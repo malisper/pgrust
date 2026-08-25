@@ -807,6 +807,7 @@ rawsync	crates/backend/libpq/auth/src/pam_ffi.rs	1	DST-REVIEW(auth-pam-gss): the
 rawsync	crates/backend/libpq/auth/src/lib.rs	1	DST-REVIEW(auth-pam-gss): krb_server_keyfile GUC backing RwLock (PGC_SIGHUP process global, the hba PARSED_HBA_LINES class); pgsync import owed when auth joins a sim world
 rawsync	crates/backend/commands/foreigncmds/src/foreign.rs	2	DST-REVIEW(ddl-gaps merge 2026-08-18): FDW_UPDATABLE OnceLock registry array (per-FDW-kind resolved-once fn pointers, install-once read-many; the fmgr late-builtin registry class) — ledgered at the auth-lane merge because the ddl-gaps branch landed without a row; routing rides the chartered DST migration
 once	crates/bin/fuzzgen/src/gramwalk.rs	1	DST-REVIEW(gramwalk): grammar() OnceLock init — a PURE closure deriving the Grammar tables (rhs/mincost/witness fixpoint) from the vendored static bison arrays; no I/O, no env, no time, no spawn; fuzzgen is the differential-rig tool, never linked into the server
+once	crates/bin/fuzzgen/src/gramreach.rs	1	DST-REVIEW(gramreach): stmt_rules() OnceLock init — a PURE closure enumerating the `stmt` productions from the same vendored static bison arrays as gramwalk's grammar() row; no I/O, no env, no time, no spawn; feature-gated antithesis observability in the differential-rig tool (crates/bin/fuzzgen), never linked into the server
 
 # ==== sqe-main-merge CI round-2 debt (2026-08-21) ====
 # The origin/sqe merge (5dc24308c9, PR #1527) landed the whole sqe campaign;

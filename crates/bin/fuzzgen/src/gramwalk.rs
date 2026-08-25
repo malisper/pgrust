@@ -372,6 +372,14 @@ fn walk_statement(g: &mut Gen) -> String {
                 }
             }
         };
+        if expansions == 0 {
+            // The first expansion is the `stmt` nonterminal (the frontier
+            // starts as [entry]), so `rule` is the top-level statement-kind
+            // production of this derivation: record it for Antithesis
+            // grammar-reachability accounting (no-op outside `antithesis`
+            // builds — see gramreach).
+            crate::gramreach::record_stmt_rule(rule);
+        }
         expansions += 1;
         rule_uses[rule] += 1;
         for &s in gr.rhs[rule].iter().rev() {

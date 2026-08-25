@@ -801,6 +801,12 @@ fn run() -> Result<ExitCode, String> {
 }
 
 fn main() -> ExitCode {
+    // Antithesis harness builds: register the assertion catalog up front so
+    // gramwalk grammar-reach `Reachable` properties that a run NEVER hits
+    // still appear (red) in the triage report — that visibility of
+    // unreached grammar territory is the point of the instrumentation.
+    #[cfg(feature = "antithesis")]
+    antithesis_sdk::antithesis_init();
     match run() {
         Ok(code) => code,
         Err(e) => {

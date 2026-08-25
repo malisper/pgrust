@@ -246,6 +246,7 @@ pub mod exr2;
 pub mod expr;
 pub mod floatmath;
 pub mod geo;
+pub mod gramreach;
 pub mod gramwalk;
 pub mod groupingsets;
 pub mod heap;
