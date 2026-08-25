@@ -360,7 +360,15 @@ fn gen_wal(g: &mut Gen) -> Vec<StmtKind> {
         }
     } else {
         match g.rng.below(8) {
-            0 => "SELECT pg_current_wal_lsn() IS NOT NULL, pg_current_wal_insert_lsn() >= pg_current_wal_lsn(), pg_current_wal_lsn() >= pg_current_wal_flush_lsn();".to_string(),
+            // Round-10 wal-lsn-ordering-diff: each comparison must read the
+            // lower-bound pointer FIRST (current before insert, flush before
+            // current). Args evaluate left-to-right, and insert/current/flush
+            // only ever advance, so lower(t1) <= upper(t2) holds under any
+            // concurrent commit activity. The reversed order is racy on
+            // EITHER engine: a concurrent commit's fsync advances the
+            // later-read pointer past the earlier-read one (reproduced
+            // 3/30000 probes on stock Postgres 18.4 under commit churn).
+            0 => "SELECT pg_current_wal_lsn() IS NOT NULL, pg_current_wal_lsn() <= pg_current_wal_insert_lsn(), pg_current_wal_flush_lsn() <= pg_current_wal_lsn();".to_string(),
             1 => {
                 let lsn = pick_str(g, &["A/1000000", "5/7B968D8", "0/1", "FFFFFFFF/FFFFFF00"]);
                 format!("SELECT pg_walfile_name('{}'::pg_lsn);", lsn)
@@ -656,9 +664,23 @@ mod tests {
                     || sql.contains("pg_export_snapshot")
                 {
                     assert!(
-                        sql.contains("IS NOT NULL") || sql.contains(">="),
+                        sql.contains("IS NOT NULL") || sql.contains(">=") || sql.contains("<="),
                         "raw live LSN/snapshot on compare surface: {sql}"
                     );
+                }
+                // Round-10 wal-lsn-ordering-diff: live-LSN comparisons must
+                // read the lower-bound pointer first (current before insert,
+                // flush before current). The reversed read order is racy on
+                // either engine — a concurrent commit's fsync advances the
+                // later-read pointer past the earlier-read one — so it must
+                // never reach the compare surface.
+                for racy in [
+                    "pg_current_wal_insert_lsn() >= pg_current_wal_lsn",
+                    "pg_current_wal_lsn() >= pg_current_wal_flush_lsn",
+                    "pg_current_wal_lsn() <= pg_current_wal_flush_lsn",
+                    "pg_current_wal_insert_lsn() <= pg_current_wal_lsn",
+                ] {
+                    assert!(!sql.contains(racy), "racy live-LSN read order: {sql}");
                 }
                 if sql.contains("pg_available_wal_summaries")
                     || sql.contains("pg_wal_summary_contents")
