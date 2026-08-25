@@ -72,12 +72,36 @@ pub const DATETIME_GUC_PIN: &[(&str, &str)] = &[
     ("IntervalStyle", "'postgres'"),
 ];
 
-/// The full session pin (C-parity + datetime determinism) as session SET
-/// statements, applied on BOTH sessions at setup.
+/// RB-8 locale determinism pin (a fuzzing round, NEW-TOCHAR): the three
+/// cluster-level lc_* GUCs that price locale-sensitive text rendering —
+/// `to_char`'s L/D/G/S currency and separator patterns (lc_monetary +
+/// lc_numeric) and its TM-prefixed localized day/month names (lc_time).
+/// initdb derives each of them from the host environment, so the two sides
+/// only agree when the two images were initdb'd under the same LANG: the
+/// antithesis pgrust datadir is initdb'd under en_US.utf8 while the C
+/// oracle is initdb'd under the C locale, and the per-batch CREATE DATABASE
+/// pin (helper_diffrun) covers only ENCODING/LC_COLLATE/LC_CTYPE — lc_monetary
+/// et al. still come from each cluster's own postgresql.conf. Every RB-8
+/// "divergence" was this setup artifact: `to_char(-125.8, 'L99G999D99')`
+/// rendered `$   -125.80` (en_US) vs `    -125.80` (C locale substitutes a
+/// single space for the empty currency_symbol). pgrust itself is
+/// byte-for-byte C-parity under both values (verified against PG 18,
+/// lc_monetary=C and en_US.UTF-8, 2026-08-24; pinned by unit tests in
+/// adt/formatting). Pinned identically on BOTH sides and re-pinned after
+/// RESET/DISCARD, exactly like the datetime pin.
+pub const LOCALE_GUC_PIN: &[(&str, &str)] = &[
+    ("lc_monetary", "'C'"),
+    ("lc_numeric", "'C'"),
+    ("lc_time", "'C'"),
+];
+
+/// The full session pin (C-parity + datetime + locale determinism) as
+/// session SET statements, applied on BOTH sessions at setup.
 pub fn c_parity_pin_sql() -> Vec<String> {
     C_PARITY_GUC_PIN
         .iter()
         .chain(DATETIME_GUC_PIN)
+        .chain(LOCALE_GUC_PIN)
         .map(|(name, value)| format!("SET {name} = {value};"))
         .collect()
 }
@@ -676,9 +700,23 @@ mod tests {
             ("IntervalStyle", "'postgres'"),
         ];
         assert_eq!(DATETIME_GUC_PIN, &expected_dt, "datetime pin drifted");
+        // RB-8: the locale pin neutralizes the initdb-environment asymmetry
+        // (pgrust datadir en_US.utf8 vs C oracle C locale); 'C' on both
+        // sides keeps the reference arm a no-op relative to its own conf.
+        let expected_lc = [
+            ("lc_monetary", "'C'"),
+            ("lc_numeric", "'C'"),
+            ("lc_time", "'C'"),
+        ];
+        assert_eq!(LOCALE_GUC_PIN, &expected_lc, "locale pin drifted");
         let sql = c_parity_pin_sql();
-        assert_eq!(sql.len(), expected.len() + expected_dt.len());
-        for ((name, value), s) in expected.iter().chain(expected_dt.iter()).zip(&sql) {
+        assert_eq!(sql.len(), expected.len() + expected_dt.len() + expected_lc.len());
+        for ((name, value), s) in expected
+            .iter()
+            .chain(expected_dt.iter())
+            .chain(expected_lc.iter())
+            .zip(&sql)
+        {
             assert_eq!(*s, format!("SET {name} = {value};"));
         }
     }
@@ -705,13 +743,13 @@ mod tests {
         ex.apply("SELECT 1;");
         assert_eq!(ex.0 .0.len(), 1);
         ex.apply("RESET ALL;");
-        // RESET ALL + the full re-pin SETs (C-parity + datetime; re-applied
-        // even though the inner executor reports errors: best-effort,
-        // outcome ignored).
+        // RESET ALL + the full re-pin SETs (C-parity + datetime + locale;
+        // re-applied even though the inner executor reports errors:
+        // best-effort, outcome ignored).
         let npin = c_parity_pin_sql().len();
         assert_eq!(ex.0 .0.len(), 1 + 1 + npin);
         assert_eq!(ex.0 .0[2], "SET parallel_setup_cost = 1000;");
-        assert_eq!(ex.0 .0[1 + npin], "SET IntervalStyle = 'postgres';");
+        assert_eq!(ex.0 .0[1 + npin], "SET lc_time = 'C';");
         ex.apply("DISCARD SEQUENCES;");
         assert_eq!(ex.0 .0.len(), 2 * (1 + npin) + 1);
     }

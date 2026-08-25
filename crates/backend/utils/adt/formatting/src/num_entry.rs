@@ -632,6 +632,65 @@ mod tests {
         assert_eq!(as_text(&numeric_to_char(c.mcx(), v.num(), b"FM9.99").unwrap()), ".1");
     }
 
+    /// RB-8 (a fuzzing round): under lc_monetary=C the `L` currency
+    /// pattern must render C's exact bytes — localeconv's currency_symbol is
+    /// empty and C's NUM_prepare_locale substitutes a single space, which
+    /// still consumes the symbol's field width. Every expectation below is
+    /// pinned to real PostgreSQL 18 output with lc_monetary=lc_numeric=C
+    /// (initdb --no-locale, verified 2026-08-24). The GUC thread-locals boot
+    /// "C" in tests, so this exercises the same path a C-locale server takes.
+    #[test]
+    fn currency_l_pattern_c_locale_is_a_space() {
+        let c = ctx();
+        // The round-9 repro: SELECT to_char(-125.8::numeric, 'L99G999D99');
+        let v = ::numeric::numeric_in("-125.8", -1, None).unwrap().unwrap();
+        assert_eq!(
+            as_text(&numeric_to_char(c.mcx(), v.num(), b"L99G999D99").unwrap()),
+            "    -125.80"
+        );
+        // Positive value: space for L, sign space, locale G/D fallbacks.
+        let v = ::numeric::numeric_in("3999", -1, None).unwrap().unwrap();
+        assert_eq!(
+            as_text(&numeric_to_char(c.mcx(), v.num(), b"L99G999D99").unwrap()),
+            "   3,999.00"
+        );
+        // Rounds to zero: digits blank out, separators stay.
+        let v = ::numeric::numeric_in("0.001", -1, None).unwrap().unwrap();
+        assert_eq!(
+            as_text(&numeric_to_char(c.mcx(), v.num(), b"L99G999D99").unwrap()),
+            "        .00"
+        );
+        // NaN fills the digit field; the L space is part of the padding.
+        let v = ::numeric::numeric_in("NaN", -1, None).unwrap().unwrap();
+        assert_eq!(
+            as_text(&numeric_to_char(c.mcx(), v.num(), b"L99G999D99").unwrap()),
+            "     NaN"
+        );
+        // int8 overflow of the digit field: '#' fill, L still one space.
+        assert_eq!(
+            as_text(&int8_to_char(c.mcx(), i64::MAX, b"L0999PL").unwrap()),
+            "  ####+"
+        );
+        assert_eq!(
+            as_text(&int8_to_char(c.mcx(), 2147483648, b"L0999.999S").unwrap()),
+            " ####.###+"
+        );
+        // L + ordinal suffix (the round-9 STATE_DIFF laundering pattern).
+        assert_eq!(
+            as_text(&int8_to_char(c.mcx(), 0, b"L9990.9999999999th").unwrap()),
+            "     0.0000000000"
+        );
+        // D alone under the C locale: '.' fallback, digits blanked.
+        let v = ::numeric::numeric_in("123.45", -1, None).unwrap().unwrap();
+        assert_eq!(as_text(&numeric_to_char(c.mcx(), v.num(), b"D99").unwrap()), " .##");
+        // G alone: ',' fallback.
+        let v = ::numeric::numeric_in("1234.5", -1, None).unwrap().unwrap();
+        assert_eq!(
+            as_text(&numeric_to_char(c.mcx(), v.num(), b"9G999D9").unwrap()),
+            " 1,234.5"
+        );
+    }
+
     #[test]
     fn to_number_grouping() {
         let c = ctx();
