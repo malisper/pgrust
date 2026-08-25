@@ -451,6 +451,25 @@ fn find_next_record_skips_into_valid_boundary() {
 }
 
 #[test]
+fn find_next_record_at_boundary_of_open_segment() {
+    let mut w = WalSim::new();
+    let l1 = w.append(0, 0x10, 1, &main_data_body(b"first"));
+    let mut src = SimRead { wal: &w, end: w.insert };
+
+    let cx = MemoryContext::new("t");
+    let mut r = reader(&cx);
+    // Restore-from-archive readers open the segment before the first decode
+    // (WALRead seeds ws_segno/ws_tli the same way); the read buffer is still
+    // unread, and the first page request at the exact segment boundary asks
+    // for req_len = 0.
+    r.v.seg.ws_segno = w.base / SEGSZ as u64;
+    r.v.seg.ws_tli = w.tli;
+    let found = r.XLogFindNextRecord(&mut src, w.base).unwrap();
+    assert_eq!(found, l1, "errormsg: {:?}", r.errormsg_buf_raw());
+    assert_eq!(r.XLogReadRecord(&mut src).unwrap(), Some(l1));
+}
+
+#[test]
 fn oversized_and_ring_full_accounting() {
     let mut w = WalSim::new();
     let l1 = w.append(0, 0x10, 1, &main_data_body(b"first"));

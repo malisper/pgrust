@@ -1189,8 +1189,14 @@ impl<'mcx> XLogReaderState<'mcx> {
         let target_seg_no = XLByteToSeg(pageptr, self.v.segcxt.ws_segsize);
         let target_page_off = XLogSegmentOffset(pageptr, self.v.segcxt.ws_segsize);
 
+        // C's "check whether we have all the requested data already" shortcut,
+        // guarded by readLen != 0: pgrust consumers (WALRead's segment-open
+        // bookkeeping) can seed ws_segno/segoff before the first page read, and
+        // a req_len == 0 probe (XLogFindNextRecord at an exact segment
+        // boundary) must not pass the unread zeroed buffer off as cached data.
         if target_seg_no == self.v.seg.ws_segno
             && target_page_off == self.v.segoff
+            && self.v.readLen != 0
             && req_len <= self.v.readLen as i32
         {
             return Ok(self.v.readLen as i32);
