@@ -467,6 +467,39 @@ fn interval_datum(mcx: Mcx<'_>, iv: Interval) -> PgResult<Datum> {
     byref_result(mcx, &img)
 }
 
+/// Row coordinates for percentile_cont: (floor row, ceil row) — 0-based —
+/// plus the interpolation proportion, C-op-for-op with UNFUSED arithmetic:
+/// floor/ceil of the plain product `percentile * (rowcount-1)`, then
+/// `proportion = product - floor` as separate rounded ops.
+///
+/// NO mul_add here, deliberately. pgrust's pinned conformance target is
+/// PostgreSQL 18.3 pgdg **amd64** (SSE2 baseline — the compiler CANNOT emit
+/// fma there, so the reference semantics are the uncontracted ones). C
+/// builds on aarch64 (gcc -ffp-contract=fast, clang -ffp-contract=on)
+/// contract `(p*(N-1)) - floor` to fnmsub and float8_lerp to fmadd, print
+/// 36.6 instead of 36.599999999999994 for covdiff seed 202 stmt 3374
+/// (p=0.6 over f = g*1.5, g=1..40), and are NOT the reference — the same
+/// class as the RB-6 corr()/regr accumulator finding (PR #1538, which
+/// likewise removed mul_add). That seed-202 finding was oracle build skew:
+/// the CI cluster covdiff referee built on aarch64 with contraction enabled;
+/// scripts/pgref-build.sh now pins -ffp-contract=off so the oracle matches
+/// amd64 semantics on any host arch.
+#[inline]
+fn cont_interp_coords(percentile: f64, rowcount: i64) -> (i64, i64, f64) {
+    let n1 = (rowcount - 1) as f64;
+    let base = percentile * n1;
+    let floor = base.floor();
+    (floor as i64, base.ceil() as i64, base - floor)
+}
+
+/// C's float8_lerp, `loval + (pct * (hival - loval))`, kept as plain
+/// separately-rounded ops — no mul_add — to match the SSE2/amd64 pgdg
+/// reference (see cont_interp_coords).
+#[inline]
+fn float8_lerp(lo: f64, hi: f64, pct: f64) -> f64 {
+    lo + pct * (hi - lo)
+}
+
 enum Lerp {
     Float8,
     Interval,
@@ -476,8 +509,7 @@ impl Lerp {
     fn apply(&self, mcx: Mcx<'_>, lo: Datum, hi: Datum, pct: f64) -> PgResult<Datum> {
         match self {
             Lerp::Float8 => {
-                let (loval, hival) = (lo.as_f64(), hi.as_f64());
-                Ok(Datum::from_f64(loval + pct * (hival - loval)))
+                Ok(Datum::from_f64(float8_lerp(lo.as_f64(), hi.as_f64(), pct)))
             }
             Lerp::Interval => {
                 // SAFETY: the sort column type is interval (expect_type check).
@@ -513,8 +545,8 @@ fn percentile_cont_final_common(
     debug_assert_eq!(expect_type, st.q.sort_col_type);
     start_scan(st)?;
 
-    let first_row = (percentile * (st.number_of_rows - 1) as f64).floor() as i64;
-    let second_row = (percentile * (st.number_of_rows - 1) as f64).ceil() as i64;
+    let (first_row, second_row, proportion) =
+        cont_interp_coords(percentile, st.number_of_rows);
     debug_assert!(first_row < st.number_of_rows);
 
     if !st.sort.as_mut().unwrap().skiptuples(first_row, true)? {
@@ -536,7 +568,6 @@ fn percentile_cont_final_common(
     if second.isnull {
         return null_result(fcinfo);
     }
-    let proportion = percentile * (st.number_of_rows - 1) as f64 - first_row as f64;
     lerp.apply(mcx, first.value, second.value, proportion)
 }
 
@@ -579,11 +610,11 @@ fn setup_pct_info<'mcx>(
             return Err(percentile_range_error(p));
         }
         if continuous {
-            let base = p * (rowcount - 1) as f64;
+            let (floor_row, ceil_row, proportion) = cont_interp_coords(p, rowcount);
             out.push(PctInfo {
-                first_row: 1 + base.floor() as i64,
-                second_row: 1 + base.ceil() as i64,
-                proportion: base - base.floor(),
+                first_row: 1 + floor_row,
+                second_row: 1 + ceil_row,
+                proportion,
                 idx: i,
             });
         } else {
@@ -1134,4 +1165,78 @@ pub fn fc_hypothetical_dense_rank_final(
         }
     }
     Ok(Datum::from_i64(rank - duplicate_count))
+}
+
+#[cfg(test)]
+mod cont_interp_parity {
+    use super::{cont_interp_coords, float8_lerp};
+
+    /// Byte-parity pins for the UNFUSED percentile_cont arithmetic (see
+    /// cont_interp_coords: the conformance target is PostgreSQL 18.3 pgdg
+    /// amd64/SSE2, which cannot fp-contract). Expected bit patterns verified
+    /// against Debian pgdg PostgreSQL 18 on linux/amd64 (docker
+    /// --platform linux/amd64, x86_64-pc-linux-gnu / gcc 14). fp-contracted
+    /// aarch64 C builds (CI cluster covdiff pre-fix referee, Homebrew arm64)
+    /// differ in the last ulp on every DIVERGES-marked case and are NOT the
+    /// reference — same class as the regr/corr pins in PR #1538.
+    #[test]
+    fn coords_and_lerp_match_amd64_reference_bits() {
+        // Covdiff seed 202 stmt 3374: p=0.6, f = g*1.5 for g=1..40.
+        // amd64 reference prints 36.599999999999994; contracted aarch64 C
+        // prints 36.6 (DIVERGES — that was oracle build skew, not a pgrust
+        // bug; cpg-ref now builds with -ffp-contract=off).
+        let (lo_row, hi_row, prop) = cont_interp_coords(0.6, 40);
+        assert_eq!((lo_row, hi_row), (23, 24));
+        assert_eq!(prop.to_bits(), 0x3fd9999999999980); // 0.3999999999999986
+        let val = float8_lerp(36.0, 37.5, prop);
+        assert_eq!(val.to_bits(), 0x40424ccccccccccc);
+        assert_eq!(val, 36.599999999999994);
+
+        // p=0.7, N=10, lerp between 0.3 and 0.4. Reference text:
+        // 0.32999999999999996. The contracted proportion is 1 ulp LOWER
+        // (0x3fd333333333332c); the proportion pin guards the op order even
+        // though both proportions happen to lerp to the same double here.
+        let (lo_row, hi_row, prop) = cont_interp_coords(0.7, 10);
+        assert_eq!((lo_row, hi_row), (6, 7));
+        assert_eq!(prop.to_bits(), 0x3fd3333333333330); // 0.2999999999999998
+        assert_eq!(float8_lerp(0.3, 0.4, prop).to_bits(), 0x3fd51eb851eb851e);
+
+        // p=0.3, N=8, lerp between -1.5 and 2.25. amd64 reference:
+        // -1.1249999999999996; contracted: -1.1250000000000002 (DIVERGES).
+        // Exercises negative lo.
+        let (lo_row, hi_row, prop) = cont_interp_coords(0.3, 8);
+        assert_eq!((lo_row, hi_row), (2, 3));
+        assert_eq!(prop.to_bits(), 0x3fb99999999999a0); // 0.10000000000000009
+        assert_eq!(float8_lerp(-1.5, 2.25, prop).to_bits(), 0xbff1fffffffffffe);
+
+        // p=0.9, N=7: contracted and unfused lerp agree on the printed text
+        // (1000.12) but the PROPORTION differs by 1 ulp — pin it so the
+        // interval path (which consumes the raw proportion via interval_mul)
+        // stays on the amd64 value too.
+        let (lo_row, hi_row, prop) = cont_interp_coords(0.9, 7);
+        assert_eq!((lo_row, hi_row), (5, 6));
+        assert_eq!(prop.to_bits(), 0x3fd99999999999a0); // 0.40000000000000036
+        assert_eq!(float8_lerp(1000.0, 1000.3, prop).to_bits(), 0x408f40f5c28f5c29);
+
+        // p=0.15, N=40 (the ARRAY[...,0.15] leg of the seed-202 family,
+        // multi path): amd64 reference 10.274999999999999; contracted
+        // aarch64 prints 10.275 (DIVERGES).
+        let (lo_row, hi_row, prop) = cont_interp_coords(0.15, 40);
+        assert_eq!((lo_row, hi_row), (5, 6));
+        assert_eq!(prop.to_bits(), 0x3feb333333333330); // 0.8499999999999996
+        assert_eq!(float8_lerp(9.0, 10.5, prop).to_bits(), 0x40248ccccccccccc);
+    }
+
+    /// When p*(N-1) is an exact integer, floor == ceil and the unfused
+    /// proportion is exactly 0.0 (the fused form can make it NONZERO, even
+    /// negative — one more way contraction is observable). C returns the row
+    /// value directly without lerping; pin the coords so the equal-row guard
+    /// keeps doing that. amd64 reference: p=0.15 over 21 rows of g*4.735
+    /// returns row 3 verbatim (14.205000000000002).
+    #[test]
+    fn exact_row_hit_keeps_equal_rows() {
+        let (lo_row, hi_row, prop) = cont_interp_coords(0.15, 21);
+        assert_eq!((lo_row, hi_row), (3, 3));
+        assert_eq!(prop.to_bits(), 0); // exactly 0.0
+    }
 }
