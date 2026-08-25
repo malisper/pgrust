@@ -17,7 +17,7 @@ fn test_parse_bool(value: &str) -> Option<bool> {
     }
 }
 
-fn setup() {
+pub(crate) fn setup() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         std::env::set_var("PGRUST_TZDIR", "/usr/share/zoneinfo");

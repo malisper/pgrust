@@ -146,6 +146,19 @@ pub enum RuledPattern {
     /// the private-per-batch-DB split — timing, not conformance. Emitted
     /// only for that exact message; every other XX000 stays panic-class.
     SharedCatalogTcu,
+    /// One side raised F0000 "could not parse contents of file
+    /// \"postgresql.auto.conf\"" on an ALTER SYSTEM statement while the
+    /// other did not (round-10 RB-14). postgresql.auto.conf is
+    /// INSTANCE-global — every concurrent driver batch shares it — and
+    /// both engines carry C 18's own self-poisoning behavior
+    /// bug-for-bug (ALTER SYSTEM accepts 3+-component custom-GUC names
+    /// that the config-file lexer's two-component QUALIFIED_ID cannot
+    /// re-read; verified byte-identical across the full local A/B
+    /// matrix, including reload no-op and restart FATAL). Whichever
+    /// side a racing batch's poisoning write lands on first errors
+    /// F0000 alone — interleaving, not conformance. Exact-message
+    /// scope; any other F0000 or non-ALTER-SYSTEM statement escalates.
+    AutoconfSharedRace,
 }
 
 #[derive(Clone, Debug)]
@@ -283,6 +296,22 @@ pub fn default_table() -> Vec<RuledEntry> {
             pattern: RuledPattern::SharedCatalogTcu,
         },
         RuledEntry {
+            id: "autoconf-shared-race",
+            ruling: "round-10 RB-14 autoconf shared-state ruling: \
+                     postgresql.auto.conf is instance-global and both \
+                     engines replicate C 18's multi-dot custom-GUC \
+                     self-poisoning identically (local A/B sweep \
+                     2026-08-25: acceptance SQLSTATEs, auto.conf bytes, \
+                     keyword-segment grammar classes, reload and \
+                     restart-FATAL all byte-identical), so an \
+                     asymmetric F0000 'could not parse contents of \
+                     file postgresql.auto.conf' on ALTER SYSTEM under \
+                     concurrent batches is write/read interleaving, \
+                     not conformance; exact-message scope \
+                     (notes/internal classification notes)",
+            pattern: RuledPattern::AutoconfSharedRace,
+        },
+        RuledEntry {
             id: "oid-literal",
             ruling: "round-7 OID ruling: user-object OIDs (>= 16384) are not \
                      comparable across two independently-evolving clusters; \
@@ -388,6 +417,9 @@ fn matches(entry: &RuledEntry, candidate: &str, sql: &str) -> bool {
         RuledPattern::XmlConfig => candidate == "xml-config",
         RuledPattern::SharedCatalogTcu => {
             candidate == "shared-catalog-tcu" && crate::diff::is_shared_catalog_stmt(sql)
+        }
+        RuledPattern::AutoconfSharedRace => {
+            candidate == "autoconf-shared-race" && crate::diff::is_alter_system_stmt(sql)
         }
         RuledPattern::InstanceConfig => {
             candidate == "instance-config" && crate::diff::is_instance_config_stmt(sql)
@@ -516,6 +548,21 @@ mod tests {
         );
         assert_eq!(out.class, DiffClass::Ruled("explain-timing".to_string()));
         let out = apply_ruled(&default_table(), "SELECT 1;", candidate("explain-timing"));
+        assert_eq!(out.class, DiffClass::RowsetDiff);
+    }
+
+    #[test]
+    fn autoconf_shared_race_resolves_only_on_alter_system() {
+        let out = apply_ruled(
+            &default_table(),
+            "alter system reset flag . fz_scalar . trim ;",
+            candidate("autoconf-shared-race"),
+        );
+        assert_eq!(out.class, DiffClass::Ruled("autoconf-shared-race".to_string()));
+        assert!(out.detail.contains("RB-14"));
+        // Any other statement carrying the candidate escalates.
+        let out =
+            apply_ruled(&default_table(), "SELECT 1;", candidate("autoconf-shared-race"));
         assert_eq!(out.class, DiffClass::RowsetDiff);
     }
 

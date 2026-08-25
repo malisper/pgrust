@@ -685,6 +685,35 @@ pub fn is_shared_catalog_stmt(sql: &str) -> bool {
     false
 }
 
+/// ALTER SYSTEM statements: the gramwalk surface that read-modify-writes
+/// INSTANCE-global state (postgresql.auto.conf is one file per cluster,
+/// shared by every concurrent driver batch). Scope for the RB-14
+/// autoconf-shared-race ruling only — see is_autoconf_parse_error.
+pub fn is_alter_system_stmt(sql: &str) -> bool {
+    let head = sql.trim_start();
+    if head.len() < 5 || !head[..5].eq_ignore_ascii_case("ALTER") {
+        return false;
+    }
+    let rest = head[5..].trim_start();
+    rest.len() >= 6 && rest[..6].eq_ignore_ascii_case("SYSTEM")
+}
+
+/// AlterSystemSetConfigFile's re-parse failure (guc.c:4734,
+/// ERRCODE_CONFIG_FILE_ERROR): raised when the CURRENT contents of
+/// postgresql.auto.conf do not lex as `name = value` lines. Verbatim in
+/// both engines. Under concurrent driver batches this fires on whichever
+/// side a racing batch's accepted multi-dot custom-GUC write (a C 18
+/// self-poisoning behavior pgrust replicates bug-for-bug: the config-file
+/// lexer's QUALIFIED_ID is two components while valid_custom_variable_name
+/// accepts 2+, so `a.b.c` writes an entry neither engine can re-read)
+/// landed first — timing, not conformance (RB-14, round-10: the local A/B
+/// sweep found zero per-statement asymmetry across the whole
+/// name-validation/serialization/re-parse matrix).
+fn is_autoconf_parse_error(sqlstate: &str, message: &str) -> bool {
+    sqlstate == "F0000"
+        && message == "could not parse contents of file \"postgresql.auto.conf\""
+}
+
 /// C's simple_heap_update / CatalogTupleUpdate concurrency error
 /// (ERRCODE_INTERNAL_ERROR, heapam.c "tuple concurrently updated" /
 /// "tuple concurrently deleted"): both engines raise it verbatim when two
@@ -1424,6 +1453,16 @@ pub fn classify(input: &DiffInput) -> Classified {
                     class: DiffClass::Ruled("shared-catalog-tcu".to_string()),
                     detail: format!("SQLSTATE {sa} ({ma}) vs {sb} ({mb})"),
                 }
+            } else if is_alter_system_stmt(sql)
+                && (is_autoconf_parse_error(sa, ma) || is_autoconf_parse_error(sb, mb))
+            {
+                // RB-14: one side's instance-global postgresql.auto.conf was
+                // poisoned by a concurrent batch's write racing this
+                // statement; the other side's wasn't (yet).
+                Classified {
+                    class: DiffClass::Ruled("autoconf-shared-race".to_string()),
+                    detail: format!("SQLSTATE {sa} ({ma}) vs {sb} ({mb})"),
+                }
             } else {
                 Classified {
                     class: DiffClass::ErrorDiff,
@@ -1435,6 +1474,13 @@ pub fn classify(input: &DiffInput) -> Classified {
             if is_shared_catalog_stmt(sql) && is_tuple_concurrency_error(sqlstate, message) {
                 return Classified {
                     class: DiffClass::Ruled("shared-catalog-tcu".to_string()),
+                    detail: format!("A errored {sqlstate} ({message}); B succeeded"),
+                };
+            }
+            if is_alter_system_stmt(sql) && is_autoconf_parse_error(sqlstate, message) {
+                // RB-14 autoconf shared-state race (see is_autoconf_parse_error).
+                return Classified {
+                    class: DiffClass::Ruled("autoconf-shared-race".to_string()),
                     detail: format!("A errored {sqlstate} ({message}); B succeeded"),
                 };
             }
@@ -1482,6 +1528,13 @@ pub fn classify(input: &DiffInput) -> Classified {
                         "A succeeded; B refused per the UTF-8-only \
                          server-encoding carve: {sqlstate} ({message})"
                     ),
+                };
+            }
+            if is_alter_system_stmt(sql) && is_autoconf_parse_error(sqlstate, message) {
+                // RB-14 autoconf shared-state race (see is_autoconf_parse_error).
+                return Classified {
+                    class: DiffClass::Ruled("autoconf-shared-race".to_string()),
+                    detail: format!("A succeeded; B errored {sqlstate} ({message})"),
                 };
             }
             // FP-4 (round-7): Antithesis thread-pauses the instrumented
@@ -1906,6 +1959,43 @@ mod tests {
             message: "some other unsupported feature".to_string(),
         };
         let c = classify_sql("select 1;", &a, &ok);
+        assert_eq!(c.class, DiffClass::ErrorDiff);
+    }
+
+    /// Round-10 RB-14: an asymmetric F0000 auto.conf re-parse failure on
+    /// ALTER SYSTEM is the instance-global-file race, ruled in every
+    /// direction — but only that exact message, and only on ALTER SYSTEM.
+    #[test]
+    fn alter_system_autoconf_parse_race_is_ruled_candidate() {
+        let f0000 = StmtOutcome::Error {
+            sqlstate: "F0000".to_string(),
+            message: "could not parse contents of file \"postgresql.auto.conf\"".to_string(),
+        };
+        let ok = StmtOutcome::Command { tag: "ALTER SYSTEM".to_string(), affected: None };
+        let ruled = DiffClass::Ruled("autoconf-shared-race".to_string());
+        // A-only, B-only, and F0000-vs-other-error shapes are all candidates.
+        let c = classify_sql("alter system reset flag . fz_scalar . trim ;", &f0000, &ok);
+        assert_eq!(c.class, ruled);
+        let c = classify_sql("alter system set xmlparse . k_int . fz_wide = false ;", &ok, &f0000);
+        assert_eq!(c.class, ruled);
+        let other = StmtOutcome::Error {
+            sqlstate: "42704".to_string(),
+            message: "unrecognized configuration parameter \"nope\"".to_string(),
+        };
+        let c = classify_sql("ALTER SYSTEM RESET nope;", &f0000, &other);
+        assert_eq!(c.class, ruled);
+        // Symmetric F0000 stays MATCH.
+        let c = classify_sql("alter system set a.b.c = 1;", &f0000, &f0000);
+        assert_eq!(c.class, DiffClass::Match);
+        // The same error on a non-ALTER-SYSTEM statement escalates.
+        let c = classify_sql("SELECT pg_reload_conf();", &f0000, &ok);
+        assert_eq!(c.class, DiffClass::ErrorDiff);
+        // Any other F0000 message on ALTER SYSTEM escalates.
+        let noisy = StmtOutcome::Error {
+            sqlstate: "F0000".to_string(),
+            message: "could not parse contents of file \"postgresql.conf\"".to_string(),
+        };
+        let c = classify_sql("ALTER SYSTEM SET work_mem = '1MB';", &noisy, &ok);
         assert_eq!(c.class, DiffClass::ErrorDiff);
     }
 

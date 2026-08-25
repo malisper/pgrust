@@ -345,6 +345,145 @@ fn read_autoconf_via_fd() -> PgResult<Option<Vec<u8>>> {
     Ok(Some(contents))
 }
 
+// RB-14 (round-10): the ALTER SYSTEM qualified-GUC name round-trip, pinned
+// cell-for-cell to C PostgreSQL 18 (18.3 reference source + live 18.4 A/B
+// sweep, 2026-08-25). C's valid_custom_variable_name accepts custom names
+// with ANY number of dot separators, ALTER SYSTEM writes them to
+// postgresql.auto.conf unquoted, but guc-file.l's QUALIFIED_ID is exactly
+// {ID}"."{ID} — TWO components — and flex maximal munch lexes a 3+-component
+// name as GUC_UNQUOTED_STRING, which is not legal in name position. So C
+// itself accepts `ALTER SYSTEM SET a.b.c = 1`, then can never re-parse its
+// own auto.conf: every later ALTER SYSTEM raises F0000, reload logs
+// "contains errors; no changes were applied", and restart is FATAL
+// "configuration file contains errors" (verified live: PostgreSQL 18.4
+// refuses to boot). Bug-for-bug parity: pgrust must do exactly the same,
+// and these tests pin BOTH directions of the round-trip so neither engine
+// side drifts silently.
+#[cfg(test)]
+mod autoconf_roundtrip_tests {
+    use std::path::Path;
+
+    use guc_file::{ConfigVariable, ParseConfigFp};
+    use types_error::LOG;
+
+    use super::{render_auto_conf_file, replace_auto_config_value};
+
+    // Shared crate test harness init (tests.rs): one process-wide Once, so
+    // this module cannot race the SHOW/SET tests over the seam installs.
+    use crate::tests::setup;
+
+    fn render(pairs: &[(&str, &str)]) -> String {
+        let mut list: Vec<ConfigVariable> = Vec::new();
+        for (name, value) in pairs {
+            replace_auto_config_value(&mut list, name, Some(value));
+        }
+        render_auto_conf_file(&list)
+    }
+
+    fn reparse(content: &str) -> (bool, Vec<(String, String)>) {
+        setup();
+        let mut head: Vec<ConfigVariable> = Vec::new();
+        let ok = ParseConfigFp(
+            content.as_bytes(),
+            Path::new("postgresql.auto.conf"),
+            super::CONF_FILE_START_DEPTH,
+            LOG,
+            &mut head,
+        )
+        .unwrap();
+        let entries = head
+            .into_iter()
+            .filter_map(|v| Some((v.name?, v.value?)))
+            .collect();
+        (ok, entries)
+    }
+
+    /// Every name/value shape C 18 round-trips, pgrust must round-trip to
+    /// the same bytes and re-read to the same (name, value) pairs: known
+    /// GUCs, one-dot custom names, case-preserved mixed-case (reachable via
+    /// quoted ColIds — the SQL scanner only downcases UNQUOTED idents),
+    /// reserved-ish pg_catalog prefix (accepted — no prefix is reserved
+    /// without an extension registering it), digit segments, and values
+    /// exercising the quote/backslash escaper (C escape_single_quotes_ascii
+    /// with SQL_STR_DOUBLE(ch, true): both ' and \ are doubled, and
+    /// DeescapeQuotedString folds them back). NOTE `$` segments are absent
+    /// on purpose: C accepts them but cannot re-parse them (poison test
+    /// below).
+    #[test]
+    fn two_component_names_and_escaped_values_round_trip() {
+        let pairs: &[(&str, &str)] = &[
+            ("work_mem", "64MB"),
+            ("foo.bar", "x"),
+            ("Mixed.Case", "z"),
+            ("pg_catalog.x", "y"),
+            ("foo.b_1", "it's a \\ test"),
+            ("foo._x", ""),
+            ("search_path", "a, b, \"c d\""),
+        ];
+        let content = render(pairs);
+        let (ok, entries) = reparse(&content);
+        assert!(ok, "C 18 re-parses this file; content:\n{content}");
+        let got: Vec<(&str, &str)> =
+            entries.iter().map(|(n, v)| (n.as_str(), v.as_str())).collect();
+        assert_eq!(got, pairs.to_vec(), "content:\n{content}");
+    }
+
+    /// replace_auto_config_value is C's delete-matches-then-append: a
+    /// case-insensitive name match (guc_name_compare) removes the old entry
+    /// and the NEW spelling lands at the tail. (Through SQL this is only
+    /// observable with quoted mixed-case ColIds; unquoted names are already
+    /// downcased by the scanner before AlterSystemSetConfigFile sees them —
+    /// verified live on 18.4: SET foo.bar then SET foo.Bar leaves one
+    /// `foo.bar = 'z'` entry because the scanner lowercased the name.)
+    #[test]
+    fn replace_is_case_insensitive_delete_then_append() {
+        let mut list: Vec<ConfigVariable> = Vec::new();
+        replace_auto_config_value(&mut list, "foo.bar", Some("x"));
+        replace_auto_config_value(&mut list, "other.guc", Some("y"));
+        replace_auto_config_value(&mut list, "foo.Bar", Some("z"));
+        let content = render_auto_conf_file(&list);
+        let (ok, entries) = reparse(&content);
+        assert!(ok, "content:\n{content}");
+        let got: Vec<(&str, &str)> =
+            entries.iter().map(|(n, v)| (n.as_str(), v.as_str())).collect();
+        assert_eq!(got, vec![("other.guc", "y"), ("foo.Bar", "z")], "content:\n{content}");
+    }
+
+    /// The C 18 self-poisoning arm, pinned bug-for-bug: a 3+-component
+    /// custom name passes valid_custom_variable_name (2+ components
+    /// allowed), is written unquoted, and the config-file lexer — whose
+    /// QUALIFIED_ID is exactly two components, with maximal munch handing
+    /// the whole name to UNQUOTED_STRING — must then REJECT the file, the
+    /// F0000 "could not parse contents" detector shape from RB-14. If this
+    /// test ever fails because pgrust learned to re-parse these names, that
+    /// is a conformance BREAK against C 18, not a fix.
+    #[test]
+    fn multi_dot_names_poison_the_file_like_c() {
+        // `a.b$` is 2-component and passes valid_custom_variable_name ($ is
+        // a legal non-first character there), but guc-file.l's ID class has
+        // no `$`, so the written line dies at the lone `$` (verified live on
+        // 18.4: LOG `syntax error ... near token "$"`, then F0000).
+        for name in [
+            "foo.bar.baz",
+            "xmlparse.k_int.fz_wide",
+            "flag.fz_scalar.trim",
+            "a.b.c.d.e",
+            "a.b$",
+        ] {
+            assert!(
+                guc::valid_custom_variable_name(name),
+                "{name}: C accepts 2+ components, ALTER SYSTEM must too"
+            );
+            let content = render(&[(name, "x")]);
+            let (ok, _) = reparse(&content);
+            assert!(!ok, "{name}: C 18 cannot re-parse its own write; content:\n{content}");
+        }
+        // The two-component boundary case stays parseable.
+        let (ok, _) = reparse(&render(&[("foo.bar", "x")]));
+        assert!(ok);
+    }
+}
+
 // DST P4 dataplane arm (site: the postgresql.auto.conf temp-file rewrite).
 #[cfg(all(test, pgrust_sim))]
 mod sim_dataplane_tests {
