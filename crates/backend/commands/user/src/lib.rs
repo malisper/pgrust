@@ -1209,6 +1209,28 @@ pub fn DropRole<'mcx>(mcx: Mcx<'mcx>, stmt: &DropRoleStmt<'_>) -> PgResult<()> {
 
         lmgr::LockSharedObject(catalog::AuthIdRelationId, roleid, 0, AccessExclusiveLock)?;
 
+        // Re-check under the lock: the role can be dropped by a concurrent
+        // session between the name lookup above and acquiring the lock
+        // (LockSharedObject absorbs the invalidations we waited out).  Without
+        // this, the by-OID re-lookup in the second pass hits the internal
+        // "could not find tuple for role" error; degrade to the same clean
+        // shapes the name lookup produces, as if we had arrived after the
+        // concurrent drop committed.  (a fuzzing round: DROP ROLE IF
+        // EXISTS racing another session's role DDL raised XX000.)
+        match SearchSysCache1(AUTHOID, SysCacheKey::Value(Datum::from_oid(roleid)))? {
+            Some(recheck) => ReleaseSysCache(recheck),
+            None => {
+                if !stmt.missing_ok {
+                    return Err(err(
+                        format!("role \"{role}\" does not exist"),
+                        ERRCODE_UNDEFINED_OBJECT,
+                    ));
+                }
+                notice(format!("role \"{role}\" does not exist, skipping"), "DropRole")?;
+                continue;
+            }
+        }
+
         // Both membership directions are silently removed; grantor-only
         // references are caught by checkSharedDependencies in the second pass.
         delete_auth_members(
