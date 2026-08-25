@@ -1402,15 +1402,25 @@ pub(crate) fn execute_plan<'m, 'mcx>(
             loop {
                 estate.reset_per_tuple_expr_context();
 
-                let Some(slot_id) = exec_proc_node(planstate, estate)? else {
+                let Some(mut slot_id) = exec_proc_node(planstate, estate)? else {
                     break;
                 };
-                // Capture-armed fills are budgeted store fills: SELECT,
-                // junk-free (the dispatch gate above), send_tuples — the
-                // plain loop's junk/send branches degenerate accordingly.
-                debug_assert!(send_tuples && estate.es_junkFilter.is_none());
+                // Antithesis r10 SIGSEGV-0x26 class: the old premise here
+                // ("capture-armed fills are junk-free") is FALSE — the §4.1
+                // eligibility probe (plan_has_capturable_scan) accepts any
+                // Scan/Append/Result/Limit/SubqueryScan top, so an eligible
+                // cursor like `SELECT v FROM t ORDER BY pk` (IndexScan with
+                // a resjunk sort key) arms the sidecar WITH a junk filter
+                // installed. Store fills must apply the same junk/send
+                // discipline as the plain loop below (C ExecutePlan), or
+                // the store is filled with junk-carrying tuples under the
+                // plan descriptor while every reader deforms them with the
+                // portal's junk-cleaned descriptor.
+                if estate.es_junkFilter.is_some() {
+                    slot_id = execjunk::exec_filter_junk(estate, slot_id);
+                }
 
-                {
+                if send_tuples {
                     let slot = estate.slot_mut(slot_id);
                     // SAFETY: lifetime bridge at the seam boundary — the
                     // plain loop's receive_slot arm verbatim.
