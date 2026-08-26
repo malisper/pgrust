@@ -288,7 +288,7 @@ pub fn record_stmt_rule(rule: usize) {
 /// family without a per-kind property.
 #[cfg(feature = "antithesis")]
 fn fire_family(family: &'static str, kind: &'static str) {
-    use antithesis_sdk::{assert_reachable, serde_json::json};
+    use antithesis_sdk::{assert_reachable, assert_unreachable, serde_json::json};
     let d = &json!({ "stmt_kind": kind, "family": family });
     match family {
         "select" => assert_reachable!("gramwalk reach: select", d),
@@ -328,7 +328,15 @@ fn fire_family(family: &'static str, kind: &'static str) {
         "notify" => assert_reachable!("gramwalk reach: notify", d),
         "comment" => assert_reachable!("gramwalk reach: comment", d),
         "empty" => assert_reachable!("gramwalk reach: empty", d),
-        _ => assert_reachable!("gramwalk reach: family-other (mapping drift)", d),
+        // Drift tripwire, INVERTED semantics vs the roster above: every
+        // curated family is a `Reachable` property (red until seen), but
+        // never-reaching "other" is the DESIRED state — it fires only when
+        // a grammar bump adds a `stmt` alternative family_of() doesn't
+        // know. Registered as `Unreachable` so a clean run shows it green
+        // (round-11 polish: as `assert_reachable!` it sat Failing 0/0 on
+        // every healthy run), while an actual drift hit turns it red with
+        // the unmapped kind in the details payload.
+        _ => assert_unreachable!("gramwalk reach: family-other (mapping drift)", d),
     }
 }
 

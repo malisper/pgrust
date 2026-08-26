@@ -730,6 +730,183 @@ pub fn sanitize_alter_system_guc_names(sql: &str) -> String {
     format!("{}{}{}", &sql[..name_start], rebuilt, &sql[name_end..])
 }
 
+/// Round-11 RB (keyword role-name races, seeds 1613205494570832255 /
+/// 1827595058581613030): roles are CLUSTER-GLOBAL (pg_authid) exactly like
+/// databases (FP-1) and tablespaces (RB-9), but gramwalk derives raw role
+/// DDL over the whole grammar (`create role trim with in group
+/// current_user , collation ;`, `alter user trim with ;`) whose short
+/// keyword-spelled name operands land in the shared namespace. Concurrent
+/// driver batches race each other's CREATE/DROP of those names, so the
+/// same statement succeeds on the side where a sibling batch's `create
+/// role collation` already landed and errors 42704 on the other. PR #1550
+/// rebased only the aclrls module's fixed `fz_acl_` deck; gramwalk's
+/// grammar-derived role operands were left raw.
+///
+/// Rewrite every role-name operand into the batch-unique namespace
+/// `{tag}_{name}` (tag = the batch's private scratch-db name, exactly as
+/// FP-1/RB-9), following the rebase_database_names precedent:
+///   - the name (list) after CREATE/ALTER/DROP ROLE|USER|GROUP (skipping
+///     IF EXISTS; `USER MAPPING` is a different statement and is left
+///     alone), including ALTER GROUP ... ADD/DROP USER lists;
+///   - the RENAME TO target of an ALTER ROLE/USER/GROUP;
+///   - IN GROUP / IN ROLE option lists of CREATE ROLE, and the ROLE /
+///     ADMIN / USER option lists ride the same keyword triggers;
+///   - GRANT ... TO / REVOKE ... FROM role lists, GRANTED BY, and
+///     REASSIGN/DROP OWNED BY lists (with REASSIGN's TO target);
+/// with comma-continuation inside every list. The role-keyword
+/// pseudo-names (CURRENT_USER, CURRENT_ROLE, SESSION_USER, PUBLIC, ALL,
+/// NONE) and `pg_*` built-in roles pass through untouched; quoted
+/// material is opaque. The mapping is injective per batch and the
+/// statement TEXT is identical on both sides, so differential parity is
+/// untouched. GRANT's source role list (GRANT r1 TO r2) is deliberately
+/// NOT rebased — it is textually indistinguishable from a privilege list
+/// without lookahead, and an unrebased reference draws a matched 42704 on
+/// both sides. Applied by the runner to gramwalk statements only (the
+/// aclrls deck has its own rebase); helper_diffrun reclaims `{tag}_*`
+/// roles at batch cleanup.
+pub fn rebase_role_names(sql: &str, tag: &str) -> String {
+    #[derive(PartialEq, Clone, Copy)]
+    enum Mode {
+        Idle,
+        /// Expect one role name (rebase it), then fall to AfterName.
+        Name,
+        /// A name was just consumed: a `,` re-arms Name (list
+        /// continuation); anything else returns to Idle.
+        AfterName,
+    }
+    let is_word = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'$';
+    let b = sql.as_bytes();
+    let mut out = String::with_capacity(sql.len() + tag.len() + 1);
+    let mut i = 0usize;
+    let mut mode = Mode::Idle;
+    let mut saw_role_stmt = false;
+    let mut prev_word = String::new();
+    let first_word = sql
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .find(|w| !w.is_empty())
+        .map(|w| w.to_ascii_lowercase())
+        .unwrap_or_default();
+    while i < b.len() {
+        // Quoted material is opaque — never rebase inside '...'/"...".
+        if b[i] == b'\'' || b[i] == b'"' {
+            let q = b[i];
+            out.push(q as char);
+            i += 1;
+            while i < b.len() {
+                if b[i] == q {
+                    if i + 1 < b.len() && b[i + 1] == q {
+                        out.push_str(&sql[i..i + 2]); // doubled quote
+                        i += 2;
+                        continue;
+                    }
+                    out.push(q as char);
+                    i += 1;
+                    break;
+                }
+                let c = sql[i..].chars().next().unwrap();
+                out.push(c);
+                i += c.len_utf8();
+            }
+            if mode == Mode::Name {
+                mode = Mode::Idle;
+            }
+            continue;
+        }
+        if b[i].is_ascii_alphabetic() || b[i] == b'_' {
+            let start = i;
+            while i < b.len() && is_word(b[i]) {
+                i += 1;
+            }
+            let word = &sql[start..i];
+            let lower = word.to_ascii_lowercase();
+            if mode == Mode::Name {
+                match lower.as_str() {
+                    // DROP ROLE IF EXISTS: keep expecting the name.
+                    "if" | "exists" => {
+                        out.push_str(word);
+                        prev_word = lower;
+                        continue;
+                    }
+                    // CREATE/ALTER/DROP USER MAPPING is a different
+                    // statement: cancel the expectation entirely.
+                    "mapping" => {
+                        mode = Mode::Idle;
+                        out.push_str(word);
+                        prev_word = lower;
+                        continue;
+                    }
+                    // Role-keyword pseudo-names and pg_* built-ins pass
+                    // through but consume the name slot.
+                    "current_user" | "current_role" | "session_user" | "public" | "all"
+                    | "none" => {
+                        mode = Mode::AfterName;
+                        out.push_str(word);
+                        prev_word = lower;
+                        continue;
+                    }
+                    _ if lower.starts_with("pg_") => {
+                        mode = Mode::AfterName;
+                        out.push_str(word);
+                        prev_word = lower;
+                        continue;
+                    }
+                    _ => {
+                        mode = Mode::AfterName;
+                        let mut rebased = format!("{tag}_{lower}");
+                        rebased.truncate(63);
+                        out.push_str(&rebased);
+                        prev_word = lower;
+                        continue;
+                    }
+                }
+            }
+            if mode == Mode::AfterName {
+                mode = Mode::Idle; // a bare word ends the list
+            }
+            match lower.as_str() {
+                "role" | "user" | "group"
+                    if matches!(prev_word.as_str(), "create" | "alter" | "drop" | "add") =>
+                {
+                    if matches!(prev_word.as_str(), "create" | "alter" | "drop") {
+                        saw_role_stmt = true;
+                    }
+                    mode = Mode::Name;
+                }
+                "group" | "role" if prev_word == "in" => mode = Mode::Name,
+                // OWNED BY is a role list only in DROP/REASSIGN OWNED;
+                // ALTER SEQUENCE/TYPE ... OWNED BY names a table.column.
+                "by" if prev_word == "granted"
+                    || (prev_word == "owned"
+                        && matches!(first_word.as_str(), "drop" | "reassign")) =>
+                {
+                    mode = Mode::Name
+                }
+                "to" if prev_word == "rename" && saw_role_stmt => mode = Mode::Name,
+                "to" if matches!(first_word.as_str(), "grant" | "reassign") => mode = Mode::Name,
+                "from" if first_word == "revoke" => mode = Mode::Name,
+                _ => {}
+            }
+            out.push_str(word);
+            prev_word = lower;
+        } else {
+            match mode {
+                // `DROP ROLE ;` has no operand; any non-space punctuation
+                // ends a pending single-name expectation.
+                Mode::Name if b[i] != b' ' => mode = Mode::Idle,
+                // List continuation: a comma after a consumed name expects
+                // another name; anything else (but spaces) ends the list.
+                Mode::AfterName if b[i] == b',' => mode = Mode::Name,
+                Mode::AfterName if b[i] != b' ' => mode = Mode::Idle,
+                _ => {}
+            }
+            let c = sql[i..].chars().next().unwrap();
+            out.push(c);
+            i += c.len_utf8();
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -939,6 +1116,86 @@ mod tests {
         // 63-byte identifier bound holds.
         let long = rebase_tablespace_names(
             "DROP TABLESPACE abcdefghijklmnopqrstuvwxyz0123456789 ;",
+            "fuzz_gramwalk_1234567_99",
+        );
+        let name = long.split_whitespace().nth(2).unwrap();
+        assert!(name.len() <= 63, "{name}");
+    }
+
+    /// Round-11: role-name operands land in the batch-unique namespace
+    /// across the role DDL surface; keyword pseudo-names, pg_* built-ins,
+    /// USER MAPPING, quoted material, and unrelated statements stay
+    /// untouched.
+    #[test]
+    fn rebase_role_names_rewrites_operands_only() {
+        let t = "fuzz_gw_71_3";
+        let f = |s: &str| rebase_role_names(s, t);
+        // The two round-11 finding shapes.
+        assert_eq!(
+            f("create role trim with in group current_user , collation ;"),
+            "create role fuzz_gw_71_3_trim with in group current_user , \
+             fuzz_gw_71_3_collation ;"
+        );
+        assert_eq!(f("alter user trim with ;"), "alter user fuzz_gw_71_3_trim with ;");
+        // CREATE/ALTER/DROP ROLE|USER|GROUP, IF EXISTS, name lists.
+        assert_eq!(f("drop role if exists zz , v0 ;"),
+            "drop role if exists fuzz_gw_71_3_zz , fuzz_gw_71_3_v0 ;");
+        assert_eq!(f("drop group q7 ;"), "drop group fuzz_gw_71_3_q7 ;");
+        // ALTER GROUP ... ADD/DROP USER lists.
+        assert_eq!(
+            f("alter group gw_a add user gw_b , gw_c ;"),
+            "alter group fuzz_gw_71_3_gw_a add user fuzz_gw_71_3_gw_b , \
+             fuzz_gw_71_3_gw_c ;"
+        );
+        // RENAME TO target of an ALTER ROLE.
+        assert_eq!(
+            f("alter role v0 rename to zz ;"),
+            "alter role fuzz_gw_71_3_v0 rename to fuzz_gw_71_3_zz ;"
+        );
+        // IN ROLE list; keyword pseudo-names pass through mid-list.
+        assert_eq!(
+            f("create role zz in role public , gw_a ;"),
+            "create role fuzz_gw_71_3_zz in role public , fuzz_gw_71_3_gw_a ;"
+        );
+        // GRANT ... TO / REVOKE ... FROM lists; pg_* built-ins stay.
+        assert_eq!(
+            f("grant select on gw_a to zz , pg_monitor ;"),
+            "grant select on gw_a to fuzz_gw_71_3_zz , pg_monitor ;"
+        );
+        assert_eq!(
+            f("revoke all on gw_a from session_user , v0 granted by q7 ;"),
+            "revoke all on gw_a from session_user , fuzz_gw_71_3_v0 granted by \
+             fuzz_gw_71_3_q7 ;"
+        );
+        // DROP/REASSIGN OWNED role lists (with REASSIGN's TO target)...
+        assert_eq!(f("drop owned by v0 , zz cascade ;"),
+            "drop owned by fuzz_gw_71_3_v0 , fuzz_gw_71_3_zz cascade ;");
+        assert_eq!(
+            f("reassign owned by v0 to zz ;"),
+            "reassign owned by fuzz_gw_71_3_v0 to fuzz_gw_71_3_zz ;"
+        );
+        // ...but ALTER SEQUENCE ... OWNED BY names a table.column: untouched.
+        let s = "alter sequence gw_a owned by gw_b . k_int ;";
+        assert_eq!(f(s), s.to_string());
+        // USER MAPPING is a different statement: untouched.
+        let s = "create user mapping for gw_a server gw_b ;";
+        assert_eq!(f(s), s.to_string());
+        // GROUP BY / ORDER BY never trigger; quoted material is opaque;
+        // unrelated statements never change.
+        let s = "select k_int from fz_scalar group by k_int order by 1 ;";
+        assert_eq!(f(s), s.to_string());
+        let s = "select 'create role trim' , \"trim\" from fz_rich ;";
+        assert_eq!(f(s), s.to_string());
+        let s = "alter table fz_scalar rename to zz ;";
+        assert_eq!(f(s), s.to_string());
+        // SET ROLE is out of scope (session state, not role DDL).
+        let s = "set role gw_a ;";
+        assert_eq!(f(s), s.to_string());
+        // No operand (derivation closed early): nothing to rewrite.
+        assert_eq!(f("drop role ;"), "drop role ;");
+        // 63-byte identifier bound holds.
+        let long = rebase_role_names(
+            "create role abcdefghijklmnopqrstuvwxyz0123456789 ;",
             "fuzz_gramwalk_1234567_99",
         );
         let name = long.split_whitespace().nth(2).unwrap();

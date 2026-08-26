@@ -100,17 +100,19 @@ pub fn pg_hypot(x: f64, y: f64) -> PgResult<f64> {
         return Ok(x);
     }
     let yx = y / x;
-    // C computes `x * sqrt(1.0 + (yx * yx))` as RAW arithmetic (no float8_*
-    // checked helpers), so gcc (-ffp-contract=fast, the default) and clang
-    // (-ffp-contract=on) contract `1.0 + yx*yx` into fma(yx, yx, 1.0) on
-    // aarch64 — the C twin's radius differs in the last ulp from the
-    // uncontracted form, which float8out's shortest-round-trip then prints
-    // as a different decimal string (t25 soak P1: s101 idx 42355,
-    // circle(box) on fast_emp4000 — 160/3378 rect.data rows diverged).
-    // Rust never contracts implicitly; fuse explicitly for byte parity.
-    // (On targets without hardware FMA, mul_add is a correctly-rounded
-    // soft fma — same value.)
-    let result = x * f64::mul_add(yx, yx, 1.0).sqrt();
+    // Float-parity law: the conformance reference is PostgreSQL 18.3 pgdg
+    // linux/amd64 (SSE2 baseline, NO FMA — every C float op rounds
+    // separately), so `1.0 + yx*yx` must stay UNFUSED. An earlier revision
+    // fused this with `f64::mul_add` to chase an aarch64-compiled C twin
+    // (default fp-contract contracts the add into fma) — that referee was
+    // inverted: a fuzzing round (run b7c2944201...-59-13, seed
+    // 3161693741062387539) caught the fused form diverging from the real
+    // amd64 oracle in the last ulp on `point <-> point`
+    // (0.5901699437494736 vs C's ...745). Same class as the regr
+    // aggregates (PR #1538) and percentile_cont (PR #1540): plain op
+    // order, never mul_add, in ported float paths; ARM C builds need
+    // -ffp-contract=off before they may referee.
+    let result = x * (1.0 + yx * yx).sqrt();
     if result.is_infinite() {
         return Err(Box::new(::adt_float::float_overflow_error()));
     }
@@ -551,15 +553,18 @@ mod tests {
         assert_eq!(pg_hypot(3.0, 4.0).unwrap(), 5.0);
         assert_eq!(pg_hypot(0.0, 0.0).unwrap(), 0.0);
         assert!(pg_hypot(f64::INFINITY, f64::NAN).unwrap().is_infinite());
-        // Byte-parity pin for the fp-contracted form (fma(yx,yx,1.0)): the
-        // circle(box '(137,582),(867,821)') radius from the t25 soak family.
-        // The uncontracted form gives ...886 (last-ulp high); C-on-aarch64
-        // (and thus the shipped oracle) gives ...874.
-        assert_eq!(pg_hypot(365.0, 119.5).unwrap(), 384.06412225043874_f64);
-        // rect.data witness row (box '(11003,10859),(10950,10765)'): the
-        // circle(box) radius that flipped the s101 idx 42355 md5
-        // (<(10976.5,10812),53.95600059307583>; uncontracted gives ...584).
-        assert_eq!(pg_hypot(26.5, 47.0).unwrap(), 53.95600059307583_f64);
+        // Byte-parity pins for the UNCONTRACTED form (1.0 + yx*yx rounds
+        // separately) — verified against the authoritative referee, pgdg
+        // PostgreSQL 18 on linux/amd64 (docker --platform linux/amd64,
+        // 2026-08-25): `SELECT radius(circle(box '(137,582),(867,821)'))`
+        // = 384.06412225043886. C compiled on aarch64 with default
+        // fp-contract fuses and prints ...874 — it is NOT a valid referee
+        // (float-parity law; Antithesis r11 seed 3161693741062387539).
+        assert_eq!(pg_hypot(365.0, 119.5).unwrap(), 384.06412225043886_f64);
+        // rect.data witness row (box '(11003,10859),(10950,10765)'):
+        // amd64 referee radius(circle(box)) = 53.95600059307584; the
+        // aarch64-contracted form gives ...583.
+        assert_eq!(pg_hypot(26.5, 47.0).unwrap(), 53.95600059307584_f64);
     }
 
     #[test]

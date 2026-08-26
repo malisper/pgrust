@@ -623,10 +623,21 @@ fn run() -> Result<ExitCode, String> {
                             // (autoconf-shared-race); this pass prevents
                             // the poison at generation time.
                             sql: {
+                            // Round-11: gramwalk's grammar-derived ROLE
+                            // DDL name operands are the same cluster-
+                            // global hazard (short keyword-spelled names
+                            // raced concurrent batches' CREATE/DROP —
+                            // one-sided 42704s, seeds 1613205494570832255
+                            // / 1827595058581613030), so they are rebased
+                            // into the batch namespace exactly like
+                            // database names; helper_diffrun's `{db}_*`
+                            // role reclaim covers them.
                                 let sql = if is_gramwalk {
                                     let sql = fuzzgen::gramwalk::rebase_database_names(
                                         &s.sql, &args.db,
                                     );
+                                    let sql =
+                                        fuzzgen::gramwalk::rebase_role_names(&sql, &args.db);
                                     fuzzgen::gramwalk::sanitize_alter_system_guc_names(&sql)
                                 } else {
                                     s.sql.clone()

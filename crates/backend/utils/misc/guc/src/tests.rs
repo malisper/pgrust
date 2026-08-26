@@ -147,6 +147,44 @@ fn file_source_rejection_returns_zero() {
     assert_eq!(rc, 0);
 }
 
+/// Per-role/db settings (pg_db_role_setting -> ProcessGUCArray, sources
+/// PGC_S_USER / PGC_S_DATABASE[_USER] / PGC_S_GLOBAL) resolve elevel 0 to
+/// WARNING (C set_config_option): a bad stored value is SKIPPED (rc 0),
+/// never an Err — an Err at login would refuse every new connection where
+/// C connects with a WARNING (`ALTER ROLE x SET role = <dropped role>`
+/// locked pgrust sessions out in the round-11 role-DDL soak).
+#[test]
+fn user_source_rejection_skips_not_errors() {
+    setup();
+    for source in [PGC_S_USER, PGC_S_DATABASE, PGC_S_DATABASE_USER, PGC_S_GLOBAL] {
+        let rc = set_config_option_ext(
+            "work_mem",
+            Some("banana"),
+            PGC_SUSET,
+            source,
+            BOOTSTRAP_SUPERUSERID,
+            GUC_ACTION_SET,
+            true,
+            ErrorLevel(0),
+            false,
+        )
+        .unwrap();
+        assert_eq!(rc, 0, "source {source:?} must skip, not error");
+    }
+}
+
+/// The report emitted for a demoted rejection carries the DEMOTED level:
+/// C's set_config_option ereport()s at elevel, so the client sees 'N'
+/// (WARNING), not 'E' — an 'E' during connection startup makes libpq
+/// abort the whole connection.
+#[test]
+fn demoted_rejection_reports_at_demoted_level() {
+    let e = types_error::PgError::new(types_error::ERROR, "role \"gone\" does not exist");
+    let demoted = crate::registry::demoted_for_report(e, types_error::WARNING);
+    assert_eq!(demoted.level, types_error::WARNING);
+    assert_eq!(demoted.message, "role \"gone\" does not exist");
+}
+
 #[test]
 fn postmaster_param_cannot_change_at_runtime() {
     setup();

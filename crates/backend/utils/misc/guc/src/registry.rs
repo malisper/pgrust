@@ -306,10 +306,26 @@ fn reject(elevel: ErrorLevel, e: PgError) -> PgResult<i32> {
         Err(e.into())
     } else {
         if message_level_is_interesting(elevel) {
-            elog::emit_error_report_for(&e);
+            // C reports AT the demoted level — ereport(elevel, ...) in
+            // set_config_option — so a bad per-role/db setting surfaces as
+            // a WARNING the client shrugs off. The PgError was built at
+            // ERROR; emitting it unchanged sends an 'E' (ERROR) wire
+            // message, which at LOGIN makes libpq abort the whole
+            // connection: `ALTER ROLE x SET role = <dropped role>` then
+            // locked every new pgrust session out ("role ... does not
+            // exist" at connect) while C logs a WARNING and connects
+            // (found by the round-11 gramwalk role-DDL soak).
+            elog::emit_error_report_for(&demoted_for_report(e, elevel));
         }
         Ok(0)
     }
+}
+
+/// The report a demoted rejection emits, carrying the DEMOTED level (see
+/// reject()). Split out for a direct unit test.
+pub(crate) fn demoted_for_report(mut e: PgError, elevel: ErrorLevel) -> PgError {
+    e.level = elevel;
+    e
 }
 
 enum AccessCheck {

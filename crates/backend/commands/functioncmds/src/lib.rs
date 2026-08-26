@@ -215,7 +215,27 @@ fn interpret_func_parallel(defel: &DefElem<'_>) -> PgResult<i8> {
 fn interpret_func_support(mcx: Mcx<'_>, defel: &DefElem<'_>) -> PgResult<Oid> {
     let proc_name = commands_define::defGetQualifiedName(mcx, defel)?;
     let arg_types = [types_core::INTERNALOID];
-    let proc_oid = parse_func::LookupFuncName(proc_name, 1, &arg_types, false)?;
+    // C passes missing_ok = TRUE and raises its OWN 42883 below, so a
+    // support-function name with a nonexistent schema reports 42883
+    // "function k_int.xmlforest(internal) does not exist" — NOT the
+    // lookup's 3F000 "schema does not exist" (missing_ok swallows the
+    // schema check in FuncnameGetCandidates). pgrust used to pass false
+    // and leaked the 3F000 (Antithesis r11 run b7c2944201...-59-13, seed
+    // 2265144536387274920: `alter routine right support k_int .
+    // xmlforest`).
+    let proc_oid = parse_func::LookupFuncName(proc_name, 1, &arg_types, true)?;
+    if !types_core::OidIsValid(proc_oid) {
+        // C: errmsg("function %s does not exist", func_signature_string(
+        // procName, 1, NIL, argList)); argList is exactly [INTERNALOID],
+        // so the signature always renders as "<name>(internal)".
+        return Err(err(
+            format!(
+                "function {}(internal) does not exist",
+                catalog_objectaddress::NameListToString(proc_name)
+            ),
+            types_error::ERRCODE_UNDEFINED_FUNCTION,
+        ));
+    }
     if lsyscache::get_func_rettype(proc_oid)? != types_core::INTERNALOID {
         return Err(err(
             format!(

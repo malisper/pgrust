@@ -97,8 +97,13 @@ fn raw(s: impl Into<String>) -> StmtKind {
 /// statistics sample, so both sides see identical stats — Q1 ruling).
 fn t300(name: &str) -> Vec<StmtKind> {
     vec![
+        // autovacuum_enabled = off on EVERY exd fixture (RB-15, broadened
+        // in round 11 — see the pin_autovacuum_off test): fixture stats
+        // must change only via the batch's own ANALYZE, or a one-engine
+        // autovacuum flips a later compared plan.
         raw(format!(
-            "CREATE TABLE {name} (pk int PRIMARY KEY, a int, b int, t text COLLATE \"C\");"
+            "CREATE TABLE {name} (pk int PRIMARY KEY, a int, b int, t text COLLATE \"C\") \
+             WITH (autovacuum_enabled = off);"
         )),
         raw(format!(
             "INSERT INTO {name} SELECT i, (i*13)%50, (i*7)%60, 'x'||((i*23)%97) \
@@ -238,10 +243,12 @@ fn joins(_g: &mut Gen) -> Vec<StmtKind> {
     let s = "fz_xd_js";
     vec![
         raw(format!(
-            "CREATE TABLE {b} AS SELECT i AS pk, (i*13)%50 AS a FROM generate_series(1,4000) i;"
+            "CREATE TABLE {b} WITH (autovacuum_enabled = off) AS \
+             SELECT i AS pk, (i*13)%50 AS a FROM generate_series(1,4000) i;"
         )),
         raw(format!(
-            "CREATE TABLE {s} AS SELECT i AS pk, (i*3)%50 AS a FROM generate_series(1,40) i;"
+            "CREATE TABLE {s} WITH (autovacuum_enabled = off) AS \
+             SELECT i AS pk, (i*3)%50 AS a FROM generate_series(1,40) i;"
         )),
         raw(format!("ANALYZE {b};")),
         raw(format!("ANALYZE {s};")),
@@ -285,7 +292,8 @@ fn bitmap(g: &mut Gen) -> Vec<StmtKind> {
     let fmt = pick_fmt(g, "exd:bitmap");
     vec![
         raw(format!(
-            "CREATE TABLE {n} AS SELECT i AS pk, (i*13)%50 AS a, (i*17)%60 AS c \
+            "CREATE TABLE {n} WITH (autovacuum_enabled = off) AS \
+             SELECT i AS pk, (i*13)%50 AS a, (i*17)%60 AS c \
              FROM generate_series(1,20000) i;"
         )),
         raw(format!("CREATE INDEX {n}_a ON {n}(a);")),
@@ -459,7 +467,16 @@ fn exec_details(_g: &mut Gen) -> Vec<StmtKind> {
     let b = "fz_xd_eb";
     v.extend([
         raw(format!(
-            "CREATE TABLE {b} AS SELECT i AS pk, (i*13)%50 AS a, (i*7)%4000 AS bb, \
+            // Round-11 residual (run b7c2944201...-59-13, seed
+            // 3327024602697330757): this 4000-row CTAS crosses
+            // autovacuum_vacuum_insert_threshold (1000), and the manual
+            // ANALYZE below resets n_mod_since_analyze but NOT
+            // n_ins_since_vacuum — so an insert-triggered autovacuum
+            // landed on ONE engine before the compared JOIN EXPLAIN
+            // (relallvisible/reltuples move, the Aggregate plan row
+            // flipped). Pin autovacuum off, as everywhere in exd.
+            "CREATE TABLE {b} WITH (autovacuum_enabled = off) AS \
+             SELECT i AS pk, (i*13)%50 AS a, (i*7)%4000 AS bb, \
              'x'||(i%97) AS t FROM generate_series(1,4000) i;"
         )),
         raw(format!("CREATE INDEX {b}_a ON {b}(a);")),
@@ -560,20 +577,20 @@ fn utility(g: &mut Gen) -> Vec<StmtKind> {
         raw(format!(
             "EXPLAIN (COSTS OFF{fmt}) CREATE MATERIALIZED VIEW fz_xd_mv AS SELECT a FROM {n};"
         )),
-        raw("CREATE TABLE fz_xd_ct AS SELECT 1 AS x;"),
+        raw("CREATE TABLE fz_xd_ct WITH (autovacuum_enabled = off) AS SELECT 1 AS x;"),
         raw(format!(
             "EXPLAIN (COSTS OFF{fmt}) CREATE TABLE IF NOT EXISTS fz_xd_ct AS SELECT * FROM {n};"
         )),
         raw("DROP TABLE fz_xd_ct;"),
         raw(format!("EXPLAIN (COSTS OFF{fmt}) DECLARE fz_xd_cur CURSOR FOR SELECT * FROM {n};")),
-        raw("CREATE TABLE fz_xd_rt (x int);"),
+        raw("CREATE TABLE fz_xd_rt (x int) WITH (autovacuum_enabled = off);"),
         raw("CREATE RULE fz_xd_r1 AS ON INSERT TO fz_xd_rt DO INSTEAD NOTHING;"),
         raw(format!("EXPLAIN (COSTS OFF{fmt}) INSERT INTO fz_xd_rt VALUES (1);")),
         raw("DROP RULE fz_xd_r1 ON fz_xd_rt;"),
         raw("CREATE RULE fz_xd_r2 AS ON INSERT TO fz_xd_rt DO INSTEAD NOTIFY fz_xd_chan;"),
         raw(format!("EXPLAIN (COSTS OFF{fmt}) INSERT INTO fz_xd_rt VALUES (1);")),
         raw("DROP RULE fz_xd_r2 ON fz_xd_rt;"),
-        raw("CREATE TABLE fz_xd_rl (x int);"),
+        raw("CREATE TABLE fz_xd_rl (x int) WITH (autovacuum_enabled = off);"),
         raw("CREATE RULE fz_xd_r3 AS ON INSERT TO fz_xd_rt DO ALSO \
              INSERT INTO fz_xd_rl VALUES (new.x);"),
         raw(format!("EXPLAIN (COSTS OFF{fmt}) INSERT INTO fz_xd_rt VALUES (1);")),
@@ -622,7 +639,8 @@ fn utility(g: &mut Gen) -> Vec<StmtKind> {
         raw("BEGIN;"),
         raw(format!(
             "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) \
-             CREATE TABLE fz_xd_und AS SELECT * FROM {n} WITH NO DATA;"
+             CREATE TABLE fz_xd_und WITH (autovacuum_enabled = off) AS \
+             SELECT * FROM {n} WITH NO DATA;"
         )),
         raw("ROLLBACK;"),
         // ExplainExecuteQuery option arms (MEMORY / ANALYZE+BUFFERS).
@@ -799,7 +817,9 @@ fn partition(g: &mut Gen) -> Vec<StmtKind> {
 fn namedts(_g: &mut Gen) -> Vec<StmtKind> {
     let n = "fz_xd_nt";
     vec![
-        raw(format!("CREATE TABLE {n} (pk int PRIMARY KEY, v int);")),
+        raw(format!(
+            "CREATE TABLE {n} (pk int PRIMARY KEY, v int) WITH (autovacuum_enabled = off);"
+        )),
         raw(format!(
             "INSERT INTO {n} SELECT i, i FROM generate_series(1,20) i;"
         )),
@@ -1020,90 +1040,58 @@ mod tests {
         }
     }
 
-    /// Round-10 RB-15 (explain-analyze-update-planshape): a fixture that is
-    /// ANALYZE'd and then receives executed DML (bare, or instrumented via
-    /// EXPLAIN ANALYZE — aborted brackets still create dead tuples and bump
-    /// n_mod_since_analyze) can cross the autovacuum thresholds mid-batch.
-    /// An autovacuum/autoanalyze then lands on exactly ONE engine at an
-    /// arbitrary point, changing relpages/reltuples/stats, and any later
-    /// compared EXPLAIN of that table flips scan shape (on fz_xd_m the Seq /
-    /// Index / Bitmap plans sit within 0.6% cost of each other; C-vs-C
-    /// diverges 3/7 iterations locally). Such fixtures must pin
-    /// autovacuum_enabled = off so fixture stats change only via the batch's
-    /// own ANALYZE.
+    /// Round-10 RB-15 (explain-analyze-update-planshape), BROADENED in
+    /// round 11: an autovacuum/autoanalyze landing on exactly ONE engine at
+    /// an arbitrary point changes relpages/reltuples/relallvisible/stats,
+    /// and any later compared EXPLAIN of that table can flip plan shape.
+    /// Two distinct trigger paths reached exd fixtures:
+    ///   - post-ANALYZE executed DML (round 10, fz_xd_m: aborted EXPLAIN
+    ///     ANALYZE brackets still create dead tuples and bump
+    ///     n_mod_since_analyze past the autoanalyze threshold);
+    ///   - creation-time bulk load alone (round 11, fz_xd_eb — run
+    ///     b7c2944201...-59-13, seed 3327024602697330757): a 4000-row CTAS
+    ///     crosses autovacuum_vacuum_insert_threshold (1000), and the
+    ///     manual ANALYZE resets n_mod_since_analyze but NOT
+    ///     n_ins_since_vacuum, so an insert-triggered autovacuum still
+    ///     fires with NO subsequent DML at all. The round-10 version of
+    ///     this test only modeled the first path and missed it.
+    /// The rule is therefore blanket: EVERY executed storage-bearing
+    /// CREATE TABLE in an exd group (bare, or inside an instrumented
+    /// EXPLAIN ANALYZE — plain EXPLAIN never executes) must pin
+    /// autovacuum_enabled = off, so fixture stats change only via the
+    /// batch's own ANALYZE. Partitioned parents are exempt (no storage;
+    /// the reloption is rejected there) — their partitions carry the pin.
     #[test]
-    fn post_analyze_dml_fixtures_pin_autovacuum_off() {
-        // Target table of an executed DML statement, given uppercase SQL
-        // with any `EXPLAIN (...)` prefix already stripped.
-        fn dml_target(up: &str) -> Option<String> {
-            let t = up.trim_start();
-            let rest = t
-                .strip_prefix("INSERT INTO ")
-                .or_else(|| t.strip_prefix("UPDATE "))
-                .or_else(|| t.strip_prefix("DELETE FROM "))
-                .or_else(|| t.strip_prefix("MERGE INTO "))?;
-            Some(
-                rest.split([' ', '(', ';'])
-                    .next()
-                    .unwrap()
-                    .to_string(),
-            )
-        }
+    fn executed_fixtures_pin_autovacuum_off() {
         let (groups, _) = gen_groups(0x8B15, 400, &WeightTable::defaults());
         for grp in &groups {
-            let up: Vec<String> = grp.iter().map(|s| s.to_ascii_uppercase()).collect();
-            // Storage-bearing creates per family root: partitions attach to
-            // their parent's name so DML on the parent checks the children.
-            let mut creates: Vec<(String, String, usize)> = Vec::new(); // (family, stmt, idx)
-            for (i, s) in up.iter().enumerate() {
-                let Some(rest) = s.trim_start().strip_prefix("CREATE TABLE ") else {
-                    continue;
-                };
-                let rest = rest.strip_prefix("IF NOT EXISTS ").unwrap_or(rest);
-                let name = rest.split([' ', '(', ';']).next().unwrap().to_string();
-                if s.contains(" PARTITION BY ") {
-                    continue; // no storage; reloption is rejected there
-                }
-                let family = match s.split(" PARTITION OF ").nth(1) {
-                    Some(after) => after.split([' ', ';']).next().unwrap().to_string(),
-                    None => name,
-                };
-                creates.push((family, s.clone(), i));
-            }
-            let mut analyzed: Vec<String> = Vec::new();
-            for (i, s) in up.iter().enumerate() {
-                let t = s.trim_start();
-                if let Some(rest) = t.strip_prefix("ANALYZE ") {
-                    analyzed.push(rest.split([' ', ';']).next().unwrap().to_string());
-                    continue;
-                }
-                // Executed DML: bare, or instrumented EXPLAIN ANALYZE
-                // (plain EXPLAIN never executes).
+            for sql in grp {
+                let up = sql.to_ascii_uppercase();
+                let t = up.trim_start();
+                // Executed body: bare statement, or the tail of an
+                // instrumented EXPLAIN ANALYZE.
                 let body = if t.starts_with("EXPLAIN") {
-                    if !t.contains("ANALYZE") {
+                    let Some((head, tail)) = t.split_once(") ") else { continue };
+                    if !head.contains("ANALYZE") {
                         continue;
                     }
-                    match t.split_once(") ") {
-                        Some((_, tail)) => tail,
-                        None => continue,
-                    }
+                    tail
                 } else {
                     t
                 };
-                let Some(target) = dml_target(body) else { continue };
-                if !analyzed.contains(&target) {
-                    continue; // never-ANALYZE'd fixtures stay on default stats
+                let Some(rest) = body.trim_start().strip_prefix("CREATE TABLE ") else {
+                    continue;
+                };
+                let rest = rest.strip_prefix("IF NOT EXISTS ").unwrap_or(rest);
+                if body.contains(" PARTITION BY ") {
+                    continue; // no storage; reloption is rejected there
                 }
-                for (family, create, ci) in &creates {
-                    if *family == target && *ci < i {
-                        assert!(
-                            create.contains("AUTOVACUUM_ENABLED = OFF"),
-                            "RB-15: ANALYZE'd fixture {target} receives executed DML \
-                             (`{}`) but its CREATE does not pin autovacuum off: `{create}`",
-                            grp[i],
-                        );
-                    }
-                }
+                assert!(
+                    body.contains("AUTOVACUUM_ENABLED = OFF"),
+                    "RB-15 (broadened): executed exd fixture {} does not pin \
+                     autovacuum off: `{sql}`",
+                    rest.split([' ', '(', ';']).next().unwrap(),
+                );
             }
         }
     }
