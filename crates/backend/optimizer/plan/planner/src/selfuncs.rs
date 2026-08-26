@@ -1363,10 +1363,17 @@ pub fn examine_variable<'mcx>(
     }
     match node.node_tag() {
         NodeTag::T_Const => Ok(vardata),
-        // Var-free expressions (HAVING Aggrefs, PARAM_EXEC initplan outputs,
-        // scalararraysel dummies): C's expression leg finds no relids and
-        // returns "don't know".
-        NodeTag::T_Aggref | NodeTag::T_Param | NodeTag::T_CaseTestExpr => Ok(vardata),
+        // Var-free expressions (PARAM_EXEC initplan outputs, scalararraysel
+        // dummies): C's expression leg finds no relids and returns "don't
+        // know". Aggrefs do NOT belong here: C's pull_varnos descends into
+        // the aggregate's args, so `HAVING max(d) < <expr>` yields the
+        // table's relid and get_restriction_variable then folds <expr> via
+        // estimate_expression_value — including raising the user-visible
+        // error a stable cast throws at estimation time (round-14 sqldiff
+        // seed 2015409199847134057: A errored 22008 on
+        // `('1900-02-29'::text)::date` in a HAVING at PLAN time; the old
+        // shortcut made B skip the fold and succeed).
+        NodeTag::T_Param | NodeTag::T_CaseTestExpr => Ok(vardata),
         // C's general expression leg: rel membership is judged net of
         // outer-join relids (basevarnos); a single-base-rel expression keeps
         // its rel and searches expression-index columns for stats, a

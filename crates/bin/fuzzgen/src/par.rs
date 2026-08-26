@@ -218,9 +218,15 @@ fn gen_create(g: &mut Gen) -> Vec<StmtKind> {
     let i2 = format!("fz_pari_{}", g.par.next_index + 1);
     g.par.next_index += 2;
     let stmts = vec![
+        // autovacuum_enabled = off (round-14, seed 1270990599324922574;
+        // same rule as exd's RB-15 pin): the bulk INSERT alone crosses the
+        // insert-autovacuum threshold, and a one-engine autoanalyze between
+        // A's and B's execution flips a later compared EXPLAIN plan (the
+        // fz_par_0 self-join row-count 14-vs-12 finding). Stats must change
+        // only via the batch's own ANALYZE.
         StmtKind::Raw(format!(
             "CREATE TABLE {name} (pk int4 PRIMARY KEY, k_int int4, k2 int4, \
-             num numeric, ival interval, txt text);"
+             num numeric, ival interval, txt text) WITH (autovacuum_enabled = off);"
         )),
         StmtKind::Raw(format!("INSERT INTO {name} {};", row_source(1, rows))),
         // Two secondary indexes from birth: every live table is VACUUM
@@ -823,6 +829,26 @@ mod tests {
         ] {
             assert!(stmts.contains(needle), "family never fired in 800 groups: {needle}");
         }
+    }
+
+    /// Round-14 (seed 1270990599324922574), same rule as exd RB-15: every
+    /// par CREATE TABLE pins autovacuum_enabled = off. The 8000-24000-row
+    /// bulk loads cross the insert-autovacuum threshold on their own, and a
+    /// one-engine autoanalyze landing between A's and B's execution flips a
+    /// later compared EXPLAIN plan.
+    #[test]
+    fn creates_pin_autovacuum_off() {
+        let mut seen = 0;
+        for sql in flat(21, 600) {
+            if sql.starts_with("CREATE TABLE ") {
+                assert!(
+                    sql.contains("autovacuum_enabled = off"),
+                    "par fixture does not pin autovacuum off: `{sql}`"
+                );
+                seen += 1;
+            }
+        }
+        assert!(seen > 0, "no CREATE TABLE generated in 600 statements");
     }
 
     #[test]

@@ -925,6 +925,54 @@ fn ATPrepCmd<'mcx>(
             AT_PASS_MISC
         }
         AlterTableType::AT_AlterColumnType => {
+            // C parse_utilcmd.c:3639-3663 cooks the USING transform BEFORE
+            // the identity get_attnum lookup, so a bad USING expression
+            // (e.g. a sublink: 0A000 "cannot use subquery in transform
+            // expression", with error position) outranks 42703 "column does
+            // not exist" — round-14 gramwalk seed 1862186456443555964 caught
+            // the swapped precedence when the cook still lived in
+            // ATPrepAlterColumnType. Children arrive with cooked_default
+            // mapped and raw None (never re-parsed), so this fires once.
+            if let (Some(raw), None) = {
+                let cd = cmd
+                    .def
+                    .expect("AT_AlterColumnType ColumnDef")
+                    .as_variant::<types_nodes::rawnodes::ColumnDef>()
+                    .expect("ColumnDef");
+                (cd.raw_default, cd.cooked_default)
+            } {
+                let mut pstate = parser_small1::make_parsestate(mcx, None);
+                pstate.p_sourcetext = Some(str_arena(mcx, query_string)?.as_bytes());
+                let nsitem = parse_relation::addRangeTableEntryForRelation(
+                    mcx,
+                    &mut pstate,
+                    rel,
+                    types_rel::AccessShareLock,
+                    None,
+                    false,
+                    true,
+                )?;
+                parse_relation::addNSItemToQuery(mcx, &mut pstate, nsitem, false, true, true)?;
+                let transformed = parse_expr::transformExpr(
+                    mcx,
+                    &mut pstate,
+                    raw,
+                    parser_small1::ParseExprKind::EXPR_KIND_ALTER_COL_TRANSFORM,
+                )?;
+                // SAFETY: cnode is this table's own copy (copy_object above);
+                // the `cmd` shared ref's raw/cooked reads are not used past
+                // this point in this arm.
+                unsafe {
+                    cmd.def
+                        .expect("AT_AlterColumnType ColumnDef")
+                        .with_mut::<types_nodes::rawnodes::ColumnDef, _>(|d| {
+                            d.cooked_default = Some(transformed);
+                            d.raw_default = None;
+                        })
+                        .expect("ColumnDef");
+                }
+                parser_small1::free_parsestate(pstate)?;
+            }
             // ATParseTransformCmd: the identity ALTER SEQUENCE ... AS retype
             // runs before prep (C executes beforeStmts here).
             let relname = rel.name().to_string();

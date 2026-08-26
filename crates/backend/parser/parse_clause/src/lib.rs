@@ -2056,7 +2056,11 @@ fn on_conflict_bad_index_elem(
 ) -> Box<PgError> {
     Box::new(
         elog::ereport(ERROR)
-            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            // C resolve_unique_index_expr (parse_clause.c:3225/3231) tags
+            // BOTH the ASC/DESC and NULLS FIRST/LAST rejections
+            // ERRCODE_INVALID_COLUMN_REFERENCE (42P10), not 0A000 — round-14
+            // gramwalk seed 1992923080990245657 caught the skew.
+            .errcode(types_error::ERRCODE_INVALID_COLUMN_REFERENCE)
             .errmsg(msg)
             .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
             .into_error()

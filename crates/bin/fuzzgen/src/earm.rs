@@ -1122,6 +1122,16 @@ pub const FIXED_ROLE_TOKENS: &[&str] = &[
     // ddldeep
     "dd_u",
     "dd_pu",
+    // objid (round-14, run 37aa8abec580e5f2d184aa2b00ea1060-59-13, seed
+    // 1777368629953620144): the largeobj/objid deck's cluster-global
+    // ldo_user/ldo_user2 CREATE/DROP brackets raced concurrent batches
+    // the same way (one-sided 2BP01 on DROP ROLE ldo_user; XX000 "tuple
+    // concurrently deleted" on the concurrent DROP ROLE ldo_user2) — the
+    // #1569 deck rebase never covered them. ldo_user2 sorts before
+    // ldo_user only for reading order; replace_word's boundary check
+    // keeps the prefix overlap safe either way.
+    "ldo_user2",
+    "ldo_user",
 ];
 
 fn replace_word(s: &str, from: &str, to: &str) -> String {
@@ -1257,6 +1267,8 @@ mod tests {
             ("earm3", crate::earm3::gen_earm3_module),
             ("earm4", crate::earm4::gen_earm4_module),
             ("ddldeep", crate::ddldeep::gen_ddldeep_module),
+            // Round-14: the objid deck's ldo_user/ldo_user2 joined the list.
+            ("objid", crate::objid::gen_objid_module),
         ];
         for (name, f) in gens {
             let mut rng = Rng::new(1234);

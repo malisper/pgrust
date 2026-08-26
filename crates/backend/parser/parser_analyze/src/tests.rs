@@ -1765,12 +1765,26 @@ mod from_where {
         assert_eq!(err.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
         assert_eq!(err.message, "ON CONFLICT is not supported with system catalog tables");
 
+        // C resolve_unique_index_expr (parse_clause.c:3225/3231) tags BOTH
+        // the ASC/DESC and NULLS FIRST/LAST rejections
+        // ERRCODE_INVALID_COLUMN_REFERENCE (42P10), verified against the
+        // pinned 18.3 oracle — round-14 gramwalk seed 1992923080990245657
+        // caught pgrust's old 0A000 skew.
         let err =
             analyze_sql(mcx, "INSERT INTO u VALUES (1, 'a') ON CONFLICT (x DESC) DO NOTHING")
                 .map(|_| ())
                 .unwrap_err();
-        assert_eq!(err.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_COLUMN_REFERENCE);
         assert_eq!(err.message, "ASC/DESC is not allowed in ON CONFLICT clause");
+
+        let err = analyze_sql(
+            mcx,
+            "INSERT INTO u VALUES (1, 'a') ON CONFLICT (x NULLS LAST) DO NOTHING",
+        )
+        .map(|_| ())
+        .unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_COLUMN_REFERENCE);
+        assert_eq!(err.message, "NULLS FIRST/LAST is not allowed in ON CONFLICT clause");
 
         let err = analyze_sql(mcx, "INSERT INTO u VALUES (1, 'a') ON CONFLICT (nope) DO NOTHING")
             .map(|_| ())

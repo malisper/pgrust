@@ -489,6 +489,14 @@ pub fn is_scroll_declare_explain_stmt(sql: &str) -> bool {
     if !toks.any(|t| t == "declare") {
         return false;
     }
+    // The token right after DECLARE is the cursor NAME, never an option.
+    // SCROLL/NO are unreserved words, so a cursor can be named "no" —
+    // `declare no scroll cursor for select` is DECLARE "no" SCROLL (round-14
+    // gramwalk seed 4606538290375852325): scanning the name as an option
+    // read it as NO SCROLL and missed the ratified Materialize divergence.
+    if toks.next().is_none() {
+        return false;
+    }
     let mut prev = "";
     for t in toks {
         if t == "for" {
@@ -688,6 +696,22 @@ pub fn is_shared_catalog_stmt(sql: &str) -> bool {
         "COMMENT ON DATABASE ",
         "COMMENT ON ROLE ",
         "COMMENT ON TABLESPACE ",
+        // Round-14 (seed 1777368629953620144): CREATE/DROP ROLE and DROP
+        // OWNED touch pg_authid / pg_auth_members / pg_shdepend — shared
+        // catalogs. C's DropRole membership/shdep cleanup goes through
+        // CatalogTupleDelete -> simple_heap_delete and raises the identical
+        // XX000 "tuple concurrently deleted" when two sessions race the
+        // same rows, so the hazard is symmetric (the deck rebase removes
+        // the deck-role race; this covers grammar-derived stragglers).
+        // Only the tuple-concurrency XX000 messages are ruled — any other
+        // XX000 on these statements still escalates.
+        "CREATE ROLE ",
+        "CREATE USER ",
+        "CREATE GROUP ",
+        "DROP ROLE ",
+        "DROP USER ",
+        "DROP GROUP ",
+        "DROP OWNED ",
     ] {
         if head.len() >= kw.len() && head[..kw.len()].eq_ignore_ascii_case(kw) {
             return true;
@@ -2351,6 +2375,16 @@ mod tests {
         // NO SCROLL is not SCROLL.
         assert!(!is_scroll_declare_explain_stmt(
             "explain declare c no scroll cursor for select ;"
+        ));
+        // A cursor NAMED "no" followed by SCROLL is SCROLL (round-14
+        // gramwalk seed 4606538290375852325: the name token was scanned as
+        // an option and swallowed the SCROLL that followed it).
+        assert!(is_scroll_declare_explain_stmt(
+            "explain ( analyze on ) declare no scroll cursor for select ;"
+        ));
+        // ... and a cursor merely NAMED "scroll" carries no option.
+        assert!(!is_scroll_declare_explain_stmt(
+            "explain declare scroll cursor for select 1 ;"
         ));
         // "scroll" in the query body is not an option.
         assert!(!is_scroll_declare_explain_stmt(
