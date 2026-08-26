@@ -1060,6 +1060,107 @@ pub fn gen_earm_module(g: &mut Gen) -> Vec<StmtKind> {
     body(g, shape)
 }
 
+/// Round-13 (run 72b2e74701d0e1310d59d39345e716da-59-13, seeds
+/// 4078551634953133971 / 1653252951681713200): the earm-family and
+/// ddldeep fixed CREATE/DROP role decks are the SAME cluster-global
+/// pg_authid hazard the aclrls (FP-12, #1550), gramwalk (#1565) and
+/// nodes ns_role (#1568) rebases already retired — concurrent batches'
+/// DROP ROLE ea3_wown brackets raced each other and the A/B
+/// interleavings diverged in both directions. Every deck-owned role
+/// TOKEN (word-boundary match, quoted material included so pg_roles /
+/// aclitem probe literals move coherently) is rewritten into the
+/// batch-unique `{tag}_` namespace; helper_diffrun's `{db}_*` role
+/// reclaim covers the leftovers of a crashed batch. Deliberately NOT
+/// rebased: pg_-prefixed reserved-name error decks (`pg_ea_reserved`,
+/// `pg_ea2b_reserved`, `pg_bogus` — the 42939 is the point and the role
+/// never exists), keyword-spelled matched-error names (`public`,
+/// `current_role`, `"none"`, `and`, `has` — never created), and
+/// `*_nosuch_*` missing-role probes. Unlike the aclrls PREFIX rewrite,
+/// this is a token list: the ea_/ea2_/ea3_/ea4_ prefixes also own
+/// hundreds of db-local tables, and moving those would double-rebase
+/// the deck tablespaces (ea_ts*) already handled by the whole-stream
+/// tablespace pass. The drift guard in each module's tests asserts every
+/// deck CREATE ROLE stays covered.
+pub const FIXED_ROLE_TOKENS: &[&str] = &[
+    // earm
+    "ea_sneak",
+    "ea_aclrole",
+    "ea_aclmem",
+    "ea_aclnobody",
+    "ea_aclowner",
+    "ea_badconn",
+    "ea_dupopt",
+    // earm2
+    "ea2_owner",
+    "ea2_grantee",
+    "ea2_cyc1",
+    "ea2_cyc2",
+    "ea2b_r1",
+    "ea2b_r2",
+    "ea2b_r3",
+    "ea2b_r4",
+    "ea2b_r5",
+    "ea2b_r7",
+    "ea2b_r8",
+    "ea2b_r9",
+    "ea2b_rx",
+    "ea2b_u",
+    // earm3
+    "ea3_u1",
+    "ea3_u2",
+    "ea3_cr",
+    "ea3_sub",
+    "ea3_bad",
+    "ea3_m1",
+    "ea3_m2",
+    "ea3_wown",
+    "ea3_own1",
+    "ea3_own2",
+    // earm4
+    "ea4_o1",
+    "ea4_o2",
+    // ddldeep
+    "dd_u",
+    "dd_pu",
+];
+
+fn replace_word(s: &str, from: &str, to: &str) -> String {
+    let b = s.as_bytes();
+    let fb = from.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i..].starts_with(fb) {
+            let before_ok =
+                i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_');
+            let j = i + fb.len();
+            let after_ok =
+                j >= b.len() || !(b[j].is_ascii_alphanumeric() || b[j] == b'_');
+            if before_ok && after_ok {
+                out.extend_from_slice(to.as_bytes());
+                i = j;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    // `from` is ASCII and every splice point sits on an ASCII byte, so the
+    // result stays valid UTF-8.
+    String::from_utf8(out).expect("ASCII token splice kept UTF-8 valid")
+}
+
+/// Applied by the runner to the WHOLE statement stream (see diffrunner).
+pub fn rebase_role_names(sql: &str, tag: &str) -> String {
+    let mut out = sql.to_string();
+    for tok in FIXED_ROLE_TOKENS {
+        if out.contains(tok) {
+            out = replace_word(&out, tok, &format!("{tag}_{tok}"));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1093,6 +1194,99 @@ mod tests {
     #[test]
     fn deterministic_by_seed() {
         assert_eq!(gen_groups(42, 150), gen_groups(42, 150));
+    }
+
+    /// Round-13: the earm-family role rebase rewrites deck role tokens
+    /// (quoted material included), respects word boundaries, and leaves
+    /// the intentional reserved-name / keyword error decks alone.
+    #[test]
+    fn rebase_role_names_rewrites_deck_roles_only() {
+        let t = "fuzz_mixed_1a2b";
+        assert_eq!(
+            rebase_role_names("CREATE ROLE ea3_wown;", t),
+            "CREATE ROLE fuzz_mixed_1a2b_ea3_wown;"
+        );
+        assert_eq!(
+            rebase_role_names("ALTER TABLE ea3_wt OWNER TO ea3_wown;", t),
+            "ALTER TABLE ea3_wt OWNER TO fuzz_mixed_1a2b_ea3_wown;"
+        );
+        assert_eq!(
+            rebase_role_names(
+                "SELECT rolname FROM pg_roles WHERE rolname = 'ea_aclrole';",
+                t
+            ),
+            "SELECT rolname FROM pg_roles WHERE rolname = 'fuzz_mixed_1a2b_ea_aclrole';"
+        );
+        assert_eq!(
+            rebase_role_names("GRANT SELECT ON dd_tp TO dd_pu;", t),
+            "GRANT SELECT ON dd_tp TO fuzz_mixed_1a2b_dd_pu;"
+        );
+        // Word boundary: table/typed names sharing a prefix stay put.
+        assert_eq!(
+            rebase_role_names("SELECT * FROM ea3_wownx, ea3_m1_extra;", t),
+            "SELECT * FROM ea3_wownx, ea3_m1_extra;"
+        );
+        // Intentional error decks stay put.
+        for sql in [
+            "CREATE ROLE pg_ea_reserved;",
+            "CREATE ROLE pg_bogus;",
+            "CREATE ROLE \"none\";",
+            "CREATE ROLE public;",
+            "CREATE ROLE current_role;",
+            "COMMENT ON ROLE ea4_nosuch_role IS 'x';",
+        ] {
+            assert_eq!(rebase_role_names(sql, t), sql);
+        }
+        // Idempotent: a rebased name is not rebased again.
+        let once = rebase_role_names("DROP ROLE ea3_wown;", t);
+        assert_eq!(rebase_role_names(&once, t), once);
+    }
+
+    /// Drift guard: every CREATE ROLE any module in the earm family (or
+    /// ddldeep) can emit is either covered by FIXED_ROLE_TOKENS or is an
+    /// intentional never-created error name. A new deck role added
+    /// without extending the token list fails here instead of racing
+    /// concurrent batches in the CI cluster.
+    #[test]
+    fn rebase_covers_every_deck_role() {
+        let cat = FixtureCatalog.load_catalog().unwrap();
+        let w = WeightTable::defaults();
+        let gens: &[(&str, fn(&mut Gen) -> Vec<StmtKind>)] = &[
+            ("earm", gen_earm_module),
+            ("earm2", crate::earm2::gen_earm2_module),
+            ("earm3", crate::earm3::gen_earm3_module),
+            ("earm4", crate::earm4::gen_earm4_module),
+            ("ddldeep", crate::ddldeep::gen_ddldeep_module),
+        ];
+        for (name, f) in gens {
+            let mut rng = Rng::new(1234);
+            for _ in 0..4000 {
+                let mut prods = Vec::new();
+                let mut g = Gen::new(&mut rng, &cat, &w, &mut prods, 3);
+                for s in f(&mut g) {
+                    let sql = s.to_sql();
+                    for line in sql.lines() {
+                        let Some(rest) = line.trim_start().strip_prefix("CREATE ROLE ")
+                        else {
+                            continue;
+                        };
+                        let role: String = rest
+                            .chars()
+                            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '"')
+                            .collect();
+                        let intentional = role.starts_with("pg_")
+                            || role.starts_with('"')
+                            || role.contains("nosuch")
+                            || ["public", "current_role", "none"].contains(&role.as_str());
+                        assert!(
+                            intentional || FIXED_ROLE_TOKENS.contains(&role.as_str()),
+                            "{name}: deck role {role:?} not covered by \
+                             FIXED_ROLE_TOKENS (statement: {line:?})"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// Every shape is reachable from the default weight table.

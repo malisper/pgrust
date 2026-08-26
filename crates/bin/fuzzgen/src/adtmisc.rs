@@ -2556,8 +2556,22 @@ fn gen_activity(g: &mut Gen) -> Vec<StmtKind> {
         2 => "SELECT state, xact_start IS NOT NULL, query <> '' \
               FROM pg_stat_activity WHERE pid = pg_backend_pid();"
             .to_string(),
-        _ => "SELECT pg_stat_get_backend_activity(pg_backend_pid()) <> '', \
-              pg_stat_get_backend_dbid(pg_backend_pid()) IS NOT NULL;"
+        // Round-13 (run 72b2e74701d0e1310d59d39345e716da-59-13, seed
+        // 4146339408691531505, 7 findings): pg_stat_get_backend_*(integer)
+        // takes a BACKEND ID (pg_stat_get_backend_idset numbering), not a
+        // PID. Passing pg_backend_pid() addresses an arbitrary live slot —
+        // whichever backend happens to hold that id, if any — so the result
+        // is a function of each cluster's live backend population (the
+        // busy in-container C oracle answered [t|t] where pgrust's lookup
+        // missed: unmatched-row findings, no engine gap — pgrust answers
+        // identically for every valid id). Self-address through the idset
+        // like the obs module's per-backend probes so the compared value
+        // is deterministic; diff.rs FP-13 backstops grammar-derived raw
+        // calls.
+        _ => "SELECT bool_and(pg_stat_get_backend_activity(s) <> ''), \
+              bool_and(pg_stat_get_backend_dbid(s) IS NOT NULL) \
+              FROM pg_stat_get_backend_idset() s \
+              WHERE pg_stat_get_backend_pid(s) = pg_backend_pid();"
             .to_string(),
     };
     raw(sql)
@@ -3844,8 +3858,18 @@ mod tests {
                 );
             }
         }
-        // Every shape fires under default weights (roles present).
+        // Every shape fires under default weights (roles present) —
+        // except adtm:xml, coverage-only at default weight 0 since
+        // round-13 (whole-database XML dumps are not differential-
+        // comparable; the covloop opts in with --weight adtm:xml=1).
         for p in SHAPES {
+            if *p == "adtm:xml" {
+                assert!(
+                    !prods.iter().any(|q| q == p),
+                    "coverage-only shape {p} fired at default weights"
+                );
+                continue;
+            }
             assert!(prods.iter().any(|q| q == p), "shape {p} never fired");
         }
         assert!(prods.iter().any(|q| q == "adtm:err"), "err arm never fired");

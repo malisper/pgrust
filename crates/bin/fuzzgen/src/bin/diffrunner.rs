@@ -652,7 +652,17 @@ fn run() -> Result<ExitCode, String> {
                                 // batch namespace like the aclrls deck;
                                 // helper_diffrun's {db}_* role reclaim
                                 // covers it.
-                                fuzzgen::nodes::rebase_role_names(&sql, &args.db)
+                                let sql =
+                                    fuzzgen::nodes::rebase_role_names(&sql, &args.db);
+                                // Round-13: the earm-family + ddldeep fixed
+                                // role decks raced concurrent batches the
+                                // same way (both-direction DROP ROLE
+                                // ea3_wown divergence, seeds
+                                // 4078551634953133971 /
+                                // 1653252951681713200) — token-rebased
+                                // into the batch namespace; helper_diffrun's
+                                // {db}_* role reclaim covers them.
+                                fuzzgen::earm::rebase_role_names(&sql, &args.db)
                             },
                             soft_float_cols: s.soft_float_cols.clone(),
                             // Opt-in H1 mask: gramwalk derives raw EXPLAIN

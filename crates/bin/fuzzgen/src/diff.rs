@@ -643,6 +643,17 @@ pub fn is_instance_config_stmt(sql: &str) -> bool {
         "pg_stat_activity",
         // FP-10 (round-10): cluster-global live lock state.
         "pg_locks",
+        // FP-13 (round-13, run 72b2e74701d0e1310d59d39345e716da-59-13,
+        // seed 4146339408691531505): the pg_stat_get_backend_*(integer)
+        // family addresses live backend slots by BACKEND ID — an
+        // argument that does not name the caller's own backend (the old
+        // adtmisc probe passed pg_backend_pid(), a PID) reads whichever
+        // session happens to occupy that slot, a function of each
+        // cluster's live backend population exactly like
+        // pg_stat_activity. The curated pools now self-address through
+        // pg_stat_get_backend_idset(); this entry is the defensive net
+        // for gramwalk-derived raw calls.
+        "pg_stat_get_backend_",
     ]
     .iter()
     .any(|v| lower.contains(v))
@@ -1279,6 +1290,25 @@ pub fn calls_cmp_builtin(sql: &str) -> bool {
     false
 }
 
+/// One int4 cell's numeric value: text form, or — round-13 (run
+/// 72b2e74701d0e1310d59d39345e716da-59-13, seeds 451588928933415389 /
+/// 1836375092275758948) — the 4-byte `\x`-hex image an xproto
+/// binary-result batch renders. Both findings were FP-6 shapes the text
+/// path already rules (`uuid_cmp` over the scalartypes literal deck: the
+/// glibc-amd64 oracle's memcmp returns the byte difference, `\xffffff60`
+/// = -160, where pgrust — like macOS memcmp — returns -1), escaping only
+/// because the sign normalizer could not read a binary cell.
+fn int4_cell_value(s: &str) -> Option<i64> {
+    if let Ok(v) = s.parse::<i64>() {
+        return Some(v);
+    }
+    let b = parse_hex_cell(s)?;
+    if b.len() != 4 {
+        return None;
+    }
+    Some(i32::from_be_bytes([b[0], b[1], b[2], b[3]]) as i64)
+}
+
 /// Map int4 cells to their sign ("-"/"0"/"+"); other columns unchanged.
 fn normalize_int4_sign_rows(
     rows: &[Vec<Option<String>>],
@@ -1292,11 +1322,11 @@ fn normalize_int4_sign_rows(
                     if col_oids.get(i) != Some(&23) {
                         return c.clone();
                     }
-                    c.as_ref().map(|s| match s.parse::<i64>() {
-                        Ok(v) if v < 0 => "-".to_string(),
-                        Ok(0) => "0".to_string(),
-                        Ok(_) => "+".to_string(),
-                        Err(_) => s.clone(),
+                    c.as_ref().map(|s| match int4_cell_value(s) {
+                        Some(v) if v < 0 => "-".to_string(),
+                        Some(0) => "0".to_string(),
+                        Some(_) => "+".to_string(),
+                        None => s.clone(),
                     })
                 })
                 .collect()
@@ -2942,6 +2972,33 @@ mod tests {
         let a8 = rowset(vec![20], rows(&[&[Some("-238")]]));
         let b8 = rowset(vec![20], rows(&[&[Some("-1")]]));
         assert_eq!(classify_sql(sql, &a8, &b8).class, DiffClass::RowsetDiff);
+    }
+
+    /// Round-13: the same FP-6 shape under xproto binary result format —
+    /// int4 cells arrive as 4-byte `\x`-hex images (run
+    /// 72b2e74701d0e1310d59d39345e716da-59-13, seeds 451588928933415389 /
+    /// 1836375092275758948: glibc-amd64 uuid_cmp answered \xffffff60 =
+    /// -160 where pgrust answered \xffffffff = -1).
+    #[test]
+    fn cmp_magnitude_diff_is_ruled_for_binary_cells() {
+        let sql = "select uuid_cmp(a, b) from t ;";
+        let a = rowset(vec![23], rows(&[&[Some("\\xffffff60")]]));
+        let b = rowset(vec![23], rows(&[&[Some("\\xffffffff")]]));
+        let c = classify_sql(sql, &a, &b);
+        assert_eq!(c.class, DiffClass::Ruled("cmp-magnitude".to_string()));
+        // Sign flip in binary form: stays a finding.
+        let b2 = rowset(vec![23], rows(&[&[Some("\\x000000ee")]]));
+        assert_eq!(classify_sql(sql, &a, &b2).class, DiffClass::RowsetDiff);
+        // Mixed text/binary cells still agree in sign: ruled.
+        let bt = rowset(vec![23], rows(&[&[Some("-1")]]));
+        assert_eq!(
+            classify_sql(sql, &a, &bt).class,
+            DiffClass::Ruled("cmp-magnitude".to_string())
+        );
+        // A non-int4-sized hex image is left alone: finding.
+        let a5 = rowset(vec![23], rows(&[&[Some("\\xffffff60aa")]]));
+        let b5 = rowset(vec![23], rows(&[&[Some("\\xffffffffaa")]]));
+        assert_eq!(classify_sql(sql, &a5, &b5).class, DiffClass::RowsetDiff);
     }
 
     #[test]

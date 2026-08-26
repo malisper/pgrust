@@ -2015,8 +2015,15 @@ pub const PROD_WEIGHTS: &[ProdWeight] = &[
     ProdWeight { name: "numx:fl:pow", default: 1.2 },
     ProdWeight { name: "numx:fl:regr", default: 1.0 },
     // Q7 expr-misc-adt + expr-strings breadth (crate::adtmisc).
-    // adtm:xml is coverage-only: set --weight adtm:xml=0 on every
-    // differential leg (no-libxml C reference vs native pgrust XML).
+    // adtm:xml is coverage-only. It used to default ON with a "set
+    // --weight adtm:xml=0 on every differential leg" contract, but the
+    // Antithesis sqldiff drivers run defaults and the contract was never
+    // enforced — round-13 (run 72b2e74701d0e1310d59d39345e716da-59-13,
+    // seed 2904803255780464198) a database_to_xml_and_xmlschema
+    // whole-database dump reached a differential batch and diverged on
+    // instance-global content. Default 0 makes the differential legs
+    // structurally unable to emit the family; the covloop opts in with
+    // --weight adtm:xml=1.
     ProdWeight { name: "adtm:misc2", default: 2.5 },
     ProdWeight { name: "adtm:errhint", default: 1.0 },
     ProdWeight { name: "adtm:regex3", default: 2.0 },
@@ -2031,7 +2038,7 @@ pub const PROD_WEIGHTS: &[ProdWeight] = &[
     ProdWeight { name: "adtm:deparse3", default: 2.5 },
     ProdWeight { name: "adtm:pseudo3", default: 2.0 },
     ProdWeight { name: "adtm:tid3", default: 1.0 },
-    ProdWeight { name: "adtm:xml", default: 1.0 },
+    ProdWeight { name: "adtm:xml", default: 0.0 },
     ProdWeight { name: "adtm:char2", default: 1.5 },
     ProdWeight { name: "adtm:bpchar", default: 2.5 },
     ProdWeight { name: "adtm:nametext", default: 1.5 },
@@ -3327,6 +3334,15 @@ mod tests {
         for (i, a) in PROD_WEIGHTS.iter().enumerate() {
             for b in &PROD_WEIGHTS[i + 1..] {
                 assert_ne!(a.name, b.name);
+            }
+            // Round-13: adtm:xml is the one deliberate zero-default —
+            // coverage-only (whole-database XML dumps are not
+            // differential-comparable; the covloop opts in with
+            // --weight adtm:xml=1). Everything else must stay positive
+            // so the mixed differential vector reaches every module.
+            if a.name == "adtm:xml" {
+                assert_eq!(a.default, 0.0, "adtm:xml is coverage-only (weight 0)");
+                continue;
             }
             assert!(a.default > 0.0, "{} must default positive", a.name);
         }
