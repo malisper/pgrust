@@ -526,6 +526,198 @@ fn rb6_regr_family_c_bit_parity() {
     assert_eq!(out8(float8_stddev_samp(t).unwrap()), "1.2909944487358056");
 }
 
+// Round-12 (Antithesis sqldiff, fz_fma fixture, seeds 3446924009097215843 /
+// 2383620390565615383 / 1345841888102124772): var/stddev/corr/covar/regr_*
+// rowset diffs vs the C oracle. The parity reference is x86-64 SSE2 (no FMA)
+// PostgreSQL 18. Expected bits below were produced TWO independent ways on
+// linux/amd64 postgres:18 (Debian, docker --platform linux/amd64):
+//   1. live SQL over the exact fuzzgen fixture (float8send output), and
+//   2. a standalone C mirror of float.c's accum/combine/finals compiled
+//      gcc -O2 -ffp-contract=off — both agree bit-for-bit.
+// Fixture (crates/bin/fuzzgen/src/floatmath.rs gen_agg):
+//   v = ((i % 64)::float8)/2.0, w = ((i % 32) - 16)::float8,
+//   r = ((i % 16)::float4), i in 1..=n, n in 200..500.
+#[test]
+fn round12_fz_fma_aggregate_amd64_bit_parity() {
+    let v = |i: i64| (i % 64) as f64 / 2.0;
+    let w = |i: i64| ((i % 32) - 16) as f64;
+    let r = |i: i64| ((i % 16) as f32) as f64; // float4_accum widens to f64
+
+    // (n, var_pop(v), var_samp(v), stddev_pop(v), stddev_samp(v),
+    //  var_pop(r), stddev_samp(r))
+    let plain: [(i64, [u64; 6]); 3] = [
+        (200, [
+            0x40563cdb8bac710a,
+            0x40565977054cd360,
+            0x4022dcdda3d090b2,
+            0x4022e8fbc074a280,
+            0x4034f4a2339c0ebd,
+            0x40125b5b77ed36c4,
+        ]),
+        (350, [
+            0x405527bc4a65906b,
+            0x40553740dd50953b,
+            0x402265de19ec1ab5,
+            0x40226c9c44554743,
+            0x40350cccccccccce,
+            0x401260ddda6c68c2,
+        ]),
+        (499, [
+            0x4054b4af09997564,
+            0x4054bf53e3108382,
+            0x4022339223e29d1d,
+            0x4022383f2e255653,
+            0x40354e990ce54393,
+            0x40127b7ab31f883a,
+        ]),
+    ];
+    for (n, exp) in plain {
+        let mut tv = [0.0f64; 3];
+        let mut tr = [0.0f64; 3];
+        for i in 1..=n {
+            tv = float8_accum(tv, v(i)).unwrap();
+            // float4_accum is float8_accum over the f32-widened value; r()
+            // spells out the widening the fixture's float4 column goes through.
+            tr = float4_accum(tr, (i % 16) as f32).unwrap();
+            debug_assert_eq!(r(i), (i % 16) as f32 as f64);
+        }
+        let got = [
+            float8_var_pop(tv).unwrap(),
+            float8_var_samp(tv).unwrap(),
+            float8_stddev_pop(tv).unwrap(),
+            float8_stddev_samp(tv).unwrap(),
+            float8_var_pop(tr).unwrap(),
+            float8_stddev_samp(tr).unwrap(),
+        ];
+        assert_eq!(got.map(f64::to_bits), exp, "n={n}");
+    }
+
+    // regr family, accum args (Y=v, X=w):
+    // (n, corr, covar_pop, covar_samp, regr_slope, regr_intercept, regr_r2,
+    //  regr_avgx, regr_avgy, regr_sxx, regr_syy, regr_sxy)
+    let regr: [(i64, [u64; 11]); 3] = [
+        (200, [
+            0x3fe106fd6500fe92,
+            0x40475d1b71758e1f,
+            0x40477b29bb5b217d,
+            0x3fe13f4d86aaba61,
+            0x402f6eeb464fca4f,
+            0x3fd21edd845aea71,
+            0xbfee147ae147ae14,
+            0x402e6b851eb851ec,
+            0x40d0eed1eb851eb9,
+            0x40d15f8b851eb850,
+            0x40c240bd70a3d708,
+        ]),
+        (350, [
+            0x3fdff3922a5cb88d,
+            0x4045175075075076,
+            0x404526c8fc5516bf,
+            0x3fe0000000000002,
+            0x402ea0ea0ea0ea0f,
+            0x3fcfe7292892a88b,
+            0xbfe0000000000000,
+            0x402e20ea0ea0ea0f,
+            0x40dcd5dfffffffff,
+            0x40dcec536db6db72,
+            0x40ccd5e000000002,
+        ]),
+        (499, [
+            0x3fde9528f7f34c28,
+            0x4043f57be7088e0d,
+            0x4043ffbe76eb4557,
+            0x3fde5262df69f303,
+            0x402f9c2ee3ab9d88,
+            0x3fcd3a6416a1abe0,
+            0xbfe6b38f225f6c40,
+            0x402ef018a0106ab6,
+            0x40e4875bb412780d,
+            0x40e42e1897db0fe9,
+            0x40d373c041aad672,
+        ]),
+    ];
+    for (n, exp) in regr {
+        let mut t = [0.0f64; 6];
+        for i in 1..=n {
+            t = float8_regr_accum(t, v(i), w(i)).unwrap();
+        }
+        let got = [
+            float8_corr(t).unwrap(),
+            float8_covar_pop(t).unwrap(),
+            float8_covar_samp(t).unwrap(),
+            float8_regr_slope(t).unwrap(),
+            float8_regr_intercept(t).unwrap(),
+            float8_regr_r2(t).unwrap(),
+            float8_regr_avgx(t).unwrap(),
+            float8_regr_avgy(t).unwrap(),
+            float8_regr_sxx(t).unwrap(),
+            float8_regr_syy(t).unwrap(),
+            float8_regr_sxy(t).unwrap(),
+        ];
+        assert_eq!(got.map(f64::to_bits), exp, "n={n}");
+    }
+
+    // Parallel leg: split the rows at k, accumulate the halves separately,
+    // combine, then run the finals — pinned to the same amd64 C mirror
+    // (float8_combine / float8_regr_combine round every op separately).
+    // (n, k, var_samp(v), stddev_pop(v), corr, regr_intercept, Sxx, Syy, Sxy)
+    let combined: [(i64, i64, [u64; 7]); 3] = [
+        (200, 73, [
+            0x40565977054cd364,
+            0x4022dcdda3d090b4,
+            0x3fe106fd6500fe93,
+            0x402f6eeb464fca4f,
+            0x40d0eed1eb851eb7,
+            0x40d15f8b851eb853,
+            0x40c240bd70a3d70a,
+        ]),
+        (350, 175, [
+            0x40553740dd509537,
+            0x402265de19ec1ab3,
+            0x3fdff3922a5cb886,
+            0x402ea0ea0ea0ea0f,
+            0x40dcd5e000000005,
+            0x40dcec536db6db6c,
+            0x40ccd5dffffffffc,
+        ]),
+        (499, 168, [
+            0x4054bf53e3108382,
+            0x4022339223e29d1d,
+            0x3fde9528f7f34c28,
+            0x402f9c2ee3ab9d88,
+            0x40e4875bb412780a,
+            0x40e42e1897db0fe9,
+            0x40d373c041aad671,
+        ]),
+    ];
+    for (n, k, exp) in combined {
+        let mut a3 = [0.0f64; 3];
+        let mut b3 = [0.0f64; 3];
+        let mut a6 = [0.0f64; 6];
+        let mut b6 = [0.0f64; 6];
+        for i in 1..=k {
+            a3 = float8_accum(a3, v(i)).unwrap();
+            a6 = float8_regr_accum(a6, v(i), w(i)).unwrap();
+        }
+        for i in (k + 1)..=n {
+            b3 = float8_accum(b3, v(i)).unwrap();
+            b6 = float8_regr_accum(b6, v(i), w(i)).unwrap();
+        }
+        let c3 = float8_combine(a3, b3).unwrap();
+        let c6 = float8_regr_combine(a6, b6).unwrap();
+        let got = [
+            float8_var_samp(c3).unwrap(),
+            float8_stddev_pop(c3).unwrap(),
+            float8_corr(c6).unwrap(),
+            float8_regr_intercept(c6).unwrap(),
+            float8_regr_sxx(c6).unwrap(),
+            float8_regr_syy(c6).unwrap(),
+            float8_regr_sxy(c6).unwrap(),
+        ];
+        assert_eq!(got.map(f64::to_bits), exp, "n={n} k={k}");
+    }
+}
+
 #[test]
 fn transarray_image_layout() {
     let vals = [1.0f64, -2.5, 0.0];

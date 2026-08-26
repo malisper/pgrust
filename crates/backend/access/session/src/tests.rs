@@ -1318,12 +1318,99 @@ fn dirty_error_resource_holdoff_and_pending_cancel_boundaries_refuse() {
         assert!(error.message().contains("holdoff"));
         init_small::globals::SetCritSectionCount(0);
 
+        init_small::globals::SetProcDiePending(true);
+        init_small::globals::SetInterruptPending(true);
+        let error = bind_session_envelope_with(&target, || Ok(()))
+            .err()
+            .expect("pending die");
+        assert!(error.message().contains("cancellation is pending"));
+        init_small::globals::SetProcDiePending(false);
+        init_small::globals::SetInterruptPending(false);
+    })
+    .join()
+    .unwrap();
+}
+
+// Round-12 sqldiff VACUUM-55000: a pg_cancel_backend racing a statement
+// boundary latches QueryCancelPending/InterruptPending on a retained thread
+// with no statement left to consume them. C discards such a cancel
+// (ProcessInterrupts' DoingCommandRead arm; a canceled parallel worker
+// process exits and its flags die with it) — it NEVER errors 55000 on the
+// next statement. The boundary must discard the stale cancel and bind.
+#[test]
+fn stale_pending_cancel_is_discarded_at_statement_boundary() {
+    std::thread::spawn(|| {
+        setup();
+        let (_base, target, _) = contexts();
+
+        // Cancel landed between statements: the next bind succeeds and the
+        // stale flags are gone (the "VACUUM after idle cancel" shape).
+        init_small::globals::SetInterruptPending(true);
+        init_small::globals::SetQueryCancelPending(true);
+        bind_session_envelope_with(&target, || Ok(()))
+            .expect("stale cancel must be discarded, not refused")
+            .finish()
+            .unwrap();
+        assert!(!init_small::globals::QueryCancelPending());
+        assert!(!init_small::globals::InterruptPending());
+
+        // The boundary predicates discard too (park/resume checks).
+        init_small::globals::SetInterruptPending(true);
+        init_small::globals::SetQueryCancelPending(true);
+        assert_eq!(SessionEnvelopeBoundaryIssue(), None);
+        assert!(!init_small::globals::QueryCancelPending());
+        assert!(!init_small::globals::InterruptPending());
+
+        init_small::globals::SetInterruptPending(true);
+        init_small::globals::SetQueryCancelPending(true);
+        assert_eq!(SessionEnvelopeBoundaryIssueForRetainedBind(), None);
+        assert!(!init_small::globals::QueryCancelPending());
+        assert!(!init_small::globals::InterruptPending());
+
+        // A bare InterruptPending nudge (delivered but not yet drained) is
+        // discarded the same way; a real cause re-latches at the next drain.
+        init_small::globals::SetInterruptPending(true);
+        assert_eq!(SessionEnvelopeBoundaryIssue(), None);
+        assert!(!init_small::globals::InterruptPending());
+    })
+    .join()
+    .unwrap();
+}
+
+// The discard is ONLY for cancels: ProcDiePending stays latched and keeps
+// refusing (C: die is never discarded), and a held-off boundary is left
+// untouched — the holdoff itself is the boundary defect there.
+#[test]
+fn proc_die_and_held_off_cancel_are_never_discarded() {
+    std::thread::spawn(|| {
+        setup();
+        let (_base, target, _) = contexts();
+
+        init_small::globals::SetInterruptPending(true);
+        init_small::globals::SetProcDiePending(true);
         init_small::globals::SetQueryCancelPending(true);
         let error = bind_session_envelope_with(&target, || Ok(()))
             .err()
-            .expect("pending cancellation");
+            .expect("pending die must refuse");
         assert!(error.message().contains("cancellation is pending"));
+        assert!(init_small::globals::ProcDiePending());
+        assert!(init_small::globals::QueryCancelPending());
+        assert!(init_small::globals::InterruptPending());
+        init_small::globals::SetProcDiePending(false);
+
+        // Still held off: the cancel is NOT discarded (it may yet be
+        // delivered as 57014 once the holdoff lifts) and the bind refuses.
+        init_small::globals::SetQueryCancelHoldoffCount(1);
+        let error = bind_session_envelope_with(&target, || Ok(()))
+            .err()
+            .expect("held-off cancel must refuse");
+        assert!(error.message().contains("cancellation is pending"));
+        assert!(init_small::globals::QueryCancelPending());
+        assert!(init_small::globals::InterruptPending());
+        init_small::globals::SetQueryCancelHoldoffCount(0);
+
         init_small::globals::SetQueryCancelPending(false);
+        init_small::globals::SetInterruptPending(false);
     })
     .join()
     .unwrap();

@@ -644,7 +644,15 @@ fn run() -> Result<ExitCode, String> {
                                 };
                                 let sql =
                                     fuzzgen::gramwalk::rebase_tablespace_names(&sql, &args.db);
-                                fuzzgen::aclrls::rebase_role_names(&sql, &args.db)
+                                let sql = fuzzgen::aclrls::rebase_role_names(&sql, &args.db);
+                                // Round-12: the nodes module's ns_role1/2
+                                // deck is the same cluster-global hazard
+                                // (one-sided 42704 on ALTER ROLE, seed
+                                // 1186240469902918316) — rebased into the
+                                // batch namespace like the aclrls deck;
+                                // helper_diffrun's {db}_* role reclaim
+                                // covers it.
+                                fuzzgen::nodes::rebase_role_names(&sql, &args.db)
                             },
                             soft_float_cols: s.soft_float_cols.clone(),
                             // Opt-in H1 mask: gramwalk derives raw EXPLAIN

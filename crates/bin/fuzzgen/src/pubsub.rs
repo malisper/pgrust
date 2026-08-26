@@ -62,10 +62,24 @@ const PUBTAB_PROBE: &str = "SELECT pubname, schemaname, tablename, \
      attnames::text, rowfilter FROM pg_publication_tables \
      WHERE pubname LIKE 'fz\\_%' ORDER BY pubname, schemaname, tablename;";
 
+// Round-12 (run 9348c12d...-59-13, seeds 3819190793736560824 /
+// 1409498049480292136 / 1072053679970594838): pg_subscription is a SHARED
+// catalog — rows from every database are visible — while subscription
+// names are only unique per (subdbid, subname). Concurrent driver batches
+// each legally own an fz_sub2 in their private scratch db, so a bare
+// `subname LIKE 'fz\_%'` probe leaked the other batch's rows (row count
+// 1 vs 2, and fz_sub2 field diffs whenever the other batch's fz_sub2 sat
+// in a different ALTER state). No DDL race exists — only the probe leaked
+// — so the fix is probe-side: restrict to the current database. Both
+// engines run the batch in a same-named scratch db, so the filter is
+// engine-symmetric and the projected rowset stays deterministic (subdbid
+// itself, an oid, is still never projected).
 const SUB_PROBE: &str = "SELECT subname, subenabled, subbinary, substream, \
      subtwophasestate, subdisableonerr, subpasswordrequired, subrunasowner, \
      subfailover, subslotname, subsynccommit, subpublications::text, \
      suborigin FROM pg_subscription WHERE subname LIKE 'fz\\_%' \
+     AND subdbid = (SELECT oid FROM pg_database \
+     WHERE datname = current_database()) \
      ORDER BY subname;";
 
 /// Fixture table bracket: a tiny table the publication shapes attach.
@@ -520,5 +534,31 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Round-12: pg_subscription is a shared catalog; every probe of it
+    /// must be scoped to the current database or it leaks concurrent
+    /// batches' same-named subscriptions (cross-batch sqldiff noise).
+    #[test]
+    fn pg_subscription_probes_are_scoped_to_current_database() {
+        let cat = FixtureCatalog.load_catalog().unwrap();
+        let w = WeightTable::defaults();
+        let mut rng = Rng::new(11);
+        let mut saw_probe = false;
+        for _ in 0..600 {
+            let mut prods = Vec::new();
+            let mut g = Gen::new(&mut rng, &cat, &w, &mut prods, 4);
+            for s in gen_pubsub_module(&mut g).iter().map(|s| s.to_sql()) {
+                if s.contains("FROM pg_subscription") {
+                    saw_probe = true;
+                    assert!(
+                        s.contains("subdbid = (SELECT oid FROM pg_database")
+                            && s.contains("datname = current_database()"),
+                        "unscoped pg_subscription probe: {s}"
+                    );
+                }
+            }
+        }
+        assert!(saw_probe, "no pg_subscription probe generated in 600 groups");
     }
 }

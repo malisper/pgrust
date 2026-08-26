@@ -755,8 +755,24 @@ pub fn sanitize_alter_system_guc_names(sql: &str) -> String {
 ///     REASSIGN/DROP OWNED BY lists (with REASSIGN's TO target);
 /// with comma-continuation inside every list. The role-keyword
 /// pseudo-names (CURRENT_USER, CURRENT_ROLE, SESSION_USER, PUBLIC, ALL,
-/// NONE) and `pg_*` built-in roles pass through untouched; quoted
-/// material is opaque. The mapping is injective per batch and the
+/// NONE) and `pg_*` built-in roles pass through untouched in REFERENCE
+/// positions; quoted material is opaque.
+///
+/// Round-12 (run 9348c12d...-59-13, seed 2649331128096838021): a
+/// pseudo-name in the PRIMARY role-DDL slot (`alter role session_user
+/// set session characteristics as transaction deferrable`) resolves to
+/// the SHARED login role, whose pg_db_role_setting rows are
+/// cluster-global mutable state raced by other batches' ALTER ROLE
+/// SET/RESET streams — C validates a VAR_SET_MULTI setting name only
+/// when a setconfig array already exists (GUCArrayDelete), so the same
+/// statement is state-dependently 42704 or success on each side (both
+/// engines match exactly in both states; verified live against pgdg
+/// 18.3 amd64 and pgrust at the round-12 image commit). Pseudo-names
+/// (and ALL) in the primary CREATE/ALTER/DROP ROLE|USER|GROUP name slot
+/// and the RENAME TO target are therefore rebased into the batch
+/// namespace like ordinary names, turning the outcome into a matched
+/// batch-local one; reference positions keep the pass-through (role
+/// memberships are pairwise batch-unique rows and carry no such race). The mapping is injective per batch and the
 /// statement TEXT is identical on both sides, so differential parity is
 /// untouched. GRANT's source role list (GRANT r1 TO r2) is deliberately
 /// NOT rebased — it is textually indistinguishable from a privilege list
@@ -780,6 +796,14 @@ pub fn rebase_role_names(sql: &str, tag: &str) -> String {
     let mut i = 0usize;
     let mut mode = Mode::Idle;
     let mut saw_role_stmt = false;
+    // True while Mode::Name expects the PRIMARY operand of a role-DDL
+    // statement (the name after CREATE/ALTER/DROP ROLE|USER|GROUP, or its
+    // RENAME TO target) — the slot where a pseudo-name resolves to a
+    // shared cluster-global role the statement then MUTATES. False for
+    // reference positions (IN ROLE/GROUP, GRANT/REVOKE lists, OWNED BY,
+    // GRANTED BY, ALTER GROUP ... ADD/DROP USER member lists). Comma
+    // continuation keeps the current slot kind.
+    let mut role_ddl_slot = false;
     let mut prev_word = String::new();
     let first_word = sql
         .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
@@ -836,7 +860,38 @@ pub fn rebase_role_names(sql: &str, tag: &str) -> String {
                         continue;
                     }
                     // Role-keyword pseudo-names and pg_* built-ins pass
-                    // through but consume the name slot.
+                    // through but consume the name slot — EXCEPT in a
+                    // role-DDL name slot (round-12, seed
+                    // 2649331128096838021): `alter role session_user set
+                    // session characteristics ...` resolves the pseudo-name
+                    // to the SHARED login role, whose pg_db_role_setting
+                    // rows are cluster-global mutable state that other
+                    // batches' ALTER ROLE ... SET/RESET streams toggle
+                    // concurrently. C validates a VAR_SET_MULTI name only
+                    // when a setconfig array already EXISTS (GUCArrayDelete),
+                    // so the same statement is state-dependently 42704 or
+                    // success — a pure cross-batch race (both engines match
+                    // exactly in BOTH states; verified live on 18.3 amd64
+                    // and pgrust at the round-12 image commit). Rebasing the
+                    // pseudo-name into the batch namespace makes the outcome
+                    // a matched, batch-local one (42704 role-does-not-exist
+                    // on both sides, or real DDL on a batch-owned role when
+                    // the walk created it). `ALTER ROLE ALL` mutates every
+                    // role's shared settings and rides the same rewrite.
+                    // Reference positions (GRANT/REVOKE lists, IN ROLE,
+                    // OWNED BY, membership lists) still pass through:
+                    // memberships are pairwise batch-unique rows, and
+                    // pass-through keeps their coverage.
+                    "current_user" | "current_role" | "session_user" | "all"
+                        if role_ddl_slot =>
+                    {
+                        mode = Mode::AfterName;
+                        let mut rebased = format!("{tag}_{lower}");
+                        rebased.truncate(63);
+                        out.push_str(&rebased);
+                        prev_word = lower;
+                        continue;
+                    }
                     "current_user" | "current_role" | "session_user" | "public" | "all"
                     | "none" => {
                         mode = Mode::AfterName;
@@ -870,20 +925,34 @@ pub fn rebase_role_names(sql: &str, tag: &str) -> String {
                     if matches!(prev_word.as_str(), "create" | "alter" | "drop") {
                         saw_role_stmt = true;
                     }
+                    role_ddl_slot = matches!(prev_word.as_str(), "create" | "alter" | "drop");
                     mode = Mode::Name;
                 }
-                "group" | "role" if prev_word == "in" => mode = Mode::Name,
+                "group" | "role" if prev_word == "in" => {
+                    role_ddl_slot = false;
+                    mode = Mode::Name;
+                }
                 // OWNED BY is a role list only in DROP/REASSIGN OWNED;
                 // ALTER SEQUENCE/TYPE ... OWNED BY names a table.column.
                 "by" if prev_word == "granted"
                     || (prev_word == "owned"
                         && matches!(first_word.as_str(), "drop" | "reassign")) =>
                 {
+                    role_ddl_slot = false;
                     mode = Mode::Name
                 }
-                "to" if prev_word == "rename" && saw_role_stmt => mode = Mode::Name,
-                "to" if matches!(first_word.as_str(), "grant" | "reassign") => mode = Mode::Name,
-                "from" if first_word == "revoke" => mode = Mode::Name,
+                "to" if prev_word == "rename" && saw_role_stmt => {
+                    role_ddl_slot = true;
+                    mode = Mode::Name;
+                }
+                "to" if matches!(first_word.as_str(), "grant" | "reassign") => {
+                    role_ddl_slot = false;
+                    mode = Mode::Name;
+                }
+                "from" if first_word == "revoke" => {
+                    role_ddl_slot = false;
+                    mode = Mode::Name;
+                }
                 _ => {}
             }
             out.push_str(word);
@@ -1157,6 +1226,35 @@ mod tests {
             f("create role zz in role public , gw_a ;"),
             "create role fuzz_gw_71_3_zz in role public , fuzz_gw_71_3_gw_a ;"
         );
+        // Round-12: pseudo-names in the PRIMARY role-DDL slot resolve to
+        // shared cluster-global roles the statement mutates — rebased.
+        assert_eq!(
+            f("alter role session_user set session characteristics as transaction deferrable ;"),
+            "alter role fuzz_gw_71_3_session_user set session characteristics \
+             as transaction deferrable ;"
+        );
+        assert_eq!(
+            f("alter user all set work_mem = '4MB' ;"),
+            "alter user fuzz_gw_71_3_all set work_mem = '4MB' ;"
+        );
+        assert_eq!(
+            f("drop role current_user , gw_a ;"),
+            "drop role fuzz_gw_71_3_current_user , fuzz_gw_71_3_gw_a ;"
+        );
+        assert_eq!(
+            f("alter role v0 rename to current_role ;"),
+            "alter role fuzz_gw_71_3_v0 rename to fuzz_gw_71_3_current_role ;"
+        );
+        // ...but reference positions keep the pass-through, including
+        // inside a role-DDL statement's IN ROLE list.
+        assert_eq!(
+            f("create role zz in role current_user , gw_a ;"),
+            "create role fuzz_gw_71_3_zz in role current_user , fuzz_gw_71_3_gw_a ;"
+        );
+        // (GRANT's source list is never rebased; its TO list keeps the
+        // pseudo-name pass-through.)
+        let s = "grant gw_a to session_user ;";
+        assert_eq!(f(s), s.to_string());
         // GRANT ... TO / REVOKE ... FROM lists; pg_* built-ins stay.
         assert_eq!(
             f("grant select on gw_a to zz , pg_monitor ;"),

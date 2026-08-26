@@ -307,7 +307,45 @@ pub fn SessionEnvelopeBoundaryClean() -> bool {
     SessionEnvelopeBoundaryIssue().is_none()
 }
 
+/// C parity for a query cancel that has no statement left to cancel
+/// (postgres.c ProcessInterrupts: at DoingCommandRead a pending
+/// QueryCancelPending is cleared and IGNORED — "the client is presumably
+/// going to send a new query anyway" — and a canceled parallel worker
+/// PROCESS simply exits, its flags dying with it; C never surfaces a
+/// pending cancel as a persistent error on the NEXT statement).
+///
+/// The thread model retains session/helper threads across engagements, so a
+/// cancel delivered after a statement's last interrupt-processing point
+/// latches this thread's QueryCancelPending/InterruptPending with nothing
+/// left to consume them, and every later boundary check refused with 55000
+/// "interrupt or cancellation is pending" (round-12 sqldiff: `VACUUM ...`
+/// erroring 55000 after a pg_cancel_backend raced the statement boundary;
+/// the C oracle succeeded). Discard the stale cancel at the boundary
+/// instead — exactly C's discard. A bare InterruptPending nudge is also
+/// cleared: it carries no cause of its own, and any real still-pending
+/// cause re-latches it at the next drain point (latch waits and
+/// ProcessInterrupts drain unconditionally). ProcDiePending is NEVER
+/// discarded, and a held-off boundary is left untouched — those stay
+/// refusals, they are real boundary defects.
+fn discard_stale_query_cancel_at_boundary() {
+    use init_small::globals as g;
+    if g::InterruptHoldoffCount() != 0
+        || g::QueryCancelHoldoffCount() != 0
+        || g::CritSectionCount() != 0
+        || g::ProcDiePending()
+    {
+        return;
+    }
+    if g::QueryCancelPending() {
+        g::SetQueryCancelPending(false);
+    }
+    if g::InterruptPending() {
+        g::SetInterruptPending(false);
+    }
+}
+
 pub fn SessionEnvelopeBoundaryIssue() -> Option<&'static str> {
+    discard_stale_query_cancel_at_boundary();
     if ENVELOPE_DEPTH.get() != 0 {
         return Some("session envelope binding is still live");
     }
@@ -336,6 +374,7 @@ pub fn SessionEnvelopeBoundaryIssue() -> Option<&'static str> {
 /// can bind — SESSION_BOUND accounting stays exact: exactly one live
 /// binding, always the keyed session's.
 pub fn SessionEnvelopeBoundaryIssueForRetainedBind() -> Option<&'static str> {
+    discard_stale_query_cancel_at_boundary();
     if ENVELOPE_DEPTH.get() != 0 {
         return Some("session envelope binding is still live");
     }
@@ -349,6 +388,7 @@ pub fn SessionEnvelopeBoundaryIssueForRetainedBind() -> Option<&'static str> {
 }
 
 fn validate_entry_boundary() -> PgResult<()> {
+    discard_stale_query_cancel_at_boundary();
     if guc::store::session_bound() {
         return Err(prerequisite_error("legacy SessionGucBinding is still live"));
     }

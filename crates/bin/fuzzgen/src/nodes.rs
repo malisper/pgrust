@@ -477,6 +477,29 @@ fn body(g: &mut Gen, shape: &str) -> Vec<StmtKind> {
     }
 }
 
+/// Round-12 (run 9348c12d...-59-13, seed 1186240469902918316): roles are
+/// CLUSTER-global (pg_authid), so the `nodes:role` bracket's fixed
+/// `ns_role1`/`ns_role2` names raced concurrent driver batches'
+/// CREATE/DROP brackets exactly like aclrls' fz_acl_* roles did in FP-12
+/// (round-10) and gramwalk's in round-11 — observed as a one-sided 42704
+/// on `ALTER ROLE ns_role1 NOLOGIN NOSUPERUSER` after another batch's
+/// DROP ROLE won the race. Same remedy, same shape as
+/// [`crate::aclrls::rebase_role_names`]: the diffrunner rewrites the
+/// module-owned `ns_role` prefix into the batch-unique `{tag}_ns_role`
+/// namespace (tag = the batch's private scratch-db name), identically on
+/// both sides so statement text stays engine-symmetric, and
+/// helper_diffrun's existing `{tag}_*` role reclaim covers teardown. A
+/// plain textual prefix rewrite is safe: `ns_role` occurs only as these
+/// role identifiers (asserted by the module tests), and rewritten names
+/// stay far under the 63-byte identifier bound.
+pub fn rebase_role_names(sql: &str, tag: &str) -> String {
+    const PREFIX: &str = "ns_role";
+    if !sql.contains(PREFIX) {
+        return sql.to_string();
+    }
+    sql.replace(PREFIX, &format!("{tag}_{PREFIX}"))
+}
+
 /// Registry entry point (stmt::STMT_MODULES): one debug-print bracket group.
 pub fn gen_nodes_module(g: &mut Gen) -> Vec<StmtKind> {
     g.fire("nodes");
@@ -628,5 +651,46 @@ mod tests {
         assert_eq!(a, b);
         let (c, _) = gen_groups(6, 120, &w);
         assert_ne!(a, c);
+    }
+
+    /// Round-12: the rebase contract. Every `ns_role` occurrence the
+    /// module can emit is a bare role identifier (never quoted, never a
+    /// substring of some other name), so the diffrunner's plain textual
+    /// prefix rewrite is exact; and the rewrite itself moves every
+    /// occurrence into the batch namespace while leaving other ns_
+    /// objects (db-local, no rebase needed) untouched.
+    #[test]
+    fn ns_role_names_are_rebasable() {
+        let (groups, _) = gen_groups(0x0135, 800, &WeightTable::defaults());
+        let mut saw_role = false;
+        for group in &groups {
+            for sql in group {
+                let mut rest = sql.as_str();
+                while let Some(i) = rest.find("ns_role") {
+                    saw_role = true;
+                    let tail = &rest[i + "ns_role".len()..];
+                    assert!(
+                        tail.starts_with('1') || tail.starts_with('2'),
+                        "unexpected ns_role spelling in: {sql}"
+                    );
+                    assert!(!sql.contains('"'), "quoted material in role stmt: {sql}");
+                    rest = tail;
+                }
+                let rebased = rebase_role_names(sql, "fuzz_ab12");
+                assert!(
+                    !rebased.contains(" ns_role"),
+                    "unrebased role name survived: {rebased}"
+                );
+                if sql.contains("ns_role") {
+                    assert!(rebased.contains("fuzz_ab12_ns_role"), "{rebased}");
+                }
+            }
+        }
+        assert!(saw_role, "nodes:role bracket never generated in 800 groups");
+        // Non-role ns_ names pass through untouched.
+        assert_eq!(
+            rebase_role_names("CREATE SCHEMA ns_fs;", "t"),
+            "CREATE SCHEMA ns_fs;"
+        );
     }
 }

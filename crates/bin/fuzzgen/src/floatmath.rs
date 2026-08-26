@@ -26,11 +26,13 @@
 //!     only through the byte-exact ::text arm (floatmath:text:signzero).
 //!
 //! Accumulation-order pin: the aggregate family feeds EXACT-REPRESENTABLE
-//! inputs (small integers / halves) so sum/avg are order-independent; the
-//! pgrust and C planners may pick different (serial vs parallel) plans, so
-//! only order-independent results are emitted as bare-float aggregates
-//! (variance/stddev over the small integer fixture stay within the ulp
-//! budget). See findings-floatmath.md.
+//! inputs (small integers / halves) so sum/avg are order-independent and
+//! ride forced-parallel plans; the variance/stddev/regression family
+//! (Youngs-Cramer, order-SENSITIVE) is pinned serial instead — parallel
+//! chunk boundaries are nondeterministic and C's own combine legs drift
+//! 1-7 ulp from serial on this fixture, beyond the 4-ulp budget (round-12
+//! disposition; parallel-combine parity is pinned by adt_float's amd64
+//! bit-parity unit tests). See findings-floatmath.md.
 //!
 //! Stateless: every probe is a self-contained one-statement group except
 //! the aggregate family, which creates-and-drops a `fz_fma` fixture in-group
@@ -859,8 +861,24 @@ fn gen_agg(g: &mut Gen) -> Vec<StmtKind> {
             )));
         }
         _ => {
-            // Variance/stddev/regression over the small exact integer fixture:
-            // combine-order drift stays within the ulp budget (bare float).
+            // Variance/stddev/regression (Youngs-Cramer): the transition is
+            // NOT order-independent, and a parallel plan's chunk boundaries
+            // are nondeterministic (dynamic block assignment; the launched
+            // worker count also varies with pool pressure under the mixed
+            // workload) — so the combine-order drift is not bounded by the
+            // 4-ulp budget. Round-12 (run 9348c12d...-59-13, seeds
+            // 3446924009097215843 / 2383620390565615383 /
+            // 1345841888102124772): C's OWN combine legs drift 1-7 ulp from
+            // its serial leg on this very fixture (measured against pgdg
+            // amd64 18), so the previous claim that the drift "stays within
+            // the ulp budget" was simply wrong, and both-sides-forced-
+            // parallel still diverged whenever the two engines landed on
+            // different chunkings. The stat family is therefore pinned
+            // SERIAL: deterministic C-ordered accumulation over the fixed
+            // fixture is bit-exact on both engines (stronger than ulp), and
+            // the combine/parallel transition parity is pinned instead by
+            // adt_float's amd64 bit-parity unit tests.
+            out.push(raw("SET max_parallel_workers_per_gather = 0;".to_string()));
             out.push(raw(format!(
                 "SELECT var_pop(v), var_samp(v), stddev_pop(v), stddev_samp(v) FROM {t};"
             )));
@@ -934,5 +952,44 @@ mod tests {
             out
         };
         assert_eq!(run(), run());
+    }
+
+    /// Round-12: every order-SENSITIVE stat aggregate probe
+    /// (var/stddev/corr/covar/regr over fz_fma) must run under the serial
+    /// pin — a `SET max_parallel_workers_per_gather = 0;` after the
+    /// forced-parallel block and before the first stat SELECT — because
+    /// parallel combine chunking is nondeterministic and its legitimate
+    /// drift exceeds the 4-ulp budget.
+    #[test]
+    fn stat_aggregates_are_serial_pinned() {
+        let cat = FixtureCatalog.load_catalog().unwrap();
+        let w = WeightTable::defaults();
+        let mut rng = Rng::new(0xA66);
+        let mut saw_stat = false;
+        for _ in 0..4000 {
+            let mut prods = Vec::new();
+            let mut g = crate::stmt::Gen::new(&mut rng, &cat, &w, &mut prods, 3);
+            let stmts: Vec<String> =
+                gen_floatmath_module(&mut g).iter().map(|s| s.to_sql()).collect();
+            let stat_idx = stmts.iter().position(|s| s.contains("var_pop"));
+            if let Some(si) = stat_idx {
+                saw_stat = true;
+                let pin = stmts
+                    .iter()
+                    .position(|s| s == "SET max_parallel_workers_per_gather = 0;");
+                let forced = stmts
+                    .iter()
+                    .position(|s| s == "SET max_parallel_workers_per_gather = 4;");
+                assert!(
+                    matches!((forced, pin), (Some(fp), Some(p)) if fp < p && p < si),
+                    "stat probe not serial-pinned: {stmts:?}"
+                );
+                assert!(
+                    stmts.iter().any(|s| s == "RESET max_parallel_workers_per_gather;"),
+                    "missing RESET: {stmts:?}"
+                );
+            }
+        }
+        assert!(saw_stat, "floatmath:agg:stat never fired in 4000 groups");
     }
 }
