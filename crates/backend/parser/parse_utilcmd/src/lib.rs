@@ -461,6 +461,16 @@ pub fn LookupTypeNameOidExtended<'mcx>(
     } else {
         let arr = syscache_seams::pg_type_typarray::call(typoid)?.unwrap_or(InvalidOid);
         if arr == InvalidOid {
+            // C LookupTypeNameExtended: a missing array type (typarray = 0,
+            // e.g. unknown[]) makes the TYPEOID fetch fail, which under
+            // missing_ok returns NULL — LookupTypeNameOid then hands
+            // InvalidOid back so DROP ... IF EXISTS can skip with a NOTICE
+            // instead of erroring (round-16 gramwalk seed
+            // 2685276905843125608: DROP OPERATOR IF EXISTS + (setof
+            // unknown[], ...)).
+            if missing_ok {
+                return Ok(InvalidOid);
+            }
             return Err(type_does_not_exist(&typeNameToString(tn)?));
         }
         arr

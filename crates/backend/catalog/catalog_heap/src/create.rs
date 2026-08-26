@@ -680,6 +680,20 @@ pub fn heap_create_with_catalog<'mcx>(
         )
         .into());
     }
+    // C moveArrayTypeName returns true WITHOUT renaming when the colliding
+    // type is a shell: TypeCreate then fills the shell in place, reusing its
+    // OID (newTypeOid stays InvalidOid on C's AddNewRelationType path). The
+    // composite-OID hoist below must therefore reuse the shell's OID instead
+    // of preassigning a fresh one — a preassigned OID trips TypeCreate's
+    // "cannot assign new OID to existing shell type" XX000 guard (round-16
+    // gramwalk: CREATE MATERIALIZED VIEW over a same-named shell type).
+    let shell_row_type_oid = if old_type_oid != InvalidOid
+        && !lsyscache::typ::get_typisdefined(old_type_oid)?
+    {
+        old_type_oid
+    } else {
+        InvalidOid
+    };
 
     // Binary-upgrade override for pg_class.oid and relfilenumber (heap.c);
     // indexes use binary_upgrade_next_index_pg_class_oid instead.
@@ -726,15 +740,23 @@ pub fn heap_create_with_catalog<'mcx>(
     // and both TypeCreate calls' catalog effects are unchanged.
     let (new_array_oid, new_type_oid) = if make_rowtype {
         let array_oid = pg_type::AssignTypeArrayOid(mcx)?;
-        let pg_type_rel = table::table_open(mcx, types_core::TYPE_RELATION_ID, AccessShareLock)?;
-        let oid = catalog::GetNewOidWithIndex(
-            mcx,
-            &pg_type_rel,
-            pg_type::TypeOidIndexId,
-            pg_type::Anum_pg_type_oid,
-        )?;
-        pg_type_rel.close(AccessShareLock)?;
-        (array_oid, oid)
+        if shell_row_type_oid != InvalidOid {
+            // Shell reuse: the rowtype IS the surviving shell type; C never
+            // draws a composite OID in this case (TypeCreate updates the
+            // shell tuple in place).
+            (array_oid, shell_row_type_oid)
+        } else {
+            let pg_type_rel =
+                table::table_open(mcx, types_core::TYPE_RELATION_ID, AccessShareLock)?;
+            let oid = catalog::GetNewOidWithIndex(
+                mcx,
+                &pg_type_rel,
+                pg_type::TypeOidIndexId,
+                pg_type::Anum_pg_type_oid,
+            )?;
+            pg_type_rel.close(AccessShareLock)?;
+            (array_oid, oid)
+        }
     } else {
         (InvalidOid, InvalidOid)
     };
@@ -788,7 +810,10 @@ pub fn heap_create_with_catalog<'mcx>(
         relid,
         p.relkind,
         p.ownerid,
-        new_type_oid,
+        // Shell reuse: pass InvalidOid so TypeCreate takes its existing-shell
+        // update-in-place branch (which resolves to shell_row_type_oid ==
+        // new_type_oid); a preassigned OID there is the XX000 guard.
+        if shell_row_type_oid != InvalidOid { InvalidOid } else { new_type_oid },
         new_array_oid,
     )?;
 
