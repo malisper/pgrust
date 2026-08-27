@@ -1831,10 +1831,15 @@ pub mod rtpool {
             bgw_extra: [0u8; bgworker::BGW_EXTRALEN],
             bgw_notify_pid: 0,
         });
-        // Per-thread timeout machinery BEFORE any connect (the rtgang
-        // train-12 finding: the serve-time InitPostgres registers session
-        // timeouts, which debug_assert InitializeTimeouts ran here).
-        timeout_seams::initialize_timeouts::call();
+        // The full BackgroundWorkerMain pqsignal set + per-thread timeout
+        // machinery, BEFORE any connect (the rtgang train-12 finding: the
+        // serve-time InitPostgres registers session timeouts, which
+        // debug_assert InitializeTimeouts ran here). The dispositions are
+        // load-bearing too (FUZZ-ROUND): once a serve publishes this
+        // thread's pid into a ProcSignal slot, pg_terminate_backend /
+        // TerminateOtherDBBackends can SIGTERM it at any time, and a C
+        // bgworker always has bgworker_die installed by then.
+        bgworker::install_signal_handlers(true);
 
         // Shared-memory identity is deferred to the first serve gate
         // (pool_identity_complete) — see the fn doc.
@@ -2497,15 +2502,17 @@ pub mod rtgang {
             bgw_extra: [0u8; bgworker::BGW_EXTRALEN],
             bgw_notify_pid: 0,
         });
-        // Per-thread timeout machinery, exactly where the bgworker glue
-        // does it (after signal dispositions, before any connect): the
-        // gang's warm/cold InitPostgres path registers the session
-        // timeouts, and RegisterTimeout debug_asserts InitializeTimeouts
-        // ran on THIS thread. Latent in m2-pool-binding -- its tranche rode
-        // a fast-profile sweep (assert compiled out); the train-12 split
-        // dev-profile tranche jobs exposed it (13 warm-connect panics,
-        // gang dead, standing refusals on every engagement).
-        timeout_seams::initialize_timeouts::call();
+        // The full BackgroundWorkerMain pqsignal set + per-thread timeout
+        // machinery, exactly as the bgworker glue installs them (before any
+        // connect): the gang's warm/cold InitPostgres path registers the
+        // session timeouts, and RegisterTimeout debug_asserts
+        // InitializeTimeouts ran on THIS thread (train-12: 13 warm-connect
+        // panics when this was missing). The dispositions are load-bearing
+        // too (FUZZ-ROUND): an engaged gang worker's pid is procarray/
+        // ProcSignal-visible, so pg_terminate_backend /
+        // TerminateOtherDBBackends can SIGTERM it at any time, and a C
+        // bgworker always has bgworker_die installed by then.
+        bgworker::install_signal_handlers(true);
 
         // The loop + exit discipline (run_child_task-shaped): proc_exit's
         // unwind drains the deferred callbacks (ProcKill releases the

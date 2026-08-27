@@ -360,16 +360,66 @@ fn send_proc_signal_pends_sigusr1_and_drain_reaches_cfi_flags() {
     cleanup_current();
 }
 
+// FUZZ-ROUND regression (run e7967e5a..-59-13): a SIGTERM against a
+// slot-published identity whose thread has not installed a disposition for
+// that signo — C's kill() can land at ANY time (pg_terminate_backend,
+// TerminateOtherDBBackends), and in C such a signo is still blocked by the
+// startup sigmask, so the kernel keeps it pending until the main's pqsignal
+// set exists. The drain must pend, not panic; installing the disposition
+// later runs it on the next drain, exactly once.
 #[test]
-fn drain_without_disposition_is_loud() {
+fn drain_without_disposition_stays_pending_until_installed() {
     setup();
     let _guard = serial();
     register(12, 1012, &[]);
 
     assert_eq!(SendThreadSignal(1012, libc::SIGHUP), 0);
-    let outcome = std::panic::catch_unwind(DrainThreadSignals);
-    let msg = *outcome.unwrap_err().downcast::<String>().unwrap();
-    assert!(msg.contains("pqsignal_thread"), "got: {msg}");
+    let bit = 1u32 << libc::SIGHUP as u32;
+    DrainThreadSignals().unwrap(); /* Unset: blocked, stays pending */
+    assert_eq!(slot(12).pss_pendingThreadSignals.load(Relaxed), bit);
+    DrainThreadSignals().unwrap(); /* still pending, still no panic */
+    assert_eq!(slot(12).pss_pendingThreadSignals.load(Relaxed), bit);
+
+    static OBSERVED_SIGHUP: AtomicUsize = AtomicUsize::new(0);
+    OBSERVED_SIGHUP.store(0, SeqCst);
+    pqsignal_thread(
+        libc::SIGHUP,
+        ThreadSignalHandler::Simple(|| {
+            OBSERVED_SIGHUP.fetch_add(1, SeqCst);
+        }),
+    );
+    DrainThreadSignals().unwrap(); /* delivered at "unblock", exactly once */
+    assert_eq!(OBSERVED_SIGHUP.load(SeqCst), 1);
+    assert_eq!(slot(12).pss_pendingThreadSignals.load(Relaxed), 0);
+
+    // Restore the Unset disposition for this thread (table is thread-local
+    // but be tidy for single-thread test runners).
+    pqsignal_thread(libc::SIGHUP, ThreadSignalHandler::Unset);
+    cleanup_current();
+}
+
+// The Err path must also carry blocked (Unset) bits back into the slot, not
+// drop them: SIGHUP (1, Unset) is scanned before SIGINT (2, failing
+// Fallible). The failing signo is consumed (delivered, handler threw); the
+// blocked one must still be pending after the error.
+#[test]
+fn drain_error_keeps_blocked_bits_pending_too() {
+    setup();
+    let _guard = serial();
+    register(14, 1014, &[]);
+    pqsignal_thread(libc::SIGHUP, ThreadSignalHandler::Unset);
+    pqsignal_thread(
+        libc::SIGINT,
+        ThreadSignalHandler::Fallible(|| Err(Box::new(types_error::PgError::new(ERROR, "boom")))),
+    );
+
+    assert_eq!(SendThreadSignal(1014, libc::SIGHUP), 0);
+    assert_eq!(SendThreadSignal(1014, libc::SIGINT), 0);
+    assert!(DrainThreadSignals().is_err());
+    assert_eq!(
+        slot(14).pss_pendingThreadSignals.load(Relaxed),
+        1u32 << libc::SIGHUP as u32
+    );
     cleanup_current();
 }
 

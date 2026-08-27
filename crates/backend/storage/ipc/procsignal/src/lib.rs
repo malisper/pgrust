@@ -748,8 +748,10 @@ pub fn DrainThreadSignals() -> PgResult<()> {
     }
     let mut bits = slot.pss_pendingThreadSignals.swap(0, SeqCst);
     let handlers = THREAD_SIGNAL_HANDLERS.with(Cell::get);
+    let mut still_blocked: u32 = 0;
     while bits != 0 {
         let signo = bits.trailing_zeros() as usize;
+        let bit = 1u32 << signo;
         bits &= bits - 1;
         let result = match handlers[signo] {
             ThreadSignalHandler::Ignore => Ok(()),
@@ -758,20 +760,32 @@ pub fn DrainThreadSignals() -> PgResult<()> {
                 Ok(())
             }
             ThreadSignalHandler::Fallible(f) => f(),
-            ThreadSignalHandler::Unset => panic!(
-                "thread signal {signo} delivered to pid {} with no pqsignal_thread \
-                 disposition — its main must install its C pqsignal set at entry \
-                 (aux-mains handoff)",
-                g::MyProcPid()
-            ),
+            // No disposition installed on this thread: in C this signo is
+            // still BLOCKED by the startup sigmask (no main unblocks a
+            // signal before installing its pqsignal set), so the kernel
+            // keeps it pending and delivers at unblock. Mirror that: the
+            // bit stays pending on the slot and the drain after the main's
+            // pqsignal_thread set runs it. Identical to the pre-identity
+            // drain's Unset arm — a slot-published identity earns no
+            // stricter contract (FUZZ-ROUND: a SIGTERM aimed at a
+            // runtime pool executor mid-bring-up panicked here; C's
+            // equivalent — kill() at any time against any pid — can never
+            // crash the target).
+            ThreadSignalHandler::Unset => {
+                still_blocked |= bit;
+                Ok(())
+            }
         };
         if let Err(e) = result {
             // Undelivered signos stay pending, as blocked signals do in C.
-            if bits != 0 {
-                slot.pss_pendingThreadSignals.fetch_or(bits, SeqCst);
+            if bits | still_blocked != 0 {
+                slot.pss_pendingThreadSignals.fetch_or(bits | still_blocked, SeqCst);
             }
             return Err(e);
         }
+    }
+    if still_blocked != 0 {
+        slot.pss_pendingThreadSignals.fetch_or(still_blocked, SeqCst);
     }
     Ok(())
 }

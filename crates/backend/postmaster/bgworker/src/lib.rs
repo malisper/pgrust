@@ -877,7 +877,17 @@ pub fn bgworker_die() -> PgResult<()> {
         .finish(loc(732, "bgworker_die"))
 }
 
-fn install_signal_handlers(db_connection: bool) {
+/// The BackgroundWorkerMain pqsignal set (bgworker.c SetupSignalHandlers +
+/// InitializeTimeouts). Public for the launch_backend runtime pool
+/// executors (rtworker/standing gang): they are bgworker-SHAPED threads
+/// that adopt a synthetic worker entry WITHOUT passing through
+/// BackgroundWorkerMain, and C cannot produce a procarray/ProcSignal-
+/// visible worker that lacks this set — kill(pid, SIGTERM) against any
+/// live worker pid always has a disposition (pg_terminate_backend /
+/// TerminateOtherDBBackends reach parallel-capable workers too). Every
+/// adopt_worker_entry caller must install it before its identity becomes
+/// signalable. SIGQUIT stays owned by the launch path.
+pub fn install_signal_handlers(db_connection: bool) {
     use procsignal::ThreadSignalHandler::{Fallible, Ignore, Simple};
 
     if db_connection {
