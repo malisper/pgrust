@@ -392,8 +392,19 @@ fn gen_create(g: &mut Gen) -> Vec<StmtKind> {
         _ => 1800,
     };
 
+    // autovacuum_enabled = off on EVERY idx fixture (round-18a, seed
+    // 4001601682479221144 on fz_btd_; same rule as exd RB-15 / par
+    // round-14): bulk loads cross autovacuum_vacuum_insert_threshold and
+    // mass-delete churn crosses the autoanalyze threshold, so an
+    // autovacuum landing on exactly ONE engine flips a later compared
+    // EXPLAIN (COSTS OFF) plan — and on the B2 injected-stats probes it
+    // silently overwrites the injected stats. Blanket across all six
+    // fixture families; see creates_pin_autovacuum_off.
     let mut stmts = vec![
-        StmtKind::Raw(format!("CREATE TABLE {} ({});", name, COLS_SQL)),
+        StmtKind::Raw(format!(
+            "CREATE TABLE {} ({}) WITH (autovacuum_enabled = off);",
+            name, COLS_SQL
+        )),
         StmtKind::Raw(format!("INSERT INTO {} {};", name, row_source(1, rows))),
     ];
 
@@ -892,8 +903,14 @@ fn bt_create(g: &mut Gen) -> Vec<StmtKind> {
         }
         BtShape::Text => ("pk int4 PRIMARY KEY, t text NOT NULL", "t", 9000),
     };
+    // autovacuum_enabled = off (round-18a, seed 4001601682479221144; same
+    // rule as exd RB-15 / par round-14): the 3000-9000-row bulk load
+    // crosses autovacuum_vacuum_insert_threshold on its own, and an
+    // autovacuum landing on exactly ONE engine flips a later compared
+    // EXPLAIN (COSTS OFF) plan (verified flap: 5-row Bitmap Heap Scan vs
+    // 3-row Index Only Scan across the VACUUM-state ladder).
     let stmts = vec![
-        StmtKind::Raw(format!("CREATE TABLE {} ({});", name, cols)),
+        StmtKind::Raw(format!("CREATE TABLE {} ({}) WITH (autovacuum_enabled = off);", name, cols)),
         StmtKind::Raw(format!("CREATE INDEX {} ON {} ({});", iname, name, sec)),
         StmtKind::Raw(format!("INSERT INTO {} {};", name, bt_row_source(shape, 1, rows))),
         StmtKind::Raw(format!("ANALYZE {};", name)),
@@ -1149,7 +1166,8 @@ fn adv_create(g: &mut Gen) -> Vec<StmtKind> {
     let big_n = 220 + g.rng.below(120) as i64;
     let poly = big_poly_literal(200 + g.rng.below(160));
     let mut stmts = vec![StmtKind::Raw(format!(
-        "CREATE TABLE {} (pk int4 PRIMARY KEY, pt point, txt text, poly polygon);",
+        "CREATE TABLE {} (pk int4 PRIMARY KEY, pt point, txt text, poly polygon) \
+         WITH (autovacuum_enabled = off);",
         name
     ))];
     // Build-path splits: load all three distributions, then index.
@@ -1662,7 +1680,7 @@ fn gist_create(g: &mut Gen) -> Vec<StmtKind> {
         StmtKind::Raw(format!(
             "CREATE {}TABLE {} (pk int4 PRIMARY KEY, pt point, bx box, r8 int8range, \
              rn numrange, rt tsrange, rz tstzrange, rd daterange, mr int4multirange, \
-             tsq tsquery, addr inet, tsv tsvector);",
+             tsq tsquery, addr inet, tsv tsvector) WITH (autovacuum_enabled = off);",
             if unlogged { "UNLOGGED " } else { "" },
             name
         )),
@@ -1948,7 +1966,11 @@ fn gist_buffered(g: &mut Gen) -> Vec<StmtKind> {
     g.idx.next_gist += 1;
     let rows = if g.rng.chance(1, 2) { 6000 } else { 9000 };
     let mut stmts = vec![
-        StmtKind::Raw(format!("CREATE TABLE {} (pk int4 PRIMARY KEY, pt point);", name)),
+        StmtKind::Raw(format!(
+            "CREATE TABLE {} (pk int4 PRIMARY KEY, pt point) \
+             WITH (autovacuum_enabled = off);",
+            name
+        )),
         StmtKind::Raw(format!(
             "INSERT INTO {} SELECT i, point((i * 17) % 701, (i * 31) % 733) \
              FROM generate_series(1, {}) i;",
@@ -2004,7 +2026,7 @@ fn gist_excl(g: &mut Gen) -> Vec<StmtKind> {
     let mut stmts = vec![
         StmtKind::Raw(format!(
             "CREATE TABLE {} (pk int4 PRIMARY KEY, rng int4range, \
-             EXCLUDE USING gist (rng WITH &&));",
+             EXCLUDE USING gist (rng WITH &&)) WITH (autovacuum_enabled = off);",
             name
         )),
         StmtKind::Raw(format!(
@@ -2095,6 +2117,32 @@ mod tests {
         assert_eq!(a, b);
         let (c, _, _) = gen_many(52, 300, "");
         assert_ne!(a, c);
+    }
+
+    /// Round-18a (seed 4001601682479221144), same rule as exd RB-15 / par
+    /// round-14: every idx CREATE TABLE pins autovacuum_enabled = off.
+    /// Bulk loads (up to 9000 rows) cross the insert-autovacuum threshold
+    /// on their own, massdel churn crosses the autoanalyze threshold, and
+    /// an autovacuum landing on exactly ONE engine flips a later compared
+    /// EXPLAIN (COSTS OFF) plan — verified flap on fz_btd_: 5-row Bitmap
+    /// Heap Scan vs 3-row Index Only Scan across the VACUUM-state ladder.
+    /// Blanket across all six fixture families (the B2 injected-stats
+    /// probes additionally rely on autoanalyze never overwriting the
+    /// injected stats).
+    #[test]
+    fn creates_pin_autovacuum_off() {
+        let (groups, _, _) = gen_many(0x18A, 1500, "");
+        let mut seen = 0;
+        for sql in flat(&groups) {
+            if sql.starts_with("CREATE TABLE ") || sql.starts_with("CREATE UNLOGGED TABLE ") {
+                assert!(
+                    sql.contains("autovacuum_enabled = off"),
+                    "idx fixture does not pin autovacuum off: `{sql}`"
+                );
+                seen += 1;
+            }
+        }
+        assert!(seen > 0, "no CREATE TABLE generated in 1500 groups");
     }
 
     #[test]

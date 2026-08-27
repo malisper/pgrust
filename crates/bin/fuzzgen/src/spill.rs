@@ -187,10 +187,17 @@ fn gen_create(g: &mut Gen) -> Vec<StmtKind> {
     let i2 = format!("fz_spi_{}", g.spill.next_index + 1);
     let i3 = format!("fz_spi_{}", g.spill.next_index + 2);
     g.spill.next_index += 3;
+    // autovacuum_enabled = off (round-18a, seed 2833167612009520371; same
+    // rule as exd RB-15 / par round-14): the 8000-24000-row bulk load
+    // crosses autovacuum_vacuum_insert_threshold on its own, and an
+    // autovacuum landing on exactly ONE engine flips a later compared
+    // EXPLAIN (COSTS OFF) plan (verified flap: Index Only Scan vs
+    // Seq Scan on the join inner side across the VACUUM-state ladder).
     let stmts = vec![
         StmtKind::Raw(format!(
             "CREATE TABLE {name} (pk int4 PRIMARY KEY, k_int int4, k2 int4, \
-             kskew int4, num numeric, txt text, pad text);"
+             kskew int4, num numeric, txt text, pad text) \
+             WITH (autovacuum_enabled = off);"
         )),
         StmtKind::Raw(format!("INSERT INTO {name} {};", row_source(1, rows))),
         StmtKind::Raw(format!("CREATE INDEX {i1} ON {name} (k_int);")),
@@ -1245,6 +1252,28 @@ mod tests {
                 assert!(hi <= 24000, "bulk load exceeds ANALYZE-exhaustive cap: {sql}");
             }
         }
+    }
+
+    /// Round-18a (seed 2833167612009520371), same rule as exd RB-15 / par
+    /// round-14: every spill CREATE TABLE pins autovacuum_enabled = off.
+    /// The 8000-20000-row bulk loads cross the insert-autovacuum threshold
+    /// on their own, the tables are session-persistent, and an autovacuum
+    /// landing on exactly ONE engine flips a later compared EXPLAIN
+    /// (COSTS OFF) plan — verified flap: Index Only Scan vs Seq Scan on
+    /// the join inner side across the VACUUM-state ladder.
+    #[test]
+    fn creates_pin_autovacuum_off() {
+        let mut seen = 0;
+        for sql in flat(23, 600) {
+            if sql.starts_with("CREATE TABLE ") {
+                assert!(
+                    sql.contains("autovacuum_enabled = off"),
+                    "spill fixture does not pin autovacuum off: `{sql}`"
+                );
+                seen += 1;
+            }
+        }
+        assert!(seen > 0, "no CREATE TABLE generated in 600 statements");
     }
 
     #[test]

@@ -414,11 +414,19 @@ fn gen_create(g: &mut Gen) -> Vec<StmtKind> {
     let nm = names(n);
     let (big, small, p1, p2, gen) = (&nm.big, &nm.small, &nm.p1, &nm.p2, &nm.gen);
     let (srf, tab, cf) = (&nm.srf, &nm.tab, &nm.cf);
+    // autovacuum_enabled = off on every plansel fixture (round-18a, same
+    // rule as exd RB-15 / par round-14): the 10000/6000/2000-row bulk
+    // loads cross autovacuum_vacuum_insert_threshold, the rollback-bracket
+    // DML churns n_mod_since_analyze afterwards, and an autovacuum landing
+    // on exactly ONE engine flips a later compared EXPLAIN (COSTS OFF)
+    // plan. Partitioned parents carry no storage (the reloption is
+    // rejected there) — their partitions carry the pin.
     let mut stmts = vec![
         // big: the multi-index scan target.
         StmtKind::Raw(format!(
             "CREATE TABLE {big} (pk int4 PRIMARY KEY, a int4, b int4, c int4, \
-             flag bool, num numeric, txt text, pad text);"
+             flag bool, num numeric, txt text, pad text) \
+             WITH (autovacuum_enabled = off);"
         )),
         StmtKind::Raw(format!(
             "INSERT INTO {big} SELECT i, (i * 17) % 200, (i * 7) % 50, (i * 13) % 1000, \
@@ -437,7 +445,8 @@ fn gen_create(g: &mut Gen) -> Vec<StmtKind> {
         StmtKind::Raw(format!("ANALYZE {big};")),
         // small: pk-unique join target (join removal / unique-ification).
         StmtKind::Raw(format!(
-            "CREATE TABLE {small} (pk int4 PRIMARY KEY, d int4, txt text);"
+            "CREATE TABLE {small} (pk int4 PRIMARY KEY, d int4, txt text) \
+             WITH (autovacuum_enabled = off);"
         )),
         StmtKind::Raw(format!(
             "INSERT INTO {small} SELECT i, (i * 3) % 40, 's' || (i % 37) \
@@ -456,7 +465,8 @@ fn gen_create(g: &mut Gen) -> Vec<StmtKind> {
             [(0, 2500), (2500, 5000), (5000, 7500), (7500, 10000)].iter().enumerate()
         {
             stmts.push(StmtKind::Raw(format!(
-                "CREATE TABLE {t}_c{i} PARTITION OF {t} FOR VALUES FROM ({lo}) TO ({hi});"
+                "CREATE TABLE {t}_c{i} PARTITION OF {t} FOR VALUES FROM ({lo}) TO ({hi}) \
+                 WITH (autovacuum_enabled = off);"
             )));
         }
         stmts.push(StmtKind::Raw(format!(
@@ -470,7 +480,8 @@ fn gen_create(g: &mut Gen) -> Vec<StmtKind> {
     stmts.push(StmtKind::Raw(format!(
         "CREATE TABLE {gen} (pk int4 PRIMARY KEY, x int4, \
          gv int4 GENERATED ALWAYS AS (x * 2 + 1) VIRTUAL, \
-         gs int4 GENERATED ALWAYS AS (x * 3) STORED);"
+         gs int4 GENERATED ALWAYS AS (x * 3) STORED) \
+         WITH (autovacuum_enabled = off);"
     )));
     stmts.push(StmtKind::Raw(format!(
         "INSERT INTO {gen} (pk, x) SELECT i, (i * 19) % 500 FROM generate_series(1, {GEN_ROWS}) i;"
@@ -1361,6 +1372,30 @@ mod tests {
     #[test]
     fn deterministic_per_seed() {
         assert_eq!(gen_groups(5, 60), gen_groups(5, 60));
+    }
+
+    /// Round-18a, same rule as exd RB-15 / par round-14: every
+    /// storage-bearing plansel CREATE TABLE pins autovacuum_enabled = off
+    /// (partitioned parents are exempt — no storage; their partitions
+    /// carry the pin). The 10000/6000/2000-row bulk loads cross the
+    /// insert-autovacuum threshold and the module's whole surface is
+    /// compared EXPLAIN (COSTS OFF) plan shape.
+    #[test]
+    fn creates_pin_autovacuum_off() {
+        let mut seen = 0;
+        for grp in gen_groups(0x18A, 300) {
+            for sql in grp {
+                if !sql.starts_with("CREATE TABLE ") || sql.contains(" PARTITION BY ") {
+                    continue;
+                }
+                assert!(
+                    sql.contains("autovacuum_enabled = off"),
+                    "plansel fixture does not pin autovacuum off: `{sql}`"
+                );
+                seen += 1;
+            }
+        }
+        assert!(seen > 0, "no CREATE TABLE generated in 300 groups");
     }
 
     #[test]

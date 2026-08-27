@@ -164,12 +164,12 @@ fn build_range(
     bounds.push((lo, DOM));
     for (i, (a, b)) in bounds.iter().enumerate() {
         stmts.push(raw(format!(
-            "CREATE TABLE {name}_p{i} PARTITION OF {name} FOR VALUES FROM ({a}) TO ({b});"
+            "CREATE TABLE {name}_p{i} PARTITION OF {name} FOR VALUES FROM ({a}) TO ({b}) WITH (autovacuum_enabled = off);"
         )));
     }
     if with_default {
         stmts.push(raw(format!(
-            "CREATE TABLE {name}_pd PARTITION OF {name} DEFAULT;"
+            "CREATE TABLE {name}_pd PARTITION OF {name} DEFAULT WITH (autovacuum_enabled = off);"
         )));
     }
     // k in [0, DOM): always routes into a covering partition.
@@ -267,17 +267,17 @@ fn build_list(
             .collect::<Vec<_>>()
             .join(", ");
         stmts.push(raw(format!(
-            "CREATE TABLE {name}_p{i} PARTITION OF {name} FOR VALUES IN ({vals});"
+            "CREATE TABLE {name}_p{i} PARTITION OF {name} FOR VALUES IN ({vals}) WITH (autovacuum_enabled = off);"
         )));
     }
     if null_own {
         stmts.push(raw(format!(
-            "CREATE TABLE {name}_pn PARTITION OF {name} FOR VALUES IN (NULL);"
+            "CREATE TABLE {name}_pn PARTITION OF {name} FOR VALUES IN (NULL) WITH (autovacuum_enabled = off);"
         )));
     }
     // DEFAULT catches unlisted residue (and NULL when null_own is false).
     stmts.push(raw(format!(
-        "CREATE TABLE {name}_pd PARTITION OF {name} DEFAULT;"
+        "CREATE TABLE {name}_pd PARTITION OF {name} DEFAULT WITH (autovacuum_enabled = off);"
     )));
     // k in 0..=5, with a scattering of NULLs (i % 11 == 0).
     stmts.push(raw(format!(
@@ -354,10 +354,10 @@ fn gen_route_err(g: &mut Gen) -> Vec<StmtKind> {
             "CREATE TABLE {r} (k int4, v int4) PARTITION BY RANGE (k);"
         )),
         raw(format!(
-            "CREATE TABLE {r}_p0 PARTITION OF {r} FOR VALUES FROM (0) TO (100);"
+            "CREATE TABLE {r}_p0 PARTITION OF {r} FOR VALUES FROM (0) TO (100) WITH (autovacuum_enabled = off);"
         )),
         raw(format!(
-            "CREATE TABLE {r}_p1 PARTITION OF {r} FOR VALUES FROM (100) TO (200);"
+            "CREATE TABLE {r}_p1 PARTITION OF {r} FOR VALUES FROM (100) TO (200) WITH (autovacuum_enabled = off);"
         )),
         raw(format!(
             "INSERT INTO {r} SELECT i % 200, i FROM generate_series(1, 200) i;"
@@ -371,10 +371,10 @@ fn gen_route_err(g: &mut Gen) -> Vec<StmtKind> {
         "CREATE TABLE {r2} (a int4, b int4, v int4) PARTITION BY RANGE (a, b);"
     )));
     stmts.push(raw(format!(
-        "CREATE TABLE {r2}_p0 PARTITION OF {r2} FOR VALUES FROM (0, 0) TO (10, 0);"
+        "CREATE TABLE {r2}_p0 PARTITION OF {r2} FOR VALUES FROM (0, 0) TO (10, 0) WITH (autovacuum_enabled = off);"
     )));
     stmts.push(raw(format!(
-        "CREATE TABLE {r2}_p1 PARTITION OF {r2} FOR VALUES FROM (10, 0) TO (20, 0);"
+        "CREATE TABLE {r2}_p1 PARTITION OF {r2} FOR VALUES FROM (10, 0) TO (20, 0) WITH (autovacuum_enabled = off);"
     )));
     let ba = 20 + g.rng.below(50) as i64;
     stmts.push(raw(format!("INSERT INTO {r2} VALUES ({ba}, 5, 1);")));
@@ -383,7 +383,7 @@ fn gen_route_err(g: &mut Gen) -> Vec<StmtKind> {
         "CREATE TABLE {l} (k int4, v int4) PARTITION BY LIST (k);"
     )));
     stmts.push(raw(format!(
-        "CREATE TABLE {l}_p0 PARTITION OF {l} FOR VALUES IN (1, 2, 3);"
+        "CREATE TABLE {l}_p0 PARTITION OF {l} FOR VALUES IN (1, 2, 3) WITH (autovacuum_enabled = off);"
     )));
     let bl = 4 + g.rng.below(90) as i64;
     stmts.push(raw(format!("INSERT INTO {l} VALUES ({bl}, 1);")));
@@ -412,16 +412,16 @@ fn gen_attach_default(g: &mut Gen) -> Vec<StmtKind> {
             "CREATE TABLE {p} (k int4, v int4) PARTITION BY RANGE (k);"
         )),
         raw(format!(
-            "CREATE TABLE {p}_p0 PARTITION OF {p} FOR VALUES FROM (0) TO (50);"
+            "CREATE TABLE {p}_p0 PARTITION OF {p} FOR VALUES FROM (0) TO (50) WITH (autovacuum_enabled = off);"
         )),
-        raw(format!("CREATE TABLE {p}_pd PARTITION OF {p} DEFAULT;")),
+        raw(format!("CREATE TABLE {p}_pd PARTITION OF {p} DEFAULT WITH (autovacuum_enabled = off);")),
         // Rows 0..49 -> p0, rows 50..149 -> DEFAULT.
         raw(format!(
             "INSERT INTO {p} SELECT i, i FROM generate_series(0, 149) i;"
         )),
         // Success: attach a range the DEFAULT has NO rows for (>=200);
         // check_default_partition_contents scans the DEFAULT and passes.
-        raw(format!("CREATE TABLE {ok} (k int4, v int4);")),
+        raw(format!("CREATE TABLE {ok} (k int4, v int4) WITH (autovacuum_enabled = off);")),
         raw(format!(
             "INSERT INTO {ok} SELECT i, i FROM generate_series(200, 249) i;"
         )),
@@ -430,7 +430,7 @@ fn gen_attach_default(g: &mut Gen) -> Vec<StmtKind> {
         )),
         // Failure: attach [50,100) — the DEFAULT holds rows 50..99 that
         // would belong to the new partition -> ERROR (isolated autocommit).
-        raw(format!("CREATE TABLE {bad} (k int4, v int4);")),
+        raw(format!("CREATE TABLE {bad} (k int4, v int4) WITH (autovacuum_enabled = off);")),
         raw(format!(
             "ALTER TABLE {p} ATTACH PARTITION {bad} FOR VALUES FROM (50) TO (100);"
         )),
@@ -462,10 +462,10 @@ fn gen_colmap(g: &mut Gen) -> Vec<StmtKind> {
         )),
         // Same-order partition for the low range.
         raw(format!(
-            "CREATE TABLE {p}_lo PARTITION OF {p} FOR VALUES FROM (0) TO (100);"
+            "CREATE TABLE {p}_lo PARTITION OF {p} FOR VALUES FROM (0) TO (100) WITH (autovacuum_enabled = off);"
         )),
         // Different physical column order, ATTACHed -> attribute map needed.
-        raw(format!("CREATE TABLE {c1} (k int4, v int4, id int4);")),
+        raw(format!("CREATE TABLE {c1} (k int4, v int4, id int4) WITH (autovacuum_enabled = off);")),
         raw(format!(
             "ALTER TABLE {p} ATTACH PARTITION {c1} FOR VALUES FROM (100) TO (200);"
         )),
@@ -510,13 +510,13 @@ fn gen_prune_prefix(g: &mut Gen) -> Vec<StmtKind> {
             "CREATE TABLE {t} (a int4 NOT NULL, b int4 NOT NULL, v int4) PARTITION BY RANGE (a, b);"
         )),
         raw(format!(
-            "CREATE TABLE {t}_p0 PARTITION OF {t} FOR VALUES FROM (MINVALUE, MINVALUE) TO (10, MINVALUE);"
+            "CREATE TABLE {t}_p0 PARTITION OF {t} FOR VALUES FROM (MINVALUE, MINVALUE) TO (10, MINVALUE) WITH (autovacuum_enabled = off);"
         )),
         raw(format!(
-            "CREATE TABLE {t}_p1 PARTITION OF {t} FOR VALUES FROM (10, MINVALUE) TO (20, MINVALUE);"
+            "CREATE TABLE {t}_p1 PARTITION OF {t} FOR VALUES FROM (10, MINVALUE) TO (20, MINVALUE) WITH (autovacuum_enabled = off);"
         )),
         raw(format!(
-            "CREATE TABLE {t}_p2 PARTITION OF {t} FOR VALUES FROM (20, MINVALUE) TO (MAXVALUE, MAXVALUE);"
+            "CREATE TABLE {t}_p2 PARTITION OF {t} FOR VALUES FROM (20, MINVALUE) TO (MAXVALUE, MAXVALUE) WITH (autovacuum_enabled = off);"
         )),
         raw(format!(
             "INSERT INTO {t} SELECT (i * 7) % 30, (i * 13) % 50, i FROM generate_series(1, 600) i;"
@@ -582,13 +582,13 @@ fn gen_constraintdef(g: &mut Gen) -> Vec<StmtKind> {
             "CREATE TABLE {name} (k int4 NOT NULL, v int4) PARTITION BY RANGE (k);"
         )));
         stmts.push(raw(format!(
-            "CREATE TABLE {name}_p0 PARTITION OF {name} FOR VALUES FROM (0) TO (100);"
+            "CREATE TABLE {name}_p0 PARTITION OF {name} FOR VALUES FROM (0) TO (100) WITH (autovacuum_enabled = off);"
         )));
         stmts.push(raw(format!(
-            "CREATE TABLE {name}_p1 PARTITION OF {name} FOR VALUES FROM (100) TO (200);"
+            "CREATE TABLE {name}_p1 PARTITION OF {name} FOR VALUES FROM (100) TO (200) WITH (autovacuum_enabled = off);"
         )));
         stmts.push(raw(format!(
-            "CREATE TABLE {name}_pd PARTITION OF {name} DEFAULT;"
+            "CREATE TABLE {name}_pd PARTITION OF {name} DEFAULT WITH (autovacuum_enabled = off);"
         )));
         stmts.push(raw(format!(
             "INSERT INTO {name} SELECT (i * 3) % 250, i FROM generate_series(1, 300) i;"
@@ -612,7 +612,7 @@ fn gen_constraintdef(g: &mut Gen) -> Vec<StmtKind> {
     ));
     // Validated ATTACH (no CHECK -> full validation scan) then DETACH.
     stmts.push(raw(format!(
-        "CREATE TABLE {ext} (k int4 NOT NULL, v int4);"
+        "CREATE TABLE {ext} (k int4 NOT NULL, v int4) WITH (autovacuum_enabled = off);"
     )));
     stmts.push(raw(format!(
         "INSERT INTO {ext} SELECT 200 + (i % 100), i FROM generate_series(1, 80) i;"
@@ -705,6 +705,29 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Round-18a blanket rule (exd RB-15 lineage): every storage-bearing
+    /// partition CREATE TABLE (children and plain side tables) pins
+    /// autovacuum_enabled = off — the module emits compared EXPLAIN
+    /// (COSTS OFF) prune probes. Partitioned parents are exempt (no
+    /// storage; the reloption is rejected there).
+    #[test]
+    fn creates_pin_autovacuum_off() {
+        let mut seen = 0;
+        for grp in gen_groups(0x18A, 600) {
+            for sql in grp {
+                if !sql.starts_with("CREATE TABLE ") || sql.contains(" PARTITION BY ") {
+                    continue;
+                }
+                assert!(
+                    sql.contains("autovacuum_enabled = off"),
+                    "partition fixture does not pin autovacuum off: `{sql}`"
+                );
+                seen += 1;
+            }
+        }
+        assert!(seen > 0, "no CREATE TABLE generated in 600 groups");
     }
 
     #[test]

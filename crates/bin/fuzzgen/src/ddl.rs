@@ -350,11 +350,18 @@ fn gen_create_table(g: &mut Gen) -> StmtKind {
         pk: "pk".to_string(),
         kind: DdlEventKind::Created,
     });
+    // autovacuum_enabled = off on plain ddl tables (round-18a workspace
+    // RB-15 rule): fz_ddl_* enter the effective catalog, take dml.rs
+    // churn, and are reachable by explain.rs's compared EXPLAIN
+    // (COSTS OFF) wrappers — an autoanalyze landing on one engine could
+    // flip a compared plan. TEMP tables are exempt (autovacuum never
+    // visits them).
     StmtKind::Raw(format!(
-        "CREATE {}TABLE {} ({});",
+        "CREATE {}TABLE {} ({}){};",
         if temp { "TEMPORARY " } else { "" },
         name,
-        defs.join(", ")
+        defs.join(", "),
+        if temp { "" } else { " WITH (autovacuum_enabled = off)" }
     ))
 }
 
@@ -836,12 +843,13 @@ fn gen_foreign_key(g: &mut Gen) -> StmtKind {
             mark_fk_parent(g, &parent);
             StmtKind::Raw(format!(
                 "CREATE {}TABLE {} (pk int4 PRIMARY KEY, k_int int4, k_text text, \
-                 {} int4 REFERENCES {} (pk){});",
+                 {} int4 REFERENCES {} (pk){}){};",
                 if temp { "TEMPORARY " } else { "" },
                 name,
                 cname,
                 parent,
-                actions
+                actions,
+                if temp { "" } else { " WITH (autovacuum_enabled = off)" }
             ))
         }
     }

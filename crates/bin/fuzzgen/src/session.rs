@@ -332,6 +332,163 @@ mod tests {
         assert_ne!(sqls(&a), sqls(&b));
     }
 
+    /// Round-18a workspace-wide RB-15 rule (lineage: exd round-10/11,
+    /// par round-14, spill/idx round-18a): ANY module whose executed,
+    /// row-bearing fixture is later probed by a compared EXPLAIN
+    /// (COSTS OFF) statement must pin autovacuum_enabled = off on that
+    /// fixture. An autovacuum/autoanalyze landing on exactly ONE engine
+    /// between the two lockstep executions changes
+    /// relpages/reltuples/relallvisible/stats and flips the compared plan
+    /// shape — a false-positive ROWSET_DIFF that consumes findings budget
+    /// forever. Per-module `creates_pin_autovacuum_off` tests guard each
+    /// known module; this stream-level test is the safety net that catches
+    /// the NEXT module added with an EXPLAIN probe and no pin.
+    ///
+    /// Rule, precisely: for every table created by an executed
+    /// `CREATE [UNLOGGED] TABLE` in the session stream that is BOTH
+    /// (a) mutated (referenced by an executed INSERT/UPDATE/DELETE/MERGE/
+    /// COPY or created via CTAS) and (b) referenced by an EXPLAIN
+    /// (COSTS OFF) statement, the CREATE must carry
+    /// `autovacuum_enabled = off`. Partitioned parents have no storage
+    /// (the reloption is rejected there): the rule lands on each of their
+    /// non-partitioned children instead. Never-mutated tables are exempt
+    /// (no trigger path: autovacuum thresholds need row churn), as are
+    /// TEMP tables (autovacuum never visits them; they also don't parse
+    /// as `CREATE TABLE `).
+    #[test]
+    fn explain_probed_fixtures_pin_autovacuum_off() {
+        fn refs_word(sql: &str, name: &str) -> bool {
+            let mut start = 0;
+            while let Some(i) = sql[start..].find(name) {
+                let at = start + i;
+                let before_ok = at == 0
+                    || !sql.as_bytes()[at - 1].is_ascii_alphanumeric()
+                        && sql.as_bytes()[at - 1] != b'_';
+                let end = at + name.len();
+                let after_ok = end >= sql.len()
+                    || !sql.as_bytes()[end].is_ascii_alphanumeric() && sql.as_bytes()[end] != b'_';
+                if before_ok && after_ok {
+                    return true;
+                }
+                start = end;
+            }
+            false
+        }
+
+        let cat = FixtureCatalog.load_catalog().unwrap();
+        for seed in [0x18A1u64, 0x18A2, 0x18A3, 0x18A4] {
+            let mut c = cfg(seed);
+            c.budget = 4000;
+            let stmts = run_session(&c, &cat);
+
+            struct Created {
+                pinned: bool,
+                partitioned: bool,
+                parent: Option<String>,
+            }
+            let mut created: Vec<(String, Created)> = Vec::new();
+            let mut mutated: Vec<String> = Vec::new();
+            let mut probes: Vec<String> = Vec::new();
+
+            for s in &stmts {
+                let sql = s.sql.trim();
+                // Executed body: bare statement, or the tail of an
+                // instrumented EXPLAIN ANALYZE (plain EXPLAIN never
+                // executes).
+                let (body, is_plain_explain) = if sql.starts_with("EXPLAIN") {
+                    let up = sql.to_ascii_uppercase();
+                    if up.contains("COSTS OFF") {
+                        probes.push(sql.to_string());
+                    }
+                    match sql.split_once(") ") {
+                        Some((head, tail)) if head.to_ascii_uppercase().contains("ANALYZE") => {
+                            (tail.trim_start(), false)
+                        }
+                        _ => (sql, true),
+                    }
+                } else {
+                    (sql, false)
+                };
+                if is_plain_explain {
+                    continue;
+                }
+                let create_tail = body
+                    .strip_prefix("CREATE TABLE ")
+                    .or_else(|| body.strip_prefix("CREATE UNLOGGED TABLE "));
+                if let Some(rest) = create_tail {
+                    let rest = rest.strip_prefix("IF NOT EXISTS ").unwrap_or(rest);
+                    let name = rest
+                        .split(|c: char| c.is_whitespace() || c == '(' || c == ';')
+                        .next()
+                        .unwrap()
+                        .to_string();
+                    let parent = rest
+                        .split_once("PARTITION OF ")
+                        .map(|(_, t)| t.split_whitespace().next().unwrap().to_string());
+                    let lo = body.to_ascii_lowercase();
+                    if lo.contains(" as select") || lo.contains(" as (select") {
+                        mutated.push(name.clone()); // CTAS: rows at birth
+                    }
+                    created.push((
+                        name,
+                        Created {
+                            pinned: lo.contains("autovacuum_enabled = off"),
+                            partitioned: body.contains(" PARTITION BY "),
+                            parent,
+                        },
+                    ));
+                    continue;
+                }
+                let head = body.split_whitespace().next().unwrap_or("").to_ascii_uppercase();
+                if matches!(head.as_str(), "INSERT" | "UPDATE" | "DELETE" | "MERGE" | "COPY") {
+                    for (name, _) in &created {
+                        if refs_word(body, name) {
+                            mutated.push(name.clone());
+                        }
+                    }
+                }
+            }
+
+            let get = |n: &str| created.iter().find(|(name, _)| name == n).map(|(_, c)| c);
+            for probe in &probes {
+                for (name, info) in &created {
+                    if !refs_word(probe, name) {
+                        continue;
+                    }
+                    // A partition child is mutated through its parent.
+                    let is_mutated = |n: &str| {
+                        mutated.iter().any(|m| m == n)
+                            || get(n)
+                                .and_then(|c| c.parent.as_deref())
+                                .is_some_and(|p| mutated.iter().any(|m| m == p))
+                    };
+                    if info.partitioned {
+                        for (child, cinfo) in &created {
+                            if cinfo.parent.as_deref() == Some(name.as_str())
+                                && !cinfo.partitioned
+                                && is_mutated(child)
+                            {
+                                assert!(
+                                    cinfo.pinned,
+                                    "RB-15 (workspace): partition {child} of EXPLAIN \
+                                     (COSTS OFF)-probed parent {name} is mutated but does \
+                                     not pin autovacuum off (seed {seed}, probe `{probe}`)"
+                                );
+                            }
+                        }
+                    } else if is_mutated(name) {
+                        assert!(
+                            info.pinned,
+                            "RB-15 (workspace): EXPLAIN (COSTS OFF)-probed fixture {name} \
+                             is mutated but does not pin autovacuum off \
+                             (seed {seed}, probe `{probe}`)"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn budget_and_metadata() {
         let cat = FixtureCatalog.load_catalog().unwrap();

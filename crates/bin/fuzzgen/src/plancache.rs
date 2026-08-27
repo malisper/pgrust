@@ -114,7 +114,7 @@ fn create_plain(nm: &Names) -> Vec<StmtKind> {
     vec![
         raw(format!(
             "CREATE TABLE {b} (pk int4 PRIMARY KEY, a int4, b int4, c int4, \
-             flag bool, txt text);"
+             flag bool, txt text) WITH (autovacuum_enabled = off);"
         )),
         raw(format!(
             "INSERT INTO {b} SELECT i, (i * 17) % 200, (i * 7) % 50, (i * 13) % 1000, \
@@ -137,7 +137,8 @@ fn create_part(nm: &Names) -> Vec<StmtKind> {
     ))];
     for (i, (lo, hi)) in [(0, 300), (300, 600), (600, 900), (900, 1200)].iter().enumerate() {
         v.push(raw(format!(
-            "CREATE TABLE {p}_c{i} PARTITION OF {p} FOR VALUES FROM ({lo}) TO ({hi});"
+            "CREATE TABLE {p}_c{i} PARTITION OF {p} FOR VALUES FROM ({lo}) TO ({hi}) \
+             WITH (autovacuum_enabled = off);"
         )));
     }
     v.push(raw(format!(
@@ -557,6 +558,29 @@ mod tests {
             }
             assert!(prepared.is_empty(), "un-deallocated {prepared:?} in {group:?}");
         }
+    }
+
+    /// Round-18a blanket rule (exd RB-15 lineage): every storage-bearing
+    /// plancache CREATE TABLE pins autovacuum_enabled = off — the module's
+    /// surface is compared EXPLAIN (COSTS OFF, SUMMARY OFF) EXECUTE plan
+    /// shape, so fixture stats must change only via the group's own
+    /// ANALYZE. Partitioned parents are exempt (no storage).
+    #[test]
+    fn creates_pin_autovacuum_off() {
+        let mut seen = 0;
+        for grp in gen_groups(0x18A, 400) {
+            for sql in grp {
+                if !sql.starts_with("CREATE TABLE ") || sql.contains(" PARTITION BY ") {
+                    continue;
+                }
+                assert!(
+                    sql.contains("autovacuum_enabled = off"),
+                    "plancache fixture does not pin autovacuum off: `{sql}`"
+                );
+                seen += 1;
+            }
+        }
+        assert!(seen > 0, "no CREATE TABLE generated in 400 groups");
     }
 
     #[test]

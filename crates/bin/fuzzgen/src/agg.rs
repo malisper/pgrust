@@ -572,7 +572,7 @@ fn aggx_fixture(probes: Vec<String>) -> Vec<StmtKind> {
     let mut v = vec![
         StmtKind::Raw("DROP TABLE IF EXISTS fz_q7ag CASCADE;".to_string()),
         StmtKind::Raw(
-            "CREATE TABLE fz_q7ag (a int, b text, f float8, i interval, ts time, tz timetz, d date);"
+            "CREATE TABLE fz_q7ag (a int, b text, f float8, i interval, ts time, tz timetz, d date) WITH (autovacuum_enabled = off);"
                 .to_string(),
         ),
         StmtKind::Raw(
@@ -753,7 +753,7 @@ fn aggx_fdep(g: &mut Gen) -> Vec<StmtKind> {
     let n = g.rng.below(100);
     vec![
         StmtKind::Raw("DROP TABLE IF EXISTS fz_q7fd CASCADE;".to_string()),
-        StmtKind::Raw("CREATE TABLE fz_q7fd (id int PRIMARY KEY, val text, n int);".to_string()),
+        StmtKind::Raw("CREATE TABLE fz_q7fd (id int PRIMARY KEY, val text, n int) WITH (autovacuum_enabled = off);".to_string()),
         StmtKind::Raw(format!("INSERT INTO fz_q7fd VALUES (1, 'x', {n}), (2, 'y', 6);")),
         StmtKind::Raw(
             "CREATE VIEW fz_q7fdv AS SELECT id, val, count(*) AS c, sum(n) AS s FROM fz_q7fd GROUP BY id;"

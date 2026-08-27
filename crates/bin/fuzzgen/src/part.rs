@@ -427,8 +427,15 @@ fn gen_create_parent(g: &mut Gen) -> Vec<StmtKind> {
         } else {
             format!("{}_c{}", name, i)
         };
+        // autovacuum_enabled = off (round-18a blanket rule, exd RB-15
+        // lineage): the parent is a compared EXPLAIN (COSTS OFF) prune
+        // target (part:prune:explain) and long-lived children accumulate
+        // dml.rs churn with no module-owned ANALYZE, so an autoanalyze
+        // landing on exactly ONE engine can flip the pruned plan. The
+        // partitioned parent has no storage (reloption rejected there);
+        // the children carry the pin.
         stmts.push(StmtKind::Raw(format!(
-            "CREATE TABLE {} PARTITION OF {} {};",
+            "CREATE TABLE {} PARTITION OF {} {} WITH (autovacuum_enabled = off);",
             c.name, name, c.bound
         )));
     }
@@ -770,6 +777,29 @@ mod tests {
         assert_ne!(a, c);
     }
 
+    /// Round-18a blanket rule (exd RB-15 lineage): every storage-bearing
+    /// part CREATE TABLE (i.e. every partition child) pins
+    /// autovacuum_enabled = off. The parent is a compared EXPLAIN
+    /// (COSTS OFF) prune target and long-lived children take dml.rs churn
+    /// with no module-owned ANALYZE. Partitioned parents are exempt (no
+    /// storage; the reloption is rejected there).
+    #[test]
+    fn creates_pin_autovacuum_off() {
+        let (sqls, _, _) = gen_many(0x18A, 600, "");
+        let mut seen = 0;
+        for sql in sqls {
+            if !sql.starts_with("CREATE TABLE ") || sql.contains(" PARTITION BY ") {
+                continue;
+            }
+            assert!(
+                sql.contains("autovacuum_enabled = off"),
+                "part fixture does not pin autovacuum off: `{sql}`"
+            );
+            seen += 1;
+        }
+        assert!(seen > 0, "no partition child generated in 600 groups");
+    }
+
     #[test]
     fn part_variety() {
         let (sqls, prods, _) = gen_many(0xB417, 1200, "");
@@ -782,7 +812,7 @@ mod tests {
             "PARTITION BY LIST ((k_int % 4))",
             "PARTITION BY HASH (pk)",
             "PARTITION OF ",
-            " DEFAULT;",
+            " DEFAULT WITH (autovacuum_enabled = off);",
             "FOR VALUES FROM (MINVALUE)",
             "TO (MAXVALUE)",
             "FOR VALUES IN (",
@@ -856,7 +886,14 @@ mod tests {
                     assert_eq!(live.get(parent), Some(&true), "partition of dead parent: {sql}");
                     let bound = tail
                         .split_once(' ')
-                        .map(|(_, b)| b.trim_end_matches(';').to_string())
+                        .map(|(_, b)| {
+                            // CREATE-time children carry the round-18a
+                            // autovacuum pin; ATTACH has no WITH clause,
+                            // so strip it for bound comparison.
+                            b.trim_end_matches(';')
+                                .trim_end_matches(" WITH (autovacuum_enabled = off)")
+                                .to_string()
+                        })
                         .unwrap();
                     if bound == "DEFAULT" {
                         has_default.insert(parent.to_string(), true);

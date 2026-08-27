@@ -160,7 +160,8 @@ pub fn gen_stats_module(g: &mut Gen) -> Vec<StmtKind> {
 /// dependency_is_compatible_clause/expression, statext_is_compatible_clause.
 fn gen_dep(g: &mut Gen) -> Vec<StmtKind> {
     let mut v = raws(&[
-        "CREATE TABLE fz_st_dep (pk int4 PRIMARY KEY, a int4, b int4, grp int4, txt text);",
+        "CREATE TABLE fz_st_dep (pk int4 PRIMARY KEY, a int4, b int4, grp int4, txt text) \
+         WITH (autovacuum_enabled = off);",
         // a in 0..99; b = a/10 (0..9) so a -> b holds exactly; grp = a%5.
         // txt is a deterministic label of a so (a -> txt) also holds.
         "INSERT INTO fz_st_dep \
@@ -201,7 +202,8 @@ fn gen_dep(g: &mut Gen) -> Vec<StmtKind> {
 /// estimate_multivariate_ndistinct, estimate_num_groups, add_unique_group_var.
 fn gen_ndist(g: &mut Gen) -> Vec<StmtKind> {
     let mut v = raws(&[
-        "CREATE TABLE fz_st_nd (pk int4 PRIMARY KEY, x int4, y int4, z int4);",
+        "CREATE TABLE fz_st_nd (pk int4 PRIMARY KEY, x int4, y int4, z int4) \
+         WITH (autovacuum_enabled = off);",
         "INSERT INTO fz_st_nd \
          SELECT i, i % 50, (i % 50) / 2, i % 7 \
          FROM generate_series(1, 5000) i;",
@@ -234,7 +236,8 @@ fn gen_ndist(g: &mut Gen) -> Vec<StmtKind> {
 /// build_column_frequencies, get_mincount_for_mcv_list.
 fn gen_mcv(g: &mut Gen) -> Vec<StmtKind> {
     let mut v = raws(&[
-        "CREATE TABLE fz_st_mcv (pk int4 PRIMARY KEY, hot int4, cat int4, opt int4);",
+        "CREATE TABLE fz_st_mcv (pk int4 PRIMARY KEY, hot int4, cat int4, opt int4) \
+         WITH (autovacuum_enabled = off);",
         // hot: ~80% zeros, tail 1..9 (skewed -> MCV built). cat tracks hot
         // (cat = hot, so (hot -> cat)). opt has NULLs.
         "INSERT INTO fz_st_mcv \
@@ -286,7 +289,7 @@ fn gen_analyze(g: &mut Gen) -> Vec<StmtKind> {
             nul int4, \
             xq xid, \
             j json, \
-            wide text);",
+            wide text) WITH (autovacuum_enabled = off);",
         // skew: 90% value 0, tail 1..9 -> MCV + histogram + trivial-remainder.
         // uniq = pk (all distinct). nul: 1/3 NULL. xq: eq-only type.
         // j: json has no '=' -> trivial. wide: >1KB for i%50=0 else short.
@@ -332,7 +335,8 @@ fn gen_analyze(g: &mut Gen) -> Vec<StmtKind> {
 fn gen_sel(g: &mut Gen) -> Vec<StmtKind> {
     let mut v = raws(&[
         "CREATE TABLE fz_st_r (\
-            pk int4 PRIMARY KEY, a int4, b int4, f bool, t timestamp, n numeric, s text);",
+            pk int4 PRIMARY KEY, a int4, b int4, f bool, t timestamp, n numeric, s text) \
+            WITH (autovacuum_enabled = off);",
         "INSERT INTO fz_st_r \
          SELECT i, i % 200, i % 50, (i % 3 = 0), \
                 timestamp '2020-01-01' + (i % 365) * interval '1 day', \
@@ -342,7 +346,8 @@ fn gen_sel(g: &mut Gen) -> Vec<StmtKind> {
         "CREATE INDEX fz_st_r_a ON fz_st_r (a);",
         "CREATE INDEX fz_st_r_t ON fz_st_r (t);",
         "ANALYZE fz_st_r;",
-        "CREATE TABLE fz_st_j (pk int4 PRIMARY KEY, a int4, k int4);",
+        "CREATE TABLE fz_st_j (pk int4 PRIMARY KEY, a int4, k int4) \
+         WITH (autovacuum_enabled = off);",
         "INSERT INTO fz_st_j SELECT i, i % 200, i % 80 FROM generate_series(1, 2000) i;",
         "CREATE INDEX fz_st_j_a ON fz_st_j (a);",
         "ANALYZE fz_st_j;",
@@ -400,7 +405,8 @@ fn gen_sel(g: &mut Gen) -> Vec<StmtKind> {
 /// clauses, add_predicate_to_index_quals, compute_index_stats.
 fn gen_index(g: &mut Gen) -> Vec<StmtKind> {
     let mut v = raws(&[
-        "CREATE TABLE fz_st_ix (pk int4 PRIMARY KEY, a int4, b int4, arr int4[]);",
+        "CREATE TABLE fz_st_ix (pk int4 PRIMARY KEY, a int4, b int4, arr int4[]) \
+         WITH (autovacuum_enabled = off);",
         "INSERT INTO fz_st_ix \
          SELECT i, i % 300, i % 40, ARRAY[i % 10, (i % 10) + 1, (i % 7) + 20] \
          FROM generate_series(1, 5000) i;",
@@ -475,6 +481,28 @@ mod tests {
             assert!(prods.iter().any(|p| p == arm), "arm {arm} never fired");
         }
         assert!(prods.iter().any(|p| p == "stats"));
+    }
+
+    /// Round-18a, same rule as exd RB-15 / par round-14: every stats
+    /// CREATE TABLE pins autovacuum_enabled = off. All arms bulk-load
+    /// 2000-5000 rows (over autovacuum_vacuum_insert_threshold), and the
+    /// module's whole surface is stats-driven compared EXPLAIN
+    /// (COSTS OFF) plan shape — an autoanalyze landing on exactly ONE
+    /// engine is maximally destructive here.
+    #[test]
+    fn creates_pin_autovacuum_off() {
+        let (sqls, _) = gen_many(0x18A, 400, &WeightTable::defaults());
+        let mut seen = 0;
+        for sql in sqls {
+            if sql.starts_with("CREATE TABLE ") {
+                assert!(
+                    sql.contains("autovacuum_enabled = off"),
+                    "stats fixture does not pin autovacuum off: `{sql}`"
+                );
+                seen += 1;
+            }
+        }
+        assert!(seen > 0, "no CREATE TABLE generated in 400 groups");
     }
 
     #[test]
