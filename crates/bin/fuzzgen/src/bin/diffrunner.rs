@@ -749,7 +749,7 @@ fn run() -> Result<ExitCode, String> {
         .map(|(state, n)| format!("{state}:{n}"))
         .collect();
     eprintln!(
-        "diffrunner: seed={} profile={} guc_pin={} xproto={} applied={} matches={} ruled={} findings={} probes={} errors=[{}]",
+        "diffrunner: seed={} profile={} guc_pin={} xproto={} applied={} matches={} ruled={} findings={} probes={} cascade_collapsed={} errors=[{}]",
         args.seed,
         args.profile,
         if args.guc_pin { "on" } else { "off" },
@@ -762,6 +762,7 @@ fn run() -> Result<ExitCode, String> {
         stats.ruled,
         stats.findings,
         stats.probes,
+        stats.cascade_collapsed,
         error_hist.join(" ")
     );
 

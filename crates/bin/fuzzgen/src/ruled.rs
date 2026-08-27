@@ -718,5 +718,29 @@ mod tests {
             candidate("shared-catalog-tcu"),
         );
         assert_eq!(out.class, DiffClass::RowsetDiff);
+        // Round-18: parameter-ACL DDL writes pg_parameter_acl (shared
+        // catalog, RowExclusiveLock-only in C) — GRANT/REVOKE ... ON
+        // PARAMETER qualifies.
+        for sql in [
+            "REVOKE SET ON PARAMETER work_mem FROM fz_role_3;",
+            "  grant set, alter system on parameter jit to public;",
+            "REVOKE GRANT OPTION FOR SET ON PARAMETER shared_buffers FROM r;",
+        ] {
+            let out = apply_ruled(&default_table(), sql, candidate("shared-catalog-tcu"));
+            assert_eq!(
+                out.class,
+                DiffClass::Ruled("shared-catalog-tcu".to_string()),
+                "{sql}"
+            );
+        }
+        // Database-local grants never qualify.
+        for sql in [
+            "GRANT SELECT ON TABLE fz_scalar TO PUBLIC;",
+            "REVOKE ALL ON SCHEMA public FROM r;",
+            "GRANTED ON PARAMETER x;", // not the GRANT keyword
+        ] {
+            let out = apply_ruled(&default_table(), sql, candidate("shared-catalog-tcu"));
+            assert_eq!(out.class, DiffClass::RowsetDiff, "{sql}");
+        }
     }
 }

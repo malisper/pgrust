@@ -401,13 +401,36 @@ pub fn typenameTypeId<'mcx>(
 // LookupTypeNameOid (parse_type.c): plain resolution, no column-lane typtype
 // restriction (operator/opclass DDL accepts pseudo-types like internal).
 pub fn LookupTypeNameOid<'mcx>(mcx: Mcx<'mcx>, tn: &TypeName<'_>) -> PgResult<Oid> {
-    LookupTypeNameOidExtended(mcx, tn, false)
+    lookup_type_name_oid_internal(mcx, tn, false, false)
 }
 
 pub fn LookupTypeNameOidExtended<'mcx>(
     mcx: Mcx<'mcx>,
     tn: &TypeName<'_>,
     missing_ok: bool,
+) -> PgResult<Oid> {
+    lookup_type_name_oid_internal(mcx, tn, missing_ok, false)
+}
+
+/// LookupTypeNameOid WITHOUT the pgrust-local shell-type fence: C's
+/// LookupTypeName returns shell pg_type rows (typisdefined = false) and its
+/// DDL consumers decide what to do with them. The GRANT/REVOKE object
+/// resolution path (aclchk.c objectNamesToOids -> get_object_address_type)
+/// is such a consumer: a shell type named in GRANT ... ON DOMAIN must
+/// resolve, so the "\"%s\" is not a domain" 42809 wins over any
+/// does-not-exist/shell error — round-18 soak, gramwalk seed
+/// 652549418283084977 (A 42809 vs B 42704 "type ... is only a shell").
+/// Every other caller keeps the fence: the shell-type USE lanes are
+/// unported and must keep failing cleanly.
+pub fn LookupTypeNameOidAllowShell<'mcx>(mcx: Mcx<'mcx>, tn: &TypeName<'_>) -> PgResult<Oid> {
+    lookup_type_name_oid_internal(mcx, tn, false, true)
+}
+
+fn lookup_type_name_oid_internal<'mcx>(
+    mcx: Mcx<'mcx>,
+    tn: &TypeName<'_>,
+    missing_ok: bool,
+    allow_shell: bool,
 ) -> PgResult<Oid> {
     if tn.names.is_nil() {
         // LookupTypeName pre-resolved arm (makeTypeNameFromOid consumers).
@@ -420,7 +443,9 @@ pub fn LookupTypeNameOidExtended<'mcx>(
             Some(true) => {}
             // unported: C's LookupTypeNameOid returns shell types (their DDL
             // consumers accept them); pgrust's shell-type USE lanes are
-            // unported, so raise the typenameType-shaped error cleanly.
+            // unported, so raise the typenameType-shaped error cleanly —
+            // except for the allow-shell consumers, which are C-parity.
+            Some(false) if allow_shell => {}
             Some(false) => return Err(type_is_only_a_shell(&typeNameToString(tn)?)),
             // C LookupTypeNameExtended elogs on a vanished TYPEOID row.
             None => return Err(cache_lookup_failed("type", tn.typeOid)),
@@ -442,6 +467,7 @@ pub fn LookupTypeNameOidExtended<'mcx>(
         match syscache_seams::pg_type_isdefined::call(typoid)? {
             Some(true) => {}
             // unported: same shell-type USE divergence as the lanes above.
+            Some(false) if allow_shell => {}
             Some(false) => return Err(type_is_only_a_shell(&typeNameToString(tn)?)),
             None => return Err(cache_lookup_failed("type", typoid)),
         }
@@ -480,6 +506,7 @@ pub fn LookupTypeNameOidExtended<'mcx>(
     typenameTypeMod(mcx, None, tn, typoid)?;
     match syscache_seams::pg_type_isdefined::call(typoid)? {
         Some(true) => {}
+        Some(false) if allow_shell => {}
         // unported: C's LookupTypeNameOid returns shell types (their DDL
         // consumers accept them); pgrust's shell-type USE lanes are
         // unported, so raise the typenameType-shaped error cleanly.
@@ -3714,6 +3741,7 @@ fn multiple_defaults(colname: &str, relname: &str) -> Box<PgError> {
 
 pub fn init_seams() {
     parse_utilcmd_seams::LookupTypeNameOid::set(LookupTypeNameOid);
+    parse_utilcmd_seams::LookupTypeNameOidAllowShell::set(LookupTypeNameOidAllowShell);
     parse_utilcmd_seams::parseTypeString::set(parseTypeString);
     parse_utilcmd_seams::typename_type_id_and_mod::set(typenameTypeIdAndMod);
     parse_utilcmd_seams::typename_type_id_and_mod_any::set(typenameTypeIdAndModAllowComposite);

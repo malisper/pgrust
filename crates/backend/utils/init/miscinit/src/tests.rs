@@ -271,9 +271,18 @@ fn scratch_dir(tag: &str) -> String {
     dir.to_str().unwrap().to_owned()
 }
 
+// Serializes the tests that depend on the process-global cwd: this test
+// MUTATES it (postmaster.pid is cwd-relative), and
+// make_absolute_path_canonicalizes READS it twice (once inside
+// make_absolute_path, once for the expected value) — unserialized, the
+// chdir can land between the two reads (merge-queue run 33081408913
+// flake: 1-in-many thread-schedule race, LATCH_SLAB_LOCK precedent).
+static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn lockfile_lifecycle() {
     setup();
+    let _g = CWD_LOCK.lock().unwrap();
     let dir = scratch_dir("lockfile");
     // Only this test changes cwd (postmaster.pid is cwd-relative).
     std::env::set_current_dir(&dir).unwrap();
@@ -706,7 +715,10 @@ fn make_absolute_path_canonicalizes() {
     assert_eq!(make_absolute_path("/data/dd/"), "/data/dd");
     assert_eq!(make_absolute_path("/data/../dd"), "/dd");
 
-    // Relative input: prepend cwd, then canonicalize the whole thing.
+    // Relative input: prepend cwd, then canonicalize the whole thing. Hold
+    // CWD_LOCK across BOTH cwd reads (the one inside make_absolute_path and
+    // the expected-value one): lockfile_lifecycle chdirs the process.
+    let _g = CWD_LOCK.lock().unwrap();
     let cwd = std::env::current_dir()
         .unwrap()
         .into_os_string()

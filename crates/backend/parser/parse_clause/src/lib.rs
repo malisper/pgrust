@@ -1723,7 +1723,15 @@ pub fn transformIndexStmt<'mcx>(
     let mut pstate = parser_small1::make_parsestate(mcx, None);
     pstate.p_sourcetext = Some(bytes_in(mcx, query_string.as_bytes())?);
 
-    let rel = table::table_open(mcx, relid, types_rel::NoLock)?;
+    // C: relation_open (parse_utilcmd.c:3069) — transformIndexStmt opens ANY
+    // relkind; a CREATE INDEX targeting an index/composite type must first
+    // run expression transformation (where e.g. DEFAULT raises 42601,
+    // parse_expr.c:314) and only hit the relkind rejection in DefineIndex's
+    // own table_open (indexcmds.c:682). table_open's guard here fired the
+    // 42809 at analysis time, losing the error-precedence race (round-18
+    // soak, gramwalk seed 1185879197357490538; transformStatsStmt precedent
+    // below).
+    let rel = relation_seams::relation_open::call(mcx, relid, types_rel::NoLock)?;
     let nsitem = parse_relation::addRangeTableEntryForRelation(
         mcx,
         &mut pstate,

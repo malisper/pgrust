@@ -15,6 +15,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // LookupTypeNameOid without the pgrust shell-type fence: C's
+    // LookupTypeName returns shell pg_type rows; the GRANT/REVOKE object
+    // resolution path (aclchk objectNamesToOids, OBJECT_DOMAIN/OBJECT_TYPE)
+    // must observe them so the "is not a domain" 42809 check runs on shells
+    // exactly like C (round-18, gramwalk seed 652549418283084977).
+    pub fn LookupTypeNameOidAllowShell<'a, 'mcx>(
+        mcx: Mcx<'mcx>,
+        tn: &'a TypeName<'a>,
+    ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
     // parseTypeString (parse_type.c), NULL escontext: (type Oid, typmod).
     pub fn parseTypeString<'a, 'mcx>(
         mcx: Mcx<'mcx>,

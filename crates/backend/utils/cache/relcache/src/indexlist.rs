@@ -36,6 +36,29 @@ pub fn RelationGetIndexList<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<PgVec<
     rebuild_index_list(mcx, &rel)
 }
 
+// RelationGetReplicaIndex's oid resolution (relcache.c), reading through the
+// CURRENT cache entry. C fills rd_replidindex on the single in-place relcache
+// struct, so a caller-held relation always observes the freshly built value;
+// our rebuild replaces the Rc, so a caller holding a rebuilt-away predecessor
+// (entry invalidated between open and use) would see its own rd_indexlist
+// stay None forever and misread "no replica index" (round-18 soak, class-6
+// disposition: with a delete-publishing publication present that misread
+// escalates to a B-only 55000 where C succeeds). Resolving via the current
+// entry restores C's in-place semantics.
+pub fn RelationGetReplicaIndexOid(mcx: Mcx<'_>, relid: Oid) -> PgResult<Oid> {
+    let rel = store::RelationIdGetRelation(relid)?.ok_or_else(|| not_open(relid))?;
+    if rel.rd_indexlist.borrow().is_none() {
+        let _ = rebuild_index_list(mcx, &rel)?;
+    }
+    let replidindex = rel
+        .rd_indexlist
+        .borrow()
+        .as_ref()
+        .map(|l| l.replidindex)
+        .unwrap_or(InvalidOid);
+    Ok(replidindex)
+}
+
 // The scan may process invalidations (it re-enters the relcache), so no
 // rd_indexlist borrow is held across it; the result is built in the caller's
 // context and installed on the entry only after the scan completes, as in C.

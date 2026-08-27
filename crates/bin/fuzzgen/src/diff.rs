@@ -717,6 +717,35 @@ pub fn is_shared_catalog_stmt(sql: &str) -> bool {
             return true;
         }
     }
+    // Round-18 soak (seed 1550471152172160129): GRANT/REVOKE ... ON
+    // PARAMETER writes pg_parameter_acl — a BKI_SHARED_RELATION, so
+    // per-batch private databases do not isolate concurrent drivers. C's
+    // ExecGrant_Parameter (aclchk.c:2432/2453/2526/2540) takes only
+    // RowExclusiveLock on the catalog, operates on a syscache tuple, and
+    // goes through CatalogTupleUpdate/Delete -> simple_heap_update/delete,
+    // which raise the identical XX000 tcu messages under the same race —
+    // there is NO LockSharedObject in this path (unlike role membership,
+    // user.c:1703), so the hazard is symmetric and pgrust's port is
+    // faithful. A bare GRANT/REVOKE prefix would be far too broad
+    // (table/schema grants are database-local): the shape requires the
+    // GRANT/REVOKE head keyword AND the "ON PARAMETER" object clause,
+    // the only grammar route to OBJECT_PARAMETER_ACL. The
+    // tcu-messages-only gate is untouched — any other XX000 on these
+    // statements still escalates.
+    let is_kw = |kw: &str| {
+        head.len() > kw.len()
+            && head[..kw.len()].eq_ignore_ascii_case(kw)
+            && !head.as_bytes()[kw.len()].is_ascii_alphanumeric()
+    };
+    if is_kw("GRANT") || is_kw("REVOKE") {
+        let lower = sql.to_ascii_lowercase();
+        let mut tokens = lower.split_whitespace().peekable();
+        while let Some(t) = tokens.next() {
+            if t == "on" && tokens.peek() == Some(&"parameter") {
+                return true;
+            }
+        }
+    }
     false
 }
 

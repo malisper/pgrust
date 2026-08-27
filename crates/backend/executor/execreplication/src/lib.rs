@@ -47,11 +47,17 @@ impl PublicationDesc {
 // (the trimmed RelationData has no rd_pubdesc field; indexattr precedent).
 struct PubDescState {
     descs: PgHashMap<'static, Oid, PublicationDesc>,
-    callbacks_registered: bool,
 }
 
 thread_local! {
     static STATE: RefCell<Option<ManuallyDrop<PubDescState>>> = const { RefCell::new(None) };
+    // Callback registration is per-THREAD, matching the inval CALLBACKS
+    // table's lifetime (C statics live for the backend's whole life; the
+    // table is never cleared at session teardown). It must NOT live in
+    // PubDescState: the state is per-SESSION (see below), and re-registering
+    // per session would leak a relcache_callback_list slot per engagement
+    // until the 10-slot table FATALs.
+    static CALLBACK_REGISTERED: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
 }
 
 fn with_state<R>(f: impl FnOnce(&mut PubDescState) -> R) -> R {
@@ -59,21 +65,41 @@ fn with_state<R>(f: impl FnOnce(&mut PubDescState) -> R) -> R {
         let mut slot = cell.borrow_mut();
         let st = slot.get_or_insert_with(|| {
             let mcx = ::mcx::session_root("PubDescContext").mcx();
+            // Round-18 soak (seed 3888260581771107163, B-only 55000
+            // "publishes deletes" on an unpublished table): session_root
+            // arenas are retired wholesale at session teardown, but this
+            // thread_local survived it — a warm re-engaged thread then read
+            // the RETIRED arena through the stale map, so descs.get() could
+            // resurrect freed bytes as a PublicationDesc (spurious
+            // pubdelete=true on whatever relid collided). Same lifetime
+            // contract as relcache's RelcacheState: drop the state at
+            // session cleanup, BEFORE the Roots-phase arena retirement.
+            ::mcx::register_session_cleanup(Box::new(|| {
+                STATE.with(|cell| {
+                    if let Some(st) = cell.borrow_mut().take() {
+                        drop(ManuallyDrop::into_inner(st));
+                    }
+                });
+            }));
             ManuallyDrop::new(PubDescState {
                 descs: PgHashMap::with_capacity_in(8, mcx),
-                callbacks_registered: false,
             })
         });
         f(st)
     })
 }
 
+// NOT with_state: an inval arriving after session cleanup took the state
+// (or before any pubdesc was ever built) must not instantiate a fresh
+// state — with_state would allocate a new session_root per such call.
 fn PubDescRelCallback(_arg: Datum, relid: Oid) {
-    with_state(|st| {
-        if relid != InvalidOid {
-            st.descs.remove(&relid);
-        } else {
-            st.descs.clear();
+    STATE.with(|cell| {
+        if let Some(st) = cell.borrow_mut().as_deref_mut() {
+            if relid != InvalidOid {
+                st.descs.remove(&relid);
+            } else {
+                st.descs.clear();
+            }
         }
     });
 }
@@ -96,12 +122,12 @@ pub fn RelationBuildPublicationDesc<'mcx>(
     if let Some(hit) = with_state(|st| st.descs.get(&rel.rd_id).copied()) {
         return Ok(hit);
     }
-    if !with_state(|st| st.callbacks_registered) {
+    if !CALLBACK_REGISTERED.with(|c| c.get()) {
         inval::invalidate::CacheRegisterRelcacheCallback(
             PubDescRelCallback,
             Datum::from_oid(InvalidOid),
         )?;
-        with_state(|st| st.callbacks_registered = true);
+        CALLBACK_REGISTERED.with(|c| c.set(true));
     }
 
     let relid = rel.rd_id;
@@ -186,16 +212,15 @@ pub fn RelationBuildPublicationDesc<'mcx>(
     Ok(desc)
 }
 
+// Resolve through the CURRENT relcache entry, never the caller-held one: a
+// held rebuilt-away predecessor's rd_indexlist stays None after the rebuild
+// installs on the replacement entry, which misread as "no replica index"
+// (round-18 class-6: B-only 55000 on a published table C deletes from).
 fn RelationGetReplicaIndex<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<Oid> {
-    if rel.rd_indexlist.borrow().is_none() {
-        let _ = relcache::RelationGetIndexList(mcx, rel.rd_id)?;
+    if let Some(l) = rel.rd_indexlist.borrow().as_ref() {
+        return Ok(l.replidindex);
     }
-    Ok(rel
-        .rd_indexlist
-        .borrow()
-        .as_ref()
-        .map(|l| l.replidindex)
-        .unwrap_or(InvalidOid))
+    relcache::indexlist::RelationGetReplicaIndexOid(mcx, rel.rd_id)
 }
 
 #[track_caller]

@@ -22,7 +22,7 @@
 use std::collections::BTreeMap;
 
 use crate::client::{Client, ConnLost, RawResult};
-use crate::diff::{classify, tag_affected, Classified, DiffClass, DiffInput, StmtOutcome};
+use crate::diff::{classify, tag_affected, Classified, DiffClass, DiffInput, Side, StmtOutcome};
 use crate::ruled::{apply_ruled, RuledEntry};
 use crate::session::json_escape;
 
@@ -396,6 +396,14 @@ pub struct RunStats {
     pub findings: u32,
     /// Probe exchanges executed (all tables, all rounds).
     pub probes: u32,
+    /// Statements (and probe rounds) collapsed into a root finding as
+    /// asymmetric-25P02 cascade noise (round-18 soak: one side's
+    /// transaction aborted, so every later in-transaction statement on
+    /// that side reports 25P02 "current transaction is aborted" while the
+    /// other side sails on — N downstream noise records for one root
+    /// cause). Collapsed exchanges produce NO records of their own; the
+    /// root record's detail carries the collapsed count.
+    pub cascade_collapsed: u32,
     /// SQLSTATE histogram of erroring statements (side A's state when A
     /// errored, else side B's) — the error-class breakdown surface.
     pub error_states: BTreeMap<String, u32>,
@@ -429,9 +437,78 @@ pub fn apply_and_classify(
     apply_ruled(table, sql, raw)
 }
 
+/// The side whose outcome is a 25P02 "current transaction is aborted"
+/// error while the other side's is anything else: the signature of an
+/// asymmetrically aborted transaction (exactly one side's transaction
+/// died on some earlier statement). Symmetric 25P02 is None — both
+/// transactions aborted, the statements compare as matches anyway.
+fn aborted_txn_side(oa: &StmtOutcome, ob: &StmtOutcome) -> Option<Side> {
+    let aborted = |o: &StmtOutcome| {
+        matches!(o, StmtOutcome::Error { sqlstate, .. } if sqlstate == "25P02")
+    };
+    match (aborted(oa), aborted(ob)) {
+        (true, false) => Some(Side::A),
+        (false, true) => Some(Side::B),
+        _ => None,
+    }
+}
+
+/// The side that errored (with anything but 25P02) while the other side
+/// did not error at all: the candidate transaction-aborting statement a
+/// later asymmetric-25P02 cascade is rooted at. Both-sides-error is None
+/// (both transactions abort together — no asymmetry follows).
+fn one_sided_error_side(oa: &StmtOutcome, ob: &StmtOutcome) -> Option<Side> {
+    let err = |o: &StmtOutcome| {
+        matches!(o, StmtOutcome::Error { sqlstate, .. } if sqlstate != "25P02")
+    };
+    let any_err = |o: &StmtOutcome| matches!(o, StmtOutcome::Error { .. });
+    match (err(oa), err(ob)) {
+        (true, false) if !any_err(ob) => Some(Side::A),
+        (false, true) if !any_err(oa) => Some(Side::B),
+        _ => None,
+    }
+}
+
+/// An active asymmetric-25P02 cascade: one side's transaction is aborted,
+/// the other side's is live. Rooted at the record of the statement that
+/// aborted the transaction (the first divergent statement); every later
+/// noise exchange folds into that record's detail instead of minting its
+/// own finding.
+struct CascadeState {
+    side: Side,
+    /// Index into `records` of the root (the aborting statement's record —
+    /// a finding or a ruled record; one-sided errors always record).
+    root_pos: usize,
+    /// The root record's detail before any cascade annotation.
+    base_detail: String,
+    collapsed: u32,
+}
+
+impl CascadeState {
+    fn annotated_detail(&self) -> String {
+        format!(
+            "{} [25P02-cascade: {} downstream exchange(s) on side {:?} collapsed into this finding]",
+            self.base_detail, self.collapsed, self.side
+        )
+    }
+}
+
 /// Lockstep run over a statement stream, with optional state probes.
 /// Stops after a SESSION_DIVERGED record: with a side gone, every later
 /// statement diverges vacuously.
+///
+/// Asymmetric-25P02 cascades collapse (round-18 soak, 15/52 findings were
+/// this noise shape): once one side's transaction aborts while the
+/// other's stays live, every later in-transaction statement on the dead
+/// side answers 25P02 — each of which used to mint its own ERROR_DIFF /
+/// STATE_DIFF record. Now the FIRST divergent statement (the one-sided
+/// error that aborted the transaction — it always has a record, finding
+/// or ruled) becomes the cascade root, and every following
+/// asymmetric-25P02 exchange (statements and probe rounds alike) is
+/// counted into that root record's detail instead. The cascade closes as
+/// soon as the dead side stops answering 25P02 (ROLLBACK/COMMIT ended the
+/// transaction). A cascade whose root precedes the stream window gets one
+/// synthetic ERROR_DIFF root naming the condition.
 pub fn run_stream(
     a: &mut dyn Executor,
     b: &mut dyn Executor,
@@ -440,11 +517,16 @@ pub fn run_stream(
     ulp_tol: u64,
     probes: Option<&ProbeSpec>,
 ) -> (Vec<Record>, RunStats) {
-    let mut records = Vec::new();
+    let mut records: Vec<Record> = Vec::new();
     let mut stats = RunStats::default();
     let mut suppressed: Vec<String> = Vec::new();
     let mut since_probe = 0u32;
     let mut last_index = 0u32;
+    // The most recent one-sided (non-25P02) error's side and record
+    // position: the candidate cascade root. One-sided errors always push
+    // a record (ErrorDiff/CountDiff finding or a Ruled record).
+    let mut last_one_sided: Option<(Side, usize)> = None;
+    let mut cascade: Option<CascadeState> = None;
     for StreamStmt { stmt_index, sql, soft_float_cols, mask_explain_timing } in stmts {
         last_index = *stmt_index;
         let oa = a.apply(sql);
@@ -466,28 +548,92 @@ pub fn run_stream(
         let c = apply_ruled(table, sql, raw);
         stats.applied += 1;
         since_probe += 1;
-        let diverged_session = matches!(c.class, DiffClass::SessionDiverged(_));
-        match &c.class {
-            DiffClass::Match => stats.matches += 1,
-            DiffClass::Ruled(_) => {
-                stats.ruled += 1;
-                records.push(Record {
-                    stmt_index: *stmt_index,
-                    sql: sql.clone(),
-                    class: c.class,
-                    detail: c.detail,
-                    probe: false,
-                });
+        // Asymmetric-25P02 cascade handling: fold noise into the root.
+        let collapsed = match aborted_txn_side(&oa, &ob) {
+            Some(side) => {
+                match cascade.as_mut() {
+                    Some(cs) if cs.side == side => {
+                        cs.collapsed += 1;
+                        stats.cascade_collapsed += 1;
+                        records[cs.root_pos].detail = cs.annotated_detail();
+                        true
+                    }
+                    _ => {
+                        // Open a cascade rooted at the aborting statement's
+                        // record; synthesize a root when the abort predates
+                        // this window (that synthetic record IS the one
+                        // finding — this statement is not double-counted).
+                        let (root_pos, folds) = match last_one_sided {
+                            Some((s, pos)) if s == side => (pos, true),
+                            _ => {
+                                stats.findings += 1;
+                                records.push(Record {
+                                    stmt_index: *stmt_index,
+                                    sql: sql.clone(),
+                                    class: DiffClass::ErrorDiff,
+                                    detail: format!(
+                                        "asymmetric 25P02 cascade on side {:?} (transaction aborted by a statement before this window)",
+                                        side
+                                    ),
+                                    probe: false,
+                                });
+                                (records.len() - 1, false)
+                            }
+                        };
+                        let mut cs = CascadeState {
+                            side,
+                            root_pos,
+                            base_detail: records[root_pos].detail.clone(),
+                            collapsed: 0,
+                        };
+                        if folds {
+                            cs.collapsed = 1;
+                            stats.cascade_collapsed += 1;
+                            records[root_pos].detail = cs.annotated_detail();
+                        }
+                        cascade = Some(cs);
+                        true
+                    }
+                }
             }
-            _ => {
-                stats.findings += 1;
-                records.push(Record {
-                    stmt_index: *stmt_index,
-                    sql: sql.clone(),
-                    class: c.class,
-                    detail: c.detail,
-                    probe: false,
-                });
+            None => {
+                // The dead side answered something other than 25P02: the
+                // transaction ended, the cascade is over.
+                cascade = None;
+                false
+            }
+        };
+        let diverged_session = matches!(c.class, DiffClass::SessionDiverged(_));
+        if !collapsed {
+            match &c.class {
+                DiffClass::Match => stats.matches += 1,
+                DiffClass::Ruled(_) => {
+                    stats.ruled += 1;
+                    records.push(Record {
+                        stmt_index: *stmt_index,
+                        sql: sql.clone(),
+                        class: c.class,
+                        detail: c.detail,
+                        probe: false,
+                    });
+                }
+                _ => {
+                    stats.findings += 1;
+                    records.push(Record {
+                        stmt_index: *stmt_index,
+                        sql: sql.clone(),
+                        class: c.class,
+                        detail: c.detail,
+                        probe: false,
+                    });
+                }
+            }
+            if let Some(side) = one_sided_error_side(&oa, &ob) {
+                // A record was pushed for every non-Match class; Match is
+                // impossible with exactly one side erroring.
+                if !records.is_empty() {
+                    last_one_sided = Some((side, records.len() - 1));
+                }
             }
         }
         if diverged_session {
@@ -498,7 +644,7 @@ pub fn run_stream(
                 since_probe = 0;
                 if run_probe_round(
                     a, b, spec, table, ulp_tol, *stmt_index, &mut suppressed, &mut records,
-                    &mut stats,
+                    &mut stats, &mut cascade, last_one_sided,
                 ) {
                     return (records, stats);
                 }
@@ -511,7 +657,7 @@ pub fn run_stream(
         if !stmts.is_empty() {
             run_probe_round(
                 a, b, spec, table, ulp_tol, last_index, &mut suppressed, &mut records,
-                &mut stats,
+                &mut stats, &mut cascade, last_one_sided,
             );
         }
     }
@@ -531,6 +677,8 @@ fn run_probe_round(
     suppressed: &mut Vec<String>,
     records: &mut Vec<Record>,
     stats: &mut RunStats,
+    cascade: &mut Option<CascadeState>,
+    last_one_sided: Option<(Side, usize)>,
 ) -> bool {
     for pt in &spec.tables {
         let (t, pk) = (&pt.name, &pt.pk);
@@ -541,6 +689,37 @@ fn run_probe_round(
         let oa = a.apply(&sql);
         let ob = b.apply(&sql);
         stats.probes += 1;
+        // Probes riding an asymmetric-25P02 cascade fold into the cascade
+        // root like stream statements do (the dead side answers 25P02 to
+        // the probe SELECT itself — pure noise, and transient, so the
+        // table is NOT suppressed for later rounds). A probe can also be
+        // the FIRST noise exchange after the aborting statement (cadence
+        // fires before the next stream statement), so it may open the
+        // cascade off the known root; without a known root it falls
+        // through to normal classification.
+        if let Some(side) = aborted_txn_side(&oa, &ob) {
+            let matching_root = match (cascade.as_mut(), last_one_sided) {
+                (Some(cs), _) if cs.side == side => Some(cs.root_pos),
+                (Some(_), _) => None,
+                (None, Some((s, pos))) if s == side => {
+                    *cascade = Some(CascadeState {
+                        side,
+                        root_pos: pos,
+                        base_detail: records[pos].detail.clone(),
+                        collapsed: 0,
+                    });
+                    Some(pos)
+                }
+                (None, _) => None,
+            };
+            if matching_root.is_some() {
+                let cs = cascade.as_mut().expect("cascade just ensured");
+                cs.collapsed += 1;
+                stats.cascade_collapsed += 1;
+                records[cs.root_pos].detail = cs.annotated_detail();
+                continue;
+            }
+        }
         let c = classify_probe(t, &oa, &ob, table, ulp_tol);
         match &c.class {
             DiffClass::Match => {}
@@ -631,6 +810,107 @@ mod tests {
         assert_eq!(records[0].class, DiffClass::RowsetDiff);
         assert!(records[0].is_finding());
         assert!(!records[0].probe);
+    }
+
+    #[test]
+    fn asymmetric_25p02_cascade_collapses_into_root_finding() {
+        let table = crate::ruled::default_table();
+        let err = |s: &str, m: &str| StmtOutcome::Error {
+            sqlstate: s.to_string(),
+            message: m.to_string(),
+        };
+        let aborted = || err("25P02", "current transaction is aborted");
+        // Stream: s0 matches; s1 aborts B only (one-sided 42804); s2..s4
+        // are cascade noise (A sails on, B answers 25P02); s5 both succeed
+        // (ROLLBACK ended the transaction — cascade closes).
+        let a_seq = vec![
+            rows_of("1"),
+            rows_of("2"),
+            rows_of("3"),
+            rows_of("4"),
+            rows_of("5"),
+            rows_of("6"),
+        ];
+        let b_seq = vec![
+            rows_of("1"),
+            err("42804", "datatype mismatch"),
+            aborted(),
+            aborted(),
+            aborted(),
+            rows_of("6"),
+        ];
+        let mut a = Scripted { outcomes: a_seq, next: 0 };
+        let mut b = Scripted { outcomes: b_seq, next: 0 };
+        let (records, stats) = run_stream(&mut a, &mut b, &stmts(6), &table, 4, None);
+        // ONE finding: the aborting statement's ErrorDiff, carrying the
+        // collapsed count; the three noise statements record nothing.
+        assert_eq!(stats.findings, 1);
+        assert_eq!(stats.cascade_collapsed, 3);
+        assert_eq!(stats.matches, 2, "s0 and s5 match");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].stmt_index, 1, "root is the aborting statement");
+        assert_eq!(records[0].class, DiffClass::ErrorDiff);
+        assert!(
+            records[0].detail.contains("25P02-cascade: 3 downstream exchange(s) on side B"),
+            "detail: {}",
+            records[0].detail
+        );
+    }
+
+    #[test]
+    fn cascade_without_in_stream_root_gets_one_synthetic_finding() {
+        let table = crate::ruled::default_table();
+        let aborted = || StmtOutcome::Error {
+            sqlstate: "25P02".to_string(),
+            message: "current transaction is aborted".to_string(),
+        };
+        // B is already inside an aborted transaction when the window
+        // starts: 3 asymmetric-25P02 statements, no root in stream.
+        let mut a = Scripted { outcomes: vec![rows_of("1"); 3], next: 0 };
+        let mut b = Scripted { outcomes: vec![aborted(), aborted(), aborted()], next: 0 };
+        let (records, stats) = run_stream(&mut a, &mut b, &stmts(3), &table, 4, None);
+        assert_eq!(stats.findings, 1, "one synthetic root, not three findings");
+        assert_eq!(stats.cascade_collapsed, 2);
+        assert_eq!(records.len(), 1);
+        assert!(records[0].detail.contains("transaction aborted by a statement before this window"));
+    }
+
+    #[test]
+    fn symmetric_25p02_still_matches_and_probe_noise_collapses() {
+        let table = crate::ruled::default_table();
+        let err = |s: &str, m: &str| StmtOutcome::Error {
+            sqlstate: s.to_string(),
+            message: m.to_string(),
+        };
+        let aborted = || err("25P02", "current transaction is aborted");
+        // Symmetric abort: both sides answer 25P02 — plain matches, no
+        // cascade, no findings.
+        let mut a = Scripted { outcomes: vec![aborted(), aborted()], next: 0 };
+        let mut b = Scripted { outcomes: vec![aborted(), aborted()], next: 0 };
+        let (records, stats) = run_stream(&mut a, &mut b, &stmts(2), &table, 4, None);
+        assert_eq!(stats.matches, 2);
+        assert_eq!(stats.findings, 0);
+        assert_eq!(stats.cascade_collapsed, 0);
+        assert!(records.is_empty());
+
+        // Probe rounds inside an active cascade fold too: apply order per
+        // side with every=1 is s0 P s1 P (end P suppressed by cadence
+        // logic running right before). s0 roots the cascade; both probes
+        // hit B's aborted transaction and collapse instead of minting
+        // STATE_DIFFs — and the table is NOT suppressed.
+        let a_seq = vec![rows_of("1"), rows_of("p"), rows_of("2"), rows_of("p")];
+        let b_seq = vec![err("42804", "datatype mismatch"), aborted(), aborted(), aborted()];
+        let mut a = Scripted { outcomes: a_seq, next: 0 };
+        let mut b = Scripted { outcomes: b_seq, next: 0 };
+        let (records, stats) =
+            run_stream(&mut a, &mut b, &stmts(2), &table, 4, Some(&probe_spec(1)));
+        assert_eq!(stats.findings, 1, "only the root");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].stmt_index, 0);
+        // s1 collapsed + probe rounds collapsed (cadence after s0, after
+        // s1, and the end round).
+        assert!(stats.cascade_collapsed >= 3, "collapsed={}", stats.cascade_collapsed);
+        assert!(records[0].detail.contains("25P02-cascade:"));
     }
 
     #[test]

@@ -471,7 +471,13 @@ fn object_names_to_oids<'mcx>(
                     location: -1,
                     ..Default::default()
                 };
-                let oid = parse_utilcmd_seams::LookupTypeNameOid::call(mcx, &tn)?;
+                // Shell-tolerant lookup, matching C's get_object_address_type
+                // -> LookupTypeName (objectaddress.c:1608): a shell type
+                // resolves and then fails the domain-kind check below with
+                // 42809 "is not a domain" — never 42704 (round-18, gramwalk
+                // seed 652549418283084977: `grant all on domain k_int` where
+                // an earlier `create type k_int;` left a shell).
+                let oid = parse_utilcmd_seams::LookupTypeNameOidAllowShell::call(mcx, &tn)?;
                 if objtype == ObjectType::OBJECT_DOMAIN {
                     check_is_domain(oid, typname)?;
                 }
