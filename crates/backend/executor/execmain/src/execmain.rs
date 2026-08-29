@@ -1512,6 +1512,26 @@ pub(crate) fn execute_plan<'m, 'mcx>(
     // --- end WS-AJ wave-9.5 -----------------------------------------------------
     if estate.es_top_eflags & EXEC_FLAG_BACKWARD == 0 {
         exec_shutdown_node(planstate, estate)?;
+        // C's ExecShutdownNode_walker rides planstate_tree_walker, which
+        // descends into every node's initPlan/subPlan SubPlanStates — so a
+        // Gather inside an initplan reaps its workers (and retrieves their
+        // instrumentation) here, before EXPLAIN reads it. This lane parks
+        // subplan planstates in es_subplanstates cells instead of on the
+        // tree, so walk the cells directly; nothing is mid-run at this
+        // point, but a cell can legitimately be empty (take-out protocol),
+        // and an empty cell has nothing to shut down.
+        for i in 0..estate.es_subplanstates.len() {
+            let cell = estate.es_subplanstates[i];
+            // SAFETY: init_plan created this arena cell; exclusive here (no
+            // subplan can be mid-run at the post-run shutdown point).
+            let slot =
+                unsafe { &mut *cell.0.cast::<Option<PlanStateNode<'mcx>>>().as_ptr() };
+            if let Some(mut ps) = slot.take() {
+                let r = exec_shutdown_node(&mut ps, estate);
+                *slot = Some(ps);
+                r?;
+            }
+        }
     }
     if use_parallel_mode {
         exit_parallel_mode_outlined();
