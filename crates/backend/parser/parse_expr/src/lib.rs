@@ -1130,8 +1130,16 @@ fn between_bool_expr<'mcx>(
 }
 
 // transformAExprBetween (parse_expr.c): hard-wired >= <= < > comparisons.
-// C copyObject's the re-used raw subexprs; the raw tree is read-only under
-// transform, so the arena share is that copy.
+// C copyObject's the multiply-referenced raw subexprs and transforms each
+// copy.  The arena tree has no deep copy, and re-transforming a shared raw
+// subtree is not safe: analyzeCTE writes the analyzed Query back into the
+// (shared) CommonTableExpr node, so a second transform of a WITH-bearing
+// operand tripped the "unexpected utility statement in WITH" internal
+// error.  Each subexpr is therefore transformed exactly once, in C's
+// left-to-right evaluation order, and the sealed transformed subtree is
+// shared across the comparisons (the transformAExprIn pattern); the
+// per-comparison dispatch mirrors transformAExprOp's row-row and make_op
+// arms, and transformBoolExpr's boolean coercion of each comparison.
 fn transformAExprBetween<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'_, 'mcx>,
@@ -1146,6 +1154,133 @@ fn transformAExprBetween<'mcx>(
     debug_assert_eq!(args.len(), 2);
     let bexpr = Some(args.nth(0));
     let cexpr = Some(args.nth(1));
+    let loc = a.location;
+
+    // A raw RowExpr compared against an EXPR_SUBLINK rewrites to a
+    // ROWCOMPARE_SUBLINK on the *raw* operands (transformAExprOp); that
+    // shape keeps the legacy build-raw-and-retransform path.
+    let is_expr_sublink = |n: Option<Node<'mcx>>| {
+        n.is_some_and(|n| {
+            n.as_sub_link()
+                .is_some_and(|s| s.subLinkType == types_nodes::SubLinkType::EXPR_SUBLINK)
+        })
+    };
+    if aexpr.is_some_and(|n| n.node_tag() == NodeTag::T_RowExpr)
+        && (is_expr_sublink(bexpr) || is_expr_sublink(cexpr))
+    {
+        return transformAExprBetweenRaw(mcx, pstate, a, aexpr, bexpr, cexpr);
+    }
+
+    let tx = |pstate: &mut ParseState<'_, 'mcx>, n: Option<Node<'mcx>>| -> PgResult<Option<Node<'mcx>>> {
+        match n {
+            Some(n) => Ok(Some(transformExprRecurse(mcx, pstate, n)?)),
+            None => Ok(None),
+        }
+    };
+
+    let result = match a.kind {
+        A_Expr_Kind::AEXPR_BETWEEN => {
+            let ta = tx(pstate, aexpr)?;
+            let tb = tx(pstate, bexpr)?;
+            let cmp1 = between_comparison(mcx, pstate, ">=", ta, tb, loc, "AND")?;
+            let tc = tx(pstate, cexpr)?;
+            let cmp2 = between_comparison(mcx, pstate, "<=", ta, tc, loc, "AND")?;
+            between_bool_expr(mcx, AND_EXPR, cmp1, cmp2, loc)?
+        }
+        A_Expr_Kind::AEXPR_NOT_BETWEEN => {
+            let ta = tx(pstate, aexpr)?;
+            let tb = tx(pstate, bexpr)?;
+            let cmp1 = between_comparison(mcx, pstate, "<", ta, tb, loc, "OR")?;
+            let tc = tx(pstate, cexpr)?;
+            let cmp2 = between_comparison(mcx, pstate, ">", ta, tc, loc, "OR")?;
+            between_bool_expr(mcx, OR_EXPR, cmp1, cmp2, loc)?
+        }
+        A_Expr_Kind::AEXPR_BETWEEN_SYM => {
+            let ta = tx(pstate, aexpr)?;
+            let tb = tx(pstate, bexpr)?;
+            let cmp1 = between_comparison(mcx, pstate, ">=", ta, tb, loc, "AND")?;
+            let tc = tx(pstate, cexpr)?;
+            let cmp2 = between_comparison(mcx, pstate, "<=", ta, tc, loc, "AND")?;
+            let sub1 = between_bool_expr(mcx, AND_EXPR, cmp1, cmp2, loc)?;
+            let cmp3 = between_comparison(mcx, pstate, ">=", ta, tc, loc, "AND")?;
+            let cmp4 = between_comparison(mcx, pstate, "<=", ta, tb, loc, "AND")?;
+            let sub2 = between_bool_expr(mcx, AND_EXPR, cmp3, cmp4, loc)?;
+            between_bool_expr(mcx, OR_EXPR, sub1, sub2, loc)?
+        }
+        A_Expr_Kind::AEXPR_NOT_BETWEEN_SYM => {
+            let ta = tx(pstate, aexpr)?;
+            let tb = tx(pstate, bexpr)?;
+            let cmp1 = between_comparison(mcx, pstate, "<", ta, tb, loc, "OR")?;
+            let tc = tx(pstate, cexpr)?;
+            let cmp2 = between_comparison(mcx, pstate, ">", ta, tc, loc, "OR")?;
+            let sub1 = between_bool_expr(mcx, OR_EXPR, cmp1, cmp2, loc)?;
+            let cmp3 = between_comparison(mcx, pstate, "<", ta, tc, loc, "OR")?;
+            let cmp4 = between_comparison(mcx, pstate, ">", ta, tb, loc, "OR")?;
+            let sub2 = between_bool_expr(mcx, OR_EXPR, cmp3, cmp4, loc)?;
+            between_bool_expr(mcx, AND_EXPR, sub1, sub2, loc)?
+        }
+        other => panic!("unrecognized A_Expr kind: {other:?}"),
+    };
+    Ok(result)
+}
+
+// One BETWEEN comparison over already-transformed operands: the row-row and
+// make_op arms of transformAExprOp, then transformBoolExpr's coercion of the
+// comparison to boolean under the enclosing AND/OR construct name.
+fn between_comparison<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    op: &'mcx str,
+    lexpr: Option<Node<'mcx>>,
+    rexpr: Option<Node<'mcx>>,
+    location: i32,
+    bool_construct: &str,
+) -> PgResult<Node<'mcx>> {
+    let name = types_nodes::list::NodeList::make1(mcx, Node::mk_string(mcx, op)?)?;
+    let cmp = if lexpr.is_some_and(|n| n.node_tag() == NodeTag::T_RowExpr)
+        && rexpr.is_some_and(|n| n.node_tag() == NodeTag::T_RowExpr)
+    {
+        let lrow = lexpr.expect("checked above");
+        let rrow = rexpr.expect("checked above");
+        let largs = &lrow.as_row_expr().expect("transformed RowExpr").args;
+        let rargs = &rrow.as_row_expr().expect("transformed RowExpr").args;
+        make_row_comparison_op_lists(mcx, pstate, &name, largs, rargs, location)?
+    } else {
+        parse_oper::make_op(
+            mcx,
+            pstate,
+            &name,
+            lexpr,
+            rexpr,
+            lexpr.map_or(types_core::InvalidOid, expr_type),
+            rexpr.map_or(types_core::InvalidOid, expr_type),
+            pstate.p_last_srf,
+            location,
+        )?
+    };
+    coerce::coerce_to_boolean(
+        mcx,
+        pstate,
+        cmp,
+        expr_type(cmp),
+        expr_location(cmp),
+        bool_construct,
+    )
+}
+
+// The legacy raw shape for the RowExpr-vs-EXPR_SUBLINK corner: build raw
+// AEXPR_OP comparisons (transformAExprOp's ROWCOMPARE_SUBLINK conversion
+// needs the raw operands) and transform the whole tree, as C does after
+// copyObject.
+fn transformAExprBetweenRaw<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    a: &types_nodes::A_Expr<'mcx>,
+    aexpr: Option<Node<'mcx>>,
+    bexpr: Option<Node<'mcx>>,
+    cexpr: Option<Node<'mcx>>,
+) -> PgResult<Node<'mcx>> {
+    use types_nodes::primnodes::BoolExprType::{AND_EXPR, OR_EXPR};
     let loc = a.location;
 
     let result = match a.kind {

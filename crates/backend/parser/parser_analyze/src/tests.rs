@@ -259,6 +259,15 @@ fn install_type_fixture() {
             if name == ">" && l == INT4OID && r == INT4OID {
                 v.push((521, 11));
             }
+            if name == "<" && l == INT4OID && r == INT4OID {
+                v.push((97, 11));
+            }
+            if name == "<=" && l == INT4OID && r == INT4OID {
+                v.push((523, 11));
+            }
+            if name == ">=" && l == INT4OID && r == INT4OID {
+                v.push((525, 11));
+            }
             if name == "=" && l == INT4OID && r == INT4OID {
                 v.push((96, 11));
             }
@@ -295,6 +304,44 @@ fn install_type_fixture() {
                     oprcanmerge: true,
                     oprcanhash: false,
                 }),
+                // 97 = int4lt (proc 66), 523 = int4le (proc 149),
+                // 525 = int4ge (proc 150) — pg_operator.dat.
+                97 => Some(syscache_seams::PgOperatorShape { oprnamespace: 11,
+                    oprleft: INT4OID,
+                    oprright: INT4OID,
+                    oprresult: BOOLOID,
+                    oprcom: 521,
+                    oprnegate: 525,
+                    oprcode: 66,
+                    oprrest: InvalidOid,
+                    oprjoin: InvalidOid,
+                    oprcanmerge: true,
+                    oprcanhash: false,
+                }),
+                523 => Some(syscache_seams::PgOperatorShape { oprnamespace: 11,
+                    oprleft: INT4OID,
+                    oprright: INT4OID,
+                    oprresult: BOOLOID,
+                    oprcom: 525,
+                    oprnegate: 521,
+                    oprcode: 149,
+                    oprrest: InvalidOid,
+                    oprjoin: InvalidOid,
+                    oprcanmerge: true,
+                    oprcanhash: false,
+                }),
+                525 => Some(syscache_seams::PgOperatorShape { oprnamespace: 11,
+                    oprleft: INT4OID,
+                    oprright: INT4OID,
+                    oprresult: BOOLOID,
+                    oprcom: 523,
+                    oprnegate: 97,
+                    oprcode: 150,
+                    oprrest: InvalidOid,
+                    oprjoin: InvalidOid,
+                    oprcanmerge: true,
+                    oprcanhash: false,
+                }),
                 // 96 = int4eq (proc 65 -> bool).
                 96 => Some(syscache_seams::PgOperatorShape { oprnamespace: 11,
                     oprleft: INT4OID,
@@ -325,19 +372,25 @@ fn install_type_fixture() {
             })
         });
         syscache_seams::pg_operator_name_candidates_exist::set(|name, _| {
-            Ok(name == "+" || name == ">" || name == "=" || name == "<>")
+            Ok(name == "+"
+                || name == ">"
+                || name == "="
+                || name == "<>"
+                || name == "<"
+                || name == "<="
+                || name == ">=")
         });
         syscache_seams::lookup_pg_proc_shape::set(|funcid| {
             Ok(match funcid {
                 // 481 = int8(int4), the pg_cast int4->int8 coercion function;
-                // 144 = int4ne.
-                177 | 147 | 481 | 65 | 144 => Some(syscache_seams::PgProcShape {
+                // 144 = int4ne; 66/149/150 = int4lt/int4le/int4ge.
+                177 | 147 | 481 | 65 | 144 | 66 | 149 | 150 => Some(syscache_seams::PgProcShape {
                     prolang: 12,
                     prosecdef: false,
                     proconfig_isnull: true,
                     pronamespace: 11,
                     prorettype: match funcid {
-                        147 | 65 | 144 => BOOLOID,
+                        147 | 65 | 144 | 66 | 149 | 150 => BOOLOID,
                         481 => INT8OID,
                         _ => INT4OID,
                     },
@@ -3029,6 +3082,54 @@ mod from_where {
             let sub = rte_node.as_range_tbl_entry().unwrap().subquery.unwrap();
             assert!(sub.limitCount.is_none());
         }
+    }
+
+    // a fuzzing round with-utility (run textsearch b06122a0724ea9d22a905d228d73548d-59-13,
+    // seed 3891435749910983805): BETWEEN shares its raw lexpr across both
+    // comparison arms (C copyObject's it); re-transforming the shared subtree
+    // re-ran analyzeCTE on a CommonTableExpr whose ctequery had already been
+    // replaced by the analyzed Query, tripping the internal XX000
+    // "unexpected utility statement in WITH".  The operand is now transformed
+    // once and shared; a WITH-bearing sublink under BETWEEN must analyze
+    // cleanly.
+    #[test]
+    fn between_shared_sublink_with_cte_analyzes_once() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(
+            mcx,
+            "SELECT (WITH gw_c AS (SELECT) SELECT 1) NOT BETWEEN 1 AND 2",
+        )
+        .unwrap();
+        assert_eq!(q.commandType, CmdType::CMD_SELECT);
+
+        // The symmetric variant re-uses the operands twice more.
+        analyze_sql(
+            mcx,
+            "SELECT (WITH gw_c AS (SELECT) SELECT 1) BETWEEN SYMMETRIC 1 AND 2",
+        )
+        .unwrap();
+    }
+
+    // The full finding's shape: with DEFAULT as the upper bound, the user
+    // error C reports is 42601 "DEFAULT is not allowed in this context" —
+    // never the internal WITH error from re-transforming the shared lexpr.
+    #[test]
+    fn between_with_cte_lexpr_and_default_bound_is_42601() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let err = analyze_sql(
+            mcx,
+            "SELECT (WITH gw_c AS (SELECT) SELECT 1) NOT BETWEEN 1 AND DEFAULT",
+        )
+        .map(|_| ())
+        .unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_SYNTAX_ERROR);
+        assert_eq!(err.message(), "DEFAULT is not allowed in this context");
     }
 }
 
