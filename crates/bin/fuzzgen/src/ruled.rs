@@ -34,6 +34,18 @@ pub enum RuledPattern {
     /// set DiffInput::mask_explain_timing (gramwalk grammar-derived
     /// EXPLAIN ANALYZE, --mask-explain-timing replays). H1.
     ExplainTiming,
+    /// EXPLAIN output equal after additionally dropping the TEXT
+    /// "Planning:" buffer-usage block (header + indented Buffers /
+    /// I/O Timings / Memory children). Whether the block prints AT ALL is
+    /// session cache state: C's ExplainOnePlan gates the whole TEXT group
+    /// on any planning-time buffer being touched, which a warm backend
+    /// avoids — the same C server answers 8 rows cold and 6 rows warm.
+    /// pgrust's thread-shared catalog caches reach the warm state on
+    /// different session histories than C's per-backend forks (r20
+    /// update-rowcount, run 4ab3382e87..-59-13 seed 3878502244648856050).
+    /// Plan structure, node-level Buffers, and Planning Time still
+    /// compare strictly.
+    ExplainPlanningBuffers,
     /// xml build-config divergence (F9 / LD1-N1): the pinned C oracle is
     /// a no-libxml build whose every XML path short-circuits with 0A000
     /// "unsupported XML feature"; pgrust deliberately dlopens libxml2
@@ -204,6 +216,16 @@ pub fn default_table() -> Vec<RuledEntry> {
                      carry TIMING OFF); plan structure and actual rows still \
                      compare strictly",
             pattern: RuledPattern::ExplainTiming,
+        },
+        RuledEntry {
+            id: "explain-planning-buffers",
+            ruling: "EXPLAIN TEXT Planning: buffer-usage block presence is \
+                     session cache state (a warm backend plans without \
+                     touching buffers and C omits the whole group; pgrust's \
+                     thread-shared caches warm on different histories than \
+                     C's per-backend forks); plan structure, node-level \
+                     Buffers, and Planning Time still compare strictly",
+            pattern: RuledPattern::ExplainPlanningBuffers,
         },
         RuledEntry {
             id: "xml-config",
@@ -393,6 +415,9 @@ fn matches(entry: &RuledEntry, candidate: &str, sql: &str) -> bool {
         RuledPattern::ExplainTiming => {
             candidate == "explain-timing" && crate::diff::is_explain_stmt(sql)
         }
+        RuledPattern::ExplainPlanningBuffers => {
+            candidate == "explain-planning-buffers" && crate::diff::is_explain_stmt(sql)
+        }
         RuledPattern::GucInventory => {
             candidate == "guc-inventory" && crate::diff::is_guc_inventory_stmt(sql)
         }
@@ -548,6 +573,20 @@ mod tests {
         );
         assert_eq!(out.class, DiffClass::Ruled("explain-timing".to_string()));
         let out = apply_ruled(&default_table(), "SELECT 1;", candidate("explain-timing"));
+        assert_eq!(out.class, DiffClass::RowsetDiff);
+    }
+
+    #[test]
+    fn explain_planning_buffers_resolves_only_on_explain_statements() {
+        let out = apply_ruled(
+            &default_table(),
+            "explain analyse update fz_scalar * fz_scalar set k_text = default ;",
+            candidate("explain-planning-buffers"),
+        );
+        assert_eq!(out.class, DiffClass::Ruled("explain-planning-buffers".to_string()));
+        assert!(out.detail.contains("session cache state"));
+        let out =
+            apply_ruled(&default_table(), "SELECT 1;", candidate("explain-planning-buffers"));
         assert_eq!(out.class, DiffClass::RowsetDiff);
     }
 

@@ -1033,6 +1033,57 @@ fn normalize_explain_rows(rows: &[Vec<Option<String>>]) -> Vec<Vec<Option<String
         .collect()
 }
 
+/// EXPLAIN TEXT "Planning:" buffer-usage block: whether the section prints
+/// AT ALL depends on whether the planner touched any buffer, which is
+/// session cache state, not conformance — the SAME C server prints it on a
+/// cold backend (catalog reads miss the syscache) and omits it once the
+/// session has planned the relation before (18.3 explain.c ExplainOnePlan:
+/// `if (peek_buffer_usage(es, bufusage) || mem_counters)` gates the whole
+/// group in TEXT). pgrust's thread-shared catalog caches reach the warm
+/// state on different session histories than C's per-backend forks, so the
+/// block's PRESENCE (r20 run 4ab3382e87..-59-13 seed 3878502244648856050:
+/// "row count 8 vs 6") is implementation state exactly like the counter
+/// values inside it. Strip the header row plus its more-indented counter
+/// children ("Buffers:", "I/O Timings:", "Memory:") from TEXT rowsets;
+/// JSON/YAML need no strip (peek_buffer_usage returns true for non-text
+/// formats whenever BUFFERS is on, so group presence is deterministic and
+/// the per-key values are already masked). Plan structure, node-level
+/// Buffers presence, and "Planning Time" still compare strictly.
+pub fn strip_planning_buffer_rows(rows: &[Vec<Option<String>>]) -> Vec<Vec<Option<String>>> {
+    let indent_of = |s: &str| s.len() - s.trim_start_matches(' ').len();
+    let mut out: Vec<Vec<Option<String>>> = Vec::with_capacity(rows.len());
+    let mut i = 0;
+    while i < rows.len() {
+        let header = rows[i].len() == 1
+            && rows[i][0].as_deref().is_some_and(|s| s.trim() == "Planning:");
+        if !header {
+            out.push(rows[i].clone());
+            i += 1;
+            continue;
+        }
+        let hdr_indent = indent_of(rows[i][0].as_deref().unwrap());
+        i += 1;
+        while i < rows.len() {
+            let child = rows[i].len() == 1
+                && rows[i][0].as_deref().is_some_and(|s| {
+                    indent_of(s) > hdr_indent
+                        && [
+                            "Buffers:",
+                            "I/O Timings:",
+                            "Memory:",
+                        ]
+                        .iter()
+                        .any(|p| s.trim_start().starts_with(p))
+                });
+            if !child {
+                break;
+            }
+            i += 1;
+        }
+    }
+    out
+}
+
 /// FP-2 (round-7): deparse text embeds user-object OIDs as literals —
 /// `pg_get_partition_constraintdef` renders
 /// `satisfies_hash_partition('48594'::oid, ...)`, and user-range OIDs are
@@ -1757,6 +1808,43 @@ pub fn classify(input: &DiffInput) -> Classified {
                     })
                 }
             };
+            // r20 update-rowcount: the TEXT "Planning:" buffer-usage
+            // block's PRESENCE is session cache state (see
+            // strip_planning_buffer_rows). Tried after the counter and
+            // timing masks, so the ruled id records that the block's
+            // presence was load-bearing for the match; any other
+            // structural difference still escalates.
+            let explain_planning_only = |d: &str| -> Option<Classified> {
+                if !is_explain_stmt(sql) {
+                    return None;
+                }
+                let na = normalize_explain_rows(&strip_planning_buffer_rows(ra));
+                let nb = normalize_explain_rows(&strip_planning_buffer_rows(rb));
+                let (na, nb) = if mask_explain_timing {
+                    (
+                        normalize_explain_timing_rows(&na),
+                        normalize_explain_timing_rows(&nb),
+                    )
+                } else {
+                    (na, nb)
+                };
+                let norm = if ordered {
+                    cmp_rows_ordered(&na, &nb, &modes, ulp_tol)
+                } else {
+                    cmp_rows_multiset(&na, &nb, &modes, ulp_tol)
+                };
+                if matches!(norm, RowsetCmp::Diff(_)) {
+                    None
+                } else {
+                    Some(Classified {
+                        class: DiffClass::Ruled("explain-planning-buffers".to_string()),
+                        detail: format!(
+                            "equal after dropping the TEXT Planning: buffer-usage \
+                             block (presence is session cache state): {d}"
+                        ),
+                    })
+                }
+            };
             // Round-9 instance-state candidates: rowset diffs on
             // statements referencing instance-config views (FP-9) or
             // calling backup-control functions are cluster-local state,
@@ -1896,6 +1984,9 @@ pub fn classify(input: &DiffInput) -> Classified {
                         if let Some(c) = explain_timing_only(&d) {
                             return c;
                         }
+                        if let Some(c) = explain_planning_only(&d) {
+                            return c;
+                        }
                         if let Some(c) = scroll_materialize_only(&d) {
                             return c;
                         }
@@ -1947,6 +2038,9 @@ pub fn classify(input: &DiffInput) -> Classified {
                             return c;
                         }
                         if let Some(c) = explain_timing_only(&d) {
+                            return c;
+                        }
+                        if let Some(c) = explain_planning_only(&d) {
                             return c;
                         }
                         if let Some(c) = scroll_materialize_only(&d) {
@@ -2391,6 +2485,130 @@ mod tests {
             mask_explain_timing: true,
         });
         assert_eq!(c.class, DiffClass::RowsetDiff);
+    }
+
+    /// r20 update-rowcount (run 4ab3382e87..-59-13, gramwalk seed
+    /// 3878502244648856050, "row count 8 vs 6"): the TEXT "Planning:"
+    /// buffer-usage block prints only when planning touched a buffer —
+    /// session cache state, not conformance (the same C server answers 8
+    /// rows on a cold backend and 6 on a warm one). Its presence-only
+    /// diff resolves as a ruled candidate; any residual structural diff
+    /// still escalates.
+    #[test]
+    fn explain_planning_buffer_block_presence_is_ruled_candidate() {
+        // A: cold backend — Planning: block present (8 rows).
+        let a = rowset(
+            vec![25],
+            rows(&[
+                &[Some(
+                    "Update on fz_scalar  (cost=0.00..14.00 rows=0 width=0) \
+                     (actual time=0.034..0.035 rows=0.00 loops=1)",
+                )],
+                &[Some("  Buffers: shared hit=17")],
+                &[Some(
+                    "  ->  Seq Scan on fz_scalar  (cost=0.00..14.00 rows=400 width=38) \
+                     (actual time=0.005..0.006 rows=8.00 loops=1)",
+                )],
+                &[Some("        Buffers: shared hit=1")],
+                &[Some("Planning:")],
+                &[Some("  Buffers: shared hit=109")],
+                &[Some("Planning Time: 0.231 ms")],
+                &[Some("Execution Time: 0.351 ms")],
+            ]),
+        );
+        // B: warm session — zero planning buffer touches, block absent
+        // (6 rows).
+        let b = rowset(
+            vec![25],
+            rows(&[
+                &[Some(
+                    "Update on fz_scalar  (cost=0.00..14.00 rows=0 width=0) \
+                     (actual time=0.031..0.031 rows=0.00 loops=1)",
+                )],
+                &[Some("  Buffers: shared hit=17")],
+                &[Some(
+                    "  ->  Seq Scan on fz_scalar  (cost=0.00..14.00 rows=400 width=38) \
+                     (actual time=0.004..0.004 rows=8.00 loops=1)",
+                )],
+                &[Some("        Buffers: shared hit=1")],
+                &[Some("Planning Time: 0.114 ms")],
+                &[Some("Execution Time: 0.076 ms")],
+            ]),
+        );
+        let sql = "explain analyse update fz_scalar * fz_scalar set k_text = default ;";
+        let c = classify(&DiffInput {
+            sql,
+            a: &a,
+            b: &b,
+            ulp_tol: 4,
+            soft_cols: &[],
+            mask_explain_timing: true,
+        });
+        assert_eq!(c.class, DiffClass::Ruled("explain-planning-buffers".to_string()));
+        // Also resolves without the timing opt-in when the timing text
+        // happens to match (plain EXPLAIN under BUFFERS).
+        let a2 = rowset(
+            vec![25],
+            rows(&[
+                &[Some("Seq Scan on t  (cost=0.00..1.00 rows=1 width=4)")],
+                &[Some("Planning:")],
+                &[Some("  Buffers: shared hit=5 read=2")],
+            ]),
+        );
+        let b2 = rowset(
+            vec![25],
+            rows(&[&[Some("Seq Scan on t  (cost=0.00..1.00 rows=1 width=4)")]]),
+        );
+        let c = classify_sql("explain select * from t ;", &a2, &b2);
+        assert_eq!(c.class, DiffClass::Ruled("explain-planning-buffers".to_string()));
+        // Residual structural diff still escalates: dropping the block
+        // must not hide a real plan-shape divergence.
+        let b3 = rowset(
+            vec![25],
+            rows(&[&[Some("Index Scan using t_pkey on t  (cost=0.00..1.00 rows=1 width=4)")]]),
+        );
+        let c = classify_sql("explain select * from t ;", &a2, &b3);
+        assert_eq!(c.class, DiffClass::RowsetDiff);
+        // Non-EXPLAIN statements never receive the candidate.
+        let c = classify_sql("select * from t ;", &a2, &b2);
+        assert_eq!(c.class, DiffClass::RowsetDiff);
+    }
+
+    #[test]
+    fn planning_buffer_strip_shape() {
+        let r = rows(&[
+            &[Some("Result")],
+            &[Some("Planning:")],
+            &[Some("  Buffers: shared hit=3")],
+            &[Some("  I/O Timings: shared read=0.1")],
+            &[Some("  Memory: used=8kB  allocated=16kB")],
+            &[Some("Planning Time: 0.1 ms")],
+        ]);
+        let stripped = strip_planning_buffer_rows(&r);
+        assert_eq!(
+            stripped,
+            rows(&[&[Some("Result")], &[Some("Planning Time: 0.1 ms")]])
+        );
+        // A row spelled "Planning:" deeper in a plan tree strips with its
+        // own children only; unrelated rows survive.
+        let r = rows(&[
+            &[Some("Planning:")],
+            &[Some("  Buffers: shared hit=3")],
+            &[Some("Execution Time: 1 ms")],
+        ]);
+        assert_eq!(
+            strip_planning_buffer_rows(&r),
+            rows(&[&[Some("Execution Time: 1 ms")]])
+        );
+        // Non-counter children terminate the block.
+        let r = rows(&[
+            &[Some("Planning:")],
+            &[Some("  Something Else: 3")],
+        ]);
+        assert_eq!(
+            strip_planning_buffer_rows(&r),
+            rows(&[&[Some("  Something Else: 3")]])
+        );
     }
 
     #[test]
