@@ -238,6 +238,15 @@ fn install_catalog_fixture() {
                 typstorage: b'x' as i8,
                 typcollation: 100,
             }),
+            // date, for the SQLValueFunction EXPLAIN-shape test (no I/O
+            // shape needed: EXPLAIN never renders a date value).
+            1082 => Some(types_tuple::PgTypeShape {
+                typlen: 4,
+                typbyval: true,
+                typalign: b'i' as i8,
+                typstorage: types_tuple::TYPSTORAGE_PLAIN,
+                typcollation: 0,
+            }),
             _ => None,
         })
     });
@@ -1138,5 +1147,39 @@ fn explain_generate_series_matches_live_pg_shape() {
     assert_eq!(
         line,
         "Function Scan on generate_series  (cost=0.00..0.10 rows=10 width=4)"
+    );
+}
+
+// Antithesis r20 rowsfrom-cdate (run 267fff0cefb579e92d1c6a7736b1e55d-59-13,
+// seed 3900666266787178552; reduced repro `explain ( select from lateral rows
+// from ( current_date , current_date ) for update ) ;`): cost_qual_eval_walker
+// charged nothing for SQLValueFunction, so a ROWS FROM (current_date,
+// current_date) function scan printed cost=0.00..0.01 where C's "treat all
+// these as having cost 1" arm (costsize.c) yields cost=0.01..0.01. The FOR
+// UPDATE decoration is orthogonal to the cost bug and needs seams this
+// harness does not install, so the test uses the minimal diverging shape.
+#[test]
+fn explain_rows_from_sqlvaluefunction_matches_live_pg_shape() {
+    install_fixtures();
+
+    let input: Vec<u8> = [
+        simple_query_msg("explain select from rows from (current_date, current_date)"),
+        msg(b'X', &[]),
+    ]
+    .concat();
+    let wire = run_session(input);
+    let all = frames(&wire);
+
+    let datarows: Vec<&Vec<u8>> = all.iter().filter(|(t, _)| *t == b'D').map(|(_, b)| b).collect();
+    let errs: Vec<String> = all
+        .iter()
+        .filter(|(t, _)| *t == b'E')
+        .filter_map(|(_, b)| error_field(b, b'M'))
+        .collect();
+    assert_eq!(datarows.len(), 1, "errors: {errs:?}");
+    let line = core::str::from_utf8(&datarows[0][6..]).unwrap();
+    assert_eq!(
+        line,
+        "Function Scan on \"current_date\"  (cost=0.01..0.01 rows=1 width=0)"
     );
 }

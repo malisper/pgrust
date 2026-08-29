@@ -89,13 +89,17 @@ fn cost_qual_eval_walker<'mcx>(
     cost: &mut QualCost,
 ) -> PgResult<()> {
     match node.node_tag() {
-        // SQLValueFunction: no explicit C case; childless leaf, no charge.
         NodeTag::T_Var
         | NodeTag::T_Const
         | NodeTag::T_Param
-        | NodeTag::T_SQLValueFunction
-        | NodeTag::T_MergeSupportFunc
-        | NodeTag::T_NextValueExpr => Ok(()),
+        | NodeTag::T_MergeSupportFunc => Ok(()),
+        // C's "treat all these as having cost 1" arm (with MinMaxExpr,
+        // XmlExpr, CoerceToDomain, JsonExpr below): a flat cpu_operator_cost.
+        // These two are childless leaves, so no recursion.
+        NodeTag::T_SQLValueFunction | NodeTag::T_NextValueExpr => {
+            cost.per_tuple += gucs::cpu_operator_cost();
+            Ok(())
+        }
         // C charges nothing for Aggref/WindowFunc themselves and does not
         // descend: their costs are get_agg_clause_costs'/cost_windowagg's job.
         NodeTag::T_Aggref | NodeTag::T_WindowFunc => Ok(()),
@@ -139,7 +143,10 @@ fn cost_qual_eval_walker<'mcx>(
             planner_seams::add_function_cost::call(outfunc, cost)?;
             cost_qual_eval_walker(run.as_deref_mut(), c.arg, cost)
         }
+        // C's "cost 1" arm charges a flat cpu_operator_cost, then falls
+        // through to expression_tree_walker for the argument.
         NodeTag::T_CoerceToDomain => {
+            cost.per_tuple += gucs::cpu_operator_cost();
             cost_qual_eval_walker(run.as_deref_mut(), node.as_coerce_to_domain().unwrap().arg, cost)
         }
         // C charges the per-element expression once per estimated element,
@@ -385,9 +392,11 @@ fn cost_qual_eval_walker<'mcx>(
             Some(e) => cost_qual_eval_walker(run.as_deref_mut(), e, cost),
             None => Ok(()),
         },
-        // No C case: both fall to C's expression_tree_walker default.
+        // C's "cost 1" arm charges XmlExpr a flat cpu_operator_cost, then
+        // falls through to expression_tree_walker for the children.
         NodeTag::T_XmlExpr => {
             let x = node.as_xml_expr().unwrap();
+            cost.per_tuple += gucs::cpu_operator_cost();
             for a in x.named_args.iter().chain(x.args.iter()) {
                 cost_qual_eval_walker(run.as_deref_mut(), a, cost)?;
             }
