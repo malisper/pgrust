@@ -955,7 +955,10 @@ pub fn AlterTypeOwner<'mcx>(
     objecttype: ObjectType,
 ) -> PgResult<ObjectAddress> {
     let typename = typename_from_list(mcx, names)?;
-    let (type_oid, _) = parse_utilcmd::typenameTypeIdAndMod(mcx, None, &typename)?;
+    // C: "Use LookupTypeName here so that shell types can be processed" —
+    // ALTER TYPE ... OWNER TO succeeds on a shell type; never raise
+    // "type ... is only a shell" here (a fuzzing round shelltype).
+    let type_oid = parse_utilcmd::LookupTypeNameOidAllowShell(mcx, &typename)?;
     let row = fetch_type_row(mcx, type_oid)?;
 
     if objecttype == ObjectType::OBJECT_DOMAIN && row.typtype != TYPTYPE_DOMAIN {

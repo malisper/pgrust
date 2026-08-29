@@ -156,7 +156,11 @@ pub fn LookupOperWithArgs(
         let t = n
             .as_variant::<types_nodes::rawnodes::TypeName>()
             .expect("oper_argtypes holds TypeName nodes");
-        oids[i] = parse_utilcmd::LookupTypeNameOidExtended(scratch.mcx(), t, noError)?;
+        // C uses LookupTypeNameOid, which returns shell types: a shell
+        // argument type resolves here and the operator lookup below fails
+        // with 42883 "operator does not exist: ...", never 42704
+        // "type ... is only a shell" (a fuzzing round shelltype).
+        oids[i] = parse_utilcmd::LookupTypeNameOidExtendedAllowShell(scratch.mcx(), t, noError)?;
     }
     LookupOperName(oper_name, oids[0], oids[1], noError)
 }

@@ -426,6 +426,23 @@ pub fn LookupTypeNameOidAllowShell<'mcx>(mcx: Mcx<'mcx>, tn: &TypeName<'_>) -> P
     lookup_type_name_oid_internal(mcx, tn, false, true)
 }
 
+/// LookupTypeNameOidExtended without the shell-type fence, for the C-parity
+/// consumers of LookupTypeNameOid that must see shell types:
+/// - LookupOperWithArgs (parse_oper.c): operator DDL resolves argument type
+///   names with LookupTypeNameOid, so a shell argument type resolves and the
+///   subsequent operator lookup fails with 42883 "operator does not exist:
+///   ..." (never "type ... is only a shell") — a fuzzing round shelltype.
+/// - AlterTypeOwner (typecmds.c): "Use LookupTypeName here so that shell
+///   types can be processed" — ALTER TYPE ... OWNER TO succeeds on a shell
+///   type.
+pub fn LookupTypeNameOidExtendedAllowShell<'mcx>(
+    mcx: Mcx<'mcx>,
+    tn: &TypeName<'_>,
+    missing_ok: bool,
+) -> PgResult<Oid> {
+    lookup_type_name_oid_internal(mcx, tn, missing_ok, true)
+}
+
 fn lookup_type_name_oid_internal<'mcx>(
     mcx: Mcx<'mcx>,
     tn: &TypeName<'_>,
@@ -4112,6 +4129,20 @@ mod tests {
         assert_eq!(err.message(), "type \"smallint\" is only a shell");
         let err = LookupTypeNameOid(mcx, tn).unwrap_err();
         assert_eq!(err.message(), "type \"smallint\" is only a shell");
+    }
+
+    #[test]
+    fn allow_shell_lanes_return_shell_types() {
+        // C's LookupTypeName/LookupTypeNameOid return shell types; the
+        // C-parity consumers (GRANT object resolution, AlterTypeOwner,
+        // LookupOperWithArgs — a fuzzing round shelltype) must get the OID
+        // back, never "type ... is only a shell".
+        install_type_seams();
+        let mcx = ctx().mcx();
+        let tn = mk_type_name(mcx, &[], false, false, INT2OID);
+        assert_eq!(LookupTypeNameOidAllowShell(mcx, tn).unwrap(), INT2OID);
+        assert_eq!(LookupTypeNameOidExtendedAllowShell(mcx, tn, false).unwrap(), INT2OID);
+        assert_eq!(LookupTypeNameOidExtendedAllowShell(mcx, tn, true).unwrap(), INT2OID);
     }
 
     #[test]
