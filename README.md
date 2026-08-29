@@ -23,7 +23,9 @@
 
 <br />
 
-> **New:** [How AI Changes the Economics of JIT Compilers](https://malisper.me/how-ai-changes-the-economics-of-jit-compilers/)
+> **New:** [Slides from Michael's talk at PlanetScale on pgrust](https://drive.google.com/file/d/1_wDk4HPE9-MuiPBo_X-QdJUmFtVV0p8p/view) — the full talk video is coming soon.
+>
+> [How AI Changes the Economics of JIT Compilers](https://malisper.me/how-ai-changes-the-economics-of-jit-compilers/)
 
 pgrust is a re-implementation of Postgres meant to show what Postgres would
 look like if it was built in 2026. It is wire compatible and even SQL dialect
