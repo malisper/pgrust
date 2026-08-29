@@ -210,10 +210,22 @@ fn set_subquery_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> Pg
 
     crate::costsize::set_subquery_size_estimates(run, rel)?;
 
-    let sub = run.rte(rti).subquery.expect("RTE_SUBQUERY has a subquery");
+    // C compares against subquery->targetList (allpaths.c:2715) AFTER
+    // subquery_planner ran — whose preprocess_targetlist lappends rowmark
+    // junk TLEs onto the SELECT's parse targetList IN PLACE, so for a
+    // FOR UPDATE/SHARE subquery that list already carries the junk ctid
+    // and the length test fails (the SubqueryScan is non-trivial: its
+    // tlist drops the junk, and cost_subqueryscan must charge for it).
+    // This lane's preprocess_targetlist clones instead of scribbling, so
+    // read the subroot's processed tlist — for a SELECT subquery C's
+    // parse targetList and processed_tlist are literally the same List.
+    let sub_tlist_len = run.rel_subroots[idx]
+        .processed_tlist
+        .map(|tl| tl.len())
+        .unwrap_or_else(|| run.rte(rti).subquery.expect("RTE_SUBQUERY has a subquery").targetList.len());
     let trivial_pathtarget = {
         let rt = run.root.rel_reltarget(rel);
-        if rt.exprs.len() != sub.targetList.len() {
+        if rt.exprs.len() != sub_tlist_len {
             false
         } else {
             let mut ok = true;
