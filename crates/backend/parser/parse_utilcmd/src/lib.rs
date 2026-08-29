@@ -2293,6 +2293,18 @@ fn transform_index_constraints<'mcx>(
                 | ConstrType::CONSTR_EXCLUSION
         ));
         let is_exclusion = constraint.contype == ConstrType::CONSTR_EXCLUSION;
+        // transformIndexConstraint checks the duplicate primary key at the
+        // top of the function, before the USING INDEX rejection
+        // (parse_utilcmd.c:2352 precedes :2419): a constraint that is both
+        // the second PRIMARY KEY and a USING INDEX form reports 42P16, not
+        // 0A000 (a fuzzing round pkusingindex).
+        if constraint.contype == ConstrType::CONSTR_PRIMARY && pkey.is_some() {
+            return Err(cursor_at(
+                multiple_pkeys(relname, constraint.location),
+                Some(src.as_bytes()),
+                constraint.location,
+            ));
+        }
         if constraint.indexname.is_some() {
             return Err(cursor_at(
                 Box::new(
@@ -2309,11 +2321,6 @@ fn transform_index_constraints<'mcx>(
         let mut index = Node::build::<IndexStmt>(mcx)?;
         index.unique = !is_exclusion;
         index.primary = constraint.contype == ConstrType::CONSTR_PRIMARY;
-        if index.primary {
-            if pkey.is_some() {
-                return Err(multiple_pkeys(relname, constraint.location));
-            }
-        }
         index.nulls_not_distinct = constraint.nulls_not_distinct;
         index.isconstraint = true;
         index.iswithoutoverlaps = constraint.without_overlaps;
@@ -3968,6 +3975,66 @@ mod tests {
         .unwrap();
         let alist = run_transform(mcx, &columns, &ix).unwrap();
         assert_eq!(alist.len(), 2);
+    }
+
+    #[test]
+    fn transform_index_constraint_using_index_rejected_in_create() {
+        // CREATE TABLE ... PRIMARY KEY USING INDEX x (not a duplicate PK) is
+        // the 0A000 feature-not-supported rejection (parse_utilcmd.c:2419).
+        let mcx = ctx().mcx();
+        let columns = mk_columns(mcx, &["a"]);
+        let con = mk_unique_constraint(mcx, ConstrType::CONSTR_PRIMARY, &[], &[]);
+        // SAFETY: parse tree is test-owned; no derived refs.
+        unsafe {
+            con.with_mut::<Constraint, _>(|c| c.indexname = Some("gw_b")).unwrap();
+        }
+        let ix = NodeList::make1(mcx, con).unwrap();
+        let e = run_transform(mcx, &columns, &ix).unwrap_err();
+        assert_eq!(e.message(), "cannot use an existing index in CREATE TABLE");
+        assert_eq!(e.sqlstate(), ERRCODE_FEATURE_NOT_SUPPORTED);
+    }
+
+    #[test]
+    fn transform_index_constraint_dup_pkey_beats_using_index() {
+        // a fuzzing round pkusingindex (run b06122a0724ea9d22a905d228d73548d-59-13,
+        // seed 1833222682333586209): a second PRIMARY KEY that is also a USING
+        // INDEX form reports 42P16 multiple-primary-keys, not the 0A000 USING
+        // INDEX rejection — upstream checks the duplicate PK at the top of
+        // transformIndexConstraint (parse_utilcmd.c:2352 precedes :2419).
+        let mcx = ctx().mcx();
+        let columns = mk_columns(mcx, &["a"]);
+        let mut ix = NodeList::nil();
+        ix.lappend(mcx, mk_unique_constraint(mcx, ConstrType::CONSTR_PRIMARY, &["a"], &[]))
+            .unwrap();
+        let con2 = mk_unique_constraint(mcx, ConstrType::CONSTR_PRIMARY, &[], &[]);
+        // SAFETY: parse tree is test-owned; no derived refs.
+        unsafe {
+            con2.with_mut::<Constraint, _>(|c| c.indexname = Some("gw_b")).unwrap();
+        }
+        ix.lappend(mcx, con2).unwrap();
+        let e = run_transform(mcx, &columns, &ix).unwrap_err();
+        assert_eq!(e.message(), "multiple primary keys for table \"t\" are not allowed");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INVALID_TABLE_DEFINITION);
+    }
+
+    #[test]
+    fn transform_index_constraint_first_using_index_pk_still_0a000() {
+        // Two PK USING INDEX constraints: the first is not a duplicate yet, so
+        // the USING INDEX rejection fires on it (matches C 18.3 ordering).
+        let mcx = ctx().mcx();
+        let columns = mk_columns(mcx, &["a"]);
+        let mut ix = NodeList::nil();
+        for name in ["tablespace", "gw_b"] {
+            let con = mk_unique_constraint(mcx, ConstrType::CONSTR_PRIMARY, &[], &[]);
+            // SAFETY: parse tree is test-owned; no derived refs.
+            unsafe {
+                con.with_mut::<Constraint, _>(|c| c.indexname = Some(name)).unwrap();
+            }
+            ix.lappend(mcx, con).unwrap();
+        }
+        let e = run_transform(mcx, &columns, &ix).unwrap_err();
+        assert_eq!(e.message(), "cannot use an existing index in CREATE TABLE");
+        assert_eq!(e.sqlstate(), ERRCODE_FEATURE_NOT_SUPPORTED);
     }
 
     fn mk_con(mcx: Mcx<'_>, contype: ConstrType) -> Node<'_> {
