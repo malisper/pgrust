@@ -2270,6 +2270,56 @@ fn make_not_null_constraint<'mcx>(mcx: Mcx<'mcx>, colname: &'mcx str) -> PgResul
 // `columns` are left for DefineIndex, and PK not-null forcing is skipped
 // (ATPrepAddPrimaryKey / transformColumnDefinition already handled it,
 // parse_utilcmd.c:2634-2668,2727-2733).
+// Included columns (parse_utilcmd.c:2841-2929): no NOT NULL forcing, no
+// duplicate complaints. C runs this loop after the key columns, so key-column
+// errors (missing column, non-range WITHOUT OVERLAPS column) fire before a
+// missing INCLUDE column is reported.
+fn build_including_params<'mcx>(
+    mcx: Mcx<'mcx>,
+    including: &NodeList<'mcx>,
+    columns: &NodeList<'mcx>,
+    inh_relations: &NodeList<'mcx>,
+    nnconstraints: &mut NodeList<'mcx>,
+    location: i32,
+    src: &str,
+    isalter: bool,
+) -> PgResult<NodeList<'mcx>> {
+    let mut including_params = NodeList::nil();
+    for keynode in including.iter() {
+        let key = keynode.as_string().expect("constraint including").sval;
+        let mut found = columns
+            .iter()
+            .any(|cn| cn.as_variant::<ColumnDef>().expect("ColumnDef").colname == Some(key));
+        if !found {
+            if catalog_heap::SystemAttributeByName(key).is_some() {
+                found = true;
+            } else if !inh_relations.is_nil() {
+                found = key_found_in_inh_relations(
+                    mcx,
+                    key,
+                    false,
+                    inh_relations,
+                    nnconstraints,
+                )?
+                .is_some();
+            }
+        }
+        if !found && !isalter {
+            return Err(cursor_at(
+                key_column_missing(key, location),
+                Some(src.as_bytes()),
+                location,
+            ));
+        }
+        let mut iparam = Node::build::<IndexElem>(mcx)?;
+        iparam.name = Some(key);
+        iparam.ordering = SortByDir::SORTBY_DEFAULT;
+        iparam.nulls_ordering = SortByNulls::SORTBY_NULLS_DEFAULT;
+        including_params.lappend(mcx, iparam.seal())?;
+    }
+    Ok(including_params)
+}
+
 fn transform_index_constraints<'mcx>(
     mcx: Mcx<'mcx>,
     relname: &str,
@@ -2337,42 +2387,6 @@ fn transform_index_constraints<'mcx>(
                 .expect("Constraint");
         index.tableSpace = constraint.indexspace;
         index.reset_default_tblspc = constraint.reset_default_tblspc;
-        // Included columns (parse_utilcmd.c:2841-2929): no NOT NULL forcing,
-        // no duplicate complaints.
-        let mut including_params = NodeList::nil();
-        for keynode in constraint.including.iter() {
-            let key = keynode.as_string().expect("constraint including").sval;
-            let mut found = columns
-                .iter()
-                .any(|cn| cn.as_variant::<ColumnDef>().expect("ColumnDef").colname == Some(key));
-            if !found {
-                if catalog_heap::SystemAttributeByName(key).is_some() {
-                    found = true;
-                } else if !inh_relations.is_nil() {
-                    found = key_found_in_inh_relations(
-                        mcx,
-                        key,
-                        false,
-                        inh_relations,
-                        nnconstraints,
-                    )?
-                    .is_some();
-                }
-            }
-            if !found && !isalter {
-                return Err(cursor_at(
-                    key_column_missing(key, constraint.location),
-                    Some(src.as_bytes()),
-                    constraint.location,
-                ));
-            }
-            let mut iparam = Node::build::<IndexElem>(mcx)?;
-            iparam.name = Some(key);
-            iparam.ordering = SortByDir::SORTBY_DEFAULT;
-            iparam.nulls_ordering = SortByNulls::SORTBY_NULLS_DEFAULT;
-            including_params.lappend(mcx, iparam.seal())?;
-        }
-        index.indexIncludingParams = including_params;
 
         if is_exclusion {
             let mut index_params = NodeList::nil();
@@ -2384,6 +2398,16 @@ fn transform_index_constraints<'mcx>(
             }
             index.indexParams = index_params;
             index.excludeOpNames = exclude_op_names;
+            index.indexIncludingParams = build_including_params(
+                mcx,
+                &constraint.including,
+                columns,
+                inh_relations,
+                nnconstraints,
+                constraint.location,
+                src,
+                isalter,
+            )?;
             indexlist.lappend(mcx, index.seal())?;
             continue;
         }
@@ -2514,6 +2538,20 @@ fn transform_index_constraints<'mcx>(
             // WITHOUT OVERLAPS requires a GiST index.
             index.accessMethod = Some("gist");
         }
+        // Included columns come after the key columns (and after the
+        // WITHOUT OVERLAPS checks above), matching C's statement order:
+        // a bad key column is reported before a missing INCLUDE column
+        // (a fuzzing round overlaps-prec).
+        index.indexIncludingParams = build_including_params(
+            mcx,
+            &constraint.including,
+            columns,
+            inh_relations,
+            nnconstraints,
+            constraint.location,
+            src,
+            isalter,
+        )?;
         let index_node = {
             index.indexParams = index_params;
             index.seal()
@@ -3957,6 +3995,27 @@ mod tests {
         let ix = NodeList::make1(mcx, con).unwrap();
         let e = run_transform(mcx, &columns, &ix).unwrap_err();
         assert_eq!(e.message(), "column \"z\" named in key does not exist");
+    }
+
+    #[test]
+    fn transform_index_constraint_overlaps_before_include() {
+        // a fuzzing round overlaps-prec (run 1701f43cdb3787befc34cc00308f1a29-59-13,
+        // seed 764198082900334493): C processes key columns — including the
+        // WITHOUT OVERLAPS range/multirange check (parse_utilcmd.c:2808) —
+        // before the INCLUDE list (parse_utilcmd.c:2841), so a non-range
+        // overlaps column is reported before a missing INCLUDE column.
+        let mcx = ctx().mcx();
+        let columns = mk_columns(mcx, &["a", "r"]);
+        let con = mk_unique_constraint(mcx, ConstrType::CONSTR_UNIQUE, &["a", "r"], &["z"]);
+        unsafe {
+            con.with_mut::<Constraint, _>(|c| c.without_overlaps = true).unwrap();
+        }
+        let ix = NodeList::make1(mcx, con).unwrap();
+        let e = run_transform(mcx, &columns, &ix).unwrap_err();
+        assert_eq!(
+            e.message(),
+            "column \"r\" in WITHOUT OVERLAPS is not a range or multirange type"
+        );
     }
 
     #[test]
