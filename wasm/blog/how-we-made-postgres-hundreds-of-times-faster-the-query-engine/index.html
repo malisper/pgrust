@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rebuilding Postgres for 300x faster analytics: batching, operator fusion, and SIMD | pgrust</title>
+<meta name="description" content="How batching, operator fusion, and SIMD made pgrust analytical queries hundreds of times faster than PostgreSQL.">
+<link rel="canonical" href="https://pgrust.com/blog/how-we-made-postgres-hundreds-of-times-faster-the-query-engine/">
+<link rel="alternate" type="application/rss+xml" title="pgrust blog" href="https://pgrust.com/blog/feed.xml">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="icon" type="image/png" sizes="48x48" href="/favicon-48x48.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+<link rel="manifest" href="/site.webmanifest">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/blog/blog.css">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="pgrust">
+<meta property="og:title" content="Rebuilding Postgres for 300x faster analytics: batching, operator fusion, and SIMD">
+<meta property="og:description" content="How batching, operator fusion, and SIMD made pgrust analytical queries hundreds of times faster than PostgreSQL.">
+<meta property="og:url" content="https://pgrust.com/blog/how-we-made-postgres-hundreds-of-times-faster-the-query-engine/">
+<meta property="og:image" content="https://pgrust.com/blog/assets/query-engine.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Rebuilding Postgres for 300x faster analytics: batching, operator fusion, and SIMD">
+<meta name="twitter:description" content="How batching, operator fusion, and SIMD made pgrust analytical queries hundreds of times faster than PostgreSQL.">
+<meta name="twitter:image" content="https://pgrust.com/blog/assets/query-engine.png">
+<meta property="article:published_time" content="2026-08-03T03:00:39-07:00">
+<meta property="article:modified_time" content="2026-08-07T12:48:15-07:00">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"Article","headline":"Rebuilding Postgres for 300x faster analytics: batching, operator fusion, and SIMD","description":"How batching, operator fusion, and SIMD made pgrust analytical queries hundreds of times faster than PostgreSQL.","image":"https://pgrust.com/blog/assets/query-engine.png","datePublished":"2026-08-03T03:00:39-07:00","dateModified":"2026-08-07T12:48:15-07:00","author":{"@type":"Person","name":"Michael Malis"},"publisher":{"@type":"Organization","name":"pgrust","url":"https://pgrust.com/"},"mainEntityOfPage":"https://pgrust.com/blog/how-we-made-postgres-hundreds-of-times-faster-the-query-engine/"}</script>
+</head>
+<body>
+<header class="site-header">
+  <div class="site-header-inner">
+    <a class="wordmark" href="/">pgrust</a>
+    <nav class="site-nav" aria-label="Primary">
+      <a href="/">Demo</a>
+      <a href="/blog/" aria-current="page">Blog</a>
+      <a href="https://github.com/malisper/pgrust">GitHub</a>
+      <a class="nav-updates" href="/#updates">Updates</a>
+    </nav>
+  </div>
+</header>
+<main class="article-shell">
+  <article>
+    <header class="article-header">
+      <p class="eyebrow">pgrust engineering</p>
+      <h1>Rebuilding Postgres for 300x faster analytics: batching, operator fusion, and SIMD</h1>
+      <p class="article-dek">How batching, operator fusion, and SIMD made pgrust analytical queries hundreds of times faster than PostgreSQL.</p>
+      <p class="article-meta">Michael Malis · <time datetime="2026-08-03T03:00:39-07:00">August 3, 2026</time></p>
+    </header>
+    <img class="article-hero" src="/blog/assets/query-engine.png" alt="" fetchpriority="high">
+    <div class="article-body"><p>Last week we released <a href="https://github.com/malisper/pgrust">version 0.2 of pgrust</a>. This release was all about performance. It&#8217;s 10x faster than the previous version of pgrust. On OLTP benchmarks, pgrust is 30% faster than Postgres, and <a href="https://benchmark.clickhouse.com/#system=+liH|pgrs|gQ&amp;type=-&amp;machine=-6t|ca2|6ax|g4e|6ale|3al&amp;cluster_size=-&amp;opensource=-&amp;hardware=+c&amp;tuned=+n&amp;metric=combined&amp;queries=-">on Clickbench, Clickhouse&#8217;s benchmark for analytical databases, pgrust is 300x faster than Postgres. It&#8217;s even ahead of Clickhouse!</a></p>
+<p>The query engine is one of the biggest changes we made to achieve much better performance. On its own, the query engine drove ~10x of the 300x. We&#8217;ll start with a miniature version of the Postgres query engine and we&#8217;ll one by one add the same optimizations we made to make the pgrust query engine so fast.</p>
+<p>To give some background on why there&#8217;s so much room for improvement vs Postgres, Postgres was created in a different era. The original Postgres project dates back to the 80s. It was built at a time when the main bottleneck to database performance was disk I/O. Three trends have made that no longer the case:</p>
+<ol>
+<li>Many datasets now fit in RAM, eliminating most disk I/O</li>
+<li>For datasets that don&#8217;t fit in RAM, the workloads differ. Data analytics scans data in bulk. The bottleneck is often no longer your disk throughput and is often either your CPU throughput or memory throughput</li>
+<li>Disks have gotten much faster in recent years. NVMe is hundreds of times faster than a hard drive.</li>
+</ol>
+<p>All three trends have made CPU and memory speeds more important than they were historically. Many of the optimizations we&#8217;ve made target this. The query engine is the main user of CPU in a database. We optimized the pgrust query engine to use less CPU and less memory bandwidth than Postgres when processing the same queries.</p>
+<hr />
+<p>To give you a sense of just how slow the Postgres query engine is, let&#8217;s take a simple query that sums the first 500 million numbers:</p>
+<pre data-language="sql"><code>
+CREATE TABLE my_table AS select col::float8 from generate_series(1.0, 500000000.0) g(col);
+SELECT SUM(col) FROM my_table;
+</code></pre>
+<p>When I run this in Postgres, it takes ~20 seconds. This was done on a c8g.4xl with parallel queries disabled.</p>
+<p>For comparison, when I time the equivalent in Rust:</p>
+<pre data-language="rust"><code>
+let table: Vec&lt;f64&gt; = (1..=500_000_000usize).map(|i| i as f64).collect();
+
+let mut sum = 0.0;
+for &amp;value in &amp;table {
+    sum += value;
+}
+</code></pre>
+<p>The query takes 358ms. That&#8217;s around 55x faster, and believe it or not, we can do even faster than 358ms. Now this example isn&#8217;t an apples-to-apples comparison. There&#8217;s a lot more going on under the hood in Postgres. At the same time, optimizing a database is all about removing as much of this overhead as possible. (If you&#8217;re curious two of the biggest causes of overhead from Postgres are 1. locking and 2. parsing the Postgres storage format and extracting the tuples relevant to the query).</p>
+<p>To narrow our focus to just the impact of the query engine, let&#8217;s build a miniature version of the Postgres query engine. First, a brief explanation of what a query engine is. When processing your SQL query, Postgres first converts your query into an internal representation called a &#8220;Query Plan,&#8221; which describes *how* Postgres will execute the query. In the example above, Postgres will produce a query plan that may look something like the following:</p>
+<p><img loading="lazy" decoding="async" class="size-medium wp-image-1636 aligncenter" src="/blog/assets/query-engine.png" alt="" width="300" height="129" /></p>
+<p>This effectively says &#8220;get rows from my_table and sum the values in those rows&#8221;. This query plan is pretty simple given the nature of the query, but they can get much more complicated when you start working with joins/sorts/subqueries etc. In total Postgres has over 40 different types of plan nodes.</p>
+<p>After generating the query plan, Postgres passes it to the query engine. The Postgres query engine is the part of Postgres that takes the query plan and actually retrieves the rows and performs the aggregation. Postgres uses a style of executor known as the &#8220;Volcano model.&#8221; To get a sense of how it works, here&#8217;s a miniature implementation of the Postgres query engine:</p>
+<pre data-language="rust"><code>
+use std::hint::black_box;
+
+trait Node {
+    fn next(&amp;mut self) -&gt; Option&lt;f64&gt;;
+}
+
+struct SeqScan&lt;&#039;a&gt; {
+    table: &amp;&#039;a &#x5B;f64],
+    pos: usize,
+}
+
+impl Node for SeqScan&lt;&#039;_&gt; {
+    fn next(&amp;mut self) -&gt; Option&lt;f64&gt; {
+        if self.pos &gt;= self.table.len() {
+            return None; // end of table
+        }
+        let value = self.table&#x5B;self.pos];
+        self.pos += 1;
+        Some(value)
+    }
+}
+
+struct SumAggregate&lt;&#039;a&gt; {
+    child: Box&lt;dyn Node + &#039;a&gt;,
+    total: f64,
+    done: bool,
+}
+
+impl Node for SumAggregate&lt;&#039;_&gt; {
+    fn next(&amp;mut self) -&gt; Option&lt;f64&gt; {
+        if self.done {
+            return None;
+        }
+        while let Some(value) = self.child.next() {
+            self.total += value;
+        }
+        self.done = true;
+        Some(self.total)
+    }
+}
+
+let table: Vec&lt;f64&gt; = (1..=500_000_000usize).map(|i| i as f64).collect();
+
+let mut plan = SumAggregate {
+    child: black_box(Box::new(SeqScan { table: &amp;table, pos: 0 })),
+    total: 0.0,
+    done: false,
+};
+
+let sum = plan.next().unwrap();
+</code></pre>
+<p>(The black_box is needed to prevent compiler optimizations from thwarting our benchmark)</p>
+<p>The key feature of the Volcano model is the `next()` method, which is supported by all nodes in the query plan. The job of `next()` is to return a single row. `next()` in a sequential scan returns the next row in the sequential scan. `next()` on an aggregation will compute the entire aggregation and then return the single row result. Executing a query plan is just a matter of calling `next()` on the root plan node until it no longer returns any rows. The advantage of the Volcano model is that it&#8217;s very simple. You implement a single method for each of your plan nodes, and that&#8217;s it. While simplified, the above code is very close to what Postgres does internally.</p>
+<p>While the Volcano model makes things simple, it also adds a lot of overhead. When I run this example, it takes 1.3s. That&#8217;s much faster than the Postgres version because we&#8217;re removing a lot of the non-query engine pieces, but it&#8217;s still slower than the raw for loop because of the Volcano model&#8217;s overhead.</p>
+<p>The biggest performance hit in the code above is that `next()` processes only one row at a time. There&#8217;s no batching. The `SeqScan.next()` function is called once per row. That adds significant overhead, especially because many CPU optimizations, such as pipelining, don&#8217;t work well when you are calling a function that isn&#8217;t known until runtime. The first optimization we can implement is batching:</p>
+<pre data-language="rust"><code>
+const BATCH: usize = 1024;
+
+trait BatchNode {
+    fn next_batch(&amp;mut self, out: &amp;mut &#x5B;f64; BATCH]) -&gt; usize;
+}
+
+struct BatchSeqScan&lt;&#039;a&gt; {
+    table: &amp;&#039;a &#x5B;f64],
+    pos: usize,
+}
+
+impl BatchNode for BatchSeqScan&lt;&#039;_&gt; {
+    fn next_batch(&amp;mut self, out: &amp;mut &#x5B;f64; BATCH]) -&gt; usize {
+        let n = (self.table.len() - self.pos).min(BATCH);
+        out&#x5B;..n].copy_from_slice(&amp;self.table&#x5B;self.pos..self.pos + n]);
+        self.pos += n;
+        n
+    }
+}
+
+struct BatchSumAggregate&lt;&#039;a&gt; {
+    child: Box&lt;dyn BatchNode + &#039;a&gt;,
+    total: f64,
+}
+
+impl BatchSumAggregate&lt;&#039;_&gt; {
+    fn run(&amp;mut self) -&gt; f64 {
+        let mut buf = &#x5B;0.0f64; BATCH];
+        loop {
+            let n = self.child.next_batch(&amp;mut buf);
+            if n == 0 {
+                break;
+            }
+            for &amp;value in &amp;buf&#x5B;..n] {
+                self.total += value;
+            }
+        }
+        self.total
+    }
+}
+
+let mut plan = BatchSumAggregate {
+    child: black_box(Box::new(BatchSeqScan { table: &amp;table, pos: 0 })),
+    total: 0.0,
+};
+let sum = plan.run();
+</code></pre>
+<p>Batching on its own eliminates most of the overhead. It brings the time to run the query from 1.3 seconds down to around 480ms. Still slower than the for loop, but much closer. One very important detail is that the batch buffer is allocated on the stack. This means the aggregation node doesn&#8217;t need to allocate any memory while it&#8217;s running. Allocating memory tends to be one of the slower operations. Therefore, when writing ultra-fast code, you&#8217;ll want to minimize the number of memory allocations you make.</p>
+<p>Now, if you profile the batched version, the hotspot is now `copy_from_slice`. Even though we are now batching, we still need to copy the items into the buffer. This overhead can be eliminated with what&#8217;s known as &#8220;operator fusion&#8221;. If there are common operations that we know will be performed together, we can create a single node that replaces two nodes. In our case, we can create a single `SumAggregateSequentialScan` node that combines the logic of both the sequential scan and the sum:</p>
+<pre data-language="rust"><code>
+struct SumAggregateSequentialScan&lt;&#039;a&gt; {
+    table: &amp;&#039;a &#x5B;f64],
+    done: bool,
+}
+
+impl Node for SumAggregateSequentialScan&lt;&#039;_&gt; {
+    fn next(&amp;mut self) -&gt; Option&lt;f64&gt; {
+        if self.done {
+            return None;
+        }
+        self.done = true;
+        let mut total = 0.0;
+        for &amp;value in self.table {
+            total += value;
+        }
+        Some(total)
+    }
+}
+</code></pre>
+<p>This gives us the same performance as the straight for loop because it is literally the same code as the for loop. Now this may seem like cheating, and it definitely is because we&#8217;re hardcoding in an optimization for a specific query we know in advance. With operator fusion, it makes sense to hardcode a couple of the most common cases, but you&#8217;ll still pretty quickly hit cases you didn&#8217;t prepare for ahead of time.</p>
+<p>This can be solved with JIT compilation. With JIT compilation, you can generate the ideal code you wish you had and &#8220;cheat&#8221; in every query. JIT compilation lets you generate the perfect code for your query, no matter what the query is and always do operator fusion. Unfortunately, this post is long enough as is, so I&#8217;ll have to talk about how pgrust leverages JIT compilation another time.</p>
+<p>For one final optimization, we can look to SIMD. SIMD refers to a set of CPU operations that can perform one operation across multiple pieces of data simultaneously. Using SIMD to perform an operation against multiple rows simultaneously is usually much faster than performing the operation on one row at a time. If we change our code to use SIMD:</p>
+<pre data-language="rust"><code>
+#&#x5B;cfg(target_arch = &quot;aarch64&quot;)]
+struct SumAggregateSequentialScanSimd&lt;&#039;a&gt; {
+    table: &amp;&#039;a &#x5B;f64],
+    done: bool,
+}
+
+#&#x5B;cfg(target_arch = &quot;aarch64&quot;)]
+impl Node for SumAggregateSequentialScanSimd&lt;&#039;_&gt; {
+    fn next(&amp;mut self) -&gt; Option&lt;f64&gt; {
+        if self.done {
+            return None;
+        }
+        self.done = true;
+        use std::arch::aarch64::*;
+        let mut acc = unsafe { &#x5B;vdupq_n_f64(0.0); 4] };
+        let (chunks, rest) = self.table.as_chunks::&lt;8&gt;();
+        for chunk in chunks {
+            for lane in 0..4 {
+                unsafe {
+                    let v = vld1q_f64(chunk.as_ptr().add(2 * lane));
+                    acc&#x5B;lane] = vaddq_f64(acc&#x5B;lane], v);
+                }
+            }
+        }
+        let mut tail = 0.0;
+        for &amp;value in rest {
+            tail += value;
+        }
+        Some(unsafe {
+            let s01 = vaddq_f64(acc&#x5B;0], acc&#x5B;1]);
+            let s23 = vaddq_f64(acc&#x5B;2], acc&#x5B;3]);
+            vaddvq_f64(vaddq_f64(s01, s23)) + tail
+        })
+    }
+}
+</code></pre>
+<p>Our code now takes 135ms which is now almost 3x faster than the for loop and 10x faster than our original Volcano code. While it is common for compilers to replace for loops with SIMD equivalents, I chose this example so that wouldn&#8217;t happen. Compilers will usually avoid introducing SIMD when operating on floats, because they will produce a slightly different result. This is because floating point arithmetic is not associative, so changing the order in which you do a sum can produce a slightly different result.</p>
+<p>&#8212;</p>
+<p>All in all, with three simple optimizations, we were able to make our query 10x faster. Here&#8217;s where things ended up:</p>
+<div class="table-scroll" tabindex="0" role="region" aria-label="Scrollable table"><table>
+<thead>
+<tr>
+<th>implementation</th>
+<th>time</th>
+<th>speedup</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Postgres</td>
+<td>~20 s</td>
+<td>—</td>
+</tr>
+<tr>
+<td>Volcano model</td>
+<td>1.3 s</td>
+<td>1×</td>
+</tr>
+<tr>
+<td>+ batching</td>
+<td>480 ms</td>
+<td>2.7×</td>
+</tr>
+<tr>
+<td>+ operator fusion</td>
+<td>358 ms</td>
+<td>3.6×</td>
+</tr>
+<tr>
+<td>+ SIMD</td>
+<td>135 ms</td>
+<td>9.6×</td>
+</tr>
+</tbody>
+</table></div>
+<p>These types of optimizations, and many more, enable pgrust to perform hundreds of times faster than Postgres for analytical queries.</p>
+<p>Benchmark setup: AWS c8g.4xlarge (Graviton4, 16 vCPU), PostgreSQL 18.4 with `max_parallel_workers_per_gather = 0`, data warm in shared buffers, median of 5 runs. Rust built with `cargo build &#8211;release`, 4 runs per implementation, all measured in one process on one machine.</p></div>
+    <footer class="article-footer">
+      <section class="post-cta" aria-label="Follow pgrust">
+  <div class="post-cta-copy">
+    <p class="post-cta-title">Follow the rewrite</p>
+    <p>Star pgrust and keep up with new releases.</p>
+  </div>
+  <nav class="post-cta-actions" aria-label="pgrust community links">
+    <a class="post-cta-primary" href="https://github.com/malisper/pgrust" target="_blank" rel="noopener">Star pgrust on GitHub <span aria-hidden="true">↗</span></a>
+    <a class="post-cta-action" href="https://discord.gg/FZZ4dbdvwU" target="_blank" rel="noopener">Join Discord</a>
+    <a class="post-cta-action" href="/#updates">Email updates</a>
+  </nav>
+  <p class="post-cta-social">Follow on X: <a href="https://x.com/pgrustdb" target="_blank" rel="noopener">pgrust</a><span aria-hidden="true"> · </span><a href="https://x.com/mmalisper" target="_blank" rel="noopener">Malis</a><span aria-hidden="true"> · </span><a href="https://x.com/JasonSeibel" target="_blank" rel="noopener">Jason</a></p>
+</section>
+      <p class="article-back"><a href="/blog/">← All posts</a></p>
+    </footer>
+  </article>
+</main>
+<footer class="site-footer">Postgres, rewritten in Rust. Built by Michael Malis and Jason Seibel.</footer>
+<script src="/blog/analytics.js"></script>
+</body>
+</html>

@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Postgres in Rust: three dead ends before we passed 100% of the regression suite | pgrust</title>
+<meta name="description" content="Four attempts, three dead ends, and the process that produced a Rust rewrite passing PostgreSQL's full regression suite.">
+<link rel="canonical" href="https://pgrust.com/blog/postgres-in-rust-regression-suite/">
+<link rel="alternate" type="application/rss+xml" title="pgrust blog" href="https://pgrust.com/blog/feed.xml">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="icon" type="image/png" sizes="48x48" href="/favicon-48x48.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+<link rel="manifest" href="/site.webmanifest">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/blog/blog.css">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="pgrust">
+<meta property="og:title" content="Postgres in Rust: three dead ends before we passed 100% of the regression suite">
+<meta property="og:description" content="Four attempts, three dead ends, and the process that produced a Rust rewrite passing PostgreSQL's full regression suite.">
+<meta property="og:url" content="https://pgrust.com/blog/postgres-in-rust-regression-suite/">
+<meta property="og:image" content="https://pgrust.com/blog/assets/regression-suite.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Postgres in Rust: three dead ends before we passed 100% of the regression suite">
+<meta name="twitter:description" content="Four attempts, three dead ends, and the process that produced a Rust rewrite passing PostgreSQL's full regression suite.">
+<meta name="twitter:image" content="https://pgrust.com/blog/assets/regression-suite.png">
+<meta property="article:published_time" content="2026-07-16T03:00:49-07:00">
+<meta property="article:modified_time" content="2026-07-22T23:07:39-07:00">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"Article","headline":"Postgres in Rust: three dead ends before we passed 100% of the regression suite","description":"Four attempts, three dead ends, and the process that produced a Rust rewrite passing PostgreSQL's full regression suite.","image":"https://pgrust.com/blog/assets/regression-suite.png","datePublished":"2026-07-16T03:00:49-07:00","dateModified":"2026-07-22T23:07:39-07:00","author":{"@type":"Person","name":"Michael Malis"},"publisher":{"@type":"Organization","name":"pgrust","url":"https://pgrust.com/"},"mainEntityOfPage":"https://pgrust.com/blog/postgres-in-rust-regression-suite/"}</script>
+</head>
+<body>
+<header class="site-header">
+  <div class="site-header-inner">
+    <a class="wordmark" href="/">pgrust</a>
+    <nav class="site-nav" aria-label="Primary">
+      <a href="/">Demo</a>
+      <a href="/blog/" aria-current="page">Blog</a>
+      <a href="https://github.com/malisper/pgrust">GitHub</a>
+      <a class="nav-updates" href="/#updates">Updates</a>
+    </nav>
+  </div>
+</header>
+<main class="article-shell">
+  <article>
+    <header class="article-header">
+      <p class="eyebrow">pgrust engineering</p>
+      <h1>Postgres in Rust: three dead ends before we passed 100% of the regression suite</h1>
+      <p class="article-dek">Four attempts, three dead ends, and the process that produced a Rust rewrite passing PostgreSQL's full regression suite.</p>
+      <p class="article-meta">Michael Malis · <time datetime="2026-07-16T03:00:49-07:00">July 16, 2026</time></p>
+    </header>
+    <img class="article-hero" src="/blog/assets/regression-suite.png" alt="" fetchpriority="high">
+    <div class="article-body"><p><em>tl;dr After four attempts and dropping $100k, we succeeded in using Opus to rewrite Postgres in Rust. We defined a number of skills and were able to build a repeatable process to rewrite Postgres files into Rust. After running up to 40 concurrent subagents for days, the end result is the 1.8M lines of idiomatic rust code that make up pgrust.</em></p>
+<p>Over the past three months, I&#8217;ve been working with my friend Jason Seibel on building <a href="https://github.com/malisper/pgrust">pgrust</a>. The idea behind pgrust is we want to show that by leveraging AI, it&#8217;s possible to can build a much better version of Postgres. Unfortunately Postgres is written in C and AI still makes a lot of mistakes. For this reason, we started by first rewriting Postgres in Rust. We believe that by having Postgres in Rust it will become a lot easier for AI to safely add new features to Postgres. This thesis is starting to be proven true. Currently in development we have a new, 5th version of pgrust that is faster than Postgres for transactional workloads and is as fast as Clickhouse when it comes to analytical style queries. For context, Clickhouse is hundreds of times faster than Postgres when it comes to analytical queries.</p>
+<p>Let us walk you through each of our attempts and what we learned from each approach. We figure for those interested in completely rewriting legacy systems, this post will serve as a useful guide as how to go about such a rewrite of your own.</p>
+<h2>Attempt #1 &#8211; pgrust-og</h2>
+<p>The first version of pgrust, pgrust-og was initially was going well. It got very close to completion, but ended up having fundamental issues that made it unsalvageable. What I consider to be the root issue is we approached pgrust-og by porting one feature at a time (for contrast in later versions I worked on porting one file at a time).</p>
+<p>There were roughly three different phases to the pgrust-og lifecycle:</p>
+<ul>
+<li>Foundation</li>
+<li>Features</li>
+<li>Last Mile</li>
+</ul>
+<h3>Foundation</h3>
+<p>Initially I worked on laying out the core foundation of the database. Postgres has a couple of key systems that everything else relies on. To name a few:</p>
+<ul>
+<li>The query parser &#8211; The parser converts your SQL query into a representation Postgres can understand what data you&#8217;re asking for</li>
+<li>The query planner &#8211; The query planner takes the output from the parser and produces a query plan. A specific way for Postgres to retrieve the data you&#8217;re looking for</li>
+<li>The executor &#8211; Once Postgres has a plan for how to fetch your data, the executor is the one that actually fetches it</li>
+</ul>
+<p>Along with these three, there are maybe 15 other core subsystems of Postgres.</p>
+<p>Over a couple of days I built a new database in Rust that architecturally had the same subsystems as Postgres. This step seemingly went very smooth. For each component, I already had a pretty good sense of how it should work. I gave Codex 5.4 access to the Postgres codebase and would ask it to come up with a plan for rewriting X subsystem of Postgres into pgrust-og. I would then review the plan and make sure it covered everything I wanted and would give Codex feedback on the plan where it fell short. From there I had codex execute the plan.</p>
+<p>Given these were the core systems of Postgres, I read the code thoroughly to make sure I understood how they worked. This approach worked pretty well and after a couple of days I had knocked out pretty much all the core pieces.</p>
+<h3>Features, Features, Features</h3>
+<p>Once I had the core scaffolding in place, I started working on adding all the features that Postgres supports. The easiest way to do this was to look at the Postgres regression tests and look at all the features they were testing. Now the thing about Postgres is it has a surprising number of features. When it comes to features, Postgres looks almost like a programming language&#8217;s standard library. Postgres has:</p>
+<ul>
+<li>Over 300 different types (including two different json types)</li>
+<li>Nearly 500 different SQL keywords</li>
+<li>More than 3000 different builtin functions</li>
+</ul>
+<p>That&#8217;s a lot to implement!</p>
+<p>Initially I was following the same approach I did when working on the foundation phase. The &#8220;problem&#8221; I was running into was that Codex was too good at implementing these features. For any individual feature, Codex is usually able to one-shot it. If you want to try it yourself, ask Codex to write a JSON parser for you. The problem I was running into was I would ask Codex to come up with a plan and then wait hours for it to implement the plan. I spent most of my time &#8220;programming&#8221; being idle!</p>
+<p>This is when I realized that it might be possible to run multiple agents at a time. I decided it was time for a new approach. Instead of working on one feature at a time, I would try multiple. The next day I installed Conductor a tool that let&#8217;s you manage multiple agent sessions simultaneously. You can see the moment I started using Conductor in the git history:</p>
+<h3><img loading="lazy" decoding="async" class=" wp-image-1574 aligncenter" src="/blog/assets/account-usage.png" alt="" width="179" height="639" /></h3>
+<p>Surprisingly, this approach worked! Because each feature was relatively independent of each other, multiple Codex agents could work on them independently. I eventually scaled up this approach and started spinning up as many as 20 agent sessions each. Usually I would look at which test files were left to work on and then spin up a session for each file. From there I would see what the current failures were and have Codex work on completing that file.</p>
+<p>There were two issues with this approach. First I started burning through my Codex quota. I had to get multiple Codex accounts and switch between them in order to stay on the subscription plan. Second, I started maxing out CPU on my computer. Rust builds end up being somewhat cpu intensive and when you run enough builds, even my M4 Macbook Pro couldn&#8217;t handle them all. I ended up setting up GitHub actions, just so I could run tests off of my computer.</p>
+<h3>Last Mile</h3>
+<p>Over the course of about four weeks I was able to get 96% of the Postgres tests passing. That&#8217;s when progress started to slow down and things started to grind to a halt. The big obstacle came when I tried to get all the Postgres planner tests to work.</p>
+<p>The postgres planner is the most complicated part of Postgres. It&#8217;s 50k lines of very nuanced logic that figures out the optimal way to fetch the data your SQL query is asking for. In short, it evaluates every possible way to fetch your rows out of the table, every possible way to perform the joins, and applies a advanced cost model to figure out the best way to plan the query. While pgrust-og had a planner and had all the functionality that postgres does, the way the planner was integrated into the rest of the codebase was subtly different. This led to an &#8220;organ transplant failure&#8221;.</p>
+<p><img loading="lazy" decoding="async" class=" wp-image-1604 aligncenter" src="/blog/assets/planner-tweet.jpg" alt="" width="648" height="458" />To give an example of one of the failures, let me show you the differences in how pgrust-og and pgrust would represent a plan for the query: <code style="font-size: 16px;">SELECT name FROM users WHERE age &gt; 30</code>. In Postgres this ends up being represented as a single plan node:</p>
+<pre data-language="rust"><code>
+SeqScan {
+  .scan.scanrelid = 1, 
+  .plan.targetlist = &#x5B; name ],
+  .plan.qual = &#x5B; age &gt; 30 ], 
+}
+</code></pre>
+<p>While in Rust, it ended up being represented as three plan nodes:</p>
+<pre data-language="rust"><code>
+Projection {
+  .columns = &#x5B; name ],
+  .input = Filter {
+    .predicate = (age &gt; 30),
+    .input = SeqScan {
+      .table = users,
+    },
+  },
+}
+</code></pre>
+<p>On top of that in Postgres the tableis referred to by an index for the query while in Rust it&#8217;s referred to by a string. While these look like small differences, they end up being massive. In C lots of functions will take a sequential scan node with a filter. In rust, those functions would sometimes need to take a sequential scan, sometimes take a filter node, and other times need to take a projection node. Fix just this one issue would be difficult as it would require rewriting everywhere where a seqscan, filter, or projection node is used.</p>
+<p>In total, dozens of slight differences like this made it infeasible to get all the tests passing with pgrust-og. After struggling to get the planner to work I realized just how different the internals of pgrust-og were versus Postgres. If there were subtle differences in how the planner worked, who knew how many subtle differences there were in things like replication and backups. I realized it would be impossible to get pgrust-og into a production ready state. That&#8217;s when I decided it was time for a new approach. Enter c2rust.</p>
+<p><em>cost: 8x codex accounts for 1 month = $1600</em></p>
+<h2>Attempt #2 &#8211; c2rust</h2>
+<p>For our next attempt we wanted to take a different approach. Instead of trying to go feature by feature, we wanted to see if there was some way we could transpile the Postgres code from C to Rust. That way each Rust code would match up line by line with equivalent Postgres code. It would be much easier to audit the code and show that I was doing things exactly the same way Postgres was doing.</p>
+<p>c2rust is a open source project that will transpile your C code to unsafe rust. While that technically would be &#8220;Postgres rewritten in Rust&#8221; it wouldn&#8217;t help me further my goal of making it easy to add new features to Postgres. The idea was that we would use c2rust to unsafe rust and from there gradually rewrite the unsafe rust code into safe rust.</p>
+<p>After toying with c2rust for two days, Jason managed to get it to completely transpile the Postgres C code to 5.3M lines of unsafe Rust. That resulting code completely passed the Postgres test suite and passed 100% of the Postgres regressions suite and had similar performance to Postgres. That&#8217;s not even the coolest part. The c2rust version of pgrust was ABI compatible with Postgres. That meant things like Postgres extensions would be compatible with Postgres. We didn&#8217;t even think that was possible!</p>
+<p>At that point, we thought the hard part was over. Now all we had to do was have Codex refactor the code into idiomatic Rust. It turns out the hard part was not over.</p>
+<p>When we tried to refactor the unsafe rust code, we found it would take hours to convert a single function. To show you why let me show you what some of the output of c2rust looks like:</p>
+<pre data-language="rust"><code>
+pub unsafe extern &quot;C&quot; fn makeAlias(
+    mut aliasname: *const ::core::ffi::c_char,
+    mut colnames: *mut List,
+) -&gt; *mut Alias {
+    let mut a: *mut Alias =
+        newNode(::core::mem::size_of::&lt;Alias&gt;() as size_t, T_Alias) as *mut Alias;
+    (*a).aliasname = pstrdup(aliasname);
+    (*a).colnames = colnames;
+    return a;
+}
+</code></pre>
+<p>This looks closer to idiomatic C code than it does to idiomatic rust! Every value is represented as a pointer which more or less means all the code has to be unsafe. In order to convert a single function from unsafe rust to safe rust you had to change all the types the function accepted to be more idiomatic Rust types, change all the callers of the function, and change all the callees of the function. That meant changing one function could necessitate changing 100s of functions to make it idiomatic.</p>
+<p>We tried a couple of different approaches. Could we define two versions of every function one that&#8217;s safe, one that&#8217;s unsafe? Could we make the internal functions of a package safe and leave the external functions unsafe? We were never able to get any of these incremental approaches to work that well. That&#8217;s when I had a new idea &#8211; what if instead of trying to rewrite the c2rust code incrementally, I instead created a new codebase and piece by piece, rewrote the c2rust code from unsafe Rust to idiomatic Rust. That led to the creation of pgrust-idiomatic.</p>
+<h2>Attempt #3 &#8211; pgrust-idiomatic</h2>
+<p>The output of c2rust was ~1000 individual Rust crates, with roughly one C file mapping to one Rust crate. The idea for pgrust-idiomatic was to rewrite the generated c2rust code, crate by crate. While I had considered doing a similar approach with the original Postgres code, I had brushed it off because it had seemed too high risk. If I&#8217;m rewriting it crate by crate, the code won&#8217;t work until I rewrite all of the crates. At the same time, Jarred Sumner had approached the infamous rewrite of Bun from Zig to Rust by going file by file. I figured if Jarred was successful with it, maybe I could be successful with it to.</p>
+<p>What I started doing is asking my coding agent to identify a crate we could port next, have it port the crate, and then have it audit the results. Note that although I was primarily focusing on the c2rust code, Codex had access to the original Postgres code as well. This was the beginning of what people now call a &#8220;loop&#8221;, albeit a manual one. As I was going through this process, I was constantly giving Codex feedback. The most common shape of feedback was pushing Codex to eliminate uses of unsafe. Once the loop started to run smoothly and work consistently, I had Codex encode all the feedback I gave it into skills. I ran prompts like this:</p>
+<blockquote><p>can you write a skill in this project $find-next-crate which will find the next crate we should work on &#8211; it should find a crate we have not ported and has no dependencies on crates we have not ported</p></blockquote>
+<p>This time I approached the project a little bit differently. This time, I set up my &#8220;agentic infrastructure&#8221;. I started out by defining my Agents.md and defining some skills to start the project. I knew that if I could get Codex to be good at rewriting one crate into idiomatic Rust, I could massively parallelize that and quickly get to completion. I defined three skills:</p>
+<ul>
+<li><strong>find-next-crate</strong> &#8211; This was a skill that explained to codex how to determine which crates we were yet to port and we had already ported all the dependencies of those crates</li>
+<li><strong>port-crate</strong> &#8211; This would take one crate and rewriting it from C to Rust</li>
+<li><strong>audit-crate</strong> &#8211; This would compare the new pgrust-idiomatic crate against both the c2rust code and the original C code and make sure things lined up. It would also make sure the code was idiomatic Rust and there weren&#8217;t any major issues with it. It would come back with any findings and if there were issues, I would dig in</li>
+</ul>
+<p>Initially I tested the skills on a coupleof crates. I gave Codex some feedback and have it update the skills. Once the skills started working consistently, I started to scale up the process. I started using Conductor to port the crates in mass.</p>
+<p>Initially this was working great! I was making consistent progress. That was until I hit the Postgres regex implementation. Here&#8217;s a (paraphrased) part of my session with Codex:</p>
+<blockquote><p><strong>Me:</strong> Here&#8217;s the entire regex crate &#8211; about 16,000 lines of machine-translated C. Rewrite it into idiomatic Rust.</p>
+<p><strong>Model:</strong> (five minutes and 185,000 tokens later) Done. I&#8217;ve rewritten 11 functions.</p>
+<p><strong>Me:</strong> …11? How many functions are there?</p>
+<p><strong>Model:</strong> 228.</p>
+<p><strong>Me:</strong> Keep going until all the code has been ported.</p>
+<p><strong>Model:</strong> (334,000 tokens later) I&#8217;ve rewritten 11 functions.</p></blockquote>
+<p>I don&#8217;t know what it was, but GPT-5.5 was really struggling to port the regex code. There were some other approaches I tried, suchas porting function by function or using a cheaper model and then having a more expensive model clean the code up, but I wasn&#8217;t making any real progress. I spent about two days trying different approaches to rewrite the regular expression code when Anthropic released something new &#8211; Claude dynamic workflows.</p>
+<p>If you aren&#8217;t aware, Claude dynamic workflows are a way for you to run a massive amounts of subagents in a structured way. They&#8217;re kind of like map reduce, but with coding agents. They are what Jarred Sumner used to rewrite Bun from Zig to Rust. To give a simple example, here&#8217;s what it looks like when you ask Claude:</p>
+<blockquote><p>Can you spin up a dynamic workflow of 10 agents each of which write a document on how to implement a different part of a database? Then can you have 10 agents review each of those documents</p></blockquote>
+<p><img loading="lazy" decoding="async" class="alignnone wp-image-1605" style="background-color: transparent;" src="/blog/assets/dynamic-workflow.jpg" alt="" width="699" height="177" /></p>
+<p>I decided to try dynamic workflows on the regex code. I turned on ultracode in Claude Code (which has Claude try to use dynamic workflows) and asked to it port over the regular expression code. It spun up 4 subagents, one for each file in the Regex crate, spun up a couple of reviewer agents, a couple of fixer agents, and finally an integrator agent. I was watching the code being written and it seemed like Claude was making real progress. After 30 minutes, Claude had completed porting the regex code. I dug through the code and it appeared as if all the code had been ported. I asked Claude how many functions were in the Rust regex code and it confirmed that it had ported all 228 functions. I was astonished. A task that I was struggling with for days had suddenly been taking down by dynamic workflows.</p>
+<p>Now there was just one problem with dynamic workflows &#8211; token usage. Because you&#8217;re running dozens of subagents at a time, you burn through the 5h usage limits in minutes. I was churning through the usage limits so fast that it was infeasible for me to have enough subscription accounts. If I wanted to use dynamic workflows for the rest of the project, it would cost an order of magnitude more than the Claude Code subscriptions.</p>
+<p>Now I may be a little crazy, or maybe very crazy, but I thought if I could complete pgrust for under $100k, it would be worth it. I know that sounds absurd, but when comparing to the cost of Postgres, Postgres probably cost on the order of hundreds of millions of dollars in R&amp;D effort to create. I thought if I could create a new database that was compatible with Postgres for under $100k, that would be worth it.</p>
+<p>So going forward, I used dynamic workflows to port a bunch of crates in batch. I could go to codex and ask it for what files was it currently possible to port and then I would spin up a dynamic workflow to port all of them at once. At any given time, I would have 3-6 different dynamic workflows porting different parts of the Postgres code. I often had over 100 subagents running at a time working on porting a large number of files from unsafe Rust to idiomatic Rust a time. And it was working! I was moving many times faster than I was before and from what I could tell it was all working reasonably well.</p>
+<p>Now you remember how at the beginning of the section I said that doing a file by file approach was really risky. Yeah, well… I ended up running into a major issue. To explain, let me cover one major challenge with migrating from C to Rust that I haven&#8217;t covered yet &#8211; circular dependencies.</p>
+<p>In C, you&#8217;re allowed to have circular dependencies. On the other hand, Rust crates forbid the creation of circular dependencies. This had created a pretty big challenge for me. The Postgres source code has a ton of circular dependencies. To show you just how tightly integrated the Postgres codebase is, here&#8217;s what the dependency relationships between the different Postgres subsystems looks like:</p>
+<p><img decoding="async" src="/blog/assets/dependency-graph.jpg" alt="dependency relationships between Postgres subsystems" /></p>
+<p>A red line means the both subsystems is bi-directional and any other color means the relationship is one way. It&#8217;s safe to say that there&#8217;s no easy way to just break the circular dependency.</p>
+<p>Up until this point, I had been handling circular dependencies with a form of dependency injection Claude calls &#8220;seams&#8221;. The idea was when crate A wanted to call crate B but crate B wanted to call crate A, we would create a seam that would break the circular dependency. Specifically crate A would define a global function variable that represented the function it wanted to call in crate B. Later when starting up pgrust, that function pointer would be updated to the respective function. This meant B could depend on A without A depending on B and both crates could call functions in the other respective crate. To give an example, let&#8217;s say we have the following C code</p>
+<pre data-language="rust"><code>
+/* ---- executor.c ---- */
+#include &quot;executor.h&quot;
+#include &quot;storage.h&quot;
+
+void executor_run() {
+    storage_read();
+}
+
+void executor_report_progress() {
+}
+</code></pre>
+<pre data-language="rust"><code>
+/* ---- storage.c ---- */
+#include &quot;storage.h&quot;
+#include &quot;executor.h&quot;
+
+int storage_read() {
+    executor_report_progress();
+}
+</code></pre>
+<p>In C, this is perfectly valid. In Rust on the other hand it would look something like this with seams:</p>
+<pre data-language="rust"><code>
+use std::sync::OnceLock;
+
+#&#x5B;allow(non_upper_case_globals)]
+static report_progress: OnceLock&lt;fn()&gt;; = OnceLock::new();
+
+pub fn register_report_progress(f: fn()) {
+    report_progress.set(f).expect(&quot;seam registered twice&quot;);
+}
+
+pub fn storage_read() -&gt; i32 {
+    (report_progress.get().expect(&quot;seam not registered&quot;))();
+    0
+}
+
+pub fn executor_report_progress() {}
+
+pub fn init() {
+    storage::register_report_progress(executor_report_progress);
+}
+
+pub fn executor_run() {
+    storage::storage_read();
+}
+
+// main.rs
+fn main() {
+    executor::init();
+    executor::executor_run();
+}
+</code></pre>
+<p>This had appeared to work fine. As far as I could tell all the code was ported, it compiled, and all I had to do was initialize all the seams. When I told Claude to wire up the seams, for some reason it struggled and was unable to do so. When I dug in deeper, I found a major issue: in many cases the type signature of the seam diverged from the type signature of the function definition. For example, Postgres has a Relation type that is defined as:</p>
+<pre data-language="rust"><code>
+typedef RelationData *Relation
+</code></pre>
+<p>The obvious way to translate Relation into Rust it as &amp;RelationData. Unfortunately for me, Opus had sometimes translated Relation into &amp;RelationData and other times it defined Relation as:</p>
+<pre data-language="rust"><code>
+pub type Relation = usize;
+</code></pre>
+<p>and other times Opus translated it as:</p>
+<pre data-language="rust"><code>
+pub type Relation = oid
+</code></pre>
+<p>I don&#8217;t quite now why Opus sometimes translated it one way and sometimes translated it another way, but now I was stuck with it. Large parts of the pgrust-idiomatic would use one definition of Relation and other parts would use a different definition. In total, there were around ten thousand seams that diverged from their implementation. Solving this problem was just as hard as solving the c2rust refactoring problem. In order to fix one seam, I had to completely remove one of the incorrect type definitions. I tried for several days to save pgrust-idiomatic, but it was just too token intensive to fix all the seams.</p>
+<p>It was around this time that Claude Fable was released. I tried throwing Fable at the problem but it was to no avail. Even Fable couldn&#8217;t recover pgrust-idiomatic. I started questioning what do I do? Is there any way to save pgrust-idiomatic? Does it just make sense to start over again? Given I had what appeared to be a new superior model, I wanted to see just how capable Fable would be at building it&#8217;s own version of pgrust. That resulted in pgrust-reference.</p>
+<p><em>cost: Lots of Claude dynamic workflows &#8211; $50k</em></p>
+<h2>Attempt #4: pgrust-reference</h2>
+<p><em>Spoiler: pgrust-reference was not built by Fable</em></p>
+<p>With Fable in hand, I created a new codebase and got to it. This time I approached things a little bit differently. This time I gave Fable all the relevant context to the project and gave it access to all the code across all the previous versions of pgrust. I also gave it access to some tech debt logs I was keeping track of while building previous versions so it would know exactly what issues it needed to avoid.</p>
+<p>Based on my lesson from building pgrust-idiomatic, I changed two things. First I changed the skill for finding the next crate to prioritize implementing seams. That way if there were any seam divergences, they would be detected quickly. Second, I updated the audit skill and gave it many more things to look for. In particular, seams that had diverged.</p>
+<p>Once I had laid out the groundwork, I kicked off the build. I had proven out Fable was working with a couple of crates and then started doing a number of dynamic workflows to port code. I got maybe 50k lines of code in, before Anthropic shut off Fable. I was stuck with Opus again.</p>
+<p>This time, I kept going with Opus. I regularly ran the audit skill and was consistently making sure all the seams were wired. I would periodically find an issue, but I made sure to nip it in the bud as soon as I discovered it. There were some minor hiccups along the way, but everything kept going smoothly. It kept going smoothly all the way until I ported all the code over. By that point it took a little bit of work to wire all the seams together, some additional work to fix the bugs, and pgrust-reference was able to pass 100% of the Postgres regression suite! I had finally accomplished my goal of getting pgrust into idiomatic Rust.</p>
+<p>This is the version of pgrust that&#8217;s available publicly.</p>
+<p><em>Cost: Lots of Claude dynamic workflows + Fable &#8211; $50k</em></p>
+<h2>What&#8217;s next?</h2>
+<p>The big issue with pgrust-reference is it&#8217;s really slow. It&#8217;s about 8x slower than Postgres. As it turns out, when you try to write the most idiomatic Rust possible, something has to give. That&#8217;s why we&#8217;re currently working on the next version of pgrust we&#8217;re internally calling pgrust-fast. So far we&#8217;ve put in $200k into pgrust-fast on top of the $100k we put into pgrust-idiomatic. pgrust-fast has been completely built by Fable and was built with speed in mind. We&#8217;ve had Fable attempt to optimize every individual bit of code of pgrust-fast. On top of that we&#8217;ve completely revamped a number of Postgres components including:</p>
+<ul>
+<li>A new vectorized executor</li>
+<li>A new JIT compiler that replaces LLVM and cuts latency of JIT compilation from 50ms to 5μs</li>
+<li>A scheduler that dynamically adjusts the prioritization of queries. Long running queries get throttled allowing for faster queries to run with less contention</li>
+</ul>
+<p>Altogether the optimizations we&#8217;ve made have made pgrust-fast over 50% faster than Postgres on trasactional workloads and about as fast as Clickhouse for analytical ones.</p>
+<p>Keep an eye out because we plan on releasing pgrust-fast within the next two weeks.</p></div>
+    <footer class="article-footer">
+      <section class="post-cta" aria-label="Follow pgrust">
+  <div class="post-cta-copy">
+    <p class="post-cta-title">Follow the rewrite</p>
+    <p>Star pgrust and keep up with new releases.</p>
+  </div>
+  <nav class="post-cta-actions" aria-label="pgrust community links">
+    <a class="post-cta-primary" href="https://github.com/malisper/pgrust" target="_blank" rel="noopener">Star pgrust on GitHub <span aria-hidden="true">↗</span></a>
+    <a class="post-cta-action" href="https://discord.gg/FZZ4dbdvwU" target="_blank" rel="noopener">Join Discord</a>
+    <a class="post-cta-action" href="/#updates">Email updates</a>
+  </nav>
+  <p class="post-cta-social">Follow on X: <a href="https://x.com/pgrustdb" target="_blank" rel="noopener">pgrust</a><span aria-hidden="true"> · </span><a href="https://x.com/mmalisper" target="_blank" rel="noopener">Malis</a><span aria-hidden="true"> · </span><a href="https://x.com/JasonSeibel" target="_blank" rel="noopener">Jason</a></p>
+</section>
+      <p class="article-back"><a href="/blog/">← All posts</a></p>
+    </footer>
+  </article>
+</main>
+<footer class="site-footer">Postgres, rewritten in Rust. Built by Michael Malis and Jason Seibel.</footer>
+<script src="/blog/analytics.js"></script>
+</body>
+</html>

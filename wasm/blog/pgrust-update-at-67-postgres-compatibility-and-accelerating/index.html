@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pgrust update: at 67% Postgres compatibility, and accelerating | pgrust</title>
+<meta name="description" content="How parallel coding agents, shared build artifacts, and a merge queue accelerated the PostgreSQL rewrite.">
+<link rel="canonical" href="https://pgrust.com/blog/pgrust-update-at-67-postgres-compatibility-and-accelerating/">
+<link rel="alternate" type="application/rss+xml" title="pgrust blog" href="https://pgrust.com/blog/feed.xml">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="icon" type="image/png" sizes="48x48" href="/favicon-48x48.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+<link rel="manifest" href="/site.webmanifest">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/blog/blog.css">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="pgrust">
+<meta property="og:title" content="pgrust update: at 67% Postgres compatibility, and accelerating">
+<meta property="og:description" content="How parallel coding agents, shared build artifacts, and a merge queue accelerated the PostgreSQL rewrite.">
+<meta property="og:url" content="https://pgrust.com/blog/pgrust-update-at-67-postgres-compatibility-and-accelerating/">
+<meta property="og:image" content="https://pgrust.com/blog/assets/compatibility-update.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="pgrust update: at 67% Postgres compatibility, and accelerating">
+<meta name="twitter:description" content="How parallel coding agents, shared build artifacts, and a merge queue accelerated the PostgreSQL rewrite.">
+<meta name="twitter:image" content="https://pgrust.com/blog/assets/compatibility-update.png">
+<meta property="article:published_time" content="2026-04-28T00:13:20-07:00">
+<meta property="article:modified_time" content="2026-05-03T17:12:03-07:00">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"Article","headline":"pgrust update: at 67% Postgres compatibility, and accelerating","description":"How parallel coding agents, shared build artifacts, and a merge queue accelerated the PostgreSQL rewrite.","image":"https://pgrust.com/blog/assets/compatibility-update.png","datePublished":"2026-04-28T00:13:20-07:00","dateModified":"2026-05-03T17:12:03-07:00","author":{"@type":"Person","name":"Michael Malis"},"publisher":{"@type":"Organization","name":"pgrust","url":"https://pgrust.com/"},"mainEntityOfPage":"https://pgrust.com/blog/pgrust-update-at-67-postgres-compatibility-and-accelerating/"}</script>
+</head>
+<body>
+<header class="site-header">
+  <div class="site-header-inner">
+    <a class="wordmark" href="/">pgrust</a>
+    <nav class="site-nav" aria-label="Primary">
+      <a href="/">Demo</a>
+      <a href="/blog/" aria-current="page">Blog</a>
+      <a href="https://github.com/malisper/pgrust">GitHub</a>
+      <a class="nav-updates" href="/#updates">Updates</a>
+    </nav>
+  </div>
+</header>
+<main class="article-shell">
+  <article>
+    <header class="article-header">
+      <p class="eyebrow">pgrust engineering</p>
+      <h1>pgrust update: at 67% Postgres compatibility, and accelerating</h1>
+      <p class="article-dek">How parallel coding agents, shared build artifacts, and a merge queue accelerated the PostgreSQL rewrite.</p>
+      <p class="article-meta">Michael Malis · <time datetime="2026-04-28T00:13:20-07:00">April 28, 2026</time></p>
+    </header>
+    <img class="article-hero" src="/blog/assets/compatibility-update.png" alt="" fetchpriority="high">
+    <div class="article-body"><blockquote><p>It&#8217;s been a week since I published the <a href="/blog/pgrust-rebuilding-postgres-in-rust-with-ai/">original pgrust post</a>. pgrust is my attempt to rewrite Postgres in Rust. My ultimate goal is to build a database that is safer to work with so that I can work on improving Postgres. pgrust now passes about two thirds of the queries in the Postgres regression suite, up from one third a week ago. The codebase is over 450k lines. I have 8 Codex accounts running in parallel at $200/month each, and 280 PRs have merged in the last two weeks. I expected progress to slow down by now. Instead the opposite has happened. I&#8217;m now moving an order of magnitude faster against the Postgres test suite than I was when working on the foundational work, even when weighting against token usage.</p></blockquote>
+<hr />
+<h2>Building a Factory</h2>
+<p>The easiest way I can describe what the experience has been like is by comparing it to building a factory. If you&#8217;ve ever played the game Factorio, you know exactly what I&#8217;m talking about. My role in building pgrust has become less about hand writing code and more about designing a system that produces the output I want, then optimizing that system to move faster. Things will break all the time and it&#8217;s my job to fix the system so it doesn&#8217;t break again. A lot of my work has been dealing with bottlenecks in the factory and there&#8217;s been a number of really interesting ones I&#8217;ve dealt with.</p>
+<p>For most of the last week, my laptop has been at 80–100% CPU. As it turns out, running multiple instances of the Rust compiler while running multiple instances of a database at the same time can consume a lot of CPU. Even with my beefy macbook pro with 14 CPUs, I&#8217;m still frequently maxing out the CPU. When you&#8217;re running 20 agents at one, it&#8217;s not hard to max out the CPU on your computer. I ended up spending a lot of time over the past week optimizing CPU usage.</p>
+<p>I did some profiling into where the CPU was going during builds. From the profiling I did, compiling the parser made about half of the time it took to build pgrust. Moving the generated grammar code into its own compilation unit dropped the time it took to rebuild the rest of pgrust from about 60 seconds to 36 seconds. That sounds small, but it gets multiplied by every test every agent runs. After this change, I could run more agents at once.</p>
+<p>One issue I was not expecting was running out of disk. Because I&#8217;m using git worktrees, each agent will get it&#8217;s own directory it works in. Initially that was resulting in every agent getting its own build artifacts as well. With each agent building pgrust multiple times over it&#8217;s lifecycle, I was ending up with over 100GB of build artifacts before I knew it. I now have a dedicated target directory for all my agents to share to ensure build artifacts are shared across agents.</p>
+<p>The biggest win overall ended up being setting up a CI workflow. Previously to move quickly, I would have my agents make small changes, run a subset of the tests, and then merge their code into main. This meant the agents could move quickly, but also resulted in the build breaking all the time. Often at the end of the day, it would take a couple of hours of agents running in the background to merge all the code together and fix any merge conflicts and bugs that were introduced. I now have a GitHub merge queue set up that runs before code makes it into main. This allows my agents to still maintain a fairly high velocity, while also making sure the code that makes it into main passes all checks I have in place.</p>
+<h2>Switching between 8 codex accounts</h2>
+<p>I currently have 8 Codex accounts. Each one is a $200/month Codex subscription. At any given moment I&#8217;m running between 10 and 20 Codex sessions through Conductor. Each session has its own git worktree and is working on a different feature of pgrust. One may be working on jsonb, another on foreign keys, and so on and so on. As I&#8217;m getting further along with pgrust, I&#8217;m starting to point each agent at a specific test failure.</p>
+<p>The reason I need 8 accounts is that each account has a 5-hour rate limit window and a separate weekly cap. When a single account hits its rate limit, every session running on that account stops. One account initially worked fine, but as I&#8217;ve started running more agents in parallel, I&#8217;ve needed to sign up for more Codex subscriptions to navigate around the rate limits.</p>
+<p>As I was spinning up new accounts, it actually was a big pain to manage them all. As I would hit different rate limits, I would switch between my different accounts and see which one had any credits. I eventually started using a tool called <code>codex-auth</code> that shows me my remaining quota across all 8 accounts. This makes it easy to see how much usage I have left and easily find which account I should switch to.</p>
+<h2>GPT 5.5</h2>
+<p>GPT-5.5 came out last week. As soon as it came out, I was super excited to try it. I ended up having to do some hacks to get Conductor to support it before Conductor released official support for it. Off the bat, I tried using it the same way I&#8217;d been using 5.4. Many parallel agents, all in fast mode. I ended up hitting the rate limits incredibly fast. One time it took only 15 minutes to hit the 5 hour rate limit on one of the codex&#8217;s account. This was happening because 5.5 costs about 2x as much as 5.4 and ast mode adds another 2x multiplier on top in exchange for being about 50% faster.</p>
+<p>I ended up backing off fast mode and running 5.5 at normal speed, with more agents in parallel. The big shift since the launch post is that my agents now spend more time waiting for builds and tests than waiting for inference. Since that&#8217;s true, the cost per token of being faster matters less than the ability to run more agents at once.</p>
+<h2>Progress is Accelerating</h2>
+<p>Going into this week, I expected progress to slow down. That&#8217;s how every project I&#8217;ve worked on has felt with the long tail of features eventually slowing down progress.</p>
+<p>It was a pleasant surprise when I observed the opposite happening. Yesterday, I added around 90k new lines to pgrust. Now I know that lines of code is a terrible metric. But if you compare those lines of code to the progress I made on the Postgres test suite, those 90k lines of code improved the percentage of Postgres tests passing from 57% to around 67%. Given Postgres is 1M lines of code, adding 90k lines of code to get 10% of the Postgres tests to pass sounds pretty reasonable.</p>
+<p>The more interesting data point is when you look at the amount of effort it takes to get an additional test to pass. Codex has pretty good telemetry on how many tokens you&#8217;ve been using. I&#8217;ve been able to compare my token usage against the number of regression tests I get passing and it&#8217;s been taking less tokens over time to get regression tests passing and not more.</p>
+<p><img loading="lazy" decoding="async" class="alignnone wp-image-1584" src="/blog/assets/compatibility-update.png" alt="" width="632" height="421" /></p>
+<p>&nbsp;</p>
+<p>In my opinion, the reason this is happening is I&#8217;ve already laid the foundation for pgrust. Most of the core systems are now in place. The planner exists, the buffer cache exists, PL/pgSQL is there, JSONB mostly works, and so does a long list of other things that took the first week to build. The work that&#8217;s left is mostly small and very specific. Things like adding this specific JSONB function or change the way certain query plans get displayed. Agents handle that kind of work well. I can hand five specific functions to an agent and say &#8220;implement these,&#8221; walk away, and it does a reasonable job. The macro features were where I had to be most careful.</p>
+<h2>What I&#8217;d like to build next</h2>
+<p>This week, I want to get as close to 100% query-level compatibility as I can<strong>.</strong> There&#8217;s still a long tail of behavior to cover. At the current rate, there&#8217;s no specific reason it can&#8217;t happen this week.</p>
+<p>Then, stability. Compatibility means &#8220;this query returns the right answer.&#8221; Production-readiness means &#8220;this query returns the right answer for the next 90 days under load.&#8221; Bug-bashing on real workloads is the next phase, and I want to do it on real workloads, not toy ones.</p>
+<p>Then, the parts of Postgres I wish were different<strong>.</strong> The architectural opinions I had going into this project, like multi-threading, auto-tuning, and less stack-glue, are still where I think the value is. But I can&#8217;t get to those until pgrust looks and behaves like Postgres in every other way.</p>
+<h2>Want to help us test pgrust on real workloads?</h2>
+<p>The single most useful thing right now is finding people who run small Postgres workloads who would be open to running pgrust as a replica. Hobby projects, side projects, internal tools at work that nobody depends on. pgrust is a drop in replacement with Postgres, so the setup is just as easy as setting up Postgres. We are able to replicate off of an existing db so you can try out pgrust with minimal impact to your production workload. You don&#8217;t have to put pgrust anywhere near your write path.</p>
+<p>To be clear, I&#8217;m not asking anyone to bet production on this. Synthetic test suites can pass while a database has subtle correctness or durability issues that only show up against real workloads. That&#8217;s the gap I&#8217;m trying to close, and the only way to close it is to run real workloads against it.</p>
+<p>If you have such a workload, or if you have specific Postgres pain you&#8217;d like to see addressed first, I&#8217;d love to hear from you.</p></div>
+    <footer class="article-footer">
+      <section class="post-cta" aria-label="Follow pgrust">
+  <div class="post-cta-copy">
+    <p class="post-cta-title">Follow the rewrite</p>
+    <p>Star pgrust and keep up with new releases.</p>
+  </div>
+  <nav class="post-cta-actions" aria-label="pgrust community links">
+    <a class="post-cta-primary" href="https://github.com/malisper/pgrust" target="_blank" rel="noopener">Star pgrust on GitHub <span aria-hidden="true">↗</span></a>
+    <a class="post-cta-action" href="https://discord.gg/FZZ4dbdvwU" target="_blank" rel="noopener">Join Discord</a>
+    <a class="post-cta-action" href="/#updates">Email updates</a>
+  </nav>
+  <p class="post-cta-social">Follow on X: <a href="https://x.com/pgrustdb" target="_blank" rel="noopener">pgrust</a><span aria-hidden="true"> · </span><a href="https://x.com/mmalisper" target="_blank" rel="noopener">Malis</a><span aria-hidden="true"> · </span><a href="https://x.com/JasonSeibel" target="_blank" rel="noopener">Jason</a></p>
+</section>
+      <p class="article-back"><a href="/blog/">← All posts</a></p>
+    </footer>
+  </article>
+</main>
+<footer class="site-footer">Postgres, rewritten in Rust. Built by Michael Malis and Jason Seibel.</footer>
+<script src="/blog/analytics.js"></script>
+</body>
+</html>

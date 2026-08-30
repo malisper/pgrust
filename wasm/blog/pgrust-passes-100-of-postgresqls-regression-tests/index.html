@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pgrust passes 100% of the Postgres regression tests | pgrust</title>
+<meta name="description" content="pgrust reaches full PostgreSQL regression and isolation test compatibility.">
+<link rel="canonical" href="https://pgrust.com/blog/pgrust-passes-100-of-postgresqls-regression-tests/">
+<link rel="alternate" type="application/rss+xml" title="pgrust blog" href="https://pgrust.com/blog/feed.xml">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="icon" type="image/png" sizes="48x48" href="/favicon-48x48.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+<link rel="manifest" href="/site.webmanifest">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/blog/blog.css">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="pgrust">
+<meta property="og:title" content="pgrust passes 100% of the Postgres regression tests">
+<meta property="og:description" content="pgrust reaches full PostgreSQL regression and isolation test compatibility.">
+<meta property="og:url" content="https://pgrust.com/blog/pgrust-passes-100-of-postgresqls-regression-tests/">
+<meta property="og:image" content="https://pgrust.com/blog/assets/pgrust-default.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="pgrust passes 100% of the Postgres regression tests">
+<meta name="twitter:description" content="pgrust reaches full PostgreSQL regression and isolation test compatibility.">
+<meta name="twitter:image" content="https://pgrust.com/blog/assets/pgrust-default.png">
+<meta property="article:published_time" content="2026-06-25T08:25:42-07:00">
+<meta property="article:modified_time" content="2026-06-25T08:25:52-07:00">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"Article","headline":"pgrust passes 100% of the Postgres regression tests","description":"pgrust reaches full PostgreSQL regression and isolation test compatibility.","image":"https://pgrust.com/blog/assets/pgrust-default.png","datePublished":"2026-06-25T08:25:42-07:00","dateModified":"2026-06-25T08:25:52-07:00","author":{"@type":"Person","name":"Michael Malis"},"publisher":{"@type":"Organization","name":"pgrust","url":"https://pgrust.com/"},"mainEntityOfPage":"https://pgrust.com/blog/pgrust-passes-100-of-postgresqls-regression-tests/"}</script>
+</head>
+<body>
+<header class="site-header">
+  <div class="site-header-inner">
+    <a class="wordmark" href="/">pgrust</a>
+    <nav class="site-nav" aria-label="Primary">
+      <a href="/">Demo</a>
+      <a href="/blog/" aria-current="page">Blog</a>
+      <a href="https://github.com/malisper/pgrust">GitHub</a>
+      <a class="nav-updates" href="/#updates">Updates</a>
+    </nav>
+  </div>
+</header>
+<main class="article-shell">
+  <article>
+    <header class="article-header">
+      <p class="eyebrow">pgrust engineering</p>
+      <h1>pgrust passes 100% of the Postgres regression tests</h1>
+      <p class="article-dek">pgrust reaches full PostgreSQL regression and isolation test compatibility.</p>
+      <p class="article-meta">Michael Malis · <time datetime="2026-06-25T08:25:42-07:00">June 25, 2026</time></p>
+    </header>
+    <img class="article-hero" src="/blog/assets/pgrust-default.png" alt="" fetchpriority="high">
+    <div class="article-body"><p>pgrust is a Postgres rewrite in Rust that I’ve been working on with my friend Jason Seibel. It targets compatibility with Postgres 18.3, passes the PostgreSQL regression tests, and now also passes the isolation tests.</p>
+<p>It is disk compatible with Postgres and and can boot from an existing Postgres 18.3 data directory. It is not production-ready yet, not performance optimized yet, and not compatible with existing Postgres extensions. The goal is to make Postgres easier to change from the inside: keep Postgres behavior as the oracle, use Rust to make the codebase easier to work on, and use AI-assisted programming to explore deeper server changes.</p></div>
+    <footer class="article-footer">
+      <section class="post-cta" aria-label="Follow pgrust">
+  <div class="post-cta-copy">
+    <p class="post-cta-title">Follow the rewrite</p>
+    <p>Star pgrust and keep up with new releases.</p>
+  </div>
+  <nav class="post-cta-actions" aria-label="pgrust community links">
+    <a class="post-cta-primary" href="https://github.com/malisper/pgrust" target="_blank" rel="noopener">Star pgrust on GitHub <span aria-hidden="true">↗</span></a>
+    <a class="post-cta-action" href="https://discord.gg/FZZ4dbdvwU" target="_blank" rel="noopener">Join Discord</a>
+    <a class="post-cta-action" href="/#updates">Email updates</a>
+  </nav>
+  <p class="post-cta-social">Follow on X: <a href="https://x.com/pgrustdb" target="_blank" rel="noopener">pgrust</a><span aria-hidden="true"> · </span><a href="https://x.com/mmalisper" target="_blank" rel="noopener">Malis</a><span aria-hidden="true"> · </span><a href="https://x.com/JasonSeibel" target="_blank" rel="noopener">Jason</a></p>
+</section>
+      <p class="article-back"><a href="/blog/">← All posts</a></p>
+    </footer>
+  </article>
+</main>
+<footer class="site-footer">Postgres, rewritten in Rust. Built by Michael Malis and Jason Seibel.</footer>
+<script src="/blog/analytics.js"></script>
+</body>
+</html>

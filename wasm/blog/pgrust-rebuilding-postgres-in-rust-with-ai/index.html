@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pgrust: Rebuilding Postgres in Rust with AI | pgrust</title>
+<meta name="description" content="The first two weeks of rebuilding PostgreSQL in Rust with coding agents, from the parser to a browser demo.">
+<link rel="canonical" href="https://pgrust.com/blog/pgrust-rebuilding-postgres-in-rust-with-ai/">
+<link rel="alternate" type="application/rss+xml" title="pgrust blog" href="https://pgrust.com/blog/feed.xml">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="icon" type="image/png" sizes="48x48" href="/favicon-48x48.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+<link rel="manifest" href="/site.webmanifest">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/blog/blog.css">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="pgrust">
+<meta property="og:title" content="pgrust: Rebuilding Postgres in Rust with AI">
+<meta property="og:description" content="The first two weeks of rebuilding PostgreSQL in Rust with coding agents, from the parser to a browser demo.">
+<meta property="og:url" content="https://pgrust.com/blog/pgrust-rebuilding-postgres-in-rust-with-ai/">
+<meta property="og:image" content="https://pgrust.com/blog/assets/launch.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="pgrust: Rebuilding Postgres in Rust with AI">
+<meta name="twitter:description" content="The first two weeks of rebuilding PostgreSQL in Rust with coding agents, from the parser to a browser demo.">
+<meta name="twitter:image" content="https://pgrust.com/blog/assets/launch.png">
+<meta property="article:published_time" content="2026-04-20T09:03:16-07:00">
+<meta property="article:modified_time" content="2026-04-20T09:03:16-07:00">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"Article","headline":"pgrust: Rebuilding Postgres in Rust with AI","description":"The first two weeks of rebuilding PostgreSQL in Rust with coding agents, from the parser to a browser demo.","image":"https://pgrust.com/blog/assets/launch.png","datePublished":"2026-04-20T09:03:16-07:00","dateModified":"2026-04-20T09:03:16-07:00","author":{"@type":"Person","name":"Michael Malis"},"publisher":{"@type":"Organization","name":"pgrust","url":"https://pgrust.com/"},"mainEntityOfPage":"https://pgrust.com/blog/pgrust-rebuilding-postgres-in-rust-with-ai/"}</script>
+</head>
+<body>
+<header class="site-header">
+  <div class="site-header-inner">
+    <a class="wordmark" href="/">pgrust</a>
+    <nav class="site-nav" aria-label="Primary">
+      <a href="/">Demo</a>
+      <a href="/blog/" aria-current="page">Blog</a>
+      <a href="https://github.com/malisper/pgrust">GitHub</a>
+      <a class="nav-updates" href="/#updates">Updates</a>
+    </nav>
+  </div>
+</header>
+<main class="article-shell">
+  <article>
+    <header class="article-header">
+      <p class="eyebrow">pgrust engineering</p>
+      <h1>pgrust: Rebuilding Postgres in Rust with AI</h1>
+      <p class="article-dek">The first two weeks of rebuilding PostgreSQL in Rust with coding agents, from the parser to a browser demo.</p>
+      <p class="article-meta">Michael Malis · <time datetime="2026-04-20T09:03:16-07:00">April 20, 2026</time></p>
+    </header>
+    <img class="article-hero" src="/blog/assets/launch.png" alt="" fetchpriority="high">
+    <div class="article-body">
+<blockquote><p><a href="https://malisper.me/table-of-contents/">I&#8217;ve written dozens of blog posts about Postgres internals</a>. Postgres is one of the greatest databases out there. But from chatting with a lot of my friends at startups, I&#8217;ve seen consistent challenges. Two weeks ago I started rebuilding it from scratch in Rust with AI and now I have 250k lines of code, a third of Postgres’s regression tests passing, and <a href="https://pgrust.com">a WASM demo you can try at pgrust.com.</a></p></blockquote>
+<hr />
+<p>Postgres is one of the greatest databases out there. It&#8217;s great all around and it&#8217;s become the default for any startup to use. But while Postgres got a lot of things right, I believe there&#8217;s opportunity to do even better.</p>
+<p>From chatting with a lot of my friends at startups, I&#8217;ve seen consistent challenges with using Postgres. There&#8217;s over 350 settings, and if you configure one wrong, the vacuum can take down your whole database. You need a connection pooler, or else a storm of connections can bring down your whole database. And don&#8217;t get me started on how Postgres doesn&#8217;t capture statistics on JSONB.</p>
+<p>And that&#8217;s only scratching the surface when it comes to challenges with running Postgres.</p>
+<p>I spent years dealing with these problems. At Heap, I spent years running a Postgres cluster with over a petabyte of data in it. <a href="https://malisper.me/table-of-contents/">I have written dozens of blog posts about Postgres and the Postgres internals</a>. I know the ins and outs super well, and I know it&#8217;s possible to do even better.</p>
+<p>That&#8217;s why two weeks ago I started working on pgrust. pgrust is a rebuild of Postgres in Rust. The result so far is pgrust. 250,000 lines of Rust. That includes all the major Postgres subsystems. It looks exactly like Postgres and currently passes one third of Postgres&#8217;s 50,000 regression tests (there&#8217;s quite a long tail of functionality when it comes to Postgres).</p>
+<p><a href="https://pgrust.com/">I compiled pgrust to wasm so you can try it out in your browser right now.</a> It&#8217;s preloaded with a number of examples to show off what pgrust is capable of (one that <a href="https://www.youtube.com/watch?v=MPSMH8w7nfw">implements a Lisp interpreter</a>.</p>
+<p>I don&#8217;t think this project would have been possible two years ago, let alone even six months ago. Coding agents, mainly Codex, have been a massive accelerant for this project, and I wouldn&#8217;t have been able to make anywhere near as much progress as I have without them.</p>
+<p>Before I walk you through the whirlwind that’s been the last two weeks, let me show you why databases are one of the most complicated pieces of software out there.</p>
+<h2>What’s in a Database?</h2>
+<p>Postgres has been in development for nearly 40 years and consists of around 1M lines of C code. Just to give you a sense of <em>some</em> of what makes up those 1M lines:</p>
+<ol>
+<li>Multiple programming language implementations in SQL and PL/pgSQL</li>
+<li>An advanced concurrency system that enables multiple queries to manipulate the same data simultaneously</li>
+<li>A durability system that guarantees no data loss, even if the power crashes in the middle of an operation</li>
+<li>Over 100 different built-in types including regular expressions, JSON, geometry types, and much more</li>
+</ol>
+<p>And that&#8217;s only scratching the surface. If you&#8217;re curious to learn more, I&#8217;ve <a href="https://malisper.me/table-of-contents/">written dozens of posts about Postgres internals</a>.</p>
+<p>Given the scale of Postgres, how did I built anything remotely close to Postgres on the scale of two weeks? The answer &#8211; I got a lot of help with AI.</p>
+<p>To give you a sense of how fast things have been moving, here’s how the number of lines of code have changed each day:</p>
+<p><img loading="lazy" decoding="async" class="wp-image-1573 aligncenter" src="/blog/assets/launch.png" alt="" width="600" height="372" /></p>
+<p>&nbsp;</p>
+<p>Let me walk you through day by day how I went about building pgrust.</p>
+<h2>Day 1 &#8211; The Foundation</h2>
+<p>The first decision I had to make was how to approach the rewrite. From the beginning, I wanted something runnable at all times. If I tried to rewrite all of Postgres at once, I knew I’d end up with a mess that didn&#8217;t work. I considered two options:</p>
+<ol>
+<li>Integrate Rust into the existing Postgres codebase and replace each Postgres component one at a time</li>
+<li>Start completely from scratch and build my own version of each component</li>
+</ol>
+<p>After looking at how tightly coupled Postgres&#8217;s components are, I thought option 1 would be really hard to even get started with. I decided to go with option 2. I could skip figuring out how to integrate Rust into the existing C codebase and could get something running much sooner.</p>
+<p>My goal for day 1 was to get something that could run queries. That way I would have something I could compare directly against Postgres. That meant I needed four things:</p>
+<ol>
+<li>A storage layer</li>
+<li>A SQL parser</li>
+<li>Concurrency controls</li>
+<li>A query executor</li>
+</ol>
+<p>Although I never actually looked at the code for these, with my experience in Postgres, I had a pretty good understanding of how they worked. My workflow was straightforward. I&#8217;d point Codex at the Postgres source code and ask it to explain to me how each component worked. From there, I would work with Codex and build a minimal version of that component in Rust.</p>
+<p>Within a little over three hours, I had something that could run real SQL queries. I got something working much faster than I&#8217;d expected.</p>
+<p>By the end of the day, I was able to support a lot of the fundamental Postgres features:</p>
+<ul>
+<li>CREATE TABLE/DROP TABLE</li>
+<li>SELECT/INSERT/UPDATE/DELETE</li>
+<li>JOIN/WHERE/ORDER BY/LIMIT</li>
+<li>BEGIN/COMMIT/ROLLBACK</li>
+</ul>
+<p>I was really happy with my progress.</p>
+<p>As an aside, throughout this I was using Codex 5.4 fast. I prefer using Codex over Claude because it&#8217;s just way faster, especially with the fast option. I tried using the Claude Code Fast mode but would consistently hit rate limits.</p>
+<h2>Days 2-7: Performance and Debugging</h2>
+<p>Now that I had a system that could run queries, it was time to experiment. One question I had going into this project was whether or not it was possible for pgrust to be faster than Postgres? Two experiments in particular showed great results.</p>
+<p><strong>Multi-threading:</strong> I’ll spare you the details, but there are two different ways to parallelize a program. You can use multiple processes and you can use multiple threads. In general, processes are easier to work with, but threads are faster.</p>
+<p>Postgres uses processes largely for historical reasons. There&#8217;s been chatter about switching to a thread-based model for years, but nothing concrete has materialized. It&#8217;s just really hard because changing to a thread-based model would require refactoring pretty much all of Postgres.</p>
+<p>Starting from the ground up in Rust changes the equation. I can start from the beginning with a thread-based model. In an overly simplified benchmark, I was able to get individual queries to be 3x faster when using threads on a small in-memory dataset. Largely because Postgres will only parallelize a query when there&#8217;s a certain amount of scale involved, because processes are so expensive to spin up.</p>
+<p><strong>Regular expressions:</strong> I know from experience that Postgres&#8217; regular expression engine is slow. It predates modern regular expression syntax and has not had as much effort put into it as other regular expression engines.</p>
+<p>On the other hand, the Rust regular expression engine has had a ton of effort put into it. It will use things like SIMD to speed up the query.</p>
+<p>On some simple benchmarks, I found the Rust regular expression engine to be 10x faster than the Postgres one, showing that there&#8217;s still a lot of room to improve on Postgres.</p>
+<hr />
+<p>A couple of important notes. Both of these optimizations were in very specific contexts. My goal was more to show that there is opportunity to improve on Postgres than to show that there is a way to improve all queries in Postgres.</p>
+<p>Also, the current version of pgrust has a lot of unoptimized code. Since I did the original benchmarking, I&#8217;ve added some components, such as the query planner, that I have not optimized yet. The numbers above reflect an earlier version of pgrust, and benchmarks on the latest version may not yield the same result.</p>
+<p><strong>Debugging:</strong> besides doing experiments, the other part of my time was spent on fixing bugs. The concurrency management system and the storage layer for Postgres are two of the trickiest pieces to get right. Even though I had rust, there were still some concurrency issues that I had to debug.</p>
+<p>One issue I had was a race condition that would, in some cases, an extra row would appear and in other cases a row would never appear. It turns out I had a race condition where data could be updated in memory after it was written to disk. That means some operations would just never make their way to disk, and it would be as if they never happened.</p>
+<p>When debugging these issues my process would look like the following:</p>
+<ol>
+<li>Ask Codex if it could figure out what the issue was. If so, I would ask it to write a minimal repro for the issue</li>
+<li>If Codex could not figure out, I would keep running the test until I could repro the issue and try to get the issue to repro more consistently. Once I could consistently repro the issue it was usually easier to figure out what was happening.</li>
+</ol>
+<h2>Days 8-14: Going Multi-Agent</h2>
+<p>After I had demonstrated there were opportunities to make Postgres faster, I switched back to focusing on covering more of the Postgres surface area. <a href="https://github.com/postgres/postgres/tree/master/src/test/regress/sql">I discovered Postgres has a regression suite of 50,000 SQL queries</a>. My goal became to get as many of these queries to pass as possible.</p>
+<p>Immediately, the gaps I saw were related to a number of “large features” that Postgres has. These include things like PL/pgSQL, json, and a vast number of math-related functions.</p>
+<p>With Codex, I was able to knock out large chunks of these features in one shot. Often, Codex could get 50% of the tests for a particular feature passing in one go. That&#8217;s a big part of what contributed to the spike on April 10th.</p>
+<p><img loading="lazy" decoding="async" class="wp-image-1573 aligncenter" src="/blog/assets/launch.png" alt="" width="601" height="373" /></p>
+<p>&nbsp;</p>
+<p>But as I started to knock out these large features, things started to slow down. That&#8217;s when I realized that the size of a feature has little to do with how hard it is for an AI to build the feature. <strong>Often a small feature that requires changing the existing codebase is much harder than a large, net new feature.</strong></p>
+<p>For example, one &#8220;small feature&#8221; I worked on was adding the ability to put comments on tables. Even though it&#8217;s a pretty small feature, it took Codex more time than it took to add the majority of JSON support.</p>
+<p>As I was doing more and more of these tiny features, things started to slow down, and you see my velocity dropped on April 12.</p>
+<p>At the same time, something was bothering me. Often, when I was building a new feature, I would ask Codex to build it, and it would spend 5 minutes and then come back with a working version of the feature. During those five minutes, I wasn&#8217;t doing anything except for waiting.</p>
+<p>That&#8217;s when I decided to try going multi-agent.</p>
+<p><strong>Going multi-agent:</strong> I avoided going multi-agent before because I thought it would be too hard to coordinate work across multiple agents. But now that I had laid a lot of the Postgres foundation, a lot of what I needed to build were disjoint features. JSON support was independent from PL/pgSQL, and it seemed like it would be pretty easy to work on them at the same time independently.</p>
+<p>On April 13th, I downloaded <a href="https://www.conductor.build/">Conductor</a>. Those that don&#8217;t know, Conductor is a tool for running and coordinating multiple agents at a time. It automatically handles git worktrees so that your agents can work on the same codebase independently of each other.</p>
+<p>I spun up multiple agents and had one focused on building toast, one on date functions, and one on views. You can actually see in the Git history the exact moment I went multi-agent.</p>
+<p><img loading="lazy" decoding="async" class="wp-image-1574 aligncenter" src="/blog/assets/account-usage.png" alt="" width="139" height="496" /></p>
+<p>The initial results were very promising. I had multiple agents building features at the same time, and each agent was spending enough time building the feature that I could give instructions to other agents.</p>
+<p>I ended up spending two to three hours and got tens of thousands of lines of code written over that time. Now, while things started out super well, they quickly took a negative turn. I had to spend another two hours just merging all the code together.</p>
+<p>Even though the features were disjoint, they still touched a lot of shared components. The query parser, the planner, the executor, and handling those merge conflicts just became a huge pain, and I had to do them all one at a time.</p>
+<p>On day two of multi-agent, I decided to change my approach. Instead of having agents go off and build complete features and then merge their code in, I had agents work on small slices of the features that would pass tests. Every slice, they would commit their work and then merge back into the main branch. By doing things this way, I guaranteed that there was minimal drift between the code that each agent was working on and minimal effort was needed to actually merge the code together. This actually worked super well. Over time I eventually worked my way up to 17 different coding agents before maxing out the CPU on my computer.</p>
+<p><img loading="lazy" decoding="async" class="wp-image-1575 aligncenter" src="/blog/assets/account-rotation.png" alt="" width="258" height="466" /></p>
+<p>&nbsp;</p>
+<p><strong>Trusting the agents:</strong> One other change I made was I was no longer reading most of the code. You might think this is crazy, but I&#8217;ve done this before.</p>
+<p>I was previously the CEO of a 120-person company at Freshpaint. And while I wanted to read the code all the time, I wasn&#8217;t able to. My job was to set guardrails for the team and make sure I had the visibility I need to understand when things go wrong and why they go wrong. Working with a team of agents is very similar. It&#8217;s way more about figuring out how to maximize your leverage and deciding on what to focus on, as opposed to trying to focus on everything.</p>
+<p>I&#8217;ve been working on getting good sense of what features agents will be able to knock out in one shot and what features agents will struggle with. If it&#8217;s a feature that I know an agent will do well, then I&#8217;ll just have the agent knock it out. When it&#8217;s one that an agent will struggle with, I&#8217;ll go to founder mode and really dig in and make sure that the agent does things right.</p>
+<p>Of course, a lot of dumb code makes its way through, and that&#8217;s okay. Given how early pgrust is, it&#8217;s way more about getting something that works than writing the best possible code. It&#8217;s faster to get to good state by trusting the agent and fixing things when they go wrong.</p>
+<p>With this approach, even though I&#8217;ve been working on a large number of tiny features, normally the type of thing AI is not good at, my velocity hasn&#8217;t slowed down.</p>
+<h3>What I&#8217;d Like to Build Next</h3>
+<p>Now that I&#8217;m two weeks into pgrust, I think there&#8217;s something real here. My road map currently looks like the following:</p>
+<p><strong>Full Postgres compatibility.</strong> Priority number one is getting the regression suite to pass. I want to go from one third of the tests we are passing to as close to 100 as I can get.</p>
+<p><strong>Stability.</strong> Once I get the regression suite to pass, I think I’ll need to do a lot of bug bashing. I want to get pgrust into a production-ready state where people can actually trust it as a database.</p>
+<p><strong>The things I wish Postgres had:</strong> this is the longer-term goal. A number of Postgres&#8217; design decisions date back 40 years. We&#8217;ve learned a lot about databases over the last 40 years, and I think there&#8217;s opportunity to build something that improves upon what Postgres has.</p></div>
+    <footer class="article-footer">
+      <section class="post-cta" aria-label="Follow pgrust">
+  <div class="post-cta-copy">
+    <p class="post-cta-title">Follow the rewrite</p>
+    <p>Star pgrust and keep up with new releases.</p>
+  </div>
+  <nav class="post-cta-actions" aria-label="pgrust community links">
+    <a class="post-cta-primary" href="https://github.com/malisper/pgrust" target="_blank" rel="noopener">Star pgrust on GitHub <span aria-hidden="true">↗</span></a>
+    <a class="post-cta-action" href="https://discord.gg/FZZ4dbdvwU" target="_blank" rel="noopener">Join Discord</a>
+    <a class="post-cta-action" href="/#updates">Email updates</a>
+  </nav>
+  <p class="post-cta-social">Follow on X: <a href="https://x.com/pgrustdb" target="_blank" rel="noopener">pgrust</a><span aria-hidden="true"> · </span><a href="https://x.com/mmalisper" target="_blank" rel="noopener">Malis</a><span aria-hidden="true"> · </span><a href="https://x.com/JasonSeibel" target="_blank" rel="noopener">Jason</a></p>
+</section>
+      <p class="article-back"><a href="/blog/">← All posts</a></p>
+    </footer>
+  </article>
+</main>
+<footer class="site-footer">Postgres, rewritten in Rust. Built by Michael Malis and Jason Seibel.</footer>
+<script src="/blog/analytics.js"></script>
+</body>
+</html>

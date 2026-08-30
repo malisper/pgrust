@@ -5,7 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>pgrust — postgres, rewritten in rust</title>
 <meta name="description" content="pgrust is an experimental rewrite of PostgreSQL in Rust, compiled to WebAssembly and running in your browser. Run real SQL in an interactive session — no server.">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='10' fill='%230e1117'/%3E%3Ctext x='32' y='46' text-anchor='middle' font-family='monospace' font-size='42' font-weight='bold' fill='%23e0794a'%3Ep%3C/text%3E%3C/svg%3E">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="icon" type="image/png" sizes="48x48" href="/favicon-48x48.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+<link rel="manifest" href="/site.webmanifest">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
@@ -20,6 +24,7 @@
 
   /* hover states ported from the design's style-hover attributes */
   .gh-link:hover { border-color: var(--accent, #e0794a); color: #ffffff; }
+  .blog-link:hover { color: #ffffff; }
   .updates-link:hover { border-color: var(--accent, #e0794a); color: #ffffff; background: rgba(224,121,74,0.20); }
   .term-btn:hover { border-color: var(--accent, #e0794a); color: #c6ccd6; }
   .example-btn:hover { background: rgba(255,255,255,0.035); border-left-color: var(--accent, #e0794a); }
@@ -394,7 +399,7 @@
     <div class="boot-loader">
       <div class="boot-spinner" aria-hidden="true"></div>
       <div class="boot-status-wrap">
-        <div id="boot-status">Starting wasm engine...</div>
+        <div id="boot-status">Starting wasm32 engine...</div>
         <div id="boot-hint" class="boot-hint">First load compiles PostgreSQL in your browser. Queries are warmed before the session opens.</div>
       </div>
     </div>
@@ -408,7 +413,7 @@
 
   <header class="topbar" style="display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 0 22px; height: 54px; flex: none; background: #0e1117; border-bottom: 1px solid #1c212b;">
     <div class="brand-wrap" style="display: flex; align-items: baseline; gap: 13px;">
-      <span style="font-weight: 600; font-size: 15.5px; letter-spacing: 0.02em; color: var(--accent, #e0794a);">pgrust</span>
+      <a href="/" style="font-weight: 600; font-size: 15.5px; letter-spacing: 0.02em; color: var(--accent, #e0794a); text-decoration: none;">pgrust</a>
       <span class="brand-tagline" style="font-size: 12.5px; color: #6f7785; letter-spacing: 0.01em;">postgres, rewritten in rust</span>
     </div>
     <div class="topbar-actions" style="display: flex; align-items: center; gap: 14px;">
@@ -416,7 +421,8 @@
         <span style="width: 7px; height: 7px; border-radius: 50%; background: #6cc06c; box-shadow: 0 0 6px rgba(108,192,108,0.7);"></span>
         PostgreSQL regression suite&nbsp;·&nbsp;46,066/46,066&nbsp;queries&nbsp;(100%)
       </span>
-      <span id="version-badge" class="version-badge" style="font-size: 11.5px; color: #555c69;">wasm32-wasip1</span>
+      <span id="version-badge" class="version-badge" style="font-size: 11.5px; color: #555c69;">wasm32 · preview</span>
+      <a class="blog-link" href="/blog/" style="font-size: 12.5px; color: #aeb6c2; text-decoration: none; padding: 7px 3px;">Blog</a>
       <button class="updates-link" type="button" data-update-link="header" style="display: inline-flex; align-items: center; font: inherit; font-size: 12.5px; font-weight: 600; color: #ffd8c8; padding: 7px 13px; border: 1px solid rgba(224,121,74,0.55); border-radius: 7px; background: rgba(224,121,74,0.13); cursor: pointer;">Get updates</button>
       <a class="gh-link" href="https://github.com/malisper/pgrust" target="_blank" rel="noopener" style="display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: #c6ccd6; text-decoration: none; padding: 7px 14px; border: 1px solid #2a323d; border-radius: 7px; background: #161b22;">GitHub ↗</a>
     </div>
@@ -439,10 +445,7 @@
         <div id="lines"></div>
         <div style="display: flex; align-items: flex-start;">
           <span id="prompt" style="color: var(--accent, #e0794a); white-space: pre; flex: none;">pgrust=# </span>
-          <!-- textarea, not input: recalled history entries keep their embedded
-               newlines the way real psql's readline does (repl.js intercepts
-               Enter, so typing never inserts a literal newline). -->
-          <textarea id="input" rows="1" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off" style="flex: 1; min-width: 0; background: transparent; border: none; outline: none; color: #e6e9ee; font: inherit; padding: 0; margin: 0; caret-color: var(--accent, #e0794a); resize: none; overflow-y: hidden; white-space: pre-wrap;"></textarea>
+          <input id="input" value="" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off" style="flex: 1; min-width: 0; background: transparent; border: none; outline: none; color: #e6e9ee; font: inherit; padding: 0; margin: 0; caret-color: var(--accent, #e0794a);" />
         </div>
       </div>
     </main>
@@ -482,6 +485,14 @@
         <p style="font-size: 12px; line-height: 1.5; color: #6f7785; margin: 14px 0 4px;">By Michael Malis &amp; Jason Seibel · Licensed AGPL-3.0</p>
       </div>
 
+      <div style="border-top: 1px solid #1c212b; padding: 14px 16px 22px; margin-top: auto;">
+        <div style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10.5px; letter-spacing: 0.16em; text-transform: uppercase; color: #5a626f; padding-bottom: 8px;">More</div>
+        <a class="more-link" href="https://github.com/malisper/pgrust" target="_blank" rel="noopener" style="display: block; font-size: 12.5px; color: #aeb6c2; text-decoration: none; padding: 4px 0;">github.com/malisper/pgrust ↗</a>
+        <a class="more-link" href="/blog/" style="display: block; font-size: 12.5px; color: #aeb6c2; text-decoration: none; padding: 4px 0;">pgrust engineering blog →</a>
+        <a class="more-link" href="https://malisper.me/pgrust-rebuilding-postgres-in-rust-with-ai/" target="_blank" rel="noopener" style="display: block; font-size: 12.5px; color: #aeb6c2; text-decoration: none; padding: 4px 0;">Launch: rebuilding Postgres in Rust ↗</a>
+        <a class="more-link" href="https://malisper.me/pgrust-update-at-67-postgres-compatibility-and-accelerating/" target="_blank" rel="noopener" style="display: block; font-size: 12.5px; color: #aeb6c2; text-decoration: none; padding: 4px 0;">Update: 67% compatibility &amp; accelerating ↗</a>
+      </div>
+
     </aside>
   </div>
 </div>
@@ -499,14 +510,14 @@
         <input id="updates-email" class="updates-email" type="email" name="email" placeholder="you@example.com" autocomplete="email" required>
         <button id="updates-submit" class="updates-submit" type="submit">Get updates</button>
       </div>
-      <p class="updates-note">Unsubscribe anytime.</p>
+      <p class="updates-note">Confirm by email. Unsubscribe anytime.</p>
       <p id="updates-status" class="updates-status" role="status" aria-live="polite"></p>
     </form>
     <section id="updates-success" class="updates-success" role="status" aria-live="polite" tabindex="-1" hidden>
-      <div class="updates-success-eyebrow">You're subscribed</div>
-      <h3 class="updates-success-title">Thanks for following pgrust</h3>
-      <p class="updates-success-copy">You'll get release notes, compatibility milestones, and architecture experiments as they land.</p>
-      <p class="updates-success-hint">No confirmation needed &mdash; you're on the list.</p>
+      <div class="updates-success-eyebrow">One more step</div>
+      <h3 class="updates-success-title">Check your inbox</h3>
+      <p class="updates-success-copy">Open the confirmation email from pgrust and click the confirmation link. You won't receive updates until you confirm.</p>
+      <p class="updates-success-hint">Can't find it? Check your spam or promotions folder.</p>
     </section>
   </section>
 </div>

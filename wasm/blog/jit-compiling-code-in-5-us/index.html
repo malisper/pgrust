@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JIT Compiling Code in 5μs | pgrust</title>
+<meta name="description" content="Build a copy-and-patch JIT compiler in Rust, generate ARM64 machine code, and benchmark it against an interpreter and handwritten implementation.">
+<link rel="canonical" href="https://pgrust.com/blog/jit-compiling-code-in-5-us/">
+<link rel="alternate" type="application/rss+xml" title="pgrust blog" href="https://pgrust.com/blog/feed.xml">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="icon" type="image/png" sizes="48x48" href="/favicon-48x48.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+<link rel="manifest" href="/site.webmanifest">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/blog/blog.css">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="pgrust">
+<meta property="og:title" content="JIT Compiling Code in 5μs">
+<meta property="og:description" content="Build a copy-and-patch JIT compiler in Rust, generate ARM64 machine code, and benchmark it against an interpreter and handwritten implementation.">
+<meta property="og:url" content="https://pgrust.com/blog/jit-compiling-code-in-5-us/">
+<meta property="og:image" content="https://pgrust.com/blog/assets/jit-compiler.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="JIT Compiling Code in 5μs">
+<meta name="twitter:description" content="Build a copy-and-patch JIT compiler in Rust, generate ARM64 machine code, and benchmark it against an interpreter and handwritten implementation.">
+<meta name="twitter:image" content="https://pgrust.com/blog/assets/jit-compiler.png">
+<meta property="article:published_time" content="2026-08-11T02:55:57-07:00">
+<meta property="article:modified_time" content="2026-08-20T07:51:16-07:00">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"Article","headline":"JIT Compiling Code in 5μs","description":"Build a copy-and-patch JIT compiler in Rust, generate ARM64 machine code, and benchmark it against an interpreter and handwritten implementation.","image":"https://pgrust.com/blog/assets/jit-compiler.png","datePublished":"2026-08-11T02:55:57-07:00","dateModified":"2026-08-20T07:51:16-07:00","author":{"@type":"Person","name":"Michael Malis"},"publisher":{"@type":"Organization","name":"pgrust","url":"https://pgrust.com/"},"mainEntityOfPage":"https://pgrust.com/blog/jit-compiling-code-in-5-us/"}</script>
+</head>
+<body>
+<header class="site-header">
+  <div class="site-header-inner">
+    <a class="wordmark" href="/">pgrust</a>
+    <nav class="site-nav" aria-label="Primary">
+      <a href="/">Demo</a>
+      <a href="/blog/" aria-current="page">Blog</a>
+      <a href="https://github.com/malisper/pgrust">GitHub</a>
+      <a class="nav-updates" href="/#updates">Updates</a>
+    </nav>
+  </div>
+</header>
+<main class="article-shell">
+  <article>
+    <header class="article-header">
+      <p class="eyebrow">pgrust engineering</p>
+      <h1>JIT Compiling Code in 5μs</h1>
+      <p class="article-dek">Build a copy-and-patch JIT compiler in Rust, generate ARM64 machine code, and benchmark it against an interpreter and handwritten implementation.</p>
+      <p class="article-meta">Michael Malis · <time datetime="2026-08-11T02:55:57-07:00">August 11, 2026</time></p>
+    </header>
+    <img class="article-hero" src="/blog/assets/jit-compiler.png" alt="" fetchpriority="high">
+    <div class="article-body"><p>Historically, fast JIT compilation was a black art. To write a fast JIT compiler, you would need to know how to write assembly. Case in point: there is no production-ready database today that has its own JIT compiler. They all either use LLVM or generate C/C++ code. Both of these options suffer from high compile times, which limits their applicability. Now, with the use of AI, it’s easier than ever to write a JIT compiler with fast compile times by directly targeting assembly. This is also one area of opportunity for new databases to improve on old ones. When building <a href="https://github.com/malisper/pgrust">pgrust</a>, I initially thought it would be really hard to implement a JIT compiler. In the end, I found it much easier than I expected due to AI assistance and it ends up being part of the reason why pgrust is so fast. The pgrust JIT compiler compiles code in around 5μs, which enables us to JIT compile every SQL query, not just a subset of them. In this post, I’ll walk you through how you can build your own fast JIT compiler. We’ll build a simple regular expression engine that uses JIT compilation as an example.</p>
+<h2>Why JIT Compilation</h2>
+<p>JIT compilation is the practice of generating compiled code at runtime or “Just In Time”. When done right, it can result in big performance wins, often on the order of 2-5x and sometimes even more. The main use case for JIT compilation is when there’s information you gain at runtime that drastically alters the behavior of your program. This is particularly common with programming language interpreters; they receive the code to execute at runtime. JIT compilers are also useful in domains beyond programming languages, such as parsing data. Sometimes you don’t know the schema of the data you’re parsing until runtime, and a JIT can help with that.</p>
+<hr />
+<p>To kick things off, let’s implement a toy regular expression engine. To keep things simple, we&#8217;ll support only two features: literal strings and repetition (i.e. the regex *). We’ll also skip the parser and represent the regular expression as already parsed Rust structures. This means we’ll be able to support strings such as:</p>
+<ul>
+<li>apples</li>
+<li>b(an)*</li>
+</ul>
+<p>but no alternation or lookbehind or anything like that.</p>
+<p>In code this is pretty simple. We’ll have 3 types of Nodes: a literal string node, a repetition node, and a concatenation node, which is the combination of two nodes. This ends up looking like this:</p>
+<pre data-language="rust"><code>enum Node {
+    Literal(&amp;'static str),
+    Concatenation(Box&lt;Node&gt;, Box&lt;Node&gt;),
+    Repetition(Box&lt;Node&gt;),
+}
+
+fn literal(text: &amp;'static str) -&gt; Node {
+    Node::Literal(text)
+}
+
+fn concatenation(left: Node, right: Node) -&gt; Node {
+    Node::Concatenation(Box::new(left), Box::new(right))
+}
+
+fn repetition(body: Node) -&gt; Node {
+    Node::Repetition(Box::new(body))
+}
+</code></pre>
+<p>Writing an interpreter for our regular expression engine is also straightforward:</p>
+<pre data-language="rust"><code>fn match_node(node: &amp;Node, input: &amp;[u8], pos: usize, next: &amp;dyn Fn(usize) -&gt; bool) -&gt; bool {
+    match node {
+        Node::Literal(text) =&gt; {
+            let literal = text.as_bytes();
+            input[pos..].starts_with(literal) &amp;&amp; next(pos + literal.len())
+        }
+
+        Node::Concatenation(left, right) =&gt; {
+            match_node(left, input, pos, &amp;|left_end| {
+                match_node(right, input, left_end, next)
+            })
+        }
+
+        Node::Repetition(body) =&gt; {
+            match_node(body, input, pos, &amp;|body_end| {
+                match_node(node, input, body_end, next)
+            }) || next(pos)
+        }
+    }
+}
+
+fn interp_match(regex: &amp;Node, input: &amp;str) -&gt; bool {
+    let bytes = input.as_bytes();
+    match_node(regex, bytes, 0, &amp;|pos| pos == bytes.len())
+}
+</code></pre>
+<p>Now this regular expression engine is pretty simple. It’s under 20 lines of code, but let’s see how it does in terms of performance. For comparison, we’ll compare the code against handwritten code implemented specifically for the regex. For our example we’ll use the regex b(an)*. The handwritten code ends up looking like:</p>
+<pre data-language="rust"><code>fn handwritten_b_an_star(input: &amp;str) -&gt; bool {
+    let bytes = input.as_bytes();
+    let mut pos = 0;
+
+    if pos == bytes.len() || bytes[pos] != b'b' {
+        return false;
+    }
+    pos += 1;
+
+    while pos &lt; bytes.len() {
+        if bytes[pos] != b'a' {
+            return false;
+        }
+        pos += 1;
+        if pos == bytes.len() || bytes[pos] != b'n' {
+            return false;
+        }
+        pos += 1;
+    }
+    true
+}
+</code></pre>
+<p>(There are ways you could optimize this code and make it much faster, but for our purposes it serves as a good comparison)</p>
+<p>When I benchmark a couple of examples against these two, I get that the handwritten version is 10-20x faster than the interpreter. Clearly a lot of room for improvement.</p>
+<p>Now let’s take a look at how we can use JIT compilation to get a general regular expression engine that performs as well as the handwritten version.</p>
+<h2>How to JIT Compile</h2>
+<p>There are two steps to JIT compile code. First you generate the assembly for the code you want to run. Once you have the code, you then package the assembly code into a function that you can call like any other code into your program.</p>
+<p>To generate the assembly, we will use a variant of an approach called copy-and-patch. The idea is that we have a series of templates in assembly for the different operations we want to JIT compile. These templates are called “stencils”. When we want to JIT compile an operation, we take the associated stencil and make small tweaks based on the specifics of the operation. Very similar to filling in a real stencil. By stringing together several of these filled stencils, we can construct a program at runtime that has similar performance to the handwritten version.</p>
+<p>Here’s the path we’ll take: first we’ll look at the ARM64 code we want to generate for b(an)*. Then we’ll turn repeated instruction sequences into reusable stencils, write an emitter that fills and combines those stencils from the regex AST, and finally copy the generated instructions into executable memory so Rust can call them like a normal function.</p>
+<p>To walk you through how this works, it’s easiest to start with the generated code and work backwards to the JIT compiler itself. Again, we’re working with the regex “b(an)*”. To lay out some design decisions:</p>
+<ul>
+<li>We’ll use a stack for backtracking. The stack will keep track of the state we should go to if we hit a dead end in the regex</li>
+<li>The string we are matching with will end in a null byte. That means any of our character comparisons will automatically fail if we hit the end of the string. This means we don’t have to do any length comparisons at any point</li>
+</ul>
+<p>For the state of our program we will use the following registers:</p>
+<ul>
+<li>x0 &#8211; current position in string and return value</li>
+<li>x1 &#8211; top of stack used for backtracking</li>
+<li>x2 &#8211; bottom of stack used for backtracking (this is needed to determine if the stack is empty)</li>
+<li>x9 &#8211; used as a temporary variable</li>
+</ul>
+<p>For the inputs into our program, we will be passed:</p>
+<ul>
+<li>x0 &#8211; a pointer to the start of the string</li>
+<li>x1 &#8211; a pointer to the location we will use for our stack</li>
+</ul>
+<h3>Generated ARM64</h3>
+<p>Now that we’ve taken care of that, let’s walk through the generated assembly part by part. This is specifically on macOS with ARM64. First up, we have the prologue, which initializes the program. All it does is initialize the stack by setting the top of the stack and the bottom of the stack to the value passed in:</p>
+<pre data-language="asm"><code>0:  aa0103e2   mov   x2, x1
+</code></pre>
+<p>Next up, we have the code that checks for the character b. If it sees a character that’s not b, we jump to a block of code that handles fallback logic. Otherwise, we advance our position in the string:</p>
+<pre data-language="asm"><code>; CHAR 'b'
+  4:  39400009   ldrb  w9, [x0]                  ; load current input byte
+  8:  7101893f   cmp   w9, #0x62                 ; is it 'b'?
+  c:  54000281   b.ne  0x5c                      ; no -&gt; fallback block
+ 10:  91000400   add   x0, x0, #1                ; yes -&gt; advance input
+</code></pre>
+<p>Next up, we have the repetition (an)*. For the repetition, we need to do the backtracking. If we backtrack here, that means we jump immediately to the end of the loop. That means we need to store both the address of the instruction after the loop and our position in the string on the stack.</p>
+<pre data-language="asm"><code> 14:  d2800989   movz  x9, #0x004c               ; build resume address
+ 18:  f2a00009   movk  x9, #0x0000, lsl #16      ;   = 0x1_0000_004c
+ 1c:  f2c00029   movk  x9, #0x0001, lsl #32      ;   (the loop exit)
+ 20:  f2e00009   movk  x9, #0x0000, lsl #48      ;
+ 24:  a8810029   stp   x9, x0, [x1], #16         ; push (exit, pos) onto stack
+</code></pre>
+<p>With that in place, we can now execute the body of the repetition. This will check for the characters ‘a’ and ‘n’ and, if it sees them, go back to the top of the repetition, but at a new string location.</p>
+<pre data-language="asm"><code>; CHAR 'a'
+ 28:  39400009   ldrb  w9, [x0]
+ 2c:  7101853f   cmp   w9, #0x61                 ; 'a'?
+ 30:  54000161   b.ne  0x5c                      ; no -&gt; fallback block
+ 34:  91000400   add   x0, x0, #1
+
+; CHAR 'n'
+ 38:  39400009   ldrb  w9, [x0]
+ 3c:  7101b93f   cmp   w9, #0x6e                 ; 'n'?
+ 40:  540000e1   b.ne  0x5c                      ; no -&gt; fallback block
+ 44:  91000400   add   x0, x0, #1
+
+; JMP
+ 48:  17fffff3   b     0x14                      ; back to top of loop
+</code></pre>
+<p>Now we’re past the loop. This is where the backtracking will jump once we backtrack. Once we finish the repetition, we’re at the end of the regex. All we have to do now is check if we’re at the end of the string. If we are at the end of the string, we return 1 for success. If we are not, that means the regex failed to match, and we need to run the fail logic to do a fallback.</p>
+<pre data-language="asm"><code> 4c:  39400009   ldrb  w9, [x0]
+ 50:  35000069   cbnz  w9, 0x5c                  ; not at NUL -&gt; fallback block
+ 54:  d2800020   mov   x0, #1                    ; success
+ 58:  d65f03c0   ret
+</code></pre>
+<p>And then finally, we have the fallback logic. This checks if the stack is empty. If it is, we return 0. If it’s not empty, we pop both the fallback address and the fallback string position off the stack, and then jump to the fallback address.</p>
+<pre data-language="asm"><code> 5c:  eb02003f   cmp   x1, x2                    ; any frames left?
+ 60:  54000060   b.eq  0x6c                      ; no -&gt; give up
+ 64:  a9ff0029   ldp   x9, x0, [x1, #-16]!       ; pop (resume, pos)
+ 68:  d61f0120   br    x9                        ; jump there
+ 6c:  d2800000   mov   x0, #0                    ; no match
+ 70:  d65f03c0   ret
+</code></pre>
+<h3>Building the Stencils</h3>
+<p>Now that you’ve had the chance to see the compiled code, you should start to get a sense of how the copy-and-patch compiler would work. We have common sets of instructions with only minor differences between them. For each of these blocks of functions, we can write a function to generate the respective code. Each function will take in values to use to modify the code. For example, one of the arguments to stencil_char will be the char in the regex to compare against. We’ll insert that char directly into the machine code.</p>
+<p>The prologue is straightforward since it’s just a block of code:</p>
+<pre data-language="rust"><code>const PROLOGUE_WORDS: usize = 1;
+
+fn stencil_prologue() -&gt; [u32; PROLOGUE_WORDS] {
+    [0xAA0103E2] // mov x2, x1
+}
+</code></pre>
+<p>For character comparison, we need to insert the character we’re comparing against and where to jump for the fallback logic:</p>
+<pre data-language="rust"><code>const CHAR_WORDS: usize = 4;
+
+fn stencil_char(byte: u8, stencil_pos: usize, fail_pos: usize) -&gt; [u32; CHAR_WORDS] {
+    [
+        0x39400009,                                                 // ldrb w9, [x0]
+        0x7100013F | ((byte as u32) &lt;&lt; 10),                         // cmp  w9, #byte
+        0x54000001 | cond_branch_offset(stencil_pos + 2, fail_pos), // b.ne fail
+        0x91000400,                                                 // add  x0, x0, #1
+    ]
+}
+</code></pre>
+<p>For the repetition, we have the start of the loop that pushes onto the stack and the jump onto the end:</p>
+<pre data-language="rust"><code>const SPLIT_WORDS: usize = 5;
+
+fn stencil_split(resume_addr: u64) -&gt; [u32; SPLIT_WORDS] {
+    [
+        0xD2800009 | addr_bits(resume_addr, 0), // movz x9, #addr[0..16]
+        0xF2A00009 | addr_bits(resume_addr, 1), // movk x9, #addr[16..32], lsl 16
+        0xF2C00009 | addr_bits(resume_addr, 2), // movk x9, #addr[32..48], lsl 32
+        0xF2E00009 | addr_bits(resume_addr, 3), // movk x9, #addr[48..64], lsl 48
+        0xA8810029,                             // stp  x9, x0, [x1], #16
+    ]
+}
+
+const JMP_WORDS: usize = 1;
+
+fn stencil_jmp(stencil_pos: usize, target_pos: usize) -&gt; [u32; JMP_WORDS] {
+    [0x14000000 | branch_offset(stencil_pos, target_pos)] // b target
+}
+</code></pre>
+<p>And then we have the match and fail blocks which are pretty clean:</p>
+<pre data-language="rust"><code>const MATCH_WORDS: usize = 4;
+
+fn stencil_match(stencil_pos: usize, fail_pos: usize) -&gt; [u32; MATCH_WORDS] {
+    [
+        0x39400009,                                                 // ldrb w9, [x0]
+        0x35000009 | cond_branch_offset(stencil_pos + 1, fail_pos), // cbnz w9, fail
+        0xD2800020,                                                 // mov  x0, #1
+        0xD65F03C0,                                                 // ret
+    ]
+}
+
+const FAIL_WORDS: usize = 6;
+
+fn stencil_fail() -&gt; [u32; FAIL_WORDS] {
+    [
+        0xEB02003F, // cmp  x1, x2
+        0x54000060, // b.eq +3 (to the mov below)
+        0xA9FF0029, // ldp  x9, x0, [x1, #-16]!
+        0xD61F0120, // br   x9
+        0xD2800000, // mov  x0, #0
+        0xD65F03C0, // ret
+    ]
+}
+</code></pre>
+<p>For completeness, here’s the helper functions we used which just help us insert specific data into the instructions:</p>
+<pre data-language="rust"><code>// Compute the branch-offset field for a conditional branch (b.ne / cbnz):
+// the instruction count from branch to target, stored in bits 5..24.
+fn cond_branch_offset(branch_pos: usize, target_pos: usize) -&gt; u32 {
+    let instr_count = target_pos as i64 - branch_pos as i64; // may be negative
+    (((instr_count as u64) &amp; 0x7FFFF) &lt;&lt; 5) as u32
+}
+
+// Compute the branch-offset field for an unconditional branch (b):
+// same idea, but stored in bits 0..26.
+fn branch_offset(branch_pos: usize, target_pos: usize) -&gt; u32 {
+    let instr_count = target_pos as i64 - branch_pos as i64; // may be negative
+    ((instr_count as u64) &amp; 0x3FF_FFFF) as u32
+}
+
+// Extract 16 bits of an absolute address, positioned for a movz/movk immediate.
+fn addr_bits(addr: u64, part: usize) -&gt; u32 {
+    (((addr &gt;&gt; (16 * part)) &amp; 0xFFFF) as u32) &lt;&lt; 5
+}
+</code></pre>
+<h3>Emitting Code</h3>
+<p>Now the code that drives it:</p>
+<pre data-language="rust"><code>// Computes how many instructions a node compiles to.
+fn node_words(node: &amp;Node) -&gt; usize {
+    match node {
+        Node::Literal(text) =&gt; text.len() * CHAR_WORDS,
+        Node::Concatenation(left, right) =&gt; node_words(left) + node_words(right),
+        Node::Repetition(body) =&gt; SPLIT_WORDS + node_words(body) + JMP_WORDS,
+    }
+}
+
+struct Emitter {
+    code: Vec&lt;u32&gt;,
+    fail: usize, // word offset of the shared fail block
+    base: u64,   // runtime address of code[0], for absolute-address holes
+}
+
+impl Emitter {
+    // Returns the offset where the next instruction will be placed.
+    fn pos(&amp;self) -&gt; usize {
+        self.code.len()
+    }
+
+    // Appends a filled stencil to the code buffer.
+    fn emit(&amp;mut self, stencil: &amp;[u32]) {
+        self.code.extend_from_slice(stencil);
+    }
+
+    // Emits the code for one node, recursing into children.
+    fn emit_node(&amp;mut self, node: &amp;Node) {
+        match node {
+            Node::Literal(text) =&gt; {
+                for &amp;byte in text.as_bytes() {
+                    self.emit(&amp;stencil_char(byte, self.pos(), self.fail));
+                }
+            }
+            Node::Concatenation(left, right) =&gt; {
+                self.emit_node(left);
+                self.emit_node(right);
+            }
+            Node::Repetition(body) =&gt; {
+                let split_at = self.pos();
+                let exit = split_at + SPLIT_WORDS + node_words(body) + JMP_WORDS;
+                self.emit(&amp;stencil_split(self.base + exit as u64 * 4));
+                self.emit_node(body);
+                self.emit(&amp;stencil_jmp(self.pos(), split_at));
+            }
+        }
+    }
+}
+
+// Generates the complete program: prologue, the compiled AST, MATCH, fail block.
+fn generate_code(regex: &amp;Node, base: u64) -&gt; Vec&lt;u32&gt; {
+    let nwords = PROLOGUE_WORDS + node_words(regex) + MATCH_WORDS + FAIL_WORDS;
+    let mut emitter = Emitter {
+        code: Vec::with_capacity(nwords),
+        fail: nwords - FAIL_WORDS,
+        base,
+    };
+    emitter.emit(&amp;stencil_prologue());
+    emitter.emit_node(regex);
+    let match_at = emitter.pos();
+    emitter.emit(&amp;stencil_match(match_at, emitter.fail));
+    emitter.emit(&amp;stencil_fail());
+    assert_eq!(emitter.pos(), nwords);
+    emitter.code
+}
+</code></pre>
+<p>And that’s the hard part! Personally, writing assembly is where I find AI the most helpful. My main experience with assembly is completing the microcorruption CTF. I’ve never actually written assembly myself. I would really struggle to figure out the exact instructions needed and how to modify them to get the output I wanted. With AI, I can give my coding agent the general shape of how I want the JIT compiler to work, and it can handle a lot of these details for me.</p>
+<h3>Loading Machine Code</h3>
+<p>To finish our compiler we need to actually load the code. To do this, we’ll use mmap to allocate a block of memory that is readable, writable, and executable. We’ll then copy the code into that memory and convert that block of memory into a function which we then call:</p>
+<pre data-language="rust"><code>const BSTACK_MAX: usize = 4096;
+
+// These functions are included in the mac system library
+unsafe extern "C" {
+    fn pthread_jit_write_protect_np(enabled: libc::c_int);
+    fn sys_icache_invalidate(start: *mut libc::c_void, len: libc::size_t);
+}
+
+type MatchFn = unsafe extern "C" fn(input: *const u8, bstack: *mut u64) -&gt; u64;
+
+struct Jit {
+    buf: *mut u32,
+    nbytes: usize,
+    bstack: Vec&lt;u64&gt;,
+}
+
+impl Jit {
+    fn compile(regex: &amp;Node) -&gt; Jit {
+        let nwords = PROLOGUE_WORDS + node_words(regex) + MATCH_WORDS + FAIL_WORDS;
+        let nbytes = nwords * 4;
+
+        unsafe {
+            let buf = libc::mmap(
+                std::ptr::null_mut(),
+                nbytes,
+                libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+                libc::MAP_PRIVATE | libc::MAP_ANON | libc::MAP_JIT,
+                -1,
+                0,
+            ) as *mut u32;
+            assert!(buf as *mut libc::c_void != libc::MAP_FAILED, "mmap failed");
+
+            let code = generate_code(regex, buf as u64);
+
+            pthread_jit_write_protect_np(0); // make the region writable (Apple W^X)
+            std::slice::from_raw_parts_mut(buf, code.len()).copy_from_slice(&amp;code);
+            pthread_jit_write_protect_np(1); // back to executable
+            sys_icache_invalidate(buf as *mut libc::c_void, nbytes);
+
+            Jit { buf, nbytes, bstack: vec![0; BSTACK_MAX * 2] }
+        }
+    }
+
+    // Runs the generated code. Input must end with a NUL byte.
+    fn is_match(&amp;mut self, nul_terminated: &amp;[u8]) -&gt; bool {
+        debug_assert_eq!(nul_terminated.last(), Some(&amp;0));
+        unsafe {
+            let matcher: MatchFn = std::mem::transmute(self.buf);
+            matcher(nul_terminated.as_ptr(), self.bstack.as_mut_ptr()) != 0
+        }
+    }
+}
+
+impl Drop for Jit {
+    fn drop(&amp;mut self) {
+        unsafe {
+            libc::munmap(self.buf as *mut libc::c_void, self.nbytes);
+        }
+    }
+}
+</code></pre>
+<h2>Results</h2>
+<p>With all of this complete, let’s compare the performance of the different implementations we built:</p>
+<div class="pgrust-benchmark-wrap" tabindex="0" role="region" aria-label="JIT benchmark results">
+<table class="pgrust-benchmark-table">
+<thead>
+<tr>
+<th style="text-align: right; white-space: nowrap;" scope="col">Input length</th>
+<th style="text-align: right; white-space: nowrap;" scope="col">Interpreter</th>
+<th style="text-align: right; white-space: nowrap;" scope="col">JIT</th>
+<th style="text-align: right; white-space: nowrap;" scope="col">Handwritten</th>
+<th style="text-align: right; white-space: nowrap;" scope="col">JIT speedup</th>
+<th style="text-align: right; white-space: nowrap;" scope="col">Handwritten speedup</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">9</td>
+<td style="text-align: right;">45 ns</td>
+<td style="text-align: right;">3.8 ns</td>
+<td style="text-align: right;">3.8 ns</td>
+<td style="text-align: right;">11.7x</td>
+<td style="text-align: right;">11.9x</td>
+</tr>
+<tr>
+<td style="text-align: right;">33</td>
+<td style="text-align: right;">103 ns</td>
+<td style="text-align: right;">7.9 ns</td>
+<td style="text-align: right;">10.5 ns</td>
+<td style="text-align: right;">13.0x</td>
+<td style="text-align: right;">9.8x</td>
+</tr>
+<tr>
+<td style="text-align: right;">129</td>
+<td style="text-align: right;">597 ns</td>
+<td style="text-align: right;">30 ns</td>
+<td style="text-align: right;">32 ns</td>
+<td style="text-align: right;">19.7x</td>
+<td style="text-align: right;">18.6x</td>
+</tr>
+<tr>
+<td style="text-align: right;">513</td>
+<td style="text-align: right;">1,955 ns</td>
+<td style="text-align: right;">126 ns</td>
+<td style="text-align: right;">120 ns</td>
+<td style="text-align: right;">15.5x</td>
+<td style="text-align: right;">16.2x</td>
+</tr>
+<tr>
+<td style="text-align: right;">2,049</td>
+<td style="text-align: right;">8,301 ns</td>
+<td style="text-align: right;">470 ns</td>
+<td style="text-align: right;">393 ns</td>
+<td style="text-align: right;">17.7x</td>
+<td style="text-align: right;">21.1x</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>So JIT and the hand-rolled implementation are pretty much neck and neck. Sometimes the JIT version is faster, and sometimes the hand-rolled version is faster.</p>
+<hr />
+<p>There’s been a meme circulating about how AI doesn’t help because “code was never the hard part.” I think that’s true in some domains, but in others, writing the code absolutely was the hard part. JIT compilers are a great example of that. For many pieces of software, a JIT compiler would help a lot with speeding up the code. The rarity of JIT compilers makes me believe that implementing a JIT compiler historically was too difficult for it to be worthwhile. LLMs have lowered the barrier to entry and made it much easier to write a JIT compiler. This is the thesis behind pgrust. Databases historically were the hardest piece of software to build and were limited because of that. Now, with AI, we can be more ambitious about the type of software we build.</p></div>
+    <footer class="article-footer">
+      <section class="post-cta" aria-label="Follow pgrust">
+  <div class="post-cta-copy">
+    <p class="post-cta-title">Follow the rewrite</p>
+    <p>Star pgrust and keep up with new releases.</p>
+  </div>
+  <nav class="post-cta-actions" aria-label="pgrust community links">
+    <a class="post-cta-primary" href="https://github.com/malisper/pgrust" target="_blank" rel="noopener">Star pgrust on GitHub <span aria-hidden="true">↗</span></a>
+    <a class="post-cta-action" href="https://discord.gg/FZZ4dbdvwU" target="_blank" rel="noopener">Join Discord</a>
+    <a class="post-cta-action" href="/#updates">Email updates</a>
+  </nav>
+  <p class="post-cta-social">Follow on X: <a href="https://x.com/pgrustdb" target="_blank" rel="noopener">pgrust</a><span aria-hidden="true"> · </span><a href="https://x.com/mmalisper" target="_blank" rel="noopener">Malis</a><span aria-hidden="true"> · </span><a href="https://x.com/JasonSeibel" target="_blank" rel="noopener">Jason</a></p>
+</section>
+      <p class="article-back"><a href="/blog/">← All posts</a></p>
+    </footer>
+  </article>
+</main>
+<footer class="site-footer">Postgres, rewritten in Rust. Built by Michael Malis and Jason Seibel.</footer>
+<script src="/blog/analytics.js"></script>
+</body>
+</html>

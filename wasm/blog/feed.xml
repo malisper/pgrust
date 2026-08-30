@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
+  <channel>
+    <title>pgrust blog</title>
+    <link>https://pgrust.com/blog/</link>
+    <description>Engineering notes from the team rebuilding PostgreSQL in Rust.</description>
+    <language>en-us</language>
+    <atom:link href="https://pgrust.com/blog/feed.xml" rel="self" type="application/rss+xml" />
+    <item>
+      <title>JIT Compiling Code in 5μs</title>
+      <link>https://pgrust.com/blog/jit-compiling-code-in-5-us/</link>
+      <guid isPermaLink="true">https://pgrust.com/blog/jit-compiling-code-in-5-us/</guid>
+      <pubDate>Tue, 11 Aug 2026 09:55:57 GMT</pubDate>
+      <description>Build a copy-and-patch JIT compiler in Rust, generate ARM64 machine code, and benchmark it against an interpreter and handwritten implementation.</description>
+    </item>
+<item>
+      <title>Rebuilding Postgres for 300x faster analytics: batching, operator fusion, and SIMD</title>
+      <link>https://pgrust.com/blog/how-we-made-postgres-hundreds-of-times-faster-the-query-engine/</link>
+      <guid isPermaLink="true">https://pgrust.com/blog/how-we-made-postgres-hundreds-of-times-faster-the-query-engine/</guid>
+      <pubDate>Mon, 03 Aug 2026 10:00:39 GMT</pubDate>
+      <description>How batching, operator fusion, and SIMD made pgrust analytical queries hundreds of times faster than PostgreSQL.</description>
+    </item>
+<item>
+      <title>Postgres in Rust: three dead ends before we passed 100% of the regression suite</title>
+      <link>https://pgrust.com/blog/postgres-in-rust-regression-suite/</link>
+      <guid isPermaLink="true">https://pgrust.com/blog/postgres-in-rust-regression-suite/</guid>
+      <pubDate>Thu, 16 Jul 2026 10:00:49 GMT</pubDate>
+      <description>Four attempts, three dead ends, and the process that produced a Rust rewrite passing PostgreSQL's full regression suite.</description>
+    </item>
+<item>
+      <title>pgrust passes 100% of the Postgres regression tests</title>
+      <link>https://pgrust.com/blog/pgrust-passes-100-of-postgresqls-regression-tests/</link>
+      <guid isPermaLink="true">https://pgrust.com/blog/pgrust-passes-100-of-postgresqls-regression-tests/</guid>
+      <pubDate>Thu, 25 Jun 2026 15:25:42 GMT</pubDate>
+      <description>pgrust reaches full PostgreSQL regression and isolation test compatibility.</description>
+    </item>
+<item>
+      <title>The four horsemen behind thousands of Postgres outages</title>
+      <link>https://pgrust.com/blog/the-four-horsemen-behind-thousands-of-postgres-outages/</link>
+      <guid isPermaLink="true">https://pgrust.com/blog/the-four-horsemen-behind-thousands-of-postgres-outages/</guid>
+      <pubDate>Thu, 07 May 2026 05:00:13 GMT</pubDate>
+      <description>Four recurring PostgreSQL failure modes and how pgrust is designed to address them.</description>
+    </item>
+<item>
+      <title>pgrust update: at 67% Postgres compatibility, and accelerating</title>
+      <link>https://pgrust.com/blog/pgrust-update-at-67-postgres-compatibility-and-accelerating/</link>
+      <guid isPermaLink="true">https://pgrust.com/blog/pgrust-update-at-67-postgres-compatibility-and-accelerating/</guid>
+      <pubDate>Tue, 28 Apr 2026 07:13:20 GMT</pubDate>
+      <description>How parallel coding agents, shared build artifacts, and a merge queue accelerated the PostgreSQL rewrite.</description>
+    </item>
+<item>
+      <title>pgrust: Rebuilding Postgres in Rust with AI</title>
+      <link>https://pgrust.com/blog/pgrust-rebuilding-postgres-in-rust-with-ai/</link>
+      <guid isPermaLink="true">https://pgrust.com/blog/pgrust-rebuilding-postgres-in-rust-with-ai/</guid>
+      <pubDate>Mon, 20 Apr 2026 16:03:16 GMT</pubDate>
+      <description>The first two weeks of rebuilding PostgreSQL in Rust with coding agents, from the parser to a browser demo.</description>
+    </item>
+  </channel>
+</rss>

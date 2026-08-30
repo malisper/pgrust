@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The four horsemen behind thousands of Postgres outages | pgrust</title>
+<meta name="description" content="Four recurring PostgreSQL failure modes and how pgrust is designed to address them.">
+<link rel="canonical" href="https://pgrust.com/blog/the-four-horsemen-behind-thousands-of-postgres-outages/">
+<link rel="alternate" type="application/rss+xml" title="pgrust blog" href="https://pgrust.com/blog/feed.xml">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="icon" type="image/png" sizes="48x48" href="/favicon-48x48.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+<link rel="manifest" href="/site.webmanifest">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/blog/blog.css">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="pgrust">
+<meta property="og:title" content="The four horsemen behind thousands of Postgres outages">
+<meta property="og:description" content="Four recurring PostgreSQL failure modes and how pgrust is designed to address them.">
+<meta property="og:url" content="https://pgrust.com/blog/the-four-horsemen-behind-thousands-of-postgres-outages/">
+<meta property="og:image" content="https://pgrust.com/blog/assets/pgrust-default.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="The four horsemen behind thousands of Postgres outages">
+<meta name="twitter:description" content="Four recurring PostgreSQL failure modes and how pgrust is designed to address them.">
+<meta name="twitter:image" content="https://pgrust.com/blog/assets/pgrust-default.png">
+<meta property="article:published_time" content="2026-05-06T22:00:13-07:00">
+<meta property="article:modified_time" content="2026-05-06T22:10:04-07:00">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"Article","headline":"The four horsemen behind thousands of Postgres outages","description":"Four recurring PostgreSQL failure modes and how pgrust is designed to address them.","image":"https://pgrust.com/blog/assets/pgrust-default.png","datePublished":"2026-05-06T22:00:13-07:00","dateModified":"2026-05-06T22:10:04-07:00","author":{"@type":"Person","name":"Michael Malis"},"publisher":{"@type":"Organization","name":"pgrust","url":"https://pgrust.com/"},"mainEntityOfPage":"https://pgrust.com/blog/the-four-horsemen-behind-thousands-of-postgres-outages/"}</script>
+</head>
+<body>
+<header class="site-header">
+  <div class="site-header-inner">
+    <a class="wordmark" href="/">pgrust</a>
+    <nav class="site-nav" aria-label="Primary">
+      <a href="/">Demo</a>
+      <a href="/blog/" aria-current="page">Blog</a>
+      <a href="https://github.com/malisper/pgrust">GitHub</a>
+      <a class="nav-updates" href="/#updates">Updates</a>
+    </nav>
+  </div>
+</header>
+<main class="article-shell">
+  <article>
+    <header class="article-header">
+      <p class="eyebrow">pgrust engineering</p>
+      <h1>The four horsemen behind thousands of Postgres outages</h1>
+      <p class="article-dek">Four recurring PostgreSQL failure modes and how pgrust is designed to address them.</p>
+      <p class="article-meta">Michael Malis · <time datetime="2026-05-06T22:00:13-07:00">May 7, 2026</time></p>
+    </header>
+    <img class="article-hero" src="/blog/assets/pgrust-default.png" alt="" fetchpriority="high">
+    <div class="article-body"><p>Postgres is great, but there are some very common problems that people have that can pretty easily lead to outages with Postgres. These aren&#8217;t just theoretical issues. From talking to a lot of startups, these are the things that actually cause outages in production, especially on teams that don&#8217;t have a dedicated database person. These are the four main areas I want to improve upon, in pgrust, my reimplementation of Postgres.</p>
+<hr />
+<h2>VACUUM and Transaction ID Wraparound</h2>
+<p>The Postgres vacuums are probably <a href="https://blog.sentry.io/transaction-id-wraparound-in-postgres/">the</a> <a href="https://mailchimp.com/what-we-learned-from-the-recent-mandrill-outage/">number</a> <a href="https://www.davepacheco.net/blog/2024/challenges-deploying-postgresql-9.2-for-high-availability/">one</a> cause of outages related to Postgres. When you delete a row in Postgres, Postgres doesn&#8217;t actually delete it. Postgres will keep the row around and mark it as deleted. This is done for many reasons including giving Postgres an easy way to rollback the transaction if needed. To actually delete the rows and free up the space, Postgres has a background job called the vacuum, which will physically remove the rows that were marked as deleted.</p>
+<p>This creates some problems. First, the vacuum itself. Because the vacuum has to read all your data, the vacuum can consume a ton of I/O. This I/O will compete with the I/O your queries need and can slow your queries down. If you try to configure your vacuum such that it doesn&#8217;t use as much IO, it may fall behind, and you may actually be accruing deleted rows faster than the vacuum can clean them up. You end up having to play this really messy game with the vacuum where you want to be aggressive enough that it keeps up with how quickly you&#8217;re updating your deleted data, but not too fast that it competes with I/O for your queries.</p>
+<p>The second issue is transaction wraparound. In order to keep track of which rows are live and which ones are dead, Postgres will label those rows with a transaction ID. Postgres uses a 32-bit ID to represent the transaction IDs. That means you can have at most four billion transactions before Postgres has to start reusing transaction IDs. One job of the vacuum is it will reclaim the old transaction IDs so they can be reused. Now, if the vacuum falls too far behind on reclaiming transaction IDs, Postgres will actually shut down your DB to prevent you from reusing live transaction IDs. This may sound silly, but it&#8217;s necessary because otherwise your data can become corrupted. I would bet this is probably caused on the order of thousands or tens of thousands of outages with Postgres.</p>
+<p><strong>What pgrust is doing differently:</strong></p>
+<p>I’m looking at two different ways to solve for this:</p>
+<ol>
+<li>There’s been a patch out there to add 64-bit transaction IDs to Postgres. There&#8217;s been reluctance to merge the patch for a number of reasons: it breaks compatibility with previous versions of Postgres and adds 32 bits of overhead to every row. I personally think, given the number of outages this has caused, it&#8217;s totally worth it to make this change.</li>
+<li>I’m looking at alternative architectures that don&#8217;t require VACUUMs at all. Oracle takes a completely different approach to marking rows as deleted that doesn&#8217;t require a VACUUM, referred to as an undo log. There are projects exploring adding this kind of support to Postgres.</li>
+</ol>
+<hr />
+<h2>Connection Limits and Query Parallelism</h2>
+<p>When you spin up a Postgres instance, there&#8217;s a configuration variable for the maximum number of connections that Postgres can create. If more things try to connect to Postgres then the connection limit, they won&#8217;t be able to, and your database will go down. Changing the number of connections requires restarting your DB, so you need to be very thoughtful about about this setting when first creating your database. If you don’t know about this ahead of time, you’ll likely end up with a connection limit that’s too low. Many people will run software like PgBouncer, which will partially solve this problem, but it&#8217;s still a big pain.</p>
+<p>You may ask, why does Postgres even have a connection limit in the first place? The answer largely comes down to how Postgres parallelizes queries. Every time you create a new Postgres connection, Postgres will create a new process. Compared to other ways of doing parallelism, processes are very expensive, both in terms of taking CPU resources but also the amount of time it takes to spin up a new process.</p>
+<p>Not only do processes limit Postgres’ ability to parallelize across queries, but they also limit Postgres&#8217;s ability to parallelize within a query. When Postgres wants to parallel process a single query, Postgres will spin up multiple processes and have them each process the query. Because it&#8217;s expensive to spin up new processes, Postgres will only do this for long-running queries.</p>
+<p>There&#8217;s been years of people talking about switching Postgres from a process model to a threading model, but nothing concrete has come out of that. One of the big challenges is it&#8217;s such a big refactor that it&#8217;s really hard to do, and it&#8217;s really hard to do in a safe way.</p>
+<p><strong>What pgrust does:</strong></p>
+<p>pgrust was architected from day one with a thread based model. One of the big reasons Postgres uses a process model is because of safety. Processes are more isolated from each other than threads are, so if something goes bad in a process, Postgres, it won&#8217;t impact the other processes. Because pgrust is written in Rust and Rust provides safety guarantees at compile time, this isn&#8217;t a risk for pgrust.</p>
+<hr />
+<h2>Bad Query Plans</h2>
+<p>Postgres&#8217;s query planner, although it&#8217;s very smart, can be challenging to work with. If you aren&#8217;t familiar, Postgres has dozens of different algorithms it can use to execute a query. When you run a query, Postgres will look at it and look at some statistics about the data in your tables and will try to figure out which algorithms will execute the query the fastest.</p>
+<p>In many cases, Postgres will get things right. The problem is when Postgres gets things wrong, it can get them very wrong. The difference between a good query plan and a bad one, can be the difference between a query taking 10ms and taking 10 minutes. Even worse, Postgres doesn&#8217;t give you meaningful control of the query planner. That means when you do get a bad query plan, you&#8217;re pretty much SOL.</p>
+<p>If you get a bad query plan, the only real option you have is to <strong>completely</strong> turn off some of the Postgres algorithms. Other databases like MySQL allow for “planner hints” which allow you to influence how specific queries are executed. Postgres doesn&#8217;t have anything similar.</p>
+<p>At a previous company I worked at, we had to globally turn off nested loop joins because Postgres would try to use them all the time, and it would make all the queries incredibly slow. This was in large part to our use of json, which made it so Postgres couldn’t understand our data, but I’ll get back to that in a bit.</p>
+<p><strong>What pgrust is building toward:</strong></p>
+<p>This is one of the more theoretical parts of pgrust, but I want to build in an adaptive query planner. The idea: if a query that normally takes 10ms suddenly takes 10 seconds, pgrust would detect the regression, check if the plan changed, check if the underlying statistics drifted, and make a correction, instead of waiting for a DBA to notice and manually intervene.</p>
+<p>This hasn&#8217;t been built into pgrust yet, but I don&#8217;t see a reason why this can&#8217;t exist.</p>
+<hr />
+<h2>JSON</h2>
+<p>Postgres has a love-hate relationship with json. When you&#8217;re working with unstructured data, Postgres json makes it really easy to store that data and makes it really easy to query that data. Unfortunately, it&#8217;s also really easy for things to go wrong with json.</p>
+<p>At Heap, we were heavy users of json and it was a massive headache. <a href="https://www.heap.io/blog/when-to-avoid-jsonb-in-a-postgresql-schema">My manager even wrote a whole blog post about it.</a> The biggest issue is Postgres doesn’t capture statistics for json. For most types Postgres will collect a ton of statistics: a histogram, the most common values, and more. For json, Postgres captures no meaningful statistics. Instead what Postgres does is when you filter on a json column, it estimates the filter will match .1% of rows. The .1% is a magic number instead of being calculated based on your data. The right number could be 80% or it could be .0001%.</p>
+<p>All this together means as soon as you start filter on json, you’re pretty much guaranteed to start getting bad query plans.</p>
+<p>That isn’t to mention the other big problem with json. Postgres doesn’t do any sort of compression of your json. That means if you are reusing the same keys and values, Postgres will store those full keys and values from scratch every time. There’s real opportunity to do something like dictionary compression to reduce the amount of space json takes up.</p>
+<p><strong>What pgrust is going to do about it</strong></p>
+<p>The first thing I want to do is build in real statistics for json. This will solve 80% of the pain points with json. There were a couple patches floating around for adding statistics for json and I want to see one through to completion. It will require some experimentation, but I’ve got a couple ideas in mind.</p>
+<p>I also want to look at introducing some sort of compression to make the amount of space json takes up less problematic. That could be either by introducing some sort of cross row compression or by introducing dictionary compression.</p>
+<hr />
+<h2>What&#8217;s on the roadmap for pgrust</h2>
+<p>The current priorities:</p>
+<ol>
+<li>Continue pushing toward 100% Postgres compatibility &#8211; we’re passing 96% of the Postgres regression suite today with only a couple issues remaining.</li>
+<li>Stability and bug bashing &#8211; getting pgrust to a state where people can start trusting it</li>
+<li>Start working on the architectural improvements discussed above &#8211; starting with 64-bit transaction IDs</li>
+</ol>
+</div>
+    <footer class="article-footer">
+      <section class="post-cta" aria-label="Follow pgrust">
+  <div class="post-cta-copy">
+    <p class="post-cta-title">Follow the rewrite</p>
+    <p>Star pgrust and keep up with new releases.</p>
+  </div>
+  <nav class="post-cta-actions" aria-label="pgrust community links">
+    <a class="post-cta-primary" href="https://github.com/malisper/pgrust" target="_blank" rel="noopener">Star pgrust on GitHub <span aria-hidden="true">↗</span></a>
+    <a class="post-cta-action" href="https://discord.gg/FZZ4dbdvwU" target="_blank" rel="noopener">Join Discord</a>
+    <a class="post-cta-action" href="/#updates">Email updates</a>
+  </nav>
+  <p class="post-cta-social">Follow on X: <a href="https://x.com/pgrustdb" target="_blank" rel="noopener">pgrust</a><span aria-hidden="true"> · </span><a href="https://x.com/mmalisper" target="_blank" rel="noopener">Malis</a><span aria-hidden="true"> · </span><a href="https://x.com/JasonSeibel" target="_blank" rel="noopener">Jason</a></p>
+</section>
+      <p class="article-back"><a href="/blog/">← All posts</a></p>
+    </footer>
+  </article>
+</main>
+<footer class="site-footer">Postgres, rewritten in Rust. Built by Michael Malis and Jason Seibel.</footer>
+<script src="/blog/analytics.js"></script>
+</body>
+</html>
