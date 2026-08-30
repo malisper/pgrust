@@ -23,8 +23,15 @@ use ::types_slot::{TupleSlotKind, EXEC_FLAG_BACKWARD};
 use ::types_tuple::TupleDescData;
 use ::tuplestore::Tuplestore;
 
+mod series;
+
 #[cfg(test)]
 mod tests;
+
+// The `generate_series` generator face (see series.rs): recognition is pure
+// and separate from opening, so a consumer can test its own admission before
+// any argument expression is evaluated.
+pub use series::{series_kind, series_open, SeriesFeed, SeriesKind};
 
 pub fn init_seams() {}
 
@@ -47,6 +54,11 @@ struct FunctionScanPerFuncState<'mcx> {
     tupdesc: Rc<TupleDescData<'mcx>>,
     colcount: i32,
     tstore: Option<Tuplestore>,
+    // The `generate_series` generator's replay handle — the fast path's
+    // tuplestore (series.rs). Opened at most once per set of argument values
+    // and dropped in exactly the places `tstore` is, so both rescan arms
+    // treat the two identically.
+    series: Option<series::SeriesFeed>,
     // 1 + the actual row count once known; -1 until then (backward scans).
     rowcount: i64,
     func_slot: Option<ExecSlotId>,
@@ -114,16 +126,28 @@ impl<'mcx> ScanNode<'mcx> for FunctionScanState<'mcx> {
         if self.simple {
             let fs = &mut self.funcstates[0];
             if fs.tstore.is_none() {
-                let mut store = exec_make_table_function_result(
-                    &mut fs.setexpr,
-                    &fs.tupdesc,
-                    self.eflags & EXEC_FLAG_BACKWARD != 0,
-                    estate,
-                    self.ss.ps_ExprContext,
-                    // SAFETY: arena slot armed by make_arg_ctx; exclusive
-                    // during the scan (dropped only by the estate reset cb).
-                    unsafe { self.arg_mcx.as_mut() },
-                )?;
+                let mut store = match fs.series {
+                    // The series fast path already ran ExecEvalFuncArgs for
+                    // this node (series.rs); replay its retained sequence
+                    // instead of calling the SRF again, so reaching the store
+                    // path after a fast-path drive is invisible — C's
+                    // chgParam-NULL rescan rewinds, it does not re-evaluate.
+                    Some(feed) => series::store_from_feed(
+                        feed,
+                        &fs.tupdesc,
+                        self.eflags & EXEC_FLAG_BACKWARD != 0,
+                    )?,
+                    None => exec_make_table_function_result(
+                        &mut fs.setexpr,
+                        &fs.tupdesc,
+                        self.eflags & EXEC_FLAG_BACKWARD != 0,
+                        estate,
+                        self.ss.ps_ExprContext,
+                        // SAFETY: arena slot armed by make_arg_ctx; exclusive
+                        // during the scan (dropped only by the estate reset cb).
+                        unsafe { self.arg_mcx.as_mut() },
+                    )?,
+                };
                 store.rescan();
                 fs.tstore = Some(store);
             }
@@ -265,6 +289,7 @@ pub fn exec_init_function_scan<'mcx>(
             colcount: rtfunc.funccolcount,
             tupdesc: Rc::new(tupdesc),
             tstore: None,
+            series: None,
             rowcount: -1,
             func_slot: None,
             funcparams: &rtfunc.funcparams,
@@ -901,6 +926,11 @@ pub fn exec_rescan_function_scan_chg<'mcx>(
             if let Some(store) = fs.tstore.take() {
                 store.end();
             }
+            // The generator's replay handle is this scan's tuplestore
+            // (series.rs): dropped here so the next open re-evaluates the
+            // arguments, exactly where the store is dropped for the same
+            // reason.
+            fs.series = None;
             fs.rowcount = -1;
         } else if let Some(store) = fs.tstore.as_mut() {
             store.rescan();
@@ -912,7 +942,7 @@ pub fn exec_rescan_function_scan_chg<'mcx>(
 // Exempt: all released in exec_end_function_scan.
 mcx::forget_safe_struct!(
     SetExprState<'_> { collation, returns_set, returns_tuple; flinfo, args, elided_func_state },
-    FunctionScanPerFuncState<'_> { colcount, rowcount; setexpr, tupdesc, tstore, func_slot, funcparams },
+    FunctionScanPerFuncState<'_> { colcount, series, rowcount; setexpr, tupdesc, tstore, func_slot, funcparams },
     // arg_mcx: NonNull to an arena slot; the context value it points at is
     // dropped by the estate-reset callback (make_arg_ctx), never by this
     // struct — the old by-value field leaked its arena on every execution

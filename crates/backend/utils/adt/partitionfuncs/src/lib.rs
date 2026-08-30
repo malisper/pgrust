@@ -102,16 +102,12 @@ pub fn fc_pg_partition_tree(
             TreeRows { tuples: Vec::new() }
         };
         let fctx = funcapi::init_MultiFuncCall(flinfo, fcinfo)?;
-        fctx.user_fctx = Some(Box::new(rows));
+        fctx.set_user_fctx(rows);
     }
     let fctx = funcapi::per_MultiFuncCall(flinfo);
     let idx = fctx.call_cntr as usize;
     let rows = fctx
-        .user_fctx
-        .as_ref()
-        .expect("pg_partition_tree: rows set at first call")
-        .downcast_ref::<TreeRows>()
-        .expect("pg_partition_tree: user_fctx is TreeRows");
+        .user_fctx_ref::<TreeRows>();
     match rows.tuples.get(idx) {
         Some(img) => {
             let d = byref_result(fcinfo.result_mcx(), img)?;
@@ -157,16 +153,12 @@ pub fn fc_pg_partition_ancestors(
             );
         }
         let fctx = funcapi::init_MultiFuncCall(flinfo, fcinfo)?;
-        fctx.user_fctx = Some(Box::new(AncestorRows { oids }));
+        fctx.set_user_fctx(AncestorRows { oids });
     }
     let fctx = funcapi::per_MultiFuncCall(flinfo);
     let idx = fctx.call_cntr as usize;
     let rows = fctx
-        .user_fctx
-        .as_ref()
-        .expect("pg_partition_ancestors: rows set at first call")
-        .downcast_ref::<AncestorRows>()
-        .expect("pg_partition_ancestors: user_fctx is AncestorRows");
+        .user_fctx_ref::<AncestorRows>();
     match rows.oids.get(idx) {
         Some(&oid) => Ok(funcapi::srf_return_next(flinfo, fcinfo, Datum::from_oid(oid))),
         None => Ok(funcapi::srf_return_done(flinfo, fcinfo)),

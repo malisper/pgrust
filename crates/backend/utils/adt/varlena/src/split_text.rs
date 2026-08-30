@@ -115,16 +115,12 @@ pub fn fc_text_to_table(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
         let fields = split_fields(fcinfo)?;
         let fctx = funcapi_srf::init_MultiFuncCall(flinfo, fcinfo)?;
         fctx.max_calls = fields.len() as u64;
-        fctx.user_fctx = Some(Box::new(fields));
+        fctx.set_user_fctx(fields);
     }
     let fctx = funcapi_srf::per_MultiFuncCall(flinfo);
     let idx = fctx.call_cntr as usize;
     let fields = fctx
-        .user_fctx
-        .as_ref()
-        .expect("text_to_table: fields set at first call")
-        .downcast_ref::<Vec<TableField>>()
-        .expect("text_to_table: user_fctx is Vec<TableField>");
+        .user_fctx_ref::<Vec<TableField>>();
     match fields.get(idx) {
         Some(field) if field.is_null => Ok(funcapi_srf::srf_return_next_null(flinfo, fcinfo)),
         Some(field) => {

@@ -196,14 +196,10 @@ pub fn fc_pg_stat_get_backend_idset(
     let flinfo = flinfo.expect("pg_stat_get_backend_idset: NULL flinfo");
     if !flinfo.has_fn_extra() {
         let fctx = ::funcapi::init_MultiFuncCall(flinfo, fcinfo)?;
-        fctx.user_fctx = Some(Box::new(0i32));
+        fctx.set_user_fctx(0i32);
     }
     let idx = ::funcapi::per_MultiFuncCall(flinfo)
-        .user_fctx
-        .as_mut()
-        .expect("pg_stat_get_backend_idset: user_fctx set at first call")
-        .downcast_mut::<i32>()
-        .expect("pg_stat_get_backend_idset: user_fctx is i32");
+        .user_fctx_mut::<i32>();
     *idx += 1;
     let cur = *idx;
     // C rechecks numbackends each call; refresh mid-scan may skip/duplicate.

@@ -2130,6 +2130,22 @@ fn agg_arm<'mcx>(
                 }
             }
         }
+        PlanStateNode::FunctionScan(fsn) => {
+            // Series-fold dispatch hook (issue #83, PGRUST_LANE_V2_SERIESFOLD,
+            // default ON): a plain Agg over `generate_series` folds straight
+            // off the generator instead of over the SRF's materialized
+            // tuplestore. Falls through to the UNCHANGED per-tuple agg over
+            // exec_function_scan on refuse — and every refusal point sits
+            // BEFORE the scan's arguments are evaluated. Lane logic +
+            // refuse-set in `lanev2::series_fold`.
+            if crate::lanev2::enabled() {
+                if let Some(r) =
+                    crate::lanev2::try_own_plain_agg_over_function_scan(agg, fsn, estate)?
+                {
+                    return Ok(r);
+                }
+            }
+        }
         PlanStateNode::Append(apn) => {
             // PARTWISE-MORSELS dispatch hook (night/partitionwise-morsels,
             // knob-gated default OFF): plain fold agg over a partitioned

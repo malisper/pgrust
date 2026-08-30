@@ -109,16 +109,12 @@ pub fn fc_pg_snapshot_xip(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
         let snap = arg_snap(fcinfo, 0)?;
         let xips: Vec<u64> = (0..snap.nxip() as usize).map(|i| snap.xip(i)).collect();
         let fctx = ::funcapi::init_MultiFuncCall(flinfo, fcinfo)?;
-        fctx.user_fctx = Some(Box::new(SnapXips { xips }));
+        fctx.set_user_fctx(SnapXips { xips });
     }
     let fctx = ::funcapi::per_MultiFuncCall(flinfo);
     let idx = fctx.call_cntr as usize;
     let next = fctx
-        .user_fctx
-        .as_ref()
-        .expect("pg_snapshot_xip: user_fctx set at first call")
-        .downcast_ref::<SnapXips>()
-        .expect("pg_snapshot_xip: user_fctx is SnapXips")
+        .user_fctx_ref::<SnapXips>()
         .xips
         .get(idx)
         .copied();

@@ -274,14 +274,10 @@ pub fn fc_generate_series_step_int8(
         let step = if fcinfo.nargs() == 3 { fcinfo.arg(2).as_i64() } else { 1 };
         let state = crate::GenerateSeriesInt8::new(start, finish, step)?;
         let fctx = ::funcapi::init_MultiFuncCall(flinfo, fcinfo)?;
-        fctx.user_fctx = Some(alloc::boxed::Box::new(state));
+        fctx.set_user_fctx(state);
     }
     let next = ::funcapi::per_MultiFuncCall(flinfo)
-        .user_fctx
-        .as_mut()
-        .expect("generate_series_int8: user_fctx set at first call")
-        .downcast_mut::<crate::GenerateSeriesInt8>()
-        .expect("generate_series_int8: user_fctx is GenerateSeriesInt8")
+        .user_fctx_mut::<crate::GenerateSeriesInt8>()
         .next();
     match next {
         Some(v) => Ok(::funcapi::srf_return_next(flinfo, fcinfo, Datum::from_i64(v))),

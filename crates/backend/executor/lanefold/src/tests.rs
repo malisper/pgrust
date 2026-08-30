@@ -5064,3 +5064,212 @@ fn fold_trans2_side_arm_refusals() {
     assert!(agg_meta_cols(&plan).is_none(), "footer arm refuses filtered");
     assert!(granule_meta_len_cols(&plan).is_none(), "granule arm refuses filtered");
 }
+
+// ===========================================================================
+// Dense-batch reductions: the dense arm must be a pure alias of the bit-scan
+// walk. These pin the split itself (`dense_prefix`) and the three kernels
+// against their own sparse bodies, so an all-selected batch cannot fold to
+// anything the row-order walk would not.
+// ===========================================================================
+
+/// Selection words for `sel` over `n` rows.
+fn words_of(sel: &[bool]) -> Vec<u64> {
+    let mut w = vec![0u64; sel.len().div_ceil(64).max(1)];
+    for (i, &s) in sel.iter().enumerate() {
+        if s {
+            w[i / 64] |= 1u64 << (i % 64);
+        }
+    }
+    w
+}
+
+#[test]
+fn dense_prefix_recognises_exactly_the_prefixes() {
+    // Every prefix length across a word boundary is dense...
+    for n in 0..=200usize {
+        let sel: Vec<bool> = (0..200).map(|i| i < n).collect();
+        assert_eq!(dense_prefix(&words_of(&sel), 200), Some(n), "prefix {n}");
+    }
+    // ... and a hole anywhere is not.
+    for hole in [0usize, 1, 63, 64, 65, 130] {
+        let sel: Vec<bool> = (0..200).map(|i| i < 150 && i != hole).collect();
+        assert_eq!(dense_prefix(&words_of(&sel), 200), None, "hole at {hole}");
+    }
+    // A set bit past the prefix is not a prefix either.
+    let mut sel: Vec<bool> = (0..200).map(|i| i < 100).collect();
+    sel[150] = true;
+    assert_eq!(dense_prefix(&words_of(&sel), 200), None);
+    // Refuse rather than index past the staged lanes.
+    let all: Vec<bool> = vec![true; 128];
+    assert_eq!(dense_prefix(&words_of(&all), 127), None);
+    assert_eq!(dense_prefix(&words_of(&all), 128), Some(128));
+}
+
+/// The reference: the pre-dense bodies, verbatim.
+fn ref_sum(width: LaneWidth, divk: i64, values: &[Datum], isnull: &[bool], rows: &[u64]) -> (i64, i64) {
+    let (mut c, mut s) = (0i64, 0i64);
+    for_each_row(rows, |i| {
+        if !isnull[i] {
+            c += 1;
+            let v = lane_value(values, width, i);
+            s = s.wrapping_add(if divk != 1 { v / divk } else { v });
+        }
+    });
+    (c, s)
+}
+
+fn ref_minmax(t: &LaneTrans, values: &[Datum], isnull: &[bool], w: LaneWidth, rows: &[u64], want_max: bool) -> Option<i64> {
+    let mut m: Option<i64> = None;
+    for_each_row(rows, |i| {
+        if !isnull[i] {
+            let v = xform(t, lane_value(values, w, i));
+            m = Some(match m {
+                None => v,
+                Some(p) => if want_max { p.max(v) } else { p.min(v) },
+            });
+        }
+    });
+    m
+}
+
+#[test]
+fn dense_kernels_alias_the_sparse_walk() {
+    // A lane that exercises sign, the type bounds (so a max/min candidate can
+    // BE the operator's own identity), nulls in every position class, and
+    // enough rows to cross the vector width several times.
+    let n = 300usize;
+    let mk = |width: LaneWidth| -> (Vec<Datum>, Vec<bool>) {
+        let mut vals = Vec::with_capacity(n);
+        let mut nulls = Vec::with_capacity(n);
+        for i in 0..n {
+            let v: i64 = match i % 7 {
+                0 => 0,
+                1 => -1,
+                2 => i as i64,
+                3 => -(i as i64) * 3,
+                4 => match width {
+                    LaneWidth::I16 => i16::MAX as i64,
+                    LaneWidth::I32 => i32::MAX as i64,
+                    _ => i64::MAX,
+                },
+                5 => match width {
+                    LaneWidth::I16 => i16::MIN as i64,
+                    LaneWidth::I32 => i32::MIN as i64,
+                    _ => i64::MIN,
+                },
+                _ => 12345,
+            };
+            vals.push(match width {
+                LaneWidth::I16 => Datum::from_i16(v as i16),
+                LaneWidth::I32 => Datum::from_i32(v as i32),
+                _ => Datum::from_i64(v),
+            });
+            // nulls at both ends and interior, including a run
+            nulls.push(i == 0 || i == n - 1 || (40..48).contains(&i) || i % 11 == 3);
+        }
+        (vals, nulls)
+    };
+
+    for width in [LaneWidth::I16, LaneWidth::I32, LaneWidth::I64] {
+        let (values, isnull) = mk(width);
+        // Prefix lengths: none, one, sub-word, exact word, cross-word, all.
+        for &len in &[0usize, 1, 63, 64, 65, 128, 299, 300] {
+            let sel: Vec<bool> = (0..n).map(|i| i < len).collect();
+            let rows = words_of(&sel);
+            assert!(dense_prefix(&rows, n).is_some(), "len {len} must be dense");
+
+            for divk in [1i64, 3, -2] {
+                assert_eq!(
+                    base_sum(width, divk, &values, &isnull, &rows),
+                    ref_sum(width, divk, &values, &isnull, &rows),
+                    "base_sum width {width:?} len {len} divk {divk}"
+                );
+            }
+
+            for (addend, mulk, divk) in [(0i32, 1i32, 1i32), (7, 1, 1), (0, 3, 1), (0, 1, 4)] {
+                let t = LaneTrans {
+                    kind: LaneKind::Sum, col: 0, col2: 0, width, res_width: width,
+                    fconv: FloatConv::None, fconv2: FloatConv::None, filter: NO_FILTER,
+                    addend, mulk, divk, transno: 0,
+                };
+                // sum_selected folds the addend in; the reference applies the
+                // same transform through xform.
+                let (gc, gs) = sum_selected(&t, width, &values, &isnull, &rows);
+                let (mut rc, mut rs) = (0i64, 0i64);
+                for_each_row(&rows, |i| {
+                    if !isnull[i] {
+                        rc += 1;
+                        rs = rs.wrapping_add(xform(&t, lane_value(&values, width, i)));
+                    }
+                });
+                assert_eq!((gc, gs), (rc, rs), "sum_selected {t:?} len {len}");
+
+                for want_max in [false, true] {
+                    let (any, best) = dense_minmax(&t, &values[..len], &isnull[..len], width, want_max);
+                    assert_eq!(
+                        (any > 0).then_some(best),
+                        ref_minmax(&t, &values, &isnull, width, &rows, want_max),
+                        "minmax width {width:?} len {len} max {want_max} t {t:?}"
+                    );
+                }
+            }
+
+            let want: i64 = isnull[..len].iter().filter(|b| !**b).count() as i64;
+            assert_eq!(dense_count_nonnull(&isnull[..len]), want, "count len {len}");
+        }
+
+        // A sparse selection must keep taking the walk and agree with it.
+        let sel: Vec<bool> = (0..n).map(|i| i % 3 == 0 || i % 7 == 1).collect();
+        let rows = words_of(&sel);
+        assert!(dense_prefix(&rows, n).is_none());
+        assert_eq!(
+            base_sum(width, 1, &values, &isnull, &rows),
+            ref_sum(width, 1, &values, &isnull, &rows),
+            "sparse base_sum width {width:?}"
+        );
+    }
+}
+
+/// The dense arm's record (`cargo test -p lanefold -- --ignored dense_arm_vs_walk
+/// --nocapture`): one heap-page-grain batch (SOA_MAX_ROWS = 291 rows, int4
+/// lane, no nulls) — the shape an unqualified all-visible seqscan fold sees.
+/// Local, opt-level=3, no LTO: dense 0.31ns/row vs walk 1.55ns/row, 4.9x.
+/// Not a gate (no C baseline, not the fleet) — it exists so the claim in the
+/// dense-batch region's comment is reproducible.
+#[test]
+#[ignore]
+fn dense_arm_vs_walk() {
+    let n = 291usize;
+    let values: Vec<Datum> = (0..n).map(|i| Datum::from_i32(i as i32 * 7 - 13)).collect();
+    let isnull = vec![false; n];
+    let all: Vec<bool> = vec![true; n];
+    let dense = words_of(&all);
+    // Same rows minus one INTERIOR bit: identical work, but no longer a
+    // prefix, so the kernel must take the walk. (A cleared TRAILING bit is
+    // still a prefix and would measure the dense arm twice.)
+    let mut holed = all.clone();
+    holed[n / 2] = false;
+    let sparse = words_of(&holed);
+    assert!(dense_prefix(&dense, n).is_some());
+    assert!(dense_prefix(&sparse, n).is_none());
+
+    let iters = 200_000u64;
+    for (label, rows) in [("dense", &dense), ("walk ", &sparse)] {
+        let mut best = u128::MAX;
+        for _ in 0..7 {
+            let t0 = std::time::Instant::now();
+            let mut acc = 0i64;
+            for _ in 0..iters {
+                let (_, s) = base_sum(LaneWidth::I32, 1, &values, &isnull, rows);
+                acc = acc.wrapping_add(s);
+            }
+            let el = t0.elapsed().as_nanos();
+            std::hint::black_box(acc);
+            best = best.min(el);
+        }
+        eprintln!(
+            "FOLDBENCH {label} ns_per_row={:.3}",
+            best as f64 / (iters as f64 * n as f64)
+        );
+    }
+}

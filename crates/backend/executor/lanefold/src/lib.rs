@@ -1778,6 +1778,155 @@ fn lane_value(values: &[Datum], width: LaneWidth, i: usize) -> i64 {
     }
 }
 
+// ===========================================================================
+// Dense-batch reductions (the analytical-engine shape: DuckDB/ClickHouse sum
+// a non-nullable column with a SIMD reduction over several accumulators).
+//
+// `for_each_row` is a bit-scan (`trailing_zeros`) walk with a loop-carried
+// scalar accumulator and a per-row `isnull` branch. That is the right shape
+// for a SPARSE selection — a qual that kept a scattered handful of a heap
+// page — and it is pure overhead when every row is selected, which is the
+// common case: an unqualified all-visible page, a kernel qual that passed
+// everything, or a generated lane (lanev2::series_fold). Measured on the
+// series feed, the walk costs ~1.45ns/row where the generator feeding it
+// costs ~0.17.
+//
+// So: when the selection words are a dense PREFIX, run a counted loop over
+// the value slice instead. Two properties make it vectorize where the walk
+// cannot — the trip count is known and the slices are pre-sliced (no
+// per-row bounds check), and the null handling is a SELECT rather than a
+// branch, so there is no control dependence inside the body.
+//
+// BIT-EXACTNESS. The vectorizer reassociates the reduction into per-lane
+// partials and combines them at the end, so these kernels must be exact
+// under ANY grouping. They are: i64/i128 `wrapping_add` is the mod-2^N ring
+// (associative and commutative — the same fact `CseGroup`'s derivation
+// already rests on), integer min/max are associative and commutative, and
+// counting is addition. Every value folded is one C's checked per-row
+// evaluation also produces (guard-passed batch, caller contract), so the
+// end state is bit-identical to the row-order walk.
+//
+// INTEGER LANES ONLY. `lane_value` DEREFERENCES the datum for the VarLen
+// widths (`str_payload`), and the branchless form reads every row's value
+// including null ones — sound for a datum-word read, UB for a pointer one.
+// The dense arms therefore admit I16/I32/I64 and nothing else; VarLen and
+// datum-lane widths keep the guarded walk, which is also the only shape that
+// could vectorize anyway.
+// ===========================================================================
+
+/// The selection words as a dense prefix: `Some(n)` iff exactly rows `0..n`
+/// are selected (`covers` bounds it to what the caller staged, so a
+/// malformed bitmap refuses rather than indexing past the lanes).
+#[inline]
+fn dense_prefix(rows: &[u64], covers: usize) -> Option<usize> {
+    let mut n = 0usize;
+    let mut it = rows.iter().enumerate();
+    for (w, &word) in it.by_ref() {
+        if word == u64::MAX {
+            n = (w + 1) * 64;
+            continue;
+        }
+        // The boundary word must itself be a low-bit run: `x & (x + 1) == 0`
+        // holds exactly for `2^k - 1` (0 included).
+        if word & word.wrapping_add(1) != 0 {
+            return None;
+        }
+        n = w * 64 + word.trailing_ones() as usize;
+        break;
+    }
+    // Anything after the boundary word breaks the prefix.
+    if it.any(|(_, &word)| word != 0) {
+        return None;
+    }
+    (n <= covers).then_some(n)
+}
+
+/// Integer lane read, split from [`lane_value`] because the dense arms may
+/// call it on rows they will discard — sound only for the widths whose read
+/// is a pure datum-word operation.
+#[inline(always)]
+fn int_lane_value(d: Datum, width: LaneWidth) -> i64 {
+    match width {
+        LaneWidth::I16 => d.as_i16() as i64,
+        LaneWidth::I32 => d.as_i32() as i64,
+        LaneWidth::I64 => d.as_i64(),
+        _ => unreachable!("dense integer lane read on a non-integer width"),
+    }
+}
+
+#[inline(always)]
+fn is_int_width(width: LaneWidth) -> bool {
+    matches!(width, LaneWidth::I16 | LaneWidth::I32 | LaneWidth::I64)
+}
+
+/// Dense `(count of non-null, Σ v/divk over non-null)` — the vectorizable
+/// twin of the `for_each_row` body in [`base_sum`] / [`sum_selected`].
+#[inline(always)]
+fn dense_sum(values: &[Datum], isnull: &[bool], width: LaneWidth, divk: i64) -> (i64, i64) {
+    macro_rules! reduce {
+        ($conv:expr, $post:expr) => {{
+            let (mut c, mut s) = (0i64, 0i64);
+            for (d, &nul) in values.iter().zip(isnull.iter()) {
+                let v: i64 = $post($conv(*d));
+                c += !nul as i64;
+                // SELECT, not branch: a null row contributes the additive
+                // identity, so the body has no control dependence.
+                s = s.wrapping_add(if nul { 0 } else { v });
+            }
+            (c, s)
+        }};
+    }
+    // divk is hoisted into the instantiation so the common (divk == 1) lane
+    // is a bare add — a per-row divide would block vectorization outright.
+    macro_rules! per_width {
+        ($post:expr) => {
+            match width {
+                LaneWidth::I16 => reduce!(|d: Datum| d.as_i16() as i64, $post),
+                LaneWidth::I32 => reduce!(|d: Datum| d.as_i32() as i64, $post),
+                LaneWidth::I64 => reduce!(|d: Datum| d.as_i64(), $post),
+                _ => unreachable!("dense sum admits integer widths only"),
+            }
+        };
+    }
+    if divk == 1 {
+        per_width!(|v: i64| v)
+    } else {
+        per_width!(|v: i64| v / divk)
+    }
+}
+
+/// Dense count of non-null rows (`CountAny`).
+#[inline(always)]
+fn dense_count_nonnull(isnull: &[bool]) -> i64 {
+    let mut c = 0i64;
+    for &nul in isnull {
+        c += !nul as i64;
+    }
+    c
+}
+
+/// Dense integer MIN/MAX: `(any_non_null, best)`. Null rows fold the
+/// operator's identity, which is why the loop needs no branch; `best` is
+/// meaningful only when the count is non-zero.
+#[inline(always)]
+fn dense_minmax(
+    t: &LaneTrans,
+    values: &[Datum],
+    isnull: &[bool],
+    width: LaneWidth,
+    want_max: bool,
+) -> (i64, i64) {
+    let ident = if want_max { i64::MIN } else { i64::MAX };
+    let (mut any, mut best) = (0i64, ident);
+    for (d, &nul) in values.iter().zip(isnull.iter()) {
+        let v = xform(t, int_lane_value(*d, width));
+        any += !nul as i64;
+        let cand = if nul { ident } else { v };
+        best = if want_max { best.max(cand) } else { best.min(cand) };
+    }
+    (any, best)
+}
+
 // (count, sum of transformed values) over selected non-null rows. The
 // addend-only shape keeps the hoisted c*addend form (one multiply per batch);
 // mul/div transforms fold per row — each transformed term is int4-proven, so
@@ -1793,6 +1942,14 @@ fn sum_selected(
     let mut c = 0i64;
     let mut s = 0i64;
     if t.mulk == 1 && t.divk == 1 {
+        // Dense arm: same terms, same multiset, reassociation-exact (see the
+        // dense-batch region above).
+        if is_int_width(width) {
+            if let Some(n) = dense_prefix(rows, values.len().min(isnull.len())) {
+                let (c, s) = dense_sum(&values[..n], &isnull[..n], width, 1);
+                return (c, s.wrapping_add(c.wrapping_mul(t.addend as i64)));
+            }
+        }
         for_each_row(rows, |i| {
             if !isnull[i] {
                 c += 1;
@@ -2096,6 +2253,12 @@ fn base_sum(
     isnull: &[bool],
     rows: &[u64],
 ) -> (i64, i64) {
+    // Dense arm (see the dense-batch region above).
+    if is_int_width(width) {
+        if let Some(n) = dense_prefix(rows, values.len().min(isnull.len())) {
+            return dense_sum(&values[..n], &isnull[..n], width, divk);
+        }
+    }
     let mut c = 0i64;
     let mut s = 0i64;
     for_each_row(rows, |i| {
@@ -2470,10 +2633,19 @@ pub unsafe fn fold_batch(
         match t.kind {
             LaneKind::CountStar => unreachable!(),
             LaneKind::CountAny => {
-                let mut c = 0i64;
-                for_each_row(trows, |i| {
-                    c += !isnull[i] as i64;
-                });
+                // Dense arm (see the dense-batch region): the null lane is
+                // read the same way at any width, so this one needs no
+                // integer-width gate.
+                let c = match dense_prefix(trows, isnull.len()) {
+                    Some(n) => dense_count_nonnull(&isnull[..n]),
+                    None => {
+                        let mut c = 0i64;
+                        for_each_row(trows, |i| {
+                            c += !isnull[i] as i64;
+                        });
+                        c
+                    }
+                };
                 count_apply(pg, c);
             }
             LaneKind::Sum => {
@@ -2552,23 +2724,39 @@ pub unsafe fn fold_batch(
                 count_apply(pg, c);
             }
             LaneKind::Min | LaneKind::Max => {
-                let mut m: Option<i64> = None;
                 let want_max = t.kind == LaneKind::Max;
-                for_each_row(trows, |i| {
-                    if !isnull[i] {
-                        let v = xform(t, lane_value(values, w, i));
-                        m = Some(match m {
-                            None => v,
-                            Some(p) => {
-                                if want_max {
-                                    p.max(v)
-                                } else {
-                                    p.min(v)
-                                }
+                // Dense arm (see the dense-batch region above).
+                let dense = if is_int_width(w) {
+                    dense_prefix(trows, values.len().min(isnull.len()))
+                } else {
+                    None
+                };
+                let m: Option<i64> = match dense {
+                    Some(n) => {
+                        let (any, best) =
+                            dense_minmax(t, &values[..n], &isnull[..n], w, want_max);
+                        (any > 0).then_some(best)
+                    }
+                    None => {
+                        let mut m: Option<i64> = None;
+                        for_each_row(trows, |i| {
+                            if !isnull[i] {
+                                let v = xform(t, lane_value(values, w, i));
+                                m = Some(match m {
+                                    None => v,
+                                    Some(p) => {
+                                        if want_max {
+                                            p.max(v)
+                                        } else {
+                                            p.min(v)
+                                        }
+                                    }
+                                });
                             }
                         });
+                        m
                     }
-                });
+                };
                 if let Some(v) = m {
                     minmax_advance(t, pg, v, want_max);
                 }

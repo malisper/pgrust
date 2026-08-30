@@ -785,14 +785,10 @@ pub fn fc_generate_subscripts(
             }
         };
         let fctx = ::funcapi_srf::init_MultiFuncCall(flinfo, fcinfo)?;
-        fctx.user_fctx = Some(Box::new(state));
+        fctx.set_user_fctx(state);
     }
     let fctx = ::funcapi_srf::per_MultiFuncCall(flinfo)
-        .user_fctx
-        .as_mut()
-        .expect("generate_subscripts: user_fctx set at first call")
-        .downcast_mut::<GenerateSubscriptsFctx>()
-        .expect("generate_subscripts: user_fctx is GenerateSubscriptsFctx");
+        .user_fctx_mut::<GenerateSubscriptsFctx>();
     if fctx.lower <= fctx.upper {
         let v = if !fctx.reverse {
             let v = fctx.lower;

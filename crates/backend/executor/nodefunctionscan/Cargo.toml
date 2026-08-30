@@ -5,6 +5,10 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+# The `generate_series` fast path (series.rs) steps the SRF's OWN state
+# machines, so the emitted sequence cannot drift from the fmgr bodies.
+adt_int = { path = "../../utils/adt/int" }
+adt_int8 = { path = "../../utils/adt/int8" }
 datum = { path = "../../../_support/types/datum" }
 mcx = { path = "../../../_support/mcx" }
 types_core = { path = "../../../_support/types/types_core" }

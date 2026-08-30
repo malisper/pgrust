@@ -1126,14 +1126,10 @@ pub fn fc_generate_series_numeric(
         };
         let state = crate::series::GenerateSeriesNumeric::new(start, stop, step)?;
         let fctx = ::funcapi_srf::init_MultiFuncCall(flinfo, fcinfo)?;
-        fctx.user_fctx = Some(std::boxed::Box::new(state));
+        fctx.set_user_fctx(state);
     }
     let next = ::funcapi_srf::per_MultiFuncCall(flinfo)
-        .user_fctx
-        .as_mut()
-        .expect("generate_series_numeric: user_fctx set at first call")
-        .downcast_mut::<crate::series::GenerateSeriesNumeric>()
-        .expect("generate_series_numeric: user_fctx is GenerateSeriesNumeric")
+        .user_fctx_mut::<crate::series::GenerateSeriesNumeric>()
         .next()?;
     match next {
         Some(img) => {

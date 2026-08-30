@@ -1,18 +1,71 @@
 use std::any::Any;
 
 use datum::Datum;
-use fmgr::{ExprDoneCond, FmgrInfo, FunctionCallInfoBaseData, SetFunctionReturnMode};
+use fmgr::{
+    ExprDoneCond, FmgrInfo, FnExtra, FunctionCallInfoBaseData, SetFunctionReturnMode,
+};
 use nodes::NodeTag;
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
 
 const _: () = assert!(fmgr::RETURN_SET_INFO_TAG == NodeTag::T_ReturnSetInfo as u32);
 
 // C FuncCallContext minus attinmeta/tuple_desc/multi_call_memory_ctx: the
-// fn_extra Box owns the cross-call data (fn_mcxt's role).
+// fn_extra carrier owns the cross-call data (fn_mcxt's role).
 pub struct FuncCallContext {
     pub call_cntr: u64,
     pub max_calls: u64,
-    pub user_fctx: Option<Box<dyn Any>>,
+    // C's `void *user_fctx`, carried the way FmgrInfo::fn_extra already
+    // carries its memo: a thin pointer whose pointee leads with
+    // (TypeId, dropper), so a per-call read is a pointer cast — a
+    // debug-only TypeId compare, nothing in release.
+    //
+    // This was `Option<Box<dyn Any>>`, which put a vtable load + an indirect
+    // `type_id()` call + a 128-bit TypeId compare on the per-ROW path of
+    // every value-per-call SRF (`generate_series`, `unnest`, `regexp_matches`,
+    // …) against C's single pointer read. That is the same cost the fmgr
+    // layer refuted for `fn_extra` itself and for the same reason; see the
+    // FnExtra doc in types/fmgr/src/fcinfo.rs. Read it through
+    // [`FuncCallContext::user_fctx_mut`] / [`user_fctx_ref`], which name the
+    // expected type in their panic; write it with [`set_user_fctx`].
+    pub user_fctx: Option<FnExtra>,
+}
+
+impl FuncCallContext {
+    /// Install the per-set cross-call state (C's
+    /// `funcctx->user_fctx = palloc(...)`, in the multi-call context).
+    #[inline]
+    pub fn set_user_fctx<T: Any>(&mut self, state: T) {
+        self.user_fctx = Some(FnExtra::new(state));
+    }
+
+    /// The installed state (C's `fctx = (T *) funcctx->user_fctx`). Panics
+    /// when the first call did not install it — a wiring bug, exactly as a
+    /// NULL deref would be in C; the message names the expected type.
+    #[inline]
+    pub fn user_fctx_mut<T: Any>(&mut self) -> &mut T {
+        match self.user_fctx.as_mut() {
+            Some(x) => x.downcast_mut::<T>(),
+            None => no_user_fctx::<T>(),
+        }
+    }
+
+    /// Shared-borrow [`user_fctx_mut`].
+    #[inline]
+    pub fn user_fctx_ref<T: Any>(&self) -> &T {
+        match self.user_fctx.as_ref() {
+            Some(x) => x.downcast_ref::<T>(),
+            None => no_user_fctx::<T>(),
+        }
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn no_user_fctx<T>() -> ! {
+    panic!(
+        "SRF user_fctx: {} was not installed on the first call",
+        core::any::type_name::<T>()
+    )
 }
 
 impl core::fmt::Debug for FuncCallContext {

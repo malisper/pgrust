@@ -67,6 +67,7 @@ pub use stmt_task::{stmt_task_engagements, stmt_task_inline_count};
 pub use write_funnel::ctas_funnel_engagements;
 mod rowmode;
 mod rowmode_tail;
+mod series_fold; // issue #83: plain-agg fold straight off a generate_series
 mod stats;
 mod tail_source; // WS-Q wave-3: T3 source-form tail hosts (contract §3.1)
 mod windows;
@@ -85,6 +86,7 @@ pub(crate) use router::engine_runtime_active;
 pub(crate) use router::query_start as router_query_start;
 pub(crate) use rowmode::merge_join_pull_verdict;
 pub(crate) use rowmode::try_own_project_set;
+pub(crate) use series_fold::try_own_plain_agg_over_function_scan;
 pub(crate) use rowmode_tail::{cte_scan_pull_verdict, lock_rows_pull_verdict, material_pull_verdict, memoize_pull_verdict, merge_append_pull_verdict, recursive_union_pull_verdict, set_op_pull_verdict, try_own_function_scan, try_own_named_tuplestore_scan, try_own_sample_scan, try_own_table_func_scan, try_own_tid_range_scan, try_own_tid_scan, values_scan_pull_verdict, work_table_scan_pull_verdict};
 pub(crate) use windows::try_own_window_agg;
 pub(crate) use windows::try_own_window_agg_t2;

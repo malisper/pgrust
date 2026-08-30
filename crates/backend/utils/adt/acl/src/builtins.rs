@@ -1294,16 +1294,12 @@ fn fc_aclexplode(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult
     if !flinfo.has_fn_extra() {
         let rows = collect_aclexplode_rows(fcinfo)?;
         let fctx = funcapi_srf::init_MultiFuncCall(flinfo, fcinfo)?;
-        fctx.user_fctx = Some(Box::new(rows));
+        fctx.set_user_fctx(rows);
     }
     let fctx = funcapi_srf::per_MultiFuncCall(flinfo);
     let idx = fctx.call_cntr as usize;
     let rows = fctx
-        .user_fctx
-        .as_ref()
-        .expect("aclexplode: rows set at first call")
-        .downcast_ref::<AclExplodeRows>()
-        .expect("aclexplode: user_fctx is AclExplodeRows");
+        .user_fctx_ref::<AclExplodeRows>();
     match rows.tuples.get(idx) {
         Some(img) => {
             let d = byref_result(fcinfo.result_mcx(), img)?;

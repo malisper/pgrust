@@ -355,16 +355,12 @@ pub(crate) fn srf_stream(
 ) -> PgResult<Datum> {
     if let Some(rows) = first_call_rows {
         let fctx = funcapi::init_MultiFuncCall(flinfo, fcinfo)?;
-        fctx.user_fctx = Some(Box::new(RowSet { rows }) as Box<dyn Any>);
+        fctx.set_user_fctx(RowSet { rows });
     }
     let fctx = funcapi::per_MultiFuncCall(flinfo);
     let idx = fctx.call_cntr as usize;
     let rs = fctx
-        .user_fctx
-        .as_ref()
-        .expect("pageinspect SRF: rows set at first call")
-        .downcast_ref::<RowSet>()
-        .expect("pageinspect SRF: user_fctx is RowSet");
+        .user_fctx_ref::<RowSet>();
     match rs.rows.get(idx) {
         Some(img) => {
             let d = byref_result(fcinfo.result_mcx(), img)?;
