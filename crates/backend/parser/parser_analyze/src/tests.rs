@@ -1902,6 +1902,94 @@ mod from_where {
         assert_eq!(q.commandType, CmdType::CMD_UTILITY);
     }
 
+    // C 18.3 transformLockingClause (analyze.c) recurses into RTE_SUBQUERY
+    // with an allrels clause, so CheckSelectLocking re-runs at every subquery
+    // level: a set operation (or DISTINCT/GROUP BY/aggregate) anywhere down
+    // the FROM-subquery chain rejects the outer locking clause with 0A000
+    // (a fuzzing round forupdate-setop: pgrust used to accept these).
+    #[test]
+    fn locking_clause_rechecked_inside_from_subqueries() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let not_allowed = |sql: &str, msg: &str| {
+            let err = analyze_sql(mcx, sql).map(|_| ()).unwrap_err();
+            assert_eq!(err.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED, "{sql}");
+            assert_eq!(err.message(), msg, "{sql}");
+        };
+
+        // Set operation at the locked query's own level: still an error.
+        not_allowed(
+            "SELECT 1 EXCEPT SELECT 2 FOR UPDATE",
+            "FOR UPDATE is not allowed with UNION/INTERSECT/EXCEPT",
+        );
+        // Set operation buried in a FROM subquery — every strength, and
+        // regardless of wait policy, LATERAL, extra parens, or join nesting.
+        not_allowed(
+            "SELECT * FROM (SELECT 1 EXCEPT SELECT 2) s FOR UPDATE",
+            "FOR UPDATE is not allowed with UNION/INTERSECT/EXCEPT",
+        );
+        not_allowed(
+            "SELECT * FROM (SELECT 1 EXCEPT SELECT 2) s FOR SHARE",
+            "FOR SHARE is not allowed with UNION/INTERSECT/EXCEPT",
+        );
+        not_allowed(
+            "SELECT * FROM (SELECT 1 EXCEPT SELECT 2) s FOR KEY SHARE",
+            "FOR KEY SHARE is not allowed with UNION/INTERSECT/EXCEPT",
+        );
+        not_allowed(
+            "SELECT * FROM (SELECT 1 EXCEPT SELECT 2) s FOR UPDATE SKIP LOCKED",
+            "FOR UPDATE is not allowed with UNION/INTERSECT/EXCEPT",
+        );
+        not_allowed(
+            "SELECT * FROM ((((SELECT 1 EXCEPT SELECT 2)))) s FOR UPDATE",
+            "FOR UPDATE is not allowed with UNION/INTERSECT/EXCEPT",
+        );
+        not_allowed(
+            "SELECT * FROM t, LATERAL (SELECT x EXCEPT SELECT 2) s FOR UPDATE",
+            "FOR UPDATE is not allowed with UNION/INTERSECT/EXCEPT",
+        );
+        not_allowed(
+            "SELECT * FROM t JOIN (SELECT 1 EXCEPT SELECT 2) s ON true FOR UPDATE",
+            "FOR UPDATE is not allowed with UNION/INTERSECT/EXCEPT",
+        );
+        // Two subquery levels down.
+        not_allowed(
+            "SELECT * FROM (SELECT * FROM (SELECT 1 EXCEPT SELECT 2) i) o FOR UPDATE",
+            "FOR UPDATE is not allowed with UNION/INTERSECT/EXCEPT",
+        );
+        // FOR UPDATE OF a named subquery recurses the same way.
+        not_allowed(
+            "SELECT * FROM (SELECT 1 EXCEPT SELECT 2) s FOR UPDATE OF s",
+            "FOR UPDATE is not allowed with UNION/INTERSECT/EXCEPT",
+        );
+        // The other CheckSelectLocking arms also apply through the boundary.
+        not_allowed(
+            "SELECT * FROM (SELECT DISTINCT x FROM t) s FOR UPDATE",
+            "FOR UPDATE is not allowed with DISTINCT clause",
+        );
+        not_allowed(
+            "SELECT * FROM (SELECT x FROM t GROUP BY x) s FOR UPDATE",
+            "FOR UPDATE is not allowed with GROUP BY clause",
+        );
+        not_allowed(
+            "SELECT * FROM (SELECT count(*) FROM t) s FOR UPDATE",
+            "FOR UPDATE is not allowed with aggregate functions",
+        );
+
+        // Allowed, as in C: a plain FROM subquery, a setop behind a CTE
+        // reference (RTE_CTE is not propagated into), and VALUES.
+        for sql in [
+            "SELECT * FROM (SELECT x FROM t) s FOR UPDATE",
+            "WITH c AS (SELECT 1 EXCEPT SELECT 2) SELECT * FROM c FOR UPDATE",
+            "SELECT * FROM (VALUES (1)) v FOR UPDATE",
+        ] {
+            let q = analyze_sql(mcx, sql).unwrap_or_else(|e| panic!("{sql}: {}", e.message()));
+            assert_eq!(q.commandType, CmdType::CMD_SELECT, "{sql}");
+        }
+    }
+
     #[test]
     fn bare_values_order_by_end_to_end() {
         install();

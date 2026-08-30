@@ -2700,8 +2700,9 @@ fn transformLockingClause<'mcx>(
 }
 
 /// `applyLockingClause` (analyze.c).
-// markQueryForLocking (analyze.c): propagate FOR UPDATE/SHARE into a
-// FOR-UPDATE'd subquery RTE's rels. The sub-Query sits behind a shared ref;
+// C's `transformLockingClause(pstate, rte->subquery, allrels, true)`
+// recursion: propagate FOR UPDATE/SHARE into a FOR-UPDATE'd subquery RTE's
+// rels. The sub-Query sits behind a shared ref;
 // its owning Node comes from the root ParseState registry (pointer identity),
 // mutated under with_mut with no derived refs held across the call.
 fn mark_subquery_for_locking<'mcx>(
@@ -2746,20 +2747,25 @@ fn mark_query_for_locking<'mcx>(
     wait_policy: types_nodes::LockWaitPolicy,
 ) -> PgResult<()> {
     use types_nodes::parsenodes::{RTEKind, ACL_SELECT_FOR_UPDATE};
+    // C's transformLockingClause recursion: `transformLockingClause(pstate,
+    // rte->subquery, allrels, true)` — so each subquery level re-runs
+    // CheckSelectLocking (a set operation, DISTINCT, GROUP BY, ... anywhere
+    // down the FROM-subquery chain rejects the outer locking clause) and the
+    // rel scan is the allrels rtable walk (inFromCl), not a jointree walk.
     // Collect this level's work under one with_mut, recursing afterwards so
     // no &mut Query is live across nested with_mut calls.
     let mut child_subs: Vec<Node<'mcx>> = Vec::new();
     // SAFETY: parser-owned tree; no derived refs live across the closure.
     unsafe {
         qnode.with_mut::<types_nodes::parsenodes::Query<'mcx>, _>(|q| -> PgResult<()> {
-            let jointree = q.jointree.expect("transformed Query has a jointree");
-            let mut rtis: Vec<u32> = Vec::new();
-            for item in &jointree.fromlist {
-                collect_jointree_rtis(item, &mut rtis);
-            }
-            for rti in rtis {
-                let rte_node = q.rtable.nth((rti - 1) as usize);
+            CheckSelectLocking(q, strength)?;
+            for idx in 0..q.rtable.len() {
+                let rte_node = q.rtable.nth(idx);
                 let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
+                let rti = idx as u32 + 1;
+                if !rte.inFromCl {
+                    continue;
+                }
                 match rte.rtekind {
                     RTEKind::RTE_RELATION => {
                         applyLockingClause(mcx, q, rti, strength, wait_policy, true)?;
@@ -2789,22 +2795,6 @@ fn mark_query_for_locking<'mcx>(
         mark_query_for_locking(mcx, pstate, child, strength, wait_policy)?;
     }
     Ok(())
-}
-
-// markQueryForLocking's jointree walk: RangeTblRef rtis under FromExpr/JoinExpr.
-fn collect_jointree_rtis(n: Node<'_>, out: &mut Vec<u32>) {
-    if let Some(rtr) = n.as_range_tbl_ref() {
-        out.push(rtr.rtindex as u32);
-    } else if let Some(f) = n.as_from_expr() {
-        for item in &f.fromlist {
-            collect_jointree_rtis(item, out);
-        }
-    } else if let Some(j) = n.as_join_expr() {
-        collect_jointree_rtis(j.larg, out);
-        collect_jointree_rtis(j.rarg, out);
-    } else {
-        panic!("unrecognized node type in jointree: {:?}", n.node_tag());
-    }
 }
 
 fn applyLockingClause<'mcx>(
