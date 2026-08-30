@@ -346,6 +346,21 @@ fn refresh_matview_datafill<'mcx>(
         0,
     )?;
 
+    // Own the registry entry across the run (mirrors pquery::QueryDescOwner;
+    // execmain audit E-4): an error anywhere below must release it, or the
+    // EState's relcache pins outlive the statement and every later
+    // CheckTableNotInUse in the session errors 55006 (the a fuzzing round
+    // inuse-guard class, fixed for COPY (query) TO in commands/copy).
+    struct OwnedQueryDesc(types_portal::QueryDescHandle);
+    impl Drop for OwnedQueryDesc {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                execmain_seams::release_query_desc::call(self.0);
+            }
+        }
+    }
+    let mut owner = OwnedQueryDesc(qd);
+
     execmain_seams::executor_start::call(qd, 0)?;
     execmain_seams::executor_run::call(
         qd,
@@ -356,6 +371,7 @@ fn refresh_matview_datafill<'mcx>(
     let processed = execmain_seams::query_desc_es_processed::call(qd);
     execmain_seams::executor_finish::call(qd)?;
     execmain_seams::executor_end::call(qd)?;
+    owner.0 = types_portal::QueryDescHandle::NULL;
     execmain_seams::free_query_desc::call(qd);
     snapmgr::PopActiveSnapshot()?;
 

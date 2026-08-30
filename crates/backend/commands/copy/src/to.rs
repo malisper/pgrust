@@ -62,6 +62,29 @@ enum CopyDest<'s> {
     Stdout,
 }
 
+// Owning handle for the query-COPY QueryDesc registry entry (mirrors
+// pquery::QueryDescOwner; the execmain audit E-4 law): both Err returns and
+// loud panics between BeginCopyTo's create and EndCopyTo's free must release
+// the entry, or the EState's relcache refs survive the statement and every
+// later CheckTableNotInUse in the session sees a phantom "active query"
+// (a fuzzing round inuse-guard: COPY (query) TO erroring mid-run left VACUUM
+// FULL raising 55006 where C succeeds). EndCopyTo disarms on its clean path.
+struct OwnedQueryDesc(QueryDescHandle);
+
+impl OwnedQueryDesc {
+    fn disarm(&mut self) {
+        self.0 = QueryDescHandle::NULL;
+    }
+}
+
+impl Drop for OwnedQueryDesc {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            execmain_seams::release_query_desc::call(self.0);
+        }
+    }
+}
+
 pub struct CopyToState<'mcx, 's> {
     fe_msgbuf: StringInfo<'mcx>,
     dest: CopyDest<'s>,
@@ -78,7 +101,7 @@ pub struct CopyToState<'mcx, 's> {
     null_print_client: Option<PgVec<'mcx, u8>>,
     bytes_processed: u64,
     rowcx: MemoryContext,
-    query_desc: Option<QueryDescHandle>,
+    query_desc: Option<OwnedQueryDesc>,
     tupdesc: Option<Rc<TupleDescData<'static>>>,
 }
 
@@ -267,7 +290,7 @@ fn begin_copy_query<'mcx>(
     raw_query: &RawStmt<'mcx>,
     query_rel_id: types_core::Oid,
     query_string: &str,
-) -> PgResult<(QueryDescHandle, Rc<TupleDescData<'static>>)> {
+) -> PgResult<(OwnedQueryDesc, Rc<TupleDescData<'static>>)> {
     let rewritten = postgres::simple_query::pg_analyze_and_rewrite_fixedparams(
         mcx,
         raw_query,
@@ -347,10 +370,14 @@ fn begin_copy_query<'mcx>(
         QueryEnvHandle::NULL,
         0,
     )?;
+    // Own the entry from creation: an ExecutorStart error — or any error
+    // between here and EndCopyTo's clean shutdown — must release it, or its
+    // EState's relcache pins outlive the statement (see OwnedQueryDesc).
+    let owner = OwnedQueryDesc(qd);
     execmain_seams::executor_start::call(qd, 0)?;
     let tupdesc = execmain_seams::query_desc_result_tupdesc::call(qd)
         .expect("ExecutorStart computed a result tupDesc");
-    Ok((qd, tupdesc))
+    Ok((owner, tupdesc))
 }
 
 #[track_caller]
@@ -482,7 +509,7 @@ pub fn DoCopyTo<'mcx>(
             processed
         }
         None => {
-            let qd = cstate.query_desc.expect("query COPY has a QueryDesc");
+            let qd = cstate.query_desc.as_ref().expect("query COPY has a QueryDesc").0;
             let mut frame = QueryFrame { cstate, out_functions: &mut out_functions };
             let mut dest = tcop_dest::DestReceiver::CopyOut(copy_seams::CopyDestState::new(
                 (&mut frame as *mut QueryFrame<'_, '_, '_>).cast(),
@@ -860,9 +887,14 @@ fn flush_to_stdout(cstate: &mut CopyToState<'_, '_>) -> PgResult<()> {
 
 /// `EndCopyTo` + `EndCopy` (copyto.c).
 pub fn EndCopyTo(mut cstate: CopyToState<'_, '_>) -> PgResult<()> {
-    if let Some(qd) = cstate.query_desc.take() {
+    if let Some(mut owner) = cstate.query_desc.take() {
+        let qd = owner.0;
+        // A finish/end error releases the entry via the owner drop (the
+        // abort path keeps the executor bundle's drop glue as teardown,
+        // PortalCleanup's error contract); the clean path frees it.
         execmain_seams::executor_finish::call(qd)?;
         execmain_seams::executor_end::call(qd)?;
+        owner.disarm();
         execmain_seams::free_query_desc::call(qd);
         snapmgr::PopActiveSnapshot()?;
     }
