@@ -273,7 +273,13 @@ pub fn record_stmt_rule(rule: usize) {
         let id = sr.kind_of_rule[rule].expect("kind id for stmt rule");
         let (newly, n_seen, calls) = note_seen(id);
         fire_family(family_of(kind), kind);
-        if newly || calls % AGG_EVERY == 0 {
+        // Milestones only, not every new kind: each batch is a fresh
+        // process, so per-kind lines put ~125 near-identical lines into the
+        // moment log per batch and drowned the diffrunner summaries triage
+        // greps for (round-20). Per-kind resolution still reaches Antithesis
+        // through the fire_family details payloads.
+        let milestone = newly && (n_seen % 25 == 0 || n_seen == total_stmt_kinds());
+        if milestone || calls % AGG_EVERY == 0 {
             eprintln!("gramwalk-reach: seen={}/{} stmt kinds", n_seen, total_stmt_kinds());
         }
     }
