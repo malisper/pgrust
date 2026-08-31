@@ -19,6 +19,10 @@ use crate::{
 // the fnconf byte-diff caught the drift (OID 2467; e.g. C 18.3
 // atanh(-1.3990760221756862e-5) → -1.399076022266972e-05, the formula gives
 // ...669721e-05).
+// cbrt: same class — Rust std's cbrt is its own polynomial port, one ulp off
+// libm on e.g. cbrt(2) and cbrt(100) (antithesis r21, lane-locking/portals:
+// SELECT cbrt(2::float8)::text diverged from the C oracle's
+// 1.2599210498948734).
 mod libm {
     extern "C" {
         pub fn erf(x: f64) -> f64;
@@ -26,6 +30,7 @@ mod libm {
         pub fn tgamma(x: f64) -> f64;
         pub fn lgamma_r(x: f64, signp: *mut core::ffi::c_int) -> f64;
         pub fn atanh(x: f64) -> f64;
+        pub fn cbrt(x: f64) -> f64;
     }
 }
 
@@ -193,7 +198,8 @@ pub fn dsqrt(arg1: f64) -> PgResult<f64> {
 }
 
 pub fn dcbrt(arg1: f64) -> PgResult<f64> {
-    let result = arg1.cbrt();
+    // SAFETY: pure libm function, no preconditions.
+    let result = unsafe { libm::cbrt(arg1) };
     if result.is_infinite() && !arg1.is_infinite() {
         return Err(float_overflow_error().into());
     }

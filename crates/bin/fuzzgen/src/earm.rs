@@ -1100,6 +1100,12 @@ pub const FIXED_ROLE_TOKENS: &[&str] = &[
     "ea2b_r3",
     "ea2b_r4",
     "ea2b_r5",
+    // r21 (portals 3082013199248652494-era batch, plancost seed
+    // 1211817571083290956): the r6 rename chain was minted via CREATE USER,
+    // which the drift guard's CREATE ROLE prefix missed — r6b before r6 for
+    // reading order on the prefix overlap, as with ldo_user2/ldo_user.
+    "ea2b_r6b",
+    "ea2b_r6",
     "ea2b_r7",
     "ea2b_r8",
     "ea2b_r9",
@@ -1278,7 +1284,40 @@ mod tests {
                 for s in f(&mut g) {
                     let sql = s.to_sql();
                     for line in sql.lines() {
-                        let Some(rest) = line.trim_start().strip_prefix("CREATE ROLE ")
+                        // CREATE USER mints a role too, and a rename target
+                        // is a new cluster-global name (r21: the CREATE USER
+                        // ea2b_r6 -> RENAME TO ea2b_r6b chain raced batches
+                        // because only CREATE ROLE was guarded).
+                        let t = line.trim_start();
+                        let Some(rest) = t
+                            .strip_prefix("CREATE ROLE ")
+                            .or_else(|| {
+                                // CREATE USER MAPPING is a different object.
+                                t.strip_prefix("CREATE USER ")
+                                    .filter(|r| !r.starts_with("MAPPING "))
+                            })
+                            .or_else(|| {
+                                let src = t
+                                    .strip_prefix("ALTER ROLE ")
+                                    .or_else(|| t.strip_prefix("ALTER USER "))?;
+                                let (from, to) = src.split_once(" RENAME TO ")?;
+                                // A rename whose source can never exist (or
+                                // is a keyword spelling) always errors, so
+                                // its target is never minted.
+                                let from = from.trim();
+                                let intentional_src = from.starts_with("pg_")
+                                    || from.starts_with('"')
+                                    || from.contains("nosuch")
+                                    || [
+                                        "public",
+                                        "current_role",
+                                        "current_user",
+                                        "session_user",
+                                        "none",
+                                    ]
+                                    .contains(&from);
+                                (!intentional_src).then_some(to)
+                            })
                         else {
                             continue;
                         };
