@@ -487,7 +487,14 @@ pub fn fixture_ddl(catalog: &Catalog) -> String {
                 out.push_str(" NOT NULL");
             }
         }
-        out.push_str(");\n");
+        // Round-20 extension of the #1574 pin: gramwalk derives EXPLAIN
+        // statements over these core fixtures too, and an autovacuum firing
+        // on one container but not the other mid-batch skews
+        // reltuples/relpages into plan-shape and cost knife-edges (round-20
+        // soak ROWSET_DIFF classes on fz_one/fz_mixed). Same tradeoff as the
+        // module decks: EXPLAIN determinism over autovacuum interplay, which
+        // the vacuum module exercises on its own tables.
+        out.push_str(") WITH (autovacuum_enabled = off);\n");
     }
     out
 }

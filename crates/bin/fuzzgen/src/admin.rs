@@ -548,7 +548,11 @@ fn gen_control(g: &mut Gen) -> Vec<StmtKind> {
     let sql = match g.rng.below(6) {
         0 => "SELECT max_data_alignment, database_block_size, blocks_per_segment, wal_block_size, bytes_per_wal_segment, max_identifier_length, max_index_columns, max_toast_chunk_size, large_object_chunk_size, float8_pass_by_value, data_page_checksum_version FROM pg_control_init();".to_string(),
         1 => "SELECT pg_control_version, catalog_version_no FROM pg_control_system();".to_string(),
-        2 => "SELECT timeline_id, prev_timeline_id, full_page_writes, checkpoint_lsn IS NOT NULL, redo_lsn IS NOT NULL, next_multixact_id, next_multi_offset, oldest_multi_xid FROM pg_control_checkpoint();".to_string(),
+        // Round-20: the multixact counters are global-state, not layout —
+        // B's shared server advances them from other templates' FOR SHARE
+        // traffic while the dedicated A oracle idles (2 soak ROWSET_DIFFs).
+        // Existence shapes only, round-9 FP-9 precedent.
+        2 => "SELECT timeline_id, prev_timeline_id, full_page_writes, checkpoint_lsn IS NOT NULL, redo_lsn IS NOT NULL, next_multixact_id IS NOT NULL, next_multi_offset IS NOT NULL, oldest_multi_xid >= 1 FROM pg_control_checkpoint();".to_string(),
         3 => "SELECT min_recovery_end_lsn::text, min_recovery_end_timeline, backup_start_lsn::text, backup_end_lsn::text, end_of_backup_record_required FROM pg_control_recovery();".to_string(),
         4 => {
             // Round-9 FP-9: pg_hba_file_rules content/row counts reflect

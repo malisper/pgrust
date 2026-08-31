@@ -95,6 +95,22 @@ pub enum RuledPattern {
     /// passing) in the liveness campaign's parallel canary. Any other
     /// B-only 55000 message still escalates.
     ParallelWorkerInit,
+    /// A succeeded while B errored exactly 57014 "canceling statement due
+    /// to statement timeout" (round-20 soak): the FP-4 sibling — thread
+    /// pauses hit only the instrumented SUT, so a deck-set symmetric
+    /// statement_timeout can expire on B (stream statement or state
+    /// probe) where the unfaulted oracle finishes. Any other B-only
+    /// 57014 message (e.g. a cancel request) still escalates.
+    FaultStmtTimeout,
+    /// A succeeded while B errored exactly 40P01 "deadlock detected" on a
+    /// DROP TABLE statement (round-20 soak): a hard lock cycle between
+    /// the DROP and an autovacuum ANALYZE propagating partition stats to
+    /// ancestors — genuine upstream C behavior (C cancels autovacuum only
+    /// on cycle-free blocking), B-only because thread pauses widen the
+    /// collision window on the instrumented side. pgrust's
+    /// RemoveRelations lock order was verified against tablecmds.c.
+    /// Any non-DROP-TABLE 40P01 asymmetry still escalates.
+    DropAutovacuumDeadlock,
     /// Rowset/row-count diff on a statement referencing an instance-config
     /// introspection view (round-9 FP-9): pg_hba_file_rules /
     /// pg_ident_file_mappings / pg_file_settings / pg_shmem_allocations*
@@ -377,6 +393,29 @@ pub fn default_table() -> Vec<RuledEntry> {
             pattern: RuledPattern::ParallelWorkerInit,
         },
         RuledEntry {
+            id: "fault-stmt-timeout",
+            ruling: "round-20 asymmetric-fault ruling: thread-pause faults \
+                     hit only the instrumented SUT, so B-only 57014 \
+                     'canceling statement due to statement timeout' under \
+                     the decks' symmetric statement_timeout SETs is \
+                     injected scheduling, not conformance; exact-message \
+                     scope, statement responsiveness owned by the \
+                     liveness cancel-ladder campaign",
+            pattern: RuledPattern::FaultStmtTimeout,
+        },
+        RuledEntry {
+            id: "drop-autovacuum-deadlock",
+            ruling: "round-20 symmetric-race ruling: DROP TABLE vs \
+                     autovacuum-ANALYZE ancestor-stats propagation forms a \
+                     hard lock cycle that 40P01s in C too (deadlock.c \
+                     cancels autovacuum only when no cycle exists); B-only \
+                     visibility is fault-widened autovacuum timing on the \
+                     shared SUT; DROP TABLE + exact-message scope, \
+                     detector correctness owned by the liveness deadlock \
+                     campaign",
+            pattern: RuledPattern::DropAutovacuumDeadlock,
+        },
+        RuledEntry {
             id: "scroll-materialize",
             ruling: "SCROLL-Materialize ruling (round-9 RB-10): pgrust \
                      deliberately omits C's planner Materialize wrap for \
@@ -436,6 +475,11 @@ fn matches(entry: &RuledEntry, candidate: &str, sql: &str) -> bool {
         }
         // Emitted only on the exact A-success/B-55000 message signature.
         RuledPattern::ParallelWorkerInit => candidate == "parallel-worker-init",
+        // Emitted only on the exact A-success/B-57014 message signature.
+        RuledPattern::FaultStmtTimeout => candidate == "fault-stmt-timeout",
+        RuledPattern::DropAutovacuumDeadlock => {
+            candidate == "drop-autovacuum-deadlock" && crate::diff::is_drop_table_stmt(sql)
+        }
         // The candidate is emitted only on the A-side NO_XML_SUPPORT
         // message signature; there is no reliable SQL-text refinement
         // (xml reaches casts, xmlserialize, table functions, ...).
@@ -507,6 +551,17 @@ mod tests {
         let out = apply_ruled(&default_table(), "SELECT f FROM t;", candidate("float-ulp"));
         assert_eq!(out.class, DiffClass::Ruled("b1-float-ulp".to_string()));
         assert!(out.detail.contains("B1"));
+    }
+
+    #[test]
+    fn fault_stmt_timeout_resolves() {
+        let out = apply_ruled(
+            &default_table(),
+            "SELECT * FROM fz_par_0 ORDER BY pk;",
+            candidate("fault-stmt-timeout"),
+        );
+        assert_eq!(out.class, DiffClass::Ruled("fault-stmt-timeout".to_string()));
+        assert!(out.detail.contains("round-20"));
     }
 
     #[test]

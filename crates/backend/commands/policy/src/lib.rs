@@ -12,11 +12,9 @@ use types_core::{AttrNumber, InvalidOid, Oid, RELATION_RELATION_ID};
 use types_error::{
     PgError, PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_INSUFFICIENT_PRIVILEGE,
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_OBJECT,
-    ERRCODE_WRONG_OBJECT_TYPE, NOTICE, WARNING,
+    ERRCODE_WRONG_OBJECT_TYPE, WARNING,
 };
-use types_nodes::parsenodes::{
-    AlterPolicyStmt, CreatePolicyStmt, DropStmt, ObjectType, RenameStmt,
-};
+use types_nodes::parsenodes::{AlterPolicyStmt, CreatePolicyStmt, ObjectType, RenameStmt};
 use types_nodes::{Node, NodeList};
 use types_rel::pg_class::{
     RELKIND_FOREIGN_TABLE, RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
@@ -827,116 +825,6 @@ pub fn relation_has_policies<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgRe
     genam::systable_endscan(mcx, scan)?;
     catalog_rel.close(AccessShareLock)?;
     Ok(ret)
-}
-
-fn name_list_to_string(names: &NodeList<'_>, upto: usize) -> String {
-    let mut out = String::new();
-    for (i, n) in names.iter().enumerate() {
-        if i >= upto {
-            break;
-        }
-        if i > 0 {
-            out.push('.');
-        }
-        out.push_str(n.as_string().expect("name list component").sval);
-    }
-    out
-}
-
-// RemoveObjects (dropcmds.c), OBJECT_POLICY arm only: address lookup per
-// get_object_address_relobject + relation-owner check, then
-// performMultipleDeletions over doDeletion's policy arm.
-pub fn RemovePolicyObjects<'mcx>(mcx: Mcx<'mcx>, stmt: &DropStmt<'mcx>) -> PgResult<()> {
-    debug_assert_eq!(stmt.removeType, ObjectType::OBJECT_POLICY);
-    let mut objects = catalog_dependency::ObjectAddresses::new();
-
-    for cell in stmt.objects.iter() {
-        let names = cell.as_list().expect("DROP POLICY object is a name list");
-        let nnames = names.len();
-        if nnames < 2 {
-            return Err(Box::new(
-                PgError::error("must specify relation and object name")
-                    .with_sqlstate(ERRCODE_SYNTAX_ERROR),
-            ));
-        }
-        let polname = names.nth(nnames - 1).as_string().expect("policy name").sval;
-
-        let mut rel_parts: Vec<&str> = Vec::with_capacity(nnames - 1);
-        for (i, n) in names.iter().enumerate() {
-            if i < nnames - 1 {
-                rel_parts.push(n.as_string().expect("name list component").sval);
-            }
-        }
-        let mut rv = rel_vocab::RangeVar {
-            catalogname: None,
-            schemaname: None,
-            relname: "",
-            inh: true,
-            relpersistence: types_core::RELPERSISTENCE_PERMANENT,
-            location: -1,
-        };
-        match rel_parts.as_slice() {
-            [r] => rv.relname = r,
-            [s, r] => {
-                rv.schemaname = Some(s);
-                rv.relname = r;
-            }
-            [c, s, r] => {
-                rv.catalogname = Some(c);
-                rv.schemaname = Some(s);
-                rv.relname = r;
-            }
-            _ => {
-                return Err(Box::new(
-                    PgError::error("improper relation name (too many dotted names)")
-                        .with_sqlstate(ERRCODE_SYNTAX_ERROR),
-                ))
-            }
-        }
-
-        let relid = catalog_namespace::RangeVarGetRelidExtended(
-            &rv,
-            AccessShareLock,
-            if stmt.missing_ok { catalog_namespace::RVR_MISSING_OK } else { 0 },
-            None,
-        )?;
-        if relid == InvalidOid {
-            elog_seams::ereport_msg::call(
-                NOTICE,
-                format!(
-                    "relation \"{}\" does not exist, skipping",
-                    name_list_to_string(&names, nnames - 1)
-                ),
-                None,
-            )?;
-            continue;
-        }
-
-        let policy_oid = get_relation_policy_oid(mcx, relid, polname, stmt.missing_ok)?;
-        if policy_oid == InvalidOid {
-            elog_seams::ereport_msg::call(
-                NOTICE,
-                format!(
-                    "policy \"{polname}\" for relation \"{}\" does not exist, skipping",
-                    name_list_to_string(&names, nnames - 1)
-                ),
-                None,
-            )?;
-            continue;
-        }
-
-        // check_object_ownership (objectaddress.c): must own the relation.
-        if !aclchk::object_ownercheck(RELATION_RELATION_ID, relid, miscinit::GetUserId())? {
-            let relname = lsyscache::relation::get_rel_name(mcx, relid)?
-                .map(|n| n.as_str().to_string())
-                .unwrap_or_default();
-            aclchk::aclcheck_error(aclchk::ACLCHECK_NOT_OWNER, ObjectType::OBJECT_POLICY, &relname)?;
-        }
-
-        objects.add_exact_object_address(ObjectAddress::set(POLICY_RELATION_ID, policy_oid));
-    }
-
-    catalog_dependency::performMultipleDeletions(mcx, &objects, stmt.behavior, 0)
 }
 
 pub fn init_seams() {

@@ -2068,10 +2068,6 @@ fn exec_drop_stmt<'mcx>(mcx: Mcx<'mcx>, parsetree: Node<'_>, is_top_level: bool)
         }
         OBJECT_INDEX | OBJECT_TABLE | OBJECT_SEQUENCE | OBJECT_VIEW | OBJECT_MATVIEW
         | OBJECT_FOREIGN_TABLE => tablecmds::RemoveRelations(mcx, stmt)?,
-        // DROP POLICY stays specialized: dropcmds' get_object_address
-        // has no OBJECT_POLICY arm yet (C routes it through RemoveObjects).
-        OBJECT_POLICY => commands_policy::RemovePolicyObjects(mcx, stmt)?,
-        // DROP TEXT SEARCH objects stay specialized for the same reason.
         _ => commands_dropcmds::RemoveObjects(mcx, stmt)?,
     }
     Ok(())

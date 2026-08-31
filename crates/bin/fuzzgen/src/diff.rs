@@ -753,6 +753,16 @@ pub fn is_shared_catalog_stmt(sql: &str) -> bool {
 /// INSTANCE-global state (postgresql.auto.conf is one file per cluster,
 /// shared by every concurrent driver batch). Scope for the RB-14
 /// autoconf-shared-race ruling only — see is_autoconf_parse_error.
+/// `DROP TABLE ...` head, for the round-20 autovacuum-deadlock ruling.
+pub fn is_drop_table_stmt(sql: &str) -> bool {
+    let head = sql.trim_start();
+    if head.len() < 4 || !head[..4].eq_ignore_ascii_case("DROP") {
+        return false;
+    }
+    let rest = head[4..].trim_start();
+    rest.len() >= 5 && rest[..5].eq_ignore_ascii_case("TABLE")
+}
+
 pub fn is_alter_system_stmt(sql: &str) -> bool {
     let head = sql.trim_start();
     if head.len() < 5 || !head[..5].eq_ignore_ascii_case("ALTER") {
@@ -1680,6 +1690,39 @@ pub fn classify(input: &DiffInput) -> Classified {
             if sqlstate == "55000" && message == "parallel worker failed to initialize" {
                 return Classified {
                     class: DiffClass::Ruled("parallel-worker-init".to_string()),
+                    detail: format!("A succeeded; B errored {sqlstate} ({message})"),
+                };
+            }
+            // Round-20 soak sibling of FP-4: the same asymmetric
+            // thread-pause faults can run a statement (or a state probe)
+            // into pgrust's statement_timeout while the unfaulted A oracle
+            // sails through. The timeouts in play are the module decks'
+            // own symmetric SETs, so B-only expiry is injected scheduling,
+            // not conformance; exact-signature scope, and statement
+            // responsiveness is owned by the liveness cancel ladders.
+            if sqlstate == "57014" && message == "canceling statement due to statement timeout" {
+                return Classified {
+                    class: DiffClass::Ruled("fault-stmt-timeout".to_string()),
+                    detail: format!("A succeeded; B errored {sqlstate} ({message})"),
+                };
+            }
+            // Round-20 soak: DROP TABLE deadlocking against an autovacuum
+            // ANALYZE of a partition (the worker propagates stats to
+            // ancestors, closing a lock cycle with the DROP) is genuine
+            // upstream C behavior — a hard cycle involving autovacuum
+            // 40P01s in C too (deadlock.c returns DS_BLOCKED_BY_AUTOVACUUM
+            // only when there is NO cycle). B-only because thread-pause
+            // faults widen the collision window on the instrumented side
+            // while the dedicated A oracle's autovacuum idles. Scope:
+            // DROP TABLE statements with the exact deadlock message;
+            // detector correctness is owned by the liveness deadlock
+            // campaign (victim-or-commit, detector-chose-victim).
+            if sqlstate == "40P01"
+                && message == "deadlock detected"
+                && is_drop_table_stmt(sql)
+            {
+                return Classified {
+                    class: DiffClass::Ruled("drop-autovacuum-deadlock".to_string()),
                     detail: format!("A succeeded; B errored {sqlstate} ({message})"),
                 };
             }
@@ -3308,6 +3351,48 @@ mod tests {
         assert_eq!(c.class, DiffClass::ErrorDiff);
         // A-side worker-init error (the UNfaulted oracle failing): finding.
         let c = classify_sql("select 1 ;", &err("parallel worker failed to initialize"), &ok);
+        assert_eq!(c.class, DiffClass::ErrorDiff);
+    }
+
+    /// Round-20 FP-4 sibling: B-only 57014 with the exact
+    /// statement_timeout message is a ruled candidate; other 57014
+    /// messages and A-side timeouts escalate.
+    #[test]
+    fn fault_stmt_timeout_is_ruled_candidate() {
+        let ok = rowset(vec![23], rows(&[&[Some("1")]]));
+        let err = |m: &str| StmtOutcome::Error {
+            sqlstate: "57014".to_string(),
+            message: m.to_string(),
+        };
+        let c = classify_sql("SELECT * FROM fz_par_0 ORDER BY pk;", &ok,
+                             &err("canceling statement due to statement timeout"));
+        assert_eq!(c.class, DiffClass::Ruled("fault-stmt-timeout".to_string()));
+        // Different 57014 message (user cancel): finding.
+        let c = classify_sql("select 1 ;", &ok, &err("canceling statement due to user request"));
+        assert_eq!(c.class, DiffClass::ErrorDiff);
+        // A-side timeout (the UNfaulted oracle stalling): finding.
+        let c =
+            classify_sql("select 1 ;", &err("canceling statement due to statement timeout"), &ok);
+        assert_eq!(c.class, DiffClass::ErrorDiff);
+    }
+
+    /// Round-20: B-only 40P01 on a DROP TABLE is a ruled candidate
+    /// (autovacuum-deadlock symmetric race); other statements and other
+    /// messages escalate.
+    #[test]
+    fn drop_autovacuum_deadlock_is_ruled_candidate() {
+        let ok = rowset(vec![23], rows(&[&[Some("1")]]));
+        let err = StmtOutcome::Error {
+            sqlstate: "40P01".to_string(),
+            message: "deadlock detected".to_string(),
+        };
+        let c = classify_sql("DROP TABLE fz_pa_t1, fz_pa_t2, fz_pa_t3;", &ok, &err);
+        assert_eq!(c.class, DiffClass::Ruled("drop-autovacuum-deadlock".to_string()));
+        // Non-DROP-TABLE statement: finding.
+        let c = classify_sql("update fz_one set k_int = 2 ;", &ok, &err);
+        assert_eq!(c.class, DiffClass::ErrorDiff);
+        // A-side deadlock: finding.
+        let c = classify_sql("DROP TABLE fz_pa_ml;", &err, &ok);
         assert_eq!(c.class, DiffClass::ErrorDiff);
     }
 
