@@ -109,8 +109,18 @@ pub enum RuledPattern {
     /// on cycle-free blocking), B-only because thread pauses widen the
     /// collision window on the instrumented side. pgrust's
     /// RemoveRelations lock order was verified against tablecmds.c.
-    /// Any non-DROP-TABLE 40P01 asymmetry still escalates.
+    /// Any non-DROP-TABLE 40P01 asymmetry still escalates. r21 widened
+    /// the statement scope to VACUUM FULL (same AccessExclusive-vs-
+    /// autoanalyze hard cycle on cluster_rel).
     DropAutovacuumDeadlock,
+    /// A succeeded while B errored exactly 23505 on
+    /// pg_db_role_setting_databaseid_rol_index under an ALTER ROLE ALL
+    /// SET statement (r21): concurrent batches race the (0, 0) singleton
+    /// row; C's AlterSetting is scan-then-insert with no unique-violation
+    /// recovery, so the same interleaving 23505s in C — B-only visibility
+    /// is the shared instrumented SUT vs the idle dedicated oracle. Any
+    /// other 23505 asymmetry still escalates.
+    RoleSettingSharedRace,
     /// Rowset/row-count diff on a statement referencing an instance-config
     /// introspection view (round-9 FP-9): pg_hba_file_rules /
     /// pg_ident_file_mappings / pg_file_settings / pg_shmem_allocations*
@@ -410,10 +420,22 @@ pub fn default_table() -> Vec<RuledEntry> {
                      hard lock cycle that 40P01s in C too (deadlock.c \
                      cancels autovacuum only when no cycle exists); B-only \
                      visibility is fault-widened autovacuum timing on the \
-                     shared SUT; DROP TABLE + exact-message scope, \
-                     detector correctness owned by the liveness deadlock \
-                     campaign",
+                     shared SUT; DROP TABLE / VACUUM FULL + exact-message \
+                     scope (r21 widened to VACUUM FULL — same cycle on \
+                     cluster_rel), detector correctness owned by the \
+                     liveness deadlock campaign",
             pattern: RuledPattern::DropAutovacuumDeadlock,
+        },
+        RuledEntry {
+            id: "role-setting-shared-race",
+            ruling: "r21 symmetric-race ruling: concurrent ALTER ROLE ALL \
+                     SET batches race the (0, 0) pg_db_role_setting \
+                     singleton; C's AlterSetting is scan-then-insert with \
+                     no unique-violation recovery, so the interleaving \
+                     23505s in C too; B-only visibility is the shared \
+                     instrumented SUT vs the idle dedicated oracle; ALTER \
+                     ROLE ALL + exact constraint-name scope",
+            pattern: RuledPattern::RoleSettingSharedRace,
         },
         RuledEntry {
             id: "scroll-materialize",
@@ -478,7 +500,13 @@ fn matches(entry: &RuledEntry, candidate: &str, sql: &str) -> bool {
         // Emitted only on the exact A-success/B-57014 message signature.
         RuledPattern::FaultStmtTimeout => candidate == "fault-stmt-timeout",
         RuledPattern::DropAutovacuumDeadlock => {
-            candidate == "drop-autovacuum-deadlock" && crate::diff::is_drop_table_stmt(sql)
+            candidate == "drop-autovacuum-deadlock"
+                && (crate::diff::is_drop_table_stmt(sql)
+                    || crate::diff::is_vacuum_full_stmt(sql))
+        }
+        RuledPattern::RoleSettingSharedRace => {
+            candidate == "role-setting-shared-race"
+                && crate::diff::is_alter_role_all_stmt(sql)
         }
         // The candidate is emitted only on the A-side NO_XML_SUPPORT
         // message signature; there is no reliable SQL-text refinement

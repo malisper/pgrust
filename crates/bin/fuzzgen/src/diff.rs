@@ -763,6 +763,28 @@ pub fn is_drop_table_stmt(sql: &str) -> bool {
     rest.len() >= 5 && rest[..5].eq_ignore_ascii_case("TABLE")
 }
 
+pub fn is_vacuum_full_stmt(sql: &str) -> bool {
+    let head = sql.trim_start();
+    if head.len() < 6 || !head[..6].eq_ignore_ascii_case("VACUUM") {
+        return false;
+    }
+    // FULL directly or inside a parenthesized option list.
+    let rest = head[6..].trim_start();
+    let rest_upper: String = rest.chars().take(64).collect::<String>().to_ascii_uppercase();
+    rest_upper.starts_with("FULL")
+        || (rest_upper.starts_with('(') && rest_upper.contains("FULL"))
+}
+
+pub fn is_alter_role_all_stmt(sql: &str) -> bool {
+    let mut words = sql.split_ascii_whitespace();
+    let (Some(a), Some(b), Some(c)) = (words.next(), words.next(), words.next()) else {
+        return false;
+    };
+    a.eq_ignore_ascii_case("ALTER")
+        && (b.eq_ignore_ascii_case("ROLE") || b.eq_ignore_ascii_case("USER"))
+        && c.eq_ignore_ascii_case("ALL")
+}
+
 pub fn is_alter_system_stmt(sql: &str) -> bool {
     let head = sql.trim_start();
     if head.len() < 5 || !head[..5].eq_ignore_ascii_case("ALTER") {
@@ -1717,12 +1739,33 @@ pub fn classify(input: &DiffInput) -> Classified {
             // DROP TABLE statements with the exact deadlock message;
             // detector correctness is owned by the liveness deadlock
             // campaign (victim-or-commit, detector-chose-victim).
+            // r21 widened the statement scope to VACUUM FULL: the same
+            // AccessExclusive-vs-autoanalyze hard cycle closes on the
+            // cluster_rel lock (exprshared seeds 1492822037706339988 /
+            // 745470093528192749, portals seed 4538595598360985633).
             if sqlstate == "40P01"
                 && message == "deadlock detected"
-                && is_drop_table_stmt(sql)
+                && (is_drop_table_stmt(sql) || is_vacuum_full_stmt(sql))
             {
                 return Classified {
                     class: DiffClass::Ruled("drop-autovacuum-deadlock".to_string()),
+                    detail: format!("A succeeded; B errored {sqlstate} ({message})"),
+                };
+            }
+            // r21 (plancost seeds 1206897213384595932 / 2028493458731298022,
+            // portals seed 2289180174241644280): concurrent batches' ALTER
+            // ROLE ALL SET race on the (0, 0) pg_db_role_setting singleton;
+            // C's AlterSetting is scan-then-insert with no unique-violation
+            // recovery, so the same interleaving 23505s in C too — B-only
+            // visibility is the shared instrumented SUT vs the idle
+            // dedicated oracle. Exact scope: ALTER ROLE ALL statement shape
+            // plus the exact constraint name; any other 23505 escalates.
+            if sqlstate == "23505"
+                && message.contains("pg_db_role_setting_databaseid_rol_index")
+                && is_alter_role_all_stmt(sql)
+            {
+                return Classified {
+                    class: DiffClass::Ruled("role-setting-shared-race".to_string()),
                     detail: format!("A succeeded; B errored {sqlstate} ({message})"),
                 };
             }
@@ -2336,6 +2379,50 @@ mod tests {
             message: "invalid input syntax for type tid: \"(0,)\"".to_string(),
         };
         let c = classify_sql("SELECT '(0,)'::tid::text;", &a, &ok);
+        assert_eq!(c.class, DiffClass::ErrorDiff);
+    }
+
+    /// r21: the deadlock ruling covers VACUUM FULL shapes; plain VACUUM and
+    /// non-deadlock messages still escalate.
+    #[test]
+    fn b_only_vacuum_full_deadlock_is_ruled() {
+        let ok = rowset(vec![27], rows(&[&[Some("1")]]));
+        let dl = StmtOutcome::Error {
+            sqlstate: "40P01".to_string(),
+            message: "deadlock detected".to_string(),
+        };
+        for sql in ["vacuum full freeze verbose ;", "VACUUM (FULL, ANALYZE) t;"] {
+            let c = classify_sql(sql, &ok, &dl);
+            assert_eq!(c.class, DiffClass::Ruled("drop-autovacuum-deadlock".to_string()));
+        }
+        let c = classify_sql("VACUUM t;", &ok, &dl);
+        assert_eq!(c.class, DiffClass::ErrorDiff);
+    }
+
+    /// r21: B-only 23505 on the pg_db_role_setting singleton under ALTER
+    /// ROLE ALL is ruled; other statements or constraints escalate.
+    #[test]
+    fn b_only_role_setting_dup_key_is_ruled() {
+        let ok = rowset(vec![27], rows(&[&[Some("1")]]));
+        let dup = StmtOutcome::Error {
+            sqlstate: "23505".to_string(),
+            message: "duplicate key value violates unique constraint \
+                      \"pg_db_role_setting_databaseid_rol_index\""
+                .to_string(),
+        };
+        let c = classify_sql("ALTER ROLE ALL SET statement_timeout = '30s';", &ok, &dup);
+        assert_eq!(c.class, DiffClass::Ruled("role-setting-shared-race".to_string()));
+        let c = classify_sql("ALTER USER ALL SET statement_timeout = 0;", &ok, &dup);
+        assert_eq!(c.class, DiffClass::Ruled("role-setting-shared-race".to_string()));
+        // A named role's SET is not the shared-singleton race.
+        let c = classify_sql("ALTER ROLE r1 SET statement_timeout = 0;", &ok, &dup);
+        assert_eq!(c.class, DiffClass::ErrorDiff);
+        // A different unique constraint escalates.
+        let other = StmtOutcome::Error {
+            sqlstate: "23505".to_string(),
+            message: "duplicate key value violates unique constraint \"t_pkey\"".to_string(),
+        };
+        let c = classify_sql("ALTER ROLE ALL SET statement_timeout = 0;", &ok, &other);
         assert_eq!(c.class, DiffClass::ErrorDiff);
     }
 
