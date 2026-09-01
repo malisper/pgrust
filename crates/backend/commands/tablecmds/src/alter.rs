@@ -3948,12 +3948,10 @@ fn check_notnull_droppable<'mcx>(
 ) -> PgResult<()> {
     // C reads the rd_pkindex/rd_replidindex bitmaps (key columns only), so the
     // guards see only what RelationGetIndexList validated (indisvalid etc.).
-    relcache::RelationGetIndexList(mcx, rel.rd_id)?;
-    let (pkindex, replidindex) = {
-        let cached = rel.rd_indexlist.borrow();
-        let l = cached.as_ref().expect("rd_indexlist populated by RelationGetIndexList");
-        (l.pkindex, l.replidindex)
-    };
+    // Resolved through the CURRENT cache entry — `rel` may hold a
+    // rebuilt-away predecessor whose rd_indexlist stays None.
+    let (pkindex, replidindex) =
+        relcache::indexlist::RelationGetPkReplidIndexes(mcx, rel.rd_id)?;
     if pkindex != InvalidOid {
         let (_, _, keys) = pg_index_shape(mcx, pkindex)?;
         if keys.contains(&attnum) {

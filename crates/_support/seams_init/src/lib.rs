@@ -490,6 +490,13 @@ fn install_panic_hook() {
                 return;
             }
             default_hook(info);
+            // The statement the backend was executing — the panic line alone
+            // is unactionable from a fuzz soak without it (r21 alter.rs:3954).
+            elog::with_debug_query_string(|q| {
+                if let Some(q) = q {
+                    eprintln!("panicking backend query: {q}");
+                }
+            });
         }));
     });
 }

@@ -59,6 +59,26 @@ pub fn RelationGetReplicaIndexOid(mcx: Mcx<'_>, relid: Oid) -> PgResult<Oid> {
     Ok(replidindex)
 }
 
+// dropconstraint_internal's rd_pkindex/rd_replidindex read, through the
+// CURRENT cache entry for the same reason as RelationGetReplicaIndexOid
+// above: a rebuild replaces the Rc, so a caller-held predecessor entry can
+// have rd_indexlist == None even right after RelationGetIndexList succeeded
+// (r21 portals soak: ALTER TABLE .. DROP NOT NULL panicked on that expect
+// when an invalidation landed inside the pg_index scan).
+pub fn RelationGetPkReplidIndexes(mcx: Mcx<'_>, relid: Oid) -> PgResult<(Oid, Oid)> {
+    let rel = store::RelationIdGetRelation(relid)?.ok_or_else(|| not_open(relid))?;
+    if rel.rd_indexlist.borrow().is_none() {
+        let _ = rebuild_index_list(mcx, &rel)?;
+    }
+    let pair = rel
+        .rd_indexlist
+        .borrow()
+        .as_ref()
+        .map(|l| (l.pkindex, l.replidindex))
+        .unwrap_or((InvalidOid, InvalidOid));
+    Ok(pair)
+}
+
 // The scan may process invalidations (it re-enters the relcache), so no
 // rd_indexlist borrow is held across it; the result is built in the caller's
 // context and installed on the entry only after the scan completes, as in C.
