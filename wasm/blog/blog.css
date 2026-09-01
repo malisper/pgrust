@@ -196,17 +196,6 @@ a:hover { color: #ffc2a7; }
   line-height: 1.55;
 }
 
-.article-hero {
-  display: block;
-  width: min(960px, 100%);
-  max-height: 540px;
-  margin: 0 auto 52px;
-  object-fit: contain;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--panel);
-}
-
 .article-body {
   width: min(760px, 100%);
   margin: 0 auto;
@@ -460,7 +449,6 @@ a:hover { color: #ffc2a7; }
   .article-shell { padding: 48px 0 72px; }
   .article-header { margin-bottom: 30px; }
   .article-dek { font-size: 17px; }
-  .article-hero { margin-bottom: 36px; }
   .article-body h2 { font-size: 25px; }
   .article-body h3 { font-size: 20px; }
   .article-body pre {

@@ -50,7 +50,6 @@
       <p class="article-dek">pgrust reaches full PostgreSQL regression and isolation test compatibility.</p>
       <p class="article-meta">Michael Malis · <time datetime="2026-06-25T08:25:42-07:00">June 25, 2026</time></p>
     </header>
-    <img class="article-hero" src="/blog/assets/pgrust-default.png" alt="" fetchpriority="high">
     <div class="article-body"><p>pgrust is a Postgres rewrite in Rust that I’ve been working on with my friend Jason Seibel. It targets compatibility with Postgres 18.3, passes the PostgreSQL regression tests, and now also passes the isolation tests.</p>
 <p>It is disk compatible with Postgres and and can boot from an existing Postgres 18.3 data directory. It is not production-ready yet, not performance optimized yet, and not compatible with existing Postgres extensions. The goal is to make Postgres easier to change from the inside: keep Postgres behavior as the oracle, use Rust to make the codebase easier to work on, and use AI-assisted programming to explore deeper server changes.</p></div>
     <footer class="article-footer">

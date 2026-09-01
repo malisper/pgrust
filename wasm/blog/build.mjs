@@ -280,7 +280,6 @@ ${header()}
       <p class="article-dek">${escapeHtml(meta.description)}</p>
       <p class="article-meta">Michael Malis · <time datetime="${published}">${formatDate(post.date)}</time></p>
     </header>
-    <img class="article-hero" src="/blog/assets/${meta.image}" alt="" fetchpriority="high">
     <div class="article-body">${cleanContent(post)}</div>
     <footer class="article-footer">
       ${postFooterCta()}
