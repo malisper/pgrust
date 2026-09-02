@@ -1927,6 +1927,15 @@ fn perform_wal_recovery_guts(rec: &mut Recovery) -> PgResult<()> {
             have_record = read_record(rec, LOG, false, replay_tli)?;
         }
 
+        // The WAL prefetcher issues io_uring reads whose buffer pins are owned
+        // by this thread's ring slots and are only dropped when this thread
+        // collects them (bufmgr::uring::start_read -> collect_done). Redo has
+        // no further prefetch after the last record, so wait out and collect
+        // the in-flight reads here; otherwise the last prefetched page stays
+        // pinned forever and DropRelationsAllBuffers (DROP TABLE, TRUNCATE,
+        // DROP DATABASE) on that relation spins in InvalidateBuffer.
+        bufmgr::uring_drain_pins();
+
         if reached_recovery_target {
             if !reached_consistency() {
                 ereport(FATAL)
