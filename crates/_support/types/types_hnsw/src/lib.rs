@@ -1,7 +1,9 @@
 //! hnsw.h vocabulary (pgvector): scan state lives here so relscan's
 //! IndexScanOpaque can hold it without a cycle through the AM crates.
 
+use mcx::{Mcx, PgVec};
 use types_core::{BlockNumber, Oid};
+use types_error::{PgError, PgResult};
 use types_fmgr::FmgrInfo;
 use types_tuple::itemptr::ItemPointerData;
 
@@ -51,6 +53,22 @@ pub fn hnsw_get_ml(m: i32) -> f64 {
     1.0 / (m as f64).ln()
 }
 
+/// C: hnsw.h HnswTypeInfo. Returned (by pointer, as a Datum) from opclass
+/// support proc 3 (`hnsw_*_support`) and consulted by HnswGetTypeInfo.
+/// Callbacks receive the full detoasted varlena image (4-byte header
+/// included), which is the representation the HNSW code already carries.
+pub type HnswNormalizeFn = for<'m> fn(Mcx<'m>, &[u8]) -> PgResult<PgVec<'m, u8>>;
+pub type HnswCheckValueFn = fn(&[u8]) -> PgResult<()>;
+
+pub struct HnswTypeInfo {
+    /// C: maxDimensions.
+    pub max_dimensions: i32,
+    /// C: normalize (l2_normalize for vector, halfvec_l2_normalize, ...).
+    pub normalize: Option<HnswNormalizeFn>,
+    /// C: checkValue (SparsevecCheckValue); None for vector/halfvec/bit.
+    pub check_value: Option<HnswCheckValueFn>,
+}
+
 // Resolved support procs (C HnswSupport): distance (proc 1), optional norm
 // (proc 2), index collation.
 #[derive(Clone)]
@@ -58,6 +76,8 @@ pub struct HnswSupport {
     pub procinfo: FmgrInfo,
     pub normprocinfo: Option<FmgrInfo>,
     pub collation: Oid,
+    /// C: HnswBuildState/ScanOpaque typeInfo, resolved once via HnswGetTypeInfo.
+    pub type_info: &'static HnswTypeInfo,
 }
 
 #[derive(Clone, Copy)]
@@ -157,4 +177,27 @@ pub struct HnswScanOpaqueData<'mcx> {
     pub w: Vec<HnswScanElement>,
     pub visited: std::collections::HashSet<(BlockNumber, u16), rustc_hash::FxBuildHasher>,
     pub discarded: Option<DistanceMinHeap>,
+}
+
+#[cfg(test)]
+mod type_info_tests {
+    use super::*;
+
+    fn upper<'m>(_mcx: Mcx<'m>, img: &[u8]) -> PgResult<PgVec<'m, u8>> {
+        unreachable!("not called in this test: {}", img.len())
+    }
+    fn reject_all(_img: &[u8]) -> PgResult<()> {
+        Err(PgError::error("rejected").into())
+    }
+
+    static TI: HnswTypeInfo =
+        HnswTypeInfo { max_dimensions: 7, normalize: Some(upper), check_value: Some(reject_all) };
+
+    #[test]
+    fn type_info_is_a_plain_static_with_fn_pointers() {
+        assert_eq!(TI.max_dimensions, 7);
+        assert!(TI.normalize.is_some());
+        let err = (TI.check_value.unwrap())(&[0u8; 4]).unwrap_err();
+        assert_eq!(err.message(), "rejected");
+    }
 }
