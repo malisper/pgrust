@@ -3,7 +3,7 @@
 
 use mcx::{Mcx, PgVec};
 use types_core::{BlockNumber, Oid};
-use types_error::{PgError, PgResult};
+use types_error::PgResult;
 use types_fmgr::FmgrInfo;
 use types_tuple::itemptr::ItemPointerData;
 
@@ -53,13 +53,15 @@ pub fn hnsw_get_ml(m: i32) -> f64 {
     1.0 / (m as f64).ln()
 }
 
+/// C: HnswTypeInfo.normalize — takes the full detoasted varlena image.
+pub type HnswNormalizeFn = for<'m> fn(Mcx<'m>, &[u8]) -> PgResult<PgVec<'m, u8>>;
+/// C: HnswTypeInfo.checkValue.
+pub type HnswCheckValueFn = fn(&[u8]) -> PgResult<()>;
+
 /// C: hnsw.h HnswTypeInfo. Returned (by pointer, as a Datum) from opclass
 /// support proc 3 (`hnsw_*_support`) and consulted by HnswGetTypeInfo.
 /// Callbacks receive the full detoasted varlena image (4-byte header
 /// included), which is the representation the HNSW code already carries.
-pub type HnswNormalizeFn = for<'m> fn(Mcx<'m>, &[u8]) -> PgResult<PgVec<'m, u8>>;
-pub type HnswCheckValueFn = fn(&[u8]) -> PgResult<()>;
-
 pub struct HnswTypeInfo {
     /// C: maxDimensions.
     pub max_dimensions: i32,
@@ -182,6 +184,7 @@ pub struct HnswScanOpaqueData<'mcx> {
 #[cfg(test)]
 mod type_info_tests {
     use super::*;
+    use types_error::PgError;
 
     fn upper<'m>(_mcx: Mcx<'m>, img: &[u8]) -> PgResult<PgVec<'m, u8>> {
         unreachable!("not called in this test: {}", img.len())
