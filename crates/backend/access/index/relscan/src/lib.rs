@@ -2,6 +2,7 @@
 //! split out so nbtree takes the descriptor without a cycle through indexam.
 #![allow(non_snake_case)]
 
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -37,6 +38,9 @@ pub enum IndexAmKind {
     Brin,
     Hnsw,
     Bloom,
+    /// btree semantics, but the entries live in object storage beside the rows
+    /// they index, written in the same commit object. See the `objkv` crate.
+    Objkv,
     #[cfg(feature = "mock")]
     Mock,
 }
@@ -66,6 +70,11 @@ impl IndexAmKind {
             IndexAmKind::Brin => false,
             IndexAmKind::Hnsw => false,
             IndexAmKind::Bloom => false,
+            // false, so the caller predicate-locks the whole relation: objkv
+            // takes no finer-grained locks, and its conflict check compares
+            // written keys, never scanned ranges. Coarse and correct beats
+            // claiming a guarantee nothing implements.
+            IndexAmKind::Objkv => false,
             #[cfg(feature = "mock")]
             IndexAmKind::Mock => true,
         }
@@ -81,6 +90,7 @@ impl IndexAmKind {
             IndexAmKind::Brin => true,
             IndexAmKind::Hnsw => false,
             IndexAmKind::Bloom => false,
+            IndexAmKind::Objkv => false,
             #[cfg(feature = "mock")]
             IndexAmKind::Mock => false,
         }
@@ -96,6 +106,7 @@ impl IndexAmKind {
             IndexAmKind::Brin => false,
             IndexAmKind::Hnsw => false,
             IndexAmKind::Bloom => false,
+            IndexAmKind::Objkv => true,
             #[cfg(feature = "mock")]
             IndexAmKind::Mock => false,
         }
@@ -111,6 +122,7 @@ impl IndexAmKind {
             IndexAmKind::Brin => false,
             IndexAmKind::Hnsw => false,
             IndexAmKind::Bloom => false,
+            IndexAmKind::Objkv => false,
             #[cfg(feature = "mock")]
             IndexAmKind::Mock => true,
         }
@@ -126,6 +138,7 @@ impl IndexAmKind {
             IndexAmKind::Brin => false,
             IndexAmKind::Hnsw => false,
             IndexAmKind::Bloom => false,
+            IndexAmKind::Objkv => false,
             #[cfg(feature = "mock")]
             IndexAmKind::Mock => false,
         }
@@ -141,6 +154,7 @@ impl IndexAmKind {
             IndexAmKind::Brin => 0,
             IndexAmKind::Hnsw => 0,
             IndexAmKind::Bloom => 1,
+            IndexAmKind::Objkv => 5,
             #[cfg(feature = "mock")]
             IndexAmKind::Mock => 5,
         }
@@ -156,6 +170,8 @@ impl IndexAmKind {
             IndexAmKind::Brin => 15,
             IndexAmKind::Hnsw => 3,
             IndexAmKind::Bloom => 2,
+            IndexAmKind::Objkv => 6, // bthandler, so btree's stride
+
             #[cfg(feature = "mock")]
             IndexAmKind::Mock => 6,
         }
@@ -171,6 +187,7 @@ impl IndexAmKind {
             IndexAmKind::Brin => 5,
             IndexAmKind::Hnsw => 0,
             IndexAmKind::Bloom => 2,
+            IndexAmKind::Objkv => 5,
             #[cfg(feature = "mock")]
             IndexAmKind::Mock => 5,
         }
@@ -186,6 +203,7 @@ impl IndexAmKind {
             IndexAmKind::Brin => true,
             IndexAmKind::Hnsw => false,
             IndexAmKind::Bloom => false,
+            IndexAmKind::Objkv => false,
             #[cfg(feature = "mock")]
             IndexAmKind::Mock => false,
         }
@@ -201,6 +219,7 @@ impl IndexAmKind {
             IndexAmKind::Brin => false,
             IndexAmKind::Hnsw => false,
             IndexAmKind::Bloom => false,
+            IndexAmKind::Objkv => false,
             #[cfg(feature = "mock")]
             IndexAmKind::Mock => true,
         }
@@ -216,6 +235,7 @@ impl IndexAmKind {
             IndexAmKind::Brin => false,
             IndexAmKind::Hnsw => false,
             IndexAmKind::Bloom => false,
+            IndexAmKind::Objkv => false,
             #[cfg(feature = "mock")]
             IndexAmKind::Mock => false,
         }
@@ -231,6 +251,7 @@ impl IndexAmKind {
             IndexAmKind::Brin => false,
             IndexAmKind::Hnsw => true,
             IndexAmKind::Bloom => false,
+            IndexAmKind::Objkv => false,
             #[cfg(feature = "mock")]
             IndexAmKind::Mock => false,
         }
@@ -246,6 +267,7 @@ impl IndexAmKind {
             IndexAmKind::Brin => true,
             IndexAmKind::Hnsw => false,
             IndexAmKind::Bloom => false,
+            IndexAmKind::Objkv => false,
             #[cfg(feature = "mock")]
             IndexAmKind::Mock => false,
         }
@@ -342,6 +364,7 @@ pub enum IndexScanOpaque<'mcx> {
     Brin(PgBox<'mcx, ::types_brin::BrinOpaque<'mcx>>),
     Hnsw(PgBox<'mcx, ::types_hnsw::HnswScanOpaqueData<'mcx>>),
     Bloom(PgBox<'mcx, ::types_bloom::BloomScanOpaqueData>),
+    Objkv(Rc<RefCell<::objkv::index::ScanState>>),
     #[cfg(feature = "mock")]
     Mock(MockOpaque),
 }
@@ -350,6 +373,7 @@ impl IndexScanOpaque<'_> {
     #[inline]
     pub fn kind(&self) -> IndexAmKind {
         match self {
+            IndexScanOpaque::Objkv(_) => IndexAmKind::Objkv,
             IndexScanOpaque::Btree(_) => IndexAmKind::Btree,
             IndexScanOpaque::Hash(_) => IndexAmKind::Hash,
             IndexScanOpaque::Gin(_) => IndexAmKind::Gin,

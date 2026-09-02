@@ -137,6 +137,7 @@ pub fn get_relation_info<'mcx>(
             let am_is_spgist = am_kind == types_relscan::IndexAmKind::Spgist;
             let am_is_hnsw = am_kind == types_relscan::IndexAmKind::Hnsw;
             let am_is_bloom = am_kind == types_relscan::IndexAmKind::Bloom;
+            let am_is_objkv = am_kind == types_relscan::IndexAmKind::Objkv;
             let ncolumns = ind.indnatts as i32;
             let nkeycolumns = ind.indnkeyatts as i32;
             let mut info = IndexOptInfo::new(mcx);
@@ -160,6 +161,9 @@ pub fn get_relation_info<'mcx>(
                     types_relscan::IndexAmKind::Spgist => {
                         spgist::spgcanreturn(&index_rel, i as i32 + 1)?
                     }
+                    types_relscan::IndexAmKind::Objkv => {
+                        tableam::objkv_index::returnable(&index_rel, i as i32 + 1)
+                    }
                     _ => false,
                 });
             }
@@ -172,23 +176,29 @@ pub fn get_relation_info<'mcx>(
             // a partitioned index has no AM (C NULLifies these fields).
             if !is_partitioned_index {
                 info.amcanorderbyop = am_is_gist || am_is_spgist || am_is_hnsw;
+                // objkv included: a scan with no condition on the first
+                // column is the whole index in order, which is what ORDER BY
+                // with no WHERE asks for.
                 info.amoptionalkey = am_is_btree
                     || am_is_gin
                     || am_is_gist
                     || am_is_spgist
                     || am_is_brin
                     || am_is_hnsw
-                    || am_is_bloom;
-                info.amsearcharray = am_is_btree;
-                info.amsearchnulls = am_is_btree || am_is_gist || am_is_spgist || am_is_brin;
+                    || am_is_bloom
+                    || am_is_objkv;
+                info.amsearcharray = am_is_btree || am_is_objkv;
+                info.amsearchnulls =
+                    am_is_btree || am_is_gist || am_is_spgist || am_is_brin || am_is_objkv;
                 info.amcanparallel = am_is_btree;
                 info.amhasgettuple = !am_is_gin && !am_is_brin && !am_is_bloom;
                 info.amhasgetbitmap = !am_is_hnsw;
                 info.amcanmarkpos = am_is_btree;
 
                 // amcanorder arm: a non-ordering AM leaves the sort vectors
-                // empty (C's NULL sortopfamily).
-                if am_is_btree {
+                // empty (C's NULL sortopfamily). objkv orders as btree does,
+                // each column the way its option says.
+                if am_is_btree || am_is_objkv {
                     for i in 0..nkeycolumns as usize {
                         let opt = index_rel.rd_indoption[i];
                         info.sortopfamily.push(info.opfamily[i]);
@@ -270,7 +280,11 @@ pub fn get_relation_info<'mcx>(
                 info.tuples = 0.0;
                 info.tree_height = Cell::new(-1);
             } else {
-                if info.indpred.is_empty() {
+                if am_is_objkv {
+                    // Entries are objects; there may be no file to ask.
+                    info.pages = 0;
+                    info.tuples = run.root.rel(rel).tuples;
+                } else if info.indpred.is_empty() {
                     info.pages = bufmgr_seams::relation_get_number_of_blocks_in_fork::call(
                         &index_rel,
                         types_core::ForkNumber::MAIN_FORKNUM,
@@ -771,6 +785,7 @@ pub fn index_can_return(mcx: mcx::Mcx<'_>, index_oid: Oid, attno: i32) -> PgResu
         types_relscan::IndexAmKind::Btree => btcanreturn(),
         types_relscan::IndexAmKind::Gist => gist::gistcanreturn(&rel, attno),
         types_relscan::IndexAmKind::Spgist => spgist::spgcanreturn(&rel, attno)?,
+        types_relscan::IndexAmKind::Objkv => tableam::objkv_index::returnable(&rel, attno),
         _ => false,
     };
     indexam::index_close(rel, types_rel::AccessShareLock)?;

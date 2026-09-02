@@ -247,6 +247,11 @@ pub fn index_bulk_delete<'mcx>(
         IndexAmKind::Gist => gist::gistbulkdelete(info, istat, dead_items),
         IndexAmKind::Spgist => spgist::spgbulkdelete(info, istat, dead_items),
         IndexAmKind::Hnsw => pgvector_hnsw::hnswbulkdelete(info, istat, dead_items),
+        // Nothing for vacuum to do: an objkv entry is retired by the update
+        // or delete that invalidates its row (objkv_index::retire_entries),
+        // and an entry whose row has no version left is dropped when the
+        // runs merge (db::drop_dead_entries). There are no dead items here.
+        IndexAmKind::Objkv => Ok(istat.unwrap_or_default()),
         IndexAmKind::Bloom => bloom::blbulkdelete(info, istat, dead_items),
         // brinbulkdelete: BRIN has no per-heap-tuple entries; stats
         // allocation is the whole body.
@@ -272,10 +277,13 @@ pub fn index_bulk_delete_collect<'mcx>(
         IndexAmKind::Gist => gist::gistbulkdelete_collect(info, callback),
         IndexAmKind::Spgist => spgist::spgbulkdelete_collect(info, callback),
         IndexAmKind::Hnsw => pgvector_hnsw::hnswbulkdelete_collect(info, callback),
+        IndexAmKind::Objkv => Ok(IndexBulkDeleteResult::default()),
         IndexAmKind::Bloom => bloom::blbulkdelete_collect(info, callback),
         // brinbulkdelete never invokes the callback: BRIN has no
         // per-heap-tuple entries to report.
         IndexAmKind::Brin => Ok(IndexBulkDeleteResult::default()),
+        // Only the mock AM reaches this once every real variant is covered.
+        #[allow(unreachable_patterns)]
         _ => panic!("unported: ambulkdelete TID-collect beyond btree/hash/gin/gist/spgist/brin (validate_index)"),
     }
 }
@@ -303,6 +311,7 @@ pub fn index_vacuum_cleanup<'mcx>(
         IndexAmKind::Gist => gist::gistvacuumcleanup(info, istat),
         IndexAmKind::Spgist => spgist::spgvacuumcleanup(info, istat),
         IndexAmKind::Hnsw => pgvector_hnsw::hnswvacuumcleanup(info, istat),
+        IndexAmKind::Objkv => Ok(istat),
         IndexAmKind::Bloom => bloom::blvacuumcleanup(info, istat),
         IndexAmKind::Brin => {
             if info.analyze_only {
@@ -463,6 +472,7 @@ fn am_getbitmap(
         IndexScanOpaque::Spgist(_) => spgist::spggetbitmap(scan, bitmap),
         IndexScanOpaque::Brin(_) => brin::bringetbitmap(scan, bitmap),
         IndexScanOpaque::Hnsw(_) => Err(missing_procedure("amgetbitmap", scan.index_rel())),
+        IndexScanOpaque::Objkv(_) => objkv_getbitmap(scan, bitmap),
         IndexScanOpaque::Bloom(_) => bloom::blgetbitmap(scan, bitmap),
         #[cfg(test)]
         IndexScanOpaque::Mock(_) => unreachable!("Mock lacks amgetbitmap"),
@@ -867,6 +877,15 @@ fn am_beginscan<'mcx>(
         IndexAmKind::Gist => gist::gistbeginscan(mcx, indexRelation, nkeys, norderbys),
         IndexAmKind::Spgist => spgist::spgbeginscan(mcx, indexRelation, nkeys, norderbys),
         IndexAmKind::Hnsw => pgvector_hnsw::hnswbeginscan(mcx, indexRelation, nkeys, norderbys),
+        IndexAmKind::Objkv => relation_get_index_scan(
+            mcx,
+            indexRelation,
+            nkeys,
+            norderbys,
+            IndexScanOpaque::Objkv(Default::default()),
+            // objkv writes no WAL, so recovery never reaches it.
+            false,
+        ),
         IndexAmKind::Bloom => bloom::blbeginscan(mcx, indexRelation, nkeys, norderbys),
         IndexAmKind::Brin => brin::brinbeginscan(mcx, indexRelation, nkeys, norderbys),
         #[cfg(test)]
@@ -889,6 +908,18 @@ fn am_rescan(
         IndexScanOpaque::Gist(_) => gist::gistrescan(scan, keys, orderbys),
         IndexScanOpaque::Spgist(_) => spgist::spgrescan(scan, keys, orderbys),
         IndexScanOpaque::Hnsw(_) => pgvector_hnsw::hnswrescan(scan, keys, orderbys),
+        IndexScanOpaque::Objkv(ref st) => {
+            st.borrow_mut().reset();
+            // The seek on the next gettuple reads them back out.
+            if let Some(keys) = keys {
+                if scan.numberOfKeys > 0 {
+                    debug_assert!(keys.len() == scan.numberOfKeys as usize);
+                    scan.keyData.clear();
+                    scan.keyData.extend(keys.iter().cloned());
+                }
+            }
+            Ok(())
+        }
         IndexScanOpaque::Bloom(_) => bloom::blrescan(scan, keys),
         IndexScanOpaque::Brin(_) => brin::brinrescan(scan, keys),
         #[cfg(test)]
@@ -906,6 +937,10 @@ fn am_endscan(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
         IndexScanOpaque::Gist(_) => gist::gistendscan(scan),
         IndexScanOpaque::Spgist(_) => spgist::spgendscan(scan),
         IndexScanOpaque::Hnsw(_) => pgvector_hnsw::hnswendscan(scan),
+        IndexScanOpaque::Objkv(ref st) => {
+            st.borrow_mut().reset();
+            Ok(())
+        }
         IndexScanOpaque::Bloom(_) => bloom::blendscan(scan),
         IndexScanOpaque::Brin(_) => brin::brinendscan(scan),
         #[cfg(test)]
@@ -923,6 +958,7 @@ fn am_markpos(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
         IndexScanOpaque::Gist(_) => Err(missing_procedure("ammarkpos", scan.index_rel())),
         IndexScanOpaque::Spgist(_) => unreachable!("has_ammarkpos gate"),
         IndexScanOpaque::Hnsw(_) => unreachable!("has_ammarkpos gate"),
+        IndexScanOpaque::Objkv(_) => unreachable!("has_ammarkpos gate"),
         IndexScanOpaque::Bloom(_) => unreachable!("has_ammarkpos gate"),
         IndexScanOpaque::Brin(_) => unreachable!("has_ammarkpos gate"),
         #[cfg(test)]
@@ -940,6 +976,7 @@ fn am_restrpos(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
         IndexScanOpaque::Gist(_) => Err(missing_procedure("amrestrpos", scan.index_rel())),
         IndexScanOpaque::Spgist(_) => unreachable!("has_amrestrpos gate"),
         IndexScanOpaque::Hnsw(_) => unreachable!("has_amrestrpos gate"),
+        IndexScanOpaque::Objkv(_) => unreachable!("has_amrestrpos gate"),
         IndexScanOpaque::Bloom(_) => unreachable!("has_amrestrpos gate"),
         IndexScanOpaque::Brin(_) => unreachable!("has_amrestrpos gate"),
         #[cfg(test)]
@@ -951,6 +988,155 @@ fn am_restrpos(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
 
 // CHECK_SCAN_PROCEDURE(amgettuple) folds in: a bitmap-only AM would get an error arm here.
 #[allow(unused_variables)]
+/// objkv's amgettuple: one seek on the first call after a rescan, then a walk
+/// of the rowids it yielded, each turned into a TID the table AM's way.
+fn objkv_gettuple(
+    scan: &mut IndexScanDescData<'_>,
+    direction: ScanDirection,
+) -> PgResult<bool> {
+    use ::types_scan::scankey::{
+        BTEqualStrategyNumber, BTLessStrategyNumber, SK_ISNULL, SK_SEARCHARRAY, SK_SEARCHNOTNULL,
+        SK_SEARCHNULL,
+    };
+
+    let IndexScanOpaque::Objkv(state) = &scan.opaque else {
+        unreachable!("objkv_gettuple on another AM's scan");
+    };
+    let state = Rc::clone(state);
+    let mut st = state.borrow_mut();
+    let backward = direction == ScanDirection::BackwardScanDirection;
+    if st.started && st.backward != backward {
+        return Err(tableam::objkv_unsupported(
+            "changing direction part way through an index scan",
+        ));
+    }
+    st.backward = backward;
+    st.want_keys = scan.xs_want_itup;
+
+    // A window at a time, so a query that wants ten rows from a range of a
+    // million reads ten. A window can come back empty without the range being
+    // finished, which is why this is a loop rather than one call.
+    while st.wants_more() {
+        let mcx = *scan.keyData.allocator();
+        let index = scan.index_rel();
+        let mut conds: Vec<tableam::objkv_index::Cond> = Vec::new();
+        for key in scan.keyData[..scan.numberOfKeys as usize].iter() {
+            if key.sk_attno < 1 {
+                return Err(tableam::objkv_unsupported("index conditions on a whole row"));
+            }
+            // A null test arrives with no strategy at all. A NULL encodes as one
+            // byte above every value, so IS NULL is an equality against that
+            // byte and IS NOT NULL is everything below it.
+            let nulltest = key.sk_flags & (SK_SEARCHNULL | SK_SEARCHNOTNULL) != 0;
+            let strategy = if key.sk_flags & SK_SEARCHNULL != 0 {
+                BTEqualStrategyNumber as u16
+            } else if key.sk_flags & SK_SEARCHNOTNULL != 0 {
+                BTLessStrategyNumber as u16
+            } else {
+                key.sk_strategy as u16
+            };
+            let isarray = key.sk_flags & SK_SEARCHARRAY != 0;
+            let isnull = key.sk_flags & SK_ISNULL != 0;
+            // `= ANY(NULL)` arrives as an array key with no array behind it,
+            // and reading a varlena header through that null pointer takes the
+            // backend down. There is nothing to expand: the condition is
+            // unknown, and `load_scan` answers it with no rows.
+            let values = if isarray && !isnull {
+                tableam::objkv_index::array_elements(mcx, key.sk_argument)?
+            } else {
+                vec![key.sk_argument]
+            };
+            conds.push(tableam::objkv_index::Cond {
+                col: key.sk_attno as usize - 1,
+                strategy,
+                nulltest,
+                isarray,
+                values,
+                isnull,
+                // A cross-type operator hands over a value of its own right
+                // type, not the column's: `relname >= 'post_'` compares a
+                // name column against a text datum, whose bytes are laid out
+                // differently. Zero means "the column's type".
+                subtype: key.sk_subtype,
+            });
+        }
+        let at = tableam::objkv_am::snapshot_seq(scan.xs_snapshot.as_deref())?;
+        tableam::objkv_index::load_scan(mcx, index, &mut st, &conds, at)?;
+    }
+
+    match st.next() {
+        Some(rowid) => {
+            scan.xs_heaptid = tableam::objkv_am::tid_of(rowid);
+            if scan.xs_want_itup {
+                objkv_publish_itup(scan, &mut st)?;
+            }
+            // Exact: entries are withdrawn with the row change that
+            // invalidates them, and every condition is applied before this
+            // point. It has to be the AM's job -- genam does not recheck, and
+            // a wrong pg_attribute row becomes a relcache entry built from
+            // another relation's columns.
+            scan.xs_recheck = false;
+            Ok(true)
+        }
+        None => Ok(false),
+    }
+}
+
+/// Everything the scan matches, in one go, as row ids for the caller to sort
+/// and combine. This is what lets one query use two indexes at once -- an OR
+/// across two columns, or an AND that narrows by both.
+fn objkv_getbitmap(
+    scan: &mut IndexScanDescData<'_>,
+    tbm: &mut tidbitmap::TIDBitmap<'_>,
+) -> PgResult<i64> {
+    let mut ntids: i64 = 0;
+    while objkv_gettuple(scan, ScanDirection::ForwardScanDirection)? {
+        tbm.add_tuples(core::slice::from_ref(&scan.xs_heaptid), false)?;
+        ntids += 1;
+    }
+    Ok(ntids)
+}
+
+/// Rebuilds the indexed values from the entry and hands them to the executor,
+/// so a query that wants only indexed columns never reads the row.
+///
+/// Cheaper here than in a heap, which needs a separate map of which pages are
+/// all-visible before it may skip the fetch. An objkv entry is versioned and
+/// retired with the row change that invalidates it, so the snapshot read that
+/// produced this entry has already settled the question.
+fn objkv_publish_itup(
+    scan: &mut IndexScanDescData<'_>,
+    st: &mut ::objkv::index::ScanState,
+) -> PgResult<()> {
+    let mcx = *scan.keyData.allocator();
+    let index = scan.index_rel();
+    let key = st
+        .key()
+        .ok_or_else(|| tableam::objkv_unsupported("an index-only scan without its entry key"))?;
+    let (mut values, mut isnull) = tableam::objkv_index::decode_entry(mcx, index, key)?;
+    // INCLUDE columns are not in the key. They are reported unreturnable, so
+    // the planner never asks for one; the padding is only to shape the tuple.
+    let desc = index.rd_att.clone();
+    values.resize(desc.natts as usize, ::datum::Datum::null());
+    isnull.resize(desc.natts as usize, true);
+    let itup = nbtree::itup::index_form_tuple(mcx, &desc, &values, &isnull)?;
+    // Into the scan state's own buffer, reused row after row, so a long
+    // index-only scan does not keep one image per row until the query
+    // context goes. The formed tuple is scratch and is freed here.
+    let words = itup.size().div_ceil(8);
+    st.itup.clear();
+    st.itup.resize(words, 0);
+    // SAFETY: both sides are at least `size` bytes -- the buffer was just
+    // sized to hold it -- and do not overlap.
+    unsafe {
+        core::ptr::copy_nonoverlapping(itup.as_ptr().cast::<u8>(), st.itup.as_mut_ptr().cast::<u8>(), itup.size());
+    }
+    drop(itup);
+    scan.xs_itup = core::ptr::NonNull::new(st.itup.as_mut_ptr().cast());
+    scan.xs_itupdesc = Some(desc);
+    Ok(())
+}
+
 fn am_gettuple(scan: &mut IndexScanDescData<'_>, direction: ScanDirection) -> PgResult<bool> {
     match scan.opaque {
         IndexScanOpaque::Btree(_) => nbtree::btgettuple(scan, direction),
@@ -963,6 +1149,7 @@ fn am_gettuple(scan: &mut IndexScanDescData<'_>, direction: ScanDirection) -> Pg
         IndexScanOpaque::Spgist(_) => spgist::spggettuple(scan, direction),
         IndexScanOpaque::Hnsw(_) => pgvector_hnsw::hnswgettuple(scan, direction),
         // CHECK_SCAN_PROCEDURE(amgettuple): bloom is bitmap-only.
+        IndexScanOpaque::Objkv(_) => objkv_gettuple(scan, direction),
         IndexScanOpaque::Bloom(_) => Err(missing_procedure("amgettuple", scan.index_rel())),
         // CHECK_SCAN_PROCEDURE(amgettuple): BRIN is bitmap-only.
         IndexScanOpaque::Brin(_) => Err(missing_procedure("amgettuple", scan.index_rel())),
@@ -1073,6 +1260,21 @@ fn am_insert<'mcx>(
             debug_assert!(checkUnique == IndexUniqueCheck::UNIQUE_CHECK_NO);
             pgvector_hnsw::hnswinsert(mcx, indexRelation, values, isnull, heap_t_ctid, heapRelation)
         }
+        IndexAmKind::Objkv => {
+            // Staged, not written: same commit object as the row.
+            let _ = (mcx, heapRelation, indexUnchanged, am_cache);
+            tableam::objkv_index::insert(
+                mcx,
+                indexRelation,
+                heapRelation,
+                values,
+                isnull,
+                tableam::objkv_am::rowid_of(heap_t_ctid),
+                // A speculative or deferred check wants the duplicate
+                // reported, not raised: ON CONFLICT DO NOTHING is not an error.
+                checkUnique == IndexUniqueCheck::UNIQUE_CHECK_PARTIAL,
+            )
+        }
         IndexAmKind::Bloom => {
             debug_assert!(checkUnique == IndexUniqueCheck::UNIQUE_CHECK_NO);
             bloom::blinsert(mcx, indexRelation, values, isnull, heap_t_ctid, heapRelation)
@@ -1097,6 +1299,7 @@ fn am_insert_cleanup(
         IndexAmKind::Gist => Ok(()),
         IndexAmKind::Spgist => unreachable!("spgist lacks aminsertcleanup (guarded)"),
         IndexAmKind::Hnsw => unreachable!("hnsw lacks aminsertcleanup (guarded)"),
+        IndexAmKind::Objkv => unreachable!("objkv lacks aminsertcleanup (guarded)"),
         IndexAmKind::Bloom => unreachable!("bloom lacks aminsertcleanup (guarded)"),
         IndexAmKind::Brin => {
             let Some(boxed) = am_cache else { return Ok(()) };

@@ -591,6 +591,15 @@ pub fn InitPostgres(
     }
 
     gtrace("p.timeouts");
+    // pg_am is an objkv relation here: the answers go in before it opens.
+    if ::objkv_marker::catalogs_in_bucket() {
+        ::tableam_vocab::register_objkv_table_am(::objkv_marker::NAILED_AM);
+        ::tableam::objkv_am::register_lifted_ams();
+        for oid in ::tableam::objkv_am::lifted_am_oids("iam=") {
+            ::types_relscan::register_index_am(oid, ::types_relscan::IndexAmKind::Objkv);
+            ::tableam_vocab::register_objkv_index_am(oid);
+        }
+    }
     if !warm_claim {
         relcache::RelationCacheInitialize();
         cache_syscache::InitCatalogCache()?;

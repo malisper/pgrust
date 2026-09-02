@@ -20,6 +20,8 @@ genam_seams = { path = "../genam_seams" }
 relation_seams = { path = "../../common/relation_seams" }
 rls_seams = { path = "../../../utils/misc/rls_seams" }
 tableam = { path = "../../table/tableam" }
+tableam_vocab = { path = "../../table/tableam_vocab" }
+inval = { path = "../../../utils/cache/inval" }
 exectuples = { path = "../../../executor/exectuples" }
 heaptuple = { path = "../../common/heaptuple" }
 xact = { path = "../../transam/xact" }

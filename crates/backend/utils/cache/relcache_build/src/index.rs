@@ -117,6 +117,7 @@ pub(crate) fn relation_init_index_access_info(
         types_relscan::IndexAmKind::Hnsw => 3,
         // contrib/bloom: hash proc + options proc (BLOOM_NPROC).
         types_relscan::IndexAmKind::Bloom => 2,
+        types_relscan::IndexAmKind::Objkv => BTNProcs, // btree's opclasses
         #[allow(unreachable_patterns)]
         other => panic!("relcache_build: index AM kind {other:?} for index {relid} unported"),
     };

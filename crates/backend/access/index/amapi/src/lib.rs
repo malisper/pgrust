@@ -22,6 +22,17 @@ const Anum_pg_am_amhandler: i32 = 3;
 const Anum_pg_am_amtype: i32 = 4;
 const NAMEDATALEN: usize = 64;
 
+/// pg_am.amname of the index AM whose entries live in objkv.
+pub const OBJKV_INDEX_AM: &str = "objkv_btree";
+
+fn amname_is(d: Datum, want: &str) -> bool {
+    let p = d.as_usize() as *const u8;
+    // SAFETY: pg_am.amname is NameData -- 64 NUL-padded bytes.
+    let bytes = unsafe { core::slice::from_raw_parts(p, NAMEDATALEN) };
+    let len = bytes.iter().position(|&b| b == 0).unwrap_or(NAMEDATALEN);
+    &bytes[..len] == want.as_bytes()
+}
+
 /// C calls the handler by OID and gets a palloc'd IndexAmRoutine; the closed
 /// AM set makes the routine the IndexAmKind enum. No catalog access, so safe
 /// while bootstrapping catalog indexes (relcache relies on that).
@@ -430,7 +441,16 @@ fn resolve_index_am_kind(amoid: Oid) -> Option<IndexAmKind> {
     let amhandler = SysCacheGetAttrNotNull(AMOID, &tuple, Anum_pg_am_amhandler)
         .map(|d| d.as_oid())
         .ok()?;
+    // By amname: objkv_btree borrows btree's handler.
+    let is_objkv = SysCacheGetAttrNotNull(AMOID, &tuple, Anum_pg_am_amname)
+        .ok()
+        .is_some_and(|d| amname_is(d, OBJKV_INDEX_AM));
     ReleaseSysCache(tuple);
+    if is_objkv {
+        // The storage vocabulary needs this before anything asks for a file.
+        tableam_vocab::register_objkv_index_am(amoid);
+        return Some(IndexAmKind::Objkv);
+    }
     if !matches!(
         amhandler,
         F_BTHANDLER | F_HASHHANDLER | F_GINHANDLER | F_GISTHANDLER | F_SPGHANDLER | F_BRINHANDLER

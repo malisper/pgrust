@@ -21,6 +21,8 @@ fd = { path = "../../file/fd" }
 inval = { path = "../../../utils/cache/inval" }
 xlogutils = { path = "../../../access/transam/xlogutils" }
 smgr_seams = { path = "../smgr_seams" }
+tableam_vocab = { path = "../../../access/table/tableam_vocab" }
+objkv_marker = { path = "../../../../_support/objkv_marker" }
 bufmgr_seams = { path = "../../buffer/bufmgr_seams" }
 relmapper_seams = { path = "../../../utils/cache/relmapper_seams" }
 init_small = { path = "../../../utils/init/init_small" }

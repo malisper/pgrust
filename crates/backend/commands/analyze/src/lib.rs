@@ -1433,6 +1433,9 @@ fn acquire_sample_rows<'mcx>(
     if tableam::TableAm::of(onerel) == Some(tableam::TableAm::Pgrcolumnar) {
         return pgrcolumnar_acquire_sample_rows(mcx, onerel, rows, targrows, totalrows, totaldeadrows);
     }
+    if tableam::TableAm::of(onerel) == Some(tableam::TableAm::Objkv) {
+        return objkv_acquire_sample_rows(mcx, onerel, rows, targrows, totalrows, totaldeadrows);
+    }
     let base = rows.len();
     let mut numrows: i32 = 0;
     let mut samplerows = 0.0f64;
@@ -1966,11 +1969,76 @@ fn acquire_inherited_sample_rows<'mcx>(
     Ok(numrows)
 }
 
+// objkv's acquirefunc: the rows are not paged, so there is no block to
+// sample by. The scan hands over every row in the newest state and a Vitter
+// reservoir picks `targrows` of them uniformly; totalrows is exact, and a
+// bucket holds no dead rows -- an old version is a snapshot's, not garbage.
+fn objkv_acquire_sample_rows<'mcx>(
+    mcx: Mcx<'mcx>,
+    onerel: &Relation<'mcx>,
+    rows: &mut PgVec<'mcx, HeapTupleData<'mcx>>,
+    targrows: i32,
+    totalrows: &mut f64,
+    totaldeadrows: &mut f64,
+) -> PgResult<i32> {
+    let mut scan = tableam::table_beginscan_analyze(mcx, onerel)?;
+    let mut slot = tableam::table_slot_create(mcx, onerel)?;
+    let mut rstate = sampling::reservoir_init_selection_state(
+        pg_prng::global_prng(|p| p.next_u64()),
+        targrows as u32,
+    );
+    // (ordinal, tuple): a replacement lands at a random slot, and the final
+    // sort restores row order, which the correlation statistic reads.
+    let mut sample: Vec<(u64, HeapTupleData<'mcx>)> = Vec::new();
+    let mut samplerows = 0.0f64;
+    let mut rowstoskip = -1.0f64;
+    let mut ord: u64 = 0;
+    while tableam::table_scan_getnextslot(
+        mcx,
+        &mut scan,
+        types_scan::sdir::ScanDirection::ForwardScanDirection,
+        &mut slot,
+    )? {
+        if (sample.len() as i32) < targrows {
+            sample.push((ord, copy_slot_tuple(mcx, &slot)?));
+        } else {
+            if rowstoskip < 0.0 {
+                rowstoskip = sampling::reservoir_get_next_s(&mut rstate, samplerows, targrows as u32);
+            }
+            if rowstoskip <= 0.0 {
+                let k = (targrows as f64 * sampling::sampler_random_fract(&mut rstate.randstate))
+                    as usize;
+                debug_assert!(k < targrows as usize);
+                sample[k] = (ord, copy_slot_tuple(mcx, &slot)?);
+            }
+            rowstoskip -= 1.0;
+        }
+        samplerows += 1.0;
+        ord += 1;
+    }
+    drop(slot);
+    tableam::table_endscan(scan)?;
+
+    sample.sort_unstable_by_key(|&(o, _)| o);
+    let numrows = sample.len() as i32;
+    for (_, t) in sample {
+        rows.push(t);
+    }
+    *totalrows = samplerows;
+    *totaldeadrows = 0.0;
+    pgstat_progress_update_param(PROGRESS_ANALYZE_BLOCKS_TOTAL, 1);
+    pgstat_progress_update_param(PROGRESS_ANALYZE_BLOCKS_DONE, 1);
+    Ok(numrows)
+}
+
 fn copy_slot_tuple<'mcx>(mcx: Mcx<'mcx>, slot: &SlotData<'mcx>) -> PgResult<HeapTupleData<'mcx>> {
-    let SlotData::BufferHeap(s) = slot else {
-        panic!("acquire_sample_rows: non-buffer slot from analyze scan")
-    };
-    let src = s.base.tuple.as_ref().expect("stored sample tuple");
+    let src = match slot {
+        SlotData::BufferHeap(s) => s.base.tuple.as_ref(),
+        // objkv's analyze scan stores each row in a plain heap-tuple slot.
+        SlotData::Heap(s) => s.tuple.as_ref(),
+        _ => panic!("acquire_sample_rows: unexpected slot kind from analyze scan"),
+    }
+    .expect("stored sample tuple");
     let owned = heaptuple::heap_copytuple(mcx, src)?;
     let (ptr, len, tid, oid) =
         (owned.image().as_ptr(), owned.as_tuple().t_len, owned.as_tuple().t_self, owned.as_tuple().t_tableOid);

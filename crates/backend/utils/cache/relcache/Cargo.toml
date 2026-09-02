@@ -19,6 +19,7 @@ types_tuple = { path = "../../../../_support/types/types_tuple" }
 tupdesc = { path = "../../../access/common/tupdesc" }
 elog = { path = "../../error/elog" }
 init_small = { path = "../../init/init_small" }
+objkv_marker = { path = "../../../../_support/objkv_marker" }
 lmgr = { path = "../../../storage/lmgr/lmgr" }
 lwlock = { path = "../../../storage/lmgr/lwlock" }
 smgr = { path = "../../../storage/smgr/smgr" }

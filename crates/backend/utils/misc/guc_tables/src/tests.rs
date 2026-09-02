@@ -47,12 +47,16 @@ fn table_counts_match_compiled_backend_shape() {
     //   -> 135), Int +4 (pgrust.memory_watchdog_interval / _threshold /
     //   _limit, plus the hidden developer hog pgrust.memory_watchdog_test_hog
     //   -> 166) = 453.
-    assert_eq!(ConfigureNamesBool.len(), 135);
-    assert_eq!(ConfigureNamesInt.len(), 166);
+    // objkv async commit: + pgrust.objkv_async_commit (Bool 135 -> 136) = 454.
+    // objkv snapshots and collection: + pgrust.objkv_snapshot_seq,
+    //   pgrust.objkv_retain_commits (Int 166 -> 168) = 456.
+    // objkv async queue cap: + pgrust.objkv_async_queue (Int 168 -> 169) = 457.
+    assert_eq!(ConfigureNamesBool.len(), 136);
+    assert_eq!(ConfigureNamesInt.len(), 169);
     assert_eq!(ConfigureNamesReal.len(), 28);
     assert_eq!(ConfigureNamesString.len(), 77);
     assert_eq!(ConfigureNamesEnum.len(), 47);
-    assert_eq!(all_settings().count(), 453);
+    assert_eq!(all_settings().count(), 457);
     assert_eq!(GucContext_Names.len(), PGC_USERSET as usize + 1);
     assert_eq!(GucSource_Names.len(), PGC_S_SESSION as usize + 1);
     assert_eq!(config_group_names.len(), DEVELOPER_OPTIONS as usize + 1);

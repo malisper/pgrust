@@ -65,6 +65,8 @@ pub struct SnapshotData<'mcx> {
     pub active_count: Cell<u32>,
     pub regd_count: Cell<u32>,
     pub snapXactCompletionCount: u64,
+    /// Where this snapshot stands in objkv's commit clock; 0 = unstamped.
+    pub am_commit_seq: Cell<u64>,
 }
 
 impl<'mcx> SnapshotData<'mcx> {
@@ -90,6 +92,7 @@ impl<'mcx> SnapshotData<'mcx> {
             active_count: Cell::new(0),
             regd_count: Cell::new(0),
             snapXactCompletionCount: 0,
+            am_commit_seq: Cell::new(0),
         }
     }
 }

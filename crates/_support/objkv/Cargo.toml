@@ -1,0 +1,22 @@
+[package]
+name = "objkv"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "objkv"
+path = "src/lib.rs"
+
+[features]
+# Off by default: the object-store client is the only thing here with external
+# dependencies, and they are heavy (TLS, a URL parser and its ICU tables).
+# Without it the engine still builds and tests against the in-memory store.
+default = []
+s3 = ["dep:ureq", "dep:rusty-s3"]
+
+[dependencies]
+crc32c = { path = "../../port/crc32c" }
+libc = "0.2"
+ureq = { version = "2", default-features = false, features = ["tls", "native-certs"], optional = true }
+rusty-s3 = { version = "0.10.2", optional = true }

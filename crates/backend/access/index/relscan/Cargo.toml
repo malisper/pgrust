@@ -8,6 +8,7 @@ publish.workspace = true
 mock = []
 
 [dependencies]
+objkv = { path = "../../../../_support/objkv" }
 pgsync = { path = "../../../../_support/pgsync" }
 mcx = { path = "../../../../_support/mcx" }
 datum = { path = "../../../../_support/types/datum" }

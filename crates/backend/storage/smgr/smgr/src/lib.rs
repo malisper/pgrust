@@ -804,6 +804,20 @@ pub fn RelationGetSmgr(rel: &RelationData<'_>) -> PgResult<SmgrHandle> {
 #[cold]
 #[inline(never)]
 fn rel_open_smgr(rel: &RelationData<'_>) -> PgResult<SmgrHandle> {
+    // A lifted catalog is mapped, and pg_filenode.map no longer describes it.
+    let mapped = rel.rd_rel.relfilenode == types_core::primitive::InvalidRelFileNumber;
+    if mapped
+        && (tableam_vocab::is_objkv_relam(rel.rd_rel.relam)
+            || rel.rd_rel.relam == objkv_marker::NAILED_AM)
+    {
+        return Err(Box::new(PgError::error(format!(
+            "objkv relation \"{}\" (OID {}) reached the storage manager; its rows are in \
+             the bucket and it has no file. This is a bug in whatever asked, not a \
+             recoverable condition.",
+            String::from_utf8_lossy(rel.rd_rel.relname.name_str()),
+            rel.rd_id
+        ))));
+    }
     let h = smgropen_handle(rel_file_locator(rel), rel.rd_backend)?;
     smgrpin_h(h);
     rel.rd_smgr.set(Some(h));

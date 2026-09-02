@@ -12,6 +12,15 @@ path = "src/lib.rs"
 name = "postgres"
 path = "src/bin/postgres.rs"
 
+[features]
+# The object-store client, off by default: it is the only thing in the tree
+# with external dependencies, and they are heavy (TLS and a URL parser with its
+# ICU tables). A server built without it runs objkv tables against memory, so
+# any cluster that means to keep its rows is built with
+# `--features objkv-s3`.
+default = []
+objkv-s3 = ["seams_init/objkv-s3"]
+
 [dependencies]
 ipc = { path = "../../storage/ipc/ipc" }
 libc = "0.2"

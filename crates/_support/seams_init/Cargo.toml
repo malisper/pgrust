@@ -8,6 +8,10 @@ publish.workspace = true
 name = "seams_init"
 path = "src/lib.rs"
 
+[features]
+default = []
+objkv-s3 = ["objkv_lift/objkv-s3", "tableam/objkv-s3"]
+
 [dependencies]
 operatorcmds = { path = "../../backend/commands/operatorcmds" }
 foreigncmds = { path = "../../backend/commands/foreigncmds" }
@@ -77,6 +81,7 @@ executils = { path = "../../backend/executor/executils" }
 execexpr = { path = "../../backend/executor/execexpr" }
 execjunk = { path = "../../backend/executor/execjunk" }
 execmain = { path = "../../backend/executor/execmain" }
+objkv_lift = { path = "../../backend/access/objkv/objkv_lift" }
 execscan = { path = "../../backend/executor/execscan" }
 nodeseqscan = { path = "../../backend/executor/nodeseqscan" }
 nodesamplescan = { path = "../../backend/executor/nodesamplescan" }

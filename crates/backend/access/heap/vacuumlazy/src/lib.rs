@@ -2146,6 +2146,10 @@ pub fn init_seams() {
         if tableam_vocab::is_pgrcolumnar_am_oid(rel.rd_rel.relam) {
             return Ok(());
         }
+        // objkv: same reasoning -- no pages, and no xmin to freeze.
+        if tableam_vocab::is_objkv_am_oid(rel.rd_rel.relam) {
+            return Ok(());
+        }
         heap_vacuum_rel(mcx, rel, params, bstrategy)
     });
 }

@@ -362,6 +362,23 @@ pub fn systable_endscan_ordered<'mcx>(
 
 // The buffer stays pinned by the scan slot; the erased-lifetime view must not
 // outlive the open scan.
+/// The stored tuple of a scan slot, buffer-backed or not.
+///
+/// objkv rows are not in buffers: an in-place update there is a new version
+/// under the same row key, with no page to pin and no lock to take.
+fn slot_tuple<'any>(slot: &SlotData<'_>) -> HeapTupleData<'any> {
+    let src = match slot {
+        SlotData::BufferHeap(s) => s.base.tuple.as_ref(),
+        SlotData::Heap(s) => s.tuple.as_ref(),
+        _ => panic!("systable_inplace_update: unexpected slot kind from catalog scan"),
+    }
+    .expect("stored scan tuple");
+    // SAFETY: aliases the tuple held by the slot, which outlives this view.
+    unsafe {
+        HeapTupleData::from_raw_parts(src.header_ptr(), src.t_len, src.t_self, src.t_tableOid)
+    }
+}
+
 fn slot_buffer_tuple<'any>(slot: &SlotData<'_>) -> (HeapTupleData<'any>, types_core::Buffer) {
     let SlotData::BufferHeap(s) = slot else {
         panic!("systable_inplace_update: non-buffer slot from catalog scan");
@@ -401,6 +418,14 @@ pub fn systable_inplace_update_begin<'mcx>(
             return Ok(None);
         }
 
+        // objkv has no buffer to lock and no page to hold still. The row is
+        // read, and the write lands under the same key at finish.
+        if tableam_vocab::is_objkv_relam(relation.rd_rel.relam) {
+            let oldtup = slot_tuple(&scan.slot);
+            let copy = heaptuple::heap_copytuple(mcx, &oldtup)?;
+            return Ok(Some((copy, scan)));
+        }
+
         let (oldtup, buffer) = slot_buffer_tuple(&scan.slot);
         let mut scan_opt = Some(scan);
         let locked = heapam::heap_inplace_lock(relation, &oldtup, buffer, &mut || {
@@ -418,6 +443,26 @@ pub fn systable_inplace_update_finish(
     state: SysScanDescData<'_>,
     tuple: &HeapTupleData<'_>,
 ) -> PgResult<()> {
+    if tableam_vocab::is_objkv_relam(state.heap_rel.rd_rel.relam) {
+        // SAFETY: a formed catalog tuple, live for t_len bytes.
+        let image =
+            unsafe { core::slice::from_raw_parts(tuple.header_ptr(), tuple.t_len as usize) }
+                .to_vec();
+        let rel = &state.heap_rel;
+        tableam::objkv_am::update_row_in_place(
+            tableam::objkv_am::scope(rel),
+            tableam::objkv_am::relid(rel),
+            tableam::objkv_am::rowid_of(&tuple.t_self),
+            image,
+        )?;
+        // The ordinary message, not the in-place one: an objkv row updated
+        // this way is a new version under the same key, which is exactly what
+        // an update is. The in-place variant belongs to heap's two-step
+        // protocol and asserts on state this path never sets up.
+        let old = slot_tuple(&state.slot);
+        inval::invalidate::CacheInvalidateHeapTuple(&state.heap_rel, &old, Some(tuple))?;
+        return systable_endscan(mcx, state);
+    }
     let (oldtup, buffer) = slot_buffer_tuple(&state.slot);
     heapam::heap_inplace_update_and_unlock(mcx, &state.heap_rel, &oldtup, tuple, buffer)?;
     systable_endscan(mcx, state)
@@ -427,6 +472,10 @@ pub fn systable_inplace_update_cancel(
     mcx: Mcx<'_>,
     state: SysScanDescData<'_>,
 ) -> PgResult<()> {
+    // Nothing was locked for objkv, so there is nothing to unlock.
+    if tableam_vocab::is_objkv_relam(state.heap_rel.rd_rel.relam) {
+        return systable_endscan(mcx, state);
+    }
     let (oldtup, buffer) = slot_buffer_tuple(&state.slot);
     heapam::heap_inplace_unlock(&state.heap_rel, &oldtup, buffer)?;
     systable_endscan(mcx, state)

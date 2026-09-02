@@ -485,6 +485,25 @@ fn copy_table_data<'mcx>(
         .errmsg(what)
         .finish(types_error::ErrorLocation::new(file!(), line!() as i32, "copy_table_data"))?;
 
+    // objkv rows are not in pages, so the rewrite below has nothing to read.
+    // Refused here rather than three frames deeper, where the message is
+    // about buffer slots and says nothing about what the user asked for.
+    if tableam_vocab::is_objkv_am_oid(old_heap.rd_rel.relam) {
+        return Err(Box::new(
+            types_error::PgError::new(
+                types_error::ERROR,
+                format!(
+                    "objkv does not support rewriting \"{}\" (CLUSTER, VACUUM FULL)",
+                    old_heap.name()
+                ),
+            )
+            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .with_detail(
+                "Its rows are in an object store, and a rewrite copies pages.".to_string(),
+            ),
+        ));
+    }
+
     let (num_tuples, tups_vacuumed, tups_recently_dead) = crate::copy::copy_for_cluster(
         mcx,
         old_heap,

@@ -26,6 +26,25 @@ use ::types_tuple::itemptr::ItemPointerGetBlockNumber;
 use ::types_tuple::TupleDescData;
 use ::visibilitymap::VmBuffer;
 
+/// Whether the row behind this entry can be trusted without reading it.
+///
+/// A heap has to ask a separate map whether every row on the page is visible
+/// to everyone, because an index entry there outlives the row version it
+/// describes. objkv entries are versioned and withdrawn with the row change
+/// that invalidates them, so the snapshot read that produced this one has
+/// already answered the question -- and asking the map would answer "no" for a
+/// relation that has no map, undoing the whole point by fetching every row.
+fn visible_without_the_row(
+    rel: &::types_rel::RelationData<'_>,
+    tid: &::types_tuple::ItemPointerData,
+    vmbuf: &mut VmBuffer,
+) -> PgResult<bool> {
+    if ::tableam::table_is_objkv_data(rel) {
+        return Ok(true);
+    }
+    ::visibilitymap::vm_all_visible(rel, ItemPointerGetBlockNumber(tid), vmbuf)
+}
+
 pub fn init_seams() {}
 
 #[cfg(test)]
@@ -130,9 +149,9 @@ impl<'mcx> ScanNode<'mcx> for IndexOnlyScanState<'mcx> {
 
             // Skip the heap fetch when the VM says the TID's page is
             // all-visible; caller-recheck caveats are C's (visibilitymap.c).
-            if !::visibilitymap::vm_all_visible(
+            if !visible_without_the_row(
                 ss.ss_currentRelation.as_ref().expect("IOS has a relation"),
-                ItemPointerGetBlockNumber(&tid),
+                &tid,
                 ioss_VMBuffer,
             )? {
                 // InstrCountTuples2: EXPLAIN's Heap Fetches.
@@ -269,9 +288,9 @@ pub fn index_only_scan_batch_next<'mcx>(
         let Some(tid) = index_getnext_tid(scandesc, direction)? else {
             return Ok(0);
         };
-        if !::visibilitymap::vm_all_visible(
+        if !visible_without_the_row(
             ss.ss_currentRelation.as_ref().expect("IOS has a relation"),
-            ItemPointerGetBlockNumber(&tid),
+            &tid,
             ioss_VMBuffer,
         )? {
             if !index_fetch_heap(mcx, scandesc, estate.slot_mut(table_slot_id))? {

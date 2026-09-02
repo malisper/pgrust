@@ -830,7 +830,7 @@ std::thread_local! {
         core::cell::RefCell::new(::mcx::MemoryContext::new_bump("heap key test scratch"));
 }
 
-fn heap_key_test(
+pub fn heap_key_test(
     tuple: &HeapTupleData<'_>,
     tupdesc: &::types_tuple::TupleDescData<'_>,
     keys: &mut [ScanKeyData],

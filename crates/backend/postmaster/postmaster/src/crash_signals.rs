@@ -67,15 +67,41 @@ extern "C" fn crash_handler(sig: i32, info: *mut libc::siginfo_t, _uctx: *mut li
     unsafe {
         libc::write(2, w.buf.as_ptr() as *const libc::c_void, w.at);
     }
-    // Best-effort frame dump (glibc backtrace is not async-signal-safe; the
-    // disposition is already restored, so a fault here dies under SIG_DFL).
-    #[cfg(target_os = "linux")]
-    // SAFETY: see above; addresses are written raw to fd 2.
+    // Frame addresses, not symbol names.
+    //
+    // backtrace_symbols_fd() allocates -- on macOS and on glibc both -- and a
+    // handler that allocates can deadlock when the fault it is reporting
+    // interrupted the allocator. Hanging is a worse outcome than crashing:
+    // the process stops without a core file and without ever reaching the
+    // raise() below. backtrace() itself only walks frames, so the addresses
+    // are written with the same write(2) as the line above and symbolized
+    // afterwards, by whoever reads the log:
+    //
+    //     atos -o <binary> <addr>...        (macOS)
+    //     addr2line -fpe <binary> <addr>... (Linux)
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    // SAFETY: backtrace() walks the stack without allocating, and write(2) is
+    // async-signal-safe. The disposition is already restored, so a fault here
+    // dies under SIG_DFL rather than recursing.
     unsafe {
         let mut frames = [core::ptr::null_mut::<libc::c_void>(); 64];
         let n = libc::backtrace(frames.as_mut_ptr(), frames.len() as i32);
         if n > 0 {
-            libc::backtrace_symbols_fd(frames.as_ptr(), n, 2);
+            let mut fbuf = [0u8; 160];
+            let mut fw = Writer { buf: &mut fbuf, at: 0 };
+            fw.put(b"pgrust: backtrace:");
+            for f in frames.iter().take(n as usize) {
+                // Flush before a frame that might not fit, so a long trace
+                // spans several writes rather than being silently cut.
+                if fw.at + 20 > fw.buf.len() {
+                    libc::write(2, fw.buf.as_ptr() as *const libc::c_void, fw.at);
+                    fw.at = 0;
+                }
+                fw.put(b" 0x");
+                fw.hex(*f as usize as u64);
+            }
+            fw.put(b"\n");
+            libc::write(2, fw.buf.as_ptr() as *const libc::c_void, fw.at);
         }
     }
     // SAFETY: raise(2) is async-signal-safe.

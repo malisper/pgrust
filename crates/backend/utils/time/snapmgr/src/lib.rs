@@ -210,6 +210,9 @@ pub fn FirstSnapshotSet() -> bool {
     with_state(|s| s.first_snapshot_set)
 }
 
+// The only moment a snapshot's place in another AM's clock is unambiguous.
+seam_core::tap!(pub fn tap_snapshot_taken<'a>(snapshot: &'a SnapshotData<'static>));
+
 // Always refills the SAME persistent struct so snapXactCompletionCount and
 // the once-sized xip arrays survive — the reuse fastpath depends on it.
 // Seams reached under the borrow never re-enter snapmgr.
@@ -236,6 +239,7 @@ fn refill_static_locked(
         }
     };
     fill(target, mcx)?;
+    tap_snapshot_taken::call_if(|f| f(target));
     let snap = slot.clone();
     match which {
         Which::Current => s.current = Some(SnapRef::Static(Which::Current)),
@@ -419,6 +423,7 @@ fn copy_snapshot_locked(s: &mut SnapMgrState, src: &SnapshotData<'static>) -> Sn
     }
     snap.suboverflowed = src.suboverflowed;
     snap.takenDuringRecovery = src.takenDuringRecovery;
+    snap.am_commit_seq.set(src.am_commit_seq.get());
     snap.copied = true;
     snap.curcid.set(src.curcid.get());
     snap.speculativeToken = src.speculativeToken;
@@ -502,6 +507,7 @@ pub fn RestoreSnapshot(serialized: &SerializedSnapshot) -> Snapshot {
         snap.active_count.set(0);
         snap.regd_count.set(0);
         snap.snapXactCompletionCount = 0;
+        snap.am_commit_seq.set(0); // parallel objkv scan is refused
         rc
     })
 }

@@ -1114,6 +1114,10 @@ pub fn index_build<'mcx>(
             let r = ginbuild::ginbuild(mcx, heapRelation, indexRelation, indexInfo)?;
             (r.heap_tuples, r.index_tuples)
         }
+        types_relscan::IndexAmKind::Objkv => {
+            let r = objkv_build::objkvbuild(mcx, heapRelation, indexRelation, indexInfo)?;
+            (r.heap_tuples, r.index_tuples)
+        }
         types_relscan::IndexAmKind::Hnsw => {
             let r = pgvector_hnsw_build::hnswbuild(mcx, heapRelation, indexRelation, indexInfo)?;
             (r.heap_tuples, r.index_tuples)
@@ -1389,6 +1393,7 @@ pub fn init_seams() {
     indexam_seams::relation_get_index_att_options::set(relation_get_index_att_options);
     indexam_seams::index_expression_input_type::set(index_expression_input_type);
     indexam_seams::get_func_rettype::set(lsyscache::get_func_rettype);
+    tableam_seams::objkv_index_row_datum::set(objkv_build::index_row_datum);
 }
 
 // GetIndexInputType's expression-column arm (spgutils.c):

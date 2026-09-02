@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+objkv = { path = "../../../../_support/objkv" }
 bloom = { path = "../../../../contrib/bloom" }
 bufmgr = { path = "../../../storage/buffer/bufmgr" }
 snapmgr = { path = "../../../utils/time/snapmgr" }

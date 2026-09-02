@@ -9,7 +9,7 @@ use types_core::catalog::{FirstNormalObjectId, DATABASE_RELATION_ID};
 use types_core::{InvalidOid, Oid};
 use types_error::{
     PgResult, ERRCODE_DUPLICATE_DATABASE, ERRCODE_INSUFFICIENT_PRIVILEGE,
-    ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_OBJECT_IN_USE,
+    ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_OBJECT_IN_USE,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_DATABASE,
     ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR, WARNING,
 };
@@ -420,6 +420,25 @@ pub fn createdb<'mcx>(mcx: Mcx<'mcx>, stmt: &CreatedbStmt<'mcx>) -> PgResult<Oid
             .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
             .errmsg(format!("cannot use invalid database \"{dbtemplate}\" as template"))
             .errhint("Use DROP DATABASE to drop invalid databases.".to_string())
+            .into_error()
+            .into());
+    }
+
+    // Copying files misses the bucket: the clone reads empty.
+    if tableam::objkv_am::database_has_rows(src_dboid)? {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(format!(
+                "cannot copy database \"{dbtemplate}\": it has tables stored in objkv"
+            ))
+            .errdetail(
+                "objkv rows live in an object store, and CREATE DATABASE copies only local files."
+                    .to_string(),
+            )
+            .errhint(
+                "Create the database from template0 and load the objkv tables into it."
+                    .to_string(),
+            )
             .into_error()
             .into());
     }

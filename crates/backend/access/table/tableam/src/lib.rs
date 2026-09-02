@@ -58,7 +58,54 @@ pub fn init_seams() {
     guc_tables::hooks::check_default_table_access_method
         .install(check_default_table_access_method);
     tableam_seams::table_tid_get_latest::set(table_tid_get_latest);
+    tableam_seams::objkv_catalog_tuple_insert::set(|rel, tup| {
+        objkv_am::insert_tuple_image(&rel, tup)
+    });
+    tableam_seams::objkv_claim_oid_block::set(objkv_am::claim_oid_block);
+    tableam_seams::objkv_catalog_tuple_update::set(|rel, otid, tup| {
+        objkv_am::update_tuple_image(&rel, &otid, tup)
+    });
+    tableam_seams::objkv_catalog_tuple_delete::set(|rel, tid| {
+        objkv_am::tuple_delete(&rel, &tid)
+    });
+    tableam_seams::objkv_catalog_fetch_tuple::set(|rel, tid| {
+        objkv_am::fetch_row_any(
+            objkv_am::scope(&rel),
+            objkv_am::relid(&rel),
+            objkv_am::rowid_of(&tid),
+        )
+    });
+    objkv_am::init_seams();
 }
+
+/// The objkv table AM is wired for dispatch but its scan and DML paths are not
+/// implemented yet. Every operation that would otherwise fall through to
+/// another AM's engine raises this instead, so a mis-routed relation fails
+/// loudly rather than quietly executing as columnar.
+pub fn objkv_unsupported(what: &str) -> Box<::types_error::PgError> {
+    Box::new(
+        ::types_error::PgError::error(format!("objkv does not support {what} yet"))
+            .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+    )
+}
+
+fn objkv_concurrent_update() -> Box<::types_error::PgError> {
+    Box::new(
+        ::types_error::PgError::error(
+            "could not serialize access due to concurrent update".to_string(),
+        )
+        .with_detail(
+            "The row was changed by another transaction. objkv has no row locking, \
+             so it cannot wait for that transaction and re-evaluate the way heap does."
+                .to_string(),
+        )
+        .with_hint("Retry the transaction.".to_string())
+        .with_sqlstate(::types_error::ERRCODE_T_R_SERIALIZATION_FAILURE),
+    )
+}
+
+pub mod objkv_am;
+pub mod objkv_index;
 
 // --- The dispatch-facing scan values (closed per-AM extensions, rule 4) ---
 
@@ -69,6 +116,7 @@ pub enum TableScanDesc<'mcx> {
     Heap(HeapScanDescData<'mcx>),
     // Boxed: cold at scan-begin, keeps the enum heap-sized for the hot arm.
     Pgrcolumnar(std::boxed::Box<::pgrcolumnar::CbScanDescData<'mcx>>),
+    Objkv(std::boxed::Box<objkv_am::ObjkvScanDescData<'mcx>>),
 }
 
 impl<'mcx> TableScanDesc<'mcx> {
@@ -76,6 +124,7 @@ impl<'mcx> TableScanDesc<'mcx> {
     pub fn base(&self) -> &TableScanDescData<'mcx> {
         match self {
             TableScanDesc::Heap(h) => &h.rs_base,
+            TableScanDesc::Objkv(s) => &s.rs_base,
             TableScanDesc::Pgrcolumnar(c) => &c.rs_base,
         }
     }
@@ -84,6 +133,7 @@ impl<'mcx> TableScanDesc<'mcx> {
     pub fn base_mut(&mut self) -> &mut TableScanDescData<'mcx> {
         match self {
             TableScanDesc::Heap(h) => &mut h.rs_base,
+            TableScanDesc::Objkv(s) => &mut s.rs_base,
             TableScanDesc::Pgrcolumnar(c) => &mut c.rs_base,
         }
     }
@@ -92,6 +142,9 @@ impl<'mcx> TableScanDesc<'mcx> {
 // C's IndexFetchTableData base embedded in IndexFetchHeapData, same treatment.
 pub enum IndexFetchTableData<'mcx> {
     Heap(IndexFetchHeapData<'mcx>),
+    /// objkv keeps no per-scan fetch state: a rowid is a direct seek, and
+    /// there are no buffer pins to hold between fetches.
+    Objkv(Relation<'mcx>),
 }
 
 impl<'mcx> IndexFetchTableData<'mcx> {
@@ -99,6 +152,7 @@ impl<'mcx> IndexFetchTableData<'mcx> {
     pub fn rel(&self) -> &Relation<'mcx> {
         match self {
             IndexFetchTableData::Heap(h) => &h.xs_rel,
+            IndexFetchTableData::Objkv(rel) => rel,
         }
     }
 }
@@ -179,6 +233,12 @@ mod cb {
 #[inline(never)]
 fn cb_refused(what: &'static str) -> ! {
     panic!("cbstore does not support {what} (unreachable without indexes/DML)")
+}
+
+/// Diverging refusal for the handful of objkv dispatch points whose return type
+/// leaves no room for an error value.
+fn objkv_refused(what: &'static str) -> ! {
+    panic!("objkv does not support {what}")
 }
 
 // heapam_handler.c's heapam_methods: read lane bound directly onto heapam /
@@ -848,6 +908,10 @@ pub fn table_slot_callbacks(relation: &Relation<'_>) -> TupleSlotKind {
         match am {
             TableAm::Heap => heap::slot_callbacks(relation),
             TableAm::Pgrcolumnar => TupleSlotKind::Virtual,
+            // objkv stores whole heap-tuple images, so its slots are
+            // heap-shaped: that is what makes every column type work,
+            // varlena included, rather than only by-value ones.
+            TableAm::Objkv => TupleSlotKind::HeapTuple,
         }
     } else if relation.rd_rel.relkind == RELKIND_FOREIGN_TABLE {
         // FDWs historically expect heap tuples in their slots.
@@ -886,6 +950,7 @@ pub fn table_beginscan<'mcx>(
     let flags = SO_TYPE_SEQSCAN | SO_ALLOW_STRAT | SO_ALLOW_SYNC | SO_ALLOW_PAGEMODE;
     match am(relation) {
         TableAm::Heap => heap::scan_begin(mcx, relation, snapshot, nkeys, key, None, flags),
+        TableAm::Objkv => objkv_am::begin_scan(relation, snapshot, nkeys, key, flags),
         TableAm::Pgrcolumnar => {
             let _ = (nkeys, &key);
             cb::scan_begin(mcx, relation, snapshot, flags, None)
@@ -911,6 +976,7 @@ pub fn table_beginscan_strat<'mcx>(
     }
     match am(relation) {
         TableAm::Heap => heap::scan_begin(mcx, relation, snapshot, nkeys, key, None, flags),
+        TableAm::Objkv => objkv_am::begin_scan(relation, snapshot, nkeys, key, flags),
         TableAm::Pgrcolumnar => {
             let _ = (nkeys, &key);
             cb::scan_begin(mcx, relation, snapshot, flags, None)
@@ -936,6 +1002,7 @@ pub fn table_beginscan_bm<'mcx>(
     let flags = SO_TYPE_BITMAPSCAN | SO_ALLOW_PAGEMODE;
     match am(rel) {
         TableAm::Heap => heap::scan_begin(mcx, rel, snapshot, 0, PgVec::new_in(mcx), None, flags),
+        TableAm::Objkv => objkv_am::begin_scan_bitmap(mcx, rel, snapshot, flags),
         TableAm::Pgrcolumnar => Err(::pgrcolumnar::unsupported("bitmap scans")),
     }
 }
@@ -963,6 +1030,7 @@ pub fn table_beginscan_sampling<'mcx>(
     }
     match am(relation) {
         TableAm::Heap => heap::scan_begin(mcx, relation, snapshot, nkeys, key, None, flags),
+        TableAm::Objkv => Err(objkv_unsupported("TABLESAMPLE")),
         TableAm::Pgrcolumnar => Err(::pgrcolumnar::unsupported("TABLESAMPLE")),
     }
 }
@@ -975,6 +1043,7 @@ pub fn table_beginscan_tid<'mcx>(
     let flags = SO_TYPE_TIDSCAN;
     match am(rel) {
         TableAm::Heap => heap::scan_begin(mcx, rel, snapshot, 0, PgVec::new_in(mcx), None, flags),
+        TableAm::Objkv => Err(objkv_unsupported("TID scans")),
         TableAm::Pgrcolumnar => Err(::pgrcolumnar::unsupported("TID scans")),
     }
 }
@@ -986,6 +1055,9 @@ pub fn table_beginscan_analyze<'mcx>(
     let flags = SO_TYPE_ANALYZE;
     match am(relation) {
         TableAm::Heap => heap::scan_begin(mcx, relation, None, 0, PgVec::new_in(mcx), None, flags),
+        // Every row, newest state; the sampler in commands/analyze walks
+        // this scan with getnextslot rather than by block.
+        TableAm::Objkv => objkv_am::begin_scan(relation, None, 0, PgVec::new_in(mcx), flags),
         TableAm::Pgrcolumnar => cb::scan_begin(mcx, relation, None, flags, None),
     }
 }
@@ -1040,6 +1112,7 @@ pub fn pgrcolumnar_footer_stitch_gndv(rel: &Relation<'_>) -> PgResult<Option<Vec
 // AM supply the whole acquirefunc): row-group enumeration + random row fetch.
 pub fn pgrcolumnar_analyze_visible_rgs(scan: &TableScanDesc<'_>) -> PgResult<Vec<(u32, u32)>> {
     match scan {
+        TableScanDesc::Objkv(_) => panic!("objkv: columnar-only scan path"),
         TableScanDesc::Pgrcolumnar(c) => c.analyze_visible_rgs(),
         TableScanDesc::Heap(_) => panic!("cbstore_analyze_visible_rgs: heap scan"),
     }
@@ -1052,6 +1125,7 @@ pub fn pgrcolumnar_analyze_fetch_row(
     slot: &mut SlotData<'_>,
 ) -> bool {
     match scan {
+        TableScanDesc::Objkv(_) => panic!("objkv: columnar-only scan path"),
         TableScanDesc::Pgrcolumnar(c) => c.gather_row(rg, row, slot),
         TableScanDesc::Heap(_) => panic!("cbstore_analyze_fetch_row: heap scan"),
     }
@@ -1070,6 +1144,7 @@ pub fn pgrcolumnar_analyze_gather_rows(
     per_row: &mut dyn FnMut(&mut SlotData<'_>) -> PgResult<()>,
 ) -> PgResult<u64> {
     match scan {
+        TableScanDesc::Objkv(_) => panic!("objkv: columnar-only scan path"),
         TableScanDesc::Pgrcolumnar(c) => c.analyze_gather_rows(refs, pool, slot, per_row),
         TableScanDesc::Heap(_) => panic!("cbstore_analyze_gather_rows: heap scan"),
     }
@@ -1078,6 +1153,7 @@ pub fn pgrcolumnar_analyze_gather_rows(
 pub fn table_endscan(scan: TableScanDesc<'_>) -> PgResult<()> {
     match scan {
         TableScanDesc::Heap(h) => heap::scan_end(h),
+        TableScanDesc::Objkv(_) => Ok(()),
         TableScanDesc::Pgrcolumnar(mut c) => {
             if std::env::var_os("PGRUST_AGG_BATCH_DEBUG").is_some() {
                 let (dfb, dft, dfe, dfa) = ::pgrcolumnar::dict_frame_stats();
@@ -1127,6 +1203,13 @@ pub fn table_rescan<'mcx>(
 ) -> PgResult<()> {
     match scan {
         TableScanDesc::Heap(h) => heap::scan_rescan(h, key, false, false, false, false),
+        TableScanDesc::Objkv(s) => {
+            if let Some(k) = key {
+                s.set_keys(k);
+            }
+            s.rewind();
+            Ok(())
+        }
         TableScanDesc::Pgrcolumnar(c) => {
             let _ = key;
             c.reset_position();
@@ -1147,6 +1230,13 @@ pub fn table_rescan_set_params<'mcx>(
         TableScanDesc::Heap(h) => {
             heap::scan_rescan(h, key, true, allow_strat, allow_sync, allow_pagemode)
         }
+        TableScanDesc::Objkv(s) => {
+            if let Some(k) = key {
+                s.set_keys(k);
+            }
+            s.rewind();
+            Ok(())
+        }
         TableScanDesc::Pgrcolumnar(c) => {
             let _ = key;
             c.reset_position();
@@ -1166,6 +1256,21 @@ pub fn table_scan_getnextslot<'mcx>(
 ) -> PgResult<bool> {
     match scan {
         TableScanDesc::Heap(h) => heap::scan_getnextslot(mcx, h, direction, slot),
+        TableScanDesc::Objkv(s) => {
+            // The scan only walks forward, and nothing may ask it not to:
+            // `ExecutorRun` refuses backward entry at the run seam (0A000)
+            // before any node runs, and backward cursor reads are served by
+            // the portal tuplestore. Asserted rather than checked, because
+            // this is per-tuple and the guarantee is upstream -- if that ever
+            // changes, this says so in an assertion build instead of handing
+            // FETCH BACKWARD the next rows forward.
+            debug_assert!(
+                direction != ScanDirection::BackwardScanDirection,
+                "objkv scans only go forward; the run seam is meant to refuse this"
+            );
+            let _ = direction;
+            objkv_am::next_slot(mcx, s, slot)
+        }
         TableScanDesc::Pgrcolumnar(c) => {
             if direction == ScanDirection::BackwardScanDirection {
                 return Err(::pgrcolumnar::unsupported("backward scans"));
@@ -1187,6 +1292,7 @@ pub fn table_scan_supports_pagebatch(scan: &TableScanDesc<'_>) -> bool {
         // variant below instead; keeping the incumbents off pgrcolumnar keeps
         // lane-OFF the pure per-row Volcano drive (`getnextslot`) — the
         // byte-parity oracle for every pgrcolumnar lane path (phase4 design §6).
+        TableScanDesc::Objkv(_) => false,
         TableScanDesc::Pgrcolumnar(_) => false,
     }
 }
@@ -1208,6 +1314,7 @@ pub fn table_scan_supports_pagebatch_parallel(scan: &TableScanDesc<'_>) -> bool 
         // claims row groups through the shared `phs_nallocated` cursor
         // exactly as the per-tuple drive does, partitioning RGs across
         // workers without gaps or overlaps.
+        TableScanDesc::Objkv(_) => false,
         TableScanDesc::Pgrcolumnar(_) => true,
     }
 }
@@ -1217,6 +1324,7 @@ pub fn table_scan_supports_pagebatch_parallel(scan: &TableScanDesc<'_>) -> bool 
 pub fn table_scan_cb_total_rows(scan: &TableScanDesc<'_>) -> Option<u64> {
     match scan {
         TableScanDesc::Heap(_) => None,
+        TableScanDesc::Objkv(_) => None,
         TableScanDesc::Pgrcolumnar(c) => Some(c.total_rows()),
     }
 }
@@ -1227,6 +1335,7 @@ pub fn table_scan_cb_total_rows(scan: &TableScanDesc<'_>) -> Option<u64> {
 pub fn table_scan_cb_granule_geometry(scan: &TableScanDesc<'_>) -> Option<(u64, Vec<u64>)> {
     match scan {
         TableScanDesc::Heap(_) => None,
+        TableScanDesc::Objkv(_) => None,
         TableScanDesc::Pgrcolumnar(c) => c.granule_geometry(),
     }
 }
@@ -1238,6 +1347,7 @@ pub fn table_scan_cb_granule_geometry(scan: &TableScanDesc<'_>) -> Option<(u64, 
 pub fn table_scan_heap_block_geometry(scan: &TableScanDesc<'_>) -> Option<u64> {
     match scan {
         TableScanDesc::Heap(h) => Some(h.rs_nblocks as u64),
+        TableScanDesc::Objkv(_) => None,
         TableScanDesc::Pgrcolumnar(_) => None,
     }
 }
@@ -1254,6 +1364,7 @@ pub fn table_scan_cb_set_granule_range(
 ) -> PgResult<bool> {
     match scan {
         TableScanDesc::Heap(_) => Ok(false),
+        TableScanDesc::Objkv(_) => Ok(false),
         TableScanDesc::Pgrcolumnar(c) => {
             c.set_granule_range(g0, g1)?;
             Ok(true)
@@ -1273,6 +1384,7 @@ pub fn table_scan_set_morsel_range(
 ) -> PgResult<()> {
     match scan {
         TableScanDesc::Heap(h) => ::heapam::heap_set_block_range(h, g0, g1),
+        TableScanDesc::Objkv(_) => Ok(()),
         TableScanDesc::Pgrcolumnar(c) => c.set_granule_range(g0, g1),
     }
 }
@@ -1284,6 +1396,7 @@ pub fn table_scan_set_morsel_range(
 pub fn table_scan_end_claim_release(scan: &mut TableScanDesc<'_>) {
     match scan {
         TableScanDesc::Heap(h) => ::heapam::heap_end_claim_release(h),
+        TableScanDesc::Objkv(_) => {}
         TableScanDesc::Pgrcolumnar(_) => {}
     }
 }
@@ -1299,6 +1412,7 @@ pub fn table_scan_end_claim_release(scan: &mut TableScanDesc<'_>) {
 pub fn table_scan_cursor_park_point(scan: &TableScanDesc<'_>) -> Option<(u64, u64)> {
     match scan {
         TableScanDesc::Heap(h) => ::heapam::heap_cursor_park_point(h),
+        TableScanDesc::Objkv(_) => None,
         TableScanDesc::Pgrcolumnar(_) => None,
     }
 }
@@ -1313,6 +1427,7 @@ pub fn table_scan_cursor_park_point(scan: &TableScanDesc<'_>) -> Option<(u64, u6
 pub fn table_scan_adopt_midpage_batch(scan: &mut TableScanDesc<'_>) -> Option<(u32, u32)> {
     match scan {
         TableScanDesc::Heap(h) => ::heapam::heap_adopt_midpage_batch(h),
+        TableScanDesc::Objkv(_) => None,
         TableScanDesc::Pgrcolumnar(_) => None,
     }
 }
@@ -1323,6 +1438,7 @@ pub fn table_scan_adopt_midpage_batch(scan: &mut TableScanDesc<'_>) -> Option<(u
 pub fn table_scan_holds_claim_pin(scan: &TableScanDesc<'_>) -> bool {
     match scan {
         TableScanDesc::Heap(h) => h.rs_cbuf.is_some(),
+        TableScanDesc::Objkv(_) => false,
         TableScanDesc::Pgrcolumnar(_) => false,
     }
 }
@@ -1339,6 +1455,7 @@ pub fn table_scan_cb_zone_topk_words(
 ) -> PgResult<Option<(Vec<u64>, Option<u64>)>> {
     match scan {
         TableScanDesc::Heap(_) => Ok(None),
+        TableScanDesc::Objkv(_) => Ok(None),
         TableScanDesc::Pgrcolumnar(c) => c.zone_topk_words(col, desc, bound),
     }
 }
@@ -1355,6 +1472,7 @@ pub fn table_scan_topn_direct_next_granule(
         TableScanDesc::Heap(_) => Err(elog_error(
             "direct top-N granule drive on a non-columnar scan",
         )),
+        TableScanDesc::Objkv(_) => panic!("objkv: columnar-only scan path"),
         TableScanDesc::Pgrcolumnar(c) => c.topn_direct_next_granule(),
     }
 }
@@ -1368,6 +1486,7 @@ pub fn table_scan_topn_direct_lane<'a>(
 ) -> Option<&'a [::datum::Datum]> {
     match scan {
         TableScanDesc::Heap(_) => None,
+        TableScanDesc::Objkv(_) => None,
         TableScanDesc::Pgrcolumnar(c) => c.topn_direct_lane(col),
     }
 }
@@ -1378,6 +1497,7 @@ pub fn table_scan_topn_direct_lane<'a>(
 pub fn table_scan_cb_drive_counters(scan: &TableScanDesc<'_>) -> Option<(u64, u64, u64, u64)> {
     match scan {
         TableScanDesc::Heap(_) => None,
+        TableScanDesc::Objkv(_) => None,
         TableScanDesc::Pgrcolumnar(c) => Some(c.drive_counters()),
     }
 }
@@ -1391,6 +1511,7 @@ pub fn table_scan_cb_drive_counters(scan: &TableScanDesc<'_>) -> Option<(u64, u6
 pub fn table_scan_cb_ea_counters(scan: &TableScanDesc<'_>) -> Option<[u64; 7]> {
     match scan {
         TableScanDesc::Heap(_) => None,
+        TableScanDesc::Objkv(_) => None,
         TableScanDesc::Pgrcolumnar(c) => Some([
             c.granules_scanned,
             c.granules_pruned,
@@ -1408,6 +1529,7 @@ pub fn table_scan_cb_ea_counters(scan: &TableScanDesc<'_>) -> Option<[u64; 7]> {
 pub fn table_scan_nblocks(scan: &TableScanDesc<'_>) -> u32 {
     match scan {
         TableScanDesc::Heap(h) => h.rs_nblocks,
+        TableScanDesc::Objkv(_) => 0,
         TableScanDesc::Pgrcolumnar(c) => c.nblocks(),
     }
 }
@@ -1417,6 +1539,7 @@ pub fn table_scan_nblocks(scan: &TableScanDesc<'_>) -> u32 {
 pub fn table_scan_set_needed_attrs(scan: &mut TableScanDesc<'_>, needed: &[bool]) {
     match scan {
         TableScanDesc::Heap(_) => {}
+        TableScanDesc::Objkv(_) => {}
         TableScanDesc::Pgrcolumnar(c) => c.set_needed_attrs(needed),
     }
 }
@@ -1427,6 +1550,7 @@ pub fn table_scan_set_needed_attrs(scan: &mut TableScanDesc<'_>, needed: &[bool]
 pub fn table_scan_set_lazy_decode(scan: &mut TableScanDesc<'_>, on: bool) {
     match scan {
         TableScanDesc::Heap(_) => {}
+        TableScanDesc::Objkv(_) => {}
         TableScanDesc::Pgrcolumnar(c) => c.set_lazy_decode(on),
     }
 }
@@ -1442,6 +1566,7 @@ pub fn table_scan_cb_zone_meta_census(
 ) -> PgResult<Option<(u64, u64)>> {
     match scan {
         TableScanDesc::Heap(_) => Ok(None),
+        TableScanDesc::Objkv(_) => Ok(None),
         TableScanDesc::Pgrcolumnar(c) => c.zone_meta_rg_census(need_sums),
     }
 }
@@ -1449,6 +1574,7 @@ pub fn table_scan_cb_zone_meta_census(
 pub fn table_scan_push_zone_quals(scan: &mut TableScanDesc<'_>, quals: &[ZoneQual]) {
     match scan {
         TableScanDesc::Heap(_) => {}
+        TableScanDesc::Objkv(_) => {}
         TableScanDesc::Pgrcolumnar(c) => c.push_zone_quals(quals),
     }
 }
@@ -1464,6 +1590,7 @@ pub fn table_scan_arm_adaptive_order(
 ) -> PgResult<bool> {
     match scan {
         TableScanDesc::Heap(_) => Ok(false),
+        TableScanDesc::Objkv(_) => Ok(false),
         TableScanDesc::Pgrcolumnar(c) => c.arm_adaptive_order(col, desc, strict),
     }
 }
@@ -1474,6 +1601,7 @@ pub fn table_scan_arm_adaptive_order(
 pub fn table_scan_disarm_adaptive_order(scan: &mut TableScanDesc<'_>) {
     match scan {
         TableScanDesc::Heap(_) => {}
+        TableScanDesc::Objkv(_) => {}
         TableScanDesc::Pgrcolumnar(c) => c.disarm_adaptive_order(),
     }
 }
@@ -1483,6 +1611,7 @@ pub fn table_scan_disarm_adaptive_order(scan: &mut TableScanDesc<'_>) {
 pub fn table_scan_update_scan_bound(scan: &mut TableScanDesc<'_>, key: ::datum::Datum) {
     match scan {
         TableScanDesc::Heap(_) => {}
+        TableScanDesc::Objkv(_) => {}
         TableScanDesc::Pgrcolumnar(c) => c.set_adaptive_bound(key),
     }
 }
@@ -1495,6 +1624,7 @@ pub fn table_scan_window_value_minmax(
 ) -> Option<(i64, i64)> {
     match scan {
         TableScanDesc::Heap(_) => None,
+        TableScanDesc::Objkv(_) => None,
         TableScanDesc::Pgrcolumnar(c) => c.staged_window_value_minmax(col),
     }
 }
@@ -1512,6 +1642,7 @@ pub fn table_scan_granule_meta_peek(
 ) -> PgResult<CbGranuleMetaStep> {
     match scan {
         TableScanDesc::Heap(_) => Ok(CbGranuleMetaStep::NotMeta),
+        TableScanDesc::Objkv(_) => Ok(CbGranuleMetaStep::NotMeta),
         TableScanDesc::Pgrcolumnar(c) => c.granule_meta_peek(key_cols, len_cols, key_mm, len_stats),
     }
 }
@@ -1520,6 +1651,7 @@ pub fn table_scan_granule_meta_peek(
 pub fn table_scan_granule_meta_consume(scan: &mut TableScanDesc<'_>) {
     match scan {
         TableScanDesc::Heap(_) => unreachable!("granule meta is cbstore-only"),
+        TableScanDesc::Objkv(_) => panic!("objkv: columnar-only scan path"),
         TableScanDesc::Pgrcolumnar(c) => c.granule_meta_consume(),
     }
 }
@@ -1540,6 +1672,7 @@ pub fn table_scan_agg_meta_peek(
 ) -> PgResult<CbAggMetaStep> {
     match scan {
         TableScanDesc::Heap(_) => Ok(CbAggMetaStep::NotMeta),
+        TableScanDesc::Objkv(_) => Ok(CbAggMetaStep::NotMeta),
         TableScanDesc::Pgrcolumnar(c) => {
             c.agg_meta_peek(mm_cols, sum_cols, len_cols, mm, sums, lens)
         }
@@ -1550,6 +1683,7 @@ pub fn table_scan_agg_meta_peek(
 pub fn table_scan_agg_meta_consume_rg(scan: &mut TableScanDesc<'_>) {
     match scan {
         TableScanDesc::Heap(_) => unreachable!("agg meta is cbstore-only"),
+        TableScanDesc::Objkv(_) => panic!("objkv: columnar-only scan path"),
         TableScanDesc::Pgrcolumnar(c) => c.agg_meta_consume_rg(),
     }
 }
@@ -1558,6 +1692,7 @@ pub fn table_scan_agg_meta_consume_rg(scan: &mut TableScanDesc<'_>) {
 pub fn table_scan_agg_meta_consume_granule(scan: &mut TableScanDesc<'_>) {
     match scan {
         TableScanDesc::Heap(_) => unreachable!("agg meta is cbstore-only"),
+        TableScanDesc::Objkv(_) => panic!("objkv: columnar-only scan path"),
         TableScanDesc::Pgrcolumnar(c) => c.agg_meta_consume_granule(),
     }
 }
@@ -1571,6 +1706,7 @@ pub fn table_scan_supports_meta_count(scan: &TableScanDesc<'_>) -> bool {
 /// Metadata COUNT(*) feed: visible-row count of one row group; 0 = exhausted.
 pub fn table_scan_meta_count_next(scan: &mut TableScanDesc<'_>) -> PgResult<u32> {
     match scan {
+        TableScanDesc::Objkv(_) => panic!("objkv: columnar-only scan path"),
         TableScanDesc::Pgrcolumnar(c) => c.next_meta_count(),
         TableScanDesc::Heap(_) => unreachable!("meta count is cbstore-only"),
     }
@@ -1592,6 +1728,7 @@ pub fn table_scan_meta_agg(
     zq: Option<MetaZeroQual>,
 ) -> PgResult<Option<MetaAggScan>> {
     match scan {
+        TableScanDesc::Objkv(_) => panic!("objkv: columnar-only scan path"),
         TableScanDesc::Pgrcolumnar(c) => c.meta_agg_scan(cols, sum_cols, zq),
         TableScanDesc::Heap(_) => Ok(None),
     }
@@ -1606,6 +1743,7 @@ pub fn table_scan_staged_granule_verdict(
 ) -> ZoneVerdict {
     match scan {
         TableScanDesc::Heap(_) => ZoneVerdict::Mixed,
+        TableScanDesc::Objkv(_) => ZoneVerdict::Mixed,
         TableScanDesc::Pgrcolumnar(c) => c.staged_granule_verdict(q),
     }
 }
@@ -1616,6 +1754,7 @@ pub fn table_scan_staged_granule_verdict(
 pub fn table_scan_condcache_arm(scan: &mut TableScanDesc<'_>, fp: u128, capacity: u64) -> bool {
     match scan {
         TableScanDesc::Heap(_) => false,
+        TableScanDesc::Objkv(_) => false,
         TableScanDesc::Pgrcolumnar(c) => c.condcache_arm(fp, capacity),
     }
 }
@@ -1626,6 +1765,7 @@ pub fn table_scan_condcache_arm(scan: &mut TableScanDesc<'_>, fp: u128, capacity
 pub fn table_scan_condcache_lookup(scan: &mut TableScanDesc<'_>, sel: &mut [u64]) -> bool {
     match scan {
         TableScanDesc::Heap(_) => false,
+        TableScanDesc::Objkv(_) => false,
         TableScanDesc::Pgrcolumnar(c) => c.condcache_lookup(sel),
     }
 }
@@ -1635,6 +1775,7 @@ pub fn table_scan_condcache_lookup(scan: &mut TableScanDesc<'_>, sel: &mut [u64]
 pub fn table_scan_condcache_store(scan: &mut TableScanDesc<'_>, sel: &[u64]) {
     match scan {
         TableScanDesc::Heap(_) => {}
+        TableScanDesc::Objkv(_) => {}
         TableScanDesc::Pgrcolumnar(c) => c.condcache_store(sel),
     }
 }
@@ -1644,6 +1785,7 @@ pub fn table_scan_condcache_store(scan: &mut TableScanDesc<'_>, sel: &[u64]) {
 pub fn table_scan_condcache_fold_stats(scan: &mut TableScanDesc<'_>) {
     match scan {
         TableScanDesc::Heap(_) => {}
+        TableScanDesc::Objkv(_) => {}
         TableScanDesc::Pgrcolumnar(c) => c.condcache_fold_stats(),
     }
 }
@@ -1652,6 +1794,7 @@ pub fn table_scan_condcache_fold_stats(scan: &mut TableScanDesc<'_>) {
 pub fn table_scan_getnextpagebatch<'mcx>(scan: &mut TableScanDesc<'mcx>) -> PgResult<u32> {
     match scan {
         TableScanDesc::Heap(h) => ::heapam::heap_getnextpagebatch(h),
+        TableScanDesc::Objkv(_) => panic!("objkv: columnar-only scan path"),
         TableScanDesc::Pgrcolumnar(c) => c.next_window(),
     }
 }
@@ -1679,6 +1822,7 @@ pub fn table_scan_batch_deform_sel<'mcx>(
 ) {
     match scan {
         TableScanDesc::Heap(h) => ::heapam::heap_batch_deform_soa(h, plan, soa, qual_col_only),
+        TableScanDesc::Objkv(_) => panic!("objkv: columnar-only scan path"),
         TableScanDesc::Pgrcolumnar(c) => {
             c.batch_deform(plan.ncols() as usize, soa, qual_col_only, sel)
         }
@@ -1700,6 +1844,7 @@ pub fn table_scan_batch_deform_cols<'mcx>(
 ) {
     match scan {
         TableScanDesc::Heap(h) => ::heapam::heap_batch_deform_soa_cols(h, plan, soa, cols),
+        TableScanDesc::Objkv(_) => panic!("objkv: columnar-only scan path"),
         TableScanDesc::Pgrcolumnar(c) => {
             debug_assert!(false, "late-mat narrowed staging arms on heap scans only");
             c.batch_deform(plan.ncols() as usize, soa, None, None)
@@ -1725,6 +1870,7 @@ pub fn table_scan_batch_complete_deform<'mcx>(
         TableScanDesc::Heap(h) => {
             ::heapam::heap_batch_complete_deform_soa(h, plan, soa, cols, sel)
         }
+        TableScanDesc::Objkv(_) => panic!("objkv: columnar-only scan path"),
         TableScanDesc::Pgrcolumnar(_) => {}
     }
 }
@@ -1743,6 +1889,7 @@ pub fn table_scan_batch_fill_len<'mcx>(
     soa: &mut ::exectuples::SoaBatch<'_>,
 ) {
     match scan {
+        TableScanDesc::Objkv(_) => panic!("objkv: columnar-only scan path"),
         TableScanDesc::Pgrcolumnar(cb) => cb.batch_fill_len_col(c as usize, chars, soa),
         _ => unreachable!("length lanes arm on cbstore batches only"),
     }
@@ -1759,6 +1906,7 @@ pub fn table_scan_batch_dict_codes<'mcx>(
 ) -> Option<::exectuples::SoaDictLane> {
     match scan {
         TableScanDesc::Heap(_) => None,
+        TableScanDesc::Objkv(_) => None,
         TableScanDesc::Pgrcolumnar(cb) => cb.staged_codes_lane(c as usize),
     }
 }
@@ -1775,6 +1923,7 @@ pub fn table_scan_batch_dict_codes_global<'mcx>(
 ) -> Option<::exectuples::SoaDictLane> {
     match scan {
         TableScanDesc::Heap(_) => None,
+        TableScanDesc::Objkv(_) => None,
         TableScanDesc::Pgrcolumnar(cb) => cb.staged_codes_lane_global(c as usize),
     }
 }
@@ -1786,6 +1935,7 @@ pub fn table_scan_batch_dict_codes_global<'mcx>(
 pub fn table_scan_batch_rowref_base<'mcx>(scan: &TableScanDesc<'mcx>) -> Option<u64> {
     match scan {
         TableScanDesc::Heap(_) => None,
+        TableScanDesc::Objkv(_) => None,
         TableScanDesc::Pgrcolumnar(cb) => cb.staged_rowref_base(),
     }
 }
@@ -1797,6 +1947,7 @@ pub fn table_scan_batch_deform_col<'mcx>(
 ) {
     match scan {
         TableScanDesc::Heap(_) => unreachable!("staged deform is cbstore-only"),
+        TableScanDesc::Objkv(_) => panic!("objkv: columnar-only scan path"),
         TableScanDesc::Pgrcolumnar(cb) => cb.batch_deform_col(c as usize, soa),
     }
 }
@@ -1809,6 +1960,7 @@ pub fn table_scan_batch_stage_varkey<'mcx>(
 ) {
     match scan {
         TableScanDesc::Heap(h) => ::heapam::heap_batch_stage_varkey(h, plan, soa),
+        TableScanDesc::Objkv(_) => panic!("objkv: columnar-only scan path"),
         TableScanDesc::Pgrcolumnar(c) => c.batch_stage_varkey(plan.key() as usize, soa),
     }
 }
@@ -1823,6 +1975,7 @@ pub fn table_scan_batch_store_slot<'mcx>(
 ) {
     match scan {
         TableScanDesc::Heap(h) => ::heapam::heap_batch_store_slot(mcx, h, i, slot),
+        TableScanDesc::Objkv(_) => panic!("objkv: columnar-only scan path"),
         TableScanDesc::Pgrcolumnar(c) => c.store_slot(i, slot),
     }
 }
@@ -1833,6 +1986,7 @@ pub fn table_scan_batch_store_slot<'mcx>(
 pub fn table_scan_window_ref(scan: &TableScanDesc<'_>) -> Option<(u32, u32)> {
     match scan {
         TableScanDesc::Heap(_) => None,
+        TableScanDesc::Objkv(_) => None,
         TableScanDesc::Pgrcolumnar(c) => c.window_ref(),
     }
 }
@@ -1848,6 +2002,7 @@ pub fn table_scan_gather_row<'mcx>(
 ) -> bool {
     match scan {
         TableScanDesc::Heap(_) => false,
+        TableScanDesc::Objkv(_) => false,
         TableScanDesc::Pgrcolumnar(c) => c.gather_row(rg, row, slot),
     }
 }
@@ -1866,6 +2021,9 @@ pub fn table_scan_bitmap_next_pagebatch<'mcx>(
         TableScanDesc::Heap(h) => ::heapam::bitmap::heap_scan_bitmap_next_pagebatch(
             h, tbm, iterator, recheck, lossy_pages, exact_pages,
         ),
+        TableScanDesc::Objkv(s) => objkv_am::scan_bitmap_next_pagebatch(
+            s, tbm, iterator, recheck, lossy_pages, exact_pages,
+        ),
         TableScanDesc::Pgrcolumnar(_) => cb_refused("bitmap scans"),
     }
 }
@@ -1880,6 +2038,7 @@ pub fn table_scan_bitmap_batch_store_slot<'mcx>(
 ) {
     match scan {
         TableScanDesc::Heap(h) => ::heapam::bitmap::heap_scan_bitmap_batch_store(mcx, h, i, slot),
+        TableScanDesc::Objkv(s) => objkv_am::scan_bitmap_batch_store(mcx, s, i, slot),
         TableScanDesc::Pgrcolumnar(_) => cb_refused("bitmap scans"),
     }
 }
@@ -1902,6 +2061,7 @@ pub fn table_beginscan_tidrange<'mcx>(
             }
             Ok(sscan)
         }
+        TableAm::Objkv => Err(objkv_unsupported("TID range scans")),
         TableAm::Pgrcolumnar => Err(::pgrcolumnar::unsupported("TID range scans")),
     }
 }
@@ -1919,6 +2079,7 @@ pub fn table_rescan_tidrange<'mcx>(
             heap::scan_set_tidrange(h, mintid, maxtid);
             Ok(())
         }
+        TableScanDesc::Objkv(_) => panic!("objkv: columnar-only scan path"),
         TableScanDesc::Pgrcolumnar(_) => Err(::pgrcolumnar::unsupported("TID range scans")),
     }
 }
@@ -1931,6 +2092,7 @@ pub fn table_scan_getnextslot_tidrange<'mcx>(
 ) -> PgResult<bool> {
     match scan {
         TableScanDesc::Heap(h) => heap::scan_getnextslot_tidrange(mcx, h, direction, slot),
+        TableScanDesc::Objkv(_) => panic!("objkv: columnar-only scan path"),
         TableScanDesc::Pgrcolumnar(_) => Err(::pgrcolumnar::unsupported("TID range scans")),
     }
 }
@@ -1960,7 +2122,7 @@ pub fn table_parallelscan_estimate(
 
     let am_sz = match am(rel) {
         TableAm::Heap => heap::parallelscan_estimate(rel),
-        TableAm::Pgrcolumnar => std::mem::size_of::<ParallelBlockTableScanDescData>(),
+        TableAm::Pgrcolumnar | TableAm::Objkv => std::mem::size_of::<ParallelBlockTableScanDescData>(),
     };
     sz = add_size(sz, am_sz)?;
 
@@ -1974,6 +2136,7 @@ pub fn table_parallelscan_initialize(
 ) -> PgResult<()> {
     let snapshot_off = match am(rel) {
         TableAm::Heap => heap::parallelscan_initialize(rel, &mut target.pscan)?,
+        TableAm::Objkv => return Err(objkv_unsupported("parallel scans")),
         TableAm::Pgrcolumnar => cb::parallelscan_initialize(rel, &mut target.pscan),
     };
     target.pscan.phs_snapshot_off = snapshot_off;
@@ -1999,6 +2162,10 @@ pub fn table_parallelscan_reinitialize(
 ) {
     match am(rel) {
         TableAm::Heap => heap::parallelscan_reinitialize(rel, pscan),
+        // Unit-returning: parallel scan is unreachable for objkv because
+        // beginscan refuses first, so a panic here is a wiring bug, not a
+        // user-facing error.
+        TableAm::Objkv => panic!("objkv: parallel scan reached without a scan"),
         TableAm::Pgrcolumnar => cb::parallelscan_reinitialize(pscan),
     }
 }
@@ -2045,9 +2212,11 @@ pub fn table_beginscan_parallel<'mcx>(
             }
             Ok(scan)
         }
+        TableAm::Objkv => return Err(objkv_unsupported("parallel scans")),
         TableAm::Pgrcolumnar => {
             let mut scan = cb::scan_begin(mcx, relation, snapshot, flags, Some(pscan_ptr))?;
             match &mut scan {
+                TableScanDesc::Objkv(_) => panic!("objkv: columnar-only scan path"),
                 TableScanDesc::Pgrcolumnar(c) => c.rs_temp_snapshot = registered,
                 _ => unreachable!(),
             }
@@ -2063,6 +2232,7 @@ pub fn table_index_fetch_begin<'mcx>(rel: &Relation<'mcx>) -> IndexFetchTableDat
         TableAm::Heap => {
             IndexFetchTableData::Heap(::heapam_handler::heapam_index_fetch_begin(rel))
         }
+        TableAm::Objkv => IndexFetchTableData::Objkv(rel.alias()),
         TableAm::Pgrcolumnar => cb_refused("index scans"),
     }
 }
@@ -2070,12 +2240,14 @@ pub fn table_index_fetch_begin<'mcx>(rel: &Relation<'mcx>) -> IndexFetchTableDat
 pub fn table_index_fetch_reset(scan: &mut IndexFetchTableData<'_>) {
     match scan {
         IndexFetchTableData::Heap(h) => ::heapam_handler::heapam_index_fetch_reset(h),
+        IndexFetchTableData::Objkv(_) => {}
     }
 }
 
 pub fn table_index_fetch_end(scan: IndexFetchTableData<'_>) {
     match scan {
         IndexFetchTableData::Heap(h) => ::heapam_handler::heapam_index_fetch_end(h),
+        IndexFetchTableData::Objkv(_) => {}
     }
 }
 
@@ -2097,6 +2269,16 @@ pub fn table_index_fetch_tuple<'mcx>(
         IndexFetchTableData::Heap(h) => ::heapam_handler::heapam_index_fetch_tuple(
             mcx, h, tid, snapshot, slot, call_again, all_dead,
         ),
+        IndexFetchTableData::Objkv(rel) => {
+            // One rowid, one version, no HOT chain to walk: never call again,
+            // and nothing is ever "all dead" because objkv has no dead space
+            // for an index to help vacuum reclaim.
+            *call_again = false;
+            if let Some(d) = all_dead {
+                *d = false;
+            }
+            objkv_am::index_fetch(mcx, rel, tid, slot, snapshot.as_deref())
+        }
     }
 }
 
@@ -2113,6 +2295,8 @@ pub fn table_index_fetch_batch_fill<'mcx>(
         IndexFetchTableData::Heap(h) => {
             ::heapam_handler::heapam_index_fetch_batch_fill(mcx, h, first_tid, rest, snapshot)
         }
+        // Only a btree scan opaque starts a batch, so objkv never gets here.
+        IndexFetchTableData::Objkv(_) => Ok(()),
     }
 }
 
@@ -2126,6 +2310,8 @@ pub fn table_index_fetch_batch_next<'mcx>(
         IndexFetchTableData::Heap(h) => {
             ::heapam_handler::heapam_index_fetch_batch_next(mcx, h, tid, slot)
         }
+        // Miss sends the caller down the per-tuple path, which is objkv's only one.
+        IndexFetchTableData::Objkv(_) => ::heapam_handler::BatchFetch::Miss,
     }
 }
 
@@ -2163,6 +2349,14 @@ pub fn table_index_delete_tuples<'mcx>(
 ) -> PgResult<TransactionId> {
     match am(rel) {
         TableAm::Heap => heap::index_delete_tuples(mcx, rel, delstate),
+        // Only nbtree's own deletion path calls this, and an objkv index is
+        // never an nbtree index -- CREATE INDEX redirects btree to objkv_btree
+        // on an objkv table, so no btree scan ever holds one. Reachable only
+        // through a routing mistake, which is worth hearing about rather than
+        // silently doing nothing.
+        TableAm::Objkv => Err(objkv_unsupported(
+            "index-deletion scans (an objkv index reached nbtree's delete path)",
+        )),
         TableAm::Pgrcolumnar => cb_refused("index scans"),
     }
 }
@@ -2185,6 +2379,7 @@ pub fn table_tuple_fetch_row_version<'mcx>(
         TableAm::Heap => {
             ::heapam_handler::heapam_fetch_row_version(mcx, rel, tid, snapshot, slot)
         }
+        TableAm::Objkv => objkv_am::index_fetch(mcx, rel, tid, slot, snapshot.as_deref()),
         TableAm::Pgrcolumnar => Err(::pgrcolumnar::unsupported("TID row fetches")),
     }
 }
@@ -2192,6 +2387,9 @@ pub fn table_tuple_fetch_row_version<'mcx>(
 pub fn table_tuple_tid_valid(scan: &mut TableScanDesc<'_>, tid: &ItemPointerData) -> bool {
     match scan {
         TableScanDesc::Heap(h) => ::heapam_handler::heapam_tuple_tid_valid(h, tid),
+        TableScanDesc::Objkv(s) => {
+            objkv_am::row_exists(&s.rs_base.rs_rd, tid).unwrap_or(false)
+        }
         TableScanDesc::Pgrcolumnar(_) => false,
     }
 }
@@ -2222,6 +2420,9 @@ pub fn table_tuple_get_latest_tid<'mcx>(
 
     match scan {
         TableScanDesc::Heap(h) => ::heapam_handler::heapam_tuple_get_latest_tid(h, tid),
+        // Silently succeeding here would claim "this TID is the latest
+        // version" without checking anything. objkv tracks no update chains.
+        TableScanDesc::Objkv(_) => Err(objkv_unsupported("following update chains")),
         TableScanDesc::Pgrcolumnar(_) => Err(::pgrcolumnar::unsupported("TID row fetches")),
     }
 }
@@ -2233,6 +2434,9 @@ pub fn table_tuple_satisfies_snapshot<'mcx>(
 ) -> PgResult<bool> {
     match am(rel) {
         TableAm::Heap => ::heapam_handler::heapam_tuple_satisfies_snapshot(rel, slot, snapshot),
+        TableAm::Objkv => {
+            objkv_am::satisfies_snapshot(rel, &slot.base().tts_tid, snapshot.as_deref())
+        }
         TableAm::Pgrcolumnar => Err(::pgrcolumnar::unsupported("tuple visibility rechecks")),
     }
 }
@@ -2273,6 +2477,29 @@ fn ensure_cbstore_eoxact_registered() {
     });
 }
 
+/// Whether a relation's rows live in the bucket.
+pub fn table_is_objkv(rel: &Relation<'_>) -> bool {
+    am(rel) == TableAm::Objkv
+}
+
+/// The same question of a bare relation, for callers below the `Relation`
+/// handle -- the executor holds one of these while scanning.
+pub fn table_is_objkv_data(rel: &::types_rel::RelationData<'_>) -> bool {
+    ::tableam_vocab::is_objkv_relam(rel.rd_rel.relam)
+}
+
+/// Empties an objkv relation, and the indexes that describe it, as of now.
+pub fn objkv_truncate(mcx: Mcx<'_>, rel: &Relation<'_>) -> PgResult<()> {
+    let scope = objkv_am::scope(rel);
+    objkv_am::empty_relation(scope, rel.rd_id);
+    // The indexes too: a scan answers from entries alone now, so entries left
+    // describing emptied rows would bring them back.
+    for &oid in relcache_seams::relation_get_index_list::call(mcx, rel.rd_id)?.iter() {
+        objkv_am::empty_relation(scope, oid);
+    }
+    Ok(())
+}
+
 pub fn table_tuple_insert<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
@@ -2283,6 +2510,10 @@ pub fn table_tuple_insert<'mcx>(
 ) -> PgResult<()> {
     match am(rel) {
         TableAm::Heap => heap::tuple_insert(mcx, rel, slot, cid, options, bistate),
+        TableAm::Objkv => {
+            let _ = (mcx, cid, options, bistate);
+            objkv_am::tuple_insert(mcx, rel, slot)
+        }
         TableAm::Pgrcolumnar => {
             let _ = (cid, options, bistate);
             ensure_cbstore_eoxact_registered();
@@ -2306,6 +2537,14 @@ pub fn table_tuple_insert_speculative<'mcx>(
         TableAm::Heap => {
             heap::tuple_insert_speculative(mcx, rel, slot, cid, options, bistate, spec_token)
         }
+        TableAm::Objkv => {
+            // The token exists so a heap page can show an in-flight insert to
+            // a concurrent inserter and let it wait. objkv shows nothing until
+            // commit and settles the race there instead, so a speculative
+            // insert is an ordinary staged one and the token is not needed.
+            let _ = (cid, options, bistate, spec_token);
+            objkv_am::tuple_insert(mcx, rel, slot)
+        }
         TableAm::Pgrcolumnar => Err(::pgrcolumnar::unsupported("INSERT ... ON CONFLICT")),
     }
 }
@@ -2319,6 +2558,15 @@ pub fn table_tuple_complete_speculative<'mcx>(
 ) -> PgResult<()> {
     match am(rel) {
         TableAm::Heap => heap::tuple_complete_speculative(mcx, rel, slot, spec_token, succeeded),
+        TableAm::Objkv => {
+            let _ = (mcx, spec_token);
+            // Nothing outside this transaction saw the row, so withdrawing it
+            // is a staged delete rather than heap's abort-speculative dance.
+            if !succeeded {
+                objkv_am::tuple_delete(rel, &slot.base().tts_tid)?;
+            }
+            Ok(())
+        }
         TableAm::Pgrcolumnar => Err(::pgrcolumnar::unsupported("INSERT ... ON CONFLICT")),
     }
 }
@@ -2333,6 +2581,10 @@ pub fn table_multi_insert<'mcx>(
 ) -> PgResult<()> {
     match am(rel) {
         TableAm::Heap => heap::multi_insert(mcx, rel, slots, cid, options, bistate),
+        TableAm::Objkv => {
+            let _ = (mcx, cid, options, bistate);
+            slots.iter_mut().try_for_each(|slot| objkv_am::tuple_insert(mcx, rel, slot))
+        }
         TableAm::Pgrcolumnar => {
             let _ = (mcx, cid, options, bistate);
             ensure_cbstore_eoxact_registered();
@@ -2346,6 +2598,7 @@ pub fn table_multi_insert<'mcx>(
 pub fn table_finish_bulk_insert(rel: &Relation<'_>, _options: i32) -> PgResult<()> {
     match am(rel) {
         TableAm::Heap => Ok(()),
+        TableAm::Objkv => Ok(()),
         TableAm::Pgrcolumnar => ::pgrcolumnar::finish_bulk_insert(rel),
     }
 }
@@ -2374,6 +2627,21 @@ pub fn table_tuple_delete<'mcx>(
             tmfd,
             changingPart,
         ),
+        TableAm::Objkv => {
+            // No concurrency control: objkv has no per-row visibility, so the
+            // snapshot and wait policy cannot be honoured. What it *can* do
+            // honestly is refuse to report success for a row that is gone.
+            let _ = (mcx, cid, snapshot, crosscheck, wait, changingPart);
+            *tmfd = TM_FailureData::default();
+            // TM_Deleted would send the executor into EvalPlanQual, which needs
+            // row locking objkv does not have; it fails there with a much worse
+            // message. Say what actually happened instead.
+            if !objkv_am::row_exists(rel, tid)? {
+                return Err(objkv_concurrent_update());
+            }
+            objkv_am::tuple_delete(rel, tid)?;
+            Ok(TM_Result::TM_Ok)
+        }
         TableAm::Pgrcolumnar => Err(::pgrcolumnar::unsupported("DELETE")),
     }
 }
@@ -2406,6 +2674,20 @@ pub fn table_tuple_update<'mcx>(
             lockmode,
             update_indexes,
         ),
+        TableAm::Objkv => {
+            // Same caveat as delete: no snapshot honoured, no conflict
+            // detection. It refuses rather than fabricating success when the
+            // target row is already gone.
+            let _ = (cid, snapshot, crosscheck, wait, lockmode);
+            *tmfd = TM_FailureData::default();
+            if !objkv_am::row_exists(rel, otid)? {
+                return Err(objkv_concurrent_update());
+            }
+            objkv_am::tuple_update(mcx, rel, otid, slot)?;
+            // The row moved to a new key, so every index entry is stale.
+            *update_indexes = TU_UpdateIndexes::TU_All;
+            Ok(TM_Result::TM_Ok)
+        }
         TableAm::Pgrcolumnar => Err(::pgrcolumnar::unsupported("UPDATE")),
     }
 }
@@ -2436,6 +2718,18 @@ pub fn table_tuple_lock<'mcx>(
             flags,
             tmfd,
         ),
+        TableAm::Objkv => {
+            // There is no lock to take and nothing to wait on: objkv detects
+            // write-write conflicts when the commit object lands, and tells
+            // the loser to retry. So the lock reads the row -- which is what
+            // every caller does with it -- and reports honestly if it is gone.
+            let _ = (cid, mode, wait_policy, flags);
+            *tmfd = TM_FailureData::default();
+            if !objkv_am::index_fetch(mcx, rel, tid, slot, snapshot.as_deref())? {
+                return Err(objkv_concurrent_update());
+            }
+            Ok(TM_Result::TM_Ok)
+        }
         TableAm::Pgrcolumnar => Err(::pgrcolumnar::unsupported("row locking")),
     }
 }
@@ -2450,7 +2744,7 @@ pub fn table_relation_set_new_filelocator(
     match am(rel) {
         // Storage create/reset is AM-independent (main fork file); pgrcolumnar
         // reuses the heap arm — an empty file is a valid empty part.
-        TableAm::Heap | TableAm::Pgrcolumnar => {
+        TableAm::Heap | TableAm::Pgrcolumnar | TableAm::Objkv => {
             heap::relation_set_new_filelocator(rel, newrlocator, relpersistence)
         }
     }
@@ -2459,33 +2753,44 @@ pub fn table_relation_set_new_filelocator(
 pub fn table_relation_copy_data(rel: &Relation<'_>, newrlocator: &RelFileLocator) -> PgResult<()> {
     match am(rel) {
         TableAm::Heap => heap::relation_copy_data(rel, newrlocator),
+        TableAm::Objkv => Err(objkv_unsupported("CLUSTER / rewrites")),
         TableAm::Pgrcolumnar => Err(::pgrcolumnar::unsupported("CLUSTER / rewrites")),
     }
 }
 
 pub fn table_relation_nontransactional_truncate(rel: &Relation<'_>) -> PgResult<()> {
     match am(rel) {
-        TableAm::Heap | TableAm::Pgrcolumnar => heap::relation_nontransactional_truncate(rel),
+        TableAm::Heap | TableAm::Pgrcolumnar | TableAm::Objkv => heap::relation_nontransactional_truncate(rel),
     }
 }
 
 pub fn table_relation_needs_toast_table(rel: &Relation<'_>) -> bool {
     match am(rel) {
         TableAm::Heap => heap::relation_needs_toast_table(rel),
-        TableAm::Pgrcolumnar => false,
+        TableAm::Pgrcolumnar | TableAm::Objkv => false,
     }
 }
 
 pub fn table_relation_toast_am(rel: &Relation<'_>) -> ::types_core::Oid {
     match am(rel) {
         TableAm::Heap => heap::relation_toast_am(rel),
-        TableAm::Pgrcolumnar => 0,
+        TableAm::Pgrcolumnar | TableAm::Objkv => 0,
     }
 }
 
 pub fn table_relation_size(rel: &Relation<'_>, forkNumber: ForkNumber) -> PgResult<u64> {
     match am(rel) {
         TableAm::Heap | TableAm::Pgrcolumnar => heap::relation_size(rel, forkNumber),
+        // An objkv table's local heap file is always 0 bytes, so answering
+        // from it told the planner every such relation was empty -- and with
+        // ANALYZE unsupported, nothing ever corrected that. A zero-row
+        // estimate is a wrong plan with no error to notice it by, so report
+        // the live bytes actually stored in the bucket.
+        TableAm::Objkv => match forkNumber {
+            ForkNumber::MAIN_FORKNUM => objkv_am::relation_bytes(objkv_am::scope(rel), objkv_am::relid(rel)),
+            // No FSM, VM or init fork exists for a relation with no pages.
+            _ => Ok(0),
+        },
     }
 }
 
@@ -2498,6 +2803,7 @@ pub fn table_scan_analyze_next_block<'mcx>(
 ) -> PgResult<bool> {
     match scan {
         TableScanDesc::Heap(h) => heap::scan_analyze_next_block(mcx, h, next_buffer),
+        TableScanDesc::Objkv(_) => panic!("objkv: columnar-only scan path"),
         TableScanDesc::Pgrcolumnar(_) => Err(::pgrcolumnar::unsupported("ANALYZE")),
     }
 }
@@ -2514,6 +2820,7 @@ pub fn table_scan_analyze_next_tuple<'mcx>(
         TableScanDesc::Heap(h) => {
             heap::scan_analyze_next_tuple(mcx, h, oldest_xmin, liverows, deadrows, slot)
         }
+        TableScanDesc::Objkv(_) => panic!("objkv: columnar-only scan path"),
         TableScanDesc::Pgrcolumnar(_) => Err(::pgrcolumnar::unsupported("ANALYZE")),
     }
 }
@@ -2535,6 +2842,9 @@ pub fn table_scan_bitmap_next_tuple<'mcx>(
         TableScanDesc::Heap(h) => {
             heap::scan_bitmap_next_tuple(mcx, h, tbm, iterator, slot, recheck, lossy_pages, exact_pages)
         }
+        TableScanDesc::Objkv(s) => objkv_am::scan_bitmap_next_tuple(
+            mcx, s, tbm, iterator, slot, recheck, lossy_pages, exact_pages,
+        ),
         TableScanDesc::Pgrcolumnar(_) => cb_refused("bitmap scans"),
     }
 }
@@ -2552,6 +2862,7 @@ pub fn table_scan_sample_next_block<'mcx>(
     }
     match scan {
         TableScanDesc::Heap(h) => heap::scan_sample_next_block(mcx, h, scanstate, donetuples),
+        TableScanDesc::Objkv(_) => panic!("objkv: columnar-only scan path"),
         TableScanDesc::Pgrcolumnar(_) => Err(::pgrcolumnar::unsupported("TABLESAMPLE")),
     }
 }
@@ -2572,6 +2883,7 @@ pub fn table_scan_sample_next_tuple<'mcx>(
         TableScanDesc::Heap(h) => {
             heap::scan_sample_next_tuple(mcx, h, scanstate, donetuples, slot)
         }
+        TableScanDesc::Objkv(_) => panic!("objkv: columnar-only scan path"),
         TableScanDesc::Pgrcolumnar(_) => Err(::pgrcolumnar::unsupported("TABLESAMPLE")),
     }
 }
@@ -2736,6 +3048,21 @@ pub fn table_relation_estimate_size(
             *allvisfrac = 0.0;
             return Ok(());
         }
+    }
+    // objkv: the heap-density math below reads the local file, which for an
+    // objkv relation is always 0 bytes -- so every such table estimated at the
+    // never-analyzed default and the planner sized joins off a guess. The rows
+    // live in the bucket, so answer from there. `pages` is notional: it exists
+    // because the cost model is written in 8KB pages, not because anything is
+    // paged. allvisfrac 0.0 -- no visibility map, and it only feeds
+    // index-only-scan costing, which objkv has no indexes for anyway.
+    if am(rel) == TableAm::Objkv {
+        let (bytes, rows) = objkv_am::relation_stats(objkv_am::scope(rel), objkv_am::relid(rel))?;
+        *pages = bytes.div_ceil(usable_bytes_per_page as u64) as BlockNumber;
+        *tuples = rows as f64;
+        *allvisfrac = 0.0;
+        let _ = (overhead_bytes_per_tuple, data_width, attr_widths.take());
+        return Ok(());
     }
     let curpages =
         bufmgr_seams::relation_get_number_of_blocks_in_fork::call(rel, ForkNumber::MAIN_FORKNUM)?;

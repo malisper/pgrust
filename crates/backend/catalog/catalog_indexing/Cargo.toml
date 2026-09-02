@@ -16,5 +16,9 @@ heaptuple = { path = "../../access/common/heaptuple" }
 heapam = { path = "../../access/heap/heapam" }
 xact_seams = { path = "../../access/transam/xact_seams" }
 tableam_vocab = { path = "../../access/table/tableam_vocab" }
+tableam_seams = { path = "../../access/table/tableam_seams" }
+inval = { path = "../../utils/cache/inval" }
+objkv_marker = { path = "../../../_support/objkv_marker" }
+catalog = { path = "../catalog" }
 exectuples = { path = "../../executor/exectuples" }
 execindexing = { path = "../../executor/execindexing" }
