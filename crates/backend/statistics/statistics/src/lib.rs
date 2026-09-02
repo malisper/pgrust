@@ -203,16 +203,26 @@ pub fn fetch_statentries_for_relation<'mcx>(
     Ok(result)
 }
 
-fn lookup_var_attr_stats<'mcx>(
+fn lookup_var_attr_stats<'mcx, 'b, F: ExprStatsCompute<'mcx>>(
     mcx: Mcx<'mcx>,
+    bmcx: Mcx<'b>,
     columns: &[AttrNumber],
+    exprs: &[types_nodes::Node<'mcx>],
     colstats: &[ColStats],
-) -> PgResult<Option<PgVec<'mcx, ColStats>>> {
-    let mut stats: PgVec<'mcx, ColStats> = mcx::vec_with_capacity_in(mcx, columns.len())?;
+    expr_compute: &mut F,
+) -> PgResult<Option<PgVec<'b, ColStats>>> {
+    let mut stats: PgVec<'b, ColStats> = mcx::vec_with_capacity_in(bmcx, columns.len())?;
     for &attnum in columns {
         match colstats.iter().find(|s| s.tupattnum == attnum as i32) {
             Some(s) => stats.push(*s),
             None => return Ok(None),
+        }
+    }
+    // upstream 83671c0da049 (18.4): Fix set of issues with extended statistics on expressions
+    // An expression found non-analyzable gives up on the whole object.
+    for &expr in exprs {
+        if !expr_compute.examinable(mcx, expr)? {
+            return Ok(None);
         }
     }
     Ok(Some(stats))
@@ -234,7 +244,12 @@ fn statext_compute_stattarget(stattarget: i32, stats: &[ColStats]) -> i32 {
     target
 }
 
-pub fn ComputeExtStatisticsRows(mcx: Mcx<'_>, relid: Oid, colstats: &[ColStats]) -> PgResult<i32> {
+pub fn ComputeExtStatisticsRows<'mcx, F: ExprStatsCompute<'mcx>>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    colstats: &[ColStats],
+    expr_compute: &mut F,
+) -> PgResult<i32> {
     if colstats.is_empty() {
         return Ok(0);
     }
@@ -242,7 +257,9 @@ pub fn ComputeExtStatisticsRows(mcx: Mcx<'_>, relid: Oid, colstats: &[ColStats])
     let lstats = fetch_statentries_for_relation(mcx, &pg_stext, relid)?;
     let mut result = 0;
     for stat in lstats.iter() {
-        let Some(stats) = lookup_var_attr_stats(mcx, &stat.columns, colstats)? else {
+        let Some(stats) =
+            lookup_var_attr_stats(mcx, mcx, &stat.columns, &stat.exprs, colstats, expr_compute)?
+        else {
             continue;
         };
         let stattarget = statext_compute_stattarget(stat.stattarget, &stats);
@@ -283,7 +300,9 @@ pub fn BuildRelationExtStatistics<'mcx, F: ExprStatsCompute<'mcx>>(
     for stat in statslist.iter() {
         let bcx = mcx::MemoryContext::new("BuildRelationExtStatistics");
         let bmcx = bcx.mcx();
-        let Some(stats) = lookup_var_attr_stats(bmcx, &stat.columns, colstats)? else {
+        let Some(stats) =
+            lookup_var_attr_stats(mcx, bmcx, &stat.columns, &stat.exprs, colstats, expr_compute)?
+        else {
             let nsp = lsyscache::get_namespace_name(bmcx, onerel.rd_rel.relnamespace)?
                 .map(|s| s.as_str().to_string())
                 .unwrap_or_default();

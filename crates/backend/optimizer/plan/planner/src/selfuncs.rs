@@ -326,10 +326,12 @@ fn scalarineqsel<'mcx>(
     consttype: Oid,
 ) -> PgResult<f64> {
     if vardata.stats.is_none() {
-        let is_ctid = vardata
-            .var
-            .and_then(|id| run.root.expr_node(id).as_var())
-            .is_some_and(|v| v.varattno == SELF_ITEM_POINTER_ATTRIBUTE_NUMBER);
+        // upstream a2cb5a1cfbae (18.6): Be more wary about constant's datatype in scalarineqsel() (CVE-2026-14668).
+        let is_ctid = consttype == types_core::catalog::TIDOID
+            && vardata
+                .var
+                .and_then(|id| run.root.expr_node(id).as_var())
+                .is_some_and(|v| v.varattno == SELF_ITEM_POINTER_ATTRIBUTE_NUMBER);
         if is_ctid {
             let rel = vardata.rel.expect("ctid Var has a rel");
             let pages = run.root.rel(rel).pages as f64;
@@ -1046,6 +1048,11 @@ fn convert_string_datum<'mcx>(
         }
         _ => return None,
     };
+    // upstream 5fd1c3f28718 (18.5): Avoid collation lookup failure when considering a "char" column.
+    // No collation (the "char" type, in particular): act as though it is "C".
+    if !types_core::OidIsValid(collid) {
+        return Some(bytes);
+    }
     let locale = pg_locale::pg_newlocale_from_collation(collid)
         .expect("convert_string_datum: collation lookup");
     if !locale.collate_is_c {
@@ -1515,7 +1522,13 @@ fn examine_expression_index_stats<'mcx>(
     }
     if vardata.stats.is_none() {
         let inh = rte_at(run, &run.root, varno as usize).inh;
-        'stats: for &sid in run.root.rel(onerel).statlist.iter() {
+        for &sid in run.root.rel(onerel).statlist.iter() {
+            // upstream 83671c0da049 (18.4): Fix set of issues with extended statistics on expressions
+            // A NULL stxdexpr element leaves stats unset and the next object
+            // holding the expression is still tried, as C's loop head does.
+            if vardata.stats.is_some() {
+                break;
+            }
             let info = run.root.statistic_ext(sid);
             if info.kind != b'e' as i8 || info.inherit != inh {
                 continue;
@@ -1529,17 +1542,17 @@ fn examine_expression_index_stats<'mcx>(
                     let stat_oid = info.stat_oid;
                     // Keyed by statistics object, not (rel, att): not memoized
                     // (rare path); arena-leaked so the ref shape is uniform.
-                    vardata.stats = Some(leak_bundle(
+                    vardata.stats = match syscache_seams::statext_expressions_load::call(
                         run.mcx,
-                        syscache_seams::statext_expressions_load::call(
-                            run.mcx,
-                            stat_oid,
-                            inh,
-                            pos as i32,
-                        )?,
-                    )?);
+                        stat_oid,
+                        inh,
+                        pos as i32,
+                    )? {
+                        Some(bundle) => Some(leak_bundle(run.mcx, bundle)?),
+                        None => None,
+                    };
                     vardata.acl_ok = all_rows_selectable(run, &run.root, varno, None)?;
-                    break 'stats;
+                    break;
                 }
             }
         }
@@ -4267,6 +4280,16 @@ pub fn estimate_array_length<'mcx>(
         return Ok(a.elements.len() as f64);
     }
     if let Some(run) = run {
+        // upstream 13e20d1c9d99 (18.4): Fix estimate_array_length error with set-operation array coercions
+        // A Var with varno 0 has no relation entry and would fail in
+        // find_base_rel. recurse_set_operations builds such Vars through
+        // generate_setop_tlist when a nested set operation's output type
+        // needs coercing; an ArrayCoerceExpr over one lands here.
+        if let Some(v) = node.as_var() {
+            if v.varno == 0 {
+                return Ok(10.0); // default guess, should match scalararraysel
+            }
+        }
         // The DECHIST slot's last stanumber is the average distinct element
         // count.
         let node_id = run.intern_expr(node);

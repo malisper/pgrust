@@ -81,6 +81,7 @@ walreceiver = { path = "../../walreceiver" }
 xact = { path = "../../../access/transam/xact" }
 shm_mq = { path = "../../../storage/ipc/shm_mq" }
 pgsync = { path = "../../../../_support/pgsync" }
+pgstat = { path = "../../../utils/activity/pgstat" }
 
 [dev-dependencies]
 adt_int = { path = "../../../utils/adt/int" }

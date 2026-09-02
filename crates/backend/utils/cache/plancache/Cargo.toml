@@ -21,6 +21,7 @@ elog = { path = "../../error/elog" }
 inval = { path = "../inval" }
 cache_syscache = { path = "../cache_syscache" }
 catalog_namespace = { path = "../../../catalog/catalog_namespace" }
+adt_acl = { path = "../../adt/acl" }
 execscan = { path = "../../../executor/execscan" }
 tupdesc = { path = "../../../access/common/tupdesc" }
 guc_tables = { path = "../../misc/guc_tables" }

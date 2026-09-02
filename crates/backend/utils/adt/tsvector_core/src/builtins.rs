@@ -5,8 +5,8 @@ use ::types_core::{
     Oid,
 };
 use ::types_error::{
-    PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_NULL_VALUE_NOT_ALLOWED,
-    ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_ZERO_LENGTH_CHARACTER_STRING,
+    PgError, PgResult, ERRCODE_NULL_VALUE_NOT_ALLOWED, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+    ERRCODE_ZERO_LENGTH_CHARACTER_STRING,
 };
 use ::types_fmgr::{
     byref_result, cstring_result, varlena_result, FmgrBuiltin, FmgrInfo,
@@ -121,7 +121,7 @@ pub fn fc_tsvector_setweight(
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     let v = arg_tsvector(fcinfo, 0)?;
-    let w = weight_code(fcinfo.arg_char(1) as u8)?;
+    let w = parse_weight(fcinfo.arg_char(1) as u8)?;
     // SAFETY: the armed result mcx outlives this call.
     let mcx = unsafe { fcinfo.result_mcx_detached() };
     Ok(image_result(tsvector_setweight_core(mcx, v, w)?))
@@ -154,15 +154,8 @@ pub fn fc_tsvector_setweight_by_filter(
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     let v = arg_tsvector(fcinfo, 0)?;
-    let cw = fcinfo.arg_char(1) as u8;
-    // C (tsvector_op.c tsvector_setweight_by_filter): elog(ERROR,
-    // "unrecognized weight: %c", char_weight) — the raw byte lands in the
-    // message (invalid UTF-8 for high bytes; a NUL byte ends the cstring).
-    let w = weight_code(cw).map_err(|_| {
-        let mut m = b"unrecognized weight: ".to_vec();
-        m.push(cw);
-        PgError::error_raw_message(m)
-    })?;
+    // upstream c5194139cb4c (18.6): Improve reporting of invalid weight symbols in setweight() et al.
+    let w = parse_weight(fcinfo.arg_char(1) as u8)?;
     // SAFETY: the armed result mcx outlives this call.
     let mcx = unsafe { fcinfo.result_mcx_detached() };
     let (elems, nulls) = arg_text_array(mcx, fcinfo, 2)?;
@@ -262,10 +255,20 @@ pub fn fc_array_to_tsvector(
                 .with_sqlstate(ERRCODE_NULL_VALUE_NOT_ALLOWED)
                 .into());
         }
-        if text_datum_bytes(*d).is_empty() {
+        let toklen = text_datum_bytes(*d).len();
+        if toklen == 0 {
             return Err(PgError::error("lexeme array may not contain empty strings")
                 .with_sqlstate(ERRCODE_ZERO_LENGTH_CHARACTER_STRING)
                 .into());
+        }
+        // upstream e251350573e2 (18.6): Harden tsvector code against overflows.
+        if toklen >= MAXSTRLEN {
+            return Err(PgError::error(format!(
+                "word is too long ({toklen} bytes, max {} bytes)",
+                MAXSTRLEN - 1
+            ))
+            .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+            .into());
         }
     }
     let mut lexemes: PgVec<&[u8]> = vec_with_capacity_in(mcx, elems.len())?;
@@ -279,29 +282,15 @@ pub fn fc_array_to_tsvector(
     });
     lexemes.dedup();
     let datalen: usize = lexemes.iter().map(|l| l.len()).sum();
+    if datalen > MAXSTRPOS {
+        return Err(PgError::error(format!(
+            "string is too long for tsvector ({datalen} bytes, max {MAXSTRPOS} bytes)"
+        ))
+        .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+        .into());
+    }
     let mut b = crate::layout::TsVecBuilder::with_capacity(mcx, lexemes.len(), datalen)?;
     for lex in &lexemes {
-        // Enforce the bit-packed WordEntry limits before packing each entry,
-        // matching tsvectorin: len is 11 bits (< MAXSTRLEN) and pos is 20 bits
-        // (<= MAXSTRPOS). Without these, a long lexeme or large cumulative
-        // offset would silently overflow the packed len/pos fields.
-        if lex.len() >= MAXSTRLEN {
-            return Err(PgError::error(format!(
-                "word is too long ({} bytes, max {} bytes)",
-                lex.len(),
-                MAXSTRLEN - 1
-            ))
-            .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
-            .into());
-        }
-        if b.cur_off() > MAXSTRPOS {
-            return Err(PgError::error(format!(
-                "string is too long for tsvector ({} bytes, max {MAXSTRPOS} bytes)",
-                b.cur_off()
-            ))
-            .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
-            .into());
-        }
         b.push(lex, &[])?;
     }
     Ok(image_result(b.finish(mcx)?))
@@ -326,20 +315,8 @@ pub fn fc_tsvector_filter(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -
                 .with_sqlstate(ERRCODE_NULL_VALUE_NOT_ALLOWED)
                 .into());
         }
-        match d.as_char() as u8 {
-            b'A' | b'a' => mask |= 8,
-            b'B' | b'b' => mask |= 4,
-            b'C' | b'c' => mask |= 2,
-            b'D' | b'd' => mask |= 1,
-            other => {
-                return Err(PgError::error(format!(
-                    "unrecognized weight: \"{}\"",
-                    other as char
-                ))
-                .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE)
-                .into())
-            }
-        }
+        // upstream c5194139cb4c (18.6): one weight parser for all three functions
+        mask |= 1 << parse_weight(d.as_char() as u8)?;
     }
     Ok(image_result(tsvector_filter_core(mcx, v, mask)?))
 }

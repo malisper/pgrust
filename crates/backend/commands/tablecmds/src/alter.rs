@@ -398,7 +398,9 @@ pub(crate) struct AlteredTableInfo<'mcx> {
     pub(crate) validate_default: bool,
     changed_constraints: Vec<(Oid, String)>,
     changed_indexes: Vec<(Oid, String)>,
-    changed_statistics: Vec<(Oid, String)>,
+    // (stxoid, definition, stxowner) — upstream a1fa24127d6a (18.6):
+    // Preserve the owner of extended statistics rebuilt by ALTER TABLE.
+    changed_statistics: Vec<(Oid, String, Oid)>,
     replica_identity_index: Option<String>,
     cluster_on_index: Option<String>,
 }
@@ -1217,6 +1219,17 @@ fn ATRewriteCatalogs<'mcx>(
                 }
                 AlterTableType::AT_CookedColumnDefault => {
                     let defnode = cmd.def.expect("AT_CookedColumnDefault expr");
+                    // upstream 2780538433fc (18.5): Check for USAGE privilege on types used by stored expressions.
+                    // ATExecCookedColumnDefault: a cooked default copied by
+                    // CREATE TABLE ... LIKE adds new type dependencies and
+                    // bypasses AddRelationNewConstraints(); StoreAttrDefault()
+                    // leaves the privilege checks to its caller.
+                    pg_depend::CheckUsageOnTypesInSingleRelExpr(
+                        mcx,
+                        defnode,
+                        rel.rd_id,
+                        miscinit::GetUserId(),
+                    )?;
                     pg_attrdef::StoreAttrDefault(mcx, &rel, cmd.num, defnode)?;
                 }
                 AlterTableType::AT_AddConstraint => {
@@ -1375,7 +1388,10 @@ fn ATRewriteCatalogs<'mcx>(
                         .expect("AT_ReAddStatistics CreateStatsStmt")
                         .as_variant::<types_nodes::rawnodes::CreateStatsStmt>()
                         .expect("CreateStatsStmt");
-                    statscmds::CreateStatistics(mcx, stmt, false)?;
+                    // upstream a1fa24127d6a (18.6): the owner must be set to
+                    // the original statistics owner (tablecmds.c:9701).
+                    debug_assert!(stmt.owner != InvalidOid, "AT_ReAddStatistics without owner");
+                    statscmds::CreateStatistics(mcx, rel.rd_id, stmt, false)?;
                 }
                 AlterTableType::AT_ReAddConstraint => {
                     let defnode = cmd.def.expect("AT_ReAddConstraint Constraint");
@@ -1417,6 +1433,8 @@ fn ATRewriteCatalogs<'mcx>(
                         mcx,
                         &stmt.typeName,
                         stmt.def.expect("ALTER DOMAIN ADD CONSTRAINT def"),
+                        // upstream 2780538433fc (18.5): is_readd
+                        true,
                     )?;
                 }
                 AlterTableType::AT_ReAddComment => {
@@ -3159,9 +3177,16 @@ fn ATPrepDropExpression<'mcx>(
     cmd: &AlterTableCmd<'mcx>,
     recurse: bool,
     recursing: bool,
-    lockmode: LOCKMODE,
+    _lockmode: LOCKMODE,
 ) -> PgResult<()> {
-    if !recurse && !pg_inherits::find_inheritance_children(mcx, rel.rd_id, lockmode)?.is_empty() {
+    // upstream c374f2807c23 (18.6): Fix ALTER COLUMN ... DROP EXPRESSION with subpartitions
+    // Reject ONLY if there are child tables -- but only, of course, at the
+    // top of the tree, otherwise it'd be impossible to run this command with
+    // trees deeper than two levels.  Caller already got lock.
+    if !recurse
+        && !recursing
+        && !pg_inherits::find_inheritance_children(mcx, rel.rd_id, NoLock)?.is_empty()
+    {
         return Err(Box::new(
             PgError::new(
                 ERROR,
@@ -4186,10 +4211,13 @@ fn create_notnull_constraint<'mcx>(
         rel,
         rel.rd_att.constr.as_deref().map(|c| c.num_check as i16).unwrap_or(0),
     )?;
-    objectaccess::InvokeObjectPostAlterHook(RELATION_RELATION_ID, rel.rd_id, attnum as i32)?;
-
     // An invalid constraint sets attnotnull without queueing verification.
     set_attnotnull(mcx, wqueue, rel, attnum, initially_valid)?;
+
+    // upstream 6958077ceb93 (18.4): SET NOT NULL: Call object-alter hook only after the catalog change
+    // set_attnotnull's CommandCounterIncrement is what lets the hook see the
+    // new constraint and attnotnull in the catalog.
+    objectaccess::InvokeObjectPostAlterHook(RELATION_RELATION_ID, rel.rd_id, attnum as i32)?;
     Ok(())
 }
 
@@ -4328,6 +4356,7 @@ pub(crate) fn ATAddCheckNNConstraint<'mcx>(
         &NodeList::make1(mcx, constr_copy)?,
         recursing || is_readd,
         !recursing,
+        is_readd,
         None,
     )?;
     debug_assert!(cooked.len() <= 1);
@@ -6004,12 +6033,27 @@ fn RememberStatisticsForRebuilding<'mcx>(
     tab: &mut AlteredTableInfo<'mcx>,
     stxoid: Oid,
 ) -> PgResult<()> {
-    if tab.changed_statistics.iter().any(|(o, _)| *o == stxoid) {
+    if tab.changed_statistics.iter().any(|(o, _, _)| *o == stxoid) {
         return Ok(());
     }
     let defstring = ruleutils::pg_get_statisticsobj_worker(mcx, stxoid, false, false)?
         .ok_or_else(|| crate::cache_lookup_failed("statistics object", stxoid))?;
-    tab.changed_statistics.push((stxoid, defstring));
+    // upstream a1fa24127d6a (18.6): Preserve the owner of extended statistics rebuilt by ALTER TABLE.
+    // Remember the object's owner as well, so the re-created object gets it back.
+    let stxowner = {
+        use cache_syscache::{
+            cacheinfo::STATEXTOID, ReleaseSysCache, SearchSysCache1, SysCacheGetAttr, SysCacheKey,
+        };
+        const ANUM_PG_STATISTIC_EXT_STXOWNER: i32 = 5;
+        let tup = SearchSysCache1(STATEXTOID, SysCacheKey::Value(Datum::from_oid(stxoid)))?
+            .ok_or_else(|| crate::cache_lookup_failed("statistics object", stxoid))?;
+        let (d, isnull) = SysCacheGetAttr(STATEXTOID, &tup, ANUM_PG_STATISTIC_EXT_STXOWNER)?;
+        debug_assert!(!isnull);
+        let owner = d.as_oid();
+        ReleaseSysCache(tup);
+        owner
+    };
+    tab.changed_statistics.push((stxoid, defstring, stxowner));
     Ok(())
 }
 
@@ -6085,25 +6129,26 @@ fn ATPostAlterTypeCleanup<'mcx>(
         if relid != tab_relid {
             lmgr::LockRelationOid(relid, AccessExclusiveLock)?;
         }
-        ATPostAlterTypeParse(mcx, wqueue, *conoid, relid, confrelid, def, tab_rewrite)?;
+        ATPostAlterTypeParse(mcx, wqueue, *conoid, relid, confrelid, InvalidOid, def, tab_rewrite)?;
     }
     for (indoid, def) in &changed_indexes {
         let relid = catalog_index::IndexGetRelation(mcx, *indoid, false)?;
         if relid != tab_relid {
             lmgr::LockRelationOid(relid, AccessExclusiveLock)?;
         }
-        ATPostAlterTypeParse(mcx, wqueue, *indoid, relid, InvalidOid, def, tab_rewrite)?;
+        ATPostAlterTypeParse(mcx, wqueue, *indoid, relid, InvalidOid, InvalidOid, def, tab_rewrite)?;
         objects
             .add_exact_object_address(pg_depend::ObjectAddress::set(RELATION_RELATION_ID, *indoid));
     }
-    for (stxoid, def) in &changed_statistics {
+    for (stxoid, def, owner) in &changed_statistics {
         let relid = statscmds::StatisticsGetRelation(*stxoid, false)?;
         // ShareUpdateExclusiveLock aligns with CreateStatistics and
         // RemoveStatisticsById; taken after all AccessExclusiveLock cases.
         if relid != tab_relid {
             lmgr::LockRelationOid(relid, ShareUpdateExclusiveLock)?;
         }
-        ATPostAlterTypeParse(mcx, wqueue, *stxoid, relid, InvalidOid, def, tab_rewrite)?;
+        // upstream a1fa24127d6a (18.6): re-create with the remembered owner.
+        ATPostAlterTypeParse(mcx, wqueue, *stxoid, relid, InvalidOid, *owner, def, tab_rewrite)?;
         objects.add_exact_object_address(pg_depend::ObjectAddress::set(
             StatisticExtRelationId,
             *stxoid,
@@ -6155,12 +6200,15 @@ fn constraint_rebuild_shape(mcx: Mcx<'_>, conoid: Oid) -> PgResult<(Oid, Oid, Oi
     Ok((conrelid, contypid, confrelid, conislocal))
 }
 
+// owner_id: upstream a1fa24127d6a (18.6) — the original owner for a rebuilt
+// extended-statistics object (InvalidOid for constraints and indexes).
 fn ATPostAlterTypeParse<'mcx>(
     mcx: Mcx<'mcx>,
     wqueue: &mut Wqueue<'mcx>,
     old_id: Oid,
     rel_id: Oid,
     ref_rel_id: Oid,
+    owner_id: Oid,
     def: &str,
     rewrite: i32,
 ) -> PgResult<()> {
@@ -6335,6 +6383,14 @@ fn ATPostAlterTypeParse<'mcx>(
                     })
                     .expect("CreateStatsStmt");
                 }
+            }
+            // upstream a1fa24127d6a (18.6): Preserve the owner of extended statistics rebuilt by ALTER TABLE.
+            // SAFETY: parse tree is arena-owned; no derived refs live.
+            unsafe {
+                stmt.with_mut::<types_nodes::rawnodes::CreateStatsStmt, _>(|st| {
+                    st.owner = owner_id;
+                })
+                .expect("CreateStatsStmt");
             }
             let mut newcmd = Node::build::<AlterTableCmd>(mcx)?;
             newcmd.subtype = AlterTableType::AT_ReAddStatistics;
@@ -7020,6 +7076,17 @@ fn ATExecAddOf<'mcx>(
     let (typeid, _typmod) =
         parse_utilcmd::typenameTypeIdAndModAllowComposite(mcx, None, of_typename)?;
     check_of_type(mcx, typeid)?;
+
+    // upstream 57f59ca1d954 (18.4): Check for USAGE privilege on the composite type in ALTER TABLE OF.
+    let aclresult = aclchk::object_aclcheck(
+        TYPE_RELATION_ID,
+        typeid,
+        miscinit::GetUserId(),
+        adt_acl::ACL_USAGE,
+    )?;
+    if aclresult != aclchk::ACLCHECK_OK {
+        crate::aclcheck_error_type(aclresult, typeid)?;
+    }
 
     if pg_inherits::has_superclass(mcx, relid)? {
         return Err(Box::new(

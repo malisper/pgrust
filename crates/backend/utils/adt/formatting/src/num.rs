@@ -19,6 +19,18 @@ fn pg_mblen_range(s: &[u8]) -> i32 {
     mbutils::pg_mblen_range(s).unwrap_or(s.len() as i32)
 }
 
+// upstream 580e7be88ce2 (18.4): Guard against overly-long numeric formatting symbols from locale.
+// to_char's image holds NUM_MAX_ITEM_SIZ bytes per node; from_char never clips.
+#[inline]
+fn clip_locale_symbol(sym: &[u8]) -> &[u8] {
+    if sym.len() > NUM_MAX_ITEM_SIZ {
+        let n = mbutils::pg_mbcliplen(sym, sym.len() as i32, NUM_MAX_ITEM_SIZ as i32) as usize;
+        &sym[..n]
+    } else {
+        sym
+    }
+}
+
 pub fn fill_str(c: u8, max: usize) -> Vec<u8> {
     vec![c; max]
 }
@@ -199,6 +211,12 @@ impl NumToChar<'_> {
         self.out_p += bytes.len();
     }
 
+    // C NUM_add_locale_symbol (upstream 580e7be88ce2).
+    #[inline]
+    fn write_locale_symbol(&mut self, sym: &[u8]) {
+        self.write(clip_locale_symbol(sym));
+    }
+
     #[inline]
     fn overlay_spaces(&mut self, n: usize) {
         debug_assert!(self.out_p + n <= self.out.len());
@@ -237,7 +255,7 @@ impl NumToChar<'_> {
                     } else {
                         self.loc.positive
                     };
-                    self.write(s);
+                    self.write_locale_symbol(s);
                     self.sign_wrote = true;
                 }
             } else if self.num.is_bracket() {
@@ -273,10 +291,10 @@ impl NumToChar<'_> {
                     let lr_is_dot = self.last_relevant_is_dot();
                     if self.last_relevant.is_none() || !lr_is_dot {
                         let dec = self.loc.decimal;
-                        self.write(dec);
+                        self.write_locale_symbol(dec);
                     } else if self.num.is_fillmode() && lr_is_dot {
                         let dec = self.loc.decimal;
-                        self.write(dec);
+                        self.write_locale_symbol(dec);
                     }
                 } else {
                     let skip = self.last_relevant.is_some()
@@ -325,7 +343,7 @@ impl NumToChar<'_> {
                     } else {
                         self.loc.positive
                     };
-                    self.write(s);
+                    self.write_locale_symbol(s);
                 }
             }
         }
@@ -341,6 +359,27 @@ pub fn num_processor_to_char(
     number: &[u8],
     to_char_out_pre_spaces: i32,
     sign: i32,
+) -> PgResult<usize> {
+    num_processor_to_char_with(
+        nodes,
+        num,
+        out,
+        number,
+        to_char_out_pre_spaces,
+        sign,
+        num_prepare_locale,
+    )
+}
+
+// The locale source is a parameter so tests can inject symbols no installed locale carries.
+fn num_processor_to_char_with(
+    nodes: &[FormatNode],
+    num: &mut NUMDesc,
+    out: &mut [u8],
+    number: &[u8],
+    to_char_out_pre_spaces: i32,
+    sign: i32,
+    prepare_locale: impl FnOnce(&NUMDesc) -> PgResult<NumLocale>,
 ) -> PgResult<usize> {
     // NUL termination backs number_at's unchecked reads (C's numstr shape).
     assert!(number.last() == Some(&0), "numstr must be NUL-terminated");
@@ -408,7 +447,7 @@ pub fn num_processor_to_char(
         np.num_count += 1;
     }
 
-    np.loc = num_prepare_locale(np.num)?;
+    np.loc = prepare_locale(&*np.num)?;
 
     for n in nodes {
         if n.typ == NODE_TYPE_END {
@@ -437,22 +476,23 @@ pub fn num_processor_to_char(
                 }
             }
             NUM_G => {
+                // upstream 580e7be88ce2 (18.4): clipped before either use; spaces count clipped chars.
+                let pattern = clip_locale_symbol(np.loc.thousands);
                 if !np.num_in {
                     if np.num.is_fillmode() {
                         continue;
                     } else {
-                        let pattern_len = pg_mbstrlen(np.loc.thousands) as usize;
+                        let pattern_len = pg_mbstrlen(pattern) as usize;
                         np.overlay_spaces(pattern_len);
                         np.out_p += pattern_len - 1;
                     }
                 } else {
-                    let pattern = np.loc.thousands;
                     np.overlay(pattern);
                     np.out_p += pattern.len() - 1;
                 }
             }
             NUM_L => {
-                let pattern = np.loc.currency;
+                let pattern = clip_locale_symbol(np.loc.currency);
                 np.overlay(pattern);
                 np.out_p += pattern.len() - 1;
             }
@@ -1092,5 +1132,119 @@ fn normalize_exponent(s: &str) -> String {
         format!("{mantissa}e{sign}{digits}")
     } else {
         s.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const L12: &[u8] = b"CURRENCYSYMB"; // 12 ASCII bytes, clips to 8
+    const E4: &[u8] = "€€€€".as_bytes(); // 12 bytes / 4 chars, clips to 2 chars
+
+    fn loc(
+        currency: &'static [u8],
+        thousands: &'static [u8],
+        decimal: &'static [u8],
+        negative: &'static [u8],
+        positive: &'static [u8],
+    ) -> NumLocale {
+        NumLocale {
+            negative,
+            positive,
+            decimal,
+            thousands,
+            currency,
+        }
+    }
+
+    // int4_to_char's prep for a value that fits the picture, with a synthetic locale.
+    fn to_char_with(numstr: &[u8], sign: u8, fmt: &[u8], loc: NumLocale) -> Vec<u8> {
+        ::mbutils::SetDatabaseEncoding(::wchar::PG_UTF8).unwrap();
+        let mut num = NUMDesc::default();
+        num.zeroize();
+        let nodes = crate::parse::parse_format(
+            fmt,
+            NUM_KEYWORDS,
+            &[],
+            &NUM_INDEX,
+            NUM_FLAG,
+            Some(&mut num),
+        )
+        .unwrap();
+        let plen = numstr
+            .iter()
+            .position(|&c| c == b'.')
+            .unwrap_or(numstr.len()) as i32;
+        assert!(plen <= num.pre, "value must fit the picture");
+        let out_pre_spaces = num.pre - plen;
+        let mut number = numstr.to_vec();
+        number.push(0);
+        let mut out = vec![0u8; fmt.len() * NUM_MAX_ITEM_SIZ + 1];
+        let n = num_processor_to_char_with(
+            &nodes,
+            &mut num,
+            &mut out,
+            &number,
+            out_pre_spaces,
+            sign as i32,
+            |_| Ok(loc),
+        )
+        .unwrap();
+        out.truncate(n);
+        out
+    }
+
+    // upstream 580e7be88ce2 (18.4): symbols clip to the 8-bytes-per-node budget at a char boundary.
+    #[test]
+    fn currency_symbol_clips_to_node_budget() {
+        assert_eq!(
+            to_char_with(b"1", b'+', b"L9", loc(L12, b",", b".", b"-", b"+")),
+            b"CURRENCY 1"
+        );
+        assert_eq!(
+            to_char_with(b"1", b'+', b"L9", loc(E4, b",", b".", b"-", b"+")),
+            "€€ 1".as_bytes()
+        );
+        let mut want = b"CURRENCY".repeat(9);
+        want.extend_from_slice(b" 1");
+        assert_eq!(
+            to_char_with(b"1", b'+', b"LLLLLLLLL9", loc(L12, b",", b".", b"-", b"+")),
+            want
+        );
+    }
+
+    #[test]
+    fn thousands_separator_clips_in_both_modes() {
+        // after the first digit the symbol itself is written, clipped
+        assert_eq!(
+            to_char_with(b"1234", b'+', b"9G999", loc(b" ", L12, b".", b"-", b"+")),
+            b" 1CURRENCY234"
+        );
+        // before it, one space per character of the CLIPPED symbol
+        assert_eq!(
+            to_char_with(b"1", b'+', b"9G999", loc(b" ", E4, b".", b"-", b"+")),
+            b"      1"
+        );
+    }
+
+    #[test]
+    fn decimal_and_sign_symbols_clip() {
+        assert_eq!(
+            to_char_with(b"1.5", b'+', b"9D9", loc(b" ", b",", L12, b"-", b"+")),
+            b" 1CURRENCY5"
+        );
+        assert_eq!(
+            to_char_with(b"1", b'-', b"S9", loc(b" ", b",", b".", L12, b"+")),
+            b"CURRENCY1"
+        );
+        assert_eq!(
+            to_char_with(b"1", b'-', b"9S", loc(b" ", b",", b".", L12, b"+")),
+            b"1CURRENCY"
+        );
+        assert_eq!(
+            to_char_with(b"1", b'+', b"9S", loc(b" ", b",", b".", b"-", E4)),
+            "1€€".as_bytes()
+        );
     }
 }

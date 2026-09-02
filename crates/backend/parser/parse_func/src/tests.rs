@@ -1,8 +1,11 @@
 use mcx::{Mcx, MemoryContext};
 use parser_small1::{make_parsestate, ParseExprKind, ParseState};
-use types_core::catalog::{INT2OID, INT4OID, INT8OID, NUMERICOID, VOIDOID};
+use types_core::catalog::{INT2OID, INT4OID, INT8OID, INTERNALOID, NUMERICOID, VOIDOID};
 use types_core::{InvalidOid, Oid};
-use types_error::{ERRCODE_UNDEFINED_FUNCTION, ERRCODE_WRONG_OBJECT_TYPE};
+use types_error::{
+    ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_TOO_MANY_ARGUMENTS, ERRCODE_UNDEFINED_FUNCTION,
+    ERRCODE_WRONG_OBJECT_TYPE,
+};
 use types_nodes::rawnodes::FuncCall;
 use types_nodes::{Node, NodeList, String as PgStr};
 
@@ -96,6 +99,17 @@ fn install_fixture() {
                 "nfunc" => {
                     v.push(proc_candidate(mcx, 8888, &[INT4OID]));
                 }
+                "ifn" => {
+                    v.push(proc_candidate(mcx, 7001, &[INTERNALOID]));
+                }
+                "rfn" => {
+                    v.push(proc_candidate(mcx, 7002, &[]));
+                }
+                "vagg" => {
+                    let mut c = proc_candidate(mcx, 7003, &[ANYOID]);
+                    c.provariadic = ANYOID;
+                    v.push(c);
+                }
                 _ => {}
             }
             Ok(v)
@@ -120,6 +134,13 @@ fn install_fixture() {
                 2108 => Some(proc_shape(INT8OID, 1, b'a')),
                 2109 => Some(proc_shape(INT8OID, 1, b'a')),
                 9999 => Some(proc_shape(INT4OID, 0, b'f')),
+                7001 => Some(proc_shape(INT4OID, 1, b'f')),
+                7002 => Some(proc_shape(INTERNALOID, 0, b'f')),
+                7003 => {
+                    let mut s = proc_shape(INT8OID, 1, b'a');
+                    s.provariadic = ANYOID;
+                    Some(s)
+                }
                 _ => None,
             })
         });
@@ -129,6 +150,7 @@ fn install_fixture() {
                 2147 => Some(agg_shape(769, INT8OID)),
                 2108 => Some(agg_shape(1841, INT8OID)),
                 2109 => Some(agg_shape(1840, INT8OID)),
+                7003 => Some(agg_shape(1219, INT8OID)),
                 _ => None,
             })
         });
@@ -176,18 +198,88 @@ fn call<'mcx>(
 }
 
 fn void_param<'mcx>(mcx: Mcx<'mcx>) -> Node<'mcx> {
+    typed_param(mcx, VOIDOID)
+}
+
+fn typed_param<'mcx>(mcx: Mcx<'mcx>, paramtype: Oid) -> Node<'mcx> {
     Node::mk(
         mcx,
         types_nodes::primnodes::Param {
             paramkind: types_nodes::primnodes::ParamKind::PARAM_EXTERN,
             paramid: 1,
-            paramtype: VOIDOID,
+            paramtype,
             paramtypmod: -1,
             paramcollid: InvalidOid,
             location: -1,
         },
     )
     .unwrap()
+}
+
+// upstream 54649de65f08 (18.6): SQL cannot call functions that take or return internal.
+#[test]
+fn function_accepting_internal_is_0a000() {
+    install_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+
+    let fc = func_call(mcx, "ifn", false, false);
+    let fargs = NodeList::make1(mcx, typed_param(mcx, INTERNALOID)).unwrap();
+    let err = call(mcx, &mut pstate, fc, fargs, &[INTERNALOID]).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_FEATURE_NOT_SUPPORTED);
+    assert_eq!(err.message(), "functions accepting type \"internal\" cannot be called explicitly");
+}
+
+#[test]
+fn function_returning_internal_is_0a000() {
+    install_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+
+    let fc = func_call(mcx, "rfn", false, false);
+    let err = call(mcx, &mut pstate, fc, NodeList::nil(), &[]).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_FEATURE_NOT_SUPPORTED);
+    assert_eq!(err.message(), "functions returning type \"internal\" cannot be called explicitly");
+}
+
+// upstream 2a03f21daf59 (18.6): aggregates take at most FUNC_MAX_ARGS-1 arguments.
+fn int4_vars<'mcx>(mcx: Mcx<'mcx>, n: usize) -> (NodeList<'mcx>, Vec<Oid>) {
+    let mut fargs = NodeList::nil();
+    for _ in 0..n {
+        fargs.lappend(mcx, Node::mk_var(mcx, 1, 1, INT4OID, -1, InvalidOid, 0).unwrap()).unwrap();
+    }
+    (fargs, vec![INT4OID; n])
+}
+
+#[test]
+fn aggregate_with_100_args_is_54023() {
+    install_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+
+    let (fargs, types) = int4_vars(mcx, 100);
+    let fc = func_call(mcx, "vagg", false, false);
+    let err = call(mcx, &mut pstate, fc, fargs, &types).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_TOO_MANY_ARGUMENTS);
+    assert_eq!(err.message(), "aggregates cannot have more than 99 arguments");
+}
+
+#[test]
+fn aggregate_with_99_args_builds_aggref() {
+    install_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+
+    let (fargs, types) = int4_vars(mcx, 99);
+    let fc = func_call(mcx, "vagg", false, false);
+    let node = call(mcx, &mut pstate, fc, fargs, &types).unwrap();
+    let agg = node.as_aggref().unwrap();
+    assert_eq!(agg.aggfnoid, 7003);
+    assert_eq!(agg.args.len(), 99);
 }
 
 #[test]

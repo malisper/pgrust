@@ -1212,7 +1212,8 @@ fn execute_dml_stmt<'mcx>(
         r?
     };
     let params: Vec<Option<&str>> = values.iter().map(|v| v.as_deref()).collect();
-    let res = connection::exec_query_params(state.conn_key, state.query, &params)?;
+    let res =
+        connection::exec_query_params(state.conn_key, state.query, &params, state.query)?;
     let expected =
         if state.has_returning { ExecStatus::TuplesOk } else { ExecStatus::CommandOk };
     if res.status != expected {

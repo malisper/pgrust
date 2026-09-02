@@ -143,7 +143,7 @@ pub fn fc_clock_timestamp(
 }
 
 pub fn fc_timeofday(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    let mut buf = [0u8; 128];
+    let mut buf = [0u8; crate::TIMEOFDAY_BUF];
     let len = crate::timeofday_into(&mut buf);
     let mcx = fcinfo.result_mcx();
     let mut image = ::mcx::vec_with_capacity_in(mcx, 4 + len)?;

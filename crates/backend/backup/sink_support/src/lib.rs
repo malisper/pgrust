@@ -151,7 +151,12 @@ impl<'mcx> BbsinkOps<'mcx> for BbsinkProgress {
         bbsink_forward_end_backup(sink, state, endptr, endtli)
     }
 
+    // upstream e7564ee8cdcb (18.6): Clear base backup progress on backup failure
+    // bbsink_cleanup runs on both the success and the error path (PG_FINALLY
+    // in SendBaseBackup), so ending the progress command here clears the
+    // pg_stat_progress_basebackup row after a failed backup too.
     fn cleanup(&mut self, sink: &mut Bbsink<'mcx>, state: &mut BbsinkState) -> PgResult<()> {
+        pgstat_progress_end_command();
         bbsink_forward_cleanup(sink, state)
     }
 }
@@ -189,10 +194,6 @@ pub fn basebackup_progress_transfer_wal() {
         PROGRESS_BASEBACKUP_PHASE,
         PROGRESS_BASEBACKUP_PHASE_TRANSFER_WAL,
     );
-}
-
-pub fn basebackup_progress_done() {
-    pgstat_progress_end_command();
 }
 
 pub fn init_seams() {}

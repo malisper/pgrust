@@ -292,7 +292,7 @@ pub fn PersistHoldablePortal(portal: &Portal<'static>) -> PgResult<()> {
 
             // detoast=true: the stored rows must not depend on the snapshot.
             let mut treceiver = tcop_dest::CreateDestReceiver(CommandDest::Tuplestore);
-            tcop_dest::SetTuplestoreDestReceiverParams(&mut treceiver, hold_store, true);
+            tcop_dest::SetTuplestoreDestReceiverParams(&mut treceiver, hold_store, true, None, None);
             execmain_seams::executor_run::call(query_desc, direction, 0, &mut treceiver)?;
             treceiver.destroy();
         }

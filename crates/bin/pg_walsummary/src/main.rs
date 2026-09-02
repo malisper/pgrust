@@ -14,7 +14,7 @@ use types_core::{BlockNumber, ForkNumber, InvalidBlockNumber};
 use types_storage::RelFileLocator;
 
 /// The pg_walsummary version whose behavior this port tracks.
-pub const PG_WALSUMMARY_VERSION: &str = "18.3";
+pub const PG_WALSUMMARY_VERSION: &str = "18.6";
 
 const PROGNAME: &str = "pg_walsummary";
 

@@ -183,3 +183,122 @@ fn invalidation_cause_names() {
     assert_eq!(GetSlotInvalidationCauseName(RS_INVAL_IDLE_TIMEOUT), "idle_timeout");
     assert_eq!(GetSlotInvalidationCause("rows_removed"), RS_INVAL_HORIZON);
 }
+
+// One-shot lwlock / proc / procarray / slot-array bring-up (the twophase
+// crate's test setup, minus its own state).
+fn shmem_setup() {
+    static SETUP: std::sync::Once = std::sync::Once::new();
+    SETUP.call_once(|| {
+        init_small::globals::SetMaxConnections(8);
+        init_small::globals::set_max_worker_processes(2);
+        init_small::globals::SetMaxBackends(17);
+        init_small::globals::SetMyProcPid(4242);
+        init_small::globals::SetMyDatabaseId(5);
+
+        pg_sema_seams::pg_semaphore_create::set(|_| {});
+        pg_sema_seams::pg_semaphore_reset::set(|_| {});
+        pg_sema_seams::pg_semaphore_lock::set(|_| {});
+        pg_sema_seams::pg_semaphore_unlock::set(|_| {});
+        s_lock_seams::perform_spin_delay::set(|_| std::thread::yield_now());
+        s_lock_seams::finish_spin_delay::set(|_| {});
+        s_lock_seams::set_spins_per_delay::set(|_| {});
+        s_lock_seams::update_spins_per_delay::set(|v| v);
+        latch_seams::own_latch::set(|_| {});
+        latch_seams::disown_latch::set(|_| {});
+        latch_seams::set_latch::set(|_| {});
+        latch_seams::set_latch_my_latch::set(|| {});
+        latch_seams::wait_latch_my_latch::set(|_, _, _| 0);
+        latch_seams::reset_latch_my_latch::set(|| {});
+        miscinit_seams::switch_to_shared_latch::set(|| {});
+        miscinit_seams::switch_back_to_local_latch::set(|| {});
+        waitevent_seams::pgstat_set_wait_event_storage::set(|_| {});
+        waitevent_seams::pgstat_report_wait_start::set(|_| {});
+        waitevent_seams::pgstat_report_wait_end::set(|| {});
+        waitevent_seams::pgstat_reset_wait_event_storage::set(|| {});
+        ipc_seams::on_shmem_exit::set(|_, _| {});
+        deadlock_seams::init_dead_lock_checking::set(|| Ok(()));
+        pmsignal_seams::register_postmaster_child_active::set(|| {});
+        syncrep_seams::sync_rep_cleanup_at_proc_exit::set(|| {});
+        condition_variable_seams::condition_variable_cancel_sleep::set(|| false);
+        autovacuum_seams::wake_autovacuum_launcher::set(|| {});
+        lock_seams::abort_strong_lock_acquire::set(|| {});
+        lock_seams::get_awaited_lock_hashcode::set(|| None);
+        lock_seams::lock_release_all::set(|_, _| Ok(()));
+        timeout_seams::disable_timeouts::set(|_| {});
+        shmem_seams::add_size::set(|a, b| Ok(a.checked_add(b).expect("size overflow")));
+        shmem_seams::mul_size::set(|a, b| Ok(a.checked_mul(b).expect("size overflow")));
+        shmem_seams::shmem_alloc::set(|size| {
+            Ok(Box::leak(vec![0u8; size].into_boxed_slice()).as_mut_ptr())
+        });
+        xact_seams::transaction_id_is_current_transaction_id::set(|_| false);
+        xact_seams::get_current_sub_transaction_id::set(|| 1);
+        xlog_seams::recovery_in_progress::set(|| false);
+        transam_seams::transaction_id_did_abort::set(|_| Ok(false));
+        subtrans_seams::sub_trans_get_topmost_transaction::set(Ok);
+        superuser_seams::superuser_arg::set(|_| Ok(false));
+
+        walsender_config::init_seams();
+        guc_tables::vars::max_replication_slots.write(2);
+
+        lwlock::CreateLWLocks(false).unwrap();
+        lmgr_proc::init_seams();
+        lmgr_proc::InitProcGlobal(&lmgr_proc::ProcGlobalConfig {
+            autovacuum_worker_slots: 3,
+            max_wal_senders: 2,
+            max_prepared_xacts: 2,
+            fastpath_lock_groups_per_backend: 1,
+        });
+        procarray::init_seams();
+        procarray::ProcArrayShmemInit();
+        // The slot-drop path stores the required-LSN floor into XLogCtl.
+        static XLOG_BUFFERS: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(64);
+        guc_tables::vars::XLOGbuffers.install_if_absent(guc_tables::GucVarAccessors {
+            get: || XLOG_BUFFERS.load(std::sync::atomic::Ordering::Relaxed),
+            set: |v| XLOG_BUFFERS.store(v, std::sync::atomic::Ordering::Relaxed),
+        });
+        transam_xlog::XLOGShmemInit();
+        crate::ReplicationSlotsShmemInit();
+
+        lmgr_proc::InitProcess(types_core::BackendType::Backend).expect("InitProcess");
+        procarray::ProcArrayAdd(lmgr_proc::MyProc().unwrap()).expect("ProcArrayAdd self");
+    });
+}
+
+// upstream f833c92077a1 (18.5): Fix race in ReplicationSlotRelease() for
+// ephemeral slots — once dropped, the entry is another backend's to reuse,
+// so the release must not write effective_xmin / inactive_since into it.
+#[test]
+fn release_of_ephemeral_slot_leaves_the_dropped_entry_untouched() {
+    use crate::{MyReplicationSlot, ReplicationSlotCtl, ReplicationSlotRelease, SetMyReplicationSlot};
+
+    shmem_setup();
+    let s = &ReplicationSlotCtl()[0];
+
+    // An ephemeral slot mid-creation: acquired, data.xmin invalid while
+    // effective_xmin holds the temporary horizon, never inactive.
+    let mut d = ReplicationSlotPersistentData::default();
+    d.name.namestrcpy("eph");
+    d.persistency = RS_EPHEMERAL;
+    // SAFETY: single-threaded test; nobody else references this entry.
+    unsafe {
+        s.data.set(d);
+        s.in_use.set(true);
+        s.active_pid.set(4242);
+        s.effective_xmin.set(1234);
+        s.inactive_since.set(0);
+    }
+    SetMyReplicationSlot(Some(s));
+
+    ReplicationSlotRelease().unwrap();
+
+    assert!(MyReplicationSlot().is_none());
+    // SAFETY: as above.
+    unsafe {
+        assert!(!s.in_use.get());
+        assert_eq!(s.active_pid.get(), 0);
+        // Not written to after the drop (both landed on the dead entry
+        // before the fix).
+        assert_eq!(s.effective_xmin.get(), 1234);
+        assert_eq!(s.inactive_since.get(), 0);
+    }
+}

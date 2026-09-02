@@ -154,7 +154,17 @@ fn clean_shutdown_boot_path() {
     write_segment_with_checkpoint(&dir, ckpt_loc, &ckpt);
     transam_xlog::ReadControlFile().unwrap();
 
+    // upstream 311e66df9cc8 (18.6): a startup process can begin life with a
+    // stale reachedConsistency=true (C: inherited from the postmaster on a
+    // crash reset after hot standby reached consistency; pgrust: the startup
+    // thread shares the process-global outright). InitWalRecovery must clear
+    // it, or CheckRecoveryConsistency skips the minRecoveryPoint comparison.
+    REACHED_CONSISTENCY.store(true, Relaxed);
     let init = xlogrecovery_seams::init_wal_recovery::call().unwrap();
+    assert!(
+        !reached_consistency(),
+        "InitWalRecovery must clear an inherited reachedConsistency"
+    );
     assert!(init.was_shutdown);
     assert!(!init.have_backup_label && !init.have_tblspc_map);
     assert!(!xlogutils::in_recovery());

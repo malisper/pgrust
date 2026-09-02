@@ -436,6 +436,11 @@ impl QueryTaskBindingGuard {
     /// engagements.
     fn finish_session_into(&mut self, first: &mut Option<Box<PgError>>) {
         self.guc_binding.take();
+        // Bind installs the task's security context after the GUC restore (C's
+        // worker order); lift it before the baseline GUC replay so the role /
+        // session_authorization assign hooks it re-fires see context 0, as C asserts.
+        let (task_user_id, _) = miscinit::GetUserIdAndSecContext();
+        miscinit::SetUserIdAndSecContext(task_user_id, 0);
         if let Some(gucs) = self.saved_gucs.take() {
             guc::store::replace_exact_guc_state(&gucs);
         }

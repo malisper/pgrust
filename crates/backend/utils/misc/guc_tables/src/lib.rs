@@ -470,6 +470,10 @@ fn install_guc_tables_owned_vars() {
         get: backing::oauth_validator_libraries,
         set: backing::set_oauth_validator_libraries,
     });
+    vars::output_plugin_libraries_string.install(GucVarAccessors {
+        get: backing::output_plugin_libraries_string,
+        set: backing::set_output_plugin_libraries_string,
+    });
     vars::SSLPreferServerCiphers.install(GucVarAccessors {
         get: backing::SSLPreferServerCiphers,
         set: backing::set_SSLPreferServerCiphers,

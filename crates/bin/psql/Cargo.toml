@@ -16,4 +16,5 @@ pg_hmac = { path = "../../common/hmac" }
 pg_md5 = { path = "../../common/md5" }
 saslprep = { path = "../../common/saslprep" }
 scram_common = { path = "../../common/scram_common" }
+timingsafe_bcmp = { path = "../../port/timingsafe_bcmp" }
 wchar = { path = "../../common/wchar" }

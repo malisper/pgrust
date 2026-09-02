@@ -658,6 +658,36 @@ fn prepare_truncate_clears_tail() {
     );
 }
 
+// upstream 9540c0e5dd40 (18.4): the side-effect-free VM length the WAL
+// summarizer records as the VM fork's limit block.
+#[test]
+fn truncation_length_matches_prepare_truncate() {
+    assert_eq!(visibilitymap_truncation_length(0), 0);
+    assert_eq!(visibilitymap_truncation_length(1), 1);
+    assert_eq!(visibilitymap_truncation_length(5), 1);
+    assert_eq!(visibilitymap_truncation_length(HEAPBLOCKS_PER_PAGE - 1), 1);
+    assert_eq!(visibilitymap_truncation_length(HEAPBLOCKS_PER_PAGE), 1);
+    assert_eq!(visibilitymap_truncation_length(HEAPBLOCKS_PER_PAGE + 1), 2);
+    assert_eq!(visibilitymap_truncation_length(HEAPBLOCKS_PER_PAGE + 5), 2);
+    assert_eq!(visibilitymap_truncation_length(2 * HEAPBLOCKS_PER_PAGE), 2);
+    // C sums in uintptr_t: MaxBlockNumber rounds up, it does not wrap to 0.
+    assert_eq!(visibilitymap_truncation_length(u32::MAX - 1), 131458);
+
+    // Same answer as prepare_truncate's kept-page count, on and off a
+    // map-page boundary.
+    let _s = serial();
+    let ctx = MemoryContext::new("test");
+    let rel = test_relation(ctx.mcx(), 4243);
+    for n in [1, 5, HEAPBLOCKS_PER_PAGE, HEAPBLOCKS_PER_PAGE + 5, 2 * HEAPBLOCKS_PER_PAGE] {
+        setup(vec![vm_page(&[]), vm_page(&[]), vm_page(&[])], true);
+        assert_eq!(
+            visibilitymap_prepare_truncate(&rel, n).unwrap(),
+            visibilitymap_truncation_length(n),
+            "nheapblocks = {n}"
+        );
+    }
+}
+
 #[test]
 fn map_geometry_matches_c() {
     assert_eq!(CONTENTS_OFF, 24);
@@ -701,4 +731,70 @@ fn set_bits_catalog_rel_flags_wal_record() {
         assert_eq!(rec.main[4], VISIBILITYMAP_ALL_VISIBLE | 0x04);
     });
     assert_eq!(map_byte(0), 0b0100);
+}
+
+// upstream f581fa729d8e (18.5): visibilitymap_clear_locked leaves the VM
+// buffer lock to the caller (who holds it across the WAL insert that
+// registers the buffer); visibilitymap_clear is the lock/unlock wrapper.
+#[test]
+fn clear_locked_leaves_lock_to_caller_and_reports_cleared() {
+    let _s = serial();
+    let ctx = MemoryContext::new("test");
+    let rel = test_relation(ctx.mcx(), 4242);
+    setup(vec![vm_page(&[(0, 0x03)])], true);
+
+    let mut vmbuf = VmBuffer::new();
+    visibilitymap_pin(&rel, 0, &mut vmbuf).unwrap();
+    assert_eq!(vmbuf.block_number(), 0);
+    bufmgr_seams::lock_buffer::call(vmbuf.buffer(), bufmgr_seams::BUFFER_LOCK_EXCLUSIVE).unwrap();
+    let locks_before = with_fake(|f| f.lock_calls);
+
+    assert!(visibilitymap_clear_locked(&rel, 0, &vmbuf, VISIBILITYMAP_ALL_FROZEN).unwrap());
+    assert_eq!(map_byte(0), 0x01, "only the all-frozen bit went");
+    with_fake(|f| {
+        assert_eq!(f.lock_calls, locks_before, "no lock traffic inside clear_locked");
+        assert_eq!(f.locks[0], -1, "still exclusively locked by the caller");
+        assert_eq!(f.dirty[0], 1);
+    });
+    assert!(
+        !visibilitymap_clear_locked(&rel, 0, &vmbuf, VISIBILITYMAP_ALL_FROZEN).unwrap(),
+        "already clear: nothing cleared"
+    );
+    with_fake(|f| assert_eq!(f.dirty[0], 1, "nothing dirtied either"));
+    bufmgr_seams::lock_buffer::call(vmbuf.buffer(), bufmgr_seams::BUFFER_LOCK_UNLOCK).unwrap();
+
+    // The unlocked entry point takes and drops the lock itself.
+    let locks_before = with_fake(|f| f.lock_calls);
+    assert!(visibilitymap_clear(&rel, 0, &vmbuf, VISIBILITYMAP_VALID_BITS).unwrap());
+    assert_eq!(map_byte(0), 0);
+    with_fake(|f| {
+        assert_eq!(f.lock_calls, locks_before + 2, "exclusive + unlock");
+        assert_eq!(f.locks[0], 0);
+    });
+
+    // A buffer for the wrong map page is refused before anything is touched.
+    let err =
+        visibilitymap_clear_locked(&rel, HEAPBLOCKS_PER_PAGE, &vmbuf, VISIBILITYMAP_VALID_BITS)
+            .unwrap_err();
+    assert_eq!(err.message, "wrong buffer passed to visibilitymap_clear");
+    vmbuf.release();
+}
+
+// upstream f581fa729d8e (18.5): redo wraps the VM buffer XLogReadBufferForRedo
+// handed back (pinned by the reader) so visibilitymap_clear_locked /
+// visibilitymap_pin_ok can address it; release returns that pin.
+#[test]
+fn adopt_wraps_a_redo_pinned_vm_buffer() {
+    let _s = serial();
+    setup(vec![vm_page(&[]), vm_page(&[])], true);
+    with_fake(|f| f.pins[1] = 1);
+    let mut vmbuf = VmBuffer::adopt(2).expect("valid buffer");
+    assert!(vmbuf.is_valid());
+    assert_eq!(vmbuf.buffer(), 2);
+    assert_eq!(vmbuf.block_number(), 1);
+    assert!(visibilitymap_pin_ok(HEAPBLOCKS_PER_PAGE, &vmbuf));
+    assert!(!visibilitymap_pin_ok(0, &vmbuf));
+    vmbuf.release();
+    with_fake(|f| assert_eq!(f.pins[1], 0));
+    assert!(VmBuffer::adopt(::types_core::InvalidBuffer).is_none());
 }

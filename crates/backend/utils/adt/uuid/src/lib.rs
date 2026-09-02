@@ -12,7 +12,8 @@ use mcx::Mcx;
 use stringinfo::StringInfo;
 use types_core::TimestampTz;
 use types_error::{
-    ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_INVALID_TEXT_REPRESENTATION,
+    ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE,
+    ERRCODE_INVALID_TEXT_REPRESENTATION,
 };
 pub use types_fmgr::UUID_LEN;
 
@@ -26,6 +27,18 @@ const US_PER_MS: i64 = 1_000;
 const NS_PER_MS: i64 = 1_000_000;
 const NS_PER_US: i64 = 1_000;
 const GREGORIAN_EPOCH_JDATE: i64 = 2_299_161;
+
+// upstream c31b0fca059c (18.6): Reject infinite and out-of-range interval shifts in uuidv7().
+/// The offset between the PostgreSQL epoch (2000-01-01) and the Unix epoch
+/// (1970-01-01) in microseconds. Subtract this from Unix-epoch microseconds
+/// to get a TimestampTz.
+const PG_UNIX_EPOCH_OFFSET_US: i64 =
+    (POSTGRES_EPOCH_JDATE as i64 - UNIX_EPOCH_JDATE as i64) * SECS_PER_DAY as i64 * USECS_PER_SEC;
+/// Valid timestamp range for UUID version 7, in PostgreSQL-epoch microseconds.
+/// UUIDv7 uses a 48-bit unsigned millisecond field relative to the Unix
+/// epoch, so the representable window is [1970-01-01, ~10889].
+const UUIDV7_MIN_TIMESTAMP: i64 = -PG_UNIX_EPOCH_OFFSET_US;
+const UUIDV7_MAX_TIMESTAMP: i64 = ((1i64 << 48) - 1) * US_PER_MS - PG_UNIX_EPOCH_OFFSET_US;
 
 // C: 10 sub-ms precision bits on __darwin__/_MSC_VER (µs clocks), 12 elsewhere.
 #[cfg(target_os = "macos")]
@@ -109,26 +122,52 @@ pub fn uuidv7() -> PgResult<PgUuid> {
 pub fn uuidv7_interval(shift: &adt_datetime::Interval) -> PgResult<PgUuid> {
     let ns = get_real_time_ns_ascending();
 
-    let ts: TimestampTz = ns / NS_PER_US
-        - (POSTGRES_EPOCH_JDATE as i64 - UNIX_EPOCH_JDATE as i64)
-            * SECS_PER_DAY as i64
-            * USECS_PER_SEC;
+    // upstream c31b0fca059c (18.6): Reject infinite and out-of-range interval shifts in uuidv7().
+    // Reject infinite intervals before any arithmetic (18.3 wrapped the epoch
+    // re-base under -fwrapv and produced a garbage UUID).
+    if shift.not_finite() {
+        return Err(uuidv7_infinite_interval_err().into());
+    }
+
+    // Shift the current timestamp by the given interval: convert the Unix
+    // epoch to TimestampTz and use timestamptz_pl_interval() so sub-second
+    // precision is kept.
+    let ts: TimestampTz = ns / NS_PER_US - PG_UNIX_EPOCH_OFFSET_US;
     let ts = adt_timestamp::interval::timestamptz_pl_interval_internal(ts, shift, None)?;
-    // C (uuid.c uuidv7_interval): an infinite interval shift makes
-    // timestamptz_pl_interval return DT_NOEND/DT_NOBEGIN (INT64_MAX/MIN + 1)
-    // and the epoch re-base below overflows int64; PostgreSQL builds with
-    // -fwrapv so the arithmetic WRAPS and a UUID is still produced
-    // (C 18.3: SELECT uuidv7('infinity'::interval) returns a UUID).
-    let us = ts.wrapping_add(
-        (POSTGRES_EPOCH_JDATE as i64 - UNIX_EPOCH_JDATE as i64)
-            * SECS_PER_DAY as i64
-            * USECS_PER_SEC,
-    );
+
+    // Reject timestamps outside the range representable by UUID version 7's
+    // 48-bit millisecond field. Compared in PostgreSQL-epoch units so that
+    // the conversion back to Unix-epoch microseconds cannot overflow.
+    if ts < UUIDV7_MIN_TIMESTAMP || ts > UUIDV7_MAX_TIMESTAMP {
+        return Err(uuidv7_timestamp_out_of_range_err().into());
+    }
+
+    // Convert the TimestampTz value to a Unix-epoch timestamp in usec.
+    let us = ts + PG_UNIX_EPOCH_OFFSET_US;
 
     generate_uuidv7(
         (us / US_PER_MS) as u64,
         ((us % US_PER_MS) * NS_PER_US + ns % NS_PER_US) as u32,
     )
+}
+
+// upstream c31b0fca059c (18.6): Reject infinite and out-of-range interval shifts in uuidv7().
+#[cold]
+#[inline(never)]
+fn uuidv7_infinite_interval_err() -> PgError {
+    PgError::error("interval out of range for UUID version 7")
+        .with_sqlstate(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE)
+        .with_detail("UUID version 7 does not support infinite intervals.")
+}
+
+#[cold]
+#[inline(never)]
+fn uuidv7_timestamp_out_of_range_err() -> PgError {
+    PgError::error("timestamp out of range for UUID version 7")
+        .with_sqlstate(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE)
+        .with_detail(
+            "UUID version 7 supports timestamps from 1970-01-01 to approximately year 10889.",
+        )
 }
 
 #[cold]

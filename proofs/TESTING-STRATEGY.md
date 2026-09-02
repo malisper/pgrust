@@ -75,8 +75,12 @@ doing the same for typcache via a generated static-catalog mock.
   never written by pgrust; pinned-transcript harnesses are minted from live C
   (`scripts/auth-regen-expected.sh`). The oracle is sound.
 - Overlay: `regress/overlay/sql/` (154 files) is byte-identical vendor SQL plus
-  `-- pgrust:` annotations only (`cmp` guard enforced); 10,608 `pgrust:rowsort`
-  annotations relax row order; everything else is byte-exact.
+  `-- pgrust:` annotations only (`cmp` guard enforced); 10,609 `pgrust:rowsort`
+  annotations relax row order; 4 `pgrust:ruled <ledger-id>` annotations
+  (portals x2, json x2) mask the result block of a BUG-LEDGER-ruled deliberate
+  divergence — every masking is printed as a `ruled:` line in the run log and
+  an id absent from the ledger docs is refused; everything else is byte-exact.
+  Gate contract: docs/conformance/regress-gate.md.
 - Anti-gaming: `scripts/lane-gates.sh` adds engagement floors and a refusal
   allowlist ("regress-parity alone is gameable").
 - Isolation: 119 upstream specs + 12 overlay EPQ specs via real

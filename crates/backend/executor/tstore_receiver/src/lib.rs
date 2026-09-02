@@ -1,6 +1,8 @@
 // tstoreReceiver.c; the tupmap arm is a loud panic naming its lane.
 #![allow(non_snake_case)]
 
+use std::rc::Rc;
+
 use ::datum::Datum;
 use ::mcx::MemoryContext;
 use ::types_error::PgResult;
@@ -14,9 +16,12 @@ use ::types_tuple::TupleDescData;
 #[cfg(test)]
 mod tests;
 
-pub struct DrTstore {
+pub struct DrTstore<'mcx> {
     tstore: TuplestoreHandle,
     detoast: bool,
+    // upstream 37b8f3b0e05e (18.6): Cross-check the type of a portal running EXECUTE or FETCH.
+    target_tupdesc: Option<Rc<TupleDescData<'mcx>>>,
+    map_failure_msg: Option<&'static str>,
     needtoast: bool,
     scratch: Option<MemoryContext>,
     /// SE-R41 (notes/se-r41-retire.md §3.3): the §4.2 row-identity sidecar
@@ -28,10 +33,12 @@ pub struct DrTstore {
     capture_sidecar: TuplestoreHandle,
 }
 
-pub fn tstore_create_DR() -> DrTstore {
+pub fn tstore_create_DR<'mcx>() -> DrTstore<'mcx> {
     DrTstore {
         tstore: TuplestoreHandle::NULL,
         detoast: false,
+        target_tupdesc: None,
+        map_failure_msg: None,
         needtoast: false,
         scratch: None,
         capture_sidecar: TuplestoreHandle::NULL,
@@ -39,17 +46,29 @@ pub fn tstore_create_DR() -> DrTstore {
 }
 
 // C's tContext lives inside the store behind the handle.
-pub fn set_params(myState: &mut DrTstore, tstore: TuplestoreHandle, detoast: bool) {
+pub fn set_params<'mcx>(
+    myState: &mut DrTstore<'mcx>,
+    tstore: TuplestoreHandle,
+    detoast: bool,
+    target_tupdesc: Option<Rc<TupleDescData<'mcx>>>,
+    map_failure_msg: Option<&'static str>,
+) {
+    debug_assert!(
+        !(detoast && target_tupdesc.is_some()),
+        "tstoreReceiver: detoast with target_tupdesc unsupported"
+    );
     myState.tstore = tstore;
     myState.detoast = detoast;
+    myState.target_tupdesc = target_tupdesc;
+    myState.map_failure_msg = map_failure_msg;
 }
 
 /// SE-R41: arm/read the capture sidecar (see the field doc).
-pub fn set_capture_sidecar(myState: &mut DrTstore, sidecar: TuplestoreHandle) {
+pub fn set_capture_sidecar(myState: &mut DrTstore<'_>, sidecar: TuplestoreHandle) {
     myState.capture_sidecar = sidecar;
 }
 
-pub fn capture_sidecar(myState: &DrTstore) -> Option<TuplestoreHandle> {
+pub fn capture_sidecar(myState: &DrTstore<'_>) -> Option<TuplestoreHandle> {
     if myState.capture_sidecar.is_null() {
         None
     } else {
@@ -57,7 +76,7 @@ pub fn capture_sidecar(myState: &DrTstore) -> Option<TuplestoreHandle> {
     }
 }
 
-impl DrTstore {
+impl<'mcx> DrTstore<'mcx> {
     pub fn startup(&mut self, _operation: i32, typeinfo: &TupleDescData<'_>) -> PgResult<()> {
         let natts = typeinfo.natts as usize;
         self.needtoast = self.detoast
@@ -66,6 +85,16 @@ impl DrTstore {
                 .any(|attr| !attr.attisdropped && attr.attlen == -1);
         if self.needtoast && self.scratch.is_none() {
             self.scratch = Some(MemoryContext::new_bump("tstoreReceiver detoast"));
+        }
+        // upstream 37b8f3b0e05e (18.6): Cross-check the type of a portal running EXECUTE or FETCH.
+        if let Some(target) = &self.target_tupdesc {
+            let msg = self.map_failure_msg.expect("target_tupdesc without map_failure_msg");
+            let identity = tuplestore::hold::with_store(self.tstore, |store| {
+                tupdesc::convert_tuples_by_position(store.mcx(), typeinfo, target, msg)
+                    .map(|tupmap| tupmap.is_none())
+            })?;
+            // Non-identity needs dropped/missing columns; portal result descriptors have none.
+            assert!(identity, "tstoreReceiveSlot_tupmap: attrmap conversion not ported");
         }
         Ok(())
     }

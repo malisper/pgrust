@@ -9,6 +9,7 @@ use scram_common::{
     SCRAM_SHA_256_PLUS_NAME,
 };
 use stringinfo::StringInfo;
+use timingsafe_bcmp::timingsafe_bcmp;
 use types_error::{
     PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INTERNAL_ERROR,
     ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION, ERRCODE_PROTOCOL_VIOLATION, ERROR,
@@ -616,8 +617,11 @@ fn verify_final_nonce(state: &ScramState) -> bool {
     if state.client_final_nonce.len() != client_len + server_len {
         return false;
     }
-    state.client_final_nonce[..client_len] == state.client_nonce[..]
-        && state.client_final_nonce[client_len..] == state.server_nonce[..]
+    // upstream d93ef413174d (18.4): Apply timingsafe_bcmp() in authentication paths
+    if timingsafe_bcmp(&state.client_final_nonce[..client_len], &state.client_nonce) != 0 {
+        return false;
+    }
+    timingsafe_bcmp(&state.client_final_nonce[client_len..], &state.server_nonce) == 0
 }
 
 fn verify_client_proof(state: &mut ScramState) -> bool {
@@ -634,7 +638,9 @@ fn verify_client_proof(state: &mut ScramState) -> bool {
     }
 
     let client_stored_key = scram_h(&state.client_key);
-    client_stored_key[..state.key_length] == state.stored_key[..state.key_length]
+    // upstream d93ef413174d (18.4): Apply timingsafe_bcmp() in authentication paths
+    let n = state.key_length;
+    timingsafe_bcmp(&client_stored_key[..n], &state.stored_key[..n]) == 0
 }
 
 fn build_server_final_message(state: &ScramState) -> Vec<u8> {

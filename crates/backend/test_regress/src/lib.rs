@@ -1172,6 +1172,62 @@ fn fc_test_relpath(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<
     Ok(Datum::null())
 }
 
+/* ============= test_pglz_compress / test_pglz_decompress ================= */
+// upstream 42473d90098d (18.4): Add tests for low-level PGLZ [de]compression routines
+
+/// C `test_pglz_compress(bytea) RETURNS bytea`: pglz_compress() under
+/// PGLZ_strategy_always; NULL where the compressor returns -1.
+fn fc_test_pglz_compress(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let compressed = {
+        // SAFETY: strict fn, bytea arg live for the call.
+        let input = unsafe { fcinfo.arg_varlena_packed(0) }?;
+        let source = input.data();
+        let maxout = pglz::pglz_max_output(source.len());
+        // C: palloc(maxout + VARHDRSZ), SET_VARSIZE to the compressed length.
+        let mut result = varlena::image_with_header(fcinfo.result_mcx(), maxout)?;
+        match pglz::pglz_compress_into(
+            source,
+            &mut result.spare_capacity_mut()[..maxout],
+            &pglz::PGLZ_STRATEGY_ALWAYS,
+        ) {
+            Some(clen) => {
+                // SAFETY: 4 header bytes appended + clen compressed bytes initialized.
+                unsafe { result.set_len(varlena::VARHDRSZ + clen) };
+                Some(varlena_result(::datum::Varlena::from_image(result)))
+            }
+            None => None,
+        }
+    };
+    Ok(compressed.unwrap_or_else(|| fcinfo.return_null()))
+}
+
+/// C `test_pglz_decompress(bytea, int4, bool) RETURNS bytea`:
+/// pglz_decompress() into a `rawsize` buffer under `check_complete`;
+/// `elog(ERROR)` where the decompressor returns -1.
+fn fc_test_pglz_decompress(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: strict fn, bytea arg live for the call.
+    let input = unsafe { fcinfo.arg_varlena_packed(0) }?;
+    let rawsize = fcinfo.arg_i32(1);
+    let check_complete = fcinfo.arg_bool(2);
+
+    if rawsize < 0 {
+        return Err(err("rawsize must not be negative".to_string()));
+    }
+    let rawsize = rawsize as usize;
+
+    // C: palloc(rawsize + VARHDRSZ), SET_VARSIZE to the decompressed length.
+    let mut result = varlena::image_with_header(fcinfo.result_mcx(), rawsize)?;
+    let dlen = pglz::pglz_decompress(
+        input.data(),
+        &mut result.spare_capacity_mut()[..rawsize],
+        check_complete,
+    )
+    .ok_or_else(|| err("pglz_decompress failed".to_string()))?;
+    // SAFETY: 4 header bytes appended + dlen decompressed bytes initialized.
+    unsafe { result.set_len(varlena::VARHDRSZ + dlen) };
+    Ok(varlena_result(::datum::Varlena::from_image(result)))
+}
+
 /* ========================== registry lookup ============================== */
 
 fn lookup(function: &str) -> Option<PGFunction> {
@@ -1205,6 +1261,8 @@ fn lookup(function: &str) -> Option<PGFunction> {
         "test_valid_server_encoding" => fc_test_valid_server_encoding,
         "binary_coercible" => fc_binary_coercible,
         "test_relpath" => fc_test_relpath,
+        "test_pglz_compress" => fc_test_pglz_compress,
+        "test_pglz_decompress" => fc_test_pglz_decompress,
         _ => return None,
     })
 }
@@ -1245,6 +1303,69 @@ mod tests {
         assert_eq!(REL_PATH_STR_MAXLEN, 71);
     }
 
+    /// upstream 42473d90098d (18.4): the regress.c pglz helpers over the
+    /// compression_pglz.sql vectors — roundtrips, both rawsize mismatches,
+    /// and the truncated-match-tag corruptions.
+    #[test]
+    fn pglz_helpers_match_compression_pglz_vectors() {
+        use ::datum::varlena::{set_varsize_4b, VarlenaRef, VARHDRSZ};
+        use ::mcx::MemoryContext;
+        use ::types_error::ERRCODE_INTERNAL_ERROR;
+
+        fn bytea(payload: &[u8]) -> Vec<u8> {
+            let mut image = set_varsize_4b(VARHDRSZ + payload.len()).to_vec();
+            image.extend_from_slice(payload);
+            image
+        }
+        fn payload(d: Datum) -> Vec<u8> {
+            // SAFETY: a 4B-header varlena result left in the armed context.
+            unsafe { VarlenaRef::from_ptr(d.as_u64() as usize as *const u8) }.data().to_vec()
+        }
+        let ctx = MemoryContext::new("t");
+        let compress = |input: &[u8]| -> Option<Vec<u8>> {
+            let image = bytea(input);
+            let mut fci = fmgr::LocalFcinfo::<1>::new(0);
+            // SAFETY: ctx outlives the call and the payload reads.
+            unsafe { fci.set_result_mcx(ctx.mcx()) };
+            fci.set_arg(0, Datum::from_usize(image.as_ptr() as usize));
+            let d = fc_test_pglz_compress(None, &mut fci).unwrap();
+            (!fci.isnull).then(|| payload(d))
+        };
+        let decompress = |src: &[u8], rawsize: i32, check_complete: bool| -> PgResult<Vec<u8>> {
+            let image = bytea(src);
+            let mut fci = fmgr::LocalFcinfo::<3>::new(0);
+            // SAFETY: ctx outlives the call and the payload reads.
+            unsafe { fci.set_result_mcx(ctx.mcx()) };
+            fci.set_arg(0, Datum::from_usize(image.as_ptr() as usize));
+            fci.set_arg(1, Datum::from_i32(rawsize));
+            fci.set_arg(2, Datum::from_bool(check_complete));
+            fc_test_pglz_decompress(None, &mut fci).map(payload)
+        };
+        let failed = |r: PgResult<Vec<u8>>| {
+            let e = r.unwrap_err();
+            assert_eq!(e.sqlstate(), ERRCODE_INTERNAL_ERROR);
+            assert_eq!(e.message(), "pglz_decompress failed");
+        };
+
+        let raw = b"abcd".repeat(100);
+        let c = compress(&raw).expect("PGLZ_strategy_always compresses 'abcd' x 100");
+        assert_eq!(decompress(&c, 400, false).unwrap(), raw);
+        assert_eq!(decompress(&c, 400, true).unwrap(), raw);
+        // rawsize too large: the destination never fills.
+        failed(decompress(&c, 500, true));
+        // rawsize too small: the source is not fully consumed.
+        failed(decompress(&c, 100, true));
+        // Set control bit with read of a match tag, no data follows.
+        assert_eq!(decompress(b"\x01", 1024, false).unwrap(), b"");
+        failed(decompress(b"\x01", 1024, true));
+        // Set control bit with read of a match tag, 1 byte follows.
+        failed(decompress(b"\x01\xff", 1024, false));
+        failed(decompress(b"\x01\xff", 1024, true));
+        // Match tag whose length nibble is 3 bytes (extended), no data follows.
+        failed(decompress(b"\x01\x0f\x01", 1024, false));
+        failed(decompress(b"\x01\x0f\x01", 1024, true));
+    }
+
     #[test]
     fn lookup_covers_every_regress_symbol() {
         for sym in [
@@ -1257,6 +1378,7 @@ mod tests {
             "test_bytea_to_text", "test_text_to_bytea", "test_mblen_func",
             "test_text_to_wchars", "test_wchars_to_text",
             "test_valid_server_encoding", "binary_coercible", "test_relpath",
+            "test_pglz_compress", "test_pglz_decompress",
         ] {
             assert!(lookup(sym).is_some(), "regress symbol {sym} missing from lookup");
         }

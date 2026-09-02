@@ -46,3 +46,19 @@ seam_core::seam!(
         relation: Option<&'a Relation<'mcx>>,
     ) -> PgResult<()>
 );
+
+// upstream c8cd3d6976f7 (18.6): Avoid orphaned objects dependencies
+// get_object_catcache_oid / get_object_oid_index / get_object_attnum_oid /
+// get_object_class_descr (objectaddress.c) for crates below
+// catalog_objectaddress (pg_depend's dependencyLockAndCheckObject).
+#[derive(Clone, Copy)]
+pub struct ObjectClassProps {
+    pub oid_catcache_id: i32,
+    pub oid_index_oid: Oid,
+    pub attnum_oid: i32,
+    pub class_descr: &'static str,
+}
+
+seam_core::seam!(
+    pub fn get_object_class_props(class_id: Oid) -> ObjectClassProps
+);

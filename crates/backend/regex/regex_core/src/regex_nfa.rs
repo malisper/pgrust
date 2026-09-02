@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use ::mcx::Mcx;
 
 use crate::regex_consts::{DUPINF, REG_UEMPTYMATCH, REG_UIMPOSSIBLE};
-use crate::regex_error::{check_interrupt, err_assert, err_etoobig, RegResult};
+use crate::regex_error::{check_interrupt, err_assert, err_ecolors, err_etoobig, RegResult};
 use crate::regex_foundation::{maxcolor, pseudocolor};
 use crate::regguts::{
     chr, color, Arc, ArcId, Carc, Cnfa, ColorMap, Nfa, State, StateId, AHEAD, ARC_BOS, ARC_EOS,
@@ -2613,10 +2613,12 @@ pub fn compact<'mcx>(mcx: Mcx<'mcx>, nfa: &Nfa, cm: &ColorMap, cnfa: &mut Cnfa) 
                 // ([ncolors, MAX_COLOR]); the executor tells them apart by
                 // co >= ncolors. Bound the sum before the i16 cast so a huge
                 // lookaround count can't wrap a LACON color back into the
-                // char-color range (C fails cleanly with REG_ETOOBIG here).
+                // char-color range.
+                // upstream f3cee4dc4330 (18.4): Harden our regex engine against integer overflow in size calculations.
+                // C: `a->co > MAX_COLOR - cnfa->ncolors` -> NERR(REG_ECOLORS).
                 let laco = ncolors + arc.co as i32;
                 if laco > MAX_COLOR as i32 {
-                    return Err(err_etoobig());
+                    return Err(err_ecolors());
                 }
                 arcs.push(Carc {
                     co: laco as color,

@@ -2,6 +2,7 @@ use super::*;
 use mcx::MemoryContext;
 use std::cell::Cell;
 use std::vec::Vec;
+use types_core::MAX_FORKNUM;
 
 fn rl(spc: u32, db: u32, rel: u32) -> RelFileLocator {
     RelFileLocator::new(spc, db, rel)
@@ -349,4 +350,99 @@ fn incremental_writer_matches_table_writer() {
     writer.close().expect("close");
 
     assert_eq!(incr_bytes, table_bytes);
+}
+
+// upstream 01e568b8c11b (18.4): an entry whose nchunks would size the chunk
+// array past MaxAllocSize is refused before anything is allocated.
+#[test]
+fn oversized_chunk_size_array_is_rejected() {
+    let cx = MemoryContext::new("brt-nchunks");
+    let mut bytes = BLOCKREFTABLE_MAGIC.to_ne_bytes().to_vec();
+    let entry = SerializedEntry {
+        rlocator: rl(1, 2, 3),
+        forknum: 0,
+        limit_block: InvalidBlockNumber,
+        nchunks: u32::MAX,
+    };
+    bytes.extend_from_slice(&entry.to_bytes());
+    let mut reader = reader_over(cx.mcx(), &bytes, "huge").expect("reader");
+    let err = reader.next_relation().expect_err("oversized nchunks must be rejected");
+    assert_eq!(err.message(), "file \"huge\" has oversized chunk size array");
+    assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+}
+
+// upstream bcc428a23a69 (18.6): a corrupt fork number or chunk size is refused
+// with C's message as it is read, instead of indexing past the fork or chunk
+// arrays downstream.
+fn two_chunk_entry_bytes(mcx: Mcx<'_>) -> Vec<u8> {
+    let mut brtab = BlockRefTable::new(mcx);
+    for b in [5u32, BLOCKS_PER_CHUNK + 7] {
+        brtab
+            .mark_block_modified(rl(1, 2, 3), ForkNumber::MAIN_FORKNUM, b)
+            .unwrap();
+    }
+    serialize(&brtab)
+}
+
+// Image layout: 4-byte magic, 24-byte entry (forknum word at +12), then the
+// u16 chunk_size array.
+const FORKNUM_OFF: usize = 4 + 12;
+const CHUNK_SIZE_OFF: usize = 4 + SERIALIZED_ENTRY_LEN;
+
+#[test]
+fn invalid_fork_number_is_rejected() {
+    let cx = MemoryContext::new("brt-fork");
+    for bad in [MAX_FORKNUM as i32 + 1, -1, 7, i32::MIN] {
+        let mut bytes = two_chunk_entry_bytes(cx.mcx());
+        bytes[FORKNUM_OFF..FORKNUM_OFF + 4].copy_from_slice(&bad.to_ne_bytes());
+        let mut reader = reader_over(cx.mcx(), &bytes, "fork").expect("reader");
+        let err = reader.next_relation().expect_err("corrupt fork number accepted");
+        assert_eq!(err.message(), format!("file \"fork\" has invalid fork number {bad}"));
+        assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+    }
+
+    // MAX_FORKNUM itself is the last valid value.
+    let mut bytes = two_chunk_entry_bytes(cx.mcx());
+    bytes[FORKNUM_OFF..FORKNUM_OFF + 4].copy_from_slice(&(MAX_FORKNUM as i32).to_ne_bytes());
+    let mut reader = reader_over(cx.mcx(), &bytes, "fork").expect("reader");
+    let (_, fork, _) = reader.next_relation().expect("next").expect("entry");
+    assert_eq!(fork, MAX_FORKNUM);
+
+    // The fork check comes before the nchunks check, as in C.
+    let mut bytes = BLOCKREFTABLE_MAGIC.to_ne_bytes().to_vec();
+    let entry = SerializedEntry {
+        rlocator: rl(1, 2, 3),
+        forknum: 7,
+        limit_block: InvalidBlockNumber,
+        nchunks: u32::MAX,
+    };
+    bytes.extend_from_slice(&entry.to_bytes());
+    let mut reader = reader_over(cx.mcx(), &bytes, "fork").expect("reader");
+    let err = reader.next_relation().expect_err("corrupt fork number accepted");
+    assert_eq!(err.message(), "file \"fork\" has invalid fork number 7");
+}
+
+#[test]
+fn oversized_chunk_is_rejected() {
+    let cx = MemoryContext::new("brt-chunk");
+    // Two chunks, so the reported index is the corrupt chunk's, not always 0.
+    for (chunkno, bad) in [(1usize, MAX_ENTRIES_PER_CHUNK as u16 + 1), (0, 5000), (1, u16::MAX)] {
+        let mut bytes = two_chunk_entry_bytes(cx.mcx());
+        let off = CHUNK_SIZE_OFF + 2 * chunkno;
+        bytes[off..off + 2].copy_from_slice(&bad.to_ne_bytes());
+        let mut reader = reader_over(cx.mcx(), &bytes, "chunk").expect("reader");
+        let err = reader.next_relation().expect_err("corrupt chunk size accepted");
+        assert_eq!(
+            err.message(),
+            format!("file \"chunk\" chunk {chunkno} has invalid size {bad}")
+        );
+        assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+    }
+
+    // MAX_ENTRIES_PER_CHUNK itself (a bitmap chunk) is the last valid size.
+    let mut bytes = two_chunk_entry_bytes(cx.mcx());
+    bytes[CHUNK_SIZE_OFF..CHUNK_SIZE_OFF + 2]
+        .copy_from_slice(&(MAX_ENTRIES_PER_CHUNK as u16).to_ne_bytes());
+    let mut reader = reader_over(cx.mcx(), &bytes, "chunk").expect("reader");
+    assert!(reader.next_relation().expect("max size is valid").is_some());
 }

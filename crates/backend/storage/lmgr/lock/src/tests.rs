@@ -24,6 +24,8 @@ const CFG: lmgr_proc::ProcGlobalConfig = lmgr_proc::ProcGlobalConfig {
 };
 
 static NEXT_PID: AtomicI32 = AtomicI32::new(9100);
+// Nonzero so a stale PGPROC.waitStart is distinguishable from a cleared one.
+const TEST_WAIT_START: i64 = 1_234_567;
 
 fn semas() -> &'static (Mutex<HashMap<types_core::ProcNumber, i32>>, Condvar) {
     static SEMS: OnceLock<(Mutex<HashMap<types_core::ProcNumber, i32>>, Condvar)> =
@@ -133,7 +135,7 @@ fn setup() {
         timeout_seams::enable_timeouts::set(|_| Ok(()));
         timeout_seams::disable_timeout::set(|_, _| Ok(()));
         timeout_seams::disable_timeouts::set(|_| {});
-        timeout_seams::get_timeout_start_time::set(|_| 0);
+        timeout_seams::get_timeout_start_time::set(|_| TEST_WAIT_START);
         timestamp_seams::get_current_timestamp::set(|| 0);
 
         ps_status_seams::set_ps_display_suffix::set(|_| {});
@@ -308,6 +310,54 @@ fn blocked_acquire_wakes_on_release() {
     assert!(LockRelease(&tag, ExclusiveLock, false).unwrap());
     t.join().unwrap();
     assert_eq!(LockWaiterCount(&tag).unwrap(), 0);
+}
+
+// upstream 0d3be0501784 (18.4): ProcWakeup cleared the waker's own waitStart
+// instead of the awakened process's, leaving the latter stale.
+#[test]
+fn wakeup_clears_the_woken_procs_wait_start() {
+    become_backend();
+    let tag = LOCKTAG::transaction(4247);
+    assert_eq!(
+        LockAcquire(&tag, ExclusiveLock, false, false).unwrap(),
+        LOCKACQUIRE_OK
+    );
+    let waker = lmgr_proc::GetPGProcByNumber(lmgr_proc::MyProc().unwrap());
+    const WAKER_STAMP: u64 = 4_242;
+    waker.waitStart.write(WAKER_STAMP);
+
+    let waiter_procno = std::sync::Arc::new(AtomicI32::new(-1));
+    let publish = std::sync::Arc::clone(&waiter_procno);
+    let t = std::thread::spawn(move || {
+        become_backend();
+        publish.store(lmgr_proc::MyProc().unwrap(), SeqCst);
+        assert_eq!(
+            LockAcquire(&tag, ShareLock, false, false).unwrap(),
+            LOCKACQUIRE_OK
+        );
+        let mine = lmgr_proc::GetPGProcByNumber(lmgr_proc::MyProc().unwrap())
+            .waitStart
+            .read();
+        assert!(LockRelease(&tag, ShareLock, false).unwrap());
+        mine
+    });
+
+    // Release only once the waiter is queued AND has stamped waitStart
+    // (ProcSleep stamps it after dropping the partition lock).
+    loop {
+        let procno = waiter_procno.load(SeqCst);
+        if procno >= 0
+            && LockWaiterCount(&tag).unwrap() >= 2
+            && lmgr_proc::GetPGProcByNumber(procno).waitStart.read() == TEST_WAIT_START as u64
+        {
+            break;
+        }
+        std::thread::yield_now();
+    }
+    assert!(LockRelease(&tag, ExclusiveLock, false).unwrap());
+    assert_eq!(t.join().unwrap(), 0, "awakened proc keeps a stale waitStart");
+    assert_eq!(waker.waitStart.read(), WAKER_STAMP, "waker's waitStart was cleared");
+    waker.waitStart.write(0);
 }
 
 #[test]

@@ -370,6 +370,27 @@ fn exec_window_result_qual<'mcx>(
     }
 }
 
+// upstream 2a03f21daf59 (18.6): Protect some fixed-size arrays that have FUNC_MAX_ARGS elements.
+// initialize_peragg's guard: a stored parse tree may carry more.
+fn check_window_agg_arity(wfunc: &WindowFunc<'_>) -> PgResult<()> {
+    if wfunc.args.len() > ::types_core::FUNC_MAX_ARGS - 1 {
+        return Err(too_many_window_agg_arguments());
+    }
+    Ok(())
+}
+
+#[cold]
+#[inline(never)]
+fn too_many_window_agg_arguments() -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "aggregates cannot have more than {} arguments",
+            ::types_core::FUNC_MAX_ARGS - 1
+        ))
+        .with_sqlstate(::types_error::ERRCODE_TOO_MANY_ARGUMENTS),
+    )
+}
+
 #[track_caller]
 #[cold]
 #[inline(never)]
@@ -1106,6 +1127,7 @@ fn initialize_peragg_default<'mcx>(
             shape.aggkind
         );
     }
+    check_window_agg_arity(wfunc)?;
     // C's use_ma_code tree collapses under the pinned default-frame head,
     // except the safety-forced arm (mfinalmodify 'r', finalmodify not 'r');
     // the compiled default lane has no moving kernels for it.
@@ -1220,6 +1242,7 @@ fn initialize_peragg_framed<'mcx>(
             shape.aggkind
         );
     }
+    check_window_agg_arity(wfunc)?;
     let use_ma_code = if shape.aggminvtransfn == 0 {
         false
     } else if shape.aggmfinalmodify == AGGMODIFY_READ_ONLY

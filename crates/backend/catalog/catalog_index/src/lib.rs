@@ -26,6 +26,8 @@ pub const INDEX_CREATE_CONCURRENT: u16 = 1 << 3;
 pub const INDEX_CREATE_IF_NOT_EXISTS: u16 = 1 << 4;
 pub const INDEX_CREATE_PARTITIONED: u16 = 1 << 5;
 pub const INDEX_CREATE_INVALID: u16 = 1 << 6;
+// upstream e4527519b77e (18.6): Fix propagation of indimmediate flag in index_create_copy()
+pub const INDEX_CREATE_DEFERRABLE: u16 = 1 << 7;
 
 pub const INDEX_CONSTR_CREATE_MARK_AS_PRIMARY: u16 = 1 << 0;
 pub const INDEX_CONSTR_CREATE_DEFERRABLE: u16 = 1 << 1;
@@ -587,6 +589,8 @@ pub struct IndexCreateExtra<'a> {
 
 // index_create; relFileNumber/opclassOptions/stattargets fixed at their
 // toast-lane values. Returns (index oid, constraint oid or InvalidOid).
+// upstream 2780538433fc (18.5): NB: caller is responsible for ensuring the
+// user has USAGE on all types indexInfo.ii_{Expressions,Predicate} depend on.
 #[allow(clippy::too_many_arguments)]
 pub fn index_create<'mcx>(
     mcx: Mcx<'mcx>,
@@ -835,7 +839,9 @@ pub fn index_create<'mcx>(
         coloptions,
         isprimary,
         indexInfo.ii_HasExclusion,
-        extra.constr_flags & INDEX_CONSTR_CREATE_DEFERRABLE == 0,
+        // upstream e4527519b77e (18.6): Fix propagation of indimmediate flag in index_create_copy()
+        extra.constr_flags & INDEX_CONSTR_CREATE_DEFERRABLE == 0
+            && extra.flags & INDEX_CREATE_DEFERRABLE == 0,
         !concurrent && !invalid,
         !concurrent,
     )?;
@@ -1467,9 +1473,20 @@ pub fn CompareIndexInfo<'mcx>(
     if !map_list_equal(&info1.ii_Predicate, &info2.ii_Predicate)? {
         return Ok(false);
     }
-    // C: no support currently for comparing exclusion indexes.
-    if info1.ii_HasExclusion || info2.ii_HasExclusion {
+    // upstream 19e3aa704126 (18.6): Fix restore of partitions with exclusion constraints
+    // If they're exclusion indexes, their properties must be identical.
+    if info1.ii_HasExclusion != info2.ii_HasExclusion {
         return Ok(false);
+    }
+    if info1.ii_HasExclusion {
+        for i in 0..info1.ii_NumIndexKeyAttrs as usize {
+            if info1.ii_ExclusionOps[i] != info2.ii_ExclusionOps[i]
+                || info1.ii_ExclusionProcs[i] != info2.ii_ExclusionProcs[i]
+                || info1.ii_ExclusionStrats[i] != info2.ii_ExclusionStrats[i]
+            {
+                return Ok(false);
+            }
+        }
     }
     Ok(true)
 }

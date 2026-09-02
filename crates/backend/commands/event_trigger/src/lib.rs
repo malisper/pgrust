@@ -301,12 +301,22 @@ pub fn EventTriggerOnLogin(mcx: Mcx<'_>) -> PgResult<()> {
         snapmgr::PushActiveSnapshot(&snapshot)?;
         EventTriggerInvoke(&runlist, "login", tag)?;
         snapmgr::PopActiveSnapshot()?;
-    } else if lmgr::ConditionalLockSharedObject(
-        types_core::catalog::DATABASE_RELATION_ID,
-        init_small::globals::MyDatabaseId(),
-        0,
-        types_rel::AccessExclusiveLock,
-    )? {
+    } else if !transam_xlog::RecoveryInProgress()
+        && lmgr::ConditionalLockSharedObject(
+            types_core::catalog::DATABASE_RELATION_ID,
+            init_small::globals::MyDatabaseId(),
+            0,
+            types_rel::AccessExclusiveLock,
+        )?
+    {
+        // upstream 97b5c5aaad5d (18.5): Skip pg_database.dathasloginevt cleanup on standby
+        // The RecoveryInProgress() guard above: on a hot standby the
+        // conditional AccessExclusiveLock on the database object would fail
+        // with "cannot acquire lock mode ... while recovery is in progress",
+        // which the caller surfaces as a FATAL connection error.  A standby
+        // cannot (and must not) clear the pg_database flag itself; WAL replay
+        // clears it once the primary's next login pass clears it there.
+        //
         // Under the lock a concurrent CREATE/ALTER sets the flag only after
         // inserting the trigger, so an empty unfiltered list is conclusive.
         let runlist = event_trigger_common_setup(mcx, tag, EventTriggerEvent::Login, true)?;

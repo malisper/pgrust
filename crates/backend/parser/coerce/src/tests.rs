@@ -6,8 +6,8 @@ use types_nodes::{CoercionForm, Node, NodeTag};
 
 use crate::{
     can_coerce_type, coerce_type, enforce_generic_type_consistency, find_coercion_pathway,
-    IsBinaryCoercible, COERCION_ASSIGNMENT, COERCION_IMPLICIT, COERCION_PATH_COERCEVIAIO,
-    COERCION_PATH_NONE, COERCION_PATH_RELABELTYPE,
+    IsBinaryCoercible, COERCION_ASSIGNMENT, COERCION_EXPLICIT, COERCION_IMPLICIT,
+    COERCION_PATH_COERCEVIAIO, COERCION_PATH_NONE, COERCION_PATH_RELABELTYPE,
 };
 
 const VARCHAROID: types_core::Oid = 1043;
@@ -622,4 +622,24 @@ fn expression_returns_set_walks_tags_beyond_the_old_closed_set() {
     )
     .unwrap();
     assert!(!crate::expression_returns_set(std));
+}
+
+// upstream 54649de65f08 (18.6): internal never has a cast pathway, not even to ANY.
+#[test]
+fn internal_has_no_coercion_pathway() {
+    install_fixture();
+    const INTERNALOID: types_core::Oid = 2281;
+    const ANYOID: types_core::Oid = 2276;
+    assert_eq!(
+        find_coercion_pathway(TEXTOID, INTERNALOID, COERCION_ASSIGNMENT).unwrap().0,
+        COERCION_PATH_NONE
+    );
+    assert_eq!(
+        find_coercion_pathway(INTERNALOID, TEXTOID, COERCION_EXPLICIT).unwrap().0,
+        COERCION_PATH_NONE
+    );
+    assert!(!can_coerce_type(&[INTERNALOID], &[ANYOID], COERCION_IMPLICIT).unwrap());
+    assert!(!can_coerce_type(&[UNKNOWNOID], &[INTERNALOID], COERCION_EXPLICIT).unwrap());
+    assert!(!can_coerce_type(&[INTERNALOID], &[TEXTOID], COERCION_EXPLICIT).unwrap());
+    assert!(can_coerce_type(&[INTERNALOID], &[INTERNALOID], COERCION_IMPLICIT).unwrap());
 }

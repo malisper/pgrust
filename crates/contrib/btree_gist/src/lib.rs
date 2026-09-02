@@ -4,6 +4,8 @@
 //! where C uses gbtree_ninfo/gbtree_vinfo fn-pointer tables.
 
 mod num;
+#[cfg(test)]
+mod tests;
 mod var;
 
 use datum::Datum;
@@ -17,7 +19,7 @@ use types_gist::{GistEntryVector, GistSortSupportShim, GistSplitVec, GISTENTRY};
 use types_tuple::varatt;
 
 use adt_datetime::consts::Interval;
-use num::{interval_to_sec, penalty_check_max_float, penalty_num, Ctx, NumOps};
+use num::{float_penalty_num, interval_to_sec, penalty_check_max_float, penalty_num, Ctx, NumOps};
 use var::VarOps;
 
 const LIBRARY: &str = "btree_gist";
@@ -213,6 +215,51 @@ macro_rules! scalar_numops {
     };
 }
 
+// upstream 1e1d07792e08 (18.5): btree_gist: fix NaN handling in float4/float8 opclasses.
+// NaN-aware utils/float.h comparators, so GiST agrees with btree (NaNs equal, NaN greatest).
+macro_rules! float_numops {
+    (
+        $name:ident, $v:ty, $size:expr, $indexsize:expr, $read:expr,
+        $gt:path, $ge:path, $eq:path, $le:path, $lt:path, $cmp:path
+    ) => {
+        struct $name;
+        impl NumOps for $name {
+            const SIZE: usize = $size;
+            const INDEXSIZE: usize = $indexsize;
+            type V = $v;
+            fn read(b: &[u8]) -> $v {
+                $read(b)
+            }
+            fn write(out: &mut [u8], v: $v) {
+                out.copy_from_slice(&v.to_ne_bytes())
+            }
+            fn gt(a: $v, b: $v, _: &mut Ctx) -> PgResult<bool> {
+                Ok($gt(a, b))
+            }
+            fn ge(a: $v, b: $v, _: &mut Ctx) -> PgResult<bool> {
+                Ok($ge(a, b))
+            }
+            fn eq(a: $v, b: $v, _: &mut Ctx) -> PgResult<bool> {
+                Ok($eq(a, b))
+            }
+            fn le(a: $v, b: $v, _: &mut Ctx) -> PgResult<bool> {
+                Ok($le(a, b))
+            }
+            fn lt(a: $v, b: $v, _: &mut Ctx) -> PgResult<bool> {
+                Ok($lt(a, b))
+            }
+            fn key_cmp(a: ($v, $v), b: ($v, $v), _: &mut Ctx) -> PgResult<i32> {
+                let res = $cmp(a.0, b.0);
+                Ok(if res != 0 { res } else { $cmp(a.1, b.1) })
+            }
+            const HAS_DIST: bool = true;
+            fn dist(a: $v, b: $v, _: &mut Ctx) -> PgResult<f64> {
+                $name::dist_impl(a, b)
+            }
+        }
+    };
+}
+
 macro_rules! scalar_penalty {
     () => {
         fn penalty(
@@ -222,6 +269,19 @@ macro_rules! scalar_penalty {
             _: &mut Ctx,
         ) -> PgResult<f32> {
             Ok(penalty_num(o.0 as f64, o.1 as f64, n.0 as f64, n.1 as f64, natts))
+        }
+    };
+}
+
+macro_rules! float_penalty {
+    () => {
+        fn penalty(
+            o: (Self::V, Self::V),
+            n: (Self::V, Self::V),
+            natts: u16,
+            _: &mut Ctx,
+        ) -> PgResult<f32> {
+            Ok(float_penalty_num(o.0 as f64, o.1 as f64, n.0 as f64, n.1 as f64, natts))
         }
     };
 }
@@ -290,7 +350,18 @@ impl NumProc for OidT {
     lower_ssup!();
 }
 
-scalar_numops!(Float4, f32, 4, 8, rd_f32);
+float_numops!(
+    Float4, f32, 4, 8, rd_f32,
+    adt_float::float4_gt, adt_float::float4_ge, adt_float::float4_eq,
+    adt_float::float4_le, adt_float::float4_lt, adt_float::float4_cmp_internal
+);
+impl Float4 {
+    // gbt_float4_dist: computed in float8, so the difference cannot overflow.
+    fn dist_impl(a: f32, b: f32) -> PgResult<f64> {
+        let (a, b) = (a as f64, b as f64);
+        Ok(nan_aware_abs(a - b, a, b))
+    }
+}
 impl NumProc for Float4 {
     fn val_from_datum(d: Datum, _: Mcx<'_>) -> PgResult<f32> {
         Ok(d.as_f32())
@@ -298,9 +369,7 @@ impl NumProc for Float4 {
     fn fetch_datum(l: f32, _: Datum) -> Datum {
         Datum::from_f32(l)
     }
-    scalar_penalty!();
-    // C's ssup deliberately switches to the total order (float4_cmp_internal:
-    // NaN greatest), unlike every other float comparison in this opclass.
+    float_penalty!();
     fn ssup_cmp(x: Datum, y: Datum, _c: Oid, _m: Mcx<'_>) -> PgResult<i32> {
         Ok(adt_float::float4_cmp_internal(
             Self::read(num_key::<Self>(x)),
@@ -309,7 +378,21 @@ impl NumProc for Float4 {
     }
 }
 
-scalar_numops!(Float8, f64, 8, 16, rd_f64);
+float_numops!(
+    Float8, f64, 8, 16, rd_f64,
+    adt_float::float8_gt, adt_float::float8_ge, adt_float::float8_eq,
+    adt_float::float8_le, adt_float::float8_lt, adt_float::float8_cmp_internal
+);
+impl Float8 {
+    // gbt_float8_dist: error when the subtraction overflows to infinity.
+    fn dist_impl(a: f64, b: f64) -> PgResult<f64> {
+        let r = a - b;
+        if r.is_infinite() && !a.is_infinite() && !b.is_infinite() {
+            return Err(float_overflow_error());
+        }
+        Ok(nan_aware_abs(r, a, b))
+    }
+}
 impl NumProc for Float8 {
     fn val_from_datum(d: Datum, _: Mcx<'_>) -> PgResult<f64> {
         Ok(d.as_f64())
@@ -317,8 +400,7 @@ impl NumProc for Float8 {
     fn fetch_datum(l: f64, _: Datum) -> Datum {
         Datum::from_f64(l)
     }
-    scalar_penalty!();
-    // As Float4: C ssup uses the float8_cmp_internal total order.
+    float_penalty!();
     fn ssup_cmp(x: Datum, y: Datum, _c: Oid, _m: Mcx<'_>) -> PgResult<i32> {
         Ok(adt_float::float8_cmp_internal(
             Self::read(num_key::<Self>(x)),
@@ -337,17 +419,6 @@ impl NumProc for CashT {
     }
     scalar_penalty!();
     lower_ssup!();
-}
-
-impl Float8 {
-    // gbt_float8_dist: error when the subtraction overflows to infinity.
-    fn dist_checked(a: f64, b: f64) -> PgResult<f64> {
-        let r = a - b;
-        if r.is_infinite() && !a.is_infinite() && !b.is_infinite() {
-            return Err(float_overflow_error());
-        }
-        Ok(r.abs())
-    }
 }
 
 // inet keys hold convert_network_to_scalar doubles.
@@ -986,22 +1057,6 @@ fn fc_gbt_timetz_consistent(f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> Pg
     Ok(Datum::from_bool(r))
 }
 
-fn fc_gbt_float8_distance(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    // gbt_float8_dist's overflow check replaces GET_FLOAT_DISTANCE.
-    // SAFETY: gist fmgr protocol.
-    let entry = unsafe { entry_arg(fcinfo, 0) };
-    let query = fcinfo.arg(1).as_f64();
-    let (lower, upper) = num::read_pair::<Float8>(num_key::<Float8>(entry.key));
-    let r = if query <= lower {
-        Float8::dist_checked(query, lower)?
-    } else if query >= upper {
-        Float8::dist_checked(query, upper)?
-    } else {
-        0.0
-    };
-    Ok(Datum::from_f64(r))
-}
-
 // ===========================================================================
 // Var types.
 // ===========================================================================
@@ -1116,9 +1171,7 @@ impl VarOps for BitV {
     fn leaf_cmp(a: &[u8], b: &[u8], _: &mut Ctx) -> PgResult<i32> {
         Ok(adt_varbit::bit_cmp_payload(&a[VARHDRSZ..], &b[VARHDRSZ..]))
     }
-    // C biteq: equal bit counts + memcmp of VARBITBYTES(a). On truncated node
-    // keys C's memcmp over-reads (UB); payload equality is the OOB-free
-    // equivalent (identical on well-formed values, conservative on nodes).
+    // C biteq on leaf varbit values: equal bit counts and equal bytes.
     fn eq(a: &[u8], b: &[u8], _: &mut Ctx) -> PgResult<bool> {
         Ok(a[VARHDRSZ..] == b[VARHDRSZ..])
     }
@@ -1127,10 +1180,11 @@ impl VarOps for BitV {
     }
 }
 impl VarProc for BitV {
+    // upstream 558c4ea9a43b (18.5): Use the proper comparator in gbt_bit_ssup_cmp.
     fn ssup_cmp(x: Datum, y: Datum, _coll: Oid, mcx: Mcx<'_>) -> PgResult<i32> {
         let a = var_ssup_lower(mcx, x)?;
         let b = var_ssup_lower(mcx, y)?;
-        Ok(varlena::bytea::byteacmp(&a[VARHDRSZ..], &b[VARHDRSZ..]))
+        Ok(adt_varbit::bit_cmp_payload(&a[VARHDRSZ..], &b[VARHDRSZ..]))
     }
     fn query_for_node(q: &[u8]) -> std::borrow::Cow<'_, [u8]> {
         std::borrow::Cow::Owned(bit_xfrm(q))
@@ -1411,11 +1465,34 @@ fn fc_oid_dist(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum
     Ok(Datum::from_oid(if a < b { b - a } else { a - b }))
 }
 
+// upstream 1e1d07792e08 (18.5): btree_gist: fix NaN handling in float4/float8 opclasses.
+// NaNs are equal to each other and maximally far from non-NaNs; Inf - Inf is 0.
+fn nan_aware_abs(r: f64, a: f64, b: f64) -> f64 {
+    if !r.is_nan() {
+        r.abs()
+    } else if a.is_nan() && b.is_nan() {
+        0.0
+    } else if a.is_nan() || b.is_nan() {
+        adt_float::get_float8_infinity()
+    } else {
+        0.0
+    }
+}
+
 fn fc_float4_dist(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let (a, b) = (fcinfo.arg(0).as_f32(), fcinfo.arg(1).as_f32());
-    let r = a - b;
+    let mut r = a - b;
     if r.is_infinite() && !a.is_infinite() && !b.is_infinite() {
         return Err(float_overflow_error());
+    }
+    if r.is_nan() {
+        r = if a.is_nan() && b.is_nan() {
+            0.0
+        } else if a.is_nan() || b.is_nan() {
+            adt_float::get_float4_infinity()
+        } else {
+            0.0
+        };
     }
     Ok(Datum::from_f32(r.abs()))
 }
@@ -1426,7 +1503,7 @@ fn fc_float8_dist(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Da
     if r.is_infinite() && !a.is_infinite() && !b.is_infinite() {
         return Err(float_overflow_error());
     }
-    Ok(Datum::from_f64(r.abs()))
+    Ok(Datum::from_f64(nan_aware_abs(r, a, b)))
 }
 
 fn fc_date_dist(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -1538,7 +1615,7 @@ fn lookup(function: &str) -> Option<PGFunction> {
         "gbt_int8_distance" => num_distance::<Int8>,
         "gbt_oid_distance" => num_distance::<OidT>,
         "gbt_float4_distance" => num_distance::<Float4>,
-        "gbt_float8_distance" => fc_gbt_float8_distance,
+        "gbt_float8_distance" => num_distance::<Float8>,
         "gbt_cash_distance" => num_distance::<CashT>,
         "gbt_date_distance" => num_distance::<DateT>,
         "gbt_time_distance" => num_distance::<TimeT>,

@@ -16,7 +16,7 @@ use types_core::primitive::FUNC_MAX_ARGS;
 use types_core::catalog::{
     ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLENONARRAYOID,
     ANYCOMPATIBLEOID, ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYENUMOID, ANYMULTIRANGEOID,
-    ANYNONARRAYOID, ANYOID, ANYRANGEOID, BOOLOID, INT2VECTOROID, INT4OID, INTERVALOID,
+    ANYNONARRAYOID, ANYOID, ANYRANGEOID, BOOLOID, INT2VECTOROID, INT4OID, INTERNALOID, INTERVALOID,
     OIDVECTOROID, RECORDARRAYOID, RECORDOID, UNKNOWNOID,
 };
 use types_core::{InvalidOid, Oid, OidIsValid, ParseLoc};
@@ -309,13 +309,8 @@ fn coerce_record_to_complex<'mcx>(
         Some(r) => r.args.clone_in(mcx)?,
         None => match node.as_var() {
             Some(v) if v.varattno == types_core::InvalidAttrNumber => {
-                parse_relation_seams::expand_nsitem_vars_at::call(
-                    mcx,
-                    pstate,
-                    v.varno,
-                    v.varlevelsup as i32,
-                    v.location,
-                )?
+                // upstream 9108fed3eda9 (18.5): Fix parsing of parenthesised OLD/NEW in RETURNING list.
+                parse_relation_seams::expand_nsitem_vars_at::call(mcx, pstate, v)?
             }
             _ => return Err(record_cast_error(pstate, targetTypeId, Option::None, node_errloc)),
         },
@@ -582,7 +577,14 @@ pub fn can_coerce_type(
     debug_assert!(input_typeids.len() <= target_typeids.len());
     let mut have_generics = false;
     for (&inputTypeId, &targetTypeId) in input_typeids.iter().zip(target_typeids) {
-        if inputTypeId == targetTypeId || targetTypeId == ANYOID {
+        if inputTypeId == targetTypeId {
+            continue;
+        }
+        // upstream 54649de65f08 (18.6): Reject calls from SQL to functions that take or return type internal.
+        if inputTypeId == INTERNALOID || targetTypeId == INTERNALOID {
+            return Ok(false);
+        }
+        if targetTypeId == ANYOID {
             continue;
         }
         if IsPolymorphicType(targetTypeId) {
@@ -947,6 +949,10 @@ pub fn find_coercion_pathway(
 
     if sourceTypeId == targetTypeId {
         return Ok((COERCION_PATH_RELABELTYPE, funcid));
+    }
+    // upstream 54649de65f08 (18.6): Reject calls from SQL to functions that take or return type internal.
+    if sourceTypeId == INTERNALOID || targetTypeId == INTERNALOID {
+        return Ok((COERCION_PATH_NONE, funcid));
     }
 
     match syscache_seams::lookup_pg_cast_shape::call(sourceTypeId, targetTypeId)? {

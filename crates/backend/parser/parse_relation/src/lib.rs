@@ -36,12 +36,11 @@ pub fn init_seams() {
 fn expand_nsitem_vars_at<'a, 'p, 'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &'a ParseState<'p, 'mcx>,
-    varno: i32,
-    sublevels_up: i32,
-    location: ParseLoc,
+    var: &'a Var<'mcx>,
 ) -> PgResult<NodeList<'mcx>> {
-    let nsitem = GetNSItemByRangeTablePosn(pstate, varno, sublevels_up);
-    Ok(expandNSItemVars(mcx, pstate, nsitem, sublevels_up, location)?.0)
+    // upstream 9108fed3eda9 (18.5): Fix parsing of parenthesised OLD/NEW in RETURNING list.
+    let nsitem = GetNSItemByVar(pstate, var);
+    Ok(expandNSItemVars(mcx, pstate, nsitem, var.varlevelsup as i32, var.location)?.0)
 }
 
 #[track_caller]
@@ -162,6 +161,8 @@ fn check_lateral_ref_ok<'p, 'mcx>(
     Ok(())
 }
 
+// NB: callers starting from a Var should use GetNSItemByVar() instead, to
+// find the namespace item with matching varreturningtype.
 pub fn GetNSItemByRangeTablePosn<'p, 'mcx>(
     pstate: &'p ParseState<'p, 'mcx>,
     varno: i32,
@@ -173,6 +174,27 @@ pub fn GetNSItemByRangeTablePosn<'p, 'mcx>(
     }
     for nsitem in p.p_namespace.iter().copied() {
         if nsitem.p_rtindex == varno {
+            return nsitem;
+        }
+    }
+    panic!("nsitem not found (internal error)");
+}
+
+// upstream 9108fed3eda9 (18.5): Fix parsing of parenthesised OLD/NEW in RETURNING list.
+/// C `GetNSItemByVar` (parse_relation.c): like GetNSItemByRangeTablePosn, but
+/// also matches the Var's varreturningtype. RETURNING registers OLD and NEW
+/// nsitems on the result relation's rtindex that differ only in
+/// p_returning_type, so an rtindex-only lookup picks whichever comes first.
+pub fn GetNSItemByVar<'p, 'mcx>(
+    pstate: &'p ParseState<'p, 'mcx>,
+    var: &Var<'mcx>,
+) -> &'mcx ParseNamespaceItem<'mcx> {
+    let mut p = pstate;
+    for _ in 0..var.varlevelsup {
+        p = p.parentParseState.expect("sublevels_up exceeds pstate depth");
+    }
+    for nsitem in p.p_namespace.iter().copied() {
+        if nsitem.p_rtindex == var.varno && nsitem.p_returning_type == var.varreturningtype {
             return nsitem;
         }
     }

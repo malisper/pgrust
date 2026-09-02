@@ -972,7 +972,11 @@ fn transformJsonParseArg<'mcx>(
     } else {
         let (typcategory, _) = lsyscache::get_type_category_preferred(*exprtype)?;
         if *exprtype == UNKNOWNOID || typcategory == coerce::TYPCATEGORY_STRING {
-            expr = coerce::coerce_to_target_type(
+            // upstream 35d9a6263407 (18.5): IS JSON/JSON(): Protect against expressions uncoercible to text
+            // A user type in the string category need not have a cast to
+            // text; C's NULL return here became an executor-time crash.
+            let location = expr_location(expr);
+            let Some(coerced) = coerce::coerce_to_target_type(
                 mcx,
                 pstate,
                 expr,
@@ -983,7 +987,19 @@ fn transformJsonParseArg<'mcx>(
                 CoercionForm::COERCE_IMPLICIT_CAST,
                 -1,
             )?
-            .expect("string category coerces to text");
+            else {
+                return Err(err(
+                    pstate,
+                    types_error::ERRCODE_CANNOT_COERCE,
+                    format!(
+                        "cannot cast type {} to {}",
+                        type_name(*exprtype),
+                        type_name(TEXTOID)
+                    ),
+                    location,
+                ));
+            };
+            expr = coerced;
             *exprtype = TEXTOID;
         }
         if format.encoding != JsonEncoding::JS_ENC_DEFAULT {
@@ -1743,7 +1759,13 @@ fn transformJsonBehavior<'mcx>(
     }
 
     if let Some(e) = expr {
-        if expr_type(e) != returning.typid {
+        // upstream 441e4c8d6999 (18.6): Enforce RETURNING typmod on SQL/JSON DEFAULT behavior expressions
+        // A DEFAULT whose base type already matches still needs the cast when
+        // RETURNING carries a typmod (numeric(4,1), varchar(3)): the coercion
+        // below is what enforces it. A NULL constant needs no enforcement.
+        if expr_type(e) != returning.typid
+            || (returning.typmod >= 0 && !e.as_const().is_some_and(|c| c.constisnull))
+        {
             let isnull = e.as_const().is_some_and(|c| c.constisnull);
             if isnull
                 || expr_type(e) == JSONBOID

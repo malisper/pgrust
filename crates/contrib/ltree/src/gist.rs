@@ -354,10 +354,10 @@ pub fn ltree_union(entries: &[(Vec<u8>, bool)], siglen: usize) -> PgResult<Vec<u
 pub fn ltree_penalty(orig_image: &[u8], new_image: &[u8], siglen: usize) -> PgResult<f32> {
     let origval = decode_key(orig_image, siglen)?;
     let newval = decode_key(new_image, siglen)?;
-    let cmpl = op::ltree_compare(origval.get_lnode(), newval.get_lnode());
-    let cmpr = op::ltree_compare(newval.get_rnode(), origval.get_rnode());
-    let penalty = cmpl.max(0) + cmpr.max(0);
-    Ok(penalty as f32)
+    // upstream c3e36a9a5f19 (18.6): Fix int32 overflow in ltree_compare()
+    let cmpl = op::ltree_compare_distance(origval.get_lnode(), newval.get_lnode());
+    let cmpr = op::ltree_compare_distance(newval.get_rnode(), origval.get_rnode());
+    Ok(cmpl.max(0.0) + cmpr.max(0.0))
 }
 
 pub fn ltree_picksplit(

@@ -1,0 +1,7 @@
+# upstream 4689ea9ceee3 control: complete AF table; alias 2 is the empty flag set
+AF 2
+AF S		#1
+AF		#2 (empty flag set)
+
+SFX S Y 1
+SFX S   0	s/2	.

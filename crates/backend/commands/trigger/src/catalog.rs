@@ -595,6 +595,14 @@ pub fn CreateTriggerFiringOn<'mcx>(
     }
 
     if !when_rtable.is_nil() {
+        // upstream 2780538433fc (18.5): Check for USAGE privilege on types used by stored expressions.
+        if !is_internal {
+            dependency_seams::check_usage_on_types_in_expr::call(
+                when_node.expect("WHEN clause parsed here"),
+                &when_rtable,
+                miscinit::GetUserId(),
+            )?;
+        }
         dependency_seams::record_dependency_on_expr::call(
             mcx,
             &myself,

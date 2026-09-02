@@ -731,8 +731,8 @@ fn fill_entry(e: &TypeCacheEntry, flags: &mut i32) -> PgResult<()> {
             hash_proc = InvalidOid;
         } else if hash_proc == F_HASH_RANGE && !range_element_has(e, TCFLAGS_HAVE_ELEM_HASHING)? {
             hash_proc = InvalidOid;
-        }
-        if hash_proc == F_HASH_MULTIRANGE
+        // upstream 11aed8d19cd7 (18.4): Fix missed checks for hashability of container-type equality.
+        } else if hash_proc == F_HASH_MULTIRANGE
             && !multirange_element_has(e, TCFLAGS_HAVE_ELEM_HASHING)?
         {
             hash_proc = InvalidOid;
@@ -760,8 +760,8 @@ fn fill_entry(e: &TypeCacheEntry, flags: &mut i32) -> PgResult<()> {
             && !range_element_has(e, TCFLAGS_HAVE_ELEM_EXTENDED_HASHING)?
         {
             hash_extended_proc = InvalidOid;
-        }
-        if hash_extended_proc == F_HASH_MULTIRANGE_EXTENDED
+        // upstream 11aed8d19cd7 (18.4): Fix missed checks for hashability of container-type equality.
+        } else if hash_extended_proc == F_HASH_MULTIRANGE_EXTENDED
             && !multirange_element_has(e, TCFLAGS_HAVE_ELEM_EXTENDED_HASHING)?
         {
             hash_extended_proc = InvalidOid;

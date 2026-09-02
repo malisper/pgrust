@@ -81,7 +81,8 @@ pub fn encrypt_symmetric(
         esk.push(s2k.iter);
     }
     if ctx.use_sess_key != 0 {
-        let mut cfb = PgpCfb::create(ctx.s2k_cipher_algo, &s2k.key, false, None)
+        // upstream 4c5128ca0b30 (18.6): pgcrypto: Add option to revert to prior decryption behavior
+        let mut cfb = PgpCfb::create(ctx.s2k_cipher_algo, &s2k.key, false, None, false)
             .map_err(|e| e.to_string())?;
         let mut pt = Vec::with_capacity(1 + sess_key.len());
         pt.push(ctx.cipher_algo as u8);
@@ -140,7 +141,8 @@ pub fn write_encdata_packet(
     }
 
     let resync = !mdc;
-    let mut cfb = PgpCfb::create(ctx.cipher_algo, sess_key, resync, None)
+    // upstream 4c5128ca0b30 (18.6): pgcrypto: Add option to revert to prior decryption behavior
+    let mut cfb = PgpCfb::create(ctx.cipher_algo, sess_key, resync, None, false)
         .map_err(|e| e.to_string())?;
     let ciphertext = cfb.encrypt(&plaintext);
 

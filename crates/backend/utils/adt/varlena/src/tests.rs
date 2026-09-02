@@ -579,6 +579,47 @@ fn levenshtein_untrusted_length_cap_is_22023() {
     );
 }
 
+// upstream e88eb4e76638 (18.6): costs are summed in i64 and the int4 result
+// is range-checked (the contrib/fuzzystrmatch rows the commit added, plus
+// the empty-side early returns and the max_d + 1 sentinel). Pre-fix every
+// out-of-range case overflows i32 (a debug-build panic).
+#[test]
+fn levenshtein_costs_use_64bit_arithmetic_and_range_check() {
+    install_mb_for_levenshtein();
+    mbutils::SetDatabaseEncoding(wchar::PG_UTF8).unwrap();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let lev = |s: &str, t: &str, i: i32, d: i32, u: i32| {
+        levenshtein::varstr_levenshtein(mcx, s.as_bytes(), t.as_bytes(), i, d, u, false)
+    };
+    let lle = |s: &str, t: &str, i: i32, d: i32, u: i32, max_d: i32| {
+        levenshtein::varstr_levenshtein_less_equal(
+            mcx,
+            s.as_bytes(),
+            t.as_bytes(),
+            i,
+            d,
+            u,
+            max_d,
+            false,
+        )
+    };
+    fn out_of_range(r: types_error::PgResult<i32>) {
+        let err = r.expect_err("distance must not fit int4");
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);
+        assert_eq!(err.message, "levenshtein distance out of range");
+    }
+    assert_eq!(lev("GUMBO", "GAMBOL", 1, 1, 2000000000).unwrap(), 3);
+    out_of_range(lev("GUMBO", "GAMBOL", 2000000000, 2000000000, 2000000000));
+    assert_eq!(lle("aaa", "aaaaa", 1073741824, 0, 1073741824, 10).unwrap(), 11);
+    out_of_range(lev("", "abc", 1000000000, 1, 1));
+    out_of_range(lev("abc", "", 1, 1000000000, 1));
+    assert_eq!(lev("", "ab", 1000000000, 1, 1).unwrap(), 2000000000);
+    out_of_range(lle("abc", "abcdef", i32::MAX, 1, 1, i32::MAX));
+    assert_eq!(lle("abc", "abcdef", 1000000000, 1, 1, 2000000000).unwrap(), 2000000001);
+    assert_eq!(lev("kitten", "sitting", 100000000, 100000000, 100000000).unwrap(), 300000000);
+}
+
 mod fc_results {
     use datum::{Datum, VarlenaRef};
     use mcx::MemoryContext;

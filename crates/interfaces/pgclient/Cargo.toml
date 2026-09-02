@@ -21,6 +21,7 @@ pg_strong_random = { path = "../../port/pg_strong_random" }
 postgres_seams = { path = "../../backend/tcop/postgres_seams" }
 saslprep = { path = "../../common/saslprep" }
 scram_common = { path = "../../common/scram_common" }
+timingsafe_bcmp = { path = "../../port/timingsafe_bcmp" }
 types_core = { path = "../../_support/types/types_core" }
 types_error = { path = "../../_support/types/types_error" }
 types_storage = { path = "../../_support/types/types_storage" }

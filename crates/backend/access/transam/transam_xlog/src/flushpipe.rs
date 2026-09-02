@@ -108,10 +108,11 @@ use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT}
 
 use crate::ctl::{SpinLock, XLogCtl};
 
-// wait_event_names.txt IPC section: appended after the C 18.3 rows (index
-// 57, pgrust-specific; the IPC names table gained the row in waitevent).
+// wait_event_names.txt IPC section: appended after the C 18.6 rows (index
+// 58, pgrust-specific; the IPC names table gained the row in waitevent).
+// upstream 33101632235a (18.6): index 57 is C's WalReceiverUpstreamCatchup.
 const PG_WAIT_IPC: u32 = 0x0800_0000;
-pub const WAIT_EVENT_FLUSH_PIPELINE: u32 = PG_WAIT_IPC + 57;
+pub const WAIT_EVENT_FLUSH_PIPELINE: u32 = PG_WAIT_IPC + 58;
 
 /// Park-loop timeout backstop (ms): defense-in-depth recheck cadence, NOT
 /// a correctness input (the fence pair above is). Sized well under the

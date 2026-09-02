@@ -1264,15 +1264,8 @@ fn rv_mutate<'mcx>(
             }
             Ok(None)
         }
-        NodeTag::T_CurrentOfExpr => {
-            let cexpr = node.as_current_of_expr().expect("CurrentOfExpr");
-            if cexpr.cvarno == ctx.target_varno as u32 && ctx.sublevels_up == 0 {
-                return Err(feature_not_supported(
-                    "WHERE CURRENT OF on a view is not implemented",
-                ).into());
-            }
-            Ok(None)
-        }
+        // upstream f3d03fbd5d01 (18.5): Fix UPDATE/DELETE ... WHERE CURRENT OF on a table with virtual columns.
+        // No CurrentOfExpr arm: the view check moved to parse analysis; the node copies normally.
         // nodes_core's SubLink mutator arm skips the subselect C mutates.
         NodeTag::T_SubLink => {
             let sl = node.as_sub_link().expect("SubLink");

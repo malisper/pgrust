@@ -171,7 +171,9 @@ fn process_secret_key(
         let iv = &body[pos..pos + bs];
         pos += bs;
 
-        let mut cfb = PgpCfb::create(cipher_algo, &s2k.key, false, Some(iv))
+        // upstream 4c5128ca0b30 (18.6): pgcrypto: Add option to revert to prior decryption behavior
+        // (never for the secret-key unlock: pgcrypto did not produce this ciphertext)
+        let mut cfb = PgpCfb::create(cipher_algo, &s2k.key, false, Some(iv), false)
             .map_err(|e| e.to_string())?;
         let dec = cfb.decrypt(&body[pos..]);
         (dec, hide_type == HIDE_SHA1)

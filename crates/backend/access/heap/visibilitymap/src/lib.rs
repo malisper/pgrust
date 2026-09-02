@@ -34,6 +34,13 @@ fn HEAPBLK_TO_MAPBLOCK(x: BlockNumber) -> BlockNumber {
     x / HEAPBLOCKS_PER_PAGE
 }
 
+// upstream 9540c0e5dd40 (18.4): Prevent restore of incremental backup from bloating VM fork.
+#[inline(always)]
+fn HEAPBLK_TO_MAPBLOCK_LIMIT(x: BlockNumber) -> BlockNumber {
+    // C sums in uintptr_t (MAXALIGN widens HEAPBLOCKS_PER_PAGE): no u32 wrap.
+    ((x as u64 + (HEAPBLOCKS_PER_PAGE - 1) as u64) / HEAPBLOCKS_PER_PAGE as u64) as BlockNumber
+}
+
 #[inline(always)]
 fn HEAPBLK_TO_MAPBYTE(x: BlockNumber) -> u32 {
     (x % HEAPBLOCKS_PER_PAGE) / HEAPBLOCKS_PER_BYTE
@@ -74,6 +81,25 @@ impl VmBuffer {
     #[inline]
     pub fn buffer(&self) -> Buffer {
         self.pin.as_ref().map_or(0, BufferPin::buffer)
+    }
+
+    // upstream f581fa729d8e (18.5): Fix VM clear WAL logging by registering VM blocks
+    /// `BufferGetBlockNumber(vmbuffer)` for the WAL block reference; 0 when
+    /// nothing is pinned (callers register only a pinned, modified VM page).
+    #[inline]
+    pub fn block_number(&self) -> BlockNumber {
+        self.map_block
+    }
+
+    // upstream f581fa729d8e (18.5): Fix VM clear WAL logging by registering VM blocks
+    /// Wrap a VM-fork buffer somebody else pinned (redo's
+    /// XLogReadBufferForRedo). The pin moves into the carrier: `release`
+    /// (or drop) gives it back, so the caller must unlock first.
+    #[inline]
+    pub fn adopt(buffer: Buffer) -> Option<VmBuffer> {
+        let pin = BufferPin::adopt(buffer)?;
+        let map_block = pin.block_number();
+        Some(VmBuffer { pin: Some(pin), map_block })
     }
 }
 
@@ -345,9 +371,33 @@ fn set_bits_and_log(
     Ok(())
 }
 
-/// `visibilitymap_clear` -> whether any bit was cleared. Not WAL-logged: the
-/// caller's operation clears the bit again at replay.
+// upstream f581fa729d8e (18.5): Fix VM clear WAL logging by registering VM blocks
+/// `visibilitymap_clear` -> whether any bit was cleared. Takes and drops the
+/// VM buffer's exclusive lock itself. Most callers should use
+/// `visibilitymap_clear_locked`: registering the VM buffer in the WAL record
+/// needs the lock held longer than it is held here. Kept for in-tree callers
+/// that don't manage the VM buffer lock themselves (vacuum, redo fallback).
 pub fn visibilitymap_clear(
+    rel: &RelationData<'_>,
+    heapBlk: BlockNumber,
+    vmbuf: &VmBuffer,
+    flags: u8,
+) -> PgResult<bool> {
+    let Some(pin) = vmbuf.pin.as_ref() else {
+        return Err(wrong_buffer("wrong buffer passed to visibilitymap_clear"));
+    };
+    let guard = pin.lock_exclusive()?;
+    let cleared = visibilitymap_clear_locked(rel, heapBlk, vmbuf, flags);
+    guard.unlock();
+    cleared
+}
+
+// upstream f581fa729d8e (18.5): Fix VM clear WAL logging by registering VM blocks
+/// `visibilitymap_clear_locked`: like `visibilitymap_clear`, except the caller
+/// already holds the VM buffer's exclusive lock and unlocks it afterwards
+/// (typically after registering the buffer in the WAL record and stamping its
+/// LSN). Returns whether any bit was actually cleared.
+pub fn visibilitymap_clear_locked(
     _rel: &RelationData<'_>,
     heapBlk: BlockNumber,
     vmbuf: &VmBuffer,
@@ -365,8 +415,9 @@ pub fn visibilitymap_clear(
         return Err(wrong_buffer("wrong buffer passed to visibilitymap_clear"));
     };
 
-    let guard = pin.lock_exclusive()?;
-    // SAFETY: exclusive content lock held for `guard`'s lifetime; mapByte < MAPSIZE.
+    // C: Assert(BufferIsExclusiveLocked(vmbuf)) -- bufmgr exposes no
+    // held-by-me probe; the callers' lock/unlock pairing is the contract.
+    // SAFETY: caller holds the exclusive content lock; mapByte < MAPSIZE.
     let map_byte_ptr = unsafe {
         bufmgr_seams::buffer_get_page::call(pin.buffer())
             .as_ptr()
@@ -377,14 +428,9 @@ pub fn visibilitymap_clear(
     if unsafe { *map_byte_ptr } & mask != 0 {
         // SAFETY: as above.
         unsafe { *map_byte_ptr &= !mask };
-        let res = bufmgr_seams::mark_buffer_dirty::call(pin.buffer());
-        if let Err(e) = res {
-            guard.unlock();
-            return Err(e);
-        }
+        bufmgr_seams::mark_buffer_dirty::call(pin.buffer())?;
         cleared = true;
     }
-    guard.unlock();
     Ok(cleared)
 }
 
@@ -452,6 +498,13 @@ pub fn visibilitymap_prepare_truncate(
         return Ok(InvalidBlockNumber);
     }
     Ok(newnblocks)
+}
+
+/// The VM length `visibilitymap_prepare_truncate` would leave for a main
+/// fork truncated to `nheapblocks`, without touching anything.
+// upstream 9540c0e5dd40 (18.4): Prevent restore of incremental backup from bloating VM fork.
+pub fn visibilitymap_truncation_length(nheapblocks: BlockNumber) -> BlockNumber {
+    HEAPBLK_TO_MAPBLOCK_LIMIT(nheapblocks)
 }
 
 fn heap_page(buf: Buffer) -> PageRef<'static> {

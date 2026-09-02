@@ -16,9 +16,9 @@ mod tests;
 // (spot_aclitemout_numeric kernel-extract reduction, 2026-07-31)
 pub use io::{aclitemin, aclitemout, aclitemout_into, aclparse, push_oid_decimal, ACL_ALL_RIGHTS_STR};
 pub use membership::{
-    get_language_oid, get_role_oid, get_role_oid_or_public, has_privs_of_role, initialize_acl,
-    is_admin_of_role, is_member_of_role, is_member_of_role_nosuper, member_can_set_role,
-    select_best_admin, RoleMembershipCacheCallback,
+    cached_db_hash, get_language_oid, get_role_oid, get_role_oid_or_public, has_privs_of_role,
+    initialize_acl, is_admin_of_role, is_member_of_role, is_member_of_role_nosuper,
+    member_can_set_role, select_best_admin, RoleMembershipCacheCallback,
 };
 pub(crate) use membership::RoleRecurseType;
 pub use ops::{

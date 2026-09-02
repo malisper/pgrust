@@ -205,9 +205,7 @@ pub fn sig_digits(s: &[u8]) -> i32 {
     significant_digits(s).min(FLT_DIG)
 }
 
-/// seg.c `seg_out`, including its bug-compatible quirk: with `l_ext == '~'`
-/// the upper boundary's extension byte is emitted even when it is `'\0'`,
-/// which (as in C's `sprintf("%c", 0)`) truncates the cstring right there.
+/// seg.c `seg_out`.
 pub fn seg_out(seg: &Seg) -> Vec<u8> {
     let mut out: Vec<u8> = Vec::new();
 
@@ -228,16 +226,12 @@ pub fn seg_out(seg: &Seg) -> Vec<u8> {
         if seg.u_ext != b'-' {
             // print the upper boundary if exists
             out.push(b' ');
-            if seg.u_ext == b'>' || seg.u_ext == b'<' || seg.l_ext == b'~' {
+            // upstream 0004cab4dc60 (18.6): seg: Fix seg_out() to preserve the upper boundary's certainty indicator
+            if seg.u_ext == b'>' || seg.u_ext == b'<' || seg.u_ext == b'~' {
                 out.push(seg.u_ext);
             }
             out.extend_from_slice(&restore(seg.upper, seg.u_sigd as i32));
         }
-    }
-
-    // cstring semantics: C's embedded-NUL quirk cuts the string
-    if let Some(z) = out.iter().position(|&c| c == 0) {
-        out.truncate(z);
     }
     out
 }
@@ -341,7 +335,9 @@ mod tests {
         );
         // extensions
         assert_eq!(seg_out(&seg(1.0, 2.0, 1, 1, b'<', b'>')), b"<1 .. >2");
-        // the '~' lower-ext quirk: u_ext 0 emitted -> string cut after ".. "
-        assert_eq!(seg_out(&seg(1.0, 2.0, 1, 1, b'~', 0)), b"~1 .. ");
+        // upstream 0004cab4dc60 (18.6): each boundary keeps its own '~'
+        assert_eq!(seg_out(&seg(1.0, 2.0, 1, 1, b'~', 0)), b"~1 .. 2");
+        assert_eq!(seg_out(&seg(1.0, 2.0, 1, 1, 0, b'~')), b"1 .. ~2");
+        assert_eq!(seg_out(&seg(1.0, 2.0, 1, 1, b'~', b'~')), b"~1 .. ~2");
     }
 }

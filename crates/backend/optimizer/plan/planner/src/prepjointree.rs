@@ -1582,19 +1582,30 @@ fn get_relids_in_jointree_base<'mcx>(
     Ok(())
 }
 
-// find_dependent_phvs_walker (prepjointree.c): a PHV whose phrels are exactly
-// {varno} pins the RESULT rel that computes it.
-struct FindDependentPhvs<'mcx> {
+// find_dependent_phvs_walker (prepjointree.c): a PHV whose base relids are
+// exactly {varno} pins the RESULT rel that computes it.
+// upstream 21f5e659e758 (18.5): Fix edge case in remove_useless_result_rtes() with outer joins.
+// phrels also carries outer-join relids, some possibly stale (joins this
+// pass already decided to remove), so only phrels & baserels decides.
+// upstream 9e40d07e140b (18.5): Skip unnecessary get_relids_in_jointree() when there are no PHVs
+// The caller passes no baserels when the query has no PHVs; the walkers
+// return early then, and C's NULL set intersects to empty otherwise.
+struct FindDependentPhvs<'a, 'mcx> {
+    mcx: Mcx<'mcx>,
     relids: types_nodes::Bitmapset<'mcx>,
+    baserels: &'a types_nodes::Bitmapset<'mcx>,
     sublevels_up: u32,
 }
-impl<'mcx> nodes_core::NodeWalker<'mcx> for FindDependentPhvs<'mcx> {
+impl<'a, 'mcx> nodes_core::NodeWalker<'mcx> for FindDependentPhvs<'a, 'mcx> {
     fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
         match node.node_tag() {
             NodeTag::T_PlaceHolderVar => {
                 let phv = node.as_place_holder_var().expect("PlaceHolderVar");
-                if phv.phlevelsup == self.sublevels_up && phv.phrels.equal(&self.relids) {
-                    return Ok(true);
+                if phv.phlevelsup == self.sublevels_up {
+                    let phbaserels = phv.phrels.intersect(self.baserels, self.mcx)?;
+                    if phbaserels.equal(&self.relids) {
+                        return Ok(true);
+                    }
                 }
                 nodes_core::expression_tree_walker(node, self)
             }
@@ -1621,13 +1632,19 @@ pub(crate) fn find_dependent_phvs<'mcx>(
     run: &crate::run::PlannerRun<'mcx>,
     parse: &Query<'mcx>,
     varno: i32,
+    baserels: Option<&types_nodes::Bitmapset<'mcx>>,
 ) -> PgResult<bool> {
     use nodes_core::NodeWalker as _;
     if run.glob.last_ph_id == 0 {
         return Ok(false);
     }
+    debug_assert!(baserels.is_some());
+    let empty = types_nodes::Bitmapset::empty();
+    let baserels = baserels.unwrap_or(&empty);
     let mut w = FindDependentPhvs {
+        mcx: run.mcx,
         relids: types_nodes::Bitmapset::make_singleton(run.mcx, varno)?,
+        baserels,
         sublevels_up: 0,
     };
     if nodes_core::query_tree_walker(parse, &mut w, 0)? {
@@ -1653,14 +1670,20 @@ pub(crate) fn find_dependent_phvs_in_jointree<'mcx>(
     parse: &Query<'mcx>,
     node: Node<'mcx>,
     varno: i32,
+    baserels: Option<&types_nodes::Bitmapset<'mcx>>,
 ) -> PgResult<bool> {
     use nodes_core::NodeWalker as _;
     let mcx = run.mcx;
     if run.glob.last_ph_id == 0 {
         return Ok(false);
     }
+    debug_assert!(baserels.is_some());
+    let empty = types_nodes::Bitmapset::empty();
+    let baserels = baserels.unwrap_or(&empty);
     let mut w = FindDependentPhvs {
+        mcx,
         relids: types_nodes::Bitmapset::make_singleton(mcx, varno)?,
+        baserels,
         sublevels_up: 0,
     };
     if w.visit(node)? {
@@ -2475,19 +2498,8 @@ pub(crate) fn replace_var_expr_su<'mcx>(
                 },
             )?))
         }
-        NodeTag::T_CurrentOfExpr => {
-            let c = node.as_current_of_expr().expect("CurrentOfExpr");
-            if sublevels_up == 0 && c.cvarno == varno as u32 {
-                // C replace_rte_variables_mutator (rewriteManip.c): a WHERE
-                // CURRENT OF that turns out to apply to a view being pulled up.
-                return Err(types_error::PgError::error(
-                    "WHERE CURRENT OF on a view is not implemented".to_string(),
-                )
-                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
-                .into());
-            }
-            Ok(None)
-        }
+        // upstream f3d03fbd5d01 (18.5): Fix UPDATE/DELETE ... WHERE CURRENT OF on a table with virtual columns.
+        // No CurrentOfExpr arm: the view check moved to parse analysis; the node copies normally.
         // replace_rte_variables_mutator's Query arm (rewriteManip.c): recurse
         // into an RTE subquery or a not-yet-planned sublink subquery with
         // sublevels_up incremented for the duration.
@@ -4570,7 +4582,10 @@ pub fn expand_virtual_generated_columns<'mcx>(
     for rt_index in 1..=nrte {
         let rte_node = parse.rtable.nth(rt_index - 1);
         let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
-        if rte.rtekind != RTEKind::RTE_RELATION || !matches!(rte.relkind, b'r' | b'p') {
+        // rtekind only, as C (prepjointree.c:989): the EXCLUDED pseudo-relation
+        // (relkind RELKIND_COMPOSITE_TYPE, relid = target table) and foreign
+        // tables carry virtual columns too. Divergence: generated_virtual-2.
+        if rte.rtekind != RTEKind::RTE_RELATION {
             continue;
         }
         let rel = table::table_open(mcx, rte.relid, types_rel::NoLock)?;
@@ -4727,11 +4742,16 @@ pub fn expand_virtual_generated_columns<'mcx>(
 
 // expression_tree_mutator's T_OnConflictExpr arm (nodeFuncs.c:3585), the leg
 // query_tree_mutator reaches from Query.onConflict (nodeFuncs.c:3790):
-// FLATCOPY then mutate arbiterElems, arbiterWhere, onConflictSet,
-// onConflictWhere and exclRelTlist. `action`, `constraint` and `exclRelIndex`
-// are scalars the FLATCOPY carries over unchanged. (The EXCLUDED
-// pseudo-relation is its own RTE_RELATION rtable entry, so its own virtual
-// generated columns are expanded by the caller's loop at its own rt_index.)
+// FLATCOPY then mutate arbiterElems, arbiterWhere, onConflictSet and
+// onConflictWhere. `action`, `constraint` and `exclRelIndex` are scalars the
+// FLATCOPY carries over unchanged. (The EXCLUDED pseudo-relation is its own
+// RTE_RELATION rtable entry, so its own virtual generated columns are
+// expanded by the caller's loop at its own rt_index.)
+//
+// upstream cf38dedf693a (18.5): Fix expansion of EXCLUDED virtual generated columns.
+// exclRelTlist is left alone (C NILs it around pullup_replace_vars): it must
+// hold only Vars, else set_plan_refs would fold the SET/WHERE expansions back
+// into virtual-column Vars the executor cannot evaluate.
 pub(crate) fn replace_vars_in_on_conflict<'mcx>(
     mcx: Mcx<'mcx>,
     oc_node: Node<'mcx>,
@@ -4748,9 +4768,6 @@ pub(crate) fn replace_vars_in_on_conflict<'mcx>(
         replace_var_expr(mcx, n, varno, tlist, false, Some(phc))
     })?;
     let on_conflict_where = replace_opt(mcx, oc.onConflictWhere, varno, tlist, false, Some(phc))?;
-    let excl_rel_tlist = clauses::walker::mutate_list(mcx, &oc.exclRelTlist, &mut |n| {
-        replace_var_expr(mcx, n, varno, tlist, false, Some(phc))
-    })?;
     // SAFETY: pre-seal tree owned by this planner invocation.
     unsafe {
         oc_node.with_mut::<types_nodes::primnodes::OnConflictExpr, _>(|o| {
@@ -4762,9 +4779,6 @@ pub(crate) fn replace_vars_in_on_conflict<'mcx>(
                 o.onConflictSet = l;
             }
             o.onConflictWhere = on_conflict_where;
-            if let Some(l) = excl_rel_tlist {
-                o.exclRelTlist = l;
-            }
         })
     }
     .expect("OnConflictExpr");

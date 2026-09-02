@@ -1006,6 +1006,7 @@ use ::types_tuple::{HEAP_KEYS_UPDATED, HEAP_UPDATED};
 const FAKE_XID: u32 = 100;
 
 static DML_INIT: Once = Once::new();
+static FSM_VACUUM_RANGES: Mutex<Vec<(BlockNumber, BlockNumber)>> = Mutex::new(Vec::new());
 static XLOG_RECS: Mutex<Vec<(u8, Vec<u8>, usize, Vec<(u8, Vec<u8>)>)>> = Mutex::new(Vec::new());
 static NEXT_LSN: AtomicUsize = AtomicUsize::new(0x1000);
 
@@ -1044,19 +1045,30 @@ fn install_dml_seams() {
     DML_INIT.call_once(|| {
         bufmgr_seams::mark_buffer_dirty::set(|_buf| Ok(()));
         bufmgr_seams::extend_buffered_rel_by::set(|rel, _fork, _strategy, flags, extend_by| {
-            assert_eq!(extend_by, 1);
             assert!(flags & bufmgr_seams::EB_LOCK_FIRST != 0);
-            let page = Box::new(TestPage([0u8; BLCKSZ]));
             let rd_id = rel.rd_id;
             Ok(with_fake(|f| {
-                let addr = Box::leak(page).as_mut_ptr() as usize;
-                f.pages.push(addr);
-                f.pins.push(1);
-                f.locks.push(1);
-                let buf = f.pages.len() as Buffer;
-                f.tables.get_mut(&rd_id).unwrap().push(buf);
-                (buf, 1)
+                let mut first = InvalidBuffer;
+                for i in 0..extend_by {
+                    let page = Box::new(TestPage([0u8; BLCKSZ]));
+                    let addr = Box::leak(page).as_mut_ptr() as usize;
+                    f.pages.push(addr);
+                    // Only the first page comes back pinned + locked
+                    // (EB_LOCK_FIRST); the seam impl drops the other pins.
+                    f.pins.push(if i == 0 { 1 } else { 0 });
+                    f.locks.push(if i == 0 { 1 } else { 0 });
+                    let buf = f.pages.len() as Buffer;
+                    if i == 0 {
+                        first = buf;
+                    }
+                    f.tables.get_mut(&rd_id).unwrap().push(buf);
+                }
+                (first, extend_by)
             }))
+        });
+        freespace_seams::free_space_map_vacuum_range::set(|_rel, start, end| {
+            FSM_VACUUM_RANGES.lock().unwrap().push((start, end));
+            Ok(())
         });
         xact_seams::get_current_transaction_id::set(|| Ok(FAKE_XID));
         xact_seams::get_current_command_id::set(|_used| Ok(7));
@@ -2389,5 +2401,405 @@ fn inplace_update_wal_precedes_page_mutation() {
     assert_eq!(live_val, 42i32.to_ne_bytes(), "page mutated after WAL");
 
     bufmgr_seams::release_buffer::call(buf).unwrap();
+    quiesced();
+}
+
+// upstream eabc9a9dd908 (18.5): Include last block in FSM vacuum of bulk
+// extended relation. FreeSpaceMapVacuumRange's end is exclusive, so the
+// range handed over by RelationAddBlocks must run one past the last block
+// it recorded in the FSM.
+#[test]
+fn bulk_extend_fsm_vacuum_range_covers_last_block() {
+    install_dml_seams();
+    let _serial = serial();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let oid = fresh_oid();
+    register_table(oid, vec![]);
+    let rel = test_relation(mcx, oid);
+    FSM_VACUUM_RANGES.lock().unwrap().clear();
+
+    // A bulk-insert state that already grew the relation once extends by
+    // four pages at a time; num_pages = 1 keeps only the first out of the FSM.
+    let mut bistate = hio::GetBulkInsertState();
+    bistate.already_extended_by = 4;
+    let pin = hio::RelationGetBufferForTuple(&rel, 64, None, 0, Some(&mut bistate), 1).unwrap();
+    assert_eq!(pin.block_number(), 0);
+    assert_eq!(with_fake(|f| f.tables[&oid].len()), 4);
+    bufmgr_seams::lock_buffer::call(pin.buffer(), bufmgr_seams::BUFFER_LOCK_UNLOCK).unwrap();
+    pin.release();
+    assert_eq!((bistate.next_free, bistate.last_free), (1, 3));
+    hio::ReleaseBulkInsertStatePin(&mut bistate);
+
+    // Blocks 1..=3 went into the FSM; the vacuum must cover block 3 too.
+    let ranges = core::mem::take(&mut *FSM_VACUUM_RANGES.lock().unwrap());
+    assert_eq!(ranges, vec![(1, 4)]);
+    quiesced();
+}
+
+// --- upstream f581fa729d8e (18.5): VM buffers registered in heap records ---
+
+// Block references as the write side registers them, per record:
+// (block_id, fork, block, flags).
+type BlkRefs = Vec<(u8, ::types_core::ForkNumber, BlockNumber, u8)>;
+static BLKREFS: Mutex<Vec<(u8, BlkRefs)>> = Mutex::new(Vec::new());
+
+fn capture_blkrefs() {
+    BLKREFS.lock().unwrap().clear();
+    *WAL_INSPECT.lock().unwrap_or_else(|e| e.into_inner()) = Some(Box::new(|info, blocks| {
+        let refs = blocks
+            .iter()
+            .map(|b| (b.block_id, b.forknum, b.block, b.flags))
+            .collect();
+        BLKREFS.lock().unwrap().push((info, refs));
+    }));
+}
+
+fn take_blkrefs() -> Vec<(u8, BlkRefs)> {
+    *WAL_INSPECT.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    core::mem::take(&mut *BLKREFS.lock().unwrap())
+}
+
+fn page_lsn(oid: Oid, page_idx: usize) -> u64 {
+    let buf = with_fake(|f| f.tables[&oid][page_idx]);
+    let addr = with_fake(|f| f.pages[(buf - 1) as usize]);
+    // SAFETY: leaked test page, always live.
+    unsafe { PageRef::from_raw(NonNull::new(addr as *mut u8).unwrap()) }.lsn()
+}
+
+const MAIN: ::types_core::ForkNumber = ::types_core::ForkNumber::MAIN_FORKNUM;
+const VM: ::types_core::ForkNumber = ::types_core::ForkNumber::VISIBILITYMAP_FORKNUM;
+const STD: u8 = ::xloginsert_seams::REGBUF_STANDARD;
+
+// One all-visible heap page holding tuple (9, 0, 1), VM byte `vm_byte` for it.
+fn all_visible_table(vm_byte: u8) -> Oid {
+    let oid = fresh_oid();
+    register_table(
+        oid,
+        vec![build_page(&[Item::Tuple(tuple_image(9, 0, 1))], true)],
+    );
+    register_table(oid + VM_OID_OFFSET, vec![vm_test_page(vm_byte)]);
+    oid
+}
+
+// An insert that clears the page's VM bits registers the VM page as block
+// HEAP_INSERT_BLKREF_VM (flags 0) and stamps it with the record LSN.
+#[test]
+fn insert_onto_all_visible_page_registers_vm_block() {
+    install_dml_seams();
+    install_vm_seams();
+    let _serial = serial();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let oid = all_visible_table(0x03);
+    let rel = test_relation(mcx, oid);
+    let _ = take_xlog();
+    capture_blkrefs();
+
+    let mut tup = make_writable_tuple(&tuple_image(0, 0, 41));
+    dml::heap_insert(&rel, &mut tup, 7, 0, None).unwrap();
+    assert_eq!(tup.t_self, ItemPointerData::new(0, 2));
+
+    assert!(!heap_page_flags_check(oid, 0), "PD_ALL_VISIBLE cleared");
+    assert_eq!(vm_first_byte(oid), 0, "VM bits cleared");
+    let recs = take_xlog();
+    assert_eq!(recs.len(), 1);
+    assert_ne!(recs[0].1[2] & dml::XLH_INSERT_ALL_VISIBLE_CLEARED, 0);
+    assert_eq!(
+        take_blkrefs(),
+        vec![(
+            dml::XLOG_HEAP_INSERT,
+            vec![(0, MAIN, 0, STD), (dml::HEAP_INSERT_BLKREF_VM, VM, 0, 0)]
+        )]
+    );
+    let heap_lsn = page_lsn(oid, 0);
+    assert_ne!(heap_lsn, 0);
+    assert_eq!(page_lsn(oid + VM_OID_OFFSET, 0), heap_lsn, "VM page carries the record LSN");
+    quiesced();
+}
+
+// PD_ALL_VISIBLE set but the VM bits already clear: the flag is still
+// logged (redo re-clears via the fallback path) but no VM block is
+// registered and the VM page's LSN does not move.
+#[test]
+fn insert_with_vm_bits_already_clear_registers_no_vm_block() {
+    install_dml_seams();
+    install_vm_seams();
+    let _serial = serial();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let oid = all_visible_table(0x00);
+    let rel = test_relation(mcx, oid);
+    let _ = take_xlog();
+    capture_blkrefs();
+
+    let mut tup = make_writable_tuple(&tuple_image(0, 0, 41));
+    dml::heap_insert(&rel, &mut tup, 7, 0, None).unwrap();
+
+    assert!(!heap_page_flags_check(oid, 0), "PD_ALL_VISIBLE cleared");
+    let recs = take_xlog();
+    assert_eq!(recs.len(), 1);
+    assert_ne!(recs[0].1[2] & dml::XLH_INSERT_ALL_VISIBLE_CLEARED, 0);
+    assert_eq!(
+        take_blkrefs(),
+        vec![(dml::XLOG_HEAP_INSERT, vec![(0, MAIN, 0, STD)])]
+    );
+    assert_eq!(page_lsn(oid + VM_OID_OFFSET, 0), 0, "untouched VM page keeps its LSN");
+    quiesced();
+}
+
+#[test]
+fn delete_on_all_visible_page_registers_vm_block() {
+    install_dml_seams();
+    install_vm_seams();
+    let _serial = serial();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let oid = all_visible_table(0x03);
+    let rel = test_relation(mcx, oid);
+    let _ = take_xlog();
+    capture_blkrefs();
+
+    let tid = ItemPointerData::new(0, 1);
+    let mut tmfd = TM_FailureData::default();
+    let r = dml::heap_delete(&rel, &tid, 7, None, true, &mut tmfd, false).unwrap();
+    assert_eq!(r, TM_Result::TM_Ok);
+
+    assert!(!heap_page_flags_check(oid, 0), "PD_ALL_VISIBLE cleared");
+    assert_eq!(vm_first_byte(oid), 0, "VM bits cleared");
+    let recs = take_xlog();
+    assert_eq!(recs.len(), 1);
+    assert_ne!(recs[0].1[7] & dml::XLH_DELETE_ALL_VISIBLE_CLEARED, 0);
+    assert_eq!(
+        take_blkrefs(),
+        vec![(
+            dml::XLOG_HEAP_DELETE,
+            vec![(0, MAIN, 0, STD), (dml::HEAP_DELETE_BLKREF_VM, VM, 0, 0)]
+        )]
+    );
+    assert_eq!(page_lsn(oid + VM_OID_OFFSET, 0), page_lsn(oid, 0));
+    quiesced();
+}
+
+// Same-page (HOT) update: the one heap block is block 0, and the VM page
+// covering it is registered as HEAP_UPDATE_BLKREF_VM_OLD.
+#[test]
+fn hot_update_on_all_visible_page_registers_vm_old() {
+    install_dml_seams();
+    install_vm_seams();
+    let _serial = serial();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let oid = all_visible_table(0x03);
+    let rel = test_relation(mcx, oid);
+    let _ = take_xlog();
+    capture_blkrefs();
+
+    let otid = ItemPointerData::new(0, 1);
+    let mut newtup = make_writable_tuple(&tuple_image(0, 0, 2));
+    let mut tmfd = TM_FailureData::default();
+    let mut lockmode = LockTupleMode::LockTupleNoKeyExclusive;
+    let mut update_indexes = TU_UpdateIndexes::TU_None;
+    let r = dml::heap_update(
+        &rel,
+        &otid,
+        &mut newtup,
+        7,
+        None,
+        true,
+        &mut tmfd,
+        &mut lockmode,
+        &mut update_indexes,
+    )
+    .unwrap();
+    assert_eq!(r, TM_Result::TM_Ok);
+    assert_eq!(newtup.t_self, ItemPointerData::new(0, 2));
+
+    assert!(!heap_page_flags_check(oid, 0), "PD_ALL_VISIBLE cleared");
+    assert_eq!(vm_first_byte(oid), 0, "VM bits cleared");
+    let recs = take_xlog();
+    assert_eq!(recs.len(), 1);
+    assert_eq!(
+        recs[0].1[7] & (dml::XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED | dml::XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED),
+        dml::XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED
+    );
+    assert_eq!(
+        take_blkrefs(),
+        vec![(
+            dml::XLOG_HEAP_HOT_UPDATE,
+            vec![(0, MAIN, 0, STD), (dml::HEAP_UPDATE_BLKREF_VM_OLD, VM, 0, 0)]
+        )]
+    );
+    assert_eq!(page_lsn(oid + VM_OID_OFFSET, 0), page_lsn(oid, 0));
+    quiesced();
+}
+
+// Cross-page update off a full all-visible page: the lock-only record
+// clears (and registers the VM page for) all-frozen, then the update record
+// registers new (0) and old (1) heap blocks plus the old page's VM page as
+// HEAP_UPDATE_BLKREF_VM_OLD; the fresh new page has no VM bits to clear.
+#[test]
+fn cross_page_update_registers_vm_old_after_lock_record() {
+    install_dml_seams();
+    install_vm_seams();
+    let _serial = serial();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let oid = fresh_oid();
+    let mut filler = tuple_image(10, 0, 0);
+    filler.resize(1900, 0);
+    register_table(
+        oid,
+        vec![build_page(
+            &[
+                Item::Tuple(tuple_image(10, 0, 1)),
+                Item::Tuple(filler.clone()),
+                Item::Tuple(filler.clone()),
+                Item::Tuple(filler.clone()),
+                Item::Tuple(filler),
+            ],
+            true,
+        )],
+    );
+    register_table(oid + VM_OID_OFFSET, vec![vm_test_page(0x03)]);
+    let rel = test_relation(mcx, oid);
+    let _ = take_xlog();
+    capture_blkrefs();
+
+    let otid = ItemPointerData::new(0, 1);
+    let mut big = tuple_image(0, 0, 2);
+    big.resize(600, 0);
+    let mut newtup = make_writable_tuple(&big);
+    let mut tmfd = TM_FailureData::default();
+    let mut lockmode = LockTupleMode::LockTupleNoKeyExclusive;
+    let mut update_indexes = TU_UpdateIndexes::TU_None;
+    let r = dml::heap_update(
+        &rel,
+        &otid,
+        &mut newtup,
+        7,
+        None,
+        true,
+        &mut tmfd,
+        &mut lockmode,
+        &mut update_indexes,
+    )
+    .unwrap();
+    assert_eq!(r, TM_Result::TM_Ok);
+    assert_eq!(newtup.t_self, ItemPointerData::new(1, 1));
+
+    assert!(!heap_page_flags_check(oid, 0), "old page PD_ALL_VISIBLE cleared");
+    assert_eq!(vm_first_byte(oid), 0, "old block's VM bits cleared");
+    let recs = take_xlog();
+    assert_eq!(recs.len(), 2, "xl_heap_lock then xl_heap_update");
+    assert_eq!(recs[0].1[7], dml::XLH_LOCK_ALL_FROZEN_CLEARED);
+    assert_eq!(
+        recs[1].1[7] & (dml::XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED | dml::XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED),
+        dml::XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED
+    );
+    assert_eq!(
+        take_blkrefs(),
+        vec![
+            (
+                dml::XLOG_HEAP_LOCK,
+                vec![(0, MAIN, 0, STD), (dml::HEAP_LOCK_BLKREF_VM, VM, 0, 0)]
+            ),
+            (
+                dml::XLOG_HEAP_UPDATE | dml::XLOG_HEAP_INIT_PAGE,
+                vec![
+                    (0, MAIN, 1, STD | ::xloginsert_seams::REGBUF_WILL_INIT),
+                    (1, MAIN, 0, STD),
+                    (dml::HEAP_UPDATE_BLKREF_VM_OLD, VM, 0, 0),
+                ]
+            ),
+        ]
+    );
+    assert_eq!(page_lsn(oid + VM_OID_OFFSET, 0), page_lsn(oid, 0), "VM page LSN = update record");
+    quiesced();
+}
+
+// Locking a tuple on an all-frozen page clears only all-frozen and
+// registers the VM page as HEAP_LOCK_BLKREF_VM; PD_ALL_VISIBLE survives.
+#[test]
+fn lock_tuple_clearing_all_frozen_registers_vm_block() {
+    install_dml_seams();
+    install_vm_seams();
+    let _serial = serial();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let oid = all_visible_table(0x03);
+    let rel = test_relation(mcx, oid);
+    let _ = take_xlog();
+    capture_blkrefs();
+
+    let tid = ItemPointerData::new(0, 1);
+    let mut tmfd = TM_FailureData::default();
+    let (r, pin) = dml::heap_lock_tuple(
+        &rel,
+        &tid,
+        7,
+        LockTupleMode::LockTupleExclusive,
+        ::tableam_vocab::LockWaitPolicy::LockWaitBlock,
+        false,
+        &mut tmfd,
+    )
+    .unwrap();
+    assert_eq!(r, TM_Result::TM_Ok);
+    drop(pin);
+
+    assert!(heap_page_flags_check(oid, 0), "PD_ALL_VISIBLE kept");
+    assert_eq!(vm_first_byte(oid), 0x01, "all-visible kept, all-frozen cleared");
+    let recs = take_xlog();
+    assert_eq!(recs.len(), 1);
+    assert_eq!(recs[0].1[7], dml::XLH_LOCK_ALL_FROZEN_CLEARED);
+    assert_eq!(
+        take_blkrefs(),
+        vec![(
+            dml::XLOG_HEAP_LOCK,
+            vec![(0, MAIN, 0, STD), (dml::HEAP_LOCK_BLKREF_VM, VM, 0, 0)]
+        )]
+    );
+    assert_eq!(page_lsn(oid + VM_OID_OFFSET, 0), page_lsn(oid, 0));
+    quiesced();
+}
+
+// All-visible but not all-frozen: nothing to clear, so no flag, no VM block
+// and no VM LSN movement -- even though the VM buffer was locked.
+#[test]
+fn lock_tuple_on_unfrozen_all_visible_page_registers_no_vm_block() {
+    install_dml_seams();
+    install_vm_seams();
+    let _serial = serial();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let oid = all_visible_table(0x01);
+    let rel = test_relation(mcx, oid);
+    let _ = take_xlog();
+    capture_blkrefs();
+
+    let tid = ItemPointerData::new(0, 1);
+    let mut tmfd = TM_FailureData::default();
+    let (r, pin) = dml::heap_lock_tuple(
+        &rel,
+        &tid,
+        7,
+        LockTupleMode::LockTupleExclusive,
+        ::tableam_vocab::LockWaitPolicy::LockWaitBlock,
+        false,
+        &mut tmfd,
+    )
+    .unwrap();
+    assert_eq!(r, TM_Result::TM_Ok);
+    drop(pin);
+
+    assert_eq!(vm_first_byte(oid), 0x01);
+    let recs = take_xlog();
+    assert_eq!(recs.len(), 1);
+    assert_eq!(recs[0].1[7], 0);
+    assert_eq!(
+        take_blkrefs(),
+        vec![(dml::XLOG_HEAP_LOCK, vec![(0, MAIN, 0, STD)])]
+    );
+    assert_eq!(page_lsn(oid + VM_OID_OFFSET, 0), 0);
     quiesced();
 }

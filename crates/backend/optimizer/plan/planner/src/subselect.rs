@@ -693,6 +693,8 @@ fn convert_exists_sublink_to_join<'mcx>(
     let perm_offset = parse.rteperminfos.len() as u32;
     for srte_node in &subselect.rtable {
         let srte = srte_node.as_range_tbl_entry().expect("rtable cell");
+        // upstream 1c7358099cbe (18.4): Fix unsafe RTE_GROUP removal in simplify_EXISTS_query
+        // RTE_RESULT (the converted RTE_GROUP) carries no expressions: the plain copy is exact.
         assert!(
             matches!(
                 srte.rtekind,
@@ -701,6 +703,7 @@ fn convert_exists_sublink_to_join<'mcx>(
                     | RTEKind::RTE_JOIN
                     | RTEKind::RTE_FUNCTION
                     | RTEKind::RTE_CTE
+                    | RTEKind::RTE_RESULT
             ),
             "convert_EXISTS_sublink_to_join (subselect.c): {:?} RTE in EXISTS body",
             srte.rtekind
@@ -1567,16 +1570,19 @@ fn contain_exec_param<'mcx>(node: Node<'mcx>, ids: &IntList<'mcx>) -> PgResult<b
     Ok(w.1)
 }
 
-// hash_ok_operator (subselect.c): hashable + strict. ARRAY_EQ/RECORD_EQ take
-// the input-type-sensitive check.
+// hash_ok_operator (subselect.c): hashable + strict. The container-type
+// equality operators take the input-type-sensitive check.
 fn hash_ok_operator(expr: &types_nodes::primnodes::OpExpr<'_>) -> PgResult<bool> {
-    const ARRAY_EQ_OP: types_core::Oid = 1070;
-    const RECORD_EQ_OP: types_core::Oid = 2988;
     let opid = expr.opno;
     if expr.args.len() != 2 {
         return Ok(false);
     }
-    if opid == ARRAY_EQ_OP || opid == RECORD_EQ_OP {
+    // upstream 11aed8d19cd7 (18.4): Fix missed checks for hashability of container-type equality.
+    if opid == lsyscache::ARRAY_EQ_OP
+        || opid == lsyscache::RECORD_EQ_OP
+        || opid == lsyscache::RANGE_EQ_OP
+        || opid == lsyscache::MULTIRANGE_EQ_OP
+    {
         let (lty, _) = crate::costsize::expr_type_typmod(expr.args.nth(0));
         return lsyscache::op_hashjoinable(opid, lty);
     }
@@ -1751,16 +1757,29 @@ fn simplify_exists_query<'mcx>(run: &mut PlannerRun<'mcx>, query: &mut Query<'mc
     query.distinctClause = NodeList::nil();
     query.sortClause = NodeList::nil();
     query.hasDistinctOn = false;
-    // The GROUP BY clauses are gone; drop the RTE_GROUP entry too.
+    // upstream 1c7358099cbe (18.4): Fix unsafe RTE_GROUP removal in simplify_EXISTS_query
+    // The RTE_GROUP becomes an RTE_RESULT (groupexprs cleared) at the same
+    // index rather than being deleted, so later RTEs keep their indexes.  The
+    // pull-up caller's rtable nodes are plancache-shared: fresh node, no write.
     if query.hasGroupRTE {
+        let mcx = run.mcx;
         let mut new_rtable = NodeList::nil();
         for rte_node in &query.rtable {
-            if rte_node.as_range_tbl_entry().expect("rtable cell").rtekind
-                == types_nodes::parsenodes::RTEKind::RTE_GROUP
-            {
-                continue;
+            let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
+            if rte.rtekind == RTEKind::RTE_GROUP {
+                let copy =
+                    crate::prepjointree::rte_copy_with_perminfoindex(mcx, rte, rte.perminfoindex)?;
+                // SAFETY: exclusive pre-seal fixup of the fresh copy.
+                unsafe {
+                    copy.with_mut::<RangeTblEntry, _>(|r| {
+                        r.rtekind = RTEKind::RTE_RESULT;
+                        r.groupexprs = NodeList::nil();
+                    })
+                };
+                new_rtable.lappend(mcx, copy)?;
+            } else {
+                new_rtable.lappend(mcx, rte_node)?;
             }
-            new_rtable.lappend(run.mcx, rte_node)?;
         }
         query.rtable = new_rtable;
         query.hasGroupRTE = false;
@@ -2470,4 +2489,121 @@ pub(crate) fn ss_make_initplan_from_plan<'mcx>(
     let splan_id = run.intern_expr(Node::mk(mcx, splan)?);
     run.root.init_plans.push(splan_id);
     Ok(())
+}
+
+#[cfg(test)]
+mod simplify_exists_tests {
+    use super::*;
+    use mcx::MemoryContext;
+    use types_nodes::nodes_enums::CmdType;
+
+    // upstream 1c7358099cbe (18.4): simplify_EXISTS_query gets rid of the
+    // EXISTS subquery's RTE_GROUP by converting it in place to RTE_RESULT
+    // (groupexprs cleared) rather than deleting it, so the rtable keeps its
+    // length and every later RTE keeps its index.
+    #[test]
+    fn simplify_exists_query_converts_rte_group_in_place() {
+        crate::tests::install_fixtures();
+        let cx = MemoryContext::new_bump("simplify-exists");
+        let mcx = cx.mcx();
+        let rel_rte = || {
+            let mut rte = Node::build::<RangeTblEntry>(mcx).unwrap();
+            rte.rtekind = RTEKind::RTE_RELATION;
+            rte.relid = 16384;
+            rte.relkind = b'r';
+            rte.rellockmode = 1;
+            rte.seal()
+        };
+        // rtable = [t1, *GROUP*, t2]: a relation RTE *after* the group RTE,
+        // named by the qual's Var (varno 3).
+        let mut rtable = NodeList::make1(mcx, rel_rte()).unwrap();
+        {
+            let mut grte = Node::build::<RangeTblEntry>(mcx).unwrap();
+            grte.rtekind = RTEKind::RTE_GROUP;
+            grte.groupexprs =
+                NodeList::make1(mcx, Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap()).unwrap();
+            rtable.lappend(mcx, grte.seal()).unwrap();
+        }
+        rtable.lappend(mcx, rel_rte()).unwrap();
+        let qual = Node::mk_var(mcx, 3, 1, 16, -1, 0, 0).unwrap();
+        let jointree = mcx::alloc_leak_in(
+            mcx,
+            FromExpr {
+                fromlist: NodeList::make2(
+                    mcx,
+                    Node::mk_range_tbl_ref(mcx, 1).unwrap(),
+                    Node::mk_range_tbl_ref(mcx, 3).unwrap(),
+                )
+                .unwrap(),
+                quals: Some(qual),
+            },
+        )
+        .unwrap();
+        let group_var = Node::mk_var(mcx, 2, 1, 23, -1, 0, 0).unwrap();
+        let mut query = Query {
+            commandType: CmdType::CMD_SELECT,
+            rtable,
+            jointree: Some(jointree),
+            targetList: NodeList::make1(
+                mcx,
+                Node::mk_target_entry(mcx, group_var, 1, Some("b"), false).unwrap(),
+            )
+            .unwrap(),
+            hasGroupRTE: true,
+            ..Query::default()
+        };
+        let mut run = PlannerRun::new(mcx);
+
+        assert!(simplify_exists_query(&mut run, &mut query).unwrap());
+
+        assert_eq!(query.rtable.len(), 3, "rtable length must be preserved");
+        let g = query.rtable.nth(1).as_range_tbl_entry().unwrap();
+        assert_eq!(g.rtekind, RTEKind::RTE_RESULT);
+        assert!(g.groupexprs.is_nil());
+        assert!(!query.hasGroupRTE);
+        assert!(query.targetList.is_nil());
+        // The Var naming rtable entry 3 still resolves to the relation RTE.
+        let t2 = query.rtable.nth(2).as_range_tbl_entry().unwrap();
+        assert_eq!(t2.rtekind, RTEKind::RTE_RELATION);
+        let f = query.jointree.unwrap();
+        assert_eq!(f.quals.unwrap().as_var().unwrap().varno, 3);
+    }
+
+    // upstream 1c7358099cbe (18.4): the EXISTS pull-up simplifies a
+    // cells-level copy whose RTE nodes are the plancache-shared originals,
+    // so the converted entry must be a fresh node and the original unwritten.
+    #[test]
+    fn simplify_exists_query_leaves_shared_rte_group_unwritten() {
+        crate::tests::install_fixtures();
+        let cx = MemoryContext::new_bump("simplify-exists-shared");
+        let mcx = cx.mcx();
+        let mut grte = Node::build::<RangeTblEntry>(mcx).unwrap();
+        grte.rtekind = RTEKind::RTE_GROUP;
+        grte.groupexprs =
+            NodeList::make1(mcx, Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap()).unwrap();
+        let shared = grte.seal();
+        let orig = Query {
+            commandType: CmdType::CMD_SELECT,
+            rtable: NodeList::make1(mcx, shared).unwrap(),
+            jointree: Some(
+                mcx::alloc_leak_in(mcx, FromExpr { fromlist: NodeList::nil(), quals: None })
+                    .unwrap(),
+            ),
+            hasGroupRTE: true,
+            ..Query::default()
+        };
+        let mut query = query_cells_copy(mcx, &orig).unwrap();
+        let mut run = PlannerRun::new(mcx);
+
+        assert!(simplify_exists_query(&mut run, &mut query).unwrap());
+
+        let g = query.rtable.nth(0).as_range_tbl_entry().unwrap();
+        assert_eq!(g.rtekind, RTEKind::RTE_RESULT);
+        assert!(g.groupexprs.is_nil());
+        assert!(!query.hasGroupRTE);
+        let o = shared.as_range_tbl_entry().unwrap();
+        assert_eq!(o.rtekind, RTEKind::RTE_GROUP, "shared RTE node was written");
+        assert_eq!(o.groupexprs.len(), 1);
+        assert!(orig.hasGroupRTE);
+    }
 }

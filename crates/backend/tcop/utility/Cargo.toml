@@ -53,6 +53,8 @@ commands_createas = { path = "../../commands/createas" }
 matview_seams = { path = "../../commands/matview_seams" }
 portalcmds = { path = "../../commands/portalcmds" }
 prepare = { path = "../../commands/prepare" }
+plancache = { path = "../../utils/cache/plancache" }
+tupdesc = { path = "../../access/common/tupdesc" }
 guc_funcs = { path = "../../utils/misc/guc_funcs" }
 mcx = { path = "../../../_support/mcx" }
 types_core = { path = "../../../_support/types/types_core" }

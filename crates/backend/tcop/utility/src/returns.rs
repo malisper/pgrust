@@ -53,7 +53,7 @@ pub fn UtilityReturnsTuples(parsetree: Node<'_>) -> bool {
             )
             .expect("throwError=false cannot fail");
             match entry {
-                Some(e) => prepare::FetchPreparedStatementResultDesc(&e).is_some(),
+                Some(e) => plancache::CachedPlanResultDesc(e.plansource).is_some(),
                 None => false,
             }
         }
@@ -77,9 +77,14 @@ pub fn UtilityTupleDescriptor(
             if stmt.ismove {
                 return Ok(None);
             }
-            // C CreateTupleDescCopy; the Rc clone is the caller-owned copy.
-            Ok(portalmem::GetPortalByName(stmt.portalname)
-                .and_then(|portal| portal.borrow().tupDesc.clone()))
+            // upstream 37b8f3b0e05e (18.6): Cross-check the type of a portal running EXECUTE or FETCH.
+            // C CreateTupleDescCopy: the cursor's own descriptor dies with it at CLOSE.
+            match portalmem::GetPortalByName(stmt.portalname)
+                .and_then(|portal| portal.borrow().tupDesc.clone())
+            {
+                Some(desc) => Ok(Some(Rc::new(tupdesc::CreateTupleDescCopy(desc_mcx(), &desc)?))),
+                None => Ok(None),
+            }
         }
         T_ExecuteStmt => {
             let stmt = parsetree.as_execute_stmt().unwrap();
@@ -88,7 +93,11 @@ pub fn UtilityTupleDescriptor(
                 false,
             )
             .expect("throwError=false cannot fail");
-            Ok(entry.and_then(|e| prepare::FetchPreparedStatementResultDesc(&e)))
+            // upstream 37b8f3b0e05e (18.6): Cross-check the type of a portal running EXECUTE or FETCH.
+            match entry {
+                Some(e) => prepare::FetchPreparedStatementResultDesc(desc_mcx(), &e),
+                None => Ok(None),
+            }
         }
         T_ExplainStmt => {
             let stmt = parsetree.as_explain_stmt().unwrap();

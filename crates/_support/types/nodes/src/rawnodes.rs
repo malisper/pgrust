@@ -1056,6 +1056,9 @@ pub struct CreateStatsStmt<'mcx> {
     pub stxcomment: Option<&'mcx str>,
     pub transformed: bool,
     pub if_not_exists: bool,
+    // upstream a1fa24127d6a (18.6): Preserve the owner of extended statistics rebuilt by ALTER TABLE.
+    // OID of owner, or InvalidOid for default.
+    pub owner: Oid,
 }
 
 #[derive(Default)]

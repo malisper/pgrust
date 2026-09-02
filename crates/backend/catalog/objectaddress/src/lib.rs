@@ -67,7 +67,19 @@ pub fn init_seams() {
     objectaddress_seams::get_object_description::set(get_object_description_by_oids);
     objectaddress_seams::get_object_address::set(get_object_address_marshal);
     objectaddress_seams::check_object_ownership::set(check_object_ownership_marshal);
+    objectaddress_seams::get_object_class_props::set(get_object_class_props_marshal);
     fmgr_core::register_late_builtins(builtins::OBJECTADDRESS_BUILTINS);
+}
+
+// upstream c8cd3d6976f7 (18.6): Avoid orphaned objects dependencies
+fn get_object_class_props_marshal(class_id: Oid) -> objectaddress_seams::ObjectClassProps {
+    let p = properties::get_object_property_data(class_id);
+    objectaddress_seams::ObjectClassProps {
+        oid_catcache_id: p.oid_catcache_id,
+        oid_index_oid: p.oid_index_oid,
+        attnum_oid: p.attnum_oid,
+        class_descr: p.class_descr,
+    }
 }
 
 fn get_object_address_marshal<'mcx>(

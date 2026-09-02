@@ -600,33 +600,38 @@ pub fn ReplicationSlotRelease() -> PgResult<()> {
     // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
     if unsafe { slot.data.get() }.persistency == RS_EPHEMERAL {
         ReplicationSlotDropAcquired()?;
-    }
-
-    // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
-    if !TransactionIdIsValid(unsafe { slot.data.get() }.xmin)
-        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
-        && TransactionIdIsValid(unsafe { slot.effective_xmin.get() })
-    {
-        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
-        slot.with_mutex(|| unsafe { slot.effective_xmin.set(InvalidTransactionId) });
-        ReplicationSlotsComputeRequiredXmin(false)?;
-    }
-
-    let now = GetCurrentTimestamp();
-
-    // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
-    if unsafe { slot.data.get() }.persistency == RS_PERSISTENT {
-        slot.with_mutex(|| {
-            // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
-            unsafe { slot.active_pid.set(0) };
-            ReplicationSlotSetInactiveSince(slot, now, false);
-        });
-        ConditionVariableBroadcast(&slot.active_cv);
     } else {
-        ReplicationSlotSetInactiveSince(slot, now, true);
-    }
+        // upstream f833c92077a1 (18.5): Fix race in ReplicationSlotRelease() for ephemeral slots
+        // A dropped ephemeral slot's entry is immediately reusable by another
+        // backend's ReplicationSlotCreate, so the post-release shared-memory
+        // updates below apply only to slots that survive the release.
 
-    SetMyReplicationSlot(None);
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        if !TransactionIdIsValid(unsafe { slot.data.get() }.xmin)
+            // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+            && TransactionIdIsValid(unsafe { slot.effective_xmin.get() })
+        {
+            // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+            slot.with_mutex(|| unsafe { slot.effective_xmin.set(InvalidTransactionId) });
+            ReplicationSlotsComputeRequiredXmin(false)?;
+        }
+
+        let now = GetCurrentTimestamp();
+
+        // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+        if unsafe { slot.data.get() }.persistency == RS_PERSISTENT {
+            slot.with_mutex(|| {
+                // SAFETY: ReplicationSlot field serialized by ReplicationSlotControlLock / the slot spinlock mutex
+                unsafe { slot.active_pid.set(0) };
+                ReplicationSlotSetInactiveSince(slot, now, false);
+            });
+            ConditionVariableBroadcast(&slot.active_cv);
+        } else {
+            ReplicationSlotSetInactiveSince(slot, now, true);
+        }
+
+        SetMyReplicationSlot(None);
+    }
 
     lw(lwlock::main_lock(procarray::PROC_ARRAY_LOCK), LW_EXCLUSIVE)?;
     let proc = lmgr_proc::GetPGProcByNumber(g::MyProcNumber());

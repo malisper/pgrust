@@ -2484,7 +2484,8 @@ fn transform_index_constraints<'mcx>(
                     return Err(duplicate_key_column(key, is_primary, constraint.location));
                 }
             }
-            // C: the WITHOUT OVERLAPS part must be a range or multirange type.
+            // C: the WITHOUT OVERLAPS part must be a range or multirange type,
+            // or a domain over such a type.
             if constraint.without_overlaps && keyidx == nkeys - 1 {
                 if found {
                     if typid == InvalidOid {
@@ -2495,6 +2496,10 @@ fn transform_index_constraints<'mcx>(
                                 typid = typenameTypeIdAndMod(mcx, None, tn)?.0;
                             }
                         }
+                    }
+                    // upstream 49f3cb453b9b (18.4): Fix WITHOUT OVERLAPS' interaction with domains.
+                    if typid != InvalidOid {
+                        typid = lsyscache::getBaseType(typid)?;
                     }
                     if typid == InvalidOid
                         || !(lsyscache::type_is_range(typid)?
@@ -2699,11 +2704,15 @@ pub fn transformIndexConstraintForAlter<'mcx>(
             let desc = rel.descr();
             for i in 0..desc.natts as usize {
                 let att = desc.attr(i);
+                // upstream 49f3cb453b9b (18.4): Fix WITHOUT OVERLAPS' interaction with domains.
                 if att.attisdropped {
-                    break;
+                    continue;
                 }
                 if att.attname.name_str() == key.as_bytes() {
-                    let typid = att.atttypid;
+                    let mut typid = att.atttypid;
+                    if typid != InvalidOid {
+                        typid = lsyscache::getBaseType(typid)?;
+                    }
                     if typid == InvalidOid
                         || !(lsyscache::type_is_range(typid)?
                             || lsyscache::type_is_multirange(typid)?)

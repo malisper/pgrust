@@ -821,7 +821,8 @@ pub fn gistGetFakeLSN(rel: &Relation<'_>) -> PgResult<XLogRecPtr> {
     }
     if rel.is_permanent() {
         debug_assert!(!crate::relation_needs_wal(rel));
-        let mut currlsn = ::transam_xlog::GetXLogInsertRecPtr();
+        // upstream 5b3f63a1bf59 (18.4): Use GetXLogInsertEndRecPtr in gistGetFakeLSN
+        let mut currlsn = ::transam_xlog::GetXLogInsertEndRecPtr();
         let lastlsn = FAKE_LSN_LASTLSN.with(|c| c.get());
         if lastlsn != 0 && lastlsn == currlsn {
             currlsn = crate::wal::gistXLogAssignLSN()?;

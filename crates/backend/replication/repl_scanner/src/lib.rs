@@ -141,11 +141,9 @@ impl<'a> Scanner<'a> {
         }
     }
 
-    // NB: unlike <xq> (which has an {xqdouble} rule), repl_scanner.l's <xd>
-    // state has NO {xddouble} rule — a second double-quote always TERMINATES
-    // the identifier, so `"a""b"` lexes as Ident(a) Ident(b), never a`"`b.
-    // (The original port collapsed doubled quotes here; repl_scanner_diff
-    // caught the divergence against the real flex machine, 2026-08-01.)
+    // upstream abb5825550a8 (18.5): Clean up quoting of variable strings within replication commands.
+    // <xd>{xddouble} (new in 18.5, longest-match ahead of {xdstop}): `"a""b"`
+    // is Ident(a"b); the 18.3 machine ended the identifier at the 2nd quote.
     fn lex_delimited_identifier(&mut self) -> PgResult<Token> {
         debug_assert_eq!(self.input[self.pos], b'"');
         self.pos += 1;
@@ -156,6 +154,11 @@ impl<'a> Scanner<'a> {
             }
             let ch = self.input[self.pos];
             if ch == b'"' {
+                if self.pos + 1 < self.input.len() && self.input[self.pos + 1] == b'"' {
+                    lit.push(b'"');
+                    self.pos += 2;
+                    continue;
+                }
                 self.pos += 1;
                 let mut folded = mcx::slice_in(self.mcx.mcx(), &lit)
                     .map_err(|_| replication_yyerror("out of memory"))?;

@@ -591,3 +591,32 @@ fn json_table_row_pattern_errors() {
         "JSON object does not contain key \"missing\""
     );
 }
+
+// upstream 84001a04d552 (18.6): Fix jsonpath .decimal() to honor silent mode
+// .decimal(p, s) built its typmod through numerictypmodin(), whose range
+// errors were hard even in silent mode; 18.6 routes them through the soft
+// error context so silent queries return nothing / @? returns NULL.
+#[test]
+fn decimal_method_typmod_range_honors_silent_mode() {
+    // without silent mode the numerictypmodin() messages are still thrown
+    assert_eq!(
+        q_err("12345.678", "$.decimal(0, 6)"),
+        "NUMERIC precision 0 must be between 1 and 1000"
+    );
+    assert_eq!(
+        q_err("1234.5678", "$.decimal(6, 1001)"),
+        "NUMERIC scale 1001 must be between -1000 and 1000"
+    );
+    // An out-of-range precision or scale does not fail in silent mode.
+    for (json, path) in [
+        ("12345.678", "$.decimal(0, 6)"),
+        ("12345.678", "$.decimal(1001, 6)"),
+        ("1234.5678", "$.decimal(-6, +2)"),
+        ("1234.5678", "$.decimal(6, -1001)"),
+        ("1234.5678", "$.decimal(6, 1001)"),
+    ] {
+        assert_eq!(query(json, path, true, false), Ok(vec![]), "{json} @ {path}");
+    }
+    // select '1234.5678'::jsonb @? '$.decimal(0)'  ->  NULL
+    assert_eq!(exists("1234.5678", "$.decimal(0)"), None);
+}

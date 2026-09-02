@@ -334,7 +334,14 @@ pub(crate) fn cached_sql_function(
         let a = read_oidvector_attr(scratch.mcx(), argv)?;
         ReleaseSysCache(tup);
         let n = a.len();
-        assert!(n <= MAX_SQL_FN_ARGS, "fmgr_sql: >{MAX_SQL_FN_ARGS} arguments (FUNC_MAX_ARGS)");
+        // upstream 2a03f21daf59 (18.6): Protect some fixed-size arrays that have FUNC_MAX_ARGS elements.
+        if n > MAX_SQL_FN_ARGS {
+            return Err(ereport(ERROR)
+                .errcode(types_error::ERRCODE_TOO_MANY_ARGUMENTS)
+                .errmsg(format!("cannot pass more than {MAX_SQL_FN_ARGS} arguments to a function"))
+                .into_error()
+                .into());
+        }
         (a, n)
     };
     let argtypes = resolve_argtypes(&declared, flinfo)?;

@@ -33,6 +33,23 @@ pub(crate) fn check_deparse_nargs(n: usize) -> PgResult<()> {
     Ok(())
 }
 
+// upstream 2a03f21daf59 (18.6): Protect some fixed-size arrays that have FUNC_MAX_ARGS elements.
+// get_aggregate_argtypes' guard: a stored parse tree may carry more.
+pub(crate) fn check_agg_nargs(n: usize) -> PgResult<()> {
+    if n > FUNC_MAX_ARGS - 1 {
+        return Err(too_many_aggregate_arguments());
+    }
+    Ok(())
+}
+
+#[cold]
+#[inline(never)]
+fn too_many_aggregate_arguments() -> Box<PgError> {
+    PgError::error(format!("aggregates cannot have more than {} arguments", FUNC_MAX_ARGS - 1))
+        .with_sqlstate(ERRCODE_TOO_MANY_ARGUMENTS)
+        .into()
+}
+
 pub(crate) const PRETTYINDENT_STD: i32 = 8;
 pub(crate) const PRETTYINDENT_JOIN: i32 = 4;
 pub(crate) const PRETTYINDENT_VAR: i32 = 4;
@@ -784,9 +801,37 @@ fn get_json_agg_constructor<'mcx>(
     is_json_objectagg: bool,
 ) -> PgResult<()> {
     let func = ctor.func.expect("func");
+    if func.as_var().is_some() {
+        // upstream 45364e49688a (18.6): Fix EXPLAIN failure when deparsing SQL/JSON aggregates
+        // If the aggregate is computed by a lower plan node, setrefs.c will
+        // have replaced the Aggref or WindowFunc with a Var referencing that
+        // node's output.  Chase the Var back to it so we can still print the
+        // original JSON aggregate syntax.  This only happens in EXPLAIN.
+        return crate::plan::resolve_special_varno(func, ctx, &mut |node, ctx| {
+            // C get_json_agg_constructor_expr flat-copies ctor with func
+            // swapped and re-enters get_json_constructor; the Rust deparses
+            // the unchanged ctor against the resolved func directly.
+            if node.as_aggref().is_none() && node.as_window_func().is_none() {
+                panic!("JSON aggregate constructor does not point to an Aggref or WindowFunc");
+            }
+            get_json_agg_constructor_func(ctor, node, ctx, funcname, is_json_objectagg)
+        });
+    }
+    get_json_agg_constructor_func(ctor, func, ctx, funcname, is_json_objectagg)
+}
+
+// get_json_agg_constructor's Aggref/WindowFunc arms over `func`: the
+// constructor's own node, or the one a setrefs Var resolved to.
+fn get_json_agg_constructor_func<'mcx>(
+    ctor: &'mcx types_nodes::JsonConstructorExpr<'mcx>,
+    func: Node<'mcx>,
+    ctx: &mut DeparseContext<'mcx>,
+    funcname: &str,
+    is_json_objectagg: bool,
+) -> PgResult<()> {
     let Some(aggref) = func.as_aggref() else {
         let Some(wfunc) = func.as_window_func() else {
-            gap("get_json_agg_constructor", "non-Aggref/WindowFunc constructor func");
+            panic!("invalid JsonConstructorExpr underlying node type: {:?}", func.node_tag());
         };
         return get_windowfunc_expr_helper(wfunc, ctx, Some((ctor, funcname, is_json_objectagg)));
     };
@@ -1668,7 +1713,8 @@ fn get_func_sql_syntax<'mcx>(
         }
         _ if F_EXTRACT_OIDS.contains(&funcoid) => {
             ctx.buf.push_str("EXTRACT(");
-            ctx.buf.push_str(&text_const_str(expr.args.nth(0)));
+            // upstream 0ddd9098a310 (18.6): Obstruct EXTRACT() field name deparse injection.
+            ctx.buf.push_str(&quote_identifier(&text_const_str(expr.args.nth(0))));
             ctx.buf.push_str(" FROM ");
             get_rule_expr(expr.args.nth(1), ctx, false)?;
             ctx.buf.push(')');
@@ -1680,6 +1726,7 @@ fn get_func_sql_syntax<'mcx>(
             ctx.buf.push_str(" IS");
             if expr.args.len() == 2 {
                 ctx.buf.push(' ');
+                // NB: safe because no allowed words need quoted/escaped
                 ctx.buf.push_str(&text_const_str(expr.args.nth(1)));
             }
             ctx.buf.push_str(" NORMALIZED)");
@@ -1816,6 +1863,7 @@ fn get_agg_expr_original<'mcx>(
     if aggref.aggkind != types_nodes::primnodes::AGGKIND_NORMAL && !ordered_set {
         gap("get_agg_expr", "unrecognized aggkind");
     }
+    check_agg_nargs(aggref.aggargtypes.len())?;
     let argtypes: Vec<Oid> = aggref.aggargtypes.iter().collect();
     let funcname =
         generate_function_name(ctx.mcx, aggref.aggfnoid, &argtypes, &[], aggref.aggvariadic)?;

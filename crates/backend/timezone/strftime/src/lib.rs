@@ -81,7 +81,8 @@ impl OutBuf<'_> {
 
 /// On success the text plus a trailing NUL is written into `s`; returns the
 /// formatted byte count (excluding NUL). `None` is C's `return 0` / ERANGE
-/// path: `s` holds truncated bytes without a NUL.
+/// path, and a non-empty `s` is still NUL-terminated (the empty string): an
+/// overrun never yields mis-encoded multibyte `%Z` output.
 pub fn pg_strftime(s: &mut [u8], format: &[u8], t: &PgTm<'_>) -> Option<usize> {
     let mut warn = Warn::None;
     let mut out = OutBuf { buf: s, pos: 0 };
@@ -89,6 +90,10 @@ pub fn pg_strftime(s: &mut [u8], format: &[u8], t: &PgTm<'_>) -> Option<usize> {
     fmt(format, t, &mut out, &mut warn);
     // C's `if (!p)` EOVERFLOW branch is unreachable (_fmt never returns NULL).
     if out.full() {
+        // upstream c6e7a9ef30a2 (18.4): Guard against unsafe conditions in usage of pg_strftime().
+        if let Some(first) = out.buf.first_mut() {
+            *first = 0;
+        }
         return None;
     }
     let len = out.pos;

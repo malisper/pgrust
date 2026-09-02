@@ -220,5 +220,4 @@ fn standalone_phase_helpers_do_not_panic() {
     basebackup_progress_estimate_backup_size();
     basebackup_progress_wait_wal_archive(&st);
     basebackup_progress_transfer_wal();
-    basebackup_progress_done();
 }

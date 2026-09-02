@@ -1613,32 +1613,41 @@ pub fn GetSQLLocalTimestamp(typmod: i32) -> PgResult<Timestamp> {
     Ok(ts)
 }
 
+// upstream ba27389c2cfa (18.4): Avoid passing unintended format codes to snprintf().
+// C: part1[128] and part2[128] assembled by snprintf into buf[128 + 128 + 10].
+pub const TIMEOFDAY_BUF: usize = 128 + 128 + 10;
+
 /// C `timeofday` body: formatted text into `buf`, returns the length.
-pub fn timeofday_into(buf: &mut [u8; 128]) -> usize {
+pub fn timeofday_into(buf: &mut [u8; TIMEOFDAY_BUF]) -> usize {
     // DST P2 (contract §1.2): gettimeofday -> pg_clock::wall_timeval().
     let (tv_sec, tv_usec) = pg_clock::wall_timeval();
 
     let zone = require_session_timezone();
     let tx = localtime::pg_localtime(tv_sec, zone)
         .expect("current time within pg_localtime range");
-    let mut templ = [0u8; 128];
-    let n = strftime::pg_strftime(&mut templ, b"%a %b %d %H:%M:%S.%%06d %Y %Z", &tx)
-        .expect("timeofday template fits");
+    // The zone abbreviation (%Z) is user-controlled and unbounded: it is
+    // formatted on its own, never through a format string, and a part that
+    // overflows its 128 bytes is the empty string (C 18.6 pg_strftime).
+    let mut part1 = [0u8; 128];
+    let mut part2 = [0u8; 128];
+    let n1 = strftime::pg_strftime(&mut part1, b"%a %b %d %H:%M:%S", &tx).unwrap_or(0);
+    let n2 = strftime::pg_strftime(&mut part2, b"%Y %Z", &tx).unwrap_or(0);
 
-    // C's second step: snprintf(buf, templ, tv_usec) fills the %06d hole.
-    let pos = templ[..n]
-        .windows(4)
-        .position(|w| w == b"%06d")
-        .expect("template keeps the %06d hole");
-    buf[..pos].copy_from_slice(&templ[..pos]);
+    // snprintf(buf, sizeof(buf), "%s.%06d %s", part1, (int) tv_usec, part2)
+    buf[..n1].copy_from_slice(&part1[..n1]);
+    let mut p = n1;
+    buf[p] = b'.';
+    p += 1;
     let mut usec = tv_usec;
     for i in (0..6).rev() {
-        buf[pos + i] = b'0' + (usec % 10) as u8;
+        buf[p + i] = b'0' + (usec % 10) as u8;
         usec /= 10;
     }
-    let tail = n - (pos + 4);
-    buf[pos + 6..pos + 6 + tail].copy_from_slice(&templ[pos + 4..n]);
-    pos + 6 + tail
+    p += 6;
+    buf[p] = b' ';
+    p += 1;
+    buf[p..p + n2].copy_from_slice(&part2[..n2]);
+    p + n2
 }
 
 #[derive(Clone, Copy)]

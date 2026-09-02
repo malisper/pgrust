@@ -93,8 +93,8 @@ enum ProbeKernel {
     Int4,
     Int8,
     // Binary-mode single byval key (the LATERAL shape — C forces binary_mode
-    // for lateral_vars): hash/eq are datum_image ops over the full Datum
-    // word, so one kernel covers every byval type.
+    // for lateral_vars): hash/eq are datum_image ops over the Datum word
+    // truncated to attlen, so one kernel covers every byval type.
     ByvalImage,
 }
 
@@ -719,18 +719,21 @@ fn cache_lookup<'mcx>(
     } else {
         let (key, isnull) = eval_key(&mut node.param_exprs[0], node.ps_ExprContext, estate)?;
         (kernel_key, kernel_isnull) = (key, isnull);
+        // upstream 49315de0c074 (18.4): Fix datum_image_*()'s inability to detect sign-extension variations
+        // Both sides at attlen width (C DatumGetInt32 etc.): sign- and zero-extended words fold.
+        let len = node.key_attrs[0].len;
         let h32 = match (kernel, isnull) {
             (_, true) => 0,
             (ProbeKernel::Int4, _) => hashfn::hash_bytes_uint32(key.as_u32()),
             (ProbeKernel::Int8, _) => hashfn::hash_bytes_uint32(hashint8_fold(key)),
-            // datum_image_hash byval arm: the full Datum word's bytes.
-            _ => hashfn::hash_bytes(&key.as_usize().to_ne_bytes()),
+            // datum_image_hash byval arm: the attlen-truncated word's bytes.
+            _ => hashfn::hash_bytes(&truncate_byval(key, len).to_ne_bytes()),
         };
         hash = hashfn::murmurhash32(h32);
         let MemoizeState { entries, hashtab, .. } = node;
         // NOT DISTINCT over the entry's cached key word: grouping-equal fold
         // in logical mode, the binary probe_equal isnull fold for ByvalImage
-        // (identical shape); byval datum_image_eq is the full-word compare.
+        // (identical shape); byval datum_image_eq compares at attlen width.
         hashtab
             .find(hash as u64, |&ix| {
                 let e = entries[ix as usize].as_ref().expect("live entry");
@@ -739,7 +742,7 @@ fn cache_lookup<'mcx>(
                         (false, false) => match kernel {
                             ProbeKernel::Int4 => e.key.as_i32() == key.as_i32(),
                             ProbeKernel::Int8 => e.key.as_i64() == key.as_i64(),
-                            _ => e.key.as_usize() == key.as_usize(),
+                            _ => truncate_byval(e.key, len) == truncate_byval(key, len),
                         },
                         (a, b) => a & b,
                     }

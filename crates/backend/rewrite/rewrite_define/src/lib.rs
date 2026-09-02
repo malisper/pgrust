@@ -174,6 +174,8 @@ fn InsertRule<'mcx>(
     };
     pg_depend::recordDependencyOn(mcx, &myself, &referenced, behavior)?;
 
+    // upstream 2780538433fc (18.5): Check for USAGE privilege on types used by stored expressions.
+    catalog_dependency::CheckUsageOnTypesInExpr(action_node, &NodeList::nil(), miscinit::GetUserId())?;
     catalog_dependency::recordDependencyOnExpr(
         mcx,
         &myself,
@@ -185,6 +187,7 @@ fn InsertRule<'mcx>(
     if let Some(qual) = event_qual {
         let qry = action.nth(0).as_query().expect("rule action is a Query");
         let qry = rewrite_manip::getInsertSelectQuery_ref(qry)?;
+        catalog_dependency::CheckUsageOnTypesInExpr(qual, &qry.rtable, miscinit::GetUserId())?;
         catalog_dependency::recordDependencyOnExpr(
             mcx,
             &myself,
@@ -844,6 +847,18 @@ pub fn RenameRewriteRule<'mcx>(
         return Err(Box::new(
             PgError::error("renaming an ON SELECT rule is not allowed")
                 .with_sqlstate(ERRCODE_INVALID_OBJECT_DEFINITION),
+        ));
+    }
+    // upstream a7f7958ab6bf (18.6): Disallow renaming a rule to "_RETURN".
+    // Conversely, a rule that is not ON SELECT must *not* be named _RETURN.
+    if new_name == ViewSelectRuleName {
+        return Err(Box::new(
+            PgError::error(format!(
+                "non-view rule for \"{}\" must not be named \"{}\"",
+                targetrel.name(),
+                ViewSelectRuleName
+            ))
+            .with_sqlstate(ERRCODE_INVALID_OBJECT_DEFINITION),
         ));
     }
 

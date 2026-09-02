@@ -4,6 +4,8 @@
 //! (which mirrors libpq fe-auth.c / fe-auth-scram.c), retargeted at psql's
 //! own blocking Conn.
 
+use timingsafe_bcmp::timingsafe_bcmp;
+
 use crate::proto::{be_i32, cstr_at, msg, parse_diag, Conn};
 
 fn error_text(f: &crate::proto::ErrorFields) -> String {
@@ -189,7 +191,11 @@ fn scram_exchange(conn: &mut Conn, password: &str) -> Result<(), String> {
     let server_first = String::from_utf8_lossy(&mbody[4..]).into_owned();
     let fields: Vec<&str> = server_first.split(',').collect();
     let server_nonce = scram_attr(&fields, 'r')?.to_string();
-    if !server_nonce.starts_with(&client_nonce) {
+    // upstream d93ef413174d (18.4): Apply timingsafe_bcmp() in authentication paths
+    let n = client_nonce.len();
+    if server_nonce.len() < n
+        || timingsafe_bcmp(&server_nonce.as_bytes()[..n], client_nonce.as_bytes()) != 0
+    {
         return Err("invalid SCRAM response (nonce mismatch)".into());
     }
     let salt = scram_attr(&fields, 's').and_then(b64_decode)?;
@@ -225,7 +231,8 @@ fn scram_exchange(conn: &mut Conn, password: &str) -> Result<(), String> {
     let server_sig_b64 = scram_attr(&ffields, 'v')?.to_string();
     let server_key = scram_common::scram_server_key(&salted);
     let expected = b64(&pg_hmac::hmac_sha256(&server_key, auth_message.as_bytes()));
-    if server_sig_b64 != expected {
+    // upstream d93ef413174d (18.4): Apply timingsafe_bcmp() in authentication paths
+    if timingsafe_bcmp(server_sig_b64.as_bytes(), expected.as_bytes()) != 0 {
         return Err("incorrect server signature in SCRAM exchange".into());
     }
     Ok(())

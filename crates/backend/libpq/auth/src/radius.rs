@@ -4,6 +4,7 @@
 //! EINTR/timeout arms, no FD_SETSIZE ceiling.
 
 use elog::{elog, ereport};
+use timingsafe_bcmp::timingsafe_bcmp;
 use types_error::{PgResult, LOG, WARNING};
 use types_startup::Port;
 
@@ -421,7 +422,8 @@ fn PerformRadiusTransaction(
         cryptvector.extend_from_slice(secret.as_bytes());
         let digest = pg_md5::pg_md5_binary(&cryptvector);
 
-        if receive.vector() != digest {
+        // upstream d93ef413174d (18.4): Apply timingsafe_bcmp() in authentication paths
+        if timingsafe_bcmp(receive.vector(), &digest) != 0 {
             ereport(LOG)
                 .errmsg(format!(
                     "RADIUS response from {server} has incorrect MD5 signature"

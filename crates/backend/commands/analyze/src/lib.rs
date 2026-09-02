@@ -100,6 +100,8 @@ enum ComputeStats {
     Range { is_multirange: bool },
     Array { std: StdCompute, elem_typeid: Oid },
     TsVector,
+    // upstream 017e4e395d0d (18.4): test_custom_types: Test module with fancy custom data types
+    Custom(CustomComputeStats),
 }
 
 // std_typanalyze's pick, saved by array_typanalyze (C's std_compute_stats).
@@ -115,7 +117,7 @@ struct StdAnalyzeData {
     ltopr: Oid,
 }
 
-pub(crate) struct VacAttrStats<'mcx> {
+pub struct VacAttrStats<'mcx> {
     tupattnum: i32,
     attstattarget: i32,
     attrtypid: Oid,
@@ -145,6 +147,43 @@ pub(crate) struct VacAttrStats<'mcx> {
     statyplen: [i16; STATISTIC_NUM_SLOTS],
     statypbyval: [bool; STATISTIC_NUM_SLOTS],
     statypalign: [u8; STATISTIC_NUM_SLOTS],
+}
+
+// upstream 017e4e395d0d (18.4): test_custom_types: Test module with fancy custom data types
+pub type CustomComputeStats =
+    fn(&mut VacAttrStats<'_>, &FetchSource<'_, '_>, i32, f64) -> PgResult<()>;
+
+impl VacAttrStats<'_> {
+    pub fn attstattarget(&self) -> i32 {
+        self.attstattarget
+    }
+
+    pub fn set_attstattarget(&mut self, target: i32) {
+        self.attstattarget = target;
+    }
+
+    pub fn set_minrows(&mut self, minrows: i32) {
+        self.minrows = minrows;
+    }
+
+    pub fn set_compute_stats(&mut self, compute: CustomComputeStats) {
+        self.compute = ComputeStats::Custom(compute);
+    }
+
+    pub fn set_stats_valid(&mut self, valid: bool) {
+        self.stats_valid = valid;
+    }
+}
+
+pub fn with_typanalyze_stats<R>(
+    fcinfo: &types_fmgr::FunctionCallInfoBaseData,
+    f: impl FnOnce(&mut VacAttrStats<'_>) -> R,
+) -> R {
+    let stats = fcinfo.arg(0).as_usize() as *mut VacAttrStats<'static>;
+    // SAFETY: call_custom_typanalyze passes the `&mut VacAttrStats` it holds
+    // as arg 0 and does not touch it until the call returns, so this is the
+    // only live reference while `f` runs; the setters store no borrowed data.
+    f(unsafe { &mut *stats })
 }
 
 pub fn ExecVacuum<'mcx>(
@@ -404,6 +443,7 @@ pub fn inline_analyze_targrows(onerel: &Relation<'_>) -> PgResult<i32> {
         anl_mcx,
         onerel.rd_id,
         &colstats,
+        &mut ExtStatsExprCompute,
     )?);
     Ok(targrows)
 }
@@ -598,8 +638,12 @@ fn do_analyze_rel<'mcx>(
     }
     // Captured (not just maxed into targrows) — extended statistics REQUIRE
     // sample rows, so their presence is a P6-5 fold-admission gate below.
-    let ext_stats_rows =
-        statistics::ComputeExtStatisticsRows(anl_mcx, onerel.rd_id, &colstats)?;
+    let ext_stats_rows = statistics::ComputeExtStatisticsRows(
+        anl_mcx,
+        onerel.rd_id,
+        &colstats,
+        &mut ExtStatsExprCompute,
+    )?;
     targrows = targrows.max(ext_stats_rows);
 
     let mut totalrows = 0.0f64;
@@ -785,6 +829,7 @@ fn do_analyze_rel<'mcx>(
                 ComputeStats::TsVector => {
                     ts_typanalyze::compute_tsvector_stats(anl_mcx, col_cx.mcx(), s, &src, numrows)?
                 }
+                ComputeStats::Custom(f) => f(s, &src, numrows, totalrows)?,
             }
             if let Some(ndv) = &footer_ndv {
                 if s.stats_valid && s.tupattnum >= 1 {
@@ -1128,6 +1173,9 @@ fn compute_index_stats<'mcx>(
                                 totalindexrows,
                             )?
                         }
+                        ComputeStats::Custom(f) => {
+                            f(stats, &src, numindexrows as i32, totalindexrows)?
+                        }
                     }
                     col_cx.reset();
                 }
@@ -1231,7 +1279,8 @@ fn examine_attribute<'mcx>(
         }
         other => call_custom_typanalyze(mcx, other, &mut stats)?,
     };
-    if !ok {
+    // upstream 017e4e395d0d (18.4): test_custom_types: Test module with fancy custom data types
+    if !ok || stats.minrows <= 0 {
         return Ok(None);
     }
     Ok(Some(stats))
@@ -1323,6 +1372,11 @@ fn examine_expression<'mcx>(
 pub struct ExtStatsExprCompute;
 
 impl<'mcx> statistics::ExprStatsCompute<'mcx> for ExtStatsExprCompute {
+    // upstream 83671c0da049 (18.4): Fix set of issues with extended statistics on expressions
+    fn examinable(&mut self, mcx: Mcx<'mcx>, expr: types_nodes::Node<'mcx>) -> PgResult<bool> {
+        Ok(examine_expression(mcx, expr, -1)?.is_some())
+    }
+
     // compute_expr_stats + serialize_expr_stats row extraction
     // (extended_stats.c); expression stats are computed against the sample
     // only, so totalrows == samplerows per C.
@@ -1432,6 +1486,7 @@ impl<'mcx> statistics::ExprStatsCompute<'mcx> for ExtStatsExprCompute {
                         &src,
                         tcnt,
                     )?,
+                    ComputeStats::Custom(f) => f(&mut stats, &src, tcnt, tcnt as f64)?,
                 }
                 col_cx.reset();
             }
@@ -1495,7 +1550,9 @@ fn call_custom_typanalyze<'mcx>(
     unsafe { fcinfo.set_result_mcx(mcx) };
     fcinfo.set_arg(0, Datum::from_usize(stats as *mut VacAttrStats<'mcx> as usize));
     let d = flinfo.invoke(&mut fcinfo)?;
-    Ok(!fcinfo.isnull && d.as_bool())
+    let ok = !fcinfo.isnull && d.as_bool();
+    // upstream 017e4e395d0d (18.4): test_custom_types: Test module with fancy custom data types
+    Ok(ok && matches!(stats.compute, ComputeStats::Custom(_)))
 }
 
 fn std_typanalyze(stats: &mut VacAttrStats<'_>) -> PgResult<bool> {
@@ -2509,7 +2566,7 @@ struct ScalarMCVItem {
 }
 
 // C's fetchfunc pair (std_fetch_func / ind_fetch_func).
-pub(crate) enum FetchSource<'a, 'd> {
+pub enum FetchSource<'a, 'd> {
     Heap {
         tupdesc: &'a TupleDescData<'d>,
         rows: &'a [HeapTupleData<'d>],
@@ -2523,7 +2580,7 @@ pub(crate) enum FetchSource<'a, 'd> {
 }
 
 impl FetchSource<'_, '_> {
-    pub(crate) fn fetch(&self, rowno: usize, attnum: i32) -> (Datum, bool) {
+    pub fn fetch(&self, rowno: usize, attnum: i32) -> (Datum, bool) {
         match self {
             FetchSource::Heap { tupdesc, rows } => fetch_attr(&rows[rowno], attnum, tupdesc),
             FetchSource::Expr { vals, nulls, stride, off } => {

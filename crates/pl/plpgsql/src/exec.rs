@@ -59,6 +59,7 @@ const INT8OID: Oid = 20;
 const TEXTOID: Oid = 25;
 const UNKNOWNOID: Oid = 705;
 const RECORDOID: Oid = 2249;
+const INTERNALOID: Oid = 2281;
 const TYPTYPE_DOMAIN: i8 = b'd' as i8;
 
 const CURSOR_OPT_NO_SCROLL: i32 = 0x0004;
@@ -1799,6 +1800,17 @@ impl<'a> Estate<'a> {
         let cast_expr = match cast_expr {
             Some(e) => Some(e),
             None => {
+                // upstream 54649de65f08 (18.6): Reject calls from SQL to functions that take or return type internal.
+                if srctype == INTERNALOID || dsttype == INTERNALOID {
+                    return Err(exec_err(
+                        types_error::ERRCODE_CANNOT_COERCE,
+                        format!(
+                            "cannot cast type {} to {}",
+                            format_type::format_type_be(srctype)?,
+                            format_type::format_type_be(dsttype)?
+                        ),
+                    ));
+                }
                 let io = types_nodes::Node::mk(
                     mcx,
                     types_nodes::primnodes::CoerceViaIO {
@@ -5228,5 +5240,53 @@ mod cfi_tests {
 
         let mut estate = Estate::new(&func, false, true);
         assert_eq!(estate.param_datum_type(0).unwrap(), INT8OID);
+    }
+
+    // upstream 54649de65f08 (18.6): the I/O-coercion fallback never casts to or from internal.
+    #[test]
+    fn cast_to_or_from_internal_is_42846() {
+        const TEXTOID: Oid = 25;
+        syscache_seams::lookup_pg_type_shape::set(|_| {
+            Ok(Some(types_tuple::PgTypeShape {
+                typlen: 4,
+                typbyval: true,
+                typalign: b'i' as i8,
+                typstorage: b'p' as i8,
+                typcollation: types_core::InvalidOid,
+            }))
+        });
+        syscache_seams::lookup_pg_type_typcache_shape::set(|typid| {
+            let name = match typid {
+                INTERNALOID => "internal",
+                TEXTOID => "text",
+                _ => return Ok(None),
+            };
+            let mut typname = types_tuple::NameData::default();
+            typname.namestrcpy(name);
+            Ok(Some(syscache_seams::PgTypeTypcacheShape {
+                typname,
+                typlen: 4,
+                typbyval: true,
+                typalign: b'i' as i8,
+                typstorage: b'p' as i8,
+                typtype: b'p' as i8,
+                typisdefined: true,
+                typrelid: types_core::InvalidOid,
+                typsubscript: types_core::InvalidOid,
+                typelem: types_core::InvalidOid,
+                typarray: types_core::InvalidOid,
+                typcollation: types_core::InvalidOid,
+            }))
+        });
+        namespace_seams::type_is_visible::set(|_| Ok(true));
+
+        let func = tiny_function();
+        let mut estate = Estate::new(&func, false, true);
+        let err = match estate.build_cast_entry(INTERNALOID, -1, TEXTOID, -1) {
+            Ok(_) => panic!("internal -> text was given a cast entry"),
+            Err(e) => e,
+        };
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_CANNOT_COERCE);
+        assert_eq!(err.message(), "cannot cast type internal to text");
     }
 }

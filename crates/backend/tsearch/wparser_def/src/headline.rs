@@ -642,6 +642,17 @@ pub fn prsd_headline_impl<'mcx>(
     if prs.fragdelim.is_none() {
         prs.fragdelim = Some(bytes_in(mcx, b" ... ")?);
     }
+    check_selector_len("StartSel", prs.startsel.as_deref().unwrap_or(b""))?;
+    check_selector_len("StopSel", prs.stopsel.as_deref().unwrap_or(b""))?;
+    check_selector_len("FragmentDelimiter", prs.fragdelim.as_deref().unwrap_or(b""))?;
+    Ok(())
+}
+
+// prsd_headline: C keeps these lengths as int16 (CVE-2026-6473 backpatch).
+fn check_selector_len(name: &str, sel: &[u8]) -> PgResult<()> {
+    if sel.len() > i16::MAX as usize {
+        return Err(opt_err(format!("value for \"{name}\" is too long")));
+    }
     Ok(())
 }
 
@@ -653,8 +664,21 @@ fn bytes_in<'mcx>(mcx: Mcx<'mcx>, b: &[u8]) -> PgResult<::mcx::PgVec<'mcx, u8>> 
 
 #[cfg(test)]
 mod tests {
-    use super::headline_int_opt;
-    use ::types_error::{ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE};
+    use super::{check_selector_len, headline_int_opt};
+    use ::types_error::{
+        ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_INVALID_TEXT_REPRESENTATION,
+        ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+    };
+
+    #[test]
+    fn selector_longer_than_int16_max_is_22023() {
+        assert!(check_selector_len("StartSel", &[b'x'; 32767]).is_ok());
+        let e = check_selector_len("StartSel", &[b'x'; 32768]).unwrap_err();
+        assert_eq!(e.sqlstate(), ERRCODE_INVALID_PARAMETER_VALUE);
+        assert_eq!(e.message(), "value for \"StartSel\" is too long");
+        let e = check_selector_len("FragmentDelimiter", "\u{e9}".repeat(16384).as_bytes()).unwrap_err();
+        assert_eq!(e.message(), "value for \"FragmentDelimiter\" is too long");
+    }
 
     #[test]
     fn headline_int_opt_overflow_is_22003() {

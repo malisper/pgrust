@@ -1849,6 +1849,7 @@ fn node(out: &mut String, n: Node<'_>) {
         string_field(out, "stxcomment", s.stxcomment);
         bool_field(out, "transformed", s.transformed);
         bool_field(out, "if_not_exists", s.if_not_exists);
+        int_field(out, "owner", s.owner as i32); // upstream a1fa24127d6a (18.6)
         out.push('}');
     } else if let Some(s) = n.as_variant::<types_nodes::rawnodes::StatsElem>() {
         out.push_str("{STATSELEM");

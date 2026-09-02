@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <img alt="Postgres 18.3" src="https://img.shields.io/badge/Postgres-18.3-336791">
+  <img alt="Postgres 18.6" src="https://img.shields.io/badge/Postgres-18.6-336791">
   <img alt="Regression suite: 100%" src="https://img.shields.io/badge/regression_suite-46%2C066%2F46%2C066-brightgreen">
   <img alt="Version: v0.3-beta" src="https://img.shields.io/badge/version-v0.3--beta-blue">
   <a href="LICENSE"><img alt="License: AGPL-3.0" src="https://img.shields.io/badge/license-AGPL--3.0-blue"></a>
@@ -177,7 +177,7 @@ export PATH="$(brew --prefix postgresql@18)/bin:$PATH"
 psql -h /tmp -p 5432 -U postgres -c "select version()"
 ```
 
-You should see `pgrust 0.3-beta (PostgreSQL 18.3 compatible)`.
+You should see `pgrust 0.3-beta (PostgreSQL 18.6 compatible)`.
 
 **macOS Intel:** the same flow works with `pgrust-0.3-beta-macos-x86_64` in place
 of `pgrust-0.3-beta-macos-arm64` (`brew --prefix` handles the different Homebrew
@@ -244,7 +244,7 @@ Leave the server running and connect from a second terminal:
 psql -h /tmp -p 5432 -U postgres -c "select version()"
 ```
 
-You should see `pgrust 0.3-beta (PostgreSQL 18.3 compatible)`.
+You should see `pgrust 0.3-beta (PostgreSQL 18.6 compatible)`.
 
 ### Stopping, restarting, cleaning up
 

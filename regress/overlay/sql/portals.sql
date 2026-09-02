@@ -530,6 +530,11 @@ DECLARE c1 CURSOR FOR SELECT * FROM ucview;
 FETCH FROM c1;
 DELETE FROM ucview WHERE CURRENT OF c1; -- fail, views not supported
 ROLLBACK;
+BEGIN;
+DECLARE c1 CURSOR FOR SELECT * FROM ucview;
+FETCH FROM c1;
+UPDATE ucview SET f1 = f1 + 10 WHERE CURRENT OF c1; -- fail, views not supported
+ROLLBACK;
 
 -- Check WHERE CURRENT OF with an index-only scan
 BEGIN;
@@ -593,6 +598,7 @@ rollback;
 -- Check handling of non-backwards-scan-capable plans with scroll cursors
 begin;
 explain (costs off) declare c1 cursor for select (select 42) as x;
+-- pgrust:ruled SCROLL-MATERIALIZE-WRAP
 explain (costs off) declare c1 scroll cursor for select (select 42) as x;
 declare c1 scroll cursor for select (select 42) as x;
 fetch all in c1;
@@ -600,6 +606,7 @@ fetch backward all in c1;
 rollback;
 begin;
 explain (costs off) declare c2 cursor for select generate_series(1,3) as g;
+-- pgrust:ruled SCROLL-MATERIALIZE-WRAP
 explain (costs off) declare c2 scroll cursor for select generate_series(1,3) as g;
 declare c2 scroll cursor for select generate_series(1,3) as g;
 fetch all in c2;

@@ -14,6 +14,7 @@ pg_sha2 = { path = "../../../common/sha2" }
 scram_common = { path = "../../../common/scram_common" }
 saslprep = { path = "../../../common/saslprep" }
 pg_strong_random = { path = "../../../port/pg_strong_random" }
+timingsafe_bcmp = { path = "../../../port/timingsafe_bcmp" }
 transam_xlog = { path = "../../access/transam/transam_xlog" }
 postgres_seams = { path = "../../tcop/postgres_seams" }
 auth_sasl = { path = "../auth_sasl" }

@@ -278,6 +278,11 @@ pub fn parsetext<'mcx, E: TsParseEnv<'mcx>>(
         while let Some(norms) = lexize_exec(&mut ldata, env, buf)? {
             prs.pos += 1;
             for lex in norms {
+                // upstream e251350573e2 (18.6): Harden tsvector code against overflows.
+                if lex.lexeme.len() > MAXSTRLEN {
+                    elog_notice_word_too_long()?;
+                    continue;
+                }
                 if lex.flags & TSL_ADDPOS != 0 {
                     prs.pos += 1;
                 }

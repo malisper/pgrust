@@ -167,13 +167,57 @@ impl PgLocale {
     }
 }
 
+// upstream 5f003855e7f0 (18.6): Fix pg_strupper/lower/title/fold() functions to work with C locale.
+// strlower_c/strtitle_c/strupper_c: ASCII-only, no stop at NUL, terminator only when it fits.
+fn strlower_c(dst: &mut [u8], src: &[u8]) -> usize {
+    let n = src.len().min(dst.len());
+    for (d, &c) in dst[..n].iter_mut().zip(&src[..n]) {
+        *d = pgstrcasecmp::pg_ascii_tolower(c);
+    }
+    if n < dst.len() {
+        dst[n] = 0;
+    }
+    src.len()
+}
+
+fn strtitle_c(dst: &mut [u8], src: &[u8]) -> usize {
+    let n = src.len().min(dst.len());
+    let mut wasalnum = false;
+    for (d, &c) in dst[..n].iter_mut().zip(&src[..n]) {
+        *d = if wasalnum {
+            pgstrcasecmp::pg_ascii_tolower(c)
+        } else {
+            pgstrcasecmp::pg_ascii_toupper(c)
+        };
+        wasalnum = c.is_ascii_alphanumeric();
+    }
+    if n < dst.len() {
+        dst[n] = 0;
+    }
+    src.len()
+}
+
+fn strupper_c(dst: &mut [u8], src: &[u8]) -> usize {
+    let n = src.len().min(dst.len());
+    for (d, &c) in dst[..n].iter_mut().zip(&src[..n]) {
+        *d = pgstrcasecmp::pg_ascii_toupper(c);
+    }
+    if n < dst.len() {
+        dst[n] = 0;
+    }
+    src.len()
+}
+
 pub fn pg_strlower<'mcx>(
     mcx: Mcx<'mcx>,
     dest: &mut [u8],
     src: &[u8],
     locale: &PgLocale,
 ) -> PgResult<usize> {
-    if locale.provider == COLLPROVIDER_BUILTIN {
+    // upstream 5f003855e7f0 (18.6): the C ctype never reaches libc (NULL locale_t).
+    if locale.ctype_is_c {
+        Ok(strlower_c(dest, src))
+    } else if locale.provider == COLLPROVIDER_BUILTIN {
         Ok(builtin_case::strlower_builtin(dest, src, locale))
     } else if locale.provider == COLLPROVIDER_ICU {
         icu::str_case(icu::CASE_LOWER, dest, src, locale.icu)
@@ -190,7 +234,10 @@ pub fn pg_strtitle<'mcx>(
     src: &[u8],
     locale: &PgLocale,
 ) -> PgResult<usize> {
-    if locale.provider == COLLPROVIDER_BUILTIN {
+    // upstream 5f003855e7f0 (18.6): the C ctype never reaches libc (NULL locale_t).
+    if locale.ctype_is_c {
+        Ok(strtitle_c(dest, src))
+    } else if locale.provider == COLLPROVIDER_BUILTIN {
         Ok(builtin_case::strtitle_builtin(dest, src, locale))
     } else if locale.provider == COLLPROVIDER_ICU {
         icu::str_case(icu::CASE_TITLE, dest, src, locale.icu)
@@ -207,7 +254,10 @@ pub fn pg_strupper<'mcx>(
     src: &[u8],
     locale: &PgLocale,
 ) -> PgResult<usize> {
-    if locale.provider == COLLPROVIDER_BUILTIN {
+    // upstream 5f003855e7f0 (18.6): the C ctype never reaches libc (NULL locale_t).
+    if locale.ctype_is_c {
+        Ok(strupper_c(dest, src))
+    } else if locale.provider == COLLPROVIDER_BUILTIN {
         Ok(builtin_case::strupper_builtin(dest, src, locale))
     } else if locale.provider == COLLPROVIDER_ICU {
         icu::str_case(icu::CASE_UPPER, dest, src, locale.icu)
@@ -224,7 +274,10 @@ pub fn pg_strfold<'mcx>(
     src: &[u8],
     locale: &PgLocale,
 ) -> PgResult<usize> {
-    if locale.provider == COLLPROVIDER_BUILTIN {
+    // upstream 5f003855e7f0 (18.6): in the C locale, casefolding is lowercasing.
+    if locale.ctype_is_c {
+        Ok(strlower_c(dest, src))
+    } else if locale.provider == COLLPROVIDER_BUILTIN {
         Ok(builtin_case::strfold_builtin(dest, src, locale))
     } else if locale.provider == COLLPROVIDER_ICU {
         icu::str_case(icu::CASE_FOLD, dest, src, locale.icu)

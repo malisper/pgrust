@@ -1,5 +1,6 @@
 use ::mcx::{Mcx, PgVec};
 use ::ts_locale::dict_api::DictInitData;
+use ::types_error::{PgResult, ERRCODE_CONFIG_FILE_ERROR};
 
 use crate::dict_ispell::{dispell_init, dispell_lexize, DictISpell};
 
@@ -22,7 +23,7 @@ fn static_mcx() -> Mcx<'static> {
     ctx.mcx()
 }
 
-fn make_dict(mcx: Mcx<'static>, dictfile: &str, afffile: &str) -> Result<DictISpell, String> {
+fn try_dict(mcx: Mcx<'static>, dictfile: &str, afffile: &str) -> PgResult<DictISpell> {
     let init = DictInitData {
         mcx,
         dict_options: opts(mcx, &[("dictfile", dictfile), ("afffile", afffile)]),
@@ -33,7 +34,11 @@ fn make_dict(mcx: Mcx<'static>, dictfile: &str, afffile: &str) -> Result<DictISp
             v
         },
     };
-    dispell_init(&init).map_err(|e| e.message().to_string())
+    dispell_init(&init)
+}
+
+fn make_dict(mcx: Mcx<'static>, dictfile: &str, afffile: &str) -> Result<DictISpell, String> {
+    try_dict(mcx, dictfile, afffile).map_err(|e| e.message().to_string())
 }
 
 fn lexize(mcx: Mcx<'static>, d: &DictISpell, word: &str) -> Option<Vec<String>> {
@@ -143,6 +148,35 @@ fn tsdicts_bad_pairs_oracle() {
 
     let err = make_dict(mcx, "hunspell_sample_num", "hunspell_sample_long").err().unwrap();
     assert_eq!(err, "invalid affix alias \"302,301,202,303\"");
+}
+
+// Oracle: C 18.6 spell.c after upstream 4689ea9ceee3 -- a Hunspell AF alias
+// slot must be filled before an affix entry references it, and the whole
+// table must be present by end of file (both ERRCODE_CONFIG_FILE_ERROR).
+#[test]
+fn hunspell_af_alias_table_oracle() {
+    std::env::set_var(
+        "PGRUST_PGSHAREDIR",
+        format!("{}/fixtures", env!("CARGO_MANIFEST_DIR")),
+    );
+    let mcx = static_mcx();
+
+    let err = try_dict(mcx, "hunspell_af", "hunspell_af_unfilled")
+        .err()
+        .expect("alias referenced before its AF line must be rejected");
+    assert_eq!(err.message(), "invalid affix alias \"2\"");
+    assert_eq!(err.sqlstate(), ERRCODE_CONFIG_FILE_ERROR);
+
+    let err = try_dict(mcx, "hunspell_af", "hunspell_af_short")
+        .err()
+        .expect("AF table shorter than declared must be rejected");
+    assert_eq!(err.message(), "number of aliases is less than specified number 3");
+    assert_eq!(err.sqlstate(), ERRCODE_CONFIG_FILE_ERROR);
+
+    // An AF line with an empty flag field fills its slot with "" (C stores
+    // cpstrdup(""), not NULL), so a complete table referencing it loads.
+    let ok = make_dict(mcx, "hunspell_af", "hunspell_af_ok").unwrap();
+    assert_eq!(lexize(mcx, &ok, "books"), Some(vec!["book".to_string()]));
 }
 
 /// MUST-FAIL CONTROL for the mk_a_node / mk_sp_node recursion guards

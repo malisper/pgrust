@@ -166,16 +166,8 @@ fn ProcessStandbyReplyMessage(r: &mut MsgReader<'_>) -> PgResult<()> {
     // deferred; report unknown (-1) lag.
     let (write_lag, flush_lag, apply_lag) = (-1i64, -1i64, -1i64);
 
-    let sent = crate::SENT_PTR.with(|c| c.get());
-    let mut clear_lag_times = false;
-    if apply_ptr == sent {
-        if crate::FULLY_APPLIED_LAST_TIME.with(|c| c.get()) {
-            clear_lag_times = true;
-        }
-        crate::FULLY_APPLIED_LAST_TIME.with(|c| c.set(true));
-    } else {
-        crate::FULLY_APPLIED_LAST_TIME.with(|c| c.set(false));
-    }
+    let clear_lag_times =
+        reply_clears_lag_times(write_ptr, flush_ptr, apply_ptr, crate::SENT_PTR.with(|c| c.get()));
 
     if reply_requested {
         WalSndKeepalive(false, InvalidXLogRecPtr)?;
@@ -200,6 +192,31 @@ fn ProcessStandbyReplyMessage(r: &mut MsgReader<'_>) -> PgResult<()> {
         }
     }
     Ok(())
+}
+
+// ProcessStandbyReplyMessage's clear-lag-times decision, kept beside its
+// function-static state (C's prevWritePtr/prevFlushPtr/prevApplyPtr): forget
+// the measured lag only when the standby reports full replay (flush and apply
+// at sentPtr) AND its write/flush/apply positions are unchanged since the
+// previous reply -- the wal_receiver_status_interval tick with no activity
+// behind it. "apply == sentPtr twice in a row" alone cleared the lag while
+// positions were still advancing (logical apply catches up at once).
+// upstream 98e96e579b91 (18.4): Fix premature NULL lag reporting in pg_stat_replication
+fn reply_clears_lag_times(
+    write_ptr: XLogRecPtr,
+    flush_ptr: XLogRecPtr,
+    apply_ptr: XLogRecPtr,
+    sent: XLogRecPtr,
+) -> bool {
+    let clear_lag_times = apply_ptr == sent
+        && flush_ptr == sent
+        && write_ptr == crate::PREV_WRITE_PTR.with(|c| c.get())
+        && flush_ptr == crate::PREV_FLUSH_PTR.with(|c| c.get())
+        && apply_ptr == crate::PREV_APPLY_PTR.with(|c| c.get());
+    crate::PREV_WRITE_PTR.with(|c| c.set(write_ptr));
+    crate::PREV_FLUSH_PTR.with(|c| c.set(flush_ptr));
+    crate::PREV_APPLY_PTR.with(|c| c.set(apply_ptr));
+    clear_lag_times
 }
 
 // static void PhysicalConfirmReceivedLocation(XLogRecPtr lsn).
@@ -341,4 +358,31 @@ fn ProcessStandbyHSFeedbackMessage(r: &mut MsgReader<'_>) -> PgResult<()> {
         my_proc().xmin.value.store(feedback_xmin, Relaxed);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reply_clears_lag_times;
+
+    // upstream 98e96e579b91 (18.4): the measured lag is forgotten only when a
+    // reply repeats a fully-replayed position (flush and apply at sentPtr,
+    // write/flush/apply unchanged since the previous reply) -- the
+    // wal_receiver_status_interval tick with nothing behind it. A reply whose
+    // positions advanced with sentPtr (logical apply catches up at once) or
+    // whose flush still lags keeps the lag; the old "apply == sent twice"
+    // rule cleared it there.
+    #[test]
+    fn lag_cleared_only_on_repeated_fully_replayed_reply() {
+        assert!(!reply_clears_lag_times(100, 100, 100, 100));
+        assert!(reply_clears_lag_times(100, 100, 100, 100));
+
+        assert!(!reply_clears_lag_times(200, 200, 200, 200), "positions advanced: activity");
+        assert!(!reply_clears_lag_times(300, 300, 300, 300), "positions advanced: activity");
+
+        assert!(!reply_clears_lag_times(300, 250, 300, 300), "flush lags sentPtr");
+        assert!(!reply_clears_lag_times(300, 250, 300, 300), "flush lags sentPtr");
+
+        assert!(!reply_clears_lag_times(300, 300, 300, 300), "flush just caught up");
+        assert!(reply_clears_lag_times(300, 300, 300, 300), "unchanged full replay");
+    }
 }

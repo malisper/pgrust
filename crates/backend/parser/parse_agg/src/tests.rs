@@ -3,7 +3,8 @@ use parser_small1::{make_parsestate, ParseExprKind};
 use types_core::catalog::{INT4OID, INT8OID};
 use types_core::InvalidOid;
 use types_error::ERRCODE_GROUPING_ERROR;
-use types_nodes::parsenodes::{GroupingSetKind, Query, RangeTblEntry};
+use types_nodes::parsenodes::{GroupingSetKind, Query, RTEKind, RangeTblEntry};
+use types_nodes::JoinType;
 use types_nodes::primnodes::{Aggref, Alias, GroupingFunc};
 use types_nodes::{Node, NodeList, String as PgStr};
 
@@ -934,4 +935,59 @@ fn grouped_outer_var_in_window_frame_offset_is_substituted() {
     assert_eq!(v.varlevelsup, 1);
     assert_eq!(v.varno, 2);
     assert_eq!(v.varattno, 1);
+}
+
+#[test]
+fn group_rte_keeps_join_alias_vars() {
+    // upstream c2c1962a64b5 (18.4): the RTE_GROUP's groupexprs hold the
+    // original join alias Vars (pg_get_viewdef deparses them back); only the
+    // grouping checks run on the flattened form.
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    pstate.p_hasAggs.set(true);
+
+    // rtable: t (varno 1) and a LEFT JOIN RTE (varno 2) whose alias column
+    // 1 resolves to t.x.
+    let colnames = NodeList::make1(mcx, Node::mk(mcx, PgStr { sval: "x" }).unwrap()).unwrap();
+    let eref = Node::mk_mut(mcx, Alias { aliasname: Some("t"), colnames }).unwrap().seal_ref();
+    let mut base = Node::build::<RangeTblEntry>(mcx).unwrap();
+    base.eref = Some(eref);
+    let jcolnames = NodeList::make1(mcx, Node::mk(mcx, PgStr { sval: "x" }).unwrap()).unwrap();
+    let jeref = Node::mk_mut(mcx, Alias { aliasname: Some("j"), colnames: jcolnames })
+        .unwrap()
+        .seal_ref();
+    let mut join = Node::build::<RangeTblEntry>(mcx).unwrap();
+    join.rtekind = RTEKind::RTE_JOIN;
+    join.jointype = JoinType::JOIN_LEFT;
+    join.eref = Some(jeref);
+    join.joinaliasvars =
+        NodeList::make1(mcx, Node::mk_var(mcx, 1, 1, INT4OID, -1, InvalidOid, 0).unwrap())
+            .unwrap();
+
+    // SELECT j.x ... GROUP BY j.x
+    let alias_var = Node::mk_var(mcx, 2, 1, INT4OID, -1, InvalidOid, 0).unwrap();
+    let tle = Node::mk_target_entry(mcx, alias_var, 1, Some("x"), false).unwrap();
+    // SAFETY: freshly built tlist; no other reference is live.
+    unsafe {
+        tle.with_mut::<types_nodes::primnodes::TargetEntry, _>(|t| t.ressortgroupref = 1)
+    }
+    .unwrap();
+    let mut rtable = NodeList::make1(mcx, base.seal()).unwrap();
+    rtable.lappend(mcx, join.seal()).unwrap();
+    let mut qry = Query::default();
+    qry.rtable = rtable;
+    qry.targetList = NodeList::make1(mcx, tle).unwrap();
+    qry.groupClause = group_clause_ref1(mcx);
+    parseCheckAggregates(mcx, &mut pstate, &mut qry).unwrap();
+
+    assert!(qry.hasGroupRTE);
+    let grp = qry.rtable.nth(2).as_range_tbl_entry().unwrap();
+    assert!(matches!(grp.rtekind, RTEKind::RTE_GROUP));
+    let ge = grp.groupexprs.nth(0).as_var().expect("groupexpr stays a Var");
+    assert_eq!((ge.varno, ge.varattno), (2, 1), "groupexprs must keep the join alias Var");
+    // The grouped tlist column was still matched through the flattened form
+    // and now references the RTE_GROUP.
+    let out = qry.targetList.nth(0).as_target_entry().unwrap().expr.as_var().unwrap();
+    assert_eq!((out.varno, out.varattno), (3, 1));
 }

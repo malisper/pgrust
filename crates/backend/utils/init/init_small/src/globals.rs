@@ -73,6 +73,9 @@ scalar_global! {
     LOG_MEMORY_CONTEXT_PENDING, LogMemoryContextPending, SetLogMemoryContextPending,
         bool, false;
     PARALLEL_MESSAGE_PENDING, ParallelMessagePending, SetParallelMessagePending, bool, false;
+    // upstream 58c1188a3eaa (18.4): Fix slotsync worker blocking promotion when stuck in wait
+    // (slotsync.c's SlotSyncShutdownPending; read by ProcessInterrupts).
+    SLOT_SYNC_SHUTDOWN_PENDING, SlotSyncShutdownPending, SetSlotSyncShutdownPending, bool, false;
     IDLE_STATS_UPDATE_TIMEOUT_PENDING, IdleStatsUpdateTimeoutPending,
         SetIdleStatsUpdateTimeoutPending, bool, false;
     // pgrust-only (docs/design/connection-scaling.md D3.4): idle passivation.

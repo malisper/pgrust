@@ -7,11 +7,13 @@
 use mcx::{Mcx, PgVec};
 use relcache::rules::RewriteRuleMeta;
 use rewrite_manip::{ReplaceVarsNoMatchOption, PRS2_NEW_VARNO, PRS2_OLD_VARNO};
+use types_core::catalog::{ATTRIBUTE_GENERATED_STORED, ATTRIBUTE_GENERATED_VIRTUAL};
 use types_core::Oid;
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
 use types_nodes::nodes_enums::CmdType;
 use types_nodes::parsenodes::{Query, QuerySource, RTEKind, RangeTblEntry};
 use types_nodes::{Node, NodeList, NodeTag};
+use types_rel::NoLock;
 
 pub(crate) const RULE_FIRES_ON_ORIGIN: u8 = b'O';
 pub(crate) const RULE_FIRES_ON_REPLICA: u8 = b'R';
@@ -352,13 +354,29 @@ fn rewriteRuleAction<'mcx>(
         } else {
             ReplaceVarsNoMatchOption::SubstituteNull
         };
+        let mut has_sublinks = sub_action.hasSubLinks;
+        // upstream e528bfe97190 (18.4): Fix incorrect NEW references to generated columns in rule rewriting
+        let gen_tlist = generated_column_replacements(
+            mcx,
+            target_rte,
+            new_varno,
+            &parsetree.targetList,
+            result_relation,
+            nomatch,
+            &mut has_sublinks,
+        )?;
+        if has_sublinks {
+            // SAFETY: as above.
+            unsafe { sub_action_node.with_mut::<Query, _>(|q| q.hasSubLinks = true) }
+                .expect("Query");
+        }
         rewrite_manip::ReplaceVarsFromTargetList(
             mcx,
             sub_action_node,
             new_varno,
             0,
             target_rte,
-            &parsetree.targetList,
+            gen_tlist.as_ref().unwrap_or(&parsetree.targetList),
             result_relation,
             nomatch,
             None,
@@ -475,13 +493,23 @@ fn CopyAndAddInvertedQual<'mcx>(
             ReplaceVarsNoMatchOption::SubstituteNull
         };
         let mut inserted_sublink = false;
+        // upstream e528bfe97190 (18.4): Fix incorrect NEW references to generated columns in rule rewriting
+        let gen_tlist = generated_column_replacements(
+            mcx,
+            target_rte,
+            PRS2_NEW_VARNO,
+            &qp.targetList,
+            qp.resultRelation,
+            nomatch,
+            &mut inserted_sublink,
+        )?;
         let replaced = rewrite_manip::ReplaceVarsFromTargetList(
             mcx,
             new_qual,
             PRS2_NEW_VARNO,
             0,
             target_rte,
-            &qp.targetList,
+            gen_tlist.as_ref().unwrap_or(&qp.targetList),
             qp.resultRelation,
             nomatch,
             Some(&mut inserted_sublink),
@@ -496,6 +524,68 @@ fn CopyAndAddInvertedQual<'mcx>(
         new_qual
     };
     rewrite_manip::AddInvertedQual(mcx, qual_product_node, Some(new_qual))
+}
+
+// get_generated_columns (rewriteHandler.c).
+fn get_generated_columns<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &types_rel::Relation<'mcx>,
+    rt_index: i32,
+    include_stored: bool,
+) -> PgResult<NodeList<'mcx>> {
+    const STORED: i8 = ATTRIBUTE_GENERATED_STORED as i8;
+    const VIRTUAL: i8 = ATTRIBUTE_GENERATED_VIRTUAL as i8;
+    let mut gen_cols = NodeList::nil();
+    let has_any = rel
+        .rd_att
+        .constr
+        .as_deref()
+        .is_some_and(|c| c.has_generated_virtual || (include_stored && c.has_generated_stored));
+    if !has_any {
+        return Ok(gen_cols);
+    }
+    for i in 0..rel.rd_att.natts as usize {
+        let att = rel.rd_att.attr(i);
+        if att.attgenerated == VIRTUAL || (include_stored && att.attgenerated == STORED) {
+            let defexpr = crate::build_generation_expression(mcx, rel, i + 1)?;
+            rewrite_manip::ChangeVarNodes(mcx, defexpr, 1, rt_index, 0)?;
+            let te = Node::mk_target_entry(mcx, defexpr, (i + 1) as i16, None, false)?;
+            gen_cols.lappend(mcx, te)?;
+        }
+    }
+    Ok(gen_cols)
+}
+
+// rewriteTargetListIU drops generated columns from the target list; their
+// entries go ahead of it, pre-resolved (they refer to NEW.attribute).
+fn generated_column_replacements<'mcx>(
+    mcx: Mcx<'mcx>,
+    new_rte: &RangeTblEntry<'mcx>,
+    new_varno: i32,
+    targetlist: &NodeList<'mcx>,
+    result_relation: i32,
+    nomatch: ReplaceVarsNoMatchOption,
+    has_sublinks: &mut bool,
+) -> PgResult<Option<NodeList<'mcx>>> {
+    let rel = relation::relation_open(mcx, new_rte.relid, NoLock)?;
+    let gen_cols = get_generated_columns(mcx, &rel, new_varno, true)?;
+    rel.close(NoLock)?;
+    if gen_cols.is_nil() {
+        return Ok(None);
+    }
+    let mut out = rewrite_manip::ReplaceVarsFromTargetList_list(
+        mcx,
+        &gen_cols,
+        new_varno,
+        0,
+        new_rte,
+        targetlist,
+        result_relation,
+        nomatch,
+        Some(has_sublinks),
+    )?;
+    out.concat(mcx, targetlist)?;
+    Ok(Some(out))
 }
 
 // acquireLocksOnSubLinks (rewriteHandler.c), for_execute arm: lock rels of

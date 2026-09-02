@@ -1031,9 +1031,19 @@ impl<'a, 'x, 'mcx: 'a> ExecCtx<'a, 'x, 'mcx> {
                         };
                     }
 
-                    // C round-trips through numerictypmodin; its range errors
-                    // are thrown, not suppressed.
-                    let dtypmod = adt_numeric::numerictypmodin_core(&[precision, scale])?;
+                    // upstream 84001a04d552 (18.6): Fix jsonpath .decimal() to honor silent mode
+                    // Pack the precision and scale into a numeric typmod; the
+                    // range errors are soft in silent mode (C:
+                    // make_numeric_typmod_safe with the jspThrowErrors context).
+                    let mut esc = SoftErrorContext::new(false);
+                    let dtypmod = adt_numeric::make_numeric_typmod_safe(
+                        precision,
+                        scale,
+                        if self.throw_errors { None } else { Some(&mut esc) },
+                    )?;
+                    if esc.error_occurred() {
+                        return Ok(Jper::Error);
+                    }
 
                     let numstr = numstr.expect("numstr set for .decimal()");
                     let mut esc = SoftErrorContext::new(false);

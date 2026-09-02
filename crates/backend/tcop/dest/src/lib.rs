@@ -1,6 +1,8 @@
 // dest.c — communication-destination management (PG 18.3).
 #![allow(non_snake_case)]
 
+use std::rc::Rc;
+
 use ::mcx::Mcx;
 use ::types_core::CommandTag;
 use ::types_dest::CommandDest;
@@ -26,7 +28,7 @@ pub enum DestReceiver<'mcx> {
     PrintTup(printtup::DrPrinttup<'mcx>),  // printtup_create_DR(Remote|RemoteExecute)
     PrintSimple(printtup::printsimple::DrPrintsimple), // printsimpleDR (DestRemoteSimple)
     SpiPrintTup,                           // spi_printtupDR shell; callbacks in spi.c
-    Tuplestore(tstore_receiver::DrTstore), // CreateTuplestoreDestReceiver (tstoreReceiver.c)
+    Tuplestore(tstore_receiver::DrTstore<'mcx>), // CreateTuplestoreDestReceiver (tstoreReceiver.c)
     IntoRel(createas_seams::IntoRelState<'mcx>), // CreateIntoRelDestReceiver (createas.c)
     CopyOut(copy_seams::CopyDestState),    // CreateCopyDestReceiver (copyto.c)
     TransientRel(matview_seams::TransientRelState<'mcx>), // CreateTransientRelDestReceiver (matview.c)
@@ -147,13 +149,18 @@ pub fn SetRemoteDestReceiverParams<'mcx>(receiver: &mut DestReceiver<'mcx>, port
 }
 
 // SetTuplestoreDestReceiverParams (tstoreReceiver.c) at the enum boundary.
-pub fn SetTuplestoreDestReceiverParams(
-    receiver: &mut DestReceiver<'_>,
+// upstream 37b8f3b0e05e (18.6): Cross-check the type of a portal running EXECUTE or FETCH.
+pub fn SetTuplestoreDestReceiverParams<'mcx>(
+    receiver: &mut DestReceiver<'mcx>,
     tstore: types_portal::TuplestoreHandle,
     detoast: bool,
+    target_tupdesc: Option<Rc<TupleDescData<'mcx>>>,
+    map_failure_msg: Option<&'static str>,
 ) {
     match receiver {
-        DestReceiver::Tuplestore(dr) => tstore_receiver::set_params(dr, tstore, detoast),
+        DestReceiver::Tuplestore(dr) => {
+            tstore_receiver::set_params(dr, tstore, detoast, target_tupdesc, map_failure_msg)
+        }
         _ => panic!("SetTuplestoreDestReceiverParams: not a tuplestore receiver"),
     }
 }

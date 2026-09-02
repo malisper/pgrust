@@ -23,7 +23,7 @@ use print::PrintOptions;
 use proto::{Conn, ExecStatus, QueryResult};
 
 /// The psql version whose behavior this port tracks.
-pub const PSQL_VERSION: &str = "18.3";
+pub const PSQL_VERSION: &str = "18.6";
 
 pub struct ConnParams {
     pub host: String,
@@ -41,6 +41,8 @@ pub struct PsqlState {
     pub timing: bool,
     pub quiet: bool,
     pub interactive: bool,
+    /// stdin is a terminal (PSQL_INTERACTIVE overrides the fd report).
+    pub stdin_is_tty: bool,
     pub last_error: bool,
     /// wasm raw-fd transport override (fd 3 read / fd 4 write).
     pub fd_transport: Option<(i32, i32)>,
@@ -217,10 +219,24 @@ fn print_notifications(conn: &mut Conn) {
 
 /// Send one SQL statement (simple protocol) and render every result, as
 /// psql's SendQuery/SendQueryAndProcessResults does. Returns success.
-pub fn send_query(st: &mut PsqlState, query: &str, input: &mut input::InputStack) -> bool {
+/// `num_copy_from_stdin`: COPY ... FROM STDIN commands in `query`, or -1.
+pub fn send_query(
+    st: &mut PsqlState,
+    query: &str,
+    input: &mut input::InputStack,
+    num_copy_from_stdin: i32,
+) -> bool {
     let Some(conn) = st.conn.as_mut() else {
         eprintln!("You are currently not connected to a database.");
         return false;
+    };
+    // upstream 29921259e83b (18.6): Teach psql to skip in-line COPY ... FROM STDIN data after a failure.
+    let mut num_copy_from_stdin = if num_copy_from_stdin < 0 {
+        let standard_strings =
+            conn.parameter_status("standard_conforming_strings").map(|v| v == "on").unwrap_or(true);
+        ScanState::count_copy_from_stdin_in_string(query, standard_strings)
+    } else {
+        num_copy_from_stdin
     };
     let start = std::time::Instant::now();
     if let Err(e) = conn.send_query(query) {
@@ -285,7 +301,15 @@ pub fn send_query(st: &mut PsqlState, query: &str, input: &mut input::InputStack
                     ok = false;
                 }
                 ExecStatus::CopyIn => {
-                    handle_copy_in(conn, input);
+                    // upstream 29921259e83b (18.6): an unrequested COPY_IN
+                    // is a broken or malicious server; C exits EXIT_BADCONN.
+                    if num_copy_from_stdin <= 0 {
+                        eprintln!("unexpected COPY_IN result, aborting connection");
+                        let _ = std::io::stderr().flush();
+                        std::process::exit(2);
+                    }
+                    num_copy_from_stdin -= 1;
+                    handle_copy_in(Some(conn), input);
                 }
                 ExecStatus::CopyOut => {
                     handle_copy_out(conn);
@@ -293,6 +317,15 @@ pub fn send_query(st: &mut PsqlState, query: &str, input: &mut input::InputStack
                 }
             },
         }
+    }
+    // upstream 29921259e83b (18.6): eat the in-line data of COPY FROM STDIN
+    // command(s) that failed before COPY_IN (text assumed); not from a tty.
+    let discard_from_tty = input.current_is_stdin() && st.stdin_is_tty;
+    while num_copy_from_stdin > 0 {
+        if !discard_from_tty {
+            handle_copy_in(None, input);
+        }
+        num_copy_from_stdin -= 1;
     }
     if st.timing {
         print_timing(start.elapsed().as_secs_f64() * 1000.0);
@@ -304,22 +337,30 @@ pub fn send_query(st: &mut PsqlState, query: &str, input: &mut input::InputStack
     ok
 }
 
-fn handle_copy_in(conn: &mut Conn, input: &mut input::InputStack) {
-    // Read data lines from the current input source until "\." or EOF.
+/// handleCopyIn: lines of the current input source up to "\." or its EOF
+/// go to the server; with `conn` None they are read and discarded
+/// (upstream 29921259e83b, 18.6: the COPY failed before COPY_IN).
+fn handle_copy_in(mut conn: Option<&mut Conn>, input: &mut input::InputStack) {
     loop {
-        match input.read_line_raw() {
+        match input.read_line_current() {
             None => {
-                let _ = conn.copy_put_done();
+                if let Some(c) = conn.as_deref_mut() {
+                    let _ = c.copy_put_done();
+                }
                 break;
             }
             Some(line) => {
                 if line == "\\." {
-                    let _ = conn.copy_put_done();
+                    if let Some(c) = conn.as_deref_mut() {
+                        let _ = c.copy_put_done();
+                    }
                     break;
                 }
-                let mut data = line.into_bytes();
-                data.push(b'\n');
-                let _ = conn.copy_put_data(&data);
+                if let Some(c) = conn.as_deref_mut() {
+                    let mut data = line.into_bytes();
+                    data.push(b'\n');
+                    let _ = c.copy_put_data(&data);
+                }
             }
         }
     }
@@ -478,6 +519,7 @@ fn main() {
         timing: false,
         quiet,
         interactive,
+        stdin_is_tty: tty,
         last_error: false,
         fd_transport,
         quit: false,
@@ -518,7 +560,7 @@ fn main() {
             if let Some(rest) = c.trim_start().strip_prefix('\\') {
                 let mut scan = ScanState::new();
                 commands::exec_meta(&mut st, rest, &mut input, &mut scan);
-            } else if !send_query(&mut st, c, &mut input) {
+            } else if !send_query(&mut st, c, &mut input, -1) {
                 rc = 1;
             }
             if st.quit {
@@ -582,8 +624,11 @@ fn main_loop(st: &mut PsqlState, input: &mut input::InputStack) {
             // terminating semicolon (psql MainLoop's EOF arm).
             if !scan.buffer_empty() {
                 let q = std::mem::take(&mut scan.buf);
-                send_query(st, &q, input);
+                // upstream 29921259e83b (18.6): a trailing COPY counts too.
+                let ncopy = scan.count_copy_from_stdin();
+                send_query(st, &q, input, ncopy);
             }
+            scan.reset_buffer();
             if input.pop() {
                 continue;
             }
@@ -610,8 +655,8 @@ fn main_loop(st: &mut PsqlState, input: &mut input::InputStack) {
         let vars = st.vars.clone();
         for item in scan.scan_line(&line, &vars) {
             match item {
-                ScanItem::Statement(s) => {
-                    send_query(st, &s, input);
+                ScanItem::Statement(s, ncopy) => {
+                    send_query(st, &s, input, ncopy);
                     if st.var_bool("ON_ERROR_STOP") && st.last_error {
                         st.quit = true;
                         st.exit_code = 3;

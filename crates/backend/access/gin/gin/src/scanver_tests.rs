@@ -58,19 +58,14 @@ fn set_meta_version(version: i32) {
 fn install() {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
-        bufmgr_seams::read_buffer::set(|_rel, blkno| {
-            assert_eq!(blkno, 0, "only the metapage is read in these tests");
-            Ok(1)
-        });
-        bufmgr_seams::lock_buffer::set(|_buf, _mode| Ok(()));
-        bufmgr_seams::release_buffer::set(|_buf| Ok(()));
-        bufmgr_seams::buffer_get_page::set(|buf| {
-            assert_eq!(buf, 1);
-            META_PAGE.with(|p| p.cast::<u8>())
-        });
+        // The bufmgr seams install once per process and are shared with
+        // tests::fake_bufmgr; this module's world is the one metapage
+        // (buffer 1 = block 0, the only page a version gate reads).
+        crate::tests::fake_bufmgr::install();
         // array_ops Fmgr compare arm: btint8cmp stand-in resolved by oid.
         fmgr_seams::fmgr_info::set(|oid| Ok(FmgrInfo::new(fake_int8_cmp, oid, 2, true, false)));
     });
+    META_PAGE.with(|p| crate::tests::fake_bufmgr::set_pages(vec![p.cast::<u8>()]));
 }
 
 fn fake_int8_cmp(

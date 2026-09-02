@@ -382,14 +382,9 @@ pub fn get_matching_range_bounds<'mcx, B: BoundInfo>(
     let mut maxoff: i32 = boundinfo.ndatums();
 
     if nvalues == 0 {
-        if boundinfo.index_at(minoff) < 0 {
-            minoff += 1;
-        }
-        if boundinfo.index_at(maxoff) < 0 {
-            maxoff -= 1;
-        }
+        // upstream 02e69be47c05 (18.6): Fix issue with RANGE's DEFAULT partition pruning
         result.scan_default = boundinfo.has_default();
-        debug_assert!(boundinfo.index_at(minoff) >= 0 && boundinfo.index_at(maxoff) >= 0);
+        debug_assert!(boundinfo.index_at(minoff) >= -1 && boundinfo.index_at(maxoff) >= -1);
         bms_add_range(mcx, &mut result.bound_offsets, minoff, maxoff)?;
         return Ok(result);
     }

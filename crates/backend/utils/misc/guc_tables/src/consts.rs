@@ -143,7 +143,7 @@ pub const PG_TLS1_2_VERSION: i32 = 3;
 pub const PG_TLS1_3_VERSION: i32 = 4;
 pub const PG_TLS1_VERSION: i32 = 1;
 pub const PG_TLS_ANY: i32 = 0;
-pub const PG_VERSION_NUM: i32 = 180003;
+pub const PG_VERSION_NUM: i32 = 180006;
 pub const PLAN_CACHE_MODE_AUTO: i32 = 0;
 pub const PLAN_CACHE_MODE_FORCE_CUSTOM_PLAN: i32 = 2;
 pub const PLAN_CACHE_MODE_FORCE_GENERIC_PLAN: i32 = 1;
@@ -168,7 +168,7 @@ pub const PARALLEL_ENGINE_RUNTIME: i32 = 1;
 // because guc_tables already owns the SQL-visible `server_version` default,
 // which references PG_COMPAT_VERSION below.
 pub const PGRUST_VERSION: &str = "0.3-beta";
-pub const PG_COMPAT_VERSION: &str = "18.3";
+pub const PG_COMPAT_VERSION: &str = "18.6";
 pub const RECOVERY_TARGET_ACTION_PAUSE: i32 = 0;
 pub const RELSEG_SIZE: i32 = 131072;
 // tcopprot.h restrict_nonsystem_relation_kind flag bits.

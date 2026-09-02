@@ -667,6 +667,56 @@ drop table t2;
 drop table t3;
 drop table p_t1;
 
+-- A composite type used by the tests below to exercise the asymmetry
+-- between record_ops (per-field equality, the default) and record_image_ops
+-- (bytewise equality): values like row(1.0) and row(1.00) are field-equal
+-- but byte-distinct.
+create type avg_rec as (x numeric);
+
+-- A unique index proves uniqueness only under its own opfamily.  When the
+-- GROUP BY's eqop comes from a different opfamily with looser equality,
+-- rows the index regards as distinct can collapse into one GROUP BY group,
+-- so the index is not usable for removing redundant columns.
+create temp table t_opf (a avg_rec not null, b text);
+create unique index on t_opf (a record_image_ops);
+-- (1.0) and (1.00) are bytewise distinct but logically equal as records;
+-- the index admits both, but GROUP BY a (default record_ops) would merge
+-- them, so b must be retained as a grouping key.
+insert into t_opf values (row(1.0)::avg_rec, 'X'), (row(1.00)::avg_rec, 'Y');
+explain (costs off)
+select a, b from t_opf group by a, b order by b;
+select a, b from t_opf group by a, b order by b;
+drop table t_opf;
+
+-- A HAVING clause that uses an equality operator from a different opfamily
+-- than the GROUP BY's eqop must NOT be pushed down to WHERE.
+create temp table t_having (id int, a avg_rec);
+insert into t_having values
+  (1, row(1.0)::avg_rec),
+  (2, row(1.00)::avg_rec),
+  (3, row(2)::avg_rec);
+
+-- the clause must stay in HAVING
+explain (costs off)
+select a, count(*) from t_having group by a having a *= row(1.0)::avg_rec;
+-- pgrust:rowsort
+select a, count(*) from t_having group by a having a *= row(1.0)::avg_rec;
+
+-- the clause must stay in HAVING
+explain (costs off)
+select a, count(*) from t_having group by a having a *= any (array[row(1.0)::avg_rec]);
+-- pgrust:rowsort
+select a, count(*) from t_having group by a having a *= any (array[row(1.0)::avg_rec]);
+
+-- the clause can be pushed down to WHERE
+explain (costs off)
+select a, count(*) from t_having group by a having a = row(1.0)::avg_rec;
+-- pgrust:rowsort
+select a, count(*) from t_having group by a having a = row(1.0)::avg_rec;
+
+drop table t_having;
+drop type avg_rec;
+
 --
 -- Test GROUP BY matching of join columns that are type-coerced due to USING
 --
@@ -695,6 +745,12 @@ select f2, count(*) from
 t1 x(x0,x1) left join (t1 left join t2 using(f2)) on (x0 = 0)
 group by f2;
 
+-- check that we preserve join alias in GROUP BY expressions
+create temp view v1 as
+select f1::int from t1 left join t2 using (f1) group by f1;
+select pg_get_viewdef('v1'::regclass);
+
+drop view v1;
 drop table t1, t2;
 
 --

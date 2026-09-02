@@ -338,6 +338,12 @@ fn gin_check_parent_keys_consistency(rel: &Relation<'_>) -> PgResult<()> {
         blkno: GIN_ROOT_BLKNO,
     });
 
+    // upstream 1f8ab91c11eb (18.6): amcheck: Fix memory leak with
+    // gin_index_check(). C pfree()s the per-tuple posting-list buffer each
+    // iteration; the bump arena has no free, so one reusable buffer is
+    // cleared and refilled for every leaf tuple across the whole walk.
+    let mut ipd: PgVec<'_, ItemPointerData> = mcx::vec_new_in(amcx);
+
     while let Some(mut cur) = stack.pop() {
         ::gin::check_for_interrupts()?;
 
@@ -359,6 +365,7 @@ fn gin_check_parent_keys_consistency(rel: &Relation<'_>) -> PgResult<()> {
             &mut cur,
             &mut stack,
             &mut leafdepth,
+            &mut ipd,
         );
         LockBuffer(buffer, BUFFER_LOCK_UNLOCK)?;
         ReleaseBuffer(buffer)?;
@@ -377,6 +384,7 @@ fn check_entry_page<'a>(
     cur: &mut GinEntryScanItem,
     stack: &mut PgVec<'a, GinEntryScanItem>,
     leafdepth: &mut i32,
+    ipd: &mut PgVec<'a, ItemPointerData>,
 ) -> PgResult<()> {
     let bytes = ginam::page_bytes(page);
     let maxoff = page.max_offset_number();
@@ -469,7 +477,8 @@ fn check_entry_page<'a>(
         if i != FirstOffsetNumber && !(i == maxoff && rightlink == InvalidBlockNumber && !is_leaf) {
             let prev = prev_tuple.expect("prev_tuple set for i > First");
             let mut prev_key_category = GIN_CAT_NORM_KEY;
-            // SAFETY: prev is an owned copy of the previous entry tuple.
+            // SAFETY: prev points at a tuple on the page, which stays pinned
+            // + locked for the whole walk.
             let prev_key =
                 unsafe { ginam::gintuple_get_key(amcx, rel, state, prev, &mut prev_key_category)? };
             if ginam::ginCompareAttEntries(
@@ -579,9 +588,9 @@ fn check_entry_page<'a>(
             let root_posting_tree = unsafe { ginam::gin_get_posting_tree(idxtuple) };
             gin_check_posting_tree_parent_keys_consistency(rel, root_posting_tree)?;
         } else {
-            let mut ipd: PgVec<'a, ItemPointerData> = mcx::vec_new_in(amcx);
+            ipd.clear();
             // SAFETY: as above.
-            unsafe { gin_read_tuple_without_state(amcx, rel, idxtuple, &mut ipd)? };
+            unsafe { gin_read_tuple_without_state(amcx, rel, idxtuple, ipd)? };
             for j in 0..ipd.len() {
                 if !OffsetNumberIsValid(ItemPointerGetOffsetNumberNoCheck(&ipd[j])) {
                     return Err(corrupt(format!(
@@ -593,8 +602,11 @@ fn check_entry_page<'a>(
             }
         }
 
-        // SAFETY: live tuple on the pinned + locked page.
-        prev_tuple = Some(unsafe { copy_itup_arena(amcx, idxtuple)? });
+        // upstream 1f8ab91c11eb (18.6): the page stays pinned and locked for
+        // the whole check_entry_page walk, so prev_tuple borrows the previous
+        // offset's tuple in place instead of copying it into the arena (which
+        // C pfree()s every iteration; the bump arena cannot).
+        prev_tuple = Some(idxtuple);
         prev_attnum = current_attnum;
 
         i = OffsetNumberNext(i);
@@ -748,6 +760,9 @@ fn page_get_item_id_careful(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ::datum::Datum;
+    use ::nbtree::itup::{index_form_tuple, set_t_info, set_t_tid, t_info, ItupBuf, INDEX_SIZE_MASK};
+    use ::types_storage::bufpage::PageMut;
 
     #[test]
     fn item_pointer_set_min_is_zero() {
@@ -770,5 +785,238 @@ mod tests {
         assert!(!line_pointer_past_end(24, limit - 24));
         assert!(line_pointer_past_end(limit, 1));
         assert!(line_pointer_past_end(limit - 1, 2));
+    }
+
+    fn int4_gin_rel(mcx: Mcx<'_>) -> Relation<'_> {
+        use ::types_core::catalog::INT4OID;
+        use ::types_core::{INVALID_PROC_NUMBER, RELPERSISTENCE_PERMANENT};
+        use ::types_rel::{
+            FormData_pg_class, LockInfoData, LockRelId, RelationData, RELKIND_INDEX,
+            REPLICA_IDENTITY_DEFAULT,
+        };
+        use ::types_tuple::tupdesc::CompactAttribute;
+        use ::types_tuple::{FormData_pg_attribute, NameData, TupleDescData};
+        use core::cell::Cell;
+        use std::rc::Rc;
+
+        let mut relname = NameData::default();
+        relname.namestrcpy("t_gin_idx");
+        let mut attrs = ::mcx::PgVec::new_in(mcx);
+        attrs.push(FormData_pg_attribute {
+            atttypid: INT4OID,
+            attlen: 4,
+            attnum: 1,
+            atttypmod: -1,
+            attbyval: true,
+            attalign: b'i' as i8,
+            attstorage: b'p' as i8,
+            attislocal: true,
+            ..Default::default()
+        });
+        let mut compact = ::mcx::PgVec::new_in(mcx);
+        compact.push(CompactAttribute::populate_from(&attrs[0]));
+        let one = |v: Oid| {
+            let mut vec = ::mcx::PgVec::new_in(mcx);
+            vec.push(v);
+            vec
+        };
+        let mut indoption = ::mcx::PgVec::new_in(mcx);
+        indoption.push(0i16);
+        let data = RelationData {
+            rd_locator: Cell::new(::types_storage::RelFileLocator::new(1663, 5, 5001)),
+            rd_smgr: Default::default(),
+            rd_id: 5001,
+            rd_backend: INVALID_PROC_NUMBER,
+            rd_islocaltemp: false,
+            rd_isvalid: Cell::new(true),
+            rd_createSubid: Cell::new(0),
+            rd_newRelfilelocatorSubid: Cell::new(0),
+            rd_firstRelfilelocatorSubid: Cell::new(0),
+            rd_droppedSubid: Cell::new(0),
+            rd_lockInfo: LockInfoData {
+                lockRelId: LockRelId { relId: 5001, dbId: 5 },
+            },
+            rd_rel: FormData_pg_class {
+                relname,
+                relnamespace: 2200,
+                reltype: 0,
+                relowner: 10,
+                relam: GIN_AM_OID,
+                relfilenode: 5001,
+                reltablespace: 0,
+                relpages: 0,
+                reltuples: -1.0,
+                relallvisible: 0,
+                reltoastrelid: 0,
+                relhasindex: false,
+                relisshared: false,
+                relpersistence: RELPERSISTENCE_PERMANENT,
+                relkind: RELKIND_INDEX,
+                relhassubclass: false,
+                relrowsecurity: false,
+                relispopulated: true,
+                relreplident: REPLICA_IDENTITY_DEFAULT,
+                relispartition: false,
+                relfrozenxid: 3,
+                relminmxid: 1,
+            },
+            rd_att: Rc::new(TupleDescData {
+                natts: 1,
+                tdtypeid: 0,
+                tdtypmod: -1,
+                tdrefcount: 1,
+                constr: None,
+                compact_attrs: compact,
+                attrs,
+            }),
+            rd_index: None,
+            rd_opcintype: one(INT4OID),
+            rd_opfamily: one(2745),
+            rd_indoption: indoption,
+            rd_indcollation: one(0),
+            rd_options: None,
+            pgstat_enabled: Cell::new(false),
+            pgstat_link: Cell::new((0, core::ptr::null_mut())),
+            rd_amcache: Default::default(),
+            rd_amcache_hash: Default::default(),
+            rd_amcache_gin: Default::default(),
+            rd_amcache_spgist: Default::default(),
+            rd_support: ::mcx::PgVec::new_in(mcx),
+            rd_supportinfo: Default::default(),
+            rd_opcoptions: Default::default(),
+            rd_indexlist: Default::default(),
+            rd_trigdesc: Default::default(),
+            rd_hastriggers: false,
+            rd_hasrules: false,
+        };
+        Relation::open(data, None)
+    }
+
+    fn int4_array_gin_state() -> GinState {
+        use ::gin_vocab::{GinColState, GinElemCmp, GinOpclass, GIN_MAX_KEY_COLS};
+        let col = GinColState {
+            opclass: GinOpclass::ArrayOps,
+            elem_cmp: GinElemCmp::Int4,
+            support_collation: ::types_core::primitive::InvalidOid,
+            can_partial_match: false,
+            key_byval: true,
+            key_len: 4,
+        };
+        GinState {
+            natts: 1,
+            one_col: true,
+            cols: [col; GIN_MAX_KEY_COLS],
+        }
+    }
+
+    // GinFormTuple's leaf shape with an uncompressed one-item posting list
+    // (the layout ginReadTupleWithoutState still accepts).
+    fn gin_leaf_tuple<'m>(mcx: Mcx<'m>, rel: &Relation<'_>, key: i32) -> ItupBuf<'m> {
+        let keytup =
+            index_form_tuple(mcx, rel.descr(), &[Datum::from_i32(key)], &[false]).unwrap();
+        let posting_off = keytup.size();
+        let size = MAXALIGN(posting_off + core::mem::size_of::<ItemPointerData>());
+        let mut tup = ItupBuf::with_size(mcx, size).unwrap();
+        // SAFETY: both images are owned, MAXALIGNed and sized just above.
+        unsafe {
+            core::ptr::copy_nonoverlapping(keytup.as_ptr(), tup.as_mut_ptr(), posting_off);
+            set_t_info(
+                tup.as_mut_ptr(),
+                (t_info(keytup.as_ptr()) & !INDEX_SIZE_MASK) | size as u16,
+            );
+            set_t_tid(tup.as_mut_ptr(), ItemPointerData::new(posting_off as BlockNumber, 1));
+            tup.as_mut_ptr()
+                .add(posting_off)
+                .cast::<ItemPointerData>()
+                .write_unaligned(ItemPointerData::new(key as BlockNumber, 1));
+        }
+        tup
+    }
+
+    // One full GIN_LEAF entry page: ascending int4 keys, one heap TID each.
+    fn full_leaf_entry_page<'m>(mcx: Mcx<'m>, rel: &Relation<'_>) -> (PgVec<'m, u64>, usize) {
+        let mut img: PgVec<'m, u64> = mcx::vec_from_elem_in(mcx, 0u64, BLCKSZ / 8);
+        let base = core::ptr::NonNull::new(img.as_mut_ptr().cast::<u8>()).unwrap();
+        // SAFETY: img is an 8-aligned BLCKSZ image exclusively owned here.
+        let mut page = unsafe { PageMut::from_raw(base) };
+        page.init(core::mem::size_of::<GinPageOpaqueData>());
+        // SAFETY: the special area lies inside the image, 8-aligned.
+        unsafe {
+            base.as_ptr()
+                .add(BLCKSZ - core::mem::size_of::<GinPageOpaqueData>())
+                .cast::<GinPageOpaqueData>()
+                .write(GinPageOpaqueData {
+                    rightlink: InvalidBlockNumber,
+                    maxoff: 0,
+                    flags: GIN_LEAF,
+                });
+        }
+        let mut n = 0usize;
+        loop {
+            let tup = gin_leaf_tuple(mcx, rel, n as i32 + 1);
+            // SAFETY: tup.size() bytes of owned tuple image.
+            let bytes = unsafe { core::slice::from_raw_parts(tup.as_ptr(), tup.size()) };
+            if page.add_item(bytes, InvalidOffsetNumber, 0).is_none() {
+                break;
+            }
+            n += 1;
+        }
+        (img, n)
+    }
+
+    // upstream 1f8ab91c11eb (18.6): amcheck: Fix memory leak with
+    // gin_index_check(). C pfree()s the prev_tuple copy and the posting-list
+    // buffer every iteration; the bump arena cannot, so the walk must not
+    // allocate them at all. After the first page the check arena is at its
+    // steady state and further pages must not move its footprint.
+    #[test]
+    fn entry_page_walk_keeps_the_check_arena_flat() {
+        let fixture = MemoryContext::new_bump("amcheck gin walk fixture");
+        let fmcx = fixture.mcx();
+        let rel = int4_gin_rel(fmcx);
+        let state = int4_array_gin_state();
+        let (img, ntuples) = full_leaf_entry_page(fmcx, &rel);
+        assert!(ntuples > 200, "page holds only {ntuples} tuples");
+        // SAFETY: img is an 8-aligned BLCKSZ image alive for the whole walk.
+        let page = unsafe {
+            PageRef::from_raw(core::ptr::NonNull::new(img.as_ptr().cast_mut().cast::<u8>()).unwrap())
+        };
+
+        let arena = MemoryContext::new_bump("amcheck consistency check context");
+        let amcx = arena.mcx();
+        let mut stack: PgVec<'_, GinEntryScanItem> = mcx::vec_new_in(amcx);
+        let mut leafdepth: i32 = -1;
+        let mut ipd: PgVec<'_, ItemPointerData> = mcx::vec_new_in(amcx);
+        let mut after_first = 0usize;
+        for pass in 0..32 {
+            let mut cur = GinEntryScanItem {
+                depth: 0,
+                parenttup: None,
+                parentblk: InvalidBlockNumber,
+                blkno: GIN_ROOT_BLKNO,
+            };
+            check_entry_page(
+                &rel,
+                &state,
+                amcx,
+                &None,
+                &page,
+                &mut cur,
+                &mut stack,
+                &mut leafdepth,
+                &mut ipd,
+            )
+            .unwrap();
+            if pass == 0 {
+                after_first = arena.stats().arena_footprint;
+            }
+        }
+        let after_all = arena.stats().arena_footprint;
+        assert!(stack.is_empty() && leafdepth == 0);
+        assert_eq!(
+            after_first, after_all,
+            "check arena grew by {} bytes over 31 more pages of {ntuples} tuples: per-tuple copies leak",
+            after_all - after_first
+        );
     }
 }

@@ -477,3 +477,65 @@ fn qtn_sort_stack_error_propagates_as_54001() {
         .unwrap();
     h.join().expect("qtn_sort must return Err, not unwind");
 }
+
+// upstream dddc8a69ff8b (18.6): QTN2QT refuses an operand offset past the 20-bit
+// distance field; checked per item, so the last operand may run past MAXSTRPOS.
+mod qtn2qt_too_large {
+    use super::*;
+    use ::adt_tsvector_core::query::{Operand, Operator, OP_OR};
+    use ::mcx::PgVec;
+    use ::types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED;
+
+    use crate::parse::MAXSTRPOS;
+    use crate::util::{qtn2qt, QtNode};
+
+    const WORD: usize = 2000;
+
+    fn leaf(mcx: Mcx<'_>) -> QtNode<'_> {
+        let mut word = ::mcx::vec_with_capacity_in(mcx, WORD).unwrap();
+        word.resize(WORD, b'a');
+        QtNode {
+            item: QItem::Val(Operand { weight: 0, prefix: false, valcrc: 1, length: WORD, distance: 0 }),
+            word,
+            sign: 1,
+            flags: 0,
+            children: PgVec::new_in(mcx),
+        }
+    }
+
+    // balanced OR tree of n leaves (shallow stack); operand k starts at k * (WORD + 1)
+    fn or_tree(mcx: Mcx<'_>, n: usize) -> QtNode<'_> {
+        if n == 1 {
+            return leaf(mcx);
+        }
+        let mut children: PgVec<QtNode> = PgVec::new_in(mcx);
+        children.try_reserve_exact(2).unwrap();
+        children.push(or_tree(mcx, n / 2));
+        children.push(or_tree(mcx, n - n / 2));
+        QtNode {
+            item: QItem::Opr(Operator { oper: OP_OR, distance: 0, left: 0 }),
+            word: PgVec::new_in(mcx),
+            sign: 1,
+            flags: 0,
+            children,
+        }
+    }
+
+    #[test]
+    fn operand_offset_past_maxstrpos_is_refused() {
+        let ctx = MemoryContext::new("t-too-large");
+        let mcx = ctx.mcx();
+        let last_ok = MAXSTRPOS / (WORD + 1); // largest k with k * (WORD + 1) <= MAXSTRPOS
+        assert!(last_ok * (WORD + 1) <= MAXSTRPOS && (last_ok + 1) * (WORD + 1) > MAXSTRPOS);
+
+        let err = qtn2qt(mcx, &or_tree(mcx, last_ok + 2)).expect_err("offset past MAXSTRPOS");
+        assert_eq!(err.message(), "tsquery is too large");
+        assert_eq!(err.sqlstate(), ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+
+        let img = qtn2qt(mcx, &or_tree(mcx, last_ok + 1)).expect("last operand may run past");
+        let q = TsQueryRef { payload: &img[4..] };
+        let QItem::Val(last) = q.item(q.size() - 1) else { panic!("last item is the operand") };
+        assert_eq!(last.distance, last_ok * (WORD + 1));
+        assert_eq!(q.operand_str(&last).len(), WORD);
+    }
+}

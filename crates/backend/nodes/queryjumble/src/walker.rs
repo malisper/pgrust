@@ -1936,6 +1936,8 @@ fn jumble_node<'mcx>(js: J<'_, 'mcx>, n: Node<'mcx>) -> PgResult<()> {
             js.f_str(e.stxcomment);
             js.f_bool(e.transformed);
             js.f_bool(e.if_not_exists);
+            // upstream a1fa24127d6a (18.6): JUMBLE_FIELD(owner)
+            js.f_u32(e.owner);
         }
         NodeTag::T_StatsElem => {
             let e = cast!(r::StatsElem);

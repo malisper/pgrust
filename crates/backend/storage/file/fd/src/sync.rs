@@ -279,10 +279,11 @@ pub fn pg_flush_data(fd: RawFd, offset: i64, nbytes: i64) -> PgResult<()> {
     loop {
         let rc = vfs::flush_range(fd, offset, nbytes);
         if rc != 0 {
-            if rc == libc::EINTR {
+            // upstream 6cb307251c5c (18.4): Fix errno check based on EINTR in pg_flush_data()
+            let en = get_errno();
+            if en == libc::EINTR {
                 continue;
             }
-            let en = get_errno();
             // One warning then silence when the kernel lacks sync_file_range
             // (e.g. Windows WSL).
             let elevel = if en == libc::ENOSYS {

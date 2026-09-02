@@ -597,12 +597,14 @@ fn create_slot_use_snapshot(
 ) -> PgResult<XLogRecPtr> {
     let cmd = create_slot_use_snapshot_cmd(slotname, failover);
     let res = conn.exec(&cmd)?;
-    if res.status != ExecStatus::TuplesOk || res.rows.is_empty() {
+    if res.status != ExecStatus::TuplesOk {
         ereport(ERROR)
             .errcode(ERRCODE_CONNECTION_FAILURE)
             .errmsg(format!("could not create replication slot \"{slotname}\": {}", res.err))
             .finish(loc("create_slot_use_snapshot"))?;
     }
+    // upstream a6a2eb9f6024 (18.6): Check CREATE_REPLICATION_SLOT response shape in libpqwalreceiver
+    walreceiver::client::check_create_slot_result(&res, slotname)?;
     // Row: slot_name, consistent_point, snapshot_name, output_plugin.
     let lsn_text = res.rows[0]
         .get(1)

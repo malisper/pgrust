@@ -32,7 +32,7 @@ use load_manifest::ManifestData;
 use write_manifest::ManifestWriter;
 
 /// The pg_combinebackup version whose behavior this port tracks.
-pub const PG_COMBINEBACKUP_VERSION: &str = "18.3";
+pub const PG_COMBINEBACKUP_VERSION: &str = "18.6";
 
 pub const BLCKSZ: usize = 8192;
 pub const RELSEG_SIZE: u32 = 131072;

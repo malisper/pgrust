@@ -45,6 +45,7 @@ miscinit = { path = "../../backend/utils/init/miscinit" }
 init_small = { path = "../../backend/utils/init/init_small" }
 parser_small1 = { path = "../../backend/parser/parser_small1" }
 foreigncmds = { path = "../../backend/commands/foreigncmds" }
+commands_define = { path = "../../backend/commands/commands_define" }
 tablecmds = { path = "../../backend/commands/tablecmds" }
 aclchk = { path = "../../backend/catalog/aclchk" }
 catalog_namespace = { path = "../../backend/catalog/catalog_namespace" }

@@ -665,3 +665,77 @@ fn allocate_recordbuf_rejects_wrapping_xl_tot_len() {
     assert!(allocate_recordbuf(&mut r, 16 * 1024 * 1024).is_ok());
     assert!(r.read_record_buf_size >= 16 * 1024 * 1024);
 }
+
+// upstream 13f940b4b56f (18.6): Fix pgstat_count_io_op_time() calls passing
+// incorrect information. A pread() returning <= 0 is a failed read and must
+// not be reported to pg_stat_io as a WAL read op (it was counted as one op of
+// 0 bytes before the error check); only successful, possibly short, reads
+// count.
+#[cfg(not(miri))]
+#[test]
+fn wal_read_failed_pread_is_not_counted() {
+    use std::cell::Cell;
+    use std::io::Write;
+    use std::os::unix::io::IntoRawFd;
+
+    thread_local! {
+        // Per-thread: the seam is process-global and other tests in this
+        // binary read WAL through WALRead concurrently.
+        static COUNTED: Cell<(u32, u64)> = const { Cell::new((0, 0)) };
+    }
+    fn record(io_object: u32, io_context: u32, io_op: u32, _start_ns: i64, cnt: u32, bytes: u64) {
+        assert_eq!(
+            (io_object, io_context, io_op),
+            (pgstat_seams::IOOBJECT_WAL, pgstat_seams::IOCONTEXT_NORMAL, pgstat_seams::IOOP_READ)
+        );
+        COUNTED.with(|c| {
+            let (n, b) = c.get();
+            c.set((n + cnt, b + bytes));
+        });
+    }
+    pgstat_seams::pgstat_count_io_op_time::set(record);
+
+    // A segment file that ends before the requested offset: pread returns 0.
+    let dir = std::env::temp_dir().join(format!("xlogreader-walread-eof-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let seg_path = dir.join("seg1");
+    std::fs::File::create(&seg_path).unwrap().write_all(&[0u8; 64]).unwrap();
+
+    struct FileSegs {
+        path: std::path::PathBuf,
+    }
+    impl XLogSegmentRoutine for FileSegs {
+        fn segment_open(
+            &mut self,
+            v: &mut ReaderView,
+            _next_seg_no: XLogSegNo,
+            _tli: &mut TimeLineID,
+        ) -> PgResult<()> {
+            let f = std::fs::File::open(&self.path).unwrap();
+            v.seg.ws_file = f.into_raw_fd();
+            Ok(())
+        }
+        fn segment_close(&mut self, v: &mut ReaderView) {
+            // SAFETY: closing the fd segment_open produced.
+            unsafe { libc::close(v.seg.ws_file) };
+            v.seg.ws_file = -1;
+        }
+    }
+
+    let mut v = ReaderView {
+        segcxt: WALSegmentContext { ws_segsize: SEGSZ },
+        ..Default::default()
+    };
+    let mut out = vec![0u8; 4096];
+    let startptr = SEGSZ as u64 + 100;
+    let res = WALRead(&mut v, &mut FileSegs { path: seg_path }, &mut out, startptr, 4096, 1)
+        .unwrap();
+    let err = res.unwrap_err();
+    assert_eq!(err.wre_read, 0);
+    assert_eq!(err.wre_req, 4096);
+    // Pre-fix: (1, 0) -- one read op of 0 bytes for the failed pread.
+    assert_eq!(COUNTED.with(|c| c.get()), (0, 0));
+    // SAFETY: closing the fd segment_open produced.
+    unsafe { libc::close(v.seg.ws_file) };
+    std::fs::remove_dir_all(&dir).ok();
+}

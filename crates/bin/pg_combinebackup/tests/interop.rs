@@ -453,7 +453,7 @@ fn help_and_version() {
 
     let out = Command::new(bin()).arg("--version").output().unwrap();
     assert!(out.status.success());
-    assert!(String::from_utf8_lossy(&out.stdout).starts_with("pg_combinebackup (PostgreSQL) 18.3"));
+    assert!(String::from_utf8_lossy(&out.stdout).starts_with("pg_combinebackup (PostgreSQL) 18.6"));
 
     /* no args: C prints the no-input-directories error + hint, exit 1 */
     let out = Command::new(bin()).output().unwrap();

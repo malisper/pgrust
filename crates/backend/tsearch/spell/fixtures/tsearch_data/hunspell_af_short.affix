@@ -1,0 +1,7 @@
+# upstream 4689ea9ceee3: AF declares 3 aliases but only 2 follow
+AF 3
+AF S		#1
+AF X		#2
+
+SFX S Y 1
+SFX S   0	s/1	.

@@ -1,4 +1,4 @@
-use ::adt_tsvector_core::layout::{shortalign, TsVecBuilder, MAXNUMPOS, MAXSTRPOS};
+use ::adt_tsvector_core::layout::{shortalign, TsVecBuilder, MAXNUMPOS, MAXSTRLEN, MAXSTRPOS};
 use ::mcx::{Mcx, PgVec};
 use ::ts_parse::{limitpos, ParsedText, ParsedWord, MAXENTRYPOS};
 use ::types_error::{PgError, PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
@@ -50,7 +50,16 @@ pub fn make_tsvector<'mcx>(mcx: Mcx<'mcx>, prs: &mut ParsedText<'mcx>) -> PgResu
 
     let mut lenstr = 0usize;
     for w in prs.words.iter() {
-        lenstr += w.word.len();
+        // upstream e251350573e2 (18.6): Harden tsvector code against overflows.
+        let toklen = w.word.len();
+        if toklen == 0 || toklen > MAXSTRLEN {
+            return Err(PgError::error(format!(
+                "lexeme is too long for tsvector ({toklen} bytes, max {MAXSTRLEN} bytes)"
+            ))
+            .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+            .into());
+        }
+        lenstr += toklen;
         if !w.apos.is_empty() {
             lenstr = shortalign(lenstr);
             lenstr += 2 + w.apos.len() * 2;

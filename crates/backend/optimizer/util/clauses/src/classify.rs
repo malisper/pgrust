@@ -415,6 +415,14 @@ impl<'mcx> NodeWalker<'mcx> for ContainNonstrict {
             NodeTag::T_ArrayCoerceExpr => {
                 return self.visit(node.as_array_coerce_expr().unwrap().arg);
             }
+            // upstream 277122036c33 (18.6): Fix planner's nullability/strictness logic for ScalarArrayOpExpr.
+            // Strict only over a provably non-empty array; is_strict_saop covers the operator.
+            NodeTag::T_ScalarArrayOpExpr => {
+                if !is_strict_saop(node.as_scalar_array_op_expr().unwrap(), false)? {
+                    return Ok(true);
+                }
+                return expression_tree_walker(node, self);
+            }
             _ => {}
         }
         if check_functions_in_node(node, &mut |f| Ok(!func_strict(f)?))? {
@@ -636,8 +644,12 @@ impl<'mcx> NodeWalker<'mcx> for ConvertSaop {
             const MIN_ARRAY_SIZE_FOR_HASHED_SAOP: i64 = 9;
             if let Some(c) = sa.args.nth(1).as_const() {
                 if !c.constisnull {
+                    // upstream 11aed8d19cd7 (18.4): Fix missed checks for hashability of container-type equality.
+                    let lefttype = nodes_core::node_funcs::expr_type(sa.args.nth(0));
                     if sa.useOr {
-                        if let Some((l, r)) = lsyscache::get_op_hash_functions(sa.opno)? {
+                        if let Some((l, r)) =
+                            lsyscache::get_op_hash_functions_ext(sa.opno, lefttype)?
+                        {
                             if l == r {
                                 if saop_const_array_nitems(c.constvalue)
                                     >= MIN_ARRAY_SIZE_FOR_HASHED_SAOP
@@ -660,7 +672,9 @@ impl<'mcx> NodeWalker<'mcx> for ConvertSaop {
                         // NOT IN whose negator is hashable: hash-and-negate.
                         let negator = lsyscache::get_negator(sa.opno)?;
                         if negator != 0 {
-                            if let Some((l, r)) = lsyscache::get_op_hash_functions(negator)? {
+                            if let Some((l, r)) =
+                                lsyscache::get_op_hash_functions_ext(negator, lefttype)?
+                            {
                                 if l == r {
                                     if saop_const_array_nitems(c.constvalue)
                                         >= MIN_ARRAY_SIZE_FOR_HASHED_SAOP
@@ -936,7 +950,8 @@ fn find_nonnullable_rels_walker<'mcx>(
         }
         NodeTag::T_ScalarArrayOpExpr => {
             let sa = node.as_scalar_array_op_expr().unwrap();
-            if is_strict_saop(sa, true)? {
+            // upstream 277122036c33 (18.6): Fix planner's nullability/strictness logic for ScalarArrayOpExpr.
+            if is_strict_saop(sa, top_level)? {
                 result = nonnullable_rels_args(mcx, &sa.args, false)?;
             }
         }
@@ -1191,7 +1206,8 @@ fn find_nonnullable_vars_walker<'mcx>(
         }
         NodeTag::T_ScalarArrayOpExpr => {
             let sa = node.as_scalar_array_op_expr().unwrap();
-            if is_strict_saop(sa, true)? {
+            // upstream 277122036c33 (18.6): Fix planner's nullability/strictness logic for ScalarArrayOpExpr.
+            if is_strict_saop(sa, top_level)? {
                 result = nonnullable_vars_args(mcx, &sa.args, false)?;
             }
         }

@@ -1,5 +1,7 @@
 use mcx::{Mcx, PgVec};
-use types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
+use types_error::{
+    PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+};
 
 pub const MAX_LEVENSHTEIN_STRLEN: i32 = 255;
 
@@ -25,6 +27,20 @@ fn too_long() -> PgError {
     .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE)
 }
 
+// upstream e88eb4e76638 (18.6): Avoid overflow in Levenshtein distance calculations.
+// Distances are summed in i64; the int4 result is range-checked once.
+#[cold]
+#[inline(never)]
+fn out_of_range() -> PgError {
+    PgError::error("levenshtein distance out of range")
+        .with_sqlstate(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE)
+}
+
+#[inline]
+fn levenshtein_result(res: i64) -> PgResult<i32> {
+    i32::try_from(res).map_err(|_| out_of_range().into())
+}
+
 pub fn varstr_levenshtein(
     mcx: Mcx<'_>,
     source: &[u8],
@@ -45,21 +61,24 @@ pub fn varstr_levenshtein_less_equal(
     target: &[u8],
     ins_c: i32,
     del_c: i32,
-    mut sub_c: i32,
+    sub_c: i32,
     mut max_d: i32,
     trusted: bool,
 ) -> PgResult<i32> {
     let slen = source.len() as i32;
     let tlen = target.len() as i32;
+    let ins_c = ins_c as i64;
+    let del_c = del_c as i64;
+    let mut sub_c = sub_c as i64;
 
     let m0 = mbutils_seams::pg_mbstrlen_with_len::call(source)?;
     let n0 = mbutils_seams::pg_mbstrlen_with_len::call(target)?;
 
     if m0 == 0 {
-        return Ok(n0 * ins_c);
+        return levenshtein_result(n0 as i64 * ins_c);
     }
     if n0 == 0 {
-        return Ok(m0 * del_c);
+        return levenshtein_result(m0 as i64 * del_c);
     }
 
     if !trusted && (m0 > MAX_LEVENSHTEIN_STRLEN || n0 > MAX_LEVENSHTEIN_STRLEN) {
@@ -71,24 +90,25 @@ pub fn varstr_levenshtein_less_equal(
 
     if max_d >= 0 {
         let net_inserts = n0 - m0;
-        let min_theo_d =
-            if net_inserts < 0 { -net_inserts * del_c } else { net_inserts * ins_c };
-        if min_theo_d > max_d {
-            return Ok(max_d + 1);
+        let min_theo_d: i64 = if net_inserts < 0 {
+            -(net_inserts as i64) * del_c
+        } else {
+            net_inserts as i64 * ins_c
+        };
+        if min_theo_d > max_d as i64 {
+            return levenshtein_result(max_d as i64 + 1);
         }
         if ins_c + del_c < sub_c {
             sub_c = ins_c + del_c;
         }
-        let max_theo_d = min_theo_d + sub_c * m0.min(n0);
-        if max_d >= max_theo_d {
+        let max_theo_d = min_theo_d + sub_c * m0.min(n0) as i64;
+        if max_d as i64 >= max_theo_d {
             max_d = -1;
         } else if ins_c + del_c > 0 {
-            let slack_d = max_d - min_theo_d;
+            let slack_d = max_d as i64 - min_theo_d;
             let best_column = if net_inserts < 0 { -net_inserts } else { 0 };
-            stop_column = best_column + (slack_d / (ins_c + del_c)) + 1;
-            if stop_column > m0 {
-                stop_column = m0 + 1;
-            }
+            let tmp = best_column as i64 + (slack_d / (ins_c + del_c)) + 1;
+            stop_column = tmp.min(m0 as i64 + 1) as i32;
         }
     }
 
@@ -108,13 +128,13 @@ pub fn varstr_levenshtein_less_equal(
     let m = m0 + 1;
     let n = n0 + 1;
 
-    let mut rows: PgVec<'_, i32> = mcx::vec_with_capacity_in(mcx, 2 * m as usize)?;
+    let mut rows: PgVec<'_, i64> = mcx::vec_with_capacity_in(mcx, 2 * m as usize)?;
     rows.resize(2 * m as usize, 0);
     let (mut prev, mut curr) = rows.split_at_mut(m as usize);
 
     let mut i = start_column;
     while i < stop_column {
-        prev[i as usize] = i * del_c;
+        prev[i as usize] = i as i64 * del_c;
         i += 1;
     }
 
@@ -130,13 +150,13 @@ pub fn varstr_levenshtein_less_equal(
         };
 
         if stop_column < m {
-            prev[stop_column as usize] = max_d + 1;
+            prev[stop_column as usize] = max_d as i64 + 1;
             stop_column += 1;
         }
 
         let mut i;
         if start_column == 0 {
-            curr[0] = j * ins_c;
+            curr[0] = j as i64 * ins_c;
             i = 1;
         } else {
             i = start_column;
@@ -184,11 +204,11 @@ pub fn varstr_levenshtein_less_equal(
                 let ii = stop_column - 1;
                 let net_inserts = ii - zp;
                 let resid = if net_inserts > 0 {
-                    net_inserts * ins_c
+                    net_inserts as i64 * ins_c
                 } else {
-                    -net_inserts * del_c
+                    -(net_inserts as i64) * del_c
                 };
-                if prev[ii as usize] + resid <= max_d {
+                if prev[ii as usize] + resid <= max_d as i64 {
                     break;
                 }
                 stop_column -= 1;
@@ -197,15 +217,15 @@ pub fn varstr_levenshtein_less_equal(
             while start_column < stop_column {
                 let net_inserts = start_column - zp;
                 let resid = if net_inserts > 0 {
-                    net_inserts * ins_c
+                    net_inserts as i64 * ins_c
                 } else {
-                    -net_inserts * del_c
+                    -(net_inserts as i64) * del_c
                 };
-                if prev[start_column as usize] + resid <= max_d {
+                if prev[start_column as usize] + resid <= max_d as i64 {
                     break;
                 }
-                prev[start_column as usize] = max_d + 1;
-                curr[start_column as usize] = max_d + 1;
+                prev[start_column as usize] = max_d as i64 + 1;
+                curr[start_column as usize] = max_d as i64 + 1;
                 if start_column != 0 {
                     source_off += match s_char_len {
                         Some(ref scl) => scl[(start_column - 1) as usize] as usize,
@@ -216,10 +236,10 @@ pub fn varstr_levenshtein_less_equal(
             }
 
             if start_column >= stop_column {
-                return Ok(max_d + 1);
+                return levenshtein_result(max_d as i64 + 1);
             }
         }
     }
 
-    Ok(prev[(m - 1) as usize])
+    levenshtein_result(prev[(m - 1) as usize])
 }

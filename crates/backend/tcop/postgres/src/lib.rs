@@ -637,6 +637,11 @@ pub fn ProcessInterrupts() -> PgResult<()> {
         logical_worker_seams::process_parallel_apply_messages::call()?;
     }
 
+    // upstream 58c1188a3eaa (18.4): Fix slotsync worker blocking promotion when stuck in wait
+    if g::SlotSyncShutdownPending() {
+        slotsync_seams::process_slot_sync_message::call()?;
+    }
+
     // Serial-lease v2 safe-point admission (GL-SLEASE-2; pgrust extension):
     // a sweeper-flagged floor crossing acquires its execution permit HERE —
     // the canonical safe point (past the holdoff/crit-section gates, never

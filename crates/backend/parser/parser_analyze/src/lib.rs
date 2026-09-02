@@ -1892,6 +1892,22 @@ fn transformDeleteStmt<'mcx>(
         parse_clause::setTargetTable(mcx, pstate, relation, relation.inh, true, ACL_DELETE)?;
     let nsitem = pstate.p_target_nsitem.expect("setTargetTable set p_target_nsitem");
 
+    // upstream f3d03fbd5d01 (18.5): Fix UPDATE/DELETE ... WHERE CURRENT OF on a table with virtual columns.
+    // disallow DELETE ... WHERE CURRENT OF on a view
+    if stmt
+        .whereClause
+        .is_some_and(|w| w.node_tag() == types_nodes::NodeTag::T_CurrentOfExpr)
+        && pstate
+            .p_target_relation
+            .as_ref()
+            .expect("setTargetTable set p_target_relation")
+            .rd_rel
+            .relkind
+            == types_rel::RELKIND_VIEW
+    {
+        return Err(where_current_of_on_view("transformDeleteStmt"));
+    }
+
     // Subqueries in USING cannot access the result relation.
     nsitem.p_lateral_only.set(true);
     nsitem.p_lateral_ok.set(false);
@@ -1962,6 +1978,22 @@ fn transformUpdateStmt<'mcx>(
     qry.resultRelation =
         parse_clause::setTargetTable(mcx, pstate, relation, relation.inh, true, ACL_UPDATE)?;
     let nsitem = pstate.p_target_nsitem.expect("setTargetTable set p_target_nsitem");
+
+    // upstream f3d03fbd5d01 (18.5): Fix UPDATE/DELETE ... WHERE CURRENT OF on a table with virtual columns.
+    // disallow UPDATE ... WHERE CURRENT OF on a view
+    if stmt
+        .whereClause
+        .is_some_and(|w| w.node_tag() == types_nodes::NodeTag::T_CurrentOfExpr)
+        && pstate
+            .p_target_relation
+            .as_ref()
+            .expect("setTargetTable set p_target_relation")
+            .rd_rel
+            .relkind
+            == types_rel::RELKIND_VIEW
+    {
+        return Err(where_current_of_on_view("transformUpdateStmt"));
+    }
 
     // Subqueries in FROM cannot access the result relation.
     nsitem.p_lateral_only.set(true);
@@ -2504,6 +2536,23 @@ pub(crate) fn first_locking_strength(
         .as_locking_clause()
         .expect("lockingClause cell")
         .strength
+}
+
+// upstream f3d03fbd5d01 (18.5): Fix UPDATE/DELETE ... WHERE CURRENT OF on a table with virtual columns.
+// The view check that used to live in the rewriter's
+// replace_rte_variables_mutator (which now also runs to expand virtual
+// generated columns of ordinary tables); the relkind cannot change after
+// parse analysis, so parse time is the right place.
+#[cold]
+fn where_current_of_on_view(funcname: &'static str) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg("WHERE CURRENT OF on a view is not implemented")
+            .into_error()
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, funcname)),
+    )
 }
 
 #[cold]

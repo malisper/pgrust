@@ -10,10 +10,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // upstream 2780538433fc (18.5): is_readd — true from tablecmds'
+    // AT_ReAddDomainConstraint rebuild, which must not re-check USAGE.
     pub fn alter_domain_add_constraint<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         names: &types_nodes::NodeList<'mcx>,
         new_constraint: types_nodes::Node<'mcx>,
+        is_readd: bool,
     ) -> PgResult<()>
 );
 

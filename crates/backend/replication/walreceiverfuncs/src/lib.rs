@@ -248,7 +248,6 @@ pub fn RequestXLogStreaming(
     let walrcv_proc = with_walrcv(|d| {
         debug_assert!(matches!(d.walRcvState, WalRcvState::Stopped | WalRcvState::Waiting));
 
-        d.conninfo = strlcpy_trunc(conninfo, MAXCONNINFO);
         if !slotname.is_empty() {
             d.slotname = strlcpy_trunc(slotname, NAMEDATALEN);
             d.is_temp_slot = false;
@@ -257,9 +256,13 @@ pub fn RequestXLogStreaming(
             d.is_temp_slot = create_temp_slot;
         }
 
+        // A WAITING walreceiver keeps its connection: only a fresh launch may
+        // clobber the user-visible conninfo WalReceiverMain stored.
+        // upstream b903d17927ee (18.6): Avoid exposing WAL receiver raw conninfo during timeline jumps
         if d.walRcvState == WalRcvState::Stopped {
             launch = true;
             d.walRcvState = WalRcvState::Starting;
+            d.conninfo = strlcpy_trunc(conninfo, MAXCONNINFO);
         } else {
             d.walRcvState = WalRcvState::Restarting;
         }
@@ -373,9 +376,13 @@ mod tests {
         ONCE.call_once(WalRcvShmemInit);
     }
 
+    // Serializes the tests that change walRcvState in the shared control block.
+    static STATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn stopped_by_default_and_flush_ptr_tracks() {
         init_once();
+        let _g = STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         assert!(!WalRcvRunning());
         assert!(!WalRcvStreaming());
         with_walrcv(|d| {
@@ -403,5 +410,37 @@ mod tests {
     fn stat_snapshot_none_until_ready() {
         init_once();
         assert!(pg_stat_wal_receiver_snapshot().is_none());
+    }
+
+    // upstream b903d17927ee (18.6): a WAITING walreceiver re-pointed at a new
+    // timeline keeps the displayable conninfo (pg_stat_wal_receiver shows it
+    // while ready_to_display is set); only a launch from STOPPED copies the raw one.
+    #[test]
+    fn request_streaming_keeps_display_conninfo_across_timeline_jump() {
+        init_once();
+        let _g = STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let raw = "host=primary user=rep password=dont_show_me";
+        let shown = "host=primary user=rep";
+
+        with_walrcv(|d| {
+            *d = WalRcvData::new();
+            d.walRcvState = WalRcvState::Waiting;
+            d.conninfo = shown.to_string();
+            d.ready_to_display = true;
+        });
+        RequestXLogStreaming(2, 0x0100_0000, raw, "", false).unwrap();
+        with_walrcv(|d| {
+            assert_eq!(d.walRcvState, WalRcvState::Restarting);
+            assert_eq!(d.conninfo, shown, "timeline jump must not expose the raw conninfo");
+            assert_eq!((d.receiveStart, d.receiveStartTLI), (0x0100_0000, 2));
+            *d = WalRcvData::new();
+        });
+
+        RequestXLogStreaming(1, 0x0100_0000, raw, "", false).unwrap();
+        with_walrcv(|d| {
+            assert_eq!(d.walRcvState, WalRcvState::Starting);
+            assert_eq!(d.conninfo, raw, "a fresh launch takes the configured conninfo");
+            *d = WalRcvData::new();
+        });
     }
 }

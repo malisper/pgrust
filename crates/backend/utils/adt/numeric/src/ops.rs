@@ -14,6 +14,42 @@ use crate::{
     NUMERIC_WEIGHT_MAX, VARHDRSZ,
 };
 
+// upstream 84001a04d552 (18.6): Fix jsonpath .decimal() to honor silent mode
+/// C `make_numeric_typmod_safe` (numeric.c): validate a numeric
+/// precision/scale and pack them into a typmod value, with soft error
+/// handling (`-1` is the ereturn value when a soft error is recorded).
+pub fn make_numeric_typmod_safe(
+    precision: i32,
+    scale: i32,
+    escontext: Option<&mut SoftErrorContext>,
+) -> PgResult<i32> {
+    use ::types_error::ERRCODE_INVALID_PARAMETER_VALUE;
+
+    if precision < 1 || precision > crate::NUMERIC_MAX_PRECISION {
+        return ereturn(
+            escontext,
+            -1,
+            PgError::error(format!(
+                "NUMERIC precision {} must be between 1 and {}",
+                precision, crate::NUMERIC_MAX_PRECISION
+            ))
+            .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE),
+        );
+    }
+    if scale < crate::NUMERIC_MIN_SCALE || scale > crate::NUMERIC_MAX_SCALE {
+        return ereturn(
+            escontext,
+            -1,
+            PgError::error(format!(
+                "NUMERIC scale {} must be between {} and {}",
+                scale, crate::NUMERIC_MIN_SCALE, crate::NUMERIC_MAX_SCALE
+            ))
+            .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE),
+        );
+    }
+    Ok(make_numeric_typmod(precision, scale))
+}
+
 #[inline]
 /// C: numerictypmodin over already-decoded typmod integers.
 pub fn numerictypmodin_core(tl: &[i32]) -> PgResult<i32> {
@@ -27,31 +63,12 @@ pub fn numerictypmodin_core(tl: &[i32]) -> PgResult<i32> {
         ))
     }
 
+    // upstream 84001a04d552 (18.6): Fix jsonpath .decimal() to honor silent mode
+    // (range checks live in make_numeric_typmod_safe; no context = hard error)
     match tl.len() {
-        2 => {
-            if tl[0] < 1 || tl[0] > crate::NUMERIC_MAX_PRECISION {
-                return param_err(format!(
-                    "NUMERIC precision {} must be between 1 and {}",
-                    tl[0], crate::NUMERIC_MAX_PRECISION
-                ));
-            }
-            if tl[1] < crate::NUMERIC_MIN_SCALE || tl[1] > crate::NUMERIC_MAX_SCALE {
-                return param_err(format!(
-                    "NUMERIC scale {} must be between {} and {}",
-                    tl[1], crate::NUMERIC_MIN_SCALE, crate::NUMERIC_MAX_SCALE
-                ));
-            }
-            Ok(make_numeric_typmod(tl[0], tl[1]))
-        }
-        1 => {
-            if tl[0] < 1 || tl[0] > crate::NUMERIC_MAX_PRECISION {
-                return param_err(format!(
-                    "NUMERIC precision {} must be between 1 and {}",
-                    tl[0], crate::NUMERIC_MAX_PRECISION
-                ));
-            }
-            Ok(make_numeric_typmod(tl[0], 0))
-        }
+        2 => make_numeric_typmod_safe(tl[0], tl[1], None),
+        // scale defaults to zero
+        1 => make_numeric_typmod_safe(tl[0], 0, None),
         _ => param_err(String::from("invalid NUMERIC type modifier")),
     }
 }

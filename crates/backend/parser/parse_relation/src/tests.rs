@@ -902,3 +902,74 @@ fn scalar_function_rte_expands_single_var() {
     let v = colvars.nth(0).as_var().unwrap();
     assert_eq!((v.varno, v.varattno, v.vartype, v.vartypmod), (3, 1, INT4OID, -1));
 }
+
+// upstream 9108fed3eda9 (18.5): Fix parsing of parenthesised OLD/NEW in RETURNING list.
+#[test]
+fn get_ns_item_by_var_matches_returning_type() {
+    use types_nodes::{Var, VarReturningType};
+    use VarReturningType::{VAR_RETURNING_DEFAULT, VAR_RETURNING_NEW, VAR_RETURNING_OLD};
+
+    install();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+
+    // RETURNING (addNSItemForReturning) registers OLD and NEW nsitems on the
+    // target relation's rtindex; they differ only in p_returning_type.
+    let base: &ParseNamespaceItem = add(mcx, &mut pstate, "t", None);
+    let returning_item = |rt: VarReturningType| {
+        let mut cols: PgVec<'_, parser_small1::ParseNamespaceColumn> =
+            mcx::vec_with_capacity_in(mcx, base.p_nscolumns.len()).unwrap();
+        for col in base.p_nscolumns {
+            let mut c = *col;
+            c.p_varreturningtype = rt;
+            cols.push(c);
+        }
+        let item = ParseNamespaceItem {
+            p_names: base.p_names,
+            p_rte: base.p_rte,
+            p_rtindex: base.p_rtindex,
+            p_perminfo: base.p_perminfo,
+            p_nscolumns: cols.leak(),
+            p_rel_visible: true,
+            p_cols_visible: true,
+            p_lateral_only: core::cell::Cell::new(false),
+            p_lateral_ok: core::cell::Cell::new(true),
+            p_returning_type: rt,
+        };
+        let item: &ParseNamespaceItem = mcx::leak_in(mcx::alloc_in(mcx, item).unwrap());
+        item
+    };
+    let old_item = returning_item(VAR_RETURNING_OLD);
+    let new_item = returning_item(VAR_RETURNING_NEW);
+    pstate.p_namespace.push(base);
+    pstate.p_namespace.push(old_item);
+    pstate.p_namespace.push(new_item);
+
+    let whole_row = |rt: VarReturningType| Var {
+        varno: 1,
+        varattno: 0,
+        varlevelsup: 0,
+        varreturningtype: rt,
+        location: 7,
+        ..Default::default()
+    };
+
+    // The rtindex-only lookup cannot tell the three apart: first wins.
+    assert_eq!(GetNSItemByRangeTablePosn(&pstate, 1, 0).p_returning_type, VAR_RETURNING_DEFAULT);
+    // The Var-driven lookup honours varreturningtype (bug #19516).
+    for rt in [VAR_RETURNING_DEFAULT, VAR_RETURNING_OLD, VAR_RETURNING_NEW] {
+        let found = GetNSItemByVar(&pstate, &whole_row(rt));
+        assert_eq!((found.p_rtindex, found.p_returning_type), (1, rt));
+    }
+    assert!(core::ptr::eq(GetNSItemByVar(&pstate, &whole_row(VAR_RETURNING_NEW)), new_item));
+
+    // The coerce_record_to_complex seam threads it through to the expansion:
+    // (old).* / (new).* yield Vars carrying the requested returning type.
+    for rt in [VAR_RETURNING_OLD, VAR_RETURNING_NEW] {
+        let vars = expand_nsitem_vars_at(mcx, &pstate, &whole_row(rt)).unwrap();
+        assert_eq!(vars.len(), 2);
+        assert!(vars.iter().all(|v| v.as_var().unwrap().varreturningtype == rt));
+        assert!(vars.iter().all(|v| v.as_var().unwrap().location == 7));
+    }
+}

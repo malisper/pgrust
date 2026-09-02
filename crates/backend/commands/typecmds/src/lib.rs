@@ -430,6 +430,26 @@ pub fn DefineDomain<'mcx>(
         }
     }
 
+    // upstream 2780538433fc (18.5): Check for USAGE privilege on types used by stored expressions.
+    // The below call to TypeCreate() calls GenerateTypeDependencies(), which
+    // adds the dependencies on types. We are responsible for checking USAGE.
+    // An inherited default has no cooked node yet: rebuild it from the bin
+    // (C: stringToNode(defaultValueBin)).
+    let default_expr_node = match default_expr_node {
+        Some(e) => Some(e),
+        None => match &default_value_bin {
+            Some(bin) => Some(readfuncs::stringToNode(mcx, bin.as_str())?),
+            None => None,
+        },
+    };
+    if let Some(expr) = default_expr_node {
+        catalog_dependency::CheckUsageOnTypesInExpr(
+            expr,
+            &types_nodes::NodeList::nil(),
+            miscinit::GetUserId(),
+        )?;
+    }
+
     let domain_array_oid = pg_type::AssignTypeArrayOid(mcx)?;
 
     let address = pg_type::TypeCreate(
@@ -472,14 +492,6 @@ pub fn DefineDomain<'mcx>(
     // C records the typdefaultbin expression's dependencies inside
     // GenerateTypeDependencies (pg_type.c:576-581,710-711); pg_type cannot
     // depend on catalog_dependency, so the same records are written here.
-    // An inherited default has no cooked node yet: rebuild it from the bin.
-    let default_expr_node = match default_expr_node {
-        Some(e) => Some(e),
-        None => match &default_value_bin {
-            Some(bin) => Some(readfuncs::stringToNode(mcx, bin.as_str())?),
-            None => None,
-        },
-    };
     if let Some(expr) = default_expr_node {
         catalog_dependency::recordDependencyOnExpr(
             mcx,
@@ -542,6 +554,8 @@ pub fn DefineDomain<'mcx>(
                     basetype_mod,
                     constr,
                     domain_name,
+                    // upstream 2780538433fc (18.5): is_readd
+                    false,
                 )?;
             }
             ConstrType::CONSTR_NOTNULL => {
@@ -1392,6 +1406,7 @@ pub(crate) fn domainAddCheckConstraint<'mcx>(
     typ_mod: i32,
     constr: &Constraint<'mcx>,
     domain_name: &str,
+    is_readd: bool,
 ) -> PgResult<(Oid, mcx::PgString<'mcx>)> {
     debug_assert!(constr.contype == ConstrType::CONSTR_CHECK);
     let conname =
@@ -1421,6 +1436,17 @@ pub(crate) fn domainAddCheckConstraint<'mcx>(
         "CHECK",
     )?;
     parse_collate::assign_expr_collations(mcx, &cpstate, expr)?;
+
+    // upstream 2780538433fc (18.5): Check for USAGE privilege on types used by stored expressions.
+    // The below call to CreateConstraintEntry() creates the dependencies on
+    // types. We are responsible for checking USAGE.
+    if !is_readd {
+        catalog_dependency::CheckUsageOnTypesInExpr(
+            expr,
+            &types_nodes::NodeList::nil(),
+            miscinit::GetUserId(),
+        )?;
+    }
 
     if !cpstate.p_rtable.is_nil() || vars::contain_var_clause(expr)? {
         return Err(table_refs_in_domain_check());
@@ -1504,8 +1530,11 @@ fn permission_denied_schema(nsp: Oid) -> PgResult<Box<PgError>> {
 #[track_caller]
 #[cold]
 #[inline(never)]
+// aclcheck_error_type (aclchk.c): arrays report their element type.
 fn permission_denied_type(typeoid: Oid) -> Box<PgError> {
-    let name = format_type::format_type_be(typeoid).unwrap_or_else(|_| "???".into());
+    let element_type = lsyscache::get_element_type(typeoid).unwrap_or(InvalidOid);
+    let shown = if OidIsValid(element_type) { element_type } else { typeoid };
+    let name = format_type::format_type_be(shown).unwrap_or_else(|_| "???".into());
     Box::new(
         PgError::new(ERROR, format!("permission denied for type {name}"))
             .with_sqlstate(ERRCODE_INSUFFICIENT_PRIVILEGE),

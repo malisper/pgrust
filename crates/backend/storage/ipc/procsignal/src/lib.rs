@@ -420,6 +420,11 @@ fn proc_signal_init_internal(cancel_key: &[u8], register_cleanup: bool) -> PgRes
         g::interrupt_pending_flag() as *const _ as *mut AtomicBool,
         Relaxed,
     );
+    // upstream 1a9b1cc18e06 (18.6): Fix race between ProcSignalInit() and EmitProcSignalBarrier().
+    // Pid, full barrier, then generation: a concurrent emitter either sees
+    // the pid and signals this slot, or bumped before the load below.
+    slot.pss_pid.store(g::MyProcPid(), SeqCst);
+    fence(SeqCst);
     slot.pss_barrierCheckMask.store(0, Relaxed);
     let barrier_generation = header.psh_barrierGeneration.load(Relaxed);
     slot.pss_barrierGeneration.store(barrier_generation, Relaxed);
@@ -432,7 +437,6 @@ fn proc_signal_init_internal(cancel_key: &[u8], register_cleanup: bool) -> PgRes
     }
     // SAFETY: serialized by the ProcSignalSlot pss_mutex spinlock
     unsafe { slot.pss_cancel_key_len.set(cancel_key.len() as i32) };
-    slot.pss_pid.store(g::MyProcPid(), Relaxed);
     slot.pss_mutex.unlock();
 
     // Identity is now published: consume this thread's pre-identity target
@@ -886,6 +890,10 @@ pub fn EmitProcSignalBarrier(barrier_type: ProcSignalBarrierType) -> u64 {
         slot.pss_barrierCheckMask.fetch_or(flagbit, SeqCst);
     }
     let generation = header.psh_barrierGeneration.fetch_add(1, SeqCst) + 1;
+    // upstream 1a9b1cc18e06 (18.6): Fix race between ProcSignalInit() and EmitProcSignalBarrier().
+    // C's bump is a full barrier (pg_atomic_add_fetch_u64); the pid loads
+    // below must not precede it.
+    fence(SeqCst);
 
     for i in (0..header.psh_slot.len()).rev() {
         let slot = &header.psh_slot[i];
@@ -1090,6 +1098,15 @@ pub fn procsignal_sigusr1_handler() {
             logical_worker_seams::handle_parallel_apply_message_interrupt::call();
         } else {
             unported_handler("HandleParallelApplyMessageInterrupt (applyparallelworker.c)");
+        }
+    }
+    // upstream 58c1188a3eaa (18.4): Fix slotsync worker blocking promotion when stuck in wait
+    // (reason 14: acf49bfede2a's ABI placement after the conflict block).
+    if CheckProcSignal(PROCSIG_SLOTSYNC_MESSAGE) {
+        if slotsync_seams::handle_slot_sync_message_interrupt::is_installed() {
+            slotsync_seams::handle_slot_sync_message_interrupt::call();
+        } else {
+            unported_handler("HandleSlotSyncMessageInterrupt (replication/logical/slotsync.c)");
         }
     }
     for conflict in [

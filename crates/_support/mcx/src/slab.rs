@@ -46,6 +46,11 @@ pub(crate) struct SlabArena {
     emptyblocks: alloc::vec::Vec<usize>,
     mem_allocated: usize,
     nblocks: usize,
+    // upstream 3f3eefc28892 (18.4): Detect pfree or repalloc of a previously-freed memory chunk.
+    // Chunks currently on a block freelist, by address (C marks the chunk header;
+    // chunks here have none). Debug builds only.
+    #[cfg(debug_assertions)]
+    freed: crate::freed::FreedSet,
 }
 
 impl SlabArena {
@@ -73,6 +78,8 @@ impl SlabArena {
             emptyblocks: alloc::vec::Vec::new(),
             mem_allocated: 0,
             nblocks: 0,
+            #[cfg(debug_assertions)]
+            freed: crate::freed::FreedSet::new(),
         }
     }
 
@@ -132,7 +139,7 @@ impl SlabArena {
     }
 
     #[inline]
-    fn next_free_chunk(&self, addr: usize) -> usize {
+    fn next_free_chunk(&mut self, addr: usize) -> usize {
         let b = block_mut(addr);
         debug_assert!(b.nfree > 0);
         let chunk;
@@ -140,6 +147,8 @@ impl SlabArena {
             chunk = b.freehead;
             // SAFETY: a free chunk's first 8 bytes hold the next-free address.
             b.freehead = unsafe { *core::ptr::with_exposed_provenance::<usize>(chunk) };
+            #[cfg(debug_assertions)]
+            self.freed.note_alloc(chunk);
         } else {
             debug_assert!(b.nunused > 0);
             chunk = b.unused;
@@ -221,6 +230,8 @@ impl SlabArena {
     /// # Safety: `ptr` is live from this arena with `layout` (Allocator contract).
     pub(crate) unsafe fn dealloc(&mut self, ptr: NonNull<u8>, layout: Layout, acct: &Acct) {
         debug_assert_eq!(layout.size(), self.chunk_size);
+        #[cfg(debug_assertions)]
+        self.freed.note_free(ptr);
         let chunk = ptr.as_ptr().addr();
         let addr = chunk & !(self.block_size - 1);
         let nfree = {
@@ -247,6 +258,13 @@ impl SlabArena {
         }
     }
 
+    // upstream 3f3eefc28892 (18.4): Detect pfree or repalloc of a previously-freed memory chunk.
+    // C SlabFree's `requested_size == InvalidAllocSize` test.
+    #[cfg(debug_assertions)]
+    pub(crate) fn is_freed(&self, ptr: NonNull<u8>) -> bool {
+        self.freed.contains(ptr)
+    }
+
     #[cold]
     #[inline(never)]
     fn block_emptied(&mut self, addr: usize, i: u32, acct: &Acct) {
@@ -263,6 +281,8 @@ impl SlabArena {
     }
 
     fn release_block_bytes(&mut self, addr: usize) {
+        #[cfg(debug_assertions)]
+        self.freed.forget_block(addr, self.block_size);
         self.mem_allocated -= self.block_size;
         crate::global_footprint::sub(self.block_size);
         self.nblocks -= 1;

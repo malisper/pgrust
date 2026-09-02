@@ -258,3 +258,24 @@ fn internal_size_overflow_is_minus_one() {
     assert_eq!(tool::internal_size(&[1, 10, 12, 12]), 11);
     assert_eq!(tool::internal_size(&[i32::MIN, i32::MAX]), -1);
 }
+
+fn balanced(leaf: &str, depth: usize) -> String {
+    let mut e = leaf.to_string();
+    for _ in 0..depth {
+        e = format!("({e}&{e})");
+    }
+    e
+}
+
+#[test]
+fn findoprnd_left_offset_overflow() {
+    // upstream c5790ec4fd9a (18.4): depth 14 puts '|'s left offset at PG_INT16_MIN; 15 overflows.
+    let fits = format!("0|{}", balanced("1", 14));
+    assert!(boolop(&[1], &fits));
+    assert!(boolop(&[0], &fits));
+    assert!(!boolop(&[2], &fits));
+    let e = parse_query(format!("0|{}", balanced("1", 15)).as_bytes()).unwrap_err();
+    assert_eq!(e.err.message(), "query_int expression is too complex");
+    assert_eq!(e.err.sqlstate(), types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+    assert!(e.soft);
+}

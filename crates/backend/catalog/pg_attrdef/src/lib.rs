@@ -37,6 +37,8 @@ fn eq_key(attno: AttrNumber, func: RegProcedure, arg: Datum) -> ScanKeyData {
     key
 }
 
+// upstream 2780538433fc (18.5): NB: caller is responsible for ensuring the
+// user has USAGE on all types expr depends on.
 pub fn StoreAttrDefault<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,

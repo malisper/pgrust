@@ -29,11 +29,18 @@ pub struct ScanState {
     comment_depth: u32,
     pub paren_depth: i32,
     pub standard_strings: bool,
+    // upstream 29921259e83b (18.6): Teach psql to skip in-line COPY ... FROM STDIN data after a failure.
+    // (psqlscan.l's statement-start tracking.)
+    begin_depth: i32,
+    copy_stdin_count: i32,
+    init_idents_count: usize,
+    init_idents: [u8; 8],
 }
 
 pub enum ScanItem {
-    /// A complete statement, including its terminating semicolon.
-    Statement(String),
+    /// A complete statement, including its terminating semicolon, and the
+    /// number of COPY ... FROM STDIN commands it contains.
+    Statement(String, i32),
     /// A backslash command line (without the leading backslash).
     Backslash(String),
 }
@@ -53,6 +60,10 @@ impl ScanState {
             comment_depth: 0,
             paren_depth: 0,
             standard_strings: true,
+            begin_depth: 0,
+            copy_stdin_count: 0,
+            init_idents_count: 0,
+            init_idents: [0; 8],
         }
     }
 
@@ -66,13 +77,130 @@ impl ScanState {
         self.buf.trim().is_empty()
     }
 
-    #[allow(dead_code)]
+    /// psql_scan_reset: before a new query string starts.
     pub fn reset_buffer(&mut self) {
         self.buf.clear();
         self.state = QuoteState::None;
         self.dollar_tag.clear();
         self.comment_depth = 0;
         self.paren_depth = 0;
+        self.reset_statement_tracking();
+    }
+
+    fn reset_statement_tracking(&mut self) {
+        self.begin_depth = 0;
+        self.copy_stdin_count = 0;
+        self.init_idents_count = 0;
+    }
+
+    /// psqlscan_track_identifier: the first few keywords of a statement
+    /// (COPY ... FROM STDIN) and routine BEGIN/CASE ... END nesting.
+    fn track_identifier(&mut self, ident: &str) {
+        if self.paren_depth != 0 {
+            return;
+        }
+        if self.init_idents_count == 0 {
+            self.init_idents = [0; 8];
+        }
+        if self.init_idents_count < self.init_idents.len() {
+            let first = ident.as_bytes()[0];
+            // Routine keywords lower case, COPY keywords upper case, else 0.
+            let mark = if ["create", "function", "procedure", "or", "replace"]
+                .iter()
+                .any(|k| ident.eq_ignore_ascii_case(k))
+            {
+                first.to_ascii_lowercase()
+            } else if ["copy", "from", "stdin", "stdout"].iter().any(|k| ident.eq_ignore_ascii_case(k))
+            {
+                first.to_ascii_uppercase()
+            } else {
+                0
+            };
+            self.init_idents[self.init_idents_count] = mark;
+            self.init_idents_count += 1;
+        }
+        if is_create_routine(&self.init_idents) {
+            if ident.eq_ignore_ascii_case("begin") {
+                self.begin_depth += 1;
+            } else if ident.eq_ignore_ascii_case("case") {
+                if self.begin_depth >= 1 {
+                    self.begin_depth += 1;
+                }
+            } else if ident.eq_ignore_ascii_case("end") && self.begin_depth > 0 {
+                self.begin_depth -= 1;
+            }
+        }
+    }
+
+    /// Interpolated variable text: track its unquoted words.
+    fn track_identifiers_in(&mut self, text: &str) {
+        let chars: Vec<char> = text.chars().collect();
+        let mut i = 0;
+        let mut quote: Option<char> = None;
+        while i < chars.len() {
+            let c = chars[i];
+            if let Some(q) = quote {
+                if c == q {
+                    quote = None;
+                }
+                i += 1;
+            } else if c == '\'' || c == '"' {
+                quote = Some(c);
+                i += 1;
+            } else if is_ident_start(c) {
+                let mut j = i + 1;
+                while j < chars.len() && is_ident_cont(chars[j]) {
+                    j += 1;
+                }
+                let ident: String = chars[i..j].iter().collect();
+                self.track_identifier(&ident);
+                i = j;
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    /// psqlscan_is_copy_from_stdin: COPY, then FROM STDIN among the words.
+    fn is_copy_from_stdin(&self) -> bool {
+        let id = &self.init_idents;
+        if id[0] != b'C' {
+            return false;
+        }
+        for i in 1..id.len() - 1 {
+            if id[i] != b'F' {
+                continue;
+            }
+            return id[i + 1] == b'S';
+        }
+        false
+    }
+
+    /// psql_scan_count_copy_from_stdin (a trailing command counts once).
+    pub fn count_copy_from_stdin(&mut self) -> i32 {
+        if self.init_idents_count > 0 {
+            if self.is_copy_from_stdin() {
+                self.copy_stdin_count += 1;
+            }
+            self.init_idents_count = 0;
+        }
+        self.copy_stdin_count
+    }
+
+    /// SendQuery's -1 path: one psql_scan over a caller-supplied string.
+    pub fn count_copy_from_stdin_in_string(query: &str, standard_strings: bool) -> i32 {
+        let mut st = ScanState::new();
+        st.standard_strings = standard_strings;
+        let vars = HashMap::new();
+        for line in query.split('\n') {
+            for item in st.scan_line(line, &vars) {
+                return match item {
+                    ScanItem::Statement(_, n) => n,
+                    ScanItem::Backslash(_) => st.count_copy_from_stdin(),
+                };
+            }
+        }
+        st.count_copy_from_stdin()
     }
 
     /// PROMPT2's %R character.
@@ -225,10 +353,18 @@ impl ScanState {
                         ';' => {
                             push!(';');
                             i += 1;
-                            let stmt = std::mem::take(&mut self.buf);
-                            self.paren_depth = 0;
-                            appended_sep = false;
-                            out.push(ScanItem::Statement(stmt));
+                            // upstream 29921259e83b (18.6): a top-level ';'
+                            // books a COPY FROM STDIN and resets the tracking.
+                            if self.paren_depth == 0 && self.begin_depth == 0 {
+                                if self.is_copy_from_stdin() {
+                                    self.copy_stdin_count += 1;
+                                }
+                                let stmt = std::mem::take(&mut self.buf);
+                                let ncopy = self.copy_stdin_count;
+                                self.reset_statement_tracking();
+                                appended_sep = false;
+                                out.push(ScanItem::Statement(stmt, ncopy));
+                            }
                         }
                         '\'' => {
                             // E'...' if the preceding pushed char was e/E and
@@ -334,6 +470,7 @@ impl ScanState {
                                 let name: String = chars[i + 1..j].iter().collect();
                                 if let Some(v) = vars.get(&name) {
                                     push_str!(v);
+                                    self.track_identifiers_in(v);
                                     i = j;
                                 } else {
                                     push!(':');
@@ -341,6 +478,29 @@ impl ScanState {
                                 }
                             } else {
                                 push!(':');
+                                i += 1;
+                            }
+                        }
+                        c if is_ident_start(c) => {
+                            // {identifier}; the E'..'/N/B/X/U& prefixes are not.
+                            let mut j = i + 1;
+                            while j < n && is_ident_cont(chars[j]) {
+                                j += 1;
+                            }
+                            let literal_prefix = j == i + 1
+                                && ((matches!(c, 'e' | 'E' | 'n' | 'N' | 'b' | 'B' | 'x' | 'X')
+                                    && j < n
+                                    && chars[j] == '\'')
+                                    || (matches!(c, 'u' | 'U')
+                                        && j + 1 < n
+                                        && chars[j] == '&'
+                                        && (chars[j + 1] == '\'' || chars[j + 1] == '"')));
+                            if !literal_prefix {
+                                let ident: String = chars[i..j].iter().collect();
+                                self.track_identifier(&ident);
+                            }
+                            while i < j {
+                                push!(chars[i]);
                                 i += 1;
                             }
                         }
@@ -354,6 +514,14 @@ impl ScanState {
         }
         out
     }
+}
+
+/// psqlscan_is_create_routine: CREATE [OR REPLACE] {FUNCTION|PROCEDURE}.
+fn is_create_routine(id: &[u8; 8]) -> bool {
+    id[0] == b'c'
+        && (id[1] == b'f'
+            || id[1] == b'p'
+            || (id[1] == b'o' && id[2] == b'r' && (id[3] == b'f' || id[3] == b'p')))
 }
 
 fn prev_is_ident_continuation(buf: &str) -> bool {
@@ -434,7 +602,7 @@ mod tests {
         for l in lines {
             for item in st.scan_line(l, &vars) {
                 match item {
-                    ScanItem::Statement(s) => stmts.push(s),
+                    ScanItem::Statement(s, _) => stmts.push(s),
                     ScanItem::Backslash(s) => metas.push(s),
                 }
             }
@@ -501,11 +669,93 @@ mod tests {
         vars.insert("who".to_string(), "wor'ld".to_string());
         let items = st.scan_line("select :'who', :who, :missing;", &vars);
         match &items[0] {
-            ScanItem::Statement(s) => {
+            ScanItem::Statement(s, _) => {
                 assert_eq!(s, "select 'wor''ld', wor'ld, :missing;")
             }
             _ => panic!(),
         }
+    }
+
+    // upstream 29921259e83b (18.6): Teach psql to skip in-line COPY ... FROM STDIN data after a failure.
+    fn copy_counts(lines: &[&str]) -> Vec<i32> {
+        let mut st = ScanState::new();
+        let vars = HashMap::new();
+        let mut counts = Vec::new();
+        for l in lines {
+            for item in st.scan_line(l, &vars) {
+                if let ScanItem::Statement(_, n) = item {
+                    counts.push(n);
+                }
+            }
+        }
+        counts
+    }
+
+    #[test]
+    fn copy_from_stdin_is_counted_per_statement() {
+        assert_eq!(copy_counts(&["copy t from stdin;"]), vec![1]);
+        assert_eq!(copy_counts(&["COPY BINARY public.t FROM STDIN;"]), vec![1]);
+        assert_eq!(copy_counts(&["copy t (a, b) from stdin with (format csv);"]), vec![1]);
+        assert_eq!(copy_counts(&["copy t", "from", "stdin;"]), vec![1]);
+        assert_eq!(copy_counts(&["copy t to stdout;"]), vec![0]);
+        assert_eq!(copy_counts(&["copy (select 1) to stdout;"]), vec![0]);
+        assert_eq!(copy_counts(&["select 'copy t from stdin';"]), vec![0]);
+        assert_eq!(copy_counts(&["select E'x' from stdin;"]), vec![0]);
+        assert_eq!(copy_counts(&["select 1; copy t from stdin; select 2;"]), vec![0, 1, 0]);
+        assert_eq!(copy_counts(&["copy t from stdin", "copy t from stdin;"]), vec![1]);
+        assert_eq!(copy_counts(&["copy a b c d e f g from stdin;"]), vec![0]);
+        let mut st = ScanState::new();
+        let mut vars = HashMap::new();
+        vars.insert("cmd".to_string(), "copy t from stdin".to_string());
+        match st.scan_line(":cmd;", &vars).pop() {
+            Some(ScanItem::Statement(s, n)) => {
+                assert_eq!(s, "copy t from stdin;");
+                assert_eq!(n, 1);
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn trailing_copy_from_stdin_counts_once_at_eof() {
+        let (s, _, mut st) = scan_all(&["copy t from stdin"]);
+        assert!(s.is_empty());
+        assert_eq!(st.count_copy_from_stdin(), 1);
+        assert_eq!(st.count_copy_from_stdin(), 1);
+        st.reset_buffer();
+        assert_eq!(st.count_copy_from_stdin(), 0);
+        let (_, _, mut st) = scan_all(&["copy t from stdin;", "select 1"]);
+        assert_eq!(st.count_copy_from_stdin(), 0);
+    }
+
+    #[test]
+    fn count_copy_from_stdin_in_string_stops_at_first_terminator() {
+        assert_eq!(ScanState::count_copy_from_stdin_in_string("copy t from stdin", true), 1);
+        assert_eq!(ScanState::count_copy_from_stdin_in_string("copy t from stdin;\nselect 1", true), 1);
+        assert_eq!(ScanState::count_copy_from_stdin_in_string("select 1; copy t from stdin", true), 0);
+        assert_eq!(ScanState::count_copy_from_stdin_in_string("copy t from stdin \\echo x", true), 1);
+        assert_eq!(ScanState::count_copy_from_stdin_in_string("select 1", true), 0);
+    }
+
+    #[test]
+    fn routine_body_semicolons_do_not_end_the_statement() {
+        let (s, _, _) = scan_all(&[
+            "create function f() returns int language sql begin atomic",
+            "  select case when true then 1 else 2 end;",
+            "  select 2;",
+            "end;",
+            "select 3;",
+        ]);
+        assert_eq!(s.len(), 2, "{s:?}");
+        assert!(s[0].ends_with("\nend;"));
+        assert_eq!(s[1], "select 3;");
+        let (s, _, _) =
+            scan_all(&["CREATE OR REPLACE PROCEDURE p() BEGIN ATOMIC select 1; END; select 2;"]);
+        assert_eq!(s, vec!["CREATE OR REPLACE PROCEDURE p() BEGIN ATOMIC select 1; END;", "select 2;"]);
+        assert_eq!(scan_all(&["begin; select 1; end;"]).0.len(), 3);
+        let (s, _, st) = scan_all(&["select (1;"]);
+        assert!(s.is_empty());
+        assert_eq!(st.prompt2_char(), '(');
     }
 
     #[test]

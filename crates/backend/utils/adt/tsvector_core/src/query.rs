@@ -20,6 +20,13 @@ pub const QUERYITEM_SIZE: usize = 12;
 pub const HDRSIZETQ: usize = 8;
 pub const MAX_ALLOC_SIZE: usize = 0x3fff_ffff;
 
+// upstream dddc8a69ff8b (18.6): Harden tsquery code against overflows.
+#[inline]
+pub fn tsquery_too_big(size: usize, lenofoperand: usize) -> bool {
+    lenofoperand > MAX_ALLOC_SIZE - HDRSIZETQ
+        || size > (MAX_ALLOC_SIZE - HDRSIZETQ - lenofoperand) / QUERYITEM_SIZE
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Operand {
     pub weight: u8,

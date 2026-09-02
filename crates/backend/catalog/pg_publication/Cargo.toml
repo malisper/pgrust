@@ -40,4 +40,5 @@ catalog_indexing = { path = "../catalog_indexing" }
 catalog_namespace = { path = "../catalog_namespace" }
 pg_class_seams = { path = "../pg_class_seams" }
 pg_depend = { path = "../pg_depend" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 pg_inherits = { path = "../pg_inherits" }

@@ -466,6 +466,18 @@ pub fn expandTableLikeClause<'mcx>(
                         relation.name()
                     )));
                 }
+                // upstream 2780538433fc (18.5): Check for USAGE privilege on types used by stored expressions.
+                // Copying a CHECK constraint adds new references. Since the
+                // constraint arrives pre-cooked, it bypasses the checks in
+                // AddRelationNewConstraints(), so check for USAGE on types
+                // here (C re-reads ccbin; only the type references matter, so
+                // the source tree serves).
+                pg_depend::CheckUsageOnTypesInSingleRelExpr(
+                    mcx,
+                    ccbin_node,
+                    relation.rd_id,
+                    miscinit::GetUserId(),
+                )?;
                 let n = Constraint {
                     contype: ConstrType::CONSTR_CHECK,
                     conname: Some(str_in(mcx, ccname)?),
@@ -1123,8 +1135,13 @@ fn generateClonedExtStatsStmt<'mcx>(
     let mut def_names = NodeList::nil();
     for i in 0..nkeys {
         let attnum = i16::from_ne_bytes(keydata[i * 2..i * 2 + 2].try_into().unwrap());
-        let attname = lsyscache::get_attname(mcx, heap_relid, attnum, false)?
-            .expect("statistics key column");
+        // upstream 149c875fc20b (18.4): Fix attnum remapping in generateClonedExtStatsStmt()
+        // stxkeys hold the PARENT's attnums; remap through attmap before the
+        // child lookup (a dropped parent column renumbers the child), as the
+        // expression path below already does.
+        let attname =
+            lsyscache::get_attname(mcx, heap_relid, attmap[attnum as usize - 1], false)?
+                .expect("statistics key column");
         let selem = StatsElem { name: Some(str_in(mcx, attname.as_str())?), expr: None };
         def_names.lappend(mcx, Node::mk(mcx, selem)?)?;
     }
@@ -1176,6 +1193,8 @@ fn generateClonedExtStatsStmt<'mcx>(
         stxcomment: None,
         transformed: true,
         if_not_exists: false,
+        // upstream a1fa24127d6a (18.6): Preserve the owner of extended statistics rebuilt by ALTER TABLE.
+        owner: InvalidOid,
     })
 }
 

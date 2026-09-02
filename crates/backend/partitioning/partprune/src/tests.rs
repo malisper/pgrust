@@ -292,3 +292,73 @@ fn bms_add_range_inverted_is_noop() {
     bms_add_range(mcx, &mut b, 5, 3).unwrap();
     assert!(b.is_empty());
 }
+
+// RANGE bounds with a DEFAULT (partition_prune.sql rangepart): datums {0},
+// {10}, {20}; indexes [-1, 0, 1, -1]; partition 0 = [0,10), partition 1 =
+// [10,20), default -> 2. Offsets 0 and 3 are key space no range covers.
+fn range_bounds_with_default(mcx: Mcx<'static>) -> partbounds::PartitionBoundInfoData<'static> {
+    let mut datums = mcx::vec_with_capacity_in(mcx, 3).unwrap();
+    datums.extend([Datum::from_i32(0), Datum::from_i32(10), Datum::from_i32(20)]);
+    let mut kind = mcx::vec_with_capacity_in(mcx, 3).unwrap();
+    kind.extend([KIND_VALUE, KIND_VALUE, KIND_VALUE]);
+    let mut indexes = mcx::vec_with_capacity_in(mcx, 4).unwrap();
+    indexes.extend([-1, 0, 1, -1]);
+    partbounds::PartitionBoundInfoData {
+        strategy: b'r' as i8,
+        ndatums: 3,
+        width: 1,
+        datums,
+        kind,
+        indexes,
+        null_index: -1,
+        default_index: 2,
+    }
+}
+
+// upstream 02e69be47c05 (18.6): Fix issue with RANGE's DEFAULT partition pruning
+// `a IS NOT NULL AND a IN (-1, 5, 15, 20)`: the IS NOT NULL step (no values)
+// must carry the DEFAULT in bound_offsets as well as scan_default, or the
+// INTERSECT with the IN step (which reaches the DEFAULT only through offsets
+// 0 and 3) drops both representations and prunes the DEFAULT.
+#[test]
+fn range_not_null_intersect_in_keeps_default() {
+    let mcx = static_mcx();
+    let bi = range_bounds_with_default(mcx);
+    let empty = Bitmapset::empty();
+    let notnull =
+        get_matching_range_bounds(mcx, &bi, 1, InvalidStrategy, 0, &empty, &mut |_, _| 0).unwrap();
+    assert!(notnull.scan_default);
+    assert_eq!(members(&notnull.bound_offsets), [0, 1, 2, 3]);
+    let per_value: Vec<_> = [-1, 5, 15, 20]
+        .into_iter()
+        .map(|v| {
+            get_matching_range_bounds(
+                mcx,
+                &bi,
+                1,
+                BTEqualStrategyNumber,
+                1,
+                &empty,
+                &mut |_, b| i32_cmp(b, v),
+            )
+            .ok()
+        })
+        .collect();
+    let in_step =
+        perform_pruning_combine_step(mcx, &bi, PARTPRUNE_COMBINE_UNION, 4, 0..4, &per_value)
+            .unwrap();
+    assert_eq!(members(&in_step.bound_offsets), [0, 1, 2, 3]);
+    assert!(!in_step.scan_default);
+    let results = vec![Some(notnull), Some(in_step)];
+    let both = perform_pruning_combine_step(
+        mcx,
+        &bi,
+        PARTPRUNE_COMBINE_INTERSECT,
+        2,
+        [0i32, 1].into_iter(),
+        &results,
+    )
+    .unwrap();
+    let sel = matching_bounds_to_partitions(mcx, &bi, &both, b'r').unwrap();
+    assert_eq!(members(&sel), [0, 1, 2]);
+}

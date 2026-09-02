@@ -286,4 +286,35 @@ mod tests {
         let out = sym_decrypt(&bin, b"key", Some(b"expect-compress-algo=1"), true).expect("decrypt");
         assert_eq!(out.plaintext, b"Secret message");
     }
+
+    /// upstream 4c5128ca0b30 (18.6): the pgp-decrypt corpus message that an
+    /// OpenSSL lacking Blowfish "encrypted" with cipher-algo=bf. With the
+    /// cipher available both decryptions fail alike; ignore-cipher-failure
+    /// only has to be accepted, and must not weaken a real decryption.
+    #[test]
+    fn ignore_cipher_failure_is_accepted_without_weakening_decryption() {
+        let armored = "\n-----BEGIN PGP MESSAGE-----\n\nww0EBAMC8wIKbtvzJtxi0jABUleCwFJWGCkYKcsNdABqdtXaU2VjcmV0LtMUlnPH3A2QBmZrcucm\n1GPb/s2Bkdg=\n=6aqD\n-----END PGP MESSAGE-----\n";
+        let bin = armor::armor_decode(armored.as_bytes()).expect("dearmor");
+        let err = |r: Result<DecryptOutput, DecryptError>| r.err().expect("must fail").message;
+        assert_eq!(err(sym_decrypt(&bin, b"wrong key", None, true)), "Wrong key or corrupt data");
+        assert_eq!(
+            err(sym_decrypt(&bin, b"wrong key", Some(b"ignore-cipher-failure=1"), true)),
+            "Wrong key or corrupt data"
+        );
+
+        let ct = sym_encrypt(b"Secret.", b"key", Some(b"cipher-algo=bf, ignore-cipher-failure=1"), true)
+            .expect("encrypt accepts the option");
+        let out = sym_decrypt(&ct, b"key", Some(b"ignore-cipher-failure=1"), true).expect("decrypt");
+        assert_eq!(out.plaintext, b"Secret.");
+        assert_eq!(
+            err(sym_decrypt(&ct, b"nope", Some(b"ignore-cipher-failure=1"), true)),
+            "Wrong key or corrupt data"
+        );
+
+        let seckey = armor::armor_decode(RSA_SECKEY.as_bytes()).expect("dearmor seckey");
+        let msg = armor::armor_decode(RSA_MSG.as_bytes()).expect("dearmor msg");
+        let out = pub_decrypt(&msg, &seckey, None, Some(b"ignore-cipher-failure=1"), true)
+            .expect("pub decrypt");
+        assert_eq!(out.plaintext, b"Secret message.");
+    }
 }

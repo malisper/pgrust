@@ -338,3 +338,272 @@ fn build_accumulator_compressed_keys_group_and_sort_detoasted() {
     assert!(acc.next_entry().is_none());
     assert_eq!(acc.nentries(), 2);
 }
+
+// A per-thread fake buffer manager shared by every gin unit test that reads
+// pages through the bufmgr seams (a seam installs once per process): buffer
+// b is page b-1 of the calling thread's page table, pins are counted, content
+// locks are no-ops, vacuum delay points are counted.
+pub(crate) mod fake_bufmgr {
+    use std::cell::{Cell, RefCell};
+    use std::sync::Once;
+
+    use ::types_core::Buffer;
+
+    thread_local! {
+        static PAGES: RefCell<Vec<core::ptr::NonNull<u8>>> = const { RefCell::new(Vec::new()) };
+        static PINS: Cell<i32> = const { Cell::new(0) };
+        static DELAY_POINTS: Cell<u32> = const { Cell::new(0) };
+    }
+
+    pub(crate) fn install() {
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            bufmgr_seams::read_buffer::set(|_rel, blkno| {
+                PINS.with(|c| c.set(c.get() + 1));
+                Ok(blkno as Buffer + 1)
+            });
+            bufmgr_seams::release_buffer::set(|_buf| {
+                PINS.with(|c| c.set(c.get() - 1));
+                Ok(())
+            });
+            bufmgr_seams::lock_buffer::set(|_buf, _mode| Ok(()));
+            bufmgr_seams::buffer_get_page::set(|buf| {
+                PAGES.with(|p| p.borrow()[(buf - 1) as usize])
+            });
+            vacuum_seams::vacuum_delay_point::set(|_is_analyze| {
+                DELAY_POINTS.with(|c| c.set(c.get() + 1));
+                Ok(())
+            });
+            postgres_seams::check_for_interrupts::set(|| Ok(()));
+        });
+    }
+
+    /// This thread's page table (leaked BLCKSZ images); resets the counters.
+    pub(crate) fn set_pages(pages: Vec<core::ptr::NonNull<u8>>) {
+        PAGES.with(|p| *p.borrow_mut() = pages);
+        PINS.with(|c| c.set(0));
+        DELAY_POINTS.with(|c| c.set(0));
+    }
+
+    pub(crate) fn pins() -> i32 {
+        PINS.with(Cell::get)
+    }
+
+    pub(crate) fn delay_points() -> u32 {
+        DELAY_POINTS.with(Cell::get)
+    }
+}
+
+// --- posting-tree leaf vacuum sweep (fake buffer manager) ---
+
+mod posting_tree_vacuum {
+    use super::*;
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    use ::mcx::{Mcx, PgVec};
+    use ::types_core::{
+        BlockNumber, InvalidBlockNumber, Oid, BLCKSZ, INVALID_PROC_NUMBER, RELPERSISTENCE_PERMANENT,
+    };
+    use ::types_error::PgResult;
+    use ::types_nbtree::IndexBulkDeleteResult;
+    use ::types_rel::{
+        FormData_pg_class, FormData_pg_index, LockInfoData, LockRelId, Relation, RelationData,
+        LOCKMODE, RELKIND_INDEX, REPLICA_IDENTITY_DEFAULT,
+    };
+    use ::types_tuple::tupdesc::CompactAttribute;
+    use ::types_tuple::TupleDescData;
+
+    use crate::util::gin_init_page_bytes;
+    use crate::vacuum::{ginVacuumPostingTreeLeaves, GinVacDelete, GinVacuumState};
+    use crate::write_opaque_to;
+
+    #[repr(C, align(8))]
+    struct FakePage([u8; BLCKSZ]);
+
+    // A compressed, empty posting-tree leaf whose rightlink is `rightlink`.
+    fn empty_leaf(rightlink: BlockNumber) -> Box<FakePage> {
+        let mut p = Box::new(FakePage([0u8; BLCKSZ]));
+        gin_init_page_bytes(&mut p.0, GIN_DATA | GIN_LEAF | GIN_COMPRESSED);
+        // GinDataPageSetDataSize(page, 0): pd_lower starts past the
+        // rightbound ItemPointer slot.
+        p.0[12..14].copy_from_slice(&(GinDataPageDataOffset as u16).to_ne_bytes());
+        write_opaque_to(
+            &mut p.0,
+            &GinPageOpaqueData {
+                rightlink,
+                maxoff: 0,
+                flags: GIN_DATA | GIN_LEAF | GIN_COMPRESSED,
+            },
+        );
+        p
+    }
+
+    fn int4_tupdesc(mcx: Mcx<'_>) -> TupleDescData<'_> {
+        let mut compact = PgVec::new_in(mcx);
+        compact.push(CompactAttribute {
+            attcacheoff: Cell::new(-1),
+            attlen: 4,
+            attbyval: true,
+            attispackable: false,
+            atthasmissing: false,
+            attisdropped: false,
+            attgenerated: false,
+            attnullability: 0,
+            attalignby: 4,
+        });
+        TupleDescData {
+            natts: 1,
+            tdtypeid: 0,
+            tdtypmod: -1,
+            tdrefcount: 1,
+            constr: None,
+            compact_attrs: compact,
+            attrs: PgVec::new_in(mcx),
+        }
+    }
+
+    fn noop_close(_oid: Oid, _mode: LOCKMODE) -> PgResult<()> {
+        Ok(())
+    }
+
+    fn index_rel(mcx: Mcx<'_>) -> Relation<'_> {
+        let mut relname = ::types_tuple::NameData::default();
+        relname.namestrcpy("t_gin");
+        let mut indkey = PgVec::new_in(mcx);
+        indkey.push(1);
+        let one = |v: Oid| {
+            let mut vec = PgVec::new_in(mcx);
+            vec.push(v);
+            vec
+        };
+        let mut indoption = PgVec::new_in(mcx);
+        indoption.push(0i16);
+        let data = RelationData {
+            rd_locator: Cell::new(::types_storage::RelFileLocator::new(1663, 5, 6000)),
+            rd_smgr: Default::default(),
+            rd_id: 6000,
+            rd_backend: INVALID_PROC_NUMBER,
+            rd_islocaltemp: false,
+            rd_isvalid: Cell::new(true),
+            rd_createSubid: Cell::new(0),
+            rd_newRelfilelocatorSubid: Cell::new(0),
+            rd_firstRelfilelocatorSubid: Cell::new(0),
+            rd_droppedSubid: Cell::new(0),
+            rd_lockInfo: LockInfoData {
+                lockRelId: LockRelId { relId: 6000, dbId: 5 },
+            },
+            rd_rel: FormData_pg_class {
+                relname,
+                relnamespace: 2200,
+                reltype: 0,
+                relowner: 10,
+                relam: ::types_core::catalog::GIN_AM_OID,
+                relfilenode: 6000,
+                reltablespace: 0,
+                relpages: 0,
+                reltuples: -1.0,
+                relallvisible: 0,
+                reltoastrelid: 0,
+                relhasindex: false,
+                relisshared: false,
+                relpersistence: RELPERSISTENCE_PERMANENT,
+                relkind: RELKIND_INDEX,
+                relhassubclass: false,
+                relrowsecurity: false,
+                relispopulated: true,
+                relreplident: REPLICA_IDENTITY_DEFAULT,
+                relispartition: false,
+                relfrozenxid: 3,
+                relminmxid: 1,
+            },
+            rd_att: Rc::new(int4_tupdesc(mcx)),
+            rd_index: Some(FormData_pg_index {
+                indexrelid: 6000,
+                indrelid: 5999,
+                indnatts: 1,
+                indnkeyatts: 1,
+                indisunique: false,
+                indnullsnotdistinct: false,
+                indisprimary: false,
+                indisexclusion: false,
+                indimmediate: true,
+                indisvalid: true,
+                indisready: true,
+                indkey,
+                has_indpred: false,
+                indexprs_src: None,
+                indpred_src: None,
+            }),
+            rd_opcintype: one(23),
+            rd_opfamily: one(2745),
+            rd_indoption: indoption,
+            rd_indcollation: one(0),
+            rd_options: None,
+            pgstat_enabled: Cell::new(false),
+            pgstat_link: Cell::new((0, core::ptr::null_mut())),
+            rd_amcache: Default::default(),
+            rd_amcache_hash: Default::default(),
+            rd_amcache_gin: Default::default(),
+            rd_amcache_spgist: Default::default(),
+            rd_support: PgVec::new_in(mcx),
+            rd_supportinfo: Default::default(),
+            rd_opcoptions: Default::default(),
+            rd_indexlist: Default::default(),
+            rd_trigdesc: Default::default(),
+            rd_hastriggers: false,
+            rd_hasrules: false,
+        };
+        Relation::open(data, Some(noop_close))
+    }
+
+    fn int4_col() -> GinColState {
+        GinColState {
+            opclass: GinOpclass::ArrayOps,
+            elem_cmp: GinElemCmp::Int4,
+            support_collation: 0,
+            can_partial_match: false,
+            key_byval: true,
+            key_len: 4,
+        }
+    }
+
+    // upstream 7becb647da74 (18.5): Restore vacuum_delay_point() in GIN
+    // posting-tree leaf vacuum. The rightlink sweep of a posting tree must
+    // reach a delay/interrupt point between leaf pages, with no buffer lock
+    // held (the sibling per-page loops in ginbulkdelete already do).
+    #[test]
+    fn posting_tree_leaf_sweep_delays_between_pages() {
+        super::fake_bufmgr::install();
+        // Block 0 stands in for the metapage; the tree is three chained
+        // leaves 1 -> 2 -> 3, the root being the leftmost leaf.
+        super::fake_bufmgr::set_pages(
+            [empty_leaf(InvalidBlockNumber), empty_leaf(2), empty_leaf(3), empty_leaf(InvalidBlockNumber)]
+                .into_iter()
+                .map(|page| core::ptr::NonNull::from(Box::leak(page)).cast::<u8>())
+                .collect(),
+        );
+        init_small::globals::SetVacuumCostActive(true);
+
+        let ctx = MemoryContext::new("t");
+        let rel = index_rel(ctx.mcx());
+        let state = one_col_state(int4_col());
+        let mut stats = IndexBulkDeleteResult::default();
+        let mut gvs = GinVacuumState {
+            rel: &rel,
+            state: &state,
+            delete: GinVacDelete::DeadItems(&[]),
+            stats: &mut stats,
+        };
+        let has_void = ginVacuumPostingTreeLeaves(&mut gvs, 1).unwrap();
+        init_small::globals::SetVacuumCostActive(false);
+
+        assert!(has_void, "every leaf is empty");
+        assert_eq!(super::fake_bufmgr::pins(), 0, "no pins leaked");
+        assert_eq!(
+            super::fake_bufmgr::delay_points(),
+            2,
+            "one vacuum_delay_point per rightlink hop"
+        );
+    }
+}

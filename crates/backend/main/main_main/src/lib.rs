@@ -19,7 +19,7 @@ mod wasm_lc {
 #[cfg(target_family = "wasm")]
 use wasm_lc::*;
 
-pub const PG_BACKEND_VERSIONSTR: &str = "postgres (PostgreSQL) 18.3\n";
+pub const PG_BACKEND_VERSIONSTR: &str = "postgres (PostgreSQL) 18.6\n";
 
 const SRC: &str = "src/backend/main/main.c";
 

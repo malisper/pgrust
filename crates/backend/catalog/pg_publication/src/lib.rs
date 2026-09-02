@@ -457,6 +457,13 @@ pub fn publication_add_relation<'mcx>(
         DependencyType::Auto,
     )?;
     if let Some(w) = pri.whereClause {
+        // upstream 2780538433fc (18.5): Check for USAGE privilege on types used by stored expressions.
+        pg_depend::CheckUsageOnTypesInSingleRelExpr(
+            mcx,
+            w,
+            relid,
+            miscinit_seams::get_user_id::call(),
+        )?;
         recordDependencyOnSingleRelExpr(
             mcx,
             &myself,
@@ -1011,8 +1018,16 @@ fn collect_publication_tables(fcinfo: &Fcinfo) -> PgResult<PubTablesRows> {
 
     let mut tuples = Vec::with_capacity(table_infos.len());
     for &(relid, pubid) in &table_infos {
+        // upstream 73d63d1c1f67 (18.6): Fix pg_get_publication_tables() failure with concurrent DROP TABLE.
+        // The table OIDs were collected earlier, so a table may have been
+        // dropped before we get here; try_table_open returns None if it is
+        // already gone, in which case we skip it: such tables are simply
+        // absent from the result set, the expected point-in-time behavior.
+        let Some(rel) = table::try_table_open(mcx, relid, AccessShareLock)? else {
+            continue;
+        };
         let publication = GetPublication(mcx, pubid)?;
-        let schemaid = lsyscache::get_rel_namespace(relid)?;
+        let schemaid = rel.rd_rel.relnamespace;
 
         let mut attrs_img: Option<PgVec<'_, u8>> = None;
         let mut qual_img: Option<PgVec<'_, u8>> = None;
@@ -1045,7 +1060,6 @@ fn collect_publication_tables(fcinfo: &Fcinfo) -> PgResult<PubTablesRows> {
         }
 
         if attrs_img.is_none() {
-            let rel = table::table_open(mcx, relid, AccessShareLock)?;
             let rd = rel.descr();
             let mut attnums: PgVec<'_, i16> = mcx::vec_with_capacity_in(mcx, rd.natts as usize)?;
             for i in 0..rd.natts as usize {
@@ -1066,8 +1080,8 @@ fn collect_publication_tables(fcinfo: &Fcinfo) -> PgResult<PubTablesRows> {
             if !attnums.is_empty() {
                 attrs_img = Some(adt_int::buildint2vector(mcx, &attnums)?);
             }
-            rel.close(AccessShareLock)?;
         }
+        rel.close(AccessShareLock)?;
 
         let mut values = [Datum::null(); 4];
         let mut nulls = [false; 4];

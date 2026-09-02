@@ -38,6 +38,7 @@ miscinit = { path = "../../utils/init/miscinit" }
 init_small = { path = "../../utils/init/init_small" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 xact = { path = "../../access/transam/xact" }
+transam_xlog = { path = "../../access/transam/transam_xlog" }
 lmgr = { path = "../../storage/lmgr/lmgr" }
 snapmgr = { path = "../../utils/time/snapmgr" }
 pg_database = { path = "../../catalog/pg_database" }

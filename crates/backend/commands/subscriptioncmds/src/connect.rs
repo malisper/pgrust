@@ -209,6 +209,8 @@ pub(crate) fn walrcv_create_slot(
             ERRCODE_CONNECTION_FAILURE,
         ));
     }
+    // upstream a6a2eb9f6024 (18.6): Check CREATE_REPLICATION_SLOT response shape in libpqwalreceiver
+    walreceiver::client::check_create_slot_result(&res, slotname)?;
     Ok(())
 }
 

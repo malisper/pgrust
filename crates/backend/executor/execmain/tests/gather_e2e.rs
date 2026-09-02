@@ -495,7 +495,7 @@ fn run_once(qd: types_portal::QueryDescHandle) -> PgResult<(u64, Vec<i32>)> {
     let store = tuplestore::Tuplestore::begin_heap(false, false, 1024);
     let h = tuplestore::hold::register(store);
     let mut dest = DestReceiver::Tuplestore(tstore_receiver::tstore_create_DR());
-    tcop_dest::SetTuplestoreDestReceiverParams(&mut dest, h, false);
+    tcop_dest::SetTuplestoreDestReceiverParams(&mut dest, h, false, None, None);
     execmain_seams::executor_run::call(qd, ForwardScanDirection, 0, &mut dest)?;
     let processed = execmain_seams::query_desc_es_processed::call(qd);
     let mcx = leaked_mcx();

@@ -786,7 +786,7 @@ mod from_where {
     use types_nodes::RTEKind;
     use types_rel::{
         AccessShareLock, FormData_pg_class, LockInfoData, LockRelId, Relation, RelationData,
-        LOCKMODE, RELKIND_RELATION, REPLICA_IDENTITY_DEFAULT,
+        LOCKMODE, RELKIND_RELATION, RELKIND_VIEW, REPLICA_IDENTITY_DEFAULT,
     };
     use types_tuple::htup::FirstLowInvalidHeapAttributeNumber;
     use types_tuple::{FormData_pg_attribute, NameData};
@@ -797,12 +797,18 @@ mod from_where {
     // Past FirstUnpinnedObjectId, so ON CONFLICT's catalog-relation gate
     // does not fire.
     const U_OID: Oid = 40000;
+    // A view (RELKIND_VIEW) for the parse-time WHERE CURRENT OF check.
+    const V_OID: Oid = 40001;
 
     fn make_t(mcx: Mcx<'_>) -> Relation<'_> {
         make_rel(mcx, "t", T_OID)
     }
 
     fn make_rel<'m>(mcx: Mcx<'m>, name: &str, oid: Oid) -> Relation<'m> {
+        make_rel_of_kind(mcx, name, oid, RELKIND_RELATION)
+    }
+
+    fn make_rel_of_kind<'m>(mcx: Mcx<'m>, name: &str, oid: Oid, relkind: u8) -> Relation<'m> {
         let mut relname = NameData::default();
         relname.namestrcpy(name);
         let cols = [("x", INT4OID, types_core::InvalidOid), ("y", TEXTOID, 100)];
@@ -849,7 +855,7 @@ mod from_where {
                 relhasindex: false,
                 relisshared: false,
                 relpersistence: RELPERSISTENCE_PERMANENT,
-                relkind: RELKIND_RELATION,
+                relkind,
                 relhassubclass: false,
                 relrowsecurity: false,
                 relispopulated: true,
@@ -888,6 +894,7 @@ mod from_where {
         match rv.relname {
             "t" => Ok(Some(make_t(mcx))),
             "u" => Ok(Some(make_rel(mcx, "u", U_OID))),
+            "v" => Ok(Some(make_rel_of_kind(mcx, "v", V_OID, RELKIND_VIEW))),
             _ if missing_ok => Ok(None),
             _ => Err(types_error::PgError::error("no such relation").into()),
         }
@@ -3218,6 +3225,37 @@ mod from_where {
         .unwrap_err();
         assert_eq!(err.sqlstate(), types_error::ERRCODE_SYNTAX_ERROR);
         assert_eq!(err.message(), "DEFAULT is not allowed in this context");
+    }
+
+    // upstream f3d03fbd5d01 (18.5): WHERE CURRENT OF on a view is rejected at
+    // parse time (transformUpdateStmt/transformDeleteStmt), no longer by the
+    // rewriter's replace_rte_variables_mutator, which now also runs to
+    // expand virtual generated columns of ordinary tables.
+    #[test]
+    fn update_delete_where_current_of_on_view_is_0a000() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        for sql in [
+            "UPDATE v SET x = 1 WHERE CURRENT OF c1",
+            "DELETE FROM v WHERE CURRENT OF c1",
+        ] {
+            let err = analyze_sql(mcx, sql).map(|_| ()).unwrap_err();
+            assert_eq!(err.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED, "{sql}");
+            assert_eq!(err.message(), "WHERE CURRENT OF on a view is not implemented", "{sql}");
+        }
+        // Any other WHERE on the view is fine at parse time.
+        analyze_sql(mcx, "UPDATE v SET x = 1 WHERE x = 2").unwrap();
+        analyze_sql(mcx, "DELETE FROM v WHERE x = 2").unwrap();
+        // On a table the CurrentOfExpr passes through, naming the target RTE.
+        let q = analyze_sql(mcx, "UPDATE t SET x = 1 WHERE CURRENT OF c1").unwrap();
+        let c = q.jointree.unwrap().quals.unwrap().as_current_of_expr().unwrap();
+        assert_eq!(c.cvarno, 1);
+        assert_eq!(c.cursor_name, Some("c1"));
+        let q = analyze_sql(mcx, "DELETE FROM t WHERE CURRENT OF c1").unwrap();
+        let c = q.jointree.unwrap().quals.unwrap().as_current_of_expr().unwrap();
+        assert_eq!(c.cvarno, 1);
     }
 }
 

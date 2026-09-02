@@ -555,7 +555,7 @@ fn conversions_round_trip_under_session_zone() {
 #[test]
 fn timeofday_formats_like_c() {
     zone_session(b"Asia/Kolkata");
-    let mut buf = [0u8; 128];
+    let mut buf = [0u8; crate::TIMEOFDAY_BUF];
     let len = timeofday_into(&mut buf);
     let s = core::str::from_utf8(&buf[..len]).unwrap();
     assert!(s.ends_with(" IST"), "{s}");
@@ -936,4 +936,32 @@ fn float8_timestamptz_vectors() {
     // passes the pre-check but overflows IS_VALID_TIMESTAMP after rounding
     let err = float8_timestamptz(9224318015999999.0).unwrap_err();
     assert_eq!(err.message(), "timestamp out of range: \"9.22432e+15\"");
+}
+
+// upstream ba27389c2cfa (18.4): a POSIX zone abbreviation may run to a couple
+// hundred bytes; the "%Y %Z" tail gets its own 128-byte strftime pass and an
+// overlong tail is an empty string (C 18.6), never a panic.
+#[test]
+fn timeofday_survives_long_zone_abbreviations() {
+    let mut name = vec![b'A'; 104];
+    name.push(b'5');
+    zone_session(&name);
+    let mut buf = [0u8; crate::TIMEOFDAY_BUF];
+    let len = timeofday_into(&mut buf);
+    let s = core::str::from_utf8(&buf[..len]).unwrap();
+    // "Tue Sep 01 12:00:00.123456 2026 " + the 104-byte abbreviation
+    assert_eq!(len, 32 + 104, "{s}");
+    assert!(s.ends_with(&"A".repeat(104)), "{s}");
+
+    let mut name = vec![b'A'; 200];
+    name.push(b'5');
+    zone_session(&name);
+    let len = timeofday_into(&mut buf);
+    let s = core::str::from_utf8(&buf[..len]).unwrap();
+    // "Tue Sep 01 12:00:00.123456 " and nothing after the separator
+    assert_eq!(len, 27, "{s}");
+    assert!(
+        s.ends_with(' ') && s.as_bytes()[len - 2].is_ascii_digit(),
+        "{s}"
+    );
 }

@@ -1621,7 +1621,7 @@ fn run_program<'mcx>(
                 jumpdone,
                 out,
             } => {
-                if step_hash_datum_first_strict(call, *out)? {
+                if step_hash_datum_first_strict(call, *out, OutRef(res))? {
                     // SAFETY: jump targets validated < steps.len() at ready.
                     sp = unsafe { base.add(*jumpdone as usize) };
                     continue;
@@ -1633,7 +1633,7 @@ fn run_program<'mcx>(
                 jumpdone,
                 out,
             } => {
-                if step_hash_datum_next32_strict(call, *iresult, *out)? {
+                if step_hash_datum_next32_strict(call, *iresult, *out, OutRef(res))? {
                     // SAFETY: jump targets validated < steps.len() at ready.
                     sp = unsafe { base.add(*jumpdone as usize) };
                     continue;
@@ -4487,17 +4487,18 @@ fn step_hash_datum_next32(
     Ok(())
 }
 
-/// C EEOP_HASHDATUM_FIRST_STRICT: a NULL key writes (0, isnull) to THIS
-/// step's out and jumps to done (returns true = jump). C-verbatim: an
-/// intermediate-key out is the iresult, so the result cell keeps the
-/// previous evaluation's value (execExprInterp.c behavior as of 18.4).
+/// C EEOP_HASHDATUM_FIRST_STRICT: a NULL key writes (0, isnull) to the
+/// ExprState's result cell (`result` — not this step's out, which for an
+/// intermediate key is the iresult) and jumps to done (returns true =
+/// jump), so the expression returns NULL for every NULL-key row.
+// upstream f70acc8a2b96 (18.6): Fix Hash Join performance issue when hashing NULL values
 #[inline(always)]
-fn step_hash_datum_first_strict(call: &FuncCall, out: OutRef) -> PgResult<bool> {
+fn step_hash_datum_first_strict(call: &FuncCall, out: OutRef, result: OutRef) -> PgResult<bool> {
     // SAFETY: arg 0 of the call's live fcinfo image; hash fns
     // never return NULL (C reads fn_addr's Datum directly).
     let a0 = unsafe { crate::steps::arg_slot_of(call.fcinfo, 0).read() };
     if a0.isnull {
-        write_out(out, Datum::from_u32(0), true);
+        write_out(result, Datum::from_u32(0), true);
         return Ok(true);
     }
     write_out(out, invoke(call)?.0, false);
@@ -4505,17 +4506,19 @@ fn step_hash_datum_first_strict(call: &FuncCall, out: OutRef) -> PgResult<bool> 
 }
 
 /// C EEOP_HASHDATUM_NEXT32_STRICT; see [`step_hash_datum_first_strict`].
+// upstream f70acc8a2b96 (18.6): Fix Hash Join performance issue when hashing NULL values
 #[inline(always)]
 fn step_hash_datum_next32_strict(
     call: &FuncCall,
     iresult: core::ptr::NonNull<NullableDatum>,
     out: OutRef,
+    result: OutRef,
 ) -> PgResult<bool> {
     // SAFETY: iresult is a build-owned once-allocated slot; arg 0
     // as HashDatumFirst.
     let a0 = unsafe { crate::steps::arg_slot_of(call.fcinfo, 0).read() };
     if a0.isnull {
-        write_out(out, Datum::from_u32(0), true);
+        write_out(result, Datum::from_u32(0), true);
         return Ok(true);
     }
     // SAFETY: as above.
@@ -5442,7 +5445,7 @@ pub(crate) fn exec_one_step<'mcx>(
             jumpdone,
             out,
         } => {
-            if step_hash_datum_first_strict(&call, out)? {
+            if step_hash_datum_first_strict(&call, out, OutRef(res))? {
                 return Ok(StepFlow::Jump(jumpdone));
             }
         }
@@ -5452,7 +5455,7 @@ pub(crate) fn exec_one_step<'mcx>(
             jumpdone,
             out,
         } => {
-            if step_hash_datum_next32_strict(&call, iresult, out)? {
+            if step_hash_datum_next32_strict(&call, iresult, out, OutRef(res))? {
                 return Ok(StepFlow::Jump(jumpdone));
             }
         }

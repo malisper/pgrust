@@ -779,7 +779,8 @@ fn check_exclusion_or_unique_constraint<'mcx>(
             heap_relation,
             &att.attname,
             values[indnkeyatts - 1],
-            lsyscache::get_typtype(att.atttypid)?,
+            // upstream 49f3cb453b9b (18.4): Fix WITHOUT OVERLAPS' interaction with domains.
+            lsyscache::get_typtype(lsyscache::getBaseType(att.atttypid)?)?,
         )?;
     }
 

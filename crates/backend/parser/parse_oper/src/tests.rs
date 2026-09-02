@@ -5,7 +5,7 @@ use parser_small1::make_parsestate;
 use syscache_seams::{PgOperatorShape, PgProcShape};
 use types_core::catalog::{INT4OID, TEXTOID, UNKNOWNOID};
 use types_core::InvalidOid;
-use types_error::ERRCODE_UNDEFINED_FUNCTION;
+use types_error::{ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_UNDEFINED_FUNCTION};
 use types_nodes::{Node, NodeList, String as PgStr};
 
 use crate::{compatible_oper_opid, make_op, oper};
@@ -21,6 +21,11 @@ const INT4_HASH_OPCLASS: types_core::Oid = 1979;
 const INT_BTREE_FAM: types_core::Oid = 1976;
 const INT_HASH_FAM: types_core::Oid = 1977;
 const NOSORT_OID: types_core::Oid = 9999;
+const INTERNALOID: types_core::Oid = 2281;
+const INTERNAL_ARG_OP: types_core::Oid = 7101;
+const INTERNAL_ARG_PROC: types_core::Oid = 7102;
+const INTERNAL_RET_OP: types_core::Oid = 7103;
+const INTERNAL_RET_PROC: types_core::Oid = 7104;
 
 static CANDIDATE_PROBES: AtomicUsize = AtomicUsize::new(0);
 
@@ -41,22 +46,21 @@ fn install_fixture() {
             if (name == "+" || name == "@@") && l == INT4OID && r == INT4OID {
                 v.push((INT4_PLUS_OP, PG_CATALOG));
             }
+            if name == "@@i" && l == INTERNALOID && r == INT4OID {
+                v.push((INTERNAL_ARG_OP, PG_CATALOG));
+            }
+            if name == "@@r" && l == INT4OID && r == INT4OID {
+                v.push((INTERNAL_RET_OP, PG_CATALOG));
+            }
             Ok(v)
         });
         syscache_seams::lookup_pg_operator_shape::set(|opno| {
-            Ok((opno == INT4_PLUS_OP).then_some(PgOperatorShape {
-                oprnamespace: 11,
-                oprleft: INT4OID,
-                oprright: INT4OID,
-                oprresult: INT4OID,
-                oprcom: INT4_PLUS_OP,
-                oprnegate: InvalidOid,
-                oprcode: INT4PL_PROC,
-                oprrest: InvalidOid,
-                oprjoin: InvalidOid,
-                oprcanmerge: false,
-                oprcanhash: false,
-            }))
+            Ok(match opno {
+                INT4_PLUS_OP => Some(op_shape(INT4OID, INT4OID, INT4OID, INT4PL_PROC)),
+                INTERNAL_ARG_OP => Some(op_shape(INTERNALOID, INT4OID, INT4OID, INTERNAL_ARG_PROC)),
+                INTERNAL_RET_OP => Some(op_shape(INT4OID, INT4OID, INTERNALOID, INTERNAL_RET_PROC)),
+                _ => None,
+            })
         });
         syscache_seams::pg_operator_name_candidates_exist::set(|name, oprkind| {
             Ok(name == "+" && oprkind == b'b' as i8)
@@ -83,22 +87,11 @@ fn install_fixture() {
             }))
         });
         syscache_seams::lookup_pg_proc_shape::set(|funcid| {
-            Ok((funcid == INT4PL_PROC).then_some(PgProcShape {
-                prolang: 12,
-                prosecdef: false,
-                proconfig_isnull: true,
-                pronamespace: PG_CATALOG,
-                prorettype: INT4OID,
-                provariadic: InvalidOid,
-                prosupport: InvalidOid,
-                pronargs: 2,
-                prokind: b'f' as i8,
-                provolatile: b'i' as i8,
-                proparallel: b's' as i8,
-                proretset: false,
-                proisstrict: true,
-                proleakproof: false,
-            }))
+            Ok(match funcid {
+                INT4PL_PROC | INTERNAL_ARG_PROC => Some(binary_proc_shape(INT4OID)),
+                INTERNAL_RET_PROC => Some(binary_proc_shape(INTERNALOID)),
+                _ => None,
+            })
         });
         syscache_seams::pg_type_base_shape::set(|_| {
             Ok(Some(syscache_seams::PgTypeBaseShape {
@@ -176,6 +169,50 @@ fn install_fixture() {
             }))
         });
     });
+}
+
+fn op_shape(
+    oprleft: types_core::Oid,
+    oprright: types_core::Oid,
+    oprresult: types_core::Oid,
+    oprcode: types_core::Oid,
+) -> PgOperatorShape {
+    PgOperatorShape {
+        oprnamespace: 11,
+        oprleft,
+        oprright,
+        oprresult,
+        oprcom: INT4_PLUS_OP,
+        oprnegate: InvalidOid,
+        oprcode,
+        oprrest: InvalidOid,
+        oprjoin: InvalidOid,
+        oprcanmerge: false,
+        oprcanhash: false,
+    }
+}
+
+fn binary_proc_shape(prorettype: types_core::Oid) -> PgProcShape {
+    PgProcShape {
+        prolang: 12,
+        prosecdef: false,
+        proconfig_isnull: true,
+        pronamespace: PG_CATALOG,
+        prorettype,
+        provariadic: InvalidOid,
+        prosupport: InvalidOid,
+        pronargs: 2,
+        prokind: b'f' as i8,
+        provolatile: b'i' as i8,
+        proparallel: b's' as i8,
+        proretset: false,
+        proisstrict: true,
+        proleakproof: false,
+    }
+}
+
+fn op_name<'mcx>(mcx: Mcx<'mcx>, name: &'static str) -> NodeList<'mcx> {
+    NodeList::make1(mcx, Node::mk(mcx, PgStr { sval: name }).unwrap()).unwrap()
 }
 
 fn plus_name<'mcx>(mcx: Mcx<'mcx>) -> NodeList<'mcx> {
@@ -368,4 +405,53 @@ fn compatible_oper_opid_exact_and_missing() {
         compatible_oper_opid(&pstate, &missing, INT4OID, INT4OID, true).unwrap(),
         InvalidOid
     );
+}
+
+// upstream 54649de65f08 (18.6): operator syntax cannot call functions that take or return internal.
+#[test]
+fn operator_accepting_internal_is_0a000() {
+    install_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    let name = op_name(mcx, "@@i");
+
+    let err = make_op(
+        mcx,
+        &mut pstate,
+        &name,
+        Some(int4_const(mcx, 1)),
+        Some(int4_const(mcx, 1)),
+        INTERNALOID,
+        INT4OID,
+        None,
+        9,
+    )
+    .unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_FEATURE_NOT_SUPPORTED);
+    assert_eq!(err.message(), "functions accepting type \"internal\" cannot be called explicitly");
+}
+
+#[test]
+fn operator_returning_internal_is_0a000() {
+    install_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    let name = op_name(mcx, "@@r");
+
+    let err = make_op(
+        mcx,
+        &mut pstate,
+        &name,
+        Some(int4_const(mcx, 1)),
+        Some(int4_const(mcx, 1)),
+        INT4OID,
+        INT4OID,
+        None,
+        9,
+    )
+    .unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_FEATURE_NOT_SUPPORTED);
+    assert_eq!(err.message(), "functions returning type \"internal\" cannot be called explicitly");
 }

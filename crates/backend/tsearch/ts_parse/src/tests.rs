@@ -9,6 +9,7 @@ const D_STEM: Oid = 1001;
 const D_STOP: Oid = 1002;
 const D_THES: Oid = 1003;
 const D_FILTER: Oid = 1004;
+const D_LONG: Oid = 1005;
 
 struct MockEnv<'mcx> {
     mcx: Mcx<'mcx>,
@@ -92,6 +93,11 @@ impl<'mcx> TsParseEnv<'mcx> for MockEnv<'mcx> {
                     Ok(None)
                 }
             }
+            D_LONG => match t.as_str() {
+                "long" => Ok(Some(self.lex(&"a".repeat(2048)))),
+                "edge" => Ok(Some(self.lex(&"b".repeat(2047)))),
+                _ => Ok(None),
+            },
             D_FILTER => {
                 if t == "colour" {
                     let mut v = self.lex("color");
@@ -221,4 +227,34 @@ fn thesaurus_partial_match_falls_back() {
         vec![D_THES, D_STEM],
     );
     assert_eq!(words(&prs), vec![("new".into(), 1), ("cat".into(), 2)]);
+}
+
+// upstream e251350573e2 (18.6): a dictionary output longer than MAXSTRLEN is
+// NOTICE-skipped after lexizing (IGNORE_LONGLEXEME), like an over-long raw
+// token before it; pre-fix it reached the ParsedText and overflowed the
+// 11-bit WordEntry.len field.
+static LONG_NOTICES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+#[test]
+fn overlong_dictionary_output_is_skipped_with_notice() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        ::elog_seams::ereport::set(|e| {
+            LONG_NOTICES.lock().unwrap().push(e.message().to_string());
+            Ok(())
+        })
+    });
+    let ctx = MemoryContext::new("ts-parse-test");
+    let prs = run(
+        ctx.mcx(),
+        "long cats edge",
+        vec![(1, "long"), (1, "cats"), (1, "edge")],
+        vec![D_LONG, D_STEM],
+    );
+    let got = words(&prs);
+    assert_eq!(got.len(), 2, "{:?}", got.iter().map(|(w, p)| (w.len(), *p)).collect::<Vec<_>>());
+    assert_eq!(got[0], ("cat".to_string(), 2));
+    assert_eq!((got[1].0.len(), got[1].1), (2047, 3));
+    let notices = LONG_NOTICES.lock().unwrap();
+    assert_eq!(notices.as_slice(), ["word is too long to be indexed"]);
 }

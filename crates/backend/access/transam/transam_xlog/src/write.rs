@@ -268,12 +268,6 @@ fn XLogFileInitInternal(
             save_err = Some(std::io::Error::last_os_error());
         }
     }
-    count_wal_io(
-        pgstat::io::IOContext::IOCONTEXT_INIT,
-        pgstat::io::IOOp::Write,
-        io_start,
-        if init_zero { wal_segsz as u64 } else { 1 },
-    );
     if let Some(e) = save_err {
         let _ = fd::pg_unlink(&tmppath);
         // fd owned here.
@@ -283,6 +277,16 @@ fn XLogFileInitInternal(
             .finish(loc("XLogFileInitInternal"))
             .map(|_| -1);
     }
+
+    // upstream 13f940b4b56f (18.6): Fix pgstat_count_io_op_time() calls passing incorrect information
+    // A full segment worth of data is written when using wal_init_zero. One
+    // byte is written when not using it.
+    count_wal_io(
+        pgstat::io::IOContext::IOCONTEXT_INIT,
+        pgstat::io::IOOp::Write,
+        io_start,
+        if init_zero { wal_segsz as u64 } else { 1 },
+    );
 
     let io_start = wal_io_start();
     if fd::pg_fsync(f) != 0 {
@@ -564,12 +568,6 @@ pub(crate) fn XLogWrite(write_rqst: (XLogRecPtr, XLogRecPtr), tli: TimeLineID, f
                     unsafe { std::slice::from_raw_parts(from.cast::<u8>(), nleft) },
                     startoffset as i64,
                 );
-                count_wal_io(
-                    pgstat::io::IOContext::IOCONTEXT_NORMAL,
-                    pgstat::io::IOOp::Write,
-                    io_start,
-                    written.max(0) as u64,
-                );
                 if written <= 0 {
                     let e = std::io::Error::last_os_error();
                     if e.kind() == std::io::ErrorKind::Interrupted {
@@ -582,6 +580,14 @@ pub(crate) fn XLogWrite(write_rqst: (XLogRecPtr, XLogRecPtr), tli: TimeLineID, f
                         ))
                         .finish(loc("XLogWrite"));
                 }
+
+                // upstream 13f940b4b56f (18.6): Fix pgstat_count_io_op_time() calls passing incorrect information
+                count_wal_io(
+                    pgstat::io::IOContext::IOCONTEXT_NORMAL,
+                    pgstat::io::IOOp::Write,
+                    io_start,
+                    written as u64,
+                );
                 nleft -= written as usize;
                 // SAFETY: written <= nleft.
                 from = unsafe { from.add(written as usize) };

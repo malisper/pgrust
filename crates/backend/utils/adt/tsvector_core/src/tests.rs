@@ -209,8 +209,7 @@ fn tsvector_out_over_ceiling_lenbuf_raises_palloc_error() {
     // storage: lexeme "ab" (len 2, shortalign 2) + npos=256 + 256 positions
     let lex_len = 2usize;
     let npos = 256usize;
-    let enc_max = ::mbutils::pg_database_encoding_max_length() as usize;
-    let per_entry = lex_len * 2 * enc_max + 1 + 7 * npos;
+    let per_entry = lex_len * 2 + 1 + 7 * npos;
     // number of entries needed for lenbuf > MAX_ALLOC_SIZE
     let n = (::mcx::MAX_ALLOC_SIZE - 2) / (per_entry + 3) + 2;
     let mut payload: Vec<u8> = Vec::with_capacity(4 + n * 4 + 2 + 2 + npos * 2);
@@ -231,4 +230,64 @@ fn tsvector_out_over_ceiling_lenbuf_raises_palloc_error() {
     let err = tsvector_out_core(ctx.mcx(), TsVec { payload: &payload })
         .expect_err("worst-case text form above MaxAllocSize must raise palloc's error");
     assert_eq!(err.message(), format!("invalid memory alloc request size {lenbuf}"));
+}
+
+// upstream c5194139cb4c (18.6): an invalid weight is 22023 with the symbol
+// quoted (printable ASCII) or as \ooo (anything else); pre-fix XX000 + decimal.
+#[test]
+fn parse_weight_reports_invalid_symbols_like_c() {
+    assert_eq!(parse_weight(b'a').unwrap(), 3);
+    assert_eq!(parse_weight(b'B').unwrap(), 2);
+    assert_eq!(parse_weight(b'c').unwrap(), 1);
+    assert_eq!(parse_weight(b'D').unwrap(), 0);
+    for (cw, want) in [
+        (b'X', "unrecognized weight: \"X\""),
+        (b' ', "unrecognized weight: \" \""),
+        (b'~', "unrecognized weight: \"~\""),
+        (0xE5u8, "unrecognized weight: \"\\345\""),
+        (0x01u8, "unrecognized weight: \"\\001\""),
+        (0x7Fu8, "unrecognized weight: \"\\177\""),
+        (0u8, "unrecognized weight: \"\\000\""),
+    ] {
+        let err = parse_weight(cw).expect_err("invalid weight");
+        assert_eq!(err.sqlstate(), ::types_error::ERRCODE_INVALID_PARAMETER_VALUE, "{cw:#x}");
+        assert_eq!(err.message(), want, "{cw:#x}");
+    }
+}
+
+// upstream e251350573e2 (18.6): tsvectorrecv rejects an empty lexeme, an
+// entry count above MAXSTRPOS, and a final datalen past MAXSTRPOS.
+#[test]
+fn tsvector_recv_rejects_invalid_shapes() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let recv = |wire: &[u8]| {
+        let mut vec = ::mcx::vec_with_capacity_in::<u8>(mcx, wire.len()).expect("cap");
+        ::mcx::vec_append_bytes(&mut vec, wire).expect("append");
+        let mut buf = ::stringinfo::StringInfo::from_vec(vec).expect("si");
+        crate::io::tsvector_recv_core(mcx, &mut buf).map_err(|e| e.message().to_string())
+    };
+    assert_eq!(recv(&[0, 0, 0, 1, 0, 0, 0]).unwrap_err(), "invalid tsvector: empty lexeme");
+    // nentries = 0x00100000 = MAXSTRPOS + 1
+    assert_eq!(recv(&[0, 0x10, 0, 0]).unwrap_err(), "invalid size of tsvector");
+    // 512 x 2047-byte lexemes = 1048064 bytes; the last lexeme decides
+    let mut wire: Vec<u8> = 513i32.to_be_bytes().to_vec();
+    for i in 0..512u32 {
+        let tag = i.to_string();
+        wire.extend(std::iter::repeat(b'x').take(2047 - tag.len()));
+        wire.extend_from_slice(tag.as_bytes());
+        wire.extend_from_slice(&[0, 0, 0]);
+    }
+    let base = wire.len();
+    wire.extend(std::iter::repeat(b'y').take(512));
+    wire.extend_from_slice(&[0, 0, 0]);
+    assert_eq!(
+        recv(&wire).unwrap_err(),
+        "invalid tsvector: maximum total lexeme length exceeded"
+    );
+    wire.truncate(base);
+    wire.extend(std::iter::repeat(b'y').take(511));
+    wire.extend_from_slice(&[0, 0, 0]);
+    let img = recv(&wire).expect("datalen == MAXSTRPOS fits");
+    assert_eq!(TsVec { payload: &img[4..] }.size(), 513);
 }

@@ -24,7 +24,7 @@ use types_rel::{AccessExclusiveLock, AccessShareLock, NoLock, Relation, RowExclu
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_tuple::{HeapTupleData, TupleDescData};
 
-use catalog_dependency::recordDependencyOnExpr;
+use catalog_dependency::{recordDependencyOnExpr, CheckUsageOnTypesInExpr};
 use pg_shdepend::deleteSharedDependencyRecordsFor;
 use parse_clause::transformWhereClause;
 use parse_collate::assign_expr_collations;
@@ -397,10 +397,13 @@ pub fn CreatePolicy<'mcx>(mcx: Mcx<'mcx>, stmt: &CreatePolicyStmt<'mcx>) -> PgRe
         &ObjectAddress::set(RELATION_RELATION_ID, table_id),
         DependencyType::Auto,
     )?;
+    // upstream 2780538433fc (18.5): Check for USAGE privilege on types used by stored expressions.
     if let Some(q) = &qual {
+        CheckUsageOnTypesInExpr(q.expr, &q.rtable, miscinit::GetUserId())?;
         recordDependencyOnExpr(mcx, &myself, q.expr, &q.rtable, DependencyType::Normal)?;
     }
     if let Some(q) = &with_check {
+        CheckUsageOnTypesInExpr(q.expr, &q.rtable, miscinit::GetUserId())?;
         recordDependencyOnExpr(mcx, &myself, q.expr, &q.rtable, DependencyType::Normal)?;
     }
     record_role_dependencies(mcx, &myself, &role_oids)?;
@@ -592,8 +595,17 @@ pub fn AlterPolicy<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterPolicyStmt<'mcx>) -> PgResu
         &ObjectAddress::set(RELATION_RELATION_ID, table_id),
         DependencyType::Auto,
     )?;
+    // upstream 2780538433fc (18.5): Check for USAGE privilege on types used by stored expressions.
+    // Only a newly supplied USING / WITH CHECK is checked (C: if (stmt->qual),
+    // if (stmt->with_check)); the re-recorded stored one is not.
+    if let Some(q) = &new_qual {
+        CheckUsageOnTypesInExpr(q.expr, &q.rtable, miscinit::GetUserId())?;
+    }
     if let Some(q) = new_qual.as_ref().or(stored_qual.as_ref()) {
         recordDependencyOnExpr(mcx, &myself, q.expr, &q.rtable, DependencyType::Normal)?;
+    }
+    if let Some(q) = &new_with_check {
+        CheckUsageOnTypesInExpr(q.expr, &q.rtable, miscinit::GetUserId())?;
     }
     if let Some(q) = new_with_check.as_ref().or(stored_with_check.as_ref()) {
         recordDependencyOnExpr(mcx, &myself, q.expr, &q.rtable, DependencyType::Normal)?;

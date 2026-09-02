@@ -1,0 +1,538 @@
+/*
+ * contrib/spi/refint.c
+ *
+ *
+ * refint.c --	set of functions to define referential integrity
+ *		constraints using general triggers.
+ */
+#include "postgres.h"
+
+#include <ctype.h>
+
+#include "commands/trigger.h"
+#include "executor/spi.h"
+#include "utils/builtins.h"
+#include "utils/rel.h"
+
+PG_MODULE_MAGIC_EXT(
+					.name = "refint",
+					.version = PG_VERSION
+);
+
+/*
+ * check_primary_key () -- check that key in tuple being inserted/updated
+ *			 references existing tuple in "primary" table.
+ * Though it's called without args You have to specify referenced
+ * table/keys while creating trigger:  key field names in triggered table,
+ * referenced table name, referenced key field names:
+ * EXECUTE PROCEDURE
+ * check_primary_key ('Fkey1', 'Fkey2', 'Ptable', 'Pkey1', 'Pkey2').
+ */
+
+PG_FUNCTION_INFO_V1(check_primary_key);
+
+Datum
+check_primary_key(PG_FUNCTION_ARGS)
+{
+	TriggerData *trigdata = (TriggerData *) fcinfo->context;
+	Trigger    *trigger;		/* to get trigger name */
+	int			nargs;			/* # of args specified in CREATE TRIGGER */
+	char	  **args;			/* arguments: column names and table name */
+	int			nkeys;			/* # of key columns (= nargs / 2) */
+	Datum	   *kvals;			/* key values */
+	char	   *relname;		/* referenced relation name */
+	Relation	rel;			/* triggered relation */
+	HeapTuple	tuple = NULL;	/* tuple to return */
+	TupleDesc	tupdesc;		/* tuple description */
+	SPIPlanPtr	pplan;			/* prepared plan */
+	Oid		   *argtypes = NULL;	/* key types to prepare execution plan */
+	bool		isnull;			/* to know is some column NULL or not */
+	int			ret;
+	int			i;
+	StringInfoData sql;
+
+#ifdef	DEBUG_QUERY
+	elog(DEBUG4, "check_primary_key: Enter Function");
+#endif
+
+	/*
+	 * Some checks first...
+	 */
+
+	/* Called by trigger manager ? */
+	if (!CALLED_AS_TRIGGER(fcinfo))
+		/* internal error */
+		elog(ERROR, "check_primary_key: not fired by trigger manager");
+
+	/* Should be called for ROW trigger */
+	if (!TRIGGER_FIRED_FOR_ROW(trigdata->tg_event))
+		/* internal error */
+		elog(ERROR, "check_primary_key: must be fired for row");
+
+	if (!TRIGGER_FIRED_AFTER(trigdata->tg_event))
+		/* internal error */
+		elog(ERROR, "check_primary_key: must be fired by AFTER trigger");
+
+	/* If INSERTion then must check Tuple to being inserted */
+	if (TRIGGER_FIRED_BY_INSERT(trigdata->tg_event))
+		tuple = trigdata->tg_trigtuple;
+
+	/* Not should be called for DELETE */
+	else if (TRIGGER_FIRED_BY_DELETE(trigdata->tg_event))
+		/* internal error */
+		elog(ERROR, "check_primary_key: cannot process DELETE events");
+
+	/* If UPDATE, then must check new Tuple, not old one */
+	else
+		tuple = trigdata->tg_newtuple;
+
+	trigger = trigdata->tg_trigger;
+	nargs = trigger->tgnargs;
+	args = trigger->tgargs;
+
+	if (nargs % 2 != 1)			/* odd number of arguments! */
+		/* internal error */
+		elog(ERROR, "check_primary_key: odd number of arguments should be specified");
+
+	nkeys = nargs / 2;
+	relname = args[nkeys];
+	rel = trigdata->tg_relation;
+	tupdesc = rel->rd_att;
+
+	/* Connect to SPI manager */
+	SPI_connect();
+
+	/*
+	 * We use SPI plan preparation feature, so allocate space to place key
+	 * values.
+	 */
+	kvals = (Datum *) palloc(nkeys * sizeof(Datum));
+
+	/* allocate argtypes for preparation */
+	argtypes = (Oid *) palloc(nkeys * sizeof(Oid));
+
+	/* For each column in key ... */
+	for (i = 0; i < nkeys; i++)
+	{
+		/* get index of column in tuple */
+		int			fnumber = SPI_fnumber(tupdesc, args[i]);
+
+		/* Bad guys may give us un-existing column in CREATE TRIGGER */
+		if (fnumber <= 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_COLUMN),
+					 errmsg("there is no attribute \"%s\" in relation \"%s\"",
+							args[i], SPI_getrelname(rel))));
+
+		/* Well, get binary (in internal format) value of column */
+		kvals[i] = SPI_getbinval(tuple, tupdesc, fnumber, &isnull);
+
+		/*
+		 * If it's NULL then nothing to do! DON'T FORGET call SPI_finish ()!
+		 * DON'T FORGET return tuple! Executor inserts tuple you're returning!
+		 * If you return NULL then nothing will be inserted!
+		 */
+		if (isnull)
+		{
+			SPI_finish();
+			return PointerGetDatum(tuple);
+		}
+
+		/* Get typeId of column */
+		argtypes[i] = SPI_gettypeid(tupdesc, fnumber);
+	}
+
+	initStringInfo(&sql);
+
+	/*
+	 * Construct query: SELECT 1 FROM _referenced_relation_ WHERE Pkey1 = $1
+	 * [AND Pkey2 = $2 [...]]
+	 */
+	appendStringInfo(&sql, "select 1 from %s where ", relname);
+	for (i = 1; i <= nkeys; i++)
+	{
+		appendStringInfo(&sql, "%s = $%d ", args[i + nkeys], i);
+		if (i < nkeys)
+			appendStringInfoString(&sql, "and ");
+	}
+
+	/* Prepare plan for query */
+	pplan = SPI_prepare(sql.data, nkeys, argtypes);
+	if (pplan == NULL)
+		/* internal error */
+		elog(ERROR, "check_primary_key: SPI_prepare returned %s", SPI_result_code_string(SPI_result));
+
+	pfree(sql.data);
+
+	/*
+	 * Ok, execute prepared plan.
+	 */
+	ret = SPI_execp(pplan, kvals, NULL, 1);
+	/* we have no NULLs - so we pass   ^^^^   here */
+
+	if (ret < 0)
+		/* internal error */
+		elog(ERROR, "check_primary_key: SPI_execp returned %d", ret);
+
+	/*
+	 * If there are no tuples returned by SELECT then ...
+	 */
+	if (SPI_processed == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_TRIGGERED_ACTION_EXCEPTION),
+				 errmsg("tuple references non-existent key"),
+				 errdetail("Trigger \"%s\" found tuple referencing non-existent key in \"%s\".", trigger->tgname, relname)));
+
+	SPI_finish();
+
+	return PointerGetDatum(tuple);
+}
+
+/*
+ * check_foreign_key () -- check that key in tuple being deleted/updated
+ *			 is not referenced by tuples in "foreign" table(s).
+ * Though it's called without args You have to specify (while creating trigger):
+ * number of references, action to do if key referenced
+ * ('restrict' | 'setnull' | 'cascade'), key field names in triggered
+ * ("primary") table and referencing table(s)/keys:
+ * EXECUTE PROCEDURE
+ * check_foreign_key (2, 'restrict', 'Pkey1', 'Pkey2',
+ * 'Ftable1', 'Fkey11', 'Fkey12', 'Ftable2', 'Fkey21', 'Fkey22').
+ */
+
+PG_FUNCTION_INFO_V1(check_foreign_key);
+
+Datum
+check_foreign_key(PG_FUNCTION_ARGS)
+{
+	TriggerData *trigdata = (TriggerData *) fcinfo->context;
+	Trigger    *trigger;		/* to get trigger name */
+	int			nargs;			/* # of args specified in CREATE TRIGGER */
+	char	  **args;			/* arguments: as described above */
+	char	  **args_temp;
+	int			nrefs;			/* number of references (== # of plans) */
+	char		action;			/* 'R'estrict | 'S'etnull | 'C'ascade */
+	int			nkeys;			/* # of key columns */
+	Datum	   *kvals;			/* key values */
+	char	   *relname;		/* referencing relation name */
+	Relation	rel;			/* triggered relation */
+	HeapTuple	trigtuple = NULL;	/* tuple to being changed */
+	HeapTuple	newtuple = NULL;	/* tuple to return */
+	TupleDesc	tupdesc;		/* tuple description */
+	SPIPlanPtr *splan;			/* prepared plan(s) */
+	Oid		   *argtypes = NULL;	/* key types to prepare execution plan */
+	bool		isnull;			/* to know is some column NULL or not */
+	bool		isequal = true; /* are keys in both tuples equal (in UPDATE) */
+	int			is_update = 0;
+	int			ret;
+	int			i,
+				r;
+	char	  **args2;
+
+#ifdef DEBUG_QUERY
+	elog(DEBUG4, "check_foreign_key: Enter Function");
+#endif
+
+	/*
+	 * Some checks first...
+	 */
+
+	/* Called by trigger manager ? */
+	if (!CALLED_AS_TRIGGER(fcinfo))
+		/* internal error */
+		elog(ERROR, "check_foreign_key: not fired by trigger manager");
+
+	/* Should be called for ROW trigger */
+	if (!TRIGGER_FIRED_FOR_ROW(trigdata->tg_event))
+		/* internal error */
+		elog(ERROR, "check_foreign_key: must be fired for row");
+
+	/* Not should be called for INSERT */
+	if (TRIGGER_FIRED_BY_INSERT(trigdata->tg_event))
+		/* internal error */
+		elog(ERROR, "check_foreign_key: cannot process INSERT events");
+
+	if (!TRIGGER_FIRED_AFTER(trigdata->tg_event))
+		/* internal error */
+		elog(ERROR, "check_foreign_key: must be fired by AFTER trigger");
+
+	/* Have to check tg_trigtuple - tuple being deleted */
+	trigtuple = trigdata->tg_trigtuple;
+
+	/*
+	 * But if this is UPDATE then we have to return tg_newtuple. Also, if key
+	 * in tg_newtuple is the same as in tg_trigtuple then nothing to do.
+	 */
+	is_update = 0;
+	if (TRIGGER_FIRED_BY_UPDATE(trigdata->tg_event))
+	{
+		newtuple = trigdata->tg_newtuple;
+		is_update = 1;
+	}
+	trigger = trigdata->tg_trigger;
+	nargs = trigger->tgnargs;
+	args = trigger->tgargs;
+
+	if (nargs < 5)				/* nrefs, action, key, Relation, key - at
+								 * least */
+		/* internal error */
+		elog(ERROR, "check_foreign_key: too short %d (< 5) list of arguments", nargs);
+
+	nrefs = pg_strtoint32(args[0]);
+	if (nrefs < 1)
+		/* internal error */
+		elog(ERROR, "check_foreign_key: %d (< 1) number of references specified", nrefs);
+	action = tolower((unsigned char) *(args[1]));
+	if (action != 'r' && action != 'c' && action != 's')
+		/* internal error */
+		elog(ERROR, "check_foreign_key: invalid action %s", args[1]);
+	nargs -= 2;
+	args += 2;
+	nkeys = (nargs - nrefs) / (nrefs + 1);
+	if (nkeys <= 0 || nargs != (nrefs + nkeys * (nrefs + 1)))
+		/* internal error */
+		elog(ERROR, "check_foreign_key: invalid number of arguments %d for %d references",
+			 nargs + 2, nrefs);
+
+	rel = trigdata->tg_relation;
+	tupdesc = rel->rd_att;
+
+	/* Connect to SPI manager */
+	SPI_connect();
+
+	/*
+	 * We use SPI plan preparation feature, so allocate space to place key
+	 * values.
+	 */
+	kvals = (Datum *) palloc(nkeys * sizeof(Datum));
+
+	/* allocate argtypes for preparation */
+	argtypes = (Oid *) palloc(nkeys * sizeof(Oid));
+
+	/* For each column in key ... */
+	for (i = 0; i < nkeys; i++)
+	{
+		/* get index of column in tuple */
+		int			fnumber = SPI_fnumber(tupdesc, args[i]);
+
+		/* Bad guys may give us un-existing column in CREATE TRIGGER */
+		if (fnumber <= 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_COLUMN),
+					 errmsg("there is no attribute \"%s\" in relation \"%s\"",
+							args[i], SPI_getrelname(rel))));
+
+		/* Well, get binary (in internal format) value of column */
+		kvals[i] = SPI_getbinval(trigtuple, tupdesc, fnumber, &isnull);
+
+		/*
+		 * If it's NULL then nothing to do! DON'T FORGET call SPI_finish ()!
+		 * DON'T FORGET return tuple! Executor inserts tuple you're returning!
+		 * If you return NULL then nothing will be inserted!
+		 */
+		if (isnull)
+		{
+			SPI_finish();
+			return PointerGetDatum((newtuple == NULL) ? trigtuple : newtuple);
+		}
+
+		/*
+		 * If UPDATE then get column value from new tuple being inserted and
+		 * compare is this the same as old one. For the moment we use string
+		 * presentation of values...
+		 */
+		if (newtuple != NULL)
+		{
+			char	   *oldval = SPI_getvalue(trigtuple, tupdesc, fnumber);
+			char	   *newval;
+
+			/* this shouldn't happen! SPI_ERROR_NOOUTFUNC ? */
+			if (oldval == NULL)
+				/* internal error */
+				elog(ERROR, "check_foreign_key: SPI_getvalue returned %s", SPI_result_code_string(SPI_result));
+			newval = SPI_getvalue(newtuple, tupdesc, fnumber);
+			if (newval == NULL || strcmp(oldval, newval) != 0)
+				isequal = false;
+		}
+
+		/* Get typeId of column */
+		argtypes[i] = SPI_gettypeid(tupdesc, fnumber);
+	}
+	args_temp = args;
+	nargs -= nkeys;
+	args += nkeys;
+	args2 = args;
+
+	splan = (SPIPlanPtr *) palloc(nrefs * sizeof(SPIPlanPtr));
+
+	for (r = 0; r < nrefs; r++)
+	{
+		StringInfoData sql;
+		SPIPlanPtr	pplan;
+
+		initStringInfo(&sql);
+
+		relname = args2[0];
+
+		/*---------
+		 * For 'R'estrict action we construct SELECT query:
+		 *
+		 *	SELECT 1
+		 *	FROM _referencing_relation_
+		 *	WHERE Fkey1 = $1 [AND Fkey2 = $2 [...]]
+		 *
+		 *	to check is tuple referenced or not.
+		 *---------
+		 */
+		if (action == 'r')
+			appendStringInfo(&sql, "select 1 from %s where ", relname);
+
+		/*---------
+		 * For 'C'ascade action we construct DELETE query
+		 *
+		 *	DELETE
+		 *	FROM _referencing_relation_
+		 *	WHERE Fkey1 = $1 [AND Fkey2 = $2 [...]]
+		 *
+		 * to delete all referencing tuples.
+		 *---------
+		 */
+
+		/*
+		 * Max : Cascade with UPDATE query i create update query that updates
+		 * new key values in referenced tables
+		 */
+
+
+		else if (action == 'c')
+		{
+			if (is_update == 1)
+			{
+				int			fn;
+				char	   *nv;
+				int			k;
+
+				appendStringInfo(&sql, "update %s set ", relname);
+				for (k = 1; k <= nkeys; k++)
+				{
+					fn = SPI_fnumber(tupdesc, args_temp[k - 1]);
+					Assert(fn > 0); /* already checked above */
+					nv = SPI_getvalue(newtuple, tupdesc, fn);
+
+					appendStringInfo(&sql, " %s = %s ",
+									 args2[k],
+									 nv ? quote_literal_cstr(nv) : "NULL");
+					if (k < nkeys)
+						appendStringInfoString(&sql, ", ");
+				}
+				appendStringInfoString(&sql, " where ");
+			}
+			else
+				/* DELETE */
+				appendStringInfo(&sql, "delete from %s where ", relname);
+		}
+
+		/*
+		 * For 'S'etnull action we construct UPDATE query - UPDATE
+		 * _referencing_relation_ SET Fkey1 null [, Fkey2 null [...]] WHERE
+		 * Fkey1 = $1 [AND Fkey2 = $2 [...]] - to set key columns in all
+		 * referencing tuples to NULL.
+		 */
+		else if (action == 's')
+		{
+			appendStringInfo(&sql, "update %s set ", relname);
+			for (i = 1; i <= nkeys; i++)
+			{
+				appendStringInfo(&sql, "%s = null", args2[i]);
+				if (i < nkeys)
+					appendStringInfoString(&sql, ", ");
+			}
+			appendStringInfoString(&sql, " where ");
+		}
+
+		/* Construct WHERE qual */
+		for (i = 1; i <= nkeys; i++)
+		{
+			appendStringInfo(&sql, "%s = $%d ", args2[i], i);
+			if (i < nkeys)
+				appendStringInfoString(&sql, "and ");
+		}
+
+		/* Prepare plan for query */
+		pplan = SPI_prepare(sql.data, nkeys, argtypes);
+		if (pplan == NULL)
+			/* internal error */
+			elog(ERROR, "check_foreign_key: SPI_prepare returned %s", SPI_result_code_string(SPI_result));
+
+		splan[r] = pplan;
+
+		args2 += nkeys + 1;		/* to the next relation */
+
+#ifdef DEBUG_QUERY
+		elog(DEBUG4, "check_foreign_key Debug Query is :  %s ", sql.data);
+#endif
+
+		pfree(sql.data);
+	}
+
+	/*
+	 * If UPDATE and key is not changed ...
+	 */
+	if (newtuple != NULL && isequal)
+	{
+		SPI_finish();
+		return PointerGetDatum(newtuple);
+	}
+
+	/*
+	 * Ok, execute prepared plan(s).
+	 */
+	for (r = 0; r < nrefs; r++)
+	{
+		/*
+		 * For 'R'estrict we may to execute plan for one tuple only, for other
+		 * actions - for all tuples.
+		 */
+		int			tcount = (action == 'r') ? 1 : 0;
+
+		relname = args[0];
+
+		ret = SPI_execp(splan[r], kvals, NULL, tcount);
+		/* we have no NULLs - so we pass   ^^^^  here */
+
+		if (ret < 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_TRIGGERED_ACTION_EXCEPTION),
+					 errmsg("SPI_execp returned %d", ret)));
+
+		/* If action is 'R'estrict ... */
+		if (action == 'r')
+		{
+			/* If there is tuple returned by SELECT then ... */
+			if (SPI_processed > 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_TRIGGERED_ACTION_EXCEPTION),
+						 errmsg("\"%s\": tuple is referenced in \"%s\"",
+								trigger->tgname, relname)));
+		}
+		else
+		{
+#ifdef REFINT_VERBOSE
+			const char *operation;
+
+			if (action == 'c')
+				operation = is_update ? "updated" : "deleted";
+			else
+				operation = "set to null";
+
+			elog(NOTICE, "%s: " UINT64_FORMAT " tuple(s) of %s are %s",
+				 trigger->tgname, SPI_processed, relname, operation);
+#endif
+		}
+		args += nkeys + 1;		/* to the next relation */
+	}
+
+	SPI_finish();
+
+	return PointerGetDatum((newtuple == NULL) ? trigtuple : newtuple);
+}

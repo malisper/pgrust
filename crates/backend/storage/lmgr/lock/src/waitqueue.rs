@@ -597,8 +597,8 @@ pub unsafe fn ProcWakeup(procno: ProcNumber, waitStatus: ProcWaitStatus) {
         proc.waitProcLock.set(std::ptr::null_mut());
     }
     proc.waitStatus.store(waitStatus, Release);
-    // C clears MyProc's waitStart here (not proc's); transcribed faithfully.
-    lmgr_proc::GetPGProcByNumber(my_procno()).waitStart.write(0);
+    // upstream 0d3be0501784 (18.4): Fix ProcWakeup() resetting wrong waitStart field.
+    proc.waitStart.write(0);
 
     latch_seams::set_latch::call(&proc.procLatch);
 }

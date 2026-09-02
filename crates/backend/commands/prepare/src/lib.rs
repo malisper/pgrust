@@ -390,11 +390,17 @@ pub fn FetchPreparedStatement(
 }
 
 // Fixed-result plans never change their tupdesc, so no revalidation (C).
-pub fn FetchPreparedStatementResultDesc(
+// upstream 37b8f3b0e05e (18.6): Cross-check the type of a portal running EXECUTE or FETCH.
+// A copy, as in C: the plansource's own descriptor dies with it at DEALLOCATE.
+pub fn FetchPreparedStatementResultDesc<'mcx>(
+    mcx: Mcx<'mcx>,
     stmt: &PreparedStatement,
-) -> Option<Rc<types_tuple::TupleDescData<'static>>> {
+) -> PgResult<Option<Rc<types_tuple::TupleDescData<'mcx>>>> {
     debug_assert!(plancache::CachedPlanFixedResult(stmt.plansource));
-    plancache::CachedPlanResultDesc(stmt.plansource)
+    match plancache::CachedPlanResultDesc(stmt.plansource) {
+        Some(desc) => Ok(Some(Rc::new(tupdesc::CreateTupleDescCopy(mcx, &desc)?))),
+        None => Ok(None),
+    }
 }
 
 pub fn FetchPreparedStatementTargetList<'mcx>(

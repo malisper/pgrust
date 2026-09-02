@@ -241,16 +241,22 @@ pub(crate) fn exec_query(key: Oid, sql: &str) -> PgResult<QueryResult> {
     })?
 }
 
-// create_cursor's PQsendQueryParams + pgfdw_get_result pair (text params).
+// create_cursor/execute_dml_stmt send+result pair; a refused send is reported against `sql`.
+// upstream c318777da8b8 (18.4): postgres_fdw: Fix handling of abort-cleanup-failed connections.
 pub(crate) fn exec_query_params(
     key: Oid,
     sql: &str,
     params: &[Option<&str>],
+    query: &str,
 ) -> PgResult<QueryResult> {
     with_entry(key, |e| -> PgResult<QueryResult> {
         park_pending_entry(e)?;
         let conn = e.conn.as_mut().expect("live connection");
-        conn.exec_params(sql, &[], params)
+        conn.drain();
+        if !conn.send_query_params(sql, &[], params) {
+            return Err(remote_error(&QueryResult::conn_error(conn.error_message()), Some(sql)));
+        }
+        drain_last_result(conn, Some(query))
     })?
 }
 
@@ -380,16 +386,18 @@ pub(crate) fn get_connection<'mcx>(
     let key = user.umid;
     let mut entry = take_entry(key);
 
-    // Reject connections whose xact state changes were interrupted mid-flight
-    // (pgfdw_reject_incomplete_xact_state_change).
+    // pgfdw_reject_incomplete_xact_state_change; the entry keeps its connection for open cursors.
+    // upstream c318777da8b8 (18.4): postgres_fdw: Fix handling of abort-cleanup-failed connections.
     if entry.conn.is_some() && entry.changing_xact_state {
         let serverid = entry.serverid;
-        disconnect_entry(&mut entry);
         put_entry(key, entry);
         let server = foreigncmds::foreign::GetForeignServer(mcx, serverid)?;
         return Err(Box::new(
-            PgError::error(format!("connection to server \"{}\" was lost", server.servername))
-                .with_sqlstate(ERRCODE_CONNECTION_EXCEPTION),
+            PgError::error(format!(
+                "connection to server \"{}\" cannot be used due to abort cleanup failure",
+                server.servername
+            ))
+            .with_sqlstate(ERRCODE_CONNECTION_EXCEPTION),
         ));
     }
 
@@ -761,10 +769,9 @@ fn pgfdw_xact_callback(event: XactEvent, _arg: Datum) -> PgResult<()> {
                 match event {
                     XACT_EVENT_PARALLEL_PRE_COMMIT | XACT_EVENT_PRE_COMMIT => {
                         // Interrupted-state connections cannot commit.
+                        // upstream c318777da8b8 (18.4): postgres_fdw: Fix handling of abort-cleanup-failed connections.
                         if entry.changing_xact_state {
-                            let serverid = entry.serverid;
-                            disconnect_entry(entry);
-                            return Err(connection_lost_error(serverid));
+                            return Err(abort_cleanup_failure_error(entry.serverid));
                         }
                         entry.changing_xact_state = true;
                         do_sql_command(
@@ -804,23 +811,30 @@ fn pgfdw_xact_callback(event: XactEvent, _arg: Datum) -> PgResult<()> {
         Ok(())
     })();
     CONNECTIONS.with(|c| *c.borrow_mut() = map);
-    // Regardless of the event outcome we are now out of the transaction
-    // (matches C: these reset at the bottom of every non-quick-exit call).
-    XACT_GOT_CONNECTION.with(|c| c.set(false));
-    CURSOR_NUMBER.with(|c| c.set(0));
+    // Out of the transaction only once the scan completed: C's resets sit past
+    // every ereport(ERROR) in the scan, so a pre-commit rejection (or a failed
+    // COMMIT / PRE_PREPARE) leaves the ABORT callback that follows to discard.
+    // upstream c318777da8b8 (18.4): postgres_fdw: Fix handling of abort-cleanup-failed connections.
+    if r.is_ok() {
+        XACT_GOT_CONNECTION.with(|c| c.set(false));
+        CURSOR_NUMBER.with(|c| c.set(0));
+    }
     r
 }
 
+// upstream c318777da8b8 (18.4): postgres_fdw: Fix handling of abort-cleanup-failed connections.
 #[track_caller]
 #[cold]
-fn connection_lost_error(serverid: Oid) -> Box<PgError> {
+fn abort_cleanup_failure_error(serverid: Oid) -> Box<PgError> {
     let scratch = mcx::MemoryContext::new("postgres_fdw connection error");
     let name = foreigncmds::foreign::GetForeignServer(scratch.mcx(), serverid)
         .map(|s| s.servername.to_string())
         .unwrap_or_else(|_| format!("{serverid}"));
     Box::new(
-        PgError::error(format!("connection to server \"{name}\" was lost"))
-            .with_sqlstate(ERRCODE_CONNECTION_EXCEPTION),
+        PgError::error(format!(
+            "connection to server \"{name}\" cannot be used due to abort cleanup failure"
+        ))
+        .with_sqlstate(ERRCODE_CONNECTION_EXCEPTION),
     )
 }
 
@@ -851,10 +865,9 @@ fn pgfdw_subxact_callback(
                 );
             }
             if event == SUBXACT_EVENT_PRE_COMMIT_SUB {
+                // upstream c318777da8b8 (18.4): postgres_fdw: Fix handling of abort-cleanup-failed connections.
                 if entry.changing_xact_state {
-                    let serverid = entry.serverid;
-                    disconnect_entry(entry);
-                    return Err(connection_lost_error(serverid));
+                    return Err(abort_cleanup_failure_error(entry.serverid));
                 }
                 let sql = format!("RELEASE SAVEPOINT s{curlevel}");
                 entry.changing_xact_state = true;
@@ -931,8 +944,8 @@ fn pgfdw_reset_xact_state(entry: &mut ConnCacheEntry, toplevel: bool) {
 // ---------- abort cleanup (cancel + bounded-deadline pumps) ----------
 
 // pgfdw_abort_cleanup: abort the remote (sub)transaction. On any failure the
-// entry keeps changing_xact_state=true, which makes GetConnection /
-// pgfdw_reset_xact_state discard the connection — C's exact rule.
+// entry keeps changing_xact_state=true, which makes GetConnection reject it
+// and toplevel pgfdw_reset_xact_state discard it — C's exact rule.
 fn pgfdw_abort_cleanup(entry: &mut ConnCacheEntry, toplevel: bool) -> PgResult<()> {
     if elog::in_error_recursion_trouble() {
         entry.changing_xact_state = true;

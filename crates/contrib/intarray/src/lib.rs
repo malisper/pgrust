@@ -143,7 +143,7 @@ fn fc_bqarr_in(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum
     let s = unsafe { fcinfo.arg_cstring(0) };
     match boolquery::parse_query(s.to_bytes()) {
         Ok(img) => image_result(fcinfo, &img),
-        // Only C's four ereturn sites are soft; stack-depth exhaustion stays
+        // Only C's five ereturn sites are soft; stack-depth exhaustion stays
         // a hard error even under pg_input_error_info.
         Err(pe) if pe.soft => {
             // SAFETY: context, if set, rides per the ErrorSaveNode contract

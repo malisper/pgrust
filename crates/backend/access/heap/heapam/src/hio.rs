@@ -160,10 +160,11 @@ fn RelationAddBlocks(
         }
     }
     if use_fsm && not_in_fsm_pages < extended_by {
+        // upstream eabc9a9dd908 (18.5): Include last block in FSM vacuum of bulk extended relation
         freespace_seams::free_space_map_vacuum_range::call(
             relation,
             first_block + not_in_fsm_pages,
-            last_block,
+            last_block + 1,
         )?;
     }
 

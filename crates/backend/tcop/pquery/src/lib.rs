@@ -795,7 +795,14 @@ fn FillPortalStore(portal: &Portal<'static>, is_top_level: bool) -> PgResult<()>
     portalmem::PortalCreateHoldStore(portal)?;
     // C also passes holdContext; it lives inside the store behind the handle.
     let mut treceiver = tcop_dest::CreateDestReceiver(CommandDest::Tuplestore);
-    tcop_dest::SetTuplestoreDestReceiverParams(&mut treceiver, portal.borrow().holdStore, false);
+    // upstream 37b8f3b0e05e (18.6): Cross-check the type of a portal running EXECUTE or FETCH.
+    tcop_dest::SetTuplestoreDestReceiverParams(
+        &mut treceiver,
+        portal.borrow().holdStore,
+        false,
+        portal.borrow().tupDesc.clone(),
+        Some("query result type does not match portal result type"),
+    );
 
     let strategy = portal.borrow().strategy;
     match strategy {
@@ -1416,7 +1423,7 @@ pub fn fill_portal_store_to(portal: &Portal<'static>, target_rows: u64) -> PgRes
     let mut treceiver = tcop_dest::CreateDestReceiver(CommandDest::Tuplestore);
     // detoast=true exactly for the holdStore shape (§1.1): same bytes
     // (detoasting is deterministic), earlier cost, no re-execution at commit.
-    tcop_dest::SetTuplestoreDestReceiverParams(&mut treceiver, store, hold);
+    tcop_dest::SetTuplestoreDestReceiverParams(&mut treceiver, store, hold, None, None);
 
     // Same snapshot discipline as the executor arm of PortalRunSelect; on
     // error the active snapshot unwinds with the (now FAILED) transaction.
@@ -1526,7 +1533,7 @@ pub fn cursor_store_persist_into_hold(portal: &Portal<'static>) -> PgResult<()> 
     };
     let mcx = ctx.mcx();
     let mut treceiver = tcop_dest::CreateDestReceiver(CommandDest::Tuplestore);
-    tcop_dest::SetTuplestoreDestReceiverParams(&mut treceiver, dst, true);
+    tcop_dest::SetTuplestoreDestReceiverParams(&mut treceiver, dst, true, None, None);
     treceiver.startup(CmdType::CMD_SELECT as i32, &tup_desc)?;
     let mut slot =
         exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(tup_desc));

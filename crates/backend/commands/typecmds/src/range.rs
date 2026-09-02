@@ -5,7 +5,7 @@ use mcx::Mcx;
 use parser_small1::ParseState;
 use types_core::{
     InvalidOid, Oid, OidIsValid, BOOTSTRAP_SUPERUSERID, BTREE_AM_OID, FLOAT8OID,
-    PROCEDURE_RELATION_ID, TEXTOID, TYPE_RELATION_ID,
+    NAMESPACE_RELATION_ID, PROCEDURE_RELATION_ID, TEXTOID, TYPE_RELATION_ID,
 };
 use types_error::{
     PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_INVALID_OBJECT_DEFINITION,
@@ -125,6 +125,16 @@ pub fn DefineRange<'mcx>(
                 }
                 let (nsp, name) =
                     catalog_namespace::QualifiedNameGetCreationNamespace(mcx, &buf[..nnames])?;
+                // upstream a44780f41251 (18.4): Check CREATE privilege on multirange type schema in CREATE TYPE.
+                if aclchk::object_aclcheck(
+                    NAMESPACE_RELATION_ID,
+                    nsp,
+                    miscinit::GetUserId(),
+                    adt_acl::ACL_CREATE,
+                )? != aclchk::ACLCHECK_OK
+                {
+                    return Err(crate::permission_denied_schema(nsp)?);
+                }
                 multirangeNamespace = nsp;
                 multirangeTypeName = Some(name);
             }
@@ -154,6 +164,17 @@ pub fn DefineRange<'mcx>(
             )
             .with_sqlstate(ERRCODE_DATATYPE_MISMATCH),
         ));
+    }
+
+    // upstream 2e91f8548daa (18.6): Check for USAGE privilege on the subtype in CREATE TYPE AS RANGE.
+    if aclchk::object_aclcheck(
+        TYPE_RELATION_ID,
+        rangeSubtype,
+        miscinit::GetUserId(),
+        adt_acl::ACL_USAGE,
+    )? != aclchk::ACLCHECK_OK
+    {
+        return Err(crate::permission_denied_type(rangeSubtype));
     }
 
     let rangeSubOpclass = findRangeSubOpclass(mcx, rangeSubOpclassName, rangeSubtype)?;

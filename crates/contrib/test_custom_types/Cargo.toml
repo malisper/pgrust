@@ -1,0 +1,19 @@
+[package]
+name = "test_custom_types"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "test_custom_types"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../_support/mcx" }
+datum = { path = "../../_support/types/datum" }
+types_error = { path = "../../_support/types/types_error" }
+types_fmgr = { path = "../../_support/types/fmgr" }
+dfmgr = { path = "../../backend/utils/fmgr/dfmgr" }
+adt_int = { path = "../../backend/utils/adt/int" }
+guc_tables = { path = "../../backend/utils/misc/guc_tables" }
+commands_analyze = { path = "../../backend/commands/analyze" }

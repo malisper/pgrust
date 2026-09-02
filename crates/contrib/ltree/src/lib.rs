@@ -878,12 +878,54 @@ mod tests {
         assert!(!op::inner_isparent(&img("a.b"), &img("a.b.c")));
     }
 
+    /// upstream c3e36a9a5f19: ltree_compare() no longer overflows int32 on
+    /// deep paths (the sign inverted past ~14,653 levels); it is sign-only.
+    #[test]
+    fn ltree_compare_deep_paths_do_not_overflow() {
+        let a = img("a");
+        let deep = img(&format!("{}a", "a.".repeat(14999)));
+        assert_eq!(op::ltree_compare(&deep, &a), 14999);
+        assert_eq!(op::ltree_compare(&a, &deep), -14999);
+        let deepest = img(&format!("{}a", "a.".repeat(65534)));
+        assert!(op::ltree_compare(&deepest, &a) > 0);
+        assert!(op::ltree_compare(&deepest, &deep) > 0);
+        assert!(op::ltree_compare(&deep, &deepest) < 0);
+        // memcmp value (a libc-defined magnitude: macOS libSystem and glibc
+        // return the byte difference), label-length and level-count differences
+        assert_eq!(op::ltree_compare(&img("a.b"), &img("a.z")), -24);
+        assert_eq!(op::ltree_compare(&img("a.bb"), &img("a.b")), 1);
+        assert_eq!(op::ltree_compare(&img("a"), &img("a.b.c")), -2);
+    }
+
     #[test]
     fn lquery_match() {
         pin_c_ctype();
         let q = io::parse_lquery(b"*.Astronomy.*").unwrap();
         assert!(op::ltq_regex(&img("Top.Astronomy.Stars"), &q).unwrap());
         assert!(!op::ltq_regex(&img("Top.Science"), &q).unwrap());
+    }
+
+    /// upstream 53a57cae1c89: under the C ctype a non-prefix '@' predicate
+    /// still requires equal length (b3c2a3d386fa's fast path matched 'ab@'
+    /// against 'abc'); the sublexeme and ltxtquery paths share the matcher.
+    #[test]
+    fn lquery_ci_exact_length_in_c_ctype() {
+        pin_c_ctype();
+        let t = img("Top.abc");
+        for (q, want) in [("*.ab@", false), ("*.ab@*", true), ("*.ABC@", true), ("*.abcd@", false)] {
+            let q_img = io::parse_lquery(q.as_bytes()).unwrap();
+            assert_eq!(op::ltq_regex(&t, &q_img).unwrap(), want, "{q}");
+        }
+        let t = img("Top.x_abc");
+        for (q, want) in [("*.ab@%", false), ("*.ab@%*", true), ("*.ABC@%", true)] {
+            let q_img = io::parse_lquery(q.as_bytes()).unwrap();
+            assert_eq!(op::ltq_regex(&t, &q_img).unwrap(), want, "{q}");
+        }
+        let t = img("Top.abc");
+        for (q, want) in [("ab@", false), ("ab@*", true), ("ABC@", true)] {
+            let q_img = io::parse_ltxtquery(q.as_bytes()).unwrap();
+            assert_eq!(op::ltxtq_exec(&t, &q_img).unwrap(), want, "{q}");
+        }
     }
 
     #[test]
@@ -1354,6 +1396,51 @@ mod tests {
         assert_eq!(img[voff + repr::LVAR_HDRSIZE], 0, "+8 is pad, not the label");
     }
 
+    /// upstream 7f019f34140a: a level's variant count and serialized size are
+    /// bounded by their uint16 fields instead of wrapping (CVE-2026-6473).
+    /// The numvar check fires mid-parse, ahead of a later syntax error; the
+    /// size check runs after the parse, so any syntax error wins over it.
+    #[test]
+    fn lquery_level_limits_are_program_limit_errors() {
+        pin_c_ctype();
+        let limit = |input: &str, msg: &str, detail: &str| {
+            let e = io::parse_lquery(input.as_bytes()).expect_err(msg);
+            assert_eq!(e.sqlstate(), types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED, "{msg}");
+            assert_eq!(e.message(), msg);
+            assert_eq!(e.detail(), Some(detail), "{msg}");
+        };
+        let too_large = "lquery level is too large";
+        let too_large_detail = "Total size of level exceeds the maximum allowed (65535 bytes).";
+        let too_many = "lquery level has too many variants";
+        let too_many_detail = "Number of variants exceeds the maximum allowed (65535).";
+
+        // 4094 one-char variants: 16 + 4094 * 16 = 65520 bytes, fits exactly
+        let ok = format!("{}a", "a|".repeat(4093));
+        let img = io::parse_lquery(ok.as_bytes()).unwrap();
+        let lvl = repr::Lquery::new(&img).levels().next().unwrap();
+        assert_eq!((lvl.numvar(), lvl.totallen()), (4094, 65520));
+        assert_eq!(io::deparse_lquery(&img).unwrap(), ok.as_bytes());
+        // one more variant crosses the level-size limit
+        limit(&format!("{}a", "a|".repeat(4094)), too_large, too_large_detail);
+        // the upstream regress shapes
+        let mut long = "x".repeat(1000);
+        for _ in 0..65 {
+            long.push('|');
+            long.push_str(&"x".repeat(1000));
+        }
+        limit(&long, too_large, too_large_detail);
+        limit(&format!("ok.{long}"), too_large, too_large_detail);
+        limit(&format!("{}a", "a|".repeat(65535)), too_many, too_many_detail);
+        // 65535 variants pass the count check and fail the size check
+        limit(&format!("{}a", "a|".repeat(65534)), too_large, too_large_detail);
+        // ordering against syntax errors
+        limit(&format!("{}a..", "a|".repeat(65535)), too_many, too_many_detail);
+        for input in [format!(".{}a", "a|".repeat(65535)), format!("{long}..")] {
+            let e = io::parse_lquery(input.as_bytes()).unwrap_err();
+            assert_eq!(e.sqlstate(), types_error::ERRCODE_SYNTAX_ERROR);
+        }
+    }
+
     /// MaxAllocSize ceiling (task #85 sibling sweep): C's deparse_lquery
     /// pallocs its estimate (~1.25x the stored size for dense multi-variant
     /// levels), so a valid sub-1GB lquery whose estimate crosses MaxAllocSize
@@ -1399,5 +1486,26 @@ mod tests {
             err.message(),
             format!("invalid memory alloc request size {estimate}")
         );
+    }
+
+    fn balanced(leaf: &str, depth: usize) -> String {
+        let mut e = leaf.to_string();
+        for _ in 0..depth {
+            e = format!("({e}&{e})");
+        }
+        e
+    }
+
+    #[test]
+    fn ltxtquery_left_offset_overflow() {
+        // upstream c5790ec4fd9a (18.4): depth 14 puts '|'s left offset at 32768, past PG_INT16_MAX.
+        pin_c_ctype();
+        let fits = io::parse_ltxtquery(format!("b|{}", balanced("a", 13)).as_bytes()).unwrap();
+        assert!(op::ltxtq_exec(&img("a"), &fits).unwrap());
+        assert!(op::ltxtq_exec(&img("b"), &fits).unwrap());
+        assert!(!op::ltxtq_exec(&img("c"), &fits).unwrap());
+        let e = io::parse_ltxtquery(format!("b|{}", balanced("a", 14)).as_bytes()).unwrap_err();
+        assert_eq!(e.message(), "ltxtquery is too large");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED);
     }
 }

@@ -35,13 +35,16 @@ fn unquoted_identifier_is_downcased() {
     assert_eq!(lex("node$1"), vec![Token::Ident("node$1".into())]);
 }
 
+// upstream abb5825550a8 (18.5): Clean up quoting of variable strings within replication commands.
 #[test]
-fn quoted_identifier_preserves_case_and_terminates_on_every_dquote() {
+fn quoted_identifier_preserves_case_and_folds_doubled_dquote() {
     assert_eq!(lex("\"FooBar\""), vec![Token::Ident("FooBar".into())]);
-    // repl_scanner.l's <xd> state has NO {xddouble} rule (unlike <xq>):
-    // `"a""b"` is TWO identifiers, not a`"`b (repl_scanner_diff, 2026-08-01).
+    // <xd>{xddouble} (18.5+): `"a""b"` is ONE identifier a"b.
+    assert_eq!(lex("\"a\"\"b\""), vec![Token::Ident("a\"b".into())]);
+    assert_eq!(lex("\"\"\"\""), vec![Token::Ident("\"".into())]);
+    assert_eq!(lex("\"\""), vec![Token::Ident(String::new())]);
     assert_eq!(
-        lex("\"a\"\"b\""),
+        lex("\"a\" \"b\""),
         vec![Token::Ident("a".into()), Token::Ident("b".into())]
     );
 }

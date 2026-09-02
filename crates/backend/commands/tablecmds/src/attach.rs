@@ -1888,6 +1888,8 @@ pub(crate) fn ATExecAttachPartitionIdx<'mcx>(
         NoLock,
     )?;
 
+    // Check if the index is already attached to the correct parent,
+    // ultimately attempting one round of validation if already the case.
     let curr_parent = if part_idx.rd_rel.relispartition {
         pg_inherits::get_partition_parent(mcx, part_idx_id, false)?
     } else {
@@ -1997,6 +1999,11 @@ pub(crate) fn ATExecAttachPartitionIdx<'mcx>(
             )?;
         }
 
+        validate_partitioned_index(mcx, parent_idx, &parent_tbl)?;
+    } else if !parent_idx.rd_index.as_ref().expect("rd_index").indisvalid {
+        // upstream 5713ac248f26 (18.4): Allow ALTER INDEX .. ATTACH PARTITION
+        // to validate a parent index -- the index is attached, but the parent
+        // is still invalid; see if it can be validated now.
         validate_partitioned_index(mcx, parent_idx, &parent_tbl)?;
     }
 

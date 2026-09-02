@@ -1061,7 +1061,8 @@ fn perform_base_backup<'mcx>(
             .finish(loc("perform_base_backup"));
     }
 
-    sink_support::basebackup_progress_done();
+    // upstream e7564ee8cdcb (18.6): Clear base backup progress on backup failure
+    // (progress reporting now ends in the progress sink's cleanup callback).
     Ok(())
 }
 
@@ -2198,5 +2199,120 @@ mod tar_limit_sqlstate_tests {
         let err = readlink_target_too_long("./pg_tblspc").unwrap_err();
         assert_eq!(err.sqlstate(), ERRCODE_PROGRAM_LIMIT_EXCEEDED);
         assert_eq!(err.message(), "symbolic link \"./pg_tblspc\" target is too long");
+    }
+}
+
+// upstream e7564ee8cdcb (18.6): Clear base backup progress on backup failure
+#[cfg(test)]
+mod progress_cleanup_tests {
+    use ::sink::{bbsink_cleanup, Bbsink, BbsinkOps, BbsinkState};
+    use ::types_core::primitive::{Size, TimeLineID, XLogRecPtr};
+    use ::types_error::PgResult;
+
+    /// No-op leaf under the progress sink: `cleanup` is the only callback the
+    /// test drives, and forwarding needs a `next`.
+    struct NullLeaf;
+
+    impl<'mcx> BbsinkOps<'mcx> for NullLeaf {
+        fn begin_backup(&mut self, _: &mut Bbsink<'mcx>, _: &mut BbsinkState) -> PgResult<()> {
+            Ok(())
+        }
+        fn begin_archive(
+            &mut self,
+            _: &mut Bbsink<'mcx>,
+            _: &mut BbsinkState,
+            _: &str,
+        ) -> PgResult<()> {
+            Ok(())
+        }
+        fn archive_contents(
+            &mut self,
+            _: &mut Bbsink<'mcx>,
+            _: &mut BbsinkState,
+            _: Size,
+        ) -> PgResult<()> {
+            Ok(())
+        }
+        fn end_archive(&mut self, _: &mut Bbsink<'mcx>, _: &mut BbsinkState) -> PgResult<()> {
+            Ok(())
+        }
+        fn begin_manifest(&mut self, _: &mut Bbsink<'mcx>, _: &mut BbsinkState) -> PgResult<()> {
+            Ok(())
+        }
+        fn manifest_contents(
+            &mut self,
+            _: &mut Bbsink<'mcx>,
+            _: &mut BbsinkState,
+            _: Size,
+        ) -> PgResult<()> {
+            Ok(())
+        }
+        fn end_manifest(&mut self, _: &mut Bbsink<'mcx>, _: &mut BbsinkState) -> PgResult<()> {
+            Ok(())
+        }
+        fn end_backup(
+            &mut self,
+            _: &mut Bbsink<'mcx>,
+            _: &mut BbsinkState,
+            _: XLogRecPtr,
+            _: TimeLineID,
+        ) -> PgResult<()> {
+            Ok(())
+        }
+        fn cleanup(&mut self, _: &mut Bbsink<'mcx>, _: &mut BbsinkState) -> PgResult<()> {
+            Ok(())
+        }
+    }
+
+    // Binds this thread to a real PgBackendStatus slot so pgstat_progress_*
+    // has a target (bare unit tests have no MyBEEntry and the calls are
+    // no-ops). Same recipe as lmgr's progress_beentry test helper; the guard
+    // serializes binders of the shared slot.
+    fn progress_beentry() -> (
+        &'static backend_status::PgBackendStatus,
+        std::sync::MutexGuard<'static, ()>,
+    ) {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            init_small::globals::SetMaxBackends(8);
+            ipc_seams::on_shmem_exit::set(|_, _| {});
+            backend_status::init_seams();
+            backend_progress::init_seams();
+            backend_status::BackendStatusShmemInit().unwrap();
+        });
+        static SLOT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let guard = SLOT.lock().unwrap_or_else(|e| e.into_inner());
+        init_small::globals::SetMyProcNumber(3);
+        backend_status::pgstat_beinit().unwrap();
+        backend_status::set_pgstat_track_activities_backing(true);
+        (
+            backend_status::MyBEEntry().expect("pgstat_beinit bound a beentry"),
+            guard,
+        )
+    }
+
+    // C 18.6 basebackup_progress.c bbsink_progress_cleanup: the progress
+    // command started by bbsink_progress_new ends in the sink's cleanup
+    // callback, which SendBaseBackup's PG_FINALLY runs on the error path
+    // too. Pre-fix only the successful tail of perform_base_backup ended it,
+    // so a failed backup left a stale pg_stat_progress_basebackup row.
+    #[test]
+    fn progress_sink_cleanup_ends_command_without_end_backup() {
+        let (be, _slot_guard) = progress_beentry();
+        // SAFETY: own-backend read; no other thread writes this slot while
+        // the SLOT guard is held.
+        let command = || unsafe { be.st_progress_command.get() };
+
+        let ctx = mcx::MemoryContext::new("progress cleanup test");
+        let mcx = ctx.mcx();
+        let leaf = Box::new(Bbsink::new(mcx, Box::new(NullLeaf), None));
+        let mut sink = sink_support::bbsink_progress_new(mcx, leaf, false);
+        assert_eq!(command(), backend_status::PROGRESS_COMMAND_BASEBACKUP);
+
+        // Error path: perform_base_backup failed before end_backup ran;
+        // only bbsink_cleanup follows.
+        let mut state = BbsinkState::default();
+        bbsink_cleanup(&mut sink, &mut state).unwrap();
+        assert_eq!(command(), backend_status::PROGRESS_COMMAND_INVALID);
     }
 }

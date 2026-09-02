@@ -2333,41 +2333,57 @@ fn exec_create_stats_stmt<'mcx>(
     let stmt = stmt_node
         .as_variant::<types_nodes::rawnodes::CreateStatsStmt>()
         .expect("CreateStatsStmt");
-    if let Some(first) = stmt.relations.iter().next() {
-        let Some(rv_node) = first.as_range_var() else {
-            return Err(Box::new(
-                types_error::PgError::new(
-                    types_error::ERROR,
-                    "CREATE STATISTICS only supports relation names in the FROM clause"
-                        .to_string(),
-                )
-                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
-            ));
-        };
-        let rv = rel_vocab::RangeVar {
-            catalogname: rv_node.catalogname,
-            schemaname: rv_node.schemaname,
-            relname: rv_node.relname.expect("CreateStatsStmt relation without relname"),
-            inh: rv_node.inh,
-            relpersistence: rv_node.relpersistence,
-            location: rv_node.location,
-        };
-        let relid = catalog_namespace::RangeVarGetRelidExtended(
-            &rv,
-            types_rel::ShareUpdateExclusiveLock,
-            0,
-            None,
-        )?;
-        // Cloned LIKE statistics arrive pre-transformed (C utility.c:1901).
-        if !stmt.transformed {
-            parse_clause::transformStatsStmt(mcx, relid, stmt_node, source_text)?;
-        }
+    // upstream a1fa24127d6a (18.6): Preserve the owner of extended statistics rebuilt by ALTER TABLE.
+    // Examine the FROM clause. Currently, we only allow it to be a single
+    // simple table, but later we'll probably allow multiple tables and JOIN
+    // syntax. The grammar is already prepared for that, so we have to check
+    // here that what we got is what we can support (utility.c:1891).
+    if stmt.relations.len() != 1 {
+        return Err(Box::new(
+            types_error::PgError::new(
+                types_error::ERROR,
+                "only a single relation is allowed in CREATE STATISTICS".to_string(),
+            )
+            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
+    }
+    let first = stmt.relations.iter().next().expect("CreateStatsStmt relation");
+    let Some(rv_node) = first.as_range_var() else {
+        return Err(Box::new(
+            types_error::PgError::new(
+                types_error::ERROR,
+                "CREATE STATISTICS only supports relation names in the FROM clause".to_string(),
+            )
+            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
+    };
+    let rv = rel_vocab::RangeVar {
+        catalogname: rv_node.catalogname,
+        schemaname: rv_node.schemaname,
+        relname: rv_node.relname.expect("CreateStatsStmt relation without relname"),
+        inh: rv_node.inh,
+        relpersistence: rv_node.relpersistence,
+        location: rv_node.location,
+    };
+    // Lock the relation here (ShareUpdateExclusiveLock, utility.c:1914);
+    // CreateStatistics opens it by this OID, never by name again.
+    let relid = catalog_namespace::RangeVarGetRelidExtended(
+        &rv,
+        types_rel::ShareUpdateExclusiveLock,
+        0,
+        None,
+    )?;
+    // Cloned LIKE statistics arrive pre-transformed (C utility.c:1917 →
+    // transformStatsStmt returns early when stmt->transformed).
+    if !stmt.transformed {
+        parse_clause::transformStatsStmt(mcx, relid, stmt_node, source_text)?;
     }
     let stmt = stmt_node
         .as_variant::<types_nodes::rawnodes::CreateStatsStmt>()
         .expect("CreateStatsStmt");
-    // C: address = CreateStatistics(); collected by the shared slow-path tail.
-    statscmds::CreateStatistics(mcx, stmt, true)
+    // C: address = CreateStatistics(list_make1_oid(relid), stmt, true);
+    // collected by the shared slow-path tail.
+    statscmds::CreateStatistics(mcx, relid, stmt, true)
 }
 
 fn exec_index_stmt<'mcx>(

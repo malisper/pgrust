@@ -24,6 +24,8 @@ pub const XML_ELEMENT_NODE: c_int = 1;
 pub const XML_ATTRIBUTE_NODE: c_int = 2;
 pub const XML_TEXT_NODE: c_int = 3;
 pub const XML_DOCUMENT_NODE: c_int = 9;
+// upstream 4c777d6dd9c9 (18.6): Fix handling of namespace nodes in xpath() (xml)
+pub const XML_NAMESPACE_DECL: c_int = 18;
 
 pub const XPATH_NODESET: c_int = 1;
 pub const XPATH_BOOLEAN: c_int = 2;

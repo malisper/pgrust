@@ -85,7 +85,7 @@ static WAIT_EVENT_CLIENT_NAMES: [&str; 9] = [
 // Rows 0-56 are the C 18.3 wait_event_names.txt IPC section verbatim; rows
 // beyond are pgrust-specific appends (never reorder — ids are wire-frozen
 // into wait_event_info by their array index).
-static WAIT_EVENT_IPC_NAMES: [&str; 58] = [
+static WAIT_EVENT_IPC_NAMES: [&str; 59] = [
     "AppendReady",
     "ArchiveCleanupCommand",
     "ArchiveCommand",
@@ -143,9 +143,12 @@ static WAIT_EVENT_IPC_NAMES: [&str; 58] = [
     "WalReceiverWaitStart",
     "WalSummaryReady",
     "XactGroupUpdate",
+    // upstream 33101632235a (18.6): Fix cascading standby reconnect failure after archive fallback
+    // (wait_event_names.txt ABI_compatibility row: index 57).
+    "WalReceiverUpstreamCatchup",
     // pgrust-specific (GL-FLUSHPIPE-1): the pipelined sync-commit
     // durability wait (transam_xlog::flushpipe WAIT_EVENT_FLUSH_PIPELINE =
-    // PG_WAIT_IPC + 57 — keep the index in sync with this row).
+    // PG_WAIT_IPC + 58 — keep the index in sync with this row).
     "FlushPipeline",
 ];
 

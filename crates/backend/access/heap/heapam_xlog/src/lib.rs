@@ -60,6 +60,15 @@ pub const XLH_DELETE_IS_SUPER: u8 = 1 << 3;
 pub const XLH_DELETE_IS_PARTITION_MOVE: u8 = 1 << 4;
 pub const XLH_LOCK_ALL_FROZEN_CLEARED: u8 = 1 << 0;
 
+// upstream f581fa729d8e (18.5): Fix VM clear WAL logging by registering VM blocks
+// WAL block-reference ids (heapam_xlog.h); the write side is heapam::dml.
+pub const HEAP_INSERT_BLKREF_VM: u8 = 1;
+pub const HEAP_MULTI_INSERT_BLKREF_VM: u8 = 1;
+pub const HEAP_DELETE_BLKREF_VM: u8 = 1;
+pub const HEAP_LOCK_BLKREF_VM: u8 = 1;
+pub const HEAP_UPDATE_BLKREF_VM_NEW: u8 = 2;
+pub const HEAP_UPDATE_BLKREF_VM_OLD: u8 = 3;
+
 // xl_heap_new_cid (heapam_xlog.h); the record payload is the SizeOfHeapNewCid
 // prefix (trailing tid padding excluded).
 #[repr(C)]
@@ -222,18 +231,78 @@ fn fix_infomask_from_infobits(infobits: u8, infomask: &mut u16, infomask2: &mut 
     }
 }
 
-fn clear_vm_bits(
-    rlocator: types_storage::RelFileLocator,
+// visibilitymap_pin + visibilitymap_clear on a fake relcache entry: the
+// pre-registration replay of a cleared VM bit.
+fn clear_vm_bits_rel(
+    reln: &xlogutils::FakeRelcacheEntry,
     blkno: types_core::BlockNumber,
     flags: u8,
 ) -> PgResult<()> {
-    let reln = xlogutils::CreateFakeRelcacheEntry(rlocator);
     let mut vmbuffer = visibilitymap::VmBuffer::new();
-    visibilitymap::visibilitymap_pin(&reln, blkno, &mut vmbuffer)?;
-    visibilitymap::visibilitymap_clear(&reln, blkno, &vmbuffer, flags)?;
+    visibilitymap::visibilitymap_pin(reln, blkno, &mut vmbuffer)?;
+    visibilitymap::visibilitymap_clear(reln, blkno, &vmbuffer, flags)?;
     vmbuffer.release();
-    xlogutils::FreeFakeRelcacheEntry(reln);
     Ok(())
+}
+
+// upstream f581fa729d8e (18.5): Fix VM clear WAL logging by registering VM blocks
+// Clear `heap_blkno`'s bits on a VM buffer registered in the record: read it
+// through the recovery routines, which either apply an FPI or hand back
+// BLK_NEEDS_REDO for us to clear the bits and stamp the LSN ourselves.
+// The buffer comes back pinned + exclusively locked, or invalid.
+fn heap_xlog_vm_clear_registered(
+    record: &XLogReaderState,
+    reln: &xlogutils::FakeRelcacheEntry,
+    wal_vm_block_id: u8,
+    clear: impl FnOnce(&visibilitymap::VmBuffer) -> PgResult<bool>,
+) -> PgResult<()> {
+    let lsn = record.EndRecPtr;
+    let (action, vmbuffer) = XLogReadBufferForRedo(record, wal_vm_block_id)?;
+    if action == BLK_NEEDS_REDO {
+        let mut vmb =
+            visibilitymap::VmBuffer::adopt(vmbuffer).expect("BLK_NEEDS_REDO with no buffer");
+        if clear(&vmb)? {
+            // SAFETY: pin + exclusive lock per the redo protocol (module contract).
+            unsafe { page_mut(vmbuffer) }.set_lsn(lsn);
+        }
+        // UnlockReleaseBuffer: the carrier owns the pin, so unlock first.
+        bufmgr_seams::lock_buffer::call(vmbuffer, bufmgr_seams::BUFFER_LOCK_UNLOCK)?;
+        vmb.release();
+    } else if vmbuffer != InvalidBuffer {
+        unlock_release(vmbuffer)?;
+    }
+    let _ = reln;
+    Ok(())
+}
+
+// upstream f581fa729d8e (18.5): Fix VM clear WAL logging by registering VM blocks
+// Clear visibility map bits for a single heap block during heap redo. Used by
+// records that modify one heap block and, at most, its corresponding VM block
+// (insert, delete, multi_insert, lock); updates, which can touch several
+// heap or VM blocks, replay their VM changes inline.
+//
+// Originally, clearing the VM did not register the VM buffers, so since
+// registering the VM buffer was a bug fix, a fallback path replays WAL
+// generated from before the fix. It is also taken when the heap page's
+// PD_ALL_VISIBLE was cleared but the VM bits were already clear: the record
+// flags do not distinguish the two situations.
+fn heap_xlog_vm_clear(
+    record: &XLogReaderState,
+    target_locator: types_storage::RelFileLocator,
+    heap_blkno: types_core::BlockNumber,
+    wal_vm_block_id: u8,
+    flags: u8,
+) -> PgResult<()> {
+    let reln = xlogutils::CreateFakeRelcacheEntry(target_locator);
+    let res = if record.has_block_ref(wal_vm_block_id) {
+        heap_xlog_vm_clear_registered(record, &reln, wal_vm_block_id, |vmb| {
+            visibilitymap::visibilitymap_clear_locked(&reln, heap_blkno, vmb, flags)
+        })
+    } else {
+        clear_vm_bits_rel(&reln, heap_blkno, flags)
+    };
+    xlogutils::FreeFakeRelcacheEntry(reln);
+    res
 }
 
 fn page_set_prunable(pm: &mut PageMut<'_>, xid: TransactionId) {
@@ -258,7 +327,13 @@ fn heap_xlog_delete(record: &mut XLogReaderState) -> PgResult<()> {
     let target_tid = ItemPointerData::new(blkno, offnum);
 
     if flags & XLH_DELETE_ALL_VISIBLE_CLEARED != 0 {
-        clear_vm_bits(target_locator, blkno, visibilitymap::VISIBILITYMAP_VALID_BITS)?;
+        heap_xlog_vm_clear(
+            record,
+            target_locator,
+            blkno,
+            HEAP_DELETE_BLKREF_VM,
+            visibilitymap::VISIBILITYMAP_VALID_BITS,
+        )?;
     }
 
     let (action, buffer) = XLogReadBufferForRedo(record, 0)?;
@@ -332,7 +407,13 @@ fn heap_xlog_insert(record: &mut XLogReaderState) -> PgResult<()> {
     debug_assert!(flags & XLH_INSERT_ALL_FROZEN_SET == 0);
 
     if flags & XLH_INSERT_ALL_VISIBLE_CLEARED != 0 {
-        clear_vm_bits(target_locator, blkno, visibilitymap::VISIBILITYMAP_VALID_BITS)?;
+        heap_xlog_vm_clear(
+            record,
+            target_locator,
+            blkno,
+            HEAP_INSERT_BLKREF_VM,
+            visibilitymap::VISIBILITYMAP_VALID_BITS,
+        )?;
     }
 
     let info = record.record.as_ref().unwrap().xl_info & !XLR_INFO_MASK;
@@ -440,8 +521,17 @@ fn heap_xlog_multi_insert(record: &mut XLogReaderState) -> PgResult<()> {
         !(flags & XLH_INSERT_ALL_VISIBLE_CLEARED != 0 && flags & XLH_INSERT_ALL_FROZEN_SET != 0)
     );
 
+    // Clear the VM (if needed) before clearing the heap page-level visibility
+    // flag (PD_ALL_VISIBLE) to prevent the heap page from being marked
+    // all-visible in the VM while its PD_ALL_VISIBLE is clear.
     if flags & XLH_INSERT_ALL_VISIBLE_CLEARED != 0 {
-        clear_vm_bits(target_locator, blkno, visibilitymap::VISIBILITYMAP_VALID_BITS)?;
+        heap_xlog_vm_clear(
+            record,
+            target_locator,
+            blkno,
+            HEAP_MULTI_INSERT_BLKREF_VM,
+            visibilitymap::VISIBILITYMAP_VALID_BITS,
+        )?;
     }
 
     let info = record.record.as_ref().unwrap().xl_info & !XLR_INFO_MASK;
@@ -655,12 +745,80 @@ fn heap_xlog_update(record: &mut XLogReaderState, hot_update: bool) -> PgResult<
     };
     let newtid = ItemPointerData::new(newblk, new_offnum);
 
-    if flags & XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED != 0 {
-        clear_vm_bits(rlocator, oldblk, visibilitymap::VISIBILITYMAP_VALID_BITS)?;
+    // upstream f581fa729d8e (18.5): Fix VM clear WAL logging by registering VM blocks
+    // The visibility map may need to be fixed even if the heap page is
+    // already up-to-date.
+    let new_cleared = flags & XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED != 0;
+    let old_cleared = flags & XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED != 0;
+    if new_cleared || old_cleared {
+        let reln = xlogutils::CreateFakeRelcacheEntry(rlocator);
+        let has_vm_old = record.has_block_ref(HEAP_UPDATE_BLKREF_VM_OLD);
+        let has_vm_new = record.has_block_ref(HEAP_UPDATE_BLKREF_VM_NEW);
+        let res = (|| -> PgResult<()> {
+            if has_vm_new {
+                debug_assert!(new_cleared);
+                heap_xlog_vm_clear_registered(record, &reln, HEAP_UPDATE_BLKREF_VM_NEW, |vmb| {
+                    let mut cleared = false;
+                    // If both the old and new heap pages were all-visible and
+                    // their VM bits are on the same VM page, that single VM
+                    // page is registered as HEAP_UPDATE_BLKREF_VM_NEW: clear
+                    // both heap blocks' bits from it. One of them may already
+                    // be clear, which is harmless. oldblk really being on this
+                    // VM page must be verified rather than inferred from the
+                    // absence of VM_OLD: VM_OLD is also omitted when oldblk is
+                    // on a different VM page but its bit was already clear.
+                    if old_cleared && visibilitymap::visibilitymap_pin_ok(oldblk, vmb) {
+                        cleared |= visibilitymap::visibilitymap_clear_locked(
+                            &reln,
+                            oldblk,
+                            vmb,
+                            visibilitymap::VISIBILITYMAP_VALID_BITS,
+                        )?;
+                    }
+                    // If VM_NEW is registered, we are sure newblk is on VM_NEW.
+                    cleared |= visibilitymap::visibilitymap_clear_locked(
+                        &reln,
+                        newblk,
+                        vmb,
+                        visibilitymap::VISIBILITYMAP_VALID_BITS,
+                    )?;
+                    Ok(cleared)
+                })?;
+            }
+            if has_vm_old {
+                debug_assert!(old_cleared);
+                heap_xlog_vm_clear_registered(record, &reln, HEAP_UPDATE_BLKREF_VM_OLD, |vmb| {
+                    visibilitymap::visibilitymap_clear_locked(
+                        &reln,
+                        oldblk,
+                        vmb,
+                        visibilitymap::VISIBILITYMAP_VALID_BITS,
+                    )
+                })?;
+            }
+            if !has_vm_old && !has_vm_new {
+                // Backwards compatibility path. Previously, the VM buffers
+                // were not registered in the WAL record; needed to replay WAL
+                // generated by a not-yet-patched primary during upgrade.
+                if old_cleared {
+                    clear_vm_bits_rel(&reln, oldblk, visibilitymap::VISIBILITYMAP_VALID_BITS)?;
+                }
+                if new_cleared {
+                    clear_vm_bits_rel(&reln, newblk, visibilitymap::VISIBILITYMAP_VALID_BITS)?;
+                }
+            }
+            Ok(())
+        })();
+        xlogutils::FreeFakeRelcacheEntry(reln);
+        res?;
     }
 
     // The old page stays locked until the new tuple is in place (C's Hot
     // Standby consistency rule); the raw old-tuple slice below relies on it.
+    // In normal operation the two pages are locked in page-number order to
+    // avoid deadlocks against updates going the other way; during replay no
+    // other update runs, so neither that nor the VM buffer order above
+    // matters.
     let (oldaction, obuffer) =
         XLogReadBufferForRedo(record, if oldblk == newblk { 0 } else { 1 })?;
     let mut old_item: Option<(*const u8, u32)> = None;
@@ -699,7 +857,7 @@ fn heap_xlog_update(record: &mut XLogReaderState, hot_update: bool) -> PgResult<
 
         page_set_prunable(&mut pm, record_xid(record));
 
-        if flags & XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED != 0 {
+        if old_cleared {
             pm.clear_all_visible();
         }
 
@@ -719,10 +877,6 @@ fn heap_xlog_update(record: &mut XLogReaderState, hot_update: bool) -> PgResult<
     } else {
         XLogReadBufferForRedo(record, 0)?
     };
-
-    if flags & XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED != 0 {
-        clear_vm_bits(rlocator, newblk, visibilitymap::VISIBILITYMAP_VALID_BITS)?;
-    }
 
     let mut freespace = 0usize;
     if newaction == BLK_NEEDS_REDO {
@@ -819,7 +973,7 @@ fn heap_xlog_update(record: &mut XLogReaderState, hot_update: bool) -> PgResult<
             return Err(panic_err("failed to add tuple".into()));
         }
 
-        if flags & XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED != 0 {
+        if new_cleared {
             pm.clear_all_visible();
         }
 
@@ -901,7 +1055,13 @@ fn heap_xlog_lock_common(record: &mut XLogReaderState, lock_updated: bool) -> Pg
         let (rlocator, _fork, block, _) = record
             .block_tag_extended(0)
             .expect("heap_xlog_lock: no block 0");
-        clear_vm_bits(rlocator, block, visibilitymap::VISIBILITYMAP_ALL_FROZEN)?;
+        heap_xlog_vm_clear(
+            record,
+            rlocator,
+            block,
+            HEAP_LOCK_BLKREF_VM,
+            visibilitymap::VISIBILITYMAP_ALL_FROZEN,
+        )?;
     }
 
     let (action, buffer) = XLogReadBufferForRedo(record, 0)?;

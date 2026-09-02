@@ -128,3 +128,22 @@ fn errdetail_codes() {
     assert_eq!(errdetail_for_xml_code(9), "Invalid character value.");
     assert_eq!(errdetail_for_xml_code(4242), "Unrecognized libxml error code: 4242.");
 }
+
+// upstream 4c777d6dd9c9 (18.6): Fix handling of namespace nodes in xpath() (xml)
+// A namespace node (XML_NAMESPACE_DECL) is an xmlNs, not an xmlNode: routing
+// it through xmlCopyNode + xmlNodeDump returned the raw ` xmlns:foo="..."`
+// declaration (18.3 regress: "could not copy node" on other libxml2 builds);
+// C 18.6 casts it to its string value like attribute/text nodes.
+#[test]
+fn xpath_namespace_node_casts_to_string() {
+    let mut out = Vec::new();
+    let n = crate::xpath::xpath_internal(
+        b"//namespace::foo",
+        b"<root xmlns:foo=\"http://127.0.0.1\"/>",
+        None,
+        Some(&mut out),
+    )
+    .unwrap();
+    assert_eq!(n, 1);
+    assert_eq!(out, vec![b"http://127.0.0.1".to_vec()]);
+}

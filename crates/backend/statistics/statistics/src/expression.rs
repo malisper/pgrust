@@ -41,6 +41,11 @@ pub struct ExprStatsRow<'mcx> {
 // VacAttrStats; the analyze crate implements this (extended_stats.c's
 // compute_stats fn-pointer boundary).
 pub trait ExprStatsCompute<'mcx> {
+    // upstream 83671c0da049 (18.4): Fix set of issues with extended statistics on expressions
+    // examine_attribute (extended_stats.c) on an expression: false when its
+    // typanalyze refuses it, so no statistics object can be built on it.
+    fn examinable(&mut self, mcx: Mcx<'mcx>, expr: Node<'mcx>) -> PgResult<bool>;
+
     fn compute(
         &mut self,
         mcx: Mcx<'mcx>,

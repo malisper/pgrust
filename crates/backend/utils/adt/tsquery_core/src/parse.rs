@@ -657,7 +657,8 @@ pub fn parse_tsquery<'mcx>(
         return Ok(Some(ParsedQuery { img, empty: true }));
     }
 
-    if p.polstr.len() > (MAX_ALLOC_SIZE - HDRSIZETQ - p.op_pool.len()) / QUERYITEM_SIZE {
+    // upstream dddc8a69ff8b (18.6): Harden tsquery code against overflows.
+    if tsquery_too_big(p.polstr.len(), p.op_pool.len()) {
         let esc2 = p.take_esc();
         ereturn(
             esc2,

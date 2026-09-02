@@ -327,6 +327,11 @@ pub(crate) struct AllocSet {
     // permanently and invisibly (P1: create_gather_merge_path's path_arena
     // final buffer, ~13KB leaked per DISTINCT planning under ArenaForget).
     dedicated: alloc::vec::Vec<(NonNull<u8>, Layout)>,
+    // upstream 3f3eefc28892 (18.4): Detect pfree or repalloc of a previously-freed memory chunk.
+    // Pool chunks currently on a freelist, by address (C marks the chunk header;
+    // pool chunks here have none). Debug builds only.
+    #[cfg(debug_assertions)]
+    freed: crate::freed::FreedSet,
 }
 
 impl AllocSet {
@@ -351,6 +356,8 @@ impl AllocSet {
             cur_ptr,
             cur_end,
             dedicated: alloc::vec::Vec::new(),
+            #[cfg(debug_assertions)]
+            freed: crate::freed::FreedSet::new(),
         }
     }
 
@@ -394,6 +401,8 @@ impl AllocSet {
             // SAFETY: a parked chunk's first 8 bytes hold the next-free pointer (>= 8B, 8-aligned).
             let next = unsafe { core::ptr::read(head.as_ptr() as *const Option<NonNull<u8>>) };
             self.freelist[idx] = next;
+            #[cfg(debug_assertions)]
+            self.freed.note_alloc(head.as_ptr().addr());
             return Ok(NonNull::slice_from_raw_parts(head, csize));
         }
 
@@ -489,8 +498,29 @@ impl AllocSet {
             return;
         }
         let idx = free_list_index(layout.size());
+        #[cfg(debug_assertions)]
+        self.freed.note_free(ptr);
         core::ptr::write(ptr.as_ptr() as *mut Option<NonNull<u8>>, self.freelist[idx]);
         self.freelist[idx] = Some(ptr);
+    }
+
+    // upstream 3f3eefc28892 (18.4): Detect pfree or repalloc of a previously-freed memory chunk.
+    // C AllocSetFree/AllocSetRealloc's `requested_size == InvalidAllocSize` test.
+    // Dedicated chunks leave the context at free, so "untracked" is "freed".
+    #[cfg(debug_assertions)]
+    pub(crate) fn is_freed(&self, ptr: NonNull<u8>, layout: Layout) -> bool {
+        #[cfg(feature = "aset-guard")]
+        {
+            let _ = (ptr, layout);
+            false
+        }
+        #[cfg(not(feature = "aset-guard"))]
+        {
+            if is_dedicated(layout) {
+                return !self.dedicated.iter().any(|&(p, _)| p == ptr);
+            }
+            self.freed.contains(ptr)
+        }
     }
 
     // Always-move realloc (C's in-place lone-block growth is not ported).
@@ -510,6 +540,8 @@ impl AllocSet {
 
     pub(crate) fn reset(&mut self) {
         self.free_all_dedicated();
+        #[cfg(debug_assertions)]
+        self.freed.clear();
         if self.blocks.is_empty() {
             self.freelist = [None; NUM_FREELISTS];
             self.next_block_size = INIT_BLOCK_SIZE;

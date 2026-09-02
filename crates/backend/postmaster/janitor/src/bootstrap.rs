@@ -19,7 +19,9 @@
 //! (PostgreSQL documents 9000-9999 as reserved for forks, bki.sgml "OID
 //! Assignment"; the execmain lanev2 coverage test pins the range) — in the
 //! `pg_catalog` namespace, owned by the bootstrap superuser, `LANGUAGE
-//! internal` with `prosrc` = the builtin name. Everything about the rows
+//! internal` with `prosrc` = the builtin name, plus the pg_description row
+//! initdb loads from a .dat `descr` (classoid pg_proc, objsubid 0 — the
+//! opr_sanity "built-ins have descriptions" law). Everything about the rows
 //! mirrors a genuine initdb builtin: below FirstUnpinnedObjectId they are
 //! PINNED (DROP FUNCTION refuses, no pg_depend rows — exactly how .dat
 //! rows are pinned), pg_dump never emits pg_catalog objects, and fmgr
@@ -40,6 +42,11 @@
 //!   can still see "function does not exist" once, that session's next
 //!   connect (or statement-level retry) resolves it. Bounded to the first
 //!   connection ever per database.
+//! - The description rows are probed separately from the pg_proc rows, so
+//!   a database backfilled by a binary that predates them gains them on its
+//!   next per-boot first connect; the flip side is that a `COMMENT ON` ...
+//!   `IS NULL` on one of the three reappears at the next boot (bootstrap
+//!   state, like the row itself).
 //! - Legacy databases that ran the deleted janitor-functions.sql keep
 //!   their `public.pgrust_*` wrappers; `pg_catalog` precedes `public` in
 //!   every search_path, so the builtins win and the leftovers are inert
@@ -47,7 +54,7 @@
 
 use datum::Datum;
 use mcx::Mcx;
-use types_core::catalog::{BOOLOID, BOOTSTRAP_SUPERUSERID, TEXTOID, VOIDOID};
+use types_core::catalog::{BOOLOID, BOOTSTRAP_SUPERUSERID, PROCEDURE_RELATION_ID, TEXTOID, VOIDOID};
 use types_core::{Oid, OidIsValid, PG_CATALOG_NAMESPACE};
 use types_error::{PgResult, LOG};
 use types_rel::RowExclusiveLock;
@@ -57,13 +64,15 @@ use crate::builtins::{
     PGRUST_PIN_DATABASE_FOID, PGRUST_SEAL_TEMPLATE_FOID, PGRUST_UNPIN_DATABASE_FOID,
 };
 
-/// One builtin's pg_proc row description.
+/// One builtin's pg_proc row description; `descr` is its pg_description
+/// text (the .dat `descr` field of a genuine builtin).
 struct BuiltinRow {
     foid: Oid,
     name: &'static str,
     rettype: Oid,
     argtypes: &'static [Oid],
     argnames: &'static [&'static str],
+    descr: &'static str,
 }
 
 /// The three janitor builtins (builtins.rs owns the implementations and
@@ -76,6 +85,7 @@ const BUILTIN_ROWS: &[BuiltinRow] = &[
         rettype: BOOLOID,
         argtypes: &[TEXTOID],
         argnames: &["dbname"],
+        descr: "pin an ephemeral database against janitor reaping until restart",
     },
     BuiltinRow {
         foid: PGRUST_UNPIN_DATABASE_FOID,
@@ -83,6 +93,7 @@ const BUILTIN_ROWS: &[BuiltinRow] = &[
         rettype: BOOLOID,
         argtypes: &[TEXTOID],
         argnames: &["dbname"],
+        descr: "unpin an ephemeral database so the janitor may reap it again",
     },
     BuiltinRow {
         foid: PGRUST_SEAL_TEMPLATE_FOID,
@@ -90,6 +101,7 @@ const BUILTIN_ROWS: &[BuiltinRow] = &[
         rettype: VOIDOID,
         argtypes: &[TEXTOID],
         argnames: &["dbname"],
+        descr: "freeze-vacuum a database and seal it as a template via the janitor",
     },
 ];
 
@@ -167,55 +179,67 @@ pub fn backfill_builtin_rows() -> PgResult<()> {
     }
     let mut release = Release { db, done: false };
 
-    let inserted = probe_and_insert()?;
+    let (procs, descrs) = probe_and_insert()?;
     // Only after the COMMIT below returned: an aborted insert must not
     // latch `done` (the rows rolled back; the next connection retries).
     release.done = true;
-    if inserted > 0 {
+    if procs > 0 || descrs > 0 {
         let _ = elog::elog(
             LOG,
             format!(
-                "pgrust: backfilled {inserted} builtin function row(s) into database oid {db} \
-                 (pgrust_pin_database / pgrust_unpin_database / pgrust_seal_template)"
+                "pgrust: backfilled {procs} builtin function row(s) and {descrs} description \
+                 row(s) into database oid {db} (pgrust_pin_database / pgrust_unpin_database / \
+                 pgrust_seal_template)"
             ),
         );
     }
     Ok(())
 }
 
-/// One transaction: probe each reserved oid via syscache, insert the
-/// missing rows, commit. Returns how many rows were inserted.
-fn probe_and_insert() -> PgResult<usize> {
+/// One transaction: probe each reserved oid via syscache and its
+/// pg_description row via GetComment, insert whatever is missing, commit.
+/// Returns (pg_proc rows, pg_description rows) inserted.
+fn probe_and_insert() -> PgResult<(usize, usize)> {
     let cx = mcx::MemoryContext::new("pgrust builtin backfill");
     xact::StartTransactionCommand()?;
     let mcx = cx.mcx();
 
-    let mut missing: Vec<&BuiltinRow> = Vec::new();
-    for b in BUILTIN_ROWS {
+    let mut need_proc = [false; BUILTIN_ROWS.len()];
+    let mut need_descr = [false; BUILTIN_ROWS.len()];
+    for (i, b) in BUILTIN_ROWS.iter().enumerate() {
         match cache_syscache::SearchSysCache1(
             cache_syscache::cacheinfo::PROCOID,
             cache_syscache::SysCacheKey::Value(Datum::from_oid(b.foid)),
         )? {
             Some(t) => cache_syscache::ReleaseSysCache(t),
-            None => missing.push(b),
+            None => need_proc[i] = true,
         }
+        need_descr[i] =
+            commands_comment::GetComment(mcx, b.foid, PROCEDURE_RELATION_ID, 0)?.is_none();
     }
-    if missing.is_empty() {
+    let procs = need_proc.iter().filter(|&&m| m).count();
+    let descrs = need_descr.iter().filter(|&&m| m).count();
+    if procs == 0 && descrs == 0 {
         xact::CommitTransactionCommand()?;
-        return Ok(0);
+        return Ok((0, 0));
     }
 
-    let rel = table::table_open(mcx, types_core::catalog::PROCEDURE_RELATION_ID, RowExclusiveLock)?;
-    for b in &missing {
-        insert_row(mcx, &rel, b)?;
-        // Multi-statement-transaction convention (the mint_batch_body CCI
-        // precedent): make each row command-visible before the next.
+    if procs > 0 {
+        let rel = table::table_open(mcx, PROCEDURE_RELATION_ID, RowExclusiveLock)?;
+        for (b, _) in BUILTIN_ROWS.iter().zip(need_proc).filter(|&(_, m)| m) {
+            insert_row(mcx, &rel, b)?;
+            // Multi-statement-transaction convention (the mint_batch_body CCI
+            // precedent): make each row command-visible before the next.
+            xact::CommandCounterIncrement()?;
+        }
+        rel.close(RowExclusiveLock)?;
+    }
+    for (b, _) in BUILTIN_ROWS.iter().zip(need_descr).filter(|&(_, m)| m) {
+        commands_comment::CreateComments(mcx, b.foid, PROCEDURE_RELATION_ID, 0, Some(b.descr))?;
         xact::CommandCounterIncrement()?;
     }
-    rel.close(RowExclusiveLock)?;
-    let n = missing.len();
     xact::CommitTransactionCommand()?;
-    Ok(n)
+    Ok((procs, descrs))
 }
 
 /// Form and insert one pg_proc row with an EXPLICIT reserved oid (the
@@ -315,6 +339,9 @@ mod tests {
             assert_eq!(b.argnames.len(), b.argtypes.len());
             assert!(d.strict, "rows are formed proisstrict = true");
             assert!(!d.retset, "rows are formed proretset = false");
+            // opr_sanity: every built-in pg_proc entry has a description.
+            assert!(!b.descr.is_empty(), "{} needs a pg_description row", b.name);
+            assert!(!b.descr.ends_with('.'), "{}: .dat descr style, no period", b.name);
             // The pinned-object law: every backfilled oid sits below
             // FirstUnpinnedObjectId, so DROP FUNCTION refuses without any
             // pg_depend row — the initdb-builtin posture.

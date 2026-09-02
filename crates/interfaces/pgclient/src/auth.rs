@@ -6,6 +6,7 @@
 // walreceiver may point at an arbitrary host. A truncated or malformed
 // message must therefore surface as a connection error, never a panic: all
 // reads below are bounds-checked before slicing.
+use timingsafe_bcmp::timingsafe_bcmp;
 use types_error::PgResult;
 
 use crate::{be_i32, msg, parse_error_fields, PgConn};
@@ -180,7 +181,11 @@ fn parse_server_first(payload: &[u8], client_nonce: &str) -> Result<ServerFirst,
     let server_first = String::from_utf8_lossy(payload).into_owned();
     let fields: Vec<&str> = server_first.split(',').collect();
     let server_nonce = scram_attr(&fields, 'r')?.to_string();
-    if server_nonce.len() <= client_nonce.len() || !server_nonce.starts_with(client_nonce) {
+    // upstream d93ef413174d (18.4): Apply timingsafe_bcmp() in authentication paths
+    let n = client_nonce.len();
+    if server_nonce.len() <= n
+        || timingsafe_bcmp(&server_nonce.as_bytes()[..n], client_nonce.as_bytes()) != 0
+    {
         return Err("invalid SCRAM response (nonce mismatch)".into());
     }
     let salt = b64_decode(scram_attr(&fields, 's')?)?;
@@ -274,7 +279,8 @@ fn scram_exchange(conn: &mut PgConn, password: &str) -> PgResult<Result<(), Stri
     };
     let server_key = scram_common::scram_server_key(&salted);
     let expected = b64(&pg_hmac::hmac_sha256(&server_key, auth_message.as_bytes()));
-    if server_sig_b64 != expected {
+    // upstream d93ef413174d (18.4): Apply timingsafe_bcmp() in authentication paths
+    if timingsafe_bcmp(server_sig_b64.as_bytes(), expected.as_bytes()) != 0 {
         return Ok(Err("incorrect server signature in SCRAM exchange".into()));
     }
     Ok(Ok(()))

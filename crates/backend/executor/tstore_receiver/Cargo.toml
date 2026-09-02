@@ -17,3 +17,4 @@ types_portal = { path = "../../../_support/types/portal" }
 types_slot = { path = "../../../_support/types/types_slot" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
 tuplestore = { path = "../../utils/sort/tuplestore" }
+tupdesc = { path = "../../access/common/tupdesc" }

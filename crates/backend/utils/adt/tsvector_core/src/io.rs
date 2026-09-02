@@ -194,25 +194,19 @@ pub fn tsvector_out_core<'mcx>(mcx: Mcx<'mcx>, v: TsVec<'_>) -> PgResult<PgVec<'
     let size = v.size();
     // C tsvectorout (tsvector.c) pallocs its exact worst-case lenbuf up front:
     //   lenbuf = size*2 /* '' */ + size-1 /* space */ + 2 /* \0 */
-    //          + per entry: len * 2 * pg_database_encoding_max_length()
+    //          + per entry: len * 2 /* escapes */
     //          + if haspos: 1 /* : */ + 7 /* int2 + , + weight */ * npos
     // so an over-MaxAllocSize output raises palloc's CATCHABLE
     // "invalid memory alloc request size {lenbuf}" before anything is
     // emitted. vec_with_capacity_in's check_alloc_size is that exact check
     // and message; reserving the same bound also means the emission below
     // never regrows (C writes into the one palloc'd buffer).
-    //
-    // C computes lenbuf in int32 with -fwrapv; where that computation wraps
-    // (raw worst case >= 2^31, i.e. ~270MB+ of lexemes under a 4-byte
-    // encoding) C either errors on the sign-extended huge Size or overruns
-    // its own buffer (wrap to a small positive). We compute in usize: in the
-    // whole regime where C is well-defined and non-corrupting the request
-    // value and firing point match C exactly.
-    let enc_max = ::mbutils::pg_database_encoding_max_length() as usize;
+    // upstream e251350573e2 (18.6): C sums lenbuf in size_t (was int32) and
+    // no longer multiplies by pg_database_encoding_max_length().
     let mut lenbuf: usize = size * 2 + size.saturating_sub(1) + 2;
     for i in 0..size {
         let e = v.entry(i);
-        lenbuf += v.lexeme(e).len() * 2 * enc_max;
+        lenbuf += v.lexeme(e).len() * 2;
         let npos = v.positions(e).len();
         if npos != 0 {
             lenbuf += 1 + 7 * npos;
@@ -283,7 +277,8 @@ pub fn tsvector_recv_core<'mcx>(
     buf: &mut ::stringinfo::StringInfo<'_>,
 ) -> PgResult<PgVec<'mcx, u8>> {
     let nentries = ::pqformat::pq_getmsgint(buf, 4)? as i32;
-    if nentries < 0 || nentries as usize > 0x3fff_ffff / 4 {
+    // upstream e251350573e2 (18.6): no empty lexemes, so more than MAXSTRPOS entries can't fit
+    if nentries < 0 || nentries as usize > MAXSTRPOS {
         return Err(PgError::error("invalid size of tsvector").into());
     }
     let nentries = nentries as usize;
@@ -298,6 +293,9 @@ pub fn tsvector_recv_core<'mcx>(
         word.extend_from_slice(lex);
         let npos = ::pqformat::pq_getmsgint(buf, 2)? as u16;
 
+        if word.is_empty() {
+            return Err(PgError::error("invalid tsvector: empty lexeme").into());
+        }
         if word.len() > MAXSTRLEN {
             return Err(PgError::error("invalid tsvector: lexeme too long").into());
         }
@@ -324,6 +322,12 @@ pub fn tsvector_recv_core<'mcx>(
         }
         b.push(&word, &poss)?;
         prev = Some(word);
+    }
+    // the last lexeme must not carry datalen past MAXSTRPOS either
+    if b.strlen() > MAXSTRPOS {
+        return Err(
+            PgError::error("invalid tsvector: maximum total lexeme length exceeded").into(),
+        );
     }
 
     if !needs_sort {

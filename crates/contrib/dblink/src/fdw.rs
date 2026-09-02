@@ -8,6 +8,8 @@ use types_core::{Oid, FOREIGN_DATA_WRAPPER_RELATION_ID, FOREIGN_SERVER_RELATION_
 use types_error::{PgError, PgResult, ERRCODE_FDW_OPTION_NAME_NOT_FOUND};
 use types_fmgr::FmgrInfo;
 use types_fmgr::FunctionCallInfoBaseData as Fcinfo;
+use types_nodes::parsenodes::{DefElem, DefElemAction};
+use types_nodes::Node;
 
 pub const FDW_CONTEXT: Oid = FOREIGN_DATA_WRAPPER_RELATION_ID;
 pub const SERVER_CONTEXT: Oid = FOREIGN_SERVER_RELATION_ID;
@@ -38,9 +40,31 @@ pub fn is_valid_dblink_option(option: &str, context: Oid) -> bool {
     }
 }
 
-// is_valid_dblink_fdw_option: also permits use_scram_passthrough.
+// is_valid_dblink_fdw_option: also permits use_scram_passthrough, which is
+// only meaningful on foreign servers and user mappings.
+// upstream cd777e27e203 (18.6): dblink: Reject use_scram_passthrough on foreign-data wrappers
 fn is_valid_dblink_fdw_option(option: &str, context: Oid) -> bool {
-    option == "use_scram_passthrough" || is_valid_dblink_option(option, context)
+    if (context == SERVER_CONTEXT || context == USER_MAPPING_CONTEXT)
+        && option == "use_scram_passthrough"
+    {
+        return true;
+    }
+    is_valid_dblink_option(option, context)
+}
+
+// upstream e5d019fbdc12 (18.6): postgres_fdw, dblink: Validate use_scram_passthrough values
+fn mk_def_elem<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    name: &'mcx str,
+    value: Option<&'mcx str>,
+) -> PgResult<DefElem<'mcx>> {
+    Ok(DefElem {
+        defnamespace: None,
+        defname: Some(name),
+        arg: value.map(|v| Node::mk(mcx, types_nodes::String { sval: v })).transpose()?,
+        defaction: DefElemAction::DEFELEM_UNSPEC,
+        location: -1,
+    })
 }
 
 #[cold]
@@ -114,7 +138,29 @@ mod tests {
     #[test]
     fn fdw_specific_option() {
         assert!(is_valid_dblink_fdw_option("use_scram_passthrough", SERVER_CONTEXT));
+        assert!(is_valid_dblink_fdw_option("use_scram_passthrough", USER_MAPPING_CONTEXT));
+        // upstream cd777e27e203 (18.6): meaningless on the wrapper itself.
+        assert!(!is_valid_dblink_fdw_option("use_scram_passthrough", FDW_CONTEXT));
         assert!(!is_valid_dblink_option("use_scram_passthrough", SERVER_CONTEXT));
+    }
+
+    // upstream e5d019fbdc12 (18.6): the value goes through defGetBoolean.
+    #[test]
+    fn use_scram_passthrough_value_is_boolean() {
+        let ctx = mcx::MemoryContext::new("dblink-test");
+        let mcx = ctx.mcx();
+        let check = |v: Option<&'static str>| {
+            commands_define::defGetBoolean(&mk_def_elem(mcx, "use_scram_passthrough", v).unwrap())
+        };
+        assert_eq!(check(Some("true")).unwrap(), true);
+        assert_eq!(check(Some("Off")).unwrap(), false);
+        assert_eq!(check(Some("ON")).unwrap(), true);
+        assert_eq!(check(None).unwrap(), true);
+        for bad in ["invalid", "1", "", "yes"] {
+            let e = check(Some(bad)).unwrap_err();
+            assert_eq!(e.message(), "use_scram_passthrough requires a Boolean value");
+            assert_eq!(e.sqlstate(), types_error::ERRCODE_SYNTAX_ERROR);
+        }
     }
 }
 
@@ -126,6 +172,10 @@ pub fn fc_dblink_fdw_validator(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcin
     for opt in options.iter() {
         if !is_valid_dblink_fdw_option(opt.name, context) {
             return Err(invalid_option_error(mcx, opt.name, context)?);
+        }
+        // upstream e5d019fbdc12 (18.6): postgres_fdw, dblink: Validate use_scram_passthrough values
+        if opt.name == "use_scram_passthrough" {
+            commands_define::defGetBoolean(&mk_def_elem(mcx, opt.name, opt.value)?)?;
         }
     }
     Ok(Datum::null())

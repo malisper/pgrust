@@ -308,7 +308,7 @@ fn create_cursor<'mcx>(
     };
     let params: Vec<Option<&str>> = values.iter().map(|v| v.as_deref()).collect();
     let sql = format!("DECLARE c{} CURSOR FOR\n{}", state.cursor_number, state.query);
-    let res = connection::exec_query_params(state.conn_key, &sql, &params)?;
+    let res = connection::exec_query_params(state.conn_key, &sql, &params, state.query)?;
     if res.status != ExecStatus::CommandOk {
         return Err(connection::remote_error(&res, Some(state.query)));
     }

@@ -504,6 +504,39 @@ fn deferred_leader_return_survives_member_cleanup_panic() {
 }
 
 #[test]
+fn kill_retained_proc_disowns_latch_before_freelisting() {
+    // upstream 12c9b8b422e2 (18.6): Fix procLatch ownership race in
+    // ProcKill(). A thread killed mid-engagement skips ProcKill (and its
+    // DisownLatch); KillRetainedProc is the exit callback that returns its
+    // PGPROC. The slot must not reach the freelist still owning its latch:
+    // the next InitProcess popping it would hit own_latch's "latch already
+    // owned by PID" panic (C's OwnLatch PANIC).
+    setup();
+    let _guard = freelist_guard();
+    let free_before = freelist_len(FreeListId::Regular);
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            thread_globals(304);
+            InitProcess(BackendType::Backend).unwrap();
+            let procno = MyProc().unwrap();
+            let proc = GetPGProcByNumber(procno);
+            assert_eq!(proc.procLatch.owner_pid.load(SeqCst), 304, "InitProcess owns the latch");
+            KillRetainedProc(); // kill path: no ProcKill ran before this
+            assert!(MyProc().is_none());
+            assert_eq!(proc.pid.load(SeqCst), 0);
+            assert_eq!(
+                proc.procLatch.owner_pid.load(SeqCst),
+                0,
+                "PGPROC reached the freelist still owning its latch"
+            );
+        })
+        .join()
+        .unwrap();
+    });
+    assert_eq!(freelist_len(FreeListId::Regular), free_before);
+}
+
+#[test]
 fn concurrent_backend_claims_are_disjoint() {
     setup();
     let _guard = freelist_guard();

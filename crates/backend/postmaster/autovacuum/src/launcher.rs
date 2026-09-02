@@ -442,7 +442,8 @@ fn rebuild_database_list(newdb: Oid) -> PgResult<()> {
     DATABASE_LIST.with_borrow_mut(|l| l.clear());
     let nelems = dbary.len() as i32;
     if nelems > 0 {
-        dbary.sort_by_key(|d| d.adl_score);
+        // upstream 4cc49cb70396 (18.6): Fix autovacuum's database sorting.
+        dbary.sort_by(db_comparator);
 
         // C stores the float quotient into an int before the min-compare.
         let mut millis_increment =
@@ -462,6 +463,11 @@ fn rebuild_database_list(newdb: Oid) -> PgResult<()> {
         });
     }
     Ok(())
+}
+
+// Descending by score: qsort(dbary, nelems, sizeof(avl_dbase), db_comparator).
+fn db_comparator(a: &AvlDbase, b: &AvlDbase) -> core::cmp::Ordering {
+    b.adl_score.cmp(&a.adl_score)
 }
 
 // get_database_list: the launcher's only transaction; seqscan pg_database.
@@ -646,4 +652,33 @@ pub fn AutoVacWorkerFailed() {
 #[inline(never)]
 fn loc(routine: &'static str) -> types_error::ErrorLocation {
     types_error::ErrorLocation::new(file!(), line!() as i32, routine)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // upstream 4cc49cb70396 (18.6): descending by score (3b42bdb471 swapped
+    // pg_cmp_s32's arguments); the push-to-head loop then leaves the
+    // highest score at the tail the launcher services first.
+    #[test]
+    fn db_comparator_sorts_scores_descending() {
+        let mut dbary = vec![
+            AvlDbase { adl_datid: 10, adl_next_worker: 0, adl_score: 0 },
+            AvlDbase { adl_datid: 12, adl_next_worker: 0, adl_score: 2 },
+            AvlDbase { adl_datid: 11, adl_next_worker: 0, adl_score: 1 },
+        ];
+        dbary.sort_by(db_comparator);
+        let order: Vec<i32> = dbary.iter().map(|d| d.adl_score).collect();
+        assert_eq!(order, vec![2, 1, 0]);
+        let datids: Vec<Oid> = dbary.iter().map(|d| d.adl_datid).collect();
+        assert_eq!(datids, vec![12, 11, 10]);
+
+        let mut list: Vec<AvlDbase> = Vec::new();
+        for db in &dbary {
+            list.insert(0, *db);
+        }
+        assert_eq!(list.last().unwrap().adl_score, 2, "the launcher pops the tail: highest score");
+        assert_eq!(list.first().unwrap().adl_score, 0);
+    }
 }

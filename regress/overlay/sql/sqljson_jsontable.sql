@@ -145,6 +145,16 @@ SELECT * FROM JSON_TABLE(jsonb '{"d1": "foo"}', '$'
 SELECT * FROM JSON_TABLE(jsonb '{"d1": "foo"}', '$'
     COLUMNS (js1 oid[] PATH '$.d2' DEFAULT '{1}'::int[]::oid[] ON EMPTY));
 
+-- A DEFAULT expression whose base type matches the column type must still be
+-- coerced to the column's typmod.
+SELECT * FROM JSON_TABLE(jsonb '{}', '$'
+    COLUMNS (c numeric(4,1) PATH '$.x' DEFAULT 99999.999 ON EMPTY));
+SELECT * FROM JSON_TABLE(jsonb '{}', '$'
+    COLUMNS (c bit(3) PATH '$.x' DEFAULT b'10101' ON EMPTY));
+-- pgrust:rowsort
+SELECT * FROM JSON_TABLE(jsonb '{}', '$'
+    COLUMNS (c numeric(4,1) PATH '$.x' DEFAULT abs(NULL::numeric) ON EMPTY));
+
 -- JSON_TABLE: Test backward parsing
 
 CREATE VIEW jsonb_table_view2 AS

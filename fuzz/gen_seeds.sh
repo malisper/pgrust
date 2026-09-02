@@ -103,16 +103,15 @@ for fid in range(3):
 PY
 
 # --- char/bool differentials (phase-1 100%-coverage campaign) ----------------
-# Literals harvested mechanically from the vendored 18.3 regress SQL, crossed
+# Literals harvested mechanically from the in-repo REL_18_6 regress SQL, crossed
 # with every selector; plus hand seeds for the non-text selectors.
 mkdir -p corpus/char_diff corpus/bool_diff
 python3 - <<'PY'
 import re, hashlib, pathlib
 
-# repo root may be the main clone or a .wt-* worktree one level deeper.
+# cwd is fuzz/; the corpus is the in-repo pristine REL_18_6 reference tree.
 _cands = [pathlib.Path(p) for p in
-          ("../../pgrust-reference/vendor/postgres-src/src/test/regress/sql",
-           "../../../pgrust-reference/vendor/postgres-src/src/test/regress/sql")]
+          ("../crates/postgres-18.6-reference/src/test/regress/sql",)]
 REGRESS = next(p for p in _cands if p.is_dir())
 
 def harvest(sqlfile, maxlen=24):
@@ -156,7 +155,7 @@ echo "seed corpus written under $(pwd)/corpus/"
 
 # ---- pg_lsn_diff (Lane-0A p1 campaign): selector-stamped seeds ----
 # Layout: [sel%8][payload]; regress literals harvested from
-# vendor/postgres-src/src/test/regress/sql/pg_lsn.sql (Stamp 18.3).
+# crates/postgres-18.6-reference/src/test/regress/sql/pg_lsn.sql (Stamp 18.6).
 mkdir -p corpus/pg_lsn_diff
 python3 - <<'PYEOF'
 import os, re, struct
@@ -168,7 +167,7 @@ lsn_texts = ["0/0", "0/12345678", "ABCD1234/beef0001", "FFFFFFFF/FFFFFFFF",
              "16/B374D848", "0/16B3748", "1/2", "0/FF", "", "/", "0/", "/0",
              "123456789/0", "0/123456789", " 0/0", "0/0 ", "xyz/0"]
 # harvest every 'X/X'-shaped literal from the vendored regress pg_lsn.sql
-reg = "../../pgrust-reference/vendor/postgres-src/src/test/regress/sql/pg_lsn.sql"
+reg = "../crates/postgres-18.6-reference/src/test/regress/sql/pg_lsn.sql"
 try:
     sql = open(reg).read()
     lsn_texts += re.findall(r"'([0-9A-Fa-f]{1,9}/[0-9A-Fa-f]{1,9})'", sql)[:64]

@@ -135,6 +135,10 @@ pub fn CheckAttributeNamesTypes<'mcx>(
     }
     let mut containing_rowtypes: mcx::PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, 4)?;
     for att in &tupdesc.attrs[..natts] {
+        // upstream 01db3f0398fd (18.4): Don't call CheckAttributeType() with InvalidOid on dropped cols
+        if att.attisdropped {
+            continue;
+        }
         let name = core::str::from_utf8(att.attname.name_str()).expect("non-UTF-8 attname");
         CheckAttributeType(
             mcx,
@@ -234,6 +238,17 @@ pub fn CheckAttributeType<'mcx>(
             attname,
             lsyscache::misc::get_range_subtype(atttypid)?,
             lsyscache::misc::get_range_collation(atttypid)?,
+            containing_rowtypes,
+            flags,
+        )?;
+    } else if att_typtype == lsyscache::typ::TYPTYPE_MULTIRANGE {
+        // upstream ff8f27d6eae2 (18.4): Don't allow composite type to be member of itself via multirange
+        // If it's a multirange, recurse to check its plain range type.
+        CheckAttributeType(
+            mcx,
+            attname,
+            lsyscache::misc::get_multirange_range(atttypid)?,
+            InvalidOid, // range types are not collatable
             containing_rowtypes,
             flags,
         )?;
@@ -588,6 +603,10 @@ fn AddNewAttributeTuples<'mcx>(
 
     for i in 0..tupdesc.natts as usize {
         let att = &tupdesc.attrs[i];
+        // upstream f9d5a52da4ca (18.5): Don't try to record dependency on a dropped column's datatype
+        if att.attisdropped {
+            continue;
+        }
         let myself = ObjectAddress::sub_set(RELATION_RELATION_ID, new_rel_oid, i as i32 + 1);
         let referenced = ObjectAddress::set(TYPE_RELATION_ID, att.atttypid);
         pg_depend::recordDependencyOn(
@@ -1153,4 +1172,51 @@ pub fn SetAttrMissing<'mcx>(
 
     attrrel.close(RowExclusiveLock)?;
     tablerel.close(AccessExclusiveLock)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mcx::MemoryContext;
+
+    // upstream 01db3f0398fd (18.4): CheckAttributeNamesTypes must not run
+    // CheckAttributeType() over a dropped column (atttypid == InvalidOid).
+    // Pre-fix it did, and only "worked" because every syscache probe with
+    // InvalidOid happens to miss; the mocked probe refuses InvalidOid, so the
+    // pre-fix loop fails here for exactly that reason.
+    #[test]
+    fn check_attribute_names_types_skips_dropped_columns() {
+        use std::sync::Once;
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            syscache_seams::pg_type_typtype::set(|typid| {
+                assert!(
+                    typid != InvalidOid,
+                    "get_typtype(InvalidOid): CheckAttributeType() reached for a dropped column"
+                );
+                Ok(None)
+            });
+        });
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        let mut dropped = FormData_pg_attribute::default();
+        dropped.attname.namestrcpy("........pg.dropped.1........");
+        dropped.attnum = 1;
+        dropped.atttypid = InvalidOid;
+        dropped.attcollation = InvalidOid;
+        dropped.attisdropped = true;
+        let mut attrs: mcx::PgVec<'_, FormData_pg_attribute> =
+            mcx::vec_with_capacity_in(mcx, 1).unwrap();
+        attrs.push(dropped);
+        let tupdesc = TupleDescData {
+            natts: 1,
+            tdtypeid: types_core::catalog::RECORDOID,
+            tdtypmod: -1,
+            tdrefcount: -1,
+            constr: None,
+            compact_attrs: mcx::PgVec::new_in(mcx),
+            attrs,
+        };
+        CheckAttributeNamesTypes(mcx, &tupdesc, RELKIND_RELATION, 0).unwrap();
+    }
 }

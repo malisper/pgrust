@@ -1130,6 +1130,13 @@ pub fn fc_satisfies_hash_partition(
                 partcollid,
                 partsupfunc,
             }
+        } else if fcinfo.args[3].isnull {
+            // upstream 0c06ebf126a0 (18.6): Prevent satisfies_hash_partition from crashing with VARIADIC NULL.
+            // Special case for VARIADIC NULL::sometype[]: answer false without
+            // touching the array; fn_extra stays unset so the next call redoes
+            // the setup (C: relation_close(parent, NoLock); PG_RETURN_BOOL(false)).
+            parent.close(NoLock)?;
+            return Ok(Datum::from_bool(false));
         } else {
             let variadic_type = variadic_array_elemtype(fcinfo)?;
             let (typlen, typbyval, typalign) = lsyscache::get_typlenbyvalalign(variadic_type)?;
@@ -1181,6 +1188,11 @@ pub fn fc_satisfies_hash_partition(
             row_hash = hash_combine64(row_hash, hash);
         }
     } else {
+        // upstream 0c06ebf126a0 (18.6): Prevent satisfies_hash_partition from crashing with VARIADIC NULL.
+        // Special case for VARIADIC NULL::sometype[] on the cached-setup path.
+        if fcinfo.args[3].isnull {
+            return Ok(Datum::from_bool(false));
+        }
         let (datums, isnull) = deconstruct_variadic_array(
             fcinfo,
             my.variadic_typlen,

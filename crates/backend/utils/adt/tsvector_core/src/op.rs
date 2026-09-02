@@ -1,5 +1,7 @@
 use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
-use ::types_error::{PgError, PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
+use ::types_error::{
+    PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+};
 
 use crate::execute::{ExecPhraseData, Ternary};
 use crate::layout::*;
@@ -50,14 +52,26 @@ pub fn tsvector_strip_core<'mcx>(mcx: Mcx<'mcx>, v: TsVec<'_>) -> PgResult<PgVec
     b.finish(mcx)
 }
 
-pub fn weight_code(cw: u8) -> PgResult<u16> {
+// upstream c5194139cb4c (18.6): Improve reporting of invalid weight symbols in setweight() et al.
+pub fn parse_weight(cw: u8) -> PgResult<u16> {
     match cw {
         b'A' | b'a' => Ok(3),
         b'B' | b'b' => Ok(2),
         b'C' | b'c' => Ok(1),
         b'D' | b'd' => Ok(0),
-        other => Err(PgError::error(format!("unrecognized weight: {}", other as i8)).into()),
+        _ => Err(unrecognized_weight(cw).into()),
     }
+}
+
+#[cold]
+#[inline(never)]
+fn unrecognized_weight(cw: u8) -> PgError {
+    let msg = if (b' '..0x7f).contains(&cw) {
+        format!("unrecognized weight: \"{}\"", cw as char)
+    } else {
+        format!("unrecognized weight: \"\\{cw:03o}\"")
+    };
+    PgError::error(msg).with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE)
 }
 
 pub fn tsvector_setweight_core<'mcx>(

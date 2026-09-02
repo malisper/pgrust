@@ -484,3 +484,93 @@ fn seams_installed_and_delegate() {
     procsignal_seams::process_proc_signal_barrier::call().unwrap();
     cleanup_current();
 }
+
+// upstream 1a9b1cc18e06 (18.6): init adopted psh_barrierGeneration before
+// publishing pss_pid, so an emitter could bump and skip the pid-0 slot while
+// it kept the older generation (WaitForProcSignalBarrier never returns).
+// Invariant once both finish: the slot holds the emitted generation or
+// carries PROCSIG_BARRIER. The worker sweeps its start across the bump.
+#[test]
+fn init_publishes_pid_before_adopting_barrier_generation() {
+    use std::sync::atomic::AtomicU32;
+    use std::sync::Arc;
+
+    setup();
+    let _guard = serial();
+    // Last slot: the emitter's reverse scan reads its pid right after the bump.
+    let procno = (proc_signal().psh_slot.len() - 1) as ProcNumber;
+    let s = slot(procno);
+    let flag = &s.pss_signalFlags[ProcSignalReason::PROCSIG_BARRIER as usize];
+    const ROUNDS: u32 = 100_000;
+    const SWEEP: u32 = 512;
+    const KEY: [u8; MAX_CANCEL_KEY_LENGTH] = [7; MAX_CANCEL_KEY_LENGTH];
+
+    // Handshake word: main stores odd (init now), the worker stores the next
+    // even (init done), u32::MAX ends the worker.
+    let phase = Arc::new(AtomicU32::new(0));
+    let worker_phase = Arc::clone(&phase);
+    let worker = std::thread::spawn(move || {
+        thread_globals(procno, 1050);
+        loop {
+            let p = worker_phase.load(SeqCst);
+            if p == u32::MAX {
+                break;
+            }
+            if p & 1 == 1 {
+                for _ in 0..((p / 2) % SWEEP) {
+                    std::hint::black_box(());
+                }
+                ProcSignalReinitStanding(&KEY).unwrap();
+                worker_phase.store(p + 1, SeqCst);
+            } else {
+                std::hint::spin_loop();
+            }
+        }
+        ProcSignalRelease();
+    });
+
+    let mut violation = None;
+    let mut stalled = None;
+    // Bounded wait: a worker panic or a wedged init fails instead of hanging.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    for round in 0..ROUNDS {
+        s.pss_pid.store(0, Relaxed);
+        s.pss_barrierGeneration.store(u64::MAX, Relaxed);
+        flag.store(false, Relaxed);
+        phase.store(2 * round + 1, SeqCst);
+        let generation =
+            EmitProcSignalBarrier(ProcSignalBarrierType::PROCSIGNAL_BARRIER_SMGRRELEASE);
+        let mut spins: u32 = 0;
+        while phase.load(SeqCst) != 2 * round + 2 {
+            spins = spins.wrapping_add(1);
+            if spins % 1024 == 0 && (worker.is_finished() || std::time::Instant::now() > deadline)
+            {
+                stalled = Some(round);
+                break;
+            }
+            std::hint::spin_loop();
+        }
+        if stalled.is_some() {
+            break;
+        }
+        let adopted = s.pss_barrierGeneration.load(Relaxed);
+        if adopted < generation && !flag.load(Acquire) {
+            violation = Some((round, adopted, generation));
+            break;
+        }
+    }
+    phase.store(u32::MAX, SeqCst);
+    if let Some(round) = stalled {
+        // A panicked worker's payload resurfaces through the join below.
+        assert!(worker.is_finished(), "worker stalled in round {round}");
+    }
+    worker.join().unwrap();
+    assert_eq!(s.pss_pid.load(Relaxed), 0);
+    scrub_barrier_masks();
+    if let Some((round, adopted, generation)) = violation {
+        panic!(
+            "round {round}: slot adopted generation {adopted}, generation {generation} \
+             was emitted without signalling it"
+        );
+    }
+}

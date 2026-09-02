@@ -687,6 +687,15 @@ pub fn GetXLogInsertRecPtr() -> XLogRecPtr {
     XLogBytePosToRecPtr(current_bytepos)
 }
 
+// upstream 5b3f63a1bf59 (18.4): Use GetXLogInsertEndRecPtr in gistGetFakeLSN
+// Latest WAL record end pointer: at a page boundary this is the boundary
+// itself, where GetXLogInsertRecPtr points past the next page header.
+pub fn GetXLogInsertEndRecPtr() -> XLogRecPtr {
+    let insert = &XLogCtl().Insert;
+    let current_bytepos = insert.insertpos_lck.with(|| insert.CurrBytePos.load(Relaxed));
+    XLogBytePosToEndRecPtr(current_bytepos)
+}
+
 const _: () = {
     assert!(XL_TOT_LEN == 0 && XL_PREV == 8 && XL_INFO == 16 && XL_RMID == 17 && XL_CRC == 20);
 };

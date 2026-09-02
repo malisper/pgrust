@@ -1,7 +1,7 @@
 //! remove_useless_joins / reduce_unique_semijoins / innerrel_is_unique /
 //! self-join elimination (analyzejoins.c).
 
-use mcx::PgVec;
+use mcx::{Mcx, PgVec};
 use types_error::PgResult;
 use types_nodes::parsenodes::Query;
 use types_pathnodes::{
@@ -214,9 +214,40 @@ fn remove_leftjoinrel_from_query<'mcx>(
         }
         run.root.placeholder_list = kept;
     }
+    // upstream e0252679559a (18.5): Strip removed-relation references from PlaceHolderVars at join removal
+    // An EM's em_relids reflects ph_eval_at, so an embedded PHV's phrels can
+    // still name the removed rel even when the EC's relids do not; C strips
+    // these inside remove_rel_from_eclass, but equivclass sits below this
+    // crate, so the pass runs here first. Plain Vars and Consts hold no PHV.
+    if run.glob.last_ph_id != 0 {
+        for i in 0..run.root.eq_classes.len() {
+            let ec = EcId(i as u32);
+            if run.root.ec(ec).ec_merged.is_some() {
+                continue;
+            }
+            for m in 0..run.root.ec(ec).ec_members.len() {
+                let em_id = run.root.ec(ec).ec_members[m];
+                let expr = *run.root.expr_node(run.root.em(em_id).em_expr);
+                if expr.as_var().is_some() || expr.as_const().is_some() {
+                    continue;
+                }
+                if let Some(stripped) = remove_rel_from_phvs(mcx, expr, relid, ojrelid)? {
+                    run.root.em_mut(em_id).em_expr = run.intern_expr(stripped);
+                }
+            }
+        }
+    }
     crate::equivclass::remove_rel_from_eclasses(run, relid, ojrelid);
 
     // Reset attr_needed to only the "relation 0" bits; rebuilt below.
+    // upstream e0252679559a (18.5): Strip removed-relation references from PlaceHolderVars at join removal
+    // upstream 18105e6db5e5 (18.5): Strip removed-relation references from PHVs in join clauses
+    // Surviving rels' restriction and join clauses may still embed PHVs
+    // naming the removed rel and join; the rel being removed and PHV-free
+    // queries need no pass. Join clauses are only reachable through the
+    // per-base-rel joininfo lists, so rinfo_serial dedupes the non-clone
+    // ones (clones share serials and are processed every time).
+    let mut seen_serials = types_nodes::Bitmapset::empty();
     for rti in 1..run.root.simple_rel_array_size as usize {
         let Some(other) = run.root.simple_rel_array[rti] else { continue };
         debug_assert_eq!(run.root.rel(other).relid as usize, rti);
@@ -225,6 +256,23 @@ fn remove_leftjoinrel_from_query<'mcx>(
             let keep = relids_is_member(0, &run.root.rel(other).attr_needed[ndx]);
             run.root.rel_mut(other).attr_needed[ndx] =
                 if keep { relids_singleton(mcx, 0) } else { crate::relnode::relids_empty() };
+        }
+        if rti != relid as usize && run.glob.last_ph_id != 0 {
+            for k in 0..run.root.rel(other).baserestrictinfo.len() {
+                let rid = run.root.rel(other).baserestrictinfo[k];
+                remove_rel_from_restrictinfo_phvs(run, rid, relid, ojrelid)?;
+            }
+            for k in 0..run.root.rel(other).joininfo.len() {
+                let rid = run.root.rel(other).joininfo[k];
+                if !run.root.rinfo(rid).is_clone {
+                    let serial = run.root.rinfo(rid).rinfo_serial;
+                    if seen_serials.is_member(serial) {
+                        continue;
+                    }
+                    seen_serials.add_member(mcx, serial)?;
+                }
+                remove_rel_from_restrictinfo_phvs(run, rid, relid, ojrelid)?;
+            }
         }
     }
 
@@ -290,15 +338,97 @@ fn remove_join_clause_from_rels(run: &mut PlannerRun<'_>, rid: RinfoId) {
 
 pub(crate) fn remove_rel_from_restrictinfo(run: &mut PlannerRun<'_>, rid: RinfoId, relid: i32, ojrelid: i32) {
     let mcx = run.mcx;
-    let mut v = relids_del_member(mcx, &run.root.rinfo(rid).clause_relids, relid);
-    v = relids_del_member(mcx, &v, ojrelid);
-    run.root.rinfo_mut(rid).clause_relids = v;
-    let mut v = relids_del_member(mcx, &run.root.rinfo(rid).required_relids, relid);
-    v = relids_del_member(mcx, &v, ojrelid);
-    run.root.rinfo_mut(rid).required_relids = v;
+    // upstream 16fb94605c8f (18.4): Clean up all relid fields of RestrictInfos during join removal.
+    macro_rules! scrub {
+        ($field:ident) => {
+            let mut v = relids_del_member(mcx, &run.root.rinfo(rid).$field, relid);
+            v = relids_del_member(mcx, &v, ojrelid);
+            run.root.rinfo_mut(rid).$field = v;
+        };
+    }
+    scrub!(clause_relids);
+    scrub!(required_relids);
+    scrub!(incompatible_relids);
+    scrub!(outer_relids);
+    scrub!(left_relids);
+    scrub!(right_relids);
     // OR clauses carry no sub-RestrictInfos here (make_restrictinfo
     // divergence: orclause stays None), so C's recursion has nothing to fix.
     debug_assert!(run.root.rinfo(rid).orclause.is_none());
+}
+
+// upstream 18105e6db5e5 (18.5): Strip removed-relation references from PHVs in join clauses
+// remove_rel_from_restrictinfo_phvs (analyzejoins.c). OR clauses carry no
+// sub-RestrictInfos here (make_restrictinfo divergence: orclause stays
+// None), so C's recursion into the orclause has nothing to fix; the
+// OR-clause derivation reads the top-level clause stripped here.
+fn remove_rel_from_restrictinfo_phvs<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rid: RinfoId,
+    relid: i32,
+    ojrelid: i32,
+) -> PgResult<()> {
+    let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
+    if let Some(stripped) = remove_rel_from_phvs(run.mcx, clause, relid, ojrelid)? {
+        run.root.rinfo_mut(rid).clause = run.intern_expr(stripped);
+    }
+    debug_assert!(run.root.rinfo(rid).orclause.is_none());
+    Ok(())
+}
+
+// upstream e0252679559a (18.5): Strip removed-relation references from PlaceHolderVars at join removal
+// remove_rel_from_phvs (analyzejoins.c): drop relid/ojrelid from the phrels
+// and phnullingrels of every PHV in the expression, keeping them consistent
+// with the canonical PHV so that an appendrel translation followed by
+// pull_varnos cannot resurrect the removed rel. Returns None when nothing
+// changed (identity-preserving, where C's mutator copies everything). A PHV
+// whose phrels would become empty is evaluated only at the removed rel(s)
+// and belongs to an EquivalenceMember the caller drops right after; it is
+// left untouched rather than built with empty phrels.
+fn remove_rel_from_phvs<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: types_nodes::Node<'mcx>,
+    relid: i32,
+    ojrelid: i32,
+) -> PgResult<Option<types_nodes::Node<'mcx>>> {
+    let mut removable = types_nodes::Bitmapset::make_singleton(mcx, relid)?;
+    removable.add_member(mcx, ojrelid)?;
+    remove_rel_from_phvs_mutator(mcx, node, &removable)
+}
+
+fn remove_rel_from_phvs_mutator<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: types_nodes::Node<'mcx>,
+    removable: &types_nodes::Bitmapset<'mcx>,
+) -> PgResult<Option<types_nodes::Node<'mcx>>> {
+    if let Some(phv) = node.as_place_holder_var() {
+        debug_assert_eq!(phv.phlevelsup, 0, "upper-level PlaceHolderVars are long gone");
+        let phexpr = remove_rel_from_phvs_mutator(mcx, phv.phexpr, removable)?;
+        let newphrels = phv.phrels.difference(removable, mcx)?;
+        let strip = !newphrels.is_empty()
+            && (phv.phrels.overlap(removable) || phv.phnullingrels.overlap(removable));
+        if phexpr.is_none() && !strip {
+            return Ok(None);
+        }
+        let (phrels, phnullingrels) = if strip {
+            (newphrels, phv.phnullingrels.difference(removable, mcx)?)
+        } else {
+            (phv.phrels.clone_in(mcx)?, phv.phnullingrels.clone_in(mcx)?)
+        };
+        return Ok(Some(types_nodes::Node::mk(
+            mcx,
+            types_nodes::primnodes::PlaceHolderVar {
+                phexpr: phexpr.unwrap_or(phv.phexpr),
+                phrels,
+                phnullingrels,
+                phid: phv.phid,
+                phlevelsup: phv.phlevelsup,
+            },
+        )?));
+    }
+    nodes_core::expression_tree_mutator(mcx, node, &mut |n| {
+        remove_rel_from_phvs_mutator(mcx, n, removable)
+    })
 }
 
 fn remove_rel_from_joinlist<'mcx>(

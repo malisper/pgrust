@@ -86,5 +86,6 @@ elog_seams = { path = "../../utils/error/elog_seams" }
 inval = { path = "../../utils/cache/inval" }
 
 pg_rusage = { path = "../../utils/misc/pg_rusage" }
+injection_point = { path = "../../utils/misc/injection_point" }
 
 [dev-dependencies]

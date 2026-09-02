@@ -861,7 +861,7 @@ fn postgres_main_inner(dbname: &str, username: &str) -> PgResult<()> {
 
     /* Welcome banner for standalone case (postgres.c:4341) */
     if elog::config::where_to_send_output() == CommandDest::Debug {
-        println!("\nPostgreSQL stand-alone backend 18.3");
+        println!("\nPostgreSQL stand-alone backend 18.6");
     }
 
     let mut message_context = MemoryContext::new_bump("MessageContext");

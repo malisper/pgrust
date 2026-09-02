@@ -52,6 +52,41 @@ fn diff_ms_rounds_up_and_clamps() {
     assert_eq!(diff_ms(0, 10_000_000), 10_000);
 }
 
+// upstream 18f0de6b885a (18.6): Prevent walsummarizer from getting stuck at a timeline switch.
+fn tle(tli: TimeLineID, begin: XLogRecPtr, end: XLogRecPtr) -> timeline_seams::TimeLineHistoryEntry {
+    timeline_seams::TimeLineHistoryEntry { tli, begin, end }
+}
+
+#[test]
+fn switch_point_lists_descendant_timelines_oldest_first() {
+    let tles = [
+        tle(4, 0x3000, InvalidXLogRecPtr),
+        tle(3, 0x2000, 0x3000),
+        tle(2, 0x1000, 0x2000),
+        tle(1, InvalidXLogRecPtr, 0x1000),
+    ];
+    let (switch_lsn, descendants) = WalSummarizerSwitchPoint(1, &tles).unwrap();
+    assert_eq!(switch_lsn, 0x1000);
+    assert_eq!(descendants, vec![2, 3, 4]);
+    let (switch_lsn, descendants) = WalSummarizerSwitchPoint(3, &tles).unwrap();
+    assert_eq!(switch_lsn, 0x3000);
+    assert_eq!(descendants, vec![4]);
+}
+
+#[test]
+fn switch_point_rejects_timelines_without_a_successor() {
+    let tles = [tle(2, 0x1000, InvalidXLogRecPtr), tle(1, InvalidXLogRecPtr, 0x1000)];
+    let err = WalSummarizerSwitchPoint(7, &tles).err().unwrap();
+    assert_eq!(err.message(), "requested timeline 7 is not in this server's history");
+    // The newest timeline has no end yet; C reports that the same way.
+    let err = WalSummarizerSwitchPoint(2, &tles).err().unwrap();
+    assert_eq!(err.message(), "requested timeline 2 is not in this server's history");
+    // First entry is the current TLI with an end recorded: no descendants.
+    let odd = [tle(2, 0x1000, 0x2000), tle(1, InvalidXLogRecPtr, 0x1000)];
+    let err = WalSummarizerSwitchPoint(2, &odd).err().unwrap();
+    assert_eq!(err.message(), "cannot compute switch point for current TLI 2");
+}
+
 fn ws(tli: TimeLineID, start_lsn: XLogRecPtr, end_lsn: XLogRecPtr) -> WalSummaryFile {
     WalSummaryFile { tli, start_lsn, end_lsn }
 }

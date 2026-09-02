@@ -808,7 +808,9 @@ pub fn parseCheckAggregates<'mcx>(
     // is decided on the flattened form (a merged FULL USING column is a
     // COALESCE, not a Var). common_vars is C's groupClauseCommonVars: grouping
     // Vars present in every grouping set, the only ones usable for
-    // functional-dependency proofs.
+    // functional-dependency proofs. group_tles keeps the unflattened exprs:
+    // the RTE_GROUP's groupexprs must preserve join alias Vars (deparsing
+    // reads them back), so only the checks below see the flattened form.
     let mut grp: PgVec<'_, (Node<'mcx>, Index)> = PgVec::new_in(mcx);
     let mut common_vars: PgVec<'_, Node<'mcx>> = PgVec::new_in(mcx);
     let mut group_tles = NodeList::nil();
@@ -840,7 +842,8 @@ pub fn parseCheckAggregates<'mcx>(
             Node::mk(
                 mcx,
                 types_nodes::primnodes::TargetEntry {
-                    expr,
+                    // upstream c2c1962a64b5 (18.4): Don't flatten join alias Vars that are stored within a GROUP RTE.
+                    expr: tle.expr,
                     resno: (grp.len() + 1) as i16,
                     resname: tle.resname,
                     ressortgroupref: tle.ressortgroupref,

@@ -1190,6 +1190,7 @@ pub fn DefineRelation<'mcx>(
                 &stmt.constraints,
                 true,
                 true,
+                false,
                 Some(query_string),
             )?;
             for con in conlist.iter() {

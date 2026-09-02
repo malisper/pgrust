@@ -411,7 +411,7 @@ function scrollOutputIntoView() {
 function banner() {
   const info = getBuildInfo();
   clearScreen();
-  pushLine('', `pgrust (PostgreSQL 18.3 compatible) — ${info.label}`, '#9aa2ae');
+  pushLine('', `pgrust (PostgreSQL 18.6 compatible) — ${info.label}`, '#9aa2ae');
   pushLine('', "Type \\? for psql meta-commands. End a statement with ; to run it.", '#6f7785');
   pushLine('', "Pick an example on the right, or try:  select 'pg' || 'rust';", '#6f7785');
   if (info.build === 'wasm32') pushLine('', info.note, '#7e8794');

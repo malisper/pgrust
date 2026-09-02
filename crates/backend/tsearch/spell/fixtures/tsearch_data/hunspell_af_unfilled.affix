@@ -1,0 +1,9 @@
+# upstream 4689ea9ceee3: alias 2 is referenced before its AF line fills it
+AF 3
+AF S		#1
+
+SFX S Y 1
+SFX S   0	s/2	.
+
+AF X		#2
+AF Y		#3

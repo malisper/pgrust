@@ -54,6 +54,34 @@ thread_local! {
     static DIRTY_HINTS: Cell<u32> = const { Cell::new(0) };
     static WAL: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     static NEXT_LSN: Cell<u64> = const { Cell::new(0x1000) };
+    static PRED_LOCK_RELATION_CALLS: Cell<u32> = const { Cell::new(0) };
+    // A key a concurrent writer inserts into the (empty) index while the
+    // reader is taking its relation-level predicate lock.
+    static INSERT_ON_PRED_LOCK: Cell<Option<i32>> = const { Cell::new(None) };
+}
+
+// The writer's root creation, as _bt_newroot leaves it: one leaf that is
+// also the root, and a metapage pointing at it.
+fn create_root_leaf(value: i32) {
+    let mut leaf = new_page(BTP_LEAF | BTP_ROOT, 0, P_NONE, P_NONE);
+    add_tuple(&mut leaf, tid(10, 1), value);
+    PAGES.with(|p| {
+        let mut pages = p.borrow_mut();
+        pages.push(leak_page(leaf));
+        let root = (pages.len() - 1) as BlockNumber;
+        // SAFETY: metapage contents at +24 on the leaked metapage.
+        unsafe {
+            let metad = pages[0]
+                .as_ptr()
+                .cast::<u8>()
+                .add(SizeOfPageHeaderData)
+                .cast::<BTMetaPageData>();
+            (*metad).btm_root = root;
+            (*metad).btm_fastroot = root;
+            (*metad).btm_level = 0;
+            (*metad).btm_fastlevel = 0;
+        }
+    });
 }
 
 fn install() {
@@ -132,6 +160,14 @@ fn install() {
         predicate_seams::predicate_lock_page_split::set(|_rel, _o, _n| Ok(()));
         predicate_seams::predicate_lock_tid::set(|_rel, _tid, _snap, _xid| Ok(()));
         predicate_seams::check_for_serializable_conflict_out_needed::set(|_rel, _snap| Ok(false));
+        predicate_seams::predicate_lock_page::set(|_rel, _blk, _snap| Ok(()));
+        predicate_seams::predicate_lock_relation::set(|_rel, _snap| {
+            PRED_LOCK_RELATION_CALLS.with(|c| c.set(c.get() + 1));
+            if let Some(v) = INSERT_ON_PRED_LOCK.with(Cell::take) {
+                create_root_leaf(v);
+            }
+            Ok(())
+        });
         pruneheap_seams::heap_page_prune_opt::set(|_rel, _buf| Ok(()));
         bufmgr_seams::relation_smgr_locator::set(|rel| ::types_storage::RelFileLocatorBackend {
             locator: ::types_storage::RelFileLocator {
@@ -1799,4 +1835,37 @@ fn bt_saveitem_rejects_oversized_tuple_instead_of_overflowing() {
     let ok = unsafe { crate::search::bt_saveitem(&mut so, 0, 1, ok_img.0.as_ptr()) };
     assert!(ok.is_ok(), "an in-bounds tuple must save normally");
     assert_eq!(so.currPos.nextTupleOffset, 16, "cursor advances by MAXALIGN(itupsz)");
+}
+
+// upstream d560e730e813 (18.5): Fix another empty nbtree index SSI race. A
+// qualless serializable scan over an empty index takes the relation
+// predicate lock and then re-runs _bt_get_endpoint: a key inserted between
+// the empty answer and the lock must be returned (before the fix the scan
+// ended without seeing it, and the writer never conflicted with it).
+#[test]
+fn serializable_qualless_scan_rechecks_empty_index_after_relation_lock() {
+    install();
+    build_empty_index(true);
+    let cx = MemoryContext::new("t");
+    let rel = index_rel(cx.mcx());
+    let saved_iso = ::xact::XactIsoLevel();
+    ::xact::SetXactIsoLevel(::types_core::xact::XACT_SERIALIZABLE);
+    PRED_LOCK_RELATION_CALLS.with(|c| c.set(0));
+    INSERT_ON_PRED_LOCK.with(|c| c.set(Some(42)));
+
+    let mut scan = begin_scan(cx.mcx(), &rel, &[]);
+    scan.xs_snapshot = Some(Rc::new(::types_snapshot::SnapshotData::sentinel(
+        cx.mcx(),
+        ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+    )));
+    let mut seen = Vec::new();
+    while crate::btgettuple(&mut scan, ForwardScanDirection).unwrap() {
+        seen.push(ItemPointerGetBlockNumber(&scan.xs_heaptid));
+    }
+    crate::btendscan(&mut scan).unwrap();
+    ::xact::SetXactIsoLevel(saved_iso);
+
+    assert_eq!(PRED_LOCK_RELATION_CALLS.with(Cell::get), 1);
+    assert_eq!(seen, vec![10], "key inserted before the relation lock is seen");
+    assert_eq!(PINS.with(Cell::get), 0, "no pins leaked");
 }

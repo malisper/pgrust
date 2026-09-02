@@ -336,6 +336,30 @@ pub fn seq_search_ascii(name: &[u8], array: &[&str]) -> (i32, usize) {
     (-1, 0)
 }
 
+// upstream 011384ba45fe (18.6): Fix calculating length of match to localized month/weekday names
+// C MAX_L10N_DATA: fixed fold buffers; a fold that would not fit is no match.
+const MAX_L10N_DATA: usize = 80;
+
+// C casefold_str_cmp: `name` folded upper-then-lower equals the folded `element`.
+fn casefold_str_cmp<'mcx>(
+    mcx: Mcx<'mcx>,
+    name: &[u8],
+    element: &[u8],
+    mylocale: &::pg_locale::PgLocale,
+) -> PgResult<bool> {
+    let mut upper = [0u8; MAX_L10N_DATA];
+    let upper_len = ::pg_locale::pg_strupper(mcx, &mut upper, name, mylocale)?;
+    if upper_len > MAX_L10N_DATA - 1 {
+        return Ok(false);
+    }
+    let mut lower = [0u8; MAX_L10N_DATA];
+    let lower_len = ::pg_locale::pg_strlower(mcx, &mut lower, &upper[..upper_len], mylocale)?;
+    if lower_len > MAX_L10N_DATA - 1 {
+        return Ok(false);
+    }
+    Ok(&lower[..lower_len] == element)
+}
+
 pub fn seq_search_localized<'mcx>(
     mcx: Mcx<'mcx>,
     name: &[u8],
@@ -345,6 +369,7 @@ pub fn seq_search_localized<'mcx>(
     if name.is_empty() || name[0] == 0 {
         return Ok((-1, 0));
     }
+    let name_len = name.len();
 
     for (ai, a) in array.iter().enumerate() {
         let ab = a.as_slice();
@@ -354,17 +379,61 @@ pub fn seq_search_localized<'mcx>(
         }
     }
 
+    let mylocale = ::pg_locale::pg_newlocale_from_collation(collid)?;
+
     let upper_name = str_toupper(mcx, name, collid)?;
     let lower_name = str_tolower(mcx, &upper_name, collid)?;
 
     for (ai, a) in array.iter().enumerate() {
         let ab = a.as_slice();
-        let upper_element = str_toupper(mcx, ab, collid)?;
-        let lower_element = str_tolower(mcx, &upper_element, collid)?;
-        let element_len = lower_element.len();
+        let mut upper_element = [0u8; MAX_L10N_DATA];
+        let upper_element_len = ::pg_locale::pg_strupper(mcx, &mut upper_element, ab, mylocale)?;
+        if upper_element_len > MAX_L10N_DATA - 1 {
+            continue;
+        }
+        let mut lower_element = [0u8; MAX_L10N_DATA];
+        let lower_element_len = ::pg_locale::pg_strlower(
+            mcx,
+            &mut lower_element,
+            &upper_element[..upper_element_len],
+            mylocale,
+        )?;
+        if lower_element_len > MAX_L10N_DATA - 1 {
+            continue;
+        }
+        let lower_element = &lower_element[..lower_element_len];
 
-        if lower_name.len() >= element_len && lower_name[..element_len] == lower_element[..] {
-            return Ok((ai as i32, element_len));
+        if lower_name.len() < lower_element_len || &lower_name[..lower_element_len] != lower_element
+        {
+            continue;
+        }
+        // A match; the folds may have changed either length: recover it in the original.
+        if lower_name.len() == lower_element_len {
+            return Ok((ai as i32, name_len));
+        }
+        // Best guess: the folds kept the character count.
+        let mut element_nchars = 0usize;
+        let mut ep = 0usize;
+        while ep < lower_element_len {
+            ep += ::mbutils::pg_mblen_range(&lower_element[ep..])? as usize;
+            element_nchars += 1;
+        }
+        let mut substr_len = 0usize;
+        let mut substr_nchars = 0usize;
+        while substr_nchars < element_nchars && substr_len < name_len {
+            substr_len += ::mbutils::pg_mblen_range(&name[substr_len..])? as usize;
+            substr_nchars += 1;
+        }
+        if casefold_str_cmp(mcx, &name[..substr_len], lower_element, mylocale)? {
+            return Ok((ai as i32, substr_len));
+        }
+        // Last resort: every prefix of the original, shortest first.
+        substr_len = 0;
+        while substr_len < name_len {
+            substr_len += ::mbutils::pg_mblen_range(&name[substr_len..])? as usize;
+            if casefold_str_cmp(mcx, &name[..substr_len], lower_element, mylocale)? {
+                return Ok((ai as i32, substr_len));
+            }
         }
     }
 
@@ -410,4 +479,38 @@ pub fn from_char_seq_search<'mcx>(
 #[inline]
 pub fn is_scanner_space(c: u8) -> bool {
     matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0c)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // upstream 011384ba45fe (18.6): the length is the ORIGINAL input's matching prefix;
+    // Turkish ı (U+0131, 2 bytes) upper-folds to ASCII I under a non-Turkish ctype.
+    #[test]
+    fn seq_search_localized_returns_original_prefix_length() {
+        ::pg_locale::set_default_locale_builtin_utf8_for_tests();
+        ::mbutils::SetDatabaseEncoding(::wchar::PG_UTF8).unwrap();
+        let ctx = ::mcx::MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        let months: Vec<Vec<u8>> = vec![b"Ocak".to_vec(), "Aralık".as_bytes().to_vec()];
+        let search = |name: &str| {
+            seq_search_localized(
+                mcx,
+                name.as_bytes(),
+                &months,
+                ::types_core::DEFAULT_COLLATION_OID,
+            )
+            .unwrap()
+        };
+        assert_eq!(search("Aralık 2010"), (1, 7));
+        // case-folded matches: 7 bytes of the original, not the 6 of the fold
+        assert_eq!(search("aralık 2010"), (1, 7));
+        assert_eq!(search("araLık"), (1, 7));
+        // ASCII spelling folds to the same 6 bytes as the element
+        assert_eq!(search("ARALIK 2010"), (1, 6));
+        assert_eq!(search("ocak 1"), (0, 4));
+        assert_eq!(search("aral 2010"), (-1, 0));
+        assert_eq!(search(""), (-1, 0));
+    }
 }

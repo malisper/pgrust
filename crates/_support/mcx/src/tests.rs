@@ -1427,3 +1427,188 @@ fn huge_entry_points_bypass_ceiling() {
     let err = vec_with_capacity_huge_in::<u64>(mcx, MAX_ALLOC_HUGE_SIZE).unwrap_err();
     assert!(err.message().starts_with("invalid memory alloc request size"));
 }
+
+// upstream 3f3eefc28892 (18.4): Detect pfree or repalloc of a previously-freed memory chunk.
+// Debug-build tripwire (C MEMORY_CONTEXT_CHECKING); release builds carry no check.
+#[cfg(debug_assertions)]
+mod freed_chunk_detection {
+    use super::*;
+    use allocator_api2::alloc::Allocator;
+
+    fn l(size: usize) -> Layout {
+        Layout::from_size_align(size, 8).unwrap()
+    }
+
+    #[test]
+    #[should_panic(expected = "detected double pfree in t 0x")]
+    fn aset_immediate_double_pfree_is_detected() {
+        let ctx = MemoryContext::new("t");
+        let m = ctx.mcx();
+        let a = m.allocate(l(8)).unwrap().cast::<u8>();
+        unsafe {
+            m.deallocate(a, l(8));
+            m.deallocate(a, l(8));
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "detected double pfree in t 0x")]
+    fn aset_non_adjacent_double_pfree_is_detected() {
+        // Pre-fix shape: freelist a -> b -> a, then every alloc of the class returns a.
+        let ctx = MemoryContext::new("t");
+        let m = ctx.mcx();
+        let a = m.allocate(l(8)).unwrap().cast::<u8>();
+        let b = m.allocate(l(8)).unwrap().cast::<u8>();
+        unsafe {
+            m.deallocate(a, l(8));
+            m.deallocate(b, l(8));
+            m.deallocate(a, l(8));
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "detected double pfree in t 0x")]
+    fn aset_pfree_of_moved_realloc_source_is_detected() {
+        let ctx = MemoryContext::new("t");
+        let m = ctx.mcx();
+        let a = m.allocate(l(8)).unwrap().cast::<u8>();
+        unsafe {
+            let moved = m.grow(a, l(8), l(4096)).unwrap().cast::<u8>();
+            assert_ne!(moved, a, "always-move realloc");
+            m.deallocate(a, l(8));
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "detected double pfree in t 0x")]
+    fn aset_dedicated_double_pfree_is_detected() {
+        let ctx = MemoryContext::new("t");
+        let m = ctx.mcx();
+        let a = m.allocate(l(100_000)).unwrap().cast::<u8>();
+        unsafe {
+            m.deallocate(a, l(100_000));
+            m.deallocate(a, l(100_000));
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "detected realloc of freed chunk in t 0x")]
+    fn aset_grow_of_freed_chunk_is_detected() {
+        let ctx = MemoryContext::new("t");
+        let m = ctx.mcx();
+        let a = m.allocate(l(8)).unwrap().cast::<u8>();
+        unsafe {
+            m.deallocate(a, l(8));
+            let _ = m.grow(a, l(8), l(64));
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "detected realloc of freed chunk in t 0x")]
+    fn aset_shrink_of_freed_chunk_is_detected() {
+        let ctx = MemoryContext::new("t");
+        let m = ctx.mcx();
+        let a = m.allocate(l(64)).unwrap().cast::<u8>();
+        unsafe {
+            m.deallocate(a, l(64));
+            let _ = m.shrink(a, l(64), l(8));
+        }
+    }
+
+    #[test]
+    fn aset_reused_and_reset_chunks_are_not_flagged() {
+        let mut ctx = MemoryContext::new("t");
+        let a = ctx.mcx().allocate(l(8)).unwrap().cast::<u8>();
+        unsafe { ctx.mcx().deallocate(a, l(8)) };
+        let b = ctx.mcx().allocate(l(8)).unwrap().cast::<u8>();
+        assert_eq!(a, b, "LIFO freelist reuse");
+        unsafe { ctx.mcx().deallocate(b, l(8)) };
+        ctx.reset();
+        let c = ctx.mcx().allocate(l(8)).unwrap().cast::<u8>();
+        unsafe { ctx.mcx().deallocate(c, l(8)) };
+    }
+
+    #[test]
+    #[should_panic(expected = "detected double pfree in t 0x")]
+    fn generation_double_pfree_is_detected() {
+        let ctx = MemoryContext::new_generation("t");
+        let m = ctx.mcx();
+        let a = m.allocate(l(32)).unwrap().cast::<u8>();
+        let b = m.allocate(l(32)).unwrap().cast::<u8>();
+        unsafe {
+            m.deallocate(a, l(32));
+            m.deallocate(a, l(32));
+            m.deallocate(b, l(32));
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "detected realloc of freed chunk in t 0x")]
+    fn generation_grow_of_freed_chunk_is_detected() {
+        let ctx = MemoryContext::new_generation("t");
+        let m = ctx.mcx();
+        let a = m.allocate(l(32)).unwrap().cast::<u8>();
+        let _keep = m.allocate(l(32)).unwrap();
+        unsafe {
+            m.deallocate(a, l(32));
+            let _ = m.grow(a, l(32), l(64));
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "detected realloc of freed chunk in t 0x")]
+    fn generation_shrink_of_freed_chunk_is_detected() {
+        let ctx = MemoryContext::new_generation("t");
+        let m = ctx.mcx();
+        let a = m.allocate(l(64)).unwrap().cast::<u8>();
+        let _keep = m.allocate(l(32)).unwrap();
+        unsafe {
+            m.deallocate(a, l(64));
+            let _ = m.shrink(a, l(64), l(32));
+        }
+    }
+
+    #[test]
+    fn generation_recarved_chunk_is_not_flagged() {
+        let ctx = MemoryContext::new_generation("t");
+        let m = ctx.mcx();
+        let a = m.allocate(l(32)).unwrap().cast::<u8>();
+        unsafe { m.deallocate(a, l(32)) };
+        // Emptied current block rewinds; the re-carve rewrites the header.
+        let b = m.allocate(l(32)).unwrap().cast::<u8>();
+        assert_eq!(a, b);
+        unsafe { m.deallocate(b, l(32)) };
+    }
+
+    #[test]
+    #[should_panic(expected = "detected double pfree in t 0x")]
+    fn slab_double_pfree_is_detected() {
+        let ctx = MemoryContext::new_slab("t", 8 * 1024, 72);
+        let m = ctx.mcx();
+        let a = m.allocate(l(72)).unwrap().cast::<u8>();
+        let b = m.allocate(l(72)).unwrap().cast::<u8>();
+        unsafe {
+            m.deallocate(a, l(72));
+            m.deallocate(b, l(72));
+            m.deallocate(a, l(72));
+        }
+    }
+
+    #[test]
+    fn slab_reused_chunk_is_not_flagged() {
+        let ctx = MemoryContext::new_slab("t", 8 * 1024, 72);
+        let m = ctx.mcx();
+        let a = m.allocate(l(72)).unwrap().cast::<u8>();
+        let b = m.allocate(l(72)).unwrap().cast::<u8>();
+        unsafe { m.deallocate(a, l(72)) };
+        let c = m.allocate(l(72)).unwrap().cast::<u8>();
+        assert_eq!(a, c, "LIFO freelist reuse");
+        unsafe {
+            m.deallocate(c, l(72));
+            m.deallocate(b, l(72));
+        }
+        // Block now parked empty; its chunks come back off the freelist.
+        let d = m.allocate(l(72)).unwrap().cast::<u8>();
+        unsafe { m.deallocate(d, l(72)) };
+    }
+}

@@ -39,8 +39,9 @@ pub use control_file::{
 };
 pub use ctl::{GetWALInsertionTimeLineIfSet, XLOGShmemInit, XLOGShmemResetAfterCrash, XLOGShmemSize};
 pub use insert::{
-    GetFullPageWriteInfo, GetInsertRecPtr, GetLastImportantRecPtr, GetRedoRecPtr, GetXLogInsertRecPtr,
-    RecoveryInProgress, XLogInsertAllowed, XLogInsertRecord,
+    GetFullPageWriteInfo, GetInsertRecPtr, GetLastImportantRecPtr, GetRedoRecPtr,
+    GetXLogInsertEndRecPtr, GetXLogInsertRecPtr, RecoveryInProgress, XLogInsertAllowed,
+    XLogInsertRecord,
 };
 pub use startup::{
     CreateCheckPoint, CreateRestartPoint, ReachedEndOfBackup, ResetInstallXLogFileSegmentActive,
@@ -611,6 +612,8 @@ pub fn init_seams() {
     s::wal_usage_fpi::set(WalUsageFpi);
     s::wal_usage::set(pgWalUsage);
     s::get_flush_rec_ptr::set(write::get_flush_rec_ptr_seam);
+    // upstream 4bff3aa51c19 (18.6): Fix second race with timeline selection during promotion
+    s::get_wal_insertion_time_line_if_set::set(GetWALInsertionTimeLineIfSet);
     s::wal_segment_size::set(wal_segment_size);
     s::xact_last_rec_end::set(XactLastRecEnd);
     s::set_xact_last_rec_end::set(|lsn| XACT_LAST_REC_END.set(lsn));

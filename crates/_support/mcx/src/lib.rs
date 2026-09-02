@@ -16,11 +16,14 @@ use core::ptr::NonNull;
 pub use allocator_api2::alloc::Allocator;
 
 use allocator_api2::alloc::{AllocError, Global};
-use ::types_error::{PgError, PgResult, ERRCODE_OUT_OF_MEMORY};
+use ::types_error::{PgError, PgResult, ERRCODE_OUT_OF_MEMORY, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
 
 mod arena_safe;
 mod aset;
 mod bump;
+// upstream 3f3eefc28892 (18.4): Detect pfree or repalloc of a previously-freed memory chunk.
+#[cfg(debug_assertions)]
+mod freed;
 mod generation;
 mod owned;
 mod slab;
@@ -1215,6 +1218,36 @@ impl MemoryContext {
         }
     }
 
+    // upstream 3f3eefc28892 (18.4): Detect pfree or repalloc of a previously-freed memory chunk.
+    /// C's MEMORY_CONTEXT_CHECKING test `chunk->requested_size == InvalidAllocSize`
+    /// in AllocSetFree/Realloc, GenerationFree/Realloc and SlabFree (SlabRealloc
+    /// never touches the chunk and has no test). The arenas keep the freed mark
+    /// (aset/slab: `freed::FreedSet`, generation: zeroed chunk header); this is
+    /// the single reporting point so the panic carries the context name like C's
+    /// elog. Debug builds only: the release hot path is untouched.
+    #[cfg(debug_assertions)]
+    #[inline(always)]
+    fn check_not_freed(&self, ptr: NonNull<u8>, layout: Layout, realloc: bool) {
+        if layout.size() == 0 {
+            return;
+        }
+        // SAFETY: shared read of arena bookkeeping; no &mut borrow is live (the
+        // arenas are only ever borrowed for a single statement).
+        let freed = unsafe {
+            match &self.backend {
+                Backend::Aset(set) => (*set.get()).is_freed(ptr, layout),
+                Backend::Generation(a) => (*a.get()).is_freed(ptr),
+                Backend::Slab(a) => !realloc && (*a.get()).is_freed(ptr),
+                Backend::Malloc | Backend::Bump(_) | Backend::BumpDrop(..) | Backend::BumpForget(_) => {
+                    false
+                }
+            }
+        };
+        if freed {
+            freed::report(realloc, self.acct.name.get(), ptr);
+        }
+    }
+
     /// Contract: set the limit before creating children (limited_path cache).
     pub fn with_limit(self, limit: usize) -> Self {
         debug_assert!(
@@ -1675,6 +1708,8 @@ unsafe impl Allocator for Mcx<'_> {
 
     unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
         self.0.check_live();
+        #[cfg(debug_assertions)]
+        self.0.check_not_freed(ptr, layout, false);
         match &self.0.backend {
             Backend::Aset(set) => {
                 self.0.uncharge(layout.size());
@@ -1713,6 +1748,8 @@ unsafe impl Allocator for Mcx<'_> {
             return Err(alloc_ceiling_exceeded());
         }
         self.0.check_live();
+        #[cfg(debug_assertions)]
+        self.0.check_not_freed(ptr, old_layout, true);
         self.0.is_reset.set(false);
         match &self.0.backend {
             Backend::Aset(set) => {
@@ -1762,6 +1799,8 @@ unsafe impl Allocator for Mcx<'_> {
         new_layout: Layout,
     ) -> Result<NonNull<[u8]>, AllocError> {
         self.0.check_live();
+        #[cfg(debug_assertions)]
+        self.0.check_not_freed(ptr, old_layout, true);
         match &self.0.backend {
             Backend::Aset(set) => {
                 // SAFETY: single-statement borrow, never re-entered (aset_mut).
@@ -1904,6 +1943,24 @@ pub fn check_alloc_size(request: usize) -> PgResult<()> {
         return Err(invalid_alloc_size(request));
     }
     Ok(())
+}
+
+/// C mcxt.c `mul_size()`: the overflow-checked `count * sizeof(type)` that
+/// `palloc_array()` / `palloc_mul()` size through (ERRCODE_PROGRAM_LIMIT_EXCEEDED).
+// upstream e1c30458a10f (18.4): Make palloc_array() and friends safe against integer overflow.
+#[inline]
+pub fn mul_size(s1: usize, s2: usize) -> PgResult<usize> {
+    match s1.checked_mul(s2) {
+        Some(result) => Ok(result),
+        None => Err(mul_size_error(s1, s2)),
+    }
+}
+
+#[cold]
+fn mul_size_error(s1: usize, s2: usize) -> alloc::boxed::Box<PgError> {
+    PgError::error(alloc::format!("invalid memory allocation request size {s1} * {s2}"))
+        .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+        .into()
 }
 
 /// Droppy `T` allowed: the returned box runs `Drop`.

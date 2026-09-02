@@ -251,9 +251,13 @@ pub fn AlterDomain<'mcx>(
         b'T' => AlterDomainDefault(mcx, &stmt.typeName, stmt.def),
         b'N' => AlterDomainNotNull(mcx, &stmt.typeName, false),
         b'O' => AlterDomainNotNull(mcx, &stmt.typeName, true),
-        b'C' => {
-            alter_domain_add_constraint_impl(mcx, &stmt.typeName, stmt.def.expect("constraint def"))
-        }
+        b'C' => alter_domain_add_constraint_impl(
+            mcx,
+            &stmt.typeName,
+            stmt.def.expect("constraint def"),
+            // upstream 2780538433fc (18.5): is_readd
+            false,
+        ),
         b'X' => AlterDomainDropConstraint(
             mcx,
             &stmt.typeName,
@@ -300,6 +304,10 @@ fn AlterDomainDefault<'mcx>(
             .map(|c| c.constisnull)
             .unwrap_or(false);
         if !is_null_const {
+            // upstream 2780538433fc (18.5): Check for USAGE privilege on types used by stored expressions.
+            // The below GenerateTypeDependencies rebuild creates the
+            // dependencies on types. We are responsible for checking USAGE.
+            catalog_dependency::CheckUsageOnTypesInExpr(expr, &NodeList::nil(), miscinit::GetUserId())?;
             let default_value = ruleutils::deparse_expression_pretty(mcx, expr, InvalidOid, false, 0)?;
             let binstr = outfuncs::nodeToString(mcx, expr)?;
             defaultbin_text = Some(varlena::cstring_to_text(mcx, binstr.as_str().as_bytes())?);
@@ -543,15 +551,19 @@ pub(crate) fn AlterDomainAddConstraint<'mcx>(
     mcx: Mcx<'mcx>,
     names: &NodeList<'mcx>,
     new_constraint: Node<'mcx>,
+    is_readd: bool,
 ) -> PgResult<()> {
-    alter_domain_add_constraint_impl(mcx, names, new_constraint)?;
+    alter_domain_add_constraint_impl(mcx, names, new_constraint, is_readd)?;
     Ok(())
 }
 
+// upstream 2780538433fc (18.5): is_readd — a tablecmds rebuild of an existing
+// constraint skips the USAGE check on the types its expression names.
 fn alter_domain_add_constraint_impl<'mcx>(
     mcx: Mcx<'mcx>,
     names: &NodeList<'mcx>,
     new_constraint: Node<'mcx>,
+    is_readd: bool,
 ) -> PgResult<ObjectAddress> {
     let typename = typename_from_list(mcx, names)?;
     let (domainoid, _) = parse_utilcmd::typenameTypeIdAndMod(mcx, None, &typename)?;
@@ -573,6 +585,7 @@ fn alter_domain_add_constraint_impl<'mcx>(
                 row.typtypmod,
                 constr,
                 &row.typname,
+                is_readd,
             )?;
             if !constr.skip_validation {
                 validateDomainCheckConstraint(mcx, domainoid, ccbin.as_str())?;

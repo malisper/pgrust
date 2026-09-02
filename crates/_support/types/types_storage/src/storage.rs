@@ -311,13 +311,19 @@ pub enum ProcSignalReason {
     PROCSIG_RECOVERY_CONFLICT_LOGICALSLOT = 11,
     PROCSIG_RECOVERY_CONFLICT_BUFFERPIN = 12,
     PROCSIG_RECOVERY_CONFLICT_STARTUP_DEADLOCK = 13,
+    // upstream acf49bfede2a (18.4): Fix ABI break by moving PROCSIG_SLOTSYNC_MESSAGE in ProcSignalReason
+    // Appended after the recovery-conflict block (58c1188a3eaa had inserted it
+    // mid-enum as 7); the recovery conflicts keep 7..13. Header-numeric mirror
+    // of procsignal.h at 18.6.
+    PROCSIG_SLOTSYNC_MESSAGE = 14,
 }
 
 pub const PROCSIG_RECOVERY_CONFLICT_FIRST: ProcSignalReason =
     ProcSignalReason::PROCSIG_RECOVERY_CONFLICT_DATABASE;
 pub const PROCSIG_RECOVERY_CONFLICT_LAST: ProcSignalReason =
     ProcSignalReason::PROCSIG_RECOVERY_CONFLICT_STARTUP_DEADLOCK;
-pub const NUM_PROCSIGNALS: usize = PROCSIG_RECOVERY_CONFLICT_LAST as usize + 1;
+// upstream acf49bfede2a (18.4): Fix ABI break by moving PROCSIG_SLOTSYNC_MESSAGE in ProcSignalReason
+pub const NUM_PROCSIGNALS: usize = ProcSignalReason::PROCSIG_SLOTSYNC_MESSAGE as usize + 1;
 
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -869,7 +875,12 @@ mod tests {
     fn proc_constants_match_headers() {
         assert_eq!(MAX_BACKENDS, 0x3FFFF);
         assert_eq!(NUM_AUXILIARY_PROCS, 38);
-        assert_eq!(NUM_PROCSIGNALS, 14);
+        // upstream acf49bfede2a (18.4): Fix ABI break by moving PROCSIG_SLOTSYNC_MESSAGE in ProcSignalReason
+        assert_eq!(NUM_PROCSIGNALS, 15);
+        assert_eq!(ProcSignalReason::PROCSIG_SLOTSYNC_MESSAGE as u32, 14);
+        assert_eq!(ProcSignalReason::PROCSIG_RECOVERY_CONFLICT_DATABASE as u32, 7);
+        assert_eq!(PROCSIG_RECOVERY_CONFLICT_FIRST as u32, 7);
+        assert_eq!(PROCSIG_RECOVERY_CONFLICT_LAST as u32, 13);
         assert_eq!(PROC_VACUUM_STATE_MASK, 0x0E);
         assert_eq!(PROC_XMIN_FLAGS, 0x06);
     }

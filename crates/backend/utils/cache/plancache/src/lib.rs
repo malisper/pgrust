@@ -15,7 +15,8 @@ use core::cell::RefCell;
 use std::rc::Rc;
 
 use cache_syscache::cacheinfo::{
-    AMOPOPID, FOREIGNDATAWRAPPEROID, FOREIGNSERVEROID, NAMESPACEOID, OPEROID, PROCOID, TYPEOID,
+    AMOPOPID, AUTHMEMROLEMEM, AUTHOID, DATABASEOID, FOREIGNDATAWRAPPEROID, FOREIGNSERVEROID,
+    NAMESPACEOID, OPEROID, PROCOID, TYPEOID,
 };
 use catalog_namespace::SearchPathMatcher;
 use datum::Datum;
@@ -356,6 +357,10 @@ pub fn InitPlanCache() -> PgResult<()> {
         PlanCacheSysCallback,
         zero,
     )?;
+    // upstream 0b12f56bfac1 (18.6): Invalidate plan cache after role changes.
+    inval::invalidate::CacheRegisterSyscacheCallback(AUTHMEMROLEMEM, PlanCacheRoleCallback, zero)?;
+    inval::invalidate::CacheRegisterSyscacheCallback(AUTHOID, PlanCacheRoleCallback, zero)?;
+    inval::invalidate::CacheRegisterSyscacheCallback(DATABASEOID, PlanCacheRoleCallback, zero)?;
     Ok(())
 }
 
@@ -1982,6 +1987,38 @@ fn stmt_list_matches_inval(stmt_list: &[PlannedStmt<'_>], cacheid: i32, hashvalu
                 item.cacheId == cacheid && (hashvalue == 0 || item.hashValue == hashvalue)
             })
     })
+}
+
+// upstream 0b12f56bfac1 (18.6): Invalidate plan cache after role changes.
+// Role membership, role attributes and database ownership change which RLS
+// policies apply; these shared-catalog invals reach every backend, so only
+// the role-dependent plans drop. cached_db_hash is read lazily: initialize_acl
+// runs after InitPlanCache, once the database is selected.
+pub fn PlanCacheRoleCallback(_arg: Datum, cacheid: i32, hashvalue: u32) {
+    if cacheid == DATABASEOID && hashvalue != adt_acl::cached_db_hash() && hashvalue != 0 {
+        return;
+    }
+    with_cache(|pc| {
+        for i in 0..pc.saved_plan_list.len() {
+            let h = pc.saved_plan_list[i];
+            let (rls, gplan) = {
+                let src = source_mut(pc, h);
+                if !src.is_valid || !src.requires_reval {
+                    continue;
+                }
+                if src.depends_on_rls {
+                    (true, invalidate_source_entry(src))
+                } else {
+                    (false, src.gplan)
+                }
+            };
+            let Some(gplan) = gplan else { continue };
+            let plan = plan_mut(pc, gplan);
+            if rls || plan.depends_on_role {
+                plan.is_valid = false;
+            }
+        }
+    });
 }
 
 pub fn PlanCacheSysCallback(_arg: Datum, _cacheid: i32, _hashvalue: u32) {

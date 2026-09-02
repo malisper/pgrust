@@ -522,7 +522,7 @@ fn run_stmt_returning(sql: &str) -> (CmdType, u64, Vec<Vec<i32>>) {
 
     let store = tuplestore_hold_seams::tuplestore_begin_heap_hold::call(false).unwrap();
     let mut dest = tcop_dest::CreateDestReceiver(types_dest::CommandDest::Tuplestore);
-    tcop_dest::SetTuplestoreDestReceiverParams(&mut dest, store, false);
+    tcop_dest::SetTuplestoreDestReceiverParams(&mut dest, store, false, None, None);
     execmain_seams::executor_run::call(
         qd,
         types_scan::sdir::ForwardScanDirection,

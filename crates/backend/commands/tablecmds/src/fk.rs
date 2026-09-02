@@ -2013,6 +2013,10 @@ pub(crate) fn queue_fk_constraint_validation<'mcx>(
     con: &FkConstraintForm,
     lockmode: types_rel::LOCKMODE,
 ) -> PgResult<()> {
+    // upstream 0480d84ee35f (18.6): Add stack depth check to QueueFKConstraintValidation().
+    // since this function recurses, it could be driven to stack overflow
+    stack_depth::check_stack_depth()?;
+
     debug_assert!(con.contype == pg_constraint::CONSTRAINT_FOREIGN);
     debug_assert!(!con.convalidated);
 
@@ -2700,6 +2704,20 @@ pub(crate) fn ATExecAlterConstraint<'mcx>(
             ERRCODE_WRONG_OBJECT_TYPE,
         ));
     }
+    // upstream 41247cdf695b (18.6): Prevent setting NO INHERIT on partitioned
+    // NOT NULL constraints -- partitions always inherit them.
+    if cmdcon.alterInheritability
+        && cmdcon.noinherit
+        && rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE
+    {
+        return Err(err(
+            format!(
+                "not-null constraint \"{conname}\" on partitioned table \"{relname}\" cannot be \
+                 NO INHERIT"
+            ),
+            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+        ));
+    }
     // Refuse to modify inheritability of inherited constraints.
     if cmdcon.alterInheritability && cmdcon.noinherit && con.coninhcount > 0 {
         return Err(err(
@@ -2864,14 +2882,17 @@ fn alter_constr_enforceability<'mcx>(
         drop_foreign_key_constraint_triggers(mcx, con.oid, InvalidOid, InvalidOid)?;
     } else if changed {
         // Minimal Constraint node carrying what trigger creation reads.
-        // 18.3 leaves deferrable/initdeferred at makeNode zero here, so a
-        // re-ENFORCED constraint's triggers come back NOT DEFERRABLE.
+        // upstream 5db5e339692e (18.4): Fix FK triggers losing DEFERRABLE/
+        // INITIALLY DEFERRED when marked ENFORCED again -- the recreated
+        // triggers take tgdeferrable/tginitdeferred from the constraint row.
         let fkconstraint = Constraint {
             contype: types_nodes::rawnodes::ConstrType::CONSTR_FOREIGN,
             conname: Some(str_in(mcx, con.name_str())?),
             fk_matchtype: con.confmatchtype,
             fk_upd_action: con.confupdtype,
             fk_del_action: con.confdeltype,
+            deferrable: con.condeferrable,
+            initdeferred: con.condeferred,
             location: -1,
             ..Default::default()
         };

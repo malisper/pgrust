@@ -9,7 +9,7 @@ use types_tuple::{HeapTupleData, TupleDescData};
 
 use crate::{
     err, index_create, oid_scankey, IndexCreateExtra, IndexRelidIndexId,
-    INDEX_CREATE_CONCURRENT, INDEX_CREATE_SKIP_BUILD,
+    INDEX_CREATE_CONCURRENT, INDEX_CREATE_DEFERRABLE, INDEX_CREATE_SKIP_BUILD,
 };
 
 const Anum_pg_class_relname: usize = 2;
@@ -167,6 +167,12 @@ pub fn index_concurrently_create_copy<'mcx>(
     }
 
     let form = indexRelation.rd_index.as_ref().expect("index relation");
+    // upstream e4527519b77e (18.6): Fix propagation of indimmediate flag in index_create_copy()
+    let mut flags = INDEX_CREATE_SKIP_BUILD | INDEX_CREATE_CONCURRENT;
+    // Old index is deferrable, do the same for the new index.
+    if !form.indimmediate {
+        flags |= INDEX_CREATE_DEFERRABLE;
+    }
     let nattrs = oldInfo.ii_NumIndexAttrs as usize;
 
     // indclass off the pg_index row (the Form does not carry it).
@@ -289,7 +295,7 @@ pub fn index_concurrently_create_copy<'mcx>(
         &opclass_ids,
         &indexRelation.rd_indoption,
         &IndexCreateExtra {
-            flags: INDEX_CREATE_SKIP_BUILD | INDEX_CREATE_CONCURRENT,
+            flags,
             constr_flags: 0,
             allow_system_table_mods: true,
             is_internal: false,

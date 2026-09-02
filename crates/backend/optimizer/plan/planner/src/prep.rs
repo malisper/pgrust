@@ -46,6 +46,18 @@ pub fn remove_useless_result_rtes<'mcx>(
 ) -> PgResult<()> {
     let mcx = run.mcx;
     let f = parse.jointree.expect("top jointree is a FromExpr");
+    // upstream 21f5e659e758 (18.5): Fix edge case in remove_useless_result_rtes() with outer joins.
+    // upstream 9e40d07e140b (18.5): Skip unnecessary get_relids_in_jointree() when there are no PHVs
+    // The find_dependent_phvs() checks need the jointree's set of baserels,
+    // but they are no-ops when the query has no PHVs, so skip the scan then.
+    let baserels = if run.glob.last_ph_id != 0 {
+        let mut b = types_nodes::bitmapset::Bitmapset::empty();
+        collect_jointree_relids(mcx, f, &mut b)?;
+        Some(b)
+    } else {
+        None
+    };
+    let baserels = baserels.as_ref();
     // All-RangeTblRef fast path (SELECT 1 and every no-join query pays this
     // pass): the recursion is a per-child no-op, so drop RESULT siblings
     // directly and rebuild only when something dropped. A RESULT that
@@ -81,7 +93,7 @@ pub fn remove_useless_result_rtes<'mcx>(
                             }
                         };
                         crate::prepjointree::find_dependent_phvs_in_jointree(
-                            run, parse, fnode, varno,
+                            run, parse, fnode, varno, baserels,
                         )?
                     };
                     if !dependent {
@@ -119,6 +131,7 @@ pub fn remove_useless_result_rtes<'mcx>(
             run,
             parse,
             child,
+            baserels,
             Some(&mut slot),
             &mut dropped_outer_joins,
         )? {
@@ -130,7 +143,7 @@ pub fn remove_useless_result_rtes<'mcx>(
         }
     }
     let (fromlist, ndropped) =
-        drop_result_children(run, parse, &mut children, slot.node)?;
+        drop_result_children(run, parse, &mut children, baserels, slot.node)?;
     if any_child_changed || slot.changed || ndropped > 0 {
         parse.jointree = Some(alloc_leak_in(mcx, FromExpr { fromlist, quals: slot.node })?);
     }
@@ -173,6 +186,7 @@ fn drop_result_children<'mcx>(
     run: &mut PlannerRun<'mcx>,
     parse: &Query<'mcx>,
     children: &mut [Option<Node<'mcx>>],
+    baserels: Option<&types_nodes::bitmapset::Bitmapset<'mcx>>,
     quals: Option<Node<'mcx>>,
 ) -> PgResult<(NodeList<'mcx>, usize)> {
     let mcx = run.mcx;
@@ -196,7 +210,9 @@ fn drop_result_children<'mcx>(
                 cur.lappend(mcx, *c)?;
             }
             let f_node = Node::mk(mcx, FromExpr { fromlist: cur, quals })?;
-            if crate::prepjointree::find_dependent_phvs_in_jointree(run, parse, f_node, varno)? {
+            if crate::prepjointree::find_dependent_phvs_in_jointree(
+                run, parse, f_node, varno, baserels,
+            )? {
                 continue;
             }
         }
@@ -253,6 +269,7 @@ fn remove_useless_results_recurse<'mcx>(
     run: &mut PlannerRun<'mcx>,
     parse: &Query<'mcx>,
     jtnode: Node<'mcx>,
+    baserels: Option<&types_nodes::bitmapset::Bitmapset<'mcx>>,
     mut parent_quals: Option<&mut QualSlot<'mcx>>,
     dropped_outer_joins: &mut types_nodes::bitmapset::Bitmapset<'mcx>,
 ) -> PgResult<Option<Node<'mcx>>> {
@@ -270,6 +287,7 @@ fn remove_useless_results_recurse<'mcx>(
                     run,
                     parse,
                     child,
+                    baserels,
                     Some(&mut slot),
                     dropped_outer_joins,
                 )? {
@@ -281,7 +299,7 @@ fn remove_useless_results_recurse<'mcx>(
                 }
             }
             let (fromlist, ndropped) =
-                drop_result_children(run, parse, &mut children, slot.node)?;
+                drop_result_children(run, parse, &mut children, baserels, slot.node)?;
             if fromlist.len() == 1 && (slot.node.is_none() || parent_quals.is_some()) {
                 let kept = fromlist.nth(0);
                 if let Some(p) = parent_quals {
@@ -302,6 +320,7 @@ fn remove_useless_results_recurse<'mcx>(
                     run,
                     parse,
                     j.larg,
+                    baserels,
                     Some(&mut slot),
                     dropped_outer_joins,
                 )?,
@@ -309,6 +328,7 @@ fn remove_useless_results_recurse<'mcx>(
                     run,
                     parse,
                     j.larg,
+                    baserels,
                     parent_quals.as_deref_mut(),
                     dropped_outer_joins,
                 )?,
@@ -316,6 +336,7 @@ fn remove_useless_results_recurse<'mcx>(
                     run,
                     parse,
                     j.larg,
+                    baserels,
                     None,
                     dropped_outer_joins,
                 )?,
@@ -325,6 +346,7 @@ fn remove_useless_results_recurse<'mcx>(
                     run,
                     parse,
                     j.rarg,
+                    baserels,
                     Some(&mut slot),
                     dropped_outer_joins,
                 )?,
@@ -332,6 +354,7 @@ fn remove_useless_results_recurse<'mcx>(
                     run,
                     parse,
                     j.rarg,
+                    baserels,
                     None,
                     dropped_outer_joins,
                 )?,
@@ -348,7 +371,7 @@ fn remove_useless_results_recurse<'mcx>(
                     // gate since nothing after it can reference it.
                     let keep = if lrel != 0
                         && !crate::prepjointree::find_dependent_phvs_in_jointree(
-                            run, parse, rarg, lrel,
+                            run, parse, rarg, lrel, baserels,
                         )? {
                         crate::prepjointree::remove_result_refs(run, parse, lrel, rarg)?;
                         Some(rarg)
@@ -381,7 +404,9 @@ fn remove_useless_results_recurse<'mcx>(
                     let varno = get_result_relid(parse, rarg);
                     if varno != 0
                         && (slot.node.is_none()
-                            || !crate::prepjointree::find_dependent_phvs(run, parse, varno)?)
+                            || !crate::prepjointree::find_dependent_phvs(
+                                run, parse, varno, baserels,
+                            )?)
                     {
                         crate::prepjointree::remove_result_refs(run, parse, varno, larg)?;
                         dropped_outer_joins.add_member(mcx, j.rtindex)?;

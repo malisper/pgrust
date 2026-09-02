@@ -1711,10 +1711,13 @@ pub fn newlacon(v: &mut Vars, begin: StateId, end: StateId, latype: u8) -> RegRe
     v.nlacons = n + 1;
     // The lookaround index is later packed into the i16 color space (LACON arcs
     // use color = ncolors + index at compaction). Reject before the caller's
-    // `n as color` cast can truncate a pathological count; C fails REG_ETOOBIG.
+    // `n as color` cast can truncate a pathological count, with the code
+    // compact()'s LACON fit check reports for this overflow class (C has no
+    // guard here; its cast wraps silently).
+    // upstream f3cee4dc4330 (18.4): Harden our regex engine against integer overflow in size calculations.
     if n > crate::regguts::MAX_COLOR as i32 {
-        v.seterr(REG_ETOOBIG);
-        return Err(RegError(REG_ETOOBIG));
+        v.seterr(REG_ECOLORS);
+        return Err(RegError(REG_ECOLORS));
     }
     let sub = &mut v.lacons[n as usize];
     sub.begin = Some(begin);

@@ -11,7 +11,7 @@ compile_error!("only the little-endian blkreftable layout is implemented");
 
 use crc32c::{fin_crc32c, pg_comp_crc32c, CRC32C_INIT};
 use mcx::{vec_append_bytes, vec_new_in, Mcx, PgFxHashMap, PgVec};
-use types_core::{BlockNumber, ForkNumber, InvalidBlockNumber};
+use types_core::{BlockNumber, ForkNumber, InvalidBlockNumber, MAX_FORKNUM};
 use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED};
 use types_storage::RelFileLocator;
 
@@ -546,6 +546,28 @@ impl<'mcx, 'f, R: FnMut(&mut [u8]) -> PgResult<usize>> BlockRefTableReader<'mcx,
         .into()
     }
 
+    #[track_caller]
+    #[cold]
+    fn invalid_fork_number(&self, forknum: i32) -> Box<PgError> {
+        PgError::error(format!(
+            "file \"{}\" has invalid fork number {}",
+            self.error_filename, forknum
+        ))
+        .with_sqlstate(ERRCODE_DATA_CORRUPTED)
+        .into()
+    }
+
+    #[track_caller]
+    #[cold]
+    fn invalid_chunk_size(&self, chunkno: usize, size: u16) -> Box<PgError> {
+        PgError::error(format!(
+            "file \"{}\" chunk {} has invalid size {}",
+            self.error_filename, chunkno, size
+        ))
+        .with_sqlstate(ERRCODE_DATA_CORRUPTED)
+        .into()
+    }
+
     pub fn next_relation(
         &mut self,
     ) -> PgResult<Option<(RelFileLocator, ForkNumber, BlockNumber)>> {
@@ -573,6 +595,24 @@ impl<'mcx, 'f, R: FnMut(&mut [u8]) -> PgResult<usize>> BlockRefTableReader<'mcx,
 
         let sentry = SerializedEntry::from_bytes(&sbytes);
 
+        // upstream bcc428a23a69 (18.6): Add additional sanity checks when reading a blkreftable.
+        if sentry.forknum < 0 || sentry.forknum > MAX_FORKNUM as i32 {
+            return Err(self.invalid_fork_number(sentry.forknum));
+        }
+        let forknum = ForkNumber::from_i32(sentry.forknum).expect("fork number range-checked");
+
+        // upstream 01e568b8c11b (18.4): Fix assorted places that need to use palloc_array().
+        // C bounds nchunks before sizing the chunk array (frontend builds have
+        // no palloc_array ceiling, so BlockRefTableRead's int length could wrap).
+        if sentry.nchunks as usize > mcx::MAX_ALLOC_SIZE / core::mem::size_of::<u16>() {
+            return Err(PgError::error(format!(
+                "file \"{}\" has oversized chunk size array",
+                self.error_filename
+            ))
+            .with_sqlstate(ERRCODE_DATA_CORRUPTED)
+            .into());
+        }
+
         self.chunk_size.clear();
         let n = sentry.nchunks as usize;
         let alloc = *self.chunk_size.allocator();
@@ -583,13 +623,18 @@ impl<'mcx, 'f, R: FnMut(&mut [u8]) -> PgResult<usize>> BlockRefTableReader<'mcx,
         self.chunk_size = size_words;
         res?;
 
+        // upstream bcc428a23a69 (18.6): Add additional sanity checks when reading a blkreftable.
+        if let Some((chunkno, &size)) = self
+            .chunk_size
+            .iter()
+            .enumerate()
+            .find(|(_, &size)| size as u32 > MAX_ENTRIES_PER_CHUNK)
+        {
+            return Err(self.invalid_chunk_size(chunkno, size));
+        }
+
         self.total_chunks = sentry.nchunks;
         self.consumed_chunks = 0;
-
-        // C carries the raw int through; unknown fork values only occur in
-        // corrupt files and collapse to InvalidForkNumber here.
-        let forknum =
-            ForkNumber::from_i32(sentry.forknum).unwrap_or(ForkNumber::InvalidForkNumber);
         Ok(Some((sentry.rlocator, forknum, sentry.limit_block)))
     }
 

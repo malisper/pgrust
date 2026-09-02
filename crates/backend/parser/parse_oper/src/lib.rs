@@ -12,11 +12,12 @@ use datum::Datum;
 use mcx::{Mcx, MemoryContext, PgHashMap};
 use parser_small1::{parser_errposition, ParseState};
 use syscache_seams::PgOperatorShape;
-use types_core::catalog::UNKNOWNOID;
+use types_core::catalog::{INTERNALOID, UNKNOWNOID};
 use types_core::{InvalidOid, Oid, OidIsValid, ParseLoc};
 use types_error::{
-    ErrorLocation, PgError, PgResult, ERRCODE_AMBIGUOUS_FUNCTION, ERRCODE_SYNTAX_ERROR,
-    ERRCODE_UNDEFINED_FUNCTION, ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
+    ErrorLocation, PgError, PgResult, ERRCODE_AMBIGUOUS_FUNCTION, ERRCODE_FEATURE_NOT_SUPPORTED,
+    ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_FUNCTION, ERRCODE_UNDEFINED_OBJECT,
+    ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
 use types_nodes::{CoercionForm, Node, NodeList, OpExpr, OptNodeList, ScalarArrayOpExpr};
 
@@ -429,6 +430,25 @@ fn coercion_error(
     )
 }
 
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn internal_call_error(
+    pstate: &ParseState<'_, '_>,
+    verb: &str,
+    location: ParseLoc,
+) -> Box<PgError> {
+    let encoding = mbutils::GetDatabaseEncoding();
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(format!("functions {verb} type \"internal\" cannot be called explicitly"))
+            .errposition(parser_errposition(pstate, location, encoding))
+            .into_error()
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "make_op")),
+    )
+}
+
 /// C `make_op`, with the operand types precomputed by the caller (exprType's
 /// closed-set slice lives in parse_expr pending backend-nodes-core).
 #[allow(clippy::too_many_arguments)]
@@ -474,6 +494,14 @@ pub fn make_op<'mcx>(
         op.shape.oprresult,
         false,
     )?;
+
+    // upstream 54649de65f08 (18.6): Reject calls from SQL to functions that take or return type internal.
+    if declared_arg_types[..nargs].contains(&INTERNALOID) {
+        return Err(internal_call_error(pstate, "accepting", location));
+    }
+    if rettype == INTERNALOID {
+        return Err(internal_call_error(pstate, "returning", location));
+    }
 
     // make_fn_arguments (parse_func.c) hosted here until backend-parser-func.
     let ltree = match ltree {

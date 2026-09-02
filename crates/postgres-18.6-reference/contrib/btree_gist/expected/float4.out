@@ -1,0 +1,126 @@
+-- float4 check
+CREATE TABLE float4tmp (a float4);
+\copy float4tmp from 'data/float4.data'
+SET enable_seqscan=on;
+SELECT count(*) FROM float4tmp WHERE a <  -179.0;
+ count 
+-------
+   245
+(1 row)
+
+SELECT count(*) FROM float4tmp WHERE a <= -179.0;
+ count 
+-------
+   246
+(1 row)
+
+SELECT count(*) FROM float4tmp WHERE a  = -179.0;
+ count 
+-------
+     1
+(1 row)
+
+SELECT count(*) FROM float4tmp WHERE a >= -179.0;
+ count 
+-------
+   305
+(1 row)
+
+SELECT count(*) FROM float4tmp WHERE a >  -179.0;
+ count 
+-------
+   304
+(1 row)
+
+SELECT a, a <-> '-179.0' FROM float4tmp ORDER BY a <-> '-179.0' LIMIT 3;
+     a      | ?column?  
+------------+-----------
+       -179 |         0
+ -189.02386 | 10.023865
+ -158.17741 | 20.822586
+(3 rows)
+
+CREATE INDEX float4idx ON float4tmp USING gist ( a );
+SET enable_seqscan=off;
+SELECT count(*) FROM float4tmp WHERE a <  -179.0::float4;
+ count 
+-------
+   245
+(1 row)
+
+SELECT count(*) FROM float4tmp WHERE a <= -179.0::float4;
+ count 
+-------
+   246
+(1 row)
+
+SELECT count(*) FROM float4tmp WHERE a  = -179.0::float4;
+ count 
+-------
+     1
+(1 row)
+
+SELECT count(*) FROM float4tmp WHERE a >= -179.0::float4;
+ count 
+-------
+   305
+(1 row)
+
+SELECT count(*) FROM float4tmp WHERE a >  -179.0::float4;
+ count 
+-------
+   304
+(1 row)
+
+EXPLAIN (COSTS OFF)
+SELECT a, a <-> '-179.0' FROM float4tmp ORDER BY a <-> '-179.0' LIMIT 3;
+                     QUERY PLAN                     
+----------------------------------------------------
+ Limit
+   ->  Index Only Scan using float4idx on float4tmp
+         Order By: (a <-> '-179'::real)
+(3 rows)
+
+SELECT a, a <-> '-179.0' FROM float4tmp ORDER BY a <-> '-179.0' LIMIT 3;
+     a      | ?column?  
+------------+-----------
+       -179 |         0
+ -189.02386 | 10.023865
+ -158.17741 | 20.822586
+(3 rows)
+
+-- EXCLUDE constraint must block a duplicate NaN, same as it does for finite
+-- values.
+CREATE TABLE float4excl (a float4, EXCLUDE USING gist (a WITH =));
+INSERT INTO float4excl VALUES ('NaN'::float4);
+INSERT INTO float4excl VALUES ('NaN'::float4);  -- expect: violates EXCLUDE
+ERROR:  conflicting key value violates exclusion constraint "float4excl_a_excl"
+DETAIL:  Key (a)=(NaN) conflicts with existing key (a)=(NaN).
+SELECT count(*) FROM float4excl;
+ count 
+-------
+     1
+(1 row)
+
+-- Test double-column index
+CREATE INDEX float4idx2 ON float4tmp USING gist ( a, abs(a) );
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM float4tmp WHERE abs(a) = 179.0::float4;
+                    QUERY PLAN                    
+--------------------------------------------------
+ Aggregate
+   ->  Bitmap Heap Scan on float4tmp
+         Recheck Cond: (abs(a) = '179'::real)
+         ->  Bitmap Index Scan on float4idx2
+               Index Cond: (abs(a) = '179'::real)
+(5 rows)
+
+SELECT count(*) FROM float4tmp WHERE abs(a) = 179.0::float4;
+ count 
+-------
+     1
+(1 row)
+
+RESET enable_seqscan;
+RESET enable_indexscan;
+RESET enable_bitmapscan;

@@ -2,6 +2,7 @@
 
 use mcx::{Mcx, PgString};
 use pg_md5::{pg_md5_encrypt, MD5_PASSWD_CHARSET, MD5_PASSWD_LEN};
+use timingsafe_bcmp::timingsafe_bcmp;
 use types_error::{
     ErrorLocation, PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_WARNING_DEPRECATED_FEATURE,
     ERROR, WARNING,
@@ -162,7 +163,10 @@ pub fn md5_crypt_verify(
     // Stored password already encrypted, only do salt.
     let crypt_pwd = pg_md5_encrypt(&shadow_pass.as_bytes()[3..], md5_salt);
 
-    if client_pass.as_bytes() == &crypt_pwd[..] {
+    // upstream d93ef413174d (18.4): Apply timingsafe_bcmp() in authentication paths
+    if client_pass.len() == crypt_pwd.len()
+        && timingsafe_bcmp(client_pass.as_bytes(), &crypt_pwd) == 0
+    {
         Ok(STATUS_OK)
     } else {
         *logdetail = Some(format!("Password does not match for user \"{role}\"."));
@@ -187,7 +191,10 @@ pub fn plain_crypt_verify(
         }
         PasswordType::Md5 => {
             let crypt_client_pass = pg_md5_encrypt(client_pass.as_bytes(), role.as_bytes());
-            if &crypt_client_pass[..] == shadow_pass.as_bytes() {
+            // upstream d93ef413174d (18.4): Apply timingsafe_bcmp() in authentication paths
+            if crypt_client_pass.len() == shadow_pass.len()
+                && timingsafe_bcmp(&crypt_client_pass, shadow_pass.as_bytes()) == 0
+            {
                 return Ok(STATUS_OK);
             }
             *logdetail = Some(format!("Password does not match for user \"{role}\"."));

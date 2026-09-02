@@ -2,6 +2,9 @@
 #![allow(non_upper_case_globals)]
 #![allow(non_camel_case_types)]
 
+#[cfg(test)]
+mod tests;
+
 use std::rc::Rc;
 
 use elog::{elog, ereport};
@@ -20,8 +23,8 @@ use types_core::{
     TransactionIdIsValid, TransactionIdPrecedes, XLogRecPtr,
 };
 use types_error::{
-    ErrorLocation, PgResult, ERRCODE_ACTIVE_SQL_TRANSACTION,
-    ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR, LOG,
+    ErrorLocation, PgResult, ERRCODE_ACTIVE_SQL_TRANSACTION, ERRCODE_INSUFFICIENT_PRIVILEGE,
+    ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_SYNTAX_ERROR, ERROR, LOG,
 };
 use types_rel::RelationData;
 use types_storage::storage::{PROC_ARRAY_LOCK, REPLICATION_SLOT_CONTROL_LOCK};
@@ -295,10 +298,10 @@ fn StartupDecodingContext(
     let mut callbacks = OutputPluginCallbacks::default();
     if !fast_forward {
         let plugin = unsafe { slot.data.get() }.plugin;
-        LoadOutputPlugin(
-            &mut callbacks,
-            std::str::from_utf8(plugin.name_str()).expect("plugin name is utf8"),
-        )?;
+        let plugin = std::str::from_utf8(plugin.name_str()).expect("plugin name is utf8");
+        // upstream 2a29b607dbbb (18.6): Add an output_plugin_libraries GUC to bless trusted output plugins
+        check_output_plugin_allowed(plugin)?;
+        LoadOutputPlugin(&mut callbacks, plugin)?;
     }
 
     if !xact::IsTransactionOrTransactionBlock() {
@@ -721,6 +724,39 @@ pub fn OutputPluginUpdateProgress(
         return Ok(());
     };
     update_progress(opc, opc.write_location, opc.write_xid, skipped_xact)
+}
+
+// upstream 2a29b607dbbb (18.6): Add an output_plugin_libraries GUC to bless trusted output plugins
+// Exact-name allowlist applied before LoadOutputPlugin (which applies no LOAD
+// restrictions); superusers included. The detail is log-only, the hint goes
+// to the client.
+fn check_output_plugin_allowed(plugin: &str) -> PgResult<()> {
+    let libraries = guc_tables::vars::output_plugin_libraries_string
+        .read()
+        .unwrap_or_default();
+    let mut plugin_allowed = false;
+    if !libraries.is_empty() {
+        match pg_string::split_guc_list(&libraries, b',') {
+            Ok(elemlist) => plugin_allowed = elemlist.iter().any(|allowed| allowed == plugin),
+            Err(()) => {
+                let _ = ereport(LOG)
+                    .errcode(ERRCODE_SYNTAX_ERROR)
+                    .errmsg("invalid list syntax in parameter \"output_plugin_libraries\"")
+                    .finish(loc("StartupDecodingContext"));
+            }
+        }
+    }
+    if !plugin_allowed {
+        return ereport(ERROR)
+            .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)
+            .errmsg(format!("library \"{plugin}\" may not be used as an output plugin"))
+            .errdetail_log(format!(
+                "The configuration parameter \"output_plugin_libraries\" (currently '{libraries}') does not name this library as a trusted output plugin."
+            ))
+            .errhint("If it is safe for all REPLICATION users to use this library as an output plugin, add it to \"output_plugin_libraries\" and reload the server configuration.")
+            .finish(loc("StartupDecodingContext"));
+    }
+    Ok(())
 }
 
 fn LoadOutputPlugin(callbacks: &mut OutputPluginCallbacks, plugin: &str) -> PgResult<()> {

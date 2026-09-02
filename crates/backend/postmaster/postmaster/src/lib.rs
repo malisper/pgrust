@@ -666,21 +666,7 @@ pub fn process_pm_child_exit() -> PgResult<()> {
                 continue;
             }
 
-            if with_pm(|pm| {
-                pm.pm_state == PMState::PM_STARTUP
-                    && pm.startup_status != StartupStatusEnum::Signaled
-            }) && !status0
-            {
-                log_child_exit("startup process", pid, exitstatus);
-                report(
-                    LOG,
-                    "aborting startup due to startup process failure".into(),
-                    2292,
-                    "process_pm_child_exit",
-                );
-                statemachine::ExitPostmaster(1);
-            }
-
+            // upstream affdb2dd5c67 (18.4): Fix orphaned processes when startup process fails during PM_STARTUP
             if !status0 {
                 if with_pm(|pm| pm.startup_status == StartupStatusEnum::Signaled) {
                     with_pm(|pm| pm.startup_status = StartupStatusEnum::NotRunning);

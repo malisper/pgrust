@@ -625,3 +625,73 @@ fn corrupt_member_count_is_rejected() {
         assert!(member_count_is_corrupt(bad), "count {bad} must be rejected");
     }
 }
+
+// upstream c8d68bfd52d7 (18.5): the MultiXactId wraparound hints no longer
+// suggest dropping replication slots (slots do not hold back multixact
+// cleanup); both the SetMultiXactIdLimit and the GetNewMultiXactId WARNING
+// carry the 18.6 text.
+static WARNING_HINTS: Mutex<Vec<Option<String>>> = Mutex::new(Vec::new());
+
+fn capture_warning_hint(err: &types_error::PgError, _output_to_server: &mut bool) {
+    if err.level == types_error::WARNING {
+        WARNING_HINTS.lock().unwrap().push(err.hint.clone());
+    }
+}
+
+#[test]
+fn wraparound_warning_hints_carry_no_replication_slot_advice() {
+    let _l = test_lock();
+    setup();
+
+    let st = MultiXactState();
+    let saved_next = st.nextMXact.load(Relaxed);
+    let saved_offset = st.nextOffset.load(Relaxed);
+    // SetMultiXactIdLimit(1, ..) puts the warn limit 40M short of the wrap
+    // limit; park nextMXact just past it, on an offsets-page boundary (the
+    // page is zeroed on first use, not read) and off a 64K multiple (no
+    // postmaster signal).
+    let wrap_limit = FirstMultiXactId.wrapping_add(MaxMultiXactId >> 1);
+    let warn_limit = wrap_limit.wrapping_sub(40_000_000);
+    let per_page = MULTIXACT_OFFSETS_PER_PAGE;
+    let mut next = warn_limit.wrapping_add(per_page) & !(per_page - 1);
+    if next % 65536 == 0 {
+        next += per_page;
+    }
+    assert!(MultiXactIdPrecedes(warn_limit, next));
+    st.nextMXact.store(next, Relaxed);
+    // The offsets page the new multi lands on (RecordNewMultiXact reads it).
+    ExtendMultiXactOffset(next).unwrap();
+
+    let prev_hook = elog::set_emit_log_hook(Some(capture_warning_hint));
+    WARNING_HINTS.lock().unwrap().clear();
+    SetMultiXactIdLimit(FirstMultiXactId, 1, false).unwrap();
+
+    multixact_seams::multi_xact_id_set_oldest_member::call().unwrap();
+    let mut members = [
+        MultiXactMember { xid: 1901, status: MultiXactStatusForKeyShare },
+        MultiXactMember { xid: 1902, status: MultiXactStatusForShare },
+    ];
+    let multi = MultiXactIdCreateFromMembers(&mut members).unwrap();
+    assert_eq!(multi, next);
+    elog::set_emit_log_hook(prev_hook);
+    AtEOXact_MultiXact();
+
+    st.nextMXact.store(saved_next, Relaxed);
+    st.nextOffset.store(saved_offset, Relaxed);
+    SetMultiXactIdLimit(FirstMultiXactId, 1, false).unwrap();
+
+    let hints = core::mem::take(&mut *WARNING_HINTS.lock().unwrap());
+    assert_eq!(
+        hints,
+        vec![
+            Some(
+                "To avoid MultiXactId assignment failures, execute a database-wide VACUUM in that database.\nYou might also need to commit or roll back old prepared transactions."
+                    .to_string()
+            ),
+            Some(
+                "Execute a database-wide VACUUM in that database.\nYou might also need to commit or roll back old prepared transactions."
+                    .to_string()
+            ),
+        ]
+    );
+}

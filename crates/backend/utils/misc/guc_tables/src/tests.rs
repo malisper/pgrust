@@ -83,12 +83,14 @@ fn table_counts_match_compiled_backend_shape() {
     // sqe→main merge (pgrust-only, the sqe campaign lands): Int +1
     //   pgrust.sqe_threads (-> 177) = 472 — the engine worker width
     //   (0 = auto), formerly the PGRUST_SQE_THREADS env spelling.
+    // upstream 2a29b607dbbb (18.6, CVE-2026-6471): String +1
+    //   output_plugin_libraries (-> 80) = 473 — the C 18.6 GUC.
     assert_eq!(ConfigureNamesBool.len(), 140);
     assert_eq!(ConfigureNamesInt.len(), 177);
     assert_eq!(ConfigureNamesReal.len(), 28);
-    assert_eq!(ConfigureNamesString.len(), 79);
+    assert_eq!(ConfigureNamesString.len(), 80);
     assert_eq!(ConfigureNamesEnum.len(), 48);
-    assert_eq!(all_settings().count(), 472);
+    assert_eq!(all_settings().count(), 473);
     assert_eq!(GucContext_Names.len(), PGC_USERSET as usize + 1);
     assert_eq!(GucSource_Names.len(), PGC_S_SESSION as usize + 1);
     assert_eq!(config_group_names.len(), DEVELOPER_OPTIONS as usize + 1);
@@ -148,7 +150,7 @@ fn common_options_are_present_with_postgres_defaults() {
     );
     assert_eq!(
         find("server_version").default_value(),
-        GucDefaultValue::String(Some("18.3"))
+        GucDefaultValue::String(Some("18.6"))
     );
 }
 

@@ -51,6 +51,20 @@ pub fn recordDependencyOnExpr<'mcx>(
     pg_depend::recordMultipleDependencies(mcx, depender, &refs, behavior)
 }
 
+// upstream 2780538433fc (18.5): Check for USAGE privilege on types used by stored expressions.
+// CheckUsageOnTypesInExpr (dependency.c): require USAGE for roleid on all
+// types named by an expression. rtable interprets Vars at varlevelsup 0 (NIL
+// if none are expected). The check lives in the command paths, never in the
+// record* routines, which also run when an existing expression is re-derived.
+pub fn CheckUsageOnTypesInExpr<'mcx>(
+    expr: Node<'mcx>,
+    rtable: &NodeList<'mcx>,
+    roleid: Oid,
+) -> PgResult<()> {
+    let refs = find_expr_references(expr, rtable)?;
+    pg_depend::check_usage_on_types(&refs, roleid)
+}
+
 pub fn find_expr_references<'mcx>(
     expr: Node<'mcx>,
     rtable: &NodeList<'mcx>,

@@ -268,6 +268,25 @@ fn missing_secret_runs_doomed_mock_exchange() {
     assert!(logdetail.is_none());
 }
 
+// upstream 822143c4d1dc: the doomed mock exchange advertises the
+// scram_iterations GUC, not the compiled-in default, so a nonexistent role
+// is indistinguishable from a real one whose secret was built under the GUC.
+#[test]
+fn mock_exchange_advertises_scram_iterations_guc() {
+    install_cfi();
+    transam_xlog::control_file_mark_read_for_tests();
+    set_scram_sha_256_iterations(1000);
+    assert_eq!(mock_scram_secret("ghost").unwrap().iterations, 1000);
+
+    let mut port = test_port("ghost", false);
+    let mut state = test_scram_init(&port, b"SCRAM-SHA-256", None).unwrap();
+    assert!(state.doomed());
+    assert_eq!(state.iterations(), 1000);
+    let (_math, sf) = drive_first(&mut state, &mut port, "whatever", "n,,");
+    assert!(sf.ends_with(",i=1000"), "{sf}");
+    set_scram_sha_256_iterations(SCRAM_SHA_256_DEFAULT_ITERATIONS);
+}
+
 // RFC 7677 test vector, exact bytes.
 #[test]
 fn rfc7677_exact_vector() {

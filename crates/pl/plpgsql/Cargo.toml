@@ -71,4 +71,5 @@ types_trigger_call = { path = "../../_support/types/types_trigger_call" }
 varlena = { path = "../../backend/utils/adt/varlena" }
 
 [dev-dependencies]
+namespace_seams = { path = "../../backend/catalog/namespace_seams" }
 typcache_seams = { path = "../../backend/utils/cache/typcache_seams" }

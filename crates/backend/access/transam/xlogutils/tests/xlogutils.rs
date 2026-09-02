@@ -30,6 +30,9 @@ fn install_seams() {
         xlogrecovery_seams::get_xlog_replay_rec_ptr::set(|| (0x4000, 1));
 
         transam_xlog_seams::recovery_in_progress::set(|| true);
+        // upstream 4bff3aa51c19 (18.6): Fix second race with timeline selection during promotion
+        // Not yet set (0): the recovery-branch page read keeps the replay TLI.
+        transam_xlog_seams::get_wal_insertion_time_line_if_set::set(|| 0);
         transam_xlog_seams::wal_segment_size::set(|| 16 * 1024 * 1024);
 
         smgr_seams::smgr_create::set(|_, _, _| Ok(()));

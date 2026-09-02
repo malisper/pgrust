@@ -321,7 +321,7 @@ fn ginScanToDelete(
 
 /// ginVacuumPostingTreeLeaves: leftmost descent, then rightlink walk vacuuming
 /// each leaf. Returns true when at least one leaf came out empty.
-fn ginVacuumPostingTreeLeaves(
+pub(crate) fn ginVacuumPostingTreeLeaves(
     gvs: &mut GinVacuumState<'_, '_, '_, '_>,
     root_blkno: BlockNumber,
 ) -> PgResult<bool> {
@@ -376,6 +376,9 @@ fn ginVacuumPostingTreeLeaves(
         if rightlink == InvalidBlockNumber {
             break;
         }
+        // upstream 7becb647da74 (18.5): Restore vacuum_delay_point() in GIN posting-tree leaf vacuum
+        // No buffer content lock (nor any other LWLock) is held here.
+        vacuum_delay_point()?;
         buffer = bm::read_buffer::call(rel, rightlink)?;
         bm::lock_buffer::call(buffer, GIN_EXCLUSIVE)?;
     }

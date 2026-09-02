@@ -329,9 +329,8 @@ fn collect_node_subplans<'mcx>(
     ctx: SubPlanScanCtx<'_, 'mcx>,
 ) -> PgResult<PgVec<'mcx, &'mcx types_nodes::primnodes::SubPlan<'mcx>>> {
     let plan = plan_of(node);
-    let mut out: PgVec<'mcx, &'mcx types_nodes::primnodes::SubPlan<'mcx>> = PgVec::new_in(mcx);
-    let walk_list = |out: &mut PgVec<'mcx, &'mcx types_nodes::primnodes::SubPlan<'mcx>>,
-                         list: &NodeList<'mcx>| {
+    let mut out = CollectedSubPlans { subplans: PgVec::new_in(mcx), aggrefs: PgVec::new_in(mcx) };
+    let walk_list = |out: &mut CollectedSubPlans<'mcx>, list: &NodeList<'mcx>| {
         for n in list {
             collect_subplans_expr(n, out);
         }
@@ -495,13 +494,22 @@ fn collect_node_subplans<'mcx>(
                 }
             }
         }
+        // ExecInitAgg: projection, qual, then the aggregates' inputs (select_parallel-1).
+        NodeTag::T_Agg => {
+            walk_list(&mut out, &plan.targetlist);
+            walk_list(&mut out, &plan.qual);
+            let combine = node.as_agg().unwrap().aggsplit
+                & types_nodes::primnodes::AGGSPLITOP_COMBINE
+                != 0;
+            collect_agg_input_subplans(mcx, &mut out, combine);
+        }
         // Scans: projection compiles before the qual (C ExecInitSeqScan).
         _ => {
             walk_list(&mut out, &plan.targetlist);
             walk_list(&mut out, &plan.qual);
         }
     }
-    Ok(out)
+    Ok(out.subplans)
 }
 
 // SubPlan references hide at ANY depth of ANY initialized expression (C's
@@ -521,8 +529,16 @@ fn collect_node_subplans<'mcx>(
 // nested inside args/testexpr land on the parent's list BEFORE the enclosing
 // SubPlan: emit args-nested, then testexpr-nested, then self (NOT walker
 // pre-order, and NOT the walker's testexpr-before-args field order).
+//
+// ExecInitExprRec's T_Aggref/T_GroupingFunc arms never descend: Aggref inputs
+// compile later in ExecInitAgg (aggrefs, aggs order), GroupingFunc.args never (groupingsets-1).
+struct CollectedSubPlans<'mcx> {
+    subplans: PgVec<'mcx, &'mcx types_nodes::primnodes::SubPlan<'mcx>>,
+    aggrefs: PgVec<'mcx, &'mcx types_nodes::primnodes::Aggref<'mcx>>,
+}
+
 struct SubPlanCollector<'a, 'mcx> {
-    out: &'a mut PgVec<'mcx, &'mcx types_nodes::primnodes::SubPlan<'mcx>>,
+    out: &'a mut CollectedSubPlans<'mcx>,
 }
 
 impl<'mcx> nodes_core::NodeWalker<'mcx> for SubPlanCollector<'_, 'mcx> {
@@ -534,19 +550,74 @@ impl<'mcx> nodes_core::NodeWalker<'mcx> for SubPlanCollector<'_, 'mcx> {
             if nodes_core::walk_opt(sp.testexpr, self)? {
                 return Ok(true);
             }
-            self.out.push(sp);
+            self.out.subplans.push(sp);
+            return Ok(false);
+        }
+        if let Some(a) = node.as_aggref() {
+            self.out.aggrefs.push(a);
+            return Ok(false);
+        }
+        if node.node_tag() == NodeTag::T_GroupingFunc {
             return Ok(false);
         }
         nodes_core::expression_tree_walker(node, self)
     }
 }
 
-fn collect_subplans_expr<'mcx>(
-    node: Node<'mcx>,
-    out: &mut PgVec<'mcx, &'mcx types_nodes::primnodes::SubPlan<'mcx>>,
-) {
+fn collect_subplans_expr<'mcx>(node: Node<'mcx>, out: &mut CollectedSubPlans<'mcx>) {
     let mut w = SubPlanCollector { out };
     nodes_core::NodeWalker::visit(&mut w, node).expect("subplan collection walk");
+}
+
+// ExecInitAgg: aggdirectargs once per aggno, then ExecBuildAggTrans per transno
+// (aggfilter, then consumed args); per-phase repeats dedup by plan_id downstream.
+fn collect_agg_input_subplans<'mcx>(
+    mcx: Mcx<'mcx>,
+    out: &mut CollectedSubPlans<'mcx>,
+    combine: bool,
+) {
+    let aggrefs = core::mem::replace(&mut out.aggrefs, PgVec::new_in(mcx));
+    for (i, a) in aggrefs.iter().enumerate() {
+        if aggrefs.iter().take(i).any(|p| p.aggno == a.aggno) {
+            continue;
+        }
+        for n in &a.aggdirectargs {
+            collect_subplans_expr(n, out);
+        }
+    }
+    let ntrans = aggrefs.iter().map(|a| a.aggtransno + 1).max().unwrap_or(0);
+    for transno in 0..ntrans {
+        let Some(a) = aggrefs.iter().find(|a| a.aggtransno == transno) else { continue };
+        if let Some(f) = a.aggfilter {
+            collect_subplans_expr(f, out);
+        }
+        for n in a.args.iter().take(agg_trans_ninputs(a, combine)) {
+            collect_subplans_expr(n, out);
+        }
+    }
+}
+
+// ExecBuildAggTrans: combine value; all args when sorting/ordered-set; else non-junk.
+fn agg_trans_ninputs(a: &types_nodes::primnodes::Aggref<'_>, combine: bool) -> usize {
+    if combine {
+        return 1;
+    }
+    let ordered_set = a.aggkind != types_nodes::primnodes::AGGKIND_NORMAL;
+    let sortrequired = if ordered_set || (a.aggpresorted && a.aggdistinct.is_nil()) {
+        false
+    } else if !a.aggdistinct.is_nil() {
+        !a.aggpresorted
+    } else {
+        !a.aggorder.is_nil()
+    };
+    if ordered_set || sortrequired {
+        a.args.len()
+    } else {
+        a.args
+            .iter()
+            .filter(|t| !t.as_target_entry().expect("Aggref arg is a TargetEntry").resjunk)
+            .count()
+    }
 }
 
 // ExplainNode's T_ForeignScan naming (explain.c): (pname, sname, operation);
@@ -1274,19 +1345,29 @@ pub fn ExplainNode<'mcx>(
                     || execmain_seams::query_desc_rti_unpruned::call(es.qd, rti).unwrap_or(true)
             };
             let total_nrels = mt.resultRelations.len();
-            let mut result_rtis: Vec<i32> = Vec::with_capacity(total_nrels);
+            // upstream bba4e095d250 (18.6): Avoid ABI break in ModifyTableState from the FDW pruning fix
+            // Each kept rel carries its ORIGINAL position in resultRelations:
+            // fdwPrivLists, fdwDirectModifyPlans and withCheckOptionLists are
+            // parallel to the pre-pruning list, so indexing them by the
+            // post-pruning position read the wrong rel's entry once initial
+            // pruning removed an earlier one.  C 18.6 recovers fdw_private
+            // from node->fdwPrivLists by direct index when nothing was
+            // pruned, else by matching the range table index against
+            // node->resultRelations; carrying the position is that same
+            // lookup (rtis are unique within resultRelations).
+            let mut result_rtis: Vec<(usize, i32)> = Vec::with_capacity(total_nrels);
             for (i, rti) in mt.resultRelations.iter().enumerate() {
                 if unpruned(rti) {
-                    result_rtis.push(rti);
+                    result_rtis.push((i, rti));
                 } else if i == total_nrels - 1 && result_rtis.is_empty() {
-                    result_rtis.push(mt.resultRelations.nth(0));
+                    result_rtis.push((0, mt.resultRelations.nth(0)));
                 }
             }
             let nrels = result_rtis.len();
             let labeltargets = nrels > 1
                 || (nrels == 1
-                    && result_rtis[0] != mt.nominalRelation as i32
-                    && unpruned(result_rtis[0]));
+                    && result_rtis[0].1 != mt.nominalRelation as i32
+                    && unpruned(result_rtis[0].1));
             let (opname, fopname) = match mt.operation {
                 types_nodes::CmdType::CMD_INSERT => ("Insert", "Foreign Insert"),
                 types_nodes::CmdType::CMD_UPDATE => ("Update", "Foreign Update"),
@@ -1294,7 +1375,7 @@ pub fn ExplainNode<'mcx>(
                 types_nodes::CmdType::CMD_MERGE => ("Merge", "Foreign Merge"),
                 _ => ("???", "Foreign ???"),
             };
-            for (j, &rti) in result_rtis.iter().enumerate() {
+            for &(i, rti) in &result_rtis {
                 let (is_foreign, relid) = {
                     let rte = es
                         .rtable
@@ -1316,14 +1397,14 @@ pub fn ExplainNode<'mcx>(
                     es.indent += 1;
                 }
                 // ExplainForeignModify (skipped for direct-modify subplans).
-                if is_foreign && !mt.fdwDirectModifyPlans.is_member(j as i32) {
+                if is_foreign && !mt.fdwDirectModifyPlans.is_member(i as i32) {
                     let mcx = es.str.allocator();
                     let kind = foreigncmds_seams::get_fdw_routine_by_rel_id::call(mcx, relid)?;
                     if let Some(f) = nodemodifytable::fdw_modify_explain(kind) {
                         let fdw_private = mt
                             .fdwPrivLists
                             .iter()
-                            .nth(j)
+                            .nth(i)
                             .and_then(|n| n.as_list())
                             .map(|l| l.clone_in(mcx))
                             .transpose()?
@@ -1332,7 +1413,7 @@ pub fn ExplainNode<'mcx>(
                             && mt
                                 .withCheckOptionLists
                                 .iter()
-                                .nth(j)
+                                .nth(i)
                                 .and_then(|n| n.as_list())
                                 .map(|l| !l.is_nil())
                                 .unwrap_or(false);

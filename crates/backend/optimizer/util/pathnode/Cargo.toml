@@ -17,6 +17,7 @@ costsize = { path = "../../path/costsize" }
 planner_seams = { path = "../../plan/planner_seams" }
 clauses = { path = "../clauses" }
 lsyscache = { path = "../../../utils/cache/lsyscache" }
+nodes_core = { path = "../../../nodes/nodes_core" }
 init_small = { path = "../../../utils/init/init_small" }
 postgres_seams = { path = "../../../tcop/postgres_seams" }
 nodehash = { path = "../../../executor/nodehash" }

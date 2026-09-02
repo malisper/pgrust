@@ -102,6 +102,13 @@ pub fn StorePartitionKey<'mcx>(
         )?;
     }
     if let Some(exprs_node) = exprs_node {
+        // upstream 2780538433fc (18.5): Check for USAGE privilege on types used by stored expressions.
+        pg_depend::CheckUsageOnTypesInSingleRelExpr(
+            mcx,
+            exprs_node,
+            rel.rd_id,
+            miscinit_seams::get_user_id::call(),
+        )?;
         pg_depend::recordDependencyOnSingleRelExpr(
             mcx,
             &myself,

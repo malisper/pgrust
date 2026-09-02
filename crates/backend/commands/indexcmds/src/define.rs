@@ -741,6 +741,20 @@ pub fn DefineIndex<'mcx>(
         Some(&mut root_save_nestlevel),
     )?;
 
+    // upstream 2780538433fc (18.5): Check for USAGE privilege on types used by stored expressions.
+    // The below call to index_create() creates the dependencies on types. We
+    // are responsible for checking USAGE.
+    if check_rights {
+        if !indexInfo.ii_Expressions.is_nil() {
+            let exprs = types_nodes::Node::mk_list(mcx, indexInfo.ii_Expressions.clone_in(mcx)?)?;
+            pg_depend::CheckUsageOnTypesInSingleRelExpr(mcx, exprs, tableId, root_save_userid)?;
+        }
+        if !indexInfo.ii_Predicate.is_nil() {
+            let pred = types_nodes::Node::mk_list(mcx, indexInfo.ii_Predicate.clone_in(mcx)?)?;
+            pg_depend::CheckUsageOnTypesInSingleRelExpr(mcx, pred, tableId, root_save_userid)?;
+        }
+    }
+
     if stmt.primary {
         catalog_index::index_check_primary_key(mcx, &rel, &indexInfo, is_alter_table)?;
     }

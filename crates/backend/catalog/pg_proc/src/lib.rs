@@ -898,6 +898,12 @@ pub fn ProcedureCreateWithTransforms<'mcx>(
     // pg_proc.c:665-666: dependencies on objects the SQL-standard body uses.
     if a.languageObjectId == SQLlanguageId {
         if let Some(body) = a.prosqlbody {
+            // upstream 2780538433fc (18.5): Check for USAGE privilege on types used by stored expressions.
+            dependency_seams::check_usage_on_types_in_expr::call(
+                body,
+                &types_nodes::list::NodeList::nil(),
+                miscinit_seams::get_user_id::call(),
+            )?;
             dependency_seams::record_dependency_on_expr::call(
                 mcx,
                 &myself,
@@ -911,6 +917,12 @@ pub fn ProcedureCreateWithTransforms<'mcx>(
     // pg_proc.c:669-670: dependencies on objects in parameter defaults.
     if let Some(defaults) = a.parameterDefaults {
         let defaults_node = readfuncs::stringToNode(mcx, defaults)?;
+        // upstream 2780538433fc (18.5): Check for USAGE privilege on types used by stored expressions.
+        dependency_seams::check_usage_on_types_in_expr::call(
+            defaults_node,
+            &types_nodes::list::NodeList::nil(),
+            miscinit_seams::get_user_id::call(),
+        )?;
         dependency_seams::record_dependency_on_expr::call(
             mcx,
             &myself,

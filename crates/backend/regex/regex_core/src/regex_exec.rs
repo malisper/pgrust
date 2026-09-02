@@ -196,6 +196,12 @@ impl HeapSpace {
             .ok_or(RegError(REG_ESPACE))?;
         let wordsper: usize = (cnfa.nstates as usize).div_ceil(UBITS);
         let ncolors: usize = cnfa.ncolors as usize;
+        // upstream f3cee4dc4330 (18.4): Harden our regex engine against integer overflow in size calculations.
+        // C newdfa's bound: no array below may exceed INT_MAX members, on any word size.
+        let int_max = i32::MAX as usize;
+        if wordsper >= int_max / (nss + WORK) || ncolors >= int_max / nss {
+            return Err(RegError(REG_ETOOBIG));
+        }
         let statesarea_words = nss
             .checked_add(WORK)
             .and_then(|n| n.checked_mul(wordsper))

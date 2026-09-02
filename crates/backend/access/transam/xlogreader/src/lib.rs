@@ -2316,16 +2316,6 @@ pub fn WALRead<R: XLogSegmentRoutine>(
                 startoff as libc::off_t,
             )
         };
-        if pgstat_seams::pgstat_count_io_op_time::is_installed() {
-            pgstat_seams::pgstat_count_io_op_time::call(
-                pgstat_seams::IOOBJECT_WAL,
-                pgstat_seams::IOCONTEXT_NORMAL,
-                pgstat_seams::IOOP_READ,
-                io_start,
-                1,
-                readbytes.max(0) as u64,
-            );
-        }
         if readbytes <= 0 {
             return Ok(Err(WALReadError {
                 wre_errno: current_errno(),
@@ -2334,6 +2324,18 @@ pub fn WALRead<R: XLogSegmentRoutine>(
                 wre_read: readbytes as i32,
                 wre_seg: v.seg,
             }));
+        }
+
+        // upstream 13f940b4b56f (18.6): Fix pgstat_count_io_op_time() calls passing incorrect information
+        if pgstat_seams::pgstat_count_io_op_time::is_installed() {
+            pgstat_seams::pgstat_count_io_op_time::call(
+                pgstat_seams::IOOBJECT_WAL,
+                pgstat_seams::IOCONTEXT_NORMAL,
+                pgstat_seams::IOOP_READ,
+                io_start,
+                1,
+                readbytes as u64,
+            );
         }
 
         recptr += readbytes as u64;

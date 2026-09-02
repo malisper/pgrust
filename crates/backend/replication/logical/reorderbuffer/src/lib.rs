@@ -1257,8 +1257,14 @@ impl ReorderBuffer {
 
         // Send a prepare if not already done so. This might occur if we have
         // detected a concurrent abort while replaying the non-streaming
-        // transaction.
-        if !self.txn(txn).sent_prepare() {
+        // transaction (the downstream still needs the prepare to roll it
+        // back later, see DecodePrepare).
+        //
+        // upstream b563fc6bd926 (18.6): Fix logical decoding of empty prepared transactions.
+        // Skip it for a transaction with no base snapshot: nothing was
+        // decoded for it, and finish_prepared cleans it up without the
+        // commit/rollback prepared callbacks.
+        if !self.txn(txn).sent_prepare() && self.txn(txn).base_snapshot.is_some() {
             let cb = self.callbacks.prepare;
             cb(self, txn, final_lsn)?;
             self.txn_mut(txn).txn_flags |= RBTXN_SENT_PREPARE;
@@ -1313,6 +1319,19 @@ impl ReorderBuffer {
                 (t.final_lsn, t.end_lsn, t.xact_time, t.origin_id, t.origin_lsn)
             };
             self.replay(txn, final_lsn, p_end_lsn, p_time, p_origin_id, p_origin_lsn)?;
+        }
+
+        // upstream b563fc6bd926 (18.6): Fix logical decoding of empty prepared transactions.
+        // No base snapshot means the transaction changed nothing (commit_child
+        // transferred any subtransaction snapshots), so no PREPARE went out:
+        // clean up without the commit/rollback prepared callbacks, as replay
+        // does for an empty commit. Removing it before its commit could
+        // compute a wrong restart_lsn (SnapBuildProcessRunningXacts).
+        if self.txn(txn).base_snapshot.is_none() {
+            debug_assert!(self.txn(txn).invalidations.is_empty());
+            debug_assert!(!self.txn(txn).sent_prepare());
+            self.cleanup_txn(txn)?;
+            return Ok(());
         }
 
         {

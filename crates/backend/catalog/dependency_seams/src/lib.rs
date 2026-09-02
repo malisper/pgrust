@@ -30,3 +30,14 @@ seam_core::seam!(
         behavior: pg_depend::DependencyType,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    // upstream 2780538433fc (18.5): CheckUsageOnTypesInExpr (dependency.c),
+    // reached from ProcedureCreate and CreateTriggerFiringOn without a
+    // catalog_dependency edge (see record_dependency_on_expr above).
+    pub fn check_usage_on_types_in_expr<'mcx>(
+        expr: types_nodes::Node<'mcx>,
+        rtable: &types_nodes::list::NodeList<'mcx>,
+        roleid: Oid,
+    ) -> PgResult<()>
+);

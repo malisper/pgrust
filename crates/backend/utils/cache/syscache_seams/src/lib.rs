@@ -1139,14 +1139,16 @@ seam_core::seam!(
 
 seam_core::seam!(
     // statext_expressions_load (extended_stats.c): stxdexpr pg_statistic[]
-    // element `idx` decoded to a bundle. Slots decode eagerly — the lazy
-    // refetch key targets pg_statistic rows, which these are not.
+    // element `idx` decoded to a bundle, None when that element is NULL (no
+    // statistics could be computed for the expression). Slots decode eagerly
+    // — the lazy refetch key targets pg_statistic rows, which these are not.
+    // upstream 83671c0da049 (18.4): Fix set of issues with extended statistics on expressions
     pub fn statext_expressions_load<'mcx>(
         mcx: Mcx<'mcx>,
         statoid: Oid,
         inh: bool,
         idx: i32,
-    ) -> PgResult<PgStatisticBundle<'mcx>>
+    ) -> PgResult<Option<PgStatisticBundle<'mcx>>>
 );
 
 seam_core::seam!(

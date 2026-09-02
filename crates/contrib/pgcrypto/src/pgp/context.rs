@@ -14,6 +14,8 @@ pub struct PgpContext {
     pub use_sess_key: i32,
     pub convert_crlf: i32,
     pub unicode_mode: i32,
+    // upstream 4c5128ca0b30 (18.6): pgcrypto: Add option to revert to prior decryption behavior
+    pub ignore_cipher_failure: i32,
     pub text_mode: i32,
     pub debug: i32,
     pub debug_notices: Vec<String>,
@@ -46,6 +48,7 @@ impl Default for PgpContext {
             use_sess_key: 0,
             convert_crlf: 0,
             unicode_mode: 0,
+            ignore_cipher_failure: 0,
             text_mode: 0,
             debug: 0,
             debug_notices: Vec::new(),
@@ -226,6 +229,8 @@ impl PgpContext {
             }
             "convert-crlf" => self.convert_crlf = atoi(val),
             "unicode-mode" => self.unicode_mode = atoi(val),
+            // upstream 4c5128ca0b30 (18.6): pgcrypto: Add option to revert to prior decryption behavior
+            "ignore-cipher-failure" => self.ignore_cipher_failure = i32::from(atoi(val) != 0),
             "debug" => self.debug = atoi(val),
             "expect-cipher-algo" => {
                 self.expect = true;
@@ -351,5 +356,28 @@ mod parse_args_tests {
         let mut c = PgpContext::default();
         c.parse_args(b"compress-level=9").unwrap();
         assert_eq!(c.compress_level, 9);
+    }
+
+    /// upstream 4c5128ca0b30 (18.6): ignore-cipher-failure is a set_arg key
+    /// whose value pgp_set_ignore_cipher_failure normalises to 0/1.
+    #[test]
+    fn ignore_cipher_failure_is_parsed_and_normalised() {
+        assert_eq!(PgpContext::default().ignore_cipher_failure, 0);
+        for (arg, want) in [
+            (&b"ignore-cipher-failure=1"[..], 1),
+            (&b"ignore-cipher-failure=0"[..], 0),
+            (&b"ignore-cipher-failure=7"[..], 1),
+            (&b"ignore-cipher-failure=-3"[..], 1),
+            (&b"ignore-cipher-failure=abc"[..], 0),
+            (&b"IGNORE-CIPHER-FAILURE=1, debug=1"[..], 1),
+        ] {
+            let mut c = PgpContext::default();
+            c.parse_args(arg).unwrap();
+            assert_eq!(c.ignore_cipher_failure, want, "{}", String::from_utf8_lossy(arg));
+        }
+        assert_eq!(
+            PgpContext::default().parse_args(b"ignore-cipher-failure=").unwrap_err(),
+            "Illegal argument to function"
+        );
     }
 }

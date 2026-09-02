@@ -410,7 +410,7 @@ int_var!(
     I_server_version_num,
     server_version_num,
     set_server_version_num,
-    180003
+    180006
 ); // PG_VERSION_NUM
 int_var!(
     I_shared_memory_size_mb,
@@ -582,6 +582,13 @@ session_string_var!(CELL_backtrace_functions,
     backtrace_functions,
     set_backtrace_functions,
     Some("")
+);
+// upstream 2a29b607dbbb (18.6): Add an output_plugin_libraries GUC to bless trusted output plugins
+// C: char *output_plugin_libraries_string (logical.c). PGC_SUSET.
+session_string_var!(CELL_output_plugin_libraries_string,
+    output_plugin_libraries_string,
+    set_output_plugin_libraries_string,
+    Some("pgoutput, test_decoding")
 );
 string_var!(
     CELL_debug_io_direct_string,

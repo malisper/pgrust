@@ -198,6 +198,8 @@ fn validate_shape(p: &TypeCreateParams<'_>) -> PgResult<()> {
     Ok(())
 }
 
+// upstream 2780538433fc (18.5): NB: caller is responsible for ensuring the
+// user has USAGE on all types defaultTypeBin depends on.
 pub fn TypeCreate<'mcx>(mcx: Mcx<'mcx>, p: &TypeCreateParams<'_>) -> PgResult<ObjectAddress> {
     validate_shape(p)?;
 

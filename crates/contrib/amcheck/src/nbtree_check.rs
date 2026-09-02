@@ -33,7 +33,7 @@ use ::types_tuple::itemptr::{
 };
 use ::types_tuple::varatt::{
     set_varsize_short, varatt_can_make_short, varatt_converted_short_size, varatt_is_1b_e,
-    varsize_4b, varsize_any, VARHDRSZ,
+    varsize_any, VARHDRSZ,
 };
 use ::types_tuple::{TYPSTORAGE_EXTENDED, TYPSTORAGE_MAIN};
 
@@ -237,20 +237,27 @@ fn bt_index_check_callback<'mcx>(
         )));
     }
     if allequalimage && !bt_allequalimage(indrel)? {
+        // upstream 12c32bbc8582 (18.5): amcheck: Fix missing allequalimage
+        // corruption report. The interval-opfamily scan only decides whether
+        // to add the hint; the corruption error must fire for every opclass.
+        let mut has_interval_ops = false;
         for i in 0..indrel.indnkeyatts() as usize {
             if indrel.rd_opfamily[i] == INTERVAL_BTREE_FAM_OID {
-                return Err(Box::new(
-                    PgError::error(format!(
-                        "index \"{}\" metapage incorrectly indicates that deduplication is safe",
-                        indrel.name()
-                    ))
-                    .with_sqlstate(ERRCODE_INDEX_CORRUPTED)
-                    .with_hint(
-                        "This is known of \"interval\" indexes last built on a version predating 2023-11.",
-                    ),
-                ));
+                has_interval_ops = true;
+                break;
             }
         }
+        let mut err = PgError::error(format!(
+            "index \"{}\" metapage incorrectly indicates that deduplication is safe",
+            indrel.name()
+        ))
+        .with_sqlstate(ERRCODE_INDEX_CORRUPTED);
+        if has_interval_ops {
+            err = err.with_hint(
+                "This is known of \"interval\" indexes last built on a version predating 2023-11.",
+            );
+        }
+        return Err(Box::new(err));
     }
 
     bt_check_every_level(
@@ -1637,7 +1644,9 @@ unsafe fn bt_normalize_tuple<'m>(
                 rel.name()
             )));
         } else if !varatt_is_compressed(p)
-            && varsize_4b(p) > TOAST_INDEX_TARGET
+            // upstream 897e79486296 (18.5): a short (1-byte header) varlena
+            // must be sized with VARSIZE_ANY, not VARSIZE (a 4-byte read).
+            && varsize_any(p) > TOAST_INDEX_TARGET
             && (att.attstorage == TYPSTORAGE_EXTENDED || att.attstorage == TYPSTORAGE_MAIN)
         {
             formnewtup = true;
@@ -2154,5 +2163,133 @@ mod tests {
         assert!(!offset_number_is_valid(0));
         assert!(offset_number_is_valid(1));
         assert!(offset_number_is_valid(::types_storage::bufpage::MaxOffsetNumber));
+    }
+
+    fn text_index_rel(mcx: Mcx<'_>) -> Relation<'_> {
+        use ::types_core::{INVALID_PROC_NUMBER, RELPERSISTENCE_PERMANENT, TEXTOID};
+        use ::types_rel::{
+            FormData_pg_class, LockInfoData, LockRelId, RelationData, RELKIND_INDEX,
+            REPLICA_IDENTITY_DEFAULT,
+        };
+        use ::types_tuple::tupdesc::CompactAttribute;
+        use ::types_tuple::{FormData_pg_attribute, NameData, TupleDescData};
+        use core::cell::Cell;
+        use std::rc::Rc;
+
+        let mut relname = NameData::default();
+        relname.namestrcpy("t_text_idx");
+        let mut attrs = ::mcx::PgVec::new_in(mcx);
+        attrs.push(FormData_pg_attribute {
+            atttypid: TEXTOID,
+            attlen: -1,
+            attnum: 1,
+            atttypmod: -1,
+            attbyval: false,
+            attalign: b'i' as i8,
+            attstorage: TYPSTORAGE_EXTENDED,
+            attislocal: true,
+            ..Default::default()
+        });
+        let mut compact = ::mcx::PgVec::new_in(mcx);
+        compact.push(CompactAttribute::populate_from(&attrs[0]));
+        let one = |v: Oid| {
+            let mut vec = ::mcx::PgVec::new_in(mcx);
+            vec.push(v);
+            vec
+        };
+        let mut indoption = ::mcx::PgVec::new_in(mcx);
+        indoption.push(0i16);
+        let data = RelationData {
+            rd_locator: Cell::new(::types_storage::RelFileLocator::new(1663, 5, 5000)),
+            rd_smgr: Default::default(),
+            rd_id: 5000,
+            rd_backend: INVALID_PROC_NUMBER,
+            rd_islocaltemp: false,
+            rd_isvalid: Cell::new(true),
+            rd_createSubid: Cell::new(0),
+            rd_newRelfilelocatorSubid: Cell::new(0),
+            rd_firstRelfilelocatorSubid: Cell::new(0),
+            rd_droppedSubid: Cell::new(0),
+            rd_lockInfo: LockInfoData {
+                lockRelId: LockRelId { relId: 5000, dbId: 5 },
+            },
+            rd_rel: FormData_pg_class {
+                relname,
+                relnamespace: 2200,
+                reltype: 0,
+                relowner: 10,
+                relam: BTREE_AM_OID,
+                relfilenode: 5000,
+                reltablespace: 0,
+                relpages: 0,
+                reltuples: -1.0,
+                relallvisible: 0,
+                reltoastrelid: 0,
+                relhasindex: false,
+                relisshared: false,
+                relpersistence: RELPERSISTENCE_PERMANENT,
+                relkind: RELKIND_INDEX,
+                relhassubclass: false,
+                relrowsecurity: false,
+                relispopulated: true,
+                relreplident: REPLICA_IDENTITY_DEFAULT,
+                relispartition: false,
+                relfrozenxid: 3,
+                relminmxid: 1,
+            },
+            rd_att: Rc::new(TupleDescData {
+                natts: 1,
+                tdtypeid: 0,
+                tdtypmod: -1,
+                tdrefcount: 1,
+                constr: None,
+                compact_attrs: compact,
+                attrs,
+            }),
+            rd_index: None,
+            rd_opcintype: one(TEXTOID),
+            rd_opfamily: one(1994),
+            rd_indoption: indoption,
+            rd_indcollation: one(100),
+            rd_options: None,
+            pgstat_enabled: Cell::new(false),
+            pgstat_link: Cell::new((0, core::ptr::null_mut())),
+            rd_amcache: Default::default(),
+            rd_amcache_hash: Default::default(),
+            rd_amcache_gin: Default::default(),
+            rd_amcache_spgist: Default::default(),
+            rd_support: ::mcx::PgVec::new_in(mcx),
+            rd_supportinfo: Default::default(),
+            rd_opcoptions: Default::default(),
+            rd_indexlist: Default::default(),
+            rd_trigdesc: Default::default(),
+            rd_hastriggers: false,
+            rd_hasrules: false,
+        };
+        Relation::open(data, None)
+    }
+
+    // upstream 897e79486296 (18.5): a 1-byte-header varlena is sized with
+    // VARSIZE_ANY. VARSIZE decoded the datum's own payload bytes as a 4-byte
+    // length far above TOAST_INDEX_TARGET and forced a spurious reform.
+    #[test]
+    fn normalize_tuple_keeps_short_varlena_tuple() {
+        let arena = MemoryContext::new_bump("amcheck normalize test");
+        let mcx = arena.mcx();
+        let rel = text_index_rel(mcx);
+
+        let mut short_text = [0u8; 4];
+        // SAFETY: 4-byte local buffer, 1-byte header + 3 payload bytes.
+        unsafe { set_varsize_short(short_text.as_mut_ptr(), 4) };
+        short_text[1..].copy_from_slice(b"abc");
+        let values = [Datum::from_usize(short_text.as_ptr() as usize)];
+        let isnull = [false];
+        let formed = index_form_tuple(mcx, rel.descr(), &values, &isnull).unwrap();
+        // SAFETY: itup is a freshly formed non-pivot, non-posting tuple.
+        let norm = unsafe { bt_normalize_tuple(mcx, &rel, formed.as_ptr()) }.unwrap();
+        assert!(
+            matches!(norm, NormTuple::Same(_)),
+            "a short varlena must not be reformed"
+        );
     }
 }

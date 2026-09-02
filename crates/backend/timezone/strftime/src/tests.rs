@@ -122,8 +122,8 @@ fn overflow_semantics() {
     let t = sample_tm("UTC");
     let mut buf = [b'x'; 4];
     assert_eq!(pg_strftime(&mut buf, b"%Y", &t), None);
-    // C leaves the truncated bytes with no NUL.
-    assert_eq!(&buf, b"2024");
+    // upstream c6e7a9ef30a2 (18.4): NUL at s[0] (empty string); the rest stays.
+    assert_eq!(&buf, b"\x00024");
 
     // Exactly-fits-without-NUL is still overflow (p == s + maxsize).
     let mut buf5 = [0u8; 5];
@@ -134,6 +134,20 @@ fn overflow_semantics() {
     let mut buf2 = [b'x'; 2];
     assert_eq!(pg_strftime(&mut buf2, b"", &t), Some(0));
     assert_eq!(buf2[0], 0);
+}
+
+// upstream c6e7a9ef30a2 (18.4): a long POSIX %Z overrunning 128 bytes -> "".
+#[test]
+fn overrun_by_long_zone_name_is_empty_string() {
+    let name: &'static str = String::leak("A".repeat(200));
+    let t = sample_tm(name);
+    let mut buf = [b'x'; 128];
+    assert_eq!(pg_strftime(&mut buf, b"%Y-%m-%d %H:%M:%S %Z", &t), None);
+    assert_eq!(buf[0], 0);
+
+    let t = sample_tm("PST");
+    let n = pg_strftime(&mut buf, b"%Y-%m-%d %H:%M:%S %Z", &t).unwrap();
+    assert_eq!(&buf[..n], b"2024-01-02 15:06:07 PST");
 }
 
 // Differential golden against C strftime for the log_line_prefix shape

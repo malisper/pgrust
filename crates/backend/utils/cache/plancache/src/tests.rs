@@ -25,6 +25,7 @@ thread_local! {
     static PLANNER_COST: Cell<f64> = const { Cell::new(1.0) };
     static PLAN_CACHE_MODE_VAR: Cell<i32> = const { Cell::new(0) };
     static LOCKS_TAKEN: Cell<u32> = const { Cell::new(0) };
+    static PLANNER_DEPENDS_ON_ROLE: Cell<bool> = const { Cell::new(false) };
 }
 
 fn stub_planner<'a, 'mcx>(
@@ -59,6 +60,7 @@ fn stub_planner<'a, 'mcx>(
         rtable: parse.rtable.clone_in(mcx)?,
         relationOids: relation_oids,
         invalItems: inval_items,
+        dependsOnRole: PLANNER_DEPENDS_ON_ROLE.with(Cell::get),
         ..PlannedStmt::default()
     })
 }
@@ -911,4 +913,74 @@ fn call_stmt_transformed_arg_relation_is_a_source_dependency() {
         "DDL on a CALL argument's relation must invalidate the cached utility statement"
     );
     DropCachedPlan(h);
+}
+
+// A saved source with its generic plan built: `rls` marks the querytree as
+// rewritten under row-level security, `role_plan` makes the planner flag the
+// generic plan as role-dependent.
+fn make_role_source(rls: bool, role_plan: bool) -> CachedPlanSourceHandle {
+    let scratch = test_mcx();
+    let raw = select_raw(scratch);
+    let h = CreateCachedPlan(Some(&raw), "SELECT 1", CommandTag::SELECT).unwrap();
+    let qmcx = SourceQueryMcx(h);
+    let mut qlist = PgVec::new_in(qmcx);
+    let mut query = select_query(qmcx, false);
+    query.hasRowSecurity = rls;
+    qlist.push(query);
+    CompleteCachedPlan(h, qlist, &[], types_portal::CURSOR_OPT_PARALLEL_OK, true).unwrap();
+    SaveCachedPlan(h).unwrap();
+    PLANNER_DEPENDS_ON_ROLE.with(|c| c.set(role_plan));
+    let plan = GetCachedPlan(h, ParamListHandle::NULL, None, QueryEnvHandle::NULL).unwrap();
+    PLANNER_DEPENDS_ON_ROLE.with(|c| c.set(false));
+    ReleaseCachedPlan(plan);
+    h
+}
+
+fn generic_plan_valid(h: CachedPlanSourceHandle) -> bool {
+    with_cache(|pc| {
+        let gplan = source_mut(pc, h).gplan.expect("saved source keeps its generic plan");
+        plan_mut(pc, gplan).is_valid
+    })
+}
+
+// upstream 0b12f56bfac1 (18.6): pg_auth_members / pg_authid / pg_database
+// invals drop the querytree and generic plan of an RLS-rewritten source, only
+// the generic plan of a role-dependent one, and nothing else; a pg_database
+// row of another database (hash != ours, != 0) is ignored.
+#[test]
+fn role_callback_invalidates_only_role_dependent_plans() {
+    install();
+    push_snapshot();
+    let no_arg = Datum::from_oid(InvalidOid);
+    for cacheid in [AUTHMEMROLEMEM, AUTHOID, DATABASEOID] {
+        let rls = make_role_source(true, false);
+        let role = make_role_source(false, true);
+        let plain = make_role_source(false, false);
+        for h in [rls, role, plain] {
+            assert!(CachedPlanIsValid(h) && generic_plan_valid(h));
+        }
+
+        // another database's pg_database row: our hash is initialize_acl's
+        // (0 here, never run), so any nonzero hash is some other database
+        PlanCacheRoleCallback(no_arg, DATABASEOID, 0x5EED);
+        for h in [rls, role, plain] {
+            assert!(CachedPlanIsValid(h) && generic_plan_valid(h), "cacheid {cacheid}");
+        }
+
+        PlanCacheRoleCallback(no_arg, cacheid, 0);
+        assert!(!CachedPlanIsValid(rls), "cacheid {cacheid}");
+        assert!(!generic_plan_valid(rls), "cacheid {cacheid}");
+        assert!(CachedPlanIsValid(role), "cacheid {cacheid}");
+        assert!(!generic_plan_valid(role), "cacheid {cacheid}");
+        assert!(CachedPlanIsValid(plain), "cacheid {cacheid}");
+        assert!(generic_plan_valid(plain), "cacheid {cacheid}");
+
+        // the next fetch rebuilds what was dropped
+        for h in [rls, role, plain] {
+            let plan = GetCachedPlan(h, ParamListHandle::NULL, None, QueryEnvHandle::NULL).unwrap();
+            ReleaseCachedPlan(plan);
+            assert!(CachedPlanIsValid(h) && generic_plan_valid(h), "cacheid {cacheid}");
+            DropCachedPlan(h);
+        }
+    }
 }

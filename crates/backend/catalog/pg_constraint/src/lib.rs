@@ -147,6 +147,8 @@ impl<'a> ConstraintEntry<'a> {
     }
 }
 
+// upstream 2780538433fc (18.5): NB: caller is responsible for ensuring the
+// user has USAGE on all types con_expr depends on.
 pub fn CreateConstraintEntry<'mcx>(mcx: Mcx<'mcx>, e: &ConstraintEntry<'_>) -> PgResult<Oid> {
     use types_core::OIDOID;
     debug_assert!(

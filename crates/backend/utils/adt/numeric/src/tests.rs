@@ -1803,3 +1803,28 @@ fn pending_interrupt_cancels_gcd_and_factorial() {
     // The interrupt was consumed on the seam side; clean runs stay clean.
     assert!(math::numeric_fac(100).is_ok());
 }
+
+// upstream 84001a04d552 (18.6): Fix jsonpath .decimal() to honor silent mode
+#[test]
+fn make_numeric_typmod_safe_soft_errors() {
+    use types_error::{SoftErrorContext, ERRCODE_INVALID_PARAMETER_VALUE};
+    assert_eq!(make_numeric_typmod_safe(5, 2, None).unwrap(), make_numeric_typmod(5, 2));
+    let e = make_numeric_typmod_safe(0, 6, None).unwrap_err();
+    assert_eq!(e.message(), "NUMERIC precision 0 must be between 1 and 1000");
+    assert_eq!(e.sqlstate(), ERRCODE_INVALID_PARAMETER_VALUE);
+    let e = make_numeric_typmod_safe(6, 1001, None).unwrap_err();
+    assert_eq!(e.message(), "NUMERIC scale 1001 must be between -1000 and 1000");
+    assert_eq!(e.sqlstate(), ERRCODE_INVALID_PARAMETER_VALUE);
+    // with a soft-error context the failure is recorded, not thrown
+    for (p, s) in [(0, 6), (1001, 6), (-6, 2), (6, -1001), (6, 1001)] {
+        let mut esc = SoftErrorContext::new(false);
+        assert_eq!(make_numeric_typmod_safe(p, s, Some(&mut esc)).unwrap(), -1, "({p}, {s})");
+        assert!(esc.error_occurred(), "({p}, {s})");
+    }
+    // numerictypmodin itself still throws (no context)
+    let e = numerictypmodin_core(&[0]).unwrap_err();
+    assert_eq!(e.message(), "NUMERIC precision 0 must be between 1 and 1000");
+    let e = numerictypmodin_core(&[6, 1001]).unwrap_err();
+    assert_eq!(e.message(), "NUMERIC scale 1001 must be between -1000 and 1000");
+    assert_eq!(numerictypmodin_core(&[5]).unwrap(), make_numeric_typmod(5, 0));
+}

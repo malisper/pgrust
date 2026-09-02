@@ -22,6 +22,14 @@ fn wal_constants_match_write_side() {
     );
     assert_eq!(XLH_LOCK_ALL_FROZEN_CLEARED, heapam::dml::XLH_LOCK_ALL_FROZEN_CLEARED);
     assert_eq!(XLH_DELETE_ALL_VISIBLE_CLEARED, heapam::dml::XLH_DELETE_ALL_VISIBLE_CLEARED);
+    // upstream f581fa729d8e (18.5): the VM block-reference ids redo reads
+    // are the ones the write side registers.
+    assert_eq!(HEAP_INSERT_BLKREF_VM, heapam::dml::HEAP_INSERT_BLKREF_VM);
+    assert_eq!(HEAP_MULTI_INSERT_BLKREF_VM, heapam::dml::HEAP_MULTI_INSERT_BLKREF_VM);
+    assert_eq!(HEAP_DELETE_BLKREF_VM, heapam::dml::HEAP_DELETE_BLKREF_VM);
+    assert_eq!(HEAP_LOCK_BLKREF_VM, heapam::dml::HEAP_LOCK_BLKREF_VM);
+    assert_eq!(HEAP_UPDATE_BLKREF_VM_NEW, heapam::dml::HEAP_UPDATE_BLKREF_VM_NEW);
+    assert_eq!(HEAP_UPDATE_BLKREF_VM_OLD, heapam::dml::HEAP_UPDATE_BLKREF_VM_OLD);
     assert_eq!(XLH_DELETE_IS_PARTITION_MOVE, heapam::dml::XLH_DELETE_IS_PARTITION_MOVE);
     assert_eq!(XLHL_XMAX_IS_MULTI, heapam::dml::XLHL_XMAX_IS_MULTI);
     assert_eq!(XLHL_XMAX_LOCK_ONLY, heapam::dml::XLHL_XMAX_LOCK_ONLY);

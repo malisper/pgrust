@@ -851,6 +851,10 @@ fn ReindexRelationConcurrently<'mcx>(
         snapmgr::PopActiveSnapshot()?;
         xact::CommitTransactionCommand()?;
     }
+
+    // upstream e4527519b77e (18.6): Fix propagation of indimmediate flag in index_create_copy()
+    injection_point::injection_point("reindex-conc-index-built")?;
+
     xact::StartTransactionCommand()?;
 
     // Phase 3: let the new indexes catch up, then validate, one per xact.

@@ -619,3 +619,43 @@ mod agg_array_serial {
         assert_eq!(err.message(), "cannot accumulate arrays of different dimensionality");
     }
 }
+
+// upstream 67dd6243dc95 (18.4): the running item count is checked against
+// MAX_ARRAY_SIZE on every input; all-NULL inputs add bitmap bits only, so the
+// count could wrap i32 before any allocation limit tripped (CVE-2026-6473).
+#[test]
+fn agg_array_rejects_growth_past_max_array_size() {
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    const INT4_ARRAY: Oid = 1007;
+    let a = int4_arr(mcx, &[Some(1), Some(2)], 1);
+    let seeded = |nitems: i32| {
+        let mut st = accum_array_result_arr(
+            mcx,
+            Some(init_array_result_arr(mcx, INT4_ARRAY, INT4OID).unwrap()),
+            Some(&a),
+            INT4_ARRAY,
+        )
+        .unwrap();
+        st.nitems = nitems;
+        st
+    };
+    let limit = ::arrayutils::MAX_ARRAY_SIZE as i32;
+    // the next two items cross the limit
+    let err = accum_array_result_arr(mcx, Some(seeded(limit - 1)), Some(&a), INT4_ARRAY)
+        .err()
+        .unwrap();
+    assert_eq!(
+        err.message(),
+        "array size exceeds the maximum allowed (134217727)"
+    );
+    assert_eq!(err.sqlstate(), ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+    // landing exactly on the limit is still allowed
+    let st = accum_array_result_arr(mcx, Some(seeded(limit - 2)), Some(&a), INT4_ARRAY).unwrap();
+    assert_eq!(st.nitems, limit);
+    // the i32-wrap shape: a clean error, not overflow arithmetic
+    let err = accum_array_result_arr(mcx, Some(seeded(i32::MAX - 1)), Some(&a), INT4_ARRAY)
+        .err()
+        .unwrap();
+    assert_eq!(err.sqlstate(), ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+}

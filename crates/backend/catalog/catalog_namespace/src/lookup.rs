@@ -862,7 +862,6 @@ pub struct FuncCandidate<'mcx> {
     pub args: mcx::PgVec<'mcx, Oid>,
 }
 
-const FUNC_MAX_ARGS: usize = 100;
 const FUNC_PARAM_IN: i8 = b'i' as i8;
 const FUNC_PARAM_INOUT: i8 = b'b' as i8;
 const FUNC_PARAM_VARIADIC: i8 = b'v' as i8;
@@ -901,7 +900,10 @@ fn MatchNamedCall<'mcx>(
     let pronargs = pronargs as usize;
 
     let mut argnumbers: mcx::PgVec<'mcx, i32> = mcx::vec_with_capacity_in(mcx, pronargs)?;
-    let mut arggiven = [false; FUNC_MAX_ARGS];
+    // upstream 7f0e1aac7a7b (18.6): Replace fixed-size, too-short array with a palloc'd one.
+    // Indexed by proargs position over all parameters (pronallargs), which
+    // exceeds FUNC_MAX_ARGS when the routine has OUT parameters.
+    let mut arggiven: mcx::PgVec<'mcx, bool> = mcx::vec_from_elem_in(mcx, false, pronallargs);
 
     for ap in 0..numposargs {
         argnumbers.push(ap as i32);
@@ -1197,4 +1199,71 @@ pub fn FuncnameGetCandidatesExtended<'mcx>(
     // C prepends; head-first order = reverse acceptance order.
     result.reverse();
     Ok(result)
+}
+
+#[cfg(test)]
+mod match_named_call_tests {
+    use super::*;
+    use mcx::{MemoryContext, PgString, PgVec};
+
+    const INT4OID: Oid = 23;
+
+    // 100 IN parameters (all defaulted) plus 10 OUT parameters: pronargs stays
+    // at FUNC_MAX_ARGS (ProcedureCreate only caps the IN count) but
+    // proallargtypes has 110 entries, so the OUT parameters sit at proargs
+    // positions 100..109.
+    fn f110_arrays<'mcx>(mcx: mcx::Mcx<'mcx>) -> syscache_seams::PgProcResultArraysShape<'mcx> {
+        let mut types: PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, 110).unwrap();
+        let mut modes: PgVec<'mcx, i8> = mcx::vec_with_capacity_in(mcx, 110).unwrap();
+        let mut names: PgVec<'mcx, PgString<'mcx>> = PgVec::new_in(mcx);
+        for i in 1..=100 {
+            types.push(INT4OID);
+            modes.push(FUNC_PARAM_IN);
+            names.push(PgString::from_str_in(&format!("a{i}"), mcx).unwrap());
+        }
+        for i in 1..=10 {
+            types.push(INT4OID);
+            modes.push(b'o' as i8);
+            names.push(PgString::from_str_in(&format!("o{i}"), mcx).unwrap());
+        }
+        syscache_seams::PgProcResultArraysShape {
+            proallargtypes: Some(types),
+            proargmodes: Some(modes),
+            proargnames: Some(names),
+        }
+    }
+
+    // upstream 7f0e1aac7a7b (18.6): Replace fixed-size, too-short array with a palloc'd one.
+    // CALL f110(o1 => 1, ..., o10 => 1): include_out_arguments = true, so the
+    // named OUT arguments land at proargs positions >= FUNC_MAX_ARGS in the
+    // named-argument loop. No candidate matches (a1..a100 are not given and
+    // the defaults loop refuses position 0), which is C's `return false`.
+    #[test]
+    fn named_out_args_beyond_func_max_args_do_not_match() {
+        let ctx = MemoryContext::new("test");
+        let mcx = ctx.mcx();
+        let arrays = f110_arrays(mcx);
+        let names: Vec<String> = (1..=10).map(|i| format!("o{i}")).collect();
+        let argnames: Vec<&str> = names.iter().map(String::as_str).collect();
+        let got = MatchNamedCall(mcx, &arrays, 100, 100, 10, &argnames, true, 110).unwrap();
+        assert!(got.is_none());
+    }
+
+    // upstream 7f0e1aac7a7b (18.6): Replace fixed-size, too-short array with a palloc'd one.
+    // CALL p110(<100 positional>, o1 => NULL, ..., o5 => NULL): positions
+    // 100..104 are set by the named-argument loop and 105..109 are filled in
+    // by the defaults loop -- both index arggiven past FUNC_MAX_ARGS.
+    #[test]
+    fn positional_plus_named_out_args_beyond_func_max_args_match() {
+        let ctx = MemoryContext::new("test");
+        let mcx = ctx.mcx();
+        let arrays = f110_arrays(mcx);
+        let names: Vec<String> = (1..=5).map(|i| format!("o{i}")).collect();
+        let argnames: Vec<&str> = names.iter().map(String::as_str).collect();
+        let got = MatchNamedCall(mcx, &arrays, 100, 100, 105, &argnames, true, 110)
+            .unwrap()
+            .expect("all 110 parameters resolve");
+        let expected: Vec<i32> = (0..110).collect();
+        assert_eq!(got.as_slice(), expected.as_slice());
+    }
 }

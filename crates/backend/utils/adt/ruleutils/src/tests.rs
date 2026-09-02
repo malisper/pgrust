@@ -231,6 +231,39 @@ fn coercion_deparse_matches_c() {
     assert_eq!(expr(COERCE_42_TEXT, 0, true), "42::text");
 }
 
+// upstream 0ddd9098a310 (18.6): the parser accepts any string as an EXTRACT()
+// field name (extract_arg: IDENT | ... | Sconst), so deparse quotes it like an
+// identifier; a bare emit let a crafted field inject SQL into pg_get_viewdef().
+// Expected strings captured from live C PG 18.6 (pg_get_viewdef over a view
+// built with each field spelling).
+const EXTRACT_FUNCEXPR_HEAD: &str = "{FUNCEXPR :funcid 6202 :funcresulttype 1700 \
+     :funcretset false :funcvariadic false :funcformat 3 :funccollid 0 :inputcollid 100 :args (";
+const CONST_TEXT_YEAR: &str = "{CONST :consttype 25 :consttypmod -1 :constcollid 100 :constlen -1 \
+     :constbyval false :constisnull false :location -1 :constvalue 8 [ 32 0 0 0 121 101 97 114 ]}";
+const CONST_TEXT_YEAR_MIXED: &str = "{CONST :consttype 25 :consttypmod -1 :constcollid 100 \
+     :constlen -1 :constbyval false :constisnull false :location -1 \
+     :constvalue 8 [ 32 0 0 0 89 101 97 114 ]}";
+const CONST_TEXT_INJECT: &str = "{CONST :consttype 25 :consttypmod -1 :constcollid 100 :constlen -1 \
+     :constbyval false :constisnull false :location -1 \
+     :constvalue 19 [ 76 0 0 0 121 101 97 114 32 70 82 79 77 32 120 41 32 45 45 ]}";
+const CONST_TEXT_DQUOTE: &str = "{CONST :consttype 25 :consttypmod -1 :constcollid 100 :constlen -1 \
+     :constbyval false :constisnull false :location -1 :constvalue 7 [ 28 0 0 0 97 34 98 ]}";
+
+fn extract_expr(field: &str) -> String {
+    expr(&format!("{EXTRACT_FUNCEXPR_HEAD}{field} {CONST_NEG5}) :location -1}}"), 0, false)
+}
+
+#[test]
+fn extract_field_name_deparses_as_quoted_identifier() {
+    assert_eq!(extract_expr(CONST_TEXT_YEAR), "EXTRACT(year FROM '-5'::integer)");
+    assert_eq!(extract_expr(CONST_TEXT_YEAR_MIXED), "EXTRACT(\"Year\" FROM '-5'::integer)");
+    assert_eq!(
+        extract_expr(CONST_TEXT_INJECT),
+        "EXTRACT(\"year FROM x) --\" FROM '-5'::integer)"
+    );
+    assert_eq!(extract_expr(CONST_TEXT_DQUOTE), "EXTRACT(\"a\"\"b\" FROM '-5'::integer)");
+}
+
 // deparse_expression_pretty directly: pg_get_expr_worker's relation probe
 // needs a live catcache the unit tests don't boot.
 fn expr_with_rel(nodetree: &str, pretty: bool) -> String {
@@ -390,6 +423,42 @@ fn deparse_too_many_arguments_is_ereport_54023() {
     let err = super::deparse::check_deparse_nargs(FUNC_MAX_ARGS + 1).err().unwrap();
     assert_eq!(err.sqlstate(), ERRCODE_TOO_MANY_ARGUMENTS);
     assert_eq!(err.message(), "too many arguments");
+}
+
+// An Aggref as a stored view would carry it (C outfuncs field order), with
+// `nargs` int4 aggargtypes and no argument expressions.
+fn aggref_nodetree(nargs: usize) -> String {
+    let types = vec!["23"; nargs].join(" ");
+    format!(
+        "{{AGGREF :aggfnoid 5002 :aggtype 20 :aggcollid 0 :inputcollid 0 :aggtranstype 0 \
+         :aggargtypes (o {types}) :aggdirectargs <> :args <> :aggorder <> :aggdistinct <> \
+         :aggfilter <> :aggstar false :aggvariadic false :aggkind n :aggpresorted false \
+         :agglevelsup 0 :aggsplit 0 :aggno -1 :aggtransno -1 :location -1}}"
+    )
+}
+
+// upstream 2a03f21daf59 (18.6): get_aggregate_argtypes' arity guard is reached
+// from ruleutils too, so a stored view whose Aggref carries FUNC_MAX_ARGS
+// argument types (made by an executable that did not enforce the limit)
+// deparses to 54023 rather than into fixed-size argument arrays. Pre-fix the
+// name lookup runs and reports the (unstubbed) function as a cache miss.
+#[test]
+fn agg_deparse_with_too_many_arguments_is_ereport_54023() {
+    install();
+    syscache_seams::pg_proc_proname::set(|_| Ok(None));
+    let ctx = MemoryContext::new("ruleutils test");
+    let deparse_err = |nargs: usize| {
+        let node = readfuncs::stringToNode(ctx.mcx(), &aggref_nodetree(nargs)).unwrap();
+        deparse_expression_pretty(ctx.mcx(), node, REL_OID, false, PRETTYFLAG_INDENT)
+            .err()
+            .unwrap()
+    };
+    let err = deparse_err(FUNC_MAX_ARGS);
+    assert_eq!(err.sqlstate(), ERRCODE_TOO_MANY_ARGUMENTS);
+    assert_eq!(err.message(), "aggregates cannot have more than 99 arguments");
+    // FUNC_MAX_ARGS-1 passes the guard and reaches the function-name lookup.
+    let err = deparse_err(FUNC_MAX_ARGS - 1);
+    assert_eq!(err.message(), "cache lookup failed for function 5002");
 }
 
 // The tablespace probes in pg_get_indexdef_worker / pg_get_constraintdef and

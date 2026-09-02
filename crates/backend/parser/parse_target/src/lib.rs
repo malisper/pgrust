@@ -660,11 +660,8 @@ fn ExpandRowReference<'mcx>(
 ) -> PgResult<NodeList<'mcx>> {
     if let Some(var) = expr.as_var() {
         if var.varattno == 0 {
-            let nsitem = parse_relation::GetNSItemByRangeTablePosn(
-                pstate,
-                var.varno as i32,
-                var.varlevelsup as i32,
-            );
+            // upstream 9108fed3eda9 (18.5): Fix parsing of parenthesised OLD/NEW in RETURNING list.
+            let nsitem = parse_relation::GetNSItemByVar(pstate, var);
             return ExpandSingleTable(
                 mcx,
                 pstate,

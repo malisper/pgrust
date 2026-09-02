@@ -8,6 +8,12 @@ pub struct PgpCfb {
     pos: usize,
     block_no: i32,
     resync: bool,
+    // upstream 4c5128ca0b30 (18.6): pgcrypto: Add option to revert to prior decryption behavior.
+    // C's cfb_process drops its px_cipher_encrypt init-failure ERROR on the decrypt
+    // path when this is set; create() builds the cipher eagerly and encrypt_block()
+    // is infallible, so nothing here can fail to be ignored.
+    #[allow(dead_code)] // C-parity: pgp_cfb_decrypt's guard input
+    ignore_decrypt_cipher_failure: bool,
     fr: Vec<u8>,
     fre: Vec<u8>,
     encbuf: Vec<u8>,
@@ -19,6 +25,7 @@ impl PgpCfb {
         key: &[u8],
         resync: bool,
         iv: Option<&[u8]>,
+        ignore_decrypt_cipher_failure: bool,
     ) -> Result<PgpCfb, &'static str> {
         let int_name = cipher_int_name(algo).ok_or(UNSUPPORTED_CIPHER)?;
         let ciph = BlockEncryptor::new(int_name, key).ok_or(UNSUPPORTED_CIPHER)?;
@@ -34,6 +41,7 @@ impl PgpCfb {
             pos: 0,
             block_no: 0,
             resync,
+            ignore_decrypt_cipher_failure,
             fr,
             fre: vec![0u8; bs],
             encbuf: vec![0u8; bs],

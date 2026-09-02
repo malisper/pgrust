@@ -496,3 +496,65 @@ fn cache_locale_time_c_locale_names() {
     assert_eq!(names.abbrev_days[0], b"Sun");
     assert_eq!(names.full_days[6].to_ascii_lowercase(), b"saturday");
 }
+
+// upstream 9021c8f3cabc (18.6): unicode_case.c: defend against truncated UTF8.
+#[test]
+fn strtitle_builtin_stops_at_invalid_utf8() {
+    for full in [false, true] {
+        let loc = PgLocale {
+            provider: COLLPROVIDER_BUILTIN,
+            deterministic: true,
+            collate_is_c: true,
+            ctype_is_c: false,
+            is_default: false,
+            builtin_locale: None,
+            builtin_casemap_full: full,
+            lt: libc_locale::LibcLocale::NONE,
+            icu: crate::icu::IcuLocale::NONE,
+        };
+        let mut dst = [0u8; 16];
+        let n = builtin_case::strtitle_builtin(&mut dst, b"abc\xCE", &loc);
+        assert_eq!((n, &dst[..n]), (3, &b"Abc"[..]), "full={full}");
+        let n = builtin_case::strtitle_builtin(&mut dst, b"abc\xF8xyz", &loc);
+        assert_eq!((n, &dst[..n]), (3, &b"Abc"[..]), "full={full}");
+    }
+}
+
+// upstream 5f003855e7f0 (18.6): the C ctype never reaches libc with a NULL locale_t
+// (pre-fix: the LibcLocale::get debug_assert on the UTF-8 wide-char arm).
+#[test]
+fn c_locale_case_mapping_is_ascii_without_libc() {
+    mbutils::SetDatabaseEncoding(6).unwrap();
+    let ctx = MemoryContext::new("c-case");
+    let mcx = ctx.mcx();
+    let run = |f: fn(Mcx<'_>, &mut [u8], &[u8], &PgLocale) -> PgResult<usize>,
+               src: &[u8]|
+     -> Vec<u8> {
+        let mut dst = vec![0xAAu8; src.len() + 2];
+        let n = f(mcx, &mut dst, src, &C_LOCALE).unwrap();
+        assert_eq!(n, src.len());
+        assert_eq!(dst[n], 0, "NUL-terminated when it fits");
+        assert_eq!(dst[n + 1], 0xAA, "nothing written past the terminator");
+        dst.truncate(n);
+        dst
+    };
+    assert_eq!(
+        run(pg_strlower, "FeBrUaRy \u{c9}T\u{c9} 1\0X".as_bytes()),
+        "february \u{c9}t\u{c9} 1\0x".as_bytes()
+    );
+    assert_eq!(
+        run(pg_strupper, "hello, w\u{f6}rld 42".as_bytes()),
+        "HELLO, W\u{f6}RLD 42".as_bytes()
+    );
+    assert_eq!(run(pg_strtitle, b"hello wORLD 4x b-c \xc3\xa9a"), b"Hello World 4x B-C \xc3\xa9A");
+    assert_eq!(run(pg_strfold, b"MiXeD"), b"mixed");
+
+    // a short destination gets the prefix, no terminator, and the full length
+    let mut short = [0xAAu8; 3];
+    assert_eq!(pg_strupper(mcx, &mut short, b"abcde", &C_LOCALE).unwrap(), 5);
+    assert_eq!(short, *b"ABC");
+    // exactly srclen bytes of room: no terminator either
+    let mut exact = [0xAAu8; 5];
+    assert_eq!(pg_strlower(mcx, &mut exact, b"ABCDE", &C_LOCALE).unwrap(), 5);
+    assert_eq!(exact, *b"abcde");
+}

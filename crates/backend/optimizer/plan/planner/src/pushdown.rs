@@ -201,9 +201,9 @@ fn check_output_expressions<'mcx>(
             safety.unsafe_flags[resno] |= UNSAFE_NOTIN_DISTINCTON_CLAUSE;
             continue;
         }
-        // C tests the DISTINCT-ON bit here, not the PARTITION-BY bit.
+        // upstream cc0819e78ae3 (18.6): Fix wrong unsafe-flag test in check_output_expressions()
         if subquery.hasWindowFuncs
-            && safety.unsafe_flags[resno] & UNSAFE_NOTIN_DISTINCTON_CLAUSE == 0
+            && safety.unsafe_flags[resno] & UNSAFE_NOTIN_PARTITIONBY_CLAUSE == 0
             && !target_is_in_all_partition_lists(tle, subquery)
         {
             safety.unsafe_flags[resno] |= UNSAFE_NOTIN_PARTITIONBY_CLAUSE;
@@ -891,4 +891,59 @@ pub(crate) fn remove_unused_subquery_outputs<'mcx>(
         subquery.targetList.as_mut_slice()[i] = new_tle;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod check_output_expressions_tests {
+    use super::*;
+    use mcx::MemoryContext;
+    use types_nodes::nodes_enums::CmdType;
+    use types_nodes::parsenodes::WindowClause;
+
+    // upstream cc0819e78ae3 (18.6): the window-function check (point 4)
+    // guards on the bit it sets, UNSAFE_NOTIN_PARTITIONBY_CLAUSE.  With
+    // UNSAFE_NOTIN_DISTINCTON_CLAUSE already accumulated from an earlier
+    // set-operation arm, a column missing from the PARTITION BY list still
+    // gets its PARTITIONBY bit; the old guard on the DISTINCT-ON bit skipped
+    // the check and left the bit unset.
+    #[test]
+    fn check_output_expressions_guards_on_partitionby_bit() {
+        let cx = MemoryContext::new_bump("check-output-expressions");
+        let mcx = cx.mcx();
+        let var = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+        let tle = Node::mk_target_entry(mcx, var, 1, Some("x"), false).unwrap();
+        // One window with an empty PARTITION BY: no tlist column is in it.
+        let wc = Node::mk(mcx, WindowClause { winref: 1, ..WindowClause::default() }).unwrap();
+        let subquery = mcx::alloc_leak_in(
+            mcx,
+            Query {
+                commandType: CmdType::CMD_SELECT,
+                targetList: NodeList::make1(mcx, tle).unwrap(),
+                windowClause: NodeList::make1(mcx, wc).unwrap(),
+                hasWindowFuncs: true,
+                ..Query::default()
+            },
+        )
+        .unwrap();
+        let mut safety = PushdownSafetyInfo {
+            unsafe_flags: mcx::vec_from_elem_in(mcx, 0u8, 2),
+            unsafe_volatile: false,
+            unsafe_leaky: false,
+        };
+        safety.unsafe_flags[1] = UNSAFE_NOTIN_DISTINCTON_CLAUSE;
+
+        check_output_expressions(mcx, subquery, &mut safety).unwrap();
+
+        assert_eq!(
+            safety.unsafe_flags[1],
+            UNSAFE_NOTIN_DISTINCTON_CLAUSE | UNSAFE_NOTIN_PARTITIONBY_CLAUSE,
+            "point 4 must run when only the DISTINCT-ON bit is set"
+        );
+        // Idempotent: a second pass over the same arm changes nothing.
+        check_output_expressions(mcx, subquery, &mut safety).unwrap();
+        assert_eq!(
+            safety.unsafe_flags[1],
+            UNSAFE_NOTIN_DISTINCTON_CLAUSE | UNSAFE_NOTIN_PARTITIONBY_CLAUSE
+        );
+    }
 }

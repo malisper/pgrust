@@ -12,6 +12,8 @@
 
 #![allow(non_camel_case_types)]
 
+#[cfg(all(test, any(target_arch = "aarch64", target_arch = "x86_64"), not(miri)))]
+mod tests;
 
 use std::cell::Cell;
 
@@ -71,11 +73,43 @@ pub fn max_stack_depth_bytes() -> isize {
     MAX_STACK_DEPTH_BYTES.get()
 }
 
-// C's __builtin_frame_address(0); inline(never) keeps the frame real; no black_box (it spills — docs/benchmarks/stack_depth.md).
+// upstream c0bf1d89df29 (18.6): Make stack depth check work with asan's use-after-return
+// C's __builtin_frame_address(0): the machine stack pointer, which ASan's
+// fake stack (detect_stack_use_after_return) never relocates the way it
+// relocates an address-taken local; read in whichever frame this inlines
+// into. C's no-__builtin_frame_address arm (a local's address) stays for
+// targets without a readable sp.
+#[inline(always)]
+fn machine_stack_addr() -> usize {
+    #[cfg(all(target_arch = "aarch64", not(miri)))]
+    {
+        let sp: usize;
+        // SAFETY: register-only read of sp; touches no memory, keeps flags.
+        unsafe {
+            core::arch::asm!("mov {}, sp", out(reg) sp, options(nomem, nostack, preserves_flags));
+        }
+        sp
+    }
+    #[cfg(all(target_arch = "x86_64", not(miri)))]
+    {
+        let sp: usize;
+        // SAFETY: register-only read of rsp; touches no memory, keeps flags.
+        unsafe {
+            core::arch::asm!("mov {}, rsp", out(reg) sp, options(nomem, nostack, preserves_flags));
+        }
+        sp
+    }
+    #[cfg(not(all(any(target_arch = "aarch64", target_arch = "x86_64"), not(miri))))]
+    {
+        let stack_loc: u8 = 0;
+        &raw const stack_loc as usize
+    }
+}
+
+// inline(never) keeps the frame real; no black_box (it spills — docs/benchmarks/stack_depth.md).
 #[inline(never)]
 fn current_stack_addr() -> usize {
-    let stack_loc: u8 = 0;
-    &raw const stack_loc as usize
+    machine_stack_addr()
 }
 
 // One backend = one thread: recorded at backend-thread spawn (C: in main()).
@@ -88,12 +122,10 @@ pub fn restore_stack_base(base: pg_stack_base_t) {
     STACK_BASE_PTR.set(base);
 }
 
-// C's shape: address of an own-frame local, pointer subtraction, compare.
 #[inline(never)]
 pub fn stack_is_too_deep() -> bool {
-    let stack_top_loc: u8 = 0;
     let stack_base_ptr = STACK_BASE_PTR.get();
-    let stack_depth = stack_base_ptr.abs_diff(&raw const stack_top_loc as usize) as isize;
+    let stack_depth = stack_base_ptr.abs_diff(machine_stack_addr()) as isize;
     // base != 0 (NULL) guard last: no wasted cycles in the normal case.
     stack_depth > MAX_STACK_DEPTH_BYTES.get() && stack_base_ptr != 0
 }

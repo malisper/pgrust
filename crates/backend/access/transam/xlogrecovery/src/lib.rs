@@ -830,14 +830,18 @@ impl XLogReaderRoutine for PageSource {
                 &mut cur_page[..XLOG_BLCKSZ],
                 self.read_off as i64,
             );
-            pgstat::io::pgstat_count_io_op_time(
-                pgstat::io::IOObject::Wal,
-                pgstat::io::IOContext::IOCONTEXT_NORMAL,
-                pgstat::io::IOOp::Read,
-                io_start,
-                1,
-                r.max(0) as u64,
-            );
+            // upstream 13f940b4b56f (18.6): Fix pgstat_count_io_op_time() calls passing incorrect information
+            // Count I/O stats only for successful short reads.
+            if r > 0 {
+                pgstat::io::pgstat_count_io_op_time(
+                    pgstat::io::IOObject::Wal,
+                    pgstat::io::IOContext::IOCONTEXT_NORMAL,
+                    pgstat::io::IOOp::Read,
+                    io_start,
+                    1,
+                    r as u64,
+                );
+            }
             if r != XLOG_BLCKSZ as isize {
                 let errno = std::io::Error::last_os_error();
                 let fname =
@@ -1166,6 +1170,16 @@ fn validate_recovery_parameters() -> PgResult<()> {
 pub fn InitWalRecovery() -> PgResult<InitWalRecoveryResult> {
     let cf = *transam_xlog::control_file::control_file();
     let dbstate_at_startup = cf.state;
+
+    // upstream 311e66df9cc8 (18.6): Fix hot standby accepting connections too early after a crash reset
+    // A startup process always starts with an inconsistent database. Set the
+    // flag accordingly, even if it was inherited from a postmaster that had
+    // already marked the database as consistent (here: left behind in the
+    // process-global by the previous startup thread of a crash reset). This
+    // keeps the invariant local to the startup process without requiring
+    // every fork path to clear the flag.
+    REACHED_CONSISTENCY.store(false, Relaxed);
+
     let mut in_recovery = false;
 
     let target_tli = if cf.minRecoveryPointTLI > cf.checkPointCopy.ThisTimeLineID {

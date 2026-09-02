@@ -60,7 +60,9 @@ const WAIT_EVENT_REPLICATION_SLOTSYNC_MAIN: u32 = PG_WAIT_ACTIVITY + 11;
 const WAIT_EVENT_REPLICATION_SLOTSYNC_SHUTDOWN: u32 = PG_WAIT_ACTIVITY + 12;
 
 /// SlotSyncCtxStruct: pid/stopSignaled/syncing/last_start_time behind one
-/// mutex (C uses a spinlock in shmem).
+/// mutex (C uses a spinlock in shmem). `pid` is the slot sync worker's or the
+/// pg_sync_replication_slots() backend's, whichever is syncing: the startup
+/// process wakes it through this on promotion.
 #[derive(Default)]
 struct SlotSyncCtx {
     pid: i32,
@@ -107,7 +109,22 @@ thread_local! {
 struct StartedWith {
     primary_conninfo: String,
     primary_slotname: String,
+    sync_replication_slots: bool,
     hot_standby_feedback: bool,
+}
+
+// upstream 94efd308bcec (18.4): Enhance slot synchronization API to respect promotion signal.
+// The pg_sync_replication_slots() backend records its baseline at
+// SyncReplicationSlots entry, the worker at its start (see STARTED_WITH).
+fn record_started_with() {
+    STARTED_WITH.with(|sw| {
+        *sw.borrow_mut() = Some(StartedWith {
+            primary_conninfo: guc_tables::vars::PrimaryConnInfo.read().unwrap_or_default(),
+            primary_slotname: guc_tables::vars::PrimarySlotName.read().unwrap_or_default(),
+            sync_replication_slots: guc_tables::vars::sync_replication_slots.read(),
+            hot_standby_feedback: guc_tables::vars::hot_standby_feedback.read(),
+        });
+    });
 }
 
 /// Information fetched from the primary about one logical slot.
@@ -231,7 +248,13 @@ fn update_local_synced_slot(
             if let Some(f) = found_consistent_snapshot.as_deref_mut() {
                 *f = true;
             }
+            updated_xmin_or_lsn = true;
         } else {
+            // upstream 540fe8fb5c22 (18.4): Fix excessive logging in idle slotsync worker.
+            let old_confirmed_lsn = d.confirmed_flush;
+            let old_restart_lsn = d.restart_lsn;
+            let old_catalog_xmin = d.catalog_xmin;
+
             let (_retlsn, consistent) =
                 logical_slot_advance_and_check_snap_state::call(remote_slot.confirmed_lsn)?;
             if let Some(f) = found_consistent_snapshot.as_deref_mut() {
@@ -239,8 +262,8 @@ fn update_local_synced_slot(
             }
 
             // Sanity check.
-            let confirmed = unsafe { slot.data.get() }.confirmed_flush;
-            if confirmed != remote_slot.confirmed_lsn {
+            let d = unsafe { slot.data.get() };
+            if d.confirmed_flush != remote_slot.confirmed_lsn {
                 return ereport(ERROR)
                     .errmsg(format!(
                         "synchronized confirmed_flush for slot \"{}\" differs from remote slot",
@@ -249,13 +272,18 @@ fn update_local_synced_slot(
                     .errdetail(format!(
                         "Remote slot has LSN {} but local slot has LSN {}.",
                         lsn_fmt(remote_slot.confirmed_lsn),
-                        lsn_fmt(confirmed)
+                        lsn_fmt(d.confirmed_flush)
                     ))
                     .finish(loc("update_local_synced_slot"))
                     .map(|()| false);
             }
+
+            // The advance is a no-op once the synced slot reached a
+            // consistent snapshot state or cannot build one at all.
+            updated_xmin_or_lsn = old_confirmed_lsn != d.confirmed_flush
+                || old_restart_lsn != d.restart_lsn
+                || old_catalog_xmin != d.catalog_xmin;
         }
-        updated_xmin_or_lsn = true;
     }
 
     let d = unsafe { slot.data.get() };
@@ -370,22 +398,21 @@ fn drop_local_obsolete_slots(remote_slot_list: &[RemoteSlot]) -> PgResult<()> {
         let synced_slot =
             local_slot.with_mutex(|| unsafe { local_slot.in_use.get() } && unsafe { local_slot.data.get() }.synced != 0);
 
+        // upstream 08458bcaea5b (18.6): Avoid stale slot access after dropping obsolete synced slots.
+        // Once dropped, the entry is another backend's to reuse: log from the
+        // pre-drop name and OID, and only when a slot was actually dropped.
         if synced_slot {
             let name = name_string(&unsafe { local_slot.data.get() }.name);
             ReplicationSlotAcquire(&name, true, false)?;
             ReplicationSlotDropAcquired()?;
+
+            let _ = elog(
+                LOG,
+                format!("dropped replication slot \"{name}\" of database with OID {dboid}"),
+            );
         }
 
         lmgr::UnlockSharedObject(DatabaseRelationId, dboid, 0, AccessShareLock)?;
-
-        let _ = elog(
-            LOG,
-            format!(
-                "dropped replication slot \"{}\" of database with OID {}",
-                name_string(&unsafe { local_slot.data.get() }.name),
-                dboid
-            ),
-        );
     }
     Ok(())
 }
@@ -894,78 +921,119 @@ fn am_slotsync_worker() -> bool {
     miscinit::GetMyBackendType() == types_core::BackendType::SlotsyncWorker
 }
 
-/// slotsync_reread_config: exit (for postmaster restart) if any slot sync GUC
-/// changed.
+/// slotsync_reread_config: on a relevant GUC change the worker exits (the
+/// postmaster restarts it); the pg_sync_replication_slots() backend errors.
+// upstream 94efd308bcec (18.4): Enhance slot synchronization API to respect promotion signal.
 fn slotsync_reread_config() -> PgResult<()> {
+    let is_slotsync_worker = am_slotsync_worker();
+
     interrupt::SetConfigReloadPending(false);
     guc_file::ProcessConfigFile(types_guc::PGC_SIGHUP)?;
 
-    // Diff against started-with values, not pre-reload reads: the GUC
+    // Diff against the recorded baseline, not pre-reload reads: the GUC
     // backings are process-shared, so the postmaster's reload already
     // changed them (thread-model hazard class 1).
-    let (old_primary_conninfo, old_primary_slotname, old_hot_standby_feedback) =
-        STARTED_WITH.with(|sw| {
-            let sw = sw.borrow();
-            let sw = sw.as_ref().expect("slot sync worker recorded its GUCs");
-            (
-                sw.primary_conninfo.clone(),
-                sw.primary_slotname.clone(),
-                sw.hot_standby_feedback,
-            )
-        });
+    let (
+        old_primary_conninfo,
+        old_primary_slotname,
+        old_sync_replication_slots,
+        old_hot_standby_feedback,
+    ) = STARTED_WITH.with(|sw| {
+        let sw = sw.borrow();
+        let sw = sw.as_ref().expect("slot sync process recorded its GUCs");
+        (
+            sw.primary_conninfo.clone(),
+            sw.primary_slotname.clone(),
+            sw.sync_replication_slots,
+            sw.hot_standby_feedback,
+        )
+    });
+    if is_slotsync_worker {
+        debug_assert!(old_sync_replication_slots);
+    }
 
     let conninfo_changed =
         old_primary_conninfo != guc_tables::vars::PrimaryConnInfo.read().unwrap_or_default();
     let primary_slotname_changed =
         old_primary_slotname != guc_tables::vars::PrimarySlotName.read().unwrap_or_default();
+    let mut parameter_changed = false;
 
-    if !guc_tables::vars::sync_replication_slots.read() {
-        let _ = ereport(LOG)
-            .errmsg(
-                "replication slot synchronization worker will shut down because \"sync_replication_slots\" is disabled"
-                    .to_string(),
-            )
-            .finish(loc("slotsync_reread_config"));
-        ipc::proc_exit(0, init_small::globals::MyProcPid());
-    }
-
-    if conninfo_changed
+    if old_sync_replication_slots != guc_tables::vars::sync_replication_slots.read() {
+        if is_slotsync_worker {
+            let _ = ereport(LOG)
+                .errmsg(
+                    "replication slot synchronization worker will stop because \"sync_replication_slots\" is disabled"
+                        .to_string(),
+                )
+                .finish(loc("slotsync_reread_config"));
+            ipc::proc_exit(0, init_small::globals::MyProcPid());
+        }
+        parameter_changed = true;
+    } else if conninfo_changed
         || primary_slotname_changed
         || old_hot_standby_feedback != guc_tables::vars::hot_standby_feedback.read()
     {
-        let _ = ereport(LOG)
-            .errmsg(
-                "replication slot synchronization worker will restart because of a parameter change"
-                    .to_string(),
-            )
+        if is_slotsync_worker {
+            let _ = ereport(LOG)
+                .errmsg(
+                    "replication slot synchronization worker will restart because of a parameter change"
+                        .to_string(),
+                )
+                .finish(loc("slotsync_reread_config"));
+
+            // Reset last-start so the postmaster restarts us immediately.
+            with_ctx(|ctx| ctx.last_start_time = 0);
+
+            ipc::proc_exit(0, init_small::globals::MyProcPid());
+        }
+        parameter_changed = true;
+    }
+
+    // Only the pg_sync_replication_slots() backend gets here with a change.
+    if parameter_changed {
+        debug_assert!(!is_slotsync_worker);
+        return ereport(ERROR)
+            .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+            .errmsg("replication slot synchronization will stop because of a parameter change")
             .finish(loc("slotsync_reread_config"));
-
-        // Reset last-start so the postmaster restarts us immediately.
-        with_ctx(|ctx| ctx.last_start_time = 0);
-
-        ipc::proc_exit(0, init_small::globals::MyProcPid());
     }
 
     Ok(())
 }
 
-fn ProcessSlotSyncInterrupts() -> PgResult<()> {
-    postgres_seams::check_for_interrupts::call()?;
+/// HandleSlotSyncMessageInterrupt: the SIGUSR1-handler arm of
+/// PROCSIG_SLOTSYNC_MESSAGE; the next CHECK_FOR_INTERRUPTS() runs
+/// ProcessSlotSyncMessage. (The latch is set by the procsignal delivery.)
+// upstream 58c1188a3eaa (18.4): Fix slotsync worker blocking promotion when stuck in wait
+pub fn HandleSlotSyncMessageInterrupt() {
+    init_small::globals::SetInterruptPending(true);
+    init_small::globals::SetSlotSyncShutdownPending(true);
+}
 
-    if with_ctx(|ctx| ctx.stop_signaled) {
+/// ProcessSlotSyncMessage (from ProcessInterrupts): the worker logs and
+/// exits; the pg_sync_replication_slots() backend errors out unless its sync
+/// already finished.
+// upstream 58c1188a3eaa (18.4): Fix slotsync worker blocking promotion when stuck in wait
+pub fn ProcessSlotSyncMessage() -> PgResult<()> {
+    init_small::globals::SetSlotSyncShutdownPending(false);
+
+    if am_slotsync_worker() {
         let _ = ereport(LOG)
             .errmsg(
-                "replication slot synchronization worker is shutting down because promotion is triggered"
+                "replication slot synchronization worker will stop because promotion is triggered"
                     .to_string(),
             )
-            .finish(loc("ProcessSlotSyncInterrupts"));
+            .finish(loc("ProcessSlotSyncMessage"));
         ipc::proc_exit(0, init_small::globals::MyProcPid());
     }
 
-    if interrupt::ConfigReloadPending() {
-        slotsync_reread_config()?;
+    if !IsSyncingReplicationSlots() {
+        return Ok(());
     }
-    Ok(())
+    ereport(ERROR)
+        .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+        .errmsg("replication slot synchronization will stop because promotion is triggered")
+        .finish(loc("ProcessSlotSyncMessage"))
 }
 
 /// slotsync_worker_onexit: slots cleanup exactly as C, then clear pid/syncing.
@@ -1015,30 +1083,48 @@ fn wait_for_slot_activity(some_slot_updated: bool) -> PgResult<()> {
     Ok(())
 }
 
-/// check_and_set_sync_info: error on promotion/concurrent sync, else
-/// advertise the sync.
-fn check_and_set_sync_info(worker_pid: i32) -> PgResult<()> {
+/// check_and_set_sync_info: exit/error if promotion was triggered or a sync
+/// is in progress, else advertise this process's sync (its pid lets the
+/// startup process signal it on promotion).
+// upstream 94efd308bcec (18.4): Enhance slot synchronization API to respect promotion signal.
+// upstream 58c1188a3eaa (18.4): Fix slotsync worker blocking promotion when stuck in wait
+fn check_and_set_sync_info(sync_process_pid: i32) -> PgResult<()> {
     enum Bad {
         Stop,
         Concurrent,
     }
     let bad = with_ctx(|ctx| {
-        debug_assert!(worker_pid == InvalidPid || ctx.pid == InvalidPid);
+        // Guards a worker (or SQL call) starting after ShutDownSlotSync
+        // stopped the old one.
         if ctx.stop_signaled {
             return Some(Bad::Stop);
         }
         if ctx.syncing {
             return Some(Bad::Concurrent);
         }
+        // The pid must not be already assigned in SlotSyncCtx.
+        debug_assert!(ctx.pid == InvalidPid);
         ctx.syncing = true;
-        ctx.pid = worker_pid;
+        ctx.pid = sync_process_pid;
         None
     });
     match bad {
-        Some(Bad::Stop) => ereport(ERROR)
-            .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
-            .errmsg("cannot synchronize replication slots when standby promotion is ongoing")
-            .finish(loc("check_and_set_sync_info")),
+        Some(Bad::Stop) => {
+            if am_slotsync_worker() {
+                let _ = ereport(DEBUG1)
+                    .errmsg(
+                        "replication slot synchronization worker will not start because promotion was triggered"
+                            .to_string(),
+                    )
+                    .finish(loc("check_and_set_sync_info"));
+                ipc::proc_exit(0, init_small::globals::MyProcPid());
+            }
+            // The backend executing pg_sync_replication_slots().
+            ereport(ERROR)
+                .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                .errmsg("replication slot synchronization will not start because promotion was triggered")
+                .finish(loc("check_and_set_sync_info"))
+        }
         Some(Bad::Concurrent) => ereport(ERROR)
             .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
             .errmsg("cannot synchronize replication slots concurrently")
@@ -1051,7 +1137,11 @@ fn check_and_set_sync_info(worker_pid: i32) -> PgResult<()> {
 }
 
 fn reset_syncing_flag() {
-    with_ctx(|ctx| ctx.syncing = false);
+    // upstream 94efd308bcec (18.4): the advertised pid goes with the flag.
+    with_ctx(|ctx| {
+        ctx.syncing = false;
+        ctx.pid = InvalidPid;
+    });
     slot::set_syncing_replication_slots(false);
 }
 
@@ -1094,13 +1184,7 @@ fn repl_slot_sync_worker_inner() -> PgResult<()> {
     // notes/2pc-decode-lane.md). The capture precedes the SIGHUP handler
     // registration below, so any reload processed before this point simply
     // becomes this worker's baseline, exactly like C's fork inheritance.
-    STARTED_WITH.with(|sw| {
-        *sw.borrow_mut() = Some(StartedWith {
-            primary_conninfo: guc_tables::vars::PrimaryConnInfo.read().unwrap_or_default(),
-            primary_slotname: guc_tables::vars::PrimarySlotName.read().unwrap_or_default(),
-            hot_standby_feedback: guc_tables::vars::hot_standby_feedback.read(),
-        });
-    });
+    record_started_with();
 
     // Signal handling (C: SIGHUP config reload, SIGINT cancel, SIGTERM die,
     // SIGUSR1 procsignal).
@@ -1169,7 +1253,12 @@ fn repl_slot_sync_worker_inner() -> PgResult<()> {
 
     // Main loop.
     loop {
-        ProcessSlotSyncInterrupts()?;
+        // upstream 58c1188a3eaa (18.4): Fix slotsync worker blocking promotion when stuck in wait
+        postgres_seams::check_for_interrupts::call()?;
+
+        if interrupt::ConfigReloadPending() {
+            slotsync_reread_config()?;
+        }
 
         let some_slot_updated = synchronize_slots(&mut conn)?;
 
@@ -1200,10 +1289,13 @@ fn update_synced_slots_inactive_since() {
     }
 }
 
-/// ShutDownSlotSync (slotsync.c:1586): signal the worker and wait until no
-/// process is syncing. Called by the startup process during promotion.
+/// ShutDownSlotSync (slotsync.c:1586): set stopSignaled, ask the syncing
+/// process (worker or pg_sync_replication_slots() backend) to stop and wait
+/// until no process is syncing. Called by the startup process during promotion.
+// upstream 94efd308bcec (18.4): Enhance slot synchronization API to respect promotion signal.
+// upstream 58c1188a3eaa (18.4): Fix slotsync worker blocking promotion when stuck in wait
 pub fn ShutDownSlotSync() -> PgResult<()> {
-    let (running, worker_pid) = with_ctx(|ctx| {
+    let (running, sync_process_pid) = with_ctx(|ctx| {
         ctx.stop_signaled = true;
         (ctx.syncing, ctx.pid)
     });
@@ -1213,8 +1305,14 @@ pub fn ShutDownSlotSync() -> PgResult<()> {
         return Ok(());
     }
 
-    if worker_pid != InvalidPid {
-        procsignal::SendThreadSignal(worker_pid, procsignal::signums::SIGUSR1);
+    // A plain SIGUSR1 only set the latch; a process blocked waiting on the
+    // primary needs the procsignal so CHECK_FOR_INTERRUPTS stops it.
+    if sync_process_pid != InvalidPid {
+        procsignal::SendProcSignal(
+            sync_process_pid,
+            types_storage::storage::ProcSignalReason::PROCSIG_SLOTSYNC_MESSAGE,
+            types_core::INVALID_PROC_NUMBER,
+        );
     }
 
     // Wait for slot sync to end.
@@ -1269,7 +1367,10 @@ pub fn IsSyncingReplicationSlots() -> bool {
 /// connection with C's ensure-error-cleanup shape.
 pub fn SyncReplicationSlots(conn: &mut PgConn) -> PgResult<()> {
     let body = |conn: &mut PgConn| -> PgResult<()> {
-        check_and_set_sync_info(InvalidPid)?;
+        // upstream 94efd308bcec (18.4): Enhance slot synchronization API to respect promotion signal.
+        record_started_with();
+        check_and_set_sync_info(init_small::globals::MyProcPid())?;
+
         validate_remote_info(conn)?;
         synchronize_slots(conn)?;
 
@@ -1330,4 +1431,10 @@ pub fn sync_replication_slots_sql_body() -> PgResult<()> {
 
 pub fn init_seams() {
     xlogrecovery_seams::shut_down_slot_sync::set(ShutDownSlotSync);
+    // upstream 58c1188a3eaa (18.4): Fix slotsync worker blocking promotion when stuck in wait
+    slotsync_seams::handle_slot_sync_message_interrupt::set(HandleSlotSyncMessageInterrupt);
+    slotsync_seams::process_slot_sync_message::set(ProcessSlotSyncMessage);
 }
+
+#[cfg(test)]
+mod tests;

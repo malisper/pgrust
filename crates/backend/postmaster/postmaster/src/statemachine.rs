@@ -103,8 +103,10 @@ pub(crate) fn HandleFatalError(
     with_pm(|pm| pm.fatal_error = true);
 
     match with_pm(|pm| pm.pm_state) {
-        PMState::PM_INIT | PMState::PM_STARTUP => debug_assert!(false),
-        PMState::PM_RECOVERY
+        PMState::PM_INIT => debug_assert!(false),
+        // upstream affdb2dd5c67 (18.4): Fix orphaned processes when startup process fails during PM_STARTUP
+        PMState::PM_STARTUP
+        | PMState::PM_RECOVERY
         | PMState::PM_HOT_STANDBY
         | PMState::PM_RUN
         | PMState::PM_STOP_BACKENDS => UpdatePMState(PMState::PM_WAIT_BACKENDS),

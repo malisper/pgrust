@@ -461,6 +461,14 @@ impl ReorderBuffer {
                     xact::RollbackAndReleaseCurrentSubTransaction()?;
                 }
 
+                // upstream bd7b2184390f (18.5): logical decoding: Correctly free speculative insertion
+                // A pending speculative insert was unlinked from txn.changes
+                // by iter_extract_change, so cleanup_txn cannot see it: free
+                // it here, before the txn, on every error path.
+                if let Some(si) = specinsert.take() {
+                    self.free_change(si, true);
+                }
+
                 // ERRCODE_TRANSACTION_ROLLBACK signals a concurrent abort of
                 // the (sub)transaction being streamed or prepared; clean up
                 // and return gracefully so streaming can continue with the
@@ -490,9 +498,6 @@ impl ReorderBuffer {
                     let prepared = self.txn(txn).is_prepared();
                     self.truncate_txn(txn, prepared)?;
                     self.toast_reset(txn);
-                    if let Some(si) = specinsert.take() {
-                        self.free_change(si, true);
-                    }
                     // For the streaming case, stop the stream and remember
                     // the command ID and snapshot for the next run.
                     if self.txn(txn).is_streamed() {

@@ -11,9 +11,6 @@ pub const BT_GREATER_EQUAL: u16 = 4;
 pub const BT_GREATER: u16 = 5;
 pub const BT_NOT_EQUAL: u16 = 6;
 
-// 0.49F promoted to double, as in C's penalty_num.
-pub const C049: f64 = 0.49f32 as f64;
-
 pub struct Ctx<'a> {
     pub flinfo: Option<&'a mut FmgrInfo>,
     pub collation: types_core::Oid,
@@ -85,7 +82,14 @@ pub fn consistent<T: NumOps>(
             }
         }
         BT_GREATER_EQUAL => T::le(query, upper, ctx)?,
-        BT_NOT_EQUAL => !(T::eq(query, lower, ctx)? && T::eq(query, upper, ctx)?),
+        // upstream 12c519207db0 (18.5): Fix btree_gist's NotEqual strategy on internal index pages.
+        BT_NOT_EQUAL => {
+            if is_leaf {
+                !T::eq(query, lower, ctx)?
+            } else {
+                !(T::eq(query, lower, ctx)? && T::eq(query, upper, ctx)?)
+            }
+        }
         _ => false,
     })
 }
@@ -182,20 +186,73 @@ pub fn picksplit<T: NumOps>(
     Ok((spl_left, spl_right, make_key::<T>(ll, lu), make_key::<T>(rl, ru)))
 }
 
-// penalty_num: C float arithmetic transcribed exactly (0.49F, FLT_MIN,
-// FLT_MAX / (natts + 1)).
+// upstream 1e1d07792e08 (18.5): btree_gist: fix NaN handling in float4/float8 opclasses.
+// penalty_num_impl: integral inputs only (never NaN, no overflow hazard).
 pub fn penalty_num(o_lower: f64, o_upper: f64, n_lower: f64, n_upper: f64, natts: u16) -> f32 {
     let mut tmp = 0.0f64;
     if n_upper > o_upper {
-        tmp += n_upper * C049 - o_upper * C049;
+        tmp += n_upper - o_upper;
     }
     if o_lower > n_lower {
-        tmp += o_lower * C049 - n_lower * C049;
+        tmp += o_lower - n_lower;
     }
     let mut result = 0.0f32;
     if tmp > 0.0 {
         result += f32::MIN_POSITIVE;
-        result += (tmp / (tmp + (o_upper * C049 - o_lower * C049))) as f32;
+        result += (tmp / (tmp + (o_upper - o_lower))) as f32;
+        result *= f32::MAX / (natts as f32 + 1.0);
+    }
+    result
+}
+
+// float_penalty_num_impl: NaNs are equal / maximally far; infinities and
+// overflows clamp to FLT_MAX.
+pub fn float_penalty_num(
+    o_lower: f64,
+    o_upper: f64,
+    n_lower: f64,
+    n_upper: f64,
+    natts: u16,
+) -> f32 {
+    const FLT_MAX: f64 = f32::MAX as f64;
+    // hi is float8_gt lo, so lo is never NaN: a NaN delta is NaN - x or Inf - Inf.
+    fn expansion(hi: f64, lo: f64) -> f64 {
+        let delta = hi - lo;
+        if delta.is_nan() {
+            if hi.is_nan() {
+                FLT_MAX
+            } else {
+                0.0
+            }
+        } else if delta > FLT_MAX {
+            FLT_MAX
+        } else {
+            delta
+        }
+    }
+    let mut tmp = 0.0f64;
+    if adt_float::float8_gt(n_upper, o_upper) {
+        tmp += expansion(n_upper, o_upper);
+    }
+    if adt_float::float8_gt(o_lower, n_lower) {
+        tmp += expansion(o_lower, n_lower);
+    }
+    let mut result = 0.0f32;
+    if tmp > 0.0 {
+        let mut delta = o_upper - o_lower;
+        if delta.is_nan() {
+            delta = if o_upper.is_nan() && o_lower.is_nan() {
+                0.0
+            } else if o_upper.is_nan() || o_lower.is_nan() {
+                FLT_MAX
+            } else {
+                0.0
+            };
+        } else if delta > FLT_MAX {
+            delta = FLT_MAX;
+        }
+        result += f32::MIN_POSITIVE;
+        result += (tmp / (tmp + delta)) as f32;
         result *= f32::MAX / (natts as f32 + 1.0);
     }
     result

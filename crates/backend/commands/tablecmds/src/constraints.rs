@@ -58,6 +58,7 @@ pub(crate) fn add_relation_new_constraints<'mcx>(
         new_constraints,
         false,
         true,
+        false,
         query_string,
     )
 }
@@ -69,6 +70,7 @@ pub(crate) fn add_relation_new_constraints_ext<'mcx>(
     new_constraints: &NodeList<'mcx>,
     allow_merge: bool,
     is_local: bool,
+    is_internal: bool,
     query_string: Option<&str>,
 ) -> PgResult<PgVec<'mcx, CookedCon<'mcx>>> {
     let numoldchecks = match rel.rd_att.constr.as_deref() {
@@ -114,6 +116,12 @@ pub(crate) fn add_relation_new_constraints_ext<'mcx>(
                     continue;
                 }
             }
+        }
+        // upstream 2780538433fc (18.5): Check for USAGE privilege on types used by stored expressions.
+        // The below call to StoreAttrDefault() adds the dependencies on
+        // types. We are responsible for checking USAGE.
+        if !is_internal {
+            pg_depend::CheckUsageOnTypesInSingleRelExpr(mcx, expr, rel.rd_id, miscinit::GetUserId())?;
         }
         let def_oid = pg_attrdef::StoreAttrDefault(mcx, rel, attnum, expr)?;
         cooked.push(CookedCon {
@@ -226,7 +234,20 @@ pub(crate) fn add_relation_new_constraints_ext<'mcx>(
         let expr = match cdef.raw_expr {
             Some(e) => {
                 debug_assert!(cdef.cooked_expr.is_none());
-                cook_constraint(mcx, &mut pstate, e, relname)?
+                let expr = cook_constraint(mcx, &mut pstate, e, relname)?;
+                // upstream 2780538433fc (18.5): Check for USAGE privilege on types used by stored expressions.
+                // The below call to store_rel_check() calls
+                // CreateConstraintEntry(), which adds the dependencies on
+                // types. We are responsible for checking USAGE.
+                if !is_internal {
+                    pg_depend::CheckUsageOnTypesInSingleRelExpr(
+                        mcx,
+                        expr,
+                        rel.rd_id,
+                        miscinit::GetUserId(),
+                    )?;
+                }
+                expr
             }
             None => {
                 let cooked = cdef
@@ -747,6 +768,8 @@ fn cook_constraint<'mcx>(
 }
 
 // StoreRelCheck (heap.c).
+// upstream 2780538433fc (18.5): NB: caller is responsible for ensuring the
+// user has USAGE on all types expr depends on.
 fn store_rel_check<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,

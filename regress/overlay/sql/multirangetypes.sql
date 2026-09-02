@@ -1157,6 +1157,22 @@ reset role;
 drop role regress_multirange_owner;
 
 --
+-- CREATE TYPE checks for CREATE on multirange schema
+--
+create role regress_mr;
+create schema mr_sch;
+set role regress_mr;
+create type mytype as range (subtype=int4, multirange_type_name=mr_sch.mr_type);
+reset role;
+grant create on schema mr_sch to regress_mr;
+set role regress_mr;
+create type mytype as range (subtype=int4, multirange_type_name=mr_sch.mr_type);
+reset role;
+drop type mytype;
+drop schema mr_sch;
+drop role regress_mr;
+
+--
 -- Test polymorphic type system
 --
 
@@ -1262,6 +1278,9 @@ create type two_ints_range as range (subtype = two_ints);
 select *, row_to_json(upper(t)) as u from
   (values (two_ints_multirange(two_ints_range(row(1,2), row(3,4)))),
           (two_ints_multirange(two_ints_range(row(5,6), row(7,8))))) v(t);
+
+-- this must be rejected to avoid self-inclusion issues:
+alter type two_ints add attribute c two_ints_multirange;
 
 drop type two_ints cascade;
 

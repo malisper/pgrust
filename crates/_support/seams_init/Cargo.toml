@@ -328,6 +328,7 @@ contrib_seg = { path = "../../contrib/seg" }
 unaccent = { path = "../../contrib/unaccent" }
 pg_walinspect = { path = "../../contrib/pg_walinspect" }
 injection_points = { path = "../../contrib/injection_points" }
+test_custom_types = { path = "../../contrib/test_custom_types" }
 sslinfo = { path = "../../contrib/sslinfo" }
 fuzzystrmatch = { path = "../../contrib/fuzzystrmatch" }
 tablefunc = { path = "../../contrib/tablefunc" }

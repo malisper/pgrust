@@ -110,7 +110,10 @@ fn parse_symenc_sesskey(
         })
     } else {
         ctx.use_sess_key = 1;
-        let mut cfb = PgpCfb::create(s2k_cipher, &s2k.key, false, None).map_err(|e| e.to_string())?;
+        // upstream 4c5128ca0b30 (18.6): pgcrypto: Add option to revert to prior decryption behavior
+        let ignore = ctx.ignore_cipher_failure != 0;
+        let mut cfb = PgpCfb::create(s2k_cipher, &s2k.key, false, None, ignore)
+            .map_err(|e| e.to_string())?;
         let dec = cfb.decrypt(rest);
         if dec.is_empty() {
             return Err(CORRUPT_DATA.to_string());
@@ -145,7 +148,10 @@ fn decrypt_data_packet(
     };
 
     let resync = !mdc;
-    let mut cfb = PgpCfb::create(sk.cipher, &sk.key, resync, None).map_err(|e| e.to_string())?;
+    // upstream 4c5128ca0b30 (18.6): pgcrypto: Add option to revert to prior decryption behavior
+    let ignore = ctx.ignore_cipher_failure != 0;
+    let mut cfb = PgpCfb::create(sk.cipher, &sk.key, resync, None, ignore)
+        .map_err(|e| e.to_string())?;
     let plain = cfb.decrypt(ct);
 
     if plain.len() < bs + 2 {

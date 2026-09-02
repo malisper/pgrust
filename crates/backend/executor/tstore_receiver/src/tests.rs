@@ -45,7 +45,7 @@ fn receive_slot_materializes_into_store() {
     let d = desc(mcx, 4, true);
     let h = tuplestore::hold::register(tuplestore::Tuplestore::begin_heap(false, true, 64));
     let mut dr = tstore_create_DR();
-    set_params(&mut dr, h, false);
+    set_params(&mut dr, h, false, None, None);
     dr.startup(1 /* CMD_SELECT */, &d).unwrap();
 
     let mut slot = exectuples::make_tuple_table_slot(mcx, TupleSlotKind::Virtual, Some(d.clone()));
@@ -72,7 +72,7 @@ fn detoast_arm_stores_inline_varlena() {
     let d = desc(mcx, -1, false);
     let h = tuplestore::hold::register(tuplestore::Tuplestore::begin_heap(false, true, 64));
     let mut dr = tstore_create_DR();
-    set_params(&mut dr, h, true);
+    set_params(&mut dr, h, true, None, None);
     dr.startup(1, &d).unwrap();
 
     let mut payload = PgVec::new_in(mcx);
@@ -111,6 +111,67 @@ fn detoast_without_varlena_columns_takes_notoast_arm() {
     let mcx = leaked_mcx();
     let d = desc(mcx, 4, true);
     let mut dr = tstore_create_DR();
-    set_params(&mut dr, types_portal::TuplestoreHandle::NULL, true);
+    set_params(&mut dr, types_portal::TuplestoreHandle::NULL, true, None, None);
     dr.startup(1, &d).unwrap();
+}
+
+fn int4_desc(mcx: Mcx<'static>, ncols: usize) -> Rc<TupleDescData<'static>> {
+    let mut attrs = PgVec::new_in(mcx);
+    let mut compact = PgVec::new_in(mcx);
+    for i in 0..ncols {
+        let att = FormData_pg_attribute {
+            attnum: (i + 1) as i16,
+            atttypid: 23,
+            attlen: 4,
+            attbyval: true,
+            attalign: TYPALIGN_INT,
+            attstorage: TYPSTORAGE_PLAIN,
+            ..Default::default()
+        };
+        compact.push(CompactAttribute::populate_from(&att));
+        attrs.push(att);
+    }
+    Rc::new(TupleDescData {
+        natts: ncols as i32,
+        tdtypeid: 2249,
+        tdtypmod: -1,
+        tdrefcount: -1,
+        constr: None,
+        compact_attrs: compact,
+        attrs,
+    })
+}
+
+const PORTAL_MISMATCH_MSG: &str = "query result type does not match portal result type";
+
+// upstream 37b8f3b0e05e (18.6): Cross-check the type of a portal running EXECUTE or FETCH.
+#[test]
+fn startup_rejects_result_type_not_matching_target_tupdesc() {
+    let mcx = leaked_mcx();
+    let target = int4_desc(mcx, 1);
+    let typeinfo = int4_desc(mcx, 2);
+    let h = tuplestore::hold::register(tuplestore::Tuplestore::begin_heap(false, true, 64));
+    let mut dr = tstore_create_DR();
+    set_params(&mut dr, h, false, Some(target), Some(PORTAL_MISMATCH_MSG));
+    let err = dr.startup(1, &typeinfo).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_DATATYPE_MISMATCH);
+    assert_eq!(err.message(), PORTAL_MISMATCH_MSG);
+    assert_eq!(
+        err.detail().unwrap(),
+        "Number of returned columns (2) does not match expected column count (1)."
+    );
+    tuplestore::hold::end(h);
+}
+
+#[test]
+fn startup_accepts_result_type_matching_target_tupdesc() {
+    let mcx = leaked_mcx();
+    let target = int4_desc(mcx, 1);
+    let typeinfo = int4_desc(mcx, 1);
+    let h = tuplestore::hold::register(tuplestore::Tuplestore::begin_heap(false, true, 64));
+    let mut dr = tstore_create_DR();
+    set_params(&mut dr, h, false, Some(target), Some(PORTAL_MISMATCH_MSG));
+    dr.startup(1, &typeinfo).unwrap();
+    assert!(dr.scratch.is_none(), "the cross-check must not create a context");
+    tuplestore::hold::end(h);
 }

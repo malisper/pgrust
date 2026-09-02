@@ -1,7 +1,10 @@
 use super::*;
 use mcx::MemoryContext;
 use types_core::C_COLLATION_OID;
-use types_error::{ERRCODE_INDETERMINATE_COLLATION, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
+use types_error::{
+    ERRCODE_CHARACTER_NOT_IN_REPERTOIRE, ERRCODE_INDETERMINATE_COLLATION,
+    ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+};
 
 fn utf8() {
     mbutils::SetDatabaseEncoding(wchar::PG_UTF8).unwrap();
@@ -367,4 +370,34 @@ fn case_functions_builtin_cutf8_collation() {
         casefold(mcx, "ΣΟΦΟΣ ẞ".as_bytes(), coll).unwrap().data(),
         "σοφοσ ß".as_bytes()
     );
+}
+
+// upstream 08e812c02ae1 (18.6): Fix out-of-bound reads with ascii() for invalid multibyte characters
+// A truncated UTF-8 sequence indexed past the input (C: out-of-bound read;
+// Rust: index-out-of-bounds panic) and malformed lead/continuation bytes only
+// tripped debug assertions; 18.6 reports them as invalid byte sequences
+// (regress encoding.sql via test_bytea_to_text).
+#[test]
+fn ascii_invalid_multibyte_rejected() {
+    utf8();
+    let cases: [&[u8]; 9] = [
+        b"\xc3",
+        b"\xe2",
+        b"\xe2\x82",
+        b"\xf0",
+        b"\xf0\x9f",
+        b"\xf0\x9f\x98",
+        b"\xc3\xff",       // invalid continuation byte
+        b"\x80",           // invalid leading byte
+        b"\xc0\x80",       // lead byte must be > 0xC0
+    ];
+    for bad in cases {
+        let err = ascii(bad).unwrap_err();
+        assert_eq!(err.message(), "invalid byte sequence for encoding \"UTF8\"", "{bad:?}");
+        assert_eq!(err.sqlstate(), ERRCODE_CHARACTER_NOT_IN_REPERTOIRE, "{bad:?}");
+    }
+    // well-formed multibyte input still decodes
+    assert_eq!(ascii("é".as_bytes()).unwrap(), 0xE9);
+    assert_eq!(ascii("€".as_bytes()).unwrap(), 0x20AC);
+    assert_eq!(ascii("🚀".as_bytes()).unwrap(), 0x1F680);
 }

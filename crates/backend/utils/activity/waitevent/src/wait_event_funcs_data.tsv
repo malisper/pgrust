@@ -165,6 +165,7 @@ IPC	WalReceiverExit	Waiting for the WAL receiver to exit
 IPC	WalReceiverWaitStart	Waiting for startup process to send initial data for streaming replication
 IPC	WalSummaryReady	Waiting for a new WAL summary to be generated
 IPC	XactGroupUpdate	Waiting for the group leader to update transaction status at transaction end
+IPC	WalReceiverUpstreamCatchup	Waiting for upstream server WAL flush position to catch up to requested start point
 Lock	advisory	Waiting to acquire an advisory user lock
 Lock	applytransaction	Waiting to acquire a lock on a remote transaction being applied by a logical replication subscriber
 Lock	extend	Waiting to extend a relation

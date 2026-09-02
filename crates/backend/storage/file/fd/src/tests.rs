@@ -822,6 +822,42 @@ fn thread_exit_with_live_vfs_fd_holders_does_not_abort_process() {
     assert!(joined.is_err(), "the spawned thread must have panicked");
 }
 
+// upstream 6cb307251c5c (18.4): an EINTR from sync_file_range must be
+// retried; the gate compared the -1 return value with EINTR, never fired, and
+// the hint escalated through data_sync_elevel (PANIC at the GUC default).
+#[cfg(all(target_os = "linux", pgrust_sim))]
+#[test]
+fn flush_data_retries_sync_file_range_on_eintr() {
+    use std::sync::Arc;
+    use vfs::sim::{FaultDecision, FaultPlan, OpDesc, OpKind, SimVfs};
+
+    struct EintrOnce(Arc<AtomicU32>);
+    impl FaultPlan for EintrOnce {
+        fn before_op(&mut self, op: &OpDesc<'_>) -> FaultDecision {
+            if op.kind == OpKind::FlushRange && self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                FaultDecision::Errno(libc::EINTR)
+            } else {
+                FaultDecision::Proceed
+            }
+        }
+    }
+
+    setup();
+    assert!(init_small::globals::enableFsync(), "witness needs the flush hint enabled");
+    let dir = scratch_dir("flush_eintr");
+    let path = format!("{dir}/f");
+    vfs_write_file(&path, b"payload");
+    let fd = vfs::open(&cpath(&path), libc::O_RDWR, 0);
+    assert!(fd >= 0, "open: errno {}", vfs::get_errno());
+
+    let flushes = Arc::new(AtomicU32::new(0));
+    SimVfs::set_fault_plan(Box::new(EintrOnce(Arc::clone(&flushes))));
+    crate::sync::pg_flush_data(fd, 0, 0).unwrap();
+    assert_eq!(flushes.load(Ordering::SeqCst), 2, "EINTR must be retried exactly once");
+    SimVfs::set_fault_plan(Box::new(vfs::sim::NoFaults));
+    assert_eq!(vfs::close(fd), 0);
+}
+
 // Test-process-global: resowner seams install once (seam_core forbids
 // reinstall); every test that needs an owner goes through here.
 fn install_resowner_seams_once() {

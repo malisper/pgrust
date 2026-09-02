@@ -581,6 +581,9 @@ pub fn StartupXLOG() -> PgResult<()> {
         CleanupAfterArchiveRecovery(end_of_log_tli, end_of_log, new_tli)?;
     }
 
+    // upstream b4bd1385043c (18.6): Fix race with timeline selection in logical decoding during promotion
+    injection_point::injection_point("promotion-after-wal-segment-cleanup")?;
+
     if commit_ts_seams::complete_commit_ts_initialization::is_installed() {
         commit_ts_seams::complete_commit_ts_initialization::call()?;
     }

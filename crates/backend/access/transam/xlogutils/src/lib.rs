@@ -739,7 +739,15 @@ fn read_local_xlog_page_guts(
         let (ru, currTLI) = if !transam_xlog_seams::recovery_in_progress::call() {
             transam_xlog_seams::get_flush_rec_ptr::call()
         } else {
-            xlogrecovery_seams::get_xlog_replay_rec_ptr::call()
+            let (ru, mut currTLI) = xlogrecovery_seams::get_xlog_replay_rec_ptr::call();
+            // upstream 4bff3aa51c19 (18.6): Fix second race with timeline selection during promotion
+            // If the insertion timeline has already been set, use it. See
+            // logical_read_xlog_page() for details.
+            let insertTLI = transam_xlog_seams::get_wal_insertion_time_line_if_set::call();
+            if insertTLI != 0 {
+                currTLI = insertTLI;
+            }
+            (ru, currTLI)
         };
         read_upto = ru;
         tli = currTLI;
@@ -903,5 +911,84 @@ mod drop_relation_forget_tests {
         XLogDropRelation(other, ForkNumber::MAIN_FORKNUM).unwrap();
         assert!(!XLogHaveInvalidPages());
         assert!(XLogCheckInvalidPages().is_ok());
+    }
+}
+
+#[cfg(test)]
+mod promotion_timeline_tests {
+    //! upstream 4bff3aa51c19 (18.6): Fix second race with timeline selection
+    //! during promotion. End-of-recovery stamps XLogCtl->InsertTimeLineID
+    //! before SharedRecoveryState flips to DONE, so RecoveryInProgress() is
+    //! still true for a window in which the replay timeline is already
+    //! historical. A WAL page read through read_local_xlog_page_guts in that
+    //! window (pg_walinspect, slot advance/creation, the SQL decoding
+    //! functions) must target the insertion timeline, or it reads a segment
+    //! that promotion's cleanup may already have removed.
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
+    use timeline_seams::TimeLineHistoryEntry;
+
+    static READ_TLI: AtomicU32 = AtomicU32::new(0);
+
+    // A one-entry history for whichever timeline is looked up, so
+    // XLogReadDetermineTimeline lands the reader on exactly the timeline the
+    // page read chose.
+    fn one_entry_history<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        target_tli: TimeLineID,
+    ) -> PgResult<mcx::PgVec<'mcx, TimeLineHistoryEntry>> {
+        let mut v = mcx::PgVec::new_in(mcx);
+        v.push(TimeLineHistoryEntry { tli: target_tli, begin: 0, end: 0 });
+        Ok(v)
+    }
+    fn first_entry_tli(_ptr: XLogRecPtr, history: &[TimeLineHistoryEntry]) -> PgResult<TimeLineID> {
+        Ok(history[0].tli)
+    }
+    fn no_switch_point(
+        _tli: TimeLineID,
+        _history: &[TimeLineHistoryEntry],
+    ) -> PgResult<(XLogRecPtr, TimeLineID)> {
+        Ok((InvalidXLogRecPtr, 0))
+    }
+    fn wal_read_recording_tli<'a>(
+        _state: &'a mut XLogReaderState,
+        _buf: &'a mut [u8],
+        _startptr: XLogRecPtr,
+        _count: usize,
+        tli: TimeLineID,
+    ) -> PgResult<Result<(), WALReadError>> {
+        READ_TLI.store(tli, Relaxed);
+        Ok(Ok(()))
+    }
+
+    #[test]
+    fn recovery_read_uses_insertion_timeline_once_set() {
+        const SEGSZ: i32 = 16 * 1024 * 1024;
+        // The promotion window: still "in recovery", replay is on timeline 1,
+        // and the insertion timeline has already been set to 2.
+        transam_xlog_seams::recovery_in_progress::set(|| true);
+        xlogrecovery_seams::get_xlog_replay_rec_ptr::set(|| (4 * XLOG_BLCKSZ as u64, 1));
+        transam_xlog_seams::get_wal_insertion_time_line_if_set::set(|| 2);
+        timeline_seams::read_timeline_history::set(one_entry_history);
+        timeline_seams::tli_of_point_in_history::set(first_entry_tli);
+        timeline_seams::tli_switch_point::set(no_switch_point);
+        xlogreader_seams::wal_read::set(wal_read_recording_tli);
+
+        let mut state = XLogReaderState::default();
+        state.segcxt.ws_segsize = SEGSZ;
+        let mut page = vec![0u8; XLOG_BLCKSZ];
+        let target = 2 * XLOG_BLCKSZ as u64;
+        let n = read_local_xlog_page_no_wait(
+            &mut state,
+            target,
+            XLOG_BLCKSZ as i32,
+            target,
+            &mut page,
+        )
+        .unwrap();
+        assert_eq!(n, XLOG_BLCKSZ as i32);
+        // Pre-fix the read was issued on the replay timeline (1).
+        assert_eq!(state.currTLI, 2);
+        assert_eq!(READ_TLI.load(Relaxed), 2);
     }
 }

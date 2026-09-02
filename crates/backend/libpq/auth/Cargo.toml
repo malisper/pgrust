@@ -18,6 +18,7 @@ be_secure = { path = "../be_secure" }
 crypt = { path = "../crypt" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 pg_strong_random = { path = "../../../port/pg_strong_random" }
+timingsafe_bcmp = { path = "../../../port/timingsafe_bcmp" }
 pgsync = { path = "../../../_support/pgsync" }
 backend_startup = { path = "../../tcop/backend_startup" }
 elog = { path = "../../utils/error/elog" }

@@ -46,3 +46,23 @@ guc_tables = { path = "../../utils/misc/guc_tables" }
 mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
 wchar = { path = "../../../common/wchar" }
 libc = "0.2"
+
+[dev-dependencies]
+# Shared-memory bring-up for the tests that drive the real slot array (the
+# twophase crate's test setup, minus its own state).
+pg_sema_seams = { path = "../../port/pg_sema_seams" }
+latch_seams = { path = "../../storage/ipc/latch_seams" }
+waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
+deadlock_seams = { path = "../../storage/lmgr/deadlock_seams" }
+pmsignal_seams = { path = "../../storage/ipc/pmsignal_seams" }
+lock_seams = { path = "../../storage/lmgr/lock_seams" }
+timeout_seams = { path = "../../utils/misc/timeout_seams" }
+shmem_seams = { path = "../../storage/ipc/shmem_seams" }
+condition_variable_seams = { path = "../../storage/lmgr/condition_variable_seams" }
+autovacuum_seams = { path = "../../postmaster/autovacuum_seams" }
+xact_seams = { path = "../../access/transam/xact_seams" }
+transam_seams = { path = "../../access/transam/transam_seams" }
+subtrans_seams = { path = "../../access/transam/subtrans_seams" }
+syncrep_seams = { path = "../syncrep_seams" }
+superuser_seams = { path = "../../utils/misc/superuser_seams" }
+xlog_seams = { path = "../../access/transam/transam_xlog_seams", package = "transam_xlog_seams" }

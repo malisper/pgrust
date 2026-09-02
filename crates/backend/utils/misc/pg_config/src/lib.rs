@@ -6,7 +6,7 @@ use types_error::PgResult;
 use types_fmgr::{varlena_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
 
 // config_info.c VERSION: "PostgreSQL " PG_VERSION (the version() string's base).
-const VERSION: &str = "PostgreSQL 18.3";
+const VERSION: &str = "PostgreSQL 18.6";
 // C reports the build's VAL_* flags; a Rust build records none, which is C's
 // own fallback text for an undefined VAL_* macro.
 const NOT_RECORDED: &str = "not recorded";
@@ -93,6 +93,6 @@ mod tests {
         assert_eq!(data.len(), 23);
         assert_eq!(data[0], ("BINDIR", "/usr/local/pgsql/bin".to_string()));
         assert_eq!(data[10].0, "SHAREDIR");
-        assert_eq!(data[22], ("VERSION", "PostgreSQL 18.3".to_string()));
+        assert_eq!(data[22], ("VERSION", "PostgreSQL 18.6".to_string()));
     }
 }

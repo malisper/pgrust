@@ -90,7 +90,8 @@ impl IndexAmKind {
         match self {
             IndexAmKind::Btree => true,
             IndexAmKind::Hash => false,
-            IndexAmKind::Gin => true,
+            // ginutil.c ginhandler: amsearcharray = false (only nbtree is true).
+            IndexAmKind::Gin => false,
             IndexAmKind::Gist => false,
             IndexAmKind::Spgist => false,
             IndexAmKind::Brin => false,
@@ -557,4 +558,24 @@ pub fn relation_get_index_scan<'mcx>(
         xs_pgstat_index_scans: 0,
         xs_nsearches: 0,
     })
+}
+
+#[cfg(test)]
+mod am_property_tests {
+    use super::IndexAmKind;
+
+    #[test]
+    fn amsearcharray_is_btree_only() {
+        assert!(IndexAmKind::Btree.amsearcharray());
+        assert!(!IndexAmKind::Hash.amsearcharray());
+        assert!(
+            !IndexAmKind::Gin.amsearcharray(),
+            "ginhandler sets amsearcharray=false; true hands GIN the whole SAOP array datum as its query"
+        );
+        assert!(!IndexAmKind::Gist.amsearcharray());
+        assert!(!IndexAmKind::Spgist.amsearcharray());
+        assert!(!IndexAmKind::Brin.amsearcharray());
+        assert!(!IndexAmKind::Hnsw.amsearcharray());
+        assert!(!IndexAmKind::Bloom.amsearcharray());
+    }
 }

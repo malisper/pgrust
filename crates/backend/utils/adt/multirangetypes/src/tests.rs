@@ -255,6 +255,41 @@ mod recv_wire {
         wire.push(::adt_rangetypes::RANGE_LB_INC);
         recv(mcx, &wire).expect("well-formed one-element wire must receive");
     }
+
+    // upstream 01e568b8c11b (18.4): C reads range_count as int32 and sizes the
+    // pointer array through palloc_array, so a negative count is mul_size's
+    // overflow error rather than a MaxAllocSize rejection of count * sizeof.
+    #[test]
+    fn negative_range_count_is_palloc_array_overflow() {
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        let e = recv(mcx, &0xFFFF_FFFFu32.to_be_bytes()).expect_err("negative range_count");
+        assert_eq!(e.sqlstate, ::types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+        assert_eq!(
+            e.message,
+            format!(
+                "invalid memory allocation request size {} * {}",
+                core::mem::size_of::<*const u8>(),
+                usize::MAX
+            )
+        );
+    }
+
+    // The positive-but-oversized count hits palloc's own ceiling with C's
+    // count * sizeof(RangeType *) figure, not the Rust element size.
+    #[test]
+    fn oversized_range_count_reports_c_request_size() {
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        let e = recv(mcx, &0x1000_0000u32.to_be_bytes()).expect_err("oversized range_count");
+        assert_eq!(
+            e.message,
+            format!(
+                "invalid memory alloc request size {}",
+                0x1000_0000usize * core::mem::size_of::<*const u8>()
+            )
+        );
+    }
 }
 
 /// Boundary-guard audit findings 5/7 (multirange arm): multirange_out

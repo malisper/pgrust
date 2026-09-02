@@ -191,8 +191,9 @@ pub fn statext_dependencies_deserialize<'mcx>(
     if ndeps == 0 {
         return Err(PgError::error("invalid zero-length item array in MVDependencies").into());
     }
-    // dependencies.c:539 computes SizeOfItem(ndeps), not MinSizeOfItems(ndeps).
-    let min_expected_size = 8 + 2 * (1 + ndeps);
+    // upstream b5fd5723a659 (18.6): Fix size check in statext_dependencies_deserialize()
+    // MinSizeOfItems(ndeps): SizeOfHeader + ndeps * SizeOfItem(2).
+    let min_expected_size = SIZE_OF_HEADER + ndeps * (8 + 2 * (1 + 2));
     if data.len() < min_expected_size {
         return Err(PgError::error(format!(
             "invalid dependencies size {} (expected at least {min_expected_size})",
@@ -267,6 +268,31 @@ mod tests {
         for cut in [0, 4, 11, 12, 13, 21, full.len() - 1] {
             assert!(statext_dependencies_deserialize(cx.mcx(), &full[..cut]).is_err());
         }
+    }
+
+    // upstream b5fd5723a659 (18.6): the minimum-size check is
+    // MinSizeOfItems (header + ndeps minimal items), so a blob cut inside
+    // its item array reports that bound, not the per-item one.
+    #[test]
+    fn deserialize_truncated_reports_min_size_of_items() {
+        let cx = mcx::MemoryContext::new("test");
+        let full = blob(1, &[(1.0, &[1, 2])]);
+        assert_eq!(full.len(), 26);
+        for cut in [12, 20, 25] {
+            let err = statext_dependencies_deserialize(cx.mcx(), &full[..cut])
+                .err()
+                .expect("truncated blob must fail");
+            assert_eq!(
+                err.message(),
+                format!("invalid dependencies size {cut} (expected at least 26)")
+            );
+        }
+        let full = blob(3, &[(1.0, &[1, 2]), (0.5, &[2, 3]), (0.25, &[1, 3])]);
+        assert_eq!(full.len(), 54);
+        let err = statext_dependencies_deserialize(cx.mcx(), &full[..40])
+            .err()
+            .expect("truncated blob must fail");
+        assert_eq!(err.message(), "invalid dependencies size 40 (expected at least 54)");
     }
 
     #[test]

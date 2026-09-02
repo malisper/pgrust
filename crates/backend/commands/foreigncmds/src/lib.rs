@@ -291,6 +291,7 @@ pub fn AlterForeignDataWrapper<'mcx>(
     let mut repl_repl = [false; Natts_pg_foreign_data_wrapper];
 
     let func = parse_func_options(mcx, &stmt.func_options, source_text)?;
+    let mut fdwhandler = func.fdwhandler;
     let mut fdwvalidator = func.fdwvalidator;
 
     if func.handler_given {
@@ -303,6 +304,10 @@ pub fn AlterForeignDataWrapper<'mcx>(
                 .to_string(),
             None,
         )?;
+    } else {
+        // upstream c11f87b1a3b9 (18.4): Fix dependency on FDW handler.
+        // handler unchanged
+        fdwhandler = getattr(Anum_pg_foreign_data_wrapper_fdwhandler).0.as_oid();
     }
 
     if func.validator_given {
@@ -355,8 +360,8 @@ pub fn AlterForeignDataWrapper<'mcx>(
             PROCEDURE_RELATION_ID,
             DependencyType::Normal,
         )?;
-        if func.fdwhandler != InvalidOid {
-            let referenced = ObjectAddress::set(PROCEDURE_RELATION_ID, func.fdwhandler);
+        if fdwhandler != InvalidOid {
+            let referenced = ObjectAddress::set(PROCEDURE_RELATION_ID, fdwhandler);
             pg_depend::recordDependencyOn(mcx, &myself, &referenced, DependencyType::Normal)?;
         }
         if fdwvalidator != InvalidOid {

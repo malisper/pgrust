@@ -95,6 +95,11 @@ pub(crate) fn amcheck_lock_relation_and_check<'mcx>(
             save_sec_context | SECURITY_RESTRICTED_OPERATION,
         );
         save_nestlevel = guc::NewGUCNestLevel();
+        // upstream 0a61fcde0325 (18.6): Empty search_path in amcheck
+        // (CVE-2026-14673). Index expression/predicate evaluation runs as the
+        // table owner; restrict search_path so it cannot resolve
+        // caller-planted schema-shadowing functions.
+        guc::RestrictSearchPath()?;
         heaprel = Some(hr);
     }
 

@@ -873,6 +873,13 @@ fn logical_parallel_apply_loop(mqh: &mut ShmMqHandle) -> PgResult<()> {
                     latch::ResetLatch(l);
                 }
             }
+
+            // upstream 44c8dc280178 (18.4): Flush statistics during idle periods in parallel apply worker.
+            // The idle gap before the leader assigns the next transaction is
+            // the only chance to report the stats of the one just applied.
+            if rc & WL_TIMEOUT != 0 && !xact::IsTransactionState() {
+                pgstat::pending::pgstat_report_stat(true);
+            }
         }
     }
 }

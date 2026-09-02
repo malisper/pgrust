@@ -185,8 +185,10 @@ pub(crate) fn fc_postgres_fdw_validator(
         }
 
         match opt.name {
+            // upstream e5d019fbdc12 (18.6): postgres_fdw, dblink: Validate use_scram_passthrough values
             "use_remote_estimate" | "updatable" | "truncatable" | "async_capable"
-            | "parallel_commit" | "parallel_abort" | "keep_connections" => {
+            | "parallel_commit" | "parallel_abort" | "keep_connections"
+            | "use_scram_passthrough" => {
                 commands_define::defGetBoolean(&mk_def_elem(mcx, opt.name, opt.value)?)?;
             }
             "fdw_startup_cost" | "fdw_tuple_cost" => {

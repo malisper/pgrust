@@ -34,6 +34,31 @@ pub(crate) fn reg_block<'a>(
     }
 }
 
+// upstream f581fa729d8e (18.5): Fix VM clear WAL logging by registering VM blocks
+// XLogRegisterBuffer(block_id, vmbuffer, 0): the visibility-map page whose
+// bits the record cleared. No REGBUF_STANDARD (a VM page has no hole to
+// skip), so an FPI, when one is due, covers the whole page.
+#[inline(always)]
+pub(crate) fn reg_vm_block<'a>(
+    block_id: u8,
+    rlocator: RelFileLocator,
+    vmb: &visibilitymap::VmBuffer,
+) -> RegBlock<'a> {
+    let page = ::bufmgr_seams::buffer_page_ptr(vmb.buffer()).as_ptr() as *const u8;
+    RegBlock {
+        block_id,
+        rlocator,
+        forknum: ForkNumber::VISIBILITYMAP_FORKNUM,
+        block: vmb.block_number(),
+        // SAFETY: caller holds the pin + exclusive content lock on the VM
+        // buffer for the record (XLogRegisterBuffer contract); page is a
+        // BLCKSZ image.
+        page: unsafe { core::slice::from_raw_parts(page, BLCKSZ) },
+        flags: 0,
+        bufdata: &[],
+    }
+}
+
 #[cfg(not(test))]
 #[inline(always)]
 pub(crate) fn insert_record(

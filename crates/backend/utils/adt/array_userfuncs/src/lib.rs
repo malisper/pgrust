@@ -400,6 +400,20 @@ pub fn accum_array_result_arr<'m>(
     let data_off = arr_data_offset(arg);
     let ndatabytes = arr_size(arg) - data_off;
 
+    // upstream 67dd6243dc95 (18.4): Fix integer overflow in array_agg(), when the array grows too large
+    // (CVE-2026-6473): the count is checked on every input, before the
+    // allocation limits could trip on all-NULL inputs.
+    let newnitems = st.nitems.checked_add(nitems).unwrap_or(i32::MAX);
+    if newnitems as i64 > ::arrayutils::MAX_ARRAY_SIZE {
+        return Err(Box::new(
+            PgError::error(format!(
+                "array size exceeds the maximum allowed ({})",
+                ::arrayutils::MAX_ARRAY_SIZE
+            ))
+            .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+        ));
+    }
+
     if st.ndims == 0 {
         if ndims == 0 {
             return Err(Box::new(
@@ -441,7 +455,6 @@ pub fn accum_array_result_arr<'m>(
 
     let arg_bitmap = arr_nullbitmap_off(arg);
     if st.nullbitmap.is_some() || arg_bitmap.is_some() {
-        let newnitems = st.nitems + nitems;
         match st.nullbitmap.as_mut() {
             None => {
                 st.aitems = pg_nextpower2_32(core::cmp::max(256, newnitems + 1) as u32) as i32;
@@ -462,7 +475,7 @@ pub fn accum_array_result_arr<'m>(
         array_bitmap_copy(bm, 0, st.nitems, arg_bitmap.map(|b| (arg, b)), 0, nitems);
     }
 
-    st.nitems += nitems;
+    st.nitems = newnitems;
     st.dims[0] += 1;
     Ok(st)
 }

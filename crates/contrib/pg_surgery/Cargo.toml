@@ -21,6 +21,7 @@ dfmgr = { path = "../../backend/utils/fmgr/dfmgr" }
 relation = { path = "../../backend/access/common/relation" }
 bufmgr = { path = "../../backend/storage/buffer/bufmgr" }
 xloginsert = { path = "../../backend/access/transam/xloginsert" }
+xloginsert_seams = { path = "../../backend/access/transam/xloginsert_seams" }
 transam_xlog = { path = "../../backend/access/transam/transam_xlog" }
 transam_xlog_seams = { path = "../../backend/access/transam/transam_xlog_seams" }
 visibilitymap = { path = "../../backend/access/heap/visibilitymap" }

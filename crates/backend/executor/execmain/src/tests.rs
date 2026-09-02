@@ -2191,7 +2191,7 @@ fn junk_filter_removes_order_by_column_end_to_end() {
         let store = tuplestore::Tuplestore::begin_heap(true, false, 1024);
         let h = tuplestore::hold::register(store);
         let mut dr = tstore_receiver::tstore_create_DR();
-        tstore_receiver::set_params(&mut dr, h, false);
+        tstore_receiver::set_params(&mut dr, h, false, None, None);
         let mut dest = DestReceiver::Tuplestore(dr);
         crate::execmain::execute_plan(
             data,
@@ -5667,7 +5667,7 @@ mod run_seam_forward_only {
         let store = tuplestore::Tuplestore::begin_heap(true, false, 1024);
         let h = tuplestore::hold::register(store);
         let mut dr = tstore_receiver::tstore_create_DR();
-        tstore_receiver::set_params(&mut dr, h, false);
+        tstore_receiver::set_params(&mut dr, h, false, None, None);
         (h, DestReceiver::Tuplestore(dr))
     }
 
@@ -5898,7 +5898,7 @@ fn executor_run_arms_capture_sidecar_from_receiver() {
     let store = mk_store();
     let sidecar = mk_store();
     let mut dest = ::tcop_dest::CreateDestReceiver(CommandDest::Tuplestore);
-    ::tcop_dest::SetTuplestoreDestReceiverParams(&mut dest, store, false);
+    ::tcop_dest::SetTuplestoreDestReceiverParams(&mut dest, store, false, None, None);
     ::tcop_dest::SetTuplestoreCaptureSidecar(&mut dest, sidecar);
     execmain_seams::executor_run::call(qd, ForwardScanDirection, 0, &mut dest).unwrap();
     assert_eq!(execmain_seams::query_desc_es_processed::call(qd), 1);
@@ -5936,7 +5936,7 @@ fn executor_run_arms_capture_sidecar_from_receiver() {
     let store2 = mk_store();
     let bystander = mk_store();
     let mut dest2 = ::tcop_dest::CreateDestReceiver(CommandDest::Tuplestore);
-    ::tcop_dest::SetTuplestoreDestReceiverParams(&mut dest2, store2, false);
+    ::tcop_dest::SetTuplestoreDestReceiverParams(&mut dest2, store2, false, None, None);
     execmain_seams::executor_run::call(qd2, ForwardScanDirection, 0, &mut dest2).unwrap();
     assert_eq!(execmain_seams::query_desc_es_processed::call(qd2), 1);
     assert_eq!(::tuplestore::hold::with_store(store2, |s| s.tuple_count()), 1);

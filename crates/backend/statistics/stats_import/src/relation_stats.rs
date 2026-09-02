@@ -63,7 +63,19 @@ fn relation_statistics_update(mcx: Mcx<'_>, args: &[Arg]) -> PgResult<bool> {
 
     if !args[RELTUPLES_ARG].isnull {
         reltuples = args[RELTUPLES_ARG].value.as_f32();
-        if reltuples < -1.0 {
+        // upstream a0369dd8448f (18.5): Reject non-finite reltuples when restoring stats
+        // Infinity and NaN pass the < -1.0 test (NaN compares false) and
+        // would land in pg_class.reltuples verbatim.
+        if reltuples.is_nan() || reltuples.is_infinite() {
+            warn(
+                "relation_statistics_update",
+                "argument \"reltuples\" must be a finite value".to_string(),
+                Some(ERRCODE_INVALID_PARAMETER_VALUE),
+                None,
+                None,
+            )?;
+            result = false;
+        } else if reltuples < -1.0 {
             warn(
                 "relation_statistics_update",
                 "argument \"reltuples\" must not be less than -1.0".to_string(),

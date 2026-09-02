@@ -777,6 +777,9 @@ impl PgConn {
                 Ok(None) => {}
                 Err(e) => return Ok(Err(e)),
             }
+            if !self.conn_ok {
+                return Ok(Err(self.err.clone()));
+            }
             wait_socket(self.fd, WL_SOCKET_READABLE, wait_event_info)?;
             if !self.consume_input() {
                 return Ok(Err(self.err.clone()));
@@ -784,12 +787,14 @@ impl PgConn {
         }
     }
 
-    // A malformed body (bad DataRow, short RowDescription) poisons the
-    // connection and comes back as the crate's usual connection-error
-    // result: after it, nothing on the wire can be trusted.
+    // A lost or poisoned connection ends the query (libpq: pqSaveErrorResult
+    // + PGASYNC_IDLE): the error comes back once, then get_result yields None.
+    // upstream c318777da8b8 (18.4): postgres_fdw: Fix handling of abort-cleanup-failed connections.
     fn proto_error(&mut self, e: String) -> QueryResult {
         self.conn_ok = false;
         self.err = e.clone();
+        self.pending_results = false;
+        self.in_copy = false;
         QueryResult::error(e)
     }
 
@@ -929,7 +934,20 @@ impl PgConn {
         Ok(result)
     }
 
+    // PQsendQueryStart's CONNECTION_BAD arm: a dead connection refuses every send.
+    // upstream c318777da8b8 (18.4): postgres_fdw: Fix handling of abort-cleanup-failed connections.
+    fn send_query_start(&mut self) -> bool {
+        if !self.conn_ok {
+            self.err = "no connection to the server".into();
+            return false;
+        }
+        true
+    }
+
     fn send_query_raw(&mut self, query: &str) -> bool {
+        if !self.send_query_start() {
+            return false;
+        }
         let mut body = query.as_bytes().to_vec();
         body.push(0);
         if let Err(e) = self.send_all(&msg(b'Q', &body)) {
@@ -962,6 +980,9 @@ impl PgConn {
         params: &[Option<&str>],
     ) -> bool {
         debug_assert!(param_types.is_empty() || param_types.len() == params.len());
+        if !self.send_query_start() {
+            return false;
+        }
         let mut pkt = msg(b'P', &parse_body("", query, param_types, params.len()));
         pkt.extend_from_slice(&msg(b'B', &bind_body("", "", params)));
         pkt.extend_from_slice(&msg(b'D', b"P\0"));
@@ -977,6 +998,9 @@ impl PgConn {
 
     /// PQsendPrepare: Parse(name) + Sync (no Describe, exactly libpq).
     pub fn send_prepare(&mut self, stmt_name: &str, query: &str, param_types: &[Oid]) -> bool {
+        if !self.send_query_start() {
+            return false;
+        }
         let mut pkt = msg(b'P', &parse_body(stmt_name, query, param_types, param_types.len()));
         pkt.extend_from_slice(&msg(b'S', &[]));
         if let Err(e) = self.send_all(&pkt) {
@@ -989,6 +1013,9 @@ impl PgConn {
 
     /// PQsendQueryPrepared: Bind(stmt) + Describe(portal) + Execute + Sync.
     pub fn send_query_prepared(&mut self, stmt_name: &str, params: &[Option<&str>]) -> bool {
+        if !self.send_query_start() {
+            return false;
+        }
         let mut pkt = msg(b'B', &bind_body("", stmt_name, params));
         pkt.extend_from_slice(&msg(b'D', b"P\0"));
         pkt.extend_from_slice(&msg(b'E', &execute_body("", 0)));
@@ -1236,7 +1263,7 @@ impl PgConn {
         loop {
             let (t, body) = match self.read_message(self.we.receive)? {
                 Ok(m) => m,
-                Err(e) => return Ok(Some(QueryResult::error(e))),
+                Err(e) => return Ok(Some(self.proto_error(e))),
             };
             match t {
                 b'T' => {
@@ -1288,9 +1315,8 @@ impl PgConn {
                     return Ok(None);
                 }
                 other => {
-                    self.conn_ok = false;
-                    self.err = format!("unexpected message type \"{}\" from server", other as char);
-                    return Ok(Some(QueryResult::error(self.err.clone())));
+                    let e = format!("unexpected message type \"{}\" from server", other as char);
+                    return Ok(Some(self.proto_error(e)));
                 }
             }
         }
@@ -2126,5 +2152,70 @@ mod tests {
         fn lookup(k: &str) -> Option<&'static ConnOption> {
             conninfo::lookup_option(k)
         }
+    }
+    // PQsendQueryStart's CONNECTION_BAD arm: every sender refuses with libpq's text.
+    // upstream c318777da8b8 (18.4): postgres_fdw: Fix handling of abort-cleanup-failed connections.
+    #[test]
+    fn dead_connection_refuses_sends_with_libpq_text() {
+        let (mut conn, _server) = test_conn();
+        conn.conn_ok = false;
+        assert!(!conn.send_query("SELECT 1"));
+        assert_eq!(conn.error_message(), "no connection to the server");
+        assert!(!conn.send_query_params("SELECT $1", &[], &[Some("1")]));
+        assert_eq!(conn.error_message(), "no connection to the server");
+        assert!(!conn.send_prepare("s", "SELECT 1", &[]));
+        assert_eq!(conn.error_message(), "no connection to the server");
+        assert!(!conn.send_query_prepared("s", &[]));
+        assert_eq!(conn.error_message(), "no connection to the server");
+        assert!(!conn.pending_results);
+        let r = conn.exec("SELECT 1").unwrap();
+        assert_eq!(r.status, ExecStatus::Error);
+        assert_eq!(r.err, "no connection to the server");
+    }
+
+    // PQgetResult on a lost connection: the error comes back once, then None
+    // (libpq goes PGASYNC_IDLE), so a drain-until-None loop cannot spin.
+    // upstream c318777da8b8 (18.4): postgres_fdw: Fix handling of abort-cleanup-failed connections.
+    #[test]
+    fn get_result_on_lost_connection_reports_once_then_idles() {
+        fn once_then_none(conn: &mut PgConn, expect: &str) {
+            let r = conn.get_result().unwrap().unwrap();
+            assert_eq!(r.status, ExecStatus::Error);
+            assert!(r.err.contains(expect), "{}", r.err);
+            assert!(conn.connection_bad());
+            assert!(conn.get_result().unwrap().is_none());
+            assert!(conn.get_result().unwrap().is_none());
+        }
+        // Framing loss (libpq handleSyncLoss).
+        let (mut conn, _srv) = test_conn();
+        conn.pending_results = true;
+        conn.inbuf = frame(b'D', -1, b"");
+        once_then_none(&mut conn, "lost synchronization");
+        // Server death mid-result (pqReadData EOF), seen by consume_input.
+        let (mut conn, srv) = test_conn();
+        conn.pending_results = true;
+        conn.inbuf = msg(b'T', &1u16.to_be_bytes());
+        drop(srv);
+        let mut dead = false;
+        for _ in 0..400 {
+            if !conn.consume_input() {
+                dead = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(dead);
+        assert_eq!(conn.error_message(), "server closed the connection unexpectedly");
+        once_then_none(&mut conn, "server closed the connection unexpectedly");
+        // Malformed DataRow (proto_error).
+        let (mut conn, _srv) = test_conn();
+        conn.pending_results = true;
+        let mut wire = msg(b'T', &1u16.to_be_bytes());
+        let mut dbody = 1u16.to_be_bytes().to_vec();
+        dbody.extend_from_slice(&100i32.to_be_bytes());
+        dbody.extend_from_slice(b"short");
+        wire.extend_from_slice(&msg(b'D', &dbody));
+        conn.inbuf = wire;
+        once_then_none(&mut conn, "insufficient data");
     }
 }

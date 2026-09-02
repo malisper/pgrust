@@ -146,39 +146,32 @@ fn chararray_image<'mcx>(mcx: Mcx<'mcx>, vals: &[u8]) -> PgResult<PgVec<'mcx, u8
 }
 
 // check_rights=false on ALTER TABLE's AT_ReAddStatistics rebuild
-// (tablecmds.c:9693 passes !is_rebuild).
+// (tablecmds.c:9704 passes !is_rebuild).
+//
+// upstream a1fa24127d6a (18.6): Preserve the owner of extended statistics rebuilt by ALTER TABLE.
+// `relid` is the relation of the FROM clause as resolved by the caller (C
+// passes a one-element `List *relids`): we operate on exactly the relation
+// the caller looked up rather than re-resolving stmt->relations by name.
+// Examining the FROM clause is the caller's job (utility.c / tablecmds.c).
 pub fn CreateStatistics<'mcx>(
     mcx: Mcx<'mcx>,
+    relid: Oid,
     stmt: &CreateStatsStmt<'mcx>,
     check_rights: bool,
 ) -> PgResult<pg_depend::ObjectAddress> {
     let mut attnums: [i16; STATS_MAX_DIMENSIONS] = [0; STATS_MAX_DIMENSIONS];
     let mut nattnums = 0usize;
-    let stxowner = miscinit_seams::get_user_id::call();
+    let stxowner = if stmt.owner != InvalidOid {
+        stmt.owner
+    } else {
+        miscinit_seams::get_user_id::call()
+    };
 
-    if stmt.relations.iter().count() != 1 {
-        return Err(err(
-            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
-            "only a single relation is allowed in CREATE STATISTICS".into(),
-        ));
-    }
-    let rln = stmt.relations.iter().next().expect("relation");
-    let Some(rv) = rln.as_range_var() else {
-        return Err(err(
-            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
-            "only a single relation is allowed in CREATE STATISTICS".into(),
-        ));
-    };
-    let rvv = rel_vocab::RangeVar {
-        catalogname: rv.catalogname,
-        schemaname: rv.schemaname,
-        relname: rv.relname.expect("relname"),
-        inh: rv.inh,
-        relpersistence: rv.relpersistence as u8,
-        location: rv.location,
-    };
-    let rel = relation_seams::relation_openrv::call(mcx, &rvv, ShareUpdateExclusiveLock)?;
-    let relid = rel.rd_id;
+    // CREATE STATISTICS will influence future execution plans but does not
+    // interfere with currently executing plans: ShareUpdateExclusiveLock,
+    // conflicting with ANALYZE and other DDL that sets statistical
+    // information, but not with normal queries.
+    let rel = relation_seams::relation_open::call(mcx, relid, ShareUpdateExclusiveLock)?;
 
     let relkind = rel.rd_rel.relkind;
     if !matches!(
@@ -193,7 +186,9 @@ pub fn CreateStatistics<'mcx>(
         ));
     }
 
-    if !aclchk::object_ownercheck(RELATION_RELATION_ID, relid, stxowner)? {
+    // You must own the relation to create stats on it. Skip check if caller
+    // doesn't want it.
+    if check_rights && !aclchk::object_ownercheck(RELATION_RELATION_ID, relid, stxowner)? {
         aclchk::aclcheck_error(
             aclchk::ACLCHECK_NOT_OWNER,
             get_relkind_objtype(relkind),
@@ -522,6 +517,15 @@ pub fn CreateStatistics<'mcx>(
     if !stxexprs.is_empty() {
         let list = types_nodes::NodeList::from_slice(mcx, &stxexprs)?;
         let exprs_node = types_nodes::Node::mk_list(mcx, list)?;
+        // upstream 2780538433fc (18.5): Check for USAGE privilege on types used by stored expressions.
+        if check_rights {
+            pg_depend::CheckUsageOnTypesInSingleRelExpr(
+                mcx,
+                exprs_node,
+                relid,
+                miscinit_seams::get_user_id::call(),
+            )?;
+        }
         pg_depend::recordDependencyOnSingleRelExpr(
             mcx,
             &myself,

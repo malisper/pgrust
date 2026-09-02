@@ -2354,6 +2354,7 @@ pub(crate) fn copy_CreateStatsStmt<'d>(mcx: Mcx<'d>, s: &CreateStatsStmt<'_>) ->
         stxcomment: opt_str_in(mcx, s.stxcomment)?,
         transformed: s.transformed,
         if_not_exists: s.if_not_exists,
+        owner: s.owner, // upstream a1fa24127d6a (18.6): CreateStatsStmt.owner
     })
 }
 

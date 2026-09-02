@@ -306,6 +306,7 @@ pub static notify_buffers: GucIntVar = GucSlot::new("notify_buffers");
 pub static num_os_semaphores: GucIntVar = GucSlot::new("num_os_semaphores");
 pub static num_temp_buffers: GucIntVar = GucSlot::new("num_temp_buffers");
 pub static oauth_validator_libraries_string: GucStringVar = GucSlot::new("oauth_validator_libraries_string");
+pub static output_plugin_libraries_string: GucStringVar = GucSlot::new("output_plugin_libraries_string");
 pub static parallel_leader_participation: GucBoolVar = GucSlot::new("parallel_leader_participation");
 pub static parallel_setup_cost: GucRealVar = GucSlot::new("parallel_setup_cost");
 pub static parallel_tuple_cost: GucRealVar = GucSlot::new("parallel_tuple_cost");

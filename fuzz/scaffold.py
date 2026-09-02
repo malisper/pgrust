@@ -52,8 +52,8 @@ from pathlib import Path
 FUZZ_DIR = Path(__file__).resolve().parent
 REPO_ROOT = FUZZ_DIR.parent
 
-ORACLE_PIN = "PostgreSQL 18.3 (Stamp-18.3, upstream sha 62d6c7d3df)"
-UPSTREAM_SHA = "62d6c7d3df6287f1bd83199c1a746e50d31571a0"
+ORACLE_PIN = "PostgreSQL 18.6 (Stamp-18.6, upstream sha 724edf9bde)"
+UPSTREAM_SHA = "724edf9bde9d356724ad384a2e196edc3c9f80f7"
 
 
 def die(msg: str) -> None:
@@ -145,7 +145,7 @@ def gen_c_shim(target: str, base: str, crate_rel: str, rows: list[dict]) -> str:
  *   - Vendor sections 1..N byte-for-byte from {" / ".join(f"src/backend/utils/adt/{c}" for c in c_files)}
  *     @ postgres-src {UPSTREAM_SHA}
  *     ({ORACLE_PIN}; re-verify against the repo's vendored ground-truth
- *     checkout ../pgrust-reference/vendor/postgres-src before pasting).
+ *     tree crates/postgres-18.6-reference before pasting).
  *   - Functions to vendor: {fn_list}.
  *   - Bodies VERBATIM except documented shims; shims are PLUMBING ONLY
  *     (isxdigit/strtoul C-locale shims, ereturn -> int sentinel, fmgr
@@ -537,7 +537,7 @@ Function rows given at scaffold time:
 - [ ] Paste VERBATIM upstream C into `core/csrc/pg_{base}_io.c` at every
       `TODO(scaffold)` site, from `src/backend/utils/adt/...` @
       `{UPSTREAM_SHA}` (re-verify against
-      `../pgrust-reference/vendor/postgres-src`). Remove each `#error` gate
+      `crates/postgres-18.6-reference`). Remove each `#error` gate
       together with its paste — never before.
 - [ ] Document every shim in the file header (plumbing only, never logic:
       ereturn -> int sentinel, fmgr unwrapping, caller buffers, C-locale
@@ -583,7 +583,7 @@ Function rows given at scaffold time:
       >=10M execs or 24h CPU per family, all planes compared; record the
       campaign size in the ledger row.
 - [ ] Ground-truth law: no divergence recorded from the vendored oracle
-      alone — replay against `postgres:18.3` Docker; triage Csmith-style
+      alone — replay against `postgres:18.6` Docker; triage Csmith-style
       (pgrust-bug / oracle-platform-variance carve / upstream-bug).
 
 ## 5. Bookkeeping (every commit) and done-gate

@@ -11,6 +11,10 @@ use crate::crc::fold;
 use crate::repr::*;
 
 
+// upstream c3e36a9a5f19 (18.6): Fix int32 overflow in ltree_compare()
+/// btree-comparison function, sign-only: memcmp value, label-length
+/// difference, level-count difference. The old `* 10 * (an + 1)` scaling
+/// overflowed int32 past ~14,653 levels; `ltree_compare_distance` keeps it.
 pub fn ltree_compare(a: &[u8], b: &[u8]) -> i32 {
     let ta = Ltree::new(a);
     let tb = Ltree::new(b);
@@ -21,34 +25,64 @@ pub fn ltree_compare(a: &[u8], b: &[u8]) -> i32 {
     while an > 0 && bn > 0 {
         let al = ai.next().unwrap();
         let bl = bi.next().unwrap();
-        let minlen = al.name.len().min(bl.name.len());
-        let res = al.name[..minlen].cmp(&bl.name[..minlen]);
-        // C ltree_op.c ltree_compare returns `<delta> * 10 * (an + 1)` in
-        // plain int arithmetic, which WRAPS for large trees (numlevel is
-        // uint16, so an+1 reaches 65536 and the product exceeds INT_MAX;
-        // SQL-reachable via ltree_cmp on a >3276-level tree vs a short one).
-        // C's wrapped two's-complement value is the value PG returns, so the
-        // multiplies must be wrapping to be C-exact — a checked `*` here
-        // PANICS in overflow-checked builds (CI cluster fuzz builds; found by
-        // ltree_diff jobs -87980/-88152, both legs, same site). Upstream
-        // match-or-fix decision: MATCH (bug-compat with C's wrap).
-        match res {
-            core::cmp::Ordering::Equal => {
-                if al.name.len() != bl.name.len() {
-                    return (al.name.len() as i32 - bl.name.len() as i32)
-                        .wrapping_mul(10)
-                        .wrapping_mul(an + 1);
-                }
+        let res = memcmp(al.name, bl.name);
+        if res == 0 {
+            if al.name.len() != bl.name.len() {
+                return al.name.len() as i32 - bl.name.len() as i32;
             }
-            core::cmp::Ordering::Less => return (-10i32).wrapping_mul(an + 1),
-            core::cmp::Ordering::Greater => return 10i32.wrapping_mul(an + 1),
+        } else {
+            return res;
         }
         an -= 1;
         bn -= 1;
     }
-    (ta.numlevel() as i32 - tb.numlevel() as i32)
-        .wrapping_mul(10)
-        .wrapping_mul(an + 1)
+    ta.numlevel() as i32 - tb.numlevel() as i32
+}
+
+/// A signed "distance" between `a` and `b`, ordered like `ltree_compare`, in
+/// float so the `10 * (an + 1)` scaling cannot overflow (the GiST penalty).
+pub fn ltree_compare_distance(a: &[u8], b: &[u8]) -> f32 {
+    let ta = Ltree::new(a);
+    let tb = Ltree::new(b);
+    let mut an = ta.numlevel() as i32;
+    let mut bn = tb.numlevel() as i32;
+    let mut ai = ta.levels();
+    let mut bi = tb.levels();
+    while an > 0 && bn > 0 {
+        let al = ai.next().unwrap();
+        let bl = bi.next().unwrap();
+        let res = memcmp(al.name, bl.name);
+        if res == 0 {
+            if al.name.len() != bl.name.len() {
+                return scaled(al.name.len() as i32 - bl.name.len() as i32, an);
+            }
+        } else {
+            return scaled(res.signum(), an);
+        }
+        an -= 1;
+        bn -= 1;
+    }
+    scaled(ta.numlevel() as i32 - tb.numlevel() as i32, an)
+}
+
+/// C's `(float) delta * 10.0 * (an + 1)`: a double product narrowed to float.
+#[inline]
+fn scaled(delta: i32, an: i32) -> f32 {
+    (delta as f64 * 10.0 * (an + 1) as f64) as f32
+}
+
+/// C's `memcmp(a, b, Min(a_len, b_len))`. Its value is implementation-defined
+/// beyond the sign; macOS libSystem and glibc return the first differing byte
+/// difference, which is what the oracles pgrust is compared against produce.
+#[inline]
+fn memcmp(a: &[u8], b: &[u8]) -> i32 {
+    let n = a.len().min(b.len());
+    for i in 0..n {
+        if a[i] != b[i] {
+            return a[i] as i32 - b[i] as i32;
+        }
+    }
+    0
 }
 
 /// `hash_ltree(a)` — `hash_any` per level, combined `result = result*31 + h`.
@@ -281,22 +315,47 @@ pub fn lca_inner(a: &[&[u8]]) -> Option<Vec<u8>> {
 }
 
 
-fn prefix_eq(a: &[u8], b: &[u8]) -> bool {
-    a.len() <= b.len() && b[..a.len()] == *a
+// upstream b3c2a3d386fa (18.4): Fix more multibyte issues in ltree.
+/// C `ltree_label_match`: does `label` match the predicate `pred`? With
+/// `prefix` ('*') the predicate is a prefix; with `ci` ('@') the comparison
+/// is case-insensitive under the default collation's ctype.
+fn ltree_label_match(pred: &[u8], label: &[u8], prefix: bool, ci: bool) -> bool {
+    label_match_with(pred, label, prefix, ci, ::pg_locale::database_ctype_is_c(), fold)
 }
 
-fn prefix_eq_ci(a: &[u8], b: &[u8]) -> bool {
-    let al = fold(a);
-    let bl = fold(b);
-    al.len() <= bl.len() && bl[..al.len()] == *al
-}
-
-fn prefix_eq_dispatch(incase: bool, a: &[u8], b: &[u8]) -> bool {
-    if incase {
-        prefix_eq_ci(a, b)
-    } else {
-        prefix_eq(a, b)
+/// The matcher over an explicit ctype flag and fold primitive. A casefold can
+/// change the byte length, so the exact/prefix rule applies to FOLDED lengths.
+fn label_match_with<F: Fn(&[u8]) -> Vec<u8>>(
+    pred: &[u8],
+    label: &[u8],
+    prefix: bool,
+    ci: bool,
+    ctype_is_c: bool,
+    fold: F,
+) -> bool {
+    if (pred.len() == label.len() || (prefix && pred.len() < label.len()))
+        && label.starts_with(pred)
+    {
+        return true;
+    } else if !ci {
+        return false;
     }
+
+    if ctype_is_c {
+        // upstream 53a57cae1c89 (18.4): Yet another ltree fix for REL_18_STABLE.
+        if pred.len() > label.len() || (!prefix && pred.len() != label.len()) {
+            return false;
+        }
+        return pred
+            .iter()
+            .zip(label)
+            .all(|(p, l)| p.to_ascii_lowercase() == l.to_ascii_lowercase());
+    }
+
+    let fpred = fold(pred);
+    let flabel = fold(label);
+    (fpred.len() == flabel.len() || (prefix && fpred.len() < flabel.len()))
+        && flabel.starts_with(&fpred)
 }
 
 fn getlexeme(s: &[u8], mut start: usize) -> Option<(usize, usize)> {
@@ -320,7 +379,7 @@ fn pg_mblen_range(s: &[u8], i: usize) -> usize {
     (::mbutils::pg_mblen(&s[i..]).max(1)) as usize
 }
 
-fn compare_subnode(t_name: &[u8], qn: &[u8], incase: bool, anyend: bool) -> bool {
+fn compare_subnode(t_name: &[u8], qn: &[u8], prefix: bool, ci: bool) -> bool {
     let mut qpos = 0usize;
     while let Some((qs, qlen)) = getlexeme(qn, qpos) {
         let q = &qn[qs..qs + qlen];
@@ -328,7 +387,7 @@ fn compare_subnode(t_name: &[u8], qn: &[u8], incase: bool, anyend: bool) -> bool
         let mut tpos = 0usize;
         while let Some((ts, tlen)) = getlexeme(t_name, tpos) {
             let tt = &t_name[ts..ts + tlen];
-            if (tlen == qlen || (tlen > qlen && anyend)) && prefix_eq_dispatch(incase, q, tt) {
+            if ltree_label_match(q, tt, prefix, ci) {
                 isok = true;
                 break;
             }
@@ -349,16 +408,13 @@ fn check_level(curq: &LqlView, t_name: &[u8]) -> bool {
         return success;
     }
     for v in curq.variants() {
-        let incase = v.flag & LVAR_INCASE != 0;
-        let anyend = v.flag & LVAR_ANYEND != 0;
+        let prefix = v.flag & LVAR_ANYEND != 0;
+        let ci = v.flag & LVAR_INCASE != 0;
         if v.flag & LVAR_SUBLEXEME != 0 {
-            if compare_subnode(t_name, v.name, incase, anyend) {
+            if compare_subnode(t_name, v.name, prefix, ci) {
                 return success;
             }
-        } else if (v.name.len() == t_name.len()
-            || (t_name.len() > v.name.len() && anyend))
-            && prefix_eq_dispatch(incase, v.name, t_name)
-        {
+        } else if ltree_label_match(v.name, t_name, prefix, ci) {
             return success;
         }
     }
@@ -459,17 +515,15 @@ fn checkcondition_str(t_names: &[&[u8]], operand: &[u8], it: &Item) -> bool {
     // operand is NUL-terminated at op+distance; the C compares val->length bytes
     let oplen = it.length as usize;
     let op = &operand[start..start + oplen];
-    let incase = it.flag & LVAR_INCASE != 0;
-    let anyend = it.flag & LVAR_ANYEND != 0;
+    let prefix = it.flag & LVAR_ANYEND != 0;
+    let ci = it.flag & LVAR_INCASE != 0;
     let sublex = it.flag & LVAR_SUBLEXEME != 0;
     for name in t_names {
         if sublex {
-            if compare_subnode(name, op, incase, anyend) {
+            if compare_subnode(name, op, prefix, ci) {
                 return true;
             }
-        } else if (oplen == name.len() || (name.len() > oplen && anyend))
-            && prefix_eq_dispatch(incase, op, name)
-        {
+        } else if ltree_label_match(op, *name, prefix, ci) {
             return true;
         }
     }
@@ -567,3 +621,80 @@ fn ltree_execute_sign(
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A byte-length-changing fold: KELVIN SIGN (U+212A, 3 bytes) -> 'k'.
+    fn fold_kelvin(s: &[u8]) -> Vec<u8> {
+        let kelvin = "\u{212A}".as_bytes();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < s.len() {
+            if s[i..].starts_with(kelvin) {
+                out.push(b'k');
+                i += kelvin.len();
+            } else {
+                out.push(s[i].to_ascii_lowercase());
+                i += 1;
+            }
+        }
+        out
+    }
+
+    /// upstream b3c2a3d386fa: raw byte lengths never decide a '@' match.
+    #[test]
+    fn label_match_applies_length_rule_to_folded_strings() {
+        let kelvin = "\u{212A}".as_bytes();
+        let m = |pred: &[u8], label: &[u8], prefix: bool, ci: bool| {
+            label_match_with(pred, label, prefix, ci, false, fold_kelvin)
+        };
+        // predicate shorter than the label in bytes, equal once folded
+        assert!(m(b"k", kelvin, false, true));
+        assert!(m(b"k", kelvin, true, true));
+        // predicate longer than the label in bytes, equal once folded
+        assert!(m(kelvin, b"k", false, true));
+        // folded prefix rule: 'K' (3 bytes) is a prefix of 'kx' (2 bytes)
+        assert!(m(kelvin, b"kx", true, true));
+        assert!(!m(kelvin, b"kx", false, true));
+        assert!(!m(b"kx", kelvin, true, true));
+        // binary predicates stay binary
+        assert!(!m(b"k", kelvin, false, false));
+        assert!(!m(kelvin, b"k", true, false));
+        assert!(m(b"ab", b"abc", true, false));
+        assert!(!m(b"ab", b"abc", false, false));
+        assert!(m(b"abc", b"abc", false, false));
+    }
+
+    /// upstream 53a57cae1c89: the C-ctype arm keeps the exact-length rule for
+    /// non-prefix predicates ('abc' does not match 'ab@').
+    #[test]
+    fn label_match_c_ctype_keeps_exact_length_rule() {
+        let m = |pred: &[u8], label: &[u8], prefix: bool, ci: bool| {
+            label_match_with(pred, label, prefix, ci, true, |s: &[u8]| s.to_vec())
+        };
+        assert!(!m(b"ab", b"abc", false, true));
+        assert!(m(b"ab", b"abc", true, true));
+        assert!(m(b"AB", b"abc", true, true));
+        assert!(m(b"abc", b"ABC", false, true));
+        assert!(!m(b"abc", b"ab", false, true));
+        assert!(!m(b"abc", b"ab", true, true));
+        assert!(!m(b"ab", b"abc", false, false));
+    }
+
+    /// upstream c3e36a9a5f19: the GiST penalty's distance keeps C's
+    /// `delta * 10 * (an + 1)` scaling, computed in float.
+    #[test]
+    fn ltree_compare_distance_keeps_c_scaling() {
+        let t = |s: &str| crate::io::parse_ltree(s.as_bytes()).unwrap();
+        let deep = t(&format!("{}a", "a.".repeat(14999)));
+        assert_eq!(ltree_compare_distance(&deep, &t("a")), (14999.0f64 * 10.0 * 15000.0) as f32);
+        // one equal level leaves an = 0 on the short side: (1 - 15000) * 10 * 1
+        assert_eq!(ltree_compare_distance(&t("a"), &deep), -149990.0);
+        assert_eq!(ltree_compare_distance(&t("a.b"), &t("a.z")), -20.0);
+        assert_eq!(ltree_compare_distance(&t("a.z"), &t("a.b")), 20.0);
+        assert_eq!(ltree_compare_distance(&t("a.bb"), &t("a.b")), 20.0);
+        assert_eq!(ltree_compare_distance(&t("a"), &t("a.b.c")), -20.0);
+        assert_eq!(ltree_compare_distance(&t("a.b"), &t("a.b")), 0.0);
+    }
+}

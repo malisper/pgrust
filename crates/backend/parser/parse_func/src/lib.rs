@@ -10,7 +10,7 @@ use elog::ereport;
 use mcx::{Mcx, PgVec};
 use nodes_core::expr_location;
 use parser_small1::{parser_errposition, ParseState};
-use types_core::catalog::{RECORDOID, UNKNOWNOID, VOIDOID};
+use types_core::catalog::{INTERNALOID, RECORDOID, UNKNOWNOID, VOIDOID};
 use types_core::{InvalidOid, Oid, OidIsValid, ParseLoc};
 use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_AMBIGUOUS_FUNCTION,
@@ -333,6 +333,7 @@ pub fn ParseFuncOrColumn<'mcx>(
                 rettype,
                 false,
             )?;
+            reject_internal_call(pstate, &declared_arg_types, rettype, location)?;
             let fargs =
                 make_fn_arguments(mcx, pstate, fargs, actual_arg_types, &declared_arg_types)?;
 
@@ -509,6 +510,7 @@ pub fn ParseFuncOrColumn<'mcx>(
                 rettype,
                 false,
             )?;
+            reject_internal_call(pstate, &declared_arg_types, rettype, location)?;
             let fargs =
                 make_fn_arguments(mcx, pstate, fargs, actual_arg_types, &declared_arg_types)?;
             // C: the variadic ArrayExpr packing is shared across function
@@ -557,6 +559,12 @@ pub fn ParseFuncOrColumn<'mcx>(
                 agg_arg_types.push(packed_array_type);
             }
 
+            // upstream 2a03f21daf59 (18.6): Protect some fixed-size arrays that have FUNC_MAX_ARGS elements.
+            // Hypothetical-set aggregates have no fixed arity, so matching the
+            // pg_proc row proves nothing; apply AggregateCreate's limit here.
+            if fargs.len() > FUNC_MAX_ARGS - 1 {
+                return Err(too_many_aggregate_arguments(pstate, location));
+            }
             if fargs.is_nil() && !fn_call.agg_star && !fn_call.agg_within_group {
                 return Err(wrong_object_type(
                     pstate,
@@ -660,6 +668,7 @@ pub fn ParseFuncOrColumn<'mcx>(
                 rettype,
                 false,
             )?;
+            reject_internal_call(pstate, &declared_arg_types, rettype, location)?;
             let fargs =
                 make_fn_arguments(mcx, pstate, fargs, actual_arg_types, &declared_arg_types)?;
             build_window_func(
@@ -1059,6 +1068,10 @@ fn build_window_func<'mcx>(
             None,
             location,
         ));
+    }
+    // upstream 2a03f21daf59 (18.6): Protect some fixed-size arrays that have FUNC_MAX_ARGS elements.
+    if winagg && fargs.len() > FUNC_MAX_ARGS - 1 {
+        return Err(too_many_aggregate_arguments(pstate, location));
     }
     if winagg && fargs.is_nil() && !fn_call.agg_star {
         return Err(wrong_object_type(
@@ -1870,6 +1883,49 @@ fn variadic_not_array(pstate: &ParseState<'_, '_>, fargs: &NodeList<'_>) -> Box<
     )
 }
 
+// upstream 54649de65f08 (18.6): Reject calls from SQL to functions that take or return type internal.
+// Checks the resolved types, so a polymorphic call passing internal is caught too.
+fn reject_internal_call(
+    pstate: &ParseState<'_, '_>,
+    declared_arg_types: &[Oid],
+    rettype: Oid,
+    location: ParseLoc,
+) -> PgResult<()> {
+    if declared_arg_types.contains(&INTERNALOID) {
+        return Err(feature_not_supported(
+            pstate,
+            "functions accepting type \"internal\" cannot be called explicitly".into(),
+            None,
+            location,
+        ));
+    }
+    if rettype == INTERNALOID {
+        return Err(feature_not_supported(
+            pstate,
+            "functions returning type \"internal\" cannot be called explicitly".into(),
+            None,
+            location,
+        ));
+    }
+    Ok(())
+}
+
+// upstream 2a03f21daf59 (18.6): Protect some fixed-size arrays that have FUNC_MAX_ARGS elements.
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn too_many_aggregate_arguments(pstate: &ParseState<'_, '_>, location: ParseLoc) -> Box<PgError> {
+    let encoding = mbutils::GetDatabaseEncoding();
+    Box::new(
+        ereport(ERROR)
+            .errcode(ERRCODE_TOO_MANY_ARGUMENTS)
+            .errmsg(format!("aggregates cannot have more than {} arguments", FUNC_MAX_ARGS - 1))
+            .errposition(parser_errposition(pstate, location, encoding))
+            .into_error()
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "ParseFuncOrColumn")),
+    )
+}
+
 #[track_caller]
 #[cold]
 #[inline(never)]
@@ -2362,8 +2418,8 @@ pub fn ParseComplexProjection<'mcx>(
 ) -> PgResult<Option<Node<'mcx>>> {
     if let Some(v) = first_arg.as_var() {
         if v.varattno == types_core::InvalidAttrNumber {
-            let nsitem =
-                parse_relation::GetNSItemByRangeTablePosn(pstate, v.varno, v.varlevelsup as i32);
+            // upstream 9108fed3eda9 (18.5): Fix parsing of parenthesised OLD/NEW in RETURNING list.
+            let nsitem = parse_relation::GetNSItemByVar(pstate, v);
             return parse_relation::scanNSItemForColumn(
                 mcx,
                 pstate,

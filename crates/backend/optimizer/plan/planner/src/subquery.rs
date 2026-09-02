@@ -108,9 +108,10 @@ pub fn subquery_planner<'mcx>(
     if parse.setOperations.is_some() {
         crate::prepjointree::flatten_simple_union_all(run, &mut *parse)?;
     }
+    // C calls this unconditionally (planner.c:768); a relkind allowlist here
+    // skipped foreign tables' virtual columns. Divergence: generated_virtual-2.
     if parse.rtable.iter().any(|n| {
-        let r = n.as_range_tbl_entry().expect("rtable cell");
-        r.rtekind == RTEKind::RTE_RELATION && matches!(r.relkind, b'r' | b'p')
+        n.as_range_tbl_entry().expect("rtable cell").rtekind == RTEKind::RTE_RELATION
     }) {
         crate::prepjointree::expand_virtual_generated_columns(run, &mut *parse)?;
     }

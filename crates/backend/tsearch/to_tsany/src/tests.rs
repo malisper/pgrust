@@ -249,3 +249,28 @@ mod json_workers {
         assert_eq!(&a[..], &b[..]);
     }
 }
+
+// upstream e251350573e2 (18.6): make_tsvector double-checks the lexeme
+// lengths its callers hand it; a >MAXSTRLEN lexeme used to overflow the
+// 11-bit WordEntry.len field silently.
+#[test]
+fn make_tsvector_rejects_empty_and_overlong_lexemes() {
+    let ctx = MemoryContext::new("to-tsany-test");
+    let mcx = ctx.mcx();
+    for (len, want) in [
+        (2048usize, "lexeme is too long for tsvector (2048 bytes, max 2047 bytes)"),
+        (0usize, "lexeme is too long for tsvector (0 bytes, max 2047 bytes)"),
+    ] {
+        let mut prs = ParsedText::with_capacity(mcx, 2).unwrap();
+        prs.words.push(word(mcx, &"a".repeat(len), 1, 0));
+        let err = make_tsvector(mcx, &mut prs).expect_err("invalid lexeme length");
+        assert_eq!(err.sqlstate(), ::types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+        assert_eq!(err.message(), want);
+    }
+    let mut prs = ParsedText::with_capacity(mcx, 2).unwrap();
+    prs.words.push(word(mcx, &"a".repeat(2047), 1, 0));
+    let img = make_tsvector(mcx, &mut prs).unwrap();
+    let v = TsVec { payload: &img[4..] };
+    assert_eq!(v.size(), 1);
+    assert_eq!(v.lexeme(v.entry(0)).len(), 2047);
+}

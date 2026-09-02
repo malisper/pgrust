@@ -411,6 +411,43 @@ fn insert_flush_smoke() {
         guc_tables::vars::CommitDelay.write(0);
         init_small::globals::set_enableFsync(false);
     }
+    // upstream 5b3f63a1bf59 (18.4): a record that ends exactly on a page
+    // boundary. GetXLogInsertRecPtr then points past the next page header
+    // (nothing is flushable there: "xlog flush request ... is not
+    // satisfied"), which is what gistGetFakeLSN used to stamp pages with;
+    // GetXLogInsertEndRecPtr is the boundary itself and flushes.
+    {
+        let insert_end = GetXLogInsertEndRecPtr();
+        assert_eq!(insert_end, GetXLogInsertRecPtr(), "mid-page: both agree");
+        let fill = INSERT_FREESPACE(insert_end);
+        assert!(fill >= SizeOfXLogRecord + 8, "need room for one record on this page");
+        let body: Vec<u8> = vec![0x5A; fill - SizeOfXLogRecord];
+        let tot_len = SizeOfXLogRecord + body.len();
+        assert_eq!(MAXALIGN(tot_len), tot_len);
+        let mut h = [0u8; 24];
+        h[0..4].copy_from_slice(&(tot_len as u32).to_ne_bytes());
+        h[16] = XLOG_NOOP;
+        h[17] = RM_XLOG_ID;
+        let crc = crc32c::pg_comp_crc32c(crc32c::CRC32C_INIT, &body);
+        h[20..24].copy_from_slice(&crc.to_ne_bytes());
+        let end = XLogInsertRecord(&mut h, &[&body], 0, 0, 0, false).unwrap();
+        assert_eq!(end % XLOG_BLCKSZ as u64, 0, "record ends on the page boundary");
+        assert_eq!(GetXLogInsertEndRecPtr(), end);
+        assert_eq!(GetXLogInsertRecPtr(), end + SizeOfXLogShortPHD as u64);
+        XLogFlush(GetXLogInsertEndRecPtr()).unwrap();
+        let err = XLogFlush(GetXLogInsertRecPtr()).unwrap_err();
+        assert_eq!(
+            err.message,
+            format!(
+                "xlog flush request {:X}/{:X} is not satisfied --- flushed only to {:X}/{:X}",
+                (end + SizeOfXLogShortPHD as u64) >> 32,
+                (end + SizeOfXLogShortPHD as u64) as u32,
+                end >> 32,
+                end as u32
+            )
+        );
+    }
+
     let segpath = dir.join(format!("pg_wal/{}", XLogFileName(1, XLByteToSeg(end_of_log, seg), seg)));
     let file = std::fs::read(&segpath).unwrap_or_else(|e| {
         let names: Vec<_> = std::fs::read_dir(dir.join("pg_wal")).unwrap().map(|x| x.unwrap().file_name()).collect();

@@ -905,11 +905,12 @@ fn GetNewMultiXactId(nmembers_in: i32) -> PgResult<(MultiXactId, MultiXactOffset
                     "database is not accepting commands that assign new MultiXactIds to avoid wraparound data loss in database with OID {oldest_datoid}"
                 ),
             };
+            // upstream c8d68bfd52d7 (18.5): Remove replication slot advice from MultiXact wraparound hints
             ereport(ERROR)
                 .errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
                 .errmsg(msg)
                 .errhint(
-                    "Execute a database-wide VACUUM in that database.\nYou might also need to commit or roll back old prepared transactions, or drop stale replication slots.",
+                    "Execute a database-wide VACUUM in that database.\nYou might also need to commit or roll back old prepared transactions.",
                 )
                 .finish(loc("GetNewMultiXactId"))?;
         }
@@ -927,10 +928,11 @@ fn GetNewMultiXactId(nmembers_in: i32) -> PgResult<(MultiXactId, MultiXactOffset
                 Some(name) => multixactid_warning_msg_named(&name, remaining),
                 None => multixactid_warning_msg_oid(oldest_datoid, remaining),
             };
+            // upstream c8d68bfd52d7 (18.5): Remove replication slot advice from MultiXact wraparound hints
             ereport(WARNING)
                 .errmsg(msg)
                 .errhint(
-                    "Execute a database-wide VACUUM in that database.\nYou might also need to commit or roll back old prepared transactions, or drop stale replication slots.",
+                    "Execute a database-wide VACUUM in that database.\nYou might also need to commit or roll back old prepared transactions.",
                 )
                 .finish(loc("GetNewMultiXactId"))?;
         }
@@ -1702,10 +1704,11 @@ pub fn SetMultiXactIdLimit(
             Some(name) => multixactid_warning_msg_named(name, remaining),
             None => multixactid_warning_msg_oid(oldest_datoid, remaining),
         };
+        // upstream c8d68bfd52d7 (18.5): Remove replication slot advice from MultiXact wraparound hints
         ereport(WARNING)
             .errmsg(msg)
             .errhint(
-                "To avoid MultiXactId assignment failures, execute a database-wide VACUUM in that database.\nYou might also need to commit or roll back old prepared transactions, or drop stale replication slots.",
+                "To avoid MultiXactId assignment failures, execute a database-wide VACUUM in that database.\nYou might also need to commit or roll back old prepared transactions.",
             )
             .finish(loc("SetMultiXactIdLimit"))?;
     }

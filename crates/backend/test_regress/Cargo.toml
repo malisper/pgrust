@@ -29,6 +29,7 @@ arrayfuncs = { path = "../utils/adt/arrayfuncs" }
 superuser = { path = "../utils/misc/superuser" }
 varlena = { path = "../utils/adt/varlena" }
 relpath = { path = "../../common/relpath" }
+pglz = { path = "../../common/pglz" }
 elog_seams = { path = "../utils/error/elog_seams" }
 typcache = { path = "../utils/cache/typcache" }
 detoast_seams = { path = "../access/common/detoast_seams" }

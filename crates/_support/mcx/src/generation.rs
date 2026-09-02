@@ -247,6 +247,13 @@ impl GenArena {
         }
         let hdr = core::ptr::with_exposed_provenance::<usize>(ptr.as_ptr().addr() - GEN_CHUNKHDRSZ);
         let addr = *hdr;
+        // upstream 3f3eefc28892 (18.4): Detect pfree or repalloc of a previously-freed memory chunk.
+        // Zero the freed chunk's block-address header (C: requested_size =
+        // InvalidAllocSize); `is_freed` reads it back. The slot is dead until the
+        // block is re-carved, which rewrites it (0 is never a block address).
+        #[cfg(debug_assertions)]
+        core::ptr::with_exposed_provenance_mut::<usize>(ptr.as_ptr().addr() - GEN_CHUNKHDRSZ)
+            .write(0);
         let b = block_mut(addr);
         b.nfree += 1;
         debug_assert!(b.nfree <= b.nchunks);
@@ -255,6 +262,14 @@ impl GenArena {
             return;
         }
         self.block_emptied(addr, acct);
+    }
+
+    // upstream 3f3eefc28892 (18.4): Detect pfree or repalloc of a previously-freed memory chunk.
+    // C GenerationFree/GenerationRealloc's `requested_size == InvalidAllocSize` test.
+    /// # Safety: `ptr` came from this arena (its 8-byte header precedes it).
+    #[cfg(debug_assertions)]
+    pub(crate) unsafe fn is_freed(&self, ptr: NonNull<u8>) -> bool {
+        *core::ptr::with_exposed_provenance::<usize>(ptr.as_ptr().addr() - GEN_CHUNKHDRSZ) == 0
     }
 
     #[cold]

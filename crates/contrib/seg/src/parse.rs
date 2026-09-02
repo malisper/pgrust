@@ -373,6 +373,14 @@ mod tests {
         );
         assert_eq!(roundtrip("<1 .. >2"), "<1 .. >2");
         assert_eq!(roundtrip("~5"), "~5");
+        // upstream 0004cab4dc60 (18.6): indicators on both interval boundaries round-trip (seg.sql)
+        assert_eq!(roundtrip("~1.5 .. 2.5"), "~1.5 .. 2.5");
+        assert_eq!(roundtrip("1.5 .. ~2.5"), "1.5 .. ~2.5");
+        assert_eq!(roundtrip("~1.5 .. ~2.5"), "~1.5 .. ~2.5");
+        assert_eq!(roundtrip("<1.5 .. 2.5"), "<1.5 .. 2.5");
+        assert_eq!(roundtrip("1.5 .. <2.5"), "1.5 .. <2.5");
+        assert_eq!(roundtrip(">1.5 .. 2.5"), ">1.5 .. 2.5");
+        assert_eq!(roundtrip("1.5 .. >2.5"), "1.5 .. >2.5");
         // PLUMIN forms
         assert_eq!(roundtrip("5'+-'1"), "4 .. 6");
         assert_eq!(roundtrip("5(+-)1"), "4 .. 6");

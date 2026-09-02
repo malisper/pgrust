@@ -2969,6 +2969,13 @@ pub fn relation_has_unique_index_for<'mcx>(
                     continue;
                 }
                 let clause = *run.root.expr_node(ri.clause);
+                // upstream b62f514ac533 (18.4): Consider collation when proving uniqueness from unique indexes
+                if !lsyscache::misc::collations_agree_on_equality(
+                    ind.indexcollations[c],
+                    nodes_core::node_funcs::expr_input_collation(clause),
+                )? {
+                    continue;
+                }
                 let o = clause.as_op_expr().expect("mergejoinable clause is an OpExpr");
                 let rexpr = strip_relabel(if ri.outer_is_left {
                     o.args.nth(1)
@@ -2982,11 +2989,19 @@ pub fn relation_has_unique_index_for<'mcx>(
             }
             if !matched {
                 for (j, &expr_id) in exprlist.iter().enumerate() {
-                    let expr = strip_relabel(*run.root.expr_node(expr_id));
-                    if !planner_seams::match_index_to_operand::call(run, expr, c, ind) {
+                    let expr = *run.root.expr_node(expr_id);
+                    if !planner_seams::match_index_to_operand::call(run, strip_relabel(expr), c, ind)
+                    {
                         continue;
                     }
                     if !lsyscache::amop::op_in_opfamily(oprlist[j], ind.opfamily[c])? {
+                        continue;
+                    }
+                    // upstream b62f514ac533 (18.4): the unstripped expr carries a COLLATE override
+                    if !lsyscache::misc::collations_agree_on_equality(
+                        ind.indexcollations[c],
+                        nodes_core::node_funcs::expr_collation(expr),
+                    )? {
                         continue;
                     }
                     matched = true;

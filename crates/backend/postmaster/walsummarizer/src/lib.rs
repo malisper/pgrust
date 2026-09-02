@@ -247,7 +247,9 @@ fn run_summarizer(context: &mut MemoryContext) -> PgResult<()> {
         Some(lsn) => lsn,
     };
     let mut switch_lsn = InvalidXLogRecPtr;
-    let mut switch_tli: TimeLineID = 0;
+    // upstream 18f0de6b885a (18.6): descendant timelines to switch to, oldest
+    // first; std Vec so it survives the per-iteration context.reset().
+    let mut descendant_tlis: Vec<TimeLineID> = Vec::new();
 
     loop {
         context.reset();
@@ -259,23 +261,25 @@ fn run_summarizer(context: &mut MemoryContext) -> PgResult<()> {
 
         if current_tli != latest_tli && switch_lsn == InvalidXLogRecPtr {
             let tles = timeline_seams::read_timeline_history::call(context.mcx(), latest_tli)?;
-            let (sp, st) = timeline_seams::tli_switch_point::call(current_tli, &tles)?;
+            let (sp, tlis) = WalSummarizerSwitchPoint(current_tli, &tles)?;
             switch_lsn = sp;
-            switch_tli = st;
+            descendant_tlis = tlis;
             elog(
                 DEBUG1,
                 format!(
-                    "switch point from TLI {current_tli} to TLI {switch_tli} is at {}",
+                    "switch point from TLI {current_tli} to TLI {} is at {}",
+                    descendant_tlis[0],
                     lsn_fmt(switch_lsn)
                 ),
             )?;
         }
 
         if switch_lsn != InvalidXLogRecPtr && current_lsn >= switch_lsn {
-            current_tli = switch_tli;
+            debug_assert!(!descendant_tlis.is_empty());
+            current_tli = descendant_tlis[0];
             current_lsn = switch_lsn;
             switch_lsn = InvalidXLogRecPtr;
-            switch_tli = 0;
+            descendant_tlis = Vec::new();
 
             lock(LW_EXCLUSIVE)?;
             let d = ctl();
@@ -287,8 +291,16 @@ fn run_summarizer(context: &mut MemoryContext) -> PgResult<()> {
             continue;
         }
 
-        let end_of_summary_lsn =
-            SummarizeWAL(current_tli, current_lsn, exact, switch_lsn, latest_lsn)?;
+        // upstream 1d299d6abfcd (18.6): walsummarizer: Guard against WAL files whose tail ends are not valid.
+        let maximum_lsn = if switch_lsn != InvalidXLogRecPtr { switch_lsn } else { latest_lsn };
+        let end_of_summary_lsn = SummarizeWAL(
+            current_tli,
+            current_lsn,
+            exact,
+            switch_lsn,
+            maximum_lsn,
+            &descendant_tlis,
+        )?;
         debug_assert!(end_of_summary_lsn != InvalidXLogRecPtr);
         debug_assert!(end_of_summary_lsn >= current_lsn);
 
@@ -592,6 +604,38 @@ fn latest_lsn_from_flush_and_replay(
     }
 }
 
+// upstream 18f0de6b885a (18.6): Prevent walsummarizer from getting stuck at a timeline switch.
+fn WalSummarizerSwitchPoint(
+    current_tli: TimeLineID,
+    tles: &[timeline_seams::TimeLineHistoryEntry],
+) -> PgResult<(XLogRecPtr, Vec<TimeLineID>)> {
+    let mut switch_lsn = InvalidXLogRecPtr;
+    let mut count = 0usize;
+    for tle in tles {
+        if tle.tli == current_tli {
+            switch_lsn = tle.end;
+            break;
+        }
+        count += 1;
+    }
+
+    if switch_lsn == InvalidXLogRecPtr {
+        ereport(ERROR)
+            .errmsg(format!("requested timeline {current_tli} is not in this server's history"))
+            .finish(loc("WalSummarizerSwitchPoint"))?;
+        unreachable!();
+    }
+    if count == 0 {
+        ereport(ERROR)
+            .errmsg_internal(format!("cannot compute switch point for current TLI {current_tli}"))
+            .finish(loc("WalSummarizerSwitchPoint"))?;
+        unreachable!();
+    }
+
+    let descendant_tlis = tles[..count].iter().rev().map(|tle| tle.tli).collect();
+    Ok((switch_lsn, descendant_tlis))
+}
+
 fn ProcessWalSummarizerInterrupts() -> PgResult<()> {
     if procsignal_seams::proc_signal_barrier_pending::call() {
         procsignal_seams::process_proc_signal_barrier::call()?;
@@ -615,28 +659,76 @@ fn ProcessWalSummarizerInterrupts() -> PgResult<()> {
     Ok(())
 }
 
-struct SummarizerPageRead {
+struct SummarizerPageRead<'a> {
     tli: TimeLineID,
     historic: bool,
     read_upto: XLogRecPtr,
     end_of_wal: bool,
+    descendant_tlis: &'a [TimeLineID],
 }
 
-impl XLogSegmentRoutine for SummarizerPageRead {
+impl XLogSegmentRoutine for SummarizerPageRead<'_> {
+    // upstream 18f0de6b885a (18.6): Prevent walsummarizer from getting stuck at a timeline switch.
     fn segment_open(
         &mut self,
         v: &mut ReaderView,
         next_seg_no: XLogSegNo,
         tli: &mut TimeLineID,
     ) -> PgResult<()> {
-        xlogutils::wal_segment_open(v, next_seg_no, tli)
+        summarizer_wal_segment_open(v, next_seg_no, tli, self.descendant_tlis)
     }
     fn segment_close(&mut self, v: &mut ReaderView) {
         xlogutils::wal_segment_close(v);
     }
 }
 
-impl XLogReaderRoutine for SummarizerPageRead {
+// wal_segment_open that, when the requested timeline's file is gone, tries
+// the same segment on each known descendant timeline: an old timeline's
+// never-archived last partial segment lives at the head of the next one.
+fn summarizer_wal_segment_open(
+    v: &mut ReaderView,
+    next_seg_no: XLogSegNo,
+    tli_p: &mut TimeLineID,
+    descendant_tlis: &[TimeLineID],
+) -> PgResult<()> {
+    let mut count = 0usize;
+    let mut tli = *tli_p;
+    loop {
+        let path = transam_xlog::XLogFilePath(tli, next_seg_no, v.segcxt.ws_segsize);
+        let fd = file_seams::basic_open_file::call(&path, libc::O_RDONLY);
+        if fd >= 0 {
+            v.seg.ws_file = fd;
+            *tli_p = tli;
+            return Ok(());
+        }
+
+        let en = elog::errno::current_errno();
+        if en != libc::ENOENT {
+            ereport(ERROR)
+                .with_saved_errno(en)
+                .errcode_for_file_access()
+                .errmsg(format!("could not open file \"{path}\": %m"))
+                .finish(loc("summarizer_wal_segment_open"))?;
+            unreachable!();
+        }
+
+        if count >= descendant_tlis.len() {
+            break;
+        }
+        tli = descendant_tlis[count];
+        count += 1;
+    }
+
+    let path = transam_xlog::XLogFilePath(*tli_p, next_seg_no, v.segcxt.ws_segsize);
+    ereport(ERROR)
+        .with_saved_errno(libc::ENOENT)
+        .errcode_for_file_access()
+        .errmsg(format!("requested WAL segment {path} has already been removed"))
+        .finish(loc("summarizer_wal_segment_open"))?;
+    unreachable!();
+}
+
+impl XLogReaderRoutine for SummarizerPageRead<'_> {
     fn page_read(
         &mut self,
         v: &mut ReaderView,
@@ -708,6 +800,7 @@ fn SummarizeWAL(
     exact: bool,
     mut switch_lsn: XLogRecPtr,
     maximum_lsn: XLogRecPtr,
+    descendant_tlis: &[TimeLineID],
 ) -> PgResult<XLogRecPtr> {
     let cx = MemoryContext::new("SummarizeWAL");
     let mcx = cx.mcx();
@@ -718,6 +811,7 @@ fn SummarizeWAL(
         historic: switch_lsn != InvalidXLogRecPtr,
         read_upto: maximum_lsn,
         end_of_wal: false,
+        descendant_tlis,
     };
     let mut xlogreader = XLogReaderState::allocate(mcx, wal_segment_size())?;
 
@@ -1010,7 +1104,12 @@ fn SummarizeSmgrRecord(
             brtab.set_limit_block(rlocator, MAIN_FORKNUM, blkno);
         }
         if flags & SMGR_TRUNCATE_VM != 0 {
-            brtab.set_limit_block(rlocator, VISIBILITYMAP_FORKNUM, blkno);
+            // upstream 9540c0e5dd40 (18.4): Prevent restore of incremental backup from bloating VM fork.
+            brtab.set_limit_block(
+                rlocator,
+                VISIBILITYMAP_FORKNUM,
+                visibilitymap::visibilitymap_truncation_length(blkno),
+            );
         }
     }
     Ok(())

@@ -2295,24 +2295,32 @@ fn validate_composite_datum_len(statoid: Oid, img: &[u8], off: usize) -> PgResul
     Ok(t_len as u32)
 }
 
+// upstream 83671c0da049 (18.4): Fix set of issues with extended statistics on expressions
 fn statext_expressions_load<'mcx>(
     mcx: Mcx<'mcx>,
     statoid: Oid,
     inh: bool,
     idx: i32,
-) -> PgResult<syscache_seams::PgStatisticBundle<'mcx>> {
+) -> PgResult<Option<syscache_seams::PgStatisticBundle<'mcx>>> {
     let img = statext_data_blob(mcx, statoid, inh, ANUM_PG_STATISTIC_EXT_DATA_STXDEXPR)?
         .unwrap_or_else(|| {
             panic!(
                 "requested statistics kind \"e\" is not yet built for statistics object {statoid}"
             )
         });
-    let elems = datum::array_build::deconstruct_array_image(mcx, &img, -1, false, b'd')?;
+    // serialize_expr_stats stores a NULL element for every expression whose
+    // statistics were not valid, so the array may carry a null bitmap.
+    let (elems, nulls) =
+        datum::array_build::deconstruct_array_image_nulls(mcx, &img, -1, false, b'd')?;
     if idx < 0 || (idx as usize) >= elems.len() {
         return Err(types_error::PgError::error(format!(
             "extended statistics expression index {idx} out of range for statistics object {statoid}"
         ))
         .into());
+    }
+    if nulls.as_ref().is_some_and(|n| n[idx as usize]) {
+        // No data found for this expression, give up.
+        return Ok(None);
     }
     let d = elems[idx as usize];
     let p = d.as_usize() as *const u8;
@@ -2365,12 +2373,12 @@ fn statext_expressions_load<'mcx>(
             values_image,
         ));
     }
-    Ok(syscache_seams::PgStatisticBundle {
+    Ok(Some(syscache_seams::PgStatisticBundle {
         stanullfrac: getattr(&tup, STATRELATTINH, ANUM_PG_STATISTIC_STANULLFRAC).as_f32(),
         stawidth: getattr(&tup, STATRELATTINH, ANUM_PG_STATISTIC_STAWIDTH).as_i32(),
         stadistinct: getattr(&tup, STATRELATTINH, ANUM_PG_STATISTIC_STADISTINCT).as_f32(),
         slots,
-    })
+    }))
 }
 
 fn text_attr<'mcx>(

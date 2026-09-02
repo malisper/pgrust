@@ -1026,8 +1026,9 @@ fn match_clause_to_partition_key<'mcx>(
 
     if let Some(opclause) = clause.as_op_expr() {
         if opclause.args.len() == 2 {
-            let leftop = strip_relabel(opclause.args.nth(0));
-            let rightop = strip_relabel(opclause.args.nth(1));
+            // upstream 8e8b2bef780e (18.4): Strip PlaceHolderVars from partition pruning operands
+            let leftop = strip_relabel(vars::strip_noop_phvs(mcx, opclause.args.nth(0))?);
+            let rightop = strip_relabel(vars::strip_noop_phvs(mcx, opclause.args.nth(1))?);
             let mut opno = opclause.opno;
             let mut negator = InvalidOid;
             let mut is_opne_listp = false;
@@ -1162,7 +1163,8 @@ fn match_clause_to_partition_key<'mcx>(
     if let Some(saop) = clause.as_scalar_array_op_expr() {
         let saop_op = saop.opno;
         let saop_coll = saop.inputcollid;
-        let leftop = strip_relabel(saop.args.nth(0));
+        // upstream 8e8b2bef780e (18.4): Strip PlaceHolderVars from partition pruning operands
+        let leftop = strip_relabel(vars::strip_noop_phvs(mcx, saop.args.nth(0))?);
         let rightop = saop.args.nth(1);
 
         if !types_nodes::equal::equal(leftop, partkey)
@@ -1307,7 +1309,8 @@ fn match_clause_to_partition_key<'mcx>(
     }
 
     if let Some(nulltest) = clause.as_null_test() {
-        let arg = strip_relabel(nulltest.arg.expect("NullTest.arg"));
+        // upstream 8e8b2bef780e (18.4): Strip PlaceHolderVars from partition pruning operands
+        let arg = strip_relabel(vars::strip_noop_phvs(mcx, nulltest.arg.expect("NullTest.arg"))?);
         if !types_nodes::equal::equal(arg, partkey) {
             return Ok(PartClauseMatchStatus::NoMatch);
         }
@@ -1335,7 +1338,8 @@ fn match_boolean_partition_clause<'mcx>(
     }
 
     if let Some(btest) = clause.as_boolean_test() {
-        let leftop = strip_relabel(btest.arg.expect("BooleanTest.arg"));
+        // upstream 8e8b2bef780e (18.4): Strip PlaceHolderVars from partition pruning operands
+        let leftop = strip_relabel(vars::strip_noop_phvs(mcx, btest.arg.expect("BooleanTest.arg"))?);
         if types_nodes::equal::equal(leftop, partkey) {
             return Ok(match btest.booltesttype {
                 BoolTestType::IS_NOT_TRUE | BoolTestType::IS_TRUE => {
@@ -1358,11 +1362,9 @@ fn match_boolean_partition_clause<'mcx>(
     }
 
     let is_not_clause = clauses::is_notclause(clause);
-    let leftop = if is_not_clause {
-        strip_relabel(clause.as_bool_expr().unwrap().args.nth(0))
-    } else {
-        strip_relabel(clause)
-    };
+    let leftop = if is_not_clause { clause.as_bool_expr().unwrap().args.nth(0) } else { clause };
+    // upstream 8e8b2bef780e (18.4): Strip PlaceHolderVars from partition pruning operands
+    let leftop = strip_relabel(vars::strip_noop_phvs(mcx, leftop)?);
 
     if types_nodes::equal::equal(leftop, partkey) {
         *outconst = Some(clauses::make_bool_const(mcx, !is_not_clause, false)?);

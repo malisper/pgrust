@@ -1307,3 +1307,87 @@ fn volatile_after_planning_runs_expression_planner_first() {
     let plus = op_expr(mcx, 551, F_INT4PL, 23, &[var, int4_const(mcx, Some(1))]);
     assert!(!contain_volatile_functions_after_planning(mcx, plus).unwrap());
 }
+
+// upstream 277122036c33 (18.6): int4[] varlena image (4B header), 0 or 1 dims.
+#[repr(C, align(8))]
+struct ArrImg([u8; 32]);
+
+const FIRST_LOW_INVALID_HEAP_ATTR: i32 = -7;
+const ATT1_KEY: i32 = 1 - FIRST_LOW_INVALID_HEAP_ATTR;
+
+fn int4_array_img(elems: &[i32]) -> ArrImg {
+    let mut img = [0u8; 32];
+    let len = if elems.is_empty() { 16 } else { 24 + 4 * elems.len() };
+    img[0..4].copy_from_slice(&((len as u32) << 2).to_ne_bytes());
+    img[4..8].copy_from_slice(&(if elems.is_empty() { 0i32 } else { 1 }).to_ne_bytes());
+    img[12..16].copy_from_slice(&23i32.to_ne_bytes());
+    if !elems.is_empty() {
+        img[16..20].copy_from_slice(&(elems.len() as i32).to_ne_bytes());
+        img[20..24].copy_from_slice(&1i32.to_ne_bytes());
+        for (i, e) in elems.iter().enumerate() {
+            img[24 + 4 * i..28 + 4 * i].copy_from_slice(&e.to_ne_bytes());
+        }
+    }
+    ArrImg(img)
+}
+
+fn int4_array_const<'mcx>(mcx: Mcx<'mcx>, img: &ArrImg) -> Node<'mcx> {
+    Node::mk_const(mcx, 1007, -1, 0, -1, Datum::from_usize(img.0.as_ptr() as usize), false, false)
+        .unwrap()
+}
+
+#[test]
+fn contain_nonstrict_functions_saop_requires_nonempty_array() {
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let var = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+    let empty_img = int4_array_img(&[]);
+    let one_img = int4_array_img(&[1]);
+    let empty = saop(mcx, OP_FAKE_EQ, F_INT4EQ, true, &[var, int4_array_const(mcx, &empty_img)]);
+    assert!(contain_nonstrict_functions(empty).unwrap());
+    let one = saop(mcx, OP_FAKE_EQ, F_INT4EQ, true, &[var, int4_array_const(mcx, &one_img)]);
+    assert!(!contain_nonstrict_functions(one).unwrap());
+    let lax = saop(mcx, OP_FAKE_EQ, F_FAKE_NONSTRICT, true, &[var, int4_array_const(mcx, &one_img)]);
+    assert!(contain_nonstrict_functions(lax).unwrap());
+}
+
+#[test]
+fn find_nonnullable_saop_below_top_level_requires_nonempty_array() {
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let var = Node::mk_var(mcx, 3, 1, 23, -1, 0, 0).unwrap();
+    let param = Node::mk(
+        mcx,
+        types_nodes::Param {
+            paramkind: ParamKind::PARAM_EXTERN,
+            paramid: 1,
+            paramtype: 1007,
+            paramtypmod: -1,
+            paramcollid: 0,
+            location: -1,
+        },
+    )
+    .unwrap();
+    let maybe_empty = saop(mcx, OP_FAKE_EQ, F_INT4EQ, true, &[var, param]);
+    assert!(find_nonnullable_rels(mcx, Some(maybe_empty)).unwrap().is_member(3));
+    assert!(mbms_is_member(3, ATT1_KEY, &find_nonnullable_vars(mcx, Some(maybe_empty)).unwrap()));
+    let is_false = Node::mk(
+        mcx,
+        types_nodes::BooleanTest {
+            arg: Some(maybe_empty),
+            booltesttype: types_nodes::BoolTestType::IS_FALSE,
+            location: -1,
+        },
+    )
+    .unwrap();
+    assert!(find_nonnullable_rels(mcx, Some(is_false)).unwrap().is_empty());
+    assert!(!mbms_is_member(3, ATT1_KEY, &find_nonnullable_vars(mcx, Some(is_false)).unwrap()));
+    let not = bool_expr(mcx, types_nodes::BoolExprType::NOT_EXPR, &[maybe_empty]);
+    assert!(find_nonnullable_rels(mcx, Some(not)).unwrap().is_empty());
+    assert!(!mbms_is_member(3, ATT1_KEY, &find_nonnullable_vars(mcx, Some(not)).unwrap()));
+    let one_img = int4_array_img(&[1]);
+    let one = saop(mcx, OP_FAKE_EQ, F_INT4EQ, true, &[var, int4_array_const(mcx, &one_img)]);
+    let not_one = bool_expr(mcx, types_nodes::BoolExprType::NOT_EXPR, &[one]);
+    assert!(find_nonnullable_rels(mcx, Some(not_one)).unwrap().is_member(3));
+    assert!(mbms_is_member(3, ATT1_KEY, &find_nonnullable_vars(mcx, Some(not_one)).unwrap()));
+}

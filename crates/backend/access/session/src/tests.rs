@@ -1063,7 +1063,17 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      inside the regex engine and re-raised at the FFI boundary (the
     //      panic-across-FFI safety fix); per-call transient, no session
     //      identity.
-    assert_eq!(count_tree(crates), 577, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 578, upstream 18.3→18.6 sync (2026-09-01): one test-only source —
+    //   45. access/transam/xlogreader/src/tests.rs COUNTED — Cell<(u32,u64)>
+    //      per-thread recorder behind the pgstat_count_io_op_time seam for
+    //      the 13f940b4 WALRead witness (unit harness fixture; counted by
+    //      the tree census, never product code — same class as 43).
+    // 579, upstream 18.3→18.6 sync (2026-09-01), wave-2 access group:
+    //   46. access/gin/gin/src/tests.rs PAGES/PINS/DELAY_POINTS (one
+    //      thread_local! block) — fake-buffer fixture + delay-point counter
+    //      for the 7becb647 posting-tree vacuum witness (unit harness
+    //      fixture; counted by the tree census, never product code).
+    assert_eq!(count_tree(crates), 579, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

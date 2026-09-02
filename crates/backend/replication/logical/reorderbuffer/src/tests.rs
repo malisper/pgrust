@@ -788,8 +788,11 @@ fn skip_prepare_marks_skipped() {
     );
 }
 
+// upstream b563fc6bd926 (18.6): Fix logical decoding of empty prepared
+// transactions — a prepared txn with no base snapshot (nothing decoded)
+// must reach the plugin neither at PREPARE nor at COMMIT/ROLLBACK PREPARED.
 #[test]
-fn prepare_sends_prepare_callback_for_changeless_txn() {
+fn prepare_of_empty_txn_sends_no_prepare() {
     let mut rb = rb();
     rb.callbacks.prepare = rec_prepare_cb;
     TWOPC_EVENTS.with(|e| e.borrow_mut().clear());
@@ -798,40 +801,46 @@ fn prepare_sends_prepare_callback_for_changeless_txn() {
     assert!(rb.remember_prepare_info(23, 100, 110, 777, 0, 0));
     rb.prepare(23, "gid_23").unwrap();
 
-    // A txn with no base snapshot skips ProcessTXN; ReorderBufferPrepare's
-    // trailing arm must still send the prepare with the prepare-record LSN.
-    assert_eq!(twopc_events(), ["prepare:gid_23:100".to_string()]);
-
-    // The prepared txn stays alive until COMMIT/ROLLBACK PREPARED.
+    // No ProcessTXN and (18.6) no trailing send-prepare arm either.
+    assert!(twopc_events().is_empty());
     let txn = rb.txn_by_xid(23, false, 0, false).0.unwrap();
-    assert!(rb.txn(txn).sent_prepare());
+    assert!(!rb.txn(txn).sent_prepare());
 }
 
 #[test]
-fn finish_prepared_replays_skipped_txn_then_sends_commit_prepared() {
+fn finish_prepared_of_empty_txn_is_cleaned_up_without_callbacks() {
     let mut rb = rb();
     rb.callbacks.prepare = rec_prepare_cb;
     rb.callbacks.commit_prepared = rec_commit_prepared_cb;
     TWOPC_EVENTS.with(|e| e.borrow_mut().clear());
 
-    // Decoded-before-two_phase_at shape: prepare at LSN 100 was skipped,
-    // two_phase_at is 200, COMMIT PREPARED arrives at LSN 500.
+    // Skipped-prepare shape (100 < two_phase_at 200): the replay arm finds
+    // nothing to decode, then the empty-txn arm cleans up silently.
     rb.process_xid(24, 90);
     assert!(rb.remember_prepare_info(24, 100, 110, 777, 0, 0));
     rb.skip_prepare(24);
     rb.finish_prepared(24, 500, 510, 200, 888, 0, 0, "gid_24", true)
         .unwrap();
 
-    // final_lsn (100) < two_phase_at (200) and is_commit: the replay arm runs
-    // first. With no base snapshot there is nothing to decode, so replay
-    // returns without sending prepare (C's ReorderBufferReplay early-return;
-    // the trailing send-prepare arm lives only in ReorderBufferPrepare) and
-    // only commit_prepared goes out, with the commit record's LSN. A txn
-    // with changes replays begin_prepare/changes/prepare here first.
-    assert_eq!(twopc_events(), ["commit_prepared:gid_24:500".to_string()]);
-
-    // The txn is fully cleaned up afterwards.
+    assert!(twopc_events().is_empty());
     assert!(rb.txn_by_xid(24, false, 0, false).0.is_none());
+}
+
+#[test]
+fn finish_prepared_rollback_of_empty_txn_is_cleaned_up_without_callbacks() {
+    let mut rb = rb();
+    rb.callbacks.prepare = rec_prepare_cb;
+    rb.callbacks.rollback_prepared = rec_rollback_prepared_cb;
+    TWOPC_EVENTS.with(|e| e.borrow_mut().clear());
+
+    rb.process_xid(28, 90);
+    assert!(rb.remember_prepare_info(28, 100, 110, 777, 0, 0));
+    rb.prepare(28, "gid_28").unwrap();
+    rb.finish_prepared(28, 600, 610, 200, 999, 0, 0, "gid_28", false)
+        .unwrap();
+
+    assert!(twopc_events().is_empty());
+    assert!(rb.txn_by_xid(28, false, 0, false).0.is_none());
 }
 
 #[test]
@@ -841,20 +850,16 @@ fn finish_prepared_already_sent_goes_straight_to_commit_prepared() {
     rb.callbacks.commit_prepared = rec_commit_prepared_cb;
     TWOPC_EVENTS.with(|e| e.borrow_mut().clear());
 
-    // Decoded-at-prepare-time shape: prepare at LSN 300 >= two_phase_at 200.
+    // Decoded-at-prepare-time shape: base snapshot, prepare already sent.
     rb.process_xid(25, 290);
+    rb.set_base_snapshot(25, 295, snap(25));
     assert!(rb.remember_prepare_info(25, 300, 310, 777, 0, 0));
-    rb.prepare(25, "gid_25").unwrap();
+    let txn = rb.txn_by_xid(25, false, 0, false).0.unwrap();
+    rb.txn_mut(txn).txn_flags |= RBTXN_SENT_PREPARE;
     rb.finish_prepared(25, 500, 510, 200, 888, 0, 0, "gid_25", true)
         .unwrap();
 
-    assert_eq!(
-        twopc_events(),
-        [
-            "prepare:gid_25:300".to_string(),
-            "commit_prepared:gid_25:500".to_string()
-        ]
-    );
+    assert_eq!(twopc_events(), ["commit_prepared:gid_25:500".to_string()]);
     assert!(rb.txn_by_xid(25, false, 0, false).0.is_none());
 }
 
@@ -866,19 +871,15 @@ fn finish_prepared_rollback_uses_prepare_record_info() {
     TWOPC_EVENTS.with(|e| e.borrow_mut().clear());
 
     rb.process_xid(26, 290);
+    rb.set_base_snapshot(26, 295, snap(26));
     assert!(rb.remember_prepare_info(26, 300, 310, 777, 0, 0));
-    rb.prepare(26, "gid_26").unwrap();
+    let txn = rb.txn_by_xid(26, false, 0, false).0.unwrap();
+    rb.txn_mut(txn).txn_flags |= RBTXN_SENT_PREPARE;
     rb.finish_prepared(26, 600, 610, 200, 999, 0, 0, "gid_26", false)
         .unwrap();
 
     // rollback_prepared carries the PREPARE record's end LSN and time.
-    assert_eq!(
-        twopc_events(),
-        [
-            "prepare:gid_26:300".to_string(),
-            "rollback_prepared:gid_26:310:777".to_string()
-        ]
-    );
+    assert_eq!(twopc_events(), ["rollback_prepared:gid_26:310:777".to_string()]);
     assert!(rb.txn_by_xid(26, false, 0, false).0.is_none());
 }
 

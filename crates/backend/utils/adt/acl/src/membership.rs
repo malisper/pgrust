@@ -81,6 +81,13 @@ pub fn RoleMembershipCacheCallback(_arg: Datum, cacheid: i32, hashvalue: u32) {
     CACHE.with(|c| c.borrow_mut().role = [InvalidOid; 3]);
 }
 
+// upstream 0b12f56bfac1 (18.6): Invalidate plan cache after role changes.
+// C's extern cached_db_hash: this database's DATABASEOID hash (0 until
+// initialize_acl), read by plancache's role callback to skip other DBs.
+pub fn cached_db_hash() -> u32 {
+    CACHED_DB_HASH.get()
+}
+
 // C roles_list_append (acl.c:5093-5131): the 1024 threshold only cuts over to
 // a Bloom-filter membership accelerator; the list stays correct at any size.
 // The accelerator here is an exact HashSet, so accept/reject decisions match

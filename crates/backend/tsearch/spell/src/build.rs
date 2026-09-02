@@ -574,7 +574,9 @@ impl<'mcx> IspellDict<'mcx> {
         Ok(flag as i32)
     }
 
-    fn get_affix_flag_set(&self, s: &[u8]) -> PgResult<Vec<u8>> {
+    // `filled` counts the affix_data slots NIImportOOAffixes has set so far
+    // (they fill in order from 0), so C's NULL-slot test is `alias >= filled`.
+    fn get_affix_flag_set(&self, s: &[u8], filled: i32) -> PgResult<Vec<u8>> {
         if self.use_flag_aliases && !s.is_empty() {
             let (raw, consumed, valid) = strtol(s);
             if consumed == 0 || !valid {
@@ -586,6 +588,14 @@ impl<'mcx> IspellDict<'mcx> {
             }
             let curaffix = raw as i32;
             if curaffix > 0 && curaffix < self.affix_data.len() as i32 {
+                // upstream 4689ea9ceee3 (18.6): Fix memory-safety bugs in the ispell/hunspell dictionary loader.
+                if curaffix >= filled {
+                    return Err(config_file_error(format!(
+                        "invalid affix alias \"{}\"",
+                        bytes_lossy(s)
+                    ))
+                    .into());
+                }
                 // No -1: the empty string was prepended in NIImportOOAffixes.
                 return Ok(self.affix_data[curaffix as usize].as_slice().to_vec());
             } else if curaffix > self.affix_data.len() as i32 {
@@ -751,7 +761,7 @@ impl<'mcx> IspellDict<'mcx> {
             } else {
                 let mut aflg: i32 = 0;
                 if let Some(slash) = bstrchr(&repl, b'/') {
-                    let fs = self.get_affix_flag_set(&repl[slash + 1..])?;
+                    let fs = self.get_affix_flag_set(&repl[slash + 1..], curaffix)?;
                     aflg |= self.get_compound_affix_flag_value(&fs)?;
                 }
                 let mut prepl = str_tolower(mcx, &repl)?;
@@ -776,6 +786,14 @@ impl<'mcx> IspellDict<'mcx> {
                     if is_suffix { FF_SUFFIX } else { FF_PREFIX },
                 )?;
             }
+        }
+        // upstream 4689ea9ceee3 (18.6): Fix memory-safety bugs in the ispell/hunspell dictionary loader.
+        if self.use_flag_aliases && curaffix != naffix {
+            return Err(config_file_error(format!(
+                "number of aliases is less than specified number {}",
+                naffix - 1
+            ))
+            .into());
         }
         Ok(())
     }

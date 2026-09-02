@@ -8,6 +8,9 @@ use types_error::PgResult;
 // pg_operator.dat
 pub const ARRAY_EQ_OP: Oid = 1070;
 pub const RECORD_EQ_OP: Oid = 2988;
+// upstream 11aed8d19cd7 (18.4): Fix missed checks for hashability of container-type equality.
+pub const RANGE_EQ_OP: Oid = 3882;
+pub const MULTIRANGE_EQ_OP: Oid = 2860;
 const _: () = assert!(RECORDOID == 2249);
 
 #[cold]
@@ -47,6 +50,8 @@ const F_BTARRAYCMP: Oid = 382;
 const F_BTRECORDCMP: Oid = 2987;
 const F_HASH_ARRAY: Oid = 626;
 const F_HASH_RECORD: Oid = 6192;
+const F_HASH_RANGE: Oid = 3902;
+const F_HASH_MULTIRANGE: Oid = 4278;
 
 pub fn op_mergejoinable(opno: Oid, inputtype: Oid) -> PgResult<bool> {
     if opno == RECORD_EQ_OP {
@@ -68,10 +73,36 @@ pub fn op_hashjoinable(opno: Oid, inputtype: Oid) -> PgResult<bool> {
     if opno == ARRAY_EQ_OP {
         return Ok(typcache_seams::type_cache_hash_proc::call(inputtype)? == F_HASH_ARRAY);
     }
+    // upstream 11aed8d19cd7 (18.4): Fix missed checks for hashability of container-type equality.
+    if opno == RANGE_EQ_OP {
+        return Ok(typcache_seams::type_cache_hash_proc::call(inputtype)? == F_HASH_RANGE);
+    }
+    if opno == MULTIRANGE_EQ_OP {
+        return Ok(typcache_seams::type_cache_hash_proc::call(inputtype)? == F_HASH_MULTIRANGE);
+    }
     Ok(match syscache_seams::lookup_pg_operator_shape::call(opno)? {
         Some(optup) => optup.oprcanhash,
         None => false,
     })
+}
+
+// upstream 11aed8d19cd7 (18.4): Fix missed checks for hashability of container-type equality.
+// get_op_hash_functions_ext (lsyscache.c): get_op_hash_functions plus the
+// container-type check the planner needs; the hash functions of array_eq,
+// record_eq, range_eq and multirange_eq fail at runtime when the contained
+// type is not hashable. As in op_hashjoinable, the left input type decides.
+pub fn get_op_hash_functions_ext(opno: Oid, inputtype: Oid) -> PgResult<Option<(Oid, Oid)>> {
+    let required = match opno {
+        ARRAY_EQ_OP => F_HASH_ARRAY,
+        RECORD_EQ_OP => F_HASH_RECORD,
+        RANGE_EQ_OP => F_HASH_RANGE,
+        MULTIRANGE_EQ_OP => F_HASH_MULTIRANGE,
+        _ => InvalidOid,
+    };
+    if required != InvalidOid && typcache_seams::type_cache_hash_proc::call(inputtype)? != required {
+        return Ok(None);
+    }
+    crate::amop::get_op_hash_functions(opno)
 }
 
 pub fn op_strict(opno: Oid) -> PgResult<bool> {

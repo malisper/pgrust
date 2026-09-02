@@ -1,5 +1,5 @@
 use crate::{
-    lookup_relation, recovery_in_progress_error, stats_check_arg_array,
+    detoast_array_datum, lookup_relation, recovery_in_progress_error, stats_check_arg_array,
     stats_check_arg_pair,
     stats_check_required_arg, stats_fill_fcinfo_from_arg_pairs, text_datum_string, warn,
     warn_error_data, Arg, StatsArgInfo, RELKIND_INDEX, RELKIND_PARTITIONED_INDEX,
@@ -102,9 +102,10 @@ const C_ATTNAME_ARG: usize = 2;
 const C_INHERITED_ARG: usize = 3;
 const C_NUM_ATTRIBUTE_STATS_ARGS: usize = 4;
 
+// upstream ae8c4bd558c5 (18.6): Fix argument names in pg_clear_attribute_stats() errors
 static CLEARARGINFO: [StatsArgInfo; C_NUM_ATTRIBUTE_STATS_ARGS] = [
-    StatsArgInfo { argname: "relation", argtype: TEXTOID },
-    StatsArgInfo { argname: "relation", argtype: TEXTOID },
+    StatsArgInfo { argname: "schemaname", argtype: TEXTOID },
+    StatsArgInfo { argname: "relname", argtype: TEXTOID },
     StatsArgInfo { argname: "attname", argtype: TEXTOID },
     StatsArgInfo { argname: "inherited", argtype: BOOLOID },
 ];
@@ -358,23 +359,38 @@ fn attribute_statistics_update(mcx: Mcx<'_>, args: &[Arg]) -> PgResult<bool> {
             atttypmod,
         )? {
             Some(img) => {
-                // C 18.3 installs the MCV slot without checking that
-                // most_common_vals and most_common_freqs have the same element
-                // count; a mismatched pair is stored as-is and the function
-                // still returns true. (Newer C releases reject the mismatch;
-                // we track the 18.3 reference.)
-                let stavalues = Datum::from_usize(img.as_ptr() as usize);
-                images.push(img);
-                set_stats_slot(
-                    &mut values,
-                    &mut nulls,
-                    &mut replaces,
-                    STATISTIC_KIND_MCV,
-                    eq_opr,
-                    atttypcoll,
-                    Some(stanumbers),
-                    Some(stavalues),
-                )?;
+                // upstream 661095c40c0b (18.4): Fix MCV input array checks in statistics restore functions
+                // The vals/freqs pair must have the same element count (the
+                // planner walks both by nvalues). Both arrays are 1-D here
+                // (vals via text_to_stavalues, freqs via
+                // stats_check_arg_array), so dims[0] is the element count.
+                let nums_arr = detoast_array_datum(mcx, stanumbers)?;
+                let nvals = arrayfuncs::arr_dim(&img, 0);
+                let nnums = arrayfuncs::arr_dim(&nums_arr, 0);
+
+                if nvals != nnums {
+                    warn(
+                        "attribute_statistics_update",
+                        "could not parse \"most_common_vals\": incorrect number of elements (same as \"most_common_freqs\" required)".to_string(),
+                        Some(ERRCODE_INVALID_PARAMETER_VALUE),
+                        None,
+                        None,
+                    )?;
+                    result = false;
+                } else {
+                    let stavalues = Datum::from_usize(img.as_ptr() as usize);
+                    images.push(img);
+                    set_stats_slot(
+                        &mut values,
+                        &mut nulls,
+                        &mut replaces,
+                        STATISTIC_KIND_MCV,
+                        eq_opr,
+                        atttypcoll,
+                        Some(stanumbers),
+                        Some(stavalues),
+                    )?;
+                }
             }
             None => result = false,
         }
@@ -467,11 +483,20 @@ fn attribute_statistics_update(mcx: Mcx<'_>, args: &[Arg]) -> PgResult<bool> {
     // BOUNDS_HISTOGRAM appears before RANGE_LENGTH_HISTOGRAM even though it is
     // numerically greater (C quirk, preserved).
     if do_bounds_histogram {
+        // upstream 08454e8b2def (18.5): Fix multirange type handling in pg_restore_attribute_stats()
+        // A multirange steps down to its range type for the bounds histogram
+        // only, as multirange_typanalyze does.
+        let bounds_typid = if lsyscache::type_is_multirange(atttypid)? {
+            lsyscache::get_multirange_range(atttypid)?
+        } else {
+            atttypid
+        };
+
         match text_to_stavalues(
             mcx,
             "range_bounds_histogram",
             args[RANGE_BOUNDS_HISTOGRAM_ARG].value,
-            atttypid,
+            bounds_typid,
             atttypmod,
         )? {
             Some(img) => {
@@ -578,7 +603,7 @@ fn get_attr_stat_type(mcx: Mcx<'_>, reloid: Oid, attnum: AttrNumber) -> PgResult
 
     let expr = get_attr_expr(mcx, &rel, attnum as i32)?;
 
-    let (mut atttypid, atttypmod, mut atttypcoll) = match expr {
+    let (atttypid, atttypmod, mut atttypcoll) = match expr {
         None => (attr.atttypid, attr.atttypmod, attr.attcollation),
         Some(e) => {
             let coll = if attr.attcollation != InvalidOid {
@@ -594,10 +619,10 @@ fn get_attr_stat_type(mcx: Mcx<'_>, reloid: Oid, attnum: AttrNumber) -> PgResult
         }
     };
 
-    // A multirange steps down to its range type, as multirange_typanalyze does.
-    if lsyscache::type_is_multirange(atttypid)? {
-        atttypid = lsyscache::get_multirange_range(atttypid)?;
-    }
+    // upstream 08454e8b2def (18.5): Fix multirange type handling in pg_restore_attribute_stats()
+    // No multirange-to-range step-down here: typtype and the eq/lt operators
+    // are the column type's own (MCVs and histograms of a multirange column
+    // are multirange arrays); only range_bounds_histogram steps down.
 
     // finds the right operators even if atttypid is a domain
     let tce = typcache::lookup_type_cache(
@@ -671,9 +696,20 @@ fn text_to_stavalues<'m>(
 
     let Some(img) = arr else { return Ok(None) };
 
-    // C 18.3 text_to_stavalues has no dimensionality check: empty (0-dim)
-    // conversion results are accepted and stored as-is. (Newer C releases
-    // reject non-1-D results here; we track the 18.3 reference.)
+    // upstream 661095c40c0b (18.4): Fix MCV input array checks in statistics restore functions
+    // Reject non-1-D results (an empty array is 0-D) before the null-elements
+    // check; pg_dump only ever delivers 1-D arrays here.
+    if arrayfuncs::arr_ndim(&img) != 1 {
+        warn(
+            "text_to_stavalues",
+            format!("\"{staname}\" must be a one-dimensional array"),
+            Some(ERRCODE_INVALID_PARAMETER_VALUE),
+            None,
+            None,
+        )?;
+        return Ok(None);
+    }
+
     if arrayfuncs::array_contains_nulls(&img) {
         warn(
             "text_to_stavalues",
@@ -943,4 +979,28 @@ pub fn fc_pg_clear_attribute_stats(
 
     delete_pg_statistic(mcx, reloid, attnum, inherited)?;
     Ok(Datum::null())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // upstream ae8c4bd558c5 (18.6): every required-argument slot names its
+    // SQL-visible argument, so a NULL schemaname or relname no longer both
+    // report "relation".
+    #[test]
+    fn clear_arginfo_names_match_sql_arguments() {
+        let args = [Arg::NULL; C_NUM_ATTRIBUTE_STATS_ARGS];
+        let msg = |argnum: usize| {
+            stats_check_required_arg(&args, &CLEARARGINFO, argnum)
+                .err()
+                .expect("NULL required argument must fail")
+                .message()
+                .to_string()
+        };
+        assert_eq!(msg(C_ATTRELSCHEMA_ARG), "argument \"schemaname\" must not be null");
+        assert_eq!(msg(C_ATTRELNAME_ARG), "argument \"relname\" must not be null");
+        assert_eq!(msg(C_ATTNAME_ARG), "argument \"attname\" must not be null");
+        assert_eq!(msg(C_INHERITED_ARG), "argument \"inherited\" must not be null");
+    }
 }

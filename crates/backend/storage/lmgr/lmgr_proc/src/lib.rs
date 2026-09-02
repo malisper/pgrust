@@ -1034,6 +1034,22 @@ pub fn KillRetainedProc() {
         }
     }
 
+    // upstream 12c9b8b422e2 (18.6): Fix procLatch ownership race in ProcKill()
+    // The latch must be disowned before the freelist push; an already-disowned identity is skipped.
+    if proc.procLatch.owner_pid.load(Acquire) != 0 {
+        if let Some(p) = run_release_step("latch teardown in KillRetainedProc", || {
+            miscinit_seams::switch_back_to_local_latch::call();
+            latch_seams::disown_latch::call(&proc.procLatch);
+        }) {
+            cleanup_failed = true;
+            // The push below is unconditional, so the disown is too (C DisownLatch).
+            proc.procLatch.owner_pid.store(0, Release);
+            if let Some(u) = p.exit_unwind {
+                deferred_unwind.get_or_insert(u);
+            }
+        }
+    }
+
     // Kill-path detach (see above). Ordered BEFORE the MY_PROC clear because
     // LeaveLockGroup re-reads MyProc. A group LEADER cannot reach here with
     // members (a live leader is always on its own members list, which the

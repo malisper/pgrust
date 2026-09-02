@@ -8165,8 +8165,10 @@ fn subplan_tuple_fraction_matches_c_chain() {
 
 // expand_virtual_generated_columns' ON CONFLICT leg (prepjointree.c:1063 ->
 // query_tree_mutator's Query.onConflict field -> expression_tree_mutator's
-// T_OnConflictExpr arm). Every one of C's five mutated sub-fields must have
-// its target-relation Vars replaced by the generation expression.
+// T_OnConflictExpr arm). Each of the four mutated sub-fields must have its
+// target-relation Vars replaced by the generation expression, while
+// exclRelTlist keeps its plain Vars.
+// upstream cf38dedf693a (18.5): Fix expansion of EXCLUDED virtual generated columns.
 #[test]
 fn on_conflict_vars_are_replaced_by_generation_expressions() {
     use crate::prepjointree::{replace_vars_in_on_conflict, PullupPhCtx, WRAP_NONE};
@@ -8248,10 +8250,12 @@ fn on_conflict_vars_are_replaced_by_generation_expressions() {
         "onConflictSet not expanded"
     );
     assert!(is_gen(oc.onConflictWhere.unwrap()), "onConflictWhere not expanded");
-    assert!(
-        is_gen(oc.exclRelTlist.nth(0).as_target_entry().unwrap().expr),
-        "exclRelTlist not expanded"
-    );
+    // exclRelTlist is left alone (C NILs it around pullup_replace_vars): it
+    // must still hold the plain Var, or set_plan_refs would fold the expanded
+    // SET/WHERE expressions back into Vars naming the virtual column.
+    let excl = oc.exclRelTlist.nth(0).as_target_entry().unwrap().expr;
+    let excl_var = excl.as_var().expect("exclRelTlist entry must stay a Var");
+    assert_eq!((excl_var.varno, excl_var.varattno), (1, 2), "exclRelTlist must not be expanded");
     // Scalars C's FLATCOPY carries over unchanged.
     assert_eq!(oc.action, OnConflictAction::ONCONFLICT_UPDATE);
     assert_eq!(oc.exclRelIndex, 2);
@@ -8581,4 +8585,96 @@ fn planner_cache_lookup_failures_are_catchable_xx000() {
         assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
         assert_eq!(e.level(), types_error::ERROR);
     }
+}
+
+// estimate_array_length (selfuncs.c) on a Var with varno 0: the projection
+// tlist generate_setop_tlist builds for a nested set operation whose output
+// type needs an ArrayCoerceExpr (`select null::int[] union all select
+// null::int[] union all select null::bigint[]`). examine_variable has no
+// relation entry for relid 0 and failed in find_base_rel; C returns the
+// default guess instead. upstream 13e20d1c9d99 (18.4).
+#[test]
+fn estimate_array_length_skips_stats_for_varno_zero_var() {
+    install_fixtures();
+    let cx = cx();
+    let mcx = cx.mcx();
+    let mut run = crate::run::PlannerRun::new(mcx);
+    // int4[] Var with varno 0, as generate_setop_tlist emits it.
+    let var = Node::mk_var(mcx, 0, 1, 1007, -1, 0, 0).unwrap();
+    assert_eq!(crate::selfuncs::estimate_array_length(Some(&mut run), var).unwrap(), 10.0);
+}
+
+// upstream 16fb94605c8f (18.4): remove_rel_from_restrictinfo must clear the
+// removed rel's and its outer join's relid bits from every relid set of the
+// RestrictInfo, not only clause_relids/required_relids; clause_sides_match_join
+// reads left/right_relids afterwards (bug #19460).
+#[test]
+fn remove_rel_from_restrictinfo_cleans_every_relid_set() {
+    use crate::relnode::{relids_add_member, relids_empty, relids_is_member};
+
+    let cx = cx();
+    let mcx = cx.mcx();
+    let mut run = crate::run::PlannerRun::new(mcx);
+    let set = |members: &[u32]| {
+        let mut s = relids_empty();
+        for &m in members {
+            s = relids_add_member(mcx, &s, m);
+        }
+        s
+    };
+    // t1.pk = t2.pk, where rel 2 is the removable left join's inner side and
+    // 3 that join's relid: both appear in every relid set of the clause.
+    let l = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+    let r = Node::mk_var(mcx, 2, 1, 23, -1, 0, 0).unwrap();
+    let clause = Node::mk(
+        mcx,
+        types_nodes::primnodes::OpExpr {
+            opno: INT4EQ_OP,
+            opfuncid: INT4EQ_PROC,
+            opresulttype: 16,
+            opretset: false,
+            opcollid: 0,
+            inputcollid: 0,
+            args: NodeList::make2(mcx, l, r).unwrap(),
+            location: -1,
+        },
+    )
+    .unwrap();
+    let rid = crate::initsplan::make_restrictinfo(
+        &mut run,
+        clause,
+        true,
+        false,
+        false,
+        false,
+        0,
+        set(&[1, 2, 3]),
+        set(&[2, 3]),
+        set(&[2, 3]),
+    )
+    .unwrap();
+    {
+        let ri = run.root.rinfo(rid);
+        assert!(relids_is_member(1, &ri.left_relids) && relids_is_member(2, &ri.right_relids));
+        assert!(relids_is_member(3, &ri.required_relids));
+    }
+
+    crate::analyzejoins::remove_rel_from_restrictinfo(&mut run, rid, 2, 3);
+
+    let ri = run.root.rinfo(rid);
+    for (name, relids) in [
+        ("clause_relids", &ri.clause_relids),
+        ("required_relids", &ri.required_relids),
+        ("incompatible_relids", &ri.incompatible_relids),
+        ("outer_relids", &ri.outer_relids),
+        ("left_relids", &ri.left_relids),
+        ("right_relids", &ri.right_relids),
+    ] {
+        assert!(!relids_is_member(2, relids), "{name} still names the removed rel");
+        assert!(!relids_is_member(3, relids), "{name} still names the removed outer join");
+    }
+    // The surviving side is untouched.
+    assert!(relids_is_member(1, &ri.clause_relids));
+    assert!(relids_is_member(1, &ri.required_relids));
+    assert!(relids_is_member(1, &ri.left_relids));
 }

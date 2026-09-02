@@ -532,15 +532,42 @@ fn uuidv7_interval_shifts_timestamp() {
     assert!((now - ts - 3_600_000_000).abs() < 60_000_000, "{ts} vs {now}");
 }
 
-// fnconf batch-1, OID 6430 crash family: an infinite interval shift makes
-// timestamptz_pl_interval return DT_NOEND/DT_NOBEGIN and C's epoch re-base
-// wraps under -fwrapv, still producing a version-7 UUID
-// (C 18.3: SELECT uuidv7('infinity'::interval) → a UUID, no error).
-// Red at base: debug add-with-overflow panic in uuidv7_interval.
+// upstream c31b0fca059c (18.6): Reject infinite and out-of-range interval shifts in uuidv7().
+// C 18.3 let an infinite shift wrap the epoch re-base under -fwrapv and
+// returned a garbage UUID (the fnconf batch-1 OID 6430 crash family pinned
+// that: `uuidv7_infinite_interval_returns_uuid`); 18.6 rejects infinite
+// intervals up front.
 #[test]
-fn uuidv7_infinite_interval_returns_uuid() {
-    let u = uuidv7_interval(&adt_datetime::Interval::NOEND).unwrap();
+fn uuidv7_infinite_interval_rejected() {
+    for inf in [adt_datetime::Interval::NOEND, adt_datetime::Interval::NOBEGIN] {
+        let e = uuidv7_interval(&inf).unwrap_err();
+        assert_eq!(e.message(), "interval out of range for UUID version 7");
+        assert_eq!(e.detail(), Some("UUID version 7 does not support infinite intervals."));
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_DATETIME_VALUE_OUT_OF_RANGE);
+    }
+}
+
+// upstream c31b0fca059c (18.6): a shift that leaves the 48-bit Unix-millisecond
+// field [1970-01-01, ~10889] is rejected instead of wrapping into a UUID with
+// a bogus (unsortable) timestamp.
+#[test]
+fn uuidv7_out_of_range_shift_rejected() {
+    gmt_session();
+    let years = |y: i32| adt_datetime::Interval { time: 0, day: 0, month: 12 * y };
+    // before the Unix epoch / beyond the 48-bit ms field
+    for shift in [years(-1000), years(9000)] {
+        let e = uuidv7_interval(&shift).unwrap_err();
+        assert_eq!(e.message(), "timestamp out of range for UUID version 7");
+        assert_eq!(
+            e.detail(),
+            Some("UUID version 7 supports timestamps from 1970-01-01 to approximately year 10889.")
+        );
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_DATETIME_VALUE_OUT_OF_RANGE);
+    }
+    // a large but in-range forward shift is accepted
+    let u = uuidv7_interval(&years(1000)).unwrap();
     assert_eq!(uuid_extract_version(&u), Some(7));
-    let u = uuidv7_interval(&adt_datetime::Interval::NOBEGIN).unwrap();
-    assert_eq!(uuid_extract_version(&u), Some(7));
+    let ts = uuid_extract_timestamp(&u).unwrap();
+    let now = wall_clock_us();
+    assert!(ts > now + 999 * 365 * 86_400 * USECS_PER_SEC, "{ts} vs {now}");
 }

@@ -165,8 +165,11 @@ pub fn connect_extended(
     Ok(Ok(conn))
 }
 
-/// libpqrcv_identify_system.
-pub fn identify_system(conn: &mut PgConn) -> PgResult<(String, TimeLineID)> {
+/// libpqrcv_identify_system. Returns (sysid, primary tli, flush position).
+// upstream 33101632235a (18.6): Fix cascading standby reconnect failure after archive fallback
+// The xlogpos column (C: WalRcvIdentifySystemLsn, a global for ABI reasons)
+// rides the return value here.
+pub fn identify_system(conn: &mut PgConn) -> PgResult<(String, TimeLineID, XLogRecPtr)> {
     let res = conn.exec("IDENTIFY_SYSTEM")?;
     if res.status != ExecStatus::TuplesOk {
         return throw(ereport(ERROR)
@@ -203,7 +206,45 @@ pub fn identify_system(conn: &mut PgConn) -> PgResult<(String, TimeLineID)> {
             .errdetail("Could not parse the primary timeline ID.")
             .into_error()
     })?;
-    Ok((sysid, tli))
+    // Column 2 is the server's current WAL flush position.
+    let xlogpos = text_col(&res, 0, 2);
+    let Some(flush) = sscanf_lsn(&xlogpos) else {
+        return throw(ereport(ERROR)
+            .errcode(ERRCODE_PROTOCOL_VIOLATION)
+            .errmsg(format!("could not parse WAL location \"{xlogpos}\""))
+            .finish(loc("libpqrcv_identify_system")));
+    };
+    Ok((sysid, tli, flush))
+}
+
+// sscanf(s, "%X/%X", &hi, &lo) == 2: each %X skips leading whitespace, takes
+// an optional 0x prefix and at least one hex digit (wrapping at 32 bits);
+// trailing bytes are ignored.
+fn sscanf_lsn(s: &str) -> Option<XLogRecPtr> {
+    fn scan_x(b: &[u8]) -> Option<(u32, usize)> {
+        let mut i = 0;
+        // C-locale isspace: the six ASCII blanks.
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\x0b' | b'\x0c' | b'\r') {
+            i += 1;
+        }
+        if b.len() >= i + 2 && b[i] == b'0' && (b[i + 1] == b'x' || b[i + 1] == b'X') {
+            i += 2;
+        }
+        let start = i;
+        let mut v: u32 = 0;
+        while i < b.len() && b[i].is_ascii_hexdigit() {
+            v = v.wrapping_mul(16).wrapping_add((b[i] as char).to_digit(16)?);
+            i += 1;
+        }
+        (i > start).then_some((v, i))
+    }
+    let b = s.as_bytes();
+    let (hi, n) = scan_x(b)?;
+    if b.get(n) != Some(&b'/') {
+        return None;
+    }
+    let (lo, _) = scan_x(&b[n + 1..])?;
+    Some(((hi as u64) << 32) | lo as u64)
 }
 
 fn text_col(res: &QueryResult, row: usize, col: usize) -> String {
@@ -211,6 +252,19 @@ fn text_col(res: &QueryResult, row: usize, col: usize) -> String {
         Some(Some(v)) => String::from_utf8_lossy(v).into_owned(),
         _ => String::new(),
     }
+}
+
+// upstream abb5825550a8 (18.5): Clean up quoting of variable strings within replication commands.
+// appendQuotedIdentifier: replication-grammar quoting (doubled quotes), not SQL's.
+fn append_quoted_identifier(buf: &mut String, s: &str) {
+    buf.push('"');
+    for c in s.chars() {
+        if c == '"' {
+            buf.push('"');
+        }
+        buf.push(c);
+    }
+    buf.push('"');
 }
 
 /// libpqrcv_startstreaming (physical).
@@ -222,7 +276,9 @@ pub fn start_streaming(
 ) -> PgResult<bool> {
     let mut cmd = String::from("START_REPLICATION");
     if let Some(slot) = slotname {
-        cmd.push_str(&format!(" SLOT \"{slot}\""));
+        // upstream abb5825550a8 (18.5): quote the slot name.
+        cmd.push_str(" SLOT ");
+        append_quoted_identifier(&mut cmd, slot);
     }
     cmd.push_str(&format!(" {} TIMELINE {tli}", lsn_fmt(startpoint)));
 
@@ -240,12 +296,36 @@ pub fn start_streaming(
 // libpqrcv_create_slot's physical command text (new options syntax; the
 // publisher is same-version).
 pub(crate) fn create_slot_physical_cmd(slotname: &str, temporary: bool) -> String {
-    let mut cmd = format!("CREATE_REPLICATION_SLOT \"{slotname}\"");
+    // upstream abb5825550a8 (18.5): quote the slot name.
+    let mut cmd = String::from("CREATE_REPLICATION_SLOT ");
+    append_quoted_identifier(&mut cmd, slotname);
     if temporary {
         cmd.push_str(" TEMPORARY");
     }
     cmd.push_str(" PHYSICAL (RESERVE_WAL)");
     cmd
+}
+
+// upstream a6a2eb9f6024 (18.6): Check CREATE_REPLICATION_SLOT response shape in libpqwalreceiver
+/// CREATE_REPLICATION_SLOT returns a single row with four columns; any other
+/// shape is a protocol violation (a zero-row result crashed C's LSN parse).
+/// Shared by every CREATE_REPLICATION_SLOT arm (the logical ones live in
+/// subscriptioncmds and tablesync).
+pub fn check_create_slot_result(res: &QueryResult, slotname: &str) -> PgResult<()> {
+    if res.nfields != 4 || res.rows.len() != 1 {
+        return ereport(ERROR)
+            .errcode(ERRCODE_PROTOCOL_VIOLATION)
+            .errmsg("invalid response from primary server")
+            .errdetail(format!(
+                "Could not create replication slot \"{slotname}\": got {} rows and {} fields, expected {} rows and {} fields.",
+                res.rows.len(),
+                res.nfields,
+                1,
+                4
+            ))
+            .finish(loc("libpqrcv_create_slot"));
+    }
+    Ok(())
 }
 
 /// libpqrcv_create_slot, physical arm (the walreceiver's temporary slot;
@@ -262,6 +342,8 @@ pub fn create_slot_physical(conn: &mut PgConn, slotname: &str, temporary: bool) 
             ))
             .finish(loc("libpqrcv_create_slot")));
     }
+    // upstream a6a2eb9f6024 (18.6): Check CREATE_REPLICATION_SLOT response shape in libpqwalreceiver
+    check_create_slot_result(&res, slotname)?;
     Ok(())
 }
 
@@ -507,5 +589,247 @@ mod tests {
         );
         // snprintf "pg_walreceiver_%lld" over the backend pid (walreceiver.c:359).
         assert_eq!(format!("pg_walreceiver_{}", 42i32 as i64), "pg_walreceiver_42");
+    }
+
+    // upstream abb5825550a8 (18.5): embedded double quotes are doubled.
+    #[test]
+    fn replication_command_identifiers_are_quote_doubled() {
+        assert_eq!(
+            super::create_slot_physical_cmd("odd\"na\"\"me", true),
+            "CREATE_REPLICATION_SLOT \"odd\"\"na\"\"\"\"me\" TEMPORARY PHYSICAL (RESERVE_WAL)"
+        );
+    }
+
+    // ---- a scripted replication server over a real socket ----
+    //
+    // The real client stack runs end to end (pgclient connect/exec, the
+    // waiteventset socket wait); only the far end is canned: one accepted
+    // connection, the startup packet answered with AuthenticationOk +
+    // ReadyForQuery, then each Query answered with the next reply.
+    fn wire(t: u8, body: &[u8]) -> Vec<u8> {
+        let mut m = vec![t];
+        m.extend_from_slice(&(body.len() as u32 + 4).to_be_bytes());
+        m.extend_from_slice(body);
+        m
+    }
+
+    fn tuples(fields: &[&str], rows: &[&[&str]]) -> Vec<u8> {
+        let mut desc = (fields.len() as i16).to_be_bytes().to_vec();
+        for f in fields {
+            desc.extend_from_slice(f.as_bytes());
+            desc.push(0);
+            desc.extend_from_slice(&0i32.to_be_bytes()); // table oid
+            desc.extend_from_slice(&0i16.to_be_bytes()); // attnum
+            desc.extend_from_slice(&25i32.to_be_bytes()); // text
+            desc.extend_from_slice(&(-1i16).to_be_bytes()); // typlen
+            desc.extend_from_slice(&(-1i32).to_be_bytes()); // typmod
+            desc.extend_from_slice(&0i16.to_be_bytes()); // format
+        }
+        let mut out = wire(b'T', &desc);
+        for row in rows {
+            let mut body = (row.len() as i16).to_be_bytes().to_vec();
+            for col in *row {
+                body.extend_from_slice(&(col.len() as i32).to_be_bytes());
+                body.extend_from_slice(col.as_bytes());
+            }
+            out.extend_from_slice(&wire(b'D', &body));
+        }
+        out.extend_from_slice(&wire(b'C', format!("SELECT {}\0", rows.len()).as_bytes()));
+        out.extend_from_slice(&wire(b'Z', b"I"));
+        out
+    }
+
+    fn scripted_server(replies: Vec<Vec<u8>>) -> (u16, std::thread::JoinHandle<Vec<String>>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut len = [0u8; 4];
+            s.read_exact(&mut len).unwrap();
+            let mut startup = vec![0u8; u32::from_be_bytes(len) as usize - 4];
+            s.read_exact(&mut startup).unwrap();
+            let mut hello = wire(b'R', &0i32.to_be_bytes());
+            hello.extend_from_slice(&wire(b'Z', b"I"));
+            s.write_all(&hello).unwrap();
+            let mut queries = Vec::new();
+            for reply in replies {
+                let mut t = [0u8; 1];
+                if s.read_exact(&mut t).is_err() {
+                    break;
+                }
+                assert_eq!(t[0], b'Q');
+                s.read_exact(&mut len).unwrap();
+                let mut q = vec![0u8; u32::from_be_bytes(len) as usize - 4];
+                s.read_exact(&mut q).unwrap();
+                queries.push(String::from_utf8_lossy(&q[..q.len() - 1]).into_owned());
+                s.write_all(&reply).unwrap();
+            }
+            queries
+        });
+        (port, handle)
+    }
+
+    // The client's socket waits ride WaitLatchOrSocket: the real
+    // waiteventset/latch stack, one owned latch per test thread (the
+    // waiteventset crate's own test recipe).
+    fn client_env() {
+        static ENV: std::sync::Once = std::sync::Once::new();
+        static NEXT_PID: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(7300);
+        ENV.call_once(|| {
+            if !waitevent_seams::pgstat_report_wait_start::is_installed() {
+                waitevent_seams::pgstat_report_wait_start::set(|_| {});
+                waitevent_seams::pgstat_report_wait_end::set(|| {});
+            }
+            if !waiteventset_seams::create_wait_event_set_current_owner::is_installed() {
+                waiteventset::init_seams();
+            }
+            if !latch_seams::set_latch::is_installed() {
+                latch::init_seams();
+            }
+            if !postgres_seams::check_for_interrupts::is_installed() {
+                postgres_seams::check_for_interrupts::set(|| Ok(()));
+            }
+        });
+        if init_small::globals::MyLatch().is_none() {
+            init_small::globals::SetMyProcPid(
+                NEXT_PID.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+            );
+            fd::vfd::set_max_safe_fds_value(1000);
+            waiteventset::InitializeWaitEventSupport().unwrap();
+            let h = latch::allocate_local_latch();
+            latch::InitLatch(h);
+            init_small::globals::SetMyLatch(Some(h));
+        }
+    }
+
+    fn connect_scripted(port: u16) -> PgConn {
+        client_env();
+        match connect(&format!("host=127.0.0.1 port={port} user=walrcv"), "t") {
+            Ok(Ok(c)) => c,
+            Ok(Err(e)) => panic!("scripted server refused: {e}"),
+            Err(e) => panic!("ereport connecting: {e}"),
+        }
+    }
+
+    const CREATE_SLOT_FIELDS: [&str; 4] =
+        ["slot_name", "consistent_point", "snapshot_name", "output_plugin"];
+
+    // upstream a6a2eb9f6024 (18.6): Check CREATE_REPLICATION_SLOT response shape in libpqwalreceiver
+    // A TuplesOk reply without exactly one row of four fields is a protocol
+    // violation (C read PQgetvalue of a missing row and crashed in pg_lsn_in).
+    #[test]
+    fn create_slot_rejects_a_zero_row_reply() {
+        let (port, server) = scripted_server(vec![tuples(&CREATE_SLOT_FIELDS, &[])]);
+        let mut conn = connect_scripted(port);
+        let err = create_slot_physical(&mut conn, "pg_walreceiver_7", true).unwrap_err();
+        assert_eq!(err.sqlstate(), ERRCODE_PROTOCOL_VIOLATION);
+        assert_eq!(err.message(), "invalid response from primary server");
+        assert_eq!(
+            err.detail(),
+            Some("Could not create replication slot \"pg_walreceiver_7\": got 0 rows and 4 fields, expected 1 rows and 4 fields.")
+        );
+        drop(conn);
+        assert_eq!(
+            server.join().unwrap(),
+            vec!["CREATE_REPLICATION_SLOT \"pg_walreceiver_7\" TEMPORARY PHYSICAL (RESERVE_WAL)"]
+        );
+    }
+
+    #[test]
+    fn create_slot_rejects_a_three_field_reply() {
+        let (port, server) =
+            scripted_server(vec![tuples(&CREATE_SLOT_FIELDS[..3], &[&["s", "0/1", ""]])]);
+        let mut conn = connect_scripted(port);
+        let err = create_slot_physical(&mut conn, "s", false).unwrap_err();
+        assert_eq!(err.sqlstate(), ERRCODE_PROTOCOL_VIOLATION);
+        assert_eq!(
+            err.detail(),
+            Some("Could not create replication slot \"s\": got 1 rows and 3 fields, expected 1 rows and 4 fields.")
+        );
+        drop(conn);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn create_slot_accepts_one_row_of_four_fields() {
+        let (port, server) = scripted_server(vec![tuples(
+            &CREATE_SLOT_FIELDS,
+            &[&["s", "0/1A2B3C", "", ""]],
+        )]);
+        let mut conn = connect_scripted(port);
+        create_slot_physical(&mut conn, "s", false).unwrap();
+        drop(conn);
+        server.join().unwrap();
+    }
+
+    // The shared shape check the logical arms (subscriptioncmds, tablesync)
+    // call on their own results.
+    #[test]
+    fn create_slot_shape_check_counts_rows_and_fields() {
+        let mut res = QueryResult {
+            status: ExecStatus::TuplesOk,
+            nfields: 4,
+            rows: vec![vec![None; 4], vec![None; 4]],
+            cmd_tag: String::new(),
+            diag: None,
+            err: String::new(),
+        };
+        let err = check_create_slot_result(&res, "two").unwrap_err();
+        assert_eq!(
+            err.detail(),
+            Some("Could not create replication slot \"two\": got 2 rows and 4 fields, expected 1 rows and 4 fields.")
+        );
+        res.rows.truncate(1);
+        check_create_slot_result(&res, "one").unwrap();
+    }
+
+    // upstream 33101632235a (18.6): Fix cascading standby reconnect failure after archive fallback
+    // IDENTIFY_SYSTEM's third column (xlogpos) is the upstream's flush
+    // position; libpqrcv_identify_system used to discard it.
+    #[test]
+    fn identify_system_returns_the_upstream_flush_position() {
+        let (port, server) = scripted_server(vec![tuples(
+            &["systemid", "timeline", "xlogpos", "dbname"],
+            &[&["7000000000000000001", "3", "1/2A3B4C5D", ""]],
+        )]);
+        let mut conn = connect_scripted(port);
+        let (sysid, tli, flush) = identify_system(&mut conn).unwrap();
+        assert_eq!(sysid, "7000000000000000001");
+        assert_eq!(tli, 3);
+        assert_eq!(flush, 0x0000_0001_2A3B_4C5D);
+        drop(conn);
+        assert_eq!(server.join().unwrap(), vec!["IDENTIFY_SYSTEM"]);
+    }
+
+    #[test]
+    fn identify_system_rejects_an_unparseable_flush_position() {
+        let (port, server) = scripted_server(vec![tuples(
+            &["systemid", "timeline", "xlogpos", "dbname"],
+            &[&["1", "1", "nope", ""]],
+        )]);
+        let mut conn = connect_scripted(port);
+        let err = identify_system(&mut conn).unwrap_err();
+        assert_eq!(err.sqlstate(), ERRCODE_PROTOCOL_VIOLATION);
+        assert_eq!(err.message(), "could not parse WAL location \"nope\"");
+        drop(conn);
+        server.join().unwrap();
+    }
+
+    // sscanf("%X/%X") acceptance: leading blanks and 0x prefixes per
+    // conversion, trailing junk ignored, anything short of two numbers fails.
+    #[test]
+    fn sscanf_lsn_matches_the_c_scan() {
+        assert_eq!(sscanf_lsn("0/0"), Some(0));
+        assert_eq!(sscanf_lsn("1/2A3B4C5D"), Some(0x1_2A3B_4C5D));
+        assert_eq!(sscanf_lsn(" 1/ 2"), Some(0x1_0000_0002));
+        assert_eq!(sscanf_lsn("0x1A/0X2b"), Some(0x1A_0000_002B));
+        assert_eq!(sscanf_lsn("FFFFFFFF/FFFFFFFF"), Some(u64::MAX));
+        assert_eq!(sscanf_lsn("1/2junk"), Some(0x1_0000_0002));
+        assert_eq!(sscanf_lsn(""), None);
+        assert_eq!(sscanf_lsn("1"), None);
+        assert_eq!(sscanf_lsn("1/"), None);
+        assert_eq!(sscanf_lsn("/1"), None);
+        assert_eq!(sscanf_lsn("g/1"), None);
     }
 }

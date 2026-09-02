@@ -105,3 +105,52 @@ fn strtitle_word_boundaries() {
     let n = unicode_strtitle(&mut dst, bytes, false, &mut wbnext);
     assert_eq!(std::str::from_utf8(&dst[..n]).unwrap(), "Hello World-Φωσ");
 }
+
+// upstream 66ec24276b18 (18.6): pg_unicode_fast: fix final sigma logic.
+#[test]
+fn final_sigma_requires_a_preceding_cased_character() {
+    assert_eq!(lower("\u{300}Σ", true).0, "\u{300}σ");
+    assert_eq!(lower("\u{300}\u{343}Σ", true).0, "\u{300}\u{343}σ");
+    assert_eq!(lower("Σ", true).0, "σ");
+    assert_eq!(lower("Α\u{300}Σ", true).0, "α\u{300}ς");
+    assert_eq!(lower("ΑΣ", true).0, "ας");
+    assert_eq!(lower("ΑΣ0", true).0, "ας0");
+    assert_eq!(lower("ΑΣ\u{300}", true).0, "ας\u{300}");
+    assert_eq!(lower("ΑΣΑ", true).0, "ασα");
+    assert_eq!(lower("ΑΣ\u{300}Α", true).0, "ασ\u{300}α");
+    assert_eq!(lower("\u{300}ΣΑ", true).0, "\u{300}σα");
+    // Regress corpus rows: 0391 0343 03A3 0343 0391 and 0391 0345 03A3 0345 0391.
+    assert_eq!(lower("Α\u{343}Σ\u{343}Α", true).0, "α\u{343}σ\u{343}α");
+    assert_eq!(lower("Α\u{345}Σ\u{345}Α", true).0, "α\u{345}σ\u{345}α");
+    // Only the last of two sigmas is final.
+    assert_eq!(lower("ΑΣΣ", true).0, "ασς");
+}
+
+// upstream 9021c8f3cabc (18.6): unicode_case.c: defend against truncated UTF8.
+#[test]
+fn invalid_utf8_stops_conversion() {
+    assert_eq!(unicode_strfold(&mut [], b"abc\xCE", false), 3, "case_test.c");
+    assert_eq!(unicode_strfold(&mut [], b"abc\xF8xyz", false), 3, "case_test.c");
+    let cases: [(&[u8], usize); 6] = [
+        (b"abc\xCE", 3),
+        (b"a\xE2\x82", 1),
+        (b"a\xF0\x9F\x98", 1),
+        (b"\xCE\xB1\xCE", 2),
+        (b"abc\xF8xyz", 3),
+        (b"a\x80b", 1),
+    ];
+    for (src, want) in cases {
+        for full in [false, true] {
+            assert_eq!(unicode_strlower(&mut [], src, full), want, "lower {src:?} full={full}");
+            assert_eq!(unicode_strupper(&mut [], src, full), want, "upper {src:?} full={full}");
+            assert_eq!(unicode_strfold(&mut [], src, full), want, "fold {src:?} full={full}");
+        }
+    }
+    let mut dst = [0xAAu8; 8];
+    assert_eq!(unicode_strupper(&mut dst, b"abc\xCE", false), 3);
+    assert_eq!(&dst[..5], b"ABC\0\xAA", "nothing past the cut is copied");
+    assert_eq!(unicode_strupper(&mut dst, b"abc\xF8xyz", false), 3);
+    assert_eq!(&dst[..5], b"ABC\0\xAA", "nothing past the invalid byte is copied");
+    let n = unicode_strlower(&mut dst, b"\xCE\x91\xCE\xA3\xCE", true);
+    assert_eq!((n, &dst[..n]), (4, &b"\xCE\xB1\xCF\x83"[..]), "sigma before a cut is not final");
+}

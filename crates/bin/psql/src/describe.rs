@@ -206,8 +206,17 @@ pub fn list_databases(st: &mut PsqlState, pattern: Option<&str>, plus: bool) -> 
         "SELECT\n  d.datname as \"Name\",\n  pg_catalog.pg_get_userbyid(d.datdba) as \"Owner\",\n  pg_catalog.pg_encoding_to_char(d.encoding) as \"Encoding\",\n  CASE d.datlocprovider WHEN 'b' THEN 'builtin' WHEN 'c' THEN 'libc' WHEN 'i' THEN 'icu' END AS \"Locale Provider\",\n  d.datcollate as \"Collate\",\n  d.datctype as \"Ctype\",\n  d.datlocale as \"Locale\",\n  d.daticurules as \"ICU Rules\",\n  CASE WHEN pg_catalog.array_length(d.datacl, 1) = 0 THEN '(none)' ELSE pg_catalog.array_to_string(d.datacl, E'\\n') END AS \"Access privileges\"",
     );
     if plus {
+        // upstream f2d6cf880240 (18.6): psql: Allow pg_read_all_stats to see database size in \l+
+        // (pg_database_size()'s rule; the role exists from PostgreSQL 10 on).
+        let read_all_stats = if st.conn.as_ref().map_or(0, |c| c.server_version_num()) >= 100000 {
+            "       OR pg_catalog.pg_has_role('pg_read_all_stats', 'USAGE')\n"
+        } else {
+            ""
+        };
+        sql.push_str(",\n  CASE WHEN pg_catalog.has_database_privilege(d.datname, 'CONNECT')\n");
+        sql.push_str(read_all_stats);
         sql.push_str(
-            ",\n  CASE WHEN pg_catalog.has_database_privilege(d.datname, 'CONNECT')\n       THEN pg_catalog.pg_size_pretty(pg_catalog.pg_database_size(d.datname))\n       ELSE 'No Access'\n  END as \"Size\",\n  t.spcname as \"Tablespace\",\n  pg_catalog.shobj_description(d.oid, 'pg_database') as \"Description\"",
+            "       THEN pg_catalog.pg_size_pretty(pg_catalog.pg_database_size(d.datname))\n       ELSE 'No Access'\n  END as \"Size\",\n  t.spcname as \"Tablespace\",\n  pg_catalog.shobj_description(d.oid, 'pg_database') as \"Description\"",
         );
     }
     sql.push_str("\nFROM pg_catalog.pg_database d");

@@ -31,3 +31,14 @@ extension_seams = { path = "../../commands/extension_seams" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 pg_inherits = { path = "../pg_inherits" }
+aclchk_seams = { path = "../aclchk_seams" }
+format_type = { path = "../../utils/adt/format_type" }
+lmgr = { path = "../../storage/lmgr/lmgr" }
+lock_seams = { path = "../../storage/lmgr/lock_seams" }
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
+types_snapshot = { path = "../../../_support/types/snapshot" }
+types_storage = { path = "../../../_support/types/types_storage" }
+init_small = { path = "../../utils/init/init_small" }
+
+[dev-dependencies]
+namespace_seams = { path = "../namespace_seams" }

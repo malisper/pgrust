@@ -89,3 +89,22 @@ fn label_bytes_verbatim() {
         .windows(needle.len())
         .any(|w| w == needle.as_slice()));
 }
+
+// upstream c6e7a9ef30a2 (18.4): a log_timezone %Z overrunning 128 bytes -> "".
+#[test]
+fn long_log_timezone_abbreviation_prints_empty_time() {
+    // pg_tzset's POSIX fallback without the zone-file probe (needs fd seams).
+    let mut name = vec![b'A'; 200];
+    name.push(b'5');
+    let mut tzstate = Box::new(localtime::TzState::new());
+    assert!(localtime::tzparse(&name, &mut tzstate, false));
+    let mut tzname = [0u8; localtime::TZ_STRLEN_MAX + 1];
+    tzname[..name.len()].copy_from_slice(&name);
+    let tz = Box::leak(Box::new(localtime::PgTz { tzname, state: *tzstate }));
+    pgtz::set_log_timezone(Some(tz));
+    let cx = mcx::MemoryContext::new("xlogbackup test");
+    let content = build_backup_content(cx.mcx(), &state(), true, WAL_SEG_SIZE).unwrap();
+    let text = std::str::from_utf8(content.as_slice()).unwrap();
+    assert!(text.contains("\nSTART TIME: \nLABEL: "), "{text}");
+    assert!(text.contains("\nSTOP TIME: \nSTOP TIMELINE: "), "{text}");
+}

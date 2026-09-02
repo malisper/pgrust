@@ -74,6 +74,17 @@ impl InputStack {
         !self.sources.is_empty()
     }
 
+    /// One line from the current (top) source only; None at its EOF (COPY
+    /// data never runs past the file or \i include that carries it).
+    pub fn read_line_current(&mut self) -> Option<String> {
+        self.sources.last_mut()?.read_line()
+    }
+
+    /// True when the current (top) source is the process's stdin.
+    pub fn current_is_stdin(&self) -> bool {
+        matches!(self.sources.last(), Some(Source::Stdin(_)))
+    }
+
     /// Plain line read from the current (top) source; None at its EOF.
     pub fn read_line_raw(&mut self) -> Option<String> {
         loop {

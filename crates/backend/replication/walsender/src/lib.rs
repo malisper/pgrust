@@ -71,7 +71,10 @@ thread_local! {
     pub(crate) static WAITING_FOR_PING_RESPONSE: Cell<bool> = const { Cell::new(false) };
     pub(crate) static LAST_REPLY_TIMESTAMP: Cell<TimestampTz> = const { Cell::new(0) };
     pub(crate) static LAST_PROCESSING: Cell<TimestampTz> = const { Cell::new(0) };
-    pub(crate) static FULLY_APPLIED_LAST_TIME: Cell<bool> = const { Cell::new(false) };
+    // upstream 98e96e579b91 (18.4): Fix premature NULL lag reporting in pg_stat_replication
+    pub(crate) static PREV_WRITE_PTR: Cell<XLogRecPtr> = const { Cell::new(InvalidXLogRecPtr) };
+    pub(crate) static PREV_FLUSH_PTR: Cell<XLogRecPtr> = const { Cell::new(InvalidXLogRecPtr) };
+    pub(crate) static PREV_APPLY_PTR: Cell<XLogRecPtr> = const { Cell::new(InvalidXLogRecPtr) };
     // output_message StringInfo — reused across sends within a backend.
     pub(crate) static OUTPUT_MESSAGE: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
 }

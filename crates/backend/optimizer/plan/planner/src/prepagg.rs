@@ -344,6 +344,11 @@ fn preprocess_aggref<'mcx>(run: &mut PlannerRun<'mcx>, node: Node<'mcx>) -> PgRe
         return Err(crate::cache_lookup_failed("aggregate", aggref.aggfnoid));
     };
 
+    // upstream 2a03f21daf59 (18.6): Protect some fixed-size arrays that have FUNC_MAX_ARGS elements.
+    // get_aggregate_argtypes' guard: a stored parse tree may carry more.
+    if aggref.aggargtypes.len() > types_core::FUNC_MAX_ARGS - 1 {
+        return Err(too_many_aggregate_arguments());
+    }
     let aggtranstype = resolve_aggregate_transtype(
         mcx,
         aggref.aggfnoid,
@@ -477,6 +482,18 @@ fn preprocess_aggref<'mcx>(run: &mut PlannerRun<'mcx>, node: Node<'mcx>) -> PgRe
     }
     .unwrap();
     Ok(())
+}
+
+#[cold]
+#[inline(never)]
+fn too_many_aggregate_arguments() -> Box<types_error::PgError> {
+    Box::new(
+        types_error::PgError::error(format!(
+            "aggregates cannot have more than {} arguments",
+            types_core::FUNC_MAX_ARGS - 1
+        ))
+        .with_sqlstate(types_error::ERRCODE_TOO_MANY_ARGUMENTS),
+    )
 }
 
 // GetAggInitVal (prepagg.c): initval text through the transtype's typinput.

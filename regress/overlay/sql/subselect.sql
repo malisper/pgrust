@@ -1011,6 +1011,120 @@ select * from
 drop function tattle(x int, y int);
 
 --
+-- check that an upper-level qual is not pushed down if its operator is from a
+-- different btree opfamily than the subquery's grouping eqop
+--
+BEGIN;
+
+CREATE TYPE t_rec AS (x numeric);
+CREATE TEMP TABLE pdt (id int, a t_rec);
+INSERT INTO pdt VALUES
+  (1, ROW(1.00)::t_rec),
+  (2, ROW(1.0)::t_rec),
+  (3, ROW(2)::t_rec);
+
+-- DISTINCT ON: conflict, qual stays in outer query
+EXPLAIN (COSTS OFF)
+SELECT * FROM (SELECT DISTINCT ON (a) id, a FROM pdt ORDER BY a, id) s
+WHERE a *= ROW(1.0)::t_rec;
+
+-- pgrust:rowsort
+SELECT * FROM (SELECT DISTINCT ON (a) id, a FROM pdt ORDER BY a, id) s
+WHERE a *= ROW(1.0)::t_rec;
+
+-- Window function PARTITION BY: conflict, qual stays outside the WindowAgg
+EXPLAIN (COSTS OFF)
+SELECT * FROM (
+  SELECT id, a, count(*) OVER (PARTITION BY a) AS cnt FROM pdt
+) s
+WHERE a *= ROW(1.0)::t_rec;
+
+-- pgrust:rowsort
+SELECT * FROM (
+  SELECT id, a, count(*) OVER (PARTITION BY a) AS cnt FROM pdt
+) s
+WHERE a *= ROW(1.0)::t_rec;
+
+-- Plain DISTINCT: conflict, qual stays in outer query
+EXPLAIN (COSTS OFF)
+SELECT * FROM (SELECT DISTINCT a FROM pdt) s WHERE a *= ROW(1.0)::t_rec;
+
+-- pgrust:rowsort
+SELECT * FROM (SELECT DISTINCT a FROM pdt) s WHERE a *= ROW(1.0)::t_rec;
+
+-- Positive: compatible opfamily, safe to push past the grouping
+EXPLAIN (COSTS OFF)
+SELECT * FROM (SELECT DISTINCT ON (a) id, a FROM pdt ORDER BY a, id) s
+WHERE a = ROW(1.0)::t_rec;
+
+-- pgrust:rowsort
+SELECT * FROM (SELECT DISTINCT ON (a) id, a FROM pdt ORDER BY a, id) s
+WHERE a = ROW(1.0)::t_rec;
+
+-- Set operations: any operation other than UNION ALL groups rows by equality,
+-- so the same opfamily-mismatch rules apply.
+CREATE TEMP TABLE u1 (a t_rec);
+CREATE TEMP TABLE u2 (a t_rec);
+INSERT INTO u1 VALUES (ROW(1.00)::t_rec), (ROW(1.0)::t_rec);
+INSERT INTO u2 VALUES (ROW(1.0)::t_rec);
+
+-- UNION: conflict, qual stays in outer query
+EXPLAIN (COSTS OFF)
+SELECT * FROM (SELECT a FROM u1 UNION SELECT a FROM u2) s
+WHERE a *= ROW(1.0)::t_rec;
+
+-- pgrust:rowsort
+SELECT * FROM (SELECT a FROM u1 UNION SELECT a FROM u2) s
+WHERE a *= ROW(1.0)::t_rec;
+
+-- INTERSECT: same
+EXPLAIN (COSTS OFF)
+SELECT * FROM (SELECT a FROM u1 INTERSECT SELECT a FROM u2) s
+WHERE a *= ROW(1.0)::t_rec;
+
+-- pgrust:rowsort
+SELECT * FROM (SELECT a FROM u1 INTERSECT SELECT a FROM u2) s
+WHERE a *= ROW(1.0)::t_rec;
+
+-- INTERSECT ALL: still groups
+EXPLAIN (COSTS OFF)
+SELECT * FROM (SELECT a FROM u1 INTERSECT ALL SELECT a FROM u2) s
+WHERE a *= ROW(1.0)::t_rec;
+
+-- pgrust:rowsort
+SELECT * FROM (SELECT a FROM u1 INTERSECT ALL SELECT a FROM u2) s
+WHERE a *= ROW(1.0)::t_rec;
+
+-- UNION ALL of (UNION ...): an inner grouping node still exposes the
+-- conflict to a qual pushed down through the outer UNION ALL.
+EXPLAIN (COSTS OFF)
+SELECT * FROM (
+  (SELECT a FROM u1 UNION SELECT a FROM u2)
+  UNION ALL
+  SELECT a FROM u2
+) s
+WHERE a *= ROW(1.0)::t_rec;
+
+-- pgrust:rowsort
+SELECT * FROM (
+  (SELECT a FROM u1 UNION SELECT a FROM u2)
+  UNION ALL
+  SELECT a FROM u2
+) s
+WHERE a *= ROW(1.0)::t_rec;
+
+-- UNION ALL only: no grouping anywhere, pushdown remains allowed.
+EXPLAIN (COSTS OFF)
+SELECT * FROM (SELECT a FROM u1 UNION ALL SELECT a FROM u2) s
+WHERE a *= ROW(1.0)::t_rec;
+
+-- pgrust:rowsort
+SELECT * FROM (SELECT a FROM u1 UNION ALL SELECT a FROM u2) s
+WHERE a *= ROW(1.0)::t_rec;
+
+ROLLBACK;
+
+--
 -- Test that LIMIT can be pushed to SORT through a subquery that just projects
 -- columns.  We check for that having happened by looking to see if EXPLAIN
 -- ANALYZE shows that a top-N sort was used.  We must suppress or filter away

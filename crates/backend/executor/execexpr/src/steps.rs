@@ -436,11 +436,12 @@ pub enum Step {
         out: OutRef,
     },
     // EEOP_HASHDATUM_FIRST_STRICT / EEOP_HASHDATUM_NEXT32_STRICT: a NULL key
-    // writes (0, isnull=true) to THIS step's out and jumps to jumpdone (the
-    // DoneReturn step). C-verbatim, including the consequence that an
-    // intermediate-key abort writes iresult — not the result cell — so
-    // DoneReturn returns the PREVIOUS evaluation's result (observed C 18.3/
-    // 18.4 behavior; see docs/fuzzing/findings-hj-counters.md).
+    // writes (0, isnull=true) to the ExprState RESULT cell and jumps to
+    // jumpdone (the DoneReturn step), so the expression returns NULL. The
+    // step's own out (the iresult for an intermediate key) is left alone:
+    // C 18.3/18.4 wrote the NULL there instead, and DoneReturn then returned
+    // the PREVIOUS evaluation's result (docs/fuzzing/findings-hj-counters.md).
+    // upstream f70acc8a2b96 (18.6): Fix Hash Join performance issue when hashing NULL values
     HashDatumFirstStrict {
         call: FuncCall,
         jumpdone: u32,
@@ -2063,11 +2064,10 @@ impl<'mcx> ExprState<'mcx> {
         let resnd: NonNull<NullableDatum> =
             mcx.allocate(rl).map_err(|_| mcx.oom(rl.size()))?.cast();
         // SAFETY: fresh exclusive allocation. C's makeNode(ExprState) zeroes
-        // the node: resvalue=0, resnull=FALSE. Observable through programs
-        // that can reach DONE_RETURN without writing the cell (today: the
-        // EEOP_HASHDATUM_*_STRICT abort on an intermediate key, whose out is
-        // the iresult) — the first evaluation then returns this initial
-        // value, and C's is not-null zero.
+        // the node: resvalue=0, resnull=FALSE. Kept as C's initial image;
+        // since f70acc8a2b96 (18.6) no step program reaches DONE_RETURN
+        // without writing the cell (the EEOP_HASHDATUM_*_STRICT abort on an
+        // intermediate key, the one case that did, now writes it directly).
         unsafe {
             resnd.write(NullableDatum {
                 value: Datum::from_u32(0),

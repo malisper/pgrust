@@ -130,8 +130,13 @@ fn convert_case<W: FnMut() -> usize>(
     }
 
     while srcoff < src.len() && src[srcoff] != 0 {
+        // upstream 9021c8f3cabc (18.6): unicode_case.c: defend against truncated UTF8.
+        let u1len = utf8_mblen(src[srcoff]);
+        if u1len < 0 || srcoff + u1len as usize > src.len() {
+            break;
+        }
+        let u1len = u1len as usize;
         let u1 = utf8_to_unicode(&src[srcoff..]);
-        let u1len = unicode_utf8len(u1) as usize;
 
         if str_casekind == CaseKind::Title {
             if srcoff == boundary {
@@ -177,45 +182,73 @@ fn convert_case<W: FnMut() -> usize>(
     result_len
 }
 
-// Final_Sigma (Unicode Table 3-17): directly preceded by a Cased character
-// and not directly followed by one, skipping Case_Ignorable in both scans.
-fn check_final_sigma(s: &[u8], offset: usize) -> bool {
-    if offset == 0 {
-        return false;
+// upstream 9021c8f3cabc (18.6): utf8_mblen returns -1 for a byte that cannot lead a sequence.
+#[inline(always)]
+fn utf8_mblen(b: u8) -> i32 {
+    if b & 0x80 == 0 {
+        1
+    } else if b & 0xe0 == 0xc0 {
+        2
+    } else if b & 0xf0 == 0xe0 {
+        3
+    } else if b & 0xf8 == 0xf0 {
+        4
+    } else {
+        -1
     }
+}
 
-    // C falls through (rather than failing) if this scan runs off the start.
-    for i in (0..offset).rev() {
-        let b = s[i];
-        if b & 0x80 == 0 || b & 0xC0 == 0xC0 {
-            let curr = utf8_to_unicode(&s[i..]);
-            if unicode_category::pg_u_prop_case_ignorable(curr) {
-                continue;
-            } else if unicode_category::pg_u_prop_cased(curr) {
-                break;
-            }
+// upstream 66ec24276b18 (18.6): pg_unicode_fast: fix final sigma logic.
+fn check_final_sigma(s: &[u8], offset: usize) -> bool {
+    let len = s.len();
+    let mut preceded_by_cased = false;
+    let mut followed_by_cased = false;
+
+    let mut i = offset;
+    while i > 0 {
+        i -= 1;
+        if s[i] & 0xC0 == 0x80 {
+            continue;
+        }
+
+        debug_assert!(s[i] & 0x80 == 0 || s[i] & 0xC0 == 0xC0);
+
+        let ulen = utf8_mblen(s[i]);
+
+        if ulen < 0 || i + ulen as usize > len {
             return false;
         }
-        debug_assert!(b & 0xC0 == 0x80);
-    }
 
-    let mut i = offset + 1;
-    while i < s.len() && s[i] != 0 {
-        let b = s[i];
-        if b & 0x80 == 0 || b & 0xC0 == 0xC0 {
-            let curr = utf8_to_unicode(&s[i..]);
-            if unicode_category::pg_u_prop_case_ignorable(curr) {
-                i += 1;
-                continue;
-            } else if unicode_category::pg_u_prop_cased(curr) {
-                return false;
-            }
+        let curr = utf8_to_unicode(&s[i..]);
+
+        if !unicode_category::pg_u_prop_case_ignorable(curr) {
+            preceded_by_cased = unicode_category::pg_u_prop_cased(curr);
             break;
         }
-        debug_assert!(b & 0xC0 == 0x80);
-        i += 1;
     }
-    true
+
+    let ulen = utf8_mblen(s[offset]);
+    debug_assert!(ulen > 0, "the sigma at offset was decoded by the caller");
+
+    let mut i = offset + ulen as usize;
+    while i < len {
+        let ulen = utf8_mblen(s[i]);
+
+        if ulen < 0 || i + ulen as usize > len {
+            return false;
+        }
+
+        let curr = utf8_to_unicode(&s[i..]);
+
+        if !unicode_category::pg_u_prop_case_ignorable(curr) {
+            followed_by_cased = unicode_category::pg_u_prop_cased(curr);
+            break;
+        }
+
+        i += ulen as usize;
+    }
+
+    preceded_by_cased && !followed_by_cased
 }
 
 fn check_special_conditions(conditions: i16, s: &[u8], offset: usize) -> bool {

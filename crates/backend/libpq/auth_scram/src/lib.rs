@@ -15,6 +15,7 @@ use scram_common::{
     SCRAM_MAX_KEY_LEN, SCRAM_SHA_256_DEFAULT_ITERATIONS, SCRAM_SHA_256_KEY_LEN,
     SCRAM_SHA_256_NAME,
 };
+use timingsafe_bcmp::timingsafe_bcmp;
 use types_error::{ErrorLocation, PgResult, ERRCODE_INTERNAL_ERROR, ERROR, LOG};
 
 use std::cell::Cell;
@@ -159,9 +160,12 @@ pub fn scram_verify_plain_password(
     let salted_password = scram_salted_password(password, &salt, parsed.iterations)?;
     let computed_key = scram_server_key(&salted_password);
 
-    // C compares with plain memcmp here (not constant-time).
-    Ok(computed_key[..parsed.key_length as usize]
-        == parsed.server_key[..parsed.key_length as usize])
+    // upstream d93ef413174d (18.4): Apply timingsafe_bcmp() in authentication paths
+    let key_length = parsed.key_length as usize;
+    Ok(timingsafe_bcmp(
+        &computed_key[..key_length],
+        &parsed.server_key[..key_length],
+    ) == 0)
 }
 
 pub struct MockScramSecret {
@@ -189,7 +193,8 @@ pub fn mock_scram_secret(username: &str) -> PgResult<MockScramSecret> {
     encoded.truncate(n as usize);
 
     Ok(MockScramSecret {
-        iterations: SCRAM_SHA_256_DEFAULT_ITERATIONS,
+        // upstream 822143c4d1dc (18.6): Use value of scram_iterations in mock_scram_secret().
+        iterations: scram_sha_256_iterations(),
         key_length,
         salt: String::from_utf8(encoded).unwrap(),
         // StoredKey and ServerKey are not used in a doomed authentication.

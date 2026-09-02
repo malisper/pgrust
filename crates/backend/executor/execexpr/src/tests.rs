@@ -5252,12 +5252,15 @@ fn current_of_expr_compiles_and_errors_cleanly_at_eval() {
 // NEXT32_STRICT): with keep_nulls=false a strict-op NULL key aborts the
 // expression to SQL NULL — nodeHash.c then skips the tuple (build-side
 // NULL-key skip; EXPLAIN ANALYZE Hash actual-rows parity, the KNOWN-HJ
-// counter family). Pins C 18.3/18.4 semantics VERBATIM, including the
-// first-key-abort quirk: an intermediate key's strict abort writes the
-// iresult, not the result cell, so DONE_RETURN returns the PREVIOUS
-// evaluation's result (fresh state: makeNode-zeroed => (0, not-null)).
+// counter family). Pins C 18.6 semantics: the abort writes the ExprState
+// result cell directly, so EVERY NULL-key row returns NULL whatever the
+// key's position or the previous row. (C 18.3/18.4 wrote an intermediate
+// key's abort to the iresult instead, and DONE_RETURN then returned the
+// PREVIOUS evaluation's result — the order-dependent quirk f70acc8a2b96
+// fixed; fresh state: makeNode-zeroed => (0, not-null) was admitted.)
+// upstream f70acc8a2b96 (18.6): Fix Hash Join performance issue when hashing NULL values
 #[test]
-fn hash32_expr_strict_null_key_aborts_c_verbatim() {
+fn hash32_expr_strict_null_key_aborts_to_null() {
     with_mcx(|mcx| {
         let desc = desc_int4(mcx, 2);
         let keys = NodeList::make2(
@@ -5293,14 +5296,14 @@ fn hash32_expr_strict_null_key_aborts_c_verbatim() {
             };
             exec_eval_expr(state, &mut slots).unwrap().isnull
         }
-        // C row sequence (verified against PostgreSQL 18.4, the same counts
-        // nodeHash's totalTuples showed): fresh state, first-key abort reads
-        // the zeroed cell -> NOT null; second-key abort -> null; first-key
-        // abort after a null -> stale null; non-null row resets; first-key
-        // abort after a non-null row -> stale not-null.
+        // The 18.3/18.4 stale-carry-over row order (fresh first-key abort,
+        // last-key abort, first-key abort after a null, a non-null row,
+        // first-key abort after a non-null row): C 18.6 returns NULL for
+        // every NULL-key row -- nodeHash's totalTuples counts only the
+        // non-null row -- where 18.3/18.4 admitted the first and the last.
         assert!(
-            !eval(mcx, &mut state, None, Some(2)),
-            "fresh first-key abort: C zeroed cell"
+            eval(mcx, &mut state, None, Some(2)),
+            "fresh first-key abort: NULL (18.3/18.4 returned the zeroed cell)"
         );
         assert!(
             eval(mcx, &mut state, Some(2), None),
@@ -5308,12 +5311,60 @@ fn hash32_expr_strict_null_key_aborts_c_verbatim() {
         );
         assert!(
             eval(mcx, &mut state, None, Some(5)),
-            "first-key abort: stale null carried"
+            "first-key abort after a null: NULL"
         );
         assert!(!eval(mcx, &mut state, Some(1), Some(1)), "non-null row");
         assert!(
-            !eval(mcx, &mut state, None, Some(7)),
-            "first-key abort: stale not-null carried"
+            eval(mcx, &mut state, None, Some(7)),
+            "first-key abort after a non-null row: NULL (18.3/18.4 carried the stale not-null)"
+        );
+
+        // Three keys with the NULL in the MIDDLE: the EEOP_HASHDATUM_NEXT32_
+        // STRICT abort on a non-final key (the other pre-18.6 stale site);
+        // NULL for every NULL-key row, whatever the previous row was.
+        let desc3 = desc_int4(mcx, 3);
+        let keys3 = NodeList::make3(
+            mcx,
+            Node::mk_var(mcx, crate::compile::OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap(),
+            Node::mk_var(mcx, crate::compile::OUTER_VAR, 2, INT4OID, -1, 0, 0).unwrap(),
+            Node::mk_var(mcx, crate::compile::OUTER_VAR, 3, INT4OID, -1, 0, 0).unwrap(),
+        )
+        .unwrap();
+        let mut s3 = crate::compile::exec_build_hash32_from_exprs(
+            mcx,
+            &desc3,
+            &keys3,
+            &[450, 450, 450],
+            &[0, 0, 0],
+            &[true, true, true],
+            false,
+            0,
+            ParamBind::NONE,
+            None,
+        )
+        .unwrap();
+        fn eval3<'m>(mcx: Mcx<'m>, state: &mut ExprState<'m>, row: [Option<i32>; 3]) -> bool {
+            let mut slot = virtual_slot(mcx, &row);
+            let mut slots = EvalSlots {
+                scan: None,
+                inner: Some(&mut slot),
+                outer: None,
+            };
+            exec_eval_expr(state, &mut slots).unwrap().isnull
+        }
+        assert!(
+            eval3(mcx, &mut s3, [Some(2), None, Some(2)]),
+            "fresh middle-key abort: NULL"
+        );
+        assert!(!eval3(mcx, &mut s3, [Some(1), Some(1), Some(1)]), "non-null row");
+        assert!(
+            eval3(mcx, &mut s3, [Some(3), None, Some(3)]),
+            "middle-key abort after a non-null row: NULL"
+        );
+        assert!(eval3(mcx, &mut s3, [Some(4), Some(4), None]), "last-key abort: NULL");
+        assert!(
+            eval3(mcx, &mut s3, [Some(5), None, Some(5)]),
+            "middle-key abort after a null: NULL"
         );
 
         // Single-key strict: the Hash32Var kernel cover — NULL returns NULL

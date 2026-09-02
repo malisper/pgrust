@@ -417,14 +417,15 @@ fn overexplain_range_table<'mcx>(
         ExplainCloseGroup("Range Table Entry", None, true, es);
     }
 
+    // upstream 6723d462db5a (18.4): Fix pg_overexplain to emit valid output with RANGE_TABLE option.
+    ExplainCloseGroup("Range Table", Some("Range Table"), false, es);
+
     if es.format != EXPLAIN_FORMAT_TEXT || !plannedstmt.unprunableRelids.is_empty() {
         overexplain_bitmapset("Unprunable RTIs", &plannedstmt.unprunableRelids, es);
     }
     if es.format != EXPLAIN_FORMAT_TEXT || !plannedstmt.resultRelations.is_nil() {
         overexplain_intlist("Result RTIs", &plannedstmt.resultRelations, es);
     }
-
-    ExplainCloseGroup("Range Table", Some("Range Table"), false, es);
     Ok(())
 }
 
@@ -496,4 +497,50 @@ pub fn init_seams() {
         lookup: |_| None,
         pg_init: Some(pg_init),
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use explain::{
+        ExplainBeginOutput, ExplainEndOutput, ExplainFormat, NewExplainState,
+        EXPLAIN_FORMAT_JSON, EXPLAIN_FORMAT_XML, EXPLAIN_FORMAT_YAML,
+    };
+    use mcx::MemoryContext;
+
+    // A whole EXPLAIN document around an empty range table, the way
+    // ExplainOnePlan wraps the per-plan hook: BeginOutput, the Query group,
+    // the hook's Range Table section, EndOutput.
+    fn range_table_document(format: ExplainFormat) -> String {
+        let ctx = MemoryContext::new("pg_overexplain-test");
+        let mcx = ctx.mcx();
+        let pstmt = PlannedStmt::default();
+        let mut es = NewExplainState(mcx).unwrap();
+        es.format = format;
+        ExplainBeginOutput(&mut es);
+        ExplainOpenGroup("Query", None, true, &mut es);
+        overexplain_range_table(&pstmt, &mut es).unwrap();
+        ExplainCloseGroup("Query", None, true, &mut es);
+        ExplainEndOutput(&mut es);
+        String::from_utf8(es.str.as_bytes().to_vec()).unwrap()
+    }
+
+    // upstream 6723d462db5a (18.4): "Unprunable RTIs" / "Result RTIs" are
+    // PlannedStmt properties and must be siblings of the Range Table array,
+    // never members of it (invalid JSON/YAML, mis-nested XML).
+    #[test]
+    fn rti_properties_are_siblings_of_the_range_table_group() {
+        assert_eq!(
+            range_table_document(EXPLAIN_FORMAT_JSON),
+            "[\n  {\n    \"Range Table\": [\n    ],\n    \"Unprunable RTIs\": \"none\",\n    \"Result RTIs\": \"none\"\n  }\n]"
+        );
+        assert_eq!(
+            range_table_document(EXPLAIN_FORMAT_XML),
+            "<explain xmlns=\"http://www.postgresql.org/2009/explain\">\n  <Query>\n    <Range-Table>\n    </Range-Table>\n    <Unprunable-RTIs>none</Unprunable-RTIs>\n    <Result-RTIs>none</Result-RTIs>\n  </Query>\n</explain>"
+        );
+        assert_eq!(
+            range_table_document(EXPLAIN_FORMAT_YAML),
+            "- Range Table: \n  Unprunable RTIs: \"none\"\n  Result RTIs: \"none\""
+        );
+    }
 }

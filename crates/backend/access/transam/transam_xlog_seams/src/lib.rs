@@ -83,6 +83,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // GetWALInsertionTimeLineIfSet() (xlog.c): XLogCtl->InsertTimeLineID under
+    // info_lck, 0 until end-of-recovery has set it. xlogutils reaches xlog
+    // only through this crate (transam_xlog depends on xlogutils).
+    // upstream 4bff3aa51c19 (18.6): Fix second race with timeline selection during promotion
+    pub fn get_wal_insertion_time_line_if_set() -> TimeLineID
+);
+
+seam_core::seam!(
     // wal_segment_size (xlog.c global).
     pub fn wal_segment_size() -> i32
 );

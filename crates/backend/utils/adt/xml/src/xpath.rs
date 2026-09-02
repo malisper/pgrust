@@ -11,18 +11,22 @@ use ::types_error::{
 use crate::errhandler::{pg_xml_init, xml_ereport, xml_err_occurred, PG_XML_STRICTNESS_ALL};
 use crate::libxml::{
     self, cstr, xml2, xmlNode, xmlNodeSetHdr, xmlXPathObjectHdr, XML_ATTRIBUTE_NODE,
-    XML_DOCUMENT_NODE, XML_TEXT_NODE, XPATH_BOOLEAN, XPATH_NODESET, XPATH_NUMBER, XPATH_STRING,
+    XML_DOCUMENT_NODE, XML_NAMESPACE_DECL, XML_TEXT_NODE, XPATH_BOOLEAN, XPATH_NODESET,
+    XPATH_NUMBER, XPATH_STRING,
 };
 use crate::{escape_xml, parse_xml_decl, PG_UTF8};
 
-/// C `xml_xmlnodetoxmltype` (xml.c:4151): attr/text nodes escape their string
-/// cast; everything else copies + dumps the subtree.
+/// C `xml_xmlnodetoxmltype` (xml.c:4151): attr/text/namespace nodes escape
+/// their string cast; everything else copies + dumps the subtree.
 pub(crate) unsafe fn node_to_xmltype(cur: *mut xmlNode) -> PgResult<Vec<u8>> {
     let x = xml2();
     // SAFETY (fn body): cur is a live node in the evaluated document.
     unsafe {
         let t = libxml::node_type(cur);
-        if t != XML_ATTRIBUTE_NODE && t != XML_TEXT_NODE {
+        // upstream 4c777d6dd9c9 (18.6): Fix handling of namespace nodes in xpath() (xml)
+        // A namespace node is an xmlNs, not an xmlNode: xmlCopyNode/xmlNodeDump
+        // cannot handle it, xmlXPathCastNodeToString can.
+        if t != XML_ATTRIBUTE_NODE && t != XML_TEXT_NODE && t != XML_NAMESPACE_DECL {
             let buf = (x.xmlBufferCreate)();
             if buf.is_null() {
                 return Err(xml_ereport("could not allocate xmlBuffer", ERRCODE_OUT_OF_MEMORY)

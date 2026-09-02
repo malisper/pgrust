@@ -16,7 +16,8 @@ use datum::{Bytea, Varlena};
 use mcx::{Mcx, PgVec};
 use types_core::Oid;
 use types_error::{
-    PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+    PgError, PgResult, ERRCODE_CHARACTER_NOT_IN_REPERTOIRE, ERRCODE_INVALID_PARAMETER_VALUE,
+    ERRCODE_PROGRAM_LIMIT_EXCEEDED,
 };
 
 pub const VARHDRSZ: usize = datum::varlena::VARHDRSZ;
@@ -31,6 +32,17 @@ fn length_too_large() -> PgError {
 #[inline(never)]
 fn character_too_large() -> PgError {
     PgError::error("requested character too large").with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+}
+
+// upstream 08e812c02ae1 (18.6): Fix out-of-bound reads with ascii() for invalid multibyte characters
+#[cold]
+#[inline(never)]
+fn invalid_byte_sequence_err() -> PgError {
+    PgError::error(format!(
+        "invalid byte sequence for encoding \"{}\"",
+        mbutils::GetDatabaseEncodingName()
+    ))
+    .with_sqlstate(ERRCODE_CHARACTER_NOT_IN_REPERTOIRE)
 }
 
 // CHECK_FOR_INTERRUPTS() (miscadmin.h): InterruptPending pre-check, then
@@ -426,22 +438,35 @@ pub fn translate<'mcx>(
 
 pub fn ascii(string: &[u8]) -> PgResult<i32> {
     let encoding = mbutils::GetDatabaseEncoding();
+    let len = string.len();
     let Some(&b0) = string.first() else {
         return Ok(0);
     };
 
     if encoding == wchar::PG_UTF8 && b0 > 127 {
+        // upstream 08e812c02ae1 (18.6): Fix out-of-bound reads with ascii() for invalid multibyte characters
+        // The lead byte, the presence of every continuation byte, and the
+        // continuation bytes' form are validated (they were assertions, and
+        // a truncated sequence indexed past the input).
         let (mut result, tbytes) = if b0 >= 0xF0 {
-            ((b0 & 0x07) as i32, 3)
+            ((b0 & 0x07) as i32, 3usize)
         } else if b0 >= 0xE0 {
             ((b0 & 0x0F) as i32, 2)
-        } else {
-            debug_assert!(b0 > 0xC0);
+        } else if b0 > 0xC0 {
             ((b0 & 0x1F) as i32, 1)
+        } else {
+            return Err(invalid_byte_sequence_err().into());
         };
-        for i in 1..=tbytes {
-            let b = string[i];
-            debug_assert!(b & 0xC0 == 0x80);
+
+        // All continuation bytes are present in the input
+        if tbytes >= len {
+            return Err(invalid_byte_sequence_err().into());
+        }
+
+        for &b in &string[1..=tbytes] {
+            if (b & 0xC0) != 0x80 {
+                return Err(invalid_byte_sequence_err().into());
+            }
             result = (result << 6) + (b & 0x3F) as i32;
         }
         Ok(result)

@@ -341,6 +341,13 @@ pub fn parse_lquery(buf: &[u8]) -> Result<Vec<u8>, PgError> {
             }
             LQPRS_WAITVAR => {
                 if is_label(&buf[i..], cl) {
+                    // upstream 7f019f34140a (18.4): ltree: Fix overflows with lquery parsing
+                    if levels[cur].variants.len() >= u16::MAX as usize {
+                        return Err(prog_limit_detail(
+                            "lquery level has too many variants",
+                            "Number of variants exceeds the maximum allowed (65535).",
+                        ));
+                    }
                     levels[cur].variants.push(NodeItem {
                         start: i,
                         len: 0,
@@ -501,22 +508,10 @@ fn serialize_lquery(
     num: u16,
     hasnot: bool,
 ) -> Result<Vec<u8>, PgError> {
-    // C counts a level's variants into `lquery_level.numvar`, a uint16 with no
-    // ceiling check (unlike `num`, which IS checked against
-    // LQUERY_MAX_LEVELS). Past 65535 variants in one level the field WRAPS,
-    // and every later C loop — the size accounting here, the copy loop below,
-    // and every reader — is bounded by the WRAPPED count, so C silently
-    // serializes only `numvar mod 65536` of the variants it parsed.
-    // `SELECT (repeat('a|',100000)||'a')::lquery` is the SQL-reachable shape
-    // (upstream bug 103a's sibling field). Truncating here is what makes the
-    // stored image the one PostgreSQL stores; iterating the full Vec instead
-    // produced a 1,600,048-byte image where PostgreSQL stores 551,472.
-    let stored_numvar = |lvl: &PLevel| (lvl.variants.len() as u16) as usize;
-
     let mut totallen = LQUERY_HDRSIZE;
     for lvl in levels {
         totallen += LQL_HDRSIZE;
-        for v in lvl.variants.iter().take(stored_numvar(lvl)) {
+        for v in &lvl.variants {
             totallen += maxalign(LVAR_HDRSIZE + v.len);
         }
     }
@@ -532,23 +527,25 @@ fn serialize_lquery(
 
     let mut off = LQUERY_HDRSIZE;
     for lvl in levels {
+        // parse_lquery bounds a level's variant count by the uint16 field.
         let numvar = lvl.variants.len() as u16;
         let lql_off = off;
-        // C's `memcpy(cur, curqlevel, LQL_HDRSIZE)` copies all 16 header
-        // bytes out of a palloc0'd parse-time struct, so the 6 padding bytes
-        // past `high` are written as zeroes. That only matters once a wrapped
-        // totallen makes levels overlap (below) and the bytes underneath are
-        // no longer the allocation's own zeroes — so zero them explicitly
-        // instead of relying on the fresh buffer.
-        out[lql_off..lql_off + LQL_HDRSIZE].fill(0);
         write_u16(&mut out, lql_off + 2, lvl.flag); // flag
         write_u16(&mut out, lql_off + 4, numvar); // numvar
         write_u16(&mut out, lql_off + 6, lvl.low); // low
         write_u16(&mut out, lql_off + 8, lvl.high); // high
         let mut cur_totallen = LQL_HDRSIZE;
         let mut voff = off + LQL_HDRSIZE;
-        for v in lvl.variants.iter().take(numvar as usize) {
-            cur_totallen += maxalign(LVAR_HDRSIZE + v.len);
+        for v in &lvl.variants {
+            // upstream 7f019f34140a (18.4): ltree: Fix overflows with lquery parsing
+            let newlen = cur_totallen + maxalign(LVAR_HDRSIZE + v.len);
+            if newlen > u16::MAX as usize {
+                return Err(prog_limit_detail(
+                    "lquery level is too large",
+                    "Total size of level exceeds the maximum allowed (65535 bytes).",
+                ));
+            }
+            cur_totallen = newlen;
             let val = ltree_crc32_sz(&buf[v.start..v.start + v.len]) as i32;
             write_i32(&mut out, voff, val); // val
             write_u16(&mut out, voff + 4, v.len as u16); // len
@@ -557,17 +554,7 @@ fn serialize_lquery(
                 .copy_from_slice(&buf[v.start..v.start + v.len]);
             voff += maxalign(LVAR_HDRSIZE + v.len);
         }
-        // C stores the level size in a uint16 and then walks to the next
-        // level with LQL_NEXT(cur) == MAXALIGN(cur->totallen), i.e. from the
-        // STORED (possibly wrapped) field, not from the real byte count it
-        // just wrote. Once one level's serialized size passes 65535 the two
-        // disagree and C's next level lands back on top of this one. That
-        // overwrite is part of the image PostgreSQL stores (upstream bug
-        // 103a, docs/upstream/bug-103a-ltree-deparse-lquery-overflow.txt),
-        // and lquery images are on-disk format, so the stride is read back
-        // out of the stored field exactly as C reads it.
-        let stored_totallen = cur_totallen as u16;
-        write_u16(&mut out, lql_off, stored_totallen); // totallen
+        write_u16(&mut out, lql_off, cur_totallen as u16); // totallen
 
         if numvar > 0 {
             if numvar > 1 || lvl.flag != 0 {
@@ -579,7 +566,7 @@ fn serialize_lquery(
             wasbad = true;
         }
 
-        off += maxalign(stored_totallen as usize);
+        off += maxalign(cur_totallen);
     }
 
     write_u16(&mut out, 6, firstgood);
@@ -975,22 +962,24 @@ fn makepol(st: &mut QprsState) -> Result<i32, PgError> {
     Ok(END)
 }
 
+// upstream c5790ec4fd9a (18.4): Guard against overflow in "left" fields of query_int and ltxtquery.
 fn findoprnd(items: &mut [Item], pos: &mut usize) -> Result<(), PgError> {
     // C ltxtquery_io.c findoprnd(): check_stack_depth() (see makepol).
     stack_depth::check_stack_depth()?;
-    let p = *pos;
-    if items[p].typ as i32 == VAL || items[p].typ as i32 == VALTRUE {
-        items[p].left = 0;
-        *pos += 1;
-    } else if items[p].val == b'!' as i32 {
-        items[p].left = 1;
-        *pos += 1;
+    let mypos = *pos;
+    *pos += 1;
+    if items[mypos].typ as i32 == VAL || items[mypos].typ as i32 == VALTRUE {
+        items[mypos].left = 0;
+    } else if items[mypos].val == b'!' as i32 {
+        items[mypos].left = 1;
         findoprnd(items, pos)?;
     } else {
-        let tmp = *pos;
-        *pos += 1;
         findoprnd(items, pos)?;
-        items[tmp].left = (*pos - tmp) as i16;
+        let delta = *pos - mypos;
+        if delta > i16::MAX as usize {
+            return Err(prog_limit("ltxtquery is too large"));
+        }
+        items[mypos].left = delta as i16;
         findoprnd(items, pos)?;
     }
     Ok(())
@@ -1058,6 +1047,7 @@ pub fn parse_ltxtquery(buf: &[u8]) -> Result<Vec<u8>, PgError> {
     // Set left links.
     let mut pos = 0usize;
     findoprnd(&mut items, &mut pos)?;
+    debug_assert_eq!(pos, size);
     for (i, it) in items.iter().enumerate() {
         write_item(&mut out, i, it);
     }

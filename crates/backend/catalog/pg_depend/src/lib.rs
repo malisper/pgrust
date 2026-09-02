@@ -91,6 +91,8 @@ pub fn recordMultipleDependencies<'mcx>(
         if isObjectPinned(r) {
             continue;
         }
+        // upstream c8cd3d6976f7 (18.6): Avoid orphaned objects dependencies
+        dependencyLockAndCheckObject(mcx, r.classId, r.objectId)?;
         let values = [
             Datum::from_oid(depender.classId),
             Datum::from_oid(depender.objectId),
@@ -151,6 +153,88 @@ pub fn object_address_comparator(a: &ObjectAddress, b: &ObjectAddress) -> core::
 
 fn isObjectPinned(object: &ObjectAddress) -> bool {
     catalog::IsPinnedObject(object.classId, object.objectId)
+}
+
+// dependencyLockAndCheckObject (pg_depend.c): lock the object a dependency is
+// about to reference and verify it was not dropped meanwhile; a no-op when the
+// caller already holds a lock that conflicts with DROP.
+// upstream c8cd3d6976f7 (18.6): Avoid orphaned objects dependencies
+fn dependencyLockAndCheckObject<'mcx>(
+    mcx: Mcx<'mcx>,
+    classId: Oid,
+    objectId: Oid,
+) -> PgResult<()> {
+    debug_assert!(!catalog::IsPinnedObject(classId, objectId));
+
+    if classId != RELATION_CLASS {
+        let tag = types_storage::LOCKTAG::object(
+            init_small::globals::MyDatabaseId(),
+            classId,
+            objectId,
+            0,
+        );
+        if lock_seams::lock_held_by_me::call(tag, types_rel::AccessShareLock, true) {
+            return Ok(());
+        }
+        lmgr::LockDatabaseObject(classId, objectId, 0, types_rel::AccessShareLock)?;
+
+        let props = objectaddress_seams::get_object_class_props::call(classId);
+        if props.oid_catcache_id != -1
+            && cache_syscache::SearchSysCacheExists(
+                props.oid_catcache_id,
+                cache_syscache::SysCacheKey::Value(Datum::from_oid(objectId)),
+                cache_syscache::SysCacheKey::UNUSED,
+                cache_syscache::SysCacheKey::UNUSED,
+                cache_syscache::SysCacheKey::UNUSED,
+            )?
+        {
+            return Ok(());
+        }
+
+        // Not in the syscache (or no usable one): scan the catalog under
+        // SnapshotSelf so an object created earlier in this command counts.
+        let rel = table::table_open(mcx, classId, types_rel::AccessShareLock)?;
+        let keys = [oid_key(props.attnum_oid as usize, objectId)];
+        let snapshot = Some(std::rc::Rc::new(types_snapshot::SnapshotData::sentinel(
+            mcx,
+            types_snapshot::SnapshotType::SNAPSHOT_SELF,
+        )));
+        let mut scan =
+            genam::systable_beginscan(mcx, &rel, props.oid_index_oid, true, snapshot, &keys)?;
+        let found = genam::systable_getnext(mcx, &mut scan)?.is_some();
+        genam::systable_endscan(mcx, scan)?;
+        rel.close(types_rel::AccessShareLock)?;
+        if !found {
+            return Err(concurrently_dropped(props.class_descr));
+        }
+        Ok(())
+    } else {
+        debug_assert!(!catalog::IsSharedRelation(objectId));
+        if lmgr::CheckRelationOidLockedByMe(objectId, types_rel::AccessShareLock, true) {
+            return Ok(());
+        }
+        lmgr::LockRelationOid(objectId, types_rel::AccessShareLock)?;
+        if cache_syscache::SearchSysCacheExists(
+            cache_syscache::cacheinfo::RELOID,
+            cache_syscache::SysCacheKey::Value(Datum::from_oid(objectId)),
+            cache_syscache::SysCacheKey::UNUSED,
+            cache_syscache::SysCacheKey::UNUSED,
+            cache_syscache::SysCacheKey::UNUSED,
+        )? {
+            return Ok(());
+        }
+        Err(concurrently_dropped("relation"))
+    }
+}
+
+// upstream c8b4186d6eef (18.6): Use term "referenced" rather than "dependent" in dependency locking
+#[cold]
+#[inline(never)]
+fn concurrently_dropped(class_descr: &str) -> Box<types_error::PgError> {
+    Box::new(
+        types_error::PgError::error(format!("referenced {class_descr} was concurrently dropped"))
+            .with_sqlstate(types_error::ERRCODE_UNDEFINED_OBJECT),
+    )
 }
 
 const RELATION_CLASS: Oid = types_core::RELATION_RELATION_ID;
@@ -463,6 +547,63 @@ pub fn recordDependencyOnSingleRelExpr<'mcx>(
     recordMultipleDependencies(mcx, depender, &addrs, behavior)
 }
 
+// upstream 2780538433fc (18.5): Check for USAGE privilege on types used by stored expressions.
+// check_usage_on_types (dependency.c): we require USAGE on a type to store a
+// dependency on it. Other referenced objects have privileges of their own,
+// but recording those dependencies doesn't require holding them: an
+// expression may reference a function the user lacks EXECUTE on; EXECUTE is
+// checked when the function is executed.
+pub fn check_usage_on_types(addrs: &[ObjectAddress], roleid: Oid) -> PgResult<()> {
+    for r in addrs {
+        if r.classId != TYPE_CLASS {
+            continue;
+        }
+        // we don't record dependencies on pinned types
+        if catalog::IsPinnedObject(r.classId, r.objectId) {
+            continue;
+        }
+        let aclresult = aclchk_seams::object_aclcheck::call(
+            r.classId,
+            r.objectId,
+            roleid,
+            types_nodes::parsenodes::ACL_USAGE,
+        )?;
+        // ACLCHECK_OK == 0 (acl.h)
+        if aclresult != 0 {
+            aclcheck_error_type(aclresult, r.objectId)?;
+        }
+    }
+    Ok(())
+}
+
+// aclcheck_error_type (aclchk.c): arrays report their element type.
+#[cold]
+#[inline(never)]
+fn aclcheck_error_type(aclerr: i32, type_oid: Oid) -> PgResult<()> {
+    let element_type = lsyscache::get_element_type(type_oid)?;
+    let type_oid = if element_type != types_core::InvalidOid { element_type } else { type_oid };
+    aclchk_seams::aclcheck_error::call(
+        aclerr,
+        types_nodes::parsenodes::ObjectType::OBJECT_TYPE as i32,
+        &format_type::format_type_be(type_oid)?,
+    )
+}
+
+// CheckUsageOnTypesInSingleRelExpr (dependency.c): like
+// recordDependencyOnSingleRelExpr, over an expression whose Vars all refer to
+// one relation; require USAGE for roleid on every type it names.
+pub fn CheckUsageOnTypesInSingleRelExpr<'mcx>(
+    mcx: Mcx<'mcx>,
+    expr: types_nodes::Node<'mcx>,
+    rel_id: Oid,
+    roleid: Oid,
+) -> PgResult<()> {
+    let mut addrs: mcx::PgVec<'mcx, ObjectAddress> = mcx::PgVec::new_in(mcx);
+    nodes_core::NodeWalker::visit(&mut FindExprRefs { mcx, rel_id, addrs: &mut addrs }, expr)?;
+    eliminate_duplicate_dependencies(&mut addrs);
+    check_usage_on_types(&addrs, roleid)
+}
+
 // eliminate_duplicate_dependencies (dependency.c): sort, drop identicals; a
 // whole-object ref (subId 0 sorts first) collapses into the first column ref
 // of the same object that follows it.
@@ -564,6 +705,10 @@ pub fn changeDependencyFor<'mcx>(
             DependencyType::Normal,
         )?;
         return Ok(1);
+    }
+    // upstream c8cd3d6976f7 (18.6): Avoid orphaned objects dependencies
+    if !new_is_pinned {
+        dependencyLockAndCheckObject(mcx, refClassId, newRefObjectId)?;
     }
     let mut count = 0i64;
     let rel = table::table_open(mcx, DependRelationId, RowExclusiveLock)?;
@@ -1345,7 +1490,90 @@ mod tests {
             syscache_seams::pg_type_typrelid::set(|typid| {
                 Ok((typid == COMPOSITE_TYPE).then_some(COMPOSITE_RELTYPE))
             });
+            // check_usage_on_types: the ACL seams, plus what aclcheck_error_type
+            // -> format_type_be needs to name UNPINNED_TYPE.
+            aclchk_seams::object_aclcheck::set(|classid, objectid, roleid, mode| {
+                assert_eq!(classid, TYPE_CLASS);
+                assert_eq!(mode, types_nodes::parsenodes::ACL_USAGE);
+                assert!(
+                    objectid >= types_core::catalog::FirstUnpinnedObjectId,
+                    "pinned type {objectid} consulted for USAGE"
+                );
+                Ok(if roleid == ROLE_WITHOUT_USAGE { 1 } else { 0 })
+            });
+            aclchk_seams::aclcheck_error::set(|_aclresult, objtype, name| {
+                assert_eq!(objtype, types_nodes::parsenodes::ObjectType::OBJECT_TYPE as i32);
+                Err(Box::new(
+                    types_error::PgError::new(
+                        types_error::ERROR,
+                        format!("permission denied for type {name}"),
+                    )
+                    .with_sqlstate(types_error::ERRCODE_INSUFFICIENT_PRIVILEGE),
+                ))
+            });
+            syscache_seams::pg_type_element_shape::set(|_| Ok(None));
+            syscache_seams::lookup_pg_type_typcache_shape::set(|typid| {
+                Ok((typid == UNPINNED_TYPE).then(|| {
+                    let mut typname = types_tuple::NameData::default();
+                    typname.namestrcpy("usage_t");
+                    syscache_seams::PgTypeTypcacheShape {
+                        typname,
+                        typlen: 4,
+                        typbyval: true,
+                        typalign: b'i' as i8,
+                        typstorage: b'p' as i8,
+                        typtype: b'b' as i8,
+                        typisdefined: true,
+                        typrelid: 0,
+                        typsubscript: 0,
+                        typelem: 0,
+                        typarray: 0,
+                        typcollation: 0,
+                    }
+                }))
+            });
+            namespace_seams::type_is_visible::set(|_| Ok(true));
         });
+    }
+
+    const UNPINNED_TYPE: Oid = 70001;
+    const ROLE_WITH_USAGE: Oid = 70010;
+    const ROLE_WITHOUT_USAGE: Oid = 70011;
+
+    // upstream 2780538433fc (18.5): check_usage_on_types (dependency.c) only
+    // consults the ACL of unpinned types; other classes and pinned types pass
+    // regardless of the role.
+    #[test]
+    fn check_usage_on_types_ignores_pinned_types_and_other_classes() {
+        install_seams();
+        let addrs = [
+            ObjectAddress::set(TYPE_CLASS, INT4OID),
+            ObjectAddress::sub_set(RELATION_CLASS, 50001, 1),
+            ObjectAddress::set(TYPE_CLASS, UNPINNED_TYPE),
+        ];
+        check_usage_on_types(&addrs, ROLE_WITH_USAGE).unwrap();
+        check_usage_on_types(&addrs[..2], ROLE_WITHOUT_USAGE).unwrap();
+    }
+
+    #[test]
+    fn check_usage_on_types_requires_usage_on_unpinned_types() {
+        install_seams();
+        let e = check_usage_on_types(&[ObjectAddress::set(TYPE_CLASS, UNPINNED_TYPE)], ROLE_WITHOUT_USAGE)
+            .unwrap_err();
+        assert_eq!(e.message(), "permission denied for type usage_t");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INSUFFICIENT_PRIVILEGE);
+    }
+
+    #[test]
+    fn single_rel_expr_usage_check_walks_the_expression() {
+        install_seams();
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        let expr =
+            Node::mk_const(mcx, UNPINNED_TYPE, -1, 0, 4, Datum::from_i32(1), false, true).unwrap();
+        CheckUsageOnTypesInSingleRelExpr(mcx, expr, 50001, ROLE_WITH_USAGE).unwrap();
+        let e = CheckUsageOnTypesInSingleRelExpr(mcx, expr, 50001, ROLE_WITHOUT_USAGE).unwrap_err();
+        assert_eq!(e.message(), "permission denied for type usage_t");
     }
 
     fn walk_expr<'mcx>(mcx: Mcx<'mcx>, expr: Node<'mcx>) -> Vec<ObjectAddress> {

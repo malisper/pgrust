@@ -23,8 +23,7 @@ pub trait VarOps {
     fn leaf_cmp(a: &[u8], b: &[u8], ctx: &mut Ctx) -> PgResult<i32> {
         Self::cmp(a, b, ctx)
     }
-    // C f_eq, used by the NOT_EQUAL arm at every level; bit overrides with
-    // the biteq shape.
+    // C f_eq (leaf NOT_EQUAL); bit overrides with the biteq shape.
     fn eq(a: &[u8], b: &[u8], ctx: &mut Ctx) -> PgResult<bool> {
         Ok(Self::cmp(a, b, ctx)? == 0)
     }
@@ -396,8 +395,16 @@ pub fn consistent<T: VarOps>(
                 T::cmp(query, key.upper, ctx)? <= 0 || node_pf_match::<T>(key, query)
             }
         }
+        // upstream 12c519207db0 (18.5): Fix btree_gist's NotEqual strategy on internal index pages.
         BT_NOT_EQUAL => {
-            !(T::eq(query, key.lower, ctx)? && T::eq(query, key.upper, ctx)?)
+            if is_leaf {
+                !T::eq(query, key.lower, ctx)?
+            } else {
+                // equal untruncated bounds pin every entry below; truncated say nothing
+                T::TRNC
+                    || !(T::cmp(query, key.lower, ctx)? == 0
+                        && T::cmp(query, key.upper, ctx)? == 0)
+            }
         }
         _ => false,
     })

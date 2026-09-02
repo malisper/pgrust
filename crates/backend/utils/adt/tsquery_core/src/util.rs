@@ -3,6 +3,8 @@ use ::adt_tsvector_core::query::*;
 use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
 use ::types_error::{PgError, PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
 
+use crate::parse::MAXSTRPOS;
+
 // tsquery_util.c QTNode as an owned tree; `word` is the operand's bytes.
 pub struct QtNode<'mcx> {
     pub item: Item,
@@ -283,7 +285,13 @@ fn fill_qt(st: &mut FillState<'_>, n: &QtNode<'_>) -> PgResult<()> {
     ::stack_depth::check_stack_depth()?;
     match n.item {
         Item::Val(mut op) => {
-            op.distance = st.pool.len();
+            // upstream dddc8a69ff8b (18.6): Harden tsquery code against overflows.
+            // Per item as assigned, so the last operand may run past MAXSTRPOS (C's practice).
+            let distance = st.pool.len();
+            if distance > MAXSTRPOS {
+                return Err(tsquery_too_large());
+            }
+            op.distance = distance;
             ::mcx::vec_append_bytes(&mut st.pool, &n.word)?;
             st.pool.push(0);
             st.items.push(Item::Val(op));
@@ -311,10 +319,9 @@ pub fn qtn2qt<'mcx>(mcx: Mcx<'mcx>, n: &QtNode<'_>) -> PgResult<PgVec<'mcx, u8>>
     let mut sumlen = 0usize;
     let mut nnode = 0usize;
     cntsize(n, &mut sumlen, &mut nnode)?;
-    if nnode > (MAX_ALLOC_SIZE - HDRSIZETQ - sumlen) / QUERYITEM_SIZE {
-        return Err(PgError::error("tsquery is too large")
-            .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
-            .into());
+    // upstream dddc8a69ff8b (18.6): Harden tsquery code against overflows.
+    if tsquery_too_big(nnode, sumlen) {
+        return Err(tsquery_too_large());
     }
     let mut st = FillState {
         items: vec_with_capacity_in(mcx, nnode)?,
@@ -322,4 +329,11 @@ pub fn qtn2qt<'mcx>(mcx: Mcx<'mcx>, n: &QtNode<'_>) -> PgResult<PgVec<'mcx, u8>>
     };
     fill_qt(&mut st, n)?;
     crate::parse::build_query_image(mcx, &st.items, &st.pool)
+}
+
+#[cold]
+fn tsquery_too_large() -> Box<PgError> {
+    PgError::error("tsquery is too large")
+        .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+        .into()
 }

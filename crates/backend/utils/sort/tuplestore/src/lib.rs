@@ -377,6 +377,12 @@ impl Tuplestore {
         self.0.with(|st| st.tuples)
     }
 
+    // upstream 37b8f3b0e05e (18.6): Cross-check the type of a portal running EXECUTE or FETCH.
+    /// C's `tContext` (tstoreReceiver.c): the context holding the store.
+    pub fn mcx(&self) -> Mcx<'_> {
+        self.0.context().mcx()
+    }
+
     pub fn ateof(&self) -> bool {
         self.0.with(|st| st.readptrs[st.activeptr].eof_reached)
     }

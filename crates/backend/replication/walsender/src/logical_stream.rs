@@ -48,11 +48,6 @@ thread_local! {
     static LOGICAL_FLUSH_PTR: Cell<XLogRecPtr> = const { Cell::new(InvalidXLogRecPtr) };
     // WalSndWaitForWal's RecentFlushPtr (C function-static).
     static RECENT_FLUSH_PTR: Cell<XLogRecPtr> = const { Cell::new(InvalidXLogRecPtr) };
-    // XLogBackgroundFlush's lastflush pacing is caller-owned state since the
-    // M4 walwriter migration; each walsender is a persistent thread (the C
-    // per-process function-static analog), so one per walsender thread.
-    static WAL_FLUSH_PACING: Cell<transam_xlog::WalFlushPacing> =
-        const { Cell::new(transam_xlog::WalFlushPacing::new()) };
 }
 
 // StartLogicalReplication (walsender.c:1447).
@@ -247,16 +242,40 @@ impl XLogReaderRoutine for LogicalWalSndPageRead {
         // segment (C delegates the same decision to WalSndSegmentOpen via
         // state->currTLI; the local-read guts here mirror
         // read_local_xlog_page, which 010's SQL path already proves).
+        //
+        // While in recovery, prefer the WAL insertion timeline once it is
+        // set: StartupXLOG assigns InsertTimeLineID before it removes or
+        // recycles the old timeline's segments (and renames its last partial
+        // segment with archiving on) and before SharedRecoveryState flips to
+        // RECOVERY_STATE_DONE. In that window the replay timeline would be
+        // taken as current and its file opened, failing with "requested WAL
+        // segment ... has already been removed"; with the new timeline the
+        // old one resolves as historic and the switch segment is read from
+        // the copy promotion made on the new timeline.
+        // upstream b4bd1385043c (18.6): Fix race with timeline selection in logical decoding during promotion
         let curr_tli = if am_cascading {
-            xlogrecovery_seams::get_xlog_replay_rec_ptr::call().1
+            let insert_tli = transam_xlog::GetWALInsertionTimeLineIfSet();
+            if insert_tli != 0 {
+                insert_tli
+            } else {
+                xlogrecovery_seams::get_xlog_replay_rec_ptr::call().1
+            }
         } else {
             transam_xlog::ctl::GetWALInsertionTimeLine()
         };
         xlogutils::XLogReadDetermineTimeline(v, target_page_ptr, req_len as u32, curr_tli)?;
         let read_tli = if v.currTLI != curr_tli {
-            // Historical timeline: read only up to the switch point.
+            // Historical timeline: read only up to the switch point, and read
+            // the segment holding the switch point from the NEXT timeline's
+            // file (WalSndSegmentOpen, walsender.c:3031: the old timeline's
+            // file may be gone; the used portion was copied at the switch).
             flushptr = v.currTLIValidUntil;
-            v.currTLI
+            let segsize = transam_xlog::wal_segment_size() as u64;
+            if target_page_ptr / segsize == v.currTLIValidUntil / segsize {
+                v.nextTLI
+            } else {
+                v.currTLI
+            }
         } else {
             curr_tli
         };
@@ -334,11 +353,18 @@ fn WalSndWaitForWal(loc_: XLogRecPtr) -> PgResult<XLogRecPtr> {
         crate::replies::ProcessRepliesIfAny()?;
 
         // If we're shutting down, trigger pending WAL to be written out so we
-        // don't wait for WAL the walwriter will never write.
-        if crate::GOT_STOPPING.with(|c| c.get()) {
-            let mut pacing = WAL_FLUSH_PACING.with(Cell::get);
-            transam_xlog::XLogBackgroundFlush(&mut pacing)?;
-            WAL_FLUSH_PACING.with(|c| c.set(pacing));
+        // don't wait for WAL the walwriter will never write. A background
+        // flush stops at the last complete page (or asyncXactLSN), leaving an
+        // xid-less rolled-back transaction's tail unflushed forever while
+        // the reader sits at its start: XLogSendLogical never reports caught
+        // up and WalSndLoop spins, wedging WalSndWaitStopping. The request
+        // LSN is GetXLogInsertEndRecPtr: with the last record ending on a
+        // page boundary GetXLogInsertRecPtr points past the next page header
+        // and XLogFlush errors "xlog flush request ... is not satisfied".
+        // upstream 3eb2fecdbbfc (18.4): Fix publisher shutdown hang caused by logical walsender busy loop.
+        // upstream 9804981386a0 (18.4): Fix WAL flush LSN used by logical walsender during shutdown
+        if crate::GOT_STOPPING.with(|c| c.get()) && !transam_xlog::RecoveryInProgress() {
+            transam_xlog::XLogFlush(transam_xlog::GetXLogInsertEndRecPtr())?;
         }
 
         // Update our idea of the currently flushed position: on a standby

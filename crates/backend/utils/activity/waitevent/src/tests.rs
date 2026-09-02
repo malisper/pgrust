@@ -67,6 +67,9 @@ fn wait_event_decodes_known_constants() {
     assert_eq!(pgstat_get_wait_event(PG_WAIT_IPC + 11), Some("CheckpointDone"));
     assert_eq!(pgstat_get_wait_event(PG_WAIT_IPC + 12), Some("CheckpointStart"));
     assert_eq!(pgstat_get_wait_event(PG_WAIT_IPC + 56), Some("XactGroupUpdate"));
+    // upstream 33101632235a (18.6): the ABI_compatibility row.
+    assert_eq!(pgstat_get_wait_event(PG_WAIT_IPC + 57), Some("WalReceiverUpstreamCatchup"));
+    assert_eq!(pgstat_get_wait_event(PG_WAIT_IPC + 58), Some("FlushPipeline"));
     assert_eq!(pgstat_get_wait_event(PG_WAIT_TIMEOUT + 1), Some("CheckpointWriteDelay"));
     assert_eq!(pgstat_get_wait_event(PG_WAIT_TIMEOUT + 9), Some("WalSummarizerError"));
     assert_eq!(pgstat_get_wait_event(PG_WAIT_IO + 1), Some("AioIoUringExecution"));
@@ -148,10 +151,11 @@ fn custom_wait_events_register_resolve_and_collide() {
     }
 }
 
+// upstream 33101632235a (18.6): +1 IPC row (WalReceiverUpstreamCatchup).
 #[test]
-fn wait_event_funcs_data_has_273_rows_across_9_classes() {
+fn wait_event_funcs_data_has_274_rows_across_9_classes() {
     let rows: Vec<_> = super::funcs::WAIT_EVENT_FUNCS_DATA.lines().collect();
-    assert_eq!(rows.len(), 273);
+    assert_eq!(rows.len(), 274);
     let mut classes = std::collections::BTreeSet::new();
     for row in &rows {
         let mut parts = row.splitn(3, '\t');

@@ -320,6 +320,31 @@ pub fn deconstruct_array_image<'mcx>(
     elmbyval: bool,
     elmalign: u8,
 ) -> PgResult<PgVec<'mcx, Datum>> {
+    Ok(deconstruct_1d_image(mcx, image, elmlen, elmbyval, elmalign, false)?.0)
+}
+
+// upstream 83671c0da049 (18.4): Fix set of issues with extended statistics on expressions
+// deconstruct_array over a 1-D image that may carry a null bitmap: the nulls
+// vector is Some exactly when the image has one, and a NULL element yields a
+// zero Datum without consuming payload bytes (C's dvalues/dnulls pair).
+pub fn deconstruct_array_image_nulls<'mcx>(
+    mcx: Mcx<'mcx>,
+    image: &[u8],
+    elmlen: i16,
+    elmbyval: bool,
+    elmalign: u8,
+) -> PgResult<(PgVec<'mcx, Datum>, Option<PgVec<'mcx, bool>>)> {
+    deconstruct_1d_image(mcx, image, elmlen, elmbyval, elmalign, true)
+}
+
+fn deconstruct_1d_image<'mcx>(
+    mcx: Mcx<'mcx>,
+    image: &[u8],
+    elmlen: i16,
+    elmbyval: bool,
+    elmalign: u8,
+    allow_nulls: bool,
+) -> PgResult<(PgVec<'mcx, Datum>, Option<PgVec<'mcx, bool>>)> {
     let align = align_of_typalign(elmalign);
     // Catchable error for any content-driven inconsistency in the image. C's
     // callers reach deconstruct_array only after array_recv/ArrayGetNItems have
@@ -338,15 +363,11 @@ pub fn deconstruct_array_image<'mcx>(
     };
     if image.len() >= 16 && rd(4)? == 0 {
         // construct_empty_array's zero-dimensional image: no elements.
-        return Ok(PgVec::new_in(mcx));
+        return Ok((PgVec::new_in(mcx), None));
     }
-    // This codec only handles the 1-D no-nulls shape; anything else (including a
+    // This codec only handles the 1-D shape; anything else (including a
     // truncated header) is treated as corrupt rather than trusted.
     if image.len() < ARR_1D_HDRSZ || rd(4)? != 1 {
-        return Err(corrupt());
-    }
-    if rd(8)? != 0 {
-        // Null bitmap present: unsupported here (dataoffset != 0).
         return Err(corrupt());
     }
     // nelems is content-controlled; a negative i32 must not become a huge usize
@@ -357,14 +378,45 @@ pub fn deconstruct_array_image<'mcx>(
         return Err(corrupt());
     }
     let nelems = nelems_i32 as usize;
+    // dataoffset != 0: a null bitmap follows the header and the payload starts
+    // at ARR_OVERHEAD_WITHNULLS(1, nelems) (MAXALIGN, 8). Only callers that
+    // can represent NULL elements accept that shape.
+    let dataoffset = rd(8)?;
+    let mut off = ARR_1D_HDRSZ;
+    let mut bitmap: Option<&[u8]> = None;
+    if dataoffset != 0 {
+        let bitmap_bytes = (nelems + 7) / 8;
+        let expected = (ARR_1D_HDRSZ + bitmap_bytes + 7) & !7;
+        if !allow_nulls
+            || dataoffset < 0
+            || dataoffset as usize != expected
+            || expected > image.len()
+        {
+            return Err(corrupt());
+        }
+        bitmap = Some(&image[ARR_1D_HDRSZ..ARR_1D_HDRSZ + bitmap_bytes]);
+        off = expected;
+    }
     let inline_fetch = elmbyval && array_fetch_inline_enabled();
     // Every element occupies at least one byte, so a valid count can never
     // exceed the remaining bytes; cap the capacity hint so a bogus (but
     // in-range) nelems cannot force a huge up-front allocation.
     let cap = core::cmp::min(nelems, image.len());
     let mut out: PgVec<'mcx, Datum> = vec_with_capacity_in(mcx, cap)?;
-    let mut off = ARR_1D_HDRSZ;
-    for _ in 0..nelems {
+    let mut nulls: Option<PgVec<'mcx, bool>> = match bitmap {
+        Some(_) => Some(vec_with_capacity_in(mcx, cap)?),
+        None => None,
+    };
+    for i in 0..nelems {
+        if let Some(bm) = bitmap {
+            // A set bit marks a present value (arrayfuncs.c bitmask walk).
+            let is_null = bm[i / 8] & (1 << (i % 8)) == 0;
+            nulls.as_mut().expect("nulls tracks the bitmap").push(is_null);
+            if is_null {
+                out.push(Datum::null());
+                continue;
+            }
+        }
         // att_align_pointer: a short-varlena header byte is never a pad byte.
         // The header byte read must itself be in bounds.
         let is_short_varlena = elmlen == -1 && *image.get(off).ok_or_else(corrupt)? != 0;
@@ -410,7 +462,7 @@ pub fn deconstruct_array_image<'mcx>(
             return Err(corrupt());
         }
     }
-    Ok(out)
+    Ok((out, nulls))
 }
 
 pub fn array_image_elemtype(image: &[u8]) -> Oid {
@@ -622,6 +674,39 @@ mod tests {
         let empty = construct_empty_array_image(mcx, 23).unwrap();
         let out = deconstruct_array_image(mcx, &empty, 4, true, b'i').unwrap();
         assert_eq!(out.len(), 0);
+    }
+
+    // upstream 83671c0da049 (18.4): a 1-D int4 image {1, NULL, 3} with its
+    // null bitmap (dataoffset = MAXALIGN(24 + 1) = 32) decodes to a
+    // dvalues/dnulls pair, while the no-nulls codec keeps rejecting it.
+    #[test]
+    fn deconstruct_with_null_bitmap() {
+        let ctx = MemoryContext::new_bump("arr-nulls");
+        let mcx = ctx.mcx();
+        let mut img = [0u8; 40];
+        img[0..4].copy_from_slice(&(40i32 << 2).to_ne_bytes());
+        img[4..8].copy_from_slice(&1i32.to_ne_bytes());
+        img[8..12].copy_from_slice(&32i32.to_ne_bytes());
+        img[12..16].copy_from_slice(&23i32.to_ne_bytes());
+        img[16..20].copy_from_slice(&3i32.to_ne_bytes());
+        img[20..24].copy_from_slice(&1i32.to_ne_bytes());
+        img[24] = 0b101;
+        img[32..36].copy_from_slice(&1i32.to_ne_bytes());
+        img[36..40].copy_from_slice(&3i32.to_ne_bytes());
+        let (vals, nulls) = deconstruct_array_image_nulls(mcx, &img, 4, true, b'i').unwrap();
+        let nulls = nulls.expect("bitmap present");
+        assert_eq!((vals.len(), nulls.len()), (3, 3));
+        assert_eq!([nulls[0], nulls[1], nulls[2]], [false, true, false]);
+        assert_eq!([vals[0].as_i32(), vals[2].as_i32()], [1, 3]);
+        assert!(deconstruct_array_image(mcx, &img, 4, true, b'i').is_err());
+        // A dataoffset that does not match the bitmap size is corrupt, not trusted.
+        img[8..12].copy_from_slice(&40i32.to_ne_bytes());
+        assert!(deconstruct_array_image_nulls(mcx, &img, 4, true, b'i').is_err());
+        // No bitmap: nulls is None and the payload starts right after the header.
+        let plain = construct_array_image(mcx, &[Datum::from_i32(9)], 23, 4, true, b'i').unwrap();
+        let (vals, nulls) = deconstruct_array_image_nulls(mcx, &plain, 4, true, b'i').unwrap();
+        assert!(nulls.is_none());
+        assert_eq!(vals[0].as_i32(), 9);
     }
 
     #[test]

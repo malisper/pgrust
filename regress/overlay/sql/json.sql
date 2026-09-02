@@ -73,7 +73,9 @@ SELECT '{"abc":1,3}'::json;		-- ERROR, no value
 
 -- Recursion.
 SET max_stack_depth = '100kB';
+-- pgrust:ruled JSON-STACK-DEPTH-SCALE
 SELECT repeat('[', 10000)::json;
+-- pgrust:ruled JSON-STACK-DEPTH-SCALE
 SELECT repeat('{"a":', 10000)::json;
 RESET max_stack_depth;
 

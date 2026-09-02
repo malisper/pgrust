@@ -17,6 +17,7 @@ types_portal = { path = "../../../_support/types/portal" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
 elog = { path = "../../utils/error/elog" }
 plancache = { path = "../../utils/cache/plancache" }
+tupdesc = { path = "../../access/common/tupdesc" }
 portalmem = { path = "../../utils/mmgr/portalmem" }
 pquery = { path = "../../tcop/pquery" }
 tcop_dest = { path = "../../tcop/dest" }

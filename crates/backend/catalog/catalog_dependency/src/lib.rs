@@ -10,7 +10,10 @@ mod description;
 mod find_expr;
 
 pub use description::getObjectDescription;
-pub use find_expr::{eliminate_duplicate_dependencies, find_expr_references, recordDependencyOnExpr};
+pub use find_expr::{
+    eliminate_duplicate_dependencies, find_expr_references, recordDependencyOnExpr,
+    CheckUsageOnTypesInExpr,
+};
 
 use datum::Datum;
 use mcx::Mcx;
@@ -187,6 +190,9 @@ pub fn AcquireDeletionLock(object: &ObjectAddress, flags: i32) -> PgResult<()> {
 pub fn ReleaseDeletionLock(object: &ObjectAddress) -> PgResult<()> {
     if object.classId == RELATION_RELATION_ID {
         lmgr::UnlockRelationOid(object.objectId, AccessExclusiveLock)
+    } else if object.classId == AuthMemRelationId {
+        // upstream a0daa0b4127d (18.5): Fix lock release for role membership grants in DROP OWNED BY.
+        lmgr::UnlockSharedObject(object.classId, object.objectId, 0, AccessExclusiveLock)
     } else {
         lmgr::UnlockDatabaseObject(object.classId, object.objectId, 0, AccessExclusiveLock)
     }
@@ -1202,6 +1208,7 @@ fn seam_perform_multiple_deletions(
 pub fn init_seams() {
     dependency_seams::perform_deletion::set(seam_perform_deletion);
     dependency_seams::record_dependency_on_expr::set(recordDependencyOnExpr);
+    dependency_seams::check_usage_on_types_in_expr::set(CheckUsageOnTypesInExpr);
     pg_shdepend::acquire_deletion_lock::set(seam_acquire_deletion_lock);
     pg_shdepend::release_deletion_lock::set(seam_release_deletion_lock);
     pg_shdepend::perform_multiple_deletions::set(seam_perform_multiple_deletions);

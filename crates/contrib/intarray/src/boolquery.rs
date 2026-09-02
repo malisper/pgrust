@@ -31,7 +31,7 @@ pub struct Item {
     pub val: i32,
 }
 
-/// bqarr_in error: `soft` marks C's four ereturn sites (reportable through an
+/// bqarr_in error: `soft` marks C's five ereturn sites (reportable through an
 /// ErrorSaveContext); stack-depth exhaustion stays hard.
 #[derive(Debug)]
 pub struct ParseError {
@@ -256,6 +256,7 @@ impl WorkState<'_> {
     }
 }
 
+// upstream c5790ec4fd9a (18.4): Guard against overflow in "left" fields of query_int and ltxtquery.
 fn findoprnd(items: &mut [Item], pos: &mut i32) -> Result<(), ParseError> {
     stack_depth::check_stack_depth().map_err(ParseError::hard)?;
     if *pos < 0 {
@@ -265,19 +266,24 @@ fn findoprnd(items: &mut [Item], pos: &mut i32) -> Result<(), ParseError> {
             PgError::error("syntax error").with_sqlstate(ERRCODE_SYNTAX_ERROR).into(),
         ));
     }
-    let p = *pos as usize;
+    let mypos = *pos;
+    let p = mypos as usize;
+    *pos -= 1;
     if items[p].typ == VAL as i16 {
         items[p].left = 0;
-        *pos -= 1;
     } else if items[p].val == '!' as i32 {
         items[p].left = -1;
-        *pos -= 1;
         findoprnd(items, pos)?;
     } else {
-        let tmp = *pos;
-        *pos -= 1;
         findoprnd(items, pos)?;
-        items[p].left = (*pos - tmp) as i16;
+        let delta = *pos - mypos;
+        if delta < i16::MIN as i32 {
+            return Err(ParseError::soft(
+                PgError::error("query_int expression is too complex")
+                    .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+            ));
+        }
+        items[p].left = delta as i16;
         findoprnd(items, pos)?;
     }
     Ok(())
@@ -309,6 +315,7 @@ pub fn parse_query(buf: &[u8]) -> Result<Vec<u8>, ParseError> {
         .collect();
     let mut pos = items.len() as i32 - 1;
     findoprnd(&mut items, &mut pos)?;
+    debug_assert_eq!(pos, -1);
     Ok(build_image(&items))
 }
 

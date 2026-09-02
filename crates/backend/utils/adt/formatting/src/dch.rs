@@ -136,6 +136,16 @@ fn append_tm_localized<'mcx>(
     }
 }
 
+// upstream 4fafe23805c4 (18.6): the abbreviation must fit key.len * DCH_MAX_ITEM_SIZ.
+#[cold]
+#[inline(never)]
+fn tz_format_value_too_long() -> Box<PgError> {
+    Box::new(
+        PgError::error("time zone format value too long")
+            .with_sqlstate(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+    )
+}
+
 fn apply_thth(out: &mut Vec<u8>, start: usize, suffix: u8) -> PgResult<()> {
     if s_thth(suffix) {
         let num = out[start..].to_vec();
@@ -286,12 +296,20 @@ pub fn dch_to_char<'mcx>(
             DCH_TZ_LOWER => {
                 invalid_for_interval(is_interval)?;
                 if let Some(tzn) = &in_.tzn {
-                    pg_append(&mut out, &asc_tolower(tzn));
+                    // upstream 4fafe23805c4 (18.6): Guard against overlength time zone abbreviations in to_char().
+                    let p = asc_tolower(tzn);
+                    if p.len() > key.len * DCH_MAX_ITEM_SIZ {
+                        return Err(tz_format_value_too_long());
+                    }
+                    pg_append(&mut out, &p);
                 }
             }
             DCH_TZ => {
                 invalid_for_interval(is_interval)?;
                 if let Some(tzn) = &in_.tzn {
+                    if tzn.len() > key.len * DCH_MAX_ITEM_SIZ {
+                        return Err(tz_format_value_too_long());
+                    }
                     pg_append(&mut out, tzn);
                 }
             }
@@ -822,4 +840,30 @@ fn dch_fsec(out: &mut Vec<u8>, prec: usize, frac_val: i32, suffix: u8) -> PgResu
 fn cstr_to_slice(buf: &[u8; MAX_MULTIBYTE_CHAR_LEN + 1]) -> &[u8] {
     let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
     &buf[..end]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tz_to_char(tzn: Vec<u8>, fmt: &[u8]) -> PgResult<Vec<u8>> {
+        let ctx = ::mcx::MemoryContext::new("dch-test");
+        let nodes =
+            crate::parse::parse_format(fmt, DCH_KEYWORDS, DCH_SUFF, &DCH_INDEX, DCH_FLAG, None)?;
+        let mut tmtc = TmToChar::zero();
+        tmtc.tzn = Some(tzn);
+        dch_to_char(ctx.mcx(), &nodes, false, &tmtc, ::types_core::InvalidOid)
+    }
+
+    // upstream 4fafe23805c4 (18.6): TZ/tz budget is key.len (2) * DCH_MAX_ITEM_SIZ.
+    #[test]
+    fn tz_abbreviation_past_the_node_budget_errors() {
+        assert_eq!(tz_to_char(vec![b'A'; 24], b"TZ").unwrap(), vec![b'A'; 24]);
+        assert_eq!(tz_to_char(vec![b'A'; 24], b"tz").unwrap(), vec![b'a'; 24]);
+        for fmt in [&b"TZ"[..], b"tz", b"YYYY TZ"] {
+            let err = tz_to_char(vec![b'A'; 25], fmt).unwrap_err();
+            assert_eq!(err.message(), "time zone format value too long");
+            assert_eq!(err.sqlstate(), ERRCODE_DATETIME_VALUE_OUT_OF_RANGE);
+        }
+    }
 }

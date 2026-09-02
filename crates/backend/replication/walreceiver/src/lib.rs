@@ -28,6 +28,8 @@ use client::PgConn;
 
 const WAIT_EVENT_WAL_RECEIVER_MAIN: u32 = 0x0500_0000 | 14;
 const WAIT_EVENT_WAL_RECEIVER_WAIT_START: u32 = 0x0800_0000 | 54;
+// upstream 33101632235a (18.6): wait_event_names.txt IPC ABI_compatibility row.
+const WAIT_EVENT_WAL_RECEIVER_UPSTREAM_CATCHUP: u32 = 0x0800_0000 | 57;
 const WAIT_EVENT_WAL_WRITE: u32 = 0x0A00_0000 | 80;
 
 const NUM_WALRCV_WAKEUPS: usize = 4;
@@ -44,6 +46,15 @@ fn loc(line: i32, func: &'static str) -> ErrorLocation {
 
 fn lsn_fmt(lsn: XLogRecPtr) -> String {
     format!("{:X}/{:X}", (lsn >> 32) as u32, lsn as u32)
+}
+
+// %X/%08X (the 18.6 LSN_FORMAT_ARGS spelling the catch-up message uses).
+fn lsn_fmt08(lsn: XLogRecPtr) -> String {
+    format!("{:X}/{:08X}", (lsn >> 32) as u32, lsn as u32)
+}
+
+fn wal_retrieve_retry_interval() -> i32 {
+    guc_tables::vars::wal_retrieve_retry_interval.read()
 }
 
 fn get_ts() -> TimestampTz {
@@ -228,8 +239,11 @@ fn wal_receiver_main_inner() -> PgResult<()> {
     });
 
     let mut first_stream = true;
+    // upstream 33101632235a (18.6): Fix cascading standby reconnect failure after archive fallback
+    let mut upstream_catchup_logged = false;
+    let mut upstream_catchup_deadline: TimestampTz = 0;
     loop {
-        let (primary_sysid, primaryTLI) = with_conn(client::identify_system)?;
+        let (primary_sysid, primaryTLI, upstream_flush) = with_conn(client::identify_system)?;
 
         let standby_sysid = format!("{}", transam_xlog::GetSystemIdentifier());
         if primary_sysid != standby_sysid {
@@ -250,6 +264,54 @@ fn wal_receiver_main_inner() -> PgResult<()> {
                 ))
                 .finish(loc(336, "WalReceiverMain"));
         }
+
+        // upstream 33101632235a (18.6): Fix cascading standby reconnect failure after archive fallback
+        // Archive recovery leaves the next read position at the start of the
+        // following segment, which can be ahead of a cascading upstream's
+        // flush position; START_REPLICATION would reject it. Same timeline
+        // and a gap within one segment: wait for the upstream to catch up
+        // (bounded by wal_receiver_timeout). A larger gap means the upstream
+        // is genuinely behind, so let START_REPLICATION fail normally.
+        if startpointTLI == primaryTLI
+            && upstream_flush != InvalidXLogRecPtr
+            && startpoint > upstream_flush
+            && startpoint - upstream_flush <= transam_xlog::wal_segment_size() as u64
+        {
+            if !upstream_catchup_logged && wal_receiver_timeout() > 0 {
+                upstream_catchup_deadline = get_ts() + wal_receiver_timeout() as i64 * 1000;
+            }
+            let _ = ereport(if upstream_catchup_logged { DEBUG1 } else { LOG })
+                .errmsg(format!(
+                    "walreceiver requested start point {} on timeline {startpointTLI} is ahead of the upstream server's flush position {}, waiting",
+                    lsn_fmt08(startpoint),
+                    lsn_fmt08(upstream_flush)
+                ))
+                .finish(loc(390, "WalReceiverMain"));
+            upstream_catchup_logged = true;
+
+            let latch = g::MyLatch();
+            latch::WaitLatch(
+                latch,
+                WL_EXIT_ON_PM_DEATH | WL_TIMEOUT | WL_LATCH_SET,
+                wal_retrieve_retry_interval() as i64,
+                WAIT_EVENT_WAL_RECEIVER_UPSTREAM_CATCHUP,
+            )?;
+            if let Some(l) = latch {
+                latch::ResetLatch(l);
+            }
+
+            if upstream_catchup_deadline > 0 && get_ts() >= upstream_catchup_deadline {
+                return ereport(ERROR)
+                    .errcode(ERRCODE_CONNECTION_FAILURE)
+                    .errmsg("terminating walreceiver due to timeout while waiting for upstream to catch up")
+                    .finish(loc(404, "WalReceiverMain"));
+            }
+
+            postgres_seams::check_for_interrupts::call()?;
+            continue;
+        }
+        upstream_catchup_logged = false;
+        upstream_catchup_deadline = 0;
 
         WalRcvFetchTimeLineHistoryFiles(startpointTLI, primaryTLI)?;
 

@@ -910,8 +910,12 @@ pub fn vacuum_get_cutoffs(
             .finish(loc("vacuum_get_cutoffs"))?;
     }
     if MultiXactIdPrecedes(cutoffs.OldestMxact, safe_oldest_mxact) {
+        // upstream c8d68bfd52d7 (18.5): Remove replication slot advice from MultiXact wraparound hints
         ereport(WARNING)
             .errmsg("cutoff for freezing multixacts is far in the past")
+            .errhint(
+                "Close open transactions soon to avoid wraparound problems.\nYou might also need to commit or roll back old prepared transactions.",
+            )
             .finish(loc("vacuum_get_cutoffs"))?;
     }
 

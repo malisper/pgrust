@@ -45,3 +45,10 @@ walreceiverfuncs_seams = { path = "../walreceiverfuncs_seams" }
 walsender_seams = { path = "../walsender_seams" }
 xlogarchive = { path = "../../access/transam/xlogarchive" }
 xlogrecovery_seams = { path = "../../access/transam/xlogrecovery_seams" }
+
+[dev-dependencies]
+# The scripted-server client tests run the real socket-wait stack.
+waiteventset = { path = "../../storage/ipc/waiteventset" }
+waiteventset_seams = { path = "../../storage/ipc/waiteventset_seams" }
+latch_seams = { path = "../../storage/ipc/latch_seams" }
+fd = { path = "../../storage/file/fd" }

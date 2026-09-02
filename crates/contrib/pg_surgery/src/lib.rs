@@ -214,7 +214,8 @@ fn heap_force_common(fcinfo: &mut Fcinfo, opt: ForceOption) -> PgResult<Datum> {
         let page = unsafe { PageRef::from_raw(page_ptr) };
         let maxoffset = page.max_offset_number();
 
-        let mut include_this_tid = [false; MaxHeapTuplesPerPage + 1];
+        // upstream 2b09f8a9110a (18.6): pg_surgery: Fix off-by-one bug with heap offset
+        let mut include_this_tid = [false; MaxHeapTuplesPerPage];
         for tid in &tids[curr_start_ptr..next_start_ptr] {
             let offno = ItemPointerGetOffsetNumberNoCheck(tid);
 
@@ -267,13 +268,20 @@ fn heap_force_common(fcinfo: &mut Fcinfo, opt: ForceOption) -> PgResult<Datum> {
                 continue;
             }
 
-            debug_assert!((offno as usize) < MaxHeapTuplesPerPage);
-            include_this_tid[offno as usize] = true;
+            // upstream 2b09f8a9110a (18.6): pg_surgery: Fix off-by-one bug with heap offset
+            debug_assert!((offno as usize) <= MaxHeapTuplesPerPage);
+            include_this_tid[offno as usize - 1] = true;
         }
 
+        // upstream f581fa729d8e (18.5): Fix VM clear WAL logging by registering VM blocks
+        // Before entering the critical section, pin and lock the visibility
+        // map page if it appears to be necessary.
         let mut vmbuf = VmBuffer::new();
+        let mut unlock_vmbuf = false;
         if opt == ForceOption::Kill && page.is_all_visible() {
             visibilitymap::visibilitymap_pin(&rel, blkno, &mut vmbuf)?;
+            bufmgr::LockBuffer(vmbuf.buffer(), bufmgr::BUFFER_LOCK_EXCLUSIVE)?;
+            unlock_vmbuf = true;
         }
 
         let mut did_modify_page = false;
@@ -282,7 +290,8 @@ fn heap_force_common(fcinfo: &mut Fcinfo, opt: ForceOption) -> PgResult<Datum> {
         init_small::globals::StartCriticalSection();
 
         for curoff in 1..=maxoffset {
-            if !include_this_tid[curoff as usize] {
+            // upstream 2b09f8a9110a (18.6): pg_surgery: Fix off-by-one bug with heap offset
+            if !include_this_tid[curoff as usize - 1] {
                 continue;
             }
             let mut itemid = page.item_id(curoff);
@@ -297,14 +306,15 @@ fn heap_force_common(fcinfo: &mut Fcinfo, opt: ForceOption) -> PgResult<Datum> {
                     pm.set_item_id(curoff, itemid);
 
                     if page.is_all_visible() {
-                        pm.clear_all_visible();
-                        visibilitymap::visibilitymap_clear(
+                        if visibilitymap::visibilitymap_clear_locked(
                             &rel,
                             blkno,
                             &vmbuf,
                             VISIBILITYMAP_VALID_BITS,
-                        )?;
-                        did_modify_vm = true;
+                        )? {
+                            did_modify_vm = true;
+                        }
+                        pm.clear_all_visible();
                     }
                 }
                 ForceOption::Freeze => {
@@ -334,17 +344,25 @@ fn heap_force_common(fcinfo: &mut Fcinfo, opt: ForceOption) -> PgResult<Datum> {
         if did_modify_page {
             bufmgr::MarkBufferDirty(buf)?;
             if relation_needs_wal(&rel) {
-                xloginsert::log_newpage_buffer(buf, true)?;
+                // One XLOG_FPI: the heap page as block 0 (log_newpage_buffer's
+                // registration) plus, if it was modified, the VM page as
+                // block 1, so the record's block references name every page
+                // it changed.
+                let recptr = log_force_fpi(&rel, buf, did_modify_vm.then_some(&vmbuf))?;
+                if did_modify_vm {
+                    bufmgr::buffer_page_set_lsn(vmbuf.buffer(), recptr);
+                }
+                bufmgr::buffer_page_set_lsn(buf, recptr);
             }
-        }
-
-        if did_modify_vm && relation_needs_wal(&rel) {
-            xloginsert::log_newpage_buffer(vmbuf.buffer(), false)?;
         }
 
         init_small::globals::EndCriticalSection();
 
         bufmgr::UnlockReleaseBuffer(buf)?;
+
+        if unlock_vmbuf {
+            bufmgr::LockBuffer(vmbuf.buffer(), bufmgr::BUFFER_LOCK_UNLOCK)?;
+        }
         vmbuf.release();
 
         curr_start_ptr = next_start_ptr;
@@ -353,6 +371,52 @@ fn heap_force_common(fcinfo: &mut Fcinfo, opt: ForceOption) -> PgResult<Datum> {
     rel.close(RowExclusiveLock)?;
 
     Ok(Datum::from_usize(0))
+}
+
+// upstream f581fa729d8e (18.5): Fix VM clear WAL logging by registering VM blocks
+// XLogInsert(RM_XLOG_ID, XLOG_FPI) with the heap buffer registered as block 0
+// (REGBUF_STANDARD | REGBUF_FORCE_IMAGE) and the VM buffer, when it was
+// modified, as block 1 (REGBUF_FORCE_IMAGE). Caller holds both pinned and
+// exclusively locked inside the critical section.
+fn log_force_fpi(
+    rel: &RelationData<'_>,
+    buf: types_core::Buffer,
+    vmbuf: Option<&VmBuffer>,
+) -> PgResult<types_core::XLogRecPtr> {
+    use xloginsert::RegBlock;
+    use xloginsert_seams::{REGBUF_FORCE_IMAGE, REGBUF_STANDARD};
+
+    const RM_XLOG_ID: u8 = types_core::RmgrIds::RM_XLOG_ID as u8;
+
+    let rlocator = rel.rd_locator.get();
+    let heap_page = bufmgr::BufferGetPagePtr(buf).as_ptr() as *const u8;
+    let heap = RegBlock {
+        block_id: 0,
+        rlocator,
+        forknum: ForkNumber::MAIN_FORKNUM,
+        block: bufmgr::BufferGetBlockNumber(buf),
+        // SAFETY: pinned + cleanup-locked heap page, a BLCKSZ image.
+        page: unsafe { core::slice::from_raw_parts(heap_page, types_core::BLCKSZ) },
+        flags: REGBUF_STANDARD | REGBUF_FORCE_IMAGE,
+        bufdata: &[],
+    };
+    match vmbuf {
+        Some(vmbuf) => {
+            let vm_page = bufmgr::BufferGetPagePtr(vmbuf.buffer()).as_ptr() as *const u8;
+            let vm = RegBlock {
+                block_id: 1,
+                rlocator,
+                forknum: ForkNumber::VISIBILITYMAP_FORKNUM,
+                block: vmbuf.block_number(),
+                // SAFETY: pinned + exclusively locked VM page, a BLCKSZ image.
+                page: unsafe { core::slice::from_raw_parts(vm_page, types_core::BLCKSZ) },
+                flags: REGBUF_FORCE_IMAGE,
+                bufdata: &[],
+            };
+            xloginsert::insert_record(RM_XLOG_ID, transam_xlog::XLOG_FPI, 0, &[], &[heap, vm])
+        }
+        None => xloginsert::insert_record(RM_XLOG_ID, transam_xlog::XLOG_FPI, 0, &[], &[heap]),
+    }
 }
 
 fn lookup(function: &str) -> Option<PGFunction> {

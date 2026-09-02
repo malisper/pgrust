@@ -1726,11 +1726,18 @@ fn bt_endpoint(ctx: &mut ScanCtx<'_, '_>, dir: ScanDirection) -> PgResult<bool> 
     debug_assert!(!BTScanPosIsValid(&ctx.so.currPos));
     debug_assert!(!ctx.so.needPrimScan);
 
-    let Some(pin) = bt_get_endpoint(rel, 0, ScanDirectionIsBackward(dir))? else {
-        // Empty index: lock the whole relation (nothing finer exists).
-        if let Some(snap) = ctx.snapshot {
+    let mut endpoint = bt_get_endpoint(rel, 0, ScanDirectionIsBackward(dir))?;
+    if endpoint.is_none() {
+        // upstream d560e730e813 (18.5): Fix another empty nbtree index SSI race.
+        // Empty index: lock the whole relation, the way bt_first does at the
+        // same point, and look again for a key that landed meanwhile.
+        if xact::IsolationIsSerializable() {
+            let snap = ctx.snapshot.expect("serializable scan has a snapshot");
             predicate_seams::predicate_lock_relation::call(rel, snap)?;
+            endpoint = bt_get_endpoint(rel, 0, ScanDirectionIsBackward(dir))?;
         }
+    }
+    let Some(pin) = endpoint else {
         crate::parallel::bt_parallel_done(ctx.so, ctx.parallel);
         return Ok(false);
     };

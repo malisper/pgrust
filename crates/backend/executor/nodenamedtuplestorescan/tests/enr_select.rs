@@ -141,7 +141,7 @@ fn select_from_enr_scans_registered_tuplestore() {
 
     let out = tuplestore::hold::register(tuplestore::Tuplestore::begin_heap(true, false, 1024));
     let mut dr = tstore_receiver::tstore_create_DR();
-    tstore_receiver::set_params(&mut dr, out, false);
+    tstore_receiver::set_params(&mut dr, out, false, None, None);
     let mut dest = DestReceiver::Tuplestore(dr);
 
     let qd = execmain_seams::create_query_desc::call(

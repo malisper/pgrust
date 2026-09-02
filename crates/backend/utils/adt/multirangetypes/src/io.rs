@@ -260,7 +260,14 @@ pub fn multirange_recv<'m>(
     buf: &mut ::stringinfo::StringInfo<'_>,
     typmod: i32,
 ) -> PgResult<PgVec<'m, u8>> {
-    let range_count = ::pqformat::pq_getmsgint(buf, 4)? as usize;
+    // upstream 01e568b8c11b (18.4): Fix assorted places that need to use palloc_array().
+    // C reads range_count as int32 and sizes RangeType *[range_count] through
+    // palloc_array (mul_size), so a negative count is the overflow error and an
+    // oversized one the MaxAllocSize error, both before anything is allocated.
+    let range_count = ::pqformat::pq_getmsgint(buf, 4)? as i32;
+    let req = ::mcx::mul_size(core::mem::size_of::<*const u8>(), range_count as isize as usize)?;
+    ::mcx::check_alloc_size(req)?;
+    let range_count = range_count as usize;
     let mut ranges: PgVec<'_, &'m [u8]> = ::mcx::vec_with_capacity_in(mcx, range_count)?;
 
     for _ in 0..range_count {

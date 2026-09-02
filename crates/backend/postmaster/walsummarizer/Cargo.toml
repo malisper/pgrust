@@ -16,6 +16,7 @@ condition_variable = { path = "../../storage/lmgr/condition_variable" }
 controldata_utils = { path = "../../../common/controldata_utils" }
 elog = { path = "../../utils/error/elog" }
 fd = { path = "../../storage/file/fd" }
+file_seams = { path = "../../storage/file/file_seams" }
 guc_file = { path = "../../utils/misc/guc_file" }
 types_guc = { path = "../../../_support/types/types_guc" }
 postgres_seams = { path = "../../tcop/postgres_seams" }
@@ -33,6 +34,7 @@ mcx = { path = "../../../_support/mcx" }
 miscinit = { path = "../../utils/init/miscinit" }
 procsignal = { path = "../../storage/ipc/procsignal" }
 timeline = { path = "../../access/transam/timeline" }
+visibilitymap = { path = "../../access/heap/visibilitymap" }
 timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
 transam_xlog = { path = "../../access/transam/transam_xlog" }
 types_core = { path = "../../../_support/types/types_core" }
