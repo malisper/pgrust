@@ -256,6 +256,9 @@ COMMENT ON ACCESS METHOD hnsw IS 'hnsw index access method';
 
 -- access method private functions
 
+CREATE FUNCTION hnsw_sparsevec_support(internal) RETURNS internal
+	AS 'MODULE_PATHNAME' LANGUAGE C;
+
 -- vector opclasses
 
 CREATE OPERATOR CLASS vector_ops
@@ -484,3 +487,28 @@ CREATE OPERATOR CLASS sparsevec_ops
 	OPERATOR 4 >= ,
 	OPERATOR 5 > ,
 	FUNCTION 1 sparsevec_cmp(sparsevec, sparsevec);
+
+CREATE OPERATOR CLASS sparsevec_l2_ops
+	FOR TYPE sparsevec USING hnsw AS
+	OPERATOR 1 <-> (sparsevec, sparsevec) FOR ORDER BY float_ops,
+	FUNCTION 1 sparsevec_l2_squared_distance(sparsevec, sparsevec),
+	FUNCTION 3 hnsw_sparsevec_support(internal);
+
+CREATE OPERATOR CLASS sparsevec_ip_ops
+	FOR TYPE sparsevec USING hnsw AS
+	OPERATOR 1 <#> (sparsevec, sparsevec) FOR ORDER BY float_ops,
+	FUNCTION 1 sparsevec_negative_inner_product(sparsevec, sparsevec),
+	FUNCTION 3 hnsw_sparsevec_support(internal);
+
+CREATE OPERATOR CLASS sparsevec_cosine_ops
+	FOR TYPE sparsevec USING hnsw AS
+	OPERATOR 1 <=> (sparsevec, sparsevec) FOR ORDER BY float_ops,
+	FUNCTION 1 sparsevec_negative_inner_product(sparsevec, sparsevec),
+	FUNCTION 2 l2_norm(sparsevec),
+	FUNCTION 3 hnsw_sparsevec_support(internal);
+
+CREATE OPERATOR CLASS sparsevec_l1_ops
+	FOR TYPE sparsevec USING hnsw AS
+	OPERATOR 1 <+> (sparsevec, sparsevec) FOR ORDER BY float_ops,
+	FUNCTION 1 l1_distance(sparsevec, sparsevec),
+	FUNCTION 3 hnsw_sparsevec_support(internal);
