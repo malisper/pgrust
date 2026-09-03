@@ -12,8 +12,10 @@ use types_tuple::varatt;
 
 use crate::funcs::{detoasted_image, image_datum};
 use crate::sparse::{
-    check_dim, check_element, check_expected_dim, check_index, check_nnz, parse_sparsevec,
-    SparseInputElement, SparseVecBuilder, SparseVecView, SPARSEVEC_MAX_DIM,
+    check_dim, check_dims, check_element, check_expected_dim, check_index, check_nnz,
+    cmp_internal, cosine_similarity, inner_product, l1_distance, l2_squared_distance, norm,
+    parse_sparsevec, sparsevec_l2_normalize_image, SparseInputElement, SparseVecBuilder,
+    SparseVecView, SPARSEVEC_MAX_DIM,
 };
 use crate::vec::{VecBuilder, VecView};
 
@@ -323,4 +325,129 @@ pub fn fc_sparsevec_to_vector(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
         b.set(v.index(i) as usize, v.value(i));
     }
     Ok(image_datum(b.image()))
+}
+
+// Mirrors funcs.rs::binary_2arg for the two-sparsevec-arg distance/comparison
+// functions below.
+fn binary_2arg<'a>(fcinfo: &'a Fcinfo) -> PgResult<(SparseVecView<'a>, SparseVecView<'a>)> {
+    // SAFETY: strict fns — args 0 and 1 are sparsevecs.
+    let a = unsafe { arg_sparsevec(fcinfo, 0)? };
+    let b = unsafe { arg_sparsevec(fcinfo, 1)? };
+    Ok((a, b))
+}
+
+// C: sparsevec_l2_distance (sparsevec.c ~854-865). sqrt of the squared
+// distance, matching funcs::fc_l2_distance's shape.
+pub fn fc_sparsevec_l2_distance(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let (a, b) = binary_2arg(fcinfo)?;
+    check_dims(&a, &b)?;
+    Ok(Datum::from_f64((l2_squared_distance(&a, &b) as f64).sqrt()))
+}
+
+// C: sparsevec_l2_squared_distance (sparsevec.c ~869-880).
+pub fn fc_sparsevec_l2_squared_distance(
+    _f: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let (a, b) = binary_2arg(fcinfo)?;
+    check_dims(&a, &b)?;
+    Ok(Datum::from_f64(l2_squared_distance(&a, &b) as f64))
+}
+
+// C: sparsevec_inner_product (sparsevec.c ~889-900).
+pub fn fc_sparsevec_inner_product(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let (a, b) = binary_2arg(fcinfo)?;
+    check_dims(&a, &b)?;
+    Ok(Datum::from_f64(inner_product(&a, &b) as f64))
+}
+
+// C: sparsevec_negative_inner_product (sparsevec.c ~904-915).
+pub fn fc_sparsevec_negative_inner_product(
+    _f: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let (a, b) = binary_2arg(fcinfo)?;
+    check_dims(&a, &b)?;
+    Ok(Datum::from_f64(-(inner_product(&a, &b) as f64)))
+}
+
+// C: sparsevec_cosine_distance (sparsevec.c ~919-948). `cosine_similarity`
+// (sparse.rs) already clamps to [-1, 1] internally, unlike vec::cosine_similarity —
+// see its doc comment — so the wrapper only needs the final `1 - similarity`.
+pub fn fc_sparsevec_cosine_distance(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let (a, b) = binary_2arg(fcinfo)?;
+    check_dims(&a, &b)?;
+    let similarity = cosine_similarity(&a, &b);
+    Ok(Datum::from_f64(1.0 - similarity))
+}
+
+// C: sparsevec_l1_distance (sparsevec.c ~1005-1043).
+pub fn fc_sparsevec_l1_distance(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let (a, b) = binary_2arg(fcinfo)?;
+    check_dims(&a, &b)?;
+    Ok(Datum::from_f64(l1_distance(&a, &b) as f64))
+}
+
+// C: sparsevec_l2_norm (sparsevec.c ~1049-1061).
+pub fn fc_sparsevec_l2_norm(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: strict fn — arg0 sparsevec.
+    let a = unsafe { arg_sparsevec(fcinfo, 0)? };
+    Ok(Datum::from_f64(norm(&a)))
+}
+
+// C: sparsevec_l2_normalize (sparsevec.c ~1069-1120). `detoasted_image`
+// rebuilds a canonical 4-byte-header image from arg0 (handling the common
+// short-header on-disk form), then `sparsevec_l2_normalize_image` (the same
+// kernel `HnswTypeInfo::normalize` uses) does the actual normalize-and-maybe-
+// shrink-nnz work: the result may have fewer non-zero elements than the
+// input if any value underflows to exactly 0.0 after dividing by the norm.
+pub fn fc_sparsevec_l2_normalize(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let mcx = fcinfo.result_mcx();
+    // SAFETY: strict fn — arg0 sparsevec.
+    let img = unsafe { detoasted_image(mcx, fcinfo.arg(0))? };
+    let out = sparsevec_l2_normalize_image(mcx, img)?;
+    Ok(image_datum(out))
+}
+
+// C: sparsevec_lt (sparsevec.c ~1178-1186). No CheckDims — comparisons treat
+// a dimension mismatch via cmp_internal's own dim tiebreaker, matching C.
+pub fn fc_sparsevec_lt(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let (a, b) = binary_2arg(fcinfo)?;
+    Ok(Datum::from_bool(cmp_internal(&a, &b) < 0))
+}
+
+// C: sparsevec_le (sparsevec.c ~1191-1199).
+pub fn fc_sparsevec_le(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let (a, b) = binary_2arg(fcinfo)?;
+    Ok(Datum::from_bool(cmp_internal(&a, &b) <= 0))
+}
+
+// C: sparsevec_eq (sparsevec.c ~1204-1212).
+pub fn fc_sparsevec_eq(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let (a, b) = binary_2arg(fcinfo)?;
+    Ok(Datum::from_bool(cmp_internal(&a, &b) == 0))
+}
+
+// C: sparsevec_ne (sparsevec.c ~1217-1225).
+pub fn fc_sparsevec_ne(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let (a, b) = binary_2arg(fcinfo)?;
+    Ok(Datum::from_bool(cmp_internal(&a, &b) != 0))
+}
+
+// C: sparsevec_ge (sparsevec.c ~1230-1238).
+pub fn fc_sparsevec_ge(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let (a, b) = binary_2arg(fcinfo)?;
+    Ok(Datum::from_bool(cmp_internal(&a, &b) >= 0))
+}
+
+// C: sparsevec_gt (sparsevec.c ~1243-1251).
+pub fn fc_sparsevec_gt(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let (a, b) = binary_2arg(fcinfo)?;
+    Ok(Datum::from_bool(cmp_internal(&a, &b) > 0))
+}
+
+// C: sparsevec_cmp (sparsevec.c ~1256-1264).
+pub fn fc_sparsevec_cmp(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let (a, b) = binary_2arg(fcinfo)?;
+    Ok(Datum::from_i32(cmp_internal(&a, &b)))
 }

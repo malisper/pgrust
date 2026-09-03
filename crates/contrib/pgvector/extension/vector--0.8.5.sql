@@ -366,3 +366,121 @@ CREATE CAST (double precision[] AS sparsevec)
 
 CREATE CAST (numeric[] AS sparsevec)
 	WITH FUNCTION array_to_sparsevec(numeric[], integer, boolean) AS ASSIGNMENT;
+
+-- sparsevec functions
+
+CREATE FUNCTION l2_distance(sparsevec, sparsevec) RETURNS float8
+	AS 'MODULE_PATHNAME', 'sparsevec_l2_distance' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION inner_product(sparsevec, sparsevec) RETURNS float8
+	AS 'MODULE_PATHNAME', 'sparsevec_inner_product' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION cosine_distance(sparsevec, sparsevec) RETURNS float8
+	AS 'MODULE_PATHNAME', 'sparsevec_cosine_distance' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION l1_distance(sparsevec, sparsevec) RETURNS float8
+	AS 'MODULE_PATHNAME', 'sparsevec_l1_distance' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION l2_norm(sparsevec) RETURNS float8
+	AS 'MODULE_PATHNAME', 'sparsevec_l2_norm' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION l2_normalize(sparsevec) RETURNS sparsevec
+	AS 'MODULE_PATHNAME', 'sparsevec_l2_normalize' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+-- sparsevec private functions
+
+CREATE FUNCTION sparsevec_lt(sparsevec, sparsevec) RETURNS bool
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION sparsevec_le(sparsevec, sparsevec) RETURNS bool
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION sparsevec_eq(sparsevec, sparsevec) RETURNS bool
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION sparsevec_ne(sparsevec, sparsevec) RETURNS bool
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION sparsevec_ge(sparsevec, sparsevec) RETURNS bool
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION sparsevec_gt(sparsevec, sparsevec) RETURNS bool
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION sparsevec_cmp(sparsevec, sparsevec) RETURNS int4
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION sparsevec_l2_squared_distance(sparsevec, sparsevec) RETURNS float8
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION sparsevec_negative_inner_product(sparsevec, sparsevec) RETURNS float8
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+-- sparsevec operators
+
+CREATE OPERATOR <-> (
+	LEFTARG = sparsevec, RIGHTARG = sparsevec, PROCEDURE = l2_distance,
+	COMMUTATOR = '<->'
+);
+
+CREATE OPERATOR <#> (
+	LEFTARG = sparsevec, RIGHTARG = sparsevec, PROCEDURE = sparsevec_negative_inner_product,
+	COMMUTATOR = '<#>'
+);
+
+CREATE OPERATOR <=> (
+	LEFTARG = sparsevec, RIGHTARG = sparsevec, PROCEDURE = cosine_distance,
+	COMMUTATOR = '<=>'
+);
+
+CREATE OPERATOR <+> (
+	LEFTARG = sparsevec, RIGHTARG = sparsevec, PROCEDURE = l1_distance,
+	COMMUTATOR = '<+>'
+);
+
+CREATE OPERATOR < (
+	LEFTARG = sparsevec, RIGHTARG = sparsevec, PROCEDURE = sparsevec_lt,
+	COMMUTATOR = > , NEGATOR = >= ,
+	RESTRICT = scalarltsel, JOIN = scalarltjoinsel
+);
+
+CREATE OPERATOR <= (
+	LEFTARG = sparsevec, RIGHTARG = sparsevec, PROCEDURE = sparsevec_le,
+	COMMUTATOR = >= , NEGATOR = > ,
+	RESTRICT = scalarlesel, JOIN = scalarlejoinsel
+);
+
+CREATE OPERATOR = (
+	LEFTARG = sparsevec, RIGHTARG = sparsevec, PROCEDURE = sparsevec_eq,
+	COMMUTATOR = = , NEGATOR = <> ,
+	RESTRICT = eqsel, JOIN = eqjoinsel
+);
+
+CREATE OPERATOR <> (
+	LEFTARG = sparsevec, RIGHTARG = sparsevec, PROCEDURE = sparsevec_ne,
+	COMMUTATOR = <> , NEGATOR = = ,
+	RESTRICT = eqsel, JOIN = eqjoinsel
+);
+
+CREATE OPERATOR >= (
+	LEFTARG = sparsevec, RIGHTARG = sparsevec, PROCEDURE = sparsevec_ge,
+	COMMUTATOR = <= , NEGATOR = < ,
+	RESTRICT = scalargesel, JOIN = scalargejoinsel
+);
+
+CREATE OPERATOR > (
+	LEFTARG = sparsevec, RIGHTARG = sparsevec, PROCEDURE = sparsevec_gt,
+	COMMUTATOR = < , NEGATOR = <= ,
+	RESTRICT = scalargtsel, JOIN = scalargtjoinsel
+);
+
+-- sparsevec opclasses
+
+CREATE OPERATOR CLASS sparsevec_ops
+	DEFAULT FOR TYPE sparsevec USING btree AS
+	OPERATOR 1 < ,
+	OPERATOR 2 <= ,
+	OPERATOR 3 = ,
+	OPERATOR 4 >= ,
+	OPERATOR 5 > ,
+	FUNCTION 1 sparsevec_cmp(sparsevec, sparsevec);
