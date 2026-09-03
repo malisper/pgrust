@@ -117,7 +117,7 @@ fs	crates/backend/commands/dbcommands/src/createdb.rs	3	DST-REVIEW(testdb-land):
 fs	crates/backend/commands/dbcommands/src/lib.rs	6
 fs	crates/backend/commands/dbcommands/src/walcopy.rs	1
 # --- crates/backend/commands/extension (7 sites) ---
-fs	crates/backend/commands/extension/src/control.rs	5
+fs	crates/backend/commands/extension/src/control.rs	6	DST-REVIEW(audit-18.6/extension-crashes): +1 = exists_in_paths, the byte-name twin of find_in_paths (C extension.c find_in_paths stat probe) so non-UTF-8 extension names take C's not-available path instead of a panic; same raw std::fs surface as the crate's other 5 sites, P1 Vfs choke routing rides with them
 fs	crates/backend/commands/extension/src/create.rs	1
 fs	crates/backend/commands/extension/src/graph.rs	1
 # --- crates/backend/commands/tablespace (16 sites) ---

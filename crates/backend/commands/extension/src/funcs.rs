@@ -6,9 +6,11 @@ use types_error::PgResult;
 use types_fmgr::{varlena_result, FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
 use types_tuple::NameData;
 
-use crate::control::{for_each_primary_control_name, parse_control_in_dir};
+use crate::control::{
+    for_each_primary_control_name, parse_control_in_dir, read_extension_control_file_bytes,
+};
 use crate::graph::{find_install_path, get_ext_ver_list, EviData};
-use crate::{check_valid_extension_name, read_extension_control_file, ExtensionControlFile};
+use crate::{check_valid_extension_name_bytes, ExtensionControlFile};
 
 fn text_datum(mcx: Mcx<'_>, s: &str) -> PgResult<Datum> {
     Ok(varlena_result(varlena::cstring_to_text(mcx, s.as_bytes())?))
@@ -153,23 +155,22 @@ pub fn fc_pg_extension_update_paths(
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     let flinfo = flinfo.expect("pg_extension_update_paths: resolved FmgrInfo required");
-    let extname = {
+    // Raw bytes (SQL_ASCII): C checks and searches them as such.
+    let extname: Vec<u8> = {
         let p = fcinfo.arg(0).as_usize() as *const u8;
         // SAFETY: name argument datum — 64 NUL-padded bytes.
         let bytes = unsafe { core::slice::from_raw_parts(p, 64) };
         let len = bytes.iter().position(|&b| b == 0).unwrap_or(64);
-        core::str::from_utf8(&bytes[..len])
-            .expect("name argument is server-encoding text")
-            .to_string()
+        bytes[..len].to_vec()
     };
 
-    check_valid_extension_name(&extname)?;
+    check_valid_extension_name_bytes(&extname)?;
 
     // SAFETY: executor arms es_query_cxt pre-call; it outlives this frame.
     let mcx = unsafe { fcinfo.result_mcx_detached() };
     let mut srf = funcapi::InitMaterializedSRF(mcx, flinfo, fcinfo, 0)?;
 
-    let control = read_extension_control_file(&extname)?;
+    let control = read_extension_control_file_bytes(&extname)?;
     let mut evi_list: Vec<EviData> = get_ext_ver_list(&control)?;
 
     for evi1 in 0..evi_list.len() {

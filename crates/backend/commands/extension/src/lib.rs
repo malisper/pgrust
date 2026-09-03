@@ -6,7 +6,9 @@
 
 use mcx::{Mcx, PgString};
 use types_core::{InvalidOid, Oid, EXTENSION_RELATION_ID};
-use types_error::{PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
+use types_error::{
+    PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_PARAMETER_VALUE, ERROR,
+};
 
 use cache_syscache::{
     GetSysCacheOid, ReleaseSysCache, SearchSysCache1, SysCacheGetAttr, SysCacheKey, EXTENSIONNAME,
@@ -43,6 +45,32 @@ pub const Anum_pg_extension_extconfig: i32 = 7;
 pub const Anum_pg_extension_extcondition: i32 = 8;
 pub const Natts_pg_extension: usize = 8;
 
+// elog(ERROR, "could not find tuple for extension %u") (extension.c:2860,
+// 3057, 3252, 3604): a catchable XX000, not a backend abort.
+#[cold]
+#[inline(never)]
+pub(crate) fn extension_tuple_not_found(oid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!("could not find tuple for extension {oid}")))
+}
+
+// carve-ratifications.md §11 (tcop's non_utf8_query_error): text C would run or spell.
+#[cold]
+#[inline(never)]
+pub(crate) fn non_utf8_text_error() -> Box<PgError> {
+    Box::new(
+        PgError::new(
+            ERROR,
+            format!(
+                "query strings with non-ASCII characters are not supported yet in databases \
+                 with encoding \"{}\"",
+                mbutils::GetDatabaseEncodingName()
+            ),
+        )
+        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
+        .with_hint("Use a database with encoding \"UTF8\"."),
+    )
+}
+
 pub fn get_extension_oid(extname: &str, missing_ok: bool) -> PgResult<Oid> {
     let result = GetSysCacheOid(
         EXTENSIONNAME,
@@ -75,8 +103,8 @@ pub fn get_extension_name<'mcx>(mcx: Mcx<'mcx>, ext_oid: Oid) -> PgResult<Option
     // NUL-padded bytes.
     let bytes = unsafe { core::slice::from_raw_parts(p, 64) };
     let len = bytes.iter().position(|&b| b == 0).unwrap_or(64);
-    let s = core::str::from_utf8(&bytes[..len]).expect("extname is server-encoding text");
-    let name = PgString::from_str_in(s, mcx)?;
+    // SQL_ASCII keeps bind-parameter bytes as-is; C hands them to every %s.
+    let name = PgString::from_str_in(&String::from_utf8_lossy(&bytes[..len]), mcx)?;
     ReleaseSysCache(tuple);
     Ok(Some(name))
 }
@@ -94,42 +122,52 @@ pub fn get_extension_schema(ext_oid: Oid) -> PgResult<Oid> {
     Ok(result)
 }
 
-fn invalid_name(kind_msg: String, detail: &'static str) -> Box<types_error::PgError> {
+// errmsg("invalid ... name: \"%s\"") on the name bytes: C's exact bytes go on the wire.
+fn invalid_name(what: &str, name: &[u8], detail: &'static str) -> Box<PgError> {
+    let mut msg = format!("invalid {what}: \"").into_bytes();
+    msg.extend_from_slice(name);
+    msg.push(b'"');
     Box::new(
-        ereport(ERROR)
-            .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
-            .errmsg(kind_msg)
-            .errdetail(detail)
-            .into_error(),
+        PgError::error_raw_message(msg)
+            .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE)
+            .with_detail(detail),
     )
 }
 
 pub fn check_valid_extension_name(extensionname: &str) -> PgResult<()> {
-    let bytes = extensionname.as_bytes();
+    check_valid_extension_name_bytes(extensionname.as_bytes())
+}
+
+// check_valid_extension_name (extension.c:360-397) is bytewise.
+pub(crate) fn check_valid_extension_name_bytes(bytes: &[u8]) -> PgResult<()> {
     if bytes.is_empty() {
         return Err(invalid_name(
-            format!("invalid extension name: \"{extensionname}\""),
+            "extension name",
+            bytes,
             "Extension names must not be empty.",
         )
         .into());
     }
-    if extensionname.contains("--") {
+    if bytes.windows(2).any(|w| w == b"--") {
         return Err(invalid_name(
-            format!("invalid extension name: \"{extensionname}\""),
+            "extension name",
+            bytes,
             "Extension names must not contain \"--\".",
         )
         .into());
     }
     if bytes[0] == b'-' || bytes[bytes.len() - 1] == b'-' {
         return Err(invalid_name(
-            format!("invalid extension name: \"{extensionname}\""),
+            "extension name",
+            bytes,
             "Extension names must not begin or end with \"-\".",
         )
         .into());
     }
-    if first_dir_separator(extensionname).is_some() {
+    if first_dir_separator(bytes).is_some() {
         return Err(invalid_name(
-            format!("invalid extension name: \"{extensionname}\""),
+            "extension name",
+            bytes,
             "Extension names must not contain directory separator characters.",
         )
         .into());
@@ -141,28 +179,32 @@ pub fn check_valid_version_name(versionname: &str) -> PgResult<()> {
     let bytes = versionname.as_bytes();
     if bytes.is_empty() {
         return Err(invalid_name(
-            format!("invalid extension version name: \"{versionname}\""),
+            "extension version name",
+            bytes,
             "Version names must not be empty.",
         )
         .into());
     }
     if versionname.contains("--") {
         return Err(invalid_name(
-            format!("invalid extension version name: \"{versionname}\""),
+            "extension version name",
+            bytes,
             "Version names must not contain \"--\".",
         )
         .into());
     }
     if bytes[0] == b'-' || bytes[bytes.len() - 1] == b'-' {
         return Err(invalid_name(
-            format!("invalid extension version name: \"{versionname}\""),
+            "extension version name",
+            bytes,
             "Version names must not begin or end with \"-\".",
         )
         .into());
     }
-    if first_dir_separator(versionname).is_some() {
+    if first_dir_separator(bytes).is_some() {
         return Err(invalid_name(
-            format!("invalid extension version name: \"{versionname}\""),
+            "extension version name",
+            bytes,
             "Version names must not contain directory separator characters.",
         )
         .into());
@@ -171,8 +213,8 @@ pub fn check_valid_version_name(versionname: &str) -> PgResult<()> {
 }
 
 // first_dir_separator (common/path.c, non-Windows).
-pub(crate) fn first_dir_separator(s: &str) -> Option<usize> {
-    s.bytes().position(|b| b == b'/')
+pub(crate) fn first_dir_separator(s: &[u8]) -> Option<usize> {
+    s.iter().position(|&b| b == b'/')
 }
 
 pub fn is_extension_control_filename(filename: &str) -> bool {
@@ -198,4 +240,38 @@ pub fn init_seams() {
         };
         out
     });
+}
+
+#[cfg(test)]
+mod elog_error_tests {
+    use super::*;
+
+    #[test]
+    fn missing_extension_tuple_is_a_catchable_xx000() {
+        let e = extension_tuple_not_found(16389);
+        assert_eq!(e.message(), "could not find tuple for extension 16389");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(e.level(), ERROR);
+    }
+
+    // extension.c:360-397 on a SQL_ASCII bind parameter's raw bytes.
+    #[test]
+    fn extension_name_checks_run_on_the_raw_bytes() {
+        assert!(check_valid_extension_name_bytes(b"caf\xe9").is_ok());
+        let e = check_valid_extension_name_bytes(b"caf\xe9--x").unwrap_err();
+        assert_eq!(e.sqlstate(), ERRCODE_INVALID_PARAMETER_VALUE);
+        assert_eq!(e.message(), "invalid extension name: \"caf\u{FFFD}--x\"");
+        assert_eq!(
+            e.message_raw.as_deref(),
+            Some(&b"invalid extension name: \"caf\xe9--x\""[..])
+        );
+        assert_eq!(e.detail(), Some("Extension names must not contain \"--\"."));
+        let e = check_valid_extension_name_bytes(b"a/\xe9").unwrap_err();
+        assert_eq!(
+            e.detail(),
+            Some("Extension names must not contain directory separator characters.")
+        );
+        let e = check_valid_extension_name("").unwrap_err();
+        assert_eq!(e.detail(), Some("Extension names must not be empty."));
+    }
 }

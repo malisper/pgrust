@@ -84,9 +84,9 @@ pub fn ExecAlterExtensionStmt<'mcx>(
     let version_d =
         unsafe { types_tuple::heap_getattr(tup, Anum_pg_extension_extversion, desc, &mut isnull) };
     if isnull {
-        panic!("extversion is null");
+        return Err(PgError::error("extversion is null").into());
     }
-    let old_version_name = text_datum_str(mcx, version_d)?;
+    let old_version = text_datum_bytes(mcx, version_d)?;
 
     genam::systable_endscan(mcx, scan)?;
     ext_rel.close(AccessShareLock)?;
@@ -133,7 +133,8 @@ pub fn ExecAlterExtensionStmt<'mcx>(
     };
     check_valid_version_name(&version_name)?;
 
-    if old_version_name == version_name {
+    // strcmp on the raw extversion bytes (extension.c:3519).
+    if old_version == version_name.as_bytes() {
         ereport(NOTICE)
             .errmsg(format!(
                 "version \"{version_name}\" of extension \"{extname}\" is already installed"
@@ -146,13 +147,14 @@ pub fn ExecAlterExtensionStmt<'mcx>(
         return Ok(ObjectAddress::set(InvalidOid, InvalidOid));
     }
 
-    let update_versions = identify_update_path(&control, &old_version_name, &version_name)?;
+    let (old_version_name, update_versions) =
+        identify_update_path(&control, &old_version, &version_name)?;
 
     ApplyExtensionUpdates(
         mcx,
         extension_oid,
         &control,
-        &old_version_name,
+        old_version_name,
         &update_versions,
         None,
         false,
@@ -162,7 +164,8 @@ pub fn ExecAlterExtensionStmt<'mcx>(
     Ok(ObjectAddress::set(EXTENSION_RELATION_ID, extension_oid))
 }
 
-fn text_datum_str(mcx: Mcx<'_>, d: Datum) -> PgResult<String> {
+// text_to_cstring on extversion, as bytes: SQL_ASCII need not hold UTF-8.
+fn text_datum_bytes(mcx: Mcx<'_>, d: Datum) -> PgResult<Vec<u8>> {
     let p = d.as_usize() as *const u8;
     // SAFETY: non-null varlena attr datum from the live scan slot; the image
     // spans its header-declared size.
@@ -183,9 +186,7 @@ fn text_datum_str(mcx: Mcx<'_>, d: Datum) -> PgResult<String> {
     } else {
         (4usize, (u32::from_ne_bytes([img[0], img[1], img[2], img[3]]) >> 2) as usize)
     };
-    Ok(core::str::from_utf8(&img[skip..total])
-        .expect("extversion is server-encoding text")
-        .to_string())
+    Ok(img[skip..total].to_vec())
 }
 
 // ApplyExtensionUpdates (extension.c:3554-3702).
@@ -210,7 +211,7 @@ pub(crate) fn ApplyExtensionUpdates(
         let mut scan =
             genam::systable_beginscan(mcx, &ext_rel, ExtensionOidIndexId, true, None, &[key])?;
         let Some(ext_tup) = genam::systable_getnext(mcx, &mut scan)? else {
-            panic!("could not find tuple for extension {extension_oid}");
+            return Err(crate::extension_tuple_not_found(extension_oid));
         };
 
         let desc = ext_rel.descr();
@@ -381,7 +382,7 @@ pub fn AlterExtensionNamespace<'mcx>(
     let mut scan =
         genam::systable_beginscan(mcx, &ext_rel, ExtensionOidIndexId, true, None, &[key])?;
     let Some(ext_tup) = genam::systable_getnext(mcx, &mut scan)? else {
-        panic!("could not find tuple for extension {extension_oid}");
+        return Err(crate::extension_tuple_not_found(extension_oid));
     };
     let desc = ext_rel.descr();
     let mut isnull = false;
@@ -479,7 +480,7 @@ pub fn AlterExtensionNamespace<'mcx>(
             continue;
         }
         if objsubid != 0 {
-            panic!("extension should not have a sub-object dependency");
+            return Err(PgError::error("extension should not have a sub-object dependency").into());
         }
 
         // Relocate the object.
@@ -518,7 +519,7 @@ pub fn AlterExtensionNamespace<'mcx>(
     let mut scan =
         genam::systable_beginscan(mcx, &ext_rel, ExtensionOidIndexId, true, None, &[key])?;
     let Some(ext_tup) = genam::systable_getnext(mcx, &mut scan)? else {
-        panic!("could not find tuple for extension {extension_oid}");
+        return Err(crate::extension_tuple_not_found(extension_oid));
     };
     let mut repl_values = [Datum::null(); Natts_pg_extension];
     let repl_nulls = [false; Natts_pg_extension];
@@ -542,7 +543,10 @@ pub fn AlterExtensionNamespace<'mcx>(
         nsp_oid,
     )? != 1
     {
-        panic!("could not change schema dependency for extension {extension_name}");
+        return Err(PgError::error(format!(
+            "could not change schema dependency for extension {extension_name}"
+        ))
+        .into());
     }
     // InvokeObjectPostAlterHook: object-access hooks are elided repo-wide.
 

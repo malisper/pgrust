@@ -286,8 +286,7 @@ pub(crate) fn extension_config_dump(
     let mut scan =
         genam::systable_beginscan(mcx, &ext_rel, ExtensionOidIndexId, true, None, &[key])?;
     let Some(ext_tup) = genam::systable_getnext(mcx, &mut scan)? else {
-        // C: should not happen.
-        panic!("could not find tuple for extension {current_extension}");
+        return Err(crate::extension_tuple_not_found(current_extension));
     };
     let desc = ext_rel.descr();
 
@@ -396,8 +395,7 @@ fn extension_config_remove(mcx: Mcx<'_>, extension_oid: Oid, table_oid: Oid) -> 
     let mut scan =
         genam::systable_beginscan(mcx, &ext_rel, ExtensionOidIndexId, true, None, &[key])?;
     let Some(ext_tup) = genam::systable_getnext(mcx, &mut scan)? else {
-        // C: should not happen.
-        panic!("could not find tuple for extension {extension_oid}");
+        return Err(crate::extension_tuple_not_found(extension_oid));
     };
     let desc = ext_rel.descr();
 

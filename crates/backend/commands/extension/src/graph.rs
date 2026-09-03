@@ -2,7 +2,7 @@
 // ExtensionVersionInfo list becomes an index-handled Vec (one bulk-freed
 // context in C).
 use elog::ereport;
-use types_error::{PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
+use types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
 
 use crate::control::{get_extension_script_directory, ExtensionControlFile};
 use crate::is_extension_script_filename;
@@ -94,27 +94,37 @@ pub(crate) fn get_ext_ver_list(control: &ExtensionControlFile) -> PgResult<Vec<E
     Ok(evi_list)
 }
 
-pub(crate) fn identify_update_path(
+#[cold]
+#[inline(never)]
+fn no_update_path(control: &ExtensionControlFile, old: &[u8], new: &str) -> Box<PgError> {
+    let mut msg = format!(
+        "extension \"{}\" has no update path from version \"",
+        control.name
+    )
+    .into_bytes();
+    msg.extend_from_slice(old);
+    msg.extend_from_slice(format!("\" to version \"{new}\"").as_bytes());
+    Box::new(PgError::error_raw_message(msg).with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE))
+}
+
+// identify_update_path (extension.c:1593-1617): a non-UTF-8 start is C's isolated vertex.
+pub(crate) fn identify_update_path<'a>(
     control: &ExtensionControlFile,
-    old_version: &str,
+    old_version: &'a [u8],
     new_version: &str,
-) -> PgResult<Vec<String>> {
+) -> PgResult<(&'a str, Vec<String>)> {
     let mut evi_list = get_ext_ver_list(control)?;
-    let evi_start = get_ext_ver_info(old_version, &mut evi_list);
+    let Ok(old) = core::str::from_utf8(old_version) else {
+        return Err(no_update_path(control, old_version, new_version));
+    };
+    let evi_start = get_ext_ver_info(old, &mut evi_list);
     let evi_target = get_ext_ver_info(new_version, &mut evi_list);
 
     let result = find_update_path(&mut evi_list, evi_start, evi_target, false, false);
     if result.is_empty() {
-        return Err(ereport(ERROR)
-            .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
-            .errmsg(format!(
-                "extension \"{}\" has no update path from version \"{old_version}\" to version \"{new_version}\"",
-                control.name
-            ))
-            .into_error()
-            .into());
+        return Err(no_update_path(control, old.as_bytes(), new_version));
     }
-    Ok(result)
+    Ok((old, result))
 }
 
 pub(crate) fn find_update_path(
@@ -213,4 +223,44 @@ pub(crate) fn find_install_path(
         }
     }
     evi_start
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::control::new_ExtensionControlFile;
+
+    // extension.c:1611-1615 from an extversion hacked to non-UTF-8 bytes.
+    #[test]
+    fn non_utf8_extversion_has_no_update_path() {
+        let dir = std::env::temp_dir().join(format!("pgrust-ext-graph-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("ea_x--1.0.sql"), b"select 1;\n").unwrap();
+        std::fs::write(dir.join("ea_x--1.0--2.0.sql"), b"select 2;\n").unwrap();
+        let mut control = new_ExtensionControlFile("ea_x");
+        control.directory = Some(dir.to_str().unwrap().to_string());
+
+        let (old, path) = identify_update_path(&control, b"1.0", "2.0").unwrap();
+        assert_eq!((old, path), ("1.0", vec!["2.0".to_string()]));
+
+        let e = identify_update_path(&control, b"1.0\xe9", "2.0").unwrap_err();
+        assert_eq!(e.sqlstate(), ERRCODE_INVALID_PARAMETER_VALUE);
+        assert_eq!(
+            e.message(),
+            "extension \"ea_x\" has no update path from version \"1.0\u{FFFD}\" to version \"2.0\""
+        );
+        let raw = e.message_raw.as_deref().unwrap();
+        assert_eq!(
+            raw,
+            b"extension \"ea_x\" has no update path from version \"1.0\xe9\" to version \"2.0\""
+        );
+
+        let e = identify_update_path(&control, b"2.0", "1.0").unwrap_err();
+        assert_eq!(
+            e.message(),
+            "extension \"ea_x\" has no update path from version \"2.0\" to version \"1.0\""
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

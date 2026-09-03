@@ -36,9 +36,15 @@ pub(crate) fn read_extension_script_file(
         None => src.as_slice(),
         Some(converted) => converted.as_slice(),
     };
-    Ok(core::str::from_utf8(bytes)
-        .expect("extension script is server-encoding text")
-        .to_string())
+    script_text(bytes)
+}
+
+// SQL_ASCII passes high-bit bytes through pg_verify_mbstr (C runs them).
+fn script_text(bytes: &[u8]) -> PgResult<String> {
+    match core::str::from_utf8(bytes) {
+        Ok(sql) => Ok(sql.to_string()),
+        Err(_) => Err(crate::non_utf8_text_error()),
+    }
 }
 
 // CleanQuerytext (queryjumblefuncs.c): trim to the statement bounds, then
@@ -421,24 +427,18 @@ pub(crate) fn execute_extension_script(
         false,
     )?;
 
-    pg_depend::set_creating_extension(true);
-    pg_depend::set_current_extension_object(extension_oid);
-
-    let result = run_script_body(
-        mcx,
-        control,
-        &filename,
-        switch_to_superuser,
-        save_userid,
-        schema_name,
-        required_schemas,
-    );
-
-    // PG_FINALLY: reset the globals; on error the GUC/userid restores below
-    // are skipped exactly as in C (transaction abort cleans them up).
-    pg_depend::set_creating_extension(false);
-    pg_depend::set_current_extension_object(InvalidOid);
-    result?;
+    // On error the GUC/userid restores below are skipped as in C (abort resets).
+    with_extension_globals(extension_oid, || {
+        run_script_body(
+            mcx,
+            control,
+            &filename,
+            switch_to_superuser,
+            save_userid,
+            schema_name,
+            required_schemas,
+        )
+    })?;
 
     guc::AtEOXact_GUC(true, save_nestlevel);
 
@@ -449,15 +449,31 @@ pub(crate) fn execute_extension_script(
     Ok(())
 }
 
+// PG_TRY/PG_FINALLY (extension.c:1319-1446): reset on every exit, panics included.
+fn with_extension_globals<R>(
+    extension_oid: Oid,
+    body: impl FnOnce() -> PgResult<R>,
+) -> PgResult<R> {
+    pg_depend::set_creating_extension(true);
+    pg_depend::set_current_extension_object(extension_oid);
+    // unwind-ok: c-callback
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
+    pg_depend::set_creating_extension(false);
+    pg_depend::set_current_extension_object(InvalidOid);
+    match outcome {
+        Ok(result) => result,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
 fn guc_enum_below_warning(var: &guc_tables::GucEnumVar) -> bool {
     (var.get().get)() < WARNING.0
 }
 
 fn quote_ident(mcx: Mcx<'_>, s: &str) -> PgResult<String> {
     let q = adt_quote::quote_identifier(mcx, s.as_bytes())?;
-    Ok(core::str::from_utf8(q.as_bytes())
-        .expect("quoted identifier is server-encoding text")
-        .to_string())
+    // UTF-8 by construction: the input plus ASCII quotes.
+    Ok(String::from_utf8_lossy(q.as_bytes()).into_owned())
 }
 
 // The C PG_TRY body (extension.c:1322-1440): read the script, apply the
@@ -570,7 +586,8 @@ fn strip_echo_lines(sql: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::clean_querytext;
+    use super::*;
+    use crate::control::new_ExtensionControlFile;
 
     // The syntax-error heuristic's bounds include the statement's ';' and
     // C's QUERY: line keeps it (test_extensions, test_ext7 2.1bad).
@@ -587,5 +604,60 @@ mod tests {
         let (b, e) = clean_querytext("  select 1 \n", &mut location, &mut len);
         assert_eq!(&"  select 1 \n"[b..e], "select 1");
         assert_eq!((location, len), (2, 8));
+    }
+
+
+    fn script_file(name: &str, bytes: &[u8]) -> String {
+        let path = std::env::temp_dir().join(format!("pgrust-ext-{}-{name}", std::process::id()));
+        std::fs::write(&path, bytes).unwrap();
+        path.to_str().unwrap().to_string()
+    }
+
+    // extension.c:872 non-error side in a SQL_ASCII database: 0A000, no panic.
+    #[test]
+    fn non_utf8_script_in_sql_ascii_database_is_a_catchable_0a000() {
+        let control = new_ExtensionControlFile("ea_badutf");
+        let path = script_file(
+            "badutf.sql",
+            b"CREATE FUNCTION f() RETURNS text LANGUAGE sql AS $$ select 'caf\xe9' $$;\n",
+        );
+        let err = read_extension_script_file(&control, &path).unwrap_err();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(err.sqlstate(), ERRCODE_FEATURE_NOT_SUPPORTED);
+        assert_eq!(
+            err.message(),
+            "query strings with non-ASCII characters are not supported yet in databases \
+             with encoding \"SQL_ASCII\""
+        );
+        assert_eq!(err.hint(), Some("Use a database with encoding \"UTF8\"."));
+
+        let path = script_file("ascii.sql", b"select 1;\n");
+        let sql = read_extension_script_file(&control, &path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(sql, "select 1;\n");
+    }
+
+    // PG_FINALLY (extension.c:1441-1445) on the panic path.
+    #[test]
+    fn extension_globals_reset_when_the_script_panics() {
+        let outcome = std::panic::catch_unwind(|| {
+            with_extension_globals(16384, || -> PgResult<()> {
+                assert!(pg_depend::creating_extension());
+                assert_eq!(pg_depend::CurrentExtensionObject(), 16384);
+                panic!("loud statement inside the script");
+            })
+        });
+        assert!(outcome.is_err());
+        assert!(!pg_depend::creating_extension());
+        assert_eq!(pg_depend::CurrentExtensionObject(), InvalidOid);
+
+        let err = with_extension_globals(16384, || -> PgResult<()> {
+            Err(PgError::error("script error").into())
+        })
+        .unwrap_err();
+        assert_eq!(err.message(), "script error");
+        assert!(!pg_depend::creating_extension());
+        assert_eq!(with_extension_globals(16384, || Ok(7)).unwrap(), 7);
+        assert_eq!(pg_depend::CurrentExtensionObject(), InvalidOid);
     }
 }

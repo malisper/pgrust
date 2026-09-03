@@ -4,8 +4,9 @@ use std::cell::RefCell;
 
 use elog::ereport;
 use types_error::{
-    PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_NAME, ERRCODE_INVALID_PARAMETER_VALUE,
-    ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_OBJECT, ERROR,
+    PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_NAME,
+    ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_SYNTAX_ERROR,
+    ERRCODE_UNDEFINED_OBJECT, ERROR,
 };
 
 use crate::{first_dir_separator, is_extension_control_filename};
@@ -78,7 +79,7 @@ fn substitute_path_macro(s: &str, macro_: &str, value: &str) -> PgResult<String>
     if !s.starts_with('$') {
         return Ok(s.to_string());
     }
-    let sep = first_dir_separator(s).unwrap_or(s.len());
+    let sep = first_dir_separator(s.as_bytes()).unwrap_or(s.len());
     if &s[..sep] != macro_ {
         return Err(ereport(ERROR)
             .errcode(ERRCODE_INVALID_NAME)
@@ -122,25 +123,55 @@ pub(crate) fn get_extension_control_directories() -> PgResult<Vec<String>> {
     Ok(paths)
 }
 
+fn absolute_search_path(path: &str) -> PgResult<String> {
+    let path = pg_path::canonicalize_path(path);
+    if !pg_path::is_absolute_path(&path) {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_INVALID_NAME)
+            .errmsg("component in parameter \"extension_control_path\" is not an absolute path")
+            .into_error()
+            .into());
+    }
+    Ok(path)
+}
+
 // find_in_paths (extension.c:4029): absolute-only search of basename in paths.
 fn find_in_paths(basename: &str, paths: &[String]) -> PgResult<Option<String>> {
     for path in paths {
-        let path = pg_path::canonicalize_path(path);
-        if !pg_path::is_absolute_path(&path) {
-            return Err(ereport(ERROR)
-                .errcode(ERRCODE_INVALID_NAME)
-                .errmsg(
-                    "component in parameter \"extension_control_path\" is not an absolute path",
-                )
-                .into_error()
-                .into());
-        }
-        let full = format!("{path}/{basename}");
+        let full = format!("{}/{basename}", absolute_search_path(path)?);
         if std::fs::metadata(&full).is_ok() {
             return Ok(Some(full));
         }
     }
     Ok(None)
+}
+
+fn exists_in_paths(basename: &[u8], paths: &[String]) -> PgResult<bool> {
+    use std::os::unix::ffi::OsStrExt;
+    for path in paths {
+        let full = std::path::Path::new(&absolute_search_path(path)?)
+            .join(std::ffi::OsStr::from_bytes(basename));
+        if std::fs::metadata(&full).is_ok() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+#[cold]
+#[inline(never)]
+// extension.c:668-674 on the name bytes: C's exact bytes go on the wire.
+fn extension_not_available(name: &[u8]) -> Box<PgError> {
+    let mut msg = b"extension \"".to_vec();
+    msg.extend_from_slice(name);
+    msg.extend_from_slice(b"\" is not available");
+    Box::new(
+        PgError::error_raw_message(msg)
+            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .with_hint(
+                "The extension must first be installed on the system where PostgreSQL is running.",
+            ),
+    )
 }
 
 fn find_extension_control_filename(control: &mut ExtensionControlFile) -> PgResult<Option<String>> {
@@ -194,14 +225,7 @@ fn parse_extension_control_file(
     };
 
     let Some(filename) = filename else {
-        return Err(ereport(ERROR)
-            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
-            .errmsg(format!("extension \"{}\" is not available", control.name))
-            .errhint(
-                "The extension must first be installed on the system where PostgreSQL is running.",
-            )
-            .into_error()
-            .into());
+        return Err(extension_not_available(control.name.as_bytes()));
     };
 
     let control_dir = control.control_dir.as_ref().expect("control_dir set above");
@@ -329,6 +353,73 @@ pub fn read_extension_control_file(extname: &str) -> PgResult<ExtensionControlFi
     let mut control = new_ExtensionControlFile(extname);
     parse_extension_control_file(&mut control, None)?;
     Ok(control)
+}
+
+// read_extension_control_file (extension.c:829) on raw name bytes, which C stats as-is.
+pub(crate) fn read_extension_control_file_bytes(extname: &[u8]) -> PgResult<ExtensionControlFile> {
+    match core::str::from_utf8(extname) {
+        Ok(name) => read_extension_control_file(name),
+        Err(_) => {
+            let basename = [extname, b".control".as_slice()].concat();
+            if exists_in_paths(&basename, &get_extension_control_directories()?)? {
+                return Err(crate::non_utf8_text_error());
+            }
+            Err(extension_not_available(extname))
+        }
+    }
+}
+
+#[cfg(test)]
+mod name_bytes_tests {
+    use super::*;
+
+    // pg_extension_update_paths('caf\xe9') in SQL_ASCII (extension.c:668-674).
+    #[test]
+    fn non_utf8_extension_name_is_c_not_available_or_the_carve() {
+        let dir = std::env::temp_dir().join(format!("pgrust-ext-ecp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("extension")).unwrap();
+        extension_control_path_set(Some(dir.to_str().unwrap().to_string()));
+
+        let e = read_extension_control_file_bytes(b"caf\xe9").unwrap_err();
+        assert_eq!(e.sqlstate(), ERRCODE_FEATURE_NOT_SUPPORTED);
+        assert_eq!(e.message(), "extension \"caf\u{FFFD}\" is not available");
+        assert_eq!(
+            e.message_raw.as_deref(),
+            Some(&b"extension \"caf\xe9\" is not available"[..])
+        );
+        assert_eq!(
+            e.hint(),
+            Some(
+                "The extension must first be installed on the system where PostgreSQL is running."
+            )
+        );
+
+        use std::os::unix::ffi::OsStrExt;
+        let control = dir
+            .join("extension")
+            .join(std::ffi::OsStr::from_bytes(b"caf\xe9.control"));
+        match std::fs::write(&control, b"default_version = '1.0'\n") {
+            Ok(()) => {
+                let e = read_extension_control_file_bytes(b"caf\xe9").unwrap_err();
+                assert_eq!(e.sqlstate(), ERRCODE_FEATURE_NOT_SUPPORTED);
+                assert!(e
+                    .message()
+                    .starts_with("query strings with non-ASCII characters"));
+            }
+            Err(e) => assert_eq!(e.raw_os_error(), Some(92), "EILSEQ: APFS, {e}"),
+        }
+
+        std::fs::write(
+            dir.join("extension/cafe.control"),
+            b"default_version = '1.0'\n",
+        )
+        .unwrap();
+        let ok = read_extension_control_file_bytes(b"cafe").unwrap();
+        assert_eq!(ok.default_version.as_deref(), Some("1.0"));
+        extension_control_path_set(None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 pub(crate) fn read_extension_aux_control_file(
