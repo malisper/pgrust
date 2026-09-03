@@ -1,5 +1,17 @@
 //! pgvector 0.8.5 sparsevec.c I/O fmgr entry points — mirrors funcs.rs's
-//! vector counterparts. DIVERGENCES (recorded): none.
+//! vector counterparts.
+//!
+//! DIVERGENCES (recorded):
+//! (a) C's `elog(ERROR, "safety check failed")` nets in `vector_to_sparsevec`
+//! and `array_to_sparsevec` (also in `sparsevec_l2_normalize` in sparse.rs),
+//! and the `elog(ERROR, "correctness check failed")` net in
+//! `array_to_sparsevec`, have no Rust counterpart: they guard against a
+//! mismatch between a pre-computed nnz and the actual fill count, which the
+//! typed builders here make unreachable.
+//! (b) `array_to_sparsevec` converts each element to f32 in one pass here,
+//! where C converts twice (once to count nnz, once to fill); the conversion
+//! is pure, so this is observably identical, including the position of a
+//! numeric_float4 conversion error relative to CheckDim/CheckExpectedDim.
 use datum::Datum;
 use mcx::PgVec;
 use types_core::{Oid, FLOAT4OID, FLOAT8OID, INT4OID, NUMERICOID};
@@ -10,25 +22,19 @@ use types_error::{
 use types_fmgr::{cstring_result, varlena_result, FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
 use types_tuple::varatt;
 
-use crate::funcs::{detoasted_image, image_datum};
+use crate::funcs::{arg_vector, detoasted_image, image_datum};
 use crate::sparse::{
-    check_dim, check_dims, check_element, check_expected_dim, check_index, check_nnz,
+    check_dim, check_dims, check_element, check_expected_dim, check_index_step, check_nnz,
     cmp_internal, cosine_similarity, inner_product, l1_distance, l2_squared_distance, norm,
     parse_sparsevec, sparsevec_l2_normalize_image, SparseInputElement, SparseVecBuilder,
     SparseVecView, SPARSEVEC_MAX_DIM, SPARSEVEC_TYPE_INFO,
 };
-use crate::vec::{VecBuilder, VecView};
+use crate::vec::VecBuilder;
 
 // SAFETY contract of callers: arg i is a non-null sparsevec varlena (strict fns).
 unsafe fn arg_sparsevec<'a>(fcinfo: &'a Fcinfo, i: usize) -> PgResult<SparseVecView<'a>> {
     let v = unsafe { fcinfo.arg_varlena_packed(i)? };
     SparseVecView::from_payload(v.data())
-}
-
-// SAFETY contract of callers: arg i is a non-null vector varlena (strict fns).
-unsafe fn arg_vector<'a>(fcinfo: &'a Fcinfo, i: usize) -> PgResult<VecView<'a>> {
-    let v = unsafe { fcinfo.arg_varlena_packed(i)? };
-    VecView::from_payload(v.data())
 }
 
 pub fn fc_sparsevec_in(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -125,15 +131,17 @@ pub fn fc_sparsevec_recv(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRe
     let mut b = SparseVecBuilder::new(fcinfo.result_mcx(), dim, nnz as usize)?;
 
     // Binary representation uses zero-based numbering for indices. C checks
-    // each index immediately after reading it (CheckIndex(indices, i, dim));
-    // re-running check_index over the growing prefix each time reproduces
-    // the same incremental bounds/order/duplicate checks and error at the
-    // same element.
+    // each index immediately after reading it (CheckIndex(indices, i, dim),
+    // which looks only at indices[i] and indices[i-1]); check_index_step
+    // reproduces that O(1)-per-element check instead of re-scanning the
+    // growing prefix.
     let mut indices: Vec<i32> = Vec::with_capacity(nnz as usize);
+    let mut prev: Option<i32> = None;
     for _ in 0..nnz {
         let idx = pqformat::pq_getmsgint(buf, 4)? as i32;
+        check_index_step(prev, idx, dim)?;
+        prev = Some(idx);
         indices.push(idx);
-        check_index(indices.iter().copied(), dim)?;
     }
 
     for i in 0..nnz as usize {

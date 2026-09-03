@@ -319,57 +319,6 @@ CREATE TYPE sparsevec (
 	STORAGE   = external
 );
 
--- pulled forward from the cast section; Task 4 must not re-add. Needed now
--- because `'{}/3'::sparsevec(2)` goes through the assignment cast (not
--- sparsevec_in with a typmod) once the value is already typed sparsevec, so
--- the "expected N dimensions, not M" regression case requires this function
--- and cast to exist alongside the type's I/O functions.
-CREATE FUNCTION sparsevec(sparsevec, integer, boolean) RETURNS sparsevec
-	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
-
-CREATE CAST (sparsevec AS sparsevec)
-	WITH FUNCTION sparsevec(sparsevec, integer, boolean) AS IMPLICIT;
-
--- sparsevec cast functions
-
-CREATE FUNCTION vector_to_sparsevec(vector, integer, boolean) RETURNS sparsevec
-	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
-
-CREATE FUNCTION sparsevec_to_vector(sparsevec, integer, boolean) RETURNS vector
-	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
-
-CREATE FUNCTION array_to_sparsevec(integer[], integer, boolean) RETURNS sparsevec
-	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
-
-CREATE FUNCTION array_to_sparsevec(real[], integer, boolean) RETURNS sparsevec
-	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
-
-CREATE FUNCTION array_to_sparsevec(double precision[], integer, boolean) RETURNS sparsevec
-	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
-
-CREATE FUNCTION array_to_sparsevec(numeric[], integer, boolean) RETURNS sparsevec
-	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
-
--- sparsevec casts
-
-CREATE CAST (sparsevec AS vector)
-	WITH FUNCTION sparsevec_to_vector(sparsevec, integer, boolean) AS ASSIGNMENT;
-
-CREATE CAST (vector AS sparsevec)
-	WITH FUNCTION vector_to_sparsevec(vector, integer, boolean) AS IMPLICIT;
-
-CREATE CAST (integer[] AS sparsevec)
-	WITH FUNCTION array_to_sparsevec(integer[], integer, boolean) AS ASSIGNMENT;
-
-CREATE CAST (real[] AS sparsevec)
-	WITH FUNCTION array_to_sparsevec(real[], integer, boolean) AS ASSIGNMENT;
-
-CREATE CAST (double precision[] AS sparsevec)
-	WITH FUNCTION array_to_sparsevec(double precision[], integer, boolean) AS ASSIGNMENT;
-
-CREATE CAST (numeric[] AS sparsevec)
-	WITH FUNCTION array_to_sparsevec(numeric[], integer, boolean) AS ASSIGNMENT;
-
 -- sparsevec functions
 
 CREATE FUNCTION l2_distance(sparsevec, sparsevec) RETURNS float8
@@ -418,6 +367,52 @@ CREATE FUNCTION sparsevec_l2_squared_distance(sparsevec, sparsevec) RETURNS floa
 
 CREATE FUNCTION sparsevec_negative_inner_product(sparsevec, sparsevec) RETURNS float8
 	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+-- sparsevec cast functions
+
+CREATE FUNCTION sparsevec(sparsevec, integer, boolean) RETURNS sparsevec
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION vector_to_sparsevec(vector, integer, boolean) RETURNS sparsevec
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION sparsevec_to_vector(sparsevec, integer, boolean) RETURNS vector
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION array_to_sparsevec(integer[], integer, boolean) RETURNS sparsevec
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION array_to_sparsevec(real[], integer, boolean) RETURNS sparsevec
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION array_to_sparsevec(double precision[], integer, boolean) RETURNS sparsevec
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION array_to_sparsevec(numeric[], integer, boolean) RETURNS sparsevec
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+-- sparsevec casts
+
+CREATE CAST (sparsevec AS sparsevec)
+	WITH FUNCTION sparsevec(sparsevec, integer, boolean) AS IMPLICIT;
+
+CREATE CAST (sparsevec AS vector)
+	WITH FUNCTION sparsevec_to_vector(sparsevec, integer, boolean) AS ASSIGNMENT;
+
+CREATE CAST (vector AS sparsevec)
+	WITH FUNCTION vector_to_sparsevec(vector, integer, boolean) AS IMPLICIT;
+
+CREATE CAST (integer[] AS sparsevec)
+	WITH FUNCTION array_to_sparsevec(integer[], integer, boolean) AS ASSIGNMENT;
+
+CREATE CAST (real[] AS sparsevec)
+	WITH FUNCTION array_to_sparsevec(real[], integer, boolean) AS ASSIGNMENT;
+
+CREATE CAST (double precision[] AS sparsevec)
+	WITH FUNCTION array_to_sparsevec(double precision[], integer, boolean) AS ASSIGNMENT;
+
+CREATE CAST (numeric[] AS sparsevec)
+	WITH FUNCTION array_to_sparsevec(numeric[], integer, boolean) AS ASSIGNMENT;
 
 -- sparsevec operators
 
