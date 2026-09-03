@@ -13,6 +13,7 @@ use types_tuple::varatt;
 
 use crate::funcs::{detoasted_image, image_datum};
 use crate::half::*;
+use crate::halfutils::{float4_to_half_unchecked, half_is_inf, half_is_zero};
 use crate::vec::{
     check_dim as vec_check_dim, check_expected_dim as vec_check_expected_dim, VecBuilder, VecView,
 };
@@ -29,9 +30,6 @@ unsafe fn arg_vector<'a>(fcinfo: &'a Fcinfo, i: usize) -> PgResult<VecView<'a>> 
     VecView::from_payload(v.data())
 }
 
-// Not yet called from this file: kept for Task 5's halfvec distance/
-// comparison functions, which take two halfvec args each.
-#[allow(dead_code)]
 fn binary_2arg<'a>(fcinfo: &'a Fcinfo) -> PgResult<(HalfVecView<'a>, HalfVecView<'a>)> {
     // SAFETY: strict fns — both args are halfvec varlenas.
     Ok(unsafe { (arg_halfvec(fcinfo, 0)?, arg_halfvec(fcinfo, 1)?) })
@@ -278,4 +276,217 @@ pub fn fc_halfvec_to_vector(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
         b.set(i, v.x(i));
     }
     Ok(image_datum(b.image()))
+}
+
+// ---- Task 5: distances, norm, arithmetic, quantize, subvector, concat ----
+// Mirrors funcs.rs's vector equivalents (fc_l2_distance .. fc_subvector),
+// swapping VecView/VecBuilder for HalfVecView/HalfVecBuilder and the vec.rs
+// kernels for half.rs's (l2_squared_distance, inner_product,
+// cosine_similarity, l1_distance, norm), per $S/src/halfvec.c ~555-1000.
+
+pub fn fc_halfvec_l2_distance(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let (a, b) = binary_2arg(fcinfo)?;
+    check_dims(&a, &b)?;
+    Ok(Datum::from_f64((l2_squared_distance(&a, &b) as f64).sqrt()))
+}
+
+pub fn fc_halfvec_l2_squared_distance(
+    _f: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let (a, b) = binary_2arg(fcinfo)?;
+    check_dims(&a, &b)?;
+    Ok(Datum::from_f64(l2_squared_distance(&a, &b) as f64))
+}
+
+pub fn fc_halfvec_inner_product(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let (a, b) = binary_2arg(fcinfo)?;
+    check_dims(&a, &b)?;
+    Ok(Datum::from_f64(inner_product(&a, &b) as f64))
+}
+
+pub fn fc_halfvec_negative_inner_product(
+    _f: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let (a, b) = binary_2arg(fcinfo)?;
+    check_dims(&a, &b)?;
+    Ok(Datum::from_f64(-(inner_product(&a, &b) as f64)))
+}
+
+pub fn fc_halfvec_cosine_distance(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let (a, b) = binary_2arg(fcinfo)?;
+    check_dims(&a, &b)?;
+    let mut similarity = cosine_similarity(&a, &b);
+    // C: "Keep in range"
+    if similarity > 1.0 {
+        similarity = 1.0;
+    } else if similarity < -1.0 {
+        similarity = -1.0;
+    }
+    Ok(Datum::from_f64(1.0 - similarity))
+}
+
+pub fn fc_halfvec_spherical_distance(
+    _f: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let (a, b) = binary_2arg(fcinfo)?;
+    check_dims(&a, &b)?;
+    let mut distance = inner_product(&a, &b) as f64;
+    // C: "Prevent NaN with acos with loss of precision"
+    if distance > 1.0 {
+        distance = 1.0;
+    } else if distance < -1.0 {
+        distance = -1.0;
+    }
+    Ok(Datum::from_f64(distance.acos() / core::f64::consts::PI))
+}
+
+pub fn fc_halfvec_l1_distance(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let (a, b) = binary_2arg(fcinfo)?;
+    check_dims(&a, &b)?;
+    Ok(Datum::from_f64(l1_distance(&a, &b) as f64))
+}
+
+pub fn fc_halfvec_vector_dims(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: strict fn — arg0 halfvec.
+    let a = unsafe { arg_halfvec(fcinfo, 0)? };
+    Ok(Datum::from_i32(a.dim() as i32))
+}
+
+pub fn fc_halfvec_l2_norm(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: strict fn — arg0 halfvec.
+    let a = unsafe { arg_halfvec(fcinfo, 0)? };
+    Ok(Datum::from_f64(norm(&a)))
+}
+
+// C: halfvec_l2_normalize builds its own result HalfVector directly; we
+// instead reuse halfvec_l2_normalize_image (half.rs), which is also the
+// HNSW normalize callback, so it needs a full varlena image (4B header +
+// payload). Rebuild that image from the arg view rather than duplicating
+// the norm/divide/overflow-check logic here.
+pub fn fc_halfvec_l2_normalize(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: strict fn — arg0 halfvec.
+    let v = unsafe { arg_halfvec(fcinfo, 0)? };
+    let mcx = fcinfo.result_mcx();
+    let mut b = HalfVecBuilder::new(mcx, v.dim())?;
+    for i in 0..v.dim() {
+        b.set_raw(i, v.raw(i));
+    }
+    Ok(image_datum(halfvec_l2_normalize_image(mcx, &b.image())?))
+}
+
+// C halfvec_add/sub/mul: compute in f32 (HalfToFloat4'd operands), narrow via
+// Float4ToHalfUnchecked (no per-set range check — the two checks below run
+// once, over the whole result, exactly like C's two post-loop sweeps), then:
+//   - overflow: HalfIsInf(rx[i]) -> float_overflow_error() ("value out of
+//     range: overflow", ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE) for all three ops.
+//   - underflow (mul only): HalfIsZero(rx[i]) && !(HalfIsZero(ax[i]) ||
+//     HalfIsZero(bx[i])) -> float_underflow_error() ("value out of range:
+//     underflow").
+fn elementwise(
+    fcinfo: &mut Fcinfo,
+    op: impl Fn(f32, f32) -> f32,
+    check_underflow: bool,
+) -> PgResult<Datum> {
+    let (a, b) = binary_2arg(fcinfo)?;
+    check_dims(&a, &b)?;
+    let mut r = HalfVecBuilder::new(fcinfo.result_mcx(), a.dim())?;
+    for i in 0..a.dim() {
+        r.set_raw(i, float4_to_half_unchecked(op(a.x(i), b.x(i))));
+    }
+    for i in 0..a.dim() {
+        let h = r.get_raw(i);
+        if half_is_inf(h) {
+            return Err(Box::new(adt_float::float_overflow_error()));
+        }
+        if check_underflow && half_is_zero(h) && !(half_is_zero(a.raw(i)) || half_is_zero(b.raw(i))) {
+            return Err(Box::new(adt_float::float_underflow_error()));
+        }
+    }
+    Ok(image_datum(r.image()))
+}
+
+pub fn fc_halfvec_add(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    elementwise(fcinfo, |x, y| x + y, false)
+}
+
+pub fn fc_halfvec_sub(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    elementwise(fcinfo, |x, y| x - y, false)
+}
+
+pub fn fc_halfvec_mul(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    elementwise(fcinfo, |x, y| x * y, true)
+}
+
+pub fn fc_halfvec_concat(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let (a, b) = binary_2arg(fcinfo)?;
+    let dim = a.dim() + b.dim();
+    check_dim(dim)?;
+    let mut r = HalfVecBuilder::new(fcinfo.result_mcx(), dim)?;
+    for i in 0..a.dim() {
+        r.set_raw(i, a.raw(i));
+    }
+    for i in 0..b.dim() {
+        r.set_raw(a.dim() + i, b.raw(i));
+    }
+    Ok(image_datum(r.image()))
+}
+
+// VarBit image: 4B varlena header, i32 bit length, zero-padded data bytes.
+// Mirrors funcs::fc_binary_quantize exactly (same layout), reading from a
+// HalfVecView instead of a VecView.
+pub fn fc_halfvec_binary_quantize(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: strict fn — arg0 halfvec.
+    let a = unsafe { arg_halfvec(fcinfo, 0)? };
+    let dim = a.dim();
+    let nbytes = dim.div_ceil(8);
+    let total = 4 + 4 + nbytes;
+    let mut img: PgVec<'_, u8> = mcx::vec_with_capacity_in(fcinfo.result_mcx(), total)?;
+    img.resize(total, 0);
+    img[..4].copy_from_slice(&((total as u32) << 2).to_ne_bytes());
+    img[4..8].copy_from_slice(&(dim as i32).to_ne_bytes());
+    for i in 0..dim {
+        if a.x(i) > 0.0 {
+            img[8 + i / 8] |= 1 << (7 - (i % 8));
+        }
+    }
+    Ok(image_datum(img))
+}
+
+// Mirrors funcs::fc_subvector exactly (same CheckDim call sites and error
+// texts — half.rs's check_dim already renders the halfvec-specific message),
+// reading/writing HalfVecView/HalfVecBuilder raw halves instead of f32s.
+pub fn fc_halfvec_subvector(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: strict fn — arg0 halfvec, args 1-2 int4.
+    let a = unsafe { arg_halfvec(fcinfo, 0)? };
+    let mut start = fcinfo.arg_i32(1);
+    let count = fcinfo.arg_i32(2);
+
+    if count < 1 {
+        check_dim(0)?;
+    }
+    let adim = a.dim() as i32;
+    // start + count without i32 overflow (both checked positive / bounded).
+    let end = if start > adim - count { adim + 1 } else { start + count };
+    if start < 1 {
+        start = 1;
+    } else if start > adim {
+        check_dim(0)?;
+    }
+    // C's CheckDim takes a signed dim: a negative (end - start) must raise
+    // the 22000 "at least 1 dimension" error, not wrap through usize into
+    // the 54000 max-dimension branch.
+    let dim = end - start;
+    if dim < 1 {
+        check_dim(0)?;
+    }
+    let dim = dim as usize;
+    check_dim(dim)?;
+    let mut r = HalfVecBuilder::new(fcinfo.result_mcx(), dim)?;
+    for i in 0..dim {
+        r.set_raw(i, a.raw((start - 1) as usize + i));
+    }
+    Ok(image_datum(r.image()))
 }
