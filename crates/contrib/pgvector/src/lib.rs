@@ -87,6 +87,7 @@ fn lookup(function: &str) -> Option<PGFunction> {
         "halfvec_cmp" => fc_halfvec_cmp,
         "halfvec_accum" => fc_halfvec_accum,
         "halfvec_avg" => fc_halfvec_avg,
+        "hnsw_halfvec_support" => fc_hnsw_halfvec_support,
         _ => return None,
     })
 }
