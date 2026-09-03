@@ -47,7 +47,9 @@ where
 /// driver): the function uses it as-is — no range restriction, no fresh
 /// snapshot registration, the scan's own snapshot governs visibility — and
 /// still ends it before returning, so the caller must not reuse it after
-/// this call.
+/// this call. Precondition: a caller-provided `scan` must be
+/// `tableam::TableScanDesc::Heap` (this is the heap-only build lane) —
+/// a `Pgrcolumnar` scan panics.
 pub fn table_index_build_scan_with<'mcx, F>(
     mcx: Mcx<'mcx>,
     heap_relation: &Relation<'mcx>,
