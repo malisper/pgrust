@@ -19,6 +19,8 @@ use types_nodes::{Node, NodeList, NodeTag};
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod expr_tags_test;
 
 pub mod makefuncs;
 pub mod node_funcs;
