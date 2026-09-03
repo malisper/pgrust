@@ -13,12 +13,11 @@ stripped, cwd = the upstream `test/` directory).
 opclasses / that access method. With no arguments the script otherwise runs
 every test under upstream's `test/sql/`, whether or not this port has caught
 up to it. On the current tree that means `vector_type`, `hnsw_vector`,
-`halfvec` and `hnsw_halfvec` pass, while `sparsevec` and `hnsw_sparsevec`
-fail outright (that type is not ported yet), and `btree`, `cast` and `copy`
-fail only on their sparsevec sections — those failing tests/sections are the
-acceptance criteria for the follow-up sparsevec PR, not a harness bug. So a
-full, argument-less run currently exits non-zero by design; pass explicit
-test names (as above) to check only what should already pass.
+`halfvec`, `hnsw_halfvec`, `sparsevec` and `hnsw_sparsevec` all pass, and so do
+`btree`, `cast` and `copy` once the halfvec<->sparsevec casts are present (they
+exercise both types together). A full, argument-less run is expected to exit
+zero on a tree that carries both types; pass explicit test names (as above) to
+check a subset.
 
 On FAIL the script leaves that test's diff (and upstream's raw output) in a
 `mktemp -d` directory, printed in the failure line, for inspection.
