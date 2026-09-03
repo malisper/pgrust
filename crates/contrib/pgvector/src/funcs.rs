@@ -21,12 +21,12 @@ pub(crate) fn image_datum(img: PgVec<'_, u8>) -> Datum {
 }
 
 // SAFETY contract of callers: arg i is a non-null vector varlena (strict fns).
-unsafe fn arg_vector<'a>(fcinfo: &'a Fcinfo, i: usize) -> PgResult<VecView<'a>> {
+pub(crate) unsafe fn arg_vector<'a>(fcinfo: &'a Fcinfo, i: usize) -> PgResult<VecView<'a>> {
     let v = unsafe { fcinfo.arg_varlena_packed(i)? };
     VecView::from_payload(v.data())
 }
 
-unsafe fn detoasted_image<'m>(mcx: Mcx<'m>, d: Datum) -> PgResult<&'m [u8]> {
+pub(crate) unsafe fn detoasted_image<'m>(mcx: Mcx<'m>, d: Datum) -> PgResult<&'m [u8]> {
     let p = d.as_usize() as *const u8;
     unsafe {
         if varatt::varatt_is_4b_u(p) {

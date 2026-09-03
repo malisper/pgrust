@@ -4,6 +4,8 @@
 //! extension script is trimmed accordingly).
 
 pub mod funcs;
+pub mod sparse;
+pub mod sparsevec_funcs;
 pub mod vec;
 
 use types_fmgr::PGFunction;
@@ -12,6 +14,7 @@ const LIBRARY: &str = "vector";
 
 fn lookup(function: &str) -> Option<PGFunction> {
     use funcs::*;
+    use sparsevec_funcs::*;
     Some(match function {
         "vector_in" => fc_vector_in,
         "vector_out" => fc_vector_out,
@@ -47,6 +50,31 @@ fn lookup(function: &str) -> Option<PGFunction> {
         "vector_accum" => fc_vector_accum,
         "vector_combine" => fc_vector_combine,
         "vector_avg" => fc_vector_avg,
+        "sparsevec_in" => fc_sparsevec_in,
+        "sparsevec_out" => fc_sparsevec_out,
+        "sparsevec_typmod_in" => fc_sparsevec_typmod_in,
+        "sparsevec_recv" => fc_sparsevec_recv,
+        "sparsevec_send" => fc_sparsevec_send,
+        "sparsevec" => fc_sparsevec,
+        "vector_to_sparsevec" => fc_vector_to_sparsevec,
+        "array_to_sparsevec" => fc_array_to_sparsevec,
+        "sparsevec_to_vector" => fc_sparsevec_to_vector,
+        "sparsevec_l2_distance" => fc_sparsevec_l2_distance,
+        "sparsevec_l2_squared_distance" => fc_sparsevec_l2_squared_distance,
+        "sparsevec_inner_product" => fc_sparsevec_inner_product,
+        "sparsevec_negative_inner_product" => fc_sparsevec_negative_inner_product,
+        "sparsevec_cosine_distance" => fc_sparsevec_cosine_distance,
+        "sparsevec_l1_distance" => fc_sparsevec_l1_distance,
+        "sparsevec_l2_norm" => fc_sparsevec_l2_norm,
+        "sparsevec_l2_normalize" => fc_sparsevec_l2_normalize,
+        "sparsevec_lt" => fc_sparsevec_lt,
+        "sparsevec_le" => fc_sparsevec_le,
+        "sparsevec_eq" => fc_sparsevec_eq,
+        "sparsevec_ne" => fc_sparsevec_ne,
+        "sparsevec_ge" => fc_sparsevec_ge,
+        "sparsevec_gt" => fc_sparsevec_gt,
+        "sparsevec_cmp" => fc_sparsevec_cmp,
+        "hnsw_sparsevec_support" => fc_hnsw_sparsevec_support,
         "hnswhandler" => fc_hnswhandler,
         _ => return None,
     })

@@ -51,6 +51,7 @@ pub fn init_support(index: &Relation<'_>) -> PgResult<HnswSupport> {
         .into());
     }
     let norm = index_getprocid(index, HNSW_NORM_PROC);
+    let type_info = get_type_info(index)?;
     Ok(HnswSupport {
         procinfo: fmgr_seams::fmgr_info::call(dist)?,
         normprocinfo: if norm != 0 {
@@ -59,21 +60,36 @@ pub fn init_support(index: &Relation<'_>) -> PgResult<HnswSupport> {
             None
         },
         collation: index.rd_indcollation.first().copied().unwrap_or(0),
+        type_info,
     })
 }
 
-// HnswGetTypeInfo: proc 3 (halfvec/bit/sparsevec) is unported — vector only.
-// Unreachable through the trimmed vector--0.8.5.sql (no such opclasses), but
-// error rather than panic if a foreign catalog ever presents one.
-pub fn check_type_supported(index: &Relation<'_>) -> PgResult<i32> {
-    if index_getprocid(index, HNSW_TYPE_INFO_PROC) != 0 {
-        return Err(PgError::error(
-            "hnsw type-info opclasses (halfvec/bit/sparsevec) are not supported",
-        )
-        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
-        .into());
+// HnswGetTypeInfo: support proc 3 returns a pointer to a static HnswTypeInfo;
+// absent (the vector opclasses), C uses HNSW_MAX_DIM + l2_normalize.
+pub fn get_type_info(index: &Relation<'_>) -> PgResult<&'static HnswTypeInfo> {
+    let proc_oid = index_getprocid(index, HNSW_TYPE_INFO_PROC);
+    if proc_oid == 0 {
+        return Ok(&pgvector::vec::VECTOR_TYPE_INFO);
     }
-    Ok(HNSW_MAX_DIM as i32)
+    let mut flinfo = fmgr_seams::fmgr_info::call(proc_oid)?;
+    let d = types_fmgr::function_call0_coll(&mut flinfo, 0)?;
+    if d.as_usize() == 0 {
+        return Err(
+            PgError::error("hnsw type-info support function returned a null pointer")
+                .with_sqlstate(types_error::ERRCODE_INTERNAL_ERROR)
+                .into(),
+        );
+    }
+    // SAFETY: this inherits C's contract, unchecked on the C side too --
+    // HnswGetTypeInfo does `(const HnswTypeInfo *) DatumGetPointer(FunctionCall0Coll(...))`
+    // with no cast or validity check on the result. The bundled extension
+    // script registers only the built-in `hnsw_*_support` functions as proc 3,
+    // and each returns the address of a `static const HnswTypeInfo`
+    // (process-lifetime storage). hnswvalidate does not check proc 3's
+    // signature or behavior, so a hand-rolled opclass wiring an arbitrary
+    // zero-argument function as proc 3 is undefined behaviour in C and here
+    // alike -- the null check above is the one guard we add beyond C.
+    Ok(unsafe { &*(d.as_usize() as *const HnswTypeInfo) })
 }
 
 #[inline]

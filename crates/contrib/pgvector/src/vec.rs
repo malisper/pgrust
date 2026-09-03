@@ -209,7 +209,14 @@ pub fn parse_vector(lit: &[u8], typmod: i32, x: &mut [f32; VECTOR_MAX_DIM]) -> P
             .with_sqlstate(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE)
             .into());
         }
-        let StrtofVal::Ok(val) = val else { unreachable!() };
+        // vector_in only checks isinf(val) (vector.c:231) — unlike
+        // sparsevec_in, it does not error on ERANGE-underflow-to-zero, so
+        // `Underflow` is accepted the same as `Ok` here.
+        let val = match val {
+            StrtofVal::Ok(v) => v,
+            StrtofVal::Underflow(_, v) => v,
+            StrtofVal::Erange(_) => unreachable!(),
+        };
         check_element(val)?;
         x[dim] = val;
         dim += 1;
@@ -244,10 +251,20 @@ pub enum StrtofVal {
     Ok(f32),
     // ERANGE with infinite result (overflow); payload = token length for the message.
     Erange(usize),
+    // ERANGE with a zero result (underflow of a token whose mantissa was not
+    // itself zero), e.g. "1e-46"; payload = token length, value = the
+    // (signed) zero. C's strtof sets errno=ERANGE for this case too, but
+    // float4in/vector_in only ever check `isinf(val)` (vector.c:231), so a
+    // vector_in caller should treat this the same as `Ok` — sparsevec_in is
+    // the one C caller that also checks `value == 0` (sparsevec.c:308) and
+    // must treat this as the same out-of-range error as `Erange`.
+    Underflow(usize, f32),
 }
 
 // libc strtof over a byte prefix: leading isspace skip, decimal/hex floats,
-// inf/nan literals; underflow keeps the (denormal or zero) value like strtof.
+// inf/nan literals; underflow keeps the (denormal or zero) value like strtof,
+// but is reported separately (`Underflow`) so callers that care about ERANGE
+// on underflow (sparsevec_in) can distinguish it from an exact-zero literal.
 pub fn strtof_prefix(s: &[u8]) -> Option<(StrtofVal, usize)> {
     let mut i = 0usize;
     while i < s.len() && (s[i] as char).is_ascii_whitespace() {
@@ -260,7 +277,35 @@ pub fn strtof_prefix(s: &[u8]) -> Option<(StrtofVal, usize)> {
     if val.is_infinite() && !token_is_inf_literal(token) {
         return Some((StrtofVal::Erange(i + tok_len), i + tok_len));
     }
+    if val == 0.0 && token_mantissa_has_nonzero_digit(token) {
+        return Some((StrtofVal::Underflow(i + tok_len, val), i + tok_len));
+    }
     Some((StrtofVal::Ok(val), i + tok_len))
+}
+
+// True if `tok` (a decimal or hex float token, sign already possibly
+// present) has a nonzero digit in its mantissa (i.e. represents a nonzero
+// real number, ignoring how the exponent might make it round to zero in
+// f32). Used to tell a genuine ERANGE underflow ("1e-46") apart from an
+// exact-zero literal ("0", "0.0", "0e10").
+fn token_mantissa_has_nonzero_digit(tok: &str) -> bool {
+    let t = tok.trim_start_matches(['+', '-']);
+    let is_hex = t.len() >= 2 && t.as_bytes()[0] == b'0' && (t.as_bytes()[1] | 0x20) == b'x';
+    let mantissa = if is_hex {
+        let rest = &t[2..];
+        let end = rest.find(['p', 'P']).unwrap_or(rest.len());
+        &rest[..end]
+    } else {
+        let end = t.find(['e', 'E']).unwrap_or(t.len());
+        &t[..end]
+    };
+    mantissa.bytes().any(|b| {
+        if is_hex {
+            b.is_ascii_hexdigit() && b != b'0'
+        } else {
+            b.is_ascii_digit() && b != b'0'
+        }
+    })
 }
 
 fn token_is_inf_literal(tok: &str) -> bool {
@@ -514,6 +559,39 @@ pub fn vector_cmp_internal(a: &VecView<'_>, b: &VecView<'_>) -> i32 {
     0
 }
 
+/// C: HnswNormValue for the vector opclasses = l2_normalize applied to the
+/// detoasted varlena image. `img` and the result include the 4-byte header.
+pub fn l2_normalize_image<'m>(mcx: Mcx<'m>, img: &[u8]) -> PgResult<PgVec<'m, u8>> {
+    let v = VecView::from_payload(&img[4..])?;
+    let mut b = VecBuilder::new(mcx, v.dim())?;
+    let mut norm = 0.0f64;
+    for x in v.iter() {
+        norm += x as f64 * x as f64;
+    }
+    norm = norm.sqrt();
+    if norm > 0.0 {
+        for i in 0..v.dim() {
+            b.set(i, (v.x(i) as f64 / norm) as f32);
+        }
+        for i in 0..v.dim() {
+            if b.get(i).is_infinite() {
+                return Err(PgError::error("value out of range: overflow")
+                    .with_sqlstate(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE)
+                    .into());
+            }
+        }
+    }
+    Ok(b.image())
+}
+
+/// C: hnswutils.c HnswGetTypeInfo default arm (no support proc 3):
+/// maxDimensions = HNSW_MAX_DIM, normalize = l2_normalize, checkValue = NULL.
+pub static VECTOR_TYPE_INFO: types_hnsw::HnswTypeInfo = types_hnsw::HnswTypeInfo {
+    max_dimensions: types_hnsw::HNSW_MAX_DIM as i32,
+    normalize: Some(l2_normalize_image),
+    check_value: None,
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -586,5 +664,40 @@ mod tests {
         assert_eq!(inner_product(&va, &vb), 0.0);
         assert_eq!(l1_distance(&va, &vb), 7.0);
         assert_eq!(vector_norm(&vb), 5.0);
+    }
+}
+
+#[cfg(test)]
+mod type_info_tests {
+    use super::*;
+
+    #[test]
+    fn l2_normalize_image_scales_to_unit_norm() {
+        let owner = mcx::MemoryContext::new_bump("t");
+        let m = owner.mcx();
+        let mut b = VecBuilder::new(m, 2).unwrap();
+        b.set(0, 3.0);
+        b.set(1, 4.0);
+        let img = b.image();
+        let out = l2_normalize_image(m, &img).unwrap();
+        let v = VecView::from_payload(&out[4..]).unwrap();
+        assert_eq!(v.dim(), 2);
+        assert!((v.x(0) - 0.6).abs() < 1e-7 && (v.x(1) - 0.8).abs() < 1e-7);
+    }
+
+    #[test]
+    fn l2_normalize_image_leaves_zero_vector_alone() {
+        let owner = mcx::MemoryContext::new_bump("t");
+        let m = owner.mcx();
+        let img = VecBuilder::new(m, 3).unwrap().image();
+        let out = l2_normalize_image(m, &img).unwrap();
+        assert_eq!(&out[..], &img[..]);
+    }
+
+    #[test]
+    fn vector_type_info_matches_c_defaults() {
+        assert_eq!(VECTOR_TYPE_INFO.max_dimensions, 2000);
+        assert!(VECTOR_TYPE_INFO.normalize.is_some());
+        assert!(VECTOR_TYPE_INFO.check_value.is_none());
     }
 }

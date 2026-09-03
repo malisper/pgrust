@@ -800,18 +800,22 @@ pub fn insert_tuple_on_disk(
     Ok(true)
 }
 
-// HnswFormIndexValue for the vector opclasses: detoast + norm-gate + normalize.
+// HnswFormIndexValue: detoast, checkValue, norm gate, normalize (C order).
 pub fn form_index_value<'m>(
     mcx: Mcx<'m>,
     value: Datum,
     support: &mut HnswSupport,
 ) -> PgResult<Option<PgVec<'m, u8>>> {
     let p = value.as_usize() as *const u8;
-    // SAFETY: non-null vector varlena datum (isnull gated by caller).
+    // SAFETY: non-null varlena datum (isnull gated by caller).
     let raw = unsafe { core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p)) };
     let flat = detoast::detoast_attr(mcx, raw)?;
     let mut img: PgVec<'m, u8> = mcx::vec_with_capacity_in_infallible(mcx, flat.len());
     let _ = mcx::vec_append_bytes(&mut img, &flat);
+
+    if let Some(check) = support.type_info.check_value {
+        check(&img)?;
+    }
 
     if support.normprocinfo.is_some() {
         // HnswCheckNorm.
@@ -823,7 +827,13 @@ pub fn form_index_value<'m>(
         if !(norm > 0.0) {
             return Ok(None);
         }
-        img = crate::scan::norm_value(mcx, &img)?;
+        let normalize = support
+            .type_info
+            .normalize
+            // C HnswNormValue would call through a NULL fn pointer here; the built-in
+            // opclasses always pair a norm proc with a normalize.
+            .expect("opclass with a norm proc must have a normalize callback");
+        img = normalize(mcx, &img)?;
     }
     Ok(Some(img))
 }
@@ -840,7 +850,6 @@ pub fn hnswinsert<'mcx>(
     if isnull.first().copied().unwrap_or(true) {
         return Ok(false);
     }
-    check_type_supported(index)?;
     let insert_ctx = mcx::MemoryContext::new_bump("Hnsw insert temporary context");
     let imcx = insert_ctx.mcx();
 
@@ -850,4 +859,83 @@ pub fn hnswinsert<'mcx>(
     };
     insert_tuple_on_disk(index, &mut support, &img, heap_tid, false)?;
     Ok(false)
+}
+
+#[cfg(test)]
+mod type_info_tests {
+    use super::*;
+
+    fn reject(_img: &[u8]) -> PgResult<()> {
+        Err(PgError::error(
+            "sparsevec cannot have more than 1000 non-zero elements for hnsw index",
+        )
+        .into())
+    }
+    static REJECTING: HnswTypeInfo = HnswTypeInfo {
+        max_dimensions: 3,
+        normalize: Some(pgvector::vec::l2_normalize_image),
+        check_value: Some(reject),
+    };
+
+    fn support_with(ti: &'static HnswTypeInfo, with_norm: bool) -> HnswSupport {
+        HnswSupport {
+            procinfo: types_fmgr::FmgrInfo::new(
+                pgvector::funcs::fc_vector_l2_squared_distance, 1, 2, true, false),
+            normprocinfo: if with_norm {
+                Some(types_fmgr::FmgrInfo::new(pgvector::funcs::fc_vector_norm, 2, 1, true, false))
+            } else { None },
+            collation: 0,
+            type_info: ti,
+        }
+    }
+
+    #[test]
+    fn form_index_value_runs_check_value_before_norm_gate() {
+        // Zero vector: norm == 0, so under the correct C order (checkValue
+        // before the norm gate) the checkValue error must surface. Under a
+        // swapped order the norm gate would fire first and return Ok(None)
+        // instead, failing this assertion.
+        let owner = mcx::MemoryContext::new_bump("t");
+        let m = owner.mcx();
+        let mut b = pgvector::vec::VecBuilder::new(m, 2).unwrap();
+        b.set(0, 0.0);
+        b.set(1, 0.0);
+        let img = b.image();
+        let d = datum::Datum::from_usize(img.as_ptr() as usize);
+        let mut sp = support_with(&REJECTING, true);
+        let err = form_index_value(m, d, &mut sp).unwrap_err();
+        assert!(err.message().contains("non-zero elements for hnsw index"));
+    }
+
+    #[test]
+    fn form_index_value_norm_gate_still_rejects_zero_vector() {
+        // Same zero vector, but with a type_info that has no check_value
+        // (the real vector opclass default): the norm gate itself must
+        // still fire and return Ok(None).
+        let owner = mcx::MemoryContext::new_bump("t");
+        let m = owner.mcx();
+        let mut b = pgvector::vec::VecBuilder::new(m, 2).unwrap();
+        b.set(0, 0.0);
+        b.set(1, 0.0);
+        let img = b.image();
+        let d = datum::Datum::from_usize(img.as_ptr() as usize);
+        let mut sp = support_with(&pgvector::vec::VECTOR_TYPE_INFO, true);
+        let out = form_index_value(m, d, &mut sp).unwrap();
+        assert!(out.is_none());
+    }
+
+    #[test]
+    fn form_index_value_normalizes_through_type_info() {
+        let owner = mcx::MemoryContext::new_bump("t");
+        let m = owner.mcx();
+        let mut b = pgvector::vec::VecBuilder::new(m, 2).unwrap();
+        b.set(0, 3.0);
+        b.set(1, 4.0);
+        let img = b.image();
+        let d = datum::Datum::from_usize(img.as_ptr() as usize);
+        let mut sp = support_with(&pgvector::vec::VECTOR_TYPE_INFO, true);
+        let out = form_index_value(m, d, &mut sp).unwrap().expect("norm > 0");
+        let v = pgvector::vec::VecView::from_payload(&out[4..]).unwrap();
+        assert!((v.x(0) - 0.6).abs() < 1e-7);
+    }
 }

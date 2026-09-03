@@ -3,7 +3,12 @@
 //! pgvector_hnsw_build. DIVERGENCES (recorded): no parallel build (C falls back
 //! to serial when no workers launch); iterative-scan memory cap approximates
 //! C's MemoryContextMemAllocated with per-tuple estimates; level RNG uses the
-//! ported pg_global_prng (same generator, per-backend seeding).
+//! ported pg_global_prng (same generator, per-backend seeding);
+//! `HnswNormalizeFn` takes no collation (C's HnswNormValue passes it via
+//! DirectFunctionCall1Coll, but no normalize function ever uses it); type
+//! info is resolved inside `init_support`, so vacuum also resolves and calls
+//! proc 3 (C's hnswvacuum calls only HnswInitSupport) -- harmless for pure
+//! support functions.
 
 pub mod insert;
 pub mod layout;

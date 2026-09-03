@@ -256,6 +256,9 @@ COMMENT ON ACCESS METHOD hnsw IS 'hnsw index access method';
 
 -- access method private functions
 
+CREATE FUNCTION hnsw_sparsevec_support(internal) RETURNS internal
+	AS 'MODULE_PATHNAME' LANGUAGE C;
+
 -- vector opclasses
 
 CREATE OPERATOR CLASS vector_ops
@@ -287,3 +290,220 @@ CREATE OPERATOR CLASS vector_l1_ops
 	FOR TYPE vector USING hnsw AS
 	OPERATOR 1 <+> (vector, vector) FOR ORDER BY float_ops,
 	FUNCTION 1 l1_distance(vector, vector);
+
+--- sparsevec type
+
+CREATE TYPE sparsevec;
+
+CREATE FUNCTION sparsevec_in(cstring, oid, integer) RETURNS sparsevec
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION sparsevec_out(sparsevec) RETURNS cstring
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION sparsevec_typmod_in(cstring[]) RETURNS integer
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION sparsevec_recv(internal, oid, integer) RETURNS sparsevec
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION sparsevec_send(sparsevec) RETURNS bytea
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE TYPE sparsevec (
+	INPUT     = sparsevec_in,
+	OUTPUT    = sparsevec_out,
+	TYPMOD_IN = sparsevec_typmod_in,
+	RECEIVE   = sparsevec_recv,
+	SEND      = sparsevec_send,
+	STORAGE   = external
+);
+
+-- sparsevec functions
+
+CREATE FUNCTION l2_distance(sparsevec, sparsevec) RETURNS float8
+	AS 'MODULE_PATHNAME', 'sparsevec_l2_distance' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION inner_product(sparsevec, sparsevec) RETURNS float8
+	AS 'MODULE_PATHNAME', 'sparsevec_inner_product' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION cosine_distance(sparsevec, sparsevec) RETURNS float8
+	AS 'MODULE_PATHNAME', 'sparsevec_cosine_distance' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION l1_distance(sparsevec, sparsevec) RETURNS float8
+	AS 'MODULE_PATHNAME', 'sparsevec_l1_distance' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION l2_norm(sparsevec) RETURNS float8
+	AS 'MODULE_PATHNAME', 'sparsevec_l2_norm' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION l2_normalize(sparsevec) RETURNS sparsevec
+	AS 'MODULE_PATHNAME', 'sparsevec_l2_normalize' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+-- sparsevec private functions
+
+CREATE FUNCTION sparsevec_lt(sparsevec, sparsevec) RETURNS bool
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION sparsevec_le(sparsevec, sparsevec) RETURNS bool
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION sparsevec_eq(sparsevec, sparsevec) RETURNS bool
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION sparsevec_ne(sparsevec, sparsevec) RETURNS bool
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION sparsevec_ge(sparsevec, sparsevec) RETURNS bool
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION sparsevec_gt(sparsevec, sparsevec) RETURNS bool
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION sparsevec_cmp(sparsevec, sparsevec) RETURNS int4
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION sparsevec_l2_squared_distance(sparsevec, sparsevec) RETURNS float8
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION sparsevec_negative_inner_product(sparsevec, sparsevec) RETURNS float8
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+-- sparsevec cast functions
+
+CREATE FUNCTION sparsevec(sparsevec, integer, boolean) RETURNS sparsevec
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION vector_to_sparsevec(vector, integer, boolean) RETURNS sparsevec
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION sparsevec_to_vector(sparsevec, integer, boolean) RETURNS vector
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION array_to_sparsevec(integer[], integer, boolean) RETURNS sparsevec
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION array_to_sparsevec(real[], integer, boolean) RETURNS sparsevec
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION array_to_sparsevec(double precision[], integer, boolean) RETURNS sparsevec
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION array_to_sparsevec(numeric[], integer, boolean) RETURNS sparsevec
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+-- sparsevec casts
+
+CREATE CAST (sparsevec AS sparsevec)
+	WITH FUNCTION sparsevec(sparsevec, integer, boolean) AS IMPLICIT;
+
+CREATE CAST (sparsevec AS vector)
+	WITH FUNCTION sparsevec_to_vector(sparsevec, integer, boolean) AS ASSIGNMENT;
+
+CREATE CAST (vector AS sparsevec)
+	WITH FUNCTION vector_to_sparsevec(vector, integer, boolean) AS IMPLICIT;
+
+CREATE CAST (integer[] AS sparsevec)
+	WITH FUNCTION array_to_sparsevec(integer[], integer, boolean) AS ASSIGNMENT;
+
+CREATE CAST (real[] AS sparsevec)
+	WITH FUNCTION array_to_sparsevec(real[], integer, boolean) AS ASSIGNMENT;
+
+CREATE CAST (double precision[] AS sparsevec)
+	WITH FUNCTION array_to_sparsevec(double precision[], integer, boolean) AS ASSIGNMENT;
+
+CREATE CAST (numeric[] AS sparsevec)
+	WITH FUNCTION array_to_sparsevec(numeric[], integer, boolean) AS ASSIGNMENT;
+
+-- sparsevec operators
+
+CREATE OPERATOR <-> (
+	LEFTARG = sparsevec, RIGHTARG = sparsevec, PROCEDURE = l2_distance,
+	COMMUTATOR = '<->'
+);
+
+CREATE OPERATOR <#> (
+	LEFTARG = sparsevec, RIGHTARG = sparsevec, PROCEDURE = sparsevec_negative_inner_product,
+	COMMUTATOR = '<#>'
+);
+
+CREATE OPERATOR <=> (
+	LEFTARG = sparsevec, RIGHTARG = sparsevec, PROCEDURE = cosine_distance,
+	COMMUTATOR = '<=>'
+);
+
+CREATE OPERATOR <+> (
+	LEFTARG = sparsevec, RIGHTARG = sparsevec, PROCEDURE = l1_distance,
+	COMMUTATOR = '<+>'
+);
+
+CREATE OPERATOR < (
+	LEFTARG = sparsevec, RIGHTARG = sparsevec, PROCEDURE = sparsevec_lt,
+	COMMUTATOR = > , NEGATOR = >= ,
+	RESTRICT = scalarltsel, JOIN = scalarltjoinsel
+);
+
+CREATE OPERATOR <= (
+	LEFTARG = sparsevec, RIGHTARG = sparsevec, PROCEDURE = sparsevec_le,
+	COMMUTATOR = >= , NEGATOR = > ,
+	RESTRICT = scalarlesel, JOIN = scalarlejoinsel
+);
+
+CREATE OPERATOR = (
+	LEFTARG = sparsevec, RIGHTARG = sparsevec, PROCEDURE = sparsevec_eq,
+	COMMUTATOR = = , NEGATOR = <> ,
+	RESTRICT = eqsel, JOIN = eqjoinsel
+);
+
+CREATE OPERATOR <> (
+	LEFTARG = sparsevec, RIGHTARG = sparsevec, PROCEDURE = sparsevec_ne,
+	COMMUTATOR = <> , NEGATOR = = ,
+	RESTRICT = eqsel, JOIN = eqjoinsel
+);
+
+CREATE OPERATOR >= (
+	LEFTARG = sparsevec, RIGHTARG = sparsevec, PROCEDURE = sparsevec_ge,
+	COMMUTATOR = <= , NEGATOR = < ,
+	RESTRICT = scalargesel, JOIN = scalargejoinsel
+);
+
+CREATE OPERATOR > (
+	LEFTARG = sparsevec, RIGHTARG = sparsevec, PROCEDURE = sparsevec_gt,
+	COMMUTATOR = < , NEGATOR = <= ,
+	RESTRICT = scalargtsel, JOIN = scalargtjoinsel
+);
+
+-- sparsevec opclasses
+
+CREATE OPERATOR CLASS sparsevec_ops
+	DEFAULT FOR TYPE sparsevec USING btree AS
+	OPERATOR 1 < ,
+	OPERATOR 2 <= ,
+	OPERATOR 3 = ,
+	OPERATOR 4 >= ,
+	OPERATOR 5 > ,
+	FUNCTION 1 sparsevec_cmp(sparsevec, sparsevec);
+
+CREATE OPERATOR CLASS sparsevec_l2_ops
+	FOR TYPE sparsevec USING hnsw AS
+	OPERATOR 1 <-> (sparsevec, sparsevec) FOR ORDER BY float_ops,
+	FUNCTION 1 sparsevec_l2_squared_distance(sparsevec, sparsevec),
+	FUNCTION 3 hnsw_sparsevec_support(internal);
+
+CREATE OPERATOR CLASS sparsevec_ip_ops
+	FOR TYPE sparsevec USING hnsw AS
+	OPERATOR 1 <#> (sparsevec, sparsevec) FOR ORDER BY float_ops,
+	FUNCTION 1 sparsevec_negative_inner_product(sparsevec, sparsevec),
+	FUNCTION 3 hnsw_sparsevec_support(internal);
+
+CREATE OPERATOR CLASS sparsevec_cosine_ops
+	FOR TYPE sparsevec USING hnsw AS
+	OPERATOR 1 <=> (sparsevec, sparsevec) FOR ORDER BY float_ops,
+	FUNCTION 1 sparsevec_negative_inner_product(sparsevec, sparsevec),
+	FUNCTION 2 l2_norm(sparsevec),
+	FUNCTION 3 hnsw_sparsevec_support(internal);
+
+CREATE OPERATOR CLASS sparsevec_l1_ops
+	FOR TYPE sparsevec USING hnsw AS
+	OPERATOR 1 <+> (sparsevec, sparsevec) FOR ORDER BY float_ops,
+	FUNCTION 1 l1_distance(sparsevec, sparsevec),
+	FUNCTION 3 hnsw_sparsevec_support(internal);
