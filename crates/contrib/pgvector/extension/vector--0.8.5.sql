@@ -287,3 +287,48 @@ CREATE OPERATOR CLASS vector_l1_ops
 	FOR TYPE vector USING hnsw AS
 	OPERATOR 1 <+> (vector, vector) FOR ORDER BY float_ops,
 	FUNCTION 1 l1_distance(vector, vector);
+
+-- halfvec type
+
+CREATE TYPE halfvec;
+
+CREATE FUNCTION halfvec_in(cstring, oid, integer) RETURNS halfvec
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION halfvec_out(halfvec) RETURNS cstring
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION halfvec_typmod_in(cstring[]) RETURNS integer
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION halfvec_recv(internal, oid, integer) RETURNS halfvec
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION halfvec_send(halfvec) RETURNS bytea
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE TYPE halfvec (
+	INPUT     = halfvec_in,
+	OUTPUT    = halfvec_out,
+	TYPMOD_IN = halfvec_typmod_in,
+	RECEIVE   = halfvec_recv,
+	SEND      = halfvec_send,
+	STORAGE   = external
+);
+
+-- Pulled forward from upstream's "-- halfvec cast functions" / "-- halfvec
+-- casts" sections (sql/vector.sql:462-490): only the halfvec-to-halfvec
+-- self typmod-coercion entry, since its function (fc_halfvec) is
+-- implemented in this task. Without a pg_cast row here, coerce_type_typmod
+-- has no length-coercion function to call for `'[...]'::halfvec(n)` and
+-- silently relabels the typmod instead of enforcing it (see halfvec.c
+-- halfvec(), which performs CheckExpectedDim). A later task appending the
+-- full "-- halfvec cast functions" / "-- halfvec casts" sections verbatim
+-- MUST skip these two statements (already present) to avoid duplicate
+-- object errors.
+CREATE FUNCTION halfvec(halfvec, integer, boolean) RETURNS halfvec
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE CAST (halfvec AS halfvec)
+	WITH FUNCTION halfvec(halfvec, integer, boolean) AS IMPLICIT;
+

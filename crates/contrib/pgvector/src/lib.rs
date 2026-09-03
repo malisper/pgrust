@@ -6,6 +6,7 @@
 pub mod funcs;
 pub mod half;
 pub mod halfutils;
+pub mod halfvec_funcs;
 pub mod vec;
 
 use types_fmgr::PGFunction;
@@ -14,6 +15,7 @@ const LIBRARY: &str = "vector";
 
 fn lookup(function: &str) -> Option<PGFunction> {
     use funcs::*;
+    use halfvec_funcs::*;
     Some(match function {
         "vector_in" => fc_vector_in,
         "vector_out" => fc_vector_out,
@@ -50,6 +52,12 @@ fn lookup(function: &str) -> Option<PGFunction> {
         "vector_combine" => fc_vector_combine,
         "vector_avg" => fc_vector_avg,
         "hnswhandler" => fc_hnswhandler,
+        "halfvec_in" => fc_halfvec_in,
+        "halfvec_out" => fc_halfvec_out,
+        "halfvec_typmod_in" => fc_halfvec_typmod_in,
+        "halfvec_recv" => fc_halfvec_recv,
+        "halfvec_send" => fc_halfvec_send,
+        "halfvec" => fc_halfvec,
         _ => return None,
     })
 }
