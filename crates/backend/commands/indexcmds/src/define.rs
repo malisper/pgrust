@@ -738,7 +738,11 @@ pub fn DefineIndex<'mcx>(
         accessMethodId,
         amname,
         amcanorder,
-        Some(&mut root_save_nestlevel),
+        Some(DdlIdentity {
+            userid: root_save_userid,
+            sec_context: root_save_sec_context,
+            save_nestlevel: &mut root_save_nestlevel,
+        }),
     )?;
 
     // upstream 2780538433fc (18.5): Check for USAGE privilege on types used by stored expressions.
@@ -1285,8 +1289,6 @@ pub fn DefineIndex<'mcx>(
     Ok(indexRelationId)
 }
 
-// ResolveOpClass (indexcmds.c), named-opclass arm; the NIL arm stays inline
-// in ComputeIndexAttrs.
 pub(crate) fn ResolveOpClass(
     opclass: &types_nodes::NodeList<'_>,
     attrType: Oid,
@@ -1343,7 +1345,6 @@ pub(crate) fn ResolveOpClass(
     Ok(opClassId)
 }
 
-// IndexSetParentIndex (indexcmds.c).
 pub fn IndexSetParentIndex<'mcx>(
     mcx: Mcx<'mcx>,
     partitionIdx: &types_rel::Relation<'mcx>,
@@ -1515,6 +1516,31 @@ fn set_pg_index_invalid<'mcx>(mcx: Mcx<'mcx>, indexRelationId: Oid) -> PgResult<
     pg_index.close(types_rel::RowExclusiveLock)
 }
 
+struct DdlIdentity<'a> {
+    userid: Oid,
+    sec_context: i32,
+    save_nestlevel: &'a mut i32,
+}
+
+// Collation, opclass and exclusion-operator lookups carry ACL checks that
+// belong to the DDL issuer, not the table owner DefineIndex runs as; they
+// also see the issuer's search_path, not the restricted one.
+fn as_ddl_user<T>(
+    ddl: &mut Option<DdlIdentity<'_>>,
+    lookup: impl FnOnce() -> PgResult<T>,
+) -> PgResult<T> {
+    let Some(ddl) = ddl.as_mut() else {
+        return lookup();
+    };
+    guc::AtEOXact_GUC(false, *ddl.save_nestlevel);
+    let guard = miscinit::SecContextGuard::set(ddl.userid, ddl.sec_context);
+    let result = lookup();
+    guard.restore();
+    *ddl.save_nestlevel = guc::NewGUCNestLevel();
+    guc::RestrictSearchPath()?;
+    result
+}
+
 #[allow(clippy::too_many_arguments)]
 fn ComputeIndexAttrs<'mcx>(
     mcx: Mcx<'mcx>,
@@ -1532,7 +1558,7 @@ fn ComputeIndexAttrs<'mcx>(
     accessMethodId: Oid,
     amname: &str,
     amcanorder: bool,
-    mut ddl_save_nestlevel: Option<&mut i32>,
+    mut ddl: Option<DdlIdentity<'_>>,
 ) -> PgResult<()> {
     let nkeycols = indexInfo.ii_NumIndexKeyAttrs as usize;
     debug_assert!(exclusionOpNames.is_nil() || exclusionOpNames.len() == nkeycols);
@@ -1569,7 +1595,6 @@ fn ComputeIndexAttrs<'mcx>(
             indexInfo.ii_IndexAttrNumbers[attn] = attform.attnum;
             (attform.atttypid, attform.attcollation)
         } else {
-            // Expression column.
             if attn >= nkeycols {
                 return Err(err(
                     "expressions are not supported in included columns".into(),
@@ -1579,8 +1604,6 @@ fn ComputeIndexAttrs<'mcx>(
             let mut expr = attribute.expr.expect("IndexElem without name or expr");
             let atttype = nodes_core::expr_type(expr);
             let attcollation = nodes_core::expr_collation(expr);
-            // Strip any top-level COLLATE clause, so "x COLLATE y" and
-            // "(x COLLATE y)" are treated alike (indexcmds.c:1985).
             while let Some(c) = expr.as_collate_expr() {
                 expr = c.arg;
             }
@@ -1596,8 +1619,6 @@ fn ComputeIndexAttrs<'mcx>(
             (atttype, attcollation)
         };
         typeIds[attn] = atttype;
-        // Included columns have no collation, no opclass and no ordering
-        // options (indexcmds.c:2029-2058).
         if attn >= nkeycols {
             let unsupported = if !attribute.collation.is_nil() {
                 Some("a collation")
@@ -1622,18 +1643,10 @@ fn ComputeIndexAttrs<'mcx>(
             continue;
         }
         let mut attcollation = attcollation;
-        // COLLATE clause overrides either leg's collation (indexcmds.c:2050-2062,
-        // resolved before the collatable check).
         if !attribute.collation.is_nil() {
-            if let Some(lvl) = ddl_save_nestlevel.as_deref_mut() {
-                guc::AtEOXact_GUC(false, *lvl);
-            }
-            let resolved = catalog_namespace::get_collation_oid_list(&attribute.collation, false);
-            if let Some(lvl) = ddl_save_nestlevel.as_deref_mut() {
-                *lvl = guc::NewGUCNestLevel();
-                guc::RestrictSearchPath()?;
-            }
-            attcollation = resolved?;
+            attcollation = as_ddl_user(&mut ddl, || {
+                catalog_namespace::get_collation_oid_list(&attribute.collation, false)
+            })?;
         }
 
         if lsyscache::type_is_collatable(atttype)? {
@@ -1657,22 +1670,13 @@ fn ComputeIndexAttrs<'mcx>(
         }
         collationIds[attn] = attcollation;
 
-        // Opclass (and collation above) resolve under the DDL owner's original
-        // search path: the RestrictSearchPath nest level pops around the
-        // lookup (indexcmds.c ComputeIndexAttrs, ddl_save_nestlevel dance).
-        if let Some(lvl) = ddl_save_nestlevel.as_deref_mut() {
-            guc::AtEOXact_GUC(false, *lvl);
-        }
-        let resolved = if !attribute.opclass.is_nil() {
-            ResolveOpClass(&attribute.opclass, atttype, amname, accessMethodId)
-        } else {
-            GetDefaultOpClass(atttype, accessMethodId)
-        };
-        if let Some(lvl) = ddl_save_nestlevel.as_deref_mut() {
-            *lvl = guc::NewGUCNestLevel();
-            guc::RestrictSearchPath()?;
-        }
-        opclassIds[attn] = resolved?;
+        opclassIds[attn] = as_ddl_user(&mut ddl, || {
+            if !attribute.opclass.is_nil() {
+                ResolveOpClass(&attribute.opclass, atttype, amname, accessMethodId)
+            } else {
+                GetDefaultOpClass(atttype, accessMethodId)
+            }
+        })?;
         if attribute.opclass.is_nil() {
             if opclassIds[attn] == InvalidOid {
                 return Err(Box::new(
@@ -1694,7 +1698,9 @@ fn ComputeIndexAttrs<'mcx>(
         if let Some(opnode) = excl_iter.next() {
             let opname = opnode.as_list().expect("exclusion op name list");
             let pstate = parser_small1::make_parsestate(mcx, None);
-            let opid = parse_oper::compatible_oper_opid(&pstate, opname, atttype, atttype, false)?;
+            let opid = as_ddl_user(&mut ddl, || {
+                parse_oper::compatible_oper_opid(&pstate, opname, atttype, atttype, false)
+            })?;
             if lsyscache::get_commutator(opid)? != opid {
                 return Err(Box::new(
                     (*err(
@@ -1779,7 +1785,6 @@ fn ComputeIndexAttrs<'mcx>(
             }
         }
 
-        // Per-column opclass options, attoptions field (indexcmds.c:2237-2247).
         opclassOptions[attn] = if !attribute.opclassopts.is_nil() {
             let opts = reloptions::transformRelOptions(
                 mcx,
@@ -2036,6 +2041,38 @@ fn name_arg<'mcx>(mcx: Mcx<'mcx>, name: &str) -> PgResult<PgVec<'mcx, u8>> {
 #[cfg(test)]
 mod tests {
     use types_relscan::IndexAmKind::*;
+
+    #[test]
+    fn ddl_lookups_run_as_the_ddl_issuer() {
+        use miscinit::{GetUserIdAndSecContext, SecContextGuard, SetUserIdAndSecContext};
+        use types_core::{ProcessingMode, SECURITY_RESTRICTED_OPERATION};
+        miscinit::SetProcessingMode(ProcessingMode::BootstrapProcessing);
+        let (issuer, owner) = (10, 16384);
+        SetUserIdAndSecContext(issuer, 0);
+        let mut nestlevel = guc::NewGUCNestLevel();
+        let restricted = SecContextGuard::security_restricted(owner);
+        assert_eq!(GetUserIdAndSecContext(), (owner, SECURITY_RESTRICTED_OPERATION));
+        let mut ddl = Some(super::DdlIdentity {
+            userid: issuer,
+            sec_context: 0,
+            save_nestlevel: &mut nestlevel,
+        });
+        let seen = super::as_ddl_user(&mut ddl, || Ok(GetUserIdAndSecContext())).unwrap();
+        assert_eq!(seen, (issuer, 0));
+        assert_eq!(GetUserIdAndSecContext(), (owner, SECURITY_RESTRICTED_OPERATION));
+        let err = super::as_ddl_user(&mut ddl, || -> super::PgResult<()> {
+            Err(super::err("lookup failed".into(), types_error::ERRCODE_UNDEFINED_OBJECT))
+        })
+        .unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_UNDEFINED_OBJECT);
+        assert_eq!(GetUserIdAndSecContext(), (owner, SECURITY_RESTRICTED_OPERATION));
+        drop(ddl);
+        assert_eq!(nestlevel, guc::NewGUCNestLevel() - 1);
+        restricted.restore();
+        let mut none = None;
+        let seen = super::as_ddl_user(&mut none, || Ok(GetUserIdAndSecContext())).unwrap();
+        assert_eq!(seen, (issuer, 0));
+    }
 
     // pg_mbcliplen is a seam and unit tests install no seams; the stub is
     // the same UTF-8 boundary clip pg_constraint's truncation_tests uses.
