@@ -830,6 +830,8 @@ pub fn form_index_value<'m>(
         let normalize = support
             .type_info
             .normalize
+            // C HnswNormValue would call through a NULL fn pointer here; the built-in
+            // opclasses always pair a norm proc with a normalize.
             .expect("opclass with a norm proc must have a normalize callback");
         img = normalize(mcx, &img)?;
     }
@@ -862,10 +864,12 @@ pub fn hnswinsert<'mcx>(
 #[cfg(test)]
 mod type_info_tests {
     use super::*;
-    use types_hnsw::HnswTypeInfo;
 
     fn reject(_img: &[u8]) -> PgResult<()> {
-        Err(PgError::error("sparsevec cannot have more than 1000 non-zero elements for hnsw index").into())
+        Err(PgError::error(
+            "sparsevec cannot have more than 1000 non-zero elements for hnsw index",
+        )
+        .into())
     }
     static REJECTING: HnswTypeInfo = HnswTypeInfo {
         max_dimensions: 3,
@@ -894,7 +898,8 @@ mod type_info_tests {
         let owner = mcx::MemoryContext::new_bump("t");
         let m = owner.mcx();
         let mut b = pgvector::vec::VecBuilder::new(m, 2).unwrap();
-        b.set(0, 0.0); b.set(1, 0.0);
+        b.set(0, 0.0);
+        b.set(1, 0.0);
         let img = b.image();
         let d = datum::Datum::from_usize(img.as_ptr() as usize);
         let mut sp = support_with(&REJECTING, true);
@@ -910,7 +915,8 @@ mod type_info_tests {
         let owner = mcx::MemoryContext::new_bump("t");
         let m = owner.mcx();
         let mut b = pgvector::vec::VecBuilder::new(m, 2).unwrap();
-        b.set(0, 0.0); b.set(1, 0.0);
+        b.set(0, 0.0);
+        b.set(1, 0.0);
         let img = b.image();
         let d = datum::Datum::from_usize(img.as_ptr() as usize);
         let mut sp = support_with(&pgvector::vec::VECTOR_TYPE_INFO, true);
@@ -923,7 +929,8 @@ mod type_info_tests {
         let owner = mcx::MemoryContext::new_bump("t");
         let m = owner.mcx();
         let mut b = pgvector::vec::VecBuilder::new(m, 2).unwrap();
-        b.set(0, 3.0); b.set(1, 4.0);
+        b.set(0, 3.0);
+        b.set(1, 4.0);
         let img = b.image();
         let d = datum::Datum::from_usize(img.as_ptr() as usize);
         let mut sp = support_with(&pgvector::vec::VECTOR_TYPE_INFO, true);

@@ -129,6 +129,8 @@ fn get_scan_value(
         let normalize = support
             .type_info
             .normalize
+            // C HnswNormValue would call through a NULL fn pointer here; the built-in
+            // opclasses always pair a norm proc with a normalize.
             .expect("opclass with a norm proc must have a normalize callback");
         let normed = normalize(tmcx, &flat)?;
         return Ok(Some(normed.to_vec()));

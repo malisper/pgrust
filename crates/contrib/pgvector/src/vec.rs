@@ -622,7 +622,6 @@ mod tests {
     }
 }
 
-
 #[cfg(test)]
 mod type_info_tests {
     use super::*;
