@@ -551,7 +551,7 @@ mod tests {
         for (i, &x) in xs.iter().enumerate() {
             let mut b = pgvector::vec::VecBuilder::new(mcx, 1).unwrap();
             b.set(0, x);
-            g.alloc_element(ItemPointerData::new(1, i as u16 + 1), 0, &b.image(), 2);
+            g.alloc_element(ItemPointerData::new(1, i as u16 + 1), 0, &b.image(), 2).unwrap();
         }
         g
     }
@@ -640,12 +640,14 @@ mod tests {
                             types_hnsw::hnsw_get_ml(m),
                             pgvector_hnsw::layout::hnsw_get_max_level(m),
                         );
-                        let e = g.alloc_element(
-                            ItemPointerData::new(t as u32 + 1, i + 1),
-                            level,
-                            &b.image(),
-                            m,
-                        );
+                        let e = g
+                            .alloc_element(
+                                ItemPointerData::new(t as u32 + 1, i + 1),
+                                level,
+                                &b.image(),
+                                m,
+                            )
+                            .unwrap();
                         insert_tuple_in_memory(&g, &mut sp, m, efc, e).unwrap();
                         g.inc_indtuples();
                     }

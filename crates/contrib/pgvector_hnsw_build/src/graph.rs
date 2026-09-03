@@ -17,15 +17,26 @@
 //! chunks allocated until the `SharedGraph` is dropped at the end of the
 //! build, where C resets `graphCtx` and returns the memory to the OS — up to
 //! `maintenance_work_mem` therefore stays allocated during the on-disk phase;
-//! and the chunk directory is sized once from `memory_total` (clamped at
+//! the chunk directory is sized once from `memory_total` (clamped at
 //! `MAX_CHUNKS`), so a `maintenance_work_mem` above ~40GB flushes at
-//! `MAX_CHUNKS * CHUNK_SIZE` elements rather than at the byte budget.
+//! `MAX_CHUNKS * CHUNK_SIZE` elements rather than at the byte budget;
+//! and the memory budget is checked outside the allocator lock. C
+//! `InsertTuple` (hnswbuild.c:524-537) holds `graph->allocatorLock`
+//! EXCLUSIVE across both the `memoryUsed + memoryMargin >= memoryTotal` test
+//! and the element/value allocation, so the check is exact; here
+//! `memory_exhausted()` is a Relaxed load taken outside `alloc_lock` and
+//! `memory_used.fetch_add` happens before `alloc_lock` is taken, so the
+//! budget can be overshot by at most (participants x one element) — bounded
+//! well below the 1MB parallel margin — and the re-check under
+//! `flush_lock.write()` in `insert_tuple` keeps multi-participant exhaustion
+//! correct (exactly one participant flushes, the rest divert to disk).
 
 use std::mem::MaybeUninit;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering::*};
 use std::sync::{Mutex, RwLock};
 use types_core::BlockNumber;
+use types_error::{PgError, PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
 use types_hnsw::{hnsw_get_layer_m, HNSW_HEAPTIDS};
 use types_tuple::itemptr::ItemPointerData;
 use pgvector_hnsw::layout::{INVALID_BLOCK, INVALID_OFFSET};
@@ -95,7 +106,9 @@ type Slot = MaybeUninit<SharedElement>;
 /// `alloc_element`, so that many elements can never fit in the budget; two
 /// spare chunks cover the participants that pass the memory check
 /// concurrently and then allocate (C: the same window between releasing the
-/// allocator lock and `HnswAlloc`).
+/// allocator lock and `HnswAlloc`). The `MAX_CHUNKS` clamp can discard that
+/// headroom, so `memory_exhausted` keeps a chunk in reserve of its own
+/// rather than relying on the `+ 2` here.
 fn dir_len_for(memory_total: usize) -> usize {
     let max_elems = memory_total / core::mem::size_of::<SharedElement>();
     (max_elems / CHUNK_SIZE + 2).clamp(1, MAX_CHUNKS)
@@ -134,7 +147,21 @@ pub struct SharedGraph {
     cleared: AtomicBool,
     head: Mutex<Vec<u32>>,
     entry_point: Mutex<Option<u32>>,
+    /// C: `graph->entryLock`. Guards the entry-point read/promote window of
+    /// `InsertTupleInMemory` (hnswbuild.c:453-470): taken SHARED to read the
+    /// entry point and held across `HnswFindElementNeighbors` +
+    /// `UpdateGraphInMemory`, upgraded to EXCLUSIVE for the whole window when
+    /// the new element's level exceeds the entry point's (or there is no
+    /// entry point yet), so a promotion cannot race another insert's search.
+    /// `flush_pages` takes it EXCLUSIVE too. Not the entry point's own
+    /// storage lock — that is `entry_point`'s Mutex.
     pub entry_lock: RwLock<()>,
+    /// C: `graph->entryWaitLock`. The fairness ping of the same protocol: an
+    /// inserter about to ask for `entry_lock` EXCLUSIVE takes this first so
+    /// that later inserters — which acquire and immediately release it before
+    /// asking for `entry_lock` SHARED (hnswbuild.c:453-455) — queue behind the
+    /// upgrade instead of starving it. Held only across the `entry_lock`
+    /// acquisition, never across work.
     pub entry_wait_lock: Mutex<()>,
     memory_used: AtomicUsize,
     pub memory_total: usize,
@@ -194,7 +221,18 @@ impl SharedGraph {
     /// `Mcx` because worker threads must not allocate from the leader's
     /// memory context (thread-affine). Ids are dense and append-only: the
     /// returned id is always the previous `len()`.
-    pub fn alloc_element(&self, heaptid: ItemPointerData, level: u8, value: &[u8], m: i32) -> u32 {
+    ///
+    /// Errors only if the arena has no free slot, which `memory_exhausted`'s
+    /// one-chunk headroom rules out for every reachable participant count; C
+    /// cannot fail here at all (it allocates from the DSM area under the
+    /// allocator lock and errors out of `HnswAlloc` instead).
+    pub fn alloc_element(
+        &self,
+        heaptid: ItemPointerData,
+        level: u8,
+        value: &[u8],
+        m: i32,
+    ) -> PgResult<u32> {
         let mut neighbors_bytes = 0usize;
         let mut neighbors = Vec::with_capacity(level as usize + 1);
         for lc in 0..=level as i32 {
@@ -216,6 +254,8 @@ impl SharedGraph {
                 neighbor_offno: INVALID_OFFSET,
             }),
         };
+        // Charged before `alloc_lock` is taken, unlike C, which tests and
+        // charges the budget under `allocatorLock` (DIVERGENCE, header).
         self.memory_used.fetch_add(
             core::mem::size_of::<SharedElement>() + neighbors_bytes + value.len(),
             Relaxed,
@@ -225,11 +265,14 @@ impl SharedGraph {
         // serialised; readers never take this lock.
         let _guard = lk(&self.alloc_lock);
         let id = self.len.load(Relaxed) as usize;
-        assert!(
-            id < self.capacity,
-            "hnsw graph arena capacity exceeded ({} elements)",
-            self.capacity
-        );
+        // Unreachable given `memory_exhausted`'s headroom; an over-budget
+        // build must degrade to the on-disk path, never panic a backend.
+        debug_assert!(id < self.capacity, "hnsw graph arena capacity exceeded");
+        if id >= self.capacity {
+            return Err(PgError::error("hnsw graph arena is full")
+                .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+                .into());
+        }
         let (c, off) = (id / CHUNK_SIZE, id % CHUNK_SIZE);
         let mut chunk = self.dir[c].load(Acquire);
         if chunk.is_null() {
@@ -245,7 +288,7 @@ impl SharedGraph {
         // Release: publishes the write above to every Acquire load of `len`
         // (and to every `elem()` call the caller's id then reaches).
         self.len.store((id + 1) as u32, Release);
-        id as u32
+        Ok(id as u32)
     }
 
     /// Lock-free indexed read. `id` must have been returned by
@@ -264,13 +307,23 @@ impl SharedGraph {
         debug_assert!(id < self.len.load(Acquire) as usize, "elem() past the published length");
         let chunk = self.dir[id / CHUNK_SIZE].load(Acquire);
         debug_assert!(!chunk.is_null());
+        // SAFETY: ids are dense and below `len` by construction, and an id
+        // only reaches another thread through a mutex-protected container
+        // (entry point, neighbor lists, head) whose acquire synchronizes with
+        // the publisher's release after `ptr::write`, so the slot is fully
+        // initialized here. The Acquire load above pairs with the Release
+        // store of the directory entry, so `chunk` is a live CHUNK_SIZE slot
+        // array. Slots are never moved (chunks are fixed-size heap blocks,
+        // the directory is never resized) and never freed before `Drop`,
+        // which takes `&mut self` and so cannot run while this `&self`
+        // borrow — and the returned reference derived from it — is alive.
         unsafe { &*(chunk.add(id % CHUNK_SIZE) as *const SharedElement) }
     }
 
     /// Number of allocated elements (duplicates included), zero once the
-    /// graph has been flushed and cleared. Used by tests and by the parallel
-    /// build's progress reporting.
-    #[allow(dead_code)]
+    /// graph has been flushed and cleared. Tests only — the build itself
+    /// reads `indtuples`, never this.
+    #[allow(dead_code)] // tests-only accessor
     pub fn len(&self) -> usize {
         if self.cleared.load(Acquire) {
             return 0;
@@ -300,9 +353,14 @@ impl SharedGraph {
     /// zero in a serial one.
     pub fn memory_exhausted(&self, margin: usize) -> bool {
         self.memory_used() + margin >= self.memory_total
-            // The arena has no more slots (only reachable when memory_total
-            // exceeds what MAX_CHUNKS can hold): flush rather than overrun.
-            || self.len.load(Acquire) as usize >= self.capacity
+            // The arena is within one chunk of full (only reachable when
+            // `dir_len_for` clamped the directory at MAX_CHUNKS, i.e. a
+            // `maintenance_work_mem` above ~40GB): flush rather than overrun.
+            // The kept chunk is headroom for the participants that pass this
+            // test concurrently and only then allocate — there are at most
+            // `max_parallel_maintenance_workers + 1` of them, far below
+            // CHUNK_SIZE, so `alloc_element` can never run out of slots.
+            || self.len.load(Acquire) as usize + CHUNK_SIZE > self.capacity
     }
 
     pub fn flushed(&self) -> bool {
@@ -369,15 +427,52 @@ mod tests {
     #[test]
     fn alloc_is_append_only_and_accounts_memory() {
         let g = SharedGraph::new(1 << 20);
-        let a = g.alloc_element(tid(1), 0, &[0u8; 16], 16);
-        let b = g.alloc_element(tid(2), 2, &[0u8; 16], 16);
+        let a = g.alloc_element(tid(1), 0, &[0u8; 16], 16).unwrap();
+        let b = g.alloc_element(tid(2), 2, &[0u8; 16], 16).unwrap();
         assert_eq!((a, b), (0, 1));
         assert_eq!(g.elem(b).neighbors.lock().unwrap().len(), 3, "one NeighborArray per layer 0..=level");
         assert!(g.memory_used() > 32);
         assert!(!g.memory_exhausted(0));
         let small = SharedGraph::new(1);
-        small.alloc_element(tid(1), 0, &[0u8; 16], 16);
+        small.alloc_element(tid(1), 0, &[0u8; 16], 16).unwrap();
         assert!(small.memory_exhausted(0));
+    }
+
+    #[test]
+    fn exhaustion_is_reported_before_the_arena_can_overrun() {
+        // (a) The byte budget. A tiny `maintenance_work_mem` sizes the
+        // directory from the same number, so this is the case where the
+        // budget check and the arena capacity sit closest together.
+        let g = SharedGraph::new(64 * 1024);
+        let mut n = 0u32;
+        while !g.memory_exhausted(0) {
+            assert!((n as usize) < g.capacity, "alloc_element reached past capacity");
+            assert_eq!(g.alloc_element(tid(n as u16), 0, &[0u8; 8], 16).unwrap(), n);
+            n += 1;
+        }
+        assert!(n > 0, "the budget must admit at least one element");
+        assert!(g.len() + CHUNK_SIZE <= g.capacity, "no arena headroom left");
+
+        // (b) The arena clause on its own (C's >40GB regime, where
+        // `dir_len_for` clamps at MAX_CHUNKS and the byte budget never
+        // fires). Forcing `memory_total` up leaves only the headroom test.
+        let mut g = SharedGraph::new(4096);
+        g.memory_total = usize::MAX;
+        let capacity = g.capacity;
+        let mut n = 0u32;
+        while !g.memory_exhausted(0) {
+            assert!((n as usize) < capacity, "alloc_element reached past capacity");
+            g.alloc_element(tid(n as u16), 0, &[0u8; 8], 16).unwrap();
+            n += 1;
+        }
+        // Stopped a full chunk short: the participants that pass the check
+        // concurrently and only then allocate all still get a slot, so
+        // `alloc_element`'s capacity guard is unreachable in practice.
+        assert_eq!(n as usize + CHUNK_SIZE, capacity + 1);
+        assert!(g.len() < capacity);
+        for i in 0..64u32 {
+            g.alloc_element(tid(i as u16), 0, &[0u8; 8], 16).unwrap();
+        }
     }
 
     #[test]
@@ -388,7 +483,7 @@ mod tests {
                 let g = Arc::clone(&g);
                 thread::spawn(move || {
                     (0..500u16)
-                        .map(|i| g.alloc_element(tid(i), 0, &[t as u8; 8], 16))
+                        .map(|i| g.alloc_element(tid(i), 0, &[t as u8; 8], 16).unwrap())
                         .collect::<Vec<u32>>()
                 })
             })
@@ -402,7 +497,7 @@ mod tests {
     #[test]
     fn head_entry_point_and_flush_flags() {
         let g = SharedGraph::new(usize::MAX);
-        let e = g.alloc_element(tid(1), 1, &[1u8; 8], 16);
+        let e = g.alloc_element(tid(1), 1, &[1u8; 8], 16).unwrap();
         assert_eq!(g.entry_point(), None);
         g.set_entry_point(Some(e));
         g.add_to_head(e);
@@ -419,7 +514,7 @@ mod tests {
     fn elements_span_chunk_boundaries() {
         let g = SharedGraph::new(1 << 30);
         for i in 0..=CHUNK_SIZE {
-            g.alloc_element(tid(i as u16), (i % 3) as u8, &[(i % 251) as u8; 8], 16);
+            g.alloc_element(tid(i as u16), (i % 3) as u8, &[(i % 251) as u8; 8], 16).unwrap();
         }
         assert_eq!(g.len(), CHUNK_SIZE + 1);
         // Explicitly borrowed: `elem` hands out a reference into the arena.
@@ -478,6 +573,7 @@ mod tests {
                     (0..2000u32)
                         .map(|i| {
                             g.alloc_element(tid(i as u16), (i % 4) as u8, &[t as u8; 8], 16)
+                                .unwrap()
                         })
                         .collect::<Vec<u32>>()
                 })
