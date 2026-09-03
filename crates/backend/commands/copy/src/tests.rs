@@ -615,3 +615,14 @@ fn csv_walk_skips_ascii_trail_bytes_under_sjis() {
     crate::to::copy_attribute_out_csv(&mut buf2, s, &opts, false, false, None).unwrap();
     assert_eq!(buf2.as_bytes(), b"\"a\x81\"\"b\"");
 }
+
+// copy-1 (audit-18.6): copyfrom.c:1881 / copyto.c:971 guard the HINT on
+// save_errno == ENOENT || save_errno == EACCES.
+#[test]
+fn open_failure_hint_only_for_enoent_and_eacces() {
+    assert!(crate::open_failure_hint_applies(libc::ENOENT));
+    assert!(crate::open_failure_hint_applies(libc::EACCES));
+    for e in [libc::EISDIR, libc::ENOTDIR, libc::EROFS, libc::EOPNOTSUPP, libc::EPERM, 0] {
+        assert!(!crate::open_failure_hint_applies(e), "errno {e} must not carry the HINT");
+    }
+}

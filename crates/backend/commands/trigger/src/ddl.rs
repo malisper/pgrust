@@ -170,8 +170,34 @@ fn get_relkind_objtype(relkind: u8) -> types_nodes::parsenodes::ObjectType {
     }
 }
 
-// renametrig (trigger.c). RangeVarCallbackForRenameTrigger's checks (relkind,
-// owner, system catalog) are applied to the opened rel.
+// RangeVarCallbackForRenameTrigger's relkind check (trigger.c:1425-1445),
+// run inside RangeVarGetRelidExtended before the relation is opened: an
+// index or composite type is refused as "relation cannot have triggers", not
+// with table_open's "cannot open relation". The owner and system-catalog
+// checks follow on the opened rel (same order as C, which runs them next).
+fn rename_trigger_relkind_callback(rv: &rel_vocab::RangeVar<'_>, relid: Oid) -> PgResult<()> {
+    if relid == InvalidOid {
+        return Ok(()); // concurrently dropped
+    }
+    let relkind = lsyscache::get_rel_relkind(relid)? as u8;
+    if relkind == 0 {
+        return Ok(()); // concurrently dropped (C: !HeapTupleIsValid)
+    }
+    match relkind {
+        RELKIND_RELATION | b'v' | RELKIND_FOREIGN_TABLE | RELKIND_PARTITIONED_TABLE => Ok(()),
+        other => Err(Box::new(
+            (*err(
+                format!("relation \"{}\" cannot have triggers", rv.relname),
+                ERRCODE_WRONG_OBJECT_TYPE,
+            ))
+            .with_detail(relkind_not_supported_detail(other)?),
+        )),
+    }
+}
+
+// renametrig (trigger.c): RangeVarGetRelidExtended with the relkind callback,
+// then table_open(relid, NoLock); the owner/system-catalog checks of
+// RangeVarCallbackForRenameTrigger are applied to the opened rel.
 pub fn renametrig<'mcx>(mcx: Mcx<'mcx>, stmt: &RenameStmt<'mcx>) -> PgResult<()> {
     let rvn = stmt.relation.expect("RenameStmt.relation");
     let rv = rel_vocab::RangeVar {
@@ -185,19 +211,16 @@ pub fn renametrig<'mcx>(mcx: Mcx<'mcx>, stmt: &RenameStmt<'mcx>) -> PgResult<()>
     let subname = stmt.subname.expect("RenameStmt.subname");
     let newname = stmt.newname.expect("RenameStmt.newname");
 
-    let targetrel = table::table_openrv(mcx, &rv, AccessExclusiveLock)?;
-    match targetrel.rd_rel.relkind {
-        RELKIND_RELATION | b'v' | RELKIND_FOREIGN_TABLE | RELKIND_PARTITIONED_TABLE => {}
-        other => {
-            return Err(Box::new(
-                (*err(
-                    format!("relation \"{}\" cannot have triggers", rv.relname),
-                    ERRCODE_WRONG_OBJECT_TYPE,
-                ))
-                .with_detail(relkind_not_supported_detail(other as u8)?),
-            ));
-        }
-    }
+    let mut callback = |rel: &rel_vocab::RangeVar<'_>, relid: Oid, _old: Oid| {
+        rename_trigger_relkind_callback(rel, relid)
+    };
+    let relid = catalog_namespace::RangeVarGetRelidExtended(
+        &rv,
+        AccessExclusiveLock,
+        0,
+        Some(&mut callback),
+    )?;
+    let targetrel = table::table_open(mcx, relid, NoLock)?;
     // RangeVarCallbackForRenameTrigger: you must own the table to rename one
     // of its triggers.
     if !aclchk::object_ownercheck(

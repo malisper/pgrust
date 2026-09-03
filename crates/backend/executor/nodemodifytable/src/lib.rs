@@ -1786,6 +1786,9 @@ pub fn mt_accept_row<'mcx>(
             // the OLD row arrives as the wholerow junk attr; the FDW keys the
             // remote UPDATE off its own junk attrs in the plan slot.
             CmdType::CMD_UPDATE if mt.rel().ri_FdwRoutine.is_some() => {
+                // ExecARUpdateTriggers' first check (trigger.c:3162-3170),
+                // hoisted: the FDW arm never reaches the AR trigger call.
+                foreign_transition_capture_check(mt, estate, CmdType::CMD_UPDATE)?;
                 let old_tup = fetch_wholerow_tuple(mt, estate, plan_slot)?;
                 if !mt.rel().ri_projectNewInfoValid {
                     exec_init_update_projection(mt, estate)?;
@@ -1834,6 +1837,8 @@ pub fn mt_accept_row<'mcx>(
             }
             // ExecDelete's ri_FdwRoutine arm (nodeModifyTable.c:1612-1637).
             CmdType::CMD_DELETE if mt.rel().ri_FdwRoutine.is_some() => {
+                // ExecARDeleteTriggers' first check (trigger.c:2816-2823).
+                foreign_transition_capture_check(mt, estate, CmdType::CMD_DELETE)?;
                 let ret_slot = ensure_returning_slot(mt, estate);
                 clear_slot(estate, ret_slot);
                 if exec_foreign_modify_row(mt, estate, CmdType::CMD_DELETE, ret_slot, plan_slot)?
@@ -5188,6 +5193,29 @@ fn ensure_returning_slot<'mcx>(
     mt.rel().ri_ReturningSlot.expect("just initialized")
 }
 
+// ExecAR{Insert,Update,Delete}Triggers' opening guard (trigger.c:2555-2562 /
+// 2816-2823 / 3162-3170): `ri_FdwRoutine && transition_capture &&
+// tcs_<op>_table` -> 0A000. The FDW arms here perform the modification and
+// never reach the AR trigger call (row triggers on foreign tables are
+// unported), so the guard is applied before the remote DML, where C's error
+// also precedes any AFTER trigger work and rolls the remote change back.
+fn foreign_transition_capture_check<'mcx>(
+    mt: &ModifyTableState<'mcx>,
+    estate: &EStateData<'mcx>,
+    op: CmdType,
+) -> PgResult<()> {
+    let capturing = mt.transition_capture.as_ref().is_some_and(|tc| match op {
+        CmdType::CMD_INSERT => tc.tcs_insert_new_table,
+        CmdType::CMD_UPDATE => tc.tcs_update_old_table || tc.tcs_update_new_table,
+        CmdType::CMD_DELETE => tc.tcs_delete_old_table,
+        _ => false,
+    });
+    let rel = estate.es_relations[(mt.rel().rti - 1) as usize]
+        .as_ref()
+        .expect("result relation opened");
+    ::trigger::check_foreign_transition_capture(rel, capturing)
+}
+
 // The ri_FdwRoutine dispatch shared by the foreign INSERT/UPDATE/DELETE arms.
 // True = a remote row was affected; the slot's tableoid is re-stamped for AR
 // triggers / RETURNING, as C.
@@ -6492,6 +6520,8 @@ fn exec_insert<'mcx>(
     // indexes are the remote's job; the tail (es_processed, WCO_VIEW_CHECK,
     // RETURNING via the caller) mirrors the common exit.
     if mt.rel().ri_FdwRoutine.is_some() {
+        // ExecARInsertTriggers' first check (trigger.c:2555-2562).
+        foreign_transition_capture_check(mt, estate, CmdType::CMD_INSERT)?;
         fdw_prepare_new_slot(mt, estate, slot_id)?;
         if !exec_foreign_modify_row(mt, estate, CmdType::CMD_INSERT, slot_id, slot_id)? {
             return Ok(None);

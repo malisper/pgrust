@@ -18,6 +18,7 @@ pub mod groupingsets;
 pub mod indxpath;
 mod tidpath;
 mod inherit;
+pub use inherit::get_rel_all_updated_cols;
 pub mod initsplan;
 pub mod joinpath;
 pub mod joinrels;

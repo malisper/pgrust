@@ -611,6 +611,12 @@ fn install_syscache_fixture_overrides() {
     // pg_type/pg_attribute/pg_opclass live behind mocks (no such catalogs here).
     // Fixture columns carry no attoptions: valid tuple, null column.
     syscache_seams::pg_attribute_attoptions::set(|_mcx, _relid, _attnum| Ok(Some(None)));
+    // do_analyze_rel's VERBOSE/instrument report names "schema.table".
+    syscache_seams::pg_namespace_nspname::set(|_nspid| {
+        let mut nd = NameData::default();
+        nd.namestrcpy("public");
+        Ok(Some(nd))
+    });
     syscache_seams::lookup_pg_type_shape::set(|typid| {
         Ok(match typid {
             INT4OID => Some(types_tuple::PgTypeShape {
@@ -930,7 +936,7 @@ fn run_analyze() {
     let cx = MemoryContext::new("analyze");
     let mcx = cx.mcx();
     xact::StartTransactionCommand().unwrap();
-    commands_analyze::analyze_rel(mcx, T_OID, None, &NodeList::nil(), &VacuumParams { options: 0x02 }, false)
+    commands_analyze::analyze_rel(mcx, T_OID, None, &NodeList::nil(), &VacuumParams { options: 0x02, log_min_duration: -1 }, false)
         .unwrap();
     xact::CommitTransactionCommand().unwrap();
 }

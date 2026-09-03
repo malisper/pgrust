@@ -74,6 +74,15 @@ pub fn pgstat_progress_update_multi_param(indices: &[usize], vals: &[i64]) {
     });
 }
 
+/// The calling backend's own current value of a progress parameter (C reads
+/// `MyBEEntry->st_progress_param[index]` directly, bypassing the changecount
+/// protocol, because only this process updates it; analyze.c:797).
+pub fn pgstat_progress_current_param(index: usize) -> i64 {
+    debug_assert!(index < PGSTAT_NUM_PROGRESS_PARAM);
+    // SAFETY: the entry is this backend's own; single-writer cell read.
+    MyBEEntry().map(|be| unsafe { be.st_progress_param[index].get() }).unwrap_or(0)
+}
+
 pub fn pgstat_progress_end_command() {
     let Some(beentry) = MyBEEntry() else {
         return;

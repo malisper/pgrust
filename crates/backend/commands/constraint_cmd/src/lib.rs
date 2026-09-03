@@ -4,20 +4,22 @@
 
 use datum::Datum;
 use types_core::{Oid, INDEX_MAX_KEYS};
-use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR, ERROR};
+use types_error::{PgError, PgResult, ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED, ERROR};
 use types_fmgr::{FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction};
 use types_trigger::{
     TRIGGER_FIRED_AFTER, TRIGGER_FIRED_BY_INSERT, TRIGGER_FIRED_BY_UPDATE, TRIGGER_FIRED_FOR_ROW,
 };
 use types_trigger_call::trigger_data_from_fcinfo;
 
+// constraint.c:59/66/80: ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED (39P01)
+// with the funcname spliced into a message shared with ri_triggers.c.
 #[track_caller]
 #[cold]
 #[inline(never)]
 fn protocol_err(msg: &str) -> Box<PgError> {
     Box::new(
-        PgError::new(ERROR, format!("unique_key_recheck: {msg}"))
-            .with_sqlstate(ERRCODE_INTERNAL_ERROR),
+        PgError::new(ERROR, format!("function \"unique_key_recheck\" {msg}"))
+            .with_sqlstate(ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED),
     )
 }
 
@@ -28,7 +30,7 @@ pub fn fc_unique_key_recheck(
     // SAFETY: the trigger call machinery keeps the TriggerData live for the
     // duration of the call.
     let Some(td) = (unsafe { trigger_data_from_fcinfo(fcinfo) }) else {
-        return Err(protocol_err("not fired by trigger manager"));
+        return Err(protocol_err("was not called by trigger manager"));
     };
     if !TRIGGER_FIRED_AFTER(td.tg_event) || !TRIGGER_FIRED_FOR_ROW(td.tg_event) {
         return Err(protocol_err("must be fired AFTER ROW"));
@@ -130,3 +132,29 @@ const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrB
 }
 
 pub const CONSTRAINT_BUILTINS: &[FmgrBuiltin] = &[b(1250, "unique_key_recheck", 1, fc_unique_key_recheck)];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use types_fmgr::LocalFcinfo;
+
+    // constraint.c:59: a plain SELECT unique_key_recheck() is 39P01, not an
+    // internal error.
+    #[test]
+    fn not_called_by_trigger_manager_is_39p01() {
+        let mut fcinfo = LocalFcinfo::<1>::new(0);
+        let e = fc_unique_key_recheck(None, &mut fcinfo).unwrap_err();
+        assert_eq!(e.sqlstate(), ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED);
+        assert_eq!(e.message(), "function \"unique_key_recheck\" was not called by trigger manager");
+    }
+
+    // constraint.c:66/80 share the same shape.
+    #[test]
+    fn protocol_errors_are_39p01_with_c_text() {
+        let e = protocol_err("must be fired AFTER ROW");
+        assert_eq!(e.sqlstate(), ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED);
+        assert_eq!(e.message(), "function \"unique_key_recheck\" must be fired AFTER ROW");
+        let e = protocol_err("must be fired for INSERT or UPDATE");
+        assert_eq!(e.message(), "function \"unique_key_recheck\" must be fired for INSERT or UPDATE");
+    }
+}

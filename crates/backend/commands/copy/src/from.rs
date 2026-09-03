@@ -409,15 +409,19 @@ fn begin_copy_from_guts<'mcx: 's, 's>(
         Some(filename) => {
             let fd = fd::AllocateFile(filename, "rb")?;
             if fd < 0 {
-                ereport(ERROR)
-                    .with_saved_errno(std::io::Error::last_os_error().raw_os_error().unwrap_or(0))
+                // copy errno because ereport subfunctions might change it
+                let save_errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+                let mut e = ereport(ERROR)
+                    .with_saved_errno(save_errno)
                     .errcode_for_file_access()
-                    .errmsg(format!("could not open file \"{filename}\" for reading: %m"))
-                    .errhint(
+                    .errmsg(format!("could not open file \"{filename}\" for reading: %m"));
+                if crate::open_failure_hint_applies(save_errno) {
+                    e = e.errhint(
                         "COPY FROM instructs the PostgreSQL server process to read a file. You \
                          may want a client-side facility such as psql's \\copy.",
-                    )
-                    .finish(loc("BeginCopyFrom"))?;
+                    );
+                }
+                e.finish(loc("BeginCopyFrom"))?;
             }
             progress_type = PROGRESS_COPY_TYPE_FILE;
             let (is_dir, size) = fd::with_allocated_stdio(fd, |f| {

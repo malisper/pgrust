@@ -69,6 +69,11 @@ backend_progress = { path = "../../utils/activity/backend_progress" }
 tableam_vocab = { path = "../../access/table/tableam_vocab" }
 guc = { path = "../../utils/misc/guc" }
 miscinit = { path = "../../utils/init/miscinit" }
+pg_rusage = { path = "../../utils/misc/pg_rusage" }
+instrument = { path = "../../executor/instrument" }
+adt_timestamp = { path = "../../utils/adt/adt_timestamp" }
+dbcommands_seams = { path = "../dbcommands_seams" }
+init_small = { path = "../../utils/init/init_small" }
 
 [dev-dependencies]
 heapam = { path = "../../access/heap/heapam" }

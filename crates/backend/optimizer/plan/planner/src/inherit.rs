@@ -1331,6 +1331,71 @@ pub fn distribute_row_identity_vars<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResul
     Ok(())
 }
 
+// get_rel_all_updated_cols (inherit.c): the UPDATE's updatedCols come from
+// the query's result relation's RTEPermissionInfo; for an inheritance /
+// partition child target they are mapped to the child's column numbers
+// through the AppendRelInfo chain, then the dependent generated columns are
+// added. Child RTEs carry no perminfo of their own, so reading the child's
+// (absent) permission info yields an empty set -- postgres_fdw then deparses
+// `UPDATE ... SET  WHERE ctid = $1` for a foreign child (audit-18.6 trigger-5).
+pub fn get_rel_all_updated_cols<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    relid: u32,
+) -> PgResult<types_nodes::Bitmapset<'mcx>> {
+    let mcx = run.mcx;
+    debug_assert!(run.parse().commandType == types_nodes::nodes_enums::CmdType::CMD_UPDATE);
+    let result_relation = run.parse().resultRelation as u32;
+    let rte = run.rte(result_relation as usize);
+    let mut updated_cols = types_nodes::Bitmapset::empty();
+    if rte.perminfoindex > 0 {
+        let pi = run
+            .parse()
+            .rteperminfos
+            .nth(rte.perminfoindex as usize - 1)
+            .as_rte_permission_info()
+            .expect("rteperminfos cell");
+        updated_cols.add_members(mcx, &pi.updatedCols)?;
+    }
+    if relid != result_relation {
+        updated_cols = translate_col_privs_multilevel(run, relid, result_relation, &updated_cols)?;
+    }
+    let extra = crate::plancat::get_dependent_generated_columns(run, relid as usize, &updated_cols)?;
+    updated_cols.add_members(mcx, &extra)?;
+    Ok(updated_cols)
+}
+
+// translate_col_privs_multilevel (inherit.c): recurse up to the top parent,
+// translating through each level's AppendRelInfo.
+fn translate_col_privs_multilevel<'mcx>(
+    run: &PlannerRun<'mcx>,
+    relid: u32,
+    top_parent: u32,
+    parent_cols: &types_nodes::Bitmapset<'mcx>,
+) -> PgResult<types_nodes::Bitmapset<'mcx>> {
+    if parent_cols.is_empty() {
+        return Ok(types_nodes::Bitmapset::empty());
+    }
+    let appinfo = run
+        .root
+        .append_rel_array
+        .get(relid as usize)
+        .and_then(|a| a.clone())
+        .ok_or_else(|| {
+            Box::new(types_error::PgError::error(format!(
+                "rel with relid {relid} is not a child rel"
+            )))
+        })?;
+    let cols_owned;
+    let parent_cols = if appinfo.parent_relid != top_parent {
+        cols_owned =
+            translate_col_privs_multilevel(run, appinfo.parent_relid, top_parent, parent_cols)?;
+        &cols_owned
+    } else {
+        parent_cols
+    };
+    translate_col_privs(run, parent_cols, &appinfo)
+}
+
 // translate_col_privs (inherit.c): attnums offset by
 // FirstLowInvalidHeapAttributeNumber, whole-row expands to all inherited cols.
 fn translate_col_privs<'mcx>(

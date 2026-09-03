@@ -9,9 +9,9 @@ use pg_depend::{DependencyType, ObjectAddress};
 use types_core::fmgr::{F_NAMEEQ, F_OIDEQ};
 use types_core::{AttrNumber, InvalidOid, Oid, NAMEDATALEN, RELATION_RELATION_ID};
 use types_error::{
-    PgError, PgResult, ERRCODE_AMBIGUOUS_FUNCTION, ERRCODE_DUPLICATE_COLUMN,
+    PgError, PgResult, ERRCODE_DUPLICATE_COLUMN,
     ERRCODE_DUPLICATE_OBJECT, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INSUFFICIENT_PRIVILEGE,
-    ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_UNDEFINED_COLUMN, ERRCODE_UNDEFINED_FUNCTION,
+    ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_UNDEFINED_COLUMN,
     ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
 use types_nodes::primnodes::{Alias, Var};
@@ -983,32 +983,17 @@ fn check_when_var(
     Ok(())
 }
 
-// LookupFuncName(funcname, 0, NULL, false) (parse_func.c).
-fn lookup_trigger_func<'mcx>(mcx: Mcx<'mcx>, funcname: &NodeList<'mcx>) -> PgResult<Oid> {
+// LookupFuncName(funcname, 0, NULL, false) (parse_func.c, trigger.c:694):
+// the real lookup goes through LookupFuncNameInternal(OBJECT_FUNCTION, ...),
+// which skips prokind = 'p' candidates, so a procedure of that name is
+// "function p() does not exist" (42883) rather than "must return type
+// trigger". The former in-crate candidate scan could not see prokind.
+fn lookup_trigger_func<'mcx>(_mcx: Mcx<'mcx>, funcname: &NodeList<'mcx>) -> PgResult<Oid> {
     let mut parts: Vec<&str> = Vec::new();
     for part in funcname.iter() {
         parts.push(part.as_string().expect("funcname String").sval);
     }
-    let clist = catalog_namespace::FuncnameGetCandidates(mcx, &parts, 0, &[], false, false)?;
-    let oids: Vec<Oid> = clist.iter().map(|c| c.oid).collect();
-    select_zero_arg_func(&oids, &name_list_to_string(funcname))
-}
-
-fn select_zero_arg_func(oids: &[Oid], display: &str) -> PgResult<Oid> {
-    match oids {
-        [] => Err(err(
-            format!("function {display}() does not exist"),
-            ERRCODE_UNDEFINED_FUNCTION,
-        )),
-        [oid] if *oid != InvalidOid => Ok(*oid),
-        _ => Err(Box::new(
-            PgError::new(ERROR, format!("function name \"{display}\" is not unique"))
-                .with_sqlstate(ERRCODE_AMBIGUOUS_FUNCTION)
-                .with_hint(
-                    "Specify the argument list to select the function unambiguously.".to_string(),
-                ),
-        )),
-    }
+    parse_func_seams::LookupFuncName::call(&parts, 0, &[], false)
 }
 
 fn name_list_to_string(names: &NodeList<'_>) -> String {
@@ -1248,8 +1233,19 @@ pub(crate) fn name_arg<'mcx>(mcx: Mcx<'mcx>, name: &str) -> PgResult<PgVec<'mcx,
 #[cfg(test)]
 mod lookup_func_tests {
     use super::*;
-    use types_error::ERRCODE_SYNTAX_ERROR;
+    use types_error::{ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_FUNCTION};
     use types_nodes::Node;
+
+    // A stand-in for parse_func's LookupFuncName seam: the name split C's
+    // LookupFuncNameInternal -> FuncnameGetCandidates ->
+    // DeconstructQualifiedName performs, then a fixed verdict. Records the
+    // (nargs, argtypes, missing_ok) shape trigger.c:694 must pass.
+    static SEEN: std::sync::Mutex<Option<(usize, i16, usize, bool)>> = std::sync::Mutex::new(None);
+    fn stub_lookup(parts: &[&str], nargs: i16, argtypes: &[Oid], missing_ok: bool) -> PgResult<Oid> {
+        *SEEN.lock().unwrap() = Some((parts.len(), nargs, argtypes.len(), missing_ok));
+        catalog_namespace::DeconstructQualifiedName(parts)?;
+        Err(err("function stub() does not exist".to_string(), ERRCODE_UNDEFINED_FUNCTION))
+    }
 
     fn name_list<'mcx>(mcx: Mcx<'mcx>, parts: &[&'mcx str]) -> NodeList<'mcx> {
         let mut list = NodeList::nil();
@@ -1259,10 +1255,15 @@ mod lookup_func_tests {
         list
     }
 
+    // One test body: the LookupFuncName seam is process-global and a second
+    // set() panics ("seam installed twice"), so both scenarios share it.
     #[test]
-    fn five_part_funcname_is_syntax_error() {
-        let root = mcx::session_root("trig-dots");
+    fn trigger_function_lookup_shapes() {
+        parse_func_seams::LookupFuncName::set(stub_lookup);
+        let root = mcx::session_root("trig-lookup");
         let mcx = root.mcx();
+
+        // five dotted parts: DeconstructQualifiedName's syntax error surfaces
         let names = name_list(mcx, &["a", "b", "c", "d", "e"]);
         let e = lookup_trigger_func(mcx, &names).unwrap_err();
         assert_eq!(
@@ -1270,23 +1271,14 @@ mod lookup_func_tests {
             "improper qualified name (too many dotted names): a.b.c.d.e"
         );
         assert_eq!(e.sqlstate(), ERRCODE_SYNTAX_ERROR);
-    }
+        SEEN.lock().unwrap().take();
 
-    #[test]
-    fn two_zero_arg_candidates_is_ambiguous_function() {
-        let e = select_zero_arg_func(&[1, 2], "foo").unwrap_err();
-        assert_eq!(e.sqlstate(), ERRCODE_AMBIGUOUS_FUNCTION);
-        assert_eq!(e.message(), "function name \"foo\" is not unique");
-        assert_eq!(
-            e.hint(),
-            Some("Specify the argument list to select the function unambiguously.")
-        );
-    }
-
-    #[test]
-    fn invalid_oid_duplicate_marker_is_ambiguous() {
-        let e = select_zero_arg_func(&[InvalidOid], "foo").unwrap_err();
-        assert_eq!(e.sqlstate(), ERRCODE_AMBIGUOUS_FUNCTION);
-        assert_eq!(e.message(), "function name \"foo\" is not unique");
+        // trigger-3 (audit-18.6): trigger.c:694 is LookupFuncName(funcname, 0,
+        // NULL, false) -- the OBJECT_FUNCTION lookup (prokind filter included)
+        // lives in parse_func, not in a local candidate scan.
+        let names = name_list(mcx, &["myschema", "pr"]);
+        let e = lookup_trigger_func(mcx, &names).unwrap_err();
+        assert_eq!(e.sqlstate(), ERRCODE_UNDEFINED_FUNCTION);
+        assert_eq!(SEEN.lock().unwrap().take(), Some((2, 0, 0, false)));
     }
 }

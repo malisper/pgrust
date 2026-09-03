@@ -28,6 +28,14 @@ mod tests;
 
 pub use from::{copy_from_error_context, BeginCopyFrom, BeginCopyFromCallback, CopyFrom, CopyFromState, EndCopyFrom};
 pub use to::{BeginCopyTo, DoCopyTo, EndCopyTo};
+
+/// copyfrom.c:1881 / copyto.c:971: the "client-side facility such as psql's
+/// \copy" HINT accompanies a failed file open only for ENOENT and EACCES;
+/// every other errno (EISDIR, ENOTDIR, EROFS, EOPNOTSUPP, ...) gets the bare
+/// "could not open file" error.
+pub(crate) fn open_failure_hint_applies(save_errno: i32) -> bool {
+    save_errno == libc::ENOENT || save_errno == libc::EACCES
+}
 #[doc(hidden)]
 pub use fromparse::bench_internals;
 #[doc(hidden)]

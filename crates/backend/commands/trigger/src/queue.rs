@@ -10,10 +10,10 @@ use std::rc::Rc;
 use mcx::Mcx;
 use ri_triggers_seams::RiTriggerData;
 use types_core::{CommandId, Oid};
-use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
+use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INTERNAL_ERROR};
 use types_nodes::nodes_enums::CmdType;
 use types_portal::TuplestoreHandle;
-use types_rel::{NoLock, Relation, RELKIND_PARTITIONED_TABLE};
+use types_rel::{NoLock, Relation, RELKIND_FOREIGN_TABLE, RELKIND_PARTITIONED_TABLE};
 use types_snapshot::{SnapshotData, SNAPSHOT_ANY};
 use types_trigger::{
     Trigger, TriggerDesc, AFTER_TRIGGER_DEFERRABLE, AFTER_TRIGGER_INITDEFERRED, RI_TRIGGER_FK,
@@ -1095,10 +1095,7 @@ fn after_trigger_save_event<'mcx>(
                 }
             }
         }
-        const F_UNIQUE_KEY_RECHECK: Oid = 1250;
-        if trigger.tgfoid == F_UNIQUE_KEY_RECHECK
-            && !recheck_indexes.contains(&trigger.tgconstrindid)
-        {
+        if skip_unique_key_recheck(trigger.tgfoid, trigger.tgconstrindid, recheck_indexes) {
             continue;
         }
         let ats_event = (event & TRIGGER_EVENT_OPMASK)
@@ -1176,6 +1173,16 @@ fn cancel_prior_stmt_triggers(relid: Oid, op: u32) {
     });
 }
 
+const F_UNIQUE_KEY_RECHECK: Oid = 1250;
+
+// AfterTriggerSaveEvent (trigger.c:6522-6526): a deferred unique-constraint
+// recheck trigger is queued only when index insertion flagged its constraint
+// index as potentially violated. Statement-level events carry no
+// recheckIndexes, so the trigger is never queued for them.
+fn skip_unique_key_recheck(tgfoid: Oid, tgconstrindid: Oid, recheck_indexes: &[Oid]) -> bool {
+    tgfoid == F_UNIQUE_KEY_RECHECK && !recheck_indexes.contains(&tgconstrindid)
+}
+
 // AfterTriggerSaveEvent, statement-level arm (row_trigger=false): no tuples,
 // both ctids invalid. TRUNCATE never cancels a prior set (C's switch).
 fn save_stmt_event<'mcx>(
@@ -1215,6 +1222,12 @@ fn save_stmt_event<'mcx>(
             if !w.check_tuples(tgindx, trigger, rel, event, None, None)? {
                 continue;
             }
+        }
+        // C's F_UNIQUE_KEY_RECHECK skip applies to statement-level events
+        // too: recheckIndexes is NIL here, so the trigger is never queued
+        // (trigger.c:6522-6526).
+        if skip_unique_key_recheck(trigger.tgfoid, trigger.tgconstrindid, &[]) {
+            continue;
         }
         let ats_event = (event & TRIGGER_EVENT_OPMASK)
             | if trigger.tgdeferrable { AFTER_TRIGGER_DEFERRABLE } else { 0 }
@@ -1297,6 +1310,22 @@ pub fn ExecASTruncateTriggers<'mcx>(
 }
 
 #[allow(clippy::too_many_arguments)]
+// ExecAR{Insert,Update,Delete}Triggers' first check (trigger.c:2555-2562,
+// 2816-2823, 3162-3170): a foreign result relation (C ri_FdwRoutine is set
+// for exactly RELKIND_FOREIGN_TABLE result rels) cannot feed a transition
+// table. CreateTrigger forbids transition tables on foreign tables
+// themselves, so this is only ever a child of a partitioned/inheritance
+// target.
+pub fn check_foreign_transition_capture(rel: &Relation<'_>, capturing: bool) -> PgResult<()> {
+    if capturing && rel.rd_rel.relkind == RELKIND_FOREIGN_TABLE {
+        return Err(Box::new(
+            PgError::error("cannot collect transition tuples from child foreign tables")
+                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
+    }
+    Ok(())
+}
+
 pub fn ExecARInsertTriggers<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
@@ -1311,6 +1340,7 @@ pub fn ExecARInsertTriggers<'mcx>(
 ) -> PgResult<()> {
     let after_row = trigdesc.is_some_and(|td| td.trig_insert_after_row);
     let capture = transition_capture.filter(|tc| tc.tcs_insert_new_table);
+    check_foreign_transition_capture(rel, capture.is_some())?;
     if !after_row && capture.is_none() {
         return Ok(());
     }
@@ -1375,6 +1405,7 @@ pub fn ExecARDeleteTriggers<'mcx>(
 ) -> PgResult<()> {
     let after_row = trigdesc.is_some_and(|td| td.trig_delete_after_row);
     let capture = transition_capture.filter(|tc| tc.tcs_delete_old_table);
+    check_foreign_transition_capture(rel, capture.is_some())?;
     if !after_row && capture.is_none() {
         return Ok(());
     }
@@ -1459,6 +1490,7 @@ pub fn ExecARUpdateTriggers<'mcx>(
     let after_row = trigdesc.is_some_and(|td| td.trig_update_after_row);
     let capture = transition_capture
         .filter(|tc| tc.tcs_update_old_table || tc.tcs_update_new_table);
+    check_foreign_transition_capture(rel, capture.is_some())?;
     if !after_row && capture.is_none() {
         return Ok(());
     }
@@ -1665,5 +1697,21 @@ mod tests {
         });
         assert_eq!(carried, Some(Some(vec![9, 11].into_boxed_slice())));
         XACT_EVENTS.with(|s| s.borrow_mut().retain(|e| e.tgoid != TGOID));
+    }
+}
+
+#[cfg(test)]
+mod save_event_tests {
+    use super::*;
+
+    // constraint_cmd-2: the F_UNIQUE_KEY_RECHECK skip with C's NIL
+    // recheckIndexes (the statement-level arm) always skips; the row arm
+    // queues only a flagged constraint index.
+    #[test]
+    fn unique_key_recheck_skip_matches_c() {
+        assert!(skip_unique_key_recheck(F_UNIQUE_KEY_RECHECK, 4242, &[]));
+        assert!(skip_unique_key_recheck(F_UNIQUE_KEY_RECHECK, 4242, &[4243]));
+        assert!(!skip_unique_key_recheck(F_UNIQUE_KEY_RECHECK, 4242, &[4242]));
+        assert!(!skip_unique_key_recheck(4444, 4242, &[]));
     }
 }

@@ -59,6 +59,9 @@ const NO_LOCK: types_rel::LOCKMODE = 0;
 
 pub struct VacuumParams {
     pub options: i32,
+    /// C VacuumParams.log_min_duration: autovacuum's "log if it took at
+    /// least this many ms" (-1 = never); the instrument report's LOG gate.
+    pub log_min_duration: i32,
 }
 
 /// `AcquireSampleRowsFunc` (fdwapi.h), shaped like this crate's native
@@ -222,6 +225,7 @@ pub fn ExecVacuum<'mcx>(
         }
     }
     let params = VacuumParams {
+        log_min_duration: -1,
         options: VACOPT_ANALYZE
             | if verbose { VACOPT_VERBOSE } else { 0 }
             | if skip_locked { VACOPT_SKIP_LOCKED } else { 0 },
@@ -235,6 +239,7 @@ fn analyze_rel_seam<'a, 'mcx>(
     relname: Option<&'a str>,
     va_cols: &'a types_nodes::NodeList<'mcx>,
     options: u32,
+    log_min_duration: i32,
     in_outer_xact: bool,
 ) -> PgResult<()> {
     analyze_rel(
@@ -242,7 +247,7 @@ fn analyze_rel_seam<'a, 'mcx>(
         relid,
         relname,
         va_cols,
-        &VacuumParams { options: options as i32 },
+        &VacuumParams { options: options as i32, log_min_duration },
         in_outer_xact,
     )
 }
@@ -487,7 +492,7 @@ pub fn analyze_rel_inline_sample<'mcx>(
         &onerel,
         ForkNumber::MAIN_FORKNUM,
     )?;
-    let params = VacuumParams { options: VACOPT_ANALYZE };
+    let params = VacuumParams { options: VACOPT_ANALYZE, log_min_duration: -1 };
     let nil = types_nodes::NodeList::nil();
     do_analyze_rel(
         mcx,
@@ -524,6 +529,27 @@ fn do_analyze_rel<'mcx>(
     // same sample. Progress reporting stays with the caller's command.
     inline_sample: Option<(&[HeapTupleData<'_>], f64)>,
 ) -> PgResult<()> {
+    // analyze.c:311-328: VERBOSE reports at INFO, otherwise DEBUG2; the
+    // instrument (usage) block also serves autovacuum's log_min_duration.
+    let verbose = params.options & VACOPT_VERBOSE != 0;
+    let elevel = if verbose { types_error::INFO } else { types_error::DEBUG2 };
+    let instrument = verbose
+        || (miscinit::GetMyBackendType() == types_core::BackendType::AutovacWorker
+            && params.log_min_duration >= 0);
+    let ru0 = if instrument { Some(pg_rusage::pg_rusage_init()) } else { None };
+    let startwalusage = ::instrument::pg_wal_usage();
+    let startbufferusage = ::instrument::pg_buffer_usage();
+    {
+        let nsp = lsyscache::get_namespace_name(mcx, onerel.rd_rel.relnamespace)?;
+        let nsp = nsp.as_ref().map(|s| s.as_str()).unwrap_or("");
+        let (msg, line) = if inh {
+            (format!("analyzing \"{}.{}\" inheritance tree", nsp, onerel.name()), 319)
+        } else {
+            (format!("analyzing \"{}.{}\"", nsp, onerel.name()), 324)
+        };
+        elog::ereport(elevel).errmsg(msg).finish(c_loc(line, "do_analyze_rel"))?;
+    }
+
     let anl = MemoryContext::new("Analyze");
     let anl_mcx = anl.mcx();
 
@@ -601,9 +627,12 @@ fn do_analyze_rel<'mcx>(
             let mut indexpr_item = thisdata.index_info.ii_Expressions.iter();
             for i in 0..thisdata.index_info.ii_NumIndexAttrs as usize {
                 if thisdata.index_info.ii_IndexAttrNumbers[i] == 0 {
-                    let indexkey = indexpr_item
-                        .next()
-                        .unwrap_or_else(|| panic!("too few entries in indexprs list"));
+                    // analyze.c:475: elog(ERROR) -- a catchable XX000, never
+                    // a backend abort (reachable by a superuser editing
+                    // pg_index.indexprs under allow_system_table_mods).
+                    let indexkey = indexpr_item.next().ok_or_else(|| {
+                        Box::new(PgError::error("too few entries in indexprs list"))
+                    })?;
                     if let Some(s) =
                         examine_attribute(anl_mcx, ind, (i + 1) as i32, Some(indexkey))?
                     {
@@ -742,11 +771,6 @@ fn do_analyze_rel<'mcx>(
         totaldeadrows = 0.0;
         prows.len() as i32
     } else if inh {
-        let elevel = if params.options & VACOPT_VERBOSE != 0 {
-            types_error::INFO
-        } else {
-            types_error::DEBUG2
-        };
         acquire_inherited_sample_rows(
             anl_mcx,
             onerel,
@@ -757,16 +781,12 @@ fn do_analyze_rel<'mcx>(
             &mut totaldeadrows,
         )?
     } else if let Some(f) = acquirefunc {
-        let elevel = if params.options & VACOPT_VERBOSE != 0 {
-            types_error::INFO
-        } else {
-            types_error::DEBUG2
-        };
         f(anl_mcx, onerel, elevel, &mut rows, targrows, &mut totalrows, &mut totaldeadrows)?
     } else {
         acquire_sample_rows(
             anl_mcx,
             onerel,
+            elevel,
             &mut rows,
             targrows,
             &mut totalrows,
@@ -1017,10 +1037,121 @@ fn do_analyze_rel<'mcx>(
     }
     commands_vacuum::vac_close_indexes(irel, NO_LOCK)?;
 
+    // Log the action if appropriate (analyze.c:735-845).
+    if let Some(ru0) = ru0.as_ref() {
+        let endtime = timestamp_seams::get_current_timestamp::call();
+        if verbose
+            || params.log_min_duration == 0
+            || adt_timestamp::TimestampDifferenceExceeds(starttime, endtime, params.log_min_duration)
+        {
+            analyze_instrument_report(
+                mcx,
+                onerel,
+                verbose,
+                starttime,
+                endtime,
+                ru0,
+                &startwalusage,
+                &startbufferusage,
+            )?;
+        }
+    }
+
     // Roll back GUC changes from index functions; restore userid (analyze.c:850-853).
     guc::AtEOXact_GUC(false, save_nestlevel);
     guard.restore();
     Ok(())
+}
+
+// C source location for the INFO/LOG lines analyze.c emits (the LOCATION line
+// of a VERBOSE report names analyze.c, as vacuumlazy's report does).
+fn c_loc(line: i32, func: &'static str) -> types_error::ErrorLocation {
+    types_error::ErrorLocation::new("src/backend/commands/analyze.c", line, func)
+}
+
+// The `instrument` report of do_analyze_rel (analyze.c:735-845): "finished
+// analyzing table" (VERBOSE, INFO) / "automatic analyze of table" (autovacuum
+// log_min_duration, LOG) followed by the delay / I/O timing / rate / buffer /
+// WAL / rusage lines, one string. The delay line reads this backend's
+// PROGRESS_ANALYZE_DELAY_TIME progress param, as C; I/O timings come from the
+// BufferUsage diff (the pgstat block-time globals it mirrors, as vacuumlazy).
+#[allow(clippy::too_many_arguments)]
+fn analyze_instrument_report<'mcx>(
+    mcx: Mcx<'mcx>,
+    onerel: &Relation<'mcx>,
+    verbose: bool,
+    starttime: types_core::TimestampTz,
+    endtime: types_core::TimestampTz,
+    ru0: &pg_rusage::PgRUsage,
+    startwalusage: &types_core::instrument::WalUsage,
+    startbufferusage: &types_core::instrument::BufferUsage,
+) -> PgResult<()> {
+    use std::fmt::Write as _;
+
+    let mut bufferusage = types_core::instrument::BufferUsage::default();
+    ::instrument::buffer_usage_accum_diff(
+        &mut bufferusage,
+        &::instrument::pg_buffer_usage(),
+        startbufferusage,
+    );
+    let mut walusage = types_core::instrument::WalUsage::default();
+    ::instrument::wal_usage_accum_diff(&mut walusage, &::instrument::pg_wal_usage(), startwalusage);
+
+    let total_blks_hit = bufferusage.shared_blks_hit + bufferusage.local_blks_hit;
+    let total_blks_read = bufferusage.shared_blks_read + bufferusage.local_blks_read;
+    let total_blks_dirtied = bufferusage.shared_blks_dirtied + bufferusage.local_blks_dirtied;
+
+    // We do not expect an analyze to take > 25 days (C comment).
+    let delay_in_ms = adt_timestamp::TimestampDifferenceMilliseconds(starttime, endtime);
+    let (mut read_rate, mut write_rate) = (0.0f64, 0.0f64);
+    if delay_in_ms > 0 {
+        let secs = delay_in_ms as f64 / 1000.0;
+        read_rate = types_core::BLCKSZ as f64 * total_blks_read as f64 / (1024.0 * 1024.0) / secs;
+        write_rate =
+            types_core::BLCKSZ as f64 * total_blks_dirtied as f64 / (1024.0 * 1024.0) / secs;
+    }
+
+    let dbname = dbcommands_seams::get_database_name::call(init_small_database_id())?
+        .unwrap_or_default();
+    let nsp = lsyscache::get_namespace_name(mcx, onerel.rd_rel.relnamespace)?;
+    let nsp = nsp.as_ref().map(|s| s.as_str()).unwrap_or("");
+    let mut buf = String::new();
+    let msgfmt = if miscinit::GetMyBackendType() == types_core::BackendType::AutovacWorker {
+        "automatic analyze of table"
+    } else {
+        "finished analyzing table"
+    };
+    let _ = writeln!(buf, "{msgfmt} \"{dbname}.{nsp}.{}\"", onerel.name());
+    if guc_tables::vars::track_cost_delay_timing.read() {
+        let ns = backend_progress::pgstat_progress_current_param(PROGRESS_ANALYZE_DELAY_TIME);
+        let _ = writeln!(buf, "delay time: {:.3} ms", ns as f64 / 1_000_000.0);
+    }
+    if guc_tables::vars::track_io_timing.read() {
+        let read_ms = bufferusage.shared_blk_read_time.get_millisec()
+            + bufferusage.local_blk_read_time.get_millisec();
+        let write_ms = bufferusage.shared_blk_write_time.get_millisec()
+            + bufferusage.local_blk_write_time.get_millisec();
+        let _ = writeln!(buf, "I/O timings: read: {read_ms:.3} ms, write: {write_ms:.3} ms");
+    }
+    let _ = writeln!(buf, "avg read rate: {read_rate:.3} MB/s, avg write rate: {write_rate:.3} MB/s");
+    let _ = writeln!(
+        buf,
+        "buffer usage: {total_blks_hit} hits, {total_blks_read} reads, {total_blks_dirtied} dirtied"
+    );
+    let _ = writeln!(
+        buf,
+        "WAL usage: {} records, {} full page images, {} bytes, {} buffers full",
+        walusage.wal_records, walusage.wal_fpi, walusage.wal_bytes, walusage.wal_buffers_full
+    );
+    let _ = write!(buf, "system usage: {}", pg_rusage::pg_rusage_show(ru0).as_str());
+
+    elog::ereport(if verbose { types_error::INFO } else { types_error::LOG })
+        .errmsg_internal(buf)
+        .finish(c_loc(843, "do_analyze_rel"))
+}
+
+fn init_small_database_id() -> Oid {
+    init_small::globals::MyDatabaseId()
 }
 
 struct AnlIndexData<'mcx> {
@@ -1584,6 +1715,7 @@ fn std_typanalyze(stats: &mut VacAttrStats<'_>) -> PgResult<bool> {
 fn acquire_sample_rows<'mcx>(
     mcx: Mcx<'mcx>,
     onerel: &Relation<'mcx>,
+    elevel: types_error::ErrorLevel,
     rows: &mut PgVec<'mcx, HeapTupleData<'mcx>>,
     targrows: i32,
     totalrows: &mut f64,
@@ -1681,6 +1813,21 @@ fn acquire_sample_rows<'mcx>(
         *totalrows = 0.0;
         *totaldeadrows = 0.0;
     }
+
+    // Emit some interesting relation info (analyze.c:1345-1352).
+    elog::ereport(elevel)
+        .errmsg(format!(
+            "\"{}\": scanned {} of {} pages, containing {:.0} live rows and {:.0} dead rows; \
+             {} rows in sample, {:.0} estimated total rows",
+            onerel.name(),
+            bs.m,
+            totalblocks,
+            liverows,
+            deadrows,
+            numrows,
+            *totalrows
+        ))
+        .finish(c_loc(1352, "acquire_sample_rows"))?;
 
     Ok(numrows)
 }
@@ -2134,6 +2281,15 @@ fn acquire_inherited_sample_rows<'mcx>(
         // flag so the inh pass stops firing (safe under our SUE lock).
         xact::CommandCounterIncrement()?;
         tablecmds_seams::set_relation_has_subclass::call(mcx, onerel.rd_id, false)?;
+        let nsp = lsyscache::get_namespace_name(mcx, onerel.rd_rel.relnamespace)?;
+        elog::ereport(elevel)
+            .errmsg(format!(
+                "skipping analyze of \"{}.{}\" inheritance tree --- this inheritance tree \
+                 contains no child tables",
+                nsp.as_ref().map(|s| s.as_str()).unwrap_or(""),
+                onerel.name()
+            ))
+            .finish(c_loc(1432, "acquire_inherited_sample_rows"))?;
         return Ok(0);
     }
 
@@ -2175,6 +2331,16 @@ fn acquire_inherited_sample_rows<'mcx>(
     }
 
     if children.is_empty() {
+        // analyze.c:1526-1533: a partitioned table is not a child table.
+        let nsp = lsyscache::get_namespace_name(mcx, onerel.rd_rel.relnamespace)?;
+        elog::ereport(elevel)
+            .errmsg(format!(
+                "skipping analyze of \"{}.{}\" inheritance tree --- this inheritance tree \
+                 contains no analyzable child tables",
+                nsp.as_ref().map(|s| s.as_str()).unwrap_or(""),
+                onerel.name()
+            ))
+            .finish(c_loc(1530, "acquire_inherited_sample_rows"))?;
         return Ok(0);
     }
 
@@ -2205,6 +2371,7 @@ fn acquire_inherited_sample_rows<'mcx>(
                     acquire_sample_rows(
                         mcx,
                         &childrel,
+                        elevel,
                         rows,
                         childtargrows,
                         &mut trows,

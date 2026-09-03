@@ -96,22 +96,10 @@ pub(crate) fn plan_foreign_modify<'mcx>(
             }
         }
     } else if operation == CmdType::CMD_UPDATE {
-        let mut all_updated = types_nodes::Bitmapset::empty();
-        if rte.perminfoindex > 0 {
-            let pi = run
-                .parse()
-                .rteperminfos
-                .nth(rte.perminfoindex as usize - 1)
-                .as_rte_permission_info()
-                .expect("rteperminfos cell");
-            all_updated.add_members(mcx, &pi.updatedCols)?;
-        }
-        let extra = planner::plancat::get_dependent_generated_columns(
-            run,
-            result_relation as usize,
-            &all_updated,
-        )?;
-        all_updated.add_members(mcx, &extra)?;
+        // get_rel_all_updated_cols: the result relation's updatedCols mapped
+        // to this (possibly child) target's attnums, plus dependent
+        // generated columns.
+        let all_updated = planner::get_rel_all_updated_cols(run, result_relation)?;
         let mut col = -1i32;
         loop {
             col = all_updated.next_member(col);

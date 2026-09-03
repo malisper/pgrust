@@ -88,6 +88,14 @@ impl Drop for OwnedQueryDesc {
 pub struct CopyToState<'mcx, 's> {
     fe_msgbuf: StringInfo<'mcx>,
     dest: CopyDest<'s>,
+    // C's copy_file is a stdio FILE: rows accumulate in its st_blksize buffer
+    // and reach the fd only when that fills (fwrite) or at fclose (EndCopy),
+    // which is where a write error on a short COPY surfaces ("could not
+    // close file", copyto.c:596) rather than per row. `file_buf` mirrors that
+    // buffer for the File destination; `file_bufsize` is the stream's
+    // st_blksize (BUFSIZ when unknown, as __smakebuf).
+    file_buf: Vec<u8>,
+    file_bufsize: usize,
     pub opts: CopyFormatOptions<'s>,
     attnumlist: PgVec<'mcx, i16>,
     force_quote_flags: PgVec<'mcx, bool>,
@@ -170,6 +178,8 @@ pub fn BeginCopyTo<'mcx: 's, 's>(
         || file_encoding == wchar::PG_SQL_ASCII);
     let encoding_embeds_ascii = wchar::pg_encoding_is_client_only(file_encoding);
 
+    // stdio buffer size of the File destination (see CopyToState).
+    let mut file_bufsize = stdio_bufsize(0);
     let dest = match filename {
         Some(filename) if is_program => {
             // copyto.c is_program arm: popen the command, write its stdin.
@@ -202,15 +212,19 @@ pub fn BeginCopyTo<'mcx: 's, 's>(
             // syslogger's logfile_open does for this same hazard.
             let copy_file = fd::AllocateFile(filename, "wb")?;
             if copy_file < 0 {
-                ereport(ERROR)
-                    .with_saved_errno(std::io::Error::last_os_error().raw_os_error().unwrap_or(0))
+                // copy errno because ereport subfunctions might change it
+                let save_errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+                let mut e = ereport(ERROR)
+                    .with_saved_errno(save_errno)
                     .errcode_for_file_access()
-                    .errmsg(format!("could not open file \"{filename}\" for writing: %m"))
-                    .errhint(
+                    .errmsg(format!("could not open file \"{filename}\" for writing: %m"));
+                if crate::open_failure_hint_applies(save_errno) {
+                    e = e.errhint(
                         "COPY TO instructs the PostgreSQL server process to write a file. You \
                          may want a client-side facility such as psql's \\copy.",
-                    )
-                    .finish(loc("BeginCopyTo"))?;
+                    );
+                }
+                e.finish(loc("BeginCopyTo"))?;
             }
             // fchmod to C's resulting mode without touching process-global
             // umask. wasm32/WASI carries no mode bits, so this is a no-op there.
@@ -228,16 +242,22 @@ pub fn BeginCopyTo<'mcx: 's, 's>(
                         .finish(loc("BeginCopyTo"))?;
                 }
             }
-            let is_dir = fd::with_allocated_stdio(copy_file, |f| {
-                f.metadata().map(|m| m.is_dir()).unwrap_or(false)
+            let (is_dir, blksize) = fd::with_allocated_stdio(copy_file, |f| {
+                f.metadata()
+                    .map(|m| {
+                        use std::os::unix::fs::MetadataExt;
+                        (m.is_dir(), m.blksize() as usize)
+                    })
+                    .unwrap_or((false, 0))
             })
-            .unwrap_or(false);
+            .unwrap_or((false, 0));
             if is_dir {
                 return Err(Box::new(
                     PgError::error(format!("\"{filename}\" is a directory"))
                         .with_sqlstate(ERRCODE_WRONG_OBJECT_TYPE),
                 ));
             }
+            file_bufsize = stdio_bufsize(blksize);
             CopyDest::File { fd: copy_file, filename }
         }
         None => {
@@ -268,6 +288,8 @@ pub fn BeginCopyTo<'mcx: 's, 's>(
 
     Ok(CopyToState {
         fe_msgbuf: StringInfo::new_in(mcx)?,
+        file_buf: Vec::new(),
+        file_bufsize,
         dest,
         opts,
         attnumlist,
@@ -779,6 +801,48 @@ fn send_end_of_row(cstate: &mut CopyToState<'_, '_>) -> PgResult<()> {
     Ok(())
 }
 
+// The stdio buffer size C's copy_file FILE gets: st_blksize when the stream
+// reports one, else BUFSIZ (__smakebuf / _IO_file_doallocate).
+fn stdio_bufsize(st_blksize: usize) -> usize {
+    if st_blksize > 0 { st_blksize } else { 1024 }
+}
+
+// stdio fwrite over `file_buf`: the row is appended, and every time the
+// buffer fills to `file_bufsize` that chunk goes to the fd (__sfvwrite
+// flushes on a full buffer). Returns the write error, if any.
+fn stdio_buffered_write(cstate: &mut CopyToState<'_, '_>, fd: i32, bytes: &[u8]) -> std::io::Result<()> {
+    cstate.file_buf.extend_from_slice(bytes);
+    while cstate.file_buf.len() >= cstate.file_bufsize {
+        let chunk = cstate.file_bufsize;
+        let r = fd::with_allocated_stdio(fd, |f| {
+            use std::io::Write;
+            f.write_all(&cstate.file_buf[..chunk])
+        });
+        match r {
+            Some(Ok(())) => cstate.file_buf.drain(..chunk),
+            Some(Err(e)) => return Err(e),
+            None => panic!("COPY TO: AllocateFile index {fd} vanished"),
+        };
+    }
+    Ok(())
+}
+
+// fflush at fclose: whatever the buffer still holds.
+fn stdio_final_flush(cstate: &mut CopyToState<'_, '_>, fd: i32) -> std::io::Result<()> {
+    if cstate.file_buf.is_empty() {
+        return Ok(());
+    }
+    let r = fd::with_allocated_stdio(fd, |f| {
+        use std::io::Write;
+        f.write_all(&cstate.file_buf)
+    });
+    cstate.file_buf.clear();
+    match r {
+        Some(r) => r,
+        None => panic!("COPY TO: AllocateFile index {fd} vanished"),
+    }
+}
+
 fn flush_to_file(cstate: &mut CopyToState<'_, '_>) -> PgResult<()> {
     let CopyDest::File { fd, .. } = cstate.dest else {
         panic!("COPY TO: flush_to_file on non-file destination")
@@ -786,21 +850,13 @@ fn flush_to_file(cstate: &mut CopyToState<'_, '_>) -> PgResult<()> {
     if cstate.fe_msgbuf.is_empty() {
         return Ok(());
     }
-    let bytes = cstate.fe_msgbuf.as_bytes();
-    let wrote = fd::with_allocated_stdio(fd, |f| {
-        use std::io::Write;
-        f.write_all(bytes)
-    });
-    match wrote {
-        Some(Ok(())) => {}
-        Some(Err(e)) => {
-            ereport(ERROR)
-                .with_saved_errno(e.raw_os_error().unwrap_or(0))
-                .errcode_for_file_access()
-                .errmsg("could not write to COPY file: %m")
-                .finish(loc("CopySendEndOfRow"))?;
-        }
-        None => panic!("COPY TO: AllocateFile index {fd} vanished"),
+    let bytes = cstate.fe_msgbuf.as_bytes().to_vec();
+    if let Err(e) = stdio_buffered_write(cstate, fd, &bytes) {
+        ereport(ERROR)
+            .with_saved_errno(e.raw_os_error().unwrap_or(0))
+            .errcode_for_file_access()
+            .errmsg("could not write to COPY file: %m")
+            .finish(loc("CopySendEndOfRow"))?;
     }
     cstate.bytes_processed += cstate.fe_msgbuf.len() as u64;
     pgstat_progress_update_param(PROGRESS_COPY_BYTES_PROCESSED, cstate.bytes_processed as i64);
@@ -905,9 +961,19 @@ pub fn EndCopyTo(mut cstate: CopyToState<'_, '_>) -> PgResult<()> {
     }
     if let CopyDest::File { fd, filename } = cstate.dest {
         flush_to_file(&mut cstate)?;
-        if fd::FreeFile(fd)? != 0 {
+        // fclose flushes the stdio buffer first; a write failure there is
+        // fclose's failure, reported as "could not close file" (copyto.c:596).
+        let flushed = stdio_final_flush(&mut cstate, fd);
+        let close_errno = match (&flushed, fd::FreeFile(fd)?) {
+            (Err(e), _) => Some(e.raw_os_error().unwrap_or(0)),
+            (Ok(()), rc) if rc != 0 => {
+                Some(std::io::Error::last_os_error().raw_os_error().unwrap_or(0))
+            }
+            _ => None,
+        };
+        if let Some(errno) = close_errno {
             ereport(ERROR)
-                .with_saved_errno(std::io::Error::last_os_error().raw_os_error().unwrap_or(0))
+                .with_saved_errno(errno)
                 .errcode_for_file_access()
                 .errmsg(format!("could not close file \"{filename}\": %m"))
                 .finish(loc("EndCopy"))?;
