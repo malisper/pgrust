@@ -16,6 +16,7 @@ types_rel = { path = "../../../../_support/types/rel" }
 types_tuple = { path = "../../../../_support/types/types_tuple" }
 types_trigger = { path = "../../../../_support/types/types_trigger" }
 types_fmgr = { path = "../../../../_support/types/fmgr" }
+types_trigger_call = { path = "../../../../_support/types/types_trigger_call" }
 fmgr_core = { path = "../../fmgr/fmgr_core" }
 types_snapshot = { path = "../../../../_support/types/snapshot" }
 ri_triggers_seams = { path = "../ri_triggers_seams" }

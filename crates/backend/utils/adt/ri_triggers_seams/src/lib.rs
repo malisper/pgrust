@@ -31,13 +31,15 @@ seam_core::seam!(
     ) -> PgResult<bool>
 );
 
+// new_slot is None for a DELETE event (C passes newslot = NULL); the queue
+// calls both for UPDATE and DELETE events (trigger.c AfterTriggerSaveEvent).
 seam_core::seam!(
     pub fn ri_fkey_fk_upd_check_required<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         trigger: &Trigger<'mcx>,
         rel: &Relation<'mcx>,
         old_slot: &HeapTupleData<'_>,
-        new_slot: &HeapTupleData<'_>,
+        new_slot: Option<&HeapTupleData<'_>>,
     ) -> PgResult<bool>
 );
 
@@ -47,7 +49,7 @@ seam_core::seam!(
         trigger: &Trigger<'mcx>,
         rel: &Relation<'mcx>,
         old_slot: &HeapTupleData<'_>,
-        new_slot: &HeapTupleData<'_>,
+        new_slot: Option<&HeapTupleData<'_>>,
     ) -> PgResult<bool>
 );
 

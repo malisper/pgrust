@@ -16022,6 +16022,7 @@ dependencies = [
  "types_rel",
  "types_snapshot",
  "types_trigger",
+ "types_trigger_call",
  "types_tuple",
  "varlena",
  "xact",

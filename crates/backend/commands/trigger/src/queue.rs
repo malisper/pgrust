@@ -418,6 +418,48 @@ pub fn ri_trigger_kind(tgfoid: Oid) -> i32 {
     }
 }
 
+// What AfterTriggerSaveEvent (trigger.c) does with one row trigger before
+// queueing its event: nothing (Queue), drop it (Skip), or ask the RI
+// *_upd_check_required test first (Pk / Fk).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RiPrecheck {
+    Queue,
+    Skip,
+    Pk,
+    Fk,
+}
+
+fn ri_queue_precheck(
+    kind: i32,
+    event: u32,
+    partitioned: bool,
+    is_crosspart_update: bool,
+    tgisclone: bool,
+) -> RiPrecheck {
+    let is_update = event == TRIGGER_EVENT_UPDATE;
+    let is_delete = event == TRIGGER_EVENT_DELETE;
+    if !(is_update || is_delete) {
+        return RiPrecheck::Queue;
+    }
+    match kind {
+        // Cross-partition update: the component DELETE's cloned PK triggers
+        // are skipped — the root's CP UPDATE event enforces the FK (C's
+        // tgisclone skip).
+        RI_TRIGGER_PK if is_delete && is_crosspart_update && tgisclone => RiPrecheck::Skip,
+        RI_TRIGGER_PK => RiPrecheck::Pk,
+        // C: skip the event on a partitioned FK table during its own
+        // cross-partition update — the destination leaf's INSERT event
+        // performs the check (and the virtual slot lacks system columns).
+        RI_TRIGGER_FK if partitioned => RiPrecheck::Skip,
+        RI_TRIGGER_FK => RiPrecheck::Fk,
+        // RI_TRIGGER_NONE: ordinary row triggers on a partitioned rel are
+        // not queued for the root CP UPDATE event — the same trigger exists
+        // (cloned) on the affected leaves (C's arm).
+        _ if partitioned => RiPrecheck::Skip,
+        _ => RiPrecheck::Queue,
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum EvList {
     Query(usize),
@@ -1015,58 +1057,41 @@ fn after_trigger_save_event<'mcx>(
                 continue;
             }
         }
-        let is_update = event == TRIGGER_EVENT_UPDATE;
-        let is_delete = event == TRIGGER_EVENT_DELETE;
-        if is_update || is_delete {
-            match ri_trigger_kind(trigger.tgfoid) {
-                RI_TRIGGER_PK => {
-                    // Cross-partition update: the component DELETE's cloned PK
-                    // triggers are skipped — the root's CP UPDATE event
-                    // enforces the FK (C's tgisclone skip).
-                    if is_delete && is_crosspart_update && trigger.tgisclone {
-                        continue;
-                    }
-                    // C also skips DELETEs whose old key contains a NULL
-                    // (RI_FKey_pk_upd_check_required with newslot NULL);
-                    // divergence: those queue and no-op inside ri_restrict.
-                    if is_update
-                        && !ri_triggers_seams::ri_fkey_pk_upd_check_required::call(
-                            mcx,
-                            trigger,
-                            rel,
-                            old_tup.expect("UPDATE old tuple"),
-                            new_tup.expect("UPDATE new tuple"),
-                        )?
-                    {
-                        continue;
-                    }
+        // C AfterTriggerSaveEvent: on UPDATE and DELETE events an RI
+        // trigger's *_upd_check_required runs at queue time (with newslot =
+        // NULL for DELETE), so a hand-made RI trigger's "no pg_constraint
+        // entry" / "not a foreign key" errors come from here, before
+        // ri_CheckTrigger ever sees the event; a real FK's DELETE with a
+        // NULL in the old key is not queued at all.
+        match ri_queue_precheck(
+            ri_trigger_kind(trigger.tgfoid),
+            event,
+            partitioned,
+            is_crosspart_update,
+            trigger.tgisclone,
+        ) {
+            RiPrecheck::Skip => continue,
+            RiPrecheck::Queue => {}
+            RiPrecheck::Pk => {
+                if !ri_triggers_seams::ri_fkey_pk_upd_check_required::call(
+                    mcx,
+                    trigger,
+                    rel,
+                    old_tup.expect("UPDATE/DELETE old tuple"),
+                    new_tup,
+                )? {
+                    continue;
                 }
-                RI_TRIGGER_FK => {
-                    // C: skip the UPDATE event on a partitioned FK table
-                    // during its own cross-partition update — the destination
-                    // leaf's INSERT event performs the check.
-                    if is_update && partitioned {
-                        continue;
-                    }
-                    if is_update
-                        && !ri_triggers_seams::ri_fkey_fk_upd_check_required::call(
-                            mcx,
-                            trigger,
-                            rel,
-                            old_tup.expect("UPDATE old tuple"),
-                            new_tup.expect("UPDATE new tuple"),
-                        )?
-                    {
-                        continue;
-                    }
-                }
-                // RI_TRIGGER_NONE: ordinary row triggers on a partitioned
-                // rel are not queued for the root CP UPDATE event — the same
-                // trigger exists (cloned) on the affected leaves (C's arm).
-                _ => {
-                    if partitioned {
-                        continue;
-                    }
+            }
+            RiPrecheck::Fk => {
+                if !ri_triggers_seams::ri_fkey_fk_upd_check_required::call(
+                    mcx,
+                    trigger,
+                    rel,
+                    old_tup.expect("UPDATE/DELETE old tuple"),
+                    new_tup,
+                )? {
+                    continue;
                 }
             }
         }
@@ -1353,8 +1378,14 @@ pub fn ExecARDeleteTriggers<'mcx>(
     if !after_row && capture.is_none() {
         return Ok(());
     }
+    // WHEN quals and the RI queue-time skip test (C's oldslot for
+    // RI_FKey_pk_upd_check_required) both read the deleted row.
     let need_tuple = capture.is_some()
-        || trigdesc.is_some_and(|td| td.triggers.iter().any(|t| t.tgqual.is_some()));
+        || trigdesc.is_some_and(|td| {
+            td.triggers
+                .iter()
+                .any(|t| t.tgqual.is_some() || ri_trigger_kind(t.tgfoid) != RI_TRIGGER_NONE)
+        });
     let snap = SnapshotData::sentinel(mcx, SNAPSHOT_ANY);
     let mut r_old = None;
     if need_tuple {
@@ -1543,6 +1574,61 @@ fn fetch_failed(which: u32) -> Box<PgError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // audit-18.6 ri_triggers-3: trigger.c AfterTriggerSaveEvent runs the RI
+    // *_upd_check_required test for DELETE events too (newslot = NULL); the
+    // queue used to gate both on UPDATE, so a DELETE on a hand-made RI
+    // trigger fell through to ri_CheckTrigger (39P01 "must be fired for
+    // INSERT") instead of C's queue-time 42P17 "no pg_constraint entry".
+    #[test]
+    fn ri_precheck_runs_for_delete_events() {
+        assert_eq!(
+            ri_queue_precheck(RI_TRIGGER_PK, TRIGGER_EVENT_DELETE, false, false, false),
+            RiPrecheck::Pk
+        );
+        assert_eq!(
+            ri_queue_precheck(RI_TRIGGER_FK, TRIGGER_EVENT_DELETE, false, false, false),
+            RiPrecheck::Fk
+        );
+        // C's partitioned-FK skip covers DELETE as well as UPDATE.
+        assert_eq!(
+            ri_queue_precheck(RI_TRIGGER_FK, TRIGGER_EVENT_DELETE, true, false, false),
+            RiPrecheck::Skip
+        );
+    }
+
+    #[test]
+    fn ri_precheck_keeps_the_update_and_insert_arms() {
+        assert_eq!(
+            ri_queue_precheck(RI_TRIGGER_PK, TRIGGER_EVENT_UPDATE, false, false, false),
+            RiPrecheck::Pk
+        );
+        assert_eq!(
+            ri_queue_precheck(RI_TRIGGER_FK, TRIGGER_EVENT_UPDATE, true, false, false),
+            RiPrecheck::Skip
+        );
+        // tgisclone skip is DELETE-only and needs a cross-partition update.
+        assert_eq!(
+            ri_queue_precheck(RI_TRIGGER_PK, TRIGGER_EVENT_DELETE, false, true, true),
+            RiPrecheck::Skip
+        );
+        assert_eq!(
+            ri_queue_precheck(RI_TRIGGER_PK, TRIGGER_EVENT_UPDATE, false, true, true),
+            RiPrecheck::Pk
+        );
+        assert_eq!(
+            ri_queue_precheck(RI_TRIGGER_NONE, TRIGGER_EVENT_DELETE, true, false, false),
+            RiPrecheck::Skip
+        );
+        assert_eq!(
+            ri_queue_precheck(RI_TRIGGER_NONE, TRIGGER_EVENT_DELETE, false, false, false),
+            RiPrecheck::Queue
+        );
+        assert_eq!(
+            ri_queue_precheck(RI_TRIGGER_FK, TRIGGER_EVENT_INSERT, true, false, false),
+            RiPrecheck::Queue
+        );
+    }
 
     // ats_modifiedcols pin: a deferred UPDATE event moved to the xact list
     // at query end keeps its modified-column set (red before the

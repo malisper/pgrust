@@ -279,3 +279,68 @@ fn ri_cache_lookup_failures_are_catchable_xx000() {
         assert_eq!(e.level(), ERROR);
     }
 }
+
+// audit-18.6 ri_triggers-1: every RI_FKey_* fmgr row used to be
+// fc_internal_dispatch_only, which panics; C's entry points start with
+// ri_CheckTrigger, so a call without a TriggerData context is 39P01
+// "was not called by trigger manager" (the direct SELECT / LANGUAGE internal
+// wrapper route). Red before the fix: this call panicked.
+#[test]
+fn fmgr_row_without_trigger_context_is_39p01() {
+    let mut fcinfo = types_fmgr::LocalFcinfo::<0>::fresh(InvalidOid);
+    // SAFETY: the scratch context outlives the call.
+    unsafe { fcinfo.set_result_mcx(test_mcx()) };
+    for row in RI_TRIGGERS_BUILTINS {
+        let err = (row.func)(None, &mut fcinfo).err().expect("no trigger context");
+        assert_eq!(err.sqlstate(), ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED);
+        assert_eq!(
+            err.message(),
+            format!("function \"{}\" was not called by trigger manager", row.name)
+        );
+    }
+}
+
+// The fmgr row's identity is the const parameter, not flinfo (a LANGUAGE
+// internal wrapper calls in under its own pg_proc OID).
+#[test]
+fn fmgr_rows_name_their_own_builtin() {
+    for row in RI_TRIGGERS_BUILTINS {
+        let (name, _) = ri_trig_kind(row.foid).expect("every row is an RI builtin");
+        assert_eq!(name, row.name);
+    }
+}
+
+// ri_CheckTrigger's event checks in C's order: AFTER ROW first, then the
+// event kind (the AFTER STATEMENT / BEFORE ROW firings of finding 1).
+#[test]
+fn check_trigger_reports_timing_before_event_kind() {
+    use types_trigger::{TRIGGER_EVENT_AFTER, TRIGGER_EVENT_BEFORE, TRIGGER_EVENT_INSERT, TRIGGER_EVENT_ROW};
+    let stmt = TRIGGER_EVENT_INSERT | TRIGGER_EVENT_AFTER;
+    let before_row = TRIGGER_EVENT_INSERT | TRIGGER_EVENT_ROW | TRIGGER_EVENT_BEFORE;
+    let after_row = TRIGGER_EVENT_INSERT | TRIGGER_EVENT_ROW | TRIGGER_EVENT_AFTER;
+    for ev in [stmt, before_row] {
+        let err = ri_CheckTrigger("RI_FKey_noaction_del", RI_TRIGTYPE_DELETE, ev).unwrap_err();
+        assert_eq!(err.sqlstate(), ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED);
+        assert_eq!(err.message(), "function \"RI_FKey_noaction_del\" must be fired AFTER ROW");
+    }
+    let err = ri_CheckTrigger("RI_FKey_noaction_del", RI_TRIGTYPE_DELETE, after_row).unwrap_err();
+    assert_eq!(err.message(), "function \"RI_FKey_noaction_del\" must be fired for DELETE");
+    assert!(ri_CheckTrigger("RI_FKey_check_ins", RI_TRIGTYPE_INSERT, after_row).is_ok());
+}
+
+// audit-18.6 ri_triggers-2: ri_LoadConstraintInfo / ri_FetchConstraintInfo
+// cross-check failures are elog(ERROR) in C (catchable XX000, no
+// backend abort). They were assert!/panic! here; "not a foreign key" is
+// reachable from SQL through CREATE CONSTRAINT TRIGGER on an RI builtin.
+#[test]
+fn constraint_cross_checks_are_xx000_errors() {
+    let e = not_a_foreign_key(16397);
+    assert_eq!(e.sqlstate(), ERRCODE_INTERNAL_ERROR);
+    assert_eq!(e.message(), "constraint 16397 is not a foreign key constraint");
+    let e = wrong_pg_constraint_entry("rt_t", "rt");
+    assert_eq!(e.sqlstate(), ERRCODE_INTERNAL_ERROR);
+    assert_eq!(e.message(), "wrong pg_constraint entry for trigger \"rt_t\" on table \"rt\"");
+    let e = unrecognized_confmatchtype(b'x' as i8);
+    assert_eq!(e.sqlstate(), ERRCODE_INTERNAL_ERROR);
+    assert_eq!(e.message(), format!("unrecognized confmatchtype: {}", b'x'));
+}

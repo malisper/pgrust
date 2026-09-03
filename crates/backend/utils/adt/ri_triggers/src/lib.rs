@@ -190,32 +190,72 @@ fn unported(what: &str) -> ! {
     panic!("unported: ri_triggers {what}")
 }
 
-// Trigger bodies fire through ri_fkey_trigger's native tgfoid dispatch; the
-// fmgr rows exist for lookup parity only.
+// The AFTER ROW queue dispatches RI bodies natively by tgfoid
+// (ri_fkey_trigger); the fmgr rows are what every other caller reaches -- a
+// direct `SELECT "RI_FKey_check_ins"()`, a LANGUAGE internal wrapper, a
+// BEFORE / INSTEAD OF / FOR EACH STATEMENT trigger naming an RI builtin --
+// and C's RI_FKey_* entry points start with ri_CheckTrigger for exactly
+// those callers, so the rows carry that check (fc_ri_fkey).
 pub const RI_TRIGGERS_BUILTINS: &[types_fmgr::FmgrBuiltin] = &[
-    ri_row(1644, "RI_FKey_check_ins"),
-    ri_row(1645, "RI_FKey_check_upd"),
-    ri_row(1646, "RI_FKey_cascade_del"),
-    ri_row(1647, "RI_FKey_cascade_upd"),
-    ri_row(1648, "RI_FKey_restrict_del"),
-    ri_row(1649, "RI_FKey_restrict_upd"),
-    ri_row(1650, "RI_FKey_setnull_del"),
-    ri_row(1651, "RI_FKey_setnull_upd"),
-    ri_row(1652, "RI_FKey_setdefault_del"),
-    ri_row(1653, "RI_FKey_setdefault_upd"),
-    ri_row(1654, "RI_FKey_noaction_del"),
-    ri_row(1655, "RI_FKey_noaction_upd"),
+    ri_row::<F_RI_FKEY_CHECK_INS>("RI_FKey_check_ins"),
+    ri_row::<F_RI_FKEY_CHECK_UPD>("RI_FKey_check_upd"),
+    ri_row::<F_RI_FKEY_CASCADE_DEL>("RI_FKey_cascade_del"),
+    ri_row::<F_RI_FKEY_CASCADE_UPD>("RI_FKey_cascade_upd"),
+    ri_row::<F_RI_FKEY_RESTRICT_DEL>("RI_FKey_restrict_del"),
+    ri_row::<F_RI_FKEY_RESTRICT_UPD>("RI_FKey_restrict_upd"),
+    ri_row::<F_RI_FKEY_SETNULL_DEL>("RI_FKey_setnull_del"),
+    ri_row::<F_RI_FKEY_SETNULL_UPD>("RI_FKey_setnull_upd"),
+    ri_row::<F_RI_FKEY_SETDEFAULT_DEL>("RI_FKey_setdefault_del"),
+    ri_row::<F_RI_FKEY_SETDEFAULT_UPD>("RI_FKey_setdefault_upd"),
+    ri_row::<F_RI_FKEY_NOACTION_DEL>("RI_FKey_noaction_del"),
+    ri_row::<F_RI_FKEY_NOACTION_UPD>("RI_FKey_noaction_upd"),
 ];
 
-const fn ri_row(foid: Oid, name: &'static str) -> types_fmgr::FmgrBuiltin {
+const fn ri_row<const TGFOID: Oid>(name: &'static str) -> types_fmgr::FmgrBuiltin {
     types_fmgr::FmgrBuiltin {
-        foid,
+        foid: TGFOID,
         name,
         nargs: 0,
         strict: true,
         retset: false,
-        func: types_fmgr::fc_internal_dispatch_only,
+        func: fc_ri_fkey::<TGFOID>,
     }
+}
+
+// fmgr body of one RI_FKey_* builtin (ri_triggers.c RI_FKey_check_ins et
+// al.): the builtin's identity is the const parameter, not flinfo.fn_oid,
+// because a `LANGUAGE internal AS 'RI_FKey_check_ins'` wrapper calls in
+// under its own pg_proc OID. ri_CheckTrigger runs before any tuple is
+// touched, so a STATEMENT firing (no tuples) reports its protocol error
+// like C; a firing that passes it (AFTER ROW through a wrapper function)
+// runs the native body.
+fn fc_ri_fkey<const TGFOID: Oid>(
+    _flinfo: Option<&mut types_fmgr::FmgrInfo>,
+    fcinfo: &mut types_fmgr::FunctionCallInfoBaseData,
+) -> PgResult<Datum> {
+    let (funcname, tgkind) = ri_trig_kind(TGFOID).expect("registered RI builtin");
+    // SAFETY: a T_TriggerData-tagged context is the executor's live
+    // TriggerData for this call (ExecCallTriggerFunc).
+    let Some(td) = (unsafe { types_trigger_call::trigger_data_from_fcinfo(fcinfo) }) else {
+        return Err(protocol_err(funcname, "was not called by trigger manager"));
+    };
+    ri_CheckTrigger(funcname, tgkind, td.tg_event)?;
+    // Past ri_CheckTrigger the event is AFTER ROW, which always carries the
+    // fired row (C dereferences tg_trigtuple unconditionally).
+    let trigtuple = td.tg_trigtuple.expect("AFTER ROW firing carries tg_trigtuple");
+    // SAFETY: live tuples per the trigger call contract.
+    let (tg_trigtuple, tg_newtuple) =
+        unsafe { (trigtuple.as_ref(), td.tg_newtuple.map(|p| p.as_ref())) };
+    let data = RiTriggerData {
+        tg_event: td.tg_event,
+        tg_relation: td.tg_relation,
+        tg_trigtuple,
+        tg_newtuple,
+        tg_trigger: td.tg_trigger,
+    };
+    ri_fkey_trigger(fcinfo.result_mcx(), TGFOID, &data)?;
+    // C: PointerGetDatum(NULL), the AFTER ROW result is ignored.
+    Ok(Datum::from_usize(0))
 }
 
 pub fn init_seams() {
@@ -255,6 +295,33 @@ fn ri_trig_kind(tgfoid: Oid) -> Option<(&'static str, i32)> {
 #[inline(never)]
 fn cache_lookup_failed(what: &str, oid: Oid) -> Box<PgError> {
     Box::new(PgError::error(format!("cache lookup failed for {what} {oid}")))
+}
+
+// ri_FetchConstraintInfo / ri_LoadConstraintInfo cross-check failures are
+// `elog(ERROR, ...)` in C: catchable XX000, never a backend abort. The
+// "not a foreign key constraint" one is reachable from plain SQL (CREATE
+// CONSTRAINT TRIGGER makes a contype 't' pg_constraint row and points the
+// trigger's tgconstraint at it), so it must be an ereport, not an assert.
+#[cold]
+#[inline(never)]
+fn not_a_foreign_key(constraint_oid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "constraint {constraint_oid} is not a foreign key constraint"
+    )))
+}
+
+#[cold]
+#[inline(never)]
+fn wrong_pg_constraint_entry(tgname: &str, relname: &str) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "wrong pg_constraint entry for trigger \"{tgname}\" on table \"{relname}\""
+    )))
+}
+
+#[cold]
+#[inline(never)]
+fn unrecognized_confmatchtype(confmatchtype: i8) -> Box<PgError> {
+    Box::new(PgError::error(format!("unrecognized confmatchtype: {confmatchtype}")))
 }
 
 #[cold]
@@ -1224,20 +1291,23 @@ pub fn RI_PartitionRemove_Check<'mcx>(
     Ok(())
 }
 
-// RI_FKey_pk_upd_check_required (ri_triggers.c).
+// RI_FKey_pk_upd_check_required (ri_triggers.c); new_tup is None for a
+// DELETE event, which then skips only on a NULL in the old key.
 fn RI_FKey_pk_upd_check_required<'mcx>(
     _mcx: Mcx<'mcx>,
     trigger: &Trigger<'mcx>,
     pk_rel: &Relation<'mcx>,
     old_tup: &HeapTupleData<'_>,
-    new_tup: &HeapTupleData<'_>,
+    new_tup: Option<&HeapTupleData<'_>>,
 ) -> PgResult<bool> {
     let riinfo = ri_FetchConstraintInfo(trigger, pk_rel, true)?;
     if ri_NullCheck(&pk_rel.rd_att, old_tup, &riinfo, true) != RI_KEYS_NONE_NULL {
         return Ok(false);
     }
-    if ri_KeysEqual(pk_rel, old_tup, new_tup, &riinfo, true)? {
-        return Ok(false);
+    if let Some(new_tup) = new_tup {
+        if ri_KeysEqual(pk_rel, old_tup, new_tup, &riinfo, true)? {
+            return Ok(false);
+        }
     }
     Ok(true)
 }
@@ -1248,9 +1318,18 @@ fn RI_FKey_fk_upd_check_required<'mcx>(
     trigger: &Trigger<'mcx>,
     fk_rel: &Relation<'mcx>,
     old_tup: &HeapTupleData<'_>,
-    new_tup: &HeapTupleData<'_>,
+    new_tup: Option<&HeapTupleData<'_>>,
 ) -> PgResult<bool> {
     let riinfo = ri_FetchConstraintInfo(trigger, fk_rel, false)?;
+    // A DELETE event reaches here only through a hand-made trigger naming an
+    // FK-side RI builtin; C then has newslot = NULL. ri_FetchConstraintInfo
+    // already rejected every SQL-creatable such trigger (no pg_constraint
+    // entry / not a foreign key); C would dereference the NULL slot on the
+    // catalog-hacked remainder -- queue the event and let ri_CheckTrigger
+    // report the wrong event instead.
+    let Some(new_tup) = new_tup else {
+        return Ok(true);
+    };
     match ri_NullCheck(&fk_rel.rd_att, new_tup, &riinfo, false) {
         RI_KEYS_ALL_NULL => return Ok(false),
         RI_KEYS_SOME_NULL => match riinfo.confmatchtype {
@@ -1281,24 +1360,19 @@ fn ri_FetchConstraintInfo<'mcx>(
         return Err(no_pg_constraint_entry(trigger.tgname.as_str(), trig_rel.name()));
     }
     let riinfo = ri_LoadConstraintInfo(constraint_oid)?;
-    if rel_is_pk {
-        assert!(
-            riinfo.fk_relid == trigger.tgconstrrelid && riinfo.pk_relid == trig_rel.rd_id,
-            "wrong pg_constraint entry for trigger \"{}\"",
-            trigger.tgname.as_str()
-        );
+    let entry_matches = if rel_is_pk {
+        riinfo.fk_relid == trigger.tgconstrrelid && riinfo.pk_relid == trig_rel.rd_id
     } else {
-        assert!(
-            riinfo.fk_relid == trig_rel.rd_id && riinfo.pk_relid == trigger.tgconstrrelid,
-            "wrong pg_constraint entry for trigger \"{}\"",
-            trigger.tgname.as_str()
-        );
+        riinfo.fk_relid == trig_rel.rd_id && riinfo.pk_relid == trigger.tgconstrrelid
+    };
+    if !entry_matches {
+        return Err(wrong_pg_constraint_entry(trigger.tgname.as_str(), trig_rel.name()));
     }
     if riinfo.confmatchtype != FKCONSTR_MATCH_FULL
         && riinfo.confmatchtype != FKCONSTR_MATCH_PARTIAL
         && riinfo.confmatchtype != FKCONSTR_MATCH_SIMPLE
     {
-        panic!("unrecognized confmatchtype: {}", riinfo.confmatchtype);
+        return Err(unrecognized_confmatchtype(riinfo.confmatchtype));
     }
     if riinfo.confmatchtype == FKCONSTR_MATCH_PARTIAL {
         return Err(Box::new(
@@ -1341,10 +1415,10 @@ fn ri_LoadConstraintInfo(constraint_oid: Oid) -> PgResult<RiConstraintInfo> {
         assert!(!isnull, "unexpected null pg_constraint attr {attno}");
         Ok(d)
     };
-    assert!(
-        req(Anum_contype)?.as_i8() == CONSTRAINT_FOREIGN,
-        "constraint {constraint_oid} is not a foreign key constraint"
-    );
+    // ri_triggers.c:2301 elog(ERROR, "constraint %u is not a foreign key constraint").
+    if req(Anum_contype)?.as_i8() != CONSTRAINT_FOREIGN {
+        return Err(not_a_foreign_key(constraint_oid));
+    }
 
     let conparentid = req(Anum_conparentid)?.as_oid();
     let constraint_root_id = if conparentid != InvalidOid {
