@@ -4,10 +4,6 @@
 //! per-element lock is a Mutex over the mutable parts. DIVERGENCES (recorded):
 //! one implementation serves serial and parallel builds (C: base == NULL vs
 //! relptr); indtuples is an integer counter (C: double under a spinlock).
-//!
-//! Not yet consumed outside this module (Task 2 wires these into `lib.rs`'s
-//! build state), so the module is allowed to look unused for now.
-#![allow(dead_code)] // consumed from Task 2 onward
 
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::*};
 use std::sync::{Arc, Mutex, RwLock};
@@ -74,13 +70,16 @@ pub struct SharedGraph {
     memory_used: AtomicUsize,
     pub memory_total: usize,
     flushed: AtomicBool,
+    /// C: `graph->flushLock`, serialising the in-memory→disk transition
+    /// between participants; consumed by the parallel build (later task).
+    #[allow(dead_code)]
     pub flush_lock: Mutex<()>,
     indtuples: AtomicU64,
 }
 
 /// Lock a Mutex, recovering the guard on poison rather than propagating the
 /// panic to every other participant (C has no notion of lock poisoning).
-fn lk<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+pub(crate) fn lk<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -143,6 +142,9 @@ impl SharedGraph {
         Arc::clone(&self.elems.read().unwrap_or_else(|e| e.into_inner())[id as usize])
     }
 
+    /// Number of allocated elements (duplicates included). Used by tests and
+    /// by the parallel build's progress reporting (later task).
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.elems.read().unwrap_or_else(|e| e.into_inner()).len()
     }
