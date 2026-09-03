@@ -201,7 +201,7 @@ fn create_graph_pages(bs: &mut BuildState<'_, '_>, order: &[u32]) -> PgResult<()
             offno
         };
 
-        serialize_element_tuple(&mut etup, &e);
+        serialize_element_tuple(&mut etup, e);
         page_add(bs.index, buf, &etup, e_offno)?;
 
         // SAFETY: lock held.
@@ -249,7 +249,7 @@ fn write_neighbor_tuples(bs: &mut BuildState<'_, '_>, order: &[u32]) -> PgResult
             let p = lk(&e.placement);
             (p.neighbor_page, p.neighbor_offno)
         };
-        serialize_neighbor_tuple(&mut ntup, &bs.graph, &e, bs.m);
+        serialize_neighbor_tuple(&mut ntup, &bs.graph, e, bs.m);
         let buf = bufmgr::ReadBufferExtended(
             bs.index,
             bs.fork_num,
@@ -297,7 +297,8 @@ pub(crate) fn flush_pages(bs: &mut BuildState<'_, '_>) -> PgResult<()> {
     create_graph_pages(bs, &order)?;
     write_neighbor_tuples(bs, &order)?;
     graph.set_flushed();
-    // C resets graphCtx.
+    // C resets graphCtx; we reset only the logical graph and keep the arena
+    // chunks until the SharedGraph is dropped (DIVERGENCE, graph.rs header).
     graph.clear_after_flush();
 
     drop(write);
@@ -366,11 +367,11 @@ mod tests {
         let live_count = lk(&e.neighbors)[0].items.len();
 
         let mut etup: Vec<u8> = Vec::new();
-        serialize_element_tuple(&mut etup, &e);
+        serialize_element_tuple(&mut etup, e);
         assert_eq!(etup[1], e.level, "element tuple carries the element's level");
 
         let mut ntup: Vec<u8> = Vec::new();
-        serialize_neighbor_tuple(&mut ntup, &graph, &e, m);
+        serialize_neighbor_tuple(&mut ntup, &graph, e, m);
         let view = NeighborTupleView { bytes: &ntup };
         let valid = (0..view.count() as usize)
             .filter(|&i| itemptr_is_valid(view.indextid_bytes(i)))
