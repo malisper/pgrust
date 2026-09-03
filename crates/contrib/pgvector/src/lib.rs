@@ -56,6 +56,9 @@ fn lookup(function: &str) -> Option<PGFunction> {
         "sparsevec_recv" => fc_sparsevec_recv,
         "sparsevec_send" => fc_sparsevec_send,
         "sparsevec" => fc_sparsevec,
+        "vector_to_sparsevec" => fc_vector_to_sparsevec,
+        "array_to_sparsevec" => fc_array_to_sparsevec,
+        "sparsevec_to_vector" => fc_sparsevec_to_vector,
         "hnswhandler" => fc_hnswhandler,
         _ => return None,
     })
