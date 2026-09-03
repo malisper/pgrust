@@ -898,7 +898,8 @@ fn init_build_state<'a, 'g, 'mcx>(
     fork_num: ForkNumber,
     gmcx: Mcx<'g>,
 ) -> PgResult<BuildState<'a, 'g, 'mcx>> {
-    let max_dims = check_type_supported(index)?;
+    let type_info = pgvector_hnsw::utils::get_type_info(index)?;
+    let max_dims = type_info.max_dimensions;
     let m = hnsw_get_m(index);
     let ef_construction = hnsw_get_ef_construction(index);
     let dimensions = index.rd_att.attr(0).atttypmod;
@@ -923,7 +924,11 @@ fn init_build_state<'a, 'g, 'mcx>(
         );
     }
 
+    // C calls HnswInitSupport after these checks; init_support also resolves
+    // proc 3 a second time (accepted duplicate — see DIVERGENCES in
+    // pgvector_hnsw/src/lib.rs).
     let support = init_support(index)?;
+
     Ok(BuildState {
         heap,
         index,
@@ -1042,6 +1047,7 @@ mod tests {
             ),
             normprocinfo: None,
             collation: 0,
+            type_info: &pgvector::vec::VECTOR_TYPE_INFO,
         }
     }
 

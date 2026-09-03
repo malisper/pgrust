@@ -21,12 +21,12 @@ pub(crate) fn image_datum(img: PgVec<'_, u8>) -> Datum {
 }
 
 // SAFETY contract of callers: arg i is a non-null vector varlena (strict fns).
-unsafe fn arg_vector<'a>(fcinfo: &'a Fcinfo, i: usize) -> PgResult<VecView<'a>> {
+pub(crate) unsafe fn arg_vector<'a>(fcinfo: &'a Fcinfo, i: usize) -> PgResult<VecView<'a>> {
     let v = unsafe { fcinfo.arg_varlena_packed(i)? };
     VecView::from_payload(v.data())
 }
 
-unsafe fn detoasted_image<'m>(mcx: Mcx<'m>, d: Datum) -> PgResult<&'m [u8]> {
+pub(crate) unsafe fn detoasted_image<'m>(mcx: Mcx<'m>, d: Datum) -> PgResult<&'m [u8]> {
     let p = d.as_usize() as *const u8;
     unsafe {
         if varatt::varatt_is_4b_u(p) {
@@ -163,6 +163,19 @@ pub fn fc_vector(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Dat
     Ok(fcinfo.arg(0))
 }
 
+/// Numeric array element payload (skip the varlena header) for the
+/// numeric-array conversion arm shared by fc_array_to_vector and
+/// fc_array_to_halfvec.
+///
+/// SAFETY: `d` must be a non-null numeric element datum pointing into an
+/// array image whose backing memory outlives the returned slice.
+pub(crate) unsafe fn numeric_element_payload<'a>(d: &Datum) -> &'a [u8] {
+    let p = d.as_usize() as *const u8;
+    let total = varatt::varsize_any(p);
+    let hdr = if varatt::varatt_is_1b(p) { 1 } else { 4 };
+    core::slice::from_raw_parts(p.add(hdr), total - hdr)
+}
+
 pub fn fc_array_to_vector(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let mcx = fcinfo.result_mcx();
     // SAFETY: strict fn — arg0 array, arg1 typmod.
@@ -210,13 +223,8 @@ pub fn fc_array_to_vector(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
         }
         NUMERICOID => {
             for (i, d) in elems.iter().enumerate() {
-                let p = d.as_usize() as *const u8;
                 // SAFETY: non-null numeric element datum inside the array image.
-                let payload = unsafe {
-                    let total = varatt::varsize_any(p);
-                    let hdr = if varatt::varatt_is_1b(p) { 1 } else { 4 };
-                    core::slice::from_raw_parts(p.add(hdr), total - hdr)
-                };
+                let payload = unsafe { numeric_element_payload(d) };
                 b.set(i, adt_numeric::ops::numeric_float4(
                     adt_numeric::Num::from_payload(payload),
                 )?);
@@ -487,13 +495,13 @@ pub fn fc_vector_cmp(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult
     Ok(Datum::from_i32(vector_cmp_internal(&a, &b)))
 }
 
-struct StateArray<'a> {
+pub(crate) struct StateArray<'a> {
     img: &'a [u8],
     n_items: usize,
 }
 
 impl<'a> StateArray<'a> {
-    fn check(mcx: Mcx<'a>, d: Datum, caller: &str) -> PgResult<StateArray<'a>> {
+    pub(crate) fn check(mcx: Mcx<'a>, d: Datum, caller: &str) -> PgResult<StateArray<'a>> {
         // SAFETY: caller passes a non-null float8[] state datum.
         let img = unsafe { detoasted_image(mcx, d)? };
         if arrayfuncs::arr_ndim(img) != 1
@@ -510,17 +518,17 @@ impl<'a> StateArray<'a> {
     }
 
     // STATE_DIMS: dims[0] - 1.
-    fn state_dims(&self) -> usize {
+    pub(crate) fn state_dims(&self) -> usize {
         self.n_items - 1
     }
 
-    fn value(&self, i: usize) -> f64 {
+    pub(crate) fn value(&self, i: usize) -> f64 {
         let off = arrayfuncs::arr_data_offset(self.img) + 8 * i;
         f64::from_ne_bytes(self.img[off..off + 8].try_into().unwrap())
     }
 }
 
-fn build_state_array<'m>(mcx: Mcx<'m>, vals: &[Datum]) -> PgResult<PgVec<'m, u8>> {
+pub(crate) fn build_state_array<'m>(mcx: Mcx<'m>, vals: &[Datum]) -> PgResult<PgVec<'m, u8>> {
     arrayfuncs::construct_array(mcx, vals, FLOAT8OID, 8, true, b'd')
 }
 
