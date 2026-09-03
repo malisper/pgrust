@@ -1959,6 +1959,9 @@ mod tests {
     #[test]
     fn extension_handlers_resolve_through_dfmgr() {
         init_seams();
+        let mut pkglib = [0u8; types_core::MAXPGPATH];
+        pkglib[..b"/nonexistent-pkglib".len()].copy_from_slice(b"/nonexistent-pkglib");
+        init_small::globals::set_pkglib_path(pkglib);
         for symbol in ["plpgsql_call_handler", "plpgsql_inline_handler", "plpgsql_validator"] {
             let f = dfmgr::load_external_function("$libdir/plpgsql", symbol, true)
                 .unwrap_or_else(|e| panic!("{symbol}: {}", e.message()))
@@ -1973,14 +1976,15 @@ mod tests {
         // Unknown symbols in the registered library keep C's lookup-miss error.
         let err =
             dfmgr::load_external_function("$libdir/plpgsql", "no_such_symbol", true).unwrap_err();
-        assert!(err
-            .message()
-            .contains("could not find function \"no_such_symbol\" in file \"$libdir/plpgsql\""));
+        assert!(err.message().contains(&format!(
+            "could not find function \"no_such_symbol\" in file \"/nonexistent-pkglib/plpgsql{}\"",
+            dfmgr::DLSUFFIX
+        )));
         // Unregistered libraries keep C's file-access error, unchanged.
         let err =
             dfmgr::load_external_function("$libdir/no_such_lib", "plpgsql_call_handler", true)
                 .unwrap_err();
-        assert!(err.message().contains("could not access file \"$libdir/no_such_lib\""));
+        assert!(err.message().contains("could not access file \"no_such_lib\""));
     }
 
     std::thread_local! {
@@ -2157,6 +2161,8 @@ mod tests {
                     proretset: false,
                     prosecdef: false,
                     proconfig_isnull: true,
+                    xmin: 0,
+                    tid: Default::default(),
                 }))
             });
             syscache_seams::lookup_pg_language_fmgr::set(|langoid| {

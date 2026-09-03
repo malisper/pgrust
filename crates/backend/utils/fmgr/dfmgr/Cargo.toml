@@ -11,3 +11,9 @@ path = "src/lib.rs"
 [dependencies]
 fmgr = { package = "types_fmgr", path = "../../../../_support/types/fmgr" }
 types_error = { path = "../../../../_support/types/types_error" }
+elog = { path = "../../error/elog" }
+guc_tables = { path = "../../misc/guc_tables" }
+init_small = { path = "../../init/init_small" }
+pg_path = { path = "../../../../port/pg_path" }
+fd = { path = "../../../storage/file/fd" }
+vfs = { path = "../../../storage/file/vfs" }

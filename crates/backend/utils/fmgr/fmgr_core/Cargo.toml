@@ -11,6 +11,7 @@ path = "src/lib.rs"
 [dependencies]
 types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
 datum = { path = "../../../../_support/types/datum" }
 fmgr = { package = "types_fmgr", path = "../../../../_support/types/fmgr" }
 fmgr_seams = { path = "../fmgr_seams" }
@@ -90,5 +91,6 @@ miscinit_seams = { path = "../../init/miscinit_seams" }
 dfmgr = { path = "../dfmgr" }
 
 [dev-dependencies]
+init_small = { path = "../../init/init_small" }
 stringinfo = { path = "../../../../_support/types/stringinfo" }
 nodes = { package = "types_nodes", path = "../../../../_support/types/nodes" }

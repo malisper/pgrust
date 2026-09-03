@@ -1299,6 +1299,8 @@ mod tests {
                         proretset: false,
                         prosecdef: false,
                         proconfig_isnull: true,
+                        xmin: 0,
+                        tid: Default::default(),
                     }))
                 });
                 syscache_seams::lookup_pg_language_fmgr::set(|langoid| {

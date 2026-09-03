@@ -2,6 +2,8 @@
 #![allow(non_upper_case_globals)]
 
 extern crate alloc;
+// thread_local! for the per-backend CFuncHash (AGENTS.md rule 10).
+extern crate std;
 
 pub mod canonical;
 pub mod ported;
@@ -13,8 +15,9 @@ use alloc::format;
 
 use ::datum::Datum;
 use ::fmgr::{FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData, TRACK_FUNC_ALL};
-use ::types_core::{primitive::InvalidOid, Oid};
+use ::types_core::{primitive::InvalidOid, Oid, TransactionId};
 use ::types_error::PgResult;
+use ::types_tuple::ItemPointerData;
 
 pub use ::fmgr::{
     direct_input_function_call_safe, input_function_call, input_function_call_safe,
@@ -482,6 +485,57 @@ fn registered_c_lang_fn(prosrc: &str) -> Option<::fmgr::PGFunction> {
     Some(unsafe { core::mem::transmute::<usize, ::fmgr::PGFunction>(h) })
 }
 
+// fmgr.c CFuncHash: the resolved address of each external C function, keyed
+// by pg_proc OID and validated by the tuple's xmin/TID (lookup_C_func), so
+// dfmgr's path resolution runs once per function per session.
+struct CFuncHashTabEntry {
+    fn_xmin: TransactionId,
+    fn_tid: ItemPointerData,
+    user_fn: ::fmgr::PGFunction,
+}
+
+type CFuncHash = ::mcx::PgHashMap<'static, Oid, CFuncHashTabEntry>;
+
+std::thread_local! {
+    static CFUNC_HASH: core::cell::RefCell<Option<core::mem::ManuallyDrop<CFuncHash>>> =
+        const { core::cell::RefCell::new(None) };
+}
+
+fn lookup_c_func(
+    fn_oid: Oid,
+    xmin: TransactionId,
+    tid: ItemPointerData,
+) -> Option<::fmgr::PGFunction> {
+    CFUNC_HASH.with(|cell| {
+        let slot = cell.borrow();
+        let entry = slot.as_ref()?.get(&fn_oid)?;
+        (entry.fn_xmin == xmin && entry.fn_tid == tid).then_some(entry.user_fn)
+    })
+}
+
+fn record_c_func(
+    fn_oid: Oid,
+    xmin: TransactionId,
+    tid: ItemPointerData,
+    user_fn: ::fmgr::PGFunction,
+) {
+    CFUNC_HASH.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let table = slot.get_or_insert_with(|| {
+            let mcx = ::mcx::session_root("CFuncHash").mcx();
+            ::mcx::register_session_cleanup(Box::new(|| {
+                CFUNC_HASH.with(|cell| {
+                    if let Some(table) = cell.borrow_mut().take() {
+                        drop(core::mem::ManuallyDrop::into_inner(table));
+                    }
+                });
+            }));
+            core::mem::ManuallyDrop::new(CFuncHash::with_capacity_in(100, mcx))
+        });
+        table.insert(fn_oid, CFuncHashTabEntry { fn_xmin: xmin, fn_tid: tid, user_fn });
+    });
+}
+
 /// Whether `prosrc` names a registered in-tree PL entry point. DDL fences
 /// (CREATE LANGUAGE) consult this so a handler that could never dispatch is
 /// refused at creation with a clean 0A000 instead of failing at call time
@@ -568,32 +622,37 @@ fn fmgr_info_pg_proc(
             // valid PGFunction.
             unsafe { core::mem::transmute::<usize, ::fmgr::PGFunction>(h) }
         }
-        C_LANGUAGE_ID => {
-            // fmgr_info_C_lang: the dlopen'd symbol is the prosrc name;
-            // resolve against the registered PL entry points, then the
-            // shipped native-library tables, then the in-process
-            // ported-library registry keyed by probin (dfmgr).
-            let cx = ::mcx::MemoryContext::new("fmgr_info prosrc");
-            let prosrc = syscache_seams::lookup_pg_proc_prosrc::call(cx.mcx(), function_id)?
-                .unwrap_or_else(|| panic!("fmgr: null prosrc for function {function_id}"));
-            match registered_c_lang_fn(&prosrc).or_else(|| {
-                ::dict_snowball::builtins::SNOWBALL_CLANG
-                    .iter()
-                    .find(|(name, _, _)| *name == prosrc.as_str())
-                    .map(|&(_, _, func)| func)
-            }) {
-                Some(f) => f,
-                None => {
-                    let probin =
-                        syscache_seams::lookup_pg_proc_probin::call(cx.mcx(), function_id)?
-                            .unwrap_or_else(|| {
-                                panic!("fmgr: null probin for C function {function_id}")
-                            });
-                    ::dfmgr::load_external_function(&probin, &prosrc, true)?
-                        .expect("signal_not_found=true returned no function")
-                }
+        C_LANGUAGE_ID => match lookup_c_func(function_id, row.xmin, row.tid) {
+            Some(f) => f,
+            None => {
+                // fmgr_info_C_lang: the dlopen'd symbol is the prosrc name;
+                // resolve against the registered PL entry points, then the
+                // shipped native-library tables, then the in-process
+                // ported-library registry keyed by probin (dfmgr).
+                let cx = ::mcx::MemoryContext::new("fmgr_info prosrc");
+                let prosrc = syscache_seams::lookup_pg_proc_prosrc::call(cx.mcx(), function_id)?
+                    .unwrap_or_else(|| panic!("fmgr: null prosrc for function {function_id}"));
+                let user_fn = match registered_c_lang_fn(&prosrc).or_else(|| {
+                    ::dict_snowball::builtins::SNOWBALL_CLANG
+                        .iter()
+                        .find(|(name, _, _)| *name == prosrc.as_str())
+                        .map(|&(_, _, func)| func)
+                }) {
+                    Some(f) => f,
+                    None => {
+                        let probin =
+                            syscache_seams::lookup_pg_proc_probin::call(cx.mcx(), function_id)?
+                                .unwrap_or_else(|| {
+                                    panic!("fmgr: null probin for C function {function_id}")
+                                });
+                        ::dfmgr::load_external_function(&probin, &prosrc, true)?
+                            .expect("signal_not_found=true returned no function")
+                    }
+                };
+                record_c_func(function_id, row.xmin, row.tid, user_fn);
+                user_fn
             }
-        }
+        },
         lang => {
             // fmgr_info_other_lang: adopt the language call handler's entry
             // point (the handler is a C-language function; dispatch by its

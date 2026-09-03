@@ -619,6 +619,12 @@ fn a_live_owner_refuses_before_the_segment_is_ever_probed() {
     let _ = child.wait();
 }
 
+fn set_test_pkglib() {
+    let mut pkglib = [0u8; types_core::MAXPGPATH];
+    pkglib[..b"/nonexistent-pkglib".len()].copy_from_slice(b"/nonexistent-pkglib");
+    init_small::globals::set_pkglib_path(pkglib);
+}
+
 /// load_libraries (miscinit.c) list parsing = SplitDirectoriesString.
 /// Verified against postgres:18.3 (2026-07-31):
 ///   shared_preload_libraries='foo,,bar' -> LOG: invalid list syntax in
@@ -631,6 +637,7 @@ fn a_live_owner_refuses_before_the_segment_is_ever_probed() {
 #[test]
 fn preload_list_parsing_matches_split_directories_string() {
     setup();
+    set_test_pkglib();
 
     // Empty items: LOG + skip the whole list, not an error and not a load.
     preload::session_preload_libraries_string_set(Some("foo,,bar".into()));
@@ -655,6 +662,7 @@ fn preload_list_parsing_matches_split_directories_string() {
 #[test]
 fn local_preload_libraries_rejects_paths_outside_plugins() {
     setup();
+    set_test_pkglib();
 
     preload::local_preload_libraries_string_set(Some("$libdir/foo".into()));
     let err = preload::process_session_preload_libraries().unwrap_err();

@@ -264,6 +264,9 @@ pub struct PgProcFmgrShape {
     pub proretset: bool,
     pub prosecdef: bool,
     pub proconfig_isnull: bool,
+    // The tuple's raw xmin and TID: fmgr.c's CFuncHash up-to-dateness stamp.
+    pub xmin: types_core::TransactionId,
+    pub tid: types_tuple::ItemPointerData,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

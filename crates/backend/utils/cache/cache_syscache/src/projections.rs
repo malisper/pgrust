@@ -1544,6 +1544,8 @@ fn lookup_pg_proc_fmgr(funcid: Oid) -> PgResult<Option<syscache_seams::PgProcFmg
         proretset: getattr(&t, PROCOID, ANUM_PG_PROC_PRORETSET).as_bool(),
         prosecdef: getattr(&t, PROCOID, ANUM_PG_PROC_PROSECDEF).as_bool(),
         proconfig_isnull: getattr_nullable(&t, PROCOID, ANUM_PG_PROC_PROCONFIG).is_none(),
+        xmin: t.t_data().xmin_raw(),
+        tid: t.t_self,
     };
     drop(t);
     ReleaseSysCache(tuple);

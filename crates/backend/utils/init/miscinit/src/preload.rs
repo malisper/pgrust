@@ -3,9 +3,7 @@ use std::sync::RwLock;
 
 use elog::ereport;
 use guc_tables::{vars, GucVarAccessors};
-use types_error::{
-    ErrorLocation, PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_SYNTAX_ERROR, ERROR, LOG,
-};
+use types_error::{PgResult, ERRCODE_SYNTAX_ERROR, LOG};
 
 use crate::process::loc;
 
@@ -40,24 +38,6 @@ fn string_get(cell: &'static RwLock<Option<String>>) -> Option<String> {
     }
 }
 
-// Restricted library names (dfmgr.c): only $libdir/plugins/<basename>.
-// Shared with the LOAD dispatch's !superuser() leg (utility.c).
-pub fn check_restricted_library_name(name: &str) -> PgResult<()> {
-    if !name.starts_with(PLUGIN_PREFIX)
-        || pg_path::first_dir_separator(&name[PLUGIN_PREFIX.len()..]).is_some()
-    {
-        return ereport(ERROR)
-            .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)
-            .errmsg(format!("access to library \"{name}\" is not allowed"))
-            .finish(ErrorLocation::new(
-                "src/backend/utils/fmgr/dfmgr.c",
-                525,
-                "check_restricted_library_name",
-            ));
-    }
-    Ok(())
-}
-
 // load_libraries (miscinit.c): names resolve through the dfmgr
 // builtin-library registry (no dlopen); an unknown name errors like C's
 // "could not access file".
@@ -85,10 +65,7 @@ fn load_libraries(libraries: Option<&str>, gucname: &str, restricted: bool) -> P
         if restricted && pg_path::first_dir_separator(&name).is_none() {
             name = format!("{PLUGIN_PREFIX}{name}");
         }
-        if restricted {
-            check_restricted_library_name(&name)?;
-        }
-        dfmgr::load_file(&name)?;
+        dfmgr::load_file(&name, restricted)?;
     }
     Ok(())
 }
@@ -168,5 +145,9 @@ pub(crate) fn install_preload_guc_vars() {
     vars::preload_contrib_string.install(GucVarAccessors {
         get: || string_get(&PRELOAD_CONTRIB),
         set: |v| *PRELOAD_CONTRIB.write().unwrap() = v,
+    });
+    vars::Dynamic_library_path.install(GucVarAccessors {
+        get: dfmgr::dynamic_library_path_get,
+        set: dfmgr::dynamic_library_path_set,
     });
 }

@@ -23,6 +23,8 @@ fn security_definer_wrapper_switches_user_and_gucs() {
             proretset: false,
             prosecdef: true,
             proconfig_isnull: false,
+            xmin: 0,
+            tid: Default::default(),
         }))
     });
     syscache_seams::lookup_pg_proc_prosrc::set(|mcx, _| {

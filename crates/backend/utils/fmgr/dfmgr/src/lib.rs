@@ -1,13 +1,39 @@
 // probin is a registry KEY, never a file: no C ABI exists to dlopen (ratified
-// no-dlopen carve, docs/design/carve-ratifications.md §2), so an unregistered
-// library must stay loud with C's file-access error.
+// no-dlopen carve, docs/design/carve-ratifications.md §2). The registry is the
+// listing of $libdir itself — "<pkglib_path>/<name>DLSUFFIX" exists for every
+// registered name — and every other path is a real stat(), so a file under
+// $libdir/plugins/ stays the administrator's opt-in exactly as in C.
 
 use std::cell::RefCell;
+use std::ffi::CString;
 use std::sync::Mutex;
 
+use ::elog::{ereport, message_level_is_interesting};
 use ::fmgr::PGFunction;
-use ::types_error::{PgError, PgResult, ERRCODE_UNDEFINED_FILE, ERRCODE_UNDEFINED_FUNCTION};
+use ::types_error::{
+    ErrorLocation, PgError, PgResult, DEBUG3, ERRCODE_INSUFFICIENT_PRIVILEGE,
+    ERRCODE_INVALID_NAME, ERRCODE_UNDEFINED_FILE, ERRCODE_UNDEFINED_FUNCTION, ERROR,
+};
 
+pub const DLSUFFIX: &str = if cfg!(target_os = "macos") {
+    ".dylib"
+} else if cfg!(windows) {
+    ".dll"
+} else {
+    ".so"
+};
+
+const LIBDIR_MACRO: &str = "$libdir";
+const PLUGINS_PREFIX: &str = "$libdir/plugins/";
+
+guc_tables::session_guc_string!(
+    DYNAMIC_LIBRARY_PATH,
+    dynamic_library_path_get,
+    dynamic_library_path_set,
+    Some("$libdir")
+);
+
+#[derive(Clone, Copy)]
 pub struct BuiltinLibraryEntry {
     pub name: &'static str,
     pub lookup: fn(&str) -> Option<PGFunction>,
@@ -18,20 +44,15 @@ pub struct BuiltinLibraryEntry {
 
 static BUILTIN_LIBRARIES: Mutex<Vec<BuiltinLibraryEntry>> = Mutex::new(Vec::new());
 
-const KNOWN_DLSUFFIXES: [&str; 3] = [".so", ".dylib", ".dll"];
+struct LoadedFile {
+    filename: String,
+    entry: BuiltinLibraryEntry,
+}
 
-// Key is platform-independent (any suffix strips): looked up, never opened.
-pub fn simple_library_name(name: &str) -> Option<&str> {
-    let base = name.rsplit('/').next().unwrap_or(name);
-    let base = KNOWN_DLSUFFIXES
-        .iter()
-        .find_map(|sfx| base.strip_suffix(sfx))
-        .unwrap_or(base);
-    if base.is_empty() {
-        None
-    } else {
-        Some(base)
-    }
+thread_local! {
+    // file_list (dfmgr.c): per-backend record of loaded files (malloc'd in C,
+    // outliving every context), so _PG_init runs once per session.
+    static FILE_LIST: RefCell<Vec<LoadedFile>> = const { RefCell::new(Vec::new()) };
 }
 
 pub fn register_builtin_library(entry: BuiltinLibraryEntry) {
@@ -42,119 +63,448 @@ pub fn register_builtin_library(entry: BuiltinLibraryEntry) {
     }
 }
 
-pub fn library_present(filename: &str) -> bool {
-    match simple_library_name(filename) {
-        Some(key) => BUILTIN_LIBRARIES.lock().unwrap().iter().any(|e| e.name == key),
-        None => false,
+fn registered(key: &str) -> Option<BuiltinLibraryEntry> {
+    BUILTIN_LIBRARIES.lock().unwrap().iter().find(|e| e.name == key).copied()
+}
+
+fn pkglib_path() -> String {
+    let buf = init_small::globals::pkglib_path();
+    let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    String::from_utf8_lossy(&buf[..len]).into_owned()
+}
+
+fn is_directory(path: &str) -> bool {
+    let cpath = CString::new(path).unwrap_or_default();
+    let mut st = vfs::FileInfo::zeroed();
+    vfs::stat(&cpath, &mut st) == 0 && st.is_dir()
+}
+
+// The registry's $libdir listing, read the way stat(2) reads a path: "//",
+// "/./" and "x/.." collapse, ".." only backs out of an existing directory
+// ($libdir itself counts), and a trailing "/" or "/." names a directory.
+fn registered_at(full: &str) -> Option<BuiltinLibraryEntry> {
+    let pkglib = pg_path::canonicalize_path(&pkglib_path());
+    if pkglib.is_empty() || full.ends_with('/') || full.ends_with("/.") {
+        return None;
+    }
+    let mut dir = String::new();
+    for comp in full.split('/') {
+        if comp == ".." {
+            let d = pg_path::canonicalize_path(&dir);
+            if d != pkglib && !is_directory(&d) {
+                return None;
+            }
+        }
+        dir.push_str(comp);
+        dir.push('/');
+    }
+    let canonical = pg_path::canonicalize_path(full);
+    let key = canonical
+        .strip_prefix(pkglib.as_str())?
+        .strip_prefix('/')?
+        .strip_suffix(DLSUFFIX)?;
+    if pg_path::first_dir_separator(key).is_some() {
+        return None;
+    }
+    registered(key)
+}
+
+fn file_exists(full: &str) -> PgResult<bool> {
+    if registered_at(full).is_some() {
+        return Ok(true);
+    }
+    fd::pg_file_exists(full)
+}
+
+fn loc(line: i32, funcname: &'static str) -> ErrorLocation {
+    ErrorLocation::new("src/backend/utils/fmgr/dfmgr.c", line, funcname)
+}
+
+#[cold]
+#[inline(never)]
+fn invalid_name_error(message: String, line: i32, funcname: &'static str) -> Box<PgError> {
+    Box::new(
+        PgError::error(message)
+            .with_sqlstate(ERRCODE_INVALID_NAME)
+            .with_error_location(loc(line, funcname)),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn file_miss_error(libname: &str) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "could not access file \"{libname}\": No such file or directory"
+        ))
+        .with_sqlstate(ERRCODE_UNDEFINED_FILE)
+        .with_error_location(loc(212, "internal_load_library")),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn file_access_error(libname: &str, errnum: i32) -> Box<PgError> {
+    Box::new(
+        ereport(ERROR)
+            .with_saved_errno(errnum)
+            .errcode_for_file_access()
+            .errmsg(format!("could not access file \"{libname}\": %m"))
+            .into_error()
+            .with_error_location(loc(212, "internal_load_library")),
+    )
+}
+
+pub fn substitute_path_macro(s: &str, macro_name: &str, value: &str) -> PgResult<String> {
+    if !s.starts_with('$') {
+        return Ok(s.to_owned());
+    }
+    let sep = pg_path::first_dir_separator(s).unwrap_or(s.len());
+    if macro_name.len() != sep || !s.starts_with(macro_name) {
+        return Err(invalid_name_error(
+            format!("invalid macro name in path: {s}"),
+            552,
+            "substitute_path_macro",
+        ));
+    }
+    Ok(format!("{value}{}", &s[sep..]))
+}
+
+pub fn find_in_path(
+    basename: &str,
+    path: &str,
+    path_param: &str,
+    macro_name: &str,
+    macro_val: &str,
+) -> PgResult<Option<String>> {
+    if path.is_empty() {
+        return Ok(None);
+    }
+    let mut p = path;
+    loop {
+        let len = match pg_path::first_path_var_separator(p) {
+            Some(0) => {
+                return Err(invalid_name_error(
+                    format!("zero-length component in parameter \"{path_param}\""),
+                    604,
+                    "find_in_path",
+                ))
+            }
+            Some(i) => i,
+            None => p.len(),
+        };
+        let mangled =
+            pg_path::canonicalize_path(&substitute_path_macro(&p[..len], macro_name, macro_val)?);
+        if !pg_path::is_absolute_path(&mangled) {
+            return Err(invalid_name_error(
+                format!("component in parameter \"{path_param}\" is not an absolute path"),
+                623,
+                "find_in_path",
+            ));
+        }
+        let full = format!("{mangled}/{basename}");
+        if message_level_is_interesting(DEBUG3) {
+            ereport(DEBUG3)
+                .errmsg_internal(format!("find_in_path: trying \"{full}\""))
+                .finish(loc(631, "find_in_path"))?;
+        }
+        if file_exists(&full)? {
+            return Ok(Some(full));
+        }
+        if len == p.len() {
+            return Ok(None);
+        }
+        p = &p[len + 1..];
     }
 }
 
-thread_local! {
-    // file_list (dfmgr.c): per-backend record of loaded libraries, so
-    // _PG_init runs once per session.
-    static LOADED_LIBRARIES: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
+fn expand_dynamic_library_name(name: &str) -> PgResult<String> {
+    let have_slash = pg_path::first_dir_separator(name).is_some();
+    let pkglib = pkglib_path();
+    let path = dynamic_library_path_get().unwrap_or_default();
+    for candidate in [name.to_owned(), format!("{name}{DLSUFFIX}")] {
+        if !have_slash {
+            if let Some(full) =
+                find_in_path(&candidate, &path, "dynamic_library_path", LIBDIR_MACRO, &pkglib)?
+            {
+                return Ok(full);
+            }
+        } else {
+            let full = substitute_path_macro(&candidate, LIBDIR_MACRO, &pkglib)?;
+            if file_exists(&full)? {
+                return Ok(full);
+            }
+        }
+    }
+    Ok(name.to_owned())
 }
 
-// load_file (dfmgr.c) for the LOAD command: resolve against the builtin
-// registry (no dlopen exists) and run _PG_init on first load. An unregistered
-// name is C's stat() miss.
-pub fn load_file(filename: &str) -> PgResult<()> {
-    let entry = simple_library_name(filename).and_then(|key| {
-        let libs = BUILTIN_LIBRARIES.lock().unwrap();
-        libs.iter().find(|e| e.name == key).map(|e| (e.name, e.pg_init))
-    });
-    let Some((name, pg_init)) = entry else {
-        return Err(Box::new(
-            PgError::error(format!(
-                "could not access file \"{filename}\": No such file or directory"
-            ))
-            .with_sqlstate(ERRCODE_UNDEFINED_FILE),
-        ));
+pub fn check_restricted_library_name(name: &str) -> PgResult<()> {
+    if !name.starts_with(PLUGINS_PREFIX)
+        || pg_path::first_dir_separator(&name[PLUGINS_PREFIX.len()..]).is_some()
+    {
+        return ereport(ERROR)
+            .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)
+            .errmsg(format!("access to library \"{name}\" is not allowed"))
+            .finish(loc(525, "check_restricted_library_name"));
+    }
+    Ok(())
+}
+
+// A filename already in file_list needs no stat (C's first scan). Otherwise
+// a path outside the registry's $libdir view is stat()ed like C; an existing
+// file cannot be dlopen'd (carve §2), so its basename keys the registry. The
+// entry is the module identity (C's SAME_INODE scan).
+fn internal_load_library(libname: &str) -> PgResult<BuiltinLibraryEntry> {
+    let known =
+        FILE_LIST.with(|s| s.borrow().iter().find(|f| f.filename == libname).map(|f| f.entry));
+    if let Some(entry) = known {
+        return Ok(entry);
+    }
+    let entry = match registered_at(libname) {
+        Some(e) => e,
+        None => {
+            let cpath = CString::new(libname).unwrap_or_default();
+            let mut st = vfs::FileInfo::zeroed();
+            if vfs::stat(&cpath, &mut st) != 0 {
+                return Err(file_access_error(libname, vfs::get_errno()));
+            }
+            let base = &libname[pg_path::last_dir_separator(libname).map_or(0, |i| i + 1)..];
+            let key = base.strip_suffix(DLSUFFIX).unwrap_or(base);
+            registered(key).ok_or_else(|| file_miss_error(libname))?
+        }
     };
-    // Marked loaded only after _PG_init succeeds, mirroring C's unlink of the
-    // file_list entry on load failure.
-    let already = LOADED_LIBRARIES.with(|s| s.borrow().contains(&name));
+    // Linked into file_list only after _PG_init succeeds, as in C.
+    let already = FILE_LIST.with(|s| s.borrow().iter().any(|f| f.entry.name == entry.name));
     if !already {
-        if let Some(init) = pg_init {
+        if let Some(init) = entry.pg_init {
             init()?;
         }
-        LOADED_LIBRARIES.with(|s| s.borrow_mut().push(name));
+        FILE_LIST.with(|s| s.borrow_mut().push(LoadedFile { filename: libname.to_owned(), entry }));
     }
+    Ok(entry)
+}
+
+pub fn load_file(filename: &str, restricted: bool) -> PgResult<()> {
+    if restricted {
+        check_restricted_library_name(filename)?;
+    }
+    let fullname = expand_dynamic_library_name(filename)?;
+    internal_load_library(&fullname)?;
     Ok(())
 }
 
 // DynamicFileList walk (dfmgr.c get_first_loaded_module/get_next_loaded_module)
 // for pg_get_loaded_modules: this backend's loaded libraries, load order.
 pub fn loaded_module_names() -> Vec<&'static str> {
-    LOADED_LIBRARIES.with(|s| s.borrow().clone())
+    FILE_LIST.with(|s| s.borrow().iter().map(|f| f.entry.name).collect())
 }
 
-fn registry_resolve(key: &str, funcname: &str) -> Option<Option<PGFunction>> {
-    let libs = BUILTIN_LIBRARIES.lock().unwrap();
-    let entry = libs.iter().find(|e| e.name == key)?;
-    Some((entry.lookup)(funcname))
-}
-
-// Unregistered library = C's stat() miss; registered-but-missing symbol = the
-// C lookup miss, suppressed when !signal_not_found.
 pub fn load_external_function(
     filename: &str,
     funcname: &str,
     signal_not_found: bool,
 ) -> PgResult<Option<PGFunction>> {
-    let resolved = simple_library_name(filename).and_then(|key| registry_resolve(key, funcname));
-    match resolved {
-        Some(Some(f)) => Ok(Some(f)),
-        Some(None) => {
-            if signal_not_found {
-                Err(Box::new(
-                    PgError::error(format!(
-                        "could not find function \"{funcname}\" in file \"{filename}\""
-                    ))
-                    .with_sqlstate(ERRCODE_UNDEFINED_FUNCTION),
-                ))
-            } else {
-                Ok(None)
-            }
-        }
-        None => Err(Box::new(
+    let filename = match filename.strip_prefix("$libdir/") {
+        Some(simple) if pg_path::first_dir_separator(simple).is_none() => simple,
+        _ => filename,
+    };
+    let fullname = expand_dynamic_library_name(filename)?;
+    let entry = internal_load_library(&fullname)?;
+    match (entry.lookup)(funcname) {
+        Some(f) => Ok(Some(f)),
+        None if signal_not_found => Err(Box::new(
             PgError::error(format!(
-                "could not access file \"{filename}\": No such file or directory"
+                "could not find function \"{funcname}\" in file \"{fullname}\""
             ))
-            .with_sqlstate(ERRCODE_UNDEFINED_FILE),
+            .with_sqlstate(ERRCODE_UNDEFINED_FUNCTION)
+            .with_error_location(loc(131, "load_external_function")),
         )),
+        None => Ok(None),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ::types_error::SqlState;
 
-    #[test]
-    fn simple_names() {
-        assert_eq!(simple_library_name("$libdir/regress"), Some("regress"));
-        assert_eq!(simple_library_name("/a/b/regress.so"), Some("regress"));
-        assert_eq!(simple_library_name("regress.dylib"), Some("regress"));
-        assert_eq!(simple_library_name("regress"), Some("regress"));
-        assert_eq!(simple_library_name(""), None);
-        assert_eq!(simple_library_name("dir/"), None);
+    fn set_pkglib(dir: &str) {
+        let mut buf = [0u8; pg_path::MAXPGPATH];
+        buf[..dir.len()].copy_from_slice(dir.as_bytes());
+        init_small::globals::set_pkglib_path(buf);
     }
 
-    #[test]
-    fn unknown_library_is_file_error() {
-        let err = load_external_function("nosuchfile", "f", true).unwrap_err();
-        assert!(err.message().contains("could not access file \"nosuchfile\""));
-    }
-
-    #[test]
-    fn missing_symbol() {
+    fn setup() -> String {
         register_builtin_library(BuiltinLibraryEntry { name: "tlib", lookup: |_| None, pg_init: None });
-        let err = load_external_function("$libdir/tlib", "nosuchsymbol", true).unwrap_err();
-        assert!(err
-            .message()
-            .contains("could not find function \"nosuchsymbol\" in file \"$libdir/tlib\""));
-        assert!(load_external_function("$libdir/tlib", "nosuchsymbol", false)
-            .unwrap()
-            .is_none());
+        let pkglib = format!("/nonexistent-pkglib-{}", std::process::id());
+        set_pkglib(&pkglib);
+        dynamic_library_path_set(Some("$libdir".to_owned()));
+        pkglib
+    }
+
+    #[track_caller]
+    fn assert_err<T>(r: PgResult<T>, state: SqlState, msg: &str) {
+        let e = r.err().expect("expected an error");
+        assert_eq!((e.sqlstate(), e.message()), (state, msg));
+    }
+
+    #[test]
+    fn bare_and_libdir_names_resolve() {
+        let pkglib = setup();
+        let with_suffix = format!("tlib{DLSUFFIX}");
+        let libdir_with_suffix = format!("$libdir/tlib{DLSUFFIX}");
+        for name in ["tlib", "$libdir/tlib", &with_suffix, &libdir_with_suffix] {
+            load_file(name, false).unwrap_or_else(|e| panic!("{name}: {}", e.message()));
+        }
+        assert_eq!(loaded_module_names(), vec!["tlib"]);
+        assert_err(
+            load_external_function("$libdir/tlib", "nosuchsymbol", true),
+            ERRCODE_UNDEFINED_FUNCTION,
+            &format!("could not find function \"nosuchsymbol\" in file \"{pkglib}/tlib{DLSUFFIX}\""),
+        );
+        assert!(load_external_function("$libdir/tlib", "nosuchsymbol", false).unwrap().is_none());
+    }
+
+    #[test]
+    fn directory_component_and_foreign_suffix_are_file_misses() {
+        setup();
+        let foreign = if DLSUFFIX == ".so" { "tlib.dylib" } else { "tlib.so" };
+        for name in ["/nonexistent/dir/tlib", "sub/tlib", foreign, "$libdir/plugins/tlib", "$libdir/sub/tlib"] {
+            assert_err(
+                load_file(name, false),
+                ERRCODE_UNDEFINED_FILE,
+                &format!("could not access file \"{name}\": No such file or directory"),
+            );
+        }
+        assert_err(
+            load_external_function("$libdir/sub/tlib", "f", true),
+            ERRCODE_UNDEFINED_FILE,
+            "could not access file \"$libdir/sub/tlib\": No such file or directory",
+        );
+        assert_err(
+            load_external_function("$libdir/nosuchlib", "f", true),
+            ERRCODE_UNDEFINED_FILE,
+            "could not access file \"nosuchlib\": No such file or directory",
+        );
+        assert!(loaded_module_names().is_empty());
+    }
+
+    #[test]
+    fn restricted_load_needs_a_real_plugins_file() {
+        setup();
+        assert_err(
+            load_file("$libdir/plugins/tlib", true),
+            ERRCODE_UNDEFINED_FILE,
+            "could not access file \"$libdir/plugins/tlib\": No such file or directory",
+        );
+        for name in ["tlib", "$libdir/tlib", "$libdir/plugins/../tlib", "$libdir/plugins/a/b", "/tmp/tlib"] {
+            assert_err(
+                load_file(name, true),
+                ERRCODE_INSUFFICIENT_PRIVILEGE,
+                &format!("access to library \"{name}\" is not allowed"),
+            );
+        }
+        assert!(loaded_module_names().is_empty());
+
+        let pkglib = std::env::temp_dir().join(format!("dfmgr-pkglib-{}", std::process::id()));
+        let plugins = pkglib.join("plugins");
+        std::fs::create_dir_all(&plugins).unwrap();
+        std::fs::write(plugins.join(format!("tlib{DLSUFFIX}")), b"").unwrap();
+        set_pkglib(pkglib.to_str().unwrap());
+        load_file("$libdir/plugins/tlib", true).unwrap();
+        assert_eq!(loaded_module_names(), vec!["tlib"]);
+        assert_err(
+            load_file("$libdir/plugins/other", true),
+            ERRCODE_UNDEFINED_FILE,
+            "could not access file \"$libdir/plugins/other\": No such file or directory",
+        );
+        std::fs::remove_dir_all(&pkglib).unwrap();
+    }
+
+    #[test]
+    fn non_canonical_spellings_resolve_like_stat() {
+        let pkglib = setup();
+        let base = pkglib.trim_start_matches('/').to_owned();
+        let up_and_back = format!("$libdir/../{base}/tlib");
+        let abs_double = format!("{pkglib}//tlib");
+        let dot_suffix = format!("$libdir/.//tlib{DLSUFFIX}");
+        for name in ["$libdir//tlib", "$libdir/./tlib", &up_and_back, &abs_double, &dot_suffix] {
+            load_file(name, false).unwrap_or_else(|e| panic!("{name}: {}", e.message()));
+        }
+        assert_eq!(loaded_module_names(), vec!["tlib"]);
+        assert_err(
+            load_external_function("$libdir//tlib", "nosuchsymbol", true),
+            ERRCODE_UNDEFINED_FUNCTION,
+            &format!("could not find function \"nosuchsymbol\" in file \"{pkglib}//tlib{DLSUFFIX}\""),
+        );
+        let trailing_slash = format!("$libdir/tlib{DLSUFFIX}/");
+        let trailing_dot = format!("$libdir/tlib{DLSUFFIX}/.");
+        let through_file = format!("$libdir/tlib{DLSUFFIX}/../tlib");
+        for name in ["$libdir/plugins/../tlib", "$libdir/tlib/../tlib", &trailing_slash, &trailing_dot, &through_file] {
+            assert_err(
+                load_file(name, false),
+                ERRCODE_UNDEFINED_FILE,
+                &format!("could not access file \"{name}\": No such file or directory"),
+            );
+        }
+
+        let real = std::env::temp_dir().join(format!("dfmgr-canon-{}", std::process::id()));
+        std::fs::create_dir_all(real.join("plugins")).unwrap();
+        set_pkglib(real.to_str().unwrap());
+        load_file("$libdir/plugins/../tlib", false).unwrap();
+        load_file("$libdir/plugins/./..//tlib", false).unwrap();
+        assert_err(
+            load_file("$libdir/plugins/nodir/../tlib", false),
+            ERRCODE_UNDEFINED_FILE,
+            "could not access file \"$libdir/plugins/nodir/../tlib\": No such file or directory",
+        );
+        std::fs::remove_dir_all(&real).unwrap();
+    }
+
+    #[test]
+    fn recorded_filename_loads_without_stat() {
+        setup();
+        let pkglib = std::env::temp_dir().join(format!("dfmgr-filelist-{}", std::process::id()));
+        std::fs::create_dir_all(pkglib.join("plugins")).unwrap();
+        let file = pkglib.join("plugins").join(format!("tlib{DLSUFFIX}"));
+        std::fs::write(&file, b"").unwrap();
+        set_pkglib(pkglib.to_str().unwrap());
+        load_file("$libdir/plugins/tlib", true).unwrap();
+        std::fs::remove_file(&file).unwrap();
+        load_file(file.to_str().unwrap(), false).unwrap();
+        assert_err(
+            load_file("$libdir/plugins/tlib", false),
+            ERRCODE_UNDEFINED_FILE,
+            "could not access file \"$libdir/plugins/tlib\": No such file or directory",
+        );
+        assert_eq!(loaded_module_names(), vec!["tlib"]);
+        std::fs::remove_dir_all(&pkglib).unwrap();
+    }
+
+    #[test]
+    fn dynamic_library_path_is_validated() {
+        setup();
+        for (path, state, msg) in [
+            ("$foo", ERRCODE_INVALID_NAME, "invalid macro name in path: $foo"),
+            (":/tmp", ERRCODE_INVALID_NAME, "zero-length component in parameter \"dynamic_library_path\""),
+            ("/tmp::$libdir", ERRCODE_INVALID_NAME, "zero-length component in parameter \"dynamic_library_path\""),
+            ("relative/dir", ERRCODE_INVALID_NAME, "component in parameter \"dynamic_library_path\" is not an absolute path"),
+            ("$libdir:", ERRCODE_INVALID_NAME, "component in parameter \"dynamic_library_path\" is not an absolute path"),
+            ("", ERRCODE_UNDEFINED_FILE, "could not access file \"tlib\": No such file or directory"),
+            ("$libdir/sub", ERRCODE_UNDEFINED_FILE, "could not access file \"tlib\": No such file or directory"),
+        ] {
+            dynamic_library_path_set(Some(path.to_owned()));
+            assert_err(load_file("tlib", false), state, msg);
+        }
+        dynamic_library_path_set(Some("/tmp:$libdir".to_owned()));
+        load_file("tlib", false).unwrap();
+        assert_err(load_file("$foo/bar", false), ERRCODE_INVALID_NAME, "invalid macro name in path: $foo/bar");
+        assert_err(load_file("$libdirx/tlib", false), ERRCODE_INVALID_NAME, "invalid macro name in path: $libdirx/tlib");
+        assert_err(
+            load_file("$foo", false),
+            ERRCODE_UNDEFINED_FILE,
+            "could not access file \"$foo\": No such file or directory",
+        );
     }
 }

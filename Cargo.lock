@@ -5176,8 +5176,14 @@ dependencies = [
 name = "dfmgr"
 version = "0.1.0"
 dependencies = [
+ "elog",
+ "fd",
+ "guc_tables",
+ "init_small",
+ "pg_path",
  "types_error",
  "types_fmgr",
+ "vfs",
 ]
 
 [[package]]
@@ -6326,6 +6332,7 @@ dependencies = [
  "foreigncmds_seams",
  "guc_seams",
  "hbafuncs",
+ "init_small",
  "lockfuncs",
  "mcx",
  "miscinit_seams",
@@ -6348,6 +6355,7 @@ dependencies = [
  "types_error",
  "types_fmgr",
  "types_nodes",
+ "types_tuple",
  "varlena",
  "waitfuncs",
  "wparser_def",

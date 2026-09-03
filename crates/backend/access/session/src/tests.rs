@@ -1075,11 +1075,18 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      fixture; counted by the tree census, never product code).
     // 580, 18.6 conformance audit (2026-09-02), plpgsql record fixes: one
     //   test-only source —
-    //   53. pl/plpgsql/src/exec.rs COMP_BY_NAME — Cell<Oid> per-thread typcache
+    //   60. pl/plpgsql/src/exec.rs COMP_BY_NAME — Cell<Oid> per-thread typcache
     //      fixture behind the syscache seam for the rowtype re-resolution
     //      witness (unit harness fixture; counted by the tree census, never
     //      product code — same class as 43/45/46/50).
-    assert_eq!(count_tree(crates), 580, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 581, 18.6 conformance audit (2026-09-02), dfmgr/fmgr_core library-path
+    //   fix (dfmgr's FILE_LIST is the renamed LOADED_LIBRARIES, count unchanged):
+    //   61. utils/fmgr/fmgr_core/src/lib.rs CFUNC_HASH —
+    //      RefCell<Option<ManuallyDrop<PgHashMap>>> per-backend cache of
+    //      external C function addresses keyed by pg_proc OID + tuple
+    //      xmin/tid (fmgr.c CFuncHash); a validity-checked cache with no
+    //      session identity, never bound or reset — non-session TLS.
+    assert_eq!(count_tree(crates), 581, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

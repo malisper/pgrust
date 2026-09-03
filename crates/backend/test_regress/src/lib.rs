@@ -1388,8 +1388,13 @@ mod tests {
     #[test]
     fn registry_roundtrip() {
         init_seams();
+        let mut pkglib = [0u8; types_core::MAXPGPATH];
+        pkglib[..b"/nonexistent-pkglib".len()].copy_from_slice(b"/nonexistent-pkglib");
+        init_small::globals::set_pkglib_path(pkglib);
         assert!(dfmgr::load_external_function("$libdir/regress", "binary_coercible", true).is_ok());
-        assert!(dfmgr::library_present("/x/y/regress.so"));
+        assert!(dfmgr::load_external_function("regress", "binary_coercible", true).is_ok());
+        let err = dfmgr::load_external_function("/x/y/regress.so", "binary_coercible", true).unwrap_err();
+        assert!(err.message().contains("could not access file \"/x/y/regress.so\""));
     }
 
     /// wait_pid's poll loop: a pending interrupt routes through the ported
