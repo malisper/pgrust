@@ -260,3 +260,14 @@ fn directive_prefix_matching_is_c_loose() {
     let tbl = load_tzoffsets_from(&dir, "Loose").unwrap();
     assert_eq!(find(tbl, "aaa").value, 200);
 }
+
+#[test]
+fn read_failure_message_is_bare_strerror() {
+    // C's %m: strerror text with no "(os error N)" suffix.
+    let dir = scratch_dir("errno");
+    let err = load_err(&dir, "");
+    assert_eq!(
+        err.message.as_deref(),
+        Some("could not read time zone file \"\": Is a directory")
+    );
+}

@@ -61,8 +61,8 @@ pub fn fc_to_ascii_encname(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) 
     // SAFETY: catalog args (text, name); strict fn.
     let (data, name) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_name(1)) };
     let nul = name.iter().position(|&b| b == 0).unwrap_or(name.len());
-    let encname = core::str::from_utf8(&name[..nul]).unwrap_or("");
-    let enc = mbutils::pg_char_to_encoding(encname);
+    let encname = &name[..nul];
+    let enc = mbutils::pg_char_to_encoding_bytes(encname);
     if enc < 0 {
         return Err(invalid_encoding_name(encname));
     }
@@ -120,9 +120,11 @@ fn conversion_not_supported(enc: pg_enc) -> Box<PgError> {
 #[track_caller]
 #[cold]
 #[inline(never)]
-fn invalid_encoding_name(name: &str) -> Box<PgError> {
+fn invalid_encoding_name(name: &[u8]) -> Box<PgError> {
+    // C echoes the raw name bytes; a non-UTF-8 byte (SQL_ASCII database)
+    // is the lossy replacement here.
     Box::new(
-        PgError::error(format!("{name} is not a valid encoding name"))
+        PgError::error(format!("{} is not a valid encoding name", String::from_utf8_lossy(name)))
             .with_sqlstate(ERRCODE_UNDEFINED_OBJECT),
     )
 }

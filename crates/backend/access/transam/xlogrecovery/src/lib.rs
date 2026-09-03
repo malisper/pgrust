@@ -569,6 +569,7 @@ impl PageSource {
 
             self.last_source_failed = false;
 
+            'source: {
             match self.cur_source {
                 XLogSource::Archive | XLogSource::PgWal => {
                     debug_assert!(!wal_rcv_streaming());
@@ -637,7 +638,7 @@ impl PageSource {
 
                     if !wal_rcv_streaming() {
                         self.last_source_failed = true;
-                        continue;
+                        break 'source;
                     }
 
                     let mut havedata = false;
@@ -683,7 +684,7 @@ impl PageSource {
                         }
                         if targets::CheckForStandbyTrigger() {
                             self.last_source_failed = true;
-                            continue;
+                            break 'source;
                         }
                         if !streaming_reply_sent {
                             if walreceiverfuncs_seams::wal_rcv_force_reply::is_installed() {
@@ -709,6 +710,7 @@ impl PageSource {
                         .finish(loc("WaitForWALToBecomeAvailable"))?;
         unreachable!()
                 }
+            }
             }
 
             if targets::GetRecoveryPauseState() != targets::RECOVERY_NOT_PAUSED {

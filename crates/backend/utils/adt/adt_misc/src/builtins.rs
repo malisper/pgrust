@@ -708,6 +708,16 @@ pub fn fc_pg_backup_stop(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> 
     let flinfo = flinfo.expect("pg_backup_stop: NULL flinfo");
     let waitforarchive = fcinfo.arg_bool(0);
 
+    // C resolves the result type before checking the backup status.
+    {
+        let mcx = fcinfo.result_mcx();
+        if funcapi::get_call_result_type(mcx, flinfo, None)?.class
+            != funcapi::TypeFuncClass::Composite
+        {
+            return Err(crate::not_row_type());
+        }
+    }
+
     if transam_xlog::get_backup_status() != transam_xlog::SessionBackupState::Running {
         return Err(Box::new(
             PgError::error("backup is not in progress")
@@ -924,7 +934,29 @@ fn current_logfile(fcinfo: &mut Fcinfo, logfmt: Option<&[u8]>) -> PgResult<Datum
                 .into())
         }
     };
-    for line in contents.split_inclusive(|&b| b == b'\n') {
+    match current_logfiles_entry(&contents, logfmt)? {
+        Some(path) => crate::text_datum(fcinfo.result_mcx(), path),
+        None => Ok(fcinfo.return_null()),
+    }
+}
+
+// fgets(lbuffer, MAXPGPATH): a line arrives in pieces of at most MAXPGPATH-1
+// bytes, each read as a C string.
+pub(crate) fn current_logfiles_entry<'a>(
+    contents: &'a [u8],
+    logfmt: Option<&[u8]>,
+) -> PgResult<Option<&'a [u8]>> {
+    const MAXPGPATH: usize = 1024;
+    let mut rest_all = contents;
+    while !rest_all.is_empty() {
+        let take = rest_all
+            .iter()
+            .take(MAXPGPATH - 1)
+            .position(|&b| b == b'\n')
+            .map_or((MAXPGPATH - 1).min(rest_all.len()), |p| p + 1);
+        let chunk = &rest_all[..take];
+        rest_all = &rest_all[take..];
+        let line = &chunk[..chunk.iter().position(|&b| b == 0).unwrap_or(chunk.len())];
         let Some(sp) = line.iter().position(|&b| b == b' ') else {
             return Err(Box::new(PgError::error(format!(
                 "missing space character in \"{LOG_METAINFO_DATAFILE}\""
@@ -937,10 +969,10 @@ fn current_logfile(fcinfo: &mut Fcinfo, logfmt: Option<&[u8]>) -> PgResult<Datum
             ))));
         };
         if logfmt.is_none_or(|f| f == &line[..sp]) {
-            return crate::text_datum(fcinfo.result_mcx(), &rest[..nl]);
+            return Ok(Some(&rest[..nl]));
         }
     }
-    Ok(fcinfo.return_null())
+    Ok(None)
 }
 
 pub fn fc_pg_current_logfile(

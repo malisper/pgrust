@@ -48,3 +48,31 @@ fn safe_strlcpy_replaces_nonascii() {
     ascii_safe_strlcpy(&mut tiny, b"xyz");
     assert_eq!(tiny[0], 0);
 }
+
+fn to_ascii_encname(name: &[u8]) -> Result<Vec<u8>, String> {
+    let ctx = mcx::MemoryContext::new("to_ascii_encname");
+    let mcx = ctx.mcx();
+    let mut fcinfo = types_fmgr::LocalFcinfo::<2>::new(0);
+    // SAFETY: mcx outlives the call.
+    unsafe { fcinfo.set_result_mcx(mcx) };
+    let text = varlena::cstring_to_text(mcx, b"abc").unwrap();
+    fcinfo.set_arg(0, Datum::from_usize(text.as_bytes().as_ptr() as usize));
+    let mut namebuf = [0u8; 64];
+    namebuf[..name.len()].copy_from_slice(name);
+    fcinfo.set_arg(1, Datum::from_usize(namebuf.as_ptr() as usize));
+    let d = fc_to_ascii_encname(None, &mut fcinfo).map_err(|e| e.message().to_string())?;
+    let p = d.as_usize() as *const u8;
+    // SAFETY: 4-byte-header varlena built by encode_to_ascii.
+    let len = unsafe { u32::from_le_bytes(*(p as *const [u8; 4])) } >> 2;
+    Ok(unsafe { core::slice::from_raw_parts(p.add(4), len as usize - 4) }.to_vec())
+}
+
+#[test]
+fn encname_is_cleaned_bytewise_and_echoed_raw() {
+    // C clean_encoding_name drops any non-alnum byte, so "latin<0xE9>1" is LATIN1.
+    assert_eq!(to_ascii_encname(b"latin\xe91").unwrap(), b"abc");
+    assert_eq!(to_ascii_encname(b"LATIN-1").unwrap(), b"abc");
+    // The error echoes the name bytes (lossy for a non-UTF-8 byte).
+    assert_eq!(to_ascii_encname(b"\xe9").unwrap_err(), "\u{FFFD} is not a valid encoding name");
+    assert_eq!(to_ascii_encname(b"bogus").unwrap_err(), "bogus is not a valid encoding name");
+}

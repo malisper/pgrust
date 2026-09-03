@@ -329,6 +329,22 @@ pub fn fmgr_lookup_by_name(name: &str) -> Option<&'static FmgrBuiltin> {
         .or_else(|| extra_builtin_by_name(name))
 }
 
+// A user-created internal-language fn (new oid) must resolve through the
+// canonical entry's oid: the stub's late lookup keys on flinfo.fn_oid, which
+// is the new oid, so late and extra ports are resolved here instead.
+fn internal_fn_addr(prosrc: &str) -> Option<::fmgr::PGFunction> {
+    let fbp = fmgr_lookup_by_name(prosrc)?;
+    #[allow(function_casts_as_integer)] // fn address used as identity key; cast is intentional
+    if fbp.func as usize == builtin_not_ported as usize {
+        return Some(
+            late_builtin(fbp.foid)
+                .or_else(|| extra_builtin(fbp.foid))
+                .map_or(fbp.func, |b| b.func),
+        );
+    }
+    Some(fbp.func)
+}
+
 #[cold]
 #[inline(never)]
 fn extra_builtin_by_name(name: &str) -> Option<&'static FmgrBuiltin> {
@@ -530,15 +546,8 @@ fn fmgr_info_pg_proc(
             let cx = ::mcx::MemoryContext::new("fmgr_info prosrc");
             let prosrc = syscache_seams::lookup_pg_proc_prosrc::call(cx.mcx(), function_id)?
                 .unwrap_or_else(|| panic!("fmgr: null prosrc for function {function_id}"));
-            match fmgr_lookup_by_name(&prosrc) {
-                // A user-created internal-language fn (new oid) must resolve
-                // through the canonical entry's oid; the stub's late lookup
-                // keys on flinfo.fn_oid, which is the new oid.
-                #[allow(function_casts_as_integer)] // fn address used as identity key; cast is intentional
-                Some(fbp) if fbp.func as usize == builtin_not_ported as usize => {
-                    late_builtin(fbp.foid).map_or(fbp.func, |b| b.func)
-                }
-                Some(fbp) => fbp.func,
+            match internal_fn_addr(&prosrc) {
+                Some(f) => f,
                 None => {
                     return Err(alloc::boxed::Box::new(
                         PgError::error(alloc::format!(

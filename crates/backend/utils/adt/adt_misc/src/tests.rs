@@ -270,3 +270,31 @@ fn pg_nextoid_row_matches_canonical() {
         .expect("pg_nextoid registered");
     fmgr_core::assert_rows_match_canonical(core::slice::from_ref(row));
 }
+
+#[test]
+fn current_logfiles_reads_like_fgets_maxpgpath() {
+    use crate::builtins::current_logfiles_entry;
+    let long = |n: usize| format!("stderr {}\n", "x".repeat(n)).into_bytes();
+    // 'stderr ' + 1015 x + LF fits fgets' 1023-byte read; one more splits the line.
+    assert_eq!(current_logfiles_entry(&long(1015), Some(b"stderr")).unwrap().unwrap().len(), 1015);
+    assert_eq!(
+        current_logfiles_entry(&long(1016), Some(b"stderr")).unwrap_err().message(),
+        "missing newline character in \"current_logfiles\""
+    );
+    // A later valid line does not rescue the split first line.
+    let mut two = long(1016);
+    two.extend_from_slice(b"csvlog log/a.csv\n");
+    assert!(current_logfiles_entry(&two, Some(b"csvlog")).is_err());
+    let nospace = format!("{} stderr\n", "x".repeat(1030)).into_bytes();
+    assert_eq!(
+        current_logfiles_entry(&nospace, None).unwrap_err().message(),
+        "missing space character in \"current_logfiles\""
+    );
+    // strchr stops at an embedded NUL.
+    assert!(current_logfiles_entry(b"stderr\0 log/a.log\n", None).is_err());
+    assert_eq!(
+        current_logfiles_entry(b"stderr log/a.log\ncsvlog log/a.csv\n", Some(b"csvlog")).unwrap(),
+        Some(&b"log/a.csv"[..])
+    );
+    assert_eq!(current_logfiles_entry(b"stderr log/a.log\n", Some(b"csvlog")).unwrap(), None);
+}

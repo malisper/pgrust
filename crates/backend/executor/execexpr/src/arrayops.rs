@@ -309,6 +309,9 @@ pub struct SbsRefState {
     pub upperidx: [i32; MAXDIM],
     pub loweridx: [i32; MAXDIM],
     pub resmcx: ResMcx,
+    // Assignment whose container is a Param: a PL/pgSQL array variable,
+    // which C stores expanded (pl_exec.c exec_assign_value expand_array).
+    pub container_is_param: bool,
 }
 
 #[track_caller]
@@ -418,7 +421,7 @@ pub fn sbsref_assign(st: &mut SbsRefState, cur: NullableDatum) -> PgResult<Nulla
         replace.value = Datum::from_usize(img.as_ptr() as usize);
     }
 
-    let img = arrayfuncs::array_set_element(
+    let img = arrayfuncs::element::array_set_element_ext(
         mcx,
         arr,
         &st.upperidx[..st.numupper as usize],
@@ -428,6 +431,7 @@ pub fn sbsref_assign(st: &mut SbsRefState, cur: NullableDatum) -> PgResult<Nulla
         st.refelemlength,
         st.refelembyval,
         st.refelemalign,
+        st.container_is_param && !cur.isnull,
     )?;
     Ok(NullableDatum {
         value: Datum::from_usize(img.leak().as_ptr() as usize),

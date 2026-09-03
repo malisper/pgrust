@@ -335,7 +335,7 @@ pub fn fc_array_agg_array_transfn(
     }
     // SAFETY: fcinfo.context is the executor's live AggStateNode.
     let Some(aggmcx) = (unsafe { fcinfo.agg_context() }) else {
-        panic!("array_agg_array_transfn called in non-aggregate context");
+        return Err(non_aggregate_context("array_agg_array_transfn called in non-aggregate context"));
     };
 
     let stp: *mut ArrayBuildStateArr<'_> = if fcinfo.argisnull(0) {
@@ -386,7 +386,7 @@ pub fn fc_array_agg_array_combine(
 ) -> PgResult<Datum> {
     // SAFETY: fcinfo.context is the executor's live AggStateNode.
     let Some(aggmcx) = (unsafe { fcinfo.agg_context() }) else {
-        panic!("aggregate function called in non-aggregate context");
+        return Err(non_aggregate_context("aggregate function called in non-aggregate context"));
     };
     let state1 = if fcinfo.argisnull(0) {
         None
@@ -646,3 +646,10 @@ pub const ARRAY_USERFUNCS_BUILTINS: &[FmgrBuiltin] = &[
     b(6389, "array_sort_order", 2, fc_array_sort_order),
     b(6390, "array_sort_order_nulls_first", 3, fc_array_sort_order_nulls_first),
 ];
+
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn non_aggregate_context(msg: &'static str) -> Box<PgError> {
+    Box::new(PgError::error(msg))
+}

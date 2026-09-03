@@ -3344,6 +3344,8 @@ fn init_subscripting_ref<'mcx>(
         upperidx: [0; MAXDIM],
         loweridx: [0; MAXDIM],
         resmcx: None,
+        container_is_param: is_assignment
+            && sbsref.refexpr.is_some_and(|n| n.node_tag() == NodeTag::T_Param),
     };
     let stp = alloc_state(mcx, st)?;
     register_alloc_state(state, mcx, stp)?;

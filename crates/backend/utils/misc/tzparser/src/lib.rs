@@ -261,14 +261,20 @@ fn parse_tz_file<'mcx>(
             // If share/timezonesets itself is missing, say so: it is likely
             // the first sign of a broken installation during startup.
             if let Err(de) = std::fs::read_dir(dir) {
-                GUC_check_errmsg(format!("could not open directory \"{dir}\": {de}"));
+                GUC_check_errmsg(format!(
+                    "could not open directory \"{dir}\": {}",
+                    elog::errno::strerror(de.raw_os_error().unwrap_or(0))
+                ));
                 GUC_check_errhint(format!(
                     "This may indicate an incomplete PostgreSQL installation, or that the directory \"{dir}\" has been moved away from its proper location."
                 ));
                 return false;
             }
             if e.kind() != std::io::ErrorKind::NotFound || depth > 0 {
-                GUC_check_errmsg(format!("could not read time zone file \"{filename}\": {e}"));
+                GUC_check_errmsg(format!(
+                    "could not read time zone file \"{filename}\": {}",
+                    elog::errno::strerror(e.raw_os_error().unwrap_or(0))
+                ));
             }
             return false;
         }

@@ -269,7 +269,7 @@ pub fn fc_array_agg_transfn(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) 
     }
     // SAFETY: fcinfo.context is the executor's live AggStateNode.
     let Some(aggmcx) = (unsafe { fcinfo.agg_context() }) else {
-        panic!("array_agg_transfn called in non-aggregate context");
+        return Err(non_aggregate_context("array_agg_transfn called in non-aggregate context"));
     };
 
     let stp: *mut ArrayBuildState<'_> = if fcinfo.args[0].isnull {
@@ -337,7 +337,7 @@ pub fn fc_array_agg_combine(
     use ::datum::array_build::ArrayBuildState;
     // SAFETY: fcinfo.context is the executor's live AggStateNode.
     let Some(aggmcx) = (unsafe { fcinfo.agg_context() }) else {
-        panic!("aggregate function called in non-aggregate context");
+        return Err(non_aggregate_context("aggregate function called in non-aggregate context"));
     };
     let state1 = if fcinfo.argisnull(0) {
         None
@@ -394,7 +394,7 @@ pub fn fc_array_agg_deserialize(
 ) -> PgResult<Datum> {
     // SAFETY: fcinfo.context is the executor's live AggStateNode.
     if unsafe { fcinfo.agg_context() }.is_none() {
-        panic!("aggregate function called in non-aggregate context");
+        return Err(non_aggregate_context("aggregate function called in non-aggregate context"));
     }
     // SAFETY: strict fn — arg 0 is a non-null live bytea.
     let sstate = unsafe { fcinfo.arg_varlena_packed(0) }?;
@@ -1037,3 +1037,10 @@ pub const ARRAYFUNCS_BUILTINS: &[FmgrBuiltin] = &[
     srf(1192, "generate_subscripts_nodir", 2, crate::ops::fc_generate_subscripts),
     b(3218, "width_bucket_array", 2, crate::ops::fc_width_bucket_array),
 ];
+
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn non_aggregate_context(msg: &'static str) -> Box<PgError> {
+    Box::new(PgError::error(msg))
+}

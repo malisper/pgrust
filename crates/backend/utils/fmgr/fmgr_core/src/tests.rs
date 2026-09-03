@@ -53,7 +53,10 @@ fn binary_wire_send_recv_holes_stay_ported() {
 fn oid_index_round_trips_every_entry() {
     for b in FMGR_BUILTINS.iter() {
         let hit = fmgr_isbuiltin(b.foid).unwrap();
-        assert!(core::ptr::eq(hit, b));
+        // An extra port installed by another test shadows a stub row (the
+        // documented fmgr_isbuiltin fallback); the oid still round-trips.
+        assert_eq!(hit.foid, b.foid);
+        assert!(core::ptr::eq(hit, b) || extra_builtin(b.foid).is_some());
     }
 }
 
@@ -590,4 +593,38 @@ fn fmgr_cache_lookup_failures_are_catchable_xx000() {
     assert_eq!(e.message(), "cache lookup failed for function 999999");
     assert_eq!(e.sqlstate(), ::types_error::ERRCODE_INTERNAL_ERROR);
     assert_eq!(e.level(), ::types_error::ERROR);
+}
+
+#[test]
+fn internal_prosrc_resolves_through_the_extra_tables() {
+    fn probe(_f: Option<&mut FmgrInfo>, _fci: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+        Ok(Datum::from_i32(1))
+    }
+    // A canonical stub row with no late/extra port yet: install an extra
+    // port for it and check CREATE FUNCTION ... LANGUAGE internal resolution
+    // (fmgr_info's prosrc arm) finds it, as fmgr_isbuiltin already does.
+    #[allow(function_casts_as_integer)] // fn address used as identity key; cast is intentional
+    let b = FMGR_BUILTINS
+        .iter()
+        .find(|b| {
+            b.func as usize == builtin_not_ported as usize
+                && late_builtin(b.foid).is_none()
+                && extra_builtin(b.foid).is_none()
+        })
+        .expect("no unported canonical builtin left");
+    let row: &'static [FmgrBuiltin] = Box::leak(Box::new([FmgrBuiltin {
+        foid: b.foid,
+        name: b.name,
+        nargs: b.nargs,
+        strict: b.strict,
+        retset: b.retset,
+        func: probe,
+    }]));
+    let tables: &'static [&'static [FmgrBuiltin]] = Box::leak(Box::new([row]));
+    install_extra_builtins(tables);
+    #[allow(function_casts_as_integer)]
+    let resolved = internal_fn_addr(b.name).expect("canonical name resolves") as usize;
+    #[allow(function_casts_as_integer)]
+    let want = probe as ::fmgr::PGFunction as usize;
+    assert_eq!(resolved, want);
 }

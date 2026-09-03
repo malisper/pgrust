@@ -702,3 +702,12 @@ fn agg_array_combine_reserves_abytes() {
     assert_eq!((s1.nbytes, s1.abytes), (6000, 8192));
     assert!(s1.data.capacity() >= 8192);
 }
+#[test]
+fn combine_outside_an_aggregate_is_a_clean_error() {
+    let mut fcinfo = ::types_fmgr::LocalFcinfo::<2>::new(0);
+    fcinfo.set_arg_null(0);
+    fcinfo.set_arg_null(1);
+    let err = crate::builtins::fc_array_agg_array_combine(None, &mut fcinfo).unwrap_err();
+    assert_eq!(err.message(), "aggregate function called in non-aggregate context");
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_INTERNAL_ERROR);
+}

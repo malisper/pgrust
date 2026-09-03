@@ -870,6 +870,29 @@ pub fn array_set_element<'mcx>(
     elmbyval: bool,
     elmalign: u8,
 ) -> PgResult<PgVec<'mcx, u8>> {
+    array_set_element_ext(
+        mcx, array, indx, data_value, isnull, arraytyplen, elmlen, elmbyval, elmalign, false,
+    )
+}
+
+/// `expanded`: the container is what C holds as an expanded datum (a
+/// PL/pgSQL array variable); array_set_element_expanded gives an empty
+/// array nSubscripts dimensions of extent 0, so only a 1-D subscript can
+/// extend it — every multi-D subscript is out of range. The flat path
+/// (arrayfuncs.c array_set_element) builds a 1x..x1 array instead.
+#[allow(clippy::too_many_arguments)]
+pub fn array_set_element_ext<'mcx>(
+    mcx: Mcx<'mcx>,
+    array: &[u8],
+    indx: &[i32],
+    data_value: Datum,
+    isnull: bool,
+    arraytyplen: i32,
+    elmlen: i32,
+    elmbyval: bool,
+    elmalign: u8,
+    expanded: bool,
+) -> PgResult<PgVec<'mcx, u8>> {
     let n_subscripts = indx.len() as i32;
 
     if arraytyplen > 0 {
@@ -900,6 +923,9 @@ pub fn array_set_element<'mcx>(
     let (ndim, mut dims, mut lbs) = read_dims_lbounds(array);
 
     if ndim == 0 {
+        if expanded && n_subscripts > 1 {
+            return Err(subscript_out_of_range());
+        }
         let elmtype = arr_elemtype(array);
         let mut dim = [0i32; MAXDIM];
         let mut lb = [0i32; MAXDIM];

@@ -122,7 +122,7 @@ pub fn typenameTypeIdAndMod<'mcx>(
     pstate: Option<&parser_small1::ParseState<'_, '_>>,
     tn: &TypeName<'_>,
 ) -> PgResult<(Oid, i32)> {
-    typename_type_id_and_mod(mcx, pstate, tn)
+    typename_type_id_and_mod(mcx, pstate.and_then(|ps| ps.p_sourcetext), tn)
 }
 
 // Alias kept for composite-consumer call sites; C's typenameTypeIdAndMod
@@ -132,23 +132,24 @@ pub fn typenameTypeIdAndModAllowComposite<'mcx>(
     pstate: Option<&parser_small1::ParseState<'_, '_>>,
     tn: &TypeName<'_>,
 ) -> PgResult<(Oid, i32)> {
-    typename_type_id_and_mod(mcx, pstate, tn)
+    typename_type_id_and_mod(mcx, pstate.and_then(|ps| ps.p_sourcetext), tn)
 }
 
 fn typename_type_id_and_mod<'mcx>(
     mcx: Mcx<'mcx>,
-    pstate: Option<&parser_small1::ParseState<'_, '_>>,
+    src: Option<&[u8]>,
     tn: &TypeName<'_>,
 ) -> PgResult<(Oid, i32)> {
     // C typenameType attaches parser_errposition(pstate, typeName->location)
     // to every lookup error on this path.
     let at_tn = |mut e: Box<PgError>| {
-        if let Some(ps) = pstate {
-            let pos =
-                parser_small1::parser_errposition(ps, tn.location, mbutils::GetDatabaseEncoding());
-            if e.cursor_position.is_none() && pos > 0 {
-                e.cursor_position = Some(pos);
-            }
+        let pos = parser_small1::parser_errposition_source(
+            src,
+            tn.location,
+            mbutils::GetDatabaseEncoding(),
+        );
+        if e.cursor_position.is_none() && pos > 0 {
+            e.cursor_position = Some(pos);
         }
         e
     };
@@ -165,7 +166,7 @@ fn typename_type_id_and_mod<'mcx>(
         // typenameTypeMod runs inside C's LookupTypeNameExtended, BEFORE
         // typenameType's shell check: a shell type WITH typmod decoration
         // reports the 42601 typmod error, not "is only a shell".
-        let typmod = typenameTypeMod(mcx, pstate, tn, tn.typeOid)?;
+        let typmod = typename_type_mod_src(mcx, src, tn, tn.typeOid)?;
         if !isdefined {
             // C typenameType: shell types are reported, not returned.
             return Err(at_tn(type_is_only_a_shell(&typeNameToString(tn)?)));
@@ -176,7 +177,7 @@ fn typename_type_id_and_mod<'mcx>(
     // must reject it (RangeFunction coldeflists etc.) carry their own checks.
     if tn.pct_type {
         // %TYPE reference to the type of an existing field (parse_type.c).
-        let typoid = lookup_pct_type(pstate, tn, false)?;
+        let typoid = lookup_pct_type(src, tn, false)?;
         if typoid == InvalidOid {
             // The referenced column's row vanished under us; C's typenameType
             // reports a NULL LookupTypeName result exactly this way.
@@ -188,7 +189,7 @@ fn typename_type_id_and_mod<'mcx>(
         };
         // C order: typenameTypeMod (inside LookupTypeNameExtended) before
         // typenameType's shell check.
-        let typmod = typenameTypeMod(mcx, pstate, tn, typoid)?;
+        let typmod = typename_type_mod_src(mcx, src, tn, typoid)?;
         if !isdefined {
             return Err(at_tn(type_is_only_a_shell(&typeNameToString(tn)?)));
         }
@@ -220,7 +221,7 @@ fn typename_type_id_and_mod<'mcx>(
     }
     // C order: typenameTypeMod (inside LookupTypeNameExtended) before
     // typenameType's shell check.
-    let typmod = typenameTypeMod(mcx, pstate, tn, typoid)?;
+    let typmod = typename_type_mod_src(mcx, src, tn, typoid)?;
     if !isdefined {
         return Err(at_tn(type_is_only_a_shell(&typeNameToString(tn)?)));
     }
@@ -245,17 +246,18 @@ fn improper_pct_type_reference(which: &str, names: &str) -> Box<PgError> {
 // under missing_ok or when the column's pg_attribute row vanishes between
 // lookups (C returns NULL from LookupTypeName for both).
 fn lookup_pct_type(
-    pstate: Option<&parser_small1::ParseState<'_, '_>>,
+    src: Option<&[u8]>,
     tn: &TypeName<'_>,
     missing_ok: bool,
 ) -> PgResult<Oid> {
     let at_tn = |mut e: Box<PgError>| {
-        if let Some(ps) = pstate {
-            let pos =
-                parser_small1::parser_errposition(ps, tn.location, mbutils::GetDatabaseEncoding());
-            if e.cursor_position.is_none() && pos > 0 {
-                e.cursor_position = Some(pos);
-            }
+        let pos = parser_small1::parser_errposition_source(
+            src,
+            tn.location,
+            mbutils::GetDatabaseEncoding(),
+        );
+        if e.cursor_position.is_none() && pos > 0 {
+            e.cursor_position = Some(pos);
         }
         e
     };
@@ -354,7 +356,7 @@ pub fn typenameTypeId<'mcx>(
     // rejection.
     if tn.pct_type {
         // %TYPE reference to the type of an existing field (parse_type.c).
-        let typoid = lookup_pct_type(pstate, tn, false)?;
+        let typoid = lookup_pct_type(pstate.and_then(|ps| ps.p_sourcetext), tn, false)?;
         if typoid == InvalidOid {
             return Err(at_tn(type_does_not_exist(&typeNameToString(tn)?)));
         }
@@ -750,6 +752,15 @@ pub fn typenameTypeMod<'mcx>(
     tn: &TypeName<'_>,
     typoid: Oid,
 ) -> PgResult<i32> {
+    typename_type_mod_src(mcx, pstate.and_then(|ps| ps.p_sourcetext), tn, typoid)
+}
+
+fn typename_type_mod_src<'mcx>(
+    mcx: Mcx<'mcx>,
+    src: Option<&[u8]>,
+    tn: &TypeName<'_>,
+    typoid: Oid,
+) -> PgResult<i32> {
     use types_nodes::rawnodes::{ColumnRef, ValUnion};
 
     if tn.typmods.is_nil() {
@@ -830,8 +841,12 @@ pub fn typenameTypeMod<'mcx>(
 
     // setup_parser_errposition_callback: reports emitted inside the typmodin
     // call (e.g. intervaltypmodin's precision WARNING) carry the cursor.
-    let cb = pstate.map(|ps| {
-        let pos = parser_small1::parser_errposition(ps, tn.location, mbutils::GetDatabaseEncoding());
+    let cb = src.map(|src| {
+        let pos = parser_small1::parser_errposition_source(
+            Some(src),
+            tn.location,
+            mbutils::GetDatabaseEncoding(),
+        );
         elog::push_emit_context_callback(Box::new(move |err| {
             if err.cursor_position.is_none() && pos > 0 {
                 err.cursor_position = Some(pos);
@@ -850,16 +865,14 @@ pub fn typenameTypeMod<'mcx>(
     match d {
         Ok(v) => Ok(v.as_i32()),
         Err(mut e) => {
-            if let Some(ps) = pstate {
-                if e.cursor_position.is_none() {
-                    let pos = parser_small1::parser_errposition(
-                        ps,
-                        tn.location,
-                        mbutils::GetDatabaseEncoding(),
-                    );
-                    if pos > 0 {
-                        e.cursor_position = Some(pos);
-                    }
+            if e.cursor_position.is_none() {
+                let pos = parser_small1::parser_errposition_source(
+                    src,
+                    tn.location,
+                    mbutils::GetDatabaseEncoding(),
+                );
+                if pos > 0 {
+                    e.cursor_position = Some(pos);
                 }
             }
             Err(e)
@@ -1264,7 +1277,7 @@ fn transformColumnDefinition<'mcx>(
     if let Some(tn_node) = col!().typeName {
         let tn = tn_node.as_variant::<TypeName>().expect("TypeName");
         // C typenameType(cxt->pstate, ...) attaches errposition at tn.location.
-        let (type_oid, _typmod) = typenameTypeIdAndMod(mcx, None, tn)
+        let (type_oid, _typmod) = typename_type_id_and_mod(mcx, src.map(str::as_bytes), tn)
             .map_err(|e| position_on_src(e, src, tn.location))?;
         if let Some(cc) = col!().collClause {
             let cc = cc.as_variant::<types_nodes::CollateClause>().expect("CollateClause");
@@ -1412,8 +1425,9 @@ fn transformColumnDefinition<'mcx>(
                     .as_variant::<TypeName>()
                     .expect("TypeName");
                 // C typenameType(cxt->pstate, ...) attaches errposition here.
-                let (type_oid, _typmod) = typenameTypeIdAndMod(mcx, None, tn)
-                    .map_err(|e| position_on_src(e, src, tn.location))?;
+                let (type_oid, _typmod) =
+                    typename_type_id_and_mod(mcx, src.map(str::as_bytes), tn)
+                        .map_err(|e| position_on_src(e, src, tn.location))?;
                 if saw_identity {
                     return Err(column_syntax_error(
                         format_args!(

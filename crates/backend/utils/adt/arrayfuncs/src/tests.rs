@@ -2261,3 +2261,38 @@ mod growth_limits {
         assert!(st.data.capacity() >= 8192);
     }
 }
+#[test]
+fn agg_support_outside_an_aggregate_is_a_clean_error() {
+    let mut fcinfo = LocalFcinfo::<2>::new(0);
+    fcinfo.set_arg_null(0);
+    fcinfo.set_arg_null(1);
+    let err = crate::builtins::fc_array_agg_combine(None, &mut fcinfo).unwrap_err();
+    assert_eq!(err.message(), "aggregate function called in non-aggregate context");
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_INTERNAL_ERROR);
+    let err = crate::builtins::fc_array_agg_deserialize(None, &mut fcinfo).unwrap_err();
+    assert_eq!(err.message(), "aggregate function called in non-aggregate context");
+}
+
+#[test]
+fn set_element_on_empty_expanded_container_matches_c() {
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    let empty = crate::construct::construct_empty_array(mcx, INT4OID).unwrap();
+    let set = |indx: &[i32], expanded: bool| {
+        crate::element::array_set_element_ext(
+            mcx, &empty, indx, Datum::from_i32(5), false, -1, 4, true, b'i', expanded,
+        )
+    };
+    // Flat path: a 1x1 array with the given lower bounds.
+    let img = set(&[2, 3], false).unwrap();
+    let (ndim, dims, lbs) = crate::foundation::read_dims_lbounds(&img);
+    assert_eq!((ndim, &dims[..2], &lbs[..2]), (2, &[1, 1][..], &[2, 3][..]));
+    // Expanded path (array_set_element_expanded): 0-extent dims, so every
+    // multi-D subscript is out of range; 1-D extends like the flat path.
+    let err = set(&[2, 3], true).unwrap_err();
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_ARRAY_SUBSCRIPT_ERROR);
+    assert_eq!(err.message(), "array subscript out of range");
+    let img = set(&[5], true).unwrap();
+    let (ndim, dims, lbs) = crate::foundation::read_dims_lbounds(&img);
+    assert_eq!((ndim, dims[0], lbs[0]), (1, 1, 5));
+}
