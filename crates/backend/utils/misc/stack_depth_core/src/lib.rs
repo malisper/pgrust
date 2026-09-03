@@ -36,13 +36,28 @@ pub const STACK_DEPTH_SLOP: isize = 512 * 1024;
 /// budget the guard *enforces* is scaled by this per-profile constant so
 /// the same GUC setting buys comparable recursion DEPTH.
 ///
-/// debug = 32: covers the measured 27x worst chain with slop.
-/// release = 4: PLACEHOLDER — NOT a measurement. It MUST be calibrated
-/// with `scripts/stack-calibrate.sh` against a release build before any
-/// perf-claim or conformance run leans on release-mode depth behavior
-/// (the 27x/1.9x figures above are dev-profile; release frames are
-/// smaller but not C-sized).
-pub const STACK_DEPTH_SCALE: isize = if cfg!(debug_assertions) { 32 } else { 4 };
+/// unoptimized (opt-level 0) = 32: covers the measured 27x worst chain
+/// with slop.
+/// optimized (opt-level >= 1, s, z) = 4: PLACEHOLDER — NOT a measurement.
+/// It MUST be calibrated with `scripts/stack-calibrate.sh` against a
+/// release build before any perf-claim or conformance run leans on
+/// release-mode depth behavior (the 27x/1.9x figures above are
+/// opt-level-0; optimized frames are smaller but not C-sized).
+///
+/// Keyed on the build's opt-level (build.rs turns cargo's `OPT_LEVEL` into
+/// the `pgrust_opt_level` cfg), NOT on `debug_assertions` — as PR #1613
+/// re-keyed it (bug catalog PR1613-1). The pathological frames the 32x
+/// budget covers are an opt-level-0 artifact (unmerged match-arm slots, no
+/// mem2reg); an opt-level-1 build with assertions on — the debug-server
+/// profile shape — has near-optimized frames, and under the 32x budget the
+/// regress inputs `repeat('[', 10000)::json` and the `{"a":` / jsonb twins
+/// at max_stack_depth = 100kB (3.2 MB enforced vs 0.64–1.4 MB used) parsed
+/// to end of input (22P02) where C raises 54001. tests.rs pins the keying.
+pub const STACK_DEPTH_SCALE: isize = if cfg!(pgrust_opt_level = "0") { 32 } else { 4 };
+
+/// Cargo's `OPT_LEVEL` for this build ("0", "1", "2", "3", "s", "z") as
+/// build.rs saw it — the input `STACK_DEPTH_SCALE` is keyed on. Test-facing.
+pub const BUILD_OPT_LEVEL: &str = env!("PGRUST_OPT_LEVEL");
 
 thread_local! {
     static MAX_STACK_DEPTH: Cell<i32> = const { Cell::new(100) };

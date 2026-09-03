@@ -54,3 +54,88 @@ fn guard_probe_reads_the_machine_stack() {
     assert!(stack_is_too_deep());
     restore_stack_base(0);
 }
+
+// ---------------------------------------------------------------------------
+// E-DEBUGBUILD unit gate (bug catalog PR1613-1, fix PR #1613): the scale is a
+// function of the build's opt-level ONLY. Opt-level 0 is the only profile
+// with the pathological frames the 32x budget covers; every optimized build
+// — including opt-level >= 1 with debug-assertions on, the debug-server
+// profile shape — must enforce the optimized 4x budget. Pre-fix,
+// `cfg!(debug_assertions)` put that shape on the 32x arm and the json/jsonb
+// regress deep-nesting inputs at max_stack_depth = 100kB stopped tripping
+// 54001 there (22P02 "input string ended unexpectedly" instead).
+//
+// The two stock invocations cannot tell the keyings apart (dev: opt 0 +
+// assertions, release: opt 3 + no assertions — both agree). The
+// DISCRIMINATING build is the one where they disagree:
+//
+//   cargo test -p stack_depth_core --config profile.dev.opt-level=1
+//
+// (opt-level 1, debug-assertions still on). There a debug_assertions-keyed
+// constant reads 32 and `scale_is_keyed_on_opt_level_not_debug_assertions`
+// fails; the opt-level-keyed constant reads 4 and it passes. The two
+// shape-specific tests below compile ONLY on such disagreeing builds and
+// state the required value outright.
+// ---------------------------------------------------------------------------
+
+/// What `STACK_DEPTH_SCALE` must be for the opt-level build.rs reported.
+fn expected_scale_for_opt_level() -> isize {
+    if cfg!(pgrust_opt_level = "0") { 32 } else { 4 }
+}
+
+#[test]
+fn build_script_cfg_and_env_agree_on_the_opt_level() {
+    // build.rs emits both from the same OPT_LEVEL read; a mismatch means the
+    // cfg the constant is keyed on is not the level cargo actually built at.
+    assert!(
+        matches!(BUILD_OPT_LEVEL, "0" | "1" | "2" | "3" | "s" | "z"),
+        "build.rs saw an OPT_LEVEL cargo does not document: {BUILD_OPT_LEVEL:?}"
+    );
+    assert_eq!(
+        cfg!(pgrust_opt_level = "0"),
+        BUILD_OPT_LEVEL == "0",
+        "cfg(pgrust_opt_level) disagrees with OPT_LEVEL={BUILD_OPT_LEVEL}"
+    );
+}
+
+#[test]
+fn scale_is_keyed_on_opt_level_not_debug_assertions() {
+    let expected = expected_scale_for_opt_level();
+    assert_eq!(
+        STACK_DEPTH_SCALE, expected,
+        "opt-level {BUILD_OPT_LEVEL} (debug_assertions={}) must enforce {expected}x — \
+         the scale is keyed on something other than the build's opt-level",
+        cfg!(debug_assertions)
+    );
+    // The enforced budget follows the same scale (no thread ceiling in a
+    // test thread, so no clamp).
+    assign_max_stack_depth(100);
+    assert_eq!(max_stack_depth_bytes(), 100 * 1024 * expected);
+    assert_eq!(scaled_max_stack_depth_bytes(), 100 * 1024 * expected);
+}
+
+/// The PR1613-1 build shape itself: optimized, assertions on. Compiles only
+/// there (never under stock dev/release), and demands the optimized budget.
+#[cfg(all(debug_assertions, not(pgrust_opt_level = "0")))]
+#[test]
+fn optimized_with_assertions_build_enforces_the_optimized_budget() {
+    assert_eq!(
+        STACK_DEPTH_SCALE, 4,
+        "opt-level {BUILD_OPT_LEVEL} with debug-assertions on took the 32x opt-level-0 arm: \
+         deep json/jsonb at max_stack_depth=100kB would parse to end of input (22P02) \
+         where C raises 54001 (PR1613-1)"
+    );
+}
+
+/// The mirror shape: opt-level 0 with assertions OFF must still get the
+/// opt-level-0 budget — its frames are the pathological ones regardless of
+/// assertions.
+#[cfg(all(not(debug_assertions), pgrust_opt_level = "0"))]
+#[test]
+fn unoptimized_without_assertions_build_enforces_the_unoptimized_budget() {
+    assert_eq!(
+        STACK_DEPTH_SCALE, 32,
+        "opt-level 0 with debug-assertions off took the optimized 4x arm: stock \
+         max_stack_depth would trip 54001 on ordinary queries C answers (#1485)"
+    );
+}
