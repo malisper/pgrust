@@ -588,3 +588,14 @@ pub fn fc_halfvec_avg(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResul
     }
     Ok(image_datum(b.image()))
 }
+
+/// C: hnsw_halfvec_support (hnswutils.c ~1396-1408) — HNSW opclass support
+/// proc 3 for the halfvec opclasses. Returns the address of a static
+/// HnswTypeInfo (`&HALFVEC_TYPE_INFO`, process-lifetime storage), matching
+/// C's `PG_RETURN_POINTER(&typeInfo)` of a function-local `static const`.
+/// See pgvector_hnsw::utils::get_type_info for the caller-side contract:
+/// it reinterprets the returned Datum as `&'static HnswTypeInfo` unchecked,
+/// same as C.
+pub fn fc_hnsw_halfvec_support(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    Ok(Datum::from_usize(&HALFVEC_TYPE_INFO as *const types_hnsw::HnswTypeInfo as usize))
+}
