@@ -17,6 +17,7 @@ use types_tuple::itemptr::ItemPointerData;
 pub(crate) mod algo;
 pub(crate) mod flush;
 pub(crate) mod graph;
+pub(crate) mod parallel;
 
 use crate::flush::flush_pages;
 use crate::graph::SharedGraph;
@@ -39,6 +40,10 @@ struct BuildState<'a, 'mcx> {
     support: HnswSupport,
     graph: Arc<SharedGraph>,
     reltuples: f64,
+    /// C: `memoryMargin` in `InsertTuple` — `base == NULL ? 0 : 1024 * 1024`,
+    /// i.e. zero for a serial build and 1MB for every participant of a
+    /// parallel one.
+    memory_margin: usize,
 }
 
 // InsertTuple (build path).
@@ -60,28 +65,47 @@ fn insert_tuple(
     };
     bs.support = support;
 
-    if bs.graph.flushed() {
+    // C InsertTuple's flushLock protocol (hnswbuild.c:510-574). Lock order is
+    // flush_lock → entry_lock everywhere: `flush_pages` takes entry_lock for
+    // write and `insert_tuple_in_memory` takes it shared/exclusive, both while
+    // this frame holds flush_lock; nothing ever takes flush_lock while holding
+    // entry_lock. The Arc clone keeps the guard's lifetime off `bs`, which
+    // `flush_pages` needs mutably.
+    let graph = Arc::clone(&bs.graph);
+
+    // Ensure the graph is not flushed while we insert.
+    let read = graph.flush_lock.read().unwrap_or_else(|e| e.into_inner());
+
+    // Are we in the on-disk phase?
+    if graph.flushed() {
+        drop(read);
         let mut support = bs.support.clone();
         let r = insert_tuple_on_disk(bs.index, &mut support, &img, heaptid, true);
         bs.support = support;
         return r.map(|_| true);
     }
 
-    // C checks memoryUsed (+ zero serial margin) against memoryTotal BEFORE
+    // C checks memoryUsed + memoryMargin against memoryTotal BEFORE
     // HnswInitElement draws the level, so the PRNG stream is not consumed by
     // a tuple that diverts to the on-disk path at the flush transition.
-    if bs.graph.memory_exhausted() {
-        if !bs.graph.flushed() {
+    if graph.memory_exhausted(bs.memory_margin) {
+        // C: drop the shared flush lock and retake it exclusive, then re-test
+        // `flushed` — only the first participant through here flushes (and
+        // only it reports the NOTICE).
+        drop(read);
+        let write = graph.flush_lock.write().unwrap_or_else(|e| e.into_inner());
+        if !graph.flushed() {
             elog::ereport(NOTICE)
                 .errmsg(format!(
                     "hnsw graph no longer fits into maintenance_work_mem after {} tuples",
-                    bs.graph.indtuples() as i64
+                    graph.indtuples() as i64
                 ))
                 .errdetail("Building will take significantly more time.".to_string())
                 .errhint("Increase maintenance_work_mem to speed up builds.".to_string())
                 .finish(types_error::ErrorLocation::new(file!(), line!() as i32, "InsertTuple"))?;
             flush_pages(bs)?;
         }
+        drop(write);
         let mut support = bs.support.clone();
         let r = insert_tuple_on_disk(bs.index, &mut support, &img, heaptid, true);
         bs.support = support;
@@ -100,6 +124,8 @@ fn insert_tuple(
         bs.ef_construction,
         element,
     )?;
+    // C holds flushLock SHARED across InsertTupleInMemory.
+    drop(read);
     Ok(true)
 }
 
@@ -153,7 +179,100 @@ fn init_build_state<'a, 'mcx>(
             init_small::globals::maintenance_work_mem() as usize * 1024,
         )),
         reltuples: 0.0,
+        memory_margin: 0,
     })
+}
+
+/// C: `BuildGraph` — the scan that fills the in-memory graph, parallel when
+/// the planner arithmetic allows it, then the flush and the parallel teardown
+/// (in C's order: FlushPages runs before HnswEndParallel).
+fn build_graph<'a, 'mcx>(
+    mcx: Mcx<'mcx>,
+    bs: &mut BuildState<'a, 'mcx>,
+    heap: &'a Relation<'mcx>,
+    index_info: &mut IndexInfo<'mcx>,
+) -> PgResult<()> {
+    let request = parallel::compute_parallel_workers(heap, bs.index, index_info);
+    let shared = Arc::new(parallel::HnswShared {
+        heaprelid: heap.rd_id,
+        indexrelid: bs.index.rd_id,
+        isconcurrent: index_info.ii_Concurrent,
+        done: std::sync::Mutex::new((0, 0.0)),
+        workers_done: std::sync::Condvar::new(),
+        pscan: std::sync::OnceLock::new(),
+        graph: Arc::clone(&bs.graph),
+        m: bs.m,
+        ef_construction: bs.ef_construction,
+        dimensions: bs.dimensions,
+        ml: bs.ml,
+        max_level: bs.max_level,
+    });
+
+    let leader = if request > 0 {
+        parallel::begin_parallel(&shared, heap, index_info.ii_Concurrent, request)?
+    } else {
+        None
+    };
+
+    match &leader {
+        Some(l) => {
+            // C: HnswLeaderParticipateAsWorker, then ParallelHeapScan.
+            bs.memory_margin = parallel::PARALLEL_MEMORY_MARGIN;
+            parallel_scan_and_insert_leader(mcx, heap, bs.index, &shared)?;
+            bs.reltuples = parallel::parallel_heap_scan(l, &shared)?;
+        }
+        None => {
+            let mut inner_err: Option<Box<PgError>> = None;
+            // BuildState is threaded via raw pointer: the callback is FnMut and
+            // borrows would alias bs.
+            let bs_ptr: *mut BuildState<'_, 'mcx> = bs;
+            let reltuples = execindexing::table_index_build_scan(
+                mcx,
+                heap,
+                bs.index,
+                index_info,
+                true,
+                |_index_rel, tid, values, isnull, _alive| {
+                    // SAFETY: single-threaded serial build; bs outlives the scan.
+                    let bs = unsafe { &mut *bs_ptr };
+                    match insert_tuple(bs, values, isnull, tid) {
+                        Ok(true) => {
+                            bs.graph.inc_indtuples();
+                            Ok(())
+                        }
+                        Ok(false) => Ok(()),
+                        Err(e) => {
+                            inner_err = Some(e);
+                            Err(PgError::error("hnsw build insert failed").into())
+                        }
+                    }
+                },
+            );
+            match reltuples {
+                Ok(n) => bs.reltuples = n,
+                Err(e) => return Err(inner_err.unwrap_or(e)),
+            }
+        }
+    }
+
+    if !bs.graph.flushed() {
+        flush_pages(bs)?;
+    }
+    if let Some(l) = leader {
+        parallel::end_parallel(l)?;
+    }
+    Ok(())
+}
+
+// The leader's own participation. Split out so the shared borrow of `bs.index`
+// does not collide with the `&mut BuildState` the caller holds.
+fn parallel_scan_and_insert_leader<'mcx>(
+    mcx: Mcx<'mcx>,
+    heap: &Relation<'mcx>,
+    index: &Relation<'mcx>,
+    shared: &Arc<parallel::HnswShared>,
+) -> PgResult<()> {
+    parallel::parallel_scan_and_insert(mcx, heap, index, shared, true)
 }
 
 fn build_index<'mcx>(
@@ -166,39 +285,8 @@ fn build_index<'mcx>(
     let mut bs = init_build_state(heap, index, fork_num)?;
 
     if let (Some(heap), Some(index_info)) = (bs.heap, index_info) {
-        let mut inner_err: Option<Box<PgError>> = None;
-        // BuildState is threaded via raw pointer: the callback is FnMut and
-        // borrows would alias bs.
-        let bs_ptr: *mut BuildState<'_, 'mcx> = &mut bs;
-        let reltuples = execindexing::table_index_build_scan(
-            mcx,
-            heap,
-            index,
-            index_info,
-            true,
-            |_index_rel, tid, values, isnull, _alive| {
-                // SAFETY: single-threaded serial build; bs outlives the scan.
-                let bs = unsafe { &mut *bs_ptr };
-                match insert_tuple(bs, values, isnull, tid) {
-                    Ok(true) => {
-                        bs.graph.inc_indtuples();
-                        Ok(())
-                    }
-                    Ok(false) => Ok(()),
-                    Err(e) => {
-                        inner_err = Some(e);
-                        Err(PgError::error("hnsw build insert failed").into())
-                    }
-                }
-            },
-        );
-        match reltuples {
-            Ok(n) => bs.reltuples = n,
-            Err(e) => return Err(inner_err.unwrap_or(e)),
-        }
-    }
-
-    if !bs.graph.flushed() {
+        build_graph(mcx, &mut bs, heap, index_info)?;
+    } else if !bs.graph.flushed() {
         flush_pages(&mut bs)?;
     }
 
@@ -226,4 +314,10 @@ pub fn hnswbuildempty(index: &Relation<'_>) -> PgResult<()> {
     let mcx_owner = mcx::MemoryContext::new_bump("hnsw buildempty");
     build_index(mcx_owner.mcx(), None, index, None, ForkNumber::INIT_FORKNUM)?;
     Ok(())
+}
+
+/// Registers the parallel build worker entrypoint (`main_main`'s contrib seam
+/// init calls this once at startup).
+pub fn init_seams() {
+    parallel::init_seams();
 }

@@ -76,9 +76,10 @@ pub struct SharedGraph {
     pub memory_total: usize,
     flushed: AtomicBool,
     /// C: `graph->flushLock`, serialising the in-memory→disk transition
-    /// between participants; consumed by the parallel build (later task).
-    #[allow(dead_code)]
-    pub flush_lock: Mutex<()>,
+    /// between participants. Held SHARED across an in-memory insert (so a
+    /// flush cannot start under one) and EXCLUSIVE around the flush decision
+    /// itself. Lock order is flush_lock → entry_lock, never the reverse.
+    pub flush_lock: RwLock<()>,
     indtuples: AtomicU64,
 }
 
@@ -99,7 +100,7 @@ impl SharedGraph {
             memory_used: AtomicUsize::new(0),
             memory_total,
             flushed: AtomicBool::new(false),
-            flush_lock: Mutex::new(()),
+            flush_lock: RwLock::new(()),
             indtuples: AtomicU64::new(0),
         }
     }
@@ -171,8 +172,11 @@ impl SharedGraph {
     pub fn memory_used(&self) -> usize {
         self.memory_used.load(Relaxed)
     }
-    pub fn memory_exhausted(&self) -> bool {
-        self.memory_used() >= self.memory_total
+    /// C: `graph->memoryUsed + memoryMargin >= graph->memoryTotal`. The margin
+    /// is 1MB in a parallel build (see `parallel::PARALLEL_MEMORY_MARGIN`) and
+    /// zero in a serial one.
+    pub fn memory_exhausted(&self, margin: usize) -> bool {
+        self.memory_used() + margin >= self.memory_total
     }
 
     pub fn flushed(&self) -> bool {
@@ -215,10 +219,10 @@ mod tests {
         assert_eq!((a, b), (0, 1));
         assert_eq!(g.elem(b).neighbors.lock().unwrap().len(), 3, "one NeighborArray per layer 0..=level");
         assert!(g.memory_used() > 32);
-        assert!(!g.memory_exhausted());
+        assert!(!g.memory_exhausted(0));
         let small = SharedGraph::new(1);
         small.alloc_element(tid(1), 0, &[0u8; 16], 16);
-        assert!(small.memory_exhausted());
+        assert!(small.memory_exhausted(0));
     }
 
     #[test]
