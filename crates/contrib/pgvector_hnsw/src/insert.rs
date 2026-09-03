@@ -887,15 +887,35 @@ mod type_info_tests {
 
     #[test]
     fn form_index_value_runs_check_value_before_norm_gate() {
+        // Zero vector: norm == 0, so under the correct C order (checkValue
+        // before the norm gate) the checkValue error must surface. Under a
+        // swapped order the norm gate would fire first and return Ok(None)
+        // instead, failing this assertion.
         let owner = mcx::MemoryContext::new_bump("t");
         let m = owner.mcx();
         let mut b = pgvector::vec::VecBuilder::new(m, 2).unwrap();
-        b.set(0, 3.0); b.set(1, 4.0);
+        b.set(0, 0.0); b.set(1, 0.0);
         let img = b.image();
         let d = datum::Datum::from_usize(img.as_ptr() as usize);
         let mut sp = support_with(&REJECTING, true);
         let err = form_index_value(m, d, &mut sp).unwrap_err();
         assert!(err.message().contains("non-zero elements for hnsw index"));
+    }
+
+    #[test]
+    fn form_index_value_norm_gate_still_rejects_zero_vector() {
+        // Same zero vector, but with a type_info that has no check_value
+        // (the real vector opclass default): the norm gate itself must
+        // still fire and return Ok(None).
+        let owner = mcx::MemoryContext::new_bump("t");
+        let m = owner.mcx();
+        let mut b = pgvector::vec::VecBuilder::new(m, 2).unwrap();
+        b.set(0, 0.0); b.set(1, 0.0);
+        let img = b.image();
+        let d = datum::Datum::from_usize(img.as_ptr() as usize);
+        let mut sp = support_with(&pgvector::vec::VECTOR_TYPE_INFO, true);
+        let out = form_index_value(m, d, &mut sp).unwrap();
+        assert!(out.is_none());
     }
 
     #[test]

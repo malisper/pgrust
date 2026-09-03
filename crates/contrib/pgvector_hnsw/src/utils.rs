@@ -8,7 +8,6 @@ use mcx::{Mcx, PgFxHashMap, PgVec};
 use types_core::{BlockNumber, Buffer, ForkNumber, Oid};
 use types_error::{PgError, PgResult};
 use types_hnsw::*;
-use types_hnsw::HnswTypeInfo;
 use types_rel::Relation;
 use types_storage::bufpage::{PageMut, PageRef};
 use types_tuple::itemptr::{ItemPointerData, ItemPointerIsValid};
