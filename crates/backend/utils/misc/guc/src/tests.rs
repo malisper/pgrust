@@ -942,3 +942,25 @@ fn reset_store_to_process_base_evicts_prior_session_low_source_gucs() {
     .unwrap();
     assert_eq!(reset_val, boot, "scrub must rebuild reset_val to boot");
 }
+
+fn reentrant_string_check(
+    newval: &mut Option<String>,
+    _extra: &mut Option<guc_tables::GucHookExtra>,
+    _source: GucSource,
+) -> types_error::PgResult<bool> {
+    // check_datestyle's shape: 'DEFAULT' resolves against the reset value.
+    if newval.as_deref() == Some("reset") {
+        *newval = Some(GetConfigOptionResetString("createrole_self_grant").expect("reset value"));
+    }
+    Ok(true)
+}
+
+#[test]
+fn check_hook_may_read_the_store() {
+    setup();
+    guc_tables::hooks::check_createrole_self_grant.install_if_absent(reentrant_string_check);
+    assert_eq!(set_session("createrole_self_grant", Some("set, inherit")).unwrap(), 1);
+    assert_eq!(get_string("createrole_self_grant"), Some(Some("set, inherit".to_string())));
+    assert_eq!(set_session("createrole_self_grant", Some("reset")).unwrap(), 1);
+    assert_eq!(get_string("createrole_self_grant"), Some(Some(String::new())));
+}

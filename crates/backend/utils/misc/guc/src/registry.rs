@@ -301,7 +301,7 @@ fn err(sqlstate: SqlState, message: String) -> PgError {
 
 // C return convention: ereport(elevel) throws at >= ERROR, else logs and the
 // set returns 0.
-fn reject(elevel: ErrorLevel, e: PgError) -> PgResult<i32> {
+pub(crate) fn reject(elevel: ErrorLevel, e: PgError) -> PgResult<i32> {
     if elevel >= ERROR {
         Err(e.into())
     } else {
@@ -1002,10 +1002,22 @@ fn unrecognized(name: &str) -> PgError {
 
 pub type DeferredAssignHook = Box<dyn FnOnce()>;
 
-// set_config_with_handle core (guc.c:3405). Ok(1) applied, Ok(0)
+pub struct SetConfigPrep {
+    idx: usize,
+    pub(crate) elevel: ErrorLevel,
+    change_val: bool,
+    make_default: bool,
+}
+
+pub enum SetConfigPrepared {
+    Done(PgResult<i32>),
+    Pending(SetConfigPrep),
+}
+
+// set_config_with_handle (guc.c:3405) up to the value step. Ok(1) applied, Ok(0)
 // rejected-below-ERROR, Ok(-1) skipped; Err when the resolved elevel is ERROR.
 #[allow(clippy::too_many_arguments)]
-pub fn set_config_option(
+pub fn set_config_option_prepare(
     reg: &mut GucRegistry,
     name: &str,
     value: Option<&str>,
@@ -1016,14 +1028,8 @@ pub fn set_config_option(
     change_val: bool,
     elevel: ErrorLevel,
     is_reload: bool,
-    deferred_hooks: &mut Vec<DeferredAssignHook>,
-) -> PgResult<i32> {
+) -> SetConfigPrepared {
     let elevel = resolve_elevel(elevel, source);
-
-    // Originals for the session_authorization -> role kluge below.
-    let orig_context = context;
-    let orig_source = source;
-    let orig_srole = srole;
 
     // find_option(name, create_placeholders=true, skip_errors=false, elevel).
     let idx = match reg.find_index(name) {
@@ -1031,14 +1037,14 @@ pub fn set_config_option(
         None => match crate::assignable_custom_variable_name(name, false) {
             Ok(true) => match reg.add_placeholder_variable(name) {
                 Ok(idx) => idx,
-                Err(e) => return reject(elevel, *e),
+                Err(e) => return SetConfigPrepared::Done(reject(elevel, *e)),
             },
-            Ok(false) => return Ok(0),
-            Err(e) => return reject(elevel, *e),
+            Ok(false) => return SetConfigPrepared::Done(Ok(0)),
+            Err(e) => return SetConfigPrepared::Done(reject(elevel, *e)),
         },
     };
 
-    let access = check_can_set(
+    let access = match check_can_set(
         reg.vars[idx].gen(),
         value.is_none(),
         context,
@@ -1047,11 +1053,14 @@ pub fn set_config_option(
         action,
         change_val,
         is_reload,
-    )?;
+    ) {
+        Ok(access) => access,
+        Err(e) => return SetConfigPrepared::Done(Err(e)),
+    };
     match access {
         AccessCheck::Ok => {}
-        AccessCheck::Skip => return Ok(-1),
-        AccessCheck::Reject(e) => return reject(elevel, e),
+        AccessCheck::Skip => return SetConfigPrepared::Done(Ok(-1)),
+        AccessCheck::Reject(e) => return SetConfigPrepared::Done(reject(elevel, e)),
     }
 
     let make_default =
@@ -1061,33 +1070,57 @@ pub fn set_config_option(
     let mut change_val = change_val;
     if reg.vars[idx].gen().source > source {
         if change_val && !make_default {
-            return Ok(-1);
+            return SetConfigPrepared::Done(Ok(-1));
         }
         change_val = false;
     }
 
-    let mut source = source;
-    let mut context = context;
-    let mut srole = srole;
-    let (newval, newextra) = match value {
-        Some(v) => match parse_and_validate_value(&reg.vars[idx], v, source) {
-            Ok(nv) => nv,
-            Err(e) => return reject(elevel, *e),
-        },
-        None if source == PGC_S_DEFAULT => match boot_default_value(&reg.vars[idx], source) {
-            Ok(nv) => nv,
-            Err(e) => return reject(elevel, *e),
-        },
-        None => {
-            // RESET: newval = reset_val, newextra = reset_extra (Rc pointer
-            // share), provenance from the reset_* fields.
-            let record = &reg.vars[idx];
-            let gen = record.gen();
-            source = gen.reset_source;
-            context = gen.reset_scontext;
-            srole = gen.reset_srole;
-            reset_value_and_extra(record)
-        }
+    SetConfigPrepared::Pending(SetConfigPrep { idx, elevel, change_val, make_default })
+}
+
+// Value step, store borrowed shared: check_datestyle reads the reset value.
+pub fn set_config_option_value(
+    reg: &GucRegistry,
+    prep: &SetConfigPrep,
+    value: Option<&str>,
+    source: GucSource,
+) -> PgResult<(config_var_val, Option<SharedExtra>)> {
+    let record = &reg.vars[prep.idx];
+    match value {
+        Some(v) => parse_and_validate_value(record, v, source),
+        None if source == PGC_S_DEFAULT => boot_default_value(record, source),
+        None => Ok(reset_value_and_extra(record)),
+    }
+}
+
+// The apply step of set_config_with_handle (guc.c:3961 onward).
+#[allow(clippy::too_many_arguments)]
+pub fn set_config_option_apply(
+    reg: &mut GucRegistry,
+    prep: SetConfigPrep,
+    name: &str,
+    value: Option<&str>,
+    newval: config_var_val,
+    newextra: Option<SharedExtra>,
+    context: GucContext,
+    source: GucSource,
+    srole: Oid,
+    action: GucAction,
+    is_reload: bool,
+    deferred_hooks: &mut Vec<DeferredAssignHook>,
+) -> PgResult<i32> {
+    let SetConfigPrep { idx, elevel, change_val, make_default } = prep;
+
+    // Originals for the session_authorization -> role kluge below.
+    let orig_context = context;
+    let orig_source = source;
+    let orig_srole = srole;
+
+    let (source, context, srole) = if value.is_none() && source != PGC_S_DEFAULT {
+        let gen = reg.vars[idx].gen();
+        (gen.reset_source, gen.reset_scontext, gen.reset_srole)
+    } else {
+        (source, context, srole)
     };
 
     // Re-reading a PGC_POSTMASTER variable from postgresql.conf under SIGHUP.

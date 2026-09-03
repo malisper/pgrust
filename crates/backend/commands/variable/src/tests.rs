@@ -276,3 +276,45 @@ fn build_gate_checks() {
     let mut off = false;
     assert!(check_bonjour(&mut off, &mut None, PGC_S_SESSION).unwrap());
 }
+
+#[test]
+fn datestyle_default_resolves_inside_set_config_option() {
+    setup();
+    let set = |value: &str| {
+        guc::set_config_option_ext(
+            "DateStyle",
+            Some(value),
+            PGC_USERSET,
+            PGC_S_SESSION,
+            types_core::BOOTSTRAP_SUPERUSERID,
+            guc::GUC_ACTION_SET,
+            true,
+            types_error::ErrorLevel(0),
+            false,
+        )
+    };
+    assert_eq!(set("DEFAULT").unwrap(), 1);
+    assert_eq!(guc::store::get_string("DateStyle").unwrap().as_deref(), Some("ISO, MDY"));
+    assert_eq!(set("German, DEFAULT").unwrap(), 1);
+    assert_eq!(guc::store::get_string("DateStyle").unwrap().as_deref(), Some("German, MDY"));
+    assert_eq!(adt_datetime::settings::date_style(), USE_GERMAN_DATES);
+    assert_eq!(adt_datetime::settings::date_order(), DATEORDER_MDY);
+    assert_eq!(set("DEFAULT, YMD").unwrap(), 1);
+    assert_eq!(guc::store::get_string("DateStyle").unwrap().as_deref(), Some("ISO, YMD"));
+    assert_eq!(set("ISO, MDY").unwrap(), 1);
+    assert_eq!(adt_datetime::settings::date_style(), USE_ISO_DATES);
+    assert_eq!(adt_datetime::settings::date_order(), DATEORDER_MDY);
+}
+
+#[test]
+fn login_settings_apply_datestyle_default_and_only_warn_on_garbage() {
+    setup();
+    // postinit.c ApplySetting: ProcessGUCArray(a, PGC_SUSET, source, GUC_ACTION_SET).
+    let apply = |item: &str| {
+        guc::ProcessGUCArray(&[item.to_string()], PGC_SUSET, PGC_S_USER, guc::GUC_ACTION_SET)
+    };
+    apply("DateStyle=German, DEFAULT").unwrap();
+    assert_eq!(guc::store::get_string("DateStyle").unwrap().as_deref(), Some("German, MDY"));
+    apply("DateStyle=bogus").unwrap();
+    assert_eq!(guc::store::get_string("DateStyle").unwrap().as_deref(), Some("German, MDY"));
+}

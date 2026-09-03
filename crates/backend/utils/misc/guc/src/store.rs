@@ -543,9 +543,8 @@ pub fn get_string(name: &str) -> Option<Option<String>> {
     })
 }
 
-// set_config_option over the global store; assign hooks fire after the borrow
-// is released (they may recursively re-enter, e.g. session_authorization ->
-// is_superuser).
+// set_config_option over the global store: check hook under a shared borrow
+// (check_datestyle reads the store), assign hooks after release (they re-enter).
 #[allow(clippy::too_many_arguments)]
 pub fn set_config_option_global(
     name: &str,
@@ -558,18 +557,42 @@ pub fn set_config_option_global(
     elevel: ErrorLevel,
     is_reload: bool,
 ) -> PgResult<i32> {
+    use crate::registry::{
+        set_config_option_apply, set_config_option_prepare, set_config_option_value,
+        SetConfigPrepared,
+    };
+
+    let prep = match with_store_mut(|reg| {
+        set_config_option_prepare(
+            reg, name, value, context, source, srole, action, change_val, elevel, is_reload,
+        )
+    })
+    .unwrap_or_else(|| store_uninitialized(name))
+    {
+        SetConfigPrepared::Done(result) => return result,
+        SetConfigPrepared::Pending(prep) => prep,
+    };
+
+    let (newval, newextra) = match with_store(|reg| set_config_option_value(reg, &prep, value, source))
+        .unwrap_or_else(|| store_uninitialized(name))
+    {
+        Ok(parsed) => parsed,
+        Err(e) => return crate::registry::reject(prep.elevel, *e),
+    };
+
     let mut deferred_hooks: Vec<DeferredAssignHook> = Vec::new();
     let result = with_store_mut(|reg| {
-        crate::registry::set_config_option(
+        set_config_option_apply(
             reg,
+            prep,
             name,
             value,
+            newval,
+            newextra,
             context,
             source,
             srole,
             action,
-            change_val,
-            elevel,
             is_reload,
             &mut deferred_hooks,
         )
