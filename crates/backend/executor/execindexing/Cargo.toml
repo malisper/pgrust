@@ -28,6 +28,7 @@ types_snapshot = { path = "../../../_support/types/snapshot" }
 types_storage = { path = "../../../_support/types/types_storage" }
 types_scan = { path = "../../../_support/types/types_scan" }
 tableam_vocab = { path = "../../access/table/tableam_vocab" }
+tableam = { path = "../../access/table/tableam" }
 heapam = { path = "../../access/heap/heapam" }
 snapmgr = { path = "../../utils/time/snapmgr" }
 heapam_visibility = { path = "../../access/heap/heapam_visibility" }
@@ -68,7 +69,6 @@ freespace_seams = { path = "../../storage/freespace/freespace_seams" }
 seam_core = { path = "../../../_support/seam_core" }
 types_nodes = { path = "../../../_support/types/nodes" }
 heaptuple = { path = "../../access/common/heaptuple" }
-tableam = { path = "../../access/table/tableam" }
 rmgr = { path = "../../access/transam/rmgr" }
 xact_seams = { path = "../../access/transam/xact_seams" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
