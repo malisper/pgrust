@@ -17,33 +17,27 @@
 //!
 //! Lock ordering: an element mutex is never taken while another element mutex
 //! is held (`update_connection` runs under the neighbor's mutex but only reads
-//! other elements' immutable `value`s), and `SharedGraph::elem` releases the
-//! arena lock before it returns, so the only nesting that exists is
-//! element mutex → arena read lock. That cannot cycle: `alloc_element` takes
-//! the arena write lock while holding no element lock.
+//! other elements' immutable `value`s), and `SharedGraph::elem` takes no lock
+//! at all (lock-free chunked arena, Task 5b), so an element mutex is the only
+//! lock any of this code holds at a time.
 
-use crate::graph::{lk, Candidate, SharedGraph};
+use crate::graph::{lk, Candidate, SharedElement, SharedGraph};
 use datum::Datum;
 use pgvector_hnsw::utils as hnsw_utils;
 use std::sync::{RwLockReadGuard, RwLockWriteGuard};
 use types_error::PgResult;
 use types_hnsw::{hnsw_get_layer_m, HnswSupport, HNSW_HEAPTIDS};
 
-/// C: `HnswGetValue` on an in-memory element. The `Arc` returned by `elem`
-/// keeps the value alive for the duration of the distance call.
-fn value_datum(el: &crate::graph::SharedElement) -> Datum {
+/// C: `HnswGetValue` on an in-memory element. The element lives in the graph's
+/// arena, which outlives the borrow.
+fn value_datum(el: &SharedElement) -> Datum {
     Datum::from_usize(el.value.as_ptr() as usize)
 }
 
-/// C: `GetElementDistance`.
-pub(crate) fn get_distance(
-    graph: &SharedGraph,
-    support: &mut HnswSupport,
-    q: Datum,
-    e: u32,
-) -> PgResult<f64> {
-    let el = graph.elem(e);
-    hnsw_utils::get_distance(support, q, value_datum(&el))
+/// C: `GetElementDistance` on an element already in hand (the hot path fetches
+/// each element once and reads distance and level from the same reference).
+fn get_distance_el(support: &mut HnswSupport, q: Datum, el: &SharedElement) -> PgResult<f64> {
+    hnsw_utils::get_distance(support, q, value_datum(el))
 }
 
 /// C: `HnswSearchLayer`, in-memory arm (`index == NULL`), with
@@ -138,7 +132,6 @@ pub(crate) fn search_layer(
         let layer_idx = (c_el.level as i32 - lc) as usize;
         let neighbor_ids: Vec<u32> =
             lk(&c_el.neighbors)[layer_idx].items.iter().map(|hc| hc.element).collect();
-        drop(c_el);
 
         for e in neighbor_ids {
             if !visited.insert(e) {
@@ -146,11 +139,14 @@ pub(crate) fn search_layer(
             }
             let always_add = wlen < ef;
             let (f_dist, _) = *w_heap.first().expect("W nonempty");
-            let e_distance = get_distance(graph, support, q, e)?;
+            // One arena lookup per neighbor: distance and level come off the
+            // same reference (C dereferences the same relptr twice).
+            let e_el = graph.elem(e);
+            let e_distance = get_distance_el(support, q, e_el)?;
             if !(e_distance < f_dist || always_add) {
                 continue;
             }
-            if (graph.elem(e).level as i32) < lc {
+            if (e_el.level as i32) < lc {
                 continue;
             }
             push_min(&mut c_heap, (e_distance, e));
@@ -177,11 +173,11 @@ fn check_element_closer(
     e: &Candidate,
     r: &[Candidate],
 ) -> PgResult<bool> {
-    let e_el = graph.elem(e.element);
-    let e_value = value_datum(&e_el);
+    let e_value = value_datum(graph.elem(e.element));
     for ri in r {
-        let ri_el = graph.elem(ri.element);
-        let distance = hnsw_utils::get_distance(support, e_value, value_datum(&ri_el))? as f32;
+        // One arena lookup per r element per call (C: one relptr deref).
+        let ri_value = value_datum(graph.elem(ri.element));
+        let distance = hnsw_utils::get_distance(support, e_value, ri_value)? as f32;
         if distance <= e.distance {
             return Ok(false);
         }
@@ -354,11 +350,12 @@ pub(crate) fn find_element_neighbors(
 ) -> PgResult<()> {
     let el = graph.elem(element);
     let level = el.level as i32;
-    let q = value_datum(&el);
+    let q = value_datum(el);
     let Some(entry_point) = entry_point else { return Ok(()) };
 
-    let entry_level = graph.elem(entry_point).level as i32;
-    let ep_dist = get_distance(graph, support, q, entry_point)?;
+    let ep_el = graph.elem(entry_point);
+    let entry_level = ep_el.level as i32;
+    let ep_dist = get_distance_el(support, q, ep_el)?;
     let mut ep: Vec<(u32, f64)> = vec![(entry_point, ep_dist)];
 
     // 1st phase: greedy search down to the insert level.
