@@ -4,10 +4,15 @@
  * Crate under test: crates/contrib/hstore (see fuzz/core/src/hstorefam_diff.rs).
  *
  * Provenance (all bodies VERBATIM, extracted mechanically by
- * scratchpad/assemble_hstorefam.sh from the vendor tree at
- * ~/dev/pgrust-reference/vendor/postgres-src, Stamp-18.3, upstream sha
- * 62d6c7d3df6287f1bd83199c1a746e50d31571a0 — never hand-typed):
- *   - src/include/c.h 655..669 (struct varlena, VARHDRSZ, bytea/text).
+ * scratchpad/assemble_hstorefam.sh from Stamp-18.3 @ 62d6c7d3df, never
+ * hand-typed; re-vendored 2026-09-02 at PostgreSQL REL_18_6, upstream sha
+ * 724edf9bde9d356724ad384a2e196edc3c9f80f7 — the only 18.3→18.6 change inside a
+ * copied section is json.c d1d9688b1f, escape_json_char's pg_always_inline
+ * spelling; c.h/int.h/jsonapi.c/varlena.c/arrayfuncs.c changed only outside
+ * the copied ranges (the c.h and port.h ranges are re-cited at their
+ * REL_18_6 line numbers) and every block still marked @ 62d6c7d3df is
+ * byte-identical at REL_18_6):
+ *   - src/include/c.h 672..686 (struct varlena, VARHDRSZ, bytea/text).
  *   - src/include/varatt.h 18..325 (varattrib structs + varatt macros).
  *   - src/include/utils/array.h 75, 77..82, 84..98 (MAXDIM, MaxArraySize,
  *     ArrayType), 276..323 (ARR_ macros).
@@ -129,6 +134,7 @@ typedef uint8 bits8;
 #define FLEXIBLE_ARRAY_MEMBER	/* empty */
 #define PGDLLEXPORT				/* empty */
 #define pg_attribute_always_inline __attribute__((always_inline)) inline
+#define pg_always_inline __attribute__((always_inline)) inline
 #define pg_attribute_unused() __attribute__((unused))
 #define pg_noinline __attribute__((noinline))
 #define pg_restrict __restrict
@@ -188,7 +194,7 @@ typedef uint8 bits8;
 #define SET_8_BYTES(value) ((Datum) (value))
 #define CppConcat(x, y) x##y
 
-/* c.h lines 1126-1127 @ 62d6c7d3df */
+/* c.h lines 1143-1144 @ REL_18_6 */
 #define HIGHBIT					(0x80)
 #define IS_HIGHBIT_SET(ch)		((unsigned char)(ch) & HIGHBIT)
 
@@ -469,7 +475,7 @@ hst_pvsnprintf(char *buf, size_t len, const char *fmt, va_list args)
 #define hstore_hash				hst_hstore_hash
 #define hstore_hash_extended	hst_hstore_hash_extended
 
-/* ==== VERBATIM: c.h lines 655-669 @ 62d6c7d3df ==== */
+/* ==== VERBATIM: c.h lines 672-686 @ REL_18_6 ==== */
 struct varlena
 {
 	char		vl_len_[4];		/* Do not touch this field directly! */
@@ -1925,7 +1931,7 @@ loop:
 #undef ST_SWAP
 #undef ST_SWAPN
 
-/* the backend's qsort IS pg_qsort: port.h line 478 @ 62d6c7d3df */
+/* the backend's qsort IS pg_qsort: port.h line 479 @ REL_18_6 */
 #define qsort(a,b,c,d) hst_pg_qsort(a,b,c,d)
 
 /* ==== VERBATIM: pg_strcasecmp (pgstrcasecmp.c 32-62 @ 62d6c7d3df) ==== */
@@ -3090,8 +3096,8 @@ IsValidJsonNumber(const char *str, size_t len)
 	return (!numeric_error) && (total_len == dummy_lex.input_length);
 }
 
-/* ==== VERBATIM: json.c escape family @ 62d6c7d3df ==== */
-static pg_attribute_always_inline void
+/* ==== VERBATIM: json.c escape family @ REL_18_6 (d1d9688b1f) ==== */
+static pg_always_inline void
 escape_json_char(StringInfo buf, char c)
 {
 	switch (c)
@@ -3137,7 +3143,7 @@ escape_json(StringInfo buf, const char *str)
 	appendStringInfoCharMacro(buf, '"');
 }
 
-#define ESCAPE_JSON_FLUSH_AFTER 512	/* json.c line 1622 @ 62d6c7d3df */
+#define ESCAPE_JSON_FLUSH_AFTER 512	/* json.c line 1622 @ REL_18_6 */
 void
 escape_json_with_len(StringInfo buf, const char *str, int len)
 {

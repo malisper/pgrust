@@ -224,6 +224,16 @@
 #define PG_USED_FOR_ASSERTS_ONLY pg_attribute_unused()
 #endif
 
+/*
+ * Our C and C++ compilers may have different ideas about which printf
+ * archetype best represents what src/port/snprintf.c can do.
+ */
+#ifndef __cplusplus
+#define PG_PRINTF_ATTRIBUTE PG_C_PRINTF_ATTRIBUTE
+#else
+#define PG_PRINTF_ATTRIBUTE PG_CXX_PRINTF_ATTRIBUTE
+#endif
+
 /* GCC supports format attributes */
 #if defined(__GNUC__)
 #define pg_attribute_format_arg(a) __attribute__((format_arg(a)))
@@ -254,19 +264,26 @@
 #endif
 
 /*
- * Use "pg_attribute_always_inline" in place of "inline" for functions that
+ * Use "pg_always_inline" in place of "inline" for functions that
  * we wish to force inlining of, even when the compiler's heuristics would
  * choose not to.  But, if possible, don't force inlining in unoptimized
  * debug builds.
+ *
+ * XXX The "pg_attribute_always_inline" variant is kept for backwards
+ * compatibility with existing code. All new code should use the shorter
+ * variant "pg_always_inline."
  */
 #if (defined(__GNUC__) && __GNUC__ > 3 && defined(__OPTIMIZE__)) || defined(__SUNPRO_C)
 /* GCC > 3 and Sunpro support always_inline via __attribute__ */
+#define pg_always_inline __attribute__((always_inline)) inline
 #define pg_attribute_always_inline __attribute__((always_inline)) inline
 #elif defined(_MSC_VER)
 /* MSVC has a special keyword for this */
+#define pg_always_inline __forceinline
 #define pg_attribute_always_inline __forceinline
 #else
 /* Otherwise, the best we can do is to say "inline" */
+#define pg_always_inline inline
 #define pg_attribute_always_inline inline
 #endif
 

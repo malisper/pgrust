@@ -1,6 +1,6 @@
 /*
  * VENDORED for the vlmisc_diff fuzz oracle from postgres-src
- * @ 62d6c7d3df6287f1bd83199c1a746e50d31571a0 (PostgreSQL 18.3):
+ * @ REL_18_6 (PostgreSQL 18.6):
  *   src/common/unicode_norm.c
  * Entire file byte-for-byte EXCEPT the #include block, which is
  * flattened for the standalone oracle build (marked SHIM inline):
@@ -25,7 +25,8 @@
  */
 /* SHIM (include flattening; see banner) — upstream includes postgres.h /
  * postgres_fe.h, common/unicode_norm.h, common/unicode_norm_hashfunc.h,
- * common/unicode_normprops_table.h, port/pg_bswap.h here. */
+ * common/unicode_normprops_table.h, port/pg_bswap.h, utils/memutils.h
+ * here. */
 #include "unicode_norm.h"
 #include "unicode_norm_hashfunc.h"
 #include "unicode_normprops_table.h"
@@ -238,7 +239,7 @@ recompose_code(uint32 start, uint32 code, uint32 *result)
 	/* Check if two current characters are LV and T */
 	else if (start >= SBASE && start < (SBASE + SCOUNT) &&
 			 ((start - SBASE) % TCOUNT) == 0 &&
-			 code >= TBASE && code < (TBASE + TCOUNT))
+			 code > TBASE && code < (TBASE + TCOUNT))
 	{
 		/* make syllable of form LVT */
 		uint32		tindex = code - TBASE;
@@ -423,10 +424,28 @@ unicode_normalize(UnicodeNormalizationForm form, const pg_wchar *input)
 
 	/*
 	 * Calculate how many characters long the decomposed version will be.
+	 *
+	 * Some characters decompose to quite a few code points, so that the
+	 * decomposed version's size could overrun MaxAllocSize, and even 32-bit
+	 * size_t, even though the input string presumably fits in that.  In
+	 * frontend we want to just return NULL in that case, so monitor the sum
+	 * and exit early once we'd need more than MaxAllocSize bytes.
 	 */
 	decomp_size = 0;
 	for (p = input; *p; p++)
+	{
 		decomp_size += get_decomposed_size(*p, compat);
+		if (unlikely(decomp_size > MaxAllocSize / sizeof(pg_wchar)))
+		{
+#ifndef FRONTEND
+			/* Exit loop and let palloc() throw error below */
+			break;
+#else
+			/* Just return NULL with no explicit error */
+			return NULL;
+#endif
+		}
+	}
 
 	decomp_chars = (pg_wchar *) ALLOC((decomp_size + 1) * sizeof(pg_wchar));
 	if (decomp_chars == NULL)

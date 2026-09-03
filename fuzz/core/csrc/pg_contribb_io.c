@@ -4,10 +4,14 @@
  * Crates under test (see fuzz/core/src/contribb_diff.rs for the arm map):
  *   crates/contrib/seg, crates/contrib/cube.
  *
- * Provenance (all bodies VERBATIM sed-extracted from the vendor tree at
- * ~/dev/pgrust-reference/vendor/postgres-src, Stamp-18.3, upstream sha
- * 62d6c7d3df6287f1bd83199c1a746e50d31571a0 — assembled by
- * scratchpad/assemble_contribb.sh, never hand-typed):
+ * Provenance (all bodies VERBATIM sed-extracted from the upstream tree at
+ * REL_18_6 — Stamp 18.6, upstream sha 724edf9bde9d356724ad384a2e196edc3c9f80f7,
+ * /home/dev/dev/postgres-upstream-18.6; re-vendored 2026-09-02. First
+ * assembled at 18.3 by scratchpad/assemble_contribb.sh, never hand-typed;
+ * the only 18.3→18.6 change inside the copied sections is seg_out's
+ * upper-boundary '~' fix (contrib/seg/seg.c, upstream 0004cab4dc), applied
+ * in place; arrayfuncs.c's 67dd6243dc touches accumArrayResultArr only.
+ * Line numbers below are identical at both tags):
  *   - contrib/seg/seg.c lines 22-23 (SEG fmgr macros), 46-54 + 71-99 (the
  *     non-GiST PG_FUNCTION_INFO_V1 blocks + static decls), 102-186
  *     (seg_in/seg_out/seg_center/seg_lower/seg_upper), 538-1099 (everything
@@ -903,7 +907,7 @@ seg_out(PG_FUNCTION_ARGS)
 		{
 			/* print the upper boundary if exists */
 			p += sprintf(p, " ");
-			if (seg->u_ext == '>' || seg->u_ext == '<' || seg->l_ext == '~')
+			if (seg->u_ext == '>' || seg->u_ext == '<' || seg->u_ext == '~')
 				p += sprintf(p, "%c", seg->u_ext);
 			p += restore(p, seg->upper, seg->u_sigd);
 		}

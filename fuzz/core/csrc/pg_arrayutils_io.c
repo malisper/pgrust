@@ -4,8 +4,10 @@
  * crates/backend/utils/adt/arrayutils).
  *
  * Provenance (all bodies VERBATIM unless a shim is listed below):
- *   - src/backend/utils/adt/arrayutils.c @ postgres-src
- *     62d6c7d3df6287f1bd83199c1a746e50d31571a0 (Stamp-18.3): lines 25..225
+ *   - src/backend/utils/adt/arrayutils.c @ postgres-src REL_18_6
+ *     (PostgreSQL 18.6; the file is byte-identical to the 18.3 checkout
+ *     62d6c7d3df6287f1bd83199c1a746e50d31571a0 — re-verified 2026-09-02,
+ *     inline "@ 62d6c7d3df" labels are 18.3 line numbers): lines 25..225
  *     byte-for-byte (ArrayGetOffset, ArrayGetNItems, ArrayGetNItemsSafe,
  *     ArrayCheckBounds, ArrayCheckBoundsSafe, mda_get_range, mda_get_prod,
  *     mda_get_offset_values, mda_next_tuple). ArrayGetIntegerTypmods
@@ -14,7 +16,8 @@
  *     surface.
  *   - src/include/common/int.h @ same ref: pg_add_s32_overflow, the
  *     HAVE__BUILTIN_OP_OVERFLOW arm (the arm every supported gcc/clang
- *     target compiles), reduced to that arm below.
+ *     target compiles), reduced to that arm below (unchanged 18.3->18.6;
+ *     that diff only appends the pg_*_size_overflow helpers).
  *
  * Shims (plumbing only, never logic):
  *   - ereturn(escontext, ret, (errcode(X), errmsg(...))) -> record X in

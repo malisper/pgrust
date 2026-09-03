@@ -2,17 +2,17 @@
  * SHIM pg_config.h — NOT PostgreSQL code. Minimal fabricated config for
  * compiling the verbatim nodes/ walker sources standalone on LP64
  * little-endian gcc/clang (CI cluster aarch64-linux + macOS dev), matching the
- * values a real 18.3 build produces on those platforms.
+ * values a real 18.6 (REL_18_6) build produces on those platforms.
  */
 #ifndef PG_CONFIG_H_SHIM
 #define PG_CONFIG_H_SHIM
 
-#define PG_VERSION "18.3"
-#define PG_VERSION_NUM 180003
+#define PG_VERSION "18.6"
+#define PG_VERSION_NUM 180006
 #define PG_MAJORVERSION "18"
 #define PG_MAJORVERSION_NUM 18
-#define PG_MINORVERSION_NUM 3
-#define PG_VERSION_STR "PostgreSQL 18.3 (pgrust nodesfam differential oracle)"
+#define PG_MINORVERSION_NUM 6
+#define PG_VERSION_STR "PostgreSQL 18.6 (pgrust nodesfam differential oracle)"
 #define CONFIGURE_ARGS ""
 
 #define MAXIMUM_ALIGNOF 8
@@ -31,7 +31,8 @@
 #define HAVE_LONG_INT_64 1
 #define PG_INT64_TYPE long int
 #define PG_INT128_TYPE __int128
-#define PG_PRINTF_ATTRIBUTE printf
+#define PG_C_PRINTF_ATTRIBUTE printf
+#define PG_CXX_PRINTF_ATTRIBUTE printf
 #define INT64_MODIFIER "l"
 
 #define HAVE_INTTYPES_H 1
@@ -50,6 +51,9 @@
 #define HAVE__BUILTIN_BSWAP64 1
 #define HAVE__BUILTIN_CLZ 1
 #define HAVE__BUILTIN_CTZ 1
+/* 18.6 configure emits this on every gcc/clang build; it selects the
+ * __builtin_frame_address(0) probe in src/stack_depth.c (c0bf1d89df). */
+#define HAVE__BUILTIN_FRAME_ADDRESS 1
 #define HAVE__BUILTIN_POPCOUNT 1
 #define HAVE__BUILTIN_CONSTANT_P 1
 #define HAVE__BUILTIN_TYPES_COMPATIBLE_P 1
@@ -70,7 +74,7 @@
 #define ENABLE_NLS 0
 #undef ENABLE_NLS
 
-/* decl availability, per platform (matches real 18.3 configure results:
+/* decl availability, per platform (matches real 18.6 configure results:
  * macOS SDK declares strlcpy/strlcat/F_FULLFSYNC; glibc (CI cluster Linux)
  * does not declare strlcpy/strlcat before 2.38 — port/strlcpy.c and
  * port/strlcat.c are vendored and compiled for that arm). */

@@ -1,4 +1,4 @@
-/* VERBATIM segments from src/backend/utils/adt/numeric.c @ 62d6c7d3df (18.3).
+/* VERBATIM segments from src/backend/utils/adt/numeric.c @ REL_18_6 (724edf9bde, 18.6).
  * Extracted at function-comment boundaries; skipped arms are abort-shims in
  * the driver TU (see pg_jsonbio_io.c header). */
 /*-------------------------------------------------------------------------
@@ -947,7 +947,7 @@ numeric_typmod_scale(int32 typmod)
 	return (((typmod - VARHDRSZ) & 0x7ff) ^ 1024) - 1024;
 }
 
-/* --- numeric.c numeric_int4_opt_error (lines 4515-4563) --- */
+/* --- numeric.c numeric_int4_opt_error (lines 4521-4569) --- */
 int32
 numeric_int4_opt_error(Numeric num, bool *have_error)
 {
@@ -998,7 +998,7 @@ numeric_int4_opt_error(Numeric num, bool *have_error)
 	return result;
 }
 
-/* --- numeric.c numeric_int4 (lines 4565-4571) --- */
+/* --- numeric.c numeric_int4 (lines 4571-4577) --- */
 Datum
 numeric_int4(PG_FUNCTION_ARGS)
 {
@@ -1007,7 +1007,7 @@ numeric_int4(PG_FUNCTION_ARGS)
 	PG_RETURN_INT32(numeric_int4_opt_error(num, NULL));
 }
 
-/* --- numeric.c numericvar_to_int32 (lines 4573-4593) --- */
+/* --- numeric.c numericvar_to_int32 (lines 4579-4599) --- */
 /*
  * Given a NumericVar, convert it to an int32. If the NumericVar
  * exceeds the range of an int32, false is returned, otherwise true is returned.
@@ -1030,7 +1030,7 @@ numericvar_to_int32(const NumericVar *var, int32 *result)
 	return true;
 }
 
-/* --- numeric.c numeric_int8_opt_error (lines 4603-4651) --- */
+/* --- numeric.c numeric_int8_opt_error (lines 4609-4657) --- */
 int64
 numeric_int8_opt_error(Numeric num, bool *have_error)
 {
@@ -1081,7 +1081,7 @@ numeric_int8_opt_error(Numeric num, bool *have_error)
 	return result;
 }
 
-/* --- numeric.c numeric_int8 (lines 4653-4659) --- */
+/* --- numeric.c numeric_int8 (lines 4659-4665) --- */
 Datum
 numeric_int8(PG_FUNCTION_ARGS)
 {
@@ -1090,7 +1090,7 @@ numeric_int8(PG_FUNCTION_ARGS)
 	PG_RETURN_INT64(numeric_int8_opt_error(num, NULL));
 }
 
-/* --- numeric.c numeric_int2 (lines 4671-4708) --- */
+/* --- numeric.c numeric_int2 (lines 4677-4714) --- */
 Datum
 numeric_int2(PG_FUNCTION_ARGS)
 {
@@ -1130,7 +1130,7 @@ numeric_int2(PG_FUNCTION_ARGS)
 	PG_RETURN_INT16(result);
 }
 
-/* --- numeric.c numeric_float8 (lines 4746-4771) --- */
+/* --- numeric.c numeric_float8 (lines 4752-4777) --- */
 Datum
 numeric_float8(PG_FUNCTION_ARGS)
 {
@@ -1158,7 +1158,7 @@ numeric_float8(PG_FUNCTION_ARGS)
 	PG_RETURN_DATUM(result);
 }
 
-/* --- numeric.c numeric_float4 (lines 4840-4865) --- */
+/* --- numeric.c numeric_float4 (lines 4846-4871) --- */
 Datum
 numeric_float4(PG_FUNCTION_ARGS)
 {
@@ -1186,7 +1186,7 @@ numeric_float4(PG_FUNCTION_ARGS)
 	PG_RETURN_DATUM(result);
 }
 
-/* --- numeric.c alloc_var (lines 7066-7079) --- */
+/* --- numeric.c alloc_var (lines 7104-7117) --- */
 /*
  * alloc_var() -
  *
@@ -1202,7 +1202,7 @@ alloc_var(NumericVar *var, int ndigits)
 	var->ndigits = ndigits;
 }
 
-/* --- numeric.c free_var (lines 7082-7094) --- */
+/* --- numeric.c free_var (lines 7120-7132) --- */
 /*
  * free_var() -
  *
@@ -1217,7 +1217,7 @@ free_var(NumericVar *var)
 	var->sign = NUMERIC_NAN;
 }
 
-/* --- numeric.c zero_var (lines 7097-7112) --- */
+/* --- numeric.c zero_var (lines 7135-7150) --- */
 /*
  * zero_var() -
  *
@@ -1235,7 +1235,7 @@ zero_var(NumericVar *var)
 	var->sign = NUMERIC_POS;	/* anything but NAN... */
 }
 
-/* --- numeric.c set_var_from_str (lines 7115-7327) --- */
+/* --- numeric.c set_var_from_str (lines 7153-7365) --- */
 /*
  * set_var_from_str()
  *
@@ -1450,7 +1450,7 @@ invalid_syntax:
 					"numeric", str)));
 }
 
-/* --- numeric.c xdigit_value (lines 7330-7339) --- */
+/* --- numeric.c xdigit_value (lines 7368-7377) --- */
 /*
  * Return the numeric value of a single hex digit.
  */
@@ -1462,7 +1462,7 @@ xdigit_value(char dig)
 		dig >= 'A' && dig <= 'F' ? dig - 'A' + 10 : -1;
 }
 
-/* --- numeric.c set_var_from_num (lines 7533-7552) --- */
+/* --- numeric.c set_var_from_num (lines 7571-7590) --- */
 /*
  * set_var_from_num() -
  *
@@ -1484,7 +1484,7 @@ set_var_from_num(Numeric num, NumericVar *dest)
 	memcpy(dest->digits, NUMERIC_DIGITS(num), ndigits * sizeof(NumericDigit));
 }
 
-/* --- numeric.c init_var_from_num (lines 7555-7578) --- */
+/* --- numeric.c init_var_from_num (lines 7593-7616) --- */
 /*
  * init_var_from_num() -
  *
@@ -1510,7 +1510,7 @@ init_var_from_num(Numeric num, NumericVar *dest)
 	dest->buf = NULL;			/* digits array is not palloc'd */
 }
 
-/* --- numeric.c set_var_from_var (lines 7581-7602) --- */
+/* --- numeric.c set_var_from_var (lines 7619-7640) --- */
 /*
  * set_var_from_var() -
  *
@@ -1534,7 +1534,7 @@ set_var_from_var(const NumericVar *value, NumericVar *dest)
 	dest->digits = newbuf + 1;
 }
 
-/* --- numeric.c get_str_from_var (lines 7605-7741) --- */
+/* --- numeric.c get_str_from_var (lines 7643-7779) --- */
 /*
  * get_str_from_var() -
  *
@@ -1673,7 +1673,7 @@ get_str_from_var(const NumericVar *var)
 	return str;
 }
 
-/* --- numeric.c make_result_opt_error (lines 7891-8001) --- */
+/* --- numeric.c make_result_opt_error (lines 7929-8039) --- */
 /*
  * make_result_opt_error() -
  *
@@ -1786,7 +1786,7 @@ make_result_opt_error(const NumericVar *var, bool *have_error)
 	return result;
 }
 
-/* --- numeric.c make_result (lines 8004-8013) --- */
+/* --- numeric.c make_result (lines 8042-8051) --- */
 /*
  * make_result() -
  *
@@ -1798,7 +1798,7 @@ make_result(const NumericVar *var)
 	return make_result_opt_error(var, NULL);
 }
 
-/* --- numeric.c apply_typmod (lines 8016-8099) --- */
+/* --- numeric.c apply_typmod (lines 8054-8137) --- */
 /*
  * apply_typmod() -
  *
@@ -1884,7 +1884,7 @@ apply_typmod(NumericVar *var, int32 typmod, Node *escontext)
 	return true;
 }
 
-/* --- numeric.c apply_typmod_special (lines 8101-8139) --- */
+/* --- numeric.c apply_typmod_special (lines 8139-8177) --- */
 /*
  * apply_typmod_special() -
  *
@@ -1925,7 +1925,7 @@ apply_typmod_special(Numeric num, int32 typmod, Node *escontext)
 					   precision, scale)));
 }
 
-/* --- numeric.c numericvar_to_int64 (lines 8142-8217) --- */
+/* --- numeric.c numericvar_to_int64 (lines 8180-8255) --- */
 /*
  * Convert numeric to int8, rounding if needed.
  *
@@ -2003,7 +2003,7 @@ numericvar_to_int64(const NumericVar *var, int64 *result)
 	return true;
 }
 
-/* --- numeric.c int64_to_numericvar (lines 8219-8262) --- */
+/* --- numeric.c int64_to_numericvar (lines 8257-8300) --- */
 /*
  * Convert int8 value to numeric.
  */
@@ -2049,7 +2049,7 @@ int64_to_numericvar(int64 val, NumericVar *var)
 	var->weight = ndigits - 1;
 }
 
-/* --- numeric.c round_var (lines 12101-12205) --- */
+/* --- numeric.c round_var (lines 12139-12243) --- */
 /*
  * round_var
  *
@@ -2156,7 +2156,7 @@ round_var(NumericVar *var, int rscale)
 	}
 }
 
-/* --- numeric.c trunc_var (lines 12207-12269) --- */
+/* --- numeric.c trunc_var (lines 12245-12307) --- */
 /*
  * trunc_var
  *
@@ -2221,7 +2221,7 @@ trunc_var(NumericVar *var, int rscale)
 	}
 }
 
-/* --- numeric.c strip_var (lines 12271-12303) --- */
+/* --- numeric.c strip_var (lines 12309-12341) --- */
 /*
  * strip_var
  *

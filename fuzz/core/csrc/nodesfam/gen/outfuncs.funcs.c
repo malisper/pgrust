@@ -2579,6 +2579,7 @@ _outCreateStatsStmt(StringInfo str, const CreateStatsStmt *node)
 	WRITE_STRING_FIELD(stxcomment);
 	WRITE_BOOL_FIELD(transformed);
 	WRITE_BOOL_FIELD(if_not_exists);
+	WRITE_OID_FIELD(owner);
 }
 
 static void

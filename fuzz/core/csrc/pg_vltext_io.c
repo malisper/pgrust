@@ -4,8 +4,12 @@
  * text family).
  *
  * Provenance (all bodies verbatim modulo the documented shims; source of
- * record: pgrust-reference/vendor/postgres-src @
- * 62d6c7d3df6287f1bd83199c1a746e50d31571a0, PostgreSQL 18.3 Stamp-18.3):
+ * record: PostgreSQL upstream @ REL_18_6, PostgreSQL 18.6 — re-verified
+ * 2026-09-02: every copied function is byte-identical to the 18.3 checkout
+ * pgrust-reference/vendor/postgres-src @ 62d6c7d3df6287f1bd83199c1a746e50d31571a0,
+ * PostgreSQL 18.3 Stamp-18.3; varlena.c's 18.3->18.6 diff touches only
+ * SplitGUCList's comment, the levenshtein and unicode_normalize arms, and
+ * common/int.h's only appends size_t helpers):
  *   - src/backend/utils/adt/varlena.c: cstring_to_text,
  *     cstring_to_text_with_len, text_to_cstring, textin, textout, textrecv,
  *     textsend, unknownin, unknownout, unknownrecv, unknownsend, textlen,

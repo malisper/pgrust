@@ -1,11 +1,11 @@
-/* VERBATIM from src/backend/utils/adt/json.c @ 62d6c7d3df (18.3):
+/* VERBATIM from src/backend/utils/adt/json.c @ REL_18_6 (724edf9bde, 18.6):
  * escape_json_char / escape_json / escape_json_with_len (1556-1726). */
 
 /*
  * escape_json_char
  *		Inline helper function for escape_json* functions
  */
-static pg_attribute_always_inline void
+static pg_always_inline void
 escape_json_char(StringInfo buf, char c)
 {
 	switch (c)

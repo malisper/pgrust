@@ -5,8 +5,9 @@
  * (src/port/pg_bitutils.c, src/port/pg_popcount_aarch64.c,
  * src/port/pg_crc32c_sb8.c, src/backend/utils/hash/pg_crc.c,
  * src/port/pgstrcasecmp.c, src/port/path.c, src/port/strlcpy.c,
- * src/backend/access/common/bufmask.c, copied unmodified from postgres-src @
- * 62d6c7d3df6287f1bd83199c1a746e50d31571a0, REL_18 "Stamp 18.3") compile
+ * src/backend/access/common/bufmask.c, copied unmodified from postgres @
+ * REL_18_6 724edf9bde9d356724ad384a2e196edc3c9f80f7 "Stamp 18.6"; first
+ * vendored at 62d6c7d3df "Stamp 18.3") compile
  * standalone for the native differential-fuzz build (portfam_diff target).
  * Plumbing only, never logic: fixed-width typedefs matching c.h on LP64
  * little-endian (the CI cluster oracle platform + this laptop), no-op Assert

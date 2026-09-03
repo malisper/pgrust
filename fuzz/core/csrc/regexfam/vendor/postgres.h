@@ -1,8 +1,11 @@
-/* Standalone shim for the vendored REL_18_3 regex engine. MALLOC here is
+/* Standalone shim for the vendored REL_18_6 regex engine. MALLOC here is
  * palloc_extended(NO_OOM) = NULL-on-failure, so malloc is shape-identical;
- * Assert compiles out (production build); CHECK_FOR_INTERRUPTS keeps its
- * real global-load+branch; ereport arms are unreachable under the C
- * collation and abort if taken. */
+ * MALLOC_ARRAY/REALLOC_ARRAY (regcustom.h @ 18.6, upstream f3cee4dc43) go
+ * through the same overflow-checked palloc_mul_extended shape as the real
+ * palloc.h/mcxt.c (ereport ERROR on overflow = abort here, unreachable under
+ * REG_MAX_COMPILE_SPACE); Assert compiles out (production build);
+ * CHECK_FOR_INTERRUPTS keeps its real global-load+branch; ereport arms are
+ * unreachable under the C collation and abort if taken. */
 #ifndef CREF_REGEX_POSTGRES_H
 #define CREF_REGEX_POSTGRES_H
 
@@ -81,6 +84,26 @@ cref_counted_free(void *p)
 }
 #define palloc_extended(sz, flags) cref_counted_malloc(sz)
 #define repalloc_extended(p, sz, flags) cref_counted_realloc((p), (sz))
+static inline void *
+cref_counted_malloc_mul(Size s1, Size s2)
+{
+	Size		req;
+
+	if (__builtin_mul_overflow(s1, s2, &req))
+		abort();				/* mcxt.c mul_size_error: ereport(ERROR) */
+	return cref_counted_malloc(req);
+}
+static inline void *
+cref_counted_realloc_mul(void *p, Size s1, Size s2)
+{
+	Size		req;
+
+	if (__builtin_mul_overflow(s1, s2, &req))
+		abort();				/* mcxt.c mul_size_error: ereport(ERROR) */
+	return cref_counted_realloc(p, req);
+}
+#define palloc_array_extended(type, count, flags) ((type *) cref_counted_malloc_mul(sizeof(type), count))
+#define repalloc_array_extended(pointer, type, count, flags) ((type *) cref_counted_realloc_mul((pointer), sizeof(type), count))
 static inline void *palloc(Size sz) { return cref_counted_malloc(sz); }
 static inline void pfree(void *p) { cref_counted_free(p); }
 

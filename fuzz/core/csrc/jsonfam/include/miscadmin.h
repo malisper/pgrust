@@ -1,19 +1,21 @@
 /*
  * jsonfam shim miscadmin.h — check_stack_depth() for the vendored parser.
  *
- * CONTRACT (all citations = vendor/postgres-src, PostgreSQL 18.3):
- *   src/backend/utils/misc/stack_depth.c:108-137  stack_is_too_deep():
- *     measures |stack_base_ptr - &own_local| in BYTES against
- *     max_stack_depth_bytes; the base==NULL test comes last (inert until
- *     armed). stack_depth.c:94-106 check_stack_depth(): raises a CATCHABLE
- *     ereport(ERROR, ERRCODE_STATEMENT_TOO_COMPLEX, "stack depth limit
- *     exceeded"). The base is armed once per backend (set_stack_base,
- *     stack_depth.c:43-65, called from main()).
+ * CONTRACT (all citations = postgres REL_18_6, 724edf9bde, PostgreSQL 18.6):
+ *   src/backend/utils/misc/stack_depth.c:109-153  stack_is_too_deep():
+ *     measures |stack_base_ptr - own frame address| in BYTES against
+ *     max_stack_depth_bytes (18.6 samples __builtin_frame_address(0) where
+ *     available, else &own_local — same distance for this non-ASan TU); the
+ *     base==NULL test comes last (inert until armed). stack_depth.c:95-107
+ *     check_stack_depth(): raises a CATCHABLE ereport(ERROR,
+ *     ERRCODE_STATEMENT_TOO_COMPLEX, "stack depth limit exceeded"). The
+ *     base is armed once per backend (set_stack_base, stack_depth.c:43-66,
+ *     called from main()).
  *
  * THE BOUND IS 2048 kB — the EFFECTIVE server default, not the 100 kB boot
  * value:
  *   src/backend/utils/misc/stack_depth.c:26,29: boot value 100 kB;
- *   src/backend/utils/misc/guc_tables.c:2615-2618: "We use the
+ *   src/backend/utils/misc/guc_tables.c:2616-2619: "We use the
  *     hopefully-safely-small value of 100kB as the compiled-in default for
  *     max_stack_depth.  InitializeGUCOptions will increase it if possible";
  *   src/backend/utils/misc/guc.c:1589 InitializeGUCOptionsFromEnvironment,
@@ -56,7 +58,7 @@
 
 /* Armed per oracle entry by PG_JSONFAM_ENTRY (pg_json_io.c), the way a
  * backend arms it once in main(). NULL => inert, exactly C's base==NULL
- * arm (stack_depth.c:132-133). */
+ * arm (stack_depth.c:148-149). */
 extern _Thread_local const char *pg_jsonfam_stack_base;
 
 extern void pg_jsonfam_set_stack_base(void);

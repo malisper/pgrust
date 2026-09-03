@@ -9,15 +9,18 @@
  * helper becomes pure over (its arguments, that row).  This TU holds a
  * thread-local row store (loaded from the same wire bytes the Rust side
  * derives), a SearchSysCacheN / GetSysCacheOidN interception layer that
- * answers from the store, and VERBATIM 18.3 lsyscache consumer bodies
+ * answers from the store, and VERBATIM 18.6 lsyscache consumer bodies
  * compiled under that interception — C bodies stay verbatim, the
  * interception is pure preprocessor/shim plumbing.
  *
  * Provenance: FormData_pg_* fixed prefixes and the SECTION-V consumer
  * bodies vendored VERBATIM (comments/BKI annotations elided; pg_proc's
  * trailing oidvector member elided — no consumer here reads past
- * prorettype) from postgres-src 62d6c7d3df6287f1bd83199c1a746e50d31571a0
- * (REL_18 "Stamp 18.3", ../pgrust-reference/vendor/postgres-src)
+ * prorettype) from postgres-src REL_18_6 724edf9bde9d356724ad384a2e196edc3c9f80f7
+ * ("Stamp 18.6", /home/dev/dev/postgres-upstream-18.6; re-verified
+ * 2026-09-02 — lsyscache.c's 18.3→18.6 commits fe5d62951b, 11aed8d19c and
+ * b62f514ac5 touch none of the seven consumer bodies vendored here, and
+ * the seven catalog headers are byte-identical at both tags)
  * src/include/catalog/pg_{amop,amproc,operator,opclass,type,attribute,
  * proc}.h and src/backend/utils/cache/lsyscache.c.
  *
@@ -25,7 +28,7 @@
  * (verbatim bodies are renamed by #define ahead of the paste, the
  * established stubshims pattern).  nm-census before pushing.
  *
- * CACHE-ID NOTE: 18.3 generates its SysCacheIdentifier enum values at build
+ * CACHE-ID NOTE: 18.6 generates its SysCacheIdentifier enum values at build
  * time (MAKE_SYSCACHE); the NAMES are what the verbatim bodies reference,
  * so the names are load-bearing and the numeric values here are shim-
  * internal dispatch tags.
@@ -1000,7 +1003,7 @@ pg_stub_syscache_elog_raise(void)
 #define elog(level, ...) pg_stub_syscache_elog_raise()
 #define ERROR 21				/* consumed by the elog macro only */
 
-/* ---- SECTION-V: VERBATIM 18.3 lsyscache.c consumer bodies, compiled
+/* ---- SECTION-V: VERBATIM 18.6 lsyscache.c consumer bodies, compiled
  * under the interception above.  Renamed to prefixed exports by #define
  * (the established stubshims pattern); bodies unedited. ---- */
 

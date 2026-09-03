@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
-"""Extract verbatim C function/table definitions from the vendored
-PostgreSQL 18.3 checkout (../pgrust-reference/vendor/postgres-src @
-62d6c7d3df6287f1bd83199c1a746e50d31571a0) for a differential-fuzz oracle.
+"""Extract verbatim C function/table definitions from the PostgreSQL 18.6
+source tree (tag REL_18_6 @ 724edf9bde9d356724ad384a2e196edc3c9f80f7; default
+VENDOR = the in-repo pristine tree crates/postgres-18.6-reference, override
+with $PG_VENDOR) for a differential-fuzz oracle.
 
 Bodies are copied BYTE-FOR-BYTE from the definition line (function name at
 column 0, return type on the line(s) above) through the closing brace.
 Used by pg_datetime_io_io.c's generation recipe (see that file's header);
 re-run to refresh: the output is committed, this script is provenance.
 """
+import os
 import re
 import sys
 
-VENDOR = "/home/dev/dev/pgrust-reference/vendor/postgres-src"
+VENDOR = os.environ.get(
+    "PG_VENDOR",
+    os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  "..", "..", "..", "crates",
+                                  "postgres-18.6-reference")))
 
 
 def load(rel):

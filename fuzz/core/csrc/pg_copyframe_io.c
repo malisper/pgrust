@@ -6,9 +6,11 @@
  * NO verbatim-C oracle in csrc/ (findings-edge2.md "Coverage gaps").
  *
  * Provenance (bodies VERBATIM unless a shim is listed below), from the
- * repo's vendored ground-truth checkout
- * ../pgrust-reference/vendor/postgres-src @
- * 62d6c7d3df6287f1bd83199c1a746e50d31571a0 ("Stamp 18.3", REL_18):
+ * upstream tree at REL_18_6 ("Stamp 18.6",
+ * 724edf9bde9d356724ad384a2e196edc3c9f80f7; re-verified 2026-09-02 — the only
+ * 18.3→18.6 change to copyfromparse.c, d1d9688b1f
+ * pg_attribute_always_inline→pg_always_inline, touches none of the copied
+ * bodies and shifts no line numbers):
  *   - src/backend/commands/copyfromparse.c
  *       361..393  CopyGetInt32 / CopyGetInt16      — VERBATIM
  *       700..742  CopyReadBinaryData               — VERBATIM
@@ -445,7 +447,7 @@ CopyGetData(CopyFromState cstate, void *databuf, int minread, int maxread)
 }
 
 /* ============================================================= */
-/* VERBATIM vendored bodies (copyfromparse.c @ 62d6c7d3df) below. */
+/* VERBATIM vendored bodies (copyfromparse.c @ REL_18_6 724edf9bde) below. */
 /* ============================================================= */
 
 /* --- copyfromparse.c 700..742 CopyReadBinaryData (VERBATIM) --- */
@@ -783,7 +785,7 @@ CopyReadAttributesText(CopyFromState cstate)
 }
 
 /* ============================================================= */
-/* VERBATIM line/row framing (copyfromparse.c @ 62d6c7d3df) below */
+/* VERBATIM line/row framing (copyfromparse.c @ REL_18_6 724edf9bde) below */
 /* — CopyReadLine + CopyReadLineText, the raw-line reader that    */
 /* splits COPY input into rows before field parsing (VENDOR-COPYROW). */
 /* ============================================================= */

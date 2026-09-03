@@ -277,6 +277,7 @@ typedef int32 fixed_part;		/* unused placeholder */
 
 #define pg_attribute_unused() __attribute__((unused))
 #define pg_attribute_noreturn() __attribute__((noreturn))
+#define pg_always_inline __attribute__((always_inline)) inline
 #define pg_attribute_always_inline __attribute__((always_inline)) inline
 #define pg_attribute_packed() __attribute__((packed))
 #define pg_noinline __attribute__((noinline))

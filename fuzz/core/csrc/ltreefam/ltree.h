@@ -157,8 +157,6 @@ typedef struct
 	char		data[FLEXIBLE_ARRAY_MEMBER];
 } ltxtquery;
 
-typedef bool (*ltree_prefix_eq_func) (const char *, size_t, const char *, size_t);
-
 #define HDRSIZEQT		MAXALIGN(VARHDRSZ + sizeof(int32))
 #define COMPUTESIZE(size,lenofoperand)	( HDRSIZEQT + (size) * sizeof(ITEM) + (lenofoperand) )
 #define LTXTQUERY_TOO_BIG(size,lenofoperand) \
@@ -208,12 +206,13 @@ bool		ltree_execute(ITEM *curitem, void *checkval,
 						  bool calcnot, bool (*chkcond) (void *checkval, ITEM *val));
 
 int			ltree_compare(const ltree *a, const ltree *b);
+float		ltree_compare_distance(const ltree *a, const ltree *b);
 bool		inner_isparent(const ltree *c, const ltree *p);
-bool		compare_subnode(ltree_level *t, char *qn, int len,
-							ltree_prefix_eq_func prefix_eq, bool anyend);
+bool		compare_subnode(ltree_level *t, char *qn, int len, bool prefix, bool ci);
 ltree	   *lca_inner(ltree **a, int len);
-bool		ltree_prefix_eq(const char *a, size_t a_sz, const char *b, size_t b_sz);
-bool		ltree_prefix_eq_ci(const char *a, size_t a_sz, const char *b, size_t b_sz);
+bool		ltree_label_match(const char *pred, size_t pred_len,
+							  const char *label, size_t label_len,
+							  bool prefix, bool ci);
 
 /* fmgr macros for ltree objects */
 #define DatumGetLtreeP(X)			((ltree *) PG_DETOAST_DATUM(X))

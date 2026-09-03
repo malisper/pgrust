@@ -1,5 +1,5 @@
 /* VERBATIM segments from src/backend/utils/adt/arrayfuncs.c +
- * src/backend/utils/adt/arrayutils.c @ 62d6c7d3df (18.3): the array
+ * src/backend/utils/adt/arrayutils.c @ REL_18_6 (724edf9bde, 18.6): the array
  * deconstruction path the vendored jsonb ops call (deconstruct_array,
  * deconstruct_array_builtin, array_contains_nulls, ArrayGetNItems[Safe]).
  */

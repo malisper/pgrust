@@ -1,4 +1,4 @@
-/* VERBATIM from src/backend/utils/adt/varlena.c @ 62d6c7d3df (18.3):
+/* VERBATIM from src/backend/utils/adt/varlena.c @ REL_18_6 (724edf9bde, 18.6):
  * check_collation_set + varstr_cmp. Environment pin: the shim
  * pg_newlocale_from_collation (shim/utils/pg_locale.h) reports
  * collate_is_c=true for every collation this family passes

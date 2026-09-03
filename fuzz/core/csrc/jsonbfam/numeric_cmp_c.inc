@@ -1,5 +1,5 @@
-/* VERBATIM segments from src/backend/utils/adt/numeric.c @ 62d6c7d3df
- * (18.3): comparison + hashing surface reachable from jsonb ops
+/* VERBATIM segments from src/backend/utils/adt/numeric.c @ REL_18_6
+ * (724edf9bde, 18.6): comparison + hashing surface reachable from jsonb ops
  * (compareJsonbContainers -> numeric_cmp; equalsJsonbScalarValue ->
  * numeric_eq; JsonbHashScalarValue[Extended] -> hash_numeric[_extended]).
  * Static decls for cmp_* already ride numeric_c.inc (file-head decls);
@@ -7,7 +7,7 @@
  * the cmp_* helpers are static).
  */
 
-/* --- numeric.c numeric_cmp (lines 2517-2530) --- */
+/* --- numeric.c numeric_cmp (lines 2523-2536) --- */
 Datum
 numeric_cmp(PG_FUNCTION_ARGS)
 {
@@ -23,7 +23,7 @@ numeric_cmp(PG_FUNCTION_ARGS)
 	PG_RETURN_INT32(result);
 }
 
-/* --- numeric.c numeric_eq (lines 2533-2546) --- */
+/* --- numeric.c numeric_eq (lines 2539-2552) --- */
 Datum
 numeric_eq(PG_FUNCTION_ARGS)
 {
@@ -39,7 +39,7 @@ numeric_eq(PG_FUNCTION_ARGS)
 	PG_RETURN_BOOL(result);
 }
 
-/* --- numeric.c cmp_numerics (lines 2623-2675) --- */
+/* --- numeric.c cmp_numerics (lines 2629-2681) --- */
 static int
 cmp_numerics(Numeric num1, Numeric num2)
 {
@@ -94,7 +94,7 @@ cmp_numerics(Numeric num1, Numeric num2)
 	return result;
 }
 
-/* --- numeric.c hash_numeric (lines 2815-2889) --- */
+/* --- numeric.c hash_numeric (lines 2821-2895) --- */
 Datum
 hash_numeric(PG_FUNCTION_ARGS)
 {
@@ -171,7 +171,7 @@ hash_numeric(PG_FUNCTION_ARGS)
 	PG_RETURN_DATUM(result);
 }
 
-/* --- numeric.c hash_numeric_extended (lines 2891-2950) --- */
+/* --- numeric.c hash_numeric_extended (lines 2897-2956) --- */
 /*
  * Returns 64-bit value by hashing a value to a 64-bit value, with a seed.
  * Otherwise, similar to hash_numeric.
@@ -233,7 +233,7 @@ hash_numeric_extended(PG_FUNCTION_ARGS)
 	PG_RETURN_DATUM(result);
 }
 
-/* --- numeric.c cmp_var (lines 8485-8498) --- */
+/* --- numeric.c cmp_var (lines 8523-8536) --- */
 /*
  * cmp_var() -
  *
@@ -249,7 +249,7 @@ cmp_var(const NumericVar *var1, const NumericVar *var2)
 						  var2->weight, var2->sign);
 }
 
-/* --- numeric.c cmp_var_common (lines 8500-8540) --- */
+/* --- numeric.c cmp_var_common (lines 8538-8578) --- */
 /*
  * cmp_var_common() -
  *
@@ -292,7 +292,7 @@ cmp_var_common(const NumericDigit *var1digits, int var1ndigits,
 						  var1digits, var1ndigits, var1weight);
 }
 
-/* --- numeric.c cmp_abs (lines 11854-11868) --- */
+/* --- numeric.c cmp_abs (lines 11892-11906) --- */
 /* ----------
  * cmp_abs() -
  *
@@ -309,7 +309,7 @@ cmp_abs(const NumericVar *var1, const NumericVar *var2)
 						  var2->digits, var2->ndigits, var2->weight);
 }
 
-/* --- numeric.c cmp_abs_common (lines 11870-11932) --- */
+/* --- numeric.c cmp_abs_common (lines 11908-11970) --- */
 /* ----------
  * cmp_abs_common() -
  *

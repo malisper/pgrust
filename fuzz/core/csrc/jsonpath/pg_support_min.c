@@ -1,7 +1,7 @@
 /*
  * pg_support_min.c — VERBATIM support extracts for the jsonpath_diff oracle,
- * all from postgres-src @ 62d6c7d3df6287f1bd83199c1a746e50d31571a0
- * (PostgreSQL 18.3). Every extract carries a "file:A-B VERBATIM" provenance
+ * all from postgres REL_18_6 @ 724edf9bde9d356724ad384a2e196edc3c9f80f7
+ * (PostgreSQL 18.6). Every extract carries a "file:A-B VERBATIM" provenance
  * marker (extract_verbatim.py). Sections:
  *   1. src/port/pgstrcasecmp.c — ASCII case helpers.
  *   2. src/backend/libpq/pqformat.c — pq_sendtext/begintypsend/endtypsend/
@@ -367,7 +367,7 @@ pq_getmsgtext(StringInfo msg, int rawbytes, int *nbytes)
  * escape_json_char
  *		Inline helper function for escape_json* functions
  */
-static pg_attribute_always_inline void
+static pg_always_inline void
 escape_json_char(StringInfo buf, char c)
 {
 	switch (c)

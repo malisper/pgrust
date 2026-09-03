@@ -11,8 +11,9 @@
  * the Rust counterpart (adt_tsrank builtins.rs arg_weights) reads the same
  * image bytes — so the oracle needs the REAL array layout. ArrayType struct +
  * ARR_* accessor macros + MAXDIM/MaxArraySize are VERBATIM from upstream
- * src/include/utils/array.h @ 62d6c7d3df6287f1bd83199c1a746e50d31571a0
- * (lines 75-82 and 289-325); bits8 is verbatim from src/include/c.h.
+ * src/include/utils/array.h @ REL_18_6 (lines 75-82 and 289-325; the file
+ * and those lines are unchanged since 62d6c7d3df6287f1bd83199c1a746e50d31571a0);
+ * bits8 is verbatim from src/include/c.h @ REL_18_6 (typedef unchanged).
  * ArrayGetNItems/ArrayGetNItemsSafe/array_contains_nulls bodies are pasted
  * verbatim in csrc/pg_tsrank_io.c.
  */

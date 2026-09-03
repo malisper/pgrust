@@ -3,13 +3,13 @@
  *
  * Minimal environment so the VERBATIM vendored jsonpath/regex/numeric/
  * formatting/stringinfo/pqformat/mbutils TUs in this directory compile
- * standalone (postgres-src @ 62d6c7d3df6287f1bd83199c1a746e50d31571a0,
- * PostgreSQL 18.3). Plumbing only, never logic:
+ * standalone (postgres REL_18_6 @ 724edf9bde9d356724ad384a2e196edc3c9f80f7,
+ * PostgreSQL 18.6). Plumbing only, never logic:
  *
  *   - fixed-width typedefs matching c.h on LP64; Datum machinery verbatim
  *     in shape (uintptr_t) with the postgres.h conversion macros;
  *   - Assert compiled out (matches a production/NDEBUG PostgreSQL build,
- *     which is the ground-truth docker postgres:18.3 behavior);
+ *     which is the ground-truth docker postgres:18.6 behavior);
  *   - palloc family -> the TLS pointer arena in pg_jsonpath_env.c (models
  *     PG's per-query memory-context reset; error longjmps cannot leak);
  *   - ereport/elog/errsave/ereturn -> TLS errcode + message capture with
@@ -99,6 +99,7 @@ typedef unsigned __int128 uint128;
 
 #define pg_attribute_unused() __attribute__((unused))
 #define pg_attribute_noreturn() __attribute__((noreturn))
+#define pg_always_inline __attribute__((always_inline)) inline
 #define pg_attribute_always_inline __attribute__((always_inline)) inline
 #define pg_attribute_printf(f,a) __attribute__((format(printf, f, a)))
 #define pg_nodiscard __attribute__((warn_unused_result))
@@ -258,6 +259,13 @@ extern void *pg_jsonpath_palloc_extended(Size size, int flags);
 extern void *pg_jsonpath_repalloc_extended(void *ptr, Size size, int flags);
 #define palloc_extended(sz, flags) pg_jsonpath_palloc_extended((sz), (flags))
 #define repalloc_extended(p, sz, flags) pg_jsonpath_repalloc_extended((p), (sz), (flags))
+/* palloc.h @ REL_18_6 (upstream f3cee4dc43): regcustom.h MALLOC_ARRAY /
+ * REALLOC_ARRAY -> overflow-checked palloc_mul_extended shape (mcxt.c:
+ * ereport ERROR on sizeof(type)*count overflow, else the *_extended form) */
+extern void *pg_jsonpath_palloc_mul_extended(Size s1, Size s2, int flags);
+extern void *pg_jsonpath_repalloc_mul_extended(void *ptr, Size s1, Size s2, int flags);
+#define palloc_array_extended(type, count, flags) ((type *) pg_jsonpath_palloc_mul_extended(sizeof(type), count, flags))
+#define repalloc_array_extended(pointer, type, count, flags) ((type *) pg_jsonpath_repalloc_mul_extended(pointer, sizeof(type), count, flags))
 
 extern char *psprintf(const char *fmt, ...) pg_attribute_printf(1, 2);
 extern size_t pvsnprintf(char *buf, size_t len, const char *fmt, va_list args);
@@ -395,7 +403,7 @@ extern unsigned char pg_ascii_tolower(unsigned char ch);
 
 
 /* --- additions for the jsonpathexec_diff oracle family (shim, NOT PG code):
- * Datum conversion inlines VERBATIM shapes from postgres.h @ 18.3 --- */
+ * Datum conversion inlines VERBATIM shapes from postgres.h @ REL_18_6 --- */
 static inline uint32
 DatumGetUInt32(Datum X)
 {
@@ -460,7 +468,7 @@ Float8GetDatum(float8 X)
 	return (Datum) myunion.retval;
 }
 
-/* pg_rotate_left32 VERBATIM from port/pg_bitutils.h @ 18.3 */
+/* pg_rotate_left32 VERBATIM from port/pg_bitutils.h @ REL_18_6 */
 static inline uint32
 pg_rotate_left32(uint32 word, int n)
 {
@@ -469,7 +477,7 @@ pg_rotate_left32(uint32 word, int n)
 
 
 /* --- additions for the jsonpathexec_diff oracle family (shim; sqlstates are
- * the real MAKE_SQLSTATE encodings from errcodes.h @ 18.3) --- */
+ * the real MAKE_SQLSTATE encodings from errcodes.h @ REL_18_6) --- */
 #define ERRCODE_DUPLICATE_JSON_OBJECT_KEY_VALUE MAKE_SQLSTATE('2','2','0','3','0')
 #define ERRCODE_DIVISION_BY_ZERO MAKE_SQLSTATE('2','2','0','1','2')
 #define ERRCODE_UNDEFINED_OBJECT MAKE_SQLSTATE('4','2','7','0','4')
@@ -535,7 +543,7 @@ DatumGetFloat4(Datum X)
 	return myunion.retval;
 }
 
-/* unconstify VERBATIM from c.h @ 18.3 */
+/* unconstify VERBATIM from c.h @ REL_18_6 */
 #define unconstify(underlying_type, expr) \
 	(StaticAssertExpr(__builtin_types_compatible_p(__typeof(expr), const underlying_type), \
 					  "wrong cast"), \

@@ -4,8 +4,13 @@
  * crates/backend/utils/adt/oracle_compat).
  *
  * Provenance (bodies VERBATIM unless a shim is listed below), all from
- * postgres-src 62d6c7d3df6287f1bd83199c1a746e50d31571a0 (PostgreSQL 18.3,
- * "Stamp 18.3"; re-verified against ../pgrust-reference/vendor/postgres-src):
+ * PostgreSQL REL_18_6 (upstream sha 724edf9bde9d356724ad384a2e196edc3c9f80f7; re-vendored
+ * 2026-09-02 from the 18.3 extraction @ 62d6c7d3df — the only copied body
+ * that changed 18.3→18.6 is oracle_compat.c ascii(): 08e812c02a, invalid
+ * multibyte input now raises 22021 instead of Assert-and-read-past-the-end;
+ * the copied sections of every other cited path are byte-identical at
+ * REL_18_6 — varlena.c/formatting.c/mcxt.c/int.h/memutils.h changed only
+ * outside them):
  *   - src/backend/utils/adt/oracle_compat.c: lpad, rpad, dotrim,
  *     dobyteatrim, translate, ascii, chr, repeat (the 2-arg/1-arg trim SQL
  *     wrappers btrim/ltrim/rtrim/btrim1/... are dotrim flag spellings; the
@@ -146,6 +151,7 @@ pg_diff_oc_raise(int class_)
 #define ERRCODE_PROGRAM_LIMIT_EXCEEDED PG_DIFF_ERR_PROGRAM_LIMIT
 #define ERRCODE_INVALID_PARAMETER_VALUE PG_DIFF_ERR_INVALID_PARAM
 #define ERRCODE_SUBSTRING_ERROR PG_DIFF_ERR_SUBSTRING
+#define ERRCODE_CHARACTER_NOT_IN_REPERTOIRE PG_DIFF_ERR_BAD_ENCODING
 
 /* ---------------- palloc arena shim (see header) ---------------- */
 
@@ -1362,8 +1368,10 @@ pg_oc_ascii(text *string)
 {
 	int			encoding = GetDatabaseEncoding();
 	unsigned char *data;
+	int			len;
 
-	if (VARSIZE_ANY_EXHDR(string) <= 0)
+	len = VARSIZE_ANY_EXHDR(string);
+	if (len <= 0)
 		return 0;
 
 	data = (unsigned char *) VARDATA_ANY(string);
@@ -1386,18 +1394,31 @@ pg_oc_ascii(text *string)
 			result = *data & 0x0F;
 			tbytes = 2;
 		}
-		else
+		else if (*data > 0xC0)
 		{
-			Assert(*data > 0xC0);
 			result = *data & 0x1f;
 			tbytes = 1;
 		}
+		else
+			ereport(ERROR,
+					(errcode(ERRCODE_CHARACTER_NOT_IN_REPERTOIRE),
+					 errmsg("invalid byte sequence for encoding \"%s\"",
+							GetDatabaseEncodingName())));
 
-		Assert(tbytes > 0);
+		/* All continuation bytes are present in the input */
+		if (tbytes >= len)
+			ereport(ERROR,
+					(errcode(ERRCODE_CHARACTER_NOT_IN_REPERTOIRE),
+					 errmsg("invalid byte sequence for encoding \"%s\"",
+							GetDatabaseEncodingName())));
 
 		for (i = 1; i <= tbytes; i++)
 		{
-			Assert((data[i] & 0xC0) == 0x80);
+			if (unlikely((data[i] & 0xC0) != 0x80))
+				ereport(ERROR,
+						(errcode(ERRCODE_CHARACTER_NOT_IN_REPERTOIRE),
+						 errmsg("invalid byte sequence for encoding \"%s\"",
+								GetDatabaseEncodingName())));
 			result = (result << 6) + (data[i] & 0x3f);
 		}
 

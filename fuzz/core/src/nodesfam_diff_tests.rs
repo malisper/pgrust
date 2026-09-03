@@ -155,9 +155,6 @@ const COPY_COMPLEMENT: &[(&str, &str)] = &[
     // header carve), so these are unconstructible on both sides.
     ("ExtensibleNode", "NO-VOCAB (extension registry absent both sides)"),
     ("CustomScan", "NO-VOCAB (extension registry absent both sides)"),
-    // utility statements whose struct was never brought into the vocabulary
-    ("AlterExtensionContentsStmt", "NO-VOCAB (utility stmt not in vocabulary)"),
-    ("AlterObjectDependsStmt", "NO-VOCAB (utility stmt not in vocabulary)"),
 ];
 
 /// The count of out-of-charter tags for outfuncs/readfuncs. Enumerating ~300

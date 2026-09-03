@@ -22,6 +22,7 @@
 #define DCH_MAX_ITEM_SIZ	   12	/* max localized day name		*/
 #define NUM_MAX_ITEM_SIZ		8	/* roman number (RN has 15 chars)	*/
 
+#define MAX_L10N_DATA			80	/* max localized day or month name */
 
 /* ----------
  * Format parser structs
@@ -946,8 +947,9 @@ typedef struct NUMProc
 	char	   *number,			/* string with number	*/
 			   *number_p,		/* pointer to current number position */
 			   *inout,			/* in / out buffer	*/
-			   *inout_p,		/* pointer to current inout position */
-			   *last_relevant,	/* last relevant number after decimal point */
+			   *inout_p;		/* pointer to current inout position */
+
+	const char *last_relevant,	/* last relevant number after decimal point */
 
 			   *L_negative_sign,	/* Locale */
 			   *L_positive_sign,
@@ -1004,8 +1006,8 @@ static int	from_char_parse_int_len(int *dest, const char **src, const int len,
 									FormatNode *node, Node *escontext);
 static int	from_char_parse_int(int *dest, const char **src, FormatNode *node,
 								Node *escontext);
-static int	seq_search_ascii(const char *name, const char *const *array, int *len);
-static int	seq_search_localized(const char *name, char **array, int *len,
+static int	seq_search_ascii(const char *name, const char *const *array, size_t *len);
+static int	seq_search_localized(const char *name, char **array, size_t *len,
 								 Oid collid);
 static bool from_char_seq_search(int *dest, const char **src,
 								 const char *const *array,
@@ -1022,6 +1024,7 @@ static void NUM_prepare_locale(NUMProc *Np);
 static char *get_last_relevant_decnum(char *num);
 static void NUM_numpart_from_char(NUMProc *Np, int id, int input_len);
 static void NUM_numpart_to_char(NUMProc *Np, int id);
+static void NUM_add_locale_symbol(NUMProc *Np, const char *pattern);
 static char *NUM_processor(FormatNode *node, NUMDesc *Num, char *inout,
 						   char *number, int input_len, int to_char_out_pre_spaces,
 						   int sign, bool is_to_char, Oid collid);
@@ -2223,7 +2226,7 @@ from_char_parse_int(int *dest, const char **src, FormatNode *node,
  * suitable for comparisons to ASCII strings.
  */
 static int
-seq_search_ascii(const char *name, const char *const *array, int *len)
+seq_search_ascii(const char *name, const char *const *array, size_t *len)
 {
 	unsigned char firstc;
 	const char *const *a;
@@ -2269,6 +2272,41 @@ seq_search_ascii(const char *name, const char *const *array, int *len)
 }
 
 /*
+ * Compare 'name' with 'element' in a case-insensitive way, by first
+ * converting 'name' to upper case, then lower case. ('element' is already
+ * case-folded that way.)
+ *
+ * A helper function for seq_search_localized().
+ */
+static bool
+casefold_str_cmp(const char *name, size_t name_len,
+				 const char *element, size_t element_len,
+				 pg_locale_t mylocale)
+{
+	/*
+	 * 'name' is expected to fit in MAX_L10N_DATA, even with the case
+	 * conversions.
+	 */
+	char		upper_substr[MAX_L10N_DATA];
+	size_t		upper_substr_len;
+	char		lower_substr[MAX_L10N_DATA];
+	size_t		lower_substr_len;
+
+	upper_substr_len = pg_strupper(upper_substr, sizeof(upper_substr),
+								   name, name_len,
+								   mylocale);
+	if (upper_substr_len > sizeof(upper_substr) - 1)
+		return false;			/* shouldn't happen */
+	lower_substr_len = pg_strlower(lower_substr, sizeof(lower_substr),
+								   upper_substr, upper_substr_len,
+								   mylocale);
+	if (lower_substr_len > sizeof(lower_substr) - 1)
+		return false;			/* shouldn't happen */
+
+	return strcmp(lower_substr, element) == 0;
+}
+
+/*
  * Sequentially search an array of possibly non-English words for
  * a case-insensitive match to the initial character(s) of "name".
  *
@@ -2280,11 +2318,13 @@ seq_search_ascii(const char *name, const char *const *array, int *len)
  * the arrays exported by pg_locale.c aren't const.
  */
 static int
-seq_search_localized(const char *name, char **array, int *len, Oid collid)
+seq_search_localized(const char *name, char **array, size_t *len, Oid collid)
 {
-	char	  **a;
+	size_t		name_len = strlen(name);
+	const char *name_end = name + name_len;
 	char	   *upper_name;
 	char	   *lower_name;
+	pg_locale_t mylocale;
 
 	*len = 0;
 
@@ -2296,9 +2336,9 @@ seq_search_localized(const char *name, char **array, int *len, Oid collid)
 	 * The case-folding processing done below is fairly expensive, so before
 	 * doing that, make a quick pass to see if there is an exact match.
 	 */
-	for (a = array; *a != NULL; a++)
+	for (char **a = array; *a != NULL; a++)
 	{
-		int			element_len = strlen(*a);
+		size_t		element_len = strlen(*a);
 
 		if (strncmp(name, *a, element_len) == 0)
 		{
@@ -2307,36 +2347,109 @@ seq_search_localized(const char *name, char **array, int *len, Oid collid)
 		}
 	}
 
+	mylocale = pg_newlocale_from_collation(collid);
+
 	/*
 	 * Fold to upper case, then to lower case, so that we can match reliably
 	 * even in languages in which case conversions are not injective.
 	 */
-	upper_name = str_toupper(name, strlen(name), collid);
+	upper_name = str_toupper(name, name_len, collid);
 	lower_name = str_tolower(upper_name, strlen(upper_name), collid);
 	pfree(upper_name);
 
-	for (a = array; *a != NULL; a++)
+	for (char **a = array; *a != NULL; a++)
 	{
-		char	   *upper_element;
-		char	   *lower_element;
-		int			element_len;
+		char		upper_element[MAX_L10N_DATA];
+		size_t		upper_element_len;
+		char		lower_element[MAX_L10N_DATA];
+		size_t		lower_element_len;
 
 		/* Likewise upper/lower-case array element */
-		upper_element = str_toupper(*a, strlen(*a), collid);
-		lower_element = str_tolower(upper_element, strlen(upper_element),
-									collid);
-		pfree(upper_element);
-		element_len = strlen(lower_element);
+		upper_element_len = pg_strupper(upper_element, sizeof(upper_element),
+										*a, strlen(*a),
+										mylocale);
+		if (upper_element_len > sizeof(upper_element) - 1)
+			continue;			/* shouldn't happen */
+		lower_element_len = pg_strlower(lower_element, sizeof(lower_element),
+										upper_element, upper_element_len,
+										mylocale);
+		if (lower_element_len > sizeof(lower_element) - 1)
+			continue;			/* shouldn't happen */
 
-		/* Match? */
-		if (strncmp(lower_name, lower_element, element_len) == 0)
+		/* Is 'lower_element' a prefix of 'lower_name' ? */
+		if (strncmp(lower_name, lower_element, lower_element_len) == 0)
 		{
-			*len = element_len;
-			pfree(lower_element);
-			pfree(lower_name);
-			return a - array;
+			/*
+			 * We have a match, but we still need to figure out how long the
+			 * match is.  The case conversions could have changed the lengths
+			 * of either string, or both.
+			 */
+			const char *ep;
+			const char *element_end;
+			size_t		element_nchars;
+			size_t		substr_len;
+			size_t		substr_nchars;
+
+			/*
+			 * First, check the easy case that the string matches as whole.
+			 */
+			if (strlen(lower_name) == lower_element_len)
+			{
+				*len = name_len;
+				pfree(lower_name);
+				return a - array;
+			}
+
+			/*
+			 * Another good guess is that the case conversions did not change
+			 * the number of characters.
+			 */
+
+			/* count characters in the element */
+			ep = lower_element;
+			element_end = lower_element + lower_element_len;
+			for (element_nchars = 0; ep < element_end; element_nchars++)
+				ep += pg_mblen_range(ep, element_end);
+
+			/*
+			 * count the byte length of a substring of 'name' having the same
+			 * character count as the element
+			 */
+			substr_len = 0;
+			for (substr_nchars = 0;
+				 substr_nchars < element_nchars && substr_len < name_len;
+				 substr_nchars++)
+			{
+				substr_len += pg_mblen_range(name + substr_len, name_end);
+			}
+
+			if (casefold_str_cmp(name, substr_len, lower_element, lower_element_len, mylocale))
+			{
+				*len = substr_len;
+				pfree(lower_name);
+				return a - array;
+			}
+
+			/*
+			 * As last resort, try the case conversion and comparison for
+			 * every substring from the beginning of the original string until
+			 * we find a match.
+			 */
+			substr_len = 0;
+			while (substr_len < name_len)
+			{
+				substr_len += pg_mblen_range(name + substr_len, name_end);
+
+				if (casefold_str_cmp(name, substr_len,
+									 lower_element, lower_element_len,
+									 mylocale))
+				{
+					*len = substr_len;
+					pfree(lower_name);
+					return a - array;
+				}
+			}
 		}
-		pfree(lower_element);
 	}
 
 	pfree(lower_name);
@@ -2368,7 +2481,7 @@ from_char_seq_search(int *dest, const char **src, const char *const *array,
 					 char **localized_array, Oid collid,
 					 FormatNode *node, Node *escontext)
 {
-	int			len;
+	size_t		len;
 
 	if (localized_array == NULL)
 		*dest = seq_search_ascii(*src, array, &len);
@@ -2533,10 +2646,18 @@ DCH_to_char(FormatNode *node, bool is_interval, TmToChar *in, char *out, Oid col
 				INVALID_FOR_INTERVAL;
 				if (tmtcTzn(in))
 				{
-					/* We assume here that timezone names aren't localized */
+					/*
+					 * We assume here that timezone abbreviations aren't
+					 * localized, so ASCII-only downcasing is sufficient.
+					 */
 					char	   *p = asc_tolower_z(tmtcTzn(in));
 
-					strcpy(s, p);
+					if (strlen(p) <= n->key->len * DCH_MAX_ITEM_SIZ)
+						strcpy(s, p);
+					else
+						ereport(ERROR,
+								(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+								 errmsg("time zone format value too long")));
 					pfree(p);
 					s += strlen(s);
 				}
@@ -2545,7 +2666,14 @@ DCH_to_char(FormatNode *node, bool is_interval, TmToChar *in, char *out, Oid col
 				INVALID_FOR_INTERVAL;
 				if (tmtcTzn(in))
 				{
-					strcpy(s, tmtcTzn(in));
+					const char *p = tmtcTzn(in);
+
+					if (strlen(p) <= n->key->len * DCH_MAX_ITEM_SIZ)
+						strcpy(s, p);
+					else
+						ereport(ERROR,
+								(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+								 errmsg("time zone format value too long")));
 					s += strlen(s);
 				}
 				break;
@@ -3852,7 +3980,7 @@ datetime_to_char_body(TmToChar *tmtc, text *fmt, bool is_interval, Oid collid)
 	/*
 	 * Allocate workspace for result as C string
 	 */
-	result = palloc((fmt_len * DCH_MAX_ITEM_SIZ) + 1);
+	result = palloc(mul_size(fmt_len, DCH_MAX_ITEM_SIZ) + 1);
 	*result = '\0';
 
 	if (fmt_len > DCH_CACHE_SIZE)
@@ -3863,7 +3991,7 @@ datetime_to_char_body(TmToChar *tmtc, text *fmt, bool is_interval, Oid collid)
 		 */
 		incache = false;
 
-		format = (FormatNode *) palloc((fmt_len + 1) * sizeof(FormatNode));
+		format = palloc_array(FormatNode, fmt_len + 1);
 
 		parse_format(format, fmt_str, DCH_keywords,
 					 DCH_suff, DCH_index, DCH_FLAG, NULL);
@@ -4286,7 +4414,7 @@ datetime_format_has_tz(const char *fmt_str)
 		 */
 		incache = false;
 
-		format = (FormatNode *) palloc((fmt_len + 1) * sizeof(FormatNode));
+		format = palloc_array(FormatNode, fmt_len + 1);
 
 		parse_format(format, fmt_str, DCH_keywords,
 					 DCH_suff, DCH_index, DCH_FLAG, NULL);
@@ -4374,7 +4502,7 @@ do_to_timestamp(text *date_txt, text *fmt, Oid collid, bool std,
 			 * Allocate new memory if format picture is bigger than static
 			 * cache and do not use cache (call parser always)
 			 */
-			format = (FormatNode *) palloc((fmt_len + 1) * sizeof(FormatNode));
+			format = palloc_array(FormatNode, fmt_len + 1);
 
 			parse_format(format, fmt_str, DCH_keywords, DCH_suff, DCH_index,
 						 DCH_FLAG | (std ? STD_FLAG : 0), NULL);
@@ -4922,7 +5050,7 @@ NUM_cache(int len, NUMDesc *Num, text *pars_str, bool *shouldFree)
 		 * Allocate new memory if format picture is bigger than static cache
 		 * and do not use cache (call parser always)
 		 */
-		format = (FormatNode *) palloc((len + 1) * sizeof(FormatNode));
+		format = palloc_array(FormatNode, len + 1);
 
 		*shouldFree = true;
 
@@ -5543,11 +5671,9 @@ NUM_numpart_to_char(NUMProc *Np, int id)
 		{
 			if (Np->Num->lsign == NUM_LSIGN_PRE)
 			{
-				if (Np->sign == '-')
-					strcpy(Np->inout_p, Np->L_negative_sign);
-				else
-					strcpy(Np->inout_p, Np->L_positive_sign);
-				Np->inout_p += strlen(Np->inout_p);
+				NUM_add_locale_symbol(Np, (Np->sign == '-') ?
+									  Np->L_negative_sign :
+									  Np->L_positive_sign);
 				Np->sign_wrote = true;
 			}
 		}
@@ -5612,8 +5738,7 @@ NUM_numpart_to_char(NUMProc *Np, int id)
 			{
 				if (!Np->last_relevant || *Np->last_relevant != '.')
 				{
-					strcpy(Np->inout_p, Np->decimal);	/* Write DEC/D */
-					Np->inout_p += strlen(Np->inout_p);
+					NUM_add_locale_symbol(Np, Np->decimal); /* Write DEC/D */
 				}
 
 				/*
@@ -5622,8 +5747,7 @@ NUM_numpart_to_char(NUMProc *Np, int id)
 				else if (IS_FILLMODE(Np->Num) &&
 						 Np->last_relevant && *Np->last_relevant == '.')
 				{
-					strcpy(Np->inout_p, Np->decimal);	/* Write DEC/D */
-					Np->inout_p += strlen(Np->inout_p);
+					NUM_add_locale_symbol(Np, Np->decimal); /* Write DEC/D */
 				}
 			}
 			else
@@ -5681,16 +5805,31 @@ NUM_numpart_to_char(NUMProc *Np, int id)
 			}
 			else if (IS_LSIGN(Np->Num) && Np->Num->lsign == NUM_LSIGN_POST)
 			{
-				if (Np->sign == '-')
-					strcpy(Np->inout_p, Np->L_negative_sign);
-				else
-					strcpy(Np->inout_p, Np->L_positive_sign);
-				Np->inout_p += strlen(Np->inout_p);
+				NUM_add_locale_symbol(Np, (Np->sign == '-') ?
+									  Np->L_negative_sign :
+									  Np->L_positive_sign);
 			}
 		}
 	}
 
 	++Np->num_curr;
+}
+
+/*
+ * Append locale-specific symbol to Np->inout.
+ * Note we don't null-terminate the output
+ */
+static void
+NUM_add_locale_symbol(NUMProc *Np, const char *pattern)
+{
+	size_t		pattern_len = strlen(pattern);
+
+	/* Truncate symbol if it's potentially too long */
+	if (unlikely(pattern_len > NUM_MAX_ITEM_SIZ))
+		pattern_len = pg_mbcliplen(pattern, pattern_len,
+								   NUM_MAX_ITEM_SIZ);
+	memcpy(Np->inout_p, pattern, pattern_len);
+	Np->inout_p += pattern_len;
 }
 
 /*
@@ -5940,6 +6079,10 @@ NUM_processor(FormatNode *node, NUMDesc *Num, char *inout,
 					pattern_len = strlen(pattern);
 					if (Np->is_to_char)
 					{
+						/* Truncate symbol if it's potentially too long */
+						if (unlikely(pattern_len > NUM_MAX_ITEM_SIZ))
+							pattern_len = pg_mbcliplen(pattern, pattern_len,
+													   NUM_MAX_ITEM_SIZ);
 						if (!Np->num_in)
 						{
 							if (IS_FILLMODE(Np->Num))
@@ -5947,19 +6090,21 @@ NUM_processor(FormatNode *node, NUMDesc *Num, char *inout,
 							else
 							{
 								/* just in case there are MB chars */
-								pattern_len = pg_mbstrlen(pattern);
+								pattern_len = pg_mbstrlen_with_len(pattern,
+																   pattern_len);
 								memset(Np->inout_p, ' ', pattern_len);
 								Np->inout_p += pattern_len - 1;
 							}
 						}
 						else
 						{
-							strcpy(Np->inout_p, pattern);
+							memcpy(Np->inout_p, pattern, pattern_len);
 							Np->inout_p += pattern_len - 1;
 						}
 					}
 					else
 					{
+						/* Here we do not truncate the symbol ... */
 						if (!Np->num_in)
 						{
 							if (IS_FILLMODE(Np->Num))
@@ -5984,11 +6129,18 @@ NUM_processor(FormatNode *node, NUMDesc *Num, char *inout,
 					pattern = Np->L_currency_symbol;
 					if (Np->is_to_char)
 					{
-						strcpy(Np->inout_p, pattern);
-						Np->inout_p += strlen(pattern) - 1;
+						/* Truncate symbol if it's potentially too long */
+						pattern_len = strlen(pattern);
+						if (unlikely(pattern_len > NUM_MAX_ITEM_SIZ))
+							pattern_len = pg_mbcliplen(pattern, pattern_len,
+													   NUM_MAX_ITEM_SIZ);
+
+						memcpy(Np->inout_p, pattern, pattern_len);
+						Np->inout_p += pattern_len - 1;
 					}
 					else
 					{
+						/* Here we do not truncate the symbol ... */
 						NUM_eat_non_data_chars(Np, pg_mbstrlen(pattern), input_len);
 						continue;
 					}

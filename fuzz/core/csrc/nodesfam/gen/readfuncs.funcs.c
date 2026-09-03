@@ -2976,6 +2976,7 @@ _readCreateStatsStmt(void)
 	READ_STRING_FIELD(stxcomment);
 	READ_BOOL_FIELD(transformed);
 	READ_BOOL_FIELD(if_not_exists);
+	READ_OID_FIELD(owner);
 
 	READ_DONE();
 }

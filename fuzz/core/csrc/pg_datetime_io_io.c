@@ -8,9 +8,9 @@
  * Provenance (all bodies VERBATIM, extracted mechanically by
  * csrc/extract_verbatim.py into csrc/pg_datetime_verbatim.inc which this
  * file #includes; re-run the script to refresh), all from postgres-src
- * 62d6c7d3df6287f1bd83199c1a746e50d31571a0 (REL_18, the repo's vendored
- * ground-truth checkout ../pgrust-reference/vendor/postgres-src — PostgreSQL
- * 18.3 "Stamp-18.3"):
+ * 724edf9bde9d356724ad384a2e196edc3c9f80f7 (tag REL_18_6, the in-repo
+ * pristine tree crates/postgres-18.6-reference — PostgreSQL 18.6;
+ * re-vendored from REL_18_3 62d6c7d3df on 2026-09-02):
  *   - src/backend/utils/adt/date.c: date_in, date_out, time_in, time_out,
  *     timetz_in, timetz_out, time_part(+time_part_common), make_time,
  *     make_date, EncodeSpecialDate, tm2time/time2tm/tm2timetz/timetz2tm,

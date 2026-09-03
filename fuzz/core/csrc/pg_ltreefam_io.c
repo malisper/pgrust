@@ -6,9 +6,10 @@
  *
  * ORACLE PROPER: this TU #includes the banked verbatim family files
  * csrc/ltreefam/{crc32.c,ltree_io.c,ltree_op.c,lquery_op.c,ltxtquery_io.c,
- * ltxtquery_op.c,_ltree_op.c} (cmp-verified byte-identical to
- * ~/dev/pgrust-reference/vendor/postgres-src contrib/ltree, Stamp-18.3,
- * upstream sha 62d6c7d3df) after an environment block assembled by
+ * ltxtquery_op.c,_ltree_op.c} (cmp-verified byte-identical to upstream
+ * contrib/ltree @ REL_18_6 — re-vendored 2026-09-02 from Stamp-18.3 /
+ * 62d6c7d3df; crc32.c and _ltree_op.c are unchanged between the two tags)
+ * after an environment block assembled by
  * scratchpad/assemble_ltreefam.py — verbatim blocks are extracted
  * MECHANICALLY from csrc/pg_hstorefam_io.c (itself verbatim @ 62d6c7d3df,
  * hst_ prefix renamed lt_) and from the vendor tree; never hand-typed.
@@ -806,7 +807,9 @@ typedef struct ArrayType
 #define ARR_DATA_PTR(a) \
 		(((char *) (a)) + ARR_DATA_OFFSET(a))
 
-/* ==== VERBATIM: common/int.h lines 147-202 @ 62d6c7d3df ==== */
+/* ==== VERBATIM: common/int.h lines 147-202 (INT32) + 364-383 (UINT16
+ * pg_add_u16_overflow, needed by ltree_io.c parse_lquery) @ REL_18_6;
+ * both ranges unchanged since 62d6c7d3df ==== */
 /*
  * INT32
  */
@@ -860,6 +863,27 @@ pg_mul_s32_overflow(int32 a, int32 b, int32 *result)
 		return true;
 	}
 	*result = (int32) res;
+	return false;
+#endif
+}
+
+/*
+ * UINT16
+ */
+static inline bool
+pg_add_u16_overflow(uint16 a, uint16 b, uint16 *result)
+{
+#if defined(HAVE__BUILTIN_OP_OVERFLOW)
+	return __builtin_add_overflow(a, b, result);
+#else
+	uint16		res = a + b;
+
+	if (res < a)
+	{
+		*result = 0x5EED;		/* to avoid spurious warnings */
+		return true;
+	}
+	*result = res;
 	return false;
 #endif
 }
@@ -965,8 +989,8 @@ pg_mul_s32_overflow(int32 a, int32 b, int32 *result)
 #define inner_isparent			lt_inner_isparent
 #define compare_subnode			lt_compare_subnode
 #define lca_inner				lt_lca_inner
-#define ltree_prefix_eq			lt_ltree_prefix_eq
-#define ltree_prefix_eq_ci		lt_ltree_prefix_eq_ci
+#define ltree_label_match		lt_ltree_label_match
+#define ltree_compare_distance	lt_ltree_compare_distance
 #define ltree_execute			lt_ltree_execute
 #define ltree_gist_alloc		lt_ltree_gist_alloc
 #define ltree_crc32_sz			lt_ltree_crc32_sz
@@ -1853,8 +1877,9 @@ lt_stack_is_too_deep(void)
 
 /* SHIM: misc environment */
 #define PG_UINT16_MAX	(0xFFFF)
+#define PG_INT16_MAX	(0x7FFF)
 #define PG_MODULE_MAGIC_EXT(...) extern int lt_pg_module_magic_dummy
-#define PG_VERSION "18.3"
+#define PG_VERSION "18.6"
 #define PGDLLEXPORT_ALREADY_DEFINED 1
 
 /* hash_any -> the verbatim hashfn.c copies exported by pg_mac_io.c */

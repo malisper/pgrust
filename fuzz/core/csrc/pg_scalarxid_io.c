@@ -4,9 +4,11 @@
  * crates/backend/utils/adt/scalar).
  *
  * Provenance (all bodies VERBATIM unless a shim is listed below):
- *   - src/backend/utils/adt/tid.c @ postgres-src
- *     62d6c7d3df6287f1bd83199c1a746e50d31571a0 (PostgreSQL 18.3, Stamp-18.3;
- *     verified against ../pgrust-reference/vendor/postgres-src): tidin, tidout,
+ *   - src/backend/utils/adt/tid.c @ postgres-upstream
+ *     REL_18_6 724edf9bde9d356724ad384a2e196edc3c9f80f7 (PostgreSQL 18.6; re-vendored
+ *     2026-09-02 from the REL_18_3 62d6c7d3df copy — tid.c, itemptr.c,
+ *     xid.c, oid.c, numutils.c and the cited c.h/transam.h/itemptr.h
+ *     definitions are byte-identical in REL_18_6): tidin, tidout,
  *     tideq, tidne, tidlt, tidle, tidgt, tidge, bttidcmp, tidlarger,
  *     tidsmaller.
  *   - src/backend/storage/page/itemptr.c @ same ref: ItemPointerCompare.
@@ -815,7 +817,7 @@ pg_diff_oidvectorout(const uint32 *values, int32 n, char *buf, int32 bufcap)
  * Additional verbatim vendored C + driver entries for the builtins arms the
  * first-round driver never dispatched (cid family, xid8in/xid8toxid, send
  * wire images, hash wrappers, oidvector cmp family). Provenance additions:
- *   - src/common/hashfn.c + src/include/port/pg_bitutils.h @ 62d6c7d3df:
+ *   - src/common/hashfn.c + src/include/port/pg_bitutils.h @ REL_18_6 724edf9bde:
  *     hashfn_verbatim.inc (mechanically extracted; see its header). The
  *     four hash entry points are renamed to pg_sx_* via #define so this
  *     translation unit exports no PostgreSQL-named symbols (plumbing shim).

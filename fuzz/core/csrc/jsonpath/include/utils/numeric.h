@@ -3,7 +3,7 @@
 #define _PG_NUMERIC_H_
 #include "postgres.h"
 #include "fmgr.h"
-/* constants + accessor shapes VERBATIM from utils/numeric.h @ 18.3 */
+/* constants + accessor shapes VERBATIM from utils/numeric.h @ REL_18_6 */
 typedef struct NumericData *Numeric;
 #define NUMERIC_MAX_PRECISION		1000
 #define NUMERIC_MIN_SCALE			(-1000)
@@ -38,6 +38,8 @@ extern Numeric numeric_mod_opt_error(Numeric num1, Numeric num2,
 									 bool *have_error);
 extern int32 numeric_int4_opt_error(Numeric num, bool *have_error);
 extern int64 numeric_int8_opt_error(Numeric num, bool *have_error);
+extern int32 make_numeric_typmod_safe(int32 precision, int32 scale,
+									  struct Node *escontext);
 extern bool numeric_is_nan(Numeric num);
 extern bool numeric_is_inf(Numeric num);
 #endif

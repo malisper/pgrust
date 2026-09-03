@@ -4,9 +4,10 @@
  * Minimal environment so the VERBATIM vendored files in this directory
  * (tsvector.c, tsvector_parser.c, tsvector_op.c, qsort.c, qsort_arg.c,
  * copied byte-identical — modulo labeled `#if 0 PG_DIFF CARVE` blocks in
- * tsvector_op.c — from postgres-src @
- * 62d6c7d3df6287f1bd83199c1a746e50d31571a0, PostgreSQL 18.3 Stamp-18.3)
- * compile standalone for the native differential-fuzz build.
+ * tsvector_op.c — from PostgreSQL REL_18_6: src/backend/utils/adt/ and
+ * src/port/; re-vendored 2026-09-02 from Stamp-18.3 / 62d6c7d3df, which
+ * only changed tsvector.c and tsvector_op.c) compile standalone for the
+ * native differential-fuzz build.
  *
  * PLUMBING ONLY, never logic:
  *   - fixed-width typedefs matching c.h on LP64; Datum/varlena/text per
@@ -152,6 +153,12 @@ extern void pg_tsvec_pfree(void *p);
 #define palloc0(n) pg_tsvec_palloc0(n)
 #define repalloc(p, n) pg_tsvec_repalloc((p), (n))
 #define pfree(p) pg_tsvec_pfree(p)
+/* palloc.h @ REL_18_6: palloc_array -> palloc_mul (mcxt.c), whose product
+ * is checked with pg_mul_size_overflow and raises
+ * ERRCODE_PROGRAM_LIMIT_EXCEEDED; pg_tsvec_palloc_mul mirrors that over
+ * the same arena (tsvector_op.c tsvector_to_array is the retained caller). */
+extern void *pg_tsvec_palloc_mul(Size s1, Size s2);
+#define palloc_array(type, count) ((type *) pg_tsvec_palloc_mul(sizeof(type), count))
 
 /* ---- error machinery (implemented in ../pg_tsvector_core_io.c) ---- */
 typedef struct Node
@@ -188,13 +195,15 @@ extern int	errcode(int sqlerrcode);
 extern int	errmsg(const char *fmt, ...);
 extern int	errdetail(const char *fmt, ...);
 extern int	errhint(const char *fmt, ...);
-extern void pg_tsvec_errthrow(void);
-extern void pg_tsvec_elog_error(const char *fmt, ...);
+/* both throwers longjmp unconditionally: noreturn, as upstream's
+ * ereport(ERROR)/elog(ERROR) are via pg_unreachable() in elog.h */
+extern void pg_tsvec_errthrow(void) __attribute__((noreturn));
+extern void pg_tsvec_elog_error(const char *fmt, ...) __attribute__((noreturn));
 extern bool pg_tsvec_soft_save(Node *escontext);
 
 /*
  * ereport: argument list evaluated (errcode() records the code), then throw.
- * Both 18.3 invocation styles appear in the vendored files:
+ * Both upstream invocation styles appear in the vendored files:
  *   ereport(ERROR, (errcode(..), errmsg(..)));   and
  *   ereport(ERROR, errcode(..), errmsg(..));
  * A variadic swallow keeps both compiling; the (void) evaluation keeps

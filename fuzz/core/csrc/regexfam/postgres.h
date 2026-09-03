@@ -15,6 +15,14 @@
  *     paths, so libc malloc reproduces the real backend behavior exactly
  *     (a regex_t leak across an oracle ereport-longjmp is prevented by the
  *     live-regex hook in pg_regexp_io.c, documented there).
+ *   - palloc_array_extended / repalloc_array_extended (REL_18_6 regcustom.h
+ *     MALLOC_ARRAY/REALLOC_ARRAY, upstream f3cee4dc43): the real palloc.h
+ *     routes them through palloc_mul_extended / repalloc_mul_extended
+ *     (mcxt.c), i.e. an overflow-checked sizeof(type)*count followed by the
+ *     *_extended allocator, ereport(ERROR "invalid memory allocation
+ *     request size") on overflow.  Same shape here; the overflow arm is
+ *     unreachable under REG_MAX_COMPILE_SPACE and aborts loudly like every
+ *     other engine-side ereport in this shim.
  *   - CHECK_FOR_INTERRUPTS() -> no-op: the fuzz harness is single-threaded
  *     with no signal sources; CANCEL_REQUESTED is pinned false (task carve).
  *   - stack_is_too_deep() -> false: pattern length is capped at 128 bytes by
@@ -100,6 +108,34 @@ pfree(void *pointer)
 {
 	free(pointer);
 }
+
+/* palloc.h @ REL_18_6: overflow-checked array forms (see header comment) */
+static inline void *
+palloc_mul_extended(size_t s1, size_t s2, int flags)
+{
+	size_t		req;
+
+	if (__builtin_mul_overflow(s1, s2, &req))
+	{
+		fprintf(stderr, "regexfam oracle: invalid memory allocation request size %zu * %zu\n", s1, s2);
+		abort();
+	}
+	return palloc_extended(req, flags);
+}
+static inline void *
+repalloc_mul_extended(void *pointer, size_t s1, size_t s2, int flags)
+{
+	size_t		req;
+
+	if (__builtin_mul_overflow(s1, s2, &req))
+	{
+		fprintf(stderr, "regexfam oracle: invalid memory allocation request size %zu * %zu\n", s1, s2);
+		abort();
+	}
+	return repalloc_extended(pointer, req, flags);
+}
+#define palloc_array_extended(type, count, flags) ((type *) palloc_mul_extended(sizeof(type), count, flags))
+#define repalloc_array_extended(pointer, type, count, flags) ((type *) repalloc_mul_extended(pointer, sizeof(type), count, flags))
 
 /* lengthof / unlikely conveniences some vendored code uses */
 #define lengthof(array) (sizeof(array) / sizeof((array)[0]))

@@ -2,14 +2,15 @@
  * Vendored PostgreSQL C: pg_lsn family + minimal numeric support —
  * differential-fuzz oracle for the pg_lsn_diff target.
  *
- * Provenance (all bodies VERBATIM unless a shim is listed below), from the
- * repo's vendored ground-truth checkout ../pgrust-reference/vendor/postgres-src
- * @ 62d6c7d "Stamp 18.3." (PostgreSQL 18.3 exactly — the campaign oracle
- * pin):
+ * Provenance (all bodies VERBATIM unless a shim is listed below), from
+ * postgres-upstream @ REL_18_6 724edf9bde9d356724ad384a2e196edc3c9f80f7
+ * (PostgreSQL 18.6 exactly — the campaign oracle pin; re-vendored 2026-09-02
+ * from the REL_18_3 62d6c7d copy: pg_lsn.c, pgstrcasecmp.c and every copied
+ * numeric.c / common/int.h function are byte-identical in REL_18_6):
  *   - src/backend/utils/adt/pg_lsn.c: pg_lsn_in_internal, pg_lsn_in,
  *     pg_lsn_out, pg_lsn_eq/ne/lt/gt/le/ge, pg_lsn_larger, pg_lsn_smaller,
- *     pg_lsn_cmp, pg_lsn_mi, pg_lsn_pli, pg_lsn_mii — verbatim (18.3
- *     formats "%X/%X"; the PG19-devel "%X/%08X" drift is characterized in
+ *     pg_lsn_cmp, pg_lsn_mi, pg_lsn_pli, pg_lsn_mii — verbatim (18.6, like
+ *     18.3, formats "%X/%X"; the PG19-devel "%X/%08X" drift is characterized in
  *     proofs/pg_lsn, out of scope here).  pg_lsn_recv / pg_lsn_send are
  *     bare pq_getmsgint64 / pq_sendint64 calls; the Rust driver constructs
  *     their wire contract directly (see lsn_diff.rs), so they are not

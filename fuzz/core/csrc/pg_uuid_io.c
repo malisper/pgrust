@@ -5,10 +5,12 @@
  * Provenance:
  *   - Sections 1-2 below are a byte-for-byte copy of proofs/uuid/c/pg_uuid.c
  *     (this repo), itself vendored VERBATIM from
- *     src/backend/utils/adt/uuid.c @ postgres-src
- *     62d6c7d3df6287f1bd83199c1a746e50d31571a0 (the repo's vendored
- *     ground-truth checkout ../pgrust-reference/vendor/postgres-src, PG 18.3
- *     stamp; re-verified against that checkout 2026-07-30).  Its shims
+ *     src/backend/utils/adt/uuid.c @ postgres-src REL_18_6
+ *     (724edf9bde9d356724ad384a2e196edc3c9f80f7, Stamp 18.6; re-verified
+ *     against that tag 2026-09-02 — uuid.c's one 18.3→18.6 commit,
+ *     c31b0fca05, rewrites uuidv7_interval (not vendored here) and
+ *     introduces PG_UNIX_EPOCH_OFFSET_US, which the vendored
+ *     uuid_extract_timestamp already uses verbatim).  Its shims
  *     (isxdigit/strtoul C-locale shims, ereturn -> sentinel, fmgr
  *     unwrapping, wire triple for recv/send, rand8 RNG seam for
  *     generate_uuidv7) are documented in its own header comment.

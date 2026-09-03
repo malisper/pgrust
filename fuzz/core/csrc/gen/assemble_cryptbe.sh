@@ -2,13 +2,13 @@
 # assemble_cryptbe.sh — provenance generator for csrc/cryptbe/ (crypt_be_diff,
 # lane p1-wavea; crate under test: crates/backend/libpq/crypt).
 # Verbatim sections are sed-extracted byte-for-byte from the vendored
-# PostgreSQL 18.3 checkout (Stamp-18.3, upstream sha
-# 62d6c7d3df6287f1bd83199c1a746e50d31571a0); whole verbatim files are cp'd;
+# PostgreSQL 18.6 checkout (REL_18_6, upstream sha
+# 724edf9bde9d356724ad384a2e196edc3c9f80f7); whole verbatim files are cp'd;
 # shim sections are plumbing only (see the emitted file header). Re-run to
 # refresh; the outputs are committed, this script is the provenance record.
 set -eu
 
-V="${PGSRC:-$HOME/dev/pgrust-reference/vendor/postgres-src}"
+V="${PGSRC:-$HOME/dev/postgres-upstream-18.6}"
 D="$(cd "$(dirname "$0")/.." && pwd)/cryptbe"
 mkdir -p "$D/include/common" "$D/include/mb"
 
@@ -17,6 +17,7 @@ AUTHSCRAM="$V/src/backend/libpq/auth-scram.c"
 CRYPT_H="$V/src/include/libpq/crypt.h"
 WCHAR_C="$V/src/common/wchar.c"
 STRING_C="$V/src/common/string.c"
+TIMINGSAFE="$V/src/port/timingsafe_bcmp.c"
 
 # ---- whole verbatim files (never edited; renames happen via -D in build.rs) --
 cp "$V/src/common/saslprep.c" "$D/saslprep.c"
@@ -76,9 +77,9 @@ cat <<'EOF'
  * edit the script's shim heredocs and re-run.
  *
  * Provenance (all VERBATIM sections byte-for-byte from
- * ~/dev/pgrust-reference/vendor/postgres-src, Stamp-18.3, upstream sha
- * 62d6c7d3df6287f1bd83199c1a746e50d31571a0):
- *   - src/backend/libpq/crypt.c lines 86-321: get_password_type,
+ * ~/dev/postgres-upstream-18.6, REL_18_6, upstream sha
+ * 724edf9bde9d356724ad384a2e196edc3c9f80f7):
+ *   - src/backend/libpq/crypt.c lines 86-323: get_password_type,
  *     encrypt_password, md5_crypt_verify, plain_crypt_verify (ALL bodies of
  *     the unit; get_role_password lines 30-84 excluded per the carve, and
  *     the md5_password_warnings GUC storage line 28 is consumed via the
@@ -89,7 +90,9 @@ cat <<'EOF'
  *   - src/include/libpq/crypt.h: MAX_ENCRYPTED_PASSWORD_LEN + the
  *     PasswordType enum (sed-extracted below).
  *   - src/common/wchar.c pg_utf_mblen and src/common/string.c pg_is_ascii
- *     (saslprep.c's two out-of-file libpgcommon calls), pasted at the end.
+ *     (saslprep.c's two out-of-file libpgcommon calls), and
+ *     src/port/timingsafe_bcmp.c timingsafe_bcmp (the constant-time compare
+ *     crypt.c/auth-scram.c call since 18.6, d93ef41317), pasted at the end.
  *   - Whole verbatim sibling TUs in this directory (cp'd by the script):
  *     src/common/saslprep.c, src/common/unicode_norm.c (FRONTEND arms:
  *     malloc/free allocator + the linear/table lookup arms — the SAME
@@ -102,14 +105,15 @@ cat <<'EOF'
  *     pg_b64_*, scram_build_secret, scram_SaltedPassword, scram_ServerKey
  *     resolve (via the family's -D renames in build.rs, which mirror
  *     CRYPTO_SHARED_SYMS) to the cryptofam_* exports of csrc/cryptofam/ —
- *     the verbatim 18.3 copies the cryptofam_diff target already vendors
- *     (single copy per the duplicate-export rule).
+ *     the verbatim copies the cryptofam_diff target already vendors
+ *     (unchanged 18.3->18.6; single copy per the duplicate-export rule).
  *
  * Symbol renames (build.rs -D, bodies untouched): get_password_type,
  * encrypt_password, md5_crypt_verify, plain_crypt_verify,
  * parse_scram_secret, pg_be_scram_build_secret, scram_verify_plain_password,
  * pg_saslprep, unicode_normalize, pg_utf_mblen, pg_is_ascii all carry the
- * pg_cryptbe_ family prefix; the CRYPTO_SHARED_SYMS set carries cryptofam_.
+ * pg_cryptbe_ family prefix (timingsafe_bcmp likewise, via the #define in
+ * the shim section below); the CRYPTO_SHARED_SYMS set carries cryptofam_.
  *
  * Shims (PLUMBING ONLY, never logic):
  *   - ereport/elog -> record an errcode class in TLS; >= ERROR longjmps to
@@ -276,7 +280,7 @@ pg_cryptbe_strong_random(void *buf, size_t len)
 	uint8_t		salt[16];
 
 	if (len != 16)
-		abort();				/* SCRAM_DEFAULT_SALT_LEN is 16 in 18.3 */
+		abort();				/* SCRAM_DEFAULT_SALT_LEN is 16 in 18.6 */
 	pg_stub_get_scram_salt(salt);
 	memcpy(buf, salt, 16);
 	return true;
@@ -289,6 +293,12 @@ pg_cryptbe_strong_random(void *buf, size_t len)
 /* transcribed from src/include/c.h (values verbatim) */
 #define STATUS_OK				(0)
 #define STATUS_ERROR			(-1)
+
+/* timingsafe_bcmp: declaration transcribed from src/include/port.h; the
+ * verbatim src/port/timingsafe_bcmp.c body is pasted at the end of this TU
+ * and renamed here so this archive never exports the libpgport name. */
+#define timingsafe_bcmp pg_cryptbe_timingsafe_bcmp
+extern int	timingsafe_bcmp(const void *b1, const void *b2, size_t len);
 
 /* scram_build_secret's result is a RAW malloc (the cryptofam vendored
  * scram-common.c is compiled FRONTEND, so its palloc arm is malloc), but the
@@ -337,9 +347,9 @@ sed -n '/^typedef enum PasswordType/,/^} PasswordType;/p' "$CRYPT_H"
 
 cat <<'EOF'
 
-/* ===== VERBATIM src/backend/libpq/crypt.c lines 86-321 ==================== */
+/* ===== VERBATIM src/backend/libpq/crypt.c lines 86-323 ==================== */
 EOF
-sed -n '86,321p' "$CRYPT"
+sed -n '86,323p' "$CRYPT"
 
 cat <<'EOF'
 
@@ -372,6 +382,13 @@ cat <<'EOF'
 /* ===== VERBATIM src/common/string.c lines 128-142 (pg_is_ascii) =========== */
 EOF
 sed -n '128,142p' "$STRING_C"
+
+cat <<'EOF'
+
+/* ===== VERBATIM src/port/timingsafe_bcmp.c lines 29-43 (timingsafe_bcmp;
+ *       USE_SSL is undefined here, selecting the portable arm) ============ */
+EOF
+sed -n '29,43p' "$TIMINGSAFE"
 
 cat <<'EOF'
 

@@ -1,6 +1,6 @@
 /*
  * pg_formatting_min.c — VERBATIM extracts of src/backend/utils/adt/formatting.c
- * @ postgres-src 62d6c7d3df6287f1bd83199c1a746e50d31571a0 (PostgreSQL 18.3):
+ * @ postgres REL_18_6 724edf9bde9d356724ad384a2e196edc3c9f80f7 (PostgreSQL 18.6):
  * exactly the call graph of datetime_format_has_tz() as used by
  * jspIsMutableWalker (jsonpath.c). Every extract carries a
  * "formatting.c:A-B VERBATIM" provenance marker (extract_verbatim.py).
@@ -17,7 +17,7 @@
  * (shim postgres.h supplies palloc arena + ereport capture + Assert;
  * mb/pg_wchar.h supplies the pinned-UTF8 pg_mblen and
  * MAX_MULTIBYTE_CHAR_LEN); static forward decls replacing the dropped
- * originals (formatting.c:1119-1122 region names DCH-only entries here).
+ * originals (formatting.c:1122-1125 region names DCH-only entries here).
  * The DCH format-picture cache statics are carried verbatim: cache state is
  * keyed by the format string exactly as in a real backend and is
  * deterministic across iterations.
@@ -80,8 +80,26 @@ pnstrdup_shim(const char *in, size_t len)
 }
 #define pnstrdup(in, len) pnstrdup_shim((in), (len))
 
+/* shim: 18.6 datetime_format_has_tz sizes its out-of-cache FormatNode array
+ * with palloc_array (utils/palloc.h:113 -> palloc_mul, mcxt.c:1725-1734:
+ * overflow-checked multiply, then palloc); same shape over this TU's
+ * persistent palloc. */
+static inline void *
+pg_formatting_palloc_mul(Size s1, Size s2)
+{
+	Size		req;
 
-/* ---- formatting.c:95-172 VERBATIM ---- */
+	if (__builtin_mul_overflow(s1, s2, &req))
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("invalid memory allocation request size %zu * %zu",
+						s1, s2)));
+	return palloc(req);
+}
+#define palloc_array(type, count) ((type *) pg_formatting_palloc_mul(sizeof(type), count))
+
+
+/* ---- formatting.c:95-173 VERBATIM ---- */
 /* ----------
  * Routines flags
  * ----------
@@ -104,6 +122,7 @@ pnstrdup_shim(const char *in, size_t len)
 #define DCH_MAX_ITEM_SIZ	   12	/* max localized day name		*/
 #define NUM_MAX_ITEM_SIZ		8	/* roman number (RN has 15 chars)	*/
 
+#define MAX_L10N_DATA			80	/* max localized day or month name */
 
 /* ----------
  * Format parser structs
@@ -161,7 +180,7 @@ typedef struct
 #define CLOCK_12_HOUR		1
 
 
-/* ---- formatting.c:381-401 VERBATIM ---- */
+/* ---- formatting.c:382-402 VERBATIM ---- */
 #define DCH_CACHE_OVERHEAD \
 	MAXALIGN(sizeof(bool) + sizeof(int))
 #define NUM_CACHE_OVERHEAD \
@@ -184,14 +203,14 @@ typedef struct
 	int			age;
 } DCHCacheEntry;
 
-/* ---- formatting.c:411-415 VERBATIM ---- */
+/* ---- formatting.c:412-416 VERBATIM ---- */
 
 /* global cache for date/time format pictures */
 static DCHCacheEntry *DCHCache[DCH_CACHE_ENTRIES];
 static int	n_DCHCache = 0;		/* current number of entries */
 static int	DCHCounter = 0;		/* aging-event counter */
 
-/* ---- formatting.c:560-604 VERBATIM ---- */
+/* ---- formatting.c:561-605 VERBATIM ---- */
 /*****************************************************************************
  *			KeyWord definitions
  *****************************************************************************/
@@ -238,7 +257,7 @@ static const KeySuffix DCH_suff[] = {
 	{NULL, 0, 0, 0}
 };
 
-/* ---- formatting.c:606-752 VERBATIM ---- */
+/* ---- formatting.c:607-753 VERBATIM ---- */
 
 /* ----------
  * Format-pictures (KeyWord).
@@ -387,7 +406,7 @@ typedef enum
 	_DCH_last_
 }			DCH_poz;
 
-/* ---- formatting.c:796-918 VERBATIM ---- */
+/* ---- formatting.c:797-919 VERBATIM ---- */
 
 /* ----------
  * KeyWords for DATE-TIME version
@@ -512,7 +531,7 @@ static const KeyWord DCH_keywords[] = {
 	{NULL, 0, 0, 0, 0}
 };
 
-/* ---- formatting.c:968-992 VERBATIM ---- */
+/* ---- formatting.c:969-993 VERBATIM ---- */
 
 
 /* ----------
@@ -539,7 +558,7 @@ static const int DCH_index[KeyWord_INDEX_SIZE] = {
 	/*---- chars over 126 are skipped ----*/
 };
 
-/* ---- formatting.c:1050-1054 VERBATIM ---- */
+/* ---- formatting.c:1052-1056 VERBATIM ---- */
 
 /* Return flags for DCH_from_char() */
 #define DCH_DATED	0x01
@@ -547,7 +566,7 @@ static const int DCH_index[KeyWord_INDEX_SIZE] = {
 #define DCH_ZONED	0x04
 
 /* ---- shim: forward declarations for the extracted statics (the original
- * block at formatting.c:1119-1131 also names NUM-side entries not carried
+ * block at formatting.c:1122-1134 also names NUM-side entries not carried
  * here); NUMDesc stays opaque — parse_format is only ever called with
  * DCH_FLAG and Num == NULL in this extract, so NUMDesc_prepare is a
  * loud-abort stub (unreachable-arm shim, not vendored logic). ---- */
@@ -572,7 +591,7 @@ NUMDesc_prepare(NUMDesc *num, FormatNode *n)
 	abort();
 }
 
-/* ---- formatting.c:1128-1156 VERBATIM (index_seq_search) ---- */
+/* ---- formatting.c:1131-1159 VERBATIM (index_seq_search) ---- */
 /* ----------
  * Fast sequential search, use index for data selection which
  * go to seq. cycle (it is very fast for unwanted strings)
@@ -603,7 +622,7 @@ index_seq_search(const char *str, const KeyWord *kw, const int *index)
 	return NULL;
 }
 
-/* ---- formatting.c:1158-1172 VERBATIM (suff_search) ---- */
+/* ---- formatting.c:1161-1175 VERBATIM (suff_search) ---- */
 static const KeySuffix *
 suff_search(const char *str, const KeySuffix *suf, int type)
 {
@@ -620,7 +639,7 @@ suff_search(const char *str, const KeySuffix *suf, int type)
 	return NULL;
 }
 
-/* ---- formatting.c:1174-1182 VERBATIM (is_separator_char) ---- */
+/* ---- formatting.c:1177-1185 VERBATIM (is_separator_char) ---- */
 static bool
 is_separator_char(const char *str)
 {
@@ -631,7 +650,7 @@ is_separator_char(const char *str)
 			!(*str >= '0' && *str <= '9'));
 }
 
-/* ---- formatting.c:1367-1515 VERBATIM (parse_format) ---- */
+/* ---- formatting.c:1370-1518 VERBATIM (parse_format) ---- */
 /* ----------
  * Format parser, search small keywords and keyword's suffixes, and make
  * format-node tree.
@@ -782,7 +801,7 @@ parse_format(FormatNode *node, const char *str, const KeyWord *kw,
 	n->suffix = 0;
 }
 
-/* ---- formatting.c:3702-3718 VERBATIM (DCH_prevent_counter_overflow) ---- */
+/* ---- formatting.c:3830-3846 VERBATIM (DCH_prevent_counter_overflow) ---- */
 /*
  * The invariant for DCH cache entry management is that DCHCounter is equal
  * to the maximum age value among the existing entries, and we increment it
@@ -801,7 +820,7 @@ DCH_prevent_counter_overflow(void)
 	}
 }
 
-/* ---- formatting.c:3720-3817 VERBATIM (DCH_datetime_type) ---- */
+/* ---- formatting.c:3848-3945 VERBATIM (DCH_datetime_type) ---- */
 /*
  * Get mask of date/time/zone components present in format nodes.
  */
@@ -901,7 +920,7 @@ DCH_datetime_type(FormatNode *node)
 	return flags;
 }
 
-/* ---- formatting.c:3819-3877 VERBATIM (DCH_cache_getnew) ---- */
+/* ---- formatting.c:3947-4005 VERBATIM (DCH_cache_getnew) ---- */
 /* select a DCHCacheEntry to hold the given format picture */
 static DCHCacheEntry *
 DCH_cache_getnew(const char *str, bool std)
@@ -962,7 +981,7 @@ DCH_cache_getnew(const char *str, bool std)
 	}
 }
 
-/* ---- formatting.c:3879-3898 VERBATIM (DCH_cache_search) ---- */
+/* ---- formatting.c:4007-4026 VERBATIM (DCH_cache_search) ---- */
 /* look for an existing DCHCacheEntry matching the given format picture */
 static DCHCacheEntry *
 DCH_cache_search(const char *str, bool std)
@@ -984,7 +1003,7 @@ DCH_cache_search(const char *str, bool std)
 	return NULL;
 }
 
-/* ---- formatting.c:3900-3921 VERBATIM (DCH_cache_fetch) ---- */
+/* ---- formatting.c:4028-4049 VERBATIM (DCH_cache_fetch) ---- */
 /* Find or create a DCHCacheEntry for the given format picture */
 static DCHCacheEntry *
 DCH_cache_fetch(const char *str, bool std)
@@ -1008,7 +1027,7 @@ DCH_cache_fetch(const char *str, bool std)
 	return ent;
 }
 
-/* ---- formatting.c:4361-4403 VERBATIM (datetime_format_has_tz) ---- */
+/* ---- formatting.c:4489-4531 VERBATIM (datetime_format_has_tz) ---- */
 /*
  * Parses the datetime format string in 'fmt_str' and returns true if it
  * contains a timezone specifier, false if not.
@@ -1029,7 +1048,7 @@ datetime_format_has_tz(const char *fmt_str)
 		 */
 		incache = false;
 
-		format = (FormatNode *) palloc((fmt_len + 1) * sizeof(FormatNode));
+		format = palloc_array(FormatNode, fmt_len + 1);
 
 		parse_format(format, fmt_str, DCH_keywords,
 					 DCH_suff, DCH_index, DCH_FLAG, NULL);

@@ -3,9 +3,12 @@
  * differential fuzz target (100%-coverage campaign; crate
  * crates/backend/utils/adt/jsonb).
  *
- * Provenance: PostgreSQL 18.3 (Stamp-18.3, upstream sha 62d6c7d3df),
- * re-verified against the vendored ground-truth checkout
- * ../pgrust-reference/vendor/postgres-src. The vendored text lives in
+ * Provenance: PostgreSQL REL_18_6 (upstream sha 724edf9bde9d356724ad384a2e196edc3c9f80f7;
+ * re-vendored 2026-09-02 from Stamp-18.3 @ 62d6c7d3df — the sections pasted
+ * in THIS file, float.c and hashfunc.c, are byte-identical at REL_18_6, so
+ * their @ 62d6c7d3df marks stand; the csrc/jsonbfam/ TUs below carry their
+ * own provenance headers, jsonapi.c being the one whose upstream changed
+ * 18.3→18.6, 3e49556302). The vendored text lives in
  * csrc/jsonbfam/ — whole-file TUs included below plus extracted .inc
  * segments, each with an exact line-range provenance header:
  *   jsonbfam/jsonapi.c        src/common/jsonapi.c (whole file, verbatim)

@@ -1,4 +1,5 @@
-/* VERBATIM function bodies vendored from postgres-src @ 62d6c7d3df6287f1bd83199c1a746e50d31571a0.
+/* VERBATIM function bodies vendored from postgres-src @ 724edf9bde9d356724ad384a2e196edc3c9f80f7 (REL_18_6;
+ * file name kept from the REL_18_3 vendoring — see pg_fmt_dch_io.c's header).
  * Each block is byte-identical to the cited file:lines (verify: sed -n 'A,Bp' <file>).
  * The compiling environment (types/macros/shims) is pg_fmt_dch_io.c's prelude.
  */
@@ -51,7 +52,7 @@ AdjustTimestampForTypmod(Timestamp *time, int32 typmod, Node *escontext)
 	return true;
 }
 
-/* --- src/backend/utils/adt/timestamp.c:1882-1895 dt2time (verbatim) --- */
+/* --- src/backend/utils/adt/timestamp.c:1886-1899 dt2time (verbatim) --- */
 void
 dt2time(Timestamp jd, int *hour, int *min, int *sec, fsec_t *fsec)
 {
@@ -67,7 +68,7 @@ dt2time(Timestamp jd, int *hour, int *min, int *sec, fsec_t *fsec)
 	*fsec = time - (*sec * USECS_PER_SEC);
 }								/* dt2time() */
 
-/* --- src/backend/utils/adt/timestamp.c:1909-1995 timestamp2tm (verbatim) --- */
+/* --- src/backend/utils/adt/timestamp.c:1913-1999 timestamp2tm (verbatim) --- */
 int
 timestamp2tm(Timestamp dt, int *tzp, struct pg_tm *tm, fsec_t *fsec, const char **tzn, pg_tz *attimezone)
 {
@@ -156,7 +157,7 @@ timestamp2tm(Timestamp dt, int *tzp, struct pg_tm *tm, fsec_t *fsec, const char 
 	return 0;
 }
 
-/* --- src/backend/utils/adt/timestamp.c:2005-2038 tm2timestamp (verbatim) --- */
+/* --- src/backend/utils/adt/timestamp.c:2009-2042 tm2timestamp (verbatim) --- */
 int
 tm2timestamp(struct pg_tm *tm, fsec_t fsec, int *tzp, Timestamp *result)
 {
@@ -192,7 +193,7 @@ tm2timestamp(struct pg_tm *tm, fsec_t fsec, int *tzp, Timestamp *result)
 	return 0;
 }
 
-/* --- src/backend/utils/adt/timestamp.c:2046-2067 interval2itm (verbatim) --- */
+/* --- src/backend/utils/adt/timestamp.c:2050-2071 interval2itm (verbatim) --- */
 void
 interval2itm(Interval span, struct pg_itm *itm)
 {
@@ -216,7 +217,7 @@ interval2itm(Interval span, struct pg_itm *itm)
 	itm->tm_usec = (int) time;
 }
 
-/* --- src/backend/utils/adt/timestamp.c:5261-5274 isoweek2j (verbatim) --- */
+/* --- src/backend/utils/adt/timestamp.c:5273-5286 isoweek2j (verbatim) --- */
 int
 isoweek2j(int year, int week)
 {
@@ -232,14 +233,14 @@ isoweek2j(int year, int week)
 	return ((week - 1) * 7) + (day4 - day0);
 }
 
-/* --- src/backend/utils/adt/timestamp.c:5281-5285 isoweek2date (verbatim) --- */
+/* --- src/backend/utils/adt/timestamp.c:5293-5297 isoweek2date (verbatim) --- */
 void
 isoweek2date(int woy, int *year, int *mon, int *mday)
 {
 	j2date(isoweek2j(*year, woy), year, mon, mday);
 }
 
-/* --- src/backend/utils/adt/timestamp.c:5294-5306 isoweekdate2date (verbatim) --- */
+/* --- src/backend/utils/adt/timestamp.c:5306-5318 isoweekdate2date (verbatim) --- */
 void
 isoweekdate2date(int isoweek, int wday, int *year, int *mon, int *mday)
 {
@@ -254,7 +255,7 @@ isoweekdate2date(int isoweek, int wday, int *year, int *mon, int *mday)
 	j2date(jday, year, mon, mday);
 }
 
-/* --- src/backend/utils/adt/timestamp.c:5312-5359 date2isoweek (verbatim) --- */
+/* --- src/backend/utils/adt/timestamp.c:5324-5371 date2isoweek (verbatim) --- */
 int
 date2isoweek(int year, int mon, int mday)
 {
@@ -304,7 +305,7 @@ date2isoweek(int year, int mon, int mday)
 	return (int) result;
 }
 
-/* --- src/backend/utils/adt/timestamp.c:5367-5416 date2isoyear (verbatim) --- */
+/* --- src/backend/utils/adt/timestamp.c:5379-5428 date2isoyear (verbatim) --- */
 int
 date2isoyear(int year, int mon, int mday)
 {
@@ -356,21 +357,21 @@ date2isoyear(int year, int mon, int mday)
 	return year;
 }
 
-/* --- src/backend/utils/adt/timestamp.c:5424-5428 date2isoyearday (verbatim) --- */
+/* --- src/backend/utils/adt/timestamp.c:5436-5440 date2isoyearday (verbatim) --- */
 int
 date2isoyearday(int year, int mon, int mday)
 {
 	return date2j(year, mon, mday) - isoweek2j(date2isoyear(year, mon, mday), 1) + 1;
 }
 
-/* --- src/backend/utils/adt/timestamp.c:2127-2131 time2t (verbatim) --- */
+/* --- src/backend/utils/adt/timestamp.c:2131-2135 time2t (verbatim) --- */
 static TimeOffset
 time2t(const int hour, const int min, const int sec, const fsec_t fsec)
 {
 	return (((((hour * MINS_PER_HOUR) + min) * SECS_PER_MINUTE) + sec) * USECS_PER_SEC) + fsec;
 }
 
-/* --- src/backend/utils/adt/timestamp.c:2133-2138 dt2local (verbatim) --- */
+/* --- src/backend/utils/adt/timestamp.c:2137-2142 dt2local (verbatim) --- */
 static Timestamp
 dt2local(Timestamp dt, int timezone)
 {
@@ -1227,7 +1228,7 @@ pg_mblen_with_len(const char *mbstr, int limit)
 	return length;
 }
 
-/* --- src/backend/utils/adt/datetime.c:75-86 day_tab/months/days tables (verbatim) --- */
+/* --- src/backend/utils/adt/datetime.c:75-85 day_tab/months/days tables (verbatim) --- */
 const int	day_tab[2][13] =
 {
 	{31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31, 0},
@@ -1240,3 +1241,110 @@ const char *const months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
 const char *const days[] = {"Sunday", "Monday", "Tuesday", "Wednesday",
 "Thursday", "Friday", "Saturday", NULL};
 
+/* --- src/backend/utils/mmgr/mcxt.c:1712-1719 mul_size_error (verbatim) --- */
+pg_noreturn static pg_noinline void
+mul_size_error(Size s1, Size s2)
+{
+	ereport(ERROR,
+			(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+			 errmsg("invalid memory allocation request size %zu * %zu",
+					s1, s2)));
+}
+
+/* --- src/backend/utils/mmgr/mcxt.c:1702-1710 mul_size (verbatim) --- */
+Size
+mul_size(Size s1, Size s2)
+{
+	Size		result;
+
+	if (unlikely(pg_mul_size_overflow(s1, s2, &result)))
+		mul_size_error(s1, s2);
+	return result;
+}
+
+/* --- src/backend/utils/mmgr/mcxt.c:1725-1734 palloc_mul (verbatim) --- */
+void *
+palloc_mul(Size s1, Size s2)
+{
+	/* inline mul_size() for efficiency */
+	Size		req;
+
+	if (unlikely(pg_mul_size_overflow(s1, s2, &req)))
+		mul_size_error(s1, s2);
+	return palloc(req);
+}
+
+/* --- src/backend/utils/mb/mbutils.c:1275-1284 cliplen (verbatim) --- */
+static int
+cliplen(const char *str, int len, int limit)
+{
+	int			l = 0;
+
+	len = Min(len, limit);
+	while (l < len && str[l])
+		l++;
+	return l;
+}
+
+/* --- src/backend/utils/mb/mbutils.c:1218-1244 pg_encoding_mbcliplen (verbatim) --- */
+int
+pg_encoding_mbcliplen(int encoding, const char *mbstr,
+					  int len, int limit)
+{
+	mblen_converter mblen_fn;
+	int			clen = 0;
+	int			l;
+
+	/* optimization for single byte encoding */
+	if (pg_encoding_max_length(encoding) == 1)
+		return cliplen(mbstr, len, limit);
+
+	mblen_fn = pg_wchar_table[encoding].mblen;
+
+	while (len > 0 && *mbstr)
+	{
+		l = (*mblen_fn) ((const unsigned char *) mbstr);
+		if ((clen + l) > limit)
+			break;
+		clen += l;
+		if (clen == limit)
+			break;
+		len -= l;
+		mbstr += l;
+	}
+	return clen;
+}
+
+/* --- src/backend/utils/mb/mbutils.c:1208-1213 pg_mbcliplen (verbatim) --- */
+int
+pg_mbcliplen(const char *mbstr, int len, int limit)
+{
+	return pg_encoding_mbcliplen(DatabaseEncoding->encoding, mbstr,
+								 len, limit);
+}
+
+/* --- src/backend/utils/adt/pg_locale.c:1277-1287 strlower_c (verbatim) --- */
+static size_t
+strlower_c(char *dst, size_t dstsize, const char *src, size_t srclen)
+{
+	int			i;
+
+	for (i = 0; i < srclen && i < dstsize; i++)
+		dst[i] = pg_ascii_tolower(src[i]);
+	if (i < dstsize)
+		dst[i] = '\0';
+	return srclen;
+}
+
+/* --- src/backend/utils/adt/pg_locale.c:1315-1325 strupper_c (verbatim) --- */
+static size_t
+strupper_c(char *dst, size_t dstsize, const char *src, size_t srclen)
+{
+	int			i;
+
+	for (i = 0; i < srclen && i < dstsize; i++)
+		dst[i] = pg_ascii_toupper(src[i]);
+	if (i < dstsize)
+		dst[i] = '\0';
+	return srclen;
+}

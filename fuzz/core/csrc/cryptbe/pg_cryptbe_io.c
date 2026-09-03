@@ -11,9 +11,9 @@
  * edit the script's shim heredocs and re-run.
  *
  * Provenance (all VERBATIM sections byte-for-byte from
- * ~/dev/pgrust-reference/vendor/postgres-src, Stamp-18.3, upstream sha
- * 62d6c7d3df6287f1bd83199c1a746e50d31571a0):
- *   - src/backend/libpq/crypt.c lines 86-321: get_password_type,
+ * ~/dev/postgres-upstream-18.6, REL_18_6, upstream sha
+ * 724edf9bde9d356724ad384a2e196edc3c9f80f7):
+ *   - src/backend/libpq/crypt.c lines 86-323: get_password_type,
  *     encrypt_password, md5_crypt_verify, plain_crypt_verify (ALL bodies of
  *     the unit; get_role_password lines 30-84 excluded per the carve, and
  *     the md5_password_warnings GUC storage line 28 is consumed via the
@@ -24,7 +24,9 @@
  *   - src/include/libpq/crypt.h: MAX_ENCRYPTED_PASSWORD_LEN + the
  *     PasswordType enum (sed-extracted below).
  *   - src/common/wchar.c pg_utf_mblen and src/common/string.c pg_is_ascii
- *     (saslprep.c's two out-of-file libpgcommon calls), pasted at the end.
+ *     (saslprep.c's two out-of-file libpgcommon calls), and
+ *     src/port/timingsafe_bcmp.c timingsafe_bcmp (the constant-time compare
+ *     crypt.c/auth-scram.c call since 18.6, d93ef41317), pasted at the end.
  *   - Whole verbatim sibling TUs in this directory (cp'd by the script):
  *     src/common/saslprep.c, src/common/unicode_norm.c (FRONTEND arms:
  *     malloc/free allocator + the linear/table lookup arms — the SAME
@@ -37,14 +39,15 @@
  *     pg_b64_*, scram_build_secret, scram_SaltedPassword, scram_ServerKey
  *     resolve (via the family's -D renames in build.rs, which mirror
  *     CRYPTO_SHARED_SYMS) to the cryptofam_* exports of csrc/cryptofam/ —
- *     the verbatim 18.3 copies the cryptofam_diff target already vendors
- *     (single copy per the duplicate-export rule).
+ *     the verbatim copies the cryptofam_diff target already vendors
+ *     (unchanged 18.3->18.6; single copy per the duplicate-export rule).
  *
  * Symbol renames (build.rs -D, bodies untouched): get_password_type,
  * encrypt_password, md5_crypt_verify, plain_crypt_verify,
  * parse_scram_secret, pg_be_scram_build_secret, scram_verify_plain_password,
  * pg_saslprep, unicode_normalize, pg_utf_mblen, pg_is_ascii all carry the
- * pg_cryptbe_ family prefix; the CRYPTO_SHARED_SYMS set carries cryptofam_.
+ * pg_cryptbe_ family prefix (timingsafe_bcmp likewise, via the #define in
+ * the shim section below); the CRYPTO_SHARED_SYMS set carries cryptofam_.
  *
  * Shims (PLUMBING ONLY, never logic):
  *   - ereport/elog -> record an errcode class in TLS; >= ERROR longjmps to
@@ -211,7 +214,7 @@ pg_cryptbe_strong_random(void *buf, size_t len)
 	uint8_t		salt[16];
 
 	if (len != 16)
-		abort();				/* SCRAM_DEFAULT_SALT_LEN is 16 in 18.3 */
+		abort();				/* SCRAM_DEFAULT_SALT_LEN is 16 in 18.6 */
 	pg_stub_get_scram_salt(salt);
 	memcpy(buf, salt, 16);
 	return true;
@@ -224,6 +227,12 @@ pg_cryptbe_strong_random(void *buf, size_t len)
 /* transcribed from src/include/c.h (values verbatim) */
 #define STATUS_OK				(0)
 #define STATUS_ERROR			(-1)
+
+/* timingsafe_bcmp: declaration transcribed from src/include/port.h; the
+ * verbatim src/port/timingsafe_bcmp.c body is pasted at the end of this TU
+ * and renamed here so this archive never exports the libpgport name. */
+#define timingsafe_bcmp pg_cryptbe_timingsafe_bcmp
+extern int	timingsafe_bcmp(const void *b1, const void *b2, size_t len);
 
 /* scram_build_secret's result is a RAW malloc (the cryptofam vendored
  * scram-common.c is compiled FRONTEND, so its palloc arm is malloc), but the
@@ -273,7 +282,7 @@ typedef enum PasswordType
 	PASSWORD_TYPE_SCRAM_SHA_256,
 } PasswordType;
 
-/* ===== VERBATIM src/backend/libpq/crypt.c lines 86-321 ==================== */
+/* ===== VERBATIM src/backend/libpq/crypt.c lines 86-323 ==================== */
 /*
  * What kind of a password type is 'shadow_pass'?
  */
@@ -421,7 +430,8 @@ md5_crypt_verify(const char *role, const char *shadow_pass,
 		return STATUS_ERROR;
 	}
 
-	if (strcmp(client_pass, crypt_pwd) == 0)
+	if (strlen(client_pass) == strlen(crypt_pwd) &&
+		timingsafe_bcmp(client_pass, crypt_pwd, strlen(crypt_pwd)) == 0)
 		retval = STATUS_OK;
 	else
 	{
@@ -483,7 +493,8 @@ plain_crypt_verify(const char *role, const char *shadow_pass,
 				*logdetail = errstr;
 				return STATUS_ERROR;
 			}
-			if (strcmp(crypt_client_pass, shadow_pass) == 0)
+			if (strlen(crypt_client_pass) == strlen(shadow_pass) &&
+				timingsafe_bcmp(crypt_client_pass, shadow_pass, strlen(shadow_pass)) == 0)
 				return STATUS_OK;
 			else
 			{
@@ -619,7 +630,7 @@ scram_verify_plain_password(const char *username, const char *password,
 	 * Compare the secret's Server Key with the one computed from the
 	 * user-supplied password.
 	 */
-	return memcmp(computed_key, server_key, key_length) == 0;
+	return timingsafe_bcmp(computed_key, server_key, key_length) == 0;
 }
 /*
  * Parse and validate format of given SCRAM secret.
@@ -847,6 +858,24 @@ pg_is_ascii(const char *str)
 	return true;
 }
 
+
+/* ===== VERBATIM src/port/timingsafe_bcmp.c lines 29-43 (timingsafe_bcmp;
+ *       USE_SSL is undefined here, selecting the portable arm) ============ */
+int
+timingsafe_bcmp(const void *b1, const void *b2, size_t n)
+{
+#ifdef USE_SSL
+	return CRYPTO_memcmp(b1, b2, n);
+#else
+	const unsigned char *p1 = b1,
+			   *p2 = b2;
+	int			ret = 0;
+
+	for (; n > 0; n--)
+		ret |= *p1++ ^ *p2++;
+	return (ret != 0);
+#endif
+}
 
 /* ---------------- driver entry points (shim, exported) -------------------- */
 

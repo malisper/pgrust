@@ -2,9 +2,12 @@
  * pg_quote_io.c: vendored PostgreSQL C oracle for the quote_diff differential
  * fuzz target (100%-coverage campaign; crate crates/backend/utils/adt/quote).
  *
- * Provenance: PostgreSQL 18.3 (Stamp-18.3, upstream sha
- * 62d6c7d3df6287f1bd83199c1a746e50d31571a0), verified against the repo's
- * vendored ground-truth checkout ../pgrust-reference/vendor/postgres-src.
+ * Provenance: PostgreSQL REL_18_6 (upstream sha
+ * 724edf9bde9d356724ad384a2e196edc3c9f80f7; re-vendored 2026-09-02 from
+ * Stamp-18.3 @ 62d6c7d3df — quote.c quote_literal_internal, ruleutils.c
+ * quote_identifier, c.h SQL_STR_DOUBLE / ESCAPE_STRING_SYNTAX and
+ * keywords.h UNRESERVED_KEYWORD are byte-identical at REL_18_6; the
+ * ruleutils.c and c.h 18.3→18.6 changes are outside the copied code).
  *   - SECTION 1: quote_literal_internal — VERBATIM from
  *     src/backend/utils/adt/quote.c (the whole value core of quote_literal /
  *     quote_nullable; the fmgr wrappers quote_literal/quote_nullable are
@@ -31,7 +34,8 @@
  *     (crates/common/keywords), so hash/table parity is by shared source of
  *     truth and a Rust-side transcription drift is a divergence.
  *   - ScanKeywordCategories: extern from csrc/tablesfam/keywords.c (verbatim
- *     18.3 src/common/keywords.c; the symbol is NOT on the tablesfam rename
+ *     src/common/keywords.c, identical at 18.3 and REL_18_6; the symbol is
+ *     NOT on the tablesfam rename
  *     list, deliberately relied on here). That is the only two-sided oracle
  *     for the category table (lanef's DUPLICATION-LEDGER note).
  *

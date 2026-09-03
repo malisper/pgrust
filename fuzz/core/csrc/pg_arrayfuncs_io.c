@@ -3,11 +3,18 @@
  * differential fuzz target (100%-coverage campaign; crate
  * crates/backend/utils/adt/arrayfuncs).
  *
- * Provenance (all bodies VERBATIM unless a shim is listed below), from the
- * repo's vendored ground-truth checkout ../pgrust-reference/vendor/postgres-src
- * @ 62d6c7d3df6287f1bd83199c1a746e50d31571a0 (REL_18 "Stamp 18.3"). Every
- * pasted range is labelled inline with its exact source lines; the ranges
- * were extracted mechanically (sed) so pasted logic is byte-for-byte:
+ * Provenance (all bodies VERBATIM unless a shim is listed below), from
+ * PostgreSQL upstream @ REL_18_6 (PostgreSQL 18.6). Re-verified 2026-09-02:
+ * every copied section is byte-identical between the 18.3 checkout
+ * ../pgrust-reference/vendor/postgres-src @
+ * 62d6c7d3df6287f1bd83199c1a746e50d31571a0 (REL_18 "Stamp 18.3") and
+ * REL_18_6 — the 18.3->18.6 upstream diffs of arrayfuncs.c
+ * (accumArrayResultArr only), varlena.c (SplitGUCList comment, levenshtein,
+ * unicode_normalize arms) and common/int.h (appended size_t helpers) fall
+ * outside the ranges below. Every pasted range is labelled inline with its
+ * exact source lines (18.3 line numbers, "@ 62d6c7d3df", unchanged at
+ * REL_18_6); the ranges were extracted mechanically (sed) so pasted logic
+ * is byte-for-byte:
  *   - src/backend/utils/adt/arrayfuncs.c: Array_nulls (40..43), ASSGN (44..48),
  *     ArrayToken (56..65), array_in tail (237..376), ReadArrayDimensions /
  *     ReadDimensionInt / ReadArrayStr / ReadArrayToken / CopyArrayEls

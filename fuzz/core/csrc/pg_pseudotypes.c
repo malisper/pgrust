@@ -2,9 +2,11 @@
  * Vendored PostgreSQL C: pseudotypes — differential-fuzz oracle.
  *
  * Provenance (all bodies VERBATIM unless a shim is listed below):
- *   - src/backend/utils/adt/pseudotypes.c @ postgres-src
- *     62d6c7d3df6287f1bd83199c1a746e50d31571a0 (Stamp 18.3, the repo's
- *     vendored ground-truth checkout ../pgrust-reference/vendor/postgres-src):
+ *   - src/backend/utils/adt/pseudotypes.c @ postgres-src REL_18_6
+ *     (PostgreSQL 18.6; byte-identical to the 18.3 checkout
+ *     62d6c7d3df6287f1bd83199c1a746e50d31571a0, the repo's vendored
+ *     ground-truth ../pgrust-reference/vendor/postgres-src — re-verified
+ *     2026-09-02):
  *     the four PSEUDOTYPE_DUMMY_* macros + every instantiation line,
  *     cstring_in/cstring_out/cstring_recv/cstring_send,
  *     void_in/void_out/void_recv/void_send, shell_in/shell_out,
@@ -19,14 +21,17 @@
  *     pq_begintypsend / pq_endtypsend — reduced to their identity-encoding
  *     arms with the reduction argued per-function below.
  *   - src/backend/utils/adt/varlena.c: textout -> text_to_cstring,
- *     textsend cores (for the pg_node_tree delegates).
+ *     textsend cores (for the pg_node_tree delegates); unchanged
+ *     18.3->18.6 (that diff touches only SplitGUCList's comment, the
+ *     levenshtein and unicode_normalize arms).
  *   - src/include/varatt.h: SET_VARSIZE 4B form (little-endian arm,
  *     matching this native LE host).
  *
  * This file is the native-build adaptation of the known-good Kani
  * vendoring proofs/pseudotypes/c/pg_pseudotypes.c (same shim arguments,
- * re-verified against Stamp 18.3 — REL_18_STABLE and 18.3 are identical
- * for this file), with two deltas for the fuzz build:
+ * re-verified against Stamp 18.3 and again at REL_18_6 — REL_18_STABLE,
+ * 18.3 and 18.6 are identical for this file), with two deltas for the fuzz
+ * build:
  *   1. ereport -> thread-local sqlstate capture (pg_pseudo_errcode_get /
  *      _reset) instead of out-params, following csrc/pg_float_io.c.
  *   2. cstring_recv models the pg_verify_mbstr arm that the Kani harness

@@ -4,16 +4,19 @@
  * Crates under test (see fuzz/core/src/netfam_diff.rs):
  *   crates/backend/libpq/ifaddr, crates/backend/libpq/pqformat.
  *
- * Provenance (all Postgres bodies VERBATIM sed-extracted from the vendor
- * tree at ~/dev/pgrust-reference/vendor/postgres-src, Stamp-18.3, upstream
- * sha 62d6c7d3df6287f1bd83199c1a746e50d31571a0 — assembled by
- * scratchpad/assemble_netfam.sh, never hand-typed):
+ * Provenance (all Postgres bodies VERBATIM sed-extracted from the upstream
+ * tree at REL_18_6 — Stamp 18.6, upstream sha
+ * 724edf9bde9d356724ad384a2e196edc3c9f80f7, re-verified 2026-09-02; first
+ * assembled at 18.3 by scratchpad/assemble_netfam.sh, never hand-typed.
+ * The only cited file that changed 18.3→18.6 is src/include/c.h
+ * (d1d9688b1f, 753d5eee46: macro additions above the copied lines, which
+ * shift by +17 and are otherwise byte-identical):
  *   - src/include/port/pg_bswap.h lines 31-128 (pg_bswap16/32/64 +
  *     pg_hton/pg_ntoh; HAVE__BUILTIN_BSWAP* defined => builtin macros).
  *   - src/include/lib/stringinfo.h lines 46-54 (StringInfoData), 112
  *     (STRINGINFO_DEFAULT_SIZE), 231-234 (appendStringInfoCharMacro).
- *   - src/include/c.h lines 655-659 (struct varlena), 661 (VARHDRSZ),
- *     668 (bytea typedef).
+ *   - src/include/c.h lines 672-676 (struct varlena), 678 (VARHDRSZ),
+ *     685 (bytea typedef).
  *   - src/include/varatt.h lines 111-139 (varattrib_4b/1b/1b_e), 176-242
  *     (both endian macro arms; WORDS_BIGENDIAN undefined on x86-64 and
  *     aarch64 => the little-endian arm compiles, as on the CI cluster), 305
@@ -328,7 +331,7 @@ extern void enlargeStringInfo(StringInfo str, int needed);
 	 appendStringInfoChar(str, ch) : \
 	 (void)((str)->data[(str)->len] = (ch), (str)->data[++(str)->len] = '\0'))
 
-/* ---- VERBATIM src/include/c.h lines 655-659, 661, 668 ---- */
+/* ---- VERBATIM src/include/c.h lines 672-676, 678, 685 ---- */
 struct varlena
 {
 	char		vl_len_[4];		/* Do not touch this field directly! */

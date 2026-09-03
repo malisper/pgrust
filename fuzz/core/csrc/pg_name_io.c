@@ -1,21 +1,26 @@
 /*
- * pg_name_io.c: vendored PostgreSQL 18.3 C oracle for the adt/name
+ * pg_name_io.c: vendored PostgreSQL 18.6 (REL_18_6) C oracle for the adt/name
  * differential fuzz target (decoder_fuzz::name_diff).
  *
  * Provenance (all bodies verbatim modulo the documented shims):
- *   - src/backend/utils/adt/name.c      PostgreSQL 18.3, upstream sha
- *     62d6c7d3df (namein, nameout, namerecv core, namesend core, namecmp,
+ *   - src/backend/utils/adt/name.c      PostgreSQL 18.6, upstream tag
+ *     REL_18_6 (namein, nameout, namerecv core, namesend core, namecmp,
  *     nameeq/ne/lt/le/gt/ge, btnamecmp, namestrcpy, namestrcmp,
  *     nameconcatoid)
- *   - src/backend/utils/adt/varlena.c   PostgreSQL 18.3 (varstr_cmp
+ *   - src/backend/utils/adt/varlena.c   PostgreSQL 18.6 (varstr_cmp
  *     collate_is_c branch; nameeqtext/namenetext/btnametextcmp,
  *     texteqname/textnename/bttextnamecmp and the CmpCall-derived
  *     lt/le/ge/gt wrappers; text_name clip core)
- *   - src/backend/utils/mb/mbutils.c    PostgreSQL 18.3
+ *   - src/backend/utils/mb/mbutils.c    PostgreSQL 18.6
  *     (pg_encoding_mbcliplen, cliplen)
- *   - src/common/wchar.c                PostgreSQL 18.3 (pg_utf_mblen)
- * Source of record: pgrust-reference/vendor/postgres-src (PACKAGE_VERSION
- * '18.3'), matching proofs/name-ascii/c/pg_name_ascii.c provenance.
+ *   - src/common/wchar.c                PostgreSQL 18.6 (pg_utf_mblen)
+ * Source of record: PostgreSQL upstream @ REL_18_6. Re-verified 2026-09-02:
+ * every copied function is byte-identical between the 18.3 checkout
+ * pgrust-reference/vendor/postgres-src (PACKAGE_VERSION '18.3', upstream sha
+ * 62d6c7d3df) and REL_18_6 — varlena.c's 18.3->18.6 diff does not touch
+ * varstr_cmp or the name/text cross functions; name.c, mbutils.c and
+ * wchar.c are unchanged. Matches proofs/name-ascii/c/pg_name_ascii.c
+ * provenance.
  *
  * Shims (plumbing only, never logic):
  *   1. PG_FUNCTION_ARGS unwrapping -> plain C signatures over

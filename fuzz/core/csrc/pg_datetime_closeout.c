@@ -4,14 +4,15 @@
  * crates adt_date + adt_datetime, lane p1-lanel2 closeout).
  *
  * Provenance: all vendored bodies VERBATIM from postgres-src
- * 62d6c7d3df6287f1bd83199c1a746e50d31571a0 (PostgreSQL 18.3 "Stamp-18.3"):
+ * 724edf9bde9d356724ad384a2e196edc3c9f80f7 (PostgreSQL 18.6, tag REL_18_6;
+ * re-vendored from REL_18_3 62d6c7d3df on 2026-09-02):
  *   - csrc/pg_datetime_verbatim.inc (shared with lanes p1-lanel / p1-laney):
  *     the datetime.c parse/encode core, timestamp2tm, and the date.c bodies
  *     including time_part_common (whose retnumeric=true face THIS oracle is
  *     the first to drive — the io oracle aborts in its numeric stubs).
  *   - date.c extract_date, timetz_part_common, date_decrement,
  *     date_increment: vendored verbatim BELOW (they are not in the shared
- *     .inc; extracted by hand from vendor/postgres-src date.c, byte-compared).
+ *     .inc; extracted by hand from the REL_18_6 date.c, byte-compared).
  *
  * PINNED ENVIRONMENT + SHIMS: the prelude below is a byte-identical copy of
  * lane p1-laney's csrc/pg_timestamp_io.c prelude (itself a copy of

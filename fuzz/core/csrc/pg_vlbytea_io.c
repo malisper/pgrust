@@ -4,10 +4,13 @@
  * bytea family).
  *
  * Provenance (all bodies VERBATIM unless a shim is listed below):
- *   - src/backend/utils/adt/varlena.c @ postgres-src
- *     62d6c7d3df6287f1bd83199c1a746e50d31571a0 (PostgreSQL 18.3, Stamp-18.3;
- *     re-verified against the repo's vendored ground-truth checkout
- *     ../pgrust-reference/vendor/postgres-src): byteain, byteaout, bytearecv,
+ *   - src/backend/utils/adt/varlena.c @ postgres-src REL_18_6 (PostgreSQL
+ *     18.6; every copied function is byte-identical to the 18.3 checkout
+ *     62d6c7d3df6287f1bd83199c1a746e50d31571a0, the repo's vendored
+ *     ground-truth ../pgrust-reference/vendor/postgres-src — re-verified
+ *     2026-09-02: varlena.c's 18.3->18.6 diff touches only SplitGUCList's
+ *     comment, the levenshtein and unicode_normalize arms, and
+ *     common/int.h's only appends size_t helpers): byteain, byteaout, bytearecv,
  *     byteasend, byteaoctetlen, byteacat + bytea_catenate,
  *     bytea_substr / bytea_substr_no_len + bytea_substring,
  *     byteaoverlay / byteaoverlay_no_len + bytea_overlay, byteapos,

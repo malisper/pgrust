@@ -4,12 +4,13 @@
  * fmt_num_diff; the NUM SQL entries live in pg_fmt_num_io.c).
  *
  * Provenance (all bodies VERBATIM unless a shim is listed below), from
- * postgres-src @ 62d6c7d3df6287f1bd83199c1a746e50d31571a0 (REL_18 "Stamp
- * 18.3", the repo's vendored ground-truth checkout
- * ../pgrust-reference/vendor/postgres-src):
+ * postgres-src @ 724edf9bde9d356724ad384a2e196edc3c9f80f7 (REL_18_6, the
+ * in-repo pristine tree crates/postgres-18.6-reference; re-vendored from
+ * REL_18_3 62d6c7d3df on 2026-09-02 — the *_18_3.inc file names are KEPT
+ * because proofs/ and docs/ cite them, but their contents are REL_18_6):
  *
  *   - pg_formatting_18_3.inc = src/backend/utils/adt/formatting.c lines
- *     93..6309 BYTE-IDENTICAL (verify: sed -n '93,6309p' formatting.c | cmp -
+ *     93..6461 BYTE-IDENTICAL (verify: sed -n '93,6461p' formatting.c | cmp -
  *     pg_formatting_18_3.inc). That is the whole file after its #include
  *     block, up to (excluding) the NUM SQL-callable entries
  *     (numeric_to_number..float8_to_char, vendored by pg_fmt_num_io.c).
@@ -29,7 +30,12 @@
  *     pgstrcasecmp.c (pg_strcasecmp, pg_strncasecmp, pg_ascii_toupper,
  *     pg_ascii_tolower, pg_tolower), scansup.c (scanner_isspace),
  *     wchar.c (pg_utf_mblen), mbutils.c (pg_mblen_cstr, pg_mblen_range,
- *     pg_mbstrlen, pg_mbstrlen_with_len).
+ *     pg_mbstrlen, pg_mbstrlen_with_len, pg_mbcliplen,
+ *     pg_encoding_mbcliplen, cliplen), mcxt.c (mul_size, mul_size_error,
+ *     palloc_mul — the REL_18_6 palloc_array/mul_size size-overflow
+ *     guards formatting.c now calls), pg_locale.c (strlower_c, strupper_c
+ *     — the ctype_is_c arms of pg_strlower/pg_strupper, which REL_18_6's
+ *     seq_search_localized reaches directly via casefold_str_cmp).
  *   - hdr_datatype_timestamp_h.inc / hdr_utils_datetime_h.inc /
  *     hdr_utils_date_h.inc = src/include/datatype/timestamp.h,
  *     src/include/utils/datetime.h, src/include/utils/date.h with ONLY the
@@ -53,9 +59,12 @@
  *   - COLLATION/LOCALE PIN: pg_newlocale_from_collation returns a static
  *     { ctype_is_c = true } locale (driver always passes C_COLLATION_OID),
  *     so str_tolower/str_toupper/str_initcap/str_casefold take their
- *     verbatim ASCII arms; pg_strlower/pg_strupper/pg_strtitle/pg_strfold
- *     are abort() stubs (unreachable under the pin; an abort = harness
- *     defect, never silently wrong data). cache_locale_time() fills the
+ *     verbatim ASCII arms; pg_strlower/pg_strupper carry ONLY their
+ *     ctype_is_c arm (verbatim strlower_c/strupper_c, reached by the
+ *     TM-prefixed from_char matcher since REL_18_6) and abort() on any
+ *     other provider; pg_strtitle/pg_strfold are abort() stubs (unreachable
+ *     under the pin; an abort = harness defect, never silently wrong
+ *     data). cache_locale_time() fills the
  *     localized_* arrays with the C-locale strftime names (English), which
  *     is what real PostgreSQL produces under lc_time=C; TM-prefixed
  *     patterns therefore stay IN the comparison plane.
@@ -119,8 +128,12 @@
 #define j2date fmtdch_j2date
 #define j2day fmtdch_j2day
 #define months fmtdch_months
+#define mul_size fmtdch_mul_size
+#define palloc_mul fmtdch_palloc_mul
+#define pg_encoding_mbcliplen fmtdch_pg_encoding_mbcliplen
 #define pg_lltoa fmtdch_pg_lltoa
 #define pg_ltoa fmtdch_pg_ltoa
+#define pg_mbcliplen fmtdch_pg_mbcliplen
 #define pg_mblen_cstr fmtdch_pg_mblen_cstr
 #define pg_mblen_range fmtdch_pg_mblen_range
 #define pg_strcasecmp fmtdch_pg_strcasecmp
@@ -202,6 +215,7 @@ typedef int64 pg_time_t;
 #define _(x) (x)
 #define pg_attribute_printf(f, a)
 #define pg_noinline
+#define pg_noreturn __attribute__((noreturn))
 #define IS_HIGHBIT_SET(ch) ((unsigned char) (ch) & 0x80)
 #define FLEXIBLE_ARRAY_MEMBER	/* empty */
 #define TZ_STRLEN_MAX 255
@@ -502,6 +516,15 @@ pg_mul_s64_overflow(int64 a, int64 b, int64 *result)
 	return __builtin_mul_overflow(a, b, result);
 }
 
+static inline bool
+pg_mul_size_overflow(size_t a, size_t b, size_t *result)
+{
+	return __builtin_mul_overflow(a, b, result);
+}
+
+/* utils/palloc.h (REL_18_6): palloc_mul is vendored from mcxt.c below */
+#define palloc_array(type, count) ((type *) palloc_mul(sizeof(type), count))
+
 /* ---------------------------------------------------------------- */
 /* datetime/timestamp/date headers (filtered verbatim copies)        */
 /* ---------------------------------------------------------------- */
@@ -589,6 +612,16 @@ static const struct
 	int			encoding;
 }			DatabaseEncodingData = {PG_UTF8}, *DatabaseEncoding = &DatabaseEncodingData;
 
+/* pg_wchar.h typedef + the maxmblen lookup pg_encoding_mbcliplen makes */
+typedef int (*mblen_converter) (const unsigned char *mbstr);
+
+static int
+pg_encoding_max_length(int encoding)
+{
+	(void) encoding;
+	return 4;					/* ENCODING PIN: UTF8 */
+}
+
 /*
  * report_invalid_encoding_db raises ERRCODE_CHARACTER_NOT_IN_REPERTOIRE
  * (22021) in real PG; same class here, then throw.
@@ -643,11 +676,21 @@ pg_newlocale_from_collation(Oid collid)
 	return &pg_diff_c_locale;	/* COLLATION PIN: C */
 }
 
-/* unreachable under the ctype_is_c pin — loud stubs, never silent data */
+/*
+ * pg_strlower/pg_strupper: the pg_locale.c dispatchers' ctype_is_c arm
+ * (verbatim strlower_c/strupper_c, vendored in pg_fmt_deps_18_3.inc); every
+ * other provider arm is unreachable under the C pin — loud abort, never
+ * silent data.
+ */
+static size_t strlower_c(char *dst, size_t dstsize, const char *src, size_t srclen);
+static size_t strupper_c(char *dst, size_t dstsize, const char *src, size_t srclen);
+
 static size_t
 pg_strlower(char *dst, size_t dstsize, const char *src, ssize_t srclen,
 			pg_locale_t locale)
 {
+	if (locale->ctype_is_c)
+		return strlower_c(dst, dstsize, src, srclen);
 	abort();
 }
 
@@ -655,8 +698,12 @@ static size_t
 pg_strupper(char *dst, size_t dstsize, const char *src, ssize_t srclen,
 			pg_locale_t locale)
 {
+	if (locale->ctype_is_c)
+		return strupper_c(dst, dstsize, src, srclen);
 	abort();
 }
+
+/* unreachable under the ctype_is_c pin — loud stubs, never silent data */
 
 static size_t
 pg_strtitle(char *dst, size_t dstsize, const char *src, ssize_t srclen,

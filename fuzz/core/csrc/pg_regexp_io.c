@@ -2,9 +2,14 @@
  * pg_regexp_io.c: vendored PostgreSQL C oracle for the regexp_diff differential
  * fuzz target (100%-coverage campaign; crate crates/backend/utils/adt/regexp).
  *
- * Provenance — all bodies VERBATIM unless a shim is listed below, from the
- * repo's vendored ground-truth checkout ../pgrust-reference/vendor/postgres-src
- * @ 62d6c7d3df6287f1bd83199c1a746e50d31571a0 (PostgreSQL 18.3, Stamp-18.3):
+ * Provenance — all bodies VERBATIM unless a shim is listed below, from
+ * PostgreSQL REL_18_6 (upstream sha 724edf9bde9d356724ad384a2e196edc3c9f80f7; re-vendored
+ * 2026-09-02 from the 18.3 extraction @ 62d6c7d3df — the only copied body
+ * that changed 18.3→18.6 is regexp.c setup_regexp_matches: b7e5c3f634,
+ * conversion buffer sized maxlen*eml+1 instead of clamping to the input
+ * byte length, and wide_str allocated via palloc_array (palloc.h
+ * e1c30458a1 overflow-checked palloc_mul, shimmed below); the copied
+ * varlena.c bodies are byte-identical at REL_18_6):
  *   - src/backend/utils/adt/regexp.c: pg_re_flags, regexp_matches_ctx,
  *     RE_wchar_execute, RE_execute, RE_compile_and_execute, parse_re_flags,
  *     the textregexeq/textregexne/texticregexeq/texticregexne/nameregexeq/
@@ -245,6 +250,55 @@ pg_regexp_pfree_impl(void *p)
 #define palloc0(n) pg_regexp_palloc0_impl(n)
 #define repalloc(p, n) pg_regexp_repalloc_impl((p), (n))
 #define pfree(p) pg_regexp_pfree_impl(p)
+
+/* palloc.h @ REL_18_6 (e1c30458a1): palloc_array routes through palloc_mul;
+ * pg_mul_size_overflow VERBATIM common/int.h, mul_size_error + palloc_mul
+ * VERBATIM mcxt.c, TU-static; c.h pg_noreturn/pg_noinline/Size spellings. */
+typedef size_t Size;
+#define pg_noreturn _Noreturn
+#define pg_noinline __attribute__((noinline))
+static inline bool
+pg_mul_size_overflow(size_t a, size_t b, size_t *result)
+{
+#if defined(HAVE__BUILTIN_OP_OVERFLOW)
+	return __builtin_mul_overflow(a, b, result);
+#else
+	size_t		res = a * b;
+
+	if (a != 0 && b != res / a)
+	{
+		*result = 0x5EED;		/* to avoid spurious warnings */
+		return true;
+	}
+	*result = res;
+	return false;
+#endif
+}
+
+pg_noreturn static pg_noinline void
+mul_size_error(Size s1, Size s2)
+{
+	ereport(ERROR,
+			(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+			 errmsg("invalid memory allocation request size %zu * %zu",
+					s1, s2)));
+}
+
+/*
+ * palloc_mul
+ *		Equivalent to palloc(mul_size(s1, s2)).
+ */
+static void *
+palloc_mul(Size s1, Size s2)
+{
+	/* inline mul_size() for efficiency */
+	Size		req;
+
+	if (unlikely(pg_mul_size_overflow(s1, s2, &req)))
+		mul_size_error(s1, s2);
+	return palloc(req);
+}
+#define palloc_array(type, count) ((type *) palloc_mul(sizeof(type), count))
 
 /* ================= text / Datum shims (see header) ====================== */
 
@@ -887,7 +941,7 @@ setup_regexp_matches(text *orig_str, text *pattern, pg_re_flags *re_flags,
 
 	/* convert string to pg_wchar form for matching */
 	orig_len = VARSIZE_ANY_EXHDR(orig_str);
-	wide_str = (pg_wchar *) palloc(sizeof(pg_wchar) * (orig_len + 1));
+	wide_str = palloc_array(pg_wchar, orig_len + 1);
 	wide_len = pg_mb2wchar_with_len(VARDATA_ANY(orig_str), wide_str, orig_len);
 
 	/* set up the compiled pattern */
@@ -1023,23 +1077,24 @@ setup_regexp_matches(text *orig_str, text *pattern, pg_re_flags *re_flags,
 
 	if (eml > 1)
 	{
-		int64		maxsiz = eml * (int64) maxlen;
 		int			conv_bufsiz;
 
 		/*
 		 * Make the conversion buffer large enough for any substring of
-		 * interest.
+		 * interest. We can't use the original string's byte length as a
+		 * tighter bound, because that assumes the input is validly encoded;
+		 * but pg_mb2wchar_with_len() can accept strings that are invalid in
+		 * the database encoding, and converting such a character back to
+		 * multibyte form can take more bytes than it did in the input.
 		 *
-		 * Worst case: assume we need the maximum size (maxlen*eml), but take
-		 * advantage of the fact that the original string length in bytes is
-		 * an upper bound on the byte length of any fetched substring (and we
-		 * know that len+1 is safe to allocate because the varlena header is
-		 * longer than 1 byte).
+		 * This can't overflow, nor exceed what palloc will accept: maxlen is
+		 * at most wide_len, which is at most orig_len, and we have already
+		 * successfully allocated (orig_len + 1) * sizeof(pg_wchar) bytes for
+		 * wide_str. That relies on eml being no more than sizeof(pg_wchar),
+		 * which is true of all supported encodings.
 		 */
-		if (maxsiz > orig_len)
-			conv_bufsiz = orig_len + 1;
-		else
-			conv_bufsiz = maxsiz + 1;	/* safe since maxsiz < 2^30 */
+		Assert(eml <= sizeof(pg_wchar));
+		conv_bufsiz = maxlen * eml + 1;
 
 		matchctx->conv_buf = palloc(conv_bufsiz);
 		matchctx->conv_bufsiz = conv_bufsiz;

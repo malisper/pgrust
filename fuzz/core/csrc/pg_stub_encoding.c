@@ -2,8 +2,11 @@
  * stub:encoding — C-oracle side of the shared encoding static-table pin
  * (fuzz/core/src/stub_encoding.rs is the Rust side).
  *
- * Provenance (postgres-src 62d6c7d3df6287f1bd83199c1a746e50d31571a0,
- * REL_18 "Stamp 18.3", ../pgrust-reference/vendor/postgres-src):
+ * Provenance (postgres-src REL_18_6, 724edf9bde9d356724ad384a2e196edc3c9f80f7
+ * "Stamp 18.6", /home/dev/dev/postgres-upstream-18.6; re-verified
+ * 2026-09-02 — encnames.c's only 18.3→18.6 change, ea94d2e673, edits
+ * comments in pg_encname_tbl; pg_enc2name_tbl, pg_wchar.h and wchar.c are
+ * byte-identical at both tags):
  *   - pg_enc enum: src/include/mb/pg_wchar.h — VERBATIM.
  *   - pg_enc2name_tbl: src/common/encnames.c — VERBATIM (the non-WIN32
  *     DEF_ENC2NAME arm: { #name, PG_##name }; codepage column is a WIN32

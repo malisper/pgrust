@@ -8,8 +8,11 @@
  * csrc/portfam/{shim,include} include tree — see core/build.rs.
  *
  * Provenance: every PostgreSQL body is a VERBATIM whole-file copy under
- * csrc/portfam/ from postgres-src @ 62d6c7d3df6287f1bd83199c1a746e50d31571a0
- * (Stamp-18.3):
+ * csrc/portfam/ from postgres-src @ REL_18_6
+ * (724edf9bde9d356724ad384a2e196edc3c9f80f7, Stamp 18.6; this glue
+ * re-verified 2026-09-02 — the 18.3→18.6 changes to path.c (6a67c540a6, adds
+ * path_is_safe_for_extraction) and pg_popcount_aarch64.c (f00cccb798,
+ * non-NEON-arm dummy symbol) touch no function this glue drives):
  *   - portfam/pg_bitutils.c            = src/port/pg_bitutils.c
  *   - portfam/pg_popcount_aarch64.c    = src/port/pg_popcount_aarch64.c
  *   - portfam/pg_crc32c_sb8.c          = src/port/pg_crc32c_sb8.c

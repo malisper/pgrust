@@ -2,14 +2,16 @@
  * Vendored PostgreSQL C: NUMERIC — differential-fuzz oracle.
  *
  * Provenance:
- *   - vendor/numeric.c: UNMODIFIED vendored REL_18_3
- *     src/backend/utils/adt/numeric.c (byte-identical copy of
- *     bench/cref/numeric_vendor/numeric.c, itself vendored from postgres-src
- *     62d6c7d3df6287f1bd83199c1a746e50d31571a0 / Stamp 18.3). #include'd
+ *   - vendor/numeric.c: UNMODIFIED vendored REL_18_6
+ *     src/backend/utils/adt/numeric.c (byte-identical to postgres-upstream
+ *     REL_18_6 = 724edf9bde9d356724ad384a2e196edc3c9f80f7 / PostgreSQL 18.6;
+ *     re-vendored 2026-09-02 from the REL_18_3 62d6c7d3df copy — upstream
+ *     84001a04d5 make_numeric_typmod_safe + numerictypmodin, 722695db18
+ *     NULL-honest *_combine). #include'd
  *     whole-file below (cref_numeric precedent) so the oracle drives the
  *     exact shipped-reference bodies including statics.
- *   - vendor/common/hashfn.c: UNMODIFIED vendored REL_18_3
- *     src/common/hashfn.c (hash_bytes / hash_bytes_extended for
+ *   - vendor/common/hashfn.c: UNMODIFIED vendored REL_18_6
+ *     src/common/hashfn.c (byte-identical to REL_18_3; hash_bytes / hash_bytes_extended for
  *     hash_numeric / hash_numeric_extended).
  *   - vendor/postgres.h + vendor/{common,lib,libpq,nodes,utils,...}/*.h:
  *     the bench/cref/numeric_vendor shim environment (types/macros are

@@ -1,5 +1,6 @@
 /* SHIM utils/json.h — escape_json* implemented verbatim in the driver TU
- * (bodies from src/common/jsonapi.c REL_18 escape family). */
+ * (bodies from src/backend/utils/adt/json.c @ REL_18_6 escape family,
+ * json_escape_c.inc; decls match src/include/utils/json.h @ REL_18_6). */
 #ifndef PG_JSONBFAM_SHIM_JSON_H
 #define PG_JSONBFAM_SHIM_JSON_H
 #include "postgres.h"

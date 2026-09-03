@@ -2,9 +2,12 @@
  * Vendored PostgreSQL C: money (cash) type — differential-fuzz oracle.
  *
  * Provenance (all bodies VERBATIM unless a shim is listed below):
- *   - src/backend/utils/adt/cash.c @ postgres-src
- *     62d6c7d3df6287f1bd83199c1a746e50d31571a0 (REL_18 / 18.3, the repo's
- *     vendored ground-truth checkout ../pgrust-reference/vendor/postgres-src):
+ *   - src/backend/utils/adt/cash.c @ postgres-upstream
+ *     REL_18_6 724edf9bde9d356724ad384a2e196edc3c9f80f7 (PostgreSQL 18.6; re-vendored
+ *     2026-09-02 from the REL_18_3 62d6c7d3df copy — upstream 6298a41b4e
+ *     "Fix missing money overflow checks for INT64_MIN / -1" applied to
+ *     cash_div_int64; every other copied body, and the cited int.h /
+ *     float.h / c.h / int8.c definitions, are byte-identical in REL_18_6):
  *     cash_in, cash_out, cash_recv, cash_send, cash_eq/ne/lt/le/gt/ge,
  *     cash_cmp, cash_pl_cash (cash_pl), cash_mi_cash (cash_mi),
  *     cash_mul_int64 / cash_div_int64 cores + int8/int4/int2 wrappers,
@@ -68,13 +71,16 @@
  *   - i64abs -> the llabs identity spelled inline in pg_abs_s64 (verbatim
  *     modulo the libc call).
  *
- * KNOWN-DIVERGENCE NOTE (proofs ledger rows 865/867/3345): C cash_div_int64
- * has NO INT64_MIN / -1 guard (the 2024 money-overflow sweep 4f96281587
- * covered multiply and the float paths only), so that cell is
- * platform-dependent UB in C (x86-64 traps SIGFPE, aarch64 silently yields
- * INT64_MIN); pgrust raises 22003 like int8div (ruling 2026-07-29, reported
- * upstream). The Rust driver carves EXACTLY that cell and never calls this
- * oracle with it, keeping the oracle run UB-free.
+ * RESOLVED-DIVERGENCE NOTE (proofs ledger rows 865/867/3345): through
+ * REL_18_3 C cash_div_int64 had NO INT64_MIN / -1 guard (the 2024
+ * money-overflow sweep 4f96281587 covered multiply and the float paths
+ * only), so that cell was platform-dependent UB in C (x86-64 traps SIGFPE,
+ * aarch64 silently yields INT64_MIN); pgrust raised 22003 like int8div
+ * (ruling 2026-07-29, reported upstream). Upstream 6298a41b4e (REL_18_6,
+ * "Fix missing money overflow checks for INT64_MIN / -1") now raises 22003
+ * at exactly that point — vendored below — so both sides agree on the cell.
+ * The Rust driver still carves it (a driver-side skip that predates the
+ * fix); lifting the carve is a driver change, not an oracle one.
  */
 
 #include <stddef.h>
@@ -760,14 +766,30 @@ pg_diff_cash_mul_int64(int64 c, int64 i, int64 *out)
 	return 0;
 }
 
-/* NOTE: verbatim = NO INT64_MIN / -1 guard; the Rust driver carves that
- * exact cell (ledger rows 865/867/3345) and never calls this with it. */
+/* REL_18_6 (upstream 6298a41b4e): the INT64_MIN / -1 guard is now verbatim
+ * cash.c; the Rust driver's carve of that cell (ledger rows 865/867/3345)
+ * predates it and is no longer load-bearing for UB-freedom. */
 int
 pg_diff_cash_div_int64(int64 c, int64 i, int64 *out)
 {
 	if (unlikely(i == 0))
 		return PG_CASH_ERR_DIV_ZERO;	/* "division by zero" */
 
+	/*
+	 * INT64_MIN / -1 is problematic, since the result can't be represented on
+	 * a two's-complement machine.  Some machines produce INT64_MIN, some
+	 * produce zero, some throw an exception.  We can dodge the problem by
+	 * recognizing that division by -1 is the same as negation.
+	 */
+	if (i == -1)
+	{
+		if (unlikely(c == PG_INT64_MIN))
+			return PG_CASH_ERR_NUM_OOR;	/* "money out of range" */
+		*out = -c;
+		return 0;
+	}
+
+	/* No overflow is possible */
 	*out = c / i;
 	return 0;
 }

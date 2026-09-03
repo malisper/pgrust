@@ -1,6 +1,6 @@
 /*
  * pg_numeric_min.c — VERBATIM extracts of src/backend/utils/adt/numeric.c
- * @ postgres-src 62d6c7d3df6287f1bd83199c1a746e50d31571a0 (PostgreSQL 18.3):
+ * @ postgres REL_18_6 724edf9bde9d356724ad384a2e196edc3c9f80f7 (PostgreSQL 18.6):
  * exactly the call graph of numeric_in / numeric_out / numeric_uminus as
  * used by the jsonpath oracle (DirectFunctionCall sites in jsonpath.c and
  * jsonpath_gram.y). Every extract below carries a "numeric.c:A-B VERBATIM"
@@ -452,7 +452,7 @@ numeric_typmod_scale(int32 typmod)
 }
 
 /* ---- common/int.h VERBATIM (pg_abs_s64; used by the extracted set) ---- */
-/* ---- int.h:233-259 VERBATIM (pg_add_s64_overflow) ---- */
+/* ---- int.h:234-260 VERBATIM (pg_add_s64_overflow) ---- */
 static inline bool
 pg_add_s64_overflow(int64 a, int64 b, int64 *result)
 {
@@ -480,7 +480,7 @@ pg_add_s64_overflow(int64 a, int64 b, int64 *result)
 #endif
 }
 
-/* ---- int.h:260-290 VERBATIM (pg_sub_s64_overflow) ---- */
+/* ---- int.h:261-291 VERBATIM (pg_sub_s64_overflow) ---- */
 static inline bool
 pg_sub_s64_overflow(int64 a, int64 b, int64 *result)
 {
@@ -512,7 +512,7 @@ pg_sub_s64_overflow(int64 a, int64 b, int64 *result)
 #endif
 }
 
-/* ---- int.h:291-333 VERBATIM (pg_mul_s64_overflow) ---- */
+/* ---- int.h:292-334 VERBATIM (pg_mul_s64_overflow) ---- */
 static inline bool
 pg_mul_s64_overflow(int64 a, int64 b, int64 *result)
 {
@@ -822,7 +822,7 @@ numeric_out(PG_FUNCTION_ARGS)
 	PG_RETURN_CSTRING(str);
 }
 
-/* ---- numeric.c:1419-1458 VERBATIM (numeric_uminus) ---- */
+/* ---- numeric.c:1425-1464 VERBATIM (numeric_uminus) ---- */
 Datum
 numeric_uminus(PG_FUNCTION_ARGS)
 {
@@ -864,7 +864,7 @@ numeric_uminus(PG_FUNCTION_ARGS)
 	PG_RETURN_NUMERIC(res);
 }
 
-/* ---- numeric.c:7066-7079 VERBATIM (alloc_var) ---- */
+/* ---- numeric.c:7104-7117 VERBATIM (alloc_var) ---- */
 /*
  * alloc_var() -
  *
@@ -880,7 +880,7 @@ alloc_var(NumericVar *var, int ndigits)
 	var->ndigits = ndigits;
 }
 
-/* ---- numeric.c:7082-7094 VERBATIM (free_var) ---- */
+/* ---- numeric.c:7120-7132 VERBATIM (free_var) ---- */
 /*
  * free_var() -
  *
@@ -895,7 +895,7 @@ free_var(NumericVar *var)
 	var->sign = NUMERIC_NAN;
 }
 
-/* ---- numeric.c:7097-7112 VERBATIM (zero_var) ---- */
+/* ---- numeric.c:7135-7150 VERBATIM (zero_var) ---- */
 /*
  * zero_var() -
  *
@@ -913,7 +913,7 @@ zero_var(NumericVar *var)
 	var->sign = NUMERIC_POS;	/* anything but NAN... */
 }
 
-/* ---- numeric.c:7115-7327 VERBATIM (set_var_from_str) ---- */
+/* ---- numeric.c:7153-7365 VERBATIM (set_var_from_str) ---- */
 /*
  * set_var_from_str()
  *
@@ -1128,7 +1128,7 @@ invalid_syntax:
 					"numeric", str)));
 }
 
-/* ---- numeric.c:7330-7339 VERBATIM (xdigit_value) ---- */
+/* ---- numeric.c:7368-7377 VERBATIM (xdigit_value) ---- */
 /*
  * Return the numeric value of a single hex digit.
  */
@@ -1140,7 +1140,7 @@ xdigit_value(char dig)
 		dig >= 'A' && dig <= 'F' ? dig - 'A' + 10 : -1;
 }
 
-/* ---- numeric.c:7341-7530 VERBATIM (set_var_from_non_decimal_integer_str) ---- */
+/* ---- numeric.c:7379-7568 VERBATIM (set_var_from_non_decimal_integer_str) ---- */
 /*
  * set_var_from_non_decimal_integer_str()
  *
@@ -1332,7 +1332,7 @@ invalid_syntax:
 					"numeric", str)));
 }
 
-/* ---- numeric.c:7555-7578 VERBATIM (init_var_from_num) ---- */
+/* ---- numeric.c:7593-7616 VERBATIM (init_var_from_num) ---- */
 /*
  * init_var_from_num() -
  *
@@ -1358,7 +1358,7 @@ init_var_from_num(Numeric num, NumericVar *dest)
 	dest->buf = NULL;			/* digits array is not palloc'd */
 }
 
-/* ---- numeric.c:7581-7602 VERBATIM (set_var_from_var) ---- */
+/* ---- numeric.c:7619-7640 VERBATIM (set_var_from_var) ---- */
 /*
  * set_var_from_var() -
  *
@@ -1382,7 +1382,7 @@ set_var_from_var(const NumericVar *value, NumericVar *dest)
 	dest->digits = newbuf + 1;
 }
 
-/* ---- numeric.c:7605-7741 VERBATIM (get_str_from_var) ---- */
+/* ---- numeric.c:7643-7779 VERBATIM (get_str_from_var) ---- */
 /*
  * get_str_from_var() -
  *
@@ -1521,7 +1521,7 @@ get_str_from_var(const NumericVar *var)
 	return str;
 }
 
-/* ---- numeric.c:7876-7889 VERBATIM (duplicate_numeric) ---- */
+/* ---- numeric.c:7914-7927 VERBATIM (duplicate_numeric) ---- */
 /*
  * duplicate_numeric() - copy a packed-format Numeric
  *
@@ -1537,7 +1537,7 @@ duplicate_numeric(Numeric num)
 	return res;
 }
 
-/* ---- numeric.c:7891-8001 VERBATIM (make_result_opt_error) ---- */
+/* ---- numeric.c:7929-8039 VERBATIM (make_result_opt_error) ---- */
 /*
  * make_result_opt_error() -
  *
@@ -1650,7 +1650,7 @@ make_result_opt_error(const NumericVar *var, bool *have_error)
 	return result;
 }
 
-/* ---- numeric.c:8004-8013 VERBATIM (make_result) ---- */
+/* ---- numeric.c:8042-8051 VERBATIM (make_result) ---- */
 /*
  * make_result() -
  *
@@ -1662,7 +1662,7 @@ make_result(const NumericVar *var)
 	return make_result_opt_error(var, NULL);
 }
 
-/* ---- numeric.c:8016-8099 VERBATIM (apply_typmod) ---- */
+/* ---- numeric.c:8054-8137 VERBATIM (apply_typmod) ---- */
 /*
  * apply_typmod() -
  *
@@ -1748,7 +1748,7 @@ apply_typmod(NumericVar *var, int32 typmod, Node *escontext)
 	return true;
 }
 
-/* ---- numeric.c:8101-8139 VERBATIM (apply_typmod_special) ---- */
+/* ---- numeric.c:8139-8177 VERBATIM (apply_typmod_special) ---- */
 /*
  * apply_typmod_special() -
  *
@@ -1789,7 +1789,7 @@ apply_typmod_special(Numeric num, int32 typmod, Node *escontext)
 					   precision, scale)));
 }
 
-/* ---- numeric.c:8219-8262 VERBATIM (int64_to_numericvar) ---- */
+/* ---- numeric.c:8257-8300 VERBATIM (int64_to_numericvar) ---- */
 /*
  * Convert int8 value to numeric.
  */
@@ -1835,7 +1835,7 @@ int64_to_numericvar(int64 val, NumericVar *var)
 	var->weight = ndigits - 1;
 }
 
-/* ---- numeric.c:8543-8657 VERBATIM (add_var) ---- */
+/* ---- numeric.c:8581-8695 VERBATIM (add_var) ---- */
 /*
  * add_var() -
  *
@@ -1952,7 +1952,7 @@ add_var(const NumericVar *var1, const NumericVar *var2, NumericVar *result)
 	}
 }
 
-/* ---- numeric.c:8781-9068 VERBATIM (mul_var) ---- */
+/* ---- numeric.c:8819-9106 VERBATIM (mul_var) ---- */
 /*
  * mul_var() -
  *
@@ -2242,7 +2242,7 @@ mul_var(const NumericVar *var1, const NumericVar *var2, NumericVar *result,
 	strip_var(result);
 }
 
-/* ---- numeric.c:9071-9344 VERBATIM (mul_var_short) ---- */
+/* ---- numeric.c:9109-9382 VERBATIM (mul_var_short) ---- */
 /*
  * mul_var_short() -
  *
@@ -2518,7 +2518,7 @@ mul_var_short(const NumericVar *var1, const NumericVar *var2,
 	strip_var(result);
 }
 
-/* ---- numeric.c:11854-11868 VERBATIM (cmp_abs) ---- */
+/* ---- numeric.c:11892-11906 VERBATIM (cmp_abs) ---- */
 /* ----------
  * cmp_abs() -
  *
@@ -2535,7 +2535,7 @@ cmp_abs(const NumericVar *var1, const NumericVar *var2)
 						  var2->digits, var2->ndigits, var2->weight);
 }
 
-/* ---- numeric.c:11870-11932 VERBATIM (cmp_abs_common) ---- */
+/* ---- numeric.c:11908-11970 VERBATIM (cmp_abs_common) ---- */
 /* ----------
  * cmp_abs_common() -
  *
@@ -2600,7 +2600,7 @@ cmp_abs_common(const NumericDigit *var1digits, int var1ndigits, int var1weight,
 	return 0;
 }
 
-/* ---- numeric.c:11935-12014 VERBATIM (add_abs) ---- */
+/* ---- numeric.c:11973-12052 VERBATIM (add_abs) ---- */
 /*
  * add_abs() -
  *
@@ -2682,7 +2682,7 @@ add_abs(const NumericVar *var1, const NumericVar *var2, NumericVar *result)
 	strip_var(result);
 }
 
-/* ---- numeric.c:12017-12099 VERBATIM (sub_abs) ---- */
+/* ---- numeric.c:12055-12137 VERBATIM (sub_abs) ---- */
 /*
  * sub_abs()
  *
@@ -2767,7 +2767,7 @@ sub_abs(const NumericVar *var1, const NumericVar *var2, NumericVar *result)
 	strip_var(result);
 }
 
-/* ---- numeric.c:12101-12205 VERBATIM (round_var) ---- */
+/* ---- numeric.c:12139-12243 VERBATIM (round_var) ---- */
 /*
  * round_var
  *
@@ -2874,7 +2874,7 @@ round_var(NumericVar *var, int rscale)
 	}
 }
 
-/* ---- numeric.c:12207-12269 VERBATIM (trunc_var) ---- */
+/* ---- numeric.c:12245-12307 VERBATIM (trunc_var) ---- */
 /*
  * trunc_var
  *
@@ -2939,7 +2939,7 @@ trunc_var(NumericVar *var, int rscale)
 	}
 }
 
-/* ---- numeric.c:12271-12303 VERBATIM (strip_var) ---- */
+/* ---- numeric.c:12309-12341 VERBATIM (strip_var) ---- */
 /*
  * strip_var
  *
@@ -3030,7 +3030,31 @@ numeric_is_inf(Numeric num)
 	return NUMERIC_IS_INF(num);
 }
 
-/* ---- numeric.c:1323-1366 VERBATIM (numerictypmodin) ---- */
+/* ---- numeric.c:1323-1344 VERBATIM (make_numeric_typmod_safe) ---- */
+/*
+ * make_numeric_typmod_safe() -
+ *
+ *	Validate a numeric precision/scale and pack them into a typmod value,
+ *	with soft error handling.
+ */
+int32
+make_numeric_typmod_safe(int32 precision, int32 scale, Node *escontext)
+{
+	if (precision < 1 || precision > NUMERIC_MAX_PRECISION)
+		ereturn(escontext, -1,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("NUMERIC precision %d must be between 1 and %d",
+						precision, NUMERIC_MAX_PRECISION)));
+	if (scale < NUMERIC_MIN_SCALE || scale > NUMERIC_MAX_SCALE)
+		ereturn(escontext, -1,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("NUMERIC scale %d must be between %d and %d",
+						scale, NUMERIC_MIN_SCALE, NUMERIC_MAX_SCALE)));
+
+	return make_numeric_typmod(precision, scale);
+}
+
+/* ---- numeric.c:1346-1372 VERBATIM (numerictypmodin) ---- */
 Datum
 numerictypmodin(PG_FUNCTION_ARGS)
 {
@@ -3042,28 +3066,11 @@ numerictypmodin(PG_FUNCTION_ARGS)
 	tl = ArrayGetIntegerTypmods(ta, &n);
 
 	if (n == 2)
-	{
-		if (tl[0] < 1 || tl[0] > NUMERIC_MAX_PRECISION)
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("NUMERIC precision %d must be between 1 and %d",
-							tl[0], NUMERIC_MAX_PRECISION)));
-		if (tl[1] < NUMERIC_MIN_SCALE || tl[1] > NUMERIC_MAX_SCALE)
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("NUMERIC scale %d must be between %d and %d",
-							tl[1], NUMERIC_MIN_SCALE, NUMERIC_MAX_SCALE)));
-		typmod = make_numeric_typmod(tl[0], tl[1]);
-	}
+		typmod = make_numeric_typmod_safe(tl[0], tl[1], NULL);
 	else if (n == 1)
 	{
-		if (tl[0] < 1 || tl[0] > NUMERIC_MAX_PRECISION)
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("NUMERIC precision %d must be between 1 and %d",
-							tl[0], NUMERIC_MAX_PRECISION)));
 		/* scale defaults to zero */
-		typmod = make_numeric_typmod(tl[0], 0);
+		typmod = make_numeric_typmod_safe(tl[0], 0, NULL);
 	}
 	else
 	{
@@ -3076,7 +3083,7 @@ numerictypmodin(PG_FUNCTION_ARGS)
 	PG_RETURN_INT32(typmod);
 }
 
-/* ---- numeric.c:1392-1416 VERBATIM (numeric_abs) ---- */
+/* ---- numeric.c:1398-1422 VERBATIM (numeric_abs) ---- */
 Datum
 numeric_abs(PG_FUNCTION_ARGS)
 {
@@ -3103,7 +3110,7 @@ numeric_abs(PG_FUNCTION_ARGS)
 	PG_RETURN_NUMERIC(res);
 }
 
-/* ---- numeric.c:1589-1638 VERBATIM (numeric_trunc) ---- */
+/* ---- numeric.c:1595-1644 VERBATIM (numeric_trunc) ---- */
 /*
  * numeric_trunc() -
  *
@@ -3155,7 +3162,7 @@ numeric_trunc(PG_FUNCTION_ARGS)
 	PG_RETURN_NUMERIC(res);
 }
 
-/* ---- numeric.c:1641-1666 VERBATIM (numeric_ceil) ---- */
+/* ---- numeric.c:1647-1672 VERBATIM (numeric_ceil) ---- */
 /*
  * numeric_ceil() -
  *
@@ -3183,7 +3190,7 @@ numeric_ceil(PG_FUNCTION_ARGS)
 	PG_RETURN_NUMERIC(res);
 }
 
-/* ---- numeric.c:1669-1694 VERBATIM (numeric_floor) ---- */
+/* ---- numeric.c:1675-1700 VERBATIM (numeric_floor) ---- */
 /*
  * numeric_floor() -
  *
@@ -3211,7 +3218,7 @@ numeric_floor(PG_FUNCTION_ARGS)
 	PG_RETURN_NUMERIC(res);
 }
 
-/* ---- numeric.c:2517-2530 VERBATIM (numeric_cmp) ---- */
+/* ---- numeric.c:2523-2536 VERBATIM (numeric_cmp) ---- */
 Datum
 numeric_cmp(PG_FUNCTION_ARGS)
 {
@@ -3227,7 +3234,7 @@ numeric_cmp(PG_FUNCTION_ARGS)
 	PG_RETURN_INT32(result);
 }
 
-/* ---- numeric.c:2533-2546 VERBATIM (numeric_eq) ---- */
+/* ---- numeric.c:2539-2552 VERBATIM (numeric_eq) ---- */
 Datum
 numeric_eq(PG_FUNCTION_ARGS)
 {
@@ -3243,7 +3250,7 @@ numeric_eq(PG_FUNCTION_ARGS)
 	PG_RETURN_BOOL(result);
 }
 
-/* ---- numeric.c:2623-2675 VERBATIM (cmp_numerics) ---- */
+/* ---- numeric.c:2629-2681 VERBATIM (cmp_numerics) ---- */
 static int
 cmp_numerics(Numeric num1, Numeric num2)
 {
@@ -3298,7 +3305,7 @@ cmp_numerics(Numeric num1, Numeric num2)
 	return result;
 }
 
-/* ---- numeric.c:2978-3035 VERBATIM (numeric_add_opt_error) ---- */
+/* ---- numeric.c:2984-3041 VERBATIM (numeric_add_opt_error) ---- */
 /*
  * numeric_add_opt_error() -
  *
@@ -3358,7 +3365,7 @@ numeric_add_opt_error(Numeric num1, Numeric num2, bool *have_error)
 	return res;
 }
 
-/* ---- numeric.c:3056-3113 VERBATIM (numeric_sub_opt_error) ---- */
+/* ---- numeric.c:3062-3119 VERBATIM (numeric_sub_opt_error) ---- */
 /*
  * numeric_sub_opt_error() -
  *
@@ -3418,7 +3425,7 @@ numeric_sub_opt_error(Numeric num1, Numeric num2, bool *have_error)
 	return res;
 }
 
-/* ---- numeric.c:3134-3234 VERBATIM (numeric_mul_opt_error) ---- */
+/* ---- numeric.c:3140-3240 VERBATIM (numeric_mul_opt_error) ---- */
 /*
  * numeric_mul_opt_error() -
  *
@@ -3521,7 +3528,7 @@ numeric_mul_opt_error(Numeric num1, Numeric num2, bool *have_error)
 	return res;
 }
 
-/* ---- numeric.c:3255-3369 VERBATIM (numeric_div_opt_error) ---- */
+/* ---- numeric.c:3261-3375 VERBATIM (numeric_div_opt_error) ---- */
 /*
  * numeric_div_opt_error() -
  *
@@ -3638,7 +3645,7 @@ numeric_div_opt_error(Numeric num1, Numeric num2, bool *have_error)
 	return res;
 }
 
-/* ---- numeric.c:3479-3547 VERBATIM (numeric_mod_opt_error) ---- */
+/* ---- numeric.c:3485-3553 VERBATIM (numeric_mod_opt_error) ---- */
 /*
  * numeric_mod_opt_error() -
  *
@@ -3709,7 +3716,7 @@ numeric_mod_opt_error(Numeric num1, Numeric num2, bool *have_error)
 	return res;
 }
 
-/* ---- numeric.c:4401-4416 VERBATIM (int64_to_numeric) ---- */
+/* ---- numeric.c:4407-4422 VERBATIM (int64_to_numeric) ---- */
 Numeric
 int64_to_numeric(int64 val)
 {
@@ -3727,7 +3734,7 @@ int64_to_numeric(int64 val)
 	return res;
 }
 
-/* ---- numeric.c:4507-4513 VERBATIM (int4_numeric) ---- */
+/* ---- numeric.c:4513-4519 VERBATIM (int4_numeric) ---- */
 Datum
 int4_numeric(PG_FUNCTION_ARGS)
 {
@@ -3736,7 +3743,7 @@ int4_numeric(PG_FUNCTION_ARGS)
 	PG_RETURN_NUMERIC(int64_to_numeric(val));
 }
 
-/* ---- numeric.c:4515-4563 VERBATIM (numeric_int4_opt_error) ---- */
+/* ---- numeric.c:4521-4569 VERBATIM (numeric_int4_opt_error) ---- */
 int32
 numeric_int4_opt_error(Numeric num, bool *have_error)
 {
@@ -3787,7 +3794,7 @@ numeric_int4_opt_error(Numeric num, bool *have_error)
 	return result;
 }
 
-/* ---- numeric.c:4573-4593 VERBATIM (numericvar_to_int32) ---- */
+/* ---- numeric.c:4579-4599 VERBATIM (numericvar_to_int32) ---- */
 /*
  * Given a NumericVar, convert it to an int32. If the NumericVar
  * exceeds the range of an int32, false is returned, otherwise true is returned.
@@ -3810,7 +3817,7 @@ numericvar_to_int32(const NumericVar *var, int32 *result)
 	return true;
 }
 
-/* ---- numeric.c:4595-4601 VERBATIM (int8_numeric) ---- */
+/* ---- numeric.c:4601-4607 VERBATIM (int8_numeric) ---- */
 Datum
 int8_numeric(PG_FUNCTION_ARGS)
 {
@@ -3819,7 +3826,7 @@ int8_numeric(PG_FUNCTION_ARGS)
 	PG_RETURN_NUMERIC(int64_to_numeric(val));
 }
 
-/* ---- numeric.c:4603-4651 VERBATIM (numeric_int8_opt_error) ---- */
+/* ---- numeric.c:4609-4657 VERBATIM (numeric_int8_opt_error) ---- */
 int64
 numeric_int8_opt_error(Numeric num, bool *have_error)
 {
@@ -3870,7 +3877,7 @@ numeric_int8_opt_error(Numeric num, bool *have_error)
 	return result;
 }
 
-/* ---- numeric.c:4662-4668 VERBATIM (int2_numeric) ---- */
+/* ---- numeric.c:4668-4674 VERBATIM (int2_numeric) ---- */
 Datum
 int2_numeric(PG_FUNCTION_ARGS)
 {
@@ -3879,7 +3886,7 @@ int2_numeric(PG_FUNCTION_ARGS)
 	PG_RETURN_NUMERIC(int64_to_numeric(val));
 }
 
-/* ---- numeric.c:4711-4743 VERBATIM (float8_numeric) ---- */
+/* ---- numeric.c:4717-4749 VERBATIM (float8_numeric) ---- */
 Datum
 float8_numeric(PG_FUNCTION_ARGS)
 {
@@ -3914,7 +3921,7 @@ float8_numeric(PG_FUNCTION_ARGS)
 	PG_RETURN_NUMERIC(res);
 }
 
-/* ---- numeric.c:4805-4837 VERBATIM (float4_numeric) ---- */
+/* ---- numeric.c:4811-4843 VERBATIM (float4_numeric) ---- */
 Datum
 float4_numeric(PG_FUNCTION_ARGS)
 {
@@ -3949,7 +3956,7 @@ float4_numeric(PG_FUNCTION_ARGS)
 	PG_RETURN_NUMERIC(res);
 }
 
-/* ---- numeric.c:8142-8217 VERBATIM (numericvar_to_int64) ---- */
+/* ---- numeric.c:8180-8255 VERBATIM (numericvar_to_int64) ---- */
 /*
  * Convert numeric to int8, rounding if needed.
  *
@@ -4027,7 +4034,7 @@ numericvar_to_int64(const NumericVar *var, int64 *result)
 	return true;
 }
 
-/* ---- numeric.c:8485-8498 VERBATIM (cmp_var) ---- */
+/* ---- numeric.c:8523-8536 VERBATIM (cmp_var) ---- */
 /*
  * cmp_var() -
  *
@@ -4043,7 +4050,7 @@ cmp_var(const NumericVar *var1, const NumericVar *var2)
 						  var2->weight, var2->sign);
 }
 
-/* ---- numeric.c:8500-8540 VERBATIM (cmp_var_common) ---- */
+/* ---- numeric.c:8538-8578 VERBATIM (cmp_var_common) ---- */
 /*
  * cmp_var_common() -
  *
@@ -4086,7 +4093,7 @@ cmp_var_common(const NumericDigit *var1digits, int var1ndigits,
 						  var1digits, var1ndigits, var1weight);
 }
 
-/* ---- numeric.c:8660-8778 VERBATIM (sub_var) ---- */
+/* ---- numeric.c:8698-8816 VERBATIM (sub_var) ---- */
 /*
  * sub_var() -
  *
@@ -4207,7 +4214,7 @@ sub_var(const NumericVar *var1, const NumericVar *var2, NumericVar *result)
 	}
 }
 
-/* ---- numeric.c:9347-9897 VERBATIM (div_var) ---- */
+/* ---- numeric.c:9385-9935 VERBATIM (div_var) ---- */
 /*
  * div_var() -
  *
@@ -4760,7 +4767,7 @@ div_var(const NumericVar *var1, const NumericVar *var2, NumericVar *result,
 	strip_var(result);
 }
 
-/* ---- numeric.c:9900-10009 VERBATIM (div_var_int) ---- */
+/* ---- numeric.c:9938-10047 VERBATIM (div_var_int) ---- */
 /*
  * div_var_int() -
  *
@@ -4872,7 +4879,7 @@ div_var_int(const NumericVar *var, int ival, int ival_weight,
 	strip_var(result);
 }
 
-/* ---- numeric.c:10129-10195 VERBATIM (select_div_scale) ---- */
+/* ---- numeric.c:10167-10233 VERBATIM (select_div_scale) ---- */
 /*
  * Default scale selection for division
  *
@@ -4941,7 +4948,7 @@ select_div_scale(const NumericVar *var1, const NumericVar *var2)
 	return rscale;
 }
 
-/* ---- numeric.c:10198-10223 VERBATIM (mod_var) ---- */
+/* ---- numeric.c:10236-10261 VERBATIM (mod_var) ---- */
 /*
  * mod_var() -
  *
@@ -4969,7 +4976,7 @@ mod_var(const NumericVar *var1, const NumericVar *var2, NumericVar *result)
 	free_var(&tmp);
 }
 
-/* ---- numeric.c:10226-10293 VERBATIM (div_mod_var) ---- */
+/* ---- numeric.c:10264-10331 VERBATIM (div_mod_var) ---- */
 /*
  * div_mod_var() -
  *
@@ -5039,7 +5046,7 @@ div_mod_var(const NumericVar *var1, const NumericVar *var2,
 	free_var(&r);
 }
 
-/* ---- numeric.c:10296-10317 VERBATIM (ceil_var) ---- */
+/* ---- numeric.c:10334-10355 VERBATIM (ceil_var) ---- */
 /*
  * ceil_var() -
  *
@@ -5063,7 +5070,7 @@ ceil_var(const NumericVar *var, NumericVar *result)
 	free_var(&tmp);
 }
 
-/* ---- numeric.c:10320-10341 VERBATIM (floor_var) ---- */
+/* ---- numeric.c:10358-10379 VERBATIM (floor_var) ---- */
 /*
  * floor_var() -
  *
@@ -5086,7 +5093,7 @@ floor_var(const NumericVar *var, NumericVar *result)
 	set_var_from_var(&tmp, result);
 	free_var(&tmp);
 }
-/* ---- numeric.c:7533-7552 VERBATIM (set_var_from_num) ---- */
+/* ---- numeric.c:7571-7590 VERBATIM (set_var_from_num) ---- */
 /*
  * set_var_from_num() -
  *
@@ -5108,7 +5115,7 @@ set_var_from_num(Numeric num, NumericVar *dest)
 	memcpy(dest->digits, NUMERIC_DIGITS(num), ndigits * sizeof(NumericDigit));
 }
 
-/* ---- numeric.c:1470-1501 VERBATIM (numeric_sign_internal) ---- */
+/* ---- numeric.c:1476-1507 VERBATIM (numeric_sign_internal) ---- */
 /*
  * numeric_sign_internal() -
  *
@@ -5141,7 +5148,7 @@ numeric_sign_internal(Numeric num)
 	else
 		return 1;
 }
-/* ---- numeric.c:10013-10125 VERBATIM (div_var_int64) ---- */
+/* ---- numeric.c:10051-10163 VERBATIM (div_var_int64) ---- */
 /*
  * div_var_int64() -
  *

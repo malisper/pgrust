@@ -1,13 +1,13 @@
 /*
  * pgcryptofam_shim.c — harness plumbing for the pgcryptofam_diff oracle
  * (lane p1-pgcryptofam). NOT comparison logic; the compared bodies are the
- * verbatim 18.3 TUs under vendor/.
+ * verbatim 18.6 (REL_18_6) TUs under vendor/.
  *
  * Contents, labeled per function:
  *   [ARENA]    per-exec bump arena behind palloc/pfree (contribb precedent)
  *   [CHANNEL]  setjmp ereport channel recording (sqlstate, elevel, text)
  *   [VERBATIM] CheckBuiltinCryptoMode — copied byte-for-byte from
- *              contrib/pgcrypto/openssl.c (18.3); builtin_crypto_enabled
+ *              contrib/pgcrypto/openssl.c (18.6); builtin_crypto_enabled
  *              carries its verbatim pgcrypto.c initializer BC_ON, under
  *              which the function returns immediately and the FIPS arm is
  *              dead code.
@@ -338,7 +338,7 @@ CheckFIPSMode(void)
 
 /*
  * [VERBATIM] contrib/pgcrypto/openssl.c CheckBuiltinCryptoMode()
- * (PostgreSQL 18.3, upstream 62d6c7d3df) — copied byte-for-byte.
+ * (PostgreSQL 18.6 REL_18_6, upstream 724edf9bde) — copied byte-for-byte.
  */
 void
 CheckBuiltinCryptoMode(void)
@@ -538,8 +538,8 @@ pg_database_encoding_max_length(void)
 }
 
 /*
- * [VERBATIM] src/backend/utils/mb/mbutils.c `cliplen` (PostgreSQL 18.3,
- * upstream 62d6c7d3df) — copied byte-for-byte.
+ * [VERBATIM] src/backend/utils/mb/mbutils.c `cliplen` (PostgreSQL 18.6
+ * REL_18_6, upstream 724edf9bde) — copied byte-for-byte.
  */
 static int
 cliplen(const char *str, int len, int limit)

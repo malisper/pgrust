@@ -10,9 +10,11 @@
  *
  * Provenance (fill in as you paste; follow csrc/pg_uuid_io.c):
  *   - Vendor sections 1..N byte-for-byte from src/backend/utils/adt/array_userfuncs.c
- *     @ postgres-src 62d6c7d3df6287f1bd83199c1a746e50d31571a0
- *     (PostgreSQL 18.3 (Stamp-18.3, upstream sha 62d6c7d3df); re-verify against the repo's vendored ground-truth
- *     checkout ../pgrust-reference/vendor/postgres-src before pasting).
+ *     @ postgres-src REL_18_6 (PostgreSQL 18.6; re-vendored 2026-09-02 from
+ *     the 18.3 checkout 62d6c7d3df6287f1bd83199c1a746e50d31571a0,
+ *     ../pgrust-reference/vendor/postgres-src, with the 18.3->18.6 hunks applied:
+ *     14bf2c39ee array_agg_array_combine null-bitmap/overflow fix,
+ *     67dd6243dc accumArrayResultArr MaxArraySize guard).
  *   - Functions to vendor: array_append, array_prepend, array_cat, array_position, array_position_start, array_positions, trim_array, array_reverse, array_shuffle, array_sample, array_agg_array_serialize, array_agg_array_deserialize, array_agg_array_combine.
  *   - Bodies VERBATIM except documented shims; shims are PLUMBING ONLY
  *     (isxdigit/strtoul C-locale shims, ereturn -> int sentinel, fmgr
@@ -150,8 +152,10 @@ pg_diff_pfree_impl(void *p)
  *  - CHECK_FOR_INTERRUPTS/PG_FREE_IF_COPY/MemoryContext* -> no-ops (arena).
  *  - pgdiffau_ link-prefix renames on every vendored symbol.
  *
- * VERBATIM provenance (PostgreSQL 18.3, upstream 62d6c7d3df, re-verified
- * against ../pgrust-reference/vendor/postgres-src):
+ * VERBATIM provenance (PostgreSQL 18.6, upstream REL_18_6; re-vendored
+ * 2026-09-02 from 18.3's 62d6c7d3df, ../pgrust-reference/vendor/postgres-src,
+ * applying 14bf2c39ee + 67dd6243dc — see the file header; the "(18.3)"
+ * body labels below are sections unchanged at REL_18_6):
  *  - src/backend/utils/adt/arrayutils.c: ArrayGetOffset, ArrayGetNItems(Safe),
  *    ArrayCheckBounds(Safe), mda_get_range, mda_get_prod,
  *    mda_get_offset_values, mda_next_tuple.
@@ -3213,6 +3217,7 @@ accumArrayResultArr(ArrayBuildStateArr *astate,
 				ndatabytes;
 	char	   *data;
 	int			i;
+	int			newnitems;
 
 	/*
 	 * We disallow accumulating null subarrays.  Another plausible definition
@@ -3241,6 +3246,14 @@ accumArrayResultArr(ArrayBuildStateArr *astate,
 	data = ARR_DATA_PTR(arg);
 	nitems = ArrayGetNItems(ndims, dims);
 	ndatabytes = ARR_SIZE(arg) - ARR_DATA_OFFSET(arg);
+
+	/* Check that the array doesn't grow too large */
+	newnitems = astate->nitems + nitems;
+	if (newnitems > MaxArraySize)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("array size exceeds the maximum allowed (%zu)",
+						MaxArraySize)));
 
 	if (astate->ndims == 0)
 	{
@@ -3307,8 +3320,6 @@ accumArrayResultArr(ArrayBuildStateArr *astate,
 	/* Deal with null bitmap if needed */
 	if (astate->nullbitmap || ARR_HASNULL(arg))
 	{
-		int			newnitems = astate->nitems + nitems;
-
 		if (astate->nullbitmap == NULL)
 		{
 			/*
@@ -3332,7 +3343,7 @@ accumArrayResultArr(ArrayBuildStateArr *astate,
 						  nitems);
 	}
 
-	astate->nitems += nitems;
+	astate->nitems = newnitems;
 	astate->dims[0] += 1;
 
 	MemoryContextSwitchTo(oldcontext);
@@ -3813,10 +3824,11 @@ array_agg_array_combine(PG_FUNCTION_ARGS)
 	}
 
 	/* We only need to combine the two states if state2 has any items */
-	else if (state2->nitems > 0)
+	if (state2->nitems > 0)
 	{
 		MemoryContext oldContext;
-		int			reqsize = state1->nbytes + state2->nbytes;
+		int			reqsize;
+		int			newnitems;
 		int			i;
 
 		/*
@@ -3839,6 +3851,17 @@ array_agg_array_combine(PG_FUNCTION_ARGS)
 						 errmsg("cannot accumulate arrays of different dimensionality")));
 		}
 
+		/* Types should match already. */
+		Assert(state1->array_type == state2->array_type);
+		Assert(state1->element_type == state2->element_type);
+
+		/* Calculate new sizes, guarding against overflow. */
+		if (pg_add_s32_overflow(state1->nbytes, state2->nbytes, &reqsize) ||
+			pg_add_s32_overflow(state1->nitems, state2->nitems, &newnitems))
+			ereport(ERROR,
+					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+					 errmsg("array size exceeds the maximum allowed (%zu)",
+							MaxArraySize)));
 
 		oldContext = MemoryContextSwitchTo(state1->mcontext);
 
@@ -3853,17 +3876,16 @@ array_agg_array_combine(PG_FUNCTION_ARGS)
 			state1->data = (char *) repalloc(state1->data, state1->abytes);
 		}
 
-		if (state2->nullbitmap)
+		/* Combine the null bitmaps, if present. */
+		if (state1->nullbitmap || state2->nullbitmap)
 		{
-			int			newnitems = state1->nitems + state2->nitems;
-
 			if (state1->nullbitmap == NULL)
 			{
 				/*
 				 * First input with nulls; we must retrospectively handle any
 				 * previous inputs by marking all their items non-null.
 				 */
-				state1->aitems = pg_nextpower2_32(Max(256, newnitems + 1));
+				state1->aitems = pg_nextpower2_32(Max(256, newnitems));
 				state1->nullbitmap = (bits8 *) palloc((state1->aitems + 7) / 8);
 				array_bitmap_copy(state1->nullbitmap, 0,
 								  NULL, 0,
@@ -3871,26 +3893,23 @@ array_agg_array_combine(PG_FUNCTION_ARGS)
 			}
 			else if (newnitems > state1->aitems)
 			{
-				int			newaitems = state1->aitems + state2->aitems;
-
-				state1->aitems = pg_nextpower2_32(newaitems);
+				state1->aitems = pg_nextpower2_32(newnitems);
 				state1->nullbitmap = (bits8 *)
 					repalloc(state1->nullbitmap, (state1->aitems + 7) / 8);
 			}
+			/* This will do the right thing if state2->nullbitmap is NULL: */
 			array_bitmap_copy(state1->nullbitmap, state1->nitems,
 							  state2->nullbitmap, 0,
 							  state2->nitems);
 		}
 
+		/* Finally, combine the data and adjust sizes. */
 		memcpy(state1->data + state1->nbytes, state2->data, state2->nbytes);
 		state1->nbytes += state2->nbytes;
 		state1->nitems += state2->nitems;
 
 		state1->dims[0] += state2->dims[0];
 		/* remaining dims already match, per test above */
-
-		Assert(state1->array_type == state2->array_type);
-		Assert(state1->element_type == state2->element_type);
 
 		MemoryContextSwitchTo(oldContext);
 	}

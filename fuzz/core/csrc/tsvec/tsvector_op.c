@@ -175,6 +175,7 @@ tsvector_strip(PG_FUNCTION_ARGS)
 			   *arrout;
 	char	   *cur;
 
+	/* Output can't be bigger than input, so no need for overflow checks */
 	for (i = 0; i < in->size; i++)
 		len += arrin[i].len;
 
@@ -207,17 +208,10 @@ tsvector_length(PG_FUNCTION_ARGS)
 	PG_RETURN_INT32(ret);
 }
 
-Datum
-tsvector_setweight(PG_FUNCTION_ARGS)
+static int
+parse_weight(char cw)
 {
-	TSVector	in = PG_GETARG_TSVECTOR(0);
-	char		cw = PG_GETARG_CHAR(1);
-	TSVector	out;
-	int			i,
-				j;
-	WordEntry  *entry;
-	WordEntryPos *p;
-	int			w = 0;
+	int			w;
 
 	switch (cw)
 	{
@@ -238,9 +232,32 @@ tsvector_setweight(PG_FUNCTION_ARGS)
 			w = 0;
 			break;
 		default:
-			/* internal error */
-			elog(ERROR, "unrecognized weight: %d", cw);
+			/* Avoid printing non-ASCII bytes, else we have encoding issues */
+			if (cw >= ' ' && cw < 0x7f)
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("unrecognized weight: \"%c\"", cw)));
+			else				/* use \ooo format, like charout() */
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("unrecognized weight: \"\\%03o\"",
+								(unsigned char) cw)));
 	}
+	return w;
+}
+
+
+Datum
+tsvector_setweight(PG_FUNCTION_ARGS)
+{
+	TSVector	in = PG_GETARG_TSVECTOR(0);
+	char		cw = PG_GETARG_CHAR(1);
+	TSVector	out;
+	int			i,
+				j;
+	WordEntry  *entry;
+	WordEntryPos *p;
+	int			w = parse_weight(cw);
 
 	out = (TSVector) palloc(VARSIZE(in));
 	memcpy(out, in, VARSIZE(in));
@@ -285,28 +302,7 @@ tsvector_setweight_by_filter(PG_FUNCTION_ARGS)
 	Datum	   *dlexemes;
 	bool	   *nulls;
 
-	switch (char_weight)
-	{
-		case 'A':
-		case 'a':
-			weight = 3;
-			break;
-		case 'B':
-		case 'b':
-			weight = 2;
-			break;
-		case 'C':
-		case 'c':
-			weight = 1;
-			break;
-		case 'D':
-		case 'd':
-			weight = 0;
-			break;
-		default:
-			/* internal error */
-			elog(ERROR, "unrecognized weight: %c", char_weight);
-	}
+	weight = parse_weight(char_weight);
 
 	tsout = (TSVector) palloc(VARSIZE(tsin));
 	memcpy(tsout, tsin, VARSIZE(tsin));
@@ -497,6 +493,8 @@ tsvector_delete_by_indices(TSVector tsv, int *indices_to_delete,
 
 	/*
 	 * Copy tsv to tsout, skipping lexemes listed in indices_to_delete.
+	 *
+	 * Output can't be bigger than input, so no need for overflow checks.
 	 */
 	arrout = ARRPTR(tsout);
 	dataout = STRPTR(tsout);
@@ -622,7 +620,7 @@ tsvector_delete_arr(PG_FUNCTION_ARGS)
 	PG_RETURN_POINTER(tsout);
 }
 
-#if 0							/* PG_DIFF CARVE: tsvector_unnest (funcapi SRF + heap tuple machinery) -- upstream lines 625-714; retained code byte-identical */
+#if 0							/* PG_DIFF CARVE: tsvector_unnest (funcapi SRF + heap tuple machinery) -- upstream (REL_18_6) lines 623-712; retained code byte-identical */
 /*
  * Expand tsvector as table with following columns:
  *	   lexeme: lexeme text
@@ -727,7 +725,7 @@ tsvector_to_array(PG_FUNCTION_ARGS)
 	int			i;
 	ArrayType  *array;
 
-	elements = palloc(tsin->size * sizeof(Datum));
+	elements = palloc_array(Datum, tsin->size);
 
 	for (i = 0; i < tsin->size; i++)
 	{
@@ -762,20 +760,29 @@ array_to_tsvector(PG_FUNCTION_ARGS)
 	deconstruct_array_builtin(v, TEXTOID, &dlexemes, &nulls, &nitems);
 
 	/*
-	 * Reject nulls and zero length strings (maybe we should just ignore them,
-	 * instead?)
+	 * Reject nulls and zero-length or over-length strings (maybe we should
+	 * just ignore them, instead?)
 	 */
 	for (i = 0; i < nitems; i++)
 	{
+		int			toklen;
+
 		if (nulls[i])
 			ereport(ERROR,
 					(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
 					 errmsg("lexeme array may not contain nulls")));
 
-		if (VARSIZE(dlexemes[i]) - VARHDRSZ == 0)
+		toklen = VARSIZE(dlexemes[i]) - VARHDRSZ;
+		if (toklen == 0)
 			ereport(ERROR,
 					(errcode(ERRCODE_ZERO_LENGTH_CHARACTER_STRING),
 					 errmsg("lexeme array may not contain empty strings")));
+		if (toklen >= MAXSTRLEN)
+			ereport(ERROR,
+					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+					 errmsg("word is too long (%d bytes, max %d bytes)",
+							toklen,
+							MAXSTRLEN - 1)));
 	}
 
 	/* Sort and de-dup, because this is required for a valid tsvector. */
@@ -789,6 +796,11 @@ array_to_tsvector(PG_FUNCTION_ARGS)
 	/* Calculate space needed for surviving lexemes. */
 	for (i = 0; i < nitems; i++)
 		datalen += VARSIZE(dlexemes[i]) - VARHDRSZ;
+	if (datalen > MAXSTRPOS)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("string is too long for tsvector (%zu bytes, max %zu bytes)",
+						(size_t) datalen, (size_t) MAXSTRPOS)));
 	tslen = CALCDATASIZE(nitems, datalen);
 
 	/* Allocate and fill tsvector. */
@@ -847,34 +859,18 @@ tsvector_filter(PG_FUNCTION_ARGS)
 					 errmsg("weight array may not contain nulls")));
 
 		char_weight = DatumGetChar(dweights[i]);
-		switch (char_weight)
-		{
-			case 'A':
-			case 'a':
-				mask = mask | 8;
-				break;
-			case 'B':
-			case 'b':
-				mask = mask | 4;
-				break;
-			case 'C':
-			case 'c':
-				mask = mask | 2;
-				break;
-			case 'D':
-			case 'd':
-				mask = mask | 1;
-				break;
-			default:
-				ereport(ERROR,
-						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-						 errmsg("unrecognized weight: \"%c\"", char_weight)));
-		}
+		mask |= 1 << parse_weight(char_weight);
 	}
 
+	/*
+	 * The output tsvector might be smaller than the input, but it can't be
+	 * bigger, so VARSIZE(tsin) is surely enough space.  Also, we don't need
+	 * to worry about overflows below.
+	 */
 	tsout = (TSVector) palloc0(VARSIZE(tsin));
 	tsout->size = tsin->size;
 	arrout = ARRPTR(tsout);
+	/* worst-case location of output's lexemes; we may need to adjust below */
 	dataout = STRPTR(tsout);
 
 	for (i = j = 0; i < tsin->size; i++)
@@ -974,6 +970,12 @@ tsvector_concat(PG_FUNCTION_ARGS)
 	 * Conservative estimate of space needed.  We might need all the data in
 	 * both inputs, and conceivably add a pad byte before position data for
 	 * each item where there was none before.
+	 *
+	 * Note: since the MAXSTRPOS limit constrains each input tsvector to be
+	 * considerably less than MaxAllocSize, we don't need to worry about
+	 * integer overflow here, nor in the data-copying steps below.  We do need
+	 * to enforce that the result meets the MAXSTRPOS limit, but we check that
+	 * once at the end.
 	 */
 	output_bytes = VARSIZE(in1) + VARSIZE(in2) + i1 + i2;
 
@@ -1125,7 +1127,8 @@ tsvector_concat(PG_FUNCTION_ARGS)
 	if (dataoff > MAXSTRPOS)
 		ereport(ERROR,
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-				 errmsg("string is too long for tsvector (%d bytes, max %d bytes)", dataoff, MAXSTRPOS)));
+				 errmsg("string is too long for tsvector (%zu bytes, max %zu bytes)",
+						(size_t) dataoff, (size_t) MAXSTRPOS)));
 
 	/*
 	 * Adjust sizes (asserting that we didn't overrun the original estimates)
@@ -1975,7 +1978,7 @@ TS_execute_recurse(QueryItem *curitem, void *arg, uint32 flags,
 	return TS_NO;
 }
 
-#if 0							/* PG_DIFF CARVE: TS_execute_locations + TS_execute_locations_recurse (List/pg_list machinery; headline-only consumer) -- upstream lines 1976-2145; retained code byte-identical */
+#if 0							/* PG_DIFF CARVE: TS_execute_locations + TS_execute_locations_recurse (List/pg_list machinery; headline-only consumer) -- upstream (REL_18_6) lines 1979-2148; retained code byte-identical */
 /*
  * Evaluate tsquery and report locations of matching terms.
  *
@@ -2244,7 +2247,7 @@ ts_match_vq(PG_FUNCTION_ARGS)
 	PG_RETURN_BOOL(result);
 }
 
-#if 0							/* PG_DIFF CARVE: ts_match_tt, ts_match_tq (to_tsvector/to_tsquery dictionary+GUC), check_weight, insertStatEntry, chooseNextStatEntry, ts_accum, ts_setup_firstcall, walkStatEntryTree, ts_process_call, ts_stat_sql, ts_stat1, ts_stat2 (SPI/SRF session state), tsvector_update_trigger* (trigger machinery) -- upstream lines 2243-2895; retained code byte-identical */
+#if 0							/* PG_DIFF CARVE: ts_match_tt, ts_match_tq (to_tsvector/to_tsquery dictionary+GUC), check_weight, insertStatEntry, chooseNextStatEntry, ts_accum, ts_setup_firstcall, walkStatEntryTree, ts_process_call, ts_stat_sql, ts_stat1, ts_stat2 (SPI/SRF session state), tsvector_update_trigger* (trigger machinery) -- upstream (REL_18_6) lines 2246-2898; retained code byte-identical */
 Datum
 ts_match_tt(PG_FUNCTION_ARGS)
 {

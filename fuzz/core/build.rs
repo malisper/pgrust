@@ -1042,6 +1042,9 @@ fn main() {
         "numerictypmodin",
         "date_timestamptz", "timestamp_date", "timestamp_time",
         "timestamptz_date", "timestamptz_time", "timestamptz_timetz",
+        // 18.6: numeric.c make_numeric_typmod_safe (84001a04d5) is a global in
+        // both this extract and numericfam/vendor/numeric.c
+        "make_numeric_typmod_safe",
     ];
     let mut jsonpath = cc::Build::new();
     if std::env::var_os("PGRUST_FUZZ_CSANCOV").is_some_and(|v| v == "1") {

@@ -4,10 +4,13 @@
  * Crate under test: crates/backend/tsearch/wparser_def (the DEFAULT text
  * search parser's tokenizer) — see fuzz/core/src/wparserfam_diff.rs.
  *
- * Provenance (all bodies VERBATIM sed-extracted from the vendor tree at
- * ~/dev/pgrust-reference/vendor/postgres-src, Stamp-18.3, upstream sha
- * 62d6c7d3df6287f1bd83199c1a746e50d31571a0 — assembled by
- * scratchpad/assemble_wparserfam.sh, never hand-typed):
+ * Provenance (all bodies VERBATIM sed-extracted, never hand-typed: originally
+ * from Stamp-18.3 @ 62d6c7d3df by scratchpad/assemble_wparserfam.sh;
+ * re-verified 2026-09-02 against PostgreSQL REL_18_6, upstream sha
+ * 724edf9bde9d356724ad384a2e196edc3c9f80f7 — wparser_def.c's only 18.3→18.6
+ * change, 62ad262661, is inside the CARVED prsd_headline (line 2628+), so
+ * every copied range, blocks marked @ 62d6c7d3df included, is byte-identical
+ * at REL_18_6):
  *   - src/include/tsearch/ts_public.h lines 24-30 (LexDescr).
  *   - src/backend/tsearch/wparser_def.c lines 33-1935: EVERYTHING from the
  *     token-type defines through prsd_end — token categories, tok_alias,

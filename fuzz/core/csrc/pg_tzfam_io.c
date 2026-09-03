@@ -5,15 +5,17 @@
  *   crates/backend/timezone/strftime, crates/backend/utils/misc/tzparser,
  *   crates/backend/tsearch/ts_locale.
  *
- * Provenance (all bodies VERBATIM sed-extracted from the vendor tree at
- * ~/dev/pgrust-reference/vendor/postgres-src, Stamp-18.3, upstream sha
- * 62d6c7d3df6287f1bd83199c1a746e50d31571a0 — assembled by
- * scratchpad/assemble_tzfam.sh, never hand-typed):
+ * Provenance (all bodies VERBATIM sed-extracted from the PostgreSQL 18.6
+ * source tree, tag REL_18_6, upstream sha
+ * 724edf9bde9d356724ad384a2e196edc3c9f80f7 — originally assembled by
+ * scratchpad/assemble_tzfam.sh at REL_18_3 62d6c7d3df, re-vendored
+ * 2026-09-02 (strftime.c section 3-way merged, c.h line cites moved),
+ * never hand-typed):
  *   - src/include/pgtime.h lines 34-47 (struct pg_tm).
  *   - src/timezone/private.h lines 56-57 (TYPE_BIT/TYPE_SIGNED), 81-83
  *     (INT_STRLEN_MAXIMUM), 97-105 (SECSPERMIN..MONSPERYEAR), 128
  *     (TM_YEAR_BASE), 133 (isleap), 147 (isleap_sum).
- *   - src/timezone/strftime.c lines 48-571 (struct lc_time_T,
+ *   - src/timezone/strftime.c lines 48-582 (struct lc_time_T,
  *     C_time_locale, enum warn, pg_strftime, _fmt, _conv, _add, _yconv —
  *     the whole functional file after the #includes).
  *   - src/include/utils/tzparser.h lines 23-34 (tzEntry).
@@ -29,8 +31,8 @@
  *     (pg_strncasecmp), 113-129 (pg_tolower).
  *   - src/port/strlcpy.c lines 38-71 (strlcpy, tzf_-prefixed: glibc has
  *     no strlcpy and macOS libc's must not be shadowed).
- *   - src/include/c.h lines 1126-1127 (HIGHBIT/IS_HIGHBIT_SET), 773-774
- *     (TYPEALIGN), 780 (MAXALIGN); TOUCHAR from c.h (single #define).
+ *   - src/include/c.h lines 1143-1144 (HIGHBIT/IS_HIGHBIT_SET), 790-791
+ *     (TYPEALIGN), 797 (MAXALIGN); TOUCHAR from c.h (single #define).
  *   - src/backend/tsearch/ts_locale.c lines 23-68 (WC_BUF_LEN comment +
  *     GENERATE_T_ISCLASS_DEF + alnum/alpha instantiations).
  *   - src/include/tsearch/ts_locale.h lines 37-38 (t_iseq).
@@ -95,7 +97,7 @@ typedef size_t Size;
 #define MAXIMUM_ALIGNOF 8
 #define TOUCHAR(ptr)	(*((const unsigned char *) (ptr)))
 
-/* ==== VERBATIM: c.h lines 773-774, 780, 1126-1127 @ 62d6c7d3df ==== */
+/* ==== VERBATIM: c.h lines 790-791, 797, 1143-1144 @ 724edf9bde ==== */
 #define TYPEALIGN(ALIGNVAL,LEN)  \
 	(((uintptr_t) (LEN) + ((ALIGNVAL) - 1)) & ~((uintptr_t) ((ALIGNVAL) - 1)))
 #define MAXALIGN(LEN)			TYPEALIGN(MAXIMUM_ALIGNOF, (LEN))
@@ -133,7 +135,7 @@ extern int	wfam_pg_mblen_unbounded(const char *mbstr);
 #define pg_mblen_cstr		wfam_pg_mblen_cstr
 #define pg_mblen_unbounded	wfam_pg_mblen_unbounded
 
-/* ==== VERBATIM: struct pg_tm (pgtime.h lines 34-47 @ 62d6c7d3df) ==== */
+/* ==== VERBATIM: struct pg_tm (pgtime.h lines 34-47 @ 724edf9bde) ==== */
 struct pg_tm
 {
 	int			tm_sec;
@@ -149,7 +151,7 @@ struct pg_tm
 	const char *tm_zone;
 };
 
-/* ==== VERBATIM: private.h 56-57, 81-83, 97-105, 128, 133, 147 @ 62d6c7d3df ==== */
+/* ==== VERBATIM: private.h 56-57, 81-83, 97-105, 128, 133, 147 @ 724edf9bde ==== */
 #define TYPE_BIT(type)	(sizeof (type) * CHAR_BIT)
 #define TYPE_SIGNED(type) (((type) -1) < 0)
 #define INT_STRLEN_MAXIMUM(type) \
@@ -168,7 +170,7 @@ struct pg_tm
 #define isleap(y) (((y) % 4) == 0 && (((y) % 100) != 0 || ((y) % 400) == 0))
 #define isleap_sum(a, b)	isleap((a) % 400 + (b) % 400)
 
-/* ==== VERBATIM: strftime.c lines 48-571 @ 62d6c7d3df ==== */
+/* ==== VERBATIM: strftime.c lines 48-582 @ 724edf9bde (REL_18_6) ==== */
 struct lc_time_T
 {
 	const char *mon[MONSPERYEAR];
@@ -246,6 +248,13 @@ static char *_yconv(int a, int b, bool convert_top, bool convert_yy, char *pt, c
  * Convert timestamp t to string s, a caller-allocated buffer of size maxsize,
  * using the given format pattern.
  *
+ * Unlike standard strftime(), we guarantee to provide a null-terminated
+ * result even on failure, so long as maxsize > 0.  If we overrun the buffer,
+ * return an empty string rather than risking mis-encoded multibyte output.
+ * (Since this module only supports C locale, you might think multibyte
+ * characters are impossible --- but the time zone name printed by %Z comes
+ * from outside and could contain such.)
+ *
  * See also timestamptz_to_str.
  */
 size_t
@@ -259,11 +268,15 @@ pg_strftime(char *s, size_t maxsize, const char *format, const struct pg_tm *t)
 	if (!p)
 	{
 		errno = EOVERFLOW;
+		if (maxsize > 0)
+			*s = '\0';
 		return 0;
 	}
 	if (p == s + maxsize)
 	{
 		errno = ERANGE;
+		if (maxsize > 0)
+			*s = '\0';
 		return 0;
 	}
 	*p = '\0';
@@ -696,7 +709,7 @@ _yconv(int a, int b, bool convert_top, bool convert_yy,
 
 /* ==================== tzparser section ==================== */
 
-/* ==== VERBATIM: tzEntry (tzparser.h lines 23-34 @ 62d6c7d3df) ==== */
+/* ==== VERBATIM: tzEntry (tzparser.h lines 23-34 @ 724edf9bde) ==== */
 typedef struct tzEntry
 {
 	/* the actual data */
@@ -710,7 +723,7 @@ typedef struct tzEntry
 	const char *filename;
 } tzEntry;
 
-/* ==== VERBATIM: datetime.h 95-97, 204, 206-229 @ 62d6c7d3df ==== */
+/* ==== VERBATIM: datetime.h 95-97, 204, 206-229 @ 724edf9bde ==== */
 typedef struct pg_tz pg_tz;	/* opaque here, as in pgtime.h */
 #define TZ		5				/* fixed-offset timezone abbreviation */
 #define DTZ		6				/* fixed-offset timezone abbrev, DST */
@@ -885,7 +898,7 @@ extern int	tzf_pg_strncasecmp(const char *s1, const char *s2, size_t n);
 extern size_t tzf_strlcpy(char *dst, const char *src, size_t siz);
 extern TimeZoneAbbrevTable *tzf_ConvertTimeZoneAbbrevs(struct tzEntry *abbrevs, int n);
 
-/* ==== VERBATIM: tzparser.c lines 35-487 @ 62d6c7d3df ==== */
+/* ==== VERBATIM: tzparser.c lines 35-487 @ 724edf9bde ==== */
 #define WHITESPACE " \t\n\r"
 
 static bool validateTzEntry(tzEntry *tzentry);
@@ -1340,7 +1353,7 @@ load_tzoffsets(const char *filename)
 	return result;
 }
 
-/* ==== VERBATIM: ConvertTimeZoneAbbrevs (datetime.c 4986-5071 @ 62d6c7d3df) ==== */
+/* ==== VERBATIM: ConvertTimeZoneAbbrevs (datetime.c 4986-5071 @ 724edf9bde) ==== */
 /*
  * This function gets called during timezone config file load or reload
  * to create the final array of timezone tokens.  The argument array
@@ -1428,7 +1441,7 @@ ConvertTimeZoneAbbrevs(struct tzEntry *abbrevs, int n)
 	return tbl;
 }
 
-/* ==== VERBATIM: pg_strcasecmp (pgstrcasecmp.c 32-62 @ 62d6c7d3df) ==== */
+/* ==== VERBATIM: pg_strcasecmp (pgstrcasecmp.c 32-62 @ 724edf9bde) ==== */
 /*
  * Case-independent comparison of two null-terminated strings.
  */
@@ -1461,7 +1474,7 @@ pg_strcasecmp(const char *s1, const char *s2)
 	return 0;
 }
 
-/* ==== VERBATIM: pg_strncasecmp (pgstrcasecmp.c 64-95 @ 62d6c7d3df) ==== */
+/* ==== VERBATIM: pg_strncasecmp (pgstrcasecmp.c 64-95 @ 724edf9bde) ==== */
 /*
  * Case-independent comparison of two not-necessarily-null-terminated strings.
  * At most n bytes will be examined from each string.
@@ -1495,7 +1508,7 @@ pg_strncasecmp(const char *s1, const char *s2, size_t n)
 	return 0;
 }
 
-/* ==== VERBATIM: pg_tolower (pgstrcasecmp.c 113-129 @ 62d6c7d3df) ==== */
+/* ==== VERBATIM: pg_tolower (pgstrcasecmp.c 113-129 @ 724edf9bde) ==== */
 
 /*
  * Fold a character to lower case.
@@ -1514,7 +1527,7 @@ pg_tolower(unsigned char ch)
 	return ch;
 }
 
-/* ==== VERBATIM: strlcpy (strlcpy.c 38-71 @ 62d6c7d3df; tzf_-prefixed) ==== */
+/* ==== VERBATIM: strlcpy (strlcpy.c 38-71 @ 724edf9bde; tzf_-prefixed) ==== */
 /*
  * Copy src to string dst of size siz.  At most siz-1 characters
  * will be copied.  Always NUL terminates (unless siz == 0).
@@ -1574,7 +1587,7 @@ extern int	tzf_t_isalpha_cstr(const char *ptr);
 extern int	tzf_t_isalpha_unbounded(const char *ptr);
 extern int	tzf_t_isalpha(const char *ptr);
 
-/* ==== VERBATIM: ts_locale.c lines 23-68 @ 62d6c7d3df ==== */
+/* ==== VERBATIM: ts_locale.c lines 23-68 @ 724edf9bde ==== */
 /*
  * The reason these functions use a 3-wchar_t output buffer, not 2 as you
  * might expect, is that on Windows "wchar_t" is 16 bits and what we'll be
@@ -1622,7 +1635,7 @@ t_is##character_class(const char *ptr) \
 GENERATE_T_ISCLASS_DEF(alnum)
 GENERATE_T_ISCLASS_DEF(alpha)
 
-/* ==== VERBATIM: t_iseq (ts_locale.h lines 37-38 @ 62d6c7d3df) ==== */
+/* ==== VERBATIM: t_iseq (ts_locale.h lines 37-38 @ 724edf9bde) ==== */
 /* The second argument of t_iseq() must be a plain ASCII character */
 #define t_iseq(x,c)		(TOUCHAR(x) == (unsigned char) (c))
 

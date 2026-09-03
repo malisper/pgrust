@@ -1,5 +1,5 @@
 #!/bin/sh
-# assemble.sh — vendors the PostgreSQL 18.3 node-walker oracle family
+# assemble.sh — vendors the PostgreSQL 18.6 node-walker oracle family
 # (nodesfam: outfuncs/readfuncs/copyfuncs + read/value/list/bitmapset/
 # equalfuncs + datum/stringinfo/stack_depth + common/port support) from the
 # vendor tree into fuzz/core/csrc/nodesfam/. Every file lands VERBATIM
@@ -8,13 +8,15 @@
 # generate-errcodes.pl, generate-lwlocknames.pl, genbki.pl) run against the
 # same pinned tree. Re-running this script must be a no-op diff.
 #
-# Vendor tree pin: ~/dev/pgrust-reference/vendor/postgres-src, Stamp-18.3,
-# upstream sha 62d6c7d3df6287f1bd83199c1a746e50d31571a0.
+# Vendor tree pin: ~/dev/postgres-upstream-18.6 (REL_18_6, "Stamp 18.6",
+# upstream sha 724edf9bde9d356724ad384a2e196edc3c9f80f7); PGSRC overrides.
+# (Vendored at 18.3 from ~/dev/pgrust-reference/vendor/postgres-src @
+# 62d6c7d3df6287f1bd83199c1a746e50d31571a0; re-vendored at REL_18_6.)
 #
 # NOT copied (shims, hand-written, provenance in their own headers):
 #   shim/pg_config.h, shim/pg_config_os.h, ../pg_nodesfam_io.c
 set -eu
-V=${PGSRC:-"$HOME/dev/pgrust-reference/vendor/postgres-src"}
+V=${PGSRC:-"$HOME/dev/postgres-upstream-18.6"}
 D=$(cd "$(dirname "$0")" && pwd)
 
 # --- verbatim C sources -------------------------------------------------

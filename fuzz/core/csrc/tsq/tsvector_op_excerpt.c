@@ -1,8 +1,10 @@
 /*
  * tsvector_op_excerpt.c — EXCERPT of src/backend/utils/adt/tsvector_op.c
- * @ postgres-src 62d6c7d3df6287f1bd83199c1a746e50d31571a0 (PostgreSQL 18.3).
+ * @ REL_18_6 (re-stamped 2026-09-02; the function is byte-identical to the
+ * original 18.3 extract @ 62d6c7d3df6287f1bd83199c1a746e50d31571a0, lines
+ * 1146-1183 there).
  *
- * VERBATIM: lines 1146-1183 (tsCompareString) — the one tsvector_op.c
+ * VERBATIM: lines 1149-1186 (tsCompareString) — the one tsvector_op.c
  * function the vendored tsquery family reaches (QTNodeCompare in
  * tsquery_util.c). Rust counterpart: ts_compare_string in
  * adt/tsvector_core (p1-laneae's crate).
@@ -16,7 +18,7 @@
 
 #include "tsearch/ts_utils.h"
 
-/* ---- BEGIN VERBATIM tsvector_op.c:1146-1183 ---- */
+/* ---- BEGIN VERBATIM tsvector_op.c:1149-1186 @ REL_18_6 ---- */
 /*
  * Compare two strings by tsvector rules.
  *

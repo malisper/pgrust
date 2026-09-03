@@ -207,3 +207,4 @@ stringToNode
 strtoint
 toast_raw_datum_size
 TransferExpandedObject
+pg_popcount_aarch64_dummy_variable

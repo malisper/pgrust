@@ -7,7 +7,13 @@
  * VERBATIM upstream extracts — regenerate rather than hand-editing bodies.
  *
  * Provenance (ALL bodies verbatim, upstream sha
- * 62d6c7d3df6287f1bd83199c1a746e50d31571a0 = PostgreSQL 18.3 Stamp-18.3):
+ * 724edf9bde9d356724ad384a2e196edc3c9f80f7 = PostgreSQL 18.6 REL_18_6; re-vendored
+ * 2026-09-02 from the REL_18_3 62d6c7d3df assembly: the only cited upstream
+ * body that changed 18.3→18.6 is pg_lzcompress.c pglz_decompress (upstream
+ * c3e436b1cb, ported in place below); rangetypes.c, numutils.c, int.c,
+ * int8.c, nbtcompare.c, hashfunc.c, hashfn.c, fmgr.c, pqformat, stringinfo,
+ * the copied numeric.c slice and the copied common/int.h helpers are
+ * byte-identical in REL_18_6):
  *   - src/backend/utils/adt/rangetypes.c: the full non-planner surface —
  *     range_in/out/recv/send, get_range_io_data, constructors 2/3,
  *     accessors (lower/upper/empty/lower_inc/upper_inc/lower_inf/upper_inf), the operator family
@@ -583,7 +589,9 @@ store_att_byval(void *T, Datum newdatum, int attlen)
 #define unlikely(x) __builtin_expect((x) != 0, 0)
 
 /*
- * VERBATIM src/common/pg_lzcompress.c pglz_decompress (18.3, sha 62d6c7d3df).
+ * VERBATIM src/common/pg_lzcompress.c pglz_decompress (REL_18_6, sha 724edf9bde;
+ * upstream c3e436b1cb "Fix heap-buffer-overflow in pglz_decompress() on
+ * corrupt input" applied).
  * Vendored so the oracle can accept INLINE-COMPRESSED bound datums —
  * range_serialize's PG_DETOAST_DATUM_PACKED decompresses them in real C, and
  * numeric_cmp's full detoast sees them even earlier (range_serialize compares
@@ -628,22 +636,33 @@ pglz_decompress(const char *source, int32 slen, char *dest,
 				int32		len;
 				int32		off;
 
+				/*
+				 * A match tag is at least 2 bytes; if the length nibble is
+				 * 0x0f the tag is 3 bytes (extended length).  Verify we have
+				 * enough source data before reading them.
+				 */
+				if (unlikely(sp + 2 > srcend))
+					return -1;
+
 				len = (sp[0] & 0x0f) + 3;
 				off = ((sp[0] & 0xf0) << 4) | sp[1];
 				sp += 2;
 				if (len == 18)
+				{
+					if (unlikely(sp >= srcend))
+						return -1;
 					len += *sp++;
+				}
 
 				/*
-				 * Check for corrupt data: if we fell off the end of the
-				 * source, or if we obtained off = 0, or if off is more than
-				 * the distance back to the buffer start, we have problems.
-				 * (We must check for off = 0, else we risk an infinite loop
-				 * below in the face of corrupt data.  Likewise, the upper
-				 * limit on off prevents accessing outside the buffer
-				 * boundaries.)
+				 * Check for corrupt data: if we obtained off = 0, or if off
+				 * is more than the distance back to the buffer start, we have
+				 * problems.  (We must check for off = 0, else we risk an
+				 * infinite loop below in the face of corrupt data. Likewise,
+				 * the upper limit on off prevents accessing outside the
+				 * buffer boundaries.)
 				 */
-				if (unlikely(sp > srcend || off == 0 ||
+				if (unlikely(off == 0 ||
 							 off > (dp - (unsigned char *) dest)))
 					return -1;
 
@@ -1157,7 +1176,7 @@ typedef struct RangeBound
 	((range_get_flags(r) & (RANGE_EMPTY | RANGE_CONTAIN_EMPTY)) != 0)
 
 /*
- * VERBATIM rangetypes.h (18.3): DatumGetRangeTypeP DETOASTS, it is not a raw
+ * VERBATIM rangetypes.h (REL_18_6, unchanged since 18.3): DatumGetRangeTypeP DETOASTS, it is not a raw
  * cast. Spelled as a macro over the same PG_DETOAST_DATUM the header uses.
  *
  * This was a raw DatumGetPointer here until lane p1-laneac fed the first

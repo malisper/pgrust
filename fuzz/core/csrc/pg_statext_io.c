@@ -8,16 +8,17 @@
  * are feature-not-supported stubs (vacuous); the deserialize path below is
  * the genuine length-field parser.
  *
- * Provenance (all three deserialize bodies VERBATIM), from the repo's
- * vendored ground-truth checkout /home/dev/dev/pgrust-reference/vendor/
- * postgres-src @ 62d6c7d3df6287f1bd83199c1a746e50d31571a0 (REL_18 "Stamp
- * 18.3"):
+ * Provenance (all three deserialize bodies VERBATIM), from the upstream
+ * tree at REL_18_6 (724edf9bde9d356724ad384a2e196edc3c9f80f7, "Stamp 18.6";
+ * re-vendored 2026-09-02 — the one 18.3→18.6 change in the copied sections
+ * is b5fd5723a6 "Fix size check in statext_dependencies_deserialize()",
+ * SizeOfItem(ndeps) → MinSizeOfItems(ndeps), applied below):
  *   - src/backend/statistics/mvdistinct.c: statext_ndistinct_deserialize
  *     (250..343) + its file macros SizeOfHeader/SizeOfItem/MinSizeOfItem/
  *     MinSizeOfItems (44..57).
  *   - src/backend/statistics/dependencies.c: statext_dependencies_deserialize
- *     (498..587) + its file macros SizeOfHeader/SizeOfItem/MinSizeOfItem
- *     (36..44).
+ *     (498..587) + its file macros SizeOfHeader/SizeOfItem/MinSizeOfItem/
+ *     MinSizeOfItems (37..49).
  *   - src/backend/statistics/mcv.c: statext_mcv_deserialize (996..1327) + its
  *     file macros ITEM_SIZE/MinSizeOfMCVList/SizeOfMCVList (53..71).
  *   - src/include/statistics/statistics.h: STATS_MAX_DIMENSIONS (19),
@@ -264,7 +265,7 @@ pg_stx_pfree(void *p)
 #define repalloc(p, n) pg_stx_repalloc((p), (n))
 #define pfree(p) pg_stx_pfree(p)
 
-/* ==== VERBATIM: varatt structs + macros (varatt.h lines 18..325 @ 62d6c7d3df) ==== */
+/* ==== VERBATIM: varatt structs + macros (varatt.h lines 18..325 @ REL_18_6 724edf9bde) ==== */
 /*
  * struct varatt_external is a traditional "TOAST pointer", that is, the
  * information needed to fetch a Datum stored out-of-line in a TOAST table.
@@ -519,7 +520,7 @@ typedef struct
 	 (VARATT_IS_1B(PTR) ? VARDATA_1B(PTR) : VARDATA_4B(PTR))
 /* ==== end VERBATIM varatt ==== */
 
-/* ==== VERBATIM: fetch_att (tupmacs.h lines 49..76 @ 62d6c7d3df) ==== */
+/* ==== VERBATIM: fetch_att (tupmacs.h lines 49..76 @ REL_18_6 724edf9bde) ==== */
 static inline Datum
 fetch_att(const void *T, bool attbyval, int attlen)
 {
@@ -547,7 +548,7 @@ fetch_att(const void *T, bool attbyval, int attlen)
 }
 /* ==== end VERBATIM fetch_att ==== */
 
-/* ==== VERBATIM: statistics.h constants + structs (62d6c7d3df) ==== */
+/* ==== VERBATIM: statistics.h constants + structs (REL_18_6 724edf9bde) ==== */
 #define STATS_MAX_DIMENSIONS	8	/* max number of attributes */
 
 #define STATS_NDISTINCT_MAGIC		0xA352BFA4	/* struct identifier */
@@ -619,7 +620,7 @@ typedef struct DimensionInfo
 } DimensionInfo;
 /* ==== end VERBATIM statistics structs ==== */
 
-/* ==== VERBATIM: mvdistinct.c file macros (44..57 @ 62d6c7d3df) ==== */
+/* ==== VERBATIM: mvdistinct.c file macros (44..57 @ REL_18_6 724edf9bde) ==== */
 /* size of the struct header fields (magic, type, nitems) */
 #define ND_SizeOfHeader		(3 * sizeof(uint32))
 
@@ -723,13 +724,20 @@ statext_ndistinct_deserialize(bytea *data)
 	return ndistinct;
 }
 
-/* ==== VERBATIM: dependencies.c file macros (36..44 @ 62d6c7d3df) ==== */
+/* ==== VERBATIM: dependencies.c file macros (37..49 @ REL_18_6 724edf9bde) ==== */
 /* size of the struct header fields (magic, type, ndeps) */
 #define DEP_SizeOfHeader		(3 * sizeof(uint32))
 
 /* size of a serialized dependency (degree, natts, atts) */
 #define DEP_SizeOfItem(natts) \
 	(sizeof(double) + sizeof(AttrNumber) * (1 + (natts)))
+
+/* minimal size of a dependency (with two attributes) */
+#define DEP_MinSizeOfItem	DEP_SizeOfItem(2)
+
+/* minimal size of dependencies, when all deps are minimal */
+#define DEP_MinSizeOfItems(ndeps) \
+	(DEP_SizeOfHeader + (ndeps) * DEP_MinSizeOfItem)
 
 /* ==== VERBATIM: statext_dependencies_deserialize (dependencies.c 498..587) ==== */
 MVDependencies *
@@ -773,7 +781,7 @@ statext_dependencies_deserialize(bytea *data)
 		elog(ERROR, "invalid zero-length item array in MVDependencies");
 
 	/* what minimum bytea size do we expect for those parameters */
-	min_expected_size = DEP_SizeOfItem(dependencies->ndeps);
+	min_expected_size = DEP_MinSizeOfItems(dependencies->ndeps);
 
 	if (VARSIZE_ANY_EXHDR(data) < min_expected_size)
 		elog(ERROR, "invalid dependencies size %zu (expected at least %zu)",
@@ -823,7 +831,7 @@ statext_dependencies_deserialize(bytea *data)
 	return dependencies;
 }
 
-/* ==== VERBATIM: mcv.c file macros (53..71 @ 62d6c7d3df) ==== */
+/* ==== VERBATIM: mcv.c file macros (53..71 @ REL_18_6 724edf9bde) ==== */
 #define MCV_ITEM_SIZE(ndims)	\
 	((ndims) * (sizeof(uint16) + sizeof(bool)) + 2 * sizeof(double))
 

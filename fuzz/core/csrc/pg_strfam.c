@@ -4,8 +4,11 @@
  * common/percentrepl, common/relpath, common/wait_error).
  *
  * Provenance (all bodies VERBATIM unless a shim is listed below), from the
- * repo's vendored ground-truth checkout ../pgrust-reference/vendor/postgres-src
- * @ 62d6c7d3df6287f1bd83199c1a746e50d31571a0 (REL_18 "Stamp 18.3"):
+ * upstream tree at REL_18_6 (724edf9bde9d356724ad384a2e196edc3c9f80f7,
+ * "Stamp 18.6"; re-verified 2026-09-02 — the only cited file that changed
+ * 18.3→18.6 is src/port/path.c, 6a67c540a6 adding
+ * path_is_safe_for_extraction, which is not a copied section;
+ * make_native_path is unchanged):
  *   - src/common/string.c: strtoint, pg_clean_ascii — verbatim (backend
  *     palloc_extended arm shimmed to malloc; alloc-failure arm untaken).
  *   - src/common/percentrepl.c: replace_percent_placeholders — verbatim
@@ -40,7 +43,7 @@
  * NOTE the strtoint/strtoul oracles' parse core is the platform
  * strtol/strtoul, exactly as in real PostgreSQL (which defers to libc);
  * on this host that is macOS libc. Ground-truthing vs glibc is the
- * postgres:18.3 Docker replay step.
+ * postgres:18.6 Docker replay step.
  */
 
 #include "postgres.h"

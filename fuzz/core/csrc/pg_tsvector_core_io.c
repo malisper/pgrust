@@ -4,8 +4,8 @@
  * crate crates/backend/utils/adt/tsvector_core).
  *
  * THE VENDORED ORACLE IS NOT IN THIS FILE: the upstream C lives
- * byte-identical (shasum-verifiable against
- * ../pgrust-reference/vendor/postgres-src @
+ * byte-identical (diff-verifiable against PostgreSQL REL_18_6; re-vendored
+ * 2026-09-02 from ../pgrust-reference/vendor/postgres-src @
  * 62d6c7d3df6287f1bd83199c1a746e50d31571a0, PostgreSQL 18.3 Stamp-18.3) in
  * csrc/tsvec/: tsvector.c, tsvector_parser.c, tsvector_op.c (three labeled
  * `#if 0 PG_DIFF CARVE` blocks: tsvector_unnest [SRF/funcapi],
@@ -41,6 +41,8 @@
  */
 
 #include "tsvec/postgres.h"
+
+#include "common/int.h"
 
 #include <assert.h>
 #include <setjmp.h>
@@ -129,6 +131,23 @@ pg_tsvec_palloc(size_t n)
 	assert(p != NULL);
 	pg_tsvec_arena_track(p);
 	return p;
+}
+
+/* palloc.h/mcxt.c @ REL_18_6 palloc_mul: overflow-checked product (verbatim
+ * pg_mul_size_overflow from the vendored common/int.h), then the ordinary
+ * palloc contract; upstream's mul_size_error is inlined here as the same
+ * ereport (ERRCODE_PROGRAM_LIMIT_EXCEEDED). */
+void *
+pg_tsvec_palloc_mul(Size s1, Size s2)
+{
+	Size		req;
+
+	if (unlikely(pg_mul_size_overflow(s1, s2, &req)))
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("invalid memory allocation request size %zu * %zu",
+						s1, s2)));
+	return palloc(req);
 }
 
 void *

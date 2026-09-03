@@ -12,12 +12,15 @@
  * an attacker's length word actually drives) is extracted, with a byte-order
  * shim so the oracle is host-independent.
  *
- * Provenance (bodies VERBATIM apart from the numbered shims), from the repo's
- * vendored ground-truth checkout
- * ../pgrust-reference/vendor/postgres-src @ 62d6c7d "Stamp 18.3." (PostgreSQL
- * 18.3 exactly — the campaign oracle pin):
+ * Provenance (bodies VERBATIM apart from the numbered shims), from the
+ * upstream tree at REL_18_6 (724edf9bde9d356724ad384a2e196edc3c9f80f7
+ * "Stamp 18.6." — PostgreSQL 18.6 exactly, the campaign oracle pin;
+ * re-verified 2026-09-02: backend_startup.c's 18.3→18.6 commits f7a191f537
+ * and 203a48209a rework the SSL/GSS negotiation loop around this slice —
+ * the length arithmetic below is unchanged and shifts by +1 line;
+ * pqcomm.c is byte-identical at both tags):
  *
- *   - src/backend/tcop/backend_startup.c  ProcessStartupPacket, lines 532-542:
+ *   - src/backend/tcop/backend_startup.c  ProcessStartupPacket, lines 533-543:
  *         len = pg_ntoh32(len);
  *         len -= 4;
  *         if (len < (int32) sizeof(ProtocolVersion) ||
@@ -70,7 +73,7 @@ static inline int32_t wf_read_be32(const uint8_t b[4])
 }
 
 /*
- * ProcessStartupPacket length framing (backend_startup.c:532-542, verbatim).
+ * ProcessStartupPacket length framing (backend_startup.c:533-543, verbatim).
  * Returns WF_ACCEPT and writes the body length (packet minus the 4-byte length
  * word) to *out_body, or WF_REJECT.
  */

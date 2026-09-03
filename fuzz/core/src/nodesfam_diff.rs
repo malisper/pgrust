@@ -1,6 +1,6 @@
 //! nodesfam_diff: differential fuzz driver for the three node-walker crates
-//! vs verbatim vendored PostgreSQL 18.3 C (csrc/pg_nodesfam_io.c, upstream
-//! sha 62d6c7d3df; lane p1-nodes):
+//! vs verbatim vendored PostgreSQL 18.6 C (csrc/pg_nodesfam_io.c, upstream
+//! REL_18_6 sha 724edf9bde; lane p1-nodes):
 //!
 //!   crates/backend/nodes/readfuncs — stringToNode (read.c + readfuncs.c)
 //!   crates/backend/nodes/outfuncs  — nodeToString (outfuncs.c)
@@ -9,11 +9,13 @@
 //! ONE fixture drives all three: the input is node-text (the outfuncs
 //! serialization language). Pipeline per exec, both sides:
 //!
-//!     read(text) -> node
-//!     out(node) -> text'                        [outfuncs vs _outNode]
-//!     copy(node) -> node2; out(node2) -> text'' [copyfuncs vs copyObject]
-//!     read(text') -> node3; out(node3)          [round-trip stability]
-//!     C only: equal(node, copy)                 [equalfuncs witness]
+//! ```text
+//! read(text) -> node
+//! out(node) -> text'                        [outfuncs vs _outNode]
+//! copy(node) -> node2; out(node2) -> text'' [copyfuncs vs copyObject]
+//! read(text') -> node3; out(node3)          [round-trip stability]
+//! C only: equal(node, copy)                 [equalfuncs witness]
+//! ```
 //!
 //! Comparison planes (all compared on every exec where both sides accept):
 //!   P1 out-text bytes:      rust text' == C text'
@@ -178,6 +180,12 @@ pub fn rearm_stack_bases() {
     stack_depth_core::set_stack_base();
     stack_depth_core::set_max_stack_depth(2048);
     stack_depth_core::assign_max_stack_depth(2048);
+    // assign_max_stack_depth enforces GUC x STACK_DEPTH_SCALE bytes (64 MiB
+    // in a dev build, #1485) — armed BEYOND every real thread stack here,
+    // so deep nesting died by SIGSEGV instead of 54001 on the Rust side.
+    // Pin the enforced budget to C's byte budget (the hook's documented
+    // deep-nesting-witness use); depth-carve classification is unchanged.
+    stack_depth_core::set_enforced_stack_budget_for_tests(2048 * 1024);
 }
 
 thread_local! {

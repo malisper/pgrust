@@ -4,8 +4,9 @@
  * crates/backend/utils/adt/adt_timestamp, lane p1-laney).
  *
  * Provenance: all vendored bodies VERBATIM from postgres-src
- * 62d6c7d3df6287f1bd83199c1a746e50d31571a0 (PostgreSQL 18.3 "Stamp-18.3"),
- * extracted mechanically:
+ * 724edf9bde9d356724ad384a2e196edc3c9f80f7 (PostgreSQL 18.6, tag REL_18_6;
+ * re-vendored from REL_18_3 62d6c7d3df on 2026-09-02), extracted
+ * mechanically:
  *   - csrc/pg_datetime_verbatim.inc (extract_verbatim.py, shared with lane
  *     p1-lanel's datetime family targets): the whole datetime.c
  *     parse/encode core, timestamp2tm, dt2time, interval2itm, the interval

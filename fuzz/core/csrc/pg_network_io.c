@@ -4,8 +4,11 @@
  * crates/backend/utils/adt/network).
  *
  * PROVENANCE (all bodies VERBATIM unless a shim is listed below), from the
- * repo's vendored ground-truth checkout ../pgrust-reference/vendor/postgres-src
- * @ 62d6c7d3df6287f1bd83199c1a746e50d31571a0 (PostgreSQL 18.3, Stamp-18.3):
+ * upstream tree at REL_18_6 (PostgreSQL 18.6, Stamp 18.6,
+ * 724edf9bde9d356724ad384a2e196edc3c9f80f7; re-verified 2026-09-02 — none of
+ * the cited adt/port files changed 18.3→18.6; mcxt.c, cited only for the
+ * pstrdup contract below, gained bf048f0e17 + e1c30458a1 above that
+ * contract, which is unchanged apart from its line numbers):
  *   - src/backend/utils/adt/inet_net_pton.c — WHOLE parser cascade verbatim
  *     (pg_inet_net_pton, inet_net_pton_ipv4, inet_cidr_pton_ipv4, getbits,
  *     getv4, inet_net_pton_ipv6, inet_cidr_pton_ipv6).
@@ -158,12 +161,12 @@ pgc_inet_alloc0(void)
  * pstrdup — THE SCRIBBLER class, second instance (task #131 rework of the
  * refuted 515fffe6d6a; first instance was pg_float_io.c, task #112).
  *
- * The real contract (vendor/postgres-src, PostgreSQL 18.3):
+ * The real contract (postgres-src REL_18_6, PostgreSQL 18.6):
  *
- *     src/backend/utils/mmgr/mcxt.c:1724-1728
+ *     src/backend/utils/mmgr/mcxt.c:1860-1864
  *         char *pstrdup(const char *in)
  *         { return MemoryContextStrdup(CurrentMemoryContext, in); }
- *     src/backend/utils/mmgr/mcxt.c:1711-1722  MemoryContextStrdup:
+ *     src/backend/utils/mmgr/mcxt.c:1847-1858  MemoryContextStrdup:
  *         Size len = strlen(string) + 1;
  *         nstr = (char *) MemoryContextAlloc(context, len);
  *         memcpy(nstr, string, len);
@@ -277,7 +280,7 @@ pg_network_msgbuf_check(void)
 }
 
 /* ============ SECTION 1: src/backend/utils/adt/inet_net_pton.c ============ */
-/* WHOLE parser cascade VERBATIM @ 62d6c7d3df. */
+/* WHOLE parser cascade VERBATIM @ REL_18_6 724edf9bde. */
 
 static int	inet_net_pton_ipv4(const char *src, u_char *dst);
 static int	inet_cidr_pton_ipv4(const char *src, u_char *dst, size_t size);
@@ -2427,7 +2430,7 @@ pg_diff_network_abbrev_convert(unsigned char fam, unsigned char abits,
 
 /* ====== SECTION 6: network.c recv/send + comparison family + selfuncs ======
  * (p1-lanen round 2, same provenance: src/backend/utils/adt/network.c @
- * 62d6c7d3df6287f1bd83199c1a746e50d31571a0. Bodies VERBATIM except the
+ * REL_18_6 724edf9bde9d356724ad384a2e196edc3c9f80f7. Bodies VERBATIM except the
  * documented shims below.)
  *
  * SHIMS (plumbing only):

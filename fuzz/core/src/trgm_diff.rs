@@ -539,7 +539,8 @@ fn arm_word_similarity(locale_arm: i32, flags: u8, a: &[u8], b: &[u8]) {
         &crc,
         WORD_SIMILARITY_THRESHOLD,
         STRICT_WORD_SIMILARITY_THRESHOLD,
-    );
+    )
+    .unwrap_or_else(|e| panic!("Rust calc_word_similarity errored in-domain: {e:?}"));
     let mut c: f32 = 0.0;
     let rc = unsafe {
         pg_diff_trgm_word_similarity(
@@ -1125,7 +1126,7 @@ mod tests {
             &crc,
             WORD_SIMILARITY_THRESHOLD,
             STRICT_WORD_SIMILARITY_THRESHOLD,
-        );
+        ).unwrap_or_else(|e| panic!("Rust calc_word_similarity errored in-domain: {e:?}"));
         // the differential plane must agree while we're here
         arm_word_similarity(arm, flags, a, b);
         r
@@ -1721,7 +1722,7 @@ mod arm2_tests {
         let t1 = generate_trgm("café".as_bytes(), &env, &crc);
         let t2 = generate_trgm(b"cafe", &env, &crc);
         assert_eq!(cnt_sml(&t1, &t2, false).to_bits(), 0.5f32.to_bits());
-        let ws = calc_word_similarity(b"Sunday", b"Saturday", 0, &env, &crc, 0.6, 0.5);
+        let ws = calc_word_similarity(b"Sunday", b"Saturday", 0, &env, &crc, 0.6, 0.5).unwrap_or_else(|e| panic!("Rust calc_word_similarity errored in-domain: {e:?}"));
         assert_eq!(ws.to_bits(), 0.2857143f32.to_bits());
         // full differential on the same inputs (raw-byte domain incl. the
         // 0xfe high-bit and interior-NUL truncation parity seeds)

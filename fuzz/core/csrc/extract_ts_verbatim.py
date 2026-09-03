@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Extract verbatim C function/table definitions from the vendored
-PostgreSQL 18.3 checkout (../pgrust-reference/vendor/postgres-src @
-62d6c7d3df6287f1bd83199c1a746e50d31571a0) for the timestamp_diff
-differential-fuzz oracle (crate adt/adt_timestamp, lane p1-laney).
+"""Extract verbatim C function/table definitions from the PostgreSQL 18.6
+source tree (tag REL_18_6 @ 724edf9bde9d356724ad384a2e196edc3c9f80f7; the
+tree is extract_verbatim.VENDOR — crates/postgres-18.6-reference by default,
+$PG_VENDOR to override) for the timestamp_diff differential-fuzz oracle
+(crate adt/adt_timestamp, lane p1-laney).
 
 Companion to extract_verbatim.py (adt_date/adt_datetime family, lane
 p1-lanel): that script's output pg_datetime_verbatim.inc carries the whole

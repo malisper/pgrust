@@ -191,6 +191,38 @@ pg_jsonpath_repalloc_extended(void *ptr, Size size, int flags)
 	abort();
 }
 
+/*
+ * palloc_mul_extended / repalloc_mul_extended @ REL_18_6 (mcxt.c, upstream
+ * f3cee4dc43) for the regex engine's MALLOC_ARRAY / REALLOC_ARRAY: the
+ * overflow check and its ERROR are verbatim in shape; the allocation itself
+ * is the *_extended form above.
+ */
+void *
+pg_jsonpath_palloc_mul_extended(Size s1, Size s2, int flags)
+{
+	Size		req;
+
+	if (__builtin_mul_overflow(s1, s2, &req))
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("invalid memory allocation request size %zu * %zu",
+						s1, s2)));
+	return pg_jsonpath_palloc_extended(req, flags);
+}
+
+void *
+pg_jsonpath_repalloc_mul_extended(void *ptr, Size s1, Size s2, int flags)
+{
+	Size		req;
+
+	if (__builtin_mul_overflow(s1, s2, &req))
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("invalid memory allocation request size %zu * %zu",
+						s1, s2)));
+	return pg_jsonpath_repalloc_extended(ptr, req, flags);
+}
+
 /* ---------------- psprintf / pvsnprintf (arena) ---------------- */
 
 size_t

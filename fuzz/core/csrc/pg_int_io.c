@@ -4,9 +4,10 @@
  * differential-fuzz oracle for adt/int (target int_diff).
  *
  * Provenance (all bodies VERBATIM unless a shim is listed below), all from
- * the repo's vendored ground-truth checkout
- * ../pgrust-reference/vendor/postgres-src @
- * 62d6c7d3df6287f1bd83199c1a746e50d31571a0 ("Stamp 18.3", REL_18):
+ * postgres-upstream @ REL_18_6
+ * 724edf9bde9d356724ad384a2e196edc3c9f80f7 (PostgreSQL 18.6; re-vendored 2026-09-02
+ * from the REL_18_3 62d6c7d3df copy — every cited section is byte-identical
+ * in REL_18_6, only c.h's int2vector line numbers moved):
  *   - src/backend/utils/adt/numutils.c 29..97: DIGIT_TABLE,
  *     decimalLength32/64, hexlookup — verbatim.
  *   - src/backend/utils/adt/numutils.c 127..358 pg_strtoint16_safe,
@@ -26,7 +27,7 @@
  *     beyond arg plumbing).
  *   - src/include/libpq/pqformat.h pq_writeint16/pq_writeint32 — verbatim
  *     (the entire byte-image logic of int2send/int4send).
- *   - src/include/c.h 683..692: int2vector struct — verbatim.
+ *   - src/include/c.h 700..709: int2vector struct — verbatim.
  *
  * Shims (plumbing only, never logic):
  *   - fmgr: Datum = uintptr_t; MiniFcinfo carries typed args + the
@@ -252,7 +253,7 @@ pg_diff_repalloc_impl(void *old, size_t n)
 /* catalog/pg_type_d.h */
 #define INT2OID 21
 
-/* common/int.h @ 62d6c7d3df — HAVE__BUILTIN_OP_OVERFLOW branches, verbatim */
+/* common/int.h @ REL_18_6 724edf9bde — HAVE__BUILTIN_OP_OVERFLOW branches, verbatim */
 static inline bool
 pg_add_s16_overflow(int16 a, int16 b, int16 *result)
 {
@@ -307,7 +308,7 @@ pg_add_s64_overflow(int64 a, int64 b, int64 *result)
 	return __builtin_add_overflow(a, b, result);
 }
 
-/* port/pg_bitutils.h @ 62d6c7d3df — HAVE__BUILTIN_CLZ branch, verbatim */
+/* port/pg_bitutils.h @ REL_18_6 724edf9bde — HAVE__BUILTIN_CLZ branch, verbatim */
 static inline int
 pg_leftmost_one_pos32(uint32 word)
 {
@@ -326,7 +327,7 @@ pg_leftmost_one_pos64(uint64 word)
 #define pg_ntoh32(x) __builtin_bswap32(x)
 #define pg_hton32(x) __builtin_bswap32(x)
 
-/* c.h 683..692 @ 62d6c7d3df — verbatim (FLEXIBLE_ARRAY_MEMBER -> []) */
+/* c.h 700..709 @ REL_18_6 724edf9bde — verbatim (FLEXIBLE_ARRAY_MEMBER -> []) */
 typedef struct
 {
 	int32		vl_len_;		/* these fields must match ArrayType! */
@@ -377,7 +378,7 @@ pq_endtypsend(StringInfo buf)
 
 #define enlargeStringInfo(buf, needed) assert((buf)->len + (needed) <= (buf)->maxlen)
 
-/* pqformat.h @ 62d6c7d3df — pq_writeint16/pq_writeint32 verbatim
+/* pqformat.h @ REL_18_6 724edf9bde — pq_writeint16/pq_writeint32 verbatim
  * (pg_restrict -> plain; Assert -> assert) */
 static inline void
 pq_writeint16(StringInfoData *buf, uint16 i)
@@ -423,7 +424,7 @@ int			pg_ltoa(int32 value, char *a);
 int16		pg_strtoint16_safe(const char *s, Node *escontext);
 int32		pg_strtoint32_safe(const char *s, Node *escontext);
 
-/* int.c 45 @ 62d6c7d3df — verbatim */
+/* int.c 45 @ REL_18_6 724edf9bde — verbatim */
 #include <stddef.h>
 #define Int2VectorSize(n)	(offsetof(int2vector, values) + (n) * sizeof(int16))
 

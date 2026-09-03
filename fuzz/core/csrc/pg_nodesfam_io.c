@@ -7,9 +7,10 @@
  *   crates/backend/nodes/copyfuncs  (copyObject:  copyfuncs.c)
  *
  * Provenance: every PostgreSQL body in this family is a VERBATIM
- * WHOLE-FILE copy from ~/dev/pgrust-reference/vendor/postgres-src
- * (Stamp-18.3, upstream sha 62d6c7d3df6287f1bd83199c1a746e50d31571a0),
- * assembled by csrc/nodesfam/assemble.sh (re-runnable, no-op diff):
+ * WHOLE-FILE copy from the upstream tree at REL_18_6
+ * (Stamp 18.6, upstream sha 724edf9bde9d356724ad384a2e196edc3c9f80f7,
+ * re-vendored 2026-09-02), assembled by csrc/nodesfam/assemble.sh
+ * (re-runnable, no-op diff):
  *   - src/backend/nodes/{outfuncs,readfuncs,copyfuncs,equalfuncs,read,
  *     value,list,bitmapset}.c
  *   - src/backend/utils/adt/datum.c (datumCopy for Const)
@@ -31,7 +32,7 @@
  *
  * Shims (plumbing only, never logic):
  *   - nodesfam/shim/pg_config.h + pg_config_os.h: fabricated config for
- *     LP64 little-endian gcc/clang, values matching a real 18.3 build on
+ *     LP64 little-endian gcc/clang, values matching a real 18.6 build on
  *     the CI cluster (aarch64-linux) and this dev host (aarch64-darwin).
  *   - palloc family -> bump ARENA below, reset per exec (node trees are
  *     never freed piecemeal by these walkers; C context reset parity).

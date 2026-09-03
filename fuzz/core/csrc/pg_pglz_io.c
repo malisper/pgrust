@@ -7,12 +7,14 @@
  * output buffer's start or end.
  *
  * Provenance (body VERBATIM — no edit to a single statement), from the
- * repo's vendored ground-truth checkout
- * ../pgrust-reference/vendor/postgres-src @
- * 62d6c7d3df6287f1bd83199c1a746e50d31571a0 ("Stamp 18.3", REL_18):
+ * upstream tree at REL_18_6 ("Stamp 18.6",
+ * 724edf9bde9d356724ad384a2e196edc3c9f80f7; re-vendored 2026-09-02 with
+ * upstream c3e436b1cb "Fix heap-buffer-overflow in pglz_decompress() on
+ * corrupt input" applied — the one 18.3→18.6 change to this file):
  *   - src/common/pg_lzcompress.c pglz_decompress() — VERBATIM (the control
- *     byte loop, the two-byte match tag decode, the len==18 extension byte,
- *     the corrupt-data reject (sp > srcend || off == 0 ||
+ *     byte loop, the up-front `sp + 2 > srcend` tag-bytes check, the
+ *     two-byte match tag decode, the len==18 extension byte behind its own
+ *     `sp >= srcend` check, the corrupt-data reject (off == 0 ||
  *     off > dp - dest), the Min(len, destend - dp) clamp, and the
  *     doubling-offset non-overlapping memcpy copy-back loop).
  *
@@ -102,22 +104,33 @@ pglz_decompress(const char *source, int32 slen, char *dest,
 				int32		len;
 				int32		off;
 
+				/*
+				 * A match tag is at least 2 bytes; if the length nibble is
+				 * 0x0f the tag is 3 bytes (extended length).  Verify we have
+				 * enough source data before reading them.
+				 */
+				if (unlikely(sp + 2 > srcend))
+					return -1;
+
 				len = (sp[0] & 0x0f) + 3;
 				off = ((sp[0] & 0xf0) << 4) | sp[1];
 				sp += 2;
 				if (len == 18)
+				{
+					if (unlikely(sp >= srcend))
+						return -1;
 					len += *sp++;
+				}
 
 				/*
-				 * Check for corrupt data: if we fell off the end of the
-				 * source, or if we obtained off = 0, or if off is more than
-				 * the distance back to the buffer start, we have problems.
-				 * (We must check for off = 0, else we risk an infinite loop
-				 * below in the face of corrupt data.  Likewise, the upper
-				 * limit on off prevents accessing outside the buffer
-				 * boundaries.)
+				 * Check for corrupt data: if we obtained off = 0, or if off
+				 * is more than the distance back to the buffer start, we have
+				 * problems.  (We must check for off = 0, else we risk an
+				 * infinite loop below in the face of corrupt data. Likewise,
+				 * the upper limit on off prevents accessing outside the
+				 * buffer boundaries.)
 				 */
-				if (unlikely(sp > srcend || off == 0 ||
+				if (unlikely(off == 0 ||
 							 off > (dp - (unsigned char *) dest)))
 					return -1;
 

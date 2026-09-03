@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""Assemble fuzz/core/csrc/pg_json_io.c: verbatim extraction from vendored
-PG 18.3 json.c / jsonfuncs.c / string.c between hand-written shim prologue
-and pg_diff driver epilogue. Extraction = byte-exact function bodies."""
+"""Assemble fuzz/core/csrc/pg_json_io.c: verbatim extraction from upstream
+PG 18.6 (REL_18_6) json.c / jsonfuncs.c / string.c between hand-written shim
+prologue and pg_diff driver epilogue. Extraction = byte-exact function bodies.
+Source tree: $PG_ORACLE_SRC (default: the local REL_18_6 checkout).
+Usage: assemble_json_oracle.py <prologue> <epilogue> <out>; prologue = the
+file up to (not including) the SECTION V1 banner, epilogue = from the blank
+line before the SECTION S banner to the end."""
 import re, sys, os
 
-V = os.path.expanduser("~/dev/pgrust-reference/vendor/postgres-src")
+V = os.environ.get("PG_ORACLE_SRC", "/home/dev/dev/postgres-upstream-18.6")
 JSON_C = open(f"{V}/src/backend/utils/adt/json.c").read().split("\n")
 JFUN_C = open(f"{V}/src/backend/utils/adt/jsonfuncs.c").read().split("\n")
 STR_C = open(f"{V}/src/common/string.c").read().split("\n")
@@ -42,7 +46,7 @@ A(" * ===================================================================== */\n
 A(extract_fn(STR_C, "strtoint"))
 
 A("\n/* =====================================================================")
-A(" * SECTION V2: VERBATIM from src/backend/utils/adt/json.c @ 62d6c7d3df")
+A(" * SECTION V2: VERBATIM from src/backend/utils/adt/json.c @ REL_18_6")
 A(" * (uniqueness typedefs + machinery, validate/typeof/in, json_object,")
 A(" * json_object_two_arg, escape_json family)")
 A(" * ===================================================================== */\n")
@@ -62,7 +66,7 @@ for f in ["escape_json_with_len", "escape_json_text",
     A(extract_fn(JSON_C, f))
 
 A("\n/* =====================================================================")
-A(" * SECTION V3: VERBATIM from src/backend/utils/adt/jsonfuncs.c @ 62d6c7d3df")
+A(" * SECTION V3: VERBATIM from src/backend/utils/adt/jsonfuncs.c @ REL_18_6")
 A(" * (errsave plumbing, state typedefs, getters, array_length, strip_nulls)")
 A(" * ===================================================================== */\n")
 A(extract_range(JFUN_C, 85, 106))   # GetState + AlenState typedefs
@@ -90,5 +94,5 @@ for f in ["pg_parse_json_or_errsave", "makeJsonLexContext",
 
 A(open(sys.argv[2]).read())  # epilogue (hand-written drivers)
 
-open(sys.argv[3], "w").write("\n".join(OUT) + "\n")
+open(sys.argv[3], "w").write("\n".join(OUT).rstrip("\n") + "\n")
 print(f"wrote {sys.argv[3]}: {sum(len(x)+1 for x in OUT)} bytes")

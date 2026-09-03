@@ -1,10 +1,10 @@
 /* regex_diff oracle shim (p1-lanew): entry points over the verbatim
- * REL_18_3 Spencer regex engine vendored under regexfam/vendor/ (byte-for-
- * byte copy of bench/cref/regex_vendor — regcomp.c + its regc_* includes,
- * regexec.c + rege_dfa.c, regfree.c, regerror.c — plus regprefix.c,
- * regexport.c and regex/regexport.h fetched verbatim from upstream
- * 62d6c7d3df6287f1bd83199c1a746e50d31571a0 (Stamp-18.3), which the bench
- * tree did not carry).
+ * REL_18_6 Spencer regex engine vendored under regexfam/vendor/ (regcomp.c
+ * + its regc_* includes, regexec.c + rege_dfa.c and regex/regcustom.h,
+ * regex/regguts.h re-vendored at REL_18_6 — upstream f3cee4dc43; the
+ * unchanged-since-18.3 regfree.c, regerror.c, regprefix.c, regexport.c and
+ * regex/regexport.h are the original byte-for-byte copies of
+ * bench/cref/regex_vendor / upstream 62d6c7d3df6287f1bd83199c1a746e50d31571a0).
  *
  * The engine TUs compile exactly as upstream does (separate TUs — the
  * compile and exec sides both define a `struct vars` and cannot share a

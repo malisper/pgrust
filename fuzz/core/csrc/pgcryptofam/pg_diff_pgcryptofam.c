@@ -3,7 +3,8 @@
  * oracle (lane p1-pgcryptofam, contrib/pgcrypto crypt()/gen_salt()/armor
  * family).
  *
- * Every compared body is verbatim PostgreSQL 18.3 (upstream 62d6c7d3df):
+ * Every compared body is verbatim PostgreSQL 18.6 (REL_18_6, upstream
+ * 724edf9bde):
  * px_crypt/px_gen_salt (vendor/px-crypt.c) over the verbatim crypt-des/
  * crypt-md5/crypt-blowfish/crypt-sha/crypt-gensalt engines, and
  * pgp_armor_encode/pgp_armor_decode/pgp_extract_armor_headers

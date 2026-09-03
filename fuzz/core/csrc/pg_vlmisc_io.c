@@ -3,15 +3,18 @@
  * fuzz target (100%-coverage campaign; crate crates/backend/utils/adt/varlena).
  *
  * Provenance (all bodies VERBATIM unless a numbered shim below says otherwise),
- * from the repo's vendored ground-truth checkout
- * ../pgrust-reference/vendor/postgres-src @
- * 62d6c7d3df6287f1bd83199c1a746e50d31571a0 (PostgreSQL 18.3, "Stamp 18.3"):
+ * from PostgreSQL upstream @ REL_18_6 (PostgreSQL 18.6; re-vendored
+ * 2026-09-02 from the 18.3 checkout 62d6c7d3df6287f1bd83199c1a746e50d31571a0,
+ * ../pgrust-reference/vendor/postgres-src, with the 18.3->18.6 upstream hunks
+ * applied: e88eb4e766 levenshtein int64 + levenshtein_result, 8d1489d505
+ * unicode_normalize() size_t/MaxAllocSize guard, 273fe94852 Hangul TBASE):
  *
  *   - src/backend/utils/adt/varlena.c: cstring_to_text, cstring_to_text_with_len,
  *     convert_to_base, to_bin32/to_bin64/to_oct32/to_oct64/to_hex32/to_hex64,
  *     unicode_norm_form_from_string, unicode_version, unicode_assigned,
  *     unicode_normalize_func, unicode_is_normalized, isxdigits_n, hexval,
- *     hexval_n, unistr, rest_of_char_same, SplitIdentifierString, SplitGUCList.
+ *     hexval_n, unistr, rest_of_char_same, levenshtein_result,
+ *     SplitIdentifierString, SplitGUCList.
  *   - src/backend/utils/adt/levenshtein.c: vendored whole as
  *     vlmisc/levenshtein.c and #included TWICE (without and with
  *     LEVENSHTEIN_LESS_EQUAL), exactly as varlena.c does.
@@ -79,6 +82,11 @@
  *   7. palloc/palloc0/repalloc/pfree -> the TLS pointer arena below (models
  *      PG's memory-context reset; error-path longjmps strand allocations
  *      otherwise). Every pg_diff_* entry calls pg_diff_arena_reset() first.
+ *      palloc_array(type, n) -> palloc(sizeof(type) * n): 18.6's palloc_mul
+ *      size_t-overflow arm is unreachable for int-bounded n on LP64.
+ *      MaxAllocSize is the memutils.h value (unicode_normalize's 18.6
+ *      decomposition-size guard; its palloc-throws arm is unreachable on
+ *      the driver's 2 KiB inputs).
  *   8. static linkage / pg_vlmisc_ #define-renames for every vendored symbol
  *      that another oracle TU in this crate also vendors (SYMBOL ISOLATION
  *      note in fuzz/core/build.rs): unicode_category (tablesfam vendors the
@@ -95,6 +103,7 @@
  *   2 = ERRCODE_SYNTAX_ERROR                 (42601)
  *   3 = ERRCODE_CHARACTER_NOT_IN_REPERTOIRE  (22021, invalid byte sequence)
  *   4 = ERRCODE_FEATURE_NOT_SUPPORTED        (0A000; unreachable, fence)
+ *   6 = ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE    (22003; levenshtein_result)
  *   9 = INTERNAL (elog; unreachable guards)
  */
 
@@ -116,6 +125,7 @@ extern _Thread_local int pg_diff_errcode;
 #define ERRCODE_CHARACTER_NOT_IN_REPERTOIRE 3
 #define ERRCODE_FEATURE_NOT_SUPPORTED 4
 #define ERRCODE_NAME_TOO_LONG 5 /* 42622: only ever at a NOTICE site here */
+#define ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE 6
 #define PG_VLMISC_ERR_INTERNAL 9
 
 /* ---- fixed-width typedefs matching c.h on LP64 (shim prelude) ---- */
@@ -130,6 +140,10 @@ typedef uint64_t uint64;
 typedef unsigned int pg_wchar;
 typedef uintptr_t Datum;
 typedef unsigned int Oid;
+typedef size_t Size;
+#define PG_INT32_MIN	(-0x7FFFFFFF-1)
+#define PG_INT32_MAX	(0x7FFFFFFF)
+#define MaxAllocSize	((Size) 0x3fffffff) /* 1 gigabyte - 1 */
 
 #define Assert(x) ((void) 0)	/* NDEBUG backend build posture */
 #define Min(x, y) ((x) < (y) ? (x) : (y))
@@ -282,6 +296,7 @@ pg_diff_pfree_impl(void *p)
 
 #define palloc(n) pg_diff_palloc_impl(n)
 #define palloc0(n) pg_diff_palloc0_impl(n)
+#define palloc_array(type, count) ((type *) palloc(sizeof(type) * (count)))
 #define repalloc(p, n) pg_diff_repalloc_impl((p), (n))
 #define pfree(p) pg_diff_pfree_impl(p)
 
@@ -916,18 +931,18 @@ static text *
 unicode_normalize_func_impl(text *input, char *formstr)
 {
 	UnicodeNormalizationForm form;
-	int			size;
+	size_t		size;
 	pg_wchar   *input_chars;
 	pg_wchar   *output_chars;
 	unsigned char *p;
 	text	   *result;
-	int			i;
+	size_t		i;
 
 	form = unicode_norm_form_from_string(formstr);
 
 	/* convert to pg_wchar */
 	size = pg_mbstrlen_with_len(VARDATA_ANY(input), VARSIZE_ANY_EXHDR(input));
-	input_chars = palloc((size + 1) * sizeof(pg_wchar));
+	input_chars = palloc_array(pg_wchar, size + 1);
 	p = (unsigned char *) VARDATA_ANY(input);
 	for (i = 0; i < size; i++)
 	{
@@ -969,20 +984,20 @@ static bool
 unicode_is_normalized_impl(text *input, char *formstr)
 {
 	UnicodeNormalizationForm form;
-	int			size;
+	size_t		size;
 	pg_wchar   *input_chars;
 	pg_wchar   *output_chars;
 	unsigned char *p;
-	int			i;
+	size_t		i;
 	UnicodeNormalizationQC quickcheck;
-	int			output_size;
+	size_t		output_size;
 	bool		result;
 
 	form = unicode_norm_form_from_string(formstr);
 
 	/* convert to pg_wchar */
 	size = pg_mbstrlen_with_len(VARDATA_ANY(input), VARSIZE_ANY_EXHDR(input));
-	input_chars = palloc((size + 1) * sizeof(pg_wchar));
+	input_chars = palloc_array(pg_wchar, size + 1);
 	p = (unsigned char *) VARDATA_ANY(input);
 	for (i = 0; i < size; i++)
 	{
@@ -1413,7 +1428,8 @@ SplitGUCList(char *rawstring, char separator,
 }
 
 /* ============ SECTION 9: levenshtein.c (vendored file, included twice
- * exactly as varlena.c does; rest_of_char_same is varlena.c's, verbatim) === */
+ * exactly as varlena.c does; rest_of_char_same and levenshtein_result are
+ * varlena.c's, verbatim) === */
 
 /*
  * Helper function for Levenshtein distance functions. Faster than memcmp(),
@@ -1429,6 +1445,20 @@ rest_of_char_same(const char *s1, const char *s2, int len)
 			return false;
 	}
 	return true;
+}
+
+/*
+ * Helper function for checking return value of Levenshtein distance functions.
+ * We calculate it as an int64, but the distance functions return an int32.
+ */
+static inline int
+levenshtein_result(int64 res)
+{
+	if (unlikely(res < PG_INT32_MIN || res > PG_INT32_MAX))
+		ereport(ERROR,
+				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+				 errmsg("levenshtein distance out of range")));
+	return res;
 }
 
 /* SHIM 8: prefix-rename the two instantiations; static via the int-return

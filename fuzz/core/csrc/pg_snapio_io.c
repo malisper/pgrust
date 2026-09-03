@@ -3,9 +3,10 @@
  * fuzz target (100%-coverage campaign; crate crates/backend/utils/adt/xid8funcs).
  *
  * Provenance (all bodies VERBATIM unless a shim is listed below):
- *   - src/backend/utils/adt/xid8funcs.c @ postgres-src
- *     62d6c7d3df6287f1bd83199c1a746e50d31571a0 (PostgreSQL 18.3, Stamp-18.3;
- *     verified against ../pgrust-reference/vendor/postgres-src):
+ *   - src/backend/utils/adt/xid8funcs.c @ postgres-src REL_18_6
+ *     724edf9bde9d356724ad384a2e196edc3c9f80f7 (PostgreSQL 18.6, Stamp 18.6;
+ *     re-vendored 2026-09-02 — the one 18.3→18.6 hunk, de77775a7b
+ *     `const void *res` in is_visible_fxid, is applied):
  *     pg_snapshot struct + PG_SNAPSHOT_SIZE/PG_SNAPSHOT_MAX_NXIP, cmp_fxid,
  *     is_visible_fxid, buf_init, buf_add_txid, buf_finalize, parse_snapshot
  *     — verbatim. The fmgr-wrapped bodies pg_snapshot_in/out/recv/send/
@@ -406,7 +407,7 @@ is_visible_fxid(FullTransactionId value, const pg_snapshot *snap)
 #ifdef USE_BSEARCH_IF_NXIP_GREATER
 	else if (snap->nxip > USE_BSEARCH_IF_NXIP_GREATER)
 	{
-		void	   *res;
+		const void *res;
 
 		res = bsearch(&value, snap->xip, snap->nxip, sizeof(FullTransactionId),
 					  cmp_fxid);

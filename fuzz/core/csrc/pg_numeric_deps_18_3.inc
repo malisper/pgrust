@@ -1,6 +1,9 @@
-/* VERBATIM bodies vendored from postgres-src @ 62d6c7d3df6287f1bd83199c1a746e50d31571a0
+/* VERBATIM bodies vendored from postgres-upstream @ REL_18_6 724edf9bde9d356724ad384a2e196edc3c9f80f7 (PostgreSQL 18.6)
  * for the fmt_num_diff oracle (NUM SQL entries' numeric/int/float dependency closure).
  * Each block byte-identical to the cited file:lines. Environment = pg_fmt_dch_io.c prelude.
+ * (Re-vendored 2026-09-02 from the REL_18_3 62d6c7d3df copy: every block is byte-identical in
+ * REL_18_6 — upstream 84001a04d5 / 722695db18 / cf184ec77a touched only functions not copied
+ * here — so only the cited line numbers moved. File name kept: it is #include'd by name.)
  */
 
 /* --- src/backend/utils/adt/numeric.c:636-807 numeric_in (verbatim) --- */
@@ -235,7 +238,7 @@ numeric_out_sci(Numeric num, int scale)
 	return str;
 }
 
-/* --- src/backend/utils/adt/numeric.c:1542-1586 numeric_round (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:1548-1592 numeric_round (verbatim) --- */
 Datum
 numeric_round(PG_FUNCTION_ARGS)
 {
@@ -282,7 +285,7 @@ numeric_round(PG_FUNCTION_ARGS)
 	PG_RETURN_NUMERIC(res);
 }
 
-/* --- src/backend/utils/adt/numeric.c:3121-3131 numeric_mul (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:3127-3137 numeric_mul (verbatim) --- */
 Datum
 numeric_mul(PG_FUNCTION_ARGS)
 {
@@ -295,7 +298,7 @@ numeric_mul(PG_FUNCTION_ARGS)
 	PG_RETURN_NUMERIC(res);
 }
 
-/* --- src/backend/utils/adt/numeric.c:3141-3234 numeric_mul_opt_error (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:3147-3240 numeric_mul_opt_error (verbatim) --- */
 Numeric
 numeric_mul_opt_error(Numeric num1, Numeric num2, bool *have_error)
 {
@@ -391,7 +394,7 @@ numeric_mul_opt_error(Numeric num1, Numeric num2, bool *have_error)
 	return res;
 }
 
-/* --- src/backend/utils/adt/numeric.c:4053-4233 numeric_power (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:4059-4239 numeric_power (verbatim) --- */
 Datum
 numeric_power(PG_FUNCTION_ARGS)
 {
@@ -574,7 +577,7 @@ numeric_power(PG_FUNCTION_ARGS)
 	PG_RETURN_NUMERIC(res);
 }
 
-/* --- src/backend/utils/adt/numeric.c:4401-4416 int64_to_numeric (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:4407-4422 int64_to_numeric (verbatim) --- */
 Numeric
 int64_to_numeric(int64 val)
 {
@@ -592,7 +595,7 @@ int64_to_numeric(int64 val)
 	return res;
 }
 
-/* --- src/backend/utils/adt/numeric.c:4515-4563 numeric_int4_opt_error (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:4521-4569 numeric_int4_opt_error (verbatim) --- */
 int32
 numeric_int4_opt_error(Numeric num, bool *have_error)
 {
@@ -689,7 +692,7 @@ int8mul(PG_FUNCTION_ARGS)
 	PG_RETURN_INT64(result);
 }
 
-/* --- src/backend/utils/adt/int8.c:1296-1315 dtoi8 (verbatim) --- */
+/* --- src/backend/utils/adt/int8.c:1326-1345 dtoi8 (verbatim) --- */
 Datum
 dtoi8(PG_FUNCTION_ARGS)
 {
@@ -755,7 +758,7 @@ ftoi4(PG_FUNCTION_ARGS)
 	PG_RETURN_INT32((int32) num);
 }
 
-/* --- src/backend/utils/adt/numeric.c:1477-1501 numeric_sign_internal (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:1483-1507 numeric_sign_internal (verbatim) --- */
 static int
 numeric_sign_internal(Numeric num)
 {
@@ -977,14 +980,14 @@ pg_ultoa_n(uint32 value, char *a)
 }
 
 
-/* --- src/backend/utils/adt/numeric.c:8009-8013 make_result (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:8047-8051 make_result (verbatim) --- */
 static Numeric
 make_result(const NumericVar *var)
 {
 	return make_result_opt_error(var, NULL);
 }
 
-/* --- src/backend/utils/adt/numeric.c:7900-8001 make_result_opt_error (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:7938-8039 make_result_opt_error (verbatim) --- */
 static Numeric
 make_result_opt_error(const NumericVar *var, bool *have_error)
 {
@@ -1088,7 +1091,7 @@ make_result_opt_error(const NumericVar *var, bool *have_error)
 	return result;
 }
 
-/* --- src/backend/utils/adt/numeric.c:8025-8099 apply_typmod (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:8063-8137 apply_typmod (verbatim) --- */
 static bool
 apply_typmod(NumericVar *var, int32 typmod, Node *escontext)
 {
@@ -1165,7 +1168,7 @@ apply_typmod(NumericVar *var, int32 typmod, Node *escontext)
 	return true;
 }
 
-/* --- src/backend/utils/adt/numeric.c:8110-8139 apply_typmod_special (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:8148-8177 apply_typmod_special (verbatim) --- */
 static bool
 apply_typmod_special(Numeric num, int32 typmod, Node *escontext)
 {
@@ -1197,7 +1200,7 @@ apply_typmod_special(Numeric num, int32 typmod, Node *escontext)
 					   precision, scale)));
 }
 
-/* --- src/backend/utils/adt/numeric.c:7130-7327 set_var_from_str (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:7168-7365 set_var_from_str (verbatim) --- */
 static bool
 set_var_from_str(const char *str, const char *cp,
 				 NumericVar *dest, const char **endptr,
@@ -1397,7 +1400,7 @@ invalid_syntax:
 					"numeric", str)));
 }
 
-/* --- src/backend/utils/adt/numeric.c:7360-7530 set_var_from_non_decimal_integer_str (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:7398-7568 set_var_from_non_decimal_integer_str (verbatim) --- */
 static bool
 set_var_from_non_decimal_integer_str(const char *str, const char *cp, int sign,
 									 int base, NumericVar *dest,
@@ -1570,7 +1573,7 @@ invalid_syntax:
 					"numeric", str)));
 }
 
-/* --- src/backend/utils/adt/numeric.c:7087-7094 free_var (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:7125-7132 free_var (verbatim) --- */
 static void
 free_var(NumericVar *var)
 {
@@ -1580,7 +1583,7 @@ free_var(NumericVar *var)
 	var->sign = NUMERIC_NAN;
 }
 
-/* --- src/backend/utils/adt/numeric.c:7569-7578 init_var_from_num (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:7607-7616 init_var_from_num (verbatim) --- */
 static void
 init_var_from_num(Numeric num, NumericVar *dest)
 {
@@ -1592,7 +1595,7 @@ init_var_from_num(Numeric num, NumericVar *dest)
 	dest->buf = NULL;			/* digits array is not palloc'd */
 }
 
-/* --- src/backend/utils/adt/numeric.c:7538-7552 set_var_from_num (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:7576-7590 set_var_from_num (verbatim) --- */
 static void
 set_var_from_num(Numeric num, NumericVar *dest)
 {
@@ -1609,7 +1612,7 @@ set_var_from_num(Numeric num, NumericVar *dest)
 	memcpy(dest->digits, NUMERIC_DIGITS(num), ndigits * sizeof(NumericDigit));
 }
 
-/* --- src/backend/utils/adt/numeric.c:7612-7741 get_str_from_var (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:7650-7779 get_str_from_var (verbatim) --- */
 static char *
 get_str_from_var(const NumericVar *var)
 {
@@ -1741,7 +1744,7 @@ get_str_from_var(const NumericVar *var)
 	return str;
 }
 
-/* --- src/backend/utils/adt/numeric.c:7765-7831 get_str_from_var_sci (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:7803-7869 get_str_from_var_sci (verbatim) --- */
 static char *
 get_str_from_var_sci(const NumericVar *var, int rscale)
 {
@@ -1810,7 +1813,7 @@ get_str_from_var_sci(const NumericVar *var, int rscale)
 	return str;
 }
 
-/* --- src/backend/utils/adt/numeric.c:7881-7889 duplicate_numeric (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:7919-7927 duplicate_numeric (verbatim) --- */
 static Numeric
 duplicate_numeric(Numeric num)
 {
@@ -1821,7 +1824,7 @@ duplicate_numeric(Numeric num)
 	return res;
 }
 
-/* --- src/backend/utils/adt/numeric.c:12108-12205 round_var (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:12146-12243 round_var (verbatim) --- */
 static void
 round_var(NumericVar *var, int rscale)
 {
@@ -1921,7 +1924,7 @@ round_var(NumericVar *var, int rscale)
 	}
 }
 
-/* --- src/backend/utils/adt/numeric.c:8787-9068 mul_var (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:8825-9106 mul_var (verbatim) --- */
 static void
 mul_var(const NumericVar *var1, const NumericVar *var2, NumericVar *result,
 		int rscale)
@@ -2205,7 +2208,7 @@ mul_var(const NumericVar *var1, const NumericVar *var2, NumericVar *result,
 	strip_var(result);
 }
 
-/* --- src/backend/utils/adt/numeric.c:8491-8498 cmp_var (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:8529-8536 cmp_var (verbatim) --- */
 static int
 cmp_var(const NumericVar *var1, const NumericVar *var2)
 {
@@ -2215,7 +2218,7 @@ cmp_var(const NumericVar *var1, const NumericVar *var2)
 						  var2->weight, var2->sign);
 }
 
-/* --- src/backend/utils/adt/numeric.c:11288-11441 power_var (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:11326-11479 power_var (verbatim) --- */
 static void
 power_var(const NumericVar *base, const NumericVar *exp, NumericVar *result)
 {
@@ -2371,7 +2374,7 @@ power_var(const NumericVar *base, const NumericVar *exp, NumericVar *result)
 	free_var(&abs_base);
 }
 
-/* --- src/backend/utils/adt/numeric.c:8222-8262 int64_to_numericvar (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:8260-8300 int64_to_numericvar (verbatim) --- */
 static void
 int64_to_numericvar(int64 val, NumericVar *var)
 {
@@ -2414,7 +2417,7 @@ int64_to_numericvar(int64 val, NumericVar *var)
 	var->weight = ndigits - 1;
 }
 
-/* --- src/backend/utils/adt/numeric.c:4578-4593 numericvar_to_int32 (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:4584-4599 numericvar_to_int32 (verbatim) --- */
 static bool
 numericvar_to_int32(const NumericVar *var, int32 *result)
 {
@@ -2432,7 +2435,7 @@ numericvar_to_int32(const NumericVar *var, int32 *result)
 	return true;
 }
 
-/* --- src/backend/utils/adt/numeric.c:7071-7079 alloc_var (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:7109-7117 alloc_var (verbatim) --- */
 static void
 alloc_var(NumericVar *var, int ndigits)
 {
@@ -2443,7 +2446,7 @@ alloc_var(NumericVar *var, int ndigits)
 	var->ndigits = ndigits;
 }
 
-/* --- src/backend/utils/adt/numeric.c:7103-7112 zero_var (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:7141-7150 zero_var (verbatim) --- */
 static void
 zero_var(NumericVar *var)
 {
@@ -2455,7 +2458,7 @@ zero_var(NumericVar *var)
 	var->sign = NUMERIC_POS;	/* anything but NAN... */
 }
 
-/* --- src/backend/utils/adt/numeric.c:12276-12303 strip_var (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:12314-12341 strip_var (verbatim) --- */
 static void
 strip_var(NumericVar *var)
 {
@@ -2485,7 +2488,7 @@ strip_var(NumericVar *var)
 	var->ndigits = ndigits;
 }
 
-/* --- src/backend/utils/adt/numeric.c:8549-8657 add_var (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:8587-8695 add_var (verbatim) --- */
 static void
 add_var(const NumericVar *var1, const NumericVar *var2, NumericVar *result)
 {
@@ -2596,7 +2599,7 @@ add_var(const NumericVar *var1, const NumericVar *var2, NumericVar *result)
 	}
 }
 
-/* --- src/backend/utils/adt/numeric.c:8666-8778 sub_var (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:8704-8816 sub_var (verbatim) --- */
 static void
 sub_var(const NumericVar *var1, const NumericVar *var2, NumericVar *result)
 {
@@ -2711,7 +2714,7 @@ sub_var(const NumericVar *var1, const NumericVar *var2, NumericVar *result)
 	}
 }
 
-/* --- src/backend/utils/adt/numeric.c:9365-9897 div_var (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:9403-9935 div_var (verbatim) --- */
 static void
 div_var(const NumericVar *var1, const NumericVar *var2, NumericVar *result,
 		int rscale, bool round, bool exact)
@@ -3246,7 +3249,7 @@ div_var(const NumericVar *var1, const NumericVar *var2, NumericVar *result,
 	strip_var(result);
 }
 
-/* --- src/backend/utils/adt/numeric.c:9906-10009 div_var_int (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:9944-10047 div_var_int (verbatim) --- */
 static void
 div_var_int(const NumericVar *var, int ival, int ival_weight,
 			NumericVar *result, int rscale, bool round)
@@ -3352,7 +3355,7 @@ div_var_int(const NumericVar *var, int ival, int ival_weight,
 	strip_var(result);
 }
 
-/* --- src/backend/utils/adt/numeric.c:10899-11014 exp_var (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:10937-11052 exp_var (verbatim) --- */
 static void
 exp_var(const NumericVar *arg, NumericVar *result, int rscale)
 {
@@ -3470,7 +3473,7 @@ exp_var(const NumericVar *arg, NumericVar *result, int rscale)
 	free_var(&elem);
 }
 
-/* --- src/backend/utils/adt/numeric.c:11110-11218 ln_var (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:11148-11256 ln_var (verbatim) --- */
 static void
 ln_var(const NumericVar *arg, NumericVar *result, int rscale)
 {
@@ -3581,7 +3584,7 @@ ln_var(const NumericVar *arg, NumericVar *result, int rscale)
 	free_var(&fact);
 }
 
-/* --- src/backend/utils/adt/numeric.c:10419-10891 sqrt_var (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:10457-10929 sqrt_var (verbatim) --- */
 static void
 sqrt_var(const NumericVar *arg, NumericVar *result, int rscale)
 {
@@ -4056,7 +4059,7 @@ sqrt_var(const NumericVar *arg, NumericVar *result, int rscale)
 	free_var(&u_var);
 }
 
-/* --- src/backend/utils/adt/numeric.c:12214-12269 trunc_var (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:12252-12307 trunc_var (verbatim) --- */
 static void
 trunc_var(NumericVar *var, int rscale)
 {
@@ -4114,7 +4117,7 @@ trunc_var(NumericVar *var, int rscale)
 	}
 }
 
-/* --- src/backend/utils/adt/numeric.c:11863-11868 cmp_abs (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:11901-11906 cmp_abs (verbatim) --- */
 static int
 cmp_abs(const NumericVar *var1, const NumericVar *var2)
 {
@@ -4122,7 +4125,7 @@ cmp_abs(const NumericVar *var1, const NumericVar *var2)
 						  var2->digits, var2->ndigits, var2->weight);
 }
 
-/* --- src/backend/utils/adt/numeric.c:11877-11932 cmp_abs_common (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:11915-11970 cmp_abs_common (verbatim) --- */
 static int
 cmp_abs_common(const NumericDigit *var1digits, int var1ndigits, int var1weight,
 			   const NumericDigit *var2digits, int var2ndigits, int var2weight)
@@ -4180,7 +4183,7 @@ cmp_abs_common(const NumericDigit *var1digits, int var1ndigits, int var1weight,
 	return 0;
 }
 
-/* --- src/backend/utils/adt/numeric.c:11941-12014 add_abs (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:11979-12052 add_abs (verbatim) --- */
 static void
 add_abs(const NumericVar *var1, const NumericVar *var2, NumericVar *result)
 {
@@ -4256,7 +4259,7 @@ add_abs(const NumericVar *var1, const NumericVar *var2, NumericVar *result)
 	strip_var(result);
 }
 
-/* --- src/backend/utils/adt/numeric.c:12026-12099 sub_abs (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:12064-12137 sub_abs (verbatim) --- */
 static void
 sub_abs(const NumericVar *var1, const NumericVar *var2, NumericVar *result)
 {
@@ -4332,7 +4335,7 @@ sub_abs(const NumericVar *var1, const NumericVar *var2, NumericVar *result)
 	strip_var(result);
 }
 
-/* --- src/backend/utils/adt/numeric.c:7586-7602 set_var_from_var (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:7624-7640 set_var_from_var (verbatim) --- */
 static void
 set_var_from_var(const NumericVar *value, NumericVar *dest)
 {
@@ -4351,7 +4354,7 @@ set_var_from_var(const NumericVar *value, NumericVar *dest)
 	dest->digits = newbuf + 1;
 }
 
-/* --- src/backend/utils/adt/numeric.c:11028-11102 estimate_ln_dweight (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:11066-11140 estimate_ln_dweight (verbatim) --- */
 static int
 estimate_ln_dweight(const NumericVar *var)
 {
@@ -4428,7 +4431,7 @@ estimate_ln_dweight(const NumericVar *var)
 	return ln_dweight;
 }
 
-/* --- src/backend/utils/adt/numeric.c:8147-8217 numericvar_to_int64 (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:8185-8255 numericvar_to_int64 (verbatim) --- */
 static bool
 numericvar_to_int64(const NumericVar *var, int64 *result)
 {
@@ -4501,7 +4504,7 @@ numericvar_to_int64(const NumericVar *var, int64 *result)
 	return true;
 }
 
-/* --- src/backend/utils/adt/numeric.c:11450-11647 power_var_int (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:11488-11685 power_var_int (verbatim) --- */
 static void
 power_var_int(const NumericVar *base, int exp, int exp_dscale,
 			  NumericVar *result)
@@ -4701,7 +4704,7 @@ power_var_int(const NumericVar *base, int exp, int exp_dscale,
 		round_var(result, rscale);
 }
 
-/* --- src/backend/utils/adt/numeric.c:10232-10293 div_mod_var (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:10270-10331 div_mod_var (verbatim) --- */
 static void
 div_mod_var(const NumericVar *var1, const NumericVar *var2,
 			NumericVar *quot, NumericVar *rem)
@@ -4765,7 +4768,7 @@ div_mod_var(const NumericVar *var1, const NumericVar *var2,
 	free_var(&r);
 }
 
-/* --- src/backend/utils/adt/numeric.c:10203-10223 mod_var (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:10241-10261 mod_var (verbatim) --- */
 static void
 mod_var(const NumericVar *var1, const NumericVar *var2, NumericVar *result)
 {
@@ -4788,7 +4791,7 @@ mod_var(const NumericVar *var1, const NumericVar *var2, NumericVar *result)
 	free_var(&tmp);
 }
 
-/* --- src/backend/utils/adt/numeric.c:10326-10341 floor_var (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:10364-10379 floor_var (verbatim) --- */
 static void
 floor_var(const NumericVar *var, NumericVar *result)
 {
@@ -4806,7 +4809,7 @@ floor_var(const NumericVar *var, NumericVar *result)
 	free_var(&tmp);
 }
 
-/* --- src/backend/utils/adt/numeric.c:10302-10317 ceil_var (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:10340-10355 ceil_var (verbatim) --- */
 static void
 ceil_var(const NumericVar *var, NumericVar *result)
 {
@@ -4824,7 +4827,7 @@ ceil_var(const NumericVar *var, NumericVar *result)
 	free_var(&tmp);
 }
 
-/* --- src/backend/utils/adt/numeric.c:8459-8482 numericvar_to_double_no_overflow (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:8497-8520 numericvar_to_double_no_overflow (verbatim) --- */
 static double
 numericvar_to_double_no_overflow(const NumericVar *var)
 {
@@ -4850,7 +4853,7 @@ numericvar_to_double_no_overflow(const NumericVar *var)
 	return val;
 }
 
-/* --- src/backend/utils/adt/numeric.c:10134-10195 select_div_scale (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:10172-10233 select_div_scale (verbatim) --- */
 static int
 select_div_scale(const NumericVar *var1, const NumericVar *var2)
 {
@@ -4935,7 +4938,7 @@ numeric_typmod_scale(int32 typmod)
 	return (((typmod - VARHDRSZ) & 0x7ff) ^ 1024) - 1024;
 }
 
-/* --- src/backend/utils/adt/numeric.c:7333-7339 xdigit_value (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:7371-7377 xdigit_value (verbatim) --- */
 static inline int
 xdigit_value(char dig)
 {
@@ -4944,7 +4947,7 @@ xdigit_value(char dig)
 		dig >= 'A' && dig <= 'F' ? dig - 'A' + 10 : -1;
 }
 
-/* --- src/backend/utils/adt/numeric.c:11655-11675 power_ten_int (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:11693-11713 power_ten_int (verbatim) --- */
 static void
 power_ten_int(int exp, NumericVar *result)
 {
@@ -4967,7 +4970,7 @@ power_ten_int(int exp, NumericVar *result)
 		result->digits[0] *= 10;
 }
 
-/* --- src/backend/utils/adt/numeric.c:9078-9344 mul_var_short (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:9116-9382 mul_var_short (verbatim) --- */
 static void
 mul_var_short(const NumericVar *var1, const NumericVar *var2,
 			  NumericVar *result)
@@ -5236,7 +5239,7 @@ mul_var_short(const NumericVar *var1, const NumericVar *var2,
 	strip_var(result);
 }
 
-/* --- src/backend/utils/adt/numeric.c:8506-8540 cmp_var_common (verbatim) --- */
+/* --- src/backend/utils/adt/numeric.c:8544-8578 cmp_var_common (verbatim) --- */
 static int
 cmp_var_common(const NumericDigit *var1digits, int var1ndigits,
 			   int var1weight, int var1sign,

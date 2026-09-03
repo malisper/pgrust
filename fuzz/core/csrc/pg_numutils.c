@@ -2,9 +2,11 @@
  * Vendored PostgreSQL C: src/backend/utils/adt/numutils.c — differential-fuzz
  * oracle for the p1-laneaj campaign crate adt/numutils.
  *
- * Provenance (all bodies VERBATIM unless a shim is listed below), from the
- * repo's vendored ground-truth checkout ../pgrust-reference/vendor/postgres-src
- * @ 62d6c7d3df6287f1bd83199c1a746e50d31571a0 (REL_18 "Stamp 18.3"):
+ * Provenance (all bodies VERBATIM unless a shim is listed below), from
+ * postgres-upstream @ REL_18_6 724edf9bde9d356724ad384a2e196edc3c9f80f7 (PostgreSQL 18.6;
+ * re-vendored 2026-09-02 from the REL_18_3 62d6c7d3df copy — numutils.c,
+ * pg_bitutils.h and the copied common/int.h functions are byte-identical in
+ * REL_18_6):
  *   - src/backend/utils/adt/numutils.c: DIGIT_TABLE, decimalLength32/64,
  *     hexlookup, pg_strtoint16(_safe), pg_strtoint32(_safe),
  *     pg_strtoint64(_safe), uint32in_subr, uint64in_subr, pg_itoa,
@@ -31,7 +33,7 @@
  * NOTE the uint32in_subr/uint64in_subr parse core is the platform
  * strtoul(base 0), exactly as in real PostgreSQL (which defers to libc); on
  * this host that is macOS libc. Ground-truthing vs glibc is the
- * postgres:18.3 Docker replay step.
+ * postgres:18.6 Docker replay step.
  *
  * PG builds with -fwrapv and -fno-strict-aliasing; core/build.rs passes both
  * for every csrc object (flag_if_supported at the top-level cc::Build).

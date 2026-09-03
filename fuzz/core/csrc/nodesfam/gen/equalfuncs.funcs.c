@@ -2633,6 +2633,7 @@ _equalCreateStatsStmt(const CreateStatsStmt *a, const CreateStatsStmt *b)
 	COMPARE_STRING_FIELD(stxcomment);
 	COMPARE_SCALAR_FIELD(transformed);
 	COMPARE_SCALAR_FIELD(if_not_exists);
+	COMPARE_SCALAR_FIELD(owner);
 
 	return true;
 }

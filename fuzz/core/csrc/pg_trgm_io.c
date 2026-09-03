@@ -2,11 +2,18 @@
  * pg_trgm_io.c: vendored PostgreSQL C oracle for the trgm_diff differential
  * fuzz target (100%-coverage campaign; crate crates/contrib/pg_trgm).
  *
- * Provenance: every block marked "VERBATIM <file> lines A-B" is a
- * byte-for-byte extraction from the repo's vendored ground-truth checkout
- * ../pgrust-reference/vendor/postgres-src @ 62d6c7d3df6287f1bd83199c1a746e50d31571a0
- * (PostgreSQL 18.3, "Stamp 18.3"), assembled by
- * scratchpad/gen_trgm_oracle.py (line ranges auditable with sed).
+ * Provenance: every block marked "VERBATIM <file> lines A-B @ <rev>" is a
+ * byte-for-byte extraction from PostgreSQL at that revision: originally
+ * 62d6c7d3df (18.3, assembled by scratchpad/gen_trgm_oracle.py, line ranges
+ * auditable with sed), re-vendored 2026-09-02 at REL_18_6 (upstream sha
+ * 724edf9bde9d356724ad384a2e196edc3c9f80f7). Blocks still marked @ 62d6c7d3df are
+ * byte-identical at REL_18_6 (checked); the 18.3→18.6 changes in copied
+ * code are pg_locale.c pg_strlower 5f003855e7 (ctype_is_c takes the new
+ * strlower_c arm before the provider dispatch), palloc.h palloc_array/
+ * palloc0_array/repalloc0_array e1c30458a1 (overflow-checked palloc_mul/
+ * palloc0_mul/mul_size) and the linked src/common/unicode_case.c under
+ * csrc/trgmfam/ (66ec24276b final-sigma logic, 9021c8f3ca truncated-UTF8
+ * defense; whole-file REL_18_6 copy).
  * Vendored bodies: contrib/pg_trgm/trgm.h (macros/typedefs),
  * lib/qunique.h, contrib/pg_trgm/trgm_op.c (everything except the fmgr
  * Datum shells, _PG_init GUC registration, and the set_limit/show_limit/
@@ -50,8 +57,8 @@
  *      arm 0 = database ctype "C":       ctype_is_c=true  (t_isalnum
  *              byte path isalnum(TOUCHAR); str_tolower -> asc_tolower)
  *      arm 1 = builtin "C.UTF-8" (UTF8): ctype_is_c=false, provider
- *              COLLPROVIDER_BUILTIN, casemap_full=false (18.3
- *              pg_locale_builtin.c:160 -- casemap_full only for
+ *              COLLPROVIDER_BUILTIN, casemap_full=false (REL_18_6
+ *              pg_locale_builtin.c:172 -- casemap_full only for
  *              PG_UNICODE_FAST); t_isalnum multibyte path char2wchar +
  *              iswalnum under the PROCESS LC_CTYPE (harness init pins a
  *              UTF-8 LC_CTYPE; ts_locale.c passes mylocale = 0, so the
@@ -157,7 +164,7 @@ extern _Thread_local int pg_diff_errcode;
 static _Thread_local jmp_buf pg_diff_trgm_jmp;
 static _Thread_local int pg_diff_trgm_pending;
 
-static void
+_Noreturn static void
 pg_diff_trgm_raise(int code)
 {
 	pg_diff_errcode = code;
@@ -281,10 +288,82 @@ trgmf_pfree(void *p)
 #define palloc0(n) trgmf_palloc0(n)
 #define repalloc(p, n) trgmf_repalloc((p), (n))
 #define pfree(p) trgmf_pfree(p)
-/* palloc.h macro bodies (verbatim macro semantics) */
-#define palloc_array(type, count) ((type *) palloc(sizeof(type) * (count)))
-#define palloc0_array(type, count) ((type *) palloc0(sizeof(type) * (count)))
-#define repalloc0_array(pointer, type, oldcount, count) ((type *) repalloc0(pointer, sizeof(type) * (oldcount), sizeof(type) * (count)))
+/* palloc.h macro bodies @ REL_18_6 (e1c30458a1: overflow-checked through
+ * palloc_mul/palloc0_mul/mul_size; pg_mul_size_overflow VERBATIM
+ * common/int.h, the mcxt.c bodies VERBATIM, TU-static; c.h spellings) */
+#define pg_noreturn _Noreturn
+#define pg_noinline __attribute__((noinline))
+static inline bool
+pg_mul_size_overflow(size_t a, size_t b, size_t *result)
+{
+#if defined(HAVE__BUILTIN_OP_OVERFLOW)
+	return __builtin_mul_overflow(a, b, result);
+#else
+	size_t		res = a * b;
+
+	if (a != 0 && b != res / a)
+	{
+		*result = 0x5EED;		/* to avoid spurious warnings */
+		return true;
+	}
+	*result = res;
+	return false;
+#endif
+}
+
+pg_noreturn static pg_noinline void
+mul_size_error(Size s1, Size s2)
+{
+	ereport(ERROR,
+			(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+			 errmsg("invalid memory allocation request size %zu * %zu",
+					s1, s2)));
+}
+
+/*
+ * palloc_mul
+ *		Equivalent to palloc(mul_size(s1, s2)).
+ */
+static void *
+palloc_mul(Size s1, Size s2)
+{
+	/* inline mul_size() for efficiency */
+	Size		req;
+
+	if (unlikely(pg_mul_size_overflow(s1, s2, &req)))
+		mul_size_error(s1, s2);
+	return palloc(req);
+}
+
+static Size
+mul_size(Size s1, Size s2)
+{
+	Size		result;
+
+	if (unlikely(pg_mul_size_overflow(s1, s2, &result)))
+		mul_size_error(s1, s2);
+	return result;
+}
+
+/*
+ * palloc0_mul
+ *		Equivalent to palloc0(mul_size(s1, s2)).
+ *
+ * This is comparable to standard calloc's behavior.
+ */
+static void *
+palloc0_mul(Size s1, Size s2)
+{
+	/* inline mul_size() for efficiency */
+	Size		req;
+
+	if (unlikely(pg_mul_size_overflow(s1, s2, &req)))
+		mul_size_error(s1, s2);
+	return palloc0(req);
+}
+#define palloc_array(type, count) ((type *) palloc_mul(sizeof(type), count))
+#define palloc0_array(type, count) ((type *) palloc0_mul(sizeof(type), count))
+#define repalloc0_array(pointer, type, oldcount, count) ((type *) repalloc0(pointer, mul_size(sizeof(type), oldcount), mul_size(sizeof(type), count)))
 
 /* mcxt.c repalloc0: grow + zero the extension (verbatim semantics of the
  * mcxt.c body: repalloc then MemSetAligned of the tail) */
@@ -746,12 +825,27 @@ strlower_libc(char *dst, size_t dstsize, const char *src, ssize_t srclen,
 	abort();
 }
 
-/* ---- VERBATIM src/backend/utils/adt/pg_locale.c lines 1270-1287 @ 62d6c7d3df ---- */
+/* ---- VERBATIM src/backend/utils/adt/pg_locale.c lines 1276-1287 (strlower_c) + 1327-1346 (pg_strlower) @ REL_18_6 ---- */
+/* lowercasing/casefolding in C locale */
+static size_t
+strlower_c(char *dst, size_t dstsize, const char *src, size_t srclen)
+{
+	int			i;
+
+	for (i = 0; i < srclen && i < dstsize; i++)
+		dst[i] = pg_ascii_tolower(src[i]);
+	if (i < dstsize)
+		dst[i] = '\0';
+	return srclen;
+}
+
 size_t
 pg_strlower(char *dst, size_t dstsize, const char *src, ssize_t srclen,
 			pg_locale_t locale)
 {
-	if (locale->provider == COLLPROVIDER_BUILTIN)
+	if (locale->ctype_is_c)
+		return strlower_c(dst, dstsize, src, srclen);
+	else if (locale->provider == COLLPROVIDER_BUILTIN)
 		return strlower_builtin(dst, dstsize, src, srclen, locale);
 #ifdef USE_ICU
 	else if (locale->provider == COLLPROVIDER_ICU)
@@ -765,7 +859,7 @@ pg_strlower(char *dst, size_t dstsize, const char *src, ssize_t srclen,
 
 	return 0;					/* keep compiler quiet */
 }
-/* ---- end VERBATIM src/backend/utils/adt/pg_locale.c lines 1270-1287 ---- */
+/* ---- end VERBATIM src/backend/utils/adt/pg_locale.c lines 1276-1287 + 1327-1346 ---- */
 
 /* ---- VERBATIM src/backend/utils/adt/formatting.c lines 1891-1915 @ 62d6c7d3df ---- */
 /*

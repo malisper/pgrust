@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Assemble fuzz/core/csrc/pg_multirangetypes_io.c from verbatim PG 18.3 extracts.
+"""Assemble fuzz/core/csrc/pg_multirangetypes_io.c from verbatim PG 18.6 extracts.
 
 Sibling of assemble.py (which emits pg_rangetypes_io.c). SAME extraction rule:
 locate `^name(` at column 0, back up to the return-type line, capture through
@@ -18,19 +18,32 @@ range oracle; extern-promoting ~40 statics would be a large edit to a
 concurrently-owned file. Including it costs one line and keeps
 pg_rangetypes_io.c byte-identical apart from the additive `rngtype` field.
 build.rs therefore compiles ONLY this file (see its comment).
+
+SOURCES: the verbatim extracts are read straight from an upstream PostgreSQL
+checkout — VENDOR below (REL_18_6 by default; PG_VENDOR=<path> overrides it,
+e.g. to re-pin) — so the output is reproducible from the repo plus the tag.
 """
+import os
 import re
 import sys
 from pathlib import Path
 
 SRC = Path(__file__).resolve().parent
+VENDOR = Path(os.environ.get("PG_VENDOR", "/home/dev/dev/postgres-upstream-18.6"))
+UPSTREAM = {
+    "multirangetypes.c": "src/backend/utils/adt/multirangetypes.c",
+    "multirangetypes.h": "src/include/utils/multirangetypes.h",
+    "rangetypes.c": "src/backend/utils/adt/rangetypes.c",
+    "arrayfuncs.c": "src/backend/utils/adt/arrayfuncs.c",
+    "arrayutils.c": "src/backend/utils/adt/arrayutils.c",
+}
 OUT = Path(sys.argv[1]) if len(sys.argv) > 1 else SRC / "pg_multirangetypes_io.c"
 
 protos = []
 
 
 def load(name):
-    return (SRC / name).read_text().split("\n")
+    return (VENDOR / UPSTREAM[name]).read_text().split("\n")
 
 
 def extract_fn(lines, name):
@@ -86,18 +99,28 @@ MR_TYPES = """
 #define PG_GETARG_MULTIRANGE_P(n)   DatumGetMultirangeTypeP(PG_GETARG_DATUM(n))
 #define PG_RETURN_MULTIRANGE_P(x)   return MultirangeTypePGetDatum(x)
 
-/* pinned multirange type oids (pg_type.dat @ 62d6c7d3df) */
+/* pinned multirange type oids (pg_type.dat @ REL_18_6 724edf9bde) */
 #define INT4MULTIRANGEOID  4451
 #define NUMMULTIRANGEOID   4532
 #define INT8MULTIRANGEOID  4536
 
-/* errcode classes ADDED by the multirange surface (the range oracle's table
- * is 1..11 + 98/99; the Rust driver mirrors these numbers) */
-#define ERRCODE_CARDINALITY_VIOLATION   12  /* 21000 */
-#define ERRCODE_NULL_VALUE_NOT_ALLOWED  13  /* 22004 */
+/* errcode classes ADDED by the multirange surface.
+ *
+ * ONE SHARED TABLE with pg_rangetypes_io.c, which this file #includes: that
+ * file owns 1..12 (12 = ERRCODE_PROGRAM_LIMIT_EXCEEDED) plus 98/99, so the
+ * multirange additions start at 13. Both Rust drivers' err_class() mirror
+ * these exact numbers, and fuzz/core/src/rangetypes_diff.rs carries a test
+ * asserting the two mappings agree on every shared sqlstate.
+ *
+ * The two files were developed in parallel and BOTH minted a class 12 with
+ * different meanings; the merge caught it as a redefinition, but had the
+ * numbering silently diverged instead, every error-plane comparison would
+ * have compared incomparable integers. Never mint a class number here without
+ * checking the range oracle's table first. */
+#define ERRCODE_CARDINALITY_VIOLATION   13  /* 21000 */
+#define ERRCODE_NULL_VALUE_NOT_ALLOWED  14  /* 22004 */
 
 #define TYPECACHE_MULTIRANGE_INFO 0x10000
-#define ERRCODE_PROGRAM_LIMIT_EXCEEDED  14  /* 54000 */
 
 /* ---- plumbing the multirange surface needs beyond the range oracle's ---- */
 /* PG_NARGS: fcinfo->nargs, as in fmgr.h */
@@ -117,14 +140,46 @@ pnstrdup(const char *in, Size len)
 	return out;
 }
 
-/* resetStringInfo (src/common/stringinfo.c): keep the buffer, drop content. */
-static void
-resetStringInfo(StringInfo str)
+/* palloc_array (src/include/utils/palloc.h, REL_18_6) over palloc_mul +
+ * mul_size_error (src/backend/utils/mmgr/mcxt.c) and pg_mul_size_overflow
+ * (src/include/common/int.h, HAVE__BUILTIN_OP_OVERFLOW arm) — bodies
+ * VERBATIM (pg_noreturn spelled as the range oracle's noreturn attribute,
+ * palloc_mul made static for single-TU linkage); mul_size_error's ereport
+ * rides the range oracle's errcode shim (class 12 = 54000). Reached from
+ * multirange_recv / multirange_deserialize / multirange_constructor2
+ * (upstream 01e568b8c1, "Fix assorted places that need to use
+ * palloc_array()"). palloc itself is the arena shim: it has no
+ * MaxAllocSize ceiling (pre-existing, driver-carved: recv counts > 4096). */
+static inline bool
+pg_mul_size_overflow(size_t a, size_t b, size_t *result)
 {
-	str->data[0] = '\\0';
-	str->len = 0;
-	str->cursor = 0;
+	return __builtin_mul_overflow(a, b, result);
 }
+
+__attribute__((noreturn)) static pg_noinline void
+mul_size_error(Size s1, Size s2)
+{
+	ereport(ERROR,
+			(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+			 errmsg("invalid memory allocation request size %zu * %zu",
+					s1, s2)));
+}
+
+static void *
+palloc_mul(Size s1, Size s2)
+{
+	/* inline mul_size() for efficiency */
+	Size		req;
+
+	if (unlikely(pg_mul_size_overflow(s1, s2, &req)))
+		mul_size_error(s1, s2);
+	return palloc(req);
+}
+
+#define palloc_array(type, count) ((type *) palloc_mul(sizeof(type), count))
+
+/* resetStringInfo: provided by the included pg_rangetypes_io.c (same verbatim
+ * body plus C's own Assert). Deliberately not redefined here. */
 """
 region.append(MR_TYPES)
 

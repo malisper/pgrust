@@ -8,6 +8,10 @@
  * proofs/scalar-datum/c/pg_datum.c (same worktree, fetched/eyeballed against
  * REL_18_STABLE == Stamp-18.3 62d6c7d3df on 2026-07-30) rather than
  * re-transcribed; see that file's header for the full provenance notes.
+ * Re-checked against REL_18_6 724edf9bde9d356724ad384a2e196edc3c9f80f7 on 2026-09-02:
+ * every function vendored here is byte-identical in REL_18_6 (upstream
+ * 49315de0c0 changed only datum_image_eq / datum_image_hash, which are not
+ * vendored), so this oracle is the REL_18_6 datum.c.
  *
  * Function bodies VERBATIM: datumGetSize, datumCopy, datumTransfer,
  * datumIsEqual, datumEstimateSpace, datumSerialize, datumRestore

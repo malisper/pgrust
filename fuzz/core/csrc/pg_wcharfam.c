@@ -4,8 +4,10 @@
  * machinery) and mb/mbutils (pure verifier/length/clip/increment
  * wrappers + encnames lookups).
  *
- * Sources, ALL VERBATIM from the vendored PostgreSQL 18.3 tree
- * (pgrust-reference/vendor/postgres-src @ 62d6c7d "Stamp 18.3"):
+ * Sources, ALL VERBATIM from the upstream PostgreSQL 18.6 tree
+ * (REL_18_6, 724edf9bde9d356724ad384a2e196edc3c9f80f7 "Stamp 18.6";
+ * re-vendored 2026-09-02 — encnames.c re-copied (ea94d2e673, comment-only);
+ * every other source is byte-identical at both tags):
  *   - wcharfam/wchar.c            = src/common/wchar.c        (whole file)
  *   - wcharfam/encnames.c         = src/common/encnames.c     (whole file)
  *   - wcharfam/mb/pg_wchar.h      = src/include/mb/pg_wchar.h (whole file)

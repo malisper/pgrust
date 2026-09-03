@@ -6,7 +6,8 @@
  * THE VENDORED ORACLE IS NOT IN THIS FILE: upstream tsrank.c lives
  * byte-identical (shasum 194490cc2f66e899814c7d2c70ed04cd9271b0b8, verified
  * against ../pgrust-reference/vendor/postgres-src @
- * 62d6c7d3df6287f1bd83199c1a746e50d31571a0, PostgreSQL 18.3 Stamp-18.3) in
+ * 62d6c7d3df6287f1bd83199c1a746e50d31571a0, PostgreSQL 18.3 Stamp-18.3;
+ * tsrank.c is unchanged through REL_18_6) in
  * csrc/tsvec/tsrank.c, compiled against the same shim web as the
  * tsvector_core_diff oracle (csrc/tsvec/postgres.h — palloc arena,
  * ereport/longjmp, pg_qsort; see pg_tsvector_core_io.c header). No carves:
@@ -16,7 +17,11 @@
  * THIS FILE contains:
  *   - SECTION 1 (VERBATIM): ArrayGetNItems + ArrayGetNItemsSafe
  *     (src/backend/utils/adt/arrayutils.c) and array_contains_nulls
- *     (src/backend/utils/adt/arrayfuncs.c), the three array helpers
+ *     (src/backend/utils/adt/arrayfuncs.c) @ REL_18_6 (PostgreSQL 18.6;
+ *     all three byte-identical to 18.3's 62d6c7d3df, re-verified
+ *     2026-09-02 — arrayfuncs.c's 18.3->18.6 diff touches only
+ *     accumArrayResultArr; inline "@ 62d6c7d3df" labels are 18.3 line
+ *     numbers), the three array helpers
  *     tsrank.c's getWeights calls. ArrayType layout + ARR_* macros are
  *     verbatim in include/utils/array.h. The float4[] weights argument is a
  *     REAL array varlena image built by the Rust driver and handed to BOTH
