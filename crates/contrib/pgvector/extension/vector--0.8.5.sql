@@ -258,6 +258,7 @@ COMMENT ON ACCESS METHOD hnsw IS 'hnsw index access method';
 
 CREATE FUNCTION hnsw_halfvec_support(internal) RETURNS internal
 	AS 'MODULE_PATHNAME' LANGUAGE C;
+
 CREATE FUNCTION hnsw_sparsevec_support(internal) RETURNS internal
 	AS 'MODULE_PATHNAME' LANGUAGE C;
 
