@@ -23,6 +23,7 @@ use types_fmgr::{cstring_result, varlena_result, FmgrInfo, FunctionCallInfoBaseD
 use types_tuple::varatt;
 
 use crate::funcs::{arg_vector, detoasted_image, image_datum};
+use crate::half::HalfVecView;
 use crate::sparse::{
     check_dim, check_dims, check_element, check_expected_dim, check_index_step, check_nnz,
     cmp_internal, cosine_similarity, inner_product, l1_distance, l2_squared_distance, norm,
@@ -35,6 +36,12 @@ use crate::vec::VecBuilder;
 unsafe fn arg_sparsevec<'a>(fcinfo: &'a Fcinfo, i: usize) -> PgResult<SparseVecView<'a>> {
     let v = unsafe { fcinfo.arg_varlena_packed(i)? };
     SparseVecView::from_payload(v.data())
+}
+
+// SAFETY contract of callers: arg i is a non-null halfvec varlena (strict fns).
+unsafe fn arg_halfvec<'a>(fcinfo: &'a Fcinfo, i: usize) -> PgResult<HalfVecView<'a>> {
+    let v = unsafe { fcinfo.arg_varlena_packed(i)? };
+    HalfVecView::from_payload(v.data())
 }
 
 pub fn fc_sparsevec_in(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -331,6 +338,40 @@ pub fn fc_sparsevec_to_vector(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
     let mut b = VecBuilder::new(fcinfo.result_mcx(), dim as usize)?;
     for i in 0..v.nnz() {
         b.set(v.index(i) as usize, v.value(i));
+    }
+    Ok(image_datum(b.image()))
+}
+
+// C: sparsevec.c halfvec_to_sparsevec (~639-680). CheckDim/CheckExpectedDim
+// here are sparsevec.c's own (already imported above), matching C: the
+// halfvec input's dim is checked against sparsevec's own limit. Non-zero
+// halves are counted via `x(i) != 0.0`, which is equivalent to C's
+// `!HalfIsZero(vec->x[i])` since half_to_float4 maps both the +0 and -0 raw
+// half encodings to a float that compares equal to 0.0.
+pub fn fc_halfvec_to_sparsevec(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: strict fn — arg0 halfvec, arg1 typmod.
+    let v = unsafe { arg_halfvec(fcinfo, 0)? };
+    let typmod = fcinfo.arg_i32(1);
+    let dim = v.dim();
+
+    check_dim(dim as i32)?;
+    check_expected_dim(typmod, dim as i32)?;
+
+    let mut nnz = 0usize;
+    for i in 0..dim {
+        if v.x(i) != 0.0 {
+            nnz += 1;
+        }
+    }
+
+    let mut b = SparseVecBuilder::new(fcinfo.result_mcx(), dim as i32, nnz)?;
+    let mut j = 0usize;
+    for i in 0..dim {
+        let x = v.x(i);
+        if x != 0.0 {
+            b.set(j, i as i32, x);
+            j += 1;
+        }
     }
     Ok(image_datum(b.image()))
 }
