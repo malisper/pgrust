@@ -4,6 +4,9 @@
 //! extension script is trimmed accordingly).
 
 pub mod funcs;
+pub mod half;
+pub mod halfutils;
+pub mod halfvec_funcs;
 pub mod vec;
 
 use types_fmgr::PGFunction;
@@ -12,6 +15,7 @@ const LIBRARY: &str = "vector";
 
 fn lookup(function: &str) -> Option<PGFunction> {
     use funcs::*;
+    use halfvec_funcs::*;
     Some(match function {
         "vector_in" => fc_vector_in,
         "vector_out" => fc_vector_out,
@@ -48,6 +52,42 @@ fn lookup(function: &str) -> Option<PGFunction> {
         "vector_combine" => fc_vector_combine,
         "vector_avg" => fc_vector_avg,
         "hnswhandler" => fc_hnswhandler,
+        "halfvec_in" => fc_halfvec_in,
+        "halfvec_out" => fc_halfvec_out,
+        "halfvec_typmod_in" => fc_halfvec_typmod_in,
+        "halfvec_recv" => fc_halfvec_recv,
+        "halfvec_send" => fc_halfvec_send,
+        "halfvec" => fc_halfvec,
+        "array_to_halfvec" => fc_array_to_halfvec,
+        "halfvec_to_float4" => fc_halfvec_to_float4,
+        "vector_to_halfvec" => fc_vector_to_halfvec,
+        "halfvec_to_vector" => fc_halfvec_to_vector,
+        "halfvec_l2_distance" => fc_halfvec_l2_distance,
+        "halfvec_l2_squared_distance" => fc_halfvec_l2_squared_distance,
+        "halfvec_inner_product" => fc_halfvec_inner_product,
+        "halfvec_negative_inner_product" => fc_halfvec_negative_inner_product,
+        "halfvec_cosine_distance" => fc_halfvec_cosine_distance,
+        "halfvec_spherical_distance" => fc_halfvec_spherical_distance,
+        "halfvec_l1_distance" => fc_halfvec_l1_distance,
+        "halfvec_vector_dims" => fc_halfvec_vector_dims,
+        "halfvec_l2_norm" => fc_halfvec_l2_norm,
+        "halfvec_l2_normalize" => fc_halfvec_l2_normalize,
+        "halfvec_add" => fc_halfvec_add,
+        "halfvec_sub" => fc_halfvec_sub,
+        "halfvec_mul" => fc_halfvec_mul,
+        "halfvec_concat" => fc_halfvec_concat,
+        "halfvec_binary_quantize" => fc_halfvec_binary_quantize,
+        "halfvec_subvector" => fc_halfvec_subvector,
+        "halfvec_lt" => fc_halfvec_lt,
+        "halfvec_le" => fc_halfvec_le,
+        "halfvec_eq" => fc_halfvec_eq,
+        "halfvec_ne" => fc_halfvec_ne,
+        "halfvec_ge" => fc_halfvec_ge,
+        "halfvec_gt" => fc_halfvec_gt,
+        "halfvec_cmp" => fc_halfvec_cmp,
+        "halfvec_accum" => fc_halfvec_accum,
+        "halfvec_avg" => fc_halfvec_avg,
+        "hnsw_halfvec_support" => fc_hnsw_halfvec_support,
         _ => return None,
     })
 }
