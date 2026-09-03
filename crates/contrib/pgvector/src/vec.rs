@@ -149,8 +149,9 @@ pub fn check_dims(a: &VecView<'_>, b: &VecView<'_>) -> PgResult<()> {
     Ok(())
 }
 
+// C: scanner_isspace (PG17+ arm): space \t \n \r \v \f
 fn vector_isspace(ch: u8) -> bool {
-    matches!(ch, b' ' | b'\t' | b'\n' | b'\r' | 0x0c)
+    matches!(ch, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
 }
 
 #[track_caller]
@@ -566,6 +567,12 @@ mod tests {
         assert_eq!(parse(" [ 1,  2 ,    3  ] ").unwrap(), vec![1.0, 2.0, 3.0]);
         assert_eq!(parse("[1e-46,1]").unwrap(), vec![0.0, 1.0]);
         assert_eq!(parse("[1.5e+38,-1.5e+38]").unwrap(), vec![1.5e38, -1.5e38]);
+    }
+
+    #[test]
+    fn parse_vtab_is_whitespace() {
+        // C: scanner_isspace treats \v (0x0b) as space on PG17+.
+        assert_eq!(parse("[\u{0b}1]").unwrap(), vec![1.0]);
     }
 
     #[test]

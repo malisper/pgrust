@@ -15,7 +15,7 @@ pub fn half_is_zero(h: u16) -> bool { (h & 0x7FFF) == 0 }
 /// C: HalfToFloat4 (software arm).
 pub fn half_to_float4(h: u16) -> f32 {
     let bin = h as u32;
-    let mut exponent = (bin & 0x7C00) >> 10;
+    let exponent = (bin & 0x7C00) >> 10;
     let mut mantissa = bin & 0x03FF;
     let mut result = (bin & 0x8000) << 16;
     if exponent == 31 {
@@ -36,7 +36,6 @@ pub fn half_to_float4(h: u16) -> f32 {
     } else {
         result |= (exponent - 15 + 127) << 23;
     }
-    let _ = &mut exponent;
     result |= mantissa << 13;
     f32::from_bits(result)
 }

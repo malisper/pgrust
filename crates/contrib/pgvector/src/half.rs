@@ -169,8 +169,9 @@ pub fn check_dims(a: &HalfVecView<'_>, b: &HalfVecView<'_>) -> PgResult<()> {
     Ok(())
 }
 
+// C: scanner_isspace (PG17+ arm): space \t \n \r \v \f
 fn halfvec_isspace(ch: u8) -> bool {
-    matches!(ch, b' ' | b'\t' | b'\n' | b'\r' | 0x0c)
+    matches!(ch, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
 }
 
 #[track_caller]
@@ -374,9 +375,7 @@ pub fn halfvec_l2_normalize_image<'m>(mcx: Mcx<'m>, img: &[u8]) -> PgResult<PgVe
         for i in 0..v.dim() {
             let h = float4_to_half_unchecked((v.x(i) as f64 / norm) as f32);
             if half_is_inf(h) {
-                return Err(PgError::error("value out of range: overflow")
-                    .with_sqlstate(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE)
-                    .into());
+                return Err(Box::new(adt_float::float_overflow_error()));
             }
             b.set_raw(i, h);
         }
@@ -415,6 +414,14 @@ mod tests {
         let v = HalfVecView::from_payload(&img[4..]).unwrap();
         assert_eq!((v.raw(0), v.raw(1)), (0x3C00, 0xC000));
         assert_eq!(v.x(1), -2.0);
+    }
+
+    #[test]
+    fn parse_vtab_is_whitespace() {
+        // C: scanner_isspace treats \v (0x0b) as space on PG17+.
+        let mut x = [0u16; HALFVEC_MAX_DIM];
+        assert_eq!(parse_halfvec(b"[\x0b1]", -1, &mut x).unwrap(), 1);
+        assert_eq!(x[0], 0x3C00);
     }
 
     #[test]
