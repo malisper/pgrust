@@ -659,3 +659,46 @@ fn agg_array_rejects_growth_past_max_array_size() {
         .unwrap();
     assert_eq!(err.sqlstate(), ERRCODE_PROGRAM_LIMIT_EXCEEDED);
 }
+
+fn int8_image<'m>(mcx: Mcx<'m>, n: usize) -> PgVec<'m, u8> {
+    let dv: Vec<Datum> = (0..n).map(|i| Datum::from_u64(i as u64)).collect();
+    construct_md_array(mcx, &dv, None, 1, &[n as i32], &[1], ::types_core::INT8OID, 8, true, b'd')
+        .unwrap()
+}
+
+// accumArrayResultArr: data grows on C's abytes schedule, so the doubling
+// past MaxAllocSize (2^29 -> 2^30 bytes) is refused as repalloc would.
+#[test]
+fn agg_array_data_growth_stops_at_max_alloc_size() {
+    let ctx = MemoryContext::new("agg-arr-limit");
+    let mcx = ctx.mcx();
+    const INT8_ARRAY: Oid = 1016;
+    let img = int8_image(mcx, 1 << 16);
+    let mut st = init_array_result_arr(mcx, INT8_ARRAY, ::types_core::INT8OID).unwrap();
+    for _ in 0..1024 {
+        st = accum_array_result_arr(mcx, Some(st), Some(&img), INT8_ARRAY).unwrap();
+    }
+    assert_eq!((st.nbytes, st.abytes), (1 << 29, 1 << 29));
+    assert!(st.data.capacity() >= 1 << 29);
+    let err = accum_array_result_arr(mcx, Some(st), Some(&img), INT8_ARRAY).err().unwrap();
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_INTERNAL_ERROR);
+    assert_eq!(err.message(), "invalid memory alloc request size 1073741824");
+}
+
+#[test]
+fn agg_array_combine_reserves_abytes() {
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    const INT8_ARRAY: Oid = 1016;
+    let img = int8_image(mcx, 375);
+    let mk = || {
+        let st = init_array_result_arr(mcx, INT8_ARRAY, ::types_core::INT8OID).unwrap();
+        accum_array_result_arr(mcx, Some(st), Some(&img), INT8_ARRAY).unwrap()
+    };
+    let mut s1 = mk();
+    assert_eq!((s1.nbytes, s1.abytes), (3000, 4096));
+    assert!(s1.data.capacity() >= 4096);
+    combine_array_build_state_arr(&mut s1, &mk()).unwrap();
+    assert_eq!((s1.nbytes, s1.abytes), (6000, 8192));
+    assert!(s1.data.capacity() >= 8192);
+}

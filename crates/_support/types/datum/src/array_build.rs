@@ -1,7 +1,7 @@
 use crate::datum::Datum;
 use ::types_core::Oid;
 use alloc::boxed::Box;
-use mcx::{slice_borrow_in, vec_with_capacity_in, Mcx, PgVec};
+use mcx::{check_alloc_size, slice_borrow_in, vec_with_capacity_in, Mcx, PgVec};
 use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED};
 
 pub const MAXDIM: usize = 6;
@@ -16,6 +16,8 @@ pub struct ArrayBuildState<'mcx> {
     pub mcx: Mcx<'mcx>,
     pub dvalues: PgVec<'mcx, Datum>,
     pub dnulls: PgVec<'mcx, bool>,
+    // C alen: allocated slots; dvalues/dnulls capacity is always >= alen.
+    pub alen: i32,
     pub nelems: i32,
     pub element_type: Oid,
     pub typlen: i16,
@@ -26,10 +28,20 @@ pub struct ArrayBuildState<'mcx> {
 
 impl<'mcx> ArrayBuildState<'mcx> {
     pub fn new(mcx: Mcx<'mcx>, element_type: Oid, private_cxt: bool) -> PgResult<Self> {
+        Self::with_size(mcx, element_type, private_cxt, INIT_ELEMS as i32)
+    }
+
+    pub fn with_size(
+        mcx: Mcx<'mcx>,
+        element_type: Oid,
+        private_cxt: bool,
+        initsize: i32,
+    ) -> PgResult<Self> {
         Ok(ArrayBuildState {
             mcx,
-            dvalues: vec_with_capacity_in(mcx, INIT_ELEMS)?,
-            dnulls: vec_with_capacity_in(mcx, INIT_ELEMS)?,
+            dvalues: vec_with_capacity_in(mcx, initsize as usize)?,
+            dnulls: vec_with_capacity_in(mcx, initsize as usize)?,
+            alen: initsize,
             nelems: 0,
             element_type,
             typlen: 0,
@@ -37,6 +49,20 @@ impl<'mcx> ArrayBuildState<'mcx> {
             typalign: 0,
             private_cxt,
         })
+    }
+
+    pub fn grow(&mut self, alen: i32) -> PgResult<()> {
+        let slots = alen as usize;
+        let bytes = slots.saturating_mul(core::mem::size_of::<Datum>());
+        check_alloc_size(bytes)?;
+        self.dvalues
+            .try_reserve_exact(slots.saturating_sub(self.dvalues.len()))
+            .map_err(|_| self.mcx.oom(bytes))?;
+        self.dnulls
+            .try_reserve_exact(slots.saturating_sub(self.dnulls.len()))
+            .map_err(|_| self.mcx.oom(slots))?;
+        self.alen = alen;
+        Ok(())
     }
 
     // C: datumCopy into astate->mcontext; stable chunk addresses outlive the call.
@@ -69,6 +95,17 @@ pub struct ArrayBuildStateArr<'mcx> {
 pub struct ArrayBuildStateAny<'mcx> {
     pub scalarstate: Option<ArrayBuildState<'mcx>>,
     pub arraystate: Option<ArrayBuildStateArr<'mcx>>,
+}
+
+impl ArrayBuildStateArr<'_> {
+    pub fn reserve_data(&mut self) -> PgResult<()> {
+        let abytes = self.abytes as usize;
+        check_alloc_size(abytes)?;
+        self.data
+            .try_reserve_exact(abytes.saturating_sub(self.data.len()))
+            .map_err(|_| self.mcx.oom(abytes))?;
+        Ok(())
+    }
 }
 
 const ARR_1D_HDRSZ: usize = 24;

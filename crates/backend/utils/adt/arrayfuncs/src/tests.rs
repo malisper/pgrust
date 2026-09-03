@@ -2148,3 +2148,116 @@ fn pseudotype_aliases_delegate_to_array_io() {
     assert_eq!(by_oid(5089).name, "anycompatiblearray_out");
     assert_eq!(by_oid(5091).name, "anycompatiblearray_send");
 }
+
+mod growth_limits {
+    use super::*;
+    use crate::build::{accum_array_result_arr, init_array_result_arr};
+    use ::types_core::{Oid, INT8OID};
+    use ::types_error::{ERRCODE_INTERNAL_ERROR, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
+
+    const INT8_ARRAY: Oid = 1016;
+
+    fn int4_state<'m>(mcx: Mcx<'m>) -> ArrayBuildState<'m> {
+        let mut st = ArrayBuildState::new(mcx, INT4OID, true).unwrap();
+        st.typlen = 4;
+        st.typbyval = true;
+        st.typalign = b'i';
+        st
+    }
+
+    fn int8_image<'m>(mcx: Mcx<'m>, n: usize) -> PgVec<'m, u8> {
+        let dv: std::vec::Vec<Datum> = (0..n).map(|i| Datum::from_u64(i as u64)).collect();
+        construct_md_array(mcx, &dv, None, 1, &[n as i32], &[1], INT8OID, 8, true, b'd').unwrap()
+    }
+
+    // accumArrayResult: the alen doubling that would carry dvalues past
+    // MaxAllocSize (2^26 -> 2^27 Datums) raises 54000 with C's text.
+    #[test]
+    fn accum_errors_past_max_alloc_size() {
+        let ctx = MemoryContext::new("accum-limit");
+        let mcx = ctx.mcx();
+        let mut st = Some(int4_state(mcx));
+        for i in 0..(1i32 << 26) {
+            st = Some(
+                accum_array_result(mcx, st.take(), Datum::from_i32(i), false, INT4OID).unwrap(),
+            );
+        }
+        let st = st.unwrap();
+        assert_eq!(st.nelems, 1 << 26);
+        let err =
+            accum_array_result(mcx, Some(st), Datum::from_i32(0), false, INT4OID).err().unwrap();
+        assert_eq!(err.sqlstate(), ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+        assert_eq!(err.message(), "array size exceeds the maximum allowed (1073741823)");
+    }
+
+    // accumArrayResultArr: data grows on C's abytes schedule, so the doubling
+    // past MaxAllocSize (2^29 -> 2^30 bytes) is refused as repalloc would.
+    #[test]
+    fn accum_arr_data_growth_stops_at_max_alloc_size() {
+        let ctx = MemoryContext::new("accum-arr-limit");
+        let mcx = ctx.mcx();
+        let img = int8_image(mcx, 1 << 16);
+        let d = Datum::from_usize(img.as_ptr() as usize);
+        let mut st = init_array_result_arr(mcx, INT8_ARRAY, INT8OID).unwrap();
+        for _ in 0..1024 {
+            st = accum_array_result_arr(mcx, Some(st), d, false, INT8_ARRAY).unwrap();
+        }
+        assert_eq!((st.nbytes, st.abytes), (1 << 29, 1 << 29));
+        let err = accum_array_result_arr(mcx, Some(st), d, false, INT8_ARRAY).err().unwrap();
+        assert_eq!(err.sqlstate(), ERRCODE_INTERNAL_ERROR);
+        assert_eq!(err.message(), "invalid memory alloc request size 1073741824");
+    }
+
+    #[test]
+    fn alen_follows_c_schedule() {
+        use crate::build::{
+            array_agg_combine_append, array_agg_combine_clone, array_agg_deserialize_state,
+            array_agg_serialize_state,
+        };
+        let ctx = MemoryContext::new_bump("alen");
+        let mcx = ctx.mcx();
+        let fill = |n: i32| {
+            let mut st = Some(int4_state(mcx));
+            for i in 0..n {
+                st = Some(
+                    accum_array_result(mcx, st.take(), Datum::from_i32(i), false, INT4OID)
+                        .unwrap(),
+                );
+            }
+            st.unwrap()
+        };
+        assert_eq!(int4_state(mcx).alen, 64);
+        assert_eq!(fill(64).alen, 64);
+        let mut s1 = fill(65);
+        assert_eq!(s1.alen, 128);
+        assert!(s1.dvalues.capacity() >= 128 && s1.dnulls.capacity() >= 128);
+        assert_eq!(fill(129).alen, 256);
+
+        let s2 = fill(100);
+        array_agg_combine_append(&mut s1, &s2).unwrap();
+        assert_eq!((s1.nelems, s1.alen), (165, 256));
+        assert!(s1.dvalues.capacity() >= 256 && s1.dnulls.capacity() >= 256);
+
+        let wire = array_agg_serialize_state(mcx, &s2, None).unwrap();
+        let back = array_agg_deserialize_state(mcx, wire.data(), None).unwrap();
+        assert_eq!((back.nelems, back.alen), (100, 100));
+        let cloned = array_agg_combine_clone(mcx, &back).unwrap();
+        assert_eq!((cloned.nelems, cloned.alen), (100, 100));
+        assert!(cloned.dvalues.capacity() >= 100);
+    }
+
+    #[test]
+    fn arr_abytes_reserved_up_front() {
+        let ctx = MemoryContext::new_bump("abytes");
+        let mcx = ctx.mcx();
+        let img = int8_image(mcx, 375);
+        let d = Datum::from_usize(img.as_ptr() as usize);
+        let st = init_array_result_arr(mcx, INT8_ARRAY, INT8OID).unwrap();
+        let st = accum_array_result_arr(mcx, Some(st), d, false, INT8_ARRAY).unwrap();
+        assert_eq!((st.nbytes, st.abytes), (3000, 4096));
+        assert!(st.data.capacity() >= 4096);
+        let st = accum_array_result_arr(mcx, Some(st), d, false, INT8_ARRAY).unwrap();
+        assert_eq!((st.nbytes, st.abytes), (6000, 8192));
+        assert!(st.data.capacity() >= 8192);
+    }
+}

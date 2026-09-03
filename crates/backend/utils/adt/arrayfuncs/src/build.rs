@@ -2,7 +2,7 @@ use alloc::boxed::Box;
 
 use ::datum::array_build::{ArrayBuildState, ArrayBuildStateAny, ArrayBuildStateArr};
 use ::datum::{Bytea, Datum, VARHDRSZ};
-use ::mcx::{vec_append_bytes, vec_with_capacity_in, Mcx, PgVec};
+use ::mcx::{vec_append_bytes, vec_with_capacity_in, Mcx, PgVec, MAX_ALLOC_SIZE};
 use ::types_core::Oid;
 use ::types_error::{
     PgError, PgResult, ERRCODE_ARRAY_SUBSCRIPT_ERROR, ERRCODE_DATATYPE_MISMATCH,
@@ -51,6 +51,14 @@ pub fn accum_array_result<'mcx>(
         None => init_array_result(mcx, element_type, true)?,
     };
 
+    if astate.nelems >= astate.alen {
+        let alen = astate.alen.saturating_mul(2);
+        if (alen as usize).saturating_mul(core::mem::size_of::<Datum>()) > MAX_ALLOC_SIZE {
+            return Err(array_size_exceeds_max_alloc());
+        }
+        astate.grow(alen)?;
+    }
+
     let stored = if !disnull && !astate.typbyval {
         let p = dvalue.as_usize() as *const u8;
         let n = if astate.typlen == -1 {
@@ -81,6 +89,16 @@ pub fn accum_array_result<'mcx>(
     astate.dnulls.push(disnull);
     astate.nelems += 1;
     Ok(astate)
+}
+
+#[cold]
+fn array_size_exceeds_max_alloc() -> Box<PgError> {
+    Box::new(
+        PgError::error(alloc::format!(
+            "array size exceeds the maximum allowed ({MAX_ALLOC_SIZE})"
+        ))
+        .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+    )
 }
 
 // makeArrayResult: 1-D final result (empty array if no elements accumulated).
@@ -127,7 +145,7 @@ pub fn array_agg_combine_clone<'mcx>(
     mcx: Mcx<'mcx>,
     s2: &ArrayBuildState<'_>,
 ) -> PgResult<ArrayBuildState<'mcx>> {
-    let mut s1 = ArrayBuildState::new(mcx, s2.element_type, false)?;
+    let mut s1 = ArrayBuildState::with_size(mcx, s2.element_type, false, s2.alen)?;
     s1.typlen = s2.typlen;
     s1.typbyval = s2.typbyval;
     s1.typalign = s2.typalign;
@@ -146,6 +164,10 @@ pub fn array_agg_combine_append(
     s2: &ArrayBuildState<'_>,
 ) -> PgResult<()> {
     debug_assert_eq!(s1.element_type, s2.element_type);
+    let reqsize = s1.nelems + s2.nelems;
+    if s1.alen < reqsize {
+        s1.grow(pg_nextpower2_32(reqsize as u32) as i32)?;
+    }
     for i in 0..s2.nelems as usize {
         let v = if !s2.dnulls[i] { datum_copy_into(s1, s2.dvalues[i])? } else { Datum::null() };
         s1.dvalues.push(v);
@@ -211,7 +233,7 @@ pub fn array_agg_deserialize_state<'mcx>(
     let nelems = ::pqformat::pq_getmsgint64(&mut buf)?;
     // C initArrayResultWithSize's catalog lookup is skipped: the wire carries
     // the typlen/typbyval/typalign triple it would return.
-    let mut result = ArrayBuildState::new(mcx, element_type, false)?;
+    let mut result = ArrayBuildState::with_size(mcx, element_type, false, nelems as i32)?;
     result.nelems = nelems as i32;
     result.typlen = ::pqformat::pq_getmsgint(&mut buf, 2)? as i16;
     result.typbyval = ::pqformat::pq_getmsgbyte(&mut buf)? != 0;
@@ -386,6 +408,7 @@ pub fn accum_array_result_arr<'mcx>(
         st.lbs[0] = 1;
         st.lbs[1..=ndims as usize].copy_from_slice(&lbs[..ndims as usize]);
         st.abytes = pg_nextpower2_32(core::cmp::max(1024, ndatabytes as i32 + 1) as u32) as i32;
+        st.reserve_data()?;
     } else {
         if st.ndims != ndims + 1 {
             return Err(diff_dimensionality());
@@ -397,6 +420,7 @@ pub fn accum_array_result_arr<'mcx>(
         }
         if st.nbytes + ndatabytes as i32 > st.abytes {
             st.abytes = core::cmp::max(st.abytes * 2, st.nbytes + ndatabytes as i32);
+            st.reserve_data()?;
         }
     }
 

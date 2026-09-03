@@ -436,6 +436,7 @@ pub fn accum_array_result_arr<'m>(
         st.lbs[0] = 1;
         st.lbs[1..=ndims as usize].copy_from_slice(&lbs[..ndims as usize]);
         st.abytes = pg_nextpower2_32(core::cmp::max(1024, ndatabytes as i32 + 1) as u32) as i32;
+        st.reserve_data()?;
     } else {
         if st.ndims != ndims + 1 {
             return Err(diff_dimensionality());
@@ -447,6 +448,7 @@ pub fn accum_array_result_arr<'m>(
         }
         if st.nbytes + ndatabytes as i32 > st.abytes {
             st.abytes = core::cmp::max(st.abytes * 2, st.nbytes + ndatabytes as i32);
+            st.reserve_data()?;
         }
     }
 
@@ -580,6 +582,7 @@ pub fn combine_array_build_state_arr(
     };
     if s1.abytes < reqsize {
         s1.abytes = pg_nextpower2_32(reqsize as u32) as i32;
+        s1.reserve_data()?;
     }
     vec_append_bytes(&mut s1.data, &s2.data[..s2.nbytes as usize])?;
 
