@@ -18,6 +18,10 @@ const RADIUS_HEADER_LENGTH: usize = 20;
 const RADIUS_MAX_PASSWORD_LENGTH: usize = 128;
 // Maximum size of a RADIUS packet we will create or accept.
 const RADIUS_BUFFER_SIZE: usize = 1024;
+// C's radius_packet spans header + pad[RADIUS_BUFFER_SIZE - RADIUS_VECTOR_LENGTH];
+// radius_add_attribute's check (auth.c:2823) omits the 2-byte attr header on
+// purpose, so buf must carry that slack or a passing attribute overruns it.
+const RADIUS_PACKET_LENGTH: usize = RADIUS_HEADER_LENGTH + (RADIUS_BUFFER_SIZE - RADIUS_VECTOR_LENGTH);
 
 const RADIUS_ACCESS_ACCEPT: u8 = 2;
 const RADIUS_ACCESS_REJECT: u8 = 3;
@@ -33,14 +37,14 @@ const RADIUS_AUTHENTICATE_ONLY: u32 = 8;
 const RADIUS_TIMEOUT: i64 = 3;
 
 struct RadiusPacket {
-    buf: [u8; RADIUS_BUFFER_SIZE],
+    buf: [u8; RADIUS_PACKET_LENGTH],
     length: usize,
 }
 
 impl RadiusPacket {
     fn new() -> Self {
         Self {
-            buf: [0; RADIUS_BUFFER_SIZE],
+            buf: [0; RADIUS_PACKET_LENGTH],
             length: RADIUS_HEADER_LENGTH,
         }
     }
@@ -72,10 +76,11 @@ fn radius_add_attribute(packet: &mut RadiusPacket, typ: u8, data: &[u8]) -> PgRe
         return Ok(());
     }
     let at = packet.length;
+    let attr_length = (len + 2) as u8; // C: radius_attribute.length is uint8
     packet.buf[at] = typ;
-    packet.buf[at + 1] = (len + 2) as u8;
+    packet.buf[at + 1] = attr_length;
     packet.buf[at + 2..at + 2 + len].copy_from_slice(data);
-    packet.length += len + 2;
+    packet.length += attr_length as usize; // C: packet->length += attr->length
     Ok(())
 }
 
@@ -468,6 +473,25 @@ mod radius_tests {
         let big = vec![0u8; RADIUS_BUFFER_SIZE];
         radius_add_attribute(&mut p, RADIUS_USER_NAME, &big).unwrap();
         assert_eq!(p.length, RADIUS_HEADER_LENGTH);
+    }
+
+    // Finding auth-2: an attribute at packet.length + len == RADIUS_BUFFER_SIZE
+    // passes the check yet writes past it; a buf of exactly RADIUS_BUFFER_SIZE
+    // panicked ("range end index 1026 ... length 1024"), C's pad absorbs it.
+    #[test]
+    fn boundary_attribute_writes_into_slack_no_panic() {
+        let mut p = RadiusPacket::new();
+        let len = RADIUS_BUFFER_SIZE - RADIUS_HEADER_LENGTH;
+        let data = vec![0xabu8; len];
+        radius_add_attribute(&mut p, RADIUS_NAS_IDENTIFIER, &data).unwrap();
+        assert_eq!(p.buf[RADIUS_HEADER_LENGTH], RADIUS_NAS_IDENTIFIER);
+        assert_eq!(p.buf[RADIUS_HEADER_LENGTH + 1], (len + 2) as u8);
+        assert_eq!(
+            &p.buf[RADIUS_HEADER_LENGTH + 2..RADIUS_HEADER_LENGTH + 2 + len],
+            &data[..]
+        );
+        // C accumulates the truncated uint8 length, not len + 2.
+        assert_eq!(p.length, RADIUS_HEADER_LENGTH + ((len + 2) as u8) as usize);
     }
 
     // RFC 2865 §5.2 hide operation round-trip: XOR with the same digest
