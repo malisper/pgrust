@@ -13,11 +13,18 @@
 //!   on any other library.
 //! * `compute_parallel_workers` reimplements the part of PG's
 //!   `plan_create_index_workers` that C's `ComputeParallelWorkers` consumes as
-//!   a 0/non-0 gate. It does NOT apply C's parallel-safety analysis of the
-//!   index expressions/predicate (pgrust's `is_parallel_safe` needs a
-//!   `PlannerRun`): any expression or predicate index builds serially. It also
-//!   does NOT apply C's 32MB-of-`maintenance_work_mem`-per-participant floor
-//!   (our participants share one graph budget rather than each owning a sort).
+//!   a 0/non-0 gate, in `compute_parallel_worker`'s own order: the heap's
+//!   `parallel_workers` reloption wins outright (no page-size gate), and only
+//!   when it is unset does the log3 ramp over `min_parallel_table_scan_size`
+//!   decide. It does NOT apply C's parallel-safety analysis of the index
+//!   expressions/predicate (pgrust's `is_parallel_safe` needs a `PlannerRun`):
+//!   any expression or predicate index builds serially. It also does NOT apply
+//!   C's 32MB-of-`maintenance_work_mem`-per-participant floor (our
+//!   participants share one graph budget rather than each owning a sort).
+//! * `compute_parallel_workers` refuses a heap whose table AM is not `heap`:
+//!   this build lane goes through `table_index_build_scan_with`, which is
+//!   heap-only in pgrust, where C dispatches through the AM's
+//!   `index_build_range_scan`.
 //! * There is no `PARALLEL_KEY_QUERY_TEXT` hand-off: pgrust's
 //!   `InitializeParallelDSM` already carries the leader's activity state.
 //! * The graph budget is plain `maintenance_work_mem` for both a serial and a
@@ -27,6 +34,15 @@
 //! * The leader waits on a `Condvar` with a timeout and re-checks worker
 //!   liveness, where C sleeps on a `ConditionVariable` that a dying worker's
 //!   process exit implicitly signals.
+//!
+//! Teardown: every path that *refuses* to go parallel (`nworkers <= 0`,
+//! `LaunchParallelWorkers == 0`, or an error before the launch) unregisters
+//! the snapshot, destroys the parallel context and leaves parallel mode
+//! before returning. After a successful launch, an error raised out of the
+//! leader's scan or out of `parallel_heap_scan` deliberately does NOT run
+//! `end_parallel`: the transaction abort's `AtEOXact_Parallel` /
+//! resource-owner cleanup terminates and joins the workers, exactly as C
+//! relies on its longjmp to the abort path.
 
 use std::any::Any;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
@@ -112,6 +128,28 @@ pub(crate) fn workers_for_pages(
     workers.min(max_workers)
 }
 
+/// `compute_parallel_worker`'s decision order for a heap-only relation,
+/// composed with `ComputeParallelWorkers`'s use of it: the heap's
+/// `parallel_workers` reloption is taken BEFORE the size gate (a table with
+/// the reloption set builds in parallel even below
+/// `min_parallel_table_scan_size`), and only when it is unset (-1) does the
+/// log3 ramp decide — and then only as a 0/non-0 gate, C returning
+/// `max_parallel_maintenance_workers` itself.
+pub(crate) fn workers_for_heap(
+    relopt: i32,
+    heap_pages: f64,
+    min_scan_size_pages: f64,
+    max_workers: i32,
+) -> i32 {
+    if relopt != -1 {
+        return relopt.min(max_workers).max(0);
+    }
+    if workers_for_pages(heap_pages, min_scan_size_pages, max_workers) == 0 {
+        return 0;
+    }
+    max_workers
+}
+
 /// C: `ComputeParallelWorkers` (hnswbuild.c) over `plan_create_index_workers`.
 pub(crate) fn compute_parallel_workers(
     heap: &Relation<'_>,
@@ -121,6 +159,11 @@ pub(crate) fn compute_parallel_workers(
     let _ = index;
     let max_workers = guc_tables::vars::max_parallel_maintenance_workers.read();
     if max_workers <= 0 {
+        return 0;
+    }
+    // DIVERGENCE (see module header): the parallel scan goes through
+    // `table_index_build_scan_with`, which is heap-only here.
+    if heap.rd_rel.relam != tableam::HEAP_TABLE_AM_OID {
         return 0;
     }
     // plan_create_index_workers: never parallelize a temp table's index.
@@ -135,16 +178,7 @@ pub(crate) fn compute_parallel_workers(
     let heap_pages =
         bufmgr::RelationGetNumberOfBlocksInFork(heap, ForkNumber::MAIN_FORKNUM).unwrap_or(0) as f64;
     let min_pages = guc_tables::vars::min_parallel_table_scan_size.read() as f64;
-    if workers_for_pages(heap_pages, min_pages, max_workers) == 0 {
-        return 0;
-    }
-    // ComputeParallelWorkers: the table's parallel_workers reloption wins.
-    let relopt = heap.get_parallel_workers(-1);
-    if relopt != -1 {
-        relopt.min(max_workers)
-    } else {
-        max_workers
-    }
+    workers_for_heap(heap.get_parallel_workers(-1), heap_pages, min_pages, max_workers)
 }
 
 /// C: `HnswBeginParallel`. `Ok(None)` means "back out, do a serial build".
@@ -291,7 +325,7 @@ pub(crate) fn parallel_heap_scan(leader: &Leader, shared: &Arc<HnswShared>) -> P
         let done = lk(&shared.done);
         let _ = shared
             .workers_done
-            .wait_timeout(done, Duration::from_millis(20))
+            .wait_timeout(done, Duration::from_millis(100))
             .unwrap_or_else(|e| e.into_inner());
     }
 }
@@ -434,6 +468,21 @@ fn loc(func: &'static str) -> types_error::ErrorLocation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // C's compute_parallel_worker takes the reloption branch BEFORE the size
+    // gate: a table with parallel_workers set builds in parallel even below
+    // min_parallel_table_scan_size.
+    #[test]
+    fn reloption_wins_over_the_size_gate() {
+        // 100 pages, far below the 1024-page threshold.
+        assert_eq!(workers_for_heap(-1, 100.0, 1024.0, 8), 0, "no reloption: size gate refuses");
+        assert_eq!(workers_for_heap(3, 100.0, 1024.0, 8), 3, "reloption skips the size gate");
+        assert_eq!(workers_for_heap(9, 100.0, 1024.0, 4), 4, "capped by max_workers");
+        assert_eq!(workers_for_heap(0, 1.0e9, 1024.0, 8), 0, "parallel_workers = 0 means serial");
+        // Above the gate and without a reloption, C returns
+        // max_parallel_maintenance_workers itself, not the log3 count.
+        assert_eq!(workers_for_heap(-1, 3072.0, 1024.0, 8), 8);
+    }
 
     #[test]
     fn worker_count_follows_log3_rule() {

@@ -216,8 +216,11 @@ fn build_graph<'a, 'mcx>(
 
     match &leader {
         Some(l) => {
-            // C: HnswLeaderParticipateAsWorker, then ParallelHeapScan.
-            bs.memory_margin = parallel::PARALLEL_MEMORY_MARGIN;
+            // C: HnswLeaderParticipateAsWorker, then ParallelHeapScan. The
+            // leader's own inserts run through the participant BuildState
+            // that `parallel_scan_and_insert` builds (which carries
+            // PARALLEL_MEMORY_MARGIN); this outer BuildState only reaches
+            // `flush_pages` below, which does not read memory_margin.
             parallel_scan_and_insert_leader(mcx, heap, bs.index, &shared)?;
             bs.reltuples = parallel::parallel_heap_scan(l, &shared)?;
         }
