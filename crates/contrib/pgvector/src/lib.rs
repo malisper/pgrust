@@ -58,6 +58,10 @@ fn lookup(function: &str) -> Option<PGFunction> {
         "halfvec_recv" => fc_halfvec_recv,
         "halfvec_send" => fc_halfvec_send,
         "halfvec" => fc_halfvec,
+        "array_to_halfvec" => fc_array_to_halfvec,
+        "halfvec_to_float4" => fc_halfvec_to_float4,
+        "vector_to_halfvec" => fc_vector_to_halfvec,
+        "halfvec_to_vector" => fc_halfvec_to_vector,
         _ => return None,
     })
 }
