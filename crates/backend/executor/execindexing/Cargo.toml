@@ -69,6 +69,7 @@ freespace_seams = { path = "../../storage/freespace/freespace_seams" }
 seam_core = { path = "../../../_support/seam_core" }
 types_nodes = { path = "../../../_support/types/nodes" }
 heaptuple = { path = "../../access/common/heaptuple" }
+tableam = { path = "../../access/table/tableam" }
 rmgr = { path = "../../access/transam/rmgr" }
 xact_seams = { path = "../../access/transam/xact_seams" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
