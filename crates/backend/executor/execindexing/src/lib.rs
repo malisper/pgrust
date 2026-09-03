@@ -21,6 +21,7 @@ mod tests;
 mod build_scan;
 pub use build_scan::{
     table_index_build_range_scan, table_index_build_range_scan_with_xmin, table_index_build_scan,
+    table_index_build_scan_with,
 };
 mod validate_scan;
 pub use validate_scan::{table_index_validate_scan, ValidateIndexState};

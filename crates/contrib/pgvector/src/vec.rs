@@ -514,6 +514,39 @@ pub fn vector_cmp_internal(a: &VecView<'_>, b: &VecView<'_>) -> i32 {
     0
 }
 
+/// C: HnswNormValue for the vector opclasses = l2_normalize applied to the
+/// detoasted varlena image. `img` and the result include the 4-byte header.
+pub fn l2_normalize_image<'m>(mcx: Mcx<'m>, img: &[u8]) -> PgResult<PgVec<'m, u8>> {
+    let v = VecView::from_payload(&img[4..])?;
+    let mut b = VecBuilder::new(mcx, v.dim())?;
+    let mut norm = 0.0f64;
+    for x in v.iter() {
+        norm += x as f64 * x as f64;
+    }
+    norm = norm.sqrt();
+    if norm > 0.0 {
+        for i in 0..v.dim() {
+            b.set(i, (v.x(i) as f64 / norm) as f32);
+        }
+        for i in 0..v.dim() {
+            if b.get(i).is_infinite() {
+                return Err(PgError::error("value out of range: overflow")
+                    .with_sqlstate(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE)
+                    .into());
+            }
+        }
+    }
+    Ok(b.image())
+}
+
+/// C: hnswutils.c HnswGetTypeInfo default arm (no support proc 3):
+/// maxDimensions = HNSW_MAX_DIM, normalize = l2_normalize, checkValue = NULL.
+pub static VECTOR_TYPE_INFO: types_hnsw::HnswTypeInfo = types_hnsw::HnswTypeInfo {
+    max_dimensions: types_hnsw::HNSW_MAX_DIM as i32,
+    normalize: Some(l2_normalize_image),
+    check_value: None,
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -586,5 +619,40 @@ mod tests {
         assert_eq!(inner_product(&va, &vb), 0.0);
         assert_eq!(l1_distance(&va, &vb), 7.0);
         assert_eq!(vector_norm(&vb), 5.0);
+    }
+}
+
+#[cfg(test)]
+mod type_info_tests {
+    use super::*;
+
+    #[test]
+    fn l2_normalize_image_scales_to_unit_norm() {
+        let owner = mcx::MemoryContext::new_bump("t");
+        let m = owner.mcx();
+        let mut b = VecBuilder::new(m, 2).unwrap();
+        b.set(0, 3.0);
+        b.set(1, 4.0);
+        let img = b.image();
+        let out = l2_normalize_image(m, &img).unwrap();
+        let v = VecView::from_payload(&out[4..]).unwrap();
+        assert_eq!(v.dim(), 2);
+        assert!((v.x(0) - 0.6).abs() < 1e-7 && (v.x(1) - 0.8).abs() < 1e-7);
+    }
+
+    #[test]
+    fn l2_normalize_image_leaves_zero_vector_alone() {
+        let owner = mcx::MemoryContext::new_bump("t");
+        let m = owner.mcx();
+        let img = VecBuilder::new(m, 3).unwrap().image();
+        let out = l2_normalize_image(m, &img).unwrap();
+        assert_eq!(&out[..], &img[..]);
+    }
+
+    #[test]
+    fn vector_type_info_matches_c_defaults() {
+        assert_eq!(VECTOR_TYPE_INFO.max_dimensions, 2000);
+        assert!(VECTOR_TYPE_INFO.normalize.is_some());
+        assert!(VECTOR_TYPE_INFO.check_value.is_none());
     }
 }

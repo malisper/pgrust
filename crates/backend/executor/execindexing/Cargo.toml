@@ -28,6 +28,7 @@ types_snapshot = { path = "../../../_support/types/snapshot" }
 types_storage = { path = "../../../_support/types/types_storage" }
 types_scan = { path = "../../../_support/types/types_scan" }
 tableam_vocab = { path = "../../access/table/tableam_vocab" }
+tableam = { path = "../../access/table/tableam" }
 heapam = { path = "../../access/heap/heapam" }
 snapmgr = { path = "../../utils/time/snapmgr" }
 heapam_visibility = { path = "../../access/heap/heapam_visibility" }

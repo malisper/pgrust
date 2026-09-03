@@ -28,7 +28,41 @@ pub fn table_index_build_scan<'mcx, F>(
 where
     F: FnMut(&Relation<'mcx>, &ItemPointerData, &[Datum], &[bool], bool) -> PgResult<()>,
 {
-    table_index_build_range_scan(
+    table_index_build_scan_with(
+        mcx,
+        heap_relation,
+        index_relation,
+        index_info,
+        allow_sync,
+        None,
+        callback,
+    )
+}
+
+/// [`table_index_build_scan`] with an optional caller-begun `scan` (C:
+/// `table_index_build_scan`'s trailing `TableScanDesc scan` argument, M4
+/// parallel build). `None` reproduces `table_index_build_scan` exactly
+/// (begins and ends its own serial scan). `Some` hands in an
+/// already-begun scan (e.g. a parallel block scan handed out by the pool
+/// driver): the function uses it as-is — no range restriction, no fresh
+/// snapshot registration, the scan's own snapshot governs visibility — and
+/// still ends it before returning, so the caller must not reuse it after
+/// this call. A caller-provided `scan` must be
+/// `tableam::TableScanDesc::Heap` (this is the heap-only build lane); any
+/// other scan kind raises ERRCODE_FEATURE_NOT_SUPPORTED.
+pub fn table_index_build_scan_with<'mcx, F>(
+    mcx: Mcx<'mcx>,
+    heap_relation: &Relation<'mcx>,
+    index_relation: &Relation<'mcx>,
+    index_info: &mut IndexInfo<'mcx>,
+    allow_sync: bool,
+    scan: Option<tableam::TableScanDesc<'mcx>>,
+    callback: F,
+) -> PgResult<f64>
+where
+    F: FnMut(&Relation<'mcx>, &ItemPointerData, &[Datum], &[bool], bool) -> PgResult<()>,
+{
+    table_index_build_range_scan_with_xmin(
         mcx,
         heap_relation,
         index_relation,
@@ -37,6 +71,8 @@ where
         false,
         0,
         InvalidBlockNumber,
+        None,
+        scan,
         callback,
     )
 }
@@ -66,6 +102,7 @@ where
         start_blockno,
         numblocks,
         None,
+        None,
         callback,
     )
 }
@@ -89,6 +126,7 @@ pub fn table_index_build_range_scan_with_xmin<'mcx, F>(
     start_blockno: BlockNumber,
     numblocks: BlockNumber,
     hoisted_oldest_xmin: Option<types_core::TransactionId>,
+    scan: Option<tableam::TableScanDesc<'mcx>>,
     mut callback: F,
 ) -> PgResult<f64>
 where
@@ -108,14 +146,6 @@ where
         Some(heap_relation.rd_att.clone()),
     );
 
-    // Concurrent builds scan under a registered MVCC snapshot; OldestXmin is
-    // only for the SnapshotAny lane's HTSV routing.
-    let registered = if concurrent {
-        let snap = snapmgr::GetTransactionSnapshot()?;
-        Some(snapmgr::RegisterSnapshot(Some(&snap))?.expect("registered snapshot"))
-    } else {
-        None
-    };
     let oldest_xmin = if concurrent {
         types_core::InvalidTransactionId
     } else if let Some(x) = hoisted_oldest_xmin {
@@ -127,26 +157,60 @@ where
         x
     };
 
-    let mut flags = SO_TYPE_SEQSCAN | SO_ALLOW_STRAT | SO_ALLOW_PAGEMODE;
-    if allow_sync {
-        flags |= SO_ALLOW_SYNC;
-    }
-    let mut scan = heapam::heap_beginscan(
-        mcx,
-        heap_relation,
-        registered.clone(), // None is SnapshotAny
-        0,
-        PgVec::new_in(mcx),
-        None,
-        flags,
-    )?;
-
-    if !allow_sync {
-        heapam::heap_setscanlimits(&mut scan, start_blockno, numblocks);
-    } else {
-        // C: syncscan can only be requested on the whole relation.
+    // C: a caller-provided scan (parallel build) is used as-is —
+    // `need_unregister_snapshot` stays false (the scan's own snapshot, e.g.
+    // SnapshotAny for a non-concurrent parallel build, governs visibility;
+    // we neither register nor unregister one here) and no range restriction
+    // is applied (C: `Assert(start_blockno == 0 && numblocks ==
+    // InvalidBlockNumber)`). Otherwise this begins (and, below, ends) its
+    // own serial scan exactly as before.
+    let (mut scan, registered) = if let Some(scan) = scan {
         debug_assert!(start_blockno == 0 && numblocks == InvalidBlockNumber);
-    }
+        let scan = match scan {
+            tableam::TableScanDesc::Heap(h) => h,
+            tableam::TableScanDesc::Pgrcolumnar(_) => {
+                return Err(Box::new(
+                    types_error::PgError::error(
+                        "table_index_build_scan_with: only heap scans are supported",
+                    )
+                    .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+                ))
+            }
+        };
+        (scan, None)
+    } else {
+        // Concurrent builds scan under a registered MVCC snapshot; OldestXmin
+        // is only for the SnapshotAny lane's HTSV routing.
+        let registered = if concurrent {
+            let snap = snapmgr::GetTransactionSnapshot()?;
+            Some(snapmgr::RegisterSnapshot(Some(&snap))?.expect("registered snapshot"))
+        } else {
+            None
+        };
+
+        let mut flags = SO_TYPE_SEQSCAN | SO_ALLOW_STRAT | SO_ALLOW_PAGEMODE;
+        if allow_sync {
+            flags |= SO_ALLOW_SYNC;
+        }
+        let mut scan = heapam::heap_beginscan(
+            mcx,
+            heap_relation,
+            registered.clone(), // None is SnapshotAny
+            0,
+            PgVec::new_in(mcx),
+            None,
+            flags,
+        )?;
+
+        if !allow_sync {
+            heapam::heap_setscanlimits(&mut scan, start_blockno, numblocks);
+        } else {
+            // C: syncscan can only be requested on the whole relation.
+            debug_assert!(start_blockno == 0 && numblocks == InvalidBlockNumber);
+        }
+
+        (scan, registered)
+    };
 
     // C heapam_handler.c ExecPrepareQual runs before the scan: predicate fold
     // errors surface even when no tuple is ever tested.
