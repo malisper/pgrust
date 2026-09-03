@@ -509,7 +509,7 @@ pub(crate) fn begin_foreign_modify<'mcx>(
 }
 
 // OutputFunctionCall through the per-call scratch, copied out as a String.
-fn output_to_string(
+pub(crate) fn output_to_string(
     flinfo: &mut FmgrInfo,
     scratch: &mcx::MemoryContext,
     value: Datum,
@@ -1130,23 +1130,8 @@ pub(crate) fn begin_direct_modify<'mcx>(
     let attin =
         if has_returning { Some(AttInMeta::build(rel.name(), &rel.rd_att)?) } else { None };
 
-    let pb = estate.param_bind();
-    let mut param_flinfo = Vec::with_capacity(fsplan.fdw_exprs.len());
-    let mut param_exprs = Vec::with_capacity(fsplan.fdw_exprs.len());
-    for expr in fsplan.fdw_exprs.iter() {
-        let (typoutput, _isvarlena) =
-            lsyscache::getTypeOutputInfo(nodes_core::node_funcs::expr_type(expr))?;
-        param_flinfo.push(fmgr_seams::fmgr_info::call(typoutput)?);
-        let state = execexpr::exec_init_expr(mcx, Some(expr), pb)?
-            .expect("fdw_exprs entries are expressions");
-        // SAFETY: es_query_cxt restamp; dropped at end (PgFdwScanState precedent).
-        param_exprs.push(unsafe {
-            core::mem::transmute::<
-                mcx::PgBox<'mcx, execexpr::ExprState<'mcx>>,
-                mcx::PgBox<'static, execexpr::ExprState<'static>>,
-            >(state)
-        });
-    }
+    let (param_flinfo, param_exprs) =
+        crate::exec::prepare_query_params(estate, &fsplan.fdw_exprs)?;
     // SAFETY: plan-lived string, restamped (PgFdwScanState precedent).
     let query = unsafe { core::mem::transmute::<&'mcx str, &'static str>(query) };
 
@@ -1177,39 +1162,12 @@ fn execute_dml_stmt<'mcx>(
     let values = if state.param_exprs.is_empty() {
         Vec::new()
     } else {
-        let nestlevel = crate::transmission::set_transmission_modes();
-        let r = (|| -> PgResult<Vec<Option<String>>> {
-            let mut values: Vec<Option<String>> = Vec::with_capacity(state.param_exprs.len());
-            let scratch = mcx::MemoryContext::new_bump("postgres_fdw param output");
-            for (expr, flinfo) in
-                state.param_exprs.iter_mut().zip(state.param_flinfo.iter_mut())
-            {
-                let per_tuple = estate.ecxt(ecxt).per_tuple_mcx();
-                // SAFETY: reset-only per-tuple context, outlives the evaluation.
-                unsafe { expr.arm_result_mcx_raw(per_tuple) };
-                let mut slots =
-                    execexpr::EvalSlots { scan: None, inner: None, outer: None };
-                let nd = execexpr::exec_eval_expr(expr, &mut slots)?;
-                if nd.isnull {
-                    values.push(None);
-                } else {
-                    let d = types_fmgr::function_call1_coll_in(
-                        flinfo,
-                        InvalidOid,
-                        scratch.mcx(),
-                        nd.value,
-                    )?;
-                    // SAFETY: output functions return a NUL-terminated cstring.
-                    let s =
-                        unsafe { CStr::from_ptr(d.as_usize() as *const core::ffi::c_char) };
-                    values.push(Some(s.to_string_lossy().into_owned()));
-                }
-            }
-            Ok(values)
-        })();
-        crate::transmission::reset_transmission_modes(nestlevel);
-        estate.ecxt_mut(ecxt).reset();
-        r?
+        crate::exec::process_query_params(
+            &mut state.param_exprs,
+            &mut state.param_flinfo,
+            estate,
+            ecxt,
+        )?
     };
     let params: Vec<Option<&str>> = values.iter().map(|v| v.as_deref()).collect();
     let res =

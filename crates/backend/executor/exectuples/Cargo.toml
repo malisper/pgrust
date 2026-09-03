@@ -14,4 +14,5 @@ types_slot = { path = "../../../_support/types/types_slot" }
 jit_deform = { path = "../../../_support/jit_deform" }
 types_storage = { path = "../../../_support/types/types_storage" }
 heaptuple = { path = "../../access/common/heaptuple" }
+detoast = { path = "../../access/common/detoast" }
 bufmgr_seams = { path = "../../storage/buffer/bufmgr_seams" }

@@ -6,7 +6,7 @@ extern crate alloc;
 
 use core::sync::atomic::{AtomicPtr, Ordering};
 
-use ::execexpr::{exec_qual, EvalSlots, ExprState};
+use ::execexpr::ExprState;
 use ::execscan::{exec_scan, exec_scan_extended, ScanNode, ScanState};
 use ::executils::{AsyncRequest, AsyncWaitCtx, EStateData, ExecSlotId};
 use ::mcx::{Mcx, PgBox};
@@ -154,22 +154,10 @@ impl<'mcx> ScanNode<'mcx> for ForeignScanState<'mcx> {
         slot: ExecSlotId,
     ) -> PgResult<bool> {
         let ecxt = self.ss.ps_ExprContext;
-        estate.ecxt_mut(ecxt).ecxt_scantuple = Some(slot);
-        let passes = {
-            let per_tuple = estate.ecxt(ecxt).per_tuple_mcx();
-            if let Some(q) = self.fdw_recheck_quals.as_deref_mut() {
-                // SAFETY: reset-only context, outlives the plan.
-                unsafe { q.arm_result_mcx_raw(per_tuple) };
-            }
-            let mut slots = EvalSlots {
-                scan: Some(estate.slot_mut(slot)),
-                inner: None,
-                outer: None,
-            };
-            exec_qual(self.fdw_recheck_quals.as_deref_mut(), &mut slots)?
-        };
-        estate.ecxt_mut(ecxt).reset();
-        Ok(passes)
+        let e = estate.ecxt_mut(ecxt);
+        e.ecxt_scantuple = Some(slot);
+        e.reset();
+        ::executils::exec_qual_with_subplans(self.fdw_recheck_quals.as_deref_mut(), estate, ecxt)
     }
 
     fn scan_next(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<bool> {

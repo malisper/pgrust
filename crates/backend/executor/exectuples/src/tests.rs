@@ -2,13 +2,14 @@ use alloc::rc::Rc;
 use alloc::vec::Vec;
 
 use ::datum::Datum;
-use ::heaptuple::{heap_form_minimal_tuple, heap_form_tuple};
+use ::heaptuple::{heap_copy_tuple_as_datum, heap_form_minimal_tuple, heap_form_tuple};
 use ::mcx::{Mcx, MemoryContext, PgVec};
 use ::types_slot::{SlotData, TupleSlotKind};
-use ::types_tuple::varatt::varsize_any;
+use ::types_tuple::varatt::{self, varsize_any};
 use ::types_tuple::{
-    CompactAttribute, FormData_pg_attribute, HeapTupleData, TableOidAttributeNumber, TupleDescData,
-    TYPALIGN_DOUBLE, TYPALIGN_INT, TYPSTORAGE_EXTENDED, TYPSTORAGE_PLAIN,
+    CompactAttribute, FormData_pg_attribute, HeapTupleData, HeapTupleHeaderData,
+    TableOidAttributeNumber, TupleDescData, TYPALIGN_DOUBLE, TYPALIGN_INT, TYPSTORAGE_EXTENDED,
+    TYPSTORAGE_PLAIN,
 };
 
 use crate::*;
@@ -1812,4 +1813,80 @@ fn copy_to_virtual_accepts_valid_varlena() {
 
     exec_clear_tuple(&mut dst, mcx);
     exec_clear_tuple(&mut src, mcx);
+}
+
+// heap_fill_tuple's short-varlena repack of a composite that crossed a tuple
+// store: 1B header, payload at an odd address.
+fn packed_composite(image: &[u8]) -> Vec<u8> {
+    let short_len = image.len() - varatt::VARHDRSZ + varatt::VARHDRSZ_SHORT;
+    let mut buf = alloc::vec![0u8; short_len + 1];
+    // SAFETY: buf[1] is a writable byte.
+    unsafe { varatt::set_varsize_short(buf.as_mut_ptr().add(1), short_len) };
+    buf[2..].copy_from_slice(&image[varatt::VARHDRSZ..]);
+    buf
+}
+
+fn composite_datum<'mcx>(mcx: Mcx<'mcx>, desc: &TupleDescData<'mcx>, txt: &[u8]) -> Datum {
+    let values = [Datum::from_i32(7), text_datum(txt), Datum::from_i64(1_234_567_890_123)];
+    let tuple = heap_form_tuple(mcx, desc, &values, &[false; 3]).unwrap();
+    heap_copy_tuple_as_datum(mcx, &tuple, desc).unwrap()
+}
+
+#[test]
+fn datum_get_heap_tuple_header_flattens_packed_composite() {
+    let ctx = MemoryContext::new("test");
+    let mcx = ctx.mcx();
+    let desc = desc3(mcx);
+    let txt = text_varlena("hello");
+    let flat = composite_datum(mcx, &desc, &txt);
+    // SAFETY: a heap_copy_tuple_as_datum image, readable for its datum length.
+    let (borrowed, len) = unsafe {
+        let hdr = datum_get_heap_tuple_header(mcx, flat).unwrap();
+        (hdr as usize, (*hdr).datum_length() as usize)
+    };
+    assert_eq!(borrowed, flat.as_usize());
+    // SAFETY: `len` is the image's datum length.
+    let image = unsafe { core::slice::from_raw_parts(flat.as_usize() as *const u8, len) };
+    let packed = packed_composite(image);
+    let odd = packed[1..].as_ptr();
+    assert_ne!(odd as usize % core::mem::align_of::<HeapTupleHeaderData>(), 0);
+    // SAFETY: a short-varlena composite image readable for its varlena length.
+    let hdr = unsafe { datum_get_heap_tuple_header(mcx, Datum::from_usize(odd as usize)).unwrap() };
+    assert_ne!(hdr as usize, odd as usize);
+    assert_eq!(hdr as usize % core::mem::align_of::<HeapTupleHeaderData>(), 0);
+    // SAFETY: the flattened image is `len` readable bytes.
+    let copy = unsafe { core::slice::from_raw_parts(hdr as *const u8, len) };
+    assert_eq!(copy, image);
+}
+
+#[test]
+fn heap_tuple_datum_store_detoasts_packed_composite() {
+    let ctx = MemoryContext::new("test");
+    let mcx = ctx.mcx();
+    let desc = desc3(mcx);
+    let txt = text_varlena("hello");
+    let flat = composite_datum(mcx, &desc, &txt);
+    // SAFETY: a heap_copy_tuple_as_datum image, readable for its datum length.
+    let image = unsafe {
+        let len = (*(flat.as_usize() as *const HeapTupleHeaderData)).datum_length() as usize;
+        core::slice::from_raw_parts(flat.as_usize() as *const u8, len)
+    };
+    let packed = packed_composite(image);
+    let mut slot = make_tuple_table_slot(mcx, TupleSlotKind::Virtual, Some(desc));
+    // SAFETY: a short-varlena composite image readable for its varlena length.
+    unsafe {
+        exec_store_heap_tuple_datum(
+            Datum::from_usize(packed[1..].as_ptr() as usize),
+            &mut slot,
+            mcx,
+            mcx,
+        )
+        .unwrap()
+    };
+    assert!(!slot.base().is_empty());
+    let mut n = true;
+    assert_eq!(slot_getattr(&mut slot, 1, &mut n).as_i32(), 7);
+    assert!(!n);
+    assert_eq!(datum_text_bytes(slot_getattr(&mut slot, 2, &mut n)), b"hello");
+    assert_eq!(slot_getattr(&mut slot, 3, &mut n).as_i64(), 1_234_567_890_123);
 }

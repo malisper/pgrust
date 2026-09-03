@@ -63,3 +63,6 @@ execscan = { path = "../../backend/executor/execscan" }
 exectuples = { path = "../../backend/executor/exectuples" }
 dbcommands_seams = { path = "../../backend/commands/dbcommands_seams" }
 funcapi = { path = "../../backend/utils/fmgr/funcapi" }
+
+[dev-dependencies]
+types_portal = { path = "../../_support/types/portal" }

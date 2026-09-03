@@ -7,14 +7,16 @@
 // into the batch reset — bounded by one batch, recorded divergence).
 use std::ffi::CString;
 
-use datum::Datum;
+use datum::{Datum, NullableDatum};
 use mcx::PgBox;
 use types_core::{InvalidOid, Oid};
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
 use types_fmgr::FmgrInfo;
+use types_nodes::list::NodeList;
+use types_nodes::Node;
 use types_tuple::TupleDescData;
 
-use execexpr::{exec_eval_expr, exec_init_expr, EvalSlots, ExprState};
+use execexpr::{exec_init_expr_subplans, ExprState};
 use executils::{EStateData, EcxtId};
 use nodeforeignscan::ForeignScanState;
 use exectuples;
@@ -208,25 +210,7 @@ pub(crate) fn begin_foreign_scan<'mcx>(
         AttInMeta::build("foreign join", &desc)?
     };
 
-    // prepare_query_params: output functions + compiled expressions for
-    // fdw_exprs (Params after replace_nestloop_params; no SubPlans — the
-    // shippability walker rejects them).
-    let pb = estate.param_bind();
-    let mut param_flinfo = Vec::with_capacity(fsplan.fdw_exprs.len());
-    let mut param_exprs = Vec::with_capacity(fsplan.fdw_exprs.len());
-    for expr in fsplan.fdw_exprs.iter() {
-        let (typoutput, _isvarlena) =
-            lsyscache::getTypeOutputInfo(nodes_core::node_funcs::expr_type(expr))?;
-        param_flinfo.push(fmgr_seams::fmgr_info::call(typoutput)?);
-        let state =
-            exec_init_expr(mcx, Some(expr), pb)?.expect("fdw_exprs entries are expressions");
-        // SAFETY: es_query_cxt restamp; dropped at end-scan (struct comment).
-        param_exprs.push(unsafe {
-            core::mem::transmute::<PgBox<'mcx, ExprState<'mcx>>, PgBox<'static, ExprState<'static>>>(
-                state,
-            )
-        });
-    }
+    let (param_flinfo, param_exprs) = prepare_query_params(estate, &fsplan.fdw_exprs)?;
 
     // SAFETY: plan-lived string, restamped (struct comment).
     let query = unsafe { core::mem::transmute::<&'mcx str, &'static str>(query) };
@@ -252,38 +236,81 @@ pub(crate) fn begin_foreign_scan<'mcx>(
     Ok(())
 }
 
+// prepare_query_params: output functions + compiled expressions for
+// fdw_exprs (Params after replace_nestloop_params, including initplan output
+// params; the shippability walker rejects SubPlan nodes themselves).
+pub(crate) fn prepare_query_params<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    fdw_exprs: &NodeList<'mcx>,
+) -> PgResult<(Vec<FmgrInfo>, Vec<PgBox<'static, ExprState<'static>>>)> {
+    let mut param_flinfo = Vec::with_capacity(fdw_exprs.len());
+    let mut param_exprs = Vec::with_capacity(fdw_exprs.len());
+    for expr in fdw_exprs.iter() {
+        let (typoutput, _isvarlena) =
+            lsyscache::getTypeOutputInfo(nodes_core::node_funcs::expr_type(expr))?;
+        param_flinfo.push(fmgr_seams::fmgr_info::call(typoutput)?);
+        param_exprs.push(compile_query_param(estate, expr)?);
+    }
+    Ok((param_flinfo, param_exprs))
+}
+
+fn compile_query_param<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    expr: Node<'mcx>,
+) -> PgResult<PgBox<'static, ExprState<'static>>> {
+    let mcx = estate.es_query_cxt;
+    let pb = estate.param_bind();
+    let state = executils::with_subplan_compile_env(estate, |env| {
+        exec_init_expr_subplans(mcx, Some(expr), pb, env)
+    })?
+    .expect("fdw_exprs entries are expressions");
+    // SAFETY: es_query_cxt restamp; dropped at end-scan (struct comment).
+    Ok(unsafe {
+        core::mem::transmute::<PgBox<'mcx, ExprState<'mcx>>, PgBox<'static, ExprState<'static>>>(
+            state,
+        )
+    })
+}
+
+// A pending initplan output param ($1 for `c3 = (SELECT MAX(c3) ...)`)
+// suspends the interpreter; the subplan driver runs ExecSetParamPlan for it.
+pub(crate) fn eval_query_params<'mcx>(
+    param_exprs: &mut [PgBox<'static, ExprState<'static>>],
+    estate: &mut EStateData<'mcx>,
+    ecxt: EcxtId,
+) -> PgResult<Vec<NullableDatum>> {
+    let mut values = Vec::with_capacity(param_exprs.len());
+    for expr in param_exprs.iter_mut() {
+        // SAFETY: the reverse of the compile-time restamp (es_query_cxt-lived).
+        let expr = unsafe {
+            core::mem::transmute::<&mut ExprState<'static>, &mut ExprState<'mcx>>(&mut **expr)
+        };
+        let per_tuple = estate.ecxt(ecxt).per_tuple_mcx();
+        // SAFETY: reset-only per-tuple context, outlives the evaluation.
+        unsafe { expr.arm_result_mcx_raw(per_tuple) };
+        values.push(executils::exec_eval_expr_with_subplans(expr, estate, ecxt)?);
+    }
+    Ok(values)
+}
+
 // process_query_params: evaluate fdw_exprs and convert to text via the
 // output functions, under the transmission modes (datestyle=ISO etc.), as C.
-fn process_query_params<'mcx>(
-    state: &mut PgFdwScanState,
+pub(crate) fn process_query_params<'mcx>(
+    param_exprs: &mut [PgBox<'static, ExprState<'static>>],
+    param_flinfo: &mut [FmgrInfo],
     estate: &mut EStateData<'mcx>,
     ecxt: EcxtId,
 ) -> PgResult<Vec<Option<String>>> {
     let nestlevel = crate::transmission::set_transmission_modes();
     let r = (|| -> PgResult<Vec<Option<String>>> {
-        let mut values: Vec<Option<String>> = Vec::with_capacity(state.param_exprs.len());
         let scratch = mcx::MemoryContext::new_bump("postgres_fdw param output");
-        for (expr, flinfo) in state.param_exprs.iter_mut().zip(state.param_flinfo.iter_mut()) {
-            let per_tuple = estate.ecxt(ecxt).per_tuple_mcx();
-            // SAFETY: reset-only per-tuple context, outlives the evaluation.
-            unsafe { expr.arm_result_mcx_raw(per_tuple) };
-            let mut slots = EvalSlots { scan: None, inner: None, outer: None };
-            let nd = exec_eval_expr(expr, &mut slots)?;
+        let datums = eval_query_params(param_exprs, estate, ecxt)?;
+        let mut values: Vec<Option<String>> = Vec::with_capacity(datums.len());
+        for (nd, flinfo) in datums.iter().zip(param_flinfo.iter_mut()) {
             if nd.isnull {
                 values.push(None);
             } else {
-                let d = types_fmgr::function_call1_coll_in(
-                    flinfo,
-                    InvalidOid,
-                    scratch.mcx(),
-                    nd.value,
-                )?;
-                // SAFETY: output functions return a NUL-terminated cstring
-                // datum; copied out before the scratch context resets.
-                let s = unsafe {
-                    core::ffi::CStr::from_ptr(d.as_usize() as *const core::ffi::c_char)
-                };
-                values.push(Some(s.to_string_lossy().into_owned()));
+                values.push(Some(crate::modify::output_to_string(flinfo, &scratch, nd.value)?));
             }
         }
         Ok(values)
@@ -304,7 +331,7 @@ fn create_cursor<'mcx>(
     let values = if state.param_exprs.is_empty() {
         Vec::new()
     } else {
-        process_query_params(state, estate, ecxt)?
+        process_query_params(&mut state.param_exprs, &mut state.param_flinfo, estate, ecxt)?
     };
     let params: Vec<Option<&str>> = values.iter().map(|v| v.as_deref()).collect();
     let sql = format!("DECLARE c{} CURSOR FOR\n{}", state.cursor_number, state.query);
@@ -837,4 +864,54 @@ fn fetch_more_data_begin<'mcx>(
         areq.requestor_plan_id,
         state.query,
     )
+}
+
+#[cfg(test)]
+mod query_param_tests {
+    use super::*;
+    use core::ptr::NonNull;
+    use executils::{create_executor_state, free_executor_state, SubplanStateCell};
+    use types_nodes::primnodes::{Param, ParamKind};
+    use types_portal::params::ParamExecData;
+
+    // ExecSetParamPlan stand-in: fills param 0 and clears its pending bit.
+    unsafe fn set_param_plan(_: NonNull<()>, estate: &mut EStateData<'_>) -> PgResult<()> {
+        estate.es_param_exec_vals[0] =
+            ParamExecData { value: Datum::from_i32(1206), isnull: false, exec_plan: false };
+        Ok(())
+    }
+
+    #[test]
+    fn pending_initplan_param_is_driven() {
+        let parent = mcx::MemoryContext::new("postgres_fdw query params");
+        let mut estate = create_executor_state(&parent).unwrap();
+        estate.with_mut(|es| {
+            es.es_param_exec_vals.push(ParamExecData {
+                value: Datum::null(),
+                isnull: true,
+                exec_plan: true,
+            });
+            es.es_param_subplans.push(Some(SubplanStateCell(NonNull::dangling())));
+            es.es_subplan_hook = Some(set_param_plan);
+            let ecxt = es.create_expr_context();
+            let node = Node::mk(
+                es.es_query_cxt,
+                Param {
+                    paramkind: ParamKind::PARAM_EXEC,
+                    paramid: 0,
+                    paramtype: types_core::catalog::INT4OID,
+                    paramtypmod: -1,
+                    paramcollid: 0,
+                    location: -1,
+                },
+            );
+            let mut exprs = vec![compile_query_param(es, node.unwrap()).unwrap()];
+            let vals = eval_query_params(&mut exprs, es, ecxt).unwrap();
+            assert_eq!(vals.len(), 1);
+            assert!(!vals[0].isnull);
+            assert_eq!(vals[0].value.as_i32(), 1206);
+            assert!(!es.es_param_exec_vals[0].exec_plan);
+        });
+        free_executor_state(estate);
+    }
 }

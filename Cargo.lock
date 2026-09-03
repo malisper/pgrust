@@ -5873,7 +5873,6 @@ name = "execscan"
 version = "0.1.0"
 dependencies = [
  "datum",
- "detoast_seams",
  "execexpr",
  "exectuples",
  "executils",
@@ -5899,6 +5898,7 @@ version = "0.1.0"
 dependencies = [
  "bufmgr_seams",
  "datum",
+ "detoast",
  "heaptuple",
  "jit_deform",
  "mcx",
@@ -14254,6 +14254,7 @@ dependencies = [
  "types_guc",
  "types_nodes",
  "types_pathnodes",
+ "types_portal",
  "types_rel",
  "types_slot",
  "types_storage",

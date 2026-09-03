@@ -10,7 +10,10 @@ use ::heaptuple::{
 };
 use ::mcx::{vec_with_capacity_in, Allocator, Mcx, PgVec};
 use ::types_core::{AttrNumber, Buffer, BufferIsValid, InvalidBuffer, TransactionId};
-use ::types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_FEATURE_NOT_SUPPORTED};
+use ::types_error::{
+    PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_FEATURE_NOT_SUPPORTED,
+    ERRCODE_INTERNAL_ERROR,
+};
 use ::types_slot::{
     BufferHeapTupleTableSlot, HeapTupleTableSlot, MinimalTupleTableSlot, SlotBase, SlotData,
     TupleSlotKind, VirtualTupleTableSlot, TTS_FLAG_EMPTY, TTS_FLAG_FIXED, TTS_FLAG_SHOULDFREE,
@@ -1143,16 +1146,20 @@ pub fn exec_force_store_minimal_tuple_owned<'mcx>(
     }
 }
 
+/// C `ExecStoreHeapTupleDatum`; a packed image is detoasted into `out_mcx`
+/// (C's CurrentMemoryContext) and the virtual slot's values point into it.
+///
 /// # Safety
-/// `data` is a valid composite-type datum: a live, complete
-/// `HeapTupleHeader` image readable for its datum length.
+/// `data` is a live composite varlena image readable for its varlena length.
 pub unsafe fn exec_store_heap_tuple_datum<'mcx>(
     data: Datum,
     slot: &mut SlotData<'mcx>,
     mcx: Mcx<'mcx>,
-) {
-    let td = data.as_usize() as *const HeapTupleHeaderData;
+    out_mcx: Mcx<'mcx>,
+) -> PgResult<()> {
     // SAFETY: caller contract.
+    let td = unsafe { datum_get_heap_tuple_header(out_mcx, data)? };
+    // SAFETY: an aligned flat composite image readable for its datum length.
     let tuple =
         unsafe { HeapTupleData::from_raw_parts(td.cast(), (*td).datum_length(), (*td).t_ctid, 0) };
 
@@ -1169,6 +1176,45 @@ pub unsafe fn exec_store_heap_tuple_datum<'mcx>(
         .expect("ExecStoreHeapTupleDatum without descriptor");
     heap_deform_tuple(&tuple, desc, tts_values, tts_isnull);
     exec_store_virtual_tuple(slot);
+    Ok(())
+}
+
+/// C `DatumGetHeapTupleHeader`: a packed composite (a tuple store repacks it as
+/// a short varlena) is detoasted into `mcx` first; an unaligned header errors.
+///
+/// # Safety
+/// `datum` is a live composite varlena image readable for its varlena length.
+pub unsafe fn datum_get_heap_tuple_header<'mcx>(
+    mcx: Mcx<'mcx>,
+    datum: Datum,
+) -> PgResult<*const HeapTupleHeaderData> {
+    let aligned = |p: *const u8| (p as usize) % core::mem::align_of::<HeapTupleHeaderData>() == 0;
+    let src = datum.as_usize() as *const u8;
+    // SAFETY: caller contract.
+    let hdr = unsafe {
+        if varatt::varatt_is_4b_u(src) && aligned(src) {
+            src
+        } else {
+            let image = core::slice::from_raw_parts(src, varsize_any(src));
+            let flat = ::detoast::detoast_attr(mcx, image)?;
+            let p = flat.as_ptr();
+            core::mem::forget(flat);
+            p
+        }
+    };
+    if !aligned(hdr) {
+        return Err(misaligned_composite(hdr));
+    }
+    Ok(hdr.cast())
+}
+
+#[cold]
+#[inline(never)]
+fn misaligned_composite(p: *const u8) -> alloc::boxed::Box<PgError> {
+    alloc::boxed::Box::new(
+        PgError::error(alloc::format!("composite datum image at {p:p} is not MAXALIGN'd"))
+            .with_sqlstate(ERRCODE_INTERNAL_ERROR),
+    )
 }
 
 #[cold]

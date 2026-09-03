@@ -5580,18 +5580,110 @@ fn fetch_wholerow_tuple_opt<'mcx>(
     if isnull {
         return Ok(None);
     }
-    let hdr = datum.as_usize() as *const u8;
-    // SAFETY: a composite datum is an in-memory HeapTupleHeader image
-    // (RowExpr output, never toasted); live in the plan slot for this row.
-    let t_len = unsafe {
-        (*(hdr as *const types_tuple::htup::HeapTupleHeaderData)).datum_length()
-    };
+    let rel = mt.rel();
+    Ok(Some(wholerow_datum_tuple(estate.es_query_cxt, datum, rel.relkind, rel.rd_id)?))
+}
+
+// C DatumGetHeapTupleHeader on the wholerow junk datum (a composite that
+// crossed a tuple store is packed); view triggers see an invalid t_tableOid.
+fn wholerow_datum_tuple<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    datum: Datum,
+    relkind: u8,
+    rd_id: Oid,
+) -> PgResult<types_tuple::HeapTupleData<'mcx>> {
+    // SAFETY: a non-null wholerow junk datum is a live composite image, valid
+    // in the plan slot for this row.
+    let hdr = unsafe { exectuples::datum_get_heap_tuple_header(mcx, datum)? };
     let mut tid = ItemPointerData::default();
     ItemPointerSetInvalid(&mut tid);
-    // SAFETY: image bounds established above.
-    Ok(Some(unsafe {
-        types_tuple::HeapTupleData::from_raw_parts(hdr, t_len, tid, types_core::InvalidOid)
-    }))
+    let t_tableOid =
+        if relkind == types_rel::RELKIND_VIEW { types_core::InvalidOid } else { rd_id };
+    // SAFETY: an aligned flat composite image readable for its datum length.
+    Ok(unsafe {
+        types_tuple::HeapTupleData::from_raw_parts(
+            hdr.cast(),
+            (*hdr).datum_length(),
+            tid,
+            t_tableOid,
+        )
+    })
+}
+
+#[cfg(test)]
+mod wholerow_datum_tests {
+    use super::*;
+    use types_tuple::htup::{HeapTupleHeaderData, SizeofHeapTupleHeader};
+    use types_tuple::itemptr::ItemPointerIsValid;
+    use types_tuple::varatt;
+
+    const RECORDOID: Oid = 2249;
+    const HOFF: usize = 24;
+    const LEN: usize = 32;
+    const FT_OID: Oid = 16384;
+
+    // A plain 4B-header composite with no columns: t_hoff 24 plus a pad word.
+    fn composite_image() -> [u8; LEN] {
+        let mut img = [0u8; LEN];
+        img[0..4].copy_from_slice(&varatt::set_varsize_4b_word(LEN as u32).to_ne_bytes());
+        img[4..8].copy_from_slice(&(-1i32).to_ne_bytes());
+        img[8..12].copy_from_slice(&RECORDOID.to_ne_bytes());
+        img[SizeofHeapTupleHeader - 1] = HOFF as u8;
+        img
+    }
+
+    fn mcx_root() -> ::mcx::MemoryContext {
+        ::mcx::MemoryContext::new("wholerow datum test")
+    }
+
+    #[test]
+    fn aligned_4b_image_is_borrowed() {
+        let cx = mcx_root();
+        #[repr(align(8))]
+        struct Aligned([u8; LEN]);
+        let img = Aligned(composite_image());
+        let datum = Datum::from_usize(img.0.as_ptr() as usize);
+        let tup =
+            wholerow_datum_tuple(cx.mcx(), datum, types_rel::RELKIND_FOREIGN_TABLE, FT_OID)
+                .unwrap();
+        assert_eq!(tup.header_ptr(), img.0.as_ptr());
+        assert_eq!(tup.t_len, LEN as u32);
+        assert_eq!(tup.t_tableOid, FT_OID);
+        assert!(!ItemPointerIsValid(&tup.t_self));
+        assert_eq!(tup.t_data().type_id(), RECORDOID);
+        assert_eq!(tup.t_data().t_hoff as usize, HOFF);
+        let view = wholerow_datum_tuple(cx.mcx(), datum, types_rel::RELKIND_VIEW, FT_OID).unwrap();
+        assert_eq!(view.t_tableOid, types_core::InvalidOid);
+    }
+
+    // heap_fill_tuple's short-varlena repack: 1B header, payload at an odd address.
+    #[test]
+    fn packed_unaligned_image_is_flattened() {
+        let cx = mcx_root();
+        let img = composite_image();
+        let short_len = LEN - varatt::VARHDRSZ + varatt::VARHDRSZ_SHORT;
+        let mut buf = [0u8; LEN + 8];
+        // SAFETY: buf[1] is a writable byte.
+        unsafe { varatt::set_varsize_short(buf.as_mut_ptr().add(1), short_len) };
+        buf[2..2 + LEN - varatt::VARHDRSZ].copy_from_slice(&img[varatt::VARHDRSZ..]);
+        let packed = buf[1..].as_ptr();
+        assert_ne!(packed as usize % core::mem::align_of::<HeapTupleHeaderData>(), 0);
+        let datum = Datum::from_usize(packed as usize);
+        let tup =
+            wholerow_datum_tuple(cx.mcx(), datum, types_rel::RELKIND_FOREIGN_TABLE, FT_OID)
+                .unwrap();
+        assert_ne!(tup.header_ptr(), packed);
+        assert_eq!(tup.header_ptr() as usize % core::mem::align_of::<HeapTupleHeaderData>(), 0);
+        assert_eq!(tup.t_tableOid, FT_OID);
+        assert_eq!(tup.t_len, LEN as u32);
+        assert_eq!(tup.t_data().datum_length(), LEN as u32);
+        assert_eq!(tup.t_data().type_id(), RECORDOID);
+        assert_eq!(tup.t_data().typmod(), -1);
+        assert_eq!(tup.t_data().t_hoff as usize, HOFF);
+        // SAFETY: the flat image is LEN readable bytes (datum_length).
+        let flat = unsafe { core::slice::from_raw_parts(tup.header_ptr(), LEN) };
+        assert_eq!(flat, &img);
+    }
 }
 
 // GetTupleForTrigger outcomes MERGE must tell apart: C's ExecMergeMatched
