@@ -11,7 +11,7 @@ use types_error::{
 use types_fmgr::{cstring_result, FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
 use types_tuple::varatt;
 
-use crate::funcs::{detoasted_image, image_datum};
+use crate::funcs::{build_state_array, detoasted_image, image_datum, StateArray};
 use crate::half::*;
 use crate::halfutils::{float4_to_half_unchecked, half_is_inf, half_is_zero};
 use crate::vec::{
@@ -489,4 +489,102 @@ pub fn fc_halfvec_subvector(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
         r.set_raw(i, a.raw((start - 1) as usize + i));
     }
     Ok(image_datum(r.image()))
+}
+
+// ---- Task 6: comparisons, aggregates ----
+// Mirrors funcs.rs's fc_vector_lt..cmp / fc_vector_accum / fc_vector_avg
+// exactly (per $S/src/halfvec.c halfvec_lt..cmp ~1000-1070,
+// halfvec_accum/halfvec_avg ~1100-1190), swapping VecView for HalfVecView and
+// vector_cmp_internal for half.rs's cmp_internal. The aggregate transition
+// state is float8[] shared with vector's (halfvec_combine in the extension
+// SQL is literally vector_combine), so fc_vector_accum's StateArray/
+// build_state_array helpers (funcs.rs, made pub(crate) for this) are reused
+// verbatim; only the per-element read (HalfVecView::x) and, in halfvec_avg,
+// the final write (HalfVecBuilder::set, C: Float4ToHalf) differ.
+
+pub fn fc_halfvec_lt(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let (a, b) = binary_2arg(fcinfo)?;
+    Ok(Datum::from_bool(cmp_internal(&a, &b) < 0))
+}
+
+pub fn fc_halfvec_le(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let (a, b) = binary_2arg(fcinfo)?;
+    Ok(Datum::from_bool(cmp_internal(&a, &b) <= 0))
+}
+
+pub fn fc_halfvec_eq(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let (a, b) = binary_2arg(fcinfo)?;
+    Ok(Datum::from_bool(cmp_internal(&a, &b) == 0))
+}
+
+pub fn fc_halfvec_ne(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let (a, b) = binary_2arg(fcinfo)?;
+    Ok(Datum::from_bool(cmp_internal(&a, &b) != 0))
+}
+
+pub fn fc_halfvec_ge(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let (a, b) = binary_2arg(fcinfo)?;
+    Ok(Datum::from_bool(cmp_internal(&a, &b) >= 0))
+}
+
+pub fn fc_halfvec_gt(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let (a, b) = binary_2arg(fcinfo)?;
+    Ok(Datum::from_bool(cmp_internal(&a, &b) > 0))
+}
+
+pub fn fc_halfvec_cmp(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let (a, b) = binary_2arg(fcinfo)?;
+    Ok(Datum::from_i32(cmp_internal(&a, &b)))
+}
+
+pub fn fc_halfvec_accum(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let mcx = fcinfo.result_mcx();
+    let state = StateArray::check(mcx, fcinfo.arg(0), "halfvec_accum")?;
+    // SAFETY: strict fn — arg1 halfvec.
+    let newval = unsafe { arg_halfvec(fcinfo, 1)? };
+
+    let mut dim = state.state_dims();
+    let newarr = dim == 0;
+    if newarr {
+        dim = newval.dim();
+    } else {
+        check_expected_dim(dim as i32, newval.dim())?;
+    }
+
+    let n = state.value(0) + 1.0;
+    let mut datums: PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, dim + 1)?;
+    datums.push(Datum::from_f64(n));
+    if newarr {
+        for i in 0..dim {
+            datums.push(Datum::from_f64(newval.x(i) as f64));
+        }
+    } else {
+        for i in 0..dim {
+            let v = state.value(i + 1) + newval.x(i) as f64;
+            if v.is_infinite() {
+                return Err(Box::new(adt_float::float_overflow_error()));
+            }
+            datums.push(Datum::from_f64(v));
+        }
+    }
+    Ok(image_datum(build_state_array(mcx, &datums)?))
+}
+
+pub fn fc_halfvec_avg(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let mcx = fcinfo.result_mcx();
+    let state = StateArray::check(mcx, fcinfo.arg(0), "halfvec_avg")?;
+    let n = state.value(0);
+    if n == 0.0 {
+        fcinfo.isnull = true;
+        return Ok(Datum::null());
+    }
+    let dim = state.state_dims();
+    check_dim(dim)?;
+    let mut b = HalfVecBuilder::new(mcx, dim)?;
+    for i in 0..dim {
+        // C: Float4ToHalf(statevalues[i + 1] / n) then CheckElement.
+        b.set(i, (state.value(i + 1) / n) as f32)?;
+        check_element(b.get_raw(i))?;
+    }
+    Ok(image_datum(b.image()))
 }
