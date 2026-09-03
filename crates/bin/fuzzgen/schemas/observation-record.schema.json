@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pgrust.dev/schemas/sitediff/observation-record.schema.json",
+  "title": "ObservationRecord",
+  "description": "What one side observed for one step: every backend message lossless, attributed log lines, panic/crash/hang, probe decks, B-only counters. Plan v2 sections 3.2, 4.1-4.5. Rust twin: contracts.rs ObservationRecord.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["scenario", "seq", "session", "side", "wire", "liveness", "ms", "version"],
+  "properties": {
+    "scenario": { "type": "string" },
+    "seq": { "type": "integer", "minimum": 0 },
+    "session": { "type": "string" },
+    "side": { "type": "string", "enum": ["a", "b"] },
+    "wire": { "type": "array", "items": { "$ref": "#/$defs/wireMsg" } },
+    "log": { "type": "array", "items": { "$ref": "#/$defs/logLine" } },
+    "panic": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["site", "message"],
+      "properties": {
+        "site": { "type": "string", "description": "The `panicked at <site>` Rust location." },
+        "message": { "$ref": "#/$defs/bytes" },
+        "query": { "$ref": "#/$defs/bytesOrNull", "description": "The `panicking backend query:` payload." }
+      }
+    },
+    "crash": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["side", "generation"],
+      "properties": {
+        "side": { "type": "string", "enum": ["a", "b"] },
+        "generation": { "type": "integer", "minimum": 0 },
+        "signal": { "type": ["string", "null"] },
+        "log_tail": { "type": "array", "items": { "$ref": "#/$defs/bytes" } }
+      }
+    },
+    "hang": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["ms"],
+      "properties": {
+        "ms": { "type": "integer", "minimum": 0 },
+        "ladder": { "type": ["string", "null"], "enum": ["cancel", "terminate", "sigkill", null] }
+      }
+    },
+    "probes": {
+      "type": "object",
+      "description": "Deck name (catalog, invariants, locks, physical, stats, artifacts, decode, amcheck, admission) -> the deck's own JSON result.",
+      "additionalProperties": true
+    },
+    "server": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "alloc_calls": { "type": ["integer", "null"], "minimum": 0 },
+        "alloc_bytes": { "type": ["integer", "null"], "minimum": 0 },
+        "live_bytes": { "type": ["integer", "null"], "minimum": 0 },
+        "committed_bytes": { "type": ["integer", "null"], "minimum": 0 },
+        "rss_kb": { "type": ["integer", "null"], "minimum": 0, "description": "Reported, never gated." },
+        "footprint": { "type": ["integer", "null"], "minimum": 0, "description": "mcx::global_footprint::bytes() via `pgrust: memctx`." }
+      }
+    },
+    "liveness": { "type": "string", "enum": ["ok", "reconnected", "dead", "post-crash"] },
+    "ms": { "type": "integer", "minimum": 0, "description": "Wall time; reported, never compared." },
+    "version": { "type": "string", "description": "SHOW server_version of this side; side a must be 18.6." }
+  },
+  "$defs": {
+    "bytes": {
+      "oneOf": [
+        { "type": "string" },
+        { "type": "object", "additionalProperties": false, "required": ["hex"], "properties": { "hex": { "type": "string", "pattern": "^([0-9a-f]{2})*$" } } }
+      ]
+    },
+    "bytesOrNull": { "oneOf": [ { "$ref": "#/$defs/bytes" }, { "type": "null" } ] },
+    "errFields": {
+      "description": "ErrorResponse/NoticeResponse fields keyed by the one-byte field code (S V C M D H P p q W s t c d n F L R), values raw.",
+      "type": "object",
+      "propertyNames": { "pattern": "^[A-Za-z]$" },
+      "additionalProperties": { "$ref": "#/$defs/bytes" }
+    },
+    "column": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "tableoid", "attnum", "typoid", "typlen", "typmod", "fmt"],
+      "properties": {
+        "name": { "$ref": "#/$defs/bytes" },
+        "tableoid": { "type": "integer" },
+        "attnum": { "type": "integer" },
+        "typoid": { "type": "integer" },
+        "typlen": { "type": "integer" },
+        "typmod": { "type": "integer" },
+        "fmt": { "type": "integer", "enum": [0, 1] }
+      }
+    },
+    "wireMsg": {
+      "description": "One backend message; `t` is the protocol type byte. E/N carry `fields`; T `columns`; D `cells`; C `tag`; S `name`+`value`; A `pid`+`channel`+`payload`; K `pid`+`key` (hex); Z `status`; t `typoids`; G/H `fmt`+`col_fmts`; d `data`; R `kind`+`data` (hex); v `minor`+`unknown_options`; I 1 2 3 n s c carry nothing; anything else is raw `data` (hex).",
+      "type": "object",
+      "required": ["t"],
+      "properties": {
+        "t": { "type": "string", "minLength": 1, "maxLength": 1 },
+        "fields": { "$ref": "#/$defs/errFields" },
+        "columns": { "type": "array", "items": { "$ref": "#/$defs/column" } },
+        "cells": { "type": "array", "items": { "$ref": "#/$defs/bytesOrNull" } },
+        "tag": { "$ref": "#/$defs/bytes" },
+        "name": { "$ref": "#/$defs/bytes" },
+        "value": { "$ref": "#/$defs/bytes" },
+        "pid": { "type": "integer", "minimum": 0 },
+        "channel": { "$ref": "#/$defs/bytes" },
+        "payload": { "$ref": "#/$defs/bytes" },
+        "key": { "type": "string", "pattern": "^([0-9a-f]{2})*$" },
+        "status": { "type": "string", "enum": ["I", "T", "E"] },
+        "typoids": { "type": "array", "items": { "type": "integer" } },
+        "fmt": { "type": "integer" },
+        "col_fmts": { "type": "array", "items": { "type": "integer" } },
+        "data": { "oneOf": [ { "$ref": "#/$defs/bytes" }, { "type": "string", "pattern": "^([0-9a-f]{2})*$" } ] },
+        "kind": { "type": "integer" },
+        "minor": { "type": "integer" },
+        "unknown_options": { "type": "array", "items": { "$ref": "#/$defs/bytes" } }
+      }
+    },
+    "logLine": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "raw"],
+      "properties": {
+        "source": { "type": "string", "enum": ["stderr", "csvlog", "jsonlog"] },
+        "raw": { "$ref": "#/$defs/bytes" },
+        "ts": { "type": ["string", "null"] },
+        "backend_type": { "type": ["string", "null"] },
+        "pid": { "type": ["integer", "null"] },
+        "app": { "type": ["string", "null"] },
+        "level": { "type": ["string", "null"] },
+        "sqlstate": { "type": ["string", "null"] },
+        "message": { "$ref": "#/$defs/bytesOrNull" },
+        "location": { "type": ["string", "null"], "description": "LOCATION under log_error_verbosity=verbose (the A witness)." }
+      }
+    }
+  }
+}

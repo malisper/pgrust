@@ -26,6 +26,17 @@
 //!     6 executions to cross the custom-plan -> generic-plan flip at 5.
 //!     Groups are self-contained (always DEALLOCATE at the end), so the
 //!     fixed statement name can never collide across groups.
+//!   - `cmm:` session co-draw (sitediff plan §6 conf row / §9 M0; lane
+//!     L0.4): `SET client_min_messages = <notice|log|debug1|debug2>` as a
+//!     SESSION production — deliberately NOT bracketed by a RESET, so every
+//!     later statement of the stream (any module) runs under that level
+//!     until the next `util:reset_all` / cfgm `RESET ALL`. `cmm:log`
+//!     co-draws `SET log_statement = 'all'` and
+//!     `SET log_min_duration_statement = 0` (postgres-1/-2). Sound on the
+//!     differential bar: both sides receive the identical SET, so the
+//!     NOTICE/LOG/DEBUG messages it unmasks on the wire are exactly the
+//!     O-NOTICE plane the plan wants compared (postgres-8 needs debug1/2,
+//!     which the cfgm bracket restores before the next statement).
 //!
 //! Everything here is either a Command-tag statement (SET/RESET/VACUUM/...:
 //! compared by tag+count) or a deterministic rowset (SHOW, EXECUTE), so the
@@ -78,7 +89,35 @@ const SHAPES: &[&str] = &[
     "util:comment:column",
     "util:prepare",
     "util:sysview",
+    "util:cmm",
 ];
+
+/// `cmm:` levels (sitediff plan §6): the client_min_messages value is the
+/// production suffix; `cmm:log` additionally co-draws the two statement-
+/// logging GUCs. Each entry is a weight in `weights::PROD_WEIGHTS`.
+pub const CMM_LEVELS: &[&str] = &["cmm:notice", "cmm:log", "cmm:debug1", "cmm:debug2"];
+
+/// The `cmm:` session co-draw (see the module docs). Shared with the cfgm
+/// module's `cfgm:cmm` shape so the production is reachable from both
+/// modules; fires `cmm` and `cmm:<level>`.
+pub fn gen_cmm(g: &mut Gen) -> Vec<StmtKind> {
+    g.fire("cmm");
+    let level = g.weights.pick(g.rng, CMM_LEVELS);
+    g.fire(level);
+    let value = &level["cmm:".len()..];
+    let mut out = vec![StmtKind::Raw(format!("SET client_min_messages = {value};"))];
+    if value == "log" {
+        out.push(StmtKind::Raw("SET log_statement = 'all';".to_string()));
+        out.push(StmtKind::Raw("SET log_min_duration_statement = 0;".to_string()));
+    }
+    out
+}
+
+/// True when `sql` is the first statement of a `cmm:` group (used by the
+/// module tests to exempt the one deliberately unbracketed SET).
+pub fn is_cmm_set(sql: &str) -> bool {
+    sql.starts_with("SET client_min_messages = ")
+}
 
 /// System-view probes (X1 gap: pg_lock_status rank 14, pg_stat_get_activity
 /// rank 19): SELECTs over pg_locks / pg_stat_activity-shaped views with
@@ -95,7 +134,9 @@ const SHAPES: &[&str] = &[
 /// divergence — the standing rig recipe runs the pgrust server with
 /// `-c max_stack_depth=60000` under `ulimit -s 65520` (as every
 /// scripts/*-e2e.sh does), and under it these probes agree exactly. A
-/// diffrunner leg that reports a 54001 flood is a misconfigured rig.
+/// diffrunner leg that reports a 54001 flood is a misconfigured rig — except
+/// under the sitediff `unpinned-stack` cell (scripts/sitediff-cell.sh), which
+/// drops the pin on purpose to observe that band.
 const SYSVIEW_PROBES: &[(&str, &str)] = &[
     // A session scanning pg_locks always holds at least its own lock.
     ("locks_any", "SELECT count(*) > 0 FROM pg_locks;"),
@@ -205,6 +246,7 @@ pub fn gen_util_module(g: &mut Gen) -> Vec<StmtKind> {
                 vec![raw(sql.to_string())]
             }
         }
+        "util:cmm" => gen_cmm(g),
         "util:comment:table" => {
             let t = g.pick_table().name.clone();
             let txt = comment_text(g);
@@ -266,13 +308,39 @@ mod tests {
 
     #[test]
     fn shapes_and_invariants() {
-        let (groups, prods) = gen_groups(0xE1u64, 600, &WeightTable::defaults());
+        // 2000 groups: util:checkpoint weighs 0.1 of ~20, so a smaller
+        // sample can legitimately miss it.
+        let (groups, prods) = gen_groups(0xE1u64, 2000, &WeightTable::defaults());
         for group in &groups {
             for sql in group {
                 assert!(sql.ends_with(';'), "{sql}");
                 assert!(!sql.contains('\n'), "{sql}");
             }
             let first = &group[0];
+            if is_cmm_set(first) {
+                // cmm: session co-draw — one SET (three under cmm:log), no
+                // RESET, only the four levels.
+                let level = first
+                    .strip_prefix("SET client_min_messages = ")
+                    .and_then(|r| r.strip_suffix(';'))
+                    .unwrap();
+                assert!(
+                    CMM_LEVELS.iter().any(|l| &l["cmm:".len()..] == level),
+                    "unknown cmm level in {group:?}"
+                );
+                if level == "log" {
+                    assert_eq!(
+                        &group[1..],
+                        &[
+                            "SET log_statement = 'all';".to_string(),
+                            "SET log_min_duration_statement = 0;".to_string()
+                        ]
+                    );
+                } else {
+                    assert_eq!(group.len(), 1, "{group:?}");
+                }
+                continue;
+            }
             if first.starts_with("PREPARE") {
                 // Bracket: PREPARE, then only EXECUTEs, then DEALLOCATE.
                 assert_eq!(group.last().unwrap(), "DEALLOCATE fzp;");
@@ -308,8 +376,67 @@ mod tests {
             assert!(prods.iter().any(|q| q == p), "shape {p} never fired");
         }
         for p in ["util", "util:prepare:once", "util:prepare:many", "util:comment:text",
-                  "util:comment:null"] {
+                  "util:comment:null", "cmm"] {
             assert!(prods.iter().any(|q| q == p), "production {p} never fired");
+        }
+    }
+
+    /// `cmm:` co-draw under an exclusive weight: every level fires, the
+    /// log level always carries its two statement-logging co-draws, and no
+    /// group ever RESETs the level (it is a session production).
+    #[test]
+    fn cmm_codraw_levels_and_log_companions() {
+        let w = WeightTable::parse(
+            "util:set=0,util:reset=0,util:reset_all=0,util:show=0,util:discard:plans=0,\
+             util:discard:sequences=0,util:vacuum=0,util:analyze=0,util:checkpoint=0,\
+             util:comment:table=0,util:comment:column=0,util:sysview=0,util:prepare=0,util:cmm=1",
+        )
+        .unwrap();
+        let (groups, prods) = gen_groups(0xC33, 200, &w);
+        for group in &groups {
+            assert!(is_cmm_set(&group[0]), "{group:?}");
+            assert!(!group.iter().any(|s| s.starts_with("RESET")), "{group:?}");
+            let is_log = group[0] == "SET client_min_messages = log;";
+            assert_eq!(group.len(), if is_log { 3 } else { 1 }, "{group:?}");
+        }
+        for level in CMM_LEVELS {
+            assert!(prods.iter().any(|p| p == level), "{level} never fired");
+        }
+    }
+
+    /// Reachability in the M0 cells (plan §9): a default-weight, all-modules
+    /// session stream contains the `cmm` production, and the cmm:log
+    /// companions ride along in the same group. Same seed + same weights =
+    /// same stream, so the assertion is deterministic.
+    #[test]
+    fn cmm_codraw_reachable_in_default_session() {
+        use crate::session::{run_session, SessionConfig};
+        use crate::toggles::ToggleVector;
+        let cat = FixtureCatalog.load_catalog().unwrap();
+        let cfg = SessionConfig {
+            seed: 0xC300,
+            toggles: ToggleVector::all_on(),
+            weights: WeightTable::defaults(),
+            budget: 40_000,
+            max_depth: 3,
+        };
+        let stmts = run_session(&cfg, &cat);
+        let cmm: Vec<_> = stmts
+            .iter()
+            .filter(|s| s.productions.iter().any(|p| p == "cmm"))
+            .collect();
+        assert!(!cmm.is_empty(), "cmm never fired in a 40k default all-on stream");
+        assert!(cmm.iter().any(|s| is_cmm_set(&s.sql)), "cmm group without its SET");
+        for s in &cmm {
+            if s.productions.iter().any(|p| p == "cmm:log") {
+                let sql = &s.sql;
+                assert!(
+                    sql == "SET client_min_messages = log;"
+                        || sql == "SET log_statement = 'all';"
+                        || sql == "SET log_min_duration_statement = 0;",
+                    "unexpected statement in a cmm:log group: {sql}"
+                );
+            }
         }
     }
 
@@ -318,7 +445,7 @@ mod tests {
         let w = WeightTable::parse(
             "util:set=0,util:reset=0,util:reset_all=0,util:show=0,util:discard:plans=0,\
              util:discard:sequences=0,util:vacuum=0,util:analyze=0,util:checkpoint=0,\
-             util:comment:table=0,util:comment:column=0,util:sysview=0,util:prepare=1",
+             util:comment:table=0,util:comment:column=0,util:sysview=0,util:cmm=0,util:prepare=1",
         )
         .unwrap();
         let (groups, _) = gen_groups(9, 100, &w);
@@ -343,7 +470,7 @@ mod tests {
         let w = WeightTable::parse(
             "util:set=0,util:reset=0,util:reset_all=0,util:show=0,util:discard:plans=0,\
              util:discard:sequences=0,util:vacuum=0,util:analyze=0,util:checkpoint=0,\
-             util:comment:table=0,util:comment:column=0,util:prepare=0,util:sysview=1",
+             util:comment:table=0,util:comment:column=0,util:prepare=0,util:cmm=0,util:sysview=1",
         )
         .unwrap();
         let (groups, prods) = gen_groups(0x51E7, 400, &w);

@@ -1,0 +1,116 @@
+{
+  "crash": null,
+  "hang": null,
+  "liveness": "ok",
+  "log": [],
+  "ms": 12,
+  "panic": null,
+  "probes": {
+    "stats": {
+      "pg_stat_user_tables.t.analyze_count": 1
+    }
+  },
+  "scenario": "seed-3878502244648856050/cell-base",
+  "seq": 7,
+  "server": null,
+  "session": "s1",
+  "side": "a",
+  "version": "18.6",
+  "wire": [
+    {
+      "name": "client_encoding",
+      "t": "S",
+      "value": "UTF8"
+    },
+    {
+      "key": "1f9a007c",
+      "pid": 41233,
+      "t": "K"
+    },
+    {
+      "fields": {
+        "C": "00000",
+        "F": "analyze.c",
+        "L": "319",
+        "M": "analyzing \"public.t\"",
+        "R": "do_analyze_rel",
+        "S": "INFO",
+        "V": "INFO"
+      },
+      "t": "N"
+    },
+    {
+      "fields": {
+        "C": "00000",
+        "F": "analyze.c",
+        "L": "1352",
+        "M": "\"t\": scanned 1 of 1 pages, containing 10 live rows and 0 dead rows; 10 rows in sample, 10 estimated total rows",
+        "R": "acquire_sample_rows",
+        "S": "INFO",
+        "V": "INFO"
+      },
+      "t": "N"
+    },
+    {
+      "t": "C",
+      "tag": "ANALYZE"
+    },
+    {
+      "status": "I",
+      "t": "Z"
+    },
+    {
+      "columns": [
+        {
+          "attnum": 1,
+          "fmt": 0,
+          "name": "a",
+          "tableoid": 16401,
+          "typlen": 4,
+          "typmod": -1,
+          "typoid": 23
+        },
+        {
+          "attnum": 0,
+          "fmt": 0,
+          "name": "?column?",
+          "tableoid": 0,
+          "typlen": -1,
+          "typmod": -1,
+          "typoid": 25
+        }
+      ],
+      "t": "T"
+    },
+    {
+      "cells": [
+        "1",
+        null
+      ],
+      "t": "D"
+    },
+    {
+      "cells": [
+        "2",
+        {
+          "hex": "ff0041"
+        }
+      ],
+      "t": "D"
+    },
+    {
+      "t": "C",
+      "tag": "SELECT 2"
+    },
+    {
+      "channel": "fz_chan",
+      "payload": "hello",
+      "pid": 41233,
+      "t": "A"
+    },
+    {
+      "status": "I",
+      "t": "Z"
+    }
+  ]
+}

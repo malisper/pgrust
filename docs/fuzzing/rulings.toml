@@ -1,0 +1,345 @@
+# sitediff rulings ledger (plan §4.2). One [[ruling]] per row; first match
+# wins; a ruling covers exactly one plane; every ruled hit is still recorded
+# as ruled:<id>. Only cosmetic/HINT rulings carry `expires`. `hits` is
+# maintained by `sitediff rulings audit`. Schema: crates/bin/fuzzgen/schemas/rulings.schema.json
+#
+# Policy (owner-serial; crates/bin/fuzzgen/src/rulings.rs is the reader):
+#   plane   one of wire:E wire:N rows explain meta tag notify log copy
+#           probe:<deck>; a ruling never covers a second plane.
+#   stmt    case-insensitive regex searched over the whitespace-normalized
+#           step SQL (anchor with ^ for a statement kind).
+#   field   with a/b regexes: the plane field the regexes test on each side
+#           (absent value = ""; wire:E/wire:N offer the raw fields plus
+#           CM = "<sqlstate>: <message>"); without regexes: the divergence's
+#           differing-field set must be exactly {field}. Structural masks the
+#           comparator implements are ruled by that shape: rows ulp | soft |
+#           oid-literal | toast-name | binary-udt-oid | cmp-sign, explain
+#           counter | timing | planning-buffers | materialize, rows order |
+#           count | cell.
+#   expires only cosmetic rulings (wire:E/wire:N field H or R; log prefix
+#           fields) carry it, as created + 45 d + (ISO week of created mod 4)
+#           x 7 d; the reader rejects any other row carrying one, and a
+#           cosmetic row without one.
+#   audit   hard-fails on stale rows (0 hits over the last 5 CI cluster runs) and
+#           warns with a renewal queue on rows past `expires` that still fire.
+#   order   rows are tried top to bottom; put the narrower scope first
+#           (copy-order before tie-ordering).
+
+[[ruling]]
+id = "b1-float-ulp"
+plane = "rows"
+field = "ulp"
+ref = "B1 float-reassociation ruling: float surfaces compare by ulp, not text (structural mask `ulp`: cells equal within ulp_tol on float/geometry columns)"
+owner = "fuzzgen ruled.rs (migrated by L0.0; regexes sharpened by L0.2)"
+created = "2026-09-02"
+hits = 0
+
+[[ruling]]
+id = "b1-float-agg-soft"
+plane = "rows"
+field = "soft"
+ref = "B1 float-reassociation ruling: order-sensitive float aggregate result columns are ruled-soft (structural mask `soft`: generator-marked soft columns accept any two float values)"
+owner = "fuzzgen ruled.rs (migrated by L0.0; regexes sharpened by L0.2)"
+created = "2026-09-02"
+hits = 0
+
+[[ruling]]
+id = "copy-order"
+plane = "rows"
+field = "order"
+stmt = "^COPY\\b"
+ref = "COPY order ruling: COPY/heap row order is nondeterministic, non-surface (multiset-equal only; never under ordered: total)"
+owner = "fuzzgen ruled.rs (migrated by L0.0; regexes sharpened by L0.2)"
+created = "2026-09-02"
+hits = 0
+
+[[ruling]]
+id = "explain-counter"
+plane = "explain"
+field = "counter"
+stmt = "^EXPLAIN\\b"
+ref = "EXPLAIN runtime resource counters are implementation state, never compared; plan structure under COSTS OFF still compares strictly (structural mask `counter`: diff.rs normalize_explain_cell)"
+owner = "fuzzgen ruled.rs (migrated by L0.0; regexes sharpened by L0.2)"
+created = "2026-09-02"
+hits = 0
+
+[[ruling]]
+id = "explain-timing"
+plane = "explain"
+field = "timing"
+stmt = "^EXPLAIN\\b"
+ref = "EXPLAIN ANALYZE wall-clock timing text is never comparable; opt-in lanes only (gramwalk, --mask-explain-timing); actual rows still compare (structural mask `timing`)"
+owner = "fuzzgen ruled.rs (migrated by L0.0; regexes sharpened by L0.2)"
+created = "2026-09-02"
+hits = 0
+
+[[ruling]]
+id = "explain-planning-buffers"
+plane = "explain"
+field = "planning-buffers"
+stmt = "^EXPLAIN\\b"
+ref = "EXPLAIN TEXT Planning: buffer-usage block presence is session cache state; node-level Buffers and Planning Time still compare (structural mask `planning-buffers`)"
+owner = "fuzzgen ruled.rs (migrated by L0.0; regexes sharpened by L0.2)"
+created = "2026-09-02"
+hits = 0
+
+[[ruling]]
+id = "xml-config"
+plane = "wire:E"
+field = "CM"
+a = "^0A000: unsupported XML feature$"
+b = "^(?!XX000:)"
+ref = "xml build-config ruling (LD1-N1): the pinned C oracle is built without libxml while pgrust dlopens libxml2; a pgrust XX000 on the same statement still escalates (delete only if the CI cluster oracle builds with libxml, plan Q4)"
+owner = "fuzzgen ruled.rs (migrated by L0.0; regexes sharpened by L0.2)"
+created = "2026-09-02"
+hits = 0
+
+[[ruling]]
+id = "guc-inventory"
+plane = "rows"
+field = "count"
+stmt = "^SHOW ALL\\b|^SELECT\\b.*\\bpg_settings\\b"
+ref = "GUC-inventory ruling: pg_settings / SHOW ALL row-count shape only (extra pgrust.* GUCs, retuned defaults; docs/design/env-to-guc.md); GUC values still compare strictly"
+owner = "fuzzgen ruled.rs (migrated by L0.0; regexes sharpened by L0.2)"
+created = "2026-09-02"
+hits = 0
+
+[[ruling]]
+id = "instance-config"
+plane = "rows"
+stmt = "\\b(pg_hba_file_rules|pg_ident_file_mappings|pg_file_settings|pg_shmem_allocations|pg_stat_progress_|pg_stat_activity|pg_locks|pg_stat_get_backend_)"
+ref = "round-9 FP-9/FP-9b/FP-10 instance-config ruling: pg_hba_file_rules / pg_ident_file_mappings / pg_file_settings / pg_shmem_allocations / pg_stat_progress_* / pg_stat_activity / pg_locks / pg_stat_get_backend_*() are instance state; rowset shape only, errors still compare"
+owner = "fuzzgen ruled.rs (migrated by L0.0; regexes sharpened by L0.2)"
+created = "2026-09-02"
+hits = 0
+
+[[ruling]]
+id = "encoding-carve"
+plane = "wire:E"
+field = "CM"
+a = "^(?!XX000:)"
+b = "^0A000: .*is not supported by pgrust; only \"UTF8\" and \"SQL_ASCII\" server encodings are accepted"
+ref = "UTF-8-only server-encoding carve, RATIFIED 2026-08-18 (docs/design/carve-ratifications.md §11): a B-side 0A000 carrying the carve citation carries no oracle signal; exact-message scope; an A-side XX000 still escalates"
+owner = "fuzzgen ruled.rs (migrated by L0.0; regexes sharpened by L0.2)"
+created = "2026-09-02"
+hits = 0
+
+[[ruling]]
+id = "instance-lsn"
+plane = "rows"
+stmt = "\\b(pg_backup_start|pg_backup_stop|pg_switch_wal|pg_create_restore_point)\\s*\\("
+ref = "round-9 instance-LSN ruling: backup-control LSNs (pg_backup_start/stop, pg_switch_wal, pg_create_restore_point) are cluster-local, never comparable"
+owner = "fuzzgen ruled.rs (migrated by L0.0; regexes sharpened by L0.2)"
+created = "2026-09-02"
+hits = 0
+
+[[ruling]]
+id = "lz4-config"
+plane = "wire:E"
+field = "CM"
+a = "^0A000: compression method lz4 not supported$"
+b = "^(?!XX000:)"
+ref = "round-9 lz4 build-config ruling (mirror of xml-config): a --without-lz4 oracle rejects 0A000 where pgrust is lz4-capable; a pgrust XX000 still escalates"
+owner = "fuzzgen ruled.rs (migrated by L0.0; regexes sharpened by L0.2)"
+created = "2026-09-02"
+hits = 0
+
+[[ruling]]
+id = "tid-input-upstream"
+plane = "wire:E"
+field = "CM"
+a = "^$"
+b = "^22P02: invalid input syntax for type tid"
+ref = "round-9 tid-input ruling (project owner): C 18.x tidin accepts malformed forms like '(0,)'; pgrust matches the upstream-fixed strict behavior; exact-signature scope, B-only 22P02 'invalid input syntax for type tid'"
+owner = "fuzzgen ruled.rs (migrated by L0.0; regexes sharpened by L0.2)"
+created = "2026-09-02"
+hits = 0
+
+[[ruling]]
+id = "shared-catalog-tcu"
+plane = "wire:E"
+field = "CM"
+b = "^XX000: tuple concurrently (updated|deleted)$"
+stmt = "^(ALTER (USER|ROLE|GROUP|DATABASE|TABLESPACE)|COMMENT ON (DATABASE|ROLE|TABLESPACE)|(CREATE|DROP) (ROLE|USER|GROUP)|DROP OWNED|(GRANT|REVOKE)\\b.*\\bON PARAMETER)\\b"
+ref = "shared-catalog concurrency ruling (2026-08-21 soak): XX000 'tuple concurrently updated/deleted' on shared-catalog DDL is C's own simple_heap_update race under concurrent drivers; any other XX000 escalates (B side; see shared-catalog-tcu-a)"
+owner = "fuzzgen ruled.rs (migrated by L0.0; regexes sharpened by L0.2)"
+created = "2026-09-02"
+hits = 0
+
+[[ruling]]
+id = "autoconf-shared-race"
+plane = "wire:E"
+field = "CM"
+b = "^F0000: could not parse contents of file \"postgresql\\.auto\\.conf\"$"
+stmt = "^ALTER SYSTEM\\b"
+ref = "round-10 RB-14 autoconf shared-state ruling: postgresql.auto.conf is instance-global; asymmetric F0000 under concurrent batches is write/read interleaving (notes/internal classification notes) (B side; see autoconf-shared-race-a)"
+owner = "fuzzgen ruled.rs (migrated by L0.0; regexes sharpened by L0.2)"
+created = "2026-09-02"
+hits = 0
+
+[[ruling]]
+id = "oid-literal"
+plane = "rows"
+field = "oid-literal"
+ref = "round-7 OID ruling: user-object OIDs (>= 16384) embedded as '<n>'::oid literals in deparse text are masked; all other text compares exactly (structural mask `oid-literal`)"
+owner = "fuzzgen ruled.rs (migrated by L0.0; regexes sharpened by L0.2)"
+created = "2026-09-02"
+hits = 0
+
+[[ruling]]
+id = "toast-name"
+plane = "rows"
+field = "toast-name"
+ref = "round-8 OID ruling: pg_toast_<n> relation names embed the owning table's user-range OID; builtin catalog toast names still compare exactly (structural mask `toast-name`)"
+owner = "fuzzgen ruled.rs (migrated by L0.0; regexes sharpened by L0.2)"
+created = "2026-09-02"
+hits = 0
+
+[[ruling]]
+id = "binary-udt-oid"
+plane = "rows"
+field = "binary-udt-oid"
+ref = "round-7 OID ruling: embedded user-range type oids in record_send/array_send binary images are masked structurally; every other byte of the image still compares exactly (structural mask `binary-udt-oid`)"
+owner = "fuzzgen ruled.rs (migrated by L0.0; regexes sharpened by L0.2)"
+created = "2026-09-02"
+hits = 0
+
+[[ruling]]
+id = "cmp-magnitude"
+plane = "rows"
+field = "cmp-sign"
+stmt = "[A-Za-z_][A-Za-z0-9_]*cmp\\s*\\("
+ref = "round-7 cmp-magnitude ruling: C's memcmp-convention *cmp() comparators return arbitrary magnitude; scope is direct *cmp() select-list calls with sign-equal int4 results (structural mask `cmp-sign`)"
+owner = "fuzzgen ruled.rs (migrated by L0.0; regexes sharpened by L0.2)"
+created = "2026-09-02"
+hits = 0
+
+[[ruling]]
+id = "parallel-worker-init"
+plane = "wire:E"
+field = "CM"
+a = "^$"
+b = "^55000: parallel worker failed to initialize$"
+ref = "round-7 asymmetric-fault ruling: thread-pause faults hit only the instrumented SUT, so B-only 55000 'parallel worker failed to initialize' is injected scheduling; liveness owned by the parallel canary"
+owner = "fuzzgen ruled.rs (migrated by L0.0; regexes sharpened by L0.2)"
+created = "2026-09-02"
+hits = 0
+
+[[ruling]]
+id = "fault-stmt-timeout"
+plane = "wire:E"
+field = "CM"
+a = "^$"
+b = "^57014: canceling statement due to statement timeout$"
+ref = "round-20 asymmetric-fault ruling: B-only 57014 statement-timeout under the decks' symmetric statement_timeout SETs is injected scheduling; exact-message scope"
+owner = "fuzzgen ruled.rs (migrated by L0.0; regexes sharpened by L0.2)"
+created = "2026-09-02"
+hits = 0
+
+[[ruling]]
+id = "drop-autovacuum-deadlock"
+plane = "wire:E"
+field = "CM"
+a = "^$"
+b = "^40P01: deadlock detected$"
+stmt = "^(DROP TABLE\\b|VACUUM ?(\\([^)]*\\bFULL\\b|FULL\\b))"
+ref = "round-20/r21 symmetric-race ruling: DROP TABLE / VACUUM FULL vs autovacuum-ANALYZE ancestor-stats propagation forms a hard lock cycle that 40P01s in C too; B-only visibility is fault-widened timing"
+owner = "fuzzgen ruled.rs (migrated by L0.0; regexes sharpened by L0.2)"
+created = "2026-09-02"
+hits = 0
+
+[[ruling]]
+id = "role-setting-shared-race"
+plane = "wire:E"
+field = "CM"
+a = "^$"
+b = "^23505: .*pg_db_role_setting_databaseid_rol_index"
+stmt = "^ALTER (ROLE|USER) ALL\\b"
+ref = "r21 symmetric-race ruling: concurrent ALTER ROLE ALL SET batches race the (0, 0) pg_db_role_setting singleton; C's AlterSetting is scan-then-insert with no unique-violation recovery"
+owner = "fuzzgen ruled.rs (migrated by L0.0; regexes sharpened by L0.2)"
+created = "2026-09-02"
+hits = 0
+
+[[ruling]]
+id = "scroll-materialize"
+plane = "explain"
+field = "materialize"
+stmt = "^EXPLAIN\\b.*\\bDECLARE\\b"
+ref = "SCROLL-Materialize ruling (round-9 RB-10, ratified Michael 2026-07-17, notes/se-wave10-integration.md §5 item 2): pgrust omits C's planner Materialize wrap for SCROLL cursors; the diff must vanish once the top-level wrap is stripped from A (structural mask `materialize`)"
+owner = "fuzzgen ruled.rs (migrated by L0.0; regexes sharpened by L0.2)"
+created = "2026-09-02"
+hits = 0
+
+[[ruling]]
+id = "tie-ordering"
+plane = "rows"
+field = "order"
+ref = "docs/conformance/tie-ordering.md: tie order under an underdetermined ORDER BY; multiset-equal only, never under ordered: total"
+owner = "fuzzgen ruled.rs (migrated by L0.0; regexes sharpened by L0.2)"
+created = "2026-09-02"
+hits = 0
+
+[[ruling]]
+id = "icu-config"
+plane = "wire:E"
+field = "CM"
+a = "^0A000: ICU is not supported in this build$"
+b = "^(?!XX000:)"
+ref = "ICU build-config ruling (mirror of xml-config; first LIVE sitediff smoke 2026-09-03, 4 hits on COLLATE unicode): the pinned C oracle is configured `./configure --without-icu --without-readline --without-zlib` (scripts/pgref-build.sh) while pgrust carries its ICU collations built in; a pgrust XX000 on the same statement still escalates (delete only if the oracle builds with ICU)"
+owner = "sitediff"
+created = "2026-09-03"
+hits = 0
+
+[[ruling]]
+id = "shared-catalog-tcu-a"
+plane = "wire:E"
+field = "CM"
+a = "^XX000: tuple concurrently (updated|deleted)$"
+stmt = "^(ALTER (USER|ROLE|GROUP|DATABASE|TABLESPACE)|COMMENT ON (DATABASE|ROLE|TABLESPACE)|(CREATE|DROP) (ROLE|USER|GROUP)|DROP OWNED|(GRANT|REVOKE)\\b.*\\bON PARAMETER)\\b"
+ref = "A-side half of shared-catalog-tcu: C raised the simple_heap_update race on shared-catalog DDL while pgrust did not; same scope"
+owner = "L0.2 diff/canon lane"
+created = "2026-09-02"
+hits = 0
+
+[[ruling]]
+id = "autoconf-shared-race-a"
+plane = "wire:E"
+field = "CM"
+a = "^F0000: could not parse contents of file \"postgresql\\.auto\\.conf\"$"
+stmt = "^ALTER SYSTEM\\b"
+ref = "A-side half of autoconf-shared-race: the racing batch's poisoning write landed on the C side first; same scope"
+owner = "L0.2 diff/canon lane"
+created = "2026-09-02"
+hits = 0
+
+[[ruling]]
+id = "guc-inventory-count"
+plane = "rows"
+field = "cell"
+a = "^\\d+$"
+b = "^\\d+$"
+stmt = "^SELECT\\b.*\\bcount\\s*\\(\\s*\\*\\s*\\)\\s*FROM\\s+pg_settings\\b"
+ref = "GUC-inventory ruling, count(*) rendering: the single integer cell of SELECT count(*) FROM pg_settings is the inventory size, same scope as guc-inventory"
+owner = "L0.2 diff/canon lane"
+created = "2026-09-02"
+hits = 0
+
+[[ruling]]
+id = "r-field"
+plane = "wire:E"
+field = "R"
+ref = "plan §4.1: the R (routine) field is compared under this cosmetic ruling with expiry; pgrust's routine names are Rust paths, not C function names, until the site map lands"
+owner = "L0.2 diff/canon lane"
+created = "2026-09-02"
+expires = "2026-10-17"
+hits = 0
+
+[[ruling]]
+id = "r-field-notice"
+plane = "wire:N"
+field = "R"
+ref = "plan §4.1: the R (routine) field on the notice stream, same ruling as r-field"
+owner = "L0.2 diff/canon lane"
+created = "2026-09-02"
+expires = "2026-10-17"
+hits = 0

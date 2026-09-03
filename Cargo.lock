@@ -6619,6 +6619,8 @@ dependencies = [
  "keywords",
  "mcx",
  "parser_seams",
+ "pg_md5",
+ "pg_sha2",
  "pgsync",
  "scan_fgram",
 ]

@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pgrust.dev/schemas/sitediff/finding.schema.json",
+  "title": "Finding",
+  "description": "findings/<id>.json: a classified, signed, reduced, verified divergence. Superset of the audit *.verified.json finding shape (its fields live under `audit`). Plan v2 sections 3.2, 8. Rust twin: contracts.rs Finding.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "plane", "class", "severity", "signature", "cell_id", "repro", "verified", "status"],
+  "properties": {
+    "id": { "type": "string" },
+    "plane": { "type": "string", "description": "wire:E | wire:N | wire:T | wire:D | wire:C | wire:S | wire:A | log | panic | crash | hang | probe:<deck> | server:<counter> | explain" },
+    "class": {
+      "type": "string",
+      "enum": ["crash", "missing-error", "spurious-error", "wrong-result", "wrong-sqlstate", "wrong-message", "wrong-position", "plan-shape", "missing-feature", "hang", "cosmetic", "leak", "alloc-policy"],
+      "description": "Audit vocabulary; `leak` and `alloc-policy` are proposed extensions pending the owner's ruling (docs/fuzzing/sitediff/VOCABULARY.md)."
+    },
+    "severity": { "type": "string", "enum": ["critical", "high", "medium", "low"] },
+    "signature": { "type": "string", "description": "plane | unit-or-message-template | sqlstate pair | field delta (+ Rust site when known)" },
+    "units": { "type": "array", "items": { "type": "string" } },
+    "recipe": { "type": ["string", "null"] },
+    "seed": { "type": ["integer", "null"], "minimum": 0 },
+    "cell_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "a": { "description": "Side A excerpt of the divergent plane, canonicalized." },
+    "b": { "description": "Side B excerpt of the divergent plane, canonicalized." },
+    "log_marks": { "type": "array", "items": { "type": "string" } },
+    "repro": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cases_sql", "cell_json"],
+      "properties": {
+        "cases_sql": { "type": "string" },
+        "cell_json": { "type": "string" },
+        "spec": { "type": ["string", "null"] }
+      }
+    },
+    "verified": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fresh_runs"],
+      "properties": {
+        "fresh_runs": { "type": "integer", "minimum": 0, "description": "Fresh-datadir re-runs that reproduced; 3 to bank." },
+        "independent": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["host_class", "pgrust_sha", "c_sha", "verdict"],
+          "properties": {
+            "host_class": { "type": "string" },
+            "pgrust_sha": { "type": "string" },
+            "c_sha": { "type": "string" },
+            "verdict": { "type": "string" }
+          }
+        }
+      }
+    },
+    "timing": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["settle_id", "machine_class", "n"],
+      "properties": {
+        "settle_id": { "type": "string" },
+        "machine_class": { "type": "string" },
+        "n": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "rule": { "type": ["string", "null"], "description": "rulings.toml id when status is RULED." },
+    "status": { "type": "string", "enum": ["NEW", "BANKED", "RULED", "DUP", "FLAKY", "LATENT", "TIMING"] },
+    "audit": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The audit-18.6 verified.json finding fields, verbatim.",
+      "properties": {
+        "site": { "type": ["string", "null"] },
+        "reproduced": { "type": ["boolean", "null"] },
+        "repro": { "type": ["string", "null"] },
+        "c_output": { "type": ["string", "null"] },
+        "pgrust_output": { "type": ["string", "null"] },
+        "rust_site": { "type": ["string", "null"] },
+        "already_tracked": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

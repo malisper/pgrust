@@ -20,6 +20,12 @@ path = "src/bin/diffrunner.rs"
 name = "covapply"
 path = "src/bin/covapply.rs"
 
+# sitediff (plan v2 §3.1, M0 integration): site runner over a live cell
+# (`smoke`, `--dry-run` over the contracts fixtures), `rulings audit`.
+[[bin]]
+name = "sitediff"
+path = "src/bin/sitediff.rs"
+
 [features]
 # Antithesis harness builds only: Rng::next_u64 draws from the SDK entropy
 # source so coverage-guided exploration steers the generator (see rng.rs).
@@ -29,6 +35,12 @@ antithesis = ["dep:antithesis_sdk"]
 [dependencies]
 antithesis_sdk = { version = "0.2.9", optional = true }
 pgsync = { path = "../../_support/pgsync" }
+# contracts: cell_id = sha256(canonical cell.json); the workspace sha2 port
+# (zero dependencies) instead of a crates.io sha2.
+pg_sha2 = { path = "../../common/sha2" }
+# client: md5 auth ladder rung (zero-dependency workspace port); SCRAM's
+# HMAC/PBKDF2 ride pg_sha2 directly (scram_common pulls backend seams).
+pg_md5 = { path = "../../common/md5" }
 # gramwalk: the grammar-derived generation module walks the SAME vendored
 # 18.3 bison automaton the parser runs on (gram_core::tables) and renders
 # terminals from the scanner's keyword list — no duplicated tables.

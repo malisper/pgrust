@@ -1,0 +1,39 @@
+{
+  "b_build": {
+    "features": [],
+    "profile": "dev"
+  },
+  "conf": {
+    "cmm": null,
+    "guc_pin": true,
+    "gucs": {},
+    "profile": "base"
+  },
+  "faults": "none",
+  "fs_fixtures": [],
+  "hba": {
+    "method": "trust",
+    "responders": [],
+    "rules": []
+  },
+  "host": "linux",
+  "initdb": {
+    "checksums": true,
+    "encoding": "UTF8",
+    "locale": "C"
+  },
+  "logging": {
+    "csvlog": false,
+    "jsonlog": false,
+    "min_messages": "warning",
+    "mode": "stderr",
+    "prefix": "%m %b[%p] %q%a ",
+    "timezone": "America/Los_Angeles"
+  },
+  "oracle": {
+    "variants": [],
+    "version": "REL_18_6"
+  },
+  "server_flags": [],
+  "topology": "single"
+}

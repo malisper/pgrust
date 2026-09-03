@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pgrust.dev/schemas/sitediff/step-record.schema.json",
+  "title": "StepRecord",
+  "description": "One generated step of a sitediff stream (JSONL line). Plan v2 section 3.2. Rust twin: crates/bin/fuzzgen/src/contracts.rs StepRecord.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["scenario", "seq", "session", "role", "kind", "ordered"],
+  "properties": {
+    "scenario": { "type": "string", "description": "Witness label: seed/toggles/weights/bank sha/cell_id rendered by the runner." },
+    "seq": { "type": "integer", "minimum": 0, "description": "Position in the stream; part of the witness." },
+    "session": { "type": "string", "description": "Session id (s1, s2, monitor)." },
+    "role": { "type": "string", "pattern": "^(superuser|owner|role=.+)$" },
+    "kind": {
+      "type": "string",
+      "pattern": "^(sql|xproto|copy_in|connect|disconnect|cancel|env:.+|probe:.+|storm|pressure|settle|sleep_until_blocked)$"
+    },
+    "sql": { "type": ["string", "null"] },
+    "xproto": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["mode", "params", "stmt", "portal", "limit", "describe"],
+      "properties": {
+        "mode": { "type": "string" },
+        "params": { "type": "array", "items": { "$ref": "#/$defs/bytesOrNull" } },
+        "stmt": { "type": "string" },
+        "portal": { "type": "string" },
+        "limit": { "type": "integer", "minimum": 0 },
+        "describe": { "type": "string", "enum": ["", "S", "P"] }
+      }
+    },
+    "productions": { "type": "array", "items": { "type": "string" } },
+    "targets": { "type": "array", "items": { "type": "string" }, "description": "Universe unit ids." },
+    "ordered": { "type": "string", "enum": ["total", "partial", "none"] },
+    "expect_c": { "type": ["string", "null"] },
+    "bracket": { "type": ["string", "null"] },
+    "recipe": { "type": ["string", "null"] },
+    "mutant": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["op", "seed"],
+      "properties": { "op": { "type": "string" }, "seed": { "type": "integer", "minimum": 0 } }
+    },
+    "slots": { "type": "object", "additionalProperties": { "type": "string" } }
+  },
+  "$defs": {
+    "bytes": {
+      "description": "Raw bytes: a JSON string when UTF-8 without control characters, else {\"hex\": ...}.",
+      "oneOf": [
+        { "type": "string" },
+        { "type": "object", "additionalProperties": false, "required": ["hex"], "properties": { "hex": { "type": "string", "pattern": "^([0-9a-f]{2})*$" } } }
+      ]
+    },
+    "bytesOrNull": { "oneOf": [ { "$ref": "#/$defs/bytes" }, { "type": "null" } ] }
+  }
+}

@@ -605,6 +605,17 @@ pub const PROD_WEIGHTS: &[ProdWeight] = &[
     // Utility module (X1): deterministic system-view probes (pg_locks,
     // pg_stat_activity-shaped views; volatile columns projected away).
     ProdWeight { name: "util:sysview", default: 1.5 },
+    // sitediff `cmm:` session co-draw (plan §6 conf row, lane L0.4): the
+    // util-module shape that emits a persistent SET client_min_messages,
+    // and the level split. Reachable from cfgm too (cfgm:cmm below). The
+    // log level is weighted with notice because it also co-draws
+    // log_statement=all + log_min_duration_statement=0 (postgres-1/-2);
+    // debug1/debug2 are the postgres-8 levels.
+    ProdWeight { name: "util:cmm", default: 1.0 },
+    ProdWeight { name: "cmm:notice", default: 2.0 },
+    ProdWeight { name: "cmm:log", default: 2.0 },
+    ProdWeight { name: "cmm:debug1", default: 1.5 },
+    ProdWeight { name: "cmm:debug2", default: 1.0 },
     // Partitioning module: action mix (prune SELECTs cheap and high-value;
     // drop low so parents live long enough for other modules to hit them).
     ProdWeight { name: "part:create", default: 3.0 },
@@ -2161,6 +2172,8 @@ pub const PROD_WEIGHTS: &[ProdWeight] = &[
     ProdWeight { name: "cfgm:txniso", default: 1.0 },
     ProdWeight { name: "cfgm:conv", default: 1.5 },
     ProdWeight { name: "cfgm:clienc", default: 1.0 },
+    // cfgm route into the sitediff cmm: session co-draw (util::gen_cmm).
+    ProdWeight { name: "cfgm:cmm", default: 1.0 },
     ProdWeight { name: "cfgm:ok", default: 6.0 },
     ProdWeight { name: "cfgm:err", default: 1.0 },
     // btbrin (W5-BTBRIN) shape picks: btree ALT-PATH + BRIN drain arms.

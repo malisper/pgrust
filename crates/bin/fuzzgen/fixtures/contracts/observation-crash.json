@@ -1,0 +1,75 @@
+{
+  "crash": {
+    "generation": 2,
+    "log_tail": [
+      "2026-09-02 10:20:41.902 PDT postmaster[41200]  LOG:  server process (PID 41233) was terminated by signal 6: Abort trap",
+      "2026-09-02 10:20:41.903 PDT postmaster[41200]  LOG:  all server processes terminated; reinitializing"
+    ],
+    "side": "b",
+    "signal": "SIGABRT"
+  },
+  "hang": null,
+  "liveness": "post-crash",
+  "log": [
+    {
+      "app": null,
+      "backend_type": null,
+      "level": null,
+      "location": null,
+      "message": null,
+      "pid": null,
+      "raw": "thread 'backend-19' panicked at crates/backend/commands/analyze/src/lib.rs:475:17:",
+      "source": "stderr",
+      "sqlstate": null,
+      "ts": null
+    },
+    {
+      "app": null,
+      "backend_type": null,
+      "level": null,
+      "location": null,
+      "message": null,
+      "pid": null,
+      "raw": "panicking backend query: ANALYZE t",
+      "source": "stderr",
+      "sqlstate": null,
+      "ts": null
+    }
+  ],
+  "ms": 20000,
+  "panic": {
+    "message": "index has 2 expressions but indexprs lists 1",
+    "query": "ANALYZE t",
+    "site": "crates/backend/commands/analyze/src/lib.rs:475:17"
+  },
+  "probes": {
+    "invariants": []
+  },
+  "scenario": "seed-3878502244648856050/cell-astm",
+  "seq": 118,
+  "server": {
+    "alloc_bytes": 2211840,
+    "alloc_calls": 18321,
+    "committed_bytes": 67108864,
+    "footprint": 1048576,
+    "live_bytes": 94208,
+    "rss_kb": 184320
+  },
+  "session": "s2",
+  "side": "b",
+  "version": "18.6 (pgrust b49a9debcb5)",
+  "wire": [
+    {
+      "fields": {
+        "C": "XX000",
+        "F": "lib.rs",
+        "L": "0",
+        "M": "index \"t_expr_idx\" has 2 expressions but indexprs lists 1",
+        "R": "examine_attribute",
+        "S": "FATAL",
+        "V": "FATAL"
+      },
+      "t": "E"
+    }
+  ]
+}

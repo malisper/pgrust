@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pgrust.dev/schemas/sitediff/recipe-header.schema.json",
+  "title": "RecipeHeader",
+  "description": "The `-- key: value` comment block at the top of recipes/<subsystem>/<cfile-stem>/<id>.sql, as parsed by contracts.rs RecipeHeader::parse. Lists are comma-separated in the file; `slots` is `name:type, ...`. Plan v2 section 3.2.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "targets", "env", "session", "protocol", "ordered", "oracle", "origin"],
+  "properties": {
+    "id": { "type": "string" },
+    "targets": { "type": "array", "items": { "type": "string" }, "description": "Universe unit ids." },
+    "env": { "type": "string", "description": "Cell name." },
+    "session": { "type": "string", "pattern": "^(superuser|owner|role=.+)$" },
+    "protocol": { "type": "string", "pattern": "^(simple|extended|raw:.+)$" },
+    "slots": { "type": "object", "additionalProperties": { "type": "string" } },
+    "provides": { "type": "array", "items": { "type": "string" } },
+    "requires": { "type": "array", "items": { "type": "string" } },
+    "ordered": { "type": "string", "enum": ["total", "partial", "none"] },
+    "expect_c": { "type": ["string", "null"] },
+    "oracle": { "type": "string", "pattern": "^(transcript|self:no-panic|self:invariant:.+|self:alloc-rows|self:mem-slope|xprofile:.+)$" },
+    "origin": { "type": "string", "pattern": "^(audit|mined:.+:[0-9]+|author|propagate:.+|catalog:.+)$" }
+  }
+}

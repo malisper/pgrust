@@ -1,0 +1,59 @@
+{
+  "a": {
+    "count": 3,
+    "first": {
+      "C": "00000",
+      "M": "analyzing \"public.t\"",
+      "S": "INFO"
+    }
+  },
+  "audit": {
+    "already_tracked": "None. docs/fuzzing/BUG-LEDGER.md has no ANALYZE VERBOSE / analyzing / finished analyzing row",
+    "c_output": "INFO:  00000: analyzing \"public.t\"\nINFO:  00000: \"t\": scanned 1 of 1 pages, containing 10 live rows and 0 dead rows; 10 rows in sample, 10 estimated total rows\nINFO:  00000: finished analyzing table \"postgres.public.t\" (+ usage lines, see analyze-2)\nANALYZE",
+    "pgrust_output": "ANALYZE   (no INFO line for any of the four statements, nor for (verbose true), (verbose), or the analyze half of VACUUM (VERBOSE, ANALYZE); catalog side effects identical: pg_statistic count 1 for t, relhassubclass f for p2 after the 1429 path)",
+    "repro": "create table t(a int); insert into t select g from generate_series(1,10) g;\nanalyze verbose t;\ncreate table p(a int); create table c() inherits (p); insert into c values (1);\nanalyze verbose only p;\ncreate table p2(a int); create table c2() inherits (p2); drop table c2;\nanalyze verbose p2;\ncreate table pt(a int) partition by list (a); create table pt1 partition of pt for values in (1) partition by list (a);\nanalyze verbose pt;",
+    "reproduced": true,
+    "rust_site": "crates/backend/commands/analyze/src/lib.rs: do_analyze_rel computes elevel (lib.rs:745-761) but only forwards it to the FDW acquire fn / acquire_inherited_sample_rows and never emits the 'analyzing' messages",
+    "site": "analyze.c:316, analyze.c:321, analyze.c:1345, analyze.c:1429, analyze.c:1527 (C LOCATION lines report the ereport closing lines 319/324/1352/1432/1530)"
+  },
+  "b": {
+    "count": 0,
+    "first": null
+  },
+  "cell_id": "570fe9f2f4618c9e5b693d955cfe040e02dded5edb2309ddb18a4d7ea2d7b96e",
+  "class": "wrong-message",
+  "id": "analyze-1",
+  "log_marks": [
+    "m-analyze-1-pre",
+    "m-analyze-1-post"
+  ],
+  "plane": "wire:N",
+  "recipe": "commands/analyze/analyze-1",
+  "repro": {
+    "cases_sql": "cases.sql",
+    "cell_json": "cell.json",
+    "spec": null
+  },
+  "rule": null,
+  "seed": null,
+  "severity": "medium",
+  "signature": "wire:N | analyzing \"%s\" | 00000/- | N.presence",
+  "status": "BANKED",
+  "timing": null,
+  "units": [
+    "ereport:analyze.c:316",
+    "ereport:analyze.c:321",
+    "ereport:analyze.c:1345",
+    "ereport:analyze.c:1429",
+    "ereport:analyze.c:1527"
+  ],
+  "verified": {
+    "fresh_runs": 3,
+    "independent": {
+      "c_sha": "724edf9b",
+      "host_class": "CI-box",
+      "pgrust_sha": "b49a9debcb5",
+      "verdict": "wrong-message"
+    }
+  }
+}

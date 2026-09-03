@@ -1,0 +1,29 @@
+{
+  "bracket": "txn-7",
+  "expect_c": "42601",
+  "kind": "sql",
+  "mutant": {
+    "op": "arity",
+    "seed": 91
+  },
+  "ordered": "none",
+  "productions": [
+    "dml.insert",
+    "dml.insert.values",
+    "expr.row"
+  ],
+  "recipe": "parser/analyze/parser_analyze-2",
+  "role": "superuser",
+  "scenario": "seed-3878502244648856050/cell-base",
+  "seq": 42,
+  "session": "s1",
+  "slots": {
+    "n": "17",
+    "tbl": "fz_hp_3"
+  },
+  "sql": "INSERT INTO fz_hp_3 (a, b) VALUES ((1, 2));",
+  "targets": [
+    "ereport:parser_analyze.c:1123"
+  ],
+  "xproto": null
+}

@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pgrust.dev/schemas/sitediff/rulings.schema.json",
+  "title": "Rulings",
+  "description": "docs/fuzzing/rulings.toml as a JSON object: {\"ruling\": [row, ...]} where each row is one [[ruling]] table. First match wins; one plane per ruling; only cosmetic/HINT rulings carry `expires`. Plan v2 section 4.2. Rust twin: contracts.rs Rulings/Ruling.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["ruling"],
+  "properties": {
+    "ruling": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "plane", "ref", "owner", "created", "hits"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+          "plane": { "type": "string", "description": "wire:E | wire:N | rows | explain | log | meta | tag | notify | probe:<deck> | server:<counter>" },
+          "field": { "type": ["string", "null"] },
+          "a": { "type": ["string", "null"], "description": "Regex the A-side value must match (null = any)." },
+          "b": { "type": ["string", "null"], "description": "Regex the B-side value must match (null = any)." },
+          "stmt": { "type": ["string", "null"], "description": "Statement-kind scope regex (null = any)." },
+          "ref": { "type": "string" },
+          "owner": { "type": "string" },
+          "created": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+          "expires": { "type": ["string", "null"], "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+          "hits": { "type": "integer", "minimum": 0 }
+        }
+      }
+    }
+  }
+}

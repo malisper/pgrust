@@ -1,0 +1,57 @@
+{
+  "crash": null,
+  "hang": null,
+  "liveness": "ok",
+  "log": [
+    {
+      "app": "fuzz",
+      "backend_type": "client backend",
+      "level": "ERROR",
+      "location": "ExecConstraints, execMain.c:1975",
+      "message": "null value in column \"a\" of relation \"t\" violates not-null constraint",
+      "pid": 41233,
+      "raw": "2026-09-02 10:14:03.117 PDT client backend[41233] fuzz ERROR:  23502: null value in column \"a\" of relation \"t\" violates not-null constraint",
+      "source": "stderr",
+      "sqlstate": "23502",
+      "ts": "2026-09-02 10:14:03.117 PDT"
+    }
+  ],
+  "ms": 3,
+  "panic": null,
+  "probes": {},
+  "scenario": "seed-3878502244648856050/cell-base",
+  "seq": 42,
+  "server": null,
+  "session": "s1",
+  "side": "a",
+  "version": "18.6",
+  "wire": [
+    {
+      "fields": {
+        "C": "23502",
+        "D": "Failing row contains (null, 1).",
+        "F": "execMain.c",
+        "H": "Supply a value for column \"a\" or drop the constraint.",
+        "L": "1975",
+        "M": "null value in column \"a\" of relation \"t\" violates not-null constraint",
+        "P": "1",
+        "R": "ExecConstraints",
+        "S": "ERROR",
+        "V": "ERROR",
+        "W": "PL/pgSQL function f() line 3 at EXECUTE",
+        "c": "t_a_not_null",
+        "d": "integer",
+        "n": "a",
+        "p": "13",
+        "q": "INSERT INTO t VALUES (NULL, 1)",
+        "s": "public",
+        "t": "t"
+      },
+      "t": "E"
+    },
+    {
+      "status": "E",
+      "t": "Z"
+    }
+  ]
+}

@@ -29,7 +29,12 @@
 //!     convert_from() calls, never in raw literals;
 //!   - no ALTER SYSTEM: it persists across the stream (postgresql.auto.conf)
 //!     and would leak config into later legs; the deck owns that surface
-//!     with an explicit RESET ALL + reload bracket.
+//!     with an explicit RESET ALL + reload bracket;
+//!   - ONE deliberate exception to "every bracket restores state": the
+//!     `cfgm:cmm` shape routes to `util::gen_cmm`, the sitediff `cmm:`
+//!     session co-draw (plan §6 conf row) — `SET client_min_messages` is
+//!     meant to persist so later statements surface NOTICE/LOG/DEBUG on the
+//!     wire. Identical on both sides, so differentially sound.
 
 use crate::stmt::{Gen, StmtKind};
 
@@ -43,6 +48,7 @@ const SHAPES: &[&str] = &[
     "cfgm:txniso",
     "cfgm:conv",
     "cfgm:clienc",
+    "cfgm:cmm",
 ];
 
 /// Curated (guc, [values]) pool: every entry SET-able by an ordinary
@@ -65,7 +71,9 @@ const GUC_POOL: &[(&str, &[&str])] = &[
     ("geqo", &["on", "off"]),
     ("geqo_threshold", &["2", "12"]),
     ("application_name", &["'fz_cfgm'", "'fz cfgm two words'", "''"]),
-    ("client_min_messages", &["debug1", "log", "notice", "warning", "error"]),
+    // debug2 added for the sitediff O-NOTICE plane (the bracketed form
+    // here restores the level; the persistent form is cfgm:cmm / util:cmm).
+    ("client_min_messages", &["debug2", "debug1", "log", "notice", "warning", "error"]),
     ("search_path", &["public", "'public, pg_catalog'", "'\"$user\", public'"]),
     ("statement_timeout", &["0", "'10s'", "'2min'"]),
     ("lock_timeout", &["0", "'5s'"]),
@@ -173,6 +181,10 @@ pub fn gen_cfgm_module(g: &mut Gen) -> Vec<StmtKind> {
         "cfgm:txniso" => gen_txniso(g),
         "cfgm:conv" => gen_conv(g),
         "cfgm:clienc" => gen_clienc(g),
+        "cfgm:cmm" => {
+            g.fire("cfgm:cmm");
+            crate::util::gen_cmm(g)
+        }
         other => unreachable!("unknown cfgm shape {other}"),
     }
 }
@@ -461,9 +473,15 @@ mod tests {
             // state was changed.)
             let first = &sqls[0];
             let is_bad_single = sqls.len() == 1 && BAD_SETS.contains(&first.as_str());
+            // cfgm:cmm is the one session production: unbracketed by design.
+            let is_cmm = prods.iter().any(|p| p == "cmm");
+            if is_cmm {
+                assert!(crate::util::is_cmm_set(first), "{sqls:?}");
+                assert!(!sqls.iter().any(|s| s.starts_with("RESET")), "{sqls:?}");
+            }
             if let Some(name) = first.strip_prefix("SET ").and_then(|r| r.split(' ').next())
             {
-                if !is_bad_single && GUC_POOL.iter().any(|(n, _)| *n == name) {
+                if !is_bad_single && !is_cmm && GUC_POOL.iter().any(|(n, _)| *n == name) {
                     let restored = sqls.iter().any(|s| {
                         s == &format!("RESET {name};")
                             || s == "RESET ALL;"
@@ -478,6 +496,7 @@ mod tests {
             assert!(prods_all.iter().any(|q| q == p), "{p} never fired");
         }
         assert!(prods_all.iter().any(|q| q == "cfgm:err"), "err arm never fired");
+        assert!(prods_all.iter().any(|q| q == "cmm"), "cmm co-draw never fired via cfgm:cmm");
     }
 
     /// Same seed -> byte-identical statements.

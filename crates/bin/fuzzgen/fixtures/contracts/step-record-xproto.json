@@ -1,0 +1,30 @@
+{
+  "bracket": null,
+  "expect_c": null,
+  "kind": "xproto",
+  "mutant": null,
+  "ordered": "total",
+  "productions": [
+    "select.simple",
+    "orderby:total"
+  ],
+  "recipe": null,
+  "role": "superuser",
+  "scenario": "seed-3878502244648856050/cell-base",
+  "seq": 43,
+  "session": "s1",
+  "slots": {},
+  "sql": "SELECT a FROM fz_hp_3 WHERE b = $1 ORDER BY a",
+  "targets": [],
+  "xproto": {
+    "describe": "P",
+    "limit": 5,
+    "mode": "named_portal",
+    "params": [
+      "2",
+      null
+    ],
+    "portal": "p1",
+    "stmt": "ps1"
+  }
+}
