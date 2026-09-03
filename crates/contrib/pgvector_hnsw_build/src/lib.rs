@@ -115,7 +115,7 @@ fn insert_tuple(
     // HnswInitElement + the value copy; alloc_element does the memory
     // accounting HnswMemoryContextAlloc performs in C.
     let level = random_level(bs.ml, bs.max_level);
-    let element = bs.graph.alloc_element(*heaptid, level, &img, bs.m);
+    let element = bs.graph.alloc_element(*heaptid, level, &img, bs.m)?;
 
     algo::insert_tuple_in_memory(
         &bs.graph,

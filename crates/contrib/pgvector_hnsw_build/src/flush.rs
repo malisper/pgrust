@@ -1,18 +1,21 @@
 //! pgvector 0.8.5 hnswbuild.c: flush the in-memory `SharedGraph` to disk
 //! (`CreateMetaPage`/`CreateGraphPages`/`WriteNeighborTuples`/`FlushPages`).
 //!
-//! `flush_pages` runs while other participants may still be reading the
-//! graph's entry point via `insert_tuple_in_memory` (parallel build, later
-//! task), so it takes `graph.entry_wait_lock` then `graph.entry_lock` for
-//! write — the same upgrade dance `insert_tuple_in_memory` uses when it may
-//! promote the entry point — before walking `graph.head`, and holds the
-//! write lock through `clear_after_flush()` so no participant can observe a
-//! partially-reset graph. The caller (`insert_tuple`) never holds
-//! `entry_lock` when it calls `flush_pages` (flush happens before
-//! `insert_tuple_in_memory`, never interleaved with it), so this cannot
-//! deadlock against the lock this function itself takes. The `flush_lock`
-//! wrapper around the flush *decision* (C's `flushLock`) is a later task's
-//! job; this function stays single-caller.
+//! `flush_pages` is called either from `insert_tuple` while it holds
+//! `graph.flush_lock` EXCLUSIVE (C `InsertTuple`'s flushLock protocol,
+//! hnswbuild.c:510-574) or from `build_graph`/`build_index` at the end of the
+//! build, when no other participant is live. Inside, it takes
+//! `graph.entry_wait_lock` and then `graph.entry_lock` for write — the same
+//! upgrade dance `insert_tuple_in_memory` uses when it may promote the entry
+//! point — before walking `graph.head`, and holds the write lock through
+//! `clear_after_flush()` so no participant can observe a partially-reset
+//! graph. That is a deliberate superset of C's `FlushPages`, which takes no
+//! locks of its own and relies entirely on the caller's flushLock: taking the
+//! entry locks here means the function carries no caller-side entry-lock
+//! precondition. It is safe because neither caller holds `entry_lock`, and
+//! lock order is `flush_lock` → `entry_lock` everywhere (nothing ever takes
+//! `flush_lock` while holding `entry_lock`), so there is nothing to deadlock
+//! against.
 
 use crate::graph::{lk, SharedElement, SharedGraph};
 use crate::BuildState;
@@ -69,7 +72,7 @@ fn build_append_page(
     Ok(())
 }
 
-pub(crate) fn serialize_element_tuple(buf: &mut Vec<u8>, e: &SharedElement) {
+fn serialize_element_tuple(buf: &mut Vec<u8>, e: &SharedElement) {
     let size = element_tuple_size(e.value.len());
     buf.clear();
     buf.resize(size, 0);
@@ -97,7 +100,7 @@ pub(crate) fn serialize_element_tuple(buf: &mut Vec<u8>, e: &SharedElement) {
     buf[ELEMENT_DATA_OFFSET..ELEMENT_DATA_OFFSET + e.value.len()].copy_from_slice(&e.value);
 }
 
-pub(crate) fn serialize_neighbor_tuple(buf: &mut Vec<u8>, graph: &SharedGraph, e: &SharedElement, m: i32) {
+fn serialize_neighbor_tuple(buf: &mut Vec<u8>, graph: &SharedGraph, e: &SharedElement, m: i32) {
     let size = neighbor_tuple_size(e.level, m);
     buf.clear();
     buf.resize(size, 0);
@@ -346,7 +349,7 @@ mod tests {
             let x = i as f32 / 50.0;
             let mut b = pgvector::vec::VecBuilder::new(mcx, 1).unwrap();
             b.set(0, x);
-            let e = graph.alloc_element(ItemPointerData::new(1, i + 1), 0, &b.image(), m);
+            let e = graph.alloc_element(ItemPointerData::new(1, i + 1), 0, &b.image(), m).unwrap();
             crate::algo::insert_tuple_in_memory(&graph, &mut sp, m, ef_construction, e).unwrap();
         }
 
