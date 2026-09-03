@@ -237,9 +237,22 @@ pub fn parse_halfvec(
             .into());
         }
         let StrtofVal::Ok(val) = val else { unreachable!() };
-        // C: x[dim] = Float4ToHalfUnchecked(val); then the ERANGE-equivalent
-        // check via Float4ToHalf's overflow error (shortest-decimal render).
-        let h = float4_to_half(val)?;
+        // C: x[dim] = Float4ToHalfUnchecked(val); range check is
+        // `(errno == ERANGE && isinf(val)) || (HalfIsInf(x[dim]) && !isinf(val))`
+        // (the first disjunct is handled above via StrtofVal::Erange); on
+        // overflow the message uses the ORIGINAL token text
+        // (`pnstrdup(pt, stringEnd - pt)`), not halfutils::float4_to_half's
+        // shortest-decimal rendering (that helper is for the cast paths in
+        // later tasks, matching C's Float4ToHalf call sites there).
+        let h = float4_to_half_unchecked(val);
+        if half_is_inf(h) && !val.is_infinite() {
+            return Err(PgError::error(format!(
+                "\"{}\" is out of range for type halfvec",
+                String::from_utf8_lossy(&lit[pt..pt + consumed])
+            ))
+            .with_sqlstate(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE)
+            .into());
+        }
         check_element(h)?;
         x[dim] = h;
         dim += 1;
@@ -345,9 +358,10 @@ pub fn cmp_internal(a: &HalfVecView<'_>, b: &HalfVecView<'_>) -> i32 {
 /// C: halfvec_l2_normalize — double norm; divide each element (as double),
 /// narrow via Float4ToHalfUnchecked, then check the result for overflow
 /// (`HalfIsInf(rx[i])` -> `float_overflow_error()`, "value out of range:
-/// overflow"). Zero norm returns a copy of the input (C: InitHalfVector is
-/// already zeroed and never written to in that branch — same content as the
-/// source since a zero-norm vector has all-zero elements).
+/// overflow"). Zero norm returns the zero vector: C's `InitHalfVector` result
+/// is palloc0'd and never written to in that branch, so e.g. `[-0]` (raw
+/// 0x8000) normalizes to `[0]` (raw 0x0000), not a copy of the input's raw
+/// bits — `HalfVecBuilder::new` is already zero-filled, matching this.
 pub fn halfvec_l2_normalize_image<'m>(mcx: Mcx<'m>, img: &[u8]) -> PgResult<PgVec<'m, u8>> {
     let v = HalfVecView::from_payload(&img[4..])?;
     let mut b = HalfVecBuilder::new(mcx, v.dim())?;
@@ -365,10 +379,6 @@ pub fn halfvec_l2_normalize_image<'m>(mcx: Mcx<'m>, img: &[u8]) -> PgResult<PgVe
                     .into());
             }
             b.set_raw(i, h);
-        }
-    } else {
-        for i in 0..v.dim() {
-            b.set_raw(i, v.raw(i));
         }
     }
     Ok(b.image())
@@ -427,6 +437,19 @@ mod tests {
     }
 
     #[test]
+    fn parse_overflow_reports_original_token_text() {
+        let mut x = [0u16; HALFVEC_MAX_DIM];
+        // 1e5 == 100000.0, overflows half range (max 65504) but is not itself
+        // an ERANGE strtof result; C reports the original token, not a
+        // shortest-decimal rendering of the parsed value.
+        let e = parse_halfvec(b"[1e5]", -1, &mut x).unwrap_err();
+        assert_eq!(e.message(), "\"1e5\" is out of range for type halfvec");
+        // Still passes: ERANGE-from-strtof path keeps working.
+        let e = parse_halfvec(b"[65520]", -1, &mut x).unwrap_err();
+        assert_eq!(e.message(), "\"65520\" is out of range for type halfvec");
+    }
+
+    #[test]
     fn kernels_accumulate_in_f32_after_conversion() {
         let o = mcx::MemoryContext::new_bump("t");
         let m = o.mcx();
@@ -454,5 +477,19 @@ mod tests {
         assert!((v.x(0) - 0.6).abs() < 1e-3 && (v.x(1) - 0.8).abs() < 1e-3);
         assert_eq!(HALFVEC_TYPE_INFO.max_dimensions, 4000);
         assert!(HALFVEC_TYPE_INFO.check_value.is_none());
+    }
+
+    #[test]
+    fn normalize_zero_norm_returns_zero_not_input_bits() {
+        // C: InitHalfVector's result is palloc0'd and never written to when
+        // norm == 0, so [-0] (raw 0x8000) normalizes to [0] (raw 0x0000), not
+        // a copy of the input's raw bits.
+        let o = mcx::MemoryContext::new_bump("t");
+        let m = o.mcx();
+        let img = hv(m, &[-0.0]);
+        assert_eq!(HalfVecView::from_payload(&img[4..]).unwrap().raw(0), 0x8000);
+        let out = halfvec_l2_normalize_image(m, &img).unwrap();
+        let v = HalfVecView::from_payload(&out[4..]).unwrap();
+        assert_eq!(v.raw(0), 0x0000);
     }
 }
