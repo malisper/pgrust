@@ -1,4 +1,17 @@
-//! pgvector 0.8.5 sparsevec.c — the sparsevec type. DIVERGENCES (recorded): none.
+//! pgvector 0.8.5 sparsevec.c — the sparsevec type.
+//!
+//! DIVERGENCES (recorded):
+//! (a) C's `elog(ERROR, "safety check failed")` nets in `vector_to_sparsevec`,
+//! `array_to_sparsevec`, and `sparsevec_l2_normalize`, and the
+//! `elog(ERROR, "correctness check failed")` net in `array_to_sparsevec`,
+//! have no Rust counterpart: they guard against a mismatch between a
+//! pre-computed nnz and the actual fill count, which the typed builders here
+//! make unreachable (nnz and the fill loop are derived from the same source
+//! in one pass).
+//! (b) `array_to_sparsevec` converts each element to f32 in one pass here,
+//! where C converts twice (once to count nnz, once to fill); the conversion
+//! is pure, so this is observably identical, including the position of a
+//! numeric_float4 conversion error relative to CheckDim/CheckExpectedDim.
 //!
 //! Note on `sparsevec_in` and `CheckNnz`: in upstream sparsevec.c, `CheckNnz`
 //! (the "cannot have more elements than dimensions" check) is called only
@@ -131,21 +144,27 @@ pub fn check_nnz(nnz: i32, dim: i32) -> PgResult<()> {
     }
     Ok(())
 }
+/// C: CheckIndex (sparsevec.c:102-125), a single step: checks `idx` against
+/// `dim` and the previously-seen index `prev` only — O(1), not O(n).
+pub fn check_index_step(prev: Option<i32>, idx: i32, dim: i32) -> PgResult<()> {
+    if idx < 0 || idx >= dim {
+        return Err(de("sparsevec index out of bounds"));
+    }
+    if let Some(p) = prev {
+        if idx < p {
+            return Err(de("sparsevec indices must be in ascending order"));
+        }
+        if idx == p {
+            return Err(de("sparsevec indices must not contain duplicates"));
+        }
+    }
+    Ok(())
+}
 /// C: CheckIndex over a sorted element list (0-based indices).
-pub fn check_index(indices: impl Iterator<Item = i32> + Clone, dim: i32) -> PgResult<()> {
+pub fn check_index(indices: impl Iterator<Item = i32>, dim: i32) -> PgResult<()> {
     let mut prev: Option<i32> = None;
     for idx in indices {
-        if idx < 0 || idx >= dim {
-            return Err(de("sparsevec index out of bounds"));
-        }
-        if let Some(p) = prev {
-            if idx < p {
-                return Err(de("sparsevec indices must be in ascending order"));
-            }
-            if idx == p {
-                return Err(de("sparsevec indices must not contain duplicates"));
-            }
-        }
+        check_index_step(prev, idx, dim)?;
         prev = Some(idx);
     }
     Ok(())
@@ -243,6 +262,7 @@ pub fn parse_sparsevec(
     typmod: i32,
     out: &mut Vec<SparseInputElement>,
 ) -> PgResult<i32> {
+    out.clear();
     let n = lit.len();
 
     // First pass: count commas to size the "buffer" (maxNnz), matching C's
@@ -673,6 +693,7 @@ pub fn sparsevec_check_value(img: &[u8]) -> PgResult<()> {
     }
     Ok(())
 }
+
 /// C: hnswutils.c hnsw_sparsevec_support (~1420-1432) — `PG_RETURN_POINTER(&typeInfo)`.
 pub static SPARSEVEC_TYPE_INFO: types_hnsw::HnswTypeInfo = types_hnsw::HnswTypeInfo {
     max_dimensions: SPARSEVEC_MAX_DIM,
@@ -722,6 +743,36 @@ mod tests {
         let mut out = Vec::new();
         let e = parse_sparsevec(b"{1:1}/3", 4, &mut out).unwrap_err();
         assert_eq!(e.message(), "expected 4 dimensions, not 3");
+    }
+
+    #[test]
+    fn check_index_step_matches_c() {
+        // In-bounds, ascending, first element (prev = None).
+        assert!(check_index_step(None, 0, 3).is_ok());
+        assert!(check_index_step(None, 2, 3).is_ok());
+        // Out of bounds: negative and >= dim, with and without a prev.
+        assert_eq!(
+            check_index_step(None, -1, 3).unwrap_err().message(),
+            "sparsevec index out of bounds"
+        );
+        assert_eq!(
+            check_index_step(None, 3, 3).unwrap_err().message(),
+            "sparsevec index out of bounds"
+        );
+        assert_eq!(
+            check_index_step(Some(1), 3, 3).unwrap_err().message(),
+            "sparsevec index out of bounds"
+        );
+        // Ascending vs. duplicate vs. descending relative to prev.
+        assert!(check_index_step(Some(1), 2, 5).is_ok());
+        assert_eq!(
+            check_index_step(Some(2), 2, 5).unwrap_err().message(),
+            "sparsevec indices must not contain duplicates"
+        );
+        assert_eq!(
+            check_index_step(Some(2), 1, 5).unwrap_err().message(),
+            "sparsevec indices must be in ascending order"
+        );
     }
 
     #[test]
