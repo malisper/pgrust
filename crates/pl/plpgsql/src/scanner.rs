@@ -615,21 +615,20 @@ impl<'mcx> PlScanner<'mcx> {
         )
     }
 
-    /// plpgsql_yyerror: "syntax error at or near ..." with position.
+    /// plpgsql_yyerror (pl_scanner.c:534): quotes the single token at
+    /// yylloc (scanbuf re-terminated at yylloc + plpgsql_yyleng), or reports
+    /// end of input.
     pub fn syntax_error(&self, message: &str, lloc: i32) -> Box<PgError> {
-        let end = self.scanbuf.len() as i32;
-        let mut e = lloc;
-        while (e as usize) < self.scanbuf.len()
-            && !pg_string::isspace_c_locale(self.scanbuf[e as usize])
-            && e < lloc + 32
-        {
-            e += 1;
-        }
-        let near = self.span_text(lloc, e.min(end));
+        let msg = if lloc.max(0) as usize >= self.scanbuf.len() {
+            format!("{message} at end of input")
+        } else {
+            let near = self.span_text(lloc, lloc + self.yyleng);
+            format!("{message} at or near \"{near}\"")
+        };
         Box::new(
             elog::ereport(types_error::ERROR)
                 .errcode(types_error::ERRCODE_SYNTAX_ERROR)
-                .errmsg(format!("{message} at or near \"{near}\""))
+                .errmsg(msg)
                 .errposition(self.errposition(lloc))
                 .into_error(),
         )

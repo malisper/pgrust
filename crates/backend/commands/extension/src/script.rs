@@ -41,8 +41,8 @@ pub(crate) fn read_extension_script_file(
         .to_string())
 }
 
-// CleanQuerytext (postgres.c): trim to the statement bounds, then strip
-// leading whitespace and trailing junk.
+// CleanQuerytext (queryjumblefuncs.c): trim to the statement bounds, then
+// strip leading and trailing scanner_isspace() only (a ';' stays).
 fn clean_querytext(query: &str, location: &mut i32, len: &mut i32) -> (usize, usize) {
     let bytes = query.as_bytes();
     let mut begin = (*location).max(0) as usize;
@@ -54,8 +54,7 @@ fn clean_querytext(query: &str, location: &mut i32, len: &mut i32) -> (usize, us
     while begin < end && matches!(bytes[begin], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) {
         begin += 1;
     }
-    while end > begin && matches!(bytes[end - 1], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c | b';')
-    {
+    while end > begin && matches!(bytes[end - 1], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) {
         end -= 1;
     }
     *location = begin as i32;
@@ -567,4 +566,26 @@ fn strip_echo_lines(sql: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clean_querytext;
+
+    // The syntax-error heuristic's bounds include the statement's ';' and
+    // C's QUERY: line keeps it (test_extensions, test_ext7 2.1bad).
+    #[test]
+    fn clean_querytext_keeps_the_terminating_semicolon() {
+        let sql = "CREATE TABLE t (a int);\nCREATE FUNCTIN f() RETURNS int LANGUAGE SQL\nAS $$ SELECT 1 $$;\n";
+        let (mut location, mut len) = (24, (sql.len() - 24) as i32);
+        let (b, e) = clean_querytext(sql, &mut location, &mut len);
+        assert_eq!(&sql[b..e], "CREATE FUNCTIN f() RETURNS int LANGUAGE SQL\nAS $$ SELECT 1 $$;");
+        assert_eq!((location, len), (24, (e - b) as i32));
+
+        // Whitespace on both ends still goes; len <= 0 means rest-of-string.
+        let (mut location, mut len) = (0, 0);
+        let (b, e) = clean_querytext("  select 1 \n", &mut location, &mut len);
+        assert_eq!(&"  select 1 \n"[b..e], "select 1");
+        assert_eq!((location, len), (2, 8));
+    }
 }

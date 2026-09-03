@@ -325,11 +325,29 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
         )
     }
 
-    // parse_datatype (pl_gram.y) via parseTypeString; declared datatypes
-    // carry the function's input collation (pl_gram.y parse_datatype).
-    fn parse_datatype(&mut self, type_name: &str, _location: i32) -> PgResult<PlType> {
-        let (typoid, typmod) = parse_utilcmd::parseTypeString(self.scratch, type_name)?;
+    // parse_datatype (pl_gram.y): parseTypeString runs under
+    // plpgsql_sql_error_callback; the built type carries fn_input_collation.
+    fn parse_datatype(&mut self, type_name: &str, location: i32) -> PgResult<PlType> {
+        let (typoid, typmod) = parse_utilcmd::parseTypeString(self.scratch, type_name)
+            .map_err(|e| self.sql_error_callback(e, location))?;
         CompState::build_datatype(typoid, typmod, self.fn_input_collation)
+    }
+
+    // plpgsql_sql_error_callback (pl_gram.y): the datatype's start becomes an
+    // internal-query cursor over the body (plpgsql_scanner_errposition), a
+    // core-parser cursor inside the type string is added to it, errposition cleared.
+    fn sql_error_callback(&self, mut e: Box<PgError>, location: i32) -> Box<PgError> {
+        if location >= 0 {
+            e.internal_position = Some(self.sc.errposition(location));
+            e.internal_query = Some(self.source_span(0, self.sc.scanbuf().len() as i32));
+        }
+        if let Some(errpos) = e.cursor_position.filter(|&p| p > 0) {
+            if let Some(mypos) = e.internal_position.filter(|&p| p > 0) {
+                e.internal_position = Some(mypos + errpos - 1);
+            }
+        }
+        e.cursor_position = None;
+        e
     }
 
     // read_datatype (pl_gram.y); the lookahead token is passed in.
@@ -2909,5 +2927,71 @@ mod tests {
         };
         assert!(!is_call, "DO carries is_call=false");
         assert_eq!(expr.query, "DO $x$ SELECT 1 $x$");
+    }
+
+    macro_rules! parser_for {
+        ($cx:ident, $comp:ident, $src:expr) => {{
+            let buf = mcx::slice_borrow_in($cx.mcx(), $src).unwrap();
+            Parser {
+                sc: PlScanner::new($cx.mcx(), buf),
+                comp: &mut $comp,
+                check_syntax: false,
+                fn_rettype: 2278, // VOIDOID
+                fn_retset: false,
+                fn_prokind: b'f' as i8,
+                fn_input_collation: types_core::InvalidOid,
+                fn_is_trigger: false,
+                out_param_varno: -1,
+                scratch: $cx.mcx(),
+                last_endtoken_loc: -1,
+            }
+        }};
+    }
+
+    // plpgsql_yyerror quotes only the token at yylloc (plpgsql_varprops:
+    // "[" not "[1],") and says "at end of input" for EOF.
+    #[test]
+    fn syntax_error_quotes_the_offending_token_only() {
+        let cx = mcx::MemoryContext::new("plpgsql syntax error test");
+        let mut comp = crate::comp::CompState::new();
+        let mut parser =
+            parser_for!(cx, comp, b"begin for x[1], y in select 1, 2 loop end loop; end");
+        let err = parser.parse_function_body().unwrap_err();
+        assert_eq!(err.sqlstate, types_error::ERRCODE_SYNTAX_ERROR);
+        assert_eq!(err.message, "syntax error at or near \"[\"");
+        assert_eq!(err.cursor_position, Some(12));
+
+        let cx = mcx::MemoryContext::new("plpgsql syntax error test");
+        let mut comp = crate::comp::CompState::new();
+        let mut parser = parser_for!(cx, comp, b"begin raise notice 'x' ");
+        let err = parser.parse_function_body().unwrap_err();
+        assert_eq!(err.message, "syntax error at end of input");
+        assert_eq!(err.cursor_position, Some(24));
+    }
+
+    // A datatype error is positioned at the datatype's 1-based offset in the
+    // body as an internal-query cursor; a core-parser cursor offsets it.
+    #[test]
+    fn datatype_errors_are_positioned_in_the_function_body() {
+        let cx = mcx::MemoryContext::new("plpgsql datatype error test");
+        let mut comp = crate::comp::CompState::new();
+        let src = b" declare r mutable2; begin r.f1 := $1; return r.f1 + 2; end ";
+        let parser = parser_for!(cx, comp, src);
+
+        let e = Box::new(PgError::error("type \"mutable2\" does not exist"));
+        let e = parser.sql_error_callback(e, 11);
+        assert_eq!(e.internal_position, Some(12));
+        assert_eq!(e.internal_query.as_deref(), Some(core::str::from_utf8(src).unwrap()));
+        assert_eq!(e.cursor_position, None);
+
+        let mut e = Box::new(PgError::error("syntax error at or near \"(\""));
+        e.cursor_position = Some(4);
+        let e = parser.sql_error_callback(e, 11);
+        assert_eq!(e.internal_position, Some(15));
+        assert_eq!(e.cursor_position, None);
+
+        // Unknown location: C's parser_errposition is a no-op.
+        let e = parser.sql_error_callback(Box::new(PgError::error("x")), -1);
+        assert_eq!((e.internal_position, e.internal_query), (None, None));
     }
 }

@@ -394,22 +394,24 @@ impl CompState {
         Self::rowtype_of(class_oid, ident)
     }
 
-    // plpgsql_parse_cwordrowtype (pl_comp.c:1704).
+    // plpgsql_parse_cwordrowtype (pl_comp.c:1704): the RangeVar is built as
+    // makeRangeVarFromNameList does, so RangeVarGetRelid sees a catalog name.
     pub fn parse_cwordrowtype(&self, idents: &[String]) -> PgResult<PlType> {
-        let (schemaname, relname) = match idents.len() {
-            2 => (Some(idents[0].as_str()), idents[1].as_str()),
+        let (catalogname, schemaname, relname) = match idents {
+            [s, r] => (None, Some(s.as_str()), r.as_str()),
+            [c, s, r] => (Some(c.as_str()), Some(s.as_str()), r.as_str()),
             _ => {
                 return Err(comp_err(
                     types_error::ERRCODE_SYNTAX_ERROR,
                     format!(
-                        "improper qualified name (too many dotted names): {}",
+                        "improper relation name (too many dotted names): {}",
                         idents.join(".")
                     ),
                 ));
             }
         };
         let rv = rel_vocab::RangeVar {
-            catalogname: None,
+            catalogname,
             schemaname,
             relname,
             inh: true,
@@ -617,5 +619,25 @@ impl WordResolver for CompState {
 
     fn identifier_lookup(&self) -> IdentifierLookup {
         self.identifier_lookup
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // plpgsql_misc: a three-part %ROWTYPE name is RangeVarGetRelid's
+    // cross-database error, not a local 42601.
+    #[test]
+    fn three_part_rowtype_name_is_a_cross_database_reference() {
+        dbcommands_seams::get_database_name::set(|_| Ok(Some("testdb".to_string())));
+        let comp = CompState::new();
+        let idents = ["foo".to_string(), "bar".to_string(), "baz".to_string()];
+        let err = comp.parse_cwordrowtype(&idents).unwrap_err();
+        assert_eq!(err.sqlstate, types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+        assert_eq!(
+            err.message,
+            "cross-database references are not implemented: \"foo.bar.baz\""
+        );
     }
 }

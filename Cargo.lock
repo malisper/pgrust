@@ -13798,6 +13798,7 @@ dependencies = [
  "cmdtag",
  "coerce",
  "datum",
+ "dbcommands_seams",
  "detoast",
  "dfmgr",
  "elog",

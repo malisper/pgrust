@@ -655,6 +655,58 @@ fn param_type_mismatch(dno: Dno, current: Oid, planned: Oid) -> Box<PgError> {
     )
 }
 
+// Dnos with a Param in the analyzed tree.
+struct ExternParamDnos(Vec<Dno>);
+
+impl<'mcx> nodes_core::NodeWalker<'mcx> for ExternParamDnos {
+    fn visit(&mut self, node: types_nodes::Node<'mcx>) -> PgResult<bool> {
+        if let Some(p) = node.as_param() {
+            let dno = p.paramid - 1;
+            if p.paramkind == types_nodes::primnodes::ParamKind::PARAM_EXTERN
+                && !self.0.contains(&dno)
+            {
+                self.0.push(dno);
+            }
+            return Ok(false);
+        }
+        if let Some(q) = node.as_query() {
+            return nodes_core::query_tree_walker(q, self, 0);
+        }
+        nodes_core::expression_tree_walker(node, self)
+    }
+
+    fn visit_query_ref(&mut self, q: &'mcx types_nodes::parsenodes::Query<'mcx>) -> PgResult<bool> {
+        nodes_core::query_tree_walker(q, self, 0)
+    }
+}
+
+fn referenced_param_dnos<'mcx>(
+    queries: &[types_nodes::parsenodes::Query<'mcx>],
+) -> PgResult<Vec<Dno>> {
+    let mut w = ExternParamDnos(Vec::new());
+    for q in queries {
+        nodes_core::query_tree_walker(q, &mut w, 0)?;
+    }
+    Ok(w.0)
+}
+
+// transformPLAssignStmt (analyze.c) hook-resolves the assignment target
+// first (so it heads the hook-resolved list) and drops its Param unless
+// indirection reads it. C fetches a paramnos member only when a Param
+// evaluates it (lazy plpgsql_param_fetch; plpgsql_param_compile steps), so
+// `r.f1 := $1` never runs pl_exec.c:6797's check on r.f1 — the RETURN does.
+fn drop_unread_assign_target<'mcx>(
+    paramnos: &mut Vec<Dno>,
+    queries: &[types_nodes::parsenodes::Query<'mcx>],
+) -> PgResult<()> {
+    if let Some(&target) = paramnos.first() {
+        if !referenced_param_dnos(queries)?.contains(&target) {
+            paramnos.retain(|&d| d != target);
+        }
+    }
+    Ok(())
+}
+
 impl<'a> Estate<'a> {
     pub fn new(func: &'a PlFunction, readonly_func: bool, atomic: bool) -> Estate<'a> {
         let mut datums = Vec::with_capacity(func.datums.len());
@@ -864,6 +916,16 @@ impl<'a> Estate<'a> {
             plancache::SetCachedPlanReanalyze(psrc, reanalyze_plpgsql_expr, expr.expr_id as i32);
         }
         let mut paramnos = used.into_inner();
+        if matches!(
+            expr.parse_mode,
+            parser_seams::RawParseMode::RAW_PARSE_PLPGSQL_ASSIGN1
+                | parser_seams::RawParseMode::RAW_PARSE_PLPGSQL_ASSIGN2
+                | parser_seams::RawParseMode::RAW_PARSE_PLPGSQL_ASSIGN3
+        ) {
+            if let Some((psrc, _)) = spi::SPI_plan_single_source(plan) {
+                drop_unread_assign_target(&mut paramnos, plancache::SourceQueryList(psrc))?;
+            }
+        }
         paramnos.sort_unstable();
         let paramnos: std::rc::Rc<[Dno]> = paramnos.into();
         let argtypes: std::rc::Rc<[Oid]> = params_by_dno
@@ -1238,6 +1300,18 @@ impl<'a> Estate<'a> {
             nulls[dno as usize] = isnull;
         }
         Ok((values, nulls))
+    }
+
+    // Params of a plan _SPI_execute_plan runs are evaluated under its
+    // _SPI_error_callback (spi.c), so a fetch failure carries the SQL line.
+    fn setup_params_under_spi(
+        &mut self,
+        expr: &PlExpr,
+        entry_paramnos: &[Dno],
+        argtypes: &[Oid],
+    ) -> PgResult<(Vec<Datum>, Vec<bool>)> {
+        self.setup_params(entry_paramnos, argtypes)
+            .map_err(|e| spi_ctx_err(e, &expr.query, expr.parse_mode))
     }
 
     // `planned` = the Param's type as of plan preparation. C's compiled
@@ -1684,7 +1758,7 @@ impl<'a> Estate<'a> {
             let e = t.get(&expr.expr_id).expect("plan ensured");
             (e.plan, e.paramnos.clone(), e.argtypes.clone())
         });
-        let (values, nulls) = self.setup_params(&paramnos, &argtypes)?;
+        let (values, nulls) = self.setup_params_under_spi(expr, &paramnos, &argtypes)?;
         let _frame = FrameGuard::push_spi(&expr.query, expr.parse_mode);
         let rc = spi::SPI_execute_plan_with_paramlist(plan, &values, &nulls, self.readonly_func, maxtuples)
             .map_err(|e| spi_ctx_err(e, &expr.query, expr.parse_mode))?;
@@ -3745,7 +3819,7 @@ impl<'a> Estate<'a> {
             0
         };
 
-        let (values, nulls) = self.setup_params(&paramnos, &argtypes)?;
+        let (values, nulls) = self.setup_params_under_spi(expr, &paramnos, &argtypes)?;
         let _frame = FrameGuard::push_spi(&expr.query, expr.parse_mode);
         let rc = spi::SPI_execute_plan_with_paramlist(plan, &values, &nulls, self.readonly_func, tcount)
             .map_err(|e| spi_ctx_err(e, &expr.query, expr.parse_mode))?;
@@ -3873,7 +3947,7 @@ impl<'a> Estate<'a> {
             None
         };
 
-        let (values, nulls) = self.setup_params(&paramnos, &argtypes)?;
+        let (values, nulls) = self.setup_params_under_spi(expr, &paramnos, &argtypes)?;
         let before_lxid = current_lxid();
         let rc = spi::SPI_execute_plan_extended(
             plan,
@@ -5126,7 +5200,7 @@ fn array_datum_copy<'mcx>(mcx: Mcx<'mcx>, value: Datum) -> PgResult<mcx::PgVec<'
 mod cfi_tests {
     use super::*;
 
-    fn tiny_function() -> PlFunction {
+    pub(super) fn tiny_function() -> PlFunction {
         PlFunction {
             fn_signature: "inline_code_block".into(),
             fn_oid: types_core::InvalidOid,
@@ -5378,5 +5452,101 @@ mod cfi_tests {
         EXPR_PLANS.with(|t| t.borrow_mut().remove(&expr.expr_id));
         let err = r.err().expect("no portal snapshot can be re-established here");
         assert_eq!(err.message(), "cannot execute SQL without an outer snapshot or portal");
+    }
+}
+
+#[cfg(test)]
+mod param_fetch_tests {
+    use super::*;
+    use types_nodes::nodes_enums::CmdType;
+    use types_nodes::parsenodes::Query;
+    use types_nodes::primnodes::{Param, ParamKind, TargetEntry};
+    use types_nodes::{Node, NodeList};
+
+    fn param<'mcx>(m: mcx::Mcx<'mcx>, dno: Dno) -> Node<'mcx> {
+        Node::mk(
+            m,
+            Param {
+                paramkind: ParamKind::PARAM_EXTERN,
+                paramid: dno + 1,
+                paramtype: 23,
+                paramtypmod: -1,
+                paramcollid: types_core::InvalidOid,
+                location: -1,
+            },
+        )
+        .unwrap()
+    }
+
+    fn select_of<'mcx>(m: mcx::Mcx<'mcx>, expr: Node<'mcx>) -> Query<'mcx> {
+        let tle = Node::mk(
+            m,
+            TargetEntry {
+                expr,
+                resno: 1,
+                resname: None,
+                ressortgroupref: 0,
+                resorigtbl: 0,
+                resorigcol: 0,
+                resjunk: false,
+            },
+        )
+        .unwrap();
+        Query {
+            commandType: CmdType::CMD_SELECT,
+            targetList: NodeList::make1(m, tle).unwrap(),
+            ..Default::default()
+        }
+    }
+
+    // `r.f1 := $1` analyzes to `SELECT $1`: the target (dno 3, resolved
+    // first) has no Param, so it is not fetched (plpgsql_cache's RETURN
+    // reads it); a target its own source reads stays.
+    #[test]
+    fn unread_assignment_target_is_not_fetched() {
+        let cx = mcx::MemoryContext::new("plpgsql param walk test");
+        let m = cx.mcx();
+        let mut used = vec![3, 0];
+        drop_unread_assign_target(&mut used, &[select_of(m, param(m, 0))]).unwrap();
+        assert_eq!(used, vec![0]);
+
+        let mut used = vec![3, 0];
+        drop_unread_assign_target(&mut used, &[select_of(m, param(m, 3))]).unwrap();
+        assert_eq!(used, vec![3, 0]);
+        assert_eq!(referenced_param_dnos(&[select_of(m, param(m, 3))]).unwrap(), vec![3]);
+    }
+
+    // Execute-path param fetch failures carry the SQL statement line
+    // (plpgsql_cache's `select pg_typeof(r.a) into t`); the bare fetch does not.
+    #[test]
+    fn spi_param_setup_errors_carry_the_statement_context() {
+        let mut func = super::cfi_tests::tiny_function();
+        func.datums = vec![
+            PlDatum::Rec(PlRec {
+                dno: 0,
+                refname: "r".into(),
+                lineno: 1,
+                rectypeid: RECORDOID,
+                datatype: None,
+                isconst: false,
+                notnull: false,
+                default_val: None,
+            }),
+            PlDatum::RecField(PlRecField { dno: 1, recparentno: 0, fieldname: "a".into() }),
+        ];
+        let mut estate = Estate::new(&func, false, true);
+        let expr = PlExpr {
+            query: "select pg_typeof(r.a)".into(),
+            parse_mode: parser_seams::RawParseMode::RAW_PARSE_DEFAULT,
+            ns: 0,
+            expr_id: 0,
+            target_param: -1,
+        };
+        let argtypes = [types_core::InvalidOid, 23];
+        let err = estate.setup_params_under_spi(&expr, &[1], &argtypes).unwrap_err();
+        assert_eq!(err.sqlstate, types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE);
+        assert_eq!(err.context.as_deref(), Some("SQL statement \"select pg_typeof(r.a)\""));
+        let err = estate.setup_params(&[1], &argtypes).unwrap_err();
+        assert_eq!(err.context, None);
     }
 }
