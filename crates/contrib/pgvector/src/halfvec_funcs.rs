@@ -1,6 +1,10 @@
 //! pgvector 0.8.5 halfvec.c fmgr entry points: I/O + typmod cast + casts /
 //! array conversions (array_to_halfvec, halfvec_to_float4, vector_to_halfvec;
 //! halfvec_to_vector is registered here too though its C home is vector.c).
+//! DIVERGENCES (recorded): (a) fc_halfvec_l2_normalize rebuilds the full
+//! image and reuses halfvec_l2_normalize_image (C normalizes in place); (b)
+//! fc_halfvec_send writes a literal 0 for `unused` where C sends vec->unused
+//! (always 0 after the recv/in checks).
 use datum::Datum;
 use mcx::PgVec;
 use types_core::{Oid, FLOAT4OID, FLOAT8OID, INT4OID, NUMERICOID};
@@ -9,9 +13,8 @@ use types_error::{
     ERRCODE_NULL_VALUE_NOT_ALLOWED,
 };
 use types_fmgr::{cstring_result, FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
-use types_tuple::varatt;
 
-use crate::funcs::{build_state_array, detoasted_image, image_datum, StateArray};
+use crate::funcs::{build_state_array, detoasted_image, image_datum, numeric_element_payload, StateArray};
 use crate::half::*;
 use crate::halfutils::{float4_to_half_unchecked, half_is_inf, half_is_zero};
 use crate::vec::{
@@ -201,13 +204,8 @@ pub fn fc_array_to_halfvec(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> Pg
         }
         NUMERICOID => {
             for (i, d) in elems.iter().enumerate() {
-                let p = d.as_usize() as *const u8;
                 // SAFETY: non-null numeric element datum inside the array image.
-                let payload = unsafe {
-                    let total = varatt::varsize_any(p);
-                    let hdr = if varatt::varatt_is_1b(p) { 1 } else { 4 };
-                    core::slice::from_raw_parts(p.add(hdr), total - hdr)
-                };
+                let payload = unsafe { numeric_element_payload(d) };
                 let f4 = adt_numeric::ops::numeric_float4(adt_numeric::Num::from_payload(payload))?;
                 b.set(i, f4)?;
             }

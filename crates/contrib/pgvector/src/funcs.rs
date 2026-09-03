@@ -163,6 +163,19 @@ pub fn fc_vector(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Dat
     Ok(fcinfo.arg(0))
 }
 
+/// Numeric array element payload (skip the varlena header) for the
+/// numeric-array conversion arm shared by fc_array_to_vector and
+/// fc_array_to_halfvec.
+///
+/// SAFETY: `d` must be a non-null numeric element datum pointing into an
+/// array image whose backing memory outlives the returned slice.
+pub(crate) unsafe fn numeric_element_payload<'a>(d: &Datum) -> &'a [u8] {
+    let p = d.as_usize() as *const u8;
+    let total = varatt::varsize_any(p);
+    let hdr = if varatt::varatt_is_1b(p) { 1 } else { 4 };
+    core::slice::from_raw_parts(p.add(hdr), total - hdr)
+}
+
 pub fn fc_array_to_vector(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let mcx = fcinfo.result_mcx();
     // SAFETY: strict fn — arg0 array, arg1 typmod.
@@ -210,13 +223,8 @@ pub fn fc_array_to_vector(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
         }
         NUMERICOID => {
             for (i, d) in elems.iter().enumerate() {
-                let p = d.as_usize() as *const u8;
                 // SAFETY: non-null numeric element datum inside the array image.
-                let payload = unsafe {
-                    let total = varatt::varsize_any(p);
-                    let hdr = if varatt::varatt_is_1b(p) { 1 } else { 4 };
-                    core::slice::from_raw_parts(p.add(hdr), total - hdr)
-                };
+                let payload = unsafe { numeric_element_payload(d) };
                 b.set(i, adt_numeric::ops::numeric_float4(
                     adt_numeric::Num::from_payload(payload),
                 )?);
