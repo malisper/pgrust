@@ -410,6 +410,11 @@ pub fn parse_sparsevec(
 
 /// C: SparsevecL2SquaredDistance (sparsevec.c ~811-844). Two-pointer merge
 /// over both index lists; f32 accumulation.
+///
+/// Note (here and in `inner_product`/`l1_distance` below): `bpos`/`j` are
+/// `usize` *positions* into the index/value arrays, while `ai`/`bi` are
+/// `i32` index *values* (matching C's `int` indices) — intentionally
+/// different types, not a naming accident.
 pub fn l2_squared_distance(a: &SparseVecView<'_>, b: &SparseVecView<'_>) -> f32 {
     let mut distance: f32 = 0.0;
     let mut bpos: usize = 0;
@@ -605,6 +610,22 @@ pub fn sparsevec_l2_normalize_image<'m>(mcx: Mcx<'m>, img: &[u8]) -> PgResult<Pg
         let mut rx: Vec<f32> = Vec::with_capacity(nnz);
         for i in 0..nnz {
             let r = (v.value(i) as f64 / norm) as f32;
+            // This guard mirrors C's `isinf(rx[i])` check, but it is
+            // unreachable for any input, matching C: `norm` is
+            // `sqrt(sum(x_i^2))`, so floating-point summation of the
+            // non-negative `x_i^2` terms guarantees `norm >= |x_i|` for
+            // every `i` (each partial sum is monotonically non-decreasing),
+            // hence `|x_i / norm| <= 1` always — far below f32's range, so
+            // downcasting to f32 can never overflow to infinity for finite
+            // input. Even a hand-built image with an infinite element
+            // (bypassing `check_element`, which normal input always passes
+            // through) does not reach this branch either: `norm` itself
+            // becomes `f64::INFINITY`, and IEEE-754 `inf / inf = NaN` (not
+            // `inf`), so the infinite element normalizes to NaN, and every
+            // other (finite) element normalizes to `finite / inf = 0.0` —
+            // neither is infinite. So there is no reachable input, valid or
+            // hand-built, that trips this check; it is kept only because C
+            // has the equivalent dead check.
             if r.is_infinite() {
                 return Err(Box::new(adt_float::float_overflow_error()));
             }
@@ -761,5 +782,94 @@ mod tests {
             "sparsevec cannot have more than 1000 non-zero elements for hnsw index"
         );
         assert_eq!(SPARSEVEC_TYPE_INFO.max_dimensions, SPARSEVEC_MAX_DIM);
+    }
+
+    // Fix round 1: exercise the final b-tail drain (`for j in bpos..bn`) in
+    // `l2_squared_distance`/`l1_distance` — b has indices trailing past a's
+    // last index — and its mirror, where a has the trailing indices instead
+    // (which takes the *other* code path: the per-`ai` `if ai != bi`
+    // in-loop tail-add, reached via the `bi = -1` sentinel once b is
+    // exhausted). Both are mathematically the same distance, but they run
+    // through different branches.
+    #[test]
+    fn tail_drain_both_directions() {
+        let o = mcx::MemoryContext::new_bump("t");
+        let m = o.mcx();
+
+        // b has the trailing indices: exercises `for j in bpos..bn`.
+        let a = sv(m, 6, &[(0, 1.0)]);
+        let b = sv(m, 6, &[(0, 1.0), (3, 2.0), (5, 3.0)]);
+        let (a, b) = (
+            SparseVecView::from_payload(&a[4..]).unwrap(),
+            SparseVecView::from_payload(&b[4..]).unwrap(),
+        );
+        assert_eq!(l2_squared_distance(&a, &b), 4.0 + 9.0);
+        assert_eq!(l1_distance(&a, &b), 2.0 + 3.0);
+
+        // Mirror: a has the trailing indices, exercises the in-loop
+        // `if ai != bi` tail-add (b exhausted, bi stuck at -1).
+        let a2 = sv(m, 6, &[(0, 1.0), (3, 2.0), (5, 3.0)]);
+        let b2 = sv(m, 6, &[(0, 1.0)]);
+        let (a2, b2) = (
+            SparseVecView::from_payload(&a2[4..]).unwrap(),
+            SparseVecView::from_payload(&b2[4..]).unwrap(),
+        );
+        assert_eq!(l2_squared_distance(&a2, &b2), 4.0 + 9.0);
+        assert_eq!(l1_distance(&a2, &b2), 2.0 + 3.0);
+    }
+
+    // Fix round 1: exercise `cmp_internal`'s post-common-prefix branches —
+    // equal prefix, then one side has one more element whose index is still
+    // inside the *other* side's `dim` (so it counts as an implicit 0 on the
+    // shorter side, per C, rather than falling through to the `dim`
+    // comparison) — for both which side is longer and both signs of the
+    // extra value.
+    #[test]
+    fn cmp_internal_post_prefix_branches() {
+        let o = mcx::MemoryContext::new_bump("t");
+        let m = o.mcx();
+
+        let a = sv(m, 3, &[(0, 1.0)]);
+        let a = SparseVecView::from_payload(&a[4..]).unwrap();
+
+        // b longer, extra value positive: missing (0) < 5 -> a < b.
+        let b_pos = sv(m, 3, &[(0, 1.0), (2, 5.0)]);
+        let b_pos = SparseVecView::from_payload(&b_pos[4..]).unwrap();
+        assert_eq!(cmp_internal(&a, &b_pos), -1);
+
+        // b longer, extra value negative: missing (0) > -5 -> a > b.
+        let b_neg = sv(m, 3, &[(0, 1.0), (2, -5.0)]);
+        let b_neg = SparseVecView::from_payload(&b_neg[4..]).unwrap();
+        assert_eq!(cmp_internal(&a, &b_neg), 1);
+
+        // Mirror: a longer, extra value positive: 5 > missing (0) -> a > b.
+        let a_pos = sv(m, 3, &[(0, 1.0), (2, 5.0)]);
+        let a_pos = SparseVecView::from_payload(&a_pos[4..]).unwrap();
+        assert_eq!(cmp_internal(&a_pos, &a), 1);
+
+        // Mirror: a longer, extra value negative: -5 < missing (0) -> a < b.
+        let a_neg = sv(m, 3, &[(0, 1.0), (2, -5.0)]);
+        let a_neg = SparseVecView::from_payload(&a_neg[4..]).unwrap();
+        assert_eq!(cmp_internal(&a_neg, &a), -1);
+    }
+
+    // Fix round 1: `sparsevec_l2_normalize_image`'s zero-drop rebuild — one
+    // value underflows to exactly 0.0 in f32 after dividing by the norm
+    // while another stays a normal value, so the output must be rebuilt
+    // with a smaller nnz and the surviving index/value shifted down.
+    #[test]
+    fn normalize_drops_underflowed_zeros() {
+        let o = mcx::MemoryContext::new_bump("t");
+        let m = o.mcx();
+        // norm = sqrt((1e-38)^2 + (3e38)^2) ~= 3e38 (the second term
+        // completely dominates in f64), so index 0 divides down to
+        // ~3.3e-77, which underflows to exactly 0.0 in f32, while index 1
+        // divides to ~1.0.
+        let a = sv(m, 3, &[(0, 1e-38), (1, 3e38)]);
+        let out = sparsevec_l2_normalize_image(m, &a).unwrap();
+        let v = SparseVecView::from_payload(&out[4..]).unwrap();
+        assert_eq!(v.nnz(), 1);
+        assert_eq!(v.index(0), 1);
+        assert_eq!(v.value(0), 1.0);
     }
 }
