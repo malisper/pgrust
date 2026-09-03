@@ -12,14 +12,9 @@ use ::types_scan::scankey::{ScanKeyData, SK_ISNULL, SK_SEARCHNOTNULL, SK_SEARCHN
 
 use crate::state::initGISTstate;
 
+/// C fmgr_info_copy: struct copy, fn_expr (opclass options) included.
 fn fmgr_info_copy(src: &FmgrInfo) -> FmgrInfo {
-    FmgrInfo::new(
-        src.fn_addr,
-        src.fn_oid,
-        src.fn_nargs,
-        src.fn_strict,
-        src.fn_retset,
-    )
+    src.clone()
 }
 
 /// gistbeginscan.
@@ -163,6 +158,7 @@ pub fn gistrescan(
             skey.sk_func.fn_nargs = src.fn_nargs;
             skey.sk_func.fn_strict = src.fn_strict;
             skey.sk_func.fn_retset = src.fn_retset;
+            skey.sk_func.fn_expr = src.fn_expr.clone();
         }
     }
 
@@ -230,4 +226,40 @@ pub fn gistcanreturn(index: &Relation<'_>, attno: i32) -> bool {
     let compress = crate::state::index_getprocid(index, att0, ::types_gist::GIST_COMPRESS_PROC);
     const InvalidOid: Oid = 0;
     fetch != InvalidOid || compress == InvalidOid
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fmgr_info_copy;
+    use ::types_fmgr::{FmgrInfo, OpclassOptions};
+
+    fn body(
+        _flinfo: Option<&mut FmgrInfo>,
+        _fcinfo: &mut ::types_fmgr::FunctionCallInfoBaseData,
+    ) -> ::types_error::PgResult<::datum::Datum> {
+        Ok(::datum::Datum::from_i32(0))
+    }
+
+    /// sk_func is C's fmgr_info_copy of consistentFn, opclass options
+    /// included; dropping them made ltree consistent decode siglen=2024 keys
+    /// with the default 8 ("corrupt ltree_gist GiST key (node overruns key)").
+    #[test]
+    fn scan_key_copy_keeps_opclass_options() {
+        // LtreeGistOptions image: varlena header, then `int siglen` at 4.
+        let mut img = vec![0u8; 8];
+        img[4..8].copy_from_slice(&2024i32.to_ne_bytes());
+        let opts = Box::new(OpclassOptions(img.into_boxed_slice()));
+        let mut src = FmgrInfo::new(body, 1, 5, true, false);
+        // SAFETY: opts outlives both carriers.
+        unsafe { src.set_opclass_options(&opts) };
+
+        let dst = fmgr_info_copy(&src);
+        assert_eq!(dst.opclass_options(), src.opclass_options());
+        let siglen = dst
+            .opclass_options()
+            .map(|o| i32::from_ne_bytes(o[4..8].try_into().unwrap()));
+        assert_eq!(siglen, Some(2024));
+        assert!(dst.fn_extra.is_none());
+        assert_eq!((dst.fn_oid, dst.fn_nargs, dst.fn_strict, dst.fn_retset), (1, 5, true, false));
+    }
 }
