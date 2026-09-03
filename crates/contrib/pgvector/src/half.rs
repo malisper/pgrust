@@ -237,7 +237,17 @@ pub fn parse_halfvec(
             .with_sqlstate(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE)
             .into());
         }
-        let StrtofVal::Ok(val) = val else { unreachable!() };
+        // C: halfvec_in (like vector_in) only ever checks `isinf(val)`
+        // (halfvec.c:231-234) — unlike sparsevec_in, it never inspects
+        // `value == 0`, so an ERANGE-underflow-to-zero token (e.g. "1e-46")
+        // is accepted the same as an exact zero, not reported as
+        // out-of-range. Mirrors vec.rs's parse_vector handling of
+        // StrtofVal::Underflow.
+        let val = match val {
+            StrtofVal::Ok(v) => v,
+            StrtofVal::Underflow(_, v) => v,
+            StrtofVal::Erange(_) => unreachable!(),
+        };
         // C: x[dim] = Float4ToHalfUnchecked(val); range check is
         // `(errno == ERANGE && isinf(val)) || (HalfIsInf(x[dim]) && !isinf(val))`
         // (the first disjunct is handled above via StrtofVal::Erange); on

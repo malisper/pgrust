@@ -673,6 +673,12 @@ CREATE FUNCTION vector_to_sparsevec(vector, integer, boolean) RETURNS sparsevec
 CREATE FUNCTION sparsevec_to_vector(sparsevec, integer, boolean) RETURNS vector
 	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
+CREATE FUNCTION halfvec_to_sparsevec(halfvec, integer, boolean) RETURNS sparsevec
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION sparsevec_to_halfvec(sparsevec, integer, boolean) RETURNS halfvec
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
 CREATE FUNCTION array_to_sparsevec(integer[], integer, boolean) RETURNS sparsevec
 	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
@@ -695,6 +701,12 @@ CREATE CAST (sparsevec AS vector)
 
 CREATE CAST (vector AS sparsevec)
 	WITH FUNCTION vector_to_sparsevec(vector, integer, boolean) AS IMPLICIT;
+
+CREATE CAST (sparsevec AS halfvec)
+	WITH FUNCTION sparsevec_to_halfvec(sparsevec, integer, boolean) AS ASSIGNMENT;
+
+CREATE CAST (halfvec AS sparsevec)
+	WITH FUNCTION halfvec_to_sparsevec(halfvec, integer, boolean) AS IMPLICIT;
 
 CREATE CAST (integer[] AS sparsevec)
 	WITH FUNCTION array_to_sparsevec(integer[], integer, boolean) AS ASSIGNMENT;

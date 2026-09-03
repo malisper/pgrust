@@ -17,6 +17,7 @@ use types_fmgr::{cstring_result, FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
 use crate::funcs::{build_state_array, detoasted_image, image_datum, numeric_element_payload, StateArray};
 use crate::half::*;
 use crate::halfutils::{float4_to_half_unchecked, half_is_inf, half_is_zero};
+use crate::sparse::SparseVecView;
 use crate::vec::{
     check_dim as vec_check_dim, check_expected_dim as vec_check_expected_dim, VecBuilder, VecView,
 };
@@ -31,6 +32,12 @@ unsafe fn arg_halfvec<'a>(fcinfo: &'a Fcinfo, i: usize) -> PgResult<HalfVecView<
 unsafe fn arg_vector<'a>(fcinfo: &'a Fcinfo, i: usize) -> PgResult<VecView<'a>> {
     let v = unsafe { fcinfo.arg_varlena_packed(i)? };
     VecView::from_payload(v.data())
+}
+
+// SAFETY contract of callers: arg i is a non-null sparsevec varlena (strict fns).
+unsafe fn arg_sparsevec<'a>(fcinfo: &'a Fcinfo, i: usize) -> PgResult<SparseVecView<'a>> {
+    let v = unsafe { fcinfo.arg_varlena_packed(i)? };
+    SparseVecView::from_payload(v.data())
 }
 
 fn binary_2arg<'a>(fcinfo: &'a Fcinfo) -> PgResult<(HalfVecView<'a>, HalfVecView<'a>)> {
@@ -272,6 +279,29 @@ pub fn fc_halfvec_to_vector(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
     let mut b = VecBuilder::new(mcx, v.dim())?;
     for i in 0..v.dim() {
         b.set(i, v.x(i));
+    }
+    Ok(image_datum(b.image()))
+}
+
+// C: halfvec.c sparsevec_to_halfvec (~1191-1211). This function is defined
+// in halfvec.c, so its CheckDim/CheckExpectedDim calls resolve to
+// halfvec.c's own file-local versions (HALFVEC_MAX_DIM-based, this module's
+// via the `crate::half::*` glob) — NOT sparsevec.c's, even though the input
+// is a sparsevec. The (zero-filled) halfvec result is built and only its
+// nnz non-zero elements are set.
+pub fn fc_sparsevec_to_halfvec(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: strict fn — arg0 sparsevec, arg1 typmod.
+    let v = unsafe { arg_sparsevec(fcinfo, 0)? };
+    let typmod = fcinfo.arg_i32(1);
+    let dim = v.dim();
+
+    check_dim(dim as usize)?;
+    check_expected_dim(typmod, dim as usize)?;
+
+    let mcx = fcinfo.result_mcx();
+    let mut b = HalfVecBuilder::new(mcx, dim as usize)?;
+    for i in 0..v.nnz() {
+        b.set(v.index(i) as usize, v.value(i))?;
     }
     Ok(image_datum(b.image()))
 }
