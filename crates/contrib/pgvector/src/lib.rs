@@ -78,6 +78,15 @@ fn lookup(function: &str) -> Option<PGFunction> {
         "halfvec_concat" => fc_halfvec_concat,
         "halfvec_binary_quantize" => fc_halfvec_binary_quantize,
         "halfvec_subvector" => fc_halfvec_subvector,
+        "halfvec_lt" => fc_halfvec_lt,
+        "halfvec_le" => fc_halfvec_le,
+        "halfvec_eq" => fc_halfvec_eq,
+        "halfvec_ne" => fc_halfvec_ne,
+        "halfvec_ge" => fc_halfvec_ge,
+        "halfvec_gt" => fc_halfvec_gt,
+        "halfvec_cmp" => fc_halfvec_cmp,
+        "halfvec_accum" => fc_halfvec_accum,
+        "halfvec_avg" => fc_halfvec_avg,
         _ => return None,
     })
 }

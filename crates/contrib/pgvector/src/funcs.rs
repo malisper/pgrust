@@ -487,13 +487,13 @@ pub fn fc_vector_cmp(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult
     Ok(Datum::from_i32(vector_cmp_internal(&a, &b)))
 }
 
-struct StateArray<'a> {
+pub(crate) struct StateArray<'a> {
     img: &'a [u8],
     n_items: usize,
 }
 
 impl<'a> StateArray<'a> {
-    fn check(mcx: Mcx<'a>, d: Datum, caller: &str) -> PgResult<StateArray<'a>> {
+    pub(crate) fn check(mcx: Mcx<'a>, d: Datum, caller: &str) -> PgResult<StateArray<'a>> {
         // SAFETY: caller passes a non-null float8[] state datum.
         let img = unsafe { detoasted_image(mcx, d)? };
         if arrayfuncs::arr_ndim(img) != 1
@@ -510,17 +510,17 @@ impl<'a> StateArray<'a> {
     }
 
     // STATE_DIMS: dims[0] - 1.
-    fn state_dims(&self) -> usize {
+    pub(crate) fn state_dims(&self) -> usize {
         self.n_items - 1
     }
 
-    fn value(&self, i: usize) -> f64 {
+    pub(crate) fn value(&self, i: usize) -> f64 {
         let off = arrayfuncs::arr_data_offset(self.img) + 8 * i;
         f64::from_ne_bytes(self.img[off..off + 8].try_into().unwrap())
     }
 }
 
-fn build_state_array<'m>(mcx: Mcx<'m>, vals: &[Datum]) -> PgResult<PgVec<'m, u8>> {
+pub(crate) fn build_state_array<'m>(mcx: Mcx<'m>, vals: &[Datum]) -> PgResult<PgVec<'m, u8>> {
     arrayfuncs::construct_array(mcx, vals, FLOAT8OID, 8, true, b'd')
 }
 

@@ -427,38 +427,26 @@ CREATE FUNCTION halfvec_mul(halfvec, halfvec) RETURNS halfvec
 CREATE FUNCTION halfvec_concat(halfvec, halfvec) RETURNS halfvec
 	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
--- DIVERGENCE (recorded, Task 5): upstream sql/vector.sql 362-443 interleaves
--- these nine CREATE FUNCTION statements (halfvec_lt..cmp, halfvec_accum,
--- halfvec_avg) among ones for symbols this task registers. pgrust's
--- fmgr_c_validator (pg_proc::ProcedureCreate) runs unconditionally for
--- LANGUAGE C, regardless of check_function_bodies (matches real Postgres:
--- "for pg_dump loading it's much better if we *do* check"), and errors
--- "could not find function ... in file ..." for a symbol lookup() doesn't
--- resolve -- verified by reproducing against the running p1 server. Since
--- Task 6 is the one that registers these nine in lib.rs, left commented here
--- (verbatim upstream text) rather than left for CREATE EXTENSION to fail on;
--- Task 6 should uncomment this block instead of re-adding it.
---
--- CREATE FUNCTION halfvec_lt(halfvec, halfvec) RETURNS bool
--- 	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
---
--- CREATE FUNCTION halfvec_le(halfvec, halfvec) RETURNS bool
--- 	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
---
--- CREATE FUNCTION halfvec_eq(halfvec, halfvec) RETURNS bool
--- 	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
---
--- CREATE FUNCTION halfvec_ne(halfvec, halfvec) RETURNS bool
--- 	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
---
--- CREATE FUNCTION halfvec_ge(halfvec, halfvec) RETURNS bool
--- 	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
---
--- CREATE FUNCTION halfvec_gt(halfvec, halfvec) RETURNS bool
--- 	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
---
--- CREATE FUNCTION halfvec_cmp(halfvec, halfvec) RETURNS int4
--- 	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION halfvec_lt(halfvec, halfvec) RETURNS bool
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION halfvec_le(halfvec, halfvec) RETURNS bool
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION halfvec_eq(halfvec, halfvec) RETURNS bool
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION halfvec_ne(halfvec, halfvec) RETURNS bool
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION halfvec_ge(halfvec, halfvec) RETURNS bool
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION halfvec_gt(halfvec, halfvec) RETURNS bool
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION halfvec_cmp(halfvec, halfvec) RETURNS int4
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION halfvec_l2_squared_distance(halfvec, halfvec) RETURNS float8
 	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
@@ -469,11 +457,116 @@ CREATE FUNCTION halfvec_negative_inner_product(halfvec, halfvec) RETURNS float8
 CREATE FUNCTION halfvec_spherical_distance(halfvec, halfvec) RETURNS float8
 	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
--- CREATE FUNCTION halfvec_accum(double precision[], halfvec) RETURNS double precision[]
--- 	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
---
--- CREATE FUNCTION halfvec_avg(double precision[]) RETURNS halfvec
--- 	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION halfvec_accum(double precision[], halfvec) RETURNS double precision[]
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION halfvec_avg(double precision[]) RETURNS halfvec
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION halfvec_combine(double precision[], double precision[]) RETURNS double precision[]
 	AS 'MODULE_PATHNAME', 'vector_combine' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+-- halfvec aggregates
+
+CREATE AGGREGATE avg(halfvec) (
+	SFUNC = halfvec_accum,
+	STYPE = double precision[],
+	FINALFUNC = halfvec_avg,
+	COMBINEFUNC = halfvec_combine,
+	INITCOND = '{0}',
+	PARALLEL = SAFE
+);
+
+CREATE AGGREGATE sum(halfvec) (
+	SFUNC = halfvec_add,
+	STYPE = halfvec,
+	COMBINEFUNC = halfvec_add,
+	PARALLEL = SAFE
+);
+
+-- halfvec operators
+
+CREATE OPERATOR <-> (
+	LEFTARG = halfvec, RIGHTARG = halfvec, PROCEDURE = l2_distance,
+	COMMUTATOR = '<->'
+);
+
+CREATE OPERATOR <#> (
+	LEFTARG = halfvec, RIGHTARG = halfvec, PROCEDURE = halfvec_negative_inner_product,
+	COMMUTATOR = '<#>'
+);
+
+CREATE OPERATOR <=> (
+	LEFTARG = halfvec, RIGHTARG = halfvec, PROCEDURE = cosine_distance,
+	COMMUTATOR = '<=>'
+);
+
+CREATE OPERATOR <+> (
+	LEFTARG = halfvec, RIGHTARG = halfvec, PROCEDURE = l1_distance,
+	COMMUTATOR = '<+>'
+);
+
+CREATE OPERATOR + (
+	LEFTARG = halfvec, RIGHTARG = halfvec, PROCEDURE = halfvec_add,
+	COMMUTATOR = +
+);
+
+CREATE OPERATOR - (
+	LEFTARG = halfvec, RIGHTARG = halfvec, PROCEDURE = halfvec_sub
+);
+
+CREATE OPERATOR * (
+	LEFTARG = halfvec, RIGHTARG = halfvec, PROCEDURE = halfvec_mul,
+	COMMUTATOR = *
+);
+
+CREATE OPERATOR || (
+	LEFTARG = halfvec, RIGHTARG = halfvec, PROCEDURE = halfvec_concat
+);
+
+CREATE OPERATOR < (
+	LEFTARG = halfvec, RIGHTARG = halfvec, PROCEDURE = halfvec_lt,
+	COMMUTATOR = > , NEGATOR = >= ,
+	RESTRICT = scalarltsel, JOIN = scalarltjoinsel
+);
+
+CREATE OPERATOR <= (
+	LEFTARG = halfvec, RIGHTARG = halfvec, PROCEDURE = halfvec_le,
+	COMMUTATOR = >= , NEGATOR = > ,
+	RESTRICT = scalarlesel, JOIN = scalarlejoinsel
+);
+
+CREATE OPERATOR = (
+	LEFTARG = halfvec, RIGHTARG = halfvec, PROCEDURE = halfvec_eq,
+	COMMUTATOR = = , NEGATOR = <> ,
+	RESTRICT = eqsel, JOIN = eqjoinsel
+);
+
+CREATE OPERATOR <> (
+	LEFTARG = halfvec, RIGHTARG = halfvec, PROCEDURE = halfvec_ne,
+	COMMUTATOR = <> , NEGATOR = = ,
+	RESTRICT = eqsel, JOIN = eqjoinsel
+);
+
+CREATE OPERATOR >= (
+	LEFTARG = halfvec, RIGHTARG = halfvec, PROCEDURE = halfvec_ge,
+	COMMUTATOR = <= , NEGATOR = < ,
+	RESTRICT = scalargesel, JOIN = scalargejoinsel
+);
+
+CREATE OPERATOR > (
+	LEFTARG = halfvec, RIGHTARG = halfvec, PROCEDURE = halfvec_gt,
+	COMMUTATOR = < , NEGATOR = <= ,
+	RESTRICT = scalargtsel, JOIN = scalargtjoinsel
+);
+
+-- halfvec opclasses
+
+CREATE OPERATOR CLASS halfvec_ops
+	DEFAULT FOR TYPE halfvec USING btree AS
+	OPERATOR 1 < ,
+	OPERATOR 2 <= ,
+	OPERATOR 3 = ,
+	OPERATOR 4 >= ,
+	OPERATOR 5 > ,
+	FUNCTION 1 halfvec_cmp(halfvec, halfvec);
