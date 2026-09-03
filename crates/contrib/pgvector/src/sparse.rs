@@ -439,7 +439,8 @@ mod tests {
         assert_eq!(parse("{1:nan}/3").unwrap_err(), "NaN not allowed in sparsevec");
         assert_eq!(parse("{1:inf}/3").unwrap_err(), "infinite value not allowed in sparsevec");
         assert_eq!(parse("{1:4e38}/3").unwrap_err(), "\"4e38\" is out of range for type sparsevec");
-        assert_eq!(parse("{1:1,2:2,3:3,4:4}/3").unwrap_err(), "sparsevec cannot have more elements than dimensions");
+        // C sparsevec_in never calls CheckNnz (recv-only); the 4th index (3, 0-based) fails CheckIndex.
+        assert_eq!(parse("{1:1,2:2,3:3,4:4}/3").unwrap_err(), "sparsevec index out of bounds");
         let mut out = Vec::new();
         let e = parse_sparsevec(b"{1:1}/3", 4, &mut out).unwrap_err();
         assert_eq!(e.message(), "expected 4 dimensions, not 3");
