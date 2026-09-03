@@ -898,7 +898,8 @@ fn init_build_state<'a, 'g, 'mcx>(
     fork_num: ForkNumber,
     gmcx: Mcx<'g>,
 ) -> PgResult<BuildState<'a, 'g, 'mcx>> {
-    let max_dims = check_type_supported(index)?;
+    let support = init_support(index)?;
+    let max_dims = support.type_info.max_dimensions;
     let m = hnsw_get_m(index);
     let ef_construction = hnsw_get_ef_construction(index);
     let dimensions = index.rd_att.attr(0).atttypmod;
@@ -923,7 +924,6 @@ fn init_build_state<'a, 'g, 'mcx>(
         );
     }
 
-    let support = init_support(index)?;
     Ok(BuildState {
         heap,
         index,
@@ -1042,6 +1042,7 @@ mod tests {
             ),
             normprocinfo: None,
             collation: 0,
+            type_info: &pgvector::vec::VECTOR_TYPE_INFO,
         }
     }
 

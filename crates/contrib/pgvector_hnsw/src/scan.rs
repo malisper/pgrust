@@ -26,7 +26,6 @@ pub fn hnswbeginscan<'mcx>(
     nkeys: i32,
     norderbys: i32,
 ) -> PgResult<IndexScanDescData<'mcx>> {
-    check_type_supported(index)?;
     let support = init_support(index)?;
     let max_memory = (init_small::globals::work_mem() as f64
         * guc_tables::vars::hnsw_scan_mem_multiplier.read()
@@ -34,6 +33,7 @@ pub fn hnswbeginscan<'mcx>(
         + 256.0)
         .min((usize::MAX / 2) as f64) as usize;
 
+    let max_dimensions = support.type_info.max_dimensions;
     let so = HnswScanOpaqueData {
         mcx,
         first: true,
@@ -44,7 +44,7 @@ pub fn hnswbeginscan<'mcx>(
         mem_used: 0,
         value: None,
         support,
-        max_dimensions: HNSW_MAX_DIM as i32,
+        max_dimensions,
         norm_is_l2: false,
         w: Vec::new(),
         visited: Default::default(),
@@ -126,34 +126,14 @@ fn get_scan_value(
     let flat = detoast::detoast_attr(tmcx, raw)?;
 
     if support.normprocinfo.is_some() {
-        let normed = norm_value(tmcx, &flat)?;
+        let normalize = support
+            .type_info
+            .normalize
+            .expect("opclass with a norm proc must have a normalize callback");
+        let normed = normalize(tmcx, &flat)?;
         return Ok(Some(normed.to_vec()));
     }
     Ok(Some(flat.to_vec()))
-}
-
-// HnswNormValue for the vector opclasses: l2_normalize applied in place.
-pub fn norm_value<'m>(mcx: Mcx<'m>, img: &[u8]) -> PgResult<PgVec<'m, u8>> {
-    let v = pgvector::vec::VecView::from_payload(&img[4..])?;
-    let mut b = pgvector::vec::VecBuilder::new(mcx, v.dim())?;
-    let mut norm = 0.0f64;
-    for x in v.iter() {
-        norm += x as f64 * x as f64;
-    }
-    norm = norm.sqrt();
-    if norm > 0.0 {
-        for i in 0..v.dim() {
-            b.set(i, (v.x(i) as f64 / norm) as f32);
-        }
-        for i in 0..v.dim() {
-            if b.get(i).is_infinite() {
-                return Err(PgError::error("value out of range: overflow")
-                    .with_sqlstate(types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE)
-                    .into());
-            }
-        }
-    }
-    Ok(b.image())
 }
 
 fn pool_elem_to_scan(pool: &ElementPool<'_>, sc: &SearchCandidate) -> HnswScanElement {

@@ -8,6 +8,7 @@ use mcx::{Mcx, PgFxHashMap, PgVec};
 use types_core::{BlockNumber, Buffer, ForkNumber, Oid};
 use types_error::{PgError, PgResult};
 use types_hnsw::*;
+use types_hnsw::HnswTypeInfo;
 use types_rel::Relation;
 use types_storage::bufpage::{PageMut, PageRef};
 use types_tuple::itemptr::{ItemPointerData, ItemPointerIsValid};
@@ -51,6 +52,7 @@ pub fn init_support(index: &Relation<'_>) -> PgResult<HnswSupport> {
         .into());
     }
     let norm = index_getprocid(index, HNSW_NORM_PROC);
+    let type_info = get_type_info(index)?;
     Ok(HnswSupport {
         procinfo: fmgr_seams::fmgr_info::call(dist)?,
         normprocinfo: if norm != 0 {
@@ -59,21 +61,23 @@ pub fn init_support(index: &Relation<'_>) -> PgResult<HnswSupport> {
             None
         },
         collation: index.rd_indcollation.first().copied().unwrap_or(0),
+        type_info,
     })
 }
 
-// HnswGetTypeInfo: proc 3 (halfvec/bit/sparsevec) is unported — vector only.
-// Unreachable through the trimmed vector--0.8.5.sql (no such opclasses), but
-// error rather than panic if a foreign catalog ever presents one.
-pub fn check_type_supported(index: &Relation<'_>) -> PgResult<i32> {
-    if index_getprocid(index, HNSW_TYPE_INFO_PROC) != 0 {
-        return Err(PgError::error(
-            "hnsw type-info opclasses (halfvec/bit/sparsevec) are not supported",
-        )
-        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
-        .into());
+// HnswGetTypeInfo: support proc 3 returns a pointer to a static HnswTypeInfo;
+// absent (the vector opclasses), C uses HNSW_MAX_DIM + l2_normalize.
+pub fn get_type_info(index: &Relation<'_>) -> PgResult<&'static HnswTypeInfo> {
+    let proc_oid = index_getprocid(index, HNSW_TYPE_INFO_PROC);
+    if proc_oid == 0 {
+        return Ok(&pgvector::vec::VECTOR_TYPE_INFO);
     }
-    Ok(HNSW_MAX_DIM as i32)
+    let mut flinfo = fmgr_seams::fmgr_info::call(proc_oid)?;
+    let d = types_fmgr::function_call0_coll(&mut flinfo, 0)?;
+    // SAFETY: hnsw_*_support functions return the address of a `static
+    // HnswTypeInfo` (process-lifetime) as their Datum; nothing else is
+    // registered as proc 3 for hnsw in the bundled extension script.
+    Ok(unsafe { &*(d.as_usize() as *const HnswTypeInfo) })
 }
 
 #[inline]
