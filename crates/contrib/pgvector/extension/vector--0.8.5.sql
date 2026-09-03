@@ -319,74 +319,6 @@ CREATE TYPE halfvec (
 	STORAGE   = external
 );
 
--- Pulled forward from upstream's "-- halfvec cast functions" / "-- halfvec
--- casts" sections (sql/vector.sql:462-490): only the halfvec-to-halfvec
--- self typmod-coercion entry, since its function (fc_halfvec) is
--- implemented in this task. Without a pg_cast row here, coerce_type_typmod
--- has no length-coercion function to call for `'[...]'::halfvec(n)` and
--- silently relabels the typmod instead of enforcing it (see halfvec.c
--- halfvec(), which performs CheckExpectedDim). A later task appending the
--- full "-- halfvec cast functions" / "-- halfvec casts" sections verbatim
--- MUST skip these two statements (already present) to avoid duplicate
--- object errors.
-CREATE FUNCTION halfvec(halfvec, integer, boolean) RETURNS halfvec
-	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
-
-CREATE CAST (halfvec AS halfvec)
-	WITH FUNCTION halfvec(halfvec, integer, boolean) AS IMPLICIT;
-
--- Rest of upstream's "-- halfvec cast functions" / "-- halfvec casts"
--- sections (sql/vector.sql:462-513), skipping the halfvec(halfvec,...)
--- function and the (halfvec AS halfvec) cast pulled forward above.
--- sparsevec_to_halfvec / (sparsevec AS halfvec) are not in this line range
--- (they live at sql/vector.sql:782-809, part of the sparsevec section) and
--- are deferred to the task that adds sparsevec.
-
-CREATE FUNCTION halfvec_to_vector(halfvec, integer, boolean) RETURNS vector
-	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
-
-CREATE FUNCTION vector_to_halfvec(vector, integer, boolean) RETURNS halfvec
-	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
-
-CREATE FUNCTION array_to_halfvec(integer[], integer, boolean) RETURNS halfvec
-	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
-
-CREATE FUNCTION array_to_halfvec(real[], integer, boolean) RETURNS halfvec
-	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
-
-CREATE FUNCTION array_to_halfvec(double precision[], integer, boolean) RETURNS halfvec
-	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
-
-CREATE FUNCTION array_to_halfvec(numeric[], integer, boolean) RETURNS halfvec
-	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
-
-CREATE FUNCTION halfvec_to_float4(halfvec, integer, boolean) RETURNS real[]
-	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
-
--- halfvec casts
-
-CREATE CAST (halfvec AS vector)
-	WITH FUNCTION halfvec_to_vector(halfvec, integer, boolean) AS ASSIGNMENT;
-
-CREATE CAST (vector AS halfvec)
-	WITH FUNCTION vector_to_halfvec(vector, integer, boolean) AS IMPLICIT;
-
-CREATE CAST (halfvec AS real[])
-	WITH FUNCTION halfvec_to_float4(halfvec, integer, boolean) AS ASSIGNMENT;
-
-CREATE CAST (integer[] AS halfvec)
-	WITH FUNCTION array_to_halfvec(integer[], integer, boolean) AS ASSIGNMENT;
-
-CREATE CAST (real[] AS halfvec)
-	WITH FUNCTION array_to_halfvec(real[], integer, boolean) AS ASSIGNMENT;
-
-CREATE CAST (double precision[] AS halfvec)
-	WITH FUNCTION array_to_halfvec(double precision[], integer, boolean) AS ASSIGNMENT;
-
-CREATE CAST (numeric[] AS halfvec)
-	WITH FUNCTION array_to_halfvec(numeric[], integer, boolean) AS ASSIGNMENT;
-
-
 -- halfvec functions
 
 CREATE FUNCTION l2_distance(halfvec, halfvec) RETURNS float8
@@ -486,6 +418,58 @@ CREATE AGGREGATE sum(halfvec) (
 	COMBINEFUNC = halfvec_add,
 	PARALLEL = SAFE
 );
+
+-- halfvec cast functions
+
+CREATE FUNCTION halfvec(halfvec, integer, boolean) RETURNS halfvec
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION halfvec_to_vector(halfvec, integer, boolean) RETURNS vector
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION vector_to_halfvec(vector, integer, boolean) RETURNS halfvec
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION array_to_halfvec(integer[], integer, boolean) RETURNS halfvec
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION array_to_halfvec(real[], integer, boolean) RETURNS halfvec
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION array_to_halfvec(double precision[], integer, boolean) RETURNS halfvec
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION array_to_halfvec(numeric[], integer, boolean) RETURNS halfvec
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION halfvec_to_float4(halfvec, integer, boolean) RETURNS real[]
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+-- halfvec casts
+
+CREATE CAST (halfvec AS halfvec)
+	WITH FUNCTION halfvec(halfvec, integer, boolean) AS IMPLICIT;
+
+CREATE CAST (halfvec AS vector)
+	WITH FUNCTION halfvec_to_vector(halfvec, integer, boolean) AS ASSIGNMENT;
+
+CREATE CAST (vector AS halfvec)
+	WITH FUNCTION vector_to_halfvec(vector, integer, boolean) AS IMPLICIT;
+
+CREATE CAST (halfvec AS real[])
+	WITH FUNCTION halfvec_to_float4(halfvec, integer, boolean) AS ASSIGNMENT;
+
+CREATE CAST (integer[] AS halfvec)
+	WITH FUNCTION array_to_halfvec(integer[], integer, boolean) AS ASSIGNMENT;
+
+CREATE CAST (real[] AS halfvec)
+	WITH FUNCTION array_to_halfvec(real[], integer, boolean) AS ASSIGNMENT;
+
+CREATE CAST (double precision[] AS halfvec)
+	WITH FUNCTION array_to_halfvec(double precision[], integer, boolean) AS ASSIGNMENT;
+
+CREATE CAST (numeric[] AS halfvec)
+	WITH FUNCTION array_to_halfvec(numeric[], integer, boolean) AS ASSIGNMENT;
 
 -- halfvec operators
 
