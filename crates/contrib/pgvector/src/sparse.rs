@@ -408,6 +408,247 @@ pub fn parse_sparsevec(
     Ok(dim)
 }
 
+/// C: SparsevecL2SquaredDistance (sparsevec.c ~811-844). Two-pointer merge
+/// over both index lists; f32 accumulation.
+pub fn l2_squared_distance(a: &SparseVecView<'_>, b: &SparseVecView<'_>) -> f32 {
+    let mut distance: f32 = 0.0;
+    let mut bpos: usize = 0;
+    let bn = b.nnz();
+    for i in 0..a.nnz() {
+        let ai = a.index(i);
+        let mut bi: i32 = -1;
+        let mut j = bpos;
+        while j < bn {
+            bi = b.index(j);
+            if ai == bi {
+                let diff = a.value(i) - b.value(j);
+                distance += diff * diff;
+            } else if ai > bi {
+                distance += b.value(j) * b.value(j);
+            }
+            if ai >= bi {
+                bpos = j + 1;
+            }
+            if bi >= ai {
+                break;
+            }
+            j += 1;
+        }
+        if ai != bi {
+            distance += a.value(i) * a.value(i);
+        }
+    }
+    for j in bpos..bn {
+        distance += b.value(j) * b.value(j);
+    }
+    distance
+}
+
+/// C: SparsevecInnerProduct (sparsevec.c ~858-880).
+pub fn inner_product(a: &SparseVecView<'_>, b: &SparseVecView<'_>) -> f32 {
+    let mut distance: f32 = 0.0;
+    let mut bpos: usize = 0;
+    let bn = b.nnz();
+    for i in 0..a.nnz() {
+        let ai = a.index(i);
+        let mut j = bpos;
+        while j < bn {
+            let bi = b.index(j);
+            if ai == bi {
+                distance += a.value(i) * b.value(j);
+            }
+            if ai >= bi {
+                bpos = j + 1;
+            }
+            if bi >= ai {
+                break;
+            }
+            j += 1;
+        }
+    }
+    distance
+}
+
+/// C: sparsevec_cosine_distance's similarity computation (sparsevec.c
+/// ~908-935), stopping before the final `1.0 - similarity` (that belongs to
+/// the SQL-facing distance function in a later task). f32 partial norms cast
+/// to f64, `similarity /= sqrt(norma * normb)`, then clamped to [-1, 1]. The
+/// `#ifdef _MSC_VER` NaN early-return is MSVC-`/fp:fast`-only and not
+/// applicable here.
+pub fn cosine_similarity(a: &SparseVecView<'_>, b: &SparseVecView<'_>) -> f64 {
+    let mut norma: f32 = 0.0;
+    let mut normb: f32 = 0.0;
+    let mut similarity = inner_product(a, b) as f64;
+
+    for i in 0..a.nnz() {
+        norma += a.value(i) * a.value(i);
+    }
+    for i in 0..b.nnz() {
+        normb += b.value(i) * b.value(i);
+    }
+
+    similarity /= (norma as f64 * normb as f64).sqrt();
+
+    if similarity > 1.0 {
+        similarity = 1.0;
+    } else if similarity < -1.0 {
+        similarity = -1.0;
+    }
+    similarity
+}
+
+/// C: sparsevec_l1_distance (sparsevec.c ~1005-1043).
+pub fn l1_distance(a: &SparseVecView<'_>, b: &SparseVecView<'_>) -> f32 {
+    let mut distance: f32 = 0.0;
+    let mut bpos: usize = 0;
+    let bn = b.nnz();
+    for i in 0..a.nnz() {
+        let ai = a.index(i);
+        let mut bi: i32 = -1;
+        let mut j = bpos;
+        while j < bn {
+            bi = b.index(j);
+            if ai == bi {
+                distance += (a.value(i) - b.value(j)).abs();
+            } else if ai > bi {
+                distance += b.value(j).abs();
+            }
+            if ai >= bi {
+                bpos = j + 1;
+            }
+            if bi >= ai {
+                break;
+            }
+            j += 1;
+        }
+        if ai != bi {
+            distance += a.value(i).abs();
+        }
+    }
+    for j in bpos..bn {
+        distance += b.value(j).abs();
+    }
+    distance
+}
+
+/// C: sparsevec_l2_norm (sparsevec.c ~1049-1061). Double accumulation.
+pub fn norm(a: &SparseVecView<'_>) -> f64 {
+    let mut n: f64 = 0.0;
+    for i in 0..a.nnz() {
+        let x = a.value(i) as f64;
+        n += x * x;
+    }
+    n.sqrt()
+}
+
+/// C: sparsevec_cmp_internal (sparsevec.c ~1136-1173). Compares values
+/// before dimensions, treating a missing index (past one side's nnz, but
+/// still below that side's dim) as an implicit 0.
+pub fn cmp_internal(a: &SparseVecView<'_>, b: &SparseVecView<'_>) -> i32 {
+    let nnz = a.nnz().min(b.nnz());
+    for i in 0..nnz {
+        let (ai, bi) = (a.index(i), b.index(i));
+        if ai < bi {
+            return if a.value(i) < 0.0 { -1 } else { 1 };
+        }
+        if ai > bi {
+            return if b.value(i) < 0.0 { 1 } else { -1 };
+        }
+        if a.value(i) < b.value(i) {
+            return -1;
+        }
+        if a.value(i) > b.value(i) {
+            return 1;
+        }
+    }
+
+    if a.nnz() < b.nnz() && b.index(nnz) < a.dim() {
+        return if b.value(nnz) < 0.0 { 1 } else { -1 };
+    }
+    if a.nnz() > b.nnz() && a.index(nnz) < b.dim() {
+        return if a.value(nnz) < 0.0 { -1 } else { 1 };
+    }
+
+    if a.dim() < b.dim() {
+        return -1;
+    }
+    if a.dim() > b.dim() {
+        return 1;
+    }
+    0
+}
+
+/// C: sparsevec_l2_normalize (sparsevec.c ~1069-1120), adapted to the
+/// image-in/image-out shape `HnswTypeInfo::normalize` expects (mirrors
+/// `vec::l2_normalize_image`). Norm is accumulated in double. When norm > 0,
+/// each value is divided by the norm; an infinite result is a hard error
+/// (`float_overflow_error`), matching C's `isinf(rx[i])` check. C then
+/// rebuilds the vector a second time, dropping any entries that underflowed
+/// to exactly 0 (0.8.x behavior — read from sparsevec.c, not guessed) so the
+/// returned nnz can be smaller than the input's. When norm == 0, C's
+/// `InitSparseVector` result is returned untouched: since a stored
+/// sparsevec never keeps zero-valued elements, norm == 0 implies nnz == 0,
+/// so `SparseVecBuilder::new`'s zero-fill already matches (there is nothing
+/// to copy).
+pub fn sparsevec_l2_normalize_image<'m>(mcx: Mcx<'m>, img: &[u8]) -> PgResult<PgVec<'m, u8>> {
+    let v = SparseVecView::from_payload(&img[4..])?;
+    let nnz = v.nnz();
+
+    let mut norm: f64 = 0.0;
+    for i in 0..nnz {
+        let x = v.value(i) as f64;
+        norm += x * x;
+    }
+    norm = norm.sqrt();
+
+    if norm > 0.0 {
+        let mut rx: Vec<f32> = Vec::with_capacity(nnz);
+        for i in 0..nnz {
+            let r = (v.value(i) as f64 / norm) as f32;
+            if r.is_infinite() {
+                return Err(Box::new(adt_float::float_overflow_error()));
+            }
+            rx.push(r);
+        }
+
+        let zeros = rx.iter().filter(|&&r| r == 0.0).count();
+        let mut b = SparseVecBuilder::new(mcx, v.dim(), nnz - zeros)?;
+        let mut j = 0;
+        for i in 0..nnz {
+            if rx[i] == 0.0 {
+                continue;
+            }
+            b.set(j, v.index(i), rx[i]);
+            j += 1;
+        }
+        return Ok(b.image());
+    }
+
+    // norm == 0: C returns the zero-initialized InitSparseVector result
+    // (indices/values never copied on this path).
+    let b = SparseVecBuilder::new(mcx, v.dim(), nnz)?;
+    Ok(b.image())
+}
+
+/// C: hnswutils.c SparsevecCheckValue.
+pub const HNSW_MAX_NNZ: i32 = 1000;
+pub fn sparsevec_check_value(img: &[u8]) -> PgResult<()> {
+    let v = SparseVecView::from_payload(&img[4..])?;
+    if v.nnz() as i32 > HNSW_MAX_NNZ {
+        return Err(PgError::error(format!(
+            "sparsevec cannot have more than {HNSW_MAX_NNZ} non-zero elements for hnsw index"
+        ))
+        .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+        .into());
+    }
+    Ok(())
+}
+pub static SPARSEVEC_TYPE_INFO: types_hnsw::HnswTypeInfo = types_hnsw::HnswTypeInfo {
+    max_dimensions: SPARSEVEC_MAX_DIM,
+    normalize: Some(sparsevec_l2_normalize_image),
+    check_value: Some(sparsevec_check_value),
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -457,5 +698,68 @@ mod tests {
         assert_eq!((v.dim(), v.nnz()), (10, 2));
         assert_eq!((v.index(1), v.value(1)), (7, -2.0));
         assert_eq!(&img[12..16], &0i32.to_ne_bytes(), "unused is zero");
+    }
+
+    fn sv<'m>(m: mcx::Mcx<'m>, dim: i32, e: &[(i32, f32)]) -> mcx::PgVec<'m, u8> {
+        let mut b = SparseVecBuilder::new(m, dim, e.len()).unwrap();
+        for (i, (idx, v)) in e.iter().enumerate() {
+            b.set(i, *idx, *v);
+        }
+        b.image()
+    }
+
+    #[test]
+    fn two_pointer_kernels() {
+        let o = mcx::MemoryContext::new_bump("t");
+        let m = o.mcx();
+        let a = sv(m, 5, &[(0, 1.0), (2, 2.0), (4, 3.0)]);
+        let b = sv(m, 5, &[(1, 4.0), (2, 5.0), (4, 6.0)]);
+        let (a, b) = (
+            SparseVecView::from_payload(&a[4..]).unwrap(),
+            SparseVecView::from_payload(&b[4..]).unwrap(),
+        );
+        assert_eq!(l2_squared_distance(&a, &b), 1.0 + 16.0 + 9.0 + 9.0);
+        assert_eq!(inner_product(&a, &b), 10.0 + 18.0);
+        assert_eq!(l1_distance(&a, &b), 1.0 + 4.0 + 3.0 + 3.0);
+        assert!((norm(&a) - 14f64.sqrt()).abs() < 1e-12);
+        // C sparsevec_cmp_internal: at index 0, a->indices[0]=0 < b->indices[0]=1,
+        // so it returns (ax[0] < 0 ? -1 : 1); ax[0] = 1.0, so this is 1 (not -1).
+        assert_eq!(cmp_internal(&a, &b), 1);
+    }
+
+    #[test]
+    fn cmp_treats_missing_as_zero_then_dim() {
+        let o = mcx::MemoryContext::new_bump("t");
+        let m = o.mcx();
+        let a = sv(m, 3, &[(1, 1.0)]);
+        let b = sv(m, 3, &[(0, 1.0)]);
+        let (a, b) = (
+            SparseVecView::from_payload(&a[4..]).unwrap(),
+            SparseVecView::from_payload(&b[4..]).unwrap(),
+        );
+        assert_eq!(cmp_internal(&a, &b), -1); // index0: a=0 < b=1
+        let c = sv(m, 4, &[(1, 1.0)]);
+        let c = SparseVecView::from_payload(&c[4..]).unwrap();
+        assert_eq!(cmp_internal(&a, &c), -1); // equal prefix, shorter dim first
+    }
+
+    #[test]
+    fn normalize_and_check_value() {
+        let o = mcx::MemoryContext::new_bump("t");
+        let m = o.mcx();
+        let a = sv(m, 5, &[(0, 3.0), (4, 4.0)]);
+        let out = sparsevec_l2_normalize_image(m, &a).unwrap();
+        let v = SparseVecView::from_payload(&out[4..]).unwrap();
+        assert!((v.value(0) - 0.6).abs() < 1e-7 && (v.value(1) - 0.8).abs() < 1e-7);
+        let big = {
+            let e: Vec<(i32, f32)> = (0..1001).map(|i| (i, 1.0)).collect();
+            sv(m, 2000, &e)
+        };
+        let err = sparsevec_check_value(&big).unwrap_err();
+        assert_eq!(
+            err.message(),
+            "sparsevec cannot have more than 1000 non-zero elements for hnsw index"
+        );
+        assert_eq!(SPARSEVEC_TYPE_INFO.max_dimensions, SPARSEVEC_MAX_DIM);
     }
 }
