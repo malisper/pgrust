@@ -12,12 +12,13 @@ stripped, cwd = the upstream `test/` directory).
 `bit`, `hnsw_bit` and `ivfflat_*` are skipped: pgrust does not ship those
 opclasses / that access method. With no arguments the script otherwise runs
 every test under upstream's `test/sql/`, whether or not this port has caught
-up to it. On the current tree that means `vector_type`, `hnsw_vector`,
-`halfvec`, `hnsw_halfvec`, `sparsevec` and `hnsw_sparsevec` all pass, and so do
-`btree`, `cast` and `copy` once the halfvec<->sparsevec casts are present (they
-exercise both types together). A full, argument-less run is expected to exit
-zero on a tree that carries both types; pass explicit test names (as above) to
-check a subset.
+up to it. On the current tree (which carries the vector, halfvec and
+sparsevec types, HNSW for all three, and the halfvec<->sparsevec casts) an
+argument-less run passes all nine selected tests: `vector_type`,
+`hnsw_vector`, `halfvec`, `hnsw_halfvec`, `sparsevec`, `hnsw_sparsevec`,
+`btree`, `cast` and `copy` (the last three exercise both halfvec and
+sparsevec together, including the cast pair). Pass explicit test names (as
+above) to check a subset.
 
 On FAIL the script leaves that test's diff (and upstream's raw output) in a
 `mktemp -d` directory, printed in the failure line, for inspection.
