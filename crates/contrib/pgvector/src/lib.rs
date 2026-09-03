@@ -4,6 +4,7 @@
 //! extension script is trimmed accordingly).
 
 pub mod funcs;
+pub mod halfutils;
 pub mod vec;
 
 use types_fmgr::PGFunction;
