@@ -3,7 +3,12 @@
 //! LWLock per element; here the arena is an Arc-slice behind a RwLock and the
 //! per-element lock is a Mutex over the mutable parts. DIVERGENCES (recorded):
 //! one implementation serves serial and parallel builds (C: base == NULL vs
-//! relptr); indtuples is an integer counter (C: double under a spinlock).
+//! relptr); indtuples is an integer counter (C: double under a spinlock);
+//! memory accounting charges `size_of::<SharedElement>()` per element (the
+//! pre-refactor Rust charged `size_of::<MemElement>()`, and C charges its own
+//! `HnswElementData`/`HnswCandidate` struct sizes), so the flush point and the
+//! "hnsw graph no longer fits into maintenance_work_mem after N tuples" count
+//! differ from both the pre-refactor Rust and from C.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::*};
 use std::sync::{Arc, Mutex, RwLock};
