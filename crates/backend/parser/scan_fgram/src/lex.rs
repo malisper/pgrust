@@ -479,6 +479,7 @@ impl<'mcx> Scanner<'mcx> {
             State::Xq | State::Xe => {
                 if self.saw_non_ascii {
                     self.verifymbstr()?;
+                    self.utf8_pin()?;
                 }
                 let s = self.litbufdup()?;
                 Ok(self.make(tokens::SCONST, CoreYYSTYPE::Str(s)))
@@ -695,6 +696,24 @@ impl<'mcx> Scanner<'mcx> {
                 seq
             ))
             .with_sqlstate(types_error::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE),
+        ))
+    }
+
+    // C keeps escape-built bytes raw; the &str parse tree draws tcop's §11 gate.
+    #[cold]
+    fn utf8_pin(&self) -> PgResult<()> {
+        if self.encoding == wchar::PG_UTF8 || core::str::from_utf8(&self.literalbuf).is_ok() {
+            return Ok(());
+        }
+        Err(Box::new(
+            types_error::PgError::error(format!(
+                "query strings with non-ASCII characters are not supported yet in databases \
+                 with encoding \"{}\"",
+                encoding_name(self.encoding)
+            ))
+            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .with_hint("Use a database with encoding \"UTF8\".")
+            .with_cursor_position(self.scanner_errposition(self.yylloc)),
         ))
     }
 }

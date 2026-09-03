@@ -318,3 +318,41 @@ fn addunicode_non_utf8_server_runs_the_conversion_lane() {
 
     mbutils::SetDatabaseEncoding(saved).unwrap();
 }
+
+fn lex_err_with(input: &[u8], settings: ScannerSettings) -> Box<types_error::PgError> {
+    let ctx = test_ctx();
+    let mut sc = Scanner::new(input, ctx.mcx(), settings);
+    loop {
+        match lex(&mut sc) {
+            Ok(tok) if tok.token == YY_NULL => panic!("no error for {input:?}"),
+            Ok(_) => {}
+            Err(e) => return e,
+        }
+    }
+}
+
+#[test]
+fn sql_ascii_escape_bytes_outside_utf8_draw_the_carve_error() {
+    let ascii = ScannerSettings { encoding: wchar::PG_SQL_ASCII, ..ScannerSettings::default() };
+    for input in [&br"e'\xc3\x28'"[..], br"e'\200'", br"E'ab\x80'", br"e'\377\376'"] {
+        let err = lex_err_with(input, ascii);
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED, "{input:?}");
+        assert_eq!(
+            err.message(),
+            "query strings with non-ASCII characters are not supported yet in databases \
+             with encoding \"SQL_ASCII\""
+        );
+        assert_eq!(err.hint(), Some("Use a database with encoding \"UTF8\"."));
+        assert_eq!(err.cursor_position(), Some(1));
+    }
+    let toks = lex_all_with(br"e'\xc3\xa9\101'", ascii);
+    assert_eq!(toks[0], (tokens::SCONST, "=\u{e9}A".to_string(), 0));
+    let err = lex_err_with(br"e'\x00\x80'", ascii);
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE);
+    assert_eq!(err.message(), "invalid byte sequence for encoding \"SQL_ASCII\": 0x00");
+    let utf8 = ScannerSettings { encoding: wchar::PG_UTF8, ..ScannerSettings::default() };
+    let err = lex_err_with(br"e'\xc3\x28'", utf8);
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE);
+    assert_eq!(err.message(), "invalid byte sequence for encoding \"UTF8\": 0xc3 0x28");
+    assert_eq!(err.cursor_position(), None);
+}

@@ -2806,3 +2806,21 @@ fn unported_grammar_action_errors_instead_of_panicking() {
     parse("ALTER TABLE t DISABLE RULE r");
 }
 
+// Test threads never SetDatabaseEncoding, so the scanner runs as SQL_ASCII.
+#[test]
+fn sql_ascii_escape_literal_with_non_utf8_bytes_errors_cleanly() {
+    let err = parse_err(r"SELECT length(E'\xc3\x28');");
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+    assert_eq!(
+        err.message(),
+        "query strings with non-ASCII characters are not supported yet in databases \
+         with encoding \"SQL_ASCII\""
+    );
+    assert_eq!(err.cursor_position(), Some(15));
+    let list = parse(r"SELECT E'\xc3\xa9'");
+    let sel = select_of(only_stmt(&list));
+    let target = sel.targetList.nth(0).as_res_target().expect("ResTarget");
+    let aconst = target.val.expect("val").as_a_const().expect("A_Const");
+    let Some(ValUnion::String(s)) = aconst.val else { panic!("String") };
+    assert_eq!(s.sval, "\u{e9}");
+}

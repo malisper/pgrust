@@ -495,8 +495,8 @@ fn yystype_from(v: CoreYYSTYPE<'_>) -> YYSTYPE<'_> {
         CoreVal::None => YYSTYPE::None,
         CoreVal::Ival(i) => YYSTYPE::Ival(i),
         CoreVal::Str(bytes) => {
-            // Input is &str and the scanner verifies escape-built literals,
-            // so values are valid UTF-8 while the server encoding is UTF-8.
+            // Input is &str and the scanner's utf8_pin rejects escape-built
+            // literals no &str can carry, so values are valid UTF-8.
             debug_assert!(core::str::from_utf8(bytes).is_ok());
             // SAFETY: see above.
             YYSTYPE::Str(unsafe { core::str::from_utf8_unchecked(bytes) })
