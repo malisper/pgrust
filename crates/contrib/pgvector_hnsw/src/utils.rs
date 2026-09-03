@@ -73,9 +73,22 @@ pub fn get_type_info(index: &Relation<'_>) -> PgResult<&'static HnswTypeInfo> {
     }
     let mut flinfo = fmgr_seams::fmgr_info::call(proc_oid)?;
     let d = types_fmgr::function_call0_coll(&mut flinfo, 0)?;
-    // SAFETY: hnsw_*_support functions return the address of a `static
-    // HnswTypeInfo` (process-lifetime) as their Datum; nothing else is
-    // registered as proc 3 for hnsw in the bundled extension script.
+    if d.as_usize() == 0 {
+        return Err(
+            PgError::error("hnsw type-info support function returned a null pointer")
+                .with_sqlstate(types_error::ERRCODE_INTERNAL_ERROR)
+                .into(),
+        );
+    }
+    // SAFETY: this inherits C's contract, unchecked on the C side too --
+    // HnswGetTypeInfo does `(const HnswTypeInfo *) DatumGetPointer(FunctionCall0Coll(...))`
+    // with no cast or validity check on the result. The bundled extension
+    // script registers only the built-in `hnsw_*_support` functions as proc 3,
+    // and each returns the address of a `static const HnswTypeInfo`
+    // (process-lifetime storage). hnswvalidate does not check proc 3's
+    // signature or behavior, so a hand-rolled opclass wiring an arbitrary
+    // zero-argument function as proc 3 is undefined behaviour in C and here
+    // alike -- the null check above is the one guard we add beyond C.
     Ok(unsafe { &*(d.as_usize() as *const HnswTypeInfo) })
 }
 
