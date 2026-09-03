@@ -26,7 +26,7 @@ unsafe fn arg_vector<'a>(fcinfo: &'a Fcinfo, i: usize) -> PgResult<VecView<'a>> 
     VecView::from_payload(v.data())
 }
 
-unsafe fn detoasted_image<'m>(mcx: Mcx<'m>, d: Datum) -> PgResult<&'m [u8]> {
+pub(crate) unsafe fn detoasted_image<'m>(mcx: Mcx<'m>, d: Datum) -> PgResult<&'m [u8]> {
     let p = d.as_usize() as *const u8;
     unsafe {
         if varatt::varatt_is_4b_u(p) {
