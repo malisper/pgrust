@@ -74,6 +74,7 @@ fn lookup(function: &str) -> Option<PGFunction> {
         "sparsevec_ge" => fc_sparsevec_ge,
         "sparsevec_gt" => fc_sparsevec_gt,
         "sparsevec_cmp" => fc_sparsevec_cmp,
+        "hnsw_sparsevec_support" => fc_hnsw_sparsevec_support,
         "hnswhandler" => fc_hnswhandler,
         _ => return None,
     })

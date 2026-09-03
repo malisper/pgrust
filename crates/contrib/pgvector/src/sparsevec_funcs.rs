@@ -15,7 +15,7 @@ use crate::sparse::{
     check_dim, check_dims, check_element, check_expected_dim, check_index, check_nnz,
     cmp_internal, cosine_similarity, inner_product, l1_distance, l2_squared_distance, norm,
     parse_sparsevec, sparsevec_l2_normalize_image, SparseInputElement, SparseVecBuilder,
-    SparseVecView, SPARSEVEC_MAX_DIM,
+    SparseVecView, SPARSEVEC_MAX_DIM, SPARSEVEC_TYPE_INFO,
 };
 use crate::vec::{VecBuilder, VecView};
 
@@ -450,4 +450,16 @@ pub fn fc_sparsevec_gt(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResu
 pub fn fc_sparsevec_cmp(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let (a, b) = binary_2arg(fcinfo)?;
     Ok(Datum::from_i32(cmp_internal(&a, &b)))
+}
+
+// C: hnswutils.c hnsw_sparsevec_support (~1420-1432): `PG_RETURN_POINTER(&typeInfo)` —
+// support proc 3 for the sparsevec hnsw opclasses. `pgvector_hnsw::utils::get_type_info`
+// calls this fmgr entry with `function_call0_coll` and reinterprets the returned Datum
+// as `&'static HnswTypeInfo` (see crates/contrib/pgvector_hnsw/src/utils.rs ~69-92), so
+// the pointer handed back here must stay valid for the process lifetime: `SPARSEVEC_TYPE_INFO`
+// is a `'static` item, so its address is always safe to reinterpret this way.
+pub fn fc_hnsw_sparsevec_support(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    Ok(Datum::from_usize(
+        &SPARSEVEC_TYPE_INFO as *const types_hnsw::HnswTypeInfo as usize,
+    ))
 }

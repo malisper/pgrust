@@ -673,6 +673,7 @@ pub fn sparsevec_check_value(img: &[u8]) -> PgResult<()> {
     }
     Ok(())
 }
+/// C: hnswutils.c hnsw_sparsevec_support (~1420-1432) — `PG_RETURN_POINTER(&typeInfo)`.
 pub static SPARSEVEC_TYPE_INFO: types_hnsw::HnswTypeInfo = types_hnsw::HnswTypeInfo {
     max_dimensions: SPARSEVEC_MAX_DIM,
     normalize: Some(sparsevec_l2_normalize_image),
