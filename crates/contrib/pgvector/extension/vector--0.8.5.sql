@@ -383,3 +383,97 @@ CREATE CAST (double precision[] AS halfvec)
 CREATE CAST (numeric[] AS halfvec)
 	WITH FUNCTION array_to_halfvec(numeric[], integer, boolean) AS ASSIGNMENT;
 
+
+-- halfvec functions
+
+CREATE FUNCTION l2_distance(halfvec, halfvec) RETURNS float8
+	AS 'MODULE_PATHNAME', 'halfvec_l2_distance' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION inner_product(halfvec, halfvec) RETURNS float8
+	AS 'MODULE_PATHNAME', 'halfvec_inner_product' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION cosine_distance(halfvec, halfvec) RETURNS float8
+	AS 'MODULE_PATHNAME', 'halfvec_cosine_distance' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION l1_distance(halfvec, halfvec) RETURNS float8
+	AS 'MODULE_PATHNAME', 'halfvec_l1_distance' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION vector_dims(halfvec) RETURNS integer
+	AS 'MODULE_PATHNAME', 'halfvec_vector_dims' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION l2_norm(halfvec) RETURNS float8
+	AS 'MODULE_PATHNAME', 'halfvec_l2_norm' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION l2_normalize(halfvec) RETURNS halfvec
+	AS 'MODULE_PATHNAME', 'halfvec_l2_normalize' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION binary_quantize(halfvec) RETURNS bit
+	AS 'MODULE_PATHNAME', 'halfvec_binary_quantize' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION subvector(halfvec, int, int) RETURNS halfvec
+	AS 'MODULE_PATHNAME', 'halfvec_subvector' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+-- halfvec private functions
+
+CREATE FUNCTION halfvec_add(halfvec, halfvec) RETURNS halfvec
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION halfvec_sub(halfvec, halfvec) RETURNS halfvec
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION halfvec_mul(halfvec, halfvec) RETURNS halfvec
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION halfvec_concat(halfvec, halfvec) RETURNS halfvec
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+-- DIVERGENCE (recorded, Task 5): upstream sql/vector.sql 362-443 interleaves
+-- these nine CREATE FUNCTION statements (halfvec_lt..cmp, halfvec_accum,
+-- halfvec_avg) among ones for symbols this task registers. pgrust's
+-- fmgr_c_validator (pg_proc::ProcedureCreate) runs unconditionally for
+-- LANGUAGE C, regardless of check_function_bodies (matches real Postgres:
+-- "for pg_dump loading it's much better if we *do* check"), and errors
+-- "could not find function ... in file ..." for a symbol lookup() doesn't
+-- resolve -- verified by reproducing against the running p1 server. Since
+-- Task 6 is the one that registers these nine in lib.rs, left commented here
+-- (verbatim upstream text) rather than left for CREATE EXTENSION to fail on;
+-- Task 6 should uncomment this block instead of re-adding it.
+--
+-- CREATE FUNCTION halfvec_lt(halfvec, halfvec) RETURNS bool
+-- 	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+--
+-- CREATE FUNCTION halfvec_le(halfvec, halfvec) RETURNS bool
+-- 	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+--
+-- CREATE FUNCTION halfvec_eq(halfvec, halfvec) RETURNS bool
+-- 	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+--
+-- CREATE FUNCTION halfvec_ne(halfvec, halfvec) RETURNS bool
+-- 	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+--
+-- CREATE FUNCTION halfvec_ge(halfvec, halfvec) RETURNS bool
+-- 	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+--
+-- CREATE FUNCTION halfvec_gt(halfvec, halfvec) RETURNS bool
+-- 	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+--
+-- CREATE FUNCTION halfvec_cmp(halfvec, halfvec) RETURNS int4
+-- 	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION halfvec_l2_squared_distance(halfvec, halfvec) RETURNS float8
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION halfvec_negative_inner_product(halfvec, halfvec) RETURNS float8
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION halfvec_spherical_distance(halfvec, halfvec) RETURNS float8
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+-- CREATE FUNCTION halfvec_accum(double precision[], halfvec) RETURNS double precision[]
+-- 	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+--
+-- CREATE FUNCTION halfvec_avg(double precision[]) RETURNS halfvec
+-- 	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION halfvec_combine(double precision[], double precision[]) RETURNS double precision[]
+	AS 'MODULE_PATHNAME', 'vector_combine' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
