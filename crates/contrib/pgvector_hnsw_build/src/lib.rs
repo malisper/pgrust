@@ -16,6 +16,8 @@ use types_rel::Relation;
 use types_storage::bufpage::PageMut;
 use types_tuple::itemptr::ItemPointerData;
 
+pub(crate) mod graph;
+
 pub struct IndexBuildResult {
     pub heap_tuples: f64,
     pub index_tuples: f64,
