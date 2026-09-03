@@ -5,6 +5,7 @@
 
 pub mod funcs;
 pub mod sparse;
+pub mod sparsevec_funcs;
 pub mod vec;
 
 use types_fmgr::PGFunction;
@@ -13,6 +14,7 @@ const LIBRARY: &str = "vector";
 
 fn lookup(function: &str) -> Option<PGFunction> {
     use funcs::*;
+    use sparsevec_funcs::*;
     Some(match function {
         "vector_in" => fc_vector_in,
         "vector_out" => fc_vector_out,
@@ -48,6 +50,12 @@ fn lookup(function: &str) -> Option<PGFunction> {
         "vector_accum" => fc_vector_accum,
         "vector_combine" => fc_vector_combine,
         "vector_avg" => fc_vector_avg,
+        "sparsevec_in" => fc_sparsevec_in,
+        "sparsevec_out" => fc_sparsevec_out,
+        "sparsevec_typmod_in" => fc_sparsevec_typmod_in,
+        "sparsevec_recv" => fc_sparsevec_recv,
+        "sparsevec_send" => fc_sparsevec_send,
+        "sparsevec" => fc_sparsevec,
         "hnswhandler" => fc_hnswhandler,
         _ => return None,
     })

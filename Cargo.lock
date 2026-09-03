@@ -12840,6 +12840,7 @@ dependencies = [
  "elog",
  "guc",
  "mcx",
+ "numutils",
  "pqformat",
  "ryu",
  "stringinfo",

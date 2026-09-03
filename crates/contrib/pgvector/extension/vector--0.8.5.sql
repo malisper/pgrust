@@ -287,3 +287,42 @@ CREATE OPERATOR CLASS vector_l1_ops
 	FOR TYPE vector USING hnsw AS
 	OPERATOR 1 <+> (vector, vector) FOR ORDER BY float_ops,
 	FUNCTION 1 l1_distance(vector, vector);
+
+--- sparsevec type
+
+CREATE TYPE sparsevec;
+
+CREATE FUNCTION sparsevec_in(cstring, oid, integer) RETURNS sparsevec
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION sparsevec_out(sparsevec) RETURNS cstring
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION sparsevec_typmod_in(cstring[]) RETURNS integer
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION sparsevec_recv(internal, oid, integer) RETURNS sparsevec
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION sparsevec_send(sparsevec) RETURNS bytea
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE TYPE sparsevec (
+	INPUT     = sparsevec_in,
+	OUTPUT    = sparsevec_out,
+	TYPMOD_IN = sparsevec_typmod_in,
+	RECEIVE   = sparsevec_recv,
+	SEND      = sparsevec_send,
+	STORAGE   = external
+);
+
+-- pulled forward from the cast section; Task 4 must not re-add. Needed now
+-- because `'{}/3'::sparsevec(2)` goes through the assignment cast (not
+-- sparsevec_in with a typmod) once the value is already typed sparsevec, so
+-- the "expected N dimensions, not M" regression case requires this function
+-- and cast to exist alongside the type's I/O functions.
+CREATE FUNCTION sparsevec(sparsevec, integer, boolean) RETURNS sparsevec
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE CAST (sparsevec AS sparsevec)
+	WITH FUNCTION sparsevec(sparsevec, integer, boolean) AS IMPLICIT;

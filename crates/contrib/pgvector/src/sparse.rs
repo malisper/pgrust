@@ -323,7 +323,16 @@ pub fn parse_sparsevec(
                 Some(r) => r,
                 None => return Err(invalid_text(lit, None)),
             };
-            if let StrtofVal::Erange(tok_len) = val {
+            // Unlike vector_in (which only checks isinf), sparsevec_in
+            // checks `errno == ERANGE && (value == 0 || isinf(value))`
+            // (sparsevec.c:308), so both overflow (`Erange`) and underflow
+            // (`Underflow`) report the same out-of-range error.
+            let tok_len_err = match &val {
+                StrtofVal::Erange(l) => Some(*l),
+                StrtofVal::Underflow(l, _) => Some(*l),
+                StrtofVal::Ok(_) => None,
+            };
+            if let Some(tok_len) = tok_len_err {
                 return Err(PgError::error(format!(
                     "\"{}\" is out of range for type sparsevec",
                     String::from_utf8_lossy(&lit[pt..pt + tok_len])
@@ -701,6 +710,12 @@ mod tests {
         assert_eq!(parse("{1:nan}/3").unwrap_err(), "NaN not allowed in sparsevec");
         assert_eq!(parse("{1:inf}/3").unwrap_err(), "infinite value not allowed in sparsevec");
         assert_eq!(parse("{1:4e38}/3").unwrap_err(), "\"4e38\" is out of range for type sparsevec");
+        // sparsevec_in additionally errors on ERANGE-underflow-to-zero
+        // (sparsevec.c:308's `value == 0` branch), unlike vector_in.
+        assert_eq!(parse("{1:1e-46}/3").unwrap_err(), "\"1e-46\" is out of range for type sparsevec");
+        assert_eq!(parse("{1:-1e-46}/3").unwrap_err(), "\"-1e-46\" is out of range for type sparsevec");
+        // A literal zero (not an underflow) is still accepted and dropped.
+        assert_eq!(parse("{1:0e10}/3").unwrap(), (3, vec![]));
         // C sparsevec_in never calls CheckNnz (recv-only); the 4th index (3, 0-based) fails CheckIndex.
         assert_eq!(parse("{1:1,2:2,3:3,4:4}/3").unwrap_err(), "sparsevec index out of bounds");
         let mut out = Vec::new();
