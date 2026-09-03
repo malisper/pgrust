@@ -1073,7 +1073,13 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      thread_local! block) — fake-buffer fixture + delay-point counter
     //      for the 7becb647 posting-tree vacuum witness (unit harness
     //      fixture; counted by the tree census, never product code).
-    assert_eq!(count_tree(crates), 579, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 580, 18.6 conformance audit (2026-09-02), plpgsql record fixes: one
+    //   test-only source —
+    //   53. pl/plpgsql/src/exec.rs COMP_BY_NAME — Cell<Oid> per-thread typcache
+    //      fixture behind the syscache seam for the rowtype re-resolution
+    //      witness (unit harness fixture; counted by the tree census, never
+    //      product code — same class as 43/45/46/50).
+    assert_eq!(count_tree(crates), 580, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

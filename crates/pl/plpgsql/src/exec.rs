@@ -123,6 +123,75 @@ impl RecDesc {
     }
 }
 
+// The heap tuple a record was bound from (C's expanded record fvalue, kept
+// across field assignments); absent for a record built from fields.
+#[derive(Clone, Copy)]
+pub struct RecSysAttrs {
+    ctid: types_tuple::ItemPointerData,
+    tableoid: Oid,
+    xmin: u32,
+    xmax: u32,
+    cmd: u32,
+}
+
+impl RecSysAttrs {
+    pub fn from_tuple(t: &types_tuple::HeapTupleData<'_>) -> RecSysAttrs {
+        let h = t.t_data();
+        RecSysAttrs {
+            ctid: t.t_self,
+            tableoid: t.t_tableOid,
+            xmin: h.xmin_raw(),
+            xmax: h.xmax_raw(),
+            cmd: h.raw_command_id(),
+        }
+    }
+
+    // heap_getsysattr; the ctid Datum points into self.
+    pub fn get(&self, attnum: i16) -> Datum {
+        match attnum as i32 {
+            types_tuple::SelfItemPointerAttributeNumber => {
+                Datum::from_usize(&self.ctid as *const _ as usize)
+            }
+            types_tuple::MinTransactionIdAttributeNumber => Datum::from_u32(self.xmin),
+            types_tuple::MaxTransactionIdAttributeNumber => Datum::from_u32(self.xmax),
+            types_tuple::MinCommandIdAttributeNumber
+            | types_tuple::MaxCommandIdAttributeNumber => Datum::from_u32(self.cmd),
+            types_tuple::TableOidAttributeNumber => Datum::from_oid(self.tableoid),
+            other => panic!("invalid attnum: {other}"),
+        }
+    }
+}
+
+pub enum RecFieldRef {
+    User(usize),
+    Sys(&'static types_tuple::FormData_pg_attribute),
+}
+
+// expanded_record_lookup_field: user columns, then system attributes.
+pub fn rec_lookup_field(desc: &RecDesc, want: &str, fieldname: &str) -> Option<RecFieldRef> {
+    for (i, n) in desc.names.iter().enumerate() {
+        if !desc.dropped[i] && n == want {
+            return Some(RecFieldRef::User(i));
+        }
+    }
+    catalog_heap::SystemAttributeByName(fieldname).map(RecFieldRef::Sys)
+}
+
+fn compatible_tupdescs(src: &types_tuple::TupleDescData<'_>, dst: &types_tuple::TupleDescData<'_>) -> bool {
+    if dst.attrs.len() != src.attrs.len() {
+        return false;
+    }
+    dst.attrs.iter().zip(src.attrs.iter()).all(|(d, s)| {
+        if d.attisdropped != s.attisdropped {
+            false
+        } else if !d.attisdropped {
+            d.atttypid == s.atttypid && (d.atttypmod < 0 || d.atttypmod == s.atttypmod)
+        } else {
+            d.attlen == s.attlen && d.attalign == s.attalign
+        }
+    })
+}
+
 // A deconstructed expanded record (values always deconstructed; src_desc
 // keeps the physical tupdesc so the record can re-materialize as a
 // composite Datum, dropped columns included).
@@ -135,6 +204,19 @@ pub struct RecValue {
     /// C ExpandedRecordIsEmpty: shape known, no row stored — reads as SQL
     /// NULL as a whole, fields read NULL, assignment makes it non-empty.
     pub empty: bool,
+    pub sys: Option<std::rc::Rc<RecSysAttrs>>,
+    /// C ER_FLAG_FVALUE_VALID: the stored tuple still matches the fields; a
+    /// field assignment clears it but keeps `sys` readable.
+    pub fvalue_valid: bool,
+}
+
+// A rec materialized into the eval scratch, keyed by the datum's address:
+// the stand-in for C's expanded-record pointer identity.
+#[derive(Clone)]
+struct RecOrigin {
+    recno: Dno,
+    sys: Option<std::rc::Rc<RecSysAttrs>>,
+    fvalue_valid: bool,
 }
 
 pub enum DatumVal {
@@ -492,6 +574,9 @@ pub struct Estate<'a> {
     // the shared AST here is immutable). Consulted wherever a Var's declared
     // type feeds plan/param typing.
     var_type_overrides: FxHashMap<Dno, PlType>,
+    // C's per-execution rec copy of rectypeid; absent = the compiled OID.
+    rec_type_overrides: FxHashMap<Dno, Oid>,
+    rec_origins: Vec<(usize, RecOrigin)>,
     pub frame: std::rc::Rc<FrameShared>,
 }
 
@@ -737,6 +822,8 @@ impl<'a> Estate<'a> {
             datum_ctx: Ctx::new("PLpgSQL per-invocation values"),
             eval_ctx: Ctx::new("PLpgSQL eval scratch"),
             var_type_overrides: FxHashMap::default(),
+            rec_type_overrides: FxHashMap::default(),
+            rec_origins: Vec::new(),
             frame: std::rc::Rc::new(FrameShared {
                 sig: func.fn_signature.clone(),
                 stmt: core::cell::Cell::new(None),
@@ -783,6 +870,11 @@ impl<'a> Estate<'a> {
         if let Some(t) = self.eval_tuptable.take() {
             let _ = spi::SPI_freetuptable(t);
         }
+        self.reset_eval_ctx();
+    }
+
+    fn reset_eval_ctx(&mut self) {
+        self.rec_origins.clear();
         self.eval_ctx.reset();
     }
 
@@ -1057,7 +1149,7 @@ impl<'a> Estate<'a> {
                         recs.push(recname.clone());
                     }
                     if matches!(&self.datums[recno as usize], DatumVal::Rec(None))
-                        && self.rec_meta(recno).rectypeid == RECORDOID
+                        && self.rec_typeid(recno) == RECORDOID
                     {
                         if is_visible_rec_binding {
                             valueless.push(recname.clone());
@@ -1103,7 +1195,7 @@ impl<'a> Estate<'a> {
     // exec_get_datum_type_info REC arm: the declared rectypeid, typmod -1.
     #[allow(dead_code)] // ported helper; see rec_param_type_mod (PR48 composite-coercion lane)
     fn rec_param_type(&self, recno: Dno) -> Oid {
-        self.rec_meta(recno).rectypeid
+        self.rec_typeid(recno)
     }
 
     // C plpgsql_exec_get_datum_type_info REC arm (pl_exec.c:5541-5562): a
@@ -1116,7 +1208,7 @@ impl<'a> Estate<'a> {
     // typmod, which the header stamped by rec_as_composite_datum matches;
     // assign_record_type_typmod dedups by shape so it is stable.
     fn rec_param_type_mod(&mut self, recno: Dno) -> PgResult<(Oid, i32)> {
-        let rectypeid = self.rec_meta(recno).rectypeid;
+        let rectypeid = self.rec_typeid(recno);
         if rectypeid != RECORDOID {
             return Ok((rectypeid, -1));
         }
@@ -1148,7 +1240,7 @@ impl<'a> Estate<'a> {
     // exec_eval_datum REC arm: materialize the record as a composite Datum in
     // the eval scratch (valueless/empty record is a plain NULL).
     fn rec_as_composite_datum(&mut self, recno: Dno) -> PgResult<(Datum, bool)> {
-        let rectypeid = self.rec_meta(recno).rectypeid;
+        let rectypeid = self.rec_typeid(recno);
         let DatumVal::Rec(Some(rv)) = &self.datums[recno as usize] else {
             return Ok((Datum::null(), true));
         };
@@ -1161,6 +1253,7 @@ impl<'a> Estate<'a> {
             .expect("RecValue carries its source tupdesc");
         let values = rv.values.clone();
         let nulls = rv.nulls.clone();
+        let origin = RecOrigin { recno, sys: rv.sys.clone(), fvalue_valid: rv.fvalue_valid };
         let mcx = self.eval_ctx.mcx();
         let mut td = tupdesc::CreateTupleDescCopy(mcx, &src)?;
         if rectypeid != RECORDOID {
@@ -1183,6 +1276,7 @@ impl<'a> Estate<'a> {
         let tup = heaptuple::heap_form_tuple(mcx, &td, &values, &nulls)?;
         let img = tup.header_ptr();
         core::mem::forget(tup);
+        self.rec_origins.push((img as usize, origin));
         Ok((Datum::from_usize(img as usize), false))
     }
 
@@ -1191,6 +1285,44 @@ impl<'a> Estate<'a> {
             PlDatum::Rec(r) => r,
             _ => panic!("plpgsql: datum {recno} is not a Rec"),
         }
+    }
+
+    fn rec_typeid(&self, recno: Dno) -> Oid {
+        match self.rec_type_overrides.get(&recno) {
+            Some(&t) => t,
+            None => self.rec_meta(recno).rectypeid,
+        }
+    }
+
+    // Re-resolves the rowtype from the name as written once its typcache
+    // entry has been invalidated (kept by OID without a name).
+    fn revalidate_rectypeid(&mut self, recno: Dno) -> PgResult<()> {
+        let rec = self.rec_meta(recno);
+        if rec.rectypeid == RECORDOID {
+            return Ok(());
+        }
+        let compiled = rec.rectypeid;
+        let ident = rec
+            .datatype
+            .as_ref()
+            .and_then(|t| t.rec_ident.clone())
+            .expect("named composite rec carries its typcache identity");
+        let cached_id = ident.tcache.borrow().upgrade().map_or(0, |e| e.tupdesc_identifier());
+        if cached_id != ident.tupdesc_id.get() {
+            if let Some(name) = &ident.origtypname {
+                ident.typoid.set(resolve_origtypname(name)?.0);
+            }
+            let entry = crate::comp::composite_typcache_entry(ident.typoid.get())?;
+            ident.tupdesc_id.set(entry.tupdesc_identifier());
+            *ident.tcache.borrow_mut() = std::rc::Rc::downgrade(&entry);
+        }
+        let current = ident.typoid.get();
+        if current == compiled {
+            self.rec_type_overrides.remove(&recno);
+        } else {
+            self.rec_type_overrides.insert(recno, current);
+        }
+        Ok(())
     }
 
     // A rec declared with a domain-over-composite type (PLPGSQL_TTYPE_REC
@@ -1246,7 +1378,8 @@ impl<'a> Estate<'a> {
                     .into_error(),
             ));
         }
-        let rectypeid = rec.rectypeid;
+        self.revalidate_rectypeid(recno)?;
+        let rectypeid = self.rec_typeid(recno);
         // C make_expanded_record_from_typeid: a composite-domain rec gets its
         // BASE type's tupdesc (typcache DOMAIN_BASE_INFO).
         let base = Self::rec_base_typeid(rectypeid)?;
@@ -1259,6 +1392,8 @@ impl<'a> Estate<'a> {
             nulls: vec![true; n],
             src_desc: Some(std::rc::Rc::new(td)),
             empty: true,
+            sys: None,
+            fvalue_valid: false,
         }));
         Ok(())
     }
@@ -1270,18 +1405,22 @@ impl<'a> Estate<'a> {
     // (resolve_column_ref's valueless_recs arm).
     fn recfield_type(&mut self, f: &PlRecField) -> PgResult<Option<(Oid, i32, Oid)>> {
         if matches!(&self.datums[f.recparentno as usize], DatumVal::Rec(None))
-            && self.rec_meta(f.recparentno).rectypeid != RECORDOID
+            && self.rec_typeid(f.recparentno) != RECORDOID
         {
             self.instantiate_empty_rec(f.recparentno)?;
         }
         if let DatumVal::Rec(Some(rv)) = &self.datums[f.recparentno as usize] {
             let want = f.fieldname.to_ascii_lowercase();
-            for (i, n) in rv.desc.names.iter().enumerate() {
-                if !rv.desc.dropped[i] && *n == want {
+            match rec_lookup_field(&rv.desc, &want, &f.fieldname) {
+                Some(RecFieldRef::User(i)) => {
                     let t = rv.desc.types[i];
                     let coll = lsyscache::typ::get_typcollation(t)?;
                     return Ok(Some((t, rv.desc.typmods[i], coll)));
                 }
+                Some(RecFieldRef::Sys(a)) => {
+                    return Ok(Some((a.atttypid, a.atttypmod, a.attcollation)));
+                }
+                None => {}
             }
         }
         Ok(None)
@@ -1342,24 +1481,32 @@ impl<'a> Estate<'a> {
             }
             PlDatum::RecField(f) => {
                 if matches!(&self.datums[f.recparentno as usize], DatumVal::Rec(None))
-                    && self.rec_meta(f.recparentno).rectypeid != RECORDOID
+                    && self.rec_typeid(f.recparentno) != RECORDOID
                 {
                     self.instantiate_empty_rec(f.recparentno)?;
                 }
                 if let DatumVal::Rec(Some(rv)) = &self.datums[f.recparentno as usize] {
                     let want = f.fieldname.to_ascii_lowercase();
-                    for (i, n) in rv.desc.names.iter().enumerate() {
-                        if !rv.desc.dropped[i] && *n == want {
-                            if let Some(planned) = planned {
-                                // plpgsql_param_eval_recfield's per-eval
-                                // safety check (pl_exec.c:6797).
-                                let current = rv.desc.types[i];
-                                if current != planned {
-                                    return Err(param_type_mismatch(dno, current, planned));
-                                }
+                    let found = rec_lookup_field(&rv.desc, &want, &f.fieldname);
+                    if let Some(found) = found {
+                        let (current, fetched) = match found {
+                            RecFieldRef::User(i) => (rv.desc.types[i], (rv.values[i], rv.nulls[i])),
+                            RecFieldRef::Sys(a) => (
+                                a.atttypid,
+                                match &rv.sys {
+                                    Some(s) => (s.get(a.attnum), false),
+                                    None => (Datum::null(), true),
+                                },
+                            ),
+                        };
+                        if let Some(planned) = planned {
+                            // plpgsql_param_eval_recfield's per-eval
+                            // safety check (pl_exec.c:6797).
+                            if current != planned {
+                                return Err(param_type_mismatch(dno, current, planned));
                             }
-                            return Ok((rv.values[i], rv.nulls[i]));
                         }
+                        return Ok(fetched);
                     }
                     let recname = match &self.func.datums[f.recparentno as usize] {
                         PlDatum::Rec(r) => r.refname.clone(),
@@ -2392,6 +2539,7 @@ impl<'a> Estate<'a> {
                         t_typoid,
                         t_typmod,
                         self.func.fn_input_collation,
+                        None,
                     )?;
                     self.var_type_overrides.insert(t_varno, ty);
                 }
@@ -2629,13 +2777,14 @@ impl<'a> Estate<'a> {
                     self.datums[dno as usize] = DatumVal::Rec(None);
                     if let Some(default_val) = &r.default_val {
                         self.exec_assign_expr(dno, default_val)?;
-                    } else if Self::rec_typeid_is_domain(r.rectypeid)? {
+                    } else if r.datatype.as_ref().is_some_and(|d| d.typtype == TYPTYPE_DOMAIN) {
                         // C pl_exec.c:1737-1748: a defaultless rec runs
                         // exec_move_row(NULL, NULL); for a composite-domain
                         // rec that makes an empty expanded record and
                         // domain-checks the NULL, so a NULL-rejecting domain
                         // errors during block local variable initialization.
-                        adt_domains::domain_check(Datum::null(), true, r.rectypeid)?;
+                        self.revalidate_rectypeid(dno)?;
+                        adt_domains::domain_check(Datum::null(), true, self.rec_typeid(dno))?;
                         self.instantiate_empty_rec(dno)?;
                     }
                 }
@@ -2736,7 +2885,7 @@ impl<'a> Estate<'a> {
                 // The subxact abort freed tuple tables made inside it
                 // (AtEOSubXact_SPI); drop the handle without a second free.
                 self.eval_tuptable = None;
-                self.eval_ctx.reset();
+                self.reset_eval_ctx();
 
                 let matched = exc
                     .exc_list
@@ -2852,25 +3001,27 @@ impl<'a> Estate<'a> {
                 let DatumVal::Rec(Some(rv)) = &self.datums[recno as usize] else {
                     panic!("plpgsql exec_assign_value: rec \"{recname}\" valueless after instantiate");
                 };
-                let mut found: Option<(usize, Oid, i32, i16, bool)> = None;
-                for (i, n) in rv.desc.names.iter().enumerate() {
-                    if !rv.desc.dropped[i] && *n == want {
-                        found = Some((
-                            i,
-                            rv.desc.types[i],
-                            rv.desc.typmods[i],
-                            rv.desc.typlens[i],
-                            rv.desc.typbyvals[i],
+                let i = match rec_lookup_field(&rv.desc, &want, &f.fieldname) {
+                    Some(RecFieldRef::User(i)) => i,
+                    Some(RecFieldRef::Sys(_)) => {
+                        return Err(exec_err(
+                            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                            format!("cannot assign to system column \"{}\"", f.fieldname),
                         ));
-                        break;
                     }
-                }
-                let Some((i, ftype, ftypmod, flen, fbyval)) = found else {
-                    return Err(exec_err(
-                        types_error::ERRCODE_UNDEFINED_COLUMN,
-                        format!("record \"{recname}\" has no field \"{}\"", f.fieldname),
-                    ));
+                    None => {
+                        return Err(exec_err(
+                            types_error::ERRCODE_UNDEFINED_COLUMN,
+                            format!("record \"{recname}\" has no field \"{}\"", f.fieldname),
+                        ));
+                    }
                 };
+                let (ftype, ftypmod, flen, fbyval) = (
+                    rv.desc.types[i],
+                    rv.desc.typmods[i],
+                    rv.desc.typlens[i],
+                    rv.desc.typbyvals[i],
+                );
                 let newvalue =
                     self.exec_cast_value(value, &mut isnull, valtype, valtypmod, ftype, ftypmod)?;
                 let stored = self.assign_copy_to_datum_ctx(newvalue, isnull, flen, fbyval)?;
@@ -2878,7 +3029,7 @@ impl<'a> Estate<'a> {
                 // the PROSPECTIVE tuple (current fields with the new value
                 // swapped in) must satisfy the composite domain before the
                 // field is committed; a violation leaves the rec unchanged.
-                let rectypeid = self.rec_meta(recno).rectypeid;
+                let rectypeid = self.rec_typeid(recno);
                 if Self::rec_typeid_is_domain(rectypeid)? {
                     let (src, mut pv, mut pn) = match &self.datums[recno as usize] {
                         DatumVal::Rec(Some(rv)) => (
@@ -2896,6 +3047,7 @@ impl<'a> Estate<'a> {
                     rv.values[i] = stored;
                     rv.nulls[i] = isnull;
                     rv.empty = false;
+                    rv.fvalue_valid = false;
                 }
                 Ok(())
             }
@@ -2917,9 +3069,9 @@ impl<'a> Estate<'a> {
                     // erh = NULL. RECORD field access then 55000 via
                     // instantiate_empty_record_variable; a named composite
                     // instantiates empty on first field touch.
-                    let rectypeid = self.rec_meta(target).rectypeid;
-                    if Self::rec_typeid_is_domain(rectypeid)? {
-                        adt_domains::domain_check(Datum::null(), true, rectypeid)?;
+                    if r.datatype.as_ref().is_some_and(|d| d.typtype == TYPTYPE_DOMAIN) {
+                        self.revalidate_rectypeid(target)?;
+                        adt_domains::domain_check(Datum::null(), true, self.rec_typeid(target))?;
                         self.instantiate_empty_rec(target)?;
                     } else {
                         self.datums[target as usize] = DatumVal::Rec(None);
@@ -2932,8 +3084,44 @@ impl<'a> Estate<'a> {
                         "cannot assign non-composite value to a record variable".to_string(),
                     ));
                 }
-                let (desc, src, values, nulls) = self.deconstruct_composite(value)?;
-                self.move_rec_from_values(target, &desc, src, &values, &nulls, true, true)
+                // C exec_move_row_from_datum, expanded-record source: r := r
+                // is a no-op; a still-valid tuple travels when the target
+                // takes it as is (declared RECORD, declared as the source's
+                // rowtype, or already holding it); else no tuple is stored.
+                let origin = self
+                    .rec_origins
+                    .iter()
+                    .find(|(p, _)| *p == value.as_usize())
+                    .map(|(_, o)| o.clone());
+                if let Some(o) = &origin {
+                    if o.recno == target {
+                        return Ok(());
+                    }
+                    self.revalidate_rectypeid(target)?;
+                }
+                let (desc, src, values, nulls, sys) = self.deconstruct_composite(value)?;
+                let sys = match origin {
+                    Some(o) => {
+                        let rectypeid = self.rec_typeid(target);
+                        let held = match &self.datums[target as usize] {
+                            DatumVal::Rec(Some(tv)) => tv.src_desc.as_ref().is_some_and(|td| {
+                                td.tdtypeid == src.tdtypeid
+                                    && (src.tdtypeid != RECORDOID
+                                        || (src.tdtypmod == td.tdtypmod && src.tdtypmod >= 0))
+                            }),
+                            _ => false,
+                        };
+                        if o.fvalue_valid
+                            && (rectypeid == RECORDOID || rectypeid == src.tdtypeid || held)
+                        {
+                            o.sys
+                        } else {
+                            None
+                        }
+                    }
+                    None => Some(sys),
+                };
+                self.move_rec_from_values(target, &desc, src, &values, &nulls, sys, true, true)
             }
             PlDatum::Row(r) => {
                 let varnos = r.varnos.clone();
@@ -2949,7 +3137,7 @@ impl<'a> Estate<'a> {
                         "cannot assign non-composite value to a row variable".to_string(),
                     ));
                 }
-                let (desc, _src, values, nulls) = self.deconstruct_composite(value)?;
+                let (desc, _src, values, nulls, _) = self.deconstruct_composite(value)?;
                 let natts = desc.types.len();
                 let mut anum = 0usize;
                 for dno in varnos {
@@ -3192,6 +3380,7 @@ impl<'a> Estate<'a> {
                     src_desc,
                     &vec![Datum::null(); n],
                     &vec![true; n],
+                    None,
                     false,
                     false,
                 )
@@ -3215,15 +3404,16 @@ impl<'a> Estate<'a> {
                 let natts = desc.types.len();
                 let mut values = vec![Datum::null(); natts];
                 let mut nulls = vec![true; natts];
-                spi::tuptable_with(tuptab, |t| {
+                let sys = spi::tuptable_with(tuptab, |t| {
                     for f in 0..natts {
                         let (v, isnull) =
                             spi::SPI_getbinval(&t.vals[i], &t.tupdesc, (f + 1) as i32);
                         values[f] = v;
                         nulls[f] = isnull;
                     }
+                    std::rc::Rc::new(RecSysAttrs::from_tuple(&t.vals[i]))
                 });
-                self.move_rec_from_values(var, &desc, src_desc, &values, &nulls, true, true)
+                self.move_rec_from_values(var, &desc, src_desc, &values, &nulls, Some(sys), true, true)
             }
             PlDatum::Row(r) => {
                 let varnos = r.varnos.clone();
@@ -3264,6 +3454,8 @@ impl<'a> Estate<'a> {
         src_tupdesc: std::rc::Rc<types_tuple::TupleDescData<'static>>,
         values: &[Datum],
         nulls: &[bool],
+        // Kept only where C stores the tuple itself rather than its fields.
+        sys: Option<std::rc::Rc<RecSysAttrs>>,
         sma_check: bool,
         // C: assignments through expanded_record_set_fields/set_tuple run
         // check_domain_on_current_fields; the row-of-NULLs arm (source
@@ -3271,7 +3463,7 @@ impl<'a> Estate<'a> {
         // through deconstruct_expanded_record instead and is NOT checked.
         domain_check: bool,
     ) -> PgResult<()> {
-        let rectypeid = self.rec_meta(recno).rectypeid;
+        let rectypeid = self.rec_typeid(recno);
         if rectypeid == RECORDOID {
             let natts = srcdesc.types.len();
             let mut out_values = values.to_vec();
@@ -3291,13 +3483,22 @@ impl<'a> Estate<'a> {
                 nulls: nulls.to_vec(),
                 src_desc: Some(src_tupdesc),
                 empty: false,
+                fvalue_valid: sys.is_some(),
+                sys,
             }));
             return Ok(());
         }
 
+        self.revalidate_rectypeid(recno)?;
+        let rectypeid = self.rec_typeid(recno);
         let base = Self::rec_base_typeid(rectypeid)?;
         let var_td = typcache::lookup_rowtype_tupdesc_copy(self.datum_ctx.mcx(), base, -1)?;
         let dst = RecDesc::from_tupdesc(&var_td);
+        let sys = if rectypeid == src_tupdesc.tdtypeid || compatible_tupdescs(&src_tupdesc, &var_td) {
+            sys
+        } else {
+            None
+        };
         let vtd_natts = dst.types.len();
         let td_natts = srcdesc.types.len();
         // strict_multi_assignment reads the GUCs at execution
@@ -3362,6 +3563,8 @@ impl<'a> Estate<'a> {
             nulls: newnulls,
             src_desc: Some(std::rc::Rc::new(var_td)),
             empty: false,
+            fvalue_valid: sys.is_some(),
+            sys,
         }));
         Ok(())
     }
@@ -3383,7 +3586,7 @@ impl<'a> Estate<'a> {
                     let t = self.var_type(dno);
                     (t.typoid, t.atttypmod)
                 }
-                PlDatum::Rec(r) => (r.rectypeid, -1),
+                PlDatum::Rec(r) => (self.rec_typeid(r.dno), -1),
                 _ => panic!("plpgsql row member {dno} is not a Var or Rec"),
             };
             tupdesc::TupleDescInitEntry(
@@ -3411,14 +3614,24 @@ impl<'a> Estate<'a> {
             nulls,
             src_desc: Some(std::rc::Rc::new(td)),
             empty: false,
+            sys: None,
+            fvalue_valid: false,
         })
     }
 
-    // deconstruct_composite_datum (pl_exec.c:7546) — plain composite Datum.
+    // deconstruct_composite_datum (pl_exec.c:7546) — plain composite Datum;
+    // the identity is C's tmptup (no ctid, no tableoid).
+    #[allow(clippy::type_complexity)]
     pub(crate) fn deconstruct_composite(
         &mut self,
         value: Datum,
-    ) -> PgResult<(RecDesc, std::rc::Rc<types_tuple::TupleDescData<'static>>, Vec<Datum>, Vec<bool>)> {
+    ) -> PgResult<(
+        RecDesc,
+        std::rc::Rc<types_tuple::TupleDescData<'static>>,
+        Vec<Datum>,
+        Vec<bool>,
+        std::rc::Rc<RecSysAttrs>,
+    )> {
         let mcx = self.datum_ctx.mcx();
         let p = value.as_usize() as *const u8;
         // C DatumGetHeapTupleHeader: detoast first — the datum can arrive
@@ -3453,7 +3666,8 @@ impl<'a> Estate<'a> {
             )
         };
         types_tuple::heap_deform_tuple(&htd, &tupdesc, &mut values, &mut nulls);
-        Ok((desc, std::rc::Rc::new(tupdesc), values, nulls))
+        let sys = std::rc::Rc::new(RecSysAttrs::from_tuple(&htd));
+        Ok((desc, std::rc::Rc::new(tupdesc), values, nulls, sys))
     }
 
     fn exec_stmt_return(&mut self, expr: Option<&PlExpr>, retvarno: Dno) -> PgResult<()> {
@@ -3475,8 +3689,8 @@ impl<'a> Estate<'a> {
                         ));
                     }
                 }
-                PlDatum::Rec(r) => {
-                    let rectypeid = r.rectypeid;
+                PlDatum::Rec(_) => {
+                    let rectypeid = self.rec_typeid(retvarno);
                     if !self.func.fn_retistuple && !self.func.fn_retset {
                         // C keeps retval a composite Datum (ExpandedRecordGetDatum);
                         // scalar-returning functions IO-cast it at exit, so the
@@ -4466,7 +4680,7 @@ impl<'a> Estate<'a> {
                                 .to_string(),
                         ));
                     }
-                    let (srcdesc, _src, values, nulls) = self.deconstruct_composite(value)?;
+                    let (srcdesc, _src, values, nulls, _) = self.deconstruct_composite(value)?;
                     let (v, n) = convert_values_by_position(
                         &srcdesc,
                         &values,
@@ -5020,6 +5234,30 @@ pub(crate) fn convert_values_by_position(
     Ok((out_values, out_nulls))
 }
 
+fn resolve_origtypname(name: &OrigTypeName) -> PgResult<(Oid, i32)> {
+    let cx = MemoryContext::new("plpgsql rowtype re-resolution");
+    let mcx = cx.mcx();
+    match name {
+        OrigTypeName::Sql(s) => parse_utilcmd::parseTypeString(mcx, s),
+        OrigTypeName::Names(parts) => {
+            let mut nodes: mcx::PgVec<'_, types_nodes::Node<'_>> =
+                mcx::vec_with_capacity_in(mcx, parts.len())?;
+            for p in parts {
+                let s = core::str::from_utf8(mcx::PgString::from_str_in(p, mcx)?.into_bytes().leak())
+                    .expect("copied from a str");
+                nodes.push(types_nodes::Node::mk_string(mcx, s)?);
+            }
+            let tn = types_nodes::rawnodes::TypeName {
+                names: types_nodes::NodeList::from_slice(mcx, &nodes)?,
+                typemod: -1,
+                location: -1,
+                ..Default::default()
+            };
+            parse_utilcmd::typenameTypeIdAndMod(mcx, None, &tn)
+        }
+    }
+}
+
 fn fetch_direction_of(direction: i32) -> types_portal::FetchDirection {
     match direction {
         FETCH_FORWARD => types_portal::FetchDirection::FETCH_FORWARD,
@@ -5197,10 +5435,10 @@ fn array_datum_copy<'mcx>(mcx: Mcx<'mcx>, value: Datum) -> PgResult<mcx::PgVec<'
 }
 
 #[cfg(test)]
-mod cfi_tests {
+pub(crate) mod cfi_tests {
     use super::*;
 
-    pub(super) fn tiny_function() -> PlFunction {
+    pub(crate) fn tiny_function() -> PlFunction {
         PlFunction {
             fn_signature: "inline_code_block".into(),
             fn_oid: types_core::InvalidOid,
@@ -5325,6 +5563,7 @@ mod cfi_tests {
             atttypmod: -1,
             typinput: types_core::InvalidOid,
             typioparam: types_core::InvalidOid,
+            rec_ident: None,
         };
         let mut func = tiny_function();
         func.datums.push(PlDatum::Var(PlVar {
@@ -5345,43 +5584,144 @@ mod cfi_tests {
         assert_eq!(estate.param_datum_type(0).unwrap(), INT8OID);
     }
 
+    // expanded_record_lookup_field + fetch_field over system attributes, and
+    // pl_exec.c:5243's refusal to assign them (pre-fix: "has no field").
+    #[test]
+    fn record_fields_include_system_attributes() {
+        const INT4OID: Oid = 23;
+        const TIDOID: Oid = 27;
+        const OIDOID: Oid = 26;
+        let mut func = tiny_function();
+        func.datums.push(PlDatum::Rec(PlRec {
+            dno: 0,
+            refname: "r".into(),
+            lineno: 1,
+            rectypeid: RECORDOID,
+            datatype: None,
+            isconst: false,
+            notnull: false,
+            default_val: None,
+        }));
+        for (dno, name) in [(1, "ctid"), (2, "tableoid"), (3, "nosuch")] {
+            func.datums.push(PlDatum::RecField(PlRecField {
+                dno,
+                recparentno: 0,
+                fieldname: name.into(),
+            }));
+        }
+        let mut estate = Estate::new(&func, false, true);
+        let mcx = estate.datum_mcx();
+        let mut td = tupdesc::CreateTemplateTupleDesc(mcx, 1).unwrap();
+        tupdesc::TupleDescInitEntry(&mut td, 1, Some("f1"), INT4OID, -1, 0).unwrap();
+        let mut tup = heaptuple::heap_form_tuple(mcx, &td, &[Datum::from_i32(7)], &[false]).unwrap();
+        tup.t_self = types_tuple::ItemPointerData::new(0, 1);
+        tup.t_tableOid = 4242;
+        let bound = |sys: Option<RecSysAttrs>| RecValue {
+            desc: RecDesc::from_tupdesc(&td),
+            values: vec![Datum::from_i32(7)],
+            nulls: vec![false],
+            src_desc: Some(std::rc::Rc::new(tupdesc::CreateTupleDescCopy(mcx, &td).unwrap())),
+            empty: false,
+            fvalue_valid: sys.is_some(),
+            sys: sys.map(std::rc::Rc::new),
+        };
+
+        estate.datums[0] = DatumVal::Rec(Some(bound(Some(RecSysAttrs::from_tuple(&tup)))));
+        let PlDatum::RecField(ctid) = &func.datums[1] else { unreachable!() };
+        assert_eq!(estate.recfield_type(ctid).unwrap(), Some((TIDOID, -1, types_core::InvalidOid)));
+        let (d, isnull) = estate.datum_as_param(1, Some(TIDOID)).unwrap();
+        assert!(!isnull);
+        // SAFETY: a tid Datum is a pointer to an ItemPointerData.
+        let tid = unsafe { *(d.as_usize() as *const types_tuple::ItemPointerData) };
+        assert_eq!(types_tuple::ItemPointerGetBlockNumber(&tid), 0);
+        assert_eq!(types_tuple::ItemPointerGetOffsetNumber(&tid), 1);
+        assert_eq!(estate.datum_as_param(2, Some(OIDOID)).unwrap(), (Datum::from_oid(4242), false));
+        let err = estate.datum_as_param(3, None).unwrap_err();
+        assert_eq!(err.message(), "record \"r\" has no field \"nosuch\"");
+        let err = estate.exec_assign_value(1, Datum::null(), true, UNKNOWNOID, -1).unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+        assert_eq!(err.message(), "cannot assign to system column \"ctid\"");
+
+        estate.datums[0] = DatumVal::Rec(Some(bound(None)));
+        assert_eq!(estate.datum_as_param(1, None).unwrap(), (Datum::null(), true));
+    }
+
+    // Whole-record assignment between recs carries the source tuple's system
+    // columns while it is valid; r := r is a no-op; a field assignment stops
+    // copies, not direct reads (pre-fix the copy read (4294967295,0)).
+    #[test]
+    fn whole_record_assignment_carries_the_source_tuple() {
+        const INT4OID: Oid = 23;
+        const TIDOID: Oid = 27;
+        const OIDOID: Oid = 26;
+        let mut func = tiny_function();
+        for (dno, name) in [(0, "src"), (1, "dst")] {
+            func.datums.push(PlDatum::Rec(PlRec {
+                dno,
+                refname: name.into(),
+                lineno: 1,
+                rectypeid: RECORDOID,
+                datatype: None,
+                isconst: false,
+                notnull: false,
+                default_val: None,
+            }));
+        }
+        let fields = [(2, 1, "ctid"), (3, 1, "tableoid"), (4, 0, "f1"), (5, 0, "ctid")];
+        for (dno, recparentno, name) in fields {
+            func.datums.push(PlDatum::RecField(PlRecField { dno, recparentno, fieldname: name.into() }));
+        }
+        let mut estate = Estate::new(&func, false, true);
+        let mcx = estate.datum_mcx();
+        let mut td = tupdesc::CreateTemplateTupleDesc(mcx, 1).unwrap();
+        tupdesc::TupleDescInitEntry(&mut td, 1, Some("f1"), INT4OID, -1, 0).unwrap();
+        let mut tup = heaptuple::heap_form_tuple(mcx, &td, &[Datum::from_i32(7)], &[false]).unwrap();
+        tup.t_self = types_tuple::ItemPointerData::new(0, 1);
+        tup.t_tableOid = 4242;
+        estate.datums[0] = DatumVal::Rec(Some(RecValue {
+            desc: RecDesc::from_tupdesc(&td),
+            values: vec![Datum::from_i32(7)],
+            nulls: vec![false],
+            src_desc: Some(std::rc::Rc::new(tupdesc::CreateTupleDescCopy(mcx, &td).unwrap())),
+            empty: false,
+            sys: Some(std::rc::Rc::new(RecSysAttrs::from_tuple(&tup))),
+            fvalue_valid: true,
+        }));
+        let ctid_of = |estate: &mut Estate<'_>, dno: Dno| -> Option<(u32, u16)> {
+            let (d, isnull) = estate.datum_as_param(dno, Some(TIDOID)).unwrap();
+            (!isnull).then(|| {
+                // SAFETY: a tid Datum is a pointer to an ItemPointerData.
+                let tid = unsafe { *(d.as_usize() as *const types_tuple::ItemPointerData) };
+                let block = types_tuple::ItemPointerGetBlockNumberNoCheck(&tid);
+                (block, types_tuple::ItemPointerGetOffsetNumberNoCheck(&tid))
+            })
+        };
+        // target := source through the param seam, as a simple expression does.
+        let assign = |estate: &mut Estate<'_>, target: Dno, source: Dno| {
+            let (v, isnull) = estate.datum_as_param(source, None).unwrap();
+            let (t, m) = estate.rec_param_type_mod(source).unwrap();
+            estate.exec_assign_value(target, v, isnull, t, m).unwrap();
+        };
+
+        assign(&mut estate, 1, 0);
+        assert_eq!(ctid_of(&mut estate, 2), Some((0, 1)));
+        assert_eq!(estate.datum_as_param(3, Some(OIDOID)).unwrap(), (Datum::from_oid(4242), false));
+
+        estate.exec_assign_value(4, Datum::from_i32(8), false, INT4OID, -1).unwrap();
+        assert_eq!(ctid_of(&mut estate, 5), Some((0, 1)));
+        assign(&mut estate, 0, 0);
+        assert_eq!(ctid_of(&mut estate, 5), Some((0, 1)));
+        assign(&mut estate, 1, 0);
+        assert_eq!(ctid_of(&mut estate, 2), None);
+        assert_eq!(estate.datum_as_param(3, Some(OIDOID)).unwrap(), (Datum::null(), true));
+        estate.exec_eval_cleanup();
+        assert!(estate.rec_origins.is_empty());
+    }
+
     // upstream 54649de65f08 (18.6): the I/O-coercion fallback never casts to or from internal.
     #[test]
     fn cast_to_or_from_internal_is_42846() {
-        const TEXTOID: Oid = 25;
-        syscache_seams::lookup_pg_type_shape::set(|_| {
-            Ok(Some(types_tuple::PgTypeShape {
-                typlen: 4,
-                typbyval: true,
-                typalign: b'i' as i8,
-                typstorage: b'p' as i8,
-                typcollation: types_core::InvalidOid,
-            }))
-        });
-        syscache_seams::lookup_pg_type_typcache_shape::set(|typid| {
-            let name = match typid {
-                INTERNALOID => "internal",
-                TEXTOID => "text",
-                _ => return Ok(None),
-            };
-            let mut typname = types_tuple::NameData::default();
-            typname.namestrcpy(name);
-            Ok(Some(syscache_seams::PgTypeTypcacheShape {
-                typname,
-                typlen: 4,
-                typbyval: true,
-                typalign: b'i' as i8,
-                typstorage: b'p' as i8,
-                typtype: b'p' as i8,
-                typisdefined: true,
-                typrelid: types_core::InvalidOid,
-                typsubscript: types_core::InvalidOid,
-                typelem: types_core::InvalidOid,
-                typarray: types_core::InvalidOid,
-                typcollation: types_core::InvalidOid,
-            }))
-        });
-        namespace_seams::type_is_visible::set(|_| Ok(true));
+        install_type_seams();
 
         let func = tiny_function();
         let mut estate = Estate::new(&func, false, true);
@@ -5391,6 +5731,238 @@ mod cfi_tests {
         };
         assert_eq!(err.sqlstate(), types_error::ERRCODE_CANNOT_COERCE);
         assert_eq!(err.message(), "cannot cast type internal to text");
+    }
+
+    const TEXTOID: Oid = 25;
+    const COMP_OLD: Oid = 7001;
+    const COMP_NEW: Oid = 7002;
+    const COMP_OLD_REL: Oid = 7101;
+    const COMP_NEW_REL: Oid = 7102;
+    const NSP: Oid = 7200;
+
+    std::thread_local! {
+        static COMP_BY_NAME: core::cell::Cell<Oid> = const { core::cell::Cell::new(COMP_OLD) };
+    }
+
+    fn typcache_row(name: &str, typtype: i8, typrelid: Oid) -> syscache_seams::PgTypeTypcacheShape {
+        let mut typname = types_tuple::NameData::default();
+        typname.namestrcpy(name);
+        syscache_seams::PgTypeTypcacheShape {
+            typname,
+            typlen: 4,
+            typbyval: true,
+            typalign: b'i' as i8,
+            typstorage: b'p' as i8,
+            typtype,
+            typisdefined: true,
+            typrelid,
+            typsubscript: types_core::InvalidOid,
+            typelem: types_core::InvalidOid,
+            typarray: types_core::InvalidOid,
+            typcollation: types_core::InvalidOid,
+        }
+    }
+
+    fn fake_relation_open<'mcx>(
+        mcx: Mcx<'mcx>,
+        oid: Oid,
+        _lockmode: types_rel::LOCKMODE,
+    ) -> PgResult<types_rel::Relation<'mcx>> {
+        use core::cell::Cell;
+        let (reltype, colname) = match oid {
+            COMP_OLD_REL => (COMP_OLD, "f1"),
+            COMP_NEW_REL => (COMP_NEW, "f0"),
+            other => panic!("unexpected relation_open({other})"),
+        };
+        let mut a = types_tuple::FormData_pg_attribute::default();
+        a.attname.namestrcpy(colname);
+        a.atttypid = 23;
+        a.attnum = 1;
+        a.attlen = 4;
+        a.attbyval = true;
+        a.attalign = b'i' as i8;
+        a.atttypmod = -1;
+        let mut td = tupdesc::CreateTupleDesc(mcx, &[a])?;
+        td.tdtypeid = reltype;
+        td.tdtypmod = -1;
+        let mut relname = types_tuple::NameData::default();
+        relname.namestrcpy("comp");
+        let rd_rel = types_rel::FormData_pg_class {
+            relname,
+            relnamespace: NSP,
+            reltype,
+            relowner: 10,
+            relam: 0,
+            relfilenode: 0,
+            reltablespace: 0,
+            relpages: 0,
+            reltuples: -1.0,
+            relallvisible: 0,
+            reltoastrelid: 0,
+            relhasindex: false,
+            relisshared: false,
+            relpersistence: types_core::RELPERSISTENCE_PERMANENT,
+            relkind: types_rel::RELKIND_RELATION,
+            relhassubclass: false,
+            relrowsecurity: false,
+            relispopulated: true,
+            relreplident: types_rel::REPLICA_IDENTITY_DEFAULT,
+            relispartition: false,
+            relfrozenxid: 3,
+            relminmxid: 1,
+        };
+        let data = types_rel::RelationData {
+            rd_locator: Default::default(),
+            rd_smgr: Default::default(),
+            rd_id: oid,
+            rd_backend: types_core::INVALID_PROC_NUMBER,
+            rd_islocaltemp: false,
+            rd_isvalid: Cell::new(true),
+            rd_createSubid: Cell::new(0),
+            rd_newRelfilelocatorSubid: Cell::new(0),
+            rd_firstRelfilelocatorSubid: Cell::new(0),
+            rd_droppedSubid: Cell::new(0),
+            rd_lockInfo: types_rel::LockInfoData {
+                lockRelId: types_rel::LockRelId { relId: oid, dbId: 5 },
+            },
+            rd_rel,
+            rd_att: std::rc::Rc::new(td),
+            rd_index: None,
+            rd_opcintype: mcx::PgVec::new_in(mcx),
+            rd_opfamily: mcx::PgVec::new_in(mcx),
+            rd_indoption: mcx::PgVec::new_in(mcx),
+            rd_indcollation: mcx::PgVec::new_in(mcx),
+            rd_options: None,
+            pgstat_enabled: Cell::new(false),
+            pgstat_link: Cell::new((0, core::ptr::null_mut())),
+            rd_amcache: Default::default(),
+            rd_amcache_hash: Default::default(),
+            rd_amcache_gin: Default::default(),
+            rd_amcache_spgist: Default::default(),
+            rd_support: mcx::PgVec::new_in(mcx),
+            rd_supportinfo: Default::default(),
+            rd_opcoptions: Default::default(),
+            rd_indexlist: Default::default(),
+            rd_trigdesc: Default::default(),
+            rd_hastriggers: false,
+            rd_hasrules: false,
+        };
+        Ok(types_rel::Relation::open(data, None))
+    }
+
+    // Seams install once per process: one catalog table for every test.
+    pub(crate) fn install_type_seams() {
+        static SEAMS: std::sync::Once = std::sync::Once::new();
+        SEAMS.call_once(|| {
+            syscache_seams::pg_type_typtype::set(|typid| {
+                Ok(match typid {
+                    RECORDOID => Some(b'p' as i8),
+                    23 => Some(b'b' as i8),
+                    COMP_OLD | COMP_NEW => Some(b'c' as i8),
+                    _ => None,
+                })
+            });
+            syscache_seams::lookup_pg_type_shape::set(|_| {
+                Ok(Some(types_tuple::PgTypeShape {
+                    typlen: 4,
+                    typbyval: true,
+                    typalign: b'i' as i8,
+                    typstorage: b'p' as i8,
+                    typcollation: types_core::InvalidOid,
+                }))
+            });
+            syscache_seams::lookup_pg_type_typcache_shape::set(|typid| {
+                Ok(match typid {
+                    INTERNALOID => Some(typcache_row("internal", b'p' as i8, types_core::InvalidOid)),
+                    TEXTOID => Some(typcache_row("text", b'p' as i8, types_core::InvalidOid)),
+                    COMP_OLD => Some(typcache_row("comp", b'c' as i8, COMP_OLD_REL)),
+                    COMP_NEW => Some(typcache_row("comp", b'c' as i8, COMP_NEW_REL)),
+                    _ => None,
+                })
+            });
+            namespace_seams::type_is_visible::set(|_| Ok(true));
+            syscache_seams::syscache_hash_value_typeoid::set(Ok);
+            relation_seams::relation_open::set(fake_relation_open);
+            relcache_seams::relation_cache_invalidate_entry::set(|_| Ok(()));
+            syscache_seams::lookup_pg_namespace_oid_by_name::set(|nsp| {
+                Ok(if nsp == "s" { NSP } else { types_core::InvalidOid })
+            });
+            aclchk_seams::object_aclcheck::set(|_, _, _, _| Ok(0));
+            miscinit_seams::get_user_id::set(|| 10);
+            syscache_seams::lookup_pg_type_oid_by_name::set(|name, nsp| {
+                Ok(if name == "comp" && nsp == NSP {
+                    COMP_BY_NAME.with(|c| c.get())
+                } else {
+                    types_core::InvalidOid
+                })
+            });
+            syscache_seams::pg_type_isdefined::set(|_| Ok(Some(true)));
+        });
+    }
+
+    // revalidate_rectypeid: the compiled OID stands until a relcache inval
+    // clears the entry's identifier; then the name is resolved anew, once.
+    #[test]
+    fn stale_rowtype_is_re_resolved_by_name() {
+        install_type_seams();
+        let ident = {
+            let tcache = crate::comp::composite_typcache_entry(COMP_OLD).unwrap();
+            std::rc::Rc::new(RecTypeIdent {
+                origtypname: Some(OrigTypeName::Names(vec!["s".into(), "comp".into()])),
+                typoid: core::cell::Cell::new(COMP_OLD),
+                tupdesc_id: core::cell::Cell::new(tcache.tupdesc_identifier()),
+                tcache: core::cell::RefCell::new(std::rc::Rc::downgrade(&tcache)),
+            })
+        };
+        let cached_id = || ident.tcache.borrow().upgrade().unwrap().tupdesc_identifier();
+        let mut func = tiny_function();
+        func.datums.push(PlDatum::Rec(PlRec {
+            dno: 0,
+            refname: "r".into(),
+            lineno: 1,
+            rectypeid: COMP_OLD,
+            datatype: Some(PlType {
+                typoid: COMP_OLD,
+                ttype: TypeKind::Rec,
+                typlen: -1,
+                typbyval: false,
+                typtype: b'c' as i8,
+                collation: types_core::InvalidOid,
+                typisarray: false,
+                atttypmod: -1,
+                typinput: types_core::InvalidOid,
+                typioparam: types_core::InvalidOid,
+                rec_ident: Some(ident.clone()),
+            }),
+            isconst: false,
+            notnull: false,
+            default_val: None,
+        }));
+        let mut estate = Estate::new(&func, false, true);
+
+        estate.revalidate_rectypeid(0).unwrap();
+        assert_eq!(estate.rec_typeid(0), COMP_OLD);
+
+        COMP_BY_NAME.with(|c| c.set(COMP_NEW));
+        inval::local::LocalExecuteInvalidationMessage(&types_storage::SharedInvalidationMessage::Relcache(
+            types_storage::SharedInvalRelcacheMsg { dbId: types_core::InvalidOid, relId: COMP_OLD_REL },
+        ))
+        .unwrap();
+        assert_eq!(cached_id(), 0);
+        estate.revalidate_rectypeid(0).unwrap();
+        assert_eq!(estate.rec_typeid(0), COMP_NEW);
+        assert_eq!(ident.typoid.get(), COMP_NEW);
+        assert_ne!(ident.tupdesc_id.get(), 0);
+        assert_eq!(cached_id(), ident.tupdesc_id.get());
+
+        COMP_BY_NAME.with(|c| c.set(types_core::InvalidOid));
+        estate.revalidate_rectypeid(0).unwrap();
+        assert_eq!(estate.rec_typeid(0), COMP_NEW);
+
+        let mut estate2 = Estate::new(&func, false, true);
+        assert_eq!(estate2.rec_typeid(0), COMP_OLD);
+        estate2.revalidate_rectypeid(0).unwrap();
+        assert_eq!(estate2.rec_typeid(0), COMP_NEW);
     }
 
     // A small array deformed out of a heap tuple arrives short-headed;

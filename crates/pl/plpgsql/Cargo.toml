@@ -13,6 +13,7 @@ pg_string = { path = "../../common/string" }
 pgsync = { path = "../../_support/pgsync" }
 array = { package = "types_array", path = "../../_support/types/array" }
 cache_syscache = { path = "../../backend/utils/cache/cache_syscache" }
+catalog_heap = { path = "../../backend/catalog/catalog_heap" }
 catalog_namespace = { path = "../../backend/catalog/catalog_namespace" }
 clauses = { path = "../../backend/optimizer/util/clauses" }
 rel_vocab = { path = "../../_support/types/rel_vocab" }
@@ -73,5 +74,11 @@ varlena = { path = "../../backend/utils/adt/varlena" }
 
 [dev-dependencies]
 dbcommands_seams = { path = "../../backend/commands/dbcommands_seams" }
+aclchk_seams = { path = "../../backend/catalog/aclchk_seams" }
+inval = { path = "../../backend/utils/cache/inval" }
+miscinit_seams = { path = "../../backend/utils/init/miscinit_seams" }
 namespace_seams = { path = "../../backend/catalog/namespace_seams" }
+relation_seams = { path = "../../backend/access/common/relation_seams" }
+relcache_seams = { path = "../../backend/utils/cache/relcache_seams" }
 typcache_seams = { path = "../../backend/utils/cache/typcache_seams" }
+types_storage = { path = "../../_support/types/types_storage" }

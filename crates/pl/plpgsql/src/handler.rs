@@ -560,7 +560,7 @@ fn do_compile(
             let dno = comp.build_variable(
                 name,
                 0,
-                CompState::build_datatype(typoid, -1, coll)?,
+                CompState::build_datatype(typoid, -1, coll, None)?,
                 true,
             )?;
             if let PlDatum::Var(v) = &mut comp.datums[dno as usize] {
@@ -585,13 +585,13 @@ fn do_compile(
         let tg_event_varno = comp.build_variable(
             "tg_event",
             0,
-            CompState::build_datatype(TEXTOID, -1, fn_collation)?,
+            CompState::build_datatype(TEXTOID, -1, fn_collation, None)?,
             true,
         )?;
         let tg_tag_varno = comp.build_variable(
             "tg_tag",
             0,
-            CompState::build_datatype(TEXTOID, -1, fn_collation)?,
+            CompState::build_datatype(TEXTOID, -1, fn_collation, None)?,
             true,
         )?;
         fn_is_trigger = FnTrigger::EventTrigger { tg_event_varno, tg_tag_varno };
@@ -618,7 +618,7 @@ fn do_compile(
             // only variadic arm in do_compile is the is-input test below.
             let argmode = proc.argmodes.get(i).copied().unwrap_or(PROARGMODE_IN);
             let buf = format!("${}", i + 1);
-            let argdtype = CompState::build_datatype(argtypeid, -1, fn_collation)?;
+            let argdtype = CompState::build_datatype(argtypeid, -1, fn_collation, None)?;
             if argdtype.ttype == TypeKind::Pseudo {
                 return Err(hdr_ctx(crate::exec::exec_err(
                     types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
@@ -710,7 +710,7 @@ fn do_compile(
             comp.build_variable(
                 "$0",
                 0,
-                CompState::build_datatype(rettypeid, -1, fn_collation)?,
+                CompState::build_datatype(rettypeid, -1, fn_collation, None)?,
                 true,
             )?;
         }
@@ -720,7 +720,7 @@ fn do_compile(
     let found_varno = comp.build_variable(
         "found",
         0,
-        CompState::build_datatype(BOOLOID, -1, types_core::InvalidOid)?,
+        CompState::build_datatype(BOOLOID, -1, types_core::InvalidOid, None)?,
         true,
     )?;
 
@@ -1133,7 +1133,7 @@ fn compile_inline(src: &str) -> PgResult<PlFunction> {
     let found_varno = comp.build_variable(
         "found",
         0,
-        CompState::build_datatype(BOOLOID, -1, types_core::InvalidOid)?,
+        CompState::build_datatype(BOOLOID, -1, types_core::InvalidOid, None)?,
         true,
     )?;
 
@@ -1486,14 +1486,27 @@ fn coerce_function_result_tuple(
         Some(rv) => rv,
         None => {
             let retval = estate.retval;
-            let (desc, src, values, nulls) = estate.deconstruct_composite(retval)?;
-            crate::exec::RecValue { desc, values, nulls, src_desc: Some(src), empty: false }
+            let (desc, src, values, nulls, _) = estate.deconstruct_composite(retval)?;
+            crate::exec::RecValue {
+                desc,
+                values,
+                nulls,
+                src_desc: Some(src),
+                empty: false,
+                sys: None,
+                fvalue_valid: false,
+            }
         }
     };
 
     let cx = mcx::MemoryContext::new("plpgsql result-type resolution");
+    // SAFETY: expectedDesc contract — armed by the executor with the scan
+    // tupdesc, live for the duration of this call.
+    let expected = estate.rsi.as_ref().and_then(|r| r.expected_desc).map(|p| unsafe {
+        p.cast::<types_tuple::TupleDescData<'_>>().as_ref()
+    });
     let resolved = match flinfo {
-        Some(fl) => funcapi::get_call_result_type(cx.mcx(), fl, None)?,
+        Some(fl) => funcapi::get_call_result_type(cx.mcx(), fl, expected)?,
         None => funcapi::ResolvedResultType {
             class: if func.fn_rettype == RECORDOID {
                 TypeFuncClass::Record
@@ -1714,6 +1727,8 @@ fn bind_trigger_tuple(
     let t = unsafe { t.as_ref() };
     let natts = rv.desc.types.len();
     types_tuple::heap_deform_tuple(t, tupdesc, &mut rv.values, &mut rv.nulls);
+    rv.sys = Some(Rc::new(crate::exec::RecSysAttrs::from_tuple(t)));
+    rv.fvalue_valid = true;
     for i in 0..natts {
         if !rv.desc.dropped[i] {
             rv.values[i] = estate.copy_to_datum_ctx(
@@ -1818,6 +1833,8 @@ fn plpgsql_exec_trigger(
         nulls: vec![true; natts],
         src_desc: Some(src_desc),
         empty: true,
+        sys: None,
+        fvalue_valid: false,
     };
     let mut new_rv = empty_rv.clone();
     let mut old_rv = empty_rv;
@@ -1834,12 +1851,13 @@ fn plpgsql_exec_trigger(
         new_rv.empty = false;
         old_rv.empty = false;
         // BEFORE UPDATE: stored generated columns are not computed yet, so
-        // NEW carries them as NULL (pl_exec.c:1005-1023).
+        // NEW carries them as NULL (pl_exec.c:1005-1023), outdating its tuple.
         if ev & TRIGGER_EVENT_TIMINGMASK == TRIGGER_EVENT_BEFORE {
             for (i, g) in generated.iter().enumerate() {
                 if *g {
                     new_rv.values[i] = Datum::null();
                     new_rv.nulls[i] = true;
+                    new_rv.fvalue_valid = false;
                 }
             }
         }
@@ -1887,11 +1905,19 @@ fn plpgsql_exec_trigger(
         None => {
             // Composite Datum returned by expression: deconstruct it.
             let retval = estate.retval;
-            let (d, s, values, nulls) = match estate.deconstruct_composite(retval) {
+            let (d, s, values, nulls, _) = match estate.deconstruct_composite(retval) {
                 Ok(x) => x,
                 Err(e) => return Err(attach_exec_context(e, &estate)),
             };
-            crate::exec::RecValue { desc: d, values, nulls, src_desc: Some(s), empty: false }
+            crate::exec::RecValue {
+                desc: d,
+                values,
+                nulls,
+                src_desc: Some(s),
+                empty: false,
+                sys: None,
+                fvalue_valid: false,
+            }
         }
     };
     // build_attrmap_by_position + execute_attr_map_tuple: map the returned
@@ -1994,6 +2020,105 @@ mod tests {
         )
         .unwrap();
         CHECKED.with(|c| assert_eq!(*c.borrow(), vec![(0xbeef, false, 1234)]));
+    }
+
+    // get_call_result_type resolves a RECORD result from the caller's column
+    // definition list (rsinfo->expectedDesc); pre-fix it was never passed.
+    #[test]
+    fn record_result_is_coerced_to_the_callers_column_list() {
+        use std::sync::Once;
+        const F_RECORD: Oid = 100_200;
+        const INT4OID: Oid = 23;
+
+        static SEAMS: Once = Once::new();
+        SEAMS.call_once(|| {
+            syscache_seams::lookup_pg_proc_shape::set(|funcid| {
+                assert_eq!(funcid, F_RECORD);
+                Ok(Some(syscache_seams::PgProcShape {
+                    prolang: 12,
+                    prosecdef: false,
+                    proconfig_isnull: true,
+                    pronamespace: 11,
+                    prorettype: RECORDOID,
+                    provariadic: types_core::InvalidOid,
+                    prosupport: types_core::InvalidOid,
+                    pronargs: 1,
+                    prokind: b'f' as i8,
+                    provolatile: b'v' as i8,
+                    proparallel: b'u' as i8,
+                    proretset: false,
+                    proisstrict: false,
+                    proleakproof: false,
+                }))
+            });
+            syscache_seams::pg_proc_result_arrays::set(|_, _| {
+                Ok(Some(syscache_seams::PgProcResultArraysShape {
+                    proallargtypes: None,
+                    proargmodes: None,
+                    proargnames: None,
+                }))
+            });
+        });
+        crate::exec::cfi_tests::install_type_seams();
+
+        fn int4_row(mcx: mcx::Mcx<'static>, n: i32) -> types_tuple::TupleDescData<'static> {
+            let mut d = tupdesc::CreateTemplateTupleDesc(mcx, n).unwrap();
+            for i in 1..=n {
+                tupdesc::TupleDescInitEntry(&mut d, i as i16, Some("c"), INT4OID, -1, 0).unwrap();
+            }
+            d.tdtypeid = RECORDOID;
+            d.tdtypmod = -1;
+            d
+        }
+
+        let mut func = crate::exec::cfi_tests::tiny_function();
+        func.fn_oid = F_RECORD;
+        func.fn_rettype = RECORDOID;
+        func.fn_retistuple = true;
+        let mut flinfo = FmgrInfo::unresolved();
+        flinfo.fn_oid = F_RECORD;
+        let result_ctx = mcx::MemoryContext::new("result");
+
+        let run = |expected: &types_tuple::TupleDescData<'static>| -> PgResult<Datum> {
+            let mut estate = Estate::new(&func, false, true);
+            let returned = int4_row(estate.datum_mcx(), 2);
+            estate.ret_rec = Some(crate::exec::RecValue {
+                desc: crate::exec::RecDesc::from_tupdesc(&returned),
+                values: vec![Datum::from_i32(42), Datum::from_i32(43)],
+                nulls: vec![false, false],
+                src_desc: Some(Rc::new(returned)),
+                empty: false,
+                sys: None,
+                fvalue_valid: false,
+            });
+            estate.rsi = Some(crate::exec::RsiSnapshot {
+                allowed_modes: 0,
+                expected_desc: Some(core::ptr::NonNull::from(expected).cast()),
+            });
+            let mut fcinfo = fmgr::LocalFcinfo::<1>::new(types_core::InvalidOid);
+            // SAFETY: result_ctx outlives the call.
+            unsafe { fcinfo.set_result_mcx(result_ctx.mcx()) };
+            coerce_function_result_tuple(&mut estate, &func, Some(&flinfo), &mut fcinfo)
+        };
+
+        let desc_ctx: &'static mcx::MemoryContext =
+            Box::leak(Box::new(mcx::MemoryContext::new("expected")));
+        let desc_mcx = desc_ctx.mcx();
+        let three = int4_row(desc_mcx, 3);
+        let err = run(&three).expect_err("a 2-column row cannot satisfy a 3-column list");
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_DATATYPE_MISMATCH);
+        assert_eq!(err.message(), "returned record type does not match expected record type");
+        assert_eq!(
+            err.detail(),
+            Some("Number of returned columns (2) does not match expected column count (3).")
+        );
+
+        let two = int4_row(desc_mcx, 2);
+        let out = run(&two).expect("matching column list");
+        // SAFETY: a composite Datum is a HeapTupleHeader image.
+        let hdr = unsafe { &*(out.as_usize() as *const types_tuple::HeapTupleHeaderData) };
+        assert_eq!(hdr.natts(), 2);
+        assert_eq!(hdr.type_id(), RECORDOID);
     }
 
     // Wiring witness: plpgsql_validator must gate through

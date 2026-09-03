@@ -212,7 +212,12 @@ impl CompState {
     }
 
     // plpgsql_build_datatype (via lsyscache instead of an open pg_type tuple).
-    pub fn build_datatype(typoid: Oid, typmod: i32, collation: Oid) -> PgResult<PlType> {
+    pub fn build_datatype(
+        typoid: Oid,
+        typmod: i32,
+        collation: Oid,
+        origtypname: Option<OrigTypeName>,
+    ) -> PgResult<PlType> {
         let (typlen, typbyval) = lsyscache::typ::get_typlenbyval(typoid)?;
         let typtype = lsyscache::typ::get_typtype(typoid)?;
         let typcollation = lsyscache::typ::get_typcollation(typoid)?;
@@ -239,6 +244,17 @@ impl CompState {
         } else {
             TypeKind::Scalar
         };
+        let rec_ident = if ttype == TypeKind::Rec && typoid != RECORDOID {
+            let tcache = composite_typcache_entry(typoid)?;
+            Some(std::rc::Rc::new(RecTypeIdent {
+                origtypname,
+                typoid: std::cell::Cell::new(typoid),
+                tupdesc_id: std::cell::Cell::new(tcache.tupdesc_identifier()),
+                tcache: std::cell::RefCell::new(std::rc::Rc::downgrade(&tcache)),
+            }))
+        } else {
+            None
+        };
         Ok(PlType {
             typoid,
             ttype,
@@ -250,6 +266,7 @@ impl CompState {
             atttypmod: typmod,
             typinput,
             typioparam,
+            rec_ident,
         })
     }
 
@@ -391,7 +408,7 @@ impl CompState {
                 format!("relation \"{ident}\" does not exist"),
             ));
         }
-        Self::rowtype_of(class_oid, ident)
+        Self::rowtype_of(class_oid, ident, OrigTypeName::Names(vec![ident.to_string()]))
     }
 
     // plpgsql_parse_cwordrowtype (pl_comp.c:1704): the RangeVar is built as
@@ -419,10 +436,10 @@ impl CompState {
             location: -1,
         };
         let class_oid = catalog_namespace::RangeVarGetRelid(&rv, types_rel::NoLock, false)?;
-        Self::rowtype_of(class_oid, relname)
+        Self::rowtype_of(class_oid, relname, OrigTypeName::Names(idents.to_vec()))
     }
 
-    fn rowtype_of(class_oid: Oid, relname: &str) -> PgResult<PlType> {
+    fn rowtype_of(class_oid: Oid, relname: &str, origtypname: OrigTypeName) -> PgResult<PlType> {
         let typoid = lsyscache::relation::get_rel_type_id(class_oid)?;
         if !OidIsValid(typoid) {
             return Err(comp_err(
@@ -430,7 +447,7 @@ impl CompState {
                 format!("relation \"{relname}\" does not have a composite type"),
             ));
         }
-        Self::build_datatype(typoid, -1, types_core::InvalidOid)
+        Self::build_datatype(typoid, -1, types_core::InvalidOid, Some(origtypname))
     }
 
     // plpgsql_parse_cwordtype: block-qualified var %TYPE, else table.column
@@ -501,7 +518,7 @@ impl CompState {
                     format!("cache lookup failed for attribute {attnum} of relation {class_oid}"),
                 )
             })?;
-        Self::build_datatype(shape.atttypid, shape.atttypmod, shape.attcollation)
+        Self::build_datatype(shape.atttypid, shape.atttypmod, shape.attcollation, None)
     }
 }
 
@@ -512,6 +529,25 @@ impl Default for CompState {
 }
 
 #[cold]
+// A domain over a composite resolves to its base type's entry.
+pub(crate) fn composite_typcache_entry(typoid: Oid) -> PgResult<std::rc::Rc<typcache::TypeCacheEntry>> {
+    let mut entry = typcache::lookup_type_cache(
+        typoid,
+        typcache::TYPECACHE_TUPDESC | typcache::TYPECACHE_DOMAIN_BASE_INFO,
+    )?;
+    let base = entry.domain_base_type();
+    if OidIsValid(base) {
+        entry = typcache::lookup_type_cache(base, typcache::TYPECACHE_TUPDESC)?;
+    }
+    if entry.tupdesc().is_none() {
+        return Err(comp_err(
+            types_error::ERRCODE_WRONG_OBJECT_TYPE,
+            format!("type {} is not composite", format_type::format_type_be(typoid)?),
+        ));
+    }
+    Ok(entry)
+}
+
 pub fn comp_err(code: types_error::SqlState, msg: String) -> Box<PgError> {
     Box::new(
         elog::ereport(ERROR)

@@ -326,11 +326,17 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
     }
 
     // parse_datatype (pl_gram.y): parseTypeString runs under
-    // plpgsql_sql_error_callback; the built type carries fn_input_collation.
+    // plpgsql_sql_error_callback; the built type carries fn_input_collation
+    // and remembers its SQL spelling for later re-resolution.
     fn parse_datatype(&mut self, type_name: &str, location: i32) -> PgResult<PlType> {
         let (typoid, typmod) = parse_utilcmd::parseTypeString(self.scratch, type_name)
             .map_err(|e| self.sql_error_callback(e, location))?;
-        CompState::build_datatype(typoid, typmod, self.fn_input_collation)
+        CompState::build_datatype(
+            typoid,
+            typmod,
+            self.fn_input_collation,
+            Some(OrigTypeName::Sql(type_name.to_string())),
+        )
     }
 
     // plpgsql_sql_error_callback (pl_gram.y): the datatype's start becomes an
@@ -431,7 +437,7 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
                         ),
                     ));
                 }
-                ty = CompState::build_datatype(arr, ty.atttypmod, ty.collation)?;
+                ty = CompState::build_datatype(arr, ty.atttypmod, ty.collation, None)?;
             }
             return Ok(ty);
         }
@@ -695,13 +701,13 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
         let sqlstate_varno = self.comp.build_variable(
             "sqlstate",
             lineno,
-            CompState::build_datatype(TEXTOID, -1, coll)?,
+            CompState::build_datatype(TEXTOID, -1, coll, None)?,
             true,
         )?;
         let sqlerrm_varno = self.comp.build_variable(
             "sqlerrm",
             lineno,
-            CompState::build_datatype(TEXTOID, -1, coll)?,
+            CompState::build_datatype(TEXTOID, -1, coll, None)?,
             true,
         )?;
         for dno in [sqlstate_varno, sqlerrm_varno] {
@@ -967,7 +973,7 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
         let dno = self.comp.build_variable(
             name,
             lineno,
-            CompState::build_datatype(REFCURSOROID, -1, types_core::InvalidOid)?,
+            CompState::build_datatype(REFCURSOROID, -1, types_core::InvalidOid, None)?,
             true,
         )?;
         if let PlDatum::Var(v) = &mut self.comp.datums[dno as usize] {
@@ -1886,7 +1892,7 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
             let fvar = self.comp.build_variable(
                 &name,
                 var_lineno,
-                CompState::build_datatype(INT4OID, -1, types_core::InvalidOid)?,
+                CompState::build_datatype(INT4OID, -1, types_core::InvalidOid, None)?,
                 true,
             )?;
             let (body, end_label, end_loc) = self.parse_loop_body()?;
@@ -1967,7 +1973,7 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
             t_varno = self.comp.build_variable(
                 &varname,
                 lineno,
-                CompState::build_datatype(INT4OID, -1, types_core::InvalidOid)?,
+                CompState::build_datatype(INT4OID, -1, types_core::InvalidOid, None)?,
                 true,
             )?;
             for (expr, _) in &mut whens {

@@ -4,9 +4,40 @@
 // a cold, backend-lifetime artifact mirroring C's dedicated func_cxt (freed
 // wholesale on recompile — Drop here); it is outside context accounting and
 // never allocated per row.
+use std::cell::{Cell, RefCell};
+use std::rc::{Rc, Weak};
+
 use types_core::Oid;
 
 pub type Dno = i32;
+
+// PLpgSQL_type.origtypname: a type string, or a %ROWTYPE relation name.
+#[derive(Clone, Debug)]
+pub enum OrigTypeName {
+    Sql(String),
+    Names(Vec<String>),
+}
+
+// A named composite's typcache identity, shared by every variable declared
+// through the same PLpgSQL_type and updated in place by revalidate_rectypeid.
+// Weak = C's unowned entry pointer: entries are never removed, and the
+// compiled function outlives the session's typcache teardown.
+pub struct RecTypeIdent {
+    pub origtypname: Option<OrigTypeName>,
+    pub typoid: Cell<Oid>,
+    pub tcache: RefCell<Weak<typcache::TypeCacheEntry>>,
+    pub tupdesc_id: Cell<u64>,
+}
+
+impl core::fmt::Debug for RecTypeIdent {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("RecTypeIdent")
+            .field("origtypname", &self.origtypname)
+            .field("typoid", &self.typoid.get())
+            .field("tupdesc_id", &self.tupdesc_id.get())
+            .finish()
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TypeKind {
@@ -28,6 +59,7 @@ pub struct PlType {
     pub atttypmod: i32,
     pub typinput: Oid,
     pub typioparam: Oid,
+    pub rec_ident: Option<Rc<RecTypeIdent>>,
 }
 
 // PLpgSQL_expr. `ns` indexes the function's namespace arena (the item
