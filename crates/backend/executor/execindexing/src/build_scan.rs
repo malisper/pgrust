@@ -47,9 +47,9 @@ where
 /// driver): the function uses it as-is — no range restriction, no fresh
 /// snapshot registration, the scan's own snapshot governs visibility — and
 /// still ends it before returning, so the caller must not reuse it after
-/// this call. Precondition: a caller-provided `scan` must be
-/// `tableam::TableScanDesc::Heap` (this is the heap-only build lane) —
-/// a `Pgrcolumnar` scan panics.
+/// this call. A caller-provided `scan` must be
+/// `tableam::TableScanDesc::Heap` (this is the heap-only build lane); any
+/// other scan kind raises ERRCODE_FEATURE_NOT_SUPPORTED.
 pub fn table_index_build_scan_with<'mcx, F>(
     mcx: Mcx<'mcx>,
     heap_relation: &Relation<'mcx>,
@@ -168,9 +168,14 @@ where
         debug_assert!(start_blockno == 0 && numblocks == InvalidBlockNumber);
         let scan = match scan {
             tableam::TableScanDesc::Heap(h) => h,
-            tableam::TableScanDesc::Pgrcolumnar(_) => panic!(
-                "table_index_build_scan_with: pgrcolumnar scan unsupported (heap build scan)"
-            ),
+            tableam::TableScanDesc::Pgrcolumnar(_) => {
+                return Err(Box::new(
+                    types_error::PgError::error(
+                        "table_index_build_scan_with: only heap scans are supported",
+                    )
+                    .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+                ))
+            }
         };
         (scan, None)
     } else {
