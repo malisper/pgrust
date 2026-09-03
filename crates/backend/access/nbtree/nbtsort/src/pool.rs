@@ -349,6 +349,7 @@ impl BtBuildPool {
             start,
             len,
             Some(self.oldest_xmin),
+            None,
             |_index_rel, tid, values, isnull, tuple_is_alive| {
                 match self.form_record(scratch, index, tid, values, isnull, tuple_is_alive, &mut batch)
                 {
