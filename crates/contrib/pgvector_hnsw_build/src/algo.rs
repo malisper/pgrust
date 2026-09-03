@@ -430,13 +430,7 @@ pub(crate) fn update_neighbors(
             // C: LW_EXCLUSIVE on the neighbor for the whole HnswUpdateConnection.
             let mut guard = lk(&ne.neighbors);
             let na = &mut guard[n_layer_idx];
-            let mut neighbors = std::mem::take(&mut na.items);
-            let mut closer_set = na.closer_set;
-            let r = update_connection(graph, support, &mut neighbors, &mut closer_set, e, hc.distance, lm);
-            let na = &mut guard[n_layer_idx];
-            na.items = neighbors;
-            na.closer_set = closer_set;
-            r?;
+            update_connection(graph, support, &mut na.items, &mut na.closer_set, e, hc.distance, lm)?;
         }
     }
     Ok(())
@@ -636,7 +630,13 @@ mod tests {
                         rng = rng
                             .wrapping_mul(6364136223846793005)
                             .wrapping_add(1442695040888963407);
-                        let x = (rng >> 40) as f32 / 16777216.0;
+                        // Distinct base value per (thread, iteration) pair, plus a
+                        // small hash-derived jitter (well under the 1/2000 gap
+                        // between adjacent base values) so no two of the 2000
+                        // points can collide and spuriously tie for max level.
+                        let global_idx = (t as u64) * 500 + i as u64;
+                        let jitter = ((rng >> 40) as f32 / 16777216.0) * 0.0001;
+                        let x = (global_idx as f32) / 2000.0 + jitter;
                         let mut b = pgvector::vec::VecBuilder::new(mcx, 1).unwrap();
                         b.set(0, x);
                         let level = pgvector_hnsw::insert::random_level(
