@@ -32,9 +32,9 @@ struct DomainMemo {
 
 struct EngineState {
     mcx: Mcx<'static>,
-    // C evaluates checks in the caller's per-tuple context; this scratch is
-    // the same lifetime class, reset at depth 0 (checks can re-enter for
-    // nested domains).
+    // C's standalone-econtext per-tuple memory: checks leave by-ref results
+    // in it and ReScanExprContext frees them wholesale, hence a bump arena;
+    // reset at depth 0 (checks can re-enter for nested domains).
     scratch: NonNull<MemoryContext>,
     depth: u32,
     memos: PgHashMap<'static, Oid, DomainMemo>,
@@ -53,7 +53,7 @@ fn with_state<R>(f: impl FnOnce(&mut EngineState) -> R) -> R {
             // reset() through it (as_mut below). session_root's shared
             // &'static only grants SharedReadOnly — the _mut variant is the
             // reset-per-use scratch-holder shape (regexp's RegexpExecScratch).
-            let scratch = NonNull::from(::mcx::session_root_mut(MemoryContext::new(
+            let scratch = NonNull::from(::mcx::session_root_mut(MemoryContext::new_bump(
                 "DomainCheckScratch",
             )));
             ManuallyDrop::new(EngineState {

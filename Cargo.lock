@@ -13825,6 +13825,7 @@ dependencies = [
  "plancache",
  "portalmem",
  "postgres_seams",
+ "pquery",
  "rel_vocab",
  "resowner",
  "rewrite_handler_seams",

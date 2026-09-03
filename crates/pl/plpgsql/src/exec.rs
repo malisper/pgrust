@@ -1394,6 +1394,7 @@ impl<'a> Estate<'a> {
             SimpleTake::Ready(se) => se,
             SimpleTake::Skip | SimpleTake::Build { .. } => return Ok(None),
         };
+        let se = simple_expr_portal_snapshot(expr.expr_id, se)?;
         // Every exit below must restore the InUse slot (an error leaving it
         // InUse would silently demote this expression to SPI forever).
         match plancache::CachedPlanIsSimplyValid(se.psrc, se.cplan) {
@@ -1430,6 +1431,7 @@ impl<'a> Estate<'a> {
             // recursion/error quarantine (expr_simple_in_use, :6042).
             SimpleTake::Skip => return Ok(None),
             SimpleTake::Ready(se) => {
+                let se = simple_expr_portal_snapshot(expr.expr_id, se)?;
                 match plancache::CachedPlanIsSimplyValid(se.psrc, se.cplan) {
                     Ok(true) => return self.eval_simple_taken(expr, se).map(Some),
                     Ok(false) => {}
@@ -1454,7 +1456,13 @@ impl<'a> Estate<'a> {
                     (e.plan, e.paramnos.clone(), e.argtypes.clone())
                 })
             }
-            SimpleTake::Build { plan, paramnos, argtypes } => (plan, paramnos, argtypes),
+            SimpleTake::Build { plan, paramnos, argtypes } => {
+                if let Err(e) = pquery::EnsurePortalSnapshotExists() {
+                    put_simple(expr.expr_id, plan, SimpleState::Unknown);
+                    return Err(e);
+                }
+                (plan, paramnos, argtypes)
+            }
         };
         let (plan, paramnos, argtypes) = build;
         let se = match self.build_simple_expr(expr, plan, paramnos, argtypes) {
@@ -2381,10 +2389,7 @@ impl<'a> Estate<'a> {
         // C's private stmt_mcontext: the array copy must survive the body's
         // eval resets.
         let stmt_ctx = Ctx::new("PLpgSQL FOREACH");
-        // SAFETY: non-null by-ref array datum; the ref lives only for the
-        // detoast copy below.
-        let vr = unsafe { datum::VarlenaRef::from_ptr(value.as_usize() as *const u8) };
-        let arr = detoast::detoast_attr(stmt_ctx.mcx(), vr.as_bytes())?;
+        let arr = array_datum_copy(stmt_ctx.mcx(), value)?;
         self.exec_eval_cleanup();
         let arr: &[u8] = &arr;
 
@@ -5093,6 +5098,30 @@ fn set_raise_fields(
     e.schema_name = schema;
 }
 
+// The portal-level snapshot goes back (a COMMIT/ROLLBACK drops every
+// snapshot) before the plan is validated or replanned, so the assignment
+// can still detoast what the eval fetched under it.
+fn simple_expr_portal_snapshot(expr_id: u32, se: Box<SimpleExpr>) -> PgResult<Box<SimpleExpr>> {
+    match pquery::EnsurePortalSnapshotExists() {
+        Ok(()) => Ok(se),
+        Err(e) => {
+            let plan = se.plan;
+            drop(se);
+            put_simple(expr_id, plan, SimpleState::Unknown);
+            Err(e)
+        }
+    }
+}
+
+// DatumGetArrayTypePCopy: the FOREACH array, in any varlena form, as a
+// private 4B-header copy in `mcx`.
+fn array_datum_copy<'mcx>(mcx: Mcx<'mcx>, value: Datum) -> PgResult<mcx::PgVec<'mcx, u8>> {
+    let p = value.as_usize() as *const u8;
+    // SAFETY: non-null by-ref datum, readable for its header-declared size.
+    let raw = unsafe { core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p)) };
+    detoast::detoast_attr(mcx, raw)
+}
+
 #[cfg(test)]
 mod cfi_tests {
     use super::*;
@@ -5288,5 +5317,66 @@ mod cfi_tests {
         };
         assert_eq!(err.sqlstate(), types_error::ERRCODE_CANNOT_COERCE);
         assert_eq!(err.message(), "cannot cast type internal to text");
+    }
+
+    // A small array deformed out of a heap tuple arrives short-headed;
+    // DatumGetArrayTypePCopy takes every varlena form.
+    #[test]
+    fn foreach_array_copy_accepts_short_header_datum() {
+        const INT4OID: Oid = 23;
+        let ctx = MemoryContext::new("foreach-test");
+        let mcx = ctx.mcx();
+        let values = [Datum::from_i32(1), Datum::from_i32(2), Datum::from_i32(3)];
+        let full = arrayfuncs::construct::construct_md_array(
+            mcx, &values, None, 1, &[3], &[1], INT4OID, 4, true, b'i',
+        )
+        .unwrap();
+        let payload = &full[datum::VARHDRSZ..];
+        let mut short: Vec<u8> = Vec::with_capacity(1 + payload.len());
+        short.push((((1 + payload.len()) as u8) << 1) | 0x01);
+        short.extend_from_slice(payload);
+        let copy = array_datum_copy(mcx, Datum::from_usize(short.as_ptr() as usize)).unwrap();
+        assert_eq!(&copy[..], &full[..]);
+        let copy4 = array_datum_copy(mcx, Datum::from_usize(full.as_ptr() as usize)).unwrap();
+        assert_eq!(&copy4[..], &full[..]);
+    }
+
+    // The snapshot step precedes any plan use: with neither a snapshot nor
+    // a portal it is C's elog, while reaching the plan reports "not simple".
+    #[test]
+    fn simple_expr_restores_portal_snapshot_before_plan_use() {
+        let func = tiny_function();
+        let mut estate = Estate::new(&func, false, false);
+        let expr = PlExpr {
+            query: "1".into(),
+            parse_mode: parser_seams::RawParseMode::RAW_PARSE_PLPGSQL_EXPR,
+            ns: 0,
+            expr_id: 0xF5F5_0001,
+            target_param: -1,
+        };
+        EXPR_PLANS.with(|t| {
+            t.borrow_mut().insert(
+                expr.expr_id,
+                PlanEntry {
+                    plan: SpiPlanPtr(u64::MAX),
+                    paramnos: std::rc::Rc::from(Vec::<Dno>::new()),
+                    argtypes: std::rc::Rc::from(Vec::<Oid>::new()),
+                    mod_stmt: false,
+                    hooks: std::rc::Rc::new(HookSnapshot {
+                        names: Vec::new(),
+                        params_by_dno: Vec::new(),
+                        arg_dnos: Vec::new(),
+                        recs: Vec::new(),
+                        valueless: Vec::new(),
+                        resolve_option: parser_small1::PlpgsqlResolveOption::Error,
+                    }),
+                    simple: SimpleState::Unknown,
+                },
+            );
+        });
+        let r = estate.exec_eval_simple_expr(&expr);
+        EXPR_PLANS.with(|t| t.borrow_mut().remove(&expr.expr_id));
+        let err = r.err().expect("no portal snapshot can be re-established here");
+        assert_eq!(err.message(), "cannot execute SQL without an outer snapshot or portal");
     }
 }

@@ -47,6 +47,7 @@ rewrite_handler_seams = { path = "../../backend/rewrite/rewrite_handler_seams" }
 pg_proc = { path = "../../backend/catalog/pg_proc" }
 plancache = { path = "../../backend/utils/cache/plancache" }
 portalmem = { path = "../../backend/utils/mmgr/portalmem" }
+pquery = { path = "../../backend/tcop/pquery" }
 resowner = { path = "../../backend/utils/resowner/resowner" }
 scan_fgram = { path = "../../backend/parser/scan_fgram" }
 snapmgr = { path = "../../backend/utils/time/snapmgr" }

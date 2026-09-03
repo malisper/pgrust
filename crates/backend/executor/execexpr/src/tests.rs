@@ -87,9 +87,13 @@ fn install_seams() {
         const F_BTINT4CMP: u32 = 351;
         syscache_seams::lookup_pg_type_typcache_shape::set(|typid| {
             Ok(match typid {
-                INT4OID | DOMAIN_OID => {
+                INT4OID | DOMAIN_OID | INLIST_DOMAIN_OID => {
                     let mut name = ::types_tuple::NameData::default();
-                    name.namestrcpy(if typid == INT4OID { "int4" } else { "posint" });
+                    name.namestrcpy(match typid {
+                        INT4OID => "int4",
+                        DOMAIN_OID => "posint",
+                        _ => "inlist",
+                    });
                     Some(syscache_seams::PgTypeTypcacheShape {
                         typname: name,
                         typlen: 4,
@@ -160,7 +164,7 @@ fn install_json_seams() {
     syscache_seams::pg_type_typtype::set(|typid| {
         Ok(match typid {
             INT4OID | BOOLOID | TEXTOID_T | JSONBOID_T | JSONPATHOID_T => Some(b'b' as i8),
-            DOMAIN_OID => Some(b'd' as i8),
+            DOMAIN_OID | INLIST_DOMAIN_OID => Some(b'd' as i8),
             _ => None,
         })
     });
@@ -203,6 +207,17 @@ fn install_json_seams() {
 }
 
 const DOMAIN_OID: u32 = 90001;
+const INLIST_DOMAIN_OID: u32 = 90002;
+// 1 = ANY (ARRAY[VALUE, 2]): the unfoldable ARRAY[] image stays behind in
+// the evaluation context.
+const CONBIN_VALUE_IN_LIST: &str = "{SCALARARRAYOPEXPR :opno 96 :opfuncid 65 :hashfuncid 0 \
+    :negfuncid 0 :useOr true :inputcollid 0 :args ({CONST :consttype 23 :consttypmod -1 \
+    :constcollid 0 :constlen 4 :constbyval true :constisnull false :location -1 \
+    :constvalue 4 [ 1 0 0 0 0 0 0 0 ]} {ARRAYEXPR :array_typeid 1007 :array_collid 0 \
+    :element_typeid 23 :elements ({COERCETODOMAINVALUE :typeId 23 :typeMod -1 :collation 0 \
+    :location -1} {CONST :consttype 23 :consttypmod -1 :constcollid 0 :constlen 4 \
+    :constbyval true :constisnull false :location -1 :constvalue 4 [ 2 0 0 0 0 0 0 0 ]}) \
+    :multidims false :list_start -1 :list_end -1 :location -1}) :location -1}";
 const CONBIN_VALUE_GT_0: &str = "{OPEXPR :opno 521 :opfuncid 147 :opresulttype 16 \
     :opretset false :opcollid 0 :inputcollid 0 :args ({COERCETODOMAINVALUE \
     :typeId 23 :typeMod -1 :collation 0 :location 47} {CONST :consttype 23 \
@@ -225,6 +240,7 @@ fn install_domain_seams() {
         };
         Ok(match typid {
             DOMAIN_OID => Some(mk("posint", 2200, b'd' as i8, true, INT4OID)),
+            INLIST_DOMAIN_OID => Some(mk("inlist", 2200, b'd' as i8, true, INT4OID)),
             INT4OID => Some(mk("int4", 11, b'b' as i8, false, 0)),
             _ => None,
         })
@@ -237,6 +253,13 @@ fn install_domain_seams() {
             rows.push(typcache_seams::DomainCheckRow {
                 conname: cn,
                 conbin: CONBIN_VALUE_GT_0,
+            });
+        } else if contypid == INLIST_DOMAIN_OID {
+            let mut cn = ::types_tuple::NameData::default();
+            cn.namestrcpy("inlist_check");
+            rows.push(typcache_seams::DomainCheckRow {
+                conname: cn,
+                conbin: CONBIN_VALUE_IN_LIST,
             });
         }
         Ok(rows)
@@ -259,7 +282,9 @@ fn install_domain_seams() {
             proleakproof: false,
         }))
     });
-    namespace_seams::type_is_visible::set(|typid| Ok(typid == DOMAIN_OID));
+    namespace_seams::type_is_visible::set(|typid| {
+        Ok(typid == DOMAIN_OID || typid == INLIST_DOMAIN_OID)
+    });
     syscache_seams::pg_namespace_nspname::set(|nspid| {
         let mut n = ::types_tuple::NameData::default();
         n.namestrcpy(if nspid == 2200 {
@@ -1910,6 +1935,22 @@ fn domain_check_input_engine_matches() {
     let e = crate::domain::domain_check_input(Datum::null(), true, DOMAIN_OID, None).err().unwrap();
     assert_eq!(e.sqlstate(), ::types_error::ERRCODE_NOT_NULL_VIOLATION);
 }
+// C ReScanExprContext releases a check's by-ref leftovers wholesale after
+// every call; they must not poison the next call's reset.
+#[test]
+fn domain_check_input_releases_check_leftovers_between_calls() {
+    install_seams();
+    for _ in 0..3 {
+        assert!(crate::domain::domain_check_input(Datum::from_i32(1), false, INLIST_DOMAIN_OID, None)
+            .is_ok());
+        let e = crate::domain::domain_check_input(Datum::from_i32(7), false, INLIST_DOMAIN_OID, None)
+            .err()
+            .unwrap();
+        assert_eq!(e.sqlstate(), ::types_error::ERRCODE_CHECK_VIOLATION);
+        assert_eq!(e.constraint_name(), Some("inlist_check"));
+    }
+}
+
 #[test]
 fn scalar_array_op_any_and_all() {
     assert_eq!(
