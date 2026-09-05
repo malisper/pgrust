@@ -57,7 +57,7 @@ pub use steps::{
     PROJ_KEY_MAX_ARGS, PROJ_KEY_MAX_CALLS, SCAN_CMP_MAX_CLAUSES, SCAN_PROJ_MAX_COLS,
 };
 pub use types_portal::params::ParamBind;
-pub use xmlops::map_sql_value_to_xml_value;
+pub use xmlops::{map_sql_value_to_xml_value, map_sql_value_to_xml_value_utf8};
 
 /// evaluate_expr (clauses.c): run a const-foldable expression once, Const-wrap.
 pub fn evaluate_expr<'mcx>(
@@ -81,13 +81,23 @@ pub fn evaluate_expr<'mcx>(
     let (typlen, typbyval) = lsyscache::get_typlenbyval(result_type)?;
     let constvalue = if r.isnull || typbyval {
         r.value
+    } else if typlen == -1 {
+        // C (clauses.c:5058): PG_DETOAST_DATUM_COPY — the Const must own a
+        // plain, uncompressed, in-line image: never a TOAST pointer, an
+        // expanded object or a packed header, since the plan tree outlives
+        // the evaluation context (and, for cached plans, the TOAST value).
+        let p = r.value.as_usize() as *const u8;
+        // SAFETY: non-null by-ref varlena result: a live image of
+        // varsize_any bytes (TOAST pointers included).
+        let raw = unsafe { core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p)) };
+        let img = detoast_seams::detoast_attr::call(mcx, raw)?;
+        datum::Datum::from_usize(img.leak().as_ptr() as usize)
     } else {
         let p = r.value.as_usize() as *const u8;
         // SAFETY: non-null by-ref result datum: typlen bytes readable, or a
-        // live varlena/cstring image for -1/-2.
+        // live cstring image for -2.
         let bytes = unsafe {
             match typlen {
-                -1 => core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p)),
                 -2 => {
                     let mut n = 0usize;
                     while *p.add(n) != 0 {

@@ -213,7 +213,8 @@ fn spi_sql_row_to_xmlelement(
                 let _ = write!(result, "  <{colname} xsi:nil=\"true\"/>\n");
             }
         } else {
-            let v = execexpr::map_sql_value_to_xml_value(colval, att.atttypid, true, resmcx)?;
+            let v =
+                execexpr::map_sql_value_to_xml_value_utf8(colval, att.atttypid, true, resmcx)?;
             let _ = write!(result, "  <{colname}>{v}</{colname}>\n");
         }
     }

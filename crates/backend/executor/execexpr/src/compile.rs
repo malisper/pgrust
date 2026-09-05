@@ -1594,11 +1594,13 @@ fn init_subplan_expr<'mcx>(
 ) -> PgResult<()> {
     let sp = node.as_sub_plan().expect("SubPlan node");
     let Some(env) = sub else {
-        panic!(
-            "ExecInitSubPlanExpr (execExpr.c): SubPlan {:?} (plan_id {}) in an expression \
-             context without a subplan driver (owning node not wired)",
-            sp.plan_name, sp.plan_id
-        )
+        // C ExecInitSubPlanExpr (execExpr.c:2831): no parent plan is
+        // elog(ERROR, "SubPlan found with no parent plan") — an ERROR, not
+        // a process panic (an expression compiled without its owning node).
+        return Err(Box::new(
+            PgError::error("SubPlan found with no parent plan")
+                .with_sqlstate(::types_error::ERRCODE_INTERNAL_ERROR),
+        ));
     };
     debug_assert_eq!(sp.parParam.len(), sp.args.len());
     for (paramid, arg) in sp.parParam.iter().zip(sp.args.iter()) {
@@ -3285,6 +3287,20 @@ fn init_subscripting_ref<'mcx>(
     const F_ARRAY_SUBSCRIPT_HANDLER: Oid = 6179;
     const F_RAW_ARRAY_SUBSCRIPT_HANDLER: Oid = 6180;
     let (typsubscript, _) = lsyscache::typ::get_typsubscript(sbsref.refcontainertype)?;
+    if typsubscript as Oid == ::types_core::InvalidOid {
+        // C ExecInitSubscriptingRef (execExpr.c:3260-3268): getSubscriptingRoutines
+        // returns NULL for a type without typsubscript. (C also attaches the
+        // cursor position when state->parent is set; the port's ExprState has
+        // no parent pointer.)
+        let tn = ::format_type::format_type_be(sbsref.refcontainertype)
+            .unwrap_or_else(|_| format!("{}", sbsref.refcontainertype));
+        return Err(Box::new(
+            PgError::error(format!(
+                "cannot subscript type {tn} because it does not support subscripting"
+            ))
+            .with_sqlstate(::types_error::ERRCODE_DATATYPE_MISMATCH),
+        ));
+    }
     if typsubscript as Oid == F_JSONB_SUBSCRIPT_HANDLER {
         return init_jsonb_subscripting_ref(node, state, mcx, out, agg, params, sub);
     }
@@ -4948,12 +4964,13 @@ fn init_param(param: &Param, params: ParamBind<'_>, out: OutRef) -> PgResult<Ste
             if prm.ptype == 0 {
                 return Ok(Step::ParamExternMissing { paramid });
             }
-            assert!(
-                prm.ptype == param.paramtype,
-                "EEOP_PARAM_EXTERN: parameter {paramid} bound as type {} but planned as {}",
-                prm.ptype,
-                param.paramtype
-            );
+            if prm.ptype != param.paramtype {
+                return Ok(Step::ParamExternTypeMismatch {
+                    paramid,
+                    ptype: prm.ptype,
+                    paramtype: param.paramtype,
+                });
+            }
             Ok(Step::ParamExtern {
                 prm: NonNull::from(prm),
                 out,
@@ -4964,6 +4981,22 @@ fn init_param(param: &Param, params: ParamBind<'_>, out: OutRef) -> PgResult<Ste
              (PARAM_SUBLINK/PARAM_MULTIEXPR are rewritten by the planner)"
         ),
     }
+}
+
+// C ExecEvalParamExtern (execExprInterp.c:3099): the planned and bound
+// parameter types differ.
+#[cold]
+#[inline(never)]
+pub(crate) fn param_type_mismatch(paramid: i32, ptype: Oid, paramtype: Oid) -> Box<PgError> {
+    let f = |o: Oid| ::format_type::format_type_be(o).unwrap_or_else(|_| format!("{o}"));
+    Box::new(
+        PgError::error(format!(
+            "type of parameter {paramid} ({}) does not match that when preparing the plan ({})",
+            f(ptype),
+            f(paramtype)
+        ))
+        .with_sqlstate(::types_error::ERRCODE_DATATYPE_MISMATCH),
+    )
 }
 
 #[cold]

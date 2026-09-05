@@ -102,6 +102,14 @@ pub enum Step {
     ParamExternMissing {
         paramid: i32,
     },
+    // PARAM_EXTERN bound as a type other than the planned one: C raises
+    // ERRCODE_DATATYPE_MISMATCH at evaluation (ExecEvalParamExtern), not at
+    // init, for the same EXPLAIN (GENERIC_PLAN) reason.
+    ParamExternTypeMismatch {
+        paramid: i32,
+        ptype: Oid,
+        paramtype: Oid,
+    },
     // paramid rides along for the pending-initplan lane: a fetch that finds
     // exec_plan set suspends so the driver can run ExecSetParamPlan for this
     // param on demand (C ExecEvalParamExec, execExprInterp.c).

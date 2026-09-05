@@ -10,7 +10,9 @@ use ::datum::{Datum, NullableDatum};
 use ::mcx::Mcx;
 use ::types_core::catalog::{BOOLOID, BYTEAOID, DATEOID, TIMESTAMPOID, TIMESTAMPTZOID, XMLOID};
 use ::types_core::{InvalidOid, Oid};
-use ::types_error::{PgError, PgResult, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE};
+use ::types_error::{
+    PgError, PgResult, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE, ERRCODE_FEATURE_NOT_SUPPORTED,
+};
 use ::types_nodes::primnodes::{XmlExpr, XmlExprOp};
 
 use alloc::boxed::Box;
@@ -101,7 +103,7 @@ pub fn eval_xml_expr(st: &XmlExprState) -> PgResult<(Datum, bool)> {
                 ::mcx::vec_append_bytes(&mut buf, b"<")?;
                 ::mcx::vec_append_bytes(&mut buf, argname.as_bytes())?;
                 ::mcx::vec_append_bytes(&mut buf, b">")?;
-                ::mcx::vec_append_bytes(&mut buf, mapped.as_bytes())?;
+                ::mcx::vec_append_bytes(&mut buf, &mapped)?;
                 ::mcx::vec_append_bytes(&mut buf, b"</")?;
                 ::mcx::vec_append_bytes(&mut buf, argname.as_bytes())?;
                 ::mcx::vec_append_bytes(&mut buf, b">")?;
@@ -113,7 +115,7 @@ pub fn eval_xml_expr(st: &XmlExprState) -> PgResult<(Datum, bool)> {
             Ok((xml_datum(mcx, &buf)?, false))
         }
         XmlExprOp::IS_XMLELEMENT => {
-            let mut named_strs: Vec<(String, Option<String>)> = Vec::with_capacity(named.len());
+            let mut named_strs: Vec<(String, Option<Vec<u8>>)> = Vec::with_capacity(named.len());
             for (i, nd) in named.iter().enumerate() {
                 let argname = x
                     .arg_names
@@ -132,7 +134,7 @@ pub fn eval_xml_expr(st: &XmlExprState) -> PgResult<(Datum, bool)> {
                 };
                 named_strs.push((argname, v));
             }
-            let mut content: Vec<String> = Vec::with_capacity(args.len());
+            let mut content: Vec<Vec<u8>> = Vec::with_capacity(args.len());
             for (i, nd) in args.iter().enumerate() {
                 if nd.isnull {
                     continue;
@@ -224,12 +226,15 @@ pub fn eval_xml_expr(st: &XmlExprState) -> PgResult<(Datum, bool)> {
 
 // C map_sql_value_to_xml_value (xml.c:2562): the fmgr/lsyscache half lives
 // here; escape_xml/encode_binary/XSD scalar rules come from adt_xml + datetime.
+// The result is server-encoded BYTES, exactly C's char*: under a non-UTF-8
+// server encoding (SQL_ASCII) a text value may carry any byte and C's
+// escape_xml (xml.c:2734) is byte-wise, so no UTF-8 requirement exists here.
 pub fn map_sql_value_to_xml_value(
     value: Datum,
     type_: Oid,
     xml_escape_strings: bool,
     resmcx: &ResMcx,
-) -> PgResult<String> {
+) -> PgResult<Vec<u8>> {
     let mcx = res_mcx(resmcx);
 
     let elmtype = ::lsyscache::typ::get_base_element_type(type_)?;
@@ -244,14 +249,14 @@ pub fn map_sql_value_to_xml_value(
             elmalign as u8,
             true,
         )?;
-        let mut buf = String::new();
+        let mut buf: Vec<u8> = Vec::new();
         for (elem, isnull) in elems.iter().zip(nulls.iter()) {
             if *isnull {
                 continue;
             }
-            buf.push_str("<element>");
-            buf.push_str(&map_sql_value_to_xml_value(*elem, elmtype, true, resmcx)?);
-            buf.push_str("</element>");
+            buf.extend_from_slice(b"<element>");
+            buf.extend_from_slice(&map_sql_value_to_xml_value(*elem, elmtype, true, resmcx)?);
+            buf.extend_from_slice(b"</element>");
         }
         return Ok(buf);
     }
@@ -261,9 +266,9 @@ pub fn map_sql_value_to_xml_value(
     match type_ {
         BOOLOID => {
             return Ok(if value.as_bool() {
-                "true".to_string()
+                b"true".to_vec()
             } else {
-                "false".to_string()
+                b"false".to_vec()
             })
         }
         DATEOID => {
@@ -284,9 +289,7 @@ pub fn map_sql_value_to_xml_value(
                 ::adt_datetime::consts::USE_XSD_DATES,
                 &mut buf,
             );
-            return Ok(core::str::from_utf8(&buf[..n])
-                .expect("date encodes ASCII")
-                .to_string());
+            return Ok(buf[..n].to_vec());
         }
         TIMESTAMPOID => {
             let ts = value.as_i64();
@@ -308,9 +311,7 @@ pub fn map_sql_value_to_xml_value(
                 ::adt_datetime::consts::USE_XSD_DATES,
                 &mut buf,
             );
-            return Ok(core::str::from_utf8(&buf[..n])
-                .expect("ts encodes ASCII")
-                .to_string());
+            return Ok(buf[..n].to_vec());
         }
         TIMESTAMPTZOID => {
             let ts = value.as_i64();
@@ -343,14 +344,12 @@ pub fn map_sql_value_to_xml_value(
                 ::adt_datetime::consts::USE_XSD_DATES,
                 &mut buf,
             );
-            return Ok(core::str::from_utf8(&buf[..n])
-                .expect("ts encodes ASCII")
-                .to_string());
+            return Ok(buf[..n].to_vec());
         }
         BYTEAOID => {
             let payload = varlena_payload(value, resmcx)?;
             let out = adt_xml::encode_binary(payload, adt_xml::xmlbinary())?;
-            return Ok(String::from_utf8(out).expect("base64/hex is ASCII"));
+            return Ok(out);
         }
         _ => {}
     }
@@ -364,13 +363,37 @@ pub fn map_sql_value_to_xml_value(
     let out = finfo.invoke(&mut fcinfo)?;
     // SAFETY: output functions return a NUL-terminated cstring datum.
     let cstr = unsafe { core::ffi::CStr::from_ptr(out.as_usize() as *const core::ffi::c_char) };
-    let s = core::str::from_utf8(cstr.to_bytes()).expect("typoutput yields server encoding");
+    // C: OidOutputFunctionCall's cstring is in the server encoding, which is
+    // not necessarily UTF-8; keep the bytes (xml.c:2675-2684).
+    let bytes = cstr.to_bytes();
 
     if type_ == XMLOID || !xml_escape_strings {
-        Ok(s.to_string())
+        Ok(bytes.to_vec())
     } else {
-        Ok(String::from_utf8(adt_xml::escape_xml(s.as_bytes())).expect("escape keeps encoding"))
+        Ok(adt_xml::escape_xml(bytes))
     }
+}
+
+/// [`map_sql_value_to_xml_value`] for the String-plumbed xmlmap callers
+/// (table_to_xml/query_to_xml): a value whose server-encoded bytes are not
+/// UTF-8 (SQL_ASCII database) is refused with a typed error rather than a
+/// panic; the XmlExpr arms above carry the bytes through like C.
+pub fn map_sql_value_to_xml_value_utf8(
+    value: Datum,
+    type_: Oid,
+    xml_escape_strings: bool,
+    resmcx: &ResMcx,
+) -> PgResult<String> {
+    let bytes = map_sql_value_to_xml_value(value, type_, xml_escape_strings, resmcx)?;
+    String::from_utf8(bytes).map_err(|_| {
+        Box::new(
+            PgError::error(
+                "XML mapping of a non-UTF-8 server-encoded value in table_to_xml/query_to_xml \
+                 is not yet implemented",
+            )
+            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+        )
+    })
 }
 
 // DatumGetArrayTypeP: full flat image (arrayops::datum_array_image shape).

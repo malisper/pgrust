@@ -613,8 +613,8 @@ fn serialize_indented(
 /// mapped all arguments through `map_sql_value_to_xml_value`.
 pub fn xmlelement(
     name: &str,
-    named_args: &[(String, Option<String>)],
-    content: &[String],
+    named_args: &[(String, Option<Vec<u8>>)],
+    content: &[Vec<u8>],
 ) -> PgResult<Vec<u8>> {
     let x = xml2();
     pg_xml_init(PG_XML_STRICTNESS_ALL);
@@ -636,12 +636,12 @@ pub fn xmlelement(
         for (argname, value) in named_args {
             if let Some(v) = value {
                 let n = cstr(argname.as_bytes());
-                let vc = cstr(v.as_bytes());
+                let vc = cstr(v);
                 (x.xmlTextWriterWriteAttribute)(writer, n.as_ptr(), vc.as_ptr());
             }
         }
         for s in content {
-            let c = cstr(s.as_bytes());
+            let c = cstr(s);
             (x.xmlTextWriterWriteRaw)(writer, c.as_ptr());
         }
 

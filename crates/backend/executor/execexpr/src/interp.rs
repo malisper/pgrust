@@ -885,6 +885,15 @@ fn run_program<'mcx>(
             Step::ParamExternMissing { paramid } => {
                 return Err(crate::compile::no_param_value(*paramid));
             }
+            Step::ParamExternTypeMismatch {
+                paramid,
+                ptype,
+                paramtype,
+            } => {
+                return Err(crate::compile::param_type_mismatch(
+                    *paramid, *ptype, *paramtype,
+                ));
+            }
             Step::ParamExec { prm, out, paramid } => {
                 // SAFETY: compile-resolved pointer into stable es_param_exec_vals.
                 let p = unsafe { prm.read() };
@@ -3136,11 +3145,20 @@ fn eval_field_select(
     // SAFETY: detoasted composite image; header prefix is in bounds.
     let hdr = unsafe { &*(rec.as_ptr() as *const HeapTupleHeaderData) };
     let tupdesc = ::typcache::lookup_rowtype_tupdesc_copy(mcx, hdr.type_id(), hdr.typmod())?;
-    if fieldnum <= 0 || fieldnum as i32 > tupdesc.natts {
+    // C ExecEvalFieldSelect (execExprInterp.c:3770-3792), heap-composite leg.
+    if fieldnum <= 0 {
+        return Err(::types_error::PgError::error(format!(
+            "unsupported reference to system column {fieldnum} in FieldSelect"
+        ))
+        .with_sqlstate(::types_error::ERRCODE_INTERNAL_ERROR)
+        .into());
+    }
+    if fieldnum as i32 > tupdesc.natts {
         return Err(::types_error::PgError::error(format!(
             "attribute number {fieldnum} exceeds number of columns {}",
             tupdesc.natts
         ))
+        .with_sqlstate(::types_error::ERRCODE_INTERNAL_ERROR)
         .into());
     }
     let att = &tupdesc.attrs[(fieldnum - 1) as usize];
@@ -3148,9 +3166,17 @@ fn eval_field_select(
         return Ok((Datum::null(), true));
     }
     if resulttype != att.atttypid {
+        let f = |o: ::types_core::Oid| {
+            format_type::format_type_be(o).unwrap_or_else(|_| format!("{o}"))
+        };
         return Err(
             ::types_error::PgError::error(format!("attribute {fieldnum} has wrong type"))
                 .with_sqlstate(ERRCODE_DATATYPE_MISMATCH)
+                .with_detail(format!(
+                    "Table has type {}, but query expects {}.",
+                    f(att.atttypid),
+                    f(resulttype)
+                ))
                 .into(),
         );
     }
@@ -3624,13 +3650,29 @@ fn var_slot_wrong_type(
     )
 }
 
+// C: elog(ERROR) — "should never happen", but an ERROR, never a process panic.
+#[track_caller]
 #[cold]
 #[inline(never)]
-fn var_slot_out_of_range(attnum: u16, natts: i32) -> ! {
-    panic!(
-        "attribute number {} exceeds number of columns {natts}",
-        attnum + 1
-    );
+fn var_slot_out_of_range(attnum: u16, natts: i32) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "attribute number {} exceeds number of columns {natts}",
+            attnum + 1
+        ))
+        .with_sqlstate(::types_error::ERRCODE_INTERNAL_ERROR),
+    )
+}
+
+// C: "Internal error: somebody forgot to expand it." (execExprInterp.c:2433).
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn var_slot_virtual_generated() -> Box<PgError> {
+    Box::new(
+        PgError::error("unexpected virtual generated column reference")
+            .with_sqlstate(::types_error::ERRCODE_INTERNAL_ERROR),
+    )
 }
 
 // C CheckExprStillValid/CheckVarSlotCompatibility: first-evaluation check of
@@ -3672,6 +3714,9 @@ fn check_still_valid_slow<'mcx>(
             }
             | Step::ScanVarFuncStrict2 {
                 attnum, vartype, ..
+            }
+            | Step::ScanVarFuncStrict2Thin {
+                attnum, vartype, ..
             } => (SlotSrc::Scan, attnum, vartype),
             Step::InnerVar {
                 attnum, vartype, ..
@@ -3680,6 +3725,9 @@ fn check_still_valid_slow<'mcx>(
                 attnum, vartype, ..
             }
             | Step::OuterVarNotDistinct {
+                attnum, vartype, ..
+            }
+            | Step::OuterVarNotDistinctThin {
                 attnum, vartype, ..
             }
             | Step::OuterVarAggTransByValIndirect {
@@ -3712,10 +3760,12 @@ fn check_still_valid_slow<'mcx>(
             .as_ref()
             .expect("var evaluation against a descriptor-less slot");
         if (attnum as i32) >= desc.natts {
-            // C: elog(ERROR) — "should never happen".
-            var_slot_out_of_range(attnum, desc.natts);
+            return Err(var_slot_out_of_range(attnum, desc.natts));
         }
         let attr = &desc.attrs[attnum as usize];
+        if attr.attgenerated as u8 == ::types_core::catalog::ATTRIBUTE_GENERATED_VIRTUAL {
+            return Err(var_slot_virtual_generated());
+        }
         if attr.attisdropped {
             return Err(var_slot_dropped(attnum, desc.tdtypeid));
         }
@@ -4885,6 +4935,13 @@ pub(crate) fn exec_one_step<'mcx>(
         Step::ParamExternMissing { paramid } => {
             return Err(crate::compile::no_param_value(paramid));
         }
+        Step::ParamExternTypeMismatch {
+            paramid,
+            ptype,
+            paramtype,
+        } => {
+            return Err(crate::compile::param_type_mismatch(paramid, ptype, paramtype));
+        }
         Step::ParamExec { prm, out, paramid } => {
             // SAFETY: compile-resolved pointer into stable es_param_exec_vals.
             let p = unsafe { prm.read() };
@@ -5565,6 +5622,7 @@ pub(crate) fn step_has_helper(step: &Step) -> bool {
         | Step::AssignTmpMakeRo { .. }
         | Step::ParamExtern { .. }
         | Step::ParamExternMissing { .. }
+        | Step::ParamExternTypeMismatch { .. }
         | Step::ParamExec { .. }
         | Step::ParamSet { .. }
         | Step::SubPlan { .. }

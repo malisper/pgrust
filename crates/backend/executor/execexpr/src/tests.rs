@@ -71,6 +71,15 @@ fn install_seams() {
                     typstorage: TYPSTORAGE_PLAIN,
                     typcollation: 0,
                 }),
+                // text: varlena shape for the evaluate_expr detoast witness
+                // (audit-18.6 remediation b028).
+                TEXTOID_T => Some(PgTypeShape {
+                    typlen: -1,
+                    typbyval: false,
+                    typalign: TYPALIGN_INT,
+                    typstorage: b'x' as i8,
+                    typcollation: 100,
+                }),
                 BOOLOID => Some(PgTypeShape {
                     typlen: 1,
                     typbyval: true,
@@ -148,6 +157,23 @@ fn install_seams() {
         });
         install_domain_seams();
         install_json_seams();
+        // Fixture varlenas are in-line: plain images copy verbatim, 1B
+        // short-header images expand to the 4B form (C detoast_attr's
+        // VARATT_IS_SHORT leg); no TOAST/expanded forms exist in these tests.
+        ::detoast_seams::detoast_attr::set(|mcx, raw| {
+            if raw[0] & 0x01 == 0x01 && raw[0] != 0x01 {
+                let total = (raw[0] >> 1) as usize;
+                let data = &raw[1..total];
+                let mut v = ::mcx::vec_with_capacity_in(mcx, data.len() + 4)?;
+                ::mcx::vec_append_bytes(&mut v, &::datum::set_varsize_4b(data.len() + 4))?;
+                ::mcx::vec_append_bytes(&mut v, data)?;
+                Ok(v)
+            } else {
+                let mut v = ::mcx::vec_with_capacity_in(mcx, raw.len())?;
+                ::mcx::vec_append_bytes(&mut v, raw)?;
+                Ok(v)
+            }
+        });
     });
 }
 
@@ -5517,4 +5543,381 @@ fn projection_evaluates_nothing_gates_fused_skip() {
         s.force_program_kernel();
         assert!(!s.projection_evaluates_nothing());
     });
+}
+
+// ---------------------------------------------------------------------------
+// audit-18.6 remediation, batch b028 (backend/executor/execexpr): regression
+// witnesses for the C-exact error paths of execExpr.c / execExprInterp.c /
+// clauses.c evaluate_expr. Each asserts the C outcome (message bytes,
+// SQLSTATE, DETAIL) and fails on the unfixed tree.
+mod rem_b028 {
+    use super::*;
+    use ::types_error::ERRCODE_DATATYPE_MISMATCH;
+    use ::types_nodes::primnodes::{FieldSelect, ParamKind, SubLinkType, SubPlan, SubscriptingRef};
+    use ::types_portal::params::{ParamExternData, PARAM_FLAG_CONST};
+
+    const F_INT8EQ: u32 = 467;
+    const RECORDOID: u32 = ::types_core::catalog::RECORDOID;
+
+    fn scan_slots<'a, 'mcx>(slot: &'a mut SlotData<'mcx>) -> EvalSlots<'a, 'mcx> {
+        EvalSlots {
+            scan: Some(slot),
+            inner: None,
+            outer: None,
+        }
+    }
+
+    // CheckExprStillValid (execExprInterp.c:2315) walks EVERY EEOP_SCAN_VAR
+    // step: a ScanVar fused with a thin strict-2 call is still a scan Var.
+    #[test]
+    fn still_valid_check_covers_thin_fused_scan_var() {
+        with_mcx(|mcx| {
+            let c8 = Node::mk_const(mcx, INT8OID, -1, 0, 8, Datum::from_i64(1), false, true)
+                .unwrap();
+            let args = NodeList::make2(mcx, mk_scan_var(mcx, 1, INT8OID), c8).unwrap();
+            let mut state = exec_init_expr(
+                mcx,
+                Some(mk_opexpr(mcx, F_INT8EQ, BOOLOID, args)),
+                ParamBind::NONE,
+            )
+            .unwrap()
+            .unwrap();
+            assert!(
+                state
+                    .steps()
+                    .iter()
+                    .any(|s| matches!(s, Step::ScanVarFuncStrict2Thin { .. })),
+                "witness shape: ScanVar + thin int8eq must fuse into ScanVarFuncStrict2Thin"
+            );
+            // The slot's column is int4; the plan says int8.
+            let mut slot = virtual_slot(mcx, &[Some(1)]);
+            let mut slots = scan_slots(&mut slot);
+            let err = exec_eval_expr(&mut state, &mut slots)
+                .err()
+                .expect("CheckVarSlotCompatibility must reject an int4 column read as int8");
+            assert!(
+                err.message().contains("has wrong type"),
+                "got: {}",
+                err.message()
+            );
+            assert_eq!(err.sqlstate, ERRCODE_DATATYPE_MISMATCH);
+        });
+    }
+
+    // Same for EEOP_OUTER_VAR fused into OuterVarNotDistinctThin
+    // (ExecBuildGroupingEqual's shape).
+    #[test]
+    fn still_valid_check_covers_thin_fused_outer_var_not_distinct() {
+        with_mcx(|mcx| {
+            let ldesc = desc_int4(mcx, 1);
+            let rdesc = desc_typed(mcx, &[(INT8OID, 8)]);
+            let mut state = crate::compile::exec_build_grouping_equal(
+                mcx,
+                &ldesc,
+                &rdesc,
+                &[1],
+                &[F_INT8EQ],
+                &[0],
+            )
+            .unwrap();
+            assert!(
+                state
+                    .steps()
+                    .iter()
+                    .any(|s| matches!(s, Step::OuterVarNotDistinctThin { .. })),
+                "witness shape: OuterVar + thin int8eq NOT DISTINCT must fuse"
+            );
+            let mut inner = virtual_slot(mcx, &[Some(1)]);
+            let mut outer = virtual_slot(mcx, &[Some(1)]);
+            let mut slots = EvalSlots {
+                scan: None,
+                inner: Some(&mut inner),
+                outer: Some(&mut outer),
+            };
+            let err = exec_qual(Some(&mut *state), &mut slots)
+                .err()
+                .expect("CheckVarSlotCompatibility must reject the int4 outer column read as int8");
+            assert!(
+                err.message().contains("has wrong type"),
+                "got: {}",
+                err.message()
+            );
+            assert_eq!(err.sqlstate, ERRCODE_DATATYPE_MISMATCH);
+        });
+    }
+
+    // CheckVarSlotCompatibility (execExprInterp.c:2411): a Var over a
+    // virtual generated column is "somebody forgot to expand it" — elog(ERROR).
+    #[test]
+    fn still_valid_check_rejects_virtual_generated_column() {
+        with_mcx(|mcx| {
+            let mut desc = desc_int4(mcx, 1);
+            {
+                let d = Rc::get_mut(&mut desc).unwrap();
+                d.attrs[0].attgenerated = ::types_core::catalog::ATTRIBUTE_GENERATED_VIRTUAL as i8;
+                d.compact_attrs[0].attgenerated = true;
+            }
+            let mut slot =
+                exectuples::make_tuple_table_slot(mcx, TupleSlotKind::Virtual, Some(desc));
+            {
+                let base = slot.base_mut();
+                base.tts_values[0] = Datum::from_i32(1);
+                base.tts_isnull[0] = false;
+            }
+            exectuples::exec_store_virtual_tuple(&mut slot);
+            let mut state =
+                exec_init_expr(mcx, Some(mk_scan_var(mcx, 1, INT4OID)), ParamBind::NONE)
+                    .unwrap()
+                    .unwrap();
+            let mut slots = scan_slots(&mut slot);
+            let err = exec_eval_expr(&mut state, &mut slots)
+                .err()
+                .expect("a Var over a virtual generated column must be an ERROR");
+            assert_eq!(err.message(), "unexpected virtual generated column reference");
+            assert_eq!(err.sqlstate, ::types_error::ERRCODE_INTERNAL_ERROR);
+        });
+    }
+
+    // CheckVarSlotCompatibility: attnum beyond the slot descriptor is
+    // elog(ERROR, "attribute number %d exceeds number of columns %d"), not a
+    // process panic.
+    #[test]
+    fn still_valid_check_reports_attnum_beyond_descriptor_as_error() {
+        with_mcx(|mcx| {
+            let mut state =
+                exec_init_expr(mcx, Some(mk_scan_var(mcx, 3, INT4OID)), ParamBind::NONE)
+                    .unwrap()
+                    .unwrap();
+            let mut slot = virtual_slot(mcx, &[Some(1)]);
+            let mut slots = scan_slots(&mut slot);
+            let err = exec_eval_expr(&mut state, &mut slots)
+                .err()
+                .expect("attnum past the descriptor must be an ERROR");
+            assert_eq!(err.message(), "attribute number 3 exceeds number of columns 1");
+            assert_eq!(err.sqlstate, ::types_error::ERRCODE_INTERNAL_ERROR);
+        });
+    }
+
+    // ExecEvalParamExtern (execExprInterp.c:3099): a bound parameter whose
+    // type differs from the planned one is ERRCODE_DATATYPE_MISMATCH at
+    // evaluation (init succeeds: EXPLAIN GENERIC_PLAN inits only).
+    #[test]
+    fn param_extern_type_mismatch_is_datatype_mismatch_error() {
+        with_mcx(|mcx| {
+            let externs = [ParamExternData {
+                value: Datum::from_i32(42),
+                isnull: false,
+                pflags: PARAM_FLAG_CONST,
+                ptype: TEXTOID_T,
+            }];
+            let bind = ParamBind {
+                extern_params: Some(&externs),
+                ..ParamBind::NONE
+            };
+            let node = mk_param(mcx, ParamKind::PARAM_EXTERN, 1, INT4OID);
+            let mut state = exec_init_expr(mcx, Some(node), bind)
+                .expect("init must not fail on a type mismatch")
+                .unwrap();
+            let mut slots = EvalSlots::default();
+            let err = exec_eval_expr(&mut state, &mut slots)
+                .err()
+                .expect("mismatched parameter type must be an ERROR");
+            assert!(
+                err.message().starts_with("type of parameter 1 (")
+                    && err
+                        .message()
+                        .contains(") does not match that when preparing the plan ("),
+                "got: {}",
+                err.message()
+            );
+            assert_eq!(err.sqlstate, ERRCODE_DATATYPE_MISMATCH);
+        });
+    }
+
+    // ExecInitSubscriptingRef (execExpr.c:3260): a container type without
+    // subscripting support (typsubscript = 0) is ERRCODE_DATATYPE_MISMATCH
+    // "cannot subscript type %s because it does not support subscripting".
+    #[test]
+    fn subscripting_ref_without_handler_is_datatype_mismatch_error() {
+        with_mcx(|mcx| {
+            let mut upper = ::types_nodes::OptNodeList::nil();
+            upper
+                .lappend(mcx, Some(mk_int4_const(mcx, Some(1))))
+                .unwrap();
+            let sbs = Node::mk(
+                mcx,
+                SubscriptingRef {
+                    refcontainertype: INT4OID,
+                    refelemtype: INT4OID,
+                    refrestype: INT4OID,
+                    reftypmod: -1,
+                    refcollid: 0,
+                    refupperindexpr: upper,
+                    reflowerindexpr: ::types_nodes::OptNodeList::nil(),
+                    refexpr: Some(mk_int4_const(mcx, Some(7))),
+                    refassgnexpr: None,
+                },
+            )
+            .unwrap();
+            let err = exec_init_expr(mcx, Some(sbs), ParamBind::NONE)
+                .err()
+                .expect("subscripting a non-subscriptable type must be an ERROR");
+            assert!(
+                err.message().starts_with("cannot subscript type ")
+                    && err
+                        .message()
+                        .ends_with(" because it does not support subscripting"),
+                "got: {}",
+                err.message()
+            );
+            assert_eq!(err.sqlstate, ERRCODE_DATATYPE_MISMATCH);
+        });
+    }
+
+    // ExecInitSubPlanExpr (execExpr.c:2831): a SubPlan compiled without a
+    // parent plan is elog(ERROR, "SubPlan found with no parent plan").
+    #[test]
+    fn subplan_without_parent_plan_is_error() {
+        with_mcx(|mcx| {
+            let subplan = Node::mk(
+                mcx,
+                SubPlan {
+                    subLinkType: SubLinkType::EXPR_SUBLINK,
+                    testexpr: None,
+                    paramIds: ::types_nodes::list::IntList::nil(),
+                    plan_id: 1,
+                    plan_name: Some("SubPlan 1"),
+                    firstColType: INT4OID,
+                    firstColTypmod: -1,
+                    firstColCollation: 0,
+                    useHashTable: false,
+                    unknownEqFalse: false,
+                    parallel_safe: false,
+                    setParam: ::types_nodes::list::IntList::nil(),
+                    parParam: ::types_nodes::list::IntList::nil(),
+                    args: NodeList::nil(),
+                    startup_cost: 0.0,
+                    per_call_cost: 0.0,
+                },
+            )
+            .unwrap();
+            let err = exec_init_expr(mcx, Some(subplan), ParamBind::NONE)
+                .err()
+                .expect("SubPlan without a parent plan must be an ERROR");
+            assert_eq!(err.message(), "SubPlan found with no parent plan");
+            assert_eq!(err.sqlstate, ::types_error::ERRCODE_INTERNAL_ERROR);
+        });
+    }
+
+    // A blessed RECORD datum (int4, int4) for the FieldSelect witnesses.
+    fn record_datum<'mcx>(mcx: Mcx<'mcx>) -> (Datum, i32) {
+        let var = Node::mk_var(mcx, 1, 0, RECORDOID, -1, 0, 0).unwrap();
+        let mut state = exec_init_expr(mcx, Some(var), ParamBind::NONE)
+            .unwrap()
+            .unwrap();
+        state.arm_result_mcx(mcx);
+        let mut scan = virtual_slot(mcx, &[Some(7), Some(8)]);
+        let mut slots = scan_slots(&mut scan);
+        let r = exec_eval_expr(&mut state, &mut slots).unwrap();
+        assert!(!r.isnull);
+        // SAFETY: the eval returns a flattened in-memory composite datum.
+        let td = unsafe { &*(r.value.as_usize() as *const ::types_tuple::HeapTupleHeaderData) };
+        (r.value, td.typmod())
+    }
+
+    fn field_select<'mcx>(
+        mcx: Mcx<'mcx>,
+        rec: Datum,
+        typmod: i32,
+        fieldnum: i16,
+        resulttype: u32,
+    ) -> PgBox<'mcx, ExprState<'mcx>> {
+        let arg = Node::mk_const(mcx, RECORDOID, typmod, 0, -1, rec, false, false).unwrap();
+        let fs = Node::mk(
+            mcx,
+            FieldSelect {
+                arg,
+                fieldnum,
+                resulttype,
+                resulttypmod: -1,
+                resultcollid: 0,
+            },
+        )
+        .unwrap();
+        let mut state = exec_init_expr(mcx, Some(fs), ParamBind::NONE)
+            .unwrap()
+            .unwrap();
+        state.arm_result_mcx(mcx);
+        state
+    }
+
+    // ExecEvalFieldSelect (execExprInterp.c:3787): the wrong-type error
+    // carries errdetail("Table has type %s, but query expects %s.").
+    #[test]
+    fn field_select_wrong_type_error_carries_detail() {
+        with_mcx(|mcx| {
+            let (rec, typmod) = record_datum(mcx);
+            let mut state = field_select(mcx, rec, typmod, 1, INT8OID);
+            let mut slots = EvalSlots::default();
+            let err = exec_eval_expr(&mut state, &mut slots)
+                .err()
+                .expect("FieldSelect over a mismatched attribute type must be an ERROR");
+            assert_eq!(err.message(), "attribute 1 has wrong type");
+            assert_eq!(err.sqlstate, ERRCODE_DATATYPE_MISMATCH);
+            assert!(
+                err.detail().is_some_and(|d| d.starts_with("Table has type ")
+                    && d.contains(", but query expects ")
+                    && d.ends_with('.')),
+                "got detail: {:?}",
+                err.detail()
+            );
+        });
+    }
+
+    // ExecEvalFieldSelect (execExprInterp.c:3770): fieldnum <= 0 is
+    // elog(ERROR, "unsupported reference to system column %d in FieldSelect").
+    #[test]
+    fn field_select_system_column_reports_c_message() {
+        with_mcx(|mcx| {
+            let (rec, typmod) = record_datum(mcx);
+            let mut state = field_select(mcx, rec, typmod, -1, INT4OID);
+            let mut slots = EvalSlots::default();
+            let err = exec_eval_expr(&mut state, &mut slots)
+                .err()
+                .expect("FieldSelect of a system column must be an ERROR");
+            assert_eq!(
+                err.message(),
+                "unsupported reference to system column -1 in FieldSelect"
+            );
+            assert_eq!(err.sqlstate, ::types_error::ERRCODE_INTERNAL_ERROR);
+        });
+    }
+
+    // evaluate_expr (clauses.c:5058): a varlena result is
+    // PG_DETOAST_DATUM_COPY'd into the Const — plain 4B header, never a
+    // packed/compressed/external image that a plan tree could outlive.
+    #[test]
+    fn evaluate_expr_detoasts_varlena_result_into_const() {
+        use ::types_tuple::varatt;
+        with_mcx(|mcx| {
+            // 1B short-header text 'ab' (total 3 bytes: header (3<<1)|1).
+            let mut img: PgVec<u8> = ::mcx::vec_with_capacity_in(mcx, 3).unwrap();
+            ::mcx::vec_append_bytes(&mut img, &[(3u8 << 1) | 1, b'a', b'b']).unwrap();
+            let d = Datum::from_usize(img.leak().as_ptr() as usize);
+            let c = Node::mk_const(mcx, TEXTOID_T, -1, 100, -1, d, false, false).unwrap();
+            let out = crate::evaluate_expr(mcx, c, TEXTOID_T, -1, 100).unwrap();
+            let k = out.as_const().expect("evaluate_expr yields a Const");
+            assert!(!k.constisnull);
+            let p = k.constvalue.as_usize() as *const u8;
+            // SAFETY: the Const owns a live varlena image in mcx.
+            unsafe {
+                assert!(
+                    varatt::varatt_is_4b_u(p),
+                    "evaluate_expr must store a detoasted plain-header copy"
+                );
+                assert_eq!(varatt::varsize_any(p), 4 + 2);
+                assert_eq!(core::slice::from_raw_parts(p.add(4), 2), b"ab");
+            }
+        });
+    }
 }
