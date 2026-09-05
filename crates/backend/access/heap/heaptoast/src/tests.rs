@@ -970,3 +970,27 @@ fn heap_delete_cascades_into_toast_chunks() {
     // every chunk got simple_heap_delete'd (xmax stamped -> not "live")
     assert_eq!(toast_heap_entries(mcx).len(), 0);
 }
+
+// detoast.c:351 / :405: toast_fetch_datum{,_slice} refuse a non-ondisk datum
+// with a runtime elog(ERROR) (not a debug-only assertion), instead of parsing
+// arbitrary varlena bytes as a toast pointer
+// (a186-candidate-fp-common-detoast-0edc56e3c2cb7e08b188-1,
+//  a186-candidate-fp-common-detoast-8155e964415c5305bb68-1).
+#[test]
+fn fetch_datum_refuses_non_ondisk_datum_with_c_error() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    // A plain 4-byte-header inline varlena: not VARATT_IS_EXTERNAL_ONDISK.
+    let inline = text_value(mcx, b"not a toast pointer, just an inline text value");
+
+    let err = toast_fetch_datum(mcx, &inline).err().expect("non-ondisk datum is an ERROR");
+    assert_eq!(err.message(), "toast_fetch_datum shouldn't be called for non-ondisk datums");
+
+    let err = toast_fetch_datum_slice(mcx, &inline, 0, 10)
+        .err()
+        .expect("non-ondisk datum is an ERROR");
+    assert_eq!(
+        err.message(),
+        "toast_fetch_datum_slice shouldn't be called for non-ondisk datums"
+    );
+}

@@ -530,7 +530,12 @@ pub fn heapam_tuple_lock<'mcx>(
                                 }
                             }
                             LockWaitPolicy::LockWaitError => {
-                                if !lmgr::ConditionalXactLockTableWait(dirty.xmax, false)? {
+                                // heapam_handler.c:467: log_lock_failures
+                                // reaches ConditionalXactLockTableWait.
+                                if !lmgr::ConditionalXactLockTableWait(
+                                    dirty.xmax,
+                                    ::heapam::dml::log_lock_failures(),
+                                )? {
                                     return Err(Box::new(
                                         ::types_error::PgError::error(std::format!(
                                             "could not obtain lock on row in relation \"{}\"",

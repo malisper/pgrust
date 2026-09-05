@@ -1094,11 +1094,49 @@ fn install_dml_seams() {
         // LockAcquireExtended: never available (the NOWAIT / SKIP LOCKED
         // arms), recording the logLockFailure argument the caller passed.
         lock_seams::lock_acquire_extended::set(
-            |_tag, _mode, _session, _dont_wait, _report_oom, log_lock_failure| {
+            |tag, _mode, _session, _dont_wait, _report_oom, log_lock_failure| {
+                // The heavyweight tuple lock can be made available (a
+                // heap_lock_tuple NOWAIT then fails on the xact lock instead).
+                if tag.locktag_type == ::types_storage::lock::LOCKTAG_TUPLE
+                    && TUPLE_LOCK_AVAILABLE.load(Ordering::Relaxed)
+                {
+                    return Ok(::types_storage::lock::LOCKACQUIRE_OK);
+                }
                 LAST_LOG_LOCK_FAILURE.store(log_lock_failure, Ordering::Relaxed);
                 Ok(::types_storage::lock::LOCKACQUIRE_NOT_AVAIL)
             },
         );
+        lock_seams::lock_release::set(|_tag, _mode, _session| Ok(true));
+        // Only the multixact-member conflict question reaches this in the
+        // paths under test; every pair conflicts.
+        lock_seams::do_lock_modes_conflict::set(|_m1, _m2| true);
+        procarray_seams::transaction_id_is_in_progress::set(|xid| {
+            Ok(IN_PROGRESS_XIDS.lock().unwrap().contains(&xid))
+        });
+        multixact_seams::get_multi_xact_id_members::set(
+            |_multi, _from_pgupgrade, _is_lock_only, consume| {
+                let members = MULTI_MEMBERS.lock().unwrap().clone();
+                consume(&members);
+                Ok(members.len() as i32)
+            },
+        );
+        // ConditionalLockBuffer: the fake's content lock, taken only when free.
+        bufmgr_seams::conditional_lock_buffer::set(|buf| {
+            COND_LOCK_CALLS.fetch_add(1, Ordering::Relaxed);
+            Ok(with_fake(|f| {
+                let l = &mut f.locks[(buf - 1) as usize];
+                if *l != 0 {
+                    return false;
+                }
+                *l += 1;
+                true
+            }))
+        });
+        // WARNINGs (elog_seams) are captured for inspection.
+        ::elog_seams::ereport::set(|err| {
+            WARNINGS.lock().unwrap().push(err.message.clone());
+            Ok(())
+        });
         ::guc_tables::vars::log_lock_failures.install_if_absent(::guc_tables::GucVarAccessors {
             get: || LOG_LOCK_FAILURES_GUC.load(Ordering::Relaxed),
             set: |v| LOG_LOCK_FAILURES_GUC.store(v, Ordering::Relaxed),
@@ -1163,6 +1201,13 @@ fn install_dml_seams() {
 
 static LOGICAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static CANCEL_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static TUPLE_LOCK_AVAILABLE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static COND_LOCK_CALLS: AtomicUsize = AtomicUsize::new(0);
+static WARNINGS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+static IN_PROGRESS_XIDS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+static MULTI_MEMBERS: Mutex<Vec<::types_storage::multixact::MultiXactMember>> =
+    Mutex::new(Vec::new());
 static LAST_LOG_LOCK_FAILURE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 static LOG_LOCK_FAILURES_GUC: std::sync::atomic::AtomicBool =
@@ -3030,4 +3075,232 @@ fn acquire_tuplock_nowait_passes_log_lock_failures_guc() {
         assert!(!have_tuple_lock);
     }
     LOG_LOCK_FAILURES_GUC.store(false, Ordering::Relaxed);
+}
+
+// heapam.c:5232 heap_lock_tuple, LockWaitError with a plain-xid xmax: the
+// log_lock_failures GUC is handed to ConditionalXactLockTableWait so the lock
+// manager logs the failed acquisition before 55P03
+// (a186-verified-fp-heap-heapam-p2-0a40872d6ee3b565bf38-1).
+#[test]
+fn lock_tuple_nowait_xid_passes_log_lock_failures_guc() {
+    install_dml_seams();
+    let _serial = serial();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let oid = fresh_oid();
+    // xmax 200 (another, running xact), HEAP_XMAX_INVALID clear: the
+    // visibility seam answers TM_BeingModified.
+    let mut img = tuple_image(10, 200, 1);
+    set_infomask(&mut img, 0, 0);
+    register_table(oid, vec![build_page(&[Item::Tuple(img)], false)]);
+    let rel = test_relation(mcx, oid);
+    let tid = ItemPointerData::new(0, 1);
+
+    TUPLE_LOCK_AVAILABLE.store(true, Ordering::Relaxed);
+    for guc in [false, true] {
+        LOG_LOCK_FAILURES_GUC.store(guc, Ordering::Relaxed);
+        LAST_LOG_LOCK_FAILURE.store(!guc, Ordering::Relaxed);
+        let mut tmfd = TM_FailureData::default();
+        let err = dml::heap_lock_tuple(
+            &rel,
+            &tid,
+            7,
+            LockTupleMode::LockTupleExclusive,
+            ::tableam_vocab::LockWaitPolicy::LockWaitError,
+            false,
+            &mut tmfd,
+        )
+        .err()
+        .expect("NOWAIT against a running updater is 55P03");
+        assert_eq!(err.sqlstate(), ::types_error::ERRCODE_LOCK_NOT_AVAILABLE);
+        assert_eq!(
+            err.message(),
+            std::format!("could not obtain lock on row in relation \"{}\"", rel.name())
+        );
+        assert_eq!(
+            LAST_LOG_LOCK_FAILURE.load(Ordering::Relaxed),
+            guc,
+            "log_lock_failures={guc} must reach ConditionalXactLockTableWait (heapam.c:5232)"
+        );
+    }
+    TUPLE_LOCK_AVAILABLE.store(false, Ordering::Relaxed);
+    LOG_LOCK_FAILURES_GUC.store(false, Ordering::Relaxed);
+    quiesced();
+}
+
+// heapam.c:5194 heap_lock_tuple, LockWaitError with a MultiXact xmax: the GUC
+// reaches each member's ConditionalXactLockTableWait through
+// ConditionalMultiXactIdWait
+// (a186-verified-fp-heap-heapam-p2-b8f24eb0e170af449fda-1).
+#[test]
+fn lock_tuple_nowait_multixact_passes_log_lock_failures_guc() {
+    use ::types_storage::multixact::{MultiXactMember, MultiXactStatus};
+    install_dml_seams();
+    let _serial = serial();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let oid = fresh_oid();
+    // xmax = multixact 500 whose one member (xid 300) holds FOR SHARE.
+    let mut img = tuple_image(10, 500, 1);
+    set_infomask(&mut img, ::types_tuple::HEAP_XMAX_IS_MULTI, 0);
+    register_table(oid, vec![build_page(&[Item::Tuple(img)], false)]);
+    let rel = test_relation(mcx, oid);
+    let tid = ItemPointerData::new(0, 1);
+    *MULTI_MEMBERS.lock().unwrap() =
+        vec![MultiXactMember { xid: 300, status: MultiXactStatus::MultiXactStatusForShare }];
+
+    TUPLE_LOCK_AVAILABLE.store(true, Ordering::Relaxed);
+    for guc in [false, true] {
+        LOG_LOCK_FAILURES_GUC.store(guc, Ordering::Relaxed);
+        LAST_LOG_LOCK_FAILURE.store(!guc, Ordering::Relaxed);
+        let mut tmfd = TM_FailureData::default();
+        let err = dml::heap_lock_tuple(
+            &rel,
+            &tid,
+            7,
+            LockTupleMode::LockTupleExclusive,
+            ::tableam_vocab::LockWaitPolicy::LockWaitError,
+            false,
+            &mut tmfd,
+        )
+        .err()
+        .expect("NOWAIT against a conflicting multixact member is 55P03");
+        assert_eq!(err.sqlstate(), ::types_error::ERRCODE_LOCK_NOT_AVAILABLE);
+        assert_eq!(
+            LAST_LOG_LOCK_FAILURE.load(Ordering::Relaxed),
+            guc,
+            "log_lock_failures={guc} must reach the member's ConditionalXactLockTableWait (heapam.c:5194)"
+        );
+    }
+    TUPLE_LOCK_AVAILABLE.store(false, Ordering::Relaxed);
+    LOG_LOCK_FAILURES_GUC.store(false, Ordering::Relaxed);
+    MULTI_MEMBERS.lock().unwrap().clear();
+    quiesced();
+}
+
+// heapam.c:5725 compute_new_xmax_infomask: LOCK_ONLY without any lock bit
+// (a pg_upgrade'd page) whose xmax is still in progress is WARNING
+// "LOCK_ONLY found for Xid in progress %u", then treated as unlocked
+// (a186-candidate-fp-heap-heapam-p3-bf8d4c2305d26fa4dd55-1).
+#[test]
+fn compute_new_xmax_infomask_warns_on_lock_only_without_lock_bits() {
+    install_dml_seams();
+    let _serial = serial();
+    IN_PROGRESS_XIDS.lock().unwrap().push(300);
+    WARNINGS.lock().unwrap().clear();
+
+    let (new_xmax, new_infomask, new_infomask2) = dml::compute_new_xmax_infomask(
+        300,
+        ::types_tuple::HEAP_XMAX_LOCK_ONLY,
+        0,
+        FAKE_XID,
+        LockTupleMode::LockTupleExclusive,
+        false,
+    )
+    .unwrap();
+    IN_PROGRESS_XIDS.lock().unwrap().clear();
+
+    assert_eq!(
+        WARNINGS.lock().unwrap().as_slice(),
+        &["LOCK_ONLY found for Xid in progress 300".to_string()][..],
+        "heapam.c:5725 emits the WARNING"
+    );
+    // The stale locker is dropped: the new xmax is our own exclusive lock.
+    assert_eq!(new_xmax, FAKE_XID);
+    assert_eq!(
+        new_infomask,
+        ::types_tuple::HEAP_XMAX_LOCK_ONLY | ::types_tuple::HEAP_XMAX_EXCL_LOCK
+    );
+    assert_eq!(new_infomask2, HEAP_KEYS_UPDATED);
+}
+
+// heapam.c:7187 FreezeMultiXactId: a multixact with two updating members is
+// ERRCODE_DATA_CORRUPTED with errdetail_internal naming both updater XIDs
+// (a186-candidate-fp-heap-heapam-p3-11d0662592cf21d8afd9-1).
+#[test]
+fn freeze_multixact_two_updaters_reports_both_xids_in_detail() {
+    use ::types_storage::multixact::{MultiXactMember, MultiXactStatus};
+    install_dml_seams();
+    let _serial = serial();
+    *MULTI_MEMBERS.lock().unwrap() = vec![
+        MultiXactMember { xid: 300, status: MultiXactStatus::MultiXactStatusUpdate },
+        MultiXactMember { xid: 301, status: MultiXactStatus::MultiXactStatusUpdate },
+    ];
+    IN_PROGRESS_XIDS.lock().unwrap().push(300);
+    let cutoffs = ::tableam_vocab::VacuumCutoffs {
+        relfrozenxid: 50,
+        relminmxid: 1,
+        OldestXmin: 250,
+        OldestMxact: 1,
+        // Members precede FreezeLimit: the multi must be replaced.
+        FreezeLimit: 400,
+        MultiXactCutoff: 1,
+    };
+    let mut flags = 0u16;
+    let mut pagefrz = crate::freeze::HeapPageFreeze {
+        freeze_required: false,
+        FreezePageRelfrozenXid: 50,
+        FreezePageRelminMxid: 1,
+        NoFreezePageRelfrozenXid: 50,
+        NoFreezePageRelminMxid: 1,
+    };
+    let err = crate::freeze::FreezeMultiXactId(
+        5,
+        ::types_tuple::HEAP_XMAX_IS_MULTI,
+        &cutoffs,
+        &mut flags,
+        &mut pagefrz,
+    )
+    .err()
+    .expect("two updaters are data corruption");
+    IN_PROGRESS_XIDS.lock().unwrap().clear();
+    MULTI_MEMBERS.lock().unwrap().clear();
+
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_DATA_CORRUPTED);
+    assert_eq!(err.message(), "multixact 5 has two or more updating members");
+    assert_eq!(
+        err.detail(),
+        Some("First updater XID=300 second updater XID=301."),
+        "heapam.c:7187 errdetail_internal"
+    );
+}
+
+// hio.c:826 RelationGetBufferForTuple: after extending for a tuple that did
+// not fit heap_update's old page (otherBuffer), the old page is locked with
+// ConditionalLockBuffer first; the newly extended page stays locked (the
+// unlock/lock/relock order is only the fallback when that fails)
+// (a186-candidate-fp-heap-hio-08d267c0d2586ab4c8aa-1).
+#[test]
+fn buffer_for_tuple_tries_conditional_lock_on_other_buffer_first() {
+    install_dml_seams();
+    let _serial = serial();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let oid = fresh_oid();
+    // Page 0 holds 16 tuples; an 8000-byte tuple cannot fit there.
+    let items: Vec<Item> = (0..16).map(|i| Item::Tuple(tuple_image(10, 0, i))).collect();
+    register_table(oid, vec![build_page(&items, false)]);
+    let rel = test_relation(mcx, oid);
+    // heap_update's old page: pinned, and (as C, heapam.c:3960) unlocked
+    // before the relation is extended.
+    let other = BufferPin::adopt(bufmgr_seams::read_buffer::call(&rel, 0).unwrap()).unwrap();
+
+    COND_LOCK_CALLS.store(0, Ordering::Relaxed);
+    let pin = hio::RelationGetBufferForTuple(&rel, 8000, Some(&other), 0, None, 1).unwrap();
+    assert_eq!(pin.block_number(), 1, "the relation was extended by one page");
+    assert_eq!(
+        COND_LOCK_CALLS.load(Ordering::Relaxed),
+        1,
+        "hio.c:826 ConditionalLockBuffer(otherBuffer) is tried first"
+    );
+    // Both pages come back exclusively locked.
+    with_fake(|f| {
+        assert_eq!(f.locks[(other.buffer() - 1) as usize], 1, "old page locked");
+        assert_eq!(f.locks[(pin.buffer() - 1) as usize], 1, "new page locked");
+    });
+    bufmgr_seams::lock_buffer::call(pin.buffer(), bufmgr_seams::BUFFER_LOCK_UNLOCK).unwrap();
+    bufmgr_seams::lock_buffer::call(other.buffer(), bufmgr_seams::BUFFER_LOCK_UNLOCK).unwrap();
+    drop(pin);
+    drop(other);
+    quiesced();
 }

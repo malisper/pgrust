@@ -7524,6 +7524,7 @@ dependencies = [
  "controldata_utils",
  "datum",
  "deadlock_seams",
+ "elog_seams",
  "exectuples",
  "fd",
  "freespace_seams",

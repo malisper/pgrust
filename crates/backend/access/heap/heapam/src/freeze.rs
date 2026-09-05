@@ -88,7 +88,7 @@ fn data_corrupted(msg: String) -> PgResult<()> {
     Err(Box::new(e))
 }
 
-fn FreezeMultiXactId(
+pub(crate) fn FreezeMultiXactId(
     multi: MultiXactId,
     t_infomask: u16,
     cutoffs: &VacuumCutoffs,
@@ -245,9 +245,15 @@ fn freeze_multixact_replace(
         }
 
         if TransactionIdIsValid(update_xid) {
-            data_corrupted(
-                format!("multixact {multi} has two or more updating members"),
-            )?;
+            // heapam.c:7187: errdetail_internal names both updaters.
+            let mut e = ::types_error::PgError::error(format!(
+                "multixact {multi} has two or more updating members"
+            ))
+            .with_detail(format!(
+                "First updater XID={update_xid} second updater XID={xid}."
+            ));
+            e.sqlstate = ERRCODE_DATA_CORRUPTED;
+            return Err(Box::new(e));
         }
 
         // In-progress must be tested before did-commit (heapam_visibility.c races).

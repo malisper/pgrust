@@ -1082,7 +1082,7 @@ fn ConditionalMultiXactIdWait(
 }
 
 /// `compute_new_xmax_infomask`: (new_xmax, new_infomask, new_infomask2).
-fn compute_new_xmax_infomask(
+pub(crate) fn compute_new_xmax_infomask(
     xmax: TransactionId,
     old_infomask: u16,
     old_infomask2: u16,
@@ -1173,7 +1173,10 @@ fn compute_new_xmax_infomask(
                     }
                 } else {
                     // LOCK_ONLY without lock bits: pg_upgrade-only state, the
-                    // locker cannot still be running (C emits a WARNING here)
+                    // locker cannot still be running (heapam.c:5725 WARNING).
+                    ::elog_seams::ereport::call(PgError::warning(std::format!(
+                        "LOCK_ONLY found for Xid in progress {xmax}"
+                    )))?;
                     old_infomask |= HEAP_XMAX_INVALID;
                     old_infomask &= !HEAP_XMAX_LOCK_ONLY;
                     continue;
@@ -1287,15 +1290,12 @@ pub(crate) fn heap_acquire_tuplock(
         }
         LockWaitPolicy::LockWaitError => {
             // heapam.c:5521: the log_lock_failures GUC reaches the lock
-            // manager so a failed NOWAIT acquisition is logged. (The slot is
-            // owned by the lock unit; harnesses without it read as off.)
-            let log_lock_failures = ::guc_tables::vars::log_lock_failures.installed()
-                && ::guc_tables::vars::log_lock_failures.read();
+            // manager so a failed NOWAIT acquisition is logged.
             if !lmgr::ConditionalLockTuple(
                 relation,
                 tid,
                 tuple_lock_hwlock(mode),
-                log_lock_failures,
+                log_lock_failures(),
             )? {
                 return Err(could_not_obtain_row_lock(relation));
             }
@@ -1303,6 +1303,15 @@ pub(crate) fn heap_acquire_tuplock(
     }
     *have_tuple_lock = true;
     Ok(true)
+}
+
+/// The `log_lock_failures` GUC as the lock manager's `logLockFailure`
+/// argument (heapam.c:5194, :5232, :5521; heapam_handler.c:467): a failed
+/// NOWAIT acquisition is logged when it is on. The slot is owned by the lock
+/// unit; harnesses without it read as off.
+pub fn log_lock_failures() -> bool {
+    ::guc_tables::vars::log_lock_failures.installed()
+        && ::guc_tables::vars::log_lock_failures.read()
 }
 
 const SizeOfHeapNewCid: usize = 34;
@@ -2069,8 +2078,15 @@ pub fn heap_lock_tuple(
                                 }
                             }
                             LockWaitPolicy::LockWaitError => {
+                                // heapam.c:5194: log_lock_failures reaches
+                                // each member's ConditionalXactLockTableWait.
                                 if !ConditionalMultiXactIdWait(
-                                    xwait, status, infomask, relation, None, false,
+                                    xwait,
+                                    status,
+                                    infomask,
+                                    relation,
+                                    None,
+                                    log_lock_failures(),
                                 )? {
                                     return Err(could_not_obtain_row_lock(relation));
                                 }
@@ -2100,7 +2116,12 @@ pub fn heap_lock_tuple(
                                 }
                             }
                             LockWaitPolicy::LockWaitError => {
-                                if !lmgr::ConditionalXactLockTableWait(xwait, false)? {
+                                // heapam.c:5232: log_lock_failures reaches
+                                // ConditionalXactLockTableWait.
+                                if !lmgr::ConditionalXactLockTableWait(
+                                    xwait,
+                                    log_lock_failures(),
+                                )? {
                                     return Err(could_not_obtain_row_lock(relation));
                                 }
                             }
@@ -2305,7 +2326,8 @@ pub fn simple_heap_delete(relation: &RelationData<'_>, tid: &ItemPointerData) ->
         TM_Result::TM_Updated => Err(Box::new(PgError::error("tuple concurrently updated"))),
         TM_Result::TM_Deleted => Err(Box::new(PgError::error("tuple concurrently deleted"))),
         _ => Err(Box::new(PgError::error(std::format!(
-            "unexpected heap_delete status: {result:?}"
+            "unrecognized heap_delete status: {}",
+            result as u32
         )))),
     }
 }
@@ -3357,7 +3379,8 @@ pub fn simple_heap_update(
         TM_Result::TM_Updated => Err(Box::new(PgError::error("tuple concurrently updated"))),
         TM_Result::TM_Deleted => Err(Box::new(PgError::error("tuple concurrently deleted"))),
         _ => Err(Box::new(PgError::error(std::format!(
-            "unexpected heap_update status: {result:?}"
+            "unrecognized heap_update status: {}",
+            result as u32
         )))),
     }
 }

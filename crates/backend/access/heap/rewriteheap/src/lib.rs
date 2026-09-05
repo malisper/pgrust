@@ -8,7 +8,6 @@
 //! fds where C leans on vfd/resowner cleanup.
 #![allow(non_snake_case)]
 
-use std::io::Write;
 use std::path::PathBuf;
 
 use elog::ereport;
@@ -102,6 +101,30 @@ fn parse_logical_rewrite_name(name: &str) -> Option<XLogRecPtr> {
 fn mappings_dir() -> PathBuf {
     let datadir = init_small::globals::DataDir().expect("rewriteheap: DataDir unset");
     PathBuf::from(datadir).join(PG_LOGICAL_MAPPINGS_DIR)
+}
+
+/// The datadir-relative `pg_logical/mappings/<name>` C prints for a mapping
+/// file (rewriteheap.c:963 builds `src->path` that way).
+fn mapping_relpath(path: &std::path::Path) -> String {
+    match path.file_name() {
+        Some(name) => format!("{PG_LOGICAL_MAPPINGS_DIR}/{}", name.to_string_lossy()),
+        None => path.display().to_string(),
+    }
+}
+
+/// `CloseTransientFile(fd)` for an owned descriptor: close(2)'s result is
+/// checked (rewriteheap.c:1243), instead of being dropped on the floor.
+#[cfg(unix)]
+fn close_checked(file: impl std::os::unix::io::IntoRawFd) -> std::io::Result<()> {
+    if fd::pg_close(file.into_raw_fd()) != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+#[cfg(not(unix))]
+fn close_checked<F>(file: F) -> std::io::Result<()> {
+    drop(file);
+    Ok(())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -295,13 +318,33 @@ fn logical_heap_rewrite_flush_mappings(state: &mut RewriteState<'_>) -> PgResult
         xlrec[24..28].copy_from_slice(&num_mappings.to_ne_bytes());
         xlrec[32..40].copy_from_slice(&start_lsn.to_ne_bytes());
 
-        if let Err(e) = src.file.write_all(&waldata) {
+        // rewriteheap.c:880-886: one positional write at src->off (FileWrite);
+        // a failed or short write reports the bytes actually written, naming
+        // the file by the datadir-relative path C keeps in src->path.
+        #[cfg(unix)]
+        let written: i64 = {
+            use std::os::unix::io::AsRawFd;
+            fd::pg_pwrite(src.file.as_raw_fd(), &waldata, src.off as i64) as i64
+        };
+        #[cfg(not(unix))]
+        let written: i64 = {
+            use std::io::{Seek, SeekFrom, Write};
+            let mut f = &src.file;
+            match f.seek(SeekFrom::Start(src.off)).and_then(|_| f.write(&waldata)) {
+                Ok(n) => n as i64,
+                Err(e) => {
+                    fd::set_errno(e.raw_os_error().unwrap_or(0));
+                    -1
+                }
+            }
+        };
+        if written != len as i64 {
             return ereport(ERROR)
                 .errcode_for_file_access()
                 .errmsg(format!(
-                    "could not write to file \"{}\", wrote {} of {}: {e}",
-                    src.path.display(),
-                    0,
+                    "could not write to file \"{}\", wrote {} of {}: %m",
+                    mapping_relpath(&src.path),
+                    written,
                     len
                 ))
                 .finish(loc(886, "logical_heap_rewrite_flush_mappings"));
@@ -740,6 +783,14 @@ pub fn CheckPointLogicalRewriteHeap() -> PgResult<()> {
                     .errcode_for_file_access()
                     .errmsg(format!("could not fsync file \"{}\": {e}", path.display()))
                     .finish(loc(1249, "CheckPointLogicalRewriteHeap"));
+            }
+            // rewriteheap.c:1243: a failing close(2) is an ERROR.
+            if let Err(e) = close_checked(f) {
+                fd::set_errno(e.raw_os_error().unwrap_or(0));
+                return ereport(ERROR)
+                    .errcode_for_file_access()
+                    .errmsg(format!("could not close file \"{}\": %m", path.display()))
+                    .finish(loc(1244, "CheckPointLogicalRewriteHeap"));
             }
         }
     }

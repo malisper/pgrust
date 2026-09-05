@@ -1432,10 +1432,14 @@ fn heap_xlog_logical_rewrite(record: &mut XLogReaderState) -> PgResult<()> {
         create_xid,
     ));
 
-    let file_err = |what: &str, e: std::io::Error| {
+    // rewriteheap.c:1085-1141: every file failure is errcode_for_file_access()
+    // + "%m" (strerror of the failing call's errno); `what` carries the
+    // per-site clause ("truncate ... to %u" names the intended length).
+    let file_err = |what: String, e: std::io::Error| {
+        fd::set_errno(e.raw_os_error().unwrap_or(0));
         elog::ereport(types_error::ERROR)
             .errcode_for_file_access()
-            .errmsg(format!("could not {what} file \"{}\": {e}", path.display()))
+            .errmsg(format!("could not {what}: %m"))
             .finish(types_error::ErrorLocation::new(
                 "src/backend/access/heap/rewriteheap.c",
                 1073,
@@ -1445,12 +1449,16 @@ fn heap_xlog_logical_rewrite(record: &mut XLogReaderState) -> PgResult<()> {
 
     let file = match std::fs::OpenOptions::new().create(true).write(true).open(&path) {
         Ok(f) => f,
-        Err(e) => return file_err("create", e),
+        Err(e) => return file_err(format!("create file \"{}\"", path.display()), e),
     };
     // Truncate all data that's not guaranteed to have been safely fsynced
     // (by a previous record or by the last checkpoint).
     if let Err(e) = file.set_len(offset) {
-        return file_err("truncate", e);
+        // rewriteheap.c:1101-1105: "could not truncate file \"%s\" to %u: %m"
+        return file_err(
+            format!("truncate file \"{}\" to {}", path.display(), offset as u32),
+            e,
+        );
     }
     let len = num_mappings as usize * LOGICAL_REWRITE_MAPPING_SIZE;
     let data = &md[40..40 + len];
@@ -1468,7 +1476,7 @@ fn heap_xlog_logical_rewrite(record: &mut XLogReaderState) -> PgResult<()> {
         f.write_all(data)
     })();
     if let Err(e) = write_res {
-        return file_err("write to", e);
+        return file_err(format!("write to file \"{}\"", path.display()), e);
     }
     // fsync all previously written data. C rewriteheap.c:1133:
     // data_sync_elevel(ERROR) — PANIC at default data_sync_retry=off; the
@@ -1483,6 +1491,19 @@ fn heap_xlog_logical_rewrite(record: &mut XLogReaderState) -> PgResult<()> {
                 "heap_xlog_logical_rewrite",
             ));
     }
+    // rewriteheap.c:1138: CloseTransientFile's result is checked.
+    #[cfg(unix)]
+    {
+        let raw = std::os::unix::io::IntoRawFd::into_raw_fd(file);
+        if fd::pg_close(raw) != 0 {
+            return file_err(
+                format!("close file \"{}\"", path.display()),
+                std::io::Error::last_os_error(),
+            );
+        }
+    }
+    #[cfg(not(unix))]
+    drop(file);
     Ok(())
 }
 

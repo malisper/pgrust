@@ -158,6 +158,16 @@ fn install_seams() {
         });
         Ok(())
     });
+    bufmgr_seams::conditional_lock_buffer::set(|buf| {
+        Ok(with_fake(|f| {
+            let l = &mut f.locks[(buf - 1) as usize];
+            if *l != 0 {
+                return false;
+            }
+            *l += 1;
+            true
+        }))
+    });
     bufmgr_seams::conditional_lock_buffer_for_cleanup::set(|buf| {
         Ok(with_fake(|f| {
             let l = &mut f.locks[(buf - 1) as usize];

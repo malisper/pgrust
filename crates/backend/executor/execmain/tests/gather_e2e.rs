@@ -698,6 +698,7 @@ mod heapfix {
             bufmgr_seams::release_buffer::set(|_| Ok(()));
             bufmgr_seams::incr_buffer_ref_count::set(|_| {});
             bufmgr_seams::lock_buffer::set(|_buf, _mode| Ok(()));
+            bufmgr_seams::conditional_lock_buffer::set(|_buf| Ok(true));
             bufmgr_seams::get_access_strategy::set(|_| None);
             bufmgr_seams::free_access_strategy::set(|_| {});
             bufmgr_seams::relation_get_number_of_blocks_in_fork::set(|rel, _fork| {

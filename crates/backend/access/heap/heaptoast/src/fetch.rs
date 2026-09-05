@@ -196,7 +196,12 @@ pub fn heap_fetch_toast_slice<'mcx>(
 
 /// detoast.c `toast_fetch_datum` (the toast_internals_seams impl).
 pub fn toast_fetch_datum<'mcx>(mcx: Mcx<'mcx>, attr: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
-    debug_assert!(toastdesc::varatt_is_external_ondisk(attr));
+    // detoast.c:351: a runtime check (elog ERROR), not an assertion.
+    if !toastdesc::varatt_is_external_ondisk(attr) {
+        return Err(Box::new(PgError::error(
+            "toast_fetch_datum shouldn't be called for non-ondisk datums",
+        )));
+    }
     let toast_pointer = VarattExternal::from_image(attr)?;
     let attrsize = toast_pointer.extsize() as i32;
 
@@ -237,7 +242,12 @@ pub fn toast_fetch_datum_slice<'mcx>(
     sliceoffset: i32,
     slicelength: i32,
 ) -> PgResult<PgVec<'mcx, u8>> {
-    debug_assert!(toastdesc::varatt_is_external_ondisk(attr));
+    // detoast.c:405: a runtime check (elog ERROR), not an assertion.
+    if !toastdesc::varatt_is_external_ondisk(attr) {
+        return Err(Box::new(PgError::error(
+            "toast_fetch_datum_slice shouldn't be called for non-ondisk datums",
+        )));
+    }
     let toast_pointer = VarattExternal::from_image(attr)?;
     debug_assert!(!toast_pointer.is_compressed() || sliceoffset == 0);
 

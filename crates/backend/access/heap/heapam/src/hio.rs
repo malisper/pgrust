@@ -456,13 +456,16 @@ pub fn RelationGetBufferForTuple<'mcx>(
             bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
         } else if let Some(op) = other_pin {
             debug_assert!(op.block_number() < target_block);
-            // C tries ConditionalLockBuffer first to avoid reopening the
-            // window; the unconditional order (unlock new, lock old, relock
-            // new) is the fallback path and is always deadlock-safe.
-            bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_UNLOCK)?;
-            bufmgr_seams::lock_buffer::call(op.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
-            bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
-            unlocked_target = true;
+            // hio.c:826: try the other buffer conditionally first so the
+            // newly extended page is not unlocked (other backends could put
+            // tuples on it meanwhile); only when that fails fall back to the
+            // deadlock-safe order (unlock new, lock old, relock new).
+            if !bufmgr_seams::conditional_lock_buffer::call(op.buffer())? {
+                unlocked_target = true;
+                bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_UNLOCK)?;
+                bufmgr_seams::lock_buffer::call(op.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
+                bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
+            }
         }
 
         let page_free_space = pin.page().heap_free_space();

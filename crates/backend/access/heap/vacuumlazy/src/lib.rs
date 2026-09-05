@@ -550,10 +550,9 @@ pub fn heap_vacuum_rel<'mcx>(
 
 // The `instrument` report tail of heap_vacuum_rel (vacuumlazy.c:946): the
 // "finished vacuuming"/"automatic vacuum of table" multi-line summary at INFO
-// (VERBOSE) or LOG (autovacuum log_min_duration). Divergences recorded inline:
-// the delay-time line needs the vacuum-delay progress param
-// (track_cost_delay_timing defaults off); I/O timings come from the
-// BufferUsage diff (the pgstat block-time globals it mirrors).
+// (VERBOSE) or LOG (autovacuum log_min_duration).
+// I/O timings come from the BufferUsage diff (the pgstat block-time globals
+// it mirrors).
 #[allow(clippy::too_many_arguments)]
 fn vacuum_instrument_report(
     vacrel: &LVRelState<'_, '_>,
@@ -721,6 +720,17 @@ fn vacuum_instrument_report(
             istat.pages_newly_deleted,
             istat.pages_deleted,
             istat.pages_free
+        );
+    }
+    if guc_tables::vars::track_cost_delay_timing.read() {
+        // vacuumlazy.c:1105-1115: this backend's own PROGRESS_VACUUM_DELAY_TIME
+        // (nanoseconds), read directly; pgstat_progress_end_command() does
+        // not clear st_progress_param.
+        let _ = writeln!(
+            buf,
+            "delay time: {:.3} ms",
+            backend_progress::pgstat_progress_current_param(PROGRESS_VACUUM_DELAY_TIME) as f64
+                / 1_000_000.0
         );
     }
     if guc_tables::vars::track_io_timing.read() {
@@ -1913,6 +1923,17 @@ pub fn lazy_vacuum_heap_rel(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> {
     }
     drop(iter);
     vacrel.dead_items = Some(dead_items);
+    // vacuumlazy.c:2834: the second-pass summary at DEBUG2.
+    elog::ereport(::types_error::DEBUG2)
+        .errmsg(format!(
+            "table \"{}\": removed {} dead item identifiers in {} pages",
+            vacrel.relname, vacrel.dead_items_info.num_items, vacuumed_pages
+        ))
+        .finish(::types_error::ErrorLocation::new(
+            "src/backend/access/heap/vacuumlazy.c",
+            2834,
+            "lazy_vacuum_heap_rel",
+        ))?;
     if morsels::vtrace_enabled() {
         morsels::vtrace(&format!(
             "w1 reap done rel={} pages={} items={} store_items={}",

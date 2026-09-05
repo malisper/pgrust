@@ -109,6 +109,18 @@ fn install_seams() {
             });
             Ok(())
         });
+        // ConditionalLockBuffer (hio.c:826): the fake's content lock, taken only
+        // when free.
+        bufmgr_seams::conditional_lock_buffer::set(|buf| {
+            Ok(with_fake(|f| {
+                let l = &mut f.locks[(buf - 1) as usize];
+                if *l != 0 {
+                    return false;
+                }
+                *l += 1;
+                true
+            }))
+        });
         bufmgr_seams::get_access_strategy::set(|_| None);
         bufmgr_seams::free_access_strategy::set(|_| {});
         bufmgr_seams::relation_get_number_of_blocks_in_fork::set(|rel, _fork| {

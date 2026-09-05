@@ -799,6 +799,7 @@ mod scanfix {
             with_fake(|f| f.pins[(buf - 1) as usize] += 1);
         });
         bufmgr_seams::lock_buffer::set(|_buf, _mode| Ok(()));
+        bufmgr_seams::conditional_lock_buffer::set(|_buf| Ok(true));
         // WS-J express_ab: the btree read path's extra seams (the
         // nodeindexscan test-fixture set, verbatim semantics).
         bufmgr_seams::release_and_read_buffer::set(|buf, rel, blkno| {
