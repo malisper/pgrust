@@ -531,6 +531,7 @@ dependencies = [
  "adt_regexp",
  "adt_timestamp",
  "datum",
+ "detoast_seams",
  "elog",
  "fd",
  "format_type",
@@ -16337,6 +16338,7 @@ dependencies = [
 name = "ruleutils"
 version = "0.1.0"
 dependencies = [
+ "aclchk_seams",
  "adt_xml",
  "amapi",
  "arrayfuncs",
@@ -16358,6 +16360,7 @@ dependencies = [
  "lsyscache",
  "mbutils",
  "mcx",
+ "miscinit_seams",
  "namespace_seams",
  "nodes_core",
  "parse_expr",

@@ -28,20 +28,70 @@ pub(crate) fn io_error(e: &std::io::Error, message: String) -> Box<PgError> {
     Box::new(builder.errcode_for_file_access().errmsg(message).into_error())
 }
 
-fn path_is_prefix_of_path(path1: &str, path2: &str) -> bool {
+// Filenames are raw server-encoding bytes (C's char *): a SQL_ASCII database
+// hands these builtins text that need not be UTF-8, and a directory may hold
+// entries whose names are not UTF-8 either; C passes both through untouched.
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(target_os = "wasi")]
+use std::os::wasi::ffi::OsStrExt;
+
+pub(crate) fn os_path(bytes: &[u8]) -> &std::path::Path {
+    std::path::Path::new(std::ffi::OsStr::from_bytes(bytes))
+}
+
+pub(crate) fn os_name_bytes(name: &std::ffi::OsStr) -> Vec<u8> {
+    name.as_bytes().to_vec()
+}
+
+// ereport(errmsg("<prefix>\"%s\"<suffix>", filename)) (genfile.c): with a
+// non-UTF-8 filename the message bytes reach the client verbatim, as C's %s
+// does. `%m` in `suffix` is expanded against the io error's errno.
+pub(crate) fn io_error_path(
+    e: &std::io::Error,
+    prefix: &str,
+    path: &[u8],
+    suffix: &str,
+) -> Box<PgError> {
+    let lossy = String::from_utf8_lossy(path);
+    let mut err = io_error(e, format!("{prefix}\"{lossy}\"{suffix}"));
+    if core::str::from_utf8(path).is_err() {
+        // %m is already expanded in `message`; splice the raw filename bytes
+        // into that same text in place of the lossy rendering.
+        let head = format!("{prefix}\"");
+        let tail_start = head.len() + lossy.len();
+        let msg = err.message().as_bytes();
+        let mut raw = Vec::with_capacity(msg.len() + path.len());
+        raw.extend_from_slice(head.as_bytes());
+        raw.extend_from_slice(path);
+        raw.extend_from_slice(&msg[tail_start..]);
+        err.message_raw = Some(raw);
+    }
+    err
+}
+
+// IS_DIR_SEP / is_absolute_path (path.c), non-Windows.
+fn is_absolute_path(path: &[u8]) -> bool {
+    path.first() == Some(&b'/')
+}
+
+fn path_is_prefix_of_path(path1: &[u8], path2: &[u8]) -> bool {
     match path2.strip_prefix(path1) {
-        Some(rest) => rest.is_empty() || rest.starts_with('/'),
+        Some(rest) => rest.is_empty() || rest.starts_with(b"/"),
         None => false,
     }
 }
 
 // path must be canonicalized already (path.c path_contains_parent_reference).
-fn path_contains_parent_reference(path: &str) -> bool {
-    path == ".." || path.starts_with("../") || path.contains("/../") || path.ends_with("/..")
+fn path_contains_parent_reference(path: &[u8]) -> bool {
+    path == b".."
+        || path.starts_with(b"../")
+        || path.windows(4).any(|w| w == b"/../")
+        || path.ends_with(b"/..")
 }
 
-fn path_is_relative_and_below_cwd(path: &str) -> bool {
-    !pg_path::is_absolute_path(path) && !path_contains_parent_reference(path)
+fn path_is_relative_and_below_cwd(path: &[u8]) -> bool {
+    !is_absolute_path(path) && !path_contains_parent_reference(path)
 }
 
 // C reads the Log_directory global directly; the slot's owner (syslogger) may
@@ -55,20 +105,20 @@ pub(crate) fn log_directory() -> String {
     "log".to_string()
 }
 
-pub(crate) fn convert_and_check_filename(arg: &str) -> PgResult<String> {
-    let filename = pg_path::canonicalize_path(arg);
+pub(crate) fn convert_and_check_filename(arg: &[u8]) -> PgResult<Vec<u8>> {
+    let filename = pg_path::canonicalize_path_bytes(arg);
 
     if acl_seams::has_privs_of_role::call(miscinit::GetUserId(), ROLE_PG_READ_SERVER_FILES)? {
         return Ok(filename);
     }
 
-    if pg_path::is_absolute_path(&filename) {
+    if is_absolute_path(&filename) {
         let data_dir =
             init_small::globals::DataDir().expect("DataDir must be set (C Assert in path checks)");
         let log_dir = log_directory();
-        if !path_is_prefix_of_path(data_dir, &filename)
-            && (!pg_path::is_absolute_path(&log_dir)
-                || !path_is_prefix_of_path(&log_dir, &filename))
+        if !path_is_prefix_of_path(data_dir.as_bytes(), &filename)
+            && (!is_absolute_path(log_dir.as_bytes())
+                || !path_is_prefix_of_path(log_dir.as_bytes(), &filename))
         {
             return Err(ereport(ERROR)
                 .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)
@@ -88,7 +138,7 @@ pub(crate) fn convert_and_check_filename(arg: &str) -> PgResult<String> {
 }
 
 fn read_binary_file(
-    filename: &str,
+    filename: &[u8],
     seek_offset: i64,
     bytes_to_read: i64,
     missing_ok: bool,
@@ -101,16 +151,13 @@ fn read_binary_file(
             .into());
     }
 
-    let mut file = match std::fs::File::open(filename) {
+    let mut file = match std::fs::File::open(os_path(filename)) {
         Ok(f) => f,
         Err(e) => {
             if missing_ok && e.kind() == std::io::ErrorKind::NotFound {
                 return Ok(None);
             }
-            return Err(io_error(
-                &e,
-                format!("could not open file \"{filename}\" for reading: %m"),
-            ));
+            return Err(io_error_path(&e, "could not open file ", filename, " for reading: %m"));
         }
     };
 
@@ -120,7 +167,7 @@ fn read_binary_file(
         SeekFrom::End(seek_offset)
     };
     if let Err(e) = file.seek(whence) {
-        return Err(io_error(&e, format!("could not seek in file \"{filename}\": %m")));
+        return Err(io_error_path(&e, "could not seek in file ", filename, ": %m"));
     }
 
     let buf = if bytes_to_read >= 0 {
@@ -132,7 +179,7 @@ fn read_binary_file(
                 Ok(n) => nbytes += n,
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(e) => {
-                    return Err(io_error(&e, format!("could not read file \"{filename}\": %m")))
+                    return Err(io_error_path(&e, "could not read file ", filename, ": %m"))
                 }
             }
         }
@@ -144,7 +191,7 @@ fn read_binary_file(
         let limit = MAX_ALLOC_SIZE - 1 - VARHDRSZ;
         let mut buf = Vec::new();
         if let Err(e) = file.by_ref().take(limit as u64 + 1).read_to_end(&mut buf) {
-            return Err(io_error(&e, format!("could not read file \"{filename}\": %m")));
+            return Err(io_error_path(&e, "could not read file ", filename, ": %m"));
         }
         if buf.len() > limit {
             return Err(ereport(ERROR)
@@ -160,7 +207,7 @@ fn read_binary_file(
 }
 
 fn read_text_file(
-    filename: &str,
+    filename: &[u8],
     seek_offset: i64,
     bytes_to_read: i64,
     missing_ok: bool,
@@ -182,7 +229,7 @@ fn negative_length() -> Box<PgError> {
 }
 
 pub(crate) fn pg_read_file_common(
-    filename: &str,
+    filename: &[u8],
     seek_offset: i64,
     bytes_to_read: i64,
     read_to_eof: bool,
@@ -197,7 +244,7 @@ pub(crate) fn pg_read_file_common(
 }
 
 pub(crate) fn pg_read_binary_file_common(
-    filename: &str,
+    filename: &[u8],
     seek_offset: i64,
     bytes_to_read: i64,
     read_to_eof: bool,

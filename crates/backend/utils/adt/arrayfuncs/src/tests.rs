@@ -80,7 +80,7 @@ fn as_str(v: &[u8]) -> &str {
 fn rt_int4(mcx: Mcx<'_>, lit: &str) -> String {
     let m = meta_int4();
     let mut ip = int4_in();
-    let img = array_in(mcx, lit, &m, &mut ip, -1, None).unwrap().unwrap();
+    let img = array_in(mcx, lit.as_bytes(), &m, &mut ip, -1, None).unwrap().unwrap();
     let mut op = int4_out();
     as_str(&array_out(mcx, &img, &m, &mut op).unwrap()).to_string()
 }
@@ -88,7 +88,7 @@ fn rt_int4(mcx: Mcx<'_>, lit: &str) -> String {
 fn rt_text(mcx: Mcx<'_>, lit: &str) -> String {
     let m = meta_text();
     let mut ip = text_in();
-    let img = array_in(mcx, lit, &m, &mut ip, -1, None).unwrap().unwrap();
+    let img = array_in(mcx, lit.as_bytes(), &m, &mut ip, -1, None).unwrap().unwrap();
     let mut op = text_out();
     as_str(&array_out(mcx, &img, &m, &mut op).unwrap()).to_string()
 }
@@ -179,7 +179,7 @@ fn text_send_recv_roundtrip() {
     let mcx = ctx.mcx();
     let m = meta_text();
     let mut ip = text_in();
-    let img = array_in(mcx, r#"{a,"b,c",d}"#, &m, &mut ip, -1, None).unwrap().unwrap();
+    let img = array_in(mcx, br#"{a,"b,c",d}"#, &m, &mut ip, -1, None).unwrap().unwrap();
     let mut sp = FmgrInfo::new(fc_mytextsend, 47, 1, true, false);
     let sent = array_send(mcx, &img, &m, &mut sp).unwrap();
     let payload = sent.data().to_vec();
@@ -255,7 +255,7 @@ fn element_fetch_and_slice() {
     let mcx = ctx.mcx();
     let m = meta_int4();
     let mut ip = int4_in();
-    let img = array_in(mcx, "{10,20,NULL,40}", &m, &mut ip, -1, None).unwrap().unwrap();
+    let img = array_in(mcx, b"{10,20,NULL,40}", &m, &mut ip, -1, None).unwrap().unwrap();
 
     let (d, isnull) = crate::element::array_get_element(&img, &[2], -1, 4, true, b'i');
     assert!(!isnull);
@@ -283,7 +283,7 @@ fn element_set_replaces_and_extends() {
     let mcx = ctx.mcx();
     let m = meta_int4();
     let mut ip = int4_in();
-    let img = array_in(mcx, "{1,2,3}", &m, &mut ip, -1, None).unwrap().unwrap();
+    let img = array_in(mcx, b"{1,2,3}", &m, &mut ip, -1, None).unwrap().unwrap();
     let mut op = int4_out();
 
     let set = crate::element::array_set_element(
@@ -314,11 +314,11 @@ fn slice_set_replaces_extends_and_nulls() {
     let m = meta_int4();
     let mut ip = int4_in();
     let mut op = int4_out();
-    let img = array_in(mcx, "{1,2,3,4,5}", &m, &mut ip, -1, None).unwrap().unwrap();
+    let img = array_in(mcx, b"{1,2,3,4,5}", &m, &mut ip, -1, None).unwrap().unwrap();
     let one = [true, false, false, false, false, false];
 
     // Replace [2:4].
-    let src = array_in(mcx, "{20,30,40}", &m, &mut ip, -1, None).unwrap().unwrap();
+    let src = array_in(mcx, b"{20,30,40}", &m, &mut ip, -1, None).unwrap().unwrap();
     let mut upper = [4i32, 0, 0, 0, 0, 0];
     let mut lower = [2i32, 0, 0, 0, 0, 0];
     let set = crate::element::array_set_slice(
@@ -328,7 +328,7 @@ fn slice_set_replaces_extends_and_nulls() {
     assert_eq!(as_str(&array_out(mcx, &set, &m, &mut op).unwrap()), "{1,20,30,40,5}");
 
     // Extension past the end with a NULL gap.
-    let src = array_in(mcx, "{80,90}", &m, &mut ip, -1, None).unwrap().unwrap();
+    let src = array_in(mcx, b"{80,90}", &m, &mut ip, -1, None).unwrap().unwrap();
     let mut upper = [9i32, 0, 0, 0, 0, 0];
     let mut lower = [8i32, 0, 0, 0, 0, 0];
     let ext = crate::element::array_set_slice(
@@ -341,7 +341,7 @@ fn slice_set_replaces_extends_and_nulls() {
     );
 
     // NULL-carrying source keeps its bitmap.
-    let src = array_in(mcx, "{NULL,99}", &m, &mut ip, -1, None).unwrap().unwrap();
+    let src = array_in(mcx, b"{NULL,99}", &m, &mut ip, -1, None).unwrap().unwrap();
     let mut upper = [2i32, 0, 0, 0, 0, 0];
     let mut lower = [1i32, 0, 0, 0, 0, 0];
     let n = crate::element::array_set_slice(
@@ -353,7 +353,7 @@ fn slice_set_replaces_extends_and_nulls() {
     // ndim == 0: empty target needs both bounds; builds from the source.
     let all = [true, true, false, false, false, false];
     let empty = crate::construct::construct_empty_array(mcx, INT4OID).unwrap();
-    let src = array_in(mcx, "{7,8}", &m, &mut ip, -1, None).unwrap().unwrap();
+    let src = array_in(mcx, b"{7,8}", &m, &mut ip, -1, None).unwrap().unwrap();
     let mut upper = [2i32, 0, 0, 0, 0, 0];
     let mut lower = [1i32, 0, 0, 0, 0, 0];
     let built = crate::element::array_set_slice(
@@ -387,12 +387,12 @@ fn slice_set_multidim_insert() {
     let m = meta_int4();
     let mut ip = int4_in();
     let mut op = int4_out();
-    let img = array_in(mcx, "{{1,2,3},{4,5,6},{7,8,9}}", &m, &mut ip, -1, None)
+    let img = array_in(mcx, b"{{1,2,3},{4,5,6},{7,8,9}}", &m, &mut ip, -1, None)
         .unwrap()
         .unwrap();
     let two = [true, true, false, false, false, false];
 
-    let src = array_in(mcx, "{{50,60},{80,90}}", &m, &mut ip, -1, None).unwrap().unwrap();
+    let src = array_in(mcx, b"{{50,60},{80,90}}", &m, &mut ip, -1, None).unwrap().unwrap();
     let mut upper = [3i32, 3, 0, 0, 0, 0];
     let mut lower = [2i32, 2, 0, 0, 0, 0];
     let set = crate::element::array_set_slice(
@@ -405,8 +405,8 @@ fn slice_set_multidim_insert() {
     );
 
     // NULLs riding through the multidim insert path.
-    let imgn = array_in(mcx, "{{1,NULL},{3,4}}", &m, &mut ip, -1, None).unwrap().unwrap();
-    let src = array_in(mcx, "{NULL}", &m, &mut ip, -1, None).unwrap().unwrap();
+    let imgn = array_in(mcx, b"{{1,NULL},{3,4}}", &m, &mut ip, -1, None).unwrap().unwrap();
+    let src = array_in(mcx, b"{NULL}", &m, &mut ip, -1, None).unwrap().unwrap();
     let mut upper = [2i32, 1, 0, 0, 0, 0];
     let mut lower = [2i32, 1, 0, 0, 0, 0];
     let set = crate::element::array_set_slice(
@@ -1327,7 +1327,7 @@ mod c_locale_whitespace {
     fn run_in(mcx: Mcx<'_>, lit: &str, int4: bool) -> String {
         let m = if int4 { meta_int4() } else { meta_text() };
         let mut ip = if int4 { int4_in() } else { text_in() };
-        match array_in(mcx, lit, &m, &mut ip, -1, None) {
+        match array_in(mcx, lit.as_bytes(), &m, &mut ip, -1, None) {
             Err(e) => format!(
                 "ERR:{}",
                 core::str::from_utf8(&::types_error::unpack_sqlstate(e.sqlstate())).unwrap()
@@ -1353,7 +1353,7 @@ mod c_locale_whitespace {
         let outhex = hex(lit_b);
         let lit = core::str::from_utf8(lit_b).unwrap();
         let mut ip = text_in();
-        match array_in(mcx, lit, &m, &mut ip, -1, None) {
+        match array_in(mcx, lit.as_bytes(), &m, &mut ip, -1, None) {
             Err(e) => format!(
                 "OUT:{outhex} RT:ERR:{}",
                 core::str::from_utf8(&::types_error::unpack_sqlstate(e.sqlstate())).unwrap()
@@ -2042,12 +2042,12 @@ mod p1_lanex_regressions {
         let m = meta_int4();
         for lit in ["[1:-]={1,2,3}", "[-:1]={1,2,3}", "[1:+]={1,2,3}"] {
             let mut ip = int4_in();
-            let e = array_in(mcx, lit, &m, &mut ip, -1, None).unwrap_err();
+            let e = array_in(mcx, lit.as_bytes(), &m, &mut ip, -1, None).unwrap_err();
             assert_eq!(sqlstate_str(&e), "22P02", "literal {lit:?}");
         }
         // Signed dimensions with digits still parse.
         let mut ip = int4_in();
-        let img = array_in(mcx, "[-2:0]={1,2,3}", &m, &mut ip, -1, None)
+        let img = array_in(mcx, b"[-2:0]={1,2,3}", &m, &mut ip, -1, None)
             .unwrap()
             .unwrap();
         let mut op = int4_out();
@@ -2092,7 +2092,7 @@ mod p1_lanex_builtin_tables {
         let mcx = ctx.mcx();
         let m = meta_int4();
         let mut ip = int4_in();
-        let img = array_in(mcx, "{1,2,3}", &m, &mut ip, -1, None).unwrap().unwrap();
+        let img = array_in(mcx, b"{1,2,3}", &m, &mut ip, -1, None).unwrap().unwrap();
         let (vals, nulls) = deconstruct_array_builtin(mcx, &img, INT4OID, true).unwrap();
         assert_eq!(vals.len(), 3);
         assert!(nulls.iter().all(|n| !n));
@@ -2333,13 +2333,13 @@ fn array_in_size_limit_is_soft_under_escontext() {
     lit.push('}');
 
     // No escontext: a hard ERROR 54000 (C ereport via ereturn's NULL context).
-    let err = array_in(mcx, &lit, &m, &mut ip, -1, None).unwrap_err();
+    let err = array_in(mcx, lit.as_bytes(), &m, &mut ip, -1, None).unwrap_err();
     assert_eq!(err.sqlstate(), ::types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED);
     assert_eq!(err.message(), "array size exceeds the maximum allowed (1073741823)");
 
     // Soft: recorded in the ErrorSaveNode, Ok(None) returned.
     let mut esc = ::types_fmgr::ErrorSaveNode::new(true);
-    let r = array_in(mcx, &lit, &m, &mut ip, -1, Some(&mut esc)).unwrap();
+    let r = array_in(mcx, lit.as_bytes(), &m, &mut ip, -1, Some(&mut esc)).unwrap();
     assert!(r.is_none(), "soft failure returns NULL");
     assert!(esc.ctx.error_occurred());
     let saved = esc.ctx.take_error().expect("details wanted");
@@ -2348,7 +2348,7 @@ fn array_in_size_limit_is_soft_under_escontext() {
 
     // Details not wanted: only the occurred flag (pg_input_is_valid shape).
     let mut esc = ::types_fmgr::ErrorSaveNode::new(false);
-    let r = array_in(mcx, &lit, &m, &mut ip, -1, Some(&mut esc)).unwrap();
+    let r = array_in(mcx, lit.as_bytes(), &m, &mut ip, -1, Some(&mut esc)).unwrap();
     assert!(r.is_none());
     assert!(esc.ctx.error_occurred());
     assert!(esc.ctx.error().is_none());

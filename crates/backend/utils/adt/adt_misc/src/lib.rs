@@ -163,7 +163,10 @@ pub fn fc_pg_input_error_info(
     let mut isnull = [true; 4];
     if !ok {
         let err = escontext.ctx.take_error().expect("details_wanted saved the error");
-        values[0] = text_datum(mcx, err.message.as_bytes())?;
+        // misc.c pg_input_error_info: CStringGetTextDatum(error_data->message)
+        // — the message bytes as raised (raw server-encoding bytes when the
+        // input function reported a non-UTF-8 literal).
+        values[0] = text_datum(mcx, err.message_raw.as_deref().unwrap_or(err.message.as_bytes()))?;
         isnull[0] = false;
         if let Some(detail) = &err.detail {
             values[1] = text_datum(mcx, detail.as_bytes())?;

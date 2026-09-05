@@ -45,11 +45,21 @@ const ASSGN: &[u8] = b"=";
 // what is whitespace, and array_out then fails to quote a VT-bearing element.
 use ::pg_string::isspace_c_locale as scanner_isspace;
 
+// arrayfuncs.c errmsg("malformed array literal: \"%s\"", origStr): the
+// literal is raw server-encoding bytes (any database encoding) and reaches
+// the message verbatim.
 #[cold]
-fn malformed(orig: &str, detail: &str) -> PgError {
-    PgError::error(alloc::format!("malformed array literal: \"{orig}\""))
-        .with_detail(detail)
-        .with_sqlstate(ERRCODE_INVALID_TEXT_REPRESENTATION)
+fn malformed(orig: &[u8], detail: &str) -> PgError {
+    let err = match core::str::from_utf8(orig) {
+        Ok(s) => PgError::error(alloc::format!("malformed array literal: \"{s}\"")),
+        Err(_) => {
+            let mut msg = b"malformed array literal: \"".to_vec();
+            msg.extend_from_slice(orig);
+            msg.push(b'"');
+            PgError::error_raw_message(msg)
+        }
+    };
+    err.with_detail(detail).with_sqlstate(ERRCODE_INVALID_TEXT_REPRESENTATION)
 }
 
 // ereturn against the fmgr ErrorSaveNode: soft path records + returns None.
@@ -80,13 +90,13 @@ enum ArrayTok {
 
 pub fn array_in<'mcx>(
     mcx: Mcx<'mcx>,
-    string: &str,
+    string: &[u8],
     meta: &ArrayIoMeta,
     proc: &mut FmgrInfo,
     typmod: i32,
     mut escontext: Option<&mut ErrorSaveNode>,
 ) -> PgResult<Option<PgVec<'mcx, u8>>> {
-    let s = string.as_bytes();
+    let s = string;
     let mut dim = [-1i32; MAXDIM];
     let mut lbound = [1i32; MAXDIM];
     let mut pos = 0usize;
@@ -213,7 +223,7 @@ fn read_array_dimensions(
     pos: &mut usize,
     dim: &mut [i32; MAXDIM],
     lbound: &mut [i32; MAXDIM],
-    orig: &str,
+    orig: &[u8],
     mut escontext: Option<&mut ErrorSaveNode>,
 ) -> PgResult<Option<i32>> {
     let mut ndim = 0usize;
@@ -304,7 +314,7 @@ struct ElemReader<'a, 'mcx> {
 
 impl<'a, 'mcx> ElemReader<'a, 'mcx> {
     // Returns Ok(Some(tok)) / Ok(None) soft-error / Err hard.
-    fn next_token(&mut self, orig: &str, escontext: Option<&mut ErrorSaveNode>) -> PgResult<Option<ArrayTok>> {
+    fn next_token(&mut self, orig: &[u8], escontext: Option<&mut ErrorSaveNode>) -> PgResult<Option<ArrayTok>> {
         self.elembuf.clear();
         // Identify token; skip leading whitespace.
         loop {
@@ -338,7 +348,7 @@ impl<'a, 'mcx> ElemReader<'a, 'mcx> {
         }
     }
 
-    fn quoted_element(&mut self, orig: &str, escontext: Option<&mut ErrorSaveNode>) -> PgResult<Option<ArrayTok>> {
+    fn quoted_element(&mut self, orig: &[u8], escontext: Option<&mut ErrorSaveNode>) -> PgResult<Option<ArrayTok>> {
         loop {
             let c = self.s.get(self.pos).copied().unwrap_or(0);
             match c {
@@ -374,7 +384,7 @@ impl<'a, 'mcx> ElemReader<'a, 'mcx> {
         }
     }
 
-    fn unquoted_element(&mut self, orig: &str, escontext: Option<&mut ErrorSaveNode>) -> PgResult<Option<ArrayTok>> {
+    fn unquoted_element(&mut self, orig: &[u8], escontext: Option<&mut ErrorSaveNode>) -> PgResult<Option<ArrayTok>> {
         let mut dstlen = 0usize;
         let mut has_escapes = false;
         loop {
@@ -430,7 +440,7 @@ fn read_array_str<'mcx>(
     meta: &ArrayIoMeta,
     proc: &mut FmgrInfo,
     typmod: i32,
-    orig: &str,
+    orig: &[u8],
     mut escontext: Option<&mut ErrorSaveNode>,
 ) -> PgResult<Option<(i32, PgVec<'mcx, Datum>, PgVec<'mcx, bool>)>> {
     let mut ndim = *ndim_p;
@@ -590,7 +600,7 @@ fn copy_byref_datum(mcx: Mcx<'_>, d: Datum, typlen: i32) -> PgResult<Datum> {
     ::types_fmgr::byref_result(mcx, image)
 }
 
-fn dimension_error<T>(escontext: Option<&mut ErrorSaveNode>, orig: &str, specified: bool) -> PgResult<Option<T>> {
+fn dimension_error<T>(escontext: Option<&mut ErrorSaveNode>, orig: &[u8], specified: bool) -> PgResult<Option<T>> {
     let detail = if specified {
         "Specified array dimensions do not match array contents."
     } else {

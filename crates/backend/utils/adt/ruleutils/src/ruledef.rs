@@ -115,6 +115,7 @@ pub fn pg_get_ruledef_worker(
     ruleoid: Oid,
     pretty_flags: i32,
 ) -> PgResult<Option<String>> {
+    crate::check_pg_rewrite_select("SELECT * FROM pg_catalog.pg_rewrite WHERE oid = $1")?;
     let Some(rule) = fetch_rule(ruleoid)? else {
         return Ok(None);
     };

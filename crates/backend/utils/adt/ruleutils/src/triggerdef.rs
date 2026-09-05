@@ -269,7 +269,7 @@ pub fn pg_get_triggerdef_worker(
 
     buf.push_str(&format!(
         "EXECUTE FUNCTION {}(",
-        generate_function_name(mcx, trig.tgfoid, &[], &[], false)?
+        generate_function_name(mcx, trig.tgfoid, &[], &[], false, false)?
     ));
     for (i, arg) in trig.tgargs.iter().enumerate() {
         if i > 0 {

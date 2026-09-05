@@ -22,6 +22,9 @@ pub fn pg_get_viewdef_worker(
     pretty_flags: i32,
     wrap_column: i32,
 ) -> PgResult<Option<String>> {
+    crate::check_pg_rewrite_select(
+        "SELECT * FROM pg_catalog.pg_rewrite WHERE ev_class = $1 AND rulename = $2",
+    )?;
     let Some(rules) = relcache::rules::RelationGetRules(mcx, viewoid)? else {
         return Ok(None);
     };

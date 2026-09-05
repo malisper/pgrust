@@ -686,7 +686,7 @@ fn text_to_stavalues<'m>(
     };
 
     let mut esn = ErrorSaveNode::new(true);
-    let arr = arrayfuncs::io::array_in(mcx, &s, &meta, &mut proc, typmod, Some(&mut esn))?;
+    let arr = arrayfuncs::io::array_in(mcx, s.as_bytes(), &meta, &mut proc, typmod, Some(&mut esn))?;
 
     if esn.ctx.error_occurred() {
         if let Some(err) = esn.ctx.take_error() {

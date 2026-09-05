@@ -2625,6 +2625,18 @@ fn timestamp_cmp(t1: Timestamp, t2: Timestamp) -> i32 {
     }
 }
 
+/// C PG_DETOAST_DATUM over a PASSING varlena datum (JsonItemFromDatum's
+/// DatumGetNumeric / DatumGetJsonbP / DatumGetTextP): the plain 4B-header
+/// image, detoasting a compressed or out-of-line value first.
+fn detoasted_passing_image<'mcx>(mcx: Mcx<'mcx>, val: Datum) -> PgResult<&'mcx [u8]> {
+    let p = val.as_usize() as *const u8;
+    // SAFETY: a non-null varlena datum; varsize_any reads only its own header
+    // (external pointers included).
+    let raw = unsafe { core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p)) };
+    let image: &'mcx [u8] = detoast_seams::detoast_attr::call(mcx, raw)?.leak();
+    Ok(image)
+}
+
 /// C: JsonItemFromDatum — the SQL/JSON PASSING value coercion.
 fn json_item_from_datum<'mcx>(
     mcx: Mcx<'mcx>,
@@ -2635,10 +2647,8 @@ fn json_item_from_datum<'mcx>(
     match typid {
         BOOLOID => Ok(JbV::Bool(val.as_bool())),
         NUMERICOID => {
-            // SAFETY: a NUMERICOID datum is a live numeric varlena.
-            let p = val.as_usize() as *const u8;
-            let image =
-                unsafe { core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p)) };
+            // C JsonbValueInitNumericDatum -> DatumGetNumeric: PG_DETOAST_DATUM.
+            let image = detoasted_passing_image(mcx, val)?;
             Ok(JbV::Numeric(numeric_image_4b(mcx, image)?))
         }
         INT2OID => {
@@ -2703,30 +2713,19 @@ fn json_item_from_datum<'mcx>(
             tz: 0,
         }),
         JSONBOID => {
-            // SAFETY: a JSONBOID datum is a live jsonb varlena (untoasted).
-            let p = val.as_usize() as *const u8;
-            let image =
-                unsafe { core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p)) };
-            let payload: &'mcx [u8] = if image[0] & 0x01 == 0x01 {
-                mcx::slice_in(mcx, &image[1..])?.leak()
-            } else {
-                mcx::slice_in(mcx, &image[4..])?.leak()
-            };
+            // C DatumGetJsonbP: PG_DETOAST_DATUM — a PASSING Var pulled from a
+            // heap tuple may be a compressed or out-of-line jsonb varlena.
+            let image = detoasted_passing_image(mcx, val)?;
+            let payload: &'mcx [u8] = &image[4..];
             match adt_jsonb::io::extract_scalar(payload) {
                 Some(item) => Ok(jbv_from_item(item)),
                 None => Ok(JbV::Binary(payload)),
             }
         }
         JSONOID => {
-            // SAFETY: a JSONOID datum is a live text varlena.
-            let p = val.as_usize() as *const u8;
-            let image =
-                unsafe { core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p)) };
-            let data = if image[0] & 0x01 == 0x01 {
-                &image[1..]
-            } else {
-                &image[4..]
-            };
+            // C DatumGetTextP: PG_DETOAST_DATUM.
+            let image = detoasted_passing_image(mcx, val)?;
+            let data = &image[4..];
             let jb = adt_jsonb::io::jsonb_in(mcx, data, None)?
                 .expect("hard errsave without escontext returns Err");
             let payload: &'mcx [u8] = &jb.leak()[4..];

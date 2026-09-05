@@ -6,14 +6,16 @@ use types_fmgr::{
 };
 
 use crate::{
-    convert_and_check_filename, io_error, log_directory, time_t_to_timestamptz, tmpdir_path,
-    PG_LOGICAL_MAPPINGS_DIR, PG_LOGICAL_SNAPSHOTS_DIR, XLOGDIR,
+    convert_and_check_filename, io_error_path, log_directory, os_name_bytes, os_path,
+    time_t_to_timestamptz, tmpdir_path, PG_LOGICAL_MAPPINGS_DIR, PG_LOGICAL_SNAPSHOTS_DIR, XLOGDIR,
 };
 
-fn arg_filename(fcinfo: &Fcinfo, i: usize) -> PgResult<String> {
+// text_to_cstring (genfile.c): raw server-encoding bytes, not necessarily
+// UTF-8 (SQL_ASCII databases).
+fn arg_filename(fcinfo: &Fcinfo, i: usize) -> PgResult<Vec<u8>> {
     // SAFETY: these builtins are strict; arg i is a non-null text datum.
     let raw = unsafe { fcinfo.arg_varlena_packed(i) }?;
-    Ok(String::from_utf8(raw.data().to_vec()).expect("non-UTF-8 filename"))
+    Ok(raw.data().to_vec())
 }
 
 fn bytes_result(fcinfo: &Fcinfo, bytes: &[u8]) -> PgResult<Datum> {
@@ -120,7 +122,7 @@ pub fn fc_pg_read_binary_file_all_missing(
 
 // (size, atime, mtime, ctime) in time_t seconds, C's pg_stat_file words.
 #[cfg(not(target_family = "wasm"))]
-fn stat_words(md: &std::fs::Metadata, _path: &str) -> (i64, i64, i64, i64) {
+fn stat_words(md: &std::fs::Metadata, _path: &[u8]) -> (i64, i64, i64, i64) {
     use std::os::unix::fs::MetadataExt;
     (md.size() as i64, md.atime(), md.mtime(), md.ctime())
 }
@@ -130,7 +132,7 @@ fn stat_words(md: &std::fs::Metadata, _path: &str) -> (i64, i64, i64, i64) {
 // filestat_t fields std does not surface). Failure leaves epoch zeros —
 // the file was stat-able a moment ago, so this arm is effectively dead.
 #[cfg(target_family = "wasm")]
-fn stat_words(md: &std::fs::Metadata, path: &str) -> (i64, i64, i64, i64) {
+fn stat_words(md: &std::fs::Metadata, path: &[u8]) -> (i64, i64, i64, i64) {
     let size = md.len() as i64;
     let Ok(c) = std::ffi::CString::new(path) else { return (size, 0, 0, 0) };
     // SAFETY: stat fills the zeroed out-param only on rc==0, which gates reads.
@@ -158,13 +160,13 @@ fn stat_file(
 ) -> PgResult<Datum> {
     let filename = convert_and_check_filename(&arg_filename(fcinfo, 0)?)?;
 
-    let md = match std::fs::metadata(&filename) {
+    let md = match std::fs::metadata(os_path(&filename)) {
         Ok(md) => md,
         Err(e) => {
             if missing_ok && e.kind() == std::io::ErrorKind::NotFound {
                 return Ok(fcinfo.return_null());
             }
-            return Err(io_error(&e, format!("could not stat file \"{filename}\": %m")));
+            return Err(io_error_path(&e, "could not stat file ", &filename, ": %m"));
         }
     };
 
@@ -203,16 +205,18 @@ pub fn fc_pg_stat_file_1arg(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) 
     stat_file(flinfo, fcinfo, false)
 }
 
-fn open_dir_error(e: &std::io::Error, dir: &str) -> Box<PgError> {
-    io_error(e, format!("could not open directory \"{dir}\": %m"))
+fn open_dir_error(e: &std::io::Error, dir: &[u8]) -> Box<PgError> {
+    io_error_path(e, "could not open directory ", dir, ": %m")
 }
 
-fn read_dir_error(e: &std::io::Error, dir: &str) -> Box<PgError> {
-    io_error(e, format!("could not read directory \"{dir}\": %m"))
+fn read_dir_error(e: &std::io::Error, dir: &[u8]) -> Box<PgError> {
+    io_error_path(e, "could not read directory ", dir, ": %m")
 }
 
-fn entry_name(entry: std::fs::DirEntry) -> String {
-    entry.file_name().into_string().expect("non-UTF-8 directory entry name")
+// readdir's d_name: raw bytes, whatever the file system holds (C returns
+// them through CStringGetTextDatum without any encoding check).
+fn entry_name(entry: std::fs::DirEntry) -> Vec<u8> {
+    os_name_bytes(&entry.file_name())
 }
 
 fn ls_dir(
@@ -239,7 +243,7 @@ fn ls_dir(
     let mut srf =
         funcapi::InitMaterializedSRF(mcx, flinfo, fcinfo, funcapi::MAT_SRF_USE_EXPECTED_DESC)?;
 
-    let dir = match std::fs::read_dir(&location) {
+    let dir = match std::fs::read_dir(os_path(&location)) {
         Ok(dir) => dir,
         Err(e) => {
             if missing_ok && e.kind() == std::io::ErrorKind::NotFound {
@@ -263,7 +267,7 @@ fn ls_dir(
             Err(e) => return Err(read_dir_error(&e, &location)),
         };
         let name = entry_name(entry);
-        srf.putvalues(&[bytes_result(fcinfo, name.as_bytes())?], &[false])?;
+        srf.putvalues(&[bytes_result(fcinfo, &name)?], &[false])?;
     }
 
     Ok(srf.finish(fcinfo))
@@ -294,28 +298,31 @@ fn ls_dir_files(
             if missing_ok && e.kind() == std::io::ErrorKind::NotFound {
                 return Ok(srf.finish(fcinfo));
             }
-            return Err(open_dir_error(&e, dir));
+            return Err(open_dir_error(&e, dir.as_bytes()));
         }
     };
 
     for entry in entries {
         let entry = match entry {
             Ok(entry) => entry,
-            Err(e) => return Err(read_dir_error(&e, dir)),
+            Err(e) => return Err(read_dir_error(&e, dir.as_bytes())),
         };
         let name = entry_name(entry);
-        if name.starts_with('.') {
+        if name.starts_with(b".") {
             continue;
         }
 
-        let path = format!("{dir}/{name}");
-        let md = match std::fs::metadata(&path) {
+        let mut path = Vec::with_capacity(dir.len() + 1 + name.len());
+        path.extend_from_slice(dir.as_bytes());
+        path.push(b'/');
+        path.extend_from_slice(&name);
+        let md = match std::fs::metadata(os_path(&path)) {
             Ok(md) => md,
             Err(e) => {
                 if e.kind() == std::io::ErrorKind::NotFound {
                     continue;
                 }
-                return Err(io_error(&e, format!("could not stat file \"{path}\": %m")));
+                return Err(io_error_path(&e, "could not stat file ", &path, ": %m"));
             }
         };
 
@@ -325,7 +332,7 @@ fn ls_dir_files(
 
         let (e_size, _, e_mtime, _) = stat_words(&md, &path);
         let values = [
-            bytes_result(fcinfo, name.as_bytes())?,
+            bytes_result(fcinfo, &name)?,
             Datum::from_i64(e_size),
             Datum::from_i64(time_t_to_timestamptz(e_mtime)),
         ];
@@ -393,15 +400,21 @@ pub fn fc_pg_ls_replslotdir(
     flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
-    let slotname = arg_filename(fcinfo, 0)?;
-    if slot::SearchNamedReplicationSlot(&slotname, true)?.is_none() {
-        return Err(Box::new(
-            elog::ereport(types_error::ERROR)
-                .errcode(types_error::ERRCODE_UNDEFINED_OBJECT)
-                .errmsg(format!("replication slot \"{slotname}\" does not exist"))
-                .into_error(),
-        ));
-    }
+    let slotname_bytes = arg_filename(fcinfo, 0)?;
+    // Slot names are validated ASCII, so a non-UTF-8 argument never names
+    // one; C reports it verbatim in the "does not exist" message.
+    let slotname = match core::str::from_utf8(&slotname_bytes) {
+        Ok(s) if slot::SearchNamedReplicationSlot(s, true)?.is_some() => s,
+        _ => {
+            let mut msg = b"replication slot \"".to_vec();
+            msg.extend_from_slice(&slotname_bytes);
+            msg.extend_from_slice(b"\" does not exist");
+            return Err(Box::new(
+                PgError::error_raw_message(msg)
+                    .with_sqlstate(types_error::ERRCODE_UNDEFINED_OBJECT),
+            ));
+        }
+    };
     let dir = format!("{}/{slotname}", slot::PG_REPLSLOT_DIR);
     ls_dir_files(flinfo, fcinfo, &dir, false)
 }

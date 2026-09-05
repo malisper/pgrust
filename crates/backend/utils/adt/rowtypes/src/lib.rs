@@ -72,8 +72,15 @@ pub fn fc_record_out(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRe
     };
 
     let flinfo = flinfo.expect("record_out: NULL flinfo");
+    // rowtypes.c record_out: the memo is rebuilt when the rowtype changes OR
+    // when ncolumns differs (ALTER TYPE ... ADD/DROP ATTRIBUTE keeps the
+    // type OID and typmod but changes the attribute count).
     let refresh = match flinfo.fn_extra_ref::<RecordIOData>() {
-        Some(x) => x.record_type != tup_type || x.record_typmod != tup_typmod,
+        Some(x) => {
+            x.record_type != tup_type
+                || x.record_typmod != tup_typmod
+                || x.columns.len() != ncolumns
+        }
         None => true,
     };
     if refresh {
@@ -229,9 +236,15 @@ fn hash_record_common(
     };
 
     let flinfo = flinfo.expect("hash_record: NULL flinfo");
+    // rowtypes.c hash_record/hash_record_extended: my_extra is reallocated
+    // when my_extra->ncolumns < ncolumns (ALTER TYPE ... ADD ATTRIBUTE keeps
+    // the type OID and typmod), not only when the rowtype identity changes.
     let refresh = match flinfo.fn_extra_ref::<RecordHashData>() {
         Some(x) => {
-            x.record_type != tup_type || x.record_typmod != tup_typmod || x.extended != extended
+            x.record_type != tup_type
+                || x.record_typmod != tup_typmod
+                || x.extended != extended
+                || x.columns.len() < ncolumns
         }
         None => true,
     };

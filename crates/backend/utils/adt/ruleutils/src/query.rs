@@ -1896,6 +1896,7 @@ fn get_tablesample_def<'mcx>(
         &[INTERNALOID],
         &[],
         false,
+        false,
     )?;
     ctx.buf.push_str(&format!(" TABLESAMPLE {fname} ("));
     let mut nargs = 0;
@@ -2114,7 +2115,7 @@ fn get_from_clause_item<'mcx>(
                     if !rte.inh {
                         ctx.buf.push_str("ONLY ");
                     }
-                    let name = generate_relation_name(ctx.mcx, rte.relid)?;
+                    let name = crate::generate_relation_name_ns(ctx.mcx, rte.relid, &ctx.namespaces)?;
                     ctx.buf.push_str(&name);
                 }
                 RTEKind::RTE_SUBQUERY => {

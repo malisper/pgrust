@@ -86,7 +86,12 @@ fn num_prepare_locale(num: &NUMDesc) -> ::types_error::PgResult<NumLocale> {
         // C's order matters: the thousands fallback is chosen AGAINST the
         // already-resolved decimal point, so a locale that uses ',' for the
         // decimal gets '.' for grouping rather than a separator collision.
-        let decimal: &'static [u8] = if !l.decimal_point.is_empty() {
+        // formatting.c NUM_prepare_locale: only a localized 'D' (NUM_D)
+        // picture takes the locale's decimal point; a plain '.' (NUM_DEC)
+        // stays '.' even when L/G/S/D-free tokens set need_locale.
+        let decimal: &'static [u8] = if !num.is_ldecimal() {
+            b"."
+        } else if !l.decimal_point.is_empty() {
             l.decimal_point.as_bytes()
         } else {
             b"."

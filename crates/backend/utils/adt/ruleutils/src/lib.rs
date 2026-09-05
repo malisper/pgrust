@@ -326,14 +326,64 @@ fn relation_is_visible(relid: Oid, relname: &str) -> PgResult<bool> {
     Ok(catalog_namespace::RelnameGetRelid(relname)? == relid)
 }
 
+// generate_relation_name(relid, NIL) (ruleutils.c): no deparse namespaces.
 pub fn generate_relation_name(mcx: Mcx<'_>, relid: Oid) -> PgResult<String> {
+    generate_relation_name_ns(mcx, relid, &[])
+}
+
+// generate_relation_name(relid, namespaces) (ruleutils.c): a CTE of the same
+// name in any of the deparse namespaces in scope forces schema qualification,
+// so the deparsed text cannot resolve to the CTE instead of the relation.
+pub(crate) fn generate_relation_name_ns(
+    mcx: Mcx<'_>,
+    relid: Oid,
+    namespaces: &[std::rc::Rc<query::DeparseNamespace<'_>>],
+) -> PgResult<String> {
     let row = pg_class_row(relid)?.ok_or_else(|| cache_lookup_failed("relation", relid))?;
-    let nspname = if relation_is_visible(relid, &row.relname)? {
-        None
-    } else {
+    let mut need_qual = namespaces
+        .iter()
+        .any(|dpns| dpns.ctes.iter().any(|cte| cte.ctename == Some(row.relname.as_str())));
+    if !need_qual {
+        need_qual = !relation_is_visible(relid, &row.relname)?;
+    }
+    let nspname = if need_qual {
         namespace_name_or_temp(mcx, row.relnamespace)?
+    } else {
+        None
     };
     Ok(quote_qualified_identifier(nspname.as_deref(), &row.relname))
+}
+
+// pg_get_ruledef_worker / pg_get_viewdef_worker (ruleutils.c) read pg_rewrite
+// through SPI, so the caller's SELECT privilege on pg_rewrite is enforced the
+// way ExecCheckOneRelPerms does for `SELECT *` (table-level SELECT, else
+// SELECT on every column) before any row is fetched; SPI's error context
+// callback adds the statement line.
+pub(crate) fn check_pg_rewrite_select(query: &str) -> PgResult<()> {
+    use types_nodes::parsenodes::{ObjectType, ACL_SELECT};
+    const REWRITE_RELATION_ID: Oid = 2618;
+    const ACLCHECK_OK: i32 = 0;
+    const ACLCHECK_NO_PRIV: i32 = 1;
+    let userid = miscinit_seams::get_user_id::call();
+    let rel_perms =
+        aclchk_seams::pg_class_aclmask::call(REWRITE_RELATION_ID, userid, ACL_SELECT, true)?;
+    if rel_perms & ACL_SELECT != 0 {
+        return Ok(());
+    }
+    if aclchk_seams::pg_attribute_aclcheck_all::call(REWRITE_RELATION_ID, userid, ACL_SELECT, true)?
+        == ACLCHECK_OK
+    {
+        return Ok(());
+    }
+    let err = match aclchk_seams::aclcheck_error::call(
+        ACLCHECK_NO_PRIV,
+        ObjectType::OBJECT_TABLE as i32,
+        "pg_rewrite",
+    ) {
+        Err(e) => e,
+        Ok(()) => unreachable!("aclcheck_error(ACLCHECK_NO_PRIV) always raises"),
+    };
+    Err(Box::new((*err).add_context(format!("SQL statement \"{query}\""))))
 }
 
 pub fn generate_qualified_relation_name(mcx: Mcx<'_>, relid: Oid) -> PgResult<String> {
@@ -453,30 +503,38 @@ pub(crate) fn generate_function_name(
     argtypes: &[Oid],
     argnames: &[&str],
     has_variadic: bool,
+    in_group_by: bool,
 ) -> PgResult<String> {
     let proname = lsyscache::get_func_name(mcx, funcid)?
         .ok_or_else(|| cache_lookup_failed("function", funcid))?;
     let proname = proname.as_str().to_owned();
-    // C threads use_variadic into func_get_detail: expand_variadic is off
-    // when the call prints with the VARIADIC keyword.
-    let cands = catalog_namespace::FuncnameGetCandidatesExtended(
-        mcx,
-        &[&proname],
-        argtypes.len() as i16,
-        argnames,
-        !has_variadic,
-        true,
-        false,
-        false,
-    )?;
-    let mut best = cands.iter().find(|c| c.args.as_slice() == argtypes).map(|c| c.oid);
-    if best.is_none() && !cands.is_empty() {
-        let matched = parse_func::func_match_argtypes(mcx, argtypes, cands.as_slice())?;
-        best = match matched.len() {
-            0 => None,
-            1 => Some(matched[0].oid),
-            _ => parse_func::func_select_candidate(argtypes, matched)?.map(|c| c.oid),
-        };
+    // ruleutils.c generate_function_name: inside GROUP BY a function named
+    // "cube" or "rollup" is always schema-qualified, since an unqualified
+    // GROUP BY cube(...) would be parsed as the CUBE grouping extension.
+    let force_qualify = in_group_by && (proname == "cube" || proname == "rollup");
+    let mut best = None;
+    if !force_qualify {
+        // C threads use_variadic into func_get_detail: expand_variadic is off
+        // when the call prints with the VARIADIC keyword.
+        let cands = catalog_namespace::FuncnameGetCandidatesExtended(
+            mcx,
+            &[&proname],
+            argtypes.len() as i16,
+            argnames,
+            !has_variadic,
+            true,
+            false,
+            false,
+        )?;
+        best = cands.iter().find(|c| c.args.as_slice() == argtypes).map(|c| c.oid);
+        if best.is_none() && !cands.is_empty() {
+            let matched = parse_func::func_match_argtypes(mcx, argtypes, cands.as_slice())?;
+            best = match matched.len() {
+                0 => None,
+                1 => Some(matched[0].oid),
+                _ => parse_func::func_select_candidate(argtypes, matched)?.map(|c| c.oid),
+            };
+        }
     }
     // C's FuncNameAsType coercion arm returns FUNCDETAIL_COERCION with
     // funcid = InvalidOid; like NOTFOUND it lands in the qualify branch, so

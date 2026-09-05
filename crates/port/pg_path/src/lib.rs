@@ -157,7 +157,15 @@ enum CanonState {
 }
 
 pub fn canonicalize_path(input: &str) -> String {
-    let mut path: Vec<u8> = input.as_bytes().to_vec();
+    String::from_utf8(canonicalize_path_bytes(input.as_bytes()))
+        .expect("components sliced on ASCII '/' boundaries")
+}
+
+// canonicalize_path (path.c) over raw bytes: the C routine works on char*
+// and only ever inspects ASCII '/', '.', so non-UTF-8 filenames (a SQL_ASCII
+// database's text) pass through byte-for-byte.
+pub fn canonicalize_path_bytes(input: &[u8]) -> Vec<u8> {
+    let mut path: Vec<u8> = input.to_vec();
     trim_trailing_separator(&mut path);
 
     let mut dedup: Vec<u8> = Vec::with_capacity(path.len());
@@ -172,7 +180,7 @@ pub fn canonicalize_path(input: &str) -> String {
     let path = dedup;
 
     if path.is_empty() {
-        return String::new();
+        return Vec::new();
     }
 
     let absolute = path[0] == b'/';
@@ -260,7 +268,7 @@ pub fn canonicalize_path(input: &str) -> String {
     if !absolute && out.is_empty() {
         out.push(b'.');
     }
-    String::from_utf8(out).expect("components sliced on ASCII '/' boundaries")
+    out
 }
 
 fn dir_strcmp(s1: &[u8], s2: &[u8]) -> i32 {

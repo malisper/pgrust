@@ -87,11 +87,10 @@ pub fn arg_array_bytes<'mcx>(
 }
 
 pub fn fc_array_in(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // arrayfuncs.c array_in works on the raw cstring bytes in whatever the
+    // database encoding is; no UTF-8 requirement.
     // SAFETY: catalog arg 0 of array_in is a non-null cstring.
-    let s = unsafe { fcinfo.arg_cstring(0) };
-    let string = s.to_str().map_err(|_| {
-        Box::new(PgError::error("invalid UTF-8 in array literal"))
-    })?;
+    let string = unsafe { fcinfo.arg_cstring(0) }.to_bytes();
     let element_type = fcinfo.arg(1).as_oid();
     let typmod = fcinfo.arg(2).as_i32();
     let mcx = fcinfo.result_mcx();

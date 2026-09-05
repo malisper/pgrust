@@ -393,7 +393,15 @@ pub(crate) fn get_rule_expr<'mcx>(
             let sbsref = node.as_subscripting_ref().unwrap();
             let refexpr = sbsref.refexpr.expect("SubscriptingRef.refexpr");
             if refexpr.node_tag() == NodeTag::T_CaseTestExpr {
-                gap("get_rule_expr", "SubscriptingRef inside FieldStore");
+                // ruleutils.c get_rule_expr T_SubscriptingRef: a CaseTestExpr
+                // argument means we are inside a FieldStore (assigning to an
+                // element of an array within a composite column); the
+                // FieldStore's target was already punted on, so only the
+                // assignment source expression is displayed.
+                let refassgnexpr = sbsref
+                    .refassgnexpr
+                    .expect("SubscriptingRef inside FieldStore carries refassgnexpr");
+                return get_rule_expr(refassgnexpr, ctx, showimplicit);
             }
             let need_parens = !matches!(refexpr.node_tag(), NodeTag::T_Var | NodeTag::T_FieldSelect);
             if need_parens {
@@ -577,13 +585,29 @@ pub(crate) fn get_rule_expr<'mcx>(
             };
             ctx.buf.push_str("ROW(");
             let mut first = true;
-            for (i, e) in r.args.iter().enumerate() {
+            let mut i = 0usize;
+            for e in r.args.iter() {
                 if tupdesc.as_ref().is_none_or(|d| !d.attr(i).attisdropped) {
                     if !first {
                         ctx.buf.push_str(", ");
                     }
                     first = false;
                     get_rule_expr_toplevel(e, ctx, true)?;
+                }
+                i += 1;
+            }
+            if let Some(d) = tupdesc.as_ref() {
+                // ruleutils.c: claim NULLs for columns added to the named
+                // composite type after the RowExpr was formed.
+                while i < d.natts as usize {
+                    if !d.attr(i).attisdropped {
+                        if !first {
+                            ctx.buf.push_str(", ");
+                        }
+                        first = false;
+                        ctx.buf.push_str("NULL");
+                    }
+                    i += 1;
                 }
             }
             ctx.buf.push(')');
@@ -1638,8 +1662,14 @@ fn get_func_expr<'mcx>(
         }
         argtypes.push(parse_expr::expr_type(arg));
     }
-    let funcname =
-        generate_function_name(ctx.mcx, expr.funcid, &argtypes, &argnames, expr.funcvariadic)?;
+    let funcname = generate_function_name(
+        ctx.mcx,
+        expr.funcid,
+        &argtypes,
+        &argnames,
+        expr.funcvariadic,
+        ctx.in_group_by,
+    )?;
     ctx.buf.push_str(&funcname);
     ctx.buf.push('(');
     let nargs = expr.args.len();
@@ -1879,8 +1909,14 @@ fn get_agg_expr_original<'mcx>(
     }
     check_agg_nargs(aggref.aggargtypes.len())?;
     let argtypes: Vec<Oid> = aggref.aggargtypes.iter().collect();
-    let funcname =
-        generate_function_name(ctx.mcx, aggref.aggfnoid, &argtypes, &[], aggref.aggvariadic)?;
+    let funcname = generate_function_name(
+        ctx.mcx,
+        aggref.aggfnoid,
+        &argtypes,
+        &[],
+        aggref.aggvariadic,
+        ctx.in_group_by,
+    )?;
     ctx.buf.push_str(&funcname);
     ctx.buf.push('(');
     if !aggref.aggdistinct.is_nil() {
@@ -1964,7 +2000,14 @@ fn get_windowfunc_expr_helper<'mcx>(
             }
             argtypes.push(parse_expr::expr_type(arg));
         }
-        let funcname = generate_function_name(ctx.mcx, wfunc.winfnoid, &argtypes, &argnames, false)?;
+        let funcname = generate_function_name(
+            ctx.mcx,
+            wfunc.winfnoid,
+            &argtypes,
+            &argnames,
+            false,
+            ctx.in_group_by,
+        )?;
         ctx.buf.push_str(&funcname);
     }
     ctx.buf.push('(');
