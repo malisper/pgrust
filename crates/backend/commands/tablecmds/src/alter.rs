@@ -1230,6 +1230,9 @@ fn ATRewriteCatalogs<'mcx>(
                         rel.rd_id,
                         miscinit::GetUserId(),
                     )?;
+                    // tablecmds.c:8236: remove any old default for the column
+                    // first (possible when combining LIKE with inheritance).
+                    RemoveAttrDefault(mcx, rel.rd_id, cmd.num, false, true)?;
                     pg_attrdef::StoreAttrDefault(mcx, &rel, cmd.num, defnode)?;
                 }
                 AlterTableType::AT_AddConstraint => {
@@ -1782,6 +1785,20 @@ fn ATRewriteTables<'mcx>(
     for tabidx in 0..wqueue.len() {
         ATRewriteTableOne(mcx, &mut wqueue[tabidx], lockmode, rewrite_tag)?;
     }
+    // Second pass (tablecmds.c:6067-6110): foreign keys are checked only
+    // after EVERY table in the queue has been rewritten -- both sides of a
+    // foreign key may have been rewritten by this command, and the check
+    // reads the referenced table.
+    for tab in wqueue.iter() {
+        if !types_rel::RELKIND_HAS_STORAGE(tab.relkind) || tab.fk_checks.is_empty() {
+            continue;
+        }
+        let rel = table::table_open(mcx, tab.relid, NoLock)?;
+        for item in tab.fk_checks.iter() {
+            crate::fk::validate_foreign_key_constraint(mcx, &rel, item)?;
+        }
+        rel.close(NoLock)?;
+    }
     for tab in wqueue.iter() {
         run_seq_stmts(mcx, &tab.after_stmts)?;
     }
@@ -1809,6 +1826,18 @@ fn ATRewriteTableOne<'mcx>(
                 PgError::new(
                     ERROR,
                     format!("cannot rewrite system relation \"{}\"", old_heap.name()),
+                )
+                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+            ));
+        }
+        // tablecmds.c:5928: never rewrite another session's temp table (its
+        // local buffer manager cannot cope); redundant with
+        // CheckAlterTableIsSafe, kept for safety exactly as C does.
+        if old_heap.is_other_temp() {
+            return Err(Box::new(
+                PgError::new(
+                    ERROR,
+                    "cannot rewrite temporary tables of other sessions".to_string(),
                 )
                 .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
             ));
@@ -1857,6 +1886,8 @@ fn ATRewriteTableOne<'mcx>(
             lockmode,
         )?;
         ATRewriteTable(mcx, tab, oid_new_heap)?;
+        // tablecmds.c:6009-6014: is_internal = !OidIsValid(tab->newTableSpace)
+        // -- an explicit SET TABLESPACE is a user-initiated alter for hooks.
         commands_cluster::finish_heap_swap(
             mcx,
             tab.relid,
@@ -1864,7 +1895,7 @@ fn ATRewriteTableOne<'mcx>(
             false,
             false,
             true,
-            true,
+            tab.new_tablespace == InvalidOid,
             procarray::RecentXmin(),
             multixact::ReadNextMultiXactId()?,
             persistence,
@@ -1898,15 +1929,8 @@ fn ATRewriteTableOne<'mcx>(
             )?;
         }
     }
-
-    // C's final pass: FK constraints are checked after all rewrites.
-    if !tab.fk_checks.is_empty() {
-        let rel = table::table_open(mcx, tab.relid, NoLock)?;
-        for item in tab.fk_checks.iter() {
-            crate::fk::validate_foreign_key_constraint(mcx, &rel, item)?;
-        }
-        rel.close(NoLock)?;
-    }
+    // FK constraints (tab.fk_checks) are validated by ATRewriteTables'
+    // second pass, after every table in the queue has been rewritten.
     Ok(())
 }
 
@@ -2525,6 +2549,8 @@ fn ATExecAddColumn<'mcx>(
     let otid = reltup.t_self;
     genam::systable_endscan(mcx, scan)?;
     catalog_indexing::CatalogTupleUpdate(mcx, &pgclass, &otid, &mut newtup)?;
+    // tablecmds.c:7412: post creation hook for the new attribute.
+    objectaccess::InvokeObjectPostCreateHook(RELATION_RELATION_ID, myrelid, newattnum as i32)?;
     pgclass.close(RowExclusiveLock)?;
 
     xact::CommandCounterIncrement()?;
@@ -2912,13 +2938,16 @@ fn ATExecDropColumn<'mcx>(
             let Some((childattnum, childinhcount)) =
                 attname_lookup(mcx, childrelid, col_name, false)?
             else {
-                panic!(
-                    "cache lookup failed for attribute \"{col_name}\" of relation \
-                     {childrelid}"
-                );
+                // tablecmds.c:9411 elog(ERROR): catchable XX000.
+                return Err(Box::new(PgError::error(format!(
+                    "cache lookup failed for attribute \"{col_name}\" of relation {childrelid}"
+                ))));
             };
             if childinhcount <= 0 {
-                panic!("relation {childrelid} has non-inherited attribute \"{col_name}\"");
+                // tablecmds.c:9418 elog(ERROR): catchable XX000.
+                return Err(Box::new(PgError::error(format!(
+                    "relation {childrelid} has non-inherited attribute \"{col_name}\""
+                ))));
             }
             let childislocal = childrel.rd_att.attr(childattnum as usize - 1).attislocal;
             if recurse {
@@ -3029,6 +3058,27 @@ fn ATExecColumnDefault<'mcx>(
     Ok(())
 }
 
+// elog(ERROR, "could not find attrdef tuple for relation %u attnum %d")
+// (pg_attrdef.c:198, tablecmds.c:8711/8888): elog's default SQLSTATE is XX000.
+#[cold]
+#[inline(never)]
+pub(crate) fn attrdef_tuple_not_found(relid: Oid, attnum: AttrNumber) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "could not find attrdef tuple for relation {relid} attnum {attnum}"
+    )))
+}
+
+// elog(ERROR, "cache lookup failed for not-null constraint on column \"%s\"
+// of relation \"%s\"") (tablecmds.c:7822/8316): catchable XX000.
+#[cold]
+#[inline(never)]
+pub(crate) fn notnull_constraint_lookup_failed(col_name: &str, relname: &str) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "cache lookup failed for not-null constraint on column \"{col_name}\" of relation \
+         \"{relname}\""
+    )))
+}
+
 // RemoveAttrDefault (pg_attrdef.c): lookup rides pg_attrdef, the deletion
 // rides catalog_dependency (a direct pg_attrdef -> dependency edge cycles).
 fn RemoveAttrDefault<'mcx>(
@@ -3041,7 +3091,8 @@ fn RemoveAttrDefault<'mcx>(
     let attrdef_id = pg_attrdef::GetAttrDefaultOid(mcx, relid, attnum)?;
     if attrdef_id == InvalidOid {
         if complain {
-            panic!("could not find attrdef tuple for relation {relid} attnum {attnum}");
+            // pg_attrdef.c:198 elog(ERROR): catchable XX000.
+            return Err(attrdef_tuple_not_found(relid, attnum));
         }
         return Ok(());
     }
@@ -3130,10 +3181,8 @@ fn ATExecSetExpression<'mcx>(
 
     let attrdefoid = pg_attrdef::GetAttrDefaultOid(mcx, rel.rd_id, attnum)?;
     if attrdefoid == InvalidOid {
-        panic!(
-            "could not find attrdef tuple for relation {} attnum {attnum}",
-            rel.rd_id
-        );
+        // tablecmds.c:8711 / 8888 elog(ERROR): catchable XX000.
+        return Err(attrdef_tuple_not_found(rel.rd_id, attnum));
     }
     pg_depend::deleteDependencyRecordsFor(
         mcx,
@@ -3280,10 +3329,8 @@ fn ATExecDropExpression<'mcx>(
 
     let attrdefoid = pg_attrdef::GetAttrDefaultOid(mcx, rel.rd_id, attnum)?;
     if attrdefoid == InvalidOid {
-        panic!(
-            "could not find attrdef tuple for relation {} attnum {attnum}",
-            rel.rd_id
-        );
+        // tablecmds.c:8711 / 8888 elog(ERROR): catchable XX000.
+        return Err(attrdef_tuple_not_found(rel.rd_id, attnum));
     }
     pg_depend::deleteDependencyRecordsFor(
         mcx,
@@ -3425,13 +3472,10 @@ fn add_identity_internal<'mcx>(
             .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
         ));
     }
-    let con = pg_constraint::findNotNullConstraintAttnum(mcx, rel.rd_id, attnum)?
-        .unwrap_or_else(|| {
-            panic!(
-                "cache lookup failed for not-null constraint on column \"{col_name}\" of \
-                 relation \"{relname}\""
-            )
-        });
+    let Some(con) = pg_constraint::findNotNullConstraintAttnum(mcx, rel.rd_id, attnum)? else {
+        // tablecmds.c:7822 / 8316 elog(ERROR): catchable XX000.
+        return Err(notnull_constraint_lookup_failed(col_name, &relname));
+    };
     if !con.convalidated {
         return Err(Box::new(
             PgError::new(
@@ -3910,13 +3954,10 @@ fn ATExecDropNotNull<'mcx>(
         }
         parent.close(types_rel::AccessShareLock)?;
     }
-    let con = pg_constraint::findNotNullConstraintAttnum(mcx, rel.rd_id, attnum)?
-        .unwrap_or_else(|| {
-            panic!(
-                "cache lookup failed for not-null constraint on column \"{col_name}\" of \
-                 relation \"{relname}\""
-            )
-        });
+    let Some(con) = pg_constraint::findNotNullConstraintAttnum(mcx, rel.rd_id, attnum)? else {
+        // tablecmds.c:7822 / 8316 elog(ERROR): catchable XX000.
+        return Err(notnull_constraint_lookup_failed(col_name, &relname));
+    };
 
     dropconstraint_internal(
         mcx,
@@ -4963,6 +5004,8 @@ fn ATExecSetOptions<'mcx>(
     let otid = tup.t_self;
     genam::systable_endscan(mcx, scan)?;
     catalog_indexing::CatalogTupleUpdate(mcx, &attrel, &otid, &mut newtup)?;
+    // tablecmds.c:9115: post alter hook for the column's options.
+    objectaccess::InvokeObjectPostAlterHook(RELATION_RELATION_ID, rel.rd_id, attnum as i32)?;
     attrel.close(RowExclusiveLock)
 }
 
@@ -5468,6 +5511,10 @@ fn ATPrepAlterColumnType<'mcx>(
         }
     };
     parse_collate::assign_expr_collations(mcx, &mut pstate, transform)?;
+    // tablecmds.c:14545: expand virtual generated columns in the expr --
+    // they have no storage, so a Var over one cannot be evaluated against
+    // the old tuple during the rewrite scan.
+    let transform = planner::prepjointree::expand_generated_columns_in_expr(mcx, transform, rel, 1)?;
     // expression_planner.
     let transform = clauses::eval_const_expressions(mcx, transform)?;
     wqueue[tabidx].newvals.push(NewColumnValue { attnum, expr: transform, is_generated: false });
@@ -5610,7 +5657,9 @@ fn ATTypedTableRecursion<'mcx>(
     )?;
     for &childrelid in children.iter() {
         let childrel = relation_seams::relation_open::call(mcx, childrelid, lockmode)?;
-        catalog_heap::CheckTableNotInUse(&childrel, "ALTER TABLE")?;
+        // tablecmds.c:6918: another session's typed temp table is refused
+        // (0A000) before the in-use check.
+        CheckAlterTableIsSafe(&childrel)?;
         ATPrepCmd(mcx, wqueue, &childrel, cnode, true, true, lockmode, query_string)?;
         childrel.close(NoLock)?;
     }
@@ -8285,5 +8334,25 @@ mod tests {
         assert_eq!(var.vartype, 25);
         assert_eq!(var.vartypmod, -1);
         assert_eq!(var.varcollid, 100);
+    }
+}
+
+#[cfg(test)]
+mod elog_hygiene_tests {
+    // The attrdef / not-null catalog-consistency arms of ATExecAlterColumnType,
+    // ATExecSetExpression, ATExecDropExpression, ATExecAddIdentity and
+    // ATExecDropNotNull are elog(ERROR)s in C (pg_attrdef.c:198,
+    // tablecmds.c:8711/8888, 7822/8316): catchable XX000, never a panic.
+    #[test]
+    fn attrdef_and_notnull_lookup_arms_are_catchable_xx000() {
+        let e = super::attrdef_tuple_not_found(16384, 2);
+        assert_eq!(e.message(), "could not find attrdef tuple for relation 16384 attnum 2");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        let e = super::notnull_constraint_lookup_failed("id", "t");
+        assert_eq!(
+            e.message(),
+            "cache lookup failed for not-null constraint on column \"id\" of relation \"t\""
+        );
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
     }
 }

@@ -942,7 +942,9 @@ pub fn DefineRelation<'mcx>(
             relpersistence,
             reloftype: of_type_id,
             mapped: false,
-            allow_system_table_mods: false,
+            // tablecmds.c:1082 passes the allowSystemTableMods GUC through,
+            // lifting heap_create's system-namespace refusal (heap.c:316).
+            allow_system_table_mods: init_small::globals::allowSystemTableMods(),
             reloptions: reloptions.as_deref(),
         },
         &descriptor,

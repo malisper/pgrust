@@ -301,7 +301,7 @@ pub(crate) fn MergeAttributes<'mcx>(
             newdef.storage = attribute.attstorage as u8;
             newdef.generated = attribute.attgenerated as u8;
             if attribute.attcompression != 0 {
-                newdef.compression = Some(compression_method_name(attribute.attcompression as u8));
+                newdef.compression = Some(compression_method_name(attribute.attcompression as u8)?);
             }
             // Regular inheritance children do not inherit identity; only
             // partitions do (they take the lib.rs descriptor-copy leg).
@@ -500,12 +500,16 @@ fn clone_column_def<'mcx>(mcx: Mcx<'mcx>, d: &ColumnDef<'mcx>) -> PgResult<Colum
     })
 }
 
-// GetCompressionMethodName (toast_compression.c).
-fn compression_method_name(c: u8) -> &'static str {
+// GetCompressionMethodName (toast_compression.c:313): an unknown byte is
+// elog(ERROR, "invalid compression method %c") -- catchable XX000.
+fn compression_method_name(c: u8) -> PgResult<&'static str> {
     match c {
-        b'p' => "pglz",
-        b'l' => "lz4",
-        _ => panic!("invalid compression method {c}"),
+        b'p' => Ok("pglz"),
+        b'l' => Ok("lz4"),
+        _ => Err(Box::new(PgError::error(format!(
+            "invalid compression method {}",
+            c as char
+        )))),
     }
 }
 
@@ -1833,5 +1837,23 @@ mod tests {
         cols.lappend(mcx, coldef(mcx, "b", false, false)).unwrap();
         partition_column_dup_scan(&cols).unwrap();
         partition_column_dup_scan(&NodeList::nil()).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod panic_hygiene_tests {
+    // GetCompressionMethodName (toast_compression.c:313) reports an unknown
+    // attcompression byte with elog(ERROR, "invalid compression method %c")
+    // -- a catchable XX000, never a backend abort. A corrupted pg_attribute
+    // row reached through CREATE TABLE ... INHERITS (parent) must not panic.
+    #[test]
+    fn unknown_compression_byte_is_a_catchable_error() {
+        let r = std::panic::catch_unwind(|| super::compression_method_name(b'x'));
+        let r = r.expect("compression_method_name(b'x') panicked");
+        let e = r.unwrap_err();
+        assert_eq!(e.message(), "invalid compression method x");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(super::compression_method_name(b'p').unwrap(), "pglz");
+        assert_eq!(super::compression_method_name(b'l').unwrap(), "lz4");
     }
 }

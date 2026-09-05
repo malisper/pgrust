@@ -378,7 +378,18 @@ fn RangeVarCallbackForDropRelation<'mcx>(
 
     // IsSystemClass: catalog oid range or pg_toast namespace.
     let is_system = catalog::IsCatalogRelationOid(relOid) || catalog::IsToastNamespace(relnamespace);
-    if is_system && !init_small::globals::allowSystemTableMods() {
+    // tablecmds.c:1793-1816: an INVALID index of a system catalog (a toast
+    // index left behind by a failed REINDEX CONCURRENTLY) may be dropped
+    // without allow_system_table_mods; a concurrently vanished pg_index row
+    // ends the callback exactly as C's !HeapTupleIsValid(locTuple) return.
+    let mut invalid_system_index = false;
+    if is_system && relkind == types_rel::RELKIND_INDEX {
+        match syscache_seams::lookup_pg_index_ls_shape::call(relOid)? {
+            Some(idx) => invalid_system_index = !idx.indisvalid,
+            None => return Ok(()),
+        }
+    }
+    if !invalid_system_index && is_system && !init_small::globals::allowSystemTableMods() {
         return Err(Box::new(
             PgError::new(
                 ERROR,

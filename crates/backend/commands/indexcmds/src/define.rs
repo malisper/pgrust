@@ -1038,7 +1038,9 @@ pub fn DefineIndex<'mcx>(
         } else {
             0
         }),
-            allow_system_table_mods: false,
+            // indexcmds.c:1271 passes the allowSystemTableMods GUC through,
+            // lifting index_create's system-relation refusal (index.c:802).
+            allow_system_table_mods: init_small::globals::allowSystemTableMods(),
             is_internal: !check_rights,
             parent_index_relid: parentIndexId,
             parent_constraint_id: parentConstraintId,

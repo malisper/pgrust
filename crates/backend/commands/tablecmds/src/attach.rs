@@ -17,6 +17,7 @@ use types_nodes::primnodes::{NullTest, NullTestType, Var};
 use types_nodes::rawnodes::{PartitionBoundSpec, PartitionCmd};
 use types_nodes::Node;
 use types_core::catalog::RELPERSISTENCE_TEMP;
+use types_tuple::ATTNULLABLE_VALID;
 use types_rel::{
     AccessExclusiveLock, AccessShareLock, NoLock, Relation, RowExclusiveLock,
     RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
@@ -962,7 +963,10 @@ pub(crate) fn PartConstraintImpliedByRelConstraint<'mcx>(
         if constr.has_not_null {
             for i in 0..desc.natts as usize {
                 let att = desc.attr(i);
-                if att.attnotnull && !att.attisdropped {
+                // tablecmds.c:20122: only a VALID not-null constraint proves
+                // IS NOT NULL; an invalid (NOT VALID) one must be ignored.
+                if desc.compact_attr(i).attnullability == ATTNULLABLE_VALID && !att.attisdropped
+                {
                     exist_constraint.push(make_notnull_test(mcx, att)?);
                 }
             }

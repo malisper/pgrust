@@ -431,9 +431,9 @@ fn at_add_foreign_key_constraint<'mcx>(
 
         let ppeqop = lsyscache::get_opfamily_member(opfamily, opcintype, opcintype, eqstrategy)?;
         if ppeqop == InvalidOid {
-            panic!(
-                "missing operator {eqstrategy}({opcintype},{opcintype}) in opfamily {opfamily}"
-            );
+            // tablecmds.c:10389 elog(ERROR): catchable XX000.
+            pkrel.close(NoLock)?;
+            return Err(missing_opfamily_operator(eqstrategy, opcintype, opfamily));
         }
 
         let fktyped = lsyscache::getBaseType(fktype)?;
@@ -483,7 +483,9 @@ fn at_add_foreign_key_constraint<'mcx>(
         }
 
         if (pkcoll != InvalidOid) != (fkcoll != InvalidOid) {
-            panic!("key columns are not both collatable");
+            // tablecmds.c:10456 elog(ERROR): catchable XX000.
+            pkrel.close(NoLock)?;
+            return Err(key_columns_not_both_collatable());
         }
         if pkcoll != InvalidOid && fkcoll != InvalidOid {
             let pkcolldet = lsyscache::get_collation_isdeterministic(pkcoll)?;
@@ -950,13 +952,20 @@ pub(crate) fn validate_foreign_key_constraint<'mcx>(
         mcx::PgVec::new_in(mcx),
     )?;
     {
-        let tableam::TableScanDesc::Heap(hscan) = &mut scan else {
-            panic!("FK validation scan on a non-heap AM");
-        };
-        while let Some(tup) = heapam::heap_getnext(
-            hscan,
+        // tablecmds.c:13762-13779: the generic table-AM scan (table_beginscan
+        // + table_scan_getnextslot) serves every table AM, not only heap.
+        let mut slot = tableam::table_slot_create(mcx, rel)?;
+        while tableam::table_scan_getnextslot(
+            mcx,
+            &mut scan,
             types_scan::ScanDirection::ForwardScanDirection,
+            &mut slot,
         )? {
+            let fetched = exectuples::exec_fetch_slot_heap_tuple(&mut slot, false, mcx, mcx)?;
+            let tup: &types_tuple::HeapTupleData<'_> = match &fetched {
+                exectuples::FetchedHeapTuple::Slot(t) => t,
+                exectuples::FetchedHeapTuple::Copied(t) => t,
+            };
             let data = ri_triggers_seams::RiTriggerData {
                 tg_event: types_trigger::TRIGGER_EVENT_INSERT | types_trigger::TRIGGER_EVENT_ROW,
                 tg_relation: rel,
@@ -3273,5 +3282,37 @@ mod panic_hygiene_tests {
                 "ALTER TABLE ... ADD CONSTRAINT for this constraint type is not supported yet"
             );
         }
+    }
+}
+
+// elog(ERROR, "missing operator %d(%u,%u) in opfamily %u") (tablecmds.c:10389):
+// elog's default SQLSTATE is XX000.
+#[cold]
+#[inline(never)]
+pub(crate) fn missing_opfamily_operator(eqstrategy: i16, opcintype: Oid, opfamily: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "missing operator {eqstrategy}({opcintype},{opcintype}) in opfamily {opfamily}"
+    )))
+}
+
+// elog(ERROR, "key columns are not both collatable") (tablecmds.c:10456).
+#[cold]
+#[inline(never)]
+pub(crate) fn key_columns_not_both_collatable() -> Box<PgError> {
+    Box::new(PgError::error("key columns are not both collatable".to_string()))
+}
+
+#[cfg(test)]
+mod elog_hygiene_tests {
+    // ATAddForeignKeyConstraint's opfamily-consistency arms are elog(ERROR)s
+    // in C (tablecmds.c:10389, 10456): catchable XX000, never a panic.
+    #[test]
+    fn opfamily_arms_are_catchable_xx000() {
+        let e = super::missing_opfamily_operator(3, 23, 1976);
+        assert_eq!(e.message(), "missing operator 3(23,23) in opfamily 1976");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        let e = super::key_columns_not_both_collatable();
+        assert_eq!(e.message(), "key columns are not both collatable");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
     }
 }
