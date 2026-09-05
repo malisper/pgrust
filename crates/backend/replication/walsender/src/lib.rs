@@ -11,6 +11,7 @@
 
 pub mod replies;
 pub mod logical_stream;
+mod lag;
 mod streaming;
 pub mod wakeup;
 
@@ -20,6 +21,7 @@ use std::sync::{Mutex, OnceLock};
 
 use condition_variable::ConditionVariable;
 use datum::Datum;
+use elog::errno::current_errno;
 use elog::ereport;
 use repl_gram::{
     AlterReplicationSlotCmd, CreateReplicationSlotCmd, DropReplicationSlotCmd, ReadReplicationSlotCmd,
@@ -29,9 +31,9 @@ use types_core::{
     InvalidOid, InvalidXLogRecPtr, TimeLineID, TimestampTz, XLogRecPtr, INT8OID, TEXTOID,
 };
 use types_error::{
-    ErrorLocation, PgResult, DEBUG1, ERRCODE_FEATURE_NOT_SUPPORTED,
-    ERRCODE_IN_FAILED_SQL_TRANSACTION, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_SYNTAX_ERROR,
-    ERROR, LOG,
+    ErrorLocation, PgResult, DEBUG1, ERRCODE_DATA_CORRUPTED, ERRCODE_FEATURE_NOT_SUPPORTED,
+    ERRCODE_IN_FAILED_SQL_TRANSACTION, ERRCODE_INVALID_PARAMETER_VALUE,
+    ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_SYNTAX_ERROR, ERROR, LOG,
 };
 
 const SRC: &str = "src/backend/replication/walsender.c";
@@ -161,6 +163,10 @@ pub struct WalSndCtlData {
 // syncrep.h wait-mode slots in WalSndCtl.lsn[] / SyncRepQueue[].
 pub const NUM_SYNC_REP_WAIT_MODE: usize = 3;
 
+// WalSndCtl->sync_standbys_status bits (walsender_private.h).
+pub const SYNC_STANDBY_INIT: u32 = 1 << 0;
+pub const SYNC_STANDBY_DEFINED: u32 = 1 << 1;
+
 static WAL_SND_CTL: OnceLock<WalSndCtlData> = OnceLock::new();
 
 // C: ShmemInitStruct("Wal Sender Ctl") sized by max_wal_senders; here the
@@ -218,7 +224,8 @@ pub fn InitWalSender() {
             .expect("InitWalSender: PROC_AFFECTS_ALL_HORIZONS");
     }
 
-    // lag_tracker allocation is streaming-path state (increment 3).
+    // Initialize empty timestamp buffer for lag tracking (walsender.c:333).
+    lag::LagTrackerInit();
 }
 
 // InitWalSenderSlot (walsender.c:2937).
@@ -457,11 +464,23 @@ pub(crate) fn my_set_reply_time(reply_time: TimestampTz) {
     my_walsnd().lock().expect("walsnd mutex").replyTime = reply_time;
 }
 
-// WalSndErrorCleanup (walsender.c:341), minus the streaming-path residue:
-// LWLockReleaseAll/ConditionVariableCancelSleep/pgstat_report_wait_end/
-// pgaio_error_cleanup and the xlogreader close land with increment 3; the
-// command-path errors of increment 1 hold none of that state.
+// WalSndErrorCleanup (walsender.c:344). WAL senders don't use transactions
+// like regular backends: on the replication-command path no transaction is
+// open, so tcop's AbortCurrentTransaction is a no-op (TBLOCK_DEFAULT) and
+// THIS is the release point for LWLocks/CV sleeps/wait events held at the
+// error (e.g. ReplicationSlotCreate's 42710 under
+// ReplicationSlotAllocationLock, slot.c:412). The physical xlogreader is a
+// StartReplication local here; its segment is closed there on both exits.
 pub fn WalSndErrorCleanup() -> PgResult<()> {
+    lwlock::LWLockReleaseAll()?;
+    condition_variable::ConditionVariableCancelSleep();
+    if waitevent_seams::pgstat_report_wait_end::is_installed() {
+        waitevent_seams::pgstat_report_wait_end::call();
+    }
+    if aio_seams::pgaio_error_cleanup::is_installed() {
+        aio_seams::pgaio_error_cleanup::call();
+    }
+
     if slot::MyReplicationSlot().is_some() {
         slot::ReplicationSlotRelease()?;
     }
@@ -469,6 +488,9 @@ pub fn WalSndErrorCleanup() -> PgResult<()> {
 
     REPLICATION_ACTIVE.set(false);
 
+    // If there is a transaction in progress, it will clean up our
+    // ResourceOwner, but if a replication command set up a resource owner
+    // without a transaction, we've got to clean that up now.
     if !xact::IsTransactionOrTransactionBlock() {
         resowner::ReleaseAuxProcessResources(false)?;
     }
@@ -477,6 +499,7 @@ pub fn WalSndErrorCleanup() -> PgResult<()> {
         ipc_seams::proc_exit::call(0, init_small::globals::MyProcPid());
     }
 
+    // Revert back to startup state
     WalSndSetState(WalSndState::Startup);
     Ok(())
 }
@@ -598,6 +621,8 @@ pub fn exec_replication_command(cmd_string: &str) -> PgResult<bool> {
             // dupe ("necessary per libpqrcv_endstreaming", walsender.c:2182).
             let cmdtag = "START_REPLICATION";
             ps_status_seams::set_ps_display::call(cmdtag);
+            // walsender.c:2195
+            xact::PreventInTransactionBlock(true, cmdtag)?;
             if c.kind == ReplicationKind::REPLICATION_KIND_PHYSICAL {
                 streaming::StartReplication(mcx, &c)?;
             } else {
@@ -608,6 +633,8 @@ pub fn exec_replication_command(cmd_string: &str) -> PgResult<bool> {
         ReplCommand::BaseBackup(c) => {
             let cmdtag = "BASE_BACKUP";
             ps_status_seams::set_ps_display::call(cmdtag);
+            // walsender.c:2163
+            xact::PreventInTransactionBlock(true, cmdtag)?;
             // SendBaseBackup lives in the basebackup crate (off the serial path);
             // installed as the walsender_seams::base_backup seam.
             walsender_seams::base_backup::call(c)?;
@@ -922,9 +949,11 @@ fn parse_create_repl_slot_options(
                     "nothing" => CrsSnapshotAction::NoExportSnapshot,
                     "use" => CrsSnapshotAction::UseSnapshot,
                     other => {
+                        // walsender.c:1171
                         ereport(ERROR)
+                            .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
                             .errmsg(format!("unrecognized value for CREATE_REPLICATION_SLOT option \"snapshot\": \"{other}\""))
-                            .finish(loc(1152, "parseCreateReplSlotOptions"))?;
+                            .finish(loc(1171, "parseCreateReplSlotOptions"))?;
                         unreachable!()
                     }
                 };
@@ -1015,9 +1044,17 @@ fn CreateReplicationSlot(mcx: mcx::Mcx<'_>, cmd: CreateReplicationSlotCmd) -> Pg
                         .finish(loc(1286, "CreateReplicationSlot"));
                 }
             }
-            // EXPORT_SNAPSHOT (the default) exports after the start point is
-            // found, below.
-            CrsSnapshotAction::ExportSnapshot | CrsSnapshotAction::NoExportSnapshot => {}
+            // walsender.c:1273: options check done early so we bail before
+            // the (possibly long) DecodingContextFindStartpoint; the export
+            // itself happens after the start point is found, below.
+            CrsSnapshotAction::ExportSnapshot => {
+                if xact::IsTransactionBlock() {
+                    return ereport(ERROR)
+                        .errmsg("CREATE_REPLICATION_SLOT ... (SNAPSHOT 'export') must not be called inside a transaction")
+                        .finish(loc(1276, "CreateReplicationSlot"));
+                }
+            }
+            CrsSnapshotAction::NoExportSnapshot => {}
         }
 
         slot::ReplicationSlotCreate(
@@ -1318,41 +1355,79 @@ fn SendTimeLineHistory(mcx: mcx::Mcx<'_>, cmd: TimeLineHistoryCmd) -> PgResult<(
     let histfname = timeline::TLHistoryFileName(cmd.timeline);
     let path = timeline::TLHistoryFilePath(cmd.timeline);
 
+    // Send a RowDescription message (walsender.c:603 dest->rStartup) BEFORE
+    // touching the file: an open error follows the 'T' on the wire, as in C.
+    let mut tstate = exectuples_output::begin_tup_output_tupdesc(mcx, &mut dest, Rc::new(tupdesc))?;
+
     // O_RDONLY | PG_BINARY (PG_BINARY == 0 on non-Windows).
     let fd = fd::OpenTransientFile(&path, libc::O_RDONLY)?;
     if fd < 0 {
+        let en = current_errno();
         return ereport(ERROR)
+            .with_saved_errno(en)
             .errcode_for_file_access()
-            .errmsg(format!("could not open file \"{path}\""))
-            .finish(loc(616, "SendTimeLineHistory"));
+            .errmsg(format!("could not open file \"{path}\": %m"))
+            .finish(loc(614, "SendTimeLineHistory"));
     }
 
-    let mut content: Vec<u8> = Vec::new();
+    // Determine file length and send it to client (walsender.c:618).
+    // SAFETY: fd is the open descriptor from OpenTransientFile above.
+    let histfilelen = unsafe { libc::lseek(fd, 0, libc::SEEK_END) };
+    if histfilelen < 0 {
+        let en = current_errno();
+        fd::CloseTransientFile(fd);
+        return ereport(ERROR)
+            .with_saved_errno(en)
+            .errcode_for_file_access()
+            .errmsg(format!("could not seek to end of file \"{path}\": %m"))
+            .finish(loc(622, "SendTimeLineHistory"));
+    }
+    // SAFETY: as above.
+    if unsafe { libc::lseek(fd, 0, libc::SEEK_SET) } != 0 {
+        let en = current_errno();
+        fd::CloseTransientFile(fd);
+        return ereport(ERROR)
+            .with_saved_errno(en)
+            .errcode_for_file_access()
+            .errmsg(format!("could not seek to beginning of file \"{path}\": %m"))
+            .finish(loc(626, "SendTimeLineHistory"));
+    }
+
+    let mut content: Vec<u8> = Vec::with_capacity(histfilelen as usize);
     let mut rbuf = [0u8; 8192];
-    loop {
+    let mut bytesleft = histfilelen as i64;
+    while bytesleft > 0 {
         // SAFETY: rbuf is a live writable buffer.
         let nread = unsafe { libc::read(fd, rbuf.as_mut_ptr().cast(), rbuf.len()) };
         if nread < 0 {
+            let en = current_errno();
             fd::CloseTransientFile(fd);
             return ereport(ERROR)
+                .with_saved_errno(en)
                 .errcode_for_file_access()
-                .errmsg(format!("could not read file \"{path}\""))
+                .errmsg(format!("could not read file \"{path}\": %m"))
                 .finish(loc(643, "SendTimeLineHistory"));
-        }
-        if nread == 0 {
-            break;
+        } else if nread == 0 {
+            // The file shrank under us (walsender.c:646).
+            fd::CloseTransientFile(fd);
+            return ereport(ERROR)
+                .errcode(ERRCODE_DATA_CORRUPTED)
+                .errmsg(format!("could not read file \"{path}\": read {nread} of {bytesleft}"))
+                .finish(loc(648, "SendTimeLineHistory"));
         }
         content.extend_from_slice(&rbuf[..nread as usize]);
+        bytesleft -= nread as i64;
     }
 
     if fd::CloseTransientFile(fd) != 0 {
+        let en = current_errno();
         return ereport(ERROR)
+            .with_saved_errno(en)
             .errcode_for_file_access()
-            .errmsg(format!("could not close file \"{path}\""))
+            .errmsg(format!("could not close file \"{path}\": %m"))
             .finish(loc(658, "SendTimeLineHistory"));
     }
 
-    let mut tstate = exectuples_output::begin_tup_output_tupdesc(mcx, &mut dest, Rc::new(tupdesc))?;
     let fname_v = varlena::cstring_to_text(mcx, histfname.as_bytes())?;
     let content_v = varlena::cstring_to_text(mcx, &content)?;
     let values = [
@@ -1449,6 +1524,9 @@ pub fn init_seams() {
 }
 
 #[cfg(test)]
+mod conformance_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1494,13 +1572,13 @@ mod tests {
     // parallel threads within one process; slots are shared).
     static SLOT_LOCK: Mutex<()> = Mutex::new(());
 
-    fn slot_lock() -> std::sync::MutexGuard<'static, ()> {
+    pub(crate) fn slot_lock() -> std::sync::MutexGuard<'static, ()> {
         SLOT_LOCK.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     thread_local! {
-        static WIRE: StdRefCell<Vec<u8>> = const { StdRefCell::new(Vec::new()) };
-        static INPUT: StdRefCell<VecDeque<Vec<u8>>> = const { StdRefCell::new(VecDeque::new()) };
+        pub(crate) static WIRE: StdRefCell<Vec<u8>> = const { StdRefCell::new(Vec::new()) };
+        pub(crate) static INPUT: StdRefCell<VecDeque<Vec<u8>>> = const { StdRefCell::new(VecDeque::new()) };
     }
 
     // Real C-generated manifest (the Stage-2 corpus fixture; provenance in
@@ -1510,7 +1588,7 @@ mod tests {
     const C_FIXTURE_SYSID: u64 = 7671867332315642488;
     const C_FIXTURE_NFILES: usize = 968;
 
-    fn upload_setup() {
+    pub(crate) fn upload_setup() {
         static ONCE: Once = Once::new();
         ONCE.call_once(|| {
             if !postgres_seams::check_for_interrupts::is_installed() {
@@ -1563,7 +1641,7 @@ mod tests {
 
     /// Frame one frontend protocol message: type byte + i32 length
     /// (self-inclusive) + body.
-    fn feed_msg(msgtype: u8, body: &[u8]) {
+    pub(crate) fn feed_msg(msgtype: u8, body: &[u8]) {
         let mut m = Vec::with_capacity(body.len() + 5);
         m.push(msgtype);
         m.extend_from_slice(&((body.len() as u32 + 4).to_be_bytes()));

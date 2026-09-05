@@ -177,7 +177,7 @@ fs	crates/backend/replication/logical/snapbuild/src/ondisk.rs	3
 # --- crates/backend/replication/slot (6 sites) ---
 fs	crates/backend/replication/slot/src/lib.rs	6
 # --- crates/backend/replication/walsender (1 sites) ---
-fs	crates/backend/replication/walsender/src/lib.rs	1
+fs	crates/backend/replication/walsender/src/lib.rs	3	DST-REVIEW(audit-18.6 b023): +2 libc::lseek sites porting walsender.c SendTimeLineHistory's lseek(fd,0,SEEK_END)/lseek(fd,0,SEEK_SET) history-file length probe and rewind (C-exact error surface); routing onto the fd/vfd Vfs choke (s2.1) stays with the DST program
 # --- crates/backend/storage/aio/aio_uring (4 sites) ---
 fs	crates/backend/storage/aio/aio_uring/src/lib.rs	4
 # --- crates/backend/storage/file/fd (7 sites) ---

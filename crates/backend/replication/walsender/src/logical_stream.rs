@@ -288,17 +288,16 @@ impl XLogReaderRoutine for LogicalWalSndPageRead {
             (flushptr - target_page_ptr) as i32
         };
 
-        if let Err(_errinfo) = xlogreader_seams::wal_read::call(
+        if let Err(errinfo) = xlogreader_seams::wal_read::call(
             v,
             &mut cur_page[..count as usize],
             target_page_ptr,
             count as usize,
             read_tli,
         )? {
-            ereport(ERROR)
-                .errcode_for_file_access()
-                .errmsg("could not read from WAL: requested WAL segment slice is unavailable")
-                .finish(ErrorLocation::new(file!(), line!() as i32, "WALReadRaiseError"))?;
+            // WALReadRaiseError (xlogutils.c:1047) — C's segment/offset text.
+            crate::streaming::wal_read_raise_error(&errinfo)?;
+            unreachable!("wal_read_raise_error reported below ERROR");
         }
 
         // The segment might have been recycled while we read it.
@@ -314,11 +313,13 @@ impl XLogReaderRoutine for LogicalWalSndPageRead {
 // also wait for the synchronized_standby_slots standbys to confirm receipt
 // (NeedToWaitForStandbys).
 
-// NeedToWaitForStandbys (walsender.c:1753): true when the acquired slot is a
+// NeedToWaitForStandbys (walsender.c:1774): true when the acquired slot is a
 // logical failover slot mid-streaming and the listed standbys have not caught
 // up to flushed_lsn. After a shutdown signal, dropped/invalidated/inactive
 // slots raise ERROR instead of WARNING so the walsender cannot wait forever.
-fn need_to_wait_for_standbys(flushed_lsn: XLogRecPtr) -> PgResult<bool> {
+// Returns the wait event to arm (WAIT_FOR_STANDBY_CONFIRMATION) when waiting,
+// else 0 (C's `*wait_event`).
+fn need_to_wait_for_standbys(flushed_lsn: XLogRecPtr) -> PgResult<(bool, u32)> {
     let elevel = if crate::GOT_STOPPING.with(|c| c.get()) {
         types_error::ERROR
     } else {
@@ -327,15 +328,37 @@ fn need_to_wait_for_standbys(flushed_lsn: XLogRecPtr) -> PgResult<bool> {
     let failover_slot = crate::REPLICATION_ACTIVE.with(|c| c.get())
         && slot::MyReplicationSlot().is_some_and(|s| unsafe { s.data.get() }.failover);
     if failover_slot && !slot::StandbySlotsHaveCaughtup(flushed_lsn, elevel)? {
-        return Ok(true);
+        return Ok((true, crate::WAIT_EVENT_WAIT_FOR_STANDBY_CONFIRMATION));
     }
-    Ok(false)
+    Ok((false, 0))
 }
+
+// NeedToWaitForWal (walsender.c:1807): true if target_lsn is not yet flushed,
+// or (failover slot) if the standbys have not caught up to flushed_lsn.
+fn need_to_wait_for_wal(target_lsn: XLogRecPtr, flushed_lsn: XLogRecPtr) -> PgResult<(bool, u32)> {
+    if target_lsn > flushed_lsn {
+        return Ok((true, WAIT_EVENT_WAL_SENDER_WAIT_WAL));
+    }
+    need_to_wait_for_standbys(flushed_lsn)
+}
+
 fn WalSndWaitForWal(loc_: XLogRecPtr) -> PgResult<XLogRecPtr> {
-    // Fast path: enough WAL already known to be flushed.
+    // C's `wait_event` is declared outside the loop and persists across
+    // iterations: it gates whether RecentFlushPtr is recomputed (below).
+    let mut wait_event: u32 = 0;
+
+    // Fast path to avoid work when we already know we have enough WAL AND all
+    // standby servers have confirmed receipt up to RecentFlushPtr
+    // (walsender.c:1843). The old fast path returned as soon as loc <= recent,
+    // sending decoded changes to logical subscribers before a failover slot's
+    // synchronized standbys had confirmed the position.
     let recent = RECENT_FLUSH_PTR.with(Cell::get);
-    if recent != InvalidXLogRecPtr && loc_ <= recent {
-        return Ok(recent);
+    if recent != InvalidXLogRecPtr {
+        let (wait, we) = need_to_wait_for_wal(loc_, recent)?;
+        wait_event = we;
+        if !wait {
+            return Ok(recent);
+        }
     }
 
     loop {
@@ -367,22 +390,29 @@ fn WalSndWaitForWal(loc_: XLogRecPtr) -> PgResult<XLogRecPtr> {
             transam_xlog::XLogFlush(transam_xlog::GetXLogInsertEndRecPtr())?;
         }
 
-        // Update our idea of the currently flushed position: on a standby
-        // WAL is decodable only once REPLAYED, so the wait target is the
-        // replay pointer, not the (local, stale-in-recovery) flush pointer
-        // (walsender.c:1869).
-        let recent_flush = if !transam_xlog::RecoveryInProgress() {
-            transam_xlog::GetFlushRecPtr(None)
-        } else {
-            xlogrecovery_seams::get_xlog_replay_rec_ptr::call().0
-        };
-        RECENT_FLUSH_PTR.with(|c| c.set(recent_flush));
+        // To avoid the scenario where standbys need to catch up to a newer
+        // WAL location in each iteration, only update our idea of the flushed
+        // position when we are NOT already waiting for standbys to catch up
+        // (walsender.c:1895). On a standby WAL is decodable only once
+        // REPLAYED, so the wait target is the replay pointer, not the (local,
+        // stale-in-recovery) flush pointer.
+        if wait_event != crate::WAIT_EVENT_WAIT_FOR_STANDBY_CONFIRMATION {
+            let recent_flush = if !transam_xlog::RecoveryInProgress() {
+                transam_xlog::GetFlushRecPtr(None)
+            } else {
+                xlogrecovery_seams::get_xlog_replay_rec_ptr::call().0
+            };
+            RECENT_FLUSH_PTR.with(|c| c.set(recent_flush));
+        }
+        let recent_flush = RECENT_FLUSH_PTR.with(Cell::get);
 
         // If postmaster asked us to stop and the standby slots have caught
-        // up to the flushed position, don't wait anymore (walsender.c:1893).
+        // up to the flushed position, don't wait anymore (walsender.c:1912).
         let mut wait_for_standby_at_stop = false;
         if crate::GOT_STOPPING.with(|c| c.get()) {
-            if need_to_wait_for_standbys(recent_flush)? {
+            let (wait, we) = need_to_wait_for_standbys(recent_flush)?;
+            if wait {
+                wait_event = we;
                 wait_for_standby_at_stop = true;
             } else {
                 break;
@@ -403,18 +433,15 @@ fn WalSndWaitForWal(loc_: XLogRecPtr) -> PgResult<XLogRecPtr> {
             crate::streaming::WalSndKeepalive(false, InvalidXLogRecPtr)?;
         }
 
-        // Exit if already caught up and not waiting for standby slots
-        // (NeedToWaitForWal, walsender.c:1926). Track WHY we wait so the
-        // sleep below arms the right condition variable.
-        let mut wait_event = WAIT_EVENT_WAL_SENDER_WAIT_WAL;
-        if !wait_for_standby_at_stop && loc_ <= recent_flush {
-            if need_to_wait_for_standbys(recent_flush)? {
-                wait_event = crate::WAIT_EVENT_WAIT_FOR_STANDBY_CONFIRMATION;
-            } else {
+        // Exit the loop if already caught up and we don't need to wait for
+        // standby slots (NeedToWaitForWal, walsender.c:1945). wait_event is
+        // set to the right condition variable to arm below.
+        if !wait_for_standby_at_stop {
+            let (wait, we) = need_to_wait_for_wal(loc_, recent_flush)?;
+            wait_event = we;
+            if !wait {
                 break;
             }
-        } else if wait_for_standby_at_stop {
-            wait_event = crate::WAIT_EVENT_WAIT_FOR_STANDBY_CONFIRMATION;
         }
 
         // Waiting for new WAL: by definition caught up.
@@ -553,17 +580,89 @@ fn ProcessPendingWrites() -> PgResult<()> {
     Ok(())
 }
 
-// WalSndUpdateProgress (walsender.c:1663): lag tracking is deferred (as on the
-// physical path); keep the skipped-transaction keepalive behavior so an idle
-// downstream still acks progress.
+// WalSndUpdateProgress (walsender.c:1685).
 fn WalSndUpdateProgress(
-    _opc: &mut OutputPluginContext,
-    _lsn: XLogRecPtr,
+    opc: &mut OutputPluginContext,
+    lsn: XLogRecPtr,
     _xid: TransactionId,
-    _skipped_xact: bool,
+    skipped_xact: bool,
 ) -> PgResult<()> {
-    WalSndKeepaliveIfNecessary()?;
-    if pqcomm::pq_is_send_pending() {
+    wal_snd_update_progress(opc.end_xact, lsn, skipped_xact)
+}
+
+// WALSND_LOGICAL_LAG_TRACK_INTERVAL_MS (walsender.c:1699).
+const WALSND_LOGICAL_LAG_TRACK_INTERVAL_MS: i32 = 1000;
+
+thread_local! {
+    // WalSndUpdateProgress's function-static sendTime (walsender.c:1689).
+    static LAG_TRACK_SEND_TIME: Cell<TimestampTz> = const { Cell::new(0) };
+}
+
+// SyncRepRequested() (syncrep.h:18): sync replication is asked for.
+fn sync_rep_requested() -> bool {
+    walsender_config::max_wal_senders() > 0
+        && guc_tables::vars::synchronous_commit.read()
+            > guc_tables::consts::SYNCHRONOUS_COMMIT_LOCAL_FLUSH
+}
+
+// The body of WalSndUpdateProgress over the plugin-context fields it reads
+// (ctx->end_xact), so the writer callback is testable without a decoding
+// context.
+pub(crate) fn wal_snd_update_progress(
+    end_xact: bool,
+    lsn: XLogRecPtr,
+    skipped_xact: bool,
+) -> PgResult<()> {
+    let now = get_ts();
+    let mut pending_writes = false;
+
+    // Track lag no more than once per interval to avoid flooding the tracker
+    // when we commit frequently. We only get an ack for end-of-xact LSNs from
+    // the downstream, so track lag only for those (walsender.c:1701).
+    if end_xact
+        && adt_timestamp::TimestampDifferenceExceeds(
+            LAG_TRACK_SEND_TIME.with(Cell::get),
+            now,
+            WALSND_LOGICAL_LAG_TRACK_INTERVAL_MS,
+        )
+    {
+        crate::lag::LagTrackerWrite(lsn, now);
+        LAG_TRACK_SEND_TIME.with(|c| c.set(now));
+    }
+
+    // When skipping empty transactions in synchronous replication, send a
+    // keepalive at once so the empty transaction's commit does not wait for
+    // standby acknowledgement (walsender.c:1716). Checking
+    // sync_standbys_status without a lock is fine: worst case an extra
+    // keepalive when not strictly required.
+    if skipped_xact
+        && sync_rep_requested()
+        && (crate::WalSndCtl()
+            .sync_standbys_status
+            .load(std::sync::atomic::Ordering::Relaxed)
+            & crate::SYNC_STANDBY_DEFINED
+            != 0)
+    {
+        crate::streaming::WalSndKeepalive(false, lsn)?;
+
+        // Try to flush pending output to the client.
+        if pqcomm::pq_flush_if_writable()? != 0 {
+            WalSndShutdown();
+        }
+
+        // If we have a pending write here, make sure it's actually flushed.
+        if pqcomm::pq_is_send_pending() {
+            pending_writes = true;
+        }
+    }
+
+    // Process pending writes if any, or try a keepalive if required. We don't
+    // send keepalives at end-of-xact (done later); this covers large
+    // transactions that emit no changes and could otherwise time out the
+    // downstream (walsender.c:1734).
+    let last_reply = crate::LAST_REPLY_TIMESTAMP.with(|c| c.get());
+    let timeout = guc_tables::vars::wal_sender_timeout.read() as i64;
+    if pending_writes || (!end_xact && now >= last_reply + (timeout / 2) * 1000) {
         ProcessPendingWrites()?;
     }
     Ok(())

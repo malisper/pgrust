@@ -14,7 +14,7 @@ use elog::ereport;
 use repl_gram::{ReplicationKind, StartReplicationCmd};
 use types_core::{InvalidXLogRecPtr, TimeLineID, TimestampTz, XLogRecPtr};
 use types_error::{
-    ErrorLocation, PgResult, DEBUG1, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR, LOG,
+    ErrorLocation, PgResult, COMMERROR, DEBUG1, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR,
 };
 use types_storage::waiteventset::{WL_POSTMASTER_DEATH, WL_SOCKET_READABLE, WL_SOCKET_WRITEABLE};
 use xlogreader::XLogReaderState;
@@ -277,7 +277,11 @@ pub fn XLogSendPhysical(reader: &mut XLogReaderState<'_>) -> PgResult<()> {
         transam_xlog::GetFlushRecPtr(None)
     };
 
-    // LagTrackerWrite: pg_stat_replication lag monitoring is deferred.
+    // Record the current system time as an approximation of the WAL flush
+    // time for this LSN, so a later standby reply can measure the lag
+    // (walsender.c:3271). LagTrackerWrite ignores samples where the LSN has
+    // not advanced.
+    crate::lag::LagTrackerWrite(send_rqst_ptr, get_ts());
 
     // If this is a historic timeline and we've reached the point where we
     // forked to the next timeline, stop streaming. (sentPtr may legitimately
@@ -384,16 +388,14 @@ fn xlog_send_physical_emit(
             let chunk_end = seg_end.min(endptr);
             let chunk_len = (chunk_end - chunk_start) as usize;
             let tli = if historic && seg_no == end_seg_no { next_tli } else { send_tli };
-            if xlogreader_seams::wal_read::call(
+            if let Err(errinfo) = xlogreader_seams::wal_read::call(
                 &mut reader.v,
                 &mut wal_buf[off..off + chunk_len],
                 chunk_start,
                 chunk_len,
                 tli,
-            )?
-            .is_err()
-            {
-                return wal_read_raise_error();
+            )? {
+                return wal_read_raise_error(&errinfo);
             }
             chunk_start = chunk_end;
             off += chunk_len;
@@ -439,12 +441,36 @@ fn xlog_send_physical_emit(
     Ok(())
 }
 
-// WALReadRaiseError(&errinfo).
-fn wal_read_raise_error() -> PgResult<()> {
-    ereport(ERROR)
-        .errcode_for_file_access()
-        .errmsg("could not read from WAL: requested WAL segment slice is unavailable")
-        .finish(ErrorLocation::new(file!(), line!() as i32, "WALReadRaiseError"))
+// WALReadRaiseError(&errinfo) (xlogutils.c:1047): the C error text, keyed on
+// the failing segment file name / offset, with %m from the saved errno on a
+// short read and ERRCODE_DATA_CORRUPTED on a premature zero read.
+pub(crate) fn wal_read_raise_error(
+    errinfo: &xlogreader_seams::WALReadError,
+) -> PgResult<()> {
+    let seg = &errinfo.wre_seg;
+    let fname = transam_xlog::XLogFileName(
+        seg.ws_tli,
+        seg.ws_segno,
+        transam_xlog::wal_segment_size(),
+    );
+    if errinfo.wre_read < 0 {
+        ereport(ERROR)
+            .with_saved_errno(errinfo.wre_errno)
+            .errcode_for_file_access()
+            .errmsg(format!(
+                "could not read from WAL segment {fname}, offset {}: %m",
+                errinfo.wre_off
+            ))
+            .finish(loc(1057, "WALReadRaiseError"))
+    } else {
+        ereport(ERROR)
+            .errcode(types_error::ERRCODE_DATA_CORRUPTED)
+            .errmsg(format!(
+                "could not read from WAL segment {fname}, offset {}: read {} of {}",
+                errinfo.wre_off, errinfo.wre_read, errinfo.wre_req
+            ))
+            .finish(loc(1064, "WALReadRaiseError"))
+    }
 }
 
 // static void WalSndLoop(WalSndSendDataCallback send_data): shared by the
@@ -490,6 +516,12 @@ pub(crate) fn WalSndLoop(send_data: &mut dyn FnMut(()) -> PgResult<()>) -> PgRes
 
         if caught_up() && !pqcomm::pq_is_send_pending() {
             if crate::my_walsnd_state() == WalSndState::Catchup {
+                let app = guc_tables::vars::application_name.read().unwrap_or_default();
+                let _ = ereport(DEBUG1)
+                    .errmsg_internal(format!(
+                        "\"{app}\" has now caught up with upstream server"
+                    ))
+                    .finish(loc(2898, "WalSndLoop"));
                 crate::WalSndSetState(WalSndState::Streaming);
             }
             // On SIGUSR2, drain up to the shutdown checkpoint and exit.
@@ -538,7 +570,7 @@ pub(crate) fn WalSndLoop(send_data: &mut dyn FnMut(()) -> PgResult<()>) -> PgRes
 }
 
 // static void WalSndDone(WalSndSendDataCallback send_data).
-fn WalSndDone(send_data: &mut dyn FnMut(()) -> PgResult<()>) -> PgResult<()> {
+pub(crate) fn WalSndDone(send_data: &mut dyn FnMut(()) -> PgResult<()>) -> PgResult<()> {
     // Let's be real sure we're caught up.
     send_data(())?;
 
@@ -549,6 +581,12 @@ fn WalSndDone(send_data: &mut dyn FnMut(()) -> PgResult<()>) -> PgResult<()> {
     };
 
     if caught_up() && sent_ptr() == replicated && !pqcomm::pq_is_send_pending() {
+        // Inform the standby that XLOG streaming is done (walsender.c:3570).
+        let qc = types_portal::QueryCompletion {
+            commandTag: cmdtag::GetCommandTagEnum(b"COPY"),
+            nprocessed: 0,
+        };
+        tcop_dest::EndCommand(&qc, types_dest::CommandDest::Remote, false)?;
         pqcomm::pq_flush()?;
         proc_exit(0);
     }
@@ -585,10 +623,11 @@ pub(crate) fn WalSndCheckTimeOut() {
     }
     let timeout = last_reply + timeout_guc as i64 * 1000;
     if timeout_guc > 0 && last_processing() >= timeout {
-        // Expiration usually means a communication problem; don't tell the standby.
-        let _ = ereport(LOG)
+        // Expiration usually means a communication problem; don't tell the
+        // standby (COMMERROR = LOG_SERVER_ONLY, never sent to the client).
+        let _ = ereport(COMMERROR)
             .errmsg("terminating walsender process due to replication timeout")
-            .finish(loc(2536, "WalSndCheckTimeOut"));
+            .finish(loc(2819, "WalSndCheckTimeOut"));
         WalSndShutdown();
     }
 }

@@ -7,11 +7,18 @@
 // feedback loop); pg_receivewal, the inc-3 oracle, never sends 'h'.
 #![allow(non_snake_case)]
 
-use elog::ereport;
+use elog::{ereport, message_level_is_interesting};
+use pqformat::{pq_getmsgbyte, pq_getmsgint, pq_getmsgint64};
+use stringinfo::StringInfo;
 use types_core::{InvalidXLogRecPtr, TimestampTz, XLogRecPtr};
-use types_error::{PgResult, ErrorLocation, COMMERROR, FATAL};
+use types_error::{PgResult, ErrorLocation, COMMERROR, DEBUG2, ERRCODE_PROTOCOL_VIOLATION, FATAL};
 
 use crate::streaming::{proc_exit, WalSndKeepalive};
+
+// SYNC_REP_WAIT_* read-head indices (syncrep.h) into the lag tracker.
+const SYNC_REP_WAIT_WRITE: usize = 0;
+const SYNC_REP_WAIT_FLUSH: usize = 1;
+const SYNC_REP_WAIT_APPLY: usize = 2;
 
 // pq_getmessage maximum body lengths (pqcomm.h).
 const PQ_LARGE_MESSAGE_LIMIT: i32 = 0x3fff_ffff;
@@ -32,36 +39,10 @@ fn streaming_done_receiving() -> bool {
     crate::STREAMING_DONE_RECEIVING.with(|c| c.get())
 }
 
-// A forward cursor over a received message body, mirroring the pq_getmsg*
-// readers (pqformat.c) — big-endian.
-struct MsgReader<'a> {
-    buf: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> MsgReader<'a> {
-    fn new(buf: &'a [u8]) -> Self {
-        MsgReader { buf, pos: 0 }
-    }
-    fn get_byte(&mut self) -> u8 {
-        let b = self.buf[self.pos];
-        self.pos += 1;
-        b
-    }
-    fn get_int32(&mut self) -> u32 {
-        let mut a = [0u8; 4];
-        a.copy_from_slice(&self.buf[self.pos..self.pos + 4]);
-        self.pos += 4;
-        u32::from_be_bytes(a)
-    }
-
-    fn get_int64(&mut self) -> i64 {
-        let mut a = [0u8; 8];
-        a.copy_from_slice(&self.buf[self.pos..self.pos + 8]);
-        self.pos += 8;
-        i64::from_be_bytes(a)
-    }
-}
+// Build a StringInfo over a received CopyData body so the message readers go
+// through pqformat's pq_getmsg* helpers (pqformat.c), which validate buffer
+// boundaries and raise 08P01 on a truncated packet instead of the raw slice
+// panic the hand-rolled reader had.
 
 // static void ProcessRepliesIfAny(void).
 pub fn ProcessRepliesIfAny() -> PgResult<()> {
@@ -79,8 +60,9 @@ pub fn ProcessRepliesIfAny() -> PgResult<()> {
         let r = pqcomm::pq_getbyte_if_available(&mut firstchar)?;
         if r == EOF {
             let _ = ereport(COMMERROR)
+                .errcode(ERRCODE_PROTOCOL_VIOLATION)
                 .errmsg("unexpected EOF on standby connection")
-                .finish(loc(2222, "ProcessRepliesIfAny"));
+                .finish(loc(2288, "ProcessRepliesIfAny"));
             proc_exit(0);
         }
         if r == 0 {
@@ -93,8 +75,9 @@ pub fn ProcessRepliesIfAny() -> PgResult<()> {
             b'c' | b'X' => PQ_SMALL_MESSAGE_LIMIT,
             other => {
                 return ereport(FATAL)
+                    .errcode(ERRCODE_PROTOCOL_VIOLATION)
                     .errmsg(format!("invalid standby message type \"{}\"", other as char))
-                    .finish(loc(2245, "ProcessRepliesIfAny"));
+                    .finish(loc(2312, "ProcessRepliesIfAny"));
             }
         };
 
@@ -104,8 +87,9 @@ pub fn ProcessRepliesIfAny() -> PgResult<()> {
         let mut buf = stringinfo::StringInfo::new_in(ctx.mcx())?;
         if pqcomm::pq_getmessage(&mut buf, maxmsglen)? != 0 {
             let _ = ereport(COMMERROR)
+                .errcode(ERRCODE_PROTOCOL_VIOLATION)
                 .errmsg("unexpected EOF on standby connection")
-                .finish(loc(2258, "ProcessRepliesIfAny"));
+                .finish(loc(2325, "ProcessRepliesIfAny"));
             proc_exit(0);
         }
 
@@ -138,33 +122,58 @@ pub fn ProcessRepliesIfAny() -> PgResult<()> {
     Ok(())
 }
 
-// static void ProcessStandbyMessage(void).
-fn ProcessStandbyMessage(body: &[u8]) -> PgResult<()> {
-    let mut r = MsgReader::new(body);
-    let msgtype = r.get_byte();
-    match msgtype {
-        b'r' => ProcessStandbyReplyMessage(&mut r),
-        b'h' => ProcessStandbyHSFeedbackMessage(&mut r),
+// static void ProcessStandbyMessage(void). The body is the CopyData payload;
+// a StringInfo lets the field reads use pqformat's validated pq_getmsg*.
+pub(crate) fn ProcessStandbyMessage(body: &[u8]) -> PgResult<()> {
+    let ctx = mcx::MemoryContext::new("standby_reply_body");
+    let mut msg = StringInfo::new_in(ctx.mcx())?;
+    msg.append_bytes(body)?;
+
+    let msgtype = pq_getmsgbyte(&mut msg)?;
+    match msgtype as u8 {
+        b'r' => ProcessStandbyReplyMessage(&mut msg),
+        b'h' => ProcessStandbyHSFeedbackMessage(&mut msg),
         _ => {
             let _ = ereport(COMMERROR)
-                .errmsg(format!("unexpected message type \"{}\"", msgtype as char))
-                .finish(loc(2288, "ProcessStandbyMessage"));
+                .errcode(ERRCODE_PROTOCOL_VIOLATION)
+                .errmsg(format!("unexpected message type \"{}\"", msgtype as u8 as char))
+                .finish(loc(2409, "ProcessStandbyMessage"));
             proc_exit(0);
         }
     }
 }
 
-// static void ProcessStandbyReplyMessage(void).
-fn ProcessStandbyReplyMessage(r: &mut MsgReader<'_>) -> PgResult<()> {
-    let write_ptr = r.get_int64() as XLogRecPtr;
-    let flush_ptr = r.get_int64() as XLogRecPtr;
-    let apply_ptr = r.get_int64() as XLogRecPtr;
-    let reply_time: TimestampTz = r.get_int64();
-    let reply_requested = r.get_byte() != 0;
+// static void ProcessStandbyReplyMessage(void) (walsender.c:2445).
+fn ProcessStandbyReplyMessage(msg: &mut StringInfo<'_>) -> PgResult<()> {
+    let write_ptr = pq_getmsgint64(msg)? as XLogRecPtr;
+    let flush_ptr = pq_getmsgint64(msg)? as XLogRecPtr;
+    let apply_ptr = pq_getmsgint64(msg)? as XLogRecPtr;
+    let reply_time: TimestampTz = pq_getmsgint64(msg)?;
+    let reply_requested = pq_getmsgbyte(msg)? != 0;
 
-    // LagTrackerRead: pg_stat_replication lag columns are monitoring-only and
-    // deferred; report unknown (-1) lag.
-    let (write_lag, flush_lag, apply_lag) = (-1i64, -1i64, -1i64);
+    if message_level_is_interesting(DEBUG2) {
+        let reply_time_str = timestamp_seams::timestamptz_to_str::call(reply_time);
+        let _ = elog::elog(
+            DEBUG2,
+            format!(
+                "write {:X}/{:X} flush {:X}/{:X} apply {:X}/{:X}{} reply_time {reply_time_str}",
+                (write_ptr >> 32) as u32,
+                write_ptr as u32,
+                (flush_ptr >> 32) as u32,
+                flush_ptr as u32,
+                (apply_ptr >> 32) as u32,
+                apply_ptr as u32,
+                if reply_requested { " (reply requested)" } else { "" },
+            ),
+        );
+    }
+
+    // See if we can compute the round-trip lag for these positions
+    // (walsender.c:2487 LagTrackerRead per reported head).
+    let now = get_ts();
+    let write_lag = crate::lag::LagTrackerRead(SYNC_REP_WAIT_WRITE, write_ptr, now);
+    let flush_lag = crate::lag::LagTrackerRead(SYNC_REP_WAIT_FLUSH, flush_ptr, now);
+    let apply_lag = crate::lag::LagTrackerRead(SYNC_REP_WAIT_APPLY, apply_ptr, now);
 
     let clear_lag_times =
         reply_clears_lag_times(write_ptr, flush_ptr, apply_ptr, crate::SENT_PTR.with(|c| c.get()));
@@ -311,16 +320,16 @@ fn transaction_id_in_recent_past(xid: types_core::TransactionId, epoch: u32) -> 
     types_core::xact::TransactionIdPrecedesOrEquals(xid, next_xid)
 }
 
-// static void ProcessStandbyHSFeedbackMessage(void) (walsender.c:2602).
-fn ProcessStandbyHSFeedbackMessage(r: &mut MsgReader<'_>) -> PgResult<()> {
+// static void ProcessStandbyHSFeedbackMessage(void) (walsender.c:2633).
+fn ProcessStandbyHSFeedbackMessage(msg: &mut StringInfo<'_>) -> PgResult<()> {
     use std::sync::atomic::Ordering::Relaxed;
     use types_core::{FirstNormalTransactionId, InvalidTransactionId};
 
-    let reply_time: TimestampTz = r.get_int64();
-    let feedback_xmin = r.get_int32();
-    let feedback_epoch = r.get_int32();
-    let feedback_catalog_xmin = r.get_int32();
-    let feedback_catalog_epoch = r.get_int32();
+    let reply_time: TimestampTz = pq_getmsgint64(msg)?;
+    let feedback_xmin = pq_getmsgint(msg, 4)?;
+    let feedback_epoch = pq_getmsgint(msg, 4)?;
+    let feedback_catalog_xmin = pq_getmsgint(msg, 4)?;
+    let feedback_catalog_epoch = pq_getmsgint(msg, 4)?;
 
     crate::my_set_reply_time(reply_time);
 
