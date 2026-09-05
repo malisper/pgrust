@@ -711,3 +711,53 @@ pub fn icu_wc_tolower(c: u32) -> u32 {
     // SAFETY: pure uchar.h case mapping.
     (unsafe { (ffi::icu().u_tolower)(c as i32) }) as u32
 }
+
+/// The ICU locale ids uloc_countAvailable()/uloc_getAvailable() enumerate
+/// (pg_import_system_collations, collationcmds.c:979-987), in ICU's order;
+/// None when libicu is not loadable — the analog of a C build without
+/// USE_ICU, where that leg is compiled out.
+pub fn icu_available_locale_ids() -> Option<Vec<String>> {
+    let api = ffi::try_icu()?;
+    // SAFETY: uloc_getAvailable returns static NUL-terminated ids for
+    // 0 <= n < uloc_countAvailable().
+    let ids = unsafe {
+        let n = (api.uloc_countAvailable)();
+        (0..n)
+            .map(|i| {
+                let p = (api.uloc_getAvailable)(i);
+                core::ffi::CStr::from_ptr(p).to_string_lossy().into_owned()
+            })
+            .collect()
+    };
+    Some(ids)
+}
+
+/// get_icu_locale_comment (collationcmds.c:679-710): the locale's English
+/// display name, or None when ICU cannot produce one or it is not all-ASCII
+/// (template0 contents must be encoding-agnostic).
+pub fn icu_locale_display_name_ascii(localename: &str) -> Option<String> {
+    let api = ffi::try_icu()?;
+    let cloc = format!("{localename}\0");
+    let mut displayname = [0 as UChar; 128];
+    let mut status = ffi::U_ZERO_ERROR;
+    // SAFETY: cloc and "en" are NUL-terminated; displayname holds the 128
+    // UChars passed as its capacity.
+    let len_uchar = unsafe {
+        (api.uloc_getDisplayName)(
+            cloc.as_ptr() as *const c_char,
+            b"en\0".as_ptr() as *const c_char,
+            displayname.as_mut_ptr(),
+            displayname.len() as i32,
+            &mut status,
+        )
+    };
+    if ffi::U_FAILURE(status) {
+        return None; // no good reason to raise an error
+    }
+    let shown = &displayname[..(len_uchar.max(0) as usize).min(displayname.len())];
+    // Check for non-ASCII comment (can't use pg_is_ascii for this).
+    if shown.iter().any(|&u| u > 127) {
+        return None;
+    }
+    Some(shown.iter().map(|&u| u as u8 as char).collect())
+}

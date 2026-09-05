@@ -156,6 +156,13 @@ pub struct IcuApi {
     ) -> i32,
     pub uloc_countAvailable: unsafe extern "C" fn() -> i32,
     pub uloc_getAvailable: unsafe extern "C" fn(n: i32) -> *const c_char,
+    pub uloc_getDisplayName: unsafe extern "C" fn(
+        localeID: *const c_char,
+        inLocaleID: *const c_char,
+        result: *mut UChar,
+        maxResultSize: i32,
+        err: *mut UErrorCode,
+    ) -> i32,
     pub uiter_setUTF8:
         unsafe extern "C" fn(iter: *mut UCharIterator, s: *const c_char, length: i32),
     pub uiter_setString:
@@ -346,6 +353,7 @@ fn resolve_all(handle: *mut c_void, suffix: i32) -> Result<IcuApi, String> {
         uloc_toLanguageTag: resolve!(uloc_toLanguageTag),
         uloc_countAvailable: resolve!(uloc_countAvailable),
         uloc_getAvailable: resolve!(uloc_getAvailable),
+        uloc_getDisplayName: resolve!(uloc_getDisplayName),
         uiter_setUTF8: resolve!(uiter_setUTF8),
         uiter_setString: resolve!(uiter_setString),
         u_isdigit: resolve!(u_isdigit),

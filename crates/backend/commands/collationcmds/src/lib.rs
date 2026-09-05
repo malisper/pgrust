@@ -6,6 +6,7 @@
 #![allow(non_snake_case)]
 
 pub mod builtins;
+mod import;
 
 use datum::Datum;
 use mcx::Mcx;
@@ -481,7 +482,11 @@ pub fn AlterCollation<'mcx>(
         Anum_pg_collation_colllocale
     };
     let (locale_datum, locale_isnull) = getattr(locale_attno);
-    assert!(!locale_isnull, "unexpected null locale in pg_collation row");
+    let locale_datum = attr_not_null(
+        if collprovider == COLLPROVIDER_LIBC { "collcollate" } else { "colllocale" },
+        locale_datum,
+        locale_isnull,
+    )?;
     let locale = text_datum_to_string(locale_datum);
 
     let newversion = pg_locale::get_collation_actual_version(collprovider, &locale)?;
@@ -533,8 +538,21 @@ pub fn AlterCollation<'mcx>(
     genam::systable_endscan(mcx, scan)?;
     catalog_indexing::CatalogTupleUpdate(mcx, &rel, &otid, &mut newtup)?;
 
+    objectaccess::InvokeObjectPostAlterHook(COLLATION_RELATION_ID, coll_oid, 0)?;
+
     rel.close(types_rel::NoLock)?;
     Ok(coll_oid)
+}
+
+// SysCacheGetAttrNotNull (syscache.c:641) over a pg_collation attribute: a
+// NULL catalog value is elog(ERROR) — catchable XX000 — never a panic.
+fn attr_not_null(column: &str, datum: Datum, isnull: bool) -> PgResult<Datum> {
+    if isnull {
+        return Err(Box::new(PgError::error(format!(
+            "unexpected null value in cached tuple for catalog pg_collation column {column}"
+        ))));
+    }
+    Ok(datum)
 }
 
 // IsThereCollationInNamespace (collationcmds.c): friendliness check ahead of
@@ -591,6 +609,24 @@ mod tests {
         let e = from_collation_oid(mcx, &def).unwrap_err();
         assert_eq!(e.sqlstate(), ERRCODE_SYNTAX_ERROR);
         assert_eq!(e.message(), "argument of from must be a name");
+    }
+
+    #[test]
+    fn null_locale_attr_is_elog_xx000_not_panic() {
+        // collationcmds.c:459-461 SysCacheGetAttrNotNull -> syscache.c:641.
+        let e = attr_not_null("collcollate", Datum::null(), true).unwrap_err();
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(
+            e.message(),
+            "unexpected null value in cached tuple for catalog pg_collation column collcollate"
+        );
+        let e = attr_not_null("colllocale", Datum::null(), true).unwrap_err();
+        assert_eq!(
+            e.message(),
+            "unexpected null value in cached tuple for catalog pg_collation column colllocale"
+        );
+        let d = Datum::from_i32(7);
+        assert_eq!(attr_not_null("collcollate", d, false).unwrap(), d);
     }
 
     #[test]

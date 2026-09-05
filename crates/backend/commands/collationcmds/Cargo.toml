@@ -43,6 +43,11 @@ heaptuple = { path = "../../access/common/heaptuple" }
 catalog_indexing = { path = "../../catalog/catalog_indexing" }
 varlena = { path = "../../utils/adt/varlena" }
 catalog_objectaddress = { path = "../../catalog/objectaddress" }
+objectaccess = { path = "../../catalog/objectaccess" }
+superuser = { path = "../../utils/misc/superuser" }
+commands_comment = { path = "../comment" }
+fd = { path = "../../storage/file/fd" }
+wchar = { path = "../../../common/wchar" }
 
 [dev-dependencies]
 fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
