@@ -260,6 +260,9 @@ pub fn CreateTableSpace<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateTableSpaceStmt<'mcx>)
 
     pg_shdepend::recordDependencyOnOwner(mcx, TableSpaceRelationId, tablespaceoid, owner_id)?;
 
+    // tablespace.c:355
+    objectaccess::InvokeObjectPostCreateHook(TableSpaceRelationId, tablespaceoid, 0)?;
+
     create_tablespace_directories(&location, tablespaceoid)?;
 
     let mut xlrec = std::vec::Vec::with_capacity(4 + location.len() + 1);
@@ -380,6 +383,9 @@ pub fn DropTableSpace<'mcx>(mcx: Mcx<'mcx>, stmt: &DropTableSpaceStmt<'mcx>) -> 
             .into_error()
             .into());
     }
+
+    // tablespace.c:463: DROP hook for the tablespace being removed
+    objectaccess::InvokeObjectDropHook(TableSpaceRelationId, tablespaceoid, 0)?;
 
     catalog_indexing::CatalogTupleDelete(&rel, &t_self)?;
     genam::systable_endscan(mcx, scan)?;
@@ -503,7 +509,9 @@ fn create_tablespace_directories(location: &str, tablespaceoid: Oid) -> PgResult
         }
     }
 
-    match std::fs::symlink_metadata(&location_with_version_dir) {
+    // tablespace.c:628 probes with stat(), which follows symlinks: a symlink to
+    // an existing directory is "already in use", a dangling one is ENOENT.
+    match std::fs::metadata(&location_with_version_dir) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             if fd::MakePGDirectory(&location_with_version_dir) < 0 {
                 let e2 = std::io::Error::last_os_error();
@@ -623,11 +631,13 @@ fn destroy_tablespace_directories(tablespaceoid: Oid, redo: bool) -> PgResult<bo
             return Ok(false);
         }
         Err(e) => {
+            // tablespace.c:743: AllocateDir failed with a non-ENOENT errno and
+            // the NULL dirdesc is handed to ReadDir, which reports the open.
             return Err(ereport(ERROR)
                 .with_saved_errno(e.raw_os_error().unwrap_or(0))
                 .errcode_for_file_access()
                 .errmsg(format!(
-                    "could not read directory \"{linkloc_with_version_dir}\": %m"
+                    "could not open directory \"{linkloc_with_version_dir}\": %m"
                 ))
                 .into_error()
                 .into());
@@ -811,6 +821,9 @@ pub fn RenameTableSpace(mcx: Mcx<'_>, oldname: &str, newname: &str) -> PgResult<
 
     catalog_indexing::CatalogTupleUpdate(mcx, &rel, &otid, &mut newtuple)?;
 
+    // tablespace.c:1002
+    objectaccess::InvokeObjectPostAlterHook(TableSpaceRelationId, tsp_id, 0)?;
+
     rel.close(types_storage::lock::NoLock)?;
     Ok(tsp_id)
 }
@@ -889,6 +902,9 @@ pub fn AlterTableSpaceOptions<'mcx>(
     genam::systable_endscan(mcx, scan)?;
 
     catalog_indexing::CatalogTupleUpdate(mcx, &rel, &otid, &mut newtuple)?;
+
+    // tablespace.c:1074
+    objectaccess::InvokeObjectPostAlterHook(TableSpaceRelationId, tablespaceoid, 0)?;
 
     rel.close(types_storage::lock::NoLock)?;
     Ok(tablespaceoid)
@@ -1240,7 +1256,11 @@ pub fn tblspc_redo(record: &mut xlogreader_seams::XLogReaderState) -> PgResult<(
             }
         }
     } else {
-        panic!("tblspc_redo: unknown op code {info}");
+        // tablespace.c:1568: elog(PANIC, "tblspc_redo: unknown op code %u", info)
+        return Err(Box::new(PgError::new(
+            types_error::PANIC,
+            format!("tblspc_redo: unknown op code {info}"),
+        )));
     }
     Ok(())
 }
@@ -1303,5 +1323,93 @@ mod pg_upgrade_oid_tests {
         SetNextPgTablespaceOid(200);
         assert_eq!(take_next_pg_tablespace_oid(), Some(200));
         assert_eq!(take_next_pg_tablespace_oid(), None);
+    }
+}
+
+// audit-18.6 b178 witnesses: tblspc_redo unknown-opcode surface (row
+// 2a354ffe) and create_tablespace_directories' stat() semantics (row b464c3ab).
+#[cfg(test)]
+mod redo_dispatch_tests {
+    use super::*;
+
+    // tablespace.c:1568: elog(PANIC, "tblspc_redo: unknown op code %u", info)
+    // is a PANIC-level ereport that the recovery loop surfaces as a server
+    // crash with the C message; it is never a bare Rust panic. The info byte
+    // is xl_info & ~XLR_INFO_MASK, flags included (0xE0 = 224).
+    #[test]
+    fn unknown_opcode_is_a_panic_level_error() {
+        let mut rec = xlogreader_seams::DecodedXLogRecord::default();
+        rec.xl_info = 0xE0;
+        let mut record =
+            xlogreader_seams::XLogReaderState { record: Some(rec), ..Default::default() };
+        let err = tblspc_redo(&mut record).expect_err("unknown tblspc opcode must not redo silently");
+        assert_eq!(err.message, "tblspc_redo: unknown op code 224");
+        assert_eq!(err.level, types_error::PANIC);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod directory_tests {
+    use super::*;
+
+    static SEAMS: std::sync::Once = std::sync::Once::new();
+
+    fn install_seams() {
+        SEAMS.call_once(|| xlogutils_seams::in_recovery::set(|| false));
+    }
+
+    fn scratch_root(name: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir()
+            .join(format!("pgrust-tablespace-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    // tablespace.c:628 probes the version directory with stat(), which
+    // follows symlinks: a symlink to an existing directory is S_ISDIR, so the
+    // location is "already in use as a tablespace" (ERRCODE_OBJECT_IN_USE,
+    // tablespace.c:647-651) — not "exists but is not a directory"
+    // (ERRCODE_WRONG_OBJECT_TYPE), which is what an lstat-based probe reports.
+    #[test]
+    fn symlinked_version_dir_is_already_in_use() {
+        install_seams();
+        let root = scratch_root("symlink");
+        let location = root.join("loc");
+        let target = root.join("target");
+        std::fs::create_dir_all(&location).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        let version_dir = location.join(TABLESPACE_VERSION_DIRECTORY);
+        std::os::unix::fs::symlink(&target, &version_dir).unwrap();
+
+        let err = create_tablespace_directories(location.to_str().unwrap(), 4_000_000_000)
+            .expect_err("a symlink to a directory must refuse as already in use");
+        assert_eq!(err.sqlstate(), ERRCODE_OBJECT_IN_USE);
+        assert_eq!(
+            err.message,
+            format!("directory \"{}\" already in use as a tablespace", version_dir.display())
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Control: a regular file at the version path is still WRONG_OBJECT_TYPE
+    // on both stat() and lstat() (tablespace.c:643-646).
+    #[test]
+    fn regular_file_version_dir_is_not_a_directory() {
+        install_seams();
+        let root = scratch_root("regfile");
+        let location = root.join("loc");
+        std::fs::create_dir_all(&location).unwrap();
+        let version_dir = location.join(TABLESPACE_VERSION_DIRECTORY);
+        std::fs::write(&version_dir, b"").unwrap();
+
+        let err = create_tablespace_directories(location.to_str().unwrap(), 4_000_000_001)
+            .expect_err("a regular file at the version path must be refused");
+        assert_eq!(err.sqlstate(), ERRCODE_WRONG_OBJECT_TYPE);
+        assert_eq!(
+            err.message,
+            format!("\"{}\" exists but is not a directory", version_dir.display())
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

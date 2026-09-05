@@ -4339,6 +4339,7 @@ dependencies = [
  "mcx",
  "miscinit",
  "pg_path",
+ "objectaccess",
  "pg_shdepend",
  "procsignal",
  "reloptions",

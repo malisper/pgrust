@@ -39,6 +39,7 @@ reloptions = { path = "../../access/common/reloptions" }
 catalog = { path = "../../catalog/catalog" }
 catalog_indexing = { path = "../../catalog/catalog_indexing" }
 aclchk = { path = "../../catalog/aclchk" }
+objectaccess = { path = "../../catalog/objectaccess" }
 pg_shdepend = { path = "../../catalog/pg_shdepend" }
 xact = { path = "../../access/transam/xact" }
 xloginsert = { path = "../../access/transam/xloginsert" }
