@@ -145,8 +145,11 @@ impl<'mcx> ScanNode<'mcx> for IndexOnlyScanState<'mcx> {
                     continue;
                 }
                 exectuples::exec_clear_tuple(estate.slot_mut(table_slot_id), mcx);
-                // Only MVCC snapshots here (no HOT continuation), as C asserts.
-                debug_assert!(!scandesc.xs_heap_continue);
+                // C nodeIndexonlyscan.c:181: only MVCC snapshots are supported,
+                // so a visible entry never continues the HOT chain.
+                if scandesc.xs_heap_continue {
+                    return Err(non_mvcc_snapshot_error());
+                }
                 tuple_from_heap = true;
             }
 
@@ -161,9 +164,11 @@ impl<'mcx> ScanNode<'mcx> for IndexOnlyScanState<'mcx> {
             // SAFETY: xs_itup points at the AM's page-copy buffer, live until
             // the next amgettuple/amendscan on this descriptor.
             unsafe {
+                let (slot, per_tuple_mcx) = estate.slot_and_per_tuple_mcx(slot_id, ecxt);
                 store_index_tuple(
-                    estate.slot_mut(slot_id),
+                    slot,
                     mcx,
+                    per_tuple_mcx,
                     itup.as_ptr(),
                     itupdesc,
                     ioss_NameCStringAttNums,
@@ -181,6 +186,8 @@ impl<'mcx> ScanNode<'mcx> for IndexOnlyScanState<'mcx> {
                     slot_id,
                 )?;
                 if !passes {
+                    // InstrCountFiltered2: EXPLAIN's Rows Removed by Index Recheck.
+                    estate.instr_count_filtered2(ss.instr_idx);
                     continue;
                 }
             }
@@ -278,8 +285,10 @@ pub fn index_only_scan_batch_next<'mcx>(
                 continue;
             }
             exectuples::exec_clear_tuple(estate.slot_mut(table_slot_id), mcx);
-            // Only MVCC snapshots here (no HOT continuation), as C asserts.
-            debug_assert!(!scandesc.xs_heap_continue);
+            // C nodeIndexonlyscan.c:181: only MVCC snapshots are supported.
+            if scandesc.xs_heap_continue {
+                return Err(non_mvcc_snapshot_error());
+            }
         } else {
             let snap = estate
                 .es_snapshot
@@ -316,9 +325,11 @@ pub fn index_only_scan_batch_store<'mcx>(
     // SAFETY: xs_itup points at the AM's page-copy buffer, live until the
     // next amgettuple/amendscan on this descriptor.
     unsafe {
+        let (slot, per_tuple_mcx) = estate.slot_and_per_tuple_mcx(slot_id, node.ss.ps_ExprContext);
         store_index_tuple(
-            estate.slot_mut(slot_id),
+            slot,
             mcx,
+            per_tuple_mcx,
             itup.as_ptr(),
             itupdesc,
             &node.ioss_NameCStringAttNums,
@@ -333,6 +344,15 @@ pub fn index_only_scan_batch_store<'mcx>(
 fn no_data_returned() -> Box<PgError> {
     Box::new(PgError::error(
         "no data returned for index-only scan".to_string(),
+    ))
+}
+
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn non_mvcc_snapshot_error() -> Box<PgError> {
+    Box::new(PgError::error(
+        "non-MVCC snapshots are not supported in index-only scans".to_string(),
     ))
 }
 
@@ -356,12 +376,15 @@ fn check_for_interrupts() -> PgResult<()> {
 
 /// `StoreIndexTuple` over btree tuple formats. The deform loop is C's
 /// index_deform_tuple; it moves to indextuple.c's unit when that lands.
+/// `per_tuple_mcx` is the node's ecxt_per_tuple_memory: C allocates the
+/// re-inflated NAME blocks there (reset per row), never in the query context.
 ///
 /// # Safety
 /// `itup` must be a live, MAXALIGNed index tuple image matching `itupdesc`.
 pub unsafe fn store_index_tuple<'mcx>(
     slot: &mut SlotData<'mcx>,
     mcx: Mcx<'mcx>,
+    per_tuple_mcx: Mcx<'_>,
     itup: ITup,
     itupdesc: &TupleDescData<'_>,
     name_cstring_attnums: &[AttrNumber],
@@ -382,7 +405,8 @@ pub unsafe fn store_index_tuple<'mcx>(
         base.tts_isnull[i] = isnull;
     }
     // C's cstring-to-NAME realloc: btree name_ops stores names as cstrings
-    // in index tuples; pad back to a NAMEDATALEN block for the slot.
+    // in index tuples; pad back to a NAMEDATALEN block for the slot
+    // (nodeIndexonlyscan.c:307: MemoryContextAlloc in ecxt_per_tuple_memory).
     for &attnum in name_cstring_attnums {
         // name_cstring_attnums stores 0-based column indexes.
         let i = attnum as usize;
@@ -391,8 +415,8 @@ pub unsafe fn store_index_tuple<'mcx>(
         }
         const NAMEDATALEN: usize = 64;
         let layout = core::alloc::Layout::from_size_align(NAMEDATALEN, 4).expect("name layout");
-        let Ok(block) = mcx.allocate(layout) else {
-            mcx.oom(NAMEDATALEN);
+        let Ok(block) = per_tuple_mcx.allocate(layout) else {
+            per_tuple_mcx.oom(NAMEDATALEN);
             unreachable!()
         };
         let dst = block.cast::<u8>().as_ptr();
@@ -758,7 +782,11 @@ pub fn exec_index_only_scan_initialize_worker<'mcx>(
     )?;
     scandesc.xs_want_itup = true;
     if node.ioss_Runtime.as_deref().is_none_or(|r| r.ready) {
-        index_rescan(&mut scandesc, Some(&node.ioss_ScanKeys), None)?;
+        index_rescan(
+            &mut scandesc,
+            Some(&node.ioss_ScanKeys),
+            Some(&node.ioss_OrderByKeys),
+        )?;
     }
     debug_assert!(node.ioss_ScanDesc.is_none());
     node.ioss_ScanDesc = Some(::mcx::alloc_in(mcx, scandesc)?);

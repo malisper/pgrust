@@ -31,7 +31,7 @@ use ::types_storage::{ReadBufferMode, RelFileLocator, RelFileLocatorBackend};
 use ::types_tuple::itemptr::ItemPointerData;
 use ::types_tuple::{
     CompactAttribute, FormData_pg_attribute, NameData, PgTypeShape, TupleDescData,
-    HEAP_XMAX_INVALID, TYPALIGN_INT, TYPSTORAGE_PLAIN,
+    HEAP_XMAX_INVALID, TYPALIGN_CHAR, TYPALIGN_INT, TYPSTORAGE_PLAIN,
 };
 use executils::EStateData;
 use syscache_seams::PgAmopShape;
@@ -42,6 +42,8 @@ const INT4_BTREE_OPFAMILY: Oid = 1976;
 const OP_INT4EQ: Oid = 96;
 const F_INT4EQ: Oid = 65;
 const F_BTINT4CMP: Oid = 351;
+const NAME_BTREE_OPFAMILY: Oid = 1986;
+const NAMEDATALEN: usize = 64;
 
 struct Fake {
     tables: HashMap<Oid, Vec<Buffer>>,
@@ -202,6 +204,20 @@ fn install_seams() {
                     typstorage: TYPSTORAGE_PLAIN,
                     typcollation: 0,
                 }),
+                NAMEOID => Some(PgTypeShape {
+                    typlen: NAMEDATALEN as i16,
+                    typbyval: false,
+                    typalign: TYPALIGN_CHAR,
+                    typstorage: TYPSTORAGE_PLAIN,
+                    typcollation: 0,
+                }),
+                CSTRINGOID => Some(PgTypeShape {
+                    typlen: -2,
+                    typbyval: false,
+                    typalign: TYPALIGN_CHAR,
+                    typstorage: TYPSTORAGE_PLAIN,
+                    typcollation: 0,
+                }),
                 _ => None,
             })
         });
@@ -296,12 +312,33 @@ fn itup_image(tid: ItemPointerData, value: i32) -> Box<Img> {
 
 fn add_index_tuple(p: &mut TestPage, tid: ItemPointerData, value: i32) {
     let img = itup_image(tid, value);
+    add_index_image(p, &img.0);
+}
+
+// MAXALIGNed cstring index-tuple image (btree name_ops storage form):
+// header, then the NUL-terminated bytes; t_info carries the varwidth bit.
+fn cstring_itup_image(tid: ItemPointerData, s: &str) -> Vec<u8> {
+    let size = (8 + s.len() + 1 + 7) & !7;
+    let mut img = vec![0u8; size];
+    // SAFETY: owned image bytes; ItemPointerData is a 6B POD.
+    unsafe {
+        img.as_mut_ptr()
+            .cast::<ItemPointerData>()
+            .write_unaligned(tid)
+    };
+    img[6..8].copy_from_slice(&(size as u16 | ::nbtree::itup::INDEX_VAR_MASK).to_ne_bytes());
+    img[8..8 + s.len()].copy_from_slice(s.as_bytes());
+    img
+}
+
+fn add_index_image(p: &mut TestPage, img: &[u8]) {
+    let len = img.len();
     let pd_lower = u16::from_ne_bytes([p.0[12], p.0[13]]) as usize;
     let pd_upper = u16::from_ne_bytes([p.0[14], p.0[15]]) as usize;
-    let off = pd_upper - 16;
-    p.0[off..off + 16].copy_from_slice(&img.0);
+    let off = pd_upper - len;
+    p.0[off..off + len].copy_from_slice(img);
     let mut iid = ItemIdData::new(0, 0, 0);
-    iid.set_normal(off as u16, 16);
+    iid.set_normal(off as u16, len as u16);
     // SAFETY: line-pointer slot in the owned page.
     unsafe {
         p.0.as_mut_ptr()
@@ -403,6 +440,26 @@ fn register_indexed_table(
     register_pages(index_oid, vec![meta_page(1, 0), leaf]);
 }
 
+// Heap page 0 holds one placeholder row per name (never fetched: the VM
+// marks block 0 all-visible); a root leaf indexes the names as cstrings in
+// ascending order, as btree name_ops stores NAME keys.
+fn register_indexed_name_table(heap_oid: Oid, index_oid: Oid, names: &[&str]) {
+    register_pages(heap_oid, vec![build_heap_page(&vec![0; names.len()])]);
+    register_pages_in(heap_oid, vec![vm_page(&[0])], true);
+
+    let mut keyed: Vec<(&str, u16)> = names
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (*s, (i + 1) as u16))
+        .collect();
+    keyed.sort();
+    let mut leaf = new_bt_page(BTP_LEAF | BTP_ROOT, 0);
+    for (s, off) in keyed {
+        add_index_image(&mut leaf, &cstring_itup_image(ItemPointerData::new(0, off), s));
+    }
+    register_pages(index_oid, vec![meta_page(1, 0), leaf]);
+}
+
 fn heap_reads(heap_oid: Oid) -> u32 {
     with_fake(|f| f.reads.get(&heap_oid).copied().unwrap_or(0))
 }
@@ -414,16 +471,39 @@ fn quiesced() {
 }
 
 fn int4_tupdesc<'mcx>(mcx: Mcx<'mcx>) -> Rc<TupleDescData<'mcx>> {
-    let att = FormData_pg_attribute {
-        attnum: 1,
-        atttypid: INT4OID,
-        atttypmod: -1,
-        attlen: 4,
-        attbyval: true,
-        attalign: TYPALIGN_INT,
-        attstorage: TYPSTORAGE_PLAIN,
-        ..Default::default()
-    };
+    one_att_tupdesc(
+        mcx,
+        FormData_pg_attribute {
+            attnum: 1,
+            atttypid: INT4OID,
+            atttypmod: -1,
+            attlen: 4,
+            attbyval: true,
+            attalign: TYPALIGN_INT,
+            attstorage: TYPSTORAGE_PLAIN,
+            ..Default::default()
+        },
+    )
+}
+
+// btree name_ops physical storage: NAME keys are stored as cstrings.
+fn cstring_tupdesc<'mcx>(mcx: Mcx<'mcx>) -> Rc<TupleDescData<'mcx>> {
+    one_att_tupdesc(
+        mcx,
+        FormData_pg_attribute {
+            attnum: 1,
+            atttypid: CSTRINGOID,
+            atttypmod: -1,
+            attlen: -2,
+            attbyval: false,
+            attalign: TYPALIGN_CHAR,
+            attstorage: TYPSTORAGE_PLAIN,
+            ..Default::default()
+        },
+    )
+}
+
+fn one_att_tupdesc<'mcx>(mcx: Mcx<'mcx>, att: FormData_pg_attribute) -> Rc<TupleDescData<'mcx>> {
     let mut attrs = PgVec::new_in(mcx);
     let mut compact = PgVec::new_in(mcx);
     compact.push(CompactAttribute::populate_from(&att));
@@ -513,6 +593,19 @@ fn noop_close(_oid: Oid, _mode: LOCKMODE) -> types_error::PgResult<()> {
 }
 
 fn index_relation<'mcx>(mcx: Mcx<'mcx>, oid: Oid, heap_oid: Oid) -> Relation<'mcx> {
+    index_relation_keyed(mcx, oid, heap_oid, int4_tupdesc(mcx), INT4OID, INT4_BTREE_OPFAMILY)
+}
+
+// Single-key btree index: `rd_att` is the physical storage descriptor,
+// `opcintype`/`opfamily` the opclass input type and family.
+fn index_relation_keyed<'mcx>(
+    mcx: Mcx<'mcx>,
+    oid: Oid,
+    heap_oid: Oid,
+    rd_att: Rc<TupleDescData<'mcx>>,
+    opcintype: Oid,
+    opfamily: Oid,
+) -> Relation<'mcx> {
     let mut relname = NameData::default();
     relname.namestrcpy("t_idx");
     let one = |v: Oid| {
@@ -565,7 +658,7 @@ fn index_relation<'mcx>(mcx: Mcx<'mcx>, oid: Oid, heap_oid: Oid) -> Relation<'mc
             relfrozenxid: 3,
             relminmxid: 1,
         },
-        rd_att: int4_tupdesc(mcx),
+        rd_att,
         rd_index: Some(FormData_pg_index {
             indexrelid: oid,
             indrelid: heap_oid,
@@ -583,8 +676,8 @@ fn index_relation<'mcx>(mcx: Mcx<'mcx>, oid: Oid, heap_oid: Oid) -> Relation<'mc
             indexprs_src: None,
             indpred_src: None,
         }),
-        rd_opcintype: one(INT4OID),
-        rd_opfamily: one(INT4_BTREE_OPFAMILY),
+        rd_opcintype: one(opcintype),
+        rd_opfamily: one(opfamily),
         rd_indoption: indoption,
         rd_indcollation: one(0),
         rd_options: None,
@@ -606,11 +699,12 @@ fn index_relation<'mcx>(mcx: Mcx<'mcx>, oid: Oid, heap_oid: Oid) -> Relation<'mc
 }
 
 fn static_mvcc_snapshot() -> Rc<SnapshotData<'static>> {
+    static_snapshot(SnapshotType::SNAPSHOT_MVCC)
+}
+
+fn static_snapshot(kind: SnapshotType) -> Rc<SnapshotData<'static>> {
     let ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap-test")));
-    Rc::new(SnapshotData::sentinel(
-        ctx.mcx(),
-        SnapshotType::SNAPSHOT_MVCC,
-    ))
+    Rc::new(SnapshotData::sentinel(ctx.mcx(), kind))
 }
 
 static NEXT_OID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(90000);
@@ -626,6 +720,12 @@ fn with_mcx<R>(f: impl for<'m> FnOnce(Mcx<'m>) -> R) -> R {
 
 fn index_var_tlist<'mcx>(mcx: Mcx<'mcx>) -> NodeList<'mcx> {
     let var = Node::mk_var(mcx, INDEX_VAR, 1, INT4OID, -1, 0, 0).unwrap();
+    let tle = Node::mk_target_entry(mcx, var, 1, None, false).unwrap();
+    NodeList::make1(mcx, tle).unwrap()
+}
+
+fn name_var_tlist<'mcx>(mcx: Mcx<'mcx>) -> NodeList<'mcx> {
+    let var = Node::mk_var(mcx, INDEX_VAR, 1, NAMEOID, -1, 0, 0).unwrap();
     let tle = Node::mk_target_entry(mcx, var, 1, None, false).unwrap();
     NodeList::make1(mcx, tle).unwrap()
 }
@@ -665,6 +765,25 @@ fn mk_index_only_scan<'mcx>(mcx: Mcx<'mcx>, k: i32) -> IndexOnlyScan<'mcx> {
         recheckqual: indexqual(mcx, k),
         indexorderby: NodeList::nil(),
         indextlist: index_var_tlist(mcx),
+        indexorderdir: 1,
+    }
+}
+
+// Unqualified index-only scan over a NAME key (btree name_ops).
+fn mk_name_index_only_scan<'mcx>(mcx: Mcx<'mcx>) -> IndexOnlyScan<'mcx> {
+    IndexOnlyScan {
+        scan: Scan {
+            plan: Plan {
+                targetlist: name_var_tlist(mcx),
+                ..Default::default()
+            },
+            scanrelid: 1,
+        },
+        indexid: 0,
+        indexqual: NodeList::nil(),
+        recheckqual: NodeList::nil(),
+        indexorderby: NodeList::nil(),
+        indextlist: name_var_tlist(mcx),
         indexorderdir: 1,
     }
 }
@@ -774,10 +893,101 @@ fn store_index_tuple_deforms_btree_int4() {
             exectuples::make_tuple_table_slot(mcx, TupleSlotKind::Virtual, Some(desc.clone()));
         let img = itup_image(ItemPointerData::new(0, 1), 777);
         // SAFETY: MAXALIGNed 16-byte int4 tuple image matching `desc`.
-        unsafe { store_index_tuple(&mut slot, mcx, img.0.as_ptr(), &desc, &[]) };
+        unsafe { store_index_tuple(&mut slot, mcx, mcx, img.0.as_ptr(), &desc, &[]) };
         let mut isnull = false;
         let v = exectuples::slot_getattr(&mut slot, 1, &mut isnull);
         assert!(!isnull);
         assert_eq!(v.as_i32(), 777);
+    });
+}
+
+// C nodeIndexonlyscan.c:307 (StoreIndexTuple): the NAMEDATALEN block a
+// cstring-stored NAME key is re-inflated into is MemoryContextAlloc'd in
+// ps_ExprContext->ecxt_per_tuple_memory, which ExecScan resets per row —
+// never in the query context, where it would leak one block per row.
+#[test]
+fn name_columns_reinflate_into_per_tuple_memory() {
+    let _g = serial();
+    with_mcx(|mcx| {
+        let names = ["gamma", "alpha", "delta", "beta", "zeta", "eta", "theta", "iota"];
+        let node = mk_name_index_only_scan(mcx);
+        let heap_oid = fresh_oid();
+        let index_oid = fresh_oid();
+        register_indexed_name_table(heap_oid, index_oid, &names);
+        let rel = heap_relation(mcx, heap_oid);
+        let index_rel = index_relation_keyed(
+            mcx,
+            index_oid,
+            heap_oid,
+            cstring_tupdesc(mcx),
+            NAMEOID,
+            NAME_BTREE_OPFAMILY,
+        );
+        let mut estate = EStateData::new_in(mcx);
+        estate.es_snapshot = Some(static_mvcc_snapshot());
+        let mut state =
+            exec_init_index_only_scan_rel(mcx, &node, &mut estate, rel, index_rel).unwrap();
+        assert_eq!(&*state.ioss_NameCStringAttNums, &[0]);
+        let ecxt = state.ss.ps_ExprContext;
+
+        let mut got = Vec::new();
+        let mut query_used_after_first = None;
+        loop {
+            // ExecScan resets the per-tuple context on entry, freeing the
+            // previous row's NAME block; the query context (aset, charged
+            // per chunk) must not grow per row.
+            estate.ecxt_mut(ecxt).reset();
+            let Some(id) = exec_index_only_scan(&mut state, &mut estate).unwrap() else {
+                break;
+            };
+            let mut isnull = false;
+            let v = exectuples::slot_getattr(estate.slot_mut(id), 1, &mut isnull);
+            assert!(!isnull);
+            // SAFETY: a NAME datum points at a NAMEDATALEN block.
+            let bytes =
+                unsafe { core::slice::from_raw_parts(v.as_usize() as *const u8, NAMEDATALEN) };
+            let end = bytes.iter().position(|b| *b == 0).expect("NUL-terminated name");
+            assert!(bytes[end..].iter().all(|b| *b == 0), "namestrcpy zero-pads");
+            got.push(String::from_utf8(bytes[..end].to_vec()).unwrap());
+            match query_used_after_first {
+                None => query_used_after_first = Some(mcx.context().used()),
+                Some(base) => assert!(
+                    mcx.context().used() - base < NAMEDATALEN * (names.len() - 1),
+                    "query context grows per row: NAME blocks leak into es_query_cxt"
+                ),
+            }
+        }
+        assert_eq!(
+            got,
+            ["alpha", "beta", "delta", "eta", "gamma", "iota", "theta", "zeta"]
+        );
+        teardown(state, &mut estate);
+    });
+}
+
+// C nodeIndexonlyscan.c:181 (IndexOnlyNext): a heap fetch that leaves
+// xs_heap_continue set (only a non-MVCC snapshot can make more than one
+// HOT-chain member visible) is elog(ERROR), in every build.
+#[test]
+fn non_mvcc_snapshot_heap_continuation_is_an_error() {
+    let _g = serial();
+    with_mcx(|mcx| {
+        let node = mk_index_only_scan(mcx, 20);
+        let heap_oid = fresh_oid();
+        let index_oid = fresh_oid();
+        register_indexed_table(heap_oid, index_oid, &[30, 20, 10], &[]);
+        let rel = heap_relation(mcx, heap_oid);
+        let index_rel = index_relation(mcx, index_oid, heap_oid);
+        let mut estate = EStateData::new_in(mcx);
+        estate.es_snapshot = Some(static_snapshot(SnapshotType::SNAPSHOT_ANY));
+        let mut state =
+            exec_init_index_only_scan_rel(mcx, &node, &mut estate, rel, index_rel).unwrap();
+        let err = exec_index_only_scan(&mut state, &mut estate).unwrap_err();
+        assert_eq!(
+            err.message(),
+            "non-MVCC snapshots are not supported in index-only scans"
+        );
+        assert!(state.ioss_ScanDesc.as_ref().unwrap().xs_heap_continue);
+        teardown(state, &mut estate);
     });
 }
