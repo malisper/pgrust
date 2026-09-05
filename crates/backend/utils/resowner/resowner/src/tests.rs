@@ -65,8 +65,23 @@ fn setup() {
         predicate_seams::check_table_for_serializable_conflict_in::set(|_rel| Ok(()));
         predicate_seams::transfer_predicate_locks_to_heap_relation::set(|_rel| Ok(()));
         snapmgr_seams::unregister_snapshot_no_owner::set(drop);
+        // Retail lock release: Ok unless the owner's lock cache carries the
+        // FAILING_LOCK_MODE sentinel, which stands in for an elog(ERROR)
+        // thrown inside LockReleaseCurrentOwner (lock.c).
+        lock_seams::lock_release_current_owner::set(|locallocks| {
+            let fails = locallocks
+                .map(|tags| tags.iter().any(|t| t.mode == FAILING_LOCK_MODE))
+                .unwrap_or(false);
+            if fails {
+                Err(Box::new(PgError::error("injected LockReleaseCurrentOwner failure")))
+            } else {
+                Ok(())
+            }
+        });
     });
 }
+
+const FAILING_LOCK_MODE: i32 = 0x7f;
 
 fn owner(name: &'static str) -> ResourceOwner {
     ResourceOwnerCreate(ResourceOwner::NULL, name).unwrap()
@@ -614,4 +629,107 @@ fn recycle_refuses_children_parents_and_spilled_hash() {
     release_all_phases(o2, true);
     let _ = released();
     ResourceOwnerDelete(o2);
+}
+
+// resowner.c:403-416 (ResourceOwnerReleaseAll): the stored count forgets each
+// item BEFORE its ReleaseResource runs, so an error thrown inside
+// ReleaseResource forgets only that item; every other item stays owned and
+// is released when AbortTransaction re-runs the release.
+fn release_or_fail(res: Datum) {
+    if res.as_usize() == POISON {
+        panic!("injected ReleaseResource failure");
+    }
+    RELEASED.with(|r| r.borrow_mut().push(("fallible", res.as_usize())));
+}
+
+const POISON: usize = 0xdead;
+
+static FALLIBLE_DESC: ResourceOwnerDesc = ResourceOwnerDesc {
+    name: "fallible",
+    release_phase: RESOURCE_RELEASE_BEFORE_LOCKS,
+    release_priority: RELEASE_PRIO_BUFFER_PINS,
+    ReleaseResource: release_or_fail,
+    DebugPrint: None,
+};
+
+fn release_failure_keeps_the_rest(nitems: usize) {
+    let o = owner("t");
+    for v in 1..nitems {
+        remember(o, v, &FALLIBLE_DESC);
+    }
+    // Same kind = same priority = already sorted, so the tail (released
+    // first) is the poisoned item.
+    remember(o, POISON, &FALLIBLE_DESC);
+    let _ = released();
+
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ResourceOwnerRelease(o, RESOURCE_RELEASE_BEFORE_LOCKS, false, false)
+    }));
+    assert!(unwound.is_err());
+    // C's longjmp leaves CurrentResourceOwner pointing at the owner too;
+    // AbortTransaction resets it.
+    SetCurrentResourceOwner(ResourceOwner::NULL);
+    assert_eq!(released(), vec![]);
+
+    // Only the failing item was forgotten (C: nitems-- then ReleaseResource).
+    let remaining = if nhash(o) == 0 { narr(o) } else { nhash(o) };
+    assert_eq!(remaining as usize, nitems - 1, "items lost from the owner");
+
+    // The abort-side re-release must find and release every survivor.
+    ResourceOwnerRelease(o, RESOURCE_RELEASE_BEFORE_LOCKS, false, false).unwrap();
+    let mut got: Vec<usize> = released().into_iter().map(|(_, v)| v).collect();
+    got.sort_unstable();
+    assert_eq!(got, (1..nitems).collect::<Vec<_>>());
+    release_rest_and_delete(o);
+}
+
+#[test]
+fn release_resource_error_forgets_only_the_failing_item_array() {
+    setup();
+    release_failure_keeps_the_rest(3);
+}
+
+#[test]
+fn release_resource_error_forgets_only_the_failing_item_hash() {
+    setup();
+    // Spilled to the hash and more than one 32-item sweep: every survivor,
+    // in the failing sweep and beyond, must remain owned.
+    release_failure_keeps_the_rest(40);
+}
+
+// resowner.c:814-821: ResourceRelease_callbacks run after the phase's own
+// actions; an error thrown by the lock release longjmps past them, so no
+// callback sees a phase whose actions did not complete.
+#[cfg_attr(miri, ignore)]
+#[test]
+fn release_callbacks_skipped_when_phase_action_errors() {
+    setup();
+    fn cb(phase: ResourceReleasePhase, _c: bool, _t: bool, arg: Datum) {
+        RELEASED.with(|r| r.borrow_mut().push(("cb", arg.as_usize() + phase as usize)));
+    }
+    RegisterResourceReleaseCallback(cb, Datum::from_usize(30)).unwrap();
+
+    let parent = owner("parent");
+    let o = ResourceOwnerCreate(parent, "child").unwrap();
+    let tag = LOCALLOCKTAG {
+        lock: Default::default(),
+        mode: FAILING_LOCK_MODE,
+    };
+    ResourceOwnerRememberLock(o, tag);
+    // Release starts at BEFORE_LOCKS (resowner.c:720 Assert); that phase's
+    // actions succeed, so its callback fires and is drained here.
+    ResourceOwnerRelease(o, RESOURCE_RELEASE_BEFORE_LOCKS, false, false).unwrap();
+    assert_eq!(released(), vec![("cb", 30 + RESOURCE_RELEASE_BEFORE_LOCKS as usize)]);
+
+    let err = ResourceOwnerRelease(o, RESOURCE_RELEASE_LOCKS, false, false).unwrap_err();
+    assert!(err.message().contains("injected LockReleaseCurrentOwner failure"));
+    assert_eq!(released(), vec![], "callbacks ran although the LOCKS phase failed");
+
+    // The callback still runs for a phase whose actions succeed.
+    ResourceOwnerRelease(o, RESOURCE_RELEASE_AFTER_LOCKS, false, false).unwrap();
+    assert_eq!(released(), vec![("cb", 30 + RESOURCE_RELEASE_AFTER_LOCKS as usize)]);
+
+    UnregisterResourceReleaseCallback(cb, Datum::from_usize(30));
+    ResourceOwnerForgetLock(o, tag).unwrap();
+    ResourceOwnerDelete(parent);
 }

@@ -416,8 +416,8 @@ fn leak_warning(kind: &'static ResourceOwnerDesc, value: Datum) {
 }
 
 // Collected in chunks: callbacks cannot Remember/Forget on a releasing owner,
-// so batching the tail scan is safe; C likewise keeps its cursor in a local
-// and writes narr/nhash back after its loop, not per item.
+// so batching the tail scan is safe. The stored count is still written back
+// per item, right before its ReleaseResource, as resowner.c:403-413 does.
 fn resource_owner_release_all(
     owner: ResourceOwner,
     phase: ResourceReleasePhase,
@@ -428,7 +428,7 @@ fn resource_owner_release_all(
         // MaybeUninit: only chunk[..n] is written and read; zero-filling 512
         // bytes per pass would dominate the empty-phase sweeps C never pays.
         let mut chunk = [const { core::mem::MaybeUninit::<ResourceElem>::uninit() }; CHUNK];
-        let n = with_arena(|a| {
+        let (n, in_hash) = with_arena(|a| {
             let d = a.data_mut(owner);
             debug_assert!(d.releasing);
             debug_assert!(d.sorted);
@@ -450,21 +450,29 @@ fn resource_owner_release_all(
                 n += 1;
                 nitems -= 1;
             }
-            if in_hash {
-                d.nhash = nitems as u32;
-            } else {
-                d.narr = nitems as u8;
-            }
-            n
+            (n, in_hash)
         });
 
         for slot in &chunk[..n] {
-            // SAFETY: chunk[..n] was written above before the count writeback.
+            // SAFETY: chunk[..n] was written above.
             let elem = unsafe { slot.assume_init() };
             let kind = elem.kind.expect("releasing a free slot");
             if print_leak_warnings {
                 leak_warning(kind, elem.item);
             }
+            // resowner.c:403-413: forget the item before calling its
+            // ReleaseResource, so an error thrown inside it (a panic here,
+            // demoted to ERROR at the statement boundary) forgets only this
+            // item; every later item stays owned for AbortTransaction's
+            // re-release instead of being lost with the chunk.
+            with_arena(|a| {
+                let d = a.data_mut(owner);
+                if in_hash {
+                    d.nhash -= 1;
+                } else {
+                    d.narr -= 1;
+                }
+            });
             (kind.ReleaseResource)(elem.item);
         }
         if n < CHUNK {
@@ -757,7 +765,9 @@ fn resource_owner_release_internal(
         Ok(())
     })();
 
-    if prep.has_callbacks {
+    // resowner.c:814-821: the callbacks run only after the phase's own
+    // actions returned; an error thrown by them longjmps past the callbacks.
+    if result.is_ok() && prep.has_callbacks {
         // C iterates head-first over a prepend list = most recently registered
         // first; callbacks may unregister themselves, so snapshot.
         let callbacks = with_arena(|a| a.callbacks.clone());
