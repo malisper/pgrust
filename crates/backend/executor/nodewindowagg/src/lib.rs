@@ -23,7 +23,7 @@ use ::tuplestore::Tuplestore;
 use ::types_core::catalog::PROCEDURE_RELATION_ID;
 use ::types_core::Oid;
 use ::types_error::{PgError, PgResult};
-use ::types_fmgr::{AggStateNode, FmgrInfo, LocalFcinfo};
+use ::types_fmgr::{AggStateNode, FmNodePtr, FmgrInfo, LocalFcinfo};
 use ::types_nodes::list::NodeList;
 use ::types_nodes::node_tree::Node;
 use ::types_nodes::plannodes::WindowAgg;
@@ -74,6 +74,13 @@ const F_INT2_AVG_ACCUM_INV: Oid = 3570;
 const F_INT4_AVG_ACCUM_INV: Oid = 3571;
 const F_INT2INT4_SUM: Oid = 3572;
 
+// C sizes every aggregate call frame LOCAL_FCINFO(fcinfo, FUNC_MAX_ARGS)
+// (advance_windowaggregate, finalize_windowaggregate); the common
+// few-argument shapes keep a small stack frame here, wider argument lists
+// (up to FUNC_MAX_ARGS - 1 aggregate arguments, plus the transvalue or the
+// FINALFUNC_EXTRA slots) take the C-sized one.
+const WIN_SMALL_FCINFO: usize = 4;
+
 #[derive(Clone, Copy, PartialEq)]
 enum WfKind {
     RowNumber,
@@ -86,6 +93,10 @@ enum WfKind {
     FirstValue,
     LastValue,
     NthValue,
+    // Any other WINDOW function (PL/SQL-language, or an internal one without
+    // a ported kernel): called through fmgr like C, with the WindowFunc's
+    // inputcollid.
+    Generic { collation: Oid },
     PlainAgg { aggno: u16 },
 }
 
@@ -105,6 +116,8 @@ struct PerFuncData<'mcx> {
     remainder: i64,
     arg1_stable: bool,
     argstates: PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>>,
+    // WfKind::Generic only: C's perfuncstate->flinfo (fmgr_info_cxt).
+    flinfo: Option<FmgrInfo>,
 }
 
 // Int8TransTypeData (numeric.c): the {count,sum} pair C wraps in an int8[2]
@@ -170,6 +183,11 @@ enum WaStatus {
 pub struct WindowAggStateData<'mcx> {
     plan: &'mcx WindowAgg<'mcx>,
     frameOptions: i32,
+    // FRAMEOPTION_DEFAULTS served by the compiled default-frame aggregate
+    // lane (false once an aggregate needs C's moving-aggregate selection).
+    default_frame: bool,
+    // InstrCountFiltered1 slot for the top-level qual (nodeWindowAgg.c:2467).
+    pub instr_idx: Option<u32>,
     pub ps_ExprContext: EcxtId,
     tmpcontext: EcxtId,
     pub ps_ResultTupleDesc: Option<Rc<TupleDescData<'static>>>,
@@ -379,6 +397,90 @@ fn check_window_agg_arity(wfunc: &WindowFunc<'_>) -> PgResult<()> {
     Ok(())
 }
 
+// eval_windowfunction (nodeWindowAgg.c:1050): a stored parse tree may carry
+// more arguments than this build's FUNC_MAX_ARGS.
+#[cold]
+#[inline(never)]
+fn too_many_window_fn_arguments() -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "cannot pass more than {} arguments to a function",
+            ::types_core::FUNC_MAX_ARGS
+        ))
+        .with_sqlstate(::types_error::ERRCODE_TOO_MANY_ARGUMENTS),
+    )
+}
+
+// initialize_peragg (nodeWindowAgg.c:2952): "decision forced by safety" —
+// with an inverse transition function, a read-only moving-aggregate finalfn
+// and a plain finalfn that isn't read-only, C runs the moving-aggregate
+// implementation whatever the frame. A missing pg_aggregate row surfaces in
+// initialize_peragg itself.
+fn safety_forced_moving_agg(fnoid: Oid) -> PgResult<bool> {
+    Ok(syscache_seams::lookup_pg_aggregate_shape::call(fnoid)?.is_some_and(|shape| {
+        shape.aggminvtransfn != 0
+            && shape.aggmfinalmodify == AGGMODIFY_READ_ONLY
+            && shape.aggfinalmodify != AGGMODIFY_READ_ONLY
+    }))
+}
+
+// finalize_windowaggregate (nodeWindowAgg.c:597), the finalfn call shared by
+// the default-frame and framed finalizers: LOCAL_FCINFO(fcinfo,
+// FUNC_MAX_ARGS) in C, since numFinalArgs = numArguments + 1 under
+// FINALFUNC_EXTRA; the extra slots stay NULL.
+fn call_window_finalfn(
+    flinfo: &mut FmgrInfo,
+    num_final_args: usize,
+    collation: Oid,
+    context: FmNodePtr,
+    per_tuple: ::mcx::Mcx<'_>,
+    trans: NullableDatum,
+) -> PgResult<NullableDatum> {
+    if num_final_args <= WIN_SMALL_FCINFO {
+        call_window_finalfn_n::<WIN_SMALL_FCINFO>(
+            flinfo,
+            num_final_args,
+            collation,
+            context,
+            per_tuple,
+            trans,
+        )
+    } else {
+        call_window_finalfn_n::<{ ::types_core::FUNC_MAX_ARGS }>(
+            flinfo,
+            num_final_args,
+            collation,
+            context,
+            per_tuple,
+            trans,
+        )
+    }
+}
+
+fn call_window_finalfn_n<const N: usize>(
+    flinfo: &mut FmgrInfo,
+    num_final_args: usize,
+    collation: Oid,
+    context: FmNodePtr,
+    per_tuple: ::mcx::Mcx<'_>,
+    trans: NullableDatum,
+) -> PgResult<NullableDatum> {
+    debug_assert!(num_final_args <= N);
+    // fresh() leaves every argument slot NULL, as C sets the extra ones.
+    let mut fcinfo = LocalFcinfo::<N>::fresh(collation);
+    fcinfo.nargs = num_final_args as i16;
+    fcinfo.context = context;
+    // SAFETY: the per-tuple context outlives this call.
+    unsafe { fcinfo.set_result_mcx(per_tuple) };
+    fcinfo.args[0] = trans;
+    let anynull = trans.isnull || num_final_args > 1;
+    if flinfo.fn_strict && anynull {
+        return Ok(NullableDatum::null());
+    }
+    let v = flinfo.invoke(&mut fcinfo)?;
+    Ok(NullableDatum { value: v, isnull: fcinfo.isnull })
+}
+
 #[cold]
 #[inline(never)]
 fn too_many_window_agg_arguments() -> Box<PgError> {
@@ -396,16 +498,6 @@ fn too_many_window_agg_arguments() -> Box<PgError> {
 #[inline(never)]
 fn wfunc_lookup_failed(fnoid: Oid) -> Box<PgError> {
     Box::new(PgError::error(format!("cache lookup failed for aggregate {fnoid}")))
-}
-
-#[track_caller]
-#[cold]
-#[inline(never)]
-fn wfunc_permission_denied(fnoid: Oid) -> Box<PgError> {
-    Box::new(
-        PgError::error(format!("permission denied for function {fnoid}"))
-            .with_sqlstate(::types_error::ERRCODE_INSUFFICIENT_PRIVILEGE),
-    )
 }
 
 // initialize_peragg (nodeWindowAgg.c:2957): the selected finalfn isn't
@@ -680,25 +772,18 @@ fn wfkind_for_builtin(oid: Oid) -> Option<WfKind> {
 // C dispatches window functions through fmgr (fmgr_info resolves an
 // internal-language pg_proc row by prosrc); a user-defined WINDOW function
 // over a builtin prosrc lands on the same C body, so the prosrc name keys
-// the kind here.
-fn wfkind_for(mcx: ::mcx::Mcx<'_>, winfnoid: Oid) -> PgResult<WfKind> {
+// the kind here. None = no ported kernel: the caller sets up the fmgr call
+// (WfKind::Generic), as C does for every window function.
+fn wfkind_for(mcx: ::mcx::Mcx<'_>, winfnoid: Oid) -> PgResult<Option<WfKind>> {
     if let Some(k) = wfkind_for_builtin(winfnoid) {
-        return Ok(k);
+        return Ok(Some(k));
     }
     let prosrc = syscache_seams::lookup_pg_proc_prosrc::call(mcx, winfnoid)?;
-    let by_name = prosrc
+    Ok(prosrc
         .as_deref()
         .map(::fmgr_core::fmgr_internal_function)
         .filter(|&oid| oid != 0)
-        .and_then(wfkind_for_builtin);
-    match by_name {
-        Some(k) => Ok(k),
-        None => panic!(
-            "eval_windowfunction (nodeWindowAgg.c): window function oid {winfnoid} \
-             (prosrc {:?}) not ported",
-            prosrc.as_deref()
-        ),
-    }
+        .and_then(wfkind_for_builtin))
 }
 
 fn build_argstates<'mcx>(
@@ -731,7 +816,6 @@ pub fn exec_init_window_agg<'mcx>(
     let frameOptions = node.frameOptions;
 
     debug_assert!(node.plan.qual.is_nil() || node.topWindow);
-    let default_frame = frameOptions == FRAMEOPTION_DEFAULTS;
 
     let tmpcontext = estate.create_expr_context();
     let ps_ExprContext = estate.exec_assign_expr_context();
@@ -746,6 +830,19 @@ pub fn exec_init_window_agg<'mcx>(
     // WindowFunc arm yet, so duplicates each get their own slot (results
     // identical, duplicated evaluation).
     let numfuncs = wfuncs.len();
+    // The compiled default-frame lane has no moving kernels: a node carrying
+    // an aggregate whose moving implementation C forces "by safety"
+    // (initialize_peragg, nodeWindowAgg.c:2952) runs C's full use_ma_code
+    // tree in the framed lane even under FRAMEOPTION_DEFAULTS.
+    let mut default_frame = frameOptions == FRAMEOPTION_DEFAULTS;
+    if default_frame {
+        for &(_, wfunc) in wfuncs.iter() {
+            if wfunc.winagg && safety_forced_moving_agg(wfunc.winfnoid)? {
+                default_frame = false;
+                break;
+            }
+        }
+    }
     let userid = miscinit_seams::get_user_id::call();
     let params = estate.param_bind();
 
@@ -785,12 +882,20 @@ pub fn exec_init_window_agg<'mcx>(
             ACL_EXECUTE,
         )?;
         if aclresult != ACLCHECK_OK {
-            return Err(wfunc_permission_denied(wfunc.winfnoid));
+            // ExecInitWindowAgg (nodeWindowAgg.c:2708): aclcheck_error over
+            // get_func_name, so the message names the function.
+            let name = lsyscache::get_func_name(mcx, wfunc.winfnoid)?;
+            aclchk_seams::aclcheck_error::call(
+                aclresult,
+                ::types_nodes::parsenodes::ObjectType::OBJECT_FUNCTION as i32,
+                name.as_ref().map(|n| n.as_str()).unwrap_or(""),
+            )?;
         }
         wfuncnos.push((wnode, wfuncno as u16));
 
         let mut argstates: PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>> = PgVec::new_in(mcx);
         let mut arg1_stable = false;
+        let mut flinfo = None;
         let kind = if wfunc.winagg {
             let aggno = agg_specs_args.len() as u16;
             if default_frame {
@@ -841,7 +946,21 @@ pub fn exec_init_window_agg<'mcx>(
             peragg_wfuncno.push(wfuncno as u16);
             WfKind::PlainAgg { aggno }
         } else {
-            let kind = wfkind_for(mcx, wfunc.winfnoid)?;
+            let kind = match wfkind_for(mcx, wfunc.winfnoid)? {
+                Some(k) => k,
+                None => {
+                    // ExecInitWindowAgg (nodeWindowAgg.c:2746): fmgr_info_cxt +
+                    // fmgr_info_set_expr((Node *) wfunc); eval_windowfunction
+                    // then calls it with every argument slot NULL.
+                    if wfunc.args.len() > ::types_core::FUNC_MAX_ARGS {
+                        return Err(too_many_window_fn_arguments());
+                    }
+                    let mut f = fmgr_core::fmgr_info(wfunc.winfnoid)?;
+                    f.fn_expr = Some(::execexpr::erase_fn_expr(mcx, wnode)?);
+                    flinfo = Some(f);
+                    WfKind::Generic { collation: wfunc.inputcollid }
+                }
+            };
             argstates = ::executils::with_subplan_compile_env(estate, |env| {
                 build_argstates(mcx, &wfunc.args, params, env)
             })?;
@@ -871,6 +990,7 @@ pub fn exec_init_window_agg<'mcx>(
             remainder: 0,
             arg1_stable,
             argstates,
+            flinfo,
         });
     }
     let numaggs = agg_specs_args.len();
@@ -1009,6 +1129,8 @@ pub fn exec_init_window_agg<'mcx>(
     Ok(WindowAggStateData {
         plan: node,
         frameOptions,
+        default_frame,
+        instr_idx: None,
         ps_ExprContext,
         tmpcontext,
         ps_ResultTupleDesc: Some(result_desc),
@@ -1128,19 +1250,10 @@ fn initialize_peragg_default<'mcx>(
         );
     }
     check_window_agg_arity(wfunc)?;
-    // C's use_ma_code tree collapses under the pinned default-frame head,
-    // except the safety-forced arm (mfinalmodify 'r', finalmodify not 'r');
-    // the compiled default lane has no moving kernels for it.
-    if shape.aggminvtransfn != 0
-        && shape.aggmfinalmodify == AGGMODIFY_READ_ONLY
-        && shape.aggfinalmodify != AGGMODIFY_READ_ONLY
-    {
-        panic!(
-            "initialize_peragg (nodeWindowAgg.c): safety-forced moving-aggregate \
-             selection not ported in the default-frame lane (aggregate {})",
-            wfunc.winfnoid
-        );
-    }
+    // C's use_ma_code tree collapses under the pinned default-frame head;
+    // its safety-forced arm (mfinalmodify 'r', finalmodify not 'r') routes
+    // the whole node to the framed lane (exec_init_window_agg).
+    debug_assert!(!safety_forced_moving_agg(wfunc.winfnoid)?);
     // Check that aggregate owner has permission to call component fns.
     {
         let agg_owner = syscache_seams::lookup_pg_proc_secdef::call(wfunc.winfnoid)?
@@ -1251,9 +1364,13 @@ fn initialize_peragg_framed<'mcx>(
         true
     } else if frame_options & FRAMEOPTION_START_UNBOUNDED_PRECEDING != 0 {
         false
-    } else {
+    } else if ::clauses::contain_volatile_functions(wnode)? {
         // C checks the whole WindowFunc: args, FILTER, and run condition.
-        !::clauses::contain_volatile_functions(wnode)?
+        false
+    } else {
+        // initialize_peragg (nodeWindowAgg.c:2959): subplans might contain
+        // volatile functions, or be nonrepeatable (syncscan).
+        !::clauses::contain_subplans(wnode)?
     };
     let (transfn_oid, invtransfn_oid, finalfn_oid, finalextra, finalmodify, aggtranstype, minit) =
         if use_ma_code {
@@ -1314,13 +1431,14 @@ fn initialize_peragg_framed<'mcx>(
     let mut finalfn = None;
     let mut has_inverse = invtransfn_oid != 0;
     match (transfn_oid, invtransfn_oid) {
+        // The specialised kernel stands in for the catalog's {0,0}-seeded
+        // int[24]_avg_accum[_inv] + int2int4_sum; any other aggminitval text
+        // (C parses it through the transtype's input function) runs the
+        // catalog's own functions through the generic moving kernel below.
         (F_INT2_AVG_ACCUM, F_INT2_AVG_ACCUM_INV) | (F_INT4_AVG_ACCUM, F_INT4_AVG_ACCUM_INV)
-            if finalfn_oid == F_INT2INT4_SUM =>
+            if finalfn_oid == F_INT2INT4_SUM
+                && initval.as_ref().map(|s| s.as_str()) == Some("{0,0}") =>
         {
-            assert!(
-                initval.as_ref().map(|s| s.as_str()) == Some("{0,0}"),
-                "MovingIntSum kernel: unexpected minitval {initval:?}"
-            );
             kernel = AggKernel::MovingIntSum { int2: transfn_oid == F_INT2_AVG_ACCUM };
             fn_strict = true;
             has_inverse = true;
@@ -1680,6 +1798,12 @@ impl<'mcx> WindowAggStateData<'mcx> {
     where
         F: FnMut(&mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>>,
     {
+        // window_gettupleslot (nodeWindowAgg.c:3219): often called repeatedly
+        // in a row (frame scans, peer walks, aggregate restarts), so the
+        // CHECK_FOR_INTERRUPTS here keeps a long inner loop cancellable.
+        if init_small::globals::InterruptPending() {
+            postgres_seams::check_for_interrupts::call()?;
+        }
         if pos < 0 {
             return Ok(false);
         }
@@ -2858,6 +2982,24 @@ impl<'mcx> WindowAggStateData<'mcx> {
                 )?;
                 nd
             }
+            WfKind::Generic { collation } => {
+                // eval_windowfunction (nodeWindowAgg.c:1034): the function
+                // sees numArguments NULL argument slots (the real arguments
+                // travel through the WindowObject, which only C-language
+                // window functions consume); the result is minted in the
+                // per-tuple result context, so C's WindowObject temp-slot
+                // datumCopy has nothing to protect here.
+                let per_tuple = estate.ecxt(self.ps_ExprContext).per_tuple_mcx();
+                let pf = &mut self.perfunc[perfunc_ix];
+                let flinfo =
+                    pf.flinfo.as_mut().expect("generic window function carries its FmgrInfo");
+                let mut fcinfo = LocalFcinfo::<{ ::types_core::FUNC_MAX_ARGS }>::fresh(collation);
+                fcinfo.nargs = pf.argstates.len() as i16;
+                // SAFETY: the per-tuple context outlives this call.
+                unsafe { fcinfo.set_result_mcx(per_tuple) };
+                let v = flinfo.invoke(&mut fcinfo)?;
+                NullableDatum { value: v, isnull: fcinfo.isnull }
+            }
             WfKind::PlainAgg { .. } => unreachable!("plain aggs go through eval_windowaggregates"),
         };
         self.write_result(perfunc_ix, result);
@@ -3028,26 +3170,14 @@ impl<'mcx> WindowAggStateData<'mcx> {
                 None => {
                     NullableDatum { value: trans_value, isnull: pg.trans_value_is_null }
                 }
-                Some(flinfo) => {
-                    let mut fcinfo = LocalFcinfo::<4>::fresh(df.agg_collation);
-                    assert!(df.num_final_args <= 4, "finalfn arg count");
-                    fcinfo.nargs = df.num_final_args as i16;
-                    fcinfo.context = agg_fm;
-                    // SAFETY: the per-tuple context outlives this call.
-                    unsafe { fcinfo.set_result_mcx(per_tuple) };
-                    fcinfo.args[0] =
-                        NullableDatum { value: trans_value, isnull: pg.trans_value_is_null };
-                    for i in 1..df.num_final_args as usize {
-                        fcinfo.args[i] = NullableDatum::null();
-                    }
-                    let anynull = pg.trans_value_is_null || df.num_final_args > 1;
-                    if flinfo.fn_strict && anynull {
-                        NullableDatum::null()
-                    } else {
-                        let v = flinfo.invoke(&mut fcinfo)?;
-                        NullableDatum { value: v, isnull: fcinfo.isnull }
-                    }
-                }
+                Some(flinfo) => call_window_finalfn(
+                    flinfo,
+                    df.num_final_args as usize,
+                    df.agg_collation,
+                    agg_fm,
+                    per_tuple,
+                    NullableDatum { value: trans_value, isnull: pg.trans_value_is_null },
+                )?,
             };
             let saved = if !result.isnull && !df.resulttype_byval {
                 // SAFETY: non-null by-ref finalfn result, live this call.
@@ -3173,9 +3303,24 @@ impl<'mcx> WindowAggStateData<'mcx> {
         if !self.agg_filter_passes(estate, aggno, which)? {
             return Ok(());
         }
+        if (self.peragg[aggno].num_arguments as usize) < WIN_SMALL_FCINFO {
+            self.advance_windowaggregate_n::<WIN_SMALL_FCINFO>(estate, aggno, which)
+        } else {
+            self.advance_windowaggregate_n::<{ ::types_core::FUNC_MAX_ARGS }>(estate, aggno, which)
+        }
+    }
+
+    // The transition call proper over an N-slot frame (N > numArguments:
+    // args[0] is the transvalue); C's LOCAL_FCINFO(fcinfo, FUNC_MAX_ARGS).
+    fn advance_windowaggregate_n<const N: usize>(
+        &mut self,
+        estate: &mut EStateData<'mcx>,
+        aggno: usize,
+        which: WhichSlot,
+    ) -> PgResult<()> {
         let nargs = self.peragg[aggno].num_arguments as usize;
-        let mut args = [NullableDatum::null(); 4];
-        assert!(nargs < 4);
+        debug_assert!(nargs < N);
+        let mut args = [NullableDatum::null(); N];
         self.eval_agg_args(estate, aggno, which, &mut args[..nargs])?;
         let pa = &mut self.peragg[aggno];
 
@@ -3222,7 +3367,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
                 pa.trans_count += 1;
             }
             AggKernel::Generic { transfn } | AggKernel::MovingByVal { transfn, .. } => {
-                let mut fcinfo = LocalFcinfo::<4>::fresh(pa.win_collation);
+                let mut fcinfo = LocalFcinfo::<N>::fresh(pa.win_collation);
                 fcinfo.nargs = (nargs + 1) as i16;
                 fcinfo.context = Some(pa.agg_state.cast());
                 // SAFETY: the per-tuple context outlives this call.
@@ -3259,9 +3404,23 @@ impl<'mcx> WindowAggStateData<'mcx> {
         if !self.agg_filter_passes(estate, aggno, WhichSlot::Temp1)? {
             return Ok(true);
         }
+        if (self.peragg[aggno].num_arguments as usize) < WIN_SMALL_FCINFO {
+            self.advance_windowaggregate_base_n::<WIN_SMALL_FCINFO>(estate, aggno)
+        } else {
+            self.advance_windowaggregate_base_n::<{ ::types_core::FUNC_MAX_ARGS }>(estate, aggno)
+        }
+    }
+
+    // The inverse-transition call proper over an N-slot frame (as
+    // advance_windowaggregate_n).
+    fn advance_windowaggregate_base_n<const N: usize>(
+        &mut self,
+        estate: &mut EStateData<'mcx>,
+        aggno: usize,
+    ) -> PgResult<bool> {
         let nargs = self.peragg[aggno].num_arguments as usize;
-        let mut args = [NullableDatum::null(); 4];
-        assert!(nargs < 4);
+        debug_assert!(nargs < N);
+        let mut args = [NullableDatum::null(); N];
         self.eval_agg_args(estate, aggno, WhichSlot::Temp1, &mut args[..nargs])?;
 
         if self.peragg[aggno].fn_strict {
@@ -3293,7 +3452,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
                 pa.trans_count -= 1;
             }
             AggKernel::MovingByVal { invtransfn, .. } => {
-                let mut fcinfo = LocalFcinfo::<4>::fresh(pa.win_collation);
+                let mut fcinfo = LocalFcinfo::<N>::fresh(pa.win_collation);
                 fcinfo.nargs = (nargs + 1) as i16;
                 fcinfo.context = Some(pa.agg_state.cast());
                 // SAFETY: the per-tuple context outlives this call.
@@ -3350,26 +3509,14 @@ impl<'mcx> WindowAggStateData<'mcx> {
                 };
                 match pa.finalfn.as_mut() {
                     None => NullableDatum { value: trans_value, isnull: pa.trans_value.isnull },
-                    Some(flinfo) => {
-                        assert!(pa.num_final_args <= 4, "finalfn arg count");
-                        let mut fcinfo = LocalFcinfo::<4>::fresh(pa.win_collation);
-                        fcinfo.nargs = pa.num_final_args as i16;
-                        fcinfo.context = Some(pa.agg_state.cast());
-                        // SAFETY: the per-tuple context outlives this call.
-                        unsafe { fcinfo.set_result_mcx(per_tuple) };
-                        fcinfo.args[0] =
-                            NullableDatum { value: trans_value, isnull: pa.trans_value.isnull };
-                        for i in 1..pa.num_final_args as usize {
-                            fcinfo.args[i] = NullableDatum::null();
-                        }
-                        let anynull = pa.trans_value.isnull || pa.num_final_args > 1;
-                        if flinfo.fn_strict && anynull {
-                            NullableDatum::null()
-                        } else {
-                            let v = flinfo.invoke(&mut fcinfo)?;
-                            NullableDatum { value: v, isnull: fcinfo.isnull }
-                        }
-                    }
+                    Some(flinfo) => call_window_finalfn(
+                        flinfo,
+                        pa.num_final_args as usize,
+                        pa.win_collation,
+                        Some(pa.agg_state.cast()),
+                        per_tuple,
+                        NullableDatum { value: trans_value, isnull: pa.trans_value.isnull },
+                    )?,
                 }
             }
         })
@@ -3627,7 +3774,7 @@ where
                 }
             }
             if state.numaggs > 0 {
-                if state.frameOptions == FRAMEOPTION_DEFAULTS {
+                if state.default_frame {
                     state.eval_windowaggregates_default(estate, fetch)?;
                 } else {
                     state.eval_windowaggregates_framed(estate, fetch)?;
@@ -3681,6 +3828,7 @@ where
                 exec_window_result_qual(qual.as_deref_mut(), estate, ecxt, result_id, scan_slot)?
             };
             if !qual_pass {
+                estate.instr_count_filtered1(state.instr_idx);
                 continue;
             }
             return Ok(Some(state.ps_ResultTupleSlot));
@@ -3708,6 +3856,7 @@ pub fn exec_end_window_agg(node: &mut WindowAggStateData<'_>) {
     node.ps_ResultTupleDesc = None;
     for pf in node.perfunc.iter_mut() {
         pf.argstates.clear();
+        pf.flinfo = None;
     }
     for pa in node.peragg.iter_mut() {
         pa.argstates.clear();
@@ -3775,13 +3924,14 @@ mcx::forget_safe_nodrop!(WfKind, Int8TransState, WaStatus);
 // cleared).
 mcx::forget_safe_struct!(
     PerFuncData<'_> { kind, wfuncno, readptr, seekpos, markpos, rank, ntile,
-        rows_per_bucket, boundary, remainder, arg1_stable; argstates },
+        rows_per_bucket, boundary, remainder, arg1_stable; argstates, flinfo },
     PerAggData<'_> { wfuncno, num_arguments, win_collation, fn_strict,
         has_inverse, num_final_args, resulttype_len, resulttype_byval,
         trans_typlen, trans_byval, agg_state, private_ctx, init_value,
         trans_value, trans_count, int_sum, result_value, restart;
         argstates, filterstate, kernel, finalfn },
-    WindowAggStateData<'_> { plan, frameOptions, ps_ExprContext, tmpcontext,
+    WindowAggStateData<'_> { plan, frameOptions, default_frame, instr_idx,
+        ps_ExprContext, tmpcontext,
         ps_ResultTupleSlot, first_part_valid, agg_row_valid, perfunc, peragg,
         trans_init, trans_typlen, trans_byval, agg_node, _pergroup, pergroup_base,
         peragg_wfuncno, agg_saved,

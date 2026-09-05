@@ -1735,6 +1735,11 @@ fn instrument_node<'mcx>(
     if let PlanStateNode::Agg(aps) = &mut inner {
         aps.agg.instr_idx = Some(idx as u32);
     }
+    // InstrCountFiltered1 target for the top-level WindowAgg qual
+    // (nodeWindowAgg.c:2467).
+    if let PlanStateNode::WindowAgg(w) = &mut inner {
+        w.state.instr_idx = Some(idx as u32);
+    }
     Ok(PlanStateNode::Instrumented(::mcx::alloc_in(
         estate.es_query_cxt,
         InstrumentedNode {

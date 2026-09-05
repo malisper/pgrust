@@ -842,7 +842,7 @@ pub fn lane_framed_emit_next<'mcx>(
         }
     }
     if state.numaggs > 0 {
-        if state.frameOptions == FRAMEOPTION_DEFAULTS {
+        if state.default_frame {
             state.eval_windowaggregates_default(estate, &mut fetch)?;
         } else {
             state.eval_windowaggregates_framed(estate, &mut fetch)?;

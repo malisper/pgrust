@@ -1301,7 +1301,9 @@ pub fn ExplainNode<'mcx>(
             let w = node.as_window_agg().unwrap();
             show_upper_qual(&w.runConditionOrig, "Run Condition", node, ancestors, es)?;
             show_upper_qual(&plan.qual, "Filter", node, ancestors, es)?;
-            filtered_count_gap(&plan.qual, es);
+            if !plan.qual.is_nil() {
+                show_instrumentation_count("Rows Removed by Filter", 1, &instrument, es);
+            }
             show_windowagg_info(node, es);
         }
         NodeTag::T_Agg => {
@@ -3110,8 +3112,8 @@ fn show_ctescan_info<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) {
 // show_instrumentation_count's nfiltered read for join/upper nodes: unlike
 // the ExecScan-driven scan family (execScan.h), these count via their own
 // node-specific InstrCountFiltered1/2 calls (e.g. nodeNestloop.c:246,
-// nodeHashjoin.c:596, nodeMergejoin.c:837, nodeAgg.c:1386, nodeGroup.c:96/149,
-// nodeWindowAgg.c:2405), which aren't ported yet, so printing would be
+// nodeHashjoin.c:596, nodeMergejoin.c:837, nodeAgg.c:1386, nodeGroup.c:96/149),
+// which aren't ported yet, so printing would be
 // silently wrong whenever a filter removed rows.
 fn filtered_count_gap(qual: &NodeList<'_>, es: &ExplainState<'_>) {
     if es.analyze && !qual.is_nil() {
