@@ -1,5 +1,6 @@
-// nodeHash.c serial build side; skew absent (sizing still reserves skew
-// memory like C); C HashJoinTupleData layout, pointer chains. The shared
+// nodeHash.c serial build side; skew buckets absent (sizing reserves the
+// skew-MCV memory iff the planner supplied a skewTable, C's useskew); C
+// HashJoinTupleData layout, pointer chains. The shared
 // (Parallel Hash) table lives in `parallel`; private-vs-shared follows the
 // RUNTIME parallel_state like C, so a parallel-aware Hash without a parallel
 // context builds a private table (exec_hash_table_create).
@@ -14,7 +15,7 @@ use ::fd::buffile::BufFile;
 use ::heaptuple::MinimalFormPlan;
 use ::mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
 use ::types_core::instrument::HashInstrumentation;
-use ::types_core::Oid;
+use ::types_core::{InvalidOid, Oid};
 use ::types_error::{PgError, PgResult};
 use ::types_nodes::plannodes::Hash;
 use ::types_slot::TupleSlotKind;
@@ -565,6 +566,8 @@ impl<'mcx> HashJoinTable<'mcx> {
                 self.space_used -= hash_tuple_size;
                 nfreed += 1;
             }
+            // nodeHash.c:1161 — the repartition walk stays cancellable.
+            cfi()?;
         }
         self.tuples = kept;
 
@@ -595,6 +598,9 @@ impl<'mcx> HashJoinTable<'mcx> {
                 (*hdr.as_ptr()).next = *head;
                 *head = hdr.as_ptr();
             }
+            // nodeHash.c:1645 — C checks once per dense_alloc chunk; the
+            // replayed walk has no chunk boundary to hand, so check per tuple.
+            cfi()?;
         }
         Ok(())
     }
@@ -813,6 +819,10 @@ pub struct HashState<'mcx> {
     tupwidth: i32,
     inner_desc: Option<Rc<TupleDescData<'static>>>,
     parallel_aware: bool,
+    /// C `OidIsValid(node->skewTable)`: the planner names the outer key's
+    /// base column only for plain-Var keys (createplan.c); sizing reserves
+    /// the skew-MCV memory only then (nodeHash.c ExecHashTableCreate).
+    use_skew: bool,
 }
 
 impl<'mcx> HashState<'mcx> {
@@ -923,11 +933,12 @@ pub fn exec_init_hash<'mcx>(
         tupwidth: child.plan_width,
         inner_desc: Some(inner_desc),
         parallel_aware: node.plan.parallel_aware,
+        use_skew: node.skewTable != InvalidOid,
     })
 }
 
-/// `ExecHashTableCreate`; useskew mirrors C's OidIsValid(node->skewTable) for
-/// these plan shapes (the skew table itself only forms from MCV stats).
+/// `ExecHashTableCreate`; useskew = C's OidIsValid(node->skewTable) (the skew
+/// buckets themselves are not built).
 pub fn exec_hash_table_create<'mcx>(
     hs: &HashState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -949,7 +960,7 @@ pub fn exec_hash_table_create<'mcx>(
     );
     let mcx = estate.es_query_cxt;
     let (nbuckets, nbatch, _num_skew_mcvs, space_allowed) =
-        exec_choose_hash_table_size_full(hs.ntuples_est, hs.tupwidth, true, false, 0);
+        exec_choose_hash_table_size_full(hs.ntuples_est, hs.tupwidth, hs.use_skew, false, 0);
     let form_plan = hs.inner_desc.as_ref().and_then(|d| MinimalFormPlan::try_new(d));
     let bloom_est = want_filter.then_some(hs.ntuples_est);
     HashJoinTable::create(mcx, estate, nbuckets, nbatch, space_allowed, form_plan, bloom_est)
@@ -1084,6 +1095,16 @@ const BLCKSZ: usize = 8192;
 #[inline]
 const fn maxalign(n: usize) -> usize {
     (n + 7) & !7
+}
+
+/// `CHECK_FOR_INTERRUPTS()` (miscadmin.h): ProcessInterrupts only when a
+/// signal handler has raised InterruptPending.
+#[inline(always)]
+fn cfi() -> PgResult<()> {
+    if init_small::globals::InterruptPending() {
+        return postgres_seams::check_for_interrupts::call();
+    }
+    Ok(())
 }
 
 /// C `get_hash_memory_limit` (nodeHash.c): `work_mem * hash_mem_multiplier * 1024`.
@@ -1303,6 +1324,6 @@ fn oom_tuples(mcx: Mcx<'_>, add: usize) -> Box<PgError> {
 // is destroyed and taken there, hash_expr via release_frames, inner_desc taken,
 // ptable/parallel_state detached in the shutdown walk then dropped there.
 mcx::forget_safe_struct!(
-    HashState<'_> { hash_tuple_slot, ps_ExprContext, ntuples_est, tupwidth, parallel_aware;
+    HashState<'_> { hash_tuple_slot, ps_ExprContext, ntuples_est, tupwidth, parallel_aware, use_skew;
         table, ptable, parallel_state, hash_expr, inner_desc },
 );

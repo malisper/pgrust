@@ -762,41 +762,44 @@ fn scan_hash_table_for_unmatched<'mcx>(
 ) -> PgResult<bool> {
     let table = hash_state.table.as_ref().expect("hash table built");
     let nbuckets = table.nbuckets();
-    // SAFETY: chain headers live in the batch arena until reset.
-    let mut cur: *mut HashJoinTupleHdr = if !node.hj_CurTuple.is_null() {
-        unsafe { (*node.hj_CurTuple).next() }
-    } else {
-        core::ptr::null_mut()
-    };
+    let mut cur: *mut HashJoinTupleHdr = node.hj_CurTuple;
     loop {
-        while cur.is_null() {
-            if node.hj_CurBucketNo >= nbuckets {
-                return Ok(false);
-            }
+        // SAFETY: chain headers live in the batch arena until reset.
+        if !cur.is_null() {
+            cur = unsafe { (*cur).next() };
+        } else if node.hj_CurBucketNo < nbuckets {
             cur = table.bucket_head(node.hj_CurBucketNo);
             node.hj_CurBucketNo += 1;
+        } else {
+            // finished all buckets (no skew buckets: unported)
+            return Ok(false);
         }
-        let (tuple, matched) = unsafe {
-            let mt = HashJoinTupleHdr::mintuple(cur);
-            (mt, (*mt.as_ptr()).has_match())
-        };
-        if !matched {
-            let hslot = hash_state.hash_tuple_slot;
-            let mcx = estate.es_query_cxt;
-            // SAFETY: entry images live in the batch arena until reset.
-            unsafe {
-                exectuples::exec_store_minimal_tuple_ptr(
-                    &mut estate.es_tupleTable[hslot.0 as usize],
-                    mcx,
-                    tuple,
-                )
+        while !cur.is_null() {
+            let (tuple, matched) = unsafe {
+                let mt = HashJoinTupleHdr::mintuple(cur);
+                (mt, (*mt.as_ptr()).has_match())
             };
-            estate.ecxt_mut(node.ps_ExprContext).ecxt_innertuple = Some(hslot);
-            estate.reset_expr_context(node.ps_ExprContext);
-            node.hj_CurTuple = cur;
-            return Ok(true);
+            if !matched {
+                let hslot = hash_state.hash_tuple_slot;
+                let mcx = estate.es_query_cxt;
+                // SAFETY: entry images live in the batch arena until reset.
+                unsafe {
+                    exectuples::exec_store_minimal_tuple_ptr(
+                        &mut estate.es_tupleTable[hslot.0 as usize],
+                        mcx,
+                        tuple,
+                    )
+                };
+                estate.ecxt_mut(node.ps_ExprContext).ecxt_innertuple = Some(hslot);
+                estate.reset_expr_context(node.ps_ExprContext);
+                node.hj_CurTuple = cur;
+                return Ok(true);
+            }
+            cur = unsafe { (*cur).next() };
         }
-        cur = unsafe { (*cur).next() };
+        // nodeHash.c ExecScanHashTableForUnmatched (:2246): one
+        // CHECK_FOR_INTERRUPTS() per exhausted bucket chain.
+        cfi()?;
     }
 }
 
