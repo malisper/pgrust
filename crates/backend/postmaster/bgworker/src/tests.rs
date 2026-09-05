@@ -38,6 +38,12 @@ fn bringup() -> MutexGuard<'static, ()> {
     pmsignal::PMSignalShmemInit(8);
     procsignal::ProcSignalShmemInit();
     *REGISTRY.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    // A fresh postmaster has no pending static registrations. The pending
+    // list is process-global and only drained by BackgroundWorkerShmemInit,
+    // so a sibling that registered static workers without running shmem
+    // init (the over-limit LOG tests) would otherwise leak them into this
+    // test's slots and `registered` entries (scheduling-dependent).
+    STATIC_PENDING.lock().unwrap_or_else(|e| e.into_inner()).clear();
     BackgroundWorkerShmemInit().expect("shmem init");
     guard
 }
