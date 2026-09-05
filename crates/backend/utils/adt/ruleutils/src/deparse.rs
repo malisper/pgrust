@@ -2033,7 +2033,7 @@ fn get_case_expr<'mcx>(caseexpr: &CaseExpr<'mcx>, ctx: &mut DeparseContext<'mcx>
         if caseexpr.arg.is_some() {
             if let Some(op) = w.as_op_expr() {
                 if op.args.len() == 2
-                    && strip_implicit_coercions(op.args.nth(0)).node_tag()
+                    && nodes_core::strip_implicit_coercions(op.args.nth(0)).node_tag()
                         == NodeTag::T_CaseTestExpr
                 {
                     w = op.args.nth(1);
@@ -2058,47 +2058,6 @@ fn get_case_expr<'mcx>(caseexpr: &CaseExpr<'mcx>, ctx: &mut DeparseContext<'mcx>
     }
     append_context_keyword(ctx, "END", -PRETTYINDENT_VAR, 0, 0);
     Ok(())
-}
-
-pub(crate) fn strip_implicit_coercions(node: Node<'_>) -> Node<'_> {
-    match node.node_tag() {
-        NodeTag::T_FuncExpr => {
-            let f = node.as_func_expr().unwrap();
-            if f.funcformat == CoercionForm::COERCE_IMPLICIT_CAST {
-                return strip_implicit_coercions(f.args.nth(0));
-            }
-            node
-        }
-        NodeTag::T_RelabelType => {
-            let r = node.as_relabel_type().unwrap();
-            if r.relabelformat == CoercionForm::COERCE_IMPLICIT_CAST {
-                return strip_implicit_coercions(r.arg);
-            }
-            node
-        }
-        NodeTag::T_CoerceViaIO => {
-            let c = node.as_coerce_via_io().unwrap();
-            if c.coerceformat == CoercionForm::COERCE_IMPLICIT_CAST {
-                return strip_implicit_coercions(c.arg);
-            }
-            node
-        }
-        NodeTag::T_ArrayCoerceExpr => {
-            let a = node.as_array_coerce_expr().unwrap();
-            if a.coerceformat == CoercionForm::COERCE_IMPLICIT_CAST {
-                return strip_implicit_coercions(a.arg);
-            }
-            node
-        }
-        NodeTag::T_ConvertRowtypeExpr => {
-            let c = node.as_convert_rowtype_expr().unwrap();
-            if c.convertformat == CoercionForm::COERCE_IMPLICIT_CAST {
-                return strip_implicit_coercions(c.arg);
-            }
-            node
-        }
-        _ => node,
-    }
 }
 
 fn get_array_expr<'mcx>(arrayexpr: &ArrayExpr<'mcx>, ctx: &mut DeparseContext<'mcx>) -> PgResult<()> {

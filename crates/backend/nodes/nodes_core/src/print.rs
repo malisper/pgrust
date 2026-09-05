@@ -4,9 +4,12 @@
 //! (real source-text locations, not -1).
 use core::fmt::Write;
 
-use mcx::{Mcx, PgString};
+use mcx::{Mcx, PgString, PgVec};
 use types_core::AttrNumber;
-use types_error::{ErrorLevel, ErrorLocation, PgResult};
+use types_error::{
+    ErrorLevel, ErrorLocation, PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED,
+    ERRCODE_INTERNAL_ERROR,
+};
 use types_nodes::parsenodes::{RTEKind, RangeTblEntry};
 use types_nodes::primnodes::{INDEX_VAR, INNER_VAR, OUTER_VAR};
 use types_nodes::{Node, NodeList, NodeTag};
@@ -182,13 +185,33 @@ pub fn elog_node_display(
         .finish(ErrorLocation::new(file!(), line!() as i32, "elog_node_display"))
 }
 
-pub fn print_rt(mcx: Mcx<'_>, rtable: &NodeList<'_>) {
-    let mut buf = PgString::new_in(mcx);
-    write_rt(&mut buf, rtable);
-    stdout_flush(buf.as_str());
+/// Arena byte buffer for the printf-style printers: C prints raw bytes
+/// (output-function results need not be UTF-8 under every server encoding).
+struct Buf<'mcx>(PgVec<'mcx, u8>);
+
+impl<'mcx> Buf<'mcx> {
+    fn new(mcx: Mcx<'mcx>) -> Self {
+        Buf(PgVec::new_in(mcx))
+    }
+    fn push_bytes(&mut self, b: &[u8]) {
+        mcx::vec_append_bytes(&mut self.0, b).expect("print append");
+    }
 }
 
-fn write_rt(buf: &mut PgString<'_>, rtable: &NodeList<'_>) {
+impl Write for Buf<'_> {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        self.push_bytes(s.as_bytes());
+        Ok(())
+    }
+}
+
+pub fn print_rt(mcx: Mcx<'_>, rtable: &NodeList<'_>) {
+    let mut buf = Buf::new(mcx);
+    write_rt(&mut buf, rtable);
+    stdout_flush(&buf.0);
+}
+
+fn write_rt(buf: &mut Buf<'_>, rtable: &NodeList<'_>) {
     let _ = writeln!(buf, "resno\trefname  \trelid\tinFromCl");
     let _ = writeln!(buf, "-----\t---------\t-----\t--------");
     for (idx, rte_node) in rtable.iter().enumerate() {
@@ -218,14 +241,16 @@ fn write_rt(buf: &mut PgString<'_>, rtable: &NodeList<'_>) {
     }
 }
 
-fn stdout_flush(s: &str) {
+fn stdout_flush(s: &[u8]) {
     use std::io::Write as _;
     let mut o = std::io::stdout();
-    let _ = o.write_all(s.as_bytes());
+    let _ = o.write_all(s);
     let _ = o.flush();
 }
 
-// parse_relation.c get_rte_attribute_name (print_expr's only consumer here).
+// parse_relation.c get_rte_attribute_name (print_expr's only consumer here);
+// its out-of-range attnum is elog(ERROR, "invalid attnum %d for rangetable
+// entry %s") — a catchable XX000.
 fn rte_attribute_name<'mcx>(
     mcx: Mcx<'mcx>,
     rte: &RangeTblEntry<'mcx>,
@@ -251,49 +276,56 @@ fn rte_attribute_name<'mcx>(
     if let Some(name) = rte.eref.and_then(colname) {
         return PgString::from_str_in(name, mcx);
     }
-    panic!(
-        "invalid attnum {attnum} for rangetable entry {}",
-        rte.eref.and_then(|e| e.aliasname).unwrap_or("")
-    );
+    Err(Box::new(
+        PgError::error(format!(
+            "invalid attnum {attnum} for rangetable entry {}",
+            rte.eref.and_then(|e| e.aliasname).unwrap_or("")
+        ))
+        .with_sqlstate(ERRCODE_INTERNAL_ERROR),
+    ))
 }
 
+// C OidOutputFunctionCall + printf("%s"): the raw output bytes, whatever the
+// server encoding.
 fn output_function_call<'mcx>(
     mcx: Mcx<'mcx>,
     typoutput: types_core::Oid,
     value: datum::Datum,
-) -> PgResult<PgString<'mcx>> {
+) -> PgResult<PgVec<'mcx, u8>> {
     let mut finfo = fmgr_seams::fmgr_info::call(typoutput)?;
     let d = types_fmgr::function_call1_coll_in(&mut finfo, types_core::InvalidOid, mcx, value)?;
     // SAFETY: out functions return a NUL-terminated cstring datum; copied out
     // before finfo (and its scratch) dies.
     let s = unsafe { core::ffi::CStr::from_ptr(d.as_usize() as *const core::ffi::c_char) };
-    PgString::from_str_in(s.to_str().expect("output fn result is UTF-8"), mcx)
+    let mut out = PgVec::new_in(mcx);
+    mcx::vec_append_bytes(&mut out, s.to_bytes())?;
+    Ok(out)
 }
 
 pub fn print_expr(mcx: Mcx<'_>, expr: Option<Node<'_>>, rtable: &NodeList<'_>) -> PgResult<()> {
-    let mut buf = PgString::new_in(mcx);
+    let mut buf = Buf::new(mcx);
     write_expr(&mut buf, mcx, expr, rtable)?;
-    stdout_flush(buf.as_str());
+    stdout_flush(&buf.0);
     Ok(())
 }
 
 fn write_expr(
-    buf: &mut PgString<'_>,
+    buf: &mut Buf<'_>,
     mcx: Mcx<'_>,
     expr: Option<Node<'_>>,
     rtable: &NodeList<'_>,
 ) -> PgResult<()> {
     let Some(expr) = expr else {
-        push(buf, "<>");
+        buf.push_bytes(b"<>");
         return Ok(());
     };
     match expr.node_tag() {
         NodeTag::T_Var => {
             let var = expr.as_var().unwrap();
             match var.varno {
-                INNER_VAR => push(buf, "INNER.?"),
-                OUTER_VAR => push(buf, "OUTER.?"),
-                INDEX_VAR => push(buf, "INDEX.?"),
+                INNER_VAR => buf.push_bytes(b"INNER.?"),
+                OUTER_VAR => buf.push_bytes(b"OUTER.?"),
+                INDEX_VAR => buf.push_bytes(b"INDEX.?"),
                 _ => {
                     debug_assert!(var.varno > 0 && var.varno as usize <= rtable.len());
                     let rte = rtable
@@ -309,12 +341,12 @@ fn write_expr(
         NodeTag::T_Const => {
             let c = expr.as_const().unwrap();
             if c.constisnull {
-                push(buf, "NULL");
+                buf.push_bytes(b"NULL");
                 return Ok(());
             }
             let (typoutput, _) = lsyscache::getTypeOutputInfo(c.consttype)?;
             let s = output_function_call(mcx, typoutput, c.constvalue)?;
-            push(buf, s.as_str());
+            buf.push_bytes(&s);
         }
         NodeTag::T_OpExpr => {
             let e = expr.as_op_expr().unwrap();
@@ -337,43 +369,51 @@ fn write_expr(
             for (i, arg) in e.args.iter().enumerate() {
                 write_expr(buf, mcx, Some(arg), rtable)?;
                 if i + 1 < e.args.len() {
-                    push(buf, ",");
+                    buf.push_bytes(b",");
                 }
             }
-            push(buf, ")");
+            buf.push_bytes(b")");
         }
-        _ => push(buf, "unknown expr"),
+        _ => buf.push_bytes(b"unknown expr"),
     }
     Ok(())
 }
 
 pub fn print_tl(mcx: Mcx<'_>, tlist: &NodeList<'_>, rtable: &NodeList<'_>) -> PgResult<()> {
-    let mut buf = PgString::new_in(mcx);
-    push(&mut buf, "(\n");
+    let mut buf = Buf::new(mcx);
+    buf.push_bytes(b"(\n");
     for tl in tlist {
         let tle = tl.as_target_entry().expect("tlist element");
         let _ = write!(buf, "\t{} {}\t", tle.resno, tle.resname.unwrap_or("<null>"));
         if tle.ressortgroupref != 0 {
             let _ = write!(buf, "({}):\t", tle.ressortgroupref);
         } else {
-            push(&mut buf, "    :\t");
+            buf.push_bytes(b"    :\t");
         }
         write_expr(&mut buf, mcx, Some(tle.expr), rtable)?;
-        push(&mut buf, "\n");
+        buf.push_bytes(b"\n");
     }
-    push(&mut buf, ")\n");
-    stdout_flush(buf.as_str());
+    buf.push_bytes(b")\n");
+    stdout_flush(&buf.0);
     Ok(())
 }
 
-pub fn print_pathkeys() -> ! {
-    panic!(
-        "print.c print_pathkeys unported: pathnodes here are PlannerInfo arena \
-         handles, not a List walkable from nodes_core — planner-debug lane"
-    )
+// C print_pathkeys walks PathKey -> EquivalenceClass members (print.c:430);
+// pathnodes here are PlannerInfo arena handles, not a List walkable from
+// nodes_core, so the printer is a typed refusal (never a panic) until the
+// planner-debug lane ports it.
+pub fn print_pathkeys() -> PgResult<()> {
+    Err(Box::new(
+        PgError::error("print_pathkeys is not supported by this server")
+            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+    ))
 }
 
-pub fn print_slot() -> ! {
-    panic!("print.c print_slot unported: debugtup (printtup.c) has no port — printer lane")
+// C print_slot formats a TupleTableSlot through debugtup (printtup.c), which
+// has no port; typed refusal (never a panic) until the printer lane ports it.
+pub fn print_slot() -> PgResult<()> {
+    Err(Box::new(
+        PgError::error("print_slot is not supported by this server")
+            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+    ))
 }
-

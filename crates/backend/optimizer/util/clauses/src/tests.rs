@@ -408,8 +408,9 @@ fn all_arguments_const_checks_children_only() {
     assert!(!all_arguments_const(mixed).unwrap());
 }
 
+// C expression_tree_walker's default arm is elog(ERROR, "unrecognized node
+// type: %d") (nodeFuncs.c:2665-2667): a catchable XX000, never a panic.
 #[test]
-#[should_panic(expected = "deferred")]
 fn unported_vocab_walks_loud() {
     let ctx = cx();
     let mcx = ctx.mcx();
@@ -420,7 +421,9 @@ fn unported_vocab_walks_loud() {
             expression_tree_walker(node, self)
         }
     }
-    let _ = expression_tree_walker(il, &mut Nop);
+    let err = expression_tree_walker(il, &mut Nop).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    assert!(err.message().starts_with("unrecognized node type: "), "{}", err.message());
 }
 
 #[test]

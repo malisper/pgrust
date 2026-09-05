@@ -264,8 +264,9 @@ fn raw_walker_case_expr_walks_arg_whens_defresult() {
     assert_eq!(w.raw, 4);
 }
 
+// C raw_expression_tree_walker's default arm is elog(ERROR, "unrecognized
+// node type: %d") (nodeFuncs.c:4640-4642): an XX000 error, not a panic.
 #[test]
-#[should_panic(expected = "raw_expression_tree_walker")]
 fn raw_walker_unported_vocab_is_loud() {
     let ctx = cx();
     let mcx = ctx.mcx();
@@ -277,7 +278,12 @@ fn raw_walker_unported_vocab_is_loud() {
     )
     .unwrap();
     let mut w = CountParams { analyzed: 0, raw: 0 };
-    let _ = raw_expression_tree_walker(rt, &mut w);
+    let err = raw_expression_tree_walker(rt, &mut w).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    assert_eq!(
+        err.message(),
+        format!("unrecognized node type: {}", NodeTag::T_TargetEntry as u16)
+    );
 }
 
 fn text_const(mcx: Mcx<'_>) -> Node<'_> {
@@ -898,4 +904,686 @@ fn walker_deep_nesting_raises_54001_with_the_guard_armed() {
         .unwrap()
         .join()
         .unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// audit-18.6 remediation b024 (fp-nodes-nodeFuncs-p1/p2, fp-nodes-print):
+// every witness below asserts the C 18.6 nodeFuncs.c / print.c contract.
+// ---------------------------------------------------------------------------
+
+fn int4_const_at(mcx: Mcx<'_>, v: i32, location: i32) -> Node<'_> {
+    Node::mk(
+        mcx,
+        types_nodes::primnodes::Const {
+            consttype: 23,
+            consttypmod: -1,
+            constcollid: 0,
+            constlen: 4,
+            constvalue: datum::Datum::from_i32(v),
+            constisnull: false,
+            constbyval: true,
+            location,
+        },
+    )
+    .unwrap()
+}
+
+fn sort_group_clause(mcx: Mcx<'_>, sortgroupref: u32) -> Node<'_> {
+    Node::mk(
+        mcx,
+        types_nodes::parsenodes::SortGroupClause {
+            tleSortGroupRef: sortgroupref,
+            eqop: 96,
+            sortop: 97,
+            reverse_sort: false,
+            nulls_first: false,
+            hashable: true,
+        },
+    )
+    .unwrap()
+}
+
+/// Records the tag of every node the engine hands back to the walker.
+struct TagTrail(Vec<NodeTag>);
+impl<'mcx> NodeWalker<'mcx> for TagTrail {
+    fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+        self.0.push(node.node_tag());
+        expression_tree_walker(node, self)
+    }
+}
+
+fn count_tag(trail: &[NodeTag], tag: NodeTag) -> usize {
+    trail.iter().filter(|t| **t == tag).count()
+}
+
+// C strip_implicit_coercions (nodeFuncs.c:744-750): an implicit
+// CoerceToDomain is stripped like the other five coercion node types.
+#[test]
+fn strip_implicit_coercions_strips_implicit_coerce_to_domain() {
+    use types_nodes::primnodes::CoercionForm;
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let c = int4_const_at(mcx, 5, -1);
+    let domain = |arg, form| {
+        Node::mk(
+            mcx,
+            types_nodes::CoerceToDomain {
+                arg,
+                resulttype: 16462,
+                resulttypmod: -1,
+                resultcollid: 0,
+                coercionformat: form,
+                location: -1,
+            },
+        )
+        .unwrap()
+    };
+    let implicit = domain(c, CoercionForm::COERCE_IMPLICIT_CAST);
+    assert_eq!(strip_implicit_coercions(implicit).node_tag(), NodeTag::T_Const);
+    // Stacked implicit coercions strip all the way down (C recurses).
+    let relabel = Node::mk(
+        mcx,
+        types_nodes::RelabelType {
+            arg: implicit,
+            resulttype: 26,
+            resulttypmod: -1,
+            resultcollid: 0,
+            relabelformat: CoercionForm::COERCE_IMPLICIT_CAST,
+            location: -1,
+        },
+    )
+    .unwrap();
+    assert_eq!(strip_implicit_coercions(relabel).node_tag(), NodeTag::T_Const);
+    // Explicit casts and SQL-syntax coercions are kept.
+    let explicit = domain(c, CoercionForm::COERCE_EXPLICIT_CAST);
+    assert_eq!(strip_implicit_coercions(explicit).node_tag(), NodeTag::T_CoerceToDomain);
+    let sql_syntax = domain(c, CoercionForm::COERCE_SQL_SYNTAX);
+    assert_eq!(strip_implicit_coercions(sql_syntax).node_tag(), NodeTag::T_CoerceToDomain);
+}
+
+fn install_int4_eq_operator_seam() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        syscache_seams::lookup_pg_operator_shape::set(|opno| {
+            Ok(match opno {
+                96 => Some(syscache_seams::PgOperatorShape {
+                    oprnamespace: 11,
+                    oprleft: 23,
+                    oprright: 23,
+                    oprresult: 16,
+                    oprcom: 96,
+                    oprnegate: 518,
+                    oprcode: 65,
+                    oprrest: 101,
+                    oprjoin: 105,
+                    oprcanmerge: true,
+                    oprcanhash: true,
+                }),
+                _ => None,
+            })
+        });
+    });
+}
+
+// C fix_opfuncids_walker (nodeFuncs.c:1844-1855): set_opfuncid on OpExpr,
+// DistinctExpr and NullIfExpr, set_sa_opfuncid on ScalarArrayOpExpr.
+#[test]
+fn fix_opfuncids_fills_distinct_nullif_and_scalar_array_ops() {
+    install_int4_eq_operator_seam();
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let p = extern_param(mcx, 1);
+    let pair = || NodeList::from_slice(mcx, &[p, p]).unwrap();
+    let op = Node::mk(
+        mcx,
+        OpExpr {
+            opno: 96,
+            opfuncid: 0,
+            opresulttype: 16,
+            opretset: false,
+            opcollid: 0,
+            inputcollid: 0,
+            args: pair(),
+            location: -1,
+        },
+    )
+    .unwrap();
+    let distinct = Node::mk(
+        mcx,
+        types_nodes::DistinctExpr {
+            opno: 96,
+            opfuncid: 0,
+            opresulttype: 16,
+            opretset: false,
+            opcollid: 0,
+            inputcollid: 0,
+            args: pair(),
+            location: -1,
+        },
+    )
+    .unwrap();
+    let nullif = Node::mk(
+        mcx,
+        types_nodes::NullIfExpr {
+            opno: 96,
+            opfuncid: 0,
+            opresulttype: 23,
+            opretset: false,
+            opcollid: 0,
+            inputcollid: 0,
+            args: pair(),
+            location: -1,
+        },
+    )
+    .unwrap();
+    let saop = Node::mk(
+        mcx,
+        types_nodes::primnodes::ScalarArrayOpExpr {
+            opno: 96,
+            opfuncid: 0,
+            useOr: true,
+            args: pair(),
+            location: -1,
+            ..types_nodes::primnodes::ScalarArrayOpExpr::default()
+        },
+    )
+    .unwrap();
+    // Nested under a BoolExpr so the walk (not just the root) is exercised.
+    let and = Node::mk(
+        mcx,
+        types_nodes::primnodes::BoolExpr {
+            boolop: types_nodes::primnodes::BoolExprType::AND_EXPR,
+            args: NodeList::from_slice(mcx, &[op, distinct, nullif, saop]).unwrap(),
+            location: -1,
+        },
+    )
+    .unwrap();
+    fix_opfuncids(and).unwrap();
+    assert_eq!(op.as_op_expr().unwrap().opfuncid, 65, "OpExpr");
+    assert_eq!(distinct.as_distinct_expr().unwrap().opfuncid, 65, "DistinctExpr");
+    assert_eq!(nullif.as_null_if_expr().unwrap().opfuncid, 65, "NullIfExpr");
+    assert_eq!(saop.as_scalar_array_op_expr().unwrap().opfuncid, 65, "ScalarArrayOpExpr");
+}
+
+// C exprType (nodeFuncs.c:96-130): MULTIEXPR sublinks are RECORD; only
+// EXPR/ARRAY sublinks look inside the subselect, so any other sublink over an
+// untransformed subselect still answers (boolean / -1 / InvalidOid).
+#[test]
+fn expr_accessors_multiexpr_sublink_is_record_and_skip_the_subselect_otherwise() {
+    use types_nodes::primnodes::SubLinkType;
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let te = Node::mk_target_entry(mcx, int4_const_at(mcx, 1, -1), 1, None, false).unwrap();
+    let subselect = Node::mk(
+        mcx,
+        Query { targetList: NodeList::from_slice(mcx, &[te]).unwrap(), ..Query::default() },
+    )
+    .unwrap();
+    let sublink = |kind, subselect| {
+        Node::mk(
+            mcx,
+            types_nodes::SubLink {
+                subLinkType: kind,
+                subLinkId: 1,
+                testexpr: None,
+                operName: NodeList::nil(),
+                subselect,
+                location: -1,
+            },
+        )
+        .unwrap()
+    };
+    let multi = sublink(SubLinkType::MULTIEXPR_SUBLINK, subselect);
+    assert_eq!(expr_type(multi), 2249, "C: MULTIEXPR is always considered to return RECORD");
+    assert_eq!(expr_typmod(multi), -1);
+    assert_eq!(expr_collation(multi), 0);
+
+    let raw = Node::mk_string(mcx, "untransformed").unwrap();
+    let exists = sublink(SubLinkType::EXISTS_SUBLINK, raw);
+    assert_eq!(expr_type(exists), 16);
+    assert_eq!(expr_typmod(exists), -1);
+    assert_eq!(expr_collation(exists), 0);
+    let any = sublink(SubLinkType::ANY_SUBLINK, raw);
+    assert_eq!(expr_type(any), 16);
+    // EXPR sublinks do consult the subselect's first target column.
+    let expr = sublink(SubLinkType::EXPR_SUBLINK, subselect);
+    assert_eq!(expr_type(expr), 23);
+}
+
+// C expression_tree_mutator T_SetOperationStmt (nodeFuncs.c:3640-3649): larg
+// and rarg are mutated; "We do not mutate groupClauses by default".
+#[test]
+fn mutator_set_operation_stmt_skips_group_clauses() {
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let rtr = |i| Node::mk(mcx, types_nodes::primnodes::RangeTblRef { rtindex: i }).unwrap();
+    let so = Node::mk(
+        mcx,
+        types_nodes::parsenodes::SetOperationStmt {
+            op: types_nodes::parsenodes::SetOperation::SETOP_UNION,
+            larg: Some(rtr(1)),
+            rarg: Some(rtr(2)),
+            groupClauses: NodeList::from_slice(mcx, &[sort_group_clause(mcx, 1)]).unwrap(),
+            ..types_nodes::parsenodes::SetOperationStmt::default()
+        },
+    )
+    .unwrap();
+    let mut seen = Vec::new();
+    let out = expression_tree_mutator(mcx, so, &mut |n| {
+        seen.push(n.node_tag());
+        Ok(None)
+    })
+    .unwrap();
+    assert!(out.is_none());
+    assert_eq!(seen, [NodeTag::T_RangeTblRef, NodeTag::T_RangeTblRef]);
+}
+
+// C expression_tree_walker T_CommonTableExpr (nodeFuncs.c:2423-2439) walks
+// ctequery, search_clause and cycle_clause; T_CTECycleClause (:2408-2417)
+// walks cycle_mark_value and cycle_mark_default; T_CTESearchClause is a leaf.
+#[test]
+fn walker_reaches_cte_search_and_cycle_clauses() {
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let cycle = Node::mk(
+        mcx,
+        types_nodes::parsenodes::CTECycleClause {
+            cycle_mark_column: Some("c"),
+            cycle_mark_value: Some(int4_const_at(mcx, 1, -1)),
+            cycle_mark_default: Some(int4_const_at(mcx, 0, -1)),
+            cycle_path_column: Some("p"),
+            cycle_mark_type: 23,
+            cycle_mark_typmod: -1,
+            location: -1,
+            ..types_nodes::parsenodes::CTECycleClause::default()
+        },
+    )
+    .unwrap();
+    let search = Node::mk(
+        mcx,
+        types_nodes::parsenodes::CTESearchClause {
+            search_breadth_first: true,
+            search_seq_column: Some("s"),
+            location: -1,
+            ..types_nodes::parsenodes::CTESearchClause::default()
+        },
+    )
+    .unwrap();
+    let cte = Node::mk(
+        mcx,
+        types_nodes::parsenodes::CommonTableExpr {
+            ctename: Some("g"),
+            ctequery: Some(Node::mk(mcx, Query::default()).unwrap()),
+            search_clause: Some(search),
+            cycle_clause: Some(cycle),
+            ..types_nodes::parsenodes::CommonTableExpr::default()
+        },
+    )
+    .unwrap();
+    let mut w = TagTrail(Vec::new());
+    assert!(!expression_tree_walker(cte, &mut w).unwrap());
+    assert_eq!(count_tag(&w.0, NodeTag::T_Query), 1);
+    assert_eq!(count_tag(&w.0, NodeTag::T_CTESearchClause), 1);
+    assert_eq!(count_tag(&w.0, NodeTag::T_CTECycleClause), 1);
+    assert_eq!(count_tag(&w.0, NodeTag::T_Const), 2, "cycle mark value + default");
+}
+
+// C expression_tree_walker arms (nodeFuncs.c:2399-2412 WindowClause,
+// :2440-2500 SQL/JSON constructors, :2570-2585 partition prune steps,
+// :2625-2632 AppendRelInfo) that the port lacked.
+#[test]
+fn walker_covers_window_clause_json_constructor_and_planner_arms() {
+    use types_nodes::rawnodes::{
+        JsonAggConstructor, JsonArrayAgg, JsonArrayConstructor, JsonArrayQueryConstructor,
+        JsonKeyValue, JsonObjectAgg, JsonObjectConstructor,
+    };
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let c = |v| int4_const_at(mcx, v, -1);
+    let trail = |node| {
+        let mut w = TagTrail(Vec::new());
+        assert!(!expression_tree_walker(node, &mut w).unwrap());
+        w.0
+    };
+
+    let wc = Node::mk(
+        mcx,
+        types_nodes::parsenodes::WindowClause {
+            partitionClause: NodeList::from_slice(mcx, &[sort_group_clause(mcx, 1)]).unwrap(),
+            orderClause: NodeList::from_slice(mcx, &[sort_group_clause(mcx, 2)]).unwrap(),
+            startOffset: Some(c(1)),
+            endOffset: Some(c(2)),
+            ..types_nodes::parsenodes::WindowClause::default()
+        },
+    )
+    .unwrap();
+    let t = trail(wc);
+    assert_eq!(count_tag(&t, NodeTag::T_SortGroupClause), 2);
+    assert_eq!(count_tag(&t, NodeTag::T_Const), 2);
+
+    let kv = Node::mk(mcx, JsonKeyValue { key: Some(c(1)), value: Some(c(2)) }).unwrap();
+    assert_eq!(count_tag(&trail(kv), NodeTag::T_Const), 2);
+    let obj = Node::mk(
+        mcx,
+        JsonObjectConstructor {
+            exprs: NodeList::from_slice(mcx, &[kv]).unwrap(),
+            ..JsonObjectConstructor::default()
+        },
+    )
+    .unwrap();
+    let t = trail(obj);
+    assert_eq!(count_tag(&t, NodeTag::T_JsonKeyValue), 1);
+    assert_eq!(count_tag(&t, NodeTag::T_Const), 2);
+    let arr = Node::mk(
+        mcx,
+        JsonArrayConstructor {
+            exprs: NodeList::from_slice(mcx, &[c(1), c(2), c(3)]).unwrap(),
+            ..JsonArrayConstructor::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(count_tag(&trail(arr), NodeTag::T_Const), 3);
+    let arrq = Node::mk(
+        mcx,
+        JsonArrayQueryConstructor { query: Some(c(1)), ..JsonArrayQueryConstructor::default() },
+    )
+    .unwrap();
+    assert_eq!(count_tag(&trail(arrq), NodeTag::T_Const), 1);
+    let agg = Node::mk(
+        mcx,
+        JsonAggConstructor {
+            agg_filter: Some(c(1)),
+            agg_order: NodeList::from_slice(mcx, &[c(2)]).unwrap(),
+            over: Some(c(3)),
+            ..JsonAggConstructor::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(count_tag(&trail(agg), NodeTag::T_Const), 3);
+    let objagg = Node::mk(
+        mcx,
+        JsonObjectAgg {
+            constructor: Some(agg),
+            arg: Some(kv),
+            absent_on_null: false,
+            unique: false,
+        },
+    )
+    .unwrap();
+    let t = trail(objagg);
+    assert_eq!(count_tag(&t, NodeTag::T_JsonAggConstructor), 1);
+    assert_eq!(count_tag(&t, NodeTag::T_JsonKeyValue), 1);
+    assert_eq!(count_tag(&t, NodeTag::T_Const), 5);
+    let arragg = Node::mk(
+        mcx,
+        JsonArrayAgg { constructor: Some(agg), arg: Some(c(9)), ..JsonArrayAgg::default() },
+    )
+    .unwrap();
+    assert_eq!(count_tag(&trail(arragg), NodeTag::T_Const), 4);
+
+    let step = Node::mk(
+        mcx,
+        types_nodes::plannodes::PartitionPruneStepOp {
+            exprs: NodeList::from_slice(mcx, &[c(1), c(2)]).unwrap(),
+            ..types_nodes::plannodes::PartitionPruneStepOp::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(count_tag(&trail(step), NodeTag::T_Const), 2);
+    let combine =
+        Node::mk(mcx, types_nodes::plannodes::PartitionPruneStepCombine::default()).unwrap();
+    assert!(trail(combine).is_empty());
+    let ari = Node::mk(
+        mcx,
+        types_nodes::plannodes::AppendRelInfo {
+            parent_relid: 1,
+            child_relid: 2,
+            parent_reltype: 0,
+            child_reltype: 0,
+            num_child_cols: 0,
+            parent_colnos: &[],
+            parent_reloid: 0,
+        },
+    )
+    .unwrap();
+    assert!(trail(ari).is_empty());
+}
+
+// C expression_tree_mutator arms the port lacked: T_Query returns the node
+// (nodeFuncs.c:3486-3488), T_WindowClause (:3489-3501), T_CTECycleClause
+// (:3502-3512), T_CommonTableExpr (:3513-3532), T_JsonFormat (:2998) and
+// T_JsonReturning (:3365) leaves, T_PartitionPruneStepOp (:3612-3622),
+// T_PartitionPruneStepCombine (:3623-3625), T_AppendRelInfo (:3683-3693).
+#[test]
+fn mutator_covers_query_window_cte_json_and_planner_arms() {
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let c = |v| int4_const_at(mcx, v, -1);
+    let replacement = c(99);
+    let is99 = |n: Node<'_>| n.as_const().is_some_and(|k| k.constvalue.as_i32() == 99);
+    // A C-shaped callback: replaces every Const, recurses through the engine
+    // for everything else; counts how often it runs.
+    fn replace_consts<'mcx>(
+        mcx: Mcx<'mcx>,
+        n: Node<'mcx>,
+        replacement: Node<'mcx>,
+        calls: &std::cell::Cell<usize>,
+    ) -> PgResult<Option<Node<'mcx>>> {
+        calls.set(calls.get() + 1);
+        if n.node_tag() == NodeTag::T_Const {
+            return Ok(Some(replacement));
+        }
+        expression_tree_mutator(mcx, n, &mut |c| replace_consts(mcx, c, replacement, calls))
+    }
+    let calls = std::cell::Cell::new(0usize);
+    let mut m = |n| replace_consts(mcx, n, replacement, &calls);
+
+    let q = Node::mk(
+        mcx,
+        Query { targetList: NodeList::from_slice(mcx, &[c(1)]).unwrap(), ..Query::default() },
+    )
+    .unwrap();
+    assert!(expression_tree_mutator(mcx, q, &mut m).unwrap().is_none());
+    assert_eq!(calls.get(), 0, "C: do nothing with a sub-Query");
+
+    let wc = Node::mk(
+        mcx,
+        types_nodes::parsenodes::WindowClause {
+            partitionClause: NodeList::from_slice(mcx, &[sort_group_clause(mcx, 1)]).unwrap(),
+            startOffset: Some(c(1)),
+            endOffset: None,
+            ..types_nodes::parsenodes::WindowClause::default()
+        },
+    )
+    .unwrap();
+    let out = expression_tree_mutator(mcx, wc, &mut m).unwrap().expect("startOffset changed");
+    let nwc = out.as_window_clause().unwrap();
+    assert!(is99(nwc.startOffset.unwrap()));
+    assert!(nwc.endOffset.is_none());
+    assert_eq!(nwc.partitionClause.len(), 1);
+
+    let cycle = Node::mk(
+        mcx,
+        types_nodes::parsenodes::CTECycleClause {
+            cycle_mark_column: Some("c"),
+            cycle_mark_value: Some(c(1)),
+            cycle_mark_default: Some(c(0)),
+            cycle_mark_type: 23,
+            ..types_nodes::parsenodes::CTECycleClause::default()
+        },
+    )
+    .unwrap();
+    let out = expression_tree_mutator(mcx, cycle, &mut m).unwrap().expect("marks changed");
+    let ncc = out.as_cte_cycle_clause().unwrap();
+    assert!(is99(ncc.cycle_mark_value.unwrap()) && is99(ncc.cycle_mark_default.unwrap()));
+    assert_eq!(ncc.cycle_mark_column, Some("c"));
+    assert_eq!(ncc.cycle_mark_type, 23);
+
+    let cte = Node::mk(
+        mcx,
+        types_nodes::parsenodes::CommonTableExpr {
+            ctename: Some("g"),
+            ctequery: Some(q),
+            search_clause: Some(
+                Node::mk(mcx, types_nodes::parsenodes::CTESearchClause::default()).unwrap(),
+            ),
+            cycle_clause: Some(cycle),
+            ..types_nodes::parsenodes::CommonTableExpr::default()
+        },
+    )
+    .unwrap();
+    let out = expression_tree_mutator(mcx, cte, &mut m).unwrap().expect("cycle clause changed");
+    let ncte = out.as_common_table_expr().unwrap();
+    assert_eq!(ncte.ctename, Some("g"));
+    let ncycle = ncte.cycle_clause.unwrap().as_cte_cycle_clause().unwrap();
+    assert!(is99(ncycle.cycle_mark_value.unwrap()));
+    assert!(ncte.search_clause.is_some());
+    assert_eq!(ncte.ctequery.unwrap().node_tag(), NodeTag::T_Query);
+    // Unchanged CTE shares the input.
+    let cte2 = Node::mk(
+        mcx,
+        types_nodes::parsenodes::CommonTableExpr {
+            ctequery: Some(q),
+            ..types_nodes::parsenodes::CommonTableExpr::default()
+        },
+    )
+    .unwrap();
+    assert!(expression_tree_mutator(mcx, cte2, &mut m).unwrap().is_none());
+
+    let fmt = Node::mk(mcx, types_nodes::primnodes::JsonFormat::default()).unwrap();
+    assert!(expression_tree_mutator(mcx, fmt, &mut m).unwrap().is_none());
+    let ret = Node::mk(
+        mcx,
+        types_nodes::primnodes::JsonReturning { format: None, typid: 114, typmod: -1 },
+    )
+    .unwrap();
+    assert!(expression_tree_mutator(mcx, ret, &mut m).unwrap().is_none());
+
+    let step = Node::mk(
+        mcx,
+        types_nodes::plannodes::PartitionPruneStepOp {
+            step_id: 3,
+            exprs: NodeList::from_slice(mcx, &[c(1)]).unwrap(),
+            ..types_nodes::plannodes::PartitionPruneStepOp::default()
+        },
+    )
+    .unwrap();
+    let out = expression_tree_mutator(mcx, step, &mut m).unwrap().expect("exprs changed");
+    let nstep = out.as_partition_prune_step_op().unwrap();
+    assert_eq!(nstep.step_id, 3);
+    assert!(is99(nstep.exprs.nth(0)));
+    let combine =
+        Node::mk(mcx, types_nodes::plannodes::PartitionPruneStepCombine::default()).unwrap();
+    assert!(expression_tree_mutator(mcx, combine, &mut m).unwrap().is_none());
+    let ari = Node::mk(
+        mcx,
+        types_nodes::plannodes::AppendRelInfo {
+            parent_relid: 1,
+            child_relid: 2,
+            parent_reltype: 0,
+            child_reltype: 0,
+            num_child_cols: 0,
+            parent_colnos: &[],
+            parent_reloid: 0,
+        },
+    )
+    .unwrap();
+    assert!(expression_tree_mutator(mcx, ari, &mut m).unwrap().is_none());
+}
+
+// C exprLocation T_CollateClause (nodeFuncs.c:1709-1712): "just use
+// argument's location" — the COLLATE keyword's own position is not consulted.
+#[test]
+fn expr_location_collate_clause_uses_the_argument_only() {
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let collate = |arg_loc, loc| {
+        let arg = Node::mk(
+            mcx,
+            types_nodes::rawnodes::ColumnRef { fields: NodeList::nil(), location: arg_loc },
+        )
+        .unwrap();
+        Node::mk(
+            mcx,
+            types_nodes::rawnodes::CollateClause {
+                arg: Some(arg),
+                collname: NodeList::nil(),
+                location: loc,
+            },
+        )
+        .unwrap()
+    };
+    assert_eq!(expr_location(collate(-1, 17)), -1);
+    assert_eq!(expr_location(collate(5, 17)), 5);
+    assert_eq!(expr_location(collate(30, 17)), 30);
+}
+
+// C's default arms are elog(ERROR, "unrecognized node type: %d") — XX000,
+// catchable — in expression_tree_walker (nodeFuncs.c:2665-2667) and
+// expression_tree_mutator (:3744-3746).
+#[test]
+fn walker_and_mutator_report_unrecognized_node_type_as_internal_error() {
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    // A raw-grammar node the analyzed-tree walker/mutator do not know.
+    let rv = Node::mk(mcx, RangeVar::default()).unwrap();
+    let expected = format!("unrecognized node type: {}", NodeTag::T_RangeVar as u16);
+
+    let mut w = CountParams { analyzed: 0, raw: 0 };
+    let err = expression_tree_walker(rv, &mut w).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    assert_eq!(err.message(), expected);
+
+    let err = expression_tree_mutator(mcx, rv, &mut |_| Ok(None)).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    assert_eq!(err.message(), expected);
+}
+
+// C print_expr (print.c:361) reaches get_rte_attribute_name
+// (parse_relation.c), whose out-of-range attnum is elog(ERROR, "invalid
+// attnum %d for rangetable entry %s") — an error, not a panic.
+#[test]
+fn print_expr_invalid_attnum_is_an_internal_error() {
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let eref = Node::mk_mut(
+        mcx,
+        Alias {
+            aliasname: Some("v"),
+            colnames: NodeList::from_slice(mcx, &[Node::mk_string(mcx, "a").unwrap()]).unwrap(),
+        },
+    )
+    .unwrap()
+    .seal_ref();
+    let rte = Node::mk(
+        mcx,
+        types_nodes::parsenodes::RangeTblEntry {
+            rtekind: types_nodes::parsenodes::RTEKind::RTE_VALUES,
+            eref: Some(eref),
+            ..types_nodes::parsenodes::RangeTblEntry::default()
+        },
+    )
+    .unwrap();
+    let rtable = NodeList::from_slice(mcx, &[rte]).unwrap();
+    let var = Node::mk(
+        mcx,
+        types_nodes::primnodes::Var { varno: 1, varattno: 7, vartype: 23, ..Default::default() },
+    )
+    .unwrap();
+    let err = print::print_expr(mcx, Some(var), &rtable).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    assert_eq!(err.message(), "invalid attnum 7 for rangetable entry v");
+}
+
+// C query_or_expression_tree_mutator (nodeFuncs.c:3965-3975) delegates a
+// Query to query_tree_mutator; that engine is unported here, so the Query arm
+// must be a typed 0A000 refusal — never a panic.
+#[test]
+fn qoe_mutator_query_arm_is_a_typed_refusal() {
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let q = Node::mk(mcx, Query::default()).unwrap();
+    let err = query_or_expression_tree_mutator(mcx, q, &mut |_| Ok(None), 0).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+    assert_eq!(err.message(), "query_or_expression_tree_mutator over a Query is not supported");
 }

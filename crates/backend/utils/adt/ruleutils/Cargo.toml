@@ -8,6 +8,7 @@ publish.workspace = true
 stack_depth_core = { path = "../../misc/stack_depth_core" }
 init_small = { path = "../../init/init_small" }
 postgres_seams = { path = "../../../tcop/postgres_seams" }
+nodes_core = { path = "../../../nodes/nodes_core" }
 amapi = { path = "../../../access/index/amapi" }
 arrayfuncs = { path = "../arrayfuncs" }
 cache_syscache = { path = "../../cache/cache_syscache" }

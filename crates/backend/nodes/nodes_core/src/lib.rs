@@ -41,6 +41,22 @@ pub const QTW_DONT_COPY_QUERY: u32 = 0x40;
 pub const QTW_EXAMINE_SORTGROUP: u32 = 0x80;
 pub const QTW_IGNORE_GROUPEXPRS: u32 = 0x100;
 
+/// C's `default:` arm in expression_tree_walker / expression_tree_mutator /
+/// raw_expression_tree_walker: `elog(ERROR, "unrecognized node type: %d")`
+/// (nodeFuncs.c:2665, :3744, :4640) — a catchable XX000, never a panic.
+#[cold]
+#[inline(never)]
+pub fn unrecognized_node_type(tag: NodeTag) -> Box<types_error::PgError> {
+    Box::new(
+        types_error::PgError::error(format!("unrecognized node type: {}", tag as u16))
+            .with_sqlstate(types_error::ERRCODE_INTERNAL_ERROR),
+    )
+}
+
+/// Infallible-signature counterpart kept for the `clauses` walkers that
+/// re-export this engine (`clauses::walker::deferred`): their default arms
+/// cannot return a `PgResult`, so C's elog surface stays a loud panic there.
+/// nodes_core's own engines use [`unrecognized_node_type`].
 #[cold]
 #[inline(never)]
 pub fn deferred(what: &str, tag: NodeTag) -> ! {
@@ -320,16 +336,63 @@ pub fn expression_tree_walker_dyn<'mcx>(
             Ok(w.visit(j.larg)? || w.visit(j.rarg)? || walk_opt(j.quals, w)?)
         }
         NodeTag::T_Query => Ok(false),
+        NodeTag::T_WindowClause => {
+            let wc = node.as_window_clause().unwrap();
+            Ok(walk_list(&wc.partitionClause, w)?
+                || walk_list(&wc.orderClause, w)?
+                || walk_opt(wc.startOffset, w)?
+                || walk_opt(wc.endOffset, w)?)
+        }
+        NodeTag::T_CTECycleClause => {
+            let cc = node.as_cte_cycle_clause().unwrap();
+            Ok(walk_opt(cc.cycle_mark_value, w)? || walk_opt(cc.cycle_mark_default, w)?)
+        }
         NodeTag::T_SetOperationStmt => {
             // C walks only larg/rarg (groupClauses deemed uninteresting).
             let s = node.as_set_operation_stmt().unwrap();
             Ok(walk_opt(s.larg, w)? || walk_opt(s.rarg, w)?)
         }
         NodeTag::T_CommonTableExpr => {
-            // C walks only ctequery (search/cycle clauses uninteresting here).
+            // C nodeFuncs.c:2423-2439: the CTE's Query node (so walkers can
+            // recurse), then the search and cycle clauses.
             let cte = node.as_common_table_expr().unwrap();
-            walk_opt(cte.ctequery, w)
+            Ok(walk_opt(cte.ctequery, w)?
+                || walk_opt(cte.search_clause, w)?
+                || walk_opt(cte.cycle_clause, w)?)
         }
+        NodeTag::T_JsonKeyValue => {
+            let kv = node.as_json_key_value().unwrap();
+            Ok(walk_opt(kv.key, w)? || walk_opt(kv.value, w)?)
+        }
+        NodeTag::T_JsonObjectConstructor => {
+            walk_list(&node.as_json_object_constructor().unwrap().exprs, w)
+        }
+        NodeTag::T_JsonArrayConstructor => {
+            walk_list(&node.as_json_array_constructor().unwrap().exprs, w)
+        }
+        NodeTag::T_JsonArrayQueryConstructor => {
+            walk_opt(node.as_json_array_query_constructor().unwrap().query, w)
+        }
+        NodeTag::T_JsonAggConstructor => {
+            let c = node.as_json_agg_constructor().unwrap();
+            Ok(walk_opt(c.agg_filter, w)? || walk_list(&c.agg_order, w)? || walk_opt(c.over, w)?)
+        }
+        NodeTag::T_JsonObjectAgg => {
+            let a = node.as_json_object_agg().unwrap();
+            Ok(walk_opt(a.constructor, w)? || walk_opt(a.arg, w)?)
+        }
+        NodeTag::T_JsonArrayAgg => {
+            let a = node.as_json_array_agg().unwrap();
+            Ok(walk_opt(a.constructor, w)? || walk_opt(a.arg, w)?)
+        }
+        NodeTag::T_PartitionPruneStepOp => {
+            walk_list(&node.as_partition_prune_step_op().unwrap().exprs, w)
+        }
+        // C: no expression sub-nodes.
+        NodeTag::T_PartitionPruneStepCombine => Ok(false),
+        // C walks translated_vars; this vocabulary's AppendRelInfo carries no
+        // expression list (the planner keeps translations outside the node).
+        NodeTag::T_AppendRelInfo => Ok(false),
         NodeTag::T_MergeAction => {
             let a = node.as_merge_action().unwrap();
             Ok(walk_opt(a.qual, w)? || walk_list(&a.targetList, w)?)
@@ -377,7 +440,9 @@ pub fn expression_tree_walker_dyn<'mcx>(
             let prd = node.as_variant::<types_nodes::rawnodes::PartitionRangeDatum>().unwrap();
             walk_opt(prd.value, w)
         }
-        other => deferred("expression_tree_walker", other),
+        // IndexClause / PlaceHolderInfo are not Node variants here (planner
+        // arena records), so C's arms for them have nothing to dispatch on.
+        other => Err(unrecognized_node_type(other)),
     }
 }
 
@@ -542,11 +607,12 @@ pub fn query_or_expression_tree_walker_dyn<'mcx>(
     }
 }
 
-/// C query_or_expression_tree_mutator; the Query arm needs a generic
-/// query_tree_mutator engine (unported here — rewrite_manip's
+/// C query_or_expression_tree_mutator (nodeFuncs.c:3965-3975); the Query arm
+/// needs a generic query_tree_mutator engine (unported here — rewrite_manip's
 /// mutate_query_fields_inplace is the parameterized in-place form, but it
 /// cannot live in this crate without a Query-copy hook: RTE subquery descent
-/// needs the outfuncs/readfuncs round trip), so it panics loudly.
+/// needs the outfuncs/readfuncs round trip), so that arm is a typed 0A000
+/// refusal. No in-tree caller passes a Query.
 pub fn query_or_expression_tree_mutator<'mcx, F>(
     mcx: Mcx<'mcx>,
     node: Node<'mcx>,
@@ -558,9 +624,12 @@ where
 {
     let _ = mcx;
     if node.as_query().is_some() {
-        panic!(
-            "query_or_expression_tree_mutator (nodeFuncs.c): generic              query_tree_mutator engine unported — nodes-core lane"
-        );
+        return Err(Box::new(
+            types_error::PgError::error(
+                "query_or_expression_tree_mutator over a Query is not supported",
+            )
+            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
     }
     m(node)
 }
@@ -953,7 +1022,7 @@ pub fn raw_expression_tree_walker_dyn<'mcx>(
         NodeTag::T_CommonTableExpr => {
             walk_opt(node.as_common_table_expr().unwrap().ctequery, w)
         }
-        other => deferred("raw_expression_tree_walker", other),
+        other => Err(unrecognized_node_type(other)),
     }
 }
 
@@ -1082,6 +1151,14 @@ pub fn strip_implicit_coercions(node: Node<'_>) -> Node<'_> {
             }
             node
         }
+        // C nodeFuncs.c:744-750.
+        NodeTag::T_CoerceToDomain => {
+            let c = node.as_coerce_to_domain().unwrap();
+            if c.coercionformat == CoercionForm::COERCE_IMPLICIT_CAST {
+                return strip_implicit_coercions(c.arg);
+            }
+            node
+        }
         _ => node,
     }
 }
@@ -1125,7 +1202,19 @@ pub fn expression_tree_mutator_dyn<'mcx>(
         | NodeTag::T_NextValueExpr
         | NodeTag::T_RangeTblRef
         | NodeTag::T_MergeSupportFunc
-        | NodeTag::T_SortGroupClause => Ok(None),
+        | NodeTag::T_SortGroupClause
+        | NodeTag::T_CTESearchClause
+        // C copies these leaves; JsonReturning's only child is a JsonFormat
+        // leaf, so it is unchanged as well (nodeFuncs.c:2998, :3365).
+        | NodeTag::T_JsonFormat
+        | NodeTag::T_JsonReturning
+        // C nodeFuncs.c:3486-3488: "Do nothing with a sub-Query".
+        | NodeTag::T_Query
+        // C nodeFuncs.c:3623-3625: no expression sub-nodes.
+        | NodeTag::T_PartitionPruneStepCombine
+        // C mutates translated_vars; this vocabulary's AppendRelInfo carries
+        // no expression list (see the walker arm).
+        | NodeTag::T_AppendRelInfo => Ok(None),
         NodeTag::T_WithCheckOption => {
             let wco = node.as_with_check_option().unwrap();
             let qual = match wco.qual {
@@ -1940,13 +2029,13 @@ pub fn expression_tree_mutator_dyn<'mcx>(
             Some(l) => Ok(Some(Node::mk_list(mcx, l)?)),
         },
         NodeTag::T_SetOperationStmt => {
-            // C mutates larg/rarg/groupClauses; the col* value lists are
-            // copied (nodeFuncs.c expression_tree_mutator).
+            // C nodeFuncs.c:3640-3649 mutates larg/rarg only: "We do not
+            // mutate groupClauses by default"; the col* value lists and
+            // groupClauses are copied.
             let so = node.as_set_operation_stmt().unwrap();
             let larg = mutate_opt_dyn(so.larg, m)?;
             let rarg = mutate_opt_dyn(so.rarg, m)?;
-            let group_clauses = mutate_list_dyn(mcx, &so.groupClauses, m)?;
-            if larg.is_none() && rarg.is_none() && group_clauses.is_none() {
+            if larg.is_none() && rarg.is_none() {
                 return Ok(None);
             }
             Ok(Some(Node::mk(
@@ -1959,10 +2048,92 @@ pub fn expression_tree_mutator_dyn<'mcx>(
                     colTypes: types_nodes::OidList::from_slice(mcx, so.colTypes.as_slice())?,
                     colTypmods: types_nodes::IntList::from_slice(mcx, so.colTypmods.as_slice())?,
                     colCollations: types_nodes::OidList::from_slice(mcx, so.colCollations.as_slice())?,
-                    groupClauses: match group_clauses {
-                        Some(g) => g,
-                        None => so.groupClauses.clone_in(mcx)?,
-                    },
+                    groupClauses: so.groupClauses.clone_in(mcx)?,
+                },
+            )?))
+        }
+        // C nodeFuncs.c:3489-3501.
+        NodeTag::T_WindowClause => {
+            let wc = node.as_window_clause().unwrap();
+            let partition = mutate_list_dyn(mcx, &wc.partitionClause, m)?;
+            let order = mutate_list_dyn(mcx, &wc.orderClause, m)?;
+            let start = mutate_opt_dyn(wc.startOffset, m)?;
+            let end = mutate_opt_dyn(wc.endOffset, m)?;
+            if partition.is_none() && order.is_none() && start.is_none() && end.is_none() {
+                return Ok(None);
+            }
+            let unchanged = |new: Option<NodeList<'mcx>>, old: &NodeList<'mcx>| match new {
+                Some(l) => Ok(l),
+                None => old.clone_in(mcx),
+            };
+            Ok(Some(Node::mk(
+                mcx,
+                types_nodes::parsenodes::WindowClause {
+                    partitionClause: unchanged(partition, &wc.partitionClause)?,
+                    orderClause: unchanged(order, &wc.orderClause)?,
+                    startOffset: start.or(wc.startOffset),
+                    endOffset: end.or(wc.endOffset),
+                    ..*wc
+                },
+            )?))
+        }
+        // C nodeFuncs.c:3502-3512.
+        NodeTag::T_CTECycleClause => {
+            let cc = node.as_cte_cycle_clause().unwrap();
+            let value = mutate_opt_dyn(cc.cycle_mark_value, m)?;
+            let default = mutate_opt_dyn(cc.cycle_mark_default, m)?;
+            if value.is_none() && default.is_none() {
+                return Ok(None);
+            }
+            Ok(Some(Node::mk(
+                mcx,
+                types_nodes::parsenodes::CTECycleClause {
+                    cycle_col_list: cc.cycle_col_list.clone_in(mcx)?,
+                    cycle_mark_value: value.or(cc.cycle_mark_value),
+                    cycle_mark_default: default.or(cc.cycle_mark_default),
+                    ..*cc
+                },
+            )?))
+        }
+        // C nodeFuncs.c:3513-3532: the CTE's Query node goes through the
+        // mutator (so it can recurse), then the search and cycle clauses.
+        NodeTag::T_CommonTableExpr => {
+            let cte = node.as_common_table_expr().unwrap();
+            let ctequery = mutate_opt_dyn(cte.ctequery, m)?;
+            let search = mutate_opt_dyn(cte.search_clause, m)?;
+            let cycle = mutate_opt_dyn(cte.cycle_clause, m)?;
+            if ctequery.is_none() && search.is_none() && cycle.is_none() {
+                return Ok(None);
+            }
+            Ok(Some(Node::mk(
+                mcx,
+                types_nodes::parsenodes::CommonTableExpr {
+                    aliascolnames: cte.aliascolnames.clone_in(mcx)?,
+                    ctequery: ctequery.or(cte.ctequery),
+                    search_clause: search.or(cte.search_clause),
+                    cycle_clause: cycle.or(cte.cycle_clause),
+                    ctecolnames: cte.ctecolnames.clone_in(mcx)?,
+                    ctecoltypes: cte.ctecoltypes.clone_in(mcx)?,
+                    ctecoltypmods: cte.ctecoltypmods.clone_in(mcx)?,
+                    ctecolcollations: cte.ctecolcollations.clone_in(mcx)?,
+                    ..*cte
+                },
+            )?))
+        }
+        // C nodeFuncs.c:3612-3622.
+        NodeTag::T_PartitionPruneStepOp => {
+            let step = node.as_partition_prune_step_op().unwrap();
+            let Some(exprs) = mutate_list_dyn(mcx, &step.exprs, m)? else {
+                return Ok(None);
+            };
+            Ok(Some(Node::mk(
+                mcx,
+                types_nodes::plannodes::PartitionPruneStepOp {
+                    step_id: step.step_id,
+                    opstrategy: step.opstrategy,
+                    exprs,
+                    cmpfns: step.cmpfns.clone_in(mcx)?,
+                    nullkeys: step.nullkeys.clone_in(mcx)?,
                 },
             )?))
         }
@@ -2262,7 +2433,9 @@ pub fn expression_tree_mutator_dyn<'mcx>(
                 },
             )?))
         }
-        other => deferred("expression_tree_mutator", other),
+        // IndexClause / PlaceHolderInfo are not Node variants here (planner
+        // arena records), so C's arms for them have nothing to dispatch on.
+        other => Err(unrecognized_node_type(other)),
     }
 }
 
@@ -2350,21 +2523,54 @@ pub fn mutate_list_dyn<'mcx>(
     Ok(out)
 }
 
-/// C fix_opfuncids (nodeFuncs.c): planned-expression invariant that every
-/// OpExpr carries its opfuncid (readfuncs trees arrive filled; a zero memo
-/// is re-derived in place).
+/// C fix_opfuncids (nodeFuncs.c:1844-1855): planned-expression invariant
+/// that every OpExpr, DistinctExpr, NullIfExpr (set_opfuncid) and
+/// ScalarArrayOpExpr (set_sa_opfuncid) carries its opfuncid (readfuncs trees
+/// arrive filled; a zero memo is re-derived in place).
 pub fn fix_opfuncids(node: Node<'_>) -> PgResult<()> {
+    use types_nodes::primnodes::{DistinctExpr, NullIfExpr, ScalarArrayOpExpr};
     struct W;
     impl<'mcx> NodeWalker<'mcx> for W {
         fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
-            if node.node_tag() == NodeTag::T_OpExpr {
-                let o = node.as_variant::<OpExpr>().unwrap();
-                if o.opfuncid == 0 {
-                    let opfuncid = lsyscache::operator::get_opcode(o.opno)?;
-                    // SAFETY: fix_opfuncids callers hold the just-read tree
-                    // exclusively; the shared borrow above has ended.
-                    unsafe {
-                        node.with_mut::<OpExpr, _>(|o| o.opfuncid = opfuncid).unwrap();
+            // The shared borrow taken to read (opno, opfuncid) ends before
+            // the write below.
+            let unset: Option<Oid> = match node.node_tag() {
+                NodeTag::T_OpExpr => {
+                    let o = node.as_variant::<OpExpr>().unwrap();
+                    (o.opfuncid == 0).then_some(o.opno)
+                }
+                NodeTag::T_DistinctExpr => {
+                    let d = node.as_distinct_expr().unwrap();
+                    (d.opfuncid == 0).then_some(d.opno)
+                }
+                NodeTag::T_NullIfExpr => {
+                    let d = node.as_null_if_expr().unwrap();
+                    (d.opfuncid == 0).then_some(d.opno)
+                }
+                NodeTag::T_ScalarArrayOpExpr => {
+                    let sa = node.as_scalar_array_op_expr().unwrap();
+                    (sa.opfuncid == 0).then_some(sa.opno)
+                }
+                _ => None,
+            };
+            if let Some(opno) = unset {
+                let opfuncid = lsyscache::operator::get_opcode(opno)?;
+                // SAFETY: fix_opfuncids callers hold the just-read tree
+                // exclusively; no reference derived from `node` is live.
+                unsafe {
+                    match node.node_tag() {
+                        NodeTag::T_OpExpr => {
+                            node.with_mut::<OpExpr, _>(|o| o.opfuncid = opfuncid).unwrap()
+                        }
+                        NodeTag::T_DistinctExpr => node
+                            .with_mut::<DistinctExpr, _>(|d| d.opfuncid = opfuncid)
+                            .unwrap(),
+                        NodeTag::T_NullIfExpr => node
+                            .with_mut::<NullIfExpr, _>(|d| d.opfuncid = opfuncid)
+                            .unwrap(),
+                        _ => node
+                            .with_mut::<ScalarArrayOpExpr, _>(|sa| sa.opfuncid = opfuncid)
+                            .unwrap(),
                     }
                 }
             }

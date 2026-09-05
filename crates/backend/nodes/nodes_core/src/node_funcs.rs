@@ -62,16 +62,19 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_NextValueExpr => {
             node.as_variant::<types_nodes::primnodes::NextValueExpr>().unwrap().typeId
         }
-        NodeTag::T_SubLink => {
-            let (sl, tent) = sublink_first_col(node);
-            match sl.subLinkType {
-                types_nodes::SubLinkType::EXPR_SUBLINK => expr_type(tent.expect("EXPR").expr),
-                types_nodes::SubLinkType::ARRAY_SUBLINK => {
-                    promoted_array_type(expr_type(tent.expect("ARRAY").expr))
-                }
-                _ => types_core::catalog::BOOLOID,
+        // C nodeFuncs.c:96-130: only EXPR/ARRAY sublinks look at the
+        // subselect's first target column; MULTIEXPR is always RECORD; every
+        // other sublink type is boolean.
+        NodeTag::T_SubLink => match node.as_sub_link().unwrap().subLinkType {
+            types_nodes::SubLinkType::EXPR_SUBLINK => {
+                expr_type(sublink_first_col(node).1.expect("EXPR").expr)
             }
-        }
+            types_nodes::SubLinkType::ARRAY_SUBLINK => {
+                promoted_array_type(expr_type(sublink_first_col(node).1.expect("ARRAY").expr))
+            }
+            types_nodes::SubLinkType::MULTIEXPR_SUBLINK => types_core::RECORDOID,
+            _ => types_core::catalog::BOOLOID,
+        },
         NodeTag::T_SubPlan => {
             let sp = node.as_sub_plan().unwrap();
             match sp.subLinkType {
@@ -231,16 +234,12 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
             let m = node.as_min_max_expr().unwrap();
             uniform_args_typmod(&m.args, m.minmaxtype)
         }
-        NodeTag::T_SubLink => {
-            let (sl, tent) = sublink_first_col(node);
-            match sl.subLinkType {
-                types_nodes::SubLinkType::EXPR_SUBLINK
-                | types_nodes::SubLinkType::ARRAY_SUBLINK => {
-                    expr_typmod(tent.expect("EXPR/ARRAY").expr)
-                }
-                _ => -1,
+        NodeTag::T_SubLink => match node.as_sub_link().unwrap().subLinkType {
+            types_nodes::SubLinkType::EXPR_SUBLINK | types_nodes::SubLinkType::ARRAY_SUBLINK => {
+                expr_typmod(sublink_first_col(node).1.expect("EXPR/ARRAY").expr)
             }
-        }
+            _ => -1,
+        },
         NodeTag::T_SubPlan => {
             let sp = node.as_sub_plan().unwrap();
             match sp.subLinkType {
@@ -327,16 +326,12 @@ pub fn expr_collation(node: Node<'_>) -> Oid {
                 types_core::InvalidOid
             }
         }
-        NodeTag::T_SubLink => {
-            let (sl, tent) = sublink_first_col(node);
-            match sl.subLinkType {
-                types_nodes::SubLinkType::EXPR_SUBLINK
-                | types_nodes::SubLinkType::ARRAY_SUBLINK => {
-                    expr_collation(tent.expect("EXPR/ARRAY").expr)
-                }
-                _ => 0,
+        NodeTag::T_SubLink => match node.as_sub_link().unwrap().subLinkType {
+            types_nodes::SubLinkType::EXPR_SUBLINK | types_nodes::SubLinkType::ARRAY_SUBLINK => {
+                expr_collation(sublink_first_col(node).1.expect("EXPR/ARRAY").expr)
             }
-        }
+            _ => types_core::InvalidOid,
+        },
         NodeTag::T_SubPlan => {
             let sp = node.as_sub_plan().unwrap();
             match sp.subLinkType {
@@ -527,9 +522,9 @@ pub fn expr_location(node: Node<'_>) -> ParseLoc {
         NodeTag::T_RowCompareExpr => {
             expr_location_list(&node.as_row_compare_expr().unwrap().largs)
         }
+        // C nodeFuncs.c:1709-1712: "just use argument's location".
         NodeTag::T_CollateClause => {
-            let c = node.as_collate_clause().unwrap();
-            leftmost_loc(c.arg.map_or(-1, expr_location), c.location)
+            node.as_collate_clause().unwrap().arg.map_or(-1, expr_location)
         }
         NodeTag::T_TypeCast => {
             let tc = node.as_type_cast().unwrap();

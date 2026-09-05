@@ -12,6 +12,7 @@ path = "src/lib.rs"
 adt_json = { path = "../../utils/adt/json" }
 adt_jsonpath = { path = "../../utils/adt/jsonpath" }
 datum = { path = "../../../_support/types/datum" }
+nodes_core = { path = "../../nodes/nodes_core" }
 stringinfo = { path = "../../../_support/types/stringinfo" }
 parse_utilcmd = { path = "../parse_utilcmd" }
 catalog = { path = "../../catalog/catalog" }

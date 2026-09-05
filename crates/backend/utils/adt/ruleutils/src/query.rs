@@ -1215,7 +1215,7 @@ fn get_update_query_targetlist_def<'mcx>(
                     _ => break,
                 }
             }
-            let expr = expr.map(crate::deparse::strip_implicit_coercions);
+            let expr = expr.map(nodes_core::strip_implicit_coercions);
             if let Some(p) = expr.and_then(|e| e.as_param()) {
                 if p.paramkind == types_nodes::ParamKind::PARAM_MULTIEXPR {
                     let sl_node = ma_sublinks[next_ma];
