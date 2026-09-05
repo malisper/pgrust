@@ -4,7 +4,7 @@
 
 use ::mcx::Mcx;
 use ::types_core::ForkNumber;
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult};
 use ::types_rel::Relation;
 use ::types_tuple::itemptr::ItemPointerData;
 use execindexing::IndexInfo;
@@ -31,8 +31,16 @@ pub fn hashbuild<'mcx>(
     index: &Relation<'mcx>,
     indexInfo: &mut IndexInfo<'mcx>,
 ) -> PgResult<IndexBuildResult> {
-    if bufmgr::RelationGetNumberOfBlocksInFork(index, ForkNumber::MAIN_FORKNUM)? != 0 {
-        panic!("index \"{}\" already contains data", index.name());
+    // RelationGetNumberOfBlocks through the bufmgr seam, as the hash crate's
+    // _hash_init reads it (unit tests stand a fake pool behind it).
+    if bufmgr_seams::relation_get_number_of_blocks_in_fork::call(index, ForkNumber::MAIN_FORKNUM)?
+        != 0
+    {
+        // hash.c:137 elog(ERROR).
+        return Err(Box::new(PgError::error(format!(
+            "index \"{}\" already contains data",
+            index.name()
+        ))));
     }
 
     let (_, reltuples_est, _) = planner::plancat::estimate_rel_size(heap, None, 0)?;
@@ -164,6 +172,221 @@ fn _h_indexbuild(
         }
 
         hash::_hash_doinsert(index, image, heap_rel, true)?;
+
+        // allow insertion phase to be interrupted (hashsort.c:152)
+        hash::check_for_interrupts()?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod audit_b004_tests {
+    //! Unit witness for hash.c:137 (audit-18.6 remediation batch b004).
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use std::sync::Once;
+
+    use ::mcx::{Mcx, MemoryContext, PgVec};
+    use ::types_core::{
+        Oid, HASH_AM_OID, INDEX_MAX_KEYS, INVALID_PROC_NUMBER, RELPERSISTENCE_PERMANENT,
+    };
+    use ::types_error::{PgResult, ERRCODE_INTERNAL_ERROR, ERROR};
+    use ::types_rel::{
+        FormData_pg_class, FormData_pg_index, LockInfoData, LockRelId, Relation, RelationData,
+        LOCKMODE, RELKIND_INDEX, RELKIND_RELATION, REPLICA_IDENTITY_DEFAULT,
+    };
+    use ::types_tuple::tupdesc::CompactAttribute;
+    use ::types_tuple::TupleDescData;
+    use execindexing::IndexInfo;
+
+    const INDEX_OID: Oid = 5000;
+    const HEAP_OID: Oid = 4999;
+
+    fn install() {
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            // The index's main fork already holds a block.
+            bufmgr_seams::relation_get_number_of_blocks_in_fork::set(|_rel, _fork| Ok(1));
+        });
+    }
+
+    fn int4_tupdesc(mcx: Mcx<'_>) -> TupleDescData<'_> {
+        let mut compact = PgVec::new_in(mcx);
+        compact.push(CompactAttribute {
+            attcacheoff: Cell::new(-1),
+            attlen: 4,
+            attbyval: true,
+            attispackable: false,
+            atthasmissing: false,
+            attisdropped: false,
+            attgenerated: false,
+            attnullability: 0,
+            attalignby: 4,
+        });
+        TupleDescData {
+            natts: 1,
+            tdtypeid: 0,
+            tdtypmod: -1,
+            tdrefcount: 1,
+            constr: None,
+            compact_attrs: compact,
+            attrs: PgVec::new_in(mcx),
+        }
+    }
+
+    fn noop_close(_oid: Oid, _mode: LOCKMODE) -> PgResult<()> {
+        Ok(())
+    }
+
+    fn pg_class(relname: &str, relam: Oid, relkind: u8, oid: Oid) -> FormData_pg_class {
+        let mut name = ::types_tuple::NameData::default();
+        name.namestrcpy(relname);
+        FormData_pg_class {
+            relname: name,
+            relnamespace: 2200,
+            reltype: 0,
+            relowner: 10,
+            relam,
+            relfilenode: oid,
+            reltablespace: 0,
+            relpages: 0,
+            reltuples: -1.0,
+            relallvisible: 0,
+            reltoastrelid: 0,
+            relhasindex: relkind == RELKIND_RELATION,
+            relisshared: false,
+            relpersistence: RELPERSISTENCE_PERMANENT,
+            relkind,
+            relhassubclass: false,
+            relrowsecurity: false,
+            relispopulated: true,
+            relreplident: REPLICA_IDENTITY_DEFAULT,
+            relispartition: false,
+            relfrozenxid: 3,
+            relminmxid: 1,
+        }
+    }
+
+    fn rel(mcx: Mcx<'_>, index: bool) -> Relation<'_> {
+        let one = |v: Oid| {
+            let mut vec = PgVec::new_in(mcx);
+            vec.push(v);
+            vec
+        };
+        let oid = if index { INDEX_OID } else { HEAP_OID };
+        let rd_index = index.then(|| {
+            let mut indkey = PgVec::new_in(mcx);
+            indkey.push(1);
+            FormData_pg_index {
+                indexrelid: INDEX_OID,
+                indrelid: HEAP_OID,
+                indnatts: 1,
+                indnkeyatts: 1,
+                indisunique: false,
+                indnullsnotdistinct: false,
+                indisprimary: false,
+                indisexclusion: false,
+                indimmediate: true,
+                indisvalid: true,
+                indisready: true,
+                indkey,
+                has_indpred: false,
+                indexprs_src: None,
+                indpred_src: None,
+            }
+        });
+        let mut indoption = PgVec::new_in(mcx);
+        if index {
+            indoption.push(0i16);
+        }
+        let data = RelationData {
+            rd_locator: Default::default(),
+            rd_smgr: Default::default(),
+            rd_id: oid,
+            rd_backend: INVALID_PROC_NUMBER,
+            rd_islocaltemp: false,
+            rd_isvalid: Cell::new(true),
+            rd_createSubid: Cell::new(0),
+            rd_newRelfilelocatorSubid: Cell::new(0),
+            rd_firstRelfilelocatorSubid: Cell::new(0),
+            rd_droppedSubid: Cell::new(0),
+            rd_lockInfo: LockInfoData { lockRelId: LockRelId { relId: oid, dbId: 5 } },
+            rd_rel: if index {
+                pg_class("t_hidx", HASH_AM_OID, RELKIND_INDEX, oid)
+            } else {
+                // 2 = HEAP_TABLE_AM_OID.
+                pg_class("t", 2, RELKIND_RELATION, oid)
+            },
+            rd_att: Rc::new(int4_tupdesc(mcx)),
+            rd_index,
+            rd_opcintype: if index { one(23) } else { PgVec::new_in(mcx) },
+            rd_opfamily: if index { one(1977) } else { PgVec::new_in(mcx) },
+            rd_indoption: indoption,
+            rd_indcollation: if index { one(0) } else { PgVec::new_in(mcx) },
+            rd_options: None,
+            pgstat_enabled: Cell::new(false),
+            pgstat_link: Cell::new((0, core::ptr::null_mut())),
+            rd_amcache: Default::default(),
+            rd_amcache_hash: Default::default(),
+            rd_amcache_gin: Default::default(),
+            rd_amcache_spgist: Default::default(),
+            rd_support: PgVec::new_in(mcx),
+            rd_supportinfo: Default::default(),
+            rd_opcoptions: Default::default(),
+            rd_indexlist: Default::default(),
+            rd_trigdesc: Default::default(),
+            rd_hastriggers: false,
+            rd_hasrules: false,
+        };
+        Relation::open(data, Some(noop_close))
+    }
+
+    fn index_info(mcx: Mcx<'_>) -> IndexInfo<'_> {
+        let mut attnums = [0; INDEX_MAX_KEYS as usize];
+        attnums[0] = 1;
+        IndexInfo {
+            ii_NumIndexAttrs: 1,
+            ii_AmCache: None,
+            ii_NumIndexKeyAttrs: 1,
+            ii_IndexAttrNumbers: attnums,
+            ii_Expressions: ::types_nodes::NodeList::nil(),
+            ii_ExpressionsState: PgVec::new_in(mcx),
+            ii_Predicate: ::types_nodes::NodeList::nil(),
+            ii_PredicateState: None,
+            ii_Unique: false,
+            ii_NullsNotDistinct: false,
+            ii_ReadyForInserts: true,
+            ii_Summarizing: false,
+            ii_Concurrent: false,
+            ii_BrokenHotChain: false,
+            ii_UniqueOps: [0; INDEX_MAX_KEYS as usize],
+            ii_UniqueProcs: [0; INDEX_MAX_KEYS as usize],
+            ii_UniqueStrats: [0; INDEX_MAX_KEYS as usize],
+            ii_HasExclusion: false,
+            ii_ExclusionOps: [0; INDEX_MAX_KEYS as usize],
+            ii_ExclusionProcs: [0; INDEX_MAX_KEYS as usize],
+            ii_ExclusionStrats: [0; INDEX_MAX_KEYS as usize],
+            ii_WithoutOverlaps: false,
+        }
+    }
+
+    // hash.c:137 elog(ERROR, "index \"%s\" already contains data"): a
+    // catchable XX000, not a backend panic.
+    #[test]
+    fn hashbuild_on_a_populated_index_is_a_catchable_error() {
+        install();
+        let cx = MemoryContext::new("t");
+        let mcx = cx.mcx();
+        let heap = rel(mcx, false);
+        let idx = rel(mcx, true);
+        let mut ii = index_info(mcx);
+        let err = match crate::hashbuild(mcx, &heap, &idx, &mut ii) {
+            Ok(_) => panic!("hash.c:137: hashbuild must refuse a populated index"),
+            Err(e) => e,
+        };
+        assert_eq!(err.level(), ERROR, "{err:?}");
+        assert_eq!(err.sqlstate(), ERRCODE_INTERNAL_ERROR, "{err:?}");
+        assert_eq!(err.message(), "index \"t_hidx\" already contains data");
+        assert_eq!(err.hint(), None);
+    }
 }

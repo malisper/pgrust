@@ -638,7 +638,10 @@ fn hash_xlog_split_allocate_page(record: &mut XLogReaderState) -> PgResult<()> {
 fn hash_xlog_split_page(record: &mut XLogReaderState) -> PgResult<()> {
     let (action, buf) = XLogReadBufferForRedo(record, 0)?;
     if action != BLK_RESTORED {
-        return Err(panic_err("Hash split record did not contain a full-page image".into()));
+        // hash_xlog.c:410 elog(ERROR): startup's redo error handling owns it.
+        return Err(Box::new(PgError::error(
+            "Hash split record did not contain a full-page image",
+        )));
     }
     unlock_release(buf)
 }
@@ -669,8 +672,9 @@ fn hash_xlog_split_complete(record: &mut XLogReaderState) -> PgResult<()> {
     Ok(())
 }
 
-// The (offsets array, tuples stream) add-back both MOVE and SQUEEZE replay.
-fn replay_add_tuples(buffer: Buffer, ntups: u16, data: &[u8]) -> PgResult<()> {
+// The (offsets array, tuples stream) add-back both MOVE and SQUEEZE replay;
+// `who` is the C function name the add-item error is prefixed with.
+fn replay_add_tuples(buffer: Buffer, ntups: u16, data: &[u8], who: &str) -> PgResult<()> {
     let mut off = core::mem::size_of::<OffsetNumber>() * ntups as usize;
     // The offsets array (ntups u16s) must fit before the tuple stream that
     // follows; C trusts `ntups` and walks `data + sizeof(OffsetNumber)*ntups`.
@@ -694,9 +698,11 @@ fn replay_add_tuples(buffer: Buffer, ntups: u16, data: &[u8]) -> PgResult<()> {
         let item = &data[off..off + itemsz];
         let target = u16_at(towrite, ninserted * 2);
         if pm.add_item(item, target, 0).is_none() {
-            return Err(panic_err(format!(
-                "hash replay: failed to add item to hash index page, size {itemsz} bytes"
-            )));
+            // hash_xlog.c:539/671 elog(ERROR, "<function>: failed to add item
+            // to hash index page, size %d bytes").
+            return Err(Box::new(PgError::error(format!(
+                "{who}: failed to add item to hash index page, size {itemsz} bytes"
+            ))));
         }
         off += itemsz;
         ninserted += 1;
@@ -732,7 +738,7 @@ fn hash_xlog_move_page_contents(record: &mut XLogReaderState) -> PgResult<()> {
     if action == BLK_NEEDS_REDO {
         let data = block_data(record, 1);
         if ntups > 0 {
-            replay_add_tuples(writebuf, ntups, data)?;
+            replay_add_tuples(writebuf, ntups, data, "hash_xlog_move_page_contents")?;
         }
         // SAFETY: redo pin+lock contract.
         unsafe { page_mut(writebuf) }.set_lsn(lsn);
@@ -799,7 +805,7 @@ fn hash_xlog_squeeze_page(record: &mut XLogReaderState) -> PgResult<()> {
     if action == BLK_NEEDS_REDO {
         let mut mod_wbuf = false;
         if ntups > 0 {
-            replay_add_tuples(writebuf, ntups, block_data(record, 1))?;
+            replay_add_tuples(writebuf, ntups, block_data(record, 1), "hash_xlog_squeeze_page")?;
             mod_wbuf = true;
         } else {
             debug_assert!(is_prim_bucket_same_wrt || is_prev_bucket_same_wrt);
@@ -1094,20 +1100,23 @@ pub fn hash_mask(pagedata: &mut [u8], _blkno: BlockNumber) -> PgResult<()> {
     let ptr = core::ptr::NonNull::new(pagedata.as_mut_ptr()).unwrap();
     // SAFETY: pagedata is a full BLCKSZ page image, exclusively borrowed here.
     let pm = unsafe { PageMut::from_raw(ptr) };
-    let mut opaque = page_opaque(&pm.as_ref());
-    let pagetype = opaque.hasho_flag & LH_PAGE_TYPE;
+    let pagetype = page_opaque(&pm.as_ref()).hasho_flag & LH_PAGE_TYPE;
     drop(pm);
 
     if pagetype == LH_UNUSED_PAGE {
+        // Mask everything on a UNUSED page - the special area included.
         bufmask::mask_page_content(pagedata);
     } else if pagetype == LH_BUCKET_PAGE || pagetype == LH_OVERFLOW_PAGE {
         bufmask::mask_lp_flags(pagedata);
     }
 
-    opaque.hasho_flag &= !LH_PAGE_HAS_DEAD_TUPLES;
+    // C clears the hint bit in place, on the (possibly masked) special area:
+    // re-read the opaque rather than restoring the pre-mask copy.
     let ptr = core::ptr::NonNull::new(pagedata.as_mut_ptr()).unwrap();
     // SAFETY: as above.
     let mut pm = unsafe { PageMut::from_raw(ptr) };
+    let mut opaque = page_opaque(&pm.as_ref());
+    opaque.hasho_flag &= !LH_PAGE_HAS_DEAD_TUPLES;
     write_opaque(&mut pm, &opaque);
     Ok(())
 }
@@ -1230,5 +1239,133 @@ mod redo_bounds_tests {
         assert_eq!(checked_bmsize(MAX_BITMAP_SIZE as u16).unwrap(), MAX_BITMAP_SIZE);
         let err = checked_bmsize(u16::MAX).err().unwrap();
         assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+    }
+}
+
+// Unit witnesses for hash_xlog.c's mask and replay contracts (audit-18.6
+// remediation batch b004). Each test names the C site it witnesses.
+#[cfg(test)]
+mod audit_b004_tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::sync::Once;
+
+    // MAXALIGNed like real buffer pages (the PageRef contract).
+    #[repr(C, align(8))]
+    struct FakePage([u8; BLCKSZ]);
+
+    // Buffer 1 of the fake pool; leaked for one stable pointer tag.
+    thread_local! {
+        static PAGE: Cell<*mut FakePage> = const { Cell::new(core::ptr::null_mut()) };
+    }
+
+    fn install() {
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            bufmgr_seams::buffer_get_page::set(|buf| {
+                assert_eq!(buf, 1, "the fake pool holds one buffer");
+                let p = PAGE.with(Cell::get);
+                assert!(!p.is_null(), "no page installed");
+                // SAFETY: leaked Box, never freed.
+                core::ptr::NonNull::new(p.cast::<u8>()).unwrap()
+            });
+        });
+    }
+
+    fn hash_page(flag: u16) -> Box<FakePage> {
+        let mut p = Box::new(FakePage([0u8; BLCKSZ]));
+        let ptr = core::ptr::NonNull::new(p.0.as_mut_ptr()).unwrap();
+        // SAFETY: owned BLCKSZ page.
+        let mut pm = unsafe { PageMut::from_raw(ptr) };
+        pm.init(SIZEOF_OPAQUE);
+        write_opaque(
+            &mut pm,
+            &HashPageOpaqueData {
+                hasho_prevblkno: 7,
+                hasho_nextblkno: 9,
+                hasho_bucket: 3,
+                hasho_flag: flag,
+                hasho_page_id: HASHO_PAGE_ID,
+            },
+        );
+        p
+    }
+
+    fn special_of(p: &FakePage) -> &[u8] {
+        &p.0[BLCKSZ - SIZEOF_OPAQUE..]
+    }
+
+    // hash_xlog.c:1117-1140 hash_mask: an LH_UNUSED_PAGE is masked whole
+    // (mask_page_content fills [SizeOfPageHeaderData, BLCKSZ) with
+    // MASK_MARKER - bufmask.h defines it 0 - the special area included), then
+    // LH_PAGE_HAS_DEAD_TUPLES is cleared in place; every opaque byte reads
+    // MASK_MARKER afterwards.
+    #[test]
+    fn hash_mask_masks_the_whole_special_area_of_an_unused_page() {
+        let mut page = hash_page(LH_UNUSED_PAGE | LH_PAGE_HAS_DEAD_TUPLES);
+        hash_mask(&mut page.0, 5).unwrap();
+        assert_eq!(
+            special_of(&page),
+            &[bufmask::MASK_MARKER; 16][..],
+            "hash_xlog.c:1127 mask_page_content covers the special area; the pre-mask \
+             opaque must not be written back over it"
+        );
+
+        // Control: a bucket page keeps its links, only the hint bit goes.
+        let mut page = hash_page(LH_BUCKET_PAGE | LH_PAGE_HAS_DEAD_TUPLES);
+        hash_mask(&mut page.0, 5).unwrap();
+        let ptr = core::ptr::NonNull::new(page.0.as_mut_ptr()).unwrap();
+        // SAFETY: owned BLCKSZ page.
+        let opaque = page_opaque(&unsafe { PageRef::from_raw(ptr) });
+        assert_eq!(
+            opaque,
+            HashPageOpaqueData {
+                hasho_prevblkno: 7,
+                hasho_nextblkno: 9,
+                hasho_bucket: 3,
+                hasho_flag: LH_BUCKET_PAGE,
+                hasho_page_id: HASHO_PAGE_ID,
+            }
+        );
+    }
+
+    // hash_xlog.c:539 / :671: a PageAddItem failure while replaying
+    // MOVE_PAGE_CONTENTS / SQUEEZE_PAGE is elog(ERROR, "<function>: failed to
+    // add item to hash index page, size %d bytes") — startup recovers it as
+    // an ERROR, not a cluster PANIC.
+    #[test]
+    fn replay_add_item_failure_is_a_catchable_error() {
+        install();
+        let page = Box::leak(hash_page(LH_OVERFLOW_PAGE));
+        {
+            let ptr = core::ptr::NonNull::new(page.0.as_mut_ptr()).unwrap();
+            // SAFETY: owned BLCKSZ page; make it full (pd_upper == pd_lower).
+            let mut pm = unsafe { PageMut::from_raw(ptr) };
+            let lower = pm.as_ref().pd_lower();
+            pm.set_pd_upper(lower);
+        }
+        PAGE.with(|c| c.set(page as *mut FakePage));
+
+        // One target offset, one 16-byte tuple (t_info = size 16).
+        let mut data = Vec::new();
+        data.extend_from_slice(&1u16.to_ne_bytes());
+        let mut itup = [0u8; 16];
+        itup[6..8].copy_from_slice(&16u16.to_ne_bytes());
+        data.extend_from_slice(&itup);
+
+        let err = replay_add_tuples(1, 1, &data, "hash_xlog_move_page_contents")
+            .expect_err("PageAddItem fails on a full page");
+        assert_eq!(err.level(), types_error::ERROR, "hash_xlog.c:539 is elog(ERROR): {err:?}");
+        assert_eq!(
+            err.message(),
+            "hash_xlog_move_page_contents: failed to add item to hash index page, size 16 bytes"
+        );
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        let err = replay_add_tuples(1, 1, &data, "hash_xlog_squeeze_page")
+            .expect_err("PageAddItem fails on a full page");
+        assert_eq!(
+            err.message(),
+            "hash_xlog_squeeze_page: failed to add item to hash index page, size 16 bytes"
+        );
     }
 }

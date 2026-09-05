@@ -12,6 +12,9 @@ pub(crate) mod search;
 pub mod util;
 pub(crate) mod wal;
 
+#[cfg(test)]
+mod tests;
+
 use ::datum::Datum;
 use ::mcx::Mcx;
 use ::types_core::{BlockNumber, Buffer, ForkNumber, InvalidBlockNumber, InvalidBuffer, OffsetNumber};
@@ -27,6 +30,7 @@ use ::types_tuple::itemptr::ItemPointerData;
 use ::xloginsert_seams::{XLogRegBuf, REGBUF_NO_CHANGE, REGBUF_NO_IMAGE, REGBUF_STANDARD};
 
 use bufmgr_seams as bm;
+use init_small::globals::{EndCriticalSection, StartCriticalSection};
 use page::{page_mut, page_opaque, page_ref, write_opaque};
 use search::HashScanCtx;
 
@@ -44,7 +48,8 @@ fn non_hash_opaque() -> ! {
     panic!("hash entry point reached with a non-hash scan opaque")
 }
 
-pub(crate) fn check_for_interrupts() -> PgResult<()> {
+/// CHECK_FOR_INTERRUPTS() for the hash AM and its build half (hashsort).
+pub fn check_for_interrupts() -> PgResult<()> {
     if init_small::globals::InterruptPending() {
         return postgres_seams::check_for_interrupts::call();
     }
@@ -57,6 +62,15 @@ pub(crate) fn relation_needs_wal(rel: &Relation<'_>) -> bool {
         && (transam_xlog_seams::xlog_standby_info_active::call()
             || (rel.rd_createSubid.get() == ::types_core::InvalidSubTransactionId
                 && rel.rd_firstRelfilelocatorSubid.get() == ::types_core::InvalidSubTransactionId))
+}
+
+// RelationIsAccessibleInLogicalDecoding (rel.h), as heapam renders it:
+// XLogLogicalInfoActive() && RelationNeedsWAL(relation) &&
+// (IsCatalogRelation(relation) || RelationIsUsedAsCatalogTable(relation)).
+pub(crate) fn relation_is_accessible_in_logical_decoding(rel: &Relation<'_>) -> bool {
+    transam_xlog_seams::xlog_logical_info_active::call()
+        && relation_needs_wal(rel)
+        && (catalog_seams::is_catalog_relation::call(rel) || rel.is_used_as_catalog_table())
 }
 
 macro_rules! split_scan {
@@ -366,7 +380,9 @@ fn hashbulkdelete_guts<'mcx>(
         break;
     }
 
-    // Update phase (C's critical section).
+    // Okay, we're really done.  Update tuple count in metapage (hash.c:585).
+    StartCriticalSection();
+
     let meta_ntuples = page::with_meta_mut(metabuf, |metap| {
         if orig_maxbucket == metap.hashm_maxbucket && orig_ntuples == metap.hashm_ntuples {
             // No split or insert since the scan started: our count is gospel.
@@ -403,6 +419,8 @@ fn hashbulkdelete_guts<'mcx>(
         // SAFETY: pin + exclusive lock held.
         unsafe { page_mut(metabuf) }.set_lsn(recptr);
     }
+
+    EndCriticalSection();
 
     page::_hash_relbuf(metabuf)?;
 
@@ -521,6 +539,9 @@ pub(crate) fn hashbucketcleanup(
         blkno = opaque.hasho_nextblkno;
 
         if ndeletable > 0 {
+            // No ereport(ERROR) until changes are logged (hash.c:800).
+            StartCriticalSection();
+
             {
                 // SAFETY: lock held on buf.
                 let mut page = unsafe { page_mut(buf) };
@@ -574,6 +595,8 @@ pub(crate) fn hashbucketcleanup(
                 // SAFETY: pin + lock held.
                 unsafe { page_mut(buf) }.set_lsn(recptr);
             }
+
+            EndCriticalSection();
         }
 
         if blkno == InvalidBlockNumber {
@@ -603,6 +626,9 @@ pub(crate) fn hashbucketcleanup(
     }
 
     if split_cleanup {
+        // No ereport(ERROR) until changes are logged (hash.c:900).
+        StartCriticalSection();
+
         {
             // SAFETY: exclusive lock held on the primary bucket page.
             let mut page = unsafe { page_mut(bucket_buf) };
@@ -628,6 +654,8 @@ pub(crate) fn hashbucketcleanup(
             // SAFETY: pin + exclusive lock held.
             unsafe { page_mut(bucket_buf) }.set_lsn(recptr);
         }
+
+        EndCriticalSection();
     }
 
     if bucket_dirty && bufmgr::IsBufferCleanupOK(bucket_buf) {

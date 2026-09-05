@@ -35,3 +35,4 @@ xloginsert = { path = "../../transam/xloginsert" }
 xloginsert_seams = { path = "../../transam/xloginsert_seams" }
 smgr = { path = "../../../storage/smgr/smgr" }
 bufmgr = { path = "../../../storage/buffer/bufmgr" }
+catalog_seams = { path = "../../../catalog/catalog_seams" }

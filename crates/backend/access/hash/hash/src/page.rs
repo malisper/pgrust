@@ -12,6 +12,7 @@ use ::types_storage::bufpage::{PageMut, PageRef, SizeOfPageHeaderData};
 use ::types_storage::ReadBufferMode;
 use ::types_tuple::itemptr::ItemPointerData;
 use ::xloginsert_seams::{XLogRegBuf, REGBUF_FORCE_IMAGE, REGBUF_STANDARD, REGBUF_WILL_INIT};
+use init_small::globals::{EndCriticalSection, StartCriticalSection};
 
 use crate::insert::_hash_pgaddmultitup;
 use crate::ovfl::{_hash_addovflpage, _hash_initbitmapbuffer};
@@ -19,6 +20,13 @@ use crate::util::{_hash_checkpage, _hash_get_indextuple_hashkey, _hash_hashkey2b
 use crate::{hashbucketcleanup, relation_needs_wal, RM_HASH};
 
 pub(crate) const P_NEW: BlockNumber = InvalidBlockNumber;
+
+// hashpage.c:75/101/140/204/246 elog(ERROR, "hash AM does not use P_NEW").
+#[cold]
+#[inline(never)]
+fn p_new_error() -> Box<PgError> {
+    Box::new(PgError::error("hash AM does not use P_NEW"))
+}
 const SIZEOF_OPAQUE: usize = core::mem::size_of::<HashPageOpaqueData>();
 
 /// # Safety
@@ -76,7 +84,7 @@ pub(crate) fn _hash_getbuf(
     flags: u16,
 ) -> PgResult<Buffer> {
     if blkno == P_NEW {
-        panic!("hash AM does not use P_NEW");
+        return Err(p_new_error());
     }
     let buf = bm::read_buffer::call(rel, blkno)?;
     if access != HASH_NOLOCK {
@@ -93,7 +101,7 @@ pub(crate) fn _hash_getbuf_with_condlock_cleanup(
     flags: u16,
 ) -> PgResult<Option<Buffer>> {
     if blkno == P_NEW {
-        panic!("hash AM does not use P_NEW");
+        return Err(p_new_error());
     }
     let buf = bm::read_buffer::call(rel, blkno)?;
     if !bm::conditional_lock_buffer_for_cleanup::call(buf)? {
@@ -107,7 +115,7 @@ pub(crate) fn _hash_getbuf_with_condlock_cleanup(
 /// _hash_getinitbuf: pre-EOF page to be filled from scratch.
 pub(crate) fn _hash_getinitbuf(rel: &Relation<'_>, blkno: BlockNumber) -> PgResult<Buffer> {
     if blkno == P_NEW {
-        panic!("hash AM does not use P_NEW");
+        return Err(p_new_error());
     }
     let buf = bm::read_buffer_extended::call(
         rel,
@@ -156,10 +164,14 @@ pub(crate) fn _hash_getnewbuf(
 ) -> PgResult<Buffer> {
     let nblocks = bm::relation_get_number_of_blocks_in_fork::call(rel, fork_num)?;
     if blkno == P_NEW {
-        panic!("hash AM does not use P_NEW");
+        return Err(p_new_error());
     }
     if blkno > nblocks {
-        panic!("access to noncontiguous page in hash index \"{}\"", rel.name());
+        // hashpage.c:206 elog(ERROR).
+        return Err(Box::new(PgError::error(format!(
+            "access to noncontiguous page in hash index \"{}\"",
+            rel.name()
+        ))));
     }
     let buf = if blkno == nblocks {
         let (buf, extended_by) = bm::extend_buffered_rel_by::call(
@@ -171,10 +183,11 @@ pub(crate) fn _hash_getnewbuf(
         )?;
         debug_assert!(extended_by == 1);
         if bm::buffer_get_block_number::call(buf) != blkno {
-            panic!(
+            // hashpage.c:213 elog(ERROR).
+            return Err(Box::new(PgError::error(format!(
                 "unexpected hash relation size: {}, should be {blkno}",
                 bm::buffer_get_block_number::call(buf)
-            );
+            ))));
         }
         buf
     } else {
@@ -194,7 +207,7 @@ pub(crate) fn _hash_getbuf_with_strategy(
     bstrategy: ::types_storage::buf::BufferAccessStrategy,
 ) -> PgResult<Buffer> {
     if blkno == P_NEW {
-        panic!("hash AM does not use P_NEW");
+        return Err(p_new_error());
     }
     let buf = bm::read_buffer_extended::call(
         rel,
@@ -254,7 +267,11 @@ pub fn _hash_init(
     fork_num: ForkNumber,
 ) -> PgResult<u32> {
     if bm::relation_get_number_of_blocks_in_fork::call(rel, fork_num)? != 0 {
-        panic!("cannot initialize non-empty hash index \"{}\"", rel.name());
+        // hashpage.c:344 elog(ERROR).
+        return Err(Box::new(PgError::error(format!(
+            "cannot initialize non-empty hash index \"{}\"",
+            rel.name()
+        ))));
     }
 
     let use_wal = relation_needs_wal(rel) || fork_num == ForkNumber::INIT_FORKNUM;
@@ -540,6 +557,11 @@ pub(crate) fn _hash_expandtable(rel: &Relation<'_>, metabuf: Buffer) -> PgResult
             return fail_unlock(metabuf);
         }
 
+        // Since we are scribbling on the pages in the shared buffers, establish
+        // a critical section (hashpage.c:830): any failure below would leave
+        // the metapage effectively corrupt but writable to disk.
+        StartCriticalSection();
+
         let mut metap_update_masks = false;
         let mut metap_update_splitpoint = false;
         with_meta_mut(metabuf, |metap| {
@@ -628,6 +650,8 @@ pub(crate) fn _hash_expandtable(rel: &Relation<'_>, metabuf: Buffer) -> PgResult
             unsafe { page_mut(buf_nblkno) }.set_lsn(recptr);
             unsafe { page_mut(metabuf) }.set_lsn(recptr);
         }
+
+        EndCriticalSection();
 
         bm::lock_buffer::call(metabuf, bm::BUFFER_LOCK_UNLOCK)?;
 
@@ -814,6 +838,9 @@ fn _hash_splitbucket(
     bm::lock_buffer::call(bucket_obuf, bm::BUFFER_LOCK_EXCLUSIVE)?;
     bm::lock_buffer::call(bucket_nbuf, bm::BUFFER_LOCK_EXCLUSIVE)?;
 
+    // hashpage.c:1277: the flag flips and their WAL are one critical section.
+    StartCriticalSection();
+
     let (old_flag, new_flag);
     {
         // SAFETY: exclusive locks reacquired above.
@@ -851,6 +878,8 @@ fn _hash_splitbucket(
         unsafe { page_mut(bucket_nbuf) }.set_lsn(recptr);
     }
 
+    EndCriticalSection();
+
     if bufmgr::IsBufferCleanupOK(bucket_obuf) {
         bm::lock_buffer::call(bucket_nbuf, bm::BUFFER_LOCK_UNLOCK)?;
         hashbucketcleanup(
@@ -875,6 +904,8 @@ fn _hash_splitbucket(
 }
 
 // The accumulated-batch flush both split exits share: add tuples, dirty, log.
+// Change the shared buffer state in a critical section (hashpage.c:1184,
+// :1235), otherwise any error could make it unrecoverable.
 fn flush_split_batch(
     rel: &Relation<'_>,
     nbuf: Buffer,
@@ -882,9 +913,11 @@ fn flush_split_batch(
     itups: &[(usize, usize)],
     itup_offsets: &mut [OffsetNumber],
 ) -> PgResult<()> {
+    StartCriticalSection();
     _hash_pgaddmultitup(rel, nbuf, tup_storage, itups, itup_offsets)?;
     bm::mark_buffer_dirty::call(nbuf)?;
     log_split_page(rel, nbuf)?;
+    EndCriticalSection();
     Ok(())
 }
 

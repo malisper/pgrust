@@ -7337,6 +7337,7 @@ version = "0.1.0"
 dependencies = [
  "bufmgr",
  "bufmgr_seams",
+ "catalog_seams",
  "datum",
  "fmgr_core",
  "genam_seams",
@@ -7432,6 +7433,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_hash",
+ "types_nodes",
  "types_rel",
  "types_tuple",
 ]

@@ -7,6 +7,7 @@ use ::types_hash::*;
 use ::types_rel::Relation;
 use ::types_storage::bufpage::SizeOfPageHeaderData;
 use ::xloginsert_seams::{XLogRegBuf, REGBUF_STANDARD};
+use init_small::globals::{EndCriticalSection, StartCriticalSection};
 
 use crate::ovfl::_hash_addovflpage;
 use crate::page::{
@@ -111,6 +112,11 @@ pub fn _hash_doinsert(
 
         bm::lock_buffer::call(metabuf, bm::BUFFER_LOCK_EXCLUSIVE)?;
 
+        // Do the update.  No ereport(ERROR) until changes are logged
+        // (hashinsert.c:199): an Err below escapes with the count raised, so
+        // the recovery frame promotes it to PANIC as errstart does in C.
+        StartCriticalSection();
+
         let itup_off = _hash_pgaddtup(rel, buf, itup, sorted)?;
         bm::mark_buffer_dirty::call(buf)?;
 
@@ -138,6 +144,8 @@ pub fn _hash_doinsert(
             unsafe { page_mut(metabuf) }.set_lsn(recptr);
         }
 
+        EndCriticalSection();
+
         bm::lock_buffer::call(metabuf, bm::BUFFER_LOCK_UNLOCK)?;
 
         _hash_relbuf(buf)?;
@@ -152,6 +160,13 @@ pub fn _hash_doinsert(
         _hash_dropbuf(metabuf)?;
         return Ok(());
     }
+}
+
+// hashinsert.c:315/357 elog(ERROR, "failed to add index item to \"%s\"").
+#[cold]
+#[inline(never)]
+fn failed_to_add_index_item(rel: &Relation<'_>) -> Box<PgError> {
+    Box::new(PgError::error(format!("failed to add index item to \"{}\"", rel.name())))
 }
 
 /// _hash_pgaddtup.
@@ -186,7 +201,7 @@ pub(crate) fn _hash_pgaddtup(
     };
 
     if page.add_item(itup, itup_off, 0).is_none() {
-        panic!("failed to add index item to \"{}\"", rel.name());
+        return Err(failed_to_add_index_item(rel));
     }
     Ok(itup_off)
 }
@@ -210,14 +225,14 @@ pub(crate) fn _hash_pgaddmultitup(
         let itup_off = _hash_binsearch(&page.as_ref(), hashkey);
         itup_offsets[i] = itup_off;
         if page.add_item(item, itup_off, 0).is_none() {
-            panic!("failed to add index item to \"{}\"", rel.name());
+            return Err(failed_to_add_index_item(rel));
         }
     }
     Ok(())
 }
 
 /// _hash_vacuum_one_page: remove LP_DEAD items so the insert can proceed.
-fn _hash_vacuum_one_page(
+pub(crate) fn _hash_vacuum_one_page(
     rel: &Relation<'_>,
     hrel: &Relation<'_>,
     metabuf: Buffer,
@@ -254,6 +269,9 @@ fn _hash_vacuum_one_page(
 
         bm::lock_buffer::call(metabuf, bm::BUFFER_LOCK_EXCLUSIVE)?;
 
+        // No ereport(ERROR) until changes are logged (hashinsert.c:406).
+        StartCriticalSection();
+
         {
             // SAFETY: cleanup lock held.
             let mut page = unsafe { page_mut(buf) };
@@ -268,7 +286,9 @@ fn _hash_vacuum_one_page(
         bm::mark_buffer_dirty::call(metabuf)?;
 
         if relation_needs_wal(rel) {
-            let is_catalog = false; // RelationIsAccessibleInLogicalDecoding: wal_level < logical
+            // hashinsert.c:433 xlrec.isCatalogRel: the standby's recovery-conflict
+            // input for catalog vacuuming under logical decoding.
+            let is_catalog = crate::relation_is_accessible_in_logical_decoding(hrel);
             let xlrec = crate::wal::xl_hash_vacuum_one_page(
                 snapshot_conflict_horizon,
                 ndeletable as u16,
@@ -292,6 +312,8 @@ fn _hash_vacuum_one_page(
             unsafe { page_mut(buf) }.set_lsn(recptr);
             unsafe { page_mut(metabuf) }.set_lsn(recptr);
         }
+
+        EndCriticalSection();
 
         bm::lock_buffer::call(metabuf, bm::BUFFER_LOCK_UNLOCK)?;
     }

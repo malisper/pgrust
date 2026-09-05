@@ -20,3 +20,6 @@ bufmgr = { path = "../../../storage/buffer/bufmgr" }
 bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
 init_small = { path = "../../../utils/init/init_small" }
 planner = { path = "../../../optimizer/plan/planner" }
+
+[dev-dependencies]
+types_nodes = { path = "../../../../_support/types/nodes" }

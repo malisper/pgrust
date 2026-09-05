@@ -8,6 +8,7 @@ use ::types_rel::Relation;
 use ::types_storage::buf::BufferAccessStrategy;
 use ::types_storage::bufpage::{PageMut, PageRef, SizeOfPageHeaderData};
 use ::xloginsert_seams::{XLogRegBuf, REGBUF_NO_CHANGE, REGBUF_NO_IMAGE, REGBUF_STANDARD, REGBUF_WILL_INIT};
+use init_small::globals::{EndCriticalSection, StartCriticalSection};
 
 use crate::insert::_hash_pgaddmultitup;
 use crate::page::{
@@ -279,7 +280,11 @@ pub(crate) fn _hash_addovflpage(
     }
     debug_assert!(ovflbuf != InvalidBuffer);
 
-    // Update phase (C's critical section).
+    // Do the update.  No ereport(ERROR) until changes are logged
+    // (hashovfl.c:321): the bitmap page and overflow page changes are logged
+    // together to avoid loss of pages in case the new page is added.
+    StartCriticalSection();
+
     let bmsize = with_meta(metabuf, |m| m.hashm_bmsize);
     if page_found {
         debug_assert!(mapbuf != InvalidBuffer);
@@ -401,6 +406,8 @@ pub(crate) fn _hash_addovflpage(
         }
     }
 
+    EndCriticalSection();
+
     if retain_pin {
         bm::lock_buffer::call(buf, bm::BUFFER_LOCK_UNLOCK)?;
     } else {
@@ -477,10 +484,10 @@ pub(crate) fn _hash_freeovflpage(
         (m.hashm_nmaps, m.hashm_mapp.get(bitmappage as usize).copied().unwrap_or(0))
     });
     if bitmappage >= nmaps {
-        return Err(crate::util::index_corrupted(
-            format!("invalid overflow bit number {ovflbitno} in index \"{}\"", rel.name()),
-            true,
-        ));
+        // hashovfl.c:562 elog(ERROR): XX000, the bare message, no HINT.
+        return Err(Box::new(PgError::error(format!(
+            "invalid overflow bit number {ovflbitno}"
+        ))));
     }
 
     bm::lock_buffer::call(metabuf, bm::BUFFER_LOCK_UNLOCK)?;
@@ -490,6 +497,10 @@ pub(crate) fn _hash_freeovflpage(
     debug_assert!(is_bitmap_bit_set(&unsafe { page_ref(mapbuf) }, bitmapbit));
 
     bm::lock_buffer::call(metabuf, bm::BUFFER_LOCK_EXCLUSIVE)?;
+
+    // hashovfl.c:581: the write-page adds, the freed page, the chain links,
+    // the bitmap bit and the metapage are one critical section.
+    StartCriticalSection();
 
     if !itups.is_empty() {
         _hash_pgaddmultitup(rel, wbuf, storage, itups, itup_offsets)?;
@@ -647,6 +658,8 @@ pub(crate) fn _hash_freeovflpage(
             }
         }
     }
+
+    EndCriticalSection();
 
     if prevbuf != InvalidBuffer && prevblkno != writeblkno {
         _hash_relbuf(prevbuf)?;
@@ -810,6 +823,9 @@ pub(crate) fn _hash_squeezebucket(
                     if !itups.is_empty() {
                         debug_assert!(itups.len() == ndeletable);
 
+                        // hashovfl.c:971: the move is one critical section.
+                        StartCriticalSection();
+
                         _hash_pgaddmultitup(rel, wbuf, &tup_storage, &itups, &mut itup_offsets)?;
                         bm::mark_buffer_dirty::call(wbuf)?;
 
@@ -876,6 +892,8 @@ pub(crate) fn _hash_squeezebucket(
                                 page_mut(rbuf).set_lsn(recptr);
                             }
                         }
+
+                        EndCriticalSection();
 
                         tups_moved = true;
                     }
