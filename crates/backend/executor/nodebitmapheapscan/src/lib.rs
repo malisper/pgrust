@@ -243,6 +243,28 @@ impl BitmapHeapScanState<'_> {
     }
 }
 
+// wait_event.h / wait_event_names.txt (IPC section index 38):
+// ConditionVariableSleep(&pstate->cv, WAIT_EVENT_PARALLEL_BITMAP_SCAN) in
+// BitmapShouldInitializeSharedState brackets every WaitLatch with
+// pgstat_report_wait_start/end (condition_variable.c:184/199), so a worker
+// parked on the leader's bitmap build reads IPC / ParallelBitmapScan in
+// pg_stat_activity. The seams are uninstalled in substrate test binaries
+// without wait-event storage (twophase/files.rs precedent).
+const PG_WAIT_IPC: u32 = 0x0800_0000;
+const WAIT_EVENT_PARALLEL_BITMAP_SCAN: u32 = PG_WAIT_IPC + 38;
+
+fn report_wait_start(wait_event_info: u32) {
+    if waitevent_seams::pgstat_report_wait_start::is_installed() {
+        waitevent_seams::pgstat_report_wait_start::call(wait_event_info);
+    }
+}
+
+fn report_wait_end() {
+    if waitevent_seams::pgstat_report_wait_end::is_installed() {
+        waitevent_seams::pgstat_report_wait_end::call();
+    }
+}
+
 /// `BitmapShouldInitializeSharedState`: true = this participant won
 /// BM_INITIAL and must build the bitmap; false = the bitmap is BM_FINISHED.
 /// The 10ms timed park is the interrupt-check cadence (C's
@@ -270,7 +292,9 @@ pub fn bitmap_should_initialize_shared_state(
                     guard.wakers.push(word);
                 }
                 drop(guard);
+                report_wait_start(WAIT_EVENT_PARALLEL_BITMAP_SCAN);
                 let _ = waiter::park_timeout(core::time::Duration::from_millis(10));
+                report_wait_end();
                 if init_small::globals::InterruptPending() {
                     if let Err(e) = postgres_seams::check_for_interrupts::call() {
                         // Unwind hygiene (the row-2/3 class rule): drop the

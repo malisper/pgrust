@@ -934,9 +934,14 @@ pub fn parallel_query_main(shared: &parallel::ParallelShared) -> PgResult<()> {
                     }
                 })
             });
-            // A relaunched worker (rescan) aggregates into its slot; the
-            // per-node aux details are C's in-place DSM structs — latest
-            // write wins (execParallel.c:1314-1322).
+            // A relaunched worker (rescan) aggregates into its slot
+            // (execParallel.c:1314-1322 InstrAggNode); the per-node aux
+            // details are C's in-place DSM structs — latest write wins —
+            // EXCEPT the bitmap heap scan page counts, which C 18.6
+            // ACCUMULATES into the worker's slot (nodeBitmapHeapscan.c:
+            // 290-291 `si->exact_pages += node->stats.exact_pages;`): each
+            // relaunch starts from a zeroed BitmapHeapScanState, so the slot
+            // must sum every rescan's pages for EXPLAIN ANALYZE.
             let mut workers = si.workers.lock().unwrap_or_else(|e| e.into_inner());
             let slot = &mut workers[me as usize];
             match slot {
@@ -954,7 +959,15 @@ pub fn parallel_query_main(shared: &parallel::ParallelShared) -> PgResult<()> {
                     prev.agg = report.agg;
                     prev.hash = report.hash;
                     prev.index = report.index;
-                    prev.bitmap = report.bitmap;
+                    for (id, bi) in report.bitmap {
+                        match prev.bitmap.iter_mut().find(|(pid, _)| *pid == id) {
+                            Some((_, acc)) => {
+                                acc.exact_pages += bi.exact_pages;
+                                acc.lossy_pages += bi.lossy_pages;
+                            }
+                            None => prev.bitmap.push((id, bi)),
+                        }
+                    }
                 }
             }
         }

@@ -12,6 +12,9 @@ pgsync = { path = "../../../_support/pgsync" }
 # permit-s4 row 3: the build wait parks on the waiter hub (pg_barrier phase
 # pattern — waker-word list + 10ms interrupt-cadence timed park).
 waiter = { path = "../../storage/ipc/waiter" }
+# pgstat_report_wait_start/end around the build wait (C's
+# ConditionVariableSleep(&pstate->cv, WAIT_EVENT_PARALLEL_BITMAP_SCAN)).
+waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
 types_core = { path = "../../../_support/types/types_core" }
 postgres_seams = { path = "../../tcop/postgres_seams" }
 mcx = { path = "../../../_support/mcx" }

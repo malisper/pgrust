@@ -730,3 +730,88 @@ fn rescan_rebuilds_from_fresh_bitmap() {
         teardown(c);
     });
 }
+
+// ---------------------------------------------------------------------------
+// Parallel build wait -> pg_stat_activity wait event (audit-18.6 b186 row
+// a186-...-d9cb9362c94ed4745a05-1). C's BitmapShouldInitializeSharedState
+// (nodeBitmapHeapscan.c:437) waits in ConditionVariableSleep(&pstate->cv,
+// WAIT_EVENT_PARALLEL_BITMAP_SCAN), whose WaitLatch is bracketed by
+// pgstat_report_wait_start(WAIT_EVENT_PARALLEL_BITMAP_SCAN) /
+// pgstat_report_wait_end() (condition_variable.c:184/199), so a worker parked
+// on the leader's bitmap build shows IPC / ParallelBitmapScan. The Rust wait
+// must publish the same event through the waitevent seams for every park and
+// clear it after the wake.
+// ---------------------------------------------------------------------------
+
+/// Last value handed to the wait-start seam; `u32::MAX` = never reported.
+static WAIT_EVENT_SLOT: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(u32::MAX);
+
+fn install_wait_event_seams() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        waitevent_seams::pgstat_report_wait_start::set(|info| {
+            WAIT_EVENT_SLOT.store(info, std::sync::atomic::Ordering::SeqCst);
+        });
+        waitevent_seams::pgstat_report_wait_end::set(|| {
+            WAIT_EVENT_SLOT.store(0, std::sync::atomic::Ordering::SeqCst);
+        });
+    });
+}
+
+#[test]
+fn build_wait_reports_parallel_bitmap_scan_wait_event() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let _g = serial();
+    install_wait_event_seams();
+    WAIT_EVENT_SLOT.store(u32::MAX, SeqCst);
+
+    // wait_event_names.txt IPC section: ParallelBitmapScan = index 38.
+    const WAIT_EVENT_PARALLEL_BITMAP_SCAN: u32 = 0x0800_0000 + 38;
+
+    let pstate = Arc::new(ParallelBitmapHeapState::default());
+    {
+        let mut g = pstate.shared.lock().unwrap_or_else(|e| e.into_inner());
+        g.state = SharedBitmapState::InProgress;
+    }
+    let ps = Arc::clone(&pstate);
+    let waiter_thread = std::thread::spawn(move || bitmap_should_initialize_shared_state(&ps));
+
+    // Observe the event while the worker is parked (each 10ms park is
+    // bracketed start/end; a 5s budget of 10ms laps covers scheduling jitter).
+    let mut seen = false;
+    for _ in 0..500 {
+        if WAIT_EVENT_SLOT.load(SeqCst) == WAIT_EVENT_PARALLEL_BITMAP_SCAN {
+            seen = true;
+            break;
+        }
+        let _ = waiter::park_timeout(core::time::Duration::from_millis(10));
+    }
+
+    // Publish BM_FINISHED the way bitmap_table_scan_setup does and wake the
+    // registered waiter.
+    let woken = {
+        let mut g = pstate.shared.lock().unwrap_or_else(|e| e.into_inner());
+        g.state = SharedBitmapState::Finished;
+        std::mem::take(&mut g.wakers)
+    };
+    for w in woken {
+        let _ = waiter::unpark_word(w);
+    }
+    let won = waiter_thread
+        .join()
+        .expect("waiter thread")
+        .expect("no interrupt pending in the test");
+    assert!(!won, "BM_FINISHED observer must not become the builder");
+    assert!(
+        seen,
+        "worker parked on the bitmap build never reported WAIT_EVENT_PARALLEL_BITMAP_SCAN \
+         (slot = {:#x})",
+        WAIT_EVENT_SLOT.load(SeqCst)
+    );
+    assert_eq!(
+        WAIT_EVENT_SLOT.load(SeqCst),
+        0,
+        "pgstat_report_wait_end must clear the event after the wake"
+    );
+}
