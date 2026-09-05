@@ -56,6 +56,26 @@ pub(crate) fn check_val_len(len: usize) -> PgResult<usize> {
     Ok(len)
 }
 
+// MaxAllocSize / sizeof(Pairs): sizeof(Pairs) = 40 on LP64 (2 pointers +
+// 2 size_t + 2 bool, padded), so 0x3fffffff / 40 = 26843545. C enforces it
+// in hstore_recv (hstore_io.c), hstore_from_arrays (hstore_io.c:638),
+// hstore_from_array (hstore_io.c:765) and hstoreArrayToPairs (hstore_op.c:99).
+const MAX_PAIRS: usize = 0x3fff_ffff / 40;
+
+// C: `if (count > MaxAllocSize / sizeof(Pairs)) ereport(ERROR,
+// (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED), errmsg("number of pairs (%d)
+// exceeds the maximum allowed (%d)", ...)))`.
+pub(crate) fn check_pair_count(count: usize) -> PgResult<()> {
+    if count > MAX_PAIRS {
+        return Err(PgError::error(format!(
+            "number of pairs ({count}) exceeds the maximum allowed ({MAX_PAIRS})"
+        ))
+        .with_sqlstate(types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+        .into());
+    }
+    Ok(())
+}
+
 // PG_GETARG_HSTORE_P: VARDATA_ANY of the detoasted arg image.
 // SAFETY wrapper: callers assert arg i is a non-null hstore varlena.
 pub(crate) unsafe fn arg_hstore<'a>(fcinfo: &'a Fcinfo, i: usize) -> PgResult<HstoreView<'a>> {
@@ -222,18 +242,18 @@ fn fc_hstore_recv(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Da
         return ret_hstore(fcinfo, &build_hstore(&[]));
     }
     // C parity (hstore_io.c hstore_recv): pcount > MaxAllocSize/sizeof(Pairs)
-    // is ERRCODE_PROGRAM_LIMIT_EXCEEDED with this exact message. sizeof(Pairs)
-    // = 40 on LP64 (2 pointers + 2 size_t + 2 bool, padded). The old bound
-    // (isize::MAX / sizeof) admitted counts C rejects, then died trying to
-    // reserve gigabytes (found by hstore_diff, lane p1-mb-contribc).
-    const MAX_PAIRS: i32 = (0x3fff_ffff_i64 / 40) as i32;
-    if pcount < 0 || pcount > MAX_PAIRS {
+    // is ERRCODE_PROGRAM_LIMIT_EXCEEDED with this exact message. The old
+    // bound (isize::MAX / sizeof) admitted counts C rejects, then died trying
+    // to reserve gigabytes (found by hstore_diff, lane p1-mb-contribc). A
+    // negative int32 count compares > the limit as C's `int > size_t`.
+    if pcount < 0 {
         return Err(PgError::error(format!(
             "number of pairs ({pcount}) exceeds the maximum allowed ({MAX_PAIRS})"
         ))
         .with_sqlstate(types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED)
         .into());
     }
+    check_pair_count(pcount as usize)?;
     let mut pairs: Vec<Pair> = Vec::with_capacity(pcount as usize);
     for _ in 0..pcount {
         let rawlen = pqformat::pq_getmsgint(buf, 4)? as i32;
@@ -329,6 +349,8 @@ fn fc_hstore_from_arrays(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRe
         return Err(subscript_err("wrong number of array subscripts"));
     }
     let keys = deconstruct_text_array(mcx, key_image)?;
+    // hstore_io.c:638 — checked before the value array is even looked at.
+    check_pair_count(keys.len())?;
     let vals = if b_null {
         None
     } else {
@@ -418,6 +440,8 @@ fn fc_hstore_from_array(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRes
     }
     let elems = deconstruct_text_array(mcx, image)?;
     let count = elems.len() / 2;
+    // hstore_io.c:765.
+    check_pair_count(count)?;
     let mut pairs: Vec<Pair> = Vec::with_capacity(count);
     for i in 0..count {
         let key = elems[i * 2].clone().ok_or_else(null_key_err)?;
@@ -468,6 +492,9 @@ fn fc_hstore_defined(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult
 pub(crate) fn array_to_keys(image: &[u8]) -> PgResult<Vec<Vec<u8>>> {
     let scratch = mcx::MemoryContext::new("hstore text[] keys");
     let elems = deconstruct_text_array(scratch.mcx(), image)?;
+    // hstore_op.c:99 (hstoreArrayToPairs): the raw element count, nulls
+    // included, is what C compares against MaxAllocSize / sizeof(Pairs).
+    check_pair_count(elems.len())?;
     let pairs: Vec<Pair> = elems
         .into_iter()
         .flatten()
