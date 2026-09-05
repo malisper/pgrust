@@ -7,7 +7,7 @@ use ::fmgr::{function_call2_coll_in, FmgrInfo};
 use ::mcx::Mcx;
 use ::types_brin::{BrinColInfo, BrinDesc, BrinOpcKind, BrinValues, MinmaxOpaque};
 use ::types_core::Oid;
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult};
 use ::types_scan::scankey::{
     ScanKeyData, BTEqualStrategyNumber, BTGreaterEqualStrategyNumber, BTGreaterStrategyNumber,
     BTLessEqualStrategyNumber, BTLessStrategyNumber, BTMaxStrategyNumber,
@@ -107,9 +107,33 @@ pub fn brin_minmax_consistent(
         s @ (BTGreaterEqualStrategyNumber | BTGreaterStrategyNumber) => call_strategy(
             mcx, bdesc, attno, subtype, s, colloid, column.bv_values[1], value,
         )?,
-        other => panic!("invalid strategy number {other}"),
+        other => return Err(invalid_strategy(other)),
     };
     Ok(matches.as_bool())
+}
+
+// brin_minmax.c:195 elog(ERROR, "invalid strategy number %d", key->sk_strategy):
+// ERRCODE_INTERNAL_ERROR (XX000), catchable.
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn invalid_strategy(strategy: u16) -> Box<PgError> {
+    Box::new(PgError::error(format!("invalid strategy number {strategy}")))
+}
+
+// brin_minmax.c:300 elog(ERROR, "missing operator %d(%u,%u) in opfamily %u").
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn missing_operator(
+    strategynum: u16,
+    atttypid: Oid,
+    subtype: Oid,
+    opfamily: Oid,
+) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "missing operator {strategynum}({atttypid},{subtype}) in opfamily {opfamily}"
+    )))
 }
 
 pub fn brin_minmax_union(
@@ -192,9 +216,7 @@ fn minmax_get_strategy_procinfo(
     let atttypid = bdesc.bd_tupdesc.attr(attno as usize - 1).atttypid;
     let oprid = lsyscache::get_opfamily_member(opfamily, atttypid, subtype, strategynum as i16)?;
     if oprid == 0 {
-        panic!(
-            "missing operator {strategynum}({atttypid},{subtype}) in opfamily {opfamily}"
-        );
+        return Err(missing_operator(strategynum, atttypid, subtype, opfamily));
     }
     let proc = lsyscache::get_opcode(oprid)?;
     debug_assert!(proc != 0);

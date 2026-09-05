@@ -143,13 +143,19 @@ pub struct SerializedHeader {
     pub maxvalues: i32,
 }
 
-pub fn read_serialized_header(image: &[u8]) -> SerializedHeader {
-    SerializedHeader {
+pub fn read_serialized_header(image: &[u8]) -> PgResult<SerializedHeader> {
+    // A truncated on-disk summary is data corruption, not an out-of-bounds
+    // read (the same guard brin_range_deserialize applies before trusting
+    // the header's counts).
+    if image.len() < SERIALIZED_HEADER {
+        return Err(corrupt_range());
+    }
+    Ok(SerializedHeader {
         typid: u32::from_ne_bytes(image[4..8].try_into().unwrap()),
         nranges: i32::from_ne_bytes(image[8..12].try_into().unwrap()),
         nvalues: i32::from_ne_bytes(image[12..16].try_into().unwrap()),
         maxvalues: i32::from_ne_bytes(image[16..20].try_into().unwrap()),
-    }
+    })
 }
 
 // SAFETY: p is a live NUL-terminated cstring.
@@ -289,14 +295,18 @@ const fn maxalign(x: usize) -> usize {
     (x + 7) & !7
 }
 
-fn fetch_byval(bytes: &[u8], typlen: i16) -> Datum {
-    match typlen {
+// tupmacs.h fetch_att: elog(ERROR, "unsupported byval length: %d") for a
+// by-value type whose typlen is not 1/2/4/8 (XX000, catchable).
+fn fetch_byval(bytes: &[u8], typlen: i16) -> PgResult<Datum> {
+    Ok(match typlen {
         1 => Datum::from_char(bytes[0] as i8),
         2 => Datum::from_i16(i16::from_ne_bytes(bytes[0..2].try_into().unwrap())),
         4 => Datum::from_i32(i32::from_ne_bytes(bytes[0..4].try_into().unwrap())),
         8 => Datum::from_i64(i64::from_ne_bytes(bytes[0..8].try_into().unwrap())),
-        other => panic!("unsupported byval length: {other}"),
-    }
+        other => {
+            return Err(Box::new(PgError::error(format!("unsupported byval length: {other}"))))
+        }
+    })
 }
 
 /// brin_range_deserialize; by-ref values are copied into one `mcx` chunk with
@@ -310,7 +320,7 @@ pub fn brin_range_deserialize<'mcx>(
     if image.len() < SERIALIZED_HEADER {
         return Err(corrupt_range());
     }
-    let hdr = read_serialized_header(image);
+    let hdr = read_serialized_header(image)?;
 
     // nranges/nvalues/maxvalues come from the (attacker-craftable) image. Reject
     // negatives, count the total in i64 so 2*nranges+nvalues cannot wrap i32, and
@@ -361,7 +371,7 @@ pub fn brin_range_deserialize<'mcx>(
             if typlen <= 0 || p + typlen as usize > data.len() {
                 return Err(corrupt_range());
             }
-            range.values[i] = fetch_byval(&data[p..], typlen);
+            range.values[i] = fetch_byval(&data[p..], typlen)?;
             p += typlen as usize;
         } else {
             let sz = checked_value_len(data, p, typlen)?;
@@ -1001,5 +1011,46 @@ mod deserialize_tests {
         let mut data = word.to_ne_bytes().to_vec();
         data.extend_from_slice(&[1u8; 4]);
         assert_eq!(checked_value_len(&data, 0, -1).unwrap(), 8);
+    }
+
+    // A summary image shorter than SerializedRanges' fixed header (a truncated
+    // on-disk tuple) must be reported as corruption, never indexed past its
+    // end (audit row brin_minmax_multi-69f5e9d7).
+    #[test]
+    fn truncated_header_image_does_not_panic() {
+        let image = [0u8; 10];
+        let outcome = std::panic::catch_unwind(|| {
+            let _ = super::read_serialized_header(&image);
+        });
+        assert!(outcome.is_ok(), "read_serialized_header must not panic on a short image");
+    }
+
+    // tupmacs.h fetch_att: elog(ERROR, "unsupported byval length: %d") for a
+    // by-value typlen outside {1,2,4,8} (audit row brin_minmax_multi-82042a2c).
+    #[test]
+    fn unsupported_byval_length_does_not_panic() {
+        let bytes = [0u8; 8];
+        let outcome = std::panic::catch_unwind(|| {
+            let _ = super::fetch_byval(&bytes, 3);
+        });
+        assert!(outcome.is_ok(), "fetch_byval must not panic on an unsupported typlen");
+    }
+
+    #[test]
+    fn truncated_header_image_is_data_corruption() {
+        let image = [0u8; 10];
+        let err = super::read_serialized_header(&image).err().expect("short image");
+        assert_eq!(err.sqlstate(), ::types_error::ERRCODE_DATA_CORRUPTED);
+        let ok = [0u8; 20];
+        assert_eq!(super::read_serialized_header(&ok).unwrap().maxvalues, 0);
+    }
+
+    #[test]
+    fn unsupported_byval_length_is_c_elog_error() {
+        let bytes = [0u8; 8];
+        let err = super::fetch_byval(&bytes, 3).expect_err("typlen 3");
+        assert_eq!(err.message, "unsupported byval length: 3");
+        assert_eq!(err.sqlstate(), ::types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(super::fetch_byval(&bytes, 4).unwrap().as_i32(), 0);
     }
 }

@@ -135,7 +135,7 @@ pub fn brin_minmax_multi_add_value(
         column.bv_mem_value = Some(Box::new(ranges));
     } else if column.bv_mem_value.is_none() {
         let serialized = detoast_summary(mcx, column.bv_values[0])?;
-        let stored_maxvalues = read_serialized_header(serialized).maxvalues;
+        let stored_maxvalues = read_serialized_header(serialized)?.maxvalues;
         let maxvalues = clamp_buffer_size(stored_maxvalues, bdesc.bd_pages_per_range);
 
         let mut ranges = brin_range_deserialize(mcx, maxvalues, serialized)?;
@@ -168,7 +168,7 @@ pub fn brin_minmax_multi_consistent(
     colloid: Oid,
 ) -> PgResult<bool> {
     let serialized = detoast_summary(mcx, column.bv_values[0])?;
-    let maxvalues = read_serialized_header(serialized).maxvalues;
+    let maxvalues = read_serialized_header(serialized)?.maxvalues;
     let ranges = brin_range_deserialize(mcx, maxvalues, serialized)?;
 
     for rangeno in 0..ranges.nranges as usize {
@@ -204,7 +204,7 @@ pub fn brin_minmax_multi_consistent(
                     let finfo = minmax_multi_get_strategy_procinfo(bdesc, attno, subtype, s)?;
                     call_bool(mcx, &finfo, colloid, maxval, value)?
                 }
-                other => panic!("invalid strategy number {other}"),
+                other => return Err(invalid_strategy(other)),
             };
 
             matching &= matches;
@@ -234,7 +234,7 @@ pub fn brin_minmax_multi_consistent(
                     let finfo = minmax_multi_get_strategy_procinfo(bdesc, attno, subtype, s)?;
                     call_bool(mcx, &finfo, colloid, val, value)?
                 }
-                other => panic!("invalid strategy number {other}"),
+                other => return Err(invalid_strategy(other)),
             };
 
             matching &= matches;
@@ -267,9 +267,9 @@ pub fn brin_minmax_multi_union(
     let serialized_b = detoast_summary(mcx, col_b.bv_values[0])?;
 
     let mut ranges_a =
-        brin_range_deserialize(mcx, read_serialized_header(serialized_a).maxvalues, serialized_a)?;
+        brin_range_deserialize(mcx, read_serialized_header(serialized_a)?.maxvalues, serialized_a)?;
     let ranges_b =
-        brin_range_deserialize(mcx, read_serialized_header(serialized_b).maxvalues, serialized_b)?;
+        brin_range_deserialize(mcx, read_serialized_header(serialized_b)?.maxvalues, serialized_b)?;
 
     let n_a = (ranges_a.nranges + ranges_a.nvalues) as usize;
     let n_b = (ranges_b.nranges + ranges_b.nvalues) as usize;
@@ -379,13 +379,37 @@ fn minmax_multi_get_strategy_procinfo(
     let atttypid = bdesc.bd_tupdesc.attr(attno as usize - 1).atttypid;
     let oprid = lsyscache::get_opfamily_member(opfamily, atttypid, subtype, strategynum as i16)?;
     if oprid == 0 {
-        panic!("missing operator {strategynum}({atttypid},{subtype}) in opfamily {opfamily}");
+        return Err(missing_operator(strategynum, atttypid, subtype, opfamily));
     }
     let proc = lsyscache::get_opcode(oprid)?;
     debug_assert!(proc != 0);
     let finfo = fmgr_core::fmgr_info(proc)?;
     opaque.strategy_procinfos.borrow_mut()[strategynum as usize - 1] = Some(finfo.clone());
     Ok(finfo)
+}
+
+// brin_minmax_multi.c:2650/2709 elog(ERROR, "invalid strategy number %d", key->sk_strategy):
+// ERRCODE_INTERNAL_ERROR (XX000), catchable.
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn invalid_strategy(strategy: u16) -> Box<PgError> {
+    Box::new(PgError::error(format!("invalid strategy number {strategy}")))
+}
+
+// brin_minmax_multi.c:2937 elog(ERROR, "missing operator %d(%u,%u) in opfamily %u").
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn missing_operator(
+    strategynum: u16,
+    atttypid: Oid,
+    subtype: Oid,
+    opfamily: Oid,
+) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "missing operator {strategynum}({atttypid},{subtype}) in opfamily {opfamily}"
+    )))
 }
 
 #[track_caller]

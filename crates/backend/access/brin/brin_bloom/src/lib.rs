@@ -262,8 +262,17 @@ pub fn brin_bloom_consistent(
             .as_u32();
             Ok(bloom_contains_value(filter, hash_value))
         }
-        other => panic!("invalid strategy number {other}"),
+        other => Err(invalid_strategy(other)),
     }
+}
+
+// brin_bloom.c:644 elog(ERROR, "invalid strategy number %d", key->sk_strategy):
+// ERRCODE_INTERNAL_ERROR (XX000), catchable.
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn invalid_strategy(strategy: u16) -> Box<PgError> {
+    Box::new(PgError::error(format!("invalid strategy number {strategy}")))
 }
 
 pub fn brin_bloom_union(

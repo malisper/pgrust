@@ -107,7 +107,11 @@ pub fn brinbuild<'mcx>(
         ForkNumber::MAIN_FORKNUM,
     )? != 0
     {
-        panic!("index \"{}\" already contains data", index.name());
+        // brin.c:1119 elog(ERROR, ...): XX000, catchable.
+        return Err(Box::new(PgError::error(format!(
+            "index \"{}\" already contains data",
+            index.name()
+        ))));
     }
 
     let pagesPerRange = brin_get_pages_per_range(index);
@@ -269,7 +273,6 @@ fn brin_fill_empty_ranges<'mcx>(
             bs_currentInsertBuf,
             bs_rmAccess,
             bs_emptyTuple,
-            bs_numtuples,
             ..
         } = state;
         let tup = bs_emptyTuple.as_mut().expect("built above");
@@ -282,7 +285,9 @@ fn brin_fill_empty_ranges<'mcx>(
             blkno,
             tup,
         )?;
-        *bs_numtuples += 1.0;
+        // brin.c:3010: empty ranges are inserted but NOT counted in
+        // bs_numtuples (only form_and_insert_tuple/form_and_spill_tuple
+        // count), so pg_class.reltuples excludes them.
 
         blkno += state.bs_pagesPerRange;
     }

@@ -251,7 +251,7 @@ fn fc_summary_out(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Da
     image.extend_from_slice(&(((payload.data().len() + 4) as u32) << 2).to_ne_bytes());
     image.extend_from_slice(payload.data());
 
-    let hdr = crate::ranges::read_serialized_header(&image);
+    let hdr = crate::ranges::read_serialized_header(&image)?;
     let (outfunc, _isvarlena) = ::lsyscache::getTypeOutputInfo(hdr.typid)?;
     let mut out_fn = ::fmgr_core::fmgr_info(outfunc)?;
     let ranges = crate::ranges::brin_range_deserialize(mcx, hdr.maxvalues, &image)?;

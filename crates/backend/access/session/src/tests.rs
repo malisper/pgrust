@@ -1086,7 +1086,14 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      external C function addresses keyed by pg_proc OID + tuple
     //      xmin/tid (fmgr.c CFuncHash); a validity-checked cache with no
     //      session identity, never bound or reset — non-session TLS.
-    assert_eq!(count_tree(crates), 581, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 582, 18.6 conformance audit (2026-09-04), brin remediation b005: one
+    //   test-only source —
+    //   62. access/brin/brin_pageops/src/tests.rs PAGES/XLOG_CRIT/XLOG_FAIL/
+    //      NBLOCKS (one thread_local! block) — fake-buffer fixture + WAL
+    //      insert recorder for the brin_doupdate/brin_doinsert critical-
+    //      section witnesses (unit harness fixture; counted by the tree
+    //      census, never product code — same class as 43/45/46/60).
+    assert_eq!(count_tree(crates), 582, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

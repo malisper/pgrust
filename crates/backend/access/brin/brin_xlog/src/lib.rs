@@ -302,7 +302,8 @@ pub fn brin_redo(record: &mut XLogReaderState) -> PgResult<()> {
         XLOG_BRIN_SAMEPAGE_UPDATE => brin_xlog_samepage_update(record),
         XLOG_BRIN_REVMAP_EXTEND => brin_xlog_revmap_extend(record),
         XLOG_BRIN_DESUMMARIZE => brin_xlog_desummarize_page(record),
-        other => Err(panic_err(format!("brin_redo: unknown op code {other}"))),
+        // brin_xlog.c:334 prints the whole info byte (flags included).
+        _ => Err(panic_err(format!("brin_redo: unknown op code {info}"))),
     }
 }
 
@@ -357,6 +358,25 @@ mod pages_per_range_tests {
         validate_pages_per_range(1).unwrap();
         validate_pages_per_range(128).unwrap();
         validate_pages_per_range(BRIN_MAX_PAGES_PER_RANGE).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod redo_dispatch_tests {
+    use super::*;
+
+    // brin_xlog.c:334: elog(PANIC, "brin_redo: unknown op code %u", info) prints
+    // the whole info byte (xl_info & ~XLR_INFO_MASK), flags included — an
+    // unknown opcode carrying XLOG_BRIN_INIT_PAGE reports 0xE0 = 224, not the
+    // XLOG_BRIN_OPMASK-stripped 96 (audit row b1-5cc21a49).
+    #[test]
+    fn unknown_opcode_reports_the_unmasked_info_byte() {
+        let mut rec = xlogreader_seams::DecodedXLogRecord::default();
+        rec.xl_info = 0xE0;
+        let mut record = XLogReaderState { record: Some(rec), ..Default::default() };
+        let err = brin_redo(&mut record).expect_err("unknown brin opcode must not redo silently");
+        assert_eq!(err.message, "brin_redo: unknown op code 224");
+        assert_eq!(err.level, types_error::PANIC);
     }
 }
 

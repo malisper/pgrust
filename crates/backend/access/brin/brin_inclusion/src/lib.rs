@@ -215,8 +215,32 @@ pub fn brin_inclusion_consistent(
 
         RTGreaterStrategyNumber => Ok(!call(RTLeftStrategyNumber)?),
 
-        other => panic!("invalid strategy number {other}"),
+        other => Err(invalid_strategy(other)),
     }
+}
+
+// brin_inclusion.c:462 elog(ERROR, "invalid strategy number %d", key->sk_strategy):
+// ERRCODE_INTERNAL_ERROR (XX000), catchable.
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn invalid_strategy(strategy: u16) -> Box<PgError> {
+    Box::new(PgError::error(format!("invalid strategy number {strategy}")))
+}
+
+// brin_inclusion.c:647 elog(ERROR, "missing operator %d(%u,%u) in opfamily %u").
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn missing_operator(
+    strategynum: u16,
+    atttypid: Oid,
+    subtype: Oid,
+    opfamily: Oid,
+) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "missing operator {strategynum}({atttypid},{subtype}) in opfamily {opfamily}"
+    )))
 }
 
 pub fn brin_inclusion_union(
@@ -347,7 +371,7 @@ fn inclusion_get_strategy_procinfo(
     let atttypid = bdesc.bd_tupdesc.attr(attno as usize - 1).atttypid;
     let oprid = lsyscache::get_opfamily_member(opfamily, atttypid, subtype, strategynum as i16)?;
     if oprid == 0 {
-        panic!("missing operator {strategynum}({atttypid},{subtype}) in opfamily {opfamily}");
+        return Err(missing_operator(strategynum, atttypid, subtype, opfamily));
     }
     let proc = lsyscache::get_opcode(oprid)?;
     debug_assert!(proc != 0);

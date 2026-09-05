@@ -21,6 +21,7 @@ use ::types_tuple::itemptr::{
 };
 use ::types_tuple::InvalidOffsetNumber;
 use ::xloginsert_seams::{XLogRegBuf, REGBUF_STANDARD, REGBUF_WILL_INIT};
+use init_small::globals::{EndCriticalSection, StartCriticalSection};
 
 pub const BrinMaxItemSize: usize =
     (BLCKSZ - (((SizeOfPageHeaderData + 4) + 7) & !7) - BrinSpecialSpaceSize) & !7;
@@ -73,6 +74,16 @@ fn row_too_big(itemsz: usize, maxsz: usize, rel: &RelationData<'_>) -> Box<PgErr
         ))
         .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
     )
+}
+
+// elog(ERROR, ...) with no errcode: ERRCODE_INTERNAL_ERROR (XX000). Raised
+// inside a critical section, the escaping Err is promoted to PANIC at the
+// catch boundary, exactly as errfinish promotes C's elog(ERROR) there.
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn internal_error(msg: impl Into<String>) -> Box<PgError> {
+    Box::new(PgError::error(msg))
 }
 
 #[track_caller]
@@ -210,10 +221,15 @@ pub fn brin_doupdate(
     if (BrinPageFlags(&oldpage) & BRIN_EVACUATE_PAGE) == 0
         && brin_can_do_samepage_update(oldbuf, origsz, newsz)
     {
+        // brin_pageops.c:178: page mutation + WAL record in one critical
+        // section (an Err escaping it is promoted to PANIC at the catch
+        // boundary, as errfinish does for C).
+        StartCriticalSection();
         // SAFETY: exclusive lock held.
         let mut oldpage = unsafe { page_mut(oldbuf) };
         if !oldpage.index_tuple_overwrite(oldoff, newtup) {
-            panic!("failed to replace BRIN tuple");
+            // brin_pageops.c:180.
+            return Err(internal_error("failed to replace BRIN tuple"));
         }
         mark_buffer_dirty::call(oldbuf)?;
 
@@ -234,6 +250,7 @@ pub fn brin_doupdate(
             )?;
             oldpage.set_lsn(recptr);
         }
+        EndCriticalSection();
 
         lock_buffer::call(oldbuf, BUFFER_LOCK_UNLOCK)?;
         discard_newbuf(idxrel, newbuf, newblk, extended)?;
@@ -244,6 +261,9 @@ pub fn brin_doupdate(
     } else {
         let revmapbuf = brinLockRevmapPageForUpdate(idxrel, revmap, heapBlk)?;
 
+        // brin_pageops.c:242.
+        StartCriticalSection();
+
         // SAFETY: newbuf pinned + exclusively locked by brin_getinsertbuffer.
         let mut newpage = unsafe { page_mut(newbuf) };
         if extended {
@@ -253,7 +273,8 @@ pub fn brin_doupdate(
         let mut oldpage = unsafe { page_mut(oldbuf) };
         oldpage.index_tuple_delete_no_compact(oldoff);
         let Some(newoff) = newpage.add_item(newtup, InvalidOffsetNumber, 0) else {
-            panic!("failed to add BRIN tuple to new page");
+            // brin_pageops.c:256.
+            return Err(internal_error("failed to add BRIN tuple to new page"));
         };
         mark_buffer_dirty::call(oldbuf)?;
         mark_buffer_dirty::call(newbuf)?;
@@ -294,6 +315,7 @@ pub fn brin_doupdate(
             // SAFETY: revmapbuf exclusively locked.
             unsafe { page_mut(revmapbuf) }.set_lsn(recptr);
         }
+        EndCriticalSection();
 
         lock_buffer::call(revmapbuf, BUFFER_LOCK_UNLOCK)?;
         lock_buffer::call(oldbuf, BUFFER_LOCK_UNLOCK)?;
@@ -353,13 +375,16 @@ pub fn brin_doinsert(
 
     let blk = buffer_get_block_number::call(*buffer);
 
+    // brin_pageops.c:408.
+    StartCriticalSection();
     // SAFETY: pinned + exclusively locked.
     let mut page = unsafe { page_mut(*buffer) };
     if extended {
         brin_page_init(&mut page, BRIN_PAGETYPE_REGULAR);
     }
     let Some(off) = page.add_item(tup, InvalidOffsetNumber, 0) else {
-        panic!("failed to add BRIN tuple to new page");
+        // brin_pageops.c:414.
+        return Err(internal_error("failed to add BRIN tuple to new page"));
     };
     mark_buffer_dirty::call(*buffer)?;
 
@@ -392,6 +417,7 @@ pub fn brin_doinsert(
         // SAFETY: revmapbuf exclusively locked.
         unsafe { page_mut(revmapbuf) }.set_lsn(recptr);
     }
+    EndCriticalSection();
 
     lock_buffer::call(*buffer, BUFFER_LOCK_UNLOCK)?;
     lock_buffer::call(revmapbuf, BUFFER_LOCK_UNLOCK)?;
@@ -485,6 +511,8 @@ pub fn brin_evacuate_page(
 // brin_initialize_empty_new_buffer: init as an empty regular page, WAL-log,
 // record in FSM. Caller holds pin + exclusive lock.
 fn brin_initialize_empty_new_buffer(idxrel: &Relation<'_>, buffer: Buffer) -> PgResult<()> {
+    // brin_pageops.c:892.
+    StartCriticalSection();
     // SAFETY: pinned + exclusively locked by caller.
     let mut page = unsafe { page_mut(buffer) };
     brin_page_init(&mut page, BRIN_PAGETYPE_REGULAR);
@@ -493,6 +521,7 @@ fn brin_initialize_empty_new_buffer(idxrel: &Relation<'_>, buffer: Buffer) -> Pg
     if relation_needs_wal(idxrel) {
         ::xloginsert_seams::log_newpage_buffer::call(buffer, true)?;
     }
+    EndCriticalSection();
 
     // FSM update not WAL-logged; VACUUM repairs after a crash.
     freespace::RecordPageWithFreeSpace(
@@ -885,6 +914,8 @@ pub fn brinRevmapDesummarizeRange(idxrel: &Relation<'_>, heapBlk: BlockNumber) -
 
     // Leftover placeholder tuples from a crashed/aborted summarization are
     // removed silently (ShareUpdateExclusiveLock excludes a live one).
+    // brin_revmap.c:398.
+    StartCriticalSection();
     brinSetHeapBlockItemptr(
         revmapBuf,
         revmap.rm_pagesPerRange,
@@ -913,6 +944,7 @@ pub fn brinRevmapDesummarizeRange(idxrel: &Relation<'_>, heapBlk: BlockNumber) -
         unsafe { page_mut(revmapBuf) }.set_lsn(recptr);
         unsafe { page_mut(regBuf) }.set_lsn(recptr);
     }
+    EndCriticalSection();
 
     lock_buffer::call(regBuf, BUFFER_LOCK_UNLOCK)?;
     release_buffer::call(regBuf)?;
@@ -941,7 +973,10 @@ fn revmap_get_buffer(
 ) -> PgResult<Buffer> {
     let mapBlk = revmap_get_blkno(revmap, heapBlk);
     if mapBlk == InvalidBlockNumber {
-        panic!("revmap does not cover heap block {heapBlk}");
+        // brin_revmap.c:471.
+        return Err(internal_error(format!(
+            "revmap does not cover heap block {heapBlk}"
+        )));
     }
     debug_assert!(mapBlk != BRIN_METAPAGE_BLKNO && mapBlk <= revmap.rm_lastRevmapPage.get());
 
@@ -1027,6 +1062,8 @@ fn revmap_physical_extend(irel: &Relation<'_>, revmap: &BrinRevmap) -> PgResult<
         return Ok(());
     }
 
+    // brin_revmap.c:602.
+    StartCriticalSection();
     // SAFETY: exclusive locks held on both pages.
     let mut pm = unsafe { page_mut(buf) };
     brin_page_init(&mut pm, BRIN_PAGETYPE_REVMAP);
@@ -1059,9 +1096,13 @@ fn revmap_physical_extend(irel: &Relation<'_>, revmap: &BrinRevmap) -> PgResult<
         metapage.set_lsn(recptr);
         pm.set_lsn(recptr);
     }
+    EndCriticalSection();
 
     lock_buffer::call(revmap.rm_metaBuf, BUFFER_LOCK_UNLOCK)?;
     lock_buffer::call(buf, BUFFER_LOCK_UNLOCK)?;
     release_buffer::call(buf)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;
