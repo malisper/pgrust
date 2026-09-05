@@ -2654,31 +2654,99 @@ fn dag_pool_win_shapes_complete() {
 /// §3.6): K queries on a real pool, ONE of them holding TWO live
 /// independent pipelines the whole window — mid-flight per-QUERY CPU shares
 /// stay in the loose band (the dual-pipeline query must not take 2x).
+///
+/// Determinism (the CI-ci flake of 2026-09-05, query 1 at 2.04x mean):
+/// the original leg spun on the wall clock and sampled after a 40 ms
+/// sleep, so under parallel sibling tests (each spawning its own spinning
+/// pool onto the same cores) a worker descheduled mid-task charged its
+/// whole absence to one query and the sleep itself overran — the sample
+/// measured the pod's load, not the scheduler. This form keeps the REAL
+/// pool (real workers, real pick races, real claims) but moves every time
+/// input onto the runtime's virtual clock: each executed granule advances
+/// it by a fixed cost, so stride charges, morsel sizing and the shares
+/// themselves are functions of executed work only. Fixture order matters
+/// in virtual time — work is instantaneous, so all K queries are
+/// submitted BEFORE the pool spawns (every slot is live at the first
+/// pick; a pool woken by the first submit would run it to completion
+/// before the second submit lands). The sample point is a handshake, not
+/// a sleep: the morsel that carries the pool past SAMPLE_GRANULES snapshots
+/// the per-query executed-granule counts under the gate lock and wakes the
+/// test. Decay stays off: the original leg's per-query totals never reached
+/// the 50 ms quantum either, and a virtual-time charge spans the siblings'
+/// concurrent advances, so consumed-CPU is not comparable to the quantum
+/// (M5-5 owns its deterministic trajectory tests). No wall-clock read
+/// remains in the leg.
 #[test]
 fn dag_threaded_pool_query_shares() {
-    struct Spin {
-        ns_per_granule: u64,
+    /// Sample gate shared by every task set: per-query executed-granule
+    /// counters (the CPU-share instrument in virtual time = cost × granules),
+    /// the pool-wide total, and the one-shot snapshot handshake.
+    struct Gate {
+        target: u64,
+        total: AtomicU64,
+        per_query: Vec<AtomicU64>,
+        snapshot: Mutex<Option<(u64, Vec<u64>)>>, // (total, per-query)
+        cv: std::sync::Condvar,
     }
-    impl TaskSetWork for Spin {
+    struct Counted {
+        clock: Arc<VirtualClock>,
+        ns_per_granule: u64,
+        query: usize,
+        gate: Arc<Gate>,
+    }
+    impl TaskSetWork for Counted {
         fn run_morsel(&self, _w: usize, range: MorselRange) {
             let n = range.end - range.start;
-            let t0 = std::time::Instant::now();
-            let budget = std::time::Duration::from_nanos(self.ns_per_granule * n);
-            while t0.elapsed() < budget {
-                std::hint::spin_loop();
+            self.gate.per_query[self.query].fetch_add(n, Ordering::SeqCst);
+            let total = self.gate.total.fetch_add(n, Ordering::SeqCst) + n;
+            // Virtual CPU: the morsel's cost lands on the scheduler clock
+            // (the stride charge and the sizer see exactly this).
+            self.clock.advance(self.ns_per_granule * n);
+            if total >= self.gate.target {
+                let mut snap = self.gate.snapshot.lock().unwrap();
+                if snap.is_none() {
+                    let per: Vec<u64> =
+                        self.gate.per_query.iter().map(|c| c.load(Ordering::SeqCst)).collect();
+                    *snap = Some((self.gate.total.load(Ordering::SeqCst), per));
+                    self.gate.cv.notify_all();
+                }
             }
         }
         fn finalize(&self) {}
     }
 
-    let mut cfg = RuntimeConfig::new(4);
+    const WORKERS: usize = 4;
+    const K: usize = 6;
+    const COST_NS: u64 = 20_000;
+    // Mid-flight by construction: 8 000 of the 24 064 granules. A query
+    // needs 4 000 to complete, i.e. 3x the fair share at the sample —
+    // every query is still active at the snapshot unless the band is
+    // already violated, so the sample is asserted, never skipped.
+    const SAMPLE_GRANULES: u64 = 8_000;
+
+    let clock = Arc::new(VirtualClock::new());
+    let mut cfg = RuntimeConfig::new(WORKERS);
     cfg.slots = 16;
-    let rt = Runtime::new(cfg);
+    let rt = Runtime::with_clock(cfg, Arc::clone(&clock) as Arc<dyn Clock>);
     rt.set_stride(true);
     rt.set_dag(true);
-    let pool = WorkerPool::spawn_std(Arc::clone(&rt)).unwrap();
+    rt.set_decay(false);
+    let gate = Arc::new(Gate {
+        target: SAMPLE_GRANULES,
+        total: AtomicU64::new(0),
+        per_query: (0..K).map(|_| AtomicU64::new(0)).collect(),
+        snapshot: Mutex::new(None),
+        cv: std::sync::Condvar::new(),
+    });
+    let work = |query: usize| -> Arc<dyn TaskSetWork> {
+        Arc::new(Counted {
+            clock: Arc::clone(&clock),
+            ns_per_granule: COST_NS,
+            query,
+            gate: Arc::clone(&gate),
+        })
+    };
 
-    let k = 6usize;
     let mut handles = Vec::new();
     let mut waiters = Vec::new();
     // Query 1: TWO independent live pipelines (each half the work of a
@@ -2688,55 +2756,95 @@ fn dag_threaded_pool_query_shares() {
         tasksets: vec![
             TaskSetSpec {
                 source: Arc::new(SyntheticMorselSource::new(2_000)),
-                work: Arc::new(Spin { ns_per_granule: 20_000 }),
+                work: work(0),
                 deps: vec![],
             },
             TaskSetSpec {
                 source: Arc::new(SyntheticMorselSource::new(2_000)),
-                work: Arc::new(Spin { ns_per_granule: 20_000 }),
+                work: work(0),
                 deps: vec![],
             },
             TaskSetSpec {
                 source: Arc::new(SyntheticMorselSource::new(64)),
-                work: Arc::new(Spin { ns_per_granule: 1_000 }),
+                work: work(0),
                 deps: vec![0, 1],
             },
         ],
     });
     handles.push(h);
     waiters.push(w);
-    for q in 1..k {
+    for q in 1..K {
         let (h, w) = rt.submit(QuerySpec {
             query_id: q as u64 + 1,
             tasksets: vec![TaskSetSpec {
                 source: Arc::new(SyntheticMorselSource::new(4_000)),
-                work: Arc::new(Spin { ns_per_granule: 20_000 }),
+                work: work(q),
                 deps: vec![],
             }],
         });
         handles.push(h);
         waiters.push(w);
     }
-    std::thread::sleep(std::time::Duration::from_millis(40));
-    let all_active = waiters.iter().all(|w| w.try_wait().is_none());
-    if all_active {
-        let cpus: Vec<u64> = handles.iter().map(|h| h.cpu_consumed_ns()).collect();
-        let mean = cpus.iter().sum::<u64>() as f64 / k as f64;
-        eprintln!("dag threaded query shares (mean {mean:.0}): {cpus:?}");
-        for c in &cpus {
-            assert!(
-                (*c as f64) >= 0.4 * mean && (*c as f64) <= 1.8 * mean,
-                "mid-flight QUERY share out of loose band: {c} vs mean {mean:.0} ({cpus:?}) \
-                 — query 1 holds two live pipelines and must not take 2x"
-            );
+    // Every slot is live before the first pick.
+    assert_eq!(rt.stats().tasksets_published, K as u64 + 1, "7 live pipelines at pool start");
+    let pool = WorkerPool::spawn_std(Arc::clone(&rt)).unwrap();
+
+    // Handshake: wait for the crossing morsel's snapshot. Bounded so a
+    // protocol bug reports instead of hanging the suite.
+    let (total, shares) = {
+        let mut snap = gate.snapshot.lock().unwrap();
+        let mut budget = 600u32; // × 100 ms
+        while snap.is_none() {
+            let (g, r) = gate
+                .cv
+                .wait_timeout(snap, std::time::Duration::from_millis(100))
+                .unwrap();
+            snap = g;
+            if r.timed_out() {
+                budget -= 1;
+                assert!(
+                    budget > 0,
+                    "sample handshake: pool executed {} of {SAMPLE_GRANULES} granules",
+                    gate.total.load(Ordering::SeqCst)
+                );
+            }
         }
-    } else {
-        eprintln!("dag threaded shares: sample point missed (fast machine) — band skipped");
+        snap.clone().unwrap()
+    };
+    assert!(total >= SAMPLE_GRANULES, "snapshot fired early: {total}");
+    // At most one in-flight morsel per worker past the target; a
+    // Default-state morsel is T·t_max = 100 granules here.
+    assert!(
+        total < SAMPLE_GRANULES + (WORKERS as u64) * 1_000,
+        "snapshot overshoot: {total} executed vs target {SAMPLE_GRANULES}"
+    );
+    let cpus: Vec<u64> = handles.iter().map(|h| h.cpu_consumed_ns()).collect();
+    let mean = shares.iter().sum::<u64>() as f64 / K as f64;
+    eprintln!("dag threaded query shares (granules, mean {mean:.0}): {shares:?}; ns {cpus:?}");
+    for (q, c) in shares.iter().enumerate() {
+        assert!(
+            (*c as f64) >= 0.4 * mean && (*c as f64) <= 1.8 * mean,
+            "mid-flight QUERY share out of loose band: query {} {c} vs mean {mean:.0} ({shares:?}) \
+             — query 1 holds two live pipelines and must not take 2x",
+            q + 1
+        );
+    }
+    // Still mid-flight for everyone (the band bounds each query under its
+    // own total; the sink's 64 granules cannot run before both pipelines
+    // finish, so query 1 sits strictly below 4 000 too).
+    for (q, c) in shares.iter().enumerate() {
+        assert!(*c < 4_000, "query {} completed before the sample ({shares:?})", q + 1);
     }
     for w in &waiters {
         assert_eq!(w.wait(), RgOutcome::Completed);
     }
     pool.shutdown();
+    let done: Vec<u64> = gate.per_query.iter().map(|c| c.load(Ordering::SeqCst)).collect();
+    assert_eq!(done[0], 4_064, "query 1 executes both pipelines and the sink exactly");
+    for (q, d) in done.iter().enumerate().skip(1) {
+        assert_eq!(*d, 4_000, "query {} executes its pipeline exactly", q + 1);
+    }
+    assert!(rt.stats().dag_fanout_publishes >= 1, "query 1 must fan out");
 }
 // ---- stream-fed sources (parallel COPY's segmentator feed) -----------------
 
