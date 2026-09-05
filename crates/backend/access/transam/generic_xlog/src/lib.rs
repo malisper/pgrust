@@ -443,7 +443,7 @@ pub fn generic_redo(record: &mut XLogReaderState) -> PgResult<()> {
 
 pub fn generic_mask(pagedata: &mut [u8], _blkno: BlockNumber) -> PgResult<()> {
     bufmask::mask_page_lsn_and_checksum(pagedata);
-    bufmask::mask_unused_space(pagedata);
+    bufmask::mask_unused_space(pagedata)?;
     Ok(())
 }
 

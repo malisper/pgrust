@@ -2724,6 +2724,7 @@ name = "bufmask"
 version = "0.1.0"
 dependencies = [
  "types_core",
+ "types_error",
  "types_storage",
 ]
 
@@ -18533,6 +18534,7 @@ dependencies = [
  "pg_sema_seams",
  "s_lock_seams",
  "shmem",
+ "shmem_seams",
  "syncscan_seams",
  "types_core",
  "types_error",

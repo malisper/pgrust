@@ -499,3 +499,70 @@ fn scratch_stays_flat_across_statement_cycles() {
         pooled
     }));
 }
+
+// printtup.c:362 — pq_sendcountedtext consults the client encoding on EVERY
+// call (mbutils.c pg_server_to_client reads ClientEncoding each time), so a
+// client_encoding change between the rows of one query (set_config(...,
+// false) in the select list) converts from the next row on. The receiver,
+// the descriptor and the slot are all unchanged across the two rows.
+#[test]
+fn text_output_reconverts_when_client_encoding_changes_mid_query() {
+    let ctx = setup();
+    let mut att = int4_attr(0);
+    att.atttypid = TEXTOID;
+    att.attlen = -1;
+    att.attbyval = false;
+    let desc = make_desc(ctx.mcx(), vec![att]);
+
+    let text = b"hello\0";
+    let mut slot = make_slot(
+        ctx.mcx(),
+        Rc::clone(&desc),
+        &[(Datum::from_usize(text.as_ptr() as usize), false)],
+    );
+    let mut dr = printtup_create_DR(CommandDest::RemoteExecute);
+    SetRemoteDestReceiverParams(&mut dr, make_portal(ctx.mcx(), &[]));
+    dr.startup(1, &desc).unwrap();
+
+    // Row 1: encodings match, bytes pass through.
+    dr.receive_slot(&mut slot).unwrap();
+    let mut raw = 1u16.to_be_bytes().to_vec();
+    raw.extend_from_slice(&counted(b"hello"));
+    assert_eq!(sent()[0], (b'D', raw));
+    assert_eq!(CONVERT_CALLS.with(|c| c.get()), 0);
+
+    // client_encoding changes mid-query; row 2 must be converted like C.
+    CONVERT.with(|c| c.set(true));
+    dr.receive_slot(&mut slot).unwrap();
+    let mut conv = 1u16.to_be_bytes().to_vec();
+    conv.extend_from_slice(&counted(b"HELLO"));
+    assert_eq!(sent()[1], (b'D', conv));
+    assert_eq!(CONVERT_CALLS.with(|c| c.get()), 1);
+
+    // ... and back again for row 3.
+    CONVERT.with(|c| c.set(false));
+    dr.receive_slot(&mut slot).unwrap();
+    let mut raw3 = 1u16.to_be_bytes().to_vec();
+    raw3.extend_from_slice(&counted(b"hello"));
+    assert_eq!(sent()[2], (b'D', raw3));
+    assert_eq!(CONVERT_CALLS.with(|c| c.get()), 1);
+}
+
+// printtup.c:427 — printatt printf's the attribute name and the output
+// function's cstring VERBATIM. A value that is not valid UTF-8 (SQL_ASCII
+// data, e.g. convert_from('\xe9'::bytea, 'SQL_ASCII')) must reach stdout
+// byte-for-byte, never as U+FFFD.
+#[test]
+fn debugtup_printatt_writes_raw_value_bytes() {
+    let ctx = setup();
+    let desc = int4_desc(ctx.mcx(), 1);
+    let value: &[u8] = b"a\xE9b";
+
+    let mut out: Vec<u8> = Vec::new();
+    crate::debugtup::printatt(&mut out, 1, &desc, 0, Some(value));
+
+    let mut expect = b"\t 1: c1 = \"".to_vec();
+    expect.extend_from_slice(value);
+    expect.extend_from_slice(b"\"\t(typeid = 23, len = 4, typmod = -1, byval = t)\n");
+    assert_eq!(out, expect);
+}

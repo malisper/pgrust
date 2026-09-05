@@ -154,10 +154,6 @@ impl<'mcx> DrPrinttup<'mcx> {
         if numAttrs <= 0 {
             return Ok(());
         }
-        // Conversion-needed resolved once here, never in the row loop
-        // (strategy lever 2; the pqformat benchmark record's watch item).
-        self.conv_needed = mbutils_seams::server_to_client_conversion_needed::call();
-
         let mcx = scratch_mcx();
         let portal = self
             .portal
@@ -230,6 +226,12 @@ impl<'mcx> DrPrinttup<'mcx> {
                 self.prepare_info(desc, token, desc.natts)?;
             }
         }
+        // C's pq_sendcountedtext (printtup.c:362) consults the client encoding
+        // on every call, so a client_encoding change between the rows of one
+        // query (set_config in the select list) converts from the next row
+        // on. One predicate read per row keeps that observable; the per-column
+        // output-function resolution stays hoisted in prepare_info.
+        self.conv_needed = mbutils_seams::server_to_client_conversion_needed::call();
         exectuples::slot_getallattrs(slot);
 
         let base = slot.base();

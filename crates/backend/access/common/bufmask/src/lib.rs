@@ -1,6 +1,9 @@
 #![no_std]
 
+extern crate alloc;
+
 use types_core::{uint16, uint32, BLCKSZ};
+use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 use types_storage::bufpage::{
     ItemIdData, PageHeaderData, PageMut, SizeOfPageHeaderData, LP_UNUSED,
 };
@@ -32,24 +35,31 @@ pub fn mask_page_hint_bits(page: &mut [u8]) {
     pm.clear_all_visible();
 }
 
-/// Panics on corrupt page pointers (C: `elog(ERROR, "invalid page ...")`).
-pub fn mask_unused_space(page: &mut [u8]) {
+/// Corrupt page pointers raise C's catchable error (bufmask.c:81:
+/// `elog(ERROR, "invalid page pd_lower %u pd_upper %u pd_special %u")`).
+pub fn mask_unused_space(page: &mut [u8]) -> PgResult<()> {
     let mut pm = page_mut(page);
     let r = pm.as_ref();
     let pd_lower = r.pd_lower() as usize;
     let pd_upper = r.pd_upper() as usize;
     let pd_special = r.pd_special() as usize;
-    assert!(
-        pd_lower <= pd_upper
-            && pd_upper <= pd_special
-            && pd_lower >= SizeOfPageHeaderData
-            && pd_special <= BLCKSZ,
-        "invalid page pd_lower {pd_lower} pd_upper {pd_upper} pd_special {pd_special}"
-    );
+    if pd_lower > pd_upper
+        || pd_special < pd_upper
+        || pd_lower < SizeOfPageHeaderData
+        || pd_special > BLCKSZ
+    {
+        return Err(alloc::boxed::Box::new(
+            PgError::error(alloc::format!(
+                "invalid page pd_lower {pd_lower} pd_upper {pd_upper} pd_special {pd_special}"
+            ))
+            .with_sqlstate(ERRCODE_INTERNAL_ERROR),
+        ));
+    }
     // SAFETY: [pd_lower, pd_upper) validated within the page above.
     unsafe {
         core::ptr::write_bytes(pm.as_mut_ptr().add(pd_lower), MASK_MARKER, pd_upper - pd_lower)
     };
+    Ok(())
 }
 
 pub fn mask_lp_flags(page: &mut [u8]) {
@@ -154,22 +164,49 @@ mod tests {
         unsafe { core::ptr::write_bytes(pm.as_mut_ptr().add(pd_lower), 0xFF, pd_upper - pd_lower) };
         drop(pm);
 
-        mask_unused_space(&mut t.0);
+        mask_unused_space(&mut t.0).unwrap();
 
         assert!(t.0[pd_lower..pd_upper].iter().all(|&b| b == 0));
         // Tuple bytes (beyond pd_upper) are untouched.
         assert!(t.0[pd_upper..pd_upper + 32].iter().all(|&b| b == 0xAA));
     }
 
+    // bufmask.c:81 — corrupt page pointers are elog(ERROR)'d ("invalid page
+    // pd_lower %u pd_upper %u pd_special %u"), a catchable error; the masking
+    // path (wal_consistency_checking replay) must never abort the process.
     #[test]
-    #[should_panic(expected = "invalid page")]
-    fn unused_space_panics_on_corrupt_pointers() {
+    fn unused_space_corrupt_pointers_do_not_panic() {
+        extern crate std;
         let mut t = temp_page();
         let mut pm = page_mut_of(&mut t);
         pm.init(0);
         pm.set_pd_lower(pm.as_ref().pd_upper() + 1); // pd_lower > pd_upper
         drop(pm);
-        mask_unused_space(&mut t.0);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = mask_unused_space(&mut t.0);
+        }));
+        assert!(outcome.is_ok(), "mask_unused_space must raise an error, not panic");
+    }
+
+    #[test]
+    fn unused_space_corrupt_pointers_raise_c_error() {
+        let mut t = temp_page();
+        let mut pm = page_mut_of(&mut t);
+        pm.init(0);
+        let upper = pm.as_ref().pd_upper();
+        pm.set_pd_lower(upper + 1); // pd_lower > pd_upper
+        drop(pm);
+        let err = mask_unused_space(&mut t.0).unwrap_err();
+        assert_eq!(
+            err.message(),
+            alloc::format!(
+                "invalid page pd_lower {} pd_upper {} pd_special {}",
+                upper + 1,
+                upper,
+                BLCKSZ
+            )
+        );
+        assert_eq!(err.sqlstate(), ERRCODE_INTERNAL_ERROR);
     }
 
     #[test]

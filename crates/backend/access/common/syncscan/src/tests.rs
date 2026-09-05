@@ -59,7 +59,7 @@ fn setup() {
         s_lock_seams::update_spins_per_delay::set(|v| v);
         pg_sema_seams::pg_semaphore_create::set(|_| {});
         lwlock::CreateLWLocks(false).unwrap();
-        SyncScanShmemInit();
+        SyncScanShmemInit().unwrap();
     });
 }
 
@@ -79,4 +79,16 @@ fn get_report_roundtrip_and_crash_reset() {
     report_location(loc(42), 512).unwrap();
     assert_eq!(get_location(loc(41), 4096).unwrap(), 0);
     assert_eq!(get_location(loc(42), 4096).unwrap(), 512);
+}
+
+// syncscan.c:141 — SyncScanShmemInit registers the table via
+// ShmemInitStruct("Sync Scan Locations List", SizeOfScanLocations(SYNC_SCAN_NELEM), ...),
+// so the ShmemIndex (pg_shmem_allocations) carries the row with C's size:
+// offsetof(items) 16 + 20 * sizeof(ss_lru_item_t) 32 = 656 bytes.
+#[test]
+fn shmem_init_registers_scan_locations_in_shmem_index() {
+    let _g = serial();
+    setup();
+    let (_, found) = shmem::ShmemInitStruct("Sync Scan Locations List", 656).unwrap();
+    assert!(found, "Sync Scan Locations List is missing from the ShmemIndex");
 }

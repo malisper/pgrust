@@ -95,7 +95,7 @@ impl DrDebugtup {
 }
 
 // printatt (printtup.c:423).
-fn printatt(
+pub(crate) fn printatt(
     out: &mut impl Write,
     attribute_id: u32,
     typeinfo: &TupleDescData<'_>,
@@ -103,14 +103,18 @@ fn printatt(
     value: Option<&[u8]>,
 ) {
     let att = typeinfo.attr(i);
+    // C printf's the name and the value as raw cstrings: the bytes pass
+    // through verbatim whatever the database encoding (no lossy re-coding).
+    let _ = write!(out, "\t{:2}: ", attribute_id);
+    let _ = out.write_all(att.attname.name_str());
+    if let Some(v) = value {
+        let _ = out.write_all(b" = \"");
+        let _ = out.write_all(v);
+        let _ = out.write_all(b"\"");
+    }
     let _ = writeln!(
         out,
-        "\t{:2}: {}{}{}{}\t(typeid = {}, len = {}, typmod = {}, byval = {})",
-        attribute_id,
-        String::from_utf8_lossy(att.attname.name_str()),
-        if value.is_some() { " = \"" } else { "" },
-        value.map(|v| String::from_utf8_lossy(v).into_owned()).unwrap_or_default(),
-        if value.is_some() { "\"" } else { "" },
+        "\t(typeid = {}, len = {}, typmod = {}, byval = {})",
         att.atttypid,
         att.attlen,
         att.atttypmod,

@@ -815,7 +815,7 @@ pub fn spg_mask(pagedata: &mut [u8], _blkno: BlockNumber) -> PgResult<()> {
     bufmask::mask_page_lsn_and_checksum(pagedata);
     bufmask::mask_page_hint_bits(pagedata);
     if u16::from_ne_bytes([pagedata[12], pagedata[13]]) as usize >= SizeOfPageHeaderData {
-        bufmask::mask_unused_space(pagedata);
+        bufmask::mask_unused_space(pagedata)?;
     }
     Ok(())
 }

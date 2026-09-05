@@ -935,7 +935,7 @@ pub fn gin_mask(pagedata: &mut [u8], _blkno: BlockNumber) -> PgResult<()> {
     if opaque.flags & GIN_DELETED != 0 {
         bufmask::mask_page_content(pagedata);
     } else if u16::from_ne_bytes([pagedata[12], pagedata[13]]) as usize > SIZE_OF_PAGE_HEADER {
-        bufmask::mask_unused_space(pagedata);
+        bufmask::mask_unused_space(pagedata)?;
     }
     Ok(())
 }

@@ -324,7 +324,7 @@ pub fn brin_mask(pagedata: &mut [u8], _blkno: types_core::BlockNumber) -> PgResu
     drop(pm);
 
     if do_unused {
-        bufmask::mask_unused_space(pagedata);
+        bufmask::mask_unused_space(pagedata)?;
     }
 
     // BRIN_EVACUATE_PAGE is not WAL-logged; mask it.

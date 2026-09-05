@@ -154,7 +154,7 @@ pub fn CreateOrAttachShmemStructs(cfg: &ProcGlobalConfig) -> PgResult<()> {
     walsummarizer::WalSummarizerShmemInit();
     walreceiverfuncs::WalRcvShmemInit();
     pgarch::PgArchShmemInit();
-    syncscan::SyncScanShmemInit();
+    syncscan::SyncScanShmemInit()?;
     commands_async::AsyncShmemInit()?;
     waitevent::custom::WaitEventCustomShmemInit()?;
     aio_core::AioShmemInit()?;

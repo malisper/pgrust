@@ -7,7 +7,7 @@ use lwlock::{LWLockAcquire, LWLockConditionalAcquire, LWLockRelease, LW_EXCLUSIV
 use types_core::{BlockNumber, InvalidBlockNumber, BLCKSZ};
 use types_error::PgResult;
 use types_rel::RelationData;
-use types_storage::{RelFileLocator, RelFileLocatorEquals, SyncCell};
+use types_storage::{RelFileLocator, RelFileLocatorEquals};
 
 #[cfg(test)]
 mod tests;
@@ -39,8 +39,28 @@ struct ScanLocations {
     items: [SsLruItem; SYNC_SCAN_NELEM],
 }
 
-// Whole struct guarded by SyncScanLock.
-static SCAN_LOCATIONS: OnceLock<SyncCell<ScanLocations>> = OnceLock::new();
+// C: SizeOfScanLocations(SYNC_SCAN_NELEM) = offsetof(items) + n * sizeof(ss_lru_item_t)
+// for C's pointer-linked layout (head/tail pointers; items of two pointers +
+// RelFileLocator + BlockNumber). The ShmemIndex row (pg_shmem_allocations)
+// reports this C size; the u8-linked image below fits inside it.
+const C_SIZEOF_SS_LRU_ITEM: usize = 2 * 8 + 12 + 4;
+const C_SIZE_OF_SCAN_LOCATIONS: usize = 2 * 8 + SYNC_SCAN_NELEM * C_SIZEOF_SS_LRU_ITEM;
+const _: () = assert!(core::mem::size_of::<ScanLocations>() <= C_SIZE_OF_SCAN_LOCATIONS);
+const _: () = assert!(core::mem::align_of::<ScanLocations>() <= 8);
+
+// C: `static ss_scan_locations_t *scan_locations` — the ShmemInitStruct
+// allocation. Whole struct guarded by SyncScanLock.
+struct ShmemPtr(*mut ScanLocations);
+// SAFETY: cross-thread access serialized by SyncScanLock (crash reset runs
+// on the postmaster thread with no children).
+unsafe impl Sync for ShmemPtr {}
+unsafe impl Send for ShmemPtr {}
+impl ShmemPtr {
+    fn ptr(&self) -> *mut ScanLocations {
+        self.0
+    }
+}
+static SCAN_LOCATIONS: OnceLock<ShmemPtr> = OnceLock::new();
 
 fn sync_scan_lock() -> &'static lwlock::LWLock {
     lwlock::main_lock(SYNC_SCAN_LOCK_OFFSET)
@@ -65,16 +85,27 @@ fn boot_image() -> ScanLocations {
 }
 
 pub fn SyncScanShmemSize() -> usize {
-    core::mem::size_of::<ScanLocations>()
+    C_SIZE_OF_SCAN_LOCATIONS
 }
 
-pub fn SyncScanShmemInit() {
+// SyncScanShmemInit (syncscan.c:141): ShmemInitStruct("Sync Scan Locations
+// List", ...) registers the table in the ShmemIndex, so pg_shmem_allocations
+// lists it; a fresh segment (C: !IsUnderPostmaster) gets the boot image.
+pub fn SyncScanShmemInit() -> PgResult<()> {
     const {
         assert!(!core::mem::needs_drop::<ScanLocations>());
     }
+    let (raw, found) =
+        shmem_seams::shmem_init_struct::call("Sync Scan Locations List", SyncScanShmemSize())?;
+    debug_assert!(!found, "SyncScanShmemInit: segment already initialized");
+    let p = raw.cast::<ScanLocations>();
+    // SAFETY: a fresh, zeroed, cache-line-aligned ShmemIndex allocation of
+    // SyncScanShmemSize() >= size_of::<ScanLocations>() bytes (const-asserted).
+    unsafe { p.write(boot_image()) };
     SCAN_LOCATIONS
-        .set(SyncCell::new(boot_image()))
+        .set(ShmemPtr(p))
         .unwrap_or_else(|_| panic!("SyncScanShmemInit called twice"));
+    Ok(())
 }
 
 /// Crash-cycle reset to the boot image; postmaster thread, children dead

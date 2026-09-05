@@ -84,7 +84,7 @@ pub fn seq_redo(record: &mut XLogReaderState) -> PgResult<()> {
 /// fully WAL-logged on every change).
 pub fn seq_mask(page: &mut [u8], _blkno: types_core::BlockNumber) -> PgResult<()> {
     bufmask::mask_page_lsn_and_checksum(page);
-    bufmask::mask_unused_space(page);
+    bufmask::mask_unused_space(page)?;
     Ok(())
 }
 
