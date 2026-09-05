@@ -51,27 +51,44 @@ static DIRTY: Mutex<Vec<(ThreadId, Buffer, u32)>> = Mutex::new(Vec::new());
 /// (thread, level, message) per emitted log report.
 static LOGGED: Mutex<Vec<(ThreadId, i32, String)>> = Mutex::new(Vec::new());
 
+/// Process-wide MarkBufferDirty ledger entry for the calling thread (also
+/// fed by the b006 rig's seam closure when that rig installed the seam first).
+pub(crate) fn record_dirty(buf: Buffer) {
+    DIRTY.lock().unwrap().push((
+        std::thread::current().id(),
+        buf,
+        init_small::globals::CritSectionCount(),
+    ));
+}
+
+/// Process-wide XLogInsert ledger entry for the calling thread (also fed by
+/// the b006 rig's seam closure).
+pub(crate) fn record_wal(info: u8) {
+    WAL.lock().unwrap().push((
+        std::thread::current().id(),
+        info,
+        init_small::globals::CritSectionCount(),
+    ));
+}
+
 fn install() {
     fake_bufmgr::install();
     static INIT: Once = Once::new();
     INIT.call_once(|| {
+        // The b006 rig (rem_b006_tests::rig) records the same two seams into
+        // its thread-local ledgers; a seam is installed once per process, so
+        // whichever rig wins the race feeds BOTH recorders.
         if !bm::mark_buffer_dirty::is_installed() {
             bm::mark_buffer_dirty::set(|buf| {
-                DIRTY.lock().unwrap().push((
-                    std::thread::current().id(),
-                    buf,
-                    init_small::globals::CritSectionCount(),
-                ));
+                record_dirty(buf);
+                crate::rem_b006_tests::rig::record_dirty(buf);
                 Ok(())
             });
         }
         if !xloginsert_seams::xlog_insert_record::is_installed() {
             xloginsert_seams::xlog_insert_record::set(|_rmid, info, _flags, _data, _bufs| {
-                WAL.lock().unwrap().push((
-                    std::thread::current().id(),
-                    info,
-                    init_small::globals::CritSectionCount(),
-                ));
+                record_wal(info);
+                crate::rem_b006_tests::rig::record_wal(info)?;
                 Ok(0x1000)
             });
         }

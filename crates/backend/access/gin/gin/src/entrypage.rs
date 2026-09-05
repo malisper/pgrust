@@ -465,11 +465,12 @@ pub(crate) unsafe fn ginReadTuple<'mcx>(
             }
             ginPostingListDecodeAllSegments(core::slice::from_raw_parts(ptr, seglen), out)?;
             if out.len() - before != nipd {
-                panic!(
+                // ginentrypage.c:176 elog(ERROR): XX000, catchable.
+                return Err(Box::new(PgError::error(format!(
                     "number of items mismatch in GIN entry tuple, {} in tuple header, {} decoded",
                     nipd,
                     out.len() - before
-                );
+                ))));
             }
         }
     } else {
@@ -632,17 +633,18 @@ impl<'a, 'r, 's> EntryBtree<'a, 'r, 's> {
         }
     }
 
-    pub(crate) fn compare_to(&self, itup: ITup) -> i32 {
+    /// The key extraction can raise (ERRCODE_DATA_CORRUPTED from a crafted
+    /// varlena key, scratch OOM); the search callbacks propagate it.
+    pub(crate) fn compare_to(&self, itup: ITup) -> PgResult<i32> {
         let mut category = GIN_CAT_NORM_KEY;
         // SAFETY: pin held by the caller of the search callbacks.
         let (tup_attnum, key) = unsafe {
             (
                 gintuple_get_attrnum(self.state, itup),
-                gintuple_get_key(self.scratch, self.rel, self.state, itup, &mut category)
-                    .expect("gin key tupdesc scratch alloc"),
+                gintuple_get_key(self.scratch, self.rel, self.state, itup, &mut category)?,
             )
         };
-        crate::util::ginCompareAttEntries(
+        Ok(crate::util::ginCompareAttEntries(
             self.state,
             self.attnum,
             self.key,
@@ -650,7 +652,7 @@ impl<'a, 'r, 's> EntryBtree<'a, 'r, 's> {
             tup_attnum,
             key,
             category,
-        )
+        ))
     }
 
     /// entryIsEnoughSpace.
@@ -771,7 +773,8 @@ impl<'a, 'r, 's> EntryBtree<'a, 'r, 's> {
                 PageMut::from_raw(core::ptr::NonNull::new(target.as_mut_bytes().as_mut_ptr()).unwrap())
             };
             if pm.add_item(&itup[..size], InvalidOffsetNumber, 0).is_none() {
-                panic!("failed to add item to index page in \"{}\"", self.rel.name());
+                // ginentrypage.c:688 elog(ERROR): XX000, catchable.
+                return Err(failed_to_add_item(self.rel));
             }
             ptr += MAXALIGN(size);
         }
@@ -819,7 +822,7 @@ impl<'r> GinBt<'r> for EntryBtree<'_, 'r, '_> {
             } else {
                 let id = page.item_id(mid);
                 let itup = page.item_raw(id).0;
-                self.compare_to(itup)
+                self.compare_to(itup)?
             };
             if result == 0 {
                 frame.off = mid;
@@ -848,12 +851,12 @@ impl<'r> GinBt<'r> for EntryBtree<'_, 'r, '_> {
     }
 
     /// entryIsMoveRight.
-    fn is_move_right(&self, page: &PageRef<'_>) -> bool {
+    fn is_move_right(&self, page: &PageRef<'_>) -> PgResult<bool> {
         if crate::GinPageRightMost(&page_opaque(page)) {
-            return false;
+            return Ok(false);
         }
         let itup = get_rightmost_tuple(page);
-        self.compare_to(itup) > 0
+        Ok(self.compare_to(itup)? > 0)
     }
 
     /// entryFindChildPtr.
@@ -924,7 +927,9 @@ impl<'r> GinBt<'r> for EntryBtree<'_, 'r, '_> {
         let tuplen = unsafe { itup::index_tuple_size(payload.entry.as_ptr()) };
         let placed = page.add_item(&entry_bytes[..tuplen], off, 0);
         if placed != Some(off) {
-            panic!("failed to add item to index page in \"{}\"", self.rel.name());
+            // ginentrypage.c:570 elog(ERROR): XX000 (PANIC under the
+            // caller's critical section, as in C).
+            return Err(failed_to_add_item(self.rel));
         }
         bm::mark_buffer_dirty::call(buf)?;
 
@@ -999,10 +1004,21 @@ pub(crate) fn gin_entry_fill_root(
             core::slice::from_raw_parts(interior.as_ptr(), itup::index_tuple_size(interior.as_ptr()))
         };
         if pm.add_item(bytes, InvalidOffsetNumber, 0).is_none() {
-            panic!("failed to add item to index root page");
+            // ginentrypage.c:731 elog(ERROR): XX000, catchable.
+            return Err(Box::new(PgError::error("failed to add item to index root page")));
         }
     }
     Ok(())
+}
+
+/// ginentrypage.c:570/688 elog(ERROR, "failed to add item to index page in \"%s\"").
+#[cold]
+#[inline(never)]
+fn failed_to_add_item(rel: &Relation<'_>) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "failed to add item to index page in \"{}\"",
+        rel.name()
+    )))
 }
 
 #[cfg(test)]

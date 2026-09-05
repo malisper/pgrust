@@ -6,7 +6,7 @@ use ::bufmgr_seams as bm;
 use ::gin_vocab::*;
 use ::mcx::{Mcx, MemoryContext};
 use ::types_core::ForkNumber;
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult};
 use ::types_rel::Relation;
 
 use gin::build::{
@@ -56,7 +56,11 @@ pub fn ginbuild<'mcx>(
     indexInfo: &mut execindexing::IndexInfo<'mcx>,
 ) -> PgResult<IndexBuildResult> {
     if bm::relation_get_number_of_blocks_in_fork::call(index, ForkNumber::MAIN_FORKNUM)? != 0 {
-        panic!("index \"{}\" already contains data", index.name());
+        // gininsert.c:624 elog(ERROR): XX000, catchable.
+        return Err(Box::new(PgError::error(format!(
+            "index \"{}\" already contains data",
+            index.name()
+        ))));
     }
 
     let state = initGinState(index)?;
@@ -79,8 +83,11 @@ pub fn ginbuild<'mcx>(
     unsafe fn erase<'x>(a: BuildAccumulator<'x>) -> BuildAccumulator<'static> {
         unsafe { core::mem::transmute(a) }
     }
+    // Option so a round can take the accumulator out of the FnMut closure's
+    // capture, drop it, reset tmpCtx and rebuild it (C ginBuildCallback:
+    // MemoryContextReset(buildstate->tmpCtx); ginInitBA(&buildstate->accum)).
     // SAFETY: per erase contract below.
-    let mut accum = unsafe { erase(BuildAccumulator::new(tmp_ctx.mcx(), state)) };
+    let mut accum = Some(unsafe { erase(BuildAccumulator::new(tmp_ctx.mcx(), state)) });
 
     let reltuples = execindexing::table_index_build_scan(
         mcx,
@@ -97,17 +104,26 @@ pub fn ginbuild<'mcx>(
                     let attnum = (i + 1) as ::types_core::OffsetNumber;
                     let (entries, categories) =
                         ginExtractEntries(fmcx, &state, attnum, values[i], isnull[i])?;
-                    accum.insert_entries(tid, attnum, entries.as_slice(), categories.as_slice())?;
+                    accum.as_mut().expect("gin build accumulator").insert_entries(
+                        tid,
+                        attnum,
+                        entries.as_slice(),
+                        categories.as_slice(),
+                    )?;
                     indtuples += entries.len() as f64;
                 }
             }
 
-            if accum.allocated_memory
+            if accum.as_ref().expect("gin build accumulator").allocated_memory
                 >= init_small::globals::maintenance_work_mem() as usize * 1024
             {
-                accum.begin_scan()?;
+                // gininsert.c:474-494 ginBuildCallback: dump the accumulated
+                // entries, then MemoryContextReset(tmpCtx) + ginInitBA so a
+                // build's memory is bounded by maintenance_work_mem per round.
+                let mut round = accum.take().expect("gin build accumulator");
+                round.begin_scan()?;
                 loop {
-                    let Some((attnum, key, category, list)) = accum.next_entry() else {
+                    let Some((attnum, key, category, list)) = round.next_entry() else {
                         break;
                     };
                     check_for_interrupts()?;
@@ -123,14 +139,17 @@ pub fn ginbuild<'mcx>(
                         Some(&mut build_stats),
                     )?;
                 }
-                accum = unsafe { erase(BuildAccumulator::new(tmp_ctx.mcx(), state)) };
-                // C resets tmpCtx here; the arena grows across rounds
-                // instead (freed at build end).
+                drop(round);
+                tmp_ctx.reset();
+                // SAFETY: per erase contract above (fresh accumulator in the
+                // freshly reset tmp_ctx).
+                accum = Some(unsafe { erase(BuildAccumulator::new(tmp_ctx.mcx(), state)) });
             }
             Ok(())
         },
     )?;
 
+    let mut accum = accum.take().expect("gin build accumulator");
     accum.begin_scan()?;
     loop {
         let Some((attnum, key, category, list)) = accum.next_entry() else {

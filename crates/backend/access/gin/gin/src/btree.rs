@@ -13,6 +13,7 @@ use ::types_rel::Relation;
 use ::types_storage::bufpage::{PageRef, PageTemp};
 use ::types_tuple::itemptr::InvalidOffsetNumber;
 use ::xloginsert_seams::{XLogRegBuf, REGBUF_FORCE_IMAGE, REGBUF_STANDARD};
+use init_small::globals::{EndCriticalSection, StartCriticalSection};
 
 use crate::{
     check_for_interrupts, page_mut, page_opaque, page_ref, relation_needs_wal,
@@ -109,7 +110,7 @@ pub(crate) trait GinBt<'r> {
 
     fn find_child_page(&self, page: &PageRef<'_>, frame: &mut Frame) -> PgResult<BlockNumber>;
     fn get_leftmost_child(&self, page: &PageRef<'_>) -> PgResult<BlockNumber>;
-    fn is_move_right(&self, page: &PageRef<'_>) -> bool;
+    fn is_move_right(&self, page: &PageRef<'_>) -> PgResult<bool>;
     fn find_child_ptr(
         &self,
         page: &PageRef<'_>,
@@ -172,7 +173,10 @@ pub(crate) fn ginStepRight(buffer: Buffer, rel: &Relation<'_>, lockmode: i32) ->
     // SAFETY: pin + lock held on nextbuffer.
     let o = page_opaque(&unsafe { page_ref(nextbuffer) });
     if is_leaf != GinPageIsLeaf(&o) || is_data != GinPageIsData(&o) {
-        panic!("right sibling of GIN page is of different type");
+        // ginbtree.c:192 elog(ERROR): XX000, catchable.
+        return Err(Box::new(PgError::error(
+            "right sibling of GIN page is of different type",
+        )));
     }
     Ok(nextbuffer)
 }
@@ -242,7 +246,7 @@ pub(crate) fn ginFindLeafPage<'s, 'r, T: GinBt<'r>>(
             let page = unsafe { page_ref(buffer) };
             if btree.full_scan()
                 || stack.top().blkno == btree.root_blkno()
-                || !btree.is_move_right(&page)
+                || !btree.is_move_right(&page)?
             {
                 break;
             }
@@ -340,7 +344,8 @@ fn ginFindParents<'r, T: GinBt<'r>>(
         bm::lock_buffer::call(buffer, GIN_EXCLUSIVE)?;
         // SAFETY: pin + exclusive lock held.
         if GinPageIsLeaf(&page_opaque(&unsafe { page_ref(buffer) })) {
-            panic!("Lost path");
+            // ginbtree.c:256 elog(ERROR, "Lost path"): XX000, catchable.
+            return Err(Box::new(PgError::error("Lost path")));
         }
 
         // SAFETY: pin + exclusive lock held.
@@ -455,6 +460,9 @@ fn ginPlaceToPage<'r, T: GinBt<'r>>(
         GinPlace::NoWork => Ok(true),
         GinPlace::Insert => {
             let wal = relation_needs_wal(rel) && !btree.is_build();
+            // ginbtree.c:397 START_CRIT_SECTION(): from the page update
+            // through PageSetLSN, an error is a PANIC (torn/unlogged page).
+            StartCriticalSection();
             let bufdata0 = btree.exec_place_to_page(buffer, off, update_blkno)?;
 
             if childbuf != InvalidBuffer {
@@ -520,6 +528,8 @@ fn ginPlaceToPage<'r, T: GinBt<'r>>(
                     unsafe { page_mut(childbuf) }.set_lsn(recptr);
                 }
             }
+            // ginbtree.c:446 END_CRIT_SECTION().
+            EndCriticalSection();
             Ok(true)
         }
         GinPlace::Split(mut newlpage, mut newrpage) => {
@@ -607,6 +617,9 @@ fn ginPlaceToPage<'r, T: GinBt<'r>>(
                 }
             }
 
+            // ginbtree.c:564 START_CRIT_SECTION(): restoring the temp
+            // images over the real buffers through PageSetLSN.
+            StartCriticalSection();
             bm::mark_buffer_dirty::call(rbuffer)?;
             bm::mark_buffer_dirty::call(buffer)?;
 
@@ -667,6 +680,8 @@ fn ginPlaceToPage<'r, T: GinBt<'r>>(
                     }
                 }
             }
+            // ginbtree.c:631 END_CRIT_SECTION().
+            EndCriticalSection();
 
             bm::lock_buffer::call(rbuffer, GIN_UNLOCK)?;
             bm::release_buffer::call(rbuffer)?;
@@ -867,6 +882,59 @@ mod tests {
     fn chain_cycle_is_data_corrupted() {
         let err = Result::<(), _>::Err(corrupt_chain_cycle()).err().unwrap();
         assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+    }
+
+    // ginbtree.c:256 ginFindParents: descending from the root onto a leaf
+    // while re-finding a split child's parent is elog(ERROR, "Lost path")
+    // (XX000), never a backend panic
+    // (row a186-candidate-fp-gin-ginbtree-4b06539a6433aaa37888-1).
+    #[test]
+    fn find_parents_onto_leaf_root_is_lost_path_error() {
+        use crate::rem_b006_tests::rig::{self, KeyKind};
+        use ::gin_vocab::{GIN_CAT_NORM_KEY, GIN_LEAF};
+        use ::types_error::ERRCODE_INTERNAL_ERROR;
+
+        rig::install();
+        // The retained root frame is a leaf: no downlink chain can exist.
+        rig::set_pages(vec![rig::metapage(), rig::gin_page(GIN_LEAF)], 0);
+        let ctx = ::mcx::MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        let rel = rig::index_rel(mcx, KeyKind::Int4);
+        let state = rig::one_col_state(KeyKind::Int4);
+        let mut btree = crate::entrypage::EntryBtree::new(
+            &rel,
+            &state,
+            1,
+            ::datum::Datum::from_i32(1),
+            GIN_CAT_NORM_KEY,
+            mcx,
+        );
+        let root_buf = bm::read_buffer::call(&rel, 1).unwrap();
+        let mut stack = GinStack {
+            frames: mcx::vec_new_in(mcx),
+            top: 1,
+        };
+        stack.push(Frame {
+            blkno: 1,
+            buffer: root_buf,
+            off: InvalidOffsetNumber,
+            predictNumber: 1,
+            parent: NO_PARENT,
+        });
+        // A split child whose parent chain must be rebuilt from the root.
+        stack.push(Frame {
+            blkno: 7,
+            buffer: InvalidBuffer,
+            off: InvalidOffsetNumber,
+            predictNumber: 1,
+            parent: 0,
+        });
+
+        let err = ginFindParents(mcx, &rel, &mut btree, &mut stack, 1)
+            .err()
+            .expect("lost path must be a catchable error");
+        assert_eq!(err.message(), "Lost path");
+        assert_eq!(err.sqlstate(), ERRCODE_INTERNAL_ERROR);
     }
 }
 

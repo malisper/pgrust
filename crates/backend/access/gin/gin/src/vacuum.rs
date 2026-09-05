@@ -54,7 +54,7 @@ fn am_autovacuum_worker() -> bool {
     miscinit::GetMyBackendType() == ::types_core::BackendType::AutovacWorker
 }
 
-fn vacuum_delay_point() -> PgResult<()> {
+pub(crate) fn vacuum_delay_point() -> PgResult<()> {
     crate::check_for_interrupts()?;
     if init_small::globals::VacuumCostActive() {
         vacuum_seams::vacuum_delay_point::call(false)?;

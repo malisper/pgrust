@@ -12,6 +12,7 @@ use ::types_rel::Relation;
 use ::types_storage::lock::ExclusiveLock;
 use ::types_tuple::itemptr::{FirstOffsetNumber, ItemPointerData, ItemPointerEquals};
 use ::xloginsert_seams::{XLogRegBuf, REGBUF_STANDARD, REGBUF_WILL_INIT};
+use init_small::globals::{EndCriticalSection, StartCriticalSection};
 
 use crate::bulk::BuildAccumulator;
 use crate::entrypage::gintuple_get_key;
@@ -56,6 +57,14 @@ pub(crate) fn ginHeapTupleFastCollect<'s>(
 ) -> PgResult<()> {
     let (entries, categories) = ginExtractEntries(mcx, state, attnum, value, is_null)?;
 
+    // ginfast.c:503: protect against integer overflow in the collector's
+    // allocation calculations (MaxAllocSize / sizeof(IndexTuple)).
+    if collector.tuples.len() + entries.len()
+        > ::mcx::MAX_ALLOC_SIZE / core::mem::size_of::<*const u8>()
+    {
+        return Err(Box::new(PgError::error("too many entries for GIN index")));
+    }
+
     for (i, key) in entries.iter().enumerate() {
         let mut itup = crate::entrypage::GinFormTuple(
             mcx,
@@ -87,6 +96,8 @@ fn write_list_page(
     tuples: &[ItupBuf<'_>],
     rightlink: BlockNumber,
 ) -> PgResult<usize> {
+    // ginfast.c:71 START_CRIT_SECTION(): page init through UnlockReleaseBuffer.
+    StartCriticalSection();
     GinInitBuffer(buffer, GIN_LIST);
 
     // C writeListPage keeps `size` only for a size Assert not carried here.
@@ -100,7 +111,8 @@ fn write_list_page(
             let this_size = unsafe { itup::index_tuple_size(t.as_ptr()) };
             let bytes = unsafe { core::slice::from_raw_parts(t.as_ptr(), this_size) };
             if page.add_item(bytes, off, 0).is_none() {
-                panic!("failed to add item to index page in \"{}\"", rel.name());
+                // ginfast.c:89 elog(ERROR): XX000 (PANIC under the section).
+                return Err(failed_to_add_item(rel));
             }
             _size += this_size;
             off += 1;
@@ -149,7 +161,19 @@ fn write_list_page(
     };
     bm::lock_buffer::call(buffer, GIN_UNLOCK)?;
     bm::release_buffer::call(buffer)?;
+    // ginfast.c:139 END_CRIT_SECTION().
+    EndCriticalSection();
     Ok(freesize)
+}
+
+/// ginfast.c:89/390 elog(ERROR, "failed to add item to index page in \"%s\"").
+#[cold]
+#[inline(never)]
+fn failed_to_add_item(rel: &Relation<'_>) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "failed to add item to index page in \"{}\"",
+        rel.name()
+    )))
 }
 
 /// makeSublist.
@@ -255,6 +279,8 @@ pub(crate) fn ginHeapTupleFastInsert<'s>(
         // SAFETY: pin + exclusive lock held.
         let mut metadata = { meta_of(page_bytes(&unsafe { page_ref(metabuffer) })) };
         if metadata.head == InvalidBlockNumber {
+            // ginfast.c:302 START_CRIT_SECTION().
+            StartCriticalSection();
             metadata.head = sublist.head;
             metadata.tail = sublist.tail;
             metadata.tailFreeSize = sublist.tailFreeSize;
@@ -266,6 +292,8 @@ pub(crate) fn ginHeapTupleFastInsert<'s>(
 
             buffer = bm::read_buffer::call(rel, metadata.tail)?;
             bm::lock_buffer::call(buffer, GIN_EXCLUSIVE)?;
+            // ginfast.c:328 START_CRIT_SECTION().
+            StartCriticalSection();
             {
                 // SAFETY: pin + exclusive lock held.
                 let mut page = unsafe { page_mut(buffer) };
@@ -298,6 +326,8 @@ pub(crate) fn ginHeapTupleFastInsert<'s>(
 
         buffer = bm::read_buffer::call(rel, metadata.tail)?;
         bm::lock_buffer::call(buffer, GIN_EXCLUSIVE)?;
+        // ginfast.c:372 START_CRIT_SECTION().
+        StartCriticalSection();
         wal_ntuples = collector.tuples.len() as i32;
 
         {
@@ -319,7 +349,8 @@ pub(crate) fn ginHeapTupleFastInsert<'s>(
                 let tupsize = unsafe { itup::index_tuple_size(t.as_ptr()) };
                 let bytes = unsafe { core::slice::from_raw_parts(t.as_ptr(), tupsize) };
                 if page.add_item(bytes, off, 0).is_none() {
-                    panic!("failed to add item to index page in \"{}\"", rel.name());
+                    // ginfast.c:390 elog(ERROR): XX000 (PANIC under the section).
+                    return Err(failed_to_add_item(rel));
                 }
                 off += 1;
             }
@@ -408,6 +439,8 @@ pub(crate) fn ginHeapTupleFastInsert<'s>(
 
     bm::lock_buffer::call(metabuffer, GIN_UNLOCK)?;
     bm::release_buffer::call(metabuffer)?;
+    // ginfast.c:464 END_CRIT_SECTION() (ginInsertCleanup runs outside it).
+    EndCriticalSection();
 
     if need_cleanup {
         ginInsertCleanup(mcx, rel, state, false, true, false, None)?;
@@ -450,6 +483,9 @@ fn shift_list(
             s.pages_deleted += ndeleted as u32;
         }
 
+        // ginfast.c:601 START_CRIT_SECTION(): metapage + deleted pages are
+        // modified and logged together.
+        StartCriticalSection();
         let metadata = {
             // SAFETY: pin + exclusive lock held.
             let mut page = unsafe { page_mut(metabuffer) };
@@ -519,6 +555,8 @@ fn shift_list(
             bm::lock_buffer::call(*buf, GIN_UNLOCK)?;
             bm::release_buffer::call(*buf)?;
         }
+        // ginfast.c:665 END_CRIT_SECTION().
+        EndCriticalSection();
         if fill_fsm {
             for blk in &freespace[..ndeleted] {
                 freespace::RecordFreeIndexPage(rel, *blk)?;
@@ -661,6 +699,9 @@ pub fn ginInsertCleanup<'s>(
 
         process_pending_page(op_ctx.mcx(), rel, state, &mut accum, &mut ka, buffer, FirstOffsetNumber)?;
 
+        // ginfast.c:895 vacuum_delay_point(false).
+        crate::vacuum::vacuum_delay_point()?;
+
         // SAFETY: pin + share lock held.
         let opaque = page_opaque(&unsafe { page_ref(buffer) });
         let full_row = opaque.flags & GIN_LIST_FULLROW != 0;
@@ -678,6 +719,8 @@ pub fn ginInsertCleanup<'s>(
                 };
                 let dump_ctx = MemoryContext::new_bump("gin cleanup dump scratch");
                 ginEntryInsert(dump_ctx.mcx(), rel, state, attnum, key, category, list, None)?;
+                // ginfast.c:932 vacuum_delay_point(false).
+                crate::vacuum::vacuum_delay_point()?;
             }
 
             bm::lock_buffer::call(metabuffer, GIN_EXCLUSIVE)?;
@@ -730,6 +773,8 @@ pub fn ginInsertCleanup<'s>(
             bm::release_buffer::call(buffer)?;
         }
 
+        // ginfast.c:1005 vacuum_delay_point(false) before the next page.
+        crate::vacuum::vacuum_delay_point()?;
         buffer = bm::read_buffer::call(rel, blkno)?;
         bm::lock_buffer::call(buffer, GIN_SHARE)?;
     }
@@ -742,4 +787,39 @@ pub fn ginInsertCleanup<'s>(
         freespace_seams::free_space_map_vacuum_range::call(rel, 0, InvalidBlockNumber)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod rem_b006_tests {
+    use super::*;
+    use crate::rem_b006_tests::rig::{self, KeyKind};
+    use ::types_error::ERRCODE_INTERNAL_ERROR;
+
+    // ginfast.c:89 writeListPage: a tuple that PageAddItem cannot place is
+    // elog(ERROR, "failed to add item to index page in \"%s\"") (XX000),
+    // never a backend panic
+    // (row a186-candidate-fp-gin-ginfast-de52f8d19b3db27539cd-1).
+    #[test]
+    fn write_list_page_overflow_is_internal_error() {
+        rig::install();
+        rig::set_pages(vec![rig::metapage(), rig::blank_page()], 0);
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        let rel = rig::index_rel(mcx, KeyKind::Int4);
+        let state = rig::one_col_state(KeyKind::Int4);
+        // 450 x (16-byte tuple + 4-byte line pointer) > GinListPageSize:
+        // the 409th PageAddItem fails.
+        let tuples: Vec<ItupBuf<'_>> = (0..450i32)
+            .map(|k| rig::pending_tuple(mcx, &rel, &state, k, rig::tid(1, 1)))
+            .collect();
+        let buf = bm::read_buffer::call(&rel, 1).unwrap();
+
+        let res = write_list_page(&rel, buf, &tuples, InvalidBlockNumber);
+        // The error escapes writeListPage's critical section (C: PANIC via
+        // errstart); close it here so the thread is reusable.
+        init_small::globals::SetCritSectionCount(0);
+        let err = res.err().expect("overflowing list page must be a catchable error");
+        assert_eq!(err.message(), "failed to add item to index page in \"t_gin\"");
+        assert_eq!(err.sqlstate(), ERRCODE_INTERNAL_ERROR);
+    }
 }

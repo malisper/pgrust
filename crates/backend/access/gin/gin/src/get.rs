@@ -292,7 +292,7 @@ fn start_scan_entry(
         entry.isFinished = true;
 
         if entry.isPartialMatch || entry.queryCategory == GIN_CAT_EMPTY_QUERY {
-            let (_, off) = crate::insert::entry_locate_leaf_pub(&btree, stack.top().buffer);
+            let (_, off) = crate::insert::entry_locate_leaf_pub(&btree, stack.top().buffer)?;
             stack.top_mut().off = off;
             if !collect_match_bitmap(rel, state, kcx, &mut stack, entry, snapshot)? {
                 entry.matchIterator = None;
@@ -308,7 +308,7 @@ fn start_scan_entry(
                 entry.isFinished = false;
             }
         } else {
-            let (found, off) = crate::insert::entry_locate_leaf_pub(&btree, stack.top().buffer);
+            let (found, off) = crate::insert::entry_locate_leaf_pub(&btree, stack.top().buffer)?;
             stack.top_mut().off = off;
             if found {
                 let buffer = stack.top().buffer;

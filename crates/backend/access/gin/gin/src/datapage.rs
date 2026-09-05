@@ -5,7 +5,8 @@ use ::bufmgr_seams as bm;
 use ::gin_vocab::*;
 use ::mcx::{Mcx, PgVec};
 use ::types_core::{BlockNumber, Buffer, InvalidBlockNumber, OffsetNumber, BLCKSZ};
-use ::types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED};
+use ::types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_FEATURE_NOT_SUPPORTED};
+use init_small::globals::{EndCriticalSection, StartCriticalSection};
 use ::types_rel::Relation;
 use ::types_storage::bufpage::{PageRef, PageTemp};
 use ::types_tuple::itemptr::{FirstOffsetNumber, InvalidOffsetNumber, ItemPointerData};
@@ -196,6 +197,22 @@ pub(crate) fn gin_page_delete_posting_item(bytes: &mut [u8], offset: OffsetNumbe
     set_data_page_data_size(bytes, opaque.maxoff as usize * 10);
 }
 
+/// The pre-9.4 uncompressed posting-tree leaf lane (gindatapage.c:139-199
+/// dataLeafPageGetUncompressed, reached only through a pg_upgrade lineage
+/// pgrust does not carry) is unported: a typed refusal, never a panic.
+#[cold]
+#[inline(never)]
+fn unsupported_uncompressed_leaf() -> Box<PgError> {
+    Box::new(
+        PgError::error(
+            "uncompressed (pre-9.4 format) GIN posting-tree leaf pages are not supported"
+                .to_string(),
+        )
+        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
+        .with_hint("Rebuild the index with REINDEX."),
+    )
+}
+
 /// GinDataLeafPageGetItems: append page TIDs (segments past advancePast).
 pub fn gin_data_leaf_page_get_items(
     bytes: &[u8],
@@ -208,7 +225,7 @@ pub fn gin_data_leaf_page_get_items(
         // gin_xlog/src/lib.rs:152 redo create-ptree) and there is no pg_upgrade
         // lineage; C keeps dataLeafPageGetUncompressed (gindatapage.c:139-199) only
         // for pg_upgrade'd pre-9.4 pages, so an uncompressed leaf here is on-disk corruption.
-        panic!("uncompressed GIN posting-tree leaf: on-disk corruption, pgrust stamps every leaf GIN_COMPRESSED (datapage.rs:1171, datapage.rs:658-659)");
+        return Err(unsupported_uncompressed_leaf());
     }
     let all = data_leaf_posting_list_checked(bytes)?;
     let mut off = 0usize;
@@ -240,7 +257,7 @@ pub(crate) fn gin_data_leaf_page_get_items_to_tbm(
         // gin_xlog/src/lib.rs:152 redo create-ptree) and there is no pg_upgrade
         // lineage; C keeps dataLeafPageGetUncompressed (gindatapage.c:139-199) only
         // for pg_upgrade'd pre-9.4 pages, so an uncompressed leaf here is on-disk corruption.
-        panic!("uncompressed GIN posting-tree leaf: on-disk corruption, pgrust stamps every leaf GIN_COMPRESSED (datapage.rs:1171, datapage.rs:658-659)");
+        return Err(unsupported_uncompressed_leaf());
     }
     crate::postinglist::ginPostingListDecodeAllSegmentsToTbm(
         mcx,
@@ -331,7 +348,7 @@ fn disassemble_leaf(bytes: &[u8]) -> PgResult<DisassembledLeaf> {
         // gin_xlog/src/lib.rs:152 redo create-ptree) and there is no pg_upgrade
         // lineage; C keeps dataLeafPageGetUncompressed (gindatapage.c:139-199) only
         // for pg_upgrade'd pre-9.4 pages, so an uncompressed leaf here is on-disk corruption.
-        panic!("uncompressed GIN posting-tree leaf: on-disk corruption, pgrust stamps every leaf GIN_COMPRESSED (datapage.rs:1171, datapage.rs:658-659)");
+        return Err(unsupported_uncompressed_leaf());
     }
     // Bounds-check pd_lower and the whole segment chain before recording any
     // (ptr, seg_size) extent: a crafted segment size would otherwise drive an
@@ -677,7 +694,7 @@ fn compute_leaf_recompress_wal_data(leaf: &mut DisassembledLeaf, new_items: &[It
 }
 
 /// dataPlaceToPageLeafRecompress over the buffer page.
-fn data_place_to_page_leaf_recompress(buf: Buffer, leaf: &DisassembledLeaf) {
+fn data_place_to_page_leaf_recompress(buf: Buffer, leaf: &DisassembledLeaf) -> PgResult<()> {
     // SAFETY: pin + exclusive lock held.
     let mut page = unsafe { page_mut(buf) };
     // SAFETY: borrow confined to this function.
@@ -688,7 +705,7 @@ fn data_place_to_page_leaf_recompress(buf: Buffer, leaf: &DisassembledLeaf) {
         // gin_xlog/src/lib.rs:152 redo create-ptree) and there is no pg_upgrade
         // lineage; C keeps dataLeafPageGetUncompressed (gindatapage.c:139-199) only
         // for pg_upgrade'd pre-9.4 pages, so an uncompressed leaf here is on-disk corruption.
-        panic!("uncompressed GIN posting-tree leaf: on-disk corruption, pgrust stamps every leaf GIN_COMPRESSED (datapage.rs:1171, datapage.rs:658-659)");
+        return Err(unsupported_uncompressed_leaf());
     }
     let mut ptr = GinDataPageDataOffset;
     let mut newsize = 0usize;
@@ -714,6 +731,7 @@ fn data_place_to_page_leaf_recompress(buf: Buffer, leaf: &DisassembledLeaf) {
     }
     debug_assert!(newsize <= GinDataPageMaxDataSize);
     set_data_page_data_size(bytes, newsize);
+    Ok(())
 }
 
 /// dataPlaceToPageLeafSplit into two temp images.
@@ -885,7 +903,10 @@ impl<'a, 'r, 's> DataBtree<'a, 'r, 's> {
         // ItemPointerIsValid: some items did not fit after the split.
         if remaining.ip_posid != 0 {
             if !append || ginCompareItemPointers(&max_old_item, &remaining) >= 0 {
-                panic!("could not split GIN page; all old items didn't fit");
+                // gindatapage.c:580 elog(ERROR): XX000, catchable.
+                return Err(Box::new(PgError::error(
+                    "could not split GIN page; all old items didn't fit",
+                )));
             }
             let mut i = 0usize;
             while i < maxitems {
@@ -895,7 +916,10 @@ impl<'a, 'r, 's> DataBtree<'a, 'r, 's> {
                 i += 1;
             }
             if i == 0 {
-                panic!("could not split GIN page; no new items fit");
+                // gindatapage.c:589 elog(ERROR): XX000, catchable.
+                return Err(Box::new(PgError::error(
+                    "could not split GIN page; no new items fit",
+                )));
             }
             maxitems = i;
         }
@@ -1017,16 +1041,16 @@ impl<'r> GinBt<'r> for DataBtree<'_, 'r, '_> {
     }
 
     /// dataIsMoveRight.
-    fn is_move_right(&self, page: &PageRef<'_>) -> bool {
+    fn is_move_right(&self, page: &PageRef<'_>) -> PgResult<bool> {
         let bytes = page_bytes(page);
         let opaque = opaque_of(bytes);
         if GinPageRightMost(&opaque) {
-            return false;
+            return Ok(false);
         }
         if GinPageIsDeleted(&opaque) {
-            return true;
+            return Ok(true);
         }
-        ginCompareItemPointers(&self.itemptr, &data_page_right_bound(bytes)) > 0
+        Ok(ginCompareItemPointers(&self.itemptr, &data_page_right_bound(bytes)) > 0)
     }
 
     /// dataFindChildPtr.
@@ -1102,7 +1126,7 @@ impl<'r> GinBt<'r> for DataBtree<'_, 'r, '_> {
         let is_leaf = { GinPageIsLeaf(&page_opaque(&unsafe { page_ref(buf) })) };
         if is_leaf {
             let leaf = self.ws.take().expect("leaf workspace");
-            data_place_to_page_leaf_recompress(buf, &leaf);
+            data_place_to_page_leaf_recompress(buf, &leaf)?;
             bm::mark_buffer_dirty::call(buf)?;
             if !leaf.walinfo.is_empty() {
                 Ok(vec![leaf.walinfo])
@@ -1272,6 +1296,9 @@ pub(crate) fn createPostingTree<'s>(
         blkno,
     )?;
 
+    // gindatapage.c:1834 START_CRIT_SECTION(): PageRestoreTempPage through
+    // UnlockReleaseBuffer.
+    StartCriticalSection();
     // PageRestoreTempPage.
     bm::overwrite_buffer_page::call(buffer, tmppage.as_bytes());
     bm::mark_buffer_dirty::call(buffer)?;
@@ -1302,6 +1329,8 @@ pub(crate) fn createPostingTree<'s>(
 
     bm::lock_buffer::call(buffer, crate::GIN_UNLOCK)?;
     bm::release_buffer::call(buffer)?;
+    // gindatapage.c:1859 END_CRIT_SECTION().
+    EndCriticalSection();
 
     if let Some(stats) = buildStats.as_deref_mut() {
         stats.nDataPages += 1;
@@ -1388,7 +1417,10 @@ pub(crate) fn ginVacuumPostingTreeLeaf<'s>(
             let ncleaned = cleaned.len();
             let (packed, npacked) = ginCompressPostingList(scratch, &cleaned, old_seg_size)?;
             if npacked != ncleaned {
-                panic!("could not fit vacuumed posting list");
+                // gindatapage.c:782 elog(ERROR): XX000, catchable.
+                return Err(Box::new(PgError::error(
+                    "could not fit vacuumed posting list",
+                )));
             }
             seg.seg = Some(owned_seg(scratch, packed));
             seg.items = Some(owned_items(scratch, cleaned));
@@ -1427,7 +1459,10 @@ pub(crate) fn ginVacuumPostingTreeLeaf<'s>(
         compute_leaf_recompress_wal_data(&mut leaf, &[]);
     }
 
-    data_place_to_page_leaf_recompress(buffer, &leaf);
+    // gindatapage.c:845 START_CRIT_SECTION(): apply the changes to the page
+    // and log them.
+    StartCriticalSection();
+    data_place_to_page_leaf_recompress(buffer, &leaf)?;
     bm::mark_buffer_dirty::call(buffer)?;
 
     if need_wal {
@@ -1446,6 +1481,8 @@ pub(crate) fn ginVacuumPostingTreeLeaf<'s>(
         // SAFETY: pin + exclusive lock held.
         unsafe { page_mut(buffer) }.set_lsn(recptr);
     }
+    // gindatapage.c:862 END_CRIT_SECTION().
+    EndCriticalSection();
     Ok(())
 }
 

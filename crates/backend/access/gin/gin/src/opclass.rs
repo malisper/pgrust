@@ -717,9 +717,11 @@ fn shim_tri_consistent(
     for &e in &maybe_entries[..nmaybe] {
         local[e] = GIN_FALSE;
     }
-    let (first, _rc) = call(&local)?;
+    // ginlogic.c:184: recheck = key->recheckCurItem of the all-FALSE probe,
+    // OR-ed with every later combination.
+    let (first, first_rc) = call(&local)?;
     let cur_result = first;
-    let mut recheck = false;
+    let mut recheck = first_rc;
     loop {
         let mut i = 0usize;
         while i < nmaybe {
@@ -822,4 +824,37 @@ pub fn gincost_extract_query(
     let out = extract_query(scratch.mcx(), &col, query, strategy)?;
     let npartial = out.partial_match.iter().filter(|&&p| p).count() as i32;
     Ok((out.entries.len() as i32, npartial, out.search_mode))
+}
+
+#[cfg(test)]
+mod rem_b006_tests {
+    use super::*;
+
+    // ginlogic.c:184 shimTriConsistentFn: `recheck = key->recheckCurItem`
+    // after the all-FALSE probe, then OR-ed with every other combination.
+    // A candidate that matches only-with-recheck when the MAYBE entries are
+    // absent, and unconditionally when present, is GIN_MAYBE in C (heap
+    // recheck forced); dropping the first probe's recheck yields GIN_TRUE
+    // and lets non-matching rows through
+    // (row a186-candidate-fp-gin-b1-ebf7e9fc257bc3bc98ad-1).
+    #[test]
+    fn shim_tri_consistent_keeps_recheck_of_all_false_probe() {
+        let check = [GIN_MAYBE, GIN_TRUE];
+        let calls = std::cell::Cell::new(0u32);
+        let consistent = |local: &[i8]| -> PgResult<(bool, bool)> {
+            calls.set(calls.get() + 1);
+            // Match either way; recheck only when the MAYBE entry is absent.
+            Ok((true, local[0] == GIN_FALSE))
+        };
+        let res = shim_tri_consistent(&check, 2, &consistent).unwrap();
+        assert_eq!(calls.get(), 2, "both combinations of the one MAYBE entry are probed");
+        assert_eq!(res, GIN_MAYBE, "TRUE with recheck from the all-FALSE probe is GIN_MAYBE");
+
+        // Control: no combination needs a recheck -> GIN_TRUE.
+        let plain = |_local: &[i8]| -> PgResult<(bool, bool)> { Ok((true, false)) };
+        assert_eq!(shim_tri_consistent(&check, 2, &plain).unwrap(), GIN_TRUE);
+        // Control: the result flips across combinations -> GIN_MAYBE.
+        let flip = |local: &[i8]| -> PgResult<(bool, bool)> { Ok((local[0] == GIN_TRUE, false)) };
+        assert_eq!(shim_tri_consistent(&check, 2, &flip).unwrap(), GIN_MAYBE);
+    }
 }

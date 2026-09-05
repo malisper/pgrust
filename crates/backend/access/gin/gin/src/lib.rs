@@ -291,3 +291,5 @@ mod tests;
 mod scanver_tests;
 #[cfg(test)]
 mod rem_b084_tests;
+#[cfg(test)]
+mod rem_b006_tests;

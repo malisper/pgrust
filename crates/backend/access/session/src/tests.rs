@@ -1137,7 +1137,15 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      Cell<*mut FakePage> one-buffer fake pool behind the
     //      buffer_get_page seam for the hash_mask / replay witnesses
     //      (#[cfg(test)] module; same class as 67).
-    assert_eq!(count_tree(crates), 588, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+        // 589, 18.6 conformance audit (2026-09-04), b006 gin remediation: one
+    //   test-only source —
+    //   69. access/gin/gin/src/rem_b006_tests.rs NBLOCKS/NALLOC/WAL/WAL_FAIL/
+    //      DIRTY/EXTENDED (one thread_local! block) — fake-buffer + WAL-record
+    //      fixture behind the bufmgr/xloginsert seams for the b006 critical-
+    //      section / cleanup-delay-point / elog(ERROR)-arm witnesses (unit
+    //      harness fixture; counted by the tree census, never product code —
+    //      same class as 43/45/46/50/60).
+    assert_eq!(count_tree(crates), 589, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

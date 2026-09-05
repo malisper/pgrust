@@ -249,7 +249,7 @@ fn buildFreshLeafTuple<'s>(
 pub(crate) fn entry_locate_leaf_pub(
     btree: &EntryBtree<'_, '_, '_>,
     buffer: Buffer,
-) -> (bool, ::types_core::OffsetNumber) {
+) -> PgResult<(bool, ::types_core::OffsetNumber)> {
     use ::types_tuple::itemptr::FirstOffsetNumber;
     // SAFETY: pin + lock held.
     let page = unsafe { page_ref(buffer) };
@@ -258,23 +258,23 @@ pub(crate) fn entry_locate_leaf_pub(
     let mut low = FirstOffsetNumber;
     let mut high = page.max_offset_number();
     if high < low {
-        return (false, FirstOffsetNumber);
+        return Ok((false, FirstOffsetNumber));
     }
     high += 1;
     while high > low {
         let mid = low + (high - low) / 2;
         let id = page.item_id(mid);
         let itup = page.item_raw(id).0;
-        let result = btree.compare_to(itup);
+        let result = btree.compare_to(itup)?;
         if result == 0 {
-            return (true, mid);
+            return Ok((true, mid));
         } else if result > 0 {
             low = mid + 1;
         } else {
             high = mid;
         }
     }
-    (false, high)
+    Ok((false, high))
 }
 
 /// ginEntryInsert.
@@ -294,7 +294,7 @@ pub fn ginEntryInsert<'s>(
     let mut stack = ginFindLeafPage(mcx, rel, &mut btree, false, false)?;
     let buffer = stack.top().buffer;
 
-    let (found, off) = entry_locate_leaf_pub(&btree, buffer);
+    let (found, off) = entry_locate_leaf_pub(&btree, buffer)?;
     stack.top_mut().off = off;
 
     let mut is_delete = false;
