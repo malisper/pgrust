@@ -1740,10 +1740,12 @@ fn instrument_node<'mcx>(
     if let PlanStateNode::Agg(aps) = &mut inner {
         aps.agg.instr_idx = Some(idx as u32);
     }
-    // InstrCountFiltered1 target for the top-level WindowAgg qual
-    // (nodeWindowAgg.c:2467).
-    if let PlanStateNode::WindowAgg(w) = &mut inner {
-        w.state.instr_idx = Some(idx as u32);
+    // InstrCountFiltered1 targets for the Group HAVING qual (nodeGroup.c) and
+    // the top-window qual (nodeWindowAgg.c).
+    match &mut inner {
+        PlanStateNode::Group(g) => g.state.instr_idx = Some(idx as u32),
+        PlanStateNode::WindowAgg(w) => w.state.instr_idx = Some(idx as u32),
+        _ => {}
     }
     // InstrCountTuples2 / InstrCountFiltered1 target for the ON CONFLICT arms
     // (nodeModifyTable.c:1156/1178/2886; explain's "Conflicting Tuples" and
@@ -3528,6 +3530,23 @@ fn instr_extra_of<'mcx>(
         }
         PlanStateNode::CteScan(cs) => {
             ::nodectescan::storage_stats(cs, estate).map(InstrExtra::Storage)
+        }
+        PlanStateNode::TableFuncScan(ts) => {
+            ::nodetablefuncscan::storage_stats(ts).map(InstrExtra::Storage)
+        }
+        // show_recursive_union_info (explain.c:3561-3575): the storage type
+        // of whichever of the two tuplestores used more, the size their sum.
+        PlanStateNode::RecursiveUnion(ru) => {
+            let param = ru.state.plan.wtParam as usize;
+            estate.worktable_shared_slot(param).as_mut().map(|shared| {
+                let temp = shared.working_table.get_stats();
+                let mut max = shared.intermediate_table.get_stats();
+                if temp.max_space > max.max_space {
+                    max.space_type = temp.space_type;
+                }
+                max.max_space += temp.max_space;
+                InstrExtra::Storage(max)
+            })
         }
         PlanStateNode::Memoize(m) => {
             Some(InstrExtra::Memoize(::nodememoize::memoize_stats(&m.state)))

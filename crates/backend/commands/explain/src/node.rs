@@ -1117,6 +1117,9 @@ pub fn ExplainNode<'mcx>(
             if node.node_tag() == NodeTag::T_CteScan {
                 show_ctescan_info(node, es);
             }
+            if node.node_tag() == NodeTag::T_TableFuncScan {
+                show_table_func_scan_info(node, es);
+            }
         }
         NodeTag::T_ForeignScan => {
             show_scan_qual(&plan.qual, "Filter", node, ancestors, es)?;
@@ -1299,7 +1302,9 @@ pub fn ExplainNode<'mcx>(
                 show_one_time_filter(q, node, ancestors, es)?;
             }
             show_scan_qual(&plan.qual, "Filter", node, ancestors, es)?;
-            filtered_count_gap(&plan.qual, es);
+            if !plan.qual.is_nil() {
+                show_instrumentation_count("Rows Removed by Filter", 1, &instrument, es);
+            }
         }
         NodeTag::T_Sort => {
             show_sort_keys(node, ancestors, es)?;
@@ -1333,7 +1338,9 @@ pub fn ExplainNode<'mcx>(
         NodeTag::T_Group => {
             show_group_keys(node, ancestors, es)?;
             show_upper_qual(&plan.qual, "Filter", node, ancestors, es)?;
-            filtered_count_gap(&plan.qual, es);
+            if !plan.qual.is_nil() {
+                show_instrumentation_count("Rows Removed by Filter", 1, &instrument, es);
+            }
         }
         NodeTag::T_Material => {
             show_material_info(node, es);
@@ -1351,11 +1358,14 @@ pub fn ExplainNode<'mcx>(
         // extra without ANALYZE.
         NodeTag::T_Unique | NodeTag::T_Limit | NodeTag::T_Append | NodeTag::T_SetOp
         | NodeTag::T_LockRows | NodeTag::T_BitmapAnd | NodeTag::T_BitmapOr
-        | NodeTag::T_ProjectSet | NodeTag::T_RecursiveUnion => {}
-        // show_modifytable_info: FDW/ON CONFLICT legs absent (asserted at the
-        // name arm). C reads mtstate->resultRelInfo; the filter below rebuilds
-        // it from the plan list minus initially-pruned rels, keeping the first
-        // if all were pruned (nodeModifyTable.c:4676).
+        | NodeTag::T_ProjectSet => {}
+        NodeTag::T_RecursiveUnion => {
+            show_recursive_union_info(node, es);
+        }
+        // show_modifytable_info (explain.c:4520-4766). C reads
+        // mtstate->resultRelInfo; the filter below rebuilds it from the plan
+        // list minus initially-pruned rels, keeping the first if all were
+        // pruned (nodeModifyTable.c:4676).
         NodeTag::T_ModifyTable => {
             let mt = node.as_modify_table().unwrap();
             let unpruned = |rti: i32| -> bool {
@@ -1393,6 +1403,9 @@ pub fn ExplainNode<'mcx>(
                 types_nodes::CmdType::CMD_MERGE => ("Merge", "Foreign Merge"),
                 _ => ("???", "Foreign ???"),
             };
+            if labeltargets {
+                ExplainOpenGroup("Target Tables", Some("Target Tables"), false, es);
+            }
             for &(i, rti) in &result_rtis {
                 let (is_foreign, relid) = {
                     let rte = es
@@ -1408,11 +1421,19 @@ pub fn ExplainNode<'mcx>(
                     )
                 };
                 if labeltargets {
-                    crate::format::ExplainIndentText(es);
-                    append!(es, "{}", if is_foreign { fopname } else { opname });
+                    // Open a group for this target (explain.c:4593).
+                    ExplainOpenGroup("Target Table", None, true, es);
+                    // In text mode, decorate each target with the operation
+                    // type so ExplainTargetRel's " on foo" reads nicely.
+                    if es.format == EXPLAIN_FORMAT_TEXT {
+                        crate::format::ExplainIndentText(es);
+                        append!(es, "{}", if is_foreign { fopname } else { opname });
+                    }
                     ExplainTargetRel(rti as types_core::Index, es)?;
-                    append!(es, "\n");
-                    es.indent += 1;
+                    if es.format == EXPLAIN_FORMAT_TEXT {
+                        append!(es, "\n");
+                        es.indent += 1;
+                    }
                 }
                 // ExplainForeignModify (skipped for direct-modify subplans).
                 if is_foreign && !mt.fdwDirectModifyPlans.is_member(i as i32) {
@@ -1456,10 +1477,14 @@ pub fn ExplainNode<'mcx>(
                     }
                 }
                 if labeltargets {
-                    es.indent -= 1;
+                    // Undo the indentation we added in text format.
+                    if es.format == EXPLAIN_FORMAT_TEXT {
+                        es.indent -= 1;
+                    }
+                    ExplainCloseGroup("Target Table", None, true, es);
                 }
             }
-            // ON CONFLICT stanza (show_modifytable_info, explain.c:4632).
+            // ON CONFLICT stanza (show_modifytable_info, explain.c:4674).
             if mt.onConflictAction != 0 {
                 let resolution = if mt.onConflictAction
                     == types_nodes::OnConflictAction::ONCONFLICT_NOTHING as u32
@@ -1578,6 +1603,9 @@ pub fn ExplainNode<'mcx>(
                         crate::format::ExplainPropertyFloat("Tuples Skipped", None, skipped, 0, es);
                     }
                 }
+            }
+            if labeltargets {
+                ExplainCloseGroup("Target Tables", Some("Target Tables"), false, es);
             }
         }
         _ => unreachable!(),
@@ -2836,8 +2864,14 @@ fn show_sortorder_options(
     if collation != types_core::primitive::InvalidOid
         && collation != lsyscache::typ::get_typcollation(sortcoltype)?
     {
-        let collname = ruleutils::generate_collation_name(buf.allocator(), collation)?;
-        write!(buf, " COLLATE {collname}").expect("PgString write");
+        // explain.c:2849-2853: get_collation_name (bare, never
+        // schema-qualified) + quote_identifier; a missing collation is
+        // elog(ERROR, "cache lookup failed for collation %u").
+        let collname = lsyscache::get_collation_name(buf.allocator(), collation)?
+            .ok_or_else(|| {
+                Box::new(PgError::error(format!("cache lookup failed for collation {collation}")))
+            })?;
+        write!(buf, " COLLATE {}", quote_identifier(collname.as_str())).expect("PgString write");
     }
     let reverse = if sort_operator == typentry.lt_opr() {
         false
@@ -3020,15 +3054,20 @@ fn show_tidbitmap_info<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) {
             if es.workers_state.is_some() {
                 explain_open_worker(n as usize, es);
             }
-            crate::format::ExplainIndentText(es);
-            append!(es, "Heap Blocks:");
-            if si.exact_pages > 0 {
-                append!(es, " exact={}", si.exact_pages);
+            if es.format == EXPLAIN_FORMAT_TEXT {
+                crate::format::ExplainIndentText(es);
+                append!(es, "Heap Blocks:");
+                if si.exact_pages > 0 {
+                    append!(es, " exact={}", si.exact_pages);
+                }
+                if si.lossy_pages > 0 {
+                    append!(es, " lossy={}", si.lossy_pages);
+                }
+                append!(es, "\n");
+            } else {
+                crate::format::ExplainPropertyUInteger("Exact Heap Blocks", None, si.exact_pages, es);
+                crate::format::ExplainPropertyUInteger("Lossy Heap Blocks", None, si.lossy_pages, es);
             }
-            if si.lossy_pages > 0 {
-                append!(es, " lossy={}", si.lossy_pages);
-            }
-            append!(es, "\n");
             if es.workers_state.is_some() {
                 explain_close_worker(n as usize, es);
             }
@@ -3156,18 +3195,19 @@ fn show_ctescan_info<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) {
     }
 }
 
-// show_instrumentation_count's nfiltered read for join/upper nodes: unlike
-// the ExecScan-driven scan family (execScan.h), these count via their own
-// node-specific InstrCountFiltered1/2 calls (e.g. nodeNestloop.c:246,
-// nodeHashjoin.c:596, nodeMergejoin.c:837, nodeAgg.c:1386, nodeGroup.c:96/149),
-// which aren't ported yet, so printing would be
-// silently wrong whenever a filter removed rows.
-fn filtered_count_gap(qual: &NodeList<'_>, es: &ExplainState<'_>) {
-    if es.analyze && !qual.is_nil() {
-        node_gap(
-            "show_instrumentation_count",
-            "Rows Removed by Filter needs nfiltered counting (InstrCountFiltered, execScan.c)",
-        );
+// show_table_func_scan_info (explain.c:3532): nothing while tupstore == NULL.
+fn show_table_func_scan_info<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) {
+    if let Some(stats) = tuplestore_stats(node, es) {
+        show_storage_info(stats, es);
+    }
+}
+
+// show_recursive_union_info (explain.c:3551): the executor folds the working
+// and intermediate tuplestores the way C does (type of the larger, sizes
+// summed).
+fn show_recursive_union_info<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) {
+    if let Some(stats) = tuplestore_stats(node, es) {
+        show_storage_info(stats, es);
     }
 }
 

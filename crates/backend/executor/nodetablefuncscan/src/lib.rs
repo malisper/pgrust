@@ -608,6 +608,14 @@ pub fn exec_rescan_table_func_scan<'mcx>(
     Ok(())
 }
 
+/// show_table_func_scan_info's tuplestore read (explain.c:3537-3542); None
+/// while `tupstore == NULL` (nothing fetched yet, or dropped by a rescan).
+pub fn storage_stats(
+    node: &mut TableFuncScanState<'_>,
+) -> Option<types_core::instrument::TuplestoreInstrumentation> {
+    node.tstore.as_mut().map(Tuplestore::get_stats)
+}
+
 /// Changed-params rescan: drop the tuplestore; the next fetch re-evaluates.
 pub fn exec_rescan_table_func_scan_chg<'mcx>(
     node: &mut TableFuncScanState<'mcx>,

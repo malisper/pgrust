@@ -3828,6 +3828,7 @@ where
                 exec_window_result_qual(qual.as_deref_mut(), estate, ecxt, result_id, scan_slot)?
             };
             if !qual_pass {
+                // nodeWindowAgg.c:2467 InstrCountFiltered1(winstate, 1).
                 estate.instr_count_filtered1(state.instr_idx);
                 continue;
             }

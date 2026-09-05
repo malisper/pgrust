@@ -29,6 +29,9 @@ pub struct GroupState<'mcx> {
     proj: PgBox<'mcx, ExprState<'mcx>>,
     grp_done: bool,
     have_first: bool,
+    // InstrCountFiltered1 target for the HAVING qual (nodeGroup.c:96/149);
+    // set by execmain's instrument_node under ANALYZE.
+    pub instr_idx: Option<u32>,
 }
 
 /// `ExecInitGroup` minus child linkage; the caller inits the outer child
@@ -82,6 +85,7 @@ pub fn exec_init_group<'mcx>(
         proj,
         grp_done: false,
         have_first: false,
+        instr_idx: None,
     })
 }
 
@@ -167,6 +171,8 @@ pub fn lane_group_feed<'mcx>(
     if node.check_qual(estate)? {
         return node.project(estate);
     }
+    // nodeGroup.c:96/149: a group head failing the HAVING qual is counted.
+    estate.instr_count_filtered1(node.instr_idx);
     Ok(None)
 }
 
@@ -256,6 +262,6 @@ pub fn exec_rescan_group<'mcx>(node: &mut GroupState<'mcx>, estate: &mut EStateD
 
 // Exempt: all released in exec_end_group (eq/qual/proj via release_frames).
 mcx::forget_safe_struct!(
-    GroupState<'_> { plan, ps_ExprContext, ps_ResultTupleSlot, grp_done, have_first;
+    GroupState<'_> { plan, ps_ExprContext, ps_ResultTupleSlot, grp_done, have_first, instr_idx;
         ps_ResultTupleDesc, firsttuple_slot, eq, qual, proj },
 );
