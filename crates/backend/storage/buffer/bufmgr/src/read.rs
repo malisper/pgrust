@@ -126,6 +126,23 @@ pub fn ReadBuffer_common(
     mode: ReadBufferMode,
     strategy: BufferAccessStrategy,
 ) -> PgResult<(Buffer, bool)> {
+    ReadBuffer_common_acct(smgr, persistence, forknum, blkno, mode, strategy, false)
+        .map(|(buffer, acct)| (buffer, acct == ReadAccounting::Hit))
+}
+
+/// ReadBuffer_common with the per-relation accounting the caller must apply.
+/// `scan_credit` opts into the batched-read credit (the relation-level
+/// readers: a scan re-pinning what its own combined read already counted).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn ReadBuffer_common_acct(
+    smgr: RelFileLocatorBackend,
+    persistence: u8,
+    forknum: ForkNumber,
+    blkno: BlockNumber,
+    mode: ReadBufferMode,
+    strategy: BufferAccessStrategy,
+    scan_credit: bool,
+) -> PgResult<(Buffer, ReadAccounting)> {
     // Backward compatibility path, most code should use ExtendBufferedRel()
     // instead, as acquiring the extension lock inside ExtendBufferedRel()
     // scales a lot better.
@@ -158,19 +175,31 @@ pub fn ReadBuffer_common(
             &mut buffers,
         )?;
         debug_assert!(extended_by == 1);
-        return Ok((buffers[0], false));
+        return Ok((buffers[0], ReadAccounting::Uncounted));
     }
+    let hit_or_miss = |found: bool| {
+        if found {
+            ReadAccounting::Hit
+        } else {
+            ReadAccounting::Miss { reads: 1, forwarded_hit: false }
+        }
+    };
     if matches!(
         mode,
         ReadBufferMode::ZeroAndLock | ReadBufferMode::ZeroAndCleanupLock
     ) {
-        let (buffer, found) = PinBufferForBlock(smgr, persistence, forknum, blkno, &strategy)?;
+        let (buffer, found) =
+            PinBufferForBlock(smgr, persistence, forknum, blkno, &strategy, true)?;
         ZeroAndLockBuffer(buffer, mode, found)?;
-        return Ok((buffer, found));
+        return Ok((buffer, hit_or_miss(found)));
     }
-    let (buffer, found) = PinBufferForBlock(smgr, persistence, forknum, blkno, &strategy)?;
+    let credited = scan_credit
+        && persistence != RELPERSISTENCE_TEMP
+        && credit_consume(smgr.locator, forknum, blkno);
+    let (buffer, found) =
+        PinBufferForBlock(smgr, persistence, forknum, blkno, &strategy, !credited)?;
     if found {
-        return Ok((buffer, true));
+        return Ok((buffer, if credited { ReadAccounting::Uncounted } else { ReadAccounting::Hit }));
     }
     if persistence == RELPERSISTENCE_TEMP {
         let mut local_flags = 0;
@@ -181,7 +210,7 @@ pub fn ReadBuffer_common(
             local_flags |= READ_BUFFERS_IGNORE_CHECKSUM_FAILURES;
         }
         let hit = complete_read_local(smgr, forknum, blkno, buffer, local_flags)?;
-        return Ok((buffer, hit));
+        return Ok((buffer, hit_or_miss(hit)));
     }
 
     // Signal that we are going to immediately wait: no benefit in executing
@@ -202,20 +231,24 @@ pub fn ReadBuffer_common(
         // Another backend completed it between the pin and StartBufferIO.
         true
     };
-    Ok((buffer, hit))
+    Ok((buffer, hit_or_miss(hit)))
 }
 
+/// PinBufferForBlock (bufmgr.c:1119): pin the block, counting a hit when it
+/// is found valid. `count_hit` is false only for a block this backend's own
+/// previous combined read already accounted for (see `BatchCredit`).
 fn PinBufferForBlock(
     smgr: RelFileLocatorBackend,
     persistence: u8,
     forknum: ForkNumber,
     blkno: BlockNumber,
     strategy: &BufferAccessStrategy,
+    count_hit: bool,
 ) -> PgResult<(Buffer, bool)> {
     debug_assert!(blkno != P_NEW);
     if persistence == RELPERSISTENCE_TEMP {
         let (buffer, found) = crate::localbuf::LocalBufferAlloc(smgr, forknum, blkno)?;
-        if found {
+        if found && count_hit {
             counters::local_hit();
             pgstat_count_io_op(
                 IOObject::TempRelation,
@@ -229,11 +262,106 @@ fn PinBufferForBlock(
     }
     let io_context = IOContextForStrategy(strategy);
     let (buffer, found) = BufferAlloc(smgr, persistence, forknum, blkno, strategy, io_context)?;
-    if found {
+    if found && count_hit {
         counters::hit();
         pgstat_count_io_op(IOObject::Relation, io_context, IOOp::Hit, 1, 0);
     }
     Ok((buffer, found))
+}
+
+/// How a read was accounted, for the per-relation pgstat counts
+/// (bufmgr.c PinBufferForBlock: pgstat_count_buffer_read per pinned block,
+/// pgstat_count_buffer_hit per block found valid).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ReadAccounting {
+    /// Found valid at pin time: one read counted, one hit.
+    Hit,
+    /// `reads` blocks pinned and read from disk (one count each); a
+    /// forwarded block found valid past the run adds one hit.
+    Miss { reads: u32, forwarded_hit: bool },
+    /// Nothing to count: an extension (ReadBuffer_common's P_NEW arm never
+    /// reaches PinBufferForBlock in C), or the re-pin of a block this
+    /// backend's previous combined read already counted.
+    Uncounted,
+}
+
+// C's StartReadBuffers pins the whole run and counts every block once at pin
+// time; read_stream then hands the pinned buffers to the scan with no further
+// accounting. ReadBuffer_batched unpins the extras instead and the scan
+// re-pins them one call at a time, so the unconsumed tail of the last few
+// batches is remembered per relation/fork and a strictly sequential re-pin of
+// it is not a hit. Any other access into the tail drops the entry: from then
+// on the blocks are accounted like any resident page (C: another reader's
+// hit). Backend-private, like the read stream it stands in for.
+#[derive(Clone, Copy)]
+struct BatchCredit {
+    locator: RelFileLocator,
+    forknum: ForkNumber,
+    next: BlockNumber,
+    end: BlockNumber,
+}
+
+const BATCH_CREDITS: usize = 4;
+
+thread_local! {
+    static BATCH_CREDIT: core::cell::Cell<[Option<BatchCredit>; BATCH_CREDITS]> =
+        const { core::cell::Cell::new([None; BATCH_CREDITS]) };
+    static BATCH_CREDIT_CLOCK: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
+fn credit_grant(locator: RelFileLocator, forknum: ForkNumber, next: BlockNumber, end: BlockNumber) {
+    if next >= end {
+        return;
+    }
+    BATCH_CREDIT.with(|c| {
+        let mut arr = c.get();
+        let slot = arr
+            .iter()
+            .position(|e| matches!(e, Some(e) if e.locator == locator && e.forknum == forknum))
+            .or_else(|| arr.iter().position(|e| e.is_none()))
+            .unwrap_or_else(|| {
+                BATCH_CREDIT_CLOCK.with(|k| {
+                    let i = k.get();
+                    k.set((i + 1) % BATCH_CREDITS);
+                    i
+                })
+            });
+        arr[slot] = Some(BatchCredit { locator, forknum, next, end });
+        c.set(arr);
+    });
+}
+
+/// True when `blkno` is the next block of a credited tail (consumed);
+/// a non-sequential access into the tail forfeits the rest of it.
+fn credit_consume(locator: RelFileLocator, forknum: ForkNumber, blkno: BlockNumber) -> bool {
+    BATCH_CREDIT.with(|c| {
+        let mut arr = c.get();
+        for e in arr.iter_mut() {
+            let Some(cr) = e else { continue };
+            if cr.locator != locator || cr.forknum != forknum {
+                continue;
+            }
+            if blkno == cr.next {
+                cr.next += 1;
+                if cr.next >= cr.end {
+                    *e = None;
+                }
+                c.set(arr);
+                return true;
+            }
+            if blkno > cr.next && blkno < cr.end {
+                *e = None;
+                c.set(arr);
+            }
+            return false;
+        }
+        false
+    })
+}
+
+/// The read stream's lifetime ends with the query: forget any tail.
+pub(crate) fn clear_batch_credits() {
+    BATCH_CREDIT.with(|c| c.set([None; BATCH_CREDITS]));
 }
 
 /// The partitioned mapping lookup, warm-hit pin, and victim install.
@@ -619,7 +747,9 @@ fn complete_read_local(
     Ok(false)
 }
 
-const MAX_READ_BATCH: usize = 64;
+/// MAX_IO_COMBINE_LIMIT (bufmgr.h:166) = PG_IOV_MAX: the largest combined
+/// read io_combine_limit / io_max_combine_limit can ask for.
+const MAX_READ_BATCH: usize = types_storage::smgr::PG_IOV_MAX;
 
 pub(crate) const READ_BUFFERS_ZERO_ON_ERROR: u32 = 1 << 0;
 pub(crate) const READ_BUFFERS_IGNORE_CHECKSUM_FAILURES: u32 = 1 << 2;
@@ -640,6 +770,8 @@ pub(crate) struct ReadBuffersOperation {
     buffers: [Buffer; MAX_READ_BATCH],
     io_wref: types_storage::buf::PgAioWaitRef,
     io_return: types_storage::aio::PgAioReturn,
+    /// The first block is a credited re-pin (no hit accounting if found).
+    credited_first: bool,
 }
 
 impl ReadBuffersOperation {
@@ -662,6 +794,7 @@ impl ReadBuffersOperation {
             buffers: [InvalidBuffer; MAX_READ_BATCH],
             io_wref: types_storage::buf::PgAioWaitRef::default(),
             io_return: types_storage::aio::PgAioReturn::default(),
+            credited_first: false,
         };
         aio_core::pgaio_wref_clear(&mut op.io_wref);
         op
@@ -694,6 +827,7 @@ fn start_read_buffers_impl(
                 operation.forknum,
                 blocknum + i as BlockNumber,
                 &operation.strategy,
+                !(i == 0 && operation.credited_first),
             )?;
             operation.buffers[idx] = buffer;
             found = f;
@@ -714,6 +848,12 @@ fn start_read_buffers_impl(
                 - (blocknum % types_storage::smgr::RELSEG_SIZE))
                 as i32;
             if maxcombine < actual_nblocks {
+                let _ = ereport(types_error::DEBUG2)
+                    .errmsg(format!(
+                        "limiting nblocks at {} from {} to {}",
+                        blocknum, actual_nblocks, maxcombine
+                    ))
+                    .finish(loc("StartReadBuffersImpl"));
                 actual_nblocks = maxcombine;
             }
         }
@@ -936,17 +1076,33 @@ pub(crate) fn ReadBuffer_batched(
     nblocks_hint: BlockNumber,
     strategy: BufferAccessStrategy,
 ) -> PgResult<(Buffer, bool)> {
+    ReadBuffer_batched_acct(smgr, persistence, blkno, nblocks_hint, strategy)
+        .map(|(buffer, acct)| (buffer, acct == ReadAccounting::Hit))
+}
+
+/// ReadBuffer_batched with the per-relation accounting the caller must apply
+/// (C counts every block of the run at pin time and never again).
+pub(crate) fn ReadBuffer_batched_acct(
+    smgr: RelFileLocatorBackend,
+    persistence: u8,
+    blkno: BlockNumber,
+    nblocks_hint: BlockNumber,
+    strategy: BufferAccessStrategy,
+) -> PgResult<(Buffer, ReadAccounting)> {
     let forknum = ForkNumber::MAIN_FORKNUM;
     if persistence == RELPERSISTENCE_TEMP {
-        return ReadBuffer_common(
+        return ReadBuffer_common_acct(
             smgr,
             persistence,
             forknum,
             blkno,
             ReadBufferMode::Normal,
             strategy,
+            false,
         );
     }
+    // A block this backend's previous batch already read and counted.
+    let credited = credit_consume(smgr.locator, forknum, blkno);
     // The extra blocks each hold a pin until the read completes: cap the run
     // pinned-buffer budget with GetAdditionalPinLimit(), which may be zero).
     // Without this, a seqscan on a tiny pool pins it whole and any concurrent
@@ -962,38 +1118,53 @@ pub(crate) fn ReadBuffer_batched(
     } else {
         i32::MAX
     };
+    // read_stream.c:618: the strategy ring caps the stream's pins, and with
+    // them the size of one combined read (at least one block).
+    let strategy_pin_limit = crate::freelist::GetAccessStrategyPinLimit(&strategy).max(1) as usize;
     let cap = (crate::gucs::io_combine_limit().min(io_max).clamp(1, MAX_READ_BATCH as i32)
         as usize)
         .min(nblocks_hint.max(1) as usize)
-        .min(pin_room);
+        .min(pin_room)
+        .min(strategy_pin_limit);
 
     // worker mode the IO is queued to the pool and the issuer waits on the
     let mut operation = ReadBuffersOperation::new(smgr, persistence, forknum, strategy, 0);
     operation.blocknum = blkno;
+    operation.credited_first = credited;
     let mut nblocks = cap as i32;
     let did_start_io = start_read_buffers_impl(&mut operation, &mut nblocks)?;
 
     // Forwarded buffers (pinned beyond the accepted range at a hit/racing-IO
     // split): this caller never continues a split operation — release them.
+    // The pin already counted the block as a hit (C consumes the forwarded
+    // buffer without re-pinning), so its re-pin is credited too.
+    let mut forwarded_hit = false;
     for i in (nblocks as usize)..cap {
         if operation.buffers[i] != InvalidBuffer {
             UnpinBuffer(GetBufferDescriptor(operation.buffers[i] - 1));
             operation.buffers[i] = InvalidBuffer;
+            forwarded_hit = true;
         }
     }
 
-    let hit = if did_start_io {
+    let acct = if did_start_io {
         WaitReadBuffers(&mut operation)?;
-        false
+        // Every block of the run is counted now, once (bufmgr.c:1157); the
+        // scan's later re-pins of the extras must not count again.
+        let end = blkno + nblocks as BlockNumber + forwarded_hit as BlockNumber;
+        credit_grant(smgr.locator, forknum, blkno + 1, end);
+        ReadAccounting::Miss { reads: nblocks as u32, forwarded_hit }
+    } else if credited {
+        ReadAccounting::Uncounted
     } else {
-        true
+        ReadAccounting::Hit
     };
 
     // Extras end valid-and-unpinned (the batched-read contract).
     for i in 1..(nblocks as usize) {
         UnpinBuffer(GetBufferDescriptor(operation.buffers[i] - 1));
     }
-    Ok((operation.buffers[0], hit))
+    Ok((operation.buffers[0], acct))
 }
 
 // Flags for page_is_verified (bufpage.h PIV_*).
@@ -1207,7 +1378,7 @@ pub enum PrefetchOutcome {
     Cached,
     /// posix_fadvise issued (C result.initiated_io).
     Issued,
-    /// Local/temp relation, direct I/O, or missing file — nothing issued.
+    /// Direct I/O or missing file — nothing issued.
     Skipped,
 }
 
@@ -1217,12 +1388,20 @@ pub fn PrefetchBuffer(
     blkno: BlockNumber,
 ) -> PgResult<PrefetchOutcome> {
     debug_assert!(blkno != P_NEW);
-    if rel.rd_rel.relpersistence == RELPERSISTENCE_TEMP {
-        crate::localbuf::ensure_local_buffers()?;
-        return Ok(PrefetchOutcome::Skipped);
-    }
     let smgr = crate::rel_locator_backend(rel);
-    let result = PrefetchSharedBuffer(smgr, rel.rd_rel.relpersistence, forknum, blkno)?;
+    let result = if rel.rd_rel.relpersistence == RELPERSISTENCE_TEMP {
+        // See comments in ReadBuffer_common (bufmgr.c:657-661).
+        if !rel.rd_islocaltemp {
+            ereport(ERROR)
+                .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errmsg("cannot access temporary tables of other sessions")
+                .finish(loc("PrefetchBuffer"))?;
+        }
+        // pass it off to localbuf.c
+        crate::localbuf::PrefetchLocalBuffer(smgr, forknum, blkno)?
+    } else {
+        PrefetchSharedBuffer(smgr, rel.rd_rel.relpersistence, forknum, blkno)?
+    };
     Ok(if BufferIsValid(result.recent_buffer) {
         PrefetchOutcome::Cached
     } else if result.initiated_io {

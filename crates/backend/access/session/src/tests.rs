@@ -1138,6 +1138,22 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      static, never bound or reset — non-session TLS, same class as 61
     //      (dfmgr FILE_LIST is the module list it mirrors).
         // 588, 18.6 conformance audit (2026-09-04), access/hash remediation
+        // 594, 18.6 conformance audit (2026-09-05), bufmgr remediation
+    //   (b039-backend-storage-buffer-1): one product source + one test-only
+    //   source —
+    //   87. storage/buffer/bufmgr/src/read.rs BATCH_CREDIT +
+    //      BATCH_CREDIT_CLOCK (one thread_local! block) — Cell<[Option<
+    //      BatchCredit>; 4]> per-backend memory of the unconsumed tail of
+    //      the last combined reads so the scan's sequential re-pin is
+    //      counted once (bufmgr.c StartReadBuffers/PinBufferForBlock count
+    //      every block at pin time; read_stream is backend-private). A
+    //      transient per-backend accounting aid with no session identity,
+    //      never bound or reset — non-session TLS (slot-41 class).
+    //   88. storage/buffer/bufmgr/src/tests.rs B039_CAPTURED —
+    //      RefCell<Vec<PgError>> per-thread emit_log_hook recorder for the
+    //      b039 error-path witnesses (unit harness fixture; counted by the
+    //      tree census, never product code — same class as 43/45/46/60/63).
+    // 595, 18.6 conformance audit (2026-09-04), access/hash remediation
     //   batch b004: two test-only sources —
     //   69. access/hash/hash/src/tests.rs PAGES/NBLOCKS_OVERRIDE/WAL_FAIL/
     //      WAL/NEXT_LSN/LOGICAL_DECODING (one thread_local! block) —
@@ -1201,7 +1217,7 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      live values. Session coverage unchanged: the surviving cells are
     //      init_small/globals.rs sources already counted below (same class
     //      as the 556 CRIT_SECTION_COUNT unification).
-    assert_eq!(count_tree(crates), 592, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    assert_eq!(count_tree(crates), 594, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

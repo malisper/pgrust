@@ -327,7 +327,7 @@ pub(crate) fn FlushBuffer(
     if buf_state & BM_PERMANENT != 0 {
         if let Err(e) = transam_xlog_seams::xlog_flush::call(recptr) {
             TerminateBufferIO(desc, false, BM_IO_ERROR, true, false);
-            return Err(e);
+            return Err(shared_buffer_write_error_context(e, &tag));
         }
     }
 
@@ -337,7 +337,7 @@ pub(crate) fn FlushBuffer(
     });
     if let Err(e) = write_result {
         TerminateBufferIO(desc, false, BM_IO_ERROR, true, false);
-        return Err(e);
+        return Err(shared_buffer_write_error_context(e, &tag));
     }
 
     pgstat_count_io_op_time(
@@ -351,6 +351,20 @@ pub(crate) fn FlushBuffer(
     counters::written();
     TerminateBufferIO(desc, true, 0, true, false);
     Ok(())
+}
+
+/// shared_buffer_write_error_callback (bufmgr.c:6216), applied on
+/// propagation where C's error_context_stack callback would have fired: the
+/// WAL flush and the write inside FlushBuffer (bufmgr.c:4326).
+fn shared_buffer_write_error_context(
+    e: Box<types_error::PgError>,
+    tag: &buftag,
+) -> Box<types_error::PgError> {
+    Box::new((*e).add_context(format!(
+        "writing block {} of relation \"{}\"",
+        tag.blockNum,
+        crate::read::relpath_desc(tag_locator(tag).locator, tag.forkNum)
+    )))
 }
 
 /// FlushOneBuffer (bufmgr.c): caller holds pin + content lock.

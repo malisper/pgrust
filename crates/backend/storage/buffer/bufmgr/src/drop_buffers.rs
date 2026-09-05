@@ -35,7 +35,10 @@ pub fn DropRelationBuffers(
     // fork size is cached and the range is small (recovery guarantees the
     // cache; elsewhere a stale cache just forfeits the fast path).
     let mut n_fork_block = [InvalidBlockNumber; MAX_FORKNUM as usize + 1];
-    let mut n_blocks_to_invalidate: u64 = 0;
+    // BlockNumber arithmetic as in C (bufmgr.c:4613): a cached size below
+    // firstDelBlock wraps to a huge count, which simply forfeits the fast
+    // path (and InvalidBlockNumber itself is "not cached").
+    let mut n_blocks_to_invalidate: BlockNumber = 0;
     let mut cached = true;
     for (i, fork) in forknum.iter().enumerate() {
         let nblocks = smgr_seams::smgr_nblocks_cached::call(rlocator, *fork);
@@ -44,10 +47,14 @@ pub fn DropRelationBuffers(
             break;
         }
         n_fork_block[i] = nblocks;
-        n_blocks_to_invalidate += (nblocks - first_del_block[i]) as u64;
+        n_blocks_to_invalidate =
+            n_blocks_to_invalidate.wrapping_add(nblocks.wrapping_sub(first_del_block[i]));
     }
 
-    if cached && n_blocks_to_invalidate < buf_drop_full_scan_threshold() {
+    if cached
+        && n_blocks_to_invalidate != InvalidBlockNumber
+        && (n_blocks_to_invalidate as u64) < buf_drop_full_scan_threshold()
+    {
         for (i, fork) in forknum.iter().enumerate() {
             FindAndDropRelationBuffers(
                 rlocator.locator,
@@ -123,6 +130,9 @@ fn InvalidateBuffer(desc: &BufferDesc, buf_state_in: u32) -> PgResult<()> {
                 private = crate::privref::GetPrivateRefCount(BufferDescriptorGetBuffer(desc));
             }
             if private > 0 {
+                // safety check: should definitely not be our *own* pin
+                // (bufmgr.c:2245 elog(ERROR)). The pin census goes to the
+                // server log only; the client sees C's message.
                 let pins: Vec<String> = crate::privref::debug_all_private_pins()
                     .into_iter()
                     .map(|(b, rc)| {
@@ -133,18 +143,25 @@ fn InvalidateBuffer(desc: &BufferDesc, buf_state_in: u32) -> PgResult<()> {
                         )
                     })
                     .collect();
-                panic!(
-                    "buffer is pinned in InvalidateBuffer: buf={} tag=({}/{}/{} fork={} blk={}) shared_refcount={} private_refcount={}; all private pins: [{}]",
-                    BufferDescriptorGetBuffer(desc),
-                    old_tag.spcOid,
-                    old_tag.dbOid,
-                    old_tag.relNumber,
-                    old_tag.forkNum as i32,
-                    old_tag.blockNum,
-                    buffer_refcount(buf_state),
-                    private,
-                    pins.join(", "),
-                );
+                return Err(Box::new(
+                    types_error::PgError::new(
+                        types_error::ERROR,
+                        "buffer is pinned in InvalidateBuffer",
+                    )
+                    .with_detail_log(format!(
+                        "buf={} tag=({}/{}/{} fork={} blk={}) shared_refcount={} private_refcount={}; all private pins: [{}]",
+                        BufferDescriptorGetBuffer(desc),
+                        old_tag.spcOid,
+                        old_tag.dbOid,
+                        old_tag.relNumber,
+                        old_tag.forkNum as i32,
+                        old_tag.blockNum,
+                        buffer_refcount(buf_state),
+                        private,
+                        pins.join(", "),
+                    ))
+                    .with_error_location(crate::read::loc("InvalidateBuffer")),
+                ));
             }
             crate::read::WaitIO(desc)?;
             continue;

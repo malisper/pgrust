@@ -392,6 +392,23 @@ pub fn IOContextForStrategy(strategy: &BufferAccessStrategy) -> IOContext {
     }
 }
 
+/// GetAccessStrategyPinLimit (freelist.c:689): how many buffers the user of
+/// a strategy ring may pin at once — the whole ring for BAS_BULKREAD (its
+/// StrategyRejectBuffer keeps dirty buffers out), half of it otherwise, and
+/// every buffer without a strategy.
+pub fn GetAccessStrategyPinLimit(strategy: &BufferAccessStrategy) -> i32 {
+    match strategy {
+        None => NBuffersInited(),
+        Some(s) => {
+            let s = s.borrow();
+            match s.btype {
+                BufferAccessStrategyType::BasBulkread => s.nbuffers,
+                _ => s.nbuffers / 2,
+            }
+        }
+    }
+}
+
 /// MaxProportionalPins (bufmgr.c InitBufferManagerAccess).
 pub fn GetPinLimit() -> i32 {
     let max_backends = globals::MaxBackends().max(1);

@@ -277,8 +277,9 @@ fn ExtendBufferedRelShared(
         ereport(ERROR)
             .errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
             .errmsg(format!(
-                "cannot extend relation base/{}/{} beyond {} blocks",
-                smgr.locator.dbOid, smgr.locator.relNumber, MaxBlockNumber
+                "cannot extend relation {} beyond {} blocks",
+                crate::read::relpath_backend_desc(smgr.locator, smgr.backend, fork),
+                MaxBlockNumber
             ))
             .finish(loc("ExtendBufferedRelShared"))?;
     }
@@ -320,8 +321,9 @@ fn ExtendBufferedRelShared(
             if valid && !page_is_new {
                 ereport(ERROR)
                     .errmsg(format!(
-                        "unexpected data beyond EOF in block {} of relation base/{}/{}",
-                        tag.blockNum, smgr.locator.dbOid, smgr.locator.relNumber
+                        "unexpected data beyond EOF in block {} of relation \"{}\"",
+                        tag.blockNum,
+                        crate::read::relpath_backend_desc(smgr.locator, smgr.backend, fork)
                     ))
                     .errhint("This has been seen to occur with buggy kernels; consider updating your system.")
                     .finish(loc("ExtendBufferedRelShared"))?;

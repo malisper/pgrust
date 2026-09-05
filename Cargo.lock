@@ -2776,6 +2776,7 @@ dependencies = [
  "postgres_seams",
  "procsignal_seams",
  "relmapper_seams",
+ "relpath",
  "relpath_seams",
  "resowner",
  "s_lock_seams",

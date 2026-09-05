@@ -170,16 +170,35 @@ pub fn ReadBufferExtended(
             .with_error_location(ErrorLocation::new(file!(), line!() as i32, "ReadBufferExtended")),
         ));
     }
-    let (buffer, hit) = read::ReadBuffer_common(
+    let (buffer, acct) = read::ReadBuffer_common_acct(
         rel_locator_backend(rel),
         rel.rd_rel.relpersistence,
         forknum,
         block_num,
         mode,
         strategy,
+        true,
     )?;
-    pgstat_count_buffer(rel, hit);
+    pgstat_count_buffer_acct(rel, acct);
     Ok(buffer)
+}
+
+// The per-relation counts PinBufferForBlock makes in C: one
+// pgstat_count_buffer_read per pinned block, plus pgstat_count_buffer_hit for
+// a block found valid; nothing for an extension or a credited re-pin.
+fn pgstat_count_buffer_acct(rel: &RelationData<'_>, acct: read::ReadAccounting) {
+    match acct {
+        read::ReadAccounting::Hit => pgstat_count_buffer(rel, true),
+        read::ReadAccounting::Miss { reads, forwarded_hit } => {
+            for _ in 0..reads {
+                pgstat_count_buffer(rel, false);
+            }
+            if forwarded_hit {
+                pgstat_count_buffer(rel, true);
+            }
+        }
+        read::ReadAccounting::Uncounted => {}
+    }
 }
 
 // bufmgr.c:1166-1168: per-relation blocks_fetched/blocks_hit; the
@@ -217,14 +236,14 @@ pub fn ReadBufferBatched(
             .with_error_location(ErrorLocation::new(file!(), line!() as i32, "ReadBufferExtended")),
         ));
     }
-    let (buffer, hit) = read::ReadBuffer_batched(
+    let (buffer, acct) = read::ReadBuffer_batched_acct(
         rel_locator_backend(rel),
         rel.rd_rel.relpersistence,
         block_num,
         nblocks_hint,
         strategy,
     )?;
-    pgstat_count_buffer(rel, hit);
+    pgstat_count_buffer_acct(rel, acct);
     Ok(buffer)
 }
 
@@ -402,12 +421,33 @@ pub fn MarkBufferDirtyHint(buffer: Buffer, buffer_std: bool) -> PgResult<()> {
     }
     if dirtied {
         counters::dirtied();
+        if init_small::globals::VacuumCostActive() {
+            init_small::globals::SetVacuumCostBalance(
+                init_small::globals::VacuumCostBalance() + init_small::globals::VacuumCostPageDirty(),
+            );
+        }
     }
     Ok(())
 }
 
-/// Private-refcount TLS is const-init; AtProcExit leak check pends proc unit.
-pub fn InitBufferManagerAccess() {}
+/// InitBufferManagerAccess (bufmgr.c:4030-4057): the private-refcount state
+/// is const-initialized TLS here; what remains is registering the exit-time
+/// cleanup.
+pub fn InitBufferManagerAccess() {
+    ipc_seams::on_shmem_exit::call(AtProcExit_Buffers, 0);
+}
+
+/// AtProcExit_Buffers (bufmgr.c:4065): clear an abandoned BM_PIN_COUNT_WAITER
+/// (a backend dying inside LockBufferForCleanup), check for leaked pins, and
+/// give localbuf.c its chance.
+fn AtProcExit_Buffers(_code: i32, _arg: usize) {
+    pin::UnlockBuffers();
+    // Uncollected uring prefetch reads hold thread-owned pins (as in
+    // AtEOXact_Buffers); wait them out before the leak census.
+    uring::drain_own();
+    pin::CheckForBufferLeaks();
+    localbuf::AtProcExit_LocalBuffers();
+}
 
 pub fn init_seams() {
     aio_read::init_seams();

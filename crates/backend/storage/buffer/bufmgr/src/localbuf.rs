@@ -252,10 +252,52 @@ pub(crate) fn LocalBufferAlloc(
     Ok((victim, false))
 }
 
+/// PrefetchLocalBuffer (localbuf.c:71): a resident block is reported as
+/// recent_buffer (nothing to do); otherwise, without direct I/O, the block is
+/// smgrprefetch'ed and initiated_io says whether advice was issued.
+pub(crate) fn PrefetchLocalBuffer(
+    smgr: RelFileLocatorBackend,
+    forknum: ForkNumber,
+    blkno: BlockNumber,
+) -> PgResult<crate::read::PrefetchBufferResult> {
+    let tag = init_buffer_tag(smgr.locator, forknum, blkno);
+    // Initialize local buffers if first request in this session.
+    ensure_local_buffers()?;
+    let resident = with(|lb| {
+        lb.hash
+            .get(&tag)
+            .copied()
+            .map(|id| BufferDescriptorGetBuffer(&lb.descs[id as usize]))
+    });
+    if let Some(recent_buffer) = resident {
+        return Ok(crate::read::PrefetchBufferResult {
+            recent_buffer,
+            initiated_io: false,
+        });
+    }
+    // Not in buffers, so initiate prefetch.
+    let initiated_io = fd::io_direct_flags() & types_storage::IO_DIRECT_DATA == 0
+        && smgr_seams::smgr_prefetch::call(smgr, forknum, blkno, 1)?;
+    Ok(crate::read::PrefetchBufferResult {
+        recent_buffer: types_core::InvalidBuffer,
+        initiated_io,
+    })
+}
+
 pub(crate) fn FlushLocalBuffer(buffer: Buffer) -> PgResult<()> {
     debug_assert!(local_ref_count(buffer) > 0);
+    // Try to start an I/O operation. There currently are no reasons for
+    // StartLocalBufferIO to return false, so we raise an error in that case
+    // (localbuf.c:193-195).
     if !StartLocalBufferIO(buffer, false) {
-        return Ok(());
+        return Err(Box::new(
+            types_error::PgError::new(ERROR, "failed to start write IO on local buffer")
+                .with_error_location(ErrorLocation::new(
+                    file!(),
+                    line!() as i32,
+                    "FlushLocalBuffer",
+                )),
+        ));
     }
     let (tag, block) = with(|lb| {
         let id = local_bufid(buffer);
@@ -482,8 +524,21 @@ pub(crate) fn FlushRelationLocalBuffers(rlocator: RelFileLocator) -> PgResult<()
         {
             resowner::ResourceOwnerEnlarge(resowner::CurrentResourceOwner())?;
             PinLocalBuffer(buffer, false);
-            FlushLocalBuffer(buffer)?;
+            // local_buffer_write_error_callback (bufmgr.c:4979, :6232) for
+            // the duration of the flush, applied on propagation.
+            let flushed = FlushLocalBuffer(buffer);
             UnpinLocalBuffer(buffer);
+            flushed.map_err(|e| {
+                Box::new((*e).add_context(format!(
+                    "writing block {} of relation \"{}\"",
+                    tag.blockNum,
+                    crate::read::relpath_backend_desc(
+                        rlocator,
+                        init_small::globals::MyProcNumber(),
+                        tag.forkNum,
+                    )
+                )))
+            })?;
         }
     }
     Ok(())

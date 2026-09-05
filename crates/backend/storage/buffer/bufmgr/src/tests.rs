@@ -25,12 +25,21 @@ const SLOW_READ_REL: u32 = 9400;
 // resolve error): raised between StartBufferIO and the pgaio stage.
 const ERROR_READ_REL: u32 = 9461;
 static READ_ERROR_INJECT: AtomicBool = AtomicBool::new(false);
+// Error injection: smgr_write fails for these rels while the flag is set —
+// the shape of an ENOSPC/EIO from mdwritev (raised inside FlushBuffer /
+// FlushLocalBuffer, under C's write error-context callback).
+const WRITE_ERROR_REL: u32 = 9909;
+const WRITE_ERROR_REL_LOCAL: u32 = 9910;
+static WRITE_ERROR_INJECT: AtomicBool = AtomicBool::new(false);
 
-// Large enough that the batched-read pin cap (GetAdditionalPinLimit ~
-// NBuffers/(MaxBackends+aux) - REFCOUNT_ARRAY_ENTRIES) still allows the full
-// io_combine_limit run: 2048/79 - 8 = 17 extra pins >= 16.
-const TEST_NBUFFERS: i32 = 2048;
-const TEST_MAX_CONNECTIONS: i32 = 32;
+// Every test runs on its own thread and become_backend() takes a proc slot
+// per thread, so MaxBackends must cover the whole suite (plus the reader
+// threads a few tests spawn). NBuffers is sized so the batched-read pin cap
+// (GetAdditionalPinLimit ~ NBuffers/(MaxBackends+aux) - REFCOUNT_ARRAY_ENTRIES)
+// still allows the full io_combine_limit run: 8192/~175 - 8 = 38 extra pins
+// >= 16.
+const TEST_NBUFFERS: i32 = 8192;
+const TEST_MAX_CONNECTIONS: i32 = 128;
 
 fn test_max_backends() -> i32 {
     TEST_MAX_CONNECTIONS + 3 + 2 + 2 + NUM_SPECIAL_WORKER_PROCS
@@ -52,6 +61,9 @@ fn valid_page_into(buffer: &mut [u8], blkno: u32) {
 }
 
 static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+// Every on_shmem_exit registration the harness saw (C ipc.c's list).
+static ON_SHMEM_EXIT_CBS: std::sync::Mutex<Vec<(fn(i32, usize), usize)>> =
+    std::sync::Mutex::new(Vec::new());
 
 fn setup() -> std::sync::MutexGuard<'static, ()> {
     let guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -113,7 +125,11 @@ fn fake_rel_fd(rel: u32, blocknum: u32, nblocks: u32) -> i32 {
     let needed_end = (blocknum + nblocks) as u64 * BLCKSZ as u64;
     let cur = f.metadata().unwrap().len();
     if cur < needed_end {
-        let first = (cur / BLCKSZ as u64) as u32;
+        // Fill forward from the current end so earlier-requested low blocks
+        // stay valid pages; a request far past the end (the segment-boundary
+        // test reads at RELSEG_SIZE - 4) leaves a sparse hole below it rather
+        // than materializing a gigabyte of pages nobody reads.
+        let first = ((cur / BLCKSZ as u64) as u32).max(blocknum.saturating_sub(256));
         let last = blocknum + nblocks;
         f.seek(SeekFrom::Start(first as u64 * BLCKSZ as u64)).unwrap();
         let mut page = vec![0u8; BLCKSZ];
@@ -253,7 +269,7 @@ fn setup_once() {
 
         s_lock_seams::perform_spin_delay::set(|_| std::thread::yield_now());
         s_lock_seams::finish_spin_delay::set(|_| {});
-        ipc_seams::on_shmem_exit::set(|_, _| {});
+        ipc_seams::on_shmem_exit::set(|cb, arg| ON_SHMEM_EXIT_CBS.lock().unwrap().push((cb, arg)));
         ipc_seams::before_shmem_exit::set(|_, _| Ok(()));
         waitevent_seams::pgstat_report_wait_start::set(|_| {});
         waitevent_seams::pgstat_report_wait_end::set(|| {});
@@ -768,6 +784,14 @@ fn setup_write_seams() {
     ONCE.call_once(|| {
         smgr_seams::smgr_write::set(|rlocator, forknum, blocknum, buffer, _skip_fsync| {
             assert_eq!(buffer.len(), BLCKSZ);
+            if WRITE_ERROR_INJECT.load(Ordering::Relaxed)
+                && (rlocator.locator.relNumber == WRITE_ERROR_REL
+                    || rlocator.locator.relNumber == WRITE_ERROR_REL_LOCAL)
+            {
+                return Err(Box::new(PgError::error(format!(
+                    "injected write failure for block {blocknum}"
+                ))));
+            }
             // SAFETY: single-threaded unit test — no other backend exists to
             // write the image (the excluding mechanism WriteChunk asks for).
             let buffer = unsafe { buffer.as_slice_unchecked() };
@@ -1694,4 +1718,443 @@ fn read_error_before_stage_is_cleaned_by_abort_and_buffer_stays_usable() {
     assert_eq!(state & types_storage::buf::BM_IO_IN_PROGRESS, 0);
     ReleaseBuffer(b).unwrap();
     AtEOXact_Buffers(true);
+}
+
+// ---------------------------------------------------------------------------
+// audit-18.6 remediation batch b039 (backend/storage/buffer) witnesses. Each
+// asserts the C 18.6 outcome at the cited bufmgr.c / localbuf.c site.
+
+thread_local! {
+    static B039_CAPTURED: std::cell::RefCell<Vec<PgError>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn b039_capture_hook(error: &PgError, _output_to_server: &mut bool) {
+    B039_CAPTURED.with(|c| c.borrow_mut().push(error.clone()));
+}
+
+// smgrnblocks_cached fake: per-relation cached size, InvalidBlockNumber when
+// unset (the not-in-recovery answer).
+static NBLOCKS_CACHED: std::sync::Mutex<std::collections::BTreeMap<u32, u32>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+fn setup_b039_seams() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        smgr_seams::smgr_nblocks_cached::set(|rlb, _| {
+            NBLOCKS_CACHED
+                .lock()
+                .unwrap()
+                .get(&rlb.locator.relNumber)
+                .copied()
+                .unwrap_or(types_core::InvalidBlockNumber)
+        });
+        // The hint-bit path under data checksums (setup_write_seams declares
+        // them): not in recovery, nothing skipping WAL, no hint FPI.
+        if !transam_xlog_seams::recovery_in_progress::is_installed() {
+            transam_xlog_seams::recovery_in_progress::set(|| false);
+        }
+        if !catalog_storage_seams::rel_file_locator_skipping_wal::is_installed() {
+            catalog_storage_seams::rel_file_locator_skipping_wal::set(|_| false);
+        }
+        if !xloginsert_seams::xlog_save_buffer_for_hint::is_installed() {
+            xloginsert_seams::xlog_save_buffer_for_hint::set(|_, _| Ok(0));
+        }
+        // C relpath() (relpath.h): tablespace- and fork-aware rendering.
+        if !relpath_seams::relpathbackend::is_installed() {
+            relpath_seams::relpathbackend::set(|l, b, f| relpath::GetRelationPath(l, b, f));
+        }
+    });
+}
+
+// bufmgr.c:2245 InvalidateBuffer: a buffer still pinned by this backend is
+// elog(ERROR, "buffer is pinned in InvalidateBuffer") (XX000), never a panic.
+#[test]
+fn b039_invalidate_buffer_own_pin_is_error_not_panic() {
+    let _g = setup();
+    setup_b039_seams();
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    let rel = 9901u32;
+    let rlb = RelFileLocatorBackend {
+        locator: rloc(rel),
+        backend: INVALID_PROC_NUMBER,
+    };
+    let b = read_blk(rel, 0);
+    assert_eq!(GetPrivateRefCount(b), 1);
+
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        crate::drop_buffers::DropRelationBuffers(rlb, &[ForkNumber::MAIN_FORKNUM], &[0])
+    }));
+    // Whatever happened, our pin is still ours: release it before asserting.
+    let still_pinned = GetPrivateRefCount(b);
+    if still_pinned > 0 {
+        ReleaseBuffer(b).unwrap();
+    }
+    let res = outcome.expect("InvalidateBuffer must not panic on an own pin (C: elog ERROR)");
+    let err = res.expect_err("dropping a relation with an own pin is an ERROR in C");
+    assert_eq!(err.message(), "buffer is pinned in InvalidateBuffer");
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    assert_eq!(still_pinned, 1, "the pinned buffer is left alone");
+    let state = GetBufferDescriptor(b - 1).state.load(Ordering::Acquire);
+    assert!(state & BM_VALID != 0, "the pinned buffer stays valid");
+
+    // Once unpinned the drop proceeds normally.
+    crate::drop_buffers::DropRelationBuffers(rlb, &[ForkNumber::MAIN_FORKNUM], &[0]).unwrap();
+    let state = GetBufferDescriptor(b - 1).state.load(Ordering::Acquire);
+    assert_eq!(state & types_storage::buf::BM_TAG_VALID, 0);
+}
+
+// bufmgr.c:4613 DropRelationBuffers: nBlocksToInvalidate is a BlockNumber and
+// `nForkBlock[i] - firstDelBlock[i]` wraps when the cached size is below the
+// truncation point; the wrapped sum exceeds BUF_DROP_FULL_SCAN_THRESHOLD and
+// the full scan runs. No overflow panic in any build profile.
+#[test]
+fn b039_drop_relation_buffers_cached_size_below_first_del_falls_back_to_full_scan() {
+    let _g = setup();
+    setup_b039_seams();
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    let rel = 9908u32;
+    let rlb = RelFileLocatorBackend {
+        locator: rloc(rel),
+        backend: INVALID_PROC_NUMBER,
+    };
+    let b = read_blk(rel, 7);
+    ReleaseBuffer(b).unwrap();
+    NBLOCKS_CACHED.lock().unwrap().insert(rel, 2);
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        crate::drop_buffers::DropRelationBuffers(rlb, &[ForkNumber::MAIN_FORKNUM], &[5])
+    }));
+    NBLOCKS_CACHED.lock().unwrap().remove(&rel);
+    let res = outcome.expect("DropRelationBuffers must not panic on cached size < firstDelBlock");
+    res.unwrap();
+    // The full scan dropped block 7 (>= firstDelBlock 5) even though the
+    // cached size said the fork had only 2 blocks.
+    let state = GetBufferDescriptor(b - 1).state.load(Ordering::Acquire);
+    assert_eq!(state & types_storage::buf::BM_TAG_VALID, 0, "block 7 must be invalidated");
+}
+
+// bufmgr.c:5579 MarkBufferDirtyHint: dirtying a clean buffer through a hint
+// charges VacuumCostPageDirty to VacuumCostBalance when VacuumCostActive.
+#[test]
+fn b039_mark_buffer_dirty_hint_charges_vacuum_cost_page_dirty() {
+    let _g = setup();
+    setup_write_seams();
+    setup_b039_seams();
+    let b = read_blk(9902, 0);
+    let state = GetBufferDescriptor(b - 1).state.load(Ordering::Acquire);
+    assert_eq!(state & BM_DIRTY, 0, "fresh read is clean");
+
+    globals::SetVacuumCostBalance(0);
+    globals::SetVacuumCostActive(true);
+    let dirtied_before = counters::shared_blks_dirtied();
+    let r = MarkBufferDirtyHint(b, true);
+    globals::SetVacuumCostActive(false);
+    r.unwrap();
+    assert_eq!(counters::shared_blks_dirtied() - dirtied_before, 1);
+    assert_eq!(
+        globals::VacuumCostBalance(),
+        globals::VacuumCostPageDirty(),
+        "hint-bit dirtying charges VacuumCostPageDirty (bufmgr.c:5579)"
+    );
+
+    // Already-dirty: no second charge (C: only when !BM_DIRTY before).
+    globals::SetVacuumCostActive(true);
+    let r = MarkBufferDirtyHint(b, true);
+    globals::SetVacuumCostActive(false);
+    r.unwrap();
+    assert_eq!(globals::VacuumCostBalance(), globals::VacuumCostPageDirty());
+    globals::SetVacuumCostBalance(0);
+
+    // Leave the pool clean: a dirty buffer would be picked up by another
+    // test's checkpoint pass on a thread without a resource owner.
+    LockBuffer(b, BUFFER_LOCK_SHARE).unwrap();
+    crate::write::FlushBuffer(GetBufferDescriptor(b - 1), types_storage::buf::IOContext::IOCONTEXT_NORMAL)
+        .unwrap();
+    LockBuffer(b, BUFFER_LOCK_UNLOCK).unwrap();
+    ReleaseBuffer(b).unwrap();
+}
+
+// localbuf.c:193 FlushLocalBuffer: StartLocalBufferIO refusing the write
+// (buffer not dirty) is elog(ERROR, "failed to start write IO on local
+// buffer"), not a silent success.
+#[test]
+fn b039_flush_local_buffer_on_clean_buffer_is_error() {
+    let _g = setup();
+    let rel = 9903u32;
+    let b = read_local_blk(rel, 0);
+    assert!(b < 0);
+    let err = crate::localbuf::FlushLocalBuffer(b)
+        .expect_err("flushing a clean local buffer is an ERROR in C");
+    assert_eq!(err.message(), "failed to start write IO on local buffer");
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    ReleaseBuffer(b).unwrap();
+    DropRelationAllLocalBuffers(rloc(rel)).unwrap();
+}
+
+// bufmgr.c:2726 ExtendBufferedRelShared: the "cannot extend relation %s
+// beyond %u blocks" path is relpath(smgr_rlocator, fork) — tablespace- and
+// fork-aware — not a hardcoded base/<db>/<rel>.
+#[test]
+fn b039_extend_beyond_max_block_number_reports_relpath() {
+    let _g = setup();
+    setup_extend_seams();
+    setup_b039_seams();
+    use types_resowner::{ResourceOwner, RESOURCE_RELEASE_BEFORE_LOCKS};
+    let rel = 9904u32;
+    NBLOCKS.lock().unwrap().insert(rel, types_core::MaxBlockNumber - 1);
+    let smgr = RelFileLocatorBackend {
+        locator: RelFileLocator {
+            spcOid: 16385,
+            dbOid: 5,
+            relNumber: rel,
+        },
+        backend: INVALID_PROC_NUMBER,
+    };
+
+    // The victims pinned before the size check are released like an aborted
+    // transaction would (ResourceOwnerRelease), so keep them on a scratch owner.
+    let save = resowner::CurrentResourceOwner();
+    let owner = resowner::ResourceOwnerCreate(ResourceOwner::NULL, "b039-extend").unwrap();
+    resowner::SetCurrentResourceOwner(owner);
+    let mut buffers = [types_core::InvalidBuffer; 2];
+    let res = crate::extend::ExtendBufferedRelCommon(
+        None,
+        smgr,
+        RELPERSISTENCE_PERMANENT,
+        ForkNumber::FSM_FORKNUM,
+        &None,
+        bufmgr_seams::EB_SKIP_EXTENSION_LOCK,
+        2,
+        types_core::InvalidBlockNumber,
+        &mut buffers,
+    );
+    resowner::ResourceOwnerRelease(owner, RESOURCE_RELEASE_BEFORE_LOCKS, false, true).unwrap();
+    resowner::SetCurrentResourceOwner(save);
+    resowner::ResourceOwnerDelete(owner);
+    NBLOCKS.lock().unwrap().remove(&rel);
+
+    let err = res.expect_err("extending past MaxBlockNumber is an ERROR");
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+    assert_eq!(
+        err.message(),
+        format!(
+            "cannot extend relation pg_tblspc/16385/{}/5/{rel}_fsm beyond {} blocks",
+            types_storage::TABLESPACE_VERSION_DIRECTORY,
+            types_core::MaxBlockNumber
+        )
+    );
+}
+
+// bufmgr.c:4057 InitBufferManagerAccess registers AtProcExit_Buffers with
+// on_shmem_exit, so a backend dying mid-LockBufferForCleanup clears its
+// BM_PIN_COUNT_WAITER flag (UnlockBuffers) on the way out.
+#[test]
+fn b039_init_buffer_manager_access_registers_at_proc_exit_buffers() {
+    let _g = setup();
+    let before = ON_SHMEM_EXIT_CBS.lock().unwrap().len();
+    InitBufferManagerAccess();
+    let registered: Vec<(fn(i32, usize), usize)> =
+        ON_SHMEM_EXIT_CBS.lock().unwrap()[before..].to_vec();
+    assert_eq!(
+        registered.len(),
+        1,
+        "InitBufferManagerAccess must on_shmem_exit(AtProcExit_Buffers, 0) (bufmgr.c:4057)"
+    );
+    let (cb, arg) = registered[0];
+    assert_eq!(arg, 0);
+
+    let rel = 9905u32;
+    let b = read_blk(rel, 0);
+    let desc = GetBufferDescriptor(b - 1);
+    let mut state = LockBufHdr(desc);
+    // SAFETY: header lock held.
+    unsafe { desc.set_wait_backend_pgprocno(globals::MyProcNumber()) };
+    crate::pin::set_pin_count_wait_buf(desc.buf_id);
+    state |= types_storage::buf::BM_PIN_COUNT_WAITER;
+    UnlockBufHdr(desc, state);
+    ReleaseBuffer(b).unwrap();
+
+    cb(0, arg);
+    assert_eq!(crate::pin::pin_count_wait_buf(), -1);
+    let state = desc.state.load(Ordering::Acquire);
+    assert_eq!(state & types_storage::buf::BM_PIN_COUNT_WAITER, 0);
+}
+
+// bufmgr.c:1157 PinBufferForBlock / StartReadBuffers: every block of a
+// combined read is one shared_blks_read at pin time and the stream hands the
+// pinned buffers to the scan without further hit accounting. The scan's
+// per-block re-pins of a batch it already paid for are therefore not hits:
+// a cold N-block scan is read=N, hit=0.
+#[test]
+fn b039_batched_scan_counts_each_block_once_as_a_read() {
+    let _g = setup();
+    let rel = 9906u32;
+    let smgr = RelFileLocatorBackend {
+        locator: rloc(rel),
+        backend: INVALID_PROC_NUMBER,
+    };
+    let nblocks = 8u32;
+    let hit0 = counters::shared_blks_hit();
+    let read0 = counters::shared_blks_read();
+    let reads0 = SMGR_READS.load(Ordering::Relaxed);
+    // heapam's forward scan: one call per block, hint = blocks left.
+    for blk in 0..nblocks {
+        let (b, _) =
+            read::ReadBuffer_batched(smgr, RELPERSISTENCE_PERMANENT, blk, nblocks - blk, None)
+                .unwrap();
+        assert_eq!(BufferGetBlockNumber(b), blk);
+        ReleaseBuffer(b).unwrap();
+    }
+    assert_eq!(SMGR_READS.load(Ordering::Relaxed) - reads0, 1, "one vectored read");
+    assert_eq!(counters::shared_blks_read() - read0, nblocks as u64, "read once per block");
+    assert_eq!(counters::shared_blks_hit() - hit0, 0, "no hit for a block this scan read");
+
+    // A second pass is pure hits, as in C.
+    for blk in 0..nblocks {
+        let (b, _) =
+            read::ReadBuffer_batched(smgr, RELPERSISTENCE_PERMANENT, blk, nblocks - blk, None)
+                .unwrap();
+        ReleaseBuffer(b).unwrap();
+    }
+    assert_eq!(counters::shared_blks_read() - read0, nblocks as u64);
+    assert_eq!(counters::shared_blks_hit() - hit0, nblocks as u64);
+}
+
+// bufmgr.c:1390 StartReadBuffersImpl: clamping a combined read at the md
+// segment boundary (smgrmaxcombine) is elog(DEBUG2, "limiting nblocks at %u
+// from %u to %u").
+#[test]
+fn b039_segment_boundary_clamp_emits_debug2() {
+    let _g = setup();
+    let rel = 9907u32;
+    let smgr = RelFileLocatorBackend {
+        locator: rloc(rel),
+        backend: INVALID_PROC_NUMBER,
+    };
+    let blk = types_storage::smgr::RELSEG_SIZE - 4;
+    let prev_level = elog::config::log_min_messages();
+    elog::config::set_log_min_messages(types_error::DEBUG2);
+    B039_CAPTURED.with(|c| c.borrow_mut().clear());
+    let prev_hook = elog::set_emit_log_hook(Some(b039_capture_hook));
+    let res = read::ReadBuffer_batched(smgr, RELPERSISTENCE_PERMANENT, blk, 13, None);
+    elog::set_emit_log_hook(prev_hook);
+    elog::config::set_log_min_messages(prev_level);
+    let (b, _) = res.unwrap();
+    // Copy out before asserting: a failing assert must not poison the
+    // harness mutex for every other test (the seam locks it on each read).
+    let last_readv = *READV_SIZES.lock().unwrap().last().unwrap();
+    assert_eq!(last_readv, 4, "clamped at the segment end");
+    let captured = B039_CAPTURED.with(|c| c.borrow().clone());
+    let expected = format!("limiting nblocks at {blk} from 13 to 4");
+    assert!(
+        captured
+            .iter()
+            .any(|e| e.level() == types_error::DEBUG2 && e.message() == expected),
+        "expected DEBUG2 {expected:?}, got {:?}",
+        captured.iter().map(|e| (e.level(), e.message().to_string())).collect::<Vec<_>>()
+    );
+    ReleaseBuffer(b).unwrap();
+}
+
+// bufmgr.c:4326 FlushBuffer pushes shared_buffer_write_error_callback for the
+// duration of the write, so an I/O error reports CONTEXT: writing block %u of
+// relation "<relpathperm>". The IO is terminated (BM_IO_ERROR) and the buffer
+// stays dirty, exactly as after C's longjmp through AbortBufferIO.
+#[test]
+fn b039_flush_buffer_error_carries_write_context() {
+    let _g = setup();
+    setup_write_seams();
+    setup_b039_seams();
+    let rel = WRITE_ERROR_REL;
+    let b = dirty_block(rel, 3);
+    let pinned = read_blk(rel, 3);
+    assert_eq!(pinned, b);
+    LockBuffer(b, BUFFER_LOCK_SHARE).unwrap();
+    let desc = GetBufferDescriptor(b - 1);
+
+    WRITE_ERROR_INJECT.store(true, Ordering::Relaxed);
+    let res = crate::write::FlushBuffer(desc, types_storage::buf::IOContext::IOCONTEXT_NORMAL);
+    WRITE_ERROR_INJECT.store(false, Ordering::Relaxed);
+    let err = res.expect_err("injected write failure must surface as an ERROR");
+    assert!(
+        err.message().contains("injected write failure"),
+        "unexpected error: {}",
+        err.message()
+    );
+    assert_eq!(
+        err.context(),
+        Some(format!("writing block 3 of relation \"base/5/{rel}\"").as_str()),
+        "CONTEXT line of shared_buffer_write_error_callback (bufmgr.c:6222)"
+    );
+    let state = desc.state.load(Ordering::Acquire);
+    assert!(state & BM_DIRTY != 0, "a failed write leaves the buffer dirty");
+    assert_eq!(state & types_storage::buf::BM_IO_IN_PROGRESS, 0, "the IO was terminated");
+    assert!(state & types_storage::buf::BM_IO_ERROR != 0);
+
+    // With the disk back, the same flush succeeds and cleans the buffer.
+    crate::write::FlushBuffer(desc, types_storage::buf::IOContext::IOCONTEXT_NORMAL).unwrap();
+    assert_eq!(desc.state.load(Ordering::Acquire) & BM_DIRTY, 0);
+    LockBuffer(b, BUFFER_LOCK_UNLOCK).unwrap();
+    ReleaseBuffer(b).unwrap();
+}
+
+// bufmgr.c:4979 FlushRelationBuffers (local arm) pushes
+// local_buffer_write_error_callback around each FlushLocalBuffer: CONTEXT:
+// writing block %u of relation "<relpathbackend(..., MyProcNumber, ...)>".
+#[test]
+fn b039_flush_relation_local_buffers_error_carries_write_context() {
+    let _g = setup();
+    setup_write_seams();
+    setup_b039_seams();
+    let rel = WRITE_ERROR_REL_LOCAL;
+    let b = read_local_blk(rel, 2);
+    assert!(b < 0);
+    MarkBufferDirty(b).unwrap();
+    ReleaseBuffer(b).unwrap();
+
+    WRITE_ERROR_INJECT.store(true, Ordering::Relaxed);
+    let res = crate::localbuf::FlushRelationLocalBuffers(rloc(rel));
+    WRITE_ERROR_INJECT.store(false, Ordering::Relaxed);
+    let err = res.expect_err("injected local write failure must surface as an ERROR");
+    assert!(err.message().contains("injected write failure"), "{}", err.message());
+    assert_eq!(
+        err.context(),
+        Some(
+            format!(
+                "writing block 2 of relation \"base/5/t{}_{rel}\"",
+                globals::MyProcNumber()
+            )
+            .as_str()
+        ),
+        "CONTEXT line of local_buffer_write_error_callback (bufmgr.c:6237)"
+    );
+
+    crate::localbuf::FlushRelationLocalBuffers(rloc(rel)).unwrap();
+    DropRelationAllLocalBuffers(rloc(rel)).unwrap();
+}
+
+// freelist.c:689 GetAccessStrategyPinLimit, applied by read_stream.c:618 to
+// the stream's pin budget: a strategy ring caps how many blocks one combined
+// read may pin (nbuffers for BAS_BULKREAD, nbuffers / 2 otherwise, at least
+// one). A 2-buffer vacuum ring therefore reads one block at a time.
+#[test]
+fn b039_batched_read_caps_at_the_strategy_pin_limit() {
+    let _g = setup();
+    let smgr = RelFileLocatorBackend {
+        locator: rloc(9911),
+        backend: INVALID_PROC_NUMBER,
+    };
+    let strategy =
+        crate::freelist::GetAccessStrategyWithSize(BufferAccessStrategyType::BasVacuum, 16);
+    assert_eq!(crate::freelist::GetAccessStrategyBufferCount(&strategy), 2);
+    let (b, _) =
+        read::ReadBuffer_batched(smgr, RELPERSISTENCE_PERMANENT, 0, 8, strategy.clone()).unwrap();
+    let last_readv = *READV_SIZES.lock().unwrap().last().unwrap();
+    assert_eq!(last_readv, 1, "a 2-buffer vacuum ring pins at most nbuffers / 2 = 1 block per read");
+    ReleaseBuffer(b).unwrap();
+    // The default (unlimited) case is unchanged: the run is capped by the hint.
+    let (b, _) = read::ReadBuffer_batched(smgr, RELPERSISTENCE_PERMANENT, 100, 8, None).unwrap();
+    let last_readv = *READV_SIZES.lock().unwrap().last().unwrap();
+    assert_eq!(last_readv, 8);
+    ReleaseBuffer(b).unwrap();
 }
