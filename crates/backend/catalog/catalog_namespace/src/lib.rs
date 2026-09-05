@@ -416,7 +416,7 @@ pub fn init_seams() {
     namespace_seams::get_ts_dict_oid::set(lookup::get_ts_dict_oid);
     namespace_seams::opername_get_oprid::set(lookup::OpernameGetOprid);
     namespace_seams::opername_get_candidate_oids::set(opername_get_candidate_oids);
-    namespace_seams::type_is_visible::set(lookup::TypeIsVisible);
+    namespace_seams::type_is_visible::set(visibility::TypeIsVisible);
     namespace_seams::lookup_explicit_namespace::set(lookup::LookupExplicitNamespace);
     namespace_seams::my_temp_namespace::set(my_temp_namespace);
 

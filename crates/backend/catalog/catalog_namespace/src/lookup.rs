@@ -2,8 +2,9 @@ use mcx::MemoryContext;
 use rel_vocab::RangeVar;
 use types_core::{InvalidOid, Oid, RELPERSISTENCE_TEMP};
 use types_error::{
-    PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_TABLE_DEFINITION,
-    ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_SCHEMA, ERRCODE_UNDEFINED_TABLE,
+    ErrorLocation, PgError, PgResult, DEBUG1, ERRCODE_FEATURE_NOT_SUPPORTED,
+    ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_LOCK_NOT_AVAILABLE, ERRCODE_SYNTAX_ERROR,
+    ERRCODE_UNDEFINED_SCHEMA, ERRCODE_UNDEFINED_TABLE, ERROR,
 };
 use types_rel::{NoLock, LOCKMODE};
 
@@ -34,14 +35,28 @@ fn undefined_schema(nspname: &str) -> Box<PgError> {
 #[cold]
 #[inline(never)]
 fn undefined_relation(relation: &RangeVar<'_>) -> Box<PgError> {
-    let msg = match relation.schemaname {
+    Box::new(
+        PgError::error(undefined_relation_message(relation)).with_sqlstate(ERRCODE_UNDEFINED_TABLE),
+    )
+}
+
+fn undefined_relation_message(relation: &RangeVar<'_>) -> String {
+    match relation.schemaname {
         Some(schema) => format!(
             "relation \"{}.{}\" does not exist",
             schema, relation.relname
         ),
         None => format!("relation \"{}\" does not exist", relation.relname),
-    };
-    Box::new(PgError::error(msg).with_sqlstate(ERRCODE_UNDEFINED_TABLE))
+    }
+}
+
+#[cold]
+#[track_caller]
+fn loc(funcname: &'static str) -> ErrorLocation {
+    // Sub-ERROR ereports carry a location like every other report; it is our
+    // source, so name the call site (#[track_caller] resolves to it).
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, funcname)
 }
 
 #[track_caller]
@@ -711,31 +726,6 @@ pub fn TypenameGetTypidExtended(typname: &str, temp_ok: bool) -> PgResult<Oid> {
     Ok(InvalidOid)
 }
 
-// TypeIsVisible (namespace.c): first path entry owning the name decides.
-pub fn TypeIsVisible(typid: Oid) -> PgResult<bool> {
-    let Some(t) = syscache_seams::pg_type_domain_shape::call(typid)? else {
-        return Err(Box::new(types_error::PgError::error(format!(
-            "cache lookup failed for type {typid}"
-        ))));
-    };
-    let typname = core::str::from_utf8(t.typname.name_str())
-        .unwrap_or_else(|_| panic!("non-UTF-8 type name"));
-    recomputeNamespacePath()?;
-    for i in 0..base_path_len() {
-        let namespace_id = base_path_nth(i);
-        if namespace_id == t.typnamespace {
-            return Ok(true);
-        }
-        if OidIsValid(syscache_seams::lookup_pg_type_oid_by_name::call(
-            typname,
-            namespace_id,
-        )?) {
-            return Ok(false);
-        }
-    }
-    Ok(false)
-}
-
 pub fn RangeVarGetRelid(
     relation: &RangeVar<'_>,
     lockmode: LOCKMODE,
@@ -816,10 +806,8 @@ pub fn RangeVarGetRelidExtended(
         } else if (flags & (RVR_NOWAIT | RVR_SKIP_LOCKED)) == 0 {
             lmgr_seams::lock_relation_oid::call(relId, lockmode)?;
         } else if !lmgr_seams::conditional_lock_relation_oid::call(relId, lockmode)? {
-            if (flags & RVR_SKIP_LOCKED) != 0 {
-                // C ereports DEBUG1 here; no elog-level channel below ERROR.
-                return Ok(InvalidOid);
-            }
+            // namespace.c:595-606: DEBUG1 under RVR_SKIP_LOCKED (the caller
+            // skips the relation), ERROR under RVR_NOWAIT.
             let msg = match relation.schemaname {
                 Some(schema) => format!(
                     "could not obtain lock on relation \"{schema}.{}\"",
@@ -827,8 +815,15 @@ pub fn RangeVarGetRelidExtended(
                 ),
                 None => format!("could not obtain lock on relation \"{}\"", relation.relname),
             };
-            return Err(::elog::ereport(types_error::ERROR)
-                .errcode(types_error::ERRCODE_LOCK_NOT_AVAILABLE)
+            if (flags & RVR_SKIP_LOCKED) != 0 {
+                ::elog::ereport(DEBUG1)
+                    .errcode(ERRCODE_LOCK_NOT_AVAILABLE)
+                    .errmsg(msg)
+                    .finish(loc("RangeVarGetRelidExtended"))?;
+                return Ok(InvalidOid);
+            }
+            return Err(::elog::ereport(ERROR)
+                .errcode(ERRCODE_LOCK_NOT_AVAILABLE)
                 .errmsg(msg)
                 .into_error()
                 .into());
@@ -842,8 +837,17 @@ pub fn RangeVarGetRelidExtended(
         oldRelId = relId;
     }
 
-    if !OidIsValid(relId) && !missing_ok {
-        return Err(undefined_relation(relation));
+    if !OidIsValid(relId) {
+        // namespace.c:628-639: elevel = missing_ok ? DEBUG1 : ERROR — the
+        // not-found report still goes out (to a client at debug1) when the
+        // caller tolerates the miss.
+        if !missing_ok {
+            return Err(undefined_relation(relation));
+        }
+        ::elog::ereport(DEBUG1)
+            .errcode(ERRCODE_UNDEFINED_TABLE)
+            .errmsg(undefined_relation_message(relation))
+            .finish(loc("RangeVarGetRelidExtended"))?;
     }
     Ok(relId)
 }
@@ -1035,16 +1039,16 @@ pub fn FuncnameGetCandidatesExtended<'mcx>(
         }
 
         // C reads proallargtypes/proargmodes/proargnames off the tuple in
-        // hand; the equivalent PROCOID re-probe cannot miss under the list.
+        // hand (namespace.c:1263-1295); the PROCOID re-probe can only miss if
+        // the row vanished, and a miss is C's syscache elog, never a panic.
         let arrays = if include_out_arguments || !argnames.is_empty() {
-            Some(
-                syscache_seams::pg_proc_result_arrays::call(mcx, cand.oid)?.unwrap_or_else(|| {
-                    panic!(
-                        "cache lookup failed for function {} (namespace.c)",
-                        cand.oid
-                    )
-                }),
-            )
+            let Some(arrays) = syscache_seams::pg_proc_result_arrays::call(mcx, cand.oid)? else {
+                return Err(Box::new(PgError::error(format!(
+                    "cache lookup failed for function {}",
+                    cand.oid
+                ))));
+            };
+            Some(arrays)
         } else {
             None
         };

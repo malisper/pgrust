@@ -21,6 +21,9 @@ thread_local! {
     static ROLNAME: RefCell<Option<String>> = const { RefCell::new(None) };
     static USER: Cell<Oid> = const { Cell::new(USER_A) };
     static ACL_DENIED: RefCell<Vec<Oid>> = const { RefCell::new(Vec::new()) };
+    // InitTempTableNamespace's RecoveryInProgress()/IsParallelWorker() arms.
+    static IN_RECOVERY: Cell<bool> = const { Cell::new(false) };
+    static PARALLEL_WORKER: Cell<bool> = const { Cell::new(false) };
 }
 
 fn install_fakes() {
@@ -67,6 +70,8 @@ fn install_fakes() {
                 .unwrap_or(InvalidOid))
         });
         inval_seams::accept_invalidation_messages::set(|| Ok(()));
+        transam_xlog_seams::recovery_in_progress::set(|| IN_RECOVERY.with(Cell::get));
+        parallel_seams::is_parallel_worker::set(|| PARALLEL_WORKER.with(Cell::get));
         lmgr_seams::lock_relation_oid::set(|_, _| Ok(()));
         lmgr_seams::unlock_relation_oid::set(|_, _| Ok(()));
         crate::init_seams();
@@ -89,6 +94,8 @@ fn install_fakes() {
     ROLNAME.with(|r| *r.borrow_mut() = None);
     ACL_DENIED.with(|d| d.borrow_mut().clear());
     USER.with(|u| u.set(USER_A));
+    IN_RECOVERY.with(|c| c.set(false));
+    PARALLEL_WORKER.with(|c| c.set(false));
 }
 
 fn set_search_path(v: &str) {
@@ -678,4 +685,67 @@ fn include_out_arguments_substitutes_proallargtypes() {
     assert_eq!(cands[0].oid, 9021);
     assert_eq!(cands[0].argnumbers.as_ref().unwrap().as_slice(), &[0, 1]);
     assert_eq!(cands[0].args.as_slice(), &[23, 25]);
+}
+
+// namespace.c:4428-4432: a hot-standby session never creates its temp
+// namespace (ERRCODE_READ_ONLY_SQL_TRANSACTION), checked right after the
+// database ACL and before any pg_temp_N lookup.
+#[test]
+fn temp_namespace_refused_during_recovery() {
+    install_fakes();
+    IN_RECOVERY.with(|c| c.set(true));
+    let ctx = MemoryContext::new("t");
+    let err = GetTempTableNamespace(ctx.mcx())
+        .err()
+        .expect("InitTempTableNamespace must refuse during recovery");
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_READ_ONLY_SQL_TRANSACTION);
+    assert_eq!(err.message(), "cannot create temporary tables during recovery");
+    assert_eq!(my_temp_namespace(), InvalidOid);
+}
+
+// namespace.c:4434-4438: a parallel worker never creates its temp namespace
+// either (same SQLSTATE, its own message); reached from SQL by a PARALLEL
+// SAFE function calling current_schema() with pg_temp first in search_path.
+#[test]
+fn temp_namespace_refused_in_parallel_worker() {
+    install_fakes();
+    PARALLEL_WORKER.with(|c| c.set(true));
+    let ctx = MemoryContext::new("t");
+    let err = GetTempTableNamespace(ctx.mcx())
+        .err()
+        .expect("InitTempTableNamespace must refuse in a parallel worker");
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_READ_ONLY_SQL_TRANSACTION);
+    assert_eq!(
+        err.message(),
+        "cannot create temporary tables during a parallel operation"
+    );
+    assert_eq!(my_temp_namespace(), InvalidOid);
+}
+
+// namespace.c:1225-1295 reads proallargtypes/proargmodes/proargnames off the
+// pinned candidate tuple; the Rust re-probe of PROCOID can only miss if the
+// row vanished, and a miss is C's elog(ERROR, "cache lookup failed for
+// function %u") — never a server panic.
+#[test]
+fn funcname_candidates_arrays_miss_is_an_error_not_a_panic() {
+    install_fakes();
+    install_proc_candidates();
+    set_search_path("public");
+
+    let ctx = MemoryContext::new("t");
+    // Named notation forces the array re-probe; the fake holds no arrays for
+    // 9001 (the PROCOID miss).
+    let err = crate::FuncnameGetCandidatesExtended(
+        ctx.mcx(),
+        &["f"],
+        1,
+        &["a"],
+        true,
+        true,
+        false,
+        false,
+    )
+    .err()
+    .expect("a vanished pg_proc row must be reported as an error");
+    assert_eq!(err.message(), "cache lookup failed for function 9001");
 }

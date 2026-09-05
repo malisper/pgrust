@@ -1,8 +1,11 @@
 use cache_syscache::cacheinfo::{
-    CLAOID, COLLOID, CONVOID, OPEROID, OPFAMILYOID, PROCOID, RELOID, STATEXTOID, TSCONFIGOID,
-    TSDICTOID, TSPARSERNAMENSP, TSPARSEROID, TSTEMPLATENAMENSP, TSTEMPLATEOID, TYPEOID,
+    CLAOID, COLLOID, CONVOID, OPEROID, OPFAMILYOID, PROCOID, RELNAMENSP, RELOID, STATEXTOID,
+    TSCONFIGOID, TSDICTOID, TSPARSERNAMENSP, TSPARSEROID, TSTEMPLATENAMENSP, TSTEMPLATEOID,
+    TYPENAMENSP, TYPEOID,
 };
-use cache_syscache::{ReleaseSysCache, SearchSysCache1, SysCacheGetAttrNotNull, SysCacheKey};
+use cache_syscache::{
+    GetSysCacheOid, ReleaseSysCache, SearchSysCache1, SysCacheGetAttrNotNull, SysCacheKey,
+};
 use datum::Datum;
 use mcx::MemoryContext;
 use types_core::{Oid, PG_CATALOG_NAMESPACE};
@@ -16,8 +19,10 @@ use crate::lookup::{
 use crate::path::recomputeNamespacePath;
 use crate::{base_path_len, base_path_nth, OidIsValid};
 
+const ANUM_PG_CLASS_OID: i32 = 1;
 const ANUM_PG_CLASS_RELNAME: i32 = 2;
 const ANUM_PG_CLASS_RELNAMESPACE: i32 = 3;
+const ANUM_PG_TYPE_OID: i32 = 1;
 const ANUM_PG_TYPE_TYPNAME: i32 = 2;
 const ANUM_PG_TYPE_TYPNAMESPACE: i32 = 3;
 const ANUM_PG_PROC_PRONAME: i32 = 2;
@@ -47,8 +52,30 @@ fn name_str(name: &NameData) -> String {
     // SQL_ASCII catalog names may be non-UTF-8; match C's non-panicking
     // behavior with a lossy copy. NOTE: for genuinely non-UTF-8 names this can
     // change the name used in the visibility lookups below, which C performs as
-    // a byte-exact NameData comparison. See idx 150 report for the tradeoff.
+    // a byte-exact NameData comparison. The relation and type arms probe the
+    // raw bytes (name_shadows); the remaining arms go through &str-keyed
+    // lookups and keep the lossy copy. See idx 150 report for the tradeoff.
     String::from_utf8_lossy(name.name_str()).into_owned()
+}
+
+// C's get_relname_relid(NameStr(relname), nsp) / SearchSysCacheExists2(
+// TYPENAMENSP, typname, nsp) shadow probes: GetSysCacheOid2 on the raw
+// NameData bytes, so a SQL_ASCII name that is not UTF-8 still finds the
+// same-named earlier-in-path object exactly as C does.
+fn name_shadows(
+    cache_id: i32,
+    oidcol: i32,
+    name: &NameData,
+    namespace_id: Oid,
+) -> PgResult<bool> {
+    Ok(OidIsValid(GetSysCacheOid(
+        cache_id,
+        oidcol,
+        SysCacheKey::Bytes(name.name_str()),
+        SysCacheKey::Value(Datum::from_oid(namespace_id)),
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+    )?))
 }
 
 fn path_contains(nsp: Oid) -> bool {
@@ -88,7 +115,7 @@ pub fn RelationIsVisibleExt(relid: Oid) -> PgResult<Option<bool>> {
             visible = true;
             break;
         }
-        if OidIsValid(lsyscache::get_relname_relid(&name_str(&relname), namespace_id)?) {
+        if name_shadows(RELNAMENSP, ANUM_PG_CLASS_OID, &relname, namespace_id)? {
             break;
         }
     }
@@ -120,10 +147,7 @@ pub fn TypeIsVisibleExt(typid: Oid) -> PgResult<Option<bool>> {
             visible = true;
             break;
         }
-        if OidIsValid(syscache_seams::lookup_pg_type_oid_by_name::call(
-            &name_str(&typname),
-            namespace_id,
-        )?) {
+        if name_shadows(TYPENAMENSP, ANUM_PG_TYPE_OID, &typname, namespace_id)? {
             break;
         }
     }

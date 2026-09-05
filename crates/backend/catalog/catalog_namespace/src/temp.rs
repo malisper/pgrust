@@ -1,6 +1,4 @@
-// namespace.c temp-namespace creation half. C divergences:
-// RecoveryInProgress/IsParallelWorker guards are compile-time absent (no hot
-// standby, no parallel workers).
+// namespace.c temp-namespace creation half.
 use std::cell::Cell;
 
 use mcx::{Mcx, MemoryContext};
@@ -9,7 +7,8 @@ use types_core::{
     NAMESPACE_RELATION_ID,
 };
 use types_error::{
-    PgError, PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_TABLE_DEFINITION, ERROR,
+    PgError, PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_TABLE_DEFINITION,
+    ERRCODE_READ_ONLY_SQL_TRANSACTION, ERROR,
 };
 use types_nodes::parsenodes::DropBehavior;
 
@@ -65,6 +64,31 @@ fn InitTempTableNamespace(mcx: Mcx<'_>) -> PgResult<()> {
                 format!("permission denied to create temporary tables in database \"{dbname}\""),
             )
             .with_sqlstate(ERRCODE_INSUFFICIENT_PRIVILEGE),
+        ));
+    }
+
+    // namespace.c:4428-4432: a hot-standby session never makes temp tables —
+    // catalog writes aside, pg_temp_N belongs to the primary's proc N. Reached
+    // from SQL by anything that forces the namespace (fetch_search_path with
+    // pg_temp first, CREATE TEMP TABLE) since XactReadOnly does not cover it.
+    if transam_xlog_seams::recovery_in_progress::call() {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                "cannot create temporary tables during recovery".to_string(),
+            )
+            .with_sqlstate(ERRCODE_READ_ONLY_SQL_TRANSACTION),
+        ));
+    }
+
+    // namespace.c:4434-4438: parallel workers can't create them either.
+    if parallel_seams::is_parallel_worker::call() {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                "cannot create temporary tables during a parallel operation".to_string(),
+            )
+            .with_sqlstate(ERRCODE_READ_ONLY_SQL_TRANSACTION),
         ));
     }
 
