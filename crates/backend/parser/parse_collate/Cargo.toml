@@ -22,3 +22,5 @@ types_nodes = { path = "../../../_support/types/nodes" }
 
 [dev-dependencies]
 datum = { path = "../../../_support/types/datum" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+types_tuple = { path = "../../../_support/types/types_tuple" }

@@ -11389,9 +11389,11 @@ dependencies = [
  "parse_collate_seams",
  "parse_expr",
  "parser_small1",
+ "syscache_seams",
  "types_core",
  "types_error",
  "types_nodes",
+ "types_tuple",
 ]
 
 [[package]]

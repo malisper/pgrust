@@ -506,7 +506,7 @@ fn assign_collations_walker<'mcx>(
                         types_nodes::primnodes::AGGKIND_HYPOTHETICAL => {
                             assign_hypothetical_collations(agg, &mut loccontext)?;
                         }
-                        _ => {
+                        types_nodes::primnodes::AGGKIND_NORMAL => {
                             debug_assert!(agg.aggdirectargs.is_nil());
                             for tle_node in &agg.args {
                                 let tle =
@@ -522,6 +522,8 @@ fn assign_collations_walker<'mcx>(
                                 }
                             }
                         }
+                        // parse_collate.c:615 elog(ERROR, "unrecognized aggkind: %d").
+                        other => return Err(unrecognized_aggkind(other)),
                     }
                     if let Some(filter) = agg.aggfilter {
                         assign_expr_collations(context.mcx, context.pstate, filter)?;
@@ -563,16 +565,23 @@ fn assign_collations_walker<'mcx>(
                         assign_collations_walker(arg, &mut loccontext)?;
                     }
                 }
+                // The subscripts are independent expressions that do not
+                // contribute to the node's collation (parse_collate.c:684-687:
+                // assign_expr_collations on each subscript list, i.e. one fresh
+                // context per list whose result is discarded).  Only the
+                // container and the assignment source contribute.
                 NodeTag::T_SubscriptingRef => {
                     let s = node.as_subscripting_ref().unwrap();
+                    let mut upper = AssignCollationsCtx::new(context.mcx, context.pstate);
                     for e in &s.refupperindexpr {
                         if let Some(e) = e {
-                            assign_collations_walker(e, &mut loccontext)?;
+                            assign_collations_walker(e, &mut upper)?;
                         }
                     }
+                    let mut lower = AssignCollationsCtx::new(context.mcx, context.pstate);
                     for e in &s.reflowerindexpr {
                         if let Some(e) = e {
-                            assign_collations_walker(e, &mut loccontext)?;
+                            assign_collations_walker(e, &mut lower)?;
                         }
                     }
                     if let Some(e) = s.refexpr {
@@ -1122,6 +1131,16 @@ fn merge_collation_state(
         }
     }
     Ok(())
+}
+
+// parse_collate.c:615 elog(ERROR, "unrecognized aggkind: %d") -- elog's
+// default SQLSTATE is XX000 (ERRCODE_INTERNAL_ERROR) and the error is
+// catchable; it must never abort the backend.
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn unrecognized_aggkind(aggkind: i8) -> Box<PgError> {
+    Box::new(PgError::error(format!("unrecognized aggkind: {}", aggkind as i32)))
 }
 
 #[track_caller]
