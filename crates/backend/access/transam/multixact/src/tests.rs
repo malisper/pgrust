@@ -24,9 +24,16 @@ fn shmem_registry() -> &'static Mutex<std::collections::HashMap<String, usize>> 
 // Datadir-shaped fixture, as C initdb + one committed multixact would leave
 // it: multi 1 = members {100 sh, 101 keysh, 102 nokeyupd} at offsets 1..4.
 fn write_fixture_segments(dir: &std::path::Path) {
-    let mut offsets_page = vec![0u8; BLCKSZ];
+    // Two offsets pages: page 0 holds the live multis; page 1 (multis
+    // 2048..4095, untouched by TrimMultiXact's zeroing of the CURRENT page)
+    // carries a corrupt pair for corrupt_negative_member_count_is_c_palloc_error.
+    let mut offsets_page = vec![0u8; 2 * BLCKSZ];
     offsets_page[4..8].copy_from_slice(&1u32.to_ne_bytes()); // multi 1 -> offset 1
     offsets_page[8..12].copy_from_slice(&4u32.to_ne_bytes()); // multi 2 -> offset 4
+    // multi 3000 -> offset 100, multi 3001 -> offset 50: length = 50 - 100 = -50.
+    let e3000 = BLCKSZ + (3000 - 2048) * 4;
+    offsets_page[e3000..e3000 + 4].copy_from_slice(&100u32.to_ne_bytes());
+    offsets_page[e3000 + 4..e3000 + 8].copy_from_slice(&50u32.to_ne_bytes());
     std::fs::write(dir.join("pg_multixact/offsets/0000"), &offsets_page).unwrap();
 
     // Group 0 layout: flags word at 0, xids at 8/12/16 for offsets 1/2/3.
@@ -763,4 +770,48 @@ fn set_multixact_id_limit_in_aborted_block_uses_oid_not_syscache() {
         "SetMultiXactIdLimit in an aborted transaction block must warn with the \
          database OID (IsTransactionState()==false), not attempt a syscache lookup",
     );
+}
+
+// multixact.c:2150 MultiXactShmemInit registers the state through
+// ShmemInitStruct("Shared MultiXact State", MultiXactSharedStateShmemSize(),
+// &found), so pg_shmem_allocations lists it; the pre-fix port Box::leak'ed it
+// on the heap with no ShmemIndex row. Audit
+// a186-candidate-fp-transam-multixact-p1-1e852a4898341b545ff9-1.
+#[test]
+fn shmem_init_registers_shared_multixact_state_in_shmem_index() {
+    let _l = test_lock();
+    setup();
+    // The test registry maps ShmemIndex name -> arena address.
+    let reg = shmem_registry().lock().unwrap();
+    assert!(
+        reg.contains_key("Shared MultiXact State"),
+        "Shared MultiXact State is missing from the ShmemIndex: {:?}",
+        reg.keys().collect::<Vec<_>>()
+    );
+}
+
+// multixact.c:1656 `palloc(length * sizeof(MultiXactMember))`: a corrupt
+// offsets pair whose delta reinterprets to a negative int becomes a huge
+// size_t (int -> size_t conversion wraps), and palloc raises the catchable
+// elog(ERROR, "invalid memory alloc request size %zu") — SQLSTATE XX000.
+// The pre-fix port classified the count first and raised its own XX001
+// "MultiXact %u has invalid member count %d". Audit
+// a186-verified-fp-transam-multixact-p1-9b45966126bc83c484bf-1.
+#[test]
+fn corrupt_negative_member_count_is_c_palloc_error() {
+    let _l = test_lock();
+    setup();
+    AtEOXact_MultiXact();
+    let st = MultiXactState();
+    let saved_next = st.nextMXact.load(Relaxed);
+    // multi 3000 must precede nextMXact to pass the wraparound guards.
+    st.nextMXact.store(3002, Relaxed);
+    let r = multixact_seams::get_multi_xact_id_members::call(3000, false, false, &mut |_| {});
+    st.nextMXact.store(saved_next, Relaxed);
+    AtEOXact_MultiXact();
+    let err = r.expect_err("length -50 must be rejected");
+    // (size_t) -50 * 8 == 2^64 - 400.
+    assert_eq!(err.message(), "invalid memory alloc request size 18446744073709551216");
+    assert_eq!(err.sqlstate(), ERRCODE_INTERNAL_ERROR);
+    assert_eq!(err.level, ERROR);
 }

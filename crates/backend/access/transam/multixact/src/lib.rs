@@ -1183,6 +1183,18 @@ fn get_members_into(
     // fallible reservation so even an in-range request degrades to a per-query
     // error rather than a wild allocation.
     if member_count_is_corrupt(length) {
+        // multixact.c:1656 `palloc(length * sizeof(MultiXactMember))`: the
+        // int length converts to size_t (a negative one wraps to ~2^64) and
+        // palloc's MaxAllocSize check raises the catchable elog(ERROR,
+        // "invalid memory alloc request size %zu") — SQLSTATE XX000. Raise
+        // that exact error for every non-zero corrupt count; C's palloc(0)
+        // for a zero count is a hardened arm here (data-corruption ERROR).
+        if length != 0 {
+            let request = (length as i64 as u64)
+                .wrapping_mul(core::mem::size_of::<MultiXactMember>() as u64)
+                as usize;
+            mcx::check_alloc_size(request)?;
+        }
         ereport(ERROR)
             .errcode(ERRCODE_DATA_CORRUPTED)
             .errmsg(format!("MultiXact {multi} has invalid member count {length}"))
@@ -1386,8 +1398,10 @@ fn num_visible_slots() -> usize {
 }
 
 // MultiXactSharedStateShmemSize: the C scalar header is 48 bytes
-// (offsetof(MultiXactStateData, perBackendXactIds)); accounting only — the
-// backing store is a leaked process-local struct (procarray precedent).
+// (offsetof(MultiXactStateData, perBackendXactIds)) plus the two per-backend
+// arrays; this is the ShmemInitStruct("Shared MultiXact State") size C
+// reports in pg_shmem_allocations. The Rust header (atomics + the boxed
+// per-backend slice) is written into that arena.
 fn shared_multixact_state_size() -> Size {
     48 + core::mem::size_of::<MultiXactId>() * (num_member_slots() + num_visible_slots())
 }
@@ -1431,26 +1445,50 @@ pub fn MultiXactShmemInit() -> PgResult<()> {
         panic!("MultiXactShmemInit called twice");
     }
 
+    // multixact.c:2150-2159: ShmemInitStruct("Shared MultiXact State",
+    // MultiXactSharedStateShmemSize(), &found) registers the state in the
+    // ShmemIndex (pg_shmem_allocations) and hands back the zeroed arena
+    // (!IsUnderPostmaster: Assert(!found) + MemSet 0).
+    let shmem_size = shared_multixact_state_size();
+    let (raw, found) = shmem_seams::shmem_init_struct::call("Shared MultiXact State", shmem_size)?;
+    debug_assert!(!found, "MultiXactShmemInit: segment already initialized");
+    const {
+        assert!(core::mem::align_of::<MultiXactStateShared>() <= 64, "PG_CACHE_LINE_SIZE alignment");
+    }
+    // C's size is 48 + 4 * (2 * MaxBackends + max_prepared_xacts) bytes;
+    // MaxBackends >= 3 keeps it at or above the Rust header size.
+    assert!(
+        shmem_size >= core::mem::size_of::<MultiXactStateShared>(),
+        "MultiXactSharedStateShmemSize {shmem_size} smaller than the state header"
+    );
     let member_slots = num_member_slots();
     let total_slots = member_slots + num_visible_slots();
     let mut per_backend = Vec::with_capacity(total_slots);
     per_backend.resize_with(total_slots, || AtomicU32::new(0));
-    let state: &'static MultiXactStateShared = Box::leak(Box::new(MultiXactStateShared {
-        nextMXact: AtomicU32::new(0),
-        nextOffset: AtomicU32::new(0),
-        finishedStartup: AtomicBool::new(false),
-        oldestMultiXactId: AtomicU32::new(0),
-        oldestMultiXactDB: AtomicU32::new(0),
-        oldestOffset: AtomicU32::new(0),
-        oldestOffsetKnown: AtomicBool::new(false),
-        multiVacLimit: AtomicU32::new(0),
-        multiWarnLimit: AtomicU32::new(0),
-        multiStopLimit: AtomicU32::new(0),
-        multiWrapLimit: AtomicU32::new(0),
-        offsetStopLimit: AtomicU32::new(0),
-        perBackendXactIds: per_backend.into_boxed_slice(),
-        num_member_slots: member_slots,
-    }));
+    let p = raw.cast::<MultiXactStateShared>();
+    // SAFETY: a fresh, zeroed, cache-line-aligned ShmemIndex allocation of at
+    // least size_of::<MultiXactStateShared>() bytes (asserted above), written
+    // once during single-threaded shmem init and leaked for the cluster
+    // lifetime like C shmem.
+    let state: &'static MultiXactStateShared = unsafe {
+        p.write(MultiXactStateShared {
+            nextMXact: AtomicU32::new(0),
+            nextOffset: AtomicU32::new(0),
+            finishedStartup: AtomicBool::new(false),
+            oldestMultiXactId: AtomicU32::new(0),
+            oldestMultiXactDB: AtomicU32::new(0),
+            oldestOffset: AtomicU32::new(0),
+            oldestOffsetKnown: AtomicBool::new(false),
+            multiVacLimit: AtomicU32::new(0),
+            multiWarnLimit: AtomicU32::new(0),
+            multiStopLimit: AtomicU32::new(0),
+            multiWrapLimit: AtomicU32::new(0),
+            offsetStopLimit: AtomicU32::new(0),
+            perBackendXactIds: per_backend.into_boxed_slice(),
+            num_member_slots: member_slots,
+        });
+        &*p
+    };
     if MULTIXACT_STATE.set(state).is_err() {
         panic!("MultiXactShmemInit called twice");
     }

@@ -17,26 +17,25 @@
 //!   ULONG_MAX first (glibc ERANGE behavior) — so it truncates to
 //!   0xFFFFFFFF.
 //!
-//! Residual divergences from the C stream parser (all deliberately out of
-//! scope; the diff is kept line-based like the pre-existing code):
-//! - C's whitespace directives and the leading skip of %X/%u/%s can cross
-//!   newlines ("BACKUP METHOD:\nstreamed" matches in C); we match within a
-//!   single line.
-//! - C tries the optional trailer fields in one fixed order against the
-//!   stream, and a partial literal match consumes input (an out-of-order
-//!   file silently loses fields in C); we recognize the trailer lines in any
-//!   order, one per line.
-//! - glibc scanf treats "0x" NOT followed by a hex digit as a matching
-//!   failure mid-conversion; we follow strtoul instead and parse the "0"
-//!   (value 0), leaving the 'x' as trailing input.
-//! - C reads raw bytes; we read the file as UTF-8 (pre-existing; a non-UTF-8
-//!   backup_label FATALs as "could not read file" rather than being parsed
-//!   bytewise).
+//! The file is one byte stream, as for C's fscanf calls: whitespace
+//! directives and the leading skip of %X/%u/%s cross newlines
+//! ("BACKUP METHOD:\nstreamed" matches), and the optional trailer fields are
+//! tried in C's fixed order (BACKUP METHOD, BACKUP FROM, START TIME, LABEL,
+//! START TIMELINE, INCREMENTAL FROM LSN) where a literal mismatch consumes
+//! the matched prefix and pushes back only the mismatching byte — so an
+//! out-of-order trailer silently loses fields exactly as it does in C
+//! (xlogrecovery.c:1298-1358; a label starting with "START TIMELINE" leaves
+//! the stream at "LINE: ..." after "START TIME" partially matches).
+//!
+//! Residual divergence from glibc (deliberately out of scope): glibc scanf
+//! treats "0x" NOT followed by a hex digit as a matching failure
+//! mid-conversion; we follow strtoul instead and parse the "0" (value 0),
+//! leaving the 'x' as trailing input.
 
 use elog::{elog, ereport};
 use pg_string::isspace_c_locale;
 use types_core::{TimeLineID, XLogRecPtr};
-use types_error::{PgResult, DEBUG1, FATAL};
+use types_error::{PgResult, DEBUG1, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, FATAL};
 
 use crate::{data_path, loc, InvalidXLogRecPtr, BACKUP_LABEL_FILE, TABLESPACE_MAP};
 
@@ -50,33 +49,67 @@ pub(crate) struct BackupLabel {
     pub redo_start_tli: TimeLineID,
 }
 
+// xlogrecovery.c:1279/1286/1345/1357 and 1433/1442/1462: every "invalid data
+// in file" FATAL carries errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE).
 fn invalid_data<T>(file: &str, func: &'static str) -> PgResult<T> {
     ereport(FATAL)
+        .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
         .errmsg(format!("invalid data in file \"{file}\""))
         .finish(loc(func))?;
     unreachable!()
 }
 
+// xlogrecovery.c:1262-1266 / 1466-1469: a read failure other than ENOENT is
+// ereport(FATAL, errcode_for_file_access(), "could not read file \"%s\": %m").
+fn could_not_read<T>(file: &str, e: &std::io::Error, func: &'static str) -> PgResult<T> {
+    ereport(FATAL)
+        .with_saved_errno(e.raw_os_error().unwrap_or(0))
+        .errcode_for_file_access()
+        .errmsg(format!("could not read file \"{file}\": %m"))
+        .finish(loc(func))?;
+    unreachable!()
+}
+
+/// fscanf whitespace directive: skip zero or more C-locale isspace bytes
+/// (newlines included).
+fn skip_ws(mut s: &[u8]) -> &[u8] {
+    while let [b, rest @ ..] = s {
+        if !isspace_c_locale(*b) {
+            break;
+        }
+        s = rest;
+    }
+    s
+}
+
 /// fscanf format-literal matcher. A space in `fmt` is a whitespace directive
 /// (skips zero or more C-locale isspace bytes); any other byte in `fmt` must
-/// match the next input byte exactly. Returns the remaining input.
-fn scan_literal<'a>(mut s: &'a [u8], fmt: &str) -> Option<&'a [u8]> {
+/// match the next input byte exactly. `Ok(rest)` on a full match; on a
+/// mismatch `Err(rest)` positioned AFTER the matched prefix — like a stdio
+/// stream, where the consumed bytes are gone and only the mismatching byte
+/// is pushed back.
+fn scan_literal<'a>(mut s: &'a [u8], fmt: &str) -> Result<&'a [u8], &'a [u8]> {
     for &f in fmt.as_bytes() {
         if f == b' ' {
-            while let [b, rest @ ..] = s {
-                if !isspace_c_locale(*b) {
-                    break;
-                }
-                s = rest;
-            }
+            s = skip_ws(s);
         } else {
             match s {
                 [b, rest @ ..] if *b == f => s = rest,
-                _ => None?,
+                _ => return Err(s),
             }
         }
     }
-    Some(s)
+    Ok(s)
+}
+
+/// fscanf `%<width>[^\n]`: no leading whitespace skip; up to `width` bytes
+/// other than '\n'. Zero bytes => matching failure (`None`).
+fn scan_line_field(s: &[u8], width: usize) -> Option<(&[u8], &[u8])> {
+    let n = s.iter().take(width).take_while(|&&b| b != b'\n').count();
+    if n == 0 {
+        return None;
+    }
+    Some((&s[..n], &s[n..]))
 }
 
 /// fscanf %X (base 16) / %u (base 10) with an optional field width, i.e.
@@ -170,7 +203,7 @@ enum LabelError {
     Incremental,
 }
 
-fn parse_backup_label_content(content: &str) -> Result<BackupLabel, LabelError> {
+fn parse_backup_label_content(content: &[u8]) -> Result<BackupLabel, LabelError> {
     let mut out = BackupLabel {
         checkpoint_loc: InvalidXLogRecPtr,
         backup_label_tli: 0,
@@ -179,64 +212,116 @@ fn parse_backup_label_content(content: &str) -> Result<BackupLabel, LabelError> 
         redo_start_lsn: InvalidXLogRecPtr,
         redo_start_tli: 0,
     };
-    // Keep the terminating '\n' on each line: the first two formats end in
-    // "%c" and C checks ch == '\n' (a '\r' there, or EOF, is FATAL).
-    let mut lines = content.split_inclusive('\n').map(str::as_bytes);
+    // One stream, as for C's successive fscanf calls on the same FILE.
+    let s = content;
 
-    // "START WAL LOCATION: %X/%X (file %08X%16s)%c", 5 fields, ch == '\n'.
-    let l1 = lines.next().unwrap_or(b"");
-    let rest = scan_literal(l1, "START WAL LOCATION: ").ok_or(LabelError::Invalid)?;
+    // "START WAL LOCATION: %X/%X (file %08X%16s)%c", 5 fields, ch == '\n'
+    // (a '\r' there, or EOF, is FATAL).
+    let rest = scan_literal(s, "START WAL LOCATION: ").map_err(|_| LabelError::Invalid)?;
     let (hi, _, rest) = scan_uint(rest, 16, usize::MAX).ok_or(LabelError::Invalid)?;
-    let rest = scan_literal(rest, "/").ok_or(LabelError::Invalid)?;
+    let rest = scan_literal(rest, "/").map_err(|_| LabelError::Invalid)?;
     let (lo, _, rest) = scan_uint(rest, 16, usize::MAX).ok_or(LabelError::Invalid)?;
-    let rest = scan_literal(rest, " (file ").ok_or(LabelError::Invalid)?;
+    let rest = scan_literal(rest, " (file ").map_err(|_| LabelError::Invalid)?;
     let (tli, _, rest) = scan_uint(rest, 16, 8).ok_or(LabelError::Invalid)?;
     let tli_from_walseg = tli as u32;
     let (_fname, rest) = scan_token(rest, 16).ok_or(LabelError::Invalid)?;
-    let rest = scan_literal(rest, ")").ok_or(LabelError::Invalid)?;
-    if rest.first() != Some(&b'\n') {
+    let rest = scan_literal(rest, ")").map_err(|_| LabelError::Invalid)?;
+    let [b'\n', rest @ ..] = rest else {
         return Err(LabelError::Invalid);
-    }
+    };
     out.redo_start_lsn = (u64::from(hi as u32)) << 32 | u64::from(lo as u32);
     out.redo_start_tli = tli_from_walseg;
     out.backup_label_tli = tli_from_walseg;
 
     // "CHECKPOINT LOCATION: %X/%X%c", 3 fields, ch == '\n'.
-    let l2 = lines.next().unwrap_or(b"");
-    let rest = scan_literal(l2, "CHECKPOINT LOCATION: ").ok_or(LabelError::Invalid)?;
+    let rest = scan_literal(rest, "CHECKPOINT LOCATION: ").map_err(|_| LabelError::Invalid)?;
     let (hi, _, rest) = scan_uint(rest, 16, usize::MAX).ok_or(LabelError::Invalid)?;
-    let rest = scan_literal(rest, "/").ok_or(LabelError::Invalid)?;
+    let rest = scan_literal(rest, "/").map_err(|_| LabelError::Invalid)?;
     let (lo, _, rest) = scan_uint(rest, 16, usize::MAX).ok_or(LabelError::Invalid)?;
-    if rest.first() != Some(&b'\n') {
+    let [b'\n', rest @ ..] = rest else {
         return Err(LabelError::Invalid);
-    }
+    };
     out.checkpoint_loc = (u64::from(hi as u32)) << 32 | u64::from(lo as u32);
 
-    for line in lines {
-        if let Some(rest) = scan_literal(line, "BACKUP METHOD: ") {
-            // "%19s": the FIRST whitespace-delimited token (<= 19 bytes) is
-            // compared, so "streamed junk" still sets backupEndRequired.
-            if let Some((tok, _)) = scan_token(rest, 19) {
+    // The optional trailer, one fscanf per field in C's fixed order. Each
+    // call resumes where the previous one left the stream: a failed literal
+    // has consumed its matched prefix; a conversion's leading whitespace skip
+    // is consumed even when the conversion then fails; the trailing "\n"
+    // directive (reached only after a successful conversion) skips any
+    // whitespace run.
+    let mut s = rest;
+
+    // "BACKUP METHOD: %19s\n": the FIRST whitespace-delimited token (<= 19
+    // bytes) is compared, so "streamed junk" still sets backupEndRequired.
+    s = match scan_literal(s, "BACKUP METHOD: ") {
+        Ok(r) => match scan_token(r, 19) {
+            Some((tok, r)) => {
                 if tok == b"streamed" {
                     out.backup_end_required = true;
                 }
-                continue;
+                skip_ws(r)
             }
-        }
-        if let Some(rest) = scan_literal(line, "BACKUP FROM: ") {
-            if let Some((tok, _)) = scan_token(rest, 19) {
+            None => skip_ws(r),
+        },
+        Err(r) => r,
+    };
+
+    // "BACKUP FROM: %19s\n".
+    s = match scan_literal(s, "BACKUP FROM: ") {
+        Ok(r) => match scan_token(r, 19) {
+            Some((tok, r)) => {
                 if tok == b"standby" {
                     out.backup_from_standby = true;
                 }
-                continue;
+                skip_ws(r)
             }
-        }
-        if let Some(rest) = scan_literal(line, "START TIMELINE: ") {
-            // "%u": strtoul base 10; trailing junk after the digits is left
-            // unread by the conversion ("2junk" parses as 2 and still feeds
-            // the cross-check). No digits => fscanf returns 0 and the whole
-            // check is silently skipped, like C.
-            if let Some((v, _, _)) = scan_uint(rest, 10, usize::MAX) {
+            None => skip_ws(r),
+        },
+        Err(r) => r,
+    };
+
+    // "START TIME: %127[^\n]\n" / "LABEL: %1023[^\n]\n": not mandatory;
+    // present values are logged at DEBUG1 (errmsg_internal).
+    s = match scan_literal(s, "START TIME: ") {
+        Ok(r) => match scan_line_field(r, 127) {
+            Some((value, r)) => {
+                let _ = elog(
+                    DEBUG1,
+                    format!(
+                        "backup time {} in file \"{BACKUP_LABEL_FILE}\"",
+                        String::from_utf8_lossy(value)
+                    ),
+                );
+                skip_ws(r)
+            }
+            None => r,
+        },
+        Err(r) => r,
+    };
+    s = match scan_literal(s, "LABEL: ") {
+        Ok(r) => match scan_line_field(r, 1023) {
+            Some((value, r)) => {
+                let _ = elog(
+                    DEBUG1,
+                    format!(
+                        "backup label {} in file \"{BACKUP_LABEL_FILE}\"",
+                        String::from_utf8_lossy(value)
+                    ),
+                );
+                skip_ws(r)
+            }
+            None => r,
+        },
+        Err(r) => r,
+    };
+
+    // "START TIMELINE: %u\n": strtoul base 10; trailing junk after the digits
+    // is left unread by the conversion ("2junk" parses as 2 and still feeds
+    // the cross-check). No digits => fscanf returns 0 and the whole check is
+    // silently skipped, like C.
+    s = match scan_literal(s, "START TIMELINE: ") {
+        Ok(r) => match scan_uint(r, 10, usize::MAX) {
+            Some((v, _, r)) => {
                 let tli_from_file = v as u32;
                 if tli_from_walseg != tli_from_file {
                     return Err(LabelError::TimelineMismatch {
@@ -248,16 +333,19 @@ fn parse_backup_label_content(content: &str) -> Result<BackupLabel, LabelError> 
                     DEBUG1,
                     format!("backup timeline {tli_from_file} in file \"{BACKUP_LABEL_FILE}\""),
                 );
-                continue;
+                skip_ws(r)
             }
-        }
-        if let Some(rest) = scan_literal(line, "INCREMENTAL FROM LSN: ") {
-            // C: fscanf(..., "%X/%X\n", ...) > 0 — at least the first %X
-            // must convert; a prefix match with no hex digits is NOT the
-            // incremental-backup FATAL.
-            if scan_uint(rest, 16, usize::MAX).is_some() {
-                return Err(LabelError::Incremental);
-            }
+            None => skip_ws(r),
+        },
+        Err(r) => r,
+    };
+
+    // "INCREMENTAL FROM LSN: %X/%X\n" > 0: at least the first %X must
+    // convert; a prefix match with no hex digits is NOT the
+    // incremental-backup FATAL.
+    if let Ok(r) = scan_literal(s, "INCREMENTAL FROM LSN: ") {
+        if scan_uint(r, 16, usize::MAX).is_some() {
+            return Err(LabelError::Incremental);
         }
     }
     Ok(out)
@@ -265,20 +353,18 @@ fn parse_backup_label_content(content: &str) -> Result<BackupLabel, LabelError> 
 
 pub(crate) fn read_backup_label() -> PgResult<Option<BackupLabel>> {
     let path = data_path(BACKUP_LABEL_FILE);
-    let content = match std::fs::read_to_string(&path) {
+    // Raw bytes, as C's fscanf reads them.
+    let content = match std::fs::read(&path) {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => {
-            { ereport(FATAL)
-                .errmsg(format!("could not read file \"{BACKUP_LABEL_FILE}\": {e}"))
-                .finish(loc("read_backup_label"))?; unreachable!() }
-        }
+        Err(e) => return could_not_read(BACKUP_LABEL_FILE, &e, "read_backup_label"),
     };
     match parse_backup_label_content(&content) {
         Ok(out) => Ok(Some(out)),
         Err(LabelError::Invalid) => invalid_data(BACKUP_LABEL_FILE, "read_backup_label"),
         Err(LabelError::TimelineMismatch { file, walseg }) => {
             ereport(FATAL)
+                .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
                 .errmsg(format!("invalid data in file \"{BACKUP_LABEL_FILE}\""))
                 .errdetail(format!(
                     "Timeline ID parsed is {file}, but expected {walseg}."
@@ -288,6 +374,7 @@ pub(crate) fn read_backup_label() -> PgResult<Option<BackupLabel>> {
         }
         Err(LabelError::Incremental) => {
             ereport(FATAL)
+                .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
                 .errmsg("this is an incremental backup, not a data directory")
                 .errhint("Use pg_combinebackup to reconstruct a valid data directory.")
                 .finish(loc("read_backup_label"))?;
@@ -355,11 +442,7 @@ pub(crate) fn read_tablespace_map() -> PgResult<Option<Vec<TablespaceInfo>>> {
     let content = match std::fs::read(&path) {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => {
-            { ereport(FATAL)
-                .errmsg(format!("could not read file \"{TABLESPACE_MAP}\": {e}"))
-                .finish(loc("read_tablespace_map"))?; unreachable!() }
-        }
+        Err(e) => return could_not_read(TABLESPACE_MAP, &e, "read_tablespace_map"),
     };
     match parse_tablespace_map_content(&content) {
         Ok(tablespaces) => Ok(Some(tablespaces)),
@@ -375,11 +458,21 @@ mod tests {
     const LINE2: &str = "CHECKPOINT LOCATION: 0/16000060\n";
 
     fn label(content: &str) -> Result<BackupLabel, LabelError> {
-        parse_backup_label_content(content)
+        parse_backup_label_content(content.as_bytes())
     }
 
     fn head(rest: &str) -> String {
         format!("{LINE1}{LINE2}{rest}")
+    }
+
+    // The trailer as pg_backup_stop / pg_basebackup write it, in C's fscanf
+    // order, so that a START TIMELINE / INCREMENTAL FROM LSN line appended
+    // after `full("")` is actually reached by the fixed fscanf sequence
+    // (xlogrecovery.c:1298-1358).
+    const TRAILER: &str = "BACKUP METHOD: streamed\nBACKUP FROM: primary\nSTART TIME: 2026-09-03 03:49:34 PDT\nLABEL: fp label\n";
+
+    fn full(rest: &str) -> String {
+        format!("{LINE1}{LINE2}{TRAILER}{rest}")
     }
 
     #[test]
@@ -504,8 +597,66 @@ mod tests {
 
     #[test]
     fn backup_from_first_token_wins_like_c() {
-        let out = label(&head("BACKUP FROM: standby whatever\n")).unwrap();
+        let out =
+            label(&head("BACKUP METHOD: streamed\nBACKUP FROM: standby whatever\n")).unwrap();
         assert!(out.backup_from_standby);
+    }
+
+    // --- C's fixed fscanf sequence over the trailer (xlogrecovery.c:1298-1358) ---
+    // Audit a186-verified-fp-transam-xlogrecovery-p1-10ebc5f875e333d6509a-1.
+
+    #[test]
+    fn out_of_order_start_timeline_is_skipped_like_c() {
+        // C tries "BACKUP METHOD: %19s\n" first: 'B' != 'S' fails without
+        // consuming; "START TIME: %127[^\n]\n" then matches the literal
+        // "START TIME" prefix of "START TIMELINE" and fails at ':' vs 'L',
+        // leaving the stream at "LINE: 2\n..." — the START TIMELINE line is
+        // never seen again, so a TLI mismatch that C would enforce in order is
+        // silently skipped, and BACKUP METHOD/FROM are lost too (C came up
+        // on the live pair; pre-fix pgrust FATALed "Timeline ID parsed is 2").
+        let out = label(&head(
+            "START TIMELINE: 2\nBACKUP METHOD: streamed\nBACKUP FROM: primary\nSTART TIME: 2026-09-03 03:49:34 PDT\nLABEL: fp label\n",
+        ))
+        .unwrap();
+        assert!(!out.backup_end_required);
+        assert!(!out.backup_from_standby);
+    }
+
+    #[test]
+    fn in_order_start_timeline_mismatch_is_fatal() {
+        assert_eq!(
+            label(&full("START TIMELINE: 2\n")).unwrap_err(),
+            LabelError::TimelineMismatch { file: 2, walseg: 1 }
+        );
+    }
+
+    #[test]
+    fn backup_from_without_backup_method_is_lost_like_c() {
+        // "BACKUP METHOD: " consumes the matched prefix "BACKUP " before
+        // failing at 'M' vs 'F'; the next format ("BACKUP FROM: ") then sees
+        // "FROM: standby" and fails at its first byte.
+        let out = label(&head("BACKUP FROM: standby\n")).unwrap();
+        assert!(!out.backup_from_standby);
+    }
+
+    #[test]
+    fn missing_optional_lines_keep_the_sequence_like_c() {
+        // BACKUP FROM and LABEL absent: each failed literal only consumes what
+        // it matched (nothing here), so START TIME and START TIMELINE are
+        // still reached in order.
+        assert_eq!(
+            label(&head("BACKUP METHOD: streamed\nSTART TIME: t\nSTART TIMELINE: 2\n"))
+                .unwrap_err(),
+            LabelError::TimelineMismatch { file: 2, walseg: 1 }
+        );
+    }
+
+    #[test]
+    fn whitespace_directive_crosses_newlines_like_c() {
+        // A space in the format (and %s's leading skip) matches any run of
+        // C-locale whitespace, newlines included.
+        let out = label(&head("BACKUP METHOD:\nstreamed\n")).unwrap();
+        assert!(out.backup_end_required);
     }
 
     // --- "START TIMELINE: %u" ---
@@ -515,20 +666,20 @@ mod tests {
         // %u converts the leading digits; "2junk" parses as 2 and the
         // tli mismatch against the walseg TLI (1) is FATAL in C.
         assert_eq!(
-            label(&head("START TIMELINE: 2junk\n")).unwrap_err(),
+            label(&full("START TIMELINE: 2junk\n")).unwrap_err(),
             LabelError::TimelineMismatch { file: 2, walseg: 1 }
         );
     }
 
     #[test]
     fn timeline_matching_with_trailing_junk_is_ok() {
-        assert!(label(&head("START TIMELINE: 1junk\n")).is_ok());
+        assert!(label(&full("START TIMELINE: 1junk\n")).is_ok());
     }
 
     #[test]
     fn timeline_no_digits_skips_check_like_c() {
         // fscanf returns 0; the cross-check is silently skipped.
-        assert!(label(&head("START TIMELINE: junk\n")).is_ok());
+        assert!(label(&full("START TIMELINE: junk\n")).is_ok());
     }
 
     // --- "INCREMENTAL FROM LSN: %X/%X" ---
@@ -536,7 +687,7 @@ mod tests {
     #[test]
     fn incremental_lsn_is_fatal() {
         assert_eq!(
-            label(&head("INCREMENTAL FROM LSN: 0/1\n")).unwrap_err(),
+            label(&full("INCREMENTAL FROM LSN: 0/1\n")).unwrap_err(),
             LabelError::Incremental
         );
     }
@@ -544,7 +695,7 @@ mod tests {
     #[test]
     fn incremental_without_hex_is_not_fatal_like_c() {
         // fscanf(...) > 0 needs at least the first %X to convert.
-        assert!(label(&head("INCREMENTAL FROM LSN: zz\n")).is_ok());
+        assert!(label(&full("INCREMENTAL FROM LSN: zz\n")).is_ok());
     }
 
     // --- read_tablespace_map ---

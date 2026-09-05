@@ -331,3 +331,19 @@ fn wal_read_raise_error_messages() {
     });
     assert!(ok.is_ok());
 }
+
+// XLogFlushBufferForRedoIfInit (xlogutils.c:341) looks the block up through
+// XLogRecGetBlockTag, whose missing-block arm is elog(ERROR, "could not locate
+// backup block with ID %d in WAL record") (xlogreader.c:2001) — a catchable
+// transaction-level error. The pre-fix port inlined the lookup and raised a
+// PANIC with the XLogReadBufferForRedoExtended text instead. Audit
+// a186-candidate-fp-transam-xlogutils-53d54963f36f62fd310d-1.
+#[test]
+fn flush_buffer_for_redo_if_init_missing_block_is_c_error() {
+    install_seams();
+    let rec = record_with_block(0x4100, 0, false);
+    let err = XLogFlushBufferForRedoIfInit(&rec, 1, 7)
+        .expect_err("block 1 is not registered in the record");
+    assert_eq!(err.level, types_error::ERROR);
+    assert_eq!(err.message(), "could not locate backup block with ID 1 in WAL record");
+}

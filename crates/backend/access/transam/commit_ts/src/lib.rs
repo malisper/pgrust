@@ -52,7 +52,10 @@ struct CommitTsSharedData {
     commitTsActive: AtomicBool,
 }
 
-static COMMIT_TS_SHARED: OnceLock<CommitTsSharedData> = OnceLock::new();
+// commitTsShared: lives in the ShmemInitStruct("CommitTs shared") arena
+// (commit_ts.c:563) so pg_shmem_allocations lists it; leaked for the
+// cluster lifetime like C shmem.
+static COMMIT_TS_SHARED: OnceLock<&'static CommitTsSharedData> = OnceLock::new();
 
 fn CommitTsCtl() -> &'static SlruCtlData {
     COMMIT_TS_CTL
@@ -63,6 +66,7 @@ fn CommitTsCtl() -> &'static SlruCtlData {
 fn shared() -> &'static CommitTsSharedData {
     COMMIT_TS_SHARED
         .get()
+        .copied()
         .unwrap_or_else(|| panic!("commitTsShared accessed before CommitTsShmemInit"))
 }
 
@@ -325,14 +329,40 @@ pub fn CommitTsShmemInit() -> PgResult<()> {
         panic!("CommitTsShmemInit called twice");
     }
 
-    COMMIT_TS_SHARED
-        .set(CommitTsSharedData {
+    // commit_ts.c:563-575: ShmemInitStruct("CommitTs shared",
+    // sizeof(CommitTimestampShared), &found) registers the control block in
+    // the ShmemIndex (pg_shmem_allocations) and hands back the arena it is
+    // initialized in (!IsUnderPostmaster: Assert(!found), then the boot
+    // values).
+    // sizeof(CommitTimestampShared): TransactionId (4) + padding,
+    // CommitTimestampEntry {TimestampTz, RepOriginId} (16), bool (1) +
+    // padding = 32 on every 18.6 platform — the pg_shmem_allocations.size
+    // C reports; the Rust image (atomics) fits inside it.
+    const SIZEOF_COMMIT_TIMESTAMP_SHARED: usize = 32;
+    const {
+        assert!(core::mem::size_of::<CommitTsSharedData>() <= SIZEOF_COMMIT_TIMESTAMP_SHARED);
+        assert!(core::mem::align_of::<CommitTsSharedData>() <= 64, "PG_CACHE_LINE_SIZE alignment");
+    }
+    let (raw, found) =
+        shmem_seams::shmem_init_struct::call("CommitTs shared", SIZEOF_COMMIT_TIMESTAMP_SHARED)?;
+    debug_assert!(!found, "CommitTsShmemInit: segment already initialized");
+    let p = raw.cast::<CommitTsSharedData>();
+    // SAFETY: a fresh, zeroed, cache-line-aligned ShmemIndex allocation of
+    // SIZEOF_COMMIT_TIMESTAMP_SHARED >= size_of::<CommitTsSharedData>() bytes
+    // (asserted above), written once during single-threaded shmem init and
+    // leaked for the cluster lifetime like C shmem.
+    let shared: &'static CommitTsSharedData = unsafe {
+        p.write(CommitTsSharedData {
             xidLastCommit: AtomicU32::new(InvalidTransactionId),
             timeLastCommit: AtomicI64::new(DT_NOBEGIN),
             nodeidLastCommit: AtomicU16::new(InvalidRepOriginId),
             commitTsActive: AtomicBool::new(false),
-        })
-        .unwrap_or_else(|_| panic!("CommitTsShmemInit called twice"));
+        });
+        &*p
+    };
+    if COMMIT_TS_SHARED.set(shared).is_err() {
+        panic!("CommitTsShmemInit called twice");
+    }
     Ok(())
 }
 

@@ -17,6 +17,215 @@ use transam_xlog::{
 const SEG: i32 = 16 * 1024 * 1024;
 const SYS_ID: u64 = 0x00AA_BB00_CCDD_0011;
 
+// DataDir is process-global: every test that points it at a fixture
+// directory holds this while the directory is in use.
+static DATADIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn datadir_lock() -> std::sync::MutexGuard<'static, ()> {
+    DATADIR_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+// init_seams() installs the crate's seam slots and GUC hooks exactly once per
+// process (seam/hook installs refuse a second install).
+fn install_crate_seams() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(init_seams);
+}
+
+// wait_event.h PG_WAIT_IO class, WalRead id (waitevent crate IO name table).
+const PG_WAIT_IO: u32 = 0x0A00_0000;
+const WAIT_EVENT_WAL_READ: u32 = PG_WAIT_IO | 75;
+
+static WAIT_EVENTS: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+
+fn record_wait_start(info: u32) {
+    WAIT_EVENTS.lock().unwrap().push(info);
+}
+
+static EMITTED: std::sync::Mutex<Vec<(types_error::SqlState, String)>> =
+    std::sync::Mutex::new(Vec::new());
+
+fn capture_emitted(err: &types_error::PgError, _output_to_server: &mut bool) {
+    EMITTED.lock().unwrap().push((err.sqlstate(), err.message().to_string()));
+}
+
+static ALLOW_IN_PLACE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn fixture_datadir(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "pgrust_xlogrecovery_{tag}_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    init_small::globals::SetDataDir(dir.to_str().unwrap());
+    dir
+}
+
+// CheckTablespaceDirectory (xlogrecovery.c:2177-2181): AllocateDir failure is
+// ReadDir's ereport(ERROR, errcode_for_file_access(), "could not open
+// directory \"pg_tblspc\": %m") — the relative name and strerror text. The
+// pre-fix port `let Ok(entries) = read_dir(..) else { return Ok(()) }`
+// swallowed the failure. Audit
+// a186-candidate-fp-transam-xlogrecovery-p1-8d8a7bd3d3071065526c-1.
+#[test]
+fn check_tablespace_directory_reports_open_failure_like_c() {
+    let _g = datadir_lock();
+    let dir = fixture_datadir("tblspc_open");
+    // A self-referential symlink fails opendir with ELOOP for root too.
+    std::os::unix::fs::symlink("pg_tblspc", dir.join("pg_tblspc")).unwrap();
+    let err = check_tablespace_directory().expect_err("opendir failure must be an ERROR");
+    assert_eq!(err.level, ERROR);
+    assert_eq!(
+        err.message(),
+        format!(
+            "could not open directory \"{PG_TBLSPC_DIR}\": {}",
+            elog::errno::strerror(libc::ELOOP)
+        )
+    );
+    // C's errcode_for_file_access() default arm for ELOOP.
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+
+    // As a non-root user EACCES exercises the 42501 arm as well.
+    if unsafe { libc::geteuid() } != 0 {
+        std::fs::remove_file(dir.join("pg_tblspc")).unwrap();
+        std::fs::create_dir(dir.join("pg_tblspc")).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.join("pg_tblspc"), std::fs::Permissions::from_mode(0o000))
+            .unwrap();
+        let err = check_tablespace_directory().expect_err("EACCES must be an ERROR");
+        std::fs::set_permissions(dir.join("pg_tblspc"), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INSUFFICIENT_PRIVILEGE);
+        assert_eq!(
+            err.message(),
+            format!(
+                "could not open directory \"{PG_TBLSPC_DIR}\": {}",
+                elog::errno::strerror(libc::EACCES)
+            )
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// CheckTablespaceDirectory (xlogrecovery.c:2189-2195): a non-symlink entry is
+// ereport(allow_in_place_tablespaces ? WARNING : PANIC, errcode(
+// ERRCODE_DATA_CORRUPTED), ...) — SQLSTATE XX001 on the WARNING arm too.
+// Audit a186-candidate-fp-transam-xlogrecovery-p1-f8e209eb08abf906f4e1-1.
+#[test]
+fn check_tablespace_directory_warning_carries_data_corrupted_sqlstate() {
+    let _g = datadir_lock();
+    let dir = fixture_datadir("tblspc_warn");
+    std::fs::create_dir_all(dir.join("pg_tblspc/16385")).unwrap();
+    guc_tables::vars::allow_in_place_tablespaces.install_if_absent(guc_tables::GucVarAccessors {
+        get: || ALLOW_IN_PLACE.load(Relaxed),
+        set: |v| ALLOW_IN_PLACE.store(v, Relaxed),
+    });
+    guc_tables::vars::allow_in_place_tablespaces.write(true);
+    EMITTED.lock().unwrap().clear();
+    let prev = elog::set_emit_log_hook(Some(capture_emitted));
+    let r = check_tablespace_directory();
+    elog::set_emit_log_hook(prev);
+    r.expect("allow_in_place_tablespaces=on downgrades the PANIC to a WARNING");
+    let emitted = EMITTED.lock().unwrap();
+    let msg = format!("unexpected directory entry \"16385\" found in {PG_TBLSPC_DIR}");
+    let row = emitted
+        .iter()
+        .find(|(_, m)| *m == msg)
+        .unwrap_or_else(|| panic!("WARNING {msg:?} not emitted; got {emitted:?}"));
+    assert_eq!(row.0, types_error::ERRCODE_DATA_CORRUPTED);
+    drop(emitted);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// check_recovery_target / check_recovery_target_name /
+// check_recovery_target_timeline (xlogrecovery.c:4846, 4921, 5047) reject
+// with GUC_check_errdetail(...) + return false, so guc.c builds the C
+// headline 'invalid value for parameter "<name>": "<value>"' with the text
+// as DETAIL and SQLSTATE 22023. The pre-fix hooks returned Err(XX000) with
+// the text folded into one message. Audit rows 46ea467b/6a4ea0ad,
+// 698f6053/89c9f972, a27457d6.
+static CHECK_DETAILS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+// The recorder is process-global (one seam slot): the hook tests run one at
+// a time so a concurrent test's detail cannot land in another's vector.
+static HOOK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn install_check_error_recorder() {
+    if !guc_seams::guc_check_errdetail::is_installed() {
+        guc_seams::guc_check_errdetail::set(|d| CHECK_DETAILS.lock().unwrap().push(d));
+    }
+}
+
+fn run_check_hook(
+    slot: &guc_tables::GucStringCheckHook,
+    value: &str,
+) -> (PgResult<bool>, Vec<String>) {
+    let _serial = HOOK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // Install first: the slot is only populated by install_guc_hooks().
+    install_crate_seams();
+    install_check_error_recorder();
+    CHECK_DETAILS.lock().unwrap().clear();
+    let hook = slot.get();
+    let mut newval = Some(value.to_string());
+    let mut extra = None;
+    let r = hook(&mut newval, &mut extra, ::types_guc::GucSource::PGC_S_FILE);
+    let details = CHECK_DETAILS.lock().unwrap().clone();
+    (r, details)
+}
+
+#[test]
+fn check_recovery_target_rejects_via_guc_check_errdetail() {
+    let (r, details) = run_check_hook(&guc_tables::hooks::check_recovery_target, "foo");
+    assert!(matches!(r, Ok(false)), "got {r:?}");
+    assert_eq!(details, vec!["The only allowed value is \"immediate\".".to_string()]);
+    let (r, _) = run_check_hook(&guc_tables::hooks::check_recovery_target, "immediate");
+    assert!(matches!(r, Ok(true)));
+}
+
+#[test]
+fn check_recovery_target_name_rejects_via_guc_check_errdetail() {
+    let long = "x".repeat(targets::MAXFNAMELEN);
+    let (r, details) = run_check_hook(&guc_tables::hooks::check_recovery_target_name, &long);
+    assert!(matches!(r, Ok(false)), "got {r:?}");
+    assert_eq!(
+        details,
+        vec![format!(
+            "\"recovery_target_name\" is too long (maximum {} characters).",
+            targets::MAXFNAMELEN - 1
+        )]
+    );
+}
+
+#[test]
+fn check_recovery_target_timeline_rejects_via_guc_check_errdetail() {
+    let (r, details) = run_check_hook(
+        &guc_tables::hooks::check_recovery_target_timeline,
+        "99999999999999999999999",
+    );
+    assert!(matches!(r, Ok(false)), "got {r:?}");
+    assert_eq!(
+        details,
+        vec!["\"recovery_target_timeline\" is not a valid number.".to_string()]
+    );
+}
+
+// check_primary_slot_name (xlogrecovery.c:4796-4806): the slot-name
+// validation failure is GUC_check_errcode + GUC_check_errdetail (+ hint) and
+// return false; the pre-fix hook raised the slot message as the primary
+// ERROR. Audit a186-verified-fp-replication-slot-1194004bffdd0bc4ee67-1 /
+// a186-candidate-fp-transam-xlogrecovery-p2-d109376c1637ea0a9551-1.
+#[test]
+fn check_primary_slot_name_rejects_via_guc_check_errdetail() {
+    let (r, details) = run_check_hook(&guc_tables::hooks::check_primary_slot_name, "Bad-Name");
+    assert!(matches!(r, Ok(false)), "got {r:?}");
+    assert_eq!(
+        details,
+        vec!["replication slot name \"Bad-Name\" contains invalid character".to_string()]
+    );
+    let (r, _) = run_check_hook(&guc_tables::hooks::check_primary_slot_name, "good_name");
+    assert!(matches!(r, Ok(true)));
+}
+
 fn make_checkpoint(loc: XLogRecPtr) -> CheckPoint {
     let mut ckpt = CheckPoint::ZEROED;
     ckpt.redo = loc;
@@ -128,6 +337,7 @@ fn checkpoint_record_length_constant() {
 // FinishWalRecovery → ShutdownWalRecovery against a fabricated datadir.
 #[test]
 fn clean_shutdown_boot_path() {
+    let _g = datadir_lock();
     let dir = std::env::temp_dir().join(format!("pgrust_xlogrecovery_test_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     for sub in ["global", "pg_wal"] {
@@ -141,8 +351,15 @@ fn clean_shutdown_boot_path() {
     xlogprefetcher::XLogPrefetchShmemInit();
     guc_tables::vars::maintenance_io_concurrency
         .install_if_absent(guc_tables::GucVarAccessors { get: || 10, set: |_| {} });
-    init_seams();
+    install_crate_seams();
     install_timeline_seams();
+    // XLogPageRead brackets pg_pread with WAIT_EVENT_WAL_READ
+    // (xlogrecovery.c:3434/3441/3466); record what the boot reports.
+    if !waitevent_seams::pgstat_report_wait_start::is_installed() {
+        waitevent_seams::pgstat_report_wait_start::set(record_wait_start);
+        waitevent_seams::pgstat_report_wait_end::set(|| {});
+    }
+    WAIT_EVENTS.lock().unwrap().clear();
 
     let ckpt_loc: XLogRecPtr = SEG as u64 + SizeOfXLogLongPHD as u64;
     let ckpt = make_checkpoint(ckpt_loc);
@@ -167,6 +384,13 @@ fn clean_shutdown_boot_path() {
     );
     assert!(init.was_shutdown);
     assert!(!init.have_backup_label && !init.have_tblspc_map);
+    // The checkpoint record read reported WalRead around its pg_pread.
+    // Audit a186-candidate-fp-transam-xlogrecovery-p2-b7d4ad68f5f82b90c195-1.
+    assert!(
+        WAIT_EVENTS.lock().unwrap().contains(&WAIT_EVENT_WAL_READ),
+        "no WAIT_EVENT_WAL_READ reported during the checkpoint read: {:?}",
+        WAIT_EVENTS.lock().unwrap()
+    );
     assert!(!xlogutils::in_recovery());
     assert_eq!(xlogrecovery_seams::recovery_target_tli::call(), 1);
     assert!(!xlogrecovery_seams::archive_recovery_requested::call());

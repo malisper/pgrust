@@ -20,6 +20,7 @@ elog = { path = "../../../utils/error/elog" }
 fd = { path = "../../../storage/file/fd" }
 init_small = { path = "../../../utils/init/init_small" }
 guc_tables = { path = "../../../utils/misc/guc_tables" }
+guc_seams = { path = "../../../utils/misc/guc_seams" }
 miscinit = { path = "../../../utils/init/miscinit" }
 xlogreader = { path = "../xlogreader" }
 xlogprefetcher = { path = "../xlogprefetcher" }
@@ -50,6 +51,8 @@ procsignal_seams = { path = "../../../storage/ipc/procsignal_seams" }
 walreceiverfuncs_seams = { path = "../../../replication/walreceiverfuncs_seams" }
 walsender_seams = { path = "../../../replication/walsender_seams" }
 ipc = { path = "../../../storage/ipc/ipc" }
+tablespace_seams = { path = "../../../commands/tablespace_seams" }
+waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
 libc = "0.2"
 
 bufmgr = { path = "../../../storage/buffer/bufmgr" }
@@ -139,12 +142,10 @@ tablecmds_seams = { path = "../../../commands/tablecmds_seams" }
 timeout_seams = { path = "../../../utils/misc/timeout_seams" }
 timestamp_seams = { path = "../../../utils/adt/timestamp_seams" }
 trigger_seams = { path = "../../../commands/trigger_seams" }
-tablespace_seams = { path = "../../../commands/tablespace_seams" }
 dbcommands_seams = { path = "../../../commands/dbcommands_seams" }
 syscache_seams = { path = "../../../utils/cache/syscache_seams" }
 postgres_seams = { path = "../../../tcop/postgres_seams" }
 typcache_seams = { path = "../../../utils/cache/typcache_seams" }
-waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
 walsummarizer_seams = { path = "../../../postmaster/walsummarizer_seams" }
 transam_seams = { path = "../transam_seams" }
 resowner = { path = "../../../utils/resowner/resowner" }

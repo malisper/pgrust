@@ -261,12 +261,15 @@ pub fn XLogFlushBufferForRedoIfInit(
     buffer: Buffer,
 ) -> PgResult<()> {
     debug_assert!(BufferIsValid(buffer));
+    // XLogRecGetBlockTag (xlogreader.c:1998-2002): a block id the record
+    // never registered is elog(ERROR, "could not locate backup block with ID
+    // %d in WAL record") — a catchable error, not a PANIC.
     let Some((_, forknum, _, _)) = record.block_tag_extended(block_id) else {
         elog(
-            PANIC,
-            format!("failed to locate backup block with ID {block_id} in WAL record"),
+            ERROR,
+            format!("could not locate backup block with ID {block_id} in WAL record"),
         )?;
-        unreachable!("elog(PANIC) returned");
+        unreachable!("elog(ERROR) returned");
     };
     if forknum == ForkNumber::INIT_FORKNUM {
         bufmgr_seams::flush_one_buffer::call(buffer)?;

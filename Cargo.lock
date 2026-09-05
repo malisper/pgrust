@@ -21695,6 +21695,7 @@ dependencies = [
  "gin_vocab",
  "gin_xlog",
  "guc",
+ "guc_seams",
  "guc_tables",
  "heapam",
  "heapam_visibility",

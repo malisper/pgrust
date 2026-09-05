@@ -600,6 +600,8 @@ pub(crate) fn recoveryApplyDelay(reader: &xlogreader::XLogReaderState<'_>) -> Pg
     Ok(true)
 }
 
+// RecoveryRequiresIntParameter (xlogrecovery.c:4712-4786): every report —
+// the two WARNINGs and the FATAL — carries errcode(ERRCODE_INVALID_PARAMETER_VALUE).
 pub fn RecoveryRequiresIntParameter(param_name: &str, curr_value: i32, min_value: i32) -> PgResult<()> {
     if curr_value >= min_value {
         return Ok(());
@@ -609,6 +611,7 @@ pub fn RecoveryRequiresIntParameter(param_name: &str, curr_value: i32, min_value
             "{param_name} = {curr_value} is a lower setting than on the primary server, where its value was {min_value}."
         );
         let _ = ereport(WARNING)
+            .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
             .errmsg("hot standby is not possible because of insufficient parameter settings")
             .errdetail(detail.clone())
             .finish(loc("RecoveryRequiresIntParameter"));
@@ -625,6 +628,7 @@ pub fn RecoveryRequiresIntParameter(param_name: &str, curr_value: i32, min_value
             startup_seams::process_startup_proc_interrupts::call()?;
             if CheckForStandbyTrigger() && !warned_for_promote {
                 let _ = ereport(WARNING)
+                    .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
                     .errmsg("promotion is not possible because of insufficient parameter settings")
                     .errdetail(detail.clone())
                     .errhint("Restart the server after making the necessary configuration changes.")
@@ -641,6 +645,7 @@ pub fn RecoveryRequiresIntParameter(param_name: &str, curr_value: i32, min_value
         ConditionVariableCancelSleep();
     }
     ereport(FATAL)
+        .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
         .errmsg("recovery aborted because of insufficient parameter settings")
         .errdetail(format!(
             "{param_name} = {curr_value} is a lower setting than on the primary server, where its value was {min_value}."
@@ -680,16 +685,40 @@ fn unset_target(kind: RecoveryTargetType) {
     }
 }
 
+// GUC_check_errcode / GUC_check_errdetail / GUC_check_errhint (guc.c): a
+// check hook records the rejection and returns false; guc.c then reports
+// 'invalid value for parameter "<name>": "<value>"' with the DETAIL/HINT and
+// ERRCODE_INVALID_PARAMETER_VALUE (or the recorded code). Returning an Err
+// from the hook instead bypassed that layer (registry.rs propagates a hook
+// Err verbatim). The seams are uninstalled in unit tests without the guc
+// crate, where recording is a no-op.
+fn guc_check_errcode(sqlstate: types_error::SqlState) {
+    if guc_seams::guc_check_errcode::is_installed() {
+        guc_seams::guc_check_errcode::call(sqlstate);
+    }
+}
+
+fn guc_check_errdetail(detail: String) {
+    if guc_seams::guc_check_errdetail::is_installed() {
+        guc_seams::guc_check_errdetail::call(detail);
+    }
+}
+
+fn guc_check_errhint(hint: String) {
+    if guc_seams::guc_check_errhint::is_installed() {
+        guc_seams::guc_check_errhint::call(hint);
+    }
+}
+
 pub(crate) fn install_guc_hooks() {
     use guc_tables::hooks;
 
+    // check_recovery_target (xlogrecovery.c:4844-4852).
     hooks::check_recovery_target.install(|newval, _extra, _source| {
         let v = newval.as_deref().unwrap_or("");
         if v != "immediate" && !v.is_empty() {
-            return Err(Box::new(types_error::PgError::new(
-                types_error::ERROR,
-                "invalid value for parameter \"recovery_target\": The only allowed value is \"immediate\".".to_string(),
-            )));
+            guc_check_errdetail("The only allowed value is \"immediate\".".to_string());
+            return Ok(false);
         }
         Ok(true)
     });
@@ -726,15 +755,14 @@ pub(crate) fn install_guc_hooks() {
         }
     });
 
+    // check_recovery_target_name (xlogrecovery.c:4918-4927).
     hooks::check_recovery_target_name.install(|newval, _extra, _source| {
         if newval.as_deref().map_or(0, |v| v.len()) >= MAXFNAMELEN {
-            return Err(Box::new(types_error::PgError::new(
-                types_error::ERROR,
-                format!(
-                    "invalid value for parameter \"recovery_target_name\": \"recovery_target_name\" is too long (maximum {} characters).",
-                    MAXFNAMELEN - 1
-                ),
-            )));
+            guc_check_errdetail(format!(
+                "\"recovery_target_name\" is too long (maximum {} characters).",
+                MAXFNAMELEN - 1
+            ));
+            return Ok(false);
         }
         Ok(true)
     });
@@ -787,10 +815,22 @@ pub(crate) fn install_guc_hooks() {
         }
     });
 
+    // check_primary_slot_name (xlogrecovery.c:4793-4810): the slot-name
+    // validation failure becomes GUC_check_errcode + GUC_check_errdetail
+    // (+ GUC_check_errhint) and `return false`, never a direct ereport.
     hooks::check_primary_slot_name.install(|newval, _extra, _source| {
         if let Some(v) = newval.as_deref() {
             if !v.is_empty() {
-                return slot::ReplicationSlotValidateName(v, types_error::ERROR);
+                if let Err((err_code, err_msg, err_hint)) =
+                    slot::ReplicationSlotValidateNameInternal(v)
+                {
+                    guc_check_errcode(err_code);
+                    guc_check_errdetail(err_msg);
+                    if let Some(hint) = err_hint {
+                        guc_check_errhint(hint);
+                    }
+                    return Ok(false);
+                }
             }
         }
         Ok(true)
@@ -817,11 +857,11 @@ fn check_recovery_target_timeline(
                 // "recovery target timeline 0 does not exist" (executed
                 // against PG 18.4).  Only u64-magnitude overflow rejects.
                 if pg_string::strtoul_base0(v.as_bytes()).range_err {
-                    return Err(Box::new(types_error::PgError::new(
-                        types_error::ERROR,
-                        "invalid value: \"recovery_target_timeline\" is not a valid number."
-                            .to_string(),
-                    )));
+                    // xlogrecovery.c:5047-5048: GUC_check_errdetail + return false.
+                    guc_check_errdetail(
+                        "\"recovery_target_timeline\" is not a valid number.".to_string(),
+                    );
+                    return Ok(false);
                 }
                 RecoveryTargetTimeLineGoal::Numeric
             }
@@ -1003,10 +1043,15 @@ mod recovery_target_parse_tests {
             assert_eq!(assigned_tli(input), tli, "parsed TLI for {input:?}");
         }
 
-        // The ONLY rejects: u64-magnitude overflow (glibc ERANGE).
+        // The ONLY rejects: u64-magnitude overflow (glibc ERANGE) — reported
+        // C-style as GUC_check_errdetail + `return false`
+        // (xlogrecovery.c:5047-5048), never as a hook Err.
         for input in ["18446744073709551616", "-18446744073709551616",
                       "99999999999999999999999", "0xffffffffffffffffff"] {
-            assert!(check_tli(input).is_err(), "C rejects {input:?} with ERANGE");
+            assert!(
+                matches!(check_tli(input), Ok((false, None))),
+                "C rejects {input:?} with ERANGE"
+            );
         }
     }
 

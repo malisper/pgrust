@@ -32,6 +32,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // remove_tablespace_symlink (tablespace.c) — InitWalRecovery's
+    // tablespace_map restore (xlogrecovery.c:701): rmdir a directory, unlink
+    // a symlink, ERROR on anything else (a direct xlogrecovery ->
+    // commands_tablespace dep would cycle).
+    pub fn remove_tablespace_symlink(linkloc: &str) -> PgResult<()>
+);
+
+seam_core::seam!(
     // tblspc_redo (tablespace.c) — the Tablespace rmgr rm_redo callback;
     // rmgr's table row delegates here (a direct rmgr -> commands_tablespace
     // dep would cycle through checkpointer/transam_xlog).

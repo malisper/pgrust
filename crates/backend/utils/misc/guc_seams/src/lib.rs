@@ -39,6 +39,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // GUC_check_errcode (guc.c): the SQLSTATE a check hook's `return false`
+    // reports instead of ERRCODE_INVALID_PARAMETER_VALUE.
+    pub fn guc_check_errcode(sqlstate: types_error::SqlState)
+);
+
+seam_core::seam!(
+    // GUC_check_errhint (guc.c).
+    pub fn guc_check_errhint(hint: String)
+);
+
+seam_core::seam!(
     // ProcessConfigFileInternal(context, applySettings, elevel) (guc.c); the
     // guc-file.l wrapper reaches back across the guc <-> guc-file cycle.
     pub fn process_config_file_internal(

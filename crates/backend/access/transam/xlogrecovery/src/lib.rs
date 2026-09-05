@@ -16,8 +16,8 @@ use elog::{elog, ereport};
 use types_core::{TimeLineID, TimestampTz, TransactionId, XLogRecPtr, XLogSegNo, BLCKSZ};
 use types_storage::{BufferIsValid, InvalidBuffer, ReadBufferMode};
 use types_error::{
-    ErrorLevel, ErrorLocation, PgResult, DEBUG1, DEBUG2, ERROR, FATAL, LOG, PANIC,
-    WARNING,
+    ErrorLevel, ErrorLocation, PgResult, DEBUG1, DEBUG2, ERRCODE_CONFIG_FILE_ERROR,
+    ERRCODE_DATA_CORRUPTED, ERRCODE_INVALID_PARAMETER_VALUE, ERROR, FATAL, LOG, PANIC, WARNING,
 };
 use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT};
 use xlogreader::{
@@ -60,6 +60,29 @@ const PG_WAIT_ACTIVITY: u32 = 0x0500_0000;
 const PG_WAIT_TIMEOUT: u32 = 0x0900_0000;
 const WAIT_EVENT_RECOVERY_WAL_STREAM: u32 = PG_WAIT_ACTIVITY + 10;
 const WAIT_EVENT_RECOVERY_RETRIEVE_RETRY_INTERVAL: u32 = PG_WAIT_TIMEOUT + 4;
+// wait_event.h PG_WAIT_IO class: the id is WalRead's position in the
+// waitevent crate's IO name table (pgstat_get_wait_event(PG_WAIT_IO | 75)
+// == "WALRead").
+const PG_WAIT_IO: u32 = 0x0A00_0000;
+const WAIT_EVENT_WAL_READ: u32 = PG_WAIT_IO | 75;
+
+// pgstat_report_wait_start/end (wait_event.h): XLogPageRead brackets its
+// pg_pread so pg_stat_activity.wait_event shows WALRead during recovery
+// reads (xlogrecovery.c:3434/3441/3466). The seam is uninstalled in unit
+// tests without backend status storage, where the report is a no-op.
+#[inline]
+fn report_wait_start(wait_event_info: u32) {
+    if waitevent_seams::pgstat_report_wait_start::is_installed() {
+        waitevent_seams::pgstat_report_wait_start::call(wait_event_info);
+    }
+}
+
+#[inline]
+fn report_wait_end() {
+    if waitevent_seams::pgstat_report_wait_end::is_installed() {
+        waitevent_seams::pgstat_report_wait_end::call();
+    }
+}
 
 #[track_caller]
 fn loc(func: &'static str) -> ErrorLocation {
@@ -371,8 +394,12 @@ impl PageSource {
         }
         let errno = std::io::Error::last_os_error();
         if errno.raw_os_error() != Some(libc::ENOENT) || !notfound_ok {
+            // xlogrecovery.c:4314-4317: ereport(PANIC, errcode_for_file_access(),
+            // "could not open file \"%s\": %m") with C's pg_wal-relative path.
             ereport(PANIC)
-                .errmsg(format!("could not open file \"{path}\": {errno}"))
+                .with_saved_errno(errno.raw_os_error().unwrap_or(0))
+                .errcode_for_file_access()
+                .errmsg(format!("could not open file \"{XLOGDIR}/{fname}\": %m"))
                 .finish(loc("XLogFileRead"))?;
         }
         Ok(-1)
@@ -827,11 +854,14 @@ impl XLogReaderRoutine for PageSource {
             let io_start =
                 pgstat::io::pgstat_prepare_io_time(guc_tables::vars::track_wal_io_timing.read());
             // cur_page is the reader's XLOG_BLCKSZ read buffer.
+            report_wait_start(WAIT_EVENT_WAL_READ);
             let r = fd::pg_pread(
                 self.read_file,
                 &mut cur_page[..XLOG_BLCKSZ],
                 self.read_off as i64,
             );
+            let read_errno = std::io::Error::last_os_error();
+            report_wait_end();
             // upstream 13f940b4b56f (18.6): Fix pgstat_count_io_op_time() calls passing incorrect information
             // Count I/O stats only for successful short reads.
             if r > 0 {
@@ -845,7 +875,7 @@ impl XLogReaderRoutine for PageSource {
                 );
             }
             if r != XLOG_BLCKSZ as isize {
-                let errno = std::io::Error::last_os_error();
+                let errno = read_errno;
                 let fname =
                     transam_xlog::XLogFileName(self.cur_file_tli, self.read_seg_no, wal_segsz);
                 let emode = self.emode;
@@ -1133,7 +1163,9 @@ fn validate_recovery_parameters() -> PgResult<()> {
                 .finish(loc("validateRecoveryParameters"));
         }
     } else if restore_command.is_empty() {
+        // xlogrecovery.c:1158: errcode(ERRCODE_INVALID_PARAMETER_VALUE).
         ereport(FATAL)
+            .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
             .errmsg("must specify \"restore_command\" when standby mode is not enabled")
             .finish(loc("validateRecoveryParameters"))?;
         unreachable!()
@@ -1155,7 +1187,9 @@ fn validate_recovery_parameters() -> PgResult<()> {
         RecoveryTargetTimeLineGoal::Numeric => {
             let rtli = targets::recovery_target_tli_requested();
             if rtli != 1 && !timeline_seams::exists_timeline_history::call(rtli)? {
+                // xlogrecovery.c:1196: errcode(ERRCODE_INVALID_PARAMETER_VALUE).
                 { ereport(FATAL)
+                    .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
                     .errmsg(format!("recovery target timeline {rtli} does not exist"))
                     .finish(loc("validateRecoveryParameters"))?; unreachable!() }
             }
@@ -1304,8 +1338,15 @@ pub fn InitWalRecovery() -> PgResult<InitWalRecoveryResult> {
 
         if let Some(tablespaces) = backup_label::read_tablespace_map()? {
             for ti in &tablespaces {
-                let linkloc = data_path(&format!("{PG_TBLSPC_DIR}/{}", ti.oid));
-                let _ = std::fs::remove_file(&linkloc);
+                // xlogrecovery.c:695-707: the link name is PGDATA-relative
+                // ("pg_tblspc/<oid>"; the startup process runs in PGDATA) and
+                // an existing entry is removed by remove_tablespace_symlink
+                // (tablespace.c: rmdir for a directory, unlink for a symlink,
+                // ERROR otherwise) — a bare unlink() left an empty directory
+                // in place and the symlink() then failed with EEXIST.
+                let linkloc_rel = format!("{PG_TBLSPC_DIR}/{}", ti.oid);
+                let linkloc = data_path(&linkloc_rel);
+                tablespace_seams::remove_tablespace_symlink::call(&linkloc_rel)?;
                 // wasm32: std exposes no symlink creation on wasi (unix::fs
                 // is absent; wasi::fs's is unstable) — refuse with the C
                 // error shape (52 = WASI ENOSYS), the tablespace wasm arm's
@@ -1316,9 +1357,12 @@ pub fn InitWalRecovery() -> PgResult<InitWalRecoveryResult> {
                 #[cfg(not(target_family = "wasm"))]
                 let link_result = std::os::unix::fs::symlink(&ti.path, &linkloc);
                 if let Err(e) = link_result {
+                    // xlogrecovery.c:704-707: errcode_for_file_access() + "%m".
                     { ereport(ERROR)
+                        .with_saved_errno(e.raw_os_error().unwrap_or(0))
+                        .errcode_for_file_access()
                         .errmsg(format!(
-                            "could not create symbolic link \"{linkloc}\": {e}"
+                            "could not create symbolic link \"{linkloc_rel}\": %m"
                         ))
                         .finish(loc("InitWalRecovery"))?; unreachable!() }
                 }
@@ -1574,27 +1618,64 @@ pub fn InitWalRecovery() -> PgResult<InitWalRecoveryResult> {
 // CheckTablespaceDirectory (xlogrecovery.c:2151).
 fn check_tablespace_directory() -> PgResult<()> {
     let dir = data_path(PG_TBLSPC_DIR);
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Ok(());
+    // xlogrecovery.c:2177-2178: AllocateDir + ReadDir(dir, PG_TBLSPC_DIR) —
+    // an unopenable directory is ReadDir's ereport(ERROR,
+    // errcode_for_file_access(), "could not open directory \"%s\": %m") with
+    // the PGDATA-relative name; a readdir failure is "could not read
+    // directory". Neither may be swallowed.
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            return Err(ereport(ERROR)
+                .with_saved_errno(e.raw_os_error().unwrap_or(0))
+                .errcode_for_file_access()
+                .errmsg(format!("could not open directory \"{PG_TBLSPC_DIR}\": %m"))
+                .into_error()
+                .into());
+        }
     };
-    for de in entries.flatten() {
+    for de in entries {
+        let de = match de {
+            Ok(de) => de,
+            Err(e) => {
+                return Err(ereport(ERROR)
+                    .with_saved_errno(e.raw_os_error().unwrap_or(0))
+                    .errcode_for_file_access()
+                    .errmsg(format!("could not read directory \"{PG_TBLSPC_DIR}\": %m"))
+                    .into_error()
+                    .into());
+            }
+        };
         let name = de.file_name();
         let name = name.to_string_lossy();
         if name.is_empty() || !name.bytes().all(|b| b.is_ascii_digit()) {
             continue;
         }
-        let is_link = de
-            .path()
-            .symlink_metadata()
-            .map(|m| m.file_type().is_symlink())
-            .unwrap_or(false);
+        // get_dirent_type(path, de, false, ERROR) (xlogrecovery.c:2188): the
+        // d_type when the filesystem reports one, else an lstat whose failure
+        // is ereport(ERROR, errcode_for_file_access(), "could not stat file
+        // \"%s\": %m") — std's DirEntry::file_type has the same shape.
+        let is_link = match de.file_type() {
+            Ok(ft) => ft.is_symlink(),
+            Err(e) => {
+                return Err(ereport(ERROR)
+                    .with_saved_errno(e.raw_os_error().unwrap_or(0))
+                    .errcode_for_file_access()
+                    .errmsg(format!("could not stat file \"{PG_TBLSPC_DIR}/{name}\": %m"))
+                    .into_error()
+                    .into());
+            }
+        };
         if !is_link {
             let level = if guc_tables::vars::allow_in_place_tablespaces.read() {
                 WARNING
             } else {
                 PANIC
             };
+            // xlogrecovery.c:2189-2195: errcode(ERRCODE_DATA_CORRUPTED) on
+            // both the WARNING and the PANIC arm.
             let r = ereport(level)
+                .errcode(ERRCODE_DATA_CORRUPTED)
                 .errmsg(format!(
                     "unexpected directory entry \"{name}\" found in {PG_TBLSPC_DIR}"
                 ))
@@ -2147,7 +2228,9 @@ fn perform_wal_recovery_guts(rec: &mut Recovery) -> PgResult<()> {
         && targets::recovery_target() != RecoveryTargetType::Unset
         && !reached_recovery_target
     {
+        // xlogrecovery.c:1929: errcode(ERRCODE_CONFIG_FILE_ERROR).
         ereport(FATAL)
+            .errcode(ERRCODE_CONFIG_FILE_ERROR)
             .errmsg("recovery ended before configured recovery target was reached")
             .finish(loc("PerformWalRecovery"))?;
         unreachable!()

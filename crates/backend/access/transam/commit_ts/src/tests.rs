@@ -333,3 +333,21 @@ fn extend_and_wal_records() {
 
     deactivate();
 }
+
+// commit_ts.c:563 CommitTsShmemInit registers the control block through
+// ShmemInitStruct("CommitTs shared", sizeof(CommitTimestampShared), &found),
+// which is what makes it visible in pg_shmem_allocations; the pre-fix port
+// kept it in a process-static OnceLock with no ShmemIndex row. Audit
+// a186-candidate-fp-transam-commit_ts-3ce8cdda490e4038f312-1.
+#[test]
+fn shmem_init_registers_commit_ts_shared_in_shmem_index() {
+    let _l = test_lock();
+    setup();
+    // The test registry maps ShmemIndex name -> arena address.
+    let reg = shmem_registry().lock().unwrap();
+    assert!(
+        reg.contains_key("CommitTs shared"),
+        "CommitTs shared is missing from the ShmemIndex: {:?}",
+        reg.keys().collect::<Vec<_>>()
+    );
+}

@@ -32,12 +32,12 @@ xloginsert_seams = { path = "../xloginsert_seams" }
 xlogutils_seams = { path = "../xlogutils_seams" }
 xlogreader_seams = { path = "../xlogreader_seams" }
 miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
+shmem_seams = { path = "../../../storage/ipc/shmem_seams" }
 
 [dev-dependencies]
 libc = "0.2"
 lmgr_proc = { path = "../../../storage/lmgr/lmgr_proc" }
 lmgr_proc_seams = { path = "../../../storage/lmgr/lmgr_proc_seams" }
-shmem_seams = { path = "../../../storage/ipc/shmem_seams" }
 file_seams = { path = "../../../storage/file/file_seams" }
 sync_seams = { path = "../../../storage/sync/sync_seams" }
 pgstat_seams = { path = "../../../utils/activity/pgstat_seams" }
