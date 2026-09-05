@@ -392,7 +392,7 @@ fn make_batch(
     pstate: &ParallelHashJoinState,
     batchno: i32,
     nbatch: i32,
-) -> ParallelHashJoinBatch {
+) -> PgResult<ParallelHashJoinBatch> {
     let batch = ParallelHashJoinBatch {
         batch_barrier: Barrier::new(0),
         mu: Mutex::new(BatchShared {
@@ -409,12 +409,12 @@ fn make_batch(
             pstate.nparticipants,
             core::mem::size_of::<u32>(),
             &format!("i{batchno}of{nbatch}"),
-        )),
+        )?),
         outer_tuples: Arc::new(SharedTuplestore::new(
             pstate.nparticipants,
             core::mem::size_of::<u32>(),
             &format!("o{batchno}of{nbatch}"),
-        )),
+        )?),
     };
     if batchno == 0 {
         // Batch 0 loads while hashing: pre-advance to PHJ_BATCH_PROBE.
@@ -427,15 +427,17 @@ fn make_batch(
         }
         batch.batch_barrier.detach();
     }
-    batch
+    Ok(batch)
 }
 
 // ExecParallelHashJoinSetUpBatches: one backend creates the generation.
-fn setup_batches(table: &mut ParallelHashJoinTable<'_>, nbatch: i32) {
+fn setup_batches(table: &mut ParallelHashJoinTable<'_>, nbatch: i32) -> PgResult<()> {
     debug_assert!(table.batches.is_empty());
     let pstate = Arc::clone(&table.pstate);
-    let gen: Arc<[ParallelHashJoinBatch]> =
-        (0..nbatch).map(|i| make_batch(&pstate, i, nbatch)).collect();
+    let gen: Arc<[ParallelHashJoinBatch]> = (0..nbatch)
+        .map(|i| make_batch(&pstate, i, nbatch))
+        .collect::<PgResult<Vec<_>>>()?
+        .into();
     {
         let mut g = pstate.locked();
         g.batches = Some(Arc::clone(&gen));
@@ -446,6 +448,7 @@ fn setup_batches(table: &mut ParallelHashJoinTable<'_>, nbatch: i32) {
     table.batches = (0..nbatch)
         .map(|i| make_accessor(table.mcx, &gen[i as usize], table.participant, &pstate))
         .collect();
+    Ok(())
 }
 
 fn make_accessor<'mcx>(
@@ -599,7 +602,7 @@ pub fn exec_parallel_hash_table_create<'mcx>(
             g.growth = ParallelHashGrowth::Ok;
             g.nbuckets = nbuckets;
         }
-        setup_batches(&mut table, nbatch);
+        setup_batches(&mut table, nbatch)?;
         exec_parallel_hash_table_alloc(&table, 0);
     }
     Ok(table)
@@ -952,7 +955,7 @@ pub fn exec_parallel_hash_increase_num_batches(
                 (old_gen, g.old_nbatch, new_nbatch)
             };
             close_batch_accessors(table)?;
-            setup_batches(table, new_nbatch);
+            setup_batches(table, new_nbatch)?;
             {
                 let mut g = pstate.locked();
                 debug_assert!(g.nbatch == new_nbatch);

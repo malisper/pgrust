@@ -13,12 +13,16 @@ use ::elog::ereport;
 use ::fd::fileset::FileSet;
 use ::fd::BufFile;
 use ::mcx::{Mcx, PgVec};
-use ::types_error::{ErrorLocation, PgResult, ERROR};
+use ::types_error::{ErrorLocation, PgError, PgResult, ERROR};
 use ::types_tuple::MinimalTupleData;
 
 pub fn init_seams() {}
 
+#[cfg(test)]
+mod tests;
+
 const BLCKSZ: usize = 8192;
+const NAMEDATALEN: usize = 64;
 const STS_CHUNK_PAGES: u32 = 4;
 const STS_CHUNK_HEADER_SIZE: usize = 8; // offsetof(SharedTuplestoreChunk, data)
 const STS_CHUNK_SIZE: usize = STS_CHUNK_PAGES as usize * BLCKSZ;
@@ -50,20 +54,25 @@ pub struct SharedTuplestore {
 }
 
 impl SharedTuplestore {
-    /// `sts_initialize` (shared part); accessors attach separately.
-    pub fn new(nparticipants: i32, meta_data_size: usize, name: &str) -> SharedTuplestore {
-        assert!(
-            meta_data_size + core::mem::size_of::<u32>() < STS_CHUNK_DATA_SIZE,
-            "meta-data too long"
-        );
-        SharedTuplestore {
+    /// `sts_initialize` (shared part); accessors attach separately. The
+    /// name-length and meta-data-size guards are C's elog(ERROR)s
+    /// (sharedtuplestore.c:143, 153).
+    pub fn new(nparticipants: i32, meta_data_size: usize, name: &str) -> PgResult<SharedTuplestore> {
+        // C: strlen(name) > sizeof(sts->name) - 1, sts->name is char[NAMEDATALEN].
+        if name.len() > NAMEDATALEN - 1 {
+            return Err(Box::new(PgError::error("SharedTuplestore name too long")));
+        }
+        if meta_data_size + core::mem::size_of::<u32>() >= STS_CHUNK_DATA_SIZE {
+            return Err(Box::new(PgError::error("meta-data too long")));
+        }
+        Ok(SharedTuplestore {
             nparticipants,
             meta_data_size,
             name: name.to_string(),
             participants: (0..nparticipants.max(0))
                 .map(|_| Mutex::new(StsParticipant { read_page: 0, npages: 0, writing: false }))
                 .collect(),
-        }
+        })
     }
 
     /// `sts_reinitialize`: reset every participant's shared read head. Only

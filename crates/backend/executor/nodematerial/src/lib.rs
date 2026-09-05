@@ -90,9 +90,9 @@ pub fn exec_material<'mcx, C: MaterialChild<'mcx>>(
     }
     if node.tuplestorestate.is_none() && node.eflags != 0 {
         let mut ts = Tuplestore::begin_heap(true, false, init_small::globals::work_mem());
-        ts.set_eflags(node.eflags);
+        ts.set_eflags(node.eflags)?;
         if node.eflags & EXEC_FLAG_MARK != 0 {
-            let ptrno = ts.alloc_read_pointer(node.eflags);
+            let ptrno = ts.alloc_read_pointer(node.eflags)?;
             debug_assert_eq!(ptrno, 1);
         }
         node.tuplestorestate = Some(ts);

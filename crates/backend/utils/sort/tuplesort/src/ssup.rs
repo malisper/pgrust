@@ -512,7 +512,8 @@ impl AbbrevArm {
 }
 
 /// `PrepareSortSupportFromOrderingOp` (sortsupport.c), `abbreviate=false` arm
-/// (nodeSetOp et al.); out-of-enum sortsupport routines panic loudly.
+/// (nodeSetOp et al.); a non-ordering operator is C's elog(ERROR), an
+/// out-of-enum sortsupport routine panics loudly (invariant tripwire).
 pub fn prepare_sort_support_from_ordering_op(
     ordering_op: Oid,
     ssup: &SortSupportInit,
@@ -528,7 +529,11 @@ pub fn prepare_sort_support_abbrev(
     let Some((opfamily, opcintype, cmptype)) =
         lsyscache::get_ordering_op_properties(ordering_op)?
     else {
-        panic!("operator {ordering_op} is not a valid ordering operator");
+        // C: elog(ERROR, ...) (sortsupport.c:145) — a backend error, not a
+        // process-level failure.
+        return Err(Box::new(PgError::error(format!(
+            "operator {ordering_op} is not a valid ordering operator"
+        ))));
     };
     let ssup_reverse = cmptype == COMPARE_GT;
     let comparator =

@@ -85,7 +85,7 @@ pub fn exec_init_named_tuplestore_scan<'mcx>(
 
     // The new read pointer copies pointer 0's position: rewind it explicitly.
     let readptr = ::tuplestore::hold::with_store(relation, |ts| {
-        let p = ts.alloc_read_pointer(EXEC_FLAG_REWIND);
+        let p = ts.alloc_read_pointer(EXEC_FLAG_REWIND)?;
         ts.select_read_pointer(p)?;
         ts.rescan()?;
         Ok::<i32, Box<::types_error::PgError>>(p)

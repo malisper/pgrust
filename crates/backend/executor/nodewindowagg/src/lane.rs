@@ -408,7 +408,7 @@ fn begin_partition<'mcx>(
             // The row engine's prepare_tuplestore budget (work_mem), one
             // forward-only read pointer (the trailing emit pointer).
             let mut store = Tuplestore::begin_heap(false, false, drive.work_mem_kb);
-            store.set_eflags(0);
+            store.set_eflags(0)?;
             drive.store = Some(store);
         }
     }

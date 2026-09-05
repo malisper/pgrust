@@ -37,12 +37,13 @@ fmgr_seams = { path = "../../fmgr/fmgr_seams" }
 detoast_seams = { path = "../../../access/common/detoast_seams" }
 tuplesort_seams = { path = "../tuplesort_seams" }
 genam_seams = { path = "../../../access/index/genam_seams" }
+guc_tables = { path = "../../misc/guc_tables" }
+elog = { path = "../../error/elog" }
+pg_rusage = { path = "../../misc/pg_rusage" }
 
 [dev-dependencies]
 detoast = { path = "../../../access/common/detoast" }
 pglz = { path = "../../../../common/pglz" }
-guc_tables = { path = "../../misc/guc_tables" }
-elog = { path = "../../error/elog" }
 fd = { path = "../../../storage/file/fd" }
 xact_seams = { path = "../../../access/transam/xact_seams" }
 aio_seams = { path = "../../../storage/aio/aio_seams" }

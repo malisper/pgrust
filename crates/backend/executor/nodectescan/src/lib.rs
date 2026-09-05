@@ -167,13 +167,13 @@ pub fn exec_init_cte_scan<'mcx>(
     let (readptr, is_leader) = match estate.cte_shared_slot(param) {
         slot @ None => {
             let mut ts = Tuplestore::begin_heap(true, false, init_small::globals::work_mem());
-            ts.set_eflags(eflags);
+            ts.set_eflags(eflags)?;
             *slot = Some(CteShared { tuplestore: ts, eof_cte: false, fills: 0 });
             (0, true)
         }
         Some(shared) => {
             let ts = &mut shared.tuplestore;
-            let p = ts.alloc_read_pointer(eflags);
+            let p = ts.alloc_read_pointer(eflags)?;
             ts.select_read_pointer(p)?;
             ts.rescan()?;
             (p, false)

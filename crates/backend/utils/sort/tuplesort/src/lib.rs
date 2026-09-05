@@ -8,6 +8,7 @@ use core::mem;
 
 use ::datum::{Datum, NullableDatum};
 use ::mcx::{McxOwned, Mcx, MemoryContext, PgVec};
+use ::pg_rusage::{pg_rusage_init, pg_rusage_show, PgRUsage};
 use ::types_core::instrument::{TuplesortInstrumentation, TuplesortMethod, TuplesortSpaceType};
 use ::types_core::Oid;
 use ::types_error::{PgError, PgResult, ERRCODE_UNIQUE_VIOLATION};
@@ -50,6 +51,10 @@ use mgetattr::minimal_getattr;
 use qsort::qsort_tuple;
 
 pub fn init_seams() {
+    ::guc_tables::vars::trace_sort.install_if_absent(::guc_tables::GucVarAccessors {
+        get: trace_sort_guc,
+        set: set_trace_sort_guc,
+    });
     tuplesort_seams::tuplesort_datums::set(
         |mcx, datum_type, sort_operator, collation, nulls_first, work_mem, values| {
             let mut ts = Tuplesort::begin_datum(
@@ -300,6 +305,8 @@ pub struct TuplesortData<'m> {
     tuple_mem: i64,
     is_max_space_disk: bool,
     tapes: Option<Box<tape::TapeState<'m>>>,
+    // C ru_start: the trace_sort rusage baseline (zero when tracing is off).
+    ru_start: PgRUsage,
 }
 
 ::mcx::bind!(pub TuplesortTy => TuplesortData<'mcx>);
@@ -312,10 +319,58 @@ pub struct Tuplesort(McxOwned<TuplesortTy>);
 impl Drop for Tuplesort {
     fn drop(&mut self) {
         self.0.with_mut(|st| {
+            // C tuplesort_free: the space figure is read before the tapes close.
+            st.trace_free();
             if let Some(ts) = st.tapes.take() {
                 let _ = ts.tapeset.close();
             }
         })
+    }
+}
+
+// C `bool trace_sort = false` (tuplesort.c:124): this crate owns the GUC's
+// backing store; init_seams installs the accessors into the guc_tables slot.
+::guc_tables::session_guc_bool!(TRACE_SORT_GUC, trace_sort_guc, set_trace_sort_guc, false);
+
+/// C `trace_sort` (tuplesort.c).
+#[inline]
+pub(crate) fn trace_sort() -> bool {
+    trace_sort_guc()
+}
+
+/// C `state->worker`: this crate is the serial arm (SERIAL(state)), whose
+/// worker number is -1 in every trace line.
+pub(crate) const TRACE_WORKER: i32 = -1;
+
+/// C `elog(LOG, ...)` under trace_sort. LOG never raises; the finish result
+/// carries nothing for a LOG-level report.
+#[cold]
+#[inline(never)]
+pub(crate) fn trace_log(message: String) {
+    let _ = ::elog::ereport(::types_error::LOG)
+        .errmsg_internal(message)
+        .finish(::types_error::ErrorLocation::new(file!(), line!() as i32, "tuplesort"));
+}
+
+/// C tuplesort_begin_common's `pg_rusage_init(&state->ru_start)` plus the
+/// variant's "begin ... sort" LOG line (tuplesortvariants.c), taken before
+/// key preparation as C does. Returns the baseline (zero when tracing is off).
+#[inline]
+fn trace_begin(message: impl FnOnce() -> String) -> PgRUsage {
+    if !trace_sort() {
+        return PgRUsage::default();
+    }
+    let ru_start = pg_rusage_init();
+    trace_log(message());
+    ru_start
+}
+
+#[inline]
+fn trace_random_access(sortopt: i32) -> char {
+    if sortopt & TUPLESORT_RANDOMACCESS != 0 {
+        't'
+    } else {
+        'f'
     }
 }
 
@@ -812,6 +867,20 @@ fn btorder_proc_check(index_rel: &types_rel::Relation<'_>, i: usize) -> PgResult
     Ok(())
 }
 
+/// C: PrepareSortSupportFromIndexRel's `!indexRel->rd_indam->amcanorder`
+/// elog(ERROR) (sortsupport.c:170), raised once per index sort after the
+/// `_bt_mkscankey` walk; btree is the roster's only ordering index AM
+/// (plancat's amcanorder arm), so the AM check is the relam test.
+fn amcanorder_check(index_rel: &types_rel::Relation<'_>) -> PgResult<()> {
+    if index_rel.rd_rel.relam != ::types_core::catalog::BTREE_AM_OID {
+        return Err(Box::new(PgError::error(format!(
+            "unexpected non-amcanorder AM: {}",
+            index_rel.rd_rel.relam
+        ))));
+    }
+    Ok(())
+}
+
 impl Tuplesort {
     /// `tuplesort_begin_heap`.
     #[allow(clippy::too_many_arguments)]
@@ -827,6 +896,12 @@ impl Tuplesort {
         let nkeys = att_nums.len();
         assert!(nkeys > 0 && sort_operators.len() == nkeys && sort_collations.len() == nkeys
             && nulls_first_flags.len() == nkeys);
+        let ru_start = trace_begin(|| {
+            format!(
+                "begin tuple sort: nkeys = {nkeys}, workMem = {work_mem}, randomAccess = {}",
+                trace_random_access(sortopt)
+            )
+        });
         let mut keys = Vec::with_capacity(nkeys);
         let mut abbrev_arm = None;
         for i in 0..nkeys {
@@ -853,6 +928,7 @@ impl Tuplesort {
             only_key,
             abbrev_arm.map(|arm| Box::new(AbbrevState::new(arm))),
             SortVariant::Heap { tup_desc },
+            ru_start,
         ))
     }
 
@@ -865,8 +941,23 @@ impl Tuplesort {
         sortopt: i32,
     ) -> Tuplesort {
         assert!(!keys.is_empty());
+        let ru_start = trace_begin(|| {
+            format!(
+                "begin tuple sort: nkeys = {}, workMem = {work_mem}, randomAccess = {}",
+                keys.len(),
+                trace_random_access(sortopt)
+            )
+        });
         let only_key = keys.len() == 1;
-        Self::begin_common(work_mem, sortopt, keys, only_key, None, SortVariant::Heap { tup_desc })
+        Self::begin_common(
+            work_mem,
+            sortopt,
+            keys,
+            only_key,
+            None,
+            SortVariant::Heap { tup_desc },
+            ru_start,
+        )
     }
 
     /// `tuplesort_begin_index_btree`, serial arm; keys read straight off the
@@ -883,6 +974,13 @@ impl Tuplesort {
         const INDOPTION_NULLS_FIRST: i16 = 1 << 1;
         let nkeys = index_rel.indnkeyatts() as usize;
         assert!(nkeys > 0);
+        let ru_start = trace_begin(|| {
+            format!(
+                "begin index sort: unique = {}, workMem = {work_mem}, randomAccess = {}",
+                if enforce_unique { 't' } else { 'f' },
+                trace_random_access(sortopt)
+            )
+        });
         // C runs `_bt_mkscankey` (per-column index_getprocinfo of BTORDER_PROC,
         // all columns) BEFORE the PrepareSortSupportFromIndexRel loop, so a
         // defective opclass fails with the index-attribute elog even when a
@@ -890,6 +988,7 @@ impl Tuplesort {
         for i in 0..nkeys {
             btorder_proc_check(index_rel, i)?;
         }
+        amcanorder_check(index_rel)?;
         let mut keys = Vec::with_capacity(nkeys);
         for i in 0..nkeys {
             let indoption = index_rel.rd_indoption[i];
@@ -914,7 +1013,7 @@ impl Tuplesort {
             unsafe { mem::transmute(index_rel.rd_att.clone()) };
         let index_rel_erased: std::rc::Rc<types_rel::RelationData<'static>> =
             unsafe { mem::transmute(index_rel.data_rc().clone()) };
-        Ok(Self::begin_index_with_keys(
+        Ok(Self::begin_index_traced(
             tup_desc,
             &keys,
             nkeys as u16,
@@ -924,6 +1023,7 @@ impl Tuplesort {
             Some(index_rel_erased),
             work_mem,
             sortopt,
+            ru_start,
         ))
     }
 
@@ -938,6 +1038,19 @@ impl Tuplesort {
     ) -> PgResult<Tuplesort> {
         let nkeys = index_rel.indnkeyatts() as usize;
         assert!(nkeys > 0);
+        let ru_start = trace_begin(|| {
+            format!(
+                "begin index sort: workMem = {work_mem}, randomAccess = {}",
+                trace_random_access(sortopt)
+            )
+        });
+        // C: PrepareSortSupportFromGistIndexRel's AM check (sortsupport.c:194).
+        if index_rel.rd_rel.relam != ::types_core::catalog::GIST_AM_OID {
+            return Err(Box::new(PgError::error(format!(
+                "unexpected non-gist AM: {}",
+                index_rel.rd_rel.relam
+            ))));
+        }
         let mut keys = Vec::with_capacity(nkeys);
         for i in 0..nkeys {
             let comparator = ssup::comparator_for_gist_index_col(
@@ -959,7 +1072,7 @@ impl Tuplesort {
             unsafe { mem::transmute(index_rel.rd_att.clone()) };
         let index_rel_erased: std::rc::Rc<types_rel::RelationData<'static>> =
             unsafe { mem::transmute(index_rel.data_rc().clone()) };
-        Ok(Self::begin_index_with_keys(
+        Ok(Self::begin_index_traced(
             tup_desc,
             &keys,
             nkeys as u16,
@@ -969,6 +1082,7 @@ impl Tuplesort {
             Some(index_rel_erased),
             work_mem,
             sortopt,
+            ru_start,
         ))
     }
 
@@ -982,6 +1096,13 @@ impl Tuplesort {
         work_mem: i32,
         sortopt: i32,
     ) -> Tuplesort {
+        let ru_start = trace_begin(|| {
+            format!(
+                "begin index sort: high_mask = 0x{high_mask:x}, low_mask = 0x{low_mask:x}, \
+                 max_buckets = 0x{max_buckets:x}, workMem = {work_mem}, randomAccess = {}",
+                trace_random_access(sortopt)
+            )
+        });
         // SAFETY: lifetime erasure on the relcache tupdesc; the caller keeps
         // the index relation open for the life of the sort (hashbuild holds
         // it open across the whole build, as C does).
@@ -994,6 +1115,7 @@ impl Tuplesort {
             false,
             None,
             SortVariant::IndexHash { tup_desc, high_mask, low_mask, max_buckets },
+            ru_start,
         )
     }
 
@@ -1008,9 +1130,16 @@ impl Tuplesort {
     ) -> PgResult<Tuplesort> {
         const INDOPTION_DESC: i16 = 1 << 0;
         const INDOPTION_NULLS_FIRST: i16 = 1 << 1;
-        debug_assert!(index_rel.rd_rel.relam == 403);
         let nkeys = index_rel.indnkeyatts() as usize;
         assert!(nkeys > 0 && nkeys <= index_attnums.len());
+        // C: nkeys printed = RelationGetNumberOfAttributes(indexRel).
+        let ru_start = trace_begin(|| {
+            format!(
+                "begin tuple sort: nkeys = {}, workMem = {work_mem}, randomAccess = {}",
+                index_rel.rd_att.natts,
+                trace_random_access(sortopt)
+            )
+        });
         let mut attnums = [0i16; 32];
         attnums[..nkeys].copy_from_slice(&index_attnums[..nkeys]);
         assert!(attnums[..nkeys].iter().all(|&a| a >= 0), "system-attribute index columns");
@@ -1019,6 +1148,7 @@ impl Tuplesort {
         for i in 0..nkeys {
             btorder_proc_check(index_rel, i)?;
         }
+        amcanorder_check(index_rel)?;
         // SAFETY: lifetime erasure as for heap_tup_desc; the caller keeps the
         // index relation open for the life of the sort.
         let index_desc: Option<std::rc::Rc<TupleDescData<'static>>> =
@@ -1051,6 +1181,7 @@ impl Tuplesort {
             false,
             None,
             SortVariant::Cluster { tup_desc: heap_tup_desc, attnums, nkeys: nkeys as u16, index_desc },
+            ru_start,
         ))
     }
 
@@ -1067,6 +1198,43 @@ impl Tuplesort {
         work_mem: i32,
         sortopt: i32,
     ) -> Tuplesort {
+        let ru_start = trace_begin(|| {
+            format!(
+                "begin index sort: unique = {}, workMem = {work_mem}, randomAccess = {}",
+                if enforce_unique { 't' } else { 'f' },
+                trace_random_access(sortopt)
+            )
+        });
+        Self::begin_index_traced(
+            tup_desc,
+            keys,
+            nkeys,
+            enforce_unique,
+            unique_nulls_not_distinct,
+            index_name,
+            index_rel,
+            work_mem,
+            sortopt,
+            ru_start,
+        )
+    }
+
+    // The index-variant tail shared by begin_index_btree / begin_index_gist
+    // (whose "begin index sort" trace lines precede their key preparation,
+    // as C's) and the pre-resolved-keys surface above.
+    #[allow(clippy::too_many_arguments)]
+    fn begin_index_traced(
+        tup_desc: std::rc::Rc<TupleDescData<'static>>,
+        keys: &[SortSupport],
+        nkeys: u16,
+        enforce_unique: bool,
+        unique_nulls_not_distinct: bool,
+        index_name: &str,
+        index_rel: Option<std::rc::Rc<types_rel::RelationData<'static>>>,
+        work_mem: i32,
+        sortopt: i32,
+        ru_start: PgRUsage,
+    ) -> Tuplesort {
         assert!(!keys.is_empty() && keys.len() == nkeys as usize);
         Self::begin_common(
             work_mem,
@@ -1082,6 +1250,7 @@ impl Tuplesort {
                 index_name: std::rc::Rc::from(index_name),
                 index_rel,
             },
+            ru_start,
         )
     }
 
@@ -1095,6 +1264,12 @@ impl Tuplesort {
         work_mem: i32,
         sortopt: i32,
     ) -> PgResult<Tuplesort> {
+        let ru_start = trace_begin(|| {
+            format!(
+                "begin datum sort: workMem = {work_mem}, randomAccess = {}",
+                trace_random_access(sortopt)
+            )
+        });
         let (typlen, typbyval) = lsyscache::get_typlenbyval(datum_type)?;
         let init = SortSupportInit {
             ssup_collation: sort_collation,
@@ -1111,12 +1286,27 @@ impl Tuplesort {
             abbrev_arm.is_none(),
             abbrev_arm.map(|arm| Box::new(AbbrevState::new(arm))),
             SortVariant::Datum { byref_typlen },
+            ru_start,
         ))
     }
 
     /// C divergence: as [`Tuplesort::begin_heap_with_keys`], datum variant.
     pub fn begin_datum_with_key(key: SortSupport, work_mem: i32, sortopt: i32) -> Tuplesort {
-        Self::begin_common(work_mem, sortopt, &[key], true, None, SortVariant::Datum { byref_typlen: 0 })
+        let ru_start = trace_begin(|| {
+            format!(
+                "begin datum sort: workMem = {work_mem}, randomAccess = {}",
+                trace_random_access(sortopt)
+            )
+        });
+        Self::begin_common(
+            work_mem,
+            sortopt,
+            &[key],
+            true,
+            None,
+            SortVariant::Datum { byref_typlen: 0 },
+            ru_start,
+        )
     }
 
     fn begin_common(
@@ -1126,6 +1316,7 @@ impl Tuplesort {
         only_key: bool,
         abbrev: Option<Box<AbbrevState>>,
         variant: SortVariant,
+        ru_start: PgRUsage,
     ) -> Tuplesort {
         let free_typlen = match variant {
             SortVariant::Datum { byref_typlen } => byref_typlen,
@@ -1171,6 +1362,7 @@ impl Tuplesort {
                 is_max_space_disk: false,
                 max_space_status: TupSortStatus::Initial,
                 tapes: None,
+                ru_start,
                 tuple_mem: 0,
                 sort_keys,
                 only_key,
@@ -1362,6 +1554,8 @@ impl Tuplesort {
     pub fn reset(&mut self) {
         self.0.with_mut(|st| {
             st.updatemax();
+            // C tuplesort_reset -> tuplesort_free: the "ended" trace line.
+            st.trace_free();
             if let Some(ts) = st.tapes.take() {
                 ts.tapeset
                     .close()
@@ -1845,6 +2039,12 @@ impl Tuplesort {
     #[inline]
     pub fn performsort(&mut self) -> PgResult<()> {
         self.0.with_mut(|st| {
+            if trace_sort() {
+                trace_log(format!(
+                    "performsort of worker {TRACE_WORKER} starting: {}",
+                    pg_rusage_show(&st.ru_start).as_str()
+                ));
+            }
             match st.status {
                 TupSortStatus::Initial => {
                     st.sort_memtuples()?;
@@ -1869,6 +2069,20 @@ impl Tuplesort {
             }
             st.markpos_offset = 0;
             st.markpos_eof = false;
+            if trace_sort() {
+                let rusage = pg_rusage_show(&st.ru_start);
+                match (&st.status, &st.tapes) {
+                    (TupSortStatus::FinalMerge, Some(ts)) => trace_log(format!(
+                        "performsort of worker {TRACE_WORKER} done (except {}-way final merge): {}",
+                        ts.n_input_tapes(),
+                        rusage.as_str()
+                    )),
+                    _ => trace_log(format!(
+                        "performsort of worker {TRACE_WORKER} done: {}",
+                        rusage.as_str()
+                    )),
+                }
+            }
             Ok(())
         })
     }
@@ -2269,6 +2483,13 @@ impl<'m> TuplesortData<'m> {
                     && (self.memtuples.len() > self.bound as usize * 2
                         || (self.memtuples.len() > self.bound as usize && self.lackmem()))
                 {
+                    if trace_sort() {
+                        trace_log(format!(
+                            "switching to bounded heapsort at {} tuples: {}",
+                            self.memtuples.len(),
+                            pg_rusage_show(&self.ru_start).as_str()
+                        ));
+                    }
                     self.make_bounded_heap()?;
                     self.recompute_put_watermark();
                     return Ok(());
@@ -2378,6 +2599,27 @@ impl<'m> TuplesortData<'m> {
     }
 
     /// `tuplesort_updatemax`: disk usage dominates memory usage.
+    /// C tuplesort_free's trace_sort arm (tuplesort.c:918): the "ended"
+    /// line, with the tape set's block count or the in-memory KB figure.
+    pub(crate) fn trace_free(&self) {
+        if !trace_sort() {
+            return;
+        }
+        let rusage = pg_rusage_show(&self.ru_start);
+        match &self.tapes {
+            Some(ts) => trace_log(format!(
+                "external sort of worker {TRACE_WORKER} ended, {} disk blocks used: {}",
+                ts.tapeset.blocks(),
+                rusage.as_str()
+            )),
+            None => trace_log(format!(
+                "internal sort of worker {TRACE_WORKER} ended, {} KB used: {}",
+                (self.allowed_mem - self.avail_mem + 1023) / 1024,
+                rusage.as_str()
+            )),
+        }
+    }
+
     fn updatemax(&mut self) {
         let (is_disk, space_used) = match &self.tapes {
             Some(ts) => (true, ts.tapeset.blocks() * tape::BLCKSZ as i64),

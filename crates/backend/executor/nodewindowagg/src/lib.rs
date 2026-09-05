@@ -1443,11 +1443,11 @@ impl<'mcx> WindowAggStateData<'mcx> {
     // prepare_tuplestore (nodeWindowAgg.c). Mark pointers are position
     // bookkeeping only (no tuplestore_trim); the agg read pointer gets
     // BACKWARD capability when the frame head can move (restart re-reads).
-    fn prepare_tuplestore(&mut self) {
+    fn prepare_tuplestore(&mut self) -> PgResult<()> {
         debug_assert!(self.buffer.is_none());
         let work_mem = init_small::globals::work_mem();
         let mut buffer = Tuplestore::begin_heap(false, false, work_mem);
-        buffer.set_eflags(0);
+        buffer.set_eflags(0)?;
         if self.numaggs > 0 {
             let mut flags = 0;
             if self.frameOptions & FRAMEOPTION_START_UNBOUNDED_PRECEDING == 0
@@ -1456,11 +1456,11 @@ impl<'mcx> WindowAggStateData<'mcx> {
                 self.agg_mark_active = true;
                 flags |= EXEC_FLAG_BACKWARD;
             }
-            self.agg_readptr = buffer.alloc_read_pointer(flags);
+            self.agg_readptr = buffer.alloc_read_pointer(flags)?;
         }
         for pf in self.perfunc.iter_mut() {
             if !matches!(pf.kind, WfKind::PlainAgg { .. }) {
-                pf.readptr = buffer.alloc_read_pointer(EXEC_FLAG_BACKWARD);
+                pf.readptr = buffer.alloc_read_pointer(EXEC_FLAG_BACKWARD)?;
             }
         }
         if self.frameOptions & (FRAMEOPTION_RANGE | FRAMEOPTION_GROUPS) != 0 {
@@ -1468,21 +1468,22 @@ impl<'mcx> WindowAggStateData<'mcx> {
                 && self.plan.ordNumCols != 0)
                 || self.frameOptions & FRAMEOPTION_START_OFFSET != 0
             {
-                self.framehead_ptr = buffer.alloc_read_pointer(0);
+                self.framehead_ptr = buffer.alloc_read_pointer(0)?;
             }
             if (self.frameOptions & FRAMEOPTION_END_CURRENT_ROW != 0
                 && self.plan.ordNumCols != 0)
                 || self.frameOptions & FRAMEOPTION_END_OFFSET != 0
             {
-                self.frametail_ptr = buffer.alloc_read_pointer(0);
+                self.frametail_ptr = buffer.alloc_read_pointer(0)?;
             }
         }
         if self.frameOptions & (FRAMEOPTION_EXCLUDE_GROUP | FRAMEOPTION_EXCLUDE_TIES) != 0
             && self.plan.ordNumCols != 0
         {
-            self.grouptail_ptr = buffer.alloc_read_pointer(0);
+            self.grouptail_ptr = buffer.alloc_read_pointer(0)?;
         }
         self.buffer = Some(buffer);
+        Ok(())
     }
 
     fn begin_partition<F>(&mut self, estate: &mut EStateData<'mcx>, fetch: &mut F) -> PgResult<()>
@@ -1523,7 +1524,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
             }
         }
         if self.buffer.is_none() {
-            self.prepare_tuplestore();
+            self.prepare_tuplestore()?;
         }
         self.next_partition = false;
 

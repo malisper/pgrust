@@ -122,11 +122,19 @@ fn cfi() -> PgResult<()> {
 const RP0: ReadPointer =
     ReadPointer { eflags: 0, eof_reached: false, current: 0, file: 0, offset: 0 };
 
+// C: ereport(ERROR, (errcode_for_file_access(), errmsg("could not seek in
+// tuplestore temporary file"))) — tuplestore.c:550, 560, 919, 1023, 1087,
+// 1104, 1318, 1383, 1392; the SQLSTATE follows errno (elog.c
+// errcode_for_file_access: EIO -> 58030, ENOSPC -> 53100, ENOENT -> 58P01, ...).
 #[track_caller]
 #[cold]
 #[inline(never)]
 fn seek_failed() -> Box<PgError> {
-    Box::new(PgError::error("could not seek in tuplestore temporary file"))
+    Box::new(
+        PgError::error("could not seek in tuplestore temporary file").with_sqlstate(
+            ::elog::errno::sqlstate_for_file_access(::elog::errno::current_errno()),
+        ),
+    )
 }
 
 // C's tuplestore_begin_heap creates no memory context; our two-context shell
@@ -407,35 +415,37 @@ impl Tuplestore {
         })
     }
 
-    pub fn set_eflags(&mut self, eflags: i32) {
+    /// C `tuplestore_set_eflags`; the too-late guard is C's elog(ERROR)
+    /// (tuplestore.c:376).
+    pub fn set_eflags(&mut self, eflags: i32) -> PgResult<()> {
         self.0.with_mut(|st| {
-            assert!(
-                st.status == TupStoreStatus::InMem && st.memtuples.is_empty(),
-                "too late to call tuplestore_set_eflags"
-            );
+            if st.status != TupStoreStatus::InMem || !st.memtuples.is_empty() {
+                return Err(Box::new(PgError::error("too late to call tuplestore_set_eflags")));
+            }
             st.readptrs[0].eflags = eflags;
             let mut all = eflags;
             for rp in st.readptrs.iter().skip(1) {
                 all |= rp.eflags;
             }
             st.eflags = all;
+            Ok(())
         })
     }
 
-    /// New pointer copies pointer 0's position (C contract).
-    pub fn alloc_read_pointer(&mut self, eflags: i32) -> i32 {
+    /// New pointer copies pointer 0's position (C contract); widening the
+    /// store's eflags after tuples exist is C's elog(ERROR) (tuplestore.c:401).
+    pub fn alloc_read_pointer(&mut self, eflags: i32) -> PgResult<i32> {
         self.0.with_mut(|st| {
-            if st.status != TupStoreStatus::InMem || !st.memtuples.is_empty() {
-                assert!(
-                    (st.eflags | eflags) == st.eflags,
-                    "too late to require new tuplestore eflags"
-                );
+            if (st.status != TupStoreStatus::InMem || !st.memtuples.is_empty())
+                && (st.eflags | eflags) != st.eflags
+            {
+                return Err(Box::new(PgError::error("too late to require new tuplestore eflags")));
             }
             let mut rp = st.readptrs[0];
             rp.eflags = eflags;
             st.readptrs.push(rp);
             st.eflags |= eflags;
-            (st.readptrs.len() - 1) as i32
+            Ok((st.readptrs.len() - 1) as i32)
         })
     }
 

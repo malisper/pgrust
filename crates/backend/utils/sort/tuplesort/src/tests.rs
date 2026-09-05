@@ -838,6 +838,7 @@ fn begin_text_datum_abbrev(sortopt: i32) -> Tuplesort {
         false,
         Some(Box::new(AbbrevState::new(text_abbrev_arm()))),
         SortVariant::Datum { byref_typlen: -1 },
+        ::pg_rusage::PgRUsage::default(),
     )
 }
 
@@ -1015,6 +1016,7 @@ fn abbrev_uuid_datum_sort() {
         false,
         Some(Box::new(AbbrevState::new(arm))),
         SortVariant::Datum { byref_typlen: 16 },
+        ::pg_rusage::PgRUsage::default(),
     );
     for u in &uuids {
         ts.putdatum(Datum::from_usize(u.as_ptr() as usize), false).unwrap();
@@ -1077,6 +1079,7 @@ fn abbrev_heap_text_sort_with_tiebreak_key() {
         false,
         Some(Box::new(AbbrevState::new(text_abbrev_arm()))),
         SortVariant::Heap { tup_desc: desc.clone() },
+        ::pg_rusage::PgRUsage::default(),
     );
 
     let texts = random_texts(400, 0x99, b"pfx_");
@@ -1383,6 +1386,7 @@ fn abbrev_numeric_datum_sort_matches_cmp_numerics_order() {
         false,
         Some(Box::new(AbbrevState::new(numeric_abbrev_arm()))),
         SortVariant::Datum { byref_typlen: -1 },
+        ::pg_rusage::PgRUsage::default(),
     );
     let blobs: Vec<Option<Box<[u64]>>> =
         vals.iter().map(|v| v.as_ref().map(|s| numeric_blob(s))).collect();
@@ -1407,6 +1411,7 @@ fn abbrev_numeric_datum_sort_reverse_nulls_first() {
         false,
         Some(Box::new(AbbrevState::new(numeric_abbrev_arm()))),
         SortVariant::Datum { byref_typlen: -1 },
+        ::pg_rusage::PgRUsage::default(),
     );
     let blobs: Vec<Option<Box<[u64]>>> =
         vals.iter().map(|v| v.as_ref().map(|s| numeric_blob(s))).collect();
@@ -1437,6 +1442,7 @@ fn numeric_abbrev_abort_low_cardinality_still_sorts() {
         false,
         Some(Box::new(AbbrevState::new(numeric_abbrev_arm()))),
         SortVariant::Datum { byref_typlen: -1 },
+        ::pg_rusage::PgRUsage::default(),
     );
     let blobs: Vec<Option<Box<[u64]>>> =
         vals.iter().map(|v| v.as_ref().map(|s| numeric_blob(s))).collect();
@@ -1462,6 +1468,7 @@ fn numeric_bounded_sort_disarms_abbrev() {
         false,
         Some(Box::new(AbbrevState::new(numeric_abbrev_arm()))),
         SortVariant::Datum { byref_typlen: -1 },
+        ::pg_rusage::PgRUsage::default(),
     );
     ts.set_bound(20);
     ts.0.with(|st| {
@@ -1523,6 +1530,7 @@ fn text_datum_sort_run(
         false,
         Some(Box::new(AbbrevState::new(text_abbrev_arm()))),
         SortVariant::Datum { byref_typlen: -1 },
+        ::pg_rusage::PgRUsage::default(),
     );
     let blobs: Vec<Option<Box<[u64]>>> =
         vals.iter().map(|v| v.as_ref().map(|p| text_blob(p))).collect();
@@ -1674,6 +1682,7 @@ fn radix_heap_two_key_matches_pgqsort() {
             false,
             Some(Box::new(AbbrevState::new(text_abbrev_arm()))),
             SortVariant::Heap { tup_desc: desc.clone() },
+            ::pg_rusage::PgRUsage::default(),
         );
         let mut in_slot =
             exectuples::make_tuple_table_slot(mcx, TupleSlotKind::Virtual, Some(desc.clone()));
@@ -1835,6 +1844,7 @@ fn cstring_sort(work_mem: i32, sortopt: i32) -> Tuplesort {
         true,
         None,
         SortVariant::Datum { byref_typlen: -2 },
+        ::pg_rusage::PgRUsage::default(),
     )
 }
 
@@ -2647,5 +2657,195 @@ mod bounded_memory_discipline {
         ts.performsort().unwrap();
         assert_eq!(drain(&mut ts, usize::MAX).len(), 8);
         ts.end();
+    }
+}
+
+// sortsupport.c guard parity (audit-18.6 b054): PrepareSortSupportFromOrderingOp
+// / PrepareSortSupportFromIndexRel / PrepareSortSupportFromGistIndexRel raise
+// elog(ERROR) for a non-ordering operator, a non-amcanorder index AM and a
+// non-GiST index AM; each must surface as a PgError (XX000 + the C message),
+// never as a Rust panic or a silent pass-through.
+mod sortsupport_guards {
+    use std::cell::Cell;
+
+    use ::mcx::PgVec;
+    use ::types_core::{Oid, INVALID_PROC_NUMBER, RELPERSISTENCE_PERMANENT};
+    use ::types_error::{PgResult, ERRCODE_INTERNAL_ERROR};
+    use ::types_rel::{
+        FormData_pg_class, FormData_pg_index, LockInfoData, LockRelId, Relation, RelationData,
+        RELKIND_INDEX, REPLICA_IDENTITY_DEFAULT,
+    };
+    use ::types_tuple::NameData;
+
+    use super::*;
+
+    const F_BTINT4CMP: Oid = 351;
+    const F_BTINT4SORTSUPPORT: Oid = 3130;
+    const INT4_BTREE_OPFAMILY: Oid = 1976;
+    const INT4OID: Oid = 23;
+    const HASH_AM_OID: Oid = 405;
+
+    // The catalog stand-in: no operator is a member of any opfamily (every
+    // ordering-op lookup misses), and the int4 btree opfamily resolves its
+    // BTORDER_PROC/BTSORTSUPPORT_PROC to btint4cmp/btint4sortsupport so the
+    // AM-agnostic index-key preparation succeeds on a stub relation.
+    fn install_catalog_seams() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            if !::syscache_seams::lookup_pg_amop_members_by_operator::is_installed() {
+                ::syscache_seams::lookup_pg_amop_members_by_operator::set(|mcx, _opno| {
+                    Ok(PgVec::new_in(mcx))
+                });
+            }
+            if !::syscache_seams::lookup_pg_amproc::is_installed() {
+                ::syscache_seams::lookup_pg_amproc::set(|_opfamily, _lt, _rt, procnum| {
+                    Ok(match procnum as u16 {
+                        ::types_nbtree::BTORDER_PROC => F_BTINT4CMP,
+                        ::types_nbtree::BTSORTSUPPORT_PROC => F_BTINT4SORTSUPPORT,
+                        _ => 0,
+                    })
+                });
+            }
+        });
+    }
+
+    fn noop_close(_oid: Oid, _mode: ::types_rel::LOCKMODE) -> PgResult<()> {
+        Ok(())
+    }
+
+    // A one-key int4 index relation whose pg_class.relam is `relam`.
+    fn index_rel(mcx: Mcx<'static>, name: &str, oid: Oid, relam: Oid) -> Relation<'static> {
+        let mut relname = NameData::default();
+        relname.namestrcpy(name);
+        let mut indkey = PgVec::new_in(mcx);
+        indkey.push(1);
+        let mut opcintype = PgVec::new_in(mcx);
+        opcintype.push(INT4OID);
+        let mut opfamily = PgVec::new_in(mcx);
+        opfamily.push(INT4_BTREE_OPFAMILY);
+        let mut indoption = PgVec::new_in(mcx);
+        indoption.push(0i16);
+        let mut indcollation = PgVec::new_in(mcx);
+        indcollation.push(0);
+        let data = RelationData {
+            rd_locator: Default::default(),
+            rd_smgr: Default::default(),
+            rd_id: oid,
+            rd_backend: INVALID_PROC_NUMBER,
+            rd_islocaltemp: false,
+            rd_isvalid: Cell::new(true),
+            rd_createSubid: Cell::new(0),
+            rd_newRelfilelocatorSubid: Cell::new(0),
+            rd_firstRelfilelocatorSubid: Cell::new(0),
+            rd_droppedSubid: Cell::new(0),
+            rd_lockInfo: LockInfoData { lockRelId: LockRelId { relId: oid, dbId: 5 } },
+            rd_rel: FormData_pg_class {
+                relname,
+                relnamespace: 2200,
+                reltype: 0,
+                relowner: 10,
+                relam,
+                relfilenode: oid,
+                reltablespace: 0,
+                relpages: 0,
+                reltuples: -1.0,
+                relallvisible: 0,
+                reltoastrelid: 0,
+                relhasindex: false,
+                relisshared: false,
+                relpersistence: RELPERSISTENCE_PERMANENT,
+                relkind: RELKIND_INDEX,
+                relhassubclass: false,
+                relrowsecurity: false,
+                relispopulated: true,
+                relreplident: REPLICA_IDENTITY_DEFAULT,
+                relispartition: false,
+                relfrozenxid: 0,
+                relminmxid: 0,
+            },
+            rd_att: int4_desc(mcx, 1),
+            rd_index: Some(FormData_pg_index {
+                indexrelid: oid,
+                indrelid: oid - 1,
+                indnatts: 1,
+                indnkeyatts: 1,
+                indisunique: false,
+                indnullsnotdistinct: false,
+                indisprimary: false,
+                indisexclusion: false,
+                indimmediate: true,
+                indisvalid: true,
+                indisready: true,
+                indkey,
+                has_indpred: false,
+                indexprs_src: None,
+                indpred_src: None,
+            }),
+            rd_opcintype: opcintype,
+            rd_opfamily: opfamily,
+            rd_indoption: indoption,
+            rd_indcollation: indcollation,
+            rd_options: None,
+            pgstat_enabled: Cell::new(false),
+            pgstat_link: Cell::new((0, core::ptr::null_mut())),
+            rd_amcache: Default::default(),
+            rd_amcache_hash: Default::default(),
+            rd_amcache_gin: Default::default(),
+            rd_amcache_spgist: Default::default(),
+            rd_support: PgVec::new_in(mcx),
+            rd_supportinfo: Default::default(),
+            rd_opcoptions: Default::default(),
+            rd_indexlist: Default::default(),
+            rd_trigdesc: Default::default(),
+            rd_hastriggers: false,
+            rd_hasrules: false,
+        };
+        Relation::open(data, Some(noop_close))
+    }
+
+    // sortsupport.c:145 — elog(ERROR, "operator %u is not a valid ordering
+    // operator") when get_ordering_op_properties finds no btree membership.
+    #[test]
+    fn invalid_ordering_operator_is_an_error_not_a_panic() {
+        install_catalog_seams();
+        let init = SortSupportInit { ssup_collation: 0, ssup_nulls_first: false, ssup_attno: 1 };
+        let bogus: Oid = 551; // int4pl: a real operator, never an ordering one
+        let outcome = std::panic::catch_unwind(|| {
+            prepare_sort_support_from_ordering_op(bogus, &init).map(|_| ())
+        });
+        let result = outcome.expect("PrepareSortSupportFromOrderingOp must elog, not panic");
+        let err = result.expect_err("a non-ordering operator must be refused");
+        assert_eq!(err.message(), "operator 551 is not a valid ordering operator");
+        assert_eq!(err.sqlstate(), ERRCODE_INTERNAL_ERROR);
+    }
+
+    // sortsupport.c:170 — elog(ERROR, "unexpected non-amcanorder AM: %u")
+    // for an index relation whose AM cannot order (hash here).
+    #[test]
+    fn begin_index_btree_refuses_non_amcanorder_am() {
+        install_catalog_seams();
+        let mcx = leaked_mcx();
+        let heap = index_rel(mcx, "heap_stub", 7000, 0);
+        let index = index_rel(mcx, "hash_idx", 7001, HASH_AM_OID);
+        let err = Tuplesort::begin_index_btree(&heap, &index, false, false, 1024, 0)
+            .err()
+            .expect("a non-amcanorder index AM must be refused");
+        assert_eq!(err.message(), "unexpected non-amcanorder AM: 405");
+        assert_eq!(err.sqlstate(), ERRCODE_INTERNAL_ERROR);
+    }
+
+    // sortsupport.c:194 — elog(ERROR, "unexpected non-gist AM: %u") for a
+    // non-GiST index relation.
+    #[test]
+    fn begin_index_gist_refuses_non_gist_am() {
+        install_catalog_seams();
+        let mcx = leaked_mcx();
+        let heap = index_rel(mcx, "heap_stub", 7002, 0);
+        let index = index_rel(mcx, "hash_idx", 7003, HASH_AM_OID);
+        let err = Tuplesort::begin_index_gist(&heap, &index, 1024, 0)
+            .err()
+            .expect("a non-GiST index AM must be refused");
+        assert_eq!(err.message(), "unexpected non-gist AM: 405");
+        assert_eq!(err.sqlstate(), ERRCODE_INTERNAL_ERROR);
     }
 }

@@ -19659,6 +19659,7 @@ dependencies = [
  "nbtree",
  "pg_locale",
  "pg_qsort",
+ "pg_rusage",
  "pglz",
  "pgstat_seams",
  "postgres_seams",

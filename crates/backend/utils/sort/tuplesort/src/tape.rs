@@ -9,13 +9,14 @@ use ::types_error::{PgError, PgResult};
 use ::types_tuple::itemptr::ItemPointerData;
 use ::types_tuple::MinimalTupleData;
 
+use ::pg_rusage::pg_rusage_show;
 use sort_storage::{LogicalTapeSet, TapeIdx};
 
 #[allow(unused_imports)]
 use crate::SortComparator;
 use crate::{
-    cfi, CmpCtx, ClusterTupleHeader, SortTuple, SortVariant, TupSortStatus, TuplesortData,
-    TUPLESORT_RANDOMACCESS,
+    cfi, trace_log, trace_sort, CmpCtx, ClusterTupleHeader, SortTuple, SortVariant,
+    TupSortStatus, TuplesortData, TRACE_WORKER, TUPLESORT_RANDOMACCESS,
 };
 
 pub(crate) const BLCKSZ: usize = 8192;
@@ -84,6 +85,13 @@ impl<'m> TuplesortData<'m> {
             self.avail_mem -= tape_space;
         }
 
+        if trace_sort() {
+            trace_log(format!(
+                "worker {TRACE_WORKER} switching to external sort with {max_tapes} tapes: {}",
+                pg_rusage_show(&self.ru_start).as_str()
+            ));
+        }
+
         let mut tapeset = LogicalTapeSet::create(self.mcx, false)?;
         let dest_tape = tapeset.create_tape();
         let mut output_tapes = PgVec::new_in(self.mcx);
@@ -131,8 +139,23 @@ impl<'m> TuplesortData<'m> {
             }
             ts.current_run += 1;
         }
+        let current_run = self.tapes.as_ref().expect("BuildRuns without tapes").current_run;
+
+        if trace_sort() {
+            trace_log(format!(
+                "worker {TRACE_WORKER} starting quicksort of run {current_run}: {}",
+                pg_rusage_show(&self.ru_start).as_str()
+            ));
+        }
 
         self.sort_memtuples()?;
+
+        if trace_sort() {
+            trace_log(format!(
+                "worker {TRACE_WORKER} finished quicksort of run {current_run}: {}",
+                pg_rusage_show(&self.ru_start).as_str()
+            ));
+        }
 
         let mut tuples = mem::replace(&mut self.memtuples, PgVec::new_in(self.mcx));
         let result = {
@@ -151,7 +174,17 @@ impl<'m> TuplesortData<'m> {
         self.tuple_mem = 0;
 
         let ts = self.tapes.as_mut().expect("BuildRuns without tapes");
-        markrunend(&mut ts.tapeset, ts.dest_tape)
+        markrunend(&mut ts.tapeset, ts.dest_tape)?;
+
+        if trace_sort() {
+            // C: (currentRun - 1) % nOutputTapes + 1.
+            let tape = (current_run - 1) % ts.output_tapes.len() as i32 + 1;
+            trace_log(format!(
+                "worker {TRACE_WORKER} finished writing run {current_run} to tape {tape}: {}",
+                pg_rusage_show(&self.ru_start).as_str()
+            ));
+        }
+        Ok(())
     }
 
     /// `mergeruns`: balanced k-way merge of all initial runs.
@@ -182,6 +215,13 @@ impl<'m> TuplesortData<'m> {
 
         ts.tape_buffer_mem = self.avail_mem;
         self.avail_mem = 0;
+        if trace_sort() {
+            trace_log(format!(
+                "worker {TRACE_WORKER} using {} KB of memory for tape buffers",
+                ts.tape_buffer_mem / 1024
+            ));
+        }
+        let ru_start = self.ru_start;
 
         loop {
             let (ts, ctx, sortopt, mcx) = self.tape_cmp_parts();
@@ -202,6 +242,16 @@ impl<'m> TuplesortData<'m> {
                     ts.n_input_runs,
                     ts.max_tapes,
                 );
+                if trace_sort() {
+                    trace_log(format!(
+                        "starting merge pass of {} input runs on {} tapes, {} KB of memory \
+                         for each input tape: {}",
+                        ts.n_input_runs,
+                        ts.input_tapes.len(),
+                        input_buffer_size / 1024,
+                        pg_rusage_show(&ru_start).as_str()
+                    ));
+                }
                 for i in 0..ts.input_tapes.len() {
                     let t = ts.input_tapes[i];
                     ts.tapeset.rewind_for_read(t, input_buffer_size as usize)?;
@@ -367,6 +417,11 @@ impl<'m> TuplesortData<'m> {
 }
 
 impl<'m> TapeState<'m> {
+    /// C `state->nInputTapes` (the performsort trace line's "%d-way final merge").
+    pub(crate) fn n_input_tapes(&self) -> usize {
+        self.input_tapes.len()
+    }
+
     /// `selectnewtape`.
     fn selectnewtape(&mut self) {
         if self.output_tapes.len() < self.max_tapes as usize {

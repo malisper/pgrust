@@ -232,8 +232,8 @@ fn follower_read_pointer_replays_leader_fill() {
     let mcx = leaked_mcx();
     let desc = int4_desc(mcx, 1);
     let mut ts = Tuplestore::begin_heap(true, true, 64);
-    ts.set_eflags(EXEC_FLAG_REWIND);
-    let follower = ts.alloc_read_pointer(EXEC_FLAG_REWIND);
+    ts.set_eflags(EXEC_FLAG_REWIND).unwrap();
+    let follower = ts.alloc_read_pointer(EXEC_FLAG_REWIND).unwrap();
     assert_eq!(follower, 1);
 
     let mut slot =
@@ -270,7 +270,7 @@ fn inactive_eof_pointer_advances_to_next_write() {
     let mcx = leaked_mcx();
     let desc = int4_desc(mcx, 1);
     let mut ts = Tuplestore::begin_heap(true, true, 64);
-    let follower = ts.alloc_read_pointer(EXEC_FLAG_REWIND);
+    let follower = ts.alloc_read_pointer(EXEC_FLAG_REWIND).unwrap();
 
     put_i32(&mut ts, &desc, 1);
     let mut slot =
@@ -299,7 +299,7 @@ fn new_pointer_copies_pointer_zero_position() {
     let mut slot =
         exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(desc.clone()));
     assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
-    let p = ts.alloc_read_pointer(EXEC_FLAG_REWIND);
+    let p = ts.alloc_read_pointer(EXEC_FLAG_REWIND).unwrap();
     ts.select_read_pointer(p).unwrap();
     assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
     assert_eq!(read_i32(&mut slot), 2);
@@ -312,7 +312,7 @@ fn late_eflags_increase_is_loud() {
     let desc = int4_desc(mcx, 1);
     let mut ts = Tuplestore::begin_heap(false, true, 64);
     put_i32(&mut ts, &desc, 1);
-    let _ = ts.alloc_read_pointer(EXEC_FLAG_BACKWARD);
+    ts.alloc_read_pointer(EXEC_FLAG_BACKWARD).unwrap();
 }
 
 #[test]
@@ -385,8 +385,8 @@ fn skiptuples_and_advance_window_navigation() {
     let mcx = leaked_mcx();
     let desc = int4_desc(mcx, 1);
     let mut ts = Tuplestore::begin_heap(false, true, 64);
-    ts.set_eflags(0);
-    let rp = ts.alloc_read_pointer(::types_slot::EXEC_FLAG_BACKWARD);
+    ts.set_eflags(0).unwrap();
+    let rp = ts.alloc_read_pointer(::types_slot::EXEC_FLAG_BACKWARD).unwrap();
     for v in 0..10 {
         put_i32(&mut ts, &desc, v);
     }
@@ -598,7 +598,7 @@ mod spill {
             exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(desc.clone()));
 
         let mut ts = Tuplestore::begin_heap(true, false, 64);
-        let follower = ts.alloc_read_pointer(EXEC_FLAG_REWIND | EXEC_FLAG_BACKWARD);
+        let follower = ts.alloc_read_pointer(EXEC_FLAG_REWIND | EXEC_FLAG_BACKWARD).unwrap();
         for v in 0..N {
             put_i32(&mut ts, &desc, v);
         }
@@ -656,11 +656,11 @@ mod spill {
         // prepare_tuplestore's shape: non-random-access store, pointer 0
         // re-flagged forward-only, then the window's pointer family.
         let mut ts = Tuplestore::begin_heap(false, false, 64);
-        ts.set_eflags(0);
-        let agg = ts.alloc_read_pointer(EXEC_FLAG_BACKWARD);
-        let func = ts.alloc_read_pointer(EXEC_FLAG_BACKWARD);
-        let head = ts.alloc_read_pointer(0);
-        let tail = ts.alloc_read_pointer(0);
+        ts.set_eflags(0).unwrap();
+        let agg = ts.alloc_read_pointer(EXEC_FLAG_BACKWARD).unwrap();
+        let func = ts.alloc_read_pointer(EXEC_FLAG_BACKWARD).unwrap();
+        let head = ts.alloc_read_pointer(0).unwrap();
+        let tail = ts.alloc_read_pointer(0).unwrap();
         for v in 0..N {
             put_i32(&mut ts, &desc, v);
         }
@@ -773,5 +773,65 @@ mod spill {
 
         exectuples::exec_clear_tuple(&mut slot, mcx);
         ts.end();
+    }
+}
+
+// tuplestore.c guard parity (audit-18.6 b054).
+mod guards {
+    use ::types_error::{ERRCODE_INTERNAL_ERROR, ERRCODE_UNDEFINED_FILE};
+
+    use super::*;
+
+    // tuplestore.c:376 — elog(ERROR, "too late to call tuplestore_set_eflags")
+    // once tuples are in the store; tuplestore.c:401 — elog(ERROR, "too late
+    // to require new tuplestore eflags") for a new pointer wanting more
+    // capability than the store was told to support. Both are backend
+    // errors in C, never a Rust panic.
+    #[test]
+    fn late_eflags_changes_are_errors_not_panics() {
+        let mcx = leaked_mcx();
+        let desc = int4_desc(mcx, 1);
+        let mut ts = Tuplestore::begin_heap(false, false, 1024);
+        // Before any put, both are fine (a pointer wanting no new capability
+        // stays fine afterwards too).
+        ts.set_eflags(0).unwrap();
+        assert_eq!(ts.alloc_read_pointer(0).unwrap(), 1);
+        put_i32(&mut ts, &desc, 1);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ts.set_eflags(EXEC_FLAG_BACKWARD)
+        }));
+        let err = outcome
+            .expect("tuplestore_set_eflags after a put must elog(ERROR), not panic")
+            .expect_err("tuplestore_set_eflags after a put must fail");
+        assert_eq!(err.message(), "too late to call tuplestore_set_eflags");
+        assert_eq!(err.sqlstate(), ERRCODE_INTERNAL_ERROR);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ts.alloc_read_pointer(EXEC_FLAG_BACKWARD)
+        }));
+        let err = outcome
+            .expect("alloc_read_pointer widening eflags after a put must elog(ERROR), not panic")
+            .expect_err("widening the store's eflags after a put must fail");
+        assert_eq!(err.message(), "too late to require new tuplestore eflags");
+        assert_eq!(err.sqlstate(), ERRCODE_INTERNAL_ERROR);
+        // A pointer within the existing capability is still allocatable.
+        assert_eq!(ts.alloc_read_pointer(0).unwrap(), 2);
+        ts.end();
+    }
+
+    // tuplestore.c:550 et al. — ereport(ERROR, (errcode_for_file_access(),
+    // errmsg("could not seek in tuplestore temporary file"))): the SQLSTATE
+    // follows errno (elog.c errcode_for_file_access: ENOENT -> 58P01, EIO ->
+    // 58030, ENOSPC -> 53100, ...), not the fixed XX000 the helper used to
+    // produce. A failed open leaves ENOENT in errno for the witness.
+    #[test]
+    fn seek_failure_carries_the_file_access_sqlstate() {
+        let missing = std::fs::File::open("/nonexistent/pgrust-b054-seek-witness");
+        assert!(missing.is_err());
+        let errno_now = ::elog::errno::current_errno();
+        let err = crate::seek_failed();
+        assert_eq!(err.message(), "could not seek in tuplestore temporary file");
+        assert_eq!(err.sqlstate(), ::elog::errno::sqlstate_for_file_access(errno_now));
+        assert_eq!(err.sqlstate(), ERRCODE_UNDEFINED_FILE);
+        assert_ne!(err.sqlstate(), ERRCODE_INTERNAL_ERROR);
     }
 }
