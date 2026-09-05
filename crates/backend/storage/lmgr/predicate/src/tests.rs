@@ -207,9 +207,21 @@ fn tag_set_get_type_and_coverage() {
     assert!(!TargetTagIsCoveredBy(&rel, &page));
 }
 
+// Seam-path smoke with no sxact on this thread: every predicate seam is the
+// C fast path (predicate.c:3312 ReleasePredicateLocks et al. return before
+// taking any lock), except check_point_predicate -> CheckPointPredicate,
+// which takes SerialControlLock and then walks the pg_serial SLRU banks
+// (SimpleLruTruncate / SimpleLruWriteAll) under their bank locks. That SLRU
+// is process-global, and serial_store_roundtrip_truncation_crash_cycle
+// resets it in place (SerialResetAfterCrash -> reset_lwlock_in_place stores a
+// fresh state into every bank lock) while holding the crate gate; an
+// ungated checkpoint overlapping that reset releases a bank lock whose
+// EXCLUSIVE bit was just wiped and trips LWLockReleaseInternal's
+// `oldstate & LW_VAL_EXCLUSIVE == 0` assert. So this test takes the gate too.
 #[test]
 fn invalid_sxact_fast_paths_and_installs() {
     become_backend();
+    let (_gate, _xid) = exclusive();
     predicate_seams::pre_commit_check_for_serialization_failure::call().unwrap();
     predicate_seams::register_predicate_locking_xid::call(100).unwrap();
     predicate_seams::at_prepare_predicate_locks::call().unwrap();
