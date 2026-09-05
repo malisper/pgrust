@@ -613,9 +613,15 @@ fn process_startup_packet(mcx: Mcx<'_>, mut ssl_done: bool, mut gss_done: bool) 
                     "replication" => {
                         // Sets the walsender.c am_walsender/am_db_walsender
                         // globals via the walsender seam (inc-1 front door).
-                        let is_walsender = val == "database"
-                            || match scalar_seams::parse_bool::call(&val) {
-                                Some(b) => b,
+                        // backend_startup.c:779-785: "database" sets both
+                        // flags; any other spelling is parse_bool'd straight
+                        // into am_walsender (false included), so the last
+                        // `replication` option in the packet wins.
+                        if val == "database" {
+                            walsender_seams::set_walsender_flags(true);
+                        } else {
+                            match scalar_seams::parse_bool::call(&val) {
+                                Some(b) => walsender_seams::set_am_walsender(b),
                                 None => {
                                     return ereport(FATAL)
                                     .errcode(types_error::ERRCODE_INVALID_PARAMETER_VALUE)
@@ -626,9 +632,7 @@ fn process_startup_packet(mcx: Mcx<'_>, mut ssl_done: bool, mut gss_done: bool) 
                                     .finish(loc(767, "ProcessStartupPacket"))
                                     .map(|()| STATUS_ERROR);
                                 }
-                            };
-                        if is_walsender {
-                            walsender_seams::set_walsender_flags(val == "database");
+                            }
                         }
                     }
                     _ if name.starts_with("_pq_.") => {

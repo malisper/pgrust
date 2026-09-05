@@ -22,6 +22,14 @@ pub fn set_walsender_flags(db_walsender: bool) {
     AM_DB_WALSENDER.set(db_walsender);
 }
 
+// ProcessStartupPacket's `parse_bool(valptr, &am_walsender)` store
+// (backend_startup.c:785): the boolean spelling of `replication` assigns
+// am_walsender in BOTH directions and leaves am_db_walsender untouched, so a
+// later `replication=false` demotes an earlier `replication=true`.
+pub fn set_am_walsender(walsender: bool) {
+    AM_WALSENDER.set(walsender);
+}
+
 seam_core::seam!(
     // exec_replication_command(cmd_string); false = not a walsender command,
     // caller falls through to exec_simple_query.

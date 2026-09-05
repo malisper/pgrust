@@ -58,6 +58,8 @@ fn setup() {
     INPUT.with(|q| q.borrow_mut().clear());
     init_small::globals::SetClientConnectionLost(false);
     init_small::globals::SetInterruptPending(false);
+    // walsender.c globals persist per thread; start every case as C's fresh backend.
+    walsender_seams::set_am_walsender(false);
     init_small::globals::SetMyProcPort(Port::new(&ClientSocket {
         sock: -1,
         raddr: SockAddr::zeroed(),
@@ -130,6 +132,71 @@ fn database_defaults_to_user_and_truncates() {
     init_small::globals::WithMyProcPort(|p| {
         assert_eq!(p.user_name.as_deref().unwrap().len(), NAMEDATALEN - 1);
         assert_eq!(p.database_name, p.user_name);
+    });
+}
+
+/// backend_startup.c:785 `parse_bool(valptr, &am_walsender)` stores the
+/// parsed boolean, so the LAST `replication` option wins: `true` then `false`
+/// is a plain B_BACKEND that keeps its database. audit-18.6 b191.
+#[test]
+fn replication_false_after_true_is_plain_backend() {
+    setup();
+    feed(packet(
+        pg_protocol(3, 0),
+        &[
+            ("user", "alice"),
+            ("database", "db1"),
+            ("replication", "true"),
+            ("replication", "false"),
+        ],
+    ));
+    assert_eq!(run_startup_packet().unwrap(), STATUS_OK);
+    assert!(!walsender_seams::am_walsender());
+    assert_eq!(miscinit::GetMyBackendType(), types_core::BackendType::Backend);
+    init_small::globals::WithMyProcPort(|p| {
+        assert_eq!(p.database_name.as_deref(), Some("db1"));
+    });
+}
+
+/// backend_startup.c:779-785: `database` sets both flags; a following `0`
+/// clears am_walsender only (am_db_walsender is not touched by the boolean
+/// arm), and MyBackendType follows am_walsender. audit-18.6 b191.
+#[test]
+fn replication_zero_after_database_is_plain_backend() {
+    setup();
+    feed(packet(
+        pg_protocol(3, 0),
+        &[
+            ("user", "alice"),
+            ("database", "db1"),
+            ("replication", "database"),
+            ("replication", "0"),
+        ],
+    ));
+    assert_eq!(run_startup_packet().unwrap(), STATUS_OK);
+    assert!(!walsender_seams::am_walsender());
+    assert!(walsender_seams::am_db_walsender());
+    assert_eq!(miscinit::GetMyBackendType(), types_core::BackendType::Backend);
+    init_small::globals::WithMyProcPort(|p| {
+        assert_eq!(p.database_name.as_deref(), Some("db1"));
+    });
+}
+
+/// Control: `replication=true` alone is a physical walsender with the
+/// database name cleared (backend_startup.c:869-880).
+#[test]
+fn replication_true_is_physical_walsender() {
+    setup();
+    feed(packet(
+        pg_protocol(3, 0),
+        &[("user", "alice"), ("database", "db1"), ("replication", "true")],
+    ));
+    assert_eq!(run_startup_packet().unwrap(), STATUS_OK);
+    assert!(walsender_seams::am_walsender());
+    assert!(!walsender_seams::am_db_walsender());
+    assert_eq!(miscinit::GetMyBackendType(), types_core::BackendType::WalSender);
+    init_small::globals::WithMyProcPort(|p| {
+        assert_eq!(p.database_name.as_deref(), Some(""));
     });
 }
 
