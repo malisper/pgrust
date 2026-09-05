@@ -96,6 +96,8 @@ pub fn exec_init_project_set<'mcx>(
                         return Err(too_many_args());
                     }
                     init_sexpr_acl(mcx, srf_funcid)?;
+                    // execSRF.c:707 init_sexpr: InvokeFunctionExecuteHook(foid).
+                    ::objectaccess::InvokeFunctionExecuteHook(srf_funcid)?;
                     let mut args: PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>> = PgVec::new_in(mcx);
                     for arg in srf_args {
                         // Query-context args replace C's argContext: by-ref arg

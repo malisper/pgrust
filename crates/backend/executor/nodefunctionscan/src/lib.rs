@@ -12,7 +12,10 @@ use ::execexpr::{exec_eval_expr, exec_init_expr_subplans, EvalSlots, ExprState};
 use ::execscan::{exec_scan_epq, exec_scan_extended, ScanNode, ScanState};
 use ::executils::{EStateData, ExecSlotId};
 use ::mcx::{Allocator, Mcx, MemoryContext, PgBox, PgVec};
-use ::types_error::{PgError, PgResult, ERRCODE_E_R_I_E_SRF_PROTOCOL_VIOLATED};
+use ::types_error::{
+    PgError, PgResult, ERRCODE_E_R_I_E_SRF_PROTOCOL_VIOLATED, ERRCODE_FEATURE_NOT_SUPPORTED,
+    ERRCODE_INTERNAL_ERROR, ERRCODE_TOO_MANY_ARGUMENTS,
+};
 use ::types_fmgr::{
     ExprDoneCond, FmgrInfo, LocalFcinfo, ReturnSetInfo, SetFunctionReturnMode, SFRM_Materialize,
     SFRM_Materialize_Preferred, SFRM_Materialize_Random, SFRM_ValuePerCall,
@@ -399,10 +402,30 @@ fn exec_init_table_function_result<'mcx>(
             ));
         }
     }
+    // execSRF.c:707 init_sexpr: InvokeFunctionExecuteHook(foid) right after
+    // the ACL check (sepgsql-style hooks may refuse the call here).
+    ::objectaccess::InvokeFunctionExecuteHook(func.funcid)?;
+    // execSRF.c:715-721 init_sexpr: the nargs safety check precedes the fmgr
+    // lookup — the fcinfo below is sized for FUNC_MAX_ARGS.
+    if func.args.len() > types_core::FUNC_MAX_ARGS {
+        return Err(too_many_args());
+    }
     let mut flinfo = fmgr_core::fmgr_info(func.funcid)?;
     // C init_sexpr: fmgr_info_set_expr((Node *) sexpr->expr, &sexpr->func) —
     // variadic-"any" callees read arg types off fn_expr.
     flinfo.fn_expr = Some(::execexpr::erase_fn_expr(mcx, fexpr)?);
+    // execSRF.c:736-741 init_sexpr: ExecInitTableFunctionResult passes
+    // allowSRF = func->funcretset; a set-returning pg_proc entry behind a
+    // FuncExpr the planner marked non-set is refused with the executor
+    // cursor at exprLocation(node).
+    if flinfo.fn_retset && !func.funcretset {
+        let pos = ::executils::executor_errposition(Some(estate), nodes_core::expr_location(fexpr));
+        return Err(Box::new(
+            PgError::error("set-valued function called in context that cannot accept a set")
+                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
+                .with_cursor_position(pos),
+        ));
+    }
     Ok(SetExprState {
         flinfo: Some(flinfo),
         args,
@@ -465,11 +488,26 @@ fn build_function_tupdesc<'mcx>(
             });
             Ok((d, true))
         }
-        other => panic!(
-            "ExecInitFunctionScan (nodeFunctionscan.c): function result class {other:?} \
-             without a coldeflist"
-        ),
+        // nodeFunctionscan.c:421: "crummy error message, but parser should
+        // have caught this" — C's elog(ERROR), never a process abort.
+        funcapi::TypeFuncClass::Record | funcapi::TypeFuncClass::Other => Err(Box::new(
+            PgError::error("function in FROM has unsupported return type")
+                .with_sqlstate(ERRCODE_INTERNAL_ERROR),
+        )),
     }
+}
+
+// execSRF.c:715-721 init_sexpr: errmsg_plural with FUNC_MAX_ARGS (100).
+#[cold]
+#[inline(never)]
+fn too_many_args() -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "cannot pass more than {} arguments to a function",
+            types_core::FUNC_MAX_ARGS
+        ))
+        .with_sqlstate(ERRCODE_TOO_MANY_ARGUMENTS),
+    )
 }
 
 #[track_caller]
@@ -669,6 +707,21 @@ fn run_value_per_call<'mcx>(
         match rsinfo.returnMode {
             SetFunctionReturnMode::ValuePerCall => {
                 if rsinfo.isDone == ExprDoneCond::ExprEndResult {
+                    // execSRF.c:403-411 no_function_result: nothing was
+                    // stored (C's setResult is still NULL), and a
+                    // non-set-returning function still contributes one
+                    // all-nulls row shaped by expectedDesc.
+                    if first_time && !setexpr.returns_set {
+                        let mut none = None;
+                        put_composite_row(
+                            &mut store,
+                            expected_desc,
+                            &mut none,
+                            ::datum::Datum::null(),
+                            true,
+                            estate,
+                        )?;
+                    }
                     break;
                 }
                 if setexpr.returns_tuple {

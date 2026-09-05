@@ -35,3 +35,12 @@ postgres_seams = { path = "../../tcop/postgres_seams" }
 aclchk_seams = { path = "../../catalog/aclchk_seams" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
+# init_sexpr: InvokeFunctionExecuteHook + exprLocation for the SRF-refusal cursor.
+objectaccess = { path = "../../catalog/objectaccess" }
+nodes_core = { path = "../../nodes/nodes_core" }
+
+[dev-dependencies]
+# init_sexpr witnesses (audit-18.6 b154): catalog seams + the object-access
+# execute hook the table-function init path must fire.
+mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
