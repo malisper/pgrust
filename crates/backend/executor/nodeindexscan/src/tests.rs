@@ -979,3 +979,30 @@ fn saop_relabeled_left_operand_is_stripped() {
         assert_eq!(runtime.len(), 1);
     });
 }
+
+/// cmp_orderbyvals (nodeIndexscan.c:427): a NULL distance on BOTH sides of
+/// an ORDER BY key is `return 0` — the whole comparison is a tie, the later
+/// keys are NOT consulted (C's NULLS LAST arm; audit-18.6 b066).
+#[test]
+fn cmp_orderbyvals_double_null_key_ties_without_consulting_later_keys() {
+    let ssup = SortSupport {
+        ssup_collation: 0,
+        ssup_reverse: false,
+        ssup_nulls_first: false,
+        ssup_attno: 0,
+        comparator: ::tuplesort::SortComparator::Int32,
+    };
+    let sort_support = [ssup, ssup];
+    let a = [Datum::null(), Datum::from_i32(14)];
+    let b = [Datum::null(), Datum::from_i32(5)];
+    // Key 1 NULL on both sides: C returns 0 before key 2 (14 vs 5) is seen.
+    assert_eq!(cmp_orderbyvals(&a, &[true, false], &b, &[true, false], &sort_support), 0);
+    assert_eq!(cmp_orderbyvals(&b, &[true, false], &a, &[true, false], &sort_support), 0);
+    // NULLS LAST on a single side still decides.
+    assert_eq!(cmp_orderbyvals(&a, &[true, false], &b, &[false, false], &sort_support), 1);
+    assert_eq!(cmp_orderbyvals(&a, &[false, false], &b, &[true, false], &sort_support), -1);
+    // Non-NULL first keys fall through to the comparator and then to key 2.
+    let c = [Datum::from_i32(1), Datum::from_i32(14)];
+    let d = [Datum::from_i32(1), Datum::from_i32(5)];
+    assert_eq!(cmp_orderbyvals(&c, &[false, false], &d, &[false, false], &sort_support), 1);
+}

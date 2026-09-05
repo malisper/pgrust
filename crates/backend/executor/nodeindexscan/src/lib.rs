@@ -36,7 +36,7 @@ use ::types_scan::scankey::{
     SK_ROW_MEMBER, SK_SEARCHARRAY, SK_SEARCHNOTNULL, SK_SEARCHNULL,
 };
 use ::types_scan::sdir::ScanDirection;
-use ::types_slot::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
+use ::types_slot::{EXEC_FLAG_BACKWARD, EXEC_FLAG_EXPLAIN_ONLY, EXEC_FLAG_MARK};
 
 pub fn init_seams() {}
 
@@ -138,7 +138,9 @@ fn cmp_orderbyvals(
         match (anulls[i], bnulls[i]) {
             (true, false) => return 1,
             (false, true) => return -1,
-            (true, true) => continue,
+            // nodeIndexscan.c:436 `return 0`: both NULL is a tie for the
+            // whole comparison — later keys are NOT consulted.
+            (true, true) => return 0,
             (false, false) => {}
         }
         let result = apply_cmp(ssup.comparator, adist[i], bdist[i]);
@@ -216,6 +218,9 @@ impl<'mcx> ScanNode<'mcx> for IndexScanState<'mcx> {
                     slot_id,
                 )?;
                 if !passes {
+                    // nodeIndexscan.c:145 InstrCountFiltered2 ("Rows
+                    // Removed by Index Recheck").
+                    estate.instr_count_filtered2(self.ss.instr_idx);
                     continue;
                 }
             }
@@ -294,6 +299,7 @@ impl<'mcx> IndexScanState<'mcx> {
         let slot_id = self.ss.ss_ScanTupleSlot;
         let ecxt = self.ss.ps_ExprContext;
         let plan_node_id = self.iss_PlanNodeId;
+        let instr_idx = self.ss.instr_idx;
         let IndexScanState {
             iss_ScanDesc,
             iss_OrderBy,
@@ -354,6 +360,8 @@ impl<'mcx> IndexScanState<'mcx> {
                         slot_id,
                     )?;
                     if !passes {
+                        // nodeIndexscan.c:283 InstrCountFiltered2.
+                        estate.instr_count_filtered2(instr_idx);
                         check_for_interrupts()?;
                         continue;
                     }
@@ -537,6 +545,13 @@ pub fn exec_init_index_scan<'mcx>(
     eflags: i32,
 ) -> PgResult<IndexScanState<'mcx>> {
     let rel = estate.exec_open_scan_relation(node.scan.scanrelid, eflags)?;
+    // nodeIndexscan.c:973: plain EXPLAIN stops here — the index is neither
+    // opened nor locked and no scan keys are built (an EXPLAIN of a cached
+    // generic plan takes no index lock; AcquireExecutorLocks covers tables
+    // only).
+    if eflags & EXEC_FLAG_EXPLAIN_ONLY != 0 {
+        return exec_init_index_scan_explain_only(mcx, node, estate, rel);
+    }
     let index_rel = indexam::index_open(mcx, node.indexid, index_lockmode(estate, node.scan.scanrelid))?;
     let mut state = exec_init_index_scan_rel(mcx, node, estate, rel, index_rel)?;
     // Lane-executor-v2: the batched tidrun drive is forward-only and can't
@@ -554,15 +569,14 @@ pub fn index_lockmode(estate: &EStateData<'_>, scanrelid: u32) -> types_rel::LOC
     estate.exec_rt_fetch(scanrelid).rellockmode
 }
 
-/// C divergence: init over caller-opened relations, splitting
-/// ExecOpenScanRelation/index_open out until the range-table lane lands.
-pub fn exec_init_index_scan_rel<'mcx>(
+/// ExecInitIndexScan's relation-independent head (nodeIndexscan.c:920-955):
+/// expression context, scan slot, projection.
+fn init_scan_state<'mcx>(
     mcx: Mcx<'mcx>,
     node: &IndexScan<'mcx>,
     estate: &mut EStateData<'mcx>,
     rel: Relation<'mcx>,
-    index_rel: Relation<'mcx>,
-) -> PgResult<IndexScanState<'mcx>> {
+) -> PgResult<ScanState<'mcx>> {
     debug_assert!(node.scan.plan.lefttree.is_none() && node.scan.plan.righttree.is_none());
 
     let ps_ExprContext = estate.exec_assign_expr_context();
@@ -580,6 +594,57 @@ pub fn exec_init_index_scan_rel<'mcx>(
         instr_idx: None,
     };
     execscan::exec_assign_scan_projection_info(mcx, estate, &mut ss, &node.scan.plan.targetlist)?;
+    Ok(ss)
+}
+
+/// ExecInitIndexScan under EXEC_FLAG_EXPLAIN_ONLY (nodeIndexscan.c:955-974):
+/// qual and indexqualorig compile (their SubPlans are found now, as C), then
+/// return before index_open — no index relation, lock, scan keys, runtime
+/// keys or ORDER BY state. The plan never runs; exec_end_index_scan closes
+/// nothing (C: "no-op if we didn't open it").
+fn exec_init_index_scan_explain_only<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: &IndexScan<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    rel: Relation<'mcx>,
+) -> PgResult<IndexScanState<'mcx>> {
+    let mut ss = init_scan_state(mcx, node, estate, rel)?;
+    let params = estate.param_bind();
+    let (qual, indexqualorig) = ::executils::with_subplan_compile_env(estate, |env| -> PgResult<_> {
+        let qual = ::execexpr::exec_init_qual_subplans(mcx, &node.scan.plan.qual, params, env)?;
+        let indexqualorig =
+            ::execexpr::exec_init_qual_subplans(mcx, &node.indexqualorig, params, env)?;
+        Ok((qual, indexqualorig))
+    })?;
+    ss.qual = qual;
+    Ok(IndexScanState {
+        ss,
+        indexqualorig,
+        iss_ScanDesc: None,
+        iss_IndexOid: node.indexid,
+        iss_RelationDesc: None,
+        iss_ScanKeys: PgVec::new_in(mcx),
+        iss_Runtime: None,
+        iss_OrderBy: None,
+        iss_OrderDir: order_dir(node.indexorderdir),
+        iss_PlanNodeId: node.scan.plan.plan_node_id,
+        iss_ParallelAware: node.scan.plan.parallel_aware,
+        batch_allowed: false,
+        lane_pos: 0,
+        lane_n: 0,
+    })
+}
+
+/// C divergence: init over caller-opened relations, splitting
+/// ExecOpenScanRelation/index_open out until the range-table lane lands.
+pub fn exec_init_index_scan_rel<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: &IndexScan<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    rel: Relation<'mcx>,
+    index_rel: Relation<'mcx>,
+) -> PgResult<IndexScanState<'mcx>> {
+    let mut ss = init_scan_state(mcx, node, estate, rel)?;
     let params = estate.param_bind();
     let (qual, indexqualorig, iss_ScanKeys, iss_OrderBy, runtime_keys) =
         ::executils::with_subplan_compile_env(estate, |env| -> PgResult<_> {
