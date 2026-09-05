@@ -1,6 +1,7 @@
 use datum::Datum;
 use elog::ereport;
 use mcx::Mcx;
+use parser_small1::ParseState;
 use pg_database::{
     Anum_pg_database_oid, DatabaseOidIndexId, Natts_pg_database, DATCONNLIMIT_UNLIMITED,
 };
@@ -78,15 +79,6 @@ enum CreateDBStrategy {
     FileCopy,
 }
 
-fn conflicting(defel: &DefElem<'_>) -> Box<types_error::PgError> {
-    let _ = defel;
-    ereport(ERROR)
-        .errcode(ERRCODE_SYNTAX_ERROR)
-        .errmsg("conflicting or redundant options".to_string())
-        .into_error()
-        .into()
-}
-
 fn defGetInt32(def: &DefElem<'_>) -> PgResult<i32> {
     match def.arg.and_then(|n| n.as_integer()) {
         Some(i) => Ok(i.ival),
@@ -96,21 +88,6 @@ fn defGetInt32(def: &DefElem<'_>) -> PgResult<i32> {
             .into_error()
             .into()),
     }
-}
-
-fn defGetObjectId(def: &DefElem<'_>) -> PgResult<Oid> {
-    if let Some(i) = def.arg.and_then(|n| n.as_integer()) {
-        return Ok(i.ival as u32);
-    }
-    // OIDs above i32::MAX lex as Float (pg_upgrade's preserved OIDs).
-    if let Some(f) = def.arg.and_then(|n| n.as_float()) {
-        return Ok(numutils::uint32in_subr(f.fval, false, "oid", None)?.0);
-    }
-    Err(ereport(ERROR)
-        .errcode(ERRCODE_SYNTAX_ERROR)
-        .errmsg(format!("{} requires a numeric value", def.defname.unwrap_or("")))
-        .into_error()
-        .into())
 }
 
 
@@ -344,8 +321,14 @@ enum CreatedbCopyMode {
     Deferred,
 }
 
-pub fn createdb<'mcx>(mcx: Mcx<'mcx>, stmt: &CreatedbStmt<'mcx>) -> PgResult<Oid> {
-    Ok(createdb_guts(mcx, stmt, CreatedbCopyMode::Inline)?.0)
+// createdb(pstate, stmt) (dbcommands.c:684): the pstate feeds
+// errorConflictingDefElem's cursor (dbcommands.c:752-764).
+pub fn createdb<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: Option<&ParseState<'_, '_>>,
+    stmt: &CreatedbStmt<'mcx>,
+) -> PgResult<Oid> {
+    Ok(createdb_guts(mcx, pstate, stmt, CreatedbCopyMode::Inline)?.0)
 }
 
 /// pgrust-only additive entry (docs/design/test-views.md, "Batched-minting
@@ -416,7 +399,7 @@ pub fn createdb_skip_checkpoints<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &CreatedbStmt<'mcx>,
 ) -> PgResult<Oid> {
-    Ok(createdb_guts(mcx, stmt, CreatedbCopyMode::InlineSkipCheckpoints)?.0)
+    Ok(createdb_guts(mcx, None, stmt, CreatedbCopyMode::InlineSkipCheckpoints)?.0)
 }
 
 /// pgrust-only additive entry (test-views.md mint-strategy addendum; the
@@ -454,13 +437,14 @@ pub fn createdb_deferred_file_copy<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &CreatedbStmt<'mcx>,
 ) -> PgResult<DeferredFileCopy> {
-    let (oid, deferred) = createdb_guts(mcx, stmt, CreatedbCopyMode::Deferred)?;
+    let (oid, deferred) = createdb_guts(mcx, None, stmt, CreatedbCopyMode::Deferred)?;
     let _ = oid;
     Ok(deferred.expect("Deferred mode always yields the copy list"))
 }
 
 fn createdb_guts<'mcx>(
     mcx: Mcx<'mcx>,
+    pstate: Option<&ParseState<'_, '_>>,
     stmt: &CreatedbStmt<'mcx>,
     copy_mode: CreatedbCopyMode,
 ) -> PgResult<(Oid, Option<DeferredFileCopy>)> {
@@ -513,7 +497,7 @@ fn createdb_guts<'mcx>(
                 continue;
             }
             "oid" => {
-                dboid = defGetObjectId(defel)?;
+                dboid = commands_define::defGetObjectId(defel)?;
                 if dboid < FirstNormalObjectId
                     && !init_small::globals::allowSystemTableMods()
                     && !init_small::globals::IsBinaryUpgrade()
@@ -538,7 +522,7 @@ fn createdb_guts<'mcx>(
             }
         };
         if slot.is_some() {
-            return Err(conflicting(defel));
+            return Err(commands_define::errorConflictingDefElem(defel, pstate));
         }
         *slot = Some(defel);
     }

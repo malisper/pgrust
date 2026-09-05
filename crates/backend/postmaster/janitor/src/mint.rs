@@ -1561,7 +1561,7 @@ pub(crate) fn mint_one(p: &registry::PendingEnsure) -> PgResult<Option<Oid>> {
     // template's flush mark so later BATCHES re-pay theirs.
     let (strategy, _probed) = strategy_for_template(mcx, tpl.oid, tpl.dattablespace)?;
     let stmt = build_createdb_stmt(mcx, p, strategy)?;
-    let db_oid = dbcommands::createdb(mcx, &stmt)?;
+    let db_oid = dbcommands::createdb(mcx, None, &stmt)?;
 
     // M4 clone fidelity, MINT-TIME ONLY: inherit the template's
     // pg_db_role_setting state (both `ALTER DATABASE ... SET` and

@@ -65,6 +65,8 @@ xlogrecovery_seams = { path = "../../access/transam/xlogrecovery_seams" }
 relmapper = { path = "../../utils/cache/relmapper" }
 snapmgr = { path = "../../utils/time/snapmgr" }
 commands_tablespace = { path = "../tablespace" }
+commands_define = { path = "../commands_define" }
+parser_small1 = { path = "../../parser/parser_small1" }
 aclchk = { path = "../../catalog/aclchk" }
 pg_db_role_setting = { path = "../../catalog/pg_db_role_setting" }
 guc_funcs = { path = "../../utils/misc/guc_funcs" }

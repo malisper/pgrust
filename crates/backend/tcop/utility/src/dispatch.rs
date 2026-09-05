@@ -417,7 +417,16 @@ fn dispatch_switch<'mcx>(
                     &types_nodes::parsenodes::CreatedbStmt<'mcx>,
                 >(stmt)
             };
-            dbcommands::createdb(mcx, stmt)?;
+            // utility.c:750 createdb(pstate, stmt): errorConflictingDefElem
+            // (dbcommands.c:752-764) carries the query cursor.
+            let mut pstate = parser_small1::make_parsestate(mcx, None);
+            {
+                let mut v: mcx::PgVec<'mcx, u8> = mcx::PgVec::new_in(mcx);
+                mcx::vec_append_bytes(&mut v, source_text.as_bytes())?;
+                pstate.p_sourcetext = Some(v.leak());
+            }
+            dbcommands::createdb(mcx, Some(&pstate), stmt)?;
+            parser_small1::free_parsestate(pstate)?;
         }
         T_AlterDatabaseStmt => {
             let stmt = parsetree

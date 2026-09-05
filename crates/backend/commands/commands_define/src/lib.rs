@@ -2,7 +2,9 @@
 #![allow(non_snake_case)]
 
 use mcx::{Mcx, PgString};
-use types_error::{PgError, PgResult, ERRCODE_SYNTAX_ERROR};
+use parser_small1::ParseState;
+use types_core::Oid;
+use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR, ERRCODE_SYNTAX_ERROR};
 use types_nodes::list::NodeList;
 use types_nodes::rawnodes::TypeName;
 use types_nodes::NodeTag;
@@ -12,6 +14,28 @@ use types_nodes::{parsenodes::DefElem, Node};
 #[cold]
 fn syntax_err(msg: String) -> Box<PgError> {
     Box::new(PgError::error(msg).with_sqlstate(ERRCODE_SYNTAX_ERROR))
+}
+
+// C's `default:` arms: elog(ERROR, "unrecognized node type: %d") — a
+// catchable XX000, never a panic (define.c:59, :344, :361).
+#[cold]
+#[inline(never)]
+fn unrecognized_node_type(tag: NodeTag) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!("unrecognized node type: {}", tag as u16))
+            .with_sqlstate(ERRCODE_INTERNAL_ERROR),
+    )
+}
+
+// elog(ERROR, "unexpected node type in name list: %d") (define.c:350,
+// namespace.c:3616).
+#[cold]
+#[inline(never)]
+fn unexpected_name_list_node(tag: NodeTag) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!("unexpected node type in name list: {}", tag as u16))
+            .with_sqlstate(ERRCODE_INTERNAL_ERROR),
+    )
 }
 
 fn defname<'a>(def: &DefElem<'a>) -> &'a str {
@@ -48,7 +72,7 @@ pub fn defGetString<'mcx>(mcx: Mcx<'mcx>, def: &DefElem<'mcx>) -> PgResult<&'mcx
             str_in(mcx, s.as_str())?
         }
         NodeTag::T_A_Star => "*",
-        t => panic!("unrecognized node type: {t:?}"),
+        t => return Err(unrecognized_node_type(t)),
     })
 }
 
@@ -59,6 +83,20 @@ pub fn defGetNumeric(def: &DefElem<'_>) -> PgResult<f64> {
         NodeTag::T_Integer => Ok(arg.as_integer().unwrap().ival as f64),
         // floatVal: strtod semantics; grammar-produced Floats always parse.
         NodeTag::T_Float => arg.as_float().unwrap().fval.parse::<f64>().map_err(|_| err()),
+        _ => Err(err()),
+    }
+}
+
+// defGetObjectId (define.c:206-233): Integer, or a Float (values too large
+// for int4 lex as Float) through oidin (oid.c:37 -> uint32in_subr).
+pub fn defGetObjectId(def: &DefElem<'_>) -> PgResult<Oid> {
+    let err = || syntax_err(format!("{} requires a numeric value", defname(def)));
+    let Some(arg) = def.arg else { return Err(err()) };
+    match arg.node_tag() {
+        NodeTag::T_Integer => Ok(arg.as_integer().unwrap().ival as Oid),
+        NodeTag::T_Float => {
+            Ok(numutils::uint32in_subr(arg.as_float().unwrap().fval, false, "oid", None)?.0)
+        }
         _ => Err(err()),
     }
 }
@@ -165,7 +203,7 @@ pub fn defGetTypeLength(def: &DefElem<'_>) -> PgResult<i32> {
             }
         }
         NodeTag::T_List => {}
-        t => panic!("unrecognized node type: {t:?}"),
+        t => return Err(unrecognized_node_type(t)),
     }
     Err(syntax_err(format!(
         "invalid argument for {}: \"{}\"",
@@ -179,27 +217,52 @@ pub fn defGetStringList<'mcx>(def: &DefElem<'mcx>) -> PgResult<&'mcx NodeList<'m
         return Err(syntax_err(format!("{} requires a parameter", defname(def))));
     };
     let Some(list) = arg.as_list() else {
-        panic!("unrecognized node type: {:?}", arg.node_tag());
+        return Err(unrecognized_node_type(arg.node_tag()));
     };
     for n in list.iter() {
         if n.as_string().is_none() {
-            panic!("unexpected node type in name list: {:?}", n.node_tag());
+            return Err(unexpected_name_list_node(n.node_tag()));
         }
     }
     Ok(list)
 }
 
-// NameListToString (namespace.c): '.'-joined, no quoting.
+// errorConflictingDefElem (define.c:371-377): ERRCODE_SYNTAX_ERROR with
+// parser_errposition(pstate, defel->location) — no cursor on a NULL pstate,
+// a pstate without source text, or a negative location.
+#[cold]
+#[inline(never)]
+pub fn errorConflictingDefElem(
+    defel: &DefElem<'_>,
+    pstate: Option<&ParseState<'_, '_>>,
+) -> Box<PgError> {
+    let mut e =
+        PgError::error("conflicting or redundant options").with_sqlstate(ERRCODE_SYNTAX_ERROR);
+    if let Some(ps) = pstate {
+        let pos =
+            parser_small1::parser_errposition(ps, defel.location, mbutils::GetDatabaseEncoding());
+        if pos > 0 {
+            e.cursor_position = Some(pos);
+        }
+    }
+    Box::new(e)
+}
+
+// NameListToString (namespace.c:3597-3621): '.'-joined, no quoting; A_Star
+// joins as '*'.
 pub fn NameListToString<'a>(mcx: Mcx<'a>, names: &NodeList<'_>) -> PgResult<PgString<'a>> {
     let mut out = PgString::new_in(mcx);
     for (i, n) in names.iter().enumerate() {
         if i > 0 {
             out.try_push('.')?;
         }
-        let Some(s) = n.as_string() else {
-            panic!("unexpected node type in name list: {:?}", n.node_tag());
-        };
-        out.try_push_str(s.sval)?;
+        if let Some(s) = n.as_string() {
+            out.try_push_str(s.sval)?;
+        } else if n.node_tag() == NodeTag::T_A_Star {
+            out.try_push('*')?;
+        } else {
+            return Err(unexpected_name_list_node(n.node_tag()));
+        }
     }
     Ok(out)
 }
@@ -256,5 +319,119 @@ mod tests {
             ..TypeName::default()
         };
         assert_eq!(TypeNameToString(mcx, &tn).unwrap().as_str(), "c%TYPE");
+    }
+
+    fn defel_with<'m>(mcx: Mcx<'m>, name: &'m str, arg: Option<Node<'m>>) -> DefElem<'m> {
+        DefElem {
+            defnamespace: None,
+            defname: Some(name),
+            arg,
+            defaction: types_nodes::parsenodes::DefElemAction::DEFELEM_UNSPEC,
+            location: -1,
+        }
+    }
+
+    fn assert_xx000(e: &PgError, msg: &str) {
+        assert_eq!(e.message(), msg);
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    }
+
+    // define.c:59 / :361 / :350 / namespace.c:3616 `default:` arms are
+    // elog(ERROR, "unrecognized node type: %d") / "unexpected node type in
+    // name list: %d" — catchable XX000 with the numeric tag, never a panic.
+    #[test]
+    fn unexpected_node_tags_are_catchable_xx000() {
+        let ctx = mcx::MemoryContext::new("commands_define-test");
+        let mcx = ctx.mcx();
+        let bits = Node::mk(mcx, types_nodes::BitString { bsval: "b101" }).unwrap();
+        let bits_tag = format!("unrecognized node type: {}", NodeTag::T_BitString as u16);
+
+        // defGetString (define.c:59)
+        let def = defel_with(mcx, "opt", Some(bits));
+        assert_xx000(&defGetString(mcx, &def).err().unwrap(), &bits_tag);
+
+        // defGetTypeLength (define.c:361)
+        assert_xx000(&defGetTypeLength(&def).err().unwrap(), &bits_tag);
+
+        // defGetStringList (define.c:344): non-List arg
+        assert_xx000(&defGetStringList(&def).err().unwrap(), &bits_tag);
+
+        // defGetStringList (define.c:350): List with a non-String member
+        let int_node = Node::mk(mcx, types_nodes::Integer { ival: 7 }).unwrap();
+        let list = Node::mk_list(mcx, NodeList::make1(mcx, int_node).unwrap()).unwrap();
+        let def = defel_with(mcx, "opt", Some(list));
+        assert_xx000(
+            &defGetStringList(&def).err().unwrap(),
+            &format!("unexpected node type in name list: {}", NodeTag::T_Integer as u16),
+        );
+
+        // NameListToString (namespace.c:3616): same message; A_Star joins as
+        // '*' (namespace.c:3613) instead of erroring.
+        let names = NodeList::make1(mcx, int_node).unwrap();
+        assert_xx000(
+            &NameListToString(mcx, &names).err().unwrap(),
+            &format!("unexpected node type in name list: {}", NodeTag::T_Integer as u16),
+        );
+        let star = Node::mk(mcx, types_nodes::A_Star).unwrap();
+        let s = Node::mk(mcx, types_nodes::String { sval: "s" }).unwrap();
+        let names = NodeList::from_slice(mcx, &[s, star]).unwrap();
+        assert_eq!(NameListToString(mcx, &names).unwrap().as_str(), "s.*");
+    }
+
+    // defGetObjectId (define.c:206-233): Integer verbatim, Float through
+    // oidin (22003 out of range above uint32), anything else 42601.
+    #[test]
+    fn def_get_object_id_matches_c() {
+        let ctx = mcx::MemoryContext::new("commands_define-test");
+        let mcx = ctx.mcx();
+        let float = |v: &'static str| Node::mk(mcx, types_nodes::Float { fval: v }).unwrap();
+        let sixteen = Node::mk(mcx, types_nodes::Integer { ival: 16 }).unwrap();
+        let def = defel_with(mcx, "oid", Some(sixteen));
+        assert_eq!(defGetObjectId(&def).unwrap(), 16);
+        let def = defel_with(mcx, "oid", Some(float("3000000000")));
+        assert_eq!(defGetObjectId(&def).unwrap(), 3_000_000_000);
+        let def = defel_with(mcx, "oid", Some(float("4294967296")));
+        let e = defGetObjectId(&def).err().unwrap();
+        assert_eq!(e.message(), "value \"4294967296\" is out of range for type oid");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);
+        let text = Node::mk(mcx, types_nodes::String { sval: "abc" }).unwrap();
+        let def = defel_with(mcx, "oid", Some(text));
+        let e = defGetObjectId(&def).err().unwrap();
+        assert_eq!(e.message(), "oid requires a numeric value");
+        assert_eq!(e.sqlstate(), ERRCODE_SYNTAX_ERROR);
+        let def = defel_with(mcx, "oid", None);
+        assert_eq!(defGetObjectId(&def).err().unwrap().message(), "oid requires a numeric value");
+    }
+
+    // errorConflictingDefElem (define.c:371-377): the cursor comes from
+    // parser_errposition(pstate, defel->location) — character-based, absent
+    // without a pstate/source text or with a negative location.
+    #[test]
+    fn error_conflicting_def_elem_carries_cursor() {
+        let ctx = mcx::MemoryContext::new("commands_define-test");
+        let mcx = ctx.mcx();
+        let src = "CREATE DATABASE \"d\u{e9}\" WITH ENCODING 'UTF8' ENCODING 'UTF8'";
+        let second = src.rfind("ENCODING").unwrap() as i32;
+        let mut def = defel_with(mcx, "encoding", None);
+        def.location = second;
+        let mut pstate = parser_small1::make_parsestate(mcx, None);
+        pstate.p_sourcetext = Some(src.as_bytes());
+
+        let e = errorConflictingDefElem(&def, Some(&pstate));
+        assert_eq!(e.message(), "conflicting or redundant options");
+        assert_eq!(e.sqlstate(), ERRCODE_SYNTAX_ERROR);
+        let expect = if mbutils::GetDatabaseEncoding() == wchar::PG_UTF8 {
+            src[..second as usize].chars().count() as i32 + 1
+        } else {
+            second + 1
+        };
+        assert_eq!(e.cursor_position, Some(expect));
+
+        assert_eq!(errorConflictingDefElem(&def, None).cursor_position, None);
+        def.location = -1;
+        assert_eq!(errorConflictingDefElem(&def, Some(&pstate)).cursor_position, None);
+        pstate.p_sourcetext = None;
+        def.location = second;
+        assert_eq!(errorConflictingDefElem(&def, Some(&pstate)).cursor_position, None);
     }
 }

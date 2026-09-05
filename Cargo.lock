@@ -4134,9 +4134,14 @@ version = "0.0.0"
 dependencies = [
  "adt_int8",
  "format_type",
+ "mbutils",
  "mcx",
+ "numutils",
+ "parser_small1",
+ "types_core",
  "types_error",
  "types_nodes",
+ "wchar",
 ]
 
 [[package]]
@@ -5012,6 +5017,7 @@ dependencies = [
  "catalog_indexing",
  "catalog_namespace",
  "checkpointer",
+ "commands_define",
  "commands_tablespace",
  "datum",
  "dbcommands_seams",
@@ -5033,6 +5039,7 @@ dependencies = [
  "mcx",
  "miscinit",
  "numutils",
+ "parser_small1",
  "pg_database",
  "pg_database_seams",
  "pg_db_role_setting",
