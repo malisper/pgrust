@@ -1986,6 +1986,14 @@ fn jumble_node<'mcx>(js: J<'_, 'mcx>, n: Node<'mcx>) -> PgResult<()> {
             js.f_u32(e.behavior as u32);
             js.f_bool(e.missing_ok);
         }
+        NodeTag::T_AlterObjectDependsStmt => {
+            let e = cast!(q::AlterObjectDependsStmt);
+            js.f_u32(e.objectType as u32);
+            range_var(js, e.relation)?;
+            node(js, e.object)?;
+            node(js, e.extname)?;
+            js.f_bool(e.remove);
+        }
         NodeTag::T_AlterObjectSchemaStmt => {
             let e = cast!(q::AlterObjectSchemaStmt);
             js.f_u32(e.objectType as u32);
