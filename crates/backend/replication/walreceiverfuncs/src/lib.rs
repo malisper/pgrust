@@ -94,15 +94,38 @@ fn shmem() -> &'static WalRcvShared {
     WAL_RCV.get().expect("WalRcv accessed before WalRcvShmemInit")
 }
 
-pub fn WalRcvShmemInit() {
-    WAL_RCV
-        .set(WalRcvShared {
-            data: Mutex::new(WalRcvData::new()),
-            writtenUpto: AtomicU64::new(0),
-            force_reply: AtomicBool::new(false),
-            walRcvStoppedCV: ConditionVariable::new(),
-        })
-        .unwrap_or_else(|_| panic!("WalRcvShmemInit called twice"));
+// sizeof(WalRcvData) (replication/walreceiver.h) at 18.6, x86-64 and
+// aarch64 Linux alike: procno/pid/walRcvState (12) + ConditionVariable (12)
+// + startTime..latestWalEndTime (8 x 10 with two TimeLineID pads = 80)
+// + conninfo[MAXCONNINFO=1024] + sender_host[NI_MAXHOST=1025] + pad +
+// sender_port (4) + slotname[NAMEDATALEN=64] + is_temp_slot + ready_to_display
+// + slock_t mutex + pad to the 8-aligned pg_atomic_uint64 writtenUpto +
+// sig_atomic_t force_reply + tail pad = 2248.
+const C_SIZE_OF_WAL_RCV_DATA: usize = 2248;
+
+/// WalRcvShmemSize (walreceiverfuncs.c:44): add_size(0, sizeof(WalRcvData)).
+pub fn WalRcvShmemSize() -> usize {
+    C_SIZE_OF_WAL_RCV_DATA
+}
+
+/// WalRcvShmemInit (walreceiverfuncs.c:55): ShmemInitStruct("Wal Receiver
+/// Ctl", WalRcvShmemSize()) registers the block in the ShmemIndex, so
+/// pg_shmem_allocations lists it; a fresh segment (!found) boots the control
+/// block (STOPPED, procno INVALID_PROC_NUMBER, writtenUpto 0), a re-entry
+/// leaves the live state alone.
+pub fn WalRcvShmemInit() -> PgResult<()> {
+    let (_raw, found) = shmem::ShmemInitStruct("Wal Receiver Ctl", WalRcvShmemSize())?;
+    if !found {
+        WAL_RCV
+            .set(WalRcvShared {
+                data: Mutex::new(WalRcvData::new()),
+                writtenUpto: AtomicU64::new(0),
+                force_reply: AtomicBool::new(false),
+                walRcvStoppedCV: ConditionVariable::new(),
+            })
+            .unwrap_or_else(|_| panic!("WalRcvShmemInit: fresh segment but WalRcv already booted"));
+    }
+    Ok(())
 }
 
 pub fn WalRcvShmemResetAfterCrash() {
@@ -359,9 +382,7 @@ fn pg_stat_wal_receiver_snapshot() -> Option<walreceiverfuncs_seams::WalRcvStatS
 pub fn init_seams() {
     walreceiverfuncs_seams::wal_rcv_streaming::set(WalRcvStreaming);
     walreceiverfuncs_seams::wal_rcv_running::set(WalRcvRunning);
-    walreceiverfuncs_seams::shutdown_wal_rcv::set(|| {
-        ShutdownWalRcv().expect("ShutdownWalRcv failed")
-    });
+    walreceiverfuncs_seams::shutdown_wal_rcv::set(ShutdownWalRcv);
     walreceiverfuncs_seams::request_xlog_streaming::set(RequestXLogStreaming);
     walreceiverfuncs_seams::get_wal_rcv_flush_rec_ptr::set(GetWalRcvFlushRecPtr);
     walreceiverfuncs_seams::pg_stat_wal_receiver_snapshot::set(pg_stat_wal_receiver_snapshot);
@@ -373,11 +394,138 @@ mod tests {
 
     fn init_once() {
         static ONCE: pgsync::Once = pgsync::Once::new();
-        ONCE.call_once(WalRcvShmemInit);
+        ONCE.call_once(|| WalRcvShmemInit().unwrap());
     }
 
     // Serializes the tests that change walRcvState in the shared control block.
     static STATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    // audit-18.6 b190: walreceiverfuncs.c:55 WalRcvShmemInit registers the
+    // control block as ShmemInitStruct("Wal Receiver Ctl", sizeof(WalRcvData))
+    // — 2248 bytes at 18.6 (x86-64 and aarch64 Linux alike) — so a re-entry
+    // finds it and pg_shmem_allocations lists it.
+    #[test]
+    fn shmem_index_lists_wal_receiver_ctl() {
+        init_once();
+        assert_eq!(WalRcvShmemSize(), 2248, "walreceiverfuncs.c:44 sizeof(WalRcvData)");
+        let (_, found) = shmem::ShmemInitStruct("Wal Receiver Ctl", 2248).unwrap();
+        assert!(
+            found,
+            "WalRcvShmemInit must register \"Wal Receiver Ctl\" (2248 bytes) in the ShmemIndex"
+        );
+    }
+
+    // audit-18.6 b190: the ShutdownWalRcv seam. C's ConditionVariableSleep
+    // runs CHECK_FOR_INTERRUPTS, so a SIGTERM/SIGINT arriving while the
+    // startup process waits for the walreceiver to exit unwinds as a
+    // FATAL/ERROR through XLogShutdownWalRcv; the seam must surface that
+    // error, never panic. The harness is the condition_variable crate's own
+    // test recipe: one owned latch, the real waiteventset stack, and a
+    // CHECK_FOR_INTERRUPTS stand-in that raises once when armed.
+    static INTERRUPT_ARMED: AtomicBool = AtomicBool::new(false);
+
+    fn cv_harness() {
+        use init_small::globals as g;
+        use types_storage::latch::LatchHandle;
+        use types_storage::storage::NUM_SPECIAL_WORKER_PROCS;
+        static SETUP: pgsync::Once = pgsync::Once::new();
+        SETUP.call_once(|| {
+            s_lock_seams::perform_spin_delay::set(|_| std::thread::yield_now());
+            s_lock_seams::finish_spin_delay::set(|_| {});
+            shmem_seams::mul_size::set(|a, b| Ok(a * b));
+            shmem_seams::add_size::set(|a, b| Ok(a + b));
+            ipc_seams::on_shmem_exit::set(|_, _| {});
+            pg_sema_seams::pg_semaphore_create::set(|_| {});
+            waitevent_seams::pgstat_report_wait_start::set(|_| {});
+            waitevent_seams::pgstat_report_wait_end::set(|| {});
+            postgres_seams::check_for_interrupts::set(|| {
+                if INTERRUPT_ARMED.swap(false, SeqCst) {
+                    // ProcessInterrupts' die arm (postgres.c).
+                    Err(Box::new(
+                        types_error::PgError::error(
+                            "terminating connection due to administrator command",
+                        )
+                        .with_sqlstate(types_error::ERRCODE_ADMIN_SHUTDOWN),
+                    ))
+                } else {
+                    Ok(())
+                }
+            });
+            lmgr_proc_seams::proc_latch::set(|p| &lmgr_proc::GetPGProcByNumber(p).procLatch);
+            g::SetIsUnderPostmaster(false);
+            g::SetMaxConnections(4);
+            g::set_max_worker_processes(2);
+            g::SetMaxBackends(4 + 3 + 2 + 2 + NUM_SPECIAL_WORKER_PROCS);
+            lmgr_proc::InitProcGlobal(&lmgr_proc::ProcGlobalConfig {
+                autovacuum_worker_slots: 3,
+                max_wal_senders: 2,
+                max_prepared_xacts: 2,
+                fastpath_lock_groups_per_backend: 1,
+            });
+            waiteventset::init_seams();
+            latch::init_seams();
+            condition_variable::init_seams();
+            init_seams();
+            // Become backend 0 (the only thread that ever sleeps here).
+            g::SetMyProcNumber(0);
+            g::SetMyProcPid(7900);
+            waiteventset::InitializeWaitEventSupport().unwrap();
+            let h = LatchHandle::proc(0);
+            lmgr_proc::GetPGProcByNumber(0).procLatch.owner_pid.store(0, SeqCst);
+            latch::OwnLatch(h).unwrap();
+            g::SetMyLatch(Some(h));
+            latch::InitializeLatchWaitSet().unwrap();
+        });
+    }
+
+    // The seam's return shape is what this witness adjudicates: C surfaces
+    // the interrupt as an error (PgResult::Err); a unit return has no error
+    // surface at all.
+    trait SeamOutcome {
+        fn surfaced_error(self) -> bool;
+    }
+    impl SeamOutcome for () {
+        fn surfaced_error(self) -> bool {
+            false
+        }
+    }
+    impl SeamOutcome for PgResult<()> {
+        fn surfaced_error(self) -> bool {
+            self.is_err()
+        }
+    }
+
+    #[test]
+    fn shutdown_wal_rcv_seam_surfaces_the_sleep_interrupt() {
+        init_once();
+        cv_harness();
+        let _g = STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // A streaming walreceiver with no process to signal (pid 0): C sets
+        // STOPPING and sleeps on walRcvStoppedCV until WalRcvRunning() clears.
+        with_walrcv(|d| {
+            *d = WalRcvData::new();
+            d.walRcvState = WalRcvState::Streaming;
+            d.pid = 0;
+        });
+        INTERRUPT_ARMED.store(true, SeqCst);
+        // The latch is already set, so the first WaitLatch returns at once and
+        // the sleep reaches its CHECK_FOR_INTERRUPTS, which raises.
+        latch::SetLatch(init_small::globals::MyLatch().unwrap());
+        let outcome = std::panic::catch_unwind(|| {
+            walreceiverfuncs_seams::shutdown_wal_rcv::call().surfaced_error()
+        });
+        ConditionVariableCancelSleep();
+        INTERRUPT_ARMED.store(false, SeqCst);
+        with_walrcv(|d| *d = WalRcvData::new());
+        match outcome {
+            Ok(true) => {}
+            Ok(false) => panic!("shutdown_wal_rcv seam swallowed the interrupt error"),
+            Err(_) => panic!(
+                "shutdown_wal_rcv seam panicked instead of returning the interrupt error \
+                 (C: ConditionVariableSleep's CHECK_FOR_INTERRUPTS unwinds through ShutdownWalRcv)"
+            ),
+        }
+    }
 
     #[test]
     fn stopped_by_default_and_flush_ptr_tracks() {

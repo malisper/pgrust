@@ -1156,7 +1156,7 @@ mod tests {
             timestamp_seams::timestamptz_to_str::set(|t| format!("<{t}>"));
             xlogrecovery_seams::archive_recovery_requested::set(|| true);
             xlogarchive_seams::restore_archived_file::set(restore_stub);
-            walreceiverfuncs::WalRcvShmemInit();
+            walreceiverfuncs::WalRcvShmemInit().unwrap();
         });
     }
 

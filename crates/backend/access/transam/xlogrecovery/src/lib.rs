@@ -242,7 +242,7 @@ fn wal_rcv_streaming() -> bool {
 // tests run without XLOGShmemInit) skips the XLogCtl touch.
 fn xlog_shutdown_wal_rcv() -> PgResult<()> {
     if walreceiverfuncs_seams::shutdown_wal_rcv::is_installed() {
-        walreceiverfuncs_seams::shutdown_wal_rcv::call();
+        walreceiverfuncs_seams::shutdown_wal_rcv::call()?;
     }
     if ARCHIVE_RECOVERY_REQUESTED.load(Relaxed) {
         transam_xlog::ResetInstallXLogFileSegmentActive()?;

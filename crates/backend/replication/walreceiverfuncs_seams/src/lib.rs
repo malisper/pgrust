@@ -17,8 +17,9 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    // ShutdownWalRcv() (walreceiverfuncs.c).
-    pub fn shutdown_wal_rcv()
+    // ShutdownWalRcv() (walreceiverfuncs.c): the walRcvStoppedCV sleep runs
+    // CHECK_FOR_INTERRUPTS, so a die/cancel comes back as the Err.
+    pub fn shutdown_wal_rcv() -> PgResult<()>
 );
 
 seam_core::seam!(

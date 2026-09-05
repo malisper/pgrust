@@ -81,6 +81,7 @@ pub fn CalculateShmemSize(cfg: &ProcGlobalConfig) -> PgResult<(usize, i32)> {
     size = shmem::add_size(size, autovacuum::AutoVacuumShmemSize()?)?;
     size = shmem::add_size(size, slot::ReplicationSlotsShmemSize())?;
     size = shmem::add_size(size, walsummarizer::WalSummarizerShmemSize())?;
+    size = shmem::add_size(size, walreceiverfuncs::WalRcvShmemSize())?;
     size = shmem::add_size(size, pgarch::PgArchShmemSize())?;
 
     size = shmem::add_size(size, TOTAL_ADDIN_REQUEST.get())?;
@@ -160,7 +161,7 @@ pub fn CreateOrAttachShmemStructs(cfg: &ProcGlobalConfig) -> PgResult<()> {
     slot::ReplicationSlotsShmemInit();
     origin::ReplicationOriginShmemInit();
     walsummarizer::WalSummarizerShmemInit();
-    walreceiverfuncs::WalRcvShmemInit();
+    walreceiverfuncs::WalRcvShmemInit()?;
     pgarch::PgArchShmemInit()?;
     slotsync::SlotSyncShmemInit()?;
     syncscan::SyncScanShmemInit()?;

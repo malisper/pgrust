@@ -16,6 +16,7 @@ latch = { path = "../../storage/ipc/latch" }
 libc = "0.2"
 pmsignal = { path = "../../storage/ipc/pmsignal" }
 procsignal = { path = "../../storage/ipc/procsignal" }
+shmem = { path = "../../storage/ipc/shmem" }
 timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
 transam_xlog = { path = "../../access/transam/transam_xlog" }
 types_core = { path = "../../../_support/types/types_core" }
@@ -23,3 +24,17 @@ types_error = { path = "../../../_support/types/types_error" }
 types_storage = { path = "../../../_support/types/types_storage" }
 walreceiverfuncs_seams = { path = "../walreceiverfuncs_seams" }
 xlogrecovery = { path = "../../access/transam/xlogrecovery" }
+
+[dev-dependencies]
+# The ShutdownWalRcv sleep witness rides the real condition-variable/latch
+# stack (the condition_variable crate's own test recipe).
+init_small = { path = "../../utils/init/init_small" }
+ipc_seams = { path = "../../storage/ipc/ipc_seams" }
+lmgr_proc = { path = "../../storage/lmgr/lmgr_proc" }
+lmgr_proc_seams = { path = "../../storage/lmgr/lmgr_proc_seams" }
+pg_sema_seams = { path = "../../port/pg_sema_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+s_lock_seams = { path = "../../storage/lmgr/s_lock_seams" }
+shmem_seams = { path = "../../storage/ipc/shmem_seams" }
+waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
+waiteventset = { path = "../../storage/ipc/waiteventset" }
