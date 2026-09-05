@@ -15,7 +15,7 @@ use types_portal::{
 use types_scan::sdir::ForwardScanDirection;
 use types_slot::EXEC_FLAG_SKIP_TRIGGERS;
 
-use crate::plan::{self, SpiPlanPtr, SpiPlanState};
+use crate::plan::{self, SpiErrorContext, SpiPlanPtr, SpiPlanState};
 use crate::{
     current_exec_mcx, set_spi_processed, set_spi_tuptable, with_current,
     TuptabHandle, _SPI_begin_call, _SPI_end_call, SPI_ERROR_ARGUMENT, SPI_ERROR_COPY,
@@ -74,12 +74,15 @@ pub fn SPI_exec(src: &str, tcount: i64) -> PgResult<i32> {
 
 // SPI_execute_extended's params leg (spi.c): one-shot plan, $n types drawn
 // from the caller's param list (C paramlist_parser_setup equivalent).
+// `must_return_tuples` is SPIExecuteOptions.must_return_tuples (plpgsql
+// RETURN QUERY EXECUTE passes true).
 pub fn SPI_execute_extended(
     src: &str,
     argtypes: &[types_core::Oid],
     values: &[Datum],
     nulls: &[bool],
     read_only: bool,
+    must_return_tuples: bool,
 ) -> PgResult<i32> {
     if argtypes.len() != values.len() || values.len() != nulls.len() {
         return Ok(SPI_ERROR_PARAM);
@@ -96,6 +99,7 @@ pub fn SPI_execute_extended(
     let options = SpiExecuteOptions {
         params,
         read_only,
+        must_return_tuples,
         ..Default::default()
     };
     let res = _SPI_execute_plan(&plan, &options, None, None, true);
@@ -116,7 +120,7 @@ pub fn SPI_execute_plan(
     read_only: bool,
     tcount: i64,
 ) -> PgResult<i32> {
-    execute_plan_common(ptr, values, nulls, false, read_only, false, tcount, None, None, true)
+    execute_plan_common(ptr, values, nulls, false, read_only, false, false, tcount, None, None, true)
 }
 
 // SPI_execute_plan_with_paramlist (spi.c): C's entry for a PL-built
@@ -132,12 +136,14 @@ pub fn SPI_execute_plan_with_paramlist(
     read_only: bool,
     tcount: i64,
 ) -> PgResult<i32> {
-    execute_plan_common(ptr, values, nulls, true, read_only, false, tcount, None, None, true)
+    execute_plan_common(ptr, values, nulls, true, read_only, false, false, tcount, None, None, true)
 }
 
-// SPI_execute_plan_extended's allow_nonatomic leg (spi.c); params ride the
-// values/nulls arrays like SPI_execute_plan. The only in-tree caller is
-// plpgsql (C: options.params = a hooked PL paramLI), hence params_hooked.
+// SPI_execute_plan_extended's allow_nonatomic / must_return_tuples legs
+// (spi.c); params ride the values/nulls arrays like SPI_execute_plan. The
+// only in-tree caller is plpgsql (C: options.params = a hooked PL paramLI),
+// hence params_hooked.
+#[allow(clippy::too_many_arguments)]
 pub fn SPI_execute_plan_extended(
     ptr: SpiPlanPtr,
     values: &[Datum],
@@ -145,6 +151,7 @@ pub fn SPI_execute_plan_extended(
     params_hooked: bool,
     read_only: bool,
     allow_nonatomic: bool,
+    must_return_tuples: bool,
     tcount: i64,
 ) -> PgResult<i32> {
     execute_plan_common(
@@ -154,6 +161,7 @@ pub fn SPI_execute_plan_extended(
         params_hooked,
         read_only,
         allow_nonatomic,
+        must_return_tuples,
         tcount,
         None,
         None,
@@ -182,6 +190,7 @@ pub fn SPI_execute_snapshot(
         false,
         read_only,
         false,
+        false,
         tcount,
         snapshot,
         crosscheck_snapshot,
@@ -197,6 +206,7 @@ fn execute_plan_common(
     params_hooked: bool,
     read_only: bool,
     allow_nonatomic: bool,
+    must_return_tuples: bool,
     tcount: i64,
     snapshot: Option<Snapshot>,
     crosscheck_snapshot: Option<Snapshot>,
@@ -221,8 +231,8 @@ fn execute_plan_common(
         params,
         read_only,
         allow_nonatomic,
+        must_return_tuples,
         tcount: tcount as u64,
-        ..Default::default()
     };
     let res = _SPI_execute_plan(&state, &options, snapshot, crosscheck_snapshot, fire_triggers);
     if !params.is_null() {
@@ -296,6 +306,10 @@ pub(crate) fn _SPI_execute_plan(
     let mut my_processed: u64 = 0;
     let mut my_tuptable: Option<u64> = None;
 
+    // Setup error traceback support for ereport() (spi.c:2427-2432): the
+    // query is filled in per plansource below.
+    let errctx = SpiErrorContext::push(plan.parse_mode);
+
     let result = (|| -> PgResult<i32> {
         let mut my_res: i32 = 0;
 
@@ -318,6 +332,8 @@ pub(crate) fn _SPI_execute_plan(
         }
 
         for &(psrc, stmt_index) in &plan.sources {
+            errctx.set_query(plancache::CachedPlanQueryString(psrc));
+
             if plan.oneshot {
                 plan::complete_source(psrc, stmt_index, &plan.argtypes, plan.cursor_options)?;
             }
@@ -521,17 +537,21 @@ pub(crate) fn _SPI_execute_plan(
         Ok(my_res)
     })();
 
+    let mut result = result;
     if pushed_active_snap {
         let popped = snapmgr::PopActiveSnapshot();
         if result.is_ok() {
-            popped?;
+            if let Err(e) = popped {
+                result = Err(e);
+            }
         }
     }
     if let Some(cplan) = held_cplan.take() {
         plancache::ReleaseCachedPlan(cplan);
     }
 
-    let mut my_res = result?;
+    // Pop the error context stack (spi.c:2797) after describing the error.
+    let mut my_res = result.map_err(|e| errctx.transpose(e))?;
 
     set_spi_processed(my_processed);
     set_spi_tuptable(my_tuptable.map(TuptabHandle));
@@ -547,7 +567,7 @@ fn free_tuptable_id(id: u64) {
     let _ = crate::SPI_freetuptable(TuptabHandle(id));
 }
 
-fn _SPI_checktuples() -> bool {
+pub(crate) fn _SPI_checktuples() -> bool {
     with_current(|c| match c.tuptable {
         None => true,
         Some(id) => crate::tuptable::numvals_of(&c.tuptables, id) != c.processed,

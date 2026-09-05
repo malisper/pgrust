@@ -14,7 +14,8 @@ use types_portal::{
 
 use elog::ereport;
 
-use crate::plan::{single_source, SpiPlanPtr};
+use crate::execute::_SPI_checktuples;
+use crate::plan::{single_source, SpiErrorContext, SpiPlanPtr};
 use crate::{
     set_spi_processed, set_spi_tuptable, with_current, TuptabHandle, _SPI_begin_call,
     _SPI_end_call,
@@ -33,10 +34,13 @@ impl SpiCursor {
     }
 }
 
-// C SPI_cursor_open_internal's copyParamList into portal->portalContext: the
-// param array must survive _SPI_end_call's exec-context reset, so it gets
-// portal lifetime. Storing the handle in portalParams immediately makes
-// PortalDrop (close or abort-time cleanup) the single free path.
+// C SPI_cursor_open_internal's copyParamList into portal->portalContext
+// (spi.c:1762-1767): the param array AND every pass-by-reference datum must
+// survive _SPI_end_call's exec-context reset and the caller's own memory
+// (a plpgsql function returning the cursor is gone before the first FETCH),
+// so both get portal lifetime. Storing the handle in portalParams
+// immediately makes PortalDrop (close or abort-time cleanup) the single free
+// path.
 fn cursor_params(
     portal: &Portal<'static>,
     argtypes: &[types_core::Oid],
@@ -55,15 +59,16 @@ fn cursor_params(
             as *const mcx::MemoryContext)
     };
     let mcx = ctx.mcx();
-    let mut v = mcx::vec_with_capacity_in(mcx, argtypes.len())?;
-    for i in 0..argtypes.len() {
-        v.push(ParamExternData {
+    let caller_params: Vec<ParamExternData> = (0..argtypes.len())
+        .map(|i| ParamExternData {
             value: values[i],
             isnull: nulls[i],
             pflags: PARAM_FLAG_CONST,
             ptype: argtypes[i],
-        });
-    }
+        })
+        .collect();
+    // copyParamList: by-ref datums are datumCopy'd into portalContext.
+    let v = nodes_params::copy_param_list(mcx, &caller_params)?;
     let slice = mcx::vec_borrow_in(mcx, v)?;
     // SAFETY: slice lives in portalContext, which PortalDrop deletes only
     // after release_portal_registry_handles frees the handle.
@@ -143,7 +148,11 @@ fn cursor_open_internal(
 
     let res = _SPI_begin_call(true);
     if res < 0 {
-        panic!("SPI_cursor_open called while not connected");
+        // spi.c:1613: elog(ERROR, ...)
+        return Err(ereport(types_error::ERROR)
+            .errmsg_internal("SPI_cursor_open called while not connected")
+            .into_error()
+            .into());
     }
     set_spi_processed(0);
     set_spi_tuptable(None);
@@ -152,15 +161,20 @@ fn cursor_open_internal(
         c.tuptable = None;
     });
 
+    // Setup error traceback support for ereport(), in case GetCachedPlan
+    // throws an error (spi.c:1636-1642).
+    let errctx = SpiErrorContext::push(state.parse_mode);
     let result = (|| -> PgResult<SpiCursor> {
         let portal = match name {
             None | Some("") => portalmem::CreateNewPortal()?,
             Some(n) => portalmem::CreatePortal(n, false, false)?,
         };
 
+        let query_string = plancache::CachedPlanQueryString(psrc);
+        errctx.set_query(query_string);
+
         let params = cursor_params(&portal, &state.argtypes, values, nulls, params_hooked)?;
 
-        let query_string = plancache::CachedPlanQueryString(psrc);
         let cplan = plancache::GetCachedPlan(psrc, params, None, crate::current_query_env())?;
         let stmt_slice = plancache::CachedPlanStmtList(cplan);
         // SAFETY: the cplan refcount taken by GetCachedPlan pins stmt_slice
@@ -233,6 +247,9 @@ fn cursor_open_internal(
 
         Ok(SpiCursor { portal, stmts })
     })();
+    // Pop the error context stack (spi.c:1780).
+    let result = result.map_err(|e| errctx.transpose(e));
+    drop(errctx);
 
     _SPI_end_call(true);
     result
@@ -242,7 +259,7 @@ fn cursor_open_internal(
 pub fn SPI_cursor_fetch(cursor: &SpiCursor, forward: bool, count: i64) -> PgResult<()> {
     let res = _SPI_begin_call(true);
     if res < 0 {
-        panic!("SPI cursor operation called while not connected");
+        return Err(cursor_operation_unconnected());
     }
     set_spi_processed(0);
     set_spi_tuptable(None);
@@ -257,6 +274,9 @@ pub fn SPI_cursor_fetch(cursor: &SpiCursor, forward: bool, count: i64) -> PgResu
             if forward { FetchDirection::FETCH_FORWARD } else { FetchDirection::FETCH_BACKWARD };
         let nfetched = pquery::PortalRunFetch(&cursor.portal, direction, count, &mut dest)?;
         with_current(|c| c.processed = nfetched);
+        if _SPI_checktuples() {
+            return Err(cursor_tuple_count_inconsistent());
+        }
         let (processed, tuptable) =
             with_current(|c| (c.processed, c.tuptable.take())).expect("connected");
         set_spi_processed(processed);
@@ -266,6 +286,26 @@ pub fn SPI_cursor_fetch(cursor: &SpiCursor, forward: bool, count: i64) -> PgResu
 
     _SPI_end_call(true);
     result
+}
+
+// _SPI_cursor_operation (spi.c:3018): elog(ERROR, ...), an ERROR the caller
+// can catch — not a panic.
+#[cold]
+fn cursor_operation_unconnected() -> Box<types_error::PgError> {
+    ereport(types_error::ERROR)
+        .errmsg_internal("SPI cursor operation called while not connected")
+        .into_error()
+        .into()
+}
+
+// _SPI_cursor_operation (spi.c:3042): a DestSPI fetch whose processed count
+// disagrees with the tuple table it filled.
+#[cold]
+fn cursor_tuple_count_inconsistent() -> Box<types_error::PgError> {
+    ereport(types_error::ERROR)
+        .errmsg_internal("consistency check on SPI tuple count failed")
+        .into_error()
+        .into()
 }
 
 // SPI_cursor_close (spi.c).
@@ -293,7 +333,7 @@ fn cursor_operation(
 ) -> PgResult<()> {
     let res = _SPI_begin_call(true);
     if res < 0 {
-        panic!("SPI cursor operation called while not connected");
+        return Err(cursor_operation_unconnected());
     }
     set_spi_processed(0);
     set_spi_tuptable(None);
@@ -311,6 +351,9 @@ fn cursor_operation(
             pquery::PortalRunFetch(portal, direction, count, &mut dest)?
         };
         with_current(|c| c.processed = nfetched);
+        if fetch && _SPI_checktuples() {
+            return Err(cursor_tuple_count_inconsistent());
+        }
         let (processed, tuptable) =
             with_current(|c| (c.processed, c.tuptable.take())).expect("connected");
         set_spi_processed(processed);

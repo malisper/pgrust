@@ -314,22 +314,30 @@ pub fn AtEOSubXact_SPI(is_commit: bool, my_subid: SubTransactionId) -> PgResult<
                     conn.exec_subid = InvalidSubTransactionId;
                     conn.exec_cxt
                 });
-            let mut dropped_current = false;
+            // spi.c:569-572: a dropped table is unlinked from BOTH
+            // _SPI_current->tuptable and the caller-facing SPI_tuptable
+            // (after _SPI_execute_plan's hand-off only the latter names it).
+            let result = SPI_tuptable();
+            let mut dropped_result = false;
             conn.tuptables.retain(|tt| {
                 let stale = tt.subid >= my_subid;
-                if stale && Some(tt.id) == conn.tuptable {
-                    conn.tuptable = None;
-                    dropped_current = true;
+                if stale {
+                    if Some(tt.id) == conn.tuptable {
+                        conn.tuptable = None;
+                    }
+                    if Some(TuptabHandle(tt.id)) == result {
+                        dropped_result = true;
+                    }
                 }
                 !stale
             });
-            (exec, dropped_current)
+            (exec, dropped_result)
         });
-        if let Some((exec, dropped_current)) = reset {
+        if let Some((exec, dropped_result)) = reset {
             if let Some(ctx) = exec {
                 reset_ctx(ctx);
             }
-            if dropped_current {
+            if dropped_result {
                 set_spi_tuptable(None);
             }
         }
@@ -441,51 +449,112 @@ pub(crate) fn current_query_env() -> types_portal::QueryEnvHandle {
     with_current(|c| c.query_env).unwrap_or(types_portal::QueryEnvHandle::NULL)
 }
 
-// SPI_register_trigger_data (spi.c): expose REFERENCING transition tables as
-// ENRs in this connection's query environment.
-pub fn SPI_register_trigger_data(tdata: &types_trigger_call::TriggerData<'_, '_>) -> PgResult<i32> {
-    if SPI_STACK.with(|s| s.borrow().is_empty()) {
-        return Ok(SPI_ERROR_UNCONNECTED);
+// _SPI_find_ENR_by_name (spi.c:3280).
+fn find_enr_by_name(name: &str) -> bool {
+    let h = current_query_env();
+    if h.is_null() {
+        return false;
     }
-    let h = with_current(|conn| {
-        if conn.query_env.is_null() {
-            let mcx = ctx_mcx(conn.proc_cxt);
-            conn.query_env =
-                queryenvironment::hold::register(queryenvironment::create_queryEnv(mcx));
-        }
-        conn.query_env
-    })
-    .expect("checked nonempty");
+    queryenvironment::hold::with_env(h, |env| queryenvironment::get_ENR(env, name).is_some())
+}
+
+/// SPI_register_relation's argument (C EphemeralNamedRelationData): the
+/// metadata is copied into this connection's query environment.
+pub struct SpiNamedRelation<'a> {
+    pub name: &'a str,
+    pub reliddesc: types_core::Oid,
+    pub tupdesc: Option<std::rc::Rc<types_tuple::TupleDescData<'static>>>,
+    pub enrtype: queryenvironment::EphemeralNameRelationType,
+    pub enrtuples: f64,
+    pub reldata: types_portal::TuplestoreHandle,
+}
+
+// SPI_register_relation (spi.c:3297): register an ephemeral named relation
+// for the planner and executor on subsequent calls using this SPI
+// connection.
+pub fn SPI_register_relation(enr: &SpiNamedRelation<'_>) -> PgResult<i32> {
+    let res = _SPI_begin_call(false); // keep current memory context
+    if res < 0 {
+        return Ok(res);
+    }
+    let res = if find_enr_by_name(enr.name) {
+        SPI_ERROR_REL_DUPLICATE
+    } else {
+        let h = with_current(|conn| {
+            if conn.query_env.is_null() {
+                let mcx = ctx_mcx(conn.proc_cxt);
+                conn.query_env =
+                    queryenvironment::hold::register(queryenvironment::create_queryEnv(mcx));
+            }
+            conn.query_env
+        })
+        .expect("connected");
+        queryenvironment::hold::with_env(h, |env| {
+            let mcx = *env.namedRelList.allocator();
+            let data = queryenvironment::EphemeralNamedRelationData {
+                md: queryenvironment::EphemeralNamedRelationMetadataData {
+                    name: mcx::PgString::from_str_in(enr.name, mcx)?,
+                    reliddesc: enr.reliddesc,
+                    tupdesc: enr.tupdesc.clone(),
+                    enrtype: enr.enrtype,
+                    enrtuples: enr.enrtuples,
+                },
+                reldata: enr.reldata,
+            };
+            queryenvironment::register_ENR(env, data)
+        })?;
+        SPI_OK_REL_REGISTER
+    };
+    _SPI_end_call(false);
+    Ok(res)
+}
+
+// SPI_unregister_relation (spi.c:3331): unregister an ephemeral named
+// relation by name (SPI_finish clears the environment anyway).
+pub fn SPI_unregister_relation(name: &str) -> PgResult<i32> {
+    let res = _SPI_begin_call(false); // keep current memory context
+    if res < 0 {
+        return Ok(res);
+    }
+    let res = if find_enr_by_name(name) {
+        let h = current_query_env();
+        queryenvironment::hold::with_env(h, |env| queryenvironment::unregister_ENR(env, name));
+        SPI_OK_REL_UNREGISTER
+    } else {
+        SPI_ERROR_REL_NOT_FOUND
+    };
+    _SPI_end_call(false);
+    Ok(res)
+}
+
+// SPI_register_trigger_data (spi.c:3355): expose REFERENCING transition
+// tables as ENRs in this connection's query environment — tg_newtable
+// first, then tg_oldtable, each through SPI_register_relation.
+pub fn SPI_register_trigger_data(tdata: &types_trigger_call::TriggerData<'_, '_>) -> PgResult<i32> {
     let relid = tdata.tg_relation.rd_id;
     for (name, store) in [
-        (tdata.tg_trigger.tgoldtable.as_ref(), tdata.tg_oldtable),
         (tdata.tg_trigger.tgnewtable.as_ref(), tdata.tg_newtable),
+        (tdata.tg_trigger.tgoldtable.as_ref(), tdata.tg_oldtable),
     ] {
-        let Some(name) = name else { continue };
         let store = types_portal::TuplestoreHandle(store);
         if store.is_null() {
             continue;
         }
+        // C: enr->md.name = tdata->tg_trigger->tgnewtable / tgoldtable; a NULL
+        // name is SPI_register_relation's SPI_ERROR_ARGUMENT (spi.c:3303).
+        let Some(name) = name else {
+            return Ok(SPI_ERROR_ARGUMENT);
+        };
         let enrtuples = tuplestore::hold::with_store(store, |ts| ts.tuple_count()) as f64;
-        let rc = queryenvironment::hold::with_env(h, |env| {
-            let mcx = *env.namedRelList.allocator();
-            let enr = queryenvironment::EphemeralNamedRelationData {
-                md: queryenvironment::EphemeralNamedRelationMetadataData {
-                    name: mcx::PgString::from_str_in(name.as_str(), mcx)?,
-                    reliddesc: relid,
-                    tupdesc: None,
-                    enrtype: queryenvironment::ENR_NAMED_TUPLESTORE,
-                    enrtuples,
-                },
-                reldata: store,
-            };
-            if queryenvironment::get_ENR(env, name.as_str()).is_some() {
-                return Ok(SPI_ERROR_REL_DUPLICATE);
-            }
-            queryenvironment::register_ENR(env, enr)?;
-            Ok::<i32, Box<types_error::PgError>>(SPI_OK_TD_REGISTER)
+        let rc = SPI_register_relation(&SpiNamedRelation {
+            name: name.as_str(),
+            reliddesc: relid,
+            tupdesc: None,
+            enrtype: queryenvironment::ENR_NAMED_TUPLESTORE,
+            enrtuples,
+            reldata: store,
         })?;
-        if rc != SPI_OK_TD_REGISTER {
+        if rc != SPI_OK_REL_REGISTER {
             return Ok(rc);
         }
     }

@@ -653,6 +653,9 @@ fn boot() {
     utility::init_seams();
     pquery::init_seams();
     spi::init_seams();
+    portalcmds::init_seams();
+    tuplestore::init_seams();
+    portalmem::EnablePortalManager();
     install_bufmgr_seams();
     install_relation_seams();
     install_parser_fixture_seams();
@@ -874,6 +877,50 @@ fn spi_end_to_end() {
     let mut rows = select_pairs("SELECT a, b FROM t");
     rows.sort();
     assert_eq!(rows, vec![(1, 11), (2, 20), (3, 30)]);
+    spi::SPI_finish().unwrap();
+    commit();
+
+    // --- Txn 5: SPI cursors. _SPI_cursor_operation while not connected is
+    // elog(ERROR, "SPI cursor operation called while not connected")
+    // (spi.c:3018) — an ERROR the caller can catch, never a panic; a
+    // connected open / fetch / exhausted-fetch / close round trip passes the
+    // DestSPI tuple-count consistency check (spi.c:3042). ---
+    begin();
+    let portal = portalmem::CreateNewPortal().unwrap();
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        spi::SPI_scroll_cursor_move(&portal, types_portal::FetchDirection::FETCH_FORWARD, 1)
+    }));
+    match outcome {
+        Ok(Err(e)) => {
+            assert_eq!(e.message(), "SPI cursor operation called while not connected");
+            assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        }
+        Ok(Ok(())) => panic!("cursor operation without an SPI connection succeeded"),
+        Err(_) => panic!("cursor operation without an SPI connection panicked (C: elog(ERROR))"),
+    }
+    portalmem::PortalDrop(&portal, false).unwrap();
+
+    spi::SPI_connect().unwrap();
+    let cplan = spi::SPI_prepare_cursor("SELECT b FROM t WHERE a = $1", &[INT4OID], 0).unwrap();
+    assert!(!cplan.is_null());
+    let cursor = spi::SPI_cursor_open(Some("spi_e2e_c"), cplan, &[Datum::from_i32(2)], &[false], false)
+        .unwrap();
+    spi::SPI_cursor_fetch(&cursor, true, 10).unwrap();
+    assert_eq!(spi::SPI_processed(), 1);
+    let h = spi::SPI_tuptable().expect("cursor fetch leaves a tuptable");
+    let b = spi::tuptable_with(h, |tt| {
+        assert_eq!(tt.vals.len(), 1);
+        spi::SPI_getbinval(&tt.vals[0], &tt.tupdesc, 1).0.as_i32()
+    });
+    assert_eq!(b, 20);
+    spi::SPI_freetuptable(h).unwrap();
+    spi::SPI_cursor_fetch(&cursor, true, 10).unwrap();
+    assert_eq!(spi::SPI_processed(), 0);
+    let h = spi::SPI_tuptable().expect("an exhausted fetch still leaves an (empty) tuptable");
+    spi::tuptable_with(h, |tt| assert_eq!(tt.vals.len(), 0));
+    spi::SPI_freetuptable(h).unwrap();
+    spi::SPI_cursor_close(cursor).unwrap();
+    assert_eq!(spi::SPI_freeplan(cplan), 0);
     spi::SPI_finish().unwrap();
     commit();
 

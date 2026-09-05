@@ -1,6 +1,8 @@
 use core::cell::RefCell;
+use std::rc::Rc;
 
 use mcx::{Mcx, PgVec};
+use parser_seams::RawParseMode;
 use types_core::{InvalidOid, Oid};
 use types_error::PgResult;
 use types_nodes::nodes_enums::CmdType;
@@ -30,6 +32,8 @@ pub(crate) struct SpiPlanState {
     pub saved: bool,
     pub cursor_options: i32,
     pub argtypes: Vec<Oid>,
+    // C _SPI_plan.parse_mode: how _SPI_error_callback describes the query.
+    pub parse_mode: RawParseMode,
 }
 
 thread_local! {
@@ -84,16 +88,19 @@ pub(crate) fn complete_source(
     let src = plancache::CachedPlanQueryString(psrc);
     let qmcx = plancache::SourceQueryMcx(psrc);
     let raw = plancache::CachedPlanRawParseTreeCopy(qmcx, psrc)?.expect("created with a raw tree");
-    let query_list = analyze_and_rewrite(qmcx, raw, src, argtypes, crate::current_query_env())
-        .map_err(|e| spi_error_transpose(src, e))?;
+    // Errors ride the enclosing SPI level's _SPI_error_callback frame
+    // (_SPI_prepare_plan or, for a one-shot plan, _SPI_execute_plan).
+    let query_list = analyze_and_rewrite(qmcx, raw, src, argtypes, crate::current_query_env())?;
     plancache::CompleteCachedPlan(psrc, query_list, argtypes, cursor_options, false)?;
     plancache::SetCachedPlanReanalyze(psrc, reanalyze_spi_source, stmt_index as i32);
     Ok(())
 }
 
 // C revalidates fixed-param SPI sources via pg_analyze_and_rewrite_fixedparams
-// on the retained raw tree (plancache.c:810-814), under _SPI_error_callback;
-// the transpose is the callback, `arg` (the statement index) is unused.
+// on the retained raw tree (plancache.c:810-814); the _SPI_error_callback
+// frame of the SPI level that called GetCachedPlan (_SPI_execute_plan,
+// SPI_cursor_open_internal) describes an error. `arg` (the statement index)
+// is unused.
 fn reanalyze_spi_source(
     _h: plancache::CachedPlanSourceHandle,
     qmcx: Mcx<'static>,
@@ -104,17 +111,13 @@ fn reanalyze_spi_source(
     _arg: i32,
 ) -> PgResult<PgVec<'static, Query<'static>>> {
     analyze_and_rewrite(qmcx, raw, query_string, param_types, query_env)
-        .map_err(|e| spi_error_transpose(query_string, e))
 }
 
 
-// _SPI_error_callback (spi.c): a parse-phase syntax error position converts
-// to an internal error against the SPI query text; otherwise the query rides
-// the context stack.
-pub(crate) fn spi_error_transpose(
-    query: &str,
-    mut e: Box<types_error::PgError>,
-) -> Box<types_error::PgError> {
+// _SPI_error_callback (spi.c:2960): a syntax error position converts to an
+// internal error against the SPI query text; otherwise the query is a
+// context line, worded by the plan's parse mode.
+pub(crate) fn spi_error_callback(query: &str, mode: RawParseMode, e: &mut types_error::PgError) {
     match e.cursor_position {
         Some(pos) if pos > 0 => {
             e.cursor_position = None;
@@ -122,14 +125,64 @@ pub(crate) fn spi_error_transpose(
             e.internal_query = Some(query.to_owned());
         }
         _ => {
-            let line = format!("SQL statement \"{query}\"");
-            e.context = Some(match e.context.take() {
-                Some(c) => format!("{c}\n{line}"),
-                None => line,
-            });
+            let line = match mode {
+                RawParseMode::RAW_PARSE_PLPGSQL_EXPR => format!("PL/pgSQL expression \"{query}\""),
+                RawParseMode::RAW_PARSE_PLPGSQL_ASSIGN1
+                | RawParseMode::RAW_PARSE_PLPGSQL_ASSIGN2
+                | RawParseMode::RAW_PARSE_PLPGSQL_ASSIGN3 => {
+                    format!("PL/pgSQL assignment \"{query}\"")
+                }
+                _ => format!("SQL statement \"{query}\""),
+            };
+            e.add_context_line(line);
         }
     }
-    e
+}
+
+// One SPI level's error-traceback registration (spi.c: the spierrcontext
+// pushed by _SPI_prepare_plan, _SPI_execute_plan and
+// SPI_cursor_open_internal). `query` is C's spicallbackarg.query: NULL until
+// the level names its plansource, and the callback is silent while NULL.
+// Non-ERROR reports reach the callback through elog's emit hook; an ERROR
+// carries no callback context at emit time (elog returns it to the raiser),
+// so the level transposes it on the Err path instead — once per level, as C
+// runs the callback once per stack frame.
+pub(crate) struct SpiErrorContext {
+    query: Rc<RefCell<Option<String>>>,
+    mode: RawParseMode,
+    callback: u64,
+}
+
+impl SpiErrorContext {
+    pub(crate) fn push(mode: RawParseMode) -> SpiErrorContext {
+        let query: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+        let callback = {
+            let query = Rc::clone(&query);
+            elog::push_emit_context_callback(Box::new(move |e| {
+                if let Some(q) = query.borrow().as_deref() {
+                    spi_error_callback(q, mode, e);
+                }
+            }))
+        };
+        SpiErrorContext { query, mode, callback }
+    }
+
+    pub(crate) fn set_query(&self, query: &str) {
+        *self.query.borrow_mut() = Some(query.to_owned());
+    }
+
+    pub(crate) fn transpose(&self, mut e: Box<types_error::PgError>) -> Box<types_error::PgError> {
+        if let Some(q) = self.query.borrow().as_deref() {
+            spi_error_callback(q, self.mode, &mut e);
+        }
+        e
+    }
+}
+
+impl Drop for SpiErrorContext {
+    fn drop(&mut self) {
+        elog::pop_emit_context_callback(self.callback);
+    }
 }
 
 fn create_sources(
@@ -174,13 +227,17 @@ pub(crate) fn prepare_oneshot_args(
     cursor_options: i32,
     argtypes: &[Oid],
 ) -> PgResult<SpiPlanState> {
+    // _SPI_prepare_oneshot_plan's error traceback frame (spi.c).
+    let errctx = SpiErrorContext::push(RawParseMode::RAW_PARSE_DEFAULT);
+    errctx.set_query(src);
     Ok(SpiPlanState {
         sources: create_sources(src, true, argtypes, cursor_options)
-            .map_err(|e| spi_error_transpose(src, e))?,
+            .map_err(|e| errctx.transpose(e))?,
         oneshot: true,
         saved: false,
         cursor_options,
         argtypes: argtypes.to_vec(),
+        parse_mode: RawParseMode::RAW_PARSE_DEFAULT,
     })
 }
 
@@ -202,13 +259,19 @@ pub fn SPI_prepare_cursor(src: &str, argtypes: &[Oid], cursor_options: i32) -> P
         return Ok(SpiPlanPtr::NULL);
     }
 
+    // _SPI_prepare_plan's error traceback frame (spi.c).
+    let errctx = SpiErrorContext::push(RawParseMode::RAW_PARSE_DEFAULT);
+    errctx.set_query(src);
+    let sources =
+        create_sources(src, false, argtypes, cursor_options).map_err(|e| errctx.transpose(e))?;
+    drop(errctx);
     let state = SpiPlanState {
-        sources: create_sources(src, false, argtypes, cursor_options)
-            .map_err(|e| spi_error_transpose(src, e))?,
+        sources,
         oneshot: false,
         saved: false,
         cursor_options,
         argtypes: argtypes.to_vec(),
+        parse_mode: RawParseMode::RAW_PARSE_DEFAULT,
     };
 
     let ptr = PLANS.with(|p| {
@@ -257,6 +320,10 @@ pub fn SPI_prepare_plpgsql(
         });
     }
 
+    // _SPI_prepare_plan's error traceback frame (spi.c), worded by the
+    // plpgsql parse mode.
+    let errctx = SpiErrorContext::push(parse_mode);
+    errctx.set_query(src);
     let outcome = (|| -> PgResult<Vec<(plancache::CachedPlanSourceHandle, usize)>> {
         let mcx = current_exec_mcx();
         let raw_list = parser_seams::raw_parser::call(mcx, src, parse_mode)?;
@@ -300,7 +367,8 @@ pub fn SPI_prepare_plpgsql(
         }
         Ok(sources)
     })();
-    let sources = outcome?;
+    let sources = outcome.map_err(|e| errctx.transpose(e))?;
+    drop(errctx);
 
     let state = SpiPlanState {
         sources,
@@ -308,6 +376,7 @@ pub fn SPI_prepare_plpgsql(
         saved: false,
         cursor_options,
         argtypes,
+        parse_mode,
     };
 
     let ptr = PLANS.with(|p| {
@@ -354,6 +423,7 @@ pub(crate) fn state_snapshot(ptr: SpiPlanPtr) -> Option<SpiPlanState> {
         saved: p.saved,
         cursor_options: p.cursor_options,
         argtypes: p.argtypes.clone(),
+        parse_mode: p.parse_mode,
     })
 }
 

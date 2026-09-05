@@ -37,6 +37,7 @@ analyze_seams = { path = "../../parser/analyze_seams" }
 parser_small1 = { path = "../../parser/parser_small1" }
 rewrite_handler_seams = { path = "../../rewrite/rewrite_handler_seams" }
 plancache = { path = "../../utils/cache/plancache" }
+nodes_params = { path = "../../nodes/params" }
 pquery = { path = "../../tcop/pquery" }
 portalmem = { path = "../../utils/mmgr/portalmem" }
 snapmgr = { path = "../../utils/time/snapmgr" }
@@ -48,6 +49,7 @@ xact = { path = "../../access/transam/xact" }
 elog = { path = "../../utils/error/elog" }
 
 [dev-dependencies]
+portalcmds = { path = "../../commands/portalcmds" }
 indexcmds_seams = { path = "../../commands/indexcmds_seams" }
 adt_bool = { path = "../../utils/adt/bool" }
 adt_float = { path = "../../utils/adt/float" }

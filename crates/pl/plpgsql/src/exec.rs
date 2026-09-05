@@ -602,7 +602,7 @@ std::thread_local! {
         const { core::cell::RefCell::new(Vec::new()) };
 }
 
-pub struct FrameGuard(u64);
+pub struct FrameGuard(Option<u64>);
 
 impl FrameGuard {
     pub fn push_pl(estate: &Estate<'_>) -> FrameGuard {
@@ -617,34 +617,25 @@ impl FrameGuard {
             }))
         };
         CONTEXT_FRAMES.with(|s| s.borrow_mut().push(CtxFrame::Pl(f)));
-        FrameGuard(cb)
+        FrameGuard(Some(cb))
     }
 
+    // The SPI level's own _SPI_error_callback frame (spi crate
+    // SpiErrorContext, pushed by SPI_prepare*/SPI_execute*/SPI_cursor_open*)
+    // describes reports raised under it; this frame only mirrors it for
+    // GET DIAGNOSTICS PG_CONTEXT (get_error_context_stack).
     fn push_spi(query: &str, mode: parser_seams::RawParseMode) -> FrameGuard {
         let line = spi_context_line(query, mode);
-        let cb = {
-            let line = line.clone();
-            let query = query.to_string();
-            elog::push_emit_context_callback(Box::new(move |e| {
-                // _SPI_error_callback (spi.c): a positioned report becomes an
-                // internal-query cursor; otherwise a context line.
-                if let Some(p) = e.cursor_position.filter(|&p| p > 0) {
-                    e.cursor_position = None;
-                    e.internal_position = Some(p);
-                    e.internal_query = Some(query.clone());
-                    return;
-                }
-                e.add_context_line(line.clone());
-            }))
-        };
         CONTEXT_FRAMES.with(|s| s.borrow_mut().push(CtxFrame::Spi(line)));
-        FrameGuard(cb)
+        FrameGuard(None)
     }
 }
 
 impl Drop for FrameGuard {
     fn drop(&mut self) {
-        elog::pop_emit_context_callback(self.0);
+        if let Some(cb) = self.0 {
+            elog::pop_emit_context_callback(cb);
+        }
         CONTEXT_FRAMES.with(|s| {
             s.borrow_mut().pop();
         });
@@ -1881,7 +1872,7 @@ impl<'a> Estate<'a> {
 
     // C exec_run_select: non-SELECT is 42601. RETURN QUERY is not this helper.
     fn exec_run_select(&mut self, expr: &PlExpr, maxtuples: i64) -> PgResult<i32> {
-        let rc = self.exec_spi_plan(expr, maxtuples)?;
+        let rc = self.exec_spi_plan(expr, maxtuples, false)?;
         if rc != spi::SPI_OK_SELECT {
             let msg = if rc == spi::SPI_OK_SELINTO {
                 "query is SELECT INTO, but it should be plain SELECT"
@@ -1899,7 +1890,15 @@ impl<'a> Estate<'a> {
         Ok(rc)
     }
 
-    fn exec_spi_plan(&mut self, expr: &PlExpr, maxtuples: i64) -> PgResult<i32> {
+    // C: SPI_execute_plan_extended with options.params = setup_param_list
+    // (hooked) and options.must_return_tuples per the statement (RETURN
+    // QUERY passes true, pl_exec.c exec_stmt_return_query).
+    fn exec_spi_plan(
+        &mut self,
+        expr: &PlExpr,
+        maxtuples: i64,
+        must_return_tuples: bool,
+    ) -> PgResult<i32> {
         let (plan, paramnos, argtypes) = EXPR_PLANS.with(|t| {
             let t = t.borrow();
             let e = t.get(&expr.expr_id).expect("plan ensured");
@@ -1907,8 +1906,17 @@ impl<'a> Estate<'a> {
         });
         let (values, nulls) = self.setup_params_under_spi(expr, &paramnos, &argtypes)?;
         let _frame = FrameGuard::push_spi(&expr.query, expr.parse_mode);
-        let rc = spi::SPI_execute_plan_with_paramlist(plan, &values, &nulls, self.readonly_func, maxtuples)
-            .map_err(|e| spi_ctx_err(e, &expr.query, expr.parse_mode))?;
+        let rc = spi::SPI_execute_plan_extended(
+            plan,
+            &values,
+            &nulls,
+            true,
+            self.readonly_func,
+            false,
+            must_return_tuples,
+            maxtuples,
+        )
+        .map_err(|e| spi_ctx_err(e, &expr.query, expr.parse_mode))?;
         self.eval_processed = spi::SPI_processed();
         if let Some(t) = self.eval_tuptable.take() {
             let _ = spi::SPI_freetuptable(t);
@@ -4171,6 +4179,7 @@ impl<'a> Estate<'a> {
             true,
             self.readonly_func,
             true,
+            false,
             0,
         )
         .map_err(|e| spi_ctx_err(e, &expr.query, expr.parse_mode))?;
@@ -4467,8 +4476,15 @@ impl<'a> Estate<'a> {
 
         let _frame =
             FrameGuard::push_spi(&querystr, parser_seams::RawParseMode::RAW_PARSE_DEFAULT);
-        let rc = spi::SPI_execute_extended(&querystr, &ptypes, &pvalues, &pnulls, self.readonly_func)
-            .map_err(|e| spi_ctx_err(e, &querystr, parser_seams::RawParseMode::RAW_PARSE_DEFAULT))?;
+        let rc = spi::SPI_execute_extended(
+            &querystr,
+            &ptypes,
+            &pvalues,
+            &pnulls,
+            self.readonly_func,
+            false,
+        )
+        .map_err(|e| spi_ctx_err(e, &querystr, parser_seams::RawParseMode::RAW_PARSE_DEFAULT))?;
 
         match rc {
             spi::SPI_OK_SELECT
@@ -4755,7 +4771,7 @@ impl<'a> Estate<'a> {
             ctx_query = query.query.clone();
             ctx_mode = query.parse_mode;
             self.ensure_plan(query, CURSOR_OPT_PARALLEL_OK)?;
-            self.exec_spi_plan(query, 0)?
+            self.exec_spi_plan(query, 0, true)?
         } else {
             let dynquery = dynquery.expect("RETURN QUERY has a query");
             let (qv, isnull, restype, _m) = self.exec_eval_expr(dynquery)?;
@@ -4772,10 +4788,18 @@ impl<'a> Estate<'a> {
             let (ptypes, pvalues, pnulls) = self.exec_eval_using_params(params)?;
             let _frame =
                 FrameGuard::push_spi(&querystr, parser_seams::RawParseMode::RAW_PARSE_DEFAULT);
-            spi::SPI_execute_extended(&querystr, &ptypes, &pvalues, &pnulls, self.readonly_func)
-                .map_err(|e| {
-                    spi_ctx_err(e, &querystr, parser_seams::RawParseMode::RAW_PARSE_DEFAULT)
-                })?
+            // must_return_tuples = true (pl_exec.c:3626): the SPI level
+            // describes its own errors — "empty query does not return
+            // tuples" is raised before its callback names a query, so it
+            // carries no SQL-statement line (spi.c:2494 vs 2509).
+            spi::SPI_execute_extended(
+                &querystr,
+                &ptypes,
+                &pvalues,
+                &pnulls,
+                self.readonly_func,
+                true,
+            )?
         };
 
         // must_return_tuples contract (spi.c:2570).
