@@ -4,7 +4,10 @@
 use ::datum::Datum;
 use ::ts_locale::LexDescr;
 use ::types_core::catalog::{INT4OID, RECORDOID, TEXTOID};
-use ::types_error::PgResult;
+use ::types_error::{
+    PgError, PgResult, SqlState, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_SYNTAX_ERROR,
+    ERRCODE_UNDEFINED_OBJECT, ERRCODE_UNDEFINED_SCHEMA,
+};
 use ::types_fmgr::{
     byref_result, varlena_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo,
     PGFunction,
@@ -257,11 +260,88 @@ pub fn fc_ts_token_type_byname(
 fn parser_oid_from_text_arg(fcinfo: &Fcinfo, i: usize) -> PgResult<::types_core::Oid> {
     // SAFETY: strict fn; arg i is a text varlena.
     let v = unsafe { fcinfo.arg_varlena_packed(i) }?;
-    let rawname = core::str::from_utf8(v.data())
-        .map_err(|_| Box::new(::types_error::PgError::error("invalid UTF-8 in parser name")))?;
-    let names = ::varlena::textToQualifiedNameList(fcinfo.result_mcx(), rawname)?;
-    let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
-    namespace_seams::get_ts_parser_oid::call(&name_refs, false)
+    // text_to_cstring (varlena.c) copies the bytes without validating the
+    // encoding: in a SQL_ASCII database the name may not be UTF-8.
+    let names = ::varlena::text_to_qualified_name_list_bytes(fcinfo.result_mcx(), v.data())?;
+    let name_refs: Result<Vec<&str>, _> =
+        names.iter().map(|n| core::str::from_utf8(n)).collect();
+    match name_refs {
+        Ok(name_refs) => namespace_seams::get_ts_parser_oid::call(&name_refs, false),
+        Err(_) => Err(parser_lookup_miss_raw(&names)?),
+    }
+}
+
+// ereport whose message quotes raw (possibly non-UTF-8) name bytes.
+fn raw_err(sqlstate: SqlState, prefix: &str, body: &[u8], suffix: &str) -> Box<PgError> {
+    let mut m = Vec::with_capacity(prefix.len() + body.len() + suffix.len());
+    m.extend_from_slice(prefix.as_bytes());
+    m.extend_from_slice(body);
+    m.extend_from_slice(suffix.as_bytes());
+    Box::new(PgError::error_raw_message(m).with_sqlstate(sqlstate))
+}
+
+// get_ts_parser_oid (namespace.c) for a qualified name carrying non-UTF-8
+// bytes. Every catalog name is valid UTF-8 (query text is UTF-8 or ASCII —
+// the ratified server-encoding carve), so such a name can only miss; this
+// walks C's arms in C's order so the SQLSTATE and the message bytes match:
+// DeconstructQualifiedName (cross-database / too many dotted names),
+// LookupExplicitNamespace (schema missing or unusable), then the
+// `does not exist` miss with NameListToString's raw bytes.
+pub(crate) fn parser_lookup_miss_raw(names: &[Vec<u8>]) -> PgResult<Box<PgError>> {
+    let name_list_to_string = || names.join(&b'.');
+    let schemaname = match names {
+        [_parser_name] => None,
+        [schemaname, _parser_name] => Some(schemaname),
+        [catalogname, schemaname, _parser_name] => {
+            let dbname = match core::str::from_utf8(catalogname) {
+                Ok(c) => ::dbcommands_seams::get_database_name::call(
+                    ::init_small::globals::MyDatabaseId(),
+                )?
+                .filter(|d| d == c),
+                Err(_) => None,
+            };
+            if dbname.is_none() {
+                return Ok(raw_err(
+                    ERRCODE_FEATURE_NOT_SUPPORTED,
+                    "cross-database references are not implemented: ",
+                    &name_list_to_string(),
+                    "",
+                ));
+            }
+            Some(schemaname)
+        }
+        _ => {
+            return Ok(raw_err(
+                ERRCODE_SYNTAX_ERROR,
+                "improper qualified name (too many dotted names): ",
+                &name_list_to_string(),
+                "",
+            ))
+        }
+    };
+    if let Some(schemaname) = schemaname {
+        match core::str::from_utf8(schemaname) {
+            // A UTF-8 schema part may exist (or be unusable): C's lookup errors
+            // come first; on success the parser part (non-UTF-8) misses below.
+            Ok(schema) => {
+                namespace_seams::lookup_explicit_namespace::call(schema, false)?;
+            }
+            Err(_) => {
+                return Ok(raw_err(
+                    ERRCODE_UNDEFINED_SCHEMA,
+                    "schema \"",
+                    schemaname,
+                    "\" does not exist",
+                ))
+            }
+        }
+    }
+    Ok(raw_err(
+        ERRCODE_UNDEFINED_OBJECT,
+        "text search parser \"",
+        &name_list_to_string(),
+        "\" does not exist",
+    ))
 }
 
 pub fn fc_ts_parse_byid(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {

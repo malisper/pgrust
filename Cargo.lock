@@ -21444,9 +21444,11 @@ version = "0.1.0"
 dependencies = [
  "adt_tsvector_core",
  "datum",
+ "dbcommands_seams",
  "fmgr_seams",
  "funcapi",
  "heaptuple",
+ "init_small",
  "libc",
  "mbutils",
  "mcx",

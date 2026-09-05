@@ -916,16 +916,37 @@ pub fn init_seams() {
 
 // SplitIdentifierString (varlena.c). Owned std strings: cold GUC-list parsing,
 // C builds a palloc'd List the caller frees. None is C's `return false`.
+// Lossy rendering of the byte-exact split below: every caller feeds query
+// text or a GUC string (valid UTF-8 already), so nothing is lost here.
 pub fn split_identifier_string(
     mcx: Mcx<'_>,
     rawstring: &str,
     separator: u8,
     encoding: wchar::pg_enc,
 ) -> PgResult<Option<Vec<String>>> {
+    Ok(split_identifier_string_bytes(mcx, rawstring.as_bytes(), separator, encoding)?.map(
+        |names| {
+            names
+                .into_iter()
+                .map(|n| String::from_utf8_lossy(&n).into_owned())
+                .collect()
+        },
+    ))
+}
+
+// SplitIdentifierString over the raw bytes C sees: a text datum in a
+// SQL_ASCII database need not be UTF-8 (`chr(171)`), and C's downcase /
+// truncate / catalog-miss messages carry those bytes verbatim.
+pub fn split_identifier_string_bytes(
+    mcx: Mcx<'_>,
+    rawstring: &[u8],
+    separator: u8,
+    encoding: wchar::pg_enc,
+) -> PgResult<Option<Vec<Vec<u8>>>> {
     use parser_small1::{downcase_truncate_identifier, scanner_isspace, truncate_identifier};
 
-    let s = rawstring.as_bytes();
-    let mut namelist: Vec<String> = Vec::new();
+    let s = rawstring;
+    let mut namelist: Vec<Vec<u8>> = Vec::new();
     let mut p = 0usize;
 
     while p < s.len() && scanner_isspace(s[p]) {
@@ -992,7 +1013,7 @@ pub fn split_identifier_string(
         };
 
         truncate_identifier(&mut curname, false, encoding)?;
-        namelist.push(String::from_utf8_lossy(&curname).into_owned());
+        namelist.push(curname.to_vec());
 
         if done {
             return Ok(Some(namelist));
@@ -1006,11 +1027,22 @@ pub fn split_identifier_string(
 pub fn textToQualifiedNameList(mcx: Mcx<'_>, rawname: &str) -> PgResult<Vec<String>> {
     match split_identifier_string(mcx, rawname, b'.', mbutils::GetDatabaseEncoding())? {
         Some(names) if !names.is_empty() => Ok(names),
-        _ => Err(Box::new(
-            PgError::error("invalid name syntax")
-                .with_sqlstate(types_error::ERRCODE_INVALID_NAME),
-        )),
+        _ => Err(invalid_name_syntax()),
     }
+}
+
+// textToQualifiedNameList over the detoasted text bytes (text_to_cstring in
+// C never validates the encoding, so a SQL_ASCII text carrying non-UTF-8
+// bytes splits like any other).
+pub fn text_to_qualified_name_list_bytes(mcx: Mcx<'_>, rawname: &[u8]) -> PgResult<Vec<Vec<u8>>> {
+    match split_identifier_string_bytes(mcx, rawname, b'.', mbutils::GetDatabaseEncoding())? {
+        Some(names) if !names.is_empty() => Ok(names),
+        _ => Err(invalid_name_syntax()),
+    }
+}
+
+fn invalid_name_syntax() -> Box<PgError> {
+    Box::new(PgError::error("invalid name syntax").with_sqlstate(types_error::ERRCODE_INVALID_NAME))
 }
 
 // SplitGUCList (varlena.c): like SplitIdentifierString but never downcases

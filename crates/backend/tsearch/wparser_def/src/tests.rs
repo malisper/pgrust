@@ -337,3 +337,44 @@ fn stoplist_roundtrip() {
     assert!(!ts_locale::searchstoplist(&sl, b"trailing"));
     assert!(!ts_locale::searchstoplist(&sl, b"dog"));
 }
+
+// get_ts_parser_oid (namespace.c) arms for a name carrying non-UTF-8 bytes
+// (SQL_ASCII database): the SQLSTATE and the raw message bytes of C's miss
+// (audit-18.6 b179). The seam-free shapes only; the schema-exists shape is
+// the e2e's (scripts/tsearch-wparser-sqlascii-e2e.sh).
+#[test]
+fn parser_lookup_miss_raw_matches_c_arms() {
+    use crate::builtins::parser_lookup_miss_raw;
+    use types_error::{
+        ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_OBJECT,
+        ERRCODE_UNDEFINED_SCHEMA,
+    };
+    let e = parser_lookup_miss_raw(&[b"\xab".to_vec()]).unwrap();
+    assert_eq!(e.sqlstate(), ERRCODE_UNDEFINED_OBJECT);
+    assert_eq!(
+        e.message_raw.as_deref(),
+        Some(&b"text search parser \"\xab\" does not exist"[..])
+    );
+    let e = parser_lookup_miss_raw(&[b"\xab".to_vec(), b"default".to_vec()]).unwrap();
+    assert_eq!(e.sqlstate(), ERRCODE_UNDEFINED_SCHEMA);
+    assert_eq!(e.message_raw.as_deref(), Some(&b"schema \"\xab\" does not exist"[..]));
+    let e = parser_lookup_miss_raw(&[b"\xab".to_vec(), b"pg_catalog".to_vec(), b"default".to_vec()])
+        .unwrap();
+    assert_eq!(e.sqlstate(), ERRCODE_FEATURE_NOT_SUPPORTED);
+    assert_eq!(
+        e.message_raw.as_deref(),
+        Some(&b"cross-database references are not implemented: \xab.pg_catalog.default"[..])
+    );
+    let e = parser_lookup_miss_raw(&[
+        b"a".to_vec(),
+        b"b".to_vec(),
+        b"c".to_vec(),
+        b"\xab".to_vec(),
+    ])
+    .unwrap();
+    assert_eq!(e.sqlstate(), ERRCODE_SYNTAX_ERROR);
+    assert_eq!(
+        e.message_raw.as_deref(),
+        Some(&b"improper qualified name (too many dotted names): a.b.c.\xab"[..])
+    );
+}

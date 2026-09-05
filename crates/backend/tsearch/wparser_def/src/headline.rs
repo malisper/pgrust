@@ -9,7 +9,9 @@ use ::adt_tsvector_core::query::{Operand, TsQueryRef};
 use ::mcx::Mcx;
 use ::ts_cache::DefListItem;
 use ::ts_parse::headline::{HeadlineParsedText, HeadlineWordEntry};
-use ::types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
+use ::types_error::{
+    PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_INVALID_TEXT_REPRESENTATION,
+};
 
 use crate::parser::{
     ASCIIHWORD, DECIMAL_T, HWORD, NUMHWORD, PROTOCOL, SCIENTIFIC, SIGNEDINT, SPACE, TAG_T,
@@ -534,8 +536,22 @@ fn opt_err(msg: String) -> Box<PgError> {
     Box::new(PgError::error(msg).with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE))
 }
 
-fn headline_int_opt(s: &str) -> PgResult<i32> {
-    numutils::pg_strtoint32(s)
+// pg_strtoint32 (numutils.c) over the option value's raw bytes: it accepts
+// only ASCII (whitespace, sign, digits, '_'), so a value that is not UTF-8
+// (SQL_ASCII database, `chr(171)`) is the syntax error, whose message
+// quotes the bytes verbatim.
+fn headline_int_opt(s: &[u8]) -> PgResult<i32> {
+    match core::str::from_utf8(s) {
+        Ok(s) => numutils::pg_strtoint32(s),
+        Err(_) => {
+            let mut m = b"invalid input syntax for type integer: \"".to_vec();
+            m.extend_from_slice(s);
+            m.push(b'"');
+            Err(Box::new(
+                PgError::error_raw_message(m).with_sqlstate(ERRCODE_INVALID_TEXT_REPRESENTATION),
+            ))
+        }
+    }
 }
 
 // prsd_headline (wparser_def.c) body over deserialize_deflist items.
@@ -551,36 +567,40 @@ pub fn prsd_headline_impl<'mcx>(
     let mut max_fragments = 0i32;
     let mut highlightall = false;
 
-    let int_val = |item: &DefListItem<'_>| -> PgResult<i32> {
-        headline_int_opt(core::str::from_utf8(&item.value).unwrap_or(""))
-    };
-
+    // C reads defname / defGetString as raw C strings: a SQL_ASCII database
+    // hands non-UTF-8 option bytes through, pstrdup'd into the selectors and
+    // quoted verbatim in the error messages.
     for item in options {
-        let name = core::str::from_utf8(&item.name).unwrap_or("");
-        let val = core::str::from_utf8(&item.value).unwrap_or("");
-        if name.eq_ignore_ascii_case("MaxWords") {
-            max_words = int_val(item)?;
-        } else if name.eq_ignore_ascii_case("MinWords") {
-            min_words = int_val(item)?;
-        } else if name.eq_ignore_ascii_case("ShortWord") {
-            shortword = int_val(item)?;
-        } else if name.eq_ignore_ascii_case("MaxFragments") {
-            max_fragments = int_val(item)?;
-        } else if name.eq_ignore_ascii_case("StartSel") {
-            prs.startsel = Some(bytes_in(mcx, val.as_bytes())?);
-        } else if name.eq_ignore_ascii_case("StopSel") {
-            prs.stopsel = Some(bytes_in(mcx, val.as_bytes())?);
-        } else if name.eq_ignore_ascii_case("FragmentDelimiter") {
-            prs.fragdelim = Some(bytes_in(mcx, val.as_bytes())?);
-        } else if name.eq_ignore_ascii_case("HighlightAll") {
-            highlightall = val.eq_ignore_ascii_case("1")
-                || val.eq_ignore_ascii_case("on")
-                || val.eq_ignore_ascii_case("true")
-                || val.eq_ignore_ascii_case("t")
-                || val.eq_ignore_ascii_case("y")
-                || val.eq_ignore_ascii_case("yes");
+        let name: &[u8] = &item.name;
+        let val: &[u8] = &item.value;
+        if name.eq_ignore_ascii_case(b"MaxWords") {
+            max_words = headline_int_opt(val)?;
+        } else if name.eq_ignore_ascii_case(b"MinWords") {
+            min_words = headline_int_opt(val)?;
+        } else if name.eq_ignore_ascii_case(b"ShortWord") {
+            shortword = headline_int_opt(val)?;
+        } else if name.eq_ignore_ascii_case(b"MaxFragments") {
+            max_fragments = headline_int_opt(val)?;
+        } else if name.eq_ignore_ascii_case(b"StartSel") {
+            prs.startsel = Some(bytes_in(mcx, val)?);
+        } else if name.eq_ignore_ascii_case(b"StopSel") {
+            prs.stopsel = Some(bytes_in(mcx, val)?);
+        } else if name.eq_ignore_ascii_case(b"FragmentDelimiter") {
+            prs.fragdelim = Some(bytes_in(mcx, val)?);
+        } else if name.eq_ignore_ascii_case(b"HighlightAll") {
+            highlightall = val.eq_ignore_ascii_case(b"1")
+                || val.eq_ignore_ascii_case(b"on")
+                || val.eq_ignore_ascii_case(b"true")
+                || val.eq_ignore_ascii_case(b"t")
+                || val.eq_ignore_ascii_case(b"y")
+                || val.eq_ignore_ascii_case(b"yes");
         } else {
-            return Err(opt_err(format!("unrecognized headline parameter: \"{name}\"")));
+            let mut m = b"unrecognized headline parameter: \"".to_vec();
+            m.extend_from_slice(name);
+            m.push(b'"');
+            return Err(Box::new(
+                PgError::error_raw_message(m).with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE),
+            ));
         }
     }
 
@@ -682,18 +702,30 @@ mod tests {
 
     #[test]
     fn headline_int_opt_overflow_is_22003() {
-        let e = headline_int_opt("9999999999").unwrap_err();
+        let e = headline_int_opt(b"9999999999").unwrap_err();
         assert_eq!(e.sqlstate(), ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);
     }
 
     #[test]
     fn headline_int_opt_hex_matches_c() {
-        assert_eq!(headline_int_opt("0x20").unwrap(), 32);
+        assert_eq!(headline_int_opt(b"0x20").unwrap(), 32);
     }
 
     #[test]
     fn headline_int_opt_bad_syntax_is_22p02() {
-        let e = headline_int_opt("nope").unwrap_err();
+        let e = headline_int_opt(b"nope").unwrap_err();
         assert_eq!(e.sqlstate(), ERRCODE_INVALID_TEXT_REPRESENTATION);
+    }
+
+    // pg_strtoint32 (numutils.c) quotes the value bytes verbatim; a SQL_ASCII
+    // value need not be UTF-8 (audit-18.6 b179).
+    #[test]
+    fn headline_int_opt_non_utf8_value_is_22p02_with_raw_bytes() {
+        let e = headline_int_opt(b"1\xab").unwrap_err();
+        assert_eq!(e.sqlstate(), ERRCODE_INVALID_TEXT_REPRESENTATION);
+        assert_eq!(
+            e.message_raw.as_deref(),
+            Some(&b"invalid input syntax for type integer: \"1\xab\""[..])
+        );
     }
 }
