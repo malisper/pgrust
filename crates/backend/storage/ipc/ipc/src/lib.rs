@@ -83,7 +83,9 @@ pub fn reset_exit_state_for_retained_park() {
 pub fn proc_exit(code: i32, my_pid: i32) -> ! {
     // C's `MyProcPid != getpid()` guard, thread-model form.
     if my_pid != init_small::globals::MyProcPid() {
-        panic!("proc_exit() called in child process");
+        // elog(PANIC, ...) (ipc.c:109): logged, then the crash unwind.
+        let _ = elog::elog(types_error::PANIC, "proc_exit() called in child process");
+        unreachable!("PANIC returned");
     }
 
     commit_to_exit();
@@ -101,9 +103,15 @@ pub fn proc_exit(code: i32, my_pid: i32) -> ! {
         EXIT_CALLBACKS_DEFERRED.with(|c| c.set(true));
     } else {
         drain_exit_callbacks(code);
+        log_exit(code);
     }
 
     std::panic::resume_unwind(Box::new(ProcExitThread { code }));
+}
+
+// elog(DEBUG3, "exit(%d)", code) (ipc.c:155): the last line before exit().
+fn log_exit(code: i32) {
+    let _ = elog::elog(types_error::DEBUG3, format!("exit({code})"));
 }
 
 /// True while this thread's proc_exit callback drain is still owed (set by
@@ -136,7 +144,10 @@ pub fn run_deferred_exit_callbacks(mut code: i32) -> i32 {
             drain_exit_callbacks(code)
         }));
         match outcome {
-            Ok(()) => return code,
+            Ok(()) => {
+                log_exit(code);
+                return code;
+            }
             Err(payload) => match payload.downcast_ref::<ProcExitThread>() {
                 Some(p) => code = p.code,
                 None => std::panic::resume_unwind(payload),
@@ -189,6 +200,15 @@ fn commit_to_exit() {
 fn drain_exit_callbacks(code: i32) {
     shmem_exit_internal(code);
 
+    // ipc.c:201
+    let _ = elog::elog(
+        types_error::DEBUG3,
+        format!(
+            "proc_exit({code}): {} callbacks to make",
+            ON_PROC_EXIT_INDEX.with(Cell::get)
+        ),
+    );
+
     while ON_PROC_EXIT_INDEX.with(Cell::get) > 0 {
         let i = ON_PROC_EXIT_INDEX.with(Cell::get) - 1;
         ON_PROC_EXIT_INDEX.with(|c| c.set(i));
@@ -237,6 +257,15 @@ fn shmem_exit_internal(code: i32) {
 
     lwlock::LWLockReleaseAll().expect("LWLockReleaseAll failed in shmem_exit");
 
+    // ipc.c:247
+    let _ = elog::elog(
+        types_error::DEBUG3,
+        format!(
+            "shmem_exit({code}): {} before_shmem_exit callbacks to make",
+            BEFORE_SHMEM_EXIT_INDEX.with(Cell::get)
+        ),
+    );
+
     while BEFORE_SHMEM_EXIT_INDEX.with(Cell::get) > 0 {
         let i = BEFORE_SHMEM_EXIT_INDEX.with(Cell::get) - 1;
         BEFORE_SHMEM_EXIT_INDEX.with(|c| c.set(i));
@@ -253,6 +282,15 @@ fn shmem_exit_internal(code: i32) {
     if let Err(e) = dsm_core::dsm::dsm_backend_shutdown() {
         rethrow_callback_error(*e);
     }
+
+    // ipc.c:280
+    let _ = elog::elog(
+        types_error::DEBUG3,
+        format!(
+            "shmem_exit({code}): {} on_shmem_exit callbacks to make",
+            ON_SHMEM_EXIT_INDEX.with(Cell::get)
+        ),
+    );
 
     while ON_SHMEM_EXIT_INDEX.with(Cell::get) > 0 {
         let i = ON_SHMEM_EXIT_INDEX.with(Cell::get) - 1;

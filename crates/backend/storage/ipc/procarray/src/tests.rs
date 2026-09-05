@@ -1364,3 +1364,38 @@ fn group_clear_xid_follower_reports_procarray_group_update_wait() {
     lp.procArrayGroupMember.store(false, Relaxed);
     other_proc_end(leader, 1300);
 }
+
+// ---------------------------------------------------------------------------
+// audit-18.6 batch b118.
+// ---------------------------------------------------------------------------
+
+static B118_LOG: Mutex<Vec<(i32, String)>> = Mutex::new(Vec::new());
+
+fn b118_capture(err: &types_error::PgError, _output_to_server: &mut bool) {
+    B118_LOG.lock().unwrap().push((err.level.0, err.message.clone()));
+}
+
+// procarray.c:3957: ProcArraySetReplicationSlotXmin logs DEBUG1
+// "xmin required by slots: data %u, catalog %u" after installing the xmins.
+#[test]
+fn set_replication_slot_xmin_logs_debug1_like_c() {
+    let _g = test_lock();
+    setup();
+    let prev = elog::set_emit_log_hook(Some(b118_capture));
+    elog::config::set_log_min_messages(types_error::DEBUG1);
+    B118_LOG.lock().unwrap().clear();
+    ProcArraySetReplicationSlotXmin(700, 690, false).unwrap();
+    elog::config::set_log_min_messages(types_error::WARNING);
+    elog::set_emit_log_hook(prev);
+    assert_eq!(ProcArrayGetReplicationSlotXmin().unwrap(), (700, 690));
+    // Leave the horizons as the other tests expect them.
+    ProcArraySetReplicationSlotXmin(InvalidTransactionId, InvalidTransactionId, false).unwrap();
+    let log = std::mem::take(&mut *B118_LOG.lock().unwrap());
+    assert!(
+        log.contains(&(
+            types_error::DEBUG1.0,
+            "xmin required by slots: data 700, catalog 690".to_string()
+        )),
+        "captured log: {log:?}"
+    );
+}

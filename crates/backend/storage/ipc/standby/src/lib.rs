@@ -18,7 +18,7 @@ pub use recovery::{
 
 use elog::elog;
 use types_core::{Oid, XLogRecPtr, XACT_FLAGS_ACQUIREDACCESSEXCLUSIVELOCK};
-use types_error::{PgError, PgResult, DEBUG2, ERRCODE_DATA_CORRUPTED, ERROR};
+use types_error::{PgError, PgResult, DEBUG2, ERRCODE_DATA_CORRUPTED, ERROR, PANIC};
 use types_storage::sinval::{SharedInvalidationMessage, SHARED_INVALIDATION_MESSAGE_SIZE};
 use types_storage::storage::{xl_standby_lock, SUBXIDS_IN_ARRAY, SUBXIDS_MISSING};
 
@@ -335,7 +335,13 @@ pub fn standby_redo(record: &mut xlogreader_seams::XLogReaderState) -> PgResult<
                 latestCompletedXid: latest_completed_xid,
                 xids,
             };
-            procarray::ProcArrayApplyRecoveryInfo(&running)
+            procarray::ProcArrayApplyRecoveryInfo(&running)?;
+
+            // The startup process has no other stats-report schedule;
+            // XLOG_RUNNING_XACTS comes at a regular cadence, so report here
+            // (standby.c:1206).
+            pgstat_seams::pgstat_report_stat::call(true);
+            Ok(())
         }
         XLOG_INVALIDATIONS => {
             require_len(data, MIN_SIZE_OF_INVALIDATIONS, "xl_invalidations")?;
@@ -371,7 +377,11 @@ pub fn standby_redo(record: &mut xlogreader_seams::XLogReaderState) -> PgResult<
                 tsId,
             )
         }
-        _ => panic!("standby_redo: unknown op code {info}"),
+        _ => {
+            // elog(PANIC, ...) (standby.c:1219): logged, then the crash unwind.
+            elog(PANIC, format!("standby_redo: unknown op code {info}"))?;
+            unreachable!("PANIC returned")
+        }
     }
 }
 

@@ -474,6 +474,12 @@ pub fn ProcArraySetReplicationSlotXmin(
     if !already_locked {
         LWLockRelease(ProcArrayLock())?;
     }
+
+    // procarray.c:3957
+    elog::elog(
+        types_error::DEBUG1,
+        format!("xmin required by slots: data {xmin}, catalog {catalog_xmin}"),
+    )?;
     Ok(())
 }
 

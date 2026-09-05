@@ -17,6 +17,7 @@ inval = { path = "../../../utils/cache/inval" }
 lmgr_proc = { path = "../../lmgr/lmgr_proc" }
 lock = { path = "../../lmgr/lock" }
 lwlock = { path = "../../lmgr/lwlock" }
+pgstat_seams = { path = "../../../utils/activity/pgstat_seams" }
 mcx = { path = "../../../../_support/mcx" }
 postgres_seams = { path = "../../../tcop/postgres_seams" }
 procarray = { path = "../procarray" }
@@ -40,6 +41,7 @@ xlogrecovery_seams = { path = "../../../access/transam/xlogrecovery_seams" }
 xlogutils = { path = "../../../access/transam/xlogutils" }
 
 [dev-dependencies]
+pg_sema_seams = { path = "../../../port/pg_sema_seams" }
 aio_seams = { path = "../../aio/aio_seams" }
 origin_seams = { path = "../../../replication/origin_seams" }
 controldata_utils = { path = "../../../../common/controldata_utils" }

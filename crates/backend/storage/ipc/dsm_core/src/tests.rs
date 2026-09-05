@@ -14,6 +14,12 @@ static WAIT_EVENTS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 static REGISTERED_EXITS: AtomicUsize = AtomicUsize::new(0);
 static EXIT_CALLBACKS: Mutex<Vec<(fn(i32, usize), usize)>> = Mutex::new(Vec::new());
 
+static STARTUP_LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn startup_capture(err: &types_error::PgError, _output_to_server: &mut bool) {
+    STARTUP_LOG.lock().unwrap().push(err.message.clone());
+}
+
 fn bringup() -> MutexGuard<'static, ()> {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
@@ -56,7 +62,12 @@ fn bringup() -> MutexGuard<'static, ()> {
             device: 0,
             inode: 0,
         }));
+        // Capture the startup DEBUG2 lines (control-segment size witness).
+        let prev = elog::set_emit_log_hook(Some(startup_capture));
+        elog::config::set_log_min_messages(types_error::DEBUG2);
         dsm_postmaster_startup(shim).unwrap();
+        elog::config::set_log_min_messages(types_error::WARNING);
+        elog::set_emit_log_hook(prev);
         assert_eq!(REGISTERED_EXITS.load(Ordering::Relaxed), 1);
         assert_ne!(shim.dsm_control, 0);
         assert_eq!(shim.dsm_control & 1, 0);
@@ -402,4 +413,47 @@ fn create_reports_dsm_allocate_wait_event() {
         "segment allocation must report DsmAllocate"
     );
     dsm_detach(seg.into_id()).unwrap();
+}
+
+// dsm.c:79 dsm_control_item carries impl_private_pm_handle on every platform
+// (40 bytes per item on 64-bit), so the control segment for maxitems =
+// 64 + 5 * MaxBackends (MaxBackends = 1 here, 69 items) is 16 + 40 * 69 =
+// 2776 bytes in dsm.c:221's DEBUG2 line.
+#[test]
+fn control_segment_size_matches_c_item_layout() {
+    let _g = bringup();
+    let log = STARTUP_LOG.lock().unwrap().clone();
+    let line = log
+        .iter()
+        .find(|l| l.starts_with("created dynamic shared memory control segment "))
+        .unwrap_or_else(|| panic!("no DEBUG2 control-segment line captured: {log:?}"));
+    assert!(line.ends_with(" (2776 bytes)"), "{line}");
+}
+
+// dsm.c:320 dsm_cleanup_for_mmap: every "mmap.*" entry is unlinked (DEBUG2
+// 'removing file "<dir>/<name>"'), other entries stay; a directory that
+// cannot be opened is errcode_for_file_access "could not open directory".
+#[test]
+fn mmap_cleanup_unlinks_only_mmap_files() {
+    let _g = bringup();
+    let dir = std::env::temp_dir().join(format!("pgrust_dsm_mmap_cleanup_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("mmap.123"), b"leftover").unwrap();
+    std::fs::write(dir.join("mmap.7"), b"leftover").unwrap();
+    std::fs::write(dir.join("other.txt"), b"junk").unwrap();
+    let dirname = dir.to_str().unwrap().to_string();
+    // fd's AllocateDir records the allocating subtransaction.
+    xact_seams::get_current_sub_transaction_id::set(|| 1);
+    cleanup_mmap_dir(&dirname).unwrap();
+    assert!(!dir.join("mmap.123").exists());
+    assert!(!dir.join("mmap.7").exists());
+    assert!(dir.join("other.txt").exists());
+    std::fs::remove_dir_all(&dir).unwrap();
+    let err = cleanup_mmap_dir(&dirname).unwrap_err();
+    assert_eq!(
+        err.message,
+        format!("could not open directory \"{dirname}\": No such file or directory")
+    );
+    assert_eq!(err.sqlstate, types_error::ERRCODE_UNDEFINED_FILE);
 }

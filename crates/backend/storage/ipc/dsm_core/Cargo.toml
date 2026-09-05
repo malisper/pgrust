@@ -15,6 +15,7 @@ types_guc = { path = "../../../../_support/types/types_guc" }
 types_storage = { path = "../../../../_support/types/types_storage" }
 mcx = { path = "../../../../_support/mcx" }
 elog = { path = "../../../utils/error/elog" }
+fd = { path = "../../file/fd" }
 guc_tables = { path = "../../../utils/misc/guc_tables" }
 guc_seams = { path = "../../../utils/misc/guc_seams" }
 init_small = { path = "../../../utils/init/init_small" }
@@ -26,3 +27,4 @@ libc = "0.2"
 
 [dev-dependencies]
 shmem_seams = { path = "../shmem_seams" }
+xact_seams = { path = "../../../access/transam/xact_seams" }

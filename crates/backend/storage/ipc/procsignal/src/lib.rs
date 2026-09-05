@@ -1167,17 +1167,10 @@ pub fn SendCancelRequest(backend_pid: i32, cancel_key: &[u8]) {
                     ))
                     .finish(loc("SendCancelRequest")),
             );
-            // C: kill(-backendPID, SIGINT); one thread per backend and no
-            // parallel workers yet, so the leader is the whole group.
-            if SendThreadSignal(backend_pid, SIGINT) < 0 {
-                log_never_raises(
-                    ereport(LOG)
-                        .errmsg(format!(
-                            "could not send signal to process {backend_pid}: No such process"
-                        ))
-                        .finish(loc("SendCancelRequest")),
-                );
-            }
+            // C: kill(-backendPID, SIGINT) with the result ignored
+            // (procsignal.c:791); one thread per backend and no parallel
+            // workers yet, so the leader is the whole group.
+            SendThreadSignal(backend_pid, SIGINT);
         } else {
             log_never_raises(
                 ereport(LOG)

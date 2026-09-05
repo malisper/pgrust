@@ -574,3 +574,38 @@ fn init_publishes_pid_before_adopting_barrier_generation() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// audit-18.6 batch b118.
+// ---------------------------------------------------------------------------
+
+static B118_LOG: std::sync::Mutex<Vec<(i32, String)>> = std::sync::Mutex::new(Vec::new());
+
+fn b118_capture(err: &types_error::PgError, _output_to_server: &mut bool) {
+    B118_LOG.lock().unwrap().push((err.level.0, err.message.clone()));
+}
+
+// procsignal.c:791: SendCancelRequest fires kill(-pid, SIGINT) and ignores
+// the result; a backend gone between the slot match and the signal produces
+// no log line (the "could not send signal" wording is signalfuncs.c's).
+#[test]
+fn cancel_request_signal_failure_is_silent_like_c() {
+    setup();
+    let _guard = serial();
+    register(8, 1008, &[1, 2, 3, 4]);
+    // A pid no thread can carry: SendThreadSignal fails with ESRCH, exactly
+    // kill(2) on a process that is already gone.
+    slot(8).pss_pid.store(-1008, Relaxed);
+    let prev = elog::set_emit_log_hook(Some(b118_capture));
+    B118_LOG.lock().unwrap().clear();
+    SendCancelRequest(-1008, &[1, 2, 3, 4]);
+    elog::set_emit_log_hook(prev);
+    slot(8).pss_pid.store(1008, Relaxed);
+    let log = std::mem::take(&mut *B118_LOG.lock().unwrap());
+    let stray: Vec<_> = log.iter().filter(|(lvl, _)| *lvl == types_error::LOG.0).collect();
+    assert!(
+        stray.is_empty(),
+        "C's SendCancelRequest logs nothing when kill() fails: {stray:?}"
+    );
+    cleanup_current();
+}

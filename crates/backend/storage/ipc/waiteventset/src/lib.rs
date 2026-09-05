@@ -59,15 +59,35 @@ thread_local! {
 static POSTMASTER_WAKER: AtomicU64 = AtomicU64::new(0);
 
 // Only the epoll/kqueue backends raise OS errors; the wasm stub never does.
+//
+// ereport(ERROR, (errcode_for_socket_access(), errmsg("%s() failed: %m")))
+// — the readiness-syscall failure shape (waiteventset.c:781/961/1201): a
+// connection-class errno is ERRCODE_CONNECTION_FAILURE, %m is strerror.
 #[cfg_attr(target_family = "wasm", allow(dead_code))]
 #[track_caller]
 #[cold]
 #[inline(never)]
 fn os_error(level: ErrorLevel, msg: &str) -> Box<PgError> {
-    Box::new(PgError::new(
-        level,
-        format!("{msg}: {}", std::io::Error::last_os_error()),
-    ))
+    let errno = elog::errno::current_errno();
+    Box::new(
+        PgError::new(level, format!("{msg}: {}", elog::errno::strerror(errno)))
+            .with_sqlstate(elog::errno::sqlstate_for_socket_access(errno))
+            .with_saved_errno(errno),
+    )
+}
+
+// elog(ERROR, "...: %m") — the set-creation / self-pipe failure shape
+// (waiteventset.c:427/432/436/441/1970): ERRCODE_INTERNAL_ERROR, %m rendered.
+#[cfg_attr(target_family = "wasm", allow(dead_code))]
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn elog_error_m(msg: &str) -> Box<PgError> {
+    let errno = elog::errno::current_errno();
+    Box::new(
+        PgError::new(ERROR, format!("{msg}: {}", elog::errno::strerror(errno)))
+            .with_saved_errno(errno),
+    )
 }
 
 #[track_caller]
@@ -253,18 +273,6 @@ pub fn AddWaitEventToSet(
     latch: Option<LatchHandle>,
     user_data: Option<i32>,
 ) -> PgResult<i32> {
-    // One address space: the postmaster cannot die while any backend thread
-    // runs, so the death watch is an event that can never fire — registered
-    // inert (position reserved, nothing handed to the kernel).
-    if events == WL_EXIT_ON_PM_DEATH || events == WL_POSTMASTER_DEATH {
-        return run_with_set(handle, |set| {
-            assert!(set.nevents < set.nevents_space, "no space for wait event");
-            let pos = set.nevents;
-            set.nevents += 1;
-            set.events.push(WaitEvent { pos, fd: PGINVALID_SOCKET, events, user_data });
-            Ok(pos)
-        });
-    }
     let my_pid = MyProcPid();
 
     run_with_set(handle, |set| {
@@ -296,6 +304,15 @@ pub fn AddWaitEventToSet(
             events,
             user_data,
         };
+        // One address space: the postmaster cannot die while any backend
+        // thread runs, so the death watch is an event that can never fire —
+        // registered inert (position reserved, nothing handed to the kernel)
+        // once C's argument checks above have run (waiteventset.c:583-602).
+        if events == WL_EXIT_ON_PM_DEATH || events == WL_POSTMASTER_DEATH {
+            event.fd = PGINVALID_SOCKET;
+            set.events.push(event);
+            return Ok(pos);
+        }
         if events == WL_LATCH_SET {
             set.latch = latch;
             set.latch_pos = pos;
@@ -320,7 +337,12 @@ pub fn ModifyWaitEvent(
         assert!(pos < set.nevents, "wait event position out of range");
         let old_events = set.events[pos as usize].events;
 
+        // Switching between WL_POSTMASTER_DEATH and WL_EXIT_ON_PM_DEATH is
+        // allowed; anything else is C's ERROR (waiteventset.c:680).
         if old_events & (WL_EXIT_ON_PM_DEATH | WL_POSTMASTER_DEATH) != 0 {
+            if events != WL_POSTMASTER_DEATH && events != WL_EXIT_ON_PM_DEATH {
+                return Err(wes_error("cannot remove postmaster death event"));
+            }
             set.events[pos as usize].events = events;
             return Ok(());
         }
@@ -506,7 +528,7 @@ pub(crate) fn drain() -> PgResult<()> {
     match waiter::drain_wake_fd() {
         Ok(()) => Ok(()),
         Err(0) => Err(wes_error("unexpected EOF on waiter wake pipe")),
-        Err(_errno) => Err(os_error(ERROR, "read() on waiter wake pipe failed")),
+        Err(_errno) => Err(elog_error_m("read() on waiter wake pipe failed")),
     }
 }
 

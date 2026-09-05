@@ -72,13 +72,82 @@ fn proc_exit_runs_stages_in_c_order_lifo() {
     assert!(!init_small::globals::InterruptPending());
 }
 
+static B118_LOG: std::sync::Mutex<Vec<(i32, String)>> = std::sync::Mutex::new(Vec::new());
+
+fn b118_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn b118_capture(err: &types_error::PgError, _output_to_server: &mut bool) {
+    B118_LOG.lock().unwrap().push((err.level.0, err.message.clone()));
+}
+
+fn b118_capture_log(f: impl FnOnce()) -> Vec<(i32, String)> {
+    let prev = elog::set_emit_log_hook(Some(b118_capture));
+    B118_LOG.lock().unwrap().clear();
+    f();
+    elog::set_emit_log_hook(prev);
+    std::mem::take(&mut *B118_LOG.lock().unwrap())
+}
+
+// ipc.c:109: proc_exit() from the wrong process is elog(PANIC, "proc_exit()
+// called in child process") — a logged PANIC unwinding as PanicExitThread,
+// not a bare Rust panic that bypasses the server log.
 #[test]
-fn proc_exit_on_wrong_thread_panics_like_c_child_process_check() {
+fn proc_exit_on_wrong_thread_is_a_logged_panic_like_c() {
     install();
+    let _g = b118_lock();
     init_small::globals::SetMyProcPid(1111);
-    let payload = catch_unwind(AssertUnwindSafe(|| proc_exit(0, 2222))).unwrap_err();
-    let msg = payload.downcast_ref::<&str>().copied().unwrap_or_default();
-    assert_eq!(msg, "proc_exit() called in child process");
+    let log = b118_capture_log(|| {
+        let payload = catch_unwind(AssertUnwindSafe(|| proc_exit(0, 2222))).unwrap_err();
+        assert!(
+            payload.downcast_ref::<types_error::PanicExitThread>().is_some(),
+            "elog(PANIC) unwinds as PanicExitThread; got a Rust panic: {:?}",
+            payload.downcast_ref::<&str>().copied()
+        );
+    });
+    assert!(
+        log.contains(&(types_error::PANIC.0, "proc_exit() called in child process".to_string())),
+        "captured log: {log:?}"
+    );
+}
+
+// ipc.c:155/201/247/280: the exit stages report at DEBUG3 — the two
+// shmem_exit callback counts, then proc_exit's on_proc_exit count, then
+// "exit(code)" last, in that order.
+#[test]
+fn exit_stages_log_debug3_like_c() {
+    install();
+    let _g = b118_lock();
+    init_small::globals::SetMyProcPid(6161);
+    let _ = take_log();
+    on_proc_exit(|_, _| {}, 0);
+    on_proc_exit(|_, _| {}, 0);
+    before_shmem_exit(|_, _| Ok(()), Datum::from_i32(0)).unwrap();
+    on_shmem_exit(|_, _| {}, 0);
+    elog::config::set_log_min_messages(types_error::DEBUG3);
+    let log = b118_capture_log(|| assert_eq!(exit_code_of(|| proc_exit(7, 6161)), 7));
+    elog::config::set_log_min_messages(types_error::WARNING);
+    let debug3: Vec<&str> = log
+        .iter()
+        .filter(|(lvl, _)| *lvl == types_error::DEBUG3.0)
+        .map(|(_, m)| m.as_str())
+        .collect();
+    let expected = [
+        "shmem_exit(7): 1 before_shmem_exit callbacks to make",
+        "shmem_exit(7): 1 on_shmem_exit callbacks to make",
+        "proc_exit(7): 2 callbacks to make",
+        "exit(7)",
+    ];
+    // In order, possibly interleaved with other DEBUG3 lines.
+    let mut next = 0;
+    for line in &debug3 {
+        if next < expected.len() && *line == expected[next] {
+            next += 1;
+        }
+    }
+    assert_eq!(next, expected.len(), "DEBUG3 lines seen: {debug3:?}");
 }
 
 #[test]

@@ -124,3 +124,144 @@ fn standby_limit_time_matches_c_arithmetic() {
     ts::set_delay_gucs(-1, -1);
     assert_eq!(ts::standby_limit_time(), 0);
 }
+
+// ---------------------------------------------------------------------------
+// standby_redo (standby.c:1163) — audit-18.6 batch b118.
+// ---------------------------------------------------------------------------
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
+
+static REPORT_STAT_CALLS: AtomicUsize = AtomicUsize::new(0);
+static REDO_LOG: Mutex<Vec<(i32, String)>> = Mutex::new(Vec::new());
+
+fn redo_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn redo_capture(err: &types_error::PgError, _output_to_server: &mut bool) {
+    REDO_LOG.lock().unwrap().push((err.level.0, err.message.clone()));
+}
+
+// The startup-process slice of shared state standby_redo's RUNNING_XACTS arm
+// walks (ProcArrayApplyRecoveryInfo -> KnownAssignedXids / TransamVariables
+// under ProcArrayLock and XidGenLock), mirroring procarray's own harness.
+fn redo_harness() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        use init_small::globals as g;
+        g::SetMaxConnections(8);
+        g::set_max_worker_processes(2);
+        g::SetMaxBackends(8 + 3 + 2 + 2 + types_storage::storage::NUM_SPECIAL_WORKER_PROCS);
+        g::SetMyProcPid(4242);
+        shmem::init_seams();
+        waitevent_seams::pgstat_report_wait_start::set(|_| {});
+        waitevent_seams::pgstat_report_wait_end::set(|| {});
+        pg_sema_seams::pg_semaphore_create::set(|_| {});
+        pg_sema_seams::pg_semaphore_reset::set(|_| {});
+        pgstat_seams::pgstat_report_stat::set(|force| {
+            assert!(force, "standby.c:1206 reports with force = true");
+            REPORT_STAT_CALLS.fetch_add(1, Ordering::Relaxed);
+            0
+        });
+        elog::init_seams();
+        lwlock::CreateLWLocks(false).unwrap();
+        lmgr_proc::init_seams();
+        lmgr_proc::InitProcGlobal(&lmgr_proc::ProcGlobalConfig {
+            autovacuum_worker_slots: 3,
+            max_wal_senders: 2,
+            max_prepared_xacts: 2,
+            fastpath_lock_groups_per_backend: 1,
+        });
+        procarray::init_seams();
+        varsup::VarsupShmemInit();
+        procarray::ProcArrayShmemInit();
+        procarray::procarray_seams::standby_release_old_locks::set(|_| Ok(()));
+    });
+}
+
+fn redo_record(info: u8, main_data: &[u8]) -> xlogreader_seams::XLogReaderState {
+    let rec = xlogreader_seams::DecodedXLogRecord {
+        xl_info: info,
+        max_block_id: -1,
+        main_data: if main_data.is_empty() { std::ptr::null() } else { main_data.as_ptr() },
+        main_data_len: main_data.len() as u32,
+        ..Default::default()
+    };
+    xlogreader_seams::XLogReaderState { record: Some(rec), ..Default::default() }
+}
+
+// standby.c:1206: replaying XLOG_RUNNING_XACTS flushes the startup process's
+// pending statistics (pgstat_report_stat(true)) — the running-xacts cadence
+// is the only stats-report schedule the startup process has.
+#[test]
+fn running_xacts_redo_reports_pending_stats() {
+    redo_harness();
+    let _g = redo_lock();
+    xlogutils::set_standby_state(xlogutils::STANDBY_SNAPSHOT_READY);
+    let tv = varsup::TransamVariables();
+    tv.nextXid.store(
+        types_core::FullTransactionId::from_epoch_and_xid(0, 105).value,
+        Ordering::Relaxed,
+    );
+    tv.latestCompletedXid.store(
+        types_core::FullTransactionId::from_epoch_and_xid(0, 104).value,
+        Ordering::Relaxed,
+    );
+    let xids = [100u32, 103];
+    let running = procarray::RunningTransactions {
+        xids: &xids,
+        xcnt: 2,
+        subxcnt: 0,
+        subxid_overflow: false,
+        next_xid: 105,
+        oldest_running_xid: 100,
+        latest_completed_xid: 104,
+        oldest_database_running_xid: 100,
+    };
+    let mut body = running_xacts_header(&running).to_vec();
+    for x in xids {
+        body.extend_from_slice(&x.to_ne_bytes());
+    }
+    let before = REPORT_STAT_CALLS.load(Ordering::Relaxed);
+    let mut reader = redo_record(XLOG_RUNNING_XACTS, &body);
+    standby_redo(&mut reader).expect("running-xacts replay");
+    xlogutils::set_standby_state(xlogutils::STANDBY_DISABLED);
+    assert_eq!(
+        REPORT_STAT_CALLS.load(Ordering::Relaxed),
+        before + 1,
+        "standby_redo must call pgstat_report_stat(true) after applying XLOG_RUNNING_XACTS"
+    );
+}
+
+// standby.c:1219: an unknown op code is elog(PANIC, "standby_redo: unknown op
+// code %u") — the logged PANIC that unwinds the thread (PanicExitThread),
+// never a bare Rust panic that bypasses the server log.
+#[test]
+fn unknown_op_code_is_a_logged_panic() {
+    redo_harness();
+    let _g = redo_lock();
+    xlogutils::set_standby_state(xlogutils::STANDBY_INITIALIZED);
+    let prev = elog::set_emit_log_hook(Some(redo_capture));
+    REDO_LOG.lock().unwrap().clear();
+    let mut reader = redo_record(0x30, &[]);
+    let outcome =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| standby_redo(&mut reader)));
+    elog::set_emit_log_hook(prev);
+    xlogutils::set_standby_state(xlogutils::STANDBY_DISABLED);
+    let payload = outcome.expect_err("unknown op code must PANIC");
+    assert!(
+        payload.downcast_ref::<types_error::PanicExitThread>().is_some(),
+        "C's elog(PANIC) unwinds the thread as PanicExitThread; got a Rust panic: {:?}",
+        payload
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+    );
+    let log = std::mem::take(&mut *REDO_LOG.lock().unwrap());
+    assert!(
+        log.contains(&(types_error::PANIC.0, "standby_redo: unknown op code 48".to_string())),
+        "captured log: {log:?}"
+    );
+}

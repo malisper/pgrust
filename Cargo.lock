@@ -5286,6 +5286,7 @@ name = "dsm_core"
 version = "0.0.0"
 dependencies = [
  "elog",
+ "fd",
  "guc_seams",
  "guc_tables",
  "init_small",
@@ -5300,6 +5301,7 @@ dependencies = [
  "types_guc",
  "types_storage",
  "waitevent_seams",
+ "xact_seams",
 ]
 
 [[package]]
@@ -18176,6 +18178,8 @@ dependencies = [
  "lwlock",
  "mcx",
  "origin_seams",
+ "pg_sema_seams",
+ "pgstat_seams",
  "postgres_seams",
  "procarray",
  "ps_status",
@@ -20968,6 +20972,7 @@ dependencies = [
 name = "waiteventset"
 version = "0.0.0"
 dependencies = [
+ "elog",
  "fd",
  "init_small",
  "latch",

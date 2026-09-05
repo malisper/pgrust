@@ -14,7 +14,10 @@ use types_storage::{
     dsm_handle, PGShmemHeader, DSM_HANDLE_INVALID, DYNAMIC_SHARED_MEMORY_CONTROL_LOCK,
 };
 
-use crate::dsm_impl::{dsm_impl_op, dsm_impl_pin_segment, dsm_impl_unpin_segment, DsmOp};
+use crate::dsm_impl::{
+    dsm_impl_op, dsm_impl_pin_segment, dsm_impl_unpin_segment, dynamic_shared_memory_type, DsmOp,
+    DSM_IMPL_MMAP, PG_DYNSHMEM_DIR, PG_DYNSHMEM_MMAP_FILE_PREFIX,
+};
 
 pub const PG_DYNSHMEM_CONTROL_MAGIC: u32 = 0x9a50_3d32;
 pub const PG_DYNSHMEM_FIXED_SLOTS: i32 = 64;
@@ -33,6 +36,8 @@ struct DsmControlItem {
     refcnt: u32,
     first_page: usize,
     npages: usize,
+    /// Only needed on Windows (C keeps the slot on every platform).
+    impl_private_pm_handle: *mut core::ffi::c_void,
     pinned: bool,
 }
 
@@ -288,9 +293,44 @@ fn dsm_control_segment_sane(control: *mut DsmControlHeader, mapped_size: usize) 
     true
 }
 
-/// The C mmap-arm leftover scan (dsm_cleanup_for_mmap) has no counterpart
-/// here: the in-process backing writes no files.
+/// dsm_cleanup_for_mmap (dsm.c:320): at postmaster startup under
+/// dynamic_shared_memory_type = mmap, unlink every leftover
+/// PG_DYNSHMEM_MMAP_FILE_PREFIX file in PG_DYNSHMEM_DIR (a previous server's
+/// segments); anything else in the directory is left alone.
+pub fn dsm_cleanup_for_mmap() -> PgResult<()> {
+    cleanup_mmap_dir(PG_DYNSHMEM_DIR)
+}
+
+pub(crate) fn cleanup_mmap_dir(dirname: &str) -> PgResult<()> {
+    // AllocateDir + ReadDir raise errcode_for_file_access "could not
+    // open/read directory \"%s\": %m" themselves (fd.c).
+    let dir = fd::AllocateDir(dirname)?;
+    while let Some(dent) = fd::ReadDir(dir, dirname)? {
+        if !dent.d_name.starts_with(PG_DYNSHMEM_MMAP_FILE_PREFIX) {
+            continue;
+        }
+        let buf = format!("{dirname}/{}", dent.d_name);
+        elog(DEBUG2, format!("removing file \"{buf}\""))?;
+        if fd::pg_unlink(&buf) != 0 {
+            ereport(ERROR)
+                .with_saved_errno(elog::errno::current_errno())
+                .errcode_for_file_access()
+                .errmsg(format!("could not remove file \"{buf}\": %m"))
+                .finish(loc("dsm_cleanup_for_mmap"))?;
+        }
+    }
+    fd::FreeDir(dir)?;
+    Ok(())
+}
+
 pub fn dsm_postmaster_startup(shim: *mut PGShmemHeader) -> PgResult<()> {
+    // If we're using the mmap implementations, clean up any leftovers
+    // (dsm.c:191); the other C implementations clean up through the old
+    // control segment (dsm_cleanup_using_control_segment).
+    if dynamic_shared_memory_type() == DSM_IMPL_MMAP {
+        dsm_cleanup_for_mmap()?;
+    }
+
     let maxitems =
         (PG_DYNSHMEM_FIXED_SLOTS + PG_DYNSHMEM_SLOTS_PER_BACKEND * globals::MaxBackends()) as u32;
     elog(

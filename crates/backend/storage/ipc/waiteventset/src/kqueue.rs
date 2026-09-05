@@ -2,7 +2,7 @@ use std::sync::atomic::Ordering::SeqCst;
 
 use types_storage::waiteventset::{WL_SOCKET_CLOSED, WL_SOCKET_READABLE, WL_SOCKET_WRITEABLE};
 
-use crate::{drain, os_error, Latch, PgResult, WaitEvent, WaitEventSetData, ERROR};
+use crate::{drain, elog_error_m, os_error, Latch, PgResult, WaitEvent, WaitEventSetData, ERROR};
 use types_core::PGINVALID_SOCKET;
 use types_storage::waiteventset::{WL_LATCH_SET, WL_POSTMASTER_DEATH};
 
@@ -26,17 +26,17 @@ fn kev(fd: i32, filter: i16, flags: u16, pos: i32) -> libc::kevent {
 impl BackendSet {
     pub(crate) fn create(nevents: i32) -> PgResult<Self> {
         if !fd::AcquireExternalFD()? {
-            return Err(os_error(ERROR, "AcquireExternalFD, for kqueue, failed"));
+            return Err(elog_error_m("AcquireExternalFD, for kqueue, failed"));
         }
         // SAFETY: kqueue(2).
         let kq = unsafe { libc::kqueue() };
         if kq < 0 {
             fd::ReleaseExternalFD();
-            return Err(os_error(ERROR, "kqueue failed"));
+            return Err(elog_error_m("kqueue failed"));
         }
         // SAFETY: fcntl on the fd just created.
         if unsafe { libc::fcntl(kq, libc::F_SETFD, libc::FD_CLOEXEC) } == -1 {
-            let err = os_error(ERROR, "fcntl(F_SETFD) failed on kqueue descriptor");
+            let err = elog_error_m("fcntl(F_SETFD) failed on kqueue descriptor");
             // SAFETY: closing the fd we just opened.
             unsafe { libc::close(kq) };
             fd::ReleaseExternalFD();

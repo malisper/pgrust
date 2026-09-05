@@ -108,3 +108,25 @@ fn concurrent_init_struct_single_creation() {
     assert!(results.iter().all(|&(p, _)| p == addr));
     assert_eq!(results.iter().filter(|&&(_, found)| !found).count(), 1);
 }
+
+// shmem.c:159 ShmemAlloc: a request the segment cannot satisfy is
+// ERRCODE_OUT_OF_MEMORY "out of shared memory (%zu bytes requested)" (and
+// ShmemInitStruct's "not enough shared memory for data structure"), never a
+// panic — ShmemAllocRaw's Layout::expect on an unrepresentable padded size
+// (> isize::MAX) was one.
+#[test]
+fn alloc_of_unrepresentable_size_is_out_of_memory_error_not_panic() {
+    let size = isize::MAX as usize;
+    let err = ShmemAlloc(size).unwrap_err();
+    assert_eq!(err.sqlstate, ERRCODE_OUT_OF_MEMORY);
+    assert_eq!(err.message, format!("out of shared memory ({size} bytes requested)"));
+    assert!(ShmemAllocNoError(size).is_null());
+    let err = ShmemInitStruct("b118_unrepresentable", size).unwrap_err();
+    assert_eq!(err.sqlstate, ERRCODE_OUT_OF_MEMORY);
+    assert_eq!(
+        err.message,
+        format!(
+            "not enough shared memory for data structure \"b118_unrepresentable\" ({size} bytes requested)"
+        )
+    );
+}

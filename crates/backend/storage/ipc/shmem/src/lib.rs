@@ -63,8 +63,13 @@ fn ShmemAllocRaw(size: usize, allocated_size: &mut usize) -> *mut u8 {
         return std::ptr::null_mut();
     };
     *allocated_size = padded;
-    let layout = Layout::from_size_align(padded.max(PG_CACHE_LINE_SIZE), PG_CACHE_LINE_SIZE)
-        .expect("shmem layout");
+    // C: freeoffset + padded > totalsize -> NULL; the heap-backed segment's
+    // ceiling is the allocator's (isize::MAX), and the caller raises C's
+    // out-of-shared-memory ERROR (shmem.c:159), never a panic.
+    let Ok(layout) = Layout::from_size_align(padded.max(PG_CACHE_LINE_SIZE), PG_CACHE_LINE_SIZE)
+    else {
+        return std::ptr::null_mut();
+    };
     SHMEM_FREEOFFSET.fetch_add(padded, Ordering::Relaxed);
     // SAFETY: layout has non-zero size. Zeroed to match a fresh C segment;
     // leaked for the cluster lifetime, as C shmem is never freed.

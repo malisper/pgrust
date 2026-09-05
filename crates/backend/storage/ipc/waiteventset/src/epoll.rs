@@ -2,7 +2,7 @@ use std::sync::atomic::Ordering::SeqCst;
 
 use types_storage::waiteventset::{WL_SOCKET_CLOSED, WL_SOCKET_READABLE, WL_SOCKET_WRITEABLE};
 
-use crate::{drain, os_error, Latch, PgResult, WaitEvent, WaitEventSetData, ERROR};
+use crate::{drain, elog_error_m, os_error, Latch, PgResult, WaitEvent, WaitEventSetData, ERROR};
 use types_core::PGINVALID_SOCKET;
 use types_storage::waiteventset::{WL_LATCH_SET, WL_POSTMASTER_DEATH};
 
@@ -14,13 +14,13 @@ pub(crate) struct BackendSet {
 impl BackendSet {
     pub(crate) fn create(nevents: i32) -> PgResult<Self> {
         if !fd::AcquireExternalFD()? {
-            return Err(os_error(ERROR, "AcquireExternalFD, for epoll_create1, failed"));
+            return Err(elog_error_m("AcquireExternalFD, for epoll_create1, failed"));
         }
         // SAFETY: epoll_create1(2).
         let epfd = unsafe { libc::epoll_create1(libc::EPOLL_CLOEXEC) };
         if epfd < 0 {
             fd::ReleaseExternalFD();
-            return Err(os_error(ERROR, "epoll_create1 failed"));
+            return Err(elog_error_m("epoll_create1 failed"));
         }
         Ok(BackendSet {
             epoll_fd: epfd,

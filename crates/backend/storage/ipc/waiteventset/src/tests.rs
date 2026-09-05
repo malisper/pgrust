@@ -364,3 +364,83 @@ fn latch_plus_socket_wakes_on_late_socket_data() {
     // SAFETY: closing our socketpair.
     unsafe { libc::close(a); libc::close(b); }
 }
+
+// ---------------------------------------------------------------------------
+// audit-18.6 batch b118: AddWaitEventToSet / ModifyWaitEvent error arms and
+// the syscall-failure error shape.
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "linux")]
+fn set_errno(en: i32) {
+    // SAFETY: writes the calling thread's errno.
+    unsafe { *libc::__errno_location() = en }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn set_errno(en: i32) {
+    // SAFETY: writes the calling thread's errno.
+    unsafe { *libc::__error() = en }
+}
+
+// waiteventset.c:680: a postmaster-death event may only switch between
+// WL_POSTMASTER_DEATH and WL_EXIT_ON_PM_DEATH; anything else is
+// ERROR "cannot remove postmaster death event".
+#[test]
+fn modify_cannot_remove_postmaster_death_event() {
+    setup_backend();
+    let set = CreateWaitEventSet(2).unwrap();
+    let pos = AddWaitEventToSet(set, WL_POSTMASTER_DEATH, PGINVALID_SOCKET, None, None).unwrap();
+    ModifyWaitEvent(set, pos, WL_EXIT_ON_PM_DEATH, None).unwrap();
+    ModifyWaitEvent(set, pos, WL_POSTMASTER_DEATH, None).unwrap();
+    let err = ModifyWaitEvent(set, pos, WL_SOCKET_READABLE, None).unwrap_err();
+    assert_eq!(err.message, "cannot remove postmaster death event");
+    assert_eq!(err.level, ERROR);
+    FreeWaitEventSet(set);
+}
+
+// waiteventset.c:591: a latch handed in with events that are not WL_LATCH_SET
+// (here the postmaster-death event) is ERROR "latch events only support
+// being set" — the latch checks come before the death event's registration.
+#[test]
+fn add_latch_with_postmaster_death_events_is_an_error() {
+    setup_backend();
+    let latch = owned_latch();
+    let set = CreateWaitEventSet(2).unwrap();
+    let err =
+        AddWaitEventToSet(set, WL_POSTMASTER_DEATH, PGINVALID_SOCKET, Some(latch), None).unwrap_err();
+    assert_eq!(err.message, "latch events only support being set");
+    assert_eq!(GetNumRegisteredWaitEvents(set), 0);
+    FreeWaitEventSet(set);
+}
+
+// waiteventset.c:781/961/1201: "%s() failed: %m" under
+// errcode_for_socket_access — a connection-class errno is SQLSTATE 08006,
+// anything else XX000, and %m is strerror without Rust's " (os error N)".
+#[test]
+fn syscall_failure_maps_socket_errno_and_renders_m_like_c() {
+    set_errno(libc::ECONNRESET);
+    let err = os_error(ERROR, "epoll_ctl() failed");
+    assert_eq!(err.message, "epoll_ctl() failed: Connection reset by peer");
+    assert_eq!(err.sqlstate, types_error::ERRCODE_CONNECTION_FAILURE);
+    set_errno(libc::EBADF);
+    let err = os_error(ERROR, "epoll_wait() failed");
+    assert_eq!(err.message, "epoll_wait() failed: Bad file descriptor");
+    assert_eq!(err.sqlstate, types_error::ERRCODE_INTERNAL_ERROR);
+}
+
+// The real epoll_ctl() failure on Linux: a regular file cannot be registered
+// (EPERM); the message is C's "epoll_ctl() failed: %m".
+#[cfg(target_os = "linux")]
+#[test]
+fn epoll_ctl_failure_message_is_c_exact() {
+    setup_backend();
+    // SAFETY: opening a well-known regular device file read-only.
+    let fd = unsafe { libc::open(b"/dev/null\0".as_ptr().cast(), libc::O_RDONLY) };
+    assert!(fd >= 0);
+    let set = CreateWaitEventSet(1).unwrap();
+    let err = AddWaitEventToSet(set, WL_SOCKET_READABLE, fd, None, None).unwrap_err();
+    assert_eq!(err.message, "epoll_ctl() failed: Operation not permitted");
+    FreeWaitEventSet(set);
+    // SAFETY: closing the fd opened above.
+    unsafe { libc::close(fd) };
+}

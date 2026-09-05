@@ -162,3 +162,10 @@ seam_core::seam!(
         bytes: u64,
     )
 );
+
+seam_core::seam!(
+    // pgstat_report_stat (pgstat.c): flush this backend's pending stats to
+    // shared memory; `force` bypasses the rate limit. Returns the time (in
+    // ms) until the next flush is due, 0 when nothing is pending.
+    pub fn pgstat_report_stat(force: bool) -> i64
+);

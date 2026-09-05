@@ -172,6 +172,7 @@ pub fn init_seams() {
         database::pgstat_set_session_end_cause_fatal,
     );
     pgstat_seams::pgstat_report_tempfile::set(database::pgstat_report_tempfile);
+    pgstat_seams::pgstat_report_stat::set(pending::pgstat_report_stat);
     pgstat_seams::pgstat_init_relation::set(relation::pgstat_init_relation);
     pgstat_seams::pgstat_before_server_shutdown::set(file::pgstat_before_server_shutdown);
     pgstat_seams::pgstat_restore_stats::set(file::pgstat_restore_stats);
