@@ -162,8 +162,8 @@ pub fn ExecuteQuery<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &ExecuteStmt<'mcx>,
     source_text: &str,
-    // C threads the caller's params into the EState for nested references;
-    // evaluate_expr has no binding, so they are unused here (loud in interp).
+    // C threads the caller's params into the EState for nested references,
+    // which transformExpr rejects first (42P02; see EvaluateParams).
     _params: ParamListHandle,
     into_clause: Option<&IntoClause<'mcx>>,
     dest: &mut DestReceiver<'mcx>,
@@ -235,9 +235,11 @@ pub fn ExecuteQuery<'mcx>(
     Ok(())
 }
 
-// EvaluateParams (prepare.c). Divergences: expression evaluation rides
-// execexpr::evaluate_expr (no EState), so a parameter expression that itself
-// references an outer $n has no binding and fails loudly in the interpreter.
+// EvaluateParams (prepare.c). Expression evaluation rides
+// execexpr::evaluate_expr (no EState): C binds the caller's params into an
+// EState here, but a $n inside a parameter expression is already a 42P02 at
+// transformExpr (this ParseState has no paramref hook, exactly as C's), so
+// that binding is never consulted on either engine.
 fn EvaluateParams<'mcx>(
     mcx: Mcx<'mcx>,
     entry: &PreparedStatement,
@@ -266,10 +268,18 @@ fn EvaluateParams<'mcx>(
     let mut pstate = parser_small1::make_parsestate(mcx, None);
     pstate.p_sourcetext = Some(mcx::slice_in(mcx, source_text.as_bytes())?.leak());
 
-    let mut out: mcx::PgVec<'mcx, types_portal::params::ParamExternData> =
+    // Pass 1 (prepare.c:311-342): parse-analyze and coerce EVERY parameter
+    // before any of them is evaluated, so a coercion failure of $j (42804) is
+    // reported ahead of a runtime error or a side effect of evaluating $i.
+    let mut coerced_exprs: mcx::PgVec<'mcx, types_nodes::Node<'mcx>> =
         mcx::vec_with_capacity_in(mcx, num_params)?;
     for (i, raw) in params_list.iter().enumerate() {
         let expected_type_id = param_types[i];
+        // C (prepare.c:335) points the 42804 cursor at the RAW parser node:
+        // exprLocation(lfirst(l)), not the transformed expression (a TypeCast
+        // is leftmost at its type name / CAST keyword, the Const it becomes
+        // is not).
+        let raw_location = parse_expr::expr_location(raw);
         let expr = parse_expr::transformExpr(
             mcx,
             &mut pstate,
@@ -300,14 +310,21 @@ fn EvaluateParams<'mcx>(
                 .errhint("You will need to rewrite or cast the expression.")
                 .errposition(parser_small1::parser_errposition(
                     &pstate,
-                    parse_expr::expr_location(expr),
+                    raw_location,
                     mbutils::GetDatabaseEncoding(),
                 ))
                 .into_error()
                 .into());
         };
         parse_collate::assign_expr_collations(mcx, &pstate, coerced)?;
+        coerced_exprs.push(coerced);
+    }
 
+    // Pass 2 (prepare.c:345-363): evaluate the finished expressions.
+    let mut out: mcx::PgVec<'mcx, types_portal::params::ParamExternData> =
+        mcx::vec_with_capacity_in(mcx, num_params)?;
+    for (i, &coerced) in coerced_exprs.iter().enumerate() {
+        let expected_type_id = param_types[i];
         let evaluated = execexpr::evaluate_expr(
             mcx,
             coerced,
