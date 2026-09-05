@@ -110,6 +110,29 @@ pub(crate) fn optimize_window_clauses<'mcx>(
             }
         }
     }
+    // planner.c:6105-6130: drop duplicate WindowFuncs (equal(), so location
+    // is ignored) from each WindowClause's list, decrementing numWindowFuncs.
+    // Done after the merge above so a moved duplicate still got its winref
+    // adjusted; it exists only to keep cost_windowagg / the window input
+    // target width identical to C -- the executor evaluates every tlist
+    // WindowFunc regardless.
+    for wc_node in window_clause {
+        let wc = wc_node.as_window_clause().expect("windowClause cell");
+        let winref = wc.winref as usize;
+        if wflists.window_funcs[winref].is_empty() {
+            continue;
+        }
+        let list = core::mem::replace(&mut wflists.window_funcs[winref], PgVec::new_in(run.mcx));
+        let mut newlist: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(run.mcx);
+        for n in list {
+            if newlist.iter().any(|m| types_nodes::equal::equal(*m, n)) {
+                wflists.num_window_funcs -= 1;
+            } else {
+                newlist.push(n);
+            }
+        }
+        wflists.window_funcs[winref] = newlist;
+    }
     Ok(())
 }
 

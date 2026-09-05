@@ -16,6 +16,10 @@ const INTERNALOID: u32 = 2281;
 const RECORDOID: u32 = 2249;
 const F_ARRAY_AGG_SERIALIZE: u32 = 6294;
 const F_ARRAY_AGG_DESERIALIZE: u32 = 6295;
+// fmgroids.h: array_append(anycompatiblearray, anycompatible).
+const F_ARRAY_APPEND: u32 = 378;
+// memutils.h: the expanded-array transvalue's minimum footprint.
+const ALLOCSET_SMALL_INITSIZE: i32 = 1024;
 const AGGMODIFY_READ_WRITE: i8 = b'w' as i8;
 
 // resolve_aggregate_transtype (parse_agg.c): a polymorphic declared
@@ -697,9 +701,13 @@ pub fn get_agg_clause_costs(
         if !byval {
             let avgwidth = if transspace > 0 {
                 transspace
+            } else if transfn_oid == F_ARRAY_APPEND {
+                // prepagg.c:631-639: array_append keeps an expanded array as
+                // the transvalue, which occupies at least
+                // ALLOCSET_SMALL_INITSIZE (a user aggregate with
+                // sfunc = array_append and no sspace lands here).
+                ALLOCSET_SMALL_INITSIZE
             } else {
-                // F_ARRAY_APPEND's expanded-array arm is unreachable while
-                // by-ref transtypes stay in this branch's typavgwidth form.
                 lsyscache::get_typavgwidth(transtype, transtypmod)?
             };
             let maxaligned = (avgwidth as usize + 7) & !7;

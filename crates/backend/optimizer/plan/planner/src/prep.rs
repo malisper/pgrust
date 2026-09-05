@@ -740,10 +740,15 @@ pub fn preprocess_targetlist<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<()> {
         .nth(parse.resultRelation as usize - 1)
         .as_range_tbl_entry()
         .expect("rtable cell");
-    debug_assert!(rte.rtekind == RTEKind::RTE_RELATION);
+    // preptlist.c:89: elog(ERROR) in every build, not a debug-only assertion.
+    if rte.rtekind != RTEKind::RTE_RELATION {
+        return Err(Box::new(types_error::PgError::error(
+            "result relation must be a regular relation".to_string(),
+        )));
+    }
     let rel = table::table_open(mcx, rte.relid, types_rel::NoLock)?;
     let mut tlist = match command_type {
-        CmdType::CMD_INSERT => expand_insert_targetlist(mcx, &parse.targetList, &rel)?,
+        CmdType::CMD_INSERT => expand_insert_targetlist(run, &parse.targetList, &rel)?,
         _ => {
             if command_type == CmdType::CMD_UPDATE {
                 run.root.update_colnos =
@@ -765,7 +770,7 @@ pub fn preprocess_targetlist<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<()> {
             let action = action_node.as_merge_action().expect("mergeActionList cell");
             match action.commandType {
                 CmdType::CMD_INSERT => {
-                    let expanded = expand_insert_targetlist(mcx, &action.targetList, &rel)?;
+                    let expanded = expand_insert_targetlist(run, &action.targetList, &rel)?;
                     // SAFETY: parse tree is planner-owned; no derived refs live.
                     unsafe {
                         action_node.with_mut::<types_nodes::primnodes::MergeAction, _>(|a| {
@@ -952,10 +957,11 @@ fn add_row_identity_columns<'mcx>(
 // attno order, NULL Consts for unassigned columns. Domain columns get
 // coerce_null_to_domain's CoerceToDomain wrapper.
 fn expand_insert_targetlist<'mcx>(
-    mcx: Mcx<'mcx>,
+    run: &mut PlannerRun<'mcx>,
     tlist: &NodeList<'mcx>,
     rel: &types_rel::Relation<'mcx>,
 ) -> PgResult<NodeList<'mcx>> {
+    let mcx = run.mcx;
     let mut new_tlist = NodeList::nil();
     let mut tlist_iter = tlist.iter().peekable();
     let numattrs = rel.rd_att.natts;
@@ -1000,7 +1006,26 @@ fn expand_insert_targetlist<'mcx>(
                     if e.node_tag() == NodeTag::T_Const {
                         e
                     } else {
-                        clauses::eval_const_expressions(mcx, e)?
+                        // preptlist.c:480: eval_const_expressions(root, ...):
+                        // a folded constraint-less domain is a plan type
+                        // dependency (clauses.c:3630), so ALTER DOMAIN ...
+                        // ADD CONSTRAINT invalidates the cached INSERT plan.
+                        let mut type_deps: Vec<types_core::Oid> = Vec::new();
+                        let mut func_deps: Vec<types_core::Oid> = Vec::new();
+                        let folded = clauses::fold::eval_const_expressions_planner(
+                            mcx,
+                            e,
+                            run.glob.bound_params,
+                            &mut type_deps,
+                            &mut func_deps,
+                        )?;
+                        for typid in type_deps {
+                            crate::setrefs::record_plan_type_dependency(run, typid)?;
+                        }
+                        for funcid in func_deps {
+                            crate::setrefs::record_plan_function_dependency(run, funcid)?;
+                        }
+                        folded
                     }
                 } else {
                     Node::mk_const(mcx, 23, -1, 0, 4, datum::Datum::null(), true, true)?
@@ -1015,12 +1040,36 @@ fn expand_insert_targetlist<'mcx>(
         };
         new_tlist.lappend(mcx, tle_node)?;
     }
+    // preptlist.c:498-520: the remaining entries must be resjunk; append them
+    // with resnos continuing past the last attribute (a flat copy only when
+    // the resno changes).
+    let mut attrno = numattrs as i16 + 1;
     for tle_node in tlist_iter {
         let tle = tle_node.as_target_entry().expect("tlist cell");
-        assert!(tle.resjunk, "targetlist is not sorted correctly");
-        panic!(
-            "expand_insert_targetlist (preptlist.c): junk tlist entries; M4 lane"
-        );
+        if !tle.resjunk {
+            // elog(ERROR): a catchable XX000, never a process abort.
+            return Err(Box::new(types_error::PgError::error(
+                "targetlist is not sorted correctly".to_string(),
+            )));
+        }
+        let node = if tle.resno == attrno {
+            tle_node
+        } else {
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::TargetEntry {
+                    expr: tle.expr,
+                    resno: attrno,
+                    resname: tle.resname,
+                    ressortgroupref: tle.ressortgroupref,
+                    resorigtbl: tle.resorigtbl,
+                    resorigcol: tle.resorigcol,
+                    resjunk: tle.resjunk,
+                },
+            )?
+        };
+        new_tlist.lappend(mcx, node)?;
+        attrno += 1;
     }
     Ok(new_tlist)
 }

@@ -1,6 +1,6 @@
 //! plan_cluster_use_sort (planner.c): cost seqscan+sort vs full index scan
-//! over a mostly-dummy planner state. comparisonCost is 0: an expression
-//! index is under-costed vs C's 2*cpu_operator_cost.
+//! over a mostly-dummy planner state; comparisonCost is twice the index
+//! expressions' eval cost (planner.c:7078).
 
 use mcx::Mcx;
 use types_core::Oid;
@@ -10,7 +10,7 @@ use types_nodes::CmdType;
 use types_nodes::{Node, NodeList};
 use types_pathnodes::PathNode;
 
-use crate::costsize::cost_sort_shape;
+use crate::costsize::{cost_qual_eval_node, cost_sort_shape};
 use crate::gucs;
 use crate::pathnode::{create_index_path, create_seqscan_path};
 use crate::plancat::get_rel_data_width;
@@ -74,8 +74,18 @@ pub fn plan_cluster_use_sort<'mcx>(
     }
     run.root.total_table_pages = pages as f64;
 
-    // cost_qual_eval over ii_Expressions: structurally empty on this lane.
-    let comparison_cost = 0.0;
+    // planner.c:7077-7078: charge twice the index expressions' eval cost per
+    // sort comparison (tuplesort re-evaluates them for every comparison).
+    let indexprs: mcx::PgVec<'mcx, types_pathnodes::NodeId> =
+        crate::relnode::pgvec_clone_shallow(mcx, &index.indexprs);
+    let mut index_expr_cost = types_pathnodes::QualCost::default();
+    for &eid in indexprs.iter() {
+        let e = *run.root.expr_node(eid);
+        let c = cost_qual_eval_node(Some(&mut run), e)?;
+        index_expr_cost.startup += c.startup;
+        index_expr_cost.per_tuple += c.per_tuple;
+    }
+    let comparison_cost = 2.0 * (index_expr_cost.startup + index_expr_cost.per_tuple);
 
     let seq_id = create_seqscan_path(&mut run, rel_id, &crate::relnode::RELIDS_UNSET, 0)?;
     let (seq_disabled, seq_total) = {

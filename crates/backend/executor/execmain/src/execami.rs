@@ -526,13 +526,28 @@ pub(crate) fn exec_re_scan_chg_forced<'mcx>(
             ::nodeindexonlyscan::exec_rescan_index_only_scan(ios, estate)?
         }
         PlanStateNode::Agg(aps) => {
-            ::nodeagg::exec_rescan_agg_chg(&mut aps.agg, estate);
-            exec_re_scan_with_chg(
-                &mut aps.outer,
-                base.lefttree.expect("Agg outer plan"),
-                estate,
-                chg,
-            )?;
+            // ExecReScanAgg (nodeAgg.c:4478-4500): a filled, never-spilled
+            // AGG_HASHED table is kept when the outer subtree sees none of the
+            // changed params (its chgParam stays NULL) and none of them feeds
+            // an aggregate argument (Agg.aggParams, subselect.c:2848); only
+            // the qual / tlist re-evaluate. That is the chgParam-free arm.
+            let outer_plan = base.lefttree.expect("Agg outer plan");
+            let agg_plan = aps.agg.plan;
+            let outer_sees_chg =
+                chg.overlap(&outer_plan.as_plan().expect("plan-tree node").allParam);
+            // nodes.h AggStrategy: AGG_HASHED (types_pathnodes is not a
+            // dependency of this crate).
+            const AGG_HASHED: u32 = 2;
+            if agg_plan.aggstrategy == AGG_HASHED
+                && !outer_sees_chg
+                && !chg.overlap(&agg_plan.aggParams)
+            {
+                ::nodeagg::exec_rescan_agg(&mut aps.agg, estate);
+                exec_re_scan(&mut aps.outer, estate)?;
+            } else {
+                ::nodeagg::exec_rescan_agg_chg(&mut aps.agg, estate);
+                exec_re_scan_with_chg(&mut aps.outer, outer_plan, estate, chg)?;
+            }
         }
         PlanStateNode::WindowAgg(w) => {
             ::nodewindowagg::exec_rescan_window_agg(&mut w.state, estate);

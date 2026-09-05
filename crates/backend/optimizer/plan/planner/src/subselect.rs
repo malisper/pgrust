@@ -2057,10 +2057,37 @@ fn finalize_plan<'mcx>(
         NodeTag::T_SeqScan | NodeTag::T_NamedTuplestoreScan => {
             paramids.add_members(mcx, scan_params)?;
         }
-        // Agg skips C's AGG_HASHED aggParams scan: no executor consumer yet.
+        NodeTag::T_Agg => {
+            // subselect.c:2848-2864: an AGG_HASHED plan records the PARAM_EXEC
+            // ids referenced inside its aggregate calls (finalize_agg_primnode)
+            // so ExecReScanAgg (nodeAgg.c:4496) can keep the filled hash table
+            // when only the qual / tlist saw a changed param.
+            let agg = plan.as_agg().unwrap();
+            if agg.aggstrategy == types_pathnodes::AGG_HASHED {
+                let mut agg_paramids = types_nodes::bitmapset::Bitmapset::empty();
+                {
+                    let mut w = FinalizeAggPrimnode {
+                        inner: FinalizePrimnode { run, root, paramids: &mut agg_paramids },
+                    };
+                    for tle in &agg.plan.targetlist {
+                        w.visit(tle)?;
+                    }
+                    for q in &agg.plan.qual {
+                        w.visit(q)?;
+                    }
+                }
+                // SAFETY: the plan tree is exclusively owned by this planning
+                // invocation (C writes agg->aggParams in place).
+                unsafe {
+                    plan.with_mut::<types_nodes::plannodes::Agg, _>(|a| {
+                        a.aggParams = agg_paramids;
+                    })
+                }
+                .expect("Agg");
+            }
+        }
         NodeTag::T_Sort
         | NodeTag::T_IncrementalSort
-        | NodeTag::T_Agg
         | NodeTag::T_Material
         | NodeTag::T_SetOp
         | NodeTag::T_ProjectSet => {}
@@ -2428,6 +2455,29 @@ fn finalize_primnode<'mcx>(
 ) -> PgResult<()> {
     FinalizePrimnode { run, root, paramids }.visit(node)?;
     Ok(())
+}
+
+// finalize_agg_primnode (subselect.c:3089): collect the params referenced by
+// the arguments / FILTER of every Aggref (the direct arguments are not
+// considered); everything outside an Aggref is walked through.
+struct FinalizeAggPrimnode<'a, 'mcx> {
+    inner: FinalizePrimnode<'a, 'mcx>,
+}
+
+impl<'a, 'mcx> clauses::NodeWalker<'mcx> for FinalizeAggPrimnode<'a, 'mcx> {
+    fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+        if let Some(agg) = node.as_aggref() {
+            for a in &agg.args {
+                self.inner.visit(a)?;
+            }
+            if let Some(f) = agg.aggfilter {
+                self.inner.visit(f)?;
+            }
+            // there can't be any Aggrefs below here
+            return Ok(false);
+        }
+        clauses::expression_tree_walker(node, self)
+    }
 }
 
 #[cold]

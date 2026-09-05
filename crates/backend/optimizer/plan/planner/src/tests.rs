@@ -738,6 +738,10 @@ fn install_scan_fixtures() {
             PTT => make_text_rel_fixture(mcx, PTT, "ptt", 10, 1000.0),
             JBT => make_jsonb_rel_fixture(mcx, JBT, "jbt", 10, 1000.0),
             JBT2 => make_jsonb_rel_fixture(mcx, JBT2, "jbt2", 10, 1000.0),
+            // prepjointree::tests view-flatten base relations: pull-up opens
+            // them for the virtual-column check (prepjointree.c:1381).
+            77 => make_join_rel_fixture(mcx, 77, "vb77", 10, 1000.0),
+            78 => make_join_rel_fixture(mcx, 78, "vb78", 10, 1000.0),
             other => panic!("fixture relation_open: unknown oid {other}"),
         })
     });
@@ -8934,4 +8938,88 @@ mod audit_b058 {
         assert!(relids_equal(&e.ec_relids, &relids_singleton(mcx, 3)));
         assert!(e.ec_derives_list.is_empty());
     }
+}
+
+// ===== audit-18.6 remediation batch b059 (backend/optimizer/plan) =====
+
+// group_var_eqop (planner.c:1517): a GROUP Var whose attno names no
+// SortGroupClause is elog(ERROR) "could not find GROUP clause for GROUP Var
+// attno %d" (XX000), a catchable error rather than a process panic.
+#[test]
+fn b059_group_var_eqop_missing_clause_is_internal_error() {
+    let cx = cx();
+    let mcx = cx.mcx();
+    let parse = table_query(mcx, None);
+    let var_node = Node::mk_var(mcx, 2, 3, 23, -1, 0, 0).unwrap();
+    let var = var_node.as_var().unwrap();
+    let err = crate::subquery::group_var_eqop(&parse, var).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    assert_eq!(err.message(), "could not find GROUP clause for GROUP Var attno 3");
+}
+
+// preprocess_targetlist (preptlist.c:89): a result relation that is not an
+// RTE_RELATION is elog(ERROR) "result relation must be a regular relation"
+// (XX000) in every build, not a debug-only assertion.
+#[test]
+fn b059_preprocess_targetlist_non_relation_result_rel_is_internal_error() {
+    let cx = cx();
+    let mcx = cx.mcx();
+    let mut parse = insert_query(mcx);
+    let mut rte = Node::build::<types_nodes::parsenodes::RangeTblEntry>(mcx).unwrap();
+    rte.rtekind = RTEKind::RTE_SUBQUERY;
+    rte.rellockmode = 3;
+    parse.rtable = NodeList::make1(mcx, rte.seal()).unwrap();
+    let mut run = crate::run::PlannerRun::new(mcx);
+    let qid = run.intern_query(leak_q(mcx, parse));
+    run.root.parse = qid;
+    let err = crate::prep::preprocess_targetlist(&mut run).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    assert_eq!(err.message(), "result relation must be a regular relation");
+}
+
+// expand_insert_targetlist (preptlist.c:498-520): trailing resjunk entries
+// are kept and renumbered after the last attribute; a trailing non-junk
+// entry is elog(ERROR) "targetlist is not sorted correctly" (XX000), not a
+// panic.
+#[test]
+fn b059_expand_insert_targetlist_trailing_entries() {
+    let cx = cx();
+    let mcx = cx.mcx();
+    let extra_expr = Node::mk_const(mcx, 23, -1, 0, 4, Datum::from_i32(9), false, true).unwrap();
+
+    let mut parse = insert_query(mcx);
+    let junk = Node::mk_target_entry(mcx, extra_expr, 7, Some("junk"), true).unwrap();
+    parse.targetList.lappend(mcx, junk).unwrap();
+    let stmt = planner(
+        mcx,
+        leak_q(mcx, parse),
+        "INSERT INTO t (pk) VALUES (7)",
+        CURSOR_OPT_PARALLEL_OK,
+        ParamListHandle::NULL,
+    )
+    .unwrap();
+    let mt_node = stmt.planTree.unwrap();
+    let mt = mt_node.as_modify_table().unwrap();
+    let sub = mt.plan.lefttree.unwrap();
+    let tlist = &sub.as_result().unwrap().plan.targetlist;
+    assert_eq!(tlist.len(), 3);
+    let t2 = tlist.nth(2).as_target_entry().unwrap();
+    assert!(t2.resjunk);
+    assert_eq!((t2.resno, t2.resname), (3, Some("junk")));
+
+    let mut parse = insert_query(mcx);
+    let extra = Node::mk_target_entry(mcx, extra_expr, 3, Some("extra"), false).unwrap();
+    parse.targetList.lappend(mcx, extra).unwrap();
+    let err = match planner(
+        mcx,
+        leak_q(mcx, parse),
+        "INSERT INTO t (pk) VALUES (7)",
+        CURSOR_OPT_PARALLEL_OK,
+        ParamListHandle::NULL,
+    ) {
+        Ok(_) => panic!("a non-junk trailing entry must be rejected"),
+        Err(e) => e,
+    };
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    assert_eq!(err.message(), "targetlist is not sorted correctly");
 }

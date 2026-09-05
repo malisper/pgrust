@@ -1001,6 +1001,17 @@ fn pull_up_simple_subquery<'mcx>(
     let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
     let lateral = rte.lateral;
     let shared_sub = rte.subquery.expect("RTE_SUBQUERY has a subquery");
+    // Whether the subroot passes below have work to do: pullable RTEs
+    // (preprocess_function_rtes / pull_up_subqueries) and relations with
+    // virtual generated columns (expand_virtual_generated_columns,
+    // prepjointree.c:1381). Either forces the copy-and-hack route.
+    let has_pullable = shared_sub.rtable.iter().any(|n| {
+        matches!(
+            n.as_range_tbl_entry().expect("rtable cell").rtekind,
+            RTEKind::RTE_SUBQUERY | RTEKind::RTE_VALUES | RTEKind::RTE_FUNCTION
+        )
+    });
+    let needs_vgen = rtable_has_virtual_generated(mcx, &shared_sub.rtable)?;
 
     let rtoffset = parse.rtable.len() as i32;
     // Nested pull-ups append their AppendRelInfos to run.root directly (C
@@ -1019,15 +1030,23 @@ fn pull_up_simple_subquery<'mcx>(
             crate::subselect::query_cells_copy(mcx, deep.as_query().expect("Query round trip"))?;
         crate::prep::replace_empty_jointree(mcx, &mut sub_local)?;
         crate::subselect::pull_up_sublinks(run, &mut sub_local)?;
-        if sub_local.rtable.iter().any(|n| {
+        // C order in pull_up_simple_subquery (prepjointree.c:1374-1394):
+        // preprocess_function_rtes on the subroot, then
+        // expand_virtual_generated_columns on the subroot, then the recursive
+        // pull_up_subqueries.
+        let has_pullable = sub_local.rtable.iter().any(|n| {
             matches!(
                 n.as_range_tbl_entry().expect("rtable cell").rtekind,
                 RTEKind::RTE_SUBQUERY | RTEKind::RTE_VALUES | RTEKind::RTE_FUNCTION
             )
-        }) {
-            // C order in pull_up_simple_subquery: preprocess_function_rtes
-            // on the subroot, then the recursive pull_up_subqueries.
+        });
+        if has_pullable {
             preprocess_function_rtes(run, &mut sub_local)?;
+        }
+        if needs_vgen {
+            expand_virtual_generated_columns(run, &mut sub_local)?;
+        }
+        if has_pullable {
             pull_up_subqueries(run, &mut sub_local)?;
         }
         // C rechecks after hacking on the copy; on failure the copy is
@@ -1050,14 +1069,10 @@ fn pull_up_simple_subquery<'mcx>(
         rewrite_manip::OffsetVarNodes(mcx, sealed, rtoffset, 0)?;
         rewrite_manip::IncrementVarSublevelsUp(sealed, -1, 1)?;
         (sealed.as_query().expect("Query"), true)
-    } else if shared_sub.rtable.iter().any(|n| {
-        matches!(
-            n.as_range_tbl_entry().expect("rtable cell").rtekind,
-            RTEKind::RTE_SUBQUERY | RTEKind::RTE_VALUES | RTEKind::RTE_FUNCTION
-        )
-    }) {
-        // C recursively completes preprocess_function_rtes (SRF inlining) and
-        // pull_up_subqueries for the child before splicing it in; runs on a
+    } else if needs_vgen || has_pullable {
+        // C recursively completes preprocess_function_rtes (SRF inlining),
+        // expand_virtual_generated_columns and pull_up_subqueries for the
+        // child before splicing it in (prepjointree.c:1374-1394); runs on a
         // cells-copy (C copyObject), the shared tree is never written.
         let mut sub_local = crate::subselect::query_cells_copy(mcx, shared_sub)?;
         // Fresh RTE nodes: the recursive pass ends with a with_mut fixup
@@ -1069,8 +1084,15 @@ fn pull_up_simple_subquery<'mcx>(
                 .lappend(mcx, rte_copy_with_perminfoindex(mcx, srte, srte.perminfoindex)?)?;
         }
         sub_local.rtable = fresh_rtable;
-        preprocess_function_rtes(run, &mut sub_local)?;
-        pull_up_subqueries(run, &mut sub_local)?;
+        if has_pullable {
+            preprocess_function_rtes(run, &mut sub_local)?;
+        }
+        if needs_vgen {
+            expand_virtual_generated_columns(run, &mut sub_local)?;
+        }
+        if has_pullable {
+            pull_up_subqueries(run, &mut sub_local)?;
+        }
         // C rechecks unconditionally after the recursive pull_up_subqueries:
         // nested pull-ups can leave the member's jointree bottoming out at a
         // JoinExpr or multiple RTEs, which is_safe_append_member must reject
@@ -4568,15 +4590,39 @@ fn add_source_nulling<'mcx>(
     // (visit recurses via expression_tree_walker above)
 }
 
+// Whether any relation of `rtable` carries virtual generated columns: the
+// pull_up_simple_subquery gate for the subroot expansion pass
+// (prepjointree.c:1381) -- the shared subquery tree is only copied when
+// there is something to expand.
+fn rtable_has_virtual_generated<'mcx>(
+    mcx: Mcx<'mcx>,
+    rtable: &NodeList<'mcx>,
+) -> PgResult<bool> {
+    for n in rtable {
+        let rte = n.as_range_tbl_entry().expect("rtable cell");
+        if rte.rtekind != RTEKind::RTE_RELATION {
+            continue;
+        }
+        let rel = table::table_open(mcx, rte.relid, types_rel::NoLock)?;
+        let has = rel.rd_att.constr.as_deref().is_some_and(|c| c.has_generated_virtual);
+        table::table_close(rel, types_rel::NoLock)?;
+        if has {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 // expand_virtual_generated_columns (prepjointree.c:969). Replaces every Var
 // referencing a virtual generated column with its generation expression via
 // the pullup replace machinery. build_generation_expression (rewriteHandler.c)
 // is mirrored here: rewrite_handler depends on this crate, and cookDefault
 // stored a coerced tree so build_column_default's re-coercion is a no-op.
-// DIVERGENCE: C expands before pull_up_subqueries plus per pulled-up subquery
-// (prepjointree.c:1360); here one pass runs after pull-up, when every merged
-// relation RTE is in the parent rtable (pull-up never opens relations, and
-// generation expressions are immutable, so pullability is unaffected).
+// Runs in C's order: once per query level before pull_up_subqueries
+// (planner.c:768) and on each subroot inside pull_up_simple_subquery
+// (prepjointree.c:1381) before the subquery's targetlist is substituted
+// into its parent, so UNION ALL leaves (AppendRelInfo translated_vars) and
+// pulled-up subqueries carry the generation expression.
 // Retained RTE_SUBQUERYs expand in their own subquery_planner pass.
 pub fn expand_virtual_generated_columns<'mcx>(
     run: &mut crate::PlannerRun<'mcx>,
@@ -4600,7 +4646,15 @@ pub fn expand_virtual_generated_columns<'mcx>(
             table::table_close(rel, types_rel::NoLock)?;
             continue;
         }
-        assert!(!rte.lateral);
+        // C Assert(!rte->lateral): a relation is marked LATERAL only when
+        // pulled up (with a TABLESAMPLE) out of a LATERAL subquery, and by
+        // then its own level already expanded it (pull_up_simple_subquery's
+        // subroot pass); the merged-rtable pass of subquery_planner may still
+        // meet it, with nothing left to replace.
+        if rte.lateral {
+            table::table_close(rel, types_rel::NoLock)?;
+            continue;
+        }
         let mut tlist = NodeList::nil();
         for i in 0..rel.rd_att.natts as usize {
             let att = rel.rd_att.attr(i);

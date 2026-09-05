@@ -102,18 +102,38 @@ pub fn subquery_planner<'mcx>(
     if has_function_rte {
         crate::prepjointree::preprocess_function_rtes(run, &mut *parse)?;
     }
-    if has_pullup_rte {
-        crate::prepjointree::pull_up_subqueries(run, &mut *parse)?;
-    }
-    if parse.setOperations.is_some() {
-        crate::prepjointree::flatten_simple_union_all(run, &mut *parse)?;
-    }
-    // C calls this unconditionally (planner.c:768); a relkind allowlist here
-    // skipped foreign tables' virtual columns. Divergence: generated_virtual-2.
+    // C order (planner.c:768-782): expand this level's virtual generated
+    // columns BEFORE pull_up_subqueries / flatten_simple_union_all; each
+    // pulled-up subquery expands its own relations on the subroot
+    // (pull_up_simple_subquery, prepjointree.c:1381) before its targetlist is
+    // substituted into this query, so UNION ALL leaves and pulled-up tlists
+    // carry the generation expression, never the stored (NULL) column.
+    // C calls this unconditionally; a relkind allowlist here skipped foreign
+    // tables' virtual columns. Divergence: generated_virtual-2.
     if parse.rtable.iter().any(|n| {
         n.as_range_tbl_entry().expect("rtable cell").rtekind == RTEKind::RTE_RELATION
     }) {
         crate::prepjointree::expand_virtual_generated_columns(run, &mut *parse)?;
+    }
+    if has_pullup_rte {
+        crate::prepjointree::pull_up_subqueries(run, &mut *parse)?;
+        // Second pass over the merged rtable: C's replace_rte_variables
+        // descends into LATERAL subqueries (sublevels_up), so an outer
+        // relation's virtual column referenced from inside a LATERAL
+        // subquery is expanded in the pass above. The expansion here does
+        // not descend into RTE_SUBQUERY bodies (RangeTblRef arm of
+        // replace_vars_in_jointree_expand), so a pulled-up LATERAL subquery
+        // surfaces that reference as a level-0 Var only now; expanding again
+        // catches it (per-relation replacement is idempotent). Redundant once
+        // the lateral RTE legs of that arm land (audit b009, PR #1655).
+        if parse.rtable.iter().any(|n| {
+            n.as_range_tbl_entry().expect("rtable cell").rtekind == RTEKind::RTE_RELATION
+        }) {
+            crate::prepjointree::expand_virtual_generated_columns(run, &mut *parse)?;
+        }
+    }
+    if parse.setOperations.is_some() {
+        crate::prepjointree::flatten_simple_union_all(run, &mut *parse)?;
     }
 
     let mut has_outer_joins = false;
@@ -505,7 +525,10 @@ fn find_having_conflicts(parse: &Query<'_>, group_rtindex: i32) -> PgResult<Vec<
 // group_var_eqop (planner.c): a GROUP Var's varattno is its 1-based position
 // in the RTE_GROUP groupexprs list, built by iterating parse->groupClause;
 // replay that traversal to recover the SortGroupClause's eqop.
-fn group_var_eqop(
+// C's get_sortgroupclause_tle(sgc, targetList) == NULL skip (planner.c:1511)
+// is not replayed: get_sortgroupref_tle elog(ERROR)s on a missing entry, so
+// the skip never fires and every clause counts, exactly as here.
+pub(crate) fn group_var_eqop(
     parse: &Query<'_>,
     var: &types_nodes::primnodes::Var<'_>,
 ) -> PgResult<types_core::Oid> {
@@ -518,7 +541,11 @@ fn group_var_eqop(
             return Ok(sgc.eqop);
         }
     }
-    panic!("could not find GROUP clause for GROUP Var attno {}", var.varattno);
+    // planner.c:1517: elog(ERROR), a catchable XX000, not a process abort.
+    Err(Box::new(types_error::PgError::error(format!(
+        "could not find GROUP clause for GROUP Var attno {}",
+        var.varattno
+    ))))
 }
 
 
