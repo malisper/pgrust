@@ -26,3 +26,4 @@ catalog = { path = "../catalog" }
 catalog_indexing = { path = "../catalog_indexing" }
 pg_depend = { path = "../pg_depend" }
 nodes_core = { path = "../../nodes/nodes_core" }
+objectaccess = { path = "../objectaccess" }

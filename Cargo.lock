@@ -12055,6 +12055,7 @@ dependencies = [
  "heaptuple",
  "mcx",
  "nodes_core",
+ "objectaccess",
  "outfuncs",
  "pg_depend",
  "table",

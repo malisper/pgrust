@@ -123,7 +123,7 @@ pub(crate) fn add_relation_new_constraints_ext<'mcx>(
         if !is_internal {
             pg_depend::CheckUsageOnTypesInSingleRelExpr(mcx, expr, rel.rd_id, miscinit::GetUserId())?;
         }
-        let def_oid = pg_attrdef::StoreAttrDefault(mcx, rel, attnum, expr)?;
+        let def_oid = pg_attrdef::StoreAttrDefault(mcx, rel, attnum, expr, is_internal)?;
         cooked.push(CookedCon {
             contype: ConstrType::CONSTR_DEFAULT,
             conoid: def_oid,

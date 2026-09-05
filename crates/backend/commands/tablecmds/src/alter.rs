@@ -1233,7 +1233,7 @@ fn ATRewriteCatalogs<'mcx>(
                     // tablecmds.c:8236: remove any old default for the column
                     // first (possible when combining LIKE with inheritance).
                     RemoveAttrDefault(mcx, rel.rd_id, cmd.num, false, true)?;
-                    pg_attrdef::StoreAttrDefault(mcx, &rel, cmd.num, defnode)?;
+                    pg_attrdef::StoreAttrDefault(mcx, &rel, cmd.num, defnode, true)?;
                 }
                 AlterTableType::AT_AddConstraint => {
                     // ATParseTransformCmd at the initial examination only
@@ -5884,7 +5884,7 @@ fn ATExecAlterColumnType<'mcx>(
         xact::CommandCounterIncrement()?;
         RemoveAttrDefault(mcx, rel.rd_id, attnum, true, true)?;
         let rel2 = table::table_open(mcx, rel.rd_id, NoLock)?;
-        pg_attrdef::StoreAttrDefault(mcx, &rel2, attnum, defexpr)?;
+        pg_attrdef::StoreAttrDefault(mcx, &rel2, attnum, defexpr, true)?;
         rel2.close(NoLock)?;
     }
     Ok(())

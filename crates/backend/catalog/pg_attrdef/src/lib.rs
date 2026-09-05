@@ -44,6 +44,7 @@ pub fn StoreAttrDefault<'mcx>(
     rel: &Relation<'mcx>,
     attnum: AttrNumber,
     expr: Node<'mcx>,
+    is_internal: bool,
 ) -> PgResult<Oid> {
     let adbin = outfuncs::nodeToString(mcx, expr)?;
     let adrel = table::table_open(mcx, ATTR_DEFAULT_RELATION_ID, RowExclusiveLock)?;
@@ -120,6 +121,16 @@ pub fn StoreAttrDefault<'mcx>(
         false,
     )?;
 
+    // pg_attrdef.c:141: post creation hook for attribute defaults.  (ALTER
+    // TABLE ALTER COLUMN SET/DROP DEFAULT is a delete+create of the entry,
+    // so a callee wanting to distinguish checks for an older version.)
+    objectaccess::InvokeObjectPostCreateHookArg(
+        ATTR_DEFAULT_RELATION_ID,
+        rel.rd_id,
+        attnum as i32,
+        is_internal,
+    )?;
+
     Ok(attrdef_oid)
 }
 
@@ -182,8 +193,9 @@ pub fn RemoveAttrDefaultById<'mcx>(mcx: Mcx<'mcx>, attrdef_id: Oid) -> PgResult<
     let keys = [eq_key(Anum_pg_attrdef_oid, F_OIDEQ, Datum::from_oid(attrdef_id))];
     let mut scan =
         genam::systable_beginscan(mcx, &adrel, ATTR_DEFAULT_OID_INDEX_ID, true, None, &keys)?;
-    let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("could not find tuple for attrdef {attrdef_id}"));
+    let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+        return Err(attrdef_tuple_missing(attrdef_id));
+    };
     let desc = adrel.descr();
     let get = |anum: i32| {
         let mut isnull = false;
@@ -237,6 +249,14 @@ pub fn RemoveAttrDefaultById<'mcx>(mcx: Mcx<'mcx>, attrdef_id: Oid) -> PgResult<
     myrel.close(types_rel::NoLock)
 }
 
+// pg_attrdef.c:235 `elog(ERROR, "could not find tuple for attrdef %u")`:
+// catchable, level ERROR, SQLSTATE XX000 -- never a backend-thread panic.
+#[cold]
+#[inline(never)]
+fn attrdef_tuple_missing(attrdef_id: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!("could not find tuple for attrdef {attrdef_id}")))
+}
+
 // Aligned with C's ATTNUM cache-lookup elog.
 #[track_caller]
 #[cold]
@@ -279,4 +299,26 @@ pub fn GetAttrDefaultBin<'mcx>(
     genam::systable_endscan(mcx, scan)?;
     adrel.close(types_rel::AccessShareLock)?;
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    // pg_attrdef.c:235 (RemoveAttrDefaultById) and the ATTNUM cache-lookup
+    // sites (pg_attrdef.c:115/:264) are elog(ERROR) -- catchable, level
+    // ERROR, SQLSTATE XX000, C's message bytes.  RemoveAttrDefaultById used
+    // to panic!() (audit-18.6 b193).
+    #[test]
+    fn elog_error_sites_are_catchable_xx000() {
+        for (e, want) in [
+            (super::attrdef_tuple_missing(16387), "could not find tuple for attrdef 16387"),
+            (
+                super::attr_lookup_failed(3, 16384),
+                "cache lookup failed for attribute 3 of relation 16384",
+            ),
+        ] {
+            assert_eq!(e.message(), want);
+            assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+            assert_eq!(e.level(), types_error::ERROR);
+        }
+    }
 }

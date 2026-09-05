@@ -962,7 +962,7 @@ pub fn DefineRelation<'mcx>(
             xact::CommandCounterIncrement()?;
             let rel = table::table_open(mcx, relation_id, types_rel::NoLock)?;
             for &(attnum, expr) in m.gendefs.iter() {
-                pg_attrdef::StoreAttrDefault(mcx, &rel, attnum, expr)?;
+                pg_attrdef::StoreAttrDefault(mcx, &rel, attnum, expr, false)?;
             }
             table::table_close(rel, types_rel::NoLock)?;
         }
@@ -971,7 +971,7 @@ pub fn DefineRelation<'mcx>(
         xact::CommandCounterIncrement()?;
         let rel = table::table_open(mcx, relation_id, types_rel::NoLock)?;
         for &(attnum, expr) in cooked_defaults.iter() {
-            pg_attrdef::StoreAttrDefault(mcx, &rel, attnum, expr)?;
+            pg_attrdef::StoreAttrDefault(mcx, &rel, attnum, expr, false)?;
         }
         table::table_close(rel, types_rel::NoLock)?;
     }
@@ -982,7 +982,7 @@ pub fn DefineRelation<'mcx>(
         xact::CommandCounterIncrement()?;
         let rel = table::table_open(mcx, relation_id, types_rel::NoLock)?;
         for &(attnum, expr) in partition_gendefs.iter() {
-            pg_attrdef::StoreAttrDefault(mcx, &rel, attnum, expr)?;
+            pg_attrdef::StoreAttrDefault(mcx, &rel, attnum, expr, false)?;
         }
         table::table_close(rel, types_rel::NoLock)?;
     }
