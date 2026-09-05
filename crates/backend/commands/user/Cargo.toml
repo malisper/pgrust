@@ -25,11 +25,13 @@ adt_timestamp = { path = "../../utils/adt/adt_timestamp" }
 varlena = { path = "../../utils/adt/varlena" }
 crypt = { path = "../../libpq/crypt" }
 mbutils = { path = "../../utils/mb/mbutils" }
+parser_small1 = { path = "../../parser/parser_small1" }
 cache_syscache = { path = "../../utils/cache/cache_syscache" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 catcache = { path = "../../utils/cache/catcache" }
 catalog = { path = "../../catalog/catalog" }
 catalog_indexing = { path = "../../catalog/catalog_indexing" }
+objectaccess = { path = "../../catalog/objectaccess" }
 pg_shdepend = { path = "../../catalog/pg_shdepend" }
 pg_db_role_setting = { path = "../../catalog/pg_db_role_setting" }
 heaptuple = { path = "../../access/common/heaptuple" }

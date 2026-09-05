@@ -288,3 +288,76 @@ fn def_get_string_remaining_arms_match_c() {
     };
     assert_eq!(def_get_string(&def).unwrap(), "a.b");
 }
+
+// check_password_hook chain: modules install newest-first (C: each _PG_init
+// saves the previous pointer and calls it from its own hook), the arguments
+// reach every hook unchanged, and the first error stops the chain.
+mod check_password_hook_chain {
+    use super::*;
+    use std::sync::Mutex;
+
+    static SEEN: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    fn first(
+        _mcx: Mcx<'_>,
+        username: &str,
+        password: &str,
+        password_type: crypt::PasswordType,
+        validuntil_time: Datum,
+        validuntil_null: bool,
+    ) -> PgResult<()> {
+        SEEN.lock().unwrap().push(format!(
+            "first:{username}:{password}:{password_type:?}:{}:{validuntil_null}",
+            validuntil_time.as_i64()
+        ));
+        Ok(())
+    }
+
+    fn second(
+        _mcx: Mcx<'_>,
+        _username: &str,
+        password: &str,
+        _password_type: crypt::PasswordType,
+        _validuntil_time: Datum,
+        _validuntil_null: bool,
+    ) -> PgResult<()> {
+        SEEN.lock().unwrap().push(format!("second:{password}"));
+        if password == "refuse" {
+            return Err(err("second refuses".into(), ERRCODE_INVALID_PARAMETER_VALUE));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn runs_newest_first_and_stops_at_the_first_error() {
+        let root = mcx::session_root("user-check-password-hook-test");
+        let mcx = root.mcx();
+        assert!(!check_password_hook_installed());
+        // No hook: nothing runs, nothing fails.
+        run_check_password_hook(mcx, "u", "refuse", Datum::from_i64(7), false).unwrap();
+        assert!(SEEN.lock().unwrap().is_empty());
+
+        install_check_password_hook(first);
+        install_check_password_hook(second);
+        assert!(check_password_hook_installed());
+
+        run_check_password_hook(mcx, "alice", "abcdefg1", Datum::from_i64(7), false).unwrap();
+        assert_eq!(
+            std::mem::take(&mut *SEEN.lock().unwrap()),
+            vec!["second:abcdefg1".to_string(), "first:alice:abcdefg1:Plaintext:7:false".to_string()]
+        );
+
+        // get_password_type classifies the supplied string (user.c:400).
+        run_check_password_hook(mcx, "alice", "md5e5f1b3fb6e6c8f8a2a4b4f9a7b3c1d2e", Datum::null(), true)
+            .unwrap();
+        assert_eq!(
+            std::mem::take(&mut *SEEN.lock().unwrap())[1],
+            "first:alice:md5e5f1b3fb6e6c8f8a2a4b4f9a7b3c1d2e:Md5:0:true"
+        );
+
+        let e = run_check_password_hook(mcx, "alice", "refuse", Datum::null(), true)
+            .expect_err("the newest hook refuses");
+        assert_eq!(e.message(), "second refuses");
+        assert_eq!(std::mem::take(&mut *SEEN.lock().unwrap()), vec!["second:refuse".to_string()]);
+    }
+}

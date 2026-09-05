@@ -6,7 +6,7 @@
 #![allow(non_upper_case_globals)]
 #![allow(clippy::too_many_arguments)]
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 use cache_syscache::cacheinfo::{AUTHMEMROLEMEM, AUTHNAME, AUTHOID};
 use cache_syscache::{
@@ -16,6 +16,7 @@ use cache_syscache::{
 use catcache::CatCTuple;
 use datum::Datum;
 use mcx::{Mcx, PgVec};
+use parser_small1::ParseState;
 use types_core::catalog::{BOOTSTRAP_SUPERUSERID, ROLE_PG_DATABASE_OWNER};
 use types_core::{AttrNumber, InvalidOid, Oid};
 use types_error::{
@@ -111,6 +112,50 @@ thread_local! {
 
 fn err(msg: String, sqlstate: SqlState) -> Box<PgError> {
     Box::new(PgError::error(msg).with_sqlstate(sqlstate))
+}
+
+// check_password_hook (user.h:25, user.c:70): CreateRole (user.c:398) and
+// AlterRole (user.c:848) hand a supplied password to the loaded modules
+// (contrib/passwordcheck) before storing it. C chains consumers by hand —
+// each _PG_init saves the previous pointer and calls it from its own hook —
+// so the per-backend chain is explicit here and runs newest-first, C's chain
+// order. Installation happens at LOAD time and is backend-local, as the
+// forked backend's static is; the slot is classified in the session TLS
+// census (backend/access/session tests).
+pub type CheckPasswordHook =
+    fn(Mcx<'_>, &str, &str, crypt::PasswordType, Datum, bool) -> PgResult<()>;
+
+thread_local! {
+    static CHECK_PASSWORD_HOOKS: RefCell<Vec<CheckPasswordHook>> = const { RefCell::new(Vec::new()) };
+}
+
+// `check_password_hook = my_hook` in a module's _PG_init.
+pub fn install_check_password_hook(hook: CheckPasswordHook) {
+    CHECK_PASSWORD_HOOKS.with(|h| h.borrow_mut().push(hook));
+}
+
+// `check_password_hook != NULL`.
+pub fn check_password_hook_installed() -> bool {
+    CHECK_PASSWORD_HOOKS.with(|h| !h.borrow().is_empty())
+}
+
+// `(*check_password_hook)(username, password, get_password_type(password),
+// validUntil_datum, validUntil_null)`: the newest module's hook runs first
+// and reaches the older ones through the chain; the first error stops it,
+// as C's ereport(ERROR) longjmps out of the chain.
+fn run_check_password_hook(
+    mcx: Mcx<'_>,
+    username: &str,
+    password: &str,
+    validuntil_time: Datum,
+    validuntil_null: bool,
+) -> PgResult<()> {
+    let hooks = CHECK_PASSWORD_HOOKS.with(|h| h.borrow().clone());
+    let password_type = crypt::get_password_type(password);
+    for hook in hooks.iter().rev() {
+        hook(mcx, username, password, password_type, validuntil_time, validuntil_null)?;
+    }
+    Ok(())
 }
 
 // binary_upgrade_next_pg_authid_oid (user.c): set-once, consume-once
@@ -323,8 +368,23 @@ fn def_get_string(def: &DefElem<'_>) -> PgResult<String> {
     })
 }
 
-fn conflicting_def_elem() -> Box<PgError> {
-    err("conflicting or redundant options".into(), ERRCODE_SYNTAX_ERROR)
+// parser_errposition(pstate, location): the cursor only when a ParseState
+// with source text is at hand (C's parser_errposition is a no-op on a NULL
+// pstate / negative location).
+fn cursor_at(pstate: Option<&ParseState<'_, '_>>, location: i32) -> Option<i32> {
+    let ps = pstate?;
+    let pos = parser_small1::parser_errposition(ps, location, mbutils::GetDatabaseEncoding());
+    (pos > 0).then_some(pos)
+}
+
+// errorConflictingDefElem (define.c:377): ERRCODE_SYNTAX_ERROR with
+// parser_errposition(pstate, defel->location) — user.c:194 (CreateRole) and
+// user.c:662 (AlterRole).
+#[cold]
+fn conflicting_def_elem(pstate: Option<&ParseState<'_, '_>>, defel: &DefElem<'_>) -> Box<PgError> {
+    let mut e = err("conflicting or redundant options".into(), ERRCODE_SYNTAX_ERROR);
+    e.cursor_position = cursor_at(pstate, defel.location);
+    e
 }
 
 fn oid_key(attno: i32, oid: Oid) -> ScanKeyData {
@@ -392,7 +452,11 @@ fn createrole_self_grant_options() -> GrantRoleOptions {
 }
 
 // CREATE ROLE
-pub fn CreateRole<'mcx, 'a>(mcx: Mcx<'mcx>, stmt: &CreateRoleStmt<'a>) -> PgResult<Oid> {
+pub fn CreateRole<'mcx, 'a>(
+    mcx: Mcx<'mcx>,
+    pstate: Option<&ParseState<'_, '_>>,
+    stmt: &CreateRoleStmt<'a>,
+) -> PgResult<Oid> {
     let currentUserId = miscinit::GetUserId();
     let role = stmt.role.expect("CreateRoleStmt.role");
 
@@ -439,7 +503,7 @@ pub fn CreateRole<'mcx, 'a>(mcx: Mcx<'mcx>, stmt: &CreateRoleStmt<'a>) -> PgResu
             }
         };
         if slot.is_some() {
-            return Err(conflicting_def_elem());
+            return Err(conflicting_def_elem(pstate, defel));
         }
         *slot = Some(defel);
     }
@@ -526,6 +590,14 @@ pub fn CreateRole<'mcx, 'a>(mcx: Mcx<'mcx>, stmt: &CreateRoleStmt<'a>) -> PgResu
         Some(s) => (Datum::from_i64(adt_timestamp::timestamptz_in(s, -1, None)?), false),
         None => (Datum::null(), true),
     };
+
+    // user.c:395-402: the password checking hook, before the empty-password
+    // clearing below (user.c:419) — an empty string reaches the hook.
+    if let Some(p) = password {
+        if check_password_hook_installed() {
+            run_check_password_hook(mcx, role, p, validUntil_datum, validUntil_null)?;
+        }
+    }
 
     let mut new_record = [Datum::null(); Natts_pg_authid];
     let mut new_record_nulls = [false; Natts_pg_authid];
@@ -679,13 +751,20 @@ pub fn CreateRole<'mcx, 'a>(mcx: Mcx<'mcx>, stmt: &CreateRoleStmt<'a>) -> PgResu
     let admin_ids = roleSpecsToIds(mcx, adminmembers)?;
     AddRoleMems(mcx, currentUserId, role, roleid, &admin_specs, &admin_ids, InvalidOid, &popt)?;
 
+    // user.c:600: post creation hook for the new role.
+    objectaccess::InvokeObjectPostCreateHook(catalog::AuthIdRelationId, roleid, 0)?;
+
     pg_authid_rel.close(NoLock)?;
 
     Ok(roleid)
 }
 
 // ALTER ROLE
-pub fn AlterRole<'mcx, 'a>(mcx: Mcx<'mcx>, stmt: &AlterRoleStmt<'a>) -> PgResult<Oid> {
+pub fn AlterRole<'mcx, 'a>(
+    mcx: Mcx<'mcx>,
+    pstate: Option<&ParseState<'_, '_>>,
+    stmt: &AlterRoleStmt<'a>,
+) -> PgResult<Oid> {
     let currentUserId = miscinit::GetUserId();
 
     check_rolespec_name(stmt.role, "Cannot alter reserved roles.")?;
@@ -724,7 +803,7 @@ pub fn AlterRole<'mcx, 'a>(mcx: Mcx<'mcx>, stmt: &AlterRoleStmt<'a>) -> PgResult
             }
         };
         if slot.is_some() {
-            return Err(conflicting_def_elem());
+            return Err(conflicting_def_elem(pstate, defel));
         }
         *slot = Some(defel);
     }
@@ -830,6 +909,13 @@ pub fn AlterRole<'mcx, 'a>(mcx: Mcx<'mcx>, stmt: &AlterRoleStmt<'a>) -> PgResult
         None => SysCacheGetAttr(cache_id, &tuple, Anum_pg_authid_rolvaliduntil)?,
     };
 
+    // user.c:845-852: the password checking hook.
+    if let Some(p) = password {
+        if check_password_hook_installed() {
+            run_check_password_hook(mcx, &rolename, p, validUntil_datum, validUntil_null)?;
+        }
+    }
+
     let mut new_record = [Datum::null(); Natts_pg_authid];
     let mut new_record_nulls = [false; Natts_pg_authid];
     let mut new_record_repl = [false; Natts_pg_authid];
@@ -929,6 +1015,9 @@ pub fn AlterRole<'mcx, 'a>(mcx: Mcx<'mcx>, stmt: &AlterRoleStmt<'a>) -> PgResult
         &new_record_repl,
     )?;
     catalog_indexing::CatalogTupleUpdate(mcx, &pg_authid_rel, &otid, &mut new_tuple)?;
+
+    // user.c:960.
+    objectaccess::InvokeObjectPostAlterHook(catalog::AuthIdRelationId, roleid, 0)?;
 
     ReleaseSysCache(tuple);
 
@@ -1134,6 +1223,9 @@ pub fn RenameRole<'mcx>(mcx: Mcx<'mcx>, oldname: &str, newname: &str) -> PgResul
     )?;
     catalog_indexing::CatalogTupleUpdate(mcx, &rel, &otid, &mut newtuple)?;
 
+    // user.c:1460.
+    objectaccess::InvokeObjectPostAlterHook(catalog::AuthIdRelationId, roleid, 0)?;
+
     ReleaseSysCache(oldtuple);
 
     rel.close(NoLock)?;
@@ -1204,6 +1296,9 @@ pub fn DropRole<'mcx>(mcx: Mcx<'mcx>, stmt: &DropRoleStmt<'_>) -> PgResult<()> {
                 ERRCODE_INSUFFICIENT_PRIVILEGE,
             ));
         }
+
+        // user.c:1182: DROP hook for the role being removed.
+        objectaccess::InvokeObjectDropHook(catalog::AuthIdRelationId, roleid, 0)?;
 
         ReleaseSysCache(tuple);
 
@@ -1367,7 +1462,11 @@ fn DeleteSharedSecurityLabel<'mcx>(mcx: Mcx<'mcx>, objectId: Oid, classId: Oid) 
 }
 
 // GRANT/REVOKE role TO/FROM role
-pub fn GrantRole<'mcx, 'a>(mcx: Mcx<'mcx>, stmt: &GrantRoleStmt<'a>) -> PgResult<()> {
+pub fn GrantRole<'mcx, 'a>(
+    mcx: Mcx<'mcx>,
+    pstate: Option<&ParseState<'_, '_>>,
+    stmt: &GrantRoleStmt<'a>,
+) -> PgResult<()> {
     let currentUserId = miscinit::GetUserId();
 
     let mut popt = InitGrantRoleOptions();
@@ -1400,17 +1499,23 @@ pub fn GrantRole<'mcx, 'a>(mcx: Mcx<'mcx>, stmt: &GrantRoleStmt<'a>) -> PgResult
                 }
             }
             _ => {
-                return Err(err(
+                // user.c:1515-1519: parser_errposition(pstate, opt->location).
+                let mut e = err(
                     format!("unrecognized role option \"{defname}\""),
                     ERRCODE_SYNTAX_ERROR,
-                ))
+                );
+                e.cursor_position = cursor_at(pstate, opt.location);
+                return Err(e);
             }
         }
 
-        return Err(err(
+        // user.c:1521-1525: parser_errposition(pstate, opt->location).
+        let mut e = err(
             format!("unrecognized value for role option \"{defname}\": \"{optval}\""),
             ERRCODE_INVALID_PARAMETER_VALUE,
-        ));
+        );
+        e.cursor_position = cursor_at(pstate, opt.location);
+        return Err(e);
     }
 
     let grantor = match stmt.grantor {

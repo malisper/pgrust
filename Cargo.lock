@@ -11960,6 +11960,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "passwordcheck"
+version = "0.0.0"
+dependencies = [
+ "crypt",
+ "datum",
+ "dfmgr",
+ "guc",
+ "mcx",
+ "types_error",
+ "types_fmgr",
+ "types_guc",
+ "user",
+]
+
+[[package]]
 name = "pathnode"
 version = "0.1.0"
 dependencies = [
@@ -16790,6 +16805,7 @@ dependencies = [
  "parser_driver",
  "partbounds",
  "partitionfuncs",
+ "passwordcheck",
  "pg_buffercache",
  "pg_class",
  "pg_config",
@@ -20547,6 +20563,8 @@ dependencies = [
  "mbutils",
  "mcx",
  "miscinit",
+ "objectaccess",
+ "parser_small1",
  "pg_db_role_setting",
  "pg_shdepend",
  "superuser",

@@ -1126,9 +1126,20 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      so the compute_*_stats vacuum_delay_point(true) witnesses can
     //      raise 57014 mid-sample (unit harness fixture; counted by the
     //      tree census, never product code — same class as 43/45/46/60/62).
-    // 588, 18.6 conformance audit (2026-09-04), access/hash remediation
+    // 587, 18.6 conformance audit (2026-09-05), commands/user
+    //   check_password_hook port (b153-backend-commands-user-1): one
+    //   product source —
+    //   67. commands/user/src/lib.rs CHECK_PASSWORD_HOOKS —
+    //      RefCell<Vec<CheckPasswordHook>>, the port of user.c:70
+    //      `check_password_hook_type check_password_hook = NULL` as the
+    //      explicit per-backend hook chain (each module's _PG_init saves the
+    //      previous pointer in C); filled at LOAD time by contrib/
+    //      passwordcheck's _PG_init, backend-local like the forked backend's
+    //      static, never bound or reset — non-session TLS, same class as 61
+    //      (dfmgr FILE_LIST is the module list it mirrors).
+        // 588, 18.6 conformance audit (2026-09-04), access/hash remediation
     //   batch b004: two test-only sources —
-    //   67. access/hash/hash/src/tests.rs PAGES/NBLOCKS_OVERRIDE/WAL_FAIL/
+    //   69. access/hash/hash/src/tests.rs PAGES/NBLOCKS_OVERRIDE/WAL_FAIL/
     //      WAL/NEXT_LSN/LOGICAL_DECODING (one thread_local! block) —
     //      fake-buffer + WAL-recorder fixture for the hashinsert/ovfl/page
     //      witnesses (unit harness fixture; counted by the tree census,
@@ -1164,7 +1175,7 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      Cell<bool> per-thread override for fill_random so the px.c:96
     //      PXE_NO_RANDOM px_THROW_ERROR paths are witnessable (unit harness
     //      fixture; same class as 43/45/46/60).
-    assert_eq!(count_tree(crates), 592, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+        assert_eq!(count_tree(crates), 593, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

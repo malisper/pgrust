@@ -251,6 +251,7 @@ pub fn init_all_with_transport(transport: Transport) {
     pg_stat_statements::init_seams();
     pg_buffercache::init_seams();
     auto_explain::init_seams();
+    passwordcheck::init_seams();
     pgvector::init_seams();
     pgvector_hnsw::init_seams();
     bloom::init_seams();

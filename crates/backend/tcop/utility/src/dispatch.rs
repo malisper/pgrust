@@ -395,7 +395,16 @@ fn dispatch_switch<'mcx>(
         }
         T_GrantRoleStmt => {
             let stmt = parsetree.as_grant_role_stmt().unwrap();
-            user::GrantRole(mcx, stmt)?;
+            // utility.c:1010 GrantRole(pstate, stmt): the option-error
+            // cursors (user.c:1519/:1525) need the statement's ParseState.
+            let mut pstate = parser_small1::make_parsestate(mcx, None);
+            {
+                let mut v: mcx::PgVec<'mcx, u8> = mcx::PgVec::new_in(mcx);
+                mcx::vec_append_bytes(&mut v, source_text.as_bytes())?;
+                pstate.p_sourcetext = Some(v.leak());
+            }
+            user::GrantRole(mcx, Some(&pstate), stmt)?;
+            parser_small1::free_parsestate(pstate)?;
         }
 
         T_CreatedbStmt => {
@@ -584,11 +593,29 @@ fn dispatch_switch<'mcx>(
 
         T_CreateRoleStmt => {
             let stmt = parsetree.as_create_role_stmt().unwrap();
-            user::CreateRole(mcx, stmt)?;
+            // utility.c:1054 CreateRole(pstate, stmt): errorConflictingDefElem
+            // (user.c:194) carries the query cursor.
+            let mut pstate = parser_small1::make_parsestate(mcx, None);
+            {
+                let mut v: mcx::PgVec<'mcx, u8> = mcx::PgVec::new_in(mcx);
+                mcx::vec_append_bytes(&mut v, source_text.as_bytes())?;
+                pstate.p_sourcetext = Some(v.leak());
+            }
+            user::CreateRole(mcx, Some(&pstate), stmt)?;
+            parser_small1::free_parsestate(pstate)?;
         }
         T_AlterRoleStmt => {
             let stmt = parsetree.as_alter_role_stmt().unwrap();
-            user::AlterRole(mcx, stmt)?;
+            // utility.c:1058 AlterRole(pstate, stmt): errorConflictingDefElem
+            // (user.c:662) carries the query cursor.
+            let mut pstate = parser_small1::make_parsestate(mcx, None);
+            {
+                let mut v: mcx::PgVec<'mcx, u8> = mcx::PgVec::new_in(mcx);
+                mcx::vec_append_bytes(&mut v, source_text.as_bytes())?;
+                pstate.p_sourcetext = Some(v.leak());
+            }
+            user::AlterRole(mcx, Some(&pstate), stmt)?;
+            parser_small1::free_parsestate(pstate)?;
         }
         T_AlterRoleSetStmt => {
             let stmt = parsetree.as_alter_role_set_stmt().unwrap();
