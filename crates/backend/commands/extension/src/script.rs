@@ -1,9 +1,9 @@
 // Install/update script execution (extension.c:867-1458).
-use elog::ereport;
+use elog::{elog, ereport};
 use mcx::Mcx;
 use types_core::{InvalidOid, Oid, SECURITY_LOCAL_USERID_CHANGE};
 use types_error::{
-    PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INSUFFICIENT_PRIVILEGE,
+    PgError, PgResult, DEBUG1, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INSUFFICIENT_PRIVILEGE,
     ERRCODE_INVALID_TEXT_REPRESENTATION, ERROR, WARNING,
 };
 use types_nodes::NodeTag;
@@ -348,6 +348,21 @@ pub(crate) fn execute_extension_script(
     }
 
     let filename = get_extension_script_filename(control, from_version, version);
+
+    // extension.c:1240-1243
+    match from_version {
+        None => elog(
+            DEBUG1,
+            format!("executing extension script for \"{}\" version '{version}'", control.name),
+        )?,
+        Some(from_version) => elog(
+            DEBUG1,
+            format!(
+                "executing extension script for \"{}\" update from version '{from_version}' to '{version}'",
+                control.name
+            ),
+        )?,
+    }
 
     let mut save_userid: Oid = InvalidOid;
     let mut save_sec_context: i32 = 0;

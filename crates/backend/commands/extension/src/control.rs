@@ -91,9 +91,13 @@ fn substitute_path_macro(s: &str, macro_: &str, value: &str) -> PgResult<String>
 }
 
 // DIVERGENCE: contrib extension files are staged beside the binary by
-// main_main's build.rs (no `make install` exists); the staged dir precedes
-// the system dir so this repo's vendored scripts win over whatever C install
-// PGRUST_PGSHAREDIR points at (that env is set for tzdata, not extensions).
+// main_main's build.rs (no `make install` exists); the staged dir stands in
+// for the system dir and is searched immediately before it, so this repo's
+// vendored scripts win over whatever C install PGRUST_PGSHAREDIR points at
+// (that env is set for tzdata, not extensions). It joins the search path only
+// where C searches the system dir (extension.c:484-535: an empty
+// extension_control_path, or its "$system" entry) — a path that excludes
+// $system excludes the staged files too.
 fn staged_extension_dir() -> Option<String> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?.join("share/extension");
@@ -105,15 +109,16 @@ pub(crate) fn get_extension_control_directories() -> PgResult<Vec<String>> {
     let ecp = EXTENSION_CONTROL_PATH.with(|c| c.borrow().clone());
 
     let mut paths = Vec::new();
-    paths.extend(staged_extension_dir());
 
     if ecp.is_empty() {
+        paths.extend(staged_extension_dir());
         paths.push(system_dir);
         return Ok(paths);
     }
 
     for piece in ecp.split(':') {
         let mangled = if piece == "$system" {
+            paths.extend(staged_extension_dir());
             substitute_path_macro(piece, "$system", &system_dir)?
         } else {
             format!("{piece}/extension")
@@ -448,15 +453,29 @@ pub(crate) fn read_whole_file(filename: &str) -> PgResult<Vec<u8>> {
             .into_error()
             .into());
     }
-    std::fs::read(filename).map_err(|e| {
+    let bytes_to_read = meta.len();
+
+    let file = std::fs::File::open(filename).map_err(|e| {
         let mut b = ereport(ERROR);
         if let Some(errno) = e.raw_os_error() {
             b = b.with_saved_errno(errno).errcode_for_file_access();
         }
         b.errmsg(format!("could not open file \"{filename}\" for reading: %m"))
             .into_error()
-            .into()
-    })
+    })?;
+
+    // fread(buf, 1, bytes_to_read, file): a read-side failure (ferror) is
+    // "could not read file", distinct from the open failure above.
+    use std::io::Read;
+    let mut buf = Vec::with_capacity(bytes_to_read as usize + 1);
+    file.take(bytes_to_read).read_to_end(&mut buf).map_err(|e| {
+        let mut b = ereport(ERROR);
+        if let Some(errno) = e.raw_os_error() {
+            b = b.with_saved_errno(errno).errcode_for_file_access();
+        }
+        b.errmsg(format!("could not read file \"{filename}\": %m")).into_error()
+    })?;
+    Ok(buf)
 }
 
 // Shared directory-scan shape of pg_available_extensions /

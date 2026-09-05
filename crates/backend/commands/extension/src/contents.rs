@@ -1,7 +1,8 @@
 //! ALTER EXTENSION ADD/DROP (extension.c ExecAlterExtensionContentsStmt +
 //! ExecAlterExtensionContentsRecurse), incl. the dependent-object recursion
-//! (array/multirange/rowtype members) and extconfig removal. pg_init_privs
-//! record/remove is a no-op repo-wide (see aclchk grant.rs).
+//! (array/multirange/rowtype members), extconfig removal and the
+//! pg_init_privs record/remove (aclchk recordExtObjInitPriv /
+//! removeExtObjInitPriv).
 
 use mcx::Mcx;
 use types_core::{
@@ -142,7 +143,14 @@ fn alter_contents_recurse<'mcx>(
             ));
         }
         pg_depend::recordDependencyOn(mcx, object, extension, DependencyType::Extension)?;
-        // recordExtObjInitPriv: pg_init_privs is a repo-wide no-op.
+
+        // Also record the initial ACL on the object, if any (extension.c:3848).
+        //
+        // Note that this will handle the object's ACLs, as well as any ACLs
+        // on object subIds.  (In other words, when the object is a table,
+        // this will record the table's ACL and the ACLs for the columns on
+        // the table, if any).
+        aclchk::recordExtObjInitPriv(mcx, object.objectId, object.classId)?;
     } else {
         if old_extension != extension.objectId {
             let desc = objectaddress_seams::get_object_description::call(
@@ -171,7 +179,10 @@ fn alter_contents_recurse<'mcx>(
         if object.classId == RELATION_RELATION_ID {
             extension_config_remove(mcx, extension.objectId, object.objectId)?;
         }
-        // removeExtObjInitPriv: pg_init_privs is a repo-wide no-op.
+
+        // Remove all the initial ACLs, if any (extension.c:3881): the
+        // object's own and those on its object subIds (a table's columns).
+        aclchk::removeExtObjInitPriv(mcx, object.objectId, object.classId)?;
     }
 
     // Recurse to dependent objects: the array type of a base type, the

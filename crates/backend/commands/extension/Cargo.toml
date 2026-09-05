@@ -62,5 +62,6 @@ commands_comment = { path = "../comment" }
 explain = { path = "../explain" }
 extension_seams = { path = "../extension_seams" }
 objectaddress_seams = { path = "../../catalog/objectaddress_seams" }
+objectaccess = { path = "../../catalog/objectaccess" }
 adt_quote = { path = "../../utils/adt/quote" }
 format_type = { path = "../../utils/adt/format_type" }

@@ -1532,6 +1532,265 @@ fn record_extension_init_priv_worker<'mcx>(
     rel.close(RowExclusiveLock)
 }
 
+// recordExtObjInitPriv (aclchk.c:4355-4508): ALTER EXTENSION ... ADD records
+// the object's ACL, and for a relation every non-dropped column's ACL, into
+// pg_init_privs through recordExtensionInitPrivWorker.
+pub fn recordExtObjInitPriv<'mcx>(mcx: Mcx<'mcx>, objoid: Oid, classoid: Oid) -> PgResult<()> {
+    if classoid == RELATION_RELATION_ID {
+        let Some(tuple) = SearchSysCache1(RELOID, SysCacheKey::Value(Datum::from_oid(objoid)))?
+        else {
+            return Err(Box::new(PgError::error(format!(
+                "cache lookup failed for relation {objoid}"
+            ))));
+        };
+        let relkind = SysCacheGetAttrNotNull(RELOID, &tuple, ANUM_PG_CLASS_RELKIND)?.as_u8();
+
+        // Indexes don't have permissions, neither do the pg_class rows for
+        // composite types.  (These cases are unreachable given the
+        // restrictions in ALTER EXTENSION ADD, but let's check anyway.)
+        if relkind == RELKIND_INDEX
+            || relkind == RELKIND_PARTITIONED_INDEX
+            || relkind == RELKIND_COMPOSITE_TYPE
+        {
+            ReleaseSysCache(tuple);
+            return Ok(());
+        }
+
+        // If this isn't a sequence then it's possibly going to have
+        // column-level ACLs associated with it.
+        if relkind != RELKIND_SEQUENCE {
+            let nattrs = SysCacheGetAttrNotNull(RELOID, &tuple, ANUM_PG_CLASS_RELNATTS)?.as_i16();
+            for curr_att in 1..=nattrs {
+                let Some(att_tuple) = SearchSysCache2(
+                    ATTNUM,
+                    SysCacheKey::Value(Datum::from_oid(objoid)),
+                    SysCacheKey::Value(Datum::from_i16(curr_att)),
+                )?
+                else {
+                    continue;
+                };
+
+                // ignore dropped columns
+                let isdropped =
+                    SysCacheGetAttrNotNull(ATTNUM, &att_tuple, ANUM_PG_ATTRIBUTE_ATTISDROPPED)?
+                        .as_bool();
+                if isdropped {
+                    ReleaseSysCache(att_tuple);
+                    continue;
+                }
+
+                let (attacl_datum, isnull) =
+                    SysCacheGetAttr(ATTNUM, &att_tuple, ANUM_PG_ATTRIBUTE_ATTACL)?;
+                // no need to do anything for a NULL ACL
+                if isnull {
+                    ReleaseSysCache(att_tuple);
+                    continue;
+                }
+
+                let attacl = with_acl_datum(attacl_datum, |acl| adt_acl::aclcopy(mcx, acl))?;
+                record_extension_init_priv_worker(
+                    mcx,
+                    objoid,
+                    classoid,
+                    curr_att as i32,
+                    &attacl,
+                )?;
+
+                ReleaseSysCache(att_tuple);
+            }
+        }
+
+        let (acl_datum, isnull) = SysCacheGetAttr(RELOID, &tuple, ANUM_PG_CLASS_RELACL)?;
+        // Add the record, if any, for the top-level object
+        if !isnull {
+            let acl = with_acl_datum(acl_datum, |acl| adt_acl::aclcopy(mcx, acl))?;
+            record_extension_init_priv_worker(mcx, objoid, classoid, 0, &acl)?;
+        }
+
+        ReleaseSysCache(tuple);
+    } else if classoid == pg_largeobject::LargeObjectRelationId {
+        use pg_largeobject::{
+            Anum_pg_largeobject_metadata_lomacl, Anum_pg_largeobject_metadata_oid,
+            LargeObjectMetadataOidIndexId, LargeObjectMetadataRelationId,
+        };
+
+        // For large objects, we must consult pg_largeobject_metadata.  Dead
+        // code in C as well (large objects can't be extension members), but
+        // carried in case a future caller needs it.
+        let relation = table::table_open(mcx, LargeObjectMetadataRelationId, RowExclusiveLock)?;
+        let desc = relation.descr();
+
+        // There's no syscache for pg_largeobject_metadata
+        let entry = [pg_largeobject::oid_key(Anum_pg_largeobject_metadata_oid, objoid)];
+        let mut scan = genam::systable_beginscan(
+            mcx,
+            &relation,
+            LargeObjectMetadataOidIndexId,
+            true,
+            None,
+            &entry,
+        )?;
+
+        let Some(tuple) = genam::systable_getnext(mcx, &mut scan)? else {
+            return Err(Box::new(PgError::error(format!(
+                "could not find tuple for large object {objoid}"
+            ))));
+        };
+
+        let mut isnull = false;
+        // SAFETY: fixed catalog column under the relation's descriptor.
+        let acl_datum = unsafe {
+            types_tuple::heap_getattr(
+                tuple,
+                Anum_pg_largeobject_metadata_lomacl as i32,
+                desc,
+                &mut isnull,
+            )
+        };
+
+        // Add the record, if any, for the top-level object
+        if !isnull {
+            let acl = with_acl_datum(acl_datum, |acl| adt_acl::aclcopy(mcx, acl))?;
+            record_extension_init_priv_worker(mcx, objoid, classoid, 0, &acl)?;
+        }
+
+        genam::systable_endscan(mcx, scan)?;
+        relation.close(RowExclusiveLock)?;
+    } else if let Some((cacheid, acl_attnum, descr)) = init_priv_acl_route(classoid)? {
+        // This will error on unsupported classoid.
+        let Some(tuple) = SearchSysCache1(cacheid, SysCacheKey::Value(Datum::from_oid(objoid)))?
+        else {
+            return Err(Box::new(PgError::error(format!(
+                "cache lookup failed for {descr} {objoid}"
+            ))));
+        };
+
+        let (acl_datum, isnull) = SysCacheGetAttr(cacheid, &tuple, acl_attnum)?;
+
+        // Add the record, if any, for the top-level object
+        if !isnull {
+            let acl = with_acl_datum(acl_datum, |acl| adt_acl::aclcopy(mcx, acl))?;
+            record_extension_init_priv_worker(mcx, objoid, classoid, 0, &acl)?;
+        }
+
+        ReleaseSysCache(tuple);
+    }
+    Ok(())
+}
+
+// removeExtObjInitPriv (aclchk.c:4519-4582): ALTER EXTENSION ... DROP removes
+// the object's pg_init_privs rows and, for a relation, every column's rows
+// (dropped columns included) via recordExtensionInitPrivWorker(NULL).
+pub fn removeExtObjInitPriv<'mcx>(mcx: Mcx<'mcx>, objoid: Oid, classoid: Oid) -> PgResult<()> {
+    if classoid == RELATION_RELATION_ID {
+        let Some(tuple) = SearchSysCache1(RELOID, SysCacheKey::Value(Datum::from_oid(objoid)))?
+        else {
+            return Err(Box::new(PgError::error(format!(
+                "cache lookup failed for relation {objoid}"
+            ))));
+        };
+        let relkind = SysCacheGetAttrNotNull(RELOID, &tuple, ANUM_PG_CLASS_RELKIND)?.as_u8();
+
+        // Indexes don't have permissions, neither do the pg_class rows for
+        // composite types.  (These cases are unreachable given the
+        // restrictions in ALTER EXTENSION DROP, but let's check anyway.)
+        if relkind == RELKIND_INDEX
+            || relkind == RELKIND_PARTITIONED_INDEX
+            || relkind == RELKIND_COMPOSITE_TYPE
+        {
+            ReleaseSysCache(tuple);
+            return Ok(());
+        }
+
+        // If this isn't a sequence then it's possibly going to have
+        // column-level ACLs associated with it.
+        if relkind != RELKIND_SEQUENCE {
+            let nattrs = SysCacheGetAttrNotNull(RELOID, &tuple, ANUM_PG_CLASS_RELNATTS)?.as_i16();
+            for curr_att in 1..=nattrs {
+                let Some(att_tuple) = SearchSysCache2(
+                    ATTNUM,
+                    SysCacheKey::Value(Datum::from_oid(objoid)),
+                    SysCacheKey::Value(Datum::from_i16(curr_att)),
+                )?
+                else {
+                    continue;
+                };
+
+                // when removing, remove all entries, even dropped columns
+                record_extension_init_priv_worker(mcx, objoid, classoid, curr_att as i32, &[])?;
+
+                ReleaseSysCache(att_tuple);
+            }
+        }
+
+        ReleaseSysCache(tuple);
+    }
+
+    // Remove the record, if any, for the top-level object
+    record_extension_init_priv_worker(mcx, objoid, classoid, 0, &[])
+}
+
+// recordExtObjInitPriv's generic arm (aclchk.c:4487-4508): objectaddress.c's
+// get_object_attnum_acl / get_object_catcache_oid / get_object_class_descr
+// subset, hosted here because catalog_objectaddress depends on this crate.
+// Some((cacheid, acl attnum, descr)) for every ObjectProperty class carrying
+// an ACL column (pg_class and pg_largeobject_metadata are the callers' own
+// arms); None for an ObjectProperty class without one (nothing to record);
+// a class without an ObjectProperty row fails in C at
+// get_object_property_data (objectaddress.c:2777) with elog(ERROR)
+// "unrecognized class ID: %u" — mirrored here, never a panic.
+fn init_priv_acl_route(classid: Oid) -> PgResult<Option<(i32, i32, &'static str)>> {
+    for class in [
+        &CLASS_DATABASE,
+        &CLASS_TABLESPACE,
+        &CLASS_TYPE,
+        &CLASS_PROC,
+        &CLASS_LANGUAGE,
+        &CLASS_NAMESPACE,
+        &CLASS_FDW,
+        &CLASS_FOREIGN_SERVER,
+    ] {
+        if classid == class.classid {
+            return Ok(Some((class.cacheid, class.acl_attnum, class.descr)));
+        }
+    }
+    // ObjectProperty rows with attnum_acl = InvalidAttrNumber
+    // (objectaddress.c:114-1016), by pg_class OID.
+    const NO_ACL_CLASSES: [Oid; 27] = [
+        types_core::ACCESS_METHOD_RELATION_ID,
+        types_core::ACCESS_METHOD_OPERATOR_RELATION_ID,
+        types_core::ACCESS_METHOD_PROCEDURE_RELATION_ID,
+        2605, // CastRelationId
+        types_core::COLLATION_RELATION_ID,
+        types_core::CONSTRAINT_RELATION_ID,
+        2607, // ConversionRelationId
+        826,  // DefaultAclRelationId
+        types_core::EXTENSION_RELATION_ID,
+        types_core::OPERATOR_CLASS_RELATION_ID,
+        types_core::OPERATOR_RELATION_ID,
+        types_core::OPERATOR_FAMILY_RELATION_ID,
+        types_core::AUTH_ID_RELATION_ID,
+        types_core::AUTH_MEM_RELATION_ID,
+        2618, // RewriteRelationId
+        3576, // TransformRelationId
+        types_core::TRIGGER_RELATION_ID,
+        3256, // PolicyRelationId
+        3466, // EventTriggerRelationId
+        3602, // TSConfigRelationId
+        3600, // TSDictionaryRelationId
+        3601, // TSParserRelationId
+        3764, // TSTemplateRelationId
+        6104, // PublicationRelationId
+        6100, // SubscriptionRelationId
+        3381, // StatisticExtRelationId
+        types_core::USER_MAPPING_RELATION_ID,
+    ];
+    if NO_ACL_CLASSES.contains(&classid) {
+        return Ok(None);
+    }
+    Err(Box::new(PgError::error(format!("unrecognized class ID: {classid}"))))
+}
+
 // RemoveRoleFromInitPriv's owner route (aclchk.c:4934-4942):
 // objectaddress.c's get_object_catcache_oid/get_object_attnum_owner subset,
 // hosted here because catalog_objectaddress depends on this crate. Covers

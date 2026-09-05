@@ -429,7 +429,8 @@ pub fn InsertExtensionTuple(
         &mut refobjs,
         pg_depend::DependencyType::Normal,
     )?;
-    // InvokeObjectPostCreateHook: object-access hooks are elided repo-wide.
+    // Post creation hook for new extension (extension.c:2268).
+    objectaccess::InvokeObjectPostCreateHook(EXTENSION_RELATION_ID, extension_oid, 0)?;
 
     Ok(myself)
 }
