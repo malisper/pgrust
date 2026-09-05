@@ -58,3 +58,8 @@ walreceiverfuncs_seams = { path = "../../replication/walreceiverfuncs_seams" }
 
 [dev-dependencies]
 xact_seams = { path = "../../access/transam/xact_seams" }
+ipc_seams = { path = "../../storage/ipc/ipc_seams" }
+pg_sema = { path = "../../port/pg_sema" }
+pg_sema_seams = { path = "../../port/pg_sema_seams" }
+s_lock_seams = { path = "../../storage/lmgr/s_lock_seams" }
+shmem_seams = { path = "../../storage/ipc/shmem_seams" }

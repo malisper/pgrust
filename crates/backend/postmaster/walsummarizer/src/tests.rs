@@ -316,3 +316,200 @@ mod contents_rows {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// audit-18.6 b203: C-exact error surfaces and lock discipline.
+// ---------------------------------------------------------------------------
+
+/// walsummarizer.c:1437 SummarizeSmgrRecord reads `xlrec->forkNum` as a plain
+/// int; a WAL record carrying an unknown fork number must surface as a
+/// catchable data-corruption error, never as an `expect` panic that takes
+/// the summarizer (and, through the postmaster, the cluster) down.
+#[test]
+fn smgr_create_unknown_fork_is_an_error_not_a_panic() {
+    let mut data = [0u8; 16];
+    data[12..16].copy_from_slice(&4i32.to_ne_bytes());
+    let err = smgr_create_forknum(&data)
+        .err()
+        .expect("fork number 4 is outside -1..=3 and must be refused");
+    assert_eq!(err.sqlstate, types_error::ERRCODE_DATA_CORRUPTED);
+    assert_eq!(
+        err.message,
+        "WAL record of type XLOG_SMGR_CREATE has invalid fork number 4"
+    );
+
+    // Every C fork number still decodes.
+    for (raw, fork) in [
+        (0, MAIN_FORKNUM),
+        (1, FSM_FORKNUM),
+        (2, VISIBILITYMAP_FORKNUM),
+        (3, ForkNumber::INIT_FORKNUM),
+    ] {
+        data[12..16].copy_from_slice(&(raw as i32).to_ne_bytes());
+        assert_eq!(smgr_create_forknum(&data).unwrap(), fork);
+    }
+}
+
+/// walsummarizer.c:1036: when XLogReaderAllocate returns NULL, SummarizeWAL
+/// raises ERRCODE_OUT_OF_MEMORY "out of memory" with the DETAIL "Failed while
+/// allocating a WAL reading processor." — not mcx's generic request-size
+/// detail.
+#[test]
+fn reader_allocation_failure_carries_c_detail() {
+    let cx = MemoryContext::new("SummarizeWAL").with_limit(8);
+    let err = allocate_summarizer_reader(cx.mcx(), 16 * 1024 * 1024)
+        .err()
+        .expect("an 8-byte context limit must fail the XLOG_BLCKSZ read buffer");
+    assert_eq!(err.sqlstate, types_error::ERRCODE_OUT_OF_MEMORY);
+    assert_eq!(err.message, "out of memory");
+    assert_eq!(
+        err.detail.as_deref(),
+        Some("Failed while allocating a WAL reading processor.")
+    );
+}
+
+/// walsummary.c:294 WriteWalSummary: a failed write reports `%m` (no byte
+/// counts); a short write reports the counts, the offset, and HINT "Check
+/// free disk space." (fd.c FileWriteV defaults errno to ENOSPC there).
+#[test]
+fn wal_summary_write_errors_match_walsummary_c() {
+    const PATH: &str = "pg_wal/summaries/temp.summary";
+    fn strerror(errnum: i32) -> String {
+        // SAFETY: strerror returns a NUL-terminated string; copied out at once.
+        unsafe { std::ffi::CStr::from_ptr(libc::strerror(errnum)) }
+            .to_string_lossy()
+            .into_owned()
+    }
+    let mut filepos: i64 = 7;
+
+    let err = write_wal_summary(PATH, &mut filepos, &[1, 2, 3, 4], |_, _| {
+        fd::set_errno(libc::EIO);
+        Ok(-1)
+    })
+    .err()
+    .expect("a negative write return is an error");
+    assert_eq!(
+        err.message,
+        format!("could not write file \"{PATH}\": {}", strerror(libc::EIO))
+    );
+    assert_eq!(err.sqlstate, types_error::ERRCODE_IO_ERROR);
+    assert_eq!(err.hint, None);
+    assert_eq!(filepos, 7, "a failed write must not advance filepos");
+
+    let err = write_wal_summary(PATH, &mut filepos, &[1, 2, 3, 4], |_, _| {
+        fd::set_errno(libc::ENOSPC);
+        Ok(3)
+    })
+    .err()
+    .expect("a short write is an error");
+    assert_eq!(
+        err.message,
+        format!("could not write file \"{PATH}\": wrote only 3 of 4 bytes at offset 7")
+    );
+    assert_eq!(err.sqlstate, types_error::ERRCODE_DISK_FULL);
+    assert_eq!(err.hint.as_deref(), Some("Check free disk space."));
+    assert_eq!(filepos, 7, "a short write must not advance filepos");
+
+    write_wal_summary(PATH, &mut filepos, &[1, 2, 3, 4], |buf, pos| {
+        assert_eq!((buf, pos), (&[1u8, 2, 3, 4][..], 7));
+        Ok(4)
+    })
+    .unwrap();
+    assert_eq!(filepos, 11);
+}
+
+/// walsummarizer.c:834 WalSummarizerShutdown takes WALSummarizerLock
+/// exclusively around `summarizer_pgprocno = INVALID_PROC_NUMBER`, so a
+/// concurrent GetWalSummarizerState (shared holder) never reads a procno
+/// whose PGPROC slot the exiting summarizer is about to give up.
+mod shutdown_lock {
+    use std::sync::atomic::Ordering::{Acquire, Relaxed};
+    use std::sync::Once;
+    use std::time::Duration;
+
+    use super::super::*;
+    use types_storage::storage::NUM_SPECIAL_WORKER_PROCS;
+
+    fn setup() {
+        static SETUP: Once = Once::new();
+        SETUP.call_once(|| {
+            s_lock_seams::perform_spin_delay::set(|_| std::thread::yield_now());
+            s_lock_seams::finish_spin_delay::set(|_| {});
+            shmem_seams::mul_size::set(|a, b| Ok(a * b));
+            shmem_seams::add_size::set(|a, b| Ok(a + b));
+            shmem_seams::shmem_alloc::set(|size| {
+                Ok(Box::leak(vec![0u8; size].into_boxed_slice()).as_mut_ptr())
+            });
+            ipc_seams::on_shmem_exit::set(|_, _| {});
+            // Real in-process semaphores: the contended LWLock wait parks on them.
+            pg_sema::init_seams();
+            if !waitevent_seams::pgstat_report_wait_start::is_installed() {
+                waitevent_seams::pgstat_report_wait_start::set(|_| {});
+                waitevent_seams::pgstat_report_wait_end::set(|| {});
+            }
+            if !postgres_seams::check_for_interrupts::is_installed() {
+                postgres_seams::check_for_interrupts::set(|| Ok(()));
+            }
+            g::SetIsUnderPostmaster(false);
+            g::SetMaxConnections(4);
+            g::set_max_worker_processes(2);
+            g::SetMaxBackends(4 + 3 + 2 + 2 + NUM_SPECIAL_WORKER_PROCS);
+            lmgr_proc::InitProcGlobal(&lmgr_proc::ProcGlobalConfig {
+                autovacuum_worker_slots: 3,
+                max_wal_senders: 2,
+                max_prepared_xacts: 2,
+                fastpath_lock_groups_per_backend: 1,
+            });
+            lmgr_proc::init_seams();
+            lwlock::CreateLWLocks(false).unwrap();
+            WalSummarizerShmemInit();
+        });
+    }
+
+    #[test]
+    fn shutdown_resets_procno_under_walsummarizer_lock() {
+        setup();
+        // This thread plays pg_get_wal_summarizer_state(): GetWalSummarizerState
+        // holds WALSummarizerLock shared while it reads summarizer_pgprocno.
+        g::SetMyProcNumber(0);
+        g::SetMyProcPid(7100);
+        let d = ctl();
+        d.summarizer_pgprocno.store(1, Relaxed);
+        let lk = summarizer_lock();
+        LWLockAcquire(lk, LW_SHARED, 0).unwrap();
+
+        let summarizer = std::thread::spawn(|| {
+            g::SetMyProcNumber(1);
+            g::SetMyProcPid(7101);
+            pg_sema_seams::pg_semaphore_reset::call(1);
+            wal_summarizer_shutdown(0, 0);
+        });
+
+        // C-exact: the exiting summarizer queues on the lock (HAS_WAITERS) and
+        // the procno stays intact until the reader releases. The unfixed port
+        // clears the procno straight through the reader's shared hold.
+        let mut queued = false;
+        for _ in 0..20_000 {
+            if lk.state.load(Acquire) & lwlock::LW_FLAG_HAS_WAITERS != 0 {
+                queued = true;
+                break;
+            }
+            if d.summarizer_pgprocno.load(Relaxed) == INVALID_PROC_NUMBER {
+                break;
+            }
+            std::thread::sleep(Duration::from_micros(100));
+        }
+        let procno_while_reader_held = d.summarizer_pgprocno.load(Relaxed);
+        LWLockRelease(lk).unwrap();
+        summarizer.join().unwrap();
+
+        assert!(
+            queued && procno_while_reader_held == 1,
+            "WalSummarizerShutdown must take WALSummarizerLock exclusively before \
+             clearing summarizer_pgprocno (walsummarizer.c:834): queued={queued}, \
+             procno seen under the reader's shared hold={procno_while_reader_held}"
+        );
+        assert_eq!(d.summarizer_pgprocno.load(Relaxed), INVALID_PROC_NUMBER);
+        assert_eq!(lk.state.load(Relaxed) & lwlock::LW_LOCK_MASK, 0, "lock released");
+    }
+}

@@ -37,7 +37,8 @@ use types_core::{
 };
 use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_INTERNAL_ERROR,
-    ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, DEBUG1, DEBUG2, ERROR, FATAL, WARNING,
+    ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_OUT_OF_MEMORY, DEBUG1, DEBUG2, ERROR,
+    FATAL, WARNING,
 };
 use types_startup::StartupData;
 use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT};
@@ -556,7 +557,16 @@ fn diff_ms(start: TimestampTz, stop: TimestampTz) -> i64 {
 }
 
 fn wal_summarizer_shutdown(_code: i32, _arg: usize) {
+    // walsummarizer.c:834: WALSummarizerLock (exclusive) serializes the reset
+    // against GetWalSummarizerState's shared-mode read of the procno.
+    // shmem_exit ran LWLockReleaseAll before this callback, so the acquire
+    // cannot fail on the held-lock ceiling; C's ereport(ERROR) here would
+    // escalate through proc_exit the same way.
+    if let Err(e) = lock(LW_EXCLUSIVE) {
+        fatal_exit(&e);
+    }
     ctl().summarizer_pgprocno.store(INVALID_PROC_NUMBER, Relaxed);
+    let _ = unlock();
 }
 
 fn GetLatestLSN() -> (XLogRecPtr, TimeLineID) {
@@ -813,7 +823,7 @@ fn SummarizeWAL(
         end_of_wal: false,
         descendant_tlis,
     };
-    let mut xlogreader = XLogReaderState::allocate(mcx, wal_segment_size())?;
+    let mut xlogreader = allocate_summarizer_reader(mcx, wal_segment_size())?;
 
     let summary_start_lsn;
     let mut summary_end_lsn = switch_lsn;
@@ -972,23 +982,9 @@ fn SummarizeWAL(
 
         let mut filepos: i64 = 0;
         let write_result = brtab.write(|data: &[u8]| {
-            let nbytes = fd::FileWrite(file, data, filepos, WAIT_EVENT_WAL_SUMMARY_WRITE)?;
-            if nbytes != data.len() as isize {
-                ereport(ERROR)
-                    .with_saved_errno(if nbytes < 0 {
-                        std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
-                    } else {
-                        libc::ENOSPC
-                    })
-                    .errcode_for_file_access()
-                    .errmsg(format!(
-                        "could not write file \"{temp_path}\": wrote only {nbytes} of {} bytes",
-                        data.len()
-                    ))
-                    .finish(loc("WriteWalSummary"))?;
-            }
-            filepos += nbytes as i64;
-            Ok(())
+            write_wal_summary(&temp_path, &mut filepos, data, |buf, pos| {
+                fd::FileWrite(file, buf, pos, WAIT_EVENT_WAL_SUMMARY_WRITE)
+            })
         });
         let close_result = fd::FileClose(file);
         write_result?;
@@ -1092,8 +1088,7 @@ fn SummarizeSmgrRecord(
         // xl_smgr_create: RelFileLocator (12), ForkNumber (4).
         require_record_len(data, 16, "XLOG_SMGR_CREATE", "SummarizeSmgrRecord")?;
         let rlocator = rlocator_at(data, 0);
-        let forknum = ForkNumber::from_i32(i32::from_ne_bytes(data[12..16].try_into().unwrap()))
-            .expect("valid fork number in smgr-create record");
+        let forknum = smgr_create_forknum(data)?;
         if forknum != FSM_FORKNUM {
             brtab.set_limit_block(rlocator, forknum, 0);
         }
@@ -1115,6 +1110,81 @@ fn SummarizeSmgrRecord(
             );
         }
     }
+    Ok(())
+}
+
+/// `xl_smgr_create.forkNum` of an XLOG_SMGR_CREATE record (walsummarizer.c:1437).
+///
+/// C passes the raw int straight into BlockRefTableSetLimitBlock; the port's
+/// BlockRefTableKey carries a ForkNumber, so an unknown value is refused as
+/// corrupt WAL (the require_record_len shape) rather than panicking.
+fn smgr_create_forknum(data: &[u8]) -> PgResult<ForkNumber> {
+    let raw = i32::from_ne_bytes(data[12..16].try_into().unwrap());
+    match ForkNumber::from_i32(raw) {
+        Some(forknum) => Ok(forknum),
+        None => {
+            ereport(ERROR)
+                .errcode(ERRCODE_DATA_CORRUPTED)
+                .errmsg(format!(
+                    "WAL record of type XLOG_SMGR_CREATE has invalid fork number {raw}"
+                ))
+                .finish(loc("SummarizeSmgrRecord"))?;
+            unreachable!();
+        }
+    }
+}
+
+/// SummarizeWAL's `XLogReaderAllocate` (walsummarizer.c:1036).
+fn allocate_summarizer_reader(
+    mcx: Mcx<'_>,
+    wal_segment_size: i32,
+) -> PgResult<XLogReaderState<'_>> {
+    match XLogReaderState::allocate(mcx, wal_segment_size) {
+        Ok(reader) => Ok(reader),
+        // XLogReaderAllocate's MCXT_ALLOC_NO_FAIL NULL return.
+        Err(_) => {
+            ereport(ERROR)
+                .errcode(ERRCODE_OUT_OF_MEMORY)
+                .errmsg("out of memory")
+                .errdetail("Failed while allocating a WAL reading processor.")
+                .finish(loc("SummarizeWAL"))?;
+            unreachable!();
+        }
+    }
+}
+
+/// `WriteWalSummary` (walsummary.c:294), the WriteBlockRefTable callback:
+/// `write` is `FileWrite` on the temp summary file, `filepos` the running
+/// `WalSummaryIO.filepos`.
+fn write_wal_summary(
+    path: &str,
+    filepos: &mut i64,
+    data: &[u8],
+    write: impl FnOnce(&[u8], i64) -> PgResult<isize>,
+) -> PgResult<()> {
+    let nbytes = write(data, *filepos)?;
+    // FileWrite's errno (fd.c FileWriteV defaults a short write to ENOSPC).
+    let save_errno = fd::get_errno();
+    if nbytes < 0 {
+        return ereport(ERROR)
+            .with_saved_errno(save_errno)
+            .errcode_for_file_access()
+            .errmsg(format!("could not write file \"{path}\": %m"))
+            .finish(loc("WriteWalSummary"));
+    }
+    if nbytes != data.len() as isize {
+        return ereport(ERROR)
+            .with_saved_errno(save_errno)
+            .errcode_for_file_access()
+            .errmsg(format!(
+                "could not write file \"{path}\": wrote only {nbytes} of {} bytes at offset {}",
+                data.len(),
+                *filepos as u32
+            ))
+            .errhint("Check free disk space.")
+            .finish(loc("WriteWalSummary"));
+    }
+    *filepos += nbytes as i64;
     Ok(())
 }
 
