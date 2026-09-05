@@ -2048,7 +2048,9 @@ dependencies = [
  "manifest",
  "mcx",
  "pg_clock",
+ "pgstat",
  "pgstrcasecmp",
+ "postgres_seams",
  "pqcomm_seams",
  "ps_status",
  "ps_status_seams",
@@ -2065,8 +2067,10 @@ dependencies = [
  "types_fmgr",
  "types_storage",
  "varlena",
+ "waitevent_seams",
  "walsender",
  "walsender_seams",
+ "xact_seams",
  "xlogbackup",
 ]
 

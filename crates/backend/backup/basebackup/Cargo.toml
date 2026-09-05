@@ -53,9 +53,17 @@ pqcomm_seams = { path = "../../libpq/pqcomm_seams" }
 basebackup_target = { path = "../basebackup_target" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 
+# audit-18.6 b086: basebackup_read_file wait event, sendDir CHECK_FOR_INTERRUPTS,
+# sendFile checksum-failure stats (basebackup.c:1818/1277/2119).
+waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+pgstat = { path = "../../utils/activity/pgstat" }
+
 [dev-dependencies]
 # upstream e7564ee8cdcb (18.6): progress-sink cleanup witness binds a real
 # PgBackendStatus (lmgr's progress_beentry recipe) to read st_progress_command.
 backend_status = { path = "../../utils/activity/backend_status" }
 backend_progress = { path = "../../utils/activity/backend_progress" }
 ipc_seams = { path = "../../storage/ipc/ipc_seams" }
+# audit-18.6 b086 witnesses: fd.c AllocateDesc consults GetCurrentSubTransactionId.
+xact_seams = { path = "../../access/transam/xact_seams" }

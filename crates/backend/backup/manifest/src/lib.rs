@@ -105,8 +105,10 @@ impl Default for BackupManifestInfo<'_> {
     }
 }
 
+// backup_manifest.h IsManifestEnabled: consulted by basebackup.c's caller
+// side too (SendBackupManifest is a no-op without a manifest).
 #[inline]
-fn IsManifestEnabled(manifest: &BackupManifestInfo) -> bool {
+pub fn IsManifestEnabled(manifest: &BackupManifestInfo) -> bool {
     manifest.enabled
 }
 
