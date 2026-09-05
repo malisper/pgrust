@@ -394,11 +394,17 @@ pub fn ServerLoop() -> PgResult<i32> {
         }
 
         if now - last_touch_time >= 58 * SECS_PER_MINUTE {
-            // TouchSocketFiles rides with the pqcomm socket-half owner.
-            miscinit::TouchSocketLockFiles();
+            touch_socket_and_lock_files();
             last_touch_time = now;
         }
     }
+}
+
+/// ServerLoop's 58-minute tick (postmaster.c:1796-1800): keep the Unix
+/// socket files and their lock files out of reach of /tmp cleaners.
+pub(crate) fn touch_socket_and_lock_files() {
+    pqcomm_seams::touch_socket_files::call();
+    miscinit::TouchSocketLockFiles();
 }
 
 pub fn canAcceptConnections(backend_type: BackendType) -> CacState {
@@ -464,9 +470,13 @@ pub fn BackendStartup(client_sock: ClientSocket) -> i32 {
         Some(client_sock),
     );
     if pid < 0 {
+        let save_errno = elog::errno::current_errno();
         pmchild_seams::release_postmaster_child_slot::call(child_slot);
-        report(LOG, "could not fork new process for connection".into(), 3608, "BackendStartup");
-        report_fork_failure_to_client(&client_sock);
+        let _ = elog::ereport(LOG)
+            .with_saved_errno(save_errno)
+            .errmsg("could not fork new process for connection: %m")
+            .finish(loc(3608, "BackendStartup"));
+        report_fork_failure_to_client(&client_sock, save_errno);
         return STATUS_ERROR;
     }
 
@@ -491,10 +501,14 @@ pub fn BackendStartup(client_sock: ClientSocket) -> i32 {
 // it on the way out of BackendStartup. Here the socket was handed to a child
 // that never started, so nobody else will ever close it — and an unclosed
 // socket is a client that waits forever (GL-FDLIMIT-1).
-fn report_fork_failure_to_client(client_sock: &ClientSocket) {
+pub(crate) fn report_fork_failure_to_client(client_sock: &ClientSocket, errnum: i32) {
+    // postmaster.c:3614-3616: "E%s%s\n" with the message and strerror(errnum).
     launch_backend::report_startup_failure_to_client(
         client_sock.sock,
-        "could not fork new process for connection",
+        &format!(
+            "could not fork new process for connection: {}",
+            elog::errno::strerror(errnum)
+        ),
     );
 }
 

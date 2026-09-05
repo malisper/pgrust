@@ -1006,6 +1006,10 @@ pub fn init_transport_seams() {
     });
     pqcomm_seams::pq_init::set(pq_init);
     pqcomm_seams::modify_fe_be_wait_set_latch::set(modify_fe_be_wait_set_latch);
+    // The virtual listen socket has no filesystem entry: nothing to touch or
+    // unlink at the postmaster's 58-minute tick / CloseServerPorts.
+    pqcomm_seams::touch_socket_files::set(|| {});
+    pqcomm_seams::remove_socket_files::set(|| {});
     pqcomm_seams::listen_server_port::set(|_host, _port, _dir, listen_sockets, _max| {
         with(|st| {
             let _ = st.consult(NetOpKind::Listen, 'S', 0);

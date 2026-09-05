@@ -72,14 +72,14 @@ fn checkControlFile() {
     let path = format!("{data_dir}/global/pg_control");
     match std::fs::File::open(&path) {
         Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            write_stderr(format!(
-                "{PROGNAME}: could not find the database system\nExpected to find it in the directory \"{data_dir}\",\nbut could not open file \"{path}\": {e}\n"
-            ));
-            ExitPostmaster(2);
-        }
         Err(e) => {
-            write_stderr(format!("{PROGNAME}: could not open file \"{path}\": {e}\n"));
+            // postmaster.c:1526-1531: one message for every open failure,
+            // with %m (strerror), not Rust's "(os error N)" rendering.
+            let errnum = e.raw_os_error().unwrap_or(0);
+            write_stderr(format!(
+                "{PROGNAME}: could not find the database system\nExpected to find it in the directory \"{data_dir}\",\nbut could not open file \"{path}\": {}\n",
+                elog::errno::strerror(errnum)
+            ));
             ExitPostmaster(2);
         }
     }
@@ -227,6 +227,18 @@ pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
             'C' => output_config_variable = Some(take_val(&mut args)),
             '-' | 'c' => {
                 let optarg = take_val(&mut args);
+                // postmaster.c:617-627: a misplaced must-be-first subprogram
+                // option (--boot, --check, --describe-config, --single, ...)
+                // is a syntax error, not a GUC.
+                if opt == '-'
+                    && init_small::dispatch::parse_dispatch_option(&optarg)
+                        != init_small::dispatch::DispatchOption::Postmaster
+                {
+                    return elog::ereport(ERROR)
+                        .errcode(types_error::ERRCODE_SYNTAX_ERROR)
+                        .errmsg(format!("--{optarg} must be first argument"))
+                        .finish(loc(627, "PostmasterMain"));
+                }
                 let (name, value) = parse_long_option(&optarg);
                 let Some(value) = value else {
                     return elog::ereport(ERROR)
@@ -337,11 +349,26 @@ pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
     guc::autotune::apply_memory_autotune()?;
 
     if let Some(name) = output_config_variable.as_deref() {
-        // GUC_RUNTIME_COMPUTED split: runtime-computed -C values print after
-        // shmem sizing in C; the flags probe joins with the guc-funcs unit.
-        let config_val = guc::GetConfigOption(name, false, false)?;
-        println!("{}", config_val.as_deref().unwrap_or(""));
-        ExitPostmaster(0);
+        // postmaster.c:789-830: a runtime-computed GUC (data_checksums,
+        // wal_segment_size, the shmem sizes, ...) has no meaningful value
+        // yet — C prints those only after locking the data directory and
+        // reading pg_control, below. Everything else prints here, before
+        // the lock, so -C works on a running server.
+        let flags = guc::GetConfigOptionFlags(name, true)?;
+        if flags & types_guc::GUC_RUNTIME_COMPUTED == 0 {
+            let config_val = guc::GetConfigOption(name, false, false)?;
+            println!("{}", config_val.as_deref().unwrap_or(""));
+            ExitPostmaster(0);
+        }
+        // A runtime-computed GUC will be printed later on; silence any LOG
+        // output the startup sequence generates meanwhile (FATAL and more
+        // severe messages still show).
+        guc::SetConfigOption(
+            "log_min_messages",
+            Some("FATAL"),
+            GucContext::PGC_SUSET,
+            GucSource::PGC_S_OVERRIDE,
+        )?;
     }
 
     miscinit_seams::check_data_dir::call()?;
@@ -430,6 +457,15 @@ pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
 
     transam_xlog_seams::initialize_wal_consistency_checking::call()?;
 
+    // postmaster.c:984-995: the -C print held back above — the data
+    // directory is locked, pg_control read and the shmem GUCs computed, so
+    // the runtime-computed value is meaningful now (and not yet shared).
+    if let Some(name) = output_config_variable.as_deref() {
+        let config_val = guc::GetConfigOption(name, false, false)?;
+        println!("{}", config_val.as_deref().unwrap_or(""));
+        ExitPostmaster(0);
+    }
+
     ipci_seams::create_shared_memory_and_semaphores::call(fastpath_groups)?;
 
     // C sizes the fd budget for ONE backend process; every child gets its own
@@ -462,6 +498,19 @@ pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
 
     if guc_tables::vars::Logging_collector.read() {
         StartSysLogger();
+    }
+
+    // If we are in fact disabling logging to stderr, first emit a log
+    // message saying so — a breadcrumb for users who may not remember that
+    // their logging is configured to go somewhere else (postmaster.c:1090).
+    if elog::config::log_destination() & types_error::LOG_DESTINATION_STDERR == 0 {
+        let _ = elog::ereport(LOG)
+            .errmsg("ending log output to stderr")
+            .errhint(format!(
+                "Future log output will go to log destination \"{}\".",
+                guc_tables::vars::Log_destination_string.read().unwrap_or_default()
+            ))
+            .finish(loc(1091, "PostmasterMain"));
     }
 
     elog::config::set_where_to_send_output(types_dest_none());
@@ -706,7 +755,7 @@ pub fn pg_start_time() -> i64 {
     PG_START_TIME.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-fn close_server_ports_cb(_code: i32, _arg: usize) {
+pub(crate) fn close_server_ports_cb(_code: i32, _arg: usize) {
     // try_with_pm, not with_pm: this on_proc_exit callback can run while a
     // with_pm borrow is still on the stack (a FATAL raised from inside
     // listen_server_port, itself called under with_pm, drains callbacks
@@ -716,12 +765,18 @@ fn close_server_ports_cb(_code: i32, _arg: usize) {
     let _ = try_with_pm(|pm| {
         for fd in pm.listen_sockets.drain(..) {
             // SAFETY: closing listen fds owned by the postmaster.
-            unsafe {
-                libc::close(fd);
+            if unsafe { libc::close(fd) } != 0 {
+                let _ = elog::ereport(LOG)
+                    .with_saved_errno(elog::errno::current_errno())
+                    .errmsg("could not close listen socket: %m")
+                    .finish(loc(1431, "CloseServerPorts"));
             }
         }
     });
-    // Unix-socket file unlinking rides with the pqcomm socket-half owner.
+    // Next, remove any filesystem entries for Unix sockets. To avoid race
+    // conditions against incoming postmasters, this must happen after
+    // closing the sockets and before removing lock files (postmaster.c:1438).
+    pqcomm_seams::remove_socket_files::call();
 }
 
 fn unlink_external_pid_file_cb(_code: i32, _arg: usize) {

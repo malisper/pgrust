@@ -20,6 +20,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // pgstat_get_crashed_backend_activity(pid, buffer, buflen)
+    // (backend_status.c): the crashed child's ASCII-safe activity string for
+    // LogChildExit's "Failed process was running: %s" DETAIL; None where C
+    // returns NULL (no entry, empty activity, status array not set up).
+    pub fn pgstat_get_crashed_backend_activity(pid: i32) -> Option<String>
+);
+
+seam_core::seam!(
     // pgstat_beinit (backend_status.c).
     pub fn pgstat_beinit() -> types_error::PgResult<()>
 );

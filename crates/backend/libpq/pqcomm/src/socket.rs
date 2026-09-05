@@ -1020,6 +1020,8 @@ fn show_tcp_user_timeout() -> String {
 /// set-once slots.
 pub fn init_socket_seams() {
     pqcomm_seams::pq_init::set(pq_init);
+    pqcomm_seams::touch_socket_files::set(TouchSocketFiles);
+    pqcomm_seams::remove_socket_files::set(RemoveSocketFiles);
     pqcomm_seams::modify_fe_be_wait_set_latch::set(pq_modify_fe_be_wait_set_latch);
     pqcomm_seams::pq_check_connection::set(pq_check_connection);
     be_secure_seams::set_port_noblock::set(set_port_noblock);

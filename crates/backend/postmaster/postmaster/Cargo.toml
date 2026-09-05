@@ -49,6 +49,8 @@ slotsync = { path = "../../replication/slotsync" }
 backend_startup = { path = "../../tcop/backend_startup" }
 be_secure = { path = "../../libpq/be_secure" }
 bgworker = { path = "../bgworker" }
+wait_error = { path = "../../../common/wait_error" }
+backend_status_seams = { path = "../../utils/activity/backend_status_seams" }
 libpq_pqsignal = { path = "../../libpq/libpq_pqsignal" }
 timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
 
@@ -73,6 +75,7 @@ libc = "0.2"
 
 [dev-dependencies]
 pmchild = { path = "../pmchild" }
+ip = { path = "../../../common/ip" }
 shmem = { path = "../../storage/ipc/shmem" }
 lmgr_proc = { path = "../../storage/lmgr/lmgr_proc" }
 s_lock_seams = { path = "../../storage/lmgr/s_lock_seams" }
@@ -84,7 +87,6 @@ scalar_seams = { path = "../../utils/adt/scalar_seams" }
 aclchk_seams = { path = "../../catalog/aclchk_seams" }
 mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
 file_seams = { path = "../../storage/file/file_seams" }
-backend_status_seams = { path = "../../utils/activity/backend_status_seams" }
 pg_prng = { path = "../../../common/pg_prng" }
 
 [lints.rust]

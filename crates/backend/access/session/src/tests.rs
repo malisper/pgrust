@@ -1093,7 +1093,14 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      insert recorder for the brin_doupdate/brin_doinsert critical-
     //      section witnesses (unit harness fixture; counted by the tree
     //      census, never product code — same class as 43/45/46/60).
-    assert_eq!(count_tree(crates), 582, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 583, 18.6 conformance audit (2026-09-04), postmaster boot/exit fixes
+    //   (b032): one test-only source —
+    //   63. postmaster/postmaster/src/tests.rs CAPTURED —
+    //      RefCell<Vec<PgError>> per-thread emit_log_hook recorder behind
+    //      the LogChildExit / CleanupBackend / BackendStartup log-line
+    //      witnesses (unit harness fixture; counted by the tree census,
+    //      never product code — same class as 43/45/46/50/60).
+    assert_eq!(count_tree(crates), 583, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

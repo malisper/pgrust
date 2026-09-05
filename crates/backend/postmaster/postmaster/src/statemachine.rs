@@ -403,18 +403,29 @@ pub fn ExitPostmaster(status: i32) -> ! {
 /// mains reach launch_backend's named panic.
 pub fn StartChildProcess(child_type: BackendType) -> Option<PmChild> {
     let Some(child_slot) = pmchild_seams::assign_postmaster_child_slot::call(child_type) else {
+        // postmaster.c:3948-3958
+        if child_type == BackendType::AutovacWorker {
+            let _ = elog::ereport(LOG)
+                .errcode(types_error::ERRCODE_CONFIGURATION_LIMIT_EXCEEDED)
+                .errmsg("no slot available for new autovacuum worker process")
+                .finish(loc(3952, "StartChildProcess"));
+        } else {
+            // shouldn't happen because we allocate enough slots
+            report_internal(
+                LOG,
+                "no postmaster child slot available for aux process".into(),
+                3957,
+                "StartChildProcess",
+            );
+        }
         return None;
     };
     let pid =
         launch_backend::postmaster_child_launch(child_type, child_slot, StartupData::None, None);
     if pid < 0 {
+        let save_errno = elog::errno::current_errno();
         pmchild_seams::release_postmaster_child_slot::call(child_slot);
-        report(
-            LOG,
-            format!("could not fork {} process", miscinit::GetBackendTypeDesc(child_type)),
-            3960,
-            "StartChildProcess",
-        );
+        log_fork_failure(child_type, save_errno);
         if child_type == BackendType::Startup {
             ExitPostmaster(1);
         }
@@ -422,6 +433,18 @@ pub fn StartChildProcess(child_type: BackendType) -> Option<PmChild> {
     }
     pmchild_seams::set_child_pid::call(child_slot, pid);
     Some(PmChild { child_slot, bkend_type: child_type, pid })
+}
+
+/// StartChildProcess's "in parent, fork failed" report (postmaster.c:3968):
+/// `could not fork "%s" process: %m` with PostmasterChildName(type).
+pub(crate) fn log_fork_failure(child_type: BackendType, save_errno: i32) {
+    let _ = elog::ereport(LOG)
+        .with_saved_errno(save_errno)
+        .errmsg(format!(
+            "could not fork \"{}\" process: %m",
+            launch_backend::postmaster_child_name(child_type)
+        ))
+        .finish(loc(3968, "StartChildProcess"));
 }
 
 pub fn StartSysLogger() {
@@ -495,7 +518,7 @@ fn StartBackgroundWorker(idx: usize) -> bool {
 }
 
 /// bgworker_should_start_now(start_time) (postmaster.c).
-fn bgworker_should_start_now(start_time: bgworker::BgWorkerStartTime) -> bool {
+pub(crate) fn bgworker_should_start_now(start_time: bgworker::BgWorkerStartTime) -> bool {
     use bgworker::BgWorkerStartTime::*;
     match with_pm(|pm| pm.pm_state) {
         PMState::PM_NO_CHILDREN
@@ -506,8 +529,12 @@ fn bgworker_should_start_now(start_time: bgworker::BgWorkerStartTime) -> bool {
         | PMState::PM_WAIT_IO_WORKERS
         | PMState::PM_WAIT_BACKENDS
         | PMState::PM_STOP_BACKENDS => false,
-        PMState::PM_RUN => matches!(start_time, RecoveryFinished | ConsistentState),
-        PMState::PM_HOT_STANDBY => start_time == ConsistentState,
+        // C's arms fall through (postmaster.c:4180-4196): PM_RUN admits
+        // every start time, PM_HOT_STANDBY ConsistentState + PostmasterStart.
+        PMState::PM_RUN => {
+            matches!(start_time, RecoveryFinished | ConsistentState | PostmasterStart)
+        }
+        PMState::PM_HOT_STANDBY => matches!(start_time, ConsistentState | PostmasterStart),
         PMState::PM_RECOVERY | PMState::PM_STARTUP | PMState::PM_INIT => {
             start_time == PostmasterStart
         }
@@ -582,12 +609,21 @@ pub fn maybe_start_bgworkers() {
 
 pub fn StartAutovacuumWorker() {
     use types_startup::CacState;
+    // Not in condition to run a process: don't try, but handle it like a
+    // fork failure (postmaster.c:4024-4046).
     if canAcceptConnections(BackendType::AutovacWorker) == CacState::Ok {
-        let c = StartChildProcess(BackendType::AutovacWorker);
-        if c.is_none() {
-            autovacuum_seams::autovac_worker_failed::call();
-            with_pm(|pm| pm.avlauncher_needs_signal = true);
+        if StartChildProcess(BackendType::AutovacWorker).is_some() {
+            return;
         }
+        // fork failed, fall through to report -- actual error message was
+        // logged by StartChildProcess
+    }
+
+    // Report the failure to the launcher, if it's running (postmaster.c:
+    // 4048-4056); ServerLoop sends the signal, avoiding a ping-pong.
+    if with_pm(|pm| pm.autovac_launcher.is_some()) {
+        autovacuum_seams::autovac_worker_failed::call();
+        with_pm(|pm| pm.avlauncher_needs_signal = true);
     }
     let _ = loc(3990, "StartAutovacuumWorker");
 }

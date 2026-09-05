@@ -497,7 +497,11 @@ pub fn process_pm_pmsignal() -> PgResult<()> {
         );
         miscinit::AddToDataDirLockFile(LOCK_FILE_LINE_PM_STATUS, PM_STATUS_READY)?;
         statemachine::UpdatePMState(PMState::PM_HOT_STANDBY);
-        with_pm(|pm| pm.conns_allowed = true);
+        with_pm(|pm| {
+            pm.conns_allowed = true;
+            // Some workers may be scheduled to start now (postmaster.c:3740).
+            pm.start_worker_needed = true;
+        });
     }
 
     if pmsignal::CheckPostmasterSignal(PMSIGNAL_BACKGROUND_WORKER_CHANGE) {
@@ -617,21 +621,36 @@ fn log_child_exit(procname: &str, pid: pid_t, exitstatus: i32) {
     log_child_exit_at(LOG, procname, pid, exitstatus);
 }
 
-fn log_child_exit_at(level: types_error::ErrorLevel, procname: &str, pid: pid_t, exitstatus: i32) {
-    match exit_status_code(exitstatus) {
-        Some(code) => report(
-            level,
-            format!("{procname} (PID {pid}) exited with exit code {code}"),
-            3830,
-            "LogChildExit",
-        ),
-        None => report(
-            level,
-            format!("{procname} (PID {pid}) was terminated by signal {}", exitstatus & 0x7f),
-            3844,
-            "LogChildExit",
-        ),
+pub(crate) fn log_child_exit_at(level: types_error::ErrorLevel, procname: &str, pid: pid_t, exitstatus: i32) {
+    // postmaster.c:2803-2845. Any non-zero status attaches the crashed
+    // child's activity as DETAIL; activity_buffer is 1024 bytes (the default
+    // track_activity_query_size), so the string is clipped to 1023.
+    let activity = if exit_status_code(exitstatus) != Some(0)
+        && backend_status_seams::pgstat_get_crashed_backend_activity::is_installed()
+    {
+        backend_status_seams::pgstat_get_crashed_backend_activity::call(pid)
+            .map(|a| a.chars().take(1023).collect::<String>())
+    } else {
+        None
+    };
+    let (message, line) = match exit_status_code(exitstatus) {
+        Some(code) => (format!("{procname} (PID {pid}) exited with exit code {code}"), 3830),
+        None => {
+            let signo = exitstatus & 0x7f;
+            (
+                format!(
+                    "{procname} (PID {pid}) was terminated by signal {signo}: {}",
+                    wait_error::pg_strsignal(signo)
+                ),
+                3844,
+            )
+        }
+    };
+    let mut builder = elog::ereport(level).errmsg(message);
+    if let Some(activity) = activity {
+        builder = builder.errdetail(format!("Failed process was running: {activity}"));
     }
+    let _ = builder.finish(loc(line, "LogChildExit"));
 }
 
 /// process_pm_child_exit — the SIGCHLD reaper over the thread-exit queue.
@@ -817,7 +836,10 @@ pub fn process_pm_child_exit() -> PgResult<()> {
             {
                 pmchild_seams::release_postmaster_child_slot::call(child_slot);
                 if !(status0 || status1) {
-                    handle_child_crash("server process", pid, exitstatus)?;
+                    // CleanupBackend's procname is GetBackendTypeDesc(bkend_type)
+                    // ("client backend", "autovacuum worker", "walsender", ...)
+                    // (postmaster.c:2569-2570).
+                    handle_child_crash(miscinit::GetBackendTypeDesc(btype), pid, exitstatus)?;
                 } else {
                     bgworker::BackgroundWorkerStopNotifications(pid);
                     // CleanupBackend's trailing LogChildExit(DEBUG2) — the TAP

@@ -753,6 +753,8 @@ pub fn postmaster_child_launch(
         // Synthetic pid space exhausted: refuse with the same -1 contract as a
         // failed thread spawn (the postmaster closes the client socket and
         // reclaims the slot) rather than return a colliding/sentinel pid.
+        // fork()'s errno for a full process table, for the caller's %m.
+        vfs::set_errno(libc::EAGAIN);
         return -1;
     };
     // Pre-identity signal window: make the pid deliverable BEFORE the caller
@@ -852,13 +854,16 @@ pub fn postmaster_child_launch(
                 .push((child_pid, handle));
             child_pid
         }
-        Err(_) => {
+        Err(e) => {
             // F3 ledger row (fixed at PERMIT-S2, taken while dooring the
             // wpool site): retire the never-entered slot so the failed
             // spawn cannot leak a Runnable ghost into the schedule.
             #[cfg(pgrust_sim)]
             pgsync::sim::spawn_door::cancel_child(sim_sched_slot);
             procsignal::PreIdentitySignalDiscard(child_pid);
+            // The -1 contract is fork()'s: leave the failure's errno for the
+            // caller's "%m" (postmaster.c:3968 / :3608 / :4162).
+            vfs::set_errno(e.raw_os_error().unwrap_or(libc::EAGAIN));
             -1
         }
     }

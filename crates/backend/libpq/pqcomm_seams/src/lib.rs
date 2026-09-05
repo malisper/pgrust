@@ -40,6 +40,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // TouchSocketFiles (pqcomm.c): utime() every Unix-domain socket file this
+    // postmaster created — ServerLoop's 58-minute guard against /tmp cleaners
+    // (postmaster.c:1798).
+    pub fn touch_socket_files()
+);
+
+seam_core::seam!(
+    // RemoveSocketFiles (pqcomm.c): unlink every Unix-domain socket file this
+    // postmaster created — CloseServerPorts' on_proc_exit arm
+    // (postmaster.c:1438), after the listen fds close and before the lock
+    // files go.
+    pub fn remove_socket_files()
+);
+
+seam_core::seam!(
     // AcceptConnection(server_fd, &client_sock) (pqcomm.c socket half);
     // Err is C's STATUS_ERROR arm.
     pub fn accept_connection(server_fd: i32) -> PgResult<types_startup::ClientSocket>

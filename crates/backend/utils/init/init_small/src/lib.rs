@@ -1,5 +1,6 @@
 #![allow(non_snake_case)]
 
+pub mod dispatch;
 pub mod globals;
 pub mod usercontext;
 pub mod wretain;

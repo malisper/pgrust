@@ -896,6 +896,7 @@ pub fn init_seams() {
     s::backend_status_shmem_init::set(BackendStatusShmemInit);
     s::backend_status_shmem_reset_after_crash::set(BackendStatusShmemResetAfterCrash);
     s::pgstat_beinit::set(pgstat_beinit);
+    s::pgstat_get_crashed_backend_activity::set(pgstat_get_crashed_backend_activity);
     s::pgstat_bestart_initial::set(pgstat_bestart_initial);
     s::pgstat_bestart_security::set(pgstat_bestart_security);
     s::pgstat_bestart_final::set(pgstat_bestart_final);
