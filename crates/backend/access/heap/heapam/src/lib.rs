@@ -840,11 +840,13 @@ fn heap_key_test(
             return Ok(false);
         }
 
+        // HeapKeyTest (valid.h) hands sk_attno straight to heap_getattr:
+        // system attributes (attno < 0) come back from heap_getsysattr and an
+        // attno beyond the tuple's natts from getmissingattr.
         let attno = cur_key.sk_attno as i32;
-        assert!(attno > 0 && attno <= tupdesc.natts);
         let mut isnull = false;
-        // SAFETY: attno in 1..=natts (checked); the image is live under the
-        // caller's pin.
+        // SAFETY: the image is live under the caller's pin; heap_getattr
+        // bounds attno against the tuple's own natts.
         let atp = unsafe { heap_getattr(tuple, attno, tupdesc, &mut isnull) };
         if isnull {
             return Ok(false);
@@ -1564,10 +1566,14 @@ pub fn heap_getnext<'a, 'mcx>(
         ScanDirectionIsForward(direction),
         "backward heap scan below the forward-only run seam (deletion-prep B1)"
     );
-    // C's "only heap AM" ereport is subsumed by the closed TableAm carrier.
-    match scan.rs_base.rs_am {
-        TableAm::Heap => {}
-        other => panic!("only heap AM is supported in heap_getnext: {other:?}"),
+    // heapam.c:1350-1353: a scan over a relation whose table AM is not the
+    // heap AM is refused (the carrier's rs_am only names the scan shape;
+    // heap_beginscan stamps it Heap for every relation it is handed).
+    if TableAm::of(&scan.rs_base.rs_rd) != Some(TableAm::Heap) {
+        return Err(Box::new(
+            PgError::error("only heap AM is supported")
+                .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
     }
     if unexpected_during_logical_decoding() {
         return Err(elog_error(

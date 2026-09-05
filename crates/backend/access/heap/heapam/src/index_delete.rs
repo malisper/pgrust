@@ -11,10 +11,10 @@ use ::types_core::{BlockNumber, InvalidBlockNumber, OffsetNumber, TransactionId}
 use ::types_error::{PgError, PgResult, ERRCODE_INDEX_CORRUPTED};
 use ::types_rel::Relation;
 use ::types_snapshot::{SnapshotData, SnapshotType};
-use ::types_storage::bufpage::PageRef;
+use ::types_storage::bufpage::{ItemIdData, PageRef};
 use ::types_tuple::{
     FirstOffsetNumber, HeapTupleHeaderData, ItemPointerData, ItemPointerGetBlockNumber,
-    ItemPointerGetOffsetNumber,
+    ItemPointerGetBlockNumberNoCheck, ItemPointerGetOffsetNumber, ItemPointerGetOffsetNumberNoCheck,
 };
 
 use crate::fetch::heap_hot_search_buffer;
@@ -71,7 +71,7 @@ pub fn heap_index_delete_tuples<'mcx>(
         let id = ideltid.id as usize;
         let htid = ideltid.tid;
 
-        if blkno == InvalidBlockNumber || ItemPointerGetBlockNumber(&htid) != blkno {
+        if blkno == InvalidBlockNumber || ItemPointerGetBlockNumberNoCheck(&htid) != blkno {
             if delstate.bottomup {
                 if bottomup_final_block {
                     break;
@@ -94,7 +94,7 @@ pub fn heap_index_delete_tuples<'mcx>(
             if let Some(old) = pin.take() {
                 unlock_release(old)?;
             }
-            blkno = ItemPointerGetBlockNumber(&htid);
+            blkno = ItemPointerGetBlockNumberNoCheck(&htid);
             let p = BufferPin::adopt(bufmgr_seams::read_buffer::call(rel, blkno)?)
                 .expect("ReadBuffer returned InvalidBuffer");
             nblocksaccessed += 1;
@@ -221,7 +221,7 @@ pub(crate) fn index_delete_sort(deltids: &mut [TM_IndexDelete]) {
 
 // index_delete_check_htid: in-passing corruption checks; the index AM holds
 // the index-page buffer lock, so no concurrent VACUUM can move these TIDs.
-fn index_delete_check_htid(
+pub(crate) fn index_delete_check_htid(
     irel: &Relation<'_>,
     iblknum: BlockNumber,
     page: &PageRef<'_>,
@@ -229,21 +229,31 @@ fn index_delete_check_htid(
     htid: &ItemPointerData,
     idxoffnum: OffsetNumber,
 ) -> PgResult<()> {
-    let indexpagehoffnum = ItemPointerGetOffsetNumber(htid);
+    // The TID comes from the index and may be corrupt (that is what this
+    // function reports); C's accessors only Assert validity in debug builds.
+    let indexpagehoffnum = ItemPointerGetOffsetNumberNoCheck(htid);
     debug_assert!(idxoffnum != 0);
 
     if indexpagehoffnum > maxoff {
         return Err(index_corrupted(format!(
             "heap tid from index tuple ({},{}) points past end of heap page line pointer array at offset {} of block {} in index \"{}\"",
-            ItemPointerGetBlockNumber(htid), indexpagehoffnum, idxoffnum, iblknum, irel.name()
+            ItemPointerGetBlockNumberNoCheck(htid), indexpagehoffnum, idxoffnum, iblknum, irel.name()
         )));
     }
 
-    let iid = page.item_id(indexpagehoffnum);
+    // heapam.c:8329-8336: C's PageGetItemId(page, 0) lands on pd_prune_xid
+    // (pd_linp[-1]) and ordinarily reads as an unused item; the page view
+    // here is hard-bounded, so an offset below FirstOffsetNumber is the same
+    // corruption report without the out-of-array read.
+    let iid = if indexpagehoffnum < FirstOffsetNumber {
+        ItemIdData::default()
+    } else {
+        page.item_id(indexpagehoffnum)
+    };
     if !iid.is_used() {
         return Err(index_corrupted(format!(
             "heap tid from index tuple ({},{}) points to unused heap page item at offset {} of block {} in index \"{}\"",
-            ItemPointerGetBlockNumber(htid), indexpagehoffnum, idxoffnum, iblknum, irel.name()
+            ItemPointerGetBlockNumberNoCheck(htid), indexpagehoffnum, idxoffnum, iblknum, irel.name()
         )));
     }
 
@@ -255,7 +265,7 @@ fn index_delete_check_htid(
         if htup.is_heap_only() {
             return Err(index_corrupted(format!(
                 "heap tid from index tuple ({},{}) points to heap-only tuple at offset {} of block {} in index \"{}\"",
-                ItemPointerGetBlockNumber(htid), indexpagehoffnum, idxoffnum, iblknum, irel.name()
+                ItemPointerGetBlockNumberNoCheck(htid), indexpagehoffnum, idxoffnum, iblknum, irel.name()
             )));
         }
     }

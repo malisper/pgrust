@@ -135,10 +135,11 @@ fn RelationAddBlocks(
     // SAFETY: pinned + exclusively locked (EB_LOCK_FIRST).
     let mut page = unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(pin.buffer())) };
     if !page.as_ref().is_new() {
-        panic!(
+        // hio.c:359 elog(ERROR, ...): a catchable XX000, not a panic.
+        return Err(Box::new(PgError::error(format!(
             "page {first_block} of relation \"{}\" should be empty but is not",
             relation.name()
-        );
+        ))));
     }
     page.init(0);
     bufmgr_seams::mark_buffer_dirty::call(pin.buffer())?;

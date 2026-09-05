@@ -307,6 +307,16 @@ fn test_relation_opts<'mcx>(
     replident: u8,
     user_catalog: bool,
 ) -> Relation<'mcx> {
+    test_relation_am(mcx, oid, replident, user_catalog, ::tableam_vocab::HEAP_TABLE_AM_OID)
+}
+
+fn test_relation_am<'mcx>(
+    mcx: Mcx<'mcx>,
+    oid: Oid,
+    replident: u8,
+    user_catalog: bool,
+    relam: Oid,
+) -> Relation<'mcx> {
     let mut relname = NameData::default();
     relname.namestrcpy("t");
     let rd_rel = FormData_pg_class {
@@ -314,7 +324,7 @@ fn test_relation_opts<'mcx>(
         relnamespace: 2200,
         reltype: 0,
         relowner: 10,
-        relam: ::tableam_vocab::HEAP_TABLE_AM_OID,
+        relam,
         relfilenode: oid,
         reltablespace: 0,
         relpages: 0,
@@ -1070,6 +1080,29 @@ fn install_dml_seams() {
             FSM_VACUUM_RANGES.lock().unwrap().push((start, end));
             Ok(())
         });
+        // CHECK_FOR_INTERRUPTS() (the seam only runs when InterruptPending is
+        // set): a pending cancel comes back as C's 57014.
+        postgres_seams::check_for_interrupts::set(|| {
+            if CANCEL_PENDING.load(Ordering::Relaxed) {
+                return Err(Box::new(
+                    PgError::error("canceling statement due to user request")
+                        .with_sqlstate(::types_error::ERRCODE_QUERY_CANCELED),
+                ));
+            }
+            Ok(())
+        });
+        // LockAcquireExtended: never available (the NOWAIT / SKIP LOCKED
+        // arms), recording the logLockFailure argument the caller passed.
+        lock_seams::lock_acquire_extended::set(
+            |_tag, _mode, _session, _dont_wait, _report_oom, log_lock_failure| {
+                LAST_LOG_LOCK_FAILURE.store(log_lock_failure, Ordering::Relaxed);
+                Ok(::types_storage::lock::LOCKACQUIRE_NOT_AVAIL)
+            },
+        );
+        ::guc_tables::vars::log_lock_failures.install_if_absent(::guc_tables::GucVarAccessors {
+            get: || LOG_LOCK_FAILURES_GUC.load(Ordering::Relaxed),
+            set: |v| LOG_LOCK_FAILURES_GUC.store(v, Ordering::Relaxed),
+        });
         xact_seams::get_current_transaction_id::set(|| Ok(FAKE_XID));
         xact_seams::get_current_command_id::set(|_used| Ok(7));
         xact_seams::is_in_parallel_mode::set(|| false);
@@ -1129,6 +1162,11 @@ fn install_dml_seams() {
 }
 
 static LOGICAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static CANCEL_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static LAST_LOG_LOCK_FAILURE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static LOG_LOCK_FAILURES_GUC: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 static ID_ATTRS: Mutex<Vec<i16>> = Mutex::new(Vec::new());
 
 struct LogicalOn;
@@ -2802,4 +2840,194 @@ fn lock_tuple_on_unfrozen_all_visible_page_registers_no_vm_block() {
     );
     assert_eq!(page_lsn(oid + VM_OID_OFFSET, 0), 0);
     quiesced();
+}
+
+// --- audit-18.6 remediation batch b008 (backend/access/heap) witnesses ---
+
+/// Arms a pending query cancel for the duration of a test (InterruptPending
+/// + the harness's check_for_interrupts seam), restoring both on drop.
+struct CancelPending;
+impl CancelPending {
+    fn arm() -> Self {
+        CANCEL_PENDING.store(true, Ordering::Relaxed);
+        init_small::globals::SetInterruptPending(true);
+        CancelPending
+    }
+}
+impl Drop for CancelPending {
+    fn drop(&mut self) {
+        init_small::globals::SetInterruptPending(false);
+        CANCEL_PENDING.store(false, Ordering::Relaxed);
+    }
+}
+
+// heapam.c:2452 heap_multi_insert: CHECK_FOR_INTERRUPTS() at the top of the
+// per-page loop, so a pending cancel aborts the batch before any page is
+// filled (a186-candidate-fp-heap-heapam-p1-defdc40bdc724bf1744d-1).
+#[test]
+fn multi_insert_page_loop_checks_for_interrupts() {
+    install_dml_seams();
+    let _serial = serial();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let oid = fresh_oid();
+    register_table(oid, vec![]);
+    let rel = test_relation(mcx, oid);
+    let _ = take_xlog();
+
+    let mut s1 = heap_slot_with(mcx, &tuple_image(0, 0, 41));
+    let mut s2 = heap_slot_with(mcx, &tuple_image(0, 0, 42));
+    let mut slots = [&mut s1, &mut s2];
+    let err = {
+        let _cancel = CancelPending::arm();
+        dml::heap_multi_insert(mcx, &rel, &mut slots, 7, 0, None)
+            .expect_err("pending cancel must abort the multi-insert page loop")
+    };
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_QUERY_CANCELED);
+    // Nothing was placed and nothing was logged.
+    assert!(take_xlog().is_empty(), "no MULTI_INSERT record after the cancel");
+    with_fake(|f| assert!(f.tables[&oid].is_empty(), "no page was extended"));
+}
+
+// heapam.c:1350 heap_getnext: a scan over a relation whose table AM is not
+// the heap AM is refused with ERRCODE_FEATURE_NOT_SUPPORTED "only heap AM is
+// supported" (a186-candidate-fp-heap-heapam-p1-7b5133974859f30af161-1).
+#[test]
+fn heap_getnext_refuses_non_heap_table_am() {
+    install_seams();
+    let _serial = serial();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let oid = fresh_oid();
+    register_table(oid, vec![build_page(&[Item::Tuple(tuple_image(10, 0, 5))], true)]);
+    // An unregistered relam: TableAm::of() is None (not the heap AM).
+    let rel = test_relation_am(mcx, oid, b'd', false, 424242);
+
+    let mut scan = begin_seqscan(mcx, &rel, mvcc_snapshot(mcx));
+    let err = match heap_getnext(&mut scan, ForwardScanDirection) {
+        Ok(_) => panic!("heap_getnext over a non-heap AM must be a catchable error"),
+        Err(e) => e,
+    };
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+    assert_eq!(err.message, "only heap AM is supported");
+    heap_endscan(scan).unwrap();
+    quiesced();
+}
+
+// heapam.c HeapKeyTest -> heap_getattr(): scan keys may name system
+// attributes (attno < 0); heap_getattr routes them to heap_getsysattr
+// (a186-candidate-fp-heap-heapam-p1-132358f78c3a9c75d71f-1).
+#[test]
+fn heap_key_test_accepts_system_attribute_scan_keys() {
+    use ::types_scan::scankey::ScanKeyData;
+    use ::types_tuple::htup::TableOidAttributeNumber;
+    install_seams();
+    let _serial = serial();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let oid = fresh_oid();
+    register_table(
+        oid,
+        vec![build_page(
+            &[
+                Item::Tuple(tuple_image(10, 0, 5)),
+                Item::Tuple(tuple_image(10, 0, 42)),
+            ],
+            true,
+        )],
+    );
+    let rel = test_relation(mcx, oid);
+
+    let flags = SO_TYPE_SEQSCAN | SO_ALLOW_PAGEMODE;
+    for (arg, expected) in [(oid, vec![(0u32, 1u16, 5i32), (0, 2, 42)]), (oid + 1, vec![])] {
+        let mut key = PgVec::new_in(mcx);
+        key.push(ScanKeyData {
+            sk_flags: 0,
+            sk_attno: TableOidAttributeNumber as i16,
+            sk_strategy: ::types_scan::scankey::BTEqualStrategyNumber,
+            sk_subtype: 0,
+            sk_collation: 0,
+            // tableoid is a 4-byte by-value datum: int4eq compares it exactly.
+            sk_func: ::types_fmgr::FmgrInfo::new(int4eq, 65, 2, true, false),
+            sk_argument: Datum::from_i32(arg as i32),
+        });
+        let mut scan =
+            heap_beginscan(mcx, &rel, mvcc_snapshot(mcx), 1, key, None, flags).unwrap();
+        let vals = collect_vals(&mut scan, ForwardScanDirection);
+        assert_eq!(vals, expected, "tableoid = {arg}");
+        heap_endscan(scan).unwrap();
+    }
+    quiesced();
+}
+
+// heapam.c:8329 index_delete_check_htid: an index TID whose offset is 0
+// (below FirstOffsetNumber) is index corruption, reported as
+// ERRCODE_INDEX_CORRUPTED like the other in-passing checks — never a panic
+// (a186-candidate-fp-heap-heapam-p4-261af0489cea380aa54f-1).
+#[test]
+fn index_delete_check_htid_offset_zero_is_index_corruption() {
+    install_seams();
+    let _serial = serial();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let oid = fresh_oid();
+    let page = build_page(&[Item::Tuple(tuple_image(10, 0, 5))], false);
+    let rel = test_relation(mcx, oid);
+    // The index relation only lends its name to the message.
+    let irel = test_relation(mcx, oid + 1);
+    // SAFETY: a fully built BLCKSZ page image, exclusively owned here.
+    let pref = unsafe { PageRef::from_raw(core::ptr::NonNull::from(&page.0[0])) };
+    let maxoff = pref.max_offset_number();
+    assert_eq!(maxoff, 1);
+
+    let htid = ItemPointerData::new(0, 0);
+    let err = crate::index_delete::index_delete_check_htid(&irel, 7, &pref, maxoff, &htid, 3)
+        .expect_err("offset 0 is corruption, not a panic");
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_INDEX_CORRUPTED);
+    assert_eq!(
+        err.message,
+        "heap tid from index tuple (0,0) points to unused heap page item at offset 3 of block 7 in index \"t\""
+    );
+    // Control: a valid offset passes the check.
+    let ok_tid = ItemPointerData::new(0, 1);
+    crate::index_delete::index_delete_check_htid(&irel, 7, &pref, maxoff, &ok_tid, 3).unwrap();
+    let _ = rel;
+}
+
+// heapam.c:5521 heap_acquire_tuplock: under LockWaitError the GUC
+// log_lock_failures is handed to ConditionalLockTupleTuplock so the lock
+// manager logs the failed acquisition
+// (a186-candidate-fp-heap-heapam-p3-461071caa12657cb0523-1).
+#[test]
+fn acquire_tuplock_nowait_passes_log_lock_failures_guc() {
+    install_dml_seams();
+    let _serial = serial();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let oid = fresh_oid();
+    register_table(oid, vec![]);
+    let rel = test_relation(mcx, oid);
+    let tid = ItemPointerData::new(0, 1);
+
+    for guc in [false, true] {
+        LOG_LOCK_FAILURES_GUC.store(guc, Ordering::Relaxed);
+        LAST_LOG_LOCK_FAILURE.store(!guc, Ordering::Relaxed);
+        let mut have_tuple_lock = false;
+        let err = dml::heap_acquire_tuplock(
+            &rel,
+            &tid,
+            LockTupleMode::LockTupleExclusive,
+            ::tableam_vocab::LockWaitPolicy::LockWaitError,
+            &mut have_tuple_lock,
+        )
+        .expect_err("NOWAIT on an unavailable tuple lock is 55P03");
+        assert_eq!(err.sqlstate(), ::types_error::ERRCODE_LOCK_NOT_AVAILABLE);
+        assert_eq!(
+            LAST_LOG_LOCK_FAILURE.load(Ordering::Relaxed),
+            guc,
+            "log_lock_failures={guc} must reach LockAcquireExtended"
+        );
+        assert!(!have_tuple_lock);
+    }
+    LOG_LOCK_FAILURES_GUC.store(false, Ordering::Relaxed);
 }

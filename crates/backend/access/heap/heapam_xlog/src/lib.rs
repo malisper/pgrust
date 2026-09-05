@@ -1512,6 +1512,14 @@ pub fn heap_mask(pagedata: &mut [u8], blkno: types_core::BlockNumber) -> PgResul
         let lp_off = iid.lp_off() as usize;
         let lp_len = iid.lp_len() as usize;
 
+        // heapam_xlog.c:1402-1416 only dereferences line pointers that are
+        // normal or have storage. LP_UNUSED and storage-less LP_DEAD items
+        // carry lp_off 0 and LP_REDIRECT carries the target offset number:
+        // nothing to mask, nothing to validate.
+        if !iid.is_normal() && !iid.has_storage() {
+            continue;
+        }
+
         // The page image can be attacker-controlled (e.g. a full-page image
         // restored from a hostile WAL stream and masked under
         // `wal_consistency_checking`). C derefs `page + ItemIdGetOffset(iid)`
@@ -1641,6 +1649,50 @@ mod mask_tests {
         let mut p2 = P(masked);
         heap_mask(&mut p2.0, 0).unwrap();
         assert_eq!(p2.0, masked);
+    }
+
+    // heapam_xlog.c:1402 heap_mask only dereferences line pointers that are
+    // normal or have storage; LP_UNUSED, LP_DEAD-without-storage and
+    // LP_REDIRECT items carry no page offset (lp_off 0 / the redirect target)
+    // and must be skipped, not rejected as corruption
+    // (a186-candidate-fp-heap-heapam_xlog-f2354a166d1878803289-1).
+    #[test]
+    fn heap_mask_skips_line_pointers_without_storage() {
+        use types_storage::bufpage::{ItemIdData, LP_DEAD, LP_REDIRECT, LP_UNUSED};
+
+        let mut p = P([0u8; BLCKSZ]);
+        {
+            let mut page = pm(&mut p);
+            page.init(0);
+            let body = [0xAAu8; SizeofHeapTupleHeader];
+            // Four line pointers: 1 normal (kept), 2 unused, 3 dead without
+            // storage, 4 redirect -> 1 (what VACUUM / HOT pruning leave).
+            for _ in 0..4 {
+                page.add_item(&body, 0, PAI_IS_HEAP).unwrap();
+            }
+            page.set_item_id(2, ItemIdData::new(0, LP_UNUSED, 0));
+            page.set_item_id(3, ItemIdData::new(0, LP_DEAD, 0));
+            page.set_item_id(4, ItemIdData::new(1, LP_REDIRECT, 0));
+            let off = page.as_ref().item_id(1).lp_off() as usize;
+            // SAFETY: normal item stores a HeapTupleHeaderData at `off`.
+            let htup = unsafe { &mut *(page.as_mut_ptr().add(off) as *mut HeapTupleHeaderData) };
+            htup.t_infomask = HEAP_XMIN_COMMITTED;
+        }
+
+        heap_mask(&mut p.0, 0).expect("a pruned page is a valid heap page");
+
+        let page = pm(&mut p);
+        assert_eq!(page.as_ref().max_offset_number(), 4);
+        // Non-storage line pointers are untouched ...
+        assert!(!page.as_ref().item_id(2).is_used());
+        assert!(page.as_ref().item_id(3).is_dead());
+        assert!(page.as_ref().item_id(4).is_redirected());
+        assert_eq!(page.as_ref().item_id(4).lp_off(), 1);
+        // ... and the normal item was still masked.
+        let off = page.as_ref().item_id(1).lp_off() as usize;
+        // SAFETY: as above.
+        let htup = unsafe { &*(page.as_ref().as_ptr().add(off) as *const HeapTupleHeaderData) };
+        assert_eq!(htup.t_infomask & HEAP_XACT_MASK, 0);
     }
 
     #[test]

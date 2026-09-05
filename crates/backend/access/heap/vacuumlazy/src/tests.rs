@@ -25,6 +25,8 @@ struct Fake {
 }
 
 static FAKE: Mutex<Option<Fake>> = Mutex::new(None);
+// Set by a test to make the harness's WAL-insert seams fail (crit-section witnesses).
+static FAIL_WAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn with_fake<R>(f: impl FnOnce(&mut Fake) -> R) -> R {
     let mut g = FAKE.lock().unwrap_or_else(|e| e.into_inner());
@@ -147,6 +149,9 @@ fn install_seams() {
 
         static NEXT_LSN: AtomicU64 = AtomicU64::new(0x0100_0000);
         xloginsert_seams::xlog_insert_record::set(|rmid, info, _flags, main_data, _bufs| {
+            if FAIL_WAL.load(Relaxed) {
+                return Err(Box::new(::types_error::PgError::error("simulated XLogInsert failure")));
+            }
             let main: Vec<u8> = main_data.iter().flat_map(|d| d.iter().copied()).collect();
             with_fake(|f| f.wal.push((rmid, info, main)));
             Ok(NEXT_LSN.fetch_add(64, Relaxed))
@@ -161,6 +166,13 @@ fn install_seams() {
                 _ => HTSV_Result::HEAPTUPLE_INSERT_IN_PROGRESS,
             })
         });
+        xloginsert_seams::log_newpage_buffer::set(|_buf, _page_std| {
+            if FAIL_WAL.load(Relaxed) {
+                return Err(Box::new(::types_error::PgError::error("simulated log_newpage failure")));
+            }
+            Ok(NEXT_LSN.fetch_add(64, Relaxed))
+        });
+        bufmgr_seams::buffer_page_get_lsn::set(|_buf| 0);
         xlogutils_seams::in_recovery::set(|| false);
         transam_xlog_seams::data_checksums_enabled::set(|| false);
         transam_xlog_seams::recovery_in_progress::set(|| false);
@@ -911,4 +923,125 @@ fn bypass_threshold_truncates_like_c() {
     // Tiny relations: threshold truncates to 0 -> never bypass.
     assert_eq!(bypass_threshold_pages(49), 0);
     assert!(!((0 as BlockNumber) < bypass_threshold_pages(49)));
+}
+
+// --- audit-18.6 remediation batch b008: critical-section witnesses ---
+
+/// Makes the harness's WAL seams fail for the test's duration and leaves the
+/// critical-section counter clean afterwards (an escaped Err deliberately
+/// leaves the section open, as C's ereport promotion would have PANICked).
+struct FailingWal;
+impl FailingWal {
+    fn arm() -> Self {
+        FAIL_WAL.store(true, Relaxed);
+        FailingWal
+    }
+}
+impl Drop for FailingWal {
+    fn drop(&mut self) {
+        FAIL_WAL.store(false, Relaxed);
+        init_small::globals::SetCritSectionCount(0);
+    }
+}
+
+// vacuumlazy.c:2872-2915 lazy_vacuum_heap_page: the LP_DEAD -> LP_UNUSED
+// rewrite, the line-pointer truncation, MarkBufferDirty and the
+// PRUNE_VACUUM_CLEANUP record are one START/END_CRIT_SECTION bracket, so a
+// failure while logging escapes with CritSectionCount > 0 (the elog boundary
+// promotes it to PANIC; miscadmin.h) instead of unwinding as a plain ERROR
+// over a dirty, unlogged page
+// (a186-candidate-fp-heap-vacuumlazy-p2-a11bd96b5e063ce5abeb-1).
+#[test]
+fn lazy_vacuum_heap_page_wal_failure_escapes_inside_critical_section() {
+    let _s = serial();
+    install_seams();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let rel = test_relation(mcx);
+
+    let heap_buf = fake_page(0, 0);
+    {
+        // SAFETY: freshly created exclusive test page.
+        let mut pm = unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(heap_buf)) };
+        pm.init(0);
+        let tuple = [0u8; 32];
+        for expected in 1..=2u16 {
+            let off = pm.add_item(&tuple, InvalidOffsetNumber, PAI_IS_HEAP).unwrap();
+            assert_eq!(off, expected);
+            let mut lp = pm.as_ref().item_id(off);
+            lp.set_dead();
+            pm.set_item_id(off, lp);
+        }
+    }
+    bufmgr_seams::lock_buffer::call(heap_buf, BUFFER_LOCK_EXCLUSIVE).unwrap();
+
+    let mut vr = vacrel(&rel, mcx);
+    assert_eq!(init_small::globals::CritSectionCount(), 0);
+    let vmb = VmBuffer::new();
+    let err = {
+        let _wal = FailingWal::arm();
+        let err = lazy_vacuum_heap_page(&mut vr, 0, heap_buf, &[1, 2], &vmb)
+            .expect_err("the failing WAL insert must escape");
+        assert_eq!(
+            init_small::globals::CritSectionCount(),
+            1,
+            "the WAL failure must escape while the critical section is still open"
+        );
+        err
+    };
+    assert_eq!(err.message, "simulated XLogInsert failure");
+    // The page had already been rewritten when the WAL insert failed — the
+    // state C refuses to leave behind without a PANIC.
+    // SAFETY: test page, live.
+    let page = unsafe { PageRef::from_raw(bufmgr_seams::buffer_get_page::call(heap_buf)) };
+    // PageTruncateLinePointerArray keeps one (unused) line pointer.
+    assert_eq!(page.max_offset_number(), 1, "line pointers already reaped");
+    assert!(!page.item_id(1).is_used(), "remaining lp is LP_UNUSED");
+    bufmgr_seams::lock_buffer::call(heap_buf, BUFFER_LOCK_UNLOCK).unwrap();
+    bufmgr_seams::release_buffer::call(heap_buf).unwrap();
+}
+
+// vacuumlazy.c:1890-1914 lazy_scan_new_or_empty: marking an empty page
+// all-visible/all-frozen (MarkBufferDirty, log_newpage_buffer, PD_ALL_VISIBLE,
+// visibilitymap_set) is one critical section
+// (a186-candidate-fp-heap-vacuumlazy-p1-dc63798b1b1b439d2803-1).
+#[test]
+fn lazy_scan_new_or_empty_wal_failure_escapes_inside_critical_section() {
+    let _s = serial();
+    install_seams();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let rel = test_relation(mcx);
+
+    let buf = fake_page(0, 0);
+    {
+        // SAFETY: freshly created exclusive test page.
+        let mut pm = unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(buf)) };
+        pm.init(0);
+    }
+    bufmgr_seams::lock_buffer::call(buf, BUFFER_LOCK_EXCLUSIVE).unwrap();
+    // SAFETY: test page, live.
+    let page = unsafe { PageRef::from_raw(bufmgr_seams::buffer_get_page::call(buf)) };
+    assert!(page_is_empty(page) && !page.is_all_visible());
+    assert!(relation_needs_wal(&rel), "the fixture relation is WAL-logged");
+
+    let mut vr = vacrel(&rel, mcx);
+    assert_eq!(init_small::globals::CritSectionCount(), 0);
+    let vmb = VmBuffer::new();
+    let err = {
+        let _wal = FailingWal::arm();
+        let err = with_scan_parts(&mut vr, |env, folds, _sink| {
+            lazy_scan_new_or_empty(env, folds, buf, 0, page, false, &vmb)
+        })
+        .expect_err("the failing log_newpage_buffer must escape");
+        assert_eq!(
+            init_small::globals::CritSectionCount(),
+            1,
+            "the WAL failure must escape while the critical section is still open"
+        );
+        err
+    };
+    assert_eq!(err.message, "simulated log_newpage failure");
+    bufmgr_seams::lock_buffer::call(buf, BUFFER_LOCK_UNLOCK).unwrap();
+    bufmgr_seams::release_buffer::call(buf).unwrap();
 }

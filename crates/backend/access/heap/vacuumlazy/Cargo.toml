@@ -61,6 +61,7 @@ runtime = { path = "../../../executor/runtime" }
 parallel = { path = "../../transam/parallel" }
 table = { path = "../../table/table" }
 latch = { path = "../../../storage/ipc/latch" }
+waitevent = { path = "../../../utils/activity/waitevent" }
 autovacuum_seams = { path = "../../../postmaster/autovacuum_seams" }
 smgr_seams = { path = "../../../storage/smgr/smgr_seams" }
 

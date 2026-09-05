@@ -20547,6 +20547,7 @@ dependencies = [
  "vacuumparallel",
  "varsup",
  "visibilitymap",
+ "waitevent",
  "xact",
  "xloginsert_seams",
  "xlogutils_seams",

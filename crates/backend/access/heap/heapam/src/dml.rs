@@ -652,6 +652,9 @@ pub fn heap_multi_insert<'mcx>(
     // always share a VM page, so the pin survives page switches.
     let mut vmb = visibilitymap::VmBuffer::new();
     while ndone < ntuples {
+        // heapam.c:2452: a pending cancel aborts the batch between pages.
+        crate::check_for_interrupts()?;
+
         if ndone == 0 || !starting_with_empty_page {
             npages = heap_multi_insert_pages(&heaptuples, ndone, save_free_space);
             npages_used = 0;
@@ -1263,7 +1266,7 @@ fn could_not_obtain_row_lock(relation: &RelationData<'_>) -> Box<PgError> {
 }
 
 /// `heap_acquire_tuplock`.
-fn heap_acquire_tuplock(
+pub(crate) fn heap_acquire_tuplock(
     relation: &RelationData<'_>,
     tid: &ItemPointerData,
     mode: LockTupleMode,
@@ -1283,7 +1286,17 @@ fn heap_acquire_tuplock(
             }
         }
         LockWaitPolicy::LockWaitError => {
-            if !lmgr::ConditionalLockTuple(relation, tid, tuple_lock_hwlock(mode), false)? {
+            // heapam.c:5521: the log_lock_failures GUC reaches the lock
+            // manager so a failed NOWAIT acquisition is logged. (The slot is
+            // owned by the lock unit; harnesses without it read as off.)
+            let log_lock_failures = ::guc_tables::vars::log_lock_failures.installed()
+                && ::guc_tables::vars::log_lock_failures.read();
+            if !lmgr::ConditionalLockTuple(
+                relation,
+                tid,
+                tuple_lock_hwlock(mode),
+                log_lock_failures,
+            )? {
                 return Err(could_not_obtain_row_lock(relation));
             }
         }

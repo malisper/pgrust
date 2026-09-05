@@ -10,7 +10,7 @@ use ::types_tuple::varatt::{
     set_varsize_4b_c_word, varatt_is_1b, varsize_1b, varsize_4b, VARHDRSZ, VARHDRSZ_SHORT,
 };
 use toastdesc::{
-    compression_method_is_valid, VarattExternal, TOAST_LZ4_COMPRESSION, TOAST_LZ4_COMPRESSION_ID,
+    VarattExternal, INVALID_COMPRESSION_METHOD, TOAST_LZ4_COMPRESSION, TOAST_LZ4_COMPRESSION_ID,
     TOAST_PGLZ_COMPRESSION, TOAST_PGLZ_COMPRESSION_ID, TOAST_POINTER_SIZE,
 };
 
@@ -97,8 +97,11 @@ pub fn toast_compress_datum<'mcx>(
         (&value[VARHDRSZ..], value.len() - VARHDRSZ)
     };
 
-    // If the compression method is not valid, use the current default.
-    let cmethod = if compression_method_is_valid(cmethod as u8) {
+    // toast_internals.c:58-59: CompressionMethodIsValid(cm) is
+    // `cm != InvalidCompressionMethod` ('\0'), so only an UNSET method falls
+    // back to the current default; any other byte reaches the switch below
+    // and its default arm errors (toast_internals.c:75).
+    let cmethod = if cmethod as u8 != INVALID_COMPRESSION_METHOD {
         cmethod as u8
     } else {
         ::guc_tables::vars::default_toast_compression.read() as u8

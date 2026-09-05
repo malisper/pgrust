@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+guc_tables = { path = "../../../utils/misc/guc_tables" }
 postgres_seams = { path = "../../../tcop/postgres_seams" }
 mcx = { path = "../../../../_support/mcx" }
 datum = { path = "../../../../_support/types/datum" }
@@ -64,7 +65,6 @@ transam_xlog = { path = "../../transam/transam_xlog" }
 xlogutils = { path = "../../transam/xlogutils" }
 varsup = { path = "../../transam/varsup" }
 controldata_utils = { path = "../../../../common/controldata_utils" }
-guc_tables = { path = "../../../utils/misc/guc_tables" }
 shmem = { path = "../../../storage/ipc/shmem" }
 fd = { path = "../../../storage/file/fd" }
 lwlock = { path = "../../../storage/lmgr/lwlock" }

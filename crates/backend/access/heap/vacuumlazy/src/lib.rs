@@ -43,6 +43,7 @@ use ::types_storage::buf::BufferAccessStrategy;
 use ::types_storage::bufpage::{
     MaxHeapTuplesPerPage, PageMut, PageRef, SizeOfPageHeaderData,
 };
+use ::types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT};
 use ::types_storage::ReadBufferMode;
 use ::tidstore::TidStore;
 use ::types_tuple::{
@@ -340,9 +341,11 @@ pub fn heap_vacuum_rel<'mcx>(
     };
     heap_vacuum_eager_scan_setup(&mut vacrel, params)?;
 
-    // C snapshots db/namespace/rel names up front for instrumentation (the
-    // error-context callback itself is elided in this port).
-    let (dbname, relnamespace, relname) = if instrument_vac {
+    // C (vacuumlazy.c:660-662) snapshots db/namespace/rel names up front,
+    // unconditionally: the failsafe WARNING and the instrumentation report
+    // name the table "db.schema.rel" (the error-context callback itself is
+    // elided in this port).
+    let (dbname, relnamespace, relname) = {
         let dbname = dbcommands_seams::get_database_name::call(
             init_small::globals::MyDatabaseId(),
         )?
@@ -351,8 +354,6 @@ pub fn heap_vacuum_rel<'mcx>(
             .map(|n| String::from_utf8_lossy(n.name_str()).into_owned())
             .unwrap_or_default();
         (dbname, nspname, rel.name().to_string())
-    } else {
-        (String::new(), String::new(), String::new())
     };
     vacrel.dbname = dbname.clone();
     vacrel.relnamespace = relnamespace.clone();
@@ -1296,6 +1297,12 @@ fn lazy_scan_new_or_empty(
         }
 
         if !page.is_all_visible() {
+            // vacuumlazy.c:1890 START_CRIT_SECTION(): dirty mark, the
+            // (possibly first) FPI of the page, PD_ALL_VISIBLE and the VM
+            // bits are one unit; an Err leaves the section open so the elog
+            // boundary promotes it to PANIC, as C's ereport would.
+            init_small::globals::StartCriticalSection();
+
             bufmgr_seams::mark_buffer_dirty::call(buf)?;
 
             if relation_needs_wal(env.rel)
@@ -1316,6 +1323,9 @@ fn lazy_scan_new_or_empty(
                 InvalidTransactionId,
                 VISIBILITYMAP_ALL_VISIBLE | VISIBILITYMAP_ALL_FROZEN,
             )?;
+            // vacuumlazy.c:1914 END_CRIT_SECTION()
+            init_small::globals::EndCriticalSection();
+
             folds.counters.vm_new_visible_pages += 1;
             folds.counters.vm_new_visible_frozen_pages += 1;
         }
@@ -1568,10 +1578,28 @@ fn lazy_scan_prune(
         && !page.is_all_visible()
         && visibilitymap_get_status(env.rel, blkno, vmbuffer)? != 0
     {
-        // VM bit set while the page-level bit is clear: repair, as C (WARNING
-        // elided).
+        // vacuumlazy.c:2139: the VM bit should never be set while the
+        // page-level bit is clear; warn, then repair.
+        elog::elog(
+            ::types_error::WARNING,
+            format!(
+                "page is not marked all-visible but visibility map bit is set in relation \"{}\" page {}",
+                env.rel.name(),
+                blkno
+            ),
+        )?;
         visibilitymap_clear(env.rel, blkno, vmbuffer, VISIBILITYMAP_VALID_BITS)?;
     } else if presult.lpdead_items > 0 && page.is_all_visible() {
+        // vacuumlazy.c:2161: there should never be LP_DEAD items on a page
+        // with PD_ALL_VISIBLE set; warn, then repair.
+        elog::elog(
+            ::types_error::WARNING,
+            format!(
+                "page containing LP_DEAD items is marked as all-visible in relation \"{}\" page {}",
+                env.rel.name(),
+                blkno
+            ),
+        )?;
         // SAFETY: pinned + cleanup-locked by the scan loop.
         let mut pm = unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(buf)) };
         pm.clear_all_visible();
@@ -1921,6 +1949,13 @@ fn lazy_vacuum_heap_page(
     let mut unused = [InvalidOffsetNumber; MaxHeapTuplesPerPage];
     let mut nunused = 0usize;
 
+    // vacuumlazy.c:2872 START_CRIT_SECTION(): the LP_UNUSED rewrite, the
+    // line-pointer truncation, the dirty mark and the WAL record are one
+    // unit. An Err below leaves the section open so the elog boundary
+    // promotes it to PANIC (C's in-crit-section ereport promotion) instead of
+    // unwinding as a plain ERROR over a dirty, unlogged page.
+    init_small::globals::StartCriticalSection();
+
     for &toff in deadoffsets {
         let mut itemid = pm.as_ref().item_id(toff);
         debug_assert!(itemid.is_dead() && !itemid.has_storage());
@@ -1948,6 +1983,11 @@ fn lazy_vacuum_heap_page(
             &unused[..nunused],
         )?;
     }
+
+    // vacuumlazy.c:2915 END_CRIT_SECTION(): the visibility test below may do
+    // I/O and allocate; a crash from here on merely leaves the VM bit for a
+    // later VACUUM.
+    init_small::globals::EndCriticalSection();
 
     debug_assert!(!pm.as_ref().is_all_visible());
     let (all_visible, all_frozen, visibility_cutoff_xid) = heap_page_is_all_visible(
@@ -2108,12 +2148,13 @@ fn apply_failsafe(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> {
         &[0, 0],
     );
 
-    // C names the table db.schema.relname; the port has the relname (recorded
-    // divergence: message prefix elided with the rest of the logging lane).
+    // vacuumlazy.c:3006: the table is named db.schema.relname.
     elog::ereport(::types_error::WARNING)
         .errmsg(format!(
-            "bypassing nonessential maintenance of table \"{}\" as a failsafe after {} index scans",
-            vacrel.rel.name(),
+            "bypassing nonessential maintenance of table \"{}.{}.{}\" as a failsafe after {} index scans",
+            vacrel.dbname,
+            vacrel.relnamespace,
+            vacrel.relname,
             vacrel.num_index_scans
         ))
         .errdetail("The table's relfrozenxid or relminmxid is too far in the past.")
@@ -2133,6 +2174,9 @@ fn apply_failsafe(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> {
 }
 
 const VACUUM_TRUNCATE_LOCK_WAIT_INTERVAL_MS: u64 = 50;
+/// WAIT_EVENT_VACUUM_TRUNCATE (wait_event_names.txt, Timeout class):
+/// waitevent's WAIT_EVENT_TIMEOUT_NAMES row 8, "VacuumTruncate".
+const WAIT_EVENT_VACUUM_TRUNCATE: u32 = ::waitevent::PG_WAIT_TIMEOUT | 8;
 const VACUUM_TRUNCATE_LOCK_TIMEOUT_MS: u64 = 5000;
 const VACUUM_TRUNCATE_LOCK_CHECK_INTERVAL_MS: i64 = 20;
 
@@ -2164,11 +2208,18 @@ fn lazy_truncate_heap(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> {
                 )?;
                 return Ok(());
             }
-            // C: WaitLatch(MyLatch, WL_TIMEOUT, 50ms) — no latch wakeups
-            // here, so a plain timed sleep (worst case the same 50ms).
-            std::thread::sleep(std::time::Duration::from_millis(
-                VACUUM_TRUNCATE_LOCK_WAIT_INTERVAL_MS,
-            ));
+            // vacuumlazy.c:3277-3282: wait on MyLatch (so a conflicting
+            // requester's SetLatch wakes us early) with the 50ms timeout,
+            // reporting VacuumTruncate to pg_stat_activity meanwhile.
+            latch::WaitLatch(
+                init_small::globals::MyLatch(),
+                WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
+                VACUUM_TRUNCATE_LOCK_WAIT_INTERVAL_MS as i64,
+                WAIT_EVENT_VACUUM_TRUNCATE,
+            )?;
+            if let Some(l) = init_small::globals::MyLatch() {
+                latch::ResetLatch(l);
+            }
         }
 
         // If the rel grew while we vacuumed under a weaker lock, the new

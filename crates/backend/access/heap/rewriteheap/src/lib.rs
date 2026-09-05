@@ -45,6 +45,60 @@ fn loc(line: i32, func: &'static str) -> ErrorLocation {
     ErrorLocation::new("src/backend/access/heap/rewriteheap.c", line, func)
 }
 
+/// `sscanf(name, LOGICAL_REWRITE_FORMAT, &dboid, &relid, &hi, &lo,
+/// &rewrite_xid, &create_xid) == 6` (rewriteheap.c:1203, the format is
+/// "map-%x-%x-%X_%X-%x-%x"): all six hex conversions must succeed, in order,
+/// with the literal separators between them; whatever follows the sixth
+/// conversion is ignored, as sscanf ignores it. Returns the LSN (hi << 32 |
+/// lo), the only components the checkpoint uses.
+fn parse_logical_rewrite_name(name: &str) -> Option<XLogRecPtr> {
+    // One `%x` conversion (C99 7.21.6.2 / strtoul base 16): leading white
+    // space, an optional sign, an optional 0x/0X prefix, then hex digits;
+    // the value is stored into a 32-bit slot.
+    fn scan_hex(b: &[u8], mut i: usize) -> Option<(u32, usize)> {
+        while i < b.len() && b[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let mut negate = false;
+        if i < b.len() && (b[i] == b'+' || b[i] == b'-') {
+            negate = b[i] == b'-';
+            i += 1;
+        }
+        if i + 1 < b.len() && b[i] == b'0' && (b[i + 1] == b'x' || b[i + 1] == b'X')
+            && i + 2 < b.len() && b[i + 2].is_ascii_hexdigit()
+        {
+            i += 2;
+        }
+        let start = i;
+        let mut v: u32 = 0;
+        while i < b.len() && b[i].is_ascii_hexdigit() {
+            v = v.wrapping_mul(16).wrapping_add((b[i] as char).to_digit(16)? as u32);
+            i += 1;
+        }
+        if i == start {
+            return None;
+        }
+        Some((if negate { v.wrapping_neg() } else { v }, i))
+    }
+    let b = name.as_bytes();
+    let rest = b.strip_prefix(b"map-")?;
+    let mut i = b.len() - rest.len();
+    let mut fields = [0u32; 6];
+    for (n, sep) in [b'-', b'-', b'_', b'-', b'-', 0u8].into_iter().enumerate() {
+        let (v, next) = scan_hex(b, i)?;
+        fields[n] = v;
+        i = next;
+        if sep != 0 {
+            if i >= b.len() || b[i] != sep {
+                return None;
+            }
+            i += 1;
+        }
+    }
+    let (hi, lo) = (fields[2], fields[3]);
+    Some(((hi as u64) << 32) | lo as u64)
+}
+
 fn mappings_dir() -> PathBuf {
     let datadir = init_small::globals::DataDir().expect("rewriteheap: DataDir unset");
     PathBuf::from(datadir).join(PG_LOGICAL_MAPPINGS_DIR)
@@ -566,8 +620,10 @@ fn raw_heap_insert<'mcx>(
     };
     // SAFETY: img_ptr/img_len delimit a live tuple image (HeapTupleData invariant).
     let item = unsafe { core::slice::from_raw_parts(img_ptr, img_len) };
-    let newoff: OffsetNumber =
-        page.add_item(item, 0, PAI_IS_HEAP).unwrap_or_else(|| panic!("failed to add tuple"));
+    // rewriteheap.c:679 elog(ERROR, "failed to add tuple"): catchable XX000.
+    let newoff: OffsetNumber = page
+        .add_item(item, 0, PAI_IS_HEAP)
+        .ok_or_else(|| Box::new(PgError::new(ERROR, "failed to add tuple")))?;
 
     tup.t_self = ItemPointerData::new(state.rs_blockno, newoff);
 
@@ -610,13 +666,14 @@ pub fn CheckPointLogicalRewriteHeap() -> PgResult<()> {
     let dir = mappings_dir();
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
-        // Datadirs from initdb always carry pg_logical/mappings; a missing
-        // dir here means nothing was ever mapped (minimal test datadirs).
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        // rewriteheap.c:1176-1177 AllocateDir + ReadDir: a directory that
+        // cannot be opened (a missing pg_logical/mappings included) fails the
+        // checkpoint with errcode_for_file_access() and C's "%m" text.
         Err(e) => {
             return ereport(ERROR)
+                .with_saved_errno(e.raw_os_error().unwrap_or(0))
                 .errcode_for_file_access()
-                .errmsg(format!("could not open directory \"{}\": {e}", dir.display()))
+                .errmsg(format!("could not open directory \"{PG_LOGICAL_MAPPINGS_DIR}\": %m"))
                 .finish(loc(1177, "CheckPointLogicalRewriteHeap"));
         }
     };
@@ -641,20 +698,14 @@ pub fn CheckPointLogicalRewriteHeap() -> PgResult<()> {
             continue;
         }
 
-        // LOGICAL_REWRITE_FORMAT: map-%x-%x-%X_%X-%x-%x.
-        let parts: Vec<&str> = name[4..].split('-').collect();
-        let lsn_parts: Vec<&str> =
-            if parts.len() == 5 { parts[2].split('_').collect() } else { Vec::new() };
-        let (Some(Ok(hi)), Some(Ok(lo))) = (
-            lsn_parts.first().map(|s| u32::from_str_radix(s, 16)),
-            lsn_parts.get(1).map(|s| u32::from_str_radix(s, 16)),
-        ) else {
+        // rewriteheap.c:1203-1206: sscanf(LOGICAL_REWRITE_FORMAT) must
+        // convert all six components.
+        let Some(lsn) = parse_logical_rewrite_name(&name) else {
             return Err(Box::new(PgError::new(
                 ERROR,
                 format!("could not parse filename \"{name}\""),
             )));
         };
-        let lsn: XLogRecPtr = ((hi as u64) << 32) | lo as u64;
 
         if lsn < cutoff || cutoff == types_core::InvalidXLogRecPtr {
             let _ = elog::elog(

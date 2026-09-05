@@ -350,6 +350,9 @@ fn install_xact_periphery_seams() {
     pruneheap_seams::heap_page_prune_opt::set(|_r, _b| Ok(()));
     catalog_seams::is_catalog_relation::set(|_rel| false);
     dbcommands_seams::get_database_name::set(|_| Ok(Some("testdb".to_string())));
+    // heap_vacuum_rel snapshots dbname.nspname.relname up front, unconditionally
+    // (vacuumlazy.c:660-662 get_database_name / get_namespace_name).
+    syscache_seams::pg_namespace_nspname::set(|_| Ok(None));
     syscache_seams::search_syscache_exists_databaseoid::set(|_| Ok(true));
     aclchk_seams::pg_class_aclmask::set(|_relid, _roleid, mask, _how_all| Ok(mask));
     aclchk_seams::object_aclcheck::set(|_classid, _objid, _roleid, _mode| Ok(0));
