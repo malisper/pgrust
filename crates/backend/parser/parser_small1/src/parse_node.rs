@@ -1,3 +1,4 @@
+use alloc::boxed::Box;
 use datum::Datum;
 use elog::ereport;
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
@@ -8,7 +9,10 @@ use types_core::catalog::{
     UNKNOWNOID, BITOID,};
 use types_core::fmgr::FLOAT8PASSBYVAL;
 use types_core::{AttrNumber, Index, InvalidOid, Oid, ParseLoc};
-use types_error::{ErrorLocation, PgResult, SoftErrorContext, ERRCODE_TOO_MANY_COLUMNS, ERROR};
+use types_error::{
+    ErrorLocation, PgError, PgResult, SoftErrorContext, ERRCODE_QUERY_CANCELED,
+    ERRCODE_TOO_MANY_COLUMNS, ERROR,
+};
 use types_nodes::{
     A_Const, Alias, Const, Node, RangeTblEntry, ValUnion, VarReturningType,
 };
@@ -261,6 +265,28 @@ pub fn setup_parser_errposition_callback(_pstate: &ParseState<'_, '_>, _location
 
 pub fn cancel_parser_errposition_callback() {}
 
+// pcb_error_callback (parse_node.c:170-180): every error raised while the
+// callback is armed gets parser_errposition(pstate, location), except
+// ERRCODE_QUERY_CANCELED. Applied on the Err path of the guarded call.
+#[cold]
+#[inline(never)]
+fn attach_parser_errposition(
+    pstate: &ParseState<'_, '_>,
+    location: i32,
+    e: Box<PgError>,
+) -> Box<PgError> {
+    if e.sqlstate() == ERRCODE_QUERY_CANCELED {
+        return e;
+    }
+    // parser_errposition returns 0 without touching the cursor when the
+    // location or source text is unavailable (parse_node.c:111-116).
+    let pos = parser_errposition(pstate, location, mbutils::GetDatabaseEncoding());
+    if pos <= 0 {
+        return e;
+    }
+    Box::new((*e).with_cursor_position(pos))
+}
+
 pub fn transformContainerType(
     container_type: &mut Oid,
     container_typmod: &mut i32,
@@ -304,7 +330,11 @@ pub fn make_const<'mcx>(
                     }
                 }
                 _ => {
-                    let img = adt_numeric::io::numeric_in(f.fval, -1, None)?
+                    // C arms setup_parser_errposition_callback around numeric_in
+                    // (parse_node.c:417): an overflow/syntax error carries the
+                    // constant's cursor.
+                    let img = adt_numeric::io::numeric_in(f.fval, -1, None)
+                        .map_err(|e| attach_parser_errposition(pstate, aconst.location, e))?
                         .expect("numeric_in: soft-error escape without an escontext");
                     let bytes = img.as_bytes();
                     let mut buf: PgVec<'mcx, u8> = vec_with_capacity_in(mcx, bytes.len())?;
@@ -317,19 +347,8 @@ pub fn make_const<'mcx>(
         ValUnion::String(s) => (cstring_datum_in(mcx, s.sval)?, UNKNOWNOID, -2, false),
         ValUnion::BitString(bs) => {
             // C rides setup_parser_errposition_callback around bit_in.
-            let img = adt_varbit::bit_in_cstr(mcx, bs.bsval.as_bytes()).map_err(|mut e| {
-                if e.cursor_position().is_none() {
-                    let pos = parser_errposition(
-                        pstate,
-                        aconst.location,
-                        mbutils::GetDatabaseEncoding(),
-                    );
-                    if pos > 0 {
-                        e.cursor_position = Some(pos);
-                    }
-                }
-                e
-            })?;
+            let img = adt_varbit::bit_in_cstr(mcx, bs.bsval.as_bytes())
+                .map_err(|e| attach_parser_errposition(pstate, aconst.location, e))?;
             (Datum::from_usize(img.leak().as_ptr() as usize), BITOID, -1, false)
         }
     };
