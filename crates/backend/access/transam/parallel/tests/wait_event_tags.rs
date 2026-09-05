@@ -21,7 +21,7 @@ fn parallel_finish_quantum_reports_as_parallel_finish() {
         Some("IPC"),
     );
     assert_eq!(
-        waitevent::pgstat_get_wait_event(parallel::WAIT_EVENT_PARALLEL_FINISH),
+        waitevent::pgstat_get_wait_event(parallel::WAIT_EVENT_PARALLEL_FINISH).unwrap(),
         Some("ParallelFinish"),
         "the leader park quantum is publishing some other event's name",
     );

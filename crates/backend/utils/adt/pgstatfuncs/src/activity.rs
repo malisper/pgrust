@@ -171,7 +171,7 @@ pub fn fc_pg_stat_get_activity(
             if let Some(proc) = proc {
                 let raw = proc.wait_event_info.load(core::sync::atomic::Ordering::Relaxed);
                 wait_event_type = waitevent::pgstat_get_wait_event_type(raw);
-                wait_event = waitevent::pgstat_get_wait_event(raw);
+                wait_event = waitevent::pgstat_get_wait_event(raw)?;
 
                 let leader: ProcNumber =
                     proc.lockGroupLeader.load(core::sync::atomic::Ordering::Relaxed);

@@ -438,6 +438,11 @@ pub(crate) fn import_entry(key: PgStat_HashKey, entry: SharedEntry) {
     pgsync::lock(&SHARED_STATS).insert(key, entry);
 }
 
+// The `found` of pgstat_read_statsfile's dshash_find_or_insert.
+pub(crate) fn contains_entry(key: &PgStat_HashKey) -> bool {
+    pgsync::lock(&SHARED_STATS).contains_key(key)
+}
+
 pub(crate) fn clear_all_entries() {
     // Crash-recovery reset (pgstat_reset_after_failure): restore the
     // fresh-world guarantee even if a plain lock().unwrap() site slips back

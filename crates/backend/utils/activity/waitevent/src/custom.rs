@@ -252,31 +252,35 @@ pub fn WaitEventCustomNew(class_id: u32, wait_event_name: &str) -> PgResult<u32>
     Ok(wait_event_info)
 }
 
+// wait_event.c:275-298. An id with no registered name is elog(ERROR)
+// (XX000), a recoverable error like any other pg_stat_activity failure.
 #[allow(non_snake_case)] // C-parity name
-pub fn GetWaitEventCustomIdentifier(wait_event_info: u32) -> &'static str {
+pub fn GetWaitEventCustomIdentifier(wait_event_info: u32) -> PgResult<&'static str> {
     if wait_event_info == PG_WAIT_EXTENSION {
-        return "Extension";
+        return Ok("Extension");
     }
 
     let tables = shared();
-    LWLockAcquire(main_lock(WAIT_EVENT_CUSTOM_LOCK), LW_SHARED, g::MyProcNumber())
-        .expect("GetWaitEventCustomIdentifier: lock");
+    LWLockAcquire(main_lock(WAIT_EVENT_CUSTOM_LOCK), LW_SHARED, g::MyProcNumber())?;
     let entry = hash_search(
         tables.by_info,
         &wait_event_info as *const u32 as *const u8,
         HASH_FIND,
         None,
-    )
-    .expect("GetWaitEventCustomIdentifier: hash_search");
-    LWLockRelease(main_lock(WAIT_EVENT_CUSTOM_LOCK)).expect("GetWaitEventCustomIdentifier: unlock");
+    )?;
+    LWLockRelease(main_lock(WAIT_EVENT_CUSTOM_LOCK))?;
 
     if entry.is_null() {
-        panic!("could not find custom name for wait event information {wait_event_info}");
+        elog(
+            ERROR,
+            format!("could not find custom name for wait event information {wait_event_info}"),
+        )?;
+        unreachable!("elog(ERROR) returns Err");
     }
     // SAFETY: the entry lives in a fixed-size table for the process lifetime
     // (never removed, never resized past its shmem-sized bound).
     let entry: &'static EntryByInfo = unsafe { &*(entry as *const EntryByInfo) };
-    trim_name(&entry.wait_event_name)
+    Ok(trim_name(&entry.wait_event_name))
 }
 
 fn trim_name(name: &'static [u8; NAMEDATALEN]) -> &'static str {

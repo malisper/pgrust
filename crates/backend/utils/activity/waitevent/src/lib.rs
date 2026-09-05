@@ -3,6 +3,7 @@
 
 use core::cell::Cell;
 use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
+use types_error::PgResult;
 
 pub mod custom;
 pub mod funcs;
@@ -287,9 +288,11 @@ pub fn pgstat_get_wait_event_type(wait_event_info: u32) -> Option<&'static str> 
     })
 }
 
-pub fn pgstat_get_wait_event(wait_event_info: u32) -> Option<&'static str> {
+// wait_event.c pgstat_get_wait_event; Err only from the custom-event arm's
+// elog(ERROR) (an unregistered extension/injection-point id).
+pub fn pgstat_get_wait_event(wait_event_info: u32) -> PgResult<Option<&'static str>> {
     if wait_event_info == 0 {
-        return None;
+        return Ok(None);
     }
     let class_id = wait_event_info & WAIT_EVENT_CLASS_MASK;
     let event_id = (wait_event_info & WAIT_EVENT_ID_MASK) as usize;
@@ -305,13 +308,13 @@ pub fn pgstat_get_wait_event(wait_event_info: u32) -> Option<&'static str> {
             names.get(event_id).copied().unwrap_or("unknown wait event")
         }
     };
-    Some(match class_id {
+    Ok(Some(match class_id {
         PG_WAIT_LWLOCK => lwlock::GetLWLockIdentifier(class_id, event_id as u16),
         // GetLockNameFromTagType (lmgr.c) over LockTagTypeNames
         // (lockfuncs.c); the event id is the locktag type.
         PG_WAIT_LOCK => LOCK_TAG_TYPE_NAMES.get(event_id).copied().unwrap_or("???"),
         PG_WAIT_EXTENSION | PG_WAIT_INJECTIONPOINT => {
-            custom::GetWaitEventCustomIdentifier(wait_event_info)
+            custom::GetWaitEventCustomIdentifier(wait_event_info)?
         }
         PG_WAIT_BUFFERPIN => named(&WAIT_EVENT_BUFFERPIN_NAMES),
         PG_WAIT_ACTIVITY => named(&WAIT_EVENT_ACTIVITY_NAMES),
@@ -321,7 +324,7 @@ pub fn pgstat_get_wait_event(wait_event_info: u32) -> Option<&'static str> {
         PG_WAIT_IO => named(&WAIT_EVENT_IO_NAMES),
         // C's default arm (wait_event.c pgstat_get_wait_event).
         _ => "unknown wait event",
-    })
+    }))
 }
 
 pub fn init_seams() {

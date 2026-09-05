@@ -29,6 +29,8 @@ fn setup() -> MutexGuard<'static, ()> {
     ONCE.call_once(|| {
         timestamp_seams::get_current_timestamp::set(|| NOW.with(|c| c.get()));
         xact_seams::get_current_transaction_nest_level::set(|| NEST_LEVEL.with(|c| c.get()));
+        // fd's AllocateDesc (OpenTransientFile in pgstat_write_statsfile).
+        xact_seams::get_current_sub_transaction_id::set(|| 1);
         xact_seams::get_current_transaction_stop_timestamp::set(|| NOW.with(|c| c.get()));
         xact_seams::is_transaction_or_transaction_block::set(|| false);
         backend_status_seams::pgstat_clear_backend_status_snapshot::set(|| {});
@@ -697,12 +699,11 @@ fn statsfile_roundtrip_restores_entries() {
 
     crate::file::pgstat_write_statsfile().unwrap();
 
-    crate::pgstat_reset(pending::PGSTAT_KIND_RELATION, 5, 8001);
+    // C restores into the freshly created (empty) shared hash at startup;
+    // an entry already present is a duplicate and marks the file corrupt.
+    crate::shmem::clear_all_entries();
     crate::pgstat_clear_snapshot();
-    assert_eq!(
-        relation::pgstat_fetch_stat_tabentry_ext(false, 8001).unwrap().tuples_inserted,
-        0
-    );
+    assert!(relation::pgstat_fetch_stat_tabentry_ext(false, 8001).is_none());
 
     crate::file::pgstat_read_statsfile();
     crate::pgstat_clear_snapshot();
@@ -1032,7 +1033,8 @@ fn statsfile_replslot_roundtrips_by_name() {
     crate::replslot::pgstat_report_replslot(3, &rep);
     crate::file::pgstat_write_statsfile().unwrap();
 
-    crate::replslot::pgstat_drop_replslot(3);
+    // Fresh-boot store (see statsfile_roundtrip_restores_entries).
+    crate::shmem::clear_all_entries();
     crate::pgstat_clear_snapshot();
     assert!(crate::pgstat_fetch_replslot("logslot").unwrap().is_none());
 
@@ -1041,5 +1043,230 @@ fn statsfile_replslot_roundtrips_by_name() {
     let e = crate::pgstat_fetch_replslot("logslot").unwrap().unwrap();
     assert_eq!(e.stream_count, 7);
     crate::replslot::pgstat_drop_replslot(3);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---- audit-18.6 b091: statsfile log parity with pgstat.c (18.6) ----
+//
+// C's pgstat_read_statsfile names every parse failure in a WARNING before
+// the LOG "corrupted statistics file" line (pgstat.c:1790-2034), refuses
+// duplicate entries (pgstat.c:1964-1974), prints the datadir-relative path
+// with %m (pgstat.c:1779, 2031), pgstat_discard_stats logs a failed unlink
+// (pgstat.c:524-536), and pgstat_write_statsfile logs open/write/close
+// failures naming pgstat.tmp and cleans the temp file up (pgstat.c:1595-1737).
+
+static B091_LOG: std::sync::Mutex<Vec<(i32, String)>> = std::sync::Mutex::new(Vec::new());
+
+fn b091_capture(err: &types_error::PgError, _output_to_server: &mut bool) {
+    B091_LOG.lock().unwrap().push((err.level.0, err.message.clone()));
+}
+
+fn b091_capture_log(f: impl FnOnce()) -> Vec<(i32, String)> {
+    let prev = elog::set_emit_log_hook(Some(b091_capture));
+    B091_LOG.lock().unwrap().clear();
+    f();
+    elog::set_emit_log_hook(prev);
+    core::mem::take(&mut *B091_LOG.lock().unwrap())
+}
+
+fn b091_warning(msg: &str) -> (i32, String) {
+    (types_error::WARNING.0, msg.to_string())
+}
+
+fn b091_corrupted() -> (i32, String) {
+    (types_error::LOG.0, "corrupted statistics file \"pg_stat/pgstat.stat\"".to_string())
+}
+
+fn b091_read_log(dir_name: &str, body: &[u8]) -> Vec<(i32, String)> {
+    let dir = statsfile_dir(dir_name);
+    std::fs::write(dir.join("pg_stat/pgstat.stat"), body).unwrap();
+    let log = b091_capture_log(crate::file::pgstat_read_statsfile);
+    // The corrupted file is unlinked on the way out (C's done: label).
+    assert!(!dir.join("pg_stat/pgstat.stat").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+    log
+}
+
+#[test]
+fn statsfile_read_failures_warn_before_corrupted_log() {
+    let _lock = setup();
+    let header = crate::file::PGSTAT_FILE_FORMAT_ID.to_ne_bytes().to_vec();
+
+    // `echo -n bad > pg_stat/pgstat.stat` (pgstat.c:1792)
+    assert_eq!(
+        b091_read_log("pgstat-b091-badfmt", b"bad"),
+        vec![b091_warning("could not read format ID"), b091_corrupted()]
+    );
+    // pgstat.c:1798
+    let mut wrong = (crate::file::PGSTAT_FILE_FORMAT_ID + 1).to_ne_bytes().to_vec();
+    wrong.push(b'E');
+    assert_eq!(
+        b091_read_log("pgstat-b091-wrongfmt", &wrong),
+        vec![
+            b091_warning(&format!(
+                "found incorrect format ID {} (expected {})",
+                crate::file::PGSTAT_FILE_FORMAT_ID + 1,
+                crate::file::PGSTAT_FILE_FORMAT_ID
+            )),
+            b091_corrupted()
+        ]
+    );
+    // pgstat.c:2028 default arm
+    let mut unknown = header.clone();
+    unknown.push(b'X');
+    assert_eq!(
+        b091_read_log("pgstat-b091-unknown", &unknown),
+        vec![b091_warning("could not read entry of type X"), b091_corrupted()]
+    );
+    // pgstat.c:1821 (fixed entry whose kind is cut short)
+    let mut short_fixed = header.clone();
+    short_fixed.extend_from_slice(&[b'F', 7, 0]);
+    assert_eq!(
+        b091_read_log("pgstat-b091-shortfixed", &short_fixed),
+        vec![
+            b091_warning("could not read stats kind for entry of type F"),
+            b091_corrupted()
+        ]
+    );
+    // pgstat.c:2019 (bytes after the end marker)
+    let mut trailing = header.clone();
+    trailing.extend_from_slice(b"EE");
+    assert_eq!(
+        b091_read_log("pgstat-b091-trailing", &trailing),
+        vec![b091_warning("could not read end-of-file"), b091_corrupted()]
+    );
+    // pgstat.c:1887 (hash entry whose key is cut short)
+    let mut short_key = header.clone();
+    short_key.extend_from_slice(&[b'S', 2, 0, 0, 0, 5]);
+    assert_eq!(
+        b091_read_log("pgstat-b091-shortkey", &short_key),
+        vec![b091_warning("could not read key for entry of type S"), b091_corrupted()]
+    );
+    // pgstat.c:1895 (kind outside the builtin range)
+    let mut bad_kind = header.clone();
+    bad_kind.push(b'S');
+    bad_kind.extend_from_slice(&99u32.to_ne_bytes());
+    bad_kind.extend_from_slice(&5u32.to_ne_bytes());
+    bad_kind.extend_from_slice(&1259u64.to_ne_bytes());
+    assert_eq!(
+        b091_read_log("pgstat-b091-badkind", &bad_kind),
+        vec![
+            b091_warning("invalid stats kind for entry 99/5/1259 of type S"),
+            b091_corrupted()
+        ]
+    );
+}
+
+#[test]
+fn statsfile_duplicate_entry_is_corruption() {
+    let _lock = setup();
+    SetMyDatabaseId(5);
+    let mut body = crate::file::PGSTAT_FILE_FORMAT_ID.to_ne_bytes().to_vec();
+    let mut rec = vec![b'S'];
+    rec.extend_from_slice(&PGSTAT_KIND_RELATION.0.to_ne_bytes());
+    rec.extend_from_slice(&5u32.to_ne_bytes());
+    rec.extend_from_slice(&1259u64.to_ne_bytes());
+    rec.extend_from_slice(&vec![0u8; core::mem::size_of::<crate::shmem::PgStat_StatTabEntry>()]);
+    body.extend_from_slice(&rec);
+    body.extend_from_slice(&rec);
+    body.push(b'E');
+    assert_eq!(
+        b091_read_log("pgstat-b091-dup", &body),
+        vec![
+            b091_warning("found duplicate stats entry 2/5/1259 of type S"),
+            b091_corrupted()
+        ]
+    );
+    // pgstat_reset_after_failure discards everything, including the entry
+    // loaded before the duplicate was found.
+    assert!(!crate::pgstat_have_entry(PGSTAT_KIND_RELATION.0, 5, 1259));
+}
+
+#[test]
+fn statsfile_open_failure_logs_relative_path_with_strerror() {
+    let _lock = setup();
+    let dir = statsfile_dir("pgstat-b091-open");
+    // pg_stat as a plain file: open(2) fails with ENOTDIR for any uid.
+    std::fs::remove_dir_all(dir.join("pg_stat")).unwrap();
+    std::fs::write(dir.join("pg_stat"), b"").unwrap();
+    let log = b091_capture_log(crate::file::pgstat_read_statsfile);
+    assert_eq!(
+        log,
+        vec![(
+            types_error::LOG.0,
+            "could not open statistics file \"pg_stat/pgstat.stat\": Not a directory".to_string()
+        )]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn statsfile_discard_logs_unlink_failure() {
+    let _lock = setup();
+    let dir = statsfile_dir("pgstat-b091-discard");
+    // A directory in the file's place: unlink(2) fails (EISDIR/EPERM), not ENOENT.
+    std::fs::create_dir(dir.join("pg_stat/pgstat.stat")).unwrap();
+    let log = b091_capture_log(|| crate::file::pgstat_discard_stats().unwrap());
+    assert_eq!(log.len(), 1, "{log:?}");
+    assert_eq!(log[0].0, types_error::LOG.0);
+    let prefix = "could not unlink permanent statistics file \"pg_stat/pgstat.stat\": ";
+    assert!(log[0].1.starts_with(prefix), "{}", log[0].1);
+    assert!(log[0].1.len() > prefix.len());
+    assert!(!log[0].1.ends_with(')'), "no Rust io::Error suffix: {}", log[0].1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn statsfile_write_open_failure_logs_tmpfile() {
+    let _lock = setup();
+    let dir = statsfile_dir("pgstat-b091-wopen");
+    std::fs::remove_dir_all(dir.join("pg_stat")).unwrap();
+    std::fs::write(dir.join("pg_stat"), b"").unwrap();
+    let log = b091_capture_log(|| crate::file::pgstat_write_statsfile().unwrap());
+    assert_eq!(
+        log,
+        vec![(
+            types_error::LOG.0,
+            "could not open temporary statistics file \"pg_stat/pgstat.tmp\": Not a directory"
+                .to_string()
+        )]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn statsfile_write_rename_failure_unlinks_tmpfile() {
+    let _lock = setup();
+    let dir = statsfile_dir("pgstat-b091-wrename");
+    std::fs::create_dir(dir.join("pg_stat/pgstat.stat")).unwrap();
+    let log = b091_capture_log(|| crate::file::pgstat_write_statsfile().unwrap());
+    // durable_rename reported the failure (pgstat.c:1733 "already emitted")...
+    assert!(
+        log.iter().any(|(lvl, m)| *lvl == types_error::LOG.0 && m.contains("pgstat.stat")),
+        "{log:?}"
+    );
+    // ...and the temp file was unlinked (pgstat.c:1736).
+    assert!(!dir.join("pg_stat/pgstat.tmp").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// pgstat_replslot.c:197: a slot index without a name is elog(ERROR) (which
+// proc_exit promotes to FATAL), never a thread panic.
+#[test]
+fn statsfile_missing_replslot_name_is_an_error_not_a_panic() {
+    let _lock = setup();
+    let dir = statsfile_dir("pgstat-b091-replslot");
+    // index 4 has stats but no name in the seam.
+    crate::replslot::pgstat_create_replslot(4);
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::file::pgstat_write_statsfile()
+    }));
+    crate::replslot::pgstat_drop_replslot(4);
+    let err = r
+        .unwrap_or_else(|_| panic!("missing replication slot name must not panic"))
+        .unwrap_err();
+    assert_eq!(err.sqlstate, types_error::ERRCODE_INTERNAL_ERROR);
+    assert_eq!(err.message, "could not find name for replication slot index 4");
+    assert!(!dir.join("pg_stat/pgstat.tmp").exists());
     let _ = std::fs::remove_dir_all(&dir);
 }

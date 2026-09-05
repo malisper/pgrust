@@ -78,7 +78,10 @@ pub fn fc_pg_stat_get_backend_wait_event(
     let we = match beentry(fcinfo) {
         None => Some("<backend information not available>"),
         Some(be) if !has_pgstat_permissions(be.st_userid)? => Some("<insufficient privilege>"),
-        Some(be) => wait_event_info(be.st_procpid).and_then(waitevent::pgstat_get_wait_event),
+        Some(be) => match wait_event_info(be.st_procpid) {
+            Some(info) => waitevent::pgstat_get_wait_event(info)?,
+            None => None,
+        },
     };
     match we {
         Some(e) => text_datum(fcinfo, e),
