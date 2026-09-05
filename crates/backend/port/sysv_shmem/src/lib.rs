@@ -193,8 +193,41 @@ fn detach(_addr: *mut libc::c_void) -> PgResult<()> {
     Ok(())
 }
 
+/// C `check_huge_page_size`'s platform gate (sysv_shmem.c:580): the size is
+/// honoured only where `MAP_HUGE_MASK` and `MAP_HUGE_SHIFT` exist (Linux);
+/// elsewhere any non-zero value is rejected.
+pub const HUGE_PAGE_SIZE_SELECTABLE: bool = cfg!(any(target_os = "linux", target_os = "android"));
+
+/// The platform-parameterised body of `check_huge_page_size`
+/// (sysv_shmem.c:578-591): returns C's verdict and, when rejecting, the
+/// GUC_check_errdetail text.
+pub fn check_huge_page_size_value(newval: i32, selectable: bool) -> Result<(), &'static str> {
+    if !selectable && newval != 0 {
+        return Err("\"huge_page_size\" must be 0 on this platform.");
+    }
+    Ok(())
+}
+
+// GUC check_hook for huge_page_size (sysv_shmem.c:578).
+fn check_huge_page_size(
+    newval: &mut i32,
+    _extra: &mut Option<guc_tables::GucHookExtra>,
+    _source: types_guc::GucSource,
+) -> PgResult<bool> {
+    match check_huge_page_size_value(*newval, HUGE_PAGE_SIZE_SELECTABLE) {
+        Ok(()) => Ok(true),
+        Err(detail) => {
+            if guc_seams::guc_check_errdetail::is_installed() {
+                guc_seams::guc_check_errdetail::call(detail.to_string());
+            }
+            Ok(false)
+        }
+    }
+}
+
 pub fn init_seams() {
     shmem_seams::pg_shared_memory_is_in_use::set(PGSharedMemoryIsInUse);
+    guc_tables::hooks::check_huge_page_size.install(check_huge_page_size);
 }
 
 #[cfg(test)]

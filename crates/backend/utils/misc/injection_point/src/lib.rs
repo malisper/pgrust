@@ -52,6 +52,9 @@ pgsync::process_global! {
     static REGISTRY: Mutex<Vec<(String, Action)>> = Mutex::new(Vec::new());
 }
 
+// INJ_NAME_MAXLEN (injection_point.c:56).
+const INJ_NAME_MAXLEN: usize = 64;
+
 // Wait machinery, mirroring the C module's InjectionPointSharedState:
 // fixed wait slots (name + wakeup counter) plus one condition variable.
 const INJ_MAX_WAIT: usize = 8;
@@ -72,6 +75,14 @@ static WAIT_POINT: ConditionVariable = ConditionVariable::new();
 /// InjectionPointAttach + the module's action-name mapping
 /// (injection_points.c:351). `action` is one of "error", "notice", "wait".
 pub fn attach(name: &str, action: &str) -> PgResult<()> {
+    // injection_point.c:285: names live in fixed INJ_NAME_MAXLEN (64) byte
+    // shmem slots, so 64+ bytes is an error there and here.
+    if name.len() >= INJ_NAME_MAXLEN {
+        return Err(Box::new(PgError::error(format!(
+            "injection point name {name} too long (maximum of {} characters)",
+            INJ_NAME_MAXLEN - 1
+        ))));
+    }
     let action = match action {
         "error" => Action::Error,
         "notice" => Action::Notice,
@@ -237,6 +248,23 @@ mod tests {
     fn bad_action_rejected() {
         assert!(attach("crash-skips-bad-action", "explode").is_err());
         assert!(!is_attached("crash-skips-bad-action"));
+    }
+
+    // injection_point.c:285-287. Audit
+    // a186-candidate-fp-misc-injection_point-8a80633bd2916a715c32-1.
+    #[test]
+    fn name_length_limit_matches_c() {
+        let long = "x".repeat(64);
+        let err = attach(&long, "notice").unwrap_err();
+        assert_eq!(
+            err.message(),
+            format!("injection point name {long} too long (maximum of 63 characters)")
+        );
+        assert!(!is_attached(&long));
+        let max = "y".repeat(63);
+        attach(&max, "notice").unwrap();
+        assert!(is_attached(&max));
+        assert!(detach(&max));
     }
 
     #[test]

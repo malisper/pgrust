@@ -64,6 +64,9 @@ pub fn init_seams() {
     postgres_seams::set_plan_disabling_options::set(set_plan_disabling_options);
     postgres_seams::get_stats_option_name::set(get_stats_option_name);
     postgres_seams::process_postgres_switches::set(switches::process_postgres_switches);
+    guc_tables::hooks::check_stage_log_stats.install(check_stage_log_stats);
+    guc_tables::hooks::check_log_stats.install(check_log_stats);
+    guc_tables::hooks::assign_transaction_timeout.install(assign_transaction_timeout);
     guc_tables::hooks::check_restrict_nonsystem_relation_kind
         .install(check_restrict_nonsystem_relation_kind);
     guc_tables::hooks::assign_restrict_nonsystem_relation_kind
@@ -82,6 +85,56 @@ guc_tables::session_guc_string!(
     restrict_nonsystem_relation_kind_string_set,
     Some("")
 );
+
+// check_stage_log_stats (postgres.c:3569): the check hook shared by
+// log_parser_stats, log_planner_stats and log_executor_stats.
+fn check_stage_log_stats(
+    newval: &mut bool,
+    _extra: &mut Option<guc_tables::GucHookExtra>,
+    _source: types_guc::GucSource,
+) -> PgResult<bool> {
+    if *newval && guc_tables::backing::log_statement_stats() {
+        guc::GUC_check_errdetail("Cannot enable parameter when \"log_statement_stats\" is true.");
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+// check_log_stats (postgres.c:3583): the check hook for log_statement_stats.
+fn check_log_stats(
+    newval: &mut bool,
+    _extra: &mut Option<guc_tables::GucHookExtra>,
+    _source: types_guc::GucSource,
+) -> PgResult<bool> {
+    if *newval
+        && (guc_tables::backing::log_parser_stats()
+            || guc_tables::backing::log_planner_stats()
+            || guc_tables::backing::log_executor_stats())
+    {
+        guc::GUC_check_errdetail(
+            "Cannot enable \"log_statement_stats\" when \"log_parser_stats\", \
+             \"log_planner_stats\", or \"log_executor_stats\" is true.",
+        );
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+// assign_transaction_timeout (postgres.c:3598): a change inside a
+// transaction block arms or disarms the TRANSACTION_TIMEOUT timer at once
+// (StartTransaction only arms it at transaction start).
+fn assign_transaction_timeout(newval: i32, _extra: Option<&guc_tables::GucHookExtra>) {
+    if xact::IsTransactionState() {
+        let id = timeout_seams::TRANSACTION_TIMEOUT;
+        if newval > 0 && !timeout_seams::get_timeout_active::call(id) {
+            // timeout.c enable_timeout_after cannot fail; the seam's Result
+            // wrapper is the only thing to discard here.
+            let _ = timeout_seams::enable_timeout_after::call(id, newval);
+        } else if newval <= 0 && timeout_seams::get_timeout_active::call(id) {
+            let _ = timeout_seams::disable_timeout::call(id, false);
+        }
+    }
+}
 
 // GUC check_hook for restrict_nonsystem_relation_kind (postgres.c); the
 // derived flag word lives in guc_tables::backing for the rewriter.

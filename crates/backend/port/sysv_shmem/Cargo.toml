@@ -18,4 +18,8 @@ init_small = { path = "../../utils/init/init_small" }
 fd = { path = "../../storage/file/fd" }
 vfs = { path = "../../storage/file/vfs" }
 shmem_seams = { path = "../../storage/ipc/shmem_seams" }
+# check_huge_page_size (sysv_shmem.c:578) is a GUC check hook: slot + errdetail seam.
+guc_tables = { path = "../../utils/misc/guc_tables" }
+guc_seams = { path = "../../utils/misc/guc_seams" }
+types_guc = { path = "../../../_support/types/types_guc" }
 libc = "0.2"

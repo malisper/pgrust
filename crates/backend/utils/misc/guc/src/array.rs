@@ -8,7 +8,15 @@ use crate::{set_config_option, valid_custom_variable_name, GucAction, ParseLongO
 // GUC option arrays travel as flat "name=value" string lists; the text[]
 // image lives with the catalog owners (pg_db_role_setting et al.).
 
-fn find_option_normalized(name: &str, make_placeholder: bool) -> PgResult<Option<(String, GucContext, bool)>> {
+// find_option(name, create_placeholders, skip_errors, ERROR) (guc.c:1235)
+// projected to (canonical name, context, is-placeholder). With skip_errors
+// false an unknown custom name raises assignable_custom_variable_name's
+// errors (42602 invalid name / reserved prefix) instead of returning None.
+fn find_option_normalized(
+    name: &str,
+    make_placeholder: bool,
+    skip_errors: bool,
+) -> PgResult<Option<(String, GucContext, bool)>> {
     with_store_mut(|reg| -> PgResult<Option<(String, GucContext, bool)>> {
         if let Some(var) = reg.find_option(name) {
             let gen = var.gen();
@@ -18,7 +26,7 @@ fn find_option_normalized(name: &str, make_placeholder: bool) -> PgResult<Option
                 gen.flags & types_guc::GUC_CUSTOM_PLACEHOLDER != 0,
             )));
         }
-        if make_placeholder && crate::assignable_custom_variable_name(name, true)? {
+        if make_placeholder && crate::assignable_custom_variable_name(name, skip_errors)? {
             reg.add_placeholder_variable(name)?;
             let var = reg.find_option(name).expect("placeholder just added");
             return Ok(Some((var.name().to_string(), var.gen().context, true)));
@@ -34,7 +42,8 @@ pub fn validate_option_array_item(
     skip_if_no_permissions: bool,
 ) -> PgResult<bool> {
     let reset_custom = value.is_none() && valid_custom_variable_name(name);
-    let found = find_option_normalized(name, true)?;
+    // guc.c:6745: find_option(name, true, skipIfNoPermissions || reset_custom, ERROR)
+    let found = find_option_normalized(name, true, skip_if_no_permissions || reset_custom)?;
 
     if found.is_none() && !reset_custom {
         if skip_if_no_permissions {
@@ -98,7 +107,7 @@ pub fn validate_option_array_item(
 pub fn GUCArrayAdd(array: &[String], name: &str, value: &str) -> PgResult<Vec<String>> {
     validate_option_array_item(name, Some(value), false)?;
 
-    let name = match find_option_normalized(name, false)? {
+    let name = match find_option_normalized(name, false, true)? {
         Some((canon, _, _)) => canon,
         None => name.to_string(),
     };
@@ -120,7 +129,7 @@ pub fn GUCArrayAdd(array: &[String], name: &str, value: &str) -> PgResult<Vec<St
 pub fn GUCArrayDelete(array: &[String], name: &str) -> PgResult<Option<Vec<String>>> {
     validate_option_array_item(name, None, false)?;
 
-    let name = match find_option_normalized(name, false)? {
+    let name = match find_option_normalized(name, false, true)? {
         Some((canon, _, _)) => canon,
         None => name.to_string(),
     };

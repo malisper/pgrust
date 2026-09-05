@@ -96,7 +96,7 @@ pub fn process_config_file_internal_list(
 // The apply phase of ProcessConfigFileInternal, over the parsed list and the
 // live store.
 pub fn apply_config_variables(
-    items: &mut [ConfigVariable],
+    items: &mut Vec<ConfigVariable>,
     context: GucContext,
     apply_settings: bool,
     elevel: ErrorLevel,
@@ -224,6 +224,17 @@ pub fn apply_config_variables(
                     ))
                     .into_error(),
             )?;
+            // guc.c:470-473: record_config_file_error(..., NULL, 0, &head,
+            // &tail) so pg_file_settings reports the removal as an error item.
+            guc_file::record_config_file_error(
+                format!(
+                    "parameter \"{}\" cannot be changed without restarting the server",
+                    r.name
+                ),
+                None,
+                0,
+                items,
+            );
             error = true;
             continue;
         }

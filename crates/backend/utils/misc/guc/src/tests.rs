@@ -608,6 +608,63 @@ fn process_config_file_applies_and_reverts() {
     assert_eq!(get_int("work_mem"), Some(4096));
 }
 
+// guc.c:459-476: a PGC_POSTMASTER parameter that came from the file and is
+// no longer in it is reported AND recorded as an error item (name NULL,
+// no file/line, ignore) so pg_file_settings shows the removal. Audit
+// a186-candidate-fp-misc-guc-p1-e735f2236e8cc368e9e6-1.
+#[test]
+fn process_config_file_removed_postmaster_param_records_error_item() {
+    setup();
+    let _guard = APPLICATION_NAME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::temp_dir().join(format!("guc_pcf_removed_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let conf = dir.join("postgresql.conf");
+    init_small::globals::SetDataDir(dir.to_str().unwrap());
+
+    // Initial load (postmaster context): port comes from the file.
+    std::fs::write(&conf, "port = 5499\n").unwrap();
+    SetConfigOption("config_file", Some(conf.to_str().unwrap()), PGC_POSTMASTER, PGC_S_OVERRIDE)
+        .unwrap();
+    let clean = crate::process_config::process_config_file_internal(
+        PGC_POSTMASTER,
+        true,
+        types_error::LOG,
+    )
+    .unwrap();
+    assert!(clean);
+    assert_eq!(get_int("port"), Some(5499));
+    assert_eq!(with_store(|reg| reg.find_option("port").unwrap().gen().reset_source).unwrap(), PGC_S_FILE);
+
+    // Removed from the file: a show_all_file_settings-style scan (SIGHUP,
+    // apply_settings=false) must return the error item C records.
+    std::fs::write(&conf, "application_name = 'unrelated'\n").unwrap();
+    let (clean, items) = crate::process_config::process_config_file_internal_list(
+        PGC_SIGHUP,
+        false,
+        types_error::LOG,
+    )
+    .unwrap();
+    assert!(!clean);
+    let err_items: Vec<&guc_file::ConfigVariable> = items.iter().filter(|i| i.errmsg.is_some()).collect();
+    assert_eq!(err_items.len(), 1, "items: {items:?}");
+    let item = err_items[0];
+    assert_eq!(
+        item.errmsg.as_deref(),
+        Some("parameter \"port\" cannot be changed without restarting the server")
+    );
+    assert!(item.name.is_none());
+    assert!(item.value.is_none());
+    assert!(item.filename.is_none());
+    assert_eq!(item.sourceline, 0);
+    assert!(item.ignore);
+    assert!(!item.applied);
+    // The error item is appended after the parsed entries (C's tail append).
+    assert_eq!(items.last().map(|i| i.errmsg.is_some()), Some(true));
+    // Not applied: the value from the file stands.
+    assert_eq!(get_int("port"), Some(5499));
+}
+
 // gucdup corpus: C's ProcessConfigFileInternal is LAST-wins for duplicate
 // entries within one pass (earlier occurrences are marked ignorable), across
 // include files, and postgresql.auto.conf — parsed after the main file — must
@@ -708,6 +765,30 @@ fn guc_array_add_validates_name_and_value() {
     assert!(e.message().contains("unrecognized configuration parameter"), "{}", e.message());
     let e = GUCArrayAdd(&[], "work_mem", "banana").unwrap_err();
     assert!(e.message().contains("invalid value for parameter"), "{}", e.message());
+}
+
+// guc.c:6745: validate_option_array_item looks the name up with
+// skip_errors = skipIfNoPermissions || reset_custom, so an unknown custom
+// name under a reserved prefix raises assignable_custom_variable_name's
+// 42602 ("... is a reserved prefix.") from GUCArrayAdd, while RESET (value
+// NULL, reset_custom) skips the lookup errors and reaches the placeholder
+// permission check. Audit a186-candidate-fp-misc-guc-p3-4c87efc31a803236318e-1.
+#[test]
+fn guc_array_add_reserved_prefix_is_invalid_name() {
+    array_setup();
+    MarkGUCPrefixReserved("b035rsv");
+    let e = GUCArrayAdd(&[], "b035rsv.bogus", "x").unwrap_err();
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_INVALID_NAME, "{}", e.message());
+    assert_eq!(e.message(), "invalid configuration parameter name \"b035rsv.bogus\"");
+    assert_eq!(e.detail(), Some("\"b035rsv\" is a reserved prefix."));
+    // Malformed custom names take the same skip_errors=false path (42602).
+    let e = GUCArrayAdd(&[], "b035rsv.bad..name", "x").unwrap_err();
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_INVALID_NAME, "{}", e.message());
+    // RESET of the same unknown reserved-prefix name is allowed (superuser).
+    assert!(GUCArrayDelete(&["other.x=1".to_string()], "b035rsv.bogus").unwrap().is_some());
+    // A plain unknown name is still 42704.
+    let e = GUCArrayAdd(&[], "no_such_setting_b035", "x").unwrap_err();
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_UNDEFINED_OBJECT, "{}", e.message());
 }
 
 #[test]

@@ -194,9 +194,37 @@ fn the_seam_is_installed_by_init_seams() {
     assert!(!shmem_seams::pg_shared_memory_is_in_use::is_installed());
     INSTALL.call_once(crate::init_seams);
     assert!(shmem_seams::pg_shared_memory_is_in_use::is_installed());
+    // check_huge_page_size (sysv_shmem.c:578) must be wired into its GUC slot
+    // by the same init_seams: guc treats an uninstalled check-hook slot as
+    // "no check hook" and silently accepts any huge_page_size (audit
+    // a186-candidate-fp-port-sysv_shmem-c922fc56eca70a2a4d9c-1).
+    assert!(guc_tables::hooks::check_huge_page_size.installed());
+    let hook = guc_tables::hooks::check_huge_page_size.get();
+    let mut extra = None;
+    let mut z = 0;
+    assert!(hook(&mut z, &mut extra, types_guc::GucSource::PGC_S_TEST).unwrap());
+    let mut v = 2048;
+    let ok = hook(&mut v, &mut extra, types_guc::GucSource::PGC_S_TEST).unwrap();
+    assert_eq!(ok, cfg!(any(target_os = "linux", target_os = "android")));
 
     let dir = scratch_datadir("seam");
     let mut seg = Segment::create();
     seg.write_postgres_header(&dir);
     assert!(shmem_seams::pg_shared_memory_is_in_use::call(0, seg.id as u64).unwrap());
+}
+
+// check_huge_page_size (sysv_shmem.c:578-591): non-zero sizes are accepted
+// only where MAP_HUGE_MASK/MAP_HUGE_SHIFT exist; 0 always passes. Audit
+// a186-candidate-fp-port-sysv_shmem-c922fc56eca70a2a4d9c-1.
+#[test]
+fn check_huge_page_size_platform_gate() {
+    use crate::{check_huge_page_size_value, HUGE_PAGE_SIZE_SELECTABLE};
+    assert_eq!(check_huge_page_size_value(0, true), Ok(()));
+    assert_eq!(check_huge_page_size_value(0, false), Ok(()));
+    assert_eq!(check_huge_page_size_value(2048, true), Ok(()));
+    assert_eq!(
+        check_huge_page_size_value(2048, false),
+        Err("\"huge_page_size\" must be 0 on this platform.")
+    );
+    assert_eq!(HUGE_PAGE_SIZE_SELECTABLE, cfg!(any(target_os = "linux", target_os = "android")));
 }

@@ -18611,10 +18611,13 @@ version = "0.0.0"
 dependencies = [
  "elog",
  "fd",
+ "guc_seams",
+ "guc_tables",
  "init_small",
  "libc",
  "shmem_seams",
  "types_error",
+ "types_guc",
  "types_storage",
  "vfs",
 ]
