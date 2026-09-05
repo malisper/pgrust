@@ -485,3 +485,108 @@ fn assemble_insert_decode_roundtrip() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+fn scratch() -> Scratch {
+    Scratch {
+        hdr: Box::new([0u8; HEADER_SCRATCH_SIZE]),
+        rdatas: Vec::with_capacity(XLR_NORMAL_RDATAS),
+        compressed: Vec::new(),
+    }
+}
+
+// XLogRegisterBufData (xloginsert.c:427-434): more than UINT16_MAX bytes of
+// buffer data for one block is ereport(ERROR, "too much WAL data") with the
+// per-block DETAIL naming the running total and the piece being added. Audit
+// a186-candidate-fp-transam-xloginsert-8577924a30b6575f56f6-1.
+#[test]
+fn too_much_block_data_error_matches_c() {
+    init_once();
+    let mut scratch = scratch();
+    let page = standard_page(0x00, 64, 8000);
+    let rloc = RelFileLocator::new(1663, 5, 24576);
+    let first = vec![0x42u8; 60000];
+    let second = vec![0x43u8; 6000];
+    let err = assemble(
+        &mut scratch,
+        RM_XLOG_ID,
+        0x20,
+        0,
+        false,
+        0,
+        &[],
+        &[RegBlock {
+            block_id: 0,
+            rlocator: rloc,
+            forknum: ForkNumber::MAIN_FORKNUM,
+            block: 1,
+            page: &page[..],
+            flags: REGBUF_NO_IMAGE,
+            bufdata: &[&first, &second],
+        }],
+    )
+    .err()
+    .expect("66000 bytes of block data must fail");
+    assert_eq!(err.message(), "too much WAL data");
+    assert_eq!(
+        err.detail(),
+        Some("Registering more than maximum 65535 bytes allowed to block 0: current 60000 bytes, adding 6000 bytes.")
+    );
+    scratch.rdatas.clear();
+}
+
+// XLogRecordAssemble (xloginsert.c:867-873): main data over PG_UINT32_MAX is
+// ereport(ERROR, "too much WAL data") with the length DETAIL. The same 512 MB
+// zero block registered nine times (4.5 GB) trips the check before any byte
+// is read. Audit a186-candidate-fp-transam-xloginsert-5593caebe6d408819e33-1.
+#[test]
+fn too_much_main_data_error_matches_c() {
+    init_once();
+    let mut scratch = scratch();
+    let chunk = vec![0u8; 512 << 20];
+    let parts: Vec<&[u8]> = (0..9).map(|_| &chunk[..]).collect();
+    let err = assemble(&mut scratch, RM_XLOG_ID, 0x20, 0, false, 0, &parts, &[])
+        .err()
+        .expect("4.5 GB of main data must fail");
+    assert_eq!(err.message(), "too much WAL data");
+    assert_eq!(
+        err.detail(),
+        Some(
+            format!(
+                "Main data length is {} bytes for a maximum of {} bytes.",
+                9u64 * (512 << 20),
+                u32::MAX
+            )
+            .as_str()
+        )
+    );
+    scratch.rdatas.clear();
+}
+
+// XLogRecordAssemble (xloginsert.c:911-917): a record over XLogRecordMaxSize
+// is ereport(ERROR, "oversized WAL record") with the size/rmid/flags DETAIL.
+// Audit a186-candidate-fp-transam-xloginsert-f6fb5c624aacc0fe0570-1.
+#[test]
+fn oversized_record_error_matches_c() {
+    init_once();
+    let mut scratch = scratch();
+    let chunk = vec![0u8; 512 << 20];
+    let parts: [&[u8]; 3] = [&chunk, &chunk, &chunk];
+    let err = assemble(&mut scratch, RM_XLOG_ID, 0x20, 0, false, 0, &parts, &[])
+        .err()
+        .expect("a 1.5 GB record must fail");
+    assert_eq!(err.message(), "oversized WAL record");
+    let detail = err.detail().unwrap_or("").to_string();
+    let tail = format!(
+        " bytes (of maximum {} bytes); rmid {} flags {}.",
+        XLogRecordMaxSize, RM_XLOG_ID, 0x20
+    );
+    assert!(
+        detail.starts_with("WAL record would be ") && detail.ends_with(&tail),
+        "got DETAIL: {detail:?}"
+    );
+    let n: u64 = detail["WAL record would be ".len()..detail.len() - tail.len()]
+        .parse()
+        .expect("byte count");
+    assert!(n > 3 * (512 << 20) && n < XLogRecordMaxSize * 2, "total {n}");
+    scratch.rdatas.clear();
+}

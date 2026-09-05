@@ -854,8 +854,13 @@ pub fn SetInstallXLogFileSegmentActive() -> PgResult<()> {
     Ok(())
 }
 
-pub fn ResetInstallXLogFileSegmentActive() {
+// xlog.c:9556-9561: serialized against InstallXLogFileSegment /
+// IsInstallXLogFileSegmentActive by ControlFileLock, like the Set side.
+pub fn ResetInstallXLogFileSegmentActive() -> PgResult<()> {
+    LWLockAcquire(ControlFileLock(), LW_EXCLUSIVE, init_small::globals::MyProcNumber())?;
     XLogCtl().InstallXLogFileSegmentActive.store(false, Relaxed);
+    LWLockRelease(ControlFileLock())?;
+    Ok(())
 }
 
 pub fn XLogReportParameters() -> PgResult<()> {

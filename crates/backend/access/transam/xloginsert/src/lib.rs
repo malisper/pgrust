@@ -84,8 +84,15 @@ fn loc(func: &'static str) -> ErrorLocation {
 
 #[track_caller]
 #[cold]
+// xloginsert.c:430-433 / 870-872: primary "too much WAL data", the
+// specifics in errdetail.
 fn too_much_wal_data(detail: String) -> Box<PgError> {
-    Box::new(PgError::new(ERROR, format!("too much WAL data: {detail}")))
+    Box::new(
+        ereport(ERROR)
+            .errmsg("too much WAL data")
+            .errdetail(detail)
+            .into_error(),
+    )
 }
 
 #[track_caller]
@@ -213,13 +220,20 @@ fn assemble(
         }
         debug_assert_eq!(blk.page.len(), BLCKSZ);
 
-        let rdata_len: usize = blk.bufdata.iter().map(|d| d.len()).sum();
-        if rdata_len > u16::MAX as usize {
-            return Err(too_much_wal_data(format!(
-                "registering more than maximum {} bytes allowed to block {}",
-                u16::MAX,
-                blk.block_id
-            )));
+        // XLogRegisterBufData (xloginsert.c:427-434) checks each piece as it
+        // is appended: the DETAIL names the running total and the piece.
+        let mut rdata_len: usize = 0;
+        for d in blk.bufdata {
+            if rdata_len + d.len() > u16::MAX as usize {
+                return Err(too_much_wal_data(format!(
+                    "Registering more than maximum {} bytes allowed to block {}: current {} bytes, adding {} bytes.",
+                    u16::MAX,
+                    blk.block_id,
+                    rdata_len,
+                    d.len()
+                )));
+            }
+            rdata_len += d.len();
         }
 
         let needs_backup = if blk.flags & REGBUF_FORCE_IMAGE != 0 {
@@ -383,7 +397,7 @@ fn assemble(
         if mainrdata_len > 255 {
             if mainrdata_len > u32::MAX as u64 {
                 return Err(too_much_wal_data(format!(
-                    "main data length is {mainrdata_len} bytes for a maximum of {}",
+                    "Main data length is {mainrdata_len} bytes for a maximum of {} bytes.",
                     u32::MAX
                 )));
             }
@@ -410,12 +424,15 @@ fn assemble(
     }
 
     if total_len > XLogRecordMaxSize {
-        return Err(Box::new(PgError::new(
-            ERROR,
-            format!(
-                "oversized WAL record: would be {total_len} bytes (of maximum {XLogRecordMaxSize}); rmid {rmid} flags {info}"
-            ),
-        )));
+        // xloginsert.c:911-917
+        return Err(Box::new(
+            ereport(ERROR)
+                .errmsg("oversized WAL record")
+                .errdetail(format!(
+                    "WAL record would be {total_len} bytes (of maximum {XLogRecordMaxSize} bytes); rmid {rmid} flags {info}."
+                ))
+                .into_error(),
+        ));
     }
 
     // XLogRecord header image; xl_prev is XLogInsertRecord's, xl_crc is the

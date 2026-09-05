@@ -252,6 +252,33 @@ pub fn XLogPrefetchReconfigure() {
     RECONFIGURE_COUNT.with(|c| c.set(c.get() + 1));
 }
 
+// XLogPrefetchReconfigureCount (xlogprefetcher.c): the process-wide
+// reconfigure generation the prefetcher compares against on its next read.
+pub fn xlog_prefetch_reconfigure_count() -> i32 {
+    RECONFIGURE_COUNT.with(Cell::get)
+}
+
+// SharedStats->{wal_distance, block_distance, io_depth}: the instantaneous
+// pg_stat_recovery_prefetch columns XLogPrefetcherComputeStats publishes.
+pub fn xlog_prefetch_shared_distances() -> (i32, i32, i32) {
+    let s = shared_stats();
+    (
+        s.wal_distance.load(Relaxed),
+        s.block_distance.load(Relaxed),
+        s.io_depth.load(Relaxed),
+    )
+}
+
+// Direct SharedStats write (C code addresses the shared struct itself): lets a
+// caller plant a distinguishable pre-state before a compute-stats point.
+#[doc(hidden)]
+pub fn xlog_prefetch_poke_shared_distances(wal_distance: i32, block_distance: i32, io_depth: i32) {
+    let s = shared_stats();
+    s.wal_distance.store(wal_distance, Relaxed);
+    s.block_distance.store(block_distance, Relaxed);
+    s.io_depth.store(io_depth, Relaxed);
+}
+
 // C: plain increment through pg_atomic_write_u64 — single writer (startup).
 fn XLogPrefetchIncrement(counter: &AtomicU64) {
     debug_assert!(AmStartupProcess() || !init_small::globals::IsUnderPostmaster());

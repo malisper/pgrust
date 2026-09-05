@@ -37,6 +37,22 @@ fn checkpoint_byte_roundtrip() {
     assert_eq!(CheckPoint::from_bytes(&bytes), ckpt);
 }
 
+// Tests that take ControlFileLock run without proc seams: any contention on
+// it is C's "cannot wait without a PGPROC structure" PANIC, so they serialize
+// here instead of racing.
+static CONTROL_FILE_LOCK_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+fn control_file_lock_gate() -> std::sync::MutexGuard<'static, ()> {
+    CONTROL_FILE_LOCK_GATE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+// CreateLWLocks publishes MainLWLockArray exactly once per process; tests
+// sharing the process reuse the published table.
+fn create_lwlocks_once() {
+    if lwlock::published_lwlock_table().is_none() {
+        lwlock::CreateLWLocks(false).unwrap();
+    }
+}
+
 fn init_seams_once() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
@@ -152,6 +168,8 @@ fn insert_flush_smoke() {
     use crate::ctl::*;
     use std::sync::atomic::Ordering::Relaxed;
 
+    let _gate = control_file_lock_gate();
+
     let dir = std::env::temp_dir().join(format!("pgrust_xlog_test_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     for sub in ["global", "pg_wal/archive_status", "pg_wal/summaries"] {
@@ -169,7 +187,7 @@ fn insert_flush_smoke() {
     waitevent_seams::pgstat_report_wait_start::set(|_| {});
     waitevent_seams::pgstat_report_wait_end::set(|| {});
     fd::InitFileAccess();
-    lwlock::CreateLWLocks(false).unwrap();
+    create_lwlocks_once();
 
     let seg = 16 * 1024 * 1024;
     let redo = seg as u64 + SizeOfXLogLongPHD as u64;
@@ -799,4 +817,64 @@ fn checkpoint_display_activity_matches_c_titles() {
         "performing end-of-recovery shutdown checkpoint"
     );
     assert_eq!(act(CHECKPOINT_IS_SHUTDOWN | CHECKPOINT_IMMEDIATE, true), "performing shutdown restartpoint");
+}
+
+// issue_xlog_fsync (xlog.c:8771-8785): the PANIC text names the primitive
+// that failed — fsync, write-through fsync or fdatasync. Audit
+// a186-candidate-fp-transam-xlog-p4-a1f6c559dd318ae09d31-1.
+#[test]
+fn issue_xlog_fsync_failure_messages_match_c() {
+    use crate::write::fsync_failure_message;
+    assert_eq!(fsync_failure_message(WAL_SYNC_METHOD_FSYNC), "could not fsync file \"%s\": %m");
+    assert_eq!(
+        fsync_failure_message(WAL_SYNC_METHOD_FSYNC_WRITETHROUGH),
+        "could not fsync write-through file \"%s\": %m"
+    );
+    assert_eq!(
+        fsync_failure_message(WAL_SYNC_METHOD_FDATASYNC),
+        "could not fdatasync file \"%s\": %m"
+    );
+}
+
+// ResetInstallXLogFileSegmentActive (xlog.c:9556-9561) flips the flag under
+// ControlFileLock (LW_EXCLUSIVE), like SetInstallXLogFileSegmentActive and
+// the InstallXLogFileSegment readers. With the lock held by this thread, a
+// reset from another thread must NOT flip the flag; without a PGPROC (no proc
+// seams in this harness) its contended acquire surfaces as the C "cannot wait
+// without a PGPROC structure" PANIC error instead of blocking. Audit
+// a186-candidate-fp-transam-xlog-p4-fc5d4d08f28f95c28b83-1.
+#[test]
+fn reset_install_xlog_file_segment_active_takes_control_file_lock() {
+    use crate::ctl::{ControlFileLock, XLogCtl, XLOGShmemInit};
+    use lwlock::{LWLockAcquire, LWLockRelease, LW_EXCLUSIVE};
+    use std::sync::atomic::Ordering::Relaxed;
+
+    let _gate = control_file_lock_gate();
+    init_seams_once();
+    fd::InitFileAccess();
+    create_lwlocks_once();
+    XLOGShmemInit();
+
+    crate::startup::SetInstallXLogFileSegmentActive().unwrap();
+    assert!(XLogCtl().InstallXLogFileSegmentActive.load(Relaxed));
+
+    LWLockAcquire(ControlFileLock(), LW_EXCLUSIVE, 0).unwrap();
+    let reset = std::thread::spawn(crate::startup::ResetInstallXLogFileSegmentActive)
+        .join()
+        .unwrap();
+    let flag_while_held = XLogCtl().InstallXLogFileSegmentActive.load(Relaxed);
+    LWLockRelease(ControlFileLock()).unwrap();
+    assert!(
+        flag_while_held,
+        "ResetInstallXLogFileSegmentActive cleared the flag while ControlFileLock was held elsewhere"
+    );
+    let err = reset.expect_err("contended acquire without a PGPROC is a PANIC error");
+    assert!(
+        err.message().contains("cannot wait without a PGPROC structure"),
+        "got: {}",
+        err.message()
+    );
+
+    crate::startup::ResetInstallXLogFileSegmentActive().unwrap();
+    assert!(!XLogCtl().InstallXLogFileSegmentActive.load(Relaxed));
 }

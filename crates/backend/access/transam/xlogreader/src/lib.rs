@@ -2274,6 +2274,24 @@ fn clear_errno() {
     unsafe { *libc::__errno_location() = 0 };
 }
 
+// wait_event.h PG_WAIT_IO class, WalRead id (the waitevent crate's IO name
+// table). pgstat_report_wait_start/end are seams: uninstalled (unit tests,
+// frontend-style readers) means no reporting, as with a NULL MyProc in C.
+const PG_WAIT_IO: u32 = 0x0A00_0000;
+const WAIT_EVENT_WAL_READ: u32 = PG_WAIT_IO | 75;
+
+fn report_wait_start(wait_event_info: u32) {
+    if waitevent_seams::pgstat_report_wait_start::is_installed() {
+        waitevent_seams::pgstat_report_wait_start::call(wait_event_info);
+    }
+}
+
+fn report_wait_end() {
+    if waitevent_seams::pgstat_report_wait_end::is_installed() {
+        waitevent_seams::pgstat_report_wait_end::call();
+    }
+}
+
 /// `WALRead`: `Ok(Err(_))` is the C `false` + errinfo; the outer `Err` is the
 /// segment_open callback's ereport surface.
 pub fn WALRead<R: XLogSegmentRoutine>(
@@ -2316,6 +2334,8 @@ pub fn WALRead<R: XLogSegmentRoutine>(
             0
         };
         clear_errno();
+        // xlogreader.c:1572-1580: the pread is a WalRead wait.
+        report_wait_start(WAIT_EVENT_WAL_READ);
         // SAFETY: buf[p..p+segbytes] is in-bounds writable memory
         // (segbytes <= nbytes <= buf.len() - p).
         let readbytes = unsafe {
@@ -2326,6 +2346,7 @@ pub fn WALRead<R: XLogSegmentRoutine>(
                 startoff as libc::off_t,
             )
         };
+        report_wait_end();
         if readbytes <= 0 {
             return Ok(Err(WALReadError {
                 wre_errno: current_errno(),

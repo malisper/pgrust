@@ -78,6 +78,12 @@ fn StartupRereadConfig() -> PgResult<()> {
 }
 
 pub fn ProcessStartupProcInterrupts() -> PgResult<()> {
+    // Thread-model SIGALRM rendering (notes/timeout-threads.md): the timer
+    // thread posts the wake; the startup process fires its due timeout
+    // handlers (startup-progress, standby timeouts) at this per-record poll,
+    // where C's signal handler would already have preempted the redo loop.
+    timeout::ProcessTimeoutInterrupt();
+
     if GOT_SIGHUP.swap(false, Relaxed) {
         StartupRereadConfig()?;
     }
@@ -229,6 +235,7 @@ pub fn init_seams() {
     startup_seams::is_promote_signaled::set(IsPromoteSignaled);
     startup_seams::reset_promote_signaled::set(ResetPromoteSignaled);
     startup_seams::disable_startup_progress_timeout::set(disable_startup_progress_timeout);
+    startup_seams::has_startup_progress_timeout_expired::set(has_startup_progress_timeout_expired);
     startup_seams::pre_restore_command::set(PreRestoreCommand);
     startup_seams::post_restore_command::set(PostRestoreCommand);
 }

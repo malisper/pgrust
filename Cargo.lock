@@ -21724,6 +21724,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_storage",
+ "waitevent_seams",
  "xlogreader_seams",
  "xlogutils",
 ]
@@ -21815,6 +21816,7 @@ dependencies = [
  "origin_seams",
  "parallel_seams",
  "pg_enum_seams",
+ "pg_rusage",
  "pg_sema",
  "pg_sema_seams",
  "pg_string",

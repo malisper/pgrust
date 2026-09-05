@@ -240,13 +240,14 @@ fn wal_rcv_streaming() -> bool {
 // XLogShutdownWalRcv (xlog.c): stop walreceiver + clear the install flag.
 // The flag can only have been set in standby mode, so crash recovery (where
 // tests run without XLOGShmemInit) skips the XLogCtl touch.
-fn xlog_shutdown_wal_rcv() {
+fn xlog_shutdown_wal_rcv() -> PgResult<()> {
     if walreceiverfuncs_seams::shutdown_wal_rcv::is_installed() {
         walreceiverfuncs_seams::shutdown_wal_rcv::call();
     }
     if ARCHIVE_RECOVERY_REQUESTED.load(Relaxed) {
-        transam_xlog::ResetInstallXLogFileSegmentActive();
+        transam_xlog::ResetInstallXLogFileSegmentActive()?;
     }
+    Ok(())
 }
 
 // The file-static read state of xlogrecovery.c plus the XLogPageReadPrivate
@@ -519,7 +520,7 @@ impl PageSource {
                 match self.cur_source {
                     XLogSource::Archive | XLogSource::PgWal => {
                         if StandbyMode() && targets::CheckForStandbyTrigger() {
-                            xlog_shutdown_wal_rcv();
+                            xlog_shutdown_wal_rcv()?;
                             return Ok(XLREAD_FAIL);
                         }
                         if !StandbyMode() {
@@ -531,9 +532,9 @@ impl PageSource {
                     XLogSource::Stream => {
                         debug_assert!(StandbyMode());
                         if wal_rcv_streaming() {
-                            xlog_shutdown_wal_rcv();
+                            xlog_shutdown_wal_rcv()?;
                         } else {
-                            transam_xlog::ResetInstallXLogFileSegmentActive();
+                            transam_xlog::ResetInstallXLogFileSegmentActive()?;
                         }
                         if targets::timeline_goal() == RecoveryTargetTimeLineGoal::Latest
                             && self.rescan_latest_timeline(self.replay_tli, replay_lsn)?
@@ -618,7 +619,7 @@ impl PageSource {
                 XLogSource::Stream => {
                     debug_assert!(StandbyMode());
                     if PENDING_WALRCV_RESTART.with(Cell::get) && !start_walreceiver {
-                        xlog_shutdown_wal_rcv();
+                        xlog_shutdown_wal_rcv()?;
                         if targets::timeline_goal() == RecoveryTargetTimeLineGoal::Latest {
                             self.rescan_latest_timeline(self.replay_tli, replay_lsn)?;
                         }
@@ -1316,6 +1317,11 @@ pub fn InitWalRecovery() -> PgResult<InitWalRecoveryResult> {
         check_point = controldata_utils::CheckPoint::from_bytes(rec.reader.XLogRecGetData());
         was_shutdown = (rec.reader.XLogRecGetInfo() & !transam_xlog::XLR_INFO_MASK)
             == transam_xlog::XLOG_CHECKPOINT_SHUTDOWN;
+        // xlogrecovery.c:648
+        let _ = elog(
+            DEBUG1,
+            format!("checkpoint record is at {}", lsn_fmt(rec.check_point_loc)),
+        );
         in_recovery = true; // force recovery even if SHUTDOWNED
 
         if check_point.redo < rec.check_point_loc {
@@ -1378,20 +1384,28 @@ pub fn InitWalRecovery() -> PgResult<InitWalRecoveryResult> {
                 &data_path(TABLESPACE_MAP_OLD),
                 DEBUG1,
             );
-            let detail = match renamed {
-                Ok(0) => {
-                    format!("File \"{TABLESPACE_MAP}\" was renamed to \"{TABLESPACE_MAP_OLD}\".")
-                }
-                _ => format!(
-                    "Could not rename file \"{TABLESPACE_MAP}\" to \"{TABLESPACE_MAP_OLD}\"."
-                ),
+            let en = fd::get_errno();
+            // xlogrecovery.c:738-746: one LOG line, the outcome in errdetail
+            // (the failure arm ends in %m).
+            let _ = match renamed {
+                Ok(0) => ereport(LOG)
+                    .errmsg(format!(
+                        "ignoring file \"{TABLESPACE_MAP}\" because no file \"{BACKUP_LABEL_FILE}\" exists"
+                    ))
+                    .errdetail(format!(
+                        "File \"{TABLESPACE_MAP}\" was renamed to \"{TABLESPACE_MAP_OLD}\"."
+                    ))
+                    .finish(loc("InitWalRecovery")),
+                _ => ereport(LOG)
+                    .with_saved_errno(en)
+                    .errmsg(format!(
+                        "ignoring file \"{TABLESPACE_MAP}\" because no file \"{BACKUP_LABEL_FILE}\" exists"
+                    ))
+                    .errdetail(format!(
+                        "Could not rename file \"{TABLESPACE_MAP}\" to \"{TABLESPACE_MAP_OLD}\": %m."
+                    ))
+                    .finish(loc("InitWalRecovery")),
             };
-            let _ = elog(
-                LOG,
-                format!(
-                    "ignoring file \"{TABLESPACE_MAP}\" because no file \"{BACKUP_LABEL_FILE}\" exists: {detail}"
-                ),
-            );
         }
 
         // No backup label: if we know how far to replay for consistency,
@@ -1428,6 +1442,11 @@ pub fn InitWalRecovery() -> PgResult<InitWalRecoveryResult> {
                 ))
                 .finish(loc("InitWalRecovery"))?;
         }
+        // xlogrecovery.c:797
+        let _ = elog(
+            DEBUG1,
+            format!("checkpoint record is at {}", lsn_fmt(rec.check_point_loc)),
+        );
         check_point = controldata_utils::CheckPoint::from_bytes(rec.reader.XLogRecGetData());
         was_shutdown = (rec.reader.XLogRecGetInfo() & !transam_xlog::XLR_INFO_MASK)
             == transam_xlog::XLOG_CHECKPOINT_SHUTDOWN;
@@ -1488,9 +1507,22 @@ pub fn InitWalRecovery() -> PgResult<InitWalRecoveryResult> {
     if tli_of_point_in_history(rec.check_point_loc, &rec.src.expected_tles)?
         != rec.check_point_tli
     {
+        // xlogrecovery.c:873-882: tliSwitchPoint throws if the checkpoint's
+        // timeline is not in expectedTLEs at all.
+        let (switchpoint, _) = timeline_seams::tli_switch_point::call(
+            rec.check_point_tli,
+            &rec.src.expected_tles,
+        )?;
         ereport(FATAL)
             .errmsg(format!(
                 "requested timeline {target_tli} is not a child of this server's history"
+            ))
+            .errdetail(format!(
+                "Latest checkpoint in file \"{}\" is at {} on timeline {}, but in the history of the requested timeline, the server forked off from that timeline at {}.",
+                if have_backup_label { "backup_label" } else { "pg_control" },
+                lsn_fmt(rec.check_point_loc),
+                rec.check_point_tli,
+                lsn_fmt(switchpoint)
             ))
             .finish(loc("InitWalRecovery"))?;
     }
@@ -1507,6 +1539,50 @@ pub fn InitWalRecovery() -> PgResult<InitWalRecoveryResult> {
             .finish(loc("InitWalRecovery"))?;
     }
 
+    // xlogrecovery.c:898-918
+    let _ = elog(
+        DEBUG1,
+        format!(
+            "redo record is at {}; shutdown {}",
+            lsn_fmt(check_point.redo),
+            if was_shutdown { "true" } else { "false" }
+        ),
+    );
+    let _ = elog(
+        DEBUG1,
+        format!(
+            "next transaction ID: {}; next OID: {}",
+            check_point.nextXid.value, check_point.nextOid
+        ),
+    );
+    let _ = elog(
+        DEBUG1,
+        format!(
+            "next MultiXactId: {}; next MultiXactOffset: {}",
+            check_point.nextMulti, check_point.nextMultiOffset
+        ),
+    );
+    let _ = elog(
+        DEBUG1,
+        format!(
+            "oldest unfrozen transaction ID: {}, in database {}",
+            check_point.oldestXid, check_point.oldestXidDB
+        ),
+    );
+    let _ = elog(
+        DEBUG1,
+        format!(
+            "oldest MultiXactId: {}, in database {}",
+            check_point.oldestMulti, check_point.oldestMultiDB
+        ),
+    );
+    let _ = elog(
+        DEBUG1,
+        format!(
+            "commit timestamp Xid oldest/newest: {}/{}",
+            check_point.oldestCommitTsXid, check_point.newestCommitTsXid
+        ),
+    );
     if (check_point.nextXid.value as u32) < types_core::FirstNormalTransactionId {
         ereport(PANIC)
             .errmsg("invalid next transaction ID")
@@ -2075,9 +2151,17 @@ fn apply_wal_record(rec: &mut Recovery, replay_tli: &mut TimeLineID) -> PgResult
     check_recovery_consistency(rec)?;
 
     if switched_tli {
-        transam_xlog::RemoveNonParentXlogFiles(rec.reader.v.EndRecPtr, *replay_tli)?;
-        // XLogPrefetchReconfigure: prefetcher re-reads its GUC lazily here.
+        after_timeline_switch(rec.reader.v.EndRecPtr, *replay_tli)?;
     }
+    Ok(())
+}
+
+// ApplyWalRecord's switchedTLI epilogue (xlogrecovery.c:2085-2092): clean up
+// any (possibly bogus) future WAL segments on the old timeline.
+fn after_timeline_switch(end_rec_ptr: XLogRecPtr, replay_tli: TimeLineID) -> PgResult<()> {
+    transam_xlog::RemoveNonParentXlogFiles(end_rec_ptr, replay_tli)?;
+    // Reset the prefetcher.
+    xlogprefetcher::XLogPrefetchReconfigure();
     Ok(())
 }
 
@@ -2148,6 +2232,7 @@ fn perform_wal_recovery_guts(rec: &mut Recovery) -> PgResult<()> {
     }
 
     if have_record {
+        let ru0 = pg_rusage::pg_rusage_init();
         IN_REDO.with(|c| c.set(true));
         rmgr::RmgrStartup(rec.context.mcx())?;
         let _ = elog(
@@ -2155,7 +2240,30 @@ fn perform_wal_recovery_guts(rec: &mut Recovery) -> PgResult<()> {
             format!("redo starts at {}", lsn_fmt(rec.reader.v.ReadRecPtr)),
         );
 
+        // xlogrecovery.c:1773: prepare to report progress of the redo phase.
+        if !StandbyMode() && startup_seams::begin_startup_progress_phase::is_installed() {
+            startup_seams::begin_startup_progress_phase::call();
+        }
+
         while have_record {
+            // xlogrecovery.c:1780-1782: ereport_startup_progress().
+            if !StandbyMode()
+                && startup_seams::has_startup_progress_timeout_expired::is_installed()
+            {
+                if let Some((secs, usecs)) =
+                    startup_seams::has_startup_progress_timeout_expired::call()
+                {
+                    let _ = elog(
+                        LOG,
+                        format!(
+                            "redo in progress, elapsed time: {secs}.{:02} s, current LSN: {}",
+                            usecs / 10000,
+                            lsn_fmt(rec.reader.v.ReadRecPtr)
+                        ),
+                    );
+                }
+            }
+
             if startup_seams::process_startup_proc_interrupts::is_installed() {
                 startup_seams::process_startup_proc_interrupts::call()?;
             }
@@ -2205,9 +2313,14 @@ fn perform_wal_recovery_guts(rec: &mut Recovery) -> PgResult<()> {
         }
 
         rmgr::RmgrCleanup();
+        // xlogrecovery.c:1903-1906
         let _ = elog(
             LOG,
-            format!("redo done at {}", lsn_fmt(rec.reader.v.ReadRecPtr)),
+            format!(
+                "redo done at {} system usage: {}",
+                lsn_fmt(rec.reader.v.ReadRecPtr),
+                pg_rusage::pg_rusage_show(&ru0).as_str()
+            ),
         );
         let xtime = targets::GetLatestXTime();
         if xtime != 0 {
@@ -2243,7 +2356,7 @@ pub fn FinishWalRecovery() -> PgResult<EndOfWalRecoveryInfo> {
         let mut guard = cell.borrow_mut();
         let rec = guard.as_mut().expect("FinishWalRecovery before InitWalRecovery");
 
-        xlog_shutdown_wal_rcv();
+        xlog_shutdown_wal_rcv()?;
 
         // Shutdown the slot sync machinery: drops its temporary slots and
         // stops it fetching failover slots ('synced' stays true, as in C).
@@ -2312,6 +2425,8 @@ pub fn FinishWalRecovery() -> PgResult<EndOfWalRecoveryInfo> {
 pub fn ShutdownWalRecovery() -> PgResult<()> {
     RECOVERY.with(|cell| {
         if let Some(mut rec) = cell.borrow_mut().take() {
+            // xlogrecovery.c:1641: final update of pg_stat_recovery_prefetch.
+            rec.prefetcher.XLogPrefetcherComputeStats(&rec.reader);
             rec.src.close_read_file();
         }
     });

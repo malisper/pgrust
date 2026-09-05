@@ -7,7 +7,10 @@ use vfs::VfsFd;
 use elog::ereport;
 use lwlock::{LWLockAcquire, LWLockAcquireOrWait, LWLockConditionalAcquire, LWLockRelease, LW_EXCLUSIVE, LW_SHARED};
 use types_core::{TimeLineID, XLogRecPtr, XLogSegNo};
-use types_error::{ErrorLocation, PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERROR, LOG, PANIC};
+use types_error::{
+    ErrorLocation, PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_INVALID_PARAMETER_VALUE, ERROR,
+    LOG, PANIC,
+};
 
 use crate::ctl::{ControlFileLock, NextBufIdx, WALWriteLock, XLogCtl, XLogRecPtrToBufIdx};
 use crate::insert::{WaitXLogInsertionsToFinish, XLogInsertAllowed};
@@ -210,6 +213,18 @@ pub(crate) fn get_sync_bit(method: i32) -> i32 {
     }
 }
 
+// issue_xlog_fsync (xlog.c:8771-8785): the PANIC text for a failed sync,
+// keyed by the wal_sync_method primitive that failed ("%s" = segment name,
+// "%m" = strerror, both expanded by the caller's ereport).
+pub(crate) fn fsync_failure_message(method: i32) -> &'static str {
+    match method {
+        WAL_SYNC_METHOD_FSYNC_WRITETHROUGH => "could not fsync write-through file \"%s\": %m",
+        WAL_SYNC_METHOD_FDATASYNC => "could not fdatasync file \"%s\": %m",
+        // WAL_SYNC_METHOD_FSYNC; any other method PANICs before a sync runs.
+        _ => "could not fsync file \"%s\": %m",
+    }
+}
+
 pub fn issue_xlog_fsync(fd: i32, segno: XLogSegNo, tli: TimeLineID) -> PgResult<()> {
     let method = wal_sync_method();
     if !init_small::globals::enableFsync()
@@ -224,7 +239,14 @@ pub fn issue_xlog_fsync(fd: i32, segno: XLogSegNo, tli: TimeLineID) -> PgResult<
         WAL_SYNC_METHOD_FSYNC => fd::pg_fsync_no_writethrough(fd),
         WAL_SYNC_METHOD_FSYNC_WRITETHROUGH => fd::pg_fsync_writethrough(fd),
         WAL_SYNC_METHOD_FDATASYNC => fd::pg_fdatasync(fd),
-        _ => panic!("unrecognized \"wal_sync_method\": {method}"),
+        _ => {
+            // xlog.c:8799-8803: the structured PANIC (ERRCODE_INVALID_PARAMETER_VALUE),
+            // not a raw thread panic.
+            return ereport(PANIC)
+                .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+                .errmsg_internal(format!("unrecognized \"wal_sync_method\": {method}"))
+                .finish(loc("issue_xlog_fsync"));
+        }
     };
     if rc != 0 {
         // xlog.c:8788-8797: errcode_for_file_access() + "%m".
@@ -233,7 +255,7 @@ pub fn issue_xlog_fsync(fd: i32, segno: XLogSegNo, tli: TimeLineID) -> PgResult<
         return ereport(PANIC)
             .with_saved_errno(en)
             .errcode_for_file_access()
-            .errmsg(format!("could not fsync file \"{fname}\": %m"))
+            .errmsg(fsync_failure_message(method).replace("%s", &fname))
             .finish(loc("issue_xlog_fsync"));
     }
     report_wait_end();

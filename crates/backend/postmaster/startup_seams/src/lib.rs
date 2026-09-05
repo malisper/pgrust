@@ -32,6 +32,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // has_startup_progress_timeout_expired(&secs, &usecs) (postmaster/startup.c):
+    // Some((secs, usecs)) once per expiry of the phase's progress timer — the
+    // ereport_startup_progress() gate.
+    pub fn has_startup_progress_timeout_expired() -> Option<(i64, i32)>
+);
+
+seam_core::seam!(
     // PreRestoreCommand() (postmaster/startup.c).
     pub fn pre_restore_command()
 );

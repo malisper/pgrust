@@ -739,3 +739,76 @@ fn wal_read_failed_pread_is_not_counted() {
     unsafe { libc::close(v.seg.ws_file) };
     std::fs::remove_dir_all(&dir).ok();
 }
+
+// WALRead (xlogreader.c:1572-1580) brackets its pg_pread with
+// pgstat_report_wait_start(WAIT_EVENT_WAL_READ) / pgstat_report_wait_end(), so
+// pg_stat_activity shows WalRead while a walsender or pg_walinspect reads a
+// segment. Audit a186-candidate-fp-transam-xlogreader-acea3dc0f11cc3108ff4-1.
+#[test]
+fn wal_read_reports_wal_read_wait_event() {
+    use std::io::Write;
+    use std::os::unix::io::IntoRawFd;
+
+    // wait_event.h PG_WAIT_IO class, WalRead id (waitevent crate IO name table).
+    const PG_WAIT_IO: u32 = 0x0A00_0000;
+    const WAIT_EVENT_WAL_READ: u32 = PG_WAIT_IO | 75;
+    static STARTS: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+    static ENDS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    if !waitevent_seams::pgstat_report_wait_start::is_installed() {
+        waitevent_seams::pgstat_report_wait_start::set(|info| STARTS.lock().unwrap().push(info));
+        waitevent_seams::pgstat_report_wait_end::set(|| {
+            ENDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        });
+    }
+
+    let mut w = WalSim::new();
+    w.append(0, 0x10, 1, &main_data_body(b"payload"));
+    let dir = std::env::temp_dir().join(format!("xlogreader-walread-wait-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let seg_path = dir.join("seg1");
+    std::fs::File::create(&seg_path)
+        .unwrap()
+        .write_all(&w.buf[..SEGSZ as usize])
+        .unwrap();
+
+    struct FileSegs {
+        path: std::path::PathBuf,
+    }
+    impl XLogSegmentRoutine for FileSegs {
+        fn segment_open(
+            &mut self,
+            v: &mut ReaderView,
+            _next_seg_no: XLogSegNo,
+            _tli: &mut TimeLineID,
+        ) -> PgResult<()> {
+            let f = std::fs::File::open(&self.path).unwrap();
+            v.seg.ws_file = f.into_raw_fd();
+            Ok(())
+        }
+        fn segment_close(&mut self, v: &mut ReaderView) {
+            // SAFETY: closing the fd segment_open produced.
+            unsafe { libc::close(v.seg.ws_file) };
+            v.seg.ws_file = -1;
+        }
+    }
+
+    let mut v = ReaderView {
+        segcxt: WALSegmentContext { ws_segsize: SEGSZ },
+        ..Default::default()
+    };
+    let mut out = vec![0u8; 4096];
+    STARTS.lock().unwrap().clear();
+    let ends_before = ENDS.load(std::sync::atomic::Ordering::Relaxed);
+    let res = WALRead(&mut v, &mut FileSegs { path: seg_path }, &mut out, w.base + 100, 4096, 1)
+        .unwrap();
+    assert!(res.is_ok());
+    let starts = STARTS.lock().unwrap().clone();
+    assert_eq!(
+        starts,
+        vec![WAIT_EVENT_WAL_READ],
+        "WALRead must report exactly one WAIT_EVENT_WAL_READ around its pread"
+    );
+    assert_eq!(ENDS.load(std::sync::atomic::Ordering::Relaxed), ends_before + 1);
+    unsafe { libc::close(v.seg.ws_file) };
+    std::fs::remove_dir_all(&dir).ok();
+}

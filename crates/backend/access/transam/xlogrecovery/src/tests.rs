@@ -415,8 +415,32 @@ fn clean_shutdown_boot_path() {
     assert_eq!(info.abortedRecPtr, InvalidXLogRecPtr);
     assert_eq!(info.missingContrecPtr, InvalidXLogRecPtr);
 
+    // ShutdownWalRecovery (xlogrecovery.c:1641) makes the final
+    // XLogPrefetcherComputeStats() pass over pg_stat_recovery_prefetch's
+    // instantaneous columns before the prefetcher goes away: a planted
+    // pre-state must not survive it. Audit
+    // a186-candidate-fp-transam-xlogrecovery-p1-32457ca830b68c7bfe2d-1.
+    xlogprefetcher::xlog_prefetch_poke_shared_distances(7, 8, 9);
     xlogrecovery_seams::shutdown_wal_recovery::call().unwrap();
     RECOVERY.with(|c| assert!(c.borrow().is_none()));
+    let distances = xlogprefetcher::xlog_prefetch_shared_distances();
+    assert_ne!(
+        distances,
+        (7, 8, 9),
+        "ShutdownWalRecovery left pg_stat_recovery_prefetch distances unfinalized"
+    );
+    assert_eq!(distances.2, 0, "io_depth after the last read is 0 (nothing in flight)");
+
+    // ApplyWalRecord's timeline-switch epilogue (xlogrecovery.c:2092) resets
+    // the prefetcher with XLogPrefetchReconfigure(). Audit
+    // a186-candidate-fp-transam-xlogrecovery-p1-8fea805aa62fca3ae264-1.
+    let reconfigures = xlogprefetcher::xlog_prefetch_reconfigure_count();
+    after_timeline_switch(end_of_log, 2).unwrap();
+    assert_eq!(
+        xlogprefetcher::xlog_prefetch_reconfigure_count(),
+        reconfigures + 1,
+        "a timeline switch must XLogPrefetchReconfigure()"
+    );
 
     // Promote signal file removal.
     std::fs::write(dir.join(PROMOTE_SIGNAL_FILE), b"").unwrap();
