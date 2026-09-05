@@ -37,6 +37,7 @@ dfmgr = { path = "../../backend/utils/fmgr/dfmgr" }
 guc_tables = { path = "../../backend/utils/misc/guc_tables" }
 ipc_seams = { path = "../../backend/storage/ipc/ipc_seams" }
 lsyscache = { path = "../../backend/utils/cache/lsyscache" }
+mbutils = { path = "../../backend/utils/mb/mbutils" }
 mcx = { path = "../../_support/mcx" }
 rustc-hash = { version = "2", default-features = false }
 nodes_core = { path = "../../backend/nodes/nodes_core" }

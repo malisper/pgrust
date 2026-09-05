@@ -97,12 +97,17 @@ fn table_counts_match_compiled_backend_shape() {
     // audit-remediation b033 (contrib/pgcrypto/pgcrypto.c:70 _PG_init): Enum +1
     //   pgcrypto.builtin_crypto_enabled (-> 49) = 478 — the C 18.6 custom GUC,
     //   statically defined like pg_stat_statements.* / auto_explain.*.
-    assert_eq!(ConfigureNamesBool.len(), 140);
+    // audit b013 (pl_handler.c _PG_init:158-203, statically defined like
+    //   auto_explain's): Bool +2 plpgsql.print_strict_params /
+    //   plpgsql.check_asserts (-> 142), String +2 plpgsql.extra_warnings /
+    //   plpgsql.extra_errors (-> 82), Enum +1 plpgsql.variable_conflict
+    //   (-> 50) = 483.
+    assert_eq!(ConfigureNamesBool.len(), 142);
     assert_eq!(ConfigureNamesInt.len(), 178);
     assert_eq!(ConfigureNamesReal.len(), 31);
-    assert_eq!(ConfigureNamesString.len(), 80);
-    assert_eq!(ConfigureNamesEnum.len(), 49);
-    assert_eq!(all_settings().count(), 478);
+    assert_eq!(ConfigureNamesString.len(), 82);
+    assert_eq!(ConfigureNamesEnum.len(), 50);
+    assert_eq!(all_settings().count(), 483);
     assert_eq!(GucContext_Names.len(), PGC_USERSET as usize + 1);
     assert_eq!(GucSource_Names.len(), PGC_S_SESSION as usize + 1);
     assert_eq!(config_group_names.len(), DEVELOPER_OPTIONS as usize + 1);

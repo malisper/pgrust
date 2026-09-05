@@ -433,6 +433,15 @@ pub static pg_trgm_word_similarity_threshold: GucRealVar =
     GucSlot::new("word_similarity_threshold");
 pub static pg_trgm_strict_word_similarity_threshold: GucRealVar =
     GucSlot::new("strict_word_similarity_threshold");
+// plpgsql.* custom GUCs (pl_handler.c _PG_init:158-203), statically defined
+// like auto_explain's: this port has no DefineCustomXxxVariable machinery.
+// The plpgsql crate installs the accessors (and the extra-checks check hook).
+pub static plpgsql_variable_conflict: GucEnumVar = GucSlot::new("plpgsql_variable_conflict");
+pub static plpgsql_print_strict_params: GucBoolVar = GucSlot::new("plpgsql_print_strict_params");
+pub static plpgsql_check_asserts: GucBoolVar = GucSlot::new("plpgsql_check_asserts");
+pub static plpgsql_extra_warnings_string: GucStringVar =
+    GucSlot::new("plpgsql_extra_warnings_string");
+pub static plpgsql_extra_errors_string: GucStringVar = GucSlot::new("plpgsql_extra_errors_string");
 // pgrust-only: pgrust.resource_counters (no C symbol; PGC_INTERNAL,
 // value computed by hooks::show_resource_counters — the simharness F8
 // resource-baseline hook channel; the fd crate owns backing + hook).

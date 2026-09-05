@@ -11,9 +11,11 @@ use types_error::{
 use crate::ast::*;
 use crate::scanner::{CwordRes, IdentifierLookup, PLcword, PLwdatum, PLword, WordRes, WordResolver};
 
-pub const PLPGSQL_RESOLVE_ERROR: i32 = 0;
-pub const PLPGSQL_RESOLVE_VARIABLE: i32 = 1;
-pub const PLPGSQL_RESOLVE_COLUMN: i32 = 2;
+// plpgsql.h PLPGSQL_RESOLVE_*; the plpgsql.variable_conflict GUC row
+// (guc_tables) stores the same values.
+pub const PLPGSQL_RESOLVE_ERROR: i32 = guc_tables::consts::PLPGSQL_RESOLVE_ERROR;
+pub const PLPGSQL_RESOLVE_VARIABLE: i32 = guc_tables::consts::PLPGSQL_RESOLVE_VARIABLE;
+pub const PLPGSQL_RESOLVE_COLUMN: i32 = guc_tables::consts::PLPGSQL_RESOLVE_COLUMN;
 
 const TYPTYPE_COMPOSITE: i8 = b'c' as i8;
 const TYPTYPE_DOMAIN: i8 = b'd' as i8;
@@ -376,20 +378,22 @@ impl CompState {
         dno
     }
 
-    // plpgsql_parse_wordtype (%TYPE on a bare variable name).
-    pub fn parse_wordtype(&self, ident: &str) -> PgResult<PlType> {
+    // plpgsql_parse_wordtype (pl_comp.c:1514, %TYPE on a bare variable
+    // name): a VAR answers with its datatype, a REC with rec->datatype —
+    // None for a record built without a PLpgSQL_type (trigger NEW/OLD), in
+    // which case C returns NULL and read_datatype falls through to the
+    // plain type-name path. Only an unknown name is an error.
+    pub fn parse_wordtype(&self, ident: &str) -> PgResult<Option<PlType>> {
         if let Some((idx, _)) = self.ns_lookup(self.ns_top, false, ident, None, None) {
             let item = &self.ns[idx as usize];
             if item.itemtype == NsType::Var {
                 if let PlDatum::Var(v) = &self.datums[item.itemno as usize] {
-                    return Ok(v.datatype.clone());
+                    return Ok(Some(v.datatype.clone()));
                 }
             }
             if item.itemtype == NsType::Rec {
                 if let PlDatum::Rec(r) = &self.datums[item.itemno as usize] {
-                    if let Some(dt) = &r.datatype {
-                        return Ok(dt.clone());
-                    }
+                    return Ok(r.datatype.clone());
                 }
             }
         }
@@ -675,5 +679,28 @@ mod tests {
             err.message,
             "cross-database references are not implemented: \"foo.bar.baz\""
         );
+    }
+
+    // pl_comp.c:1514 plpgsql_parse_wordtype: a REC namespace entry answers
+    // with rec->datatype, which is NULL for a record built without a
+    // PLpgSQL_type (the trigger NEW/OLD records, plpgsql_build_record(...,
+    // NULL, RECORDOID, ...)); read_datatype then falls through to the plain
+    // type-name path ("NEW%TYPE" -> the core parser's syntax error). Only a
+    // name that is not a variable at all is "variable does not exist".
+    #[test]
+    fn wordtype_on_a_datatype_less_record_is_not_an_undefined_variable() {
+        let mut comp = CompState::new();
+        comp.ns_push_label(Some("trg"), crate::gram::LABEL_BLOCK);
+        comp.build_rec("new", 0, true);
+        let r = comp.parse_wordtype("new");
+        assert!(
+            r.is_ok(),
+            "C returns NULL (no error) for a datatype-less record: {:?}",
+            r.err().map(|e| (e.sqlstate, e.message))
+        );
+        assert!(matches!(r, Ok(None)), "NULL datatype = no %TYPE resolution");
+        let err = comp.parse_wordtype("nosuchvar").unwrap_err();
+        assert_eq!(err.sqlstate, ERRCODE_UNDEFINED_OBJECT);
+        assert_eq!(err.message, "variable \"nosuchvar\" does not exist");
     }
 }

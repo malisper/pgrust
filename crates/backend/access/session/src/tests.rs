@@ -1229,7 +1229,17 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      live values. Session coverage unchanged: the surviving cells are
     //      init_small/globals.rs sources already counted below (same class
     //      as the 556 CRIT_SECTION_COUNT unification).
-    assert_eq!(count_tree(crates), 598, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+            // 599, 18.6 conformance audit (2026-09-04), plpgsql batch b013 (the
+    //   plpgsql.* GUCs are defined statically like _PG_init does):
+    //   90. pl/plpgsql/src/handler.rs ensure_library_loaded LOADED —
+    //      Cell<bool> per-backend-thread "plpgsql.so is loaded" marker that
+    //      runs pl_handler.c:203 MarkGUCPrefixReserved("plpgsql") once at the
+    //      first handler entry; it mirrors guc's per-thread
+    //      RESERVED_CLASS_PREFIX (guc.c:78 static reserved_class_prefix,
+    //      per-backend in C) so a thread's prefix list and its load marker
+    //      agree. Per-thread library-load state, no session identity, never
+    //      bound or reset — non-session TLS (same class as 61).
+    assert_eq!(count_tree(crates), 599, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

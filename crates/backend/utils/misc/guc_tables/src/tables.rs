@@ -372,6 +372,13 @@ pub static compute_query_id_options: &[config_enum_entry] = &[
     config_enum_entry { name: "0", val: COMPUTE_QUERY_ID_OFF, hidden: true },
 ];
 
+// pl_handler.c:40-45 variable_conflict_options.
+pub static plpgsql_variable_conflict_options: &[config_enum_entry] = &[
+    config_enum_entry { name: "error", val: PLPGSQL_RESOLVE_ERROR, hidden: false },
+    config_enum_entry { name: "use_variable", val: PLPGSQL_RESOLVE_VARIABLE, hidden: false },
+    config_enum_entry { name: "use_column", val: PLPGSQL_RESOLVE_COLUMN, hidden: false },
+];
+
 pub static pgss_track_options: &[config_enum_entry] = &[
     config_enum_entry { name: "none", val: PGSS_TRACK_NONE, hidden: false },
     config_enum_entry { name: "top", val: PGSS_TRACK_TOP, hidden: false },
@@ -761,6 +768,8 @@ pub static ConfigureNamesBool: &[GucBoolSetting] = &[
     GucBoolSetting { name: "pg_stat_statements.track_utility", context: PGC_SUSET, group: CUSTOM_OPTIONS, short_desc: Some("Selects whether utility commands are tracked by pg_stat_statements."), long_desc: None, flags: 0, variable: &vars::pgss_track_utility, boot_val: GucDefaultValue::Bool(true), check_hook: None, assign_hook: None, show_hook: None },
     GucBoolSetting { name: "pg_stat_statements.track_planning", context: PGC_SUSET, group: CUSTOM_OPTIONS, short_desc: Some("Selects whether planning duration is tracked by pg_stat_statements."), long_desc: None, flags: 0, variable: &vars::pgss_track_planning, boot_val: GucDefaultValue::Bool(false), check_hook: None, assign_hook: None, show_hook: None },
     GucBoolSetting { name: "pg_stat_statements.save", context: PGC_SIGHUP, group: CUSTOM_OPTIONS, short_desc: Some("Save pg_stat_statements statistics across server shutdowns."), long_desc: None, flags: 0, variable: &vars::pgss_save, boot_val: GucDefaultValue::Bool(true), check_hook: None, assign_hook: None, show_hook: None },
+    GucBoolSetting { name: "plpgsql.print_strict_params", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Print information about parameters in the DETAIL part of the error messages generated on INTO ... STRICT failures."), long_desc: None, flags: 0, variable: &vars::plpgsql_print_strict_params, boot_val: GucDefaultValue::Bool(false), check_hook: None, assign_hook: None, show_hook: None },
+    GucBoolSetting { name: "plpgsql.check_asserts", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Perform checks given in ASSERT statements."), long_desc: None, flags: 0, variable: &vars::plpgsql_check_asserts, boot_val: GucDefaultValue::Bool(true), check_hook: None, assign_hook: None, show_hook: None },
 ];
 
 pub static ConfigureNamesInt: &[GucIntSetting] = &[
@@ -1198,6 +1207,8 @@ pub static ConfigureNamesString: &[GucStringSetting] = &[
     // upstream 2a29b607dbbb (18.6): Add an output_plugin_libraries GUC to bless trusted output plugins
     GucStringSetting { name: "output_plugin_libraries", context: PGC_SUSET, group: REPLICATION_SENDING, short_desc: Some("Lists libraries that may be named as logical decoding output plugins."), long_desc: Some("Users with REPLICATION privileges may only use plugins in this list when creating logical replication slots."), flags: GUC_LIST_INPUT | GUC_LIST_QUOTE | GUC_SUPERUSER_ONLY, variable: &vars::output_plugin_libraries_string, boot_val: GucDefaultValue::String(Some("pgoutput, test_decoding")), check_hook: None, assign_hook: None, show_hook: None },
     GucStringSetting { name: "log_connections", context: PGC_SU_BACKEND, group: LOGGING_WHAT, short_desc: Some("Logs specified aspects of connection establishment and setup."), long_desc: None, flags: GUC_LIST_INPUT, variable: &vars::log_connections_string, boot_val: GucDefaultValue::String(Some("")), check_hook: Some(&hooks::check_log_connections), assign_hook: Some(&hooks::assign_log_connections), show_hook: None },
+    GucStringSetting { name: "plpgsql.extra_warnings", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("List of programming constructs that should produce a warning."), long_desc: None, flags: GUC_LIST_INPUT, variable: &vars::plpgsql_extra_warnings_string, boot_val: GucDefaultValue::String(Some("none")), check_hook: Some(&hooks::check_plpgsql_extra_checks), assign_hook: None, show_hook: None },
+    GucStringSetting { name: "plpgsql.extra_errors", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("List of programming constructs that should produce an error."), long_desc: None, flags: GUC_LIST_INPUT, variable: &vars::plpgsql_extra_errors_string, boot_val: GucDefaultValue::String(Some("none")), check_hook: Some(&hooks::check_plpgsql_extra_checks), assign_hook: None, show_hook: None },
 ];
 
 pub static ConfigureNamesEnum: &[GucEnumSetting] = &[
@@ -1211,6 +1222,7 @@ pub static ConfigureNamesEnum: &[GucEnumSetting] = &[
     // contrib/pgcrypto/pgcrypto.c:70 _PG_init DefineCustomEnumVariable — statically
     // defined like the pg_stat_statements/auto_explain custom GUCs above.
     GucEnumSetting { name: "pgcrypto.builtin_crypto_enabled", context: PGC_SUSET, group: CUSTOM_OPTIONS, short_desc: Some("Sets if builtin crypto functions are enabled."), long_desc: Some("\"on\" enables builtin crypto, \"off\" unconditionally disables and \"fips\" will disable builtin crypto if OpenSSL is in FIPS mode"), flags: 0, variable: &vars::pgcrypto_builtin_crypto_enabled, boot_val: GucDefaultValue::Enum(BC_ON), options: GucEnumOptions::Inline(pgcrypto_builtin_crypto_options), check_hook: None, assign_hook: None, show_hook: None },
+    GucEnumSetting { name: "plpgsql.variable_conflict", context: PGC_SUSET, group: CUSTOM_OPTIONS, short_desc: Some("Sets handling of conflicts between PL/pgSQL variable names and table column names."), long_desc: None, flags: 0, variable: &vars::plpgsql_variable_conflict, boot_val: GucDefaultValue::Enum(PLPGSQL_RESOLVE_ERROR), options: GucEnumOptions::Inline(plpgsql_variable_conflict_options), check_hook: None, assign_hook: None, show_hook: None },
     GucEnumSetting { name: "constraint_exclusion", context: PGC_USERSET, group: QUERY_TUNING_OTHER, short_desc: Some("Enables the planner to use constraints to optimize queries."), long_desc: Some("Table scans will be skipped if their constraints guarantee that no rows match the query."), flags: GUC_EXPLAIN, variable: &vars::constraint_exclusion, boot_val: GucDefaultValue::Enum(CONSTRAINT_EXCLUSION_PARTITION), options: GucEnumOptions::Inline(constraint_exclusion_options), check_hook: None, assign_hook: None, show_hook: None },
     GucEnumSetting { name: "default_toast_compression", context: PGC_USERSET, group: CLIENT_CONN_STATEMENT, short_desc: Some("Sets the default compression method for compressible values."), long_desc: None, flags: 0, variable: &vars::default_toast_compression, boot_val: GucDefaultValue::Enum(TOAST_PGLZ_COMPRESSION), options: GucEnumOptions::Inline(default_toast_compression_options), check_hook: None, assign_hook: None, show_hook: None },
     GucEnumSetting { name: "default_transaction_isolation", context: PGC_USERSET, group: CLIENT_CONN_STATEMENT, short_desc: Some("Sets the transaction isolation level of each new transaction."), long_desc: None, flags: 0, variable: &vars::DefaultXactIsoLevel, boot_val: GucDefaultValue::Enum(XACT_READ_COMMITTED), options: GucEnumOptions::Inline(isolation_level_options), check_hook: None, assign_hook: None, show_hook: None },

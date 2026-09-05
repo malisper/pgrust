@@ -2630,8 +2630,36 @@ impl<'a> Estate<'a> {
             ));
         }
 
-        let loop_var_elem = match &self.func.datums[varno as usize] {
+        // pl_exec.c:3070-3077: a record/row loop variable is never an array
+        // (and may be uninitialized); anything else is probed through
+        // plpgsql_exec_get_datum_type, whose RECFIELD arm instantiates a
+        // named-composite record and looks the field up in the live tuple.
+        let func: &'a PlFunction = self.func;
+        let loop_var_elem = match &func.datums[varno as usize] {
             PlDatum::Rec(_) | PlDatum::Row(_) => types_core::InvalidOid,
+            PlDatum::RecField(f) => {
+                let ftype = match self.recfield_type(f)? {
+                    Some((t, _, _)) => t,
+                    None => {
+                        // C plpgsql_exec_get_datum_type RECFIELD arm
+                        // (pl_exec.c:5474-5498): a still-NULL RECORD-typed
+                        // record is instantiate_empty_record_variable's
+                        // 55000; an assigned one without the field is 42703.
+                        if matches!(&self.datums[f.recparentno as usize], DatumVal::Rec(None)) {
+                            self.instantiate_empty_rec(f.recparentno)?;
+                        }
+                        let recname = match &func.datums[f.recparentno as usize] {
+                            PlDatum::Rec(r) => r.refname.clone(),
+                            _ => String::new(),
+                        };
+                        return Err(exec_err(
+                            types_error::ERRCODE_UNDEFINED_COLUMN,
+                            format!("record \"{recname}\" has no field \"{}\"", f.fieldname),
+                        ));
+                    }
+                };
+                lsyscache::typ::get_element_type(ftype)?
+            }
             _ => lsyscache::typ::get_element_type(self.var_type(varno).typoid)?,
         };
         if slice > 0 && !OidIsValid(loop_var_elem) {
@@ -3989,7 +4017,7 @@ impl<'a> Estate<'a> {
     fn exec_stmt_assert(&mut self, cond: &PlExpr, message: Option<&PlExpr>) -> PgResult<i32> {
         // plpgsql_check_asserts via the mutation-keyed GUC snapshot
         // (handler.rs PROCPERF P2); unset means C's default (true).
-        let enabled = crate::handler::check_asserts_enabled()?;
+        let enabled = crate::handler::check_asserts_enabled();
         if !enabled {
             return Ok(RC_OK);
         }

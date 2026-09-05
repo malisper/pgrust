@@ -1,8 +1,7 @@
 // pl_handler.c + pl_comp.c's plpgsql_compile / do_compile + pl_exec.c's
 // plpgsql_exec_function/plpgsql_exec_trigger shells. DO blocks and VARIADIC
-// parameters are named louds. GUC-backed compile options
-// (plpgsql.variable_conflict, ...) read their C-source defaults; SET on the
-// unregistered custom GUCs is loud at the GUC layer.
+// parameters are named louds. The plpgsql.* GUCs are static guc_tables rows
+// backed by the `gucs` cells below (_PG_init's DefineCustom*Variable set).
 use std::collections::HashMap;
 
 type FxHashMap<K, V> = HashMap<K, V, rustc_hash::FxBuildHasher>;
@@ -154,9 +153,33 @@ pub fn init_seams() {
         plpgsql_inline_handler,
         plpgsql_validator,
     );
-    // plpgsql _PG_init (pl_handler.c) runs at LOAD: MarkGUCPrefixReserved
-    // after defining its custom GUCs. Those GUC definitions are unported
-    // (compile options read C-source defaults), so only the reservation runs.
+    // plpgsql _PG_init (pl_handler.c:158-203): the custom GUCs are the
+    // static guc_tables rows backed by `gucs`; MarkGUCPrefixReserved runs
+    // here for LOAD / CREATE EXTENSION and in ensure_library_loaded for the
+    // first native handler entry.
+    use guc_tables::GucVarAccessors;
+    guc_tables::vars::plpgsql_variable_conflict.install(GucVarAccessors {
+        get: gucs::variable_conflict,
+        set: gucs::set_variable_conflict,
+    });
+    guc_tables::vars::plpgsql_print_strict_params.install(GucVarAccessors {
+        get: gucs::print_strict_params,
+        set: gucs::set_print_strict_params,
+    });
+    guc_tables::vars::plpgsql_check_asserts.install(GucVarAccessors {
+        get: gucs::check_asserts,
+        set: gucs::set_check_asserts,
+    });
+    guc_tables::vars::plpgsql_extra_warnings_string.install(GucVarAccessors {
+        get: gucs::extra_warnings,
+        set: gucs::set_extra_warnings,
+    });
+    guc_tables::vars::plpgsql_extra_errors_string.install(GucVarAccessors {
+        get: gucs::extra_errors,
+        set: gucs::set_extra_errors,
+    });
+    guc_tables::hooks::check_plpgsql_extra_checks
+        .install(|newval, _extra, _source| plpgsql_extra_checks_check_hook(newval));
     dfmgr::register_builtin_library(dfmgr::BuiltinLibraryEntry {
         name: "plpgsql",
         // The extension script (plpgsql--1.0.sql) declares the handlers as
@@ -514,12 +537,16 @@ fn do_compile(
         )));
     }
     let mut comp = CompState::new();
-    comp.print_strict_params = print_strict_params_guc()?;
+    // pl_comp.c:246-248: the GUCs seed the compile options; #variable_conflict
+    // and #print_strict_params in the body override them.
+    comp.resolve_option = gucs::variable_conflict();
+    comp.print_strict_params = gucs::print_strict_params();
     // Only promote extra warnings and errors at CREATE FUNCTION time
     // (pl_comp.c:249-250).
     if for_validator {
-        comp.extra_warnings = plpgsql_extra_checks("plpgsql.extra_warnings")?;
-        comp.extra_errors = plpgsql_extra_checks("plpgsql.extra_errors")?;
+        let checks = pl_extra_checks()?;
+        comp.extra_warnings = checks.extra_warnings;
+        comp.extra_errors = checks.extra_errors;
     }
     // Outermost level: named after the function; holds params and FOUND.
     comp.ns_push_label(Some(&proc.proname), crate::gram::LABEL_BLOCK);
@@ -855,35 +882,105 @@ fn add_dummy_return(action: &mut PlBlock, out_param_varno: Dno, nstatements: &mu
     }
 }
 
-// PROCPERF P2: the runtime extra-check levels and the print_strict_params /
-// check_asserts flags are consulted per statement execution (too_many_rows,
-// pl_exec.c:4217), per row move (strict_multi_assignment) and per ASSERT —
-// measured 16K Ir/call of by-name GetConfigOption on TPROC-C NEWORD. C binds
-// these GUCs to process globals via DefineCustom*Variable hooks
-// (pl_handler.c:61-149) and reads them for free; this port carries them as
-// SET-created placeholders with no hook lane, so the PARSED values are
-// snapshotted per backend thread, keyed by the GUC store's mutation counter
-// (the guc::layers cache pattern: every value mutation — SET / RESET / xact
+// pl_handler.c:40-56 + _PG_init (158-203): the five plpgsql.* GUCs are
+// defined statically in guc_tables (this port has no DefineCustomXxxVariable
+// machinery — the auto_explain / pg_stat_statements precedent) and backed by
+// these per-session cells, which init_seams installs as the table rows'
+// accessors together with the extra-checks check hook. C's globals are read
+// directly (plpgsql_print_strict_params, plpgsql_check_asserts,
+// plpgsql_variable_conflict); so are the cells.
+pub(crate) mod gucs {
+    guc_tables::session_guc_cluster!(PlGucs, PL_GUCS:
+        (variable_conflict_cell, i32, variable_conflict, set_variable_conflict, guc_tables::consts::PLPGSQL_RESOLVE_ERROR),
+        (print_strict_params_cell, bool, print_strict_params, set_print_strict_params, false),
+        (check_asserts_cell, bool, check_asserts, set_check_asserts, true),
+    );
+    guc_tables::session_guc_string!(EXTRA_WARNINGS, extra_warnings, set_extra_warnings, Some("none"));
+    guc_tables::session_guc_string!(EXTRA_ERRORS, extra_errors, set_extra_errors, Some("none"));
+}
+
+// plpgsql_extra_checks_check_hook (pl_handler.c:61-131): "all" / "none"
+// compared against the whole raw value (no trim), else a
+// SplitIdentifierString list of shadowed_variables / too_many_rows /
+// strict_multi_assignment; C's GUC_check_errdetail texts on every refusal.
+// C parks the parsed mask in the assign hook's extra; here the validated
+// string is re-parsed once per GUC-store mutation (pl_extra_checks below).
+fn plpgsql_extra_checks_check_hook(newval: &mut Option<String>) -> PgResult<bool> {
+    match parse_extra_checks(newval.as_deref().unwrap_or(""))? {
+        Ok(_) => Ok(true),
+        Err(detail) => {
+            guc::GUC_check_errdetail(detail);
+            Ok(false)
+        }
+    }
+}
+
+fn parse_extra_checks(value: &str) -> PgResult<Result<u32, String>> {
+    if value.eq_ignore_ascii_case("all") {
+        return Ok(Ok(crate::comp::XCHECK_ALL));
+    }
+    if value.eq_ignore_ascii_case("none") {
+        return Ok(Ok(0));
+    }
+    let ctx = mcx::MemoryContext::new("plpgsql extra checks");
+    let Some(elemlist) = varlena::split_identifier_string(
+        ctx.mcx(),
+        value,
+        b',',
+        mbutils::GetDatabaseEncoding(),
+    )?
+    else {
+        return Ok(Err("List syntax is invalid.".to_string()));
+    };
+    let mut checks = 0u32;
+    for tok in &elemlist {
+        if tok.eq_ignore_ascii_case("shadowed_variables") {
+            checks |= crate::comp::XCHECK_SHADOWVAR;
+        } else if tok.eq_ignore_ascii_case("too_many_rows") {
+            checks |= crate::comp::XCHECK_TOOMANYROWS;
+        } else if tok.eq_ignore_ascii_case("strict_multi_assignment") {
+            checks |= crate::comp::XCHECK_STRICTMULTIASSIGNMENT;
+        } else if tok.eq_ignore_ascii_case("all") || tok.eq_ignore_ascii_case("none") {
+            return Ok(Err(format!(
+                "Key word \"{tok}\" cannot be combined with other key words."
+            )));
+        } else {
+            return Ok(Err(format!("Unrecognized key word: \"{tok}\".")));
+        }
+    }
+    Ok(Ok(checks))
+}
+
+// The extra-check mask of a stored plpgsql.extra_* value. The check hook
+// admitted it (a refused SET never reaches the cell) and the boot value is
+// "none", so the refusal arm cannot fire here; it reads as no checks.
+fn extra_checks_mask(value: Option<String>) -> PgResult<u32> {
+    Ok(parse_extra_checks(value.as_deref().unwrap_or("none"))?.unwrap_or(0))
+}
+
+// PROCPERF P2: the runtime extra-check levels are consulted per statement
+// execution (too_many_rows, pl_exec.c:4217), per row move
+// (strict_multi_assignment) and per ASSERT. C's assign hooks keep the parsed
+// mask in a process global; this port re-parses the two stored lists into a
+// per-backend-thread snapshot keyed by the GUC store's mutation counter (the
+// guc::layers cache pattern: every value mutation — SET / RESET / xact
 // revert / reload / session bind — goes through with_store_mut, which bumps
 // the counter). NOT session state in itself: a session rebinding onto this
 // thread mutates the thread's store and thereby invalidates the snapshot.
 #[derive(Clone, Copy)]
-struct PlGucValues {
+struct PlExtraChecks {
     mutations: u64,
     extra_errors: u32,
     extra_warnings: u32,
-    print_strict_params: bool,
-    check_asserts: bool,
 }
 
 thread_local! {
-    static PL_GUC_VALUES: core::cell::Cell<Option<PlGucValues>> =
+    static PL_EXTRA_CHECKS: core::cell::Cell<Option<PlExtraChecks>> =
         const { core::cell::Cell::new(None) };
 }
 
-// Kill switch: PGRUST_PLPGSQL_GUC_SNAPSHOT=0 restores the per-read by-name
-// GetConfigOption behavior (the snapshot is then rebuilt on every read).
-// Latched once per process.
+// Kill switch: PGRUST_PLPGSQL_GUC_SNAPSHOT=0 restores the per-read parse
+// (the snapshot is then rebuilt on every read). Latched once per process.
 fn guc_snapshot_disabled() -> bool {
     static DISABLED: pgsync::OnceLock<bool> = pgsync::OnceLock::new();
     *DISABLED.get_or_init(|| {
@@ -891,74 +988,34 @@ fn guc_snapshot_disabled() -> bool {
     })
 }
 
-fn pl_guc_values() -> PgResult<PlGucValues> {
+fn pl_extra_checks() -> PgResult<PlExtraChecks> {
     let mutations = guc::store::store_mutation_count();
     if !guc_snapshot_disabled() {
-        if let Some(v) = PL_GUC_VALUES.with(core::cell::Cell::get) {
+        if let Some(v) = PL_EXTRA_CHECKS.with(core::cell::Cell::get) {
             if v.mutations == mutations {
                 return Ok(v);
             }
         }
     }
-    let v = PlGucValues {
+    let v = PlExtraChecks {
         mutations,
-        extra_errors: plpgsql_extra_checks("plpgsql.extra_errors")?,
-        extra_warnings: plpgsql_extra_checks("plpgsql.extra_warnings")?,
-        print_strict_params: print_strict_params_uncached()?,
-        check_asserts: check_asserts_uncached()?,
+        extra_errors: extra_checks_mask(gucs::extra_errors())?,
+        extra_warnings: extra_checks_mask(gucs::extra_warnings())?,
     };
-    PL_GUC_VALUES.with(|c| c.set(Some(v)));
+    PL_EXTRA_CHECKS.with(|c| c.set(Some(v)));
     Ok(v)
 }
 
-// plpgsql_check_asserts: DefineCustomBoolVariable is the extension-GUC lane;
-// the SET-created placeholder carries the session value and an unset name
-// means C's default (true). (Moved here from exec_stmt_assert; parse
-// semantics byte-preserved.)
-fn check_asserts_uncached() -> PgResult<bool> {
-    Ok(guc::GetConfigOption("plpgsql.check_asserts", true, false)?
-        .map_or(true, |v| !matches!(v.as_str(), "off" | "false" | "no" | "0" | "f" | "n")))
-}
-
-pub(crate) fn check_asserts_enabled() -> PgResult<bool> {
-    Ok(pl_guc_values()?.check_asserts)
-}
-
-// plpgsql_extra_checks_check_hook (pl_handler.c:61-104) applied to the
-// SET-created placeholder at compile time; an unset name is C's default
-// "none". Invalid tokens were accepted by the placeholder SET, so they
-// contribute nothing here instead of failing.
-fn plpgsql_extra_checks(guc_name: &str) -> PgResult<u32> {
-    let Some(v) = guc::GetConfigOption(guc_name, true, false)? else {
-        return Ok(0);
-    };
-    // SplitIdentifierString trims scanner_isspace (C-locale set only).
-    let v = v.trim_matches(|c: char| c.is_ascii() && pg_string::isspace_c_locale(c as u8));
-    if v.eq_ignore_ascii_case("all") {
-        return Ok(crate::comp::XCHECK_ALL);
-    }
-    if v.eq_ignore_ascii_case("none") {
-        return Ok(0);
-    }
-    let mut checks = 0u32;
-    for tok in v.split(',') {
-        let tok = tok.trim_matches(|c: char| c.is_ascii() && pg_string::isspace_c_locale(c as u8));
-        if tok.eq_ignore_ascii_case("shadowed_variables") {
-            checks |= crate::comp::XCHECK_SHADOWVAR;
-        } else if tok.eq_ignore_ascii_case("too_many_rows") {
-            checks |= crate::comp::XCHECK_TOOMANYROWS;
-        } else if tok.eq_ignore_ascii_case("strict_multi_assignment") {
-            checks |= crate::comp::XCHECK_STRICTMULTIASSIGNMENT;
-        }
-    }
-    Ok(checks)
+// plpgsql_check_asserts (pl_handler.c:50, exec_stmt_assert).
+pub(crate) fn check_asserts_enabled() -> bool {
+    gucs::check_asserts()
 }
 
 // The runtime extra-check level for one PLPGSQL_XCHECK bit: extra_errors
 // wins over extra_warnings (pl_exec.c:4217-4220, 7196-7202); None means the
 // check is off. Reads the mutation-keyed snapshot (PROCPERF P2, above).
 pub(crate) fn extra_checks_level(mask: u32) -> PgResult<Option<types_error::ErrorLevel>> {
-    let v = pl_guc_values()?;
+    let v = pl_extra_checks()?;
     if v.extra_errors & mask != 0 {
         return Ok(Some(ERROR));
     }
@@ -968,36 +1025,19 @@ pub(crate) fn extra_checks_level(mask: u32) -> PgResult<Option<types_error::Erro
     Ok(None)
 }
 
-// bool.c parse_bool_with_len: case-insensitive non-empty prefix of
-// true/false/yes/no, "on"/"off" needing at least 2 bytes, exact "1"/"0".
-// No whitespace trimming of any kind.
-fn c_parse_bool(v: &str) -> Option<bool> {
-    let v = v.to_ascii_lowercase();
-    let prefix_of = |kw: &str| !v.is_empty() && v.len() <= kw.len() && kw.starts_with(&v);
-    match v.as_bytes().first() {
-        Some(b't') if prefix_of("true") => Some(true),
-        Some(b'f') if prefix_of("false") => Some(false),
-        Some(b'y') if prefix_of("yes") => Some(true),
-        Some(b'n') if prefix_of("no") => Some(false),
-        Some(b'o') if v.len() >= 2 && prefix_of("on") => Some(true),
-        Some(b'o') if v.len() >= 2 && prefix_of("off") => Some(false),
-        Some(b'1') if v.len() == 1 => Some(true),
-        Some(b'0') if v.len() == 1 => Some(false),
-        _ => None,
+// _PG_init runs when C loads plpgsql.so — at the session's first PL/pgSQL
+// call. The handlers are native here, so the load-time side effect that is
+// observable from SQL, MarkGUCPrefixReserved("plpgsql") (pl_handler.c:203:
+// purge placeholder plpgsql.* settings, refuse new ones), runs at the first
+// handler entry on this backend thread; the dfmgr pg_init above covers LOAD
+// and CREATE EXTENSION. The GUC definitions themselves are static (gucs).
+fn ensure_library_loaded() {
+    thread_local! {
+        static LOADED: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
     }
-}
-
-// plpgsql_print_strict_params: bool GUC via the placeholder lane
-// (check_asserts precedent); C's default is false.
-fn print_strict_params_uncached() -> PgResult<bool> {
-    // bool.c parse_bool: NO whitespace trim; case-insensitive unique
-    // prefixes of true/false/yes/no/on/off plus exact "1"/"0".
-    Ok(guc::GetConfigOption("plpgsql.print_strict_params", true, false)?
-        .is_some_and(|v| c_parse_bool(&v) == Some(true)))
-}
-
-fn print_strict_params_guc() -> PgResult<bool> {
-    Ok(pl_guc_values()?.print_strict_params)
+    if !LOADED.with(|c| c.replace(true)) {
+        guc::MarkGUCPrefixReserved("plpgsql");
+    }
 }
 
 struct EmitCbGuard(u64);
@@ -1052,6 +1092,7 @@ fn plpgsql_call_handler(
     flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut FunctionCallInfoBaseData,
 ) -> PgResult<Datum> {
+    ensure_library_loaded();
     let fn_oid = flinfo.as_ref().map(|f| f.fn_oid).expect("plpgsql_call_handler needs flinfo");
 
     // CALLED_AS_TRIGGER / CALLED_AS_EVENT_TRIGGER demux on the context tag.
@@ -1125,6 +1166,7 @@ fn plpgsql_inline_handler(
     _flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut FunctionCallInfoBaseData,
 ) -> PgResult<Datum> {
+    ensure_library_loaded();
     // SAFETY: ExecuteDoStmt passes a live InlineCodeBlock for this call.
     let cb: &types_nodes::parsenodes::InlineCodeBlock =
         unsafe { &*(fcinfo.args[0].value.as_usize() as *const _) };
@@ -1147,9 +1189,10 @@ fn plpgsql_inline_handler(
 fn compile_inline(src: &str) -> PgResult<PlFunction> {
     let func_name = "inline_code_block";
     let mut comp = CompState::new();
-    // print_strict_params follows the GUC even inline (pl_comp.c:790); the
-    // extra checks stay 0 (pl_comp.c:796-797).
-    comp.print_strict_params = print_strict_params_guc()?;
+    // variable_conflict and print_strict_params follow the GUCs even inline
+    // (pl_comp.c:789-790); the extra checks stay 0 (pl_comp.c:796-797).
+    comp.resolve_option = gucs::variable_conflict();
+    comp.print_strict_params = gucs::print_strict_params();
     comp.ns_push_label(Some(func_name), crate::gram::LABEL_BLOCK);
     let found_varno = comp.build_variable(
         "found",
@@ -1218,6 +1261,7 @@ fn plpgsql_validator(
     flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut FunctionCallInfoBaseData,
 ) -> PgResult<Datum> {
+    ensure_library_loaded();
     let funcoid = fcinfo.args[0].value.as_oid();
 
     // CheckFunctionValidatorAccess (fmgr.c:2145, pl_handler.c): reject when this
@@ -1353,10 +1397,13 @@ fn plpgsql_exec_function(
     };
 
     if rc != RC_RETURN {
-        debug_assert_eq!(rc, RC_OK);
-        if func.fn_rettype == VOIDOID {
-            // C's compiled-in dummy RETURN hits the void hack (pl_exec.c:3303-
-            // 3314): functions return a non-null VOID datum; procedures null.
+        // Falling off the end (RC_OK) of a void function / procedure is C's
+        // compiled-in dummy RETURN hitting the void hack (pl_exec.c:3303-
+        // 3314): functions return a non-null VOID datum; procedures null.
+        // Any other code — RC_EXIT from `EXIT <function label>` (the
+        // outermost namespace label is not a block label, so no block
+        // consumes it) — is C's rc != PLPGSQL_RC_RETURN error (pl_exec.c:637).
+        if rc == RC_OK && func.fn_rettype == VOIDOID {
             if func.fn_prokind != PROKIND_PROCEDURE {
                 fcinfo.isnull = false;
                 return Ok(Datum::from_usize(0));
@@ -1474,7 +1521,17 @@ fn plpgsql_exec_event_trigger(
     };
     // C appends an implicit RETURN at compile (pl_comp.c), so falling off the
     // end is success; this port accepts RC_OK directly (void-fn precedent).
-    debug_assert!(rc == RC_RETURN || rc == RC_OK);
+    // Anything else (RC_EXIT from `EXIT <function label>`) is C's
+    // rc != PLPGSQL_RC_RETURN error (pl_exec.c:1212).
+    if rc != RC_RETURN && rc != RC_OK {
+        return Err(Box::new(
+            elog::ereport(ERROR)
+                .errcode(types_error::ERRCODE_S_R_E_FUNCTION_EXECUTED_NO_RETURN_STATEMENT)
+                .errmsg("control reached end of trigger procedure without RETURN")
+                .errcontext_msg(format!("PL/pgSQL function {}", func.fn_signature))
+                .into_error(),
+        ));
+    }
     Ok(())
 }
 
@@ -2224,36 +2281,39 @@ mod tests {
             )
         );
     }
-}
-
-#[cfg(test)]
-mod parse_bool_tests {
-    use super::c_parse_bool;
-
-    /// bool.c parse_bool_with_len: no trimming, case-insensitive unique
-    /// prefixes.  C rejects ' on' (leading space) where a Rust trim would
-    /// accept it, and accepts prefixes like "tr"/"ye" that parse::<bool>
-    /// style matching would reject.
+    // plpgsql_extra_checks_check_hook (pl_handler.c:61-104): whole-value
+    // "all"/"none" (no trim), SplitIdentifierString list otherwise, and C's
+    // three GUC_check_errdetail refusals.
     #[test]
-    fn matches_c_parse_bool() {
-        assert_eq!(c_parse_bool("on"), Some(true));
-        assert_eq!(c_parse_bool("ON"), Some(true));
-        assert_eq!(c_parse_bool("off"), Some(false));
-        assert_eq!(c_parse_bool("of"), Some(false));
-        assert_eq!(c_parse_bool("o"), None); // not unique
-        assert_eq!(c_parse_bool("t"), Some(true));
-        assert_eq!(c_parse_bool("tr"), Some(true));
-        assert_eq!(c_parse_bool("true"), Some(true));
-        assert_eq!(c_parse_bool("truex"), None);
-        assert_eq!(c_parse_bool("f"), Some(false));
-        assert_eq!(c_parse_bool("ye"), Some(true));
-        assert_eq!(c_parse_bool("n"), Some(false));
-        assert_eq!(c_parse_bool("1"), Some(true));
-        assert_eq!(c_parse_bool("0"), Some(false));
-        assert_eq!(c_parse_bool("10"), None);
-        assert_eq!(c_parse_bool(""), None);
-        // NO whitespace trimming of any kind.
-        assert_eq!(c_parse_bool(" on"), None);
-        assert_eq!(c_parse_bool("on "), None);
+    fn extra_checks_parse_matches_the_c_check_hook() {
+        use crate::comp::{XCHECK_ALL, XCHECK_SHADOWVAR, XCHECK_STRICTMULTIASSIGNMENT, XCHECK_TOOMANYROWS};
+        let parse = |v: &str| parse_extra_checks(v).unwrap();
+        assert_eq!(parse("all"), Ok(XCHECK_ALL));
+        assert_eq!(parse("ALL"), Ok(XCHECK_ALL));
+        assert_eq!(parse("none"), Ok(0));
+        assert_eq!(parse(""), Ok(0));
+        assert_eq!(
+            parse("Shadowed_Variables , too_many_rows"),
+            Ok(XCHECK_SHADOWVAR | XCHECK_TOOMANYROWS)
+        );
+        assert_eq!(parse("strict_multi_assignment"), Ok(XCHECK_STRICTMULTIASSIGNMENT));
+        // pg_strcasecmp against the raw value: a padded "all" is a list item.
+        assert_eq!(
+            parse(" all"),
+            Err("Key word \"all\" cannot be combined with other key words.".to_string())
+        );
+        assert_eq!(
+            parse("all, too_many_rows"),
+            Err("Key word \"all\" cannot be combined with other key words.".to_string())
+        );
+        assert_eq!(parse("bogus_check"), Err("Unrecognized key word: \"bogus_check\".".to_string()));
+        assert_eq!(parse("too_many_rows,"), Err("List syntax is invalid.".to_string()));
+
+        let mut v = Some("too_many_rows".to_string());
+        assert!(plpgsql_extra_checks_check_hook(&mut v).unwrap());
+        let mut v = Some("nope".to_string());
+        assert!(!plpgsql_extra_checks_check_hook(&mut v).unwrap());
+        assert_eq!(extra_checks_mask(None).unwrap(), 0);
+        assert_eq!(extra_checks_mask(Some("all".to_string())).unwrap(), XCHECK_ALL);
     }
 }

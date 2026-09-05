@@ -372,7 +372,10 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
             if t2.0 == ('%' as i32) {
                 let t3 = self.yylex()?;
                 if Self::tok_is_keyword(&t3, K_TYPE, "type") {
-                    result = Some(self.comp.parse_wordtype(&name)?);
+                    // NULL from plpgsql_parse_wordtype (a datatype-less
+                    // record) leaves `result` unset: the tokens consumed so
+                    // far become the start of a plain type name below.
+                    result = self.comp.parse_wordtype(&name)?;
                 } else if Self::tok_is_keyword(&t3, K_ROWTYPE, "rowtype") {
                     result = Some(self.comp.parse_wordrowtype(&name)?);
                 } else {
@@ -515,10 +518,16 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
             if opt.0 == K_OPTION {
                 let v = self.yylex()?;
                 if v.0 == K_DUMP {
-                    panic!(
-                        "comp_option '#option dump' (pl_gram.y): plpgsql_DumpExecTree \
-                         unported — unit backend-pl-plpgsql-gram"
-                    );
+                    // pl_gram.y:387 sets plpgsql_DumpExecTree and pl_comp.c
+                    // prints the compiled tree (pl_funcs.c plpgsql_dumptree)
+                    // to the server's stdout after compiling. The dump is
+                    // unported: a typed refusal at the option, never a
+                    // backend panic and never a silent no-op.
+                    return Err(self.gram_err_pos(
+                        types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                        "#option dump is not supported".to_string(),
+                        v.2,
+                    ));
                 }
                 return Err(self.yyerror("syntax error", v.2));
             } else if opt.0 == K_PRINT_STRICT_PARAMS {
@@ -1843,6 +1852,15 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
             );
             if is_cursor {
                 let curvar = w.dno;
+                // pl_gram.y for_control (1434-1439): should have had a single
+                // variable name; parser_errposition(@1) = the for_variable.
+                if scalar.is_some() && rowrec.is_some() {
+                    return Err(self.gram_err_pos(
+                        ERRCODE_SYNTAX_ERROR,
+                        "cursor FOR loop must have only one target variable".to_string(),
+                        var_loc,
+                    ));
+                }
                 // C pl_gram.y: can't use an unbound cursor this way.
                 if matches!(
                     &self.comp.datums[curvar as usize],
@@ -3033,5 +3051,99 @@ mod tests {
         // Unknown location: C's parser_errposition is a no-op.
         let e = parser.sql_error_callback(Box::new(PgError::error("x")), -1);
         assert_eq!((e.internal_position, e.internal_query), (None, None));
+    }
+
+    fn scalar_int_type() -> PlType {
+        PlType {
+            typoid: 23, // INT4OID
+            ttype: TypeKind::Scalar,
+            typlen: 4,
+            typbyval: true,
+            typtype: b'b' as i8,
+            collation: types_core::InvalidOid,
+            typisarray: false,
+            atttypmod: -1,
+            typinput: types_core::InvalidOid,
+            typioparam: types_core::InvalidOid,
+            rec_ident: None,
+        }
+    }
+
+    // pl_gram.y for_control (1434-1439): FOR x, y IN <bound cursor> is
+    // "cursor FOR loop must have only one target variable" (42601,
+    // parser_errposition(@1) = the first target variable), raised before
+    // the loop's record variable is built.
+    #[test]
+    fn cursor_for_loop_rejects_multiple_target_variables() {
+        let cx = mcx::MemoryContext::new("plpgsql cursor FOR test");
+        let mut comp = crate::comp::CompState::new();
+        comp.ns_push_label(Some("f"), LABEL_BLOCK);
+        let mut cursor_ty = scalar_int_type();
+        cursor_ty.typoid = REFCURSOROID;
+        let c = comp.build_variable("c", 1, cursor_ty, true).unwrap();
+        if let PlDatum::Var(v) = &mut comp.datums[c as usize] {
+            v.cursor_explicit_expr = Some(PlExpr {
+                query: "SELECT 1, 2".to_string(),
+                parse_mode: RawParseMode::RAW_PARSE_DEFAULT,
+                ns: 0,
+                expr_id: 0,
+                target_param: -1,
+            });
+        }
+        comp.build_variable("x", 1, scalar_int_type(), true).unwrap();
+        comp.build_variable("y", 1, scalar_int_type(), true).unwrap();
+        let ndatums = comp.datums.len();
+        let mut parser = parser_for!(cx, comp, b"begin for x, y in c loop end loop; end");
+        let err = parser.parse_function_body().unwrap_err();
+        assert_eq!(err.sqlstate, types_error::ERRCODE_SYNTAX_ERROR);
+        assert_eq!(err.message, "cursor FOR loop must have only one target variable");
+        // pl_gram.y parser_errposition = plpgsql_scanner_errposition: an
+        // internal-query cursor over the body, never a primary cursor.
+        assert_eq!(err.internal_position, Some(11));
+        assert_eq!(err.cursor_position, None);
+        // The loop's private RECORD variable was never built (C errors first);
+        // only the scalar-list row for "x, y" was.
+        assert!(
+            !comp.datums[ndatums..].iter().any(|d| matches!(d, PlDatum::Rec(_))),
+            "no loop record variable is built after the error"
+        );
+
+        // Control: one target variable is fine.
+        let cx = mcx::MemoryContext::new("plpgsql cursor FOR control");
+        let mut comp = crate::comp::CompState::new();
+        comp.ns_push_label(Some("f"), LABEL_BLOCK);
+        let mut cursor_ty = scalar_int_type();
+        cursor_ty.typoid = REFCURSOROID;
+        let c = comp.build_variable("c", 1, cursor_ty, true).unwrap();
+        if let PlDatum::Var(v) = &mut comp.datums[c as usize] {
+            v.cursor_explicit_expr = Some(PlExpr {
+                query: "SELECT 1, 2".to_string(),
+                parse_mode: RawParseMode::RAW_PARSE_DEFAULT,
+                ns: 0,
+                expr_id: 0,
+                target_param: -1,
+            });
+        }
+        comp.build_variable("x", 1, scalar_int_type(), true).unwrap();
+        let mut parser = parser_for!(cx, comp, b"begin for x in c loop end loop; end");
+        let block = parser.parse_function_body().unwrap();
+        assert!(matches!(block.body.as_slice(), [PlStmt::ForC { .. }]));
+    }
+
+    // pl_gram.y comp_option (387): '#option dump' is accepted by C (it sets
+    // plpgsql_DumpExecTree). The dump itself is unported: the option must be a
+    // typed ERRCODE_FEATURE_NOT_SUPPORTED refusal positioned at the option,
+    // never a backend panic (a186-candidate-fp-pl-plpgsql-pl_gram-p1-41cd6c00).
+    #[test]
+    fn option_dump_is_a_typed_refusal_not_a_panic() {
+        let cx = mcx::MemoryContext::new("plpgsql #option dump test");
+        let mut comp = crate::comp::CompState::new();
+        comp.ns_push_label(Some("f"), LABEL_BLOCK);
+        let mut parser = parser_for!(cx, comp, b"#option dump\nbegin end");
+        let err = parser.parse_function_body().unwrap_err();
+        assert_eq!(err.sqlstate, types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+        assert_eq!(err.message, "#option dump is not supported");
+        assert_eq!(err.internal_position, Some(9));
+        assert_eq!(err.cursor_position, None);
     }
 }

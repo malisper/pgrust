@@ -14,6 +14,10 @@ pub const COMPUTE_QUERY_ID_REGRESS: i32 = 3;
 pub const BC_ON: i32 = 0;
 pub const BC_OFF: i32 = 1;
 pub const BC_FIPS: i32 = 2;
+// plpgsql.h PLPGSQL_RESOLVE_* (plpgsql.variable_conflict, pl_handler.c:40-45).
+pub const PLPGSQL_RESOLVE_ERROR: i32 = 0;
+pub const PLPGSQL_RESOLVE_VARIABLE: i32 = 1;
+pub const PLPGSQL_RESOLVE_COLUMN: i32 = 2;
 // pg_stat_statements.c PGSSTrackLevel.
 pub const PGSS_TRACK_NONE: i32 = 0;
 pub const PGSS_TRACK_TOP: i32 = 1;

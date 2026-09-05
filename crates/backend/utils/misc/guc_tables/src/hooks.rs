@@ -92,6 +92,9 @@ pub static check_min_dynamic_shared_memory: GucIntCheckHook = GucSlot::new("chec
 pub static check_multixact_member_buffers: GucIntCheckHook = GucSlot::new("check_multixact_member_buffers");
 pub static check_multixact_offset_buffers: GucIntCheckHook = GucSlot::new("check_multixact_offset_buffers");
 pub static check_notify_buffers: GucIntCheckHook = GucSlot::new("check_notify_buffers");
+// plpgsql_extra_checks_check_hook (pl_handler.c:61-104): shared by
+// plpgsql.extra_warnings and plpgsql.extra_errors, installed by plpgsql.
+pub static check_plpgsql_extra_checks: GucStringCheckHook = GucSlot::new("check_plpgsql_extra_checks");
 pub static check_primary_slot_name: GucStringCheckHook = GucSlot::new("check_primary_slot_name");
 pub static check_random_seed: GucRealCheckHook = GucSlot::new("check_random_seed");
 pub static check_recovery_prefetch: GucEnumCheckHook = GucSlot::new("check_recovery_prefetch");
