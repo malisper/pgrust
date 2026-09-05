@@ -1,9 +1,9 @@
 //! reinit.c: reset unlogged relations from before the last restart.
 #![allow(non_snake_case)]
 
-use elog::ereport;
+use elog::{elog, ereport};
 use types_core::ForkNumber;
-use types_error::{ErrorLocation, PgResult, ERROR, LOG};
+use types_error::{ErrorLocation, PgResult, DEBUG1, DEBUG2, ERROR, LOG};
 use types_storage::{PG_TBLSPC_DIR, TABLESPACE_VERSION_DIRECTORY};
 
 use crate::copydir::copy_file;
@@ -26,6 +26,16 @@ fn loc(funcname: &'static str) -> ErrorLocation {
 /// CLEANUP removes every non-init fork of any relation that has an init
 /// fork; INIT copies each init fork over the main fork.
 pub fn ResetUnloggedRelations(op: i32) -> PgResult<()> {
+    // reinit.c:56
+    elog(
+        DEBUG1,
+        format!(
+            "resetting unlogged relations: cleanup {} init {}",
+            (op & UNLOGGED_RELATION_CLEANUP != 0) as i32,
+            (op & UNLOGGED_RELATION_INIT != 0) as i32
+        ),
+    )?;
+
     if startup_seams::begin_startup_progress_phase::is_installed() {
         startup_seams::begin_startup_progress_phase::call();
     }
@@ -63,7 +73,22 @@ fn ResetUnloggedRelationsInTablespaceDir(tsdirname: &str, op: i32) -> PgResult<(
             continue;
         }
         let dbspace_path = format!("{tsdirname}/{}", de.d_name);
-        // C also emits timeout-driven ereport_startup_progress lines here.
+
+        // reinit.c:144-149
+        if op & UNLOGGED_RELATION_INIT != 0 {
+            crate::sync::ereport_startup_progress(|secs, hundredths| {
+                format!(
+                    "resetting unlogged relations (init), elapsed time: {secs}.{hundredths:02} s, current path: {dbspace_path}"
+                )
+            })?;
+        } else if op & UNLOGGED_RELATION_CLEANUP != 0 {
+            crate::sync::ereport_startup_progress(|secs, hundredths| {
+                format!(
+                    "resetting unlogged relations (cleanup), elapsed time: {secs}.{hundredths:02} s, current path: {dbspace_path}"
+                )
+            })?;
+        }
+
         ResetUnloggedRelationsInDbspaceDir(&dbspace_path, op)?;
     }
     FreeDir(ts_dir)?;
@@ -117,6 +142,8 @@ fn ResetUnloggedRelationsInDbspaceDir(dbspacedirname: &str, op: i32) -> PgResult
                         .finish(loc("ResetUnloggedRelationsInDbspaceDir"))
                         .unwrap_err());
                 }
+                // reinit.c:264
+                elog(DEBUG2, format!("unlinked file \"{rm_path}\""))?;
             }
         }
         FreeDir(dbspace_dir)?;
@@ -135,6 +162,8 @@ fn ResetUnloggedRelationsInDbspaceDir(dbspacedirname: &str, op: i32) -> PgResult
             }
             let srcpath = format!("{dbspacedirname}/{}", de.d_name);
             let dstpath = main_fork_path(dbspacedirname, relnumber, segno);
+            // reinit.c:314
+            elog(DEBUG2, format!("copying {srcpath} to {dstpath}"))?;
             copy_file(&srcpath, &dstpath)?;
         }
         FreeDir(dbspace_dir)?;

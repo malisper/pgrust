@@ -1154,6 +1154,18 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      b039 error-path witnesses (unit harness fixture; counted by the
     //      tree census, never product code — same class as 43/45/46/60/63).
     // 595, 18.6 conformance audit (2026-09-04), access/hash remediation
+        // 595, 18.6 conformance audit (2026-09-05), fd/fileset/buffile parity
+    //   (b031-backend-storage-file-1): four test-only sources —
+    //   89. storage/file/fd/src/tests.rs WAIT_EVENTS / LOG_LINES /
+    //      GUC_DETAILS / STARTUP_PROGRESS_ARMED (four thread_local! blocks)
+    //      — per-thread recorders behind the wait-event, emit_log_hook,
+    //      GUC_check_errdetail and startup-progress seams for the fileset.c
+    //      / buffile.c / fd.c / reinit.c C-parity witnesses (unit harness
+    //      fixtures; counted by the tree census, never product code — same
+    //      class as 43/45/46/60/62/63). buffile.rs TEMP_BLK_READ_TIME /
+    //      TEMP_BLK_WRITE_TIME join the EXISTING TEMP_BLKS_* block (count
+    //      unchanged).
+        // 596, 18.6 conformance audit (2026-09-04), access/hash remediation
     //   batch b004: two test-only sources —
     //   69. access/hash/hash/src/tests.rs PAGES/NBLOCKS_OVERRIDE/WAL_FAIL/
     //      WAL/NEXT_LSN/LOGICAL_DECODING (one thread_local! block) —
@@ -1217,7 +1229,7 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      live values. Session coverage unchanged: the surviving cells are
     //      init_small/globals.rs sources already counted below (same class
     //      as the 556 CRIT_SECTION_COUNT unification).
-    assert_eq!(count_tree(crates), 594, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    assert_eq!(count_tree(crates), 598, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

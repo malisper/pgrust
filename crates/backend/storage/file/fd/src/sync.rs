@@ -573,6 +573,64 @@ impl WalkAction {
     }
 }
 
+// common/file_utils.c PGFileType.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PgFileType {
+    Error,
+    Unknown,
+    Reg,
+    Dir,
+    Lnk,
+}
+
+// get_dirent_type (common/file_utils.c:547), the `d_type`-less arm: the Vfs
+// dirent carries no d_type, so every entry is classified by stat/lstat —
+// C's PGFILETYPE_UNKNOWN fallback — and a stat failure is reported at
+// `elevel` ("could not stat file") and returned as PGFILETYPE_ERROR.
+pub(crate) fn get_dirent_type(
+    path: &str,
+    look_through_symlinks: bool,
+    elevel: ErrorLevel,
+) -> PgResult<PgFileType> {
+    let cp = vfd::cpath(path);
+    let mut fst = vfs::FileInfo::zeroed();
+    let sret = if look_through_symlinks {
+        vfs::stat(&cp, &mut fst)
+    } else {
+        vfs::lstat(&cp, &mut fst)
+    };
+    if sret < 0 {
+        ereport(elevel)
+            .with_saved_errno(get_errno())
+            .errcode_for_file_access()
+            .errmsg(format!("could not stat file \"{path}\": %m"))
+            .finish(loc("get_dirent_type"))?;
+        return Ok(PgFileType::Error);
+    }
+    Ok(if fst.is_file() {
+        PgFileType::Reg
+    } else if fst.is_dir() {
+        PgFileType::Dir
+    } else if fst.is_symlink() {
+        PgFileType::Lnk
+    } else {
+        PgFileType::Unknown
+    })
+}
+
+// ereport_startup_progress (postmaster/startup.h): when the startup-progress
+// timer has fired, LOG the phase's elapsed time and current path. The
+// startup crate installs the seam; boots without it (and unit tests) report
+// nothing, as C does with log_startup_progress_interval = 0.
+pub(crate) fn ereport_startup_progress(msg: impl FnOnce(i64, i32) -> String) -> PgResult<()> {
+    if startup_seams::has_startup_progress_timeout_expired::is_installed() {
+        if let Some((secs, usecs)) = startup_seams::has_startup_progress_timeout_expired::call() {
+            ::elog::elog(LOG, msg(secs, usecs / 10000))?;
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn walkdir(
     path: &str,
     action: WalkAction,
@@ -589,20 +647,13 @@ pub(crate) fn walkdir(
         }
         let subpath = format!("{path}/{}", de.d_name);
 
-        let csub = vfd::cpath(&subpath);
-        let mut info = vfs::FileInfo::zeroed();
-        let rc = if process_symlinks {
-            vfs::stat(&csub, &mut info)
-        } else {
-            vfs::lstat(&csub, &mut info)
-        };
-        if rc == 0 && info.is_file() {
-            action.apply(&subpath, false, elevel)?;
-        } else if rc == 0 && info.is_dir() {
-            walkdir(&subpath, action, false, elevel)?;
+        match get_dirent_type(&subpath, process_symlinks, elevel)? {
+            PgFileType::Reg => action.apply(&subpath, false, elevel)?,
+            PgFileType::Dir => walkdir(&subpath, action, false, elevel)?,
+            // Errors were reported by get_dirent_type; other file types
+            // (symlinks, devices, ...) are ignored.
+            _ => {}
         }
-        // lstat failure was reported by ReadDir's helpers at elevel in C;
-        // non-file non-dir entries are skipped.
     }
 
     let dir_present = dir.is_some();
@@ -617,6 +668,13 @@ fn pre_sync_fname(fname: &str, isdir: bool, elevel: ErrorLevel) -> PgResult<()> 
     if isdir {
         return Ok(());
     }
+
+    // fd.c:3794
+    ereport_startup_progress(|secs, hundredths| {
+        format!(
+            "syncing data directory (pre-fsync), elapsed time: {secs}.{hundredths:02} s, current path: {fname}"
+        )
+    })?;
 
     let fd = OpenTransientFile(fname, libc::O_RDONLY)?;
     if fd < 0 {
@@ -645,6 +703,13 @@ fn pre_sync_fname(fname: &str, isdir: bool, elevel: ErrorLevel) -> PgResult<()> 
 }
 
 fn datadir_fsync_fname(fname: &str, isdir: bool, elevel: ErrorLevel) -> PgResult<()> {
+    // fd.c:3826
+    ereport_startup_progress(|secs, hundredths| {
+        format!(
+            "syncing data directory (fsync), elapsed time: {secs}.{hundredths:02} s, current path: {fname}"
+        )
+    })?;
+
     // The pg_flush_data hint ran in the PreSync pass; ignore_perm here.
     fsync_fname_ext(fname, isdir, true, elevel).map(|_| ())
 }
@@ -673,6 +738,13 @@ fn unlink_if_exists_fname(fname: &str, isdir: bool, elevel: ErrorLevel) -> PgRes
 // its allowlist row retained. The open/close around it are fd-mediated.
 #[cfg(target_os = "linux")]
 fn do_syncfs(path: &str) -> PgResult<()> {
+    // fd.c:3567
+    ereport_startup_progress(|secs, hundredths| {
+        format!(
+            "syncing data directory (syncfs), elapsed time: {secs}.{hundredths:02} s, current path: {path}"
+        )
+    })?;
+
     let fd = OpenTransientFile(path, libc::O_RDONLY)?;
     if fd < 0 {
         ereport(LOG)
@@ -796,11 +868,10 @@ pub fn RemovePgTempFilesInDir(tmpdirname: &str, missing_ok: bool, unlink_all: bo
 
         if unlink_all || temp_de.d_name.starts_with(PG_TEMP_FILE_PREFIX) {
             let crm = vfd::cpath(&rm_path);
-            let mut info = vfs::FileInfo::zeroed();
-            if vfs::lstat(&crm, &mut info) != 0 {
+            let ftype = get_dirent_type(&rm_path, false, LOG)?;
+            if ftype == PgFileType::Error {
                 continue;
-            }
-            if info.is_dir() {
+            } else if ftype == PgFileType::Dir {
                 RemovePgTempFilesInDir(&rm_path, false, true)?;
                 if vfs::rmdir(&crm) != 0 {
                     ereport(LOG)

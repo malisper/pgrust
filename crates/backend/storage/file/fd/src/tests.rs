@@ -101,6 +101,39 @@ fn interrupt_checks() -> u64 {
     INTERRUPT_CHECKS.with(std::cell::Cell::get)
 }
 
+// Per-thread record of every pgstat_report_wait_start(wait_event_info) the
+// fd ops made: the witness for the WaitEventIO codes C passes (BufFile
+// read/write, copy_file read/write/copy).
+thread_local! {
+    static WAIT_EVENTS: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn take_wait_events() -> Vec<u32> {
+    WAIT_EVENTS.with(|v| std::mem::take(&mut *v.borrow_mut()))
+}
+
+// Per-thread capture of every server-log-bound report (elog emit hook):
+// (level, message) pairs, for the LOG/DEBUG witnesses below.
+thread_local! {
+    static LOG_LINES: std::cell::RefCell<Vec<(types_error::ErrorLevel, String)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn capture_log_line(err: &types_error::PgError, _output_to_server: &mut bool) {
+    LOG_LINES.with(|v| v.borrow_mut().push((err.level(), err.message().to_string())));
+}
+
+fn take_log_lines() -> Vec<(types_error::ErrorLevel, String)> {
+    LOG_LINES.with(|v| std::mem::take(&mut *v.borrow_mut()))
+}
+
+// wait_event_types.h WaitEventIO codes (PG_WAIT_IO | index in name order).
+const PG_WAIT_IO: u32 = 0x0A00_0000;
+const WE_BUFFILE_READ: u32 = PG_WAIT_IO + 6;
+const WE_BUFFILE_WRITE: u32 = PG_WAIT_IO + 7;
+const WE_COPY_FILE_READ: u32 = PG_WAIT_IO + 15;
+const WE_COPY_FILE_WRITE: u32 = PG_WAIT_IO + 16;
+
 fn setup() {
     SETUP.call_once(|| {
         guc_tables::init_seams();
@@ -114,7 +147,9 @@ fn setup() {
         });
         aio_seams::pgaio_closing_fd::set(|_| {});
         aio_seams::pgaio_io_start_readv::set(|_, _, _| Ok(()));
-        waitevent_seams::pgstat_report_wait_start::set(|_| {});
+        waitevent_seams::pgstat_report_wait_start::set(|ev| {
+            WAIT_EVENTS.with(|v| v.borrow_mut().push(ev));
+        });
         waitevent_seams::pgstat_report_wait_end::set(|| {});
         pgstat_seams::pgstat_report_tempfile::set(|_| {});
     });
@@ -549,34 +584,36 @@ fn remove_pg_temp_files_in_dir_filters_prefix() {
 fn check_debug_io_direct_parses_flag_list() {
     setup();
     use ::types_storage::{IO_DIRECT_DATA, IO_DIRECT_WAL, IO_DIRECT_WAL_INIT};
-    assert_eq!(vfd::check_debug_io_direct("").unwrap(), 0);
-    assert_eq!(vfd::check_debug_io_direct("data").unwrap(), IO_DIRECT_DATA);
+    assert_eq!(vfd::check_debug_io_direct(""), Ok(0));
+    assert_eq!(vfd::check_debug_io_direct("data"), Ok(IO_DIRECT_DATA));
     assert_eq!(
-        vfd::check_debug_io_direct("data, WAL, wal_init").unwrap(),
-        IO_DIRECT_DATA | IO_DIRECT_WAL | IO_DIRECT_WAL_INIT
+        vfd::check_debug_io_direct("data, WAL, wal_init"),
+        Ok(IO_DIRECT_DATA | IO_DIRECT_WAL | IO_DIRECT_WAL_INIT)
     );
-    let err = vfd::check_debug_io_direct("bogus").unwrap_err();
-    assert!(err.message().contains("Invalid option \"bogus\"."));
+    // Err = the GUC_check_errdetail text (fd.c:4029/4046).
+    assert_eq!(
+        vfd::check_debug_io_direct("bogus"),
+        Err("Invalid option \"bogus\".".to_string())
+    );
 
     // SplitGUCList semantics, verified against postgres:18.3 (2026-07-31):
     // 'data wal' -> FATAL: invalid value for parameter "debug_io_direct":
     // "data wal" / DETAIL: Invalid list syntax in parameter
     // "debug_io_direct".  (whitespace does NOT separate unquoted items)
-    let err = vfd::check_debug_io_direct("data wal").unwrap_err();
-    assert!(err.message().contains("Invalid list syntax in parameter \"debug_io_direct\"."));
+    let syntax = Err("Invalid list syntax in parameter \"debug_io_direct\".".to_string());
+    assert_eq!(vfd::check_debug_io_direct("data wal"), syntax);
     // 'data,,wal' -> same FATAL/DETAIL (empty items are a syntax error).
-    let err = vfd::check_debug_io_direct("data,,wal").unwrap_err();
-    assert!(err.message().contains("Invalid list syntax in parameter \"debug_io_direct\"."));
+    assert_eq!(vfd::check_debug_io_direct("data,,wal"), syntax);
     assert!(vfd::check_debug_io_direct("data,").is_err());
     // '"data",wal' -> server started (double-quoted items are legal).
     assert_eq!(
-        vfd::check_debug_io_direct("\"data\",wal").unwrap(),
-        IO_DIRECT_DATA | IO_DIRECT_WAL
+        vfd::check_debug_io_direct("\"data\",wal"),
+        Ok(IO_DIRECT_DATA | IO_DIRECT_WAL)
     );
     // 'data,wal ' -> server started (trailing whitespace trimmed).
     assert_eq!(
-        vfd::check_debug_io_direct("data,wal ").unwrap(),
-        IO_DIRECT_DATA | IO_DIRECT_WAL
+        vfd::check_debug_io_direct("data,wal "),
+        Ok(IO_DIRECT_DATA | IO_DIRECT_WAL)
     );
 }
 
@@ -1388,3 +1425,436 @@ fn copydir_clone_matches_copy() {
 #[cfg(pgrust_sim)]
 mod crash_sweep;
 
+
+// ===========================================================================
+// audit-18.6 remediation b031 (backend/storage/file): C-parity witnesses.
+// ===========================================================================
+
+// The fileset BufFile scaffold shared by the witnesses: resowner seams, an
+// owner, a scratch datadir, temp-file access.
+fn fileset_scaffold(tag: &'static str) -> (String, std::sync::MutexGuard<'static, ()>) {
+    setup();
+    install_resowner_seams_once();
+    let owner = resowner::ResourceOwnerCreate(types_resowner::ResourceOwner::NULL, tag).unwrap();
+    resowner_seams::set_current_resource_owner::call(owner);
+    let dir = scratch_dir(tag);
+    let cwd = enter_datadir(&dir);
+    with_fd(|fd| fd.temporary_files_allowed = true);
+    (dir, cwd)
+}
+
+// The "<tempdir>/pgsql_tmp<pid>.<n>.fileset" directory component of a
+// fileset path, so a test can rebuild the set's directory in another
+// tablespace.
+fn fileset_dir_component(path: &str) -> String {
+    path.split('/')
+        .find(|c| c.starts_with("pgsql_tmp") && c.ends_with(".fileset"))
+        .unwrap_or_else(|| panic!("no fileset component in {path}"))
+        .to_string()
+}
+
+// fileset.c:83-99 FileSetInit: an empty temp_tablespaces GUC (or an
+// InvalidOid entry, which PrepareTempTablespaces stores for the database's
+// own tablespace) means MyDatabaseTableSpace — a database living in a
+// non-default tablespace keeps its filesets there, never in base/pgsql_tmp.
+#[test]
+fn fileset_init_places_files_in_the_database_tablespace() {
+    setup();
+    let saved = init_small::globals::MyDatabaseTableSpace();
+    init_small::globals::SetMyDatabaseTableSpace(16385);
+    let tblspc_tmp = crate::temp::TempTablespacePath(16385);
+    assert!(tblspc_tmp.starts_with("pg_tblspc/16385/"));
+
+    // Empty GUC arm.
+    crate::sync::AtEOXact_Files(true).unwrap();
+    assert!(!crate::temp::TempTablespacesAreSet());
+    let fs = crate::fileset::FileSet::init().unwrap();
+    let path = fs.name_path("x");
+    assert!(
+        path.starts_with(&format!("{tblspc_tmp}/pgsql_tmp")),
+        "empty temp_tablespaces: fileset path {path} is not under {tblspc_tmp}"
+    );
+    drop(fs);
+
+    // InvalidOid-entry arm.
+    crate::temp::SetTempTablespaces(&[::types_core::InvalidOid]);
+    let fs = crate::fileset::FileSet::init().unwrap();
+    let path = fs.name_path("x");
+    assert!(
+        path.starts_with(&format!("{tblspc_tmp}/pgsql_tmp")),
+        "InvalidOid temp tablespace entry: fileset path {path} is not under {tblspc_tmp}"
+    );
+    drop(fs);
+
+    crate::sync::AtEOXact_Files(true).unwrap();
+    init_small::globals::SetMyDatabaseTableSpace(saved);
+}
+
+// fileset.c:186 ChooseTablespace hashes each FILE name with hash_any; a
+// BufFile's segments are distinct names ("<name>.<n>"), so with two temp
+// tablespaces the segments of one BufFile spread across both — exactly
+// where C puts them.
+#[cfg(not(pgrust_sim))]
+#[test]
+fn fileset_segments_spread_across_tablespaces_by_segment_name_hash() {
+    let (_dir, _cwd) = fileset_scaffold("fsspread");
+    let spaces: [::types_core::Oid; 2] = [1663, 16385];
+    vfs_mkdir_p(&crate::temp::TempTablespacePath(16385));
+    crate::temp::SetTempTablespaces(&spaces);
+    let fs = crate::fileset::FileSet::init().unwrap();
+
+    // A name whose segments 0 and 1 hash to different tablespaces.
+    let pick = |n: &str| (hashfn::hash_bytes(n.as_bytes()) as usize) % 2;
+    let name = (b'a'..=b'z')
+        .map(|c| (c as char).to_string())
+        .find(|n| pick(&format!("{n}.0")) != pick(&format!("{n}.1")))
+        .expect("some single-letter name splits its segments");
+    let component = fileset_dir_component(&fs.name_path(&name));
+    let seg_path = |seg: usize| {
+        let ts = spaces[pick(&format!("{name}.{seg}"))];
+        format!("{}/{component}/{name}.{seg}", crate::temp::TempTablespacePath(ts))
+    };
+
+    let ctx = mcx::MemoryContext::new("fsspread");
+    let mut bf = crate::buffile::BufFileCreateFileSet(ctx.mcx(), &fs, &name).unwrap();
+    // Straddle the 1GB segment boundary: the flush creates segment 1.
+    let boundary = 0x4000_0000;
+    assert_eq!(bf.seek(0, boundary - 4, crate::buffile::SEEK_SET).unwrap(), 0);
+    bf.write(&[1, 2, 3, 4, 5, 6, 7, 8]).unwrap();
+    bf.close().unwrap();
+
+    assert!(vfs_path_exists(&seg_path(0)), "segment 0 missing at {}", seg_path(0));
+    assert!(vfs_path_exists(&seg_path(1)), "segment 1 missing at {}", seg_path(1));
+    crate::sync::AtEOXact_Files(true).unwrap();
+}
+
+// buffile.c:231-256 MakeNewFileSetSegment: creating segment N unlinks a
+// leftover segment N+1 (crash-restart debris with the same name) so that
+// BufFileOpenFileSet does not count it as part of the new file.
+#[test]
+fn fileset_segment_create_unlinks_stale_next_segment() {
+    let (_dir, _cwd) = fileset_scaffold("fsstale");
+    let fs = crate::fileset::FileSet::init().unwrap();
+    let base = fs.name_path("s");
+    let stale = format!("{base}.1");
+    let dir = base.rsplit_once('/').unwrap().0.to_string();
+    vfs_mkdir_p(&dir);
+    vfs_write_file(&stale, b"debris");
+    assert!(vfs_path_exists(&stale));
+
+    let ctx = mcx::MemoryContext::new("fsstale");
+    let bf = crate::buffile::BufFileCreateFileSet(ctx.mcx(), &fs, "s").unwrap();
+    assert!(
+        !vfs_path_exists(&stale),
+        "stale segment {stale} survived BufFileCreateFileSet"
+    );
+    bf.close().unwrap();
+    crate::sync::AtEOXact_Files(true).unwrap();
+}
+
+// buffile.c:346-349: `could not open temporary file "<name>.0" from BufFile
+// "<name>": %m` — the probed segment name and the BufFile name, not a path.
+#[test]
+fn buffile_open_fileset_missing_names_segment_and_buffile() {
+    let (_dir, _cwd) = fileset_scaffold("fsopen");
+    let fs = crate::fileset::FileSet::init().unwrap();
+    let ctx = mcx::MemoryContext::new("fsopen");
+    let err = match crate::buffile::BufFileOpenFileSet(ctx.mcx(), &fs, "nope", true) {
+        Err(e) => e,
+        Ok(_) => panic!("opened a BufFile that does not exist"),
+    };
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_UNDEFINED_FILE);
+    assert!(
+        err.message()
+            .starts_with("could not open temporary file \"nope.0\" from BufFile \"nope\": "),
+        "message={}",
+        err.message()
+    );
+}
+
+// buffile.c:631-639: a short exact read on a fileset BufFile names the file
+// set: `could not read from file set "<name>": read only %zu of %zu bytes`.
+#[test]
+fn buffile_short_read_names_the_file_set() {
+    let (_dir, _cwd) = fileset_scaffold("fsshort");
+    let fs = crate::fileset::FileSet::init().unwrap();
+    let ctx = mcx::MemoryContext::new("fsshort");
+    let mut bf = crate::buffile::BufFileCreateFileSet(ctx.mcx(), &fs, "r").unwrap();
+    bf.write(&[7u8; 10]).unwrap();
+    assert_eq!(bf.seek(0, 0, crate::buffile::SEEK_SET).unwrap(), 0);
+    let mut got = [0u8; 20];
+    let err = bf.read_exact(&mut got).unwrap_err();
+    assert_eq!(
+        err.message(),
+        "could not read from file set \"r\": read only 10 of 20 bytes"
+    );
+    bf.close().unwrap();
+    crate::sync::AtEOXact_Files(true).unwrap();
+}
+
+// buffile.c:379-393 BufFileDeleteFileSet: FileSetDelete(..., true) — an
+// unlink failure on an EXISTING segment is an ERROR (`could not unlink
+// temporary file "%s": %m`), not a LOG followed by "unknown BufFile".
+#[test]
+fn buffile_delete_fileset_errors_on_unlink_failure() {
+    let (_dir, _cwd) = fileset_scaffold("fsdel");
+    let fs = crate::fileset::FileSet::init().unwrap();
+    // A directory where segment 0 should be: stat succeeds, unlink fails.
+    let seg0 = format!("{}.0", fs.name_path("d"));
+    vfs_mkdir_p(&seg0);
+    let err = crate::buffile::BufFileDeleteFileSet(&fs, "d", false).unwrap_err();
+    assert!(
+        err.message().starts_with("could not unlink temporary file \""),
+        "message={}",
+        err.message()
+    );
+    assert_ne!(err.sqlstate(), ::types_error::ERRCODE_INTERNAL_ERROR);
+    let _ = vfs::rmdir(&cpath(&seg0));
+}
+
+// buffile.c:779 default: elog(ERROR, "invalid whence: %d") — an ERROR, not
+// a thread panic.
+#[test]
+fn buffile_seek_invalid_whence_is_elog_error() {
+    let (_dir, _cwd) = fileset_scaffold("bfwhence");
+    let ctx = mcx::MemoryContext::new("bfwhence");
+    let mut bf = crate::buffile::BufFileCreateTemp(ctx.mcx(), false).unwrap();
+    let err = bf.seek(0, 0, 7).unwrap_err();
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_INTERNAL_ERROR);
+    assert_eq!(err.message(), "invalid whence: 7");
+    bf.close().unwrap();
+}
+
+// buffile.c:761: SEEK_CUR's off_t add wraps (-fwrapv) and the wrapped value
+// fails the range checks as EOF; no overflow trap, position unchanged.
+#[test]
+fn buffile_seek_cur_huge_offset_is_eof_not_overflow() {
+    let (_dir, _cwd) = fileset_scaffold("bfwrap");
+    let ctx = mcx::MemoryContext::new("bfwrap");
+    let mut bf = crate::buffile::BufFileCreateTemp(ctx.mcx(), false).unwrap();
+    bf.write(&[1u8; 16]).unwrap();
+    assert_eq!(bf.seek(0, i64::MAX, crate::buffile::SEEK_CUR).unwrap(), -1);
+    assert_eq!(bf.tell(), (0, 16));
+    bf.close().unwrap();
+}
+
+// buffile.c:951-957 BufFileTruncateFileSet: a segment that cannot be deleted
+// reports `could not delete fileset "<name>.<n>": %m` — segment name, errno.
+#[cfg(not(pgrust_sim))]
+#[test]
+fn buffile_truncate_fileset_missing_segment_message() {
+    let (_dir, _cwd) = fileset_scaffold("fstrunc");
+    let fs = crate::fileset::FileSet::init().unwrap();
+    let ctx = mcx::MemoryContext::new("fstrunc");
+    let mut bf = crate::buffile::BufFileCreateFileSet(ctx.mcx(), &fs, "u").unwrap();
+    let boundary = 0x4000_0000;
+    assert_eq!(bf.seek(0, boundary - 4, crate::buffile::SEEK_SET).unwrap(), 0);
+    bf.write(&[1, 2, 3, 4, 5, 6, 7, 8]).unwrap();
+    // Flush: segment 1 now exists on disk.
+    assert_eq!(bf.seek(0, 0, crate::buffile::SEEK_SET).unwrap(), 0);
+    let seg1 = format!("{}.1", fs.name_path("u"));
+    assert!(vfs_path_exists(&seg1));
+    assert_eq!(vfs::unlink(&cpath(&seg1)), 0);
+
+    let err = bf.truncate_fileset(1, 0).unwrap_err();
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_UNDEFINED_FILE);
+    assert_eq!(
+        err.message(),
+        "could not delete fileset \"u.1\": No such file or directory"
+    );
+    crate::sync::AtEOXact_Files(true).unwrap();
+}
+
+// fd.c:4007-4045 check_debug_io_direct: a rejected value goes through
+// GUC_check_errdetail and `return false` — guc.c then raises
+// `invalid value for parameter "debug_io_direct": "<val>"` (22023) with the
+// DETAIL — instead of surfacing the detail text as an XX000 error.
+thread_local! {
+    static GUC_DETAILS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn install_guc_check_errdetail_recorder_once() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        guc_seams::guc_check_errdetail::set(|d| GUC_DETAILS.with(|v| v.borrow_mut().push(d)));
+    });
+}
+
+#[test]
+fn check_debug_io_direct_rejects_through_guc_check_errdetail() {
+    setup();
+    install_guc_check_errdetail_recorder_once();
+    let hook = guc_tables::hooks::check_debug_io_direct.get();
+    let mut extra = None;
+    for (val, detail) in [
+        ("bogus", "Invalid option \"bogus\"."),
+        ("data,,wal", "Invalid list syntax in parameter \"debug_io_direct\"."),
+    ] {
+        GUC_DETAILS.with(|v| v.borrow_mut().clear());
+        let mut nv = Some(val.to_string());
+        let r = hook(&mut nv, &mut extra, types_guc::GucSource::PGC_S_FILE);
+        assert!(
+            matches!(r, Ok(false)),
+            "{val}: check hook must return Ok(false) via GUC_check_errdetail, got {r:?}"
+        );
+        assert_eq!(GUC_DETAILS.with(|v| v.borrow().clone()), vec![detail.to_string()], "{val}");
+    }
+    let mut nv = Some("data".to_string());
+    assert!(matches!(hook(&mut nv, &mut extra, types_guc::GucSource::PGC_S_FILE), Ok(true)));
+}
+
+// buffile.c:463/545: FileRead/FileWrite carry WAIT_EVENT_BUFFILE_READ /
+// WAIT_EVENT_BUFFILE_WRITE (pg_stat_activity.wait_event BufFileRead/Write).
+#[test]
+fn buffile_io_reports_buffile_wait_events() {
+    let (_dir, _cwd) = fileset_scaffold("bfwait");
+    let ctx = mcx::MemoryContext::new("bfwait");
+    let mut bf = crate::buffile::BufFileCreateTemp(ctx.mcx(), false).unwrap();
+    take_wait_events();
+    bf.write(&[3u8; 8192 * 2]).unwrap();
+    assert_eq!(bf.seek(0, 0, crate::buffile::SEEK_SET).unwrap(), 0);
+    let mut got = [0u8; 100];
+    bf.read_exact(&mut got).unwrap();
+    let events = take_wait_events();
+    assert!(events.contains(&WE_BUFFILE_WRITE), "no BufFileWrite wait event in {events:?}");
+    assert!(events.contains(&WE_BUFFILE_READ), "no BufFileRead wait event in {events:?}");
+    bf.close().unwrap();
+}
+
+// copydir.c:195/205: copy_file reports WAIT_EVENT_COPY_FILE_READ around the
+// read and WAIT_EVENT_COPY_FILE_WRITE around the write.
+#[cfg(not(pgrust_sim))]
+#[test]
+fn copy_file_reports_copy_file_wait_events() {
+    setup();
+    let dir = scratch_dir("cpwait");
+    vfs_write_file(&format!("{dir}/src"), &[9u8; 70_000]);
+    take_wait_events();
+    crate::copydir::copy_file(&format!("{dir}/src"), &format!("{dir}/dst")).unwrap();
+    let events = take_wait_events();
+    assert!(events.contains(&WE_COPY_FILE_READ), "no CopyFileRead wait event in {events:?}");
+    assert!(events.contains(&WE_COPY_FILE_WRITE), "no CopyFileWrite wait event in {events:?}");
+    assert_eq!(vfs_read_file(&format!("{dir}/dst")).len(), 70_000);
+}
+
+// fd.c:3746 walkdir -> get_dirent_type(subpath, de, process_symlinks, elevel)
+// (common/file_utils.c:547): an entry that cannot be stat'd — a dangling
+// symlink looked through — logs `could not stat file "%s": %m` at elevel.
+#[cfg(not(pgrust_sim))]
+#[test]
+fn walkdir_logs_unstatable_entries() {
+    setup();
+    let dir = scratch_dir("walkstat");
+    vfs_write_file(&format!("{dir}/plain"), b"x");
+    std::os::unix::fs::symlink("nowhere-to-be-found", format!("{dir}/dangling")).unwrap();
+    let prev = elog::set_emit_log_hook(Some(capture_log_line));
+    take_log_lines();
+    crate::sync::walkdir(&dir, crate::sync::WalkAction::PreSync, true, types_error::LOG).unwrap();
+    let lines = take_log_lines();
+    elog::set_emit_log_hook(prev);
+    let want = format!("could not stat file \"{dir}/dangling\": No such file or directory");
+    assert!(
+        lines.iter().any(|(lvl, m)| *lvl == types_error::LOG && *m == want),
+        "expected LOG {want:?}, got {lines:?}"
+    );
+}
+
+// reinit.c:56/264/314: DEBUG1 "resetting unlogged relations: cleanup %d
+// init %d", DEBUG2 "unlinked file \"%s\"", DEBUG2 "copying %s to %s".
+#[cfg(not(pgrust_sim))]
+#[test]
+fn reset_unlogged_relations_emits_debug_lines() {
+    setup();
+    let dir = scratch_dir("reinitdbg");
+    let _cwd = enter_datadir(&dir);
+    vfs_mkdir_p("base/1");
+    vfs_mkdir_p("pg_tblspc");
+    vfs_write_file("base/1/12345_init", b"init-fork");
+    vfs_write_file("base/1/12345", b"main-fork");
+    let saved_min = elog::config::log_min_messages();
+    elog::config::set_log_min_messages(types_error::DEBUG2);
+    let prev = elog::set_emit_log_hook(Some(capture_log_line));
+    take_log_lines();
+
+    crate::reinit::ResetUnloggedRelations(crate::reinit::UNLOGGED_RELATION_CLEANUP).unwrap();
+    let cleanup = take_log_lines();
+    crate::reinit::ResetUnloggedRelations(crate::reinit::UNLOGGED_RELATION_INIT).unwrap();
+    let init = take_log_lines();
+
+    elog::set_emit_log_hook(prev);
+    elog::config::set_log_min_messages(saved_min);
+
+    let has = |lines: &[(types_error::ErrorLevel, String)], lvl, m: &str| {
+        lines.iter().any(|(l, s)| *l == lvl && s == m)
+    };
+    assert!(
+        has(&cleanup, types_error::DEBUG1, "resetting unlogged relations: cleanup 1 init 0"),
+        "{cleanup:?}"
+    );
+    assert!(has(&cleanup, types_error::DEBUG2, "unlinked file \"base/1/12345\""), "{cleanup:?}");
+    assert!(
+        has(&init, types_error::DEBUG1, "resetting unlogged relations: cleanup 0 init 1"),
+        "{init:?}"
+    );
+    assert!(
+        has(&init, types_error::DEBUG2, "copying base/1/12345_init to base/1/12345"),
+        "{init:?}"
+    );
+    assert_eq!(vfs_read_file("base/1/12345"), b"init-fork");
+}
+
+// ereport_startup_progress (postmaster/startup.h) in fd.c:3794/3826 and
+// reinit.c:145/148: once the startup-progress timer fires, the phase logs
+// `<phase>, elapsed time: %ld.%02d s, current path: %s`.
+thread_local! {
+    static STARTUP_PROGRESS_ARMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn install_startup_progress_seam_once() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        startup_seams::has_startup_progress_timeout_expired::set(|| {
+            if STARTUP_PROGRESS_ARMED.with(std::cell::Cell::get) {
+                Some((1, 234_567))
+            } else {
+                None
+            }
+        });
+    });
+}
+
+#[cfg(not(pgrust_sim))]
+#[test]
+fn startup_progress_lines_during_datadir_sync_and_unlogged_reset() {
+    setup();
+    install_startup_progress_seam_once();
+    let dir = scratch_dir("startprog");
+    let _cwd = enter_datadir(&dir);
+    vfs_mkdir_p("base/1");
+    vfs_mkdir_p("pg_tblspc");
+    vfs_write_file("base/1/777_init", b"i");
+    vfs_mkdir_p("syncme");
+    vfs_write_file("syncme/f", b"y");
+    let prev = elog::set_emit_log_hook(Some(capture_log_line));
+    STARTUP_PROGRESS_ARMED.with(|c| c.set(true));
+    take_log_lines();
+
+    crate::sync::walkdir("syncme", crate::sync::WalkAction::PreSync, false, types_error::LOG).unwrap();
+    crate::sync::walkdir("syncme", crate::sync::WalkAction::DatadirFsync, false, types_error::LOG).unwrap();
+    crate::reinit::ResetUnloggedRelations(crate::reinit::UNLOGGED_RELATION_INIT).unwrap();
+    let lines = take_log_lines();
+
+    STARTUP_PROGRESS_ARMED.with(|c| c.set(false));
+    elog::set_emit_log_hook(prev);
+
+    for want in [
+        "syncing data directory (pre-fsync), elapsed time: 1.23 s, current path: syncme/f",
+        "syncing data directory (fsync), elapsed time: 1.23 s, current path: syncme/f",
+        "resetting unlogged relations (init), elapsed time: 1.23 s, current path: base/1",
+    ] {
+        assert!(
+            lines.iter().any(|(lvl, m)| *lvl == types_error::LOG && m == want),
+            "expected LOG {want:?}, got {lines:?}"
+        );
+    }
+}

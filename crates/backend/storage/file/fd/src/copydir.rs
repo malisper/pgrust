@@ -4,6 +4,9 @@ use ::types_error::{PgResult, ERROR, WARNING};
 use crate::desc::{CloseTransientFile, OpenTransientFile, TransientFileRawFd};
 use crate::sync::{fsync_fname, pg_flush_data};
 use crate::vfd::{cpath, get_errno, loc, set_errno, MakePGDirectory};
+#[cfg(all(not(pgrust_sim), target_os = "linux"))]
+use crate::wait_event::WAIT_EVENT_COPY_FILE_COPY;
+use crate::wait_event::{WAIT_EVENT_COPY_FILE_READ, WAIT_EVENT_COPY_FILE_WRITE};
 
 // FileCopyMethod (storage/copydir.h) — one C enum. guc_tables' consts carry
 // their own copy of the values; pin the two together at compile time so the
@@ -134,7 +137,9 @@ pub fn copy_file(fromfile: &str, tofile: &str) -> PgResult<()> {
         // Positional IO at the tracked offset (`offset` already advances in
         // lockstep with C's sequential read/write; both fds are regular files
         // opened here, so pread/pwrite move the same bytes).
+        waitevent_seams::pgstat_report_wait_start::call(WAIT_EVENT_COPY_FILE_READ);
         let nbytes = vfs::pread(src_raw, &mut buffer, offset as libc::off_t);
+        waitevent_seams::pgstat_report_wait_end::call();
         if nbytes < 0 {
             return Err(ereport(ERROR)
                 .with_saved_errno(get_errno())
@@ -147,6 +152,7 @@ pub fn copy_file(fromfile: &str, tofile: &str) -> PgResult<()> {
             break;
         }
         set_errno(0);
+        waitevent_seams::pgstat_report_wait_start::call(WAIT_EVENT_COPY_FILE_WRITE);
         if vfs::pwrite(dst_raw, &buffer[..nbytes as usize], offset as libc::off_t) != nbytes {
             if get_errno() == 0 {
                 set_errno(libc::ENOSPC);
@@ -158,6 +164,7 @@ pub fn copy_file(fromfile: &str, tofile: &str) -> PgResult<()> {
                 .finish(loc("copy_file"))
                 .unwrap_err());
         }
+        waitevent_seams::pgstat_report_wait_end::call();
         offset += nbytes as i64;
     }
 
@@ -254,6 +261,7 @@ fn clone_file(fromfile: &str, tofile: &str) -> PgResult<()> {
         // Don't copy too much at once, so we can check for interrupts from
         // time to time if it falls back to a slow copy.
         postgres_seams::check_for_interrupts::call()?;
+        waitevent_seams::pgstat_report_wait_start::call(WAIT_EVENT_COPY_FILE_COPY);
         // SAFETY: copy_file_range(2) on two live transient kernel fds; NULL
         // offsets advance both file positions.
         let nbytes = unsafe {
@@ -276,6 +284,7 @@ fn clone_file(fromfile: &str, tofile: &str) -> PgResult<()> {
                 .finish(loc("clone_file"))
                 .unwrap_err());
         }
+        waitevent_seams::pgstat_report_wait_end::call();
         if nbytes == 0 {
             break;
         }

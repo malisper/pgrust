@@ -8,9 +8,13 @@ use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
 use ::types_error::{PgResult, ERROR};
 use ::types_storage::File;
 
+use crate::fileset::FileSetKey;
 use crate::io::{file_path_name_lossy, FileClose, FileRead, FileSize, FileTruncate, FileWrite};
 use crate::temp::OpenTemporaryFile;
 use crate::vfd::{get_errno, loc};
+use crate::wait_event::{
+    WAIT_EVENT_BUFFILE_READ, WAIT_EVENT_BUFFILE_TRUNCATE, WAIT_EVENT_BUFFILE_WRITE,
+};
 
 const BLCKSZ: usize = 8192;
 const MAX_PHYSICAL_FILESIZE: i64 = 0x4000_0000;
@@ -19,9 +23,15 @@ pub const SEEK_SET: i32 = 0;
 pub const SEEK_CUR: i32 = 1;
 pub const SEEK_END: i32 = 2;
 
+// pgBufferUsage.temp_blks_* / temp_blk_*_time (instrument.c): BufFile is
+// their only writer, so the running totals live here and the instrument
+// crate snapshots them. The times are INSTR_TIME ticks (monotonic ns, the
+// instrument crate's instr_time unit) and only advance under track_io_timing.
 thread_local! {
     static TEMP_BLKS_READ: Cell<i64> = const { Cell::new(0) };
     static TEMP_BLKS_WRITTEN: Cell<i64> = const { Cell::new(0) };
+    static TEMP_BLK_READ_TIME: Cell<i64> = const { Cell::new(0) };
+    static TEMP_BLK_WRITE_TIME: Cell<i64> = const { Cell::new(0) };
 }
 
 pub fn temp_blks_read() -> i64 {
@@ -32,15 +42,50 @@ pub fn temp_blks_written() -> i64 {
     TEMP_BLKS_WRITTEN.with(Cell::get)
 }
 
+/// `pgBufferUsage.temp_blk_read_time` ticks (ns).
+pub fn temp_blk_read_time() -> i64 {
+    TEMP_BLK_READ_TIME.with(Cell::get)
+}
+
+/// `pgBufferUsage.temp_blk_write_time` ticks (ns).
+pub fn temp_blk_write_time() -> i64 {
+    TEMP_BLK_WRITE_TIME.with(Cell::get)
+}
+
+// INSTR_TIME_SET_CURRENT under track_io_timing, INSTR_TIME_SET_ZERO
+// otherwise (buffile.c:459/532). The "zero = not timing" sentinel is C's.
+#[inline]
+fn io_timing_start() -> i64 {
+    // bufmgr owns the GUC's backing; a boot without it (unit tests) is
+    // C's track_io_timing = off.
+    if guc_tables::vars::track_io_timing.installed() && guc_tables::vars::track_io_timing.read() {
+        pg_clock::mono_ns() as i64
+    } else {
+        0
+    }
+}
+
+// INSTR_TIME_ACCUM_DIFF(pgBufferUsage.temp_blk_*_time, now, io_start).
+#[inline]
+fn io_timing_accum(acc: &'static std::thread::LocalKey<Cell<i64>>, io_start: i64) {
+    if io_start != 0 {
+        let now = pg_clock::mono_ns() as i64;
+        acc.with(|c| c.set(c.get() + (now - io_start)));
+    }
+}
+
 pub struct BufFile<'mcx> {
     // All files except the last have length exactly MAX_PHYSICAL_FILESIZE.
     files: PgVec<'mcx, File>,
     is_inter_xact: bool,
     dirty: bool,
     read_only: bool,
-    // FileSet-backed files: segment i lives at "<seg_base>.<i>", creatable
-    // and openable by any participant thread (C's fileset BufFiles).
-    seg_base: Option<PgVec<'mcx, u8>>,
+    // FileSet-backed files (C's fileset BufFiles): segment i is the set's
+    // file "<name>.<i>", creatable and openable by any participant thread.
+    // `fileset` is the C `buffile->fileset` identity, `name` the C
+    // `buffile->name` (NULL for plain temp files).
+    fileset: Option<FileSetKey>,
+    name: Option<PgVec<'mcx, u8>>,
     cur_file: i32,
     cur_offset: i64,
     pos: i32,
@@ -76,7 +121,8 @@ pub fn BufFileCreateTemp<'mcx>(mcx: Mcx<'mcx>, inter_xact: bool) -> PgResult<Buf
         is_inter_xact: inter_xact,
         dirty: false,
         read_only: false,
-        seg_base: None,
+        fileset: None,
+        name: None,
         cur_file: 0,
         cur_offset: 0,
         pos: 0,
@@ -85,23 +131,41 @@ pub fn BufFileCreateTemp<'mcx>(mcx: Mcx<'mcx>, inter_xact: bool) -> PgResult<Buf
     })
 }
 
-fn seg_name(base: &[u8], segment: usize) -> String {
-    format!("{}.{segment}", core::str::from_utf8(base).expect("fileset name is utf8"))
+// `FileSetSegmentName` (buffile.c:222): "<buffile_name>.<segment>".
+fn seg_name(name: &[u8], segment: usize) -> String {
+    format!("{}.{segment}", core::str::from_utf8(name).expect("fileset name is utf8"))
 }
 
-/// `BufFileCreateFileSet` (buffile.c): a named, participant-shared temp file.
+// `MakeNewFileSetSegment` (buffile.c:231): create segment `segment` of the
+// named BufFile. Files left over from before a crash restart can carry the
+// same name; so that BufFileOpenFileSet() is not confused about how many
+// segments there are, unlink the NEXT segment number if it already exists.
+fn make_new_fileset_segment(fileset: &FileSetKey, name: &[u8], segment: usize) -> PgResult<File> {
+    fileset.delete(&seg_name(name, segment + 1), true)?;
+    let file = fileset.create(&seg_name(name, segment))?;
+    // FileSetCreate would've errored out.
+    debug_assert!(file.0 > 0);
+    Ok(file)
+}
+
+fn copy_name<'mcx>(mcx: Mcx<'mcx>, name: &str) -> PgResult<PgVec<'mcx, u8>> {
+    let mut v = vec_with_capacity_in(mcx, name.len())?;
+    v.extend(name.as_bytes().iter().copied());
+    Ok(v)
+}
+
+/// `BufFileCreateFileSet` (buffile.c:268): a named, participant-shared temp
+/// file.
 pub fn BufFileCreateFileSet<'mcx>(
     mcx: Mcx<'mcx>,
     fileset: &crate::fileset::FileSet,
     name: &str,
 ) -> PgResult<BufFile<'mcx>> {
-    let base = fileset.name_path(name);
-    let file = fileset.create_seg(name, &seg_name(base.as_bytes(), 0))?;
-    debug_assert!(file.0 > 0);
+    let key = fileset.key();
+    let file = make_new_fileset_segment(&key, name.as_bytes(), 0)?;
     let mut files = vec_with_capacity_in(mcx, 1)?;
     files.push(file);
-    let mut seg = vec_with_capacity_in(mcx, base.len())?;
-    seg.extend(base.as_bytes().iter().copied());
+    let name = copy_name(mcx, name)?;
     let mut buffer = vec_with_capacity_in(mcx, BLCKSZ)?;
     buffer.resize(BLCKSZ, 0);
     Ok(BufFile {
@@ -109,7 +173,8 @@ pub fn BufFileCreateFileSet<'mcx>(
         is_inter_xact: false,
         dirty: false,
         read_only: false,
-        seg_base: Some(seg),
+        fileset: Some(key),
+        name: Some(name),
         cur_file: 0,
         cur_offset: 0,
         pos: 0,
@@ -118,18 +183,22 @@ pub fn BufFileCreateFileSet<'mcx>(
     })
 }
 
-/// `BufFileOpenFileSet`: open another participant's file by name.
-pub fn BufFileOpenFileSet<'mcx>(
+// `BufFileOpenFileSet` (buffile.c:296): probe the filesystem for the
+// segments; None only when missing_ok and no segment exists.
+fn open_fileset_common<'mcx>(
     mcx: Mcx<'mcx>,
     fileset: &crate::fileset::FileSet,
     name: &str,
     read_only: bool,
-) -> PgResult<BufFile<'mcx>> {
-    let base = fileset.name_path(name);
+    missing_ok: bool,
+) -> PgResult<Option<BufFile<'mcx>>> {
+    let key = fileset.key();
     let mode = if read_only { libc::O_RDONLY } else { libc::O_RDWR };
-    let mut files: PgVec<'mcx, File> = vec_with_capacity_in(mcx, 1)?;
+    let mut files: PgVec<'mcx, File> = vec_with_capacity_in(mcx, 16)?;
+    let mut segment_name;
     loop {
-        let f = fileset.open_seg(&seg_name(base.as_bytes(), files.len()), mode)?;
+        segment_name = seg_name(name.as_bytes(), files.len());
+        let f = key.open(&segment_name, mode)?;
         if f.0 <= 0 {
             break;
         }
@@ -138,29 +207,48 @@ pub fn BufFileOpenFileSet<'mcx>(
         // mean thousands of opens); crate idiom per copydir.rs.
         postgres_seams::check_for_interrupts::call()?;
     }
+    // If we didn't find any files at all, then no BufFile exists with this
+    // name.
     if files.is_empty() {
+        if missing_ok {
+            return Ok(None);
+        }
         ereport(ERROR)
             .with_saved_errno(get_errno())
             .errcode_for_file_access()
-            .errmsg(format!("could not open temporary file \"{base}\": %m"))
+            .errmsg(format!(
+                "could not open temporary file \"{segment_name}\" from BufFile \"{name}\": %m"
+            ))
             .finish(loc("BufFileOpenFileSet"))?;
     }
-    let mut seg = vec_with_capacity_in(mcx, base.len())?;
-    seg.extend(base.as_bytes().iter().copied());
+    let name = copy_name(mcx, name)?;
     let mut buffer = vec_with_capacity_in(mcx, BLCKSZ)?;
     buffer.resize(BLCKSZ, 0);
-    Ok(BufFile {
+    Ok(Some(BufFile {
         files,
         is_inter_xact: false,
         dirty: false,
         read_only,
-        seg_base: Some(seg),
+        fileset: Some(key),
+        name: Some(name),
         cur_file: 0,
         cur_offset: 0,
         pos: 0,
         nbytes: 0,
         buffer,
-    })
+    }))
+}
+
+/// `BufFileOpenFileSet(..., missing_ok = false)`: open another participant's
+/// file by name; ERROR when it does not exist.
+pub fn BufFileOpenFileSet<'mcx>(
+    mcx: Mcx<'mcx>,
+    fileset: &crate::fileset::FileSet,
+    name: &str,
+    read_only: bool,
+) -> PgResult<BufFile<'mcx>> {
+    Ok(open_fileset_common(mcx, fileset, name, read_only, false)?
+        .expect("missing_ok=false raised on a missing BufFile"))
 }
 
 /// `BufFileOpenFileSet` with C's missing_ok=true arm: None when no segment
@@ -171,30 +259,22 @@ pub fn BufFileOpenFileSetMaybe<'mcx>(
     name: &str,
     read_only: bool,
 ) -> PgResult<Option<BufFile<'mcx>>> {
-    let base = fileset.name_path(name);
-    let mode = if read_only { libc::O_RDONLY } else { libc::O_RDWR };
-    let probe = fileset.open_seg(&seg_name(base.as_bytes(), 0), mode)?;
-    if probe.0 <= 0 {
-        return Ok(None);
-    }
-    // Hand the probed segment back and reopen the whole chain uniformly.
-    FileClose(probe)?;
-    Ok(Some(BufFileOpenFileSet(mcx, fileset, name, read_only)?))
+    open_fileset_common(mcx, fileset, name, read_only, true)
 }
 
 /// `BufFileDeleteFileSet` (buffile.c:379): unlink every segment of a named
-/// fileset file.
+/// fileset file; an unlink failure on an existing segment is an ERROR
+/// (FileSetDelete with error_on_failure = true).
 pub fn BufFileDeleteFileSet(
     fileset: &crate::fileset::FileSet,
     name: &str,
     missing_ok: bool,
 ) -> PgResult<()> {
-    let base = fileset.name_path(name);
+    let key = fileset.key();
     let mut found = false;
     let mut segment = 0usize;
     loop {
-        let seg = seg_name(base.as_bytes(), segment);
-        if !crate::temp::PathNameDeleteTemporaryFile(&seg, false)? {
+        if !key.delete(&seg_name(name.as_bytes(), segment), true)? {
             break;
         }
         found = true;
@@ -214,11 +294,8 @@ impl<'mcx> BufFile<'mcx> {
     /// `BufFileTruncateFileSet` (buffile.c:911): truncate at (fileno,
     /// offset), removing whole segments past the point.
     pub fn truncate_fileset(&mut self, fileno: i32, offset: i64) -> PgResult<()> {
-        let base = self
-            .seg_base
-            .as_ref()
-            .map(|b| b.to_vec())
-            .expect("truncate_fileset on a fileset BufFile");
+        let fileset = self.fileset.expect("truncate_fileset on a fileset BufFile");
+        let name = self.name.as_ref().map(|b| b.to_vec()).expect("fileset BufFile has a name");
         let mut num_files = self.files.len() as i32;
         let mut new_file = fileno;
         let mut new_offset = self.cur_offset;
@@ -229,12 +306,13 @@ impl<'mcx> BufFile<'mcx> {
         let mut i = self.files.len() as i32 - 1;
         while i >= fileno {
             if (i != fileno || offset == 0) && i != 0 {
-                let seg = seg_name(&base, i as usize);
+                let segment_name = seg_name(&name, i as usize);
                 FileClose(self.files[i as usize])?;
-                if !crate::temp::PathNameDeleteTemporaryFile(&seg, false)? {
+                if !fileset.delete(&segment_name, true)? {
                     ereport(ERROR)
+                        .with_saved_errno(get_errno())
                         .errcode_for_file_access()
-                        .errmsg(format!("could not delete fileset \"{seg}\""))
+                        .errmsg(format!("could not delete fileset \"{segment_name}\": %m"))
                         .finish(loc("BufFileTruncateFileSet"))?;
                 }
                 num_files -= 1;
@@ -243,7 +321,7 @@ impl<'mcx> BufFile<'mcx> {
                     new_file -= 1;
                 }
             } else {
-                if FileTruncate(self.files[i as usize], offset, 0)? < 0 {
+                if FileTruncate(self.files[i as usize], offset, WAIT_EVENT_BUFFILE_TRUNCATE)? < 0 {
                     ereport(ERROR)
                         .with_saved_errno(get_errno())
                         .errcode_for_file_access()
@@ -283,15 +361,11 @@ impl<'mcx> BufFile<'mcx> {
     }
 
     fn extend(&mut self) -> PgResult<()> {
-        let pfile = match &self.seg_base {
+        let pfile = match &self.fileset {
             None => OpenTemporaryFile(self.is_inter_xact)?,
-            Some(base) => {
-                // MakeNewFileSetSegment; requires the fileset caller keep the
-                // set alive, which the sts accessor structure guarantees.
-                crate::temp::PathNameCreateTemporaryFile(
-                    &seg_name(base, self.files.len()),
-                    true,
-                )?
+            Some(fileset) => {
+                let name = self.name.as_ref().expect("fileset BufFile has a name");
+                make_new_fileset_segment(fileset, name, self.files.len())?
             }
         };
         debug_assert!(pfile.0 >= 0);
@@ -324,11 +398,18 @@ impl<'mcx> BufFile<'mcx> {
             self.cur_offset = 0;
         }
         let thisfile = self.files[self.cur_file as usize];
-        let nread = FileRead(thisfile, &mut self.buffer[..], self.cur_offset, 0)?;
+        let io_start = io_timing_start();
+        let nread = FileRead(
+            thisfile,
+            &mut self.buffer[..],
+            self.cur_offset,
+            WAIT_EVENT_BUFFILE_READ,
+        )?;
         if nread < 0 {
             self.nbytes = 0;
             return read_failed(thisfile);
         }
+        io_timing_accum(&TEMP_BLK_READ_TIME, io_start);
         self.nbytes = nread as i32;
         if self.nbytes > 0 {
             TEMP_BLKS_READ.with(|c| c.set(c.get() + 1));
@@ -352,15 +433,17 @@ impl<'mcx> BufFile<'mcx> {
                 bytestowrite = availbytes;
             }
             let thisfile = self.files[self.cur_file as usize];
+            let io_start = io_timing_start();
             let written = FileWrite(
                 thisfile,
                 &self.buffer[wpos as usize..(wpos as i64 + bytestowrite) as usize],
                 self.cur_offset,
-                0,
+                WAIT_EVENT_BUFFILE_WRITE,
             )?;
             if written <= 0 {
                 return write_failed(thisfile);
             }
+            io_timing_accum(&TEMP_BLK_WRITE_TIME, io_start);
             self.cur_offset += written as i64;
             wpos += written as i32;
             TEMP_BLKS_WRITTEN.with(|c| c.set(c.get() + 1));
@@ -418,11 +501,18 @@ impl<'mcx> BufFile<'mcx> {
         }
 
         if exact && nread != start_size && !(nread == 0 && eof_ok) {
+            let msg = match &self.name {
+                Some(name) => format!(
+                    "could not read from file set \"{}\": read only {nread} of {start_size} bytes",
+                    String::from_utf8_lossy(name)
+                ),
+                None => format!(
+                    "could not read from temporary file: read only {nread} of {start_size} bytes"
+                ),
+            };
             ereport(ERROR)
                 .errcode_for_file_access()
-                .errmsg(format!(
-                    "could not read from temporary file: read only {nread} of {start_size} bytes"
-                ))
+                .errmsg(msg)
                 .finish(loc("BufFileReadCommon"))?;
         }
         Ok(nread)
@@ -484,24 +574,26 @@ impl<'mcx> BufFile<'mcx> {
                 new_offset = offset;
             }
             SEEK_CUR => {
+                // Relative seek considers only the signed offset, ignoring
+                // fileno. C (-fwrapv) wraps the off_t add; the wrapped value
+                // then fails the range checks below as EOF.
                 new_file = self.cur_file;
-                new_offset = (self.cur_offset + self.pos as i64) + offset;
+                new_offset = (self.cur_offset + self.pos as i64).wrapping_add(offset);
             }
             SEEK_END => {
                 new_file = self.files.len() as i32 - 1;
                 new_offset = FileSize(self.files[self.files.len() - 1])?;
                 if new_offset < 0 {
-                    ereport(ERROR)
-                        .with_saved_errno(get_errno())
-                        .errcode_for_file_access()
-                        .errmsg(format!(
-                            "could not determine size of temporary file \"{}\" from BufFile \"\": %m",
-                            file_path_name_lossy(self.files[self.files.len() - 1])
-                        ))
-                        .finish(loc("BufFileSeek"))?;
+                    return Err(self.size_failed(loc("BufFileSeek")));
                 }
             }
-            other => panic!("invalid whence: {other}"),
+            other => {
+                // elog(ERROR, "invalid whence: %d", whence) (buffile.c:779).
+                ereport(ERROR)
+                    .errmsg_internal(format!("invalid whence: {other}"))
+                    .finish(loc("BufFileSeek"))?;
+                return Ok(-1);
+            }
         }
         while new_offset < 0 {
             new_file -= 1;
@@ -560,16 +652,29 @@ impl<'mcx> BufFile<'mcx> {
         let last = self.files[self.files.len() - 1];
         let last_size = FileSize(last)?;
         if last_size < 0 {
-            ereport(ERROR)
-                .with_saved_errno(get_errno())
-                .errcode_for_file_access()
-                .errmsg(format!(
-                    "could not determine size of temporary file \"{}\" from BufFile \"\": %m",
-                    file_path_name_lossy(last)
-                ))
-                .finish(loc("BufFileSize"))?;
+            return Err(self.size_failed(loc("BufFileSize")));
         }
         Ok((self.files.len() as i64 - 1) * MAX_PHYSICAL_FILESIZE + last_size)
+    }
+
+    // buffile.c:776/862: `... from BufFile "%s": %m` with file->name, which
+    // is NULL for a plain temp file — PG's snprintf renders that "(null)".
+    #[cold]
+    #[inline(never)]
+    fn size_failed(&self, location: ::types_error::ErrorLocation) -> Box<::types_error::PgError> {
+        let name = match &self.name {
+            Some(name) => String::from_utf8_lossy(name).into_owned(),
+            None => "(null)".to_string(),
+        };
+        ereport(ERROR)
+            .with_saved_errno(get_errno())
+            .errcode_for_file_access()
+            .errmsg(format!(
+                "could not determine size of temporary file \"{}\" from BufFile \"{name}\": %m",
+                file_path_name_lossy(self.files[self.files.len() - 1])
+            ))
+            .finish(location)
+            .unwrap_err()
     }
 }
 

@@ -16,11 +16,24 @@ pub mod sync;
 pub mod temp;
 pub mod vfd;
 
+/// The fd-owned WaitEventIO codes (wait_event_types.h, generated from
+/// wait_event_names.txt: `PG_WAIT_IO | <index in name order>`; same
+/// derivation as aio_core's DATA_FILE_* and slru's SLRU_*).
+pub mod wait_event {
+    pub const PG_WAIT_IO: u32 = 0x0A00_0000;
+    pub const WAIT_EVENT_BUFFILE_READ: u32 = PG_WAIT_IO + 6;
+    pub const WAIT_EVENT_BUFFILE_WRITE: u32 = PG_WAIT_IO + 7;
+    pub const WAIT_EVENT_BUFFILE_TRUNCATE: u32 = PG_WAIT_IO + 8;
+    pub const WAIT_EVENT_COPY_FILE_COPY: u32 = PG_WAIT_IO + 14;
+    pub const WAIT_EVENT_COPY_FILE_READ: u32 = PG_WAIT_IO + 15;
+    pub const WAIT_EVENT_COPY_FILE_WRITE: u32 = PG_WAIT_IO + 16;
+}
+
 pub use buffile::{
     BufFile, BufFileCreateFileSet, BufFileCreateTemp, BufFileDeleteFileSet, BufFileOpenFileSet,
     BufFileOpenFileSetMaybe, PrepareTempTablespaces,
 };
-pub use fileset::FileSet;
+pub use fileset::{FileSet, FileSetKey};
 pub use copydir::{copy_file, copydir, directory_is_empty, pg_mkdir_p, rmtree};
 pub use desc::{
     closeAllVfds, with_allocated_dir, with_allocated_stdio, AllocateDir, AllocateFile,
@@ -104,10 +117,21 @@ pub fn init_seams() {
             set: vfd::set_temp_tablespaces_guc,
         });
 
+        // check_debug_io_direct (fd.c:4007): a rejected value reports its
+        // reason through GUC_check_errdetail and returns false; guc.c then
+        // raises `invalid value for parameter "debug_io_direct": "<val>"`
+        // (ERRCODE_INVALID_PARAMETER_VALUE) with that DETAIL.
         hooks::check_debug_io_direct.install(|newval, extra, _source| {
-            let flags = vfd::check_debug_io_direct(newval.as_deref().unwrap_or(""))?;
-            *extra = Some(Box::new(flags) as GucHookExtra);
-            Ok(true)
+            match vfd::check_debug_io_direct(newval.as_deref().unwrap_or("")) {
+                Ok(flags) => {
+                    *extra = Some(Box::new(flags) as GucHookExtra);
+                    Ok(true)
+                }
+                Err(detail) => {
+                    guc_seams::guc_check_errdetail::call(detail);
+                    Ok(false)
+                }
+            }
         });
         hooks::assign_debug_io_direct.install(|_newval, extra| {
             let flags = extra

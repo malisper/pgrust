@@ -731,9 +731,10 @@ pub fn data_sync_elevel(elevel: ErrorLevel) -> ErrorLevel {
 
 // check_debug_io_direct (fd.c:4007). PG_O_DIRECT != 0 on supported platforms
 // and BLCKSZ/XLOG_BLCKSZ >= PG_IO_ALIGN_SIZE in the default config, so those
-// compile-time reject branches are absent from this build.
-pub fn check_debug_io_direct(newval: &str) -> PgResult<i32> {
-    use ::types_error::PgError;
+// compile-time reject branches are absent from this build. `Err` carries the
+// GUC_check_errdetail text of the rejection (the hook in lib.rs hands it to
+// guc.c's check-error protocol and returns false).
+pub fn check_debug_io_direct(newval: &str) -> Result<i32, String> {
     use ::types_storage::{IO_DIRECT_DATA, IO_DIRECT_WAL, IO_DIRECT_WAL_INIT};
 
     // SplitGUCList(rawstring, ',', &elemlist): quoted items allowed, empty
@@ -742,10 +743,7 @@ pub fn check_debug_io_direct(newval: &str) -> PgResult<i32> {
     // FATAL: invalid value for parameter "debug_io_direct" /
     // DETAIL: Invalid list syntax in parameter "debug_io_direct".).
     let Ok(elemlist) = pg_string::split_guc_list(newval, b',') else {
-        return Err(PgError::error(
-            "Invalid list syntax in parameter \"debug_io_direct\".".to_string(),
-        )
-        .into());
+        return Err("Invalid list syntax in parameter \"debug_io_direct\".".to_string());
     };
 
     let mut flags = 0;
@@ -757,7 +755,7 @@ pub fn check_debug_io_direct(newval: &str) -> PgResult<i32> {
         } else if item.eq_ignore_ascii_case("wal_init") {
             flags |= IO_DIRECT_WAL_INIT;
         } else {
-            return Err(PgError::error(format!("Invalid option \"{item}\".")).into());
+            return Err(format!("Invalid option \"{item}\"."));
         }
     }
     Ok(flags)

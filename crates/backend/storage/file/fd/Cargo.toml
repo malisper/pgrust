@@ -17,6 +17,7 @@ datum = { path = "../../../../_support/types/datum" }
 mcx = { path = "../../../../_support/mcx" }
 elog = { path = "../../../utils/error/elog" }
 guc_tables = { path = "../../../utils/misc/guc_tables" }
+guc_seams = { path = "../../../utils/misc/guc_seams" }
 tablespace_seams = { path = "../../../commands/tablespace_seams" }
 pg_prng = { path = "../../../../common/pg_prng" }
 init_small = { path = "../../../utils/init/init_small" }
@@ -33,10 +34,15 @@ postgres_seams = { path = "../../../tcop/postgres_seams" }
 # seam (AGENTS.md seam doctrine; DST P1 contract §1.1).
 vfs = { path = "../vfs" }
 pg_string = { path = "../../../../common/string" }
+# hash_any (fileset.c ChooseTablespace) and INSTR_TIME_SET_CURRENT
+# (buffile.c track_io_timing).
+hashfn = { path = "../../../../common/hashfn" }
+pg_clock = { path = "../../../../port/pg_clock" }
 libc = "0.2"
 
 [dev-dependencies]
 resowner = { path = "../../../utils/resowner/resowner" }
+types_guc = { path = "../../../../_support/types/types_guc" }
 
 # `pgrust_sim` mirrors vfs's declaration (contract §1.2): non-default cfg set
 # only by the sim harness's RUSTFLAGS; fd's sim-only regression tests use it.

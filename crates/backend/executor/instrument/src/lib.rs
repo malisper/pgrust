@@ -24,9 +24,10 @@ pub fn instr_time_current() -> instr_time {
 }
 
 // pgBufferUsage (instrument.c): shared/local blks tick in bufmgr::counters
-// and temp_blks_* in fd::buffile; the track_io_timing blk_*_time clocks have
-// no ported writers (nor an installed GUC backing), so their running totals
-// are truly zero. WORKER_CONTRIB is InstrAccumParallelQuery's add — the live
+// and temp_blks_* / temp_blk_*_time in fd::buffile (the latter advance only
+// under track_io_timing, buffile.c:459-476/532-553); the shared/local
+// blk_*_time clocks have no ported writers, so their running totals are
+// truly zero. WORKER_CONTRIB is InstrAccumParallelQuery's add — the live
 // counters cannot be bumped, so the accumulated worker usage rides as an
 // overlay.
 pub fn pg_buffer_usage() -> BufferUsage {
@@ -41,6 +42,8 @@ pub fn pg_buffer_usage() -> BufferUsage {
         local_blks_written: bufmgr::counters::local_blks_written() as i64,
         temp_blks_read: fd::buffile::temp_blks_read(),
         temp_blks_written: fd::buffile::temp_blks_written(),
+        temp_blk_read_time: instr_time { ticks: fd::buffile::temp_blk_read_time() },
+        temp_blk_write_time: instr_time { ticks: fd::buffile::temp_blk_write_time() },
         ..BufferUsage::default()
     };
     WORKER_CONTRIB.with(|c| buffer_usage_add(&mut u, &c.get()));
