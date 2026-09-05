@@ -4590,6 +4590,182 @@ fn mk_epq_update_subplan_pstmt<'mcx>(mcx: ::mcx::Mcx<'mcx>, relid: u32) -> &'mcx
     pstmt.seal_ref()
 }
 
+/// LockRows(FOR UPDATE, rowmark rti 1) over a SeqScan of a 2-col fixture
+/// relation: the outer tlist carries the junk `ctid1` column
+/// ExecBuildAuxRowMark resolves (its Var is never evaluated on an empty
+/// table, so a plain column Var stands in for the ctid system attribute).
+fn mk_lockrows_over_seqscan_pstmt<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
+    relid: u32,
+) -> &'mcx PlannedStmt<'mcx> {
+    use ::types_nodes::bitmapset::Bitmapset;
+    use ::types_nodes::parsenodes::{RTEKind, RTEPermissionInfo, RangeTblEntry};
+    use ::types_nodes::plannodes::{LockRows, Plan, PlanRowMark, RowMarkType, Scan, SeqScan};
+    use ::types_nodes::primnodes::OUTER_VAR;
+    use ::types_nodes::{LockClauseStrength, LockWaitPolicy};
+    const INT4OID: u32 = 23;
+
+    let var_a = Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap();
+    let var_b = Node::mk_var(mcx, 1, 2, INT4OID, -1, 0, 0).unwrap();
+    let var_j = Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap();
+    let tle1 = Node::mk_target_entry(mcx, var_a, 1, Some("a"), false).unwrap();
+    let tle2 = Node::mk_target_entry(mcx, var_b, 2, Some("b"), false).unwrap();
+    let tle3 = Node::mk_target_entry(mcx, var_j, 3, Some("ctid1"), true).unwrap();
+    let mut scan_tlist = NodeList::make2(mcx, tle1, tle2).unwrap();
+    scan_tlist.lappend(mcx, tle3).unwrap();
+    let scan_node = Node::mk(
+        mcx,
+        SeqScan {
+            cb_scan_cols: None,
+            scan: Scan {
+                plan: Plan {
+                    targetlist: scan_tlist,
+                    ..Default::default()
+                },
+                scanrelid: 1,
+            },
+        },
+    )
+    .unwrap();
+
+    // setrefs gives LockRows the outer tlist as OUTER_VAR references.
+    let o_a = Node::mk_var(mcx, OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap();
+    let o_b = Node::mk_var(mcx, OUTER_VAR, 2, INT4OID, -1, 0, 0).unwrap();
+    let o_j = Node::mk_var(mcx, OUTER_VAR, 3, INT4OID, -1, 0, 0).unwrap();
+    let otle1 = Node::mk_target_entry(mcx, o_a, 1, Some("a"), false).unwrap();
+    let otle2 = Node::mk_target_entry(mcx, o_b, 2, Some("b"), false).unwrap();
+    let otle3 = Node::mk_target_entry(mcx, o_j, 3, Some("ctid1"), true).unwrap();
+    let mut lr_tlist = NodeList::make2(mcx, otle1, otle2).unwrap();
+    lr_tlist.lappend(mcx, otle3).unwrap();
+    let rowmark = Node::mk(
+        mcx,
+        PlanRowMark {
+            rti: 1,
+            prti: 1,
+            rowmarkId: 1,
+            markType: RowMarkType::ROW_MARK_EXCLUSIVE,
+            allMarkTypes: 1 << (RowMarkType::ROW_MARK_EXCLUSIVE as i32),
+            strength: LockClauseStrength::LCS_FORUPDATE,
+            waitPolicy: LockWaitPolicy::LockWaitBlock,
+            isParent: false,
+        },
+    )
+    .unwrap();
+    let rowmarks = NodeList::make1(mcx, rowmark).unwrap();
+    let lockrows_node = Node::mk(
+        mcx,
+        LockRows {
+            plan: Plan {
+                targetlist: lr_tlist,
+                lefttree: Some(scan_node),
+                ..Default::default()
+            },
+            rowMarks: rowmarks.clone_in(mcx).unwrap(),
+            epqParam: -1,
+        },
+    )
+    .unwrap();
+
+    let rte = Node::mk(
+        mcx,
+        RangeTblEntry {
+            rtekind: RTEKind::RTE_RELATION,
+            relid,
+            relkind: ::types_rel::RELKIND_RELATION,
+            // AccessShareLock as the sibling fixtures: ExecGetRangeTableRelation
+            // asserts any stronger rellockmode against the lmgr seam, which
+            // the fixture does not install.
+            rellockmode: ::types_rel::AccessShareLock,
+            perminfoindex: 1,
+            inFromCl: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let perminfo = Node::mk(
+        mcx,
+        RTEPermissionInfo {
+            relid,
+            requiredPerms: 1 << 1,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let mut unpruned = Bitmapset::empty();
+    unpruned.add_member(mcx, 1).unwrap();
+
+    let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
+    pstmt.commandType = CmdType::CMD_SELECT;
+    pstmt.canSetTag = true;
+    pstmt.planTree = Some(lockrows_node);
+    pstmt.rtable = NodeList::make1(mcx, rte).unwrap();
+    pstmt.permInfos = NodeList::make1(mcx, perminfo).unwrap();
+    pstmt.rowMarks = rowmarks;
+    pstmt.unprunableRelids = unpruned;
+    pstmt.seal_ref()
+}
+
+// C ExecLockRows (nodeLockRows.c:61-66): when the outer plan is exhausted,
+// EvalPlanQualEnd releases the EPQ machinery (the recheck plan tree) BEFORE
+// returning NULL — not only at ExecEndLockRows. audit-18.6 remediation b079.
+#[test]
+fn lockrows_b079_epq_ended_at_outer_eof() {
+    install_seams();
+    scanfix::install();
+    let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mcx = leaked_mcx();
+
+    let relid: u32 = 70079;
+    // Empty relation: the node reaches EOF without locking anything.
+    scanfix::register_table_2col(relid, &[]);
+    let pstmt = mk_lockrows_over_seqscan_pstmt(mcx, relid);
+
+    let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
+    let snapshot: snapmgr::Snapshot = std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+        snap_ctx.mcx(),
+        ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+    ));
+
+    with_exec_data(pstmt, |data, pstmt| {
+        data.estate.es_snapshot = Some(snapshot);
+        crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+        let ExecData { estate, planstate } = data;
+        let ps = planstate.as_mut().unwrap();
+
+        // A previous row's recheck built the EPQ plan tree (EvalPlanQualStart
+        // under the node's own relsubs, as lr_accept_row's epq_eval does).
+        {
+            let crate::PlanStateNode::LockRows(l) = &mut *ps else {
+                panic!("LockRows planstate");
+            };
+            let l = &mut **l;
+            estate.es_epq = l.state.epq_subs.take();
+            crate::epq::eval_plan_qual_start(&mut l.epq, estate).unwrap();
+            l.state.epq_subs = estate.es_epq.take();
+            assert!(l.epq.recheck.is_some(), "recheck tree built");
+        }
+
+        // Outer EOF: ExecLockRows returns NULL after EvalPlanQualEnd.
+        let got = crate::exec_proc_node(ps, estate).unwrap();
+        assert!(got.is_none(), "empty relation: LockRows returns EOF");
+        {
+            let crate::PlanStateNode::LockRows(l) = &mut *ps else {
+                panic!("LockRows planstate");
+            };
+            assert!(
+                l.epq.recheck.is_none(),
+                "ExecLockRows (nodeLockRows.c:64): EvalPlanQualEnd at outer EOF \
+                 ends the recheck plan tree before returning NULL"
+            );
+        }
+
+        crate::exec_end_node(ps, estate).unwrap();
+        estate.exec_reset_tuple_table(false);
+        estate.exec_close_range_table_relations().unwrap();
+    });
+    scanfix::quiesced();
+}
+
 fn epq_store_test_tuple(
     estate: &mut EStateData<'_>,
     slot: ::executils::ExecSlotId,

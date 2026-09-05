@@ -2614,9 +2614,18 @@ fn lockrows_arm<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
     let LockRowsNode { state, outer, epq } = &mut **l;
-    ::nodelockrows::exec_lock_rows(state, &mut **outer, estate, |subs, e, inputslot| {
+    let slot = ::nodelockrows::exec_lock_rows(state, &mut **outer, estate, |subs, e, inputslot| {
         crate::epq::eval_plan_qual(epq, subs, e, inputslot)
-    })
+    })?;
+    if slot.is_none() {
+        // C ExecLockRows (nodeLockRows.c:61-66): outer plan exhausted —
+        // "Release any resources held by EPQ mechanism before exiting"
+        // (EvalPlanQualEnd), then return NULL. The owner-held EpqState lives
+        // here, not in the nodelockrows crate, so the EOF arm sits with it;
+        // a later rescan that rechecks again re-runs EvalPlanQualStart.
+        crate::epq::eval_plan_qual_end(epq, &mut state.epq_subs, estate)?;
+    }
+    Ok(slot)
 }
 
 #[inline(never)]
