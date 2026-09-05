@@ -213,6 +213,7 @@ pub(crate) fn replace_outer_returning<'mcx>(
     let item_id = target.alloc_expr_node(copy);
     let pp = target.alloc_planner_param_item(PlannerParamItem { item: item_id, paramId: param_id });
     target.plan_params.push(pp);
+    // paramassign.c:403: retval->location = exprLocation(rexpr->retexpr).
     Node::mk(
         mcx,
         Param {
@@ -221,7 +222,7 @@ pub(crate) fn replace_outer_returning<'mcx>(
             paramtype: ptype,
             paramtypmod: ptypmod,
             paramcollid: pcollid,
-            location: -1,
+            location: nodes_core::expr_location(retexpr),
         },
     )
 }

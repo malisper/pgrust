@@ -896,6 +896,12 @@ fn operator_predicate_proof<'mcx>(
     let result = result.as_const().expect("evaluate_expr yields a Const");
     if result.constisnull {
         // Treat a null result as non-proof ... but it's a tad fishy ...
+        // predtest.c:2017: elog(DEBUG2, "null predicate test result").
+        elog_seams::ereport_msg::call(
+            types_error::DEBUG2,
+            "null predicate test result".to_string(),
+            None,
+        )?;
         return Ok(false);
     }
     Ok(result.constvalue.as_bool())

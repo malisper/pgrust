@@ -108,6 +108,7 @@ varlena = { path = "../../../utils/adt/varlena" }
 
 gin = { path = "../../../access/gin/gin" }
 clauses_seams = { path = "../../util/clauses_seams" }
+elog_seams = { path = "../../../utils/error/elog_seams" }
 pg_prng = { path = "../../../../common/pg_prng" }
 
 [features]

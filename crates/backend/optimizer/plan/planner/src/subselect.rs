@@ -1628,6 +1628,8 @@ pub(crate) fn materialize_finished_plan<'mcx>(mcx: Mcx<'mcx>, subplan: Node<'mcx
         run_cost += crate::gucs::seq_page_cost() * npages;
     }
     plan.plan.initPlan = init_plan;
+    // createplan.c:6694: the Material carries the subplan's disabled_nodes.
+    plan.plan.disabled_nodes = sub.disabled_nodes;
     plan.plan.startup_cost = startup_cost + initplan_cost;
     plan.plan.total_cost = startup_cost + run_cost + initplan_cost;
     plan.plan.plan_rows = sub.plan_rows;

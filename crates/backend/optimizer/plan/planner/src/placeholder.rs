@@ -132,7 +132,10 @@ pub fn find_placeholders_in_jointree<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResu
     }
 }
 
-fn find_placeholders_recurse<'mcx>(run: &mut PlannerRun<'mcx>, jtnode: Node<'mcx>) -> PgResult<()> {
+pub(crate) fn find_placeholders_recurse<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    jtnode: Node<'mcx>,
+) -> PgResult<()> {
     match jtnode.node_tag() {
         NodeTag::T_RangeTblRef => Ok(()),
         NodeTag::T_FromExpr => {
@@ -154,7 +157,12 @@ fn find_placeholders_recurse<'mcx>(run: &mut PlannerRun<'mcx>, jtnode: Node<'mcx
                 None => Ok(()),
             }
         }
-        other => panic!("find_placeholders_recurse (placeholder.c): {other:?}"),
+        // placeholder.c:249-250: elog(ERROR, "unrecognized node type: %d")
+        // (XX000), never a panic.
+        other => Err(Box::new(types_error::PgError::error(format!(
+            "unrecognized node type: {}",
+            other as u16
+        )))),
     }
 }
 

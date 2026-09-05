@@ -5563,7 +5563,7 @@ fn reparameterize_path_by_child<'mcx>(
         )
     };
     let required_outer =
-        crate::inherit::adjust_child_relids_multilevel(run, &old_req_outer, child_rel, top_parent);
+        crate::inherit::adjust_child_relids_multilevel(run, &old_req_outer, child_rel, top_parent)?;
     let existing = run
         .root
         .rel(parent)

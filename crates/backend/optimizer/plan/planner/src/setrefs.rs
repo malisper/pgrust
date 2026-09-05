@@ -239,12 +239,18 @@ fn add_rte_to_flat_rtable<'mcx>(
     Ok(())
 }
 
-fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i32) -> PgResult<Node<'mcx>> {
+pub(crate) fn set_plan_refs<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    plan: Node<'mcx>,
+    rtoffset: i32,
+) -> PgResult<Node<'mcx>> {
     let plan_node_id = run.glob.last_plan_node_id;
     run.glob.last_plan_node_id += 1;
     // SAFETY: the plan tree was just built by createplan and is exclusively
     // ours until returned (C mutates it in place the same way).
-    unsafe { plan.with_plan_mut(|p| p.plan_node_id = plan_node_id) }.expect("plan node");
+    if unsafe { plan.with_plan_mut(|p| p.plan_node_id = plan_node_id) }.is_none() {
+        return Err(unrecognized_plan_node(plan));
+    }
 
     match plan.node_tag() {
         NodeTag::T_Result => {
@@ -1268,7 +1274,7 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
             set_dummy_tlist_references(run, plan, rtoffset)?;
             debug_assert!(plan.as_plan().unwrap().qual.is_nil());
         }
-        other => panic!("set_plan_refs (setrefs.c): {other:?}; M2 plan lane"),
+        _ => return Err(unrecognized_plan_node(plan)),
     }
 
     let base = plan.as_plan().expect("plan node");
@@ -1345,6 +1351,15 @@ fn audit_no_phv(plan: Node<'_>) {
 // Params feed the Gather subtree (the executor rebroadcasts their values to
 // workers). extParam is empty unless ss_finalize_plan ran (paramExecTypes
 // non-NIL), exactly as in C.
+// setrefs.c:1304: a plan node set_plan_refs does not recognize is
+// elog(ERROR, "unrecognized node type: %d") (XX000), never a panic.
+fn unrecognized_plan_node(plan: Node<'_>) -> Box<types_error::PgError> {
+    Box::new(types_error::PgError::error(format!(
+        "unrecognized node type: {}",
+        plan.node_tag() as u16
+    )))
+}
+
 fn set_param_references<'mcx>(run: &PlannerRun<'mcx>, plan: Node<'mcx>) -> PgResult<()> {
     let mcx = run.mcx;
     debug_assert!(matches!(plan.node_tag(), NodeTag::T_Gather | NodeTag::T_GatherMerge));
@@ -2585,7 +2600,7 @@ fn fix_upper_expr<'mcx>(
 // search_indexed_tlist_for_var (setrefs.c), upper leg (NRM_EQUAL callers);
 // a miss is C's elog(ERROR). The nullingrels cross-check mirrors C's elog
 // guard; the emitted Var keeps the reference Var's nullingrels (C copyVar).
-fn search_indexed_tlist_for_var<'mcx>(
+pub(crate) fn search_indexed_tlist_for_var<'mcx>(
     run: &mut PlannerRun<'mcx>,
     var: &types_nodes::primnodes::Var<'mcx>,
     subplan_tlist: &NodeList<'mcx>,
@@ -2626,13 +2641,14 @@ fn search_indexed_tlist_for_var<'mcx>(
             return Node::mk(run.mcx, newvar);
         }
     }
-    panic!("variable not found in subplan target list");
+    // setrefs.c:3314 fix_upper_expr_mutator: elog(ERROR), XX000.
+    Err(Box::new(types_error::PgError::error("variable not found in subplan target list")))
 }
 
 // fix_windowagg_condition_expr / set_windowagg_runcondition_references
 // (setrefs.c): a WindowFunc in the runcondition becomes a Var (varno 0)
 // reading the value from the slot the projection just stored it into.
-fn fix_windowagg_condition_expr<'mcx>(
+pub(crate) fn fix_windowagg_condition_expr<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     node: Node<'mcx>,
     tlist: &NodeList<'mcx>,
@@ -2661,7 +2677,10 @@ fn fix_windowagg_condition_expr<'mcx>(
                 );
             }
         }
-        panic!("WindowFunc not found in subplan target lists");
+        // setrefs.c:3458: elog(ERROR), XX000.
+        return Err(Box::new(types_error::PgError::error(
+            "WindowFunc not found in subplan target lists",
+        )));
     }
     let mut m =
         |n: Node<'mcx>| -> PgResult<Option<Node<'mcx>>> {
@@ -2738,22 +2757,31 @@ fn scan_expr_mutate_children<'mcx>(
 // Param the MULTIEXPR subplan registered in root.multiexpr_params; every
 // other Param passes through (immutable arena share stands in for C's
 // copyObject).
-fn fix_param_node<'mcx>(run: &mut PlannerRun<'mcx>, node: Node<'mcx>) -> PgResult<Node<'mcx>> {
+pub(crate) fn fix_param_node<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    node: Node<'mcx>,
+) -> PgResult<Node<'mcx>> {
     let p = node.as_variant::<types_nodes::primnodes::Param>().expect("Param");
     if p.paramkind == types_nodes::primnodes::ParamKind::PARAM_MULTIEXPR {
         let subqueryid = (p.paramid >> 16) as usize;
         let colno = (p.paramid & 0xFFFF) as usize;
+        // setrefs.c:2135 / :2138: elog(ERROR, "unexpected PARAM_MULTIEXPR
+        // ID: %d") (XX000) for an out-of-range subquery id or column.
         if subqueryid == 0 || subqueryid > run.root.multiexpr_params.len() {
-            panic!("unexpected PARAM_MULTIEXPR ID: {}", p.paramid);
+            return Err(unexpected_multiexpr_param(p.paramid));
         }
         let params = &run.root.multiexpr_params[subqueryid - 1];
         if colno == 0 || colno > params.len() {
-            panic!("unexpected PARAM_MULTIEXPR ID: {}", p.paramid);
+            return Err(unexpected_multiexpr_param(p.paramid));
         }
         return Ok(*run.root.expr_node(params[colno - 1]));
     }
     fix_scan_expr_walker(run, node)?;
     Ok(node)
+}
+
+fn unexpected_multiexpr_param(paramid: i32) -> Box<types_error::PgError> {
+    Box::new(types_error::PgError::error(format!("unexpected PARAM_MULTIEXPR ID: {paramid}")))
 }
 
 // fix_scan_expr_mutator (setrefs.c) over the shapes subplan trees carry.
@@ -3891,6 +3919,19 @@ fn set_dummy_tlist_references<'mcx>(
 // Vars retarget onto the child tlists as OUTER_VAR/INNER_VAR. C builds
 // indexed_tlists; the linear probe is the set_upper_references divergence
 // (cold, tlists tiny). nestParams/merge/hash legs are dead or loud upstream.
+// setrefs.c:2389: a NestLoopParam whose paramval fix_join_expr did not turn
+// into an OUTER_VAR Var is elog(ERROR, "NestLoopParam was not reduced to a
+// simple Var") (XX000), never a panic.
+pub(crate) fn check_nestloop_param_reduced(paramval: Node<'_>) -> PgResult<()> {
+    if paramval.as_var().is_some_and(|v| v.varno == types_nodes::primnodes::OUTER_VAR) {
+        Ok(())
+    } else {
+        Err(Box::new(types_error::PgError::error(
+            "NestLoopParam was not reduced to a simple Var",
+        )))
+    }
+}
+
 fn set_join_references<'mcx>(
     run: &mut PlannerRun<'mcx>,
     plan: Node<'mcx>,
@@ -3937,10 +3978,7 @@ fn set_join_references<'mcx>(
                     base.plan_rows,
                 )?;
                 let paramval = fixed.nth(0);
-                let ok = paramval
-                    .as_var()
-                    .is_some_and(|v| v.varno == types_nodes::primnodes::OUTER_VAR);
-                assert!(ok, "NestLoopParam was not reduced to a simple Var");
+                check_nestloop_param_reduced(paramval)?;
                 new_params.lappend(
                     mcx,
                     types_nodes::Node::mk(
@@ -4040,7 +4078,7 @@ fn set_join_references<'mcx>(
 
 // setrefs.c NullingRelsMatch.
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum NrmMatch {
+pub(crate) enum NrmMatch {
     Equal,
     Subset,
     Superset,
@@ -4184,7 +4222,7 @@ fn fix_join_acceptable_rel_var<'mcx>(
     Node::mk(mcx, newvar)
 }
 
-fn fix_join_expr_mutator<'mcx>(
+pub(crate) fn fix_join_expr_mutator<'mcx>(
     run: &mut PlannerRun<'mcx>,
     node: Node<'mcx>,
     outer_tlist: &NodeList<'mcx>,
@@ -4230,16 +4268,18 @@ fn fix_join_expr_mutator<'mcx>(
                 // RETURNING fixup's other-vars index can be an empty list
                 // here (indistinguishable from absent); inner-nil plus
                 // acceptable_rel identifies the RETURNING context.
-                assert!(
-                    inner_tlist.is_nil() && acceptable_rel != 0,
-                    "variable returning old/new found outside RETURNING list"
-                );
-                assert!(
-                    var.varno == acceptable_rel,
-                    "wrong varno {} (expected {}) for variable returning old/new",
-                    var.varno,
-                    acceptable_rel
-                );
+                // setrefs.c:3145 / :3149: elog(ERROR), XX000.
+                if !(inner_tlist.is_nil() && acceptable_rel != 0) {
+                    return Err(Box::new(types_error::PgError::error(
+                        "variable returning old/new found outside RETURNING list",
+                    )));
+                }
+                if var.varno != acceptable_rel {
+                    return Err(Box::new(types_error::PgError::error(format!(
+                        "wrong varno {} (expected {}) for variable returning old/new",
+                        var.varno, acceptable_rel
+                    ))));
+                }
                 return fix_join_acceptable_rel_var(mcx, var, rtoffset, node);
             }
             if let Some(new) = search_join_tlist_for_var(
@@ -4267,7 +4307,10 @@ fn fix_join_expr_mutator<'mcx>(
             if acceptable_rel != 0 && var.varno == acceptable_rel {
                 return fix_join_acceptable_rel_var(mcx, var, rtoffset, node);
             }
-            panic!("variable not found in subplan target lists");
+            // setrefs.c:3186: elog(ERROR), XX000.
+            return Err(Box::new(types_error::PgError::error(
+                "variable not found in subplan target lists",
+            )));
         }
         NodeTag::T_PlaceHolderVar => {
             let phv = node.as_place_holder_var().unwrap();

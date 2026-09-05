@@ -23,6 +23,8 @@ pub(crate) fn install_fixtures() {
         aclchk_seams::pg_class_aclmask::set(|_, _, mask, _| Ok(mask));
         backend_status_seams::pgstat_report_plan_id::set(|_, _| {});
         postgres_seams::check_for_interrupts::set(|| Ok(()));
+        // get_rel_name for a relation with no pg_class row (C prints "(null)").
+        syscache_seams::pg_class_relname::set(|_| Ok(None));
         syscache_seams::lookup_pg_type_shape::set(|typid| {
             Ok(match typid {
                 16 => Some(PgTypeShape {
@@ -9227,4 +9229,313 @@ fn b059_expand_insert_targetlist_trailing_entries() {
     };
     assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
     assert_eq!(err.message(), "targetlist is not sorted correctly");
+}
+
+// audit-18.6 remediation batch b172 (backend/optimizer/plan): unit witnesses
+// for the internal-reach rows (each cites the C site the fix must match).
+mod audit_b172 {
+    use super::*;
+    use types_nodes::primnodes::{
+        Param, ParamKind, ReturningExpr, Var, VarReturningType, WindowFunc, OUTER_VAR,
+    };
+    use types_pathnodes::{AppendRelInfo, RelOptInfo};
+
+    fn assert_xx000(err: &types_error::PgError, msg: &str) {
+        assert_eq!(err.message(), msg);
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    }
+
+    fn var<'mcx>(mcx: Mcx<'mcx>, varno: i32, varattno: i16, location: i32) -> Node<'mcx> {
+        Node::mk(
+            mcx,
+            Var {
+                varno,
+                varattno,
+                vartype: 23,
+                vartypmod: -1,
+                varnosyn: varno.max(0) as u32,
+                varattnosyn: varattno,
+                location,
+                ..Var::default()
+            },
+        )
+        .unwrap()
+    }
+
+    // createplan.c:6694: matplan->disabled_nodes = subplan->disabled_nodes.
+    // a186-candidate-fp-plan-createplan-p3-0f1689e6bd8316c150bb-1
+    #[test]
+    fn materialize_finished_plan_keeps_disabled_nodes() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        let mut scan = Node::build::<types_nodes::plannodes::SeqScan>(mcx).unwrap();
+        scan.scan.plan.disabled_nodes = 3;
+        scan.scan.plan.plan_rows = 5.0;
+        scan.scan.plan.plan_width = 4;
+        scan.scan.plan.parallel_safe = true;
+        let sub = scan.seal();
+        let mat = crate::subselect::materialize_finished_plan(mcx, sub).unwrap();
+        let plan = mat.as_plan().expect("Material plan");
+        assert_eq!(plan.disabled_nodes, 3);
+        assert_eq!(plan.plan_rows, 5.0);
+        assert!(plan.lefttree.is_some());
+    }
+
+    // setrefs.c:1304: elog(ERROR, "unrecognized node type: %d") (XX000).
+    // a186-candidate-fp-plan-setrefs-p1-20f2c2e371d64f2b1e18-1
+    #[test]
+    fn set_plan_refs_unrecognized_node_is_xx000() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        let mut run = crate::run::PlannerRun::new(mcx);
+        let konst = Node::mk_const(mcx, 23, -1, 0, 4, Datum::from_i32(1), false, true).unwrap();
+        let err = crate::setrefs::set_plan_refs(&mut run, konst, 0).unwrap_err();
+        assert_xx000(&err, &format!("unrecognized node type: {}", NodeTag::T_Const as u16));
+    }
+
+    // setrefs.c:2135 / :2138: elog(ERROR, "unexpected PARAM_MULTIEXPR ID: %d").
+    // a186-candidate-fp-plan-setrefs-p1-3118407312b2673866ef-1
+    #[test]
+    fn fix_param_node_unexpected_multiexpr_id_is_xx000() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        let mut run = crate::run::PlannerRun::new(mcx);
+        let mk = |paramid: i32| {
+            Node::mk(
+                mcx,
+                Param {
+                    paramkind: ParamKind::PARAM_MULTIEXPR,
+                    paramid,
+                    paramtype: 23,
+                    paramtypmod: -1,
+                    paramcollid: 0,
+                    location: -1,
+                },
+            )
+            .unwrap()
+        };
+        // subquery id 1 while no MULTIEXPR subquery was registered
+        let err = crate::setrefs::fix_param_node(&mut run, mk((1 << 16) | 1)).unwrap_err();
+        assert_xx000(&err, "unexpected PARAM_MULTIEXPR ID: 65537");
+        // subquery id 1 registered with one column: colno 2 is out of range
+        let mut cols: mcx::PgVec<'_, types_pathnodes::NodeId> = mcx::PgVec::new_in(mcx);
+        cols.push(run.root.alloc_expr_node(mk(0)));
+        run.root.multiexpr_params.push(cols);
+        let err = crate::setrefs::fix_param_node(&mut run, mk((1 << 16) | 2)).unwrap_err();
+        assert_xx000(&err, "unexpected PARAM_MULTIEXPR ID: 65538");
+        let err = crate::setrefs::fix_param_node(&mut run, mk(1 << 16)).unwrap_err();
+        assert_xx000(&err, "unexpected PARAM_MULTIEXPR ID: 65536");
+    }
+
+    // setrefs.c:2389: elog(ERROR, "NestLoopParam was not reduced to a simple
+    // Var") (XX000).
+    // a186-candidate-fp-plan-setrefs-p1-b2f90c3d24b4a2b27d87-1
+    #[test]
+    fn nestloop_param_not_reduced_is_xx000() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        crate::setrefs::check_nestloop_param_reduced(var(mcx, OUTER_VAR, 1, -1)).unwrap();
+        let konst = Node::mk_const(mcx, 23, -1, 0, 4, Datum::from_i32(1), false, true).unwrap();
+        let err = crate::setrefs::check_nestloop_param_reduced(konst).unwrap_err();
+        assert_xx000(&err, "NestLoopParam was not reduced to a simple Var");
+        let err = crate::setrefs::check_nestloop_param_reduced(var(mcx, 1, 1, -1)).unwrap_err();
+        assert_xx000(&err, "NestLoopParam was not reduced to a simple Var");
+    }
+
+    // setrefs.c:3458: elog(ERROR, "WindowFunc not found in subplan target
+    // lists") (XX000).
+    // a186-candidate-fp-plan-setrefs-p2-0fb1c923afce101f3861-1
+    #[test]
+    fn windowagg_runcondition_windowfunc_missing_is_xx000() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        let wfunc = Node::mk(
+            mcx,
+            WindowFunc { winfnoid: 3100, wintype: 20, winref: 1, ..WindowFunc::default() },
+        )
+        .unwrap();
+        let err = crate::setrefs::fix_windowagg_condition_expr(mcx, wfunc, &NodeList::nil())
+            .unwrap_err();
+        assert_xx000(&err, "WindowFunc not found in subplan target lists");
+    }
+
+    // setrefs.c:3314 (fix_upper_expr_mutator): elog(ERROR, "variable not found
+    // in subplan target list") (XX000).
+    // a186-candidate-fp-plan-setrefs-p2-a381300ff053ebda93bd-1
+    #[test]
+    fn upper_var_missing_from_subplan_tlist_is_xx000() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        let mut run = crate::run::PlannerRun::new(mcx);
+        let v = Var { varno: 1, varattno: 1, vartype: 23, vartypmod: -1, ..Var::default() };
+        let err = crate::setrefs::search_indexed_tlist_for_var(
+            &mut run,
+            &v,
+            &NodeList::nil(),
+            0,
+            OUTER_VAR,
+        )
+        .unwrap_err();
+        assert_xx000(&err, "variable not found in subplan target list");
+    }
+
+    // setrefs.c:3145 / :3149 / :3186 (fix_join_expr_mutator): the OLD/NEW
+    // RETURNING invariants and the not-found case are elog(ERROR) (XX000).
+    // a186-candidate-fp-plan-setrefs-p2-a71ba282c170a2bdfaa2-1 and
+    // a186-candidate-fp-plan-setrefs-p2-7bf834c26e031d112c31-1
+    #[test]
+    fn join_var_fixups_are_xx000() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        let mut run = crate::run::PlannerRun::new(mcx);
+        let nil = NodeList::nil();
+        let eq = crate::setrefs::NrmMatch::Equal;
+        let err = crate::setrefs::fix_join_expr_mutator(
+            &mut run,
+            var(mcx, 1, 1, -1),
+            &nil,
+            &nil,
+            0,
+            eq,
+            0,
+            1.0,
+        )
+        .unwrap_err();
+        assert_xx000(&err, "variable not found in subplan target lists");
+        let old = Node::mk(
+            mcx,
+            Var {
+                varno: 1,
+                varattno: 1,
+                vartype: 23,
+                vartypmod: -1,
+                varreturningtype: VarReturningType::VAR_RETURNING_OLD,
+                ..Var::default()
+            },
+        )
+        .unwrap();
+        let err = crate::setrefs::fix_join_expr_mutator(&mut run, old, &nil, &nil, 0, eq, 0, 1.0)
+            .unwrap_err();
+        assert_xx000(&err, "variable returning old/new found outside RETURNING list");
+        let err = crate::setrefs::fix_join_expr_mutator(&mut run, old, &nil, &nil, 0, eq, 2, 1.0)
+            .unwrap_err();
+        assert_xx000(&err, "wrong varno 1 (expected 2) for variable returning old/new");
+    }
+
+    // placeholder.c:249-250: elog(ERROR, "unrecognized node type: %d") (XX000).
+    // a186-candidate-fp-util-placeholder-82fd8a3ffb461d831980-1
+    #[test]
+    fn find_placeholders_recurse_unrecognized_node_is_xx000() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        let mut run = crate::run::PlannerRun::new(mcx);
+        let konst = Node::mk_const(mcx, 23, -1, 0, 4, Datum::from_i32(1), false, true).unwrap();
+        let err = crate::placeholder::find_placeholders_recurse(&mut run, konst).unwrap_err();
+        assert_xx000(&err, &format!("unrecognized node type: {}", NodeTag::T_Const as u16));
+    }
+
+    // appendinfo.c:152 / :286-291 / :560 / :634 / :669-673 / :692 / :778: the
+    // appendrel translation invariants are elog(ERROR) (XX000), never panics.
+    // a186-candidate-fp-util-appendinfo-{f23d4009df01b13a5a16,
+    // 1c08cd4014be1fbc0329, 5ef3d0878562bd0f8ba1, ff5e0c767ab193edbac8,
+    // 258b5aa3ca551976c519}-1
+    #[test]
+    fn appendinfo_internal_errors_are_xx000() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        let err = crate::inherit::inherited_attribute_not_found(b"c1", "child_t");
+        assert_xx000(&err, "could not find inherited attribute \"c1\" of relation \"child_t\"");
+        // The fixture's pg_class lookup finds no row: C's %s of NULL.
+        let err = crate::inherit::attribute_does_not_exist(mcx, 7, 12345);
+        assert_xx000(&err, "attribute 7 of relation \"(null)\" does not exist");
+
+        let mut run = crate::run::PlannerRun::new(mcx);
+        let err =
+            crate::inherit::adjust_inherited_attnums_multilevel(&run, &[1], 1, 2).unwrap_err();
+        assert_xx000(&err, "child rel 1 not found in append_rel_array");
+
+        // A baserel with no append_rel_array entry.
+        let mut rel = RelOptInfo::new(mcx);
+        rel.relid = 1;
+        rel.relids = crate::relnode::relids_singleton(mcx, 1);
+        let child = run.root.alloc_rel(rel);
+        while run.root.simple_rel_array.len() <= 2 {
+            run.root.simple_rel_array.push(None);
+        }
+        run.root.simple_rel_array[1] = Some(child);
+        run.root.simple_rel_array_size = 3;
+        let one = crate::relnode::relids_singleton(mcx, 1);
+        let err = crate::inherit::find_appinfos_by_relids(&run, &one).unwrap_err();
+        assert_xx000(&err, "child rel 1 not found in append_rel_array");
+
+        // childrel (no parent link) is not a child of parentrel.
+        let mut prel = RelOptInfo::new(mcx);
+        prel.relid = 2;
+        prel.relids = crate::relnode::relids_singleton(mcx, 2);
+        let parent = run.root.alloc_rel(prel);
+        let two = crate::relnode::relids_singleton(mcx, 2);
+        let err = crate::inherit::adjust_child_relids_multilevel(&run, &two, child, parent)
+            .unwrap_err();
+        assert_xx000(&err, "childrel is not a child of parentrel");
+        let konst = Node::mk_const(mcx, 23, -1, 0, 4, Datum::from_i32(1), false, true).unwrap();
+        let err = crate::inherit::adjust_appendrel_attrs_multilevel(&mut run, konst, child, parent)
+            .unwrap_err();
+        assert_xx000(&err, "childrel is not a child of parentrel");
+
+        // adjust_inherited_attnums: attno 0 and a missing translation.
+        let mut appinfo = AppendRelInfo::new(mcx);
+        appinfo.parent_relid = 2;
+        appinfo.child_relid = 1;
+        appinfo.parent_reloid = 12345;
+        let err = crate::inherit::adjust_inherited_attnums(&run, &[0], &appinfo).unwrap_err();
+        assert_xx000(&err, "attribute 0 of relation \"(null)\" does not exist");
+        let err = crate::inherit::adjust_inherited_attnums(&run, &[3], &appinfo).unwrap_err();
+        assert_xx000(&err, "attribute 3 of relation \"(null)\" does not exist");
+    }
+
+    // plancat.c:1956 / :1966 and :2629: expression-count mismatches are
+    // elog(ERROR) (XX000).
+    // a186-candidate-fp-util-plancat-45d9d74ecf09c135c123-1 and
+    // a186-candidate-fp-util-plancat-dde18a2b43f29d81822a-1
+    #[test]
+    fn plancat_expression_count_mismatches_are_xx000() {
+        let mut next = 0usize;
+        assert_eq!(crate::plancat::next_index_expression(&[7u32], &mut next).unwrap(), 7);
+        assert_eq!(next, 1);
+        let err = crate::plancat::next_index_expression::<u32>(&[], &mut next).unwrap_err();
+        assert_xx000(&err, "wrong number of index expressions");
+        crate::plancat::check_index_expressions_consumed(1, 1).unwrap();
+        let err = crate::plancat::check_index_expressions_consumed(0, 1).unwrap_err();
+        assert_xx000(&err, "wrong number of index expressions");
+        assert_eq!(
+            crate::plancat::next_partition_key_expression(&mut [5u32].into_iter()).unwrap(),
+            5
+        );
+        let err = crate::plancat::next_partition_key_expression(&mut core::iter::empty::<u32>())
+            .unwrap_err();
+        assert_xx000(&err, "wrong number of partition key expressions");
+    }
+
+    // paramassign.c:403: the PARAM_EXEC Param replacing a ReturningExpr keeps
+    // exprLocation(rexpr->retexpr).
+    // a186-candidate-fp-util-paramassign-5ff0baaa8d5b226d0bde-1
+    #[test]
+    fn replace_outer_returning_keeps_expression_location() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        let mut run = crate::run::PlannerRun::new(mcx);
+        run.push_root().unwrap();
+        let retexpr = Node::mk(
+            mcx,
+            Var { varno: 1, varattno: 1, vartype: 23, vartypmod: -1, varlevelsup: 1, location: 17, ..Var::default() },
+        )
+        .unwrap();
+        let rexpr =
+            Node::mk(mcx, ReturningExpr { retlevelsup: 1, retold: true, retexpr }).unwrap();
+        let param = crate::paramassign::replace_outer_returning(&mut run, 1, rexpr).unwrap();
+        let p = param.as_variant::<Param>().expect("Param");
+        assert_eq!(p.paramkind, ParamKind::PARAM_EXEC);
+        assert_eq!(p.paramtype, 23);
+        assert_eq!(p.location, 17);
+    }
 }

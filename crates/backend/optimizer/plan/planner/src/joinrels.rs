@@ -1227,7 +1227,7 @@ fn try_partitionwise_join<'mcx>(
             &run.root.rel(child_rel1).relids,
             &run.root.rel(child_rel2).relids,
         );
-        let appinfos = crate::inherit::find_appinfos_by_relids(run, &child_relids);
+        let appinfos = crate::inherit::find_appinfos_by_relids(run, &child_relids)?;
 
         let mut child_restrictlist: PgVec<'mcx, types_pathnodes::RinfoId> =
             PgVec::new_in(mcx);
@@ -1296,8 +1296,8 @@ fn build_child_join_sjinfo<'mcx>(
         debug_assert!(parent_sjinfo.ojrelid == 0);
         return Ok(init_dummy_sjinfo(run, left_relids, right_relids));
     }
-    let left_appinfos = crate::inherit::find_appinfos_by_relids(run, &left_relids);
-    let right_appinfos = crate::inherit::find_appinfos_by_relids(run, &right_relids);
+    let left_appinfos = crate::inherit::find_appinfos_by_relids(run, &left_relids)?;
+    let right_appinfos = crate::inherit::find_appinfos_by_relids(run, &right_relids)?;
     let mut sjinfo = parent_sjinfo.clone();
     sjinfo.min_lefthand =
         crate::inherit::adjust_child_relids(mcx, &sjinfo.min_lefthand, &left_appinfos);

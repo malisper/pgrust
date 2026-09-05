@@ -1605,7 +1605,7 @@ fn make_partitionedrel_pruneinfo<'mcx>(
             ) {
                 let relids =
                     crate::relnode::relids_copy(mcx, &run.root.rel(subpart).relids);
-                let appinfos = crate::inherit::find_appinfos_by_relids(run, &relids);
+                let appinfos = crate::inherit::find_appinfos_by_relids(run, &relids)?;
                 let mut translated = Vec::with_capacity(prunequal_tr.len());
                 for q in prunequal_tr {
                     translated.push(crate::inherit::adjust_appendrel_attrs_multi(

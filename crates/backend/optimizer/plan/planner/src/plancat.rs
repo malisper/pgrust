@@ -247,21 +247,14 @@ pub fn get_relation_info<'mcx>(
                         0,
                     )?
                 } else {
-                    let id = *info
-                        .indexprs
-                        .get(indexpr_next)
-                        .expect("wrong number of index expressions");
-                    indexpr_next += 1;
+                    let id = next_index_expression(info.indexprs.as_slice(), &mut indexpr_next)?;
                     *run.root.expr_node(id)
                 };
                 let tle =
                     types_nodes::Node::mk_target_entry(mcx, expr, (i + 1) as i16, None, false)?;
                 info.indextlist.push(run.intern_expr(tle));
             }
-            assert!(
-                indexpr_next == info.indexprs.len(),
-                "wrong number of index expressions"
-            );
+            check_index_expressions_consumed(indexpr_next, info.indexprs.len())?;
 
             info.indrestrictinfo = RefCell::new(PgVec::new_in(mcx));
             info.predOK = Cell::new(false);
@@ -726,6 +719,36 @@ fn copy_boundinfo_for_planner<'mcx>(
     Ok(out)
 }
 
+// build_index_tlist (plancat.c:1956 / :1966): an indexprs list that runs out
+// before, or is not exhausted by, the expression columns is elog(ERROR,
+// "wrong number of index expressions") (XX000), never a panic.
+pub(crate) fn next_index_expression<T: Copy>(indexprs: &[T], next: &mut usize) -> PgResult<T> {
+    let id = *indexprs.get(*next).ok_or_else(wrong_number_of_index_expressions)?;
+    *next += 1;
+    Ok(id)
+}
+
+pub(crate) fn check_index_expressions_consumed(next: usize, nexprs: usize) -> PgResult<()> {
+    if next == nexprs {
+        Ok(())
+    } else {
+        Err(wrong_number_of_index_expressions())
+    }
+}
+
+fn wrong_number_of_index_expressions() -> Box<types_error::PgError> {
+    Box::new(types_error::PgError::error("wrong number of index expressions"))
+}
+
+// set_baserel_partition_key_exprs (plancat.c:2629): partexprs running out
+// before the expression attributes is elog(ERROR, "wrong number of
+// partition key expressions") (XX000), never a panic.
+pub(crate) fn next_partition_key_expression<T>(it: &mut impl Iterator<Item = T>) -> PgResult<T> {
+    it.next().ok_or_else(|| {
+        Box::new(types_error::PgError::error("wrong number of partition key expressions"))
+    })
+}
+
 // set_baserel_partition_key_exprs (plancat.c).
 fn set_baserel_partition_key_exprs<'mcx>(
     run: &mut PlannerRun<'mcx>,
@@ -752,9 +775,7 @@ fn set_baserel_partition_key_exprs<'mcx>(
             v.location = -1;
             v.seal()
         } else {
-            let expr = partexprs_item
-                .next()
-                .unwrap_or_else(|| panic!("wrong number of partition key expressions"));
+            let expr = next_partition_key_expression(&mut partexprs_item)?;
             // copyObject: the cache's tree is shared; ChangeVarNodes below
             // scribbles varno in place on the copy.
             let copied = rewrite_manip::copy_node(mcx, expr)?;

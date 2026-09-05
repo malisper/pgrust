@@ -13856,6 +13856,7 @@ dependencies = [
  "costsize",
  "datum",
  "detoast",
+ "elog_seams",
  "equivclass",
  "execexpr",
  "execmain",

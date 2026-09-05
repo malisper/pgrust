@@ -464,13 +464,9 @@ fn make_append_rel_info<'mcx>(
             !a.attisdropped && a.attname.name_str() == attname
         };
         if new_attno >= newnatts || !matches(new_attno) {
-            new_attno = (0..newnatts).find(|&i| matches(i)).unwrap_or_else(|| {
-                panic!(
-                    "could not find inherited attribute \"{}\" of relation \"{}\"",
-                    String::from_utf8_lossy(attname),
-                    childrel.name()
-                )
-            });
+            new_attno = (0..newnatts)
+                .find(|&i| matches(i))
+                .ok_or_else(|| inherited_attribute_not_found(attname, childrel.name()))?;
         }
         let catt = new_tupdesc.attr(new_attno);
         if atttypid != catt.atttypid || atttypmod != catt.atttypmod {
@@ -525,6 +521,7 @@ pub fn adjust_appendrel_attrs<'mcx>(
 struct AppinfoMap<'mcx> {
     parent_relid: u32,
     child_relid: u32,
+    parent_reloid: types_core::Oid,
     parent_reltype: types_core::Oid,
     child_reltype: types_core::Oid,
     // None = dropped parent column.
@@ -606,6 +603,7 @@ pub fn adjust_appendrel_attrs_multi<'mcx>(
         maps.push(AppinfoMap {
             parent_relid: appinfo.parent_relid,
             child_relid: appinfo.child_relid,
+            parent_reloid: appinfo.parent_reloid,
             parent_reltype: appinfo.parent_reltype,
             child_reltype: appinfo.child_reltype,
             translated,
@@ -681,14 +679,15 @@ pub fn adjust_appendrel_attrs_multi<'mcx>(
                     return Ok(Some(Node::mk(mcx, copy_var(mcx, v)?)?));
                 };
                 if v.varattno > 0 {
+                    // appendinfo.c:286-291: elog(ERROR) with the parent's name.
                     let t = map
                         .translated
                         .get(v.varattno as usize - 1)
                         .copied()
                         .flatten()
-                        .unwrap_or_else(|| {
-                            panic!("attribute {} of relation does not exist", v.varattno)
-                        });
+                        .ok_or_else(|| {
+                            attribute_does_not_exist(mcx, v.varattno as i32, map.parent_reloid)
+                        })?;
                     // C copyObject's the translation per substitution site so
                     // setrefs' in-place fixups never see a shared subtree.
                     if let Some(tv) = t.as_var() {
@@ -831,24 +830,70 @@ pub fn adjust_appendrel_attrs_multi<'mcx>(
 pub fn find_appinfos_by_relids<'mcx>(
     run: &PlannerRun<'mcx>,
     relids: &types_pathnodes::Relids<'mcx>,
-) -> PgVec<'mcx, AppendRelInfo<'mcx>> {
+) -> PgResult<PgVec<'mcx, AppendRelInfo<'mcx>>> {
     let mut out: PgVec<'mcx, AppendRelInfo<'mcx>> = PgVec::new_in(run.mcx);
     for i in crate::relnode::relids_members(relids) {
         match run.root.append_rel_array.get(i as usize).and_then(|a| a.clone()) {
             Some(appinfo) => out.push(appinfo),
             None => {
                 // Outer-join relids carry no appinfo; a baserel missing one
-                // is a bug.
+                // is appendinfo.c:778 elog(ERROR) (XX000).
                 let is_baserel = run
                     .root
                     .simple_rel_array
                     .get(i as usize)
                     .is_some_and(|r| r.is_some());
-                assert!(!is_baserel, "child rel {i} not found in append_rel_array");
+                if is_baserel {
+                    return Err(child_rel_not_in_append_rel_array(i as u32));
+                }
             }
         }
     }
-    out
+    Ok(out)
+}
+
+// appendinfo.c:692 / :778: elog(ERROR, "child rel %d not found in
+// append_rel_array") (XX000), never a panic.
+fn child_rel_not_in_append_rel_array(child_relid: u32) -> Box<types_error::PgError> {
+    Box::new(types_error::PgError::error(format!(
+        "child rel {child_relid} not found in append_rel_array"
+    )))
+}
+
+// appendinfo.c:560 / :634: elog(ERROR, "childrel is not a child of
+// parentrel") (XX000), never a panic.
+fn not_a_child_of_parentrel() -> Box<types_error::PgError> {
+    Box::new(types_error::PgError::error("childrel is not a child of parentrel"))
+}
+
+// appendinfo.c:152: elog(ERROR, "could not find inherited attribute \"%s\" of
+// relation \"%s\"") (XX000), never a panic.
+pub(crate) fn inherited_attribute_not_found(
+    attname: &[u8],
+    relname: &str,
+) -> Box<types_error::PgError> {
+    Box::new(types_error::PgError::error(format!(
+        "could not find inherited attribute \"{}\" of relation \"{relname}\"",
+        String::from_utf8_lossy(attname)
+    )))
+}
+
+// appendinfo.c:286-291 / :669-673: elog(ERROR, "attribute %d of relation
+// \"%s\" does not exist", attno, get_rel_name(reloid)) (XX000); a missing
+// pg_class row prints as C's %s of NULL, "(null)".
+pub(crate) fn attribute_does_not_exist(
+    mcx: Mcx<'_>,
+    attno: i32,
+    reloid: types_core::Oid,
+) -> Box<types_error::PgError> {
+    let relname = match lsyscache::get_rel_name(mcx, reloid) {
+        Ok(Some(name)) => name.as_str().to_string(),
+        Ok(None) => "(null)".to_string(),
+        Err(e) => return e,
+    };
+    Box::new(types_error::PgError::error(format!(
+        "attribute {attno} of relation \"{relname}\" does not exist"
+    )))
 }
 
 // adjust_child_relids (appendinfo.c).
@@ -877,11 +922,11 @@ pub fn adjust_appendrel_attrs_multilevel<'mcx>(
 ) -> PgResult<Node<'mcx>> {
     let parent = run.root.rel(childrel).parent;
     if parent != Some(parentrel) {
-        let up = parent.expect("childrel is not a child of parentrel");
+        let up = parent.ok_or_else(not_a_child_of_parentrel)?;
         node = adjust_appendrel_attrs_multilevel(run, node, up, parentrel)?;
     }
     let relids = crate::relnode::relids_copy(run.mcx, &run.root.rel(childrel).relids);
-    let appinfos = find_appinfos_by_relids(run, &relids);
+    let appinfos = find_appinfos_by_relids(run, &relids)?;
     adjust_appendrel_attrs_multi(run, node, &appinfos)
 }
 
@@ -892,18 +937,18 @@ pub fn adjust_child_relids_multilevel<'mcx>(
     relids: &types_pathnodes::Relids<'mcx>,
     childrel: RelId,
     parentrel: RelId,
-) -> types_pathnodes::Relids<'mcx> {
+) -> PgResult<types_pathnodes::Relids<'mcx>> {
     if !crate::relnode::relids_overlap(relids, &run.root.rel(parentrel).relids) {
-        return crate::relnode::relids_copy(run.mcx, relids);
+        return Ok(crate::relnode::relids_copy(run.mcx, relids));
     }
     let mut relids = crate::relnode::relids_copy(run.mcx, relids);
     let parent = run.root.rel(childrel).parent;
     if parent != Some(parentrel) {
-        let up = parent.expect("childrel is not a child of parentrel");
-        relids = adjust_child_relids_multilevel(run, &relids, up, parentrel);
+        let up = parent.ok_or_else(not_a_child_of_parentrel)?;
+        relids = adjust_child_relids_multilevel(run, &relids, up, parentrel)?;
     }
-    let appinfos = find_appinfos_by_relids(run, &run.root.rel(childrel).relids);
-    adjust_child_relids(run.mcx, &relids, &appinfos)
+    let appinfos = find_appinfos_by_relids(run, &run.root.rel(childrel).relids)?;
+    Ok(adjust_child_relids(run.mcx, &relids, &appinfos))
 }
 
 // adjust_inherited_attnums (appendinfo.c).
@@ -911,23 +956,28 @@ pub fn adjust_inherited_attnums<'mcx>(
     run: &PlannerRun<'mcx>,
     attnums: &[i16],
     appinfo: &AppendRelInfo<'mcx>,
-) -> PgVec<'mcx, i16> {
+) -> PgResult<PgVec<'mcx, i16>> {
     debug_assert!(types_core::OidIsValid(appinfo.parent_reloid));
     let mut result: PgVec<'mcx, i16> = PgVec::new_in(run.mcx);
     for &parentattno in attnums {
-        assert!(parentattno > 0, "attribute {parentattno} of relation does not exist");
-        let childvar = appinfo
-            .translated_vars
-            .get(parentattno as usize - 1)
-            .filter(|&&tid| tid != NodeId::default())
-            .map(|&tid| *run.root.expr_node(tid))
-            .and_then(|n| n.as_var())
-            .unwrap_or_else(|| {
-                panic!("attribute {parentattno} of relation does not exist")
-            });
+        // appendinfo.c:669-673: an invalid attno, a dropped-column slot or a
+        // non-Var translation is elog(ERROR) with the parent's name.
+        let childvar = if parentattno <= 0 {
+            None
+        } else {
+            appinfo
+                .translated_vars
+                .get(parentattno as usize - 1)
+                .filter(|&&tid| tid != NodeId::default())
+                .map(|&tid| *run.root.expr_node(tid))
+                .and_then(|n| n.as_var())
+        };
+        let childvar = childvar.ok_or_else(|| {
+            attribute_does_not_exist(run.mcx, parentattno as i32, appinfo.parent_reloid)
+        })?;
         result.push(childvar.varattno);
     }
-    result
+    Ok(result)
 }
 
 // adjust_inherited_attnums_multilevel (appendinfo.c).
@@ -936,17 +986,20 @@ pub fn adjust_inherited_attnums_multilevel<'mcx>(
     attnums: &[i16],
     child_relid: u32,
     top_parent_relid: u32,
-) -> PgVec<'mcx, i16> {
-    let appinfo = run.root.append_rel_array[child_relid as usize]
-        .as_ref()
-        .unwrap_or_else(|| panic!("child rel {child_relid} not found in append_rel_array"));
+) -> PgResult<PgVec<'mcx, i16>> {
+    let appinfo = run
+        .root
+        .append_rel_array
+        .get(child_relid as usize)
+        .and_then(|a| a.as_ref())
+        .ok_or_else(|| child_rel_not_in_append_rel_array(child_relid))?;
     if appinfo.parent_relid != top_parent_relid {
         let up = adjust_inherited_attnums_multilevel(
             run,
             attnums,
             appinfo.parent_relid,
             top_parent_relid,
-        );
+        )?;
         return adjust_inherited_attnums(run, &up, appinfo);
     }
     adjust_inherited_attnums(run, attnums, appinfo)
@@ -1137,11 +1190,11 @@ pub fn adjust_child_rinfo_multilevel<'mcx>(
     let mut rid = rid;
     let parent = run.root.rel(childrel).parent;
     if parent != Some(parentrel) {
-        let up = parent.expect("childrel is not a child of parentrel");
+        let up = parent.ok_or_else(not_a_child_of_parentrel)?;
         rid = adjust_child_rinfo_multilevel(run, rid, up, parentrel)?;
     }
     let relids = crate::relnode::relids_copy(run.mcx, &run.root.rel(childrel).relids);
-    let appinfos = find_appinfos_by_relids(run, &relids);
+    let appinfos = find_appinfos_by_relids(run, &relids)?;
     adjust_child_rinfo(run, rid, &appinfos)
 }
 
@@ -1492,7 +1545,7 @@ pub fn get_translated_update_targetlist<'mcx>(
     }
     let colnos_src = crate::relnode::pgvec_clone_shallow(mcx, &run.root.update_colnos);
     let colnos =
-        adjust_inherited_attnums_multilevel(run, colnos_src.as_slice(), relid, result_relation);
+        adjust_inherited_attnums_multilevel(run, colnos_src.as_slice(), relid, result_relation)?;
     Ok((tl, colnos))
 }
 

@@ -438,7 +438,7 @@ fn grouping_planner_tail<'mcx>(
                                 src.as_slice(),
                                 rti as u32,
                                 parse.resultRelation as u32,
-                            )
+                            )?
                         };
                         update_colnos_lists.push(colnos);
                     }
@@ -506,7 +506,7 @@ fn grouping_planner_tail<'mcx>(
                                     src.as_slice(),
                                     rti as u32,
                                     parse.resultRelation as u32,
-                                );
+                                )?;
                                 let mut il = types_nodes::list::IntList::nil();
                                 for &c in tr.iter() {
                                     il.lappend(mcx, c as i32)?;
@@ -2163,7 +2163,7 @@ fn create_partitionwise_grouping_paths<'mcx>(
         }
         let child_relids =
             crate::relnode::relids_copy(run.mcx, &run.root.rel(child_input).relids);
-        let appinfos = crate::inherit::find_appinfos_by_relids(run, &child_relids);
+        let appinfos = crate::inherit::find_appinfos_by_relids(run, &child_relids)?;
 
         let src_exprs =
             crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.pathtarget(target).exprs);
@@ -3556,7 +3556,7 @@ fn apply_scanjoin_target_to_paths<'mcx>(
             let child = run.root.rel(rel_id).part_rels[i as usize]
                 .expect("live partition has a RelOptInfo");
             let child_relids = crate::relnode::relids_copy(run.mcx, &run.root.rel(child).relids);
-            let appinfos = crate::inherit::find_appinfos_by_relids(run, &child_relids);
+            let appinfos = crate::inherit::find_appinfos_by_relids(run, &child_relids)?;
             let mut child_targets: mcx::PgVec<'mcx, types_pathnodes::PtId> =
                 mcx::PgVec::new_in(run.mcx);
             for &t in scanjoin_targets.iter() {
