@@ -12,7 +12,7 @@ use types_error::{
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_NULL_VALUE_NOT_ALLOWED,
 };
-use types_fmgr::{FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
+use types_fmgr::{FmgrInfo, FunctionCallInfoBaseData as Fcinfo, SFRM_Materialize};
 use types_tuple::TupleDescData;
 
 use crate::tupbuild::AttInMetadata;
@@ -86,6 +86,26 @@ pub(crate) fn fc_crosstab(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
     let flinfo = flinfo.expect("crosstab: NULL flinfo");
     let sql = arg_sql(fcinfo, 0)?;
 
+    // tablefunc.c:379-386: the set/materialize context checks precede the
+    // SPI connect + query.
+    match fcinfo.rsinfo_mut() {
+        None => {
+            return Err(err(
+                "set-valued function called in context that cannot accept a set",
+                "",
+                ERRCODE_FEATURE_NOT_SUPPORTED,
+            ));
+        }
+        Some(rsi) if rsi.allowedModes & SFRM_Materialize == 0 => {
+            return Err(err(
+                "materialize mode required, but it is not allowed in this context",
+                "",
+                ERRCODE_FEATURE_NOT_SUPPORTED,
+            ));
+        }
+        Some(_) => {}
+    }
+
     // SAFETY: the arming (per-query) context outlives this call.
     let mcx = unsafe { fcinfo.result_mcx_detached() };
 
@@ -101,6 +121,21 @@ pub(crate) fn fc_crosstab(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
         fcinfo.isnull = true;
         return Ok(Datum::null());
     }
+
+    // tablefunc.c:419-423: the source query's column count is checked before
+    // the result type is resolved (a 1-column query without a column
+    // definition list is 22023, not the TYPEFUNC_RECORD 0A000).
+    let h = spi::SPI_tuptable().expect("SELECT leaves a tuptable");
+    spi::tuptable_with(h, |t| -> PgResult<()> {
+        if t.tupdesc.natts != 3 {
+            return Err(err(
+                "invalid crosstab source data query",
+                "The query must return 3 columns: row_name, category, and value.",
+                ERRCODE_INVALID_PARAMETER_VALUE,
+            ));
+        }
+        Ok(())
+    })?;
 
     // C get_call_result_type switch: RECORD is 0A000, other non-row is 42804.
     // InitMaterializedSRF elogs XX000 for both.
@@ -126,19 +161,13 @@ pub(crate) fn fc_crosstab(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
         }
     }
     let mut srf = InitMaterializedSRF(mcx, flinfo, fcinfo, 0)?;
-    let num_categories = srf.tupdesc.natts as usize - 1;
 
-    let h = spi::SPI_tuptable().expect("SELECT leaves a tuptable");
     let result = spi::tuptable_with(h, |t| -> PgResult<()> {
-        if t.tupdesc.natts != 3 {
-            return Err(err(
-                "invalid crosstab source data query",
-                "The query must return 3 columns: row_name, category, and value.",
-                ERRCODE_INVALID_PARAMETER_VALUE,
-            ));
-        }
         compat_crosstab_tupdescs(&srf.tupdesc, &t.tupdesc)?;
         let mut attinmeta = AttInMetadata::new(&srf.tupdesc)?;
+        // tablefunc.c:477, after compatCrosstabTupleDescs proved natts >= 2
+        // (an empty composite result type is 42804, not an underflow).
+        let num_categories = srf.tupdesc.natts as usize - 1;
 
         let max_calls = proc;
         let mut firstpass = true;
