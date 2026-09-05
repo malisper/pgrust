@@ -18,6 +18,9 @@ adt_acl = { path = "../../utils/adt/acl" }
 adt_quote = { path = "../../utils/adt/quote" }
 guc = { path = "../../utils/misc/guc" }
 aclchk = { path = "../../catalog/aclchk" }
+objectaccess = { path = "../../catalog/objectaccess" }
+cmdtag = { path = "../../tcop/cmdtag" }
+event_trigger_seams = { path = "../event_trigger_seams" }
 aclchk_seams = { path = "../../catalog/aclchk_seams" }
 catalog = { path = "../../catalog/catalog" }
 catalog_namespace = { path = "../../catalog/catalog_namespace" }

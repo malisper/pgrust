@@ -150,9 +150,20 @@ pub fn CreateSchemaCommand<'mcx>(
         false,
     )?;
 
-    // The caller collects the schema for event triggers ahead of the element
-    // subcommands and hands each element to ProcessUtility (C does both
-    // inline here).
+    // Report the new schema to possibly interested event triggers.  C does
+    // this here and not in ProcessUtilitySlow because otherwise the objects
+    // created below would be reported before the schema (schemacmds.c:187);
+    // doing it here also covers the generated CREATE SCHEMA of
+    // CreateExtensionInternal (extension.c:1911), which never passes through
+    // the dispatcher.
+    event_trigger_seams::event_trigger_collect_simple_command::call(
+        pg_depend::ObjectAddress::set(NAMESPACE_RELATION_ID, namespace_id),
+        pg_depend::ObjectAddress::set(InvalidOid, InvalidOid),
+        cmdtag::GetCommandTagEnum(b"CREATE SCHEMA"),
+    );
+
+    // The caller hands each element to ProcessUtility (C does it inline
+    // here).
     exec_elements(namespace_id, &stmt.schemaElts, schema_name)?;
 
     guc::AtEOXact_GUC(true, save_nestlevel);
@@ -286,6 +297,9 @@ pub fn RenameSchema<'mcx>(mcx: Mcx<'mcx>, oldname: &str, newname: &str) -> PgRes
     genam::systable_endscan(mcx, scan)?;
     catalog_indexing::CatalogTupleUpdate(mcx, &rel, &otid, &mut newtup)?;
 
+    // schemacmds.c:296
+    objectaccess::InvokeObjectPostAlterHook(NAMESPACE_RELATION_ID, nsp_oid, 0)?;
+
     rel.close(NoLock)?;
     Ok(nsp_oid)
 }
@@ -322,9 +336,13 @@ fn AlterSchemaOwner_internal<'mcx>(
         ))));
     };
 
+    // If the new owner is the same as the existing owner, consider the
+    // command to have succeeded.  This is for dump restoration purposes.
+    // The post-alter hook still fires (schemacmds.c:440).
     let old_owner = getattr(td, tup, Anum_pg_namespace_nspowner).0.as_oid();
     if old_owner == newOwnerId {
-        return genam::systable_endscan(mcx, scan);
+        genam::systable_endscan(mcx, scan)?;
+        return objectaccess::InvokeObjectPostAlterHook(NAMESPACE_RELATION_ID, nsp_oid, 0);
     }
 
     if !aclchk::object_ownercheck(NAMESPACE_RELATION_ID, nsp_oid, miscinit::GetUserId())? {
@@ -366,7 +384,10 @@ fn AlterSchemaOwner_internal<'mcx>(
     genam::systable_endscan(mcx, scan)?;
     catalog_indexing::CatalogTupleUpdate(mcx, rel, &otid, &mut newtup)?;
 
-    pg_shdepend::changeDependencyOnOwner(mcx, NAMESPACE_RELATION_ID, nsp_oid, newOwnerId)
+    pg_shdepend::changeDependencyOnOwner(mcx, NAMESPACE_RELATION_ID, nsp_oid, newOwnerId)?;
+
+    // schemacmds.c:440
+    objectaccess::InvokeObjectPostAlterHook(NAMESPACE_RELATION_ID, nsp_oid, 0)
 }
 
 #[cfg(test)]

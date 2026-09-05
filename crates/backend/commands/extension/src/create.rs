@@ -131,8 +131,8 @@ fn CreateExtensionInternal(
                 schemaElts: types_nodes::NodeList::default(),
                 if_not_exists: false,
             };
-            // No elements; event-trigger collection of the generated schema
-            // stays with the extension collection lane (pre-existing scope).
+            // No elements; CreateSchemaCommand collects the generated schema
+            // for event triggers itself (schemacmds.c:187), as C does here.
             schemacmds::CreateSchemaCommand(mcx, &stmt, &mut |_, _, _| Ok(()))?;
             // CreateSchemaCommand includes CommandCounterIncrement.
             schema_oid = catalog_namespace::get_namespace_oid(name, false)?;

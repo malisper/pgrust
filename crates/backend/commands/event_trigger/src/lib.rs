@@ -634,6 +634,9 @@ pub fn init_seams() {
         sqldrop::EventTriggerSQLDropAddObject,
     );
     event_trigger_seams::event_trigger_collect_grant::set(EventTriggerCollectGrant);
+    event_trigger_seams::event_trigger_collect_simple_command::set(
+        EventTriggerCollectSimpleCommand,
+    );
     event_trigger_seams::event_trigger_on_login::set(EventTriggerOnLogin);
     fmgr_core::register_late_builtins(srf::EVENT_TRIGGER_BUILTINS);
 

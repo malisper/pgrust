@@ -34,6 +34,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // EventTriggerCollectSimpleCommand (event_trigger.c), for callers below
+    // the crate graph's event_trigger node that C has collect inline:
+    // CreateSchemaCommand (schemacmds.c:187) must report the schema itself
+    // so it lands ahead of the element subcommands.
+    pub fn event_trigger_collect_simple_command(
+        address: ObjectAddress,
+        secondary_object: ObjectAddress,
+        tag: types_core::CommandTag,
+    )
+);
+
+seam_core::seam!(
     // EventTriggerOnLogin (event_trigger.c), called from PostgresMain
     // (postgres.c:4369) below the crate graph's event_trigger node.
     pub fn event_trigger_on_login<'mcx>(mcx: mcx::Mcx<'mcx>) -> PgResult<()>

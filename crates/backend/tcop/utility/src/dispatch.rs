@@ -777,21 +777,16 @@ fn slow_switch<'mcx>(
                     &types_nodes::parsenodes::CreateSchemaStmt<'mcx>,
                 >(stmt)
             };
-            let tag = CreateCommandTag(parsetree);
             let (stmt_location, stmt_len) = (pstmt.stmt_location, pstmt.stmt_len);
-            // C runs this block inside CreateSchemaCommand: collect the
-            // schema for event triggers ahead of the element subcommands,
-            // then hand each element straight to ProcessUtility (the grammar
-            // guarantees they are utility statements).
-            let mut exec_elements = |nsp_oid: types_core::Oid,
+            // C runs this block inside CreateSchemaCommand (which has
+            // already collected the schema for event triggers,
+            // schemacmds.c:187): hand each element straight to
+            // ProcessUtility (the grammar guarantees they are utility
+            // statements).
+            let mut exec_elements = |_nsp_oid: types_core::Oid,
                                      elts: &types_nodes::NodeList<'mcx>,
                                      schema_name: &str|
              -> PgResult<()> {
-                event_trigger::EventTriggerCollectSimpleCommand(
-                    ObjectAddress::set(NAMESPACE_RELATION_ID, nsp_oid),
-                    INVALID_OBJECT_ADDRESS,
-                    tag,
-                );
                 let elements =
                     parse_utilcmd::transformCreateSchemaStmtElements(mcx, elts, schema_name)?;
                 for element in elements.iter() {
