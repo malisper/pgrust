@@ -57,6 +57,35 @@ pub const UNSUPPORTED_HASH: &str = "Unsupported digest algorithm";
 pub const UNSUPPORTED_COMPR: &str = "Unsupported compression algorithm";
 pub const NOT_TEXT: &str = "Not text data";
 pub const NO_USABLE_KEY: &str = "No encryption key found";
+// px.c px_err_list rows this port raises (byte-exact px_strerror text).
+pub const ARGUMENT_ERROR: &str = "Illegal argument to function";
+pub const KEYPKT_CORRUPT: &str = "Corrupt key packet";
+pub const NOT_V4_KEYPKT: &str = "Only V4 key packets are supported";
+pub const UNKNOWN_PUBALGO: &str = "Unknown public-key encryption algorithm";
+pub const MULTIPLE_KEYS: &str = "Several keys given - pgcrypto does not handle keyring";
+pub const BAD_S2K_MODE: &str = "Bad S2K mode";
+/// PXE_NO_RANDOM as px_THROW_ERROR renders it (px.c:96-101): the one px
+/// error whose SQLSTATE is ERRCODE_INTERNAL_ERROR, not 39000.
+pub const NO_RANDOM: &str = "could not generate a random number";
+
+// Test-only switch for `fill_random` (see there).
+#[cfg(test)]
+thread_local! {
+    pub static FORCE_RANDOM_FAILURE: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+}
+
+/// The crate's single entropy funnel over `pg_strong_random`: product builds
+/// are a plain call; `#[cfg(test)]` can force the OS-entropy failure arm so
+/// the PXE_NO_RANDOM paths (px.c:96 px_THROW_ERROR) are witnessable —
+/// pg_strong_random itself never fails on a healthy host.
+#[must_use]
+pub fn fill_random(buf: &mut [u8]) -> bool {
+    #[cfg(test)]
+    if FORCE_RANDOM_FAILURE.with(|f| f.get()) {
+        return false;
+    }
+    ::pg_strong_random::pg_strong_random(buf)
+}
 
 /// `s2k_decode_count` (RFC 4880 §3.7.1.3).
 pub fn s2k_decode_count(cval: i32) -> i32 {

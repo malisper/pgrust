@@ -4,7 +4,6 @@ use super::consts::*;
 use super::context::PgpContext;
 use super::packet::{render_newlen, write_packet};
 use super::s2k::S2k;
-use ::pg_strong_random::pg_strong_random;
 
 fn build_literal_packet(ctx: &PgpContext, data: &[u8]) -> Vec<u8> {
     let ty = if ctx.text_mode != 0 {
@@ -43,9 +42,6 @@ pub fn encrypt_symmetric(
     data: &[u8],
     passphrase: &[u8],
 ) -> Result<Vec<u8>, String> {
-    if passphrase.is_empty() {
-        return Err("pgp: no symmetric key".to_string());
-    }
     let mut ctx = ctx.clone();
     if ctx.s2k_cipher_algo < 0 {
         ctx.s2k_cipher_algo = ctx.cipher_algo;
@@ -59,8 +55,8 @@ pub fn encrypt_symmetric(
     let (sess_key, sess_cipher) = if ctx.use_sess_key != 0 {
         let len = cipher_key_size(ctx.cipher_algo);
         let mut k = vec![0u8; len];
-        if !pg_strong_random(&mut k) {
-            return Err("random failed".to_string());
+        if !fill_random(&mut k) {
+            return Err(NO_RANDOM.to_string());
         }
         (k, ctx.cipher_algo)
     } else {
@@ -117,8 +113,8 @@ pub fn write_encdata_packet(
     }
 
     let mut prefix = vec![0u8; bs + 2];
-    if !pg_strong_random(&mut prefix[..bs]) {
-        return Err("random failed".to_string());
+    if !fill_random(&mut prefix[..bs]) {
+        return Err(NO_RANDOM.to_string());
     }
     prefix[bs] = prefix[bs - 2];
     prefix[bs + 1] = prefix[bs - 1];

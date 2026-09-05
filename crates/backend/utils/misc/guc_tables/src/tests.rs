@@ -94,12 +94,15 @@ fn table_counts_match_compiled_backend_shape() {
     //   word_similarity_threshold / strict_word_similarity_threshold
     //   (-> 31) = 477 — the C 18.6 custom GUCs, statically defined like
     //   auto_explain.*.
+    // audit-remediation b033 (contrib/pgcrypto/pgcrypto.c:70 _PG_init): Enum +1
+    //   pgcrypto.builtin_crypto_enabled (-> 49) = 478 — the C 18.6 custom GUC,
+    //   statically defined like pg_stat_statements.* / auto_explain.*.
     assert_eq!(ConfigureNamesBool.len(), 140);
     assert_eq!(ConfigureNamesInt.len(), 178);
     assert_eq!(ConfigureNamesReal.len(), 31);
     assert_eq!(ConfigureNamesString.len(), 80);
-    assert_eq!(ConfigureNamesEnum.len(), 48);
-    assert_eq!(all_settings().count(), 477);
+    assert_eq!(ConfigureNamesEnum.len(), 49);
+    assert_eq!(all_settings().count(), 478);
     assert_eq!(GucContext_Names.len(), PGC_USERSET as usize + 1);
     assert_eq!(GucSource_Names.len(), PGC_S_SESSION as usize + 1);
     assert_eq!(config_group_names.len(), DEVELOPER_OPTIONS as usize + 1);

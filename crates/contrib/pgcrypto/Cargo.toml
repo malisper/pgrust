@@ -30,6 +30,12 @@ arrayfuncs = { path = "../../backend/utils/adt/arrayfuncs" }
 postgres_seams = { path = "../../backend/tcop/postgres_seams" }
 funcapi = { path = "../../backend/utils/fmgr/funcapi" }
 types_tuple = { path = "../../_support/types/types_tuple" }
+# find_provider (pgcrypto.c:504) runs downcase_truncate_identifier on the
+# algorithm name before lookup and before the "Cannot use" message.
+parser_small1 = { path = "../../backend/parser/parser_small1" }
+# CheckFIPSMode (openssl.c:847): the FIPS state of the linked OpenSSL. Same
+# vendored build be_secure_openssl links (Cargo.lock pins openssl-src 3.x).
+openssl-sys = { version = "0.9", features = ["vendored"] }
 
 # RustCrypto symmetric ciphers for encrypt()/decrypt() — byte-identical to
 # pgcrypto's OpenSSL px_combo_* (see cipher.rs). Third-party crates are policy-

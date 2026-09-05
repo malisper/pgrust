@@ -59,10 +59,16 @@ impl BlockEncryptor {
 }
 
 pub enum CipherError {
-    // NoCipher carries the full downcased spec (C find_provider's "Cannot use %s").
+    // The three carry the downcased/truncated spec (C find_provider's
+    // "Cannot use \"%s\": %s", pgcrypto.c:513) and map to px_strerror text:
+    // PXE_NO_CIPHER / PXE_BAD_OPTION / PXE_BAD_FORMAT (px.c:273-276).
     NoCipher(String),
+    BadOption(String),
+    BadFormat(String),
     EncryptFailed,
     DecryptFailed,
+    /// An ereport raised while normalising the name (allocation failure).
+    Pg(Box<types_error::PgError>),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -87,25 +93,36 @@ struct Spec {
     padding: bool,
 }
 
+/// px.c:246 parse_cipher_name + px.c:288 px_find_combo over the name that
+/// find_provider (pgcrypto.c:504) already ran through
+/// downcase_truncate_identifier.
 fn parse_spec(spec: &str) -> Result<Spec, CipherError> {
-    let lower = spec.to_ascii_lowercase();
+    let lower = crate::provider_name(spec).map_err(CipherError::Pg)?;
     let mut parts = lower.split('/');
     let cipher_part = parts.next().unwrap_or("");
 
-    let mut padding = true;
+    // parse_cipher_name: empty segments are skipped; "key:value" with any
+    // key but "pad" is PXE_BAD_OPTION; a segment without ':' is
+    // PXE_BAD_FORMAT. Options are parsed BEFORE the cipher lookup.
+    let mut pad: Option<&str> = None;
     for opt in parts {
+        if opt.is_empty() {
+            continue;
+        }
         let Some((k, v)) = opt.split_once(':') else {
-            return Err(CipherError::NoCipher(lower.clone()));
+            return Err(CipherError::BadFormat(lower.clone()));
         };
         if k != "pad" {
-            return Err(CipherError::NoCipher(lower.clone()));
+            return Err(CipherError::BadOption(lower.clone()));
         }
-        padding = match v {
-            "pkcs" => true,
-            "none" => false,
-            _ => return Err(CipherError::NoCipher(lower.clone())),
-        };
+        pad = Some(v);
     }
+    // px_find_combo: an unknown pad value is PXE_NO_CIPHER (err1).
+    let padding = match pad {
+        None | Some("pkcs") => true,
+        Some("none") => false,
+        Some(_) => return Err(CipherError::NoCipher(lower.clone())),
+    };
 
     let canon = resolve_alias(cipher_part);
     let (kind, mode) = match canon.as_str() {
@@ -154,17 +171,20 @@ fn block_size(kind: CipherKind) -> usize {
     }
 }
 
+/// px.c:204 combo_init: `if (klen > ks) klen = ks` — the key is cut to the
+/// cipher's max key size (openssl.c cipher table: AES 32, Blowfish 56,
+/// CAST5 16, DES 8, 3DES 24) before init, never refused for being long.
 fn prepare_key(kind: CipherKind, key: &[u8]) -> Option<Vec<u8>> {
     Some(match kind {
         CipherKind::Aes => {
+            let key = &key[..key.len().min(32)];
+            // ossl_aes_init: 128/192/256 by key length (zero-padded).
             let target = if key.len() <= 16 {
                 16
             } else if key.len() <= 24 {
                 24
-            } else if key.len() <= 32 {
-                32
             } else {
-                return None;
+                32
             };
             let mut k = vec![0u8; target];
             k[..key.len()].copy_from_slice(key);
@@ -186,6 +206,7 @@ fn prepare_key(kind: CipherKind, key: &[u8]) -> Option<Vec<u8>> {
             if key.is_empty() {
                 return None;
             }
+            let key = &key[..key.len().min(56)];
             // OpenSSL BF_set_key cycles the key through the P-array; RustCrypto
             // rejects len<4. Repeat to the smallest multiple >=4 to reproduce
             // the exact cycling (period = orig len) byte-for-byte.
@@ -208,6 +229,7 @@ fn prepare_key(kind: CipherKind, key: &[u8]) -> Option<Vec<u8>> {
             if key.is_empty() {
                 return None;
             }
+            let key = &key[..key.len().min(16)];
             // OpenSSL CAST5 zero-pads a <=10-byte "small key" to 16; RustCrypto
             // rejects len<5. Zero-pad up to 5 to keep the small-key schedule.
             if key.len() >= 5 {

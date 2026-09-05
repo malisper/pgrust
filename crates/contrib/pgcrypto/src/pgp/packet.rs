@@ -24,6 +24,12 @@ pub fn write_packet(dst: &mut Vec<u8>, tag: i32, body: &[u8]) {
 pub struct PktReader<'a> {
     pub data: &'a [u8],
     pub pos: usize,
+    /// C pgp_parse_pkt_hdr's `allow_ctx`: old-format packets with
+    /// indeterminate length (lentype 3) are only legal inside the decrypted
+    /// data stream (pgp-decrypt.c:885 ALLOW_CTX_SIZE); the message envelope
+    /// (pgp-decrypt.c:1110), key material (pgp-pubkey.c:483) and pgp_key_id
+    /// (pgp-info.c:133) pass 0 and reject them as PXE_PGP_CORRUPT_DATA.
+    allow_ctx: bool,
 }
 
 pub struct PktHdr {
@@ -34,7 +40,12 @@ pub struct PktHdr {
 
 impl<'a> PktReader<'a> {
     pub fn new(data: &'a [u8]) -> PktReader<'a> {
-        PktReader { data, pos: 0 }
+        PktReader { data, pos: 0, allow_ctx: false }
+    }
+
+    /// Reader for the decrypted data stream (ALLOW_CTX_SIZE).
+    pub fn new_allow_ctx(data: &'a [u8]) -> PktReader<'a> {
+        PktReader { data, pos: 0, allow_ctx: true }
     }
 
     #[allow(dead_code)] // C-parity: PktReader surface kept complete
@@ -67,6 +78,9 @@ impl<'a> PktReader<'a> {
             let lentype = p & 3;
             let tag = ((p >> 2) & 0x0f) as i32;
             if lentype == 3 {
+                if !self.allow_ctx {
+                    return Err(());
+                }
                 Ok(Some(PktHdr {
                     tag,
                     len: None,

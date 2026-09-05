@@ -444,6 +444,8 @@ pub static pgss_track: GucEnumVar = GucSlot::new("pgss_track");
 pub static pgss_track_utility: GucBoolVar = GucSlot::new("pgss_track_utility");
 pub static pgss_track_planning: GucBoolVar = GucSlot::new("pgss_track_planning");
 pub static pgss_save: GucBoolVar = GucSlot::new("pgss_save");
+// pgcrypto.builtin_crypto_enabled (pgcrypto.c _PG_init), statically defined too.
+pub static pgcrypto_builtin_crypto_enabled: GucEnumVar = GucSlot::new("builtin_crypto_enabled");
 // pgvector hnsw.* (contrib GUCs, defined statically; C defines them at module load).
 pub static hnsw_ef_search: GucIntVar = GucSlot::new("hnsw_ef_search");
 pub static hnsw_iterative_scan: GucEnumVar = GucSlot::new("hnsw_iterative_scan");

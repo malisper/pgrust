@@ -64,12 +64,55 @@ fn fc_pg_hmac(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<D
     bytea_result(fcinfo, &out)
 }
 
+/// pgcrypto.c:504 find_provider: the algorithm name goes through
+/// downcase_truncate_identifier (NAMEDATALEN-1 bytes, encoding-aware) before
+/// the provider lookup AND before it is quoted in "Cannot use".
+fn provider_name(name: &str) -> PgResult<String> {
+    let scratch = mcx::MemoryContext::new("pgcrypto provider name");
+    let v = parser_small1::downcase_truncate_identifier(
+        scratch.mcx(),
+        name.as_bytes(),
+        false,
+        mbutils::GetDatabaseEncoding(),
+    )?;
+    Ok(String::from_utf8_lossy(&v).into_owned())
+}
+
+/// openssl.c:847 CheckFIPSMode: the FIPS state of the linked OpenSSL. The
+/// vendored build is 3.x (Cargo.lock), so this is the
+/// EVP_default_properties_is_fips_enabled branch C compiles for it.
+fn check_fips_mode() -> bool {
+    #[cfg(test)]
+    if FORCE_FIPS_MODE.with(|f| f.get()) {
+        return true;
+    }
+    // SAFETY: a pure query on OpenSSL's default library context (NULL); no
+    // pointer is retained and no OpenSSL state is mutated.
+    unsafe { openssl_sys::EVP_default_properties_is_fips_enabled(core::ptr::null_mut()) == 1 }
+}
+
+#[cfg(test)]
+thread_local! {
+    static FORCE_FIPS_MODE: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+}
+
+/// openssl.c:888 CheckBuiltinCryptoMode over the enum GUC's current value
+/// (guc_tables: pgcrypto.builtin_crypto_enabled, C pgcrypto.c:70). Both
+/// ereports carry no errcode in C (ERRCODE_INTERNAL_ERROR).
+fn check_builtin_crypto_mode(mode: Option<&str>) -> PgResult<()> {
+    match mode {
+        Some("off") => Err(PgError::error("use of built-in crypto functions is disabled").into()),
+        Some("fips") if check_fips_mode() => Err(PgError::error(
+            "use of non-FIPS validated crypto not allowed when OpenSSL is in FIPS mode",
+        )
+        .into()),
+        _ => Ok(()),
+    }
+}
+
 fn check_builtin_crypto() -> PgResult<()> {
     let mode = guc::GetConfigOption("pgcrypto.builtin_crypto_enabled", true, false)?;
-    if matches!(mode.as_deref(), Some("off")) {
-        return Err(PgError::error("use of built-in crypto functions is disabled").into());
-    }
-    Ok(())
+    check_builtin_crypto_mode(mode.as_deref())
 }
 
 fn fc_pg_gen_salt(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -104,13 +147,36 @@ fn fc_pg_crypt(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<
     bytea_result(fcinfo, &s)
 }
 
+// pgcrypto.c:513 find_provider raises "Cannot use" as
+// ERRCODE_INVALID_PARAMETER_VALUE; pg_encrypt..pg_decrypt_iv (pgcrypto.c:288,
+// :330, :383, :433) raise the cipher failures as
+// ERRCODE_EXTERNAL_ROUTINE_INVOCATION_EXCEPTION.
 fn cipher_err(op: &str, e: cipher::CipherError) -> Box<PgError> {
-    let msg = match e {
-        cipher::CipherError::NoCipher(spec) => format!("Cannot use \"{spec}\": No such cipher algorithm"),
-        cipher::CipherError::EncryptFailed => format!("{op} error: Encryption failed"),
-        cipher::CipherError::DecryptFailed => format!("{op} error: Decryption failed"),
+    use cipher::CipherError::*;
+    let (msg, sqlstate) = match e {
+        NoCipher(spec) => (
+            format!("Cannot use \"{spec}\": No such cipher algorithm"),
+            ERRCODE_INVALID_PARAMETER_VALUE,
+        ),
+        BadOption(spec) => (
+            format!("Cannot use \"{spec}\": Unknown option"),
+            ERRCODE_INVALID_PARAMETER_VALUE,
+        ),
+        BadFormat(spec) => (
+            format!("Cannot use \"{spec}\": Badly formatted type"),
+            ERRCODE_INVALID_PARAMETER_VALUE,
+        ),
+        EncryptFailed => (
+            format!("{op} error: Encryption failed"),
+            ERRCODE_EXTERNAL_ROUTINE_INVOCATION_EXCEPTION,
+        ),
+        DecryptFailed => (
+            format!("{op} error: Decryption failed"),
+            ERRCODE_EXTERNAL_ROUTINE_INVOCATION_EXCEPTION,
+        ),
+        Pg(e) => return e,
     };
-    px_err(msg)
+    PgError::error(msg).with_sqlstate(sqlstate).into()
 }
 
 macro_rules! fc_cipher {
@@ -157,11 +223,17 @@ fn fc_pg_random_bytes(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> Pg
             .with_sqlstate(ERRCODE_EXTERNAL_ROUTINE_INVOCATION_EXCEPTION)
             .into());
     }
-    let mut buf = vec![0u8; len as usize];
-    if !pg_strong_random::pg_strong_random(&mut buf) {
-        return Err(px_err("Failed to generate random data".to_string()));
-    }
+    let buf = random_bytes(len as usize)?;
     bytea_result(fcinfo, &buf)
+}
+
+// pgcrypto.c:471 pg_random_bytes: px_THROW_ERROR(PXE_NO_RANDOM).
+fn random_bytes(len: usize) -> PgResult<Vec<u8>> {
+    let mut buf = vec![0u8; len];
+    if !pgp::consts::fill_random(&mut buf) {
+        return Err(px_msg(pgp::consts::NO_RANDOM));
+    }
+    Ok(buf)
 }
 
 fn fc_pg_random_uuid(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -169,8 +241,9 @@ fn fc_pg_random_uuid(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
     types_fmgr::byref_result(fcinfo.result_mcx(), &uuid)
 }
 
+// pgcrypto.c:489 pg_check_fipsmode (SQL fips_mode()).
 fn fc_pg_check_fipsmode(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    Ok(Datum::from_bool(false))
+    Ok(Datum::from_bool(check_fips_mode()))
 }
 
 
@@ -194,17 +267,13 @@ fn pgp_notice(msg: &str) {
 // arm — mis-states the code on every px-throwing path (dearmor,
 // pgp_armor_headers, and the four pgp sym/pub wrappers).
 fn px_msg(msg: &str) -> Box<PgError> {
-    let sqlstate = if msg == PXE_NO_RANDOM_MSG {
+    let sqlstate = if msg == pgp::consts::NO_RANDOM {
         ERRCODE_INTERNAL_ERROR
     } else {
         ERRCODE_EXTERNAL_ROUTINE_INVOCATION_EXCEPTION
     };
     PgError::error(msg.to_string()).with_sqlstate(sqlstate).into()
 }
-
-/// C's `PXE_NO_RANDOM` message (px.c:96-101) — the one px error whose
-/// SQLSTATE is XX000 rather than 39000.
-const PXE_NO_RANDOM_MSG: &str = "could not generate a random number";
 
 fn opt_arg_bytes(fcinfo: &Fcinfo, i: usize) -> PgResult<Option<Vec<u8>>> {
     if i >= fcinfo.nargs() || fcinfo.args[i].isnull {
@@ -311,7 +380,7 @@ fn fc_pgp_pub_decrypt_bytea(_f: Option<&mut FmgrInfo>, fc: &mut Fcinfo) -> PgRes
 fn fc_pgp_key_id_w(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: strict fn — arg0 bytea.
     let data = unsafe { fcinfo.arg_varlena_packed(0)? };
-    let s = pgp::key_id(data.data()).map_err(px_msg)?;
+    let s = pgp::key_id(data.data()).map_err(|e| px_msg(&e))?;
     bytea_result(fcinfo, s.as_bytes())
 }
 
@@ -518,13 +587,26 @@ fn lookup(function: &str) -> Option<PGFunction> {
     })
 }
 
+/// pgcrypto.c:68 _PG_init. The custom enum GUC pgcrypto.builtin_crypto_enabled
+/// (DefineCustomEnumVariable, PGC_SUSET, on/off/fips) is defined statically in
+/// guc_tables like pg_stat_statements.* / auto_explain.* (this port has no
+/// DefineCustomXxxVariable machinery); the prefix reservation runs here, on
+/// the library's first load, exactly as C's MarkGUCPrefixReserved does.
+fn pg_init() -> PgResult<()> {
+    guc::MarkGUCPrefixReserved("pgcrypto");
+    Ok(())
+}
+
 pub fn init_seams() {
     dfmgr::register_builtin_library(dfmgr::BuiltinLibraryEntry {
         name: LIBRARY,
         lookup,
-        pg_init: None,
+        pg_init: Some(pg_init),
     });
 }
+
+#[cfg(test)]
+mod conformance_tests;
 
 #[cfg(test)]
 mod armor_header_tests {

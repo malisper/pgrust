@@ -48,13 +48,16 @@ fn no_hash(name: &str) -> String {
 }
 
 pub fn digest(name: &str, data: &[u8]) -> Result<Vec<u8>, String> {
-    let algo = find_digest(name).ok_or_else(|| no_hash(name))?;
+    // pgcrypto.c:504 find_provider: downcase_truncate_identifier first.
+    let name = crate::provider_name(name).map_err(|e| e.message)?;
+    let algo = find_digest(&name).ok_or_else(|| no_hash(&name))?;
     Ok(hash_bytes(&algo, data))
 }
 
 // RFC 2104 HMAC (C px_find_hmac + px_hmac_* over the same reference hashes).
 pub fn hmac(name: &str, key: &[u8], data: &[u8]) -> Result<Vec<u8>, String> {
-    let algo = find_digest(name).ok_or_else(|| no_hash(name))?;
+    let name = crate::provider_name(name).map_err(|e| e.message)?;
+    let algo = find_digest(&name).ok_or_else(|| no_hash(&name))?;
     let b = algo.block_size;
 
     let mut k0 = if key.len() > b {

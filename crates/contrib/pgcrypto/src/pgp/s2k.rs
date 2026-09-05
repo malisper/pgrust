@@ -1,6 +1,5 @@
 
 use super::consts::*;
-use ::pg_strong_random::pg_strong_random;
 
 #[derive(Clone)]
 pub struct S2k {
@@ -25,21 +24,21 @@ impl S2k {
         match mode {
             PGP_S2K_SIMPLE => {}
             PGP_S2K_SALTED => {
-                if !pg_strong_random(&mut s.salt) {
-                    return Err("random failed");
+                if !fill_random(&mut s.salt) {
+                    return Err(NO_RANDOM);
                 }
             }
             PGP_S2K_ISALTED => {
-                if !pg_strong_random(&mut s.salt) {
-                    return Err("random failed");
+                if !fill_random(&mut s.salt) {
+                    return Err(NO_RANDOM);
                 }
                 let mut tmp = [0u8; 1];
-                if !pg_strong_random(&mut tmp) {
-                    return Err("random failed");
+                if !fill_random(&mut tmp) {
+                    return Err(NO_RANDOM);
                 }
                 s.iter = decide_s2k_iter(tmp[0], count);
             }
-            _ => return Err("bad s2k mode"),
+            _ => return Err(BAD_S2K_MODE),
         }
         Ok(s)
     }
@@ -75,7 +74,7 @@ impl S2k {
                 s.iter = src[10];
                 11
             }
-            _ => return Err("Bad S2K mode"),
+            _ => return Err(BAD_S2K_MODE),
         };
         Ok((s, consumed))
     }
@@ -130,7 +129,7 @@ impl S2k {
                         curcnt += c;
                     }
                 }
-                _ => return Err("bad s2k mode"),
+                _ => return Err(BAD_S2K_MODE),
             }
             let h = md.finish();
             let remain = target - filled;

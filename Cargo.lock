@@ -13192,6 +13192,8 @@ dependencies = [
  "miniz_oxide",
  "num-bigint",
  "num-traits",
+ "openssl-sys",
+ "parser_small1",
  "pg_md5",
  "pg_sha1",
  "pg_sha2",

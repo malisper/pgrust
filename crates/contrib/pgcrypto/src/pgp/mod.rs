@@ -38,7 +38,17 @@ pub fn sym_encrypt(
         ctx.parse_args(a)?;
     }
     ctx.text_mode = if is_text { 1 } else { 0 };
+    set_symkey(key)?;
     encrypt::encrypt_symmetric(&ctx, data, key)
+}
+
+/// pgp.c:362 pgp_set_symkey: `key == NULL || len < 1` is PXE_ARGUMENT_ERROR
+/// (raised after the args are parsed, on both wrappers — pgp-pgsql.c:440/505).
+fn set_symkey(key: &[u8]) -> Result<(), String> {
+    if key.is_empty() {
+        return Err(consts::ARGUMENT_ERROR.to_string());
+    }
+    Ok(())
 }
 
 pub fn sym_decrypt(
@@ -53,6 +63,7 @@ pub fn sym_decrypt(
             .map_err(|e| DecryptError { message: e, notices: Vec::new() })?;
     }
     ctx.text_mode = if need_text { 1 } else { 0 };
+    set_symkey(key).map_err(|e| DecryptError { message: e, notices: Vec::new() })?;
 
     let exp = ctx.clone();
     let result = decrypt::decrypt_symmetric(&mut ctx, data, key);
@@ -113,8 +124,8 @@ pub fn pub_encrypt(
 
     let klen = consts::cipher_key_size(ctx.cipher_algo);
     let mut sess_key = vec![0u8; klen];
-    if !::pg_strong_random::pg_strong_random(&mut sess_key) {
-        return Err("Failed to generate strong random bits".to_string());
+    if !consts::fill_random(&mut sess_key) {
+        return Err(consts::NO_RANDOM.to_string());
     }
 
     let mut out = Vec::new();
@@ -164,7 +175,7 @@ pub fn pub_decrypt(
     Ok(DecryptOutput { plaintext, notices })
 }
 
-pub fn key_id(data: &[u8]) -> Result<String, &'static str> {
+pub fn key_id(data: &[u8]) -> Result<String, String> {
     keyid::pgp_get_keyid(data)
 }
 

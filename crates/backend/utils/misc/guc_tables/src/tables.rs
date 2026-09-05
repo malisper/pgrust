@@ -378,6 +378,13 @@ pub static pgss_track_options: &[config_enum_entry] = &[
     config_enum_entry { name: "all", val: PGSS_TRACK_ALL, hidden: false },
 ];
 
+// pgcrypto.c builtin_crypto_options (contrib/pgcrypto/pgcrypto.c:52).
+pub static pgcrypto_builtin_crypto_options: &[config_enum_entry] = &[
+    config_enum_entry { name: "on", val: BC_ON, hidden: false },
+    config_enum_entry { name: "off", val: BC_OFF, hidden: false },
+    config_enum_entry { name: "fips", val: BC_FIPS, hidden: false },
+];
+
 // auto_explain.c format_options.
 pub static auto_explain_format_options: &[config_enum_entry] = &[
     config_enum_entry { name: "text", val: EXPLAIN_FORMAT_TEXT, hidden: false },
@@ -1201,6 +1208,9 @@ pub static ConfigureNamesEnum: &[GucEnumSetting] = &[
     GucEnumSetting { name: "auto_explain.log_format", context: PGC_SUSET, group: CUSTOM_OPTIONS, short_desc: Some("EXPLAIN format to be used for plan logging."), long_desc: None, flags: 0, variable: &vars::aex_log_format, boot_val: GucDefaultValue::Enum(EXPLAIN_FORMAT_TEXT), options: GucEnumOptions::Inline(auto_explain_format_options), check_hook: None, assign_hook: None, show_hook: None },
     GucEnumSetting { name: "auto_explain.log_level", context: PGC_SUSET, group: CUSTOM_OPTIONS, short_desc: Some("Log level for the plan."), long_desc: None, flags: 0, variable: &vars::aex_log_level, boot_val: GucDefaultValue::Enum(LOG), options: GucEnumOptions::Inline(auto_explain_loglevel_options), check_hook: None, assign_hook: None, show_hook: None },
     GucEnumSetting { name: "pg_stat_statements.track", context: PGC_SUSET, group: CUSTOM_OPTIONS, short_desc: Some("Selects which statements are tracked by pg_stat_statements."), long_desc: None, flags: 0, variable: &vars::pgss_track, boot_val: GucDefaultValue::Enum(PGSS_TRACK_TOP), options: GucEnumOptions::Inline(pgss_track_options), check_hook: None, assign_hook: None, show_hook: None },
+    // contrib/pgcrypto/pgcrypto.c:70 _PG_init DefineCustomEnumVariable — statically
+    // defined like the pg_stat_statements/auto_explain custom GUCs above.
+    GucEnumSetting { name: "pgcrypto.builtin_crypto_enabled", context: PGC_SUSET, group: CUSTOM_OPTIONS, short_desc: Some("Sets if builtin crypto functions are enabled."), long_desc: Some("\"on\" enables builtin crypto, \"off\" unconditionally disables and \"fips\" will disable builtin crypto if OpenSSL is in FIPS mode"), flags: 0, variable: &vars::pgcrypto_builtin_crypto_enabled, boot_val: GucDefaultValue::Enum(BC_ON), options: GucEnumOptions::Inline(pgcrypto_builtin_crypto_options), check_hook: None, assign_hook: None, show_hook: None },
     GucEnumSetting { name: "constraint_exclusion", context: PGC_USERSET, group: QUERY_TUNING_OTHER, short_desc: Some("Enables the planner to use constraints to optimize queries."), long_desc: Some("Table scans will be skipped if their constraints guarantee that no rows match the query."), flags: GUC_EXPLAIN, variable: &vars::constraint_exclusion, boot_val: GucDefaultValue::Enum(CONSTRAINT_EXCLUSION_PARTITION), options: GucEnumOptions::Inline(constraint_exclusion_options), check_hook: None, assign_hook: None, show_hook: None },
     GucEnumSetting { name: "default_toast_compression", context: PGC_USERSET, group: CLIENT_CONN_STATEMENT, short_desc: Some("Sets the default compression method for compressible values."), long_desc: None, flags: 0, variable: &vars::default_toast_compression, boot_val: GucDefaultValue::Enum(TOAST_PGLZ_COMPRESSION), options: GucEnumOptions::Inline(default_toast_compression_options), check_hook: None, assign_hook: None, show_hook: None },
     GucEnumSetting { name: "default_transaction_isolation", context: PGC_USERSET, group: CLIENT_CONN_STATEMENT, short_desc: Some("Sets the transaction isolation level of each new transaction."), long_desc: None, flags: 0, variable: &vars::DefaultXactIsoLevel, boot_val: GucDefaultValue::Enum(XACT_READ_COMMITTED), options: GucEnumOptions::Inline(isolation_level_options), check_hook: None, assign_hook: None, show_hook: None },

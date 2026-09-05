@@ -94,11 +94,11 @@ fn parse_symenc_sesskey(
     s2k.process(s2k_cipher, passphrase).map_err(|e| e.to_string())?;
 
     ctx.s2k_mode = s2k.mode;
+    // pgp-decrypt.c:647: decoded unconditionally — iter is 0 for the simple
+    // and salted modes, so expect-s2k-count sees 1024 there, as in C.
+    ctx.s2k_count = s2k_decode_count(s2k.iter as i32);
     ctx.s2k_digest_algo = s2k.digest_algo;
     ctx.s2k_cipher_algo = s2k_cipher;
-    if s2k.mode == PGP_S2K_ISALTED {
-        ctx.s2k_count = s2k_decode_count(s2k.iter as i32);
-    }
 
     let rest = &body[2 + consumed..];
     if rest.is_empty() {
@@ -109,24 +109,27 @@ fn parse_symenc_sesskey(
             key: s2k.key,
         })
     } else {
+        // pgp-decrypt.c:681: 17 <= len <= PGP_MAX_KEY + 1, else corrupt.
+        if rest.len() < 17 || rest.len() > PGP_MAX_KEY + 1 {
+            return Err(CORRUPT_DATA.to_string());
+        }
         ctx.use_sess_key = 1;
         // upstream 4c5128ca0b30 (18.6): pgcrypto: Add option to revert to prior decryption behavior
         let ignore = ctx.ignore_cipher_failure != 0;
         let mut cfb = PgpCfb::create(s2k_cipher, &s2k.key, false, None, ignore)
             .map_err(|e| e.to_string())?;
         let dec = cfb.decrypt(rest);
-        if dec.is_empty() {
-            return Err(CORRUPT_DATA.to_string());
-        }
         let cipher = dec[0] as i32;
-        let klen = cipher_key_size(cipher);
-        if klen == 0 || dec.len() < 1 + klen {
+        ctx.cipher_algo = cipher;
+        // pgp-decrypt.c:612 decrypt_key: the key length must be EXACTLY the
+        // cipher's key size (trailing bytes are not padding).
+        let klen = dec.len() - 1;
+        if cipher_key_size(cipher) != klen {
             return Err(CORRUPT_DATA.to_string());
         }
-        ctx.cipher_algo = cipher;
         Ok(SessKey {
             cipher,
-            key: dec[1..1 + klen].to_vec(),
+            key: dec[1..].to_vec(),
         })
     }
 }
@@ -195,7 +198,7 @@ fn decrypt_data_packet(
 }
 
 fn finish_inner(ctx: &mut PgpContext, inner: Vec<u8>) -> Result<Vec<u8>, String> {
-    let mut rdr = PktReader::new(&inner);
+    let mut rdr = PktReader::new_allow_ctx(&inner);
     let hdr = rdr
         .read_hdr()
         .map_err(|_| CORRUPT_DATA.to_string())?
@@ -233,7 +236,7 @@ fn finish_inner(ctx: &mut PgpContext, inner: Vec<u8>) -> Result<Vec<u8>, String>
 }
 
 fn read_literal(ctx: &mut PgpContext, data: &[u8]) -> Result<Vec<u8>, String> {
-    let mut rdr = PktReader::new(data);
+    let mut rdr = PktReader::new_allow_ctx(data);
     let hdr = rdr
         .read_hdr()
         .map_err(|_| CORRUPT_DATA.to_string())?

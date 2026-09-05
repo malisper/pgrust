@@ -1152,7 +1152,19 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      seam for the ProcWaitForSignal interrupt witness (unit harness
     //      fixture; counted by the tree census, never product code — same
     //      class as 43/45/46/60/62/63).
-    assert_eq!(count_tree(crates), 590, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 592, 18.6 conformance audit (2026-09-04), contrib/pgcrypto conformance
+    //   fixes (b033-contrib-pgcrypto-1): two test-only sources, both
+    //   `#[cfg(test)]` fault-injection switches that never compile into
+    //   product code —
+    //   71. contrib/pgcrypto/src/lib.rs FORCE_FIPS_MODE — Cell<bool>
+    //      per-thread override for check_fips_mode so the openssl.c:888
+    //      CheckBuiltinCryptoMode "fips" arm is witnessable off a FIPS host
+    //      (unit harness fixture; same class as 43/45/46/60).
+    //   72. contrib/pgcrypto/src/pgp/consts.rs FORCE_RANDOM_FAILURE —
+    //      Cell<bool> per-thread override for fill_random so the px.c:96
+    //      PXE_NO_RANDOM px_THROW_ERROR paths are witnessable (unit harness
+    //      fixture; same class as 43/45/46/60).
+    assert_eq!(count_tree(crates), 592, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),
