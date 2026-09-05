@@ -394,6 +394,14 @@ fn signals_and_deadlock_alert() {
 #[test]
 fn guc_storage_and_installed_seams() {
     setup();
+    // The sema round-trip below posts semaphore 0, which belongs to Regular
+    // PGPROC slot 0 — the freelist head, so the first slot any concurrent
+    // InitProcess(Backend) pops. InitProcess reinitializes the claimed slot's
+    // semaphore to zero (C proc.c:547 PGSemaphoreReset(MyProc->sem)), so an
+    // unguarded unlock(0)/lock(0) pair races that reset: the post is wiped
+    // and lock(0) blocks forever (tests run in parallel threads). Hold the
+    // freelist guard like every other test that claims or releases slots.
+    let _guard = freelist_guard();
     thread_globals(404);
 
     assert_eq!(guc_tables::vars::DeadlockTimeout.read(), 1000);
