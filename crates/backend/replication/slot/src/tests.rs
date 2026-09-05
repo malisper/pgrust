@@ -275,10 +275,23 @@ fn shmem_setup() {
         });
         transam_xlog::XLOGShmemInit();
         crate::ReplicationSlotsShmemInit();
+    });
+    become_backend();
+}
 
+// MyProc is per thread (lmgr_proc's MY_PROC thread-local, as C's MyProc is
+// per process) and the test harness runs each #[test] on its own thread, so
+// a PGPROC bound inside the Once above belongs to whichever test won it;
+// every other thread then reads INVALID_PROC_NUMBER — and the slot-drop path
+// (ReplicationSlotRelease -> ConditionVariableBroadcast(active_cv)) asserts
+// on that. Bind a backend PGPROC to the calling thread instead, once per
+// thread (the twophase crate's per-test idiom).
+fn become_backend() {
+    if lmgr_proc::MyProc().is_none() {
+        init_small::globals::SetMyProcPid(4242);
         lmgr_proc::InitProcess(types_core::BackendType::Backend).expect("InitProcess");
         procarray::ProcArrayAdd(lmgr_proc::MyProc().unwrap()).expect("ProcArrayAdd self");
-    });
+    }
 }
 
 // upstream f833c92077a1 (18.5): Fix race in ReplicationSlotRelease() for
@@ -290,6 +303,7 @@ fn release_of_ephemeral_slot_leaves_the_dropped_entry_untouched() {
 
     let _array = slot_array_guard();
     shmem_setup();
+    release_all_slots();
     let s = &ReplicationSlotCtl()[0];
 
     // An ephemeral slot mid-creation: acquired, data.xmin invalid while
@@ -402,6 +416,7 @@ fn physical_slot_data(name: &str) -> ReplicationSlotPersistentData {
 fn startup_restores_every_pg_replslot_entry_by_state_file_name() {
     let _array = slot_array_guard();
     shmem_setup();
+    release_all_slots();
     fd::InitFileAccess();
 
     let image = serialize_state_file(&physical_slot_data("fp3_s1"));
@@ -433,6 +448,7 @@ fn startup_restores_every_pg_replslot_entry_by_state_file_name() {
 fn slot_state_file_io_reports_wait_events() {
     let _array = slot_array_guard();
     shmem_setup();
+    release_all_slots();
     fd::InitFileAccess();
 
     // A freshly allocated in-memory entry, as ReplicationSlotCreate leaves it
