@@ -1,8 +1,14 @@
 use super::*;
 use ::bufmgr_seams::BufferPin;
+use ::types_core::{Oid, INVALID_PROC_NUMBER, RELPERSISTENCE_PERMANENT};
+use ::types_error::{ErrorLevel, DEBUG1};
+use ::types_rel::{FormData_pg_class, LockInfoData, LockRelId, RELKIND_RELATION};
+use ::types_storage::buf::buftag;
 use ::types_storage::bufpage::PageMut;
+use ::types_storage::RelFileLocatorBackend;
 use core::ptr::NonNull;
-use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering::Relaxed};
+use std::cell::Cell;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering::Relaxed};
 use std::sync::{Mutex, MutexGuard, Once};
 
 #[repr(align(8))]
@@ -35,14 +41,93 @@ static RELOCKS: AtomicUsize = AtomicUsize::new(0);
 static DIRTY_HINTS: AtomicUsize = AtomicUsize::new(0);
 static INIT: Once = Once::new();
 
+// Fake FSM fork: physical block n is served as buffer n + 1 from PAGES[n]
+// (a page of 0 falls back to PAGE_ADDR, the single-page tests' buffer 1).
+static PAGES: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+static NFSM: AtomicU32 = AtomicU32::new(0);
+static FSM_CACHED: AtomicU32 = AtomicU32::new(InvalidBlockNumber);
+static LOGGED: Mutex<Vec<(ErrorLevel, String, Option<String>)>> = Mutex::new(Vec::new());
+static INTERRUPT_CALLS: AtomicUsize = AtomicUsize::new(0);
+static NEWPAGE_LOGS: AtomicUsize = AtomicUsize::new(0);
+static WAL_LEVEL: AtomicI32 = AtomicI32::new(1); // replica
+static WAL_LOG_HINTS: AtomicBool = AtomicBool::new(false);
+
+const REL_OID: Oid = 91000;
+const TEST_LOCATOR: RelFileLocator = RelFileLocator { spcOid: 1663, dbOid: 5, relNumber: REL_OID };
+
 fn serial() -> MutexGuard<'static, ()> {
     SERIAL.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 fn install_page_seams() {
     INIT.call_once(|| {
-        bufmgr_seams::buffer_get_page::set(|_buf| {
-            NonNull::new(PAGE_ADDR.load(Relaxed) as *mut u8).unwrap()
+        bufmgr_seams::buffer_get_page::set(|buf| {
+            let table = PAGES.lock().unwrap_or_else(|e| e.into_inner());
+            let addr = match table.get((buf - 1) as usize) {
+                Some(&a) if a != 0 => a,
+                _ => PAGE_ADDR.load(Relaxed),
+            };
+            NonNull::new(addr as *mut u8).unwrap()
+        });
+        bufmgr_seams::buffer_get_tag::set(|buf| buftag {
+            spcOid: TEST_LOCATOR.spcOid,
+            dbOid: TEST_LOCATOR.dbOid,
+            relNumber: TEST_LOCATOR.relNumber,
+            forkNum: ForkNumber::FSM_FORKNUM,
+            blockNum: (buf - 1) as BlockNumber,
+        });
+        bufmgr_seams::relation_smgr_locator::set(|rel| RelFileLocatorBackend {
+            locator: rel.rd_locator.get(),
+            backend: INVALID_PROC_NUMBER,
+        });
+        bufmgr_seams::read_buffer_extended::set(|_rel, fork, blk, mode, _strategy| {
+            assert_eq!(fork, ForkNumber::FSM_FORKNUM);
+            assert_eq!(mode, ReadBufferMode::ZeroOnError);
+            assert!(blk < NFSM.load(Relaxed), "read past the fake FSM fork: block {blk}");
+            Ok(blk as Buffer + 1)
+        });
+        bufmgr_seams::mark_buffer_dirty::set(|_buf| Ok(()));
+        smgr_seams::smgr_exists::set(|_rloc, fork| {
+            assert_eq!(fork, ForkNumber::FSM_FORKNUM);
+            Ok(NFSM.load(Relaxed) > 0)
+        });
+        smgr_seams::smgr_nblocks::set(|_rloc, fork| {
+            assert_eq!(fork, ForkNumber::FSM_FORKNUM);
+            Ok(NFSM.load(Relaxed))
+        });
+        smgr_seams::smgr_cached_nblocks::set(|_rloc, fork| match fork {
+            ForkNumber::FSM_FORKNUM => FSM_CACHED.load(Relaxed),
+            _ => InvalidBlockNumber,
+        });
+        smgr_seams::smgr_set_cached_nblocks::set(|_rloc, fork, v| {
+            if fork == ForkNumber::FSM_FORKNUM {
+                FSM_CACHED.store(v, Relaxed);
+            }
+            Ok(())
+        });
+        xlogutils_seams::in_recovery::set(|| false);
+        transam_xlog_seams::data_checksums_enabled::set(|| false);
+        xloginsert_seams::log_newpage_buffer::set(|_buf, _std| {
+            NEWPAGE_LOGS.fetch_add(1, Relaxed);
+            Ok(0)
+        });
+        guc_tables::vars::wal_level.install_if_absent(guc_tables::GucVarAccessors {
+            get: || WAL_LEVEL.load(Relaxed),
+            set: |v| WAL_LEVEL.store(v, Relaxed),
+        });
+        guc_tables::vars::wal_log_hints.install_if_absent(guc_tables::GucVarAccessors {
+            get: || WAL_LOG_HINTS.load(Relaxed),
+            set: |v| WAL_LOG_HINTS.store(v, Relaxed),
+        });
+        // ProcessInterrupts with a pending cancel (postgres.c): the
+        // QUERY_CANCELED ereport(ERROR) comes back as the Err.
+        postgres_seams::check_for_interrupts::set(|| {
+            INTERRUPT_CALLS.fetch_add(1, Relaxed);
+            Err(Box::new(PgError::error("canceling statement due to user request")))
+        });
+        elog_seams::ereport_msg::set(|level, msg, detail| {
+            LOGGED.lock().unwrap_or_else(|e| e.into_inner()).push((level, msg, detail));
+            Ok(())
         });
         bufmgr_seams::lock_buffer::set(|_buf, mode| {
             match mode {
@@ -76,6 +161,198 @@ fn search(page: &mut AlignedPage, minvalue: u8, advancenext: bool, excl: bool) -
     LOCK_STATE.store(0, Relaxed);
     pin.release();
     slot
+}
+
+fn take_logged() -> Vec<(ErrorLevel, String, Option<String>)> {
+    std::mem::take(&mut *LOGGED.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
+/// A fake FSM fork of init'ed, all-zero pages (physical order: root,
+/// level-1 page 0, leaf page 0, ...), torn down — with the interrupt flag,
+/// lock state and GUC fakes reset — when the guard drops, so a failing
+/// witness cannot poison the single-page tests that share the fakes.
+struct FsmFork;
+
+fn install_fsm_fork(pages: &mut [Box<AlignedPage>]) -> FsmFork {
+    install_page_seams();
+    *PAGES.lock().unwrap_or_else(|e| e.into_inner()) =
+        pages.iter_mut().map(|p| p.0.as_mut_ptr() as usize).collect();
+    NFSM.store(pages.len() as BlockNumber, Relaxed);
+    FSM_CACHED.store(InvalidBlockNumber, Relaxed);
+    FsmFork
+}
+
+impl Drop for FsmFork {
+    fn drop(&mut self) {
+        PAGES.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        NFSM.store(0, Relaxed);
+        FSM_CACHED.store(InvalidBlockNumber, Relaxed);
+        init_small::globals::SetInterruptPending(false);
+        LOCK_STATE.store(0, Relaxed);
+        WAL_LEVEL.store(1, Relaxed);
+        WAL_LOG_HINTS.store(false, Relaxed);
+    }
+}
+
+fn test_relation<'mcx>(mcx: mcx::Mcx<'mcx>) -> RelationData<'mcx> {
+    use std::rc::Rc;
+    use types_tuple::{CompactAttribute, FormData_pg_attribute, NameData, TupleDescData};
+    let att = FormData_pg_attribute {
+        attnum: 1,
+        attlen: 4,
+        attbyval: true,
+        attalign: types_tuple::TYPALIGN_INT,
+        attstorage: types_tuple::TYPSTORAGE_PLAIN,
+        ..Default::default()
+    };
+    let mut attrs = mcx::PgVec::new_in(mcx);
+    let mut compact = mcx::PgVec::new_in(mcx);
+    compact.push(CompactAttribute::populate_from(&att));
+    attrs.push(att);
+    let rd_att = Rc::new(TupleDescData {
+        natts: 1,
+        tdtypeid: 0,
+        tdtypmod: -1,
+        tdrefcount: -1,
+        constr: None,
+        compact_attrs: compact,
+        attrs,
+    });
+    let mut relname = NameData::default();
+    relname.namestrcpy("t");
+    RelationData {
+        rd_locator: Cell::new(TEST_LOCATOR),
+        rd_smgr: Default::default(),
+        rd_id: REL_OID,
+        rd_backend: INVALID_PROC_NUMBER,
+        rd_islocaltemp: false,
+        rd_isvalid: Cell::new(true),
+        rd_createSubid: Cell::new(0),
+        rd_newRelfilelocatorSubid: Cell::new(0),
+        rd_firstRelfilelocatorSubid: Cell::new(0),
+        rd_droppedSubid: Cell::new(0),
+        rd_lockInfo: LockInfoData { lockRelId: LockRelId { relId: REL_OID, dbId: 5 } },
+        rd_rel: FormData_pg_class {
+            relname,
+            relnamespace: 2200,
+            reltype: 0,
+            relowner: 10,
+            relam: 2,
+            relfilenode: REL_OID,
+            reltablespace: 0,
+            relpages: 0,
+            reltuples: -1.0,
+            relallvisible: 0,
+            reltoastrelid: 0,
+            relhasindex: false,
+            relisshared: false,
+            relpersistence: RELPERSISTENCE_PERMANENT,
+            relkind: RELKIND_RELATION,
+            relhassubclass: false,
+            relrowsecurity: false,
+            relispopulated: true,
+            relreplident: b'd',
+            relispartition: false,
+            relfrozenxid: 3,
+            relminmxid: 1,
+        },
+        rd_att,
+        rd_index: None,
+        rd_opcintype: mcx::PgVec::new_in(mcx),
+        rd_opfamily: mcx::PgVec::new_in(mcx),
+        rd_indoption: mcx::PgVec::new_in(mcx),
+        rd_indcollation: mcx::PgVec::new_in(mcx),
+        rd_options: None,
+        pgstat_enabled: Cell::new(true),
+        pgstat_link: Cell::new((0, core::ptr::null_mut())),
+        rd_amcache: Default::default(),
+        rd_amcache_hash: Default::default(),
+        rd_amcache_gin: Default::default(),
+        rd_amcache_spgist: Default::default(),
+        rd_support: mcx::PgVec::new_in(mcx),
+        rd_supportinfo: Default::default(),
+        rd_opcoptions: Default::default(),
+        rd_indexlist: Default::default(),
+        rd_trigdesc: Default::default(),
+        rd_hastriggers: false,
+        rd_hasrules: false,
+    }
+}
+
+// freespace.c:892: CHECK_FOR_INTERRUPTS() on every slot of every upper-level
+// page, so a pending cancel aborts the tree walk (audit-18.6 b210).
+#[test]
+fn vacuum_checks_for_interrupts_per_slot() {
+    let _s = serial();
+    let mut pages = vec![fsm_test_page(), fsm_test_page(), fsm_test_page()];
+    let _fork = install_fsm_fork(&mut pages);
+    let ctx = mcx::MemoryContext::new("fsm_vacuum");
+    let rel = test_relation(ctx.mcx());
+
+    // Nothing pending: the whole tree is walked, ProcessInterrupts never runs.
+    INTERRUPT_CALLS.store(0, Relaxed);
+    init_small::globals::SetInterruptPending(false);
+    FreeSpaceMapVacuum(&rel).unwrap();
+    assert_eq!(INTERRUPT_CALLS.load(Relaxed), 0);
+
+    // A pending cancel is raised from the first slot; the walk does not
+    // continue to the remaining slots/pages.
+    init_small::globals::SetInterruptPending(true);
+    let res = FreeSpaceMapVacuum(&rel);
+    init_small::globals::SetInterruptPending(false);
+    let err = res.expect_err("FreeSpaceMapVacuum ignored a pending interrupt");
+    assert!(
+        err.message().contains("canceling statement due to user request"),
+        "{err:?}"
+    );
+    assert_eq!(INTERRUPT_CALLS.load(Relaxed), 1);
+
+    // Range form goes through the same loop.
+    init_small::globals::SetInterruptPending(true);
+    let res = FreeSpaceMapVacuumRange(&rel, 0, 10);
+    init_small::globals::SetInterruptPending(false);
+    assert!(res.is_err(), "FreeSpaceMapVacuumRange ignored a pending interrupt");
+    assert_eq!(INTERRUPT_CALLS.load(Relaxed), 2);
+    assert_eq!(LOCK_STATE.load(Relaxed), 0, "content lock leaked across the error");
+}
+
+// freespace.c:341: `!InRecovery && RelationNeedsWAL(rel) && XLogHintBitIsNeeded()`
+// gates the truncation FPI; RelationNeedsWAL (rel.h) is false under
+// wal_level=minimal for a relation created/rewritten in this transaction.
+#[test]
+fn prepare_truncate_fpi_follows_relation_needs_wal() {
+    let _s = serial();
+    let mut pages = vec![fsm_test_page(), fsm_test_page(), fsm_test_page()];
+    let _fork = install_fsm_fork(&mut pages);
+    let ctx = mcx::MemoryContext::new("fsm_truncate");
+    let rel = test_relation(ctx.mcx());
+    WAL_LEVEL.store(0, Relaxed); // minimal
+    WAL_LOG_HINTS.store(true, Relaxed);
+
+    // Truncating to 1 block clears slots 1.. of leaf page 0 (physical block
+    // 2); the new FSM length is that block + 1.
+    let expect_fpis = |rel: &RelationData<'_>, n: usize, what: &str| {
+        NEWPAGE_LOGS.store(0, Relaxed);
+        assert_eq!(FreeSpaceMapPrepareTruncateRel(rel, 1).unwrap(), 3);
+        assert_eq!(NEWPAGE_LOGS.load(Relaxed), n, "{what}");
+        assert_eq!(LOCK_STATE.load(Relaxed), 0);
+    };
+
+    // Older permanent relation: RelationNeedsWAL, FPI logged.
+    expect_fpis(&rel, 1, "permanent relation from an earlier transaction");
+    // Created in this transaction under wal_level=minimal: no WAL at all.
+    rel.rd_createSubid.set(1);
+    expect_fpis(&rel, 0, "rd_createSubid set under wal_level=minimal");
+    rel.rd_createSubid.set(0);
+    rel.rd_firstRelfilelocatorSubid.set(1);
+    expect_fpis(&rel, 0, "rd_firstRelfilelocatorSubid set under wal_level=minimal");
+    // wal_level=replica: XLogIsNeeded, so the same relation is WAL-logged.
+    WAL_LEVEL.store(1, Relaxed);
+    expect_fpis(&rel, 1, "rd_firstRelfilelocatorSubid set under wal_level=replica");
+    // Neither wal_log_hints nor checksums: no FPI regardless.
+    WAL_LOG_HINTS.store(false, Relaxed);
+    rel.rd_firstRelfilelocatorSubid.set(0);
+    expect_fpis(&rel, 0, "XLogHintBitIsNeeded false");
 }
 
 // First slot >= min at/after fp_next_slot, wrapping (fsmpage.c's result).
@@ -159,11 +436,20 @@ fn search_torn_page_repairs_under_exclusive_and_restarts() {
 
     RELOCKS.store(0, Relaxed);
     DIRTY_HINTS.store(0, Relaxed);
+    take_logged();
     // Shared-lock caller: the repair relocks exclusive, rebuilds, restarts,
     // and still finds the genuine slot.
     assert_eq!(search(&mut page, 200, false, false), -1);
     assert!(RELOCKS.load(Relaxed) >= 1, "repair did not take the exclusive lock");
     assert!(DIRTY_HINTS.load(Relaxed) >= 1);
+    // fsmpage.c:276: elog(DEBUG1, "fixing corrupt FSM block %u, relation
+    // %u/%u/%u") from BufferGetTag, once per repair.
+    let logged = take_logged();
+    assert_eq!(
+        logged,
+        vec![(DEBUG1, "fixing corrupt FSM block 0, relation 1663/5/91000".to_string(), None)],
+        "{logged:?}"
+    );
     assert_eq!(view(&mut page).node(0), 90, "rebuild did not fix the root");
     assert_eq!(search(&mut page, 90, false, true), 7);
 }

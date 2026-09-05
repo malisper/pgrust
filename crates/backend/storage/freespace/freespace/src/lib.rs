@@ -161,10 +161,10 @@ pub fn FreeSpaceMapPrepareTruncateRel(
             // MarkBufferDirty plus the FPI MarkBufferDirtyHint would have
             // logged, so the page cannot diverge from the rest of the file.
             bufmgr_seams::mark_buffer_dirty::call(pin.buffer())?;
+            // freespace.c:341
             if !xlogutils_seams::in_recovery::call()
-                && rel.is_permanent()
-                && (transam_xlog_seams::data_checksums_enabled::call()
-                    || guc_tables::vars::wal_log_hints.read())
+                && relation_needs_wal(rel)
+                && xlog_hint_bit_is_needed()
             {
                 xloginsert_seams::log_newpage_buffer::call(pin.buffer(), false)?;
             }
@@ -235,6 +235,9 @@ fn fsm_vacuum_page(
 
         let mut eof = false;
         for slot in start_slot..=end_slot {
+            // freespace.c:892
+            check_for_interrupts()?;
+
             let child_avail = if !eof {
                 let (avail, child_eof) =
                     fsm_vacuum_page(rel, fsm_get_child(addr, slot as u16), start, end)?;
@@ -550,12 +553,21 @@ fn invalid_fsm_request_size(needed: Size) -> Box<PgError> {
     Box::new(PgError::error(std::format!("invalid FSM request size {needed}")))
 }
 
+// C's CHECK_FOR_INTERRUPTS() (miscadmin.h): the inline InterruptPending gate,
+// then ProcessInterrupts via the tcop seam; a raised cancel/die comes back as
+// the Err and unwinds the tree walk (same pattern as lmgr/heapam).
+#[inline(always)]
+fn check_for_interrupts() -> PgResult<()> {
+    if init_small::globals::InterruptPending() {
+        return postgres_seams::check_for_interrupts::call();
+    }
+    Ok(())
+}
+
 #[cold]
 #[inline(never)]
 // RelationNeedsWAL (rel.h) / XLogHintBitIsNeeded (xlog.h); uninstalled
 // slots read as boot defaults (bufmgr precedent).
-// Ported ahead of the FSM WAL/hint-bit arms (unported-census 2026-08-05 port program).
-#[allow(dead_code)]
 fn relation_needs_wal(rel: &RelationData<'_>) -> bool {
     let xlog_is_needed = guc_tables::vars::wal_level.installed()
         && guc_tables::vars::wal_level.read() >= 1;
@@ -566,8 +578,6 @@ fn relation_needs_wal(rel: &RelationData<'_>) -> bool {
                     == types_core::InvalidSubTransactionId))
 }
 
-// Ported ahead of the FSM hint-bit dirtying arm (unported-census 2026-08-05 port program).
-#[allow(dead_code)]
 fn xlog_hint_bit_is_needed() -> bool {
     (guc_tables::vars::wal_log_hints.installed() && guc_tables::vars::wal_log_hints.read())
         || (transam_xlog_seams::data_checksums_enabled::is_installed()

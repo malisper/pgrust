@@ -2,7 +2,7 @@ use core::ptr::NonNull;
 
 use ::bufmgr_seams::{BufferPin, BUFFER_LOCK_EXCLUSIVE, BUFFER_LOCK_UNLOCK};
 use ::types_core::BLCKSZ;
-use ::types_error::PgResult;
+use ::types_error::{PgResult, DEBUG1};
 use ::types_storage::bufpage::SizeOfPageHeaderData;
 
 const CONTENTS_OFF: usize = (SizeOfPageHeaderData + 7) & !7;
@@ -158,8 +158,17 @@ pub fn fsm_search_avail(
             if childnodeno < NODES_PER_PAGE && page.node(childnodeno) >= minvalue {
                 nodeno = childnodeno;
             } else {
-                // Torn page: repair under an exclusive lock and restart
-                // (C's DEBUG1 elog here is log-only, skipped).
+                // Torn page: repair under an exclusive lock and restart.
+                // fsmpage.c:276
+                let tag = bufmgr_seams::buffer_get_tag::call(pin.buffer());
+                elog_seams::ereport_msg::call(
+                    DEBUG1,
+                    format!(
+                        "fixing corrupt FSM block {}, relation {}/{}/{}",
+                        tag.blockNum, tag.spcOid, tag.dbOid, tag.relNumber
+                    ),
+                    None,
+                )?;
                 if !exclusive_lock_held {
                     bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_UNLOCK)?;
                     bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;

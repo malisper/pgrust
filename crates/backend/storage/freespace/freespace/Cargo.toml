@@ -18,6 +18,8 @@ xlogutils_seams = { path = "../../../access/transam/xlogutils_seams" }
 transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
 guc_tables = { path = "../../../utils/misc/guc_tables" }
 init_small = { path = "../../../utils/init/init_small" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+elog_seams = { path = "../../../utils/error/elog_seams" }
 
 [dev-dependencies]
 test_boot = { path = "../../../../_support/test_boot" }

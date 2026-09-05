@@ -164,6 +164,12 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // BufferGetTag(buffer, &rlocator, &forknum, &blknum) (bufmgr.c): the
+    // pinned buffer's tag, for callers that only hold the Buffer.
+    pub fn buffer_get_tag(buffer: Buffer) -> types_storage::buf::buftag
+);
+
+seam_core::seam!(
     // BufferGetPage: BLCKSZ bytes, valid while pinned.
     pub fn buffer_get_page(buffer: Buffer) -> core::ptr::NonNull<u8>
 );
