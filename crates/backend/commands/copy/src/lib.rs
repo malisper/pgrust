@@ -36,6 +36,41 @@ pub use to::{BeginCopyTo, DoCopyTo, EndCopyTo};
 pub(crate) fn open_failure_hint_applies(save_errno: i32) -> bool {
     save_errno == libc::ENOENT || save_errno == libc::EACCES
 }
+
+/// copyfrom.c:1886 / copyto.c:976: fstat on the just-opened COPY file
+/// failed — `could not stat file "%s": %m` under errcode_for_file_access,
+/// never a silent fallback to "not a directory, size 0".
+pub(crate) fn could_not_stat_file(filename: &str, e: &std::io::Error) -> Box<PgError> {
+    Box::new(
+        elog::ereport(types_error::ERROR)
+            .with_saved_errno(e.raw_os_error().unwrap_or(0))
+            .errcode_for_file_access()
+            .errmsg(format!("could not stat file \"{filename}\": %m"))
+            .into_error(),
+    )
+}
+
+/// copy.c:574: C has no parquet format. The pgrust reader serves FORMAT
+/// 'parquet' for server-side files on the FROM side only; every other
+/// source (PROGRAM, STDIN) gets C's own refusal — ERRCODE_INVALID_PARAMETER_VALUE
+/// `COPY format "parquet" not recognized` at the format option's position.
+pub(crate) fn parquet_format_not_recognized(
+    options: &NodeList<'_>,
+    src: Option<&str>,
+) -> Box<PgError> {
+    let mut e = PgError::error("COPY format \"parquet\" not recognized")
+        .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE);
+    let location = options
+        .iter()
+        .filter_map(|o| o.as_def_elem())
+        .find(|d| d.defname == Some("format"))
+        .map(|d| d.location)
+        .unwrap_or(-1);
+    if location >= 0 {
+        e = e.with_cursor_position(errpos(src, location));
+    }
+    Box::new(e)
+}
 #[doc(hidden)]
 pub use fromparse::bench_internals;
 #[doc(hidden)]
@@ -624,6 +659,19 @@ pub fn ProcessCopyOptions<'s>(
     let mut quote: Option<&str> = None;
     let mut escape: Option<&str> = None;
 
+    // pgrust extension: FORMAT 'parquet' is a read-side (COPY FROM) format and
+    // MATCH_BY / COERCE_EPOCH are its companion options. C (copy.c:574, :721)
+    // knows none of them: on the COPY TO side the format is "not recognized"
+    // (ERRCODE_INVALID_PARAMETER_VALUE, at the option), and outside a parquet
+    // load the companion options are unrecognized options
+    // (ERRCODE_SYNTAX_ERROR, at the option) — in the loop, at their own
+    // position, exactly as C reports them.
+    let parquet_from = is_from
+        && options.iter().filter_map(|o| o.as_def_elem()).any(|d| {
+            d.defname == Some("format")
+                && def_string_transient(d).is_ok_and(|fmt| fmt == "parquet")
+        });
+
     for option in options.iter() {
         let d = option.as_def_elem().expect("COPY options: DefElem list");
         let name = d.defname.unwrap_or("");
@@ -637,7 +685,7 @@ pub fn ProcessCopyOptions<'s>(
                     "text" => {}
                     "csv" => opts.csv_mode = true,
                     "binary" => opts.binary = true,
-                    "parquet" => opts.parquet = true,
+                    "parquet" if is_from => opts.parquet = true,
                     fmt => {
                         return Err(Box::new(
                             PgError::error(format!("COPY format \"{fmt}\" not recognized"))
@@ -762,7 +810,7 @@ pub fn ProcessCopyOptions<'s>(
                 opts.reject_limit = def_reject_limit(d)?;
             }
             // pg_parquet's FROM-side column-matching option.
-            "match_by" => {
+            "match_by" if parquet_from => {
                 if match_by_specified {
                     return Err(conflicting_option(src, d.location));
                 }
@@ -782,7 +830,7 @@ pub fn ProcessCopyOptions<'s>(
                 }
             }
             // Opt-in epoch coercion for the parquet reader (FROM side).
-            "coerce_epoch" => {
+            "coerce_epoch" if parquet_from => {
                 if coerce_epoch_specified {
                     return Err(conflicting_option(src, d.location));
                 }
@@ -810,13 +858,10 @@ pub fn ProcessCopyOptions<'s>(
     }
 
     if opts.parquet {
-        // Read-only surface (product ruling): the writer is not planned.
-        if !is_from {
-            return Err(Box::new(
-                PgError::error("COPY TO with parquet format is not supported")
-                    .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
-            ));
-        }
+        // Read-only surface (product ruling): the writer is not planned, so
+        // COPY TO never reaches here (the format arm above refuses it as C
+        // does).
+        debug_assert!(is_from);
         // Typed self-describing input: none of the text-shape options apply.
         if delim.is_some() {
             return Err(cannot_in_parquet("DELIMITER"));
@@ -857,16 +902,10 @@ pub fn ProcessCopyOptions<'s>(
                     .with_sqlstate(ERRCODE_SYNTAX_ERROR),
             ));
         }
-    } else if match_by_specified {
-        return Err(Box::new(
-            PgError::error("COPY MATCH_BY requires parquet format")
-                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
-        ));
-    } else if coerce_epoch_specified {
-        return Err(Box::new(
-            PgError::error("COPY COERCE_EPOCH requires parquet format")
-                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
-        ));
+    } else {
+        // The companion options are only parsed under FORMAT 'parquet'; any
+        // other list refused them as unrecognized in the loop above.
+        debug_assert!(!match_by_specified && !coerce_epoch_specified);
     }
 
     let delim = delim.unwrap_or(if opts.csv_mode { "," } else { "\t" });

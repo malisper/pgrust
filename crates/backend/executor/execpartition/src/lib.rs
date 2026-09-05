@@ -813,14 +813,26 @@ fn no_partition_error(
         Ok(true)
     })()
     .unwrap_or(false);
+    // errtable(rel) (execPartition.c:335): SCHEMA NAME / TABLE NAME ride the
+    // error on both arms.
+    let errtable = |e: PgError| -> PgError {
+        e.with_schema_name(
+            lsyscache::misc::get_namespace_name(mcx, pd.rel.rd_rel.relnamespace)
+                .ok()
+                .flatten()
+                .map(|s| s.as_str().to_string())
+                .unwrap_or_default(),
+        )
+        .with_table_name(pd.rel.name().to_string())
+    };
     if !show_detail {
-        return Box::new(
+        return Box::new(errtable(
             PgError::new(
                 ERROR,
                 format!("no partition of relation \"{}\" found for row", pd.rel.name()),
             )
             .with_sqlstate(ERRCODE_CHECK_VIOLATION),
-        );
+        ));
     }
     // ExecFindPartition passes maxfieldlen = 64 (execPartition.c:328).
     const MAX_FIELD_LEN: usize = 64;
@@ -867,7 +879,7 @@ fn no_partition_error(
         }
     }
     keydesc.push(')');
-    Box::new(
+    Box::new(errtable(
         PgError::new(
             ERROR,
             format!(
@@ -877,5 +889,5 @@ fn no_partition_error(
         )
         .with_detail(format!("Partition key of the failing row contains {keydesc}."))
         .with_sqlstate(ERRCODE_CHECK_VIOLATION),
-    )
+    ))
 }

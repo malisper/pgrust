@@ -225,6 +225,13 @@ fn begin_copy_from_guts<'mcx: 's, 's>(
     source_text: Option<&str>,
 ) -> PgResult<CopyFromState<'mcx, 's>> {
     let opts = ProcessCopyOptions(mcx, true, options, source_text)?;
+    // C has no parquet format (copy.c:574). The pgrust reader serves
+    // server-side files only: a PROGRAM or STDIN source under FORMAT
+    // 'parquet' gets C's own refusal at the format option, not a pgrust
+    // "not supported" shape.
+    if opts.parquet && (is_program || (filename.is_none() && data_source_cb.is_none())) {
+        return Err(crate::parquet_format_not_recognized(options, source_text));
+    }
     let tup_desc = &rel.rd_att;
     let attnumlist = CopyGetAttnums(mcx, tup_desc, Some(rel), attnamelist)?;
     let num_phys_attrs = tup_desc.natts as usize;
@@ -350,14 +357,9 @@ fn begin_copy_from_guts<'mcx: 's, 's>(
     let mut progress_type = PROGRESS_COPY_TYPE_PIPE;
     let mut progress_bytes_total: i64 = 0;
     let src = if opts.parquet {
-        // Server-side file only in this increment (STDIN and callback
-        // sources error cleanly inside open_source / here).
-        if is_program {
-            return Err(Box::new(
-                PgError::error("COPY FROM PROGRAM with parquet format is not supported")
-                    .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
-            ));
-        }
+        // Server-side file only in this increment (PROGRAM and STDIN were
+        // refused above with C's format error; the callback source is
+        // internal and errors cleanly here).
         if data_source_cb.is_some() {
             return Err(Box::new(
                 PgError::error(
@@ -424,10 +426,13 @@ fn begin_copy_from_guts<'mcx: 's, 's>(
                 e.finish(loc("BeginCopyFrom"))?;
             }
             progress_type = PROGRESS_COPY_TYPE_FILE;
-            let (is_dir, size) = fd::with_allocated_stdio(fd, |f| {
-                f.metadata().map(|m| (m.is_dir(), m.len())).unwrap_or((false, 0))
-            })
-            .unwrap_or((false, 0));
+            // fstat (copyfrom.c:1886): a failure is an error, never a silent
+            // "not a directory, size 0".
+            let (is_dir, size) = match fd::with_allocated_stdio(fd, |f| f.metadata()) {
+                Some(Ok(m)) => (m.is_dir(), m.len()),
+                Some(Err(e)) => return Err(crate::could_not_stat_file(filename, &e)),
+                None => panic!("COPY FROM: AllocateFile index {fd} vanished"),
+            };
             if is_dir {
                 return Err(Box::new(
                     PgError::error(format!("\"{filename}\" is a directory"))
@@ -741,6 +746,8 @@ fn copy_from_body<'mcx>(
         cstate.volatile_defexprs || where_clause_volatile(cstate)? || has_br || has_ir;
     let mut single_eval_cx = MemoryContext::new_bump("CopySingleInsertEval");
     let mut check_exprs = None;
+    // C ri_PartitionCheckExpr: compiled once per COPY, on first use.
+    let mut partition_check: Option<mcx::PgBox<'mcx, execexpr::ExprState<'mcx>>> = None;
 
     let has_generated_stored =
         rel.rd_att.constr.as_deref().is_some_and(|c| c.has_generated_stored);
@@ -837,6 +844,21 @@ fn copy_from_body<'mcx>(
             None,
             Some(&inserted_cols),
         )?;
+
+        // ExecPartitionCheck (copyfrom.c:1361-1368): a COPY aimed directly at
+        // a partition has no tuple routing (proute == NULL), so every row is
+        // checked against the partition constraint, BR trigger or not.
+        if rel.rd_rel.relispartition
+            && !execpartition::exec_partition_check(mcx, &mut partition_check, rel, slot)?
+        {
+            return Err(execpartition::partition_constraint_violation(
+                mcx,
+                rel,
+                slot,
+                Some(&inserted_cols),
+                None,
+            ));
+        }
 
         if single_insert {
             single_eval_cx.reset();

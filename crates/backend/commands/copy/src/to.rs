@@ -108,6 +108,10 @@ pub struct CopyToState<'mcx, 's> {
     // None while no conversion applies.
     null_print_client: Option<PgVec<'mcx, u8>>,
     bytes_processed: u64,
+    // Prefix of fe_msgbuf already counted into bytes_processed: the buffered
+    // destinations defer the write past C's per-row fwrite, but the progress
+    // accounting stays per row (copyto.c:494-497).
+    fe_msgbuf_accounted: usize,
     rowcx: MemoryContext,
     query_desc: Option<OwnedQueryDesc>,
     tupdesc: Option<Rc<TupleDescData<'static>>>,
@@ -201,15 +205,21 @@ pub fn BeginCopyTo<'mcx: 's, 's>(
                 ));
             }
             // C's BeginCopyTo temporarily sets the process umask to
-            // S_IWGRP|S_IWOTH (0o022) around this open, so the output file
-            // lands at the fopen default 0666 masked to COPY_TO_FILE_MODE
-            // (0o644). umask(2) is process-global; in pgrust every backend is a
-            // thread of one process (unlike C's process-per-backend), so
-            // mutating it would race every other thread's concurrent file
-            // creation, and interleaved save/restore pairs could corrupt the
-            // process umask durably. Instead open under the server's own umask
-            // and set the exact resulting mode on the fd directly, exactly as
-            // syslogger's logfile_open does for this same hazard.
+            // S_IWGRP|S_IWOTH (0o022) around this open (copyto.c:952-961), so
+            // a file the fopen CREATES lands at the fopen default 0666 masked
+            // to COPY_TO_FILE_MODE (0o644) — while a file that already exists
+            // is only truncated: fopen never touches its mode, whoever owns it.
+            // umask(2) is process-global; in pgrust every backend is a thread
+            // of one process (unlike C's process-per-backend), so mutating it
+            // would race every other thread's concurrent file creation, and
+            // interleaved save/restore pairs could corrupt the process umask
+            // durably. Instead note whether the target pre-exists, open under
+            // the server's own umask, and set the exact resulting mode on the
+            // fd only for a file this open created — exactly as syslogger's
+            // logfile_open does for this same hazard. (metadata follows
+            // symlinks, as fopen does.)
+            #[cfg_attr(target_family = "wasm", allow(unused_variables))]
+            let preexisting = std::fs::metadata(filename).is_ok();
             let copy_file = fd::AllocateFile(filename, "wb")?;
             if copy_file < 0 {
                 // copy errno because ereport subfunctions might change it
@@ -226,14 +236,22 @@ pub fn BeginCopyTo<'mcx: 's, 's>(
                 }
                 e.finish(loc("BeginCopyTo"))?;
             }
-            // fchmod to C's resulting mode without touching process-global
-            // umask. wasm32/WASI carries no mode bits, so this is a no-op there.
+            // fchmod a file we created to C's resulting mode without touching
+            // process-global umask; a pre-existing file keeps its mode (C's
+            // fopen truncates it and nothing else — a 0600 file stays 0600,
+            // and a group-writable file owned by another user, where fchmod
+            // would fail with EPERM, is written as C writes it).
+            // wasm32/WASI carries no mode bits, so this is a no-op there.
             #[cfg(not(target_family = "wasm"))]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let set = fd::with_allocated_stdio(copy_file, |f| {
-                    f.set_permissions(std::fs::Permissions::from_mode(COPY_TO_FILE_MODE))
-                });
+                let set = if preexisting {
+                    None
+                } else {
+                    fd::with_allocated_stdio(copy_file, |f| {
+                        f.set_permissions(std::fs::Permissions::from_mode(COPY_TO_FILE_MODE))
+                    })
+                };
                 if let Some(Err(e)) = set {
                     ereport(ERROR)
                         .with_saved_errno(e.raw_os_error().unwrap_or(0))
@@ -242,15 +260,16 @@ pub fn BeginCopyTo<'mcx: 's, 's>(
                         .finish(loc("BeginCopyTo"))?;
                 }
             }
-            let (is_dir, blksize) = fd::with_allocated_stdio(copy_file, |f| {
-                f.metadata()
-                    .map(|m| {
-                        use std::os::unix::fs::MetadataExt;
-                        (m.is_dir(), m.blksize() as usize)
-                    })
-                    .unwrap_or((false, 0))
-            })
-            .unwrap_or((false, 0));
+            // fstat (copyto.c:976): a failure is an error, never a silent
+            // "not a directory, default buffer".
+            let (is_dir, blksize) = match fd::with_allocated_stdio(copy_file, |f| f.metadata()) {
+                Some(Ok(m)) => {
+                    use std::os::unix::fs::MetadataExt;
+                    (m.is_dir(), m.blksize() as usize)
+                }
+                Some(Err(e)) => return Err(crate::could_not_stat_file(filename, &e)),
+                None => panic!("COPY TO: AllocateFile index {copy_file} vanished"),
+            };
             if is_dir {
                 return Err(Box::new(
                     PgError::error(format!("\"{filename}\" is a directory"))
@@ -299,6 +318,7 @@ pub fn BeginCopyTo<'mcx: 's, 's>(
         file_encoding,
         need_transcoding,
         bytes_processed: 0,
+        fe_msgbuf_accounted: 0,
         rowcx: MemoryContext::new_bump("COPY TO"),
         query_desc,
         tupdesc,
@@ -521,6 +541,10 @@ pub fn DoCopyTo<'mcx>(
                 ForwardScanDirection,
                 &mut slot,
             )? {
+                // copyto.c:1082: per row, not only at the scan's block
+                // boundaries — a cancel lands on the very next tuple.
+                postgres_seams::check_for_interrupts::call()?;
+
                 exectuples::slot_getallattrs(&mut slot);
                 CopyOneRowTo(cstate, &mut slot, &mut out_functions)?;
                 processed += 1;
@@ -770,32 +794,51 @@ fn end_of_row(cstate: &mut CopyToState<'_, '_>) -> PgResult<()> {
     send_end_of_row(cstate)
 }
 
+// The progress update of CopySendEndOfRow (copyto.c:494-497): everything in
+// fe_msgbuf not yet counted joins bytes_processed, and pg_stat_progress_copy
+// sees it now — per row, on every destination, whether or not the bytes
+// have reached the file yet.
+fn account_fe_msgbuf(cstate: &mut CopyToState<'_, '_>) {
+    let unaccounted = cstate.fe_msgbuf.len() - cstate.fe_msgbuf_accounted;
+    if unaccounted == 0 {
+        return;
+    }
+    cstate.bytes_processed += unaccounted as u64;
+    cstate.fe_msgbuf_accounted = cstate.fe_msgbuf.len();
+    pgstat_progress_update_param(PROGRESS_COPY_BYTES_PROCESSED, cstate.bytes_processed as i64);
+}
+
+// fe_msgbuf handed off (written or sent): nothing left to account.
+fn reset_fe_msgbuf(cstate: &mut CopyToState<'_, '_>) {
+    cstate.fe_msgbuf.reset();
+    cstate.fe_msgbuf_accounted = 0;
+}
+
 // CopySendEndOfRow.
 fn send_end_of_row(cstate: &mut CopyToState<'_, '_>) -> PgResult<()> {
     match cstate.dest {
         CopyDest::File { .. } => {
+            account_fe_msgbuf(cstate);
             if cstate.fe_msgbuf.len() >= FILE_FLUSH_THRESHOLD {
                 flush_to_file(cstate)?;
             }
         }
         CopyDest::Program { .. } => {
+            account_fe_msgbuf(cstate);
             if cstate.fe_msgbuf.len() >= FILE_FLUSH_THRESHOLD {
                 flush_to_program(cstate)?;
             }
         }
         CopyDest::Stdout => {
+            account_fe_msgbuf(cstate);
             if cstate.fe_msgbuf.len() >= FILE_FLUSH_THRESHOLD {
                 flush_to_stdout(cstate)?;
             }
         }
         CopyDest::Frontend => {
             pqcomm::pq_putmessage(b'd', cstate.fe_msgbuf.as_bytes())?;
-            cstate.bytes_processed += cstate.fe_msgbuf.len() as u64;
-            pgstat_progress_update_param(
-                PROGRESS_COPY_BYTES_PROCESSED,
-                cstate.bytes_processed as i64,
-            );
-            cstate.fe_msgbuf.reset();
+            account_fe_msgbuf(cstate);
+            reset_fe_msgbuf(cstate);
         }
     }
     Ok(())
@@ -858,9 +901,8 @@ fn flush_to_file(cstate: &mut CopyToState<'_, '_>) -> PgResult<()> {
             .errmsg("could not write to COPY file: %m")
             .finish(loc("CopySendEndOfRow"))?;
     }
-    cstate.bytes_processed += cstate.fe_msgbuf.len() as u64;
-    pgstat_progress_update_param(PROGRESS_COPY_BYTES_PROCESSED, cstate.bytes_processed as i64);
-    cstate.fe_msgbuf.reset();
+    account_fe_msgbuf(cstate);
+    reset_fe_msgbuf(cstate);
     Ok(())
 }
 
@@ -891,9 +933,8 @@ fn flush_to_program(cstate: &mut CopyToState<'_, '_>) -> PgResult<()> {
                 .finish(loc("CopySendEndOfRow"))?;
         }
     }
-    cstate.bytes_processed += cstate.fe_msgbuf.len() as u64;
-    pgstat_progress_update_param(PROGRESS_COPY_BYTES_PROCESSED, cstate.bytes_processed as i64);
-    cstate.fe_msgbuf.reset();
+    account_fe_msgbuf(cstate);
+    reset_fe_msgbuf(cstate);
     Ok(())
 }
 
@@ -935,9 +976,8 @@ fn flush_to_stdout(cstate: &mut CopyToState<'_, '_>) -> PgResult<()> {
             .errmsg("could not write to COPY file: %m")
             .finish(loc("CopySendEndOfRow"))?;
     }
-    cstate.bytes_processed += cstate.fe_msgbuf.len() as u64;
-    pgstat_progress_update_param(PROGRESS_COPY_BYTES_PROCESSED, cstate.bytes_processed as i64);
-    cstate.fe_msgbuf.reset();
+    account_fe_msgbuf(cstate);
+    reset_fe_msgbuf(cstate);
     Ok(())
 }
 

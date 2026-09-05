@@ -626,3 +626,121 @@ fn open_failure_hint_only_for_enoent_and_eacces() {
         assert!(!crate::open_failure_hint_applies(e), "errno {e} must not carry the HINT");
     }
 }
+
+// ---- audit-18.6 remediation b016: the parquet extension's option surface
+// must not leak non-C error shapes where the extension is not served
+// (copy.c:574 format arm, copy.c:721 unrecognized-option arm). ----
+
+fn defelem_at<'m>(
+    mcx: Mcx<'m>,
+    name: &'m str,
+    sval: &'m str,
+    location: i32,
+) -> types_nodes::Node<'m> {
+    let arg = types_nodes::Node::mk(mcx, types_nodes::String { sval }).unwrap();
+    types_nodes::Node::mk(
+        mcx,
+        types_nodes::parsenodes::DefElem { defname: Some(name), arg: Some(arg), location, ..Default::default() },
+    )
+    .unwrap()
+}
+
+// COPY t TO STDOUT WITH (format parquet): C has no such format — 22023
+// 'COPY format "parquet" not recognized' with the cursor on the option.
+#[test]
+fn parquet_format_on_copy_to_is_not_recognized_like_c() {
+    setup_fd();
+    let mcx = test_ctx().mcx();
+    let src = "COPY t TO STDOUT WITH (format parquet)";
+    let opts = opt_list(mcx, &[defelem_at(mcx, "format", "parquet", 23)]);
+    let Err(e) = crate::ProcessCopyOptions(mcx, false, &opts, Some(src)) else {
+        panic!("expected error")
+    };
+    assert_eq!(e.message(), "COPY format \"parquet\" not recognized");
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_INVALID_PARAMETER_VALUE);
+    assert_eq!(e.cursor_position(), Some(24));
+}
+
+// COPY (SELECT 1) TO STDOUT WITH (match_by position): outside a parquet load
+// the companion option is, as in C, an unrecognized option — 42601 with the
+// cursor on it, not a 0A000 "requires parquet format".
+#[test]
+fn match_by_without_parquet_is_unrecognized_option_like_c() {
+    setup_fd();
+    let mcx = test_ctx().mcx();
+    let src = "COPY (SELECT 1) TO STDOUT WITH (match_by position)";
+    let opts = opt_list(mcx, &[defelem_at(mcx, "match_by", "position", 32)]);
+    let Err(e) = crate::ProcessCopyOptions(mcx, false, &opts, Some(src)) else {
+        panic!("expected error")
+    };
+    assert_eq!(e.message(), "option \"match_by\" not recognized");
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_SYNTAX_ERROR);
+    assert_eq!(e.cursor_position(), Some(33));
+}
+
+// COPY t FROM STDIN WITH (format csv, coerce_epoch true): same on the FROM
+// side under a non-parquet format, at the option's own position.
+#[test]
+fn coerce_epoch_without_parquet_is_unrecognized_option_like_c() {
+    setup_fd();
+    let mcx = test_ctx().mcx();
+    let src = "COPY t FROM STDIN WITH (format csv, coerce_epoch true)";
+    let opts = opt_list(
+        mcx,
+        &[defelem_at(mcx, "format", "csv", 24), defelem_at(mcx, "coerce_epoch", "true", 36)],
+    );
+    let Err(e) = crate::ProcessCopyOptions(mcx, true, &opts, Some(src)) else {
+        panic!("expected error")
+    };
+    assert_eq!(e.message(), "option \"coerce_epoch\" not recognized");
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_SYNTAX_ERROR);
+    assert_eq!(e.cursor_position(), Some(37));
+}
+
+// Control: the extension itself still parses on the FROM side, in either
+// option order.
+#[test]
+fn parquet_from_with_companion_options_still_parses() {
+    setup_fd();
+    let mcx = test_ctx().mcx();
+    for order in [["format", "match_by"], ["match_by", "format"]] {
+        let elems: Vec<_> = order
+            .iter()
+            .map(|n| match *n {
+                "format" => defelem_at(mcx, "format", "parquet", 0),
+                _ => defelem_at(mcx, "match_by", "name", 0),
+            })
+            .collect();
+        let opts = opt_list(mcx, &elems);
+        let parsed = crate::ProcessCopyOptions(mcx, true, &opts, None).unwrap();
+        assert!(parsed.parquet && parsed.parquet_match_by_name, "order {order:?}");
+    }
+}
+
+// copyfrom.c:1886 / copyto.c:976: an fstat failure on the opened COPY file
+// is 'could not stat file "%s": %m' under errcode_for_file_access (58030 for
+// EIO), never a silent "not a directory" fallback.
+#[test]
+fn could_not_stat_file_is_c_shaped() {
+    setup_fd();
+    let e = crate::could_not_stat_file("/x/y", &std::io::Error::from_raw_os_error(libc::EIO));
+    assert_eq!(e.message(), "could not stat file \"/x/y\": Input/output error");
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_IO_ERROR);
+}
+
+// copy.c:574 for the PROGRAM / STDIN sources of a parquet load: the refusal
+// BeginCopyFrom raises is C's format error, cursor on the format option.
+#[test]
+fn parquet_format_refusal_points_at_the_format_option() {
+    setup_fd();
+    let mcx = test_ctx().mcx();
+    let src = "COPY t FROM PROGRAM 'echo 1' WITH (format parquet)";
+    let opts = opt_list(mcx, &[defelem_at(mcx, "format", "parquet", 35)]);
+    let e = crate::parquet_format_not_recognized(&opts, Some(src));
+    assert_eq!(e.message(), "COPY format \"parquet\" not recognized");
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_INVALID_PARAMETER_VALUE);
+    assert_eq!(e.cursor_position(), Some(36));
+    // No source text: the error still carries C's message and SQLSTATE.
+    let e = crate::parquet_format_not_recognized(&opts, None);
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_INVALID_PARAMETER_VALUE);
+}
