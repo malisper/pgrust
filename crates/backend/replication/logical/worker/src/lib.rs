@@ -670,6 +670,11 @@ pub(crate) fn logicalrep_worker_die() -> PgResult<()> {
 // non-tablesync subset. main_arg = launcher worker-slot index.
 pub fn ApplyWorkerMain(main_arg: u64) -> PgResult<()> {
     let slot = main_arg as usize;
+    // InitializingApplyWorker = true (worker.c:4833) across attach + init;
+    // TablesyncWorkerMain (tablesync.c:1780) never sets it.
+    if launcher::worker_snapshot(slot).is_some_and(|w| !w.is_tablesync()) {
+        launcher::set_initializing_apply_worker(true);
+    }
     launcher::logicalrep_worker_attach(slot)?;
 
     // SetupApplyOrSyncWorker (worker.c:4784): SIGHUP reloads config; the
@@ -774,7 +779,7 @@ pub(crate) fn initialize_logrep_worker(
     // current apply operation commits. Registered here so both apply and
     // tablesync workers are protected (C's comment). The checkpointer-class
     // precedent for worker exit hooks: launcher's logicalrep_worker_onexit
-    // (on_shmem_exit at attach) and checkpointer's
+    // (before_shmem_exit at attach, launcher.c:744) and checkpointer's
     // pgstat_before_server_shutdown_cb (before_shmem_exit).
     ipc::before_shmem_exit(replorigin_reset, datum::Datum::null())?;
 
@@ -791,6 +796,9 @@ fn apply_worker_body(slot: usize) -> PgResult<()> {
     let Some(subname) = initialize_logrep_worker(mcx, &w)? else {
         return Ok(());
     };
+    // worker.c:4837: initialized — session locks may be taken from here on,
+    // and the exit callback releases them.
+    launcher::set_initializing_apply_worker(false);
 
     inval::invalidate::CacheRegisterSyscacheCallback(
         cache_syscache::cacheinfo::SUBSCRIPTIONRELMAP,

@@ -8540,6 +8540,7 @@ dependencies = [
 name = "launcher"
 version = "0.0.0"
 dependencies = [
+ "adt_timestamp",
  "bgworker",
  "datum",
  "elog",
@@ -8555,6 +8556,7 @@ dependencies = [
  "libc",
  "lmgr_proc",
  "lmgr_proc_seams",
+ "lock_seams",
  "logical_worker_seams",
  "mcx",
  "pg_subscription",
@@ -8563,6 +8565,7 @@ dependencies = [
  "postgres_seams",
  "procarray",
  "procsignal",
+ "shmem",
  "timestamp_seams",
  "types_core",
  "types_error",

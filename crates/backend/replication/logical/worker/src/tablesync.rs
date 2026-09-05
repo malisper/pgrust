@@ -3,8 +3,8 @@
 // columns, no binary copy_format — each refuses loudly. The state machine and
 // the apply<->sync worker handshake (SYNCWAIT -> CATCHUP -> SYNCDONE -> READY)
 // are ported 1:1; C's relmutex-guarded shared fields live in the launcher
-// pool behind its Mutex, and the last_start_times HTAB is the launcher ctx
-// HashMap.
+// pool behind its Mutex, and the per-worker last_start_times HTAB is the
+// launcher ctx's (subid, relid)-keyed tablesync map.
 #![allow(non_snake_case)]
 
 use std::cell::Cell;
@@ -215,6 +215,10 @@ fn process_syncing_tables_for_apply(mcx: Mcx<'static>, current_lsn: XLogRecPtr) 
         TABLE_STATES_VALID.set(true);
         rstates.iter().map(|r| (r.relid, r.state, r.lsn)).collect()
     };
+    // tablesync.c:455: every table READY -> drop the start-times table.
+    if not_ready.is_empty() {
+        launcher::tablesync_start_times_destroy(subid);
+    }
 
     for (relid, mut state, mut lsn) in not_ready {
         if state == SUBREL_STATE_SYNCDONE {
@@ -262,7 +266,7 @@ fn process_syncing_tables_for_apply(mcx: Mcx<'static>, current_lsn: XLogRecPtr) 
                 if nsync < launcher::max_sync_workers_per_subscription() as usize {
                     let now = timestamp_seams::get_current_timestamp::call();
                     let interval = guc_tables::vars::wal_retrieve_retry_interval.read();
-                    if launcher::tablesync_start_time_check_and_set(relid, now, interval) {
+                    if launcher::tablesync_start_time_check_and_set(subid, relid, now, interval) {
                         let w = launcher::worker_snapshot(
                             launcher::my_worker_slot().expect("attached"),
                         )

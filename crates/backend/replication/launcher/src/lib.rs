@@ -3,8 +3,11 @@
 // LogicalRepCtx shmem struct + LogicalRepWorkerLock LWLock collapse into one
 // std Mutex over a plain Vec (cold supervisor path); worker->proc becomes the
 // worker's ProcNumber + pid; the last-start-times dsa/dshash becomes a HashMap
-// inside the same Mutex. C code that holds the LWLock across latch waits
-// releases/reacquires per iteration — mirrored here.
+// inside the same Mutex (and tablesync.c's per-apply-worker HTAB of tablesync
+// start times a second, (subid, relid)-keyed map beside it). C code that holds
+// the LWLock across latch waits releases/reacquires per iteration — mirrored
+// here. The shmem-index entry ("Logical Replication Launcher Data") is still
+// registered with C's size so pg_shmem_allocations lists it.
 #![allow(non_snake_case)]
 
 use std::cell::{Cell, RefCell};
@@ -12,6 +15,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicI32, Ordering};
 use pgsync::Mutex;
 
+use datum::Datum;
 use elog::{elog as log_report, ereport};
 use guc_tables::{vars, GucVarAccessors};
 use init_small::globals as g;
@@ -22,6 +26,7 @@ use types_error::{
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR, LOG, WARNING,
 };
 use types_storage::latch::LatchHandle;
+use types_storage::lock::DEFAULT_LOCKMETHOD;
 use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT};
 
 mod funcs;
@@ -62,6 +67,18 @@ thread_local! {
     static ON_COMMIT_WAKEUP_WORKERS_SUBIDS: RefCell<Vec<Oid>> = const { RefCell::new(Vec::new()) };
     // MyLogicalRepWorker: this worker thread's slot index.
     static MY_WORKER_SLOT: Cell<Option<usize>> = const { Cell::new(None) };
+    // InitializingApplyWorker (worker.c:312): true while ApplyWorkerMain /
+    // ParallelApplyWorkerMain initialize the worker; logicalrep_worker_onexit
+    // skips LockReleaseAll then (the locks are only acquired once the worker
+    // is initialized). Hosted here, where the exit callback reads it.
+    static INITIALIZING_APPLY_WORKER: Cell<bool> = const { Cell::new(false) };
+}
+
+pub fn set_initializing_apply_worker(v: bool) {
+    INITIALIZING_APPLY_WORKER.with(|c| c.set(v));
+}
+fn initializing_apply_worker() -> bool {
+    INITIALIZING_APPLY_WORKER.with(|c| c.get())
 }
 
 pub fn max_logical_replication_workers() -> i32 {
@@ -146,6 +163,13 @@ struct LogicalRepCtx {
     launcher_proc: Option<ProcNumber>,
     workers: Vec<LogicalRepWorker>,
     last_start_times: HashMap<Oid, TimestampTz>,
+    // tablesync.c's last_start_times: one private HTAB per apply worker,
+    // keyed by relid (tablesync.c:425). Rendered as one map keyed by
+    // (subid, relid) — an apply worker is its subscription — so a relation
+    // whose OID equals a subscription OID never touches the apply throttle
+    // above, and each worker's table dies with it (or when every table is
+    // READY, tablesync.c:455).
+    tablesync_last_start_times: HashMap<(Oid, Oid), TimestampTz>,
 }
 
 pgsync::process_global! {
@@ -160,8 +184,39 @@ fn with_ctx<R>(f: impl FnOnce(&mut LogicalRepCtx) -> R) -> R {
     f(ctx)
 }
 
-// ApplyLauncherShmemInit (launcher.c:964).
+// ApplyLauncherShmemSize (launcher.c:909): MAXALIGN(sizeof(LogicalRepCtxStruct))
+// + max_logical_replication_workers * sizeof(LogicalRepWorker), with the C
+// struct sizes on LP64: LogicalRepCtxStruct = pid_t + dsa_handle +
+// dshash_table_handle = 16 (MAXALIGNed 16; the flexible array adds nothing);
+// LogicalRepWorker (worker_internal.h) = 128 (type 0, launch_time 8, in_use
+// 16, generation 18, proc 24, dbid/userid/subid/relid 32..48, relstate 48,
+// relstate_lsn 56, relmutex 64, stream_fileset 72, leader_pid 80,
+// parallel_apply 84, last_lsn 88, last_send_time 96, last_recv_time 104,
+// reply_lsn 112, reply_time 120). 528 bytes at the default 4 workers —
+// C 18.6's pg_shmem_allocations row.
+const C_SIZEOF_LOGICAL_REP_CTX_STRUCT: usize = 16;
+const C_SIZEOF_LOGICAL_REP_WORKER: usize = 128;
+pub fn ApplyLauncherShmemSize() -> PgResult<usize> {
+    let size = C_SIZEOF_LOGICAL_REP_CTX_STRUCT;
+    shmem::add_size(
+        size,
+        shmem::mul_size(
+            max_logical_replication_workers().max(0) as usize,
+            C_SIZEOF_LOGICAL_REP_WORKER,
+        )?,
+    )
+}
+
+// ApplyLauncherShmemInit (launcher.c:964). The shmem-index entry carries
+// C's name and size (pg_shmem_allocations); the state itself is the CTX
+// Mutex (thread model), re-created on every call — C's `found` guard only
+// matters for a re-attaching EXEC_BACKEND child.
 pub fn ApplyLauncherShmemInit() {
+    // launcher.c:969 ShmemInitStruct(...): C's ereport(ERROR) here aborts
+    // postmaster startup; the seam has no error channel, so the same abort.
+    let _ = ApplyLauncherShmemSize()
+        .and_then(|size| shmem::ShmemInitStruct("Logical Replication Launcher Data", size))
+        .unwrap_or_else(|e| panic!("ApplyLauncherShmemInit: {}", e.message()));
     let mut guard = CTX.lock().unwrap_or_else(|e| e.into_inner());
     *guard = Some(LogicalRepCtx {
         launcher_pid: 0,
@@ -170,6 +225,7 @@ pub fn ApplyLauncherShmemInit() {
             .map(|_| LogicalRepWorker::empty())
             .collect(),
         last_start_times: HashMap::new(),
+        tablesync_last_start_times: HashMap::new(),
     });
 }
 
@@ -325,7 +381,7 @@ pub fn logicalrep_worker_launch(
                 for w in ctx.workers.iter_mut() {
                     if w.in_use
                         && w.proc_pid == 0
-                        && now - w.launch_time > (wal_receiver_timeout as i64) * 1000
+                        && worker_attach_timed_out(w.launch_time, now, wal_receiver_timeout)
                     {
                         let _ = log_report(
                             WARNING,
@@ -400,34 +456,7 @@ pub fn logicalrep_worker_launch(
         Pick::Slot(s, gen) => (s, gen),
     };
 
-    let (name, btype, bgw_main): (_, _, fn(u64) -> PgResult<()>) = match wtype {
-        Apply => (
-            format!(
-                "logical replication apply worker for subscription {}",
-                subid
-            ),
-            "logical replication apply worker",
-            logicalrep_worker_bgw_main as fn(u64) -> PgResult<()>,
-        ),
-        ParallelApply => (
-            format!(
-                "logical replication parallel apply worker for subscription {}",
-                subid
-            ),
-            "logical replication parallel worker",
-            logicalrep_pa_worker_bgw_main,
-        ),
-        TableSync => (
-            format!(
-                "logical replication tablesync worker for subscription {} sync {}",
-                subid,
-                relid
-            ),
-            "logical replication tablesync worker",
-            logicalrep_worker_bgw_main,
-        ),
-        _ => unreachable!(),
-    };
+    let (name, btype, bgw_main) = worker_bgw_identity(wtype, subid, relid)?;
 
     let mut bgw_extra = [0u8; bgworker::BGW_EXTRALEN];
     bgw_extra[..8].copy_from_slice(&dsm_handle.to_ne_bytes());
@@ -459,6 +488,59 @@ pub fn logicalrep_worker_launch(
     };
 
     WaitForReplicationWorkerAttach(slot, generation, &handle)
+}
+
+// The slot-GC threshold of logicalrep_worker_launch (launcher.c:388): a
+// worker still unattached this long after its launch is cleaned up.
+fn worker_attach_timed_out(
+    launch_time: TimestampTz,
+    now: TimestampTz,
+    wal_receiver_timeout: i32,
+) -> bool {
+    // TimestampDifferenceExceeds (timestamp.c:1785): diff >= msec * 1000.
+    adt_timestamp::TimestampDifferenceExceeds(launch_time, now, wal_receiver_timeout)
+}
+
+// The per-type bgworker identity of logicalrep_worker_launch's switch
+// (launcher.c:470-508): bgw_name, bgw_type, and the main entry.
+fn worker_bgw_identity(
+    wtype: LogicalRepWorkerType,
+    subid: Oid,
+    relid: Oid,
+) -> PgResult<(String, &'static str, fn(u64) -> PgResult<()>)> {
+    use LogicalRepWorkerType::*;
+    Ok(match wtype {
+        Apply => (
+            format!(
+                "logical replication apply worker for subscription {}",
+                subid
+            ),
+            "logical replication apply worker",
+            logicalrep_worker_bgw_main as fn(u64) -> PgResult<()>,
+        ),
+        ParallelApply => (
+            format!(
+                "logical replication parallel apply worker for subscription {}",
+                subid
+            ),
+            "logical replication parallel worker",
+            logicalrep_pa_worker_bgw_main,
+        ),
+        TableSync => (
+            format!(
+                "logical replication tablesync worker for subscription {} sync {}",
+                subid,
+                relid
+            ),
+            "logical replication tablesync worker",
+            logicalrep_worker_bgw_main,
+        ),
+        // launcher.c:504-506: "Should never happen", but an ERROR, not an abort.
+        Unknown => {
+            log_report(ERROR, "unknown worker type".to_string())?;
+            unreachable!("elog(ERROR) returned");
+        }
+    })
 }
 
 // WaitForReplicationWorkerAttach (launcher.c:175).
@@ -646,26 +728,44 @@ pub fn logicalrep_sync_worker_count(subid: Oid) -> usize {
     })
 }
 
-// Tablesync start-time throttle (tablesync.c last_start_times; the launcher
-// ctx HashMap doubles as C's worker-local HTAB — keyed per relid).
-pub fn tablesync_start_time_check_and_set(relid: Oid, now: TimestampTz, interval_ms: i32) -> bool {
+// Tablesync start-time throttle (tablesync.c:618-630): the apply worker of
+// `subid` may launch a sync worker for `relid` when its private table has no
+// entry for the relation or the entry is at least wal_retrieve_retry_interval
+// old; the entry is set even if the launch then fails. Keyed by the calling
+// apply worker's subscription — C's table is that process's own HTAB.
+pub fn tablesync_start_time_check_and_set(
+    subid: Oid,
+    relid: Oid,
+    now: TimestampTz,
+    interval_ms: i32,
+) -> bool {
     with_ctx_opt(false, |ctx| {
-        let due = match ctx.last_start_times.get(&relid) {
-            // TimestampDifferenceExceeds: timestamps are microseconds.
-            Some(&last) => now.saturating_sub(last) >= interval_ms as i64 * 1000,
+        let due = match ctx.tablesync_last_start_times.get(&(subid, relid)) {
+            Some(&last) => adt_timestamp::TimestampDifferenceExceeds(last, now, interval_ms),
             None => true,
         };
         if due {
-            ctx.last_start_times.insert(relid, now);
+            ctx.tablesync_last_start_times.insert((subid, relid), now);
         }
         due
     })
 }
 
-// logicalrep_worker_wakeup (launcher.c:686).
+// tablesync.c:455 hash_destroy(last_start_times): the apply worker of `subid`
+// drops its table once every relation is READY (a later REFRESH starts from
+// an empty table); also the process-death release of a leaving apply worker.
+pub fn tablesync_start_times_destroy(subid: Oid) {
+    with_ctx_opt((), |ctx| {
+        ctx.tablesync_last_start_times.retain(|&(s, _), _| s != subid);
+    });
+}
+
+// logicalrep_worker_wakeup (launcher.c:686). Over C's zeroed shmem struct
+// (no launcher: single-user mode) the search finds nothing and returns.
 pub fn logicalrep_worker_wakeup(subid: Oid, relid: Oid) {
-    let proc_no =
-        with_ctx(|ctx| find_locked(ctx, subid, relid, true).and_then(|i| ctx.workers[i].proc_no));
+    let proc_no = with_ctx_opt(None, |ctx| {
+        find_locked(ctx, subid, relid, true).and_then(|i| ctx.workers[i].proc_no)
+    });
     if let Some(p) = proc_no {
         latch::SetLatch(LatchHandle::proc(p));
     }
@@ -688,12 +788,16 @@ pub fn logicalrep_worker_attach(slot: usize) -> PgResult<()> {
     match attached {
         Ok(()) => {
             MY_WORKER_SLOT.with(|c| c.set(Some(slot)));
-            // logicalrep_worker_onexit (launcher.c:825, via before_shmem_exit
-            // at attach): the slot must clear on EVERY exit path — a SIGTERM
+            // logicalrep_worker_onexit (launcher.c:744, before_shmem_exit at
+            // attach): the slot must clear on EVERY exit path — a SIGTERM
             // FATAL tears the worker thread down without unwinding through
             // ApplyWorkerMain's normal-return detach, and a stuck slot makes
-            // logicalrep_worker_stop (DROP SUBSCRIPTION) wait forever.
-            ipc::on_shmem_exit(logicalrep_worker_onexit, 0);
+            // logicalrep_worker_stop (DROP SUBSCRIPTION) wait forever. The
+            // before_shmem_exit stage (LIFO: after ShutdownPostgres, which
+            // the later BackgroundWorkerInitializeConnection registers)
+            // runs it while locks and shmem communication are still up,
+            // ahead of ReplicationOriginExitCleanup / ProcKill.
+            ipc::before_shmem_exit(logicalrep_worker_onexit, Datum::null())?;
             Ok(())
         }
         Err(kind) => ereport(ERROR)
@@ -713,15 +817,31 @@ pub fn my_worker_slot() -> Option<usize> {
     MY_WORKER_SLOT.with(|c| c.get())
 }
 
-// logicalrep_worker_onexit (launcher.c:825): shmem-exit callback form.
-fn logicalrep_worker_onexit(_code: i32, _arg: usize) {
-    logicalrep_worker_detach();
+// logicalrep_worker_onexit (launcher.c:825-850): detach, then release every
+// session-level lock — parallel apply mode takes them outside any
+// transaction, so nothing else releases them (launcher.c:840-848) — then
+// wake the launcher. The walrcv disconnect and the stream fileset removal
+// are the worker crate's own exit path.
+fn logicalrep_worker_onexit(_code: i32, _arg: Datum) -> PgResult<()> {
+    logicalrep_worker_detach_slot();
+    if !initializing_apply_worker() {
+        lock_seams::lock_release_all::call(DEFAULT_LOCKMETHOD, true)?;
+    }
+    ApplyLauncherWakeup();
+    Ok(())
 }
 
 // logicalrep_worker_detach + onexit's launcher wakeup (launcher.c:754/825).
-// Runs from the worker's normal exit path AND the shmem-exit callback; the
+// Runs from the worker's normal exit path AND the exit callback; the
 // MY_WORKER_SLOT take() makes it idempotent.
 pub fn logicalrep_worker_detach() {
+    logicalrep_worker_detach_slot();
+    ApplyLauncherWakeup();
+}
+
+// logicalrep_worker_detach (launcher.c:754): stop my parallel apply workers,
+// clear my slot.
+fn logicalrep_worker_detach_slot() {
     if let Some(slot) = my_worker_slot() {
         // A dying leader apply worker stops its parallel apply workers first
         // (launcher.c:754): C detaches the error queues (pa_detach_all_error_mq,
@@ -742,10 +862,17 @@ pub fn logicalrep_worker_detach() {
         for pa in pa_slots {
             let _ = logicalrep_worker_stop_internal(pa, procsignal::signums::SIGTERM);
         }
-        with_ctx(|ctx| logicalrep_worker_cleanup_locked(&mut ctx.workers[slot]));
+        with_ctx(|ctx| {
+            // A leaving apply worker's private tablesync start-times table
+            // dies with it (tablesync.c:425 is a process static).
+            if ctx.workers[slot].wtype == LogicalRepWorkerType::Apply {
+                let subid = ctx.workers[slot].subid;
+                ctx.tablesync_last_start_times.retain(|&(s, _), _| s != subid);
+            }
+            logicalrep_worker_cleanup_locked(&mut ctx.workers[slot]);
+        });
         MY_WORKER_SLOT.with(|c| c.set(None));
     }
-    ApplyLauncherWakeup();
 }
 
 // logicalrep_pa_worker_stop (launcher.c:643): SIGUSR2 so the parallel apply
@@ -933,23 +1060,23 @@ pub fn ApplyLauncherMain(_main_arg: u64) -> PgResult<()> {
 
             let last_start = ApplyLauncherGetWorkerStartTime(sub.oid);
             let now = timestamp_seams::get_current_timestamp::call();
-            let elapsed_ms = (now - last_start) / 1000;
-            if last_start == 0 || elapsed_ms >= wal_retrieve_retry_interval {
-                ApplyLauncherSetWorkerStartTime(sub.oid, now);
-                let launched = logicalrep_worker_launch(
-                    LogicalRepWorkerType::Apply,
-                    sub.dbid,
-                    sub.oid,
-                    &sub.name,
-                    sub.owner,
-                    InvalidOid,
-                    0,
-                )?;
-                if !launched {
-                    wait_time = wait_time.min(wal_retrieve_retry_interval);
+            match apply_worker_restart_wait_ms(last_start, now, wal_retrieve_retry_interval) {
+                None => {
+                    ApplyLauncherSetWorkerStartTime(sub.oid, now);
+                    let launched = logicalrep_worker_launch(
+                        LogicalRepWorkerType::Apply,
+                        sub.dbid,
+                        sub.oid,
+                        &sub.name,
+                        sub.owner,
+                        InvalidOid,
+                        0,
+                    )?;
+                    if !launched {
+                        wait_time = wait_time.min(wal_retrieve_retry_interval);
+                    }
                 }
-            } else {
-                wait_time = wait_time.min(wal_retrieve_retry_interval - elapsed_ms);
+                Some(wait) => wait_time = wait_time.min(wait),
             }
         }
 
@@ -972,6 +1099,24 @@ pub fn ApplyLauncherMain(_main_arg: u64) -> PgResult<()> {
             interrupt::SetConfigReloadPending(false);
             guc_file::ProcessConfigFile(types_guc::GucContext::PGC_SIGHUP)?;
         }
+    }
+}
+
+// ApplyLauncherMain's restart throttle (launcher.c:1207): None = the apply
+// worker may start now; Some(ms) = how long until it may.
+fn apply_worker_restart_wait_ms(
+    last_start: TimestampTz,
+    now: TimestampTz,
+    wal_retrieve_retry_interval: i64,
+) -> Option<i64> {
+    // TimestampDifferenceMilliseconds (timestamp.c:1761): 0 when now <=
+    // last_start (a clock step back waits the full interval, never longer),
+    // fractional milliseconds rounded up.
+    let elapsed_ms = adt_timestamp::TimestampDifferenceMilliseconds(last_start, now);
+    if last_start == 0 || elapsed_ms >= wal_retrieve_retry_interval {
+        None
+    } else {
+        Some(wal_retrieve_retry_interval - elapsed_ms)
     }
 }
 

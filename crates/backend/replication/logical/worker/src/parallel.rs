@@ -897,6 +897,8 @@ fn pa_shutdown(leader_pid: i32) {
 // ParallelApplyWorkerMain (applyparallelworker.c:856).
 pub fn ParallelApplyWorkerMain(main_arg: u64) -> PgResult<()> {
     let worker_slot = main_arg as usize;
+    // InitializingApplyWorker = true (applyparallelworker.c:879).
+    launcher::set_initializing_apply_worker(true);
 
     // Signals: SIGHUP config reload; SIGTERM die; SIGUSR2 = graceful shutdown
     // requested by the leader (differentiates it from an abort-and-exit).
@@ -976,6 +978,8 @@ fn pa_worker_body(
     let Some(_subname) = crate::initialize_logrep_worker(mcx, w)? else {
         return Ok(()); // subscription removed/disabled during startup
     };
+    // applyparallelworker.c:960.
+    launcher::set_initializing_apply_worker(false);
     let _ = shared;
 
     // Origin: reuse the origin the leader already acquired.
