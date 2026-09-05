@@ -10,6 +10,17 @@ path = "src/lib.rs"
 
 [dependencies]
 datum = { path = "../../../../_support/types/datum" }
+types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
 types_fmgr = { package = "types_fmgr", path = "../../../../_support/types/fmgr" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+mcx = { path = "../../../../_support/mcx" }
 funcapi = { path = "../../../utils/fmgr/funcapi" }
+varlena = { path = "../../../utils/adt/varlena" }
+# pg_get_aios walks the shared handle table (aio_funcs.c:56) and reads the
+# owner's pid (GetPGProcByNumber, :114); target_desc renders the smgr path
+# like smgr_aio_describe_identity.
+aio_core = { path = "../aio_core" }
+lmgr_proc = { path = "../../lmgr/lmgr_proc" }
+init_small = { path = "../../../utils/init/init_small" }
+relpath_seams = { path = "../../../../common/relpath_seams" }

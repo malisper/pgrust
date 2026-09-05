@@ -467,7 +467,7 @@ pub fn BaseInit() -> PgResult<()> {
 
     pgstat_seams::pgstat_initialize::call()?;
 
-    aio_seams::pgaio_init_backend::call();
+    aio_seams::pgaio_init_backend::call()?;
 
     sync_seams::init_sync::call()?;
     smgr::smgrinit()?;
@@ -489,7 +489,7 @@ pub fn BaseInit() -> PgResult<()> {
 /// (VFD cache, sync/xloginsert scratch creation asserts) are skipped.
 fn BaseInitRetained() -> PgResult<()> {
     pgstat_seams::pgstat_reattach_retained_backend::call()?;
-    aio_seams::pgaio_init_backend::call();
+    aio_seams::pgaio_init_backend::call()?;
     fd::ReattachRetainedFileAccess()?;
     slot_seams::replication_slot_initialize::call()?;
     Ok(())

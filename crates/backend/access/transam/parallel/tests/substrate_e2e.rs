@@ -152,7 +152,7 @@ fn stub_seams() {
     timeout_seams::initialize_timeouts::set(|| {});
     timeout_seams::register_timeout::set(|id, _| id);
     aio_seams::pgaio_closing_fd::set(|_| {});
-    aio_seams::pgaio_init_backend::set(|| {});
+    aio_seams::pgaio_init_backend::set(|| Ok(()));
     aio_seams::pgaio_io_start_readv::set(|_, _, _| Ok(()));
     aio_seams::at_eoxact_aio::set(|_| {});
     aio_seams::pgaio_error_cleanup::set(|| {});

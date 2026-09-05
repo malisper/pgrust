@@ -729,7 +729,7 @@ fn resource_owner_release_internal(
                         match node {
                             None => break,
                             Some(node) => {
-                                aio_seams::pgaio_io_release_resowner::call(node, !is_commit);
+                                aio_seams::pgaio_io_release_resowner::call(node, !is_commit)?;
                             }
                         }
                     }

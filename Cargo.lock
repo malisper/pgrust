@@ -1294,6 +1294,8 @@ dependencies = [
  "condition_variable",
  "datum",
  "elog",
+ "guc",
+ "guc_file_seams",
  "guc_seams",
  "guc_tables",
  "init_small",
@@ -1304,6 +1306,7 @@ dependencies = [
  "lmgr_proc",
  "lwlock",
  "miscinit",
+ "postgres_seams",
  "resowner",
  "shmem",
  "smgr_seams",
@@ -1320,10 +1323,18 @@ dependencies = [
 name = "aio_funcs"
 version = "0.0.0"
 dependencies = [
+ "aio_core",
  "datum",
  "funcapi",
+ "init_small",
+ "lmgr_proc",
+ "mcx",
+ "relpath_seams",
+ "types_core",
  "types_error",
  "types_fmgr",
+ "types_storage",
+ "varlena",
 ]
 
 [[package]]
@@ -8158,6 +8169,7 @@ dependencies = [
  "ipc",
  "libpq_pqsignal",
  "miscinit",
+ "postgres_seams",
  "procsignal",
  "types_core",
  "types_error",

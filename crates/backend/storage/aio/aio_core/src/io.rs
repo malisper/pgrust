@@ -2,9 +2,13 @@
 
 use std::sync::atomic::Ordering;
 
+use elog::ereport;
 use init_small::globals as g;
+use types_error::ERROR;
 
 use types_storage::aio::{PGAIO_OP_INVALID, PGAIO_OP_READV, PGAIO_OP_WRITEV};
+
+use crate::handle::loc;
 
 use crate::{ioh, my_backend, NO_HANDLE, PGAIO_HS_HANDED_OUT};
 
@@ -103,7 +107,14 @@ pub(crate) fn pgaio_io_perform_synchronously(index: u32) {
             waitevent_seams::pgstat_report_wait_end::call();
             r
         }
-        _ => panic!("trying to execute invalid IO operation"),
+        _ => {
+            // aio_io.c:141 elog(ERROR) inside START_CRIT_SECTION: errstart
+            // promotes it to a PANIC, the same crash class as C's.
+            let _ = ereport(ERROR)
+                .errmsg_internal("trying to execute invalid IO operation")
+                .finish(loc("pgaio_io_perform_synchronously"));
+            unreachable!("ERROR in a critical section is a PANIC");
+        }
     };
 
     let result_i32: i32 = if result < 0 {
@@ -145,6 +156,16 @@ unsafe fn pg_pwritev_raw(fd: i32, iov: *const libc::iovec, iovcnt: i32, offset: 
             continue;
         }
         return r;
+    }
+}
+
+/// aio_io.c pgaio_io_get_op_name.
+pub fn pgaio_io_op_name(op: u8) -> &'static str {
+    match op {
+        PGAIO_OP_INVALID => "invalid",
+        PGAIO_OP_READV => "readv",
+        PGAIO_OP_WRITEV => "writev",
+        _ => "?",
     }
 }
 

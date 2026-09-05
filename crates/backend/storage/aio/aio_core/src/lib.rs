@@ -14,7 +14,7 @@
 #![allow(clippy::result_large_err)]
 
 use std::cell::Cell;
-use std::sync::atomic::{AtomicI32, AtomicI64, AtomicPtr, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicPtr, AtomicU64, AtomicU8, Ordering};
 
 use guc_tables::consts::{IOMETHOD_SYNC, IOMETHOD_WORKER};
 use guc_tables::{option_sets, vars, GucHookExtra, GucVarAccessors};
@@ -36,7 +36,7 @@ mod tests;
 
 pub use callback::{
     pgaio_io_get_handle_data, pgaio_io_register_callbacks, pgaio_io_set_handle_data_32,
-    pgaio_result_report,
+    pgaio_result_report, pgaio_result_status_string,
 };
 pub use handle::{
     pgaio_closing_fd, pgaio_enter_batchmode, pgaio_error_cleanup, pgaio_exit_batchmode,
@@ -46,12 +46,14 @@ pub use handle::{
     pgaio_wref_wait, AtEOXact_Aio,
 };
 pub use init::{pgaio_init_backend, AioShmemInit, AioShmemResetAfterCrash, AioShmemSize};
-pub use io::{pgaio_io_current, pgaio_io_set_iovec_pages, pgaio_io_start_readv_current};
+pub use io::{
+    pgaio_io_current, pgaio_io_op_name, pgaio_io_set_iovec_pages, pgaio_io_start_readv_current,
+};
 pub use method_worker::{
     pgaio_worker_cycle, pgaio_worker_executed_count, pgaio_worker_register,
     pgaio_workers_enabled,
 };
-pub use target::{pgaio_io_get_target_data, pgaio_io_set_target_smgr};
+pub use target::{pgaio_io_get_target_data, pgaio_io_set_target_smgr, pgaio_io_target_name};
 
 pub const IO_METHOD_OPTIONS: &[config_enum_entry] = &[
     // io_uring stays unlisted until inc-2 (C compile-gates it the same way on
@@ -203,19 +205,57 @@ pub(crate) struct PgAioBackend {
 // SAFETY: BackendData is accessed only by the thread whose MyProcNumber owns
 unsafe impl Sync for PgAioBackend {}
 
-static HANDLES: AtomicPtr<PgAioHandle> = AtomicPtr::new(std::ptr::null_mut());
-static HANDLE_COUNT: AtomicI64 = AtomicI64::new(0);
-static BACKENDS: AtomicPtr<PgAioBackend> = AtomicPtr::new(std::ptr::null_mut());
-static BACKEND_COUNT: AtomicI64 = AtomicI64::new(0);
-static IOVECS: AtomicPtr<libc::iovec> = AtomicPtr::new(std::ptr::null_mut());
-static HANDLE_DATA: AtomicPtr<u64> = AtomicPtr::new(std::ptr::null_mut());
+/// aio.h `PgAioCtl`: the shared control block AioShmemInit registers as
+/// "AioCtl" in the shmem index (aio_init.c:157). C keeps the table pointers
+/// and counts here and every process finds them through `pgaio_ctl`; this is
+/// the same block, reached through `PGAIO_CTL` (the process-global
+/// `pgaio_ctl` pointer). `backend_count` is pgrust-only: the boot-time
+/// AioProcs() the geometry was laid out for, so scan bounds never depend on
+/// a live GUC read (see `io_handles_per_backend`).
+pub(crate) struct PgAioCtl {
+    pub io_handle_count: u64,
+    pub iovec_count: u64,
+    pub backend_count: u64,
+    pub backend_state: *mut PgAioBackend,
+    pub io_handles: *mut PgAioHandle,
+    pub iovecs: *mut libc::iovec,
+    pub handle_data: *mut u64,
+}
+
+// SAFETY: written once at AioShmemInit (single-threaded boot) and read-only
+// afterwards; the tables it points to follow the handle/backend protocols.
+unsafe impl Sync for PgAioCtl {}
+
+// C `pgaio_ctl`: null until AioShmemInit has run.
+static PGAIO_CTL: AtomicPtr<PgAioCtl> = AtomicPtr::new(std::ptr::null_mut());
+
+pub(crate) fn pgaio_ctl_opt() -> Option<&'static PgAioCtl> {
+    let p = PGAIO_CTL.load(Ordering::Acquire);
+    // SAFETY: the block is placement-initialized before it is published
+    // (Release store in AioShmemInit) and never freed.
+    unsafe { p.as_ref() }
+}
+
+pub(crate) fn pgaio_ctl() -> &'static PgAioCtl {
+    pgaio_ctl_opt().expect("pgaio_ctl is NULL (AioShmemInit not called)")
+}
+
+pub(crate) fn publish_ctl(ctl: *mut PgAioCtl) {
+    PGAIO_CTL.store(ctl, Ordering::Release);
+}
 
 pub(crate) fn handle_count() -> usize {
-    HANDLE_COUNT.load(Ordering::Relaxed) as usize
+    pgaio_ctl_opt().map_or(0, |c| c.io_handle_count as usize)
+}
+
+/// C `pgaio_ctl->io_handle_count` for readers outside the crate (pg_get_aios
+/// walks the whole table).
+pub fn pgaio_io_handle_count() -> usize {
+    handle_count()
 }
 
 pub(crate) fn backend_count() -> usize {
-    BACKEND_COUNT.load(Ordering::Relaxed) as usize
+    pgaio_ctl_opt().map_or(0, |c| c.backend_count as usize)
 }
 
 /// Immutable per-backend handle count, fixed at AioShmemInit from the boot-time
@@ -229,24 +269,179 @@ pub(crate) fn io_handles_per_backend() -> usize {
 }
 
 pub(crate) fn ioh(index: u32) -> &'static PgAioHandle {
-    debug_assert!((index as usize) < handle_count());
-    // SAFETY: AioShmemInit published a table of handle_count() initialized
-    unsafe { &*HANDLES.load(Ordering::Relaxed).add(index as usize) }
+    let ctl = pgaio_ctl();
+    debug_assert!((index as u64) < ctl.io_handle_count);
+    // SAFETY: AioShmemInit published a table of io_handle_count initialized
+    unsafe { &*ctl.io_handles.add(index as usize) }
 }
 
 pub(crate) fn backend_slot(procno: i32) -> &'static PgAioBackend {
-    debug_assert!(procno >= 0 && (procno as i64) < BACKEND_COUNT.load(Ordering::Relaxed));
+    let ctl = pgaio_ctl();
+    debug_assert!(procno >= 0 && (procno as u64) < ctl.backend_count);
     // SAFETY: as ioh().
-    unsafe { &*BACKENDS.load(Ordering::Relaxed).add(procno as usize) }
+    unsafe { &*ctl.backend_state.add(procno as usize) }
 }
 
 /// SAFETY contract: written by the owner while defining the IO, read by the
 pub(crate) unsafe fn iovec_region(iovec_off: u32) -> *mut libc::iovec {
-    IOVECS.load(Ordering::Relaxed).add(iovec_off as usize)
+    let ctl = pgaio_ctl();
+    debug_assert!((iovec_off as u64) < ctl.iovec_count);
+    ctl.iovecs.add(iovec_off as usize)
 }
 
 pub(crate) unsafe fn handle_data_region(iovec_off: u32) -> *mut u64 {
-    HANDLE_DATA.load(Ordering::Relaxed).add(iovec_off as usize)
+    let ctl = pgaio_ctl();
+    debug_assert!((iovec_off as u64) < ctl.iovec_count);
+    ctl.handle_data.add(iovec_off as usize)
+}
+
+/// Placement value for one handle slot (AioShmemInit's per-handle init,
+/// aio_init.c:196-206): IDLE, generation 1, owned by `procno`.
+pub(crate) fn new_handle(procno: i32, iovec_off: u32) -> PgAioHandle {
+    PgAioHandle {
+        state: AtomicU8::new(PGAIO_HS_IDLE),
+        flags: AtomicU8::new(0),
+        owner_procno: procno,
+        iovec_off,
+        generation: AtomicU64::new(1),
+        result: AtomicI32::new(0),
+        cv: condition_variable::ConditionVariable::new(),
+        d: AioCell::new(HandleData {
+            target: types_storage::aio::PGAIO_TID_INVALID,
+            op: types_storage::aio::PGAIO_OP_INVALID,
+            num_callbacks: 0,
+            callbacks: [0; PGAIO_HANDLE_MAX_CALLBACKS],
+            callbacks_data: [0; PGAIO_HANDLE_MAX_CALLBACKS],
+            handle_data_len: 0,
+            resowner: None,
+            report_return: std::ptr::null_mut(),
+            distilled_result: PgAioResult {
+                status: types_storage::aio::PgAioResultStatus::Unknown,
+                ..Default::default()
+            },
+            op_data: Default::default(),
+            target_data: Default::default(),
+        }),
+        node: AioCell::new(ListNode { prev: NO_HANDLE, next: NO_HANDLE }),
+    }
+}
+
+/// Placement value for one backend slot (aio_init.c:183-189).
+pub(crate) fn new_backend(io_handle_off: u32) -> PgAioBackend {
+    PgAioBackend {
+        io_handle_off,
+        b: AioCell::new(BackendData {
+            idle_ios: Dclist::new(),
+            in_flight_ios: Dclist::new(),
+            handed_out_io: NO_HANDLE,
+            in_batchmode: false,
+            num_staged_ios: 0,
+            staged_ios: [NO_HANDLE; PGAIO_SUBMIT_BATCH_SIZE],
+        }),
+    }
+}
+
+/// aio.c pgaio_io_state_get_name.
+pub fn pgaio_io_state_name(state: u8) -> &'static str {
+    match state {
+        PGAIO_HS_IDLE => "IDLE",
+        PGAIO_HS_HANDED_OUT => "HANDED_OUT",
+        PGAIO_HS_DEFINED => "DEFINED",
+        PGAIO_HS_STAGED => "STAGED",
+        PGAIO_HS_SUBMITTED => "SUBMITTED",
+        PGAIO_HS_COMPLETED_IO => "COMPLETED_IO",
+        PGAIO_HS_COMPLETED_SHARED => "COMPLETED_SHARED",
+        PGAIO_HS_COMPLETED_LOCAL => "COMPLETED_LOCAL",
+        _ => "?",
+    }
+}
+
+/// One handle rendered for pg_get_aios (aio_funcs.c:56-146): the fields C
+/// copies out of the live handle, taken under C's no-lock protocol.
+#[derive(Clone, Copy, Debug)]
+pub struct PgAioHandleSnapshot {
+    pub id: i32,
+    pub generation: u64,
+    pub state: u8,
+    pub owner_procno: i32,
+    pub op: u8,
+    pub op_offset: u64,
+    /// iov_byte_length(iov, iov_length): bytes the op covers.
+    pub iov_bytes: i64,
+    pub target: u8,
+    pub handle_data_len: u8,
+    pub result: i32,
+    pub distilled_status: types_storage::aio::PgAioResultStatus,
+    pub target_data: PgAioTargetData,
+    pub flags: u8,
+}
+
+/// aio_funcs.c:71-136 — there is no lock that could prevent the IO from
+/// advancing concurrently, so: 1) note state + generation, 2) copy the
+/// handle (and its iovecs) to local memory, 3) re-check: a generation change
+/// means the IO was recycled (don't display it); a state change means retry.
+/// `None` for IDLE or recycled handles.
+pub fn pgaio_io_snapshot(index: u32) -> Option<PgAioHandleSnapshot> {
+    use std::sync::atomic::fence;
+
+    let h = ioh(index);
+    let start_generation = h.generation.load(Ordering::Relaxed);
+    let combine = guc_tables::vars::io_max_combine_limit.read().max(0) as usize;
+
+    loop {
+        // pg_read_barrier()
+        fence(Ordering::Acquire);
+        let start_state = h.state();
+        if start_state == PGAIO_HS_IDLE {
+            return None;
+        }
+
+        // 2) C memcpy's the live handle while the owner/completer may still
+        // be writing it; the generation + state re-check below is what
+        // validates the copy. Volatile reads keep the copy a plain byte
+        // copy like C's, with no assumption of exclusive access.
+        // SAFETY: the pointers address the handle's own storage and its
+        // reserved iovec region (per_backend_iovecs covers io_max_combine_limit
+        // entries per handle).
+        let (d, iov_len_sum) = unsafe {
+            let d = std::ptr::read_volatile(h.d.get());
+            let iov = iovec_region(h.iovec_off);
+            let n = (d.op_data.iov_length as usize).min(combine);
+            let mut sum: i64 = 0;
+            for i in 0..n {
+                sum += std::ptr::read_volatile(iov.add(i)).iov_len as i64;
+            }
+            (d, sum)
+        };
+        let flags = h.flags.load(Ordering::Relaxed);
+        let result = h.result.load(Ordering::Relaxed);
+        let owner_procno = h.owner_procno;
+
+        // 3) pg_read_barrier()
+        fence(Ordering::Acquire);
+        if h.generation.load(Ordering::Relaxed) != start_generation {
+            return None;
+        }
+        if h.state() != start_state {
+            continue;
+        }
+
+        return Some(PgAioHandleSnapshot {
+            id: index as i32,
+            generation: start_generation,
+            state: start_state,
+            owner_procno,
+            op: d.op,
+            op_offset: d.op_data.offset,
+            iov_bytes: iov_len_sum,
+            target: d.target,
+            handle_data_len: d.handle_data_len,
+            result,
+            distilled_status: d.distilled_result.status,
+            target_data: d.target_data,
+            flags,
+        });
+    }
 }
 
 thread_local! {

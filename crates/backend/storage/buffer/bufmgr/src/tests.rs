@@ -84,7 +84,7 @@ fn become_backend() {
     // The read pipeline issues IO through pgaio: attach this thread's aio
     // backend slot (MyProc is the bind_task_proc TLS in this harness).
     lmgr_proc::bind_task_proc(procno);
-    aio_core::pgaio_init_backend();
+    aio_core::pgaio_init_backend().expect("pgaio_init_backend");
 }
 
 // Per-relation backing file for the smgr_startreadv fake; grown on demand

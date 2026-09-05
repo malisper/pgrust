@@ -17,6 +17,9 @@ types_storage = { path = "../../../../_support/types/types_storage" }
 datum = { path = "../../../../_support/types/datum" }
 guc_tables = { path = "../../../utils/misc/guc_tables" }
 guc_seams = { path = "../../../utils/misc/guc_seams" }
+# aio_init.c AioShmemSize resolves io_max_concurrency=-1 through
+# SetConfigOption(PGC_S_DYNAMIC_DEFAULT), like clog/commit_ts/subtrans.
+guc = { path = "../../../utils/misc/guc" }
 aio_seams = { path = "../aio_seams" }
 bufmgr_seams = { path = "../../buffer/bufmgr_seams" }
 smgr_seams = { path = "../../smgr/smgr_seams" }
@@ -36,5 +39,8 @@ shmem = { path = "../../ipc/shmem" }
 resowner = { path = "../../../utils/resowner/resowner" }
 elog = { path = "../../../utils/error/elog" }
 interrupt = { path = "../../../postmaster/interrupt" }
+# IoWorkerMain's CHECK_FOR_INTERRUPTS + ProcessConfigFile (method_worker.c:577-583).
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+guc_file_seams = { path = "../../../utils/misc/guc_file_seams" }
 waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
 types_resowner = { path = "../../../../_support/types/types_resowner" }

@@ -73,18 +73,30 @@ pub fn pgaio_io_acquire_nb(
     let result = unsafe {
         let mb = my_backend();
         if mb.idle_ios.count > 0 {
-            let index = dclist_pop_head(&mut mb.idle_ios);
+            let index = mb.idle_ios.head;
             let h = ioh(index);
 
             debug_assert!(h.state() == PGAIO_HS_IDLE);
             debug_assert!(h.owner_procno == my_backend_procno());
 
+            // C's pgaio_io_resowner_register (aio.c:245) is an infallible
+            // intrusive-list link; ours reserves vector space and can fail
+            // with OOM. Reserve BEFORE the handle leaves idle_ios and before
+            // handed_out_io is set, so a failure leaves nothing handed out
+            // (else every later acquire in the session would raise "API
+            // violation: Only one IO can be handed out").
+            if let Some(owner) = resowner {
+                if let Err(e) = pgaio_io_resowner_register(index, owner) {
+                    g::ResumeInterrupts();
+                    return Err(e);
+                }
+            }
+
+            let popped = dclist_pop_head(&mut mb.idle_ios);
+            debug_assert!(popped == index);
+
             h.set_state(PGAIO_HS_HANDED_OUT);
             mb.handed_out_io = index;
-
-            if let Some(owner) = resowner {
-                pgaio_io_resowner_register(index, owner)?;
-            }
 
             if !ret.is_null() {
                 (*ret).result.status = PgAioResultStatus::Unknown;
@@ -122,7 +134,10 @@ pub fn pgaio_io_release(index: u32) -> PgResult<()> {
 }
 
 /// pgaio_io_release_resowner: resowner cleanup callback (installed into
-pub fn pgaio_io_release_resowner(index: u32, on_error: bool) {
+/// aio_seams). Errors leave HOLD_INTERRUPTS unbalanced exactly as C's
+/// elog(ERROR) longjmp does; error recovery zeroes InterruptHoldoffCount
+/// (tcop error_recovery, C errfinish).
+pub fn pgaio_io_release_resowner(index: u32, on_error: bool) -> PgResult<()> {
     let h = ioh(index);
     // SAFETY: resowner cleanup runs on the owner thread.
     let d = unsafe { h.data() };
@@ -135,7 +150,11 @@ pub fn pgaio_io_release_resowner(index: u32, on_error: bool) {
     }
 
     match h.state() {
-        PGAIO_HS_IDLE => panic!("pgaio_io_release_resowner: unexpected IDLE state"),
+        PGAIO_HS_IDLE => {
+            // aio.c:296 elog(ERROR, "unexpected"): catchable XX000, not a
+            // thread panic.
+            ereport(ERROR).errmsg_internal("unexpected").finish(loc("pgaio_io_release_resowner"))?;
+        }
         PGAIO_HS_HANDED_OUT => {
             // SAFETY: owner-thread slot access.
             let mb = unsafe { my_backend() };
@@ -152,7 +171,7 @@ pub fn pgaio_io_release_resowner(index: u32, on_error: bool) {
             if !on_error {
                 let _ = elog::elog(WARNING, "AIO handle was not submitted".to_string());
             }
-            pgaio_submit_staged().expect("pgaio_io_release_resowner: submit staged");
+            pgaio_submit_staged()?;
         }
         _ => {
         }
@@ -162,6 +181,7 @@ pub fn pgaio_io_release_resowner(index: u32, on_error: bool) {
     unsafe { h.data() }.report_return = std::ptr::null_mut();
 
     g::ResumeInterrupts();
+    Ok(())
 }
 
 pub fn pgaio_io_set_flag(index: u32, flag: u8) {
@@ -240,6 +260,8 @@ pub(crate) fn pgaio_io_stage(index: u32, op: u8) -> PgResult<()> {
             mb.in_batchmode
         };
         if !in_batchmode {
+            // Never returns Err (submission failures are PANICs, see
+            // pgaio_submit_staged), so RESUME_INTERRUPTS below always runs.
             pgaio_submit_staged()?;
         }
     } else {
@@ -612,21 +634,29 @@ pub fn pgaio_submit_staged() -> PgResult<()> {
         (mb.staged_ios, n)
     };
 
+    // aio.c:1143-1152: the submit callback runs inside a critical section, so
+    // any error it raises is a PANIC (method_sync.c:44 elog(ERROR) included),
+    // and num_staged_ios = 0 follows unconditionally. Rendering that here
+    // means an Err from the method NEVER returns from this function: it is
+    // promoted like C's errstart-in-crit-section and the thread aborts. The
+    // count is therefore never left dangling for AtEOXact_Aio /
+    // pgaio_error_cleanup to trip over.
     g::StartCriticalSection();
     let submit_result = match crate::pgaio_method_kind() {
-        IoMethodKind::Sync => {
-            g::EndCriticalSection();
-            ereport(ERROR)
-                .errmsg_internal("IO should have been executed synchronously")
-                .finish(loc("pgaio_submit_staged"))?;
-            unreachable!("ERROR reported");
-        }
+        IoMethodKind::Sync => ereport(ERROR)
+            .errmsg_internal("IO should have been executed synchronously")
+            .finish(loc("pgaio_submit_staged")),
         IoMethodKind::Worker => {
             crate::method_worker::pgaio_worker_submit(&staged.0[..staged.1])
         }
     };
+    if let Err(e) = submit_result {
+        // Hand-built PgErrors (e.g. lwlock's "too many LWLocks taken") never
+        // pass through errstart; promote them here, still inside the section.
+        elog::panic_on_crit_section_escape(&e);
+        unreachable!("error inside a critical section is a PANIC");
+    }
     g::EndCriticalSection();
-    submit_result?;
 
     // SAFETY: owner-thread slot access.
     unsafe { my_backend() }.num_staged_ios = 0;

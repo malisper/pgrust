@@ -913,7 +913,7 @@ mod tests {
         // The read pipeline issues IO through pgaio: attach this thread's
         // aio backend slot (MyProc is the bind_task_proc TLS here).
         lmgr_proc::bind_task_proc(procno);
-        aio_core::pgaio_init_backend();
+        aio_core::pgaio_init_backend().expect("pgaio_init_backend");
     }
 
     // §2.8 permit-seam stand-ins (the runtime crate is not linked here, so

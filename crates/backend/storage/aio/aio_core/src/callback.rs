@@ -13,6 +13,28 @@ use types_storage::aio::{
 use crate::handle::loc;
 use crate::{ioh, PGAIO_HS_HANDED_OUT};
 
+/// aio_callback.c aio_handle_cbs[].name (the CALLBACK_ENTRY stringification).
+fn callback_name(id: u8) -> &'static str {
+    match id {
+        PGAIO_HCB_INVALID => "aio_invalid_cb",
+        PGAIO_HCB_MD_READV => "aio_md_readv_cb",
+        PGAIO_HCB_SHARED_BUFFER_READV => "aio_shared_buffer_readv_cb",
+        PGAIO_HCB_LOCAL_BUFFER_READV => "aio_local_buffer_readv_cb",
+        _ => "?",
+    }
+}
+
+/// aio.c pgaio_result_status_string.
+pub fn pgaio_result_status_string(rs: PgAioResultStatus) -> &'static str {
+    match rs {
+        PgAioResultStatus::Unknown => "UNKNOWN",
+        PgAioResultStatus::Ok => "OK",
+        PgAioResultStatus::Warning => "WARNING",
+        PgAioResultStatus::Partial => "PARTIAL",
+        PgAioResultStatus::Error => "ERROR",
+    }
+}
+
 pub fn pgaio_io_register_callbacks(index: u32, cb_id: u8, cb_data: u8) {
     debug_assert!(matches!(
         cb_id,
@@ -125,6 +147,12 @@ pub(crate) fn pgaio_io_call_complete_shared(index: u32) {
 
 pub(crate) fn pgaio_io_call_complete_local(index: u32) -> PgAioResult {
     let h = ioh(index);
+
+    // aio_callback.c:289/330: local completion callbacks run in a critical
+    // section, so a failure during buffer/lock cleanup escalates to PANIC
+    // instead of unwinding past torn shared state.
+    init_small::globals::StartCriticalSection();
+
     // SAFETY: owner thread past COMPLETED_SHARED.
     let (num, callbacks, callbacks_data, mut result) = unsafe {
         let d = h.data();
@@ -153,6 +181,8 @@ pub(crate) fn pgaio_io_call_complete_local(index: u32) -> PgAioResult {
         debug_assert!(result.status != PgAioResultStatus::Unknown);
     }
 
+    init_small::globals::EndCriticalSection();
+
     result
 }
 
@@ -169,8 +199,12 @@ pub fn pgaio_result_report(
             bufmgr_seams::aio_buffer_readv_report::call(result, *target_data, elevel)
         }
         id => {
+            // aio_callback.c:182 "callback %d/%s does not have report callback"
             ereport(types_error::ERROR)
-                .errmsg_internal(format!("callback {id} does not have report callback"))
+                .errmsg_internal(format!(
+                    "callback {id}/{} does not have report callback",
+                    callback_name(id)
+                ))
                 .finish(loc("pgaio_result_report"))?;
             unreachable!("ERROR reported");
         }

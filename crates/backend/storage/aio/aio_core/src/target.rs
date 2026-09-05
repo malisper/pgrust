@@ -37,6 +37,15 @@ pub fn pgaio_io_set_target_smgr(
     d.target_data.smgr.skip_fsync = skip_fsync;
 }
 
+/// aio_target.c pgaio_target_info[].name (INVALID explicitly allowed).
+pub fn pgaio_io_target_name(target: u8) -> &'static str {
+    match target {
+        PGAIO_TID_INVALID => "invalid",
+        PGAIO_TID_SMGR => "smgr",
+        _ => "?",
+    }
+}
+
 pub fn pgaio_io_get_target_data(index: u32) -> PgAioTargetData {
     // SAFETY: readers are on completion edges where d is stable.
     unsafe { ioh(index).data() }.target_data

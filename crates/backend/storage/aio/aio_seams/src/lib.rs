@@ -16,7 +16,8 @@ seam_core::seam!(
     // `pgaio_io_release_resowner(ioh_node, on_error)` (storage/aio/aio.c) —
     // resowner cleanup of a remembered AIO handle (`ioh_node` is the handle
     // index resowner stored).
-    pub fn pgaio_io_release_resowner(ioh_node: usize, on_error: bool)
+    // C elog(ERROR)s on an IDLE handle (aio.c:284), hence PgResult.
+    pub fn pgaio_io_release_resowner(ioh_node: usize, on_error: bool) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -109,5 +110,6 @@ seam_core::seam!(
 
 seam_core::seam!(
     // pgaio_init_backend (storage/aio/aio_init.c).
-    pub fn pgaio_init_backend()
+    // aio_init.c:227 elog(ERROR, "aio requires a normal PGPROC"), hence PgResult.
+    pub fn pgaio_init_backend() -> types_error::PgResult<()>
 );

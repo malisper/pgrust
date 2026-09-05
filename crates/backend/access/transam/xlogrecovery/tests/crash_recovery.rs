@@ -279,7 +279,7 @@ fn install_real() {
     aio_core::AioShmemInit().unwrap();
     sync::InitSync().unwrap();
     lmgr_proc::InitProcess(BackendType::Backend).unwrap();
-    aio_core::pgaio_init_backend();
+    aio_core::pgaio_init_backend().expect("pgaio_init_backend");
     procarray::ProcArrayAdd(lmgr_proc::MyProc().unwrap()).unwrap();
 
     // Buffer pins register with CurrentResourceOwner; recovery runs under the

@@ -965,7 +965,7 @@ fn enter_backend_world(actor: u32) {
     transam_xlog::stamp_wal_sync_method(transam_xlog::WAL_SYNC_METHOD_FDATASYNC);
     miscinit::InitProcessLocalLatch();
     lmgr_proc::InitProcess(BackendType::Backend).unwrap();
-    aio_core::pgaio_init_backend();
+    aio_core::pgaio_init_backend().expect("pgaio_init_backend");
     procarray::ProcArrayAdd(lmgr_proc::MyProc().unwrap()).unwrap();
     let owner = resowner::ResourceOwnerCreate(
         types_resowner::ResourceOwner::NULL,
@@ -1653,7 +1653,7 @@ fn flushsim_recover_child() {
     // (buffer pins are proc-numbered).
     miscinit::InitProcessLocalLatch();
     lmgr_proc::InitProcess(BackendType::Backend).unwrap();
-    aio_core::pgaio_init_backend();
+    aio_core::pgaio_init_backend().expect("pgaio_init_backend");
     procarray::ProcArrayAdd(lmgr_proc::MyProc().unwrap()).unwrap();
 
     let boot = std::panic::catch_unwind(|| -> PgResult<()> {

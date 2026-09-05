@@ -12,6 +12,12 @@ fn fatal_exit(e: &PgError) -> ! {
     ipc::proc_exit(1, g::MyProcPid())
 }
 
+// method_worker.c:405 pqsignal(SIGINT, die): manual worker restart via
+// ProcDiePending, consumed by the loop's CHECK_FOR_INTERRUPTS.
+fn sigint_die() -> types_error::PgResult<()> {
+    postgres_seams::die::call()
+}
+
 pub fn IoWorkerMain(startup_data: &StartupData) -> ! {
     debug_assert!(matches!(startup_data, StartupData::None));
 
@@ -21,16 +27,14 @@ pub fn IoWorkerMain(startup_data: &StartupData) -> ! {
     }
 
     {
-        use procsignal::ThreadSignalHandler::{Ignore, Simple};
+        use procsignal::ThreadSignalHandler::{Fallible, Ignore, Simple};
         procsignal::pqsignal_thread(
             procsignal::signums::SIGHUP,
             Simple(interrupt::SignalHandlerForConfigReload),
         );
-        // C: SIGINT = die; SIGUSR2 = late explicit shutdown (checkpointer-like).
-        procsignal::pqsignal_thread(
-            procsignal::signums::SIGINT,
-            Simple(interrupt::SignalHandlerForShutdownRequest),
-        );
+        // C: SIGINT = die (allow manually triggering worker restart);
+        // SIGUSR2 = late explicit shutdown (checkpointer-like).
+        procsignal::pqsignal_thread(procsignal::signums::SIGINT, Fallible(sigint_die));
         procsignal::pqsignal_thread(procsignal::signums::SIGTERM, Ignore);
         procsignal::pqsignal_thread(procsignal::signums::SIGALRM, Ignore);
         procsignal::pqsignal_thread(procsignal::signums::SIGPIPE, Ignore);
@@ -48,8 +52,10 @@ pub fn IoWorkerMain(startup_data: &StartupData) -> ! {
 
     while !interrupt::ShutdownRequestPending() {
         if let Err(e) = aio_core::pgaio_worker_cycle() {
-            // C's sigsetjmp arm: reopen/IO failures already completed the IO
-            // inside the cycle; exit(1) relaunches a fresh worker.
+            // C's sigsetjmp arm for errors outside IO execution (die's FATAL,
+            // a reload failure): report and exit(1) so the postmaster starts
+            // a fresh worker. Reopen failures never reach here — the cycle
+            // fails the IO and exits itself (method_worker.c:409-436).
             fatal_exit(&e);
         }
     }

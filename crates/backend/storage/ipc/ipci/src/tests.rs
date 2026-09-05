@@ -57,6 +57,12 @@ fn bringup() {
             get: || 16,
             set: |_| {},
         });
+        // AioShmemSize resolves io_max_concurrency=-1 through
+        // SetConfigOption(PGC_S_DYNAMIC_DEFAULT) (aio_init.c:117-133); the
+        // GUC engine only stores into installed variables, so the AIO
+        // accessors must be in place before the store is brought up (the
+        // postmaster installs them via seams_init).
+        aio_core::init_seams();
         pgstat::init_seams();
         init_small::init_seams();
         scalar_seams::parse_bool::set(|value| match value {
