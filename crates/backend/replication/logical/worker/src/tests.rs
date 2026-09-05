@@ -46,6 +46,7 @@ fn test_sub(skiplsn: u64, runasowner: bool) -> super::MySub {
         passwordrequired: false,
         runasowner,
         failover: false,
+        disableonerr: false,
         dbid: 5,
     }
 }
@@ -278,4 +279,40 @@ fn owner_superuser_revoked_predicate() {
     assert!(!super::owner_superuser_revoked(false, false));
     // A non-superuser owner gaining superuser is not a revoke.
     assert!(!super::owner_superuser_revoked(false, true));
+}
+
+// libpqwalreceiver.c:1051: the CREATE_REPLICATION_SLOT consistent point goes
+// through pg_lsn_in — malformed text is 22P02 with pg_lsn_in's message, and
+// a valid LSN parses exactly (row
+// a186-candidate-fp-libpqwalreceiver-libpqwalreceiver-50d642674ff510053dc6-1).
+#[test]
+fn create_slot_consistent_point_uses_pg_lsn_in() {
+    assert_eq!(super::tablesync::parse_consistent_point("0/16B3748").unwrap(), 0x16B3748);
+    assert_eq!(
+        super::tablesync::parse_consistent_point("A/FFFFFFFF").unwrap(),
+        (0xA_u64 << 32) | 0xFFFF_FFFF
+    );
+    let err = super::tablesync::parse_consistent_point("garbage").unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_TEXT_REPRESENTATION);
+    assert_eq!(err.message(), "invalid input syntax for type pg_lsn: \"garbage\"");
+    let err = super::tablesync::parse_consistent_point("").unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_TEXT_REPRESENTATION);
+}
+
+// applyparallelworker.c:1045: the leader's rethrow carries the worker error's
+// CONTEXT plus the parallel-apply-worker line — never the primary message
+// (row a186-candidate-fp-logical-applyparallelworker-bb0db1927baf6fe07776-1).
+#[test]
+fn parallel_apply_worker_error_context_is_context_not_message() {
+    let with_ctx = types_error::PgError::error("duplicate key value violates unique constraint \"t_pkey\"")
+        .with_context("processing remote data for replication origin \"pg_16390\" during message type \"INSERT\"");
+    assert_eq!(
+        super::parallel::parallel_apply_worker_context(&with_ctx),
+        "processing remote data for replication origin \"pg_16390\" during message type \"INSERT\"\nlogical replication parallel apply worker"
+    );
+    let no_ctx = types_error::PgError::error("duplicate key value violates unique constraint \"t_pkey\"");
+    assert_eq!(
+        super::parallel::parallel_apply_worker_context(&no_ctx),
+        "logical replication parallel apply worker"
+    );
 }

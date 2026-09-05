@@ -20,6 +20,19 @@ use crate::{
     ReorderBufferChangeData, ReorderBufferChangeType::*, TxnId, RBTXN_IS_SERIALIZED,
     RBTXN_IS_SERIALIZED_CLEAR, RBTXN_IS_STREAMED, RBTXN_SENT_PREPARE,
 };
+// rd_rel->relrewrite (reorderbuffer.c:2359): the trimmed relcache form does
+// not carry pg_class.relrewrite, so it is read from pg_class (under the same
+// historic snapshot the relcache entry was built under). Every rewrite heap
+// is named pg_temp_<oid> by make_new_heap (cluster.c), so only such names pay
+// the catalog read; relrewrite itself decides.
+fn is_rewrite_heap(relation: &RelationData<'static>) -> PgResult<bool> {
+    if !relation.rd_rel.relname.name_str().starts_with(b"pg_temp_") {
+        return Ok(false);
+    }
+    let scanned = relcache_build_seams::scan_pg_relation::call(relation.rd_id, true, false)?;
+    Ok(scanned.is_some_and(|c| c.relrewrite != InvalidOid))
+}
+
 
 pub(crate) fn relation_is_logically_logged(relation: &RelationData<'static>) -> bool {
     transam_xlog_seams::xlog_logical_info_active::call()
@@ -835,9 +848,10 @@ impl ReorderBuffer {
         };
 
         if let Some(relation) = &relation {
-            // rd_rel.relrewrite is not carried by this build's trimmed form;
-            // transient rewrite heaps ride the logical-rewrite path (phase-2).
+            // Ignore temporary heaps created during DDL unless the plugin has
+            // asked for them (reorderbuffer.c:2359).
             if relation_is_logically_logged(relation)
+                && (self.output_rewrites || !is_rewrite_heap(relation)?)
                 && relation.rd_rel.relkind != RELKIND_SEQUENCE
             {
                 if !catalog::IsToastRelation(relation) {
@@ -886,7 +900,7 @@ impl ReorderBuffer {
         };
         let r = match &change.data {
             ReorderBufferChangeData::Msg { prefix, message } => {
-                cb(self, Some(txn), lsn, true, prefix.as_str(), message)
+                cb(self, Some(txn), lsn, true, prefix, message)
             }
             _ => unreachable!("message change carries Msg data"),
         };

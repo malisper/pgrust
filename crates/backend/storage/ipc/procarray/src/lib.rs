@@ -2531,6 +2531,18 @@ pub fn CancelDBBackends(
     Ok(())
 }
 
+/// Run `f` holding ProcArrayLock in shared mode (snapbuild.c
+/// SnapBuildInitialSnapshot takes it around GetOldestSafeDecodingTransactionId,
+/// which reads the shared xid array and slot xmins under [PAL]).
+pub fn with_procarray_lock_shared<R>(
+    f: impl FnOnce() -> types_error::PgResult<R>,
+) -> types_error::PgResult<R> {
+    LWLockAcquire(ProcArrayLock(), LW_SHARED, init_small::globals::MyProcNumber())?;
+    let r = f();
+    LWLockRelease(ProcArrayLock())?;
+    r
+}
+
 /// Run `f` holding ProcArrayLock exclusively (slotsync.c synchronize_one_slot
 /// takes it around GetOldestSafeDecodingTransactionId + xmin install).
 pub fn with_procarray_lock_exclusive<R>(

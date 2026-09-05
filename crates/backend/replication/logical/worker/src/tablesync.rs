@@ -616,10 +616,14 @@ fn create_slot_use_snapshot(
         .and_then(|c| c.as_ref())
         .map(|b| String::from_utf8_lossy(b).into_owned())
         .unwrap_or_default();
-    let (hi, lo) = lsn_text.split_once('/').unwrap_or(("0", "0"));
-    let lsn = (u64::from_str_radix(hi, 16).unwrap_or(0) << 32)
-        | u64::from_str_radix(lo, 16).unwrap_or(0);
-    Ok(lsn)
+    parse_consistent_point(&lsn_text)
+}
+
+// libpqrcv_create_slot (libpqwalreceiver.c:1051): the consistent point goes
+// through pg_lsn_in, so malformed text is an ERRCODE_INVALID_TEXT_REPRESENTATION
+// error, never a silently adopted 0/0.
+pub(crate) fn parse_consistent_point(text: &str) -> PgResult<XLogRecPtr> {
+    adt_pg_lsn::pg_lsn_in(text, None)
 }
 
 // LogicalRepSyncTableStart (tablesync.c:1318). Returns (conn, slotname,

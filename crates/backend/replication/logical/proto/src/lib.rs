@@ -486,7 +486,7 @@ pub fn logicalrep_write_message(
     xid: TransactionId,
     lsn: XLogRecPtr,
     transactional: bool,
-    prefix: &str,
+    prefix: &[u8],
     message: &[u8],
 ) {
     send_byte(out, LOGICAL_REP_MSG_MESSAGE);
@@ -502,7 +502,9 @@ pub fn logicalrep_write_message(
 
     send_int8(out, flags);
     send_int64(out, lsn);
-    send_string(out, prefix);
+    // pq_sendstring of the raw prefix bytes (proto.c:687).
+    out.extend_from_slice(prefix);
+    out.push(0);
     send_int32(out, message.len() as u32);
     out.extend_from_slice(message);
 }

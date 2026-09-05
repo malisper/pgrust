@@ -17,7 +17,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
-use mcx::{PgString, PgVec};
+use mcx::PgVec;
 use types_core::{InvalidXLogRecPtr, Oid, TransactionId, XLogRecPtr};
 use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_OUT_OF_MEMORY};
 use types_snapshot::{SnapshotData, SnapshotType};
@@ -479,7 +479,7 @@ impl ReorderBuffer {
             }
             ReorderBufferChangeData::Msg { prefix, message } => {
                 put_u64(buf, prefix.len() as u64);
-                buf.extend_from_slice(prefix.as_str().as_bytes());
+                buf.extend_from_slice(prefix);
                 put_u64(buf, message.len() as u64);
                 buf.extend_from_slice(message);
             }
@@ -686,17 +686,13 @@ impl ReorderBuffer {
             Message => {
                 let prefix_len = cur.u64()? as usize;
                 let prefix_bytes = cur.take(prefix_len)?;
-                let prefix_str = std::str::from_utf8(prefix_bytes).map_err(|_| {
-                    rb_error("invalid message prefix in reorderbuffer spill file".into())
-                })?;
+                let mut prefix = PgVec::new_in(self.mcx);
+                mcx::vec_append_bytes(&mut prefix, prefix_bytes)?;
                 let msg_len = cur.u64()? as usize;
                 let msg_bytes = cur.take(msg_len)?;
                 let mut message = PgVec::new_in(self.mcx);
                 mcx::vec_append_bytes(&mut message, msg_bytes)?;
-                ReorderBufferChangeData::Msg {
-                    prefix: PgString::from_str_in(prefix_str, self.mcx)?,
-                    message,
-                }
+                ReorderBufferChangeData::Msg { prefix, message }
             }
             Invalidation => {
                 let n = cur.u64()? as usize;

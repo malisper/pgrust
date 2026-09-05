@@ -19,6 +19,9 @@ pub struct ScannedPgClass {
     pub relnatts: i16,
     pub relhastriggers: bool,
     pub relhasrules: bool,
+    // pg_class.relrewrite: the table this transient rewrite heap (CLUSTER /
+    // VACUUM FULL / ALTER TABLE rewrite) stands in for, else InvalidOid.
+    pub relrewrite: Oid,
     pub options: Option<RdOptions>,
 }
 

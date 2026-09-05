@@ -25,12 +25,12 @@ use logicalrelation::LogicalRepRelMapEntry;
 use mcx::Mcx;
 use types_core::{InvalidOid, Oid};
 use types_error::{
-    PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_BINARY_REPRESENTATION,
+    PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_BINARY_REPRESENTATION,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_PROTOCOL_VIOLATION,
-    ERRCODE_T_R_SERIALIZATION_FAILURE, ERROR, LOG,
+    ERRCODE_T_R_SERIALIZATION_FAILURE, ERRCODE_UNDEFINED_FUNCTION, ERROR, LOG,
 };
 use types_rel::Relation;
-use types_scan::scankey::{ScanKeyData, BTEqualStrategyNumber, SK_ISNULL, SK_SEARCHNULL};
+use types_scan::scankey::{ScanKeyData, SK_ISNULL, SK_SEARCHNULL};
 use types_slot::SlotData;
 
 use walreceiver::client::PgConn;
@@ -897,49 +897,32 @@ fn apply_trig<'mcx>(rel: &Relation<'_>) -> PgResult<Option<ApplyTrig<'mcx>>> {
     }))
 }
 
-// BEFORE ROW UPDATE/DELETE triggers on an apply target are still unported:
-// ExecBRUpdateTriggers/ExecBRDeleteTriggers have no standalone (non-
-// ModifyTableState) caller form in this port yet. Narrowed from the former
-// blanket row-trigger refusal — BEFORE ROW INSERT and every AFTER ROW trigger
-// now fire. Loud rather than silently skipped: a BEFORE trigger that would
-// rewrite or suppress the row changes the applied result.
-fn refuse_br_triggers(trig: Option<&ApplyTrig<'_>>, op: &str) -> PgResult<()> {
-    let Some(t) = trig else { return Ok(()) };
-    // A BEFORE ROW UPDATE/DELETE trigger firing during apply is still unported
-    // (ExecBRUpdate/DeleteTriggers have no standalone caller form here yet).
-    // Match C: the apply worker runs under session_replication_role = replica,
-    // so only triggers TriggerEnabled admits (ENABLE REPLICA/ALWAYS) would
-    // fire; ordinary ENABLE ORIGIN and DISABLED BEFORE-row triggers are
-    // silently skipped and must not block apply. Refuse recoverably (a
-    // per-subscription ERROR, never a panic) and only when such a trigger
-    // would actually fire.
-    for i in 0..t.td.triggers.len() {
-        let trg = &t.td.triggers[i];
-        let tt = trg.tgtype;
-        let is_br = types_trigger::TRIGGER_FOR_ROW(tt)
-            && types_trigger::TRIGGER_FOR_BEFORE(tt)
-            && match op {
-                "UPDATE" => types_trigger::TRIGGER_FOR_UPDATE(tt),
-                "DELETE" => types_trigger::TRIGGER_FOR_DELETE(tt),
-                _ => false,
-            };
-        if is_br && trigger::TriggerEnabled(trg) {
-            ereport(ERROR)
-                .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
-                .errmsg(format!(
-                    "cannot apply replicated {op} to relation with enabled BEFORE ROW {op} trigger"
-                ))
-                .finish(loc("refuse_br_triggers"))?;
-            unreachable!();
-        }
+// check_relation_updatable (worker.c:2514).
+fn check_relation_updatable(
+    mcx: Mcx<'_>,
+    rel: &Relation<'_>,
+    entry: &LogicalRepRelMapEntry,
+) -> PgResult<()> {
+    // For partitioned tables, only the target partition's updatability
+    // matters (aka has PK or RI defined for it) (worker.c:2520).
+    if rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE {
+        return Ok(());
     }
-    Ok(())
-}
-
-// check_relation_updatable (worker.c:2510).
-fn check_relation_updatable(entry: &LogicalRepRelMapEntry) -> PgResult<()> {
     if entry.updatable {
         return Ok(());
+    }
+    // Error mode, so being somewhat slow is fine: give the user the precise
+    // reason (worker.c:2532).
+    if logicalrelation::get_relation_identity_or_pk(mcx, rel)? != InvalidOid {
+        ereport(ERROR)
+            .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+            .errmsg(format!(
+                "publisher did not send replica identity column expected by the logical \
+                 replication target relation \"{}.{}\"",
+                entry.remoterel.nspname, entry.remoterel.relname
+            ))
+            .finish(loc("check_relation_updatable"))?;
+        unreachable!();
     }
     ereport(ERROR)
         .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
@@ -985,10 +968,16 @@ fn tuples_equal(
             typcache::lookup_type_cache(att.atttypid, typcache::TYPECACHE_EQ_OPR_FINFO)?;
         let mut finfo = typentry.eq_opr_finfo();
         if finfo.fn_oid == InvalidOid {
-            return Err(Box::new(types_error::PgError::error(format!(
-                "could not identify an equality operator for type {}",
-                att.atttypid
-            ))));
+            // execReplication.c:326: ERRCODE_UNDEFINED_FUNCTION with the
+            // type's SQL name (format_type_be).
+            ereport(ERROR)
+                .errcode(ERRCODE_UNDEFINED_FUNCTION)
+                .errmsg(format!(
+                    "could not identify an equality operator for type {}",
+                    format_type::format_type_be(att.atttypid)?
+                ))
+                .finish(loc("tuples_equal"))?;
+            unreachable!();
         }
         let eq = fmgr::fcinfo::function_call2_coll(&mut finfo, att.attcollation, v1, v2)?;
         if !eq.as_bool() {
@@ -998,8 +987,10 @@ fn tuples_equal(
     Ok(true)
 }
 
-// build_replindex_scan_key (execReplication.c:55), type-cache-equality
-// rendering (see header).
+// build_replindex_scan_key (execReplication.c:55): one scan key per
+// non-expression index key column, using the index opclass's own equality
+// operator (opfamily member for the AM's COMPARE_EQ strategy), never the
+// type's default equality.
 fn build_replindex_scan_key(
     idxrel: &Relation<'_>,
     rel: &Relation<'_>,
@@ -1010,23 +1001,31 @@ fn build_replindex_scan_key(
     exectuples::slot_getallattrs(searchslot);
     for (i, &table_attno) in form.indkey.iter().take(form.indnkeyatts as usize).enumerate() {
         if table_attno == 0 {
-            // Expression index keys are not supported in the scan key.
+            // XXX: Currently, we don't support expressions in the scan key.
             continue;
         }
         let att = rel.rd_att.attr((table_attno - 1) as usize);
-        let typentry =
-            typcache::lookup_type_cache(att.atttypid, typcache::TYPECACHE_EQ_OPR_FINFO)?;
-        let eq_finfo = typentry.eq_opr_finfo().clone();
-        if eq_finfo.fn_oid == InvalidOid {
-            return Err(Box::new(types_error::PgError::error(format!(
-                "missing equality operator for type {}",
-                att.atttypid
+        // Load the operator info (execReplication.c:92): rd_opcintype /
+        // rd_opfamily are the opclass's input type and family.
+        let optype = idxrel.rd_opcintype[i];
+        let opfamily = idxrel.rd_opfamily[i];
+        let eq_strategy = amapi::IndexAmTranslateCompareType(
+            lsyscache::COMPARE_EQ,
+            idxrel.rd_rel.relam,
+            opfamily,
+            false,
+        )?;
+        let operator = lsyscache::get_opfamily_member(opfamily, optype, optype, eq_strategy as i16)?;
+        if operator == InvalidOid {
+            return Err(Box::new(PgError::error(format!(
+                "missing operator {eq_strategy}({optype},{optype}) in opfamily {opfamily}"
             ))));
         }
+        let regop = lsyscache::get_opcode(operator)?;
         let mut key = ScanKeyData::empty();
         key.sk_attno = (i + 1) as i16;
-        key.sk_strategy = BTEqualStrategyNumber;
-        key.sk_func = eq_finfo;
+        key.sk_strategy = eq_strategy;
+        key.sk_func = fmgr_seams::fmgr_info::call(regop)?;
         key.sk_collation = idxrel.rd_indcollation.get(i).copied().unwrap_or(att.attcollation);
         let (isnull, value) = {
             let b = searchslot.base();
@@ -1055,8 +1054,10 @@ fn find_repl_tuple_by_index<'mcx>(
     outslot: &mut SlotData<'mcx>,
 ) -> PgResult<bool> {
     let idxrel = indexam::index_open(mcx, idxoid, types_rel::RowExclusiveLock)?;
-    let is_safe_skip_dup = true; // idxoid is always the replident/PK here
-    let _ = is_safe_skip_dup;
+    // execReplication.c:200: only the primary key / replica identity index
+    // may skip the per-candidate equality check.
+    let is_idx_safe_to_skip_duplicates =
+        logicalrelation::get_relation_identity_or_pk(mcx, rel)? == idxoid;
 
     let keys = build_replindex_scan_key(&idxrel, rel, searchslot)?;
 
@@ -1080,6 +1081,11 @@ fn find_repl_tuple_by_index<'mcx>(
             types_scan::sdir::ScanDirection::ForwardScanDirection,
             outslot,
         )? {
+            // Avoid the expensive equality check if the index is the primary
+            // key or replica identity index (execReplication.c:222).
+            if !is_idx_safe_to_skip_duplicates && !tuples_equal(outslot, searchslot, rel)? {
+                continue;
+            }
             // ExecMaterializeSlot (execReplication.c:228): own the tuple
             // before the scan's pin goes away.
             exectuples::exec_materialize_slot(outslot, mcx)?;
@@ -1358,6 +1364,14 @@ fn do_insert<'mcx>(
     if rel.rd_att.constr.is_some() {
         nodemodifytable::exec_constraints(mcx, &mut check_exprs, &mut nn_exprs, rel, slot, None, None)?;
     }
+    // ExecPartitionCheck (execReplication.c:600): a row replicated straight
+    // into a partition must satisfy its partition constraint.
+    if rel.rd_rel.relispartition {
+        let mut check_cache = None;
+        if !execpartition::exec_partition_check(mcx, &mut check_cache, rel, slot)? {
+            return Err(execpartition::partition_constraint_violation(mcx, rel, slot, None, None));
+        }
+    }
 
     tableam_real::simple_table_tuple_insert(mcx, rel, slot)?;
 
@@ -1419,7 +1433,9 @@ fn apply_updated_cols<'mcx>(
             continue;
         }
         let m = remote as usize;
-        if m < newtup.colstatus.len() && newtup.colstatus[m] != LOGICALREP_COLUMN_UNCHANGED {
+        // worker.c:2632: same protocol-violation check as slot_store_data.
+        tuple_column_check(m, newtup.ncols)?;
+        if newtup.colstatus[m] != LOGICALREP_COLUMN_UNCHANGED {
             cols.add_member(mcx, (i as i32 + 1) - FirstLowInvalidHeapAttributeNumber)?;
         }
     }
@@ -1440,7 +1456,27 @@ fn do_update<'mcx>(
     execreplication::CheckCmdReplicaIdentity(mcx, rel, types_nodes::nodes_enums::CmdType::CMD_UPDATE)?;
 
     let mut trig = apply_trig(rel)?;
-    refuse_br_triggers(trig.as_ref(), "UPDATE")?;
+    // BEFORE ROW UPDATE triggers (execReplication.c:685); a NULL return means
+    // "do nothing" for this row. The old row is the locked tuple already
+    // fetched into searchslot (C GetTupleForTrigger by its tid).
+    if let Some(t) = trig.as_mut() {
+        if t.td.trig_update_before_row {
+            let td = t.td.clone();
+            let mut when = trigger::TriggerWhenEval { mcx, cache: &mut t.when, modified_cols };
+            if !trigger::ExecBRUpdateTriggers(
+                mcx,
+                rel,
+                &td,
+                &mut t.fmgr,
+                &mut when,
+                searchslot,
+                slot,
+                modified_cols,
+            )? {
+                return Ok(());
+            }
+        }
+    }
 
     let mut generated_exprs = None;
     if rel.rd_att.constr.as_deref().is_some_and(|c| c.has_generated_stored) {
@@ -1450,6 +1486,20 @@ fn do_update<'mcx>(
     let mut nn_exprs = None;
     if rel.rd_att.constr.is_some() {
         nodemodifytable::exec_constraints(mcx, &mut check_exprs, &mut nn_exprs, rel, slot, None, None)?;
+    }
+    // ExecPartitionCheck (execReplication.c:706): the updated row must still
+    // satisfy the partition's constraint.
+    if rel.rd_rel.relispartition {
+        let mut check_cache = None;
+        if !execpartition::exec_partition_check(mcx, &mut check_cache, rel, slot)? {
+            return Err(execpartition::partition_constraint_violation(
+                mcx,
+                rel,
+                slot,
+                modified_cols,
+                None,
+            ));
+        }
     }
 
     let otid = searchslot.base().tts_tid;
@@ -1515,7 +1565,18 @@ fn do_delete<'mcx>(
     execreplication::CheckCmdReplicaIdentity(mcx, rel, types_nodes::nodes_enums::CmdType::CMD_DELETE)?;
 
     let mut trig = apply_trig(rel)?;
-    refuse_br_triggers(trig.as_ref(), "DELETE")?;
+    // BEFORE ROW DELETE triggers (execReplication.c:753); a NULL return
+    // suppresses the delete.
+    if let Some(t) = trig.as_mut() {
+        if t.td.trig_delete_before_row {
+            let td = t.td.clone();
+            let mut when =
+                trigger::TriggerWhenEval { mcx, cache: &mut t.when, modified_cols: None };
+            if !trigger::ExecBRDeleteTriggers(mcx, rel, &td, &mut t.fmgr, &mut when, searchslot)? {
+                return Ok(());
+            }
+        }
+    }
 
     let tid = searchslot.base().tts_tid;
     let snap = Some(snapmgr::GetActiveSnapshot());
@@ -1589,9 +1650,13 @@ fn apply_handle_tuple_routing<'mcx>(
     match op {
         RoutedOp::Insert => do_insert(mcx, &partrel, &mut remoteslot_part),
         RoutedOp::Delete => {
-            let part_entry =
-                logicalrelation::logicalrep_partition_open(entry, &partrel, root_to_leaf.as_deref())?;
-            check_relation_updatable(&part_entry)?;
+            let part_entry = logicalrelation::logicalrep_partition_open(
+                mcx,
+                entry,
+                &partrel,
+                root_to_leaf.as_deref(),
+            )?;
+            check_relation_updatable(mcx, &partrel, &part_entry)?;
 
             let mut localslot = tableam_real::table_slot_create(mcx, &partrel)?;
             let found =
@@ -1619,9 +1684,13 @@ fn apply_handle_tuple_routing<'mcx>(
             Ok(())
         }
         RoutedOp::Update(newtup) => {
-            let part_entry =
-                logicalrelation::logicalrep_partition_open(entry, &partrel, root_to_leaf.as_deref())?;
-            check_relation_updatable(&part_entry)?;
+            let part_entry = logicalrelation::logicalrep_partition_open(
+                mcx,
+                entry,
+                &partrel,
+                root_to_leaf.as_deref(),
+            )?;
+            check_relation_updatable(mcx, &partrel, &part_entry)?;
 
             let mut localslot = tableam_real::table_slot_create(mcx, &partrel)?;
             let found =
@@ -1767,7 +1836,7 @@ fn apply_handle_update(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> {
         logicalrelation::logicalrep_rel_close(rel, types_rel::RowExclusiveLock)?;
         return end_replication_step();
     }
-    check_relation_updatable(&entry)?;
+    check_relation_updatable(mcx, &rel, &entry)?;
 
     // Make sure that any user-supplied code runs as the table owner, unless
     // the user has opted out of that behavior (worker.c:2594).
@@ -1852,7 +1921,7 @@ fn apply_handle_delete(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> {
         logicalrelation::logicalrep_rel_close(rel, types_rel::RowExclusiveLock)?;
         return end_replication_step();
     }
-    check_relation_updatable(&entry)?;
+    check_relation_updatable(mcx, &rel, &entry)?;
 
     // Make sure that any user-supplied code runs as the table owner, unless
     // the user has opted out of that behavior (worker.c:2798).
@@ -1908,10 +1977,12 @@ fn apply_handle_delete(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> {
     end_replication_step()
 }
 
-// apply_handle_truncate (worker.c:3232). Even if the publisher used CASCADE,
+// apply_handle_truncate (worker.c:3257). Even if the publisher used CASCADE,
 // C explicitly replays without further cascading (DROP_RESTRICT).
-// TargetPrivilegesCheck (ACL_TRUNCATE) is elided as in the other handlers
-// (recorded divergence); C's truncate has no run-as-owner arm.
+// TargetPrivilegesCheck (ACL_TRUNCATE) runs for the target and for every
+// truncated partition (worker.c:3297, :3335); ExecuteTruncateGuts switches
+// to each table's owner exactly when the subscription does not run as its
+// owner (worker.c:3351).
 fn apply_handle_truncate(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> {
     begin_replication_step(mcx)?;
 
@@ -1933,6 +2004,7 @@ fn apply_handle_truncate(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> 
             logicalrelation::logicalrep_rel_close(rel, types_rel::AccessExclusiveLock)?;
             continue;
         }
+        target_privileges_check(mcx, &rel, types_nodes::parsenodes::ACL_TRUNCATE)?;
         if heapam::relation_is_logically_logged(&rel) {
             relids_logged.push(rel.rd_id);
         }
@@ -1958,6 +2030,7 @@ fn apply_handle_truncate(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> 
                     table::table_close(childrel, types_rel::AccessExclusiveLock)?;
                     continue;
                 }
+                target_privileges_check(mcx, &childrel, types_nodes::parsenodes::ACL_TRUNCATE)?;
                 if heapam::relation_is_logically_logged(&childrel) {
                     relids_logged.push(childrelid);
                 }
@@ -1975,6 +2048,11 @@ fn apply_handle_truncate(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> 
             &mut relids_logged,
             types_nodes::parsenodes::DropBehavior::DROP_RESTRICT,
             restart_seqs,
+            // MySubscription->runasowner says whether replication actions run
+            // as the subscription owner; the last argument tells the truncate
+            // whether to switch to the table owner — exactly opposite
+            // conditions (worker.c:3341).
+            !my_sub(|s| s.runasowner),
         )?;
     }
 

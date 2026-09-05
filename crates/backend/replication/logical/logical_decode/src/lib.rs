@@ -794,13 +794,14 @@ fn logicalmsg_decode(ctx: &mut LogicalDecodingContext, buf: XLogRecordBuffer) ->
 
     // Lengths were bounds-checked above, so these ranges are in-bounds; use
     // checked slicing (.get) to make that guarantee explicit and panic-free.
+    // The prefix is an arbitrary NUL-terminated string in C (decode.c:652),
+    // copied verbatim with no encoding check: a non-UTF-8 prefix (SQL_ASCII /
+    // single-byte databases) is data, never a panic.
     let data = ctx.reader.XLogRecGetData();
-    let prefix = std::str::from_utf8(
-        data.get(24..24 + prefix_size - 1)
-            .expect("prefix bytes validated"),
-    )
-    .expect("message prefix is utf8")
-    .to_string();
+    let prefix = data
+        .get(24..24 + prefix_size - 1)
+        .expect("prefix bytes validated")
+        .to_vec();
     let message = data
         .get(24 + prefix_size..24 + prefix_size + message_size)
         .expect("message bytes validated")

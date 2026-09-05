@@ -650,7 +650,7 @@ fn pg_decode_message(
     txn: Option<TxnId>,
     _lsn: XLogRecPtr,
     transactional: bool,
-    prefix: &str,
+    prefix: &[u8],
     message: &[u8],
 ) -> PgResult<()> {
     let data = data_from(opc);
@@ -664,16 +664,12 @@ fn pg_decode_message(
         txndata.xact_wrote_changes = true;
     }
 
+    // test_decoding.c:775: the prefix ("%s") and the content
+    // (appendBinaryStringInfo) are emitted byte-for-byte.
     OutputPluginPrepareWrite(opc, true)?;
-    let _ = write!(
-        opc.out,
-        "message: transactional: {} prefix: {}, sz: {} content:",
-        transactional as i32,
-        prefix,
-        message.len()
-    );
-    // appendBinaryStringInfo (test_decoding.c:764): the payload is arbitrary
-    // bytes and goes out verbatim.
+    let _ = write!(opc.out, "message: transactional: {} prefix: ", transactional as i32);
+    opc.out.as_mut_vec().extend_from_slice(prefix);
+    let _ = write!(opc.out, ", sz: {} content:", message.len());
     opc.out.as_mut_vec().extend_from_slice(message);
     OutputPluginWrite(opc, true)
 }
@@ -896,7 +892,7 @@ fn pg_decode_stream_message(
     txn: Option<TxnId>,
     _lsn: XLogRecPtr,
     transactional: bool,
-    prefix: &str,
+    prefix: &[u8],
     message: &[u8],
 ) -> PgResult<()> {
     let data = data_from(opc);
@@ -911,24 +907,13 @@ fn pg_decode_stream_message(
     }
 
     OutputPluginPrepareWrite(opc, true)?;
+    let _ = write!(opc.out, "streaming message: transactional: {} prefix: ", transactional as i32);
+    opc.out.as_mut_vec().extend_from_slice(prefix);
     if transactional {
         // The message content is not output: it may already be gone.
-        let _ = write!(
-            opc.out,
-            "streaming message: transactional: {} prefix: {}, sz: {}",
-            transactional as i32,
-            prefix,
-            message.len()
-        );
+        let _ = write!(opc.out, ", sz: {}", message.len());
     } else {
-        let _ = write!(
-            opc.out,
-            "streaming message: transactional: {} prefix: {}, sz: {} content:",
-            transactional as i32,
-            prefix,
-            message.len()
-        );
-        // appendBinaryStringInfo (test_decoding.c:974): verbatim bytes.
+        let _ = write!(opc.out, ", sz: {} content:", message.len());
         opc.out.as_mut_vec().extend_from_slice(message);
     }
     OutputPluginWrite(opc, true)

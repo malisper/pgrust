@@ -25,7 +25,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use heaptuple::HeapTuple;
-use mcx::{Mcx, MemoryContext, PgFxHashMap, PgString, PgVec};
+use mcx::{Mcx, MemoryContext, PgFxHashMap, PgVec};
 use snapmgr::Snapshot;
 use types_core::{
     CommandId, InvalidCommandId, InvalidTransactionId, InvalidXLogRecPtr, Oid, RepOriginId,
@@ -134,7 +134,9 @@ pub enum ReorderBufferChangeData {
         relids: PgVec<'static, Oid>,
     },
     Msg {
-        prefix: PgString<'static>,
+        // The prefix bytes as logged (C: a NUL-terminated string copied
+        // verbatim, never encoding-checked).
+        prefix: PgVec<'static, u8>,
         message: PgVec<'static, u8>,
     },
     Snapshot(Snapshot),
@@ -393,7 +395,7 @@ fn cb_message_unset(
     _: Option<TxnId>,
     _: XLogRecPtr,
     _: bool,
-    _: &str,
+    _: &[u8],
     _: &[u8],
 ) -> PgResult<()> {
     unported("rb->message callback not installed (logical.c)")
@@ -423,7 +425,7 @@ pub struct ReorderBufferCallbacks {
     ) -> PgResult<()>,
     pub commit: fn(&mut ReorderBuffer, TxnId, XLogRecPtr) -> PgResult<()>,
     pub message:
-        fn(&mut ReorderBuffer, Option<TxnId>, XLogRecPtr, bool, &str, &[u8]) -> PgResult<()>,
+        fn(&mut ReorderBuffer, Option<TxnId>, XLogRecPtr, bool, &[u8], &[u8]) -> PgResult<()>,
     pub begin_prepare: fn(&mut ReorderBuffer, TxnId) -> PgResult<()>,
     pub prepare: fn(&mut ReorderBuffer, TxnId, XLogRecPtr) -> PgResult<()>,
     pub commit_prepared: fn(&mut ReorderBuffer, TxnId, XLogRecPtr) -> PgResult<()>,
@@ -438,7 +440,7 @@ pub struct ReorderBufferCallbacks {
             -> PgResult<()>,
     >,
     pub stream_message: Option<
-        fn(&mut ReorderBuffer, Option<TxnId>, XLogRecPtr, bool, &str, &[u8]) -> PgResult<()>,
+        fn(&mut ReorderBuffer, Option<TxnId>, XLogRecPtr, bool, &[u8], &[u8]) -> PgResult<()>,
     >,
     pub stream_truncate: Option<
         fn(&mut ReorderBuffer, TxnId, &[Rc<RelationData<'static>>], &mut ReorderBufferChange)
@@ -976,21 +978,20 @@ impl ReorderBuffer {
         snap: Option<Snapshot>,
         lsn: XLogRecPtr,
         transactional: bool,
-        prefix: &str,
+        prefix: &[u8],
         message: &[u8],
     ) -> PgResult<()> {
         if transactional {
             debug_assert!(xid != InvalidTransactionId);
             debug_assert!(snap.is_none());
 
+            let mut pfx = PgVec::new_in(self.mcx);
+            mcx::vec_append_bytes(&mut pfx, prefix)?;
             let mut msg = PgVec::new_in(self.mcx);
             mcx::vec_append_bytes(&mut msg, message)?;
             let change = ReorderBufferChange::new(
                 Message,
-                ReorderBufferChangeData::Msg {
-                    prefix: PgString::from_str_in(prefix, self.mcx)?,
-                    message: msg,
-                },
+                ReorderBufferChangeData::Msg { prefix: pfx, message: msg },
             );
             self.queue_change(xid, lsn, change, false)
         } else {

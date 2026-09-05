@@ -79,6 +79,32 @@ pub fn RelationGetPkReplidIndexes(mcx: Mcx<'_>, relid: Oid) -> PgResult<(Oid, Oi
     Ok(pair)
 }
 
+// GetRelationIdentityOrPK (relation.c:891) resolved through the CURRENT
+// cache entry (same reason as RelationGetReplicaIndexOid): the replica
+// identity index, else RelationGetPrimaryKeyIndex(rel, false)
+// (relcache.c:5049) — which returns InvalidOid for a DEFERRABLE primary key,
+// since a deferrable key may hold duplicates inside a transaction and so
+// cannot locate one row.
+pub fn RelationGetIdentityOrPkIndex(mcx: Mcx<'_>, relid: Oid) -> PgResult<Oid> {
+    let rel = store::RelationIdGetRelation(relid)?.ok_or_else(|| not_open(relid))?;
+    if rel.rd_indexlist.borrow().is_none() {
+        let _ = rebuild_index_list(mcx, &rel)?;
+    }
+    let (pk, pkdeferrable, replident) = rel
+        .rd_indexlist
+        .borrow()
+        .as_ref()
+        .map(|l| (l.pkindex, l.ispkdeferrable, l.replidindex))
+        .unwrap_or((InvalidOid, false, InvalidOid));
+    Ok(if replident != InvalidOid {
+        replident
+    } else if pkdeferrable {
+        InvalidOid
+    } else {
+        pk
+    })
+}
+
 // The scan may process invalidations (it re-enters the relcache), so no
 // rd_indexlist borrow is held across it; the result is built in the caller's
 // context and installed on the entry only after the scan completes, as in C.

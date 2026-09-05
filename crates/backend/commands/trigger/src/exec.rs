@@ -16,6 +16,7 @@ use types_trigger::{
 };
 use types_trigger_call::TriggerData;
 use types_tuple::htup::FirstLowInvalidHeapAttributeNumber;
+use types_tuple::itemptr::ItemPointerData;
 use types_tuple::HeapTupleData;
 
 // Resolve-once carrier for a TriggerDesc's functions (C ri_TrigFunctions).
@@ -558,6 +559,174 @@ fn moved_row_before_trigger<'mcx>(
             rel.name()
         )),
     )
+}
+
+// ExecFetchSlotHeapTuple(slot, true, &should_free) as raw parts plus the
+// Copied owner: C's should_free discipline — a Copied image must outlive the
+// trigger calls that see it and is freed after them, never before.
+type RawTuple = (*const u8, u32, ItemPointerData, types_core::Oid);
+fn fetch_raw<'mcx>(
+    mcx: Mcx<'mcx>,
+    slot: &mut SlotData<'mcx>,
+) -> PgResult<(RawTuple, Option<heaptuple::HeapTuple<'mcx>>)> {
+    let fetched = exectuples::exec_fetch_slot_heap_tuple(slot, true, mcx, mcx)?;
+    Ok(match fetched {
+        exectuples::FetchedHeapTuple::Slot(t) => {
+            ((t.header_ptr(), t.t_len, t.t_self, t.t_tableOid), None)
+        }
+        exectuples::FetchedHeapTuple::Copied(t) => {
+            ((t.header_ptr(), t.t_len, t.t_self, t.t_tableOid), Some(t))
+        }
+    })
+}
+
+// ExecForceStoreHeapTuple of a trigger-returned tuple (trigger.c:3108): the
+// returned image (live in the per-call context) is copied into the query
+// context and stored into `slot`, after check_modified_virtual_generated.
+fn store_returned_tuple<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    returned: &HeapTupleData<'_>,
+    slot: &mut SlotData<'mcx>,
+) -> PgResult<()> {
+    let nulled = check_modified_virtual_generated(mcx, rel, returned)?;
+    let returned = nulled.as_ref().map_or(returned, |t| t.as_tuple());
+    // SAFETY: the returned tuple is a live heap-tuple image of t_len bytes.
+    let img = unsafe { core::slice::from_raw_parts(returned.header_ptr(), returned.t_len as usize) };
+    let mut buf = mcx::vec_with_capacity_in(mcx, img.len())?;
+    mcx::vec_append_bytes(&mut buf, img).map_err(|_| mcx.oom(img.len()))?;
+    let ptr = buf.as_ptr();
+    core::mem::forget(buf);
+    // SAFETY: fresh query-context copy of the returned image.
+    let copy = unsafe {
+        HeapTupleData::from_raw_parts(ptr, returned.t_len, returned.t_self, returned.t_tableOid)
+    };
+    exectuples::exec_force_store_heap_tuple(copy, slot, mcx)
+}
+
+// ExecBRDeleteTriggers (trigger.c:2707), standalone-caller form (logical
+// replication apply, execReplication.c:753). The row being deleted is already
+// locked and fetched into `oldslot` — C's GetTupleForTrigger(tid) leg — so no
+// EPQ recheck arises. false = a trigger returned NULL: suppress the delete.
+pub fn ExecBRDeleteTriggers<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    trigdesc: &types_trigger::TriggerDesc<'static>,
+    fmgr: &mut TriggerFmgrCache,
+    when: &mut TriggerWhenEval<'_, 'mcx>,
+    oldslot: &mut SlotData<'mcx>,
+) -> PgResult<bool> {
+    use types_trigger::{
+        TRIGGER_EVENT_BEFORE, TRIGGER_EVENT_DELETE, TRIGGER_EVENT_ROW, TRIGGER_TYPE_BEFORE,
+        TRIGGER_TYPE_DELETE, TRIGGER_TYPE_LEVEL_MASK, TRIGGER_TYPE_ROW, TRIGGER_TYPE_TIMING_MASK,
+    };
+    let tg_event = TRIGGER_EVENT_DELETE | TRIGGER_EVENT_ROW | TRIGGER_EVENT_BEFORE;
+    // trigtuple = ExecFetchSlotHeapTuple(slot, true, &should_free).
+    let ((img, len, tid, toid), _trig_owned) = fetch_raw(mcx, oldslot)?;
+    for (i, trigger) in trigdesc.triggers.iter().enumerate() {
+        if trigger.tgtype & (TRIGGER_TYPE_LEVEL_MASK | TRIGGER_TYPE_TIMING_MASK | TRIGGER_TYPE_DELETE)
+            != TRIGGER_TYPE_ROW | TRIGGER_TYPE_BEFORE | TRIGGER_TYPE_DELETE
+        {
+            continue;
+        }
+        if !TriggerEnabled(trigger) {
+            continue;
+        }
+        if !when.check(i, trigger, rel, tg_event, Some(oldslot), None)? {
+            continue;
+        }
+        // SAFETY: a materialized query-context image; the slot is not written
+        // while this handle lives within this iteration.
+        let mut trigtuple = unsafe { HeapTupleData::from_raw_parts(img, len, tid, toid) };
+        let trig_nn = NonNull::from(&mut trigtuple);
+        let finfo = fmgr.get(i, trigger.tgfoid)?;
+        let mut tdata = TriggerData::from_raw(tg_event, rel, Some(trig_nn), None, trigger);
+        if ExecCallTriggerFunc(mcx, &mut tdata, finfo)?.is_none() {
+            return Ok(false); // tell caller to suppress delete
+        }
+        // A returned tuple other than trigtuple is context-owned here
+        // (C heap_freetuple(newtuple)).
+    }
+    Ok(true)
+}
+
+// ExecBRUpdateTriggers (trigger.c:2977), standalone-caller form (logical
+// replication apply, execReplication.c:685). `oldslot` holds the locked,
+// fetched old row (GetTupleForTrigger leg, no EPQ recheck); `newslot` the
+// replacement row, rewritten in place when a trigger returns a different
+// tuple (ExecForceStoreHeapTuple). `updated_cols` is C's
+// ExecGetAllUpdatedCols, handed to the triggers as tg_updatedcols. false = a
+// trigger returned NULL: "do nothing".
+#[allow(clippy::too_many_arguments)]
+pub fn ExecBRUpdateTriggers<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    trigdesc: &types_trigger::TriggerDesc<'static>,
+    fmgr: &mut TriggerFmgrCache,
+    when: &mut TriggerWhenEval<'_, 'mcx>,
+    oldslot: &mut SlotData<'mcx>,
+    newslot: &mut SlotData<'mcx>,
+    updated_cols: Option<&Bitmapset<'mcx>>,
+) -> PgResult<bool> {
+    use types_trigger::{
+        TRIGGER_EVENT_BEFORE, TRIGGER_EVENT_ROW, TRIGGER_TYPE_BEFORE, TRIGGER_TYPE_LEVEL_MASK,
+        TRIGGER_TYPE_ROW, TRIGGER_TYPE_TIMING_MASK, TRIGGER_TYPE_UPDATE,
+    };
+    let tg_event = TRIGGER_EVENT_UPDATE | TRIGGER_EVENT_ROW | TRIGGER_EVENT_BEFORE;
+    // Here we convert oldslot to a materialized slot holding trigtuple.
+    let ((oimg, olen, otid, otoid), _trig_owned) = fetch_raw(mcx, oldslot)?;
+    // Stable across the calls: the caller's bitmapset outlives this function.
+    let updatedcols_ptr = updated_cols.map_or(0usize, |b| b as *const _ as usize);
+    let mut new_raw: Option<RawTuple> = None;
+    let mut _new_owned: Option<heaptuple::HeapTuple<'mcx>> = None;
+    for (i, trigger) in trigdesc.triggers.iter().enumerate() {
+        if trigger.tgtype & (TRIGGER_TYPE_LEVEL_MASK | TRIGGER_TYPE_TIMING_MASK | TRIGGER_TYPE_UPDATE)
+            != TRIGGER_TYPE_ROW | TRIGGER_TYPE_BEFORE | TRIGGER_TYPE_UPDATE
+        {
+            continue;
+        }
+        if !TriggerEnabled(trigger) {
+            continue;
+        }
+        if !when.check(i, trigger, rel, tg_event, Some(oldslot), Some(newslot))? {
+            continue;
+        }
+        // newtuple = ExecFetchSlotHeapTuple(newslot, true, &should_free_new),
+        // fetched once and refreshed after a replacement.
+        let (nimg, nlen, ntid, ntoid) = match new_raw {
+            Some(r) => r,
+            None => {
+                let (r, owned) = fetch_raw(mcx, newslot)?;
+                new_raw = Some(r);
+                _new_owned = owned;
+                r
+            }
+        };
+        // SAFETY (both): materialized query-context images; the slots are
+        // not written while these handles live within this iteration.
+        let mut trigtuple = unsafe { HeapTupleData::from_raw_parts(oimg, olen, otid, otoid) };
+        let mut newtuple = unsafe { HeapTupleData::from_raw_parts(nimg, nlen, ntid, ntoid) };
+        let trig_nn = NonNull::from(&mut trigtuple);
+        let new_nn = NonNull::from(&mut newtuple);
+        let finfo = fmgr.get(i, trigger.tgfoid)?;
+        let mut tdata =
+            TriggerData::from_raw(tg_event, rel, Some(trig_nn), Some(new_nn), trigger);
+        tdata.tg_updatedcols = updatedcols_ptr;
+        match ExecCallTriggerFunc(mcx, &mut tdata, finfo)? {
+            None => return Ok(false), // "do nothing"
+            Some(p) if p == new_nn => {}
+            Some(p) => {
+                // SAFETY: the trigger's returned tuple, live in the per-call
+                // context; copied into the slot before reuse.
+                let returned = unsafe { p.as_ref() };
+                store_returned_tuple(mcx, rel, returned, newslot)?;
+                let (r, owned) = fetch_raw(mcx, newslot)?;
+                new_raw = Some(r);
+                _new_owned = owned;
+            }
+        }
+    }
+    Ok(true)
 }
 
 // check_modified_virtual_generated (trigger.c:6735): a trigger-returned tuple

@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use datum::Datum;
-use mcx::{PgString, PgVec};
+use mcx::PgVec;
 use snapmgr::Snapshot;
 use types_core::{InvalidCommandId, Oid, TransactionId, XLogRecPtr};
 use types_snapshot::{SnapshotData, SnapshotType};
@@ -27,15 +27,11 @@ fn snap(xmin: TransactionId) -> Snapshot {
 
 fn msg_change(text: &str) -> ReorderBufferChange {
     let mcx = rb_mcx();
+    let mut prefix = PgVec::new_in(mcx);
+    mcx::vec_append_bytes(&mut prefix, b"test").unwrap();
     let mut message = PgVec::new_in(mcx);
     mcx::vec_append_bytes(&mut message, text.as_bytes()).unwrap();
-    ReorderBufferChange::new(
-        Message,
-        ReorderBufferChangeData::Msg {
-            prefix: PgString::from_str_in("test", mcx).unwrap(),
-            message,
-        },
-    )
+    ReorderBufferChange::new(Message, ReorderBufferChangeData::Msg { prefix, message })
 }
 
 fn inval_msg(hash: u32) -> SharedInvalidationMessage {
@@ -410,7 +406,7 @@ fn recording_message_cb(
     txn: Option<TxnId>,
     lsn: XLogRecPtr,
     transactional: bool,
-    prefix: &str,
+    prefix: &[u8],
     message: &[u8],
 ) -> types_error::PgResult<()> {
     DELIVERED.with(|d| {
@@ -419,7 +415,7 @@ fn recording_message_cb(
             txn.map(|t| t as i64).unwrap_or(-1),
             lsn,
             transactional,
-            prefix,
+            String::from_utf8_lossy(prefix),
             String::from_utf8_lossy(message)
         ))
     });
@@ -433,7 +429,7 @@ fn non_transactional_message_delivered_with_historic_snapshot() {
     DELIVERED.with(|d| d.borrow_mut().clear());
 
     assert!(!snapmgr::HistoricSnapshotActive());
-    rb.queue_message(0, Some(snap(300)), 42, false, "pfx", b"payload")
+    rb.queue_message(0, Some(snap(300)), 42, false, b"pfx", b"payload")
         .unwrap();
     assert!(!snapmgr::HistoricSnapshotActive());
 
@@ -445,14 +441,14 @@ fn non_transactional_message_delivered_with_historic_snapshot() {
 #[test]
 fn transactional_message_is_queued() {
     let mut rb = rb();
-    rb.queue_message(4, None, 43, true, "pfx", b"body").unwrap();
+    rb.queue_message(4, None, 43, true, b"pfx", b"body").unwrap();
     let txn = rb.txn_by_xid(4, false, 0, false).0.unwrap();
     assert_eq!(rb.txn(txn).nentries, 1);
     let cid = rb.txn(txn).changes.head;
     assert_eq!(rb.change(cid).action, Message);
     match &rb.change(cid).data {
         ReorderBufferChangeData::Msg { prefix, message } => {
-            assert_eq!(prefix.as_str(), "pfx");
+            assert_eq!(&prefix[..], b"pfx");
             assert_eq!(&message[..], b"body");
         }
         _ => panic!("expected Msg data"),
@@ -1104,7 +1100,7 @@ fn spill_roundtrip_preserves_every_change_type() {
         seen.push((change.lsn, change.action));
         match (change.lsn, &change.data) {
             (100, ReorderBufferChangeData::Msg { prefix, message }) => {
-                assert_eq!(prefix.as_str(), "test");
+                assert_eq!(&prefix[..], b"test");
                 assert_eq!(&message[..], b"alpha");
             }
             (110, ReorderBufferChangeData::Tp { rlocator, clear_toast_afterwards, oldtuple, newtuple }) => {

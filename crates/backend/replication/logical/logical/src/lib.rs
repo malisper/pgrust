@@ -78,13 +78,15 @@ pub type TruncateCB = fn(
 ) -> PgResult<()>;
 pub type CommitCB =
     fn(&mut OutputPluginContext, &mut ReorderBuffer, TxnId, XLogRecPtr) -> PgResult<()>;
+// The prefix is a NUL-terminated C string in C, copied verbatim (no encoding
+// check), so it travels as raw bytes.
 pub type MessageCB = fn(
     &mut OutputPluginContext,
     &mut ReorderBuffer,
     Option<TxnId>,
     XLogRecPtr,
     bool,
-    &str,
+    &[u8],
     &[u8],
 ) -> PgResult<()>;
 pub type FilterByOriginCB = fn(&mut OutputPluginContext, RepOriginId) -> PgResult<bool>;
@@ -1099,7 +1101,7 @@ fn stream_message_cb_wrapper(
     txn: Option<TxnId>,
     lsn: XLogRecPtr,
     transactional: bool,
-    prefix: &str,
+    prefix: &[u8],
     message: &[u8],
 ) -> PgResult<()> {
     let opc = opc_from_rb(rb);
@@ -1131,8 +1133,9 @@ fn stream_truncate_cb_wrapper(
     opc.write_xid = rb.txn(txn).xid;
     opc.write_location = change.lsn;
     opc.end_xact = false;
+    // This callback is optional (logical.c:1667).
     let Some(cb) = opc.callbacks.stream_truncate_cb else {
-        return missing_stream_cb("stream_truncate_cb");
+        return Ok(());
     };
     let report_location = change.lsn;
     let r = cb(&mut *opc, rb, txn, relations, change);
@@ -1198,7 +1201,7 @@ fn message_cb_wrapper(
     txn: Option<TxnId>,
     message_lsn: XLogRecPtr,
     transactional: bool,
-    prefix: &str,
+    prefix: &[u8],
     message: &[u8],
 ) -> PgResult<()> {
     let opc = opc_from_rb(rb);

@@ -626,19 +626,26 @@ pub fn ProcessParallelApplyMessages() -> PgResult<()> {
         let err = winfo.borrow().shared.lock().error.take();
         if let Some(e) = err {
             // C parses the worker's ErrorResponse and rethrows with an added
-            // context line; the original error was already logged by the
-            // worker's own exit path.
+            // context line (applyparallelworker.c:1039); the original error
+            // was already logged by the worker's own exit path.
             ereport(ERROR)
                 .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
                 .errmsg("logical replication parallel apply worker exited due to error")
-                .errcontext_msg(format!(
-                    "{}\nlogical replication parallel apply worker",
-                    e.message()
-                ))
+                .errcontext_msg(parallel_apply_worker_context(&e))
                 .finish(loc("ProcessParallelApplyMessages"))?;
         }
     }
     Ok(())
+}
+
+// applyparallelworker.c:1045: the worker error's own CONTEXT (if any) plus a
+// line showing the message was propagated from a parallel apply worker; the
+// primary message is never part of the context.
+pub(crate) fn parallel_apply_worker_context(e: &PgError) -> String {
+    match e.context() {
+        Some(c) => format!("{c}\nlogical replication parallel apply worker"),
+        None => "logical replication parallel apply worker".to_string(),
+    }
 }
 
 // ---- PA worker: subtransactions --------------------------------------------

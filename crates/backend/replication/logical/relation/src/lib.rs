@@ -14,8 +14,9 @@
 // - logicalrep_partition_open builds the per-partition entry on every call
 //   (C caches it in LogicalRepPartMap); correctness-identical, the cache is
 //   a later perf item. FindUsableIndexForReplicaIdentityFull is out of
-//   scope, so REPLICA IDENTITY FULL uses the sequential-scan path (which C
-//   also falls back to).
+//   scope, so a REPLICA IDENTITY FULL publisher against a local table with
+//   neither PK nor replica identity index uses the sequential-scan path
+//   (which C also falls back to); a local PK/RI index is used as in C.
 #![allow(non_snake_case)]
 
 use std::cell::RefCell;
@@ -138,23 +139,26 @@ fn mark_updatable(entry: &mut LogicalRepRelMapEntry) -> PgResult<()> {
     Ok(())
 }
 
-// FindLogicalRepLocalIndex (relation.c:832), replident/PK subset.
-fn find_local_index(rel: &Relation<'_>, remoterel: &LogicalRepRelation) -> Oid {
-    const REPLICA_IDENTITY_FULL: u8 = b'f';
-    if remoterel.replident == REPLICA_IDENTITY_FULL {
-        return InvalidOid;
+// GetRelationIdentityOrPK (relation.c:891): the replica identity index, else
+// the primary key through RelationGetPrimaryKeyIndex(rel, false)
+// (relcache.c:5049), which refuses a DEFERRABLE primary key.
+pub fn get_relation_identity_or_pk(mcx: Mcx<'_>, rel: &Relation<'_>) -> PgResult<Oid> {
+    relcache::indexlist::RelationGetIdentityOrPkIndex(mcx, rel.rd_id)
+}
+
+// FindLogicalRepLocalIndex (relation.c:908). A partitioned table never needs
+// an index (the leaf partition's is used); otherwise the local replica
+// identity or (non-deferrable) primary key is used whatever the remote
+// replica identity is. FindUsableIndexForReplicaIdentityFull (relation.c:770,
+// a REPLICA IDENTITY FULL publisher against a subscriber without PK/RI) is
+// unported: that arm falls back to the sequential scan, which C also takes
+// when no usable index exists (results identical; the index is a scan
+// strategy only, tuples_equal still decides the match).
+fn find_local_index(mcx: Mcx<'_>, rel: &Relation<'_>) -> PgResult<Oid> {
+    if rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE {
+        return Ok(InvalidOid);
     }
-    let (pk, replident) = rel
-        .rd_indexlist
-        .borrow()
-        .as_ref()
-        .map(|l| (l.pkindex, l.replidindex))
-        .unwrap_or((InvalidOid, InvalidOid));
-    if replident != InvalidOid {
-        replident
-    } else {
-        pk
-    }
+    get_relation_identity_or_pk(mcx, rel)
 }
 
 // logicalrep_get_attrs_str (relation.c:227): the named remote columns,
@@ -318,7 +322,7 @@ pub fn logicalrep_rel_open<'mcx>(
         report_missing_or_gen_attrs(&remoterel, &missing_idx, &generated_hit)?;
 
         mark_updatable(&mut entry)?;
-        entry.localindexoid = find_local_index(&rel, &remoterel);
+        entry.localindexoid = find_local_index(mcx, &rel)?;
         entry.localrelvalid = true;
         localrel = Some(rel);
     }
@@ -350,6 +354,7 @@ pub fn logicalrep_rel_close(rel: Relation<'_>, lockmode: LOCKMODE) -> PgResult<(
 // Rendering: built per call — C caches entries in LogicalRepPartMap, a perf
 // difference only (see module header).
 pub fn logicalrep_partition_open(
+    mcx: Mcx<'_>,
     root: &LogicalRepRelMapEntry,
     partrel: &Relation<'_>,
     map: Option<&[i16]>,
@@ -380,7 +385,7 @@ pub fn logicalrep_partition_open(
         statelsn: InvalidXLogRecPtr,
     };
     mark_updatable(&mut entry)?;
-    entry.localindexoid = find_local_index(partrel, &entry.remoterel);
+    entry.localindexoid = find_local_index(mcx, partrel)?;
     Ok(entry)
 }
 

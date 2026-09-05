@@ -95,5 +95,6 @@ pub(crate) fn decode(
     let relchecks = req(td, tup, 20)?.as_i16();
     let relhasrules = req(td, tup, 21)?.as_bool();
     let relhastriggers = req(td, tup, 22)?.as_bool();
-    Ok(ScannedPgClass { form, relchecks, relnatts, relhastriggers, relhasrules, options })
+    let relrewrite = req(td, tup, 29)?.as_oid();
+    Ok(ScannedPgClass { form, relchecks, relnatts, relhastriggers, relhasrules, relrewrite, options })
 }

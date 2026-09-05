@@ -77,6 +77,9 @@ pub(crate) struct MySub {
     pub passwordrequired: bool,
     pub runasowner: bool,
     pub failover: bool,
+    // disable_on_error: an apply/tablesync error disables the subscription
+    // instead of crash-looping the worker (worker.c:4537).
+    pub disableonerr: bool,
     #[allow(dead_code)]
     pub dbid: Oid,
 }
@@ -222,6 +225,7 @@ fn load_subscription(mcx: Mcx<'_>, subid: Oid) -> PgResult<Option<MySub>> {
         passwordrequired: sub.passwordrequired,
         runasowner: sub.runasowner,
         failover: sub.failover,
+        disableonerr: sub.disableonerr,
         dbid: sub.dbid,
     }))
 }
@@ -924,6 +928,10 @@ fn apply_worker_body(slot: usize) -> PgResult<()> {
         );
         apply::logicalrep_relmap_prepare()?;
         let r = tablesync::run_tablesync_worker(mcx, w.relid);
+        let r = match r {
+            Err(e) => finish_apply_error(mcx, e, true),
+            ok => ok,
+        };
         let _ = origin::replorigin_session_reset();
         return r;
     }
@@ -1017,10 +1025,77 @@ fn apply_worker_body(slot: usize) -> PgResult<()> {
 
     // start_apply (worker.c:4506).
     let r = apply_loop(&mut conn, origin_startpos);
+    let r = match r {
+        Err(e) => finish_apply_error(mcx, e, false),
+        ok => ok,
+    };
 
     // Session origin teardown so a relaunched worker can re-acquire.
     let _ = origin::replorigin_session_reset();
     r
+}
+
+// start_apply / start_table_sync PG_CATCH arm (worker.c:4527, :4478): reset
+// the origin advance state so a failed apply cannot advance origin progress
+// (the publisher never resends that transaction), then either disable the
+// subscription and exit cleanly (disable_on_error) or report the failure and
+// re-throw.
+fn finish_apply_error(
+    mcx: Mcx<'static>,
+    err: Box<types_error::PgError>,
+    is_tablesync: bool,
+) -> PgResult<()> {
+    let _ = replorigin_reset(0, datum::Datum::null());
+    let (subid, disableonerr) = my_sub(|s| (s.oid, s.disableonerr));
+    if disableonerr {
+        return disable_subscription_and_exit(mcx, err, subid, is_tablesync);
+    }
+    // Report the worker failed while applying changes. Abort the current
+    // transaction so that the stats message is sent in an idle state
+    // (worker.c:4541).
+    xact::AbortOutOfAnyTransaction()?;
+    pgstat::subscription::pgstat_report_subscription_error(subid, !is_tablesync);
+    Err(err)
+}
+
+// DisableSubscriptionAndExit (worker.c:4849): emit the error, recover to an
+// idle state, disable the subscription in a new transaction and exit cleanly
+// (the launcher will not restart a disabled subscription's worker).
+fn disable_subscription_and_exit(
+    mcx: Mcx<'static>,
+    err: Box<types_error::PgError>,
+    subid: types_core::Oid,
+    is_tablesync: bool,
+) -> PgResult<()> {
+    // Emit the error message, and recover from the error state to an idle
+    // state.
+    elog::emit_error_report_for(&err);
+    xact::AbortOutOfAnyTransaction()?;
+
+    // Report the worker failed during either table synchronization or apply.
+    pgstat::subscription::pgstat_report_subscription_error(subid, !is_tablesync);
+
+    // Disable the subscription. Updating pg_subscription might involve TOAST
+    // table access, so ensure we have a valid snapshot.
+    xact::StartTransactionCommand()?;
+    let snap = snapmgr::GetTransactionSnapshot()?;
+    snapmgr::PushActiveSnapshot(&snap)?;
+    pg_subscription::DisableSubscription(mcx, subid)?;
+    snapmgr::PopActiveSnapshot()?;
+    xact::CommitTransactionCommand()?;
+
+    // Ensure we remove no-longer-useful entry for worker's start time.
+    if !is_tablesync {
+        launcher::ApplyLauncherForgetWorkerStartTime(subid);
+    }
+
+    // Notify the subscription has been disabled and exit.
+    let name = my_sub(|s| s.name.clone());
+    let _ = elog::elog(
+        LOG,
+        format!("subscription \"{name}\" has been disabled because of an error"),
+    );
+    Ok(())
 }
 
 pub fn init_seams() {

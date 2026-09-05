@@ -85,7 +85,7 @@ fn truncate_rejects_lying_relid_count_without_huge_alloc() {
 #[test]
 fn message_wire_layout() {
     let mut out = Vec::new();
-    logicalrep_write_message(&mut out, InvalidTransactionId, 0x10, true, "pfx", b"payload");
+    logicalrep_write_message(&mut out, InvalidTransactionId, 0x10, true, b"pfx", b"payload");
     assert_eq!(out[0], LOGICAL_REP_MSG_MESSAGE);
     let mut r = Reader::new(&out[1..]);
     assert_eq!(r.get_byte().unwrap(), MESSAGE_TRANSACTIONAL);

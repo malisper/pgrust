@@ -269,8 +269,11 @@ impl SnapBuild {
         let snap = self.build_snapshot();
 
         // snap->xmin is alive (logical xmin mechanism), but always double-check
-        // that the horizon is enforced before adopting it.
-        let safe_xid = procarray::GetOldestSafeDecodingTransactionId(false)?;
+        // that the horizon is enforced before adopting it. ProcArrayLock is
+        // held shared around the read (snapbuild.c:478).
+        let safe_xid = procarray::with_procarray_lock_shared(|| {
+            procarray::GetOldestSafeDecodingTransactionId(false)
+        })?;
         if TransactionIdFollows(safe_xid, snap.xmin) {
             elog(
                 ERROR,

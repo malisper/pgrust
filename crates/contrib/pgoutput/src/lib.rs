@@ -1319,7 +1319,7 @@ fn pgoutput_message(
     txn: Option<TxnId>,
     message_lsn: XLogRecPtr,
     transactional: bool,
-    prefix: &str,
+    prefix: &[u8],
     message: &[u8],
 ) -> PgResult<()> {
     let data = data_from(opc);

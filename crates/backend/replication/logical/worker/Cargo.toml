@@ -32,6 +32,9 @@ clauses = { path = "../../../optimizer/util/clauses" }
 execexpr = { path = "../../../executor/execexpr" }
 execindexing = { path = "../../../executor/execindexing" }
 execpartition = { path = "../../../executor/execpartition" }
+amapi = { path = "../../../access/index/amapi" }
+format_type = { path = "../../../utils/adt/format_type" }
+adt_pg_lsn = { path = "../../../utils/adt/pg_lsn" }
 execreplication = { path = "../../../executor/execreplication" }
 exectuples = { path = "../../../executor/exectuples" }
 nodes_core = { path = "../../../nodes/nodes_core" }

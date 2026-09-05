@@ -117,6 +117,7 @@ pub fn ExecuteTruncate<'mcx>(mcx: Mcx<'mcx>, stmt: &TruncateStmt<'mcx>) -> PgRes
         &mut relids_logged,
         stmt.behavior,
         stmt.restart_seqs,
+        false,
     )?;
 
     debug_assert_eq!(rels.len(), n_explicit);
@@ -135,6 +136,7 @@ pub fn ExecuteTruncateGuts<'mcx>(
     relids_logged: &mut Vec<Oid>,
     behavior: DropBehavior,
     restart_seqs: bool,
+    run_as_table_owner: bool,
 ) -> PgResult<()> {
     let n_explicit = rels.len();
 
@@ -215,9 +217,14 @@ pub fn ExecuteTruncateGuts<'mcx>(
         trigger::AfterTriggerBeginQuery();
         for (rel, entry) in rels.iter().zip(trig_state.iter_mut()) {
             if let Some((td, fmgr, when_cache)) = entry.as_mut() {
+                // Fire BEFORE STATEMENT triggers as the table owner when asked
+                // (tablecmds.c:2139, logical replication apply).
+                let ucxt = switch_to_table_owner(mcx, rel, run_as_table_owner)?;
                 let mut when =
                     trigger::TriggerWhenEval { mcx, cache: when_cache, modified_cols: None };
-                trigger::ExecBSTruncateTriggers(mcx, rel, td, fmgr, &mut when)?;
+                let r = trigger::ExecBSTruncateTriggers(mcx, rel, td, fmgr, &mut when);
+                restore_user_context(&ucxt)?;
+                r?;
             }
         }
     }
@@ -288,9 +295,14 @@ pub fn ExecuteTruncateGuts<'mcx>(
     if any_triggers {
         for (rel, entry) in rels.iter().zip(trig_state.iter_mut()) {
             if let Some((td, _, when_cache)) = entry.as_mut() {
+                // AFTER STATEMENT triggers are queued as the table owner too
+                // (tablecmds.c:2348).
+                let ucxt = switch_to_table_owner(mcx, rel, run_as_table_owner)?;
                 let mut when =
                     trigger::TriggerWhenEval { mcx, cache: when_cache, modified_cols: None };
-                trigger::ExecASTruncateTriggers(rel, td, Some(&mut when))?;
+                let r = trigger::ExecASTruncateTriggers(rel, td, Some(&mut when));
+                restore_user_context(&ucxt)?;
+                r?;
             }
         }
         trigger::AfterTriggerEndQuery()?;
@@ -298,6 +310,28 @@ pub fn ExecuteTruncateGuts<'mcx>(
 
     for rel in rels.drain(n_explicit..) {
         rel.close(NoLock)?;
+    }
+    Ok(())
+}
+
+// ExecuteTruncateGuts's run_as_table_owner arm (tablecmds.c:2139/2348):
+// SwitchToUntrustedUser(rel->rd_rel->relowner) around each trigger bracket.
+fn switch_to_table_owner<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    run_as_table_owner: bool,
+) -> PgResult<Option<types_core::UserContext>> {
+    if !run_as_table_owner {
+        return Ok(None);
+    }
+    let mut ucxt = types_core::UserContext::new(InvalidOid, 0, 0);
+    init_small::SwitchToUntrustedUser(mcx, rel.rd_rel.relowner, &mut ucxt)?;
+    Ok(Some(ucxt))
+}
+
+fn restore_user_context(ucxt: &Option<types_core::UserContext>) -> PgResult<()> {
+    if let Some(ucxt) = ucxt {
+        init_small::RestoreUserContext(ucxt)?;
     }
     Ok(())
 }

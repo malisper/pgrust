@@ -130,7 +130,7 @@ fn fake_scan(target: Oid, _index_ok: bool, _fnh: bool) -> PgResult<Option<relcac
     }
     Ok(ROWS.with(|r| {
         r.borrow().get(&target).map(|f| relcache_build_seams::ScannedPgClass {
-            relchecks: 0, relnatts: f.natts, relhastriggers: false, relhasrules: false,
+            relchecks: 0, relnatts: f.natts, relhastriggers: false, relhasrules: false, relrewrite: 0,
             form: f.form.clone(),
             options: None,
         })

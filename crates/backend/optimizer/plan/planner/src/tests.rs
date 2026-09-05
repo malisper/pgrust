@@ -749,7 +749,7 @@ fn install_scan_fixtures() {
     // cache, fed by pg_class/pg_index fixtures underneath its build seams.
     relcache_build_seams::scan_pg_relation::set(|relid, _, _| {
         Ok((relid == TBL).then(|| relcache_build_seams::ScannedPgClass {
-            relchecks: 0, relnatts: 0, relhastriggers: false, relhasrules: false,
+            relchecks: 0, relnatts: 0, relhastriggers: false, relhasrules: false, relrewrite: 0,
             form: make_pg_class(TBL, "t", b'r', 2, true),
             options: None,
         }))
