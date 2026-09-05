@@ -1,15 +1,26 @@
 //! read.c + readfuncs.c, minimal arm: exactly the node set a stored view
-//! SELECT rule (pg_rewrite ev_action) can contain; every other node label or
-//! token shape is a loud panic naming the C reader.
+//! SELECT rule (pg_rewrite ev_action) can contain. Malformed node text raises
+//! C's elog(ERROR) surface (message bytes per read.c / readfuncs.c, SQLSTATE
+//! XX000); a node label C reads but this crate does not yet port raises a
+//! typed ERRCODE_FEATURE_NOT_SUPPORTED refusal naming the arm. The panics
+//! that remain are (1) a truncated node string inside a field list, where C
+//! dereferences the NULL pg_strtok result (READ_*_FIELD macros call
+//! atoi/strtoul/strncmp on NULL — a backend crash; the panic is caught at the
+//! statement boundary and is strictly more contained), (2) a field label
+//! that is not the one expected (C never checks labels and silently
+//! misparses), and (3) an enum code outside the closed Rust enum (C's
+//! READ_ENUM_FIELD casts unchecked). None is reachable from SQL: the
+//! pg_node_tree input function refuses every value ("cannot accept a value
+//! of type pg_node_tree"), so readers only ever see engine-written text.
 
 #![allow(non_snake_case)]
 
 use datum::Datum;
 use mcx::Mcx;
 use types_core::Oid;
-use types_error::PgResult;
+use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
 use types_nodes::bitmapset::Bitmapset;
-use types_nodes::list::{IntList, NodeList, OidList};
+use types_nodes::list::{IntList, NodeList, OidList, XidList};
 use types_nodes::jointype::JoinType;
 use types_nodes::nodes_enums::{CmdType, LimitOption};
 use types_nodes::parsenodes::{
@@ -37,7 +48,7 @@ mod tests;
 // fresh catalog). C's stringToNode returns NULL there; this returns Ok(None).
 // SQL-reachable readers of such columns (pg_get_expr) MUST use this entry.
 pub fn stringToNodeNullable<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Option<Node<'mcx>>> {
-    let mut r = Reader { mcx, buf: s.as_bytes(), pos: 0 };
+    let mut r = Reader { mcx, buf: s.as_bytes(), pos: 0, tok_start: 0 };
     // C PARITY: stringToNode("") -> nodeRead(NULL, 0) -> pg_strtok returns
     // NULL at once -> nodeRead returns NULL, i.e. C treats an empty (or
     // all-whitespace) node string as the NULL node, exactly like "<>". This
@@ -64,12 +75,108 @@ struct Reader<'a, 'mcx> {
     mcx: Mcx<'mcx>,
     buf: &'a [u8],
     pos: usize,
+    // Byte offset of the most recent token's first character. C's readDatum
+    // and parseNodeString print a pg_strtok token with "%s"/"%.32s", and
+    // pg_strtok does NOT NUL-terminate, so those messages carry the rest of
+    // the node string from the token onward; this reproduces that.
+    tok_start: usize,
 }
 
 const SPECIALS: &[u8] = b"(){}";
 
 fn is_space(c: u8) -> bool {
     c == b' ' || c == b'\n' || c == b'\t'
+}
+
+fn lossy(t: &[u8]) -> String {
+    String::from_utf8_lossy(t).into_owned()
+}
+
+// elog(ERROR, ...) from read.c / readfuncs.c: plain ERROR, SQLSTATE XX000.
+#[cold]
+#[inline(never)]
+fn elog(message: String) -> Box<PgError> {
+    Box::new(PgError::error(message))
+}
+
+// strtol(3) over a node token, base 10: optional sign, then digits; saturates
+// at the long bounds like libc; returns (value, bytes consumed) — C compares
+// `endptr` with `token + length` to require full consumption. Tokens never
+// carry leading whitespace (pg_strtok splits on it).
+fn c_strtol(tok: &[u8]) -> (i64, usize) {
+    let mut i = 0;
+    let mut neg = false;
+    if i < tok.len() && (tok[i] == b'+' || tok[i] == b'-') {
+        neg = tok[i] == b'-';
+        i += 1;
+    }
+    let start = i;
+    // Accumulate the NEGATIVE magnitude so i64::MIN is representable.
+    let mut acc: i64 = 0;
+    let mut overflow = false;
+    while i < tok.len() && tok[i].is_ascii_digit() {
+        let d = (tok[i] - b'0') as i64;
+        match acc.checked_mul(10).and_then(|v| v.checked_sub(d)) {
+            Some(v) => acc = v,
+            None => overflow = true,
+        }
+        i += 1;
+    }
+    if i == start {
+        // No digits: strtol converts nothing and sets endptr = token.
+        return (0, 0);
+    }
+    let v = if overflow {
+        if neg { i64::MIN } else { i64::MAX }
+    } else if neg {
+        acc
+    } else {
+        acc.checked_neg().unwrap_or(i64::MAX)
+    };
+    (v, i)
+}
+
+// strtoul(3) over a node token, base 10: libc accepts a sign and negates in
+// unsigned arithmetic; overflow saturates at ULONG_MAX.
+fn c_strtoul(tok: &[u8]) -> (u64, usize) {
+    let mut i = 0;
+    let mut neg = false;
+    if i < tok.len() && (tok[i] == b'+' || tok[i] == b'-') {
+        neg = tok[i] == b'-';
+        i += 1;
+    }
+    let start = i;
+    let mut acc: u64 = 0;
+    let mut overflow = false;
+    while i < tok.len() && tok[i].is_ascii_digit() {
+        let d = (tok[i] - b'0') as u64;
+        match acc.checked_mul(10).and_then(|v| v.checked_add(d)) {
+            Some(v) => acc = v,
+            None => overflow = true,
+        }
+        i += 1;
+    }
+    if i == start {
+        return (0, 0);
+    }
+    let v = if overflow {
+        u64::MAX
+    } else if neg {
+        acc.wrapping_neg()
+    } else {
+        acc
+    };
+    (v, i)
+}
+
+// atoi(3): (int) strtol(token, NULL, 10) — never fails, truncates.
+fn c_atoi(tok: &[u8]) -> i32 {
+    c_strtol(tok).0 as i32
+}
+
+// atoui / atooid (readfuncs.c): (unsigned int) strtoul(token, NULL, 10).
+fn c_atoui(tok: &[u8]) -> u32 {
+    c_strtoul(tok).0 as u32
 }
 
 impl<'a, 'mcx> Reader<'a, 'mcx> {
@@ -82,6 +189,7 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             return None;
         }
         let start = self.pos;
+        self.tok_start = start;
         if SPECIALS.contains(&self.buf[self.pos]) {
             self.pos += 1;
             return Some(&self.buf[start..self.pos]);
@@ -104,6 +212,15 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         Some(tok)
     }
 
+    // The rest of the node string from the most recent token onward — what
+    // C prints when it formats a pg_strtok token with "%s" (not NUL-terminated).
+    fn rest_from_token(&self) -> String {
+        lossy(&self.buf[self.tok_start..])
+    }
+
+    // A token inside a READ_*_FIELD macro. C never checks pg_strtok for NULL
+    // here (atoi/strtoul/strncmp on NULL: backend crash); the panic is the
+    // contained analogue, caught at the statement boundary.
     fn token(&mut self, what: &str) -> &'a [u8] {
         match self.next_token() {
             Some(t) => t,
@@ -111,13 +228,13 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         }
     }
 
-    fn expect(&mut self, lit: &str) {
-        let t = self.token(lit);
-        assert!(
-            t == lit.as_bytes(),
-            "pg_strtok (read.c): expected {lit:?}, got {:?}",
-            String::from_utf8_lossy(t)
-        );
+    // A token inside a List / Bitmapset body (nodeRead, _readBitmapset): C
+    // checks for NULL and raises "unterminated <kind> structure".
+    fn list_token(&mut self, kind: &str) -> PgResult<&'a [u8]> {
+        match self.next_token() {
+            Some(t) => Ok(t),
+            None => Err(elog(format!("unterminated {kind} structure"))),
+        }
     }
 
     fn label(&mut self, name: &str) {
@@ -127,6 +244,22 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             "readfuncs.c: expected field :{name}, got {:?}",
             String::from_utf8_lossy(t)
         );
+    }
+
+    // Node strings are UTF-8 by construction on this engine (UTF-8-only
+    // server-encoding carve, docs/design/carve-ratifications.md; SQL_ASCII
+    // databases refuse non-ASCII query text at the door), so a non-UTF-8
+    // token is a typed refusal, never a panic.
+    fn utf8(&self, bytes: &'mcx [u8]) -> PgResult<&'mcx str> {
+        core::str::from_utf8(bytes).map_err(|_| {
+            Box::new(
+                PgError::error(format!(
+                    "non-UTF-8 node token {:?} (UTF-8-only server-encoding carve)",
+                    lossy(bytes)
+                ))
+                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+            )
+        })
     }
 
     // debackslash (read.c) into the arena.
@@ -140,41 +273,38 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             v.push(tok[i]);
             i += 1;
         }
-        let bytes = v.leak();
-        Ok(core::str::from_utf8(bytes).expect("non-UTF-8 node token"))
+        self.utf8(v.leak())
     }
 
+    // A verbatim (no debackslash) token copy: nodeRead's T_Float fval.
+    fn arena_raw(&self, tok: &[u8]) -> PgResult<&'mcx str> {
+        let mut v: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(self.mcx, tok.len())?;
+        v.extend_from_slice(tok);
+        self.utf8(v.leak())
+    }
+
+    // READ_BOOL_FIELD: strtobool(token) == (*token == 't').
     fn read_bool(&mut self, name: &str) -> bool {
         self.label(name);
-        match self.token(name) {
-            b"true" => true,
-            b"false" => false,
-            t => panic!("READ_BOOL_FIELD: bad bool {:?}", String::from_utf8_lossy(t)),
-        }
+        self.token(name).first() == Some(&b't')
     }
 
-    fn parse_int(tok: &[u8]) -> i64 {
-        core::str::from_utf8(tok)
-            .ok()
-            .and_then(|s| s.parse::<i64>().ok())
-            .unwrap_or_else(|| {
-                panic!("readfuncs.c: bad integer token {:?}", String::from_utf8_lossy(tok))
-            })
-    }
-
+    // READ_INT_FIELD: atoi(token).
     fn read_i32(&mut self, name: &str) -> i32 {
         self.label(name);
-        Self::parse_int(self.token(name)) as i32
+        c_atoi(self.token(name))
     }
 
+    // READ_UINT_FIELD / READ_OID_FIELD: atoui / atooid (strtoul).
     fn read_u32(&mut self, name: &str) -> u32 {
         self.label(name);
-        Self::parse_int(self.token(name)) as u32
+        c_atoui(self.token(name))
     }
 
+    // READ_UINT64_FIELD: strtou64(token, NULL, 10).
     fn read_u64(&mut self, name: &str) -> u64 {
         self.label(name);
-        Self::parse_int(self.token(name)) as u64
+        c_strtoul(self.token(name)).0
     }
 
     // READ_LOCATION_FIELD: consumed but restored to -1.
@@ -218,10 +348,13 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         Ok(Some(self.arena_str(t)?))
     }
 
+    // READ_NODE_FIELD: nodeRead(NULL, 0) — at end of input C's pg_strtok
+    // returns NULL and the field is left NULL (the enclosing node's '}' check
+    // then raises "did not find '}' at end of input node").
     fn read_node(&mut self, name: &str) -> PgResult<Option<Node<'mcx>>> {
         self.label(name);
         match self.node_read() {
-            None => panic!("nodeRead (read.c): unterminated input at :{name}"),
+            None => Ok(None),
             Some(n) => n,
         }
     }
@@ -235,10 +368,12 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         if t.is_empty() {
             return Ok(types_nodes::list::OptNodeList::nil());
         }
-        assert!(t == b"(", "readfuncs.c: field :{name} is not a node list");
+        if t != b"(" {
+            return Err(elog(format!("unrecognized token: \"{}\"", lossy(t))));
+        }
         let mut l = types_nodes::list::OptNodeList::nil();
         loop {
-            let tok = self.token("list");
+            let tok = self.list_token("List")?;
             if tok == b")" {
                 return Ok(l);
             }
@@ -253,10 +388,12 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         if t.is_empty() {
             return Ok(NodeList::nil());
         }
-        assert!(t == b"(", "readfuncs.c: field :{name} is not a node list");
+        if t != b"(" {
+            return Err(elog(format!("unrecognized token: \"{}\"", lossy(t))));
+        }
         let mut l = NodeList::nil();
         loop {
-            let tok = self.token("list");
+            let tok = self.list_token("List")?;
             if tok == b")" {
                 return Ok(l);
             }
@@ -270,22 +407,83 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         }
     }
 
+    // The "(i ...)" / "(o ...)" body after the type letter (nodeRead, read.c).
+    fn read_int_list_body(&mut self) -> PgResult<IntList<'mcx>> {
+        let mut l = IntList::nil();
+        loop {
+            let t = self.list_token("List")?;
+            if t == b")" {
+                return Ok(l);
+            }
+            let (val, used) = c_strtol(t);
+            if used != t.len() {
+                return Err(elog(format!("unrecognized integer: \"{}\"", lossy(t))));
+            }
+            l.lappend(self.mcx, val as i32)?;
+        }
+    }
+
+    fn read_oid_list_body(&mut self) -> PgResult<OidList<'mcx>> {
+        let mut l = OidList::nil();
+        loop {
+            let t = self.list_token("List")?;
+            if t == b")" {
+                return Ok(l);
+            }
+            let (val, used) = c_strtoul(t);
+            if used != t.len() {
+                return Err(elog(format!("unrecognized OID: \"{}\"", lossy(t))));
+            }
+            l.lappend(self.mcx, val as Oid)?;
+        }
+    }
+
+    fn read_xid_list_body(&mut self) -> PgResult<XidList<'mcx>> {
+        let mut l = XidList::nil();
+        loop {
+            let t = self.list_token("List")?;
+            if t == b")" {
+                return Ok(l);
+            }
+            let (val, used) = c_strtoul(t);
+            if used != t.len() {
+                return Err(elog(format!("unrecognized Xid: \"{}\"", lossy(t))));
+            }
+            l.lappend(self.mcx, val as u32)?;
+        }
+    }
+
+    // The "(b ...)" body after the 'b' (nodeRead and _readBitmapset share it).
+    fn read_bitmapset_body(&mut self) -> PgResult<Bitmapset<'mcx>> {
+        let mut bms = Bitmapset::empty();
+        loop {
+            let t = self.list_token("Bitmapset")?;
+            if t == b")" {
+                return Ok(bms);
+            }
+            let (val, used) = c_strtol(t);
+            if used != t.len() {
+                return Err(elog(format!("unrecognized integer: \"{}\"", lossy(t))));
+            }
+            bms.add_member(self.mcx, val as i32)?;
+        }
+    }
+
+    // A typed list field: "(i ...)" / "(o ...)" or "<>".
     fn read_int_list(&mut self, name: &str) -> PgResult<IntList<'mcx>> {
         self.label(name);
         let t = self.token(name);
         if t.is_empty() {
             return Ok(IntList::nil());
         }
-        assert!(t == b"(", "readfuncs.c: field :{name} is not an int list");
-        self.expect("i");
-        let mut l = IntList::nil();
-        loop {
-            let tok = self.token("int list");
-            if tok == b")" {
-                return Ok(l);
-            }
-            l.lappend(self.mcx, Self::parse_int(tok) as i32)?;
+        if t != b"(" {
+            return Err(elog(format!("unrecognized token: \"{}\"", lossy(t))));
         }
+        let t = self.list_token("List")?;
+        if t != b"i" {
+            return Err(elog(format!("unrecognized token: \"{}\"", lossy(t))));
+        }
+        self.read_int_list_body()
     }
 
     fn read_oid_list(&mut self, name: &str) -> PgResult<OidList<'mcx>> {
@@ -294,30 +492,28 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         if t.is_empty() {
             return Ok(OidList::nil());
         }
-        assert!(t == b"(", "readfuncs.c: field :{name} is not an oid list");
-        self.expect("o");
-        let mut l = OidList::nil();
-        loop {
-            let tok = self.token("oid list");
-            if tok == b")" {
-                return Ok(l);
-            }
-            l.lappend(self.mcx, Self::parse_int(tok) as Oid)?;
+        if t != b"(" {
+            return Err(elog(format!("unrecognized token: \"{}\"", lossy(t))));
         }
+        let t = self.list_token("List")?;
+        if t != b"o" {
+            return Err(elog(format!("unrecognized token: \"{}\"", lossy(t))));
+        }
+        self.read_oid_list_body()
     }
 
+    // READ_BITMAPSET_FIELD -> _readBitmapset (readfuncs.c).
     fn read_bitmapset(&mut self, name: &str) -> PgResult<Bitmapset<'mcx>> {
         self.label(name);
-        self.expect("(");
-        self.expect("b");
-        let mut bms = Bitmapset::empty();
-        loop {
-            let t = self.token("bitmapset");
-            if t == b")" {
-                return Ok(bms);
-            }
-            bms.add_member(self.mcx, Self::parse_int(t) as i32)?;
+        let t = self.next_token().ok_or_else(|| elog("incomplete Bitmapset structure".into()))?;
+        if t != b"(" {
+            return Err(elog(format!("unrecognized token: \"{}\"", lossy(t))));
         }
+        let t = self.next_token().ok_or_else(|| elog("incomplete Bitmapset structure".into()))?;
+        if t != b"b" {
+            return Err(elog(format!("unrecognized token: \"{}\"", lossy(t))));
+        }
+        self.read_bitmapset_body()
     }
 
     // nodeRead (read.c). None = end of input; Ok(None) = the "<>" token.
@@ -326,78 +522,62 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         Some(self.node_read_token(t))
     }
 
+    // nodeRead over an already-scanned token, classified per nodeTokenType.
     fn node_read_token(&mut self, t: &'a [u8]) -> PgResult<Option<Node<'mcx>>> {
-        if t.is_empty() {
-            return Ok(None);
+        // nodeTokenType: "Check if the token is a number" — skip one sign,
+        // then a digit, or '.' followed by a digit.
+        let numptr = if !t.is_empty() && (t[0] == b'+' || t[0] == b'-') { &t[1..] } else { t };
+        if (!numptr.is_empty() && numptr[0].is_ascii_digit())
+            || (numptr.len() > 1 && numptr[0] == b'.' && numptr[1].is_ascii_digit())
+        {
+            // T_Integer only when strtoint consumes the whole token WITHOUT
+            // ERANGE (the range test runs on the UNSIGNED magnitude, so
+            // INT32_MIN's magnitude ERANGEs); the value is then atoi(token).
+            // Everything else numeric is a T_Float carrying the raw token.
+            let (v, used) = c_strtol(numptr);
+            if used == numptr.len() && v >= i32::MIN as i64 && v <= i32::MAX as i64 {
+                return Ok(Some(Node::mk_integer(self.mcx, c_atoi(t))?));
+            }
+            return Ok(Some(Node::mk_float(self.mcx, self.arena_raw(t)?)?));
         }
-        if t == b"{" {
-            let n = self.parse_node_string()?;
-            self.expect("}");
-            return Ok(Some(n));
+        match t {
+            b"(" => return Ok(Some(self.read_list_body()?)),
+            b")" => return Err(elog("unexpected right parenthesis".into())),
+            b"{" => {
+                let n = self.parse_node_string()?;
+                match self.next_token() {
+                    Some(b"}") => {}
+                    _ => return Err(elog("did not find '}' at end of input node".into())),
+                }
+                return Ok(Some(n));
+            }
+            b"true" => return Ok(Some(Node::mk_boolean(self.mcx, true)?)),
+            b"false" => return Ok(Some(Node::mk_boolean(self.mcx, false)?)),
+            _ => {}
         }
-        if t == b"(" {
-            return Ok(Some(self.read_list_body()?));
-        }
-        // Value tokens (list elements): the SELECT-rule set only carries
-        // quoted strings (Alias colnames) and integers.
-        if t.len() >= 2 && t[0] == b'"' && t[t.len() - 1] == b'"' {
+        if t.len() > 1 && t[0] == b'"' && t[t.len() - 1] == b'"' {
             let s = self.arena_str(&t[1..t.len() - 1])?;
             return Ok(Some(Node::mk_string(self.mcx, s)?));
         }
-        if t[0].is_ascii_digit() || (t[0] == b'-' && t.len() > 1 && t[1].is_ascii_digit()) {
-            // C nodeTokenType (read.c): a numeric-leading token is T_Integer
-            // ONLY when strtoint consumes the whole token WITHOUT ERANGE —
-            // note C advances past the sign first, so the range test is on the
-            // UNSIGNED magnitude (INT32_MIN's magnitude therefore ERANGEs).
-            // Anything else numeric is T_Float, which is outside this crate's
-            // charter, so it takes the loud panic like any unported shape.
-            //
-            // This used to be `parse_int(t) as i32`, which SILENTLY WRAPPED:
-            // the token `9992999999` built an Integer node holding 1403065407
-            // where C builds a Float node printing "9992999999" (found by
-            // nodesfam_diff, lane p1-nodes — data corruption, not a carve).
-            let sval = core::str::from_utf8(t).expect("ascii-digit token");
-            let magnitude = sval.strip_prefix('-').unwrap_or(sval);
-            match magnitude.parse::<i32>() {
-                Ok(_) => {
-                    let v: i32 = sval.parse().expect("magnitude fits, so the signed value does");
-                    return Ok(Some(Node::mk_integer(self.mcx, v)?));
-                }
-                Err(_) => panic!(
-                    "nodeRead (read.c): T_Float value node {sval:?} (view SELECT-rule read set)"
-                ),
-            }
+        if t.is_empty() {
+            // "<>" --- represents a null pointer
+            return Ok(None);
         }
-        panic!(
-            "nodeRead (read.c): unhandled token {:?} (view SELECT-rule read set)",
-            String::from_utf8_lossy(t)
-        );
+        if t[0] == b'b' || t[0] == b'x' {
+            return Ok(Some(Node::mk_bitstring(self.mcx, self.arena_str(t)?)?));
+        }
+        Err(elog(format!("unrecognized token: \"{}\"", lossy(t))))
     }
 
+    // nodeRead's LEFT_PAREN arm: "(i ...)", "(o ...)", "(x ...)", "(b ...)",
+    // or a list of nodes/values.
     fn read_list_body(&mut self) -> PgResult<Node<'mcx>> {
-        let first = self.token("list");
+        let first = self.list_token("List")?;
         match first {
-            b"i" => {
-                let mut l = IntList::nil();
-                loop {
-                    let t = self.token("int list");
-                    if t == b")" {
-                        return Node::mk_int_list(self.mcx, l);
-                    }
-                    l.lappend(self.mcx, Self::parse_int(t) as i32)?;
-                }
-            }
-            b"o" => {
-                let mut l = OidList::nil();
-                loop {
-                    let t = self.token("oid list");
-                    if t == b")" {
-                        return Node::mk_oid_list(self.mcx, l);
-                    }
-                    l.lappend(self.mcx, Self::parse_int(t) as Oid)?;
-                }
-            }
-            b"x" => panic!("nodeRead (read.c): xid list unported"),
+            b"i" => return Node::mk_int_list(self.mcx, self.read_int_list_body()?),
+            b"o" => return Node::mk_oid_list(self.mcx, self.read_oid_list_body()?),
+            b"x" => return Node::mk_xid_list(self.mcx, self.read_xid_list_body()?),
+            b"b" => return Node::mk_bitmapset(self.mcx, self.read_bitmapset_body()?),
             _ => {}
         }
         let mut l = NodeList::nil();
@@ -413,7 +593,7 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
                 None => Node::mk_list(self.mcx, NodeList::nil())?,
             };
             l.lappend(self.mcx, elem)?;
-            tok = self.token("list");
+            tok = self.list_token("List")?;
         }
     }
 
@@ -504,12 +684,34 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             b"JSONTABLESIBLINGJOIN" => self.read_json_table_sibling_join(),
             b"NOTIFYSTMT" => self.read_notify_stmt(),
             b"NEXTVALUEEXPR" => self.read_next_value_expr(),
-            other => panic!(
-                "parseNodeString (readfuncs.c): {} read arm unported (view SELECT-rule + \
-                 DEFAULT/CHECK expr sets only)",
-                String::from_utf8_lossy(other)
-            ),
+            other => Err(self.unknown_node_label(other)),
         }
+    }
+
+    // parseNodeString's fall-through. A token shaped like a C node label
+    // ([A-Z0-9_]+: every readfuncs.switch.c MATCH) is a read arm this crate
+    // has not ported — a typed refusal naming it, never a panic and never
+    // disguised as C's malformed-string message. Anything else takes C's
+    // elog verbatim: `"%.32s"` over a pg_strtok token that is NOT
+    // NUL-terminated, i.e. the next 32 bytes of the node string.
+    #[cold]
+    #[inline(never)]
+    fn unknown_node_label(&self, label: &[u8]) -> Box<PgError> {
+        let is_label = !label.is_empty()
+            && label.iter().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == b'_');
+        if is_label {
+            return Box::new(
+                PgError::error(format!(
+                    "parseNodeString (readfuncs.c): {} read arm unported (view SELECT-rule + \
+                     DEFAULT/CHECK expr sets only)",
+                    lossy(label)
+                ))
+                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+            );
+        }
+        let rest = &self.buf[self.tok_start..];
+        let shown = &rest[..rest.len().min(32)];
+        elog(format!("badly formatted node string \"{}\"...", lossy(shown)))
     }
 
     fn read_json_format(&mut self) -> PgResult<Node<'mcx>> {
@@ -961,7 +1163,7 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         let mut rte = Node::build::<RangeTblEntry>(mcx)?;
         rte.alias = self.read_alias_ref("alias")?;
         rte.eref = self.read_alias_ref("eref")?;
-        rte.rtekind = rte_kind(self.read_u32("rtekind"));
+        rte.rtekind = rte_kind(self.read_i32("rtekind"))?;
         match rte.rtekind {
             RTEKind::RTE_RELATION => {
                 rte.relid = self.read_u32("relid");
@@ -1031,8 +1233,8 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
                 rte.relid = self.read_u32("relid");
             }
             RTEKind::RTE_RESULT => {
-                // No extra fields. (C's unrecognized-kind default elog cannot
-                // arise: RTEKind is a closed enum here.)
+                // No extra fields. (C's unrecognized-kind default elog is
+                // raised by rte_kind before this switch.)
             }
         }
         rte.lateral = self.read_bool("lateral");
@@ -1166,8 +1368,8 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         let location = self.read_location("location");
         self.label("constvalue");
         let constvalue = if constisnull {
-            let t = self.token("constvalue");
-            assert!(t.is_empty(), "_readConst: null Const with a value");
+            // C: token = pg_strtok(&length); /* skip "<>" */
+            let _ = self.token("constvalue");
             Datum::from_usize(0)
         } else {
             self.read_datum(constbyval)?
@@ -1253,10 +1455,7 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             b"and" => BoolExprType::AND_EXPR,
             b"or" => BoolExprType::OR_EXPR,
             b"not" => BoolExprType::NOT_EXPR,
-            other => panic!(
-                "_readBoolExpr (readfuncs.c): unrecognized boolop \"{}\"",
-                String::from_utf8_lossy(other)
-            ),
+            other => return Err(elog(format!("unrecognized boolop \"{}\"", lossy(other)))),
         };
         b.args = self.read_node_list("args")?;
         b.location = self.read_location("location");
@@ -1794,29 +1993,49 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
     }
 
     // readDatum (readfuncs.c): "<len> [ <byte> ... ]"; byval always carries
-    // sizeof(Datum) byte tokens regardless of the leading length.
+    // sizeof(Datum) byte tokens regardless of the leading length. The length
+    // is atoui(token); each byte is (char) atoi(token); the delimiters are
+    // checked with C's messages (whose "%s" prints the un-NUL-terminated
+    // token, i.e. the rest of the node string).
     fn read_datum(&mut self, typbyval: bool) -> PgResult<Datum> {
-        let length = Self::parse_int(self.token("datum length")) as usize;
-        self.expect("[");
-        if typbyval {
-            assert!(length <= 8, "readDatum: byval length {length} too large");
+        let length = c_atoui(self.token("datum length")) as usize;
+        match self.next_token() {
+            Some(t) if t.first() == Some(&b'[') => {}
+            got => {
+                let got = if got.is_some() { self.rest_from_token() } else { "[NULL]".into() };
+                return Err(elog(format!(
+                    "expected \"[\" to start datum, but got \"{got}\"; length = {length}"
+                )));
+            }
+        }
+        let res = if typbyval {
+            if length > 8 {
+                return Err(elog(format!("byval datum but length = {length}")));
+            }
             let mut word = [0u8; 8];
             for b in word.iter_mut() {
-                *b = Self::parse_int(self.token("datum byte")) as u8;
+                *b = c_atoi(self.token("datum byte")) as u8;
             }
-            self.expect("]");
-            return Ok(Datum::from_u64(u64::from_le_bytes(word)));
+            Datum::from_u64(u64::from_le_bytes(word))
+        } else if length == 0 {
+            Datum::from_usize(0)
+        } else {
+            let mut v: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(self.mcx, length)?;
+            for _ in 0..length {
+                v.push(c_atoi(self.token("datum byte")) as u8);
+            }
+            Datum::from_usize(v.leak().as_ptr() as usize)
+        };
+        match self.next_token() {
+            Some(t) if t.first() == Some(&b']') => {}
+            got => {
+                let got = if got.is_some() { self.rest_from_token() } else { "[NULL]".into() };
+                return Err(elog(format!(
+                    "expected \"]\" to end datum, but got \"{got}\"; length = {length}"
+                )));
+            }
         }
-        if length == 0 {
-            self.expect("]");
-            return Ok(Datum::from_usize(0));
-        }
-        let mut v: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(self.mcx, length)?;
-        for _ in 0..length {
-            v.push(Self::parse_int(self.token("datum byte")) as u8);
-        }
-        self.expect("]");
-        Ok(Datum::from_usize(v.leak().as_ptr() as usize))
+        Ok(res)
     }
 }
 
@@ -1944,8 +2163,9 @@ fn xml_option_type(v: u32) -> XmlOptionType {
     }
 }
 
-fn rte_kind(v: u32) -> RTEKind {
-    match v {
+// _readRangeTblEntry (readfuncs.c): elog(ERROR, "unrecognized RTE kind: %d").
+fn rte_kind(v: i32) -> PgResult<RTEKind> {
+    Ok(match v {
         0 => RTEKind::RTE_RELATION,
         1 => RTEKind::RTE_SUBQUERY,
         2 => RTEKind::RTE_JOIN,
@@ -1956,8 +2176,8 @@ fn rte_kind(v: u32) -> RTEKind {
         7 => RTEKind::RTE_NAMEDTUPLESTORE,
         8 => RTEKind::RTE_RESULT,
         9 => RTEKind::RTE_GROUP,
-        other => panic!("readfuncs.c: bad RTEKind {other}"),
-    }
+        other => return Err(elog(format!("unrecognized RTE kind: {other}"))),
+    })
 }
 
 fn join_type(v: u32) -> JoinType {

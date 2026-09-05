@@ -1,6 +1,8 @@
 use mcx::MemoryContext;
+use types_error::{PgError, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INTERNAL_ERROR};
 use types_nodes::nodes_enums::CmdType;
 use types_nodes::parsenodes::{QuerySource, RTEKind};
+use types_nodes::NodeTag;
 
 use crate::stringToNode;
 
@@ -204,11 +206,23 @@ fn null_const_and_escaped_strings() {
     assert_eq!(a.colnames.nth(1).as_string().unwrap().sval, "");
 }
 
+// An unported read arm is a typed refusal (ERRCODE_FEATURE_NOT_SUPPORTED)
+// naming the arm — never a panic, never disguised as C's malformed-string
+// message; a token that is not even shaped like a C node label takes
+// parseNodeString's elog verbatim (readfuncs.c:587 `"%.32s"` over the
+// un-NUL-terminated pg_strtok token, i.e. the next 32 bytes of input).
 #[test]
-#[should_panic(expected = "read arm unported")]
-fn unknown_node_label_is_loud() {
-    let ctx = MemoryContext::new("t");
-    let _ = stringToNode(ctx.mcx(), "{PLANNEDSTMT :commandType 1}");
+fn unknown_node_label_is_a_typed_refusal() {
+    for text in ["{PLANNEDSTMT :commandType 1}", "{UNRECOGNIZED_NODE}"] {
+        let e = err_of(text);
+        assert_eq!(e.sqlstate(), ERRCODE_FEATURE_NOT_SUPPORTED, "{text:?}");
+        assert!(e.message().contains("read arm unported"), "{text:?}: {}", e.message());
+    }
+    let e = err_of("{foo bar}");
+    assert_eq!(e.sqlstate(), ERRCODE_INTERNAL_ERROR);
+    assert_eq!(e.message(), "badly formatted node string \"foo bar}\"...");
+    let e = err_of("{abcdefghijklmnopqrstuvwxyz0123456789 :x 1}");
+    assert_eq!(e.message(), "badly formatted node string \"abcdefghijklmnopqrstuvwxyz012345\"...");
 }
 
 #[test]
@@ -390,20 +404,249 @@ fn in_range_integer_tokens_read_as_integer_nodes() {
 }
 
 #[test]
-#[should_panic(expected = "T_Float value node")]
 fn out_of_range_integer_token_does_not_wrap() {
     let ctx = MemoryContext::new("t");
-    // used to silently build Integer(1403065407)
-    let _ = crate::stringToNodeNullable(ctx.mcx(), "9992999999");
+    // used to silently build Integer(1403065407); C builds Float "9992999999"
+    let n = crate::stringToNodeNullable(ctx.mcx(), "9992999999").unwrap().unwrap();
+    assert_eq!(n.as_float().expect("T_Float").fval, "9992999999");
 }
 
 #[test]
-#[should_panic(expected = "T_Float value node")]
 fn int32_min_token_follows_cs_magnitude_rule() {
     let ctx = MemoryContext::new("t");
     // C's nodeTokenType strips the sign first, so INT32_MIN's magnitude
     // ERANGEs and C builds a FLOAT node; the port must not build an Integer.
-    let _ = crate::stringToNodeNullable(ctx.mcx(), "-2147483648");
+    let n = crate::stringToNodeNullable(ctx.mcx(), "-2147483648").unwrap().unwrap();
+    assert_eq!(n.as_float().expect("T_Float").fval, "-2147483648");
+}
+
+// ---- audit-18.6 remediation b017 (read.c / readfuncs.c error surface) ----
+//
+// pg_node_tree_in refuses every SQL value in both engines ("cannot accept a
+// value of type pg_node_tree", live pair IDENTICAL), so these shapes are
+// reachable only through engine-written or corrupted catalog text; they are
+// witnessed here at the library level. Each expected message is the C elog
+// byte-for-byte; SQLSTATE XX000 is elog(ERROR)'s default.
+
+fn err_of(text: &str) -> Box<PgError> {
+    let ctx = MemoryContext::new("t");
+    match crate::stringToNodeNullable(ctx.mcx(), text) {
+        Err(e) => e,
+        Ok(n) => panic!("{text:?} parsed (some node: {}) instead of raising", n.is_some()),
+    }
+}
+
+fn assert_elog(text: &str, message: &str) {
+    let e = err_of(text);
+    assert_eq!(e.sqlstate(), ERRCODE_INTERNAL_ERROR, "{text:?}: {}", e.message());
+    assert_eq!(e.message(), message, "{text:?}");
+}
+
+// read.c:484 nodeRead T_Float: a numeric-leading token strtoint does not
+// consume entirely, or that ERANGEs, becomes a Float node carrying the raw
+// token (before: panic "T_Float value node").
+#[test]
+fn float_value_tokens_read_as_float_nodes() {
+    for t in ["1.5", "+1.5", "-0.25", ".5", "1e5", "12abc", "9992999999", "-2147483648"] {
+        let ctx = MemoryContext::new("t");
+        let n = crate::stringToNodeNullable(ctx.mcx(), t).unwrap().unwrap();
+        assert_eq!(n.node_tag(), NodeTag::T_Float, "{t:?}");
+        assert_eq!(n.as_float().unwrap().fval, t, "{t:?} keeps the raw token");
+    }
+    let ctx = MemoryContext::new("t");
+    let l = crate::stringToNode(ctx.mcx(), "(1.5)").unwrap();
+    assert_eq!(l.as_list().unwrap().nth(0).as_float().unwrap().fval, "1.5");
+}
+
+// read.c:257 nodeTokenType accepts an explicit '+' sign; the value is atoi.
+#[test]
+fn plus_signed_integer_tokens_read_as_integer_nodes() {
+    for (t, v) in [("+1", 1), ("+2147483647", i32::MAX), ("-0", 0), ("+007", 7)] {
+        let ctx = MemoryContext::new("t");
+        let n = crate::stringToNodeNullable(ctx.mcx(), t).unwrap().unwrap();
+        assert_eq!(n.as_integer().unwrap_or_else(|| panic!("{t:?} is T_Integer")).ival, v);
+    }
+    let ctx = MemoryContext::new("t");
+    let l = crate::stringToNode(ctx.mcx(), "(+1)").unwrap();
+    assert_eq!(l.as_list().unwrap().nth(0).as_integer().unwrap().ival, 1);
+}
+
+// read.c:493 T_Boolean and read.c:498 T_BitString value tokens.
+#[test]
+fn boolean_and_bitstring_value_tokens() {
+    let ctx = MemoryContext::new("t");
+    let l = crate::stringToNode(ctx.mcx(), "(true false b101 x1F)").unwrap();
+    let l = l.as_list().unwrap();
+    assert!(l.nth(0).as_boolean().unwrap().boolval);
+    assert!(!l.nth(1).as_boolean().unwrap().boolval);
+    assert_eq!(l.nth(2).as_bitstring().unwrap().bsval, "b101");
+    assert_eq!(l.nth(3).as_bitstring().unwrap().bsval, "x1F");
+}
+
+// read.c:400 "(x ...)" TransactionId lists and read.c:421 "(b ...)"
+// Bitmapsets met by nodeRead itself (not via READ_BITMAPSET_FIELD).
+#[test]
+fn xid_lists_and_bitmapsets_in_node_read() {
+    let ctx = MemoryContext::new("t");
+    let m = ctx.mcx();
+    let x = crate::stringToNode(m, "(x 100 200)").unwrap();
+    let x = x.as_xid_list().expect("XidList");
+    assert_eq!((x.len(), x.nth(0), x.nth(1)), (2, 100, 200));
+    let b = crate::stringToNode(m, "(b 1 2)").unwrap();
+    let b = b.as_bitmapset().expect("Bitmapset");
+    assert!(b.is_member(1) && b.is_member(2) && b.num_members() == 2);
+    let e = crate::stringToNode(m, "(b)").unwrap();
+    assert!(e.as_bitmapset().unwrap().is_empty());
+    let nested = crate::stringToNode(m, "((b 3) (x 7))").unwrap();
+    let nested = nested.as_list().unwrap();
+    assert!(nested.nth(0).as_bitmapset().unwrap().is_member(3));
+    assert_eq!(nested.nth(1).as_xid_list().unwrap().nth(0), 7);
+}
+
+// read.c:357/368/389/410 "unterminated List structure", read.c:433
+// "unterminated Bitmapset structure" (before: panic "unterminated input").
+#[test]
+fn unterminated_structures_raise_cs_elog() {
+    for t in ["(", "(i 1 2", "(o 1", "(x 1", "(1 2", "({RANGETBLREF :rtindex 1}"] {
+        assert_elog(t, "unterminated List structure");
+    }
+    assert_elog("(b 1", "unterminated Bitmapset structure");
+    assert_elog("(b", "unterminated Bitmapset structure");
+}
+
+// read.c:462 RIGHT_PAREN and read.c:473 OTHER_TOKEN.
+#[test]
+fn stray_tokens_raise_cs_elog() {
+    assert_elog(")", "unexpected right parenthesis");
+    assert_elog("foobar", "unrecognized token: \"foobar\"");
+    assert_elog("(1 foobar)", "unrecognized token: \"foobar\"");
+    assert_elog("+-5", "unrecognized token: \"+-5\"");
+}
+
+// read.c:373/394/417/438: a list member strtol/strtoul does not consume
+// entirely (before: panic "bad integer token").
+#[test]
+fn bad_typed_list_members_raise_cs_elog() {
+    assert_elog("(i notanint)", "unrecognized integer: \"notanint\"");
+    assert_elog("(i 12abc)", "unrecognized integer: \"12abc\"");
+    assert_elog("(o 1x)", "unrecognized OID: \"1x\"");
+    assert_elog("(x zz)", "unrecognized Xid: \"zz\"");
+    assert_elog("(b notanint)", "unrecognized integer: \"notanint\"");
+    // (int) strtol / (Oid) strtoul: libc saturation, then C's narrowing.
+    let ctx = MemoryContext::new("t");
+    let l = crate::stringToNode(ctx.mcx(), "(i 99999999999 -1)").unwrap();
+    let l = l.as_int_list().unwrap();
+    assert_eq!((l.nth(0), l.nth(1)), (99999999999i64 as i32, -1));
+    let o = crate::stringToNode(ctx.mcx(), "(o -1 4294967296)").unwrap();
+    let o = o.as_oid_list().unwrap();
+    assert_eq!((o.nth(0), o.nth(1)), (u32::MAX, 0));
+}
+
+// read.c:341 "did not find '}' at end of input node" (before: assert! in
+// expect("}")). A node whose LAST field is a node (READ_NODE_FIELD) reads
+// NULL at end of input exactly like C's nodeRead, then hits this check.
+#[test]
+fn missing_close_brace_raises_cs_elog() {
+    assert_elog("{RANGETBLREF :rtindex 1", "did not find '}' at end of input node");
+    assert_elog("{RANGETBLREF :rtindex 1 )", "did not find '}' at end of input node");
+    assert_elog("{FROMEXPR :fromlist <> :quals", "did not find '}' at end of input node");
+}
+
+// readfuncs.c:209 _readBitmapset (READ_BITMAPSET_FIELD): "incomplete
+// Bitmapset structure", "unrecognized token", "unterminated Bitmapset
+// structure", "unrecognized integer" (before: assert!/panic).
+#[test]
+fn malformed_bitmapset_field_raises_cs_elog() {
+    let head = "{VAR :varno 1 :varattno 1 :vartype 23 :vartypmod -1 :varcollid 0 :varnullingrels ";
+    let tail = " :varlevelsup 0 :location -1}";
+    assert_elog(&format!("{head}(b notanint){tail}"), "unrecognized integer: \"notanint\"");
+    assert_elog(&format!("{head}<>{tail}"), "unrecognized token: \"\"");
+    assert_elog(&format!("{head}(i 1){tail}"), "unrecognized token: \"i\"");
+    assert_elog(&format!("{head}(b 1"), "unterminated Bitmapset structure");
+    assert_elog(&format!("{head}(b"), "unterminated Bitmapset structure");
+    assert_elog(&format!("{head}("), "incomplete Bitmapset structure");
+    assert_elog(head.trim_end(), "incomplete Bitmapset structure");
+}
+
+// readfuncs.c:600 readDatum: the "[" / "]" checks print the token with
+// "%s" — pg_strtok does not NUL-terminate, so C shows the REST of the node
+// string from that token — and byval length > sizeof(Datum) is an elog
+// (before: assert!/expect panics).
+#[test]
+fn malformed_datum_raises_cs_elog() {
+    let head = "{CONST :consttype 23 :consttypmod -1 :constcollid 0 :constlen 4 \
+                :constbyval true :constisnull false :location -1 :constvalue ";
+    assert_elog(&format!("{head}9 [ 0 0 0 0 0 0 0 0 ]}}"), "byval datum but length = 9");
+    assert_elog(
+        &format!("{head}4 x 1 0 0 0 0 0 0 0 ]}}"),
+        "expected \"[\" to start datum, but got \"x 1 0 0 0 0 0 0 0 ]}\"; length = 4",
+    );
+    assert_elog(
+        &format!("{head}4 <> 1 0 0 0 0 0 0 0 ]}}"),
+        "expected \"[\" to start datum, but got \"<> 1 0 0 0 0 0 0 0 ]}\"; length = 4",
+    );
+    assert_elog(
+        &format!("{head}4"),
+        "expected \"[\" to start datum, but got \"[NULL]\"; length = 4",
+    );
+    assert_elog(
+        &format!("{head}4 [ 1 0 0 0 0 0 0 0 }}"),
+        "expected \"]\" to end datum, but got \"}\"; length = 4",
+    );
+    // atoui/atoi semantics for the length and the bytes: never an error.
+    let ctx = MemoryContext::new("t");
+    let c = crate::stringToNode(ctx.mcx(), &format!("{head}4 [ 5x 0 zz 0 0 0 0 0 ]}}")).unwrap();
+    assert_eq!(c.as_const().unwrap().constvalue.as_u64(), 5);
+}
+
+// readfuncs.c:435 _readRangeTblEntry default: "unrecognized RTE kind: %d"
+// (before: panic "bad RTEKind"). READ_ENUM_FIELD is atoi, so -1 prints -1.
+#[test]
+fn unrecognized_rte_kind_raises_cs_elog() {
+    assert_elog(
+        "{RANGETBLENTRY :alias <> :eref <> :rtekind 99 :lateral false :inFromCl false :securityQuals ()}",
+        "unrecognized RTE kind: 99",
+    );
+    assert_elog("{RANGETBLENTRY :alias <> :eref <> :rtekind -1", "unrecognized RTE kind: -1");
+}
+
+// readfuncs.c:301 _readBoolExpr: "unrecognized boolop \"%.*s\"".
+#[test]
+fn unrecognized_boolop_raises_cs_elog() {
+    assert_elog("{BOOLEXPR :boolop badop :args () :location -1}", "unrecognized boolop \"badop\"");
+    assert_elog("{BOOLEXPR :boolop <> :args () :location -1}", "unrecognized boolop \"\"");
+}
+
+// READ_INT_FIELD is atoi(token) and READ_BOOL_FIELD is strtobool(token) ==
+// (*token == 't'): neither ever errors in C (before: panic "bad integer
+// token" / "bad bool").
+#[test]
+fn scalar_fields_follow_cs_atoi_and_strtobool() {
+    for (t, v) in [("12abc", 12), ("zz", 0), ("99999999999", 99999999999i64 as i32), ("+3", 3)] {
+        let ctx = MemoryContext::new("t");
+        let n = crate::stringToNode(ctx.mcx(), &format!("{{RANGETBLREF :rtindex {t}}}")).unwrap();
+        assert_eq!(n.as_range_tbl_ref().unwrap().rtindex, v, "{t:?}");
+    }
+    for (t, v) in [("true", true), ("tru", true), ("t", true), ("false", false), ("yes", false), ("<>", false)] {
+        let ctx = MemoryContext::new("t");
+        let n = crate::stringToNode(
+            ctx.mcx(),
+            &format!("{{NULLTEST :arg <> :nulltesttype 0 :argisrow {t} :location -1}}"),
+        )
+        .unwrap();
+        assert_eq!(n.as_null_test().unwrap().argisrow, v, "{t:?}");
+    }
+}
+
+// _readConst: for a null Const C skips the constvalue token without looking
+// at it (readfuncs.c:279 "skip <>"); before: assert! that it was "<>".
+#[test]
+fn null_const_skips_the_value_token_unchecked() {
+    let ctx = MemoryContext::new("t");
+    let s = "{CONST :consttype 25 :consttypmod -1 :constcollid 100 :constlen -1 \
+             :constbyval false :constisnull true :location -1 :constvalue 4}";
+    let c = crate::stringToNode(ctx.mcx(), s).unwrap();
+    assert!(c.as_const().unwrap().constisnull);
 }
 
 // RECURSION GUARD (C parity: readfuncs.c:578 parseNodeString calls
