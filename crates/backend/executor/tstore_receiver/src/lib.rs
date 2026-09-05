@@ -1,4 +1,4 @@
-// tstoreReceiver.c; the tupmap arm is a loud panic naming its lane.
+// tstoreReceiver.c
 #![allow(non_snake_case)]
 
 use std::rc::Rc;
@@ -24,6 +24,9 @@ pub struct DrTstore<'mcx> {
     map_failure_msg: Option<&'static str>,
     needtoast: bool,
     scratch: Option<MemoryContext>,
+    /// C's `tupmap->attrMap` (attmap[out-1] = in attno, 0 = NULL): the
+    /// positional map onto `target_tupdesc` when it is not the identity.
+    tupmap: Option<Vec<i16>>,
     /// SE-R41 (notes/se-r41-retire.md §3.3): the §4.2 row-identity sidecar
     /// of a capture-batchable eligible cursor-store fill. Set ONLY by
     /// `fill_portal_store_to`'s capture-batch arm (knob-ON, store-armed
@@ -41,6 +44,7 @@ pub fn tstore_create_DR<'mcx>() -> DrTstore<'mcx> {
         map_failure_msg: None,
         needtoast: false,
         scratch: None,
+        tupmap: None,
         capture_sidecar: TuplestoreHandle::NULL,
     }
 }
@@ -83,24 +87,65 @@ impl<'mcx> DrTstore<'mcx> {
             && typeinfo.compact_attrs[..natts]
                 .iter()
                 .any(|attr| !attr.attisdropped && attr.attlen == -1);
-        if self.needtoast && self.scratch.is_none() {
-            self.scratch = Some(MemoryContext::new_bump("tstoreReceiver detoast"));
-        }
         // upstream 37b8f3b0e05e (18.6): Cross-check the type of a portal running EXECUTE or FETCH.
-        if let Some(target) = &self.target_tupdesc {
-            let msg = self.map_failure_msg.expect("target_tupdesc without map_failure_msg");
-            let identity = tuplestore::hold::with_store(self.tstore, |store| {
-                tupdesc::convert_tuples_by_position(store.mcx(), typeinfo, target, msg)
-                    .map(|tupmap| tupmap.is_none())
-            })?;
-            // Non-identity needs dropped/missing columns; portal result descriptors have none.
-            assert!(identity, "tstoreReceiveSlot_tupmap: attrmap conversion not ported");
+        self.tupmap = match &self.target_tupdesc {
+            Some(target) => {
+                let msg = self.map_failure_msg.expect("target_tupdesc without map_failure_msg");
+                tuplestore::hold::with_store(self.tstore, |store| {
+                    tupdesc::convert_tuples_by_position(store.mcx(), typeinfo, target, msg)
+                        .map(|tupmap| tupmap.map(|m| m.to_vec()))
+                })?
+            }
+            None => None,
+        };
+        if self.needtoast {
+            debug_assert!(self.tupmap.is_none(), "tstoreReceiver: detoast with a tuple map");
+        }
+        // C's outvalues/tofree (detoast) and mapslot (tupmap) workspace: one
+        // per-row scratch context, reset after every stored row.
+        if (self.needtoast || self.tupmap.is_some()) && self.scratch.is_none() {
+            self.scratch = Some(MemoryContext::new_bump("tstoreReceiver workspace"));
         }
         Ok(())
     }
 
+    // tstoreReceiveSlot_tupmap (tstoreReceiver.c): execute_attr_map_slot into
+    // a virtual slot over target_tupdesc, then tuplestore_puttupleslot of that
+    // slot. The mapslot's only content is its (values, isnull) pair, and
+    // puttupleslot of a virtual slot forms the minimal tuple from exactly
+    // those arrays over the slot's descriptor — which is tuplestore_putvalues
+    // over target_tupdesc, the crate's detoast-arm idiom.
+    fn receive_slot_tupmap(&mut self, slot: &mut SlotData<'_>) -> PgResult<bool> {
+        exectuples::slot_getallattrs(slot);
+        let tupmap = self.tupmap.as_deref().expect("startup ran before receive_slot");
+        let target = self.target_tupdesc.as_deref().expect("tupmap without target_tupdesc");
+        let ctx = self.scratch.as_mut().expect("startup ran before receive_slot");
+        {
+            let mcx = ctx.mcx();
+            let base = slot.base();
+            let mut outvalues = ::mcx::vec_with_capacity_in(mcx, tupmap.len())?;
+            let mut outisnull = ::mcx::vec_with_capacity_in(mcx, tupmap.len())?;
+            for &attno in tupmap {
+                if attno > 0 {
+                    let j = (attno - 1) as usize;
+                    outvalues.push(base.tts_values[j]);
+                    outisnull.push(base.tts_isnull[j]);
+                } else {
+                    outvalues.push(Datum::null());
+                    outisnull.push(true);
+                }
+            }
+            tuplestore::hold::putvalues(self.tstore, target, &outvalues, &outisnull)?;
+        }
+        ctx.reset();
+        Ok(true)
+    }
+
     pub fn receive_slot(&mut self, slot: &mut SlotData<'_>) -> PgResult<bool> {
         if !self.needtoast {
+            if self.tupmap.is_some() {
+                return self.receive_slot_tupmap(slot);
+            }
             tuplestore::hold::puttupleslot(self.tstore, slot)?;
             return Ok(true);
         }
@@ -134,7 +179,10 @@ impl<'mcx> DrTstore<'mcx> {
         Ok(true)
     }
 
-    pub fn shutdown(&mut self) {}
+    // tstoreShutdownReceiver: free_conversion_map + ExecDropSingleTupleTableSlot.
+    pub fn shutdown(&mut self) {
+        self.tupmap = None;
+    }
 }
 
 /// # Safety

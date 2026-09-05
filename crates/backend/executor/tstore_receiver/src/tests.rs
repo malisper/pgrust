@@ -175,3 +175,120 @@ fn startup_accepts_result_type_matching_target_tupdesc() {
     assert!(dr.scratch.is_none(), "the cross-check must not create a context");
     tuplestore::hold::end(h);
 }
+
+// int4 columns, with `dropped[i]` marking attisdropped entries (atttypid 0 as
+// RemoveAttributeById leaves them): the descriptors that make
+// convert_tuples_by_position return a non-identity map.
+fn int4_desc_dropped(mcx: Mcx<'static>, dropped: &[bool]) -> Rc<TupleDescData<'static>> {
+    let mut attrs = PgVec::new_in(mcx);
+    let mut compact = PgVec::new_in(mcx);
+    for (i, &isdropped) in dropped.iter().enumerate() {
+        let att = FormData_pg_attribute {
+            attnum: (i + 1) as i16,
+            atttypid: if isdropped { 0 } else { 23 },
+            attlen: 4,
+            attbyval: true,
+            attalign: TYPALIGN_INT,
+            attstorage: TYPSTORAGE_PLAIN,
+            attisdropped: isdropped,
+            ..Default::default()
+        };
+        compact.push(CompactAttribute::populate_from(&att));
+        attrs.push(att);
+    }
+    Rc::new(TupleDescData {
+        natts: dropped.len() as i32,
+        tdtypeid: 2249,
+        tdtypmod: -1,
+        tdrefcount: -1,
+        constr: None,
+        compact_attrs: compact,
+        attrs,
+    })
+}
+
+// audit-18.6 b134 (a186-candidate-fp-executor-b5-6d4bdb067c3a3f365735-1):
+// tstoreStartupReceiver builds the map and tstoreReceiveSlot_tupmap
+// (tstoreReceiver.c:200) remaps every received row into a slot over
+// target_tupdesc before storing it — a dropped target column becomes NULL.
+#[test]
+fn tupmap_arm_remaps_rows_into_the_target_descriptor() {
+    let mcx = leaked_mcx();
+    // target (portal) rowtype: (a int4, <dropped>, c int4); executor result: (int4, int4)
+    let target = int4_desc_dropped(mcx, &[false, true, false]);
+    let typeinfo = int4_desc_dropped(mcx, &[false, false]);
+    let h = tuplestore::hold::register(tuplestore::Tuplestore::begin_heap(false, true, 64));
+    let mut dr = tstore_create_DR();
+    set_params(&mut dr, h, false, Some(target.clone()), Some(PORTAL_MISMATCH_MSG));
+    dr.startup(1, &typeinfo).unwrap();
+
+    let mut slot = exectuples::make_tuple_table_slot(mcx, TupleSlotKind::Virtual, Some(typeinfo.clone()));
+    for (i, v) in [7, 9].into_iter().enumerate() {
+        slot.base_mut().tts_values[i] = Datum::from_i32(v);
+        slot.base_mut().tts_isnull[i] = false;
+    }
+    exectuples::exec_store_virtual_tuple(&mut slot);
+    assert!(dr.receive_slot(&mut slot).unwrap());
+    exectuples::exec_clear_tuple(&mut slot, mcx);
+    slot.base_mut().tts_values[0] = Datum::from_i32(8);
+    slot.base_mut().tts_isnull[0] = false;
+    slot.base_mut().tts_isnull[1] = true;
+    exectuples::exec_store_virtual_tuple(&mut slot);
+    assert!(dr.receive_slot(&mut slot).unwrap());
+    dr.shutdown();
+
+    let mut out = exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(target));
+    tuplestore::hold::with_store(h, |ts| {
+        assert_eq!(ts.tuple_count(), 2);
+        assert!(ts.gettupleslot(true, false, &mut out, mcx).unwrap());
+    });
+    exectuples::slot_getallattrs(&mut out);
+    assert_eq!(out.base().tts_values[0].as_i32(), 7);
+    assert!(out.base().tts_isnull[1], "dropped target column maps from attno 0 = NULL");
+    assert!(!out.base().tts_isnull[2]);
+    assert_eq!(out.base().tts_values[2].as_i32(), 9);
+    exectuples::exec_clear_tuple(&mut out, mcx);
+    tuplestore::hold::with_store(h, |ts| {
+        assert!(ts.gettupleslot(true, false, &mut out, mcx).unwrap());
+    });
+    exectuples::slot_getallattrs(&mut out);
+    assert_eq!(out.base().tts_values[0].as_i32(), 8);
+    assert!(out.base().tts_isnull[1]);
+    assert!(out.base().tts_isnull[2], "input NULL stays NULL through the map");
+    exectuples::exec_clear_tuple(&mut out, mcx);
+    tuplestore::hold::end(h);
+}
+
+// The mirror image: a dropped column in the executor's rowtype is skipped by
+// build_attrmap_by_position (attmap.c:108), so the stored row is the compact
+// target shape.
+#[test]
+fn tupmap_arm_skips_dropped_input_columns() {
+    let mcx = leaked_mcx();
+    let target = int4_desc_dropped(mcx, &[false, false]);
+    let typeinfo = int4_desc_dropped(mcx, &[false, true, false]);
+    let h = tuplestore::hold::register(tuplestore::Tuplestore::begin_heap(false, true, 64));
+    let mut dr = tstore_create_DR();
+    set_params(&mut dr, h, false, Some(target.clone()), Some(PORTAL_MISMATCH_MSG));
+    dr.startup(1, &typeinfo).unwrap();
+
+    let mut slot = exectuples::make_tuple_table_slot(mcx, TupleSlotKind::Virtual, Some(typeinfo.clone()));
+    for (i, v) in [1, 2, 3].into_iter().enumerate() {
+        slot.base_mut().tts_values[i] = Datum::from_i32(v);
+        slot.base_mut().tts_isnull[i] = false;
+    }
+    exectuples::exec_store_virtual_tuple(&mut slot);
+    assert!(dr.receive_slot(&mut slot).unwrap());
+    dr.shutdown();
+
+    let mut out = exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(target));
+    tuplestore::hold::with_store(h, |ts| {
+        assert_eq!(ts.tuple_count(), 1);
+        assert!(ts.gettupleslot(true, false, &mut out, mcx).unwrap());
+    });
+    exectuples::slot_getallattrs(&mut out);
+    assert_eq!(out.base().tts_values[0].as_i32(), 1);
+    assert_eq!(out.base().tts_values[1].as_i32(), 3);
+    exectuples::exec_clear_tuple(&mut out, mcx);
+    tuplestore::hold::end(h);
+}
