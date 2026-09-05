@@ -296,7 +296,8 @@ pub fn reindex_index<'mcx>(
         heapId,
         indexId,
         xact::GetCurrentTransactionNestLevel(),
-    );
+        xact::IsInParallelMode(),
+    )?;
     let build = (|| -> PgResult<types_rel::Relation<'mcx>> {
         RelationSetNewRelfilenumber(mcx, &iRel, persistence)?;
 
@@ -494,7 +495,8 @@ pub fn reindex_relation<'mcx>(
         types_rel::reindex::set_reindex_pending(
             &indexIds,
             xact::GetCurrentTransactionNestLevel(),
-        );
+            xact::IsInParallelMode(),
+        )?;
         xact::CommandCounterIncrement()?;
     }
 
@@ -535,7 +537,7 @@ pub fn reindex_relation<'mcx>(
                 .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
             )?;
             if flags & REINDEX_REL_SUPPRESS_INDEX_USE != 0 {
-                types_rel::reindex::remove_reindex_pending(indexOid);
+                types_rel::reindex::remove_reindex_pending(indexOid, xact::IsInParallelMode())?;
             }
             continue;
         }
