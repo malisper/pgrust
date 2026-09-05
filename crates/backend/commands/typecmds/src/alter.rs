@@ -334,72 +334,10 @@ fn AlterDomainDefault<'mcx>(
         Ok(())
     })?;
 
-    rebuild_domain_dependencies(mcx, domainoid, &row, default_expr)?;
+    generate_type_dependencies_rebuild(mcx, domainoid, &row, default_expr, false)?;
 
     objectaccess::InvokeObjectPostAlterHook(TYPE_RELATION_ID, domainoid, 0)?;
     Ok(ObjectAddress::set(TYPE_RELATION_ID, domainoid))
-}
-
-// GenerateTypeDependencies (pg_type.c) rebuild arm, domain shape: delete +
-// re-record namespace/owner/extension/procs/basetype/collation, then the
-// default expression's normal deps.
-fn rebuild_domain_dependencies<'mcx>(
-    mcx: Mcx<'mcx>,
-    domainoid: Oid,
-    row: &TypeRow,
-    default_expr: Option<Node<'mcx>>,
-) -> PgResult<()> {
-    pg_depend::deleteDependencyRecordsFor(mcx, TYPE_RELATION_ID, domainoid, true)?;
-    pg_shdepend::deleteSharedDependencyRecordsFor(mcx, TYPE_RELATION_ID, domainoid, 0)?;
-
-    let myself = ObjectAddress::set(TYPE_RELATION_ID, domainoid);
-    let mut addrs_normal = [ObjectAddress::set(InvalidOid, InvalidOid); 12];
-    let mut n = 0;
-    addrs_normal[n] = ObjectAddress::set(types_core::NAMESPACE_RELATION_ID, row.typnamespace);
-    n += 1;
-    pg_depend::recordDependencyOnOwner(mcx, TYPE_RELATION_ID, domainoid, row.typowner)?;
-    pg_depend::recordDependencyOnCurrentExtension(mcx, &myself, true)?;
-    const PROCEDURE_RELATION_ID: Oid = 1255;
-    for proc in [
-        row.typinput,
-        row.typoutput,
-        row.typreceive,
-        row.typsend,
-        row.typmodin,
-        row.typmodout,
-        row.typanalyze,
-        row.typsubscript,
-    ] {
-        if proc != InvalidOid {
-            addrs_normal[n] = ObjectAddress::set(PROCEDURE_RELATION_ID, proc);
-            n += 1;
-        }
-    }
-    if row.typbasetype != InvalidOid {
-        addrs_normal[n] = ObjectAddress::set(TYPE_RELATION_ID, row.typbasetype);
-        n += 1;
-    }
-    const COLLATION_RELATION_ID: Oid = 3456;
-    if row.typcollation != InvalidOid && row.typcollation != DEFAULT_COLLATION_OID {
-        addrs_normal[n] = ObjectAddress::set(COLLATION_RELATION_ID, row.typcollation);
-        n += 1;
-    }
-    pg_depend::record_object_address_dependencies(
-        mcx,
-        &myself,
-        &mut addrs_normal[..n],
-        DependencyType::Normal,
-    )?;
-    if let Some(expr) = default_expr {
-        catalog_dependency::recordDependencyOnExpr(
-            mcx,
-            &myself,
-            expr,
-            &NodeList::nil(),
-            DependencyType::Normal,
-        )?;
-    }
-    Ok(())
 }
 
 fn AlterDomainNotNull<'mcx>(
@@ -428,10 +366,14 @@ fn AlterDomainNotNull<'mcx>(
         domainAddNotNullConstraint(mcx, domainoid, row.typnamespace, &constr, &row.typname)?;
         validateDomainNotNullConstraint(mcx, domainoid)?;
     } else {
-        let con_oid = pg_constraint::findDomainNotNullConstraint(mcx, domainoid)?
-            .unwrap_or_else(|| {
-                panic!("could not find not-null constraint on domain \"{}\"", row.typname)
-            });
+        // C: elog(ERROR, ...) (typecmds.c:2821) — a catchable XX000, not a
+        // backend abort.
+        let Some(con_oid) = pg_constraint::findDomainNotNullConstraint(mcx, domainoid)? else {
+            return Err(Box::new(PgError::error(format!(
+                "could not find not-null constraint on domain \"{}\"",
+                row.typname
+            ))));
+        };
         catalog_dependency::performDeletion(
             mcx,
             &ObjectAddress::set(types_core::CONSTRAINT_RELATION_ID, con_oid),
@@ -571,7 +513,12 @@ fn alter_domain_add_constraint_impl<'mcx>(
     checkDomainOwner(row.typtype, domainoid)?;
 
     if new_constraint.node_tag() != NodeTag::T_Constraint {
-        panic!("unrecognized node type: {:?}", new_constraint.node_tag());
+        // C: elog(ERROR, "unrecognized node type: %d") (typecmds.c:2988) —
+        // a catchable XX000, not a backend abort.
+        return Err(Box::new(PgError::error(format!(
+            "unrecognized node type: {}",
+            new_constraint.node_tag() as i32
+        ))));
     }
     let constr = new_constraint.as_variant::<Constraint>().expect("Constraint");
 
@@ -1260,10 +1207,12 @@ pub fn AlterTypeNamespaceInternal<'mcx>(
             nsp_oid,
         )? != 1
     {
-        panic!(
+        // C: elog(ERROR, ...) (typecmds.c:4314) — a catchable XX000, not a
+        // backend abort.
+        return Err(Box::new(PgError::error(format!(
             "could not change schema dependency for type \"{}\"",
             format_type::format_type_be(type_oid)?
-        );
+        ))));
     }
 
     objectaccess::InvokeObjectPostAlterHook(TYPE_RELATION_ID, type_oid, 0)?;
@@ -1559,7 +1508,13 @@ fn AlterTypeRecurse<'mcx>(
         row.typsubscript = p.subscript_oid;
     }
 
-    rebuild_alter_type_dependencies(mcx, type_oid, &row, is_implicit_array)?;
+    // C: "don't have defaultExpr handy" — GenerateTypeDependencies re-reads
+    // typdefaultbin from the tuple (pg_type.c:580).
+    let default_expr = match &row.typdefaultbin {
+        Some(bin) => Some(readfuncs::stringToNode(mcx, bin)?),
+        None => None,
+    };
+    generate_type_dependencies_rebuild(mcx, type_oid, &row, default_expr, is_implicit_array)?;
 
     objectaccess::InvokeObjectPostAlterHook(TYPE_RELATION_ID, type_oid, 0)?;
 
@@ -1614,13 +1569,20 @@ fn AlterTypeRecurse<'mcx>(
     rel.close(RowExclusiveLock)
 }
 
-// GenerateTypeDependencies (pg_type.c) rebuild arm as invoked from
-// AlterTypeRecurse: relationKind 0 (composites rejected), dependent iff
-// implicit array, defaultExpr/typacl re-read from the row.
-fn rebuild_alter_type_dependencies<'mcx>(
+// GenerateTypeDependencies (pg_type.c:566) rebuild arm — rebuild = true,
+// relationKind 0 (composites are rejected by both callers), typacl re-read
+// from the row — as invoked from AlterDomainDefault (typecmds.c:2739,
+// defaultExpr passed by the caller) and AlterTypeRecurse (typecmds.c:4658,
+// dependent iff implicit array).  Both C callers pass makeExtensionDep =
+// false ("don't touch extension membership"), so the extension dependency
+// is neither re-recorded nor membership-checked here: a pre-existing
+// free-standing type altered from inside an extension script stays
+// free-standing.
+fn generate_type_dependencies_rebuild<'mcx>(
     mcx: Mcx<'mcx>,
     type_oid: Oid,
     row: &TypeRow,
+    default_expr: Option<Node<'mcx>>,
     is_implicit_array: bool,
 ) -> PgResult<()> {
     pg_depend::deleteDependencyRecordsFor(mcx, TYPE_RELATION_ID, type_oid, true)?;
@@ -1653,7 +1615,6 @@ fn rebuild_alter_type_dependencies<'mcx>(
             )?;
         }
     }
-    pg_depend::recordDependencyOnCurrentExtension(mcx, &myself, true)?;
     const PROCEDURE_RELATION_ID: Oid = 1255;
     for proc in [
         row.typinput,
@@ -1685,6 +1646,15 @@ fn rebuild_alter_type_dependencies<'mcx>(
         &mut addrs_normal[..n],
         DependencyType::Normal,
     )?;
+    if let Some(expr) = default_expr {
+        catalog_dependency::recordDependencyOnExpr(
+            mcx,
+            &myself,
+            expr,
+            &NodeList::nil(),
+            DependencyType::Normal,
+        )?;
+    }
     if row.typelem != InvalidOid {
         let referenced = ObjectAddress::set(TYPE_RELATION_ID, row.typelem);
         let behavior = if is_implicit_array {
@@ -1693,16 +1663,6 @@ fn rebuild_alter_type_dependencies<'mcx>(
             DependencyType::Normal
         };
         pg_depend::recordDependencyOn(mcx, &myself, &referenced, behavior)?;
-    }
-    if let Some(bin) = &row.typdefaultbin {
-        let expr = readfuncs::stringToNode(mcx, bin)?;
-        catalog_dependency::recordDependencyOnExpr(
-            mcx,
-            &myself,
-            expr,
-            &NodeList::nil(),
-            DependencyType::Normal,
-        )?;
     }
     Ok(())
 }
