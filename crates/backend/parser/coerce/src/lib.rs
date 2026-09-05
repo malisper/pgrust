@@ -25,7 +25,7 @@ use types_error::{
 };
 use types_nodes::{
     ArrayCoerceExpr, CaseTestExpr, CoerceToDomain, CoerceViaIO, CoercionForm, CollateExpr, Const,
-    ConvertRowtypeExpr, FuncExpr, Node, NodeList, NodeTag, Param, RelabelType,
+    ConvertRowtypeExpr, FuncExpr, Node, NodeList, NodeTag, Param, RelabelType, RowExpr,
 };
 
 // primnodes.h CoercionContext; ordering is load-bearing (ccontext >= castcontext).
@@ -367,12 +367,18 @@ fn coerce_record_to_complex<'mcx>(
             node_errloc,
         ));
     }
+    // parse_coerce.c:1140: a domain target hides the RowExpr's own cast
+    // (row_format = COERCE_IMPLICIT_CAST) so ruleutils shows one cast.
     let rowexpr = Node::mk(
         mcx,
         types_nodes::RowExpr {
             args: newargs,
             row_typeid: baseTypeId,
-            row_format: cformat,
+            row_format: if targetTypeId != baseTypeId {
+                CoercionForm::COERCE_IMPLICIT_CAST
+            } else {
+                cformat
+            },
             colnames: NodeList::nil(),
             location,
         },
@@ -1846,7 +1852,7 @@ pub fn coerce_to_domain<'mcx>(
         return Ok(arg);
     }
     if hideInputCoercion {
-        hide_coercion_node(arg);
+        hide_coercion_node(arg)?;
     }
     let arg = coerce_type_typmod(
         mcx,
@@ -1952,7 +1958,10 @@ pub fn coerce_to_target_type<'mcx>(
     Ok(Some(result))
 }
 
-fn hide_coercion_node(node: Node<'_>) {
+/// C hide_coercion_node (parse_coerce.c:813): force a coercion node's
+/// display format to IMPLICIT. An unsupported node is caller error: C
+/// elog(ERROR)s (XX000, catchable), never aborts.
+fn hide_coercion_node(node: Node<'_>) -> PgResult<()> {
     // SAFETY: parse tree is analyze-owned; no derived refs live.
     unsafe {
         if node
@@ -1979,15 +1988,21 @@ fn hide_coercion_node(node: Node<'_>) {
                 })
                 .is_some()
             || node
+                .with_mut::<RowExpr, _>(|r| r.row_format = CoercionForm::COERCE_IMPLICIT_CAST)
+                .is_some()
+            || node
                 .with_mut::<CoerceToDomain, _>(|c| {
                     c.coercionformat = CoercionForm::COERCE_IMPLICIT_CAST
                 })
                 .is_some()
         {
-            return;
+            return Ok(());
         }
     }
-    panic!("unsupported node type in hide_coercion_node: {:?}", node.node_tag());
+    Err(Box::new(PgError::error(format!(
+        "unsupported node type: {}",
+        node.node_tag() as u16
+    ))))
 }
 
 // find_typmod_coercion_function (parse_coerce.c): a true array type's length
@@ -2027,7 +2042,7 @@ fn coerce_type_typmod<'mcx>(
     }
 
     if hideInputCoercion {
-        hide_coercion_node(node);
+        hide_coercion_node(node)?;
     }
 
     // A negative typmod needs no coercion step, but C still applies a

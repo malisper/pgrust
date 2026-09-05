@@ -643,3 +643,60 @@ fn internal_has_no_coercion_pathway() {
     assert!(!can_coerce_type(&[INTERNALOID], &[TEXTOID], COERCION_EXPLICIT).unwrap());
     assert!(can_coerce_type(&[INTERNALOID], &[INTERNALOID], COERCION_IMPLICIT).unwrap());
 }
+
+// parse_coerce.c:813 hide_coercion_node handles RowExpr (row_format forced
+// to COERCE_IMPLICIT_CAST) and raises a catchable elog(ERROR, "unsupported
+// node type: %d") — XX000 — for anything without a CoercionForm field.
+// coerce_to_domain(hideInputCoercion = true) is C's own entry to it
+// (parse_coerce.c:694). Audit-18.6 b114 (pre-fix: RowExpr missing, panic).
+#[test]
+fn hide_coercion_node_rowexpr_implicit_and_unsupported_is_catchable() {
+    const COMP_T: types_core::Oid = 700_001;
+    const COMP_D: types_core::Oid = 700_002;
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let row = Node::mk(
+        mcx,
+        types_nodes::RowExpr {
+            args: types_nodes::NodeList::nil(),
+            row_typeid: COMP_T,
+            row_format: CoercionForm::COERCE_EXPLICIT_CAST,
+            colnames: types_nodes::NodeList::nil(),
+            location: -1,
+        },
+    )
+    .unwrap();
+    let out = crate::coerce_to_domain(
+        mcx,
+        row,
+        COMP_T,
+        -1,
+        COMP_D,
+        COERCION_EXPLICIT,
+        CoercionForm::COERCE_EXPLICIT_CAST,
+        -1,
+        true,
+    )
+    .unwrap();
+    let cd = out.as_coerce_to_domain().unwrap();
+    assert_eq!((cd.resulttype, cd.coercionformat), (COMP_D, CoercionForm::COERCE_EXPLICIT_CAST));
+    assert_eq!(cd.arg.as_row_expr().unwrap().row_format, CoercionForm::COERCE_IMPLICIT_CAST);
+
+    // A Const carries no CoercionForm: C elog(ERROR)s, never aborts.
+    let c = Node::mk_const(mcx, INT4OID, -1, InvalidOid, 4, datum::Datum::null(), true, true)
+        .unwrap();
+    let err = crate::coerce_to_domain(
+        mcx,
+        c,
+        INT4OID,
+        -1,
+        COMP_D,
+        COERCION_EXPLICIT,
+        CoercionForm::COERCE_EXPLICIT_CAST,
+        -1,
+        true,
+    )
+    .unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    assert_eq!(err.message(), format!("unsupported node type: {}", NodeTag::T_Const as u16));
+}
