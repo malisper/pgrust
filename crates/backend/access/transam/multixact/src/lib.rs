@@ -154,16 +154,25 @@ fn MultiXactOffsetPrecedes(offset1: MultiXactOffset, offset2: MultiXactOffset) -
     (offset1.wrapping_sub(offset2) as i32) < 0
 }
 
-fn mxstatus_from_word(word: u32) -> MultiXactStatus {
-    match word {
+fn mxstatus_from_word(word: u32) -> PgResult<MultiXactStatus> {
+    Ok(match word {
         0 => MultiXactStatus::MultiXactStatusForKeyShare,
         1 => MultiXactStatus::MultiXactStatusForShare,
         2 => MultiXactStatus::MultiXactStatusForNoKeyUpdate,
         3 => MultiXactStatus::MultiXactStatusForUpdate,
         4 => MultiXactStatus::MultiXactStatusNoKeyUpdate,
         5 => MultiXactStatus::MultiXactStatusUpdate,
-        w => panic!("invalid multixact member status {w} read from pg_multixact/members"),
-    }
+        // A member flags byte read from pg_multixact/members is attacker- or
+        // corruption-influenced. C stores the raw status int and only rejects
+        // it when stringifying, via mxstatus_to_string's
+        // elog(ERROR, "unrecognized multixact status %d") (multixact.c:1921) —
+        // a catchable transaction-level error. Match that message and level
+        // (XX000) here instead of panicking the backend thread.
+        w => {
+            elog(ERROR, format!("unrecognized multixact status {w}"))?;
+            unreachable!("elog(ERROR) does not return")
+        }
+    })
 }
 
 pub fn mxstatus_to_string(status: MultiXactStatus) -> &'static str {
@@ -1234,7 +1243,7 @@ fn get_members_into(
 
         out.push(MultiXactMember {
             xid,
-            status: mxstatus_from_word((flagsval >> bshift) & MXACT_MEMBER_XACT_BITMASK),
+            status: mxstatus_from_word((flagsval >> bshift) & MXACT_MEMBER_XACT_BITMASK)?,
         });
         off = off.wrapping_add(1);
     }
@@ -1694,7 +1703,14 @@ pub fn SetMultiXactIdLimit(
     }
 
     if MultiXactIdPrecedes(multi_warn_limit, cur_multi) {
-        let oldest_datname = if xact_seams::is_transaction_or_transaction_block::call() {
+        // C gates the get_database_name() syscache lookup on IsTransactionState()
+        // (multixact.c:2643), which is true only in TRANS_INPROGRESS — NOT in an
+        // aborted transaction block, where a catalog lookup would fail. The
+        // broader is_transaction_or_transaction_block() returns true in
+        // TBLOCK_ABORT/TBLOCK_SUBABORT too, turning C's OID-form WARNING into a
+        // failed syscache lookup. Match C and use is_transaction_state(); this
+        // is also what varsup's SetTransactionIdLimit uses.
+        let oldest_datname = if xact_seams::is_transaction_state::call() {
             dbcommands_seams::get_database_name::call(oldest_datoid)?
         } else {
             None
@@ -2216,8 +2232,9 @@ pub fn multixact_redo(record: &mut XLogReaderState) -> PgResult<()> {
                 TransactionId::from_ne_bytes(multixact_record_field::<4>(data, base, "create")?);
             let status =
                 i32::from_ne_bytes(multixact_record_field::<4>(data, base + 4, "create")?);
-            // Validate the status word before mxstatus_from_word, which panics
-            // on an out-of-range discriminant.
+            // Validate the status word before mxstatus_from_word: a corrupt WAL
+            // create record gets a data-corruption error with this record's
+            // context, rather than the generic per-member status error.
             if !(0..=MAX_MULTIXACT_STATUS).contains(&status) {
                 return corrupt_multixact_record(format!(
                     "invalid multixact create record: member {i} has invalid status {status}"
@@ -2225,7 +2242,7 @@ pub fn multixact_redo(record: &mut XLogReaderState) -> PgResult<()> {
             }
             members.push(MultiXactMember {
                 xid,
-                status: mxstatus_from_word(status as u32),
+                status: mxstatus_from_word(status as u32)?,
             });
             if TransactionIdPrecedes(max_xid, xid) {
                 max_xid = xid;

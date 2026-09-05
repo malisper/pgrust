@@ -253,21 +253,23 @@ pub fn CheckRequiredParameterValues() -> PgResult<()> {
                 .errmsg("hot standby is not possible because \"wal_level\" was not set to \"replica\" or higher on the primary server")
                 .finish(loc("CheckRequiredParameterValues"));
         }
+        // xlog.c:CheckRequiredParameterValues calls RecoveryRequiresIntParameter
+        // for each floor. That routine, on ours < primary, pauses recovery when
+        // HotStandbyActiveInReplay() and otherwise raises FATAL with
+        // ERRCODE_INVALID_PARAMETER_VALUE, errmsg "recovery aborted because of
+        // insufficient parameter settings", the "%s = %d is a lower setting..."
+        // errdetail and a restart errhint. An inlined ERROR here dropped the
+        // pause behavior, the SQLSTATE, the detail and the hint; route through
+        // the ported seam instead. (param, curr, min) = (name, ours, primary).
         let checks: [(&str, i32, i32); 5] = [
-            ("max_connections", cf.MaxConnections, globals::MaxConnections()),
-            ("max_worker_processes", cf.max_worker_processes, globals::max_worker_processes()),
-            ("max_wal_senders", cf.max_wal_senders, guc_tables::vars::max_wal_senders.read()),
-            ("max_prepared_transactions", cf.max_prepared_xacts, guc_tables::vars::max_prepared_xacts.read()),
-            ("max_locks_per_transaction", cf.max_locks_per_xact, guc_tables::vars::max_locks_per_xact.read()),
+            ("max_connections", globals::MaxConnections(), cf.MaxConnections),
+            ("max_worker_processes", globals::max_worker_processes(), cf.max_worker_processes),
+            ("max_wal_senders", guc_tables::vars::max_wal_senders.read(), cf.max_wal_senders),
+            ("max_prepared_transactions", guc_tables::vars::max_prepared_xacts.read(), cf.max_prepared_xacts),
+            ("max_locks_per_transaction", guc_tables::vars::max_locks_per_xact.read(), cf.max_locks_per_xact),
         ];
-        for (name, primary, ours) in checks {
-            if ours < primary {
-                return ereport(ERROR)
-                    .errmsg(format!(
-                        "insufficient parameter settings detected: \"{name}\" is {ours}, needs to be at least {primary} (the value on the primary server)"
-                    ))
-                    .finish(loc("CheckRequiredParameterValues"));
-            }
+        for (name, ours, primary) in checks {
+            xlogrecovery_seams::recovery_requires_int_parameter::call(name, ours, primary)?;
         }
     }
     Ok(())

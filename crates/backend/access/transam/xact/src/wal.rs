@@ -144,7 +144,14 @@ pub fn XactLogCommitRecord(
         info |= XLOG_XACT_HAS_INFO;
     }
 
-    let mut fragments: [&[u8]; 13] = [&[]; 13];
+    // xact.c:XactLogCommitRecord registers up to 14 distinct chunks with
+    // XLogRegisterData: xl_xact_commit, xinfo, dbinfo, {subxacts hdr,arr},
+    // {relfilelocators hdr,arr}, {dropped_stats hdr,arr}, {invals hdr,arr},
+    // twophase xid, twophase gid, and origin. A 2PC commit under logical
+    // replication that dropped rels/stats, had subxacts, and generated invals
+    // populates all 14 at once; a 13-slot array indexed the origin fragment out
+    // of bounds and panicked the backend.
+    let mut fragments: [&[u8]; 14] = [&[]; 14];
     let mut nfrags: usize = 0;
 
     // xl_xact_commit { TimestampTz xact_time; }

@@ -8,6 +8,13 @@ static XLOG_INSERTS: Mutex<Vec<(u8, u8, Vec<u8>)>> = Mutex::new(Vec::new());
 static IN_PROGRESS_XIDS: Mutex<Vec<TransactionId>> = Mutex::new(Vec::new());
 static CURRENT_XID: StdAtomicU32 = StdAtomicU32::new(0);
 static IN_RECOVERY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+// Test-controlled xact-state seams for SetMultiXactIdLimit's warning branch.
+static TEST_IN_XACT_OR_BLOCK: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static TEST_IN_XACT_STATE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static TEST_DBNAME_FAILS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 fn shmem_registry() -> &'static Mutex<std::collections::HashMap<String, usize>> {
     static R: OnceLock<Mutex<std::collections::HashMap<String, usize>>> = OnceLock::new();
@@ -133,11 +140,22 @@ fn setup() {
         xact_seams::transaction_id_is_current_transaction_id::set(|xid| {
             CURRENT_XID.load(std::sync::atomic::Ordering::Relaxed) == xid
         });
-        xact_seams::is_transaction_or_transaction_block::set(|| false);
+        xact_seams::is_transaction_or_transaction_block::set(|| {
+            TEST_IN_XACT_OR_BLOCK.load(std::sync::atomic::Ordering::Relaxed)
+        });
+        xact_seams::is_transaction_state::set(|| {
+            TEST_IN_XACT_STATE.load(std::sync::atomic::Ordering::Relaxed)
+        });
         procarray_seams::transaction_id_is_in_progress::set(|xid| {
             Ok(IN_PROGRESS_XIDS.lock().unwrap().contains(&xid))
         });
-        dbcommands_seams::get_database_name::set(|_| Ok(Some("testdb".to_string())));
+        dbcommands_seams::get_database_name::set(|_| {
+            if TEST_DBNAME_FAILS.load(std::sync::atomic::Ordering::Relaxed) {
+                Err(Box::new(types_error::PgError::error("cache lookup failed")))
+            } else {
+                Ok(Some("testdb".to_string()))
+            }
+        });
 
         // Dummy proc numbers start at MaxBackends + NUM_AUXILIARY_PROCS; this
         // fake returns the second prepared-xact proc number.
@@ -693,5 +711,56 @@ fn wraparound_warning_hints_carry_no_replication_slot_advice() {
                     .to_string()
             ),
         ]
+    );
+}
+
+// SetMultiXactIdLimit's warning branch gates the get_database_name() syscache
+// lookup on the transaction state. C uses IsTransactionState() (multixact.c:2643),
+// true only in TRANS_INPROGRESS; in an aborted transaction block a catalog
+// lookup is invalid, so C falls back to the database OID. Using the broader
+// is_transaction_or_transaction_block() (true in TBLOCK_ABORT/TBLOCK_SUBABORT)
+// drove a failing syscache lookup where C emits a plain WARNING. This asserts
+// the aborted-block case now takes the OID path (no syscache call) and succeeds.
+#[test]
+fn set_multixact_id_limit_in_aborted_block_uses_oid_not_syscache() {
+    let _l = test_lock();
+    setup();
+    use std::sync::atomic::Ordering::Relaxed as R;
+
+    // Aborted transaction block: in-a-block is true, IsTransactionState is
+    // false, and any catalog lookup would fail.
+    TEST_IN_XACT_OR_BLOCK.store(true, R);
+    TEST_IN_XACT_STATE.store(false, R);
+    TEST_DBNAME_FAILS.store(true, R);
+
+    let st = MultiXactState();
+    let saved_next = st.nextMXact.load(R);
+    let saved_offset = st.nextOffset.load(R);
+
+    // Park nextMXact just past the warn limit so the warning branch fires
+    // (same construction as wraparound_warning_hints_carry_no_replication_slot_advice).
+    let wrap_limit = FirstMultiXactId.wrapping_add(MaxMultiXactId >> 1);
+    let warn_limit = wrap_limit.wrapping_sub(40_000_000);
+    let per_page = MULTIXACT_OFFSETS_PER_PAGE;
+    let mut next = warn_limit.wrapping_add(per_page) & !(per_page - 1);
+    if next % 65536 == 0 {
+        next += per_page;
+    }
+    assert!(MultiXactIdPrecedes(warn_limit, next));
+    st.nextMXact.store(next, R);
+    ExtendMultiXactOffset(next).unwrap();
+
+    let r = SetMultiXactIdLimit(FirstMultiXactId, 1, false);
+
+    // Restore state before asserting.
+    st.nextMXact.store(saved_next, R);
+    st.nextOffset.store(saved_offset, R);
+    TEST_IN_XACT_OR_BLOCK.store(false, R);
+    TEST_DBNAME_FAILS.store(false, R);
+    SetMultiXactIdLimit(FirstMultiXactId, 1, false).unwrap();
+
+    r.expect(
+        "SetMultiXactIdLimit in an aborted transaction block must warn with the \
+         database OID (IsTransactionState()==false), not attempt a syscache lookup",
     );
 }

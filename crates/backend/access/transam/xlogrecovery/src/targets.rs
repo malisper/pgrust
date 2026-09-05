@@ -15,7 +15,7 @@ use condition_variable::{
 };
 use elog::{elog, ereport};
 use types_core::{TimeLineID, TimestampTz, TransactionId, XLogRecPtr};
-use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED, FATAL, LOG, WARNING};
+use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_INVALID_PARAMETER_VALUE, FATAL, LOG, WARNING};
 use types_storage::latch::LatchHandle;
 use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT};
 
@@ -650,13 +650,27 @@ pub fn RecoveryRequiresIntParameter(param_name: &str, curr_value: i32, min_value
 }
 
 
-// C guards every assign, but its per-process init makes the empty-value
-// guard unreachable; our per-thread snapshot replay is unordered across
-// variables, so an empty assign skips the guard and unsets only its own kind.
+// C's error_multiple_recovery_targets (xlogrecovery.c:4832) is an
+// ereport(ERROR, ERRCODE_INVALID_PARAMETER_VALUE, errmsg, errdetail) raised
+// from the assign hooks; because the postmaster (and single-user startup) has
+// no exception stack, elog.c promotes it to FATAL and the server exits. These
+// are PGC_POSTMASTER variables, so those are the only contexts that ever
+// assign them; our assign hooks return `()` and cannot propagate an error, so
+// raise the promoted FATAL directly (never a raw thread panic, which unwound
+// the postmaster's main thread with no log line and no SQLSTATE). An empty
+// assign never guards: per-thread snapshot replay is unordered across
+// variables, and an empty value only unsets its own kind.
 fn guard_target(kind: RecoveryTargetType) {
     let cur = recovery_target();
     if cur != RecoveryTargetType::Unset && cur != kind {
-        panic!("multiple recovery targets specified");
+        let _ = ereport(FATAL)
+            .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+            .errmsg("multiple recovery targets specified")
+            .errdetail(
+                "At most one of \"recovery_target\", \"recovery_target_lsn\", \"recovery_target_name\", \"recovery_target_time\", \"recovery_target_xid\" may be set."
+                    .to_string(),
+            )
+            .finish(loc("error_multiple_recovery_targets"));
     }
 }
 

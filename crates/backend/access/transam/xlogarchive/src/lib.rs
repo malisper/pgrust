@@ -15,7 +15,7 @@ use transam_xlog::{
     IsTLHistoryFileName, StatusFilePath, XLByteToSeg, XLogArchivingActive, XLogArchivingAlways,
     XLogFileName, GetRecoveryState, RECOVERY_STATE_ARCHIVE, XLOGDIR,
 };
-use types_error::{ErrorLocation, PgResult, DEBUG2, DEBUG3, ERROR, FATAL, LOG, WARNING};
+use types_error::{ErrorLocation, PgResult, DEBUG1, DEBUG2, DEBUG3, ERROR, FATAL, LOG, WARNING};
 
 #[cfg(test)]
 mod tests;
@@ -111,9 +111,18 @@ pub fn RestoreArchivedFile(
         let mut st = fd::FileInfo::zeroed();
         if fd::pg_stat(&xlogpath, &mut st) == 0 {
             if expected_size > 0 && st.size != expected_size {
-                // StandbyMode is unported (always false): C's partial-file
-                // DEBUG1 arm is unreachable, wrong size is FATAL.
-                ereport(FATAL)
+                // xlogarchive.c:208: in standby mode a smaller-than-expected
+                // restored segment is assumed to still be in the process of
+                // being copied into the archive, so it is logged at DEBUG1 and
+                // false is returned to let the standby recovery loop poll again.
+                // Any other size mismatch (or non-standby) is FATAL. StandbyMode
+                // is ported, so honor the check instead of always erroring.
+                let elevel = if xlogrecovery_seams::standby_mode::call() && st.size < expected_size {
+                    DEBUG1
+                } else {
+                    FATAL
+                };
+                ereport(elevel)
                     .errmsg(format!(
                         "archive file \"{xlogfname}\" has wrong size: {} instead of {expected_size}",
                         st.size

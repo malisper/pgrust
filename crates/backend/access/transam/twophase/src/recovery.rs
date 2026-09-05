@@ -379,16 +379,30 @@ pub fn RecoverPreparedTransactions() -> PgResult<()> {
 
             unlock_twophase_state();
 
-            // Recover other state (notably locks) via the rmgr callbacks.
-            process_records(
+            // Recover other state (notably locks) via the rmgr callbacks. The
+            // lock is released across these steps, so on error the closure must
+            // re-acquire it before propagating: the sole tail release below is
+            // otherwise fired on an unheld lock, and TwoPhaseStateLock's release
+            // helper `.expect()`s success (state.rs), so the recovering startup
+            // process aborts (SIGABRT) instead of exiting cleanly with the
+            // original error. C relies on LWLockReleaseAll tolerating the
+            // not-held lock during the FATAL unwind (twophase.c:2136-2159); we
+            // make the re-acquire explicit to keep the release balanced.
+            let step = process_records(
                 &buf,
                 layout.records,
                 xid,
                 &twophase_rmgr::twophase_recover_callbacks,
-            )?;
-
-            if xlogutils::InHotStandby() {
-                standby_seams::standby_release_lock_tree::call(xid, &subxids)?;
+            )
+            .and_then(|()| {
+                if xlogutils::InHotStandby() {
+                    standby_seams::standby_release_lock_tree::call(xid, &subxids)?;
+                }
+                Ok(())
+            });
+            if let Err(e) = step {
+                lock_twophase_state(LW_EXCLUSIVE);
+                return Err(e);
             }
 
             PostPrepare_Twophase();
