@@ -14,4 +14,5 @@ pg_locale = { path = "../../utils/adt/pg_locale" }
 oracle_compat = { package = "adt_oracle_compat", path = "../../utils/adt/oracle_compat" }
 pg_path = { path = "../../../port/pg_path" }
 init_small = { path = "../../utils/init/init_small" }
+elog = { path = "../../utils/error/elog" }
 libc = "0.2"

@@ -3,7 +3,9 @@ use std::rc::Rc;
 use ::mcx::{vec_with_capacity_in, Mcx, MemoryContext, PgVec};
 use ::ts_cache::{lookup_ts_dictionary_cache, TSDictionaryCacheEntry};
 use ::ts_locale::dict_api::{lexize_result_ref, DictInitData, LexizeResult};
-use ::ts_locale::{get_tsearch_config_filename, tsearch_readlines, DictSubState, TsLexeme};
+use ::ts_locale::{
+    could_not_open_error, get_tsearch_config_filename, tsearch_readlines, DictSubState, TsLexeme,
+};
 use ::types_core::Oid;
 use ::types_error::{PgError, PgResult, ERRCODE_CONFIG_FILE_ERROR};
 
@@ -116,11 +118,10 @@ fn mblen(s: &[u8]) -> usize {
 fn thesaurus_read(d: &mut ThesaurusBuild, filename: &[u8]) -> PgResult<()> {
     let mcx = d.mcx;
     let path = get_tsearch_config_filename(mcx, filename, "ths")?;
-    let Some(lines) = tsearch_readlines(mcx, &path)? else {
-        return Err(config_file_error(format!(
-            "could not open thesaurus file \"{}\": No such file or directory",
-            String::from_utf8_lossy(&path)
-        )));
+    // dict_thesaurus.c:179 — `could not open thesaurus file "%s": %m`.
+    let lines = match tsearch_readlines(mcx, &path)? {
+        Ok(lines) => lines,
+        Err(errno) => return Err(could_not_open_error("thesaurus", &path, errno).into()),
     };
 
     let mut idsubst: u32 = 0;

@@ -19659,6 +19659,7 @@ name = "ts_locale"
 version = "0.1.0"
 dependencies = [
  "adt_oracle_compat",
+ "elog",
  "init_small",
  "libc",
  "mbutils",

@@ -248,3 +248,155 @@ fn mk_a_node_deep_affix_raises_54001_not_stack_overflow() {
         err.message()
     );
 }
+
+// ---- audit-18.6 b167 (fp-tsearch-spell): loader/normalizer witnesses ----
+
+fn fixtures_dir() -> String {
+    let dir = format!("{}/fixtures", env!("CARGO_MANIFEST_DIR"));
+    std::env::set_var("PGRUST_PGSHAREDIR", &dir);
+    dir
+}
+
+// spell.c:2165 CheckAffix: `if (keeplen + findlen >= 2 * MAXNORMLEN) return NULL;`
+// — an affix whose result would fill C's 512-byte newword buffer is rejected.
+// spell_longfind: flag A strips 263 y's (keeplen 249 + findlen 263 = 512 →
+// refused), flag B strips 262 (511 → applied); both stems are in the .dict.
+#[test]
+fn check_affix_refuses_result_at_two_maxnormlen() {
+    fixtures_dir();
+    let mcx = static_mcx();
+    let d = make_dict(mcx, "spell_longfind", "spell_longfind").unwrap();
+
+    let refused = format!("{}a", "x".repeat(249));
+    assert_eq!(
+        lexize(mcx, &d, &refused),
+        None,
+        "keeplen + findlen == 2 * MAXNORMLEN must be refused (C returns NULL)"
+    );
+
+    let applied = format!("{}a", "z".repeat(249));
+    let want = format!("{}{}", "z".repeat(249), "y".repeat(262));
+    assert_eq!(
+        lexize(mcx, &d, &applied),
+        Some(vec![want]),
+        "keeplen + findlen == 2 * MAXNORMLEN - 1 must still be applied"
+    );
+}
+
+// spell.c:525-529 NIImportDictionary: `could not open dictionary file "%s": %m`
+// — fopen's errno, not a hardcoded ENOENT text. A directory opens fine under
+// fopen(3) and reads as empty (pg_get_line_buf's ferror ends the file).
+#[test]
+fn loader_open_failure_reports_fopen_errno() {
+    let mcx = static_mcx();
+    let dir = std::env::temp_dir().join("pgrust_spell_b167_open");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("stage dir");
+    let regular = dir.join("plain.dict");
+    std::fs::write(&regular, b"book\n").expect("stage plain.dict");
+
+    // ENOTDIR: a path that descends through a regular file (root-proof).
+    let notdir = regular.join("x");
+    let want_errno = std::fs::File::open(&notdir)
+        .expect_err("open through a regular file must fail")
+        .raw_os_error()
+        .expect("os error");
+    let notdir_b = notdir.as_os_str().as_encoded_bytes().to_vec();
+    let mut obj = crate::IspellDict::new(mcx);
+    obj.ni_start_build().expect("ni_start_build");
+    let err = obj
+        .ni_import_dictionary(&notdir_b)
+        .expect_err("open through a regular file must be refused");
+    let prefix = format!("could not open dictionary file \"{}\": ", notdir.display());
+    let rendered = err
+        .message()
+        .strip_prefix(&prefix)
+        .unwrap_or_else(|| panic!("message {:?} lacks prefix {prefix:?}", err.message()));
+    assert!(
+        !rendered.is_empty() && rendered != "%m" && rendered != "No such file or directory",
+        "`%m` must render strerror(ENOTDIR), got {rendered:?}"
+    );
+    assert_eq!(err.saved_errno(), Some(want_errno), "saved errno must be fopen's");
+    assert_eq!(err.sqlstate(), ERRCODE_CONFIG_FILE_ERROR);
+
+    // ENOENT still reports ENOENT — through the same errno path.
+    let missing = dir.join("missing.dict");
+    let want_errno = std::fs::File::open(&missing).expect_err("missing").raw_os_error().unwrap();
+    let missing_b = missing.as_os_str().as_encoded_bytes().to_vec();
+    let err = obj.ni_import_dictionary(&missing_b).expect_err("missing file");
+    assert_eq!(err.saved_errno(), Some(want_errno));
+    assert_eq!(
+        err.message(),
+        format!(
+            "could not open dictionary file \"{}\": No such file or directory",
+            missing.display()
+        )
+    );
+
+    // A directory: fopen succeeds, the read fails → empty dictionary, no error.
+    let dir_b = dir.as_os_str().as_encoded_bytes().to_vec();
+    obj.ni_import_dictionary(&dir_b)
+        .expect("a directory reads as an empty dictionary file, as under fopen/fgets");
+    assert_eq!(obj.spell.len(), 0);
+}
+
+// ts_locale.c tsearch_readline_callback: every error raised while a config
+// file is open carries `line N of configuration file "<path>": "<line>"` —
+// the line text included for loader errors (spell_badentry: parse_affentry
+// "syntax error" on line 3; spell_badflag: the FLAG-value error on line 2)
+// and omitted for an error inside tsearch_readline itself (spell_badenc:
+// the encoding violation on line 3).
+#[test]
+fn loader_errors_carry_readline_context() {
+    let fixtures = fixtures_dir();
+    let mcx = static_mcx();
+    let path = |name: &str| format!("{fixtures}/tsearch_data/{name}");
+
+    let err = try_dict(mcx, "spell_plain", "spell_badentry").err().expect("syntax error");
+    assert_eq!(err.message(), "syntax error");
+    assert_eq!(err.sqlstate(), ERRCODE_CONFIG_FILE_ERROR);
+    assert_eq!(
+        err.context(),
+        Some(
+            format!(
+                "line 3 of configuration file \"{}\": \"    [^Y] > 1S\n\"",
+                path("spell_badentry.affix")
+            )
+            .as_str()
+        )
+    );
+
+    let err = try_dict(mcx, "spell_plain", "spell_badflag").err().expect("bad FLAG value");
+    assert_eq!(
+        err.message(),
+        "Ispell dictionary supports only \"default\", \"long\", and \"num\" flag values"
+    );
+    assert_eq!(
+        err.context(),
+        Some(
+            format!(
+                "line 2 of configuration file \"{}\": \"FLAG bogus\n\"",
+                path("spell_badflag.affix")
+            )
+            .as_str()
+        )
+    );
+
+    let err = try_dict(mcx, "spell_plain", "spell_badenc").err().expect("encoding violation");
+    assert!(
+        err.message().starts_with("invalid byte sequence for encoding"),
+        "{:?}",
+        err.message()
+    );
+    assert_eq!(
+        err.context(),
+        Some(
+            format!(
+                "line 3 of configuration file \"{}\"",
+                path("spell_badenc.affix")
+            )
+            .as_str()
+        ),
+        "an error inside tsearch_readline has no line text (C dares not print it)"
+    );
+}

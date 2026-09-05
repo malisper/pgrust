@@ -1,7 +1,10 @@
 use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
 use ::ts_locale::dict_api::{def_get_boolean, DictInitData, LexizeResult};
-use ::ts_locale::{get_tsearch_config_filename, lowerstr, tsearch_readlines, TsLexeme, TSL_PREFIX};
-use ::types_error::{PgError, PgResult, ERRCODE_CONFIG_FILE_ERROR};
+use ::ts_locale::{
+    could_not_open_error, get_tsearch_config_filename, lowerstr, tsearch_readlines, TsLexeme,
+    TSL_PREFIX,
+};
+use ::types_error::PgResult;
 
 use crate::simple::invalid_param;
 
@@ -64,13 +67,10 @@ pub fn dsynonym_init(init: &DictInitData<'static>) -> PgResult<DictSyn> {
         return Err(invalid_param("missing Synonyms parameter".into()));
     };
     let path = get_tsearch_config_filename(mcx, filename, "syn")?;
-    let Some(lines) = tsearch_readlines(mcx, &path)? else {
-        return Err(PgError::error(format!(
-            "could not open synonym file \"{}\": No such file or directory",
-            String::from_utf8_lossy(&path)
-        ))
-        .with_sqlstate(ERRCODE_CONFIG_FILE_ERROR)
-        .into());
+    // dict_synonym.c:133 — `could not open synonym file "%s": %m`.
+    let lines = match tsearch_readlines(mcx, &path)? {
+        Ok(lines) => lines,
+        Err(errno) => return Err(could_not_open_error("synonym", &path, errno).into()),
     };
     let syn = load_synonyms(mcx, &lines, case_sensitive)?;
     Ok(DictSyn { syn, case_sensitive })

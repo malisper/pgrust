@@ -1,6 +1,7 @@
 use ::mcx::{Mcx, PgVec};
 use ::regex::{RegcompResult, REG_ADVANCED, REG_NOSUB};
 use ::types_core::catalog::DEFAULT_COLLATION_OID;
+use ::ts_locale::TsearchReadline;
 use ::types_error::{PgError, PgResult, ERRCODE_INVALID_REGULAR_EXPRESSION};
 
 use crate::{
@@ -23,6 +24,31 @@ fn getwchar(w: &[u8], l: i32, n: i32, t: i32) -> u8 {
 #[inline]
 fn getchar(a: &Affix, n: i32, t: i32) -> u8 {
     getwchar(&a.repl, a.repl.len() as i32, n, t)
+}
+
+// NIImportOOAffixes' second-pass locals, carried across lines.
+struct OoAffixState {
+    type_: Vec<u8>,
+    sflag: Vec<u8>,
+    mask: Vec<u8>,
+    find: Vec<u8>,
+    repl: Vec<u8>,
+    is_suffix: bool,
+    naffix: i32,
+    curaffix: i32,
+    flagflags: i32,
+}
+
+// NIImportAffixes' locals, carried across lines.
+struct AffixState {
+    flag: Vec<u8>,
+    mask: Vec<u8>,
+    find: Vec<u8>,
+    repl: Vec<u8>,
+    suffixes: bool,
+    prefixes: bool,
+    flagflags: i32,
+    oldformat: bool,
 }
 
 impl<'mcx> IspellDict<'mcx> {
@@ -258,42 +284,52 @@ impl<'mcx> IspellDict<'mcx> {
 
     pub fn ni_import_dictionary(&mut self, filename: &[u8]) -> PgResult<()> {
         let mcx = self.mcx;
-        let content = open_file(mcx, filename, "dictionary")?;
+        let mut rd = open_file(mcx, filename, "dictionary")?;
 
-        for raw_line in &content {
-            let mut line: Vec<u8> = raw_line.clone();
-
-            let flag: Vec<u8>;
-            if let Some(slash) = findchar(&line, b'/') {
-                let mut s = slash + 1;
-                let flag_start = s;
-                while s < line.len() {
-                    let c = &line[s..];
-                    if pg_mblen_clamped(c) == 1 && isprint(c[0]) && !isspace(c[0]) {
-                        s += 1;
-                    } else {
-                        break;
-                    }
-                }
-                flag = line[flag_start..s].to_vec();
-                line.truncate(slash);
-            } else {
-                flag = Vec::new();
-            }
-
-            let mut s = 0usize;
-            while s < line.len() {
-                if isspace(line[s]) {
-                    line.truncate(s);
-                    break;
-                }
-                s += pg_mblen_clamped(&line[s..]);
-            }
-
-            let pstr = str_tolower(mcx, &line)?;
-            self.ni_add_spell(&pstr, &flag)?;
+        loop {
+            let next = rd.readline();
+            let Some(raw_line) = rd.with_context(next)? else {
+                break;
+            };
+            let r = self.import_dictionary_line(mcx, &raw_line);
+            rd.with_context(r)?;
         }
         Ok(())
+    }
+
+    // NIImportDictionary's loop body for one line (spell.c:534-563).
+    fn import_dictionary_line(&mut self, mcx: Mcx<'mcx>, raw_line: &[u8]) -> PgResult<()> {
+        let mut line: Vec<u8> = raw_line.to_vec();
+
+        let flag: Vec<u8>;
+        if let Some(slash) = findchar(&line, b'/') {
+            let mut s = slash + 1;
+            let flag_start = s;
+            while s < line.len() {
+                let c = &line[s..];
+                if pg_mblen_clamped(c) == 1 && isprint(c[0]) && !isspace(c[0]) {
+                    s += 1;
+                } else {
+                    break;
+                }
+            }
+            flag = line[flag_start..s].to_vec();
+            line.truncate(slash);
+        } else {
+            flag = Vec::new();
+        }
+
+        let mut s = 0usize;
+        while s < line.len() {
+            if isspace(line[s]) {
+                line.truncate(s);
+                break;
+            }
+            s += pg_mblen_clamped(&line[s..]);
+        }
+
+        let pstr = str_tolower(mcx, &line)?;
+        self.ni_add_spell(&pstr, &flag)
     }
 
     fn get_nextfield(s: &[u8], pos: &mut usize, out: &mut Vec<u8>) -> bool {
@@ -617,49 +653,17 @@ impl<'mcx> IspellDict<'mcx> {
         self.use_flag_aliases = false;
         self.flag_mode = FlagMode::Char;
 
-        let content = open_file(mcx, filename, "affix")?;
-
-        for line in &content {
-            let line = line.as_slice();
-            if line.is_empty() || isspace(line[0]) || t_iseq(line, b'#') {
-                continue;
-            }
-            if let Some(rest) = strip_prefix(line, b"COMPOUNDFLAG") {
-                self.add_compound_affix_flag_value(rest, FF_COMPOUNDFLAG as u32)?;
-            } else if let Some(rest) = strip_prefix(line, b"COMPOUNDBEGIN") {
-                self.add_compound_affix_flag_value(rest, FF_COMPOUNDBEGIN as u32)?;
-            } else if let Some(rest) = strip_prefix(line, b"COMPOUNDLAST") {
-                self.add_compound_affix_flag_value(rest, FF_COMPOUNDLAST as u32)?;
-            } else if let Some(rest) = strip_prefix(line, b"COMPOUNDEND") {
-                self.add_compound_affix_flag_value(rest, FF_COMPOUNDLAST as u32)?;
-            } else if let Some(rest) = strip_prefix(line, b"COMPOUNDMIDDLE") {
-                self.add_compound_affix_flag_value(rest, FF_COMPOUNDMIDDLE as u32)?;
-            } else if let Some(rest) = strip_prefix(line, b"ONLYINCOMPOUND") {
-                self.add_compound_affix_flag_value(rest, FF_COMPOUNDONLY as u32)?;
-            } else if let Some(rest) = strip_prefix(line, b"COMPOUNDPERMITFLAG") {
-                self.add_compound_affix_flag_value(rest, FF_COMPOUNDPERMITFLAG as u32)?;
-            } else if let Some(rest) = strip_prefix(line, b"COMPOUNDFORBIDFLAG") {
-                self.add_compound_affix_flag_value(rest, FF_COMPOUNDFORBIDFLAG as u32)?;
-            } else if let Some(rest) = strip_prefix(line, b"FLAG") {
-                let mut p = 0usize;
-                while p < rest.len() && isspace(rest[p]) {
-                    p += pg_mblen_clamped(&rest[p..]);
-                }
-                let tail = &rest[p..];
-                if !tail.is_empty() {
-                    if has_prefix(tail, b"long") {
-                        self.flag_mode = FlagMode::Long;
-                    } else if has_prefix(tail, b"num") {
-                        self.flag_mode = FlagMode::Num;
-                    } else if !has_prefix(tail, b"default") {
-                        return Err(config_file_error(
-                            "Ispell dictionary supports only \"default\", \"long\", and \"num\" flag values".into(),
-                        )
-                        .into());
-                    }
-                }
-            }
+        // First pass (spell.c:1238): the FLAG mode and compound flags.
+        let mut rd = open_file(mcx, filename, "affix")?;
+        loop {
+            let next = rd.readline();
+            let Some(line) = rd.with_context(next)? else {
+                break;
+            };
+            let r = self.import_oo_affix_flags_line(&line);
+            rd.with_context(r)?;
         }
+        drop(rd);
 
         if self.compound_affix_flags.len() > 1 {
             let mut tmp: Vec<CompoundAffixFlag> =
@@ -673,127 +677,189 @@ impl<'mcx> IspellDict<'mcx> {
             self.compound_affix_flags = rebuilt;
         }
 
-        let mut type_ = Vec::new();
-        let mut sflag = Vec::new();
-        let mut mask = Vec::new();
-        let mut find = Vec::new();
-        let mut repl = Vec::new();
-        let mut is_suffix = false;
-        let mut naffix: i32 = 0;
-        let mut curaffix: i32 = 0;
-        let mut flagflags: i32 = 0;
-
-        for line in &content {
-            let line = line.as_slice();
-            if line.is_empty() || isspace(line[0]) || t_iseq(line, b'#') {
-                continue;
-            }
-
-            let fields_read = Self::parse_ooaffentry(
-                line, &mut type_, &mut sflag, &mut find, &mut repl, &mut mask,
-            )?;
-
-            let ptype = str_tolower(mcx, &type_)?;
-
-            if has_prefix(&ptype, b"af") {
-                if !self.use_flag_aliases {
-                    self.use_flag_aliases = true;
-                    naffix = atoi(&sflag);
-                    if naffix <= 0 {
-                        return Err(config_file_error(
-                            "invalid number of flag vector aliases".into(),
-                        )
-                        .into());
-                    }
-                    naffix += 1;
-                    // C: Conf->AffixData = palloc0(naffix * sizeof(char *)).
-                    // palloc0 enforces AllocSizeIsValid, so an oversized alias
-                    // count raises "invalid memory alloc request size" BEFORE
-                    // any allocation is attempted. Reproduce C's exact
-                    // condition (naffix * sizeof(char *), i.e. 8 bytes per
-                    // slot on LP64 — NOT this port's element size) so the
-                    // threshold and the error match C. Without this the port
-                    // handed a ~39 GB request straight to try_reserve, which C
-                    // refuses outright (found by spellfam_diff: an `AF` line
-                    // whose count atoi-truncates to 1215752191).
-                    ::mcx::check_alloc_size(
-                        (naffix as usize).saturating_mul(core::mem::size_of::<*const u8>()),
-                    )?;
-                    self.affix_data
-                        .try_reserve(naffix as usize)
-                        .map_err(|_| mcx.oom(naffix as usize))?;
-                    for _ in 0..naffix {
-                        self.affix_data.push(PgVec::new_in(mcx));
-                    }
-                    curaffix += 1;
-                } else if curaffix < naffix {
-                    let dup = new_bytes(mcx, &sflag)?;
-                    self.affix_data[curaffix as usize] = dup;
-                    curaffix += 1;
-                } else {
-                    return Err(config_file_error(format!(
-                        "number of aliases exceeds specified number {}",
-                        naffix - 1
-                    ))
-                    .into());
-                }
-                continue;
-            }
-            if fields_read < 4 || (!has_prefix(&ptype, b"sfx") && !has_prefix(&ptype, b"pfx")) {
-                continue;
-            }
-
-            let sflaglen = sflag.len();
-            if sflaglen == 0
-                || (sflaglen > 1 && self.flag_mode == FlagMode::Char)
-                || (sflaglen > 2 && self.flag_mode == FlagMode::Long)
-            {
-                continue;
-            }
-
-            if fields_read == 4 {
-                is_suffix = has_prefix(&ptype, b"sfx");
-                if t_iseq(&find, b'y') || t_iseq(&find, b'Y') {
-                    flagflags = FF_CROSSPRODUCT;
-                } else {
-                    flagflags = 0;
-                }
-            } else {
-                let mut aflg: i32 = 0;
-                if let Some(slash) = bstrchr(&repl, b'/') {
-                    let fs = self.get_affix_flag_set(&repl[slash + 1..], curaffix)?;
-                    aflg |= self.get_compound_affix_flag_value(&fs)?;
-                }
-                let mut prepl = str_tolower(mcx, &repl)?;
-                if let Some(slash) = bstrchr(&prepl, b'/') {
-                    prepl.truncate(slash);
-                }
-                let mut pfind = str_tolower(mcx, &find)?;
-                let pmask = str_tolower(mcx, &mask)?;
-                if t_iseq(&find, b'0') {
-                    pfind.clear();
-                }
-                if t_iseq(&repl, b'0') {
-                    prepl.clear();
-                }
-
-                self.ni_add_affix(
-                    &sflag,
-                    flagflags | aflg,
-                    &pmask,
-                    &pfind,
-                    &prepl,
-                    if is_suffix { FF_SUFFIX } else { FF_PREFIX },
-                )?;
-            }
+        // Second pass (spell.c:1305): the AF alias table and the entries.
+        let mut st = OoAffixState {
+            type_: Vec::new(),
+            sflag: Vec::new(),
+            mask: Vec::new(),
+            find: Vec::new(),
+            repl: Vec::new(),
+            is_suffix: false,
+            naffix: 0,
+            curaffix: 0,
+            flagflags: 0,
+        };
+        let mut rd = open_file(mcx, filename, "affix")?;
+        loop {
+            let next = rd.readline();
+            let Some(line) = rd.with_context(next)? else {
+                break;
+            };
+            let r = self.import_oo_affix_line(mcx, &mut st, &line);
+            rd.with_context(r)?;
         }
+        drop(rd);
         // upstream 4689ea9ceee3 (18.6): Fix memory-safety bugs in the ispell/hunspell dictionary loader.
-        if self.use_flag_aliases && curaffix != naffix {
+        if self.use_flag_aliases && st.curaffix != st.naffix {
             return Err(config_file_error(format!(
                 "number of aliases is less than specified number {}",
-                naffix - 1
+                st.naffix - 1
             ))
             .into());
+        }
+        Ok(())
+    }
+
+    // NIImportOOAffixes first-pass loop body for one line (spell.c:1243-1303).
+    fn import_oo_affix_flags_line(&mut self, line: &[u8]) -> PgResult<()> {
+        if line.is_empty() || isspace(line[0]) || t_iseq(line, b'#') {
+            return Ok(());
+        }
+        if let Some(rest) = strip_prefix(line, b"COMPOUNDFLAG") {
+            self.add_compound_affix_flag_value(rest, FF_COMPOUNDFLAG as u32)?;
+        } else if let Some(rest) = strip_prefix(line, b"COMPOUNDBEGIN") {
+            self.add_compound_affix_flag_value(rest, FF_COMPOUNDBEGIN as u32)?;
+        } else if let Some(rest) = strip_prefix(line, b"COMPOUNDLAST") {
+            self.add_compound_affix_flag_value(rest, FF_COMPOUNDLAST as u32)?;
+        } else if let Some(rest) = strip_prefix(line, b"COMPOUNDEND") {
+            self.add_compound_affix_flag_value(rest, FF_COMPOUNDLAST as u32)?;
+        } else if let Some(rest) = strip_prefix(line, b"COMPOUNDMIDDLE") {
+            self.add_compound_affix_flag_value(rest, FF_COMPOUNDMIDDLE as u32)?;
+        } else if let Some(rest) = strip_prefix(line, b"ONLYINCOMPOUND") {
+            self.add_compound_affix_flag_value(rest, FF_COMPOUNDONLY as u32)?;
+        } else if let Some(rest) = strip_prefix(line, b"COMPOUNDPERMITFLAG") {
+            self.add_compound_affix_flag_value(rest, FF_COMPOUNDPERMITFLAG as u32)?;
+        } else if let Some(rest) = strip_prefix(line, b"COMPOUNDFORBIDFLAG") {
+            self.add_compound_affix_flag_value(rest, FF_COMPOUNDFORBIDFLAG as u32)?;
+        } else if let Some(rest) = strip_prefix(line, b"FLAG") {
+            let mut p = 0usize;
+            while p < rest.len() && isspace(rest[p]) {
+                p += pg_mblen_clamped(&rest[p..]);
+            }
+            let tail = &rest[p..];
+            if !tail.is_empty() {
+                if has_prefix(tail, b"long") {
+                    self.flag_mode = FlagMode::Long;
+                } else if has_prefix(tail, b"num") {
+                    self.flag_mode = FlagMode::Num;
+                } else if !has_prefix(tail, b"default") {
+                    return Err(config_file_error(
+                        "Ispell dictionary supports only \"default\", \"long\", and \"num\" flag values".into(),
+                    )
+                    .into());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    // NIImportOOAffixes second-pass loop body for one line (spell.c:1310-1445).
+    fn import_oo_affix_line(
+        &mut self,
+        mcx: Mcx<'mcx>,
+        st: &mut OoAffixState,
+        line: &[u8],
+    ) -> PgResult<()> {
+        if line.is_empty() || isspace(line[0]) || t_iseq(line, b'#') {
+            return Ok(());
+        }
+
+        let fields_read = Self::parse_ooaffentry(
+            line, &mut st.type_, &mut st.sflag, &mut st.find, &mut st.repl, &mut st.mask,
+        )?;
+
+        let ptype = str_tolower(mcx, &st.type_)?;
+
+        if has_prefix(&ptype, b"af") {
+            if !self.use_flag_aliases {
+                self.use_flag_aliases = true;
+                st.naffix = atoi(&st.sflag);
+                if st.naffix <= 0 {
+                    return Err(config_file_error(
+                        "invalid number of flag vector aliases".into(),
+                    )
+                    .into());
+                }
+                st.naffix += 1;
+                // C: Conf->AffixData = palloc0(naffix * sizeof(char *)).
+                // palloc0 enforces AllocSizeIsValid, so an oversized alias
+                // count raises "invalid memory alloc request size" BEFORE
+                // any allocation is attempted. Reproduce C's exact
+                // condition (naffix * sizeof(char *), i.e. 8 bytes per
+                // slot on LP64 — NOT this port's element size) so the
+                // threshold and the error match C. Without this the port
+                // handed a ~39 GB request straight to try_reserve, which C
+                // refuses outright (found by spellfam_diff: an `AF` line
+                // whose count atoi-truncates to 1215752191).
+                ::mcx::check_alloc_size(
+                    (st.naffix as usize).saturating_mul(core::mem::size_of::<*const u8>()),
+                )?;
+                self.affix_data
+                    .try_reserve(st.naffix as usize)
+                    .map_err(|_| mcx.oom(st.naffix as usize))?;
+                for _ in 0..st.naffix {
+                    self.affix_data.push(PgVec::new_in(mcx));
+                }
+                st.curaffix += 1;
+            } else if st.curaffix < st.naffix {
+                let dup = new_bytes(mcx, &st.sflag)?;
+                self.affix_data[st.curaffix as usize] = dup;
+                st.curaffix += 1;
+            } else {
+                return Err(config_file_error(format!(
+                    "number of aliases exceeds specified number {}",
+                    st.naffix - 1
+                ))
+                .into());
+            }
+            return Ok(());
+        }
+        if fields_read < 4 || (!has_prefix(&ptype, b"sfx") && !has_prefix(&ptype, b"pfx")) {
+            return Ok(());
+        }
+
+        let sflaglen = st.sflag.len();
+        if sflaglen == 0
+            || (sflaglen > 1 && self.flag_mode == FlagMode::Char)
+            || (sflaglen > 2 && self.flag_mode == FlagMode::Long)
+        {
+            return Ok(());
+        }
+
+        if fields_read == 4 {
+            st.is_suffix = has_prefix(&ptype, b"sfx");
+            if t_iseq(&st.find, b'y') || t_iseq(&st.find, b'Y') {
+                st.flagflags = FF_CROSSPRODUCT;
+            } else {
+                st.flagflags = 0;
+            }
+        } else {
+            let mut aflg: i32 = 0;
+            if let Some(slash) = bstrchr(&st.repl, b'/') {
+                let fs = self.get_affix_flag_set(&st.repl[slash + 1..], st.curaffix)?;
+                aflg |= self.get_compound_affix_flag_value(&fs)?;
+            }
+            let mut prepl = str_tolower(mcx, &st.repl)?;
+            if let Some(slash) = bstrchr(&prepl, b'/') {
+                prepl.truncate(slash);
+            }
+            let mut pfind = str_tolower(mcx, &st.find)?;
+            let pmask = str_tolower(mcx, &st.mask)?;
+            if t_iseq(&st.find, b'0') {
+                pfind.clear();
+            }
+            if t_iseq(&st.repl, b'0') {
+                prepl.clear();
+            }
+
+            self.ni_add_affix(
+                &st.sflag,
+                st.flagflags | aflg,
+                &pmask,
+                &pfind,
+                &prepl,
+                if st.is_suffix { FF_SUFFIX } else { FF_PREFIX },
+            )?;
         }
         Ok(())
     }
@@ -804,123 +870,142 @@ impl<'mcx> IspellDict<'mcx> {
         self.use_flag_aliases = false;
         self.flag_mode = FlagMode::Char;
 
-        let content = open_file(mcx, filename, "affix")?;
-
-        let mut flag: Vec<u8> = Vec::new();
-        let mut mask = Vec::new();
-        let mut find = Vec::new();
-        let mut repl = Vec::new();
-        let mut suffixes = false;
-        let mut prefixes = false;
-        let mut flagflags: i32 = 0;
-        let mut oldformat = false;
-        let mut goto_newformat = false;
-
-        for raw_line in &content {
-            let line = raw_line.as_slice();
-            let pstr = str_tolower(mcx, line)?;
-
-            if pstr.first() == Some(&b'#') || pstr.first() == Some(&b'\n') {
-                continue;
-            }
-
-            if has_prefix(&pstr, b"compoundwords") {
-                if let Some(idx) = findchar2(line, b'l', b'L') {
-                    let mut s = idx;
-                    while s < line.len() && !isspace(line[s]) {
-                        s += pg_mblen_clamped(&line[s..]);
-                    }
-                    while s < line.len() && isspace(line[s]) {
-                        s += pg_mblen_clamped(&line[s..]);
-                    }
-                    if s < line.len() && pg_mblen_clamped(&line[s..]) == 1 {
-                        self.add_compound_affix_flag_value(&line[s..], FF_COMPOUNDFLAG as u32)?;
-                        self.usecompound = true;
-                    }
-                    oldformat = true;
-                    continue;
-                }
-            }
-            if has_prefix(&pstr, b"suffixes") {
-                suffixes = true;
-                prefixes = false;
-                oldformat = true;
-                continue;
-            }
-            if has_prefix(&pstr, b"prefixes") {
-                suffixes = false;
-                prefixes = true;
-                oldformat = true;
-                continue;
-            }
-            if has_prefix(&pstr, b"flag") {
-                let mut s = 4usize.min(line.len());
-                flagflags = 0;
-                while s < line.len() && isspace(line[s]) {
-                    s += pg_mblen_clamped(&line[s..]);
-                }
-                if line.get(s) == Some(&b'*') {
-                    flagflags |= FF_CROSSPRODUCT;
-                    s += 1;
-                } else if line.get(s) == Some(&b'~') {
-                    flagflags |= FF_COMPOUNDONLY;
-                    s += 1;
-                }
-                if line.get(s) == Some(&b'\\') {
-                    s += 1;
-                }
-                if s < line.len() && pg_mblen_clamped(&line[s..]) == 1 {
-                    flag.clear();
-                    flag.push(line[s]);
-                    s += 1;
-                    let c = line.get(s).copied().unwrap_or(0);
-                    if c == 0 || c == b'#' || c == b'\n' || c == b':' || isspace(c) {
-                        oldformat = true;
-                        continue;
-                    }
-                }
-                goto_newformat = true;
+        let mut st = AffixState {
+            flag: Vec::new(),
+            mask: Vec::new(),
+            find: Vec::new(),
+            repl: Vec::new(),
+            suffixes: false,
+            prefixes: false,
+            flagflags: 0,
+            oldformat: false,
+        };
+        let mut rd = open_file(mcx, filename, "affix")?;
+        let mut isnewformat = false;
+        loop {
+            let next = rd.readline();
+            let Some(line) = rd.with_context(next)? else {
+                break;
+            };
+            let r = self.import_affix_line(mcx, &mut st, &line);
+            if rd.with_context(r)? {
+                isnewformat = true;
                 break;
             }
-            if has_prefix(line, b"COMPOUNDFLAG")
-                || has_prefix(line, b"COMPOUNDMIN")
-                || has_prefix(line, b"PFX")
-                || has_prefix(line, b"SFX")
-            {
-                goto_newformat = true;
-                break;
-            }
-
-            if !suffixes && !prefixes {
-                continue;
-            }
-
-            if !Self::parse_affentry(&pstr, &mut mask, &mut find, &mut repl)? {
-                continue;
-            }
-
-            self.ni_add_affix(
-                &flag,
-                flagflags,
-                &mask,
-                &find,
-                &repl,
-                if suffixes { FF_SUFFIX } else { FF_PREFIX },
-            )?;
         }
-
-        if !goto_newformat {
+        if !isnewformat {
             return Ok(());
         }
 
-        if oldformat {
-            return Err(config_file_error(
+        // spell.c:1581 isnewformat: raised with the new-format line still
+        // current, so it carries that line's config-file context.
+        if st.oldformat {
+            return rd.with_context(Err(config_file_error(
                 "affix file contains both old-style and new-style commands".into(),
             )
-            .into());
+            .into()));
         }
+        drop(rd);
 
         self.ni_import_oo_affixes(filename)
+    }
+
+    // NIImportAffixes loop body for one line (spell.c:1476-1578); Ok(true)
+    // is C's `goto isnewformat`.
+    fn import_affix_line(
+        &mut self,
+        mcx: Mcx<'mcx>,
+        st: &mut AffixState,
+        line: &[u8],
+    ) -> PgResult<bool> {
+        let pstr = str_tolower(mcx, line)?;
+
+        if pstr.first() == Some(&b'#') || pstr.first() == Some(&b'\n') {
+            return Ok(false);
+        }
+
+        if has_prefix(&pstr, b"compoundwords") {
+            if let Some(idx) = findchar2(line, b'l', b'L') {
+                let mut s = idx;
+                while s < line.len() && !isspace(line[s]) {
+                    s += pg_mblen_clamped(&line[s..]);
+                }
+                while s < line.len() && isspace(line[s]) {
+                    s += pg_mblen_clamped(&line[s..]);
+                }
+                if s < line.len() && pg_mblen_clamped(&line[s..]) == 1 {
+                    self.add_compound_affix_flag_value(&line[s..], FF_COMPOUNDFLAG as u32)?;
+                    self.usecompound = true;
+                }
+                st.oldformat = true;
+                return Ok(false);
+            }
+        }
+        if has_prefix(&pstr, b"suffixes") {
+            st.suffixes = true;
+            st.prefixes = false;
+            st.oldformat = true;
+            return Ok(false);
+        }
+        if has_prefix(&pstr, b"prefixes") {
+            st.suffixes = false;
+            st.prefixes = true;
+            st.oldformat = true;
+            return Ok(false);
+        }
+        if has_prefix(&pstr, b"flag") {
+            let mut s = 4usize.min(line.len());
+            st.flagflags = 0;
+            while s < line.len() && isspace(line[s]) {
+                s += pg_mblen_clamped(&line[s..]);
+            }
+            if line.get(s) == Some(&b'*') {
+                st.flagflags |= FF_CROSSPRODUCT;
+                s += 1;
+            } else if line.get(s) == Some(&b'~') {
+                st.flagflags |= FF_COMPOUNDONLY;
+                s += 1;
+            }
+            if line.get(s) == Some(&b'\\') {
+                s += 1;
+            }
+            if s < line.len() && pg_mblen_clamped(&line[s..]) == 1 {
+                st.flag.clear();
+                st.flag.push(line[s]);
+                s += 1;
+                let c = line.get(s).copied().unwrap_or(0);
+                if c == 0 || c == b'#' || c == b'\n' || c == b':' || isspace(c) {
+                    st.oldformat = true;
+                    return Ok(false);
+                }
+            }
+            return Ok(true);
+        }
+        if has_prefix(line, b"COMPOUNDFLAG")
+            || has_prefix(line, b"COMPOUNDMIN")
+            || has_prefix(line, b"PFX")
+            || has_prefix(line, b"SFX")
+        {
+            return Ok(true);
+        }
+
+        if !st.suffixes && !st.prefixes {
+            return Ok(false);
+        }
+
+        if !Self::parse_affentry(&pstr, &mut st.mask, &mut st.find, &mut st.repl)? {
+            return Ok(false);
+        }
+
+        self.ni_add_affix(
+            &st.flag,
+            st.flagflags,
+            &st.mask,
+            &st.find,
+            &st.repl,
+            if st.suffixes { FF_SUFFIX } else { FF_PREFIX },
+        )?;
+        Ok(false)
     }
 
     fn merge_affix(&mut self, a1: i32, a2: i32) -> PgResult<i32> {
@@ -1374,18 +1459,19 @@ impl<'mcx> IspellDict<'mcx> {
     }
 }
 
+// tsearch_readline_begin at spell.c:525 (NIImportDictionary), :1238/:1305
+// (NIImportOOAffixes) and :1467 (NIImportAffixes): an open failure is
+// `could not open <kind> file "%s": %m` with fopen's errno; while the file
+// is open, every error carries the readline callback's per-line context
+// (`TsearchReadline::with_context`).
 pub(crate) fn open_file<'mcx>(
     mcx: Mcx<'mcx>,
     filename: &[u8],
     kind: &str,
-) -> PgResult<Vec<Vec<u8>>> {
-    match ::ts_locale::tsearch_readlines(mcx, filename)? {
-        Some(lines) => Ok(lines.iter().map(|l| l.as_slice().to_vec()).collect()),
-        None => Err(config_file_error(format!(
-            "could not open {kind} file \"{}\": No such file or directory",
-            bytes_lossy(filename)
-        ))
-        .into()),
+) -> PgResult<TsearchReadline<'mcx>> {
+    match ::ts_locale::tsearch_readline_begin(mcx, filename) {
+        Ok(rd) => Ok(rd),
+        Err(errno) => Err(::ts_locale::could_not_open_error(kind, filename, errno).into()),
     }
 }
 

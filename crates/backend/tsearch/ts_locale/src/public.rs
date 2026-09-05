@@ -153,32 +153,135 @@ pub fn get_tsearch_config_filename<'mcx>(
     Ok(out)
 }
 
+// ts_locale.c tsearch_readline_state. `tsearch_readline_begin` opens the
+// file (an open failure hands back fopen's errno for the caller's
+// `could not open ... file "%s": %m` report) and slurps it; `readline` hands
+// out one line at a time — lines keep their trailing newline (fgets parity)
+// and are recoded from UTF-8 to the database encoding per line, as C does —
+// while `context` reproduces tsearch_readline_callback's errcontext for the
+// line in flight, which `with_context` attaches to any error raised while
+// the file is open (C: the callback sits on error_context_stack from begin
+// to end).
+pub struct TsearchReadline<'mcx> {
+    mcx: Mcx<'mcx>,
+    filename: Vec<u8>,
+    raw: Vec<u8>,
+    pos: usize,
+    lineno: usize,
+    curline: Option<PgVec<'mcx, u8>>,
+}
+
+pub fn tsearch_readline_begin<'mcx>(
+    mcx: Mcx<'mcx>,
+    filename: &[u8],
+) -> Result<TsearchReadline<'mcx>, i32> {
+    let path = String::from_utf8_lossy(filename).into_owned();
+    let mut file = match std::fs::File::open(&path) {
+        Ok(f) => f,
+        Err(e) => return Err(e.raw_os_error().unwrap_or(0)),
+    };
+    let mut raw = Vec::new();
+    if std::io::Read::read_to_end(&mut file, &mut raw).is_err() {
+        // pg_get_line_buf: a read error (ferror) ends the file like EOF
+        // and the partial line being collected is dropped — a directory
+        // opened for reading, say, is an empty file.
+        let keep = raw.iter().rposition(|&b| b == b'\n').map_or(0, |p| p + 1);
+        raw.truncate(keep);
+    }
+    Ok(TsearchReadline {
+        mcx,
+        filename: filename.to_vec(),
+        raw,
+        pos: 0,
+        lineno: 0,
+        curline: None,
+    })
+}
+
+impl<'mcx> TsearchReadline<'mcx> {
+    // tsearch_readline: the next line, freshly copied (C pstrdup's it);
+    // Ok(None) at EOF. The recoded line stays in `curline` for `context`.
+    pub fn readline(&mut self) -> PgResult<Option<PgVec<'mcx, u8>>> {
+        self.lineno += 1;
+        self.curline = None;
+        if self.pos >= self.raw.len() {
+            return Ok(None);
+        }
+        let rest = &self.raw[self.pos..];
+        let end = rest.iter().position(|&b| b == b'\n').map_or(rest.len(), |p| p + 1);
+        let line = &rest[..end];
+        self.pos += end;
+        let recoded = match ::mbutils::pg_any_to_server(self.mcx, line, PG_UTF8)? {
+            Some(v) => v,
+            None => {
+                let mut v = vec_with_capacity_in(self.mcx, line.len())?;
+                v.extend_from_slice(line);
+                v
+            }
+        };
+        let mut copy = vec_with_capacity_in(self.mcx, recoded.len())?;
+        copy.extend_from_slice(&recoded);
+        self.curline = Some(recoded);
+        Ok(Some(copy))
+    }
+
+    // tsearch_readline_callback: no line text for an error raised inside
+    // readline itself (an encoding violation, whose bytes C dares not print).
+    pub fn context(&self) -> String {
+        let filename = String::from_utf8_lossy(&self.filename);
+        match &self.curline {
+            Some(line) => format!(
+                "line {} of configuration file \"{}\": \"{}\"",
+                self.lineno,
+                filename,
+                String::from_utf8_lossy(line)
+            ),
+            None => format!(
+                "line {} of configuration file \"{}\"",
+                self.lineno, filename
+            ),
+        }
+    }
+
+    pub fn with_context<T>(&self, r: PgResult<T>) -> PgResult<T> {
+        r.map_err(|e| Box::new((*e).add_context(self.context())))
+    }
+}
+
+// `could not open <kind> file "%s": %m` — spell.c:526/1239/1310/1468,
+// ts_utils.c:84, dict_synonym.c:133, dict_thesaurus.c:179: %m is
+// strerror(errno) from the failed fopen.
+pub fn could_not_open_error(kind: &str, filename: &[u8], errno: i32) -> PgError {
+    PgError::error(format!(
+        "could not open {kind} file \"{}\": {}",
+        String::from_utf8_lossy(filename),
+        ::elog::errno::strerror(errno)
+    ))
+    .with_sqlstate(ERRCODE_CONFIG_FILE_ERROR)
+    .with_saved_errno(errno)
+}
+
 // Whole-file tsearch_readline: lines keep trailing newlines (fgets parity);
-// Ok(None) = open failure, for the caller's "could not open ..." report.
+// Ok(Err(errno)) = open failure, for the caller's "could not open ...: %m"
+// report. Errors raised while reading carry the per-line config-file
+// context exactly as they would under C's readline callback.
 pub fn tsearch_readlines<'mcx>(
     mcx: Mcx<'mcx>,
     filename: &[u8],
-) -> PgResult<Option<PgVec<'mcx, PgVec<'mcx, u8>>>> {
-    let path = String::from_utf8_lossy(filename).into_owned();
-    let raw = match std::fs::read(&path) {
-        Ok(b) => b,
-        Err(_) => return Ok(None),
-    };
-    let recoded = match ::mbutils::pg_any_to_server(mcx, &raw, PG_UTF8)? {
-        Some(v) => v,
-        None => {
-            let mut v = vec_with_capacity_in(mcx, raw.len())?;
-            v.extend_from_slice(&raw);
-            v
-        }
+) -> PgResult<Result<PgVec<'mcx, PgVec<'mcx, u8>>, i32>> {
+    let mut rd = match tsearch_readline_begin(mcx, filename) {
+        Ok(rd) => rd,
+        Err(errno) => return Ok(Err(errno)),
     };
     let mut lines: PgVec<'mcx, PgVec<'mcx, u8>> = PgVec::new_in(mcx);
-    for chunk in recoded.split_inclusive(|&b| b == b'\n') {
-        let mut line = vec_with_capacity_in(mcx, chunk.len())?;
-        line.extend_from_slice(chunk);
-        lines.push(line);
+    loop {
+        let next = rd.readline();
+        match rd.with_context(next)? {
+            Some(line) => lines.push(line),
+            None => break,
+        }
     }
-    Ok(Some(lines))
+    Ok(Ok(lines))
 }
 
 pub fn readstoplist<'mcx>(
@@ -189,13 +292,10 @@ pub fn readstoplist<'mcx>(
     let mut stop: PgVec<'mcx, PgVec<'mcx, u8>> = PgVec::new_in(mcx);
     if let Some(fname) = fname.filter(|f| !f.is_empty()) {
         let filename = get_tsearch_config_filename(mcx, fname, "stop")?;
-        let Some(lines) = tsearch_readlines(mcx, &filename)? else {
-            return Err(PgError::error(format!(
-                "could not open stop-word file \"{}\": No such file or directory",
-                String::from_utf8_lossy(&filename)
-            ))
-            .with_sqlstate(ERRCODE_CONFIG_FILE_ERROR)
-            .into());
+        // ts_utils.c:84 — `could not open stop-word file "%s": %m`.
+        let lines = match tsearch_readlines(mcx, &filename)? {
+            Ok(lines) => lines,
+            Err(errno) => return Err(could_not_open_error("stop-word", &filename, errno).into()),
         };
         for line in &lines {
             let mut end = 0usize;

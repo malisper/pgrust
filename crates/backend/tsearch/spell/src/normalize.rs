@@ -123,27 +123,30 @@ impl<'mcx> IspellDict<'mcx> {
             }
         }
 
+        // spell.c:2159-2166: C's newword is a 2 * MAXNORMLEN stack buffer,
+        // so an affix whose result would not fit is rejected outright.
         let replen = affix.repl.len();
+        if replen > len {
+            return Ok((false, new_baselen));
+        }
+        let keeplen = len - replen;
+        let findlen = affix.find.len();
+        if keeplen + findlen >= 2 * MAXNORMLEN {
+            return Ok((false, new_baselen));
+        }
 
         out.clear();
         if affix.type_ == FF_SUFFIX {
-            if replen > len {
-                return Ok((false, new_baselen));
-            }
-            out.extend_from_slice(&word[..len]);
-            out.truncate(len - replen);
+            out.extend_from_slice(&word[..keeplen]);
             out.extend_from_slice(&affix.find);
             if baselen.is_some() {
-                new_baselen = Some((len - replen) as i32);
+                new_baselen = Some(keeplen as i32);
             }
         } else {
             if let Some(bl) = baselen {
-                if (bl as usize + affix.find.len()) <= replen {
+                if (bl as usize + findlen) <= replen {
                     return Ok((false, new_baselen));
                 }
-            }
-            if replen > len {
-                return Ok((false, new_baselen));
             }
             out.extend_from_slice(&affix.find);
             out.extend_from_slice(&word[replen..len]);
