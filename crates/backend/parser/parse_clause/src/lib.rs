@@ -1890,8 +1890,11 @@ pub fn transformOnConflictArbiter<'mcx>(
     if catalog::IsCatalogRelation(target) {
         return Err(on_conflict_on_catalog(pstate, onConflictClause.location));
     }
-    // C also rejects RelationIsUsedAsCatalogTable; the user_catalog_table
-    // reloption has no storage here, so the check has nothing to test.
+    // Same applies to a table used by logical decoding as a catalog table
+    // (RelationIsUsedAsCatalogTable: user_catalog_table reloption).
+    if target.is_used_as_catalog_table() {
+        return Err(on_conflict_on_user_catalog_table(pstate, target.name(), onConflictClause.location));
+    }
 
     let mut arbiter_elems = NodeList::nil();
     let mut arbiter_where = None;
@@ -2044,6 +2047,30 @@ fn on_conflict_on_catalog(pstate: &ParseState<'_, '_>, location: ParseLoc) -> Bo
         elog::ereport(ERROR)
             .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
             .errmsg("ON CONFLICT is not supported with system catalog tables")
+            .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
+            .into_error()
+            .with_error_location(ErrorLocation::new(
+                "parse_clause.c",
+                0,
+                "transformOnConflictArbiter",
+            )),
+    )
+}
+
+// parse_clause.c:3328-3335 (RelationIsUsedAsCatalogTable arm).
+#[cold]
+#[inline(never)]
+fn on_conflict_on_user_catalog_table(
+    pstate: &ParseState<'_, '_>,
+    relname: &str,
+    location: ParseLoc,
+) -> Box<PgError> {
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(format!(
+                "ON CONFLICT is not supported on table \"{relname}\" used as a catalog table"
+            ))
             .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
             .into_error()
             .with_error_location(ErrorLocation::new(
@@ -2294,8 +2321,11 @@ fn findTargetlistEntrySQL99<'mcx>(
             return Ok(tle_node);
         }
     }
-    // transformTargetEntry (parse_target.c) resjunk arm.
-    let resno = (tlist.len() + 1) as i16;
+    // transformTargetEntry (parse_target.c:106) resjunk arm: the resno comes
+    // from p_next_resno so free_parsestate's MaxTupleAttributeNumber check
+    // (parse_node.c:82-86) counts the junk entry.
+    let resno = pstate.p_next_resno as i16;
+    pstate.p_next_resno += 1;
     let tle = Node::mk_target_entry(mcx, expr, resno, None, true)?;
     tlist.lappend(mcx, tle)?;
     Ok(tle)
@@ -2393,7 +2423,9 @@ fn addTargetToSortList<'mcx>(
                 parse_oper::compatible_oper_opid(pstate, &sortby.useOp, restype, restype, false)
                     .map_err(attach_pos)?;
             let Some((eqop, reverse)) =
-                lsyscache::amop::get_equality_op_for_ordering_op(sortop)?.filter(|(eq, _)| *eq != InvalidOid)
+                lsyscache::amop::get_equality_op_for_ordering_op(sortop)
+                    .map_err(attach_pos)?
+                    .filter(|(eq, _)| *eq != InvalidOid)
             else {
                 let opname = sortby
                     .useOp
@@ -2401,7 +2433,8 @@ fn addTargetToSortList<'mcx>(
                     .as_string()
                     .expect("operator name list holds String nodes")
                     .sval;
-                return Err(Box::new(
+                // parse_clause.c:3460-3465, inside the errposition callback.
+                return Err(attach_pos(Box::new(
                     elog::ereport(ERROR)
                         .errcode(ERRCODE_WRONG_OBJECT_TYPE)
                         .errmsg(format!("operator {opname} is not a valid ordering operator"))
@@ -2411,9 +2444,9 @@ fn addTargetToSortList<'mcx>(
                                 .to_string(),
                         )
                         .into_error(),
-                ));
+                )));
             };
-            let hashable = lsyscache::op_hashjoinable(eqop, restype)?;
+            let hashable = lsyscache::op_hashjoinable(eqop, restype).map_err(attach_pos)?;
             (sortop, eqop, hashable, reverse)
         }
     };
@@ -3123,8 +3156,11 @@ pub fn transformWindowDefinitions<'mcx>(
         } else {
             wc.partitionClause = partitionClause;
         }
+        // C tests windef->orderClause (this clause's own ORDER BY) again
+        // after wc->orderClause may hold the referenced window's copy.
+        let has_own_order = !orderClause.is_nil();
         if let Some(refwc) = refwc {
-            if !orderClause.is_nil() && !refwc.orderClause.is_nil() {
+            if has_own_order && !refwc.orderClause.is_nil() {
                 return Err(window_error(
                     pstate,
                     format!(
@@ -3148,11 +3184,12 @@ pub fn transformWindowDefinitions<'mcx>(
         }
         if let Some(refwc) = refwc {
             if refwc.frameOptions != FRAMEOPTION_DEFAULTS {
-                // C picks between two messages (same text, hint differs);
-                // both frame-ful shapes are unreachable while the grammar's
-                // explicit-frame rules panic, so the non-hint arm suffices.
+                // parse_clause.c:2886-2901: the hint-less message is for a
+                // WINDOW clause or an OVER clause with its own ORDER BY or
+                // framing (`orderClause` is this clause's, not the copy);
+                // a bare OVER (foo) gets the HINT.
                 if windef.name.is_some()
-                    || !wc.orderClause.is_nil()
+                    || has_own_order
                     || windef.frameOptions != FRAMEOPTION_DEFAULTS
                 {
                     return Err(window_error(
