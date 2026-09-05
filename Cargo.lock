@@ -2968,6 +2968,7 @@ dependencies = [
  "pg_constraint",
  "pg_depend",
  "pg_inherits",
+ "pg_subscription",
  "pg_type",
  "pgstat",
  "predicate_seams",

@@ -1,6 +1,6 @@
 // heap.c deletion half, plain-table lane: partitions, foreign tables,
-// sequences, ON COMMIT actions and subscription states are loud or
-// unreachable (their DDL lanes do not exist).
+// sequences and ON COMMIT actions are loud or unreachable (their DDL lanes
+// do not exist); subscription states go through pg_subscription.
 use datum::Datum;
 use mcx::Mcx;
 use types_core::{
@@ -170,7 +170,12 @@ pub fn heap_drop_with_catalog<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<()> 
 
     rel.close(NoLock)?;
 
-    // RemoveSubscriptionRel: no subscription lane exists.
+    // heap.c:1914: remove any associated relation synchronization states
+    // (pg_subscription_rel rows for this relation); a sync still in progress
+    // refuses the drop with 22023 "could not drop relation mapping for
+    // subscription".
+    pg_subscription::RemoveSubscriptionRel(mcx, types_core::InvalidOid, relid)?;
+
     if tablecmds_seams::remove_on_commit_action::is_installed() {
         tablecmds_seams::remove_on_commit_action::call(relid);
     }

@@ -34,7 +34,10 @@ pub fn SPI_gettypeid(tupdesc: &TupleDescData<'_>, fnumber: i32) -> Oid {
     if fnumber > 0 {
         tupdesc.attrs[fnumber as usize - 1].atttypid
     } else {
-        catalog_heap::SystemAttributeDefinition(fnumber as i16).atttypid
+        // bad_fnumber above admits only the six system attnos, so the
+        // "invalid system attribute number" ERROR arm is unreachable here.
+        catalog_heap::SystemAttributeDefinition(fnumber as i16)
+            .map_or(InvalidOid, |att| att.atttypid)
     }
 }
 
@@ -73,7 +76,7 @@ pub fn SPI_getvalue<'mcx>(
     let typoid = if fnumber > 0 {
         tupdesc.attrs[fnumber as usize - 1].atttypid
     } else {
-        catalog_heap::SystemAttributeDefinition(fnumber as i16).atttypid
+        catalog_heap::SystemAttributeDefinition(fnumber as i16)?.atttypid
     };
     let (foutoid, _typisvarlena) = lsyscache::typ::getTypeOutputInfo(typoid)?;
     let mut finfo = fmgr_core::fmgr_info(foutoid)?;

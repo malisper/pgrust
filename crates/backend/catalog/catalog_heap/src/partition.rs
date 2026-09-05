@@ -4,7 +4,7 @@ use datum::Datum;
 use mcx::Mcx;
 use types_core::{AttrNumber, InvalidOid, Oid, DEFAULT_COLLATION_OID, RELATION_RELATION_ID};
 use types_error::PgResult;
-use types_rel::{Relation, RowExclusiveLock, RELKIND_PARTITIONED_TABLE};
+use types_rel::{Relation, RowExclusiveLock, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION};
 
 use pg_depend::ObjectAddress;
 
@@ -16,6 +16,7 @@ const INT2OID: Oid = 21;
 const OIDOID: Oid = 26;
 const Anum_pg_class_relpartbound: usize = 34;
 const Anum_pg_class_relispartition: usize = 28;
+const Anum_pg_class_relhassubclass: usize = 23;
 
 #[allow(clippy::too_many_arguments)]
 pub fn StorePartitionKey<'mcx>(
@@ -74,20 +75,25 @@ pub fn StorePartitionKey<'mcx>(
     catalog_indexing::CatalogTupleInsert(mcx, &pg_partitioned_table, &mut tuple)?;
     pg_partitioned_table.close(RowExclusiveLock)?;
 
+    // heap.c:3993-4012: opclass and collation per key column are collected
+    // into one ObjectAddresses and recorded through
+    // record_object_address_dependencies, which deduplicates them (two key
+    // columns sharing an opclass or collation yield ONE pg_depend row).
     let myself = ObjectAddress::set(RELATION_RELATION_ID, rel.rd_id);
+    let mut addrs: mcx::PgVec<'_, ObjectAddress> = mcx::vec_with_capacity_in(mcx, 2 * n)?;
     for i in 0..n {
-        let referenced = ObjectAddress::set(catalog::OperatorClassRelationId, partopclass[i]);
-        pg_depend::recordDependencyOn(mcx, &myself, &referenced, pg_depend::DependencyType::Normal)?;
+        addrs.push(ObjectAddress::set(catalog::OperatorClassRelationId, partopclass[i]));
+        // The default collation is pinned, so don't bother recording it.
         if partcollation[i] != InvalidOid && partcollation[i] != DEFAULT_COLLATION_OID {
-            let referenced = ObjectAddress::set(catalog::CollationRelationId, partcollation[i]);
-            pg_depend::recordDependencyOn(
-                mcx,
-                &myself,
-                &referenced,
-                pg_depend::DependencyType::Normal,
-            )?;
+            addrs.push(ObjectAddress::set(catalog::CollationRelationId, partcollation[i]));
         }
     }
+    pg_depend::record_object_address_dependencies(
+        mcx,
+        &myself,
+        &mut addrs,
+        pg_depend::DependencyType::Normal,
+    )?;
     for i in 0..n {
         if partattrs[i] == 0 {
             continue;
@@ -161,6 +167,12 @@ pub fn StorePartitionBound<'mcx>(
     replace[Anum_pg_class_relpartbound - 1] = true;
     values[Anum_pg_class_relispartition - 1] = Datum::from_bool(true);
     replace[Anum_pg_class_relispartition - 1] = true;
+    // heap.c:4135-4140: we already checked for no inheritance children, but
+    // reset relhassubclass in case it was left over.
+    if rel.rd_rel.relkind == RELKIND_RELATION && rel.rd_rel.relhassubclass {
+        values[Anum_pg_class_relhassubclass - 1] = Datum::from_bool(false);
+        replace[Anum_pg_class_relhassubclass - 1] = true;
+    }
 
     let mut newtup = heaptuple::heap_modify_tuple(mcx, tup, desc, &values, &isnull, &replace)?;
     let otid = tup.t_self;

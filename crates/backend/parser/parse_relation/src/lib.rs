@@ -261,7 +261,7 @@ pub fn scanNSItemForColumn<'mcx>(
             location,
         }
     } else {
-        let sysatt = catalog_heap::SystemAttributeDefinition(attnum);
+        let sysatt = catalog_heap::SystemAttributeDefinition(attnum)?;
         Var {
             varno: nsitem.p_rtindex,
             varattno: attnum,

@@ -31,7 +31,7 @@ macro_rules! next_oid_override {
             $cell.set(oid);
         }
 
-        fn $take() -> Option<Oid> {
+        pub fn $take() -> Option<Oid> {
             let oid = $cell.get();
             if OidIsValid(oid) {
                 $cell.set(InvalidOid);

@@ -124,12 +124,17 @@ pub static SysAtt: [FormData_pg_attribute; 6] = [
     sysatt("tableoid", OIDOID, 4, TableOidAttributeNumber, true, TYPALIGN_INT),
 ];
 
-pub fn SystemAttributeDefinition(attno: AttrNumber) -> &'static FormData_pg_attribute {
+pub fn SystemAttributeDefinition(
+    attno: AttrNumber,
+) -> types_error::PgResult<&'static FormData_pg_attribute> {
     let attno = attno as i32;
     if attno >= 0 || attno < -(SysAtt.len() as i32) {
-        panic!("invalid system attribute number {attno}");
+        // heap.c:239 elog(ERROR, ...): catchable, SQLSTATE XX000.
+        return Err(Box::new(types_error::PgError::error(format!(
+            "invalid system attribute number {attno}"
+        ))));
     }
-    &SysAtt[(-attno - 1) as usize]
+    Ok(&SysAtt[(-attno - 1) as usize])
 }
 
 pub fn SystemAttributeByName(attname: &str) -> Option<&'static FormData_pg_attribute> {
@@ -186,15 +191,31 @@ mod tests {
             assert_eq!(att.attbyval, byval);
             assert_eq!(att.atttypmod, -1);
             assert!(att.attnotnull && att.attislocal && !att.attisdropped);
-            assert!(core::ptr::eq(att, SystemAttributeDefinition(attnum as AttrNumber)));
+            assert!(core::ptr::eq(
+                att,
+                SystemAttributeDefinition(attnum as AttrNumber).unwrap()
+            ));
         }
         assert!(SystemAttributeByName("oid").is_none());
         assert!(SystemAttributeByName("nope").is_none());
     }
 
+    // heap.c:239 SystemAttributeDefinition: an out-of-range attno is
+    // `elog(ERROR, "invalid system attribute number %d", attno)` -- a
+    // catchable ERROR carrying elog's default SQLSTATE XX000, never a
+    // backend abort (audit-18.6 b047, fp-catalog-heap-p1).
     #[test]
-    #[should_panic(expected = "invalid system attribute number")]
-    fn out_of_range_attno_is_loud() {
-        SystemAttributeDefinition(-7);
+    fn out_of_range_attno_is_catchable_xx000() {
+        for attno in [-7i16, 0, 1, i16::MIN] {
+            let e = SystemAttributeDefinition(attno)
+                .err()
+                .unwrap_or_else(|| panic!("attno {attno} must be refused"));
+            assert_eq!(e.message(), format!("invalid system attribute number {attno}"));
+            assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+            assert_eq!(e.level(), types_error::ERROR);
+        }
+        for attno in -6i16..=-1 {
+            assert!(SystemAttributeDefinition(attno).is_ok());
+        }
     }
 }

@@ -764,6 +764,15 @@ pub fn heap_create_with_catalog<'mcx>(
             // draws a composite OID in this case (TypeCreate updates the
             // shell tuple in place).
             (array_oid, shell_row_type_oid)
+        } else if init_small::globals::IsBinaryUpgrade() {
+            // pg_type.c:472-481 (TypeCreate with reltypeid = InvalidOid,
+            // heap.c:1379): the rowtype consumes
+            // binary_upgrade_next_pg_type_oid, so pg_class.reltype and
+            // pg_type.oid equal pg_upgrade's preset.
+            let oid = pg_type::take_next_pg_type_oid().ok_or_else(|| {
+                binary_upgrade_err("pg_type OID value not set when in binary upgrade mode")
+            })?;
+            (array_oid, oid)
         } else {
             let pg_type_rel =
                 table::table_open(mcx, types_core::TYPE_RELATION_ID, AccessShareLock)?;
@@ -781,11 +790,13 @@ pub fn heap_create_with_catalog<'mcx>(
     };
 
     // C's use_user_acl=false callers are exactly the toast path, which the
-    // relkind switch already maps to NULL.
+    // relkind switch already maps to NULL. heap.c:1300-1308: RELATION, VIEW,
+    // MATVIEW, FOREIGN_TABLE and PARTITIONED_TABLE share OBJECT_TABLE.
     let relacl: Option<mcx::PgVec<'mcx, u8>> = match p.relkind {
         RELKIND_RELATION
         | RELKIND_VIEW
         | types_rel::RELKIND_MATVIEW
+        | types_rel::RELKIND_FOREIGN_TABLE
         | types_rel::RELKIND_PARTITIONED_TABLE => aclchk_seams::get_user_default_acl::call(
             mcx,
             b'r',
