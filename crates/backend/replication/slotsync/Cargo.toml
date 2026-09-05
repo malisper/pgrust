@@ -49,6 +49,7 @@ types_tuple = { path = "../../../_support/types/types_tuple" }
 types_guc = { path = "../../../_support/types/types_guc" }
 guc_file = { path = "../../utils/misc/guc_file" }
 datum = { path = "../../../_support/types/datum" }
+shmem_seams = { path = "../../storage/ipc/shmem_seams" }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }
@@ -69,7 +70,6 @@ condition_variable_seams = { path = "../../storage/lmgr/condition_variable_seams
 autovacuum_seams = { path = "../../postmaster/autovacuum_seams" }
 lock_seams = { path = "../../storage/lmgr/lock_seams" }
 timeout_seams = { path = "../../utils/misc/timeout_seams" }
-shmem_seams = { path = "../../storage/ipc/shmem_seams" }
 xact_seams = { path = "../../access/transam/xact_seams" }
 xlog_seams = { path = "../../access/transam/transam_xlog_seams", package = "transam_xlog_seams" }
 transam_seams = { path = "../../access/transam/transam_seams" }

@@ -182,6 +182,28 @@ fn slot_harness() {
         // requested point.
         logical_slot_advance_and_check_snap_state::set(|_| Ok((0, false)));
 
+        // Promotion / clock / conninfo inputs the tests below steer through
+        // statics (a seam installs exactly once per process).
+        if !xlogrecovery_seams::standby_mode::is_installed() {
+            xlogrecovery_seams::standby_mode::set(|| STANDBY_MODE.load(SeqCst));
+        }
+        if !timestamp_seams::get_current_timestamp::is_installed() {
+            timestamp_seams::get_current_timestamp::set(|| {
+                TIMESTAMP_SEEN_CONTROL_LOCK_SHARED.store(
+                    lwlock::LWLockHeldByMeInMode(
+                        lwlock::main_lock(types_storage::storage::REPLICATION_SLOT_CONTROL_LOCK),
+                        lwlock::LW_SHARED,
+                    ),
+                    SeqCst,
+                );
+                TEST_TIMESTAMP
+            });
+        }
+        guc_tables::vars::PrimaryConnInfo.install_if_absent(guc_tables::GucVarAccessors {
+            get: || PRIMARY_CONNINFO.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            set: |v| *PRIMARY_CONNINFO.lock().unwrap_or_else(|e| e.into_inner()) = v,
+        });
+
         walsender_config::init_seams();
         guc_tables::vars::max_replication_slots.write(2);
 
@@ -211,6 +233,26 @@ fn slot_harness() {
         std::fs::create_dir_all(dir.join("pg_logical/snapshots")).unwrap();
         std::env::set_current_dir(&dir).unwrap();
     });
+    become_backend();
+}
+
+static STANDBY_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static TIMESTAMP_SEEN_CONTROL_LOCK_SHARED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+const TEST_TIMESTAMP: i64 = 123_456_789;
+static PRIMARY_CONNINFO: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+// MyProc is per thread (as C's MyProc is per process) and every #[test] runs
+// on its own thread, so the PGPROC bound inside the Once above belongs to
+// whichever test won it; bind one to the calling thread instead, once per
+// thread (the slot crate's become_backend idiom). ReplicationSlotControlLock
+// waits queue MyProc.
+fn become_backend() {
+    if lmgr_proc::MyProc().is_none() {
+        init_small::globals::SetMyProcPid(4242);
+        lmgr_proc::InitProcess(types_core::BackendType::Backend).expect("InitProcess");
+        procarray::ProcArrayAdd(lmgr_proc::MyProc().unwrap()).expect("ProcArrayAdd self");
+    }
 }
 
 fn synced_slot_entry(name: &str, persistency: slot::ReplicationSlotPersistency) -> &'static ReplicationSlot {
@@ -314,4 +356,151 @@ static LOGS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 fn capture_log(error: &types_error::PgError, output_to_server: &mut bool) {
     LOGS.lock().unwrap_or_else(|e| e.into_inner()).push(error.message().to_string());
     *output_to_server = false;
+}
+
+// ---------------------------------------------------------------------------
+// audit-18.6 b174 witnesses.
+// ---------------------------------------------------------------------------
+
+// slotsync.c:1771 SlotSyncWorkerCanRestart: the elapsed time is compared as
+// (unsigned int)(curtime - last_start_time). A clock stepped backwards (the
+// last start stamp lies in the future) wraps to a huge value and the
+// postmaster may restart the worker at once; it never waits for the wall
+// clock to catch up with the stale stamp.
+#[test]
+fn worker_can_restart_after_clock_step_backwards() {
+    let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    reset_ctx();
+
+    // SAFETY: time(2) with a NULL argument.
+    let now = unsafe { libc::time(std::ptr::null_mut()) } as i64;
+    with_ctx(|ctx| ctx.last_start_time = now + 60);
+    assert!(
+        SlotSyncWorkerCanRestart(),
+        "a last_start_time in the future (clock stepped back) must not block the restart"
+    );
+    // The restart stamped now: a second attempt inside the interval is refused.
+    assert!(!SlotSyncWorkerCanRestart());
+    // A stale stamp beyond the interval allows it again.
+    with_ctx(|ctx| ctx.last_start_time = now - SLOTSYNC_RESTART_INTERVAL_SEC);
+    assert!(SlotSyncWorkerCanRestart());
+    reset_ctx();
+}
+
+// slotsync.c:377 get_local_synced_slots walks ReplicationSlotCtl under
+// ReplicationSlotControlLock (LW_SHARED): with another backend holding the
+// lock exclusively (slot creation / drop), the walk waits for the release
+// instead of reading in_use / synced mid-update.
+#[test]
+fn get_local_synced_slots_waits_for_control_lock() {
+    use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+    use std::sync::Arc;
+
+    let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    slot_harness();
+    synced_slot_entry("locked_sync", slot::RS_PERSISTENT);
+
+    let held = Arc::new(AtomicBool::new(false));
+    let walk_started = Arc::new(AtomicBool::new(false));
+    let releasing = Arc::new(AtomicBool::new(false));
+    let holder = {
+        let (held, walk_started, releasing) =
+            (held.clone(), walk_started.clone(), releasing.clone());
+        std::thread::spawn(move || {
+            become_backend();
+            slot::with_control_lock_exclusive(|| {
+                held.store(true, SeqCst);
+                while !walk_started.load(SeqCst) {
+                    std::thread::yield_now();
+                }
+                // Give a lockless walk every chance to finish first.
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                releasing.store(true, SeqCst);
+                Ok(())
+            })
+            .unwrap();
+        })
+    };
+    while !held.load(SeqCst) {
+        std::thread::yield_now();
+    }
+    walk_started.store(true, SeqCst);
+
+    let slots = get_local_synced_slots().unwrap();
+
+    assert!(
+        releasing.load(SeqCst),
+        "get_local_synced_slots walked the slot array while another backend held \
+         ReplicationSlotControlLock exclusively"
+    );
+    holder.join().unwrap();
+    assert_eq!(slots.len(), 1);
+    assert!(!lwlock::LWLockHeldByMe(lwlock::main_lock(
+        types_storage::storage::REPLICATION_SLOT_CONTROL_LOCK
+    )));
+    // SAFETY: as in synced_slot_entry.
+    unsafe { ReplicationSlotCtl()[0].in_use.set(false) };
+}
+
+// slotsync.c:1659 update_synced_slots_inactive_since stamps the synced slots
+// under ReplicationSlotControlLock (LW_SHARED); GetCurrentTimestamp is called
+// inside the walk, so it observes the lock.
+#[test]
+fn update_synced_slots_inactive_since_holds_control_lock_shared() {
+    use std::sync::atomic::Ordering::SeqCst;
+
+    let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    slot_harness();
+    reset_ctx();
+    let s = synced_slot_entry("promoted_sync", slot::RS_PERSISTENT);
+    // SAFETY: as in synced_slot_entry.
+    unsafe { s.inactive_since.set(0) };
+    TIMESTAMP_SEEN_CONTROL_LOCK_SHARED.store(false, SeqCst);
+
+    STANDBY_MODE.store(true, SeqCst);
+    let r = update_synced_slots_inactive_since();
+    STANDBY_MODE.store(false, SeqCst);
+    r.unwrap();
+
+    // SAFETY: as above.
+    assert_eq!(unsafe { s.inactive_since.get() }, TEST_TIMESTAMP, "the synced slot was not stamped");
+    assert!(
+        TIMESTAMP_SEEN_CONTROL_LOCK_SHARED.load(SeqCst),
+        "update_synced_slots_inactive_since stamped the slots without ReplicationSlotControlLock"
+    );
+    assert!(!lwlock::LWLockHeldByMe(lwlock::main_lock(
+        types_storage::storage::REPLICATION_SLOT_CONTROL_LOCK
+    )));
+    // SAFETY: as above.
+    unsafe { s.in_use.set(false) };
+}
+
+// libpqwalreceiver.c:525 libpqrcv_get_option_from_conninfo: PQconninfoParse
+// keeps the LAST value of a repeated keyword, and an empty value counts as
+// absent. The port's parse_conninfo carries the same last-wins rule, and the
+// same value scan (fe-connect.c:6355: blanks after '=' are skipped, the
+// value runs to the next blank, so `dbname= dbname=postgres` is ONE option
+// whose value is `dbname=postgres` for libpq and for the port alike).
+#[test]
+fn dbname_from_conninfo_takes_the_last_occurrence() {
+    let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    slot_harness();
+
+    guc_tables::vars::PrimaryConnInfo.write(Some("dbname= dbname=postgres".to_string()));
+    assert_eq!(CheckAndGetDbnameFromConninfo().unwrap(), "dbname=postgres");
+
+    guc_tables::vars::PrimaryConnInfo.write(Some("dbname='' dbname=postgres".to_string()));
+    assert_eq!(CheckAndGetDbnameFromConninfo().unwrap(), "postgres");
+
+    guc_tables::vars::PrimaryConnInfo.write(Some("dbname=first host=x dbname=second".to_string()));
+    assert_eq!(CheckAndGetDbnameFromConninfo().unwrap(), "second");
+
+    guc_tables::vars::PrimaryConnInfo.write(Some("dbname=postgres dbname=".to_string()));
+    let err = CheckAndGetDbnameFromConninfo().unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_INVALID_PARAMETER_VALUE);
+    assert_eq!(
+        err.message(),
+        "replication slot synchronization requires \"dbname\" to be specified in \"primary_conninfo\""
+    );
+    guc_tables::vars::PrimaryConnInfo.write(Some(String::new()));
 }

@@ -351,17 +351,20 @@ fn transaction_id_follows(a: TransactionId, b: TransactionId) -> bool {
 // get_local_synced_slots + local_sync_slot_required + drop_local_obsolete_slots.
 // ---------------------------------------------------------------------------
 
-fn get_local_synced_slots() -> Vec<&'static ReplicationSlot> {
-    let mut local_slots = Vec::new();
-    // C holds ReplicationSlotControlLock shared; the slot array is a static
-    // and per-slot state is read under each slot's mutex below.
-    for s in ReplicationSlotCtl() {
-        if unsafe { s.in_use.get() } && unsafe { s.data.get() }.synced != 0 {
-            debug_assert!(SlotIsLogical(s));
-            local_slots.push(s);
+// slotsync.c:377: the in_use / synced walk runs under
+// ReplicationSlotControlLock LW_SHARED (slot creation and drop flip in_use
+// under it exclusively).
+fn get_local_synced_slots() -> PgResult<Vec<&'static ReplicationSlot>> {
+    slot::with_control_lock_shared(|| {
+        let mut local_slots = Vec::new();
+        for s in ReplicationSlotCtl() {
+            if unsafe { s.in_use.get() } && unsafe { s.data.get() }.synced != 0 {
+                debug_assert!(SlotIsLogical(s));
+                local_slots.push(s);
+            }
         }
-    }
-    local_slots
+        local_slots
+    })
 }
 
 fn local_sync_slot_required(local_slot: &ReplicationSlot, remote_slots: &[RemoteSlot]) -> bool {
@@ -384,7 +387,7 @@ fn local_sync_slot_required(local_slot: &ReplicationSlot, remote_slots: &[Remote
 }
 
 fn drop_local_obsolete_slots(remote_slot_list: &[RemoteSlot]) -> PgResult<()> {
-    for local_slot in get_local_synced_slots() {
+    for local_slot in get_local_synced_slots()? {
         if local_sync_slot_required(local_slot, remote_slot_list) {
             continue;
         }
@@ -1270,23 +1273,29 @@ fn repl_slot_sync_worker_inner() -> PgResult<()> {
 // update_synced_slots_inactive_since + ShutDownSlotSync (startup process).
 // ---------------------------------------------------------------------------
 
-fn update_synced_slots_inactive_since() {
+fn update_synced_slots_inactive_since() -> PgResult<()> {
     // Only relevant while promoting a standby.
     if !xlogrecovery_seams::standby_mode::call() {
-        return;
+        return Ok(());
     }
 
-    let mut now: i64 = 0;
-    for s in ReplicationSlotCtl() {
-        if unsafe { s.in_use.get() } && unsafe { s.data.get() }.synced != 0 {
-            debug_assert!(SlotIsLogical(s));
-            debug_assert!(unsafe { s.active_pid.get() } == 0);
-            if now == 0 {
-                now = timestamp_seams::get_current_timestamp::call();
+    // The slot sync worker or the SQL function mustn't be running by now.
+    debug_assert!(with_ctx(|ctx| ctx.pid == InvalidPid && !ctx.syncing));
+
+    // slotsync.c:1659: the walk runs under ReplicationSlotControlLock LW_SHARED.
+    slot::with_control_lock_shared(|| {
+        let mut now: i64 = 0;
+        for s in ReplicationSlotCtl() {
+            if unsafe { s.in_use.get() } && unsafe { s.data.get() }.synced != 0 {
+                debug_assert!(SlotIsLogical(s));
+                debug_assert!(unsafe { s.active_pid.get() } == 0);
+                if now == 0 {
+                    now = timestamp_seams::get_current_timestamp::call();
+                }
+                slot::ReplicationSlotSetInactiveSince(s, now, true);
             }
-            slot::ReplicationSlotSetInactiveSince(s, now, true);
         }
-    }
+    })
 }
 
 /// ShutDownSlotSync (slotsync.c:1586): set stopSignaled, ask the syncing
@@ -1301,8 +1310,7 @@ pub fn ShutDownSlotSync() -> PgResult<()> {
     });
 
     if !running {
-        update_synced_slots_inactive_since();
-        return Ok(());
+        return update_synced_slots_inactive_since();
     }
 
     // A plain SIGUSR1 only set the latch; a process blocked waiting on the
@@ -1336,17 +1344,21 @@ pub fn ShutDownSlotSync() -> PgResult<()> {
         }
     }
 
-    update_synced_slots_inactive_since();
-    Ok(())
+    update_synced_slots_inactive_since()
 }
 
-/// SlotSyncWorkerCanRestart: at most one start per
-/// SLOTSYNC_RESTART_INTERVAL_SEC.
+/// SlotSyncWorkerCanRestart (slotsync.c:1771): at most one start per
+/// SLOTSYNC_RESTART_INTERVAL_SEC. The elapsed time is compared as C's
+/// `(unsigned int) (curtime - last_start_time)`: a stamp in the future (the
+/// clock stepped back) wraps to a huge value and the restart is allowed at
+/// once rather than deferred until the wall clock catches up.
 pub fn SlotSyncWorkerCanRestart() -> bool {
     // SAFETY: time(2) with a NULL argument has no failure modes we care for.
     let curtime = unsafe { libc::time(std::ptr::null_mut()) } as i64;
     with_ctx(|ctx| {
-        if curtime.wrapping_sub(ctx.last_start_time) < SLOTSYNC_RESTART_INTERVAL_SEC {
+        if (curtime.wrapping_sub(ctx.last_start_time) as u32)
+            < (SLOTSYNC_RESTART_INTERVAL_SEC as u32)
+        {
             return false;
         }
         ctx.last_start_time = curtime;
@@ -1357,6 +1369,48 @@ pub fn SlotSyncWorkerCanRestart() -> bool {
 /// Is the current process syncing replication slots (worker or SQL function)?
 pub fn IsSyncingReplicationSlots() -> bool {
     slot::syncing_replication_slots()
+}
+
+// sizeof(SlotSyncCtxStruct) on LP64 (slotsync.c:93): pid_t pid (4),
+// bool stopSignaled (1), bool syncing (1), pad (2), time_t last_start_time
+// (8), slock_t mutex (1), pad (7) = 24. The live state is the process-global
+// SLOT_SYNC_CTX Mutex above (thread model); the block sized here is what C
+// carves out of the segment.
+const C_SIZE_OF_SLOT_SYNC_CTX_STRUCT: usize = 24;
+
+/// SlotSyncShmemSize (slotsync.c:1795): sizeof(SlotSyncCtxStruct).
+pub fn SlotSyncShmemSize() -> usize {
+    C_SIZE_OF_SLOT_SYNC_CTX_STRUCT
+}
+
+/// SlotSyncShmemInit (slotsync.c:1804): ShmemInitStruct("Slot Sync Data",
+/// ...) registers the block in the ShmemIndex, so pg_shmem_allocations
+/// lists it; a fresh segment (!found) boots the state (pid = InvalidPid,
+/// everything else zero), a re-entry leaves the live state alone.
+pub fn SlotSyncShmemInit() -> PgResult<()> {
+    let (_raw, found) =
+        shmem_seams::shmem_init_struct::call("Slot Sync Data", SlotSyncShmemSize())?;
+    if !found {
+        with_ctx(|ctx| {
+            *ctx = SlotSyncCtx {
+                pid: InvalidPid,
+                ..Default::default()
+            }
+        });
+    }
+    Ok(())
+}
+
+/// Crash-cycle reset to the boot image (C re-creates the segment and
+/// SlotSyncShmemInit takes the !found arm); postmaster thread, children dead
+/// (notes/crash-restart-design.md).
+pub fn SlotSyncShmemResetAfterCrash() {
+    with_ctx(|ctx| {
+        *ctx = SlotSyncCtx {
+            pid: InvalidPid,
+            ..Default::default()
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------

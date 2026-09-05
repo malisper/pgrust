@@ -2403,3 +2403,12 @@ pub fn with_control_lock_exclusive<R>(f: impl FnOnce() -> PgResult<R>) -> PgResu
     LWLockRelease(control_lock())?;
     r
 }
+
+/// Run `f` holding ReplicationSlotControlLock shared (slotsync.c
+/// get_local_synced_slots / update_synced_slots_inactive_since walks).
+pub fn with_control_lock_shared<R>(f: impl FnOnce() -> R) -> PgResult<R> {
+    lw(control_lock(), LW_SHARED)?;
+    let r = f();
+    LWLockRelease(control_lock())?;
+    Ok(r)
+}

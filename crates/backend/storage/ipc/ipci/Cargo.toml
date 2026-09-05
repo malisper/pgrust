@@ -42,6 +42,7 @@ aio_core = { path = "../../aio/aio_core" }
 checkpointer = { path = "../../../postmaster/checkpointer" }
 autovacuum = { path = "../../../postmaster/autovacuum" }
 slot = { path = "../../../replication/slot" }
+slotsync = { path = "../../../replication/slotsync" }
 origin = { path = "../../../replication/origin" }
 pgarch = { path = "../../../postmaster/pgarch" }
 walsummarizer = { path = "../../../postmaster/walsummarizer" }

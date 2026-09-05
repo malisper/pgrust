@@ -8341,6 +8341,7 @@ dependencies = [
  "shmem_seams",
  "sinval",
  "slot",
+ "slotsync",
  "subtrans",
  "syncscan",
  "sysv_shmem",
