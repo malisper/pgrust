@@ -397,9 +397,9 @@ fn xfn_str(buf: &[u8]) -> &str {
 
 const PG_STAT_GET_WAL_RECEIVER_COLS: usize = 16;
 
-// walreceiver.c:pg_stat_get_wal_receiver. C PG_RETURN_NULL()s when no
-// receiver is active; here that is an all-null record — the view filters
-// `WHERE s.pid IS NOT NULL`, so both yield zero rows.
+// walreceiver.c:pg_stat_get_wal_receiver. No active receiver (pid == 0 ||
+// !ready_to_display, walreceiver.c:1515-1516) is PG_RETURN_NULL(): SQL NULL,
+// not an all-null record.
 pub fn fc_pg_stat_get_wal_receiver(
     flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
@@ -414,7 +414,7 @@ pub fn fc_pg_stat_get_wal_receiver(
         None
     };
     let Some(snap) = snap else {
-        return record_datum(flinfo, fcinfo, &values, &nulls);
+        return Ok(fcinfo.return_null());
     };
 
     values[0] = Datum::from_i32(snap.pid);

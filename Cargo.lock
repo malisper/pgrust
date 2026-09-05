@@ -5109,6 +5109,7 @@ dependencies = [
  "adt_numeric",
  "datum",
  "dbcommands_seams",
+ "elog",
  "init_small",
  "mcx",
  "miscinit_seams",

@@ -212,6 +212,16 @@ fn check_for_interrupts() -> PgResult<()> {
     Ok(())
 }
 
+// ereport(ERROR, (errcode_for_file_access(), errmsg("...: %m"))) over a
+// std::io::Error: C's strerror text, SQLSTATE from the errno.
+fn file_access_error(e: &std::io::Error, message: String) -> Box<::types_error::PgError> {
+    let mut builder = elog::ereport(::types_error::ERROR);
+    if let Some(errno) = e.raw_os_error() {
+        builder = builder.with_saved_errno(errno);
+    }
+    Box::new(builder.errcode_for_file_access().errmsg(message).into_error())
+}
+
 // db_dir_size (dbsize.c): physical size of directory contents, 0 if absent.
 // Paths are DataDir-relative (the backend chdir's to PGDATA, per C).
 fn db_dir_size(path: &str) -> PgResult<i64> {
@@ -226,14 +236,17 @@ fn db_dir_size(path: &str) -> PgResult<i64> {
             Ok(e) => e,
             Err(_) => continue,
         };
-        match entry.metadata() {
+        // dbsize.c:99-105: stat() (follows symlinks); ENOENT is skipped,
+        // any other failure is an error with %m + errcode_for_file_access().
+        let filename = format!("{path}/{}", entry.file_name().to_string_lossy());
+        match std::fs::metadata(&filename) {
             Ok(m) => dirsize += m.len() as i64,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => {
-                return Err(Box::new(::types_error::PgError::error(format!(
-                    "could not stat file \"{}\": {e}",
-                    entry.path().display()
-                ))))
+                return Err(file_access_error(
+                    &e,
+                    format!("could not stat file \"{filename}\": %m"),
+                ))
             }
         }
     }
@@ -264,9 +277,11 @@ fn calculate_database_size(db_oid: Oid) -> PgResult<i64> {
     let tblspc = match std::fs::read_dir("pg_tblspc") {
         Ok(entries) => entries,
         Err(e) => {
-            return Err(Box::new(::types_error::PgError::error(format!(
-                "could not open directory \"pg_tblspc\": {e}"
-            ))))
+            // ReadDirExtended (fd.c:2997) over a failed AllocateDir.
+            return Err(file_access_error(
+                &e,
+                "could not open directory \"pg_tblspc\": %m".to_string(),
+            ))
         }
     };
     for entry in tblspc.flatten() {

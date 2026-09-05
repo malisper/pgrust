@@ -231,10 +231,11 @@ fn fc_acldefault_sql(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
         b'S' => AclObjectType::ForeignServer,
         b'T' => AclObjectType::Type,
         other => {
-            return Err(Box::new(PgError::error(format!(
-                "unrecognized object type abbreviation: {}",
-                other as char
-            ))))
+            // acl.c:969 elog(ERROR, "...: %c", objtypec): the one byte goes
+            // out verbatim (NUL truncates), never re-encoded as UTF-8.
+            let mut msg = b"unrecognized object type abbreviation: ".to_vec();
+            msg.push(other);
+            return Err(Box::new(PgError::error_raw_message(msg)));
         }
     };
     let mcx = fcinfo.result_mcx();
@@ -293,9 +294,13 @@ pub fn convert_table_name_str(mcx: mcx::Mcx<'_>, rawname: &str) -> PgResult<Oid>
         [s, r] => (None, Some(s.as_str()), r.as_str()),
         [c, s, r] => (Some(c.as_str()), Some(s.as_str()), r.as_str()),
         _ => {
+            // namespace.c:3575-3579: NameListToString(names) — the parsed
+            // parts (downcased, unquoted, trimmed) joined by '.', not the raw
+            // argument.
             return Err(Box::new(
                 PgError::error(format!(
-                    "improper relation name (too many dotted names): {rawname}"
+                    "improper relation name (too many dotted names): {}",
+                    names.join(".")
                 ))
                 .with_sqlstate(types_error::ERRCODE_SYNTAX_ERROR),
             ))

@@ -597,6 +597,15 @@ fn saved_errno() -> i32 {
     std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
 }
 
+const WAITS_PER_SECOND: i32 = 10;
+
+// xlogfuncs.c:717 `WAITS_PER_SECOND * wait_seconds`: the loop bound of the
+// promotion wait is int arithmetic under -fwrapv — a huge wait_seconds wraps
+// negative (zero iterations, WARNING, false), never an overflow trap.
+pub(crate) fn promote_wait_iterations(wait_seconds: i32) -> i32 {
+    WAITS_PER_SECOND.wrapping_mul(wait_seconds)
+}
+
 pub fn fc_pg_promote(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     use types_storage::waiteventset::{WL_LATCH_SET, WL_POSTMASTER_DEATH, WL_TIMEOUT};
 
@@ -637,8 +646,7 @@ pub fn fc_pg_promote(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
         return Ok(Datum::from_bool(true));
     }
 
-    const WAITS_PER_SECOND: i32 = 10;
-    for _ in 0..(WAITS_PER_SECOND * wait_seconds) {
+    for _ in 0..promote_wait_iterations(wait_seconds) {
         latch_seams::reset_latch_my_latch::call();
         if !transam_xlog::RecoveryInProgress() {
             return Ok(Datum::from_bool(true));

@@ -916,7 +916,9 @@ pub fn array_send<'mcx>(
 ) -> PgResult<::datum::Bytea<'mcx>> {
     let (ndim, dims, lb) = read_dims_lbounds(array);
     let nitems = array_get_n_items(ndim, &dims)?;
-    let hasnull = crate::construct::array_contains_nulls(array);
+    // arrayfuncs.c:1607 `AARR_HASNULL(v) ? 1 : 0`: a null bitmap is present
+    // (dataoffset != 0), whether or not any element is currently null.
+    let hasnull = crate::foundation::arr_hasnull(array);
     let (elems, elem_nulls) =
         deconstruct_array(mcx, array, meta.typlen, meta.typbyval, meta.typalign, true)?;
 

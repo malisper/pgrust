@@ -143,7 +143,9 @@ pub fn xpath_internal(
     namespaces: Option<&[u8]>,
     collect: Option<&mut Vec<Vec<u8>>>,
 ) -> PgResult<i32> {
-    let mut ns_pairs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    // Namespace NULLs are only rejected at registration time (xml.c:4438),
+    // after the empty-expression check and the document parse.
+    let mut ns_pairs: Vec<(Option<Vec<u8>>, Option<Vec<u8>>)> = Vec::new();
     if let Some(arr) = namespaces {
         let ndim = arrayfuncs::foundation::arr_ndim(arr);
         if ndim != 0 {
@@ -165,12 +167,9 @@ pub fn xpath_internal(
             )?;
             let mut i = 0;
             while i < elems.len() {
-                if nulls[i] || nulls[i + 1] {
-                    return Err(PgError::error("neither namespace name nor URI may be null")
-                        .with_sqlstate(ERRCODE_NULL_VALUE_NOT_ALLOWED)
-                        .into());
-                }
-                ns_pairs.push((text_datum_payload(elems[i]), text_datum_payload(elems[i + 1])));
+                let name = (!nulls[i]).then(|| text_datum_payload(elems[i]));
+                let uri = (!nulls[i + 1]).then(|| text_datum_payload(elems[i + 1]));
+                ns_pairs.push((name, uri));
                 i += 2;
             }
         }
@@ -252,6 +251,12 @@ pub fn xpath_internal(
         (*(xpathctx as *mut libxml::xmlXPathContextHdr)).node = doc as *mut xmlNode;
 
         for (name, uri) in &ns_pairs {
+            let (Some(name), Some(uri)) = (name, uri) else {
+                cleanup(core::ptr::null_mut(), core::ptr::null_mut(), xpathctx);
+                return Err(PgError::error("neither namespace name nor URI may be null")
+                    .with_sqlstate(ERRCODE_NULL_VALUE_NOT_ALLOWED)
+                    .into());
+            };
             let n = cstr(name);
             let u = cstr(uri);
             if (x.xmlXPathRegisterNs)(xpathctx, n.as_ptr(), u.as_ptr()) != 0 {

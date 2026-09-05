@@ -298,3 +298,13 @@ fn current_logfiles_reads_like_fgets_maxpgpath() {
     );
     assert_eq!(current_logfiles_entry(b"stderr log/a.log\n", Some(b"csvlog")).unwrap(), None);
 }
+
+// xlogfuncs.c:717: `WAITS_PER_SECOND * wait_seconds` is int arithmetic under
+// -fwrapv, so a huge wait_seconds wraps negative and the wait loop runs zero
+// times (WARNING + false), never a crash.
+#[test]
+fn pg_promote_wait_loop_bound_wraps_like_c() {
+    assert_eq!(crate::builtins::promote_wait_iterations(300), 3000);
+    assert_eq!(crate::builtins::promote_wait_iterations(300_000_000), 3_000_000_000u32 as i32);
+    assert!(crate::builtins::promote_wait_iterations(i32::MAX) < 0);
+}
