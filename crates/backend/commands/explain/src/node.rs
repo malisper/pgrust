@@ -1492,16 +1492,45 @@ pub fn ExplainNode<'mcx>(
                         }
                     };
                     show_upper_qual(&qual, "Conflict Filter", node, ancestors, es)?;
-                    // C also prints "Rows Removed by Conflict Filter" under
-                    // ANALYZE; the executor doesn't count nfiltered there yet.
-                    filtered_count_gap(&qual, es);
-                }
-                if es.analyze {
-                    node_gap(
-                        "show_modifytable_info",
-                        "ON CONFLICT Tuples Inserted/Conflicting Tuples need ntuples2 \
-                         accounting (nodeModifyTable instrument)",
+                    show_instrumentation_count(
+                        "Rows Removed by Conflict Filter",
+                        1,
+                        &instrument,
+                        es,
                     );
+                }
+                // EXPLAIN ANALYZE display of actual outcome for each tuple
+                // proposed (explain.c:4695-4709): source rows = the outer
+                // plan's ntuples (fetched with C's forced InstrEndLoop),
+                // conflicts = the node's ntuples2 (InstrCountTuples2).
+                if es.analyze && !es.qd.is_null() {
+                    if let Some(i) = &instrument {
+                        let total = plan
+                            .lefttree
+                            .and_then(|l| {
+                                execmain_seams::query_desc_instrument::call(
+                                    es.qd,
+                                    plan_of(l).plan_node_id,
+                                )
+                            })
+                            .map_or(0.0, |o| o.ntuples);
+                        let other_path = i.ntuples2;
+                        let insert_path = total - other_path;
+                        crate::format::ExplainPropertyFloat(
+                            "Tuples Inserted",
+                            None,
+                            insert_path,
+                            0,
+                            es,
+                        );
+                        crate::format::ExplainPropertyFloat(
+                            "Conflicting Tuples",
+                            None,
+                            other_path,
+                            0,
+                            es,
+                        );
+                    }
                 }
             }
             // MERGE Tuples: line (show_modifytable_info, explain.c:4681-4726);

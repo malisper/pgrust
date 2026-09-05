@@ -303,6 +303,10 @@ pub struct ModifyTableState<'mcx> {
     // outerPlanState(mtstate)->instrument: the EPQ MATCHED -> NOT MATCHED
     // list switch counts the source row twice (InstrUpdateTupleCount).
     outer_instr_idx: Option<u32>,
+    // mtstate->ps.instrument: the node's own Instrumentation row (set by the
+    // executor's instrument_node under EXPLAIN ANALYZE) — the
+    // InstrCountTuples2 / InstrCountFiltered1 target of the ON CONFLICT arms.
+    pub instr_idx: Option<u32>,
     // mt_merge_inserted/updated/deleted (EXPLAIN ANALYZE's Tuples: line;
     // skipped is derived by explain as source-total minus these).
     pub mt_merge_inserted: f64,
@@ -886,6 +890,7 @@ pub fn exec_init_modify_table<'mcx>(
         merge_active_cmd: None,
         mt_merge_pending_not_matched: None,
         outer_instr_idx: None,
+        instr_idx: None,
         mt_merge_inserted: 0.0,
         mt_merge_updated: 0.0,
         mt_merge_deleted: 0.0,
@@ -2206,7 +2211,7 @@ fn ensure_all_updated_cols<'mcx>(
 // ExecGetAllUpdatedCols for a ROUTED leaf (execUtils.c ExecGetUpdatedCols'
 // ri_RootResultRelInfo arm): the target's updated columns renumbered through
 // the root->leaf attrmap. C recomputes per call; so does this. Same
-// simplification as on_conflict_update_lock_mode: leaf-local generated-column
+// simplification as exec_update_lock_mode: leaf-local generated-column
 // extras aren't recomputed — the root's, mapped, stand in (partitions share
 // the parent's generation expressions).
 fn leaf_all_updated_cols<'mcx>(
@@ -2270,15 +2275,76 @@ fn execute_attr_map_cols<'mcx>(
 ) -> PgResult<types_nodes::Bitmapset<'mcx>> {
     const FLIHAN: i32 = types_tuple::htup::FirstLowInvalidHeapAttributeNumber;
     let mut out_cols = types_nodes::Bitmapset::empty();
-    for (out_idx, &in_attno) in attr_map.iter().enumerate() {
-        if in_attno == 0 {
+    // tupconvert.c:266-292: system columns map to themselves, the whole-row
+    // entry (0) is skipped, user columns go through the map.
+    for out_attnum in FLIHAN..=attr_map.len() as i32 {
+        let in_attnum = if out_attnum < 0 {
+            out_attnum
+        } else if out_attnum == 0 {
             continue;
-        }
-        if in_cols.is_member(in_attno as i32 - FLIHAN) {
-            out_cols.add_member(mcx, (out_idx + 1) as i32 - FLIHAN)?;
+        } else {
+            let mapped = attr_map[out_attnum as usize - 1] as i32;
+            if mapped == 0 {
+                continue;
+            }
+            mapped
+        };
+        if in_cols.is_member(in_attnum - FLIHAN) {
+            out_cols.add_member(mcx, out_attnum - FLIHAN)?;
         }
     }
     Ok(out_cols)
+}
+
+#[cfg(test)]
+mod attr_map_cols_tests {
+    use super::*;
+
+    const FLIHAN: i32 = types_tuple::htup::FirstLowInvalidHeapAttributeNumber;
+
+    fn set<'mcx>(mcx: mcx::Mcx<'mcx>, attnos: &[i32]) -> types_nodes::Bitmapset<'mcx> {
+        let mut b = types_nodes::Bitmapset::empty();
+        for &a in attnos {
+            b.add_member(mcx, a - FLIHAN).unwrap();
+        }
+        b
+    }
+
+    fn members(b: &types_nodes::Bitmapset<'_>) -> Vec<i32> {
+        let mut out = Vec::new();
+        let mut x = -1;
+        loop {
+            x = b.next_member(x);
+            if x < 0 {
+                break;
+            }
+            out.push(x + FLIHAN);
+        }
+        out
+    }
+
+    // tupconvert.c:266-292: system columns (attno < 0) pass through unmapped,
+    // the whole-row entry (0) never does, user columns go through attrMap.
+    #[test]
+    fn system_columns_pass_through_the_attr_map() {
+        let cx = ::mcx::MemoryContext::new("attr map cols test");
+        let mcx = cx.mcx();
+        // child attno 1 <- parent 2, child 2 dropped, child 3 <- parent 1
+        let map: [i16; 3] = [2, 0, 1];
+        let in_cols = set(mcx, &[-6, -1, 0, 1, 2]);
+        let out = execute_attr_map_cols(mcx, &map, &in_cols).unwrap();
+        assert_eq!(members(&out), vec![-6, -1, 1, 3]);
+    }
+
+    #[test]
+    fn user_columns_only_map_like_before() {
+        let cx = ::mcx::MemoryContext::new("attr map cols test");
+        let mcx = cx.mcx();
+        let map: [i16; 2] = [2, 1];
+        let in_cols = set(mcx, &[2]);
+        let out = execute_attr_map_cols(mcx, &map, &in_cols).unwrap();
+        assert_eq!(members(&out), vec![1]);
+    }
 }
 
 // fireBSTriggers/fireASTriggers (nodeModifyTable.c); INSERT ... ON CONFLICT
@@ -3051,6 +3117,9 @@ fn exec_merge_matched_scan<'mcx>(
                 // MATCHED BY SOURCE action relocks in place and restarts
                 // (cannot switch back to MATCHED) — C 3358-3375.
                 let was_matched = !by_source;
+                // nodeModifyTable.c:3393: ExecUpdateLockMode — NoKeyExclusive
+                // unless a key column is being updated.
+                let lockmode = exec_update_lock_mode(mt, estate, None)?;
                 let inputslot =
                     if was_matched { eval_plan_qual_slot(mt, estate) } else { old_id };
                 let lock_result = {
@@ -3067,7 +3136,7 @@ fn exec_merge_matched_scan<'mcx>(
                         snapshot,
                         &mut es_tupleTable[inputslot.0 as usize],
                         output_cid,
-                        LockTupleMode::LockTupleExclusive,
+                        lockmode,
                         LockWaitPolicy::LockWaitBlock,
                         TUPLE_LOCK_FLAG_FIND_LAST_VERSION,
                         &mut tmfd,
@@ -7205,10 +7274,36 @@ fn oc_conflict_dispatch<'mcx>(
     ) -> PgResult<Option<ExecSlotId>>,
 ) -> PgResult<OnConflictOutcome> {
     if mt.plan.onConflictAction == types_nodes::OnConflictAction::ONCONFLICT_UPDATE as u32 {
-        return exec_on_conflict_update(mt, estate, conflict_tid, work_slot, leaf_idx, epq_eval);
+        let outcome =
+            exec_on_conflict_update(mt, estate, conflict_tid, work_slot, leaf_idx, epq_eval)?;
+        // nodeModifyTable.c:1156: InstrCountTuples2 once the DO UPDATE arm is
+        // done with the tuple (a retry goes back to vlock uncounted).
+        if matches!(outcome, OnConflictOutcome::Done(_)) {
+            instr_count_tuples2(mt, estate);
+        }
+        return Ok(outcome);
     }
     exec_check_tid_visible(mt, estate, &conflict_tid, leaf_idx)?;
+    // nodeModifyTable.c:1178.
+    instr_count_tuples2(mt, estate);
     Ok(OnConflictOutcome::Done(None))
+}
+
+// InstrCountTuples2(&mtstate->ps, 1): EXPLAIN ANALYZE's "Conflicting Tuples".
+#[inline]
+fn instr_count_tuples2<'mcx>(mt: &ModifyTableState<'mcx>, estate: &mut EStateData<'mcx>) {
+    if let Some(idx) = mt.instr_idx {
+        estate.es_instrumentation[idx as usize].ntuples2 += 1.0;
+    }
+}
+
+// InstrCountFiltered1(&mtstate->ps, 1): EXPLAIN ANALYZE's "Rows Removed by
+// Conflict Filter" (nodeModifyTable.c:2886).
+#[inline]
+fn instr_count_filtered1<'mcx>(mt: &ModifyTableState<'mcx>, estate: &mut EStateData<'mcx>) {
+    if let Some(idx) = mt.instr_idx {
+        estate.es_instrumentation[idx as usize].nfiltered1 += 1.0;
+    }
 }
 
 /// OC seam 4/4 — the speculative token insert/confirm/abort ceremony (C
@@ -7284,7 +7379,7 @@ fn oc_speculative_insert<'mcx>(
 // column (ExecGetAllUpdatedCols vs INDEX_ATTR_BITMAP_KEY). Routed leaves map
 // the root's updated columns through the root->leaf attrmap; leaf-local
 // generated-column extras aren't recomputed (the root's, mapped, stand in).
-fn on_conflict_update_lock_mode<'mcx>(
+fn exec_update_lock_mode<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &EStateData<'mcx>,
     leaf: Option<usize>,
@@ -7373,7 +7468,7 @@ fn exec_on_conflict_update<'mcx>(
     };
 
     let mut tmfd = TM_FailureData::default();
-    let lockmode = on_conflict_update_lock_mode(mt, estate, leaf)?;
+    let lockmode = exec_update_lock_mode(mt, estate, leaf)?;
     let lock_result = {
         let EStateData { es_relations, es_tupleTable, es_snapshot, .. } = &mut *estate;
         let snapshot: &tableam_vocab::Snapshot<'mcx> = &*es_snapshot;
@@ -7507,6 +7602,7 @@ fn exec_on_conflict_update<'mcx>(
         };
         if !pass {
             clear_slot(estate, existing_id);
+            instr_count_filtered1(mt, estate);
             return Ok(OnConflictOutcome::Done(None));
         }
         {
@@ -7546,6 +7642,7 @@ fn exec_on_conflict_update<'mcx>(
             executils::exec_project_with_subplans(set_proj, estate, ec, setvals_id)?;
         }
     } else {
+        let instr_idx = mt.instr_idx;
         let ModifyTableState { rels, cur, on_conflict, leaf_wco, leaf_on_conflict, .. } =
             &mut *mt;
         let r = &mut rels[*cur];
@@ -7554,7 +7651,7 @@ fn exec_on_conflict_update<'mcx>(
             Some(idx) => leaf_on_conflict[idx].as_mut(),
             None => None,
         };
-        let EStateData { es_tupleTable, .. } = &mut *estate;
+        let EStateData { es_tupleTable, es_instrumentation, .. } = &mut *estate;
         let (e, x, v) = (
             existing_id.0 as usize,
             excluded_id.0 as usize,
@@ -7578,6 +7675,10 @@ fn exec_on_conflict_update<'mcx>(
         };
         if !execexpr::exec_qual(where_clause, &mut slots)? {
             exectuples::exec_clear_tuple(slots.scan.take().expect("scan slot"), mcx);
+            // nodeModifyTable.c:2886 InstrCountFiltered1.
+            if let Some(idx) = instr_idx {
+                es_instrumentation[idx as usize].nfiltered1 += 1.0;
+            }
             return Ok(OnConflictOutcome::Done(None));
         }
 
@@ -8163,7 +8264,10 @@ pub fn exec_compute_stored_generated<'mcx>(
     if generated_exprs.is_none() {
         let mut compiled: mcx::PgVec<'mcx, GeneratedExpr<'mcx>> = mcx::PgVec::new_in(mcx);
         for i in 0..rel.rd_att.natts as usize {
-            if rel.rd_att.attr(i).attgenerated == 0 {
+            // nodeModifyTable.c:496: only STORED generated columns are
+            // prepared (and computed); a VIRTUAL column's expression never
+            // runs here and its slot value stays NULL.
+            if rel.rd_att.attr(i).attgenerated != STORED_GEN {
                 continue;
             }
             let adbin = constr
@@ -8549,6 +8653,7 @@ fn exec_not_null_constraints<'mcx>(
 }
 
 const VIRTUAL_GEN: i8 = types_core::catalog::ATTRIBUTE_GENERATED_VIRTUAL as i8;
+const STORED_GEN: i8 = types_core::catalog::ATTRIBUTE_GENERATED_STORED as i8;
 
 // check_modified_virtual_generated (trigger.c:6735): a trigger-returned tuple
 // must not carry a non-null value in a virtual generated column; offending
@@ -8864,7 +8969,7 @@ mcx::forget_safe_struct!(
         node_ecxt, oc_old_slot, cross_part_root_slot, last_insert_leaf,
         last_insert_remapped, oc_returning_leaf,
         mt_merge_inserted, mt_merge_updated, mt_merge_deleted, merge_active_cmd,
-        mt_merge_pending_not_matched, outer_instr_idx, epq_origslot,
+        mt_merge_pending_not_matched, outer_instr_idx, instr_idx, epq_origslot,
         rels, root, leaf_checks, leaf_virtual_nn, leaf_generated, leaf_slots,
         leaf_arbiters, leaf_existing, leaf_child_to_root, leaf_wco,
         leaf_ri_checked;

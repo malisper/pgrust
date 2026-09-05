@@ -1745,6 +1745,12 @@ fn instrument_node<'mcx>(
     if let PlanStateNode::WindowAgg(w) = &mut inner {
         w.state.instr_idx = Some(idx as u32);
     }
+    // InstrCountTuples2 / InstrCountFiltered1 target for the ON CONFLICT arms
+    // (nodeModifyTable.c:1156/1178/2886; explain's "Conflicting Tuples" and
+    // "Rows Removed by Conflict Filter").
+    if let PlanStateNode::ModifyTable(mps) = &mut inner {
+        mps.mt.instr_idx = Some(idx as u32);
+    }
     Ok(PlanStateNode::Instrumented(::mcx::alloc_in(
         estate.es_query_cxt,
         InstrumentedNode {
