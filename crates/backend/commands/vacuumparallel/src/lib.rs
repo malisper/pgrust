@@ -29,6 +29,7 @@ use ::commands_vacuum::{
     VacuumSharedCost,
 };
 use ::mcx::{Mcx, MemoryContext};
+use ::types_core::instrument::{BufferUsage, WalUsage};
 use ::types_core::{BlockNumber, ForkNumber, Oid, BLCKSZ};
 use ::types_error::{PgError, PgResult, ERROR};
 use ::types_nbtree::IndexBulkDeleteResult;
@@ -42,18 +43,20 @@ use init_small::globals as g;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum PvIndVacStatus {
-    Initial,
-    NeedBulkdelete,
-    NeedCleanup,
-    /// pgrust-only intermediate (placed last so the C-mirrored discriminants
-    /// INITIAL=0/NEED_BULKDELETE=1/NEED_CLEANUP=2/COMPLETED=3 are preserved):
-    /// a process that atomically claimed the index for dispatch marks it
-    /// IN_PROGRESS under the slot lock so a racing worker/leader that reaches
-    /// the same index observes the claim and skips it. C guarantees single
-    /// dispatch via the atomic `idx` counter instead; the threaded port makes
-    /// the per-index status the claim.
-    InProgress,
-    Completed,
+    // C PVIndVacStatus values (vacuumparallel.c:56-62): the "unexpected
+    // parallel vacuum index status %d" message prints them.
+    Initial = 0,
+    NeedBulkdelete = 1,
+    NeedCleanup = 2,
+    Completed = 3,
+    /// pgrust-only intermediate (beyond the C range, so the C-mirrored
+    /// discriminants above are preserved): a process that atomically claimed
+    /// the index for dispatch marks it IN_PROGRESS under the slot lock so a
+    /// racing worker/leader that reaches the same index observes the claim
+    /// and skips it. C guarantees single dispatch via the atomic `idx`
+    /// counter instead; the threaded port makes the per-index status the
+    /// claim.
+    InProgress = 4,
 }
 
 struct PvIndStats {
@@ -73,6 +76,16 @@ struct PvShared {
     cost: Arc<VacuumSharedCost>,
     indstats: Vec<Mutex<PvIndStats>>,
     dead_items: Mutex<Arc<[ItemPointerData]>>,
+    /// C PVShared.queryid + PARALLEL_VACUUM_KEY_QUERY_TEXT: the leader's
+    /// query id and debug_query_string, adopted by every worker
+    /// (vacuumparallel.c:1013-1020).
+    queryid: i64,
+    query_text: Option<String>,
+    /// C PARALLEL_VACUUM_KEY_BUFFER_USAGE / _WAL_USAGE: one slot per
+    /// possible worker; a launched worker writes its InstrEndParallelQuery
+    /// delta at ParallelWorkerNumber, the leader folds the first
+    /// nworkers_launched slots after the join (vacuumparallel.c:740).
+    usage: Mutex<Vec<(BufferUsage, WalUsage)>>,
     /// M4.1 pool channel: the per-pass payload slot (the pool driver reads
     /// it; cleared by the leader at every pass end) plus the leader-flushed
     /// progress relays — a pool serve has no launched-worker progress
@@ -187,6 +200,15 @@ pub fn parallel_vacuum_init(
         }),
         indstats,
         dead_items: Mutex::new(Arc::from(Vec::new())),
+        // C vacuumparallel.c:334-340: shared->queryid = pgstat_get_my_query_id()
+        // and the query text copied into the DSM (only when
+        // debug_query_string is set).
+        queryid: backend_status::pgstat_get_my_query_id(),
+        query_text: elog::with_debug_query_string(|q| q.map(str::to_owned)),
+        usage: Mutex::new(vec![
+            (BufferUsage::default(), WalUsage::default());
+            parallel_workers.max(0) as usize
+        ]),
         pool_pass: Mutex::new(None),
         pool_indexes_processed: AtomicI64::new(0),
         pool_delay_ns: AtomicI64::new(0),
@@ -481,6 +503,13 @@ struct PvPoolPass {
     refused: AtomicUsize,
     error: Mutex<Option<Box<PgError>>>,
     failed: AtomicBool,
+    /// This pass's index phase (every parallel-safe index of a pass shares
+    /// it): the worker error-context line names it.
+    phase: PvIndexPhase,
+    /// Pool stand-in for the launched gang's per-worker usage slots: every
+    /// pool serve folds its InstrEndParallelQuery delta here; the leader
+    /// accumulates it once after the pass join.
+    usage: Mutex<(BufferUsage, WalUsage)>,
 }
 
 /// One chunks-arm index unit: the resumable sweep state between tickets.
@@ -719,6 +748,21 @@ impl PvPoolPass {
     /// the rest run whole inside this single ticket (recorded residual:
     /// their sweeps stay single-unit, the M4.1 coarse shape).
     fn unit_quantum(&self, cx: &PvWorkerCx<'_, '_>, unit: &PvUnit) -> PgResult<bool> {
+        // The worker error-context frame (parallel_vacuum_error_callback)
+        // spans every quantum of the unit's sweep.
+        let errcb = pv_index_error_context(cx.heaprel, self.phase, cx.indrels[unit.ord].name())?;
+        match self.unit_quantum_body(cx, unit) {
+            Ok(more) => Ok(more),
+            Err(mut e) => {
+                if let Some(cb) = &errcb {
+                    cb.attach(&mut e);
+                }
+                Err(e)
+            }
+        }
+    }
+
+    fn unit_quantum_body(&self, cx: &PvWorkerCx<'_, '_>, unit: &PvUnit) -> PgResult<bool> {
         let shared = &self.shared;
         let i = unit.ord;
         let indrel = &cx.indrels[i];
@@ -767,15 +811,7 @@ impl PvPoolPass {
                 }
                 // Catchable error, matching C's process_one_index default:
                 // elog(ERROR, "unexpected parallel vacuum index status ...").
-                _ => {
-                    return Err(Box::new(PgError::new(
-                        ERROR,
-                        format!(
-                            "unexpected parallel vacuum index status {status:?} for index \"{}\"",
-                            indrel.name()
-                        ),
-                    )))
-                }
+                _ => return Err(Box::new(pv_unexpected_status_error(status, indrel.name()))),
             }
         }
         // Step the in-flight sweep by one quantum (the begin ticket falls
@@ -1028,6 +1064,14 @@ fn pool_index_drive(shared: &Arc<PvShared>, pass: &Arc<PvPoolPass>) -> PgResult<
         shared.ring_nbuffers * (BLCKSZ as i32 / 1024),
     );
 
+    // The launched worker's debug_query_string adoption (the serve's log
+    // lines carry the leader's STATEMENT) and InstrStartParallelQuery.
+    let _debug_query = shared
+        .query_text
+        .as_deref()
+        .map(elog::debug_query_string_scope);
+    let usage_save = ::instrument::instr_start_parallel_query();
+
     let mut cx = PvWorkerCx { mcx, heaprel: &rel, indrels: &indrels, bstrategy: &bstrategy };
     // Publish the worker cx for run_morsel (this thread only), drive, clear.
     // SAFETY (lifetime erasure): cx outlives the drive on this frame; the
@@ -1042,6 +1086,13 @@ fn pool_index_drive(shared: &Arc<PvShared>, pass: &Arc<PvPoolPass>) -> PgResult<
     let _outcome = rt.drive_pinned(&mut lane_local, &rg);
     POOL_CX.with(|c| c.set(std::ptr::null_mut()));
     drop(cx);
+    {
+        // InstrEndParallelQuery: this serve's delta into the pass's fold.
+        let (buf, wal) = ::instrument::instr_end_parallel_query(&usage_save);
+        let mut u = pass.usage.lock().unwrap_or_else(|e| e.into_inner());
+        ::instrument::buffer_usage_add(&mut u.0, &buf);
+        ::instrument::wal_usage_add(&mut u.1, &wal);
+    }
 
     // Teardown (parallel_vacuum_main order).
     shared.cost.active_nworkers.fetch_sub(1, SeqCst);
@@ -1167,6 +1218,7 @@ fn pool_claim_deadline() -> std::time::Duration {
 fn pool_engage_pass(
     pvs: &ParallelVacuumState,
     nworkers: i32,
+    phase: PvIndexPhase,
 ) -> Option<PoolEngaged> {
     let rt = runtime::global()?;
     let safe: Vec<usize> = pvs
@@ -1222,6 +1274,8 @@ fn pool_engage_pass(
         refused: AtomicUsize::new(0),
         error: Mutex::new(None),
         failed: AtomicBool::new(false),
+        phase,
+        usage: Mutex::new((BufferUsage::default(), WalUsage::default())),
     });
     *pvs.shared.pool_pass.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::clone(&pass));
 
@@ -1566,7 +1620,15 @@ fn parallel_vacuum_process_all_indexes(
     // launched → leader-serial).
     let mut pool: Option<PoolEngaged> = None;
     if nworkers > 0 && pvs.pool_armed {
-        pool = pool_engage_pass(pvs, nworkers);
+        pool = pool_engage_pass(
+            pvs,
+            nworkers,
+            if vacuum {
+                PvIndexPhase::Bulkdelete
+            } else {
+                PvIndexPhase::Cleanup
+            },
+        );
         if pool.is_some() {
             // C's launched-workers line for the pool channel: the
             // engagement publishes `nworkers` claim tickets on the standing
@@ -1591,6 +1653,10 @@ fn parallel_vacuum_process_all_indexes(
         Some(eng) => match pool_leader_join(pvs, eng, mcx, heaprel, indrels, bstrategy)? {
             PoolPassWait::Done => {
                 census_channel = "pool";
+                // The pool serves' buffer/WAL usage (C's per-worker
+                // InstrAccumParallelQuery fold, vacuumparallel.c:740).
+                let usage = eng.pass.usage.lock().unwrap_or_else(|e| e.into_inner());
+                ::instrument::instr_accum_parallel_query(&usage.0, &usage.1);
             }
             PoolPassWait::Fallback => {
                 // Nothing consumed (started == 0, statuses untouched): the
@@ -1615,6 +1681,7 @@ fn parallel_vacuum_process_all_indexes(
                 if let Some(t0) = wait_t0 {
                     ptrace(&format!("gang-wait ms={}", t0.elapsed_ns() / 1_000_000));
                 }
+                accum_gang_usage(pvs);
             }
         },
         None => {
@@ -1636,25 +1703,12 @@ fn parallel_vacuum_process_all_indexes(
                 if let Some(t0) = wait_t0 {
                     ptrace(&format!("gang-wait ms={}", t0.elapsed_ns() / 1_000_000));
                 }
-                // Buffer/WAL usage accumulation skipped: pgBufferUsage is
-                // derived from live bufmgr counters here and its vacuum
-                // consumers (VERBOSE, autovacuum log) are elided/loud.
+                accum_gang_usage(pvs);
             }
         }
     }
 
-    for (i, slot) in pvs.shared.indstats.iter().enumerate() {
-        let mut s = slot.lock().unwrap_or_else(|e| e.into_inner());
-        if s.status != PvIndVacStatus::Completed {
-            let status = s.status;
-            drop(s);
-            panic!(
-                "parallel index vacuum on index \"{}\" is not completed (status {status:?})",
-                indrels[i].name()
-            );
-        }
-        s.status = PvIndVacStatus::Initial;
-    }
+    pv_reset_index_statuses(&pvs.shared.indstats, |i| indrels[i].name().to_string())?;
 
     // Carry the shared balance back to the heap scan; disable shared costing.
     if let Some(shared_cost) = vacuum_shared_cost() {
@@ -1669,6 +1723,121 @@ fn parallel_vacuum_process_all_indexes(
         ));
     }
     Ok(())
+}
+
+/// C vacuumparallel.c:740: after the launched gang is joined, fold each
+/// launched worker's buffer and WAL usage into the leader's totals
+/// (InstrAccumParallelQuery per worker) so VACUUM VERBOSE / the autovacuum
+/// log report the whole vacuum's usage.
+fn accum_gang_usage(pvs: &ParallelVacuumState) {
+    let launched = parallel::nworkers_launched(pvs.pcxt).max(0) as usize;
+    let usage = pvs.shared.usage.lock().unwrap_or_else(|e| e.into_inner());
+    for (buf, wal) in usage.iter().take(launched) {
+        ::instrument::instr_accum_parallel_query(buf, wal);
+    }
+}
+
+/// C parallel_vacuum_error_callback (vacuumparallel.c:1119-1140): the CONTEXT
+/// line a worker's reports carry while it vacuums / cleans up an index. The
+/// leader's own index passes run under vacuumlazy's callback in C, not this
+/// one, so the leader attaches nothing here.
+fn pv_index_context_line(
+    phase: PvIndexPhase,
+    indname: &str,
+    relnamespace: &str,
+    relname: &str,
+) -> String {
+    match phase {
+        PvIndexPhase::Bulkdelete => {
+            format!("while vacuuming index \"{indname}\" of relation \"{relnamespace}.{relname}\"")
+        }
+        PvIndexPhase::Cleanup => {
+            format!(
+                "while cleaning up index \"{indname}\" of relation \"{relnamespace}.{relname}\""
+            )
+        }
+    }
+}
+
+/// The worker's installed error-context frame for one index call
+/// (vacuumparallel.c:1080-1083 errcallback on error_context_stack): reports
+/// emitted inside the call (WARNING/NOTICE/FATAL, which errfinish decorates
+/// at emit time) get the line through the emit-context callback; an ERROR
+/// propagating out as `Err` gets it through `attach`. Drop pops the frame.
+struct PvIndexErrorContext {
+    line: String,
+    callback: u64,
+}
+
+impl PvIndexErrorContext {
+    fn attach(&self, e: &mut PgError) {
+        e.add_context_line(self.line.clone());
+    }
+}
+
+impl Drop for PvIndexErrorContext {
+    fn drop(&mut self) {
+        elog::pop_emit_context_callback(self.callback);
+    }
+}
+
+/// None on the leader (C installs the callback in parallel_vacuum_main
+/// only; pool serves are this port's stand-in for launched workers).
+fn pv_index_error_context(
+    heaprel: &RelationData<'_>,
+    phase: PvIndexPhase,
+    indname: &str,
+) -> PgResult<Option<PvIndexErrorContext>> {
+    if !(parallel::IsParallelWorker() || parallel::standing::serving_on_pool()) {
+        return Ok(None);
+    }
+    // C: pvs.relnamespace = get_namespace_name(RelationGetNamespace(rel)),
+    // pvs.relname = RelationGetRelationName(rel).
+    let relnamespace = syscache_seams::pg_namespace_nspname::call(heaprel.rd_rel.relnamespace)?
+        .map(|n| String::from_utf8_lossy(n.name_str()).into_owned())
+        .unwrap_or_default();
+    let line = pv_index_context_line(phase, indname, &relnamespace, heaprel.name());
+    let cb_line = line.clone();
+    let callback = elog::push_emit_context_callback(Box::new(move |e: &mut PgError| {
+        e.add_context_line(cb_line.clone())
+    }));
+    Ok(Some(PvIndexErrorContext { line, callback }))
+}
+
+/// C vacuumparallel.c parallel_vacuum_process_all_indexes tail: reset every
+/// index status back to INITIAL while checking that the pass vacuumed all of
+/// them.
+fn pv_reset_index_statuses(
+    indstats: &[Mutex<PvIndStats>],
+    name_of: impl Fn(usize) -> String,
+) -> PgResult<()> {
+    for (i, slot) in indstats.iter().enumerate() {
+        let mut s = slot.lock().unwrap_or_else(|e| e.into_inner());
+        if s.status != PvIndVacStatus::Completed {
+            drop(s);
+            return Err(Box::new(PgError::new(
+                ERROR,
+                format!(
+                    "parallel index vacuum on index \"{}\" is not completed",
+                    name_of(i)
+                ),
+            )));
+        }
+        s.status = PvIndVacStatus::Initial;
+    }
+    Ok(())
+}
+
+/// C parallel_vacuum_process_one_index default arm:
+/// elog(ERROR, "unexpected parallel vacuum index status %d for index \"%s\"").
+fn pv_unexpected_status_error(status: PvIndVacStatus, indname: &str) -> PgError {
+    PgError::new(
+        ERROR,
+        format!(
+            "unexpected parallel vacuum index status {} for index \"{indname}\"",
+            status as i32
+        ),
+    )
 }
 
 fn parallel_vacuum_process_safe_indexes(
@@ -1810,13 +1979,7 @@ fn parallel_vacuum_process_one_index(
             PvIndexClaim::Unexpected => {
                 let status = s.status;
                 drop(s);
-                return Err(Box::new(PgError::new(
-                    ERROR,
-                    format!(
-                        "unexpected parallel vacuum index status {status:?} for index \"{}\"",
-                        indrel.name()
-                    ),
-                )));
+                return Err(Box::new(pv_unexpected_status_error(status, indrel.name())));
             }
         }
     };
@@ -1832,14 +1995,27 @@ fn parallel_vacuum_process_one_index(
         strategy: bstrategy.clone(),
     };
 
-    let istat_res: Option<IndexBulkDeleteResult> = match phase {
+    // C: "Update error traceback information" — pvs->indname / pvs->status
+    // feed parallel_vacuum_error_callback for the duration of the call.
+    let errcb = pv_index_error_context(heaprel, phase, indrel.name())?;
+    let res: PgResult<Option<IndexBulkDeleteResult>> = match phase {
         PvIndexPhase::Bulkdelete => {
             let dead_items =
                 Arc::clone(&shared.dead_items.lock().unwrap_or_else(|e| e.into_inner()));
-            Some(vac_bulkdel_one_index(mcx, &ivinfo, istat, &dead_items)?)
+            vac_bulkdel_one_index(mcx, &ivinfo, istat, &dead_items).map(Some)
         }
-        PvIndexPhase::Cleanup => vac_cleanup_one_index(mcx, &ivinfo, istat)?,
+        PvIndexPhase::Cleanup => vac_cleanup_one_index(mcx, &ivinfo, istat),
     };
+    let istat_res = match res {
+        Ok(v) => v,
+        Err(mut e) => {
+            if let Some(cb) = &errcb {
+                cb.attach(&mut e);
+            }
+            return Err(e);
+        }
+    };
+    drop(errcb);
 
     {
         let mut s = shared.indstats[idx].lock().unwrap_or_else(|e| e.into_inner());
@@ -1904,6 +2080,20 @@ fn parallel_vacuum_main(pshared: &parallel::ParallelShared) -> PgResult<()> {
 
     let _ = elog::elog(::types_error::DEBUG1, "starting parallel vacuum worker");
 
+    // C vacuumparallel.c:1013-1020: "Set debug_query_string for individual
+    // workers", report the leader's statement for monitoring
+    // (pg_stat_activity: state=active, query=the VACUUM text) and track the
+    // leader's query ID.
+    let _debug_query = shared
+        .query_text
+        .as_deref()
+        .map(elog::debug_query_string_scope);
+    backend_status::pgstat_report_activity(
+        backend_status::BackendState::STATE_RUNNING,
+        shared.query_text.as_deref(),
+    );
+    backend_status::pgstat_report_query_id(shared.queryid, false);
+
     let ctx = MemoryContext::new("parallel vacuum worker");
     let mcx = ctx.mcx();
 
@@ -1925,8 +2115,18 @@ fn parallel_vacuum_main(pshared: &parallel::ParallelShared) -> PgResult<()> {
         shared.ring_nbuffers * (BLCKSZ as i32 / 1024),
     );
 
+    // C vacuumparallel.c:1086 InstrStartParallelQuery ... :1095
+    // InstrEndParallelQuery into this worker's buffer/WAL usage slots.
+    let save = ::instrument::instr_start_parallel_query();
     let result =
         parallel_vacuum_process_safe_indexes(&shared, mcx, &rel, &indrels, &bstrategy, true);
+    {
+        let mut usage = shared.usage.lock().unwrap_or_else(|e| e.into_inner());
+        let me = parallel::ParallelWorkerNumber().max(0) as usize;
+        if let Some(slot) = usage.get_mut(me) {
+            *slot = ::instrument::instr_end_parallel_query(&save);
+        }
+    }
 
     if guc_tables::vars::track_cost_delay_timing.read() {
         backend_progress::pgstat_progress_parallel_incr_param(
@@ -2064,5 +2264,72 @@ mod tests {
         }
         assert!(s.whole_boundary_claims());
         assert_eq!(s.startup_c0(), 1);
+    }
+
+    /// audit-18.6 b158 (vacuumparallel.c:752): an index that did not reach
+    /// COMPLETED at pass end is a catchable elog(ERROR) in C, never a crash.
+    #[test]
+    fn pass_end_incomplete_index_is_catchable_error() {
+        let stats = vec![
+            Mutex::new(PvIndStats {
+                status: PvIndVacStatus::Completed,
+                parallel_workers_can_process: true,
+                istat_updated: false,
+                istat: IndexBulkDeleteResult::default(),
+            }),
+            Mutex::new(PvIndStats {
+                status: PvIndVacStatus::NeedBulkdelete,
+                parallel_workers_can_process: true,
+                istat_updated: false,
+                istat: IndexBulkDeleteResult::default(),
+            }),
+        ];
+        let names = ["t_a_idx", "t_b_idx"];
+        let err = pv_reset_index_statuses(&stats, |i| names[i].to_string())
+            .expect_err("an incomplete index must be an ERROR, not Ok");
+        assert_eq!(err.level, ERROR);
+        assert_eq!(
+            err.message(),
+            "parallel index vacuum on index \"t_b_idx\" is not completed"
+        );
+        // A completed pass resets every slot to INITIAL.
+        let ok = vec![Mutex::new(PvIndStats {
+            status: PvIndVacStatus::Completed,
+            parallel_workers_can_process: true,
+            istat_updated: false,
+            istat: IndexBulkDeleteResult::default(),
+        })];
+        pv_reset_index_statuses(&ok, |_| "t_a_idx".to_string()).unwrap();
+        assert_eq!(ok[0].lock().unwrap().status, PvIndVacStatus::Initial);
+    }
+
+    /// audit-18.6 b158 (vacuumparallel.c:1119): the worker error-context
+    /// lines match parallel_vacuum_error_callback byte for byte.
+    #[test]
+    fn worker_error_context_lines_are_c_exact() {
+        assert_eq!(
+            pv_index_context_line(PvIndexPhase::Bulkdelete, "t_a_idx", "public", "t"),
+            "while vacuuming index \"t_a_idx\" of relation \"public.t\""
+        );
+        assert_eq!(
+            pv_index_context_line(PvIndexPhase::Cleanup, "t_a_idx", "public", "t"),
+            "while cleaning up index \"t_a_idx\" of relation \"public.t\""
+        );
+    }
+
+    /// audit-18.6 b158 (vacuumparallel.c:902): the unexpected-status message
+    /// formats the status with %d (the C enum value), not a symbolic name.
+    #[test]
+    fn unexpected_status_message_is_c_exact() {
+        let e = pv_unexpected_status_error(PvIndVacStatus::Initial, "t_a_idx");
+        assert_eq!(e.level, ERROR);
+        assert_eq!(
+            e.message(),
+            "unexpected parallel vacuum index status 0 for index \"t_a_idx\""
+        );
+        assert_eq!(
+            pv_unexpected_status_error(PvIndVacStatus::Completed, "t_a_idx").message(),
+            "unexpected parallel vacuum index status 3 for index \"t_a_idx\""
+        );
     }
 }
