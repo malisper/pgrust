@@ -245,7 +245,13 @@ pub fn CreateCast<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateCastStmt<'mcx>) -> PgResult
         CoercionContext::COERCION_IMPLICIT => COERCION_CODE_IMPLICIT,
         CoercionContext::COERCION_ASSIGNMENT => COERCION_CODE_ASSIGNMENT,
         CoercionContext::COERCION_EXPLICIT => COERCION_CODE_EXPLICIT,
-        other => panic!("unrecognized CoercionContext: {}", other as u32),
+        // functioncmds.c:1790 elog(ERROR, "unrecognized CoercionContext: %d").
+        other => {
+            return Err(Box::new(PgError::error(format!(
+                "unrecognized CoercionContext: {}",
+                other as u32
+            ))))
+        }
     };
 
     pg_cast::CastCreate(

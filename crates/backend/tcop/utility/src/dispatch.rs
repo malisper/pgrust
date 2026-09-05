@@ -304,7 +304,7 @@ fn dispatch_switch<'mcx>(
 
         T_DoStmt => {
             let stmt = parsetree.as_do_stmt().unwrap();
-            functioncmds::ExecuteDoStmt(stmt, is_atomic_context)?;
+            functioncmds::ExecuteDoStmt(stmt, is_atomic_context, source_text)?;
         }
 
         T_CreateTableSpaceStmt => {

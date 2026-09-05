@@ -81,6 +81,19 @@ mod cache_lookup_error_tests {
     }
 }
 
+// functioncmds.c:1116 / :2131: "language does not exist", with the CREATE
+// EXTENSION hint when extension_file_exists(language).
+#[cold]
+#[inline(never)]
+fn language_does_not_exist(language: &str) -> PgResult<Box<PgError>> {
+    let mut e = PgError::new(ERROR, format!("language \"{language}\" does not exist"))
+        .with_sqlstate(ERRCODE_UNDEFINED_OBJECT);
+    if extension::extension_file_exists(language)? {
+        e.hint = Some("Use CREATE EXTENSION to load the language into the database.".to_string());
+    }
+    Ok(Box::new(e))
+}
+
 #[track_caller]
 #[cold]
 #[inline(never)]
@@ -92,13 +105,6 @@ fn err_at(
 ) -> Box<PgError> {
     let pos = parser_small1::parser_errposition(pstate, location, mbutils::GetDatabaseEncoding());
     Box::new(PgError::new(ERROR, msg).with_sqlstate(sqlstate).with_cursor_position(pos))
-}
-
-#[track_caller]
-#[cold]
-#[inline(never)]
-fn conflicting_options() -> Box<PgError> {
-    err("conflicting or redundant options".to_string(), ERRCODE_SYNTAX_ERROR)
 }
 
 // errorConflictingDefElem (defrem.h): the same message carrying the offending
@@ -407,10 +413,17 @@ fn resolve_type_name<'mcx>(
     languageOid: Oid,
     objtype: ObjectType,
 ) -> PgResult<Oid> {
-    let (typoid, typname) = resolve_type_oid(mcx, tn)?;
+    let typoid = resolve_type_oid(mcx, Some(pstate), tn)?;
     if typoid == InvalidOid {
-        return Err(err(
-            format!("type \"{typname}\" does not exist"),
+        // functioncmds.c:266: TypeNameToString keeps the qualification and
+        // the "[]" decoration, unquoted, and the cursor sits on the TypeName.
+        return Err(err_at(
+            pstate,
+            tn.location,
+            format!(
+                "type {} does not exist",
+                commands_define::TypeNameToString(mcx, tn)?.as_str()
+            ),
             ERRCODE_UNDEFINED_OBJECT,
         ));
     }
@@ -419,16 +432,22 @@ fn resolve_type_name<'mcx>(
     Ok(typoid)
 }
 
-fn resolve_type_oid<'mcx, 'a>(mcx: Mcx<'mcx>, tn: &TypeName<'a>) -> PgResult<(Oid, &'a str)> {
+// `pstate` is the ParseState C's LookupTypeName threads to
+// setup_parser_errposition_callback (parse_type.c:177-187): the explicit-
+// schema lookup's errors carry typeName->location when it is given.
+fn resolve_type_oid<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: Option<&parser_small1::ParseState<'_, 'mcx>>,
+    tn: &TypeName<'_>,
+) -> PgResult<Oid> {
     if tn.pct_type {
         return resolve_pct_type(mcx, tn);
     }
 
-    let (typoid, typname): (Oid, &'a str) = if tn.names.is_nil() {
+    let typoid = if tn.names.is_nil() {
         // LookupTypeNameExtended (parse_type.c): an internally generated
-        // TypeName carries its OID already. The display name is only read on
-        // the does-not-exist arm, which a pre-resolved OID cannot reach.
-        (tn.typeOid, "")
+        // TypeName carries its OID already.
+        tn.typeOid
     } else {
         // C DeconstructQualifiedName's default arm raises the
         // improper-qualified-name error itself for 0 or >3 parts; collect
@@ -439,7 +458,18 @@ fn resolve_type_oid<'mcx, 'a>(mcx: Mcx<'mcx>, tn: &TypeName<'a>) -> PgResult<(Oi
 
         let typoid = match schemaname {
             Some(schemaname) => {
-                let namespace_id = catalog_namespace::LookupExplicitNamespace(schemaname, false)?;
+                let namespace_id = catalog_namespace::LookupExplicitNamespace(schemaname, false)
+                    .map_err(|e| match pstate {
+                        // pcb_error_callback (parse_node.c:170).
+                        Some(ps) => Box::new((*e).with_cursor_position(
+                            parser_small1::parser_errposition(
+                                ps,
+                                tn.location,
+                                mbutils::GetDatabaseEncoding(),
+                            ),
+                        )),
+                        None => e,
+                    })?;
                 syscache_seams::lookup_pg_type_oid_by_name::call(typname, namespace_id)?
             }
             None => {
@@ -454,7 +484,7 @@ fn resolve_type_oid<'mcx, 'a>(mcx: Mcx<'mcx>, tn: &TypeName<'a>) -> PgResult<(Oi
                 found
             }
         };
-        (typoid, typname)
+        typoid
     };
     // LookupTypeNameExtended (parse_type.c): an array reference yields the
     // array type of the base.
@@ -468,12 +498,12 @@ fn resolve_type_oid<'mcx, 'a>(mcx: Mcx<'mcx>, tn: &TypeName<'a>) -> PgResult<(Oi
     if typoid != InvalidOid && !tn.typmods.is_nil() {
         parse_utilcmd::typenameTypeMod(mcx, None, tn, typoid)?;
     }
-    Ok((typoid, typname))
+    Ok(typoid)
 }
 
 // LookupTypeNameExtended's %TYPE arm (parse_type.c): the type of an existing
 // relation column, plus the intentionally unpositioned conversion NOTICE.
-fn resolve_pct_type<'mcx, 'a>(mcx: Mcx<'mcx>, tn: &TypeName<'a>) -> PgResult<(Oid, &'a str)> {
+fn resolve_pct_type<'mcx>(mcx: Mcx<'mcx>, tn: &TypeName<'_>) -> PgResult<Oid> {
     let nnames = tn.names.len();
     let mut names: [&str; 4] = [""; 4];
     if (1..=4).contains(&nnames) {
@@ -527,7 +557,7 @@ fn resolve_pct_type<'mcx, 'a>(mcx: Mcx<'mcx>, tn: &TypeName<'a>) -> PgResult<(Oi
             format_type::format_type_be(typoid)?
         ))
         .finish(types_error::ErrorLocation::new(file!(), line!() as i32, "LookupTypeNameExtended"))?;
-    Ok((typoid, field))
+    Ok(typoid)
 }
 
 fn check_defined_and_acl(typoid: Oid) -> PgResult<()> {
@@ -597,7 +627,8 @@ fn compute_return_type<'mcx>(
     returnType: &TypeName<'_>,
     languageOid: Oid,
 ) -> PgResult<(Oid, bool)> {
-    let (mut rettype, _typname) = resolve_type_oid(mcx, returnType)?;
+    // C: LookupTypeName(NULL, returnType, NULL, false) — no ParseState.
+    let mut rettype = resolve_type_oid(mcx, None, returnType)?;
     if rettype != InvalidOid {
         shell_type_check(
             mcx,
@@ -1125,10 +1156,9 @@ pub fn CreateFunction<'mcx>(
         cache_syscache::SysCacheKey::Str(language),
     )?
     else {
-        return Err(err(
-            format!("language \"{language}\" does not exist"),
-            ERRCODE_UNDEFINED_OBJECT,
-        ));
+        // functioncmds.c:1116: the CREATE EXTENSION hint when a control file
+        // of that name is installed.
+        return Err(language_does_not_exist(language)?);
     };
     let languageOid = cache_syscache::SysCacheGetAttrNotNull(
         cache_syscache::cacheinfo::LANGNAME,
@@ -1479,10 +1509,17 @@ pub fn AlterFunction<'mcx>(
             "rows" => &mut rows_item,
             "support" => &mut support_item,
             "parallel" => &mut parallel_item,
-            other => panic!("option \"{other}\" not recognized"),
+            // functioncmds.c:1422 elog(ERROR): catchable XX000, never a panic.
+            other => {
+                return Err(Box::new(PgError::error(format!(
+                    "option \"{other}\" not recognized"
+                ))))
+            }
         };
         if slot.is_some() {
-            return Err(conflicting_options());
+            // compute_common_attribute (functioncmds.c:533):
+            // errorConflictingDefElem(defel, pstate) carries the position.
+            return Err(conflicting_options_at(source_text, defel.location));
         }
         *slot = Some(defel);
     }
@@ -1577,7 +1614,12 @@ pub fn AlterFunction<'mcx>(
                 newsupport,
             )? != 1
             {
-                panic!("could not change support dependency for function {funcOid}");
+                // functioncmds.c:1470 elog(ERROR, ..., get_func_name(funcOid)).
+                let name = lsyscache::get_func_name(mcx, funcOid)?;
+                return Err(Box::new(PgError::error(format!(
+                    "could not change support dependency for function {}",
+                    name.as_ref().map_or("(null)", |n| n.as_str())
+                ))));
             }
         } else {
             pg_depend::recordDependencyOn(
@@ -1701,6 +1743,7 @@ pub fn RemoveFunctionById<'mcx>(mcx: Mcx<'mcx>, funcOid: Oid) -> PgResult<()> {
 pub fn ExecuteDoStmt<'mcx>(
     stmt: &types_nodes::parsenodes::DoStmt<'mcx>,
     atomic: bool,
+    source_text: &str,
 ) -> PgResult<()> {
     let mut as_item: Option<&DefElem<'mcx>> = None;
     let mut language_item: Option<&DefElem<'mcx>> = None;
@@ -1709,10 +1752,16 @@ pub fn ExecuteDoStmt<'mcx>(
         let slot = match defel.defname.unwrap_or("") {
             "as" => &mut as_item,
             "language" => &mut language_item,
-            other => panic!("option \"{other}\" not recognized"),
+            // functioncmds.c:2113 elog(ERROR): catchable XX000, never a panic.
+            other => {
+                return Err(Box::new(PgError::error(format!(
+                    "option \"{other}\" not recognized"
+                ))))
+            }
         };
         if slot.is_some() {
-            return Err(conflicting_options());
+            // functioncmds.c:2103 errorConflictingDefElem(defel, pstate).
+            return Err(conflicting_options_at(source_text, defel.location));
         }
         *slot = Some(defel);
     }
@@ -1731,12 +1780,7 @@ pub fn ExecuteDoStmt<'mcx>(
         cache_syscache::SysCacheKey::Str(language),
     )?
     else {
-        let mut e = PgError::new(ERROR, format!("language \"{language}\" does not exist"))
-            .with_sqlstate(ERRCODE_UNDEFINED_OBJECT);
-        if extension::extension_file_exists(language)? {
-            e.hint = Some("Use CREATE EXTENSION to load the language into the database.".to_string());
-        }
-        return Err(Box::new(e));
+        return Err(language_does_not_exist(language)?);
     };
     let lang_oid = cache_syscache::SysCacheGetAttrNotNull(
         cache_syscache::cacheinfo::LANGNAME,
@@ -2008,9 +2052,8 @@ mod tests {
         let cx = MemoryContext::new("resolve_type_oid test");
         let mcx = cx.mcx();
         let tn = TypeName { typeOid: 23, ..TypeName::default() };
-        let (oid, name) = resolve_type_oid(mcx, &tn).unwrap();
+        let oid = resolve_type_oid(mcx, None, &tn).unwrap();
         assert_eq!(oid, 23);
-        assert_eq!(name, "");
     }
 
     fn return_stmt<'mcx>(mcx: Mcx<'mcx>) -> Node<'mcx> {
