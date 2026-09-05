@@ -5847,6 +5847,7 @@ dependencies = [
  "lsyscache",
  "mcx",
  "miscinit_seams",
+ "outfuncs",
  "partbounds",
  "partcache",
  "partdesc",
@@ -11070,6 +11071,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_nodes",
+ "types_tuple",
 ]
 
 [[package]]

@@ -2,9 +2,11 @@
 //! pg_constraint.conbin (DEFAULT/CHECK corpus), pg_trigger.tgqual, and
 //! pg_rewrite.ev_action (view SELECT-rule Query trees), plus the
 //! AlterObjectDependsStmt raw-statement tree (RANGEVAR/OBJECTWITHARGS/
-//! TYPENAME/FUNCTIONPARAMETER/A_CONST). Every other node tag is a loud panic
-//! naming the C writer. Output is byte-compatible with C 18.3 nodeToString
-//! (write_location_fields=false: every location renders as -1).
+//! TYPENAME/FUNCTIONPARAMETER/A_CONST). Every other node tag is a typed
+//! refusal carrying C outNode's "could not dump unrecognized node type"
+//! message (never a panic). Output is byte-compatible with C nodeToString
+//! (write_location_fields=false: every ParseLoc field renders as -1) and
+//! nodeToStringWithLocations (real locations).
 
 #![allow(non_snake_case)]
 
@@ -12,9 +14,10 @@ use core::fmt::Write;
 
 use datum::Datum;
 use mcx::{Mcx, PgString};
-use types_error::PgResult;
+use types_core::ParseLoc;
+use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
 use types_nodes::bitmapset::Bitmapset;
-use types_nodes::list::{IntList, NodeList, OidList, OptNodeList};
+use types_nodes::list::{IntList, NodeList, OidList, OptNodeList, XidList};
 use types_nodes::parsenodes::{
     CommonTableExpr, FunctionParameter, ObjectWithArgs, Query, RTEKind, RTEPermissionInfo,
     RangeTblEntry, SortGroupClause, TableSampleClause,
@@ -26,14 +29,61 @@ use types_nodes::primnodes::{
     TableFunc, TargetEntry, Var, XmlExpr,
 };
 use types_nodes::rawnodes::{
-    A_Const, PartitionBoundSpec, PartitionRangeDatum, TypeName, ValUnion,
+    A_Const, A_Expr, A_Expr_Kind, PartitionBoundSpec, PartitionRangeDatum, TypeName, ValUnion,
 };
 use types_nodes::{Boolean, Float, Integer, Node, NodeTag};
+use types_tuple::varatt::varsize_any;
+
+thread_local! {
+    // outfuncs.c:29 `static bool write_location_fields = false;` — set only
+    // by node_to_string_internal, for the duration of one serialization.
+    static WRITE_LOCATION_FIELDS: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+}
+
+// WRITE_LOCATION_FIELD (outfuncs.c:99-100): a ParseLoc field renders as its
+// value under nodeToStringWithLocations and as -1 otherwise.
+fn loc(location: ParseLoc) -> ParseLoc {
+    if WRITE_LOCATION_FIELDS.with(|f| f.get()) {
+        location
+    } else {
+        -1
+    }
+}
+
+// nodeToStringInternal (outfuncs.c:783-797): save/set/restore the flag around
+// one outNode walk (restored on the error path too).
+fn node_to_string_internal<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: Node<'mcx>,
+    write_loc_fields: bool,
+) -> PgResult<PgString<'mcx>> {
+    let save = WRITE_LOCATION_FIELDS.with(|f| f.replace(write_loc_fields));
+    let mut out = PgString::new_in(mcx);
+    let walked = out_node(&mut out, node);
+    WRITE_LOCATION_FIELDS.with(|f| f.set(save));
+    walked?;
+    Ok(out)
+}
 
 pub fn nodeToString<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>) -> PgResult<PgString<'mcx>> {
-    let mut out = PgString::new_in(mcx);
-    out_node(&mut out, node)?;
-    Ok(out)
+    node_to_string_internal(mcx, node, false)
+}
+
+// outfuncs.c:811-814: the debugging form (print.c, debug_print_*) with the
+// real source-text locations instead of -1.
+pub fn nodeToStringWithLocations<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: Node<'mcx>,
+) -> PgResult<PgString<'mcx>> {
+    node_to_string_internal(mcx, node, true)
+}
+
+// bmsToString (outfuncs.c:822-830): "(b 1 2 ...)" as a plain string — C
+// returns a palloc'd cstring that its callers splice into elog texts.
+pub fn bmsToString(bms: &Bitmapset<'_>) -> String {
+    let mut out = String::new();
+    out_bitmapset(&mut out, bms);
+    out
 }
 
 // Query reachable only as RangeTblEntry.subquery's &Query (no node handle).
@@ -67,7 +117,7 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
     stack_depth_core::check_stack_depth()?;
     match node.node_tag() {
         NodeTag::T_Var => out_var(out, node.as_variant::<Var>().expect("Var")),
-        NodeTag::T_Const => out_const(out, node.as_variant::<Const>().expect("Const")),
+        NodeTag::T_Const => out_const(out, node.as_variant::<Const>().expect("Const"))?,
         NodeTag::T_OpExpr => out_op_expr(out, node.as_variant::<OpExpr>().expect("OpExpr"))?,
         NodeTag::T_DistinctExpr => out_distinct_expr(
             out,
@@ -130,7 +180,13 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
             out_list(out, &a.elements)?;
             w!(out, " :multidims ");
             out_bool(out, a.multidims);
-            w!(out, " :list_start -1 :list_end -1 :location -1}}");
+            w!(
+                out,
+                " :list_start {} :list_end {} :location {}}}",
+                loc(a.list_start),
+                loc(a.list_end),
+                loc(a.location)
+            );
         }
         NodeTag::T_CaseTestExpr => {
             let c = node.as_case_test_expr().expect("CaseTestExpr");
@@ -148,7 +204,7 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
             out_list(out, &c.args)?;
             w!(out, " :defresult ");
             out_opt_node(out, c.defresult)?;
-            w!(out, " :location -1}}");
+            w!(out, " :location {}}}", loc(c.location));
         }
         NodeTag::T_CaseWhen => {
             let c = node.as_case_when().expect("CaseWhen");
@@ -156,14 +212,14 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
             out_opt_node(out, c.expr)?;
             w!(out, " :result ");
             out_opt_node(out, c.result)?;
-            w!(out, " :location -1}}");
+            w!(out, " :location {}}}", loc(c.location));
         }
         NodeTag::T_MergeSupportFunc => {
             let m = node.as_merge_support_func().expect("MergeSupportFunc");
             w!(
                 out,
-                "{{MERGESUPPORTFUNC :msftype {} :msfcollid {} :location -1}}",
-                m.msftype, m.msfcollid
+                "{{MERGESUPPORTFUNC :msftype {} :msfcollid {} :location {}}}",
+                m.msftype, m.msfcollid, loc(m.location)
             );
         }
         NodeTag::T_WindowFunc => {
@@ -182,7 +238,7 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
             out_bool(out, f.winstar);
             w!(out, " :winagg ");
             out_bool(out, f.winagg);
-            w!(out, " :location -1}}");
+            w!(out, " :location {}}}", loc(f.location));
         }
         NodeTag::T_WindowFuncRunCondition => {
             let r = node
@@ -265,7 +321,7 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
                 c.coalescetype, c.coalescecollid
             );
             out_list(out, &c.args)?;
-            w!(out, " :location -1}}");
+            w!(out, " :location {}}}", loc(c.location));
         }
         NodeTag::T_List => out_list(out, node.as_list().expect("List"))?,
         NodeTag::T_CoerceViaIO => {
@@ -287,8 +343,8 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
             let v = node.as_variant::<CoerceToDomainValue>().expect("CoerceToDomainValue");
             w!(
                 out,
-                "{{COERCETODOMAINVALUE :typeId {} :typeMod {} :collation {} :location -1}}",
-                v.typeId, v.typeMod, v.collation
+                "{{COERCETODOMAINVALUE :typeId {} :typeMod {} :collation {} :location {}}}",
+                v.typeId, v.typeMod, v.collation, loc(v.location)
             );
         }
         NodeTag::T_SQLValueFunction => {
@@ -297,8 +353,8 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
                 .expect("SQLValueFunction");
             w!(
                 out,
-                "{{SQLVALUEFUNCTION :op {} :type {} :typmod {} :location -1}}",
-                v.op as u32, v.r#type, v.typmod
+                "{{SQLVALUEFUNCTION :op {} :type {} :typmod {} :location {}}}",
+                v.op as u32, v.r#type, v.typmod, loc(v.location)
             );
         }
         NodeTag::T_ScalarArrayOpExpr => out_scalar_array_op_expr(
@@ -319,7 +375,7 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
                 .expect("BooleanTest");
             w!(out, "{{BOOLEANTEST :arg ");
             out_opt_node(out, bt.arg)?;
-            w!(out, " :booltesttype {} :location -1}}", bt.booltesttype as u32);
+            w!(out, " :booltesttype {} :location {}}}", bt.booltesttype as u32, loc(bt.location));
         }
         NodeTag::T_SetToDefault => {
             let d = node
@@ -327,8 +383,8 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
                 .expect("SetToDefault");
             w!(
                 out,
-                "{{SETTODEFAULT :typeId {} :typeMod {} :collation {} :location -1}}",
-                d.typeId, d.typeMod, d.collation
+                "{{SETTODEFAULT :typeId {} :typeMod {} :collation {} :location {}}}",
+                d.typeId, d.typeMod, d.collation, loc(d.location)
             );
         }
         NodeTag::T_JsonFormat => {
@@ -361,7 +417,7 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
             out_bool(out, c.absent_on_null);
             w!(out, " :unique ");
             out_bool(out, c.unique);
-            w!(out, " :location -1}}");
+            w!(out, " :location {}}}", loc(c.location));
         }
         NodeTag::T_JsonIsPredicate => {
             let p = node.as_json_is_predicate().expect("JsonIsPredicate");
@@ -371,7 +427,7 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
             out_opt_json_format(out, p.format);
             w!(out, " :item_type {} :unique_keys ", p.item_type as u32);
             out_bool(out, p.unique_keys);
-            w!(out, " :location -1}}");
+            w!(out, " :location {}}}", loc(p.location));
         }
         NodeTag::T_JsonBehavior => {
             let b = node.as_json_behavior().expect("JsonBehavior");
@@ -379,7 +435,7 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
             out_opt_node(out, b.expr)?;
             w!(out, " :coerce ");
             out_bool(out, b.coerce);
-            w!(out, " :location -1}}");
+            w!(out, " :location {}}}", loc(b.location));
         }
         NodeTag::T_JsonExpr => {
             let j = node.as_json_expr().expect("JsonExpr");
@@ -411,7 +467,7 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
                 j.wrapper as u32
             );
             out_bool(out, j.omit_quotes);
-            w!(out, " :collation {} :location -1}}", j.collation);
+            w!(out, " :collation {} :location {}}}", j.collation, loc(j.location));
         }
         NodeTag::T_JsonTablePath => {
             let p = node.as_json_table_path().expect("JsonTablePath");
@@ -487,7 +543,7 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
             out_int_list(out, &g.refs);
             w!(out, " :cols ");
             out_int_list(out, &g.cols);
-            w!(out, " :agglevelsup {} :location -1}}", g.agglevelsup);
+            w!(out, " :agglevelsup {} :location {}}}", g.agglevelsup, loc(g.location));
         }
         NodeTag::T_SubLink => out_sub_link(out, node.as_variant::<SubLink>().expect("SubLink"))?,
         NodeTag::T_Param => {
@@ -495,8 +551,13 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
             w!(
                 out,
                 "{{PARAM :paramkind {} :paramid {} :paramtype {} :paramtypmod {} \
-                 :paramcollid {} :location -1}}",
-                p.paramkind as u32, p.paramid, p.paramtype, p.paramtypmod, p.paramcollid
+                 :paramcollid {} :location {}}}",
+                p.paramkind as u32,
+                p.paramid,
+                p.paramtype,
+                p.paramtypmod,
+                p.paramcollid,
+                loc(p.location)
             );
         }
         NodeTag::T_CTESearchClause => out_cte_search_clause(
@@ -558,7 +619,7 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
                 .expect("CollateExpr");
             w!(out, "{{COLLATEEXPR :arg ");
             out_node(out, c.arg)?;
-            w!(out, " :collOid {} :location -1}}", c.collOid);
+            w!(out, " :collOid {} :location {}}}", c.collOid, loc(c.location));
         }
         NodeTag::T_RowExpr => {
             let r = node.as_variant::<types_nodes::primnodes::RowExpr>().expect("RowExpr");
@@ -570,7 +631,7 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
                 r.row_typeid, r.row_format as u32
             );
             out_list(out, &r.colnames)?;
-            w!(out, " :location -1}}");
+            w!(out, " :location {}}}", loc(r.location));
         }
         NodeTag::T_RowCompareExpr => {
             let r = node
@@ -597,7 +658,7 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
                 m.minmaxtype, m.minmaxcollid, m.inputcollid, m.op as u32
             );
             out_list(out, &m.args)?;
-            w!(out, " :location -1}}");
+            w!(out, " :location {}}}", loc(m.location));
         }
         NodeTag::T_CurrentOfExpr => {
             let c = node
@@ -756,7 +817,7 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
             out_opt_node(out, p.argType)?;
             w!(out, " :mode {} :defexpr ", p.mode as u32);
             out_opt_node(out, p.defexpr)?;
-            w!(out, " :location -1}}");
+            w!(out, " :location {}}}", loc(p.location));
         }
         NodeTag::T_TypeName => {
             let t = node.as_variant::<TypeName>().expect("TypeName");
@@ -770,7 +831,7 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
             out_list(out, &t.typmods)?;
             w!(out, " :typemod {} :arrayBounds ", t.typemod);
             out_list(out, &t.arrayBounds)?;
-            w!(out, " :location -1}}");
+            w!(out, " :location {}}}", loc(t.location));
         }
         NodeTag::T_A_Const => {
             let c = node.as_variant::<A_Const>().expect("A_Const");
@@ -782,17 +843,78 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
                     out_val_union(out, v);
                 }
             }
-            w!(out, " :location -1}}");
+            w!(out, " :location {}}}", loc(c.location));
         }
         NodeTag::T_BitString => {
             out_token(out, node.as_bitstring().expect("BitString").bsval)
         }
-        other => panic!(
-            "outNode (outfuncs.c): {other:?} write arm unported (DEFAULT/CHECK + view \
-             SELECT-rule sets)"
-        ),
+        // outNode (outfuncs.c:751): `else if (IsA(obj, Bitmapset)) outBitmapset`.
+        NodeTag::T_Bitmapset => out_bitmapset(out, node.as_bitmapset().expect("Bitmapset")),
+        NodeTag::T_XidList => out_xid_list(out, node.as_xid_list().expect("XidList")),
+        NodeTag::T_A_Expr => out_a_expr(out, node.as_a_expr().expect("A_Expr"))?,
+        // outNode's default arm (outfuncs.c:766) is elog(WARNING, "could not
+        // dump unrecognized node type: %d") plus an empty "{}" — reachable in
+        // C only for tags outside its generated switch, i.e. never for a real
+        // node. A tag without a ported writer here is an unported feature: a
+        // typed refusal, never a panic and never a silently truncated tree.
+        other => {
+            return Err(Box::new(
+                PgError::error(format!(
+                    "could not dump unrecognized node type: {}",
+                    other as u16
+                ))
+                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+            ));
+        }
     }
     Ok(())
+}
+
+// _outA_Expr (outfuncs.c:588-659): the kind keyword follows the node type.
+fn out_a_expr(out: &mut PgString<'_>, e: &A_Expr<'_>) -> PgResult<()> {
+    let keyword = match e.kind {
+        A_Expr_Kind::AEXPR_OP => "",
+        A_Expr_Kind::AEXPR_OP_ANY => " ANY",
+        A_Expr_Kind::AEXPR_OP_ALL => " ALL",
+        A_Expr_Kind::AEXPR_DISTINCT => " DISTINCT",
+        A_Expr_Kind::AEXPR_NOT_DISTINCT => " NOT_DISTINCT",
+        A_Expr_Kind::AEXPR_NULLIF => " NULLIF",
+        A_Expr_Kind::AEXPR_IN => " IN",
+        A_Expr_Kind::AEXPR_LIKE => " LIKE",
+        A_Expr_Kind::AEXPR_ILIKE => " ILIKE",
+        A_Expr_Kind::AEXPR_SIMILAR => " SIMILAR",
+        A_Expr_Kind::AEXPR_BETWEEN => " BETWEEN",
+        A_Expr_Kind::AEXPR_NOT_BETWEEN => " NOT_BETWEEN",
+        A_Expr_Kind::AEXPR_BETWEEN_SYM => " BETWEEN_SYM",
+        A_Expr_Kind::AEXPR_NOT_BETWEEN_SYM => " NOT_BETWEEN_SYM",
+    };
+    w!(out, "{{A_EXPR{keyword} :name ");
+    out_list(out, &e.name)?;
+    w!(out, " :lexpr ");
+    out_opt_node(out, e.lexpr)?;
+    w!(out, " :rexpr ");
+    out_opt_node(out, e.rexpr)?;
+    w!(
+        out,
+        " :rexpr_list_start {} :rexpr_list_end {} :location {}}}",
+        loc(e.rexpr_list_start),
+        loc(e.rexpr_list_end),
+        loc(e.location)
+    );
+    Ok(())
+}
+
+// _outList (outfuncs.c:291,311): an XidList is "(x %u ...)"; NIL is "<>".
+fn out_xid_list(out: &mut PgString<'_>, l: &XidList<'_>) {
+    if l.is_nil() {
+        w!(out, "<>");
+        return;
+    }
+    w!(out, "(x");
+    for v in l.iter() {
+        w!(out, " {v}");
+    }
+    w!(out, ")");
 }
 
 fn out_list(out: &mut PgString<'_>, list: &NodeList<'_>) -> PgResult<()> {
@@ -811,7 +933,7 @@ fn out_list(out: &mut PgString<'_>, list: &NodeList<'_>) -> PgResult<()> {
     Ok(())
 }
 
-fn out_bitmapset(out: &mut PgString<'_>, bms: &Bitmapset<'_>) {
+fn out_bitmapset(out: &mut impl Write, bms: &Bitmapset<'_>) {
     w!(out, "(b");
     for m in bms.iter() {
         w!(out, " {m}");
@@ -832,8 +954,8 @@ fn out_var(out: &mut PgString<'_>, v: &Var<'_>) {
     out_bitmapset(out, &v.varnullingrels);
     w!(
         out,
-        " :varlevelsup {} :varreturningtype {} :varnosyn {} :varattnosyn {} :location -1}}",
-        v.varlevelsup, v.varreturningtype as u32, v.varnosyn, v.varattnosyn
+        " :varlevelsup {} :varreturningtype {} :varnosyn {} :varattnosyn {} :location {}}}",
+        v.varlevelsup, v.varreturningtype as u32, v.varnosyn, v.varattnosyn, loc(v.location)
     );
 }
 
@@ -848,7 +970,7 @@ fn out_place_holder_var(out: &mut PgString<'_>, phv: &PlaceHolderVar<'_>) -> PgR
     Ok(())
 }
 
-fn out_const(out: &mut PgString<'_>, c: &Const) {
+fn out_const(out: &mut PgString<'_>, c: &Const) -> PgResult<()> {
     w!(
         out,
         "{{CONST :consttype {} :consttypmod {} :constcollid {} :constlen {} :constbyval ",
@@ -857,41 +979,44 @@ fn out_const(out: &mut PgString<'_>, c: &Const) {
     out_bool(out, c.constbyval);
     w!(out, " :constisnull ");
     out_bool(out, c.constisnull);
-    w!(out, " :location -1 :constvalue ");
+    w!(out, " :location {} :constvalue ", loc(c.location));
     if c.constisnull {
         w!(out, "<>");
     } else {
-        out_datum(out, c.constvalue, c.constlen, c.constbyval);
+        out_datum(out, c.constvalue, c.constlen, c.constbyval)?;
     }
     w!(out, "}}");
+    Ok(())
 }
 
-// _outDatum (outfuncs.c) prints bytes as `char`, unsigned on aarch64 Linux —
-// the byte-compare oracle; readfuncs accepts either signedness.
-fn out_datum(out: &mut PgString<'_>, value: Datum, typlen: i32, typbyval: bool) {
+// elog(ERROR, "invalid typLen: %d") (datum.c datumGetSize): XX000 (elog default).
+fn invalid_typlen(typlen: i32) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!("invalid typLen: {typlen}")),
+    )
+}
+
+// datumGetSize (datum.c:52-108), which outDatum calls before writing
+// anything: by-value lengths are exactly sizeof(char/int16/int32/Datum);
+// by-reference is the fixed length, VARSIZE_ANY (-1; every header form,
+// external TOAST pointers included) or strlen+1 (-2); a NULL pointer for
+// the two variable forms is elog(ERROR, "invalid Datum pointer").
+fn datum_get_size(value: Datum, typbyval: bool, typlen: i32) -> PgResult<usize> {
     if typbyval {
-        // The full 8-byte Datum word: SIZEOF_DATUM is pinned to 8 on every
-        // target and readDatum consumes exactly 8 byte tokens. as_usize()
-        // emits only 4 bytes on wasm32 and the reader then dies on "]".
-        let bytes = value.as_u64().to_le_bytes();
-        w!(out, "{} [ ", typlen as u32);
-        for b in bytes {
-            w!(out, "{b} ");
-        }
-        w!(out, "]");
-        return;
+        return match typlen {
+            1 | 2 | 4 | 8 => Ok(typlen as usize),
+            _ => Err(invalid_typlen(typlen)),
+        };
+    }
+    if typlen > 0 {
+        return Ok(typlen as usize);
     }
     let p = value.as_usize() as *const u8;
-    if p.is_null() {
-        w!(out, "0 [ ]");
-        return;
-    }
-    let length = match typlen {
-        l if l > 0 => l as usize,
-        -1 => {
-            // SAFETY: byref const datum points at a live in-line varlena.
-            unsafe { varlena_size(p) }
-        }
+    match typlen {
+        -1 | -2 if p.is_null() => Err(Box::new(PgError::error("invalid Datum pointer"))),
+        // SAFETY: a non-NULL byref varlena Const points at a live varlena image
+        // of some header form.
+        -1 => Ok(unsafe { varsize_any(p) }),
         -2 => {
             // cstring (unknown-type Consts): NUL included, as C's strlen+1.
             let mut n = 0usize;
@@ -899,34 +1024,41 @@ fn out_datum(out: &mut PgString<'_>, value: Datum, typlen: i32, typbyval: bool) 
             while unsafe { *p.add(n) } != 0 {
                 n += 1;
             }
-            n + 1
+            Ok(n + 1)
         }
-        other => panic!("_outDatum (outfuncs.c): typlen {other} unported"),
-    };
-    if length == 0 {
-        w!(out, "0 [ ]");
-        return;
+        _ => Err(invalid_typlen(typlen)),
     }
-    w!(out, "{length} [ ");
+}
+
+// outDatum (outfuncs.c:340-373) prints bytes as `char`, unsigned on aarch64
+// Linux — the byte-compare oracle; readfuncs accepts either signedness.
+fn out_datum(out: &mut PgString<'_>, value: Datum, typlen: i32, typbyval: bool) -> PgResult<()> {
+    let length = datum_get_size(value, typbyval, typlen)?;
+    if typbyval {
+        // The full 8-byte Datum word: SIZEOF_DATUM is pinned to 8 on every
+        // target and readDatum consumes exactly 8 byte tokens. as_usize()
+        // emits only 4 bytes on wasm32 and the reader then dies on "]".
+        let bytes = value.as_u64().to_le_bytes();
+        w!(out, "{} [ ", length as u32);
+        for b in bytes {
+            w!(out, "{b} ");
+        }
+        w!(out, "]");
+        return Ok(());
+    }
+    let p = value.as_usize() as *const u8;
+    if p.is_null() {
+        w!(out, "0 [ ]");
+        return Ok(());
+    }
+    w!(out, "{} [ ", length as u32);
     for i in 0..length {
-        // SAFETY: length derived from the datum's own size.
+        // SAFETY: length is the datum's own size per datum_get_size.
         let b = unsafe { *p.add(i) };
         w!(out, "{b} ");
     }
     w!(out, "]");
-}
-
-// VARSIZE_ANY over a plain (parser-built, never toasted) varlena image.
-unsafe fn varlena_size(p: *const u8) -> usize {
-    // SAFETY: caller guarantees a live varlena header at p.
-    let b0 = unsafe { *p };
-    if b0 & 0x01 != 0 {
-        (b0 as usize) >> 1
-    } else {
-        // SAFETY: 4-byte header form.
-        let word = unsafe { core::ptr::read_unaligned(p as *const u32) };
-        (word as usize) >> 2
-    }
+    Ok(())
 }
 
 fn out_op_expr(out: &mut PgString<'_>, o: &OpExpr<'_>) -> PgResult<()> {
@@ -938,7 +1070,7 @@ fn out_op_expr(out: &mut PgString<'_>, o: &OpExpr<'_>) -> PgResult<()> {
     out_bool(out, o.opretset);
     w!(out, " :opcollid {} :inputcollid {} :args ", o.opcollid, o.inputcollid);
     out_list(out, &o.args)?;
-    w!(out, " :location -1}}");
+    w!(out, " :location {}}}", loc(o.location));
     Ok(())
 }
 
@@ -954,7 +1086,7 @@ fn out_distinct_expr(
     out_bool(out, o.opretset);
     w!(out, " :opcollid {} :inputcollid {} :args ", o.opcollid, o.inputcollid);
     out_list(out, &o.args)?;
-    w!(out, " :location -1}}");
+    w!(out, " :location {}}}", loc(o.location));
     Ok(())
 }
 
@@ -970,7 +1102,7 @@ fn out_null_if_expr(
     out_bool(out, o.opretset);
     w!(out, " :opcollid {} :inputcollid {} :args ", o.opcollid, o.inputcollid);
     out_list(out, &o.args)?;
-    w!(out, " :location -1}}");
+    w!(out, " :location {}}}", loc(o.location));
     Ok(())
 }
 
@@ -985,7 +1117,7 @@ fn out_func_expr(out: &mut PgString<'_>, f: &FuncExpr<'_>) -> PgResult<()> {
         f.funcformat as u32, f.funccollid, f.inputcollid
     );
     out_list(out, &f.args)?;
-    w!(out, " :location -1}}");
+    w!(out, " :location {}}}", loc(f.location));
     Ok(())
 }
 
@@ -994,7 +1126,7 @@ fn out_named_arg_expr(out: &mut PgString<'_>, n: &NamedArgExpr<'_>) -> PgResult<
     out_opt_node(out, n.arg)?;
     w!(out, " :name ");
     out_str(out, n.name);
-    w!(out, " :argnumber {} :location -1}}", n.argnumber);
+    w!(out, " :argnumber {} :location {}}}", n.argnumber, loc(n.location));
     Ok(())
 }
 
@@ -1006,7 +1138,7 @@ fn out_bool_expr(out: &mut PgString<'_>, b: &BoolExpr<'_>) -> PgResult<()> {
     };
     w!(out, "{{BOOLEXPR :boolop {opstr} :args ");
     out_list(out, &b.args)?;
-    w!(out, " :location -1}}");
+    w!(out, " :location {}}}", loc(b.location));
     Ok(())
 }
 
@@ -1018,7 +1150,7 @@ fn out_null_test(out: &mut PgString<'_>, n: &NullTest<'_>) -> PgResult<()> {
     }
     w!(out, " :nulltesttype {} :argisrow ", n.nulltesttype as u32);
     out_bool(out, n.argisrow);
-    w!(out, " :location -1}}");
+    w!(out, " :location {}}}", loc(n.location));
     Ok(())
 }
 
@@ -1027,8 +1159,8 @@ fn out_coerce_to_domain(out: &mut PgString<'_>, c: &CoerceToDomain<'_>) -> PgRes
     out_node(out, c.arg)?;
     w!(
         out,
-        " :resulttype {} :resulttypmod {} :resultcollid {} :coercionformat {} :location -1}}",
-        c.resulttype, c.resulttypmod, c.resultcollid, c.coercionformat as u32
+        " :resulttype {} :resulttypmod {} :resultcollid {} :coercionformat {} :location {}}}",
+        c.resulttype, c.resulttypmod, c.resultcollid, c.coercionformat as u32, loc(c.location)
     );
     Ok(())
 }
@@ -1051,7 +1183,7 @@ fn out_partition_bound_spec(
     out_list(out, &b.lowerdatums)?;
     w!(out, " :upperdatums ");
     out_list(out, &b.upperdatums)?;
-    w!(out, " :location -1}}");
+    w!(out, " :location {}}}", loc(b.location));
     Ok(())
 }
 
@@ -1064,7 +1196,7 @@ fn out_partition_range_datum(
         Some(v) => out_node(out, v)?,
         None => w!(out, "<>"),
     }
-    w!(out, " :location -1}}");
+    w!(out, " :location {}}}", loc(d.location));
     Ok(())
 }
 
@@ -1073,8 +1205,8 @@ fn out_relabel_type(out: &mut PgString<'_>, r: &RelabelType<'_>) -> PgResult<()>
     out_node(out, r.arg)?;
     w!(
         out,
-        " :resulttype {} :resulttypmod {} :resultcollid {} :relabelformat {} :location -1}}",
-        r.resulttype, r.resulttypmod, r.resultcollid, r.relabelformat as u32
+        " :resulttype {} :resulttypmod {} :resultcollid {} :relabelformat {} :location {}}}",
+        r.resulttype, r.resulttypmod, r.resultcollid, r.relabelformat as u32, loc(r.location)
     );
     Ok(())
 }
@@ -1084,8 +1216,8 @@ fn out_coerce_via_io(out: &mut PgString<'_>, c: &CoerceViaIO<'_>) -> PgResult<()
     out_node(out, c.arg)?;
     w!(
         out,
-        " :resulttype {} :resultcollid {} :coerceformat {} :location -1}}",
-        c.resulttype, c.resultcollid, c.coerceformat as u32
+        " :resulttype {} :resultcollid {} :coerceformat {} :location {}}}",
+        c.resulttype, c.resultcollid, c.coerceformat as u32, loc(c.location)
     );
     Ok(())
 }
@@ -1097,8 +1229,8 @@ fn out_array_coerce_expr(out: &mut PgString<'_>, a: &ArrayCoerceExpr<'_>) -> PgR
     out_opt_node(out, a.elemexpr)?;
     w!(
         out,
-        " :resulttype {} :resulttypmod {} :resultcollid {} :coerceformat {} :location -1}}",
-        a.resulttype, a.resulttypmod, a.resultcollid, a.coerceformat as u32
+        " :resulttype {} :resulttypmod {} :resultcollid {} :coerceformat {} :location {}}}",
+        a.resulttype, a.resulttypmod, a.resultcollid, a.coerceformat as u32, loc(a.location)
     );
     Ok(())
 }
@@ -1108,8 +1240,8 @@ fn out_convert_rowtype_expr(out: &mut PgString<'_>, c: &ConvertRowtypeExpr<'_>) 
     out_node(out, c.arg)?;
     w!(
         out,
-        " :resulttype {} :convertformat {} :location -1}}",
-        c.resulttype, c.convertformat as u32
+        " :resulttype {} :convertformat {} :location {}}}",
+        c.resulttype, c.convertformat as u32, loc(c.location)
     );
     Ok(())
 }
@@ -1145,14 +1277,24 @@ fn out_str(out: &mut PgString<'_>, s: Option<&str>) {
     }
 }
 
-// outChar (outfuncs.c): '\0' keeps its traditional <> encoding.
-fn out_char(out: &mut PgString<'_>, c: u8) {
+// outChar (outfuncs.c:196-211): '\0' keeps its traditional <> encoding; any
+// other byte goes through outToken. C emits a non-ASCII byte raw; the node
+// string here is UTF-8 by invariant, so such a value (only a hand-edited
+// catalog "char" column produces one) is a typed refusal, never a panic.
+fn out_char(out: &mut PgString<'_>, c: u8) -> PgResult<()> {
     if c == 0 {
         w!(out, "<>");
-        return;
+        return Ok(());
     }
-    let buf = [c];
-    out_token(out, core::str::from_utf8(&buf).expect("outChar ascii"));
+    if !c.is_ascii() {
+        return Err(Box::new(
+            PgError::error(format!("could not dump non-ASCII char field value: {c}"))
+                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
+    }
+    let mut buf = [0u8; 4];
+    out_token(out, char::from(c).encode_utf8(&mut buf));
+    Ok(())
 }
 
 // _outString (outfuncs.c): always quoted, content escaped via outToken.
@@ -1167,8 +1309,8 @@ fn out_string_node(out: &mut PgString<'_>, s: &str) {
 fn out_json_format(out: &mut PgString<'_>, f: &types_nodes::JsonFormat) {
     w!(
         out,
-        "{{JSONFORMAT :format_type {} :encoding {} :location -1}}",
-        f.format_type as u32, f.encoding as u32
+        "{{JSONFORMAT :format_type {} :encoding {} :location {}}}",
+        f.format_type as u32, f.encoding as u32, loc(f.location)
     );
 }
 
@@ -1253,7 +1395,7 @@ fn out_xml_expr(out: &mut PgString<'_>, x: &XmlExpr<'_>) -> PgResult<()> {
     out_list(out, &x.args)?;
     w!(out, " :xmloption {} :indent ", x.xmloption as u32);
     out_bool(out, x.indent);
-    w!(out, " :type {} :typmod {} :location -1}}", x.r#type, x.typmod);
+    w!(out, " :type {} :typmod {} :location {}}}", x.r#type, x.typmod, loc(x.location));
     Ok(())
 }
 
@@ -1286,7 +1428,7 @@ fn out_table_func(out: &mut PgString<'_>, tf: &TableFunc<'_>) -> PgResult<()> {
     out_bitmapset(out, &tf.notnulls);
     w!(out, " :plan ");
     out_opt_node(out, tf.plan)?;
-    w!(out, " :ordinalitycol {} :location -1}}", tf.ordinalitycol);
+    w!(out, " :ordinalitycol {} :location {}}}", tf.ordinalitycol, loc(tf.location));
     Ok(())
 }
 
@@ -1319,10 +1461,10 @@ fn out_range_var(out: &mut PgString<'_>, r: &RangeVar<'_>) -> PgResult<()> {
     w!(out, " :inh ");
     out_bool(out, r.inh);
     w!(out, " :relpersistence ");
-    out_char(out, r.relpersistence);
+    out_char(out, r.relpersistence)?;
     w!(out, " :alias ");
     out_opt_alias(out, r.alias)?;
-    w!(out, " :location -1}}");
+    w!(out, " :location {}}}", loc(r.location));
     Ok(())
 }
 
@@ -1431,7 +1573,7 @@ fn out_query(out: &mut PgString<'_>, q: &Query<'_>) -> PgResult<()> {
     out_oid_list(out, &q.constraintDeps);
     w!(out, " :withCheckOptions ");
     out_list(out, &q.withCheckOptions)?;
-    w!(out, " :stmt_location -1 :stmt_len -1}}");
+    w!(out, " :stmt_location {} :stmt_len {}}}", loc(q.stmt_location), loc(q.stmt_len));
     Ok(())
 }
 
@@ -1466,7 +1608,7 @@ fn out_range_tbl_entry(out: &mut PgString<'_>, r: &RangeTblEntry<'_>) -> PgResul
             w!(out, " :relid {} :inh ", r.relid);
             out_bool(out, r.inh);
             w!(out, " :relkind ");
-            out_char(out, r.relkind);
+            out_char(out, r.relkind)?;
             w!(
                 out,
                 " :rellockmode {} :perminfoindex {} :tablesample ",
@@ -1485,7 +1627,7 @@ fn out_range_tbl_entry(out: &mut PgString<'_>, r: &RangeTblEntry<'_>) -> PgResul
             w!(out, " :relid {} :inh ", r.relid);
             out_bool(out, r.inh);
             w!(out, " :relkind ");
-            out_char(out, r.relkind);
+            out_char(out, r.relkind)?;
             w!(
                 out,
                 " :rellockmode {} :perminfoindex {}",
@@ -1660,7 +1802,7 @@ fn out_grouping_set(out: &mut PgString<'_>, g: &types_nodes::parsenodes::Groupin
     } else {
         out_list(out, &g.content)?;
     }
-    w!(out, " :location -1}}");
+    w!(out, " :location {}}}", loc(g.location));
     Ok(())
 }
 
@@ -1687,13 +1829,13 @@ fn out_aggref(out: &mut PgString<'_>, a: &Aggref<'_>) -> PgResult<()> {
     w!(out, " :aggvariadic ");
     out_bool(out, a.aggvariadic);
     w!(out, " :aggkind ");
-    out_char(out, a.aggkind as u8);
+    out_char(out, a.aggkind as u8)?;
     w!(out, " :aggpresorted ");
     out_bool(out, a.aggpresorted);
     w!(
         out,
-        " :agglevelsup {} :aggsplit {} :aggno {} :aggtransno {} :location -1}}",
-        a.agglevelsup, a.aggsplit, a.aggno, a.aggtransno
+        " :agglevelsup {} :aggsplit {} :aggno {} :aggtransno {} :location {}}}",
+        a.agglevelsup, a.aggsplit, a.aggno, a.aggtransno, loc(a.location)
     );
     Ok(())
 }
@@ -1709,7 +1851,7 @@ fn out_sub_link(out: &mut PgString<'_>, s: &SubLink<'_>) -> PgResult<()> {
     out_list(out, &s.operName)?;
     w!(out, " :subselect ");
     out_node(out, s.subselect)?;
-    w!(out, " :location -1}}");
+    w!(out, " :location {}}}", loc(s.location));
     Ok(())
 }
 
@@ -1724,7 +1866,7 @@ fn out_common_table_expr(out: &mut PgString<'_>, c: &CommonTableExpr<'_>) -> PgR
     out_opt_node(out, c.search_clause)?;
     w!(out, " :cycle_clause ");
     out_opt_node(out, c.cycle_clause)?;
-    w!(out, " :location -1 :cterecursive ");
+    w!(out, " :location {} :cterecursive ", loc(c.location));
     out_bool(out, c.cterecursive);
     w!(out, " :cterefcount {} :ctecolnames ", c.cterefcount);
     out_list(out, &c.ctecolnames)?;
@@ -1745,7 +1887,7 @@ fn out_cte_search_clause(out: &mut PgString<'_>, s: &types_nodes::parsenodes::CT
     out_bool(out, s.search_breadth_first);
     w!(out, " :search_seq_column ");
     out_str(out, s.search_seq_column);
-    w!(out, " :location -1}}");
+    w!(out, " :location {}}}", loc(s.location));
     Ok(())
 }
 
@@ -1762,9 +1904,13 @@ fn out_cte_cycle_clause(out: &mut PgString<'_>, c: &types_nodes::parsenodes::CTE
     out_str(out, c.cycle_path_column);
     w!(
         out,
-        " :location -1 :cycle_mark_type {} :cycle_mark_typmod {} :cycle_mark_collation {} \
+        " :location {} :cycle_mark_type {} :cycle_mark_typmod {} :cycle_mark_collation {} \
          :cycle_mark_neop {}}}",
-        c.cycle_mark_type, c.cycle_mark_typmod, c.cycle_mark_collation, c.cycle_mark_neop
+        loc(c.location),
+        c.cycle_mark_type,
+        c.cycle_mark_typmod,
+        c.cycle_mark_collation,
+        c.cycle_mark_neop
     );
     Ok(())
 }
@@ -1792,7 +1938,7 @@ fn out_scalar_array_op_expr(out: &mut PgString<'_>, s: &ScalarArrayOpExpr<'_>) -
     out_bool(out, s.useOr);
     w!(out, " :inputcollid {} :args ", s.inputcollid);
     out_list(out, &s.args)?;
-    w!(out, " :location -1}}");
+    w!(out, " :location {}}}", loc(s.location));
     Ok(())
 }
 

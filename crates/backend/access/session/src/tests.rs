@@ -1100,7 +1100,16 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      the LogChildExit / CleanupBackend / BackendStartup log-line
     //      witnesses (unit harness fixture; counted by the tree census,
     //      never product code — same class as 43/45/46/50/60).
-    assert_eq!(count_tree(crates), 583, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 584, 18.6 conformance audit (2026-09-05), nodes/outfuncs
+    //   nodeToStringWithLocations port (audit-18.6 b053):
+    //   64. nodes/outfuncs/src/lib.rs WRITE_LOCATION_FIELDS — Cell<bool>,
+    //      the port of outfuncs.c:29 `static bool write_location_fields`;
+    //      set by node_to_string_internal for the duration of ONE outNode
+    //      walk and restored (on the error path too) before it returns.
+    //      A transient per-call flag with no session identity, never live
+    //      across a statement boundary (slot-35 COMPILE_ECONOMY /
+    //      slot-41 SESSION_ROOT_RETIRING class) — non-session TLS.
+    assert_eq!(count_tree(crates), 584, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

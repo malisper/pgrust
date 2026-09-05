@@ -2597,14 +2597,16 @@ fn search_indexed_tlist_for_var<'mcx>(
         let tle = tle_node.as_target_entry().expect("TargetEntry");
         let Some(sub) = tle.expr.as_var() else { continue };
         if sub.varno == var.varno && sub.varattno == var.varattno {
-            assert!(
-                var.varattno <= 0 || sub.varnullingrels.equal(&var.varnullingrels),
-                "wrong varnullingrels {:?} (expected {:?}) for Var {}/{}",
-                var.varnullingrels,
-                sub.varnullingrels,
-                var.varno,
-                var.varattno
-            );
+            // setrefs.c:2903-2908: elog(ERROR) with bmsToString texts.
+            if !(var.varattno <= 0 || sub.varnullingrels.equal(&var.varnullingrels)) {
+                return Err(Box::new(types_error::PgError::error(format!(
+                    "wrong varnullingrels {} (expected {}) for Var {}/{}",
+                    outfuncs::bmsToString(&var.varnullingrels),
+                    outfuncs::bmsToString(&sub.varnullingrels),
+                    var.varno,
+                    var.varattno
+                ))));
+            }
             let mut newvar = types_nodes::primnodes::Var {
                 varno: newvarno,
                 varattno: tle.resno,
@@ -5029,20 +5031,22 @@ fn search_join_tlist_for_var<'mcx>(
         let tle = tle_node.as_target_entry().expect("TargetEntry");
         let Some(sub) = tle.expr.as_var() else { continue };
         if sub.varno == var.varno && sub.varattno == var.varattno {
-            assert!(
-                var.varattno <= 0
-                    || match nrm_match {
-                        NrmMatch::Subset => var.varnullingrels.is_subset(&sub.varnullingrels),
-                        NrmMatch::Superset => sub.varnullingrels.is_subset(&var.varnullingrels),
-                        NrmMatch::Equal => sub.varnullingrels.equal(&var.varnullingrels),
-                    },
-                "wrong varnullingrels {:?} (expected {:?}, nrm {:?}) for Var {}/{}",
-                var.varnullingrels,
-                sub.varnullingrels,
-                nrm_match,
-                var.varno,
-                var.varattno
-            );
+            // setrefs.c:2897-2908: elog(ERROR) with bmsToString texts.
+            let nullingrels_ok = var.varattno <= 0
+                || match nrm_match {
+                    NrmMatch::Subset => var.varnullingrels.is_subset(&sub.varnullingrels),
+                    NrmMatch::Superset => sub.varnullingrels.is_subset(&var.varnullingrels),
+                    NrmMatch::Equal => sub.varnullingrels.equal(&var.varnullingrels),
+                };
+            if !nullingrels_ok {
+                return Err(Box::new(types_error::PgError::error(format!(
+                    "wrong varnullingrels {} (expected {}) for Var {}/{}",
+                    outfuncs::bmsToString(&var.varnullingrels),
+                    outfuncs::bmsToString(&sub.varnullingrels),
+                    var.varno,
+                    var.varattno
+                ))));
+            }
             let mut newvar = types_nodes::primnodes::Var {
                 varno: newvarno,
                 varattno: tle.resno,
@@ -5081,18 +5085,20 @@ fn search_tlist_for_phv<'mcx>(
         if sub.phid != phv.phid {
             continue;
         }
-        assert!(
-            match nrm_match {
-                NrmMatch::Subset => phv.phnullingrels.is_subset(&sub.phnullingrels),
-                NrmMatch::Superset => sub.phnullingrels.is_subset(&phv.phnullingrels),
-                NrmMatch::Equal => sub.phnullingrels.equal(&phv.phnullingrels),
-            },
-            "wrong phnullingrels {:?} (expected {:?}, nrm {:?}) for PlaceHolderVar {}",
-            phv.phnullingrels,
-            sub.phnullingrels,
-            nrm_match,
-            phv.phid
-        );
+        // setrefs.c:2955-2965: elog(ERROR) with bmsToString texts.
+        let nullingrels_ok = match nrm_match {
+            NrmMatch::Subset => phv.phnullingrels.is_subset(&sub.phnullingrels),
+            NrmMatch::Superset => sub.phnullingrels.is_subset(&phv.phnullingrels),
+            NrmMatch::Equal => sub.phnullingrels.equal(&phv.phnullingrels),
+        };
+        if !nullingrels_ok {
+            return Err(Box::new(types_error::PgError::error(format!(
+                "wrong phnullingrels {} (expected {}) for PlaceHolderVar {}",
+                outfuncs::bmsToString(&phv.phnullingrels),
+                outfuncs::bmsToString(&sub.phnullingrels),
+                phv.phid
+            ))));
+        }
         let (vartype, vartypmod) = crate::costsize::expr_type_typmod(tle.expr);
         return Ok(Some(Node::mk(
             run.mcx,

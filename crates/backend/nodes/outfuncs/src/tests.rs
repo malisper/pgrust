@@ -821,3 +821,328 @@ fn a_const_null_and_bitstring_match_c_format() {
         "{A_CONST :val \"x\\ y\" :location -1}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// audit-18.6 b053 (backend/nodes/outfuncs) regression witnesses.
+// Each asserts the C outfuncs.c outcome; on the unfixed tree they fail with
+// the panic or the wrong bytes named in the batch's adjudication rows.
+
+fn int_a_const<'mcx>(mcx: mcx::Mcx<'mcx>, ival: i32, location: i32) -> Node<'mcx> {
+    use types_nodes::rawnodes::{A_Const, ValUnion};
+    Node::mk(
+        mcx,
+        A_Const { val: Some(ValUnion::Integer(types_nodes::Integer { ival })), location },
+    )
+    .unwrap()
+}
+
+fn name_list<'mcx>(mcx: mcx::Mcx<'mcx>, op: &'static str) -> NodeList<'mcx> {
+    let mut name = NodeList::nil();
+    name.lappend(mcx, Node::mk(mcx, types_nodes::String { sval: op }).unwrap()).unwrap();
+    name
+}
+
+// C outfuncs.c _outA_Expr: the kind keyword follows the node type (nothing
+// for AEXPR_OP), then :name :lexpr :rexpr and three location fields, all
+// -1 under nodeToString.
+#[test]
+fn a_expr_matches_c_outfuncs_format() {
+    use types_nodes::rawnodes::{A_Expr, A_Expr_Kind};
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let op = Node::mk(
+        mcx,
+        A_Expr {
+            kind: A_Expr_Kind::AEXPR_OP,
+            name: name_list(mcx, "="),
+            lexpr: Some(int_a_const(mcx, 1, 16)),
+            rexpr: Some(int_a_const(mcx, 1, 20)),
+            rexpr_list_start: -1,
+            rexpr_list_end: -1,
+            location: 18,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        nodeToString(mcx, op).unwrap().as_str(),
+        "{A_EXPR :name (\"=\") :lexpr {A_CONST :val 1 :location -1} :rexpr {A_CONST :val 1 \
+         :location -1} :rexpr_list_start -1 :rexpr_list_end -1 :location -1}"
+    );
+
+    let mut in_list = NodeList::nil();
+    in_list.lappend(mcx, int_a_const(mcx, 1, 14)).unwrap();
+    in_list.lappend(mcx, int_a_const(mcx, 2, 17)).unwrap();
+    let in_expr = Node::mk(
+        mcx,
+        A_Expr {
+            kind: A_Expr_Kind::AEXPR_IN,
+            name: name_list(mcx, "="),
+            lexpr: Some(int_a_const(mcx, 1, 7)),
+            rexpr: Some(Node::mk_list(mcx, in_list).unwrap()),
+            rexpr_list_start: 13,
+            rexpr_list_end: 18,
+            location: 9,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        nodeToString(mcx, in_expr).unwrap().as_str(),
+        "{A_EXPR IN :name (\"=\") :lexpr {A_CONST :val 1 :location -1} :rexpr ({A_CONST :val 1 \
+         :location -1} {A_CONST :val 2 :location -1}) :rexpr_list_start -1 :rexpr_list_end -1 \
+         :location -1}"
+    );
+
+    let not_between = Node::mk(
+        mcx,
+        A_Expr {
+            kind: A_Expr_Kind::AEXPR_NOT_BETWEEN_SYM,
+            name: name_list(mcx, "NOT BETWEEN SYMMETRIC"),
+            lexpr: None,
+            rexpr: None,
+            rexpr_list_start: -1,
+            rexpr_list_end: -1,
+            location: -1,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        nodeToString(mcx, not_between).unwrap().as_str(),
+        "{A_EXPR NOT_BETWEEN_SYM :name (\"NOT\\ BETWEEN\\ SYMMETRIC\") :lexpr <> :rexpr <> \
+         :rexpr_list_start -1 :rexpr_list_end -1 :location -1}"
+    );
+}
+
+// C outfuncs.c outNode: `else if (IsA(obj, Bitmapset)) outBitmapset(...)`.
+#[test]
+fn bitmapset_node_writes_the_b_list() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut bms = Bitmapset::make_singleton(mcx, 1).unwrap();
+    bms.add_member(mcx, 5).unwrap();
+    bms.add_member(mcx, 130).unwrap();
+    let n = Node::mk_bitmapset(mcx, bms).unwrap();
+    assert_eq!(nodeToString(mcx, n).unwrap().as_str(), "(b 1 5 130)");
+    let empty = Node::mk_bitmapset(mcx, Bitmapset::empty()).unwrap();
+    assert_eq!(nodeToString(mcx, empty).unwrap().as_str(), "(b)");
+}
+
+// C outfuncs.c _outList: an XidList is "(x %u ...)".
+#[test]
+fn xid_list_node_writes_the_x_list() {
+    use types_nodes::list::XidList;
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let xl = Node::mk_xid_list(mcx, XidList::make2(mcx, 100, 4_000_000_000).unwrap()).unwrap();
+    assert_eq!(nodeToString(mcx, xl).unwrap().as_str(), "(x 100 4000000000)");
+}
+
+// A node tag without a ported writer must be a catchable, typed refusal
+// carrying C outNode's message ("could not dump unrecognized node type: %d",
+// outfuncs.c default arm), never a process panic. A_Star (tag 77) has no
+// writer on either side of this fix.
+#[test]
+fn unported_node_tag_is_a_typed_refusal_not_a_panic() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let star = Node::mk(mcx, types_nodes::rawnodes::A_Star).unwrap();
+    let err = nodeToString(mcx, star).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+    assert_eq!(err.message(), "could not dump unrecognized node type: 77");
+}
+
+fn byref_const(constlen: i32, value: Datum) -> Const {
+    Const {
+        consttype: 25,
+        consttypmod: -1,
+        constcollid: 100,
+        constlen,
+        constvalue: value,
+        constisnull: false,
+        constbyval: false,
+        location: -1,
+    }
+}
+
+// C outfuncs.c outDatum -> datumGetSize -> VARSIZE_ANY: an external TOAST
+// pointer (VARATT_IS_1B_E, header 0x01) is VARSIZE_EXTERNAL = 2 + 16 bytes
+// for VARTAG_ONDISK, and all 18 bytes are written.
+#[test]
+fn external_toast_pointer_const_writes_varsize_external_bytes() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut img = [0u8; 18];
+    img[0] = 0x01;
+    img[1] = 18; // VARTAG_ONDISK
+    for (i, b) in img.iter_mut().enumerate().skip(2) {
+        *b = i as u8;
+    }
+    let c = byref_const(-1, Datum::from_usize(img.as_ptr() as usize));
+    let s = nodeToString(mcx, Node::mk(mcx, c).unwrap()).unwrap();
+    assert!(
+        s.as_str().ends_with(
+            ":constvalue 18 [ 1 18 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 ]}"
+        ),
+        "{}",
+        s.as_str()
+    );
+}
+
+// C datum.c datumGetSize (called by outDatum before anything is written):
+// typlen outside {>0, -1, -2} (or a by-value length that is not 1/2/4/8) is
+// elog(ERROR, "invalid typLen: %d"); a NULL by-reference pointer for a
+// varlena/cstring is elog(ERROR, "invalid Datum pointer"). Both XX000.
+#[test]
+fn invalid_typlen_and_null_varlena_pointer_are_c_elog_errors_not_panics() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let img = [0x0bu8, b'h', b'e', b'l', b'l', b'o'];
+    let p = Datum::from_usize(img.as_ptr() as usize);
+    for (typlen, byval, value) in [
+        (-3, false, p),
+        (0, false, p),
+        (3, true, Datum::from_i32(5)),
+        (16, true, Datum::from_i32(5)),
+    ] {
+        let mut c = byref_const(typlen, value);
+        c.constbyval = byval;
+        let err = nodeToString(mcx, Node::mk(mcx, c).unwrap()).unwrap_err();
+        assert_eq!(err.message(), format!("invalid typLen: {typlen}"));
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    }
+    for typlen in [-1, -2] {
+        let c = byref_const(typlen, Datum::null());
+        let err = nodeToString(mcx, Node::mk(mcx, c).unwrap()).unwrap_err();
+        assert_eq!(err.message(), "invalid Datum pointer");
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    }
+    // Fixed-length by-reference with a NULL pointer is the one "0 [ ]" case.
+    let c = byref_const(16, Datum::null());
+    let s = nodeToString(mcx, Node::mk(mcx, c).unwrap()).unwrap();
+    assert!(s.as_str().ends_with(":constvalue 0 [ ]}"), "{}", s.as_str());
+}
+
+// C outfuncs.c outChar emits the raw byte; pgrust's node string is UTF-8 by
+// invariant, so a non-ASCII "char" field (only reachable through a hand-
+// edited catalog "char" column) must be a typed refusal, never the
+// `expect("outChar ascii")` panic.
+#[test]
+fn non_ascii_char_field_is_a_typed_refusal_not_a_panic() {
+    use types_nodes::parsenodes::{RTEKind, RangeTblEntry};
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut rte = Node::build::<RangeTblEntry>(mcx).unwrap();
+    rte.rtekind = RTEKind::RTE_RELATION;
+    rte.relid = 16384;
+    rte.relkind = 0xC3;
+    rte.rellockmode = 1;
+    rte.inFromCl = true;
+    let node = rte.seal();
+    let err = nodeToString(mcx, node).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+    assert_eq!(err.message(), "could not dump non-ASCII char field value: 195");
+    // ASCII chars still go through outToken unchanged.
+    let mut rte = Node::build::<RangeTblEntry>(mcx).unwrap();
+    rte.rtekind = RTEKind::RTE_RELATION;
+    rte.relid = 16384;
+    rte.relkind = b'r';
+    rte.rellockmode = 1;
+    rte.inFromCl = true;
+    let s = nodeToString(mcx, rte.seal()).unwrap();
+    assert!(s.as_str().contains(" :relkind r :rellockmode 1 "), "{}", s.as_str());
+}
+
+// C outfuncs.c nodeToStringWithLocations (:811-814): every ParseLoc field
+// renders as its real value; nodeToString keeps -1; the flag is restored
+// after each call (nodeToStringInternal's save/restore).
+#[test]
+fn node_to_string_with_locations_writes_real_locations_and_restores_the_flag() {
+    use crate::nodeToStringWithLocations;
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let node = Node::mk(mcx, int4_const(42)).unwrap();
+    assert_eq!(
+        nodeToStringWithLocations(mcx, node).unwrap().as_str(),
+        ADBIN_DEFAULT_42.replace(":location -1", ":location 7")
+    );
+    assert_eq!(nodeToString(mcx, node).unwrap().as_str(), ADBIN_DEFAULT_42);
+
+    let var = Node::mk(
+        mcx,
+        Var {
+            varno: 1,
+            varattno: 2,
+            vartype: 23,
+            vartypmod: -1,
+            varcollid: 0,
+            varnullingrels: Bitmapset::empty(),
+            varlevelsup: 0,
+            varreturningtype: types_nodes::primnodes::VarReturningType::VAR_RETURNING_DEFAULT,
+            varnosyn: 1,
+            varattnosyn: 2,
+            location: 33,
+        },
+    )
+    .unwrap();
+    let mut args = NodeList::nil();
+    args.lappend(mcx, var).unwrap();
+    args.lappend(mcx, Node::mk(mcx, int4_const(0)).unwrap()).unwrap();
+    let op = Node::mk(
+        mcx,
+        OpExpr {
+            opno: 521,
+            opfuncid: 147,
+            opresulttype: 16,
+            opretset: false,
+            opcollid: 0,
+            inputcollid: 0,
+            args,
+            location: 35,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        nodeToStringWithLocations(mcx, op).unwrap().as_str(),
+        "{OPEXPR :opno 521 :opfuncid 147 :opresulttype 16 :opretset false :opcollid 0 \
+         :inputcollid 0 :args ({VAR :varno 1 :varattno 2 :vartype 23 :vartypmod -1 \
+         :varcollid 0 :varnullingrels (b) :varlevelsup 0 :varreturningtype 0 :varnosyn 1 \
+         :varattnosyn 2 :location 33} {CONST :consttype 23 :consttypmod -1 :constcollid 0 \
+         :constlen 4 :constbyval true :constisnull false :location 7 :constvalue 4 \
+         [ 0 0 0 0 0 0 0 0 ]}) :location 35}"
+    );
+    assert_eq!(nodeToString(mcx, op).unwrap().as_str(), CONBIN_B_GT_0);
+
+    // The raw A_Expr list-bound locations are ParseLoc fields too.
+    use types_nodes::rawnodes::{A_Expr, A_Expr_Kind};
+    let mut in_list = NodeList::nil();
+    in_list.lappend(mcx, int_a_const(mcx, 1, 14)).unwrap();
+    let in_expr = Node::mk(
+        mcx,
+        A_Expr {
+            kind: A_Expr_Kind::AEXPR_IN,
+            name: name_list(mcx, "="),
+            lexpr: Some(int_a_const(mcx, 1, 7)),
+            rexpr: Some(Node::mk_list(mcx, in_list).unwrap()),
+            rexpr_list_start: 13,
+            rexpr_list_end: 18,
+            location: 9,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        nodeToStringWithLocations(mcx, in_expr).unwrap().as_str(),
+        "{A_EXPR IN :name (\"=\") :lexpr {A_CONST :val 1 :location 7} :rexpr ({A_CONST :val 1 \
+         :location 14}) :rexpr_list_start 13 :rexpr_list_end 18 :location 9}"
+    );
+}
+
+// C outfuncs.c bmsToString (:822-830).
+#[test]
+fn bms_to_string_matches_c() {
+    use crate::bmsToString;
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut bms = Bitmapset::make_singleton(mcx, 1).unwrap();
+    bms.add_member(mcx, 5).unwrap();
+    assert_eq!(bmsToString(&bms), "(b 1 5)");
+    assert_eq!(bmsToString(&Bitmapset::empty()), "(b)");
+}

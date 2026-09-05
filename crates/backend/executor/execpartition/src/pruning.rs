@@ -98,10 +98,16 @@ pub fn exec_init_partition_exec_pruning<'mcx>(
     let pruneinfo = pruneinfo_node
         .as_partition_prune_info()
         .expect("partPruneInfos cell is a PartitionPruneInfo");
-    assert!(
-        relids.equal(&pruneinfo.relids),
-        "wrong pruneinfo found at part_prune_index={part_prune_index}"
-    );
+    // execPartition.c:1895-1898: elog(ERROR) with bmsToString texts.
+    if !relids.equal(&pruneinfo.relids) {
+        return Err(Box::new(types_error::PgError::error(format!(
+            "wrong pruneinfo with relids={} found at part_prune_index={} contained in plan \
+             node with relids={}",
+            outfuncs::bmsToString(&pruneinfo.relids),
+            part_prune_index,
+            outfuncs::bmsToString(relids)
+        ))));
+    }
 
     let mut unused = Bitmapset::empty();
     let mut prunestate = create_partition_prune_state(estate, pruneinfo_node, false, &mut unused)?;
