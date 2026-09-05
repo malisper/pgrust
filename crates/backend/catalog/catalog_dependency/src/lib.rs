@@ -1,7 +1,8 @@
 // dependency.c deletion half plus recordDependencyOnExpr, bounded to plain
 // tables/views and the objects their INTERNAL/AUTO closure reaches (rowtype +
 // array type, toast table + toast index, pg_attrdef/pg_constraint entries,
-// pg_rewrite rules); the DROP RESTRICT 2BP01 report is live, every other
+// pg_rewrite rules); the DROP RESTRICT 2BP01 report, the NOTICE/DEBUG2
+// cascade reports and the auto-cascade DEBUG2 lines are live, every other
 // object class or report arm is loud with its C symbol.
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -19,7 +20,13 @@ use datum::Datum;
 use mcx::Mcx;
 use pg_depend::{object_address_comparator, ObjectAddress};
 use types_core::{AttrNumber, InvalidOid, Oid, RELATION_RELATION_ID, TYPE_RELATION_ID};
-use types_error::{PgError, PgResult, ERRCODE_DEPENDENT_OBJECTS_STILL_EXIST};
+use catalog_objectaddress::{
+    get_object_catcache_oid, get_object_class_descr, is_objectclass_supported,
+};
+use elog::ereport;
+use types_error::{
+    ErrorLocation, PgError, PgResult, DEBUG2, ERRCODE_DEPENDENT_OBJECTS_STILL_EXIST, NOTICE,
+};
 use types_rel::{AccessExclusiveLock, Relation, RowExclusiveLock, RELKIND_INDEX, RELKIND_RELATION, RELKIND_SEQUENCE, RELKIND_TOASTVALUE, RELKIND_VIEW};
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_tuple::{HeapTupleData, TupleDescData};
@@ -404,10 +411,7 @@ fn findDependentObjects<'mcx>(
                         depRel,
                     )?;
                     if !object_address_present_add_flags(object, objflags, targetObjects) {
-                        panic!(
-                            "deletion of owning object {:?} failed to delete {:?}",
-                            otherObject, object
-                        );
+                        return Err(owning_object_failed_to_delete(mcx, &otherObject, object)?);
                     }
                     return Ok(());
                 }
@@ -423,10 +427,7 @@ fn findDependentObjects<'mcx>(
                     }
                     objflags |= DEPFLAG_IS_PART;
                 }
-                other => panic!(
-                    "unrecognized dependency type '{}' for {:?}",
-                    other as char, object
-                ),
+                other => return Err(unrecognized_dependency_type(mcx, other, object)?),
             }
         }
         genam::systable_endscan(mcx, scan)?;
@@ -498,10 +499,7 @@ fn findDependentObjects<'mcx>(
                 b'i' => DEPFLAG_INTERNAL,
                 b'P' | b'S' => DEPFLAG_PARTITION,
                 b'e' => DEPFLAG_EXTENSION,
-                other => panic!(
-                    "unrecognized dependency type '{}' for {:?}",
-                    other as char, object
-                ),
+                other => return Err(unrecognized_dependency_type(mcx, other, object)?),
             };
             dependentObjects.push((otherObject, subflags));
         }
@@ -551,6 +549,80 @@ fn cache_lookup_failed(class_descr: &str, oid: types_core::Oid) -> Box<PgError> 
     Box::new(PgError::error(format!("cache lookup failed for {class_descr} {oid}")))
 }
 
+#[track_caller]
+fn loc(funcname: &'static str) -> ErrorLocation {
+    // Report where in OUR source this was raised; #[track_caller] resolves
+    // to the ereport call site, not this helper.
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, funcname)
+}
+
+// getObjectDescription(object, false): objectaddress.c raises its
+// cache-lookup elog for a missing object, so the dependency walk's messages
+// never see a NULL description.
+fn object_description<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress) -> PgResult<String> {
+    match getObjectDescription(mcx, object)? {
+        Some(desc) => Ok(desc),
+        None => {
+            let descr = if is_objectclass_supported(object.classId) {
+                get_object_class_descr(object.classId)
+            } else {
+                "object"
+            };
+            Err(cache_lookup_failed(descr, object.objectId))
+        }
+    }
+}
+
+// findDependentObjects (dependency.c:764 and :892): an unknown
+// pg_depend.deptype is `elog(ERROR, "unrecognized dependency type '%c' for
+// %s", deptype, getObjectDescription(object, false))` -- catchable XX000.
+#[cold]
+#[inline(never)]
+fn unrecognized_dependency_type<'mcx>(
+    mcx: Mcx<'mcx>,
+    deptype: u8,
+    object: &ObjectAddress,
+) -> PgResult<Box<PgError>> {
+    let desc = object_description(mcx, object)?;
+    Ok(Box::new(PgError::error(format!(
+        "unrecognized dependency type '{}' for {desc}",
+        deptype as char
+    ))))
+}
+
+// findDependentObjects (dependency.c:722): the owning object's recursion did
+// not schedule the current object (its dependency record vanished under us)
+// -- `elog(ERROR, "deletion of owning object %s failed to delete %s")`.
+#[cold]
+#[inline(never)]
+fn owning_object_failed_to_delete<'mcx>(
+    mcx: Mcx<'mcx>,
+    owner: &ObjectAddress,
+    object: &ObjectAddress,
+) -> PgResult<Box<PgError>> {
+    let owner_desc = object_description(mcx, owner)?;
+    let desc = object_description(mcx, object)?;
+    Ok(Box::new(PgError::error(format!(
+        "deletion of owning object {owner_desc} failed to delete {desc}"
+    ))))
+}
+
+// DropObjectById (dependency.c:1206 / :1229): the catcache branch reports
+// `cache lookup failed for %s %u`, the index-scan branch `could not find
+// tuple for %s %u` (get_object_class_descr noun); both elog(ERROR) --
+// catchable XX000, never an abort.
+#[cold]
+#[inline(never)]
+fn could_not_find_tuple(relation_id: Oid, oid: Oid) -> Box<PgError> {
+    let descr = get_object_class_descr(relation_id);
+    if get_object_catcache_oid(relation_id) >= 0 {
+        cache_lookup_failed(descr, oid)
+    } else {
+        Box::new(PgError::error(format!("could not find tuple for {descr} {oid}")))
+    }
+}
+
 #[cold]
 #[inline(never)]
 fn cannot_drop_required(obj_desc: &str, other_desc: &str) -> Box<PgError> {
@@ -584,7 +656,7 @@ fn dependent_objects_exist(
 
 const MAX_REPORTED_DEPS: i32 = 100;
 
-// The auto/internal cascade arm stays a silent DEBUG2 no-op.
+// reportDependentObjects (dependency.c:979-1182).
 fn reportDependentObjects<'mcx>(
     mcx: Mcx<'mcx>,
     targetObjects: &ObjectAddresses,
@@ -592,6 +664,9 @@ fn reportDependentObjects<'mcx>(
     flags: i32,
     origObject: Option<&ObjectAddress>,
 ) -> PgResult<()> {
+    // dependency.c:985: QUIETLY (ON COMMIT DROP) reports at DEBUG2, not NOTICE.
+    let msglevel = if flags & PERFORM_DELETION_QUIETLY != 0 { DEBUG2 } else { NOTICE };
+
     // A partition-dependent object may be deleted only alongside one of its
     // partition dependencies (i.e. it was reached via a PARTITION dep).
     for i in 0..targetObjects.refs.len() {
@@ -603,6 +678,12 @@ fn reportDependentObjects<'mcx>(
                 .expect("drop target exists");
             return Err(cannot_drop_required(&objDesc, &otherDesc));
         }
+    }
+
+    // dependency.c:1027: no error to throw and nobody (client or server log)
+    // listening at msglevel -- none of the rest of the work is needed.
+    if behavior == DropBehavior::DROP_CASCADE && !elog::message_level_is_interesting(msglevel) {
+        return Ok(());
     }
 
     let mut clientdetail = String::new();
@@ -624,10 +705,18 @@ fn reportDependentObjects<'mcx>(
         if extra.flags & (DEPFLAG_AUTO | DEPFLAG_INTERNAL | DEPFLAG_PARTITION | DEPFLAG_EXTENSION)
             != 0
         {
-            // drop auto-cascades: DEBUG2, not client-visible. C builds the
-            // object description before this arm for that log line; deferred
-            // into the reporting arms so unported-class descriptions (e.g. a
-            // table's own pg_type rowtype) stay unreached.
+            // dependency.c:1081: auto-cascades are reported at DEBUG2, not
+            // msglevel. C builds the description before the branch; here it
+            // is built only when the DEBUG2 line will actually be emitted
+            // (same output -- ereport short-circuits below DEBUG2 either way),
+            // so a class this port cannot yet describe does not fail a drop
+            // that C reports only in the debug log.
+            if elog::message_level_is_interesting(DEBUG2) {
+                let Some(objDesc) = getObjectDescription(mcx, obj)? else { continue };
+                ereport(DEBUG2)
+                    .errmsg_internal(format!("drop auto-cascades to {objDesc}"))
+                    .finish(loc("reportDependentObjects"))?;
+            }
         } else if behavior == DropBehavior::DROP_RESTRICT {
             let Some(objDesc) = getObjectDescription(mcx, obj)? else { continue };
             if let Some(otherDesc) = getObjectDescription(mcx, &extra.dependee)? {
@@ -648,8 +737,6 @@ fn reportDependentObjects<'mcx>(
                 numNotReportedClient += 1;
             }
             ok = false;
-        } else if flags & PERFORM_DELETION_QUIETLY != 0 {
-            // QUIETLY drops msglevel to DEBUG2: nothing client-visible.
         } else {
             let Some(objDesc) = getObjectDescription(mcx, obj)? else { continue };
             if numReportedClient < MAX_REPORTED_DEPS {
@@ -683,16 +770,23 @@ fn reportDependentObjects<'mcx>(
         return Err(dependent_objects_exist(orig_desc, clientdetail, logdetail));
     }
 
+    // dependency.c:1163-1178: the client sees clientdetail (errdetail_internal),
+    // the server log the full logdetail (errdetail_log).
     if numReportedClient > 1 {
         let total = numReportedClient + numNotReportedClient;
-        let noun = if total == 1 { "object" } else { "objects" };
-        elog_seams::ereport_msg::call(
-            types_error::NOTICE,
-            format!("drop cascades to {total} other {noun}"),
-            Some(clientdetail),
-        )?;
+        ereport(msglevel)
+            .errmsg_plural(
+                format!("drop cascades to {total} other object"),
+                format!("drop cascades to {total} other objects"),
+                total as u64,
+            )
+            .errdetail_internal(clientdetail)
+            .errdetail_log(logdetail)
+            .finish(loc("reportDependentObjects"))?;
     } else if numReportedClient == 1 {
-        elog_seams::ereport_msg::call(types_error::NOTICE, clientdetail, None)?;
+        ereport(msglevel)
+            .errmsg_internal(clientdetail)
+            .finish(loc("reportDependentObjects"))?;
     }
     Ok(())
 }
@@ -716,10 +810,7 @@ fn deleteObjectsInList<'mcx>(
             continue;
         }
         if !doDeletion_handles_class(thisobj.classId) {
-            return Err(Box::new(PgError::error(format!(
-                "unsupported object class: {}",
-                thisobj.classId
-            ))));
+            return Err(doDeletion_unsupported(thisobj.classId));
         }
     }
 
@@ -757,6 +848,14 @@ fn deleteOneObject<'mcx>(
     depRel: &mut Option<Relation<'mcx>>,
     flags: i32,
 ) -> PgResult<()> {
+    // dependency.c:1254: DROP hook of the object being removed.
+    objectaccess::InvokeObjectDropHookArg(
+        object.classId,
+        object.objectId,
+        object.objectSubId,
+        flags,
+    )?;
+
     // doDeletion commits the transaction in the concurrent case; pg_depend
     // cannot stay open across it.
     if flags & PERFORM_DELETION_CONCURRENTLY != 0 {
@@ -994,26 +1093,28 @@ fn doDeletion<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress, flags: i32) -> PgRes
             types_core::USER_MAPPING_OID_INDEX_ID,
             object.objectId,
         )?,
-        // C REL_18_3 dependency.c doDeletion: global object classes never
-        // reach per-database deletion — same message, clean error.
+        other => return Err(doDeletion_unsupported(other)),
+    }
+    Ok(())
+}
+
+// doDeletion's two fallthrough arms (dependency.c:1473-1482): the global
+// object classes say "global objects cannot be deleted by doDeletion", any
+// other class "unsupported object class: %u". Both are clean, fully
+// rolled-back errors; deleteObjectsInList's pre-check emits the same text.
+#[cold]
+#[inline(never)]
+fn doDeletion_unsupported(class_id: Oid) -> Box<PgError> {
+    match class_id {
         types_core::AUTH_ID_RELATION_ID
         | types_core::DATABASE_RELATION_ID
         | types_core::TABLE_SPACE_RELATION_ID
         | SubscriptionRelationId_dep
         | ParameterAclRelationId_dep => {
-            return Err(Box::new(PgError::error(
-                "global objects cannot be deleted by doDeletion".to_string(),
-            )));
+            Box::new(PgError::error("global objects cannot be deleted by doDeletion".to_string()))
         }
-        other => {
-            // C: `elog(ERROR, "unsupported object class: %u")` — a clean,
-            // fully-rolled-back error, never a mid-deletion panic.
-            return Err(Box::new(PgError::error(format!(
-                "unsupported object class: {other}"
-            ))));
-        }
+        other => Box::new(PgError::error(format!("unsupported object class: {other}"))),
     }
-    Ok(())
 }
 
 // The classId set doDeletion's match handles — keep in sync with the match
@@ -1151,11 +1252,13 @@ fn DeleteComments<'mcx>(mcx: Mcx<'mcx>, oid: Oid, classoid: Oid, subid: i32) -> 
 // DeleteInitPrivs (aclchk.c).
 fn DeleteInitPrivs<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress) -> PgResult<()> {
     let rel = table::table_open(mcx, InitPrivsRelationId, RowExclusiveLock)?;
-    let keys = [
-        oid_key(1, object.objectId),
-        oid_key(2, object.classId),
-        int4_key(3, object.objectSubId),
-    ];
+    // aclchk.c:2902-2911: the objsubid key only for a sub-object; a whole
+    // object (objsubid 0) takes its column-level rows with it.
+    let mut keys: Vec<ScanKeyData> =
+        vec![oid_key(1, object.objectId), oid_key(2, object.classId)];
+    if object.objectSubId != 0 {
+        keys.push(int4_key(3, object.objectSubId));
+    }
     let mut scan =
         genam::systable_beginscan(mcx, &rel, InitPrivsObjIndexId, true, None, &keys)?;
     while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
@@ -1227,7 +1330,7 @@ fn drop_row_by_oid<'mcx>(
     let keys = [oid_key(1, oid)];
     let mut scan = genam::systable_beginscan(mcx, &rel, oid_index_id, true, None, &keys)?;
     let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
-        panic!("could not find tuple for object {oid} in catalog {relation_id}");
+        return Err(could_not_find_tuple(relation_id, oid));
     };
     let tid = tup.t_self;
     catalog_indexing::CatalogTupleDelete(&rel, &tid)?;
@@ -1245,6 +1348,34 @@ mod cache_lookup_tests {
         let e = super::cache_lookup_failed("event trigger", 16384);
         assert_eq!(e.message(), "cache lookup failed for event trigger 16384");
         assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(e.level(), types_error::ERROR);
+    }
+
+    // DropObjectById (dependency.c:1206 / :1229): pg_cast has no OID syscache
+    // (index-scan branch, "could not find tuple for cast N"); pg_collation
+    // has COLLOID (catcache branch, "cache lookup failed for collation N").
+    #[test]
+    fn drop_by_oid_miss_is_a_catchable_xx000_with_the_c_noun() {
+        let e = super::could_not_find_tuple(super::CastRelationId, 16825);
+        assert_eq!(e.message(), "could not find tuple for cast 16825");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(e.level(), types_error::ERROR);
+        let e = super::could_not_find_tuple(super::CollationRelationId_dep, 16826);
+        assert_eq!(e.message(), "cache lookup failed for collation 16826");
+        assert_eq!(e.level(), types_error::ERROR);
+    }
+
+    // doDeletion (dependency.c:1473-1482): the global classes and the
+    // unsupported-class fallthrough keep their C texts through the
+    // deleteObjectsInList pre-check.
+    #[test]
+    fn dodeletion_fallthrough_messages_match_c() {
+        let e = super::doDeletion_unsupported(types_core::DATABASE_RELATION_ID);
+        assert_eq!(e.message(), "global objects cannot be deleted by doDeletion");
+        let e = super::doDeletion_unsupported(super::SubscriptionRelationId_dep);
+        assert_eq!(e.message(), "global objects cannot be deleted by doDeletion");
+        let e = super::doDeletion_unsupported(9999);
+        assert_eq!(e.message(), "unsupported object class: 9999");
         assert_eq!(e.level(), types_error::ERROR);
     }
 }

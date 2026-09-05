@@ -38,6 +38,18 @@ pub(crate) fn cache_lookup_failed(noun: &str, oid: Oid) -> Box<types_error::PgEr
     Box::new(types_error::PgError::error(format!("cache lookup failed for {noun} {oid}")))
 }
 
+// The index-scanned catalogs (no OID syscache) report a missing row with
+// `elog(ERROR, "could not find tuple for <noun> %u", oid)` (objectaddress.c
+// :2992 cast, :3120 attrdef, :3254 amop, :3319 amproc, :3383 rule, :3429
+// trigger, :3655 role membership, :3786 default ACL, :3957 policy, :4056
+// transform) -- the same catchable XX000 as the syscache misses above;
+// pgrust used to panic!().
+#[cold]
+#[inline(never)]
+pub(crate) fn could_not_find_tuple(noun: &str, oid: Oid) -> Box<types_error::PgError> {
+    Box::new(types_error::PgError::error(format!("could not find tuple for {noun} {oid}")))
+}
+
 fn oid_key(attno: AttrNumber, oid: Oid) -> ScanKeyData {
     let mut key = ScanKeyData::empty();
     key.sk_attno = attno;
@@ -216,7 +228,7 @@ pub fn getObjectDescription(
             })?;
             let Some((castsource, casttarget)) = row else {
                 if !missing_ok {
-                    panic!("could not find tuple for cast {}", object.objectId);
+                    return Err(could_not_find_tuple("cast", object.objectId));
                 }
                 return Ok(None);
             };
@@ -247,7 +259,7 @@ pub fn getObjectDescription(
             let (adrelid, adnum) = pg_attrdef::GetAttrDefaultColumnAddress(mcx, object.objectId)?;
             if !OidIsValid(adrelid) {
                 if !missing_ok {
-                    panic!("could not find tuple for attrdef {}", object.objectId);
+                    return Err(could_not_find_tuple("attrdef", object.objectId));
                 }
                 return Ok(None);
             }
@@ -262,7 +274,7 @@ pub fn getObjectDescription(
             })?;
             let Some((rulename, ev_class)) = row else {
                 if !missing_ok {
-                    panic!("could not find tuple for rule {}", object.objectId);
+                    return Err(could_not_find_tuple("rule", object.objectId));
                 }
                 return Ok(None);
             };
@@ -275,7 +287,7 @@ pub fn getObjectDescription(
             })?;
             let Some((tgrelid, tgname)) = row else {
                 if !missing_ok {
-                    panic!("could not find tuple for trigger {}", object.objectId);
+                    return Err(could_not_find_tuple("trigger", object.objectId));
                 }
                 return Ok(None);
             };
@@ -288,7 +300,7 @@ pub fn getObjectDescription(
             })?;
             let Some((polname, polrelid)) = row else {
                 if !missing_ok {
-                    panic!("could not find tuple for policy {}", object.objectId);
+                    return Err(could_not_find_tuple("policy", object.objectId));
                 }
                 return Ok(None);
             };
@@ -632,7 +644,7 @@ pub fn getObjectDescription(
             )?;
             let Some((amopfamily, lefttype, righttype, strategy, amopopr)) = row else {
                 if !missing_ok {
-                    panic!("could not find tuple for amop entry {}", object.objectId);
+                    return Err(could_not_find_tuple("amop entry", object.objectId));
                 }
                 return Ok(None);
             };
@@ -677,7 +689,7 @@ pub fn getObjectDescription(
             )?;
             let Some((amprocfamily, lefttype, righttype, procnum, amproc)) = row else {
                 if !missing_ok {
-                    panic!("could not find tuple for amproc entry {}", object.objectId);
+                    return Err(could_not_find_tuple("amproc entry", object.objectId));
                 }
                 return Ok(None);
             };
@@ -716,7 +728,7 @@ pub fn getObjectDescription(
             )?;
             let Some((roleid, member)) = row else {
                 if !missing_ok {
-                    panic!("could not find tuple for role membership {}", object.objectId);
+                    return Err(could_not_find_tuple("role membership", object.objectId));
                 }
                 return Ok(None);
             };
@@ -756,7 +768,7 @@ pub fn getObjectDescription(
             )?;
             let Some((defaclrole, defaclnamespace, defaclobjtype)) = row else {
                 if !missing_ok {
-                    panic!("could not find tuple for default ACL {}", object.objectId);
+                    return Err(could_not_find_tuple("default ACL", object.objectId));
                 }
                 return Ok(None);
             };
@@ -830,7 +842,7 @@ pub fn getObjectDescription(
             )?
             else {
                 if !missing_ok {
-                    panic!("could not find tuple for transform {}", object.objectId);
+                    return Err(could_not_find_tuple("transform", object.objectId));
                 }
                 return Ok(None);
             };
