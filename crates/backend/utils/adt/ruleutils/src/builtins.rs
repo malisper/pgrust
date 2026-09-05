@@ -112,7 +112,9 @@ pub fn fc_pg_get_constraintdef_ext(
 fn expr(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo, pretty_flags: i32) -> PgResult<Datum> {
     // SAFETY: arg 0 of strict pg_get_expr is a non-null pg_node_tree (text).
     let raw = unsafe { fcinfo.arg_varlena_packed(0) }?;
-    let text = core::str::from_utf8(raw.data()).expect("non-UTF-8 pg_node_tree").to_owned();
+    let text = core::str::from_utf8(raw.data())
+        .map_err(|_| crate::non_utf8_unsupported("pg_node_tree arguments of pg_get_expr"))?
+        .to_owned();
     let relid = fcinfo.arg_oid(1);
     let ctx = MemoryContext::new("pg_get_expr");
     let res = crate::pg_get_expr_worker(ctx.mcx(), &text, relid, pretty_flags)?;
@@ -374,7 +376,7 @@ fn text_arg(fcinfo: &mut Fcinfo, argno: usize, what: &str) -> PgResult<String> {
     // SAFETY: strict builtin, text argument.
     let raw = unsafe { fcinfo.arg_varlena_packed(argno) }?;
     Ok(core::str::from_utf8(raw.data())
-        .unwrap_or_else(|_| panic!("non-UTF-8 {what}"))
+        .map_err(|_| crate::non_utf8_unsupported(what))?
         .to_owned())
 }
 
@@ -382,8 +384,8 @@ pub fn fc_pg_get_serial_sequence(
     flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
-    let tablename = text_arg(fcinfo, 0, "table name")?;
-    let columnname = text_arg(fcinfo, 1, "column name")?;
+    let tablename = text_arg(fcinfo, 0, "table names")?;
+    let columnname = text_arg(fcinfo, 1, "column names")?;
     let ctx = MemoryContext::new("pg_get_serial_sequence");
     let res = crate::pg_get_serial_sequence_worker(ctx.mcx(), &tablename, &columnname)?;
     Ok(match res {

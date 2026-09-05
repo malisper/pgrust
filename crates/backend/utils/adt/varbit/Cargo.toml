@@ -12,6 +12,7 @@ types_error = { path = "../../../../_support/types/types_error" }
 types_fmgr = { path = "../../../../_support/types/fmgr" }
 arrayfuncs = { path = "../arrayfuncs" }
 types_tuple = { path = "../../../../_support/types/types_tuple" }
+mbutils = { path = "../../mb/mbutils" }
 pqformat = { path = "../../../libpq/pqformat" }
 stringinfo = { path = "../../../../_support/types/stringinfo" }
 nodes_core = { path = "../../../nodes/nodes_core" }

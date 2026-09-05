@@ -4,7 +4,7 @@
 use std::rc::Rc;
 
 use mcx::Mcx;
-use types_error::PgResult;
+use types_error::{PgError, PgResult};
 use types_nodes::nodes_enums::{CmdType, LimitOption, LockClauseStrength, LockWaitPolicy};
 use types_nodes::parsenodes::{CTEMaterialize, RangeTblFunction, SetOperation, WindowClause};
 use types_nodes::primnodes::{CoercionForm, OverridingKind, SubLinkType};
@@ -665,8 +665,9 @@ pub(crate) fn get_query_def<'mcx>(
     result_desc: Option<Rc<Vec<String>>>,
     col_names_visible: bool,
 ) -> PgResult<()> {
-    // C ruleutils.c:5634.
+    // C ruleutils.c:5634-5635.
     stack_depth_core::check_stack_depth()?;
+    crate::check_for_interrupts()?;
     // C scribbles the flattened targetList/havingQual back into the Query;
     // the owned tree is immutable, so the flattened lists thread as params.
     let (target_list, having_qual, rtable_size) = if query.hasGroupRTE {
@@ -712,12 +713,12 @@ pub(crate) fn get_query_def<'mcx>(
             ctx.buf.push_str("NOTHING");
             Ok(())
         }
-        // get_utility_query_def: only NOTIFY can appear in rules.
+        // get_utility_query_def (ruleutils.c:7561): only NOTIFY can appear in
+        // rules; anything else is elog(ERROR) (7584).
         CmdType::CMD_UTILITY => {
-            let stmt = query
-                .utilityStmt
-                .and_then(|n| n.as_notify_stmt())
-                .unwrap_or_else(|| gap("get_utility_query_def", "non-NOTIFY utility statement"));
+            let Some(stmt) = query.utilityStmt.and_then(|n| n.as_notify_stmt()) else {
+                return Err(PgError::error("unexpected utility statement type").into());
+            };
             append_context_keyword(ctx, "", 0, PRETTYINDENT_STD, 1);
             let name = stmt.conditionname.expect("NOTIFY has a condition name");
             ctx.buf.push_str(&format!("NOTIFY {}", quote_identifier(name)));
@@ -940,8 +941,9 @@ fn get_select_query_def<'mcx>(
                 LockClauseStrength::LCS_FORSHARE => " FOR SHARE",
                 LockClauseStrength::LCS_FORNOKEYUPDATE => " FOR NO KEY UPDATE",
                 LockClauseStrength::LCS_FORUPDATE => " FOR UPDATE",
+                // ruleutils.c:6003: intentionally an error for LCS_NONE.
                 LockClauseStrength::LCS_NONE => {
-                    panic!("unrecognized LockClauseStrength: LCS_NONE")
+                    return Err(PgError::error("unrecognized LockClauseStrength 0").into())
                 }
             };
             append_context_keyword(ctx, kw, -PRETTYINDENT_STD, PRETTYINDENT_STD, 0);
@@ -1777,8 +1779,9 @@ fn get_setop_query<'mcx>(
     query: &'mcx Query<'mcx>,
     ctx: &mut DeparseContext<'mcx>,
 ) -> PgResult<()> {
-    // C ruleutils.c:6421.
+    // C ruleutils.c:6421-6422.
     stack_depth_core::check_stack_depth()?;
+    crate::check_for_interrupts()?;
     match set_op.node_tag() {
         NodeTag::T_RangeTblRef => {
             let rtr = set_op.as_range_tbl_ref().unwrap();
@@ -1834,7 +1837,10 @@ fn get_setop_query<'mcx>(
                 SetOperation::SETOP_UNION => "UNION ",
                 SetOperation::SETOP_INTERSECT => "INTERSECT ",
                 SetOperation::SETOP_EXCEPT => "EXCEPT ",
-                SetOperation::SETOP_NONE => panic!("unrecognized set op: SETOP_NONE"),
+                // ruleutils.c:6513.
+                SetOperation::SETOP_NONE => {
+                    return Err(PgError::error("unrecognized set op: 0").into())
+                }
             });
             if op.all {
                 ctx.buf.push_str("ALL ");
@@ -1977,10 +1983,15 @@ fn get_rule_sortgroupclause<'mcx>(
         get_variable(expr, v, 0, false, ctx)?;
         ctx.var_in_order_by = save;
     } else {
+        // ruleutils.c:6617: function-like expressions are always parenthesized
+        // here (they are the ones in danger of misparsing).
         let need_paren = ctx.pretty_paren()
             || matches!(
                 expr.node_tag(),
-                NodeTag::T_FuncExpr | NodeTag::T_Aggref | NodeTag::T_WindowFunc
+                NodeTag::T_FuncExpr
+                    | NodeTag::T_Aggref
+                    | NodeTag::T_WindowFunc
+                    | NodeTag::T_JsonConstructorExpr
             );
         if need_paren {
             ctx.buf.push('(');
@@ -2343,8 +2354,9 @@ fn get_rte_alias(
     } else if ctx.namespaces[0].rtable_columns[varno - 1].printaliases {
         true
     } else if rte.rtekind == RTEKind::RTE_RELATION {
+        // get_relation_name (ruleutils.c:13171): elog(ERROR) on a bad OID.
         let relname = lsyscache::get_rel_name(ctx.mcx, rte.relid)?
-            .expect("get_relation_name: relation exists")
+            .ok_or_else(|| crate::cache_lookup_failed("relation", rte.relid))?
             .as_str()
             .to_owned();
         refname.as_deref() != Some(relname.as_str())

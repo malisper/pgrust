@@ -281,3 +281,35 @@ fn bits_out_huge_length_clean_error_like_c() {
     let e = bits_out(mcx, &payload).unwrap_err();
     assert!(format!("{e:?}").contains("invalid memory alloc request size 2109372046"));
 }
+
+// audit-18.6 b057 a186-candidate-fp-adt-varbit-58ce0a46d3ee7a030a69-1 /
+// e5606132ec72b721e984-1: varbit.c:235/260 report pg_mblen_cstr(sp) bytes of
+// the offending character -- the whole multibyte character in UTF8, the raw
+// single byte in SQL_ASCII (never the leading byte re-encoded as a code
+// point).
+#[test]
+fn invalid_digit_message_carries_whole_character() {
+    const PG_SQL_ASCII: i32 = 0;
+    const PG_UTF8: i32 = 6;
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    mbutils::SetDatabaseEncoding(PG_UTF8).unwrap();
+    let e = bit_in_cstr(mcx, "10é".as_bytes()).unwrap_err();
+    assert_eq!(e.message(), "\"é\" is not a valid binary digit");
+    assert_eq!(e.sqlstate(), ::types_error::ERRCODE_INVALID_TEXT_REPRESENTATION);
+    let e = bit_in_cstr(mcx, "x1€".as_bytes()).unwrap_err();
+    assert_eq!(e.message(), "\"€\" is not a valid hexadecimal digit");
+    let e = bit_in_cstr(mcx, b"b1z").unwrap_err();
+    assert_eq!(e.message(), "\"z\" is not a valid binary digit");
+    assert!(e.message_raw.is_none());
+
+    mbutils::SetDatabaseEncoding(PG_SQL_ASCII).unwrap();
+    let e = bit_in_cstr(mcx, b"10\xe9").unwrap_err();
+    assert_eq!(e.message_raw.as_deref(), Some(&b"\"\xe9\" is not a valid binary digit"[..]));
+    assert_eq!(e.sqlstate(), ::types_error::ERRCODE_INVALID_TEXT_REPRESENTATION);
+    let e = bit_in_cstr(mcx, b"x1\xc3\xa9").unwrap_err();
+    assert_eq!(
+        e.message_raw.as_deref(),
+        Some(&b"\"\xc3\" is not a valid hexadecimal digit"[..])
+    );
+}

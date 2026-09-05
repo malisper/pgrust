@@ -70,6 +70,13 @@ pub(crate) fn view_attnames(relid: Oid) -> PgResult<Vec<String>> {
 // (NoLock, hard error) — the by-name pg_get_viewdef and
 // pg_get_serial_sequence forms.
 pub(crate) fn qualified_name_to_relid(mcx: Mcx<'_>, rawname: &str) -> PgResult<Oid> {
+    qualified_name_lookup(mcx, rawname).map(|(relid, _)| relid)
+}
+
+// makeRangeVarFromNameList(textToQualifiedNameList(rawname)) +
+// RangeVarGetRelid(rv, NoLock, false): the relation OID and the RangeVar's
+// relname (pg_get_serial_sequence's error names the latter, ruleutils.c:2860).
+pub(crate) fn qualified_name_lookup(mcx: Mcx<'_>, rawname: &str) -> PgResult<(Oid, String)> {
     let names = match varlena::split_identifier_string(
         mcx,
         rawname,
@@ -110,7 +117,8 @@ pub(crate) fn qualified_name_to_relid(mcx: Mcx<'_>, rawname: &str) -> PgResult<O
             .into())
         }
     }
-    catalog_namespace::RangeVarGetRelid(&rv, NoLock, false)
+    let relid = catalog_namespace::RangeVarGetRelid(&rv, NoLock, false)?;
+    Ok((relid, rv.relname.to_owned()))
 }
 
 pub(crate) fn view_name_to_oid(mcx: Mcx<'_>, viewname: &str) -> PgResult<Oid> {

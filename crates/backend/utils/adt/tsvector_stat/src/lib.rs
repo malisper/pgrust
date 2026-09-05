@@ -115,8 +115,20 @@ fn ts_accum(acc: &mut HashMap<Vec<u8>, (i32, i32)>, weight: u16, img: &[u8]) {
 }
 
 fn ts_stat_sql(mcx: Mcx<'_>, txt: &[u8], ws: Option<&[u8]>) -> PgResult<Vec<(Vec<u8>, i32, i32)>> {
+    // tsvector_op.c:2580 text_to_cstring(txt) hands the raw server-encoding
+    // bytes to SPI_prepare; this port's SPI takes a &str, so a non-UTF-8
+    // query (reachable only in a SQL_ASCII database) is refused with the
+    // same typed ERRCODE_FEATURE_NOT_SUPPORTED shape as tcop's SQL_ASCII
+    // query-string carve -- not an internal error.
     let query = core::str::from_utf8(txt).map_err(|_| {
-        Box::new(PgError::error("ts_stat query is not valid UTF-8".to_string()))
+        Box::new(
+            PgError::error(format!(
+                "non-ASCII query strings of ts_stat are not supported yet in databases with encoding \"{}\"",
+                ::mbutils::GetDatabaseEncodingName()
+            ))
+            .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .with_hint("Use a database with encoding \"UTF8\"."),
+        )
     })?;
     let plan = ::spi::SPI_prepare(query, &[])?;
     if plan == ::spi::SpiPlanPtr::NULL {

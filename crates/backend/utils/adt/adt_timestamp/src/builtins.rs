@@ -722,8 +722,9 @@ pub fn fc_interval_avg_accum_inv(
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     let [a, b] = *fcinfo.args_n::<2>();
+    // timestamp.c:4228: should not get here with no state.
     if a.isnull {
-        panic!("interval_avg_accum_inv called with NULL state");
+        return Err(Box::new(PgError::error("interval_avg_accum_inv called with NULL state")));
     }
     let state = a.value.as_usize() as *mut crate::interval::IntervalAggState;
     if !b.isnull {
@@ -787,6 +788,11 @@ pub fn fc_interval_avg_serialize(
     _flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
+    // timestamp.c:4146: disallow calling when not in aggregate context.
+    // SAFETY: context, if set, is the evaltrans build's AggStateNode.
+    if unsafe { fcinfo.agg_context() }.is_none() {
+        return Err(Box::new(PgError::error("aggregate function called in non-aggregate context")));
+    }
     let a = fcinfo.args_n::<1>()[0];
     // SAFETY: strict fn — arg 0 is the aggcontext-lived state.
     let state = unsafe { &*(a.value.as_usize() as *const crate::interval::IntervalAggState) };

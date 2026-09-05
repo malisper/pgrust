@@ -69,10 +69,39 @@ pub fn get_pretty_flags(pretty: bool) -> i32 {
     }
 }
 
+// CHECK_FOR_INTERRUPTS() (miscadmin.h): route a pending interrupt through
+// the ported ProcessInterrupts seam (the gist/gin/spgist pattern).
+#[inline]
+pub(crate) fn check_for_interrupts() -> PgResult<()> {
+    if init_small::globals::InterruptPending() {
+        return postgres_seams::check_for_interrupts::call();
+    }
+    Ok(())
+}
+
 #[cold]
 #[inline(never)]
 pub(crate) fn gap(func: &str, what: &str) -> ! {
     panic!("ruleutils ({func}): {what} unported")
+}
+
+// ruleutils.c works on raw server-encoding bytes (text_to_cstring, the
+// output functions' cstrings, pg_node_tree text); this crate deparses into a
+// `String`, which cannot carry non-UTF-8 bytes, so such input (reachable only
+// in a SQL_ASCII database) is refused with the same typed
+// ERRCODE_FEATURE_NOT_SUPPORTED shape as tcop's SQL_ASCII query-string carve
+// -- never a panic.
+#[cold]
+#[inline(never)]
+pub(crate) fn non_utf8_unsupported(what: &str) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "non-ASCII {what} are not supported yet in databases with encoding \"{}\"",
+            mbutils::GetDatabaseEncodingName()
+        ))
+        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+        .with_hint("Use a database with encoding \"UTF8\"."),
+    )
 }
 
 #[cold]
@@ -374,31 +403,22 @@ pub(crate) fn generate_operator_name(
     Ok(format!("OPERATOR({}.{oprname})", quote_identifier(&nspname)))
 }
 
-// CollationIsVisibleExt reduced to the lookup_collation probe pair
-// (encoding-exact, then any-encoding) over the search path.
+// CollationIsVisible (namespace.c:2407): a collation outside pg_catalog and
+// the search path is hidden; one on the path is visible only if the
+// encoding-aware unqualified lookup, CollationGetCollid(collname), lands on
+// it (so a same-named collation earlier on the path, or a collencoding that
+// does not fit the database, forces qualification). get_collation_oid's
+// unqualified missing_ok branch (namespace.c:3870) is that same search.
 fn collation_is_visible(collid: Oid, collname: &str, collnamespace: Oid) -> PgResult<bool> {
-    let encoding = mbutils::GetDatabaseEncoding() as i32;
-    let mut path = [InvalidOid; 64];
-    let n = catalog_namespace::fetch_search_path_array(&mut path)?;
-    for &nsp in &path[..n] {
-        if nsp == collnamespace {
-            return Ok(true);
-        }
-        for enc in [encoding, -1] {
-            let found = cache_syscache::GetSysCacheOid(
-                cache_syscache::COLLNAMEENCNSP,
-                1,
-                SysCacheKey::Str(collname),
-                SysCacheKey::Value(Datum::from_i32(enc)),
-                SysCacheKey::Value(Datum::from_oid(nsp)),
-                SysCacheKey::UNUSED,
-            )?;
-            if found != InvalidOid {
-                return Ok(found == collid);
-            }
+    const PG_CATALOG_NAMESPACE: Oid = 11;
+    if collnamespace != PG_CATALOG_NAMESPACE {
+        let mut path = [InvalidOid; 64];
+        let n = catalog_namespace::fetch_search_path_array(&mut path)?;
+        if !path[..n].contains(&collnamespace) {
+            return Ok(false);
         }
     }
-    Ok(false)
+    Ok(catalog_namespace::get_collation_oid(&[collname], true)? == collid)
 }
 
 const ANUM_PG_COLLATION_COLLNAME: i32 = 2;
@@ -812,7 +832,7 @@ fn pg_get_indexdef_worker_extended(
                 let str = deparse::deparse_expression_pretty(
                     mcx, indexkey, idx.indrelid, false, pretty_flags,
                 )?;
-                if looks_like_function(indexkey) {
+                if query::looks_like_function(indexkey) {
                     buf.push_str(&str);
                 } else {
                     buf.push('(');
@@ -914,19 +934,6 @@ pub fn init_seams() {
 // wrap ("(b + 0)", not "((b + 0))") in routing-error DETAIL lines.
 fn pg_get_partkeydef_columns_for_seam(mcx: Mcx<'_>, relid: Oid) -> PgResult<Option<String>> {
     pg_get_partkeydef_worker(mcx, relid, get_pretty_flags(true), true, false)
-}
-
-// looks_like_function (ruleutils.c): node types that deparse as func(...).
-fn looks_like_function(node: types_nodes::Node<'_>) -> bool {
-    use types_nodes::NodeTag::*;
-    match node.node_tag() {
-        T_FuncExpr => node
-            .as_func_expr()
-            .map(|f| f.funcformat == types_nodes::CoercionForm::COERCE_EXPLICIT_CALL)
-            .unwrap_or(false),
-        T_NullIfExpr | T_CoalesceExpr | T_MinMaxExpr | T_SQLValueFunction | T_XmlExpr => true,
-        _ => false,
-    }
 }
 
 pub fn pg_get_indexdef_string(mcx: Mcx<'_>, indexrelid: Oid) -> PgResult<String> {
@@ -1660,11 +1667,12 @@ pub fn pg_get_serial_sequence_worker(
     tablename: &str,
     columnname: &str,
 ) -> PgResult<Option<String>> {
-    let table_oid = viewdef::qualified_name_to_relid(mcx, tablename)?;
+    let (table_oid, relname) = viewdef::qualified_name_lookup(mcx, tablename)?;
     let attnum = lsyscache::get_attnum(table_oid, columnname)?;
     if attnum == 0 {
+        // ruleutils.c:2860: tablerv->relname, not the raw argument.
         return Err(PgError::error(format!(
-            "column \"{columnname}\" of relation \"{tablename}\" does not exist"
+            "column \"{columnname}\" of relation \"{relname}\" does not exist"
         ))
         .with_sqlstate(types_error::ERRCODE_UNDEFINED_COLUMN)
         .into());

@@ -174,6 +174,18 @@ fn install() {
             }))
         });
         namespace_seams::type_is_visible::set(|_| Ok(true));
+        // CHECK_FOR_INTERRUPTS(): a pending cancel raises 57014, as
+        // ProcessInterrupts does for QueryCancelPending.
+        postgres_seams::check_for_interrupts::set(|| {
+            if init_small::globals::InterruptPending() {
+                Err(Box::new(
+                    PgError::error("canceling statement due to user request")
+                        .with_sqlstate(types_error::ERRCODE_QUERY_CANCELED),
+                ))
+            } else {
+                Ok(())
+            }
+        });
         fmgr_seams::fmgr_info::set(|foid| {
             let f = match foid {
                 F_INT4OUT => fake_int4out,
@@ -479,4 +491,78 @@ fn ruleutils_cache_lookup_failures_are_catchable_xx000() {
         assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
         assert_eq!(e.level(), types_error::ERROR);
     }
+}
+
+// audit-18.6 b057 a186-candidate-fp-adt-ruleutils-p3-d749acd8397898cfc803-1 /
+// p4-d5718746d4fe34cb7043-1: get_query_def (ruleutils.c:5635), get_setop_query
+// (6422) and get_rule_expr (9263) CHECK_FOR_INTERRUPTS(), so a pending cancel
+// stops a long deparse instead of being noticed only after it completes.
+#[test]
+fn deparse_checks_for_interrupts() {
+    install();
+    let ctx = MemoryContext::new("ruleutils test");
+    let mcx = ctx.mcx();
+    let node = readfuncs::stringToNode(mcx, CONST_NEG5).unwrap();
+    let action = include_str!("fixtures/v11_action.txt");
+    let q = readfuncs::stringToNode(mcx, action.trim_end()).unwrap();
+    let q = q.as_list().unwrap().nth(0).as_query().unwrap();
+    init_small::globals::SetInterruptPending(true);
+    let expr = deparse_expression_pretty(mcx, node, REL_OID, false, PRETTYFLAG_INDENT);
+    let mut dctx = deparse::DeparseContext::new(mcx, PRETTYFLAG_INDENT);
+    dctx.wrap_column = 0;
+    let query = query::get_query_def(q, &mut dctx, None, true);
+    init_small::globals::SetInterruptPending(false);
+    let err = expr.err().expect("pending interrupt cancels get_rule_expr");
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_QUERY_CANCELED);
+    let err = query.err().expect("pending interrupt cancels get_query_def");
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_QUERY_CANCELED);
+    // With no interrupt pending the same trees deparse.
+    assert!(deparse_expression_pretty(mcx, node, REL_OID, false, PRETTYFLAG_INDENT).is_ok());
+}
+
+fn query_def_err(action: &str) -> Box<PgError> {
+    install();
+    let ctx = MemoryContext::new("ruleutils test");
+    let mcx = ctx.mcx();
+    let node = readfuncs::stringToNode(mcx, action.trim_end()).unwrap();
+    let q = node.as_list().unwrap().nth(0).as_query().unwrap();
+    let mut dctx = deparse::DeparseContext::new(mcx, PRETTYFLAG_INDENT);
+    dctx.wrap_column = 0;
+    query::get_query_def(q, &mut dctx, None, true).err().expect("get_query_def raises")
+}
+
+// audit-18.6 b057 a186-candidate-fp-adt-ruleutils-p3-586a69256ed80efd5a97-1:
+// get_utility_query_def (ruleutils.c:7584) elog(ERROR)s on a non-NOTIFY
+// utility statement in a stored rule action; never a panic.
+#[test]
+fn utility_query_other_than_notify_is_elog_error() {
+    let action = include_str!("fixtures/v1_action.txt")
+        .replacen(":commandType 1", ":commandType 6", 1)
+        .replacen(":utilityStmt <>", &format!(":utilityStmt {CONST_NEG5}"), 1);
+    let err = query_def_err(&action);
+    assert_eq!(err.message(), "unexpected utility statement type");
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+}
+
+// audit-18.6 b057 a186-candidate-fp-adt-ruleutils-p3-90468a68265716418828-1:
+// get_select_query_def (ruleutils.c:6003) on LCS_NONE and get_setop_query
+// (6513) on SETOP_NONE are elog(ERROR)s with C's messages, not panics.
+#[test]
+fn lcs_none_and_setop_none_are_elog_errors() {
+    let action = include_str!("fixtures/v1_action.txt")
+        .replacen(":hasForUpdate false", ":hasForUpdate true", 1)
+        .replacen(
+            ":rowMarks <>",
+            ":rowMarks ({ROWMARKCLAUSE :rti 1 :strength 0 :waitPolicy 0 :pushedDown false})",
+            1,
+        );
+    let err = query_def_err(&action);
+    assert_eq!(err.message(), "unrecognized LockClauseStrength 0");
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+
+    let action = include_str!("fixtures/v11_action.txt")
+        .replacen("SETOPERATIONSTMT :op 1", "SETOPERATIONSTMT :op 0", 1);
+    let err = query_def_err(&action);
+    assert_eq!(err.message(), "unrecognized set op: 0");
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
 }

@@ -162,8 +162,9 @@ pub(crate) fn get_rule_expr<'mcx>(
     ctx: &mut DeparseContext<'mcx>,
     showimplicit: bool,
 ) -> PgResult<()> {
-    // C ruleutils.c:9262.
+    // C ruleutils.c:9262-9263.
     stack_depth_core::check_stack_depth()?;
+    crate::check_for_interrupts()?;
     match node.node_tag() {
         NodeTag::T_Var => get_variable(node, node.as_var().unwrap(), 0, false, ctx).map(|_| ()),
         NodeTag::T_Const => get_const_expr(node.as_const().unwrap(), ctx, 0),
@@ -1022,11 +1023,24 @@ pub(crate) fn get_rule_expr_paren<'mcx>(
     Ok(())
 }
 
-fn get_simple_binary_op_name<'a>(mcx: Mcx<'a>, expr: &OpExpr<'_>) -> Option<mcx::PgString<'a>> {
+// get_simple_binary_op_name (ruleutils.c:8829): the operator as
+// generate_operator_name prints it, and only when that is a single character
+// -- so multi-character operators (->, ->>, ...) and schema-qualified
+// OPERATOR(nsp.+) spellings are never precedence-simple.
+fn get_simple_binary_op_name(mcx: Mcx<'_>, expr: &OpExpr<'_>) -> Option<String> {
     if expr.args.len() != 2 {
         return None;
     }
-    lsyscache::get_opname(mcx, expr.opno).ok().flatten()
+    let arg1 = expr.args.nth(0);
+    let arg2 = expr.args.nth(1);
+    let op = crate::generate_operator_name(
+        mcx,
+        expr.opno,
+        parse_expr::expr_type(arg1),
+        parse_expr::expr_type(arg2),
+    )
+    .ok()?;
+    (op.len() == 1).then_some(op)
 }
 
 fn is_simple_node(node: Node<'_>, parent: Option<Node<'_>>, pretty_flags: i32) -> bool {
@@ -1464,7 +1478,7 @@ fn oid_output_function_call(mcx: Mcx<'_>, typoutput: Oid, value: Datum) -> PgRes
     // SAFETY: out functions return a NUL-terminated cstring datum; copied out
     // before finfo (and its scratch) dies.
     let s = unsafe { core::ffi::CStr::from_ptr(d.as_usize() as *const core::ffi::c_char) };
-    Ok(s.to_str().expect("non-UTF-8 output function result").to_owned())
+    Ok(s.to_str().map_err(|_| crate::non_utf8_unsupported("constants"))?.to_owned())
 }
 
 pub(crate) fn get_const_expr(

@@ -1162,6 +1162,7 @@ version = "0.1.0"
 dependencies = [
  "arrayfuncs",
  "datum",
+ "mbutils",
  "mcx",
  "nodes_core",
  "pqformat",
@@ -16255,6 +16256,7 @@ dependencies = [
  "guc",
  "guc_tables",
  "indexcmds_seams",
+ "init_small",
  "lsyscache",
  "mbutils",
  "mcx",
@@ -16267,6 +16269,7 @@ dependencies = [
  "partbounds",
  "partdesc",
  "pg_depend",
+ "postgres_seams",
  "readfuncs",
  "rel_vocab",
  "relation_seams",

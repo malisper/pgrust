@@ -215,7 +215,9 @@ pub fn qtn_binary<'mcx>(mcx: Mcx<'mcx>, n: &mut QtNode<'mcx>) -> PgResult<()> {
         let c1 = core::mem::replace(&mut n.children[1], dummy());
         let sign = c0.sign | c1.sign;
         let mut sub: PgVec<QtNode> = PgVec::new_in(mcx);
-        sub.try_reserve_exact(2).map_err(|_| mcx.oom(2)).expect("qtn_binary alloc");
+        // C palloc0(sizeof(QTNode *) * 2) (tsquery_util.c:267): allocation
+        // failure is the catchable out-of-memory error.
+        sub.try_reserve_exact(2).map_err(|_| mcx.oom(2))?;
         sub.push(c0);
         sub.push(c1);
         let nn = QtNode {

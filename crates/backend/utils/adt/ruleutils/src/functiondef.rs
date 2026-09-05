@@ -4,7 +4,7 @@
 use cache_syscache::{ReleaseSysCache, SearchSysCache1, SysCacheKey, AGGFNOID, PROCOID};
 use datum::Datum;
 use mcx::Mcx;
-use types_core::{InvalidOid, Oid};
+use types_core::{InvalidOid, Oid, CHAROID};
 use types_error::{PgError, PgResult, ERRCODE_WRONG_OBJECT_TYPE};
 
 use crate::deparse::simple_quote_literal;
@@ -86,7 +86,10 @@ struct PgProcRow {
     prorettype: Oid,
     proargtypes: Vec<Oid>,
     proallargtypes: Option<Vec<Oid>>,
-    proargmodes: Option<Vec<u8>>,
+    // SQL NULL, or the raw array as get_func_arg_info (funcapi.c:1444) sees
+    // it: Err(()) = not a 1-D no-null "char" array (validated against the
+    // argument count in func_arg_info).
+    proargmodes: Option<Result<Vec<u8>, ()>>,
     proargnames: Option<Vec<String>>,
     proargdefaults: Option<String>,
     trftypes: Option<Vec<Oid>>,
@@ -125,7 +128,7 @@ fn pg_proc_row(funcid: Oid) -> PgResult<Option<PgProcRow>> {
         ),
         proallargtypes: getattr_null(&t, PROCOID, ANUM_PG_PROC_PROALLARGTYPES)
             .map(crate::oid_array_at),
-        proargmodes: getattr_null(&t, PROCOID, ANUM_PG_PROC_PROARGMODES).map(char_array_at),
+        proargmodes: getattr_null(&t, PROCOID, ANUM_PG_PROC_PROARGMODES).map(char_array_checked),
         proargnames: getattr_null(&t, PROCOID, ANUM_PG_PROC_PROARGNAMES).map(text_array_at),
         proargdefaults: getattr_null(&t, PROCOID, ANUM_PG_PROC_PROARGDEFAULTS).map(text_at),
         trftypes: getattr_null(&t, PROCOID, ANUM_PG_PROC_PROTRFTYPES).map(crate::oid_array_at),
@@ -139,9 +142,17 @@ fn pg_proc_row(funcid: Oid) -> PgResult<Option<PgProcRow>> {
     Ok(Some(row))
 }
 
-// One-dimensional no-null "char" array body.
-fn char_array_at(d: Datum) -> Vec<u8> {
-    crate::array_body(d, 1)
+// "char" array body if it is one-dimensional, null-free and of element
+// type "char" (funcapi.c:1453-1456's shape test); Err(()) otherwise.
+fn char_array_checked(d: Datum) -> Result<Vec<u8>, ()> {
+    let b = crate::varlena_body_at(d);
+    let rd = |off: usize| i32::from_ne_bytes(b[off..off + 4].try_into().unwrap());
+    // ndim, dataoffset (non-zero = a nulls bitmap is present), elemtype.
+    if rd(0) != 1 || rd(4) != 0 || rd(8) as Oid != CHAROID {
+        return Err(());
+    }
+    let dim1 = rd(12) as usize;
+    Ok(b[20..20 + dim1].to_vec())
 }
 
 // %g for the COST/ROWS values CREATE FUNCTION accepts.
@@ -159,20 +170,26 @@ struct ArgInfo {
     argmodes: Option<Vec<u8>>,
 }
 
-// get_func_arg_info (funcapi.c).
-fn func_arg_info(proc: &PgProcRow) -> ArgInfo {
-    match &proc.proallargtypes {
-        Some(all) => ArgInfo {
-            argtypes: all.clone(),
-            argnames: proc.proargnames.clone(),
-            argmodes: proc.proargmodes.clone(),
-        },
-        None => ArgInfo {
-            argtypes: proc.proargtypes.clone(),
-            argnames: proc.proargnames.clone(),
-            argmodes: None,
-        },
-    }
+// get_func_arg_info (funcapi.c:1385): proargmodes is read whether or not
+// proallargtypes is set, and must be a 1-D null-free "char" array of exactly
+// numargs entries (funcapi.c:1444-1458).
+fn func_arg_info(proc: &PgProcRow) -> PgResult<ArgInfo> {
+    let argtypes = match &proc.proallargtypes {
+        Some(all) => all.clone(),
+        None => proc.proargtypes.clone(),
+    };
+    let numargs = argtypes.len();
+    let argmodes = match &proc.proargmodes {
+        None => None,
+        Some(Ok(modes)) if modes.len() == numargs => Some(modes.clone()),
+        Some(_) => {
+            return Err(PgError::error(format!(
+                "proargmodes is not a 1-D char array of length {numargs} or it contains nulls"
+            ))
+            .into())
+        }
+    };
+    Ok(ArgInfo { argtypes, argnames: proc.proargnames.clone(), argmodes })
 }
 
 fn print_function_arguments(
@@ -182,7 +199,7 @@ fn print_function_arguments(
     print_table_args: bool,
     print_defaults: bool,
 ) -> PgResult<usize> {
-    let info = func_arg_info(proc);
+    let info = func_arg_info(proc)?;
     let numargs = info.argtypes.len();
 
     let mut argdefaults: Vec<types_nodes::Node<'_>> = Vec::new();
@@ -240,7 +257,14 @@ fn print_function_arguments(
             PROARGMODE_OUT => ("OUT ", false),
             PROARGMODE_VARIADIC => ("VARIADIC ", true),
             PROARGMODE_TABLE => ("", false),
-            other => panic!("invalid parameter mode '{}'", other as char),
+            // ruleutils.c:3398.
+            other => {
+                return Err(PgError::error(format!(
+                    "invalid parameter mode '{}'",
+                    other as char
+                ))
+                .into())
+            }
         };
         if isinput {
             inputargno += 1;
@@ -397,8 +421,9 @@ pub fn pg_get_functiondef_worker(mcx: Mcx<'_>, funcid: Oid) -> PgResult<Option<S
             let (name, value) = (&item[..pos], &item[pos + 1..]);
             buf.push_str(&format!(" SET {} TO ", quote_identifier(name)));
             if guc::GetConfigOptionFlags(name, true)? & types_guc::GUC_LIST_QUOTE != 0 {
+                // ruleutils.c:3109.
                 let namelist = varlena::split_guc_list(value, b',')
-                    .expect("invalid list syntax in proconfig item");
+                    .ok_or_else(|| PgError::error("invalid list syntax in proconfig item"))?;
                 let mut first = true;
                 for curname in &namelist {
                     if !first {
@@ -439,7 +464,7 @@ pub fn pg_get_functiondef_worker(mcx: Mcx<'_>, funcid: Oid) -> PgResult<Option<S
 // print_function_sqlbody (ruleutils.c:3556). C AcquireRewriteLocks each
 // query; lock acquisition is another lane (matches get_query_def note).
 fn print_function_sqlbody(mcx: Mcx<'_>, buf: &mut String, proc: &PgProcRow) -> PgResult<()> {
-    let info = func_arg_info(proc);
+    let info = func_arg_info(proc)?;
     let mut dpns = crate::query::DeparseNamespace::empty(Vec::new());
     dpns.funcname = Some(proc.proname.clone());
     dpns.argnames = Some(info.argnames.clone().unwrap_or_default());
@@ -526,7 +551,7 @@ pub fn pg_get_function_arg_default_worker(
     let Some(proc) = pg_proc_row(funcid)? else {
         return Ok(None);
     };
-    let info = func_arg_info(&proc);
+    let info = func_arg_info(&proc)?;
     let numargs = info.argtypes.len() as i32;
     if nth_arg < 1
         || nth_arg > numargs

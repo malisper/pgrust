@@ -986,3 +986,29 @@ fn typmod_array_element_type_error_sqlstate() {
     assert_eq!(err.message(), "typmod array must be type cstring[]");
     assert_eq!(err.sqlstate(), ::types_error::ERRCODE_ARRAY_ELEMENT_ERROR);
 }
+
+// audit-18.6 b057 a186-candidate-fp-adt-timestamp-p2-522e215d5a1854abdea2-1:
+// timestamp.c:4228 interval_avg_accum_inv with a NULL state is
+// elog(ERROR) "interval_avg_accum_inv called with NULL state" (XX000).
+#[test]
+fn interval_avg_accum_inv_null_state_is_elog_error() {
+    let mut fci = ::types_fmgr::LocalFcinfo::<2>::new(0);
+    fci.set_arg_null(0);
+    fci.set_arg_null(1);
+    let err = crate::builtins::fc_interval_avg_accum_inv(None, &mut fci).unwrap_err();
+    assert_eq!(err.message(), "interval_avg_accum_inv called with NULL state");
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_INTERNAL_ERROR);
+}
+
+// audit-18.6 b057 a186-candidate-fp-adt-timestamp-p2-d33c7c6823cb62557d3e-1:
+// timestamp.c:4146 interval_avg_serialize refuses a non-aggregate call
+// context before touching the state pointer.
+#[test]
+fn interval_avg_serialize_outside_aggregate_is_error() {
+    let state = crate::interval::IntervalAggState::default();
+    let mut fci = ::types_fmgr::LocalFcinfo::<1>::new(0);
+    fci.set_arg(0, ::datum::Datum::from_usize(&state as *const _ as usize));
+    let err = crate::builtins::fc_interval_avg_serialize(None, &mut fci).unwrap_err();
+    assert_eq!(err.message(), "aggregate function called in non-aggregate context");
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_INTERNAL_ERROR);
+}

@@ -80,11 +80,11 @@ pub fn bits_in<'mcx>(
     if bit_not_hex {
         let mut x = HIGHBIT;
         let mut ri = 0usize;
-        for &c in sp {
+        for (i, &c) in sp.iter().enumerate() {
             if c == b'1' {
                 r[ri] |= x;
             } else if c != b'0' {
-                return ereturn(escontext, None, bad_digit_err(c, true));
+                return ereturn(escontext, None, bad_digit_err(&sp[i..], true));
             }
             x >>= 1;
             if x == 0 {
@@ -95,12 +95,12 @@ pub fn bits_in<'mcx>(
     } else {
         let mut bc = false;
         let mut ri = 0usize;
-        for &c in sp {
+        for (i, &c) in sp.iter().enumerate() {
             let x = match c {
                 b'0'..=b'9' => c - b'0',
                 b'A'..=b'F' => c - b'A' + 10,
                 b'a'..=b'f' => c - b'a' + 10,
-                _ => return ereturn(escontext, None, bad_digit_err(c, false)),
+                _ => return ereturn(escontext, None, bad_digit_err(&sp[i..], false)),
             };
             if bc {
                 r[ri] |= x;
@@ -154,12 +154,27 @@ fn too_long_for_varying_err(atttypmod: i32) -> PgError {
         .with_sqlstate(ERRCODE_STRING_DATA_RIGHT_TRUNCATION)
 }
 
+// varbit.c:235/260: errmsg("\"%.*s\" is not a valid ... digit",
+// pg_mblen_cstr(sp), sp) -- the whole character at `tail` in the database
+// encoding, sent as raw bytes when it is not valid UTF-8 (single-byte
+// encodings).
 #[cold]
 #[inline(never)]
-fn bad_digit_err(c: u8, binary: bool) -> PgError {
+fn bad_digit_err(tail: &[u8], binary: bool) -> PgError {
     let kind = if binary { "binary" } else { "hexadecimal" };
-    PgError::error(format!("\"{}\" is not a valid {kind} digit", c as char))
-        .with_sqlstate(ERRCODE_INVALID_TEXT_REPRESENTATION)
+    let n = (::mbutils::pg_mblen(tail) as usize).clamp(1, tail.len());
+    let ch = &tail[..n];
+    let err = match core::str::from_utf8(ch) {
+        Ok(ch) => PgError::error(format!("\"{ch}\" is not a valid {kind} digit")),
+        Err(_) => {
+            let mut raw = alloc::vec::Vec::with_capacity(n + 40);
+            raw.push(b'"');
+            raw.extend_from_slice(ch);
+            raw.extend_from_slice(format!("\" is not a valid {kind} digit").as_bytes());
+            PgError::error_raw_message(raw)
+        }
+    };
+    err.with_sqlstate(ERRCODE_INVALID_TEXT_REPRESENTATION)
 }
 
 /// C `DirectFunctionCall3(bit_in, string, InvalidOid, -1)` for the parser's

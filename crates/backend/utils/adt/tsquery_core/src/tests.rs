@@ -539,3 +539,19 @@ mod qtn2qt_too_large {
         assert_eq!(q.operand_str(&last).len(), WORD);
     }
 }
+
+// audit-18.6 b057 a186-candidate-fp-adt-tsquery_util-4fd87a4291ac52cd1ea7-1:
+// tsquery_util.c:267 QTNBinary's child-array palloc0 fails as a catchable
+// out-of-memory error (53200), never a panic.
+#[test]
+fn qtn_binary_child_allocation_failure_is_catchable() {
+    let tiny = MemoryContext::new("tiny").with_limit(1);
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let img = tsquery_in_core(mcx, b"a & b & c", None).expect("parse ok").expect("no soft error");
+    let mut tree = qt2qtn(mcx, TsQueryRef { payload: &img[4..] }, 0).expect("qt2qtn");
+    qtn_ternary(&mut tree).expect("ternary");
+    assert!(tree.children.len() > 2, "ternary form has a >2-ary node to rebuild");
+    let err = qtn_binary(tiny.mcx(), &mut tree).err().expect("allocation failure is an error");
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_OUT_OF_MEMORY);
+}

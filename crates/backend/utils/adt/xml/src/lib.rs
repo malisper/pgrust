@@ -182,7 +182,9 @@ pub fn xml_out_internal(x: &[u8], target_encoding: i32) -> PgResult<Vec<u8>> {
         return Ok(buf);
     }
 
+    // xml.c:347-350: ERRCODE_DATA_CORRUPTED (XX001) on the WARNING.
     let _ = elog::ereport(WARNING)
+        .errcode(::types_error::ERRCODE_DATA_CORRUPTED)
         .errmsg_internal("could not parse XML declaration in stored value")
         .errdetail(errdetail_for_xml_code(res_code))
         .finish(::types_error::ErrorLocation::new(
