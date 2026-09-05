@@ -12,6 +12,9 @@ use types_error::{PgError, PgResult, ERROR};
 use types_rel::{AccessShareLock, NoLock, RowExclusiveLock, LOCKMODE};
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 
+#[cfg(test)]
+mod tests;
+
 pub fn init_seams() {
     pg_inherits_seams::type_inherits_from::set(typeInheritsFrom);
 }
@@ -190,9 +193,19 @@ pub fn find_all_inheritors_numparents<'mcx>(
     Ok((rels_list, rel_numparents))
 }
 
-// has_subclass (lsyscache.c): pg_class.relhassubclass via syscache.
+// C elog(ERROR, "cache lookup failed for ...") -- catchable XX000.
+#[cold]
+fn cache_lookup_failed(what: &str, oid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!("cache lookup failed for {what} {oid}")))
+}
+
+// has_subclass (pg_inherits.c:362): pg_class.relhassubclass via syscache; a
+// miss is elog(ERROR), not "no subclasses".
 pub fn has_subclass(relation_id: Oid) -> PgResult<bool> {
-    lsyscache::get_rel_relhassubclass(relation_id)
+    match syscache_seams::lookup_pg_class_ls_shape::call(relation_id)? {
+        Some(reltup) => Ok(reltup.relhassubclass),
+        None => Err(cache_lookup_failed("relation", relation_id)),
+    }
 }
 
 pub fn has_superclass(mcx: Mcx<'_>, relation_id: Oid) -> PgResult<bool> {
@@ -214,7 +227,10 @@ pub fn typeInheritsFrom(subclass_type_id: Oid, superclass_type_id: Oid) -> PgRes
     if subclass_relid == InvalidOid {
         return Ok(false);
     }
-    let superclass_relid = lsyscache::get_typ_typrelid(superclass_type_id)?;
+    // typeidTypeRelid (parse_type.c): a missing type is a cache-lookup
+    // error, unlike lsyscache's get_typ_typrelid.
+    let superclass_relid = syscache_seams::pg_type_typrelid::call(superclass_type_id)?
+        .ok_or_else(|| cache_lookup_failed("type", superclass_type_id))?;
     if superclass_relid == InvalidOid {
         return Ok(false);
     }
@@ -334,13 +350,18 @@ pub fn DeleteInheritsTuple<'mcx>(
 pub fn get_partition_parent(mcx: Mcx<'_>, relid: Oid, even_if_detached: bool) -> PgResult<Oid> {
     let rel = table::table_open(mcx, InheritsRelationId, AccessShareLock)?;
     let (result, detach_pending) = get_partition_parent_worker(mcx, &rel, relid)?;
-    rel.close(AccessShareLock)?;
+    // partition.c:65/:68 elog(ERROR): catchable XX000, never a panic.
     if result == InvalidOid {
-        panic!("could not find tuple for parent of relation {relid}");
+        return Err(Box::new(PgError::error(format!(
+            "could not find tuple for parent of relation {relid}"
+        ))));
     }
     if detach_pending && !even_if_detached {
-        panic!("relation {relid} has no parent because it's being detached");
+        return Err(Box::new(PgError::error(format!(
+            "relation {relid} has no parent because it's being detached"
+        ))));
     }
+    rel.close(AccessShareLock)?;
     Ok(result)
 }
 
@@ -384,7 +405,8 @@ pub fn PartitionHasPendingDetach(mcx: Mcx<'_>, partoid: Oid) -> PgResult<bool> {
         rel.close(RowExclusiveLock)?;
         return Ok(detached);
     }
-    panic!("relation {partoid} is not a partition");
+    // pg_inherits.c:654 elog(ERROR): catchable XX000, never a panic.
+    Err(Box::new(PgError::error(format!("relation {partoid} is not a partition"))))
 }
 
 // C: partition.c index_get_partition; takes the partition's relid (Rust
@@ -392,7 +414,11 @@ pub fn PartitionHasPendingDetach(mcx: Mcx<'_>, partoid: Oid) -> PgResult<bool> {
 pub fn index_get_partition(mcx: Mcx<'_>, partition_relid: Oid, index_id: Oid) -> PgResult<Oid> {
     let idxlist = relcache_seams::relation_get_index_list::call(mcx, partition_relid)?;
     for &part_idx in idxlist.iter() {
-        if !lsyscache::get_rel_relispartition(part_idx)? {
+        // partition.c:190 SearchSysCache1(RELOID) miss is elog(ERROR).
+        let ispartition = syscache_seams::lookup_pg_class_ls_shape::call(part_idx)?
+            .ok_or_else(|| cache_lookup_failed("relation", part_idx))?
+            .relispartition;
+        if !ispartition {
             continue;
         }
         if get_partition_parent(mcx, part_idx, false)? == index_id {
