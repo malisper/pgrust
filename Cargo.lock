@@ -12918,6 +12918,7 @@ dependencies = [
  "mbutils_seams",
  "mcx",
  "miscinit_seams",
+ "objectaccess",
  "pg_depend",
  "pg_enum",
  "pg_range",

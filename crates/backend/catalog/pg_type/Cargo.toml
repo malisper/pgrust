@@ -34,3 +34,4 @@ varlena = { path = "../../utils/adt/varlena" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+objectaccess = { path = "../objectaccess" }
