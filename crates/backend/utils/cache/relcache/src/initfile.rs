@@ -4,8 +4,8 @@ use std::rc::Rc;
 use mcx::{Mcx, MemoryContext, PgString, PgVec};
 use types_core::{InvalidSubTransactionId, Oid, RECORDOID};
 use types_error::{
-    PgError, PgResult, DEBUG1, ERRCODE_DATA_CORRUPTED, ERRCODE_INTERNAL_ERROR,
-    ERRCODE_UNDEFINED_OBJECT, FATAL, PANIC, WARNING,
+    ErrorLevel, ErrorLocation, PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_INTERNAL_ERROR,
+    ERRCODE_UNDEFINED_OBJECT, ERROR, FATAL, LOG, PANIC, WARNING,
 };
 use types_rel::{FormData_pg_class, FormData_pg_index, RelationData, RELKIND_INDEX};
 use types_rel::{
@@ -1347,14 +1347,21 @@ fn write_relcache_init_file(shared: bool) -> PgResult<()> {
     let fd_ = match fd::OpenTransientFile(temp_s, libc::O_CREAT | libc::O_TRUNC | libc::O_WRONLY) {
         Ok(f) if f >= 0 => f,
         _ => {
-            let e = std::io::Error::from_raw_os_error(fd::get_errno());
-            elog::elog(
-                WARNING,
-                format!(
-                    "could not create relation-cache initialization file \"{}\": {e}",
-                    temp_path.display()
-                ),
-            )?;
+            // relcache.c:6633-6637: ereport(WARNING, (errcode_for_file_access(),
+            // errmsg("could not create relation-cache initialization file
+            // \"%s\": %m"), errdetail("Continuing anyway, but there's
+            // something wrong."))) -- strerror text, not io::Error's
+            // "(os error N)"; the session goes on without an init file.
+            let errnum = fd::get_errno();
+            elog::ereport(WARNING)
+                .errcode(elog::errno::sqlstate_for_file_access(errnum))
+                .errmsg(format!(
+                    "could not create relation-cache initialization file \"{}\": {}",
+                    temp_path.display(),
+                    elog::errno::strerror(errnum)
+                ))
+                .errdetail("Continuing anyway, but there's something wrong.")
+                .finish(here())?;
             return Ok(());
         }
     };
@@ -1406,33 +1413,41 @@ pub fn RelationIdIsInInitFile(relationId: Oid) -> bool {
     syscache_seams::relation_supports_sys_cache::call(relationId)
 }
 
-fn unlink_initfile(path: &Path, error_level: bool) -> PgResult<()> {
+// The elog-style location of a builder report raised here: empty, so the
+// track_caller capture of the ereport call site stands (as elog() does).
+fn here() -> ErrorLocation {
+    ErrorLocation { filename: None, lineno: 0, funcname: None }
+}
+
+// relcache.c:6959-6970 unlink_initfile(initfilename, elevel): any error other
+// than ENOENT is ereport(elevel, (errcode_for_file_access(), errmsg("could not
+// remove cache file \"%s\": %m"))) -- ERROR from the invalidation path, LOG
+// from RelationCacheInitFileRemove at postmaster start. EACCES is 42501 and
+// %m is strerror text, not io::Error's "(os error N)".
+fn unlink_initfile(path: &Path, elevel: ErrorLevel) -> PgResult<()> {
     // vfs-routed (provider-seam reroute).
     let path_s = path.to_str().expect("datadir paths are UTF-8");
     if fd::pg_unlink(path_s) == 0 || fd::get_errno() == libc::ENOENT {
         return Ok(());
     }
-    if error_level {
-        // relcache.c:6965-6968: ereport(elevel, (errcode_for_file_access(),
-        // errmsg("could not remove cache file \"%s\": %m", ...))) -- EACCES
-        // is 42501 and %m is strerror text, not io::Error's "(os error N)".
-        let errnum = fd::get_errno();
+    let errnum = fd::get_errno();
+    let message = format!(
+        "could not remove cache file \"{}\": {}",
+        path.display(),
+        elog::errno::strerror(errnum)
+    );
+    let sqlstate = elog::errno::sqlstate_for_file_access(errnum);
+    if elevel >= ERROR {
         return Err(Box::new(
-            PgError::error(format!(
-                "could not remove cache file \"{}\": {}",
-                path.display(),
-                elog::errno::strerror(errnum)
-            ))
-            .with_sqlstate(elog::errno::sqlstate_for_file_access(errnum))
-            .with_saved_errno(errnum),
+            PgError::error(message).with_sqlstate(sqlstate).with_saved_errno(errnum),
         ));
     }
-    Ok(())
+    elog::ereport(elevel).errcode(sqlstate).errmsg(message).finish(here())
 }
 
-fn unlink_both(dir: &Path, error_level: bool) -> PgResult<()> {
-    unlink_initfile(&dir.join(RELCACHE_INIT_FILENAME), error_level)?;
-    unlink_initfile(&dir.join(C_RELCACHE_INIT_FILENAME), error_level)
+fn unlink_both(dir: &Path, elevel: ErrorLevel) -> PgResult<()> {
+    unlink_initfile(&dir.join(RELCACHE_INIT_FILENAME), elevel)?;
+    unlink_initfile(&dir.join(C_RELCACHE_INIT_FILENAME), elevel)
 }
 
 // Serializes against write_relcache_init_file via RelCacheInitLock: unlink
@@ -1441,9 +1456,9 @@ pub fn RelationCacheInitFilePreInvalidate() -> PgResult<()> {
     let lock = lwlock::main_lock(RELCACHE_INIT_LOCK_OFFSET);
     lwlock::LWLockAcquire(lock, lwlock::LW_EXCLUSIVE, init_small::globals::MyProcNumber())?;
     if let Some(db) = init_small::globals::DatabasePath() {
-        unlink_both(Path::new(db), true)?;
+        unlink_both(Path::new(db), ERROR)?;
     }
-    unlink_both(Path::new("global"), true)
+    unlink_both(Path::new("global"), ERROR)
 }
 
 pub fn RelationCacheInitFilePostInvalidate() -> PgResult<()> {
@@ -1453,12 +1468,15 @@ pub fn RelationCacheInitFilePostInvalidate() -> PgResult<()> {
 // Startup removal: init files may be stale after crash recovery / PITR.
 // vfs-routed walks (provider-seam reroute): the stale files live in the
 // datadir namespace, which is simulated under sim.
+// relcache.c:6905-6950: every failure here is LOG -- unlink_initfile(.., LOG)
+// and ReadDirExtended(.., LOG) -- so a stale init file that cannot be removed
+// or an unreadable pg_tblspc is visible at the default log_min_messages.
 pub fn RelationCacheInitFileRemove() {
-    let _ = unlink_both(Path::new("global"), false);
+    let _ = unlink_both(Path::new("global"), LOG);
     remove_in_dir(Path::new("base"));
     let _ = (|| -> PgResult<()> {
         let dir = fd::AllocateDir(PG_TBLSPC_DIR)?;
-        while let Some(de) = fd::ReadDirExtended(dir, PG_TBLSPC_DIR, DEBUG1)? {
+        while let Some(de) = fd::ReadDirExtended(dir, PG_TBLSPC_DIR, LOG)? {
             if de.d_name.bytes().all(|b| b.is_ascii_digit()) {
                 remove_in_dir(
                     &Path::new(PG_TBLSPC_DIR).join(&de.d_name).join(TABLESPACE_VERSION_DIRECTORY),
@@ -1474,9 +1492,9 @@ fn remove_in_dir(tblspc: &Path) {
     let _ = (|| -> PgResult<()> {
         let dirname = tblspc.to_str().expect("datadir paths are UTF-8");
         let dir = fd::AllocateDir(dirname)?;
-        while let Some(de) = fd::ReadDirExtended(dir, dirname, DEBUG1)? {
+        while let Some(de) = fd::ReadDirExtended(dir, dirname, LOG)? {
             if de.d_name.bytes().all(|b| b.is_ascii_digit()) {
-                let _ = unlink_both(&tblspc.join(&de.d_name), false);
+                let _ = unlink_both(&tblspc.join(&de.d_name), LOG);
             }
         }
         fd::FreeDir(dir)?;

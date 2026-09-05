@@ -479,3 +479,58 @@ fn enter_dir(dir: &str) -> std::sync::MutexGuard<'static, ()> {
     std::env::set_current_dir(dir).unwrap();
     guard
 }
+
+// relmap_redo's size check prints xlrec->nbytes with %u (relmapper.c:1110):
+// a corrupt 0xFFFFFFFF is "wrong size 4294967295", never "-1"; a record
+// whose payload is shorter than its header claims is the truncation arm,
+// not a "wrong size 524" (audit-18.6 b169, rows relmapper-0ea3dfac / 170dc7ca).
+static REDO_LOGS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+fn capture_redo_log(e: &types_error::PgError, _output_to_server: &mut bool) {
+    if e.level == types_error::PANIC {
+        REDO_LOGS.lock().unwrap_or_else(|e| e.into_inner()).push(e.message().to_string());
+    }
+}
+
+fn redo_panic_message(payload: &[u8]) -> String {
+    let mut record = XLogReaderState::default();
+    let mut decoded = xlogreader_seams::DecodedXLogRecord::default();
+    decoded.xl_info = XLOG_RELMAP_UPDATE;
+    decoded.main_data = payload.as_ptr();
+    decoded.main_data_len = payload.len() as u32;
+    record.record = Some(decoded);
+    REDO_LOGS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    let prior = elog::sink::set_emit_log_hook(Some(capture_redo_log));
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| relmap_redo(&mut record)));
+    elog::sink::set_emit_log_hook(prior);
+    assert!(r.is_err(), "relmap_redo must PANIC on a bad size, got {:?}", r.map(|x| x.is_ok()));
+    let logs = REDO_LOGS.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    assert_eq!(logs.len(), 1, "one PANIC report expected: {logs:?}");
+    logs[0].clone()
+}
+
+#[test]
+fn redo_wrong_size_formats_nbytes_unsigned_like_c() {
+    setup();
+    let _l = lock_guard();
+    let map = sample_map(&[(1259, 42)]);
+    let mut data = Vec::new();
+    data.extend_from_slice(&77u32.to_ne_bytes());
+    data.extend_from_slice(&1663u32.to_ne_bytes());
+    data.extend_from_slice(&0xFFFF_FFFFu32.to_ne_bytes());
+    data.extend_from_slice(map.as_bytes());
+    assert_eq!(
+        redo_panic_message(&data),
+        "relmap_redo: wrong size 4294967295 in relmap update record"
+    );
+
+    let mut short = Vec::new();
+    short.extend_from_slice(&77u32.to_ne_bytes());
+    short.extend_from_slice(&1663u32.to_ne_bytes());
+    short.extend_from_slice(&(SIZEOF_RELMAPFILE as u32).to_ne_bytes());
+    short.extend_from_slice(&map.as_bytes()[..SIZEOF_RELMAPFILE / 2]);
+    assert_eq!(
+        redo_panic_message(&short),
+        "relmap_redo: truncated relmap update record"
+    );
+}

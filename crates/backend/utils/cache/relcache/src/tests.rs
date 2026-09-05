@@ -219,6 +219,7 @@ fn install() {
         relmapper_seams::relation_map_update_map::set(|_, _, _, _| Ok(()));
         relmapper_seams::relation_map_oid_to_filenumber::set(|relid, _| relid);
         namespace_seams::is_temp_or_temp_toast_namespace::set(|_| true);
+        namespace_seams::is_temp_toast_namespace::set(|_| false);
         namespace_seams::get_temp_namespace_proc_number::set(|_| Ok(7));
         syscache_seams::relation_has_sys_cache::set(|relid| {
             HAS_SYSCACHE.with(|v| v.borrow().contains(&relid))
@@ -1300,4 +1301,33 @@ fn local_relation_invalid_relpersistence_is_error() {
     .unwrap_err();
     assert_eq!(err.message(), "invalid relpersistence: x");
     assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+}
+
+// RelationCacheDelete on an OID that is not in the cache is C's
+// elog(WARNING, "trying to delete a reldesc that does not exist")
+// (relcache.c:1475) (audit-18.6 b169, row relcache-p2-2fb7daca).
+static DELETE_LOGS: std::sync::Mutex<Vec<(types_error::ErrorLevel, String)>> =
+    std::sync::Mutex::new(Vec::new());
+
+fn capture_delete_log(e: &types_error::PgError, _output_to_server: &mut bool) {
+    DELETE_LOGS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push((e.level, e.message().to_string()));
+}
+
+#[test]
+fn delete_of_missing_entry_warns_like_c() {
+    install();
+    elog::init_seams();
+    DELETE_LOGS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    let prior = elog::sink::set_emit_log_hook(Some(capture_delete_log));
+    let r = store::delete(4242_4242);
+    elog::sink::set_emit_log_hook(prior);
+    r.unwrap();
+    let logs = DELETE_LOGS.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    assert_eq!(
+        logs,
+        vec![(types_error::WARNING, "trying to delete a reldesc that does not exist".to_string())]
+    );
 }

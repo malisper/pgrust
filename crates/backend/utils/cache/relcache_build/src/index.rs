@@ -142,7 +142,7 @@ pub(crate) fn relation_init_index_access_info(
     // indnkeyatts is a bogus row (C would read past them), never a slice panic.
     if nkey > classvals.len() || nkey > collvals.len() || nkey > optvals.len() {
         ReleaseSysCache(tup);
-        return Err(bogus_pg_index(relid));
+        return Err(bogus_pg_index());
     }
 
     // amroutine->amsupport per handler.
@@ -167,7 +167,7 @@ pub(crate) fn relation_init_index_access_info(
     let mut support: PgVec<'static, Oid> = mcx::vec_with_capacity_in(mcx, nkey * amsupport)?;
     for &opc in &classvals[..nkey] {
         if opc == InvalidOid {
-            return Err(bogus_pg_index(relid));
+            return Err(bogus_pg_index());
         }
         let ent = lookup_opclass_info(opc, amsupport)?;
         opfamily.push(ent.opcfamily);
@@ -420,9 +420,10 @@ fn relnatts_disagrees(relid: Oid) -> Box<PgError> {
 #[track_caller]
 #[cold]
 #[inline(never)]
-fn bogus_pg_index(relid: Oid) -> Box<PgError> {
+// relcache.c:1632 elog(ERROR, "bogus pg_index tuple") -- no OID in the text.
+fn bogus_pg_index() -> Box<PgError> {
     Box::new(
-        PgError::error(format!("bogus pg_index tuple for index {relid}"))
+        PgError::error("bogus pg_index tuple")
             .with_sqlstate(ERRCODE_INTERNAL_ERROR),
     )
 }

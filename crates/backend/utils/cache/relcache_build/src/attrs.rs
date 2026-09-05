@@ -133,13 +133,14 @@ pub(crate) fn relation_build_tuple_desc(
         || has_missing
     {
         let is_catalog = catalog_seams::is_catalog_relation_oid::call(relid);
+        let relname = String::from_utf8_lossy(form.relname.name_str());
         let defval = if ndef > 0 {
-            attr_default_fetch(mcx, smcx, relid, ndef)?
+            attr_default_fetch(mcx, smcx, relid, ndef, &relname)?
         } else {
             PgVec::new_in(mcx)
         };
         let check = if relchecks > 0 || (!is_catalog && has_not_null) {
-            check_nn_constraint_fetch(mcx, smcx, relid, relchecks, &mut td)?
+            check_nn_constraint_fetch(mcx, smcx, relid, relchecks, &relname, &mut td)?
         } else {
             PgVec::new_in(mcx)
         };
@@ -202,13 +203,15 @@ pub(crate) fn text_str<'mcx>(mcx: Mcx<'mcx>, scratch: Mcx<'_>, d: Datum) -> PgRe
     PgString::from_str_in(s, mcx)
 }
 
-// AttrDefaultFetch (relcache.c): missing/null rows are C WARNINGs; here the
-// consumer's not-found error is the only surface, so they are skipped silently.
+// AttrDefaultFetch (relcache.c:4496-4558): an extra row, a null adbin and a
+// short count are each C's elog(WARNING) (:4530/:4539/:4557); the
+// descriptor is built from whatever was found.
 fn attr_default_fetch(
     mcx: Mcx<'static>,
     smcx: Mcx<'_>,
     relid: Oid,
     ndef: usize,
+    relname: &str,
 ) -> PgResult<PgVec<'static, AttrDefault<'static>>> {
     let mut defval: PgVec<'static, AttrDefault<'static>> = PgVec::new_in(mcx);
     defval
@@ -225,29 +228,51 @@ fn attr_default_fetch(
         &keys,
     )?;
     while let Some(tup) = genam::systable_getnext(smcx, &mut scan)? {
+        let adnum = req(rel.descr(), tup, Anum_pg_attrdef_adnum)?.as_i16();
         if defval.len() >= ndef {
+            elog::elog(
+                types_error::WARNING,
+                format!(
+                    "unexpected pg_attrdef record found for attribute {adnum} of relation \"{relname}\""
+                ),
+            )?;
             break;
         }
-        let adnum = req(rel.descr(), tup, Anum_pg_attrdef_adnum)?.as_i16();
         let (val, isnull) = getattr(rel.descr(), tup, Anum_pg_attrdef_adbin);
         if isnull {
+            elog::elog(
+                types_error::WARNING,
+                format!("null adbin for attribute {adnum} of relation \"{relname}\""),
+            )?;
             continue;
         }
         defval.push(AttrDefault { adnum, adbin: Some(text_str(mcx, smcx, val)?) });
     }
     genam::systable_endscan(smcx, scan)?;
     rel.close(AccessShareLock)?;
+    if defval.len() != ndef {
+        elog::elog(
+            types_error::WARNING,
+            format!(
+                "{} pg_attrdef record(s) missing for relation \"{relname}\"",
+                ndef - defval.len()
+            ),
+        )?;
+    }
     defval.sort_unstable_by_key(|d| d.adnum);
     Ok(defval)
 }
 
-// CheckNNConstraintFetch (relcache.c): 'c' rows fill the check array; invalid
-// 'n' rows mark their column ATTNULLABLE_INVALID.
+// CheckNNConstraintFetch (relcache.c:4606-4700): 'c' rows fill the check
+// array; invalid 'n' rows mark their column ATTNULLABLE_INVALID. An extra
+// CHECK row, a null conbin and a short count are each C's elog(WARNING)
+// (:4658/:4674/:4691).
 fn check_nn_constraint_fetch(
     mcx: Mcx<'static>,
     smcx: Mcx<'_>,
     relid: Oid,
     ncheck: i16,
+    relname: &str,
     td: &mut TupleDescData<'static>,
 ) -> PgResult<PgVec<'static, ConstrCheck<'static>>> {
     let mut check: PgVec<'static, ConstrCheck<'static>> = PgVec::new_in(mcx);
@@ -277,10 +302,18 @@ fn check_nn_constraint_fetch(
             continue;
         }
         if check.len() >= ncheck.max(0) as usize {
+            elog::elog(
+                types_error::WARNING,
+                format!("unexpected pg_constraint record found for relation \"{relname}\""),
+            )?;
             break;
         }
         let (val, isnull) = getattr(rel.descr(), tup, Anum_pg_constraint_conbin);
         if isnull {
+            elog::elog(
+                types_error::WARNING,
+                format!("null conbin for relation \"{relname}\""),
+            )?;
             continue;
         }
         let name_bytes = name_from(tup, req(rel.descr(), tup, Anum_pg_constraint_conname)?);
@@ -298,6 +331,15 @@ fn check_nn_constraint_fetch(
     }
     genam::systable_endscan(smcx, scan)?;
     rel.close(AccessShareLock)?;
+    if check.len() as i32 != ncheck as i32 {
+        elog::elog(
+            types_error::WARNING,
+            format!(
+                "{} pg_constraint record(s) missing for relation \"{relname}\"",
+                ncheck as i32 - check.len() as i32
+            ),
+        )?;
+    }
     check.sort_unstable_by(|a, b| {
         a.ccname.as_ref().map(|s| s.as_str()).cmp(&b.ccname.as_ref().map(|s| s.as_str()))
     });

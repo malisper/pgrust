@@ -243,7 +243,8 @@ pub(crate) fn delete(relation_id: Oid) -> PgResult<()> {
     if missing {
         elog::elog(
             types_error::WARNING,
-            format!("failed to delete relcache entry for OID {relation_id}"),
+            // relcache.c:1475 RelationCacheDelete
+            "trying to delete a reldesc that does not exist",
         )?;
     }
     Ok(())

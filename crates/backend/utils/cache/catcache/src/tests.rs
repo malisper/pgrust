@@ -469,3 +469,45 @@ fn name_scan_key_keeps_the_64th_byte() {
     let buf = unsafe { std::slice::from_raw_parts(d.as_usize() as *const u8, NAMEDATALEN) };
     assert_eq!(buf[63], b'a');
 }
+
+// RehashCatCache announces the bucket doubling at DEBUG1 (catcache.c:1002):
+// "rehashing catalog cache id %d for %s; %d tups, %d buckets" -- visible to
+// a client running with client_min_messages = debug1 (audit-18.6 b169,
+// row catcache-f7333dc6).
+static REHASH_LOGS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+fn capture_rehash_log(e: &types_error::PgError, _output_to_server: &mut bool) {
+    if e.level == types_error::DEBUG1 {
+        REHASH_LOGS.lock().unwrap_or_else(|e| e.into_inner()).push(e.message().to_string());
+    }
+}
+
+#[test]
+fn rehash_announces_at_debug1_like_c() {
+    elog::init_seams();
+    let id = fresh_id();
+    testing::init_cache_bare(id, 1, KINDS1, 2, None);
+    with_state(|st| {
+        let mcx = st.mcx;
+        st.cache_mut(id).cc_relname =
+            Some(mcx::PgString::from_str_in("pg_class", mcx).unwrap());
+    });
+    // Every insert runs C's post-insert check (catcache.c:2282); the first
+    // doubling fires at the 5th tuple of a 2-bucket cache and reports the
+    // count and bucket number BEFORE the rehash.
+    let prior_min = elog::config::log_min_messages();
+    elog::config::set_log_min_messages(types_error::DEBUG1);
+    REHASH_LOGS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    let prior = elog::sink::set_emit_log_hook(Some(capture_rehash_log));
+    for oid in 0..40u32 {
+        testing::insert_negative(id, &[oid_key(oid), CatCKey::UNUSED, CatCKey::UNUSED, CatCKey::UNUSED]);
+    }
+    elog::sink::set_emit_log_hook(prior);
+    elog::config::set_log_min_messages(prior_min);
+    let logs = REHASH_LOGS.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    assert!(
+        logs.contains(&format!("rehashing catalog cache id {id} for pg_class; 5 tups, 2 buckets")),
+        "catcache.c:1002 DEBUG1 line missing: {logs:?}"
+    );
+    with_state(|st| assert!(st.cache(id).cc_nbuckets > 2));
+}

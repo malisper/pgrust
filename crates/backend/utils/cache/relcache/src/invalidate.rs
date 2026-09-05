@@ -152,9 +152,15 @@ fn RelationReloadIndexInfo(
     let mcx = cache_mcx();
     // System indexes keep their access info without re-reading pg_index — the
     // INDEXRELID syscache load can recurse back into this reload (C gates the
-    // refresh on !IsSystemRelation for the same reason, relcache.c:2444).
-    let is_system = scanned.form.relnamespace == types_core::PG_CATALOG_NAMESPACE
-        || scanned.form.relnamespace == types_core::PG_TOAST_NAMESPACE;
+    // refresh on !IsSystemRelation for the same reason, relcache.c:2336).
+    // IsSystemRelation = IsCatalogRelationOid (pinned OID) || IsToastClass
+    // (pg_toast or a temp toast namespace) (catalog.c:74-89): a user index
+    // whose relnamespace is pg_catalog is NOT system, so its mutable
+    // pg_index bools (indisvalid after DROP INDEX CONCURRENTLY phase 1)
+    // refresh like any other index's.
+    let is_system = catalog_seams::is_catalog_relation_oid::call(relid)
+        || scanned.form.relnamespace == types_core::PG_TOAST_NAMESPACE
+        || namespace_seams::is_temp_toast_namespace::call(scanned.form.relnamespace);
     let (index, opcintype, opfamily, indoption, indcollation, support) = if is_system {
         let held_index = held.rd_index.as_ref().expect("system index rd_index");
         (

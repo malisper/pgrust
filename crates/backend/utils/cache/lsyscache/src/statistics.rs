@@ -2,7 +2,7 @@ use datum::Datum;
 use mcx::{Mcx, PgVec};
 use std::cell::Cell;
 use types_core::{AttrNumber, InvalidOid, Oid};
-use types_error::PgResult;
+use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
 use types_tuple::HeapTupleData;
 
 // pg_statistic.h
@@ -60,11 +60,12 @@ pub fn get_attstatsslot<'mcx>(
     }) else {
         return Ok(None);
     };
-    if flags & ATTSTATSSLOT_VALUES != 0 {
-        panic!("get_attstatsslot(ATTSTATSSLOT_VALUES): DatumGetArrayTypePCopy/deconstruct_array unported (arrayfuncs.c)");
-    }
-    if flags & ATTSTATSSLOT_NUMBERS != 0 {
-        panic!("get_attstatsslot(ATTSTATSSLOT_NUMBERS): DatumGetArrayTypePCopy unported (arrayfuncs.c)");
+    // lsyscache.c:3536-3639 extracts stavalues / stanumbers through
+    // DatumGetArrayTypePCopy + deconstruct_array; the port serves those
+    // arrays through syscache_seams' slot images instead, so an array
+    // request here is a typed refusal, never a panic.
+    if flags & (ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS) != 0 {
+        return Err(attstatsslot_arrays_unsupported(flags));
     }
     Ok(Some(AttStatsSlot {
         staop: stats.staop[i],
@@ -73,6 +74,18 @@ pub fn get_attstatsslot<'mcx>(
         values: PgVec::new_in(mcx),
         numbers: PgVec::new_in(mcx),
     }))
+}
+
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn attstatsslot_arrays_unsupported(flags: i32) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "get_attstatsslot: extracting pg_statistic stavalues/stanumbers arrays (flags {flags:#x}) is not supported"
+        ))
+        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+    )
 }
 
 // C pfrees the deconstructed arrays; dropping the slot's PgVecs is the mirror.

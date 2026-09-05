@@ -31,3 +31,4 @@ init_small = { path = "../../init/init_small" }
 inval = { path = "../inval" }
 l2cache = { path = "../l2cache" }
 seam_core = { path = "../../../../_support/seam_core" }
+elog = { path = "../../error/elog" }

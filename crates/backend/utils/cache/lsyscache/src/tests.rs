@@ -788,3 +788,36 @@ fn init_seams_installs() {
         (TEXTOID, 7)
     );
 }
+
+// get_attstatsslot's stavalues / stanumbers extraction (lsyscache.c:3536)
+// is unported: asking for either array is a typed 0A000 refusal, never a
+// panic (audit-18.6 b169, row lsyscache-p2-7e8bcbf8).
+#[test]
+fn attstatsslot_array_flags_are_typed_refusals() {
+    with_mcx(|m| {
+        let image = [0u64; 8];
+        // SAFETY: dummy aligned image, larger than the fixed header; the
+        // mocked pg_statistic_slot_shape seam never dereferences it.
+        let tuple = unsafe {
+            types_tuple::HeapTupleData::from_raw_parts(
+                image.as_ptr().cast(),
+                core::mem::size_of_val(&image) as u32,
+                Default::default(),
+                InvalidOid,
+            )
+        };
+        for flags in [ATTSTATSSLOT_VALUES, ATTSTATSSLOT_NUMBERS, ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS] {
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                get_attstatsslot(m, &tuple, 1, InvalidOid, flags).map(|s| s.is_some())
+            }));
+            let err = match r.expect("typed refusal, not a panic") {
+                Ok(_) => panic!("flags {flags:#x} must be refused"),
+                Err(e) => e,
+            };
+            assert_eq!(err.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+            assert!(err.message().contains("not supported"), "{}", err.message());
+        }
+        // The flag-less lookup keeps working.
+        assert!(get_attstatsslot(m, &tuple, 1, InvalidOid, 0).unwrap().is_some());
+    });
+}

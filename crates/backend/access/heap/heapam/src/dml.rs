@@ -3373,6 +3373,11 @@ fn any_attr_modified(
 ) -> bool {
     let td = &relation.rd_att;
     for &attnum in attnums {
+        // heapam.c:4618-4627: a whole-tuple reference (attno 0, from an
+        // index expression over a whole-row Var) is always "not equal".
+        if attnum == 0 {
+            return true;
+        }
         debug_assert!(attnum > 0);
         let mut isnull1 = false;
         let mut isnull2 = false;

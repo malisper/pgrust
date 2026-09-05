@@ -3322,6 +3322,7 @@ version = "0.1.0"
 dependencies = [
  "catcache_seams",
  "datum",
+ "elog",
  "fmgr_seams",
  "genam_seams",
  "guc_tables",
@@ -8206,6 +8207,7 @@ dependencies = [
  "catalog_seams",
  "catcache_seams",
  "datum",
+ "elog",
  "guc_tables",
  "init_small",
  "inval_seams",
@@ -15633,6 +15635,7 @@ dependencies = [
  "catalog_seams",
  "datum",
  "detoast",
+ "elog",
  "fmgr_seams",
  "genam",
  "heaptuple",

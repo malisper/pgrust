@@ -34,6 +34,7 @@ fmgr_seams = { path = "../../fmgr/fmgr_seams" }
 types_fmgr = { path = "../../../../_support/types/fmgr" }
 catalog_seams = { path = "../../../catalog/catalog_seams" }
 init_small = { path = "../../init/init_small" }
+elog = { path = "../../error/elog" }
 
 [dev-dependencies]
 heaptuple = { path = "../../../access/common/heaptuple" }

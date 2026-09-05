@@ -815,12 +815,22 @@ pub fn relmap_redo(record: &mut XLogReaderState) -> PgResult<()> {
     }
     let dbid = Oid::from_ne_bytes(data[0..4].try_into().unwrap());
     let tsid = Oid::from_ne_bytes(data[4..8].try_into().unwrap());
-    let nbytes = i32::from_ne_bytes(data[8..12].try_into().unwrap());
-    if nbytes as usize != SIZEOF_RELMAPFILE || data.len() < 12 + SIZEOF_RELMAPFILE {
+    // xl_relmap_update.nbytes is int32 but relmapper.c:1110 prints it with
+    // %u: a corrupt 0xFFFFFFFF is "wrong size 4294967295".
+    let nbytes = u32::from_ne_bytes(data[8..12].try_into().unwrap());
+    if nbytes as usize != SIZEOF_RELMAPFILE {
         return ereport(PANIC)
             .errmsg(format!(
                 "relmap_redo: wrong size {nbytes} in relmap update record"
             ))
+            .finish(loc("relmap_redo"));
+    }
+    // A record whose payload is shorter than the header claims: C's memcpy
+    // would read past the record; refuse it as the truncation it is, not as
+    // a "wrong size" the header did not carry.
+    if data.len() < 12 + SIZEOF_RELMAPFILE {
+        return ereport(PANIC)
+            .errmsg("relmap_redo: truncated relmap update record")
             .finish(loc("relmap_redo"));
     }
     let mut newmap = RelMapFile::from_bytes(&data[12..12 + SIZEOF_RELMAPFILE]);

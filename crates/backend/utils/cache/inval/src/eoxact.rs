@@ -416,7 +416,23 @@ pub fn ProcessCommittedInvalidationMessages(
         return Ok(());
     }
 
+    // inval.c:1142
+    elog::elog(
+        types_error::DEBUG4,
+        format!(
+            "replaying commit with {} messages{}",
+            msgs.len(),
+            if relcache_init_file_inval { " and relcache file invalidation" } else { "" }
+        ),
+    )?;
+
     if relcache_init_file_inval {
+        // inval.c:1147
+        elog::elog(
+            types_error::DEBUG4,
+            format!("removing relcache init files for database {dbid}"),
+        )?;
+
         // C pokes DatabasePath directly (SetDatabasePath is once-per-backend);
         // recovery-cold, so a per-call context for the path is fine.
         if OidIsValid(dbid) {

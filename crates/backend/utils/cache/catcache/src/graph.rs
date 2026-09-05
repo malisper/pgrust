@@ -209,6 +209,17 @@ pub fn InitCatCache(
 }
 
 pub(crate) fn rehash_cat_cache<'mcx>(mcx: mcx::Mcx<'mcx>, cache: &mut CatCache<'mcx>) {
+    // catcache.c:1002 elog(DEBUG1, ...): DEBUG-level reports cannot fail.
+    let _ = elog::elog(
+        types_error::DEBUG1,
+        format!(
+            "rehashing catalog cache id {} for {}; {} tups, {} buckets",
+            cache.id,
+            cache.cc_relname.as_ref().map_or("", |s| s.as_str()),
+            cache.cc_ntup,
+            cache.cc_nbuckets
+        ),
+    );
     let newn = cache.cc_nbuckets * 2;
     let mut newbucket: PgVec<'mcx, u32> = PgVec::new_in(mcx);
     newbucket.resize(newn as usize, NONE);
@@ -229,6 +240,17 @@ pub(crate) fn rehash_cat_cache<'mcx>(mcx: mcx::Mcx<'mcx>, cache: &mut CatCache<'
 }
 
 pub(crate) fn rehash_cat_cache_lists<'mcx>(mcx: mcx::Mcx<'mcx>, cache: &mut CatCache<'mcx>) {
+    // catcache.c:1040 elog(DEBUG1, ...): DEBUG-level reports cannot fail.
+    let _ = elog::elog(
+        types_error::DEBUG1,
+        format!(
+            "rehashing catalog cache id {} for {}; {} lists, {} buckets",
+            cache.id,
+            cache.cc_relname.as_ref().map_or("", |s| s.as_str()),
+            cache.cc_nlist,
+            cache.cc_nlbuckets
+        ),
+    );
     let newn = cache.cc_nlbuckets * 2;
     let mut newbucket: PgVec<'mcx, u32> = PgVec::new_in(mcx);
     newbucket.resize(newn as usize, NONE);

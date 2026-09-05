@@ -443,3 +443,47 @@ fn relsync_and_snapshot_dedup_in_rel_subgroup() {
     assert!(matches!(flat[0], SharedInvalidationMessage::RelSync(m) if m.relid == 10));
     assert!(matches!(flat[1], SharedInvalidationMessage::RelSync(m) if m.relid == InvalidOid));
 }
+
+// ProcessCommittedInvalidationMessages logs the replay at DEBUG4
+// (inval.c:1142/1147): "replaying commit with %d messages%s" and, with the
+// init-file flag, "removing relcache init files for database %u"
+// (audit-18.6 b169, row inval-ac899412).
+static REPLAY_LOGS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+fn capture_replay_log(e: &types_error::PgError, _output_to_server: &mut bool) {
+    if e.level == types_error::DEBUG4 {
+        REPLAY_LOGS.lock().unwrap_or_else(|e| e.into_inner()).push(e.message().to_string());
+    }
+}
+
+#[test]
+fn committed_replay_logs_at_debug4_like_c() {
+    install();
+    elog::init_seams();
+    let msgs = [SharedInvalidationMessage::Relcache(types_storage::SharedInvalRelcacheMsg {
+        dbId: 5,
+        relId: 100,
+    })];
+    let prior_min = elog::config::log_min_messages();
+    elog::config::set_log_min_messages(types_error::DEBUG4);
+    REPLAY_LOGS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    let prior = elog::sink::set_emit_log_hook(Some(capture_replay_log));
+    let r1 = ProcessCommittedInvalidationMessages(&msgs, false, 5, 1663);
+    let r2 = ProcessCommittedInvalidationMessages(&msgs, true, InvalidOid, InvalidOid);
+    let r3 = ProcessCommittedInvalidationMessages(&[], true, 5, 1663);
+    elog::sink::set_emit_log_hook(prior);
+    elog::config::set_log_min_messages(prior_min);
+    r1.unwrap();
+    r2.unwrap();
+    r3.unwrap();
+    let logs = REPLAY_LOGS.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    assert_eq!(
+        logs,
+        vec![
+            "replaying commit with 1 messages".to_string(),
+            "replaying commit with 1 messages and relcache file invalidation".to_string(),
+            "removing relcache init files for database 0".to_string(),
+        ],
+        "inval.c:1142/1147 DEBUG4 lines (nmsgs <= 0 logs nothing)"
+    );
+}
