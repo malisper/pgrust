@@ -112,10 +112,8 @@ fn fc_triggered_change_notification(
                 }
 
                 // Names/key values may be non-UTF-8 in a SQL_ASCII database;
-                // C sends the raw payload bytes. Use lossy to avoid panicking
-                // the trigger (which fires on ordinary DML).
-                let payload = String::from_utf8_lossy(&payload).into_owned();
-                commands_async::Async_Notify(channel, Some(&payload))?;
+                // C sends the raw payload bytes (tcn.c:171 Async_Notify).
+                commands_async::Async_Notify(channel.as_bytes(), Some(payload.as_slice()))?;
             }
             break;
         }

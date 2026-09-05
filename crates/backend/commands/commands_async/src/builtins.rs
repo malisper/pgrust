@@ -12,8 +12,10 @@ fn text_arg_or_empty<'a>(fcinfo: &'a Fcinfo, i: usize) -> PgResult<&'a [u8]> {
 }
 
 pub fn fc_pg_notify(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    let channel = str::from_utf8(text_arg_or_empty(fcinfo, 0)?).expect("server-encoded channel");
-    let payload = str::from_utf8(text_arg_or_empty(fcinfo, 1)?).expect("server-encoded payload");
+    // async.c:564,569: text_to_cstring, no encoding validation — the bytes
+    // are server-encoded (SQL_ASCII / single-byte text carries 0x80..0xFF).
+    let channel = text_arg_or_empty(fcinfo, 0)?;
+    let payload = text_arg_or_empty(fcinfo, 1)?;
 
     // PreventCommandDuringRecovery("NOTIFY"); the statement form is checked
     // in ProcessUtility (inlined here: a utility dep would cycle).

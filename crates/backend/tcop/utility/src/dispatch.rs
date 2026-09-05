@@ -472,7 +472,10 @@ fn dispatch_switch<'mcx>(
 
         T_NotifyStmt => {
             let stmt = parsetree.as_notify_stmt().unwrap();
-            commands_async::Async_Notify(stmt.conditionname.unwrap_or(""), stmt.payload)?;
+            commands_async::Async_Notify(
+                stmt.conditionname.unwrap_or("").as_bytes(),
+                stmt.payload.map(str::as_bytes),
+            )?;
         }
         T_ListenStmt => {
             let stmt = parsetree.as_listen_stmt().unwrap();

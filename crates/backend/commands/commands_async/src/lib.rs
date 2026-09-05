@@ -118,7 +118,10 @@ fn notification_equal(a: &Notification, b: &Notification) -> bool {
     a.channel_len == b.channel_len && a.payload_len == b.payload_len && a.data == b.data
 }
 
-pub fn Async_Notify(channel: &str, payload: Option<&str>) -> PgResult<()> {
+/// async.c Async_Notify. Channel and payload are server-encoded bytes, not
+/// UTF-8: in a SQL_ASCII / single-byte database text legitimately carries
+/// 0x80..0xFF and C forwards the raw bytes to listeners (async.c:564,569).
+pub fn Async_Notify(channel: &[u8], payload: Option<&[u8]>) -> PgResult<()> {
     let my_level = xact::GetCurrentTransactionNestLevel();
 
     // Seam, not the parallel crate: the direct edge cycles via bgworker→postgres.
@@ -126,11 +129,11 @@ pub fn Async_Notify(channel: &str, payload: Option<&str>) -> PgResult<()> {
         elog(ERROR, "cannot send notifications from a parallel worker")?;
     }
     if trace_notify() {
-        elog(DEBUG1, format!("Async_Notify({channel})"))?;
+        elog(DEBUG1, format!("Async_Notify({})", String::from_utf8_lossy(channel)))?;
     }
 
     let channel_len = channel.len();
-    let payload_len = payload.map_or(0, str::len);
+    let payload_len = payload.map_or(0, <[u8]>::len);
 
     if channel_len == 0 {
         return Err(ereport(ERROR)
@@ -155,10 +158,10 @@ pub fn Async_Notify(channel: &str, payload: Option<&str>) -> PgResult<()> {
     }
 
     let mut data = Vec::with_capacity(channel_len + payload_len + 2);
-    data.extend_from_slice(channel.as_bytes());
+    data.extend_from_slice(channel);
     data.push(0);
     if let Some(p) = payload {
-        data.extend_from_slice(p.as_bytes());
+        data.extend_from_slice(p);
     }
     data.push(0);
     let n = Notification {
@@ -279,7 +282,7 @@ pub(crate) fn listening_channel_at(i: usize) -> Option<Box<[u8]>> {
 }
 
 fn Async_UnlistenOnExit(_code: i32, _arg: datum::Datum) -> PgResult<()> {
-    exec_unlisten_all_commit();
+    exec_unlisten_all_commit()?;
     async_queue_unregister()
 }
 
@@ -347,7 +350,7 @@ pub fn AtCommit_Notify() -> PgResult<()> {
             match a.kind {
                 ListenActionKind::Listen => exec_listen_commit(&a.channel),
                 ListenActionKind::Unlisten => exec_unlisten_commit(&a.channel)?,
-                ListenActionKind::UnlistenAll => exec_unlisten_all_commit(),
+                ListenActionKind::UnlistenAll => exec_unlisten_all_commit()?,
             }
         }
     }
@@ -422,8 +425,12 @@ fn exec_unlisten_commit(channel: &[u8]) -> PgResult<()> {
     Ok(())
 }
 
-fn exec_unlisten_all_commit() {
+fn exec_unlisten_all_commit() -> PgResult<()> {
+    if trace_notify() {
+        elog(DEBUG1, format!("Exec_UnlistenAllCommit({})", g::MyProcPid()))?;
+    }
     LOCAL.with(|s| s.listen_channels.borrow_mut().clear());
+    Ok(())
 }
 
 fn is_listening_on(channel: &[u8]) -> bool {
