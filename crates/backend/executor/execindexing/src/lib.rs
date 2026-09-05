@@ -354,10 +354,12 @@ pub fn BuildSpeculativeIndexInfo(index: &Relation<'_>, ii: &mut IndexInfo) -> Pg
             strat as i16,
         )?;
         if opno == 0 {
-            panic!(
+            // index.c:2732 elog(ERROR): a catchable XX000, the transaction
+            // aborts and unwinds normally.
+            return Err(Box::new(PgError::error(format!(
                 "missing operator {}({},{}) in opfamily {}",
                 strat, index.rd_opcintype[i], index.rd_opcintype[i], index.rd_opfamily[i]
-            );
+            ))));
         }
         ii.ii_UniqueStrats[i] = strat;
         ii.ii_UniqueOps[i] = opno;
@@ -436,7 +438,7 @@ pub fn ExecCloseIndices(mut state: ResultRelIndexState<'_>) -> PgResult<()> {
     Ok(())
 }
 
-/// FormIndexDatum (catalog/index.c); system columns stay loud. The expression
+/// FormIndexDatum (catalog/index.c). The expression
 /// states resolve once onto the IndexInfo (C's lazy ExecPrepareExprList,
 /// including its expression_planner step — required on the CREATE INDEX build
 /// path, where ii_Expressions are raw parse trees from ComputeIndexAttrs, not
@@ -469,20 +471,20 @@ pub fn FormIndexDatum<'mcx>(
     for i in 0..indexInfo.ii_NumIndexAttrs as usize {
         let keycol = indexInfo.ii_IndexAttrNumbers[i];
         if keycol < 0 {
-            // Unreachable invariant: C's FormIndexDatum reads system
-            // attributes here (slot_getsysattr), but DefineIndex refuses
-            // system columns in both key columns and expressions/predicates
-            // (indexcmds.c ComputeIndexAttrs, "index creation on system
-            // columns is not supported"), and no catalog-built index uses
-            // them since oid indexes were removed.
-            panic!("FormIndexDatum: system-attribute index column {keycol}");
-        }
-        if keycol != 0 {
+            // index.c:2786: system attribute (DefineIndex refuses them, but
+            // the datum path serves them like C's slot_getsysattr).
+            let mut null = false;
+            values[i] = exectuples::slot_getsysattr(slot, keycol as i32, &mut null)?;
+            isnull[i] = null;
+        } else if keycol != 0 {
             let mut null = false;
             values[i] = exectuples::slot_getattr(slot, keycol as i32, &mut null);
             isnull[i] = null;
         } else {
-            let state = indexpr_item.next().expect("wrong number of index expressions");
+            // index.c:2801 elog(ERROR)
+            let Some(state) = indexpr_item.next() else {
+                return Err(wrong_number_of_index_expressions());
+            };
             let mut slots = execexpr::EvalSlots { scan: Some(slot), inner: None, outer: None };
             let r = execexpr::exec_eval_expr(state, &mut slots)?;
             values[i] = r.value;
@@ -490,9 +492,16 @@ pub fn FormIndexDatum<'mcx>(
         }
     }
     if indexpr_item.next().is_some() {
-        panic!("wrong number of index expressions");
+        // index.c:2812 elog(ERROR)
+        return Err(wrong_number_of_index_expressions());
     }
     Ok(())
+}
+
+#[cold]
+#[inline(never)]
+fn wrong_number_of_index_expressions() -> Box<PgError> {
+    Box::new(PgError::error("wrong number of index expressions"))
 }
 
 /// C ExecPrepareQual over ii_Predicate: expression_planner folds each
@@ -697,7 +706,7 @@ pub fn ExecCheckIndexConstraints<'mcx>(
             continue;
         }
         if !index_form.indimmediate {
-            return Err(deferrable_arbiter(heap_relation, indexRelation));
+            return Err(deferrable_arbiter(mcx, heap_relation, indexRelation));
         }
         checked_index = true;
 
@@ -729,7 +738,8 @@ pub fn ExecCheckIndexConstraints<'mcx>(
     }
 
     if !arbiter_indexes.is_empty() && !checked_index {
-        panic!("unexpected failure to find arbiter index");
+        // execIndexing.c:657 elog(ERROR): XX000, clean transaction abort.
+        return Err(Box::new(PgError::error("unexpected failure to find arbiter index")));
     }
     Ok(true)
 }
@@ -838,11 +848,14 @@ fn check_exclusion_or_unique_constraint<'mcx>(
         )? {
             let existing_tid = existing_slot.base().tts_tid;
             if ItemPointerIsValid(tupleid) && ItemPointerEquals(tupleid, &existing_tid) {
-                assert!(
-                    !found_self,
-                    "found self tuple multiple times in index \"{}\"",
-                    index_relation.name()
-                );
+                if found_self {
+                    // execIndexing.c:845 elog(ERROR) "should not happen": a
+                    // damaged index is a catchable XX000, not a panic.
+                    return Err(Box::new(PgError::error(format!(
+                        "found self tuple multiple times in index \"{}\"",
+                        index_relation.name()
+                    ))));
+                }
                 found_self = true;
                 continue;
             }
@@ -942,8 +955,10 @@ pub fn IndexCheckExclusion<'mcx>(
     if ::types_rel::reindex::ReindexIsCurrentlyProcessingIndex(index_relation.rd_id) {
         ::types_rel::reindex::reset_reindex_processing();
     }
-    let eval_cx = ::mcx::MemoryContext::new("IndexCheckExclusion");
-    let eval_mcx = eval_cx.mcx();
+    // C's econtext->ecxt_per_tuple_memory: reset after every checked tuple
+    // (index.c:3297), so expression/predicate results never accumulate
+    // across a large table.
+    let mut eval_cx = ::mcx::MemoryContext::new("IndexCheckExclusion");
     let mut slot = exectuples::make_tuple_table_slot(
         mcx,
         ::types_slot::TupleSlotKind::BufferHeapTuple,
@@ -981,16 +996,19 @@ pub fn IndexCheckExclusion<'mcx>(
         ::types_scan::ScanDirection::ForwardScanDirection,
         &mut slot,
     )? {
+        // index.c:3272 CHECK_FOR_INTERRUPTS(): a cancel lands per tuple, not
+        // only at the heap scan's page boundaries.
+        postgres_seams::check_for_interrupts::call()?;
         if !index_info.ii_Predicate.is_nil()
-            && !index_predicate_passes(mcx, eval_mcx, index_info, &mut slot)?
+            && !index_predicate_passes(mcx, eval_cx.mcx(), index_info, &mut slot)?
         {
             continue;
         }
-        FormIndexDatum(mcx, eval_mcx, index_info, &mut slot, &mut values, &mut isnull)?;
+        FormIndexDatum(mcx, eval_cx.mcx(), index_info, &mut slot, &mut values, &mut isnull)?;
         let tupleid = slot.base().tts_tid;
         check_exclusion_or_unique_constraint(
             mcx,
-            eval_mcx,
+            eval_cx.mcx(),
             heap_relation,
             index_relation,
             index_info,
@@ -1003,6 +1021,8 @@ pub fn IndexCheckExclusion<'mcx>(
             &mut existing_slot,
             None,
         )?;
+        // index.c:3297 MemoryContextReset(econtext->ecxt_per_tuple_memory)
+        eval_cx.reset();
     }
     heapam::heap_endscan(scan)?;
     snapmgr::UnregisterSnapshot(Some(&snapshot));
@@ -1142,9 +1162,22 @@ fn exec_without_overlaps_not_empty(
     attval: Datum,
     typtype: i8,
 ) -> PgResult<()> {
+    let name = String::from_utf8_lossy(attname.name_str()).into_owned();
+    // execIndexing.c:1162 switches on typtype BEFORE touching attval: an
+    // unexpected type is elog(ERROR), never a dereference of a by-value
+    // datum.
+    let is_range = match typtype {
+        TYPTYPE_RANGE => true,
+        TYPTYPE_MULTIRANGE => false,
+        _ => {
+            return Err(Box::new(PgError::error(format!(
+                "WITHOUT OVERLAPS column \"{name}\" is not a range or multirange"
+            ))))
+        }
+    };
     // PG_DETOAST_DATUM: values come from FormIndexDatum, possibly toasted.
     // SAFETY: non-null by-ref range/multirange varlena datum (caller checked
-    // isnull); readable through its full VARSIZE_ANY.
+    // isnull, typtype checked above); readable through its full VARSIZE_ANY.
     let raw = unsafe {
         let p = attval.as_usize() as *const u8;
         core::slice::from_raw_parts(p, ::types_tuple::varatt::varsize_any(p))
@@ -1156,15 +1189,10 @@ fn exec_without_overlaps_not_empty(
         flat = ::detoast_seams::detoast_attr::call(mcx, raw)?;
         &flat
     };
-    let name = String::from_utf8_lossy(attname.name_str()).into_owned();
-    let isempty = match typtype {
-        TYPTYPE_RANGE => ::adt_rangetypes::range_is_empty(bytes),
-        TYPTYPE_MULTIRANGE => ::adt_multirangetypes::multirange_is_empty(bytes),
-        _ => {
-            return Err(Box::new(PgError::error(format!(
-                "WITHOUT OVERLAPS column \"{name}\" is not a range or multirange"
-            ))))
-        }
+    let isempty = if is_range {
+        ::adt_rangetypes::range_is_empty(bytes)
+    } else {
+        ::adt_multirangetypes::multirange_is_empty(bytes)
     };
     if isempty {
         return Err(Box::new(
@@ -1185,14 +1213,18 @@ const TYPTYPE_MULTIRANGE: i8 = b'm' as i8;
 #[track_caller]
 #[cold]
 #[inline(never)]
-fn deferrable_arbiter(heap: &Relation<'_>, index: &Relation<'_>) -> Box<PgError> {
-    Box::new(
-        PgError::error(
-            "ON CONFLICT does not support deferrable unique constraints/exclusion \
-             constraints as arbiters",
-        )
-        .with_sqlstate(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
-        .with_table_name(heap.name().to_owned())
-        .with_constraint_name(index.name().to_owned()),
+fn deferrable_arbiter(mcx: Mcx<'_>, heap: &Relation<'_>, index: &Relation<'_>) -> Box<PgError> {
+    // execIndexing.c:606-611 errtableconstraint -> relcache.c:6053 errtable:
+    // schema name + table name + constraint name.
+    let mut e = PgError::error(
+        "ON CONFLICT does not support deferrable unique constraints/exclusion \
+         constraints as arbiters",
     )
+    .with_sqlstate(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+    .with_table_name(heap.name().to_owned())
+    .with_constraint_name(index.name().to_owned());
+    if let Ok(Some(nsp)) = lsyscache::misc::get_namespace_name(mcx, heap.rd_rel.relnamespace) {
+        e = e.with_schema_name(nsp.as_str().to_owned());
+    }
+    Box::new(e)
 }

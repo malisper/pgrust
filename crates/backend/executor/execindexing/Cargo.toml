@@ -48,6 +48,7 @@ tuplesort = { path = "../../utils/sort/tuplesort" }
 init_small = { path = "../../utils/init/init_small" }
 postgres_seams = { path = "../../tcop/postgres_seams" }
 elog = { path = "../../utils/error/elog" }
+backend_progress_seams = { path = "../../utils/activity/backend_progress_seams" }
 
 adt_rangetypes = { path = "../../utils/adt/rangetypes" }
 adt_multirangetypes = { path = "../../utils/adt/multirangetypes" }
@@ -55,6 +56,12 @@ detoast_seams = { path = "../../access/common/detoast_seams" }
 
 [dev-dependencies]
 test_boot = { path = "../../../_support/test_boot" }
+resowner_seams = { path = "../../utils/resowner/resowner_seams" }
+types_resowner = { path = "../../../_support/types/types_resowner" }
+subtrans_seams = { path = "../../access/transam/subtrans_seams" }
+varsup = { path = "../../access/transam/varsup" }
+syncscan_seams = { path = "../../access/common/syncscan_seams" }
+namespace_seams = { path = "../../catalog/namespace_seams" }
 nbtree = { path = "../../access/nbtree/nbtree" }
 nodeindexscan = { path = "../nodeindexscan" }
 types_scan = { path = "../../../_support/types/types_scan" }

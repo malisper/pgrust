@@ -419,6 +419,7 @@ fn bt_check_every_level<'mcx>(
             &rel_alias,
             &mut indexinfo,
             true,
+            /* progress */ false, // verify_nbtree.c:590
             |index, tid, values, isnull, _alive| {
                 bt_tuple_present_callback(
                     scratch,

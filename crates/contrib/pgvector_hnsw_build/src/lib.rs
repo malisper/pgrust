@@ -970,6 +970,7 @@ fn build_index<'mcx>(
             index,
             index_info,
             true,
+            /* progress */ true,
             |_index_rel, tid, values, isnull, _alive| {
                 // SAFETY: single-threaded serial build; bs outlives the scan.
                 let bs = unsafe { &mut *bs_ptr };

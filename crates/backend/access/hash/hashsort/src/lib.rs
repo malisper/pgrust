@@ -61,6 +61,7 @@ pub fn hashbuild<'mcx>(
         index,
         indexInfo,
         true,
+        /* progress */ true,
         |index_rel, tid, values, isnull, _tuple_is_alive| {
             let Some(hash_datum) = hash::_hash_convert_tuple(index_rel, values, isnull)? else {
                 return Ok(());

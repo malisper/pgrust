@@ -75,6 +75,7 @@ pub fn blbuild<'mcx>(
         index,
         index_info,
         true,
+        /* progress */ true,
         |_index, tid, values, isnull, _tuple_is_alive| {
             // C's per-tuple tmpCtx reset == the owned tuple Vec dropping here.
             let itup = bloom_form_tuple(&mut bs.blstate, tid, values, isnull)?;

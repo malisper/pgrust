@@ -356,6 +356,7 @@ impl BtBuildPool {
             index_info,
             /* allow_sync */ false,
             /* anyvisible */ false,
+            /* progress */ false, // nbtsort.c:1930 worker arm
             start,
             len,
             Some(self.oldest_xmin),

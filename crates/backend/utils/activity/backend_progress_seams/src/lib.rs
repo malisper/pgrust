@@ -17,3 +17,9 @@ seam_core::seam!(
 pub const PROGRESS_WAITFOR_TOTAL: usize = 3;
 pub const PROGRESS_WAITFOR_DONE: usize = 4;
 pub const PROGRESS_WAITFOR_CURRENT_PID: usize = 5;
+
+// Block counts of the heap scan (commands/progress.h), shared by the CREATE
+// INDEX and CLUSTER views; the table-AM build scan (execindexing) reports
+// them through the seam for the same reason.
+pub const PROGRESS_SCAN_BLOCKS_TOTAL: usize = 15;
+pub const PROGRESS_SCAN_BLOCKS_DONE: usize = 16;

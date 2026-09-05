@@ -115,6 +115,7 @@ pub fn gistbuild<'mcx>(
         index,
         indexInfo,
         true,
+        /* progress */ true,
         // gistBuildCallback
         |index_rel, tid, values, isnull, _tuple_is_alive| {
             {
@@ -315,6 +316,7 @@ fn gist_sorted_build<'mcx>(
             index,
             indexInfo,
             true,
+            /* progress */ true,
             // gistSortedBuildCallback
             |index_rel, tid, values, isnull, _tuple_is_alive| {
                 let tmcx = temp.mcx();

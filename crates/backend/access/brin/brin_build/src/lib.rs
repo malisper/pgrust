@@ -164,6 +164,7 @@ pub fn brinbuild<'mcx>(
         index,
         indexInfo,
         false,
+        /* progress */ true,
         |_index_rel, tid, values, isnull, _tuple_is_alive| {
             brinbuildCallback(&mut state, tid, values, isnull)
         },
@@ -344,6 +345,7 @@ fn summarize_range<'mcx>(
         indexInfo,
         false,
         true,
+        /* progress */ false,
         heapBlk,
         scanNumBlks,
         |_index_rel, tid, values, isnull, _tuple_is_alive| {

@@ -85,6 +85,7 @@ pub fn spgbuild<'mcx>(
         index,
         indexInfo,
         true,
+        /* progress */ true,
         |index_rel, tid, values, isnull, _tuple_is_alive| {
             loop {
                 let done = {

@@ -695,3 +695,419 @@ fn unique_index_conflict_surfaces_23505() {
     crate::ExecCloseIndices(idxstate).unwrap();
     quiesced();
 }
+
+// --- audit-18.6 remediation batch b139 (backend/executor/execindexing) witnesses ---
+
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// A pending query cancel for the harness's check_for_interrupts seam
+/// (installed in `install_b139_seams` BEFORE test_boot so the boot stub
+/// stays out). Deliberately NOT InterruptPending: the heapam/nbtree wrappers
+/// gate their seam call on that global, so only a direct per-tuple
+/// CHECK_FOR_INTERRUPTS() (index.c:3272) reaches the seam here.
+static CANCEL_PENDING: AtomicBool = AtomicBool::new(false);
+static PROGRESS_LOG: Mutex<Vec<(usize, i64)>> = Mutex::new(Vec::new());
+// commands/progress.h
+const PROGRESS_SCAN_BLOCKS_TOTAL: usize = 15;
+const PROGRESS_SCAN_BLOCKS_DONE: usize = 16;
+
+struct CancelPending;
+impl CancelPending {
+    fn arm() -> Self {
+        CANCEL_PENDING.store(true, Ordering::Relaxed);
+        CancelPending
+    }
+}
+impl Drop for CancelPending {
+    fn drop(&mut self) {
+        CANCEL_PENDING.store(false, Ordering::Relaxed);
+    }
+}
+
+fn take_progress() -> Vec<(usize, i64)> {
+    std::mem::take(&mut *PROGRESS_LOG.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
+macro_rules! seam_default {
+    ($seam:path, $imp:expr) => {{
+        use $seam as __s;
+        if !__s::is_installed() {
+            __s::set($imp);
+        }
+    }};
+}
+
+/// Seams the b139 witnesses need on top of `install()`: the cancel-aware
+/// CHECK_FOR_INTERRUPTS, a progress-parameter recorder, and the snapshot
+/// machinery (GetLatestSnapshot/RegisterSnapshot: procarray + varsup images,
+/// resowner and xact isolation seams) that IndexCheckExclusion and the
+/// concurrent build-scan lane take.
+fn install_b139_seams() {
+    static PRE: Once = Once::new();
+    PRE.call_once(|| {
+        seam_default!(postgres_seams::check_for_interrupts, || {
+            if CANCEL_PENDING.load(Ordering::Relaxed) {
+                return Err(Box::new(
+                    ::types_error::PgError::error("canceling statement due to user request")
+                        .with_sqlstate(::types_error::ERRCODE_QUERY_CANCELED),
+                ));
+            }
+            Ok(())
+        });
+        seam_default!(backend_progress_seams::pgstat_progress_update_param, |index, val| {
+            PROGRESS_LOG.lock().unwrap_or_else(|e| e.into_inner()).push((index, val));
+        });
+    });
+    install();
+    static POST: Once = Once::new();
+    POST.call_once(|| {
+        seam_default!(xact_seams::get_current_command_id, |_| Ok(0));
+        seam_default!(xact_seams::isolation_uses_xact_snapshot, || false);
+        seam_default!(xact_seams::isolation_is_serializable, || false);
+        seam_default!(xact_seams::transaction_id_is_current_transaction_id, |_| false);
+        seam_default!(transam_xlog_seams::recovery_in_progress, || false);
+        seam_default!(subtrans_seams::sub_trans_get_topmost_transaction, Ok);
+        seam_default!(syscache_seams::relation_invalidates_snapshots_only, |_| false);
+        seam_default!(syscache_seams::relation_has_sys_cache, |_| true);
+        seam_default!(resowner_seams::current_resource_owner, || {
+            ::types_resowner::ResourceOwner::NULL
+        });
+        seam_default!(resowner_seams::set_current_resource_owner, |_| {});
+        seam_default!(resowner_seams::top_transaction_resource_owner, || {
+            ::types_resowner::ResourceOwner::NULL
+        });
+        seam_default!(resowner_seams::resource_owner_enlarge, |_| Ok(()));
+        seam_default!(resowner_seams::resource_owner_remember_snapshot, |_, _| {});
+        seam_default!(resowner_seams::resource_owner_forget_snapshot, |_, _| {});
+        // Heap scan (table_beginscan_strat shape): strategy/syncscan arms
+        // and the strategy-aware reader route to the fixture's page table.
+        seam_default!(bufmgr_seams::read_buffer_strategy, |rel, blk, _strategy| {
+            bufmgr_seams::read_buffer::call(rel, blk)
+        });
+        seam_default!(bufmgr_seams::get_access_strategy, |_| None);
+        seam_default!(bufmgr_seams::free_access_strategy, |_| {});
+        seam_default!(syncscan_seams::ss_get_location, |_, _| Ok(0));
+        seam_default!(syncscan_seams::ss_report_location, |_, _| Ok(()));
+        // IsSystemRelation -> IsToastNamespace -> isTempToastNamespace.
+        seam_default!(namespace_seams::is_temp_toast_namespace, |_| false);
+        ::varsup::VarsupShmemInit();
+        ::procarray::ProcArrayShmemInit();
+    });
+}
+
+// A heap row inserted once; the returned slot carries its TID (ExecInsert's
+// shape) so ExecInsertIndexTuples can be driven over it more than once.
+fn insert_heap_row<'mcx>(
+    mcx: Mcx<'mcx>,
+    heap: &Relation<'mcx>,
+    val: i32,
+) -> ::types_slot::SlotData<'mcx> {
+    let mut tuple =
+        ::heaptuple::heap_form_tuple(mcx, &heap.rd_att, &[Datum::from_i32(val)], &[false]).unwrap();
+    ::heapam::heap_insert(heap, tuple.as_tuple_mut(), 0, 0, None).unwrap();
+    let mut slot = exectuples::make_tuple_table_slot(
+        mcx,
+        TupleSlotKind::Virtual,
+        Some(heap.rd_att.clone()),
+    );
+    slot.base_mut().tts_values[0] = Datum::from_i32(val);
+    slot.base_mut().tts_isnull[0] = false;
+    exectuples::exec_store_virtual_tuple(&mut slot);
+    slot.base_mut().tts_tid = tuple.as_tuple_mut().t_self;
+    slot.base_mut().tts_tableOid = HEAP_OID;
+    slot
+}
+
+fn index_relation<'mcx>(mcx: Mcx<'mcx>) -> Relation<'mcx> {
+    Relation::open(index_relation_data(mcx, false), noop_closer())
+}
+
+// Turns the single-column btree IndexInfo into a btree exclusion constraint
+// (EXCLUDE USING btree (a WITH =)): int4eq at BTEqualStrategyNumber.
+fn make_exclusion(ii: &mut crate::IndexInfo<'_>) {
+    ii.ii_HasExclusion = true;
+    ii.ii_ExclusionOps[0] = OP_INT4EQ;
+    ii.ii_ExclusionProcs[0] = F_INT4EQ;
+    ii.ii_ExclusionStrats[0] = 3;
+}
+
+// index.c:2801/2812 FormIndexDatum: an expression column with no matching
+// expression state is elog(ERROR, "wrong number of index expressions"), a
+// catchable XX000 (a186-candidate-fp-catalog-index-p2-349315a835d54b363eda-1).
+#[test]
+fn form_index_datum_expression_count_mismatch_is_an_error() {
+    let _g = serial();
+    install_b139_seams();
+    UNIQUE_IDX.with(|c| c.set(false));
+    reset_fixture();
+
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let heap = Relation::open(heap_relation_data(mcx), None);
+    let idx = index_relation(mcx);
+    let mut ii = crate::BuildIndexInfo(mcx, &idx).unwrap();
+    // Column 1 claims to be an expression, but ii_Expressions is NIL.
+    ii.ii_IndexAttrNumbers[0] = 0;
+
+    let mut slot = insert_heap_row(mcx, &heap, 5);
+    let mut values = [Datum::null(); 1];
+    let mut isnull = [false; 1];
+    let err = crate::FormIndexDatum(mcx, mcx, &mut ii, &mut slot, &mut values, &mut isnull)
+        .expect_err("expression column without an expression state must error, not panic");
+    assert_eq!(err.message(), "wrong number of index expressions");
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_INTERNAL_ERROR);
+}
+
+// index.c:2786 FormIndexDatum: keycol < 0 reads the system attribute through
+// slot_getsysattr (a186-candidate-fp-catalog-index-p2-96922c2eac4e8fb995a6-1).
+#[test]
+fn form_index_datum_serves_system_attribute_columns() {
+    let _g = serial();
+    install_b139_seams();
+    UNIQUE_IDX.with(|c| c.set(false));
+    reset_fixture();
+
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let heap = Relation::open(heap_relation_data(mcx), None);
+    let idx = index_relation(mcx);
+    let mut ii = crate::BuildIndexInfo(mcx, &idx).unwrap();
+    ii.ii_IndexAttrNumbers[0] = -1; // SelfItemPointerAttributeNumber (ctid)
+
+    let mut slot = insert_heap_row(mcx, &heap, 5);
+    let tid = slot.base().tts_tid;
+    let mut values = [Datum::null(); 1];
+    let mut isnull = [false; 1];
+    crate::FormIndexDatum(mcx, mcx, &mut ii, &mut slot, &mut values, &mut isnull)
+        .expect("system attribute index column is served like C");
+    assert!(!isnull[0]);
+    // SAFETY: slot_getsysattr(ctid) hands back a pointer to the slot's tts_tid.
+    let got = unsafe { *(values[0].as_usize() as *const ::types_tuple::ItemPointerData) };
+    assert!(::types_tuple::itemptr::ItemPointerEquals(&got, &tid));
+}
+
+// execIndexing.c:657 ExecCheckIndexConstraints: an arbiter list that matches
+// no checked index is elog(ERROR, "unexpected failure to find arbiter
+// index") — XX000, not a backend panic
+// (a186-candidate-fp-executor-execIndexing-06df515661af232d3d38-1).
+#[test]
+fn check_index_constraints_missing_arbiter_is_an_error() {
+    let _g = serial();
+    install_b139_seams();
+    UNIQUE_IDX.with(|c| c.set(false));
+    reset_fixture();
+
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let heap = Relation::open(heap_relation_data(mcx), None);
+    // Non-unique, non-exclusion index: never an arbiter candidate.
+    let mut idxstate = crate::ExecOpenIndices(mcx, &heap, true).unwrap();
+    let mut slot = insert_heap_row(mcx, &heap, 1);
+    let mut existing = exectuples::make_tuple_table_slot(
+        mcx,
+        TupleSlotKind::BufferHeapTuple,
+        Some(heap.rd_att.clone()),
+    );
+    let mut invalid = ::types_tuple::ItemPointerData::default();
+    ::types_tuple::itemptr::ItemPointerSetInvalid(&mut invalid);
+    let mut conflict = ::types_tuple::ItemPointerData::default();
+    let err = crate::ExecCheckIndexConstraints(
+        mcx,
+        mcx,
+        &mut idxstate,
+        &heap,
+        &mut slot,
+        &mut existing,
+        &invalid,
+        &[IDX_OID + 7],
+        &mut conflict,
+    )
+    .expect_err("an arbiter that is not a checked index errors like C");
+    assert_eq!(err.message(), "unexpected failure to find arbiter index");
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_INTERNAL_ERROR);
+    crate::ExecCloseIndices(idxstate).unwrap();
+    quiesced();
+}
+
+// execIndexing.c:845 check_exclusion_or_unique_constraint: the new tuple's
+// own TID showing up twice in the probe is elog(ERROR, "found self tuple
+// multiple times in index ...") — a catchable XX000 on a damaged index, not
+// an assert (a186-candidate-fp-executor-execIndexing-30d888edb7de886ad3a5-1).
+#[test]
+fn self_tuple_seen_twice_in_probe_is_an_error() {
+    let _g = serial();
+    install_b139_seams();
+    UNIQUE_IDX.with(|c| c.set(false));
+    reset_fixture();
+
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let heap = Relation::open(heap_relation_data(mcx), None);
+    let mut idxstate = crate::ExecOpenIndices(mcx, &heap, false).unwrap();
+    // One heap row, indexed twice under the same TID (the corrupt shape).
+    let mut slot = insert_heap_row(mcx, &heap, 9);
+    for _ in 0..2 {
+        crate::ExecInsertIndexTuples(mcx, mcx, &mut idxstate, &heap, &mut slot, false, None, &[], false)
+            .unwrap();
+    }
+    make_exclusion(&mut idxstate.infos[0]);
+    let tid = slot.base().tts_tid;
+    let mut existing = exectuples::make_tuple_table_slot(
+        mcx,
+        TupleSlotKind::BufferHeapTuple,
+        Some(heap.rd_att.clone()),
+    );
+    let mut conflict = ::types_tuple::ItemPointerData::default();
+    let err = crate::ExecCheckIndexConstraints(
+        mcx,
+        mcx,
+        &mut idxstate,
+        &heap,
+        &mut slot,
+        &mut existing,
+        &tid,
+        &[],
+        &mut conflict,
+    )
+    .expect_err("duplicate self TID must error, not assert");
+    assert_eq!(err.message(), "found self tuple multiple times in index \"t_idx\"");
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_INTERNAL_ERROR);
+    // The error unwinds out of a live index scan (C's resowner releases its
+    // pin at abort); the harness has no owner, so pins are not audited here.
+    exectuples::exec_clear_tuple(&mut existing, mcx);
+    crate::ExecCloseIndices(idxstate).unwrap();
+}
+
+// execIndexing.c:1162 ExecWithoutOverlapsNotEmpty switches on typtype BEFORE
+// touching attval: a non-range/multirange column is elog(ERROR), never a
+// dereference (a186-candidate-fp-executor-execIndexing-60da42faf34d7b75ca61-1).
+// The probe runs in a child process: the pre-fix code dereferences the bogus
+// by-value datum and dies of SIGSEGV, which must not take this binary down.
+#[test]
+fn without_overlaps_typtype_is_checked_before_the_datum_is_read() {
+    let exe = std::env::current_exe().unwrap();
+    let out = std::process::Command::new(exe)
+        .args(["--exact", "tests::without_overlaps_child_probe", "--nocapture"])
+        .env("EXECINDEXING_B139_CHILD", "1")
+        .output()
+        .expect("spawn child probe");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success() && stdout.contains("test result: ok. 1 passed"),
+        "child probe did not pass cleanly (status {:?}):\n{stdout}\n{stderr}",
+        out.status
+    );
+}
+
+#[test]
+fn without_overlaps_child_probe() {
+    if std::env::var_os("EXECINDEXING_B139_CHILD").is_none() {
+        return; // only meaningful as the spawned probe
+    }
+    let _g = serial();
+    install_b139_seams();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let heap = Relation::open(heap_relation_data(mcx), None);
+    let mut attname = NameData::default();
+    attname.namestrcpy("a");
+    let err = crate::exec_without_overlaps_not_empty(
+        mcx,
+        &heap,
+        &attname,
+        Datum::from_i32(7), // by-value payload: no varlena to read
+        b'b' as i8,         // TYPTYPE_BASE
+    )
+    .expect_err("non-range typtype is an error");
+    assert_eq!(err.message(), "WITHOUT OVERLAPS column \"a\" is not a range or multirange");
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_INTERNAL_ERROR);
+}
+
+// index.c:3272 IndexCheckExclusion: CHECK_FOR_INTERRUPTS() runs for every
+// scanned heap tuple, so a pending cancel aborts the verification scan with
+// 57014 (a186-candidate-fp-catalog-index-p2-0c8e2ad9c897ddc34c00-1).
+#[test]
+fn index_check_exclusion_checks_for_interrupts_per_tuple() {
+    let _g = serial();
+    install_b139_seams();
+    UNIQUE_IDX.with(|c| c.set(false));
+    reset_fixture();
+
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let heap = Relation::open(heap_relation_data(mcx), None);
+    let mut idxstate = crate::ExecOpenIndices(mcx, &heap, false).unwrap();
+    for v in [1, 2, 3] {
+        let mut slot = insert_heap_row(mcx, &heap, v);
+        crate::ExecInsertIndexTuples(mcx, mcx, &mut idxstate, &heap, &mut slot, false, None, &[], false)
+            .unwrap();
+    }
+    crate::ExecCloseIndices(idxstate).unwrap();
+
+    let idx = index_relation(mcx);
+    let mut ii = crate::BuildIndexInfo(mcx, &idx).unwrap();
+    make_exclusion(&mut ii);
+    // Distinct keys: the scan itself never raises, only the cancel can.
+    let err = {
+        let _cancel = CancelPending::arm();
+        crate::IndexCheckExclusion(mcx, &heap, &idx, &mut ii)
+            .expect_err("a pending cancel must abort the exclusion verification scan")
+    };
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_QUERY_CANCELED);
+}
+
+// heapam_handler.c:1298-1314/1338-1348/1712-1726 heapam_index_build_range_scan
+// with progress=true publishes PROGRESS_SCAN_BLOCKS_TOTAL before the scan,
+// PROGRESS_SCAN_BLOCKS_DONE as blocks complete, and blocks_done = nblocks once
+// more after the loop (a186-candidate-fp-heap-heapam_handler-f5a594ddc301c8b50c19-1).
+#[test]
+fn index_build_scan_reports_scan_block_progress() {
+    let _g = serial();
+    install_b139_seams();
+    UNIQUE_IDX.with(|c| c.set(false));
+    reset_fixture();
+
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let heap = Relation::open(heap_relation_data(mcx), None);
+    for v in [1, 2, 3] {
+        let _ = insert_heap_row(mcx, &heap, v);
+    }
+    let idx = index_relation(mcx);
+    let mut ii = crate::BuildIndexInfo(mcx, &idx).unwrap();
+    // MVCC-snapshot lane (CREATE INDEX CONCURRENTLY's first scan): every
+    // returned tuple is indexed, no vacuum-horizon routing needed here.
+    ii.ii_Concurrent = true;
+    let _ = take_progress();
+    let mut seen = 0;
+    let reltuples = crate::table_index_build_scan(
+        mcx,
+        &heap,
+        &idx,
+        &mut ii,
+        false,
+        /* progress */ true,
+        |_rel, _tid, _values, _isnull, _alive| {
+            seen += 1;
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!((seen, reltuples), (3, 3.0));
+    let log: Vec<(usize, i64)> = take_progress()
+        .into_iter()
+        .filter(|(i, _)| *i == PROGRESS_SCAN_BLOCKS_TOTAL || *i == PROGRESS_SCAN_BLOCKS_DONE)
+        .collect();
+    // One heap page: total=1 before the scan, done=1 at the first tuple (not
+    // repeated for the page's later tuples), done=nblocks after the loop.
+    assert_eq!(
+        log,
+        vec![
+            (PROGRESS_SCAN_BLOCKS_TOTAL, 1),
+            (PROGRESS_SCAN_BLOCKS_DONE, 1),
+            (PROGRESS_SCAN_BLOCKS_DONE, 1),
+        ],
+        "scan progress must be published like heapam_index_build_range_scan(progress=true)"
+    );
+}

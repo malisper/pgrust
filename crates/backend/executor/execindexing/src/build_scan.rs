@@ -14,14 +14,19 @@ use ::types_tuple::itemptr::{InvalidOffsetNumber, ItemPointerData};
 use ::types_tuple::HeapTupleData;
 use tableam_vocab::{SO_ALLOW_PAGEMODE, SO_ALLOW_STRAT, SO_ALLOW_SYNC, SO_TYPE_SEQSCAN};
 
+use backend_progress_seams::{PROGRESS_SCAN_BLOCKS_DONE, PROGRESS_SCAN_BLOCKS_TOTAL};
+
 use crate::{index_predicate_passes, FormIndexDatum, IndexInfo};
 
+/// `progress`: C's table_index_build_scan(..., progress, ...) — report
+/// PROGRESS_SCAN_BLOCKS_TOTAL/DONE through pgstat_progress_update_param.
 pub fn table_index_build_scan<'mcx, F>(
     mcx: Mcx<'mcx>,
     heap_relation: &Relation<'mcx>,
     index_relation: &Relation<'mcx>,
     index_info: &mut IndexInfo<'mcx>,
     allow_sync: bool,
+    progress: bool,
     callback: F,
 ) -> PgResult<f64>
 where
@@ -34,6 +39,7 @@ where
         index_info,
         allow_sync,
         false,
+        progress,
         0,
         InvalidBlockNumber,
         callback,
@@ -48,6 +54,7 @@ pub fn table_index_build_range_scan<'mcx, F>(
     index_info: &mut IndexInfo<'mcx>,
     allow_sync: bool,
     anyvisible: bool,
+    progress: bool,
     start_blockno: BlockNumber,
     numblocks: BlockNumber,
     callback: F,
@@ -62,11 +69,23 @@ where
         index_info,
         allow_sync,
         anyvisible,
+        progress,
         start_blockno,
         numblocks,
         None,
         callback,
     )
+}
+
+// heapam_scan_get_blocks_done (heapam_handler.c), serial-scan arm: blocks
+// completed so far, wrapping when the scan did not start at block 0.
+fn heapam_scan_get_blocks_done(scan: &heapam::HeapScanDescData<'_>) -> BlockNumber {
+    let startblock = scan.rs_startblock;
+    if scan.rs_cblock > startblock {
+        scan.rs_cblock - startblock
+    } else {
+        scan.rs_nblocks - startblock + scan.rs_cblock
+    }
 }
 
 /// [`table_index_build_range_scan`] with a HOISTED `OldestXmin` (M4.2
@@ -85,6 +104,7 @@ pub fn table_index_build_range_scan_with_xmin<'mcx, F>(
     index_info: &mut IndexInfo<'mcx>,
     allow_sync: bool,
     anyvisible: bool,
+    progress: bool,
     start_blockno: BlockNumber,
     numblocks: BlockNumber,
     hoisted_oldest_xmin: Option<types_core::TransactionId>,
@@ -140,6 +160,15 @@ where
         flags,
     )?;
 
+    // heapam_handler.c:1298-1314: publish the number of blocks to scan
+    // (the whole relation, even for a range scan).
+    if progress {
+        backend_progress_seams::pgstat_progress_update_param::call(
+            PROGRESS_SCAN_BLOCKS_TOTAL,
+            i64::from(scan.rs_nblocks),
+        );
+    }
+
     if !allow_sync {
         heapam::heap_setscanlimits(&mut scan, start_blockno, numblocks);
     } else {
@@ -152,6 +181,7 @@ where
     crate::prepare_index_predicate(mcx, index_info)?;
 
     let mut reltuples = 0.0f64;
+    let mut previous_blkno = InvalidBlockNumber;
     let mut root_blkno = InvalidBlockNumber;
     let mut root_offsets = [InvalidOffsetNumber; MaxHeapTuplesPerPage];
     let mut values = [Datum::null(); INDEX_MAX_KEYS as usize];
@@ -166,6 +196,18 @@ where
         let Some((mut tuple, buffer)) = next_tuple(&mut scan)? else {
             break;
         };
+
+        // heapam_handler.c:1338-1348: report scan progress, if asked to.
+        if progress {
+            let blocks_done = heapam_scan_get_blocks_done(&scan);
+            if blocks_done != previous_blkno {
+                backend_progress_seams::pgstat_progress_update_param::call(
+                    PROGRESS_SCAN_BLOCKS_DONE,
+                    i64::from(blocks_done),
+                );
+                previous_blkno = blocks_done;
+            }
+        }
 
         if scan.rs_cblock != root_blkno {
             let pin = scan.rs_cbuf.as_ref().expect("pinned page for returned tuple");
@@ -330,6 +372,14 @@ where
         } else {
             callback(index_relation, &self_tid, &values[..], &isnull[..], tuple_is_alive)?;
         }
+    }
+
+    // heapam_handler.c:1712-1726: report scan progress one last time.
+    if progress {
+        backend_progress_seams::pgstat_progress_update_param::call(
+            PROGRESS_SCAN_BLOCKS_DONE,
+            i64::from(scan.rs_nblocks),
+        );
     }
 
     exectuples::exec_clear_tuple(&mut slot, mcx);

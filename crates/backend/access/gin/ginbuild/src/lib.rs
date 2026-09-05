@@ -88,6 +88,7 @@ pub fn ginbuild<'mcx>(
         index,
         indexInfo,
         false,
+        /* progress */ true,
         |_rel, tid, values, isnull, _tuple_is_alive| {
             func_ctx.reset();
             {

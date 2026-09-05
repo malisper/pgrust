@@ -119,6 +119,7 @@ pub fn btbuild<'mcx>(
             index,
             indexInfo,
             true,
+            /* progress */ true,
             |_index_rel, tid, values, isnull, tuple_is_alive| {
                 if tuple_is_alive || spool2.is_none() {
                     sortstate.putindextuplevalues(*tid, values, isnull)?;
