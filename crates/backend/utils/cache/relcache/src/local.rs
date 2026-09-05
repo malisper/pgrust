@@ -12,7 +12,7 @@ use types_error::PgResult;
 use types_rel::{FormData_pg_class, RelationData, RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, REPLICA_IDENTITY_DEFAULT, REPLICA_IDENTITY_NOTHING};
 use types_tuple::{NameData, TupleConstr, TupleDescData};
 
-use crate::build::{RelationInitPhysicalAddr, RelationInitTableAccessMethod};
+use crate::build::{invalid_relpersistence, RelationInitPhysicalAddr, RelationInitTableAccessMethod};
 use crate::{cache_mcx, store};
 
 // reltype is a build-time parameter (C's AddNewRelationTuple pokes it into
@@ -75,10 +75,8 @@ pub fn RelationBuildLocalRelation(
             debug_assert!(namespace_seams::is_temp_or_temp_toast_namespace::call(relnamespace));
             (init_small::globals::ProcNumberForTempRelations(), true)
         }
-        _ => panic!(
-            "RelationBuildLocalRelation (relcache.c): relpersistence {:?} invalid",
-            relpersistence as char
-        ),
+        // relcache.c:3667 elog(ERROR, "invalid relpersistence: %c").
+        _ => return Err(invalid_relpersistence(relpersistence)),
     };
 
     let mut name = NameData::default();
@@ -87,7 +85,9 @@ pub fn RelationBuildLocalRelation(
         relname: name,
         relnamespace,
         reltype,
-        relowner: InvalidOid,
+        // relcache.c:3650: "needed when bootstrapping" -- BOOTSTRAP_SUPERUSERID
+        // until AddNewRelationTuple pokes the real owner.
+        relowner: types_core::catalog::BOOTSTRAP_SUPERUSERID,
         relam: accessmtd,
         // Mapped relations keep relfilenode 0; RelationInitPhysicalAddr
         // consults the map (relcache.c RelationBuildLocalRelation).
@@ -129,9 +129,11 @@ pub fn RelationBuildLocalRelation(
         rd_backend,
         rd_islocaltemp,
         rd_isvalid: Cell::new(false),
+        // relcache.c:3595-3597: created in this (sub)transaction, but its
+        // relfilelocator was never reassigned.
         rd_createSubid: Cell::new(subid),
-        rd_newRelfilelocatorSubid: Cell::new(subid),
-        rd_firstRelfilelocatorSubid: Cell::new(subid),
+        rd_newRelfilelocatorSubid: Cell::new(types_core::InvalidSubTransactionId),
+        rd_firstRelfilelocatorSubid: Cell::new(types_core::InvalidSubTransactionId),
         rd_droppedSubid: Cell::new(types_core::InvalidSubTransactionId),
         rd_lockInfo: lmgr::RelationInitLockInfo(relid, false),
         rd_rel,

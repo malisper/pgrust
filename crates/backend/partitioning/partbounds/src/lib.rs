@@ -118,9 +118,12 @@ fn make_one_partition_rbound(
     b
 }
 
+// The comparators below are infallible (sort_by / bsearch shapes); a support
+// function error (fmgr.c:1143 "function %u returned NULL", or a failed call)
+// surfaces with C's message text. Making these comparators fallible is a
+// separate unit (audit row partcache-2a47e965, confirmed-open).
 fn key_cmp(key: &PartitionKeyData, col: usize, a: Datum, b: Datum) -> i32 {
-    key.cmp(col, a, b)
-        .unwrap_or_else(|e| panic!("partition support function failed: {e:?}"))
+    key.cmp(col, a, b).unwrap_or_else(|e| panic!("{}", e.message()))
 }
 
 // partition_rbound_cmp: signed column number encodes the mismatch position.

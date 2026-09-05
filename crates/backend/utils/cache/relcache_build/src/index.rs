@@ -1,7 +1,7 @@
 use core::cell::RefCell;
 use core::mem::ManuallyDrop;
 
-use cache_syscache::{ReleaseSysCache, SearchSysCache1, SysCacheGetAttr, SysCacheKey, INDEXRELID};
+use cache_syscache::{ReleaseSysCache, SearchSysCache1, SysCacheGetAttr, SysCacheKey, AMOID, INDEXRELID};
 use datum::Datum;
 use mcx::{Mcx, MemoryContext, PgHashMap, PgVec};
 use relcache::schemapg::{
@@ -77,6 +77,16 @@ pub(crate) fn relation_init_index_access_info(
     else {
         return Err(cache_lookup_failed(relid));
     };
+    // relcache.c:1483-1487: the index's pg_am row must exist -- a relam
+    // with no pg_am row is elog(ERROR, "cache lookup failed for access
+    // method %u"), never the closed-set panic from_relam raises.
+    match SearchSysCache1(AMOID, SysCacheKey::Value(Datum::from_oid(form.relam)))? {
+        Some(amtup) => ReleaseSysCache(amtup),
+        None => {
+            ReleaseSysCache(tup);
+            return Err(access_method_lookup_failed(form.relam));
+        }
+    }
     let get = |attno: i32| -> PgResult<Datum> {
         let (d, isnull) = SysCacheGetAttr(INDEXRELID, &tup, attno)?;
         if isnull {
@@ -338,6 +348,17 @@ pub(crate) fn scan_pg_statistic_ext_oids<'mcx>(
 fn cache_lookup_failed(relid: Oid) -> Box<PgError> {
     Box::new(
         PgError::error(format!("cache lookup failed for index {relid}"))
+            .with_sqlstate(ERRCODE_INTERNAL_ERROR),
+    )
+}
+
+// relcache.c:1486 elog(ERROR, "cache lookup failed for access method %u").
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn access_method_lookup_failed(relam: Oid) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!("cache lookup failed for access method {relam}"))
             .with_sqlstate(ERRCODE_INTERNAL_ERROR),
     )
 }

@@ -1272,13 +1272,21 @@ fn load_relcache_init_file(shared: bool) -> PgResult<bool> {
     Ok(true)
 }
 
+// relcache.c:6647/6750/6802/6806: ereport(FATAL, (errcode_for_file_access(),
+// errmsg_internal("could not write init file: %m"))) -- the backend exits,
+// the SQLSTATE follows errno (ENOSPC = 53100) and %m is strerror text.
 #[track_caller]
 #[cold]
 #[inline(never)]
 fn could_not_write(e: std::io::Error) -> Box<PgError> {
+    let errnum = e.raw_os_error().unwrap_or(0);
     Box::new(
-        PgError::error(format!("could not write init file: {e}"))
-            .with_sqlstate(ERRCODE_INTERNAL_ERROR),
+        PgError::new(
+            FATAL,
+            format!("could not write init file: {}", elog::errno::strerror(errnum)),
+        )
+        .with_sqlstate(elog::errno::sqlstate_for_file_access(errnum))
+        .with_saved_errno(errnum),
     )
 }
 
@@ -1405,10 +1413,18 @@ fn unlink_initfile(path: &Path, error_level: bool) -> PgResult<()> {
         return Ok(());
     }
     if error_level {
-        let e = std::io::Error::from_raw_os_error(fd::get_errno());
+        // relcache.c:6965-6968: ereport(elevel, (errcode_for_file_access(),
+        // errmsg("could not remove cache file \"%s\": %m", ...))) -- EACCES
+        // is 42501 and %m is strerror text, not io::Error's "(os error N)".
+        let errnum = fd::get_errno();
         return Err(Box::new(
-            PgError::error(format!("could not remove cache file \"{}\": {e}", path.display()))
-                .with_sqlstate(ERRCODE_INTERNAL_ERROR),
+            PgError::error(format!(
+                "could not remove cache file \"{}\": {}",
+                path.display(),
+                elog::errno::strerror(errnum)
+            ))
+            .with_sqlstate(elog::errno::sqlstate_for_file_access(errnum))
+            .with_saved_errno(errnum),
         ));
     }
     Ok(())
@@ -1484,5 +1500,17 @@ mod hunt_sqlstate {
         let e = critical_index_missing(2658);
         assert_eq!(e.sqlstate(), ERRCODE_DATA_CORRUPTED);
         assert_eq!(e.level(), PANIC);
+    }
+
+    // relcache.c:6647 ereport(FATAL, errcode_for_file_access(),
+    // errmsg_internal("could not write init file: %m")): ENOSPC is
+    // ERRCODE_DISK_FULL and the text carries strerror, not io::Error's
+    // " (os error N)" suffix.
+    #[test]
+    fn write_init_file_failure_is_fatal_file_access() {
+        let e = could_not_write(std::io::Error::from_raw_os_error(libc::ENOSPC));
+        assert_eq!(e.level(), FATAL);
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_DISK_FULL);
+        assert_eq!(e.message(), "could not write init file: No space left on device");
     }
 }

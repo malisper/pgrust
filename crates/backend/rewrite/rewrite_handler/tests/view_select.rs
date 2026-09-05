@@ -441,6 +441,7 @@ fn install_parser_fixture_seams() {
             atttypmod: -1,
             attcollation: 0,
             attgenerated: 0,
+            attisdropped: false,
         }))
     });
     syscache_seams::syscache_hash_value_typeoid::set(|typid| {

@@ -1248,3 +1248,54 @@ fn l2core_field_sizes() {
     println!("LockInfoData={}", size_of::<types_rel::lock::LockInfoData>());
     println!("SmgrHandle_opt={}", size_of::<Option<types_storage::smgr::SmgrHandle>>());
 }
+
+// RelationBuildLocalRelation (relcache.c:3596-3597, 3650): a relation being
+// created gets rd_createSubid = current subxact, but its relfilelocator was
+// NOT reassigned (rd_newRelfilelocatorSubid / rd_firstRelfilelocatorSubid
+// stay InvalidSubTransactionId), and rd_rel->relowner is
+// BOOTSTRAP_SUPERUSERID until AddNewRelationTuple pokes the real owner.
+#[test]
+fn local_relation_fields_match_relcache_c() {
+    install();
+    CUR_SUBID.with(|c| c.set(5));
+    let mcx = crate::cache_mcx();
+    let mut a = FormData_pg_attribute {
+        attrelid: 16440,
+        atttypid: 23,
+        attlen: 4,
+        attnum: 1,
+        attbyval: true,
+        attalign: b'i' as i8,
+        attstorage: b'p' as i8,
+        attislocal: true,
+        ..Default::default()
+    };
+    a.attname.namestrcpy("c0");
+    let td = tupdesc::CreateTupleDesc(mcx, &[a]).unwrap();
+    let rel = crate::local::RelationBuildLocalRelation(
+        "local_t", 2200, &td, 16440, 0, 2, 16440, 0, false, false,
+        RELPERSISTENCE_PERMANENT, RELKIND_RELATION,
+    )
+    .unwrap();
+    assert_eq!(rel.rd_rel.relowner, types_core::catalog::BOOTSTRAP_SUPERUSERID);
+    assert_eq!(rel.rd_createSubid.get(), 5);
+    assert_eq!(rel.rd_newRelfilelocatorSubid.get(), InvalidSubTransactionId);
+    assert_eq!(rel.rd_firstRelfilelocatorSubid.get(), InvalidSubTransactionId);
+    assert_eq!(rel.rd_droppedSubid.get(), InvalidSubTransactionId);
+    CUR_SUBID.with(|c| c.set(1));
+}
+
+// relcache.c:3667 elog(ERROR, "invalid relpersistence: %c"): a catchable
+// XX000, never a panic.
+#[test]
+fn local_relation_invalid_relpersistence_is_error() {
+    install();
+    let mcx = crate::cache_mcx();
+    let td = tupdesc::CreateTupleDesc(mcx, &[]).unwrap();
+    let err = crate::local::RelationBuildLocalRelation(
+        "local_x", 2200, &td, 16441, 0, 2, 16441, 0, false, false, b'x', RELKIND_RELATION,
+    )
+    .unwrap_err();
+    assert_eq!(err.message(), "invalid relpersistence: x");
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+}

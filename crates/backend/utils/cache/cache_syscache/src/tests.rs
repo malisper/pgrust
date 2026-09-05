@@ -98,3 +98,35 @@ fn init_registers_all_caches_and_relid_arrays() {
 fn cache_id_range_checked() {
     let _ = SearchSysCache1(85, SysCacheKey::UNUSED);
 }
+
+// extended_stats.c:2427: a missing pg_statistic_ext_data row is elog(ERROR,
+// "cache lookup failed for statistics object %u") -- catchable, never a
+// panic (and never reported as "not yet built").
+#[test]
+fn statext_expressions_load_missing_row_is_catchable() {
+    // The projection is reached through its seam; install this crate's
+    // projections (no other test in this binary installs seams).
+    init_seams();
+    InitCatalogCache().unwrap();
+    catcache::testing::force_initialized(
+        STATEXTDATASTXOID,
+        [catcache::CCFastKind::Int4, catcache::CCFastKind::Char, catcache::CCFastKind::Int4, catcache::CCFastKind::Int4],
+    );
+    let keys = [
+        SysCacheKey::Value(datum::Datum::from_oid(4242)),
+        SysCacheKey::Value(datum::Datum::from_bool(false)),
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+    ];
+    catcache::testing::insert_negative(STATEXTDATASTXOID, &keys);
+    let cx = mcx::MemoryContext::new("statext test");
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        syscache_seams::statext_expressions_load::call(cx.mcx(), 4242, false, 0)
+    }));
+    let err = match r.expect("catchable error, not a panic") {
+        Ok(_) => panic!("missing row must be an error"),
+        Err(e) => e,
+    };
+    assert_eq!(err.message(), "cache lookup failed for statistics object 4242");
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+}

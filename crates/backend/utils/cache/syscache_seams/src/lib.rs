@@ -184,6 +184,11 @@ pub struct PgAttributeLsShape {
     pub atttypmod: i32,
     pub attcollation: Oid,
     pub attgenerated: i8,
+    // SearchSysCache2(ATTNUM) returns dropped columns too (lsyscache.c:1084
+    // get_attname prints "........pg.dropped.N........"); only the
+    // SearchSysCacheAttName/AttNum callers filter attisdropped, so the row
+    // carries the flag and the caller decides.
+    pub attisdropped: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

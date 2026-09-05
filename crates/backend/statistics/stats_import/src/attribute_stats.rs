@@ -596,9 +596,10 @@ fn get_attr_expr<'m>(mcx: Mcx<'m>, rel: &Relation<'m>, attnum: i32) -> PgResult<
 fn get_attr_stat_type(mcx: Mcx<'_>, reloid: Oid, attnum: AttrNumber) -> PgResult<StatType> {
     let rel = relation_seams::relation_open::call(mcx, reloid, AccessShareLock as LOCKMODE)?;
 
-    // lookup_pg_attribute_shape folds dropped columns into None, matching the
-    // identical C error for missing and dropped.
+    // C reads SearchSysCacheAttNum, which treats a dropped column exactly
+    // like a missing one (same error for both).
     let attr = syscache_seams::lookup_pg_attribute_shape::call(reloid, attnum)?
+        .filter(|att| !att.attisdropped)
         .ok_or_else(|| column_num_missing(attnum, rel.name()))?;
 
     let expr = get_attr_expr(mcx, &rel, attnum as i32)?;

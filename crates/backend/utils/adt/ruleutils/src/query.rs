@@ -437,10 +437,12 @@ fn set_using_names(
 fn relation_real_colnames(relid: types_core::Oid) -> PgResult<Vec<Option<String>>> {
     let natts = lsyscache::get_relnatts(relid)?;
     let mut out = Vec::with_capacity(natts.max(0) as usize);
-    // Shape lookup returns None for dropped columns; attno <= relnatts always has a row.
+    // ruleutils.c set_relation_column_names: attisdropped -> real_colname
+    // NULL; attno <= relnatts always has a row.
     for attno in 1..=natts {
         out.push(
             syscache_seams::lookup_pg_attribute_shape::call(relid, attno as i16)?
+                .filter(|att| !att.attisdropped)
                 .map(|att| String::from_utf8_lossy(att.attname.name_str()).into_owned()),
         );
     }

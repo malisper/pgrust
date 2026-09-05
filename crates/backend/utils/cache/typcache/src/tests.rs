@@ -881,3 +881,18 @@ fn domain_type_cache_lookup_failure_is_a_catchable_xx000() {
     assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
     assert_eq!(e.level(), types_error::ERROR);
 }
+
+// typcache.h:157 / typcache.c:313: INVALID_TUPLEDESC_IDENTIFIER is 1 and the
+// counter starts there, so no assigned identifier is ever 0 or 1.
+#[test]
+fn tupledesc_identifiers_skip_the_invalid_sentinel() {
+    install();
+    assert_eq!(INVALID_TUPLEDESC_IDENTIFIER, 1);
+    let id1 = assign_record_type_identifier(types_core::catalog::RECORDOID, -1).unwrap();
+    let id2 = assign_record_type_identifier(COMPOSITE_OID, -1).unwrap();
+    for id in [id1, id2] {
+        assert_ne!(id, 0);
+        assert_ne!(id, INVALID_TUPLEDESC_IDENTIFIER);
+        assert!(id >= 2, "identifier {id} collides with the reserved values");
+    }
+}

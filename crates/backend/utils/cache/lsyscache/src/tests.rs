@@ -342,6 +342,7 @@ fn install() {
                 atttypmod: -1,
                 attcollation: InvalidOid,
                 attgenerated: 0,
+                attisdropped: false,
             }))
         });
         s::lookup_pg_attribute_attnum_by_name::set(|relid, attname| {

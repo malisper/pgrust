@@ -74,7 +74,9 @@ impl PartitionKeyData {
         let mut f = self.partsupfunc[col].borrow_mut();
         let r = f.invoke(&mut fcinfo)?;
         if fcinfo.isnull {
-            panic!("partition support function {} returned NULL", f.fn_oid);
+            // fmgr.c:1143 FunctionCall2Coll: elog(ERROR, "function %u
+            // returned NULL", flinfo->fn_oid) -- catchable XX000.
+            return Err(function_returned_null(f.fn_oid));
         }
         Ok(r.as_i32())
     }
@@ -229,6 +231,15 @@ fn RelationBuildPartitionKey(rel: &Relation<'_>) -> PgResult<Rc<PartitionKeyData
             Anum_pg_partitioned_table_partnatts,
         )?
         .as_i16();
+        // partcache.c:115-119: validate the strategy code before any
+        // variable-length attribute is decoded.
+        if strategy != PARTITION_STRATEGY_LIST
+            && strategy != PARTITION_STRATEGY_RANGE
+            && strategy != PARTITION_STRATEGY_HASH
+        {
+            cache_syscache::ReleaseSysCache(tuple);
+            return Err(invalid_partition_strategy(strategy));
+        }
         let n = partnatts as usize;
         let (attrs_d, _) = cache_syscache::SysCacheGetAttr(
             PARTRELID,
@@ -293,12 +304,6 @@ fn RelationBuildPartitionKey(rel: &Relation<'_>) -> PgResult<Rc<PartitionKeyData
     }
     cache_syscache::ReleaseSysCache(tuple);
 
-    if strategy != PARTITION_STRATEGY_LIST
-        && strategy != PARTITION_STRATEGY_RANGE
-        && strategy != PARTITION_STRATEGY_HASH
-    {
-        panic!("invalid partition strategy \"{}\"", strategy as u8 as char);
-    }
     let procnum =
         if strategy == PARTITION_STRATEGY_HASH { HASHEXTENDED_PROC } else { BTORDER_PROC };
 
@@ -348,10 +353,9 @@ fn RelationBuildPartitionKey(rel: &Relation<'_>) -> PgResult<Rc<PartitionKeyData
         if funcid == InvalidOid {
             return Err(missing_support_function(&opcname, strategy, procnum, opcintype));
         }
-        key.partsupfunc.push(RefCell::new(
-            fmgr_seams::fmgr_info::call(funcid)
-                .unwrap_or_else(|e| panic!("fmgr_info({funcid}) failed: {e:?}")),
-        ));
+        // partcache.c:223 fmgr_info_cxt: a funcid with no pg_proc row is
+        // fmgr's own elog(ERROR, "cache lookup failed for function %u").
+        key.partsupfunc.push(RefCell::new(fmgr_seams::fmgr_info::call(funcid)?));
 
         let attno = key.partattrs[i];
         if attno != 0 {
@@ -360,9 +364,9 @@ fn RelationBuildPartitionKey(rel: &Relation<'_>) -> PgResult<Rc<PartitionKeyData
             key.parttypmod.push(att.atttypmod);
             key.parttypcoll.push(att.attcollation);
         } else {
-            let expr = partexprs_item
-                .next()
-                .unwrap_or_else(|| panic!("wrong number of partition key expressions"));
+            // partcache.c:239-240 elog(ERROR, "wrong number of partition
+            // key expressions").
+            let expr = partexprs_item.next().ok_or_else(wrong_number_of_partition_key_expressions)?;
             key.parttypid.push(nodes_core::expr_type(expr));
             key.parttypmod.push(nodes_core::expr_typmod(expr));
             key.parttypcoll.push(nodes_core::expr_collation(expr));
@@ -389,6 +393,33 @@ fn partition_key_lookup_failed(relid: Oid) -> Box<PgError> {
     Box::new(PgError::error(format!(
         "cache lookup failed for partition key of relation {relid}"
     )))
+}
+
+// partcache.c:119 elog(ERROR, "invalid partition strategy \"%c\"").
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn invalid_partition_strategy(strategy: i8) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "invalid partition strategy \"{}\"",
+        strategy as u8 as char
+    )))
+}
+
+// partcache.c:240 elog(ERROR, "wrong number of partition key expressions").
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn wrong_number_of_partition_key_expressions() -> Box<PgError> {
+    Box::new(PgError::error("wrong number of partition key expressions"))
+}
+
+// fmgr.c:1143 FunctionCall2Coll: elog(ERROR, "function %u returned NULL").
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn function_returned_null(fn_oid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!("function {fn_oid} returned NULL")))
 }
 
 // partcache.c:202 elog(ERROR, "cache lookup failed for opclass %u").

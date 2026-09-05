@@ -23,7 +23,7 @@ pub const HEAP_TABLE_AM_OID: Oid = 2;
 #[track_caller]
 #[cold]
 #[inline(never)]
-fn invalid_relpersistence(c: u8) -> Box<PgError> {
+pub(crate) fn invalid_relpersistence(c: u8) -> Box<PgError> {
     Box::new(
         PgError::error(format!("invalid relpersistence: {}", c as char))
             .with_sqlstate(ERRCODE_INTERNAL_ERROR),

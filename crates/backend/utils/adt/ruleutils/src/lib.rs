@@ -1099,10 +1099,12 @@ fn pg_get_constraintdef_worker_full(
     match contype {
         CONSTRAINT_FOREIGN => {
             buf.push_str("FOREIGN KEY (");
-            let conkey = conkey.expect("FK constraint has conkey");
+            // ruleutils.c:2278 SysCacheGetAttrNotNull(CONSTROID, tup, conkey).
+            let conkey = conkey.ok_or_else(|| cache_syscache::unexpected_null_in_cached_tuple(CONSTROID, ANUM_PG_CONSTRAINT_CONKEY))?;
             decompile_column_index_array(mcx, &conkey, conrelid, conperiod, &mut buf)?;
             buf.push_str(&format!(") REFERENCES {}(", generate_relation_name(mcx, confrelid)?));
-            let confkey = confkey.expect("FK constraint has confkey");
+            // ruleutils.c:2290 SysCacheGetAttrNotNull(CONSTROID, tup, confkey).
+            let confkey = confkey.ok_or_else(|| cache_syscache::unexpected_null_in_cached_tuple(CONSTROID, ANUM_PG_CONSTRAINT_CONFKEY))?;
             decompile_column_index_array(mcx, &confkey, confrelid, conperiod, &mut buf)?;
             buf.push(')');
             match confmatchtype {
@@ -1139,7 +1141,8 @@ fn pg_get_constraintdef_worker_full(
                 buf.push_str("NULLS NOT DISTINCT ");
             }
             buf.push('(');
-            let conkey = conkey.expect("index constraint has conkey");
+            // ruleutils.c:2411 SysCacheGetAttrNotNull(CONSTROID, tup, conkey).
+            let conkey = conkey.ok_or_else(|| cache_syscache::unexpected_null_in_cached_tuple(CONSTROID, ANUM_PG_CONSTRAINT_CONKEY))?;
             let keyatts = decompile_column_index_array(mcx, &conkey, conrelid, false, &mut buf)?;
             if conperiod {
                 buf.push_str(" WITHOUT OVERLAPS");
@@ -1177,7 +1180,8 @@ fn pg_get_constraintdef_worker_full(
             }
         }
         CONSTRAINT_CHECK => {
-            let conbin = conbin.expect("CHECK constraint has conbin");
+            // ruleutils.c:2569 SysCacheGetAttrNotNull(CONSTROID, tup, conbin).
+            let conbin = conbin.ok_or_else(|| cache_syscache::unexpected_null_in_cached_tuple(CONSTROID, ANUM_PG_CONSTRAINT_CONBIN))?;
             let expr = readfuncs::stringToNode(mcx, &conbin)?;
             let consrc = deparse_expression_pretty(mcx, expr, conrelid, false, pretty_flags)?;
             buf.push_str(&format!(
@@ -1187,7 +1191,8 @@ fn pg_get_constraintdef_worker_full(
         }
         CONSTRAINT_NOTNULL => {
             if conrelid != InvalidOid {
-                let conkey = conkey.expect("NOT NULL constraint has conkey");
+                // ruleutils.c:2596 SysCacheGetAttrNotNull(CONSTROID, tup, conkey).
+                let conkey = conkey.ok_or_else(|| cache_syscache::unexpected_null_in_cached_tuple(CONSTROID, ANUM_PG_CONSTRAINT_CONKEY))?;
                 assert!(conkey.len() == 1, "NOT NULL constraint has one column");
                 let colname = lsyscache::get_attname(mcx, conrelid, conkey[0], false)?
                     .expect("get_attname missing_ok=false");

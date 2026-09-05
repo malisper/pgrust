@@ -310,9 +310,32 @@ pub fn SysCacheGetAttrNotNull(cache_id: i32, tup: &CatCTuple, attnum: i32) -> Pg
 #[track_caller]
 #[cold]
 fn notnull_error(cache_id: i32, attnum: i32) -> Box<PgError> {
+    unexpected_null_in_cached_tuple(cache_id, attnum)
+}
+
+/// syscache.c:641-645: `elog(ERROR, "unexpected null value in cached tuple
+/// for catalog %s column %s", get_rel_name(cacheinfo[cacheId].reloid),
+/// NameStr(TupleDescAttr(SysCache[cacheId]->cc_tupdesc, attnum - 1)->attname))`.
+/// Public so a caller that already unpacked the tuple with a nullable
+/// getattr can raise the identical error for a column C reads through
+/// SysCacheGetAttrNotNull.
+#[track_caller]
+#[cold]
+#[inline(never)]
+pub fn unexpected_null_in_cached_tuple(cache_id: i32, attnum: i32) -> Box<PgError> {
     let reloid = CACHEINFO[cache_id as usize].reloid;
+    // get_rel_name: NULL (printed as "(null)" by C's %s) when the pg_class
+    // row is gone; the catalog's own tuple descriptor names the column.
+    let relname = match projections::pg_class_relname_of(reloid) {
+        Ok(Some(n)) => String::from_utf8_lossy(n.name_str()).into_owned(),
+        _ => "(null)".to_string(),
+    };
+    let colname = catcache::cache_tupdesc(cache_id)
+        .and_then(|td| td.attrs.get(attnum as usize - 1))
+        .map(|a| String::from_utf8_lossy(a.attname.name_str()).into_owned())
+        .unwrap_or_else(|| attnum.to_string());
     PgError::error(format!(
-        "unexpected null value in cached tuple for catalog {reloid} column {attnum}"
+        "unexpected null value in cached tuple for catalog {relname} column {colname}"
     ))
     .into()
 }

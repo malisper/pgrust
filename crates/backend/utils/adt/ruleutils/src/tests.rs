@@ -154,6 +154,7 @@ fn install() {
                 atttypmod: -1,
                 attcollation: 0,
                 attgenerated: 0,
+                attisdropped: false,
             }))
         });
         s::pg_class_relname::set(|relid| {

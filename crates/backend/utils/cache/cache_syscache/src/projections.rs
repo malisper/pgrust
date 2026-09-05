@@ -374,6 +374,10 @@ fn lookup_pg_class_by_relid(relid: Oid) -> PgResult<Option<PgClassShape>> {
 
 const ANUM_PG_CLASS_RELNAME: i32 = 2;
 
+pub(crate) fn pg_class_relname_of(relid: Oid) -> PgResult<Option<types_tuple::NameData>> {
+    pg_class_relname(relid)
+}
+
 fn pg_class_relname(relid: Oid) -> PgResult<Option<types_tuple::NameData>> {
     let Some(tuple) = SearchSysCache1(RELOID, SysCacheKey::Value(Datum::from_oid(relid)))? else {
         return Ok(None);
@@ -932,17 +936,16 @@ fn lookup_pg_attribute_shape(
         return Ok(None);
     };
     let t = tuple.tuple();
-    if getattr(&t, ATTNUM, ANUM_PG_ATTRIBUTE_ATTISDROPPED2).as_bool() {
-        drop(t);
-        ReleaseSysCache(tuple);
-        return Ok(None);
-    }
+    // lsyscache.c:1084/1141/1166/1196: get_attname, get_attgenerated,
+    // get_atttype and get_atttypetypmodcoll read SearchSysCache2(ATTNUM)
+    // directly -- a dropped column's row is returned, not filtered.
     let shape = syscache_seams::PgAttributeLsShape {
         attname: getattr_name(&t, ATTNUM, ANUM_PG_ATTRIBUTE_ATTNAME),
         atttypid: getattr(&t, ATTNUM, ANUM_PG_ATTRIBUTE_ATTTYPID).as_oid(),
         atttypmod: getattr(&t, ATTNUM, ANUM_PG_ATTRIBUTE_ATTTYPMOD).as_i32(),
         attcollation: getattr(&t, ATTNUM, ANUM_PG_ATTRIBUTE_ATTCOLLATION).as_oid(),
         attgenerated: getattr(&t, ATTNUM, ANUM_PG_ATTRIBUTE_ATTGENERATED).as_i8(),
+        attisdropped: getattr(&t, ATTNUM, ANUM_PG_ATTRIBUTE_ATTISDROPPED2).as_bool(),
     };
     drop(t);
     ReleaseSysCache(tuple);
@@ -2304,12 +2307,32 @@ fn statext_expressions_load<'mcx>(
     inh: bool,
     idx: i32,
 ) -> PgResult<Option<syscache_seams::PgStatisticBundle<'mcx>>> {
-    let img = statext_data_blob(mcx, statoid, inh, ANUM_PG_STATISTIC_EXT_DATA_STXDEXPR)?
-        .unwrap_or_else(|| {
-            panic!(
-                "requested statistics kind \"e\" is not yet built for statistics object {statoid}"
-            )
-        });
+    // extended_stats.c:2424-2434: a missing pg_statistic_ext_data row is
+    // elog(ERROR, "cache lookup failed for statistics object %u"); a NULL
+    // stxdexpr is elog(ERROR, "requested statistics kind \"%c\" is not yet
+    // built for statistics object %u", STATS_EXT_EXPRESSIONS) -- both
+    // catchable XX000s.
+    let Some(tuple) = SearchSysCache2(
+        STATEXTDATASTXOID,
+        SysCacheKey::Value(Datum::from_oid(statoid)),
+        SysCacheKey::Value(Datum::from_bool(inh)),
+    )?
+    else {
+        return Err(types_error::PgError::error(format!(
+            "cache lookup failed for statistics object {statoid}"
+        ))
+        .into());
+    };
+    let t = tuple.tuple();
+    let img = varlena_image(mcx, &t, STATEXTDATASTXOID, ANUM_PG_STATISTIC_EXT_DATA_STXDEXPR)?;
+    drop(t);
+    ReleaseSysCache(tuple);
+    let Some(img) = img else {
+        return Err(types_error::PgError::error(format!(
+            "requested statistics kind \"e\" is not yet built for statistics object {statoid}"
+        ))
+        .into());
+    };
     // serialize_expr_stats stores a NULL element for every expression whose
     // statistics were not valid, so the array may carry a null bitmap.
     let (elems, nulls) =

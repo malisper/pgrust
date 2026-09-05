@@ -411,7 +411,9 @@ pub(crate) fn with_state<R>(f: impl FnOnce(&mut TypCacheState) -> R) -> R {
                 in_progress: PgVec::new_in(mcx),
                 callbacks_registered: false,
                 record_registry: Default::default(),
-                tupledesc_id_counter: 0,
+                // typcache.c:313: starts at INVALID_TUPLEDESC_IDENTIFIER so
+                // ++counter never yields 0 or 1.
+                tupledesc_id_counter: INVALID_TUPLEDESC_IDENTIFIER,
             })
         });
         f(st)
@@ -1252,7 +1254,10 @@ pub fn assign_record_type_typmod(tupdesc: &mut types_tuple::TupleDescData<'_>) -
     Ok(())
 }
 
-pub const INVALID_TUPLEDESC_IDENTIFIER: u64 = 0;
+/// typcache.h:157 `#define INVALID_TUPLEDESC_IDENTIFIER ((uint64) 1)`: zero
+/// means "no identifier assigned", one is the reserved invalid value, and
+/// assigned identifiers start at 2.
+pub const INVALID_TUPLEDESC_IDENTIFIER: u64 = 1;
 
 /// C: assign_record_type_identifier (typcache.c). Named composites read the
 /// typcache entry's `tupDesc_identifier` (stable until a relcache inval on

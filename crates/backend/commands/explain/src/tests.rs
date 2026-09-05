@@ -1121,6 +1121,7 @@ mod order_by_limit_e2e {
                     atttypmod: -1,
                     attcollation: 0,
                     attgenerated: 0,
+                    attisdropped: false,
                 }))
             });
             syscache_seams::lookup_pg_statistic_shape::set(|_, _, _| Ok(None));
