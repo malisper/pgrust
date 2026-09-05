@@ -3,7 +3,7 @@ use std::sync::Once;
 
 use mcx::{Mcx, MemoryContext, PgVec};
 use parser_small1::{make_parsestate, ParseNamespaceItem, ParseState};
-use types_core::catalog::{INT4OID, TEXTOID};
+use types_core::catalog::{INT4OID, RECORDOID, TEXTOID};
 use types_core::{InvalidOid, Oid, RELPERSISTENCE_PERMANENT, INVALID_PROC_NUMBER};
 use types_error::{
     PgResult, ERRCODE_AMBIGUOUS_ALIAS, ERRCODE_AMBIGUOUS_COLUMN, ERRCODE_DUPLICATE_ALIAS,
@@ -723,6 +723,7 @@ fn error_missing_column_qualified_message_and_rte_penalty() {
 
 const F_COMPOSITE: Oid = 9001;
 const F_SCALAR: Oid = 9002;
+const F_RECORD: Oid = 9003;
 const COMPOSITE_TYPE: Oid = 9010;
 
 fn install_func() {
@@ -749,6 +750,7 @@ fn install_func() {
             Ok(match funcid {
                 F_COMPOSITE => Some(shape(COMPOSITE_TYPE)),
                 F_SCALAR => Some(shape(INT4OID)),
+                F_RECORD => Some(shape(RECORDOID)),
                 _ => None,
             })
         });
@@ -763,6 +765,7 @@ fn install_func() {
             Ok(match typid {
                 INT4OID | TEXTOID => Some(b'b' as i8),
                 COMPOSITE_TYPE => Some(b'c' as i8),
+                RECORDOID => Some(b'p' as i8),
                 _ => None,
             })
         });
@@ -972,4 +975,223 @@ fn get_ns_item_by_var_matches_returning_type() {
         assert!(vars.iter().all(|v| v.as_var().unwrap().varreturningtype == rt));
         assert!(vars.iter().all(|v| v.as_var().unwrap().location == 7));
     }
+}
+
+// ---- audit-18.6 batch b146 (parse_relation.c / parse_type.c) ----
+
+// parse_relation.c:2224 addRangeTableEntryForValues: an alias with more
+// column names than the VALUES rows supply is reported as
+// 
+// (not the relation-alias wording of buildRelationAliases).
+#[test]
+fn values_alias_overflow_uses_values_lists_message() {
+    install();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+
+    let one = Node::mk_integer(mcx, 1).unwrap();
+    let row = Node::mk_list(mcx, NodeList::make1(mcx, one).unwrap()).unwrap();
+    let exprs = NodeList::make1(mcx, row).unwrap();
+    let mut colnames = NodeList::nil();
+    for n in ["a", "b"] {
+        colnames.lappend(mcx, Node::mk_string(mcx, n).unwrap()).unwrap();
+    }
+    let alias =
+        Node::mk_mut(mcx, Alias { aliasname: Some("v"), colnames }).unwrap().seal_ref();
+    let mut coltypes = types_nodes::list::OidList::nil();
+    coltypes.lappend(mcx, INT4OID).unwrap();
+    let mut coltypmods = types_nodes::list::IntList::nil();
+    coltypmods.lappend(mcx, -1).unwrap();
+    let mut colcollations = types_nodes::list::OidList::nil();
+    colcollations.lappend(mcx, InvalidOid).unwrap();
+
+    let err = addRangeTableEntryForValues(
+        mcx,
+        &mut pstate,
+        exprs,
+        coltypes,
+        coltypmods,
+        colcollations,
+        Some(alias),
+        false,
+        true,
+    )
+    .map(|_| ())
+    .unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_INVALID_COLUMN_REFERENCE);
+    assert_eq!(
+        err.message(),
+        "VALUES lists \"v\" have 1 columns available but 2 columns specified"
+    );
+}
+
+// parse_relation.c:2576 addRangeTableEntryForENR: a non-dropped column with
+// an invalid atttypid is elog(ERROR) -- a catchable XX000, never a panic.
+#[test]
+fn enr_invalid_atttypid_is_catchable_xx000() {
+    install();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+
+    let mut a = FormData_pg_attribute {
+        atttypid: InvalidOid,
+        attlen: 4,
+        attnum: 1,
+        atttypmod: -1,
+        attbyval: true,
+        attalign: b'i' as i8,
+        attstorage: b'p' as i8,
+        ..Default::default()
+    };
+    a.attname.namestrcpy("c1");
+    let desc = Rc::new(tupdesc::CreateTupleDesc(mcx, &[a]).unwrap());
+    let mut env = queryenvironment::create_queryEnv(mcx);
+    queryenvironment::register_ENR(
+        &mut env,
+        queryenvironment::EphemeralNamedRelationData {
+            md: queryenvironment::EphemeralNamedRelationMetadataData {
+                name: mcx::PgString::from_str_in("newtab", mcx).unwrap(),
+                reliddesc: InvalidOid,
+                tupdesc: Some(desc),
+                enrtype: queryenvironment::ENR_NAMED_TUPLESTORE,
+                enrtuples: 0.0,
+            },
+            reldata: types_portal::TuplestoreHandle::NULL,
+        },
+    )
+    .unwrap();
+    let mut pstate = make_parsestate(mcx, None);
+    pstate.p_queryEnv = Some(&env);
+
+    let err = addRangeTableEntryForENR(mcx, &mut pstate, rv(mcx, "newtab", None), true)
+        .map(|_| ())
+        .unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    assert_eq!(err.message(), "atttypid is invalid for non-dropped column in \"newtab\"");
+}
+
+// parse_relation.c:2958 expandRTE: a FROM function whose result class is
+// neither composite nor scalar (here: bare RECORD with no column definition
+// list, which addRangeTableEntryForFunction would have refused) is
+// elog(ERROR, "function in FROM has unsupported return type") -- catchable.
+#[test]
+fn expand_rte_unsupported_function_return_type_is_catchable_xx000() {
+    install_func();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+
+    let fe = func_expr(mcx, F_RECORD, RECORDOID);
+    let rtfunc = Node::mk(
+        mcx,
+        types_nodes::RangeTblFunction { funcexpr: Some(fe), funccolcount: 1, ..Default::default() },
+    )
+    .unwrap();
+    let colnames = NodeList::make1(mcx, Node::mk_string(mcx, "f").unwrap()).unwrap();
+    let eref = Node::mk_mut(mcx, Alias { aliasname: Some("f"), colnames }).unwrap().seal_ref();
+    let rte = Node::mk(
+        mcx,
+        RangeTblEntry {
+            rtekind: RTEKind::RTE_FUNCTION,
+            functions: NodeList::make1(mcx, rtfunc).unwrap(),
+            eref: Some(eref),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let err = expandRTE(
+        mcx,
+        rte.as_range_tbl_entry().unwrap(),
+        1,
+        0,
+        types_nodes::VarReturningType::VAR_RETURNING_DEFAULT,
+        -1,
+        false,
+    )
+    .map(|_| ())
+    .unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    assert_eq!(err.message(), "function in FROM has unsupported return type");
+}
+
+// parse_relation.c:3390 get_rte_attribute_name: "*" for InvalidAttrNumber, a
+// user alias wins, RTE_RELATION goes to the catalog, else eref; a bogus
+// attnum is elog(ERROR) -- catchable XX000.
+#[test]
+fn get_rte_attribute_name_alias_catalog_eref_arms() {
+    install();
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        syscache_seams::lookup_pg_attribute_shape::set(|relid, attnum| {
+            if relid != T_OID || attnum != 2 {
+                return Ok(None);
+            }
+            // The column was renamed after the eref list was built.
+            let mut shape = syscache_seams::PgAttributeLsShape {
+                attname: Default::default(),
+                atttypid: TEXTOID,
+                atttypmod: -1,
+                attcollation: 100,
+                attgenerated: 0,
+                attisdropped: false,
+            };
+            shape.attname.namestrcpy("y_renamed");
+            Ok(Some(shape))
+        });
+    });
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+
+    let acol = NodeList::make1(mcx, Node::mk_string(mcx, "ax").unwrap()).unwrap();
+    let alias =
+        Node::mk_mut(mcx, Alias { aliasname: Some("a"), colnames: acol }).unwrap().seal_ref();
+    let nsitem = add(mcx, &mut pstate, "t", Some(alias));
+    let rte = nsitem.rte();
+    assert_eq!(get_rte_attribute_name(mcx, rte, 0).unwrap(), "*");
+    assert_eq!(get_rte_attribute_name(mcx, rte, 1).unwrap(), "ax");
+    assert_eq!(get_rte_attribute_name(mcx, rte, 2).unwrap(), "y_renamed");
+
+    let colnames = NodeList::make1(mcx, Node::mk_string(mcx, "z").unwrap()).unwrap();
+    let eref = Node::mk_mut(mcx, Alias { aliasname: Some("s"), colnames }).unwrap().seal_ref();
+    let sub = RangeTblEntry { rtekind: RTEKind::RTE_SUBQUERY, eref: Some(eref), ..Default::default() };
+    assert_eq!(get_rte_attribute_name(mcx, &sub, 1).unwrap(), "z");
+    let err = get_rte_attribute_name(mcx, &sub, 2).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    assert_eq!(err.message(), "invalid attnum 2 for rangetable entry s");
+    let err = get_rte_attribute_name(mcx, &sub, -1).unwrap_err();
+    assert_eq!(err.message(), "invalid attnum -1 for rangetable entry s");
+}
+
+// parse_relation.c:3671-3723 attnumAttName / attnumTypeId / attnumCollationId.
+#[test]
+fn attnum_lookups_cover_system_user_and_bogus_attnums() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let rel = make(mcx, T_OID, "t", &T_COLS);
+
+    assert_eq!(attnumAttName(&rel, 1).unwrap().name_str(), b"x");
+    assert_eq!(attnumAttName(&rel, 2).unwrap().name_str(), b"y");
+    assert_eq!(attnumAttName(&rel, -1).unwrap().name_str(), b"ctid");
+    assert_eq!(attnumAttName(&rel, -6).unwrap().name_str(), b"tableoid");
+    assert_eq!(attnumTypeId(&rel, 1).unwrap(), INT4OID);
+    assert_eq!(attnumTypeId(&rel, 2).unwrap(), TEXTOID);
+    assert_eq!(attnumTypeId(&rel, -1).unwrap(), types_core::catalog::TIDOID);
+    assert_eq!(attnumTypeId(&rel, -6).unwrap(), types_core::catalog::OIDOID);
+    assert_eq!(attnumCollationId(&rel, 1).unwrap(), InvalidOid);
+    assert_eq!(attnumCollationId(&rel, 2).unwrap(), 100);
+    assert_eq!(attnumCollationId(&rel, -1).unwrap(), InvalidOid);
+
+    for (name, err) in [
+        ("attnumAttName", attnumAttName(&rel, 3).map(|_| ()).unwrap_err()),
+        ("attnumTypeId", attnumTypeId(&rel, 3).map(|_| ()).unwrap_err()),
+        ("attnumCollationId", attnumCollationId(&rel, 3).map(|_| ()).unwrap_err()),
+    ] {
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR, "{name}");
+        assert_eq!(err.message(), "invalid attribute number 3", "{name}");
+    }
+    // heap.c:239: attid 0 and below the system range are elog(ERROR).
+    assert_eq!(attnumAttName(&rel, 0).unwrap_err().message(), "invalid system attribute number 0");
+    assert_eq!(attnumTypeId(&rel, -7).unwrap_err().message(), "invalid system attribute number -7");
 }

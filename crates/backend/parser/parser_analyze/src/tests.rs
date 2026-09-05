@@ -912,6 +912,28 @@ mod from_where {
             // check_functional_grouping's pkey projection: fixtures have no
             // primary keys, so None keeps C's 42803 paths live.
             syscache_seams::pg_constraint_primary_key_attnos::set(|_, _, _| Ok(None));
+            // get_rte_attribute_name reads pg_attribute for RTE_RELATION (C
+            // get_attname): serve the fixtures' two columns.
+            syscache_seams::lookup_pg_attribute_shape::set(|relid, attnum| {
+                if ![T_OID, U_OID, V_OID].contains(&relid) {
+                    return Ok(None);
+                }
+                let (name, typid, coll) = match attnum {
+                    1 => ("x", INT4OID, types_core::InvalidOid),
+                    2 => ("y", TEXTOID, 100),
+                    _ => return Ok(None),
+                };
+                let mut shape = syscache_seams::PgAttributeLsShape {
+                    attname: NameData::default(),
+                    atttypid: typid,
+                    atttypmod: -1,
+                    attcollation: coll,
+                    attgenerated: 0,
+                    attisdropped: false,
+                };
+                shape.attname.namestrcpy(name);
+                Ok(Some(shape))
+            });
             table::init_seams();
             super::init_seams_once();
         });

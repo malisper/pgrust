@@ -41,3 +41,4 @@ lmgr_seams = { path = "../../storage/lmgr/lmgr_seams" }
 mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
 pg_class_seams = { path = "../../catalog/pg_class_seams" }
 typcache_seams = { path = "../../utils/cache/typcache_seams" }
+types_portal = { path = "../../../_support/types/portal" }

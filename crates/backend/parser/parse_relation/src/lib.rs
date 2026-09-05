@@ -3,7 +3,7 @@
 #[cfg(test)]
 mod tests;
 
-use mcx::{Mcx, PgVec};
+use mcx::{Mcx, PgString, PgVec};
 use nodes_core::node_funcs;
 use parser_small1::{
     parser_errposition, ParseExprKind, ParseNamespaceColumn, ParseNamespaceItem, ParseState,
@@ -12,8 +12,8 @@ use types_core::{AttrNumber, Index, InvalidOid, Oid, OidIsValid, ParseLoc};
 use types_core::catalog::{RECORDARRAYOID, RECORDOID};
 use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_AMBIGUOUS_ALIAS, ERRCODE_AMBIGUOUS_COLUMN,
-    ERRCODE_DUPLICATE_ALIAS, ERRCODE_INVALID_COLUMN_REFERENCE, ERRCODE_UNDEFINED_COLUMN,
-    ERRCODE_UNDEFINED_TABLE, ERROR,
+    ERRCODE_DUPLICATE_ALIAS, ERRCODE_INVALID_COLUMN_REFERENCE, ERRCODE_QUERY_CANCELED,
+    ERRCODE_UNDEFINED_COLUMN, ERRCODE_UNDEFINED_TABLE, ERROR,
 };
 use types_nodes::parsenodes::ACL_SELECT;
 use types_nodes::{
@@ -23,6 +23,7 @@ use types_nodes::{
 use types_rel::{AccessShareLock, NoLock, Relation, RowShareLock, LOCKMODE};
 use types_tuple::htup::{FirstLowInvalidHeapAttributeNumber, TableOidAttributeNumber};
 use types_tuple::tupdesc::TupleDescData;
+use types_tuple::NameData;
 
 #[allow(non_upper_case_globals)]
 const InvalidAttrNumber: AttrNumber = 0;
@@ -53,6 +54,23 @@ fn loc(funcname: &'static str) -> ErrorLocation {
 
 fn errpos(pstate: &ParseState<'_, '_>, location: ParseLoc) -> i32 {
     parser_errposition(pstate, location, mbutils::GetDatabaseEncoding())
+}
+
+// setup_parser_errposition_callback / pcb_error_callback (parse_node.c):
+// every error raised while the callback is armed gets the parse location
+// (parser_errposition), except ERRCODE_QUERY_CANCELED. Rust arms it on the
+// Err path of the guarded call.
+#[cold]
+#[inline(never)]
+fn attach_parser_errposition(
+    pstate: &ParseState<'_, '_>,
+    location: ParseLoc,
+    e: Box<PgError>,
+) -> Box<PgError> {
+    if e.sqlstate() == ERRCODE_QUERY_CANCELED {
+        return e;
+    }
+    Box::new((*e).with_cursor_position(errpos(pstate, location)))
 }
 
 pub fn refnameNamespaceItem<'p, 'mcx>(
@@ -693,7 +711,12 @@ pub fn parserOpenTable<'mcx>(
     lockmode: LOCKMODE,
 ) -> PgResult<Relation<'mcx>> {
     let rv = to_rel_vocab(relation);
-    match table::table_openrv_extended(mcx, &rv, lockmode, true)? {
+    // parse_relation.c:1472 setup_parser_errposition_callback(relation->location)
+    // around table_openrv_extended: "cannot open relation" (index, composite
+    // type, ...) and schema lookup errors carry the RangeVar's cursor.
+    let opened = table::table_openrv_extended(mcx, &rv, lockmode, true)
+        .map_err(|e| attach_parser_errposition(pstate, relation.location, e))?;
+    match opened {
         Some(rel) => Ok(rel),
         None => {
             let relname = relation.relname.expect("grammar always sets relname");
@@ -886,9 +909,15 @@ fn GetColumnDefCollation(
     let typcollation = syscache_seams::lookup_pg_type_shape::call(type_oid)?
         .expect("pg_type row vanished")
         .typcollation;
+    let mut location = coldef.location;
     let result = if let Some(cc) = coldef.collClause {
         let cc = cc.as_collate_clause().expect("CollateClause");
-        catalog_namespace::get_collation_oid_list(&cc.collname, false)?
+        // parse_type.c:551: a raw COLLATE clause moves the cursor onto it;
+        // LookupCollation (parse_type.c:515) arms the errposition callback
+        // around get_collation_oid.
+        location = cc.location;
+        catalog_namespace::get_collation_oid_list(&cc.collname, false)
+            .map_err(|e| attach_parser_errposition(pstate, location, e))?
     } else if coldef.collOid != InvalidOid {
         coldef.collOid
     } else {
@@ -901,7 +930,7 @@ fn GetColumnDefCollation(
             elog::ereport(ERROR)
                 .errcode(types_error::ERRCODE_DATATYPE_MISMATCH)
                 .errmsg(format!("collations are not supported by type {typename}"))
-                .errposition(errpos(pstate, coldef.location))
+                .errposition(errpos(pstate, location))
                 .into_error()
                 .with_error_location(loc("GetColumnDefCollation")),
         ));
@@ -1201,7 +1230,17 @@ pub fn addRangeTableEntryForValues<'mcx>(
     let numcolumns = exprs.nth(0).as_list().expect("VALUES row is a List").len();
     let numaliases = alias.map(|a| a.colnames.len()).unwrap_or(0);
     if numaliases > numcolumns {
-        return Err(too_many_aliases(refname, numcolumns, numaliases));
+        // parse_relation.c:2224
+        return Err(Box::new(
+            elog::ereport(ERROR)
+                .errcode(ERRCODE_INVALID_COLUMN_REFERENCE)
+                .errmsg(format!(
+                    "VALUES lists \"{refname}\" have {numcolumns} columns available but \
+                     {numaliases} columns specified"
+                ))
+                .into_error()
+                .with_error_location(loc("addRangeTableEntryForValues")),
+        ));
     }
 
     let mut eref_colnames = NodeList::nil();
@@ -1696,10 +1735,12 @@ pub fn addRangeTableEntryForENR<'mcx>(
             coltypmods.lappend(mcx, 0)?;
             colcollations.lappend(mcx, InvalidOid)?;
         } else {
-            assert!(
-                OidIsValid(att.atttypid),
-                "atttypid is invalid for non-dropped column in \"{relname}\""
-            );
+            if !OidIsValid(att.atttypid) {
+                // parse_relation.c:2576 elog(ERROR, ...): catchable XX000.
+                return Err(Box::new(PgError::error(format!(
+                    "atttypid is invalid for non-dropped column in \"{relname}\""
+                ))));
+            }
             coltypes.lappend(mcx, att.atttypid)?;
             coltypmods.lappend(mcx, att.atttypmod)?;
             colcollations.lappend(mcx, att.attcollation)?;
@@ -2288,9 +2329,13 @@ fn expandFunction<'mcx>(
                         )?,
                     )?;
                 }
-                other => panic!(
-                    "expandRTE: function in FROM has unsupported return type ({other:?})"
-                ),
+                funcapi::TypeFuncClass::Record | funcapi::TypeFuncClass::Other => {
+                    // parse_relation.c:2958: addRangeTableEntryForFunction
+                    // should've caught this; elog(ERROR) -- catchable XX000.
+                    return Err(Box::new(PgError::error(
+                        "function in FROM has unsupported return type",
+                    )));
+                }
             }
         }
         atts_done += rtfunc.funccolcount as usize;
@@ -2923,6 +2968,85 @@ fn unsupported_function_return_type(
             .into_error()
             .with_error_location(loc("addRangeTableEntryForFunction")),
     )
+}
+
+/// get_rte_attribute_name (parse_relation.c:3390): the name of the attnum'th
+/// column of an RTE. "*" for InvalidAttrNumber; a user-written alias wins;
+/// RTE_RELATION goes to the catalog (get_attname) so a column renamed since
+/// the eref list was built (rules) is reported by its current name; otherwise
+/// the eref column name. A bogus attnum is elog(ERROR) (catchable XX000).
+pub fn get_rte_attribute_name<'mcx>(
+    mcx: Mcx<'mcx>,
+    rte: &RangeTblEntry<'mcx>,
+    attnum: AttrNumber,
+) -> PgResult<PgString<'mcx>> {
+    if attnum == InvalidAttrNumber {
+        return PgString::from_str_in("*", mcx);
+    }
+    let colname = |alias: &Alias<'mcx>| -> Option<&'mcx str> {
+        if attnum > 0 && (attnum as usize) <= alias.colnames.len() {
+            Some(alias.colnames.nth(attnum as usize - 1).as_string().expect("colname String").sval)
+        } else {
+            None
+        }
+    };
+    if let Some(name) = rte.alias.and_then(colname) {
+        return PgString::from_str_in(name, mcx);
+    }
+    if rte.rtekind == RTEKind::RTE_RELATION {
+        return Ok(lsyscache::get_attname(mcx, rte.relid, attnum, false)?
+            .expect("get_attname missing_ok=false"));
+    }
+    let eref = rte.eref.expect("RTE has eref");
+    if let Some(name) = colname(eref) {
+        return PgString::from_str_in(name, mcx);
+    }
+    // parse_relation.c:3417 elog(ERROR, ...)
+    Err(Box::new(PgError::error(format!(
+        "invalid attnum {attnum} for rangetable entry {}",
+        eref.aliasname.unwrap_or("")
+    ))))
+}
+
+// parse_relation.c:3671-3723 attnumAttName / attnumTypeId / attnumCollationId:
+// attribute properties by number on an already-open relation; system
+// attributes (attid <= 0) come from SystemAttributeDefinition, an attid past
+// natts is elog(ERROR, "invalid attribute number %d") (catchable XX000).
+fn invalid_attribute_number(attid: i32) -> Box<PgError> {
+    Box::new(PgError::error(format!("invalid attribute number {attid}")))
+}
+
+pub fn attnumAttName<'r>(rd: &'r Relation<'_>, attid: i32) -> PgResult<&'r NameData> {
+    if attid <= 0 {
+        let sysatt = catalog_heap::SystemAttributeDefinition(attid as AttrNumber)?;
+        return Ok(&sysatt.attname);
+    }
+    if attid > rd.rd_att.natts {
+        return Err(invalid_attribute_number(attid));
+    }
+    Ok(&rd.rd_att.attr(attid as usize - 1).attname)
+}
+
+pub fn attnumTypeId(rd: &Relation<'_>, attid: i32) -> PgResult<Oid> {
+    if attid <= 0 {
+        let sysatt = catalog_heap::SystemAttributeDefinition(attid as AttrNumber)?;
+        return Ok(sysatt.atttypid);
+    }
+    if attid > rd.rd_att.natts {
+        return Err(invalid_attribute_number(attid));
+    }
+    Ok(rd.rd_att.attr(attid as usize - 1).atttypid)
+}
+
+pub fn attnumCollationId(rd: &Relation<'_>, attid: i32) -> PgResult<Oid> {
+    if attid <= 0 {
+        // All system attributes are of noncollatable types.
+        return Ok(InvalidOid);
+    }
+    if attid > rd.rd_att.natts {
+        return Err(invalid_attribute_number(attid));
+    }
+    Ok(rd.rd_att.attr(attid as usize - 1).attcollation)
 }
 
 #[track_caller]

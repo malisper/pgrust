@@ -1454,6 +1454,7 @@ fn sgc_mutate<'mcx>(
                 return Ok(None);
             }
             Err(ungrouped_var_error(
+                ctx.mcx,
                 ctx.pstate,
                 ctx.qry,
                 var,
@@ -2058,9 +2059,10 @@ fn srf_in_agg_error(pstate: &ParseState<'_, '_>, location: ParseLoc) -> Box<PgEr
 #[track_caller]
 #[cold]
 #[inline(never)]
-fn ungrouped_var_error(
+fn ungrouped_var_error<'mcx>(
+    mcx: Mcx<'mcx>,
     pstate: &ParseState<'_, '_>,
-    qry: &Query<'_>,
+    qry: &Query<'mcx>,
     var: &types_nodes::primnodes::Var<'_>,
     in_agg_direct_args: bool,
     sublevels_up: i32,
@@ -2074,35 +2076,14 @@ fn ungrouped_var_error(
     let relname = eref
         .aliasname
         .unwrap_or_else(|| panic!("check_ungrouped_columns (parse_agg.c): eref without aliasname"));
-    // C get_rte_attribute_name: InvalidAttrNumber → "*"; system attnums are
-    // the fixed SysAtt names (ctid/xmin/…); user columns use eref.colnames.
-    let attname = if var.varattno == 0 {
-        "*"
-    } else if var.varattno < 0 {
-        match var.varattno {
-            -1 => "ctid",
-            -2 => "xmin",
-            -3 => "cmin",
-            -4 => "xmax",
-            -5 => "cmax",
-            -6 => "tableoid",
-            _ => panic!(
-                "check_ungrouped_columns (parse_agg.c): invalid system attno {}",
-                var.varattno
-            ),
-        }
-    } else {
-        eref.colnames
-            .nth(var.varattno as usize - 1)
-            .as_string()
-            .unwrap_or_else(|| {
-                panic!(
-                    "check_ungrouped_columns (parse_agg.c): no eref colname for attno {}",
-                    var.varattno
-                )
-            })
-            .sval
+    // parse_agg.c check_ungrouped_columns_walker: get_rte_attribute_name
+    // (alias, then catalog for RTE_RELATION, then eref; bogus attnum is
+    // elog(ERROR), which propagates in place of the grouping error).
+    let attname = match parse_relation::get_rte_attribute_name(mcx, rte, var.varattno) {
+        Ok(name) => name,
+        Err(e) => return e,
     };
+    let attname = attname.as_str();
     let encoding = mbutils::GetDatabaseEncoding();
     let mut b = ereport(ERROR).errcode(ERRCODE_GROUPING_ERROR);
     if sublevels_up == 0 {

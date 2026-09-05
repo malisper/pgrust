@@ -122,11 +122,37 @@ fn query_with_rtable<'mcx>(mcx: Mcx<'mcx>, tlist: NodeList<'mcx>) -> Query<'mcx>
         NodeList::make1(mcx, Node::mk(mcx, PgStr { sval: "x" }).unwrap()).unwrap();
     let eref = Node::mk_mut(mcx, Alias { aliasname: Some("t"), colnames }).unwrap().seal_ref();
     let mut rte = Node::build::<RangeTblEntry>(mcx).unwrap();
+    // A catalog-less fixture: get_rte_attribute_name reads eref (C goes to
+    // pg_attribute for RTE_RELATION).
+    rte.rtekind = RTEKind::RTE_SUBQUERY;
     rte.eref = Some(eref);
     let mut qry = Query::default();
     qry.rtable = NodeList::make1(mcx, rte.seal()).unwrap();
     qry.targetList = tlist;
     qry
+}
+
+// get_rte_attribute_name goes to the catalog for RTE_RELATION: the fixture
+// answers pg_attribute (relid 0, attnum -1) with ctid.
+fn install_ctid_attribute() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        syscache_seams::lookup_pg_attribute_shape::set(|relid, attnum| {
+            if relid != 0 || attnum != -1 {
+                return Ok(None);
+            }
+            let mut shape = syscache_seams::PgAttributeLsShape {
+                attname: Default::default(),
+                atttypid: types_core::catalog::TIDOID,
+                atttypmod: -1,
+                attcollation: InvalidOid,
+                attgenerated: 0,
+                attisdropped: false,
+            };
+            shape.attname.namestrcpy("ctid");
+            Ok(Some(shape))
+        });
+    });
 }
 
 #[test]
@@ -175,6 +201,7 @@ fn ungrouped_wholerow_is_42803() {
 
 #[test]
 fn ungrouped_ctid_is_42803() {
+    install_ctid_attribute();
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
     let mut pstate = make_parsestate(mcx, None);
@@ -183,6 +210,11 @@ fn ungrouped_ctid_is_42803() {
     let var = Node::mk_var(mcx, 1, -1, INT4OID, -1, InvalidOid, 0).unwrap();
     let tle = Node::mk_target_entry(mcx, var, 1, Some("ctid"), false).unwrap();
     let mut qry = query_with_rtable(mcx, NodeList::make1(mcx, tle).unwrap());
+    // System columns exist only on real relations (relid 0 keeps the
+    // functional-dependency scan away).
+    // SAFETY: freshly built rtable; no other reference is live.
+    unsafe { qry.rtable.nth(0).with_mut::<RangeTblEntry, _>(|r| r.rtekind = RTEKind::RTE_RELATION) }
+        .unwrap();
 
     let err = parseCheckAggregates(mcx, &mut pstate, &mut qry).map(|_| ()).unwrap_err();
     assert_eq!(err.sqlstate(), ERRCODE_GROUPING_ERROR);
@@ -270,6 +302,7 @@ fn ungrouped_column_next_to_group_by_is_42803() {
     .unwrap();
     let eref = Node::mk_mut(mcx, Alias { aliasname: Some("t"), colnames }).unwrap().seal_ref();
     let mut rte = Node::build::<RangeTblEntry>(mcx).unwrap();
+    rte.rtekind = RTEKind::RTE_SUBQUERY;
     rte.eref = Some(eref);
 
     let gvar = Node::mk_var(mcx, 1, 1, INT4OID, -1, InvalidOid, 0).unwrap();
@@ -673,6 +706,7 @@ fn sublink_with_from<'mcx>(mcx: Mcx<'mcx>, sub_tlist: NodeList<'mcx>) -> Node<'m
     let colnames = NodeList::make1(mcx, Node::mk(mcx, PgStr { sval: "z" }).unwrap()).unwrap();
     let eref = Node::mk_mut(mcx, Alias { aliasname: Some("s"), colnames }).unwrap().seal_ref();
     let mut rte = Node::build::<RangeTblEntry>(mcx).unwrap();
+    rte.rtekind = RTEKind::RTE_SUBQUERY;
     rte.eref = Some(eref);
     let rtr = Node::mk(mcx, types_nodes::primnodes::RangeTblRef { rtindex: 1 }).unwrap();
     let jointree = Node::mk_mut(
@@ -990,4 +1024,50 @@ fn group_rte_keeps_join_alias_vars() {
     // and now references the RTE_GROUP.
     let out = qry.targetList.nth(0).as_target_entry().unwrap().expr.as_var().unwrap();
     assert_eq!((out.varno, out.varattno), (3, 1));
+}
+
+// parse_relation.c:3417 get_rte_attribute_name: a Var whose attnum has no
+// eref column is elog(ERROR, "invalid attnum %d for rangetable entry %s")
+// -- a catchable XX000 out of check_ungrouped_columns, never a panic.
+#[test]
+fn ungrouped_bogus_attnum_is_catchable_xx000() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    pstate.p_hasAggs.set(true);
+
+    let var = Node::mk_var(mcx, 1, 5, INT4OID, -1, InvalidOid, 0).unwrap();
+    let tle = Node::mk_target_entry(mcx, var, 1, Some("x"), false).unwrap();
+    let mut qry = query_with_rtable(mcx, NodeList::make1(mcx, tle).unwrap());
+
+    let err = parseCheckAggregates(mcx, &mut pstate, &mut qry).map(|_| ()).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    assert_eq!(err.message(), "invalid attnum 5 for rangetable entry t");
+}
+
+// parse_relation.c:3399: a user-written column alias names the column in
+// the grouping error (alias colnames win over eref).
+#[test]
+fn ungrouped_column_reports_user_alias_name() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    pstate.p_hasAggs.set(true);
+
+    let var = Node::mk_var(mcx, 1, 1, INT4OID, -1, InvalidOid, 0).unwrap();
+    let tle = Node::mk_target_entry(mcx, var, 1, Some("x"), false).unwrap();
+    let mut qry = query_with_rtable(mcx, NodeList::make1(mcx, tle).unwrap());
+    let acol = NodeList::make1(mcx, Node::mk(mcx, PgStr { sval: "ax" }).unwrap()).unwrap();
+    let alias =
+        Node::mk_mut(mcx, Alias { aliasname: Some("a"), colnames: acol }).unwrap().seal_ref();
+    // SAFETY: freshly built rtable; no other reference is live.
+    unsafe { qry.rtable.nth(0).with_mut::<RangeTblEntry, _>(|r| r.alias = Some(alias)) }.unwrap();
+
+    let err = parseCheckAggregates(mcx, &mut pstate, &mut qry).map(|_| ()).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_GROUPING_ERROR);
+    assert!(
+        err.message().contains("column \"t.ax\" must appear in the GROUP BY clause"),
+        "{}",
+        err.message()
+    );
 }

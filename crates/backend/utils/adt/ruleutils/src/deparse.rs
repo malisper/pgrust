@@ -2818,10 +2818,12 @@ fn get_rte_attribute_name_string<'mcx>(
             .sval
             .to_owned());
     }
-    panic!(
+    // parse_relation.c:3417 elog(ERROR, ...): catchable XX000.
+    Err(PgError::error(format!(
         "invalid attnum {attnum} for rangetable entry {}",
         eref.aliasname.unwrap_or("")
-    );
+    ))
+    .into())
 }
 
 pub(crate) fn get_name_for_var_field<'mcx>(
