@@ -800,3 +800,45 @@ fn hand_built_error_escaping_critical_section_panics_at_catch_boundary() {
     // Control: with no critical section open the same error is recoverable.
     panic_on_crit_section_escape(&err);
 }
+
+// audit-18.6 b051 (globals.c:123/:30/:120): ExitOnAnyError, FrontendProtocol
+// and IsUnderPostmaster are ONE global each in C. The setters every port
+// calls are init_small::globals'; elog's readers (errstart's ERROR->FATAL
+// escalation, send_message_to_frontend's protocol switch, DebugFileOpen's
+// stdout dup2) must observe those same cells.
+#[test]
+fn exit_on_any_error_is_the_globals_cell() {
+    let _guard = lock();
+    let saved = init_small::globals::ExitOnAnyError();
+    init_small::globals::SetExitOnAnyError(true);
+    assert!(config::exit_on_any_error(), "async.c:1933's SetExitOnAnyError(true) must reach errstart");
+    init_small::globals::SetExitOnAnyError(false);
+    assert!(!config::exit_on_any_error());
+    // The GUC/xact side writes through elog's setter; the globals cell follows.
+    config::set_exit_on_any_error(true);
+    assert!(init_small::globals::ExitOnAnyError());
+    config::set_exit_on_any_error(saved);
+    init_small::globals::SetExitOnAnyError(saved);
+}
+
+#[test]
+fn frontend_protocol_is_the_globals_cell() {
+    let _guard = lock();
+    let saved = init_small::globals::FrontendProtocol();
+    // backend_startup.c:726 stores the client's version before the range
+    // check; elog.c:3544 switches on the same variable.
+    init_small::globals::SetFrontendProtocol(2 << 16);
+    assert_eq!(config::frontend_protocol(), 2 << 16);
+    init_small::globals::SetFrontendProtocol((3 << 16) | 2);
+    assert_eq!(config::frontend_protocol(), (3 << 16) | 2);
+    init_small::globals::SetFrontendProtocol(saved);
+}
+
+#[test]
+fn is_under_postmaster_is_the_globals_cell() {
+    let _guard = lock();
+    let saved = init_small::globals::IsUnderPostmaster();
+    init_small::globals::SetIsUnderPostmaster(true);
+    assert!(config::is_under_postmaster(), "miscinit's SetIsUnderPostmaster(true) must reach DebugFileOpen");
+    init_small::globals::SetIsUnderPostmaster(saved);
+}

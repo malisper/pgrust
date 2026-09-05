@@ -174,3 +174,26 @@ fn utf8_only_connection_gate() {
         );
     }
 }
+
+// audit-18.6 b051 (postinit.c:530): pg_split_opts appends raw bytes, so a
+// multi-byte UTF-8 option value survives the split unchanged.
+#[test]
+fn split_opts_preserves_utf8_bytes() {
+    let mut av = Vec::new();
+    pg_split_opts(&mut av, "-c b051.name=café -c search_path=naïve\\ ünïcode");
+    assert_eq!(av, ["-c", "b051.name=café", "-c", "search_path=naïve ünïcode"]);
+    assert_eq!(av[1].as_bytes(), b"b051.name=caf\xc3\xa9");
+}
+
+// audit-18.6 b051 (postinit.c:479 via ruleutils.c:13112-13115): the
+// collation-mismatch HINT quotes the database name like C's
+// quote_identifier — reserved keywords are quoted even when all-lowercase.
+#[test]
+fn quote_identifier_quotes_keywords() {
+    assert_eq!(quote_identifier("user"), "\"user\"");
+    assert_eq!(quote_identifier("order"), "\"order\"");
+    assert_eq!(quote_identifier("table"), "\"table\"");
+    // Unreserved keywords stay bare, exactly like C.
+    assert_eq!(quote_identifier("data"), "data");
+    assert_eq!(quote_identifier("plain_db1"), "plain_db1");
+}

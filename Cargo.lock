@@ -14487,6 +14487,7 @@ dependencies = [
  "datum",
  "elog",
  "fd",
+ "format_type",
  "genam",
  "guc",
  "guc_tables",

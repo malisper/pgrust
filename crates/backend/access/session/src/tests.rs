@@ -1188,7 +1188,20 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      (one thread_local! block beside slot 31's) — Cell<TimestampTz>,
     //      WalSndUpdateProgress's function-static sendTime
     //      (walsender.c:1689) — same class as 31.
-    assert_eq!(count_tree(crates), 595, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+                            // 582, re-pinned at the 18.6 conformance audit (2026-09-05) elog global
+    //   mirror unification (audit-18.6 b051):
+    //   -3 utils/error/elog/src/config.rs — EXIT_ON_ANY_ERROR,
+    //      IS_UNDER_POSTMASTER, FRONTEND_PROTOCOL: private per-thread
+    //      mirrors DELETED; elog now reads init_small's globals cells (the
+    //      ones initdb, InitPostmasterChild, ProcessStartupPacket and xact
+    //      abort actually set — globals.c ExitOnAnyError / IsUnderPostmaster
+    //      / FrontendProtocol), making errstart's ERROR->FATAL escalation
+    //      (elog.c:378), DebugFileOpen's dup2 (elog.c:2151) and
+    //      send_message_to_frontend's wire switch (elog.c:3544) observe the
+    //      live values. Session coverage unchanged: the surviving cells are
+    //      init_small/globals.rs sources already counted below (same class
+    //      as the 556 CRIT_SECTION_COUNT unification).
+    assert_eq!(count_tree(crates), 592, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

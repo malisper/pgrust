@@ -2,29 +2,39 @@
 
 use elog::ereport;
 use init_small::globals as g;
-use types_error::{PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, FATAL};
+use types_error::{ErrorLocation, PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR, FATAL};
 
 use crate::process::{loc, ValidatePgVersion};
 
-// make_absolute_path (port/path.c): prepend cwd and canonicalize.
-pub fn make_absolute_path(path: &str) -> String {
+// make_absolute_path (port/path.c): prepend cwd and canonicalize. A
+// getcwd() failure is the backend's elog(ERROR, "could not get current
+// working directory: %m") (path.c:868) — at postmaster start, with no
+// error-catching frame, that surfaces as the FATAL boot line, never a panic.
+pub fn make_absolute_path(path: &str) -> PgResult<String> {
     let abs = if path.starts_with('/') {
         path.to_string()
     } else {
-        let cwd = std::env::current_dir()
-            .ok()
-            .and_then(|p| p.into_os_string().into_string().ok())
-            .expect("make_absolute_path: could not get current working directory");
+        let cwd = match std::env::current_dir() {
+            Ok(p) => p.to_string_lossy().into_owned(),
+            Err(e) => {
+                return ereport(ERROR)
+                    .with_saved_errno(e.raw_os_error().unwrap_or(0))
+                    .errmsg("could not get current working directory: %m")
+                    .finish(ErrorLocation::new("src/port/path.c", 868, "make_absolute_path"))
+                    .map(|()| String::new());
+            }
+        };
         format!("{cwd}/{path}")
     };
     // C's make_absolute_path finishes with canonicalize_path(): a purely
     // lexical normalizer (collapses //, /./, resolves /../ textually, strips a
     // trailing slash) — no realpath/symlink resolution and no existence check.
-    pg_path::canonicalize_path(&abs)
+    Ok(pg_path::canonicalize_path(&abs))
 }
 
-pub fn SetDataDir(dir: &str) {
-    g::SetDataDir(&make_absolute_path(dir));
+pub fn SetDataDir(dir: &str) -> PgResult<()> {
+    g::SetDataDir(&make_absolute_path(dir)?);
+    Ok(())
 }
 
 const PG_MODE_MASK_OWNER: u32 = 0o077;

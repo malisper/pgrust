@@ -19,7 +19,8 @@ pub fn SelectConfigFiles(user_d_option: Option<&str>, progname: &str) -> PgResul
     let configdir = user_d_option
         .map(str::to_owned)
         .or_else(|| std::env::var("PGDATA").ok())
-        .map(|d| make_absolute_path(&d));
+        .map(|d| make_absolute_path(&d))
+        .transpose()?;
 
     if let Some(dir) = configdir.as_deref() {
         if let Err(e) = std::fs::metadata(dir) {
@@ -34,7 +35,7 @@ pub fn SelectConfigFiles(user_d_option: Option<&str>, progname: &str) -> PgResul
     }
 
     let fname = match nonempty(guc_tables::vars::ConfigFileName.read()) {
-        Some(explicit) => make_absolute_path(&explicit),
+        Some(explicit) => make_absolute_path(&explicit)?,
         None => match configdir.as_deref() {
             Some(dir) => format!("{dir}/{CONFIG_FILENAME}"),
             None => {
@@ -61,9 +62,9 @@ pub fn SelectConfigFiles(user_d_option: Option<&str>, progname: &str) -> PgResul
     guc_file::ProcessConfigFile(PGC_POSTMASTER)?;
 
     match nonempty(guc_tables::vars::data_directory.read()) {
-        Some(dd) => miscinit::SetDataDir(&dd),
+        Some(dd) => miscinit::SetDataDir(&dd)?,
         None => match configdir.as_deref() {
-            Some(dir) => miscinit::SetDataDir(dir),
+            Some(dir) => miscinit::SetDataDir(dir)?,
             None => {
                 write_stderr(&format!(
                     "{progname} does not know where to find the database system data.\n\
@@ -85,7 +86,7 @@ pub fn SelectConfigFiles(user_d_option: Option<&str>, progname: &str) -> PgResul
     pg_timezone_abbrev_initialize()?;
 
     let hba = match nonempty(guc_tables::vars::HbaFileName.read()) {
-        Some(explicit) => make_absolute_path(&explicit),
+        Some(explicit) => make_absolute_path(&explicit)?,
         None => match configdir.as_deref() {
             Some(dir) => format!("{dir}/{HBA_FILENAME}"),
             None => {
@@ -101,7 +102,7 @@ pub fn SelectConfigFiles(user_d_option: Option<&str>, progname: &str) -> PgResul
     crate::SetConfigOption("hba_file", Some(&hba), PGC_POSTMASTER, PGC_S_OVERRIDE)?;
 
     let ident = match nonempty(guc_tables::vars::IdentFileName.read()) {
-        Some(explicit) => make_absolute_path(&explicit),
+        Some(explicit) => make_absolute_path(&explicit)?,
         None => match configdir.as_deref() {
             Some(dir) => format!("{dir}/{IDENT_FILENAME}"),
             None => {

@@ -220,8 +220,10 @@ pub fn ValidatePgVersion(path: &str) -> PgResult<()> {
     let my_major = leading_i64(PG_VERSION);
     let full_path = format!("{path}/PG_VERSION");
 
-    let contents = match std::fs::read_to_string(&full_path) {
-        Ok(s) => s,
+    // AllocateFile + fscanf read raw bytes: a PG_VERSION that is not valid
+    // UTF-8 opens fine and fails the conversion check below, never the open.
+    let contents = match std::fs::read(&full_path) {
+        Ok(b) => b,
         Err(e) => {
             let errno = e.raw_os_error().unwrap_or(0);
             if errno == libc::ENOENT {
@@ -243,15 +245,18 @@ pub fn ValidatePgVersion(path: &str) -> PgResult<()> {
     // fscanf "%63s": first token delimited by C-locale isspace (NOT
     // Unicode whitespace), max 63 bytes.
     let token = contents
-        .split(|c: char| c.is_ascii() && pg_string::isspace_c_locale(c as u8))
+        .split(|&b| pg_string::isspace_c_locale(b))
         .find(|t| !t.is_empty())
-        .unwrap_or("");
-    let file_version_string = token.get(..63).unwrap_or(token);
-    let starts_numeric = file_version_string
-        .bytes()
-        .next()
-        .is_some_and(|b| b.is_ascii_digit() || b == b'+' || b == b'-');
-    if file_version_string.is_empty() || !starts_numeric {
+        .unwrap_or(&[]);
+    let token = &token[..token.len().min(63)];
+    // strtol(file_version_string, &endptr, 10) (miscinit.c:1804): endptr
+    // stays at the start — "does not contain valid data" — unless an
+    // optional sign is followed by at least one digit ('+foo' converts
+    // nothing; the empty token is fscanf's ret != 1).
+    let digits_start = usize::from(matches!(token.first(), Some(b'+' | b'-')));
+    let converts = token.get(digits_start).is_some_and(u8::is_ascii_digit);
+    let file_version_string = String::from_utf8_lossy(token);
+    if !converts {
         ereport(FATAL)
             .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
             .errmsg(format!("\"{path}\" is not a valid data directory"))
@@ -260,7 +265,7 @@ pub fn ValidatePgVersion(path: &str) -> PgResult<()> {
             .finish(loc(1805, "ValidatePgVersion"))?;
     }
 
-    if leading_i64(file_version_string) != my_major {
+    if leading_i64(&file_version_string) != my_major {
         ereport(FATAL)
             .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
             .errmsg("database files are incompatible with server")

@@ -17,6 +17,7 @@ types_guc = { path = "../../../../_support/types/types_guc" }
 types_resowner = { path = "../../../../_support/types/types_resowner" }
 datum = { path = "../../../../_support/types/datum" }
 elog = { path = "../../error/elog" }
+format_type = { path = "../../adt/format_type" }
 init_small = { path = "../init_small" }
 miscinit = { path = "../miscinit" }
 guc = { path = "../../misc/guc" }

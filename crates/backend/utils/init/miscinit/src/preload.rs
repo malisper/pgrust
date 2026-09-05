@@ -3,7 +3,7 @@ use std::sync::RwLock;
 
 use elog::ereport;
 use guc_tables::{vars, GucVarAccessors};
-use types_error::{PgResult, ERRCODE_SYNTAX_ERROR, LOG};
+use types_error::{PgResult, DEBUG1, ERRCODE_SYNTAX_ERROR, LOG};
 
 use crate::process::loc;
 
@@ -66,6 +66,9 @@ fn load_libraries(libraries: Option<&str>, gucname: &str, restricted: bool) -> P
             name = format!("{PLUGIN_PREFIX}{name}");
         }
         dfmgr::load_file(&name, restricted)?;
+        ereport(DEBUG1)
+            .errmsg_internal(format!("loaded library \"{name}\""))
+            .finish(loc(1890, "load_libraries"))?;
     }
     Ok(())
 }

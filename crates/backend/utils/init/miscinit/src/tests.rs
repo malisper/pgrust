@@ -718,10 +718,10 @@ fn make_absolute_path_canonicalizes() {
     // a purely lexical normalizer. Absolute inputs are canonicalized in place;
     // this is what lets path_is_prefix_of_path recognize a tablespace location
     // nested under a non-canonical DataDir (bug_42bdb036).
-    assert_eq!(make_absolute_path("/data/./dd"), "/data/dd");
-    assert_eq!(make_absolute_path("/data//x"), "/data/x");
-    assert_eq!(make_absolute_path("/data/dd/"), "/data/dd");
-    assert_eq!(make_absolute_path("/data/../dd"), "/dd");
+    assert_eq!(make_absolute_path("/data/./dd").unwrap(), "/data/dd");
+    assert_eq!(make_absolute_path("/data//x").unwrap(), "/data/x");
+    assert_eq!(make_absolute_path("/data/dd/").unwrap(), "/data/dd");
+    assert_eq!(make_absolute_path("/data/../dd").unwrap(), "/dd");
 
     // Relative input: prepend cwd, then canonicalize the whole thing. Hold
     // CWD_LOCK across BOTH cwd reads (the one inside make_absolute_path and
@@ -732,5 +732,58 @@ fn make_absolute_path_canonicalizes() {
         .into_os_string()
         .into_string()
         .unwrap();
-    assert_eq!(make_absolute_path("sub/./x"), format!("{cwd}/sub/x"));
+    assert_eq!(make_absolute_path("sub/./x").unwrap(), format!("{cwd}/sub/x"));
+}
+
+// audit-18.6 b051 (miscinit.c:1804-1811): strtol on the fscanf token must
+// consume at least one digit; a sign with no digits leaves endptr at the
+// start and C reports invalid data, not a version mismatch.
+#[test]
+fn validate_pg_version_sign_without_digits_is_invalid_data() {
+    setup();
+    let dir = scratch_dir("pgversion_sign");
+    for contents in ["+foo\n", "-\n", "+\n"] {
+        std::fs::write(format!("{dir}/PG_VERSION"), contents).unwrap();
+        let r = refuses(|| ValidatePgVersion(&dir));
+        assert_eq!(r.message, format!("\"{dir}\" is not a valid data directory"), "{contents:?}");
+        assert_eq!(r.hint.as_deref(), Some("You might need to initdb."), "{contents:?}");
+    }
+}
+
+// audit-18.6 b051 (miscinit.c:1785-1811): AllocateFile + fscanf read raw
+// bytes; a non-UTF-8 PG_VERSION opens fine and fails the strtol check, so
+// C reports invalid data (never "could not open file ...: %m" with errno 0).
+#[test]
+fn validate_pg_version_non_utf8_bytes_are_invalid_data() {
+    setup();
+    let dir = scratch_dir("pgversion_bytes");
+    std::fs::write(format!("{dir}/PG_VERSION"), b"\xff\xfe").unwrap();
+    let r = refuses(|| ValidatePgVersion(&dir));
+    assert_eq!(r.message, format!("\"{dir}\" is not a valid data directory"));
+    assert_eq!(r.hint.as_deref(), Some("You might need to initdb."));
+    // A version token followed by raw bytes still parses like strtol.
+    std::fs::write(format!("{dir}/PG_VERSION"), b"18\xff\n").unwrap();
+    ValidatePgVersion(&dir).unwrap();
+}
+
+// audit-18.6 b051 (port/path.c:868): getcwd() failure is a reported error
+// ("could not get current working directory: %m"), never a panic.
+#[test]
+fn make_absolute_path_reports_unreadable_cwd() {
+    setup();
+    let _g = CWD_LOCK.lock().unwrap();
+    let keep = std::env::current_dir().unwrap();
+    let dir = scratch_dir("gonecwd");
+    std::env::set_current_dir(&dir).unwrap();
+    std::fs::remove_dir(&dir).unwrap();
+
+    let unwound = std::panic::catch_unwind(|| make_absolute_path("reldir"));
+    std::env::set_current_dir(&keep).unwrap();
+
+    // An ERROR is returned to the caller (errfinish defers emission to the
+    // catch site), so the witness is the Err itself.
+    let result = unwound.expect("make_absolute_path must report the getcwd failure, not panic");
+    let err = result.expect_err("a vanished cwd is elog(ERROR, ...), not a path");
+    assert_eq!(err.level, types_error::ERROR);
+    assert_eq!(err.message, "could not get current working directory: No such file or directory");
 }

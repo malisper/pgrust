@@ -319,6 +319,7 @@ pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
             .clone()
             .or_else(|| std::env::var("PGDATA").ok())
             .map(|d| miscinit::make_absolute_path(&d))
+            .transpose()?
         {
             Some(dd) => match vfs::sim_boot::compose_boot_namespace(&dd) {
                 Ok(line) => write_stderr(format!("{line}\n")),

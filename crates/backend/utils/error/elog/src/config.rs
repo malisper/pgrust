@@ -107,8 +107,14 @@ pub fn set_syslog_split_messages(value: bool) {
     SYSLOG_SPLIT_MESSAGES.with(|c| c.set(value));
 }
 
-// `ExitOnAnyError` (globals.c; initdb sets it).
-thread_local! { static EXIT_ON_ANY_ERROR: Cell<bool> = const { Cell::new(false) }; }
+// `ExitOnAnyError`, `IsUnderPostmaster`, `FrontendProtocol` (globals.c):
+// the cells are init_small's — the ones async.c's notification delivery,
+// xact abort, miscinit's InitPostmasterChild and backend_startup's
+// ProcessStartupPacket write — so errstart's ERROR->FATAL escalation
+// (elog.c:378), DebugFileOpen's stdout dup2 (elog.c:2151) and
+// send_message_to_frontend's wire-format switch (elog.c:3544) observe the
+// value the rest of the backend set (audit-18.6 b051: private mirrors here
+// were never fed by those setters).
 // `proc_exit_inprogress` (storage/ipc/ipc.c).
 thread_local! { static PROC_EXIT_INPROGRESS: Cell<bool> = const { Cell::new(false) }; }
 // `redirection_done` (postmaster.c): stderr goes to the syslogger pipe.
@@ -117,10 +123,6 @@ thread_local! { static PROC_EXIT_INPROGRESS: Cell<bool> = const { Cell::new(fals
 static REDIRECTION_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 // Mirrors `MyBackendType == B_LOGGER` (miscinit.c).
 thread_local! { static AM_SYSLOGGER: Cell<bool> = const { Cell::new(false) }; }
-// `IsUnderPostmaster` (globals.c).
-thread_local! { static IS_UNDER_POSTMASTER: Cell<bool> = const { Cell::new(false) }; }
-// `FrontendProtocol` (globals.c); 0 = not yet negotiated.
-thread_local! { static FRONTEND_PROTOCOL: Cell<u32> = const { Cell::new(0) }; }
 // `OutputFileName` (globals.c); empty = none.
 thread_local! { static OUTPUT_FILE_NAME: RefCell<Option<String>> = const { RefCell::new(None) }; }
 
@@ -139,11 +141,11 @@ pub fn set_crit_section_count(count: u32) {
 
 #[inline]
 pub fn exit_on_any_error() -> bool {
-    EXIT_ON_ANY_ERROR.with(Cell::get)
+    init_small::globals::ExitOnAnyError()
 }
 
 pub fn set_exit_on_any_error(value: bool) {
-    EXIT_ON_ANY_ERROR.with(|c| c.set(value));
+    init_small::globals::SetExitOnAnyError(value);
 }
 
 #[inline]
@@ -172,19 +174,21 @@ pub fn set_am_syslogger(value: bool) {
 }
 
 pub fn is_under_postmaster() -> bool {
-    IS_UNDER_POSTMASTER.with(Cell::get)
+    init_small::globals::IsUnderPostmaster()
 }
 
 pub fn set_is_under_postmaster(value: bool) {
-    IS_UNDER_POSTMASTER.with(|c| c.set(value));
+    init_small::globals::SetIsUnderPostmaster(value);
 }
 
+// 0 = not yet negotiated (treated as modern by send_message_to_frontend,
+// like elog.c:3544's `FrontendProtocol == 0`).
 pub fn frontend_protocol() -> u32 {
-    FRONTEND_PROTOCOL.with(Cell::get)
+    init_small::globals::FrontendProtocol()
 }
 
 pub fn set_frontend_protocol(version: u32) {
-    FRONTEND_PROTOCOL.with(|c| c.set(version));
+    init_small::globals::SetFrontendProtocol(version);
 }
 
 pub fn output_file_name() -> Option<String> {

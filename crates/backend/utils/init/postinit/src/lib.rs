@@ -339,32 +339,12 @@ fn CheckMyDatabase(
     Ok(())
 }
 
-// quote_identifier (ruleutils.c) reduced to the quote-when-not-plain rendering
-// this WARNING hint needs; the keyword-aware owner supersedes it when
-// ruleutils lands.
+// quote_identifier (ruleutils.c:13112-13115): the keyword-aware owner —
+// ScanKeywordLookup quotes every non-unreserved keyword (a database named
+// "user" must render as \"user\" in the REFRESH COLLATION VERSION hint) and
+// quote_all_identifiers is honoured.
 fn quote_identifier(ident: &str) -> String {
-    let plain = !ident.is_empty()
-        && ident
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_lowercase() || c == '_')
-        && ident
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
-    if plain {
-        ident.to_string()
-    } else {
-        let mut s = String::with_capacity(ident.len() + 2);
-        s.push('"');
-        for c in ident.chars() {
-            if c == '"' {
-                s.push('"');
-            }
-            s.push(c);
-        }
-        s.push('"');
-        s
-    }
+    format_type::quote_identifier(ident).into_owned()
 }
 
 fn c_isspace(c: u8) -> bool {
@@ -374,7 +354,10 @@ fn c_isspace(c: u8) -> bool {
 pub fn pg_split_opts(argv: &mut Vec<String>, optstr: &str) {
     let bytes = optstr.as_bytes();
     let mut i = 0usize;
-    let mut s = String::new();
+    // appendStringInfoChar (postinit.c:530) copies raw bytes: an option is
+    // split only at ASCII whitespace and unescaped backslashes, so every
+    // multi-byte UTF-8 sequence of `optstr` reaches argv intact.
+    let mut s: Vec<u8> = Vec::new();
 
     while i < bytes.len() {
         let mut last_was_escape = false;
@@ -396,12 +379,14 @@ pub fn pg_split_opts(argv: &mut Vec<String>, optstr: &str) {
                 last_was_escape = true;
             } else {
                 last_was_escape = false;
-                s.push(c as char);
+                s.push(c);
             }
             i += 1;
         }
 
-        argv.push(s.clone());
+        // ASCII-delimited slices of a &str are valid UTF-8; lossy only names
+        // the conversion, it never fires.
+        argv.push(String::from_utf8_lossy(&s).into_owned());
     }
 }
 
@@ -910,9 +895,10 @@ pub fn InitPostgres(
             }
             Err(e) => {
                 return ereport(FATAL)
+                    .with_saved_errno(e.raw_os_error().unwrap_or(0))
                     .errcode_for_file_access()
                     .errmsg(format!(
-                        "could not access directory \"{}\": {e}",
+                        "could not access directory \"{}\": %m",
                         fullpath.as_str()
                     ))
                     .finish(loc(1158, "InitPostgres"));
