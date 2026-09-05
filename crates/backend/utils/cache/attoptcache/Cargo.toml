@@ -11,7 +11,8 @@ types_error = { path = "../../../../_support/types/types_error" }
 types_tuple = { path = "../../../../_support/types/types_tuple" }
 syscache_seams = { path = "../syscache_seams" }
 reloptions = { path = "../../../access/common/reloptions" }
+inval = { path = "../inval" }
+datum = { path = "../../../../_support/types/datum" }
 
 [dev-dependencies]
-datum = { path = "../../../../_support/types/datum" }
 types_nodes = { path = "../../../../_support/types/nodes" }

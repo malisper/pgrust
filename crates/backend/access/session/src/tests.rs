@@ -1109,7 +1109,17 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      A transient per-call flag with no session identity, never live
     //      across a statement boundary (slot-35 COMPILE_ECONOMY /
     //      slot-41 SESSION_ROOT_RETIRING class) — non-session TLS.
-    assert_eq!(count_tree(crates), 584, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 585, 18.6 conformance audit (2026-09-04), attoptcache port
+    //   (b007-backend-utils-cache-1): one product source —
+    //   65. utils/cache/attoptcache/src/lib.rs ATTOPT_CACHE +
+    //      CALLBACK_REGISTERED (one thread_local! block) —
+    //      RefCell<HashMap<(Oid, i16), Option<AttributeOpts>>> per-backend
+    //      cache of parsed pg_attribute.attoptions (attoptcache.c
+    //      AttoptCacheHash, CacheMemoryContext) plus its once-only
+    //      CacheRegisterSyscacheCallback latch; flushed wholesale by the
+    //      ATTNUM syscache callback, no session identity, never bound or
+    //      reset — non-session TLS, same class as 61.
+    assert_eq!(count_tree(crates), 585, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

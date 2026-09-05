@@ -330,12 +330,13 @@ pub(crate) fn compare_tuple(
 }
 
 /// Stable payload buffer in the cache context (C's palloc of the image).
-pub(crate) fn payload_alloc(mcx: Mcx<'_>, len: usize) -> NonNull<u8> {
+/// Allocation failure is C palloc's ereport(ERROR, ERRCODE_OUT_OF_MEMORY)
+/// (catcache.c:2216 CatalogCacheCreateEntry, :1561 scan-key copies): a
+/// catchable error, never a backend panic.
+pub(crate) fn payload_alloc(mcx: Mcx<'_>, len: usize) -> types_error::PgResult<NonNull<u8>> {
     use mcx::Allocator;
     let layout = core::alloc::Layout::from_size_align(len.max(1), 8).unwrap();
-    mcx.allocate(layout)
-        .unwrap_or_else(|_| panic!("{}", mcx.oom(len)))
-        .cast()
+    Ok(mcx.allocate(layout).map_err(|_| Box::new(mcx.oom(len)))?.cast())
 }
 
 pub(crate) fn payload_free(mcx: Mcx<'_>, ptr: *mut u8, len: u32) {

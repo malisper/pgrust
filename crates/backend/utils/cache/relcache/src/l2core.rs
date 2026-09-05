@@ -458,7 +458,7 @@ pub(crate) fn shell_from_core(core: &Arc<RelCoreShared>) -> PgResult<RelationDat
             ),
         };
 
-    RelationInitTableAccessMethod(core.form.relkind, core.form.relam)?;
+    RelationInitTableAccessMethod(core.relid, core.form.relkind, core.form.relam)?;
 
     let data = RelationData {
         rd_locator: Default::default(),

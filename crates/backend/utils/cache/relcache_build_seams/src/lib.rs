@@ -13,6 +13,10 @@ pub struct ScannedPgClass {
     // Threaded beside the trimmed form (relchecks/relhastriggers were
     // dropped from it).
     pub relchecks: i16,
+    // relnatts: C's RelationBuildTupleDesc counts the pg_attribute rows it
+    // must find from it and RelationInitIndexAccessInfo cross-checks it
+    // against indnatts (relcache.c:666, :1494).
+    pub relnatts: i16,
     pub relhastriggers: bool,
     pub relhasrules: bool,
     pub options: Option<RdOptions>,
@@ -45,6 +49,7 @@ seam_core::seam!(
         mcx: Mcx<'static>,
         relid: Oid,
         form: &FormData_pg_class,
+        relnatts: i16,
         relchecks: i16,
     ) -> PgResult<Rc<TupleDescData<'static>>>
 );
@@ -54,6 +59,7 @@ seam_core::seam!(
         mcx: Mcx<'static>,
         relid: Oid,
         form: &FormData_pg_class,
+        relnatts: i16,
     ) -> PgResult<IndexAccessInfo>
 );
 
@@ -115,11 +121,15 @@ seam_core::seam!(
 
 seam_core::seam!(
     // RelationGetExclusionInfo's pg_constraint half (relcache.c): conexclop
-    // of the exclusion (or conperiod pk/unique) constraint owning index_relid.
+    // of the exclusion (or conperiod pk/unique) constraint owning index_relid,
+    // exactly indnkeyatts long; index_relname is RelationGetRelationName of
+    // the index (C names it in every consistency ERROR).
     pub fn scan_exclusion_ops<'mcx>(
         mcx: Mcx<'mcx>,
         conrelid: Oid,
         index_relid: Oid,
+        index_relname: &str,
+        indnkeyatts: i16,
     ) -> PgResult<PgVec<'mcx, Oid>>
 );
 

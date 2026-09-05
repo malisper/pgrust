@@ -679,6 +679,8 @@ pub fn generateClonedIndexStmt<'mcx>(
                     mcx,
                     indrelid,
                     source_idx.rd_id,
+                    source_idx.name(),
+                    idxrec.indnkeyatts,
                 )?;
                 let mut names = NodeList::nil();
                 for &operid in ops.iter() {

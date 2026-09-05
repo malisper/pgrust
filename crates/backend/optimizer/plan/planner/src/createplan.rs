@@ -2602,8 +2602,10 @@ fn create_unique_plan<'mcx>(
     if umethod == types_pathnodes::UNIQUE_PATH_HASH {
         let mut grp_operators: mcx::PgVec<'mcx, types_core::Oid> = mcx::PgVec::new_in(mcx);
         for &in_oper in in_operators.iter() {
+            // createplan.c:1832: get_compatible_hash_operators(in_oper, NULL,
+            // &eq_oper); failure is elog(ERROR) (catchable XX000).
             let (_, eq_oper) = unique_plan_lookup(
-                lsyscache::get_compatible_hash_operators(in_oper)?,
+                lsyscache::get_compatible_hash_operators(in_oper, false, true)?,
                 || format!("could not find compatible hash operator for operator {in_oper}"),
             )?;
             grp_operators.push(eq_oper);

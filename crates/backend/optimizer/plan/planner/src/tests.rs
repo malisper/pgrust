@@ -749,12 +749,12 @@ fn install_scan_fixtures() {
     // cache, fed by pg_class/pg_index fixtures underneath its build seams.
     relcache_build_seams::scan_pg_relation::set(|relid, _, _| {
         Ok((relid == TBL).then(|| relcache_build_seams::ScannedPgClass {
-            relchecks: 0, relhastriggers: false, relhasrules: false,
+            relchecks: 0, relnatts: 0, relhastriggers: false, relhasrules: false,
             form: make_pg_class(TBL, "t", b'r', 2, true),
             options: None,
         }))
     });
-    relcache_build_seams::relation_build_tuple_desc::set(|mcx, _, _, _| {
+    relcache_build_seams::relation_build_tuple_desc::set(|mcx, _, _, _, _| {
         Ok(std::rc::Rc::new(types_tuple::TupleDescData {
             natts: 0,
             tdtypeid: 0,

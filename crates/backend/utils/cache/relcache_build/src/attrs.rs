@@ -42,13 +42,17 @@ const CONSTRAINT_FOREIGN: i8 = b'f' as i8;
 const ATTRIBUTE_GENERATED_STORED: i8 = b's' as i8;
 const ATTRIBUTE_GENERATED_VIRTUAL: i8 = b'v' as i8;
 
-// RelationBuildTupleDesc (relcache.c). C cross-checks attnum <= relnatts and
-// counts down from it; the trimmed rd_rel drops relnatts, so natts = max
-// scanned attnum and gaps take C's missing-attribute ERROR.
+// RelationBuildTupleDesc (relcache.c:530-670). The descriptor has exactly
+// relnatts slots: a row outside 1..=relnatts is C's "invalid attribute number"
+// ERROR (:563), and every slot the scan leaves empty -- a missing trailing row
+// included -- is counted into C's "pg_attribute catalog is missing %d
+// attribute(s)" ERROR (:666), instead of silently building a narrower
+// descriptor than the heap tuples carry.
 pub(crate) fn relation_build_tuple_desc(
     mcx: Mcx<'static>,
     relid: Oid,
     form: &FormData_pg_class,
+    relnatts: i16,
     relchecks: i16,
 ) -> PgResult<Rc<TupleDescData<'static>>> {
     let cx = MemoryContext::new("RelationBuildTupleDesc");
@@ -75,6 +79,9 @@ pub(crate) fn relation_build_tuple_desc(
     let mut missing_pairs: PgVec<'static, (i16, Datum)> = PgVec::new_in(mcx);
     while let Some(tup) = genam::systable_getnext(smcx, &mut scan)? {
         let a = decode(rel.descr(), tup, relid)?;
+        if a.attnum <= 0 || a.attnum > relnatts {
+            return Err(invalid_attribute_number(a.attnum, form));
+        }
         if a.atthasmissing {
             if let Some(v) = attr_missing_fetch(mcx, smcx, rel.descr(), tup, &a)? {
                 missing_pairs.push((a.attnum, v));
@@ -85,7 +92,7 @@ pub(crate) fn relation_build_tuple_desc(
     genam::systable_endscan(smcx, scan)?;
     rel.close(AccessShareLock)?;
 
-    let natts = rows.iter().map(|a| a.attnum).max().unwrap_or(0) as usize;
+    let natts = relnatts.max(0) as usize;
     let mut slots: PgVec<'_, FormData_pg_attribute> = mcx::vec_with_capacity_in(smcx, natts)?;
     slots.resize(natts, FormData_pg_attribute::default());
     for a in rows.iter() {
@@ -321,19 +328,35 @@ pub(crate) fn scan_pg_constraint_fkeys<'mcx>(
             continue;
         }
         let td = rel.descr();
-        let conkey = fk_array_elems(smcx, req(td, tup, Anum_pg_constraint_conkey)?, 2, b's')?;
-        let nkeys = conkey.len();
-        assert!(
-            nkeys > 0 && nkeys <= INDEX_MAX_KEYS as usize,
-            "foreign key constraint cannot have {nkeys} columns"
-        );
-        let confkey = fk_array_elems(smcx, req(td, tup, Anum_pg_constraint_confkey)?, 2, b's')?;
+        // DeconstructFkConstraintRow (pg_constraint.c:1540-1600): every arm is
+        // elog(ERROR) -- a catchable XX000 -- never an assertion.
+        let conkey_img = fk_array_image(smcx, req(td, tup, Anum_pg_constraint_conkey)?)?;
+        let (ndim, hasnull, elemtype, dim0) = array_header(&conkey_img);
+        if ndim != 1 || hasnull || elemtype != INT2OID {
+            return Err(constraint_decode_error("conkey is not a 1-D smallint array"));
+        }
+        if dim0 <= 0 || dim0 > INDEX_MAX_KEYS as i32 {
+            return Err(constraint_decode_error(&format!(
+                "foreign key constraint cannot have {dim0} columns"
+            )));
+        }
+        let nkeys = dim0 as usize;
+        let conkey = datum::array_build::deconstruct_array_image(smcx, &conkey_img, 2, true, b's')?;
+        let confkey_img = fk_array_image(smcx, req(td, tup, Anum_pg_constraint_confkey)?)?;
+        let (ndim, hasnull, elemtype, dim0) = array_header(&confkey_img);
+        if ndim != 1 || dim0 as usize != nkeys || hasnull || elemtype != INT2OID {
+            return Err(constraint_decode_error("confkey is not a 1-D smallint array"));
+        }
+        let confkey =
+            datum::array_build::deconstruct_array_image(smcx, &confkey_img, 2, true, b's')?;
+        let conpfeqop_img = fk_array_image(smcx, req(td, tup, Anum_pg_constraint_conpfeqop)?)?;
+        let (ndim, hasnull, elemtype, dim0) = array_header(&conpfeqop_img);
+        if ndim != 1 || dim0 as usize != nkeys || hasnull || elemtype != OIDOID {
+            return Err(constraint_decode_error("conpfeqop is not a 1-D Oid array"));
+        }
         let conpfeqop =
-            fk_array_elems(smcx, req(td, tup, Anum_pg_constraint_conpfeqop)?, 4, b'i')?;
-        assert!(
-            confkey.len() == nkeys && conpfeqop.len() == nkeys,
-            "confkey/conpfeqop length differs from conkey"
-        );
+            datum::array_build::deconstruct_array_image(smcx, &conpfeqop_img, 4, true, b'i')?;
+        debug_assert!(conkey.len() == nkeys && confkey.len() == nkeys && conpfeqop.len() == nkeys);
         let mut info = ForeignKeyCacheInfo {
             conoid: req(td, tup, Anum_pg_constraint_oid)?.as_oid(),
             conrelid: req(td, tup, Anum_pg_constraint_conrelid)?.as_oid(),
@@ -356,23 +379,40 @@ pub(crate) fn scan_pg_constraint_fkeys<'mcx>(
     Ok(out)
 }
 
-fn fk_array_elems<'s>(
-    smcx: Mcx<'s>,
-    d: Datum,
-    elmlen: i16,
-    elmalign: u8,
-) -> PgResult<PgVec<'s, Datum>> {
+const INT2OID: Oid = 21;
+const OIDOID: Oid = 26;
+
+// DatumGetArrayTypeP over a not-null pg_constraint array column: the
+// detoasted 4B-header image (the disk image may be packed).
+fn fk_array_image<'s>(smcx: Mcx<'s>, d: Datum) -> PgResult<PgVec<'s, u8>> {
     let p = d.as_usize() as *const u8;
     // SAFETY: not-null array column: live varlena image through its extent.
     let image = unsafe { std::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p)) };
     let payload = varlena::open_image(smcx, image)?;
-    // DatumGetArrayTypeP: rebuild the 4B-header form (disk image may be packed).
     let body = payload.as_bytes();
     let total = body.len() + 4;
     let mut full: PgVec<'s, u8> = mcx::vec_with_capacity_in(smcx, total)?;
     mcx::vec_append_bytes(&mut full, &(((total as u32) << 2).to_ne_bytes()))?;
     mcx::vec_append_bytes(&mut full, body)?;
-    datum::array_build::deconstruct_array_image(smcx, &full, elmlen, true, elmalign)
+    Ok(full)
+}
+
+// (ARR_NDIM, ARR_HASNULL, ARR_ELEMTYPE, ARR_DIMS[0]) of a 4B-header array
+// image; fields past the image read as 0 so a truncated image fails the
+// caller's 1-D check instead of reading out of bounds.
+fn array_header(full: &[u8]) -> (i32, bool, Oid, i32) {
+    let rd = |off: usize| -> i32 {
+        full.get(off..off + 4).map_or(0, |b| i32::from_ne_bytes(b.try_into().unwrap()))
+    };
+    (rd(4), rd(8) != 0, rd(12) as Oid, rd(16))
+}
+
+// pg_constraint.c's decode arms: elog(ERROR, ...) -> XX000, catchable.
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn constraint_decode_error(msg: &str) -> Box<PgError> {
+    Box::new(PgError::error(msg.to_string()).with_sqlstate(ERRCODE_INTERNAL_ERROR))
 }
 
 // extractNotNullColumn (pg_constraint.c): conkey[0] of a not-null row.
@@ -381,19 +421,15 @@ fn extract_not_null_column(
     td: &TupleDescData<'_>,
     tup: &HeapTupleData<'_>,
 ) -> PgResult<i16> {
-    let val = req(td, tup, Anum_pg_constraint_conkey)?;
-    let p = val.as_usize() as *const u8;
-    // SAFETY: not-null int2[] column: live varlena image through its extent.
-    let image = unsafe { std::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p)) };
-    let payload = varlena::open_image(smcx, image)?;
-    // DatumGetArrayTypeP: rebuild the 4B-header form (disk image may be packed).
-    let body = payload.as_bytes();
-    let total = body.len() + 4;
-    let mut full: PgVec<'_, u8> = mcx::vec_with_capacity_in(smcx, total)?;
-    mcx::vec_append_bytes(&mut full, &(((total as u32) << 2).to_ne_bytes()))?;
-    mcx::vec_append_bytes(&mut full, body)?;
+    let full = fk_array_image(smcx, req(td, tup, Anum_pg_constraint_conkey)?)?;
+    // pg_constraint.c:716-720: elog(ERROR, "conkey is not a 1-D smallint
+    // array") -- catchable XX000 (the relcache build runs inside parse
+    // analysis, so C's parser error-position context applies to it).
+    let (ndim, hasnull, elemtype, dim0) = array_header(&full);
+    if ndim != 1 || hasnull || elemtype != INT2OID || dim0 != 1 {
+        return Err(constraint_decode_error("conkey is not a 1-D smallint array"));
+    }
     let elems = datum::array_build::deconstruct_array_image(smcx, &full, 2, true, b's')?;
-    assert!(elems.len() == 1, "not-null constraint with {} conkey entries", elems.len());
     Ok(elems[0].as_i16())
 }
 
@@ -486,6 +522,20 @@ fn invalid_attnum(attnum: i16, relid: Oid) -> Box<PgError> {
     Box::new(
         PgError::error(format!(
             "invalid attribute number {attnum} for relation OID {relid}"
+        ))
+        .with_sqlstate(ERRCODE_INTERNAL_ERROR),
+    )
+}
+
+// relcache.c:563 elog(ERROR, "invalid attribute number %d for relation \"%s\"").
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn invalid_attribute_number(attnum: i16, form: &FormData_pg_class) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "invalid attribute number {attnum} for relation \"{}\"",
+            String::from_utf8_lossy(form.relname.name_str())
         ))
         .with_sqlstate(ERRCODE_INTERNAL_ERROR),
     )

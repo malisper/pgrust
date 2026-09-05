@@ -130,7 +130,7 @@ fn fake_scan(target: Oid, _index_ok: bool, _fnh: bool) -> PgResult<Option<relcac
     }
     Ok(ROWS.with(|r| {
         r.borrow().get(&target).map(|f| relcache_build_seams::ScannedPgClass {
-            relchecks: 0, relhastriggers: false, relhasrules: false,
+            relchecks: 0, relnatts: f.natts, relhastriggers: false, relhasrules: false,
             form: f.form.clone(),
             options: None,
         })
@@ -141,6 +141,7 @@ fn fake_tupdesc(
     mcx: Mcx<'static>,
     relid: Oid,
     _form: &FormData_pg_class,
+    _relnatts: i16,
     _relchecks: i16,
 ) -> PgResult<Rc<types_tuple::TupleDescData<'static>>> {
     let (natts, version) =
@@ -168,6 +169,7 @@ fn fake_index_info(
     mcx: Mcx<'static>,
     relid: Oid,
     _form: &FormData_pg_class,
+    _relnatts: i16,
 ) -> PgResult<relcache_build_seams::IndexAccessInfo> {
     let mut indkey = PgVec::new_in(mcx);
     indkey.push(1);

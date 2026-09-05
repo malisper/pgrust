@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+catalog_seams = { path = "../../../catalog/catalog_seams" }
 guc_tables = { path = "../../misc/guc_tables" }
 fd = { path = "../../../storage/file/fd" }
 libc = "0.2"
@@ -43,5 +44,4 @@ miscinit_seams = { path = "../../init/miscinit_seams" }
 xact_seams = { path = "../../../access/transam/xact_seams" }
 
 [dev-dependencies]
-catalog_seams = { path = "../../../catalog/catalog_seams" }
 types_spgist = { path = "../../../../_support/types/types_spgist" }

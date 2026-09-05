@@ -198,15 +198,16 @@ pub fn RelationGetExclusionInfo(
 ) -> PgResult<()> {
     let indexstruct = index.rd_index.as_ref().expect("index relation");
     let indnkeyatts = indexstruct.indnkeyatts as usize;
+    // The scan verifies conexclop is a 1-D Oid array of exactly indnkeyatts
+    // (relcache.c:5742) and reports every inconsistency as C's catchable ERROR.
     let conexclop = relcache_build_seams::scan_exclusion_ops::call(
         mcx,
         indexstruct.indrelid,
         index.rd_id,
+        index.name(),
+        indexstruct.indnkeyatts,
     )?;
-    assert!(
-        conexclop.len() == indnkeyatts,
-        "conexclop is not a 1-D Oid array"
-    );
+    debug_assert!(conexclop.len() == indnkeyatts);
     for i in 0..indnkeyatts {
         ops[i] = conexclop[i];
         procs[i] = lsyscache::operator::get_opcode(ops[i])?;

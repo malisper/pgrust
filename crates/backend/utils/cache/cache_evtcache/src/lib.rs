@@ -165,8 +165,20 @@ fn BuildEventTriggerCache(mcx: Mcx<'_>) -> PgResult<()> {
     Ok(())
 }
 
+// DecodeTextArrayToBitmapset (evtcache.c:222-243): the evttags image must be
+// a 1-D, null-free text array -- else elog(ERROR, "expected 1-D text array")
+// (XX000), before any element is deconstructed.
 fn DecodeTextArrayToTagSet(mcx: Mcx<'_>, array: Datum) -> PgResult<TagSet> {
     let img = varlena_bytes(mcx, array)?;
+    if arrayfuncs::arr_ndim(&img) != 1
+        || arrayfuncs::arr_hasnull(&img)
+        || arrayfuncs::arr_elemtype(&img) != TEXTOID
+    {
+        return Err(Box::new(
+            types_error::PgError::error("expected 1-D text array")
+                .with_sqlstate(types_error::ERRCODE_INTERNAL_ERROR),
+        ));
+    }
     let (elems, nulls) = arrayfuncs::deconstruct_array_builtin(mcx, &img, TEXTOID, false)?;
     debug_assert!(nulls.iter().all(|n| !n));
     let mut set = TagSet::default();

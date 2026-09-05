@@ -430,3 +430,42 @@ fn l2_shared_entry_survives_l1_eviction_while_pinned_elsewhere() {
     ReleaseCatCache(pin);
     assert_eq!(std::sync::Arc::strong_count(&ent), 1, "unpin frees the alias");
 }
+
+// C palloc raises ERRCODE_OUT_OF_MEMORY on failure; the catcache's image and
+// scan-key buffers must surface that as a catchable error, not a panic.
+#[test]
+fn payload_alloc_failure_is_a_catchable_error() {
+    let cx = mcx::MemoryContext::new("t");
+    // Over C's MaxAllocSize: the allocator refuses it deterministically.
+    let err = crate::payload_alloc(cx.mcx(), 1usize << 31).err().expect("must not panic");
+    assert!(err.message().contains("out of memory"), "{}", err.message());
+}
+
+// C SearchCatCacheMiss copies the caller's raw NAME datum into the scan key
+// (catcache.c:1561 cur_skey[0].sk_argument = v1); nameeq/btnamecmp then
+// compare NAMEDATALEN bytes, so a 64-byte probe keeps its 64th byte and can
+// never equal a 63-byte catalog name (audit FP-catcache-1: has_schema_privilege
+// of repeat('a', 64) must not find the 63-'a' schema).
+#[test]
+fn name_scan_key_keeps_the_64th_byte() {
+    let cx = mcx::MemoryContext::new("t");
+    let probe = "a".repeat(64);
+    let d = frame_scan_arg(cx.mcx(), CCFastKind::Name, &CatCKey::Str(&probe)).unwrap();
+    // SAFETY: frame_scan_arg returns a NAMEDATALEN-byte buffer in `cx`.
+    let buf = unsafe { std::slice::from_raw_parts(d.as_usize() as *const u8, NAMEDATALEN) };
+    assert_eq!(buf[62], b'a');
+    assert_eq!(buf[63], b'a', "the 64th probe byte must survive framing (C: raw datum)");
+    // A 63-byte probe frames as the NUL-terminated name it is.
+    let probe63 = "a".repeat(63);
+    let d = frame_scan_arg(cx.mcx(), CCFastKind::Name, &CatCKey::Str(&probe63)).unwrap();
+    // SAFETY: as above.
+    let buf = unsafe { std::slice::from_raw_parts(d.as_usize() as *const u8, NAMEDATALEN) };
+    assert_eq!(buf[62], b'a');
+    assert_eq!(buf[63], 0);
+    // Longer probes are capped at NAMEDATALEN (nameeq never reads past it).
+    let probe65 = "a".repeat(65);
+    let d = frame_scan_arg(cx.mcx(), CCFastKind::Name, &CatCKey::Str(&probe65)).unwrap();
+    // SAFETY: as above.
+    let buf = unsafe { std::slice::from_raw_parts(d.as_usize() as *const u8, NAMEDATALEN) };
+    assert_eq!(buf[63], b'a');
+}

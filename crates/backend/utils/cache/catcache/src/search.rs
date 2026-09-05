@@ -539,15 +539,21 @@ pub(crate) fn build_scan_keys<'mcx>(
     Ok(out)
 }
 
-fn frame_scan_arg(mcx: mcx::Mcx<'_>, kind: CCFastKind, key: &CatCKey<'_>) -> PgResult<Datum> {
+pub(crate) fn frame_scan_arg(mcx: mcx::Mcx<'_>, kind: CCFastKind, key: &CatCKey<'_>) -> PgResult<Datum> {
     use types_tuple::varatt::VARHDRSZ;
     Ok(match kind {
         CCFastKind::Char | CCFastKind::Int2 | CCFastKind::Int4 => key.word(),
         CCFastKind::Name => {
+            // C frames the caller's raw NAME datum unchanged (catcache.c:1561
+            // cur_skey[0].sk_argument = v1) and nameeq/btnamecmp compare
+            // NAMEDATALEN bytes, so a probe of NAMEDATALEN bytes or longer keeps
+            // its 64th byte and can never equal a stored (NUL at <= 63) name.
+            // Truncating to NAMEDATALEN-1 made a 64-byte probe find the
+            // 63-byte name (audit FP-catcache-1).
             let b = key.bytes();
-            let n = b.len().min(crate::compute::NAMEDATALEN - 1);
-            let buf = crate::payload_alloc(mcx, crate::compute::NAMEDATALEN);
-            // SAFETY: fresh NAMEDATALEN-byte buffer; n < NAMEDATALEN.
+            let n = b.len().min(crate::compute::NAMEDATALEN);
+            let buf = crate::payload_alloc(mcx, crate::compute::NAMEDATALEN)?;
+            // SAFETY: fresh NAMEDATALEN-byte buffer; n <= NAMEDATALEN.
             unsafe {
                 core::ptr::write_bytes(buf.as_ptr(), 0, crate::compute::NAMEDATALEN);
                 core::ptr::copy_nonoverlapping(b.as_ptr(), buf.as_ptr(), n);
@@ -557,7 +563,7 @@ fn frame_scan_arg(mcx: mcx::Mcx<'_>, kind: CCFastKind, key: &CatCKey<'_>) -> PgR
         CCFastKind::Text => {
             let b = key.bytes();
             let total = b.len() + VARHDRSZ;
-            let buf = crate::payload_alloc(mcx, total);
+            let buf = crate::payload_alloc(mcx, total)?;
             // SAFETY: fresh `total`-byte buffer.
             unsafe {
                 let word = types_tuple::varatt::set_varsize_4b_word(total as u32);
@@ -571,7 +577,7 @@ fn frame_scan_arg(mcx: mcx::Mcx<'_>, kind: CCFastKind, key: &CatCKey<'_>) -> PgR
             let b = key.bytes();
             let dim1 = (b.len() / 4) as i32;
             let total = 24 + b.len();
-            let buf = crate::payload_alloc(mcx, total);
+            let buf = crate::payload_alloc(mcx, total)?;
             // SAFETY: fresh `total`-byte, 8-aligned buffer.
             unsafe {
                 let p = buf.as_ptr();

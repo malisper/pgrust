@@ -91,8 +91,9 @@ pub(crate) fn decode(
         form.relam,
         if opts_null { None } else { Some(opts_datum) },
     )?;
+    let relnatts = req(td, tup, 19)?.as_i16();
     let relchecks = req(td, tup, 20)?.as_i16();
     let relhasrules = req(td, tup, 21)?.as_bool();
     let relhastriggers = req(td, tup, 22)?.as_bool();
-    Ok(ScannedPgClass { form, relchecks, relhastriggers, relhasrules, options })
+    Ok(ScannedPgClass { form, relchecks, relnatts, relhastriggers, relhasrules, options })
 }

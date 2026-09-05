@@ -166,8 +166,12 @@ fn RelationReloadIndexInfo(
             vec_clone_in(mcx, &held.rd_support)?,
         )
     } else {
-        let ii =
-            relcache_build_seams::relation_init_index_access_info::call(mcx, relid, &scanned.form)?;
+        let ii = relcache_build_seams::relation_init_index_access_info::call(
+            mcx,
+            relid,
+            &scanned.form,
+            scanned.relnatts,
+        )?;
         (ii.index, ii.opcintype, ii.opfamily, ii.indoption, ii.indcollation, ii.support)
     };
 

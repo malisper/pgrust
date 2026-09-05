@@ -142,6 +142,7 @@ fn decode_pg_class_roundtrips_a_formed_row() {
     assert_eq!(f.relreplident, b'n');
     assert_eq!(f.relfrozenxid, 722);
     assert_eq!(f.relminmxid, 1);
+    assert_eq!(scanned.relnatts, 34);
     assert!(scanned.options.is_none());
 }
 

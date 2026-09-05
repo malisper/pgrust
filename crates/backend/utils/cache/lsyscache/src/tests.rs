@@ -596,7 +596,14 @@ fn amop_getters() {
         assert_eq!(get_ordering_op_for_equality_op(INT4_EQ, true).unwrap(), INT4_LT);
         let fams = get_mergejoin_opfamilies(m, INT4_EQ).unwrap();
         assert_eq!(fams.as_slice(), &[INT_BTREE_FAM]);
-        assert_eq!(get_compatible_hash_operators(INT4_EQ).unwrap(), Some((INT4_EQ, INT4_EQ)));
+        assert_eq!(
+            get_compatible_hash_operators(INT4_EQ, true, true).unwrap(),
+            Some((INT4_EQ, INT4_EQ))
+        );
+        assert_eq!(
+            get_compatible_hash_operators(INT4_EQ, false, true).unwrap(),
+            Some((InvalidOid, INT4_EQ))
+        );
         assert_eq!(get_op_hash_functions(INT4_EQ).unwrap(), Some((450, 450)));
         let interp = get_op_index_interpretation(m, INT4_EQ).unwrap();
         assert_eq!(interp.len(), 1);

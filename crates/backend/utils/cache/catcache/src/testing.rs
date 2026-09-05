@@ -43,7 +43,7 @@ pub fn insert_positive(cache_id: i32, keys: &[CatCKey<'_>; 4], image: &[u8]) {
         let t_self = types_tuple::ItemPointerData::new(0, 1);
         let t_tableoid: u32 = 1;
         let total = crate::IMG_PREFIX + image.len() + byref_len;
-        let buf = payload_alloc(st.mcx, total);
+        let buf = payload_alloc(st.mcx, total).expect("test payload");
         // SAFETY: fresh `total`-byte buffer; prefix layout per IMG_PREFIX.
         unsafe {
             let p = buf.as_ptr();

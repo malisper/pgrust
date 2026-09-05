@@ -491,6 +491,23 @@ pub(crate) unsafe fn varlena_payload(p: *const u8) -> (*const u8, usize) {
 /// adt/nbtree oidvector paths do, and surface the same
 /// "array is not a valid oidvector" error instead of walking out of bounds.
 pub(crate) unsafe fn oidvector_elements(p: *const u8) -> PgResult<(*const u8, usize)> {
+    // check_valid_oidvector (oid.c:126): ndim == 1, dataoffset == 0 (no nulls
+    // bitmap), elemtype == OIDOID -- otherwise the layout is not what the
+    // hash/eq walk below assumes.
+    let (ndim, dataoffset, elemtype) = unsafe {
+        (
+            core::ptr::read_unaligned(p.add(4).cast::<i32>()),
+            core::ptr::read_unaligned(p.add(8).cast::<i32>()),
+            core::ptr::read_unaligned(p.add(12).cast::<Oid>()),
+        )
+    };
+    const OIDOID: Oid = 26;
+    if ndim != 1 || dataoffset != 0 || elemtype != OIDOID {
+        return Err(Box::new(
+            PgError::error("array is not a valid oidvector")
+                .with_sqlstate(ERRCODE_DATATYPE_MISMATCH),
+        ));
+    }
     let dim1 = unsafe { core::ptr::read_unaligned(p.add(16).cast::<i32>()) };
     // SAFETY: 4B-U plain-storage oidvector datum; header readable for VARSIZE.
     let varsize = unsafe { datum::varlena::VarlenaRef::from_ptr(p) }.varsize();
@@ -577,7 +594,7 @@ pub(crate) fn create_entry_positive(
     let mcx = st.mcx;
     let t_len = ntp.t_len;
     let payload_len = crate::IMG_PREFIX + t_len as usize;
-    let buf = payload_alloc(mcx, payload_len);
+    let buf = payload_alloc(mcx, payload_len)?;
     // SAFETY: fresh IMG_PREFIX + t_len bytes; source image live for t_len.
     let image = unsafe {
         let p = buf.as_ptr();
@@ -739,7 +756,7 @@ pub(crate) fn create_entry_negative(
         }
     }
     let mcx = st.mcx;
-    let buf = payload_alloc(mcx, byref_len);
+    let buf = payload_alloc(mcx, byref_len)?;
     let mut keys = [Datum::null(); CATCACHE_MAXKEYS];
     let mut off = 0usize;
     for i in 0..nkeys as usize {
@@ -882,7 +899,9 @@ mod oidvector_key_tests {
     fn image(varsize: u32, dim1: i32, buf_len: usize) -> Vec<u8> {
         let mut b = vec![0u8; buf_len];
         b[0..4].copy_from_slice(&(varsize << 2).to_le_bytes());
-        // ndim(4) at 4, dataoffset(8), elemtype(12) left 0/unused by this walk.
+        // A well-formed header: ndim 1, dataoffset 0, elemtype OIDOID.
+        b[4..8].copy_from_slice(&1i32.to_le_bytes());
+        b[12..16].copy_from_slice(&26u32.to_le_bytes());
         b[16..20].copy_from_slice(&dim1.to_le_bytes());
         b
     }
@@ -911,6 +930,39 @@ mod oidvector_key_tests {
         // SAFETY: as above; the crafted dim1 must be rejected before any walk.
         let err = unsafe { oidvector_elements(img.as_ptr()) }.err().unwrap();
         assert!(err.message().contains("not a valid oidvector"));
+    }
+
+    /// A 4B-U oidvector image with every header field spelled out.
+    fn image_hdr(varsize: u32, ndim: i32, dataoffset: i32, elemtype: u32, dim1: i32) -> Vec<u8> {
+        let mut b = vec![0u8; varsize as usize];
+        b[0..4].copy_from_slice(&(varsize << 2).to_le_bytes());
+        b[4..8].copy_from_slice(&ndim.to_le_bytes());
+        b[8..12].copy_from_slice(&dataoffset.to_le_bytes());
+        b[12..16].copy_from_slice(&elemtype.to_le_bytes());
+        b[16..20].copy_from_slice(&dim1.to_le_bytes());
+        b
+    }
+
+    // check_valid_oidvector (oid.c:126): C's oidvectorhashfast/oidvectoreqfast
+    // refuse ndim != 1, dataoffset != 0 (a nulls bitmap) and elemtype != OIDOID
+    // with ERRCODE_DATATYPE_MISMATCH "array is not a valid oidvector"; the
+    // dim1-fit bound alone lets such an image be hashed/compared as if valid.
+    #[test]
+    fn oidvector_header_fields_are_validated() {
+        let ok = image_hdr(28, 1, 0, 26, 1);
+        // SAFETY: `ok` is a live 4B-U oidvector image for its full VARSIZE.
+        let (_p, len) = unsafe { oidvector_elements(ok.as_ptr()) }.unwrap();
+        assert_eq!(len, 4);
+        for (name, img) in [
+            ("ndim 2", image_hdr(28, 2, 0, 26, 1)),
+            ("dataoffset != 0", image_hdr(28, 1, 24, 26, 1)),
+            ("elemtype int4", image_hdr(28, 1, 0, 23, 1)),
+        ] {
+            // SAFETY: as above.
+            let r = unsafe { oidvector_elements(img.as_ptr()) };
+            let err = r.err().unwrap_or_else(|| panic!("{name}: accepted"));
+            assert!(err.message().contains("array is not a valid oidvector"), "{name}");
+        }
     }
 
     #[test]

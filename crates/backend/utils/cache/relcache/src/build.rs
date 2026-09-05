@@ -30,17 +30,28 @@ pub(crate) fn invalid_relpersistence(c: u8) -> Box<PgError> {
     )
 }
 
-// RelationInitTableAccessMethod (relcache.c), closed-AM form: C resolves
-// pg_am.amhandler into rd_tableam per entry; here heap-handler AMs are
-// recorded in tableam_vocab's registry so TableAm::of maps non-builtin
+// RelationInitTableAccessMethod (relcache.c:1830-1870), closed-AM form: C
+// resolves pg_am.amhandler into rd_tableam per entry; here heap-handler AMs
+// are recorded in tableam_vocab's registry so TableAm::of maps non-builtin
 // relam values. Handler proc oid 3 = heap_tableam_handler (pg_proc.dat).
-pub(crate) fn RelationInitTableAccessMethod(relkind: u8, relam: Oid) -> PgResult<()> {
+//
+// C skips the pg_am probe only for sequences (:1836) and catalog relations
+// (:1845, IsCatalogRelation); any other relation reaches
+// SearchSysCache1(AMOID, relam) and a relam of 0 is elog(ERROR) "cache lookup
+// failed for access method 0" (:1864) from the relcache build itself -- never
+// an entry without a table AM (the port's tableam am() panics on that).
+pub(crate) fn RelationInitTableAccessMethod(relid: Oid, relkind: u8, relam: Oid) -> PgResult<()> {
     const F_HEAP_TABLEAM_HANDLER: Oid = 3;
-    if !types_rel::RELKIND_HAS_TABLE_AM(relkind)
-        || relam == InvalidOid
-        || relam == HEAP_TABLE_AM_OID
-    {
+    if !types_rel::RELKIND_HAS_TABLE_AM(relkind) || relam == HEAP_TABLE_AM_OID {
         return Ok(());
+    }
+    if relam == InvalidOid {
+        if catalog_seams::is_catalog_relation_oid::call(relid) {
+            return Ok(());
+        }
+        return Err(Box::new(PgError::error(
+            "cache lookup failed for access method 0".to_string(),
+        )));
     }
     // pgrcolumnar is identified by pg_am.amname, not amhandler: the closed-AM
     // engine never invokes handlers (docs/design/pgrcolumnar-impl.md §7.1).
@@ -185,12 +196,13 @@ pub(crate) fn build_desc_data(target_rel_id: Oid) -> PgResult<Option<RelationDat
 
         let mcx = cache_mcx();
         let (rd_backend, rd_islocaltemp) = resolve_backend(&scanned.form)?;
-        RelationInitTableAccessMethod(scanned.form.relkind, scanned.form.relam)?;
+        RelationInitTableAccessMethod(target_rel_id, scanned.form.relkind, scanned.form.relam)?;
         let rd_att =
             relcache_build_seams::relation_build_tuple_desc::call(
                 mcx,
                 target_rel_id,
                 &scanned.form,
+                scanned.relnatts,
                 scanned.relchecks,
             )?;
 
@@ -203,6 +215,7 @@ pub(crate) fn build_desc_data(target_rel_id: Oid) -> PgResult<Option<RelationDat
                     mcx,
                     target_rel_id,
                     &scanned.form,
+                    scanned.relnatts,
                 )?;
                 (
                     Some(ii.index),

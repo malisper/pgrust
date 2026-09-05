@@ -611,13 +611,16 @@ fn init_hashed_state<'mcx>(
         flinfo.fn_expr = Some(::execexpr::erase_fn_expr(mcx, *op_node)?);
         cur_eq_funcs.push(flinfo);
 
-        let (_, rhs_eq_oper) = lsyscache::get_compatible_hash_operators(opexpr.opno)?
-            .unwrap_or_else(|| {
-                panic!(
-                    "could not find compatible hash operator for operator {}",
-                    opexpr.opno
-                )
-            });
+        // nodeSubplan.c:986: get_compatible_hash_operators(opno, NULL, &rhs);
+        // failure is elog(ERROR) (catchable XX000), never a backend crash.
+        let Some((_, rhs_eq_oper)) =
+            lsyscache::get_compatible_hash_operators(opexpr.opno, false, true)?
+        else {
+            return Err(Box::new(types_error::PgError::error(format!(
+                "could not find compatible hash operator for operator {}",
+                opexpr.opno
+            ))));
+        };
         tab_eq_funcoids.push(lsyscache::get_opcode(rhs_eq_oper)?);
         let (left_hashfn, right_hashfn) = lsyscache::get_op_hash_functions(opexpr.opno)?
             .unwrap_or_else(|| {

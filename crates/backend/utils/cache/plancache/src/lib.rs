@@ -1783,9 +1783,19 @@ pub fn CachedPlanGetTargetList<'mcx>(
         // without a cycle back through this function, so it's a seam.
         return pquery_seams::fetch_utility_statement_target_list::call(mcx, primary.utilityStmt);
     }
-    out.try_reserve(primary.targetList.len())
-        .map_err(|_| mcx.oom(primary.targetList.len()))?;
-    for node in primary.targetList.iter() {
+    // FetchStatementTargetList (pquery.c:349-369): a SELECT describes its
+    // targetList; any other statement describes its RETURNING list (NIL when
+    // it has none), so the RowDescription carries the RETURNING columns'
+    // resorigtbl/resorigcol rather than the DML targetlist's zeros.
+    let tlist = if primary.commandType == CmdType::CMD_SELECT {
+        &primary.targetList
+    } else if !primary.returningList.is_nil() {
+        &primary.returningList
+    } else {
+        return Ok(out);
+    };
+    out.try_reserve(tlist.len()).map_err(|_| mcx.oom(tlist.len()))?;
+    for node in tlist.iter() {
         let tle = node.as_target_entry().expect("targetlist entry is a TargetEntry");
         out.push(pquery_seams::TargetEntrySummary {
             resjunk: tle.resjunk,

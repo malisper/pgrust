@@ -80,6 +80,7 @@ pub(crate) fn relation_init_index_access_info(
     mcx: Mcx<'static>,
     relid: Oid,
     form: &FormData_pg_class,
+    relnatts: i16,
 ) -> PgResult<IndexAccessInfo> {
     let Some(tup) = SearchSysCache1(INDEXRELID, SysCacheKey::Value(Datum::from_oid(relid)))?
     else {
@@ -115,6 +116,12 @@ pub(crate) fn relation_init_index_access_info(
     };
 
     let indnatts = get(Anum_pg_index_indnatts)?.as_i16();
+    // relcache.c:1492-1495: the pg_class row's relnatts must agree with
+    // pg_index.indnatts before any vector is sliced by it.
+    if relnatts != indnatts {
+        ReleaseSysCache(tup);
+        return Err(relnatts_disagrees(relid));
+    }
     let indnkeyatts = get(Anum_pg_index_indnkeyatts)?.as_i16();
     let nkey = indnkeyatts as usize;
 
@@ -130,6 +137,13 @@ pub(crate) fn relation_init_index_access_info(
         )
     };
     indkey.extend_from_slice(keyvals);
+    // C reads indclass/indcollation/indoption[0..indnkeyatts) straight off the
+    // fixed-width vectors; a pg_index row whose vectors are shorter than its
+    // indnkeyatts is a bogus row (C would read past them), never a slice panic.
+    if nkey > classvals.len() || nkey > collvals.len() || nkey > optvals.len() {
+        ReleaseSysCache(tup);
+        return Err(bogus_pg_index(relid));
+    }
 
     // amroutine->amsupport per handler.
     let amsupport = match am_kind {
@@ -392,6 +406,17 @@ fn unexpected_null_pg_index(relid: Oid, attno: i32) -> Box<PgError> {
     )
 }
 
+// relcache.c:1494 elog(ERROR, "relnatts disagrees with indnatts for index %u").
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn relnatts_disagrees(relid: Oid) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!("relnatts disagrees with indnatts for index {relid}"))
+            .with_sqlstate(ERRCODE_INTERNAL_ERROR),
+    )
+}
+
 #[track_caller]
 #[cold]
 #[inline(never)]
@@ -463,12 +488,18 @@ const Anum_pg_constraint_conexclop: i32 = 27;
 const CONSTRAINT_EXCLUSION: i8 = b'x' as i8;
 const CONSTRAINT_PRIMARY: i8 = b'p' as i8;
 const CONSTRAINT_UNIQUE: i8 = b'u' as i8;
+const OIDOID: Oid = 26;
 
-// RelationGetExclusionInfo's pg_constraint scan (relcache.c:5640-5773).
+// RelationGetExclusionInfo's pg_constraint scan (relcache.c:5640-5773). Its
+// consistency checks are elog(ERROR) naming RelationGetRelationName(index):
+// duplicate record (:5724), null conexclop (:5733), conexclop not a 1-D Oid
+// array of indnkeyatts (:5742), record missing (:5751) -- catchable XX000s.
 pub(crate) fn scan_exclusion_ops<'mcx>(
     mcx: Mcx<'mcx>,
     conrelid: Oid,
     index_relid: Oid,
+    index_relname: &str,
+    indnkeyatts: i16,
 ) -> PgResult<PgVec<'mcx, Oid>> {
     let cx = MemoryContext::new("RelationGetExclusionInfo");
     let smcx = cx.mcx();
@@ -495,12 +526,15 @@ pub(crate) fn scan_exclusion_ops<'mcx>(
         if req(td, tup, Anum_pg_constraint_conindid)?.as_oid() != index_relid {
             continue;
         }
-        assert!(
-            out.is_none(),
-            "unexpected exclusion constraint record found for rel {index_relid}"
-        );
+        if out.is_some() {
+            return Err(exclusion_info_error(format!(
+                "unexpected exclusion constraint record found for rel {index_relname}"
+            )));
+        }
         let (d, isnull) = crate::getattr(td, tup, Anum_pg_constraint_conexclop);
-        assert!(!isnull, "null conexclop for rel {index_relid}");
+        if isnull {
+            return Err(exclusion_info_error(format!("null conexclop for rel {index_relname}")));
+        }
         // The oid[] varlena header comes off the (possibly crafted) catalog
         // tuple; bound its declared length against the tuple extent so a forged
         // header raises a catchable error instead of reading past the image.
@@ -515,6 +549,14 @@ pub(crate) fn scan_exclusion_ops<'mcx>(
         let mut full: PgVec<'_, u8> = mcx::vec_with_capacity_in(smcx, total)?;
         mcx::vec_append_bytes(&mut full, &(((total as u32) << 2).to_ne_bytes()))?;
         mcx::vec_append_bytes(&mut full, body)?;
+        // relcache.c:5738-5744: ARR_NDIM == 1, dims[0] == indnkeyatts, no
+        // nulls, OIDOID elements -- else "conexclop is not a 1-D Oid array".
+        let rd = |off: usize| -> i32 {
+            full.get(off..off + 4).map_or(0, |b| i32::from_ne_bytes(b.try_into().unwrap()))
+        };
+        if rd(4) != 1 || rd(16) != indnkeyatts as i32 || rd(8) != 0 || rd(12) as Oid != OIDOID {
+            return Err(exclusion_info_error("conexclop is not a 1-D Oid array".to_string()));
+        }
         let elems = datum::array_build::deconstruct_array_image(smcx, &full, 4, true, b'i')?;
         let mut ops: PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, elems.len())?;
         for e in elems.iter() {
@@ -524,8 +566,18 @@ pub(crate) fn scan_exclusion_ops<'mcx>(
     }
     genam::systable_endscan(smcx, scan)?;
     rel.close(AccessShareLock)?;
-    Ok(out
-        .unwrap_or_else(|| panic!("exclusion constraint record missing for rel {index_relid}")))
+    out.ok_or_else(|| {
+        exclusion_info_error(format!(
+            "exclusion constraint record missing for rel {index_relname}"
+        ))
+    })
+}
+
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn exclusion_info_error(msg: String) -> Box<PgError> {
+    Box::new(PgError::error(msg).with_sqlstate(ERRCODE_INTERNAL_ERROR))
 }
 
 #[cfg(test)]

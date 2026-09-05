@@ -173,7 +173,7 @@ fn build_list(
                 byref_len += keys[i].bytes().len();
             }
         }
-        let buf = payload_alloc(mcx, byref_len);
+        let buf = payload_alloc(mcx, byref_len)?;
         let mut cl_keys = [Datum::null(); CATCACHE_MAXKEYS];
         let mut off = 0usize;
         for i in 0..nkeys as usize {

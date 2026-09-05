@@ -164,7 +164,7 @@ pub fn RelationBuildLocalRelation(
         )?;
     }
     RelationInitPhysicalAddr(&data)?;
-    RelationInitTableAccessMethod(relkind, accessmtd)?;
+    RelationInitTableAccessMethod(relid, relkind, accessmtd)?;
 
     let rel = Rc::new(data);
     store::insert(Rc::clone(&rel), false, false)?;

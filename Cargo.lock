@@ -1612,6 +1612,7 @@ name = "attoptcache"
 version = "0.1.0"
 dependencies = [
  "datum",
+ "inval",
  "mcx",
  "reloptions",
  "syscache_seams",

@@ -292,31 +292,58 @@ pub fn get_mergejoin_opfamilies<'mcx>(mcx: Mcx<'mcx>, opno: Oid) -> PgResult<PgV
     Ok(result)
 }
 
-pub fn get_compatible_hash_operators(opno: Oid) -> PgResult<Option<(Oid, Oid)>> {
+// get_compatible_hash_operators (lsyscache.c:479-561): `want_lhs`/`want_rhs`
+// are C's nullable lhs_opno/rhs_opno out-pointers. A side the caller does not
+// ask for is never looked up (lsyscache.c:528 `if (lhs_opno)`, :543
+// `if (rhs_opno)`), so a family that carries the cross-type operator and only
+// the RHS single-type '=' still satisfies both in-tree callers (nodeSubplan.c
+// and createplan.c pass NULL for lhs). An unrequested side comes back as
+// InvalidOid.
+pub fn get_compatible_hash_operators(
+    opno: Oid,
+    want_lhs: bool,
+    want_rhs: bool,
+) -> PgResult<Option<(Oid, Oid)>> {
     with_scratch(|scratch| {
         let members = syscache_seams::lookup_pg_amop_members_by_operator::call(scratch, opno)?;
         for aform in &members {
             if aform.amopmethod == HASH_AM_OID && aform.amopstrategy == HTEqualStrategyNumber {
+                // No extra lookup needed if given operator is single-type.
                 if aform.amoplefttype == aform.amoprighttype {
-                    return Ok(Some((opno, opno)));
+                    return Ok(Some((
+                        if want_lhs { opno } else { InvalidOid },
+                        if want_rhs { opno } else { InvalidOid },
+                    )));
                 }
-                let lhs = get_opfamily_member(
-                    aform.amopfamily,
-                    aform.amoplefttype,
-                    aform.amoplefttype,
-                    HTEqualStrategyNumber,
-                )?;
-                if lhs == InvalidOid {
-                    continue;
+                // Get the matching single-type operator(s). Failure implies a
+                // bogus opfamily -- continue looking, as C.
+                let mut lhs = InvalidOid;
+                if want_lhs {
+                    lhs = get_opfamily_member(
+                        aform.amopfamily,
+                        aform.amoplefttype,
+                        aform.amoplefttype,
+                        HTEqualStrategyNumber,
+                    )?;
+                    if lhs == InvalidOid {
+                        continue;
+                    }
+                    // Matching LHS found, done if caller doesn't want RHS.
+                    if !want_rhs {
+                        return Ok(Some((lhs, InvalidOid)));
+                    }
                 }
-                let rhs = get_opfamily_member(
-                    aform.amopfamily,
-                    aform.amoprighttype,
-                    aform.amoprighttype,
-                    HTEqualStrategyNumber,
-                )?;
-                if rhs == InvalidOid {
-                    continue;
+                let mut rhs = InvalidOid;
+                if want_rhs {
+                    rhs = get_opfamily_member(
+                        aform.amopfamily,
+                        aform.amoprighttype,
+                        aform.amoprighttype,
+                        HTEqualStrategyNumber,
+                    )?;
+                    if rhs == InvalidOid {
+                        continue;
+                    }
                 }
                 return Ok(Some((lhs, rhs)));
             }
