@@ -23,6 +23,7 @@ types_scan = { path = "../../../_support/types/types_scan" }
 cache_syscache = { path = "../../utils/cache/cache_syscache" }
 readfuncs = { path = "../../nodes/readfuncs" }
 clauses_seams = { path = "../../optimizer/util/clauses_seams" }
+planner_seams = { path = "../../optimizer/plan/planner_seams" }
 execexpr = { path = "../../executor/execexpr" }
 table = { path = "../../access/table/table" }
 tableam = { path = "../../access/table/tableam" }

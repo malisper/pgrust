@@ -1,14 +1,14 @@
 // get_qual_from_partbound family, satisfies_hash_partition, and
 // check_default_partition_contents (partbounds.c).
 use datum::Datum;
-use mcx::Mcx;
+use mcx::{Mcx, PgVec};
 use types_core::{
     InvalidOid, Oid, ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID,
     ANYCOMPATIBLENONARRAYOID, ANYCOMPATIBLEOID, ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYENUMOID,
     ANYMULTIRANGEOID, ANYNONARRAYOID, ANYRANGEOID, BOOLOID, INT4OID, OIDOID, RECORDOID,
 };
 use types_error::{
-    PgError, PgResult, ERRCODE_CHECK_VIOLATION, ERRCODE_INVALID_PARAMETER_VALUE, ERROR,
+    PgError, PgResult, DEBUG1, ERRCODE_CHECK_VIOLATION, ERRCODE_INVALID_PARAMETER_VALUE, ERROR,
 };
 use types_fmgr::{FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData, LocalFcinfo, PGFunction};
 use types_nodes::primnodes::{
@@ -876,9 +876,116 @@ pub fn get_proposed_default_constraint<'mcx>(
     make_ands_implicit(mcx, simplified)
 }
 
-// check_default_partition_contents (partbounds.c). C first tries
-// PartConstraintImpliedByRelConstraint to skip the scan; no predicate_implied_by
-// here, so the default partition is always scanned (DEBUG1-only divergence).
+// PartConstraintImpliedByRelConstraint (tablecmds.c:20051-20103): do the
+// relation's validated NOT NULL and CHECK constraints imply partConstraint?
+// Lives here because partbounds.c calls it and tablecmds depends on this
+// crate; tablecmds' own callers delegate to it.
+pub fn PartConstraintImpliedByRelConstraint<'mcx>(
+    mcx: Mcx<'mcx>,
+    scanrel: &Relation<'mcx>,
+    part_constraint: &NodeList<'mcx>,
+) -> PgResult<bool> {
+    let desc = scanrel.descr();
+    let mut exist_constraint: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
+    if let Some(constr) = desc.constr.as_deref() {
+        if constr.has_not_null {
+            for i in 0..desc.natts as usize {
+                let att = desc.attr(i);
+                // tablecmds.c:20122: only a VALID not-null constraint proves
+                // IS NOT NULL; an invalid (NOT VALID) one must be ignored.
+                if desc.compact_attr(i).attnullability == types_tuple::ATTNULLABLE_VALID
+                    && !att.attisdropped
+                {
+                    exist_constraint.push(make_notnull_test(mcx, att)?);
+                }
+            }
+        }
+    }
+    let mut pred: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
+    for n in part_constraint.iter() {
+        pred.push(n);
+    }
+    ConstraintImpliedByRelConstraint(mcx, scanrel, &pred, exist_constraint)
+}
+
+// An IS NOT NULL NullTest over column att of varno 1, as C builds it in
+// PartConstraintImpliedByRelConstraint and NotNullImpliedByRelConstraints.
+// argisrow=false is correct even for a composite column, because attnotnull
+// does not represent a SQL-spec IS NOT NULL test in such a case, just
+// IS DISTINCT FROM NULL.
+pub fn make_notnull_test<'mcx>(
+    mcx: Mcx<'mcx>,
+    att: &types_tuple::FormData_pg_attribute,
+) -> PgResult<Node<'mcx>> {
+    let var = Node::mk(
+        mcx,
+        Var {
+            varno: 1,
+            varattno: att.attnum,
+            vartype: att.atttypid,
+            vartypmod: att.atttypmod,
+            varcollid: att.attcollation,
+            varnosyn: 1,
+            varattnosyn: att.attnum,
+            ..Default::default()
+        },
+    )?;
+    Node::mk(
+        mcx,
+        NullTest {
+            arg: Some(var),
+            nulltesttype: NullTestType::IS_NOT_NULL,
+            argisrow: false,
+            location: -1,
+        },
+    )
+}
+
+// ConstraintImpliedByRelConstraint (tablecmds.c:20106-20164): do scanrel's
+// validated CHECK constraints, plus the caller-proven conditions, imply the
+// test constraint? Both lists are in implicit-AND form. Takes ownership of
+// proven_constraint and appends the CHECK expressions to it, as C's
+// list_copy + list_concat does.
+pub fn ConstraintImpliedByRelConstraint<'mcx>(
+    mcx: Mcx<'mcx>,
+    scanrel: &Relation<'mcx>,
+    test_constraint: &[Node<'mcx>],
+    proven_constraint: PgVec<'mcx, Node<'mcx>>,
+) -> PgResult<bool> {
+    let desc = scanrel.descr();
+    let mut exist_constraint = proven_constraint;
+    if let Some(constr) = desc.constr.as_deref() {
+        for chk in constr.check.iter() {
+            if !chk.ccvalid {
+                continue;
+            }
+            debug_assert!(chk.ccenforced);
+            let cexpr =
+                readfuncs::stringToNode(mcx, chk.ccbin.as_ref().expect("ccbin").as_str())?;
+            let cexpr = clauses_seams::eval_const_expressions::call(mcx, cexpr)?;
+            let cexpr = planner_seams::canonicalize_qual::call(mcx, cexpr, true)?;
+            for n in make_ands_implicit(mcx, cexpr)?.iter() {
+                exist_constraint.push(n);
+            }
+        }
+    }
+    // Weak implication: CHECK constraints are compared assuming
+    // exist_constraint is not-false.
+    planner_seams::predicate_implied_by::call(mcx, test_constraint, &exist_constraint, true)
+}
+
+// partbounds.c:3280 / :3330 ereport(DEBUG1, errmsg_internal(...)).
+fn implied_by_existing_constraints(relname: &str) -> PgResult<()> {
+    elog_seams::ereport::call(PgError::new(
+        DEBUG1,
+        format!(
+            "updated partition constraint for default partition \"{relname}\" is implied by \
+             existing constraints"
+        ),
+    ))
+}
+
+// check_default_partition_contents (partbounds.c:3249-3403).
 pub fn check_default_partition_contents<'mcx>(
     mcx: Mcx<'mcx>,
     parent: &Relation<'mcx>,
@@ -896,6 +1003,13 @@ pub fn check_default_partition_contents<'mcx>(
     let def_part_constraints = get_proposed_default_constraint(mcx, new_part_constraints)?;
     let def_part_constraints =
         map_partition_varattnos(mcx, def_part_constraints, 1, default_rel, parent)?;
+
+    // partbounds.c:3278: the default partition's existing constraints already
+    // preclude every row the new partition would claim -- no locks, no scan.
+    if PartConstraintImpliedByRelConstraint(mcx, default_rel, &def_part_constraints)? {
+        implied_by_existing_constraints(default_rel.name())?;
+        return Ok(());
+    }
 
     let default_relid = default_rel.rd_id;
     let mut all_parts: Vec<Oid> = Vec::new();
@@ -918,6 +1032,31 @@ pub fn check_default_partition_contents<'mcx>(
             default_rel
         };
 
+        let this_constraints = if part_relid != default_relid {
+            // Map the Vars from default_rel's attnos to the sub-partition's.
+            let mapped = map_partition_varattnos(
+                mcx,
+                def_part_constraints.clone_in(mcx)?,
+                1,
+                part_rel,
+                default_rel,
+            )?;
+            // partbounds.c:3328: the child's own constraints imply the bound.
+            // C tests def_part_constraints (default_rel's attnos), not the
+            // mapped copy -- kept verbatim.
+            if PartConstraintImpliedByRelConstraint(mcx, part_rel, &def_part_constraints)? {
+                implied_by_existing_constraints(part_rel.name())?;
+                if let Some(r) = opened {
+                    r.close(NoLock)?;
+                }
+                continue;
+            }
+            mapped
+        } else {
+            def_part_constraints.clone_in(mcx)?
+        };
+
+        // Only leaf relations are scanned (partbounds.c:3346-3364).
         if part_rel.rd_rel.relkind != RELKIND_RELATION {
             if part_rel.rd_rel.relkind == RELKIND_FOREIGN_TABLE {
                 warn_skipped_foreign_partition(part_rel.name(), default_rel.name())?;
@@ -928,25 +1067,19 @@ pub fn check_default_partition_contents<'mcx>(
             continue;
         }
 
-        let this_constraints = if part_relid != default_relid {
-            map_partition_varattnos(
-                mcx,
-                def_part_constraints.clone_in(mcx)?,
-                1,
-                part_rel,
-                default_rel,
-            )?
-        } else {
-            def_part_constraints.clone_in(mcx)?
-        };
         let constraint = make_ands_explicit(mcx, this_constraints)?;
         let planned = clauses_seams::eval_const_expressions::call(mcx, constraint)?;
 
         let mut state = execexpr::exec_init_expr(mcx, Some(planned), execexpr::ParamBind::NONE)?
             .expect("partition constraint expr");
-        // By-ref call results land in the statement mcx (C: per-tuple
-        // econtext reset each row).
-        state.arm_result_mcx(mcx);
+        // C evaluates in the per-tuple context and ResetExprContext's it
+        // for every row (partbounds.c:3378-3395): by-ref call results and
+        // detoasted copies land here and are freed before the next tuple,
+        // so memory does not grow with the partition.
+        let mut per_tuple = mcx::MemoryContext::new_bump("DefaultPartitionCheckPerTuple");
+        // SAFETY: per_tuple is a stack local of this iteration that outlives
+        // every evaluation of `state` below and is never moved.
+        unsafe { state.arm_result_mcx_raw(per_tuple.mcx()) };
         let mut slot = tableam::table_slot_create(mcx, part_rel)?;
         let snapshot = snapmgr::GetLatestSnapshot()?;
         let snapshot = snapmgr::RegisterSnapshot(Some(&snapshot))?.expect("registered snapshot");
@@ -963,6 +1096,7 @@ pub fn check_default_partition_contents<'mcx>(
             types_scan::ScanDirection::ForwardScanDirection,
             &mut slot,
         )? {
+            per_tuple.reset();
             let mut slots =
                 execexpr::EvalSlots { scan: Some(&mut slot), inner: None, outer: None };
             let r = execexpr::exec_eval_expr(&mut state, &mut slots)?;

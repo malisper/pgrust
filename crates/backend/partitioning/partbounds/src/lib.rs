@@ -14,7 +14,8 @@ pub use merge::{
 };
 pub use qual::{
     check_default_partition_contents, get_proposed_default_constraint, get_qual_from_partbound,
-    make_ands_explicit, map_partition_varattnos, read_boundspec, read_boundspec_opt,
+    make_ands_explicit, make_notnull_test, map_partition_varattnos, read_boundspec,
+    read_boundspec_opt, ConstraintImpliedByRelConstraint, PartConstraintImpliedByRelConstraint,
     PARTBOUNDS_BUILTINS,
 };
 
@@ -80,6 +81,15 @@ pub(crate) fn datum_copy<'m>(
     adt_scalar::datum_ops::datum_copy(mcx, value, typbyval, typlen)
 }
 
+// elog(ERROR, ...) in the bound builders (partbounds.c:372/:493/:523/:713/
+// :3456): a catchable XX000 carrying C's text, reachable through a corrupt
+// pg_class.relpartbound (allow_system_table_mods).
+#[cold]
+#[inline(never)]
+fn bound_internal_error(message: &'static str) -> Box<PgError> {
+    Box::new(PgError::error(message))
+}
+
 fn spec_const<'a>(n: types_nodes::Node<'a>) -> &'a Const {
     n.as_variant::<Const>().expect("partition bound datum is not a Const")
 }
@@ -96,7 +106,7 @@ fn make_one_partition_rbound(
     index: i32,
     datums: &types_nodes::NodeList<'_>,
     lower: bool,
-) -> PartitionRangeBound {
+) -> PgResult<PartitionRangeBound> {
     let n = key.partnatts as usize;
     let mut b = PartitionRangeBound {
         index,
@@ -111,19 +121,69 @@ fn make_one_partition_rbound(
         b.kind[i] = prd.kind as i8;
         if prd.kind == PartitionRangeDatumKind::Value {
             let c = spec_const(prd.value.expect("PartitionRangeDatum value"));
-            assert!(!c.constisnull, "invalid range bound datum");
+            if c.constisnull {
+                // partbounds.c:3456
+                return Err(bound_internal_error("invalid range bound datum"));
+            }
             b.datums[i] = c.constvalue;
         }
     }
-    b
+    Ok(b)
 }
 
-// The comparators below are infallible (sort_by / bsearch shapes); a support
-// function error (fmgr.c:1143 "function %u returned NULL", or a failed call)
-// surfaces with C's message text. Making these comparators fallible is a
-// separate unit (audit row partcache-2a47e965, confirmed-open).
-fn key_cmp(key: &PartitionKeyData, col: usize, a: Datum, b: Datum) -> i32 {
-    key.cmp(col, a, b).unwrap_or_else(|e| panic!("{}", e.message()))
+// FunctionCall2Coll(&key->partsupfunc[col], key->partcollation[col], a, b):
+// the support function's ereport(ERROR) (a user-defined opclass, or
+// fmgr.c:1143 "function %u returned NULL") aborts the statement; it is
+// returned, never unwrapped, so the comparators and the sorts over them are
+// fallible like C's longjmp out of qsort.
+fn key_cmp(key: &PartitionKeyData, col: usize, a: Datum, b: Datum) -> PgResult<i32> {
+    key.cmp(col, a, b)
+}
+
+// qsort with a comparator that can raise (partbounds.c:533 qsort_arg,
+// :771 qsort): the first error aborts the sort and is returned. Stable
+// bottom-up merge over an index permutation; the comparator is never called
+// again once it has failed.
+fn try_sort_by<T, F>(items: &mut Vec<T>, mut cmp: F) -> PgResult<()>
+where
+    F: FnMut(&T, &T) -> PgResult<i32>,
+{
+    let n = items.len();
+    if n < 2 {
+        return Ok(());
+    }
+    let mut idx: Vec<usize> = (0..n).collect();
+    let mut buf: Vec<usize> = vec![0; n];
+    let mut width = 1;
+    while width < n {
+        let mut lo = 0;
+        while lo < n {
+            let mid = (lo + width).min(n);
+            let hi = (lo + 2 * width).min(n);
+            let (mut i, mut j, mut k) = (lo, mid, lo);
+            while i < mid && j < hi {
+                if cmp(&items[idx[j]], &items[idx[i]])? < 0 {
+                    buf[k] = idx[j];
+                    j += 1;
+                } else {
+                    buf[k] = idx[i];
+                    i += 1;
+                }
+                k += 1;
+            }
+            buf[k..k + (mid - i)].copy_from_slice(&idx[i..mid]);
+            k += mid - i;
+            buf[k..k + (hi - j)].copy_from_slice(&idx[j..hi]);
+            lo = hi;
+        }
+        core::mem::swap(&mut idx, &mut buf);
+        width *= 2;
+    }
+    let mut taken: Vec<Option<T>> = items.drain(..).map(Some).collect();
+    for &i in &idx {
+        items.push(taken[i].take().expect("sort permutation"));
+    }
+    Ok(())
 }
 
 // partition_rbound_cmp: signed column number encodes the mismatch position.
@@ -135,19 +195,19 @@ pub fn partition_rbound_cmp(
     b2_datums: &[Datum],
     b2_kind: &[i8],
     b2_lower: bool,
-) -> i32 {
+) -> PgResult<i32> {
     let mut colnum = 0i32;
     let mut cmpval = 0i32;
     for i in 0..key.partnatts as usize {
         colnum += 1;
         if kind1[i] < b2_kind[i] {
-            return -colnum;
+            return Ok(-colnum);
         } else if kind1[i] > b2_kind[i] {
-            return colnum;
+            return Ok(colnum);
         } else if kind1[i] != KIND_VALUE {
             break;
         }
-        cmpval = key_cmp(key, i, datums1[i], b2_datums[i]);
+        cmpval = key_cmp(key, i, datums1[i], b2_datums[i])?;
         if cmpval != 0 {
             break;
         }
@@ -155,13 +215,13 @@ pub fn partition_rbound_cmp(
     if cmpval == 0 && lower1 != b2_lower {
         cmpval = if lower1 { 1 } else { -1 };
     }
-    if cmpval == 0 {
+    Ok(if cmpval == 0 {
         0
     } else if cmpval < 0 {
         -colnum
     } else {
         colnum
-    }
+    })
 }
 
 pub fn partition_rbound_datum_cmp(
@@ -169,20 +229,20 @@ pub fn partition_rbound_datum_cmp(
     rb_datums: &[Datum],
     rb_kind: &[i8],
     tuple_datums: &[Datum],
-) -> i32 {
+) -> PgResult<i32> {
     let mut cmpval = -1;
     for i in 0..tuple_datums.len() {
         if rb_kind[i] == KIND_MINVALUE {
-            return -1;
+            return Ok(-1);
         } else if rb_kind[i] == KIND_MAXVALUE {
-            return 1;
+            return Ok(1);
         }
-        cmpval = key_cmp(key, i, rb_datums[i], tuple_datums[i]);
+        cmpval = key_cmp(key, i, rb_datums[i], tuple_datums[i])?;
         if cmpval != 0 {
             break;
         }
     }
-    cmpval
+    Ok(cmpval)
 }
 
 pub fn partition_list_bsearch(
@@ -190,12 +250,12 @@ pub fn partition_list_bsearch(
     boundinfo: &PartitionBoundInfoData<'_>,
     value: Datum,
     is_equal: &mut bool,
-) -> i32 {
+) -> PgResult<i32> {
     let mut lo: i32 = -1;
     let mut hi: i32 = boundinfo.ndatums as i32 - 1;
     while lo < hi {
         let mid = (lo + hi + 1) / 2;
-        let cmpval = key_cmp(key, 0, boundinfo.datum(mid as usize, 0), value);
+        let cmpval = key_cmp(key, 0, boundinfo.datum(mid as usize, 0), value)?;
         if cmpval <= 0 {
             lo = mid;
             *is_equal = cmpval == 0;
@@ -206,7 +266,7 @@ pub fn partition_list_bsearch(
             hi = mid - 1;
         }
     }
-    lo
+    Ok(lo)
 }
 
 pub fn partition_range_datum_bsearch(
@@ -214,7 +274,7 @@ pub fn partition_range_datum_bsearch(
     boundinfo: &PartitionBoundInfoData<'_>,
     values: &[Datum],
     is_equal: &mut bool,
-) -> i32 {
+) -> PgResult<i32> {
     let w = boundinfo.width;
     let mut lo: i32 = -1;
     let mut hi: i32 = boundinfo.ndatums as i32 - 1;
@@ -226,7 +286,7 @@ pub fn partition_range_datum_bsearch(
             &boundinfo.datums[m * w..(m + 1) * w],
             &boundinfo.kind[m * w..(m + 1) * w],
             values,
-        );
+        )?;
         if cmpval <= 0 {
             lo = mid;
             *is_equal = cmpval == 0;
@@ -237,7 +297,7 @@ pub fn partition_range_datum_bsearch(
             hi = mid - 1;
         }
     }
-    lo
+    Ok(lo)
 }
 
 fn partition_range_bsearch(
@@ -245,7 +305,7 @@ fn partition_range_bsearch(
     boundinfo: &PartitionBoundInfoData<'_>,
     probe: &PartitionRangeBound,
     cmpval_out: &mut i32,
-) -> i32 {
+) -> PgResult<i32> {
     let w = boundinfo.width;
     let mut lo: i32 = -1;
     let mut hi: i32 = boundinfo.ndatums as i32 - 1;
@@ -260,7 +320,7 @@ fn partition_range_bsearch(
             &probe.datums,
             &probe.kind,
             probe.lower,
-        );
+        )?;
         if *cmpval_out <= 0 {
             lo = mid;
             if *cmpval_out == 0 {
@@ -270,7 +330,7 @@ fn partition_range_bsearch(
             hi = mid - 1;
         }
     }
-    lo
+    Ok(lo)
 }
 
 // partition_bounds_create: mapping[i] = canonical index of original slot i.
@@ -299,10 +359,10 @@ fn create_hash_bounds<'m>(
     let nparts = boundspecs.len();
     let mut hbounds: Vec<(i32, i32, i32)> = Vec::with_capacity(nparts);
     for (i, spec) in boundspecs.iter().enumerate() {
-        assert!(
-            spec.strategy == PARTITION_STRATEGY_HASH,
-            "invalid strategy in partition bound spec"
-        );
+        if spec.strategy != PARTITION_STRATEGY_HASH {
+            // partbounds.c:372
+            return Err(bound_internal_error("invalid strategy in partition bound spec"));
+        }
         hbounds.push((spec.modulus, spec.remainder, i as i32));
     }
     hbounds.sort_by(|a, b| partition_hbound_cmp(a.0, a.1, b.0, b.1).cmp(&0));
@@ -345,7 +405,10 @@ fn create_list_bounds<'m>(
     let mut all_values: Vec<(i32, Datum)> = Vec::new();
 
     for (i, spec) in boundspecs.iter().enumerate() {
-        assert!(spec.strategy == PARTITION_STRATEGY_LIST, "invalid strategy in partition bound spec");
+        if spec.strategy != PARTITION_STRATEGY_LIST {
+            // partbounds.c:493
+            return Err(bound_internal_error("invalid strategy in partition bound spec"));
+        }
         if spec.is_default {
             default_index = i as i32;
             continue;
@@ -355,13 +418,17 @@ fn create_list_bounds<'m>(
             if !val.constisnull {
                 all_values.push((i as i32, val.constvalue));
             } else {
-                assert!(null_index == -1, "found null more than once");
+                if null_index != -1 {
+                    // partbounds.c:523
+                    return Err(bound_internal_error("found null more than once"));
+                }
                 null_index = i as i32;
             }
         }
     }
 
-    all_values.sort_by(|a, b| key_cmp(key, 0, a.1, b.1).cmp(&0));
+    // qsort_arg(all_values, ..., qsort_partition_list_value_cmp, key)
+    try_sort_by(&mut all_values, |a, b| key_cmp(key, 0, a.1, b.1))?;
 
     let ndatums = all_values.len();
     let mut info = PartitionBoundInfoData {
@@ -412,19 +479,22 @@ fn create_range_bounds<'m>(
     let mut all_bounds: Vec<PartitionRangeBound> = Vec::with_capacity(2 * nparts);
 
     for (i, spec) in boundspecs.iter().enumerate() {
-        assert!(spec.strategy == PARTITION_STRATEGY_RANGE, "invalid strategy in partition bound spec");
+        if spec.strategy != PARTITION_STRATEGY_RANGE {
+            // partbounds.c:713
+            return Err(bound_internal_error("invalid strategy in partition bound spec"));
+        }
         if spec.is_default {
             default_index = i as i32;
             continue;
         }
-        all_bounds.push(make_one_partition_rbound(key, i as i32, &spec.lowerdatums, true));
-        all_bounds.push(make_one_partition_rbound(key, i as i32, &spec.upperdatums, false));
+        all_bounds.push(make_one_partition_rbound(key, i as i32, &spec.lowerdatums, true)?);
+        all_bounds.push(make_one_partition_rbound(key, i as i32, &spec.upperdatums, false)?);
     }
 
-    all_bounds.sort_by(|a, b| {
+    // qsort_arg(all_bounds, ..., qsort_partition_rbound_cmp, key)
+    try_sort_by(&mut all_bounds, |a, b| {
         partition_rbound_cmp(key, &a.datums, &a.kind, a.lower, &b.datums, &b.kind, b.lower)
-            .cmp(&0)
-    });
+    })?;
 
     // Distinct bounds only (C's rbounds pass).
     let mut rbounds: Vec<&PartitionRangeBound> = Vec::with_capacity(all_bounds.len());
@@ -443,7 +513,7 @@ fn create_range_bounds<'m>(
             if cur.kind[j] != KIND_VALUE {
                 break;
             }
-            if key_cmp(key, j, cur.datums[j], prev.datums[j]) != 0 {
+            if key_cmp(key, j, cur.datums[j], prev.datums[j])? != 0 {
                 is_distinct = true;
                 break;
             }
@@ -711,7 +781,7 @@ pub fn check_new_partition_bound<'mcx>(
                     if !val.constisnull {
                         let mut equal = false;
                         let offset =
-                            partition_list_bsearch(key, boundinfo, val.constvalue, &mut equal);
+                            partition_list_bsearch(key, boundinfo, val.constvalue, &mut equal)?;
                         if offset >= 0 && equal {
                             overlap = true;
                             overlap_location = val.location;
@@ -728,8 +798,8 @@ pub fn check_new_partition_bound<'mcx>(
             }
         }
         PARTITION_STRATEGY_RANGE => {
-            let lower = make_one_partition_rbound(key, -1, &spec.lowerdatums, true);
-            let upper = make_one_partition_rbound(key, -1, &spec.upperdatums, false);
+            let lower = make_one_partition_rbound(key, -1, &spec.lowerdatums, true)?;
+            let upper = make_one_partition_rbound(key, -1, &spec.upperdatums, false)?;
             let cmpval = partition_rbound_cmp(
                 key,
                 &lower.datums,
@@ -738,7 +808,7 @@ pub fn check_new_partition_bound<'mcx>(
                 &upper.datums,
                 &upper.kind,
                 upper.lower,
-            );
+            )?;
             debug_assert!(cmpval != 0);
             if cmpval > 0 {
                 return Err(Box::new(
@@ -762,7 +832,7 @@ pub fn check_new_partition_bound<'mcx>(
             }
             if let Some(boundinfo) = boundinfo {
                 let mut cmpval = 0;
-                let offset = partition_range_bsearch(key, boundinfo, &lower, &mut cmpval);
+                let offset = partition_range_bsearch(key, boundinfo, &lower, &mut cmpval)?;
                 if boundinfo.indexes[(offset + 1) as usize] < 0 {
                     if ((offset + 1) as usize) < boundinfo.ndatums {
                         let m = (offset + 1) as usize;
@@ -776,7 +846,7 @@ pub fn check_new_partition_bound<'mcx>(
                             &upper.datums,
                             &upper.kind,
                             upper.lower,
-                        );
+                        )?;
                         if cmpval2 < 0 {
                             overlap = true;
                             overlap_location = range_datum_location(

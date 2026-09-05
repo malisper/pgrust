@@ -217,6 +217,7 @@ pub fn init_seams() {
     planner_seams::make_opclause::set(crate::like_support::make_opclause);
     planner_seams::match_pattern_prefix::set(crate::like_support::match_pattern_prefix);
     planner_seams::predicate_implied_by::set(crate::predtest::predicate_implied_by);
+    planner_seams::canonicalize_qual::set(crate::prepqual::canonicalize_qual);
     planner_seams::build_index_pathkeys::set(crate::pathkeys::build_index_pathkeys);
     planner_seams::truncate_useless_pathkeys::set(crate::pathkeys::truncate_useless_pathkeys);
     planner_seams::inet_ref::set(crate::network_selfuncs::inet_ref);

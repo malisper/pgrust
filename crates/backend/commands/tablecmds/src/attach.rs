@@ -13,11 +13,9 @@ use types_error::{
     ERRCODE_UNDEFINED_TABLE, ERRCODE_WRONG_OBJECT_TYPE,
 };
 use types_nodes::list::NodeList;
-use types_nodes::primnodes::{NullTest, NullTestType, Var};
 use types_nodes::rawnodes::{PartitionBoundSpec, PartitionCmd};
 use types_nodes::Node;
 use types_core::catalog::RELPERSISTENCE_TEMP;
-use types_tuple::ATTNULLABLE_VALID;
 use types_rel::{
     AccessExclusiveLock, AccessShareLock, NoLock, Relation, RowExclusiveLock,
     RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
@@ -957,99 +955,31 @@ fn AttachPartitionEnsureIndexes<'mcx>(
     Ok(())
 }
 
-// PartConstraintImpliedByRelConstraint (tablecmds.c:20051-20103) over the
-// landed predtest engine.
+// PartConstraintImpliedByRelConstraint / ConstraintImpliedByRelConstraint
+// (tablecmds.c:20051-20164) live in partbounds (partbounds.c's
+// check_default_partition_contents calls them and depends on nothing here).
 pub(crate) fn PartConstraintImpliedByRelConstraint<'mcx>(
     mcx: Mcx<'mcx>,
     scanrel: &Relation<'mcx>,
     part_constraint: &NodeList<'mcx>,
 ) -> PgResult<bool> {
-    let desc = scanrel.descr();
-    let mut exist_constraint: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
-    if let Some(constr) = desc.constr.as_deref() {
-        if constr.has_not_null {
-            for i in 0..desc.natts as usize {
-                let att = desc.attr(i);
-                // tablecmds.c:20122: only a VALID not-null constraint proves
-                // IS NOT NULL; an invalid (NOT VALID) one must be ignored.
-                if desc.compact_attr(i).attnullability == ATTNULLABLE_VALID && !att.attisdropped
-                {
-                    exist_constraint.push(make_notnull_test(mcx, att)?);
-                }
-            }
-        }
-    }
-    let mut pred: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
-    for n in part_constraint.iter() {
-        pred.push(n);
-    }
-    ConstraintImpliedByRelConstraint(mcx, scanrel, &pred, exist_constraint)
+    partbounds::PartConstraintImpliedByRelConstraint(mcx, scanrel, part_constraint)
 }
 
-// An IS NOT NULL NullTest over column att of varno 1, as C builds it in
-// PartConstraintImpliedByRelConstraint and NotNullImpliedByRelConstraints.
-// argisrow=false is correct even for a composite column, because attnotnull
-// does not represent a SQL-spec IS NOT NULL test in such a case, just
-// IS DISTINCT FROM NULL.
 pub(crate) fn make_notnull_test<'mcx>(
     mcx: Mcx<'mcx>,
     att: &types_tuple::FormData_pg_attribute,
 ) -> PgResult<Node<'mcx>> {
-    let var = Node::mk(
-        mcx,
-        Var {
-            varno: 1,
-            varattno: att.attnum,
-            vartype: att.atttypid,
-            vartypmod: att.atttypmod,
-            varcollid: att.attcollation,
-            varnosyn: 1,
-            varattnosyn: att.attnum,
-            ..Default::default()
-        },
-    )?;
-    Node::mk(
-        mcx,
-        NullTest {
-            arg: Some(var),
-            nulltesttype: NullTestType::IS_NOT_NULL,
-            argisrow: false,
-            location: -1,
-        },
-    )
+    partbounds::make_notnull_test(mcx, att)
 }
 
-// ConstraintImpliedByRelConstraint (tablecmds.c:20106-20164): do scanrel's
-// validated CHECK constraints, plus the caller-proven conditions, imply the
-// test constraint? Both lists are in implicit-AND form. Takes ownership of
-// proven_constraint and appends the CHECK expressions to it, as C's
-// list_copy + list_concat does.
 pub(crate) fn ConstraintImpliedByRelConstraint<'mcx>(
     mcx: Mcx<'mcx>,
     scanrel: &Relation<'mcx>,
     test_constraint: &[Node<'mcx>],
     proven_constraint: PgVec<'mcx, Node<'mcx>>,
 ) -> PgResult<bool> {
-    let desc = scanrel.descr();
-    let mut exist_constraint = proven_constraint;
-    if let Some(constr) = desc.constr.as_deref() {
-        for chk in constr.check.iter() {
-            if !chk.ccvalid {
-                continue;
-            }
-            debug_assert!(chk.ccenforced);
-            let cexpr = readfuncs::stringToNode(
-                mcx,
-                chk.ccbin.as_ref().expect("ccbin").as_str(),
-            )?;
-            let cexpr = clauses::eval_const_expressions(mcx, cexpr)?;
-            let cexpr = planner::prepqual::canonicalize_qual(mcx, cexpr, true)?;
-            for n in clauses::make_ands_implicit(mcx, Some(cexpr))?.iter() {
-                exist_constraint.push(n);
-            }
-        }
-    }
-    planner::predtest::predicate_implied_by(mcx, test_constraint, &exist_constraint, true)
+    partbounds::ConstraintImpliedByRelConstraint(mcx, scanrel, test_constraint, proven_constraint)
 }
 
 // QueuePartitionConstraintValidation (tablecmds.c:20177): skip the scan when

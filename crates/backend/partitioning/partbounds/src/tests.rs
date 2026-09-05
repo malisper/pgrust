@@ -216,3 +216,170 @@ fn boundspec_cache_lookup_failure_is_a_catchable_xx000() {
     assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
     assert_eq!(e.level(), types_error::ERROR);
 }
+
+// ---- audit-18.6 remediation b142 witnesses ------------------------------
+
+fn list_spec<'m>(mcx: Mcx<'m>, vals: &[Option<i32>]) -> &'m PartitionBoundSpec<'m> {
+    let mut b = Node::build::<PartitionBoundSpec>(mcx).unwrap();
+    b.strategy = PARTITION_STRATEGY_LIST;
+    for v in vals {
+        b.listdatums.lappend(mcx, int_const(mcx, *v)).unwrap();
+    }
+    b.seal_ref()
+}
+
+fn range_datum<'m>(mcx: Mcx<'m>, v: Option<i32>) -> Node<'m> {
+    let mut d = Node::build::<PartitionRangeDatum>(mcx).unwrap();
+    d.kind = PartitionRangeDatumKind::Value;
+    d.value = Some(int_const(mcx, v));
+    d.seal()
+}
+
+fn range_spec<'m>(mcx: Mcx<'m>, lo: Option<i32>, hi: Option<i32>) -> &'m PartitionBoundSpec<'m> {
+    let mut b = Node::build::<PartitionBoundSpec>(mcx).unwrap();
+    b.strategy = PARTITION_STRATEGY_RANGE;
+    b.lowerdatums.lappend(mcx, range_datum(mcx, lo)).unwrap();
+    b.upperdatums.lappend(mcx, range_datum(mcx, hi)).unwrap();
+    b.seal_ref()
+}
+
+fn assert_internal_error(e: &PgError, message: &str) {
+    assert_eq!(e.message(), message);
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    assert_eq!(e.level(), types_error::ERROR);
+}
+
+// partbounds.c:372 (create_hash_bounds), :493 (create_list_bounds) and :713
+// (create_range_bounds): a bound spec whose strategy disagrees with the
+// partition key's is elog(ERROR, "invalid strategy in partition bound spec")
+// -- a catchable XX000 (reachable through pg_class.relpartbound with
+// allow_system_table_mods), not an assertion panic.
+#[test]
+fn bound_spec_with_wrong_strategy_is_a_catchable_xx000() {
+    let cx = MemoryContext::new("t");
+    let mcx = cx.mcx();
+    // HASH key, LIST spec.
+    let key = test_key(PARTITION_STRATEGY_HASH);
+    let e = partition_bounds_create(mcx, &[list_spec(mcx, &[Some(1)])], &key)
+        .err()
+        .expect("hash key with a list spec must error");
+    assert_internal_error(&e, "invalid strategy in partition bound spec");
+    // LIST key, HASH spec.
+    let key = test_key(PARTITION_STRATEGY_LIST);
+    let e = partition_bounds_create(mcx, &[hash_spec(mcx, 2, 0)], &key)
+        .err()
+        .expect("list key with a hash spec must error");
+    assert_internal_error(&e, "invalid strategy in partition bound spec");
+    // RANGE key, HASH spec.
+    let key = test_key(PARTITION_STRATEGY_RANGE);
+    let e = partition_bounds_create(mcx, &[hash_spec(mcx, 2, 0)], &key)
+        .err()
+        .expect("range key with a hash spec must error");
+    assert_internal_error(&e, "invalid strategy in partition bound spec");
+}
+
+// partbounds.c:523: two list partitions both claiming NULL is
+// elog(ERROR, "found null more than once") -- catchable XX000.
+#[test]
+fn duplicate_null_list_bound_is_a_catchable_xx000() {
+    let cx = MemoryContext::new("t");
+    let mcx = cx.mcx();
+    let key = test_key(PARTITION_STRATEGY_LIST);
+    let specs = [list_spec(mcx, &[None, Some(1)]), list_spec(mcx, &[None])];
+    let e = partition_bounds_create(mcx, &specs, &key)
+        .err()
+        .expect("two NULL-accepting list partitions must error");
+    assert_internal_error(&e, "found null more than once");
+}
+
+// partbounds.c:3456 (make_one_partition_rbound): a NULL Const in a range
+// bound is elog(ERROR, "invalid range bound datum") -- catchable XX000.
+#[test]
+fn null_range_bound_datum_is_a_catchable_xx000() {
+    let cx = MemoryContext::new("t");
+    let mcx = cx.mcx();
+    let key = test_key(PARTITION_STRATEGY_RANGE);
+    let e = partition_bounds_create(mcx, &[range_spec(mcx, None, Some(10))], &key)
+        .err()
+        .expect("a NULL range bound datum must error");
+    assert_internal_error(&e, "invalid range bound datum");
+}
+
+// A btree support function that raises, as a user-defined opclass's
+// comparison function can (ereport(ERROR) inside FunctionCall2Coll).
+fn raising_cmp(
+    _flinfo: Option<&mut FmgrInfo>,
+    _fcinfo: &mut types_fmgr::FunctionCallInfoBaseData,
+) -> PgResult<Datum> {
+    Err(Box::new(
+        PgError::error("cmp failed").with_sqlstate(types_error::ERRCODE_RAISE_EXCEPTION),
+    ))
+}
+
+fn raising_key(strategy: u8) -> PartitionKeyData {
+    let mut key = test_key(strategy);
+    key.partsupfunc = vec![RefCell::new(FmgrInfo::new(raising_cmp, 0, 2, true, false))];
+    key
+}
+
+fn assert_cmp_failed(e: &PgError) {
+    assert_eq!(e.message(), "cmp failed");
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_RAISE_EXCEPTION);
+    assert_eq!(e.level(), types_error::ERROR);
+}
+
+// partbounds.c:533 (create_list_bounds qsort_arg) and :771 (create_range_bounds
+// qsort): the support function's ereport(ERROR) longjmps out of the sort and
+// the statement aborts with the function's own error, not a panic.
+#[test]
+fn support_function_error_surfaces_from_bound_creation() {
+    let cx = MemoryContext::new("t");
+    let mcx = cx.mcx();
+    let key = raising_key(PARTITION_STRATEGY_LIST);
+    let specs = [list_spec(mcx, &[Some(1)]), list_spec(mcx, &[Some(2)])];
+    let e = partition_bounds_create(mcx, &specs, &key)
+        .err()
+        .expect("list bound sort must surface the support function error");
+    assert_cmp_failed(&e);
+
+    let key = raising_key(PARTITION_STRATEGY_RANGE);
+    let specs = [range_spec(mcx, Some(1), Some(10)), range_spec(mcx, Some(10), Some(20))];
+    let e = partition_bounds_create(mcx, &specs, &key)
+        .err()
+        .expect("range bound sort must surface the support function error");
+    assert_cmp_failed(&e);
+}
+
+// partbounds.c:3525 (partition_rbound_cmp via check_new_partition_bound's
+// lower-vs-upper compare): same error, same catchability.
+#[test]
+fn support_function_error_surfaces_from_check_new_partition_bound() {
+    let cx = MemoryContext::new("t");
+    let mcx = cx.mcx();
+    let key = raising_key(PARTITION_STRATEGY_RANGE);
+    let spec = range_spec(mcx, Some(1), Some(10));
+    let e = check_new_partition_bound(mcx, "p_new", &key, None, &[], spec, None)
+        .err()
+        .expect("range bound check must surface the support function error");
+    assert_cmp_failed(&e);
+
+    let key = raising_key(PARTITION_STRATEGY_LIST);
+    let (info, _) = partition_bounds_create(
+        mcx,
+        &[list_spec(mcx, &[Some(1)])],
+        &test_key(PARTITION_STRATEGY_LIST),
+    )
+    .unwrap();
+    let e = check_new_partition_bound(
+        mcx,
+        "p_new",
+        &key,
+        Some(&info),
+        &[100],
+        list_spec(mcx, &[Some(2)]),
+        None,
+    )
+    .err()
+    .expect("list bound bsearch must surface the support function error");
+    assert_cmp_failed(&e);
+}

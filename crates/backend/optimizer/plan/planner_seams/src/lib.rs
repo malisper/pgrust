@@ -368,6 +368,16 @@ seam_core::seam!(
     ) -> PgResult<bool>
 );
 
+// canonicalize_qual (prepqual.c) for consumers below the planner
+// (partbounds' ConstraintImpliedByRelConstraint port).
+seam_core::seam!(
+    pub fn canonicalize_qual<'a, 'mcx>(
+        mcx: Mcx<'mcx>,
+        qual: Node<'mcx>,
+        is_check: bool,
+    ) -> PgResult<Node<'mcx>>
+);
+
 seam_core::seam!(
     pub fn build_index_pathkeys<'a, 'mcx>(
         run: &'a mut PlannerRun<'mcx>,

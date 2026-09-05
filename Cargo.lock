@@ -11822,6 +11822,7 @@ dependencies = [
  "parser_small1",
  "partcache",
  "pg_inherits",
+ "planner_seams",
  "readfuncs",
  "rewrite_manip",
  "ruleutils_seams",
