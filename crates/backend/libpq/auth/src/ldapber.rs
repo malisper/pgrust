@@ -468,10 +468,10 @@ impl LdapConn {
     }
 
     /// ldap_simple_bind_s.
-    pub fn simple_bind(&mut self, dn: &str, passwd: &str) -> i32 {
+    pub fn simple_bind(&mut self, dn: &str, passwd: &[u8]) -> i32 {
         let mut body = ber_int(TAG_INTEGER, LDAP_VERSION3);
         body.extend_from_slice(&tlv(TAG_OCTET_STRING, dn.as_bytes()));
-        body.extend_from_slice(&tlv(0x80, passwd.as_bytes())); // simple auth
+        body.extend_from_slice(&tlv(0x80, passwd)); // simple auth (raw bytes)
         let op = tlv(TAG_BIND_REQUEST, &body);
         let msgid = match self.send_op(&op) {
             Ok(id) => id,

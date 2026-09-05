@@ -259,7 +259,7 @@ pub fn ClientAuthentication(port: &mut Port) -> PgResult<()> {
         }
         m if m == uaCert || m == uaTrust => STATUS_OK,
         m if m == uaPAM => {
-            pam::CheckPAMAuth(port, port.user_name.clone().unwrap_or_default().as_str(), "")?
+            pam::CheckPAMAuth(port, port.user_name.clone().unwrap_or_default().as_str(), b"")?
         }
         m if m == uaGSS => {
             // GSS encryption is never established in this build, so C's
@@ -846,7 +846,11 @@ pub fn sendAuthRequest(_port: &Port, areq: AuthRequest, extradata: &[u8]) -> PgR
     Ok(())
 }
 
-pub fn recv_password_packet(_port: &Port) -> PgResult<Option<String>> {
+// recv_password_packet (auth.c:706-776). Returns the packet's bytes exactly as
+// received: C does no character-set conversion here ("since we don't yet
+// know the client's encoding, there wouldn't be much point", auth.c:771-773),
+// so a password with non-UTF-8 bytes must reach the verifiers untouched.
+pub fn recv_password_packet(_port: &Port) -> PgResult<Option<Vec<u8>>> {
     pqcomm::pq_startmsgread()?;
 
     let mtype = pqcomm::pq_getbyte()?;
@@ -889,7 +893,7 @@ pub fn recv_password_packet(_port: &Port) -> PgResult<Option<String>> {
     // Do not echo password to logs, for security.
     elog(DEBUG5, "received password packet")?;
 
-    Ok(Some(String::from_utf8_lossy(&data[..strlen]).into_owned()))
+    Ok(Some(data[..strlen].to_vec()))
 }
 
 fn CheckPasswordAuth(port: &mut Port, logdetail: &mut Option<String>) -> PgResult<i32> {

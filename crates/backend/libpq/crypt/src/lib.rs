@@ -147,7 +147,7 @@ pub fn encrypt_password<'mcx>(
 pub fn md5_crypt_verify(
     role: &str,
     shadow_pass: &str,
-    client_pass: &str,
+    client_pass: &[u8],
     md5_salt: &[u8],
     logdetail: &mut Option<String>,
 ) -> PgResult<i32> {
@@ -165,7 +165,7 @@ pub fn md5_crypt_verify(
 
     // upstream d93ef413174d (18.4): Apply timingsafe_bcmp() in authentication paths
     if client_pass.len() == crypt_pwd.len()
-        && timingsafe_bcmp(client_pass.as_bytes(), &crypt_pwd) == 0
+        && timingsafe_bcmp(client_pass, &crypt_pwd) == 0
     {
         Ok(STATUS_OK)
     } else {
@@ -178,7 +178,7 @@ pub fn plain_crypt_verify(
     mcx: Mcx<'_>,
     role: &str,
     shadow_pass: &str,
-    client_pass: &str,
+    client_pass: &[u8],
     logdetail: &mut Option<String>,
 ) -> PgResult<i32> {
     match get_password_type(shadow_pass) {
@@ -190,7 +190,7 @@ pub fn plain_crypt_verify(
             return Ok(STATUS_ERROR);
         }
         PasswordType::Md5 => {
-            let crypt_client_pass = pg_md5_encrypt(client_pass.as_bytes(), role.as_bytes());
+            let crypt_client_pass = pg_md5_encrypt(client_pass, role.as_bytes());
             // upstream d93ef413174d (18.4): Apply timingsafe_bcmp() in authentication paths
             if crypt_client_pass.len() == shadow_pass.len()
                 && timingsafe_bcmp(&crypt_client_pass, shadow_pass.as_bytes()) == 0

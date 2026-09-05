@@ -171,7 +171,7 @@ pub(crate) fn CheckLDAPAuth(port: &mut Port) -> PgResult<i32> {
 
         let binddn = hba.ldapbinddn.clone().unwrap_or_default();
         let bindpasswd = hba.ldapbindpasswd.clone().unwrap_or_default();
-        let r = ldap.simple_bind(&binddn, &bindpasswd);
+        let r = ldap.simple_bind(&binddn, bindpasswd.as_bytes());
         if r != LDAP_SUCCESS {
             errdetail_for_ldap(
                 ereport(LOG).errmsg(format!(

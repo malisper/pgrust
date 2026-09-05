@@ -81,7 +81,7 @@ pub(crate) unsafe extern "C" fn pam_passwd_conv_proc(
 }
 
 // strdup twin over libc::malloc (PAM frees responses with free()).
-unsafe fn c_strdup(s: &str) -> *mut c_char {
+unsafe fn c_strdup(s: &[u8]) -> *mut c_char {
     let p = libc::malloc(s.len() + 1) as *mut u8;
     if p.is_null() {
         return core::ptr::null_mut();
@@ -106,15 +106,17 @@ unsafe fn conv_body(
     resp: *mut *mut pam_response,
     appdata_ptr: *mut c_void,
 ) -> c_int {
-    let mut passwd: String = if appdata_ptr.is_null() {
+    // Raw password bytes (C char*): no decoding, the client encoding is not
+    // known during authentication.
+    let mut passwd: Vec<u8> = if appdata_ptr.is_null() {
         // Solaris 2.6 workaround twin: fall back to the thread-local.
         PAM_STATE.with(|s| {
-            s.borrow().passwd.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default()
+            s.borrow().passwd.as_ref().map(|p| p.to_bytes().to_vec()).unwrap_or_default()
         })
     } else {
         std::ffi::CStr::from_ptr(appdata_ptr as *const c_char)
-            .to_string_lossy()
-            .into_owned()
+            .to_bytes()
+            .to_vec()
     };
 
     *resp = core::ptr::null_mut(); // in case of error exit
@@ -176,7 +178,7 @@ unsafe fn conv_body(
                         .errmsg(format!("error from underlying PAM layer: {text}"))
                         .finish(loc(1994, "pam_passwd_conv_proc"));
                 }
-                slot.resp = c_strdup("");
+                slot.resp = c_strdup(b"");
                 if slot.resp.is_null() {
                     return conv_fail(reply, num_msg);
                 }
@@ -266,7 +268,7 @@ impl Drop for PamHandle {
 
 // C CheckPAMAuth (auth.c:2029). `password` is always "" from dispatch: the
 // conversation fetches the real one from the client.
-pub(crate) fn CheckPAMAuth(port: &Port, user: &str, password: &str) -> PgResult<i32> {
+pub(crate) fn CheckPAMAuth(port: &Port, user: &str, password: &[u8]) -> PgResult<i32> {
     // Serialize the whole transaction: at most one thread may drive the
     // non-reentrant system libpam / module stack at a time (see PAM_LOCK).
     // Recover from poisoning — the conversation callback catches unwinds, but

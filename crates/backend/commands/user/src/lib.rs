@@ -547,7 +547,7 @@ pub fn CreateRole<'mcx, 'a>(mcx: Mcx<'mcx>, stmt: &CreateRoleStmt<'a>) -> PgResu
         // CVE-2017-7546 arm: a supplied verifier OF the empty string also clears.
         Some(p) => {
             if p.is_empty()
-                || crypt::plain_crypt_verify(mcx, role, p, "", &mut None)? == crypt::STATUS_OK
+                || crypt::plain_crypt_verify(mcx, role, p, b"", &mut None)? == crypt::STATUS_OK
             {
                 notice(
                     "empty string is not a valid password, clearing password".into(),
@@ -877,7 +877,7 @@ pub fn AlterRole<'mcx, 'a>(mcx: Mcx<'mcx>, stmt: &AlterRoleStmt<'a>) -> PgResult
         // CVE-2017-7546 arm: a supplied verifier OF the empty string also clears.
         Some(p) => {
             if p.is_empty()
-                || crypt::plain_crypt_verify(mcx, &rolename, p, "", &mut None)?
+                || crypt::plain_crypt_verify(mcx, &rolename, p, b"", &mut None)?
                     == crypt::STATUS_OK
             {
                 notice(

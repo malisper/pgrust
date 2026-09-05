@@ -61,7 +61,7 @@ fn md5_crypt_verify_challenge() {
     let ok = md5_crypt_verify(
         "postgres",
         MD5_SECRET,
-        core::str::from_utf8(&expected).unwrap(),
+        &expected[..],
         &salt,
         &mut logdetail,
     )
@@ -69,13 +69,13 @@ fn md5_crypt_verify_challenge() {
     assert_eq!(ok, STATUS_OK);
     assert!(logdetail.is_none());
 
-    let bad = md5_crypt_verify("postgres", MD5_SECRET, "md5ffffffff", &salt, &mut logdetail).unwrap();
+    let bad = md5_crypt_verify("postgres", MD5_SECRET, b"md5ffffffff", &salt, &mut logdetail).unwrap();
     assert_eq!(bad, STATUS_ERROR);
     assert_eq!(logdetail.as_deref(), Some("Password does not match for user \"postgres\"."));
 
     let mut logdetail = None;
     let wrong_kind =
-        md5_crypt_verify("postgres", RFC7677_SECRET, "x", &salt, &mut logdetail).unwrap();
+        md5_crypt_verify("postgres", RFC7677_SECRET, b"x", &salt, &mut logdetail).unwrap();
     assert_eq!(wrong_kind, STATUS_ERROR);
     assert_eq!(
         logdetail.as_deref(),
@@ -90,26 +90,26 @@ fn plain_crypt_verify_all_arms() {
     let mut logdetail = None;
 
     assert_eq!(
-        plain_crypt_verify(cx.mcx(), "u", RFC7677_SECRET, "pencil", &mut logdetail).unwrap(),
+        plain_crypt_verify(cx.mcx(), "u", RFC7677_SECRET, b"pencil", &mut logdetail).unwrap(),
         STATUS_OK
     );
     assert_eq!(
-        plain_crypt_verify(cx.mcx(), "u", RFC7677_SECRET, "wrong", &mut logdetail).unwrap(),
+        plain_crypt_verify(cx.mcx(), "u", RFC7677_SECRET, b"wrong", &mut logdetail).unwrap(),
         STATUS_ERROR
     );
 
     assert_eq!(
-        plain_crypt_verify(cx.mcx(), "postgres", MD5_SECRET, "secret", &mut logdetail).unwrap(),
+        plain_crypt_verify(cx.mcx(), "postgres", MD5_SECRET, b"secret", &mut logdetail).unwrap(),
         STATUS_OK
     );
     assert_eq!(
-        plain_crypt_verify(cx.mcx(), "postgres", MD5_SECRET, "wrong", &mut logdetail).unwrap(),
+        plain_crypt_verify(cx.mcx(), "postgres", MD5_SECRET, b"wrong", &mut logdetail).unwrap(),
         STATUS_ERROR
     );
 
     let mut logdetail = None;
     assert_eq!(
-        plain_crypt_verify(cx.mcx(), "u", "plainstored", "plainstored", &mut logdetail).unwrap(),
+        plain_crypt_verify(cx.mcx(), "u", "plainstored", b"plainstored", &mut logdetail).unwrap(),
         STATUS_ERROR
     );
     assert_eq!(

@@ -58,6 +58,13 @@ fn install() {
                     String::from_utf8(pg_md5::pg_md5_encrypt(b"md5pw", b"md5user").to_vec())
                         .unwrap(),
                 ),
+                // Verifier over a NON-UTF-8 password byte string (b046).
+                "rawbytes" => Some(
+                    String::from_utf8(
+                        pg_md5::pg_md5_encrypt(b"pencil\xe9", b"rawbytes").to_vec(),
+                    )
+                    .unwrap(),
+                ),
                 "nopass" => None,
                 _ => return Ok(None),
             };
@@ -413,7 +420,7 @@ fn b64d(src: &str) -> Vec<u8> {
 }
 
 // Reads one server message; ('R', auth code, payload) or ('E', 0, body).
-fn read_server_msg(stream: &mut UnixStream) -> (u8, u32, Vec<u8>) {
+fn read_server_msg(stream: &mut impl Read) -> (u8, u32, Vec<u8>) {
     let mut header = [0u8; 5];
     stream.read_exact(&mut header).unwrap();
     let len = u32::from_be_bytes(header[1..5].try_into().unwrap()) as usize;
@@ -427,7 +434,7 @@ fn read_server_msg(stream: &mut UnixStream) -> (u8, u32, Vec<u8>) {
     }
 }
 
-fn send_password_msg(stream: &mut UnixStream, body: &[u8]) {
+fn send_password_msg(stream: &mut impl Write, body: &[u8]) {
     let mut pkt = Vec::with_capacity(5 + body.len());
     pkt.push(b'p');
     pkt.extend_from_slice(&((4 + body.len()) as u32).to_be_bytes());
@@ -711,6 +718,129 @@ fn password_auth_end_to_end() {
     sa.cleanup();
 }
 
+// audit-18.6 b046 (auth.c:771-775): recv_password_packet returns the client's
+// bytes verbatim — C does no encoding conversion because the client encoding
+// is not known yet. A password carrying non-UTF-8 bytes must verify against a
+// verifier computed over exactly those bytes (a lossy UTF-8 decode turns
+// 0xE9 into U+FFFD and the plaintext arm fails where C succeeds).
+#[test]
+fn password_auth_raw_bytes_end_to_end() {
+    setup_backend(4251);
+    let _g = GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    load_hba_content_locked("pass_raw.conf", "local all all password\n");
+    let (sa, sock_path) = SocketAuth::listen("pass_raw", 45463);
+
+    let client = std::thread::spawn(move || {
+        let mut stream = UnixStream::connect(sock_path).unwrap();
+        let (t, code, _) = read_server_msg(&mut stream);
+        assert_eq!((t, code), (b'R', AUTH_REQ_PASSWORD));
+        send_password_msg(&mut stream, b"pencil\xe9\0");
+        let (t, code, body) = read_server_msg(&mut stream);
+        assert_eq!(
+            (t, code),
+            (b'R', AUTH_REQ_OK),
+            "server answered {:?}",
+            String::from_utf8_lossy(&body)
+        );
+    });
+
+    let mut port = sa.accept_port("rawbytes");
+    ClientAuthentication(&mut port).unwrap();
+    assert_eq!(pqcomm::pq_flush().unwrap(), 0);
+    assert_eq!(miscinit::client_connection_info().0, Some("rawbytes"));
+    client.join().unwrap();
+    sa.cleanup();
+}
+
+// TCP twin of SocketAuth for methods hba refuses on local sockets (gss).
+struct TcpAuth {
+    listen_sockets: Vec<i32>,
+}
+
+impl TcpAuth {
+    fn listen(port_number: u16) -> Self {
+        let mut listen_sockets: Vec<i32> = Vec::new();
+        let status = pqcomm::ListenServerPort(
+            libc::AF_INET,
+            Some("127.0.0.1"),
+            port_number,
+            None,
+            &mut listen_sockets,
+            64,
+        )
+        .unwrap();
+        assert_eq!(status, 0);
+        Self { listen_sockets }
+    }
+
+    fn accept_port(&self, user: &str) -> Port {
+        let mut client_sock = ClientSocket {
+            sock: PGINVALID_SOCKET,
+            raddr: SockAddr::zeroed(),
+        };
+        while pqcomm::AcceptConnection(self.listen_sockets[0], &mut client_sock) != 0 {}
+        let mut port = pqcomm_seams::pq_init::call(&client_sock).unwrap();
+        port.user_name = Some(user.to_string());
+        port.database_name = Some("postgres".to_string());
+        port
+    }
+
+    fn cleanup(self) {
+        for s in self.listen_sockets {
+            // SAFETY: fds we opened via ListenServerPort.
+            unsafe { libc::close(s) };
+        }
+    }
+}
+
+// audit-18.6 b046 (auth.c:939-1005): with pg_krb_server_keyfile set, C only
+// points libkrb5 at the keytab (setenv KRB5_KTNAME) and lets
+// gss_accept_sec_context discover an unusable keytab — AFTER the client's
+// first GSS token has been read — reported as "accepting GSS security
+// context failed". The acceptor credential must not be acquired (and fail)
+// before that read: message and socket read state would both diverge.
+#[test]
+fn gss_bad_keytab_fails_after_reading_client_token() {
+    setup_backend(4252);
+    let _g = GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if let Err(e) = crate::gss_ffi::try_gss() {
+        eprintln!("SKIP gss_bad_keytab_fails_after_reading_client_token: {e}");
+        return;
+    }
+    load_hba_content_locked("gss_keytab.conf", "host all all 127.0.0.1/32 gss\n");
+    let prev_keyfile = guc_tables::vars::pg_krb_server_keyfile.read();
+    guc_tables::vars::pg_krb_server_keyfile
+        .write(Some("/nonexistent/b046-audit.keytab".to_string()));
+    let ta = TcpAuth::listen(45471);
+
+    let client = std::thread::spawn(move || {
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", 45471)).unwrap();
+        let (t, code, _) = read_server_msg(&mut stream);
+        assert_eq!((t, code), (b'R', AUTH_REQ_GSS));
+        // First (garbage) AP-REQ token; C reads it before anything can fail.
+        send_password_msg(&mut stream, b"\x60\x10not-a-gss-token");
+        let (t, _, body) = read_server_msg(&mut stream);
+        assert_eq!(t, b'E', "expected FATAL, got {:?}", String::from_utf8_lossy(&body));
+    });
+
+    let mut port = ta.accept_port("gssuser");
+    let err = expect_client_auth_fatal(&mut port);
+    guc_tables::vars::pg_krb_server_keyfile.write(prev_keyfile);
+    assert_eq!(err.message(), "GSSAPI authentication failed for user \"gssuser\"");
+    let logged: Vec<String> =
+        CAPTURED.with(|c| c.borrow().iter().map(|e| e.message().to_string()).collect());
+    assert!(
+        logged.iter().any(|m| m == "accepting GSS security context failed"),
+        "keytab failure must surface from the context-accept step (C auth.c:1049): {logged:?}"
+    );
+    assert!(
+        !logged.iter().any(|m| m.starts_with("gss_acquire_cred_from")),
+        "acceptor credential was acquired (and failed) before the client token was read: {logged:?}"
+    );
+    client.join().unwrap();
+    ta.cleanup();
+}
+
 #[test]
 fn interpret_ident_response_cases() {
     // RFC 1413 USERID happy path (the RFC's own example).
@@ -880,7 +1010,7 @@ fn pam_mock_flow_succeeds_and_sets_authn_id() {
     // Non-empty password: the conversation answers from appdata without
     // needing a client socket (the empty-password client round trip shares
     // sendAuthRequest/recv_password_packet with the tested password arms).
-    let status = crate::pam::CheckPAMAuth(&port, "pamuser", "sekrit").unwrap();
+    let status = crate::pam::CheckPAMAuth(&port, "pamuser", b"sekrit").unwrap();
     assert_eq!(status, STATUS_OK);
     assert_eq!(
         MOCK_SEEN_PASSWORD.with(|p| p.borrow().clone()).as_deref(),
@@ -897,7 +1027,7 @@ fn pam_mock_authenticate_failure_is_status_error() {
     install_pam_mock();
     MOCK_AUTH_RESULT.with(|r| *r.borrow_mut() = 9); // e.g. PAM_AUTH_ERR
     let port = pam_port("pamuser");
-    let status = crate::pam::CheckPAMAuth(&port, "pamuser", "sekrit").unwrap();
+    let status = crate::pam::CheckPAMAuth(&port, "pamuser", b"sekrit").unwrap();
     assert_eq!(status, STATUS_ERROR);
     assert_eq!(miscinit::client_connection_info().0, None);
 }

@@ -158,6 +158,25 @@ pub(crate) fn CheckRADIUSAuth(port: &mut Port) -> PgResult<i32> {
     Ok(STATUS_ERROR)
 }
 
+// C atoi(3) as PerformRadiusTransaction applies it to radiusports
+// (auth.c:2977): skip leading C-locale whitespace, take an optional sign and
+// the digit prefix; 0 without digits; clamped where strtol would saturate.
+fn c_atoi(s: &str) -> i32 {
+    let t = s.trim_start_matches(|c: char| {
+        matches!(c, ' ' | '\t' | '\n' | '\u{0b}' | '\u{0c}' | '\r')
+    });
+    let (sign, digits) = match t.as_bytes().first() {
+        Some(b'-') => (-1i64, &t[1..]),
+        Some(b'+') => (1, &t[1..]),
+        _ => (1, t),
+    };
+    let mut v: i64 = 0;
+    for b in digits.bytes().take_while(|b| b.is_ascii_digit()) {
+        v = (v * 10 + (b - b'0') as i64).min(i32::MAX as i64 + 1);
+    }
+    (sign * v).clamp(i32::MIN as i64, i32::MAX as i64) as i32
+}
+
 #[allow(non_snake_case)]
 fn PerformRadiusTransaction(
     server: &str,
@@ -165,18 +184,13 @@ fn PerformRadiusTransaction(
     portstr: Option<&str>,
     identifier: Option<&str>,
     user_name: &str,
-    passwd: &str,
+    passwd: &[u8],
 ) -> PgResult<i32> {
     use ip::{pg_getaddrinfo_all, AddrInfoHint, PgAddrInfo};
 
     let portstr = portstr.unwrap_or("1812");
     let identifier = identifier.unwrap_or("postgresql");
-    // C atoi: digits prefix, 0 on garbage.
-    let port: i32 = portstr
-        .trim_start()
-        .bytes()
-        .take_while(|b| b.is_ascii_digit())
-        .fold(0i32, |a, b| a.saturating_mul(10).saturating_add((b - b'0') as i32));
+    let port: i32 = c_atoi(portstr); // C: port = atoi(portstr) (auth.c:2977)
 
     let hint = AddrInfoHint {
         flags: 0,
@@ -217,7 +231,7 @@ fn PerformRadiusTransaction(
 
     let encryptedpasswordlen = passwd.len().div_ceil(RADIUS_VECTOR_LENGTH) * RADIUS_VECTOR_LENGTH;
     let mut encryptedpassword = [0u8; RADIUS_MAX_PASSWORD_LENGTH];
-    let pwbytes = passwd.as_bytes();
+    let pwbytes = passwd;
     let mut md5trailer = vector;
     let mut i = 0;
     while i < encryptedpasswordlen {
@@ -492,6 +506,43 @@ mod radius_tests {
         );
         // C accumulates the truncated uint8 length, not len + 2.
         assert_eq!(p.length, RADIUS_HEADER_LENGTH + ((len + 2) as u8) as usize);
+    }
+
+    // audit-18.6 b046 (auth.c:2977): port = atoi(portstr). C atoi skips
+    // leading whitespace and accepts a sign, so radiusports="+P" verifies
+    // replies from port P; a digits-only parse yields 0, every reply is
+    // rejected as "sent from incorrect port" and the transaction times out.
+    // Live mock: an Access-Accept from port P must be accepted.
+    #[test]
+    fn plus_prefixed_port_string_parses_like_c_atoi() {
+        use std::net::UdpSocket;
+        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let port = server.local_addr().unwrap().port();
+        let responder = std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            let (n, from) = server.recv_from(&mut buf).unwrap();
+            assert!(n >= RADIUS_HEADER_LENGTH && buf[0] == RADIUS_ACCESS_REQUEST);
+            // Access-Accept without attributes; Response Authenticator =
+            // MD5(Code + ID + Length + RequestAuth + Secret) (RFC 2865 §3).
+            let mut resp = vec![RADIUS_ACCESS_ACCEPT, buf[1], 0, RADIUS_HEADER_LENGTH as u8];
+            let mut cv = resp.clone();
+            cv.extend_from_slice(&buf[4..4 + RADIUS_VECTOR_LENGTH]);
+            cv.extend_from_slice(b"radsecret");
+            resp.extend_from_slice(&pg_md5::pg_md5_binary(&cv));
+            server.send_to(&resp, from).unwrap();
+        });
+        let portstr = format!("+{port}");
+        let r = PerformRadiusTransaction(
+            "127.0.0.1",
+            "radsecret",
+            Some(&portstr),
+            None,
+            "alice",
+            b"pw",
+        )
+        .unwrap();
+        responder.join().unwrap();
+        assert_eq!(r, STATUS_OK, "reply from port {port} must be accepted for radiusports=\"+{port}\"");
     }
 
     // RFC 2865 §5.2 hide operation round-trip: XOR with the same digest

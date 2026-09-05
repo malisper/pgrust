@@ -197,23 +197,19 @@ impl Drop for GssState<'_> {
 
 // Acquire the acceptor credential for the configured keytab through the
 // thread-safe MIT credential-store extension ({"keytab": keyfile}), avoiding
-// the process-global KRB5_KTNAME environment variable. Returns:
-//   Ok(Some(cred)) — credential acquired (pass to gss_accept_sec_context),
-//   Ok(None)       — extension unavailable (caller uses the env fallback),
-//   Err(_)         — acquisition attempted but failed (reported via ereport).
-fn acquire_keytab_cred(api: &GssApi, keyfile: &str) -> PgResult<Option<gss_cred_id_t>> {
-    let Some(acquire_cred_from) = api.gss_acquire_cred_from else {
-        return Ok(None);
-    };
+// the process-global KRB5_KTNAME environment variable. The caller has checked
+// that the extension is present. Err carries the (major, minor) status: the
+// caller reports it the way C's gss_accept_sec_context failure is reported.
+fn acquire_keytab_cred(
+    api: &GssApi,
+    keyfile: &std::ffi::CStr,
+) -> Result<gss_cred_id_t, (u32, u32)> {
+    let acquire_cred_from = api
+        .gss_acquire_cred_from
+        .expect("acquire_keytab_cred: caller checked gss_acquire_cred_from");
 
     let key = c"keytab";
-    let value = match CString::new(keyfile) {
-        Ok(v) => v,
-        // A NUL in the configured path can never name a real keytab; let the
-        // env fallback / default keytab handle it exactly as before.
-        Err(_) => return Ok(None),
-    };
-    let mut kt = gss_key_value_element_desc { key: key.as_ptr(), value: value.as_ptr() };
+    let mut kt = gss_key_value_element_desc { key: key.as_ptr(), value: keyfile.as_ptr() };
     let ktset = gss_key_value_set_desc { count: 1, elements: &mut kt };
 
     let mut minor: u32 = 0;
@@ -235,10 +231,9 @@ fn acquire_keytab_cred(api: &GssApi, keyfile: &str) -> PgResult<Option<gss_cred_
         )
     };
     if major != GSS_S_COMPLETE {
-        pg_GSS_error("gss_acquire_cred_from", major, minor)?;
-        return Ok(Some(core::ptr::null_mut()));
+        return Err((major, minor));
     }
-    Ok(Some(cred))
+    Ok(cred)
 }
 
 // auth.c pg_GSS_recvauth (auth.c:921).
@@ -257,23 +252,26 @@ pub(crate) fn pg_GSS_recvauth(port: &Port) -> PgResult<i32> {
     };
 
     // Use the configured keytab, if there is one. C sets KRB5_KTNAME in the
-    // per-backend process environment (auth.c:944); that is unsafe here because
-    // every backend is a thread in one shared process. Prefer the thread-safe
-    // MIT credential-store API to select the keytab per acceptor credential;
-    // only fall back to the (now serialized) environment variable when the
-    // extension is unavailable (e.g. Heimdal / macOS GSS.framework).
+    // per-backend process environment (auth.c:944) and lets the first
+    // gss_accept_sec_context call open the keytab; that env write is unsafe
+    // here because every backend is a thread in one shared process. On MIT
+    // builds the keytab is bound to an acceptor credential through the
+    // thread-safe credential-store API instead — acquired inside the loop
+    // below, right before the first gss_accept_sec_context call, so an
+    // unusable keytab fails where C's does (after the client's first token
+    // has been read) and with C's report ("accepting GSS security context
+    // failed", auth.c:1045-1049). Only fall back to the (serialized)
+    // environment variable when the extension is unavailable (e.g. Heimdal /
+    // macOS GSS.framework).
     let keyfile = guc_tables::vars::pg_krb_server_keyfile.read().unwrap_or_default();
-    let mut acceptor_cred: gss_cred_id_t = core::ptr::null_mut();
+    let mut pending_keytab: Option<CString> = None;
     if !keyfile.is_empty() {
-        match acquire_keytab_cred(api, &keyfile)? {
-            Some(cred) => {
-                if cred.is_null() {
-                    // Acquisition failed; it was already reported via pg_GSS_error.
-                    return Ok(STATUS_ERROR);
-                }
-                acceptor_cred = cred;
-            }
-            None => {
+        match CString::new(keyfile.as_str()) {
+            Ok(kt) if api.gss_acquire_cred_from.is_some() => pending_keytab = Some(kt),
+            // Extension unavailable, or a NUL in the configured path (which
+            // can never name a real keytab): the env fallback / default
+            // keytab handles it exactly as before.
+            _ => {
                 let key = c"KRB5_KTNAME";
                 let val = CString::new(keyfile).unwrap_or_default();
                 if gss_setenv(key, val.as_c_str()) != 0 {
@@ -294,7 +292,7 @@ pub(crate) fn pg_GSS_recvauth(port: &Port) -> PgResult<i32> {
         api,
         ctx: core::ptr::null_mut(),
         name: core::ptr::null_mut(),
-        acceptor_cred,
+        acceptor_cred: core::ptr::null_mut(),
         outbuf: gss_buffer_desc::empty(),
         port,
     };
@@ -329,6 +327,20 @@ pub(crate) fn pg_GSS_recvauth(port: &Port) -> PgResult<i32> {
         };
 
         elog(DEBUG4, format!("processing received GSS token of length {}", gbuf.length))?;
+
+        // First token: bind the configured keytab to the acceptor credential
+        // now (see above). C's gss_accept_sec_context with GSS_C_NO_CREDENTIAL
+        // opens KRB5_KTNAME at this same point, so a bad keytab is reported
+        // here as a context-accept failure (auth.c:1049).
+        if let Some(kt) = pending_keytab.take() {
+            match acquire_keytab_cred(api, &kt) {
+                Ok(cred) => state.acceptor_cred = cred,
+                Err((maj_stat, min_stat)) => {
+                    pg_GSS_error("accepting GSS security context failed", maj_stat, min_stat)?;
+                    return Ok(STATUS_ERROR);
+                }
+            }
+        }
 
         let mut min_stat: u32 = 0;
         let mut gflags: u32 = 0;

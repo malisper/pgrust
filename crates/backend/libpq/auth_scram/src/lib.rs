@@ -134,7 +134,7 @@ fn test_fixed_salt() -> Option<[u8; SCRAM_DEFAULT_SALT_LEN]> {
 pub fn scram_verify_plain_password(
     mcx: Mcx<'_>,
     username: &str,
-    password: &str,
+    password: &[u8],
     secret: &str,
 ) -> PgResult<bool> {
     let Some(parsed) = parse_scram_secret(secret) else {
@@ -151,10 +151,12 @@ pub fn scram_verify_plain_password(
         return Ok(false);
     };
 
-    let prep = saslprep::pg_saslprep(mcx, password.as_bytes())?;
+    // The client's bytes are used as-is when pg_saslprep declines them
+    // (SASLPREP_INVALID_UTF8 etc.), exactly like C auth-scram.c.
+    let prep = saslprep::pg_saslprep(mcx, password)?;
     let password: &[u8] = match &prep {
         Some(p) => p,
-        None => password.as_bytes(),
+        None => password,
     };
 
     let salted_password = scram_salted_password(password, &salt, parsed.iterations)?;

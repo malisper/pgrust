@@ -54,8 +54,8 @@ fn parse_strtol_edges() {
 fn verify_plain_password_matches_and_rejects() {
     install_cfi();
     let cx = MemoryContext::new("scram-verify-test");
-    assert!(scram_verify_plain_password(cx.mcx(), "user", "pencil", RFC7677_SECRET).unwrap());
-    assert!(!scram_verify_plain_password(cx.mcx(), "user", "pencil2", RFC7677_SECRET).unwrap());
+    assert!(scram_verify_plain_password(cx.mcx(), "user", b"pencil", RFC7677_SECRET).unwrap());
+    assert!(!scram_verify_plain_password(cx.mcx(), "user", b"pencil2", RFC7677_SECRET).unwrap());
 }
 
 #[test]
@@ -64,8 +64,8 @@ fn build_secret_round_trips_through_verify() {
     let cx = MemoryContext::new("scram-build-test");
     let secret = pg_be_scram_build_secret(cx.mcx(), "s3kret").unwrap();
     assert!(secret.as_str().starts_with("SCRAM-SHA-256$4096:"));
-    assert!(scram_verify_plain_password(cx.mcx(), "u", "s3kret", secret.as_str()).unwrap());
-    assert!(!scram_verify_plain_password(cx.mcx(), "u", "other", secret.as_str()).unwrap());
+    assert!(scram_verify_plain_password(cx.mcx(), "u", b"s3kret", secret.as_str()).unwrap());
+    assert!(!scram_verify_plain_password(cx.mcx(), "u", b"other", secret.as_str()).unwrap());
 }
 
 use auth_sasl::{
