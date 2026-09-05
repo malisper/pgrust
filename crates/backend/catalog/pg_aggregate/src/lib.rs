@@ -115,8 +115,11 @@ fn type_acl_check(typeId: Oid) -> PgResult<()> {
         adt_acl::ACL_USAGE,
     )?;
     if aclresult != aclchk::ACLCHECK_OK {
-        // aclcheck_error_type
-        let name = format_type::format_type_be(typeId)?;
+        // aclcheck_error_type (aclchk.c:2974): an array type is reported by
+        // its element type.
+        let element_type = lsyscache::get_element_type(typeId)?;
+        let reported = if OidIsValid(element_type) { element_type } else { typeId };
+        let name = format_type::format_type_be(reported)?;
         aclchk::aclcheck_error(aclresult, ObjectType::OBJECT_TYPE, &name)?;
     }
     Ok(())
@@ -730,10 +733,16 @@ fn lookup_agg_function<'mcx>(
     input_types: &[Oid],
     variadicArgType: Oid,
 ) -> PgResult<(Oid, Oid)> {
-    let mut buf = [""; 4];
-    let parts = name_parts(fnName, &mut buf);
+    // Every name part goes to the lookup: DeconstructQualifiedName
+    // (namespace.c:3400) reports an over-long name in full, so nothing may
+    // be truncated here.
+    let mut parts: mcx::PgVec<'mcx, &'mcx str> = mcx::PgVec::new_in(mcx);
+    for n in fnName.iter() {
+        parts.push(n.as_string().expect("name list holds String nodes").sval);
+    }
 
-    let candidates = FuncnameGetCandidates(mcx, parts, nargs as i16, &[], false, false)?;
+    let candidates =
+        FuncnameGetCandidates(mcx, parts.as_slice(), nargs as i16, &[], false, false)?;
 
     let mut best: Option<&catalog_namespace::FuncCandidate<'_>> = None;
     for cand in candidates.iter() {
@@ -833,14 +842,6 @@ fn lookup_agg_function<'mcx>(
     }
 
     Ok((fnOid, rettype))
-}
-
-fn name_parts<'a, 'mcx>(names: &NodeList<'mcx>, buf: &'a mut [&'mcx str; 4]) -> &'a [&'mcx str] {
-    let n = names.len().min(buf.len());
-    for (i, slot) in buf.iter_mut().enumerate().take(n) {
-        *slot = names.nth(i).as_string().expect("name list holds String nodes").sval;
-    }
-    &buf[..n]
 }
 
 #[cfg(test)]
