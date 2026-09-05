@@ -154,7 +154,7 @@ pub fn CreateOrAttachShmemStructs(cfg: &ProcGlobalConfig) -> PgResult<()> {
 
     pmsignal::PMSignalShmemInit(pmchild_seams::max_live_postmaster_children::call());
     procsignal::ProcSignalShmemInit();
-    checkpointer::CheckpointerShmemInit(g::NBuffers());
+    checkpointer::CheckpointerShmemInit(g::NBuffers())?;
     slot::ReplicationSlotsShmemInit();
     origin::ReplicationOriginShmemInit();
     walsummarizer::WalSummarizerShmemInit();

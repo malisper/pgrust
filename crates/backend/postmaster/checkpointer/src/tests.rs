@@ -6,7 +6,7 @@ static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn shmem_for_tests() -> &'static CheckpointerShmemStruct {
     static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| CheckpointerShmemInit(64));
+    ONCE.call_once(|| CheckpointerShmemInit(64).unwrap());
     shmem()
 }
 
@@ -175,4 +175,23 @@ fn absorb_oom_is_error_and_lock_release_recovers() {
     assert!(!lwlock::LWLockHeldByMe(checkpointer_comm_lock()));
 
     miscinit::SetMyBackendType(prev_type);
+}
+
+// audit-18.6 b123: CheckpointerShmemInit is a ShmemInitStruct("Checkpointer
+// Data", CheckpointerShmemSize()) allocation (checkpointer.c:966), so the
+// block is registered in the ShmemIndex (pg_shmem_allocations lists it) and a
+// re-entry finds it (found = true) instead of allocating a second one.
+#[test]
+fn shmem_init_registers_checkpointer_data() {
+    let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let cp = shmem_for_tests();
+    let (raw, found) =
+        shmem::ShmemInitStruct("Checkpointer Data", CheckpointerShmemSize(64)).unwrap();
+    assert!(found, "Checkpointer Data is not registered in the ShmemIndex");
+    assert!(
+        std::ptr::eq(raw.cast::<CheckpointerShmemStruct>(), cp),
+        "CheckpointerShmem does not live in the ShmemIndex block"
+    );
+    assert_eq!(cp.max_requests, 64);
+    assert_eq!(cp.requests.len(), 64);
 }

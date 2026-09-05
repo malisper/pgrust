@@ -43,6 +43,7 @@ postgres_seams = { path = "../../tcop/postgres_seams" }
 procsignal_seams = { path = "../../storage/ipc/procsignal_seams" }
 resowner = { path = "../../utils/resowner/resowner" }
 s_lock_seams = { path = "../../storage/lmgr/s_lock_seams" }
+shmem = { path = "../../storage/ipc/shmem" }
 smgr = { path = "../../storage/smgr/smgr" }
 sync = { path = "../../storage/sync/sync" }
 sync_seams = { path = "../../storage/sync/sync_seams" }

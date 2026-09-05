@@ -130,12 +130,24 @@ struct CheckpointerShmemStruct {
     requests: &'static [SyncCell<CheckpointerRequest>],
 }
 
-static CHECKPOINTER_SHMEM: OnceLock<CheckpointerShmemStruct> = OnceLock::new();
+// C: `static CheckpointerShmemStruct *CheckpointerShmem` — the
+// ShmemInitStruct("Checkpointer Data", ...) allocation (checkpointer.c:966).
+struct ShmemPtr(*const CheckpointerShmemStruct);
+// SAFETY: every field is an atomic, a spinlock, a CheckpointerCommLock-guarded
+// SyncCell or the requests slice into the same block; the block lives for the
+// cluster lifetime (shmem is never freed).
+unsafe impl Sync for ShmemPtr {}
+unsafe impl Send for ShmemPtr {}
+
+static CHECKPOINTER_SHMEM: OnceLock<ShmemPtr> = OnceLock::new();
 
 fn shmem() -> &'static CheckpointerShmemStruct {
-    CHECKPOINTER_SHMEM
+    let p = CHECKPOINTER_SHMEM
         .get()
-        .expect("CheckpointerShmem accessed before CheckpointerShmemInit")
+        .expect("CheckpointerShmem accessed before CheckpointerShmemInit");
+    // SAFETY: a cluster-lifetime ShmemIndex allocation initialized by
+    // CheckpointerShmemInit before the pointer was published.
+    unsafe { &*p.0 }
 }
 
 fn spin_acquire(lock: &Spinlock) {
@@ -166,32 +178,68 @@ pub fn CheckpointerShmemSize(nbuffers: i32) -> usize {
         + n * core::mem::size_of::<SyncCell<CheckpointerRequest>>()
 }
 
-pub fn CheckpointerShmemInit(nbuffers: i32) {
-    let max_requests = nbuffers.min(MAX_CHECKPOINT_REQUESTS).max(0);
+/// CheckpointerShmemInit (checkpointer.c:966): ShmemInitStruct("Checkpointer
+/// Data", CheckpointerShmemSize()) registers the block in the ShmemIndex, so
+/// pg_shmem_allocations lists it; the requests array is the flexible array
+/// member at the end of the same block. A re-entry finds the block
+/// (found = true) and leaves the live data alone.
+pub fn CheckpointerShmemInit(nbuffers: i32) -> PgResult<()> {
     const {
         assert!(!core::mem::needs_drop::<SyncCell<CheckpointerRequest>>());
+        assert!(!core::mem::needs_drop::<CheckpointerShmemStruct>());
+        // requests[] starts at size_of::<CheckpointerShmemStruct>() into the
+        // (cache-line-aligned) block: that offset is a multiple of the
+        // header's alignment, which must cover the element's.
+        assert!(
+            core::mem::align_of::<SyncCell<CheckpointerRequest>>()
+                <= core::mem::align_of::<CheckpointerShmemStruct>()
+        );
     }
-    let zero = CheckpointerRequest {
-        req_type: SyncRequestType::SYNC_REQUEST,
-        ftag: FileTag::default(),
-    };
-    let requests: &'static [SyncCell<CheckpointerRequest>] = (0..max_requests)
-        .map(|_| SyncCell::new(zero))
-        .collect::<Vec<_>>()
-        .leak();
-    CHECKPOINTER_SHMEM
-        .set(CheckpointerShmemStruct {
-            checkpointer_pid: AtomicI32::new(0),
-            ckpt_lck: Spinlock::new(),
-            ckpt_started: AtomicI32::new(0),
-            ckpt_done: AtomicI32::new(0),
-            ckpt_failed: AtomicI32::new(0),
-            ckpt_flags: AtomicI32::new(0),
-            num_requests: SyncCell::new(0),
-            max_requests,
-            requests,
-        })
-        .unwrap_or_else(|_| panic!("CheckpointerShmemInit called twice"));
+    let size = CheckpointerShmemSize(nbuffers);
+    let (raw, found) = shmem::ShmemInitStruct("Checkpointer Data", size)?;
+    let p = raw.cast::<CheckpointerShmemStruct>();
+    if !found {
+        // First time through: C MemSets the whole block (the fresh
+        // allocation is already zeroed, which is what
+        // CompactCheckpointerRequestQueue's pad-byte assumption needs) and
+        // fills in the header.
+        let max_requests = nbuffers.min(MAX_CHECKPOINT_REQUESTS).max(0);
+        let zero = CheckpointerRequest {
+            req_type: SyncRequestType::SYNC_REQUEST,
+            ftag: FileTag::default(),
+        };
+        // SAFETY: a fresh, zeroed, cache-line-aligned ShmemIndex allocation of
+        // CheckpointerShmemSize(nbuffers) == size_of::<CheckpointerShmemStruct>()
+        // + max_requests * size_of::<SyncCell<CheckpointerRequest>>() bytes;
+        // the requests slice covers exactly the tail of that block.
+        let requests: &'static [SyncCell<CheckpointerRequest>] = unsafe {
+            let reqs = raw
+                .add(core::mem::size_of::<CheckpointerShmemStruct>())
+                .cast::<SyncCell<CheckpointerRequest>>();
+            for i in 0..max_requests as usize {
+                reqs.add(i).write(SyncCell::new(zero));
+            }
+            core::slice::from_raw_parts(reqs, max_requests as usize)
+        };
+        // SAFETY: as above; the header slot is uninitialized-but-zeroed memory
+        // of the right size and alignment, written exactly once.
+        unsafe {
+            p.write(CheckpointerShmemStruct {
+                checkpointer_pid: AtomicI32::new(0),
+                ckpt_lck: Spinlock::new(),
+                ckpt_started: AtomicI32::new(0),
+                ckpt_done: AtomicI32::new(0),
+                ckpt_failed: AtomicI32::new(0),
+                ckpt_flags: AtomicI32::new(0),
+                num_requests: SyncCell::new(0),
+                max_requests,
+                requests,
+            })
+        };
+    }
+    // Same block on every call: the ShmemIndex hands back the first one.
+    let _ = CHECKPOINTER_SHMEM.set(ShmemPtr(p));
+    Ok(())
 }
 
 /// Crash-cycle reset in place to the CheckpointerShmemInit boot image
@@ -581,7 +629,9 @@ fn CheckArchiveTimeout() -> PgResult<()> {
 
     if now - LAST_XLOG_SWITCH_TIME.get() >= archive_timeout as i64 {
         if transam_xlog::GetLastImportantRecPtr() > last_switch_lsn {
-            let switchpoint = transam_xlog::RequestXLogSwitch(false)?;
+            // checkpointer.c:720: mark the switch as unimportant, so it neither
+            // earns the next timed checkpoint nor the next forced switch.
+            let switchpoint = transam_xlog::RequestXLogSwitch(true)?;
             if transam_xlog::XLogSegmentOffset(switchpoint, transam_xlog::wal_segment_size()) != 0 {
                 elog(
                     DEBUG1,
