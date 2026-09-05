@@ -36,6 +36,7 @@ pub use canonical::{CANONICAL, CANONICAL_LAST_BUILTIN_OID};
 pub fn init_seams() {
     fmgr_seams::fmgr_info::set(fmgr_info);
     fmgr_seams::fmgr_info_not_ported_name::set(fmgr_info_not_ported_name);
+    fmgr_seams::internal_builtin_oid::set(internal_builtin_oid);
 }
 
 /// pgrust-only (no C analogue): `Some(builtin name)` iff `flinfo`'s resolved
@@ -330,6 +331,31 @@ pub fn fmgr_lookup_by_name(name: &str) -> Option<&'static FmgrBuiltin> {
         .iter()
         .find(|b| b.name == name)
         .or_else(|| extra_builtin_by_name(name))
+}
+
+/// The fmgr_builtins row a pg_proc row dispatches to: fmgr_info_cxt_security's
+/// LANGUAGE internal arm without the call (fmgr.c:236-247, fmgr_lookupByName
+/// on prosrc), so a `CREATE FUNCTION ... AS 'bthandler' LANGUAGE internal`
+/// alias IS bthandler. None when there is no such pg_proc row or the function
+/// is of any other language (LANGUAGE c goes through dfmgr — the no-dlopen
+/// carve, docs/design/carve-ratifications.md §2 — and SQL/PL through their
+/// handlers); a null prosrc cannot happen (pg_proc.prosrc is NOT NULL).
+pub fn internal_builtin_of(funcid: Oid) -> PgResult<Option<&'static FmgrBuiltin>> {
+    let Some(row) = syscache_seams::lookup_pg_proc_fmgr::call(funcid)? else {
+        return Ok(None);
+    };
+    if row.prolang != INTERNAL_LANGUAGE_ID {
+        return Ok(None);
+    }
+    let cx = ::mcx::MemoryContext::new("fmgr_info prosrc");
+    let prosrc = syscache_seams::lookup_pg_proc_prosrc::call(cx.mcx(), funcid)?
+        .unwrap_or_else(|| panic!("fmgr: null prosrc for function {funcid}"));
+    Ok(fmgr_lookup_by_name(prosrc.as_str()))
+}
+
+// fmgr_seams::internal_builtin_oid: the builtin's own pg_proc oid.
+fn internal_builtin_oid(funcid: Oid) -> PgResult<Option<Oid>> {
+    Ok(internal_builtin_of(funcid)?.map(|b| b.foid))
 }
 
 // A user-created internal-language fn (new oid) must resolve through the

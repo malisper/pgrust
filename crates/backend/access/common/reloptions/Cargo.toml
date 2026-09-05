@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+fmgr_seams = { path = "../../../utils/fmgr/fmgr_seams" }
 syscache_seams = { path = "../../../utils/cache/syscache_seams" }
 mcx = { path = "../../../../_support/mcx" }
 datum = { path = "../../../../_support/types/datum" }

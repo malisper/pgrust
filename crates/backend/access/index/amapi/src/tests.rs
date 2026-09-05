@@ -115,12 +115,47 @@ fn handler_dispatch_is_the_closed_set() {
         Ok(match funcid {
             5000 => Some(named("blhandler")),
             5001 => Some(named("int4pl")),
+            5002 => Some(named("fpb4_bt_handler")),
+            5003 => Some(named("fpb4_int4pl")),
+            _ => None,
+        })
+    });
+    // 5002/5003: CREATE FUNCTION ... LANGUAGE internal aliases (prolang 12);
+    // fmgr_info dispatches them by prosrc (fmgr.c:236-247 fmgr_lookupByName).
+    syscache_seams::lookup_pg_proc_fmgr::set(|funcid| {
+        Ok(match funcid {
+            5002 | 5003 => Some(syscache_seams::PgProcFmgrShape {
+                prolang: 12,
+                prorettype: 325,
+                pronargs: 1,
+                proisstrict: true,
+                proretset: false,
+                prosecdef: false,
+                proconfig_isnull: true,
+                xmin: 0,
+                tid: Default::default(),
+            }),
+            _ => None,
+        })
+    });
+    syscache_seams::lookup_pg_proc_prosrc::set(|cx, funcid| {
+        Ok(match funcid {
+            5002 => Some(mcx::PgString::from_str_in("bthandler", cx)?),
+            5003 => Some(mcx::PgString::from_str_in("int4pl", cx)?),
             _ => None,
         })
     });
     assert_eq!(GetIndexAmRoutine(F_BTHANDLER).unwrap(), IndexAmKind::Btree);
     assert_eq!(GetIndexAmRoutine(F_BRINHANDLER).unwrap(), IndexAmKind::Brin);
     assert_eq!(GetIndexAmRoutine(5000).unwrap(), IndexAmKind::Bloom);
+    // An internal alias of bthandler IS the btree handler (what C's
+    // OidFunctionCall0 on it returns); an internal alias of int4pl is not.
+    assert_eq!(GetIndexAmRoutine(5002).unwrap(), IndexAmKind::Btree);
+    let e = GetIndexAmRoutine(5003).unwrap_err();
+    assert_eq!(
+        e.message,
+        "index access method handler function 5003 did not return an IndexAmRoutine struct"
+    );
     // fmgr.c:183: OidFunctionCall0 on a handler with no pg_proc row.
     let e = GetIndexAmRoutine(999).unwrap_err();
     assert_eq!(e.message, "cache lookup failed for function 999");

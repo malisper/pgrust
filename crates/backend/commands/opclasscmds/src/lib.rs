@@ -90,15 +90,10 @@ fn name_parts<'a, 'mcx>(names: &NodeList<'mcx>, buf: &'a mut [&'mcx str; 4]) -> 
     &buf[..n]
 }
 
+// get_am_name (amcmds.c:192-206) for messages; a missing AM renders the way
+// errmsg's %s renders C's NULL (src/port/snprintf.c:691).
 fn get_am_name(amoid: Oid) -> PgResult<String> {
-    let tup = SearchSysCache1(AMOID, SysCacheKey::Value(Datum::from_oid(amoid)))?
-        .ok_or_else(|| cache_lookup_failed("access method", amoid))?;
-    const ANUM_PG_AM_AMNAME: i32 = 2;
-    let d = SysCacheGetAttrNotNull(AMOID, &tup, ANUM_PG_AM_AMNAME)?;
-    // SAFETY: amname is the row's inline NameData column.
-    let name = unsafe { *(d.as_usize() as *const NameData) };
-    cache_syscache::ReleaseSysCache(tup);
-    Ok(core::str::from_utf8(name.name_str()).unwrap_or("").to_string())
+    Ok(commands_amcmds::get_am_name(amoid)?.unwrap_or_else(|| "(null)".to_string()))
 }
 
 // pg_am AMNAME probe: (oid, amtype); None if no such access method.

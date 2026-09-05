@@ -69,15 +69,25 @@ pub(crate) fn RelationInitTableAccessMethod(relid: Oid, relkind: u8, relam: Oid)
         }
         _ => {}
     }
-    match syscache_seams::pg_am_amhandler::call(relam)? {
-        Some(F_HEAP_TABLEAM_HANDLER) => {
+    // C resolves the handler by calling it (:1873 GetTableAmRoutine ->
+    // OidFunctionCall0); a LANGUAGE internal proc dispatches by its prosrc
+    // (fmgr.c:236-247), so an internal alias of heap_tableam_handler IS heap.
+    let amhandler = syscache_seams::pg_am_amhandler::call(relam)?;
+    let dispatches_to_heap = match amhandler {
+        Some(F_HEAP_TABLEAM_HANDLER) => true,
+        Some(other) => fmgr_core::internal_builtin_of(other)?
+            .is_some_and(|b| b.foid == F_HEAP_TABLEAM_HANDLER),
+        None => false,
+    };
+    match amhandler {
+        Some(_) if dispatches_to_heap => {
             tableam_vocab::register_heap_table_am(relam);
             Ok(())
         }
         // Backstop behind the CREATE ACCESS METHOD fence (amcmds.rs, which
-        // refuses non-builtin handlers with a clean 0A000): only a catalog
-        // written outside that fence can carry another handler (no-dlopen
-        // carve, docs/design/carve-ratifications.md §2).
+        // refuses handlers that cannot dispatch with a clean 0A000): only a
+        // catalog written outside that fence can carry another handler
+        // (no-dlopen carve, docs/design/carve-ratifications.md §2).
         Some(other) => Err(Box::new(
             PgError::error(format!(
                 "table access method handler function {other} (relam {relam}) \

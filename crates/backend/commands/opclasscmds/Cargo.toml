@@ -9,6 +9,7 @@ name = "opclasscmds"
 path = "src/lib.rs"
 
 [dependencies]
+commands_amcmds = { path = "../amcmds" }
 cmdtag = { path = "../../tcop/cmdtag" }
 event_trigger = { path = "../event_trigger" }
 opclasscmds_seams = { path = "../opclasscmds_seams" }

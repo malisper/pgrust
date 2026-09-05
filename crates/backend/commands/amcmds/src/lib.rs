@@ -22,6 +22,7 @@ const INDEX_AM_HANDLEROID: Oid = 325;
 const TABLE_AM_HANDLEROID: Oid = 269;
 const F_HEAP_TABLEAM_HANDLER: Oid = 3;
 
+const Anum_pg_am_amname: i32 = 2;
 const Anum_pg_am_amtype: i32 = 4;
 
 pub use pg_depend::ObjectAddress;
@@ -136,6 +137,24 @@ pub fn get_am_oid(amname: &str, missing_ok: bool) -> PgResult<Oid> {
     get_am_type_oid(amname, 0, missing_ok)
 }
 
+// get_am_name (amcmds.c:192-206): the access method's name, None when there
+// is no such pg_am row (C returns NULL; a %s of it renders "(null)",
+// src/port/snprintf.c:691).
+pub fn get_am_name(amOid: Oid) -> PgResult<Option<String>> {
+    let Some(tup) = SearchSysCache1(
+        cache_syscache::cacheinfo::AMOID,
+        SysCacheKey::Value(Datum::from_oid(amOid)),
+    )?
+    else {
+        return Ok(None);
+    };
+    let d = SysCacheGetAttrNotNull(cache_syscache::cacheinfo::AMOID, &tup, Anum_pg_am_amname)?;
+    // SAFETY: amname is the row's inline NameData column.
+    let name = unsafe { *(d.as_usize() as *const NameData) };
+    ReleaseSysCache(tup);
+    Ok(Some(String::from_utf8_lossy(name.name_str()).into_owned()))
+}
+
 fn lookup_am_handler_func(
     mcx: Mcx<'_>,
     handler_name: &types_nodes::NodeList<'_>,
@@ -173,18 +192,24 @@ fn lookup_am_handler_func(
         ));
     }
 
-    // No-dlopen carve (docs/design/carve-ratifications.md §2): pgrust never
-    // loads C shared objects, so pg_am.amhandler can only ever dispatch if
-    // it resolves inside the closed in-tree AM set. C defers this to first
-    // use (calling the handler); here the fence sits at CREATE ACCESS METHOD
-    // so the catalog never carries an AM that cannot run — the amapi /
-    // relcache resolvers keep loud backstops behind this fence.
+    // C stores any handler of the right return type and resolves it at first
+    // use (fmgr_info). pgrust never loads C shared objects (no-dlopen carve,
+    // docs/design/carve-ratifications.md §2), so the fence sits here: the
+    // handler must dispatch, the way fmgr_info would, into the in-tree AM
+    // set — a builtin handler, or a LANGUAGE internal alias whose prosrc
+    // names one (fmgr.c:236-247 fmgr_lookupByName) — so the catalog never
+    // carries an AM that cannot run; the amapi / relcache resolvers keep loud
+    // backstops behind this fence.
     let known = match amtype {
-        AMTYPE_INDEX => amapi::known_index_am_handler(handlerOid),
+        AMTYPE_INDEX => amapi::GetIndexAmRoutine(handlerOid).is_ok(),
         // Handler proc oid 3 = heap_tableam_handler (pg_proc.dat); the
         // closed-AM engine carries no other table AM handler (pgrcolumnar is
         // resolved by pg_am.amname, docs/design/pgrcolumnar-impl.md §7.1).
-        AMTYPE_TABLE => handlerOid == F_HEAP_TABLEAM_HANDLER,
+        AMTYPE_TABLE => {
+            handlerOid == F_HEAP_TABLEAM_HANDLER
+                || fmgr_core::internal_builtin_of(handlerOid)?
+                    .is_some_and(|b| b.foid == F_HEAP_TABLEAM_HANDLER)
+        }
         _ => unreachable!("amtype validated above"),
     };
     if !known {

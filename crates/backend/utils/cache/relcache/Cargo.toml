@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+fmgr_core = { path = "../../fmgr/fmgr_core" }
 catalog_seams = { path = "../../../catalog/catalog_seams" }
 guc_tables = { path = "../../misc/guc_tables" }
 fd = { path = "../../../storage/file/fd" }

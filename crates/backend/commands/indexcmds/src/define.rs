@@ -359,23 +359,10 @@ fn index_am_probe(amname: &str) -> PgResult<Option<(Oid, Oid)>> {
     Ok(Some((oid, amhandler)))
 }
 
-// get_am_name (amcmds.c) for error details.
-fn get_am_name(amid: Oid) -> String {
-    const Anum_pg_am_amname: i32 = 2;
-    let Ok(Some(tup)) =
-        SearchSysCache1(cache_syscache::cacheinfo::AMOID, SysCacheKey::Value(Datum::from_oid(amid)))
-    else {
-        return "???".to_string();
-    };
-    let name = cache_syscache::SysCacheGetAttrNotNull(cache_syscache::cacheinfo::AMOID, &tup, Anum_pg_am_amname)
-        .map(|d| {
-            // SAFETY: amname is the row's inline NameData column.
-            let nd = unsafe { *(d.as_usize() as *const types_tuple::NameData) };
-            core::str::from_utf8(nd.name_str()).unwrap_or("???").to_string()
-        })
-        .unwrap_or_else(|_| "???".to_string());
-    ReleaseSysCache(tup);
-    name
+// get_am_name (amcmds.c:192-206) for error details; a missing AM renders the
+// way errdetail's %s renders C's NULL (src/port/snprintf.c:691).
+pub(crate) fn get_am_name(amid: Oid) -> PgResult<String> {
+    Ok(commands_amcmds::get_am_name(amid)?.unwrap_or_else(|| "(null)".to_string()))
 }
 
 // GetOperatorFromCompareType (indexcmds.c): equality/overlaps/contained-by
@@ -425,7 +412,7 @@ pub fn GetOperatorFromCompareType<'mcx>(
                 format!(
                     "Could not translate compare type {cmptype} for operator family \"{}\" of access method \"{}\".",
                     famname.as_str(),
-                    get_am_name(amid)
+                    get_am_name(amid)?
                 ),
             )?);
         }
@@ -445,7 +432,7 @@ pub fn GetOperatorFromCompareType<'mcx>(
             opcintype,
             format!(
                 "There is no suitable operator in operator family \"{famname}\" for access method \"{}\".",
-                get_am_name(amid)
+                get_am_name(amid)?
             ),
         )?);
     }
@@ -857,7 +844,7 @@ pub fn DefineIndex<'mcx>(
                                 lsyscache::get_opfamily_name(mcx, idx_opfamily, false)?
                                     .expect("missing_ok=false")
                                     .as_str(),
-                                get_am_name(lsyscache::get_opfamily_method(idx_opfamily)?)
+                                get_am_name(lsyscache::get_opfamily_method(idx_opfamily)?)?
                             )),
                         ));
                     }

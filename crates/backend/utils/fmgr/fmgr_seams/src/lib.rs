@@ -17,6 +17,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // fmgr_info's LANGUAGE internal arm without the call (fmgr.c:236-247,
+    // fmgr_lookupByName on prosrc): Some(oid of the fmgr_builtins row) for a
+    // prolang-internal pg_proc row — so a `CREATE FUNCTION ... AS 'bthandler'
+    // LANGUAGE internal` alias resolves to bthandler's own oid — None for a
+    // proc of any other language or no pg_proc row. Installed by
+    // fmgr_core::init_seams; consumers gate on is_installed() (test mocks
+    // that install only fmgr_info leave it empty).
+    pub fn internal_builtin_oid(funcid: Oid) -> PgResult<Option<Oid>>
+);
+
+seam_core::seam!(
     pub fn get_fn_expr_variadic(flinfo: &FmgrInfo) -> bool
 );
 

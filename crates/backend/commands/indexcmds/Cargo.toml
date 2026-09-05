@@ -9,6 +9,7 @@ name = "indexcmds"
 path = "src/lib.rs"
 
 [dependencies]
+commands_amcmds = { path = "../amcmds" }
 mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
 mbutils = { path = "../../utils/mb/mbutils" }
 cmdtag = { path = "../../tcop/cmdtag" }
@@ -90,3 +91,4 @@ pg_rusage = { path = "../../utils/misc/pg_rusage" }
 injection_point = { path = "../../utils/misc/injection_point" }
 
 [dev-dependencies]
+catcache = { path = "../../utils/cache/catcache" }

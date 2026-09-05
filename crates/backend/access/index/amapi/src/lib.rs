@@ -33,30 +33,47 @@ const NAMEDATALEN: usize = 64;
 /// handlers is amapi.c:42 "index access method handler function %u did not
 /// return an IndexAmRoutine struct" — catchable XX000s, never a panic.
 pub fn GetIndexAmRoutine(amhandler: Oid) -> PgResult<IndexAmKind> {
-    Ok(match amhandler {
+    match builtin_index_am(amhandler) {
+        Some(kind) => Ok(kind),
+        None => resolve_extension_handler(amhandler),
+    }
+}
+
+// The in-tree handlers by pg_proc oid (pg_proc.dat).
+fn builtin_index_am(amhandler: Oid) -> Option<IndexAmKind> {
+    Some(match amhandler {
         F_BTHANDLER => IndexAmKind::Btree,
         F_HASHHANDLER => IndexAmKind::Hash,
         F_GINHANDLER => IndexAmKind::Gin,
         F_GISTHANDLER => IndexAmKind::Gist,
         F_SPGHANDLER => IndexAmKind::Spgist,
         F_BRINHANDLER => IndexAmKind::Brin,
-        other => return resolve_extension_handler(other),
+        _ => return None,
     })
 }
 
-// Non-builtin amhandler (extension AM): map by the handler proc's C symbol.
-// Catalog access is fine here — bootstrap only reaches the builtin arms.
-// Anything else is the backstop behind the CREATE ACCESS METHOD fence
-// (amcmds.rs refuses non-builtin handlers with a clean 0A000): only a
-// catalog written outside that fence (allow_system_table_mods, restore)
-// reaches it, and it raises what C raises (no-dlopen carve,
-// docs/design/carve-ratifications.md §2).
+// Non-builtin amhandler: resolve it the way fmgr_info would. The in-tree
+// extension AMs (LANGUAGE c) map by the handler proc's C symbol; a LANGUAGE
+// internal proc dispatches by its prosrc (fmgr.c:236-247 fmgr_lookupByName),
+// so `CREATE FUNCTION f(internal) RETURNS index_am_handler AS 'bthandler'
+// LANGUAGE internal` IS bthandler. Catalog access is fine here — bootstrap
+// only reaches the builtin arms. Anything else is the backstop behind the
+// CREATE ACCESS METHOD fence (amcmds.rs refuses handlers that cannot
+// dispatch with a clean 0A000): only a catalog written outside that fence
+// (allow_system_table_mods, restore) reaches it, and it raises what C raises
+// (no-dlopen carve, docs/design/carve-ratifications.md §2).
 fn resolve_extension_handler(amhandler: Oid) -> PgResult<IndexAmKind> {
-    match syscache_seams::pg_proc_proname::call(amhandler)? {
-        Some(name) if name.name_str() == b"hnswhandler" => Ok(IndexAmKind::Hnsw),
-        Some(name) if name.name_str() == b"blhandler" => Ok(IndexAmKind::Bloom),
-        Some(_) => Err(not_an_am_routine(amhandler)),
-        None => Err(proc_lookup_failed(amhandler)),
+    let Some(name) = syscache_seams::pg_proc_proname::call(amhandler)? else {
+        return Err(proc_lookup_failed(amhandler));
+    };
+    match name.name_str() {
+        b"hnswhandler" => return Ok(IndexAmKind::Hnsw),
+        b"blhandler" => return Ok(IndexAmKind::Bloom),
+        _ => {}
+    }
+    match fmgr_core::internal_builtin_of(amhandler)?.and_then(|b| builtin_index_am(b.foid)) {
+        Some(kind) => Ok(kind),
+        None => Err(not_an_am_routine(amhandler)),
     }
 }
 
@@ -389,22 +406,6 @@ pub fn amparallelvacuumoptions(kind: IndexAmKind) -> u8 {
 /// IndexAmRoutine.amusemaintenanceworkmem: true only for GIN.
 pub fn amusemaintenanceworkmem(kind: IndexAmKind) -> bool {
     matches!(kind, IndexAmKind::Gin)
-}
-
-/// Whether `amhandler` resolves inside the closed in-tree index-AM set
-/// (builtin handler OIDs, plus the in-tree ported extension handlers by
-/// pg_proc name). CREATE ACCESS METHOD fences on this so pg_am never
-/// carries a handler the closed-AM engine cannot dispatch (no-dlopen carve,
-/// docs/design/carve-ratifications.md §2).
-pub fn known_index_am_handler(amhandler: Oid) -> bool {
-    match amhandler {
-        F_BTHANDLER | F_HASHHANDLER | F_GINHANDLER | F_GISTHANDLER | F_SPGHANDLER
-        | F_BRINHANDLER => true,
-        other => matches!(
-            syscache_seams::pg_proc_proname::call(other),
-            Ok(Some(ref name)) if name.name_str() == b"hnswhandler" || name.name_str() == b"blhandler"
-        ),
-    }
 }
 
 // amapi.c:42 elog(ERROR, "index access method handler function %u did not

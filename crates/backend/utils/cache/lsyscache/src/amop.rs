@@ -29,7 +29,7 @@ pub const BRIN_AM_OID: Oid = 3580;
 // A non-builtin AM (CREATE ACCESS METHOD over a builtin index handler)
 // behaves as its handler's builtin AM (amapi.c resolves via GetIndexAmRoutine).
 fn canonical_index_am(amoid: Oid) -> Oid {
-    match syscache_seams::pg_am_amhandler::call(amoid) {
+    match syscache_seams::pg_am_amhandler::call(amoid).map(|h| h.map(handler_dispatch_target)) {
         Ok(Some(330)) => BTREE_AM_OID,
         Ok(Some(331)) => HASH_AM_OID,
         Ok(Some(333)) => GIN_AM_OID,
@@ -38,6 +38,18 @@ fn canonical_index_am(amoid: Oid) -> Oid {
         Ok(Some(335)) => BRIN_AM_OID,
         _ => amoid,
     }
+}
+
+// fmgr.c:236-247: a LANGUAGE internal handler dispatches by its prosrc, so an
+// internal alias of bthandler IS bthandler (oid 330); LANGUAGE c handlers
+// (the in-tree extension AMs) keep their own oid.
+fn handler_dispatch_target(handler: Oid) -> Oid {
+    if fmgr_seams::internal_builtin_oid::is_installed() {
+        if let Ok(Some(target)) = fmgr_seams::internal_builtin_oid::call(handler) {
+            return target;
+        }
+    }
+    handler
 }
 
 // amapi.c IndexAmTranslateStrategy over the built-in AMs (bttranslatestrategy

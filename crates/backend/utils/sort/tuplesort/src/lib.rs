@@ -870,15 +870,34 @@ fn btorder_proc_check(index_rel: &types_rel::Relation<'_>, i: usize) -> PgResult
 /// C: PrepareSortSupportFromIndexRel's `!indexRel->rd_indam->amcanorder`
 /// elog(ERROR) (sortsupport.c:170), raised once per index sort after the
 /// `_bt_mkscankey` walk; btree is the roster's only ordering index AM
-/// (plancat's amcanorder arm), so the AM check is the relam test.
+/// (plancat's amcanorder arm), so the AM check is "dispatches to bthandler":
+/// the builtin relam, or a non-builtin AM whose handler is bthandler — by oid
+/// or as a LANGUAGE internal alias of it (fmgr.c:236-247).
 fn amcanorder_check(index_rel: &types_rel::Relation<'_>) -> PgResult<()> {
-    if index_rel.rd_rel.relam != ::types_core::catalog::BTREE_AM_OID {
+    let relam = index_rel.rd_rel.relam;
+    if relam != ::types_core::catalog::BTREE_AM_OID && !dispatches_to_bthandler(relam)? {
         return Err(Box::new(PgError::error(format!(
-            "unexpected non-amcanorder AM: {}",
-            index_rel.rd_rel.relam
+            "unexpected non-amcanorder AM: {relam}"
         ))));
     }
     Ok(())
+}
+
+fn dispatches_to_bthandler(relam: Oid) -> PgResult<bool> {
+    const F_BTHANDLER: Oid = 330;
+    if matches!(relam, 405 | 783 | 2742 | 4000 | 3580) {
+        return Ok(false); // hash, gist, gin, spgist, brin (pg_am.dat)
+    }
+    let Some(handler) = syscache_seams::pg_am_amhandler::call(relam)? else {
+        return Ok(false);
+    };
+    if handler == F_BTHANDLER {
+        return Ok(true);
+    }
+    if fmgr_seams::internal_builtin_oid::is_installed() {
+        return Ok(fmgr_seams::internal_builtin_oid::call(handler)? == Some(F_BTHANDLER));
+    }
+    Ok(false)
 }
 
 impl Tuplesort {
