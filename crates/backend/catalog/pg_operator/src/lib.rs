@@ -223,6 +223,9 @@ fn OperatorShellMake(
 
     makeOperatorDependencies(mcx, &form, true, false)?;
 
+    // Post creation hook for new shell operator (pg_operator.c:270).
+    objectaccess::InvokeObjectPostCreateHook(OPERATOR_RELATION_ID, operatorObjectId, 0)?;
+
     xact::CommandCounterIncrement()?;
     rel.close(RowExclusiveLock)?;
     Ok(operatorObjectId)
@@ -405,6 +408,9 @@ pub fn OperatorCreate(
     if OidIsValid(commutatorId) || OidIsValid(negatorId) {
         OperatorUpd(mcx, operatorObjectId, commutatorId, negatorId, false)?;
     }
+
+    // Post creation hook for new operator (pg_operator.c:537).
+    objectaccess::InvokeObjectPostCreateHook(OPERATOR_RELATION_ID, operatorObjectId, 0)?;
 
     rel.close(RowExclusiveLock)?;
     Ok(address)

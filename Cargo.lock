@@ -12602,6 +12602,7 @@ dependencies = [
  "lsyscache",
  "mcx",
  "miscinit",
+ "objectaccess",
  "parse_oper",
  "pg_depend",
  "pg_shdepend",
