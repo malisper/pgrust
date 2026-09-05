@@ -1,7 +1,7 @@
 //! pgarch.c: the WAL archiver as a postmaster child thread (walwriter/
 //! checkpointer precedents). ArchiveModuleCallbacks is the ArchiveModule enum
 //! with the shell module as the only in-core arm; loadable archive_library
-//! values are a loud panic.
+//! values are a typed FATAL (no-dlopen carve).
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -45,28 +45,53 @@ fn loc(funcname: &'static str) -> ErrorLocation {
     ErrorLocation::new(site.file(), site.line() as i32, funcname)
 }
 
+// PgArchData (pgarch.c:85): int pgprocno + pg_atomic_uint32 force_dir_scan.
 struct PgArchData {
     pgprocno: AtomicI32,
     force_dir_scan: AtomicU32,
 }
+const _: () = assert!(core::mem::size_of::<PgArchData>() == 8);
+const _: () = assert!(!core::mem::needs_drop::<PgArchData>());
 
-static PGARCH_SHMEM: OnceLock<PgArchData> = OnceLock::new();
+// C: `static PgArchData *PgArch` — the ShmemInitStruct allocation.
+struct ShmemPtr(*const PgArchData);
+// SAFETY: PgArchData is all atomics; the block lives for the cluster
+// lifetime (shmem is never freed).
+unsafe impl Sync for ShmemPtr {}
+unsafe impl Send for ShmemPtr {}
+
+static PGARCH_SHMEM: OnceLock<ShmemPtr> = OnceLock::new();
 
 fn shmem() -> &'static PgArchData {
-    PGARCH_SHMEM.get().expect("PgArch shmem accessed before PgArchShmemInit")
+    let p = PGARCH_SHMEM.get().expect("PgArch shmem accessed before PgArchShmemInit");
+    // SAFETY: a cluster-lifetime ShmemIndex allocation initialized by
+    // PgArchShmemInit before the pointer was published.
+    unsafe { &*p.0 }
 }
 
 pub fn PgArchShmemSize() -> usize {
     core::mem::size_of::<PgArchData>()
 }
 
-pub fn PgArchShmemInit() {
-    PGARCH_SHMEM
-        .set(PgArchData {
-            pgprocno: AtomicI32::new(INVALID_PROC_NUMBER),
-            force_dir_scan: AtomicU32::new(0),
-        })
-        .unwrap_or_else(|_| panic!("PgArchShmemInit called twice"));
+// PgArchShmemInit (pgarch.c:174): ShmemInitStruct("Archiver Data", ...)
+// registers the block in the ShmemIndex, so pg_shmem_allocations lists it;
+// a re-entry finds it (found = true) and leaves the live data alone.
+pub fn PgArchShmemInit() -> PgResult<()> {
+    let (raw, found) = shmem::ShmemInitStruct("Archiver Data", PgArchShmemSize())?;
+    let p = raw.cast::<PgArchData>();
+    if !found {
+        // SAFETY: a fresh, zeroed, cache-line-aligned ShmemIndex allocation
+        // of PgArchShmemSize() == size_of::<PgArchData>() bytes.
+        unsafe {
+            p.write(PgArchData {
+                pgprocno: AtomicI32::new(INVALID_PROC_NUMBER),
+                force_dir_scan: AtomicU32::new(0),
+            })
+        };
+    }
+    // Same block on every call: the ShmemIndex hands back the first one.
+    let _ = PGARCH_SHMEM.set(ShmemPtr(p));
+    Ok(())
 }
 
 pub fn PgArchShmemResetAfterCrash() {
@@ -80,11 +105,29 @@ static LAST_PGARCH_START_TIME: AtomicI64 = AtomicI64::new(0);
 
 pub fn PgArchCanRestart() -> bool {
     let curtime = time_now();
-    if curtime - LAST_PGARCH_START_TIME.load(Relaxed) < PGARCH_RESTART_INTERVAL {
+    if !restart_interval_elapsed(curtime, LAST_PGARCH_START_TIME.load(Relaxed)) {
         return false;
     }
     LAST_PGARCH_START_TIME.store(curtime, Relaxed);
     true
+}
+
+/// C's `(unsigned int) (curtime - last)`: the time_t difference truncated
+/// to unsigned 32 bits, so a clock stepped backwards wraps to a huge count
+/// and passes the interval test instead of stalling until wall time catches
+/// up with the old stamp.
+fn elapsed_secs_u32(curtime: i64, last: i64) -> u32 {
+    curtime.wrapping_sub(last) as u32
+}
+
+/// pgarch.c:222: has PGARCH_RESTART_INTERVAL passed since the last launch?
+fn restart_interval_elapsed(curtime: i64, last_start: i64) -> bool {
+    elapsed_secs_u32(curtime, last_start) >= PGARCH_RESTART_INTERVAL as u32
+}
+
+/// pgarch.c:343: have 60 seconds passed since the first SIGTERM?
+fn sigterm_grace_elapsed(curtime: i64, last_sigterm: i64) -> bool {
+    elapsed_secs_u32(curtime, last_sigterm) >= 60
 }
 
 pub fn PgArchWakeup() {
@@ -200,7 +243,17 @@ fn pgarch_die(_code: i32, _arg: usize) {
 }
 
 fn fatal_exit(e: &PgError) -> ! {
-    elog::emit_error_report_for(e);
+    // elog.c:377 errstart: the archiver has no PG_exception_stack outside
+    // pgarch_archiveXlog's sigsetjmp block, so an ereport(ERROR) escaping to
+    // here (LoadArchiveLibrary, ProcessPgArchInterrupts) is reported as
+    // FATAL. Hand-built errors never pass through errstart: promote here.
+    if e.level == ERROR {
+        let mut promoted = e.clone();
+        promoted.level = FATAL;
+        elog::emit_error_report_for(&promoted);
+    } else {
+        elog::emit_error_report_for(e);
+    }
     ipc::proc_exit(1, g::MyProcPid())
 }
 
@@ -265,7 +318,7 @@ fn pgarch_MainLoop(af: &mut ArchFilesState, module: &ArchiveModule) -> PgResult<
             let curtime = time_now();
             if LAST_SIGTERM_TIME.get() == 0 {
                 LAST_SIGTERM_TIME.set(curtime);
-            } else if curtime - LAST_SIGTERM_TIME.get() >= 60 {
+            } else if sigterm_grace_elapsed(curtime, LAST_SIGTERM_TIME.get()) {
                 return Ok(());
             }
         }

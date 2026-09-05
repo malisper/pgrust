@@ -39,6 +39,7 @@ procsignal_seams = { path = "../../storage/ipc/procsignal_seams" }
 ps_status_seams = { path = "../../utils/misc/ps_status_seams" }
 resowner = { path = "../../utils/resowner/resowner" }
 shell_archive = { path = "../../archive/shell_archive" }
+shmem = { path = "../../storage/ipc/shmem" }
 timeout_seams = { path = "../../utils/misc/timeout_seams" }
 transam_xlog = { path = "../../access/transam/transam_xlog" }
 waitevent_seams = { path = "../../utils/activity/waitevent_seams" }

@@ -153,7 +153,7 @@ pub fn CreateOrAttachShmemStructs(cfg: &ProcGlobalConfig) -> PgResult<()> {
     origin::ReplicationOriginShmemInit();
     walsummarizer::WalSummarizerShmemInit();
     walreceiverfuncs::WalRcvShmemInit();
-    pgarch::PgArchShmemInit();
+    pgarch::PgArchShmemInit()?;
     syncscan::SyncScanShmemInit()?;
     commands_async::AsyncShmemInit()?;
     waitevent::custom::WaitEventCustomShmemInit()?;

@@ -5,7 +5,7 @@ use crate::*;
 fn shmem_once() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
-        PgArchShmemInit();
+        PgArchShmemInit().unwrap();
         xact_seams::get_current_sub_transaction_id::set(|| 1);
     });
 }
@@ -148,4 +148,43 @@ fn archive_done_renames_ready() {
 fn can_restart_throttles() {
     assert!(PgArchCanRestart());
     assert!(!PgArchCanRestart());
+}
+
+// audit-18.6 b104: the archiver's two elapsed-time tests are C
+// `(unsigned int) (curtime - last)` comparisons (pgarch.c:222, :343): a
+// clock stepped backwards wraps to a huge count and PASSES the interval
+// test, so the postmaster may relaunch a dead archiver at once and a
+// SIGTERM'd archiver exits at once instead of waiting for wall time to
+// catch up with the old stamp.
+#[test]
+fn restart_interval_wraps_a_backwards_clock_step() {
+    // Forward time: C's plain interval test.
+    assert!(!restart_interval_elapsed(1000, 995));
+    assert!(restart_interval_elapsed(1000, 990));
+    assert!(restart_interval_elapsed(1000, 0));
+    // Clock stepped 5 s back: (unsigned int) -5 = 4294967291 >= 10.
+    assert!(restart_interval_elapsed(1000, 1005));
+    // The live entry point: a launch stamp from the "future" must not
+    // block the relaunch (pgarch.c:207 PgArchCanRestart).
+    LAST_PGARCH_START_TIME.store(time_now() + 3600, Relaxed);
+    assert!(PgArchCanRestart());
+}
+
+#[test]
+fn sigterm_grace_wraps_a_backwards_clock_step() {
+    assert!(!sigterm_grace_elapsed(1000, 950));
+    assert!(sigterm_grace_elapsed(1000, 940));
+    // Clock stepped back after the SIGTERM: (unsigned int) -5 >= 60.
+    assert!(sigterm_grace_elapsed(1000, 1005));
+}
+
+// audit-18.6 b104: PgArchShmemInit is re-entrant in C (pgarch.c:174:
+// ShmemInitStruct reports found = true and the block is left alone); the
+// data set up by the first call survives a second one.
+#[test]
+fn shmem_init_is_idempotent() {
+    shmem_once();
+    shmem().pgprocno.store(7, Relaxed);
+    PgArchShmemInit().unwrap();
+    assert_eq!(shmem().pgprocno.load(Relaxed), 7);
 }

@@ -13059,6 +13059,7 @@ dependencies = [
  "ps_status_seams",
  "resowner",
  "shell_archive",
+ "shmem",
  "timeout_seams",
  "transam_xlog",
  "types_core",

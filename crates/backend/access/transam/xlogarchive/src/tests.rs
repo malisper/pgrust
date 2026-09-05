@@ -15,7 +15,7 @@ thread_local! {
 fn install_vars() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
-        pgarch::PgArchShmemInit();
+        pgarch::PgArchShmemInit().unwrap();
         xact_seams::get_current_sub_transaction_id::set(|| 1);
         waitevent_seams::pgstat_report_wait_start::set(|_| {});
         waitevent_seams::pgstat_report_wait_end::set(|| {});
