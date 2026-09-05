@@ -3,7 +3,23 @@ use alloc::vec::Vec;
 use ::types_core::{
     uint16, uint32, uint8, BlockNumber, InvalidBlockNumber, OffsetNumber, Size, XLogRecPtr, BLCKSZ,
 };
-use ::types_error::PgError;
+use ::types_error::{ErrorLevel, PgError, ERRCODE_DATA_CORRUPTED, ERROR, PANIC};
+
+/// bufpage.c's `ereport(ERROR|PANIC, (errcode(ERRCODE_DATA_CORRUPTED), ...))`
+/// sites: an XX001 error on the ereport channel carrying C's message bytes.
+/// These entry points are infallible-shaped (C longjmps out), so the error
+/// travels as a `Box<PgError>` panic payload — the bitmapset `negative_member`
+/// idiom — restored losslessly by `pg_error_from_panic` at the statement
+/// boundary (and promoted to PANIC there when raised inside a critical
+/// section, as errstart would; heap_page_prune's PageRepairFragmentation
+/// call is one such site).
+#[cold]
+#[inline(never)]
+fn data_corrupted(level: ErrorLevel, message: alloc::string::String) -> ! {
+    std::panic::panic_any(alloc::boxed::Box::new(
+        PgError::new(level, message).with_sqlstate(ERRCODE_DATA_CORRUPTED),
+    ))
+}
 
 pub type ItemOffset = uint16;
 pub type ItemLength = uint16;
@@ -521,8 +537,8 @@ impl<'a> PageMut<'a> {
     }
 
     /// `PageAddItemExtended`; `None` is C's `InvalidOffsetNumber` (the C
-    /// WARNING text lives at the caller). Panics on corrupt page pointers
-    /// (C ereport PANIC).
+    /// WARNING text lives at the caller). Corrupt page pointers raise C's
+    /// ereport(PANIC, ERRCODE_DATA_CORRUPTED) (bufpage.c:214).
     pub fn add_item(
         &mut self,
         item: &[u8],
@@ -535,13 +551,20 @@ impl<'a> PageMut<'a> {
         let pd_lower = r.pd_lower() as usize;
         let pd_upper = r.pd_upper() as usize;
         let pd_special = r.pd_special() as usize;
-        assert!(
+        if !(
             pd_lower >= SizeOfPageHeaderData
                 && pd_lower <= pd_upper
                 && pd_upper <= pd_special
-                && pd_special <= BLCKSZ,
-            "corrupted page pointers: lower = {pd_lower}, upper = {pd_upper}, special = {pd_special}"
-        );
+                && pd_special <= BLCKSZ
+        ) {
+            // bufpage.c:214: PageAddItemExtended reports this at PANIC.
+            data_corrupted(
+                PANIC,
+                alloc::format!(
+                    "corrupted page pointers: lower = {pd_lower}, upper = {pd_upper}, special = {pd_special}"
+                ),
+            );
+        }
 
         let limit = r.max_offset_number() + 1;
         let mut offset_number = offset_number;
@@ -630,14 +653,20 @@ impl<'a> PageMut<'a> {
         let pd_lower = r.pd_lower() as usize;
         let pd_upper = r.pd_upper() as usize;
         let pd_special = r.pd_special() as usize;
-        assert!(
+        if !(
             pd_lower >= SizeOfPageHeaderData
                 && pd_lower <= pd_upper
                 && pd_upper <= pd_special
                 && pd_special <= BLCKSZ
-                && pd_special == (pd_special + 7) & !7,
-            "corrupted page pointers: lower = {pd_lower}, upper = {pd_upper}, special = {pd_special}"
-        );
+                && pd_special == (pd_special + 7) & !7
+        ) {
+            data_corrupted(
+                ERROR,
+                alloc::format!(
+                    "corrupted page pointers: lower = {pd_lower}, upper = {pd_upper}, special = {pd_special}"
+                ),
+            );
+        }
 
         let itemcount = r.max_offset_number();
         assert!(offnum >= 1 && offnum <= itemcount, "invalid index offnum: {offnum}");
@@ -646,10 +675,12 @@ impl<'a> PageMut<'a> {
         debug_assert!(tupid.has_storage());
         let oldsize = tupid.lp_len() as usize;
         let offset = tupid.lp_off() as usize;
-        assert!(
-            offset >= pd_upper && offset + oldsize <= pd_special && offset == (offset + 7) & !7,
-            "corrupted line pointer: offset = {offset}, size = {oldsize}"
-        );
+        if !(offset >= pd_upper && offset + oldsize <= pd_special && offset == (offset + 7) & !7) {
+            data_corrupted(
+                ERROR,
+                alloc::format!("corrupted line pointer: offset = {offset}, size = {oldsize}"),
+            );
+        }
 
         let oldsize = (oldsize + 7) & !7;
         let alignednewsize = (newtup.len() + 7) & !7;
@@ -702,14 +733,20 @@ impl<'a> PageMut<'a> {
         let pd_lower = r.pd_lower() as usize;
         let pd_upper = r.pd_upper() as usize;
         let pd_special = r.pd_special() as usize;
-        assert!(
+        if !(
             pd_lower >= SizeOfPageHeaderData
                 && pd_lower <= pd_upper
                 && pd_upper <= pd_special
                 && pd_special <= BLCKSZ
-                && pd_special == (pd_special + 7) & !7,
-            "corrupted page pointers: lower = {pd_lower}, upper = {pd_upper}, special = {pd_special}"
-        );
+                && pd_special == (pd_special + 7) & !7
+        ) {
+            data_corrupted(
+                ERROR,
+                alloc::format!(
+                    "corrupted page pointers: lower = {pd_lower}, upper = {pd_upper}, special = {pd_special}"
+                ),
+            );
+        }
 
         let mut nline = r.max_offset_number();
         assert!(offnum >= 1 && offnum <= nline, "invalid index offnum: {offnum}");
@@ -718,10 +755,12 @@ impl<'a> PageMut<'a> {
         debug_assert!(tup.has_storage());
         let size = tup.lp_len() as usize;
         let offset = tup.lp_off() as usize;
-        assert!(
-            offset >= pd_upper && offset + size <= pd_special && offset == (offset + 7) & !7,
-            "corrupted line pointer: offset = {offset}, size = {size}"
-        );
+        if !(offset >= pd_upper && offset + size <= pd_special && offset == (offset + 7) & !7) {
+            data_corrupted(
+                ERROR,
+                alloc::format!("corrupted line pointer: offset = {offset}, size = {size}"),
+            );
+        }
 
         let size = (size + 7) & !7;
 
@@ -762,14 +801,20 @@ impl<'a> PageMut<'a> {
         let pd_lower = r.pd_lower() as usize;
         let pd_upper = r.pd_upper() as usize;
         let pd_special = r.pd_special() as usize;
-        assert!(
+        if !(
             pd_lower >= SizeOfPageHeaderData
                 && pd_lower <= pd_upper
                 && pd_upper <= pd_special
                 && pd_special <= BLCKSZ
-                && pd_special == (pd_special + 7) & !7,
-            "corrupted page pointers: lower = {pd_lower}, upper = {pd_upper}, special = {pd_special}"
-        );
+                && pd_special == (pd_special + 7) & !7
+        ) {
+            data_corrupted(
+                ERROR,
+                alloc::format!(
+                    "corrupted page pointers: lower = {pd_lower}, upper = {pd_upper}, special = {pd_special}"
+                ),
+            );
+        }
 
         let nline = r.max_offset_number();
         // Bound the untrusted line-pointer count (derived from pd_lower) against
@@ -815,13 +860,16 @@ impl<'a> PageMut<'a> {
                     // past the scratch buffer). Bound the extent here, mirroring
                     // the per-item offset + size <= pd_special check that
                     // PageIndexMultiDelete already performs.
-                    assert!(
-                        itemoff >= pd_upper
-                            && itemoff < pd_special
-                            && itemoff + alignedlen <= pd_special,
-                        "corrupted line pointer: offset = {itemoff}, size = {}",
-                        lp.lp_len()
-                    );
+                    // bufpage.c:756-759: the message carries the offset only.
+                    if !(itemoff >= pd_upper
+                        && itemoff < pd_special
+                        && itemoff + alignedlen <= pd_special)
+                    {
+                        data_corrupted(
+                            ERROR,
+                            alloc::format!("corrupted line pointer: {itemoff}"),
+                        );
+                    }
                     itemidbase[nstorage] = ItemIdCompact {
                         offsetindex: i - 1,
                         itemoff: itemoff as u16,
@@ -841,11 +889,15 @@ impl<'a> PageMut<'a> {
         if nstorage == 0 {
             self.set_pd_upper(pd_special as uint16);
         } else {
-            assert!(
-                totallen <= pd_special - pd_lower,
-                "corrupted item lengths: total {totallen}, available space {}",
-                pd_special - pd_lower
-            );
+            if totallen > pd_special - pd_lower {
+                data_corrupted(
+                    ERROR,
+                    alloc::format!(
+                        "corrupted item lengths: total {totallen}, available space {}",
+                        pd_special - pd_lower
+                    ),
+                );
+            }
             self.compactify_tuples(&itemidbase[..nstorage], presorted);
         }
 
@@ -915,14 +967,20 @@ impl<'a> PageMut<'a> {
         let pd_lower = r.pd_lower() as usize;
         let pd_upper = r.pd_upper() as usize;
         let pd_special = r.pd_special() as usize;
-        assert!(
+        if !(
             pd_lower >= SizeOfPageHeaderData
                 && pd_lower <= pd_upper
                 && pd_upper <= pd_special
                 && pd_special <= BLCKSZ
-                && pd_special == (pd_special + 7) & !7,
-            "corrupted page pointers: lower = {pd_lower}, upper = {pd_upper}, special = {pd_special}"
-        );
+                && pd_special == (pd_special + 7) & !7
+        ) {
+            data_corrupted(
+                ERROR,
+                alloc::format!(
+                    "corrupted page pointers: lower = {pd_lower}, upper = {pd_upper}, special = {pd_special}"
+                ),
+            );
+        }
 
         let nline = r.max_offset_number();
         assert!(offnum >= 1 && offnum <= nline, "invalid index offnum: {offnum}");
@@ -931,10 +989,12 @@ impl<'a> PageMut<'a> {
         debug_assert!(tup.has_storage());
         let size = tup.lp_len() as usize;
         let offset = tup.lp_off() as usize;
-        assert!(
-            offset >= pd_upper && offset + size <= pd_special && offset == (offset + 7) & !7,
-            "corrupted line pointer: offset = {offset}, size = {size}"
-        );
+        if !(offset >= pd_upper && offset + size <= pd_special && offset == (offset + 7) & !7) {
+            data_corrupted(
+                ERROR,
+                alloc::format!("corrupted line pointer: offset = {offset}, size = {size}"),
+            );
+        }
         let size = (size + 7) & !7;
 
         let offidx = (offnum - 1) as usize;
@@ -988,14 +1048,20 @@ impl<'a> PageMut<'a> {
         let pd_lower = r.pd_lower() as usize;
         let pd_upper = r.pd_upper() as usize;
         let pd_special = r.pd_special() as usize;
-        assert!(
+        if !(
             pd_lower >= SizeOfPageHeaderData
                 && pd_lower <= pd_upper
                 && pd_upper <= pd_special
                 && pd_special <= BLCKSZ
-                && pd_special == (pd_special + 7) & !7,
-            "corrupted page pointers: lower = {pd_lower}, upper = {pd_upper}, special = {pd_special}"
-        );
+                && pd_special == (pd_special + 7) & !7
+        ) {
+            data_corrupted(
+                ERROR,
+                alloc::format!(
+                    "corrupted page pointers: lower = {pd_lower}, upper = {pd_upper}, special = {pd_special}"
+                ),
+            );
+        }
 
         let nline = r.max_offset_number();
         // Bound the untrusted line-pointer count (derived from pd_lower) against
@@ -1022,10 +1088,12 @@ impl<'a> PageMut<'a> {
             debug_assert!(lp.has_storage());
             let size = lp.lp_len() as usize;
             let offset = lp.lp_off() as usize;
-            assert!(
-                offset >= pd_upper && offset + size <= pd_special && offset == (offset + 7) & !7,
-                "corrupted line pointer: offset = {offset}, size = {size}"
-            );
+            if !(offset >= pd_upper && offset + size <= pd_special && offset == (offset + 7) & !7) {
+                data_corrupted(
+                    ERROR,
+                    alloc::format!("corrupted line pointer: offset = {offset}, size = {size}"),
+                );
+            }
 
             if nextitm < itemnos.len() && offnum == itemnos[nextitm] {
                 nextitm += 1;
@@ -1048,11 +1116,15 @@ impl<'a> PageMut<'a> {
         }
 
         assert!(nextitm == itemnos.len(), "incorrect index offsets supplied");
-        assert!(
-            totallen <= pd_special - pd_lower,
-            "corrupted item lengths: total {totallen}, available space {}",
-            pd_special - pd_lower
-        );
+        if totallen > pd_special - pd_lower {
+            data_corrupted(
+                ERROR,
+                alloc::format!(
+                    "corrupted item lengths: total {totallen}, available space {}",
+                    pd_special - pd_lower
+                ),
+            );
+        }
 
         for (i, id) in newitemids[..nused].iter().enumerate() {
             self.set_item_id((i + 1) as OffsetNumber, *id);
@@ -1544,7 +1616,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "corrupted line pointer")]
     fn repair_fragmentation_rejects_overlong_item() {
         // A crafted line pointer whose itemoff is in-range but whose
         // itemoff + MAXALIGN(lp_len) runs past pd_special must be rejected
@@ -1564,7 +1635,11 @@ mod tests {
         let mut lp2 = pm.as_ref().item_id(2);
         lp2.set_unused();
         pm.set_item_id(2, lp2);
-        pm.repair_fragmentation();
+        // The extent conjunct is Rust-only hardening, but it reports through
+        // C's bufpage.c:756-759 ereport (ERRCODE_DATA_CORRUPTED, "corrupted
+        // line pointer: %u" with the offset only).
+        let err = unwind_pg_error(|| pm.repair_fragmentation());
+        assert_data_corrupted(&err, ERROR, "corrupted line pointer: 8160");
     }
 
     #[test]
@@ -1687,5 +1762,194 @@ mod tests {
         pm.index_multi_delete(&[1, 2, 3, 4]);
         assert_eq!(pm.as_ref().max_offset_number(), 0);
         assert_eq!(pm.as_ref().pd_upper(), pm.as_ref().pd_special());
+    }
+
+    // bufpage.c's ereport(ERROR|PANIC, (errcode(ERRCODE_DATA_CORRUPTED), ...))
+    // sites (PageAddItemExtended :214, PageRepairFragmentation :727/:756/:786,
+    // PageIndexTupleDelete :1070/:1089, PageIndexMultiDelete :1205/:1230/:1263,
+    // PageIndexTupleDeleteNoCompact :1311/:1327, PageIndexTupleOverwrite
+    // :1423/:1439) are XX001 errors on the ereport channel with C's message
+    // bytes, never bare string panics (which the statement boundary can only
+    // report as XX000). The entry points are infallible-shaped (C longjmps),
+    // so the error travels as a Box<PgError> panic payload — the bitmapset
+    // negative_member idiom — restored by pg_error_from_panic.
+    fn unwind_pg_error<R>(f: impl FnOnce() -> R) -> PgError {
+        let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+            .err()
+            .expect("corrupt page must raise");
+        ::types_error::pg_error_from_panic(payload)
+            .expect("corruption raises a structured PgError, not a bare string panic")
+    }
+
+    fn assert_data_corrupted(err: &PgError, level: ErrorLevel, msg: &str) {
+        assert_eq!(err.level(), level, "{}", err.message());
+        assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED, "{}", err.message());
+        assert_eq!(err.message(), msg);
+    }
+
+    #[test]
+    fn repair_fragmentation_corrupt_line_pointer_is_c_data_corrupted() {
+        // The verified fp4_t case: pd_upper forged 8128 -> 8160 so the second
+        // tuple's line pointer (off 8128) falls below pd_upper. C
+        // (bufpage.c:756): ERROR XX001 "corrupted line pointer: 8128".
+        let mut t = temp_page();
+        let mut pm = page_mut(&mut t);
+        pm.init(0);
+        add_n(&mut pm, 2, 28);
+        assert_eq!(pm.as_ref().item_id(2).lp_off(), 8128);
+        assert_eq!(pm.as_ref().pd_upper(), 8128);
+        pm.set_pd_upper(8160);
+        let err = unwind_pg_error(|| pm.repair_fragmentation());
+        assert_data_corrupted(&err, ERROR, "corrupted line pointer: 8128");
+    }
+
+    #[test]
+    fn repair_fragmentation_corrupt_page_pointers_is_c_data_corrupted() {
+        // bufpage.c:727: pd_lower below the header.
+        let mut t = temp_page();
+        let mut pm = page_mut(&mut t);
+        pm.init(0);
+        add_n(&mut pm, 2, 28);
+        pm.set_pd_lower(8);
+        let err = unwind_pg_error(|| pm.repair_fragmentation());
+        assert_data_corrupted(
+            &err,
+            ERROR,
+            "corrupted page pointers: lower = 8, upper = 8128, special = 8192",
+        );
+    }
+
+    #[test]
+    fn repair_fragmentation_corrupt_item_lengths_is_c_data_corrupted() {
+        // bufpage.c:786: every line pointer claims the whole tuple area, so
+        // the summed aligned lengths exceed pd_special - pd_lower.
+        let mut t = temp_page();
+        let mut pm = page_mut(&mut t);
+        pm.init(0);
+        add_n(&mut pm, 100, 8);
+        let r = pm.as_ref();
+        let (pd_lower, pd_upper, pd_special) = (r.pd_lower(), r.pd_upper(), r.pd_special());
+        assert_eq!((pd_lower, pd_upper, pd_special), (424, 7392, 8192));
+        for i in 1..=100 {
+            pm.set_item_id(i, ItemIdData::new(pd_upper, LP_NORMAL, pd_special - pd_upper));
+        }
+        let err = unwind_pg_error(|| pm.repair_fragmentation());
+        assert_data_corrupted(
+            &err,
+            ERROR,
+            "corrupted item lengths: total 80000, available space 7768",
+        );
+    }
+
+    #[test]
+    fn index_tuple_delete_corruption_is_c_data_corrupted() {
+        // bufpage.c:1070 / :1089.
+        let mut t = temp_page();
+        let mut pm = page_mut(&mut t);
+        fill_index_page(&mut pm, 3);
+        let pd_upper = pm.as_ref().pd_upper();
+        pm.set_item_id(1, ItemIdData::new(pd_upper - 8, LP_NORMAL, 16));
+        let err = unwind_pg_error(|| pm.index_tuple_delete(1));
+        assert_data_corrupted(
+            &err,
+            ERROR,
+            &alloc::format!("corrupted line pointer: offset = {}, size = 16", pd_upper - 8),
+        );
+        pm.set_pd_lower(8);
+        let err = unwind_pg_error(|| pm.index_tuple_delete(1));
+        assert_data_corrupted(
+            &err,
+            ERROR,
+            &alloc::format!("corrupted page pointers: lower = 8, upper = {pd_upper}, special = 8176"),
+        );
+    }
+
+    #[test]
+    fn index_multi_delete_corruption_is_c_data_corrupted() {
+        // bufpage.c:1205 / :1230 (the >2-item arm runs its own checks).
+        let mut t = temp_page();
+        let mut pm = page_mut(&mut t);
+        fill_index_page(&mut pm, 4);
+        let pd_upper = pm.as_ref().pd_upper();
+        pm.set_item_id(2, ItemIdData::new(pd_upper + 4, LP_NORMAL, 16));
+        let err = unwind_pg_error(|| pm.index_multi_delete(&[1, 2, 3]));
+        assert_data_corrupted(
+            &err,
+            ERROR,
+            &alloc::format!("corrupted line pointer: offset = {}, size = 16", pd_upper + 4),
+        );
+        pm.set_pd_lower(8);
+        let err = unwind_pg_error(|| pm.index_multi_delete(&[1, 2, 3]));
+        assert_data_corrupted(
+            &err,
+            ERROR,
+            &alloc::format!("corrupted page pointers: lower = 8, upper = {pd_upper}, special = 8176"),
+        );
+    }
+
+    #[test]
+    fn index_tuple_delete_no_compact_corruption_is_c_data_corrupted() {
+        // bufpage.c:1311 / :1327.
+        let mut t = temp_page();
+        let mut pm = page_mut(&mut t);
+        fill_index_page(&mut pm, 3);
+        let pd_upper = pm.as_ref().pd_upper();
+        pm.set_item_id(3, ItemIdData::new(pd_upper, LP_NORMAL, 8176 - pd_upper + 8));
+        let err = unwind_pg_error(|| pm.index_tuple_delete_no_compact(3));
+        assert_data_corrupted(
+            &err,
+            ERROR,
+            &alloc::format!(
+                "corrupted line pointer: offset = {pd_upper}, size = {}",
+                8176 - pd_upper + 8
+            ),
+        );
+        pm.set_pd_lower(8);
+        let err = unwind_pg_error(|| pm.index_tuple_delete_no_compact(3));
+        assert_data_corrupted(
+            &err,
+            ERROR,
+            &alloc::format!("corrupted page pointers: lower = 8, upper = {pd_upper}, special = 8176"),
+        );
+    }
+
+    #[test]
+    fn index_tuple_overwrite_corruption_is_c_data_corrupted() {
+        // bufpage.c:1423 / :1439.
+        let mut t = temp_page();
+        let mut pm = page_mut(&mut t);
+        fill_index_page(&mut pm, 3);
+        let pd_upper = pm.as_ref().pd_upper();
+        pm.set_item_id(1, ItemIdData::new(pd_upper - 8, LP_NORMAL, 16));
+        let err = unwind_pg_error(|| pm.index_tuple_overwrite(1, &[7u8; 16]));
+        assert_data_corrupted(
+            &err,
+            ERROR,
+            &alloc::format!("corrupted line pointer: offset = {}, size = 16", pd_upper - 8),
+        );
+        pm.set_pd_lower(8);
+        let err = unwind_pg_error(|| pm.index_tuple_overwrite(1, &[7u8; 16]));
+        assert_data_corrupted(
+            &err,
+            ERROR,
+            &alloc::format!("corrupted page pointers: lower = 8, upper = {pd_upper}, special = 8176"),
+        );
+    }
+
+    #[test]
+    fn add_item_corrupt_page_pointers_is_c_data_corrupted_panic() {
+        // bufpage.c:214: PageAddItemExtended raises PANIC (not ERROR) on
+        // corrupted page pointers.
+        let mut t = temp_page();
+        let mut pm = page_mut(&mut t);
+        pm.init(0);
+        add_n(&mut pm, 1, 28);
+        pm.set_pd_upper(8);
+        let err = unwind_pg_error(|| pm.add_item(&[1u8; 8], 0, PAI_IS_HEAP));
+        assert_data_corrupted(
+            &err,
+            PANIC,
+            "corrupted page pointers: lower = 28, upper = 8, special = 8192",
+        );
     }
 }

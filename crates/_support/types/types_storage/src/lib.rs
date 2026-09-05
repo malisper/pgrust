@@ -4,6 +4,9 @@
 #![allow(non_upper_case_globals)]
 
 extern crate alloc;
+// std only for the ereport-channel panic payload (`std::panic::panic_any`)
+// and its test-side `catch_unwind`; the crate stays no_std otherwise.
+extern crate std;
 
 pub mod aio;
 pub mod buf;
