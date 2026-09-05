@@ -26,6 +26,7 @@ const RLS_TBL: Oid = 3;
 const MATVIEW: Oid = 4;
 const SELF_VIEW: Oid = 5;
 const RLS_REC: Oid = 6;
+const VIEW2: Oid = 7;
 
 thread_local! {
     static OPENS: RefCell<Vec<(Oid, LOCKMODE)>> = const { RefCell::new(Vec::new()) };
@@ -47,6 +48,7 @@ fn entry(oid: Oid) -> Option<(&'static str, u8, bool)> {
         RLS_REC => Some(("rls_rec", RELKIND_RELATION, true)),
         MATVIEW => Some(("mv", RELKIND_MATVIEW, false)),
         SELF_VIEW => Some(("self_vw", RELKIND_VIEW, false)),
+        VIEW2 => Some(("vw2", RELKIND_VIEW, false)),
         _ => None,
     }
 }
@@ -65,7 +67,7 @@ fn fake_scan_pg_rewrite<'mcx>(
 ) -> PgResult<PgVec<'mcx, relcache_build_seams::PgRewriteRuleShape<'mcx>>> {
     let mut rows = mcx::vec_with_capacity_in(mcx, 1)?;
     let body: Option<Oid> = match ev_class {
-        VIEW => Some(TBL),
+        VIEW | VIEW2 => Some(TBL),
         SELF_VIEW => Some(SELF_VIEW),
         _ => None,
     };
@@ -857,4 +859,107 @@ fn junk_entries_renumbered_past_real_columns() {
         .map(|n| n.as_target_entry().unwrap().expr.as_const().unwrap().constvalue.as_i32())
         .collect();
     assert_eq!(vals, vec![1, 2]);
+}
+
+// audit-18.6 remediation b069: fireRIRrules walks this level's rtable BEFORE
+// recursing into cteList (rewriteHandler.c:2054-2186, then 2189-2201), so the
+// FROM-list view is expanded (rules probe + base-table locks) before the CTE's
+// view. The order is user-visible: restrict_nonsystem_relation_kind names the
+// FROM-list view, and base-table locks are taken in C's order.
+#[test]
+fn fire_rir_expands_from_list_view_before_cte_view() {
+    install();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut query = view_query(mcx, VIEW2);
+    let cte = types_nodes::parsenodes::CommonTableExpr {
+        ctename: Some("c"),
+        ctequery: Some(Node::mk(mcx, view_query(mcx, VIEW)).unwrap()),
+        ..Default::default()
+    };
+    query.cteList = NodeList::make1(mcx, Node::mk(mcx, cte).unwrap()).unwrap();
+
+    reset_opens();
+    let results = QueryRewrite(mcx, query).unwrap();
+    assert_eq!(results.len(), 1);
+    let q = &results[0];
+    let rte = q.rtable.nth(0).as_range_tbl_entry().unwrap();
+    assert_eq!(rte.rtekind, RTEKind::RTE_SUBQUERY);
+    let cte = q.cteList.nth(0).as_common_table_expr().unwrap();
+    let cte_query = cte.ctequery.unwrap().as_query().unwrap();
+    let cte_rte = cte_query.rtable.nth(0).as_range_tbl_entry().unwrap();
+    assert_eq!(cte_rte.rtekind, RTEKind::RTE_SUBQUERY);
+
+    let opened = opens();
+    let first = |oid: Oid| opened.iter().position(|(o, _)| *o == oid).expect("relation opened");
+    assert!(
+        first(VIEW2) < first(VIEW),
+        "FROM-list view must be probed before the CTE view (C order); opens = {opened:?}"
+    );
+}
+
+// audit-18.6 remediation b069: elog(ERROR, "unrecognized commandType: %d")
+// (rewriteHandler.c:2627/2633/3259/3265) is an XX000 error, never a panic.
+#[test]
+fn unrecognized_command_type_is_internal_error_not_panic() {
+    install();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let view = make(mcx, VIEW, "vw", RELKIND_VIEW, false);
+    let action = types_nodes::primnodes::MergeAction {
+        commandType: CmdType::CMD_SELECT,
+        ..Default::default()
+    };
+    let actions = NodeList::make1(mcx, Node::mk(mcx, action).unwrap()).unwrap();
+
+    let err = crate::view_has_instead_trigger(&view, CmdType::CMD_MERGE, &actions).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    assert_eq!(err.message(), "unrecognized commandType: 1");
+    let err = crate::view_has_instead_trigger(&view, CmdType::CMD_SELECT, &NodeList::nil()).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    assert_eq!(err.message(), "unrecognized CmdType: 1");
+
+    let err = crate::error_view_not_updatable(&view, CmdType::CMD_MERGE, &actions, None).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    assert_eq!(err.message(), "unrecognized commandType: 1");
+    let err = crate::error_view_not_updatable(&view, CmdType::CMD_SELECT, &NodeList::nil(), None)
+        .unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    assert_eq!(err.message(), "unrecognized CmdType: 1");
+}
+
+// audit-18.6 remediation b069: "more than one VALUES RTE found"
+// (rewriteHandler.c:4102-4104) is an elog(ERROR) in every build, not a
+// debug-only assertion silently overwriting the first VALUES RTE.
+#[test]
+fn insert_with_two_values_rtes_is_internal_error() {
+    install();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    fn values_rte<'mcx>(mcx: Mcx<'mcx>) -> Node<'mcx> {
+        rte_node(
+            mcx,
+            RangeTblEntry { rtekind: RTEKind::RTE_VALUES, inFromCl: true, ..Default::default() },
+        )
+    }
+    let mut rtable =
+        NodeList::make1(mcx, relation_rte(mcx, TBL, RELKIND_RELATION, RowExclusiveLock)).unwrap();
+    rtable.lappend(mcx, values_rte(mcx)).unwrap();
+    rtable.lappend(mcx, values_rte(mcx)).unwrap();
+    let mut fromlist = NodeList::make1(mcx, Node::mk_range_tbl_ref(mcx, 2).unwrap()).unwrap();
+    fromlist.lappend(mcx, Node::mk_range_tbl_ref(mcx, 3).unwrap()).unwrap();
+    let mut query = select1(mcx);
+    query.commandType = CmdType::CMD_INSERT;
+    query.resultRelation = 1;
+    query.targetList = NodeList::nil();
+    query.rtable = rtable;
+    query.jointree = Some(leak_in(
+        alloc_in(mcx, types_nodes::primnodes::FromExpr { fromlist, quals: None }).unwrap(),
+    ));
+
+    let Err(err) = QueryRewrite(mcx, query) else {
+        panic!("two VALUES RTEs must be an internal error")
+    };
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    assert_eq!(err.message(), "more than one VALUES RTE found");
 }

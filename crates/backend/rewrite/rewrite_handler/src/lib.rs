@@ -166,7 +166,8 @@ fn RewriteQuery<'mcx>(
             event,
             CmdType::CMD_INSERT | CmdType::CMD_UPDATE | CmdType::CMD_DELETE | CmdType::CMD_MERGE
         ) {
-            panic!("unrecognized commandType: {event:?}");
+            // rewriteHandler.c:4203 elog(ERROR, ...): an internal error, not a panic.
+            return Err(internal_error(&format!("unrecognized commandType: {}", event as i32)));
         }
         let result_relation = parsetree.resultRelation;
         debug_assert!(result_relation != 0);
@@ -192,10 +193,13 @@ fn RewriteQuery<'mcx>(
                         let rte_node = parsetree.rtable.nth(rtr.rtindex as usize - 1);
                         let rte = rte_of(rte_node);
                         if rte.rtekind == RTEKind::RTE_VALUES {
-                            debug_assert!(
-                                values_rte.is_none(),
-                                "more than one VALUES RTE found"
-                            );
+                            // rewriteHandler.c:4102-4104: "should not find more
+                            // than one VALUES RTE" is an elog(ERROR) in every
+                            // build, not a debug-only assertion.
+                            if values_rte.is_some() {
+                                table::table_close(rel, NoLock)?;
+                                return Err(internal_error("more than one VALUES RTE found"));
+                            }
                             values_rte = Some((rte, rtr.rtindex, rte_node));
                         }
                     }
@@ -294,7 +298,14 @@ fn RewriteQuery<'mcx>(
                             }
                             .expect("MergeAction node");
                         }
-                        other => panic!("unrecognized commandType: {other:?}"),
+                        other => {
+                            // rewriteHandler.c:4193 elog(ERROR, ...).
+                            table::table_close(rel, NoLock)?;
+                            return Err(internal_error(&format!(
+                                "unrecognized commandType: {}",
+                                other as i32
+                            )));
+                        }
                     }
                 }
             }
@@ -1266,16 +1277,6 @@ fn fireRIRrules<'mcx>(
             rewrite_search_cycle::rewriteSearchAndCycle(mcx, cte_node)?;
         }
     }
-    // C reassigns cte->ctequery = fireRIRrules(...); fireRIRrules returns its
-    // argument mutated in place, so the shared-ref recursion is equivalent.
-    for cte_node in &parsetree.cteList {
-        let cte = cte_node.as_common_table_expr().expect("cteList cell");
-        let cte_query_node = cte.ctequery.expect("analyzed CTE query");
-        let ctequery = cte_query_node.as_query().expect("analyzed CTE query");
-        let rir = fireRIRrules(mcx, ctequery, active_rirs)?;
-        stamp_query_flags(mcx, cte_query_node, &rir)?;
-        out.has_row_security |= rir.has_row_security;
-    }
     // The EXCLUDED pseudo-relation must stay RTE_RELATION; never expand it.
     let excl_rel_index = parsetree
         .onConflict
@@ -1364,6 +1365,29 @@ fn fireRIRrules<'mcx>(
             }
         }
         table::table_close(rel, NoLock)?;
+    }
+
+    // Recurse into subqueries in WITH (rewriteHandler.c:2189-2201) AFTER this
+    // level's rtable: the order fixes which view a restrict_nonsystem_relation_
+    // kind error names and the order base-table locks are taken in. C
+    // reassigns cte->ctequery = fireRIRrules(...); fireRIRrules returns its
+    // argument mutated in place, so the shared-ref recursion is equivalent.
+    for cte_node in &parsetree.cteList {
+        let cte = cte_node.as_common_table_expr().expect("cteList cell");
+        let cte_query_node = cte.ctequery.expect("analyzed CTE query");
+        // ApplyRetrieveRule's result-relation arm (rewriteHandler.c:1770-1837)
+        // runs for every Query fireRIRrules visits; a data-modifying CTE on a
+        // view with an INSTEAD OF trigger needs the target copy + expansion
+        // exactly like a top-level DML (QueryRewrite applies it there).
+        // SAFETY: rewriter-owned tree; no live refs derived from the node.
+        unsafe {
+            cte_query_node.with_mut::<Query, _>(|q| rewrite_dml_view_with_instead_trigger(mcx, q))
+        }
+        .expect("analyzed CTE query")?;
+        let ctequery = cte_query_node.as_query().expect("analyzed CTE query");
+        let rir = fireRIRrules(mcx, ctequery, active_rirs)?;
+        stamp_query_flags(mcx, cte_query_node, &rir)?;
+        out.has_row_security |= rir.has_row_security;
     }
 
     // fireRIRonSubLink (rewriteHandler.c). rtable/CTE subqueries were
@@ -1546,7 +1570,13 @@ fn view_has_instead_trigger(
                     CmdType::CMD_UPDATE => upd,
                     CmdType::CMD_DELETE => del,
                     CmdType::CMD_NOTHING => true,
-                    other => panic!("unrecognized commandType: {other:?}"),
+                    other => {
+                        // rewriteHandler.c:2627 elog(ERROR, ...).
+                        return Err(internal_error(&format!(
+                            "unrecognized commandType: {}",
+                            other as i32
+                        )));
+                    }
                 };
                 if !ok {
                     return Ok(false);
@@ -1554,7 +1584,10 @@ fn view_has_instead_trigger(
             }
             true
         }
-        other => panic!("unrecognized CmdType: {other:?}"),
+        other => {
+            // rewriteHandler.c:2633 elog(ERROR, ...).
+            return Err(internal_error(&format!("unrecognized CmdType: {}", other as i32)));
+        }
     })
 }
 
@@ -1851,13 +1884,22 @@ fn error_view_not_updatable(
                     }
                     CmdType::CMD_INSERT | CmdType::CMD_UPDATE | CmdType::CMD_DELETE
                     | CmdType::CMD_NOTHING => {}
-                    other => panic!("unrecognized commandType: {other:?}"),
+                    other => {
+                        // rewriteHandler.c:3259 elog(ERROR, ...).
+                        return Err(internal_error(&format!(
+                            "unrecognized commandType: {}",
+                            other as i32
+                        )));
+                    }
                 }
             }
             // view_has_instead_trigger guarantees an action lacked a trigger.
             internal_error(&format!("cannot merge into view \"{name}\""))
         }
-        other => panic!("unrecognized CmdType: {other:?}"),
+        other => {
+            // rewriteHandler.c:3265 elog(ERROR, ...).
+            return Err(internal_error(&format!("unrecognized CmdType: {}", other as i32)));
+        }
     })
 }
 
@@ -2109,7 +2151,13 @@ fn rewriteTargetView<'mcx>(
                 CmdType::CMD_MERGE => {
                     format!("cannot merge into column \"{col}\" of view \"{view_name}\"")
                 }
-                other => panic!("unrecognized CmdType: {other:?}"),
+                other => {
+                    // rewriteHandler.c:3451 elog(ERROR, ...).
+                    return Err(internal_error(&format!(
+                        "unrecognized CmdType: {}",
+                        other as i32
+                    )));
+                }
             };
             return Err(Box::new(
                 PgError::error(msg)
