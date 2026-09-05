@@ -775,14 +775,18 @@ fn check_is_domain(type_oid: Oid, typname: &types_nodes::list::NodeList<'_>) -> 
 // for integer literals above int32 — through uint32in_subr (numutils.c), so
 // hex/octal/signed spellings are accepted and out-of-range values raise 22003
 // "value ... is out of range for type oid" (22P02 only for malformed text).
-fn oidparse(node: types_nodes::Node<'_>) -> PgResult<Oid> {
+pub(crate) fn oidparse(node: types_nodes::Node<'_>) -> PgResult<Oid> {
     if let Some(i) = node.as_integer() {
         return Ok(i.ival as Oid);
     }
     if let Some(f) = node.as_float() {
         return numutils::uint32in_subr(f.fval, false, "oid", None).map(|(v, _)| v);
     }
-    panic!("oidparse: unexpected node type");
+    // oid.c:280: elog(ERROR, "unrecognized node type: %d") -- catchable XX000.
+    Err(Box::new(PgError::error(format!(
+        "unrecognized node type: {}",
+        node.node_tag() as i32
+    ))))
 }
 
 fn exec_grant_relation<'mcx>(mcx: Mcx<'mcx>, istmt: &mut InternalGrant<'_, '_>) -> PgResult<()> {

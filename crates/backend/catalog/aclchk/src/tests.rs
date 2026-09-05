@@ -111,3 +111,18 @@ fn pg_aclmask_defensive_arms_error_catchably() {
     let e = pg_aclmask_for_grant(ObjectType::OBJECT_EVENT_TRIGGER, 1, 0, 10, 0).unwrap_err();
     assert_eq!(e.message, "grantable rights not supported for event triggers");
 }
+
+#[test]
+fn oidparse_rejects_other_nodes_with_c_elog() {
+    // oid.c:280: elog(ERROR, "unrecognized node type: %d"), catchable XX000,
+    // never a panic (audit-18.6 b138).
+    let ctx = mcx::MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    assert_eq!(grant::oidparse(types_nodes::Node::mk_integer(mcx, 16384).unwrap()).unwrap(), 16384);
+    let e = grant::oidparse(types_nodes::Node::mk_string(mcx, "x").unwrap()).unwrap_err();
+    assert_eq!(
+        e.message,
+        format!("unrecognized node type: {}", types_nodes::NodeTag::T_String as i32)
+    );
+    assert_eq!(e.sqlstate, types_error::ERRCODE_INTERNAL_ERROR);
+}

@@ -62,8 +62,23 @@ fn cache_lookup_failed(relid: Oid) -> Box<PgError> {
     Box::new(PgError::error(format!("cache lookup failed for relation {relid}")))
 }
 
-fn quote_qualified(schema: &str, name: &str) -> String {
-    format!("{}.{}", quote_identifier(schema), quote_identifier(name))
+// quote_qualified_identifier (ruleutils.c): a NULL qualifier (namespace
+// gone, see namespace_name_or_temp) yields the bare quoted name.
+fn quote_qualified(schema: Option<&str>, name: &str) -> String {
+    match schema {
+        Some(schema) => format!("{}.{}", quote_identifier(schema), quote_identifier(name)),
+        None => quote_identifier(name).into_owned(),
+    }
+}
+
+// list_make2(schema, name) for the objname lists.  C stores a NULL schema
+// pointer that every consumer (strlist_to_textarray) would dereference; the
+// port carries the bare name instead.
+fn qualified_objname(schema: Option<String>, name: String) -> Vec<String> {
+    let mut objname = Vec::with_capacity(2);
+    objname.extend(schema);
+    objname.push(name);
+    objname
 }
 
 pub fn getObjectTypeDescription<'mcx>(
@@ -390,8 +405,8 @@ pub fn getObjectIdentityParts<'mcx>(
             };
             let schema = namespace_name_or_temp(mcx, stxnamespace)?;
             Ok(Some(ObjectIdentity {
-                identity: quote_qualified(&schema, &stxname),
-                objname: vec![schema, stxname],
+                identity: quote_qualified(schema.as_deref(), &stxname),
+                objname: qualified_objname(schema, stxname),
                 objargs: vec![],
             }))
         }
@@ -423,14 +438,12 @@ pub fn getObjectIdentityParts<'mcx>(
             }))
         }
         types_core::PROCEDURE_RELATION_ID => {
+            // format_procedure_extended(FORMAT_PROC_INVALID_AS_NULL) returns
+            // NULL for a missing procedure (objectaddress.c:4898); the arm
+            // breaks and the !missing_ok tail at :6035 raises "requested
+            // object address for unsupported object class 1255: text result".
             let Some(row) = proc_row(object.objectId)? else {
-                if !missing_ok {
-                    return Err(lookup_err(format!(
-                        "cache lookup failed for procedure {}",
-                        object.objectId
-                    )));
-                }
-                return Ok(None);
+                return identity_vanished(object, missing_ok);
             };
             let schema = namespace_name_or_temp(mcx, row.namespace)?;
             let mut args = String::new();
@@ -443,8 +456,12 @@ pub fn getObjectIdentityParts<'mcx>(
                 args.push_str(&tn);
                 objargs.push(tn);
             }
-            let identity = format!("{}({})", quote_qualified(&schema, &row.name), args);
-            Ok(Some(ObjectIdentity { identity, objname: vec![schema, row.name], objargs }))
+            let identity = format!("{}({})", quote_qualified(schema.as_deref(), &row.name), args);
+            Ok(Some(ObjectIdentity {
+                identity,
+                objname: qualified_objname(schema, row.name),
+                objargs,
+            }))
         }
         crate::CastRelationId => {
             let row = crate::description::scan_one_row(
@@ -508,18 +525,18 @@ pub fn getObjectIdentityParts<'mcx>(
             Ok(Some(ObjectIdentity { identity: s.clone(), objname: vec![s], objargs: vec![] }))
         }
         types_core::OPERATOR_RELATION_ID => {
-            // FORMAT_OPERATOR_FORCE_QUALIFY | FORMAT_OPERATOR_INVALID_AS_NULL.
+            // FORMAT_OPERATOR_FORCE_QUALIFY | FORMAT_OPERATOR_INVALID_AS_NULL:
+            // NULL for a missing operator (objectaddress.c:5121), then the
+            // !missing_ok tail at :6035.
             let Some(op) = operator_row(object.objectId)? else {
-                if !missing_ok {
-                    return Err(lookup_err(format!(
-                        "cache lookup failed for operator {}",
-                        object.objectId
-                    )));
-                }
-                return Ok(None);
+                return identity_vanished(object, missing_ok);
             };
             let schema = namespace_name_or_temp(mcx, op.namespace)?;
-            let mut identity = format!("{}.{}(", quote_identifier(&schema), op.name);
+            // format_operator_extended (regproc.c): "%s." only with a namespace.
+            let mut identity = match &schema {
+                Some(schema) => format!("{}.{}(", quote_identifier(schema), op.name),
+                None => format!("{}(", op.name),
+            };
             let mut objargs = Vec::with_capacity(2);
             if op.left != InvalidOid {
                 let t = format_type::format_type_be_qualified(op.left)?;
@@ -537,7 +554,7 @@ pub fn getObjectIdentityParts<'mcx>(
                 identity.push_str("NONE");
             }
             identity.push(')');
-            Ok(Some(ObjectIdentity { identity, objname: vec![schema, op.name], objargs }))
+            Ok(Some(ObjectIdentity { identity, objname: qualified_objname(schema, op.name), objargs }))
         }
         types_core::OPERATOR_CLASS_RELATION_ID => {
             let Some((opcmethod, opcname, opcnamespace)) =
@@ -556,15 +573,15 @@ pub fn getObjectIdentityParts<'mcx>(
             };
             let amname = crate::description::am_name(opcmethod)?;
             let schema = namespace_name_or_temp(mcx, opcnamespace)?;
-            Ok(Some(ObjectIdentity {
-                identity: format!(
-                    "{} USING {}",
-                    quote_qualified(&schema, &opcname),
-                    quote_identifier(&amname)
-                ),
-                objname: vec![amname, schema, opcname],
-                objargs: vec![],
-            }))
+            let identity = format!(
+                "{} USING {}",
+                quote_qualified(schema.as_deref(), &opcname),
+                quote_identifier(&amname)
+            );
+            let mut objname = vec![amname];
+            objname.extend(schema);
+            objname.push(opcname);
+            Ok(Some(ObjectIdentity { identity, objname, objargs: vec![] }))
         }
         types_core::OPERATOR_FAMILY_RELATION_ID => {
             getOpFamilyIdentity(mcx, object.objectId, missing_ok)
@@ -754,11 +771,12 @@ pub fn getObjectIdentityParts<'mcx>(
                 object.objectId,
             )?
             else {
+                // GetForeignDataWrapperExtended (foreign.c:63).
                 if !missing_ok {
-                    return Err(lookup_err(format!(
-                        "foreign-data wrapper with OID {} does not exist",
-                        object.objectId
-                    )));
+                    return Err(crate::description::cache_lookup_failed(
+                        "foreign-data wrapper",
+                        object.objectId,
+                    ));
                 }
                 return Ok(None);
             };
@@ -774,11 +792,12 @@ pub fn getObjectIdentityParts<'mcx>(
                 object.objectId,
             )?
             else {
+                // GetForeignServerExtended (foreign.c:137).
                 if !missing_ok {
-                    return Err(lookup_err(format!(
-                        "foreign server with OID {} does not exist",
-                        object.objectId
-                    )));
+                    return Err(crate::description::cache_lookup_failed(
+                        "foreign server",
+                        object.objectId,
+                    ));
                 }
                 return Ok(None);
             };
@@ -861,9 +880,13 @@ pub fn getObjectIdentityParts<'mcx>(
             let mut identity = format!("for role {}", quote_identifier(&username));
             let mut objname = vec![username];
             if OidIsValid(defaclnamespace) {
-                let schema = namespace_name_or_temp(mcx, defaclnamespace)?;
-                identity.push_str(&format!(" in schema {}", quote_identifier(&schema)));
-                objname.push(schema);
+                // objectaddress.c:5745: "in schema %s" with quote_identifier(NULL)
+                // when the namespace is gone; C would dereference NULL there.
+                // A gone namespace keeps the role-only form here.
+                if let Some(schema) = namespace_name_or_temp(mcx, defaclnamespace)? {
+                    identity.push_str(&format!(" in schema {}", quote_identifier(&schema)));
+                    objname.push(schema);
+                }
             }
             identity.push_str(match defaclobjtype {
                 b'r' => " on tables",
@@ -1109,8 +1132,8 @@ fn named_nsp_identity<'mcx>(
     cache_syscache::ReleaseSysCache(tup);
     let schema = namespace_name_or_temp(mcx, nsp)?;
     Ok(Some(ObjectIdentity {
-        identity: quote_qualified(&schema, &name),
-        objname: vec![schema, name],
+        identity: quote_qualified(schema.as_deref(), &name),
+        objname: qualified_objname(schema, name),
         objargs: vec![],
     }))
 }
@@ -1134,11 +1157,11 @@ fn getOpFamilyIdentity<'mcx>(
     };
     let amname = crate::description::am_name(opfmethod)?;
     let schema = namespace_name_or_temp(mcx, opfnamespace)?;
-    Ok(Some(ObjectIdentity {
-        identity: format!("{} USING {amname}", quote_qualified(&schema, &opfname)),
-        objname: vec![amname, schema, opfname],
-        objargs: vec![],
-    }))
+    let identity = format!("{} USING {amname}", quote_qualified(schema.as_deref(), &opfname));
+    let mut objname = vec![amname];
+    objname.extend(schema);
+    objname.push(opfname);
+    Ok(Some(ObjectIdentity { identity, objname, objargs: vec![] }))
 }
 
 struct OperatorRow {
@@ -1257,12 +1280,13 @@ fn getProcedureTypeDescription(oid: Oid, missing_ok: bool) -> PgResult<String> {
     }
 }
 
-fn namespace_name_or_temp<'mcx>(mcx: Mcx<'mcx>, nspid: Oid) -> PgResult<String> {
-    // C tolerates a concurrently dropped namespace (NULL qualifier); loud here.
-    let Some(nspname) = lsyscache::misc::get_namespace_name_or_temp(mcx, nspid)? else {
-        return Err(lookup_err(format!("cache lookup failed for namespace {nspid}")));
-    };
-    Ok(nspname.as_str().to_owned())
+// get_namespace_name_or_temp (lsyscache.c): NULL for a namespace that no
+// longer exists.  Every identity arm feeds it to quote_qualified_identifier
+// / list_make2, which C keeps NULL-tolerant (objectaddress.c:6117 and the
+// format_procedure/format_operator/collation/... twins), so a vanished
+// namespace yields an unqualified identity, not an error.
+fn namespace_name_or_temp<'mcx>(mcx: Mcx<'mcx>, nspid: Oid) -> PgResult<Option<String>> {
+    Ok(lsyscache::misc::get_namespace_name_or_temp(mcx, nspid)?.map(|s| s.as_str().to_owned()))
 }
 
 fn getRelationIdentity<'mcx>(
@@ -1279,8 +1303,8 @@ fn getRelationIdentity<'mcx>(
     let relname = relname.as_str().to_owned();
     let schema = namespace_name_or_temp(mcx, lsyscache::relation::get_rel_namespace(relid)?)?;
     Ok(Some(ObjectIdentity {
-        identity: quote_qualified(&schema, &relname),
-        objname: vec![schema, relname],
+        identity: quote_qualified(schema.as_deref(), &relname),
+        objname: qualified_objname(schema, relname),
         objargs: vec![],
     }))
 }

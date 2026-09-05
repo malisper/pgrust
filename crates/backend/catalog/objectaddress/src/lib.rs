@@ -1182,7 +1182,11 @@ fn oidparse(node: Node<'_>) -> PgResult<Oid> {
         let (v, _) = numutils::uint32in_subr(f.fval, false, "oid", None)?;
         return Ok(v);
     }
-    panic!("unsupported node type in oidparse");
+    // oid.c:280: elog(ERROR, "unrecognized node type: %d") -- catchable XX000.
+    Err(err(
+        types_error::ERRCODE_INTERNAL_ERROR,
+        format!("unrecognized node type: {}", node.node_tag() as i32),
+    ))
 }
 
 // open relation for relation-attached objects; caller closes it.
@@ -1491,8 +1495,29 @@ pub fn get_object_namespace(address: &ObjectAddress) -> PgResult<Oid> {
     if property.attnum_namespace == 0 {
         return Ok(InvalidOid);
     }
-    debug_assert!(property.oid_catcache_id != -1);
-    syscache_oid_field(property.oid_catcache_id, address.objectId, property.attnum_namespace)
+    let cache = property.oid_catcache_id;
+    debug_assert!(cache != -1);
+    // objectaddress.c:2590-2593: a syscache miss is elog(ERROR, "cache lookup
+    // failed for cache %d oid %u"), never a silent InvalidOid.
+    let Some(tup) = cache_syscache::SearchSysCache1(
+        cache,
+        cache_syscache::SysCacheKey::Value(datum::Datum::from_oid(address.objectId)),
+    )?
+    else {
+        return Err(cache_lookup_failed_for_cache(cache, address.objectId));
+    };
+    let d = cache_syscache::SysCacheGetAttrNotNull(cache, &tup, property.attnum_namespace)?;
+    let oid = d.as_oid();
+    cache_syscache::ReleaseSysCache(tup);
+    Ok(oid)
+}
+
+// get_object_namespace (objectaddress.c:2592): the miss text names the
+// syscache id, not the object class.  Catchable XX000.
+#[cold]
+#[inline(never)]
+fn cache_lookup_failed_for_cache(cache: i32, oid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!("cache lookup failed for cache {cache} oid {oid}")))
 }
 
 const Anum_pg_constraint_contypid: i32 = 10;
@@ -1849,5 +1874,48 @@ mod tests {
             e.message,
             format!("unrecognized object type: {}", ObjectType::OBJECT_TABLE as i32)
         );
+    }
+
+    // objectaddress.c:2708-2723 get_object_type returns the ObjectProperty
+    // objtype verbatim; for constraint (2606) and role membership (1261) that
+    // is -1, which every C consumer (aclcheck_error aclchk.c:3028, acldefault
+    // acl.c:872) reports as elog(ERROR, "unrecognized object type: -1").
+    // pgrust used to panic!() (audit-18.6 b138).
+    #[test]
+    fn get_object_type_without_objtype_is_a_catchable_xx000() {
+        for class_id in [ConstraintRelationId, AuthMemRelationId] {
+            let e = get_object_type(class_id, 1).unwrap_err();
+            assert_eq!(e.message(), "unrecognized object type: -1");
+            assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+            assert_eq!(e.level(), types_error::ERROR);
+        }
+    }
+
+    // oid.c:280 oidparse: a node that is neither Integer nor Float is
+    // elog(ERROR, "unrecognized node type: %d") -- catchable XX000, not a
+    // panic (audit-18.6 b138).
+    #[test]
+    fn oidparse_rejects_other_nodes_with_c_elog() {
+        let ctx = mcx::MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        assert_eq!(oidparse(Node::mk_integer(mcx, 16384).unwrap()).unwrap(), 16384);
+        let e = oidparse(Node::mk_string(mcx, "x").unwrap()).unwrap_err();
+        assert_eq!(
+            e.message(),
+            format!("unrecognized node type: {}", types_nodes::NodeTag::T_String as i32)
+        );
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    }
+
+    // objectaddress.c:2592 get_object_namespace: a syscache miss is
+    // elog(ERROR, "cache lookup failed for cache %d oid %u") -- catchable
+    // XX000 naming the syscache id -- never a silent InvalidOid (dropcmds.c:102
+    // relies on the error).
+    #[test]
+    fn get_object_namespace_miss_is_the_c_elog() {
+        let e = cache_lookup_failed_for_cache(cache_syscache::cacheinfo::PROCOID, 16384);
+        assert_eq!(e.message(), "cache lookup failed for cache 47 oid 16384");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(e.level(), types_error::ERROR);
     }
 }

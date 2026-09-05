@@ -153,7 +153,14 @@ pub fn get_object_type(class_id: Oid, object_id: Oid) -> types_error::PgResult<O
             Ok(get_relkind_objtype(relkind))
         }
         Some(t) => Ok(t),
-        None => panic!("unsupported object type: {class_id} for object {object_id}"),
+        // C returns the row's objtype of -1 here (constraint, role
+        // membership; objectaddress.c:2723) and every consumer of that value
+        // -- aclcheck_error (aclchk.c:3028), acldefault (acl.c:872) -- then
+        // raises elog(ERROR, "unrecognized object type: %d") with -1.  The
+        // Rust enum cannot carry -1, so raise that consumer error directly.
+        None => Err(Box::new(types_error::PgError::error(
+            "unrecognized object type: -1".to_string(),
+        ))),
     }
 }
 

@@ -781,22 +781,29 @@ pub fn getObjectDescription(
             } else {
                 None
             };
+            // objectaddress.c:3857-3867: an unknown defaclobjtype ("shouldn't
+            // get here") still describes the row, without the "on new ..."
+            // noun.
             let noun = match defaclobjtype {
-                b'r' => "relations",
-                b'S' => "sequences",
-                b'f' => "functions",
-                b'T' => "types",
-                b'n' => "schemas",
-                b'L' => "large objects",
-                other => panic!("unrecognized default ACL object type {}", other as char),
+                b'r' => Some("relations"),
+                b'S' => Some("sequences"),
+                b'f' => Some("functions"),
+                b'T' => Some("types"),
+                b'n' => Some("schemas"),
+                b'L' => Some("large objects"),
+                _ => None,
             };
-            Ok(Some(match nspname {
-                Some(nsp) => format!(
+            Ok(Some(match (noun, nspname) {
+                (Some(noun), Some(nsp)) => format!(
                     "default privileges on new {noun} belonging to role {rolename} in schema {nsp}"
                 ),
-                None => {
+                (Some(noun), None) => {
                     format!("default privileges on new {noun} belonging to role {rolename}")
                 }
+                (None, Some(nsp)) => {
+                    format!("default privileges belonging to role {rolename} in schema {nsp}")
+                }
+                (None, None) => format!("default privileges belonging to role {rolename}"),
             }))
         }
         crate::EventTriggerRelationId => {
