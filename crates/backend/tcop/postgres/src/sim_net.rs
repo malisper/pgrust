@@ -1789,7 +1789,10 @@ pub fn PostgresSimNetMain(argv: &[String], username: &str) -> ! {
         // PostmasterMain parity: the bgworker registry (main_entry.rs runs
         // it after shared memory; the standalone ladder never does) — the
         // leader's RegisterDynamicBackgroundWorker needs it.
-        postmaster_seams::bgworker_shmem_init::call();
+        if let Err(err) = postmaster_seams::bgworker_shmem_init::call() {
+            elog::emit_error_report_for(&err);
+            std::process::exit(1);
+        }
         postmaster_seams::wpool_maintain::call();
         let snap = SimInherited::capture();
         let code1 =
@@ -1887,7 +1890,10 @@ pub fn PostgresSimNetMain(argv: &[String], username: &str) -> ! {
         // PostmasterMain parity (the parquery pair): bgworker registry +
         // the warm pool — session 2's script includes a real Gather, so the
         // notify flow this corpus proves is exercised end-to-end.
-        postmaster_seams::bgworker_shmem_init::call();
+        if let Err(err) = postmaster_seams::bgworker_shmem_init::call() {
+            elog::emit_error_report_for(&err);
+            std::process::exit(1);
+        }
         postmaster_seams::wpool_maintain::call();
         let snap = SimInherited::capture();
         let code1 =

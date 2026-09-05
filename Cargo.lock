@@ -2279,7 +2279,9 @@ dependencies = [
  "postinit",
  "postmaster_seams",
  "procsignal",
+ "ps_status_seams",
  "shm_mq",
+ "shmem",
  "sinval",
  "timeout_seams",
  "types_core",
@@ -14593,6 +14595,7 @@ version = "0.0.0"
 dependencies = [
  "seam_core",
  "types_core",
+ "types_error",
 ]
 
 [[package]]

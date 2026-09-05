@@ -126,10 +126,10 @@ pub fn ephemeral_db_prewarm() -> bool {
 /// load and strictly before `BackgroundWorkerShmemInit`. Gated on the prefix
 /// GUC; `BGW_NEVER_RESTART` because a janitor that failed once must stay
 /// down until an operator restarts the server (containment contract).
-pub fn JanitorRegister() {
+pub fn JanitorRegister() -> types_error::PgResult<()> {
     let prefix = ephemeral_db_prefix();
     if prefix.is_empty() {
-        return;
+        return Ok(());
     }
     let max = types_core::fmgr::NAMEDATALEN as usize - 1;
     if prefix.len() > max {
@@ -142,7 +142,7 @@ pub fn JanitorRegister() {
                  ({max} bytes); ephemeral-database janitor not started"
             ),
         );
-        return;
+        return Ok(());
     }
     let bgw = bgworker::BackgroundWorker {
         bgw_name: "pgrust ephemeral-db janitor".to_string(),
@@ -157,7 +157,7 @@ pub fn JanitorRegister() {
         bgw_extra: [0; bgworker::BGW_EXTRALEN],
         bgw_notify_pid: 0,
     };
-    bgworker::RegisterBackgroundWorker(&bgw);
+    bgworker::RegisterBackgroundWorker(&bgw)
 }
 
 pub fn init_seams() {

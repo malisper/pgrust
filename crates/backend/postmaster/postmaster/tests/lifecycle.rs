@@ -153,7 +153,7 @@ fn full_ipci_bringup() -> &'static str {
         10 + 16 + 8 + 10 + types_storage::storage::NUM_SPECIAL_WORKER_PROCS,
     );
     pmchild_seams::init_postmaster_child_slots::call();
-    bgworker::BackgroundWorkerShmemInit();
+    bgworker::BackgroundWorkerShmemInit().expect("bgworker shmem init");
 
     let dir = std::env::temp_dir().join(format!("pgrust-lifecycle-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);

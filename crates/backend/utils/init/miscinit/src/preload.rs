@@ -107,6 +107,12 @@ pub fn process_shared_preload_libraries_in_progress() -> bool {
     IN_PROGRESS.get()
 }
 
+/// The C global is a plain writable `bool`; this is its store, for callers
+/// (and their tests) that stand in for process_shared_preload_libraries.
+pub fn set_process_shared_preload_libraries_in_progress(value: bool) {
+    IN_PROGRESS.set(value);
+}
+
 pub fn process_session_preload_libraries() -> PgResult<()> {
     load_libraries(
         session_preload_libraries_string_get().as_deref(),

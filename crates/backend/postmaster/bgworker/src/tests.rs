@@ -4,21 +4,69 @@ use super::*;
 
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 
+/// Server-log capture: (sqlstate, message, detail) of every report that
+/// reaches the emit-log hook on this thread.
+static LOGS: Mutex<Vec<(types_error::SqlState, String, Option<String>)>> = Mutex::new(Vec::new());
+
+fn capture_log(e: &PgError, _output_to_server: &mut bool) {
+    LOGS.lock().unwrap_or_else(|e| e.into_inner()).push((
+        e.sqlstate(),
+        e.message().to_string(),
+        e.detail().map(str::to_string),
+    ));
+}
+
+/// The process title the worker asked for (init_ps_display seam capture).
+static PS_TITLE: Mutex<Option<String>> = Mutex::new(None);
+
+fn capture_ps_title(fixed_part: Option<&str>) {
+    *PS_TITLE.lock().unwrap_or_else(|e| e.into_inner()) = fixed_part.map(str::to_string);
+}
+
 fn bringup() -> MutexGuard<'static, ()> {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         postmaster_seams::signal_postmaster_sigusr1::set(|| {});
+        ps_status_seams::init_ps_display::set(capture_ps_title);
     });
     let guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     g::set_max_worker_processes(4);
     g::set_max_parallel_workers(2);
     g::SetIsUnderPostmaster(true);
+    g::SetIsPostmasterEnvironment(true);
     g::SetMaxBackends(16);
     pmsignal::PMSignalShmemInit(8);
     procsignal::ProcSignalShmemInit();
     *REGISTRY.lock().unwrap_or_else(|e| e.into_inner()) = None;
-    BackgroundWorkerShmemInit();
+    BackgroundWorkerShmemInit().expect("shmem init");
     guard
+}
+
+/// Postmaster-side static registration state: no registry yet, empty
+/// pending list, IsUnderPostmaster false (bgworker.c:949 admits us).
+fn static_registration_setup() {
+    *REGISTRY.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    STATIC_PENDING.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    g::SetIsUnderPostmaster(false);
+    g::SetIsPostmasterEnvironment(true);
+}
+
+fn pending_names() -> Vec<String> {
+    STATIC_PENDING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .map(|w| w.bgw_name.clone())
+        .collect()
+}
+
+fn with_log_capture<R>(f: impl FnOnce() -> R) -> (R, Vec<(types_error::SqlState, String, Option<String>)>) {
+    LOGS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    let prior = elog::sink::set_emit_log_hook(Some(capture_log));
+    let r = f();
+    elog::sink::set_emit_log_hook(prior);
+    let logs = LOGS.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    (r, logs)
 }
 
 fn wmain(_arg: u64) -> PgResult<()> {
@@ -184,7 +232,7 @@ fn shmem_reinit_zeroes_parallel_counts() {
     let _ = register("z0", flags).expect("slot");
     with_registry(|reg| assert_eq!(reg.parallel_register_count, 1));
     ResetBackgroundWorkerCrashTimes();
-    BackgroundWorkerShmemInit();
+    BackgroundWorkerShmemInit().expect("shmem init");
     with_registry(|reg| {
         assert_eq!(reg.parallel_register_count, 0);
         assert_eq!(reg.parallel_terminate_count, 0);
@@ -221,17 +269,16 @@ fn get_background_worker_type_by_pid() {
 fn static_registration_takes_slot_at_shmem_init() {
     let _g = bringup();
     // Static registration happens in the postmaster, before shmem init.
-    *REGISTRY.lock().unwrap_or_else(|e| e.into_inner()) = None;
-    STATIC_PENDING.lock().unwrap_or_else(|e| e.into_inner()).clear();
-    g::SetIsUnderPostmaster(false);
+    static_registration_setup();
     let mut w = mk_worker("static launcher", BGWORKER_SHMEM_ACCESS);
     w.bgw_restart_time = 5;
-    RegisterBackgroundWorker(&w);
+    RegisterBackgroundWorker(&w).expect("register");
     // Too many: silently rejected at LOG (max_worker_processes = 4).
     for i in 0..5 {
-        RegisterBackgroundWorker(&mk_worker(&format!("s{i}"), BGWORKER_SHMEM_ACCESS));
+        RegisterBackgroundWorker(&mk_worker(&format!("s{i}"), BGWORKER_SHMEM_ACCESS))
+            .expect("register");
     }
-    BackgroundWorkerShmemInit();
+    BackgroundWorkerShmemInit().expect("shmem init");
     g::SetIsUnderPostmaster(true);
 
     with_registry(|reg| {
@@ -245,8 +292,149 @@ fn static_registration_takes_slot_at_shmem_init() {
     });
 
     // Registration after shmem init in a backend is refused at LOG, not panic.
-    RegisterBackgroundWorker(&mk_worker("late", BGWORKER_SHMEM_ACCESS));
+    RegisterBackgroundWorker(&mk_worker("late", BGWORKER_SHMEM_ACCESS)).expect("register");
     with_registry(|reg| {
         assert_eq!(reg.slots.iter().filter(|s| s.in_use).count(), 4);
     });
+}
+
+// bgworker.c:1046-1060: a non-parallel dynamic worker may ask for a restart
+// interval; the postmaster relaunches it after a crash (maybe_start_bgworkers)
+// instead of forgetting it, so its registered entry survives the exit report.
+#[test]
+fn dynamic_worker_with_restart_interval_registers_and_survives_crash() {
+    let _g = bringup();
+    let mut w = mk_worker("restarting", BGWORKER_SHMEM_ACCESS);
+    w.bgw_restart_time = 60;
+    let h = RegisterDynamicBackgroundWorker(w).expect("register").expect("slot");
+    assert_eq!(GetBackgroundWorkerPid(&h), (BgwHandleStatus::BGWH_NOT_YET_STARTED, 0));
+
+    BackgroundWorkerStateChange(true);
+    let idx = registered_idx_for(&h);
+    assert_eq!(rw_restart_time(idx), 60);
+    set_rw_pid(idx, 5150);
+    ReportBackgroundWorkerPID(idx);
+    assert_eq!(GetBackgroundWorkerPid(&h), (BgwHandleStatus::BGWH_STARTED, 5150));
+
+    // Crash exit (CleanupBackend: rw_pid = 0, crashed_at set, not terminated).
+    set_rw_pid(idx, 0);
+    set_rw_crashed_at(idx, 1);
+    ReportBackgroundWorkerExit(idx);
+    assert_eq!(GetBackgroundWorkerPid(&h), (BgwHandleStatus::BGWH_STOPPED, 0));
+    with_registry(|reg| {
+        assert!(reg.slots[h.slot as usize].in_use, "restartable worker keeps its slot");
+        assert_eq!(find_rw_by_slot(reg, h.slot), Some(idx), "registered entry survives for the restart");
+    });
+    assert_eq!(rw_crashed_at(idx), 1);
+}
+
+// bgworker.c:976: registering a static worker after BackgroundWorkerShmemInit
+// is elog(ERROR) (XX000) -- an error value, never a panic.
+#[test]
+fn static_registration_after_shmem_init_is_an_error_not_a_panic() {
+    let _g = bringup();
+    g::SetIsUnderPostmaster(false);
+    let e = RegisterBackgroundWorker(&mk_worker("late static", BGWORKER_SHMEM_ACCESS))
+        .expect_err("registration after shmem init must fail");
+    assert_eq!(e.level(), ERROR);
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    assert_eq!(e.message(), "cannot register background worker \"late static\" after shmem init");
+}
+
+// bgworker.c:1003-1008: the over-limit LOG carries ERRCODE_CONFIGURATION_LIMIT_
+// EXCEEDED and errdetail_plural -- singular "worker" at max_worker_processes = 1.
+#[test]
+fn too_many_static_workers_log_is_singular_at_one_with_c_sqlstate() {
+    let _g = bringup();
+    static_registration_setup();
+    g::set_max_worker_processes(1);
+    let (_, logs) = with_log_capture(|| {
+        RegisterBackgroundWorker(&mk_worker("first", BGWORKER_SHMEM_ACCESS)).expect("register");
+        RegisterBackgroundWorker(&mk_worker("second", BGWORKER_SHMEM_ACCESS)).expect("register");
+    });
+    assert_eq!(pending_names(), vec!["first".to_string()]);
+    let over = logs
+        .iter()
+        .find(|(_, m, _)| m == "too many background workers")
+        .unwrap_or_else(|| panic!("no over-limit LOG: {logs:?}"));
+    assert_eq!(over.0, types_error::ERRCODE_CONFIGURATION_LIMIT_EXCEEDED);
+    assert_eq!(
+        over.2.as_deref(),
+        Some("Up to 1 background worker can be registered with the current settings.")
+    );
+
+    g::set_max_worker_processes(2);
+    let (_, logs) = with_log_capture(|| {
+        RegisterBackgroundWorker(&mk_worker("second", BGWORKER_SHMEM_ACCESS)).expect("register");
+        RegisterBackgroundWorker(&mk_worker("third", BGWORKER_SHMEM_ACCESS)).expect("register");
+    });
+    let over = logs
+        .iter()
+        .find(|(_, m, _)| m == "too many background workers")
+        .unwrap_or_else(|| panic!("no over-limit LOG: {logs:?}"));
+    assert_eq!(
+        over.2.as_deref(),
+        Some("Up to 2 background workers can be registered with the current settings.")
+    );
+}
+
+// bgworker.c:949-969: outside the postmaster environment (single-user mode)
+// the registration is refused at LOG with ERRCODE_FEATURE_NOT_SUPPORTED --
+// silently while shared_preload_libraries is being processed; the notify-pid
+// refusal (bgworker.c:988) carries the same SQLSTATE.
+#[test]
+fn static_registration_outside_postmaster_environment_is_refused_at_log() {
+    let _g = bringup();
+    static_registration_setup();
+    g::SetIsPostmasterEnvironment(false);
+
+    let (_, logs) = with_log_capture(|| {
+        RegisterBackgroundWorker(&mk_worker("single-user", BGWORKER_SHMEM_ACCESS)).expect("register");
+    });
+    assert!(pending_names().is_empty(), "registered outside the postmaster: {:?}", pending_names());
+    let refused = logs
+        .iter()
+        .find(|(_, m, _)| m.contains("must be registered in \"shared_preload_libraries\""))
+        .unwrap_or_else(|| panic!("no refusal LOG: {logs:?}"));
+    assert_eq!(refused.0, types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+    assert_eq!(
+        refused.1,
+        "background worker \"single-user\": must be registered in \"shared_preload_libraries\""
+    );
+
+    miscinit::set_process_shared_preload_libraries_in_progress(true);
+    let (_, logs) = with_log_capture(|| {
+        RegisterBackgroundWorker(&mk_worker("preloading", BGWORKER_SHMEM_ACCESS)).expect("register");
+    });
+    miscinit::set_process_shared_preload_libraries_in_progress(false);
+    assert!(pending_names().is_empty());
+    assert!(logs.is_empty(), "shared_preload_libraries-time registration must be silent: {logs:?}");
+
+    g::SetIsPostmasterEnvironment(true);
+    let mut w = mk_worker("notifier", BGWORKER_SHMEM_ACCESS);
+    w.bgw_notify_pid = 42;
+    let (_, logs) = with_log_capture(|| {
+        RegisterBackgroundWorker(&w).expect("register");
+    });
+    assert!(pending_names().is_empty());
+    let refused = logs
+        .iter()
+        .find(|(_, m, _)| m.contains("only dynamic background workers can request notification"))
+        .unwrap_or_else(|| panic!("no notify refusal LOG: {logs:?}"));
+    assert_eq!(refused.0, types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+}
+
+// bgworker.c:742: the worker's process title is its bgw_name.
+#[test]
+fn worker_identity_sets_process_title_to_bgw_name() {
+    let _g = bringup();
+    *PS_TITLE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    let w = mk_worker("titled worker", BGWORKER_SHMEM_ACCESS);
+    adopt_worker_identity(&w);
+    assert_eq!(miscinit::GetMyBackendType(), BackendType::BgWorker);
+    assert_eq!(MyBgworkerEntry().map(|w| w.bgw_name), Some("titled worker".to_string()));
+    assert_eq!(
+        PS_TITLE.lock().unwrap_or_else(|e| e.into_inner()).as_deref(),
+        Some("titled worker")
+    );
 }

@@ -287,7 +287,7 @@ fn setup() {
         assert!(transam_xlog::XLogInsertAllowed());
 
         pmsignal::PMSignalShmemInit(64);
-        bgworker::BackgroundWorkerShmemInit();
+        bgworker::BackgroundWorkerShmemInit().expect("bgworker shmem init");
         procsignal::ProcSignalShmemInit();
         parallel::register_parallel_worker_entrypoint("substrate_e2e_main", e2e_worker_main);
         parallel::register_parallel_worker_entrypoint("substrate_e2e_error", e2e_error_main);

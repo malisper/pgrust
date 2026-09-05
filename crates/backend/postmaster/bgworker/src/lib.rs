@@ -6,8 +6,11 @@
 //! RegisterBackgroundWorker registers into a pending list drained by
 //! BackgroundWorkerShmemInit (C's BackgroundWorkerList); crash-restart
 //! scheduling lives in the postmaster (maybe_start_bgworkers /
-//! DetermineSleepTime), as in C. Dynamic registration still refuses
-//! bgw_restart_time >= 0 (no in-core user).
+//! DetermineSleepTime), as in C, for static and dynamic registrations alike
+//! (bgw_restart_time >= 0 dynamic workers are re-launched after the interval,
+//! bgworker.c:1046 admits them). The "Background Worker Data" ShmemIndex
+//! block (bgworker.c:166) is the C-sized reservation so pg_shmem_allocations
+//! lists it; the live registry stays in the mutex.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -31,6 +34,7 @@ use init_small::globals as g;
 use types_core::{pid_t, BackendType, InvalidOid, ProcessingMode};
 use types_error::{
     ErrorLocation, PgError, PgResult, DEBUG1, ERRCODE_ADMIN_SHUTDOWN,
+    ERRCODE_CONFIGURATION_LIMIT_EXCEEDED, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR, FATAL, LOG,
 };
 use types_startup::StartupData;
@@ -178,7 +182,31 @@ fn send_signal(pid: pid_t, signo: i32) {
     let _ = procsignal::SendThreadSignal(pid, signo);
 }
 
-pub fn BackgroundWorkerShmemInit() {
+/// BackgroundWorkerShmemSize (bgworker.c:145): offsetof(BackgroundWorkerArray,
+/// slot) + max_worker_processes * sizeof(BackgroundWorkerSlot), on the LP64
+/// C layout: the array header is int + 2 x uint32 padded to the slot's
+/// 8-byte alignment (16); a slot is bool + bool + pid_t + uint64 (16) plus
+/// BackgroundWorker = 2 x BGW_MAXLEN + 3 x int + MAXPGPATH + BGW_MAXLEN,
+/// padded to 8 for the Datum (1328), + Datum + BGW_EXTRALEN + pid_t, padded
+/// to 8 (1472) -- 1488 per slot.
+const BGW_ARRAY_HEADER_SIZE: usize = 16;
+const BGW_SLOT_SIZE: usize = 1488;
+
+pub fn BackgroundWorkerShmemSize() -> PgResult<usize> {
+    let size = BGW_ARRAY_HEADER_SIZE;
+    shmem::add_size(
+        size,
+        shmem::mul_size(g::max_worker_processes() as usize, BGW_SLOT_SIZE)?,
+    )
+}
+
+/// BackgroundWorkerShmemInit (bgworker.c:166): ShmemInitStruct("Background
+/// Worker Data", BackgroundWorkerShmemSize()) registers the block in the
+/// ShmemIndex, so pg_shmem_allocations lists it with C's size; a crash
+/// re-init finds it (found = true). The registry itself is the mutex above
+/// (module header), so the block carries no live state.
+pub fn BackgroundWorkerShmemInit() -> PgResult<()> {
+    let (_raw, _found) = shmem::ShmemInitStruct("Background Worker Data", BackgroundWorkerShmemSize()?)?;
     let mut guard = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
     let total_slots = g::max_worker_processes() as usize;
     let mut registered = guard.take().map(|r| r.registered).unwrap_or_default();
@@ -224,6 +252,7 @@ pub fn BackgroundWorkerShmemInit() {
         slots,
         registered,
     });
+    Ok(())
 }
 
 fn find_rw_by_slot(reg: &Registry, slotno: i32) -> Option<usize> {
@@ -508,25 +537,36 @@ fn bgw_truncate(s: &str) -> String {
 // postmaster-local BackgroundWorkerList).
 static STATIC_PENDING: Mutex<Vec<BackgroundWorker>> = Mutex::new(Vec::new());
 
-pub fn RegisterBackgroundWorker(worker: &BackgroundWorker) {
+/// RegisterBackgroundWorker (bgworker.c:940). C's only non-LOG exit is the
+/// elog(ERROR) for a registration after BackgroundWorkerShmemInit
+/// (bgworker.c:976); in the postmaster that ERROR has no handler and is
+/// promoted to FATAL by errstart (elog.c:377) -- here it is the `Err`.
+pub fn RegisterBackgroundWorker(worker: &BackgroundWorker) -> PgResult<()> {
     let mut worker = worker.clone();
 
     // Static background workers can only be registered in the postmaster.
-    if g::IsUnderPostmaster() {
+    if g::IsUnderPostmaster() || !g::IsPostmasterEnvironment() {
+        // In single-user mode shared_preload_libraries is processed in the
+        // backend too; a _PG_init that registers there is tolerated silently
+        // (bgworker.c:949-963).
+        if miscinit::process_shared_preload_libraries_in_progress() {
+            return Ok(());
+        }
         let _ = ereport(LOG)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
             .errmsg(format!(
                 "background worker \"{}\": must be registered in \"shared_preload_libraries\"",
                 worker.bgw_name
             ))
-            .finish(loc(989, "RegisterBackgroundWorker"));
-        return;
+            .finish(loc(965, "RegisterBackgroundWorker"));
+        return Ok(());
     }
 
     // Cannot register static background workers after shmem init.
     if REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
-        panic!(
-            "cannot register background worker \"{}\" after shmem init",
-            worker.bgw_name
+        return report(
+            ERROR,
+            format!("cannot register background worker \"{}\" after shmem init", worker.bgw_name),
         );
     }
 
@@ -541,34 +581,39 @@ pub fn RegisterBackgroundWorker(worker: &BackgroundWorker) {
     // but keep the postmaster going.
     if let Err(e) = SanityCheckBackgroundWorker(&mut worker) {
         let _ = ereport(LOG).errmsg(e.message().to_string()).finish(loc(0, "RegisterBackgroundWorker"));
-        return;
+        return Ok(());
     }
 
     if worker.bgw_notify_pid != 0 {
         let _ = ereport(LOG)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
             .errmsg(format!(
                 "background worker \"{}\": only dynamic background workers can request notification",
                 worker.bgw_name
             ))
-            .finish(loc(1014, "RegisterBackgroundWorker"));
-        return;
+            .finish(loc(988, "RegisterBackgroundWorker"));
+        return Ok(());
     }
 
     let mut pending = STATIC_PENDING.lock().unwrap_or_else(|e| e.into_inner());
     if pending.len() as i32 + 1 > g::max_worker_processes() {
+        let max = g::max_worker_processes();
         let _ = ereport(LOG)
+            .errcode(ERRCODE_CONFIGURATION_LIMIT_EXCEEDED)
             .errmsg("too many background workers")
-            .errdetail(format!(
-                "Up to {} background workers can be registered with the current settings.",
-                g::max_worker_processes()
-            ))
+            .errdetail_plural(
+                format!("Up to {max} background worker can be registered with the current settings."),
+                format!("Up to {max} background workers can be registered with the current settings."),
+                max.max(0) as u64,
+            )
             .errhint(
                 "Consider increasing the configuration parameter \"max_worker_processes\".",
             )
-            .finish(loc(1028, "RegisterBackgroundWorker"));
-        return;
+            .finish(loc(1003, "RegisterBackgroundWorker"));
+        return Ok(());
     }
     pending.push(worker);
+    Ok(())
 }
 
 pub fn RegisterDynamicBackgroundWorker(
@@ -581,10 +626,6 @@ pub fn RegisterDynamicBackgroundWorker(
     worker.bgw_name = bgw_truncate(&worker.bgw_name);
     worker.bgw_type = bgw_truncate(&worker.bgw_type);
     SanityCheckBackgroundWorker(&mut worker)?;
-
-    if worker.bgw_restart_time != BGW_NEVER_RESTART {
-        panic!("RegisterDynamicBackgroundWorker: bgworker restart machinery unported (bgw_restart_time >= 0)");
-    }
 
     let parallel = worker.bgw_flags & BGWORKER_CLASS_PARALLEL != 0;
 
@@ -865,6 +906,18 @@ pub fn adopt_worker_entry(worker: BackgroundWorker) {
     MY_BGWORKER_ENTRY.with(|e| *e.borrow_mut() = Some(worker));
 }
 
+/// bgworker.c:740-742: MyBgworkerEntry, MyBackendType = B_BG_WORKER, and the
+/// process title from the worker's name (init_ps_display(worker->bgw_name)).
+fn adopt_worker_identity(worker: &BackgroundWorker) {
+    MY_BGWORKER_ENTRY.with(|e| *e.borrow_mut() = Some(worker.clone()));
+    miscinit::SetMyBackendType(BackendType::BgWorker);
+    // The seam is the production title writer (ps_status::init_seams); a
+    // worker-shaped test thread without it has no title to set.
+    if ps_status_seams::init_ps_display::is_installed() {
+        ps_status_seams::init_ps_display::call(Some(worker.bgw_name.as_str()));
+    }
+}
+
 pub fn bgworker_die() -> PgResult<()> {
     let bgw_type = MY_BGWORKER_ENTRY
         .with(|e| e.borrow().as_ref().map(|w| w.bgw_type.clone()))
@@ -947,9 +1000,7 @@ pub fn BackgroundWorkerMain(startup_data: &StartupData) -> ! {
     let Some(worker) = worker else {
         fatal_exit(&PgError::new(FATAL, "unable to find bgworker entry"));
     };
-    MY_BGWORKER_ENTRY.with(|e| *e.borrow_mut() = Some(worker.clone()));
-
-    miscinit::SetMyBackendType(BackendType::BgWorker);
+    adopt_worker_identity(&worker);
 
     debug_assert!(miscinit::IsInitProcessingMode());
 

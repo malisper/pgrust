@@ -127,7 +127,7 @@ seam_core::seam!(
     // leader dies at "BackgroundWorkerData accessed before
     // BackgroundWorkerShmemInit". Seam-routed (tcop cannot depend on
     // bgworker: bgworker depends on tcop).
-    pub fn bgworker_shmem_init()
+    pub fn bgworker_shmem_init() -> types_error::PgResult<()>
 );
 
 seam_core::seam!(

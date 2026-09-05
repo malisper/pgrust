@@ -417,14 +417,14 @@ pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
 
     transam_xlog::LocalProcessControlFile(false)?;
 
-    launcher_seams::apply_launcher_register::call();
+    launcher_seams::apply_launcher_register::call()?;
 
     // pgrust-only (docs/design/test-views.md D1): the ephemeral-database
     // janitor's static registration, gated inside on a non-empty
     // pgrust.ephemeral_db_prefix. Same seam point as the launcher: after
     // config load, strictly before BackgroundWorkerShmemInit below.
     if janitor_seams::janitor_register::is_installed() {
-        janitor_seams::janitor_register::call();
+        janitor_seams::janitor_register::call()?;
     }
 
     miscinit_seams::process_shared_preload_libraries::call()?;
@@ -443,8 +443,9 @@ pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
     postinit::InitializeMaxBackends()?;
     pmchild_seams::init_postmaster_child_slots::call();
     // C runs this inside CreateSharedMemoryAndSemaphores; hoisted next to the
-    // slot-pool init (plain statics, no shmem placement here).
-    bgworker::BackgroundWorkerShmemInit();
+    // slot-pool init (the registry is a plain static; only the ShmemIndex
+    // row is placed).
+    bgworker::BackgroundWorkerShmemInit()?;
     if launcher_seams::apply_launcher_shmem_init::is_installed() {
         launcher_seams::apply_launcher_shmem_init::call();
     }

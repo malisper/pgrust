@@ -368,7 +368,7 @@ pub fn PostmasterStateMachine() -> PgResult<()> {
         ipci::ResetShmemAfterCrash()?;
         // C reset_shared() re-runs BackgroundWorkerShmemInit: counts zeroed,
         // surviving registrations recopied into slots.
-        bgworker::BackgroundWorkerShmemInit();
+        bgworker::BackgroundWorkerShmemInit()?;
         if launcher_seams::apply_launcher_shmem_init::is_installed() {
             launcher_seams::apply_launcher_shmem_init::call();
         }
@@ -541,8 +541,7 @@ pub(crate) fn bgworker_should_start_now(start_time: bgworker::BgWorkerStartTime)
     }
 }
 
-/// maybe_start_bgworkers (postmaster.c). Restart scheduling is unreachable
-/// this phase: registration rejects bgw_restart_time >= 0.
+/// maybe_start_bgworkers (postmaster.c).
 pub fn maybe_start_bgworkers() {
     const MAX_BGWORKERS_TO_LAUNCH: i32 = 100;
     let mut num_launched = 0;

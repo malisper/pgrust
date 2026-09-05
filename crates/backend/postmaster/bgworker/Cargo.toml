@@ -28,6 +28,8 @@ postmaster_seams = { path = "../postmaster_seams" }
 postgres = { path = "../../tcop/postgres" }
 postinit = { path = "../../utils/init/postinit" }
 procsignal = { path = "../../storage/ipc/procsignal" }
+ps_status_seams = { path = "../../utils/misc/ps_status_seams" }
+shmem = { path = "../../storage/ipc/shmem" }
 sinval = { path = "../../storage/ipc/sinval" }
 timeout_seams = { path = "../../utils/misc/timeout_seams" }
 types_core = { path = "../../../_support/types/types_core" }

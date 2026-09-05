@@ -5,7 +5,7 @@ seam_core::seam!(
     // Postmaster calls through the seam so the janitor crate (which depends
     // on dbcommands/xact for its work) never enters postmaster's dep graph —
     // same shape as launcher_seams::apply_launcher_register.
-    pub fn janitor_register()
+    pub fn janitor_register() -> types_error::PgResult<()>
 );
 
 seam_core::seam!(

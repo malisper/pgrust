@@ -230,9 +230,9 @@ pub fn ApplyLauncherShmemInit() {
 }
 
 // ApplyLauncherRegister (launcher.c:930): static bgworker registration.
-pub fn ApplyLauncherRegister() {
+pub fn ApplyLauncherRegister() -> PgResult<()> {
     if max_logical_replication_workers() == 0 || g::IsBinaryUpgrade() {
-        return;
+        return Ok(());
     }
     let bgw = bgworker::BackgroundWorker {
         bgw_name: "logical replication launcher".to_string(),
@@ -245,7 +245,7 @@ pub fn ApplyLauncherRegister() {
         bgw_extra: [0; bgworker::BGW_EXTRALEN],
         bgw_notify_pid: 0,
     };
-    bgworker::RegisterBackgroundWorker(&bgw);
+    bgworker::RegisterBackgroundWorker(&bgw)
 }
 
 fn launcher_bgw_main(main_arg: u64) -> PgResult<()> {
