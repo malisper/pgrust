@@ -26,4 +26,5 @@ resowner_seams = { path = "../../utils/resowner/resowner_seams" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 be_fsstubs_seams = { path = "../be_fsstubs_seams" }
 fd = { path = "../../storage/file/fd" }
+mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
 libc = "0.2"

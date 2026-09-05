@@ -278,6 +278,13 @@ pub fn be_loread<'mcx>(mcx: Mcx<'mcx>, fd: i32, mut len: i32) -> PgResult<Varlen
     if len < 0 {
         len = 0;
     }
+    // C: `palloc(VARHDRSZ + len)` — palloc's MaxAllocSize admission raises
+    // the catchable XX000 "invalid memory alloc request size N" before
+    // lo_read looks at the fd. VARHDRSZ is an int there, so the sum is C int
+    // arithmetic: for len near INT_MAX it wraps and is sign-extended to Size,
+    // and N in the message is that wrapped value.
+    let request = (VARHDRSZ as i32).wrapping_add(len) as isize as usize;
+    mcx::check_alloc_size(request)?;
     let mut image: PgVec<'mcx, u8> = PgVec::new_in(mcx);
     image
         .try_reserve_exact(VARHDRSZ as usize + len as usize)
@@ -297,10 +304,22 @@ pub fn be_lowrite<'mcx>(mcx: Mcx<'mcx>, fd: i32, wbuf: &[u8]) -> PgResult<i32> {
 const BUFSIZE: usize = 8192;
 
 fn to_fnamebuf(filename: &[u8]) -> String {
-    // text_to_cstring_buffer's encoding (server encoding bytes, NUL-terminated
-    // at MAXPGPATH); paths are opaque bytes to the OS so lossless round-trip
-    // matters more than utf8 validity, but regress fixtures are ASCII.
-    String::from_utf8_lossy(filename).into_owned()
+    // text_to_cstring_buffer(filename, fnamebuf, sizeof(fnamebuf)) into a
+    // char[MAXPGPATH] (be-fsstubs.c:439, :511): at most MAXPGPATH-1 bytes are
+    // copied, clipped on a character boundary of the database encoding
+    // (varlena.c text_to_cstring_buffer -> pg_mbcliplen), so an overlong
+    // filename reaches open(2) truncated — ENOENT for a long path of short
+    // components, and the clipped path in the error message — rather than
+    // ENAMETOOLONG with the full text. Paths are opaque bytes to the OS; the
+    // tree carries them as UTF-8 strings (non-UTF-8 database bytes fall under
+    // the tree-wide SQL_ASCII carve).
+    let limit = types_core::MAXPGPATH - 1;
+    let n = if filename.len() <= limit {
+        filename.len()
+    } else {
+        mbutils_seams::pg_mbcliplen::call(filename, filename.len() as i32, limit as i32) as usize
+    };
+    String::from_utf8_lossy(&filename[..n]).into_owned()
 }
 
 fn lo_import_internal<'mcx>(mcx: Mcx<'mcx>, filename: &[u8], lobjOid: Oid) -> PgResult<Oid> {
@@ -372,14 +391,21 @@ pub fn be_lo_export<'mcx>(mcx: Mcx<'mcx>, lobjId: Oid, filename: &[u8]) -> PgRes
 
     let fnamebuf = to_fnamebuf(filename);
 
-    // C reduces the backend's normal 077 umask to 022 around the open so the
-    // exported file lands as 0644 (rw-r--r--) rather than world-writable, then
-    // restores it. umask is process-global and pgrust runs a thread per
-    // backend, so mutating it here would race with file creation on other
-    // threads (their opens would briefly see the wrong mask). Instead create
-    // the file with a narrow, umask-proof owner-only mode and fchmod it to the
-    // exact bits C's masked 0666 yields — identical resulting permissions with
-    // no shared-state mutation. See syslogger::logfile_open for the same idiom.
+    // C reduces the backend's normal 077 umask to 022 around the open so a
+    // file the open CREATES lands as 0644 (rw-r--r--) rather than
+    // world-writable, then restores it; a file that already exists is only
+    // truncated — open(2) ignores the mode bits then, so its permissions are
+    // untouched (be-fsstubs.c:513). umask is process-global and pgrust runs a
+    // thread per backend, so mutating it here would race with file creation
+    // on other threads (their opens would briefly see the wrong mask).
+    // Instead note whether the target pre-exists, create with a narrow,
+    // umask-proof owner-only mode, and fchmod a file this open created to the
+    // exact bits C's masked 0666 yields — identical resulting permissions
+    // with no shared-state mutation. See syslogger::logfile_open and
+    // copy::to (BeginCopyTo) for the same idiom. (metadata follows symlinks,
+    // as open does.)
+    #[cfg_attr(target_family = "wasm", allow(unused_variables))]
+    let preexisting = std::fs::metadata(&fnamebuf).is_ok();
     let fd = fd::desc::OpenTransientFilePerm(
         &fnamebuf,
         libc::O_CREAT | libc::O_WRONLY | libc::O_TRUNC,
@@ -395,16 +421,19 @@ pub fn be_lo_export<'mcx>(mcx: Mcx<'mcx>, lobjId: Oid, filename: &[u8]) -> PgRes
             .into_error()
             .into());
     }
-    // Set the exact permissions C produces (0666 & ~022 == 0644), independent
-    // of the process umask.
+    // Set the exact permissions C produces for a file it created
+    // (0666 & ~022 == 0644), independent of the process umask; a pre-existing
+    // file keeps whatever mode it had, as C's open(O_CREAT|O_TRUNC) leaves it.
     // SAFETY: fd is the descriptor just created above.
     // wasm32: no mode bits on WASI files — no-op.
     #[cfg(not(target_family = "wasm"))]
-    unsafe {
-        libc::fchmod(
-            fd,
-            libc::S_IRUSR | libc::S_IWUSR | libc::S_IRGRP | libc::S_IROTH,
-        );
+    if !preexisting {
+        unsafe {
+            libc::fchmod(
+                fd,
+                libc::S_IRUSR | libc::S_IWUSR | libc::S_IRGRP | libc::S_IROTH,
+            );
+        }
     }
 
     let result = (|| -> PgResult<()> {
@@ -620,6 +649,33 @@ pub fn init_seams() {
 #[cfg(all(test, unix))]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
+
+    // be-fsstubs.c:372 be_loread: `palloc(VARHDRSZ + len)` is admitted by
+    // palloc's MaxAllocSize check before lo_read ever looks at the fd, so an
+    // oversized len is the catchable XX000 "invalid memory alloc request size
+    // N" — never 53200 "out of memory" — and N is the C int sum (VARHDRSZ is
+    // an int) wrapped at INT_MAX and sign-extended to Size.
+    #[test]
+    fn loread_len_past_max_alloc_is_invalid_alloc_request() {
+        let ctx = mcx::MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        for (len, request) in [
+            (1_073_741_824i32, 1_073_741_828usize),
+            (1_073_741_820, 1_073_741_824),
+            (i32::MAX, (4i32.wrapping_add(i32::MAX)) as isize as usize),
+        ] {
+            let e = crate::be_loread(mcx, 0, len).expect_err("request past MaxAllocSize");
+            assert_eq!(
+                e.message(),
+                format!("invalid memory alloc request size {request}"),
+                "len {len}"
+            );
+            assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR, "len {len}");
+        }
+        // An admitted len reaches lo_read, whose fd check fails as before.
+        let e = crate::be_loread(mcx, 0, 16).expect_err("fd 0 is not open");
+        assert_eq!(e.message(), "invalid large-object descriptor: 0");
+    }
 
     // The lo_export permission bits C produces: 0666 & ~022.
     const EXPORT_FILE_MODE: libc::mode_t =

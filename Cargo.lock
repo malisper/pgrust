@@ -2144,6 +2144,7 @@ dependencies = [
  "guc_tables",
  "large_object",
  "libc",
+ "mbutils_seams",
  "mcx",
  "miscinit",
  "pg_largeobject",
