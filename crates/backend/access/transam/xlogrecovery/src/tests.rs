@@ -569,3 +569,254 @@ mod mask_compare_lane {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// read_backup_label / read_tablespace_map error surfaces (xlogrecovery.c:
+// 1260-1358, 1395-1469). The twelve verified rows of batch
+// b192-unit-fp-transam-xlogrecovery-p1-1 were fixed by #1800 (49124e31e1d):
+// every "invalid data in file" FATAL carries 55000, read failures carry
+// errcode_for_file_access() + strerror (%m), the START TIME / LABEL lines are
+// logged at DEBUG1, and the file is read as raw bytes (a non-UTF-8 label byte
+// is not a read failure). These are the current-main witnesses per arm.
+//
+// A FATAL runs errfinish's proc_exit(1) arm (elog.c:600-ish; stack.rs); the
+// stubbed proc_exit seam panics so catch_unwind observes it, and the emit
+// hook captures the report (level, SQLSTATE, message, DETAIL, HINT) first.
+
+const LABEL_HEAD: &str =
+    "START WAL LOCATION: 0/16000028 (file 000000010000000000000016)\nCHECKPOINT LOCATION: 0/16000060\n";
+const LABEL_TRAILER: &str =
+    "BACKUP METHOD: streamed\nBACKUP FROM: primary\nSTART TIME: 2026-09-03 03:49:34 PDT\nLABEL: fp label\n";
+
+static REPORTS: std::sync::Mutex<Vec<types_error::PgError>> = std::sync::Mutex::new(Vec::new());
+
+fn capture_report(err: &types_error::PgError, _output_to_server: &mut bool) {
+    REPORTS.lock().unwrap().push(err.clone());
+}
+
+fn install_fatal_exit_seams() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        if !pgstat_seams::pgstat_set_session_end_cause_fatal::is_installed() {
+            pgstat_seams::pgstat_set_session_end_cause_fatal::set(|| {});
+        }
+        if !init_small_seams::my_proc_pid::is_installed() {
+            init_small_seams::my_proc_pid::set(|| 4242);
+        }
+        if !ipc_seams::proc_exit::is_installed() {
+            ipc_seams::proc_exit::set(|code, _pid| panic!("proc_exit({code})"));
+        }
+    });
+}
+
+// Runs `f` (a reader that must FATAL) under the capturing emit hook; the
+// FATAL report is returned after the proc_exit(1) unwind is caught.
+fn expect_fatal(f: impl FnOnce() -> PgResult<()>) -> types_error::PgError {
+    install_fatal_exit_seams();
+    REPORTS.lock().unwrap().clear();
+    let prev = elog::set_emit_log_hook(Some(capture_report));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    elog::set_emit_log_hook(prev);
+    elog::FlushErrorState();
+    let payload = result.expect_err("a FATAL report must reach proc_exit(1)");
+    assert_eq!(payload.downcast_ref::<String>().map(String::as_str), Some("proc_exit(1)"));
+    let err = REPORTS.lock().unwrap().pop().expect("FATAL report was emitted");
+    assert_eq!(err.level, FATAL);
+    err
+}
+
+fn read_label_fatal(dir: &std::path::Path, content: &[u8]) -> types_error::PgError {
+    std::fs::write(dir.join(BACKUP_LABEL_FILE), content).unwrap();
+    expect_fatal(|| backup_label::read_backup_label().map(drop))
+}
+
+fn read_map_fatal(dir: &std::path::Path, content: &[u8]) -> types_error::PgError {
+    std::fs::write(dir.join(TABLESPACE_MAP), content).unwrap();
+    expect_fatal(|| backup_label::read_tablespace_map().map(drop))
+}
+
+// xlogrecovery.c:1278/1285: the START WAL LOCATION and CHECKPOINT LOCATION
+// fscanf failures are FATAL errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+// "invalid data in file \"backup_label\"" (pre-#1800 pgrust: XX000). Audit
+// rows 6521841a (garbage file) and a5b3dac7 (CHECKPOINT LOCATION: junk).
+#[test]
+fn backup_label_invalid_data_is_fatal_55000_like_c() {
+    let _g = datadir_lock();
+    let dir = fixture_datadir("label_invalid");
+    for content in [
+        &b"garbage\n"[..],
+        b"START WAL LOCATION: 0/16000028 (file 000000010000000000000016)\nCHECKPOINT LOCATION: junk\n",
+    ] {
+        let err = read_label_fatal(&dir, content);
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE);
+        assert_eq!(err.message(), "invalid data in file \"backup_label\"");
+        assert_eq!(err.detail(), None);
+        assert_eq!(err.hint(), None);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// xlogrecovery.c:1341-1348: the in-order START TIMELINE cross-check is FATAL
+// 55000 with errdetail("Timeline ID parsed is %u, but expected %u."). Audit
+// row ced9841a.
+#[test]
+fn backup_label_timeline_mismatch_is_fatal_55000_with_detail_like_c() {
+    let _g = datadir_lock();
+    let dir = fixture_datadir("label_tli");
+    let content = format!("{LABEL_HEAD}{LABEL_TRAILER}START TIMELINE: 2\n");
+    let err = read_label_fatal(&dir, content.as_bytes());
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE);
+    assert_eq!(err.message(), "invalid data in file \"backup_label\"");
+    assert_eq!(err.detail(), Some("Timeline ID parsed is 2, but expected 1."));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// xlogrecovery.c:1355-1359: INCREMENTAL FROM LSN is FATAL 55000 "this is an
+// incremental backup, not a data directory" + the pg_combinebackup hint.
+// Audit row 56d75d79.
+#[test]
+fn backup_label_incremental_is_fatal_55000_with_hint_like_c() {
+    let _g = datadir_lock();
+    let dir = fixture_datadir("label_incr");
+    let content = format!(
+        "{LABEL_HEAD}{LABEL_TRAILER}START TIMELINE: 1\nINCREMENTAL FROM LSN: 0/2000028\nINCREMENTAL FROM TLI: 1\n"
+    );
+    let err = read_label_fatal(&dir, content.as_bytes());
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE);
+    assert_eq!(err.message(), "this is an incremental backup, not a data directory");
+    assert_eq!(err.hint(), Some("Use pg_combinebackup to reconstruct a valid data directory."));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// xlogrecovery.c:1262-1266 / 1401-1405: a read failure other than ENOENT is
+// FATAL errcode_for_file_access() "could not read file \"%s\": %m" — the
+// strerror text, no "(os error N)" suffix (pre-#1800 pgrust: XX000 + io::Error
+// Display). ELOOP (self-referential symlink) exercises the default XX000 arm
+// for any uid; EACCES (mode 000) the 42501 arm as a non-root user. Audit rows
+// a3aac855 (backup_label) and d9f49f36 (tablespace_map).
+fn unreadable_file_is_fatal_file_access_like_c(tag: &str, file: &str, read: fn() -> PgResult<()>) {
+    let _g = datadir_lock();
+    let dir = fixture_datadir(tag);
+    std::os::unix::fs::symlink(file, dir.join(file)).unwrap();
+    let err = expect_fatal(read);
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    assert_eq!(
+        err.message(),
+        format!("could not read file \"{file}\": {}", elog::errno::strerror(libc::ELOOP))
+    );
+    if unsafe { libc::geteuid() } != 0 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::remove_file(dir.join(file)).unwrap();
+        std::fs::write(dir.join(file), b"").unwrap();
+        std::fs::set_permissions(dir.join(file), std::fs::Permissions::from_mode(0o000)).unwrap();
+        let err = expect_fatal(read);
+        std::fs::set_permissions(dir.join(file), std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INSUFFICIENT_PRIVILEGE);
+        assert_eq!(
+            err.message(),
+            format!("could not read file \"{file}\": {}", elog::errno::strerror(libc::EACCES))
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn backup_label_unreadable_is_fatal_file_access_like_c() {
+    unreadable_file_is_fatal_file_access_like_c("label_eacces", BACKUP_LABEL_FILE, || {
+        backup_label::read_backup_label().map(drop)
+    });
+}
+
+#[test]
+fn tablespace_map_unreadable_is_fatal_file_access_like_c() {
+    unreadable_file_is_fatal_file_access_like_c("map_eacces", TABLESPACE_MAP, || {
+        backup_label::read_tablespace_map().map(drop)
+    });
+}
+
+// xlogrecovery.c:1432/1441/1461: every tablespace_map reject (no space in the
+// line, strtoul trailing junk, unterminated last line) is FATAL 55000
+// "invalid data in file \"tablespace_map\"". Audit rows d6e577be, 37b281d6,
+// 8eaef6c5.
+#[test]
+fn tablespace_map_invalid_data_is_fatal_55000_like_c() {
+    let _g = datadir_lock();
+    let dir = fixture_datadir("map_invalid");
+    for content in [&b"nospace\n"[..], b"16384x /tmp/ts\n", b"16385 /tmp/ts"] {
+        let err = read_map_fatal(&dir, content);
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE);
+        assert_eq!(err.message(), "invalid data in file \"tablespace_map\"");
+        assert_eq!(err.detail(), None);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// Reads backup_label under log_min_messages=debug1 with the emit hook
+// capturing every report; returns the label and the emitted messages.
+fn read_label_at_debug1(content: &[u8]) -> (backup_label::BackupLabel, Vec<String>) {
+    let dir = fixture_datadir("label_debug1");
+    std::fs::write(dir.join(BACKUP_LABEL_FILE), content).unwrap();
+    let prev_min = elog::config::log_min_messages();
+    elog::config::set_log_min_messages(types_error::DEBUG1);
+    REPORTS.lock().unwrap().clear();
+    let prev = elog::set_emit_log_hook(Some(capture_report));
+    let r = backup_label::read_backup_label();
+    elog::set_emit_log_hook(prev);
+    elog::config::set_log_min_messages(prev_min);
+    let _ = std::fs::remove_dir_all(&dir);
+    let label = r.expect("a well-formed backup_label is read").expect("backup_label present");
+    let reports = REPORTS.lock().unwrap();
+    for e in reports.iter() {
+        assert_eq!(e.level, types_error::DEBUG1, "unexpected report {:?}", e.message());
+    }
+    let msgs = reports.iter().map(|e| e.message().to_string()).collect();
+    (label, msgs)
+}
+
+// xlogrecovery.c:1327-1335 / 1349-1352: START TIME, LABEL and START TIMELINE
+// are each logged at DEBUG1 (errmsg_internal), in that order (pre-#1800
+// pgrust had no START TIME / LABEL arm). Audit rows 4497bc1c and 5080bc8c.
+#[test]
+fn backup_label_start_time_and_label_are_logged_at_debug1_like_c() {
+    let _g = datadir_lock();
+    let content = format!("{LABEL_HEAD}{LABEL_TRAILER}START TIMELINE: 1\n");
+    let (label, msgs) = read_label_at_debug1(content.as_bytes());
+    assert!(label.backup_end_required);
+    assert_eq!(
+        msgs,
+        vec![
+            "backup time 2026-09-03 03:49:34 PDT in file \"backup_label\"".to_string(),
+            "backup label fp label in file \"backup_label\"".to_string(),
+            "backup timeline 1 in file \"backup_label\"".to_string(),
+        ]
+    );
+}
+
+// xlogrecovery.c:1260 reads the file bytewise (fscanf): a raw 0xE9 in the
+// LABEL line is not a read failure — C logs the label and starts recovery.
+// Pre-#1800 pgrust read_to_string()ed the file and FATALed "could not read
+// file \"backup_label\": stream did not contain valid UTF-8" (XX000). Audit
+// row e063214a. (Residual, outside this crate: the server-log line renders
+// the byte as U+FFFD because elog's log writer takes the String rendering —
+// PgError.message_raw only feeds the frontend wire — while C writes the raw
+// byte.)
+#[test]
+fn backup_label_with_non_utf8_label_byte_starts_recovery_like_c() {
+    let _g = datadir_lock();
+    let mut content = format!(
+        "{LABEL_HEAD}BACKUP METHOD: streamed\nBACKUP FROM: primary\nSTART TIME: 2026-09-03 03:49:34 PDT\nLABEL: caf"
+    )
+    .into_bytes();
+    content.extend_from_slice(b"\xe9\nSTART TIMELINE: 1\n");
+    let (label, msgs) = read_label_at_debug1(&content);
+    assert_eq!(label.redo_start_lsn, 0x16000028);
+    assert_eq!(label.checkpoint_loc, 0x16000060);
+    assert_eq!(label.backup_label_tli, 1);
+    assert!(label.backup_end_required);
+    assert!(
+        msgs.iter()
+            .any(|m| m.starts_with("backup label caf") && m.ends_with(" in file \"backup_label\"")),
+        "DEBUG1 backup label line missing; got {msgs:?}"
+    );
+    assert!(msgs.contains(&"backup timeline 1 in file \"backup_label\"".to_string()));
+}

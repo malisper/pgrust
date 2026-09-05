@@ -115,6 +115,10 @@ condition_variable_seams = { path = "../../../storage/lmgr/condition_variable_se
 deadlock_seams = { path = "../../../storage/lmgr/deadlock_seams" }
 freespace_seams = { path = "../../../storage/freespace/freespace_seams" }
 ipc_seams = { path = "../../../storage/ipc/ipc_seams" }
+# FATAL witnesses (tests.rs): errfinish's FATAL arm runs the pgstat/pid seams
+# before proc_exit; stubs let catch_unwind observe C's proc_exit(1).
+pgstat_seams = { path = "../../../utils/activity/pgstat_seams" }
+init_small_seams = { path = "../../../utils/init/init_small_seams" }
 latch_seams = { path = "../../../storage/ipc/latch_seams" }
 lmgr_seams = { path = "../../../storage/lmgr/lmgr_seams" }
 lock_seams = { path = "../../../storage/lmgr/lock_seams" }
