@@ -13,6 +13,9 @@ seam_core::seam!(
         // VacuumParams.log_min_duration (autovacuum's instrument threshold;
         // -1 for a manual ANALYZE).
         log_min_duration: i32,
+        // vacuum.c's bstrategy (the BAS_VACUUM ring the sample scan and the
+        // analyze-only index cleanup read through).
+        bstrategy: types_storage::buf::BufferAccessStrategy,
         in_outer_xact: bool,
     ) -> PgResult<()>
 );

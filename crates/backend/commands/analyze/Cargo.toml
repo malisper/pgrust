@@ -52,6 +52,7 @@ relcache_seams = { path = "../../utils/cache/relcache_seams" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 vacuum_seams = { path = "../vacuum_seams" }
 commands_vacuum = { path = "../vacuum" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
 commands_define = { path = "../commands_define" }
 parser_small1 = { path = "../../parser/parser_small1" }
 mbutils = { path = "../../utils/mb/mbutils" }

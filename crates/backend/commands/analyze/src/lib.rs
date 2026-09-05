@@ -23,6 +23,7 @@ use types_rel::{
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_scan::sdir::ScanDirection;
 use types_slot::SlotData;
+use types_storage::buf::BufferAccessStrategy;
 use types_tuple::{FormData_pg_attribute, HeapTupleData, TupleDescData};
 
 const VACOPT_VACUUM: i32 = tableam_vocab::VACOPT_VACUUM as i32;
@@ -200,16 +201,14 @@ pub fn ExecVacuum<'mcx>(
     }
     let mut verbose = false;
     let mut skip_locked = false;
-    // BUFFER_USAGE_LIMIT is validated C-exactly; the ANALYZE path has no
-    // buffer-strategy plumbing yet, so the accepted value is unused.
-    let mut _ring_size: i32 = -1;
+    let mut ring_size: i32 = -1;
     for opt in stmt.options.iter() {
         let d = opt.as_def_elem().expect("utility option DefElem");
         match d.defname.expect("option name") {
             "verbose" => verbose = def_get_boolean(d)?,
             "skip_locked" => skip_locked = def_get_boolean(d)?,
             "buffer_usage_limit" => {
-                _ring_size = commands_vacuum::exec_vacuum_buffer_usage_limit(mcx, d)?
+                ring_size = commands_vacuum::exec_vacuum_buffer_usage_limit(mcx, d)?
             }
             other => {
                 return Err(Box::new(
@@ -230,7 +229,18 @@ pub fn ExecVacuum<'mcx>(
             | if verbose { VACOPT_VERBOSE } else { 0 }
             | if skip_locked { VACOPT_SKIP_LOCKED } else { 0 },
     };
-    vacuum(mcx, &stmt.rels, &params, is_top_level)
+    // vacuum.c:440-452: ANALYZE always gets a BAS_VACUUM ring, sized by
+    // BUFFER_USAGE_LIMIT or, when that was not given, vacuum_buffer_usage_limit.
+    let ring_size = if ring_size == -1 {
+        init_small::globals::VacuumBufferUsageLimit()
+    } else {
+        ring_size
+    };
+    let bstrategy = bufmgr_seams::get_access_strategy_with_size::call(
+        types_storage::buf::BufferAccessStrategyType::BasVacuum,
+        ring_size,
+    );
+    vacuum(mcx, &stmt.rels, &params, bstrategy, is_top_level)
 }
 
 fn analyze_rel_seam<'a, 'mcx>(
@@ -240,6 +250,7 @@ fn analyze_rel_seam<'a, 'mcx>(
     va_cols: &'a types_nodes::NodeList<'mcx>,
     options: u32,
     log_min_duration: i32,
+    bstrategy: BufferAccessStrategy,
     in_outer_xact: bool,
 ) -> PgResult<()> {
     analyze_rel(
@@ -248,6 +259,7 @@ fn analyze_rel_seam<'a, 'mcx>(
         relname,
         va_cols,
         &VacuumParams { options: options as i32, log_min_duration },
+        bstrategy,
         in_outer_xact,
     )
 }
@@ -256,6 +268,7 @@ fn vacuum<'mcx>(
     mcx: Mcx<'mcx>,
     rels: &'mcx types_nodes::NodeList<'mcx>,
     params: &VacuumParams,
+    bstrategy: BufferAccessStrategy,
     is_top_level: bool,
 ) -> PgResult<()> {
     if commands_vacuum::in_vacuum() {
@@ -295,7 +308,15 @@ fn vacuum<'mcx>(
                 let snapshot = snapmgr::GetTransactionSnapshot()?;
                 snapmgr::PushActiveSnapshot(&snapshot)?;
             }
-            analyze_rel(mcx, vrel.oid, vrel.relname, vrel.va_cols, params, in_outer_xact)?;
+            analyze_rel(
+                mcx,
+                vrel.oid,
+                vrel.relname,
+                vrel.va_cols,
+                params,
+                bstrategy.clone(),
+                in_outer_xact,
+            )?;
             if use_own_xacts {
                 snapmgr::PopActiveSnapshot()?;
                 xact::CommandCounterIncrement()?;
@@ -325,8 +346,12 @@ pub fn analyze_rel(
     relname: Option<&str>,
     va_cols: &types_nodes::NodeList<'_>,
     params: &VacuumParams,
+    bstrategy: BufferAccessStrategy,
     in_outer_xact: bool,
 ) -> PgResult<()> {
+    // analyze.c:130: CHECK_FOR_INTERRUPTS() before taking the lock.
+    postgres_seams::check_for_interrupts::call()?;
+
     let Some(onerel) = commands_vacuum::vacuum_open_relation(
         mcx,
         relid,
@@ -400,12 +425,30 @@ pub fn analyze_rel(
 
     if relkind != RELKIND_PARTITIONED_TABLE {
         do_analyze_rel(
-            mcx, &onerel, va_cols, params, acquirefunc, relpages, false, in_outer_xact, None,
+            mcx,
+            &onerel,
+            va_cols,
+            params,
+            acquirefunc,
+            relpages,
+            false,
+            in_outer_xact,
+            bstrategy.clone(),
+            None,
         )?;
     }
     if onerel.rd_rel.relhassubclass {
         do_analyze_rel(
-            mcx, &onerel, va_cols, params, acquirefunc, relpages, true, in_outer_xact, None,
+            mcx,
+            &onerel,
+            va_cols,
+            params,
+            acquirefunc,
+            relpages,
+            true,
+            in_outer_xact,
+            bstrategy,
+            None,
         )?;
     }
 
@@ -503,6 +546,7 @@ pub fn analyze_rel_inline_sample<'mcx>(
         relpages,
         false,
         true,
+        types_storage::buf::buffer_access_strategy_none(),
         Some((rows, totalrows)),
     )?;
     onerel.close(NO_LOCK)?;
@@ -519,6 +563,9 @@ fn do_analyze_rel<'mcx>(
     relpages: BlockNumber,
     inh: bool,
     in_outer_xact: bool,
+    // C's vac_strategy: the BAS_VACUUM ring the sample scan and the index
+    // cleanup read through (analyze.c:281 do_analyze_rel bstrategy).
+    bstrategy: BufferAccessStrategy,
     // GL-COPYFAST-1 lever 3 (analyze-during-load): Some((rows, totalrows)) =
     // the sample was already acquired in-stream by the load pipeline (rows in
     // physical/stream order, formed against onerel's descriptor, alive for
@@ -566,7 +613,9 @@ fn do_analyze_rel<'mcx>(
     let irel = if is_partitioned || inh {
         PgVec::new_in(mcx)
     } else {
-        commands_vacuum::vac_open_indexes(mcx, onerel, ROW_EXCLUSIVE_LOCK)?
+        // analyze.c:438: vac_open_indexes(onerel, AccessShareLock, ...) —
+        // ANALYZE only reads the indexes (RowExclusiveLock is VACUUM's).
+        commands_vacuum::vac_open_indexes(mcx, onerel, ACCESS_SHARE_LOCK)?
     };
     let hasindex = if is_partitioned {
         !relcache_seams::relation_get_index_list::call(mcx, onerel.rd_id)?.is_empty()
@@ -779,6 +828,7 @@ fn do_analyze_rel<'mcx>(
             targrows,
             &mut totalrows,
             &mut totaldeadrows,
+            &bstrategy,
         )?
     } else if let Some(f) = acquirefunc {
         f(anl_mcx, onerel, elevel, &mut rows, targrows, &mut totalrows, &mut totaldeadrows)?
@@ -791,6 +841,7 @@ fn do_analyze_rel<'mcx>(
             targrows,
             &mut totalrows,
             &mut totaldeadrows,
+            &bstrategy,
         )?
     };
 
@@ -1028,9 +1079,8 @@ fn do_analyze_rel<'mcx>(
                     types_error::DEBUG2
                 },
                 num_heap_tuples: onerel.rd_rel.reltuples as f64,
-                strategy: bufmgr_seams::get_access_strategy::call(
-                    types_storage::buf::BufferAccessStrategyType::BasVacuum,
-                ),
+                // analyze.c:703: ivinfo.strategy = vac_strategy.
+                strategy: bstrategy.clone(),
             };
             commands_vacuum::vac_cleanup_one_index(mcx, &ivinfo, None)?;
         }
@@ -1196,6 +1246,8 @@ fn compute_index_stats<'mcx>(
             execindexing::prepare_index_predicate(anl_mcx, &mut thisdata.index_info)?;
             let mut numindexrows = 0usize;
             for row in rows {
+                // analyze.c:928: vacuum_delay_point(true) per sample row.
+                commands_vacuum::vacuum_delay_point(true)?;
                 per_tuple.reset();
                 // SAFETY: the sample image lives in anl_mcx across this loop;
                 // the reborrow mirrors C's shouldFree=false ExecStoreHeapTuple.
@@ -1330,11 +1382,7 @@ fn examine_attribute<'mcx>(
     if attr.attgenerated == b'v' as i8 {
         return Ok(None);
     }
-    let attstattarget = syscache_seams::lookup_pg_attribute_stattarget::call(
-        onerel.rd_id,
-        attnum as AttrNumber,
-    )?
-    .map_or(-1, |t| t as i32);
+    let attstattarget = attribute_stattarget(onerel.rd_id, attnum as AttrNumber)?;
     if attstattarget == 0 {
         return Ok(None);
     }
@@ -1419,6 +1467,16 @@ fn examine_attribute<'mcx>(
 
 // Every one of these is `elog(ERROR, "cache lookup failed for type %u", oid)`
 // in C: a catchable error whose SQLSTATE is elog's default XX000 /
+// analyze.c:1061-1067: SearchSysCache2(ATTNUM) for attstattarget. The syscache
+// projection (cache_syscache lookup_pg_attribute_stattarget) raises C's
+// elog(ERROR, "cache lookup failed for attribute %d of relation %u") itself
+// when the pg_attribute row is missing; Ok(None) is a NULL attstattarget,
+// which means -1 (use default_statistics_target).
+fn attribute_stattarget(relid: Oid, attnum: AttrNumber) -> PgResult<i32> {
+    Ok(syscache_seams::lookup_pg_attribute_stattarget::call(relid, attnum)?
+        .map_or(-1, |t| t as i32))
+}
+
 // ERRCODE_INTERNAL_ERROR, never a backend abort.  pgrust used to panic!() at
 // these probes, which kills the process instead.
 #[track_caller]
@@ -1712,6 +1770,7 @@ fn std_typanalyze(stats: &mut VacAttrStats<'_>) -> PgResult<bool> {
 /// Appends up to `targrows` sampled rows; the inherited caller reuses one
 /// vec across children, so replacement/sort indexes are relative to the
 /// vec length at entry (C's rows + numrows subarray).
+#[allow(clippy::too_many_arguments)]
 fn acquire_sample_rows<'mcx>(
     mcx: Mcx<'mcx>,
     onerel: &Relation<'mcx>,
@@ -1720,6 +1779,7 @@ fn acquire_sample_rows<'mcx>(
     targrows: i32,
     totalrows: &mut f64,
     totaldeadrows: &mut f64,
+    bstrategy: &BufferAccessStrategy,
 ) -> PgResult<i32> {
     debug_assert!(targrows > 0);
     if tableam::TableAm::of(onerel) == Some(tableam::TableAm::Pgrcolumnar) {
@@ -1750,11 +1810,13 @@ fn acquire_sample_rows<'mcx>(
     let mut scan = tableam::table_beginscan_analyze(mcx, onerel)?;
     let mut slot = tableam::table_slot_create(mcx, onerel)?;
 
+    // analyze.c:1244-1251: the sample blocks are read through vac_strategy
+    // (the BAS_VACUUM ring), not the plain shared-buffer path.
     let next_buffer = |bs: &mut sampling::BlockSamplerData| -> PgResult<types_core::Buffer> {
         if !bs.has_more() {
             return Ok(types_core::InvalidBuffer);
         }
-        bufmgr_seams::read_buffer::call(onerel, bs.next())
+        bufmgr_seams::read_buffer_strategy::call(onerel, bs.next(), bstrategy.clone())
     };
 
     let mut blksdone: i64 = 0;
@@ -1763,6 +1825,8 @@ fn acquire_sample_rows<'mcx>(
         if !tableam::table_scan_analyze_next_block(mcx, &mut scan, &mut || Ok(buf))? {
             break;
         }
+        // analyze.c:1256: vacuum_delay_point(true) per sampled block.
+        commands_vacuum::vacuum_delay_point(true)?;
         while tableam::table_scan_analyze_next_tuple(
             mcx,
             &mut scan,
@@ -2262,6 +2326,7 @@ fn inherited_pgrcolumnar_footer_ndv<'mcx>(
 /// acquire_inherited_sample_rows (analyze.c): the sampled union across all
 /// live children, block-proportional, child rows converted to the parent
 /// rowtype where the descriptors diverge.
+#[allow(clippy::too_many_arguments)]
 fn acquire_inherited_sample_rows<'mcx>(
     mcx: Mcx<'mcx>,
     onerel: &Relation<'mcx>,
@@ -2270,6 +2335,7 @@ fn acquire_inherited_sample_rows<'mcx>(
     targrows: i32,
     totalrows: &mut f64,
     totaldeadrows: &mut f64,
+    bstrategy: &BufferAccessStrategy,
 ) -> PgResult<i32> {
     *totalrows = 0.0;
     *totaldeadrows = 0.0;
@@ -2376,6 +2442,7 @@ fn acquire_inherited_sample_rows<'mcx>(
                         childtargrows,
                         &mut trows,
                         &mut tdrows,
+                        bstrategy,
                     )?
                 };
 
@@ -2496,6 +2563,8 @@ fn compute_trivial_stats(
     let mut nonnull_cnt = 0i32;
     let mut total_width = 0.0f64;
     for rowno in 0..samplerows as usize {
+        // analyze.c:1988: vacuum_delay_point(true) per sample row.
+        commands_vacuum::vacuum_delay_point(true)?;
         let (value, isnull) = src.fetch(rowno, stats.tupattnum);
         if isnull {
             null_cnt += 1;
@@ -2603,6 +2672,8 @@ fn compute_distinct_stats<'mcx>(
     };
 
     for rowno in 0..samplerows as usize {
+        // analyze.c:2104 / 2451: vacuum_delay_point(true) per sample row.
+        commands_vacuum::vacuum_delay_point(true)?;
         let (mut value, isnull) = src.fetch(rowno, stats.tupattnum);
         if isnull {
             null_cnt += 1;
@@ -2777,6 +2848,8 @@ fn compute_scalar_stats<'mcx>(
 
     let mut values: PgVec<'_, (Datum, i32)> = mcx::vec_with_capacity_in(col_mcx, samplerows as usize)?;
     for rowno in 0..samplerows as usize {
+        // analyze.c:2104 / 2451: vacuum_delay_point(true) per sample row.
+        commands_vacuum::vacuum_delay_point(true)?;
         let (mut value, isnull) = src.fetch(rowno, stats.tupattnum);
         if isnull {
             null_cnt += 1;
@@ -2830,13 +2903,19 @@ fn compute_scalar_stats<'mcx>(
         // pg_qsort_arg (C's qsort_arg) carries the comparator's PgError out:
         // the first failing comparison aborts the sort and is propagated,
         // leaving `values` as a valid permutation of its input.
-        ::pg_qsort::pg_qsort_arg(&mut values, |a, b| -> PgResult<i32> {
-            Ok(match cmp(a.0, b.0)? {
-                core::cmp::Ordering::Less => -1,
-                core::cmp::Ordering::Greater => 1,
-                core::cmp::Ordering::Equal => a.1 - b.1,
-            })
-        })?;
+        // analyze.c:2513: qsort_interruptible — CHECK_FOR_INTERRUPTS sits at
+        // the sort template's check points, so a cancel lands mid-sort.
+        ::pg_qsort::pg_qsort_arg_interruptible(
+            &mut values,
+            |a, b| -> PgResult<i32> {
+                Ok(match cmp(a.0, b.0)? {
+                    core::cmp::Ordering::Less => -1,
+                    core::cmp::Ordering::Greater => 1,
+                    core::cmp::Ordering::Equal => a.1 - b.1,
+                })
+            },
+            postgres_seams::check_for_interrupts::call,
+        )?;
 
         let mut corr_xysum = 0.0f64;
         let mut ndistinct = 0i32;
@@ -3236,13 +3315,39 @@ fn stat_key(attno: i32, func: types_core::primitive::RegProcedure, arg: Datum) -
 #[cfg(test)]
 mod tests {
     use super::{
-        analyze_mcv_list, compute_scalar_stats, compute_trivial_stats, distinct_track_update,
-        varlena_stored_size, ComputeStats, FetchSource, PgError, PgResult, StdAnalyzeData,
-        VacAttrStats, STATISTIC_NUM_SLOTS,
+        analyze_mcv_list, attribute_stattarget, compute_scalar_stats, compute_trivial_stats,
+        distinct_track_update, varlena_stored_size, ComputeStats, FetchSource, PgError, PgResult,
+        StdAnalyzeData, VacAttrStats, STATISTIC_NUM_SLOTS,
     };
     use datum::Datum;
     use mcx::{Mcx, MemoryContext, PgVec};
+    use std::cell::Cell;
+    use std::sync::Once;
     use types_core::InvalidOid;
+
+    thread_local! {
+        static CANCEL_PENDING: Cell<bool> = const { Cell::new(false) };
+    }
+
+    // The compute_*_stats sample loops run vacuum_delay_point(true) (C's
+    // per-row CHECK_FOR_INTERRUPTS + cost delay). Seams are set-once per
+    // process, so one install serves every test in this binary: it raises
+    // 57014 while the calling thread has CANCEL_PENDING set.
+    fn install_interrupt_seam() {
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            postgres_seams::check_for_interrupts::set(|| {
+                if CANCEL_PENDING.with(Cell::get) {
+                    Err(Box::new(
+                        PgError::error("canceling statement due to user request")
+                            .with_sqlstate(types_error::ERRCODE_QUERY_CANCELED),
+                    ))
+                } else {
+                    Ok(())
+                }
+            })
+        });
+    }
 
     // define.c defGetBoolean via ExecVacuum ANALYZE options. C is 42601.
     // Unfixed local copy omitted errcode → XX000. Live: ANALYZE (VERBOSE = 2).
@@ -3347,6 +3452,7 @@ mod tests {
 
     #[test]
     fn trivial_stats_width_counts_toast_pointers_stored() {
+        install_interrupt_seam();
         let cx = MemoryContext::new("trivial toast test");
         let mut stats = text_stats(cx.mcx());
         let compressed = compressed_image(2000, &[9u8; 92]);
@@ -3361,6 +3467,7 @@ mod tests {
 
     #[test]
     fn scalar_stats_toowide_toast_pointers_excluded() {
+        install_interrupt_seam();
         let anl = MemoryContext::new("scalar toast test");
         let col = MemoryContext::new("scalar toast col");
         let mut stats = text_stats(anl.mcx());
@@ -3375,6 +3482,52 @@ mod tests {
         assert_eq!(stats.stawidth, 18);
         assert_eq!(stats.stadistinct, -0.75);
         assert_eq!(stats.stakind[0], 0);
+    }
+
+    // analyze.c:1988 (compute_trivial_stats) and :2451 (compute_scalar_stats):
+    // vacuum_delay_point(true) at the top of every sample-row iteration, so a
+    // pending cancel surfaces as ERROR 57014 from inside the computation
+    // instead of the loop running to completion.
+    #[test]
+    fn compute_stats_service_interrupts_per_sample_row() {
+        install_interrupt_seam();
+        let anl = MemoryContext::new("cancel test");
+        let col = MemoryContext::new("cancel col");
+        // Too-wide (toast pointer) values: the scalar pass counts them and never
+        // reaches the type cache, so the only way out of the loop is the delay point.
+        let img = ondisk_image(5000, 3000);
+        let vals = [as_datum(&img), as_datum(&img)];
+        let nulls = [false, false];
+        let src = FetchSource::Expr { vals: &vals, nulls: &nulls, stride: 1, off: 0 };
+
+        CANCEL_PENDING.with(|c| c.set(true));
+        let mut stats = text_stats(anl.mcx());
+        let trivial = compute_trivial_stats(&mut stats, &src, 2);
+        stats.compute = ComputeStats::Scalar;
+        let scalar = compute_scalar_stats(anl.mcx(), col.mcx(), &mut stats, &src, 2, 2.0);
+        CANCEL_PENDING.with(|c| c.set(false));
+
+        let e = trivial.expect_err("compute_trivial_stats must surface the pending cancel");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_QUERY_CANCELED);
+        let e = scalar.expect_err("compute_scalar_stats must surface the pending cancel");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_QUERY_CANCELED);
+        assert!(!stats.stats_valid, "a cancelled computation leaves no statistics");
+
+        // With nothing pending the same inputs compute normally.
+        let mut stats = text_stats(anl.mcx());
+        compute_trivial_stats(&mut stats, &src, 2).unwrap();
+        assert!(stats.stats_valid);
+    }
+
+    // analyze.c:1065-1066: a NULL attstattarget is -1 (default_statistics_target);
+    // a missing pg_attribute row is raised by the syscache projection itself.
+    #[test]
+    fn null_attstattarget_is_minus_one() {
+        syscache_seams::lookup_pg_attribute_stattarget::set(|relid, _attnum| {
+            Ok(if relid == 4242 { None } else { Some(30) })
+        });
+        assert_eq!(attribute_stattarget(4242, 3).unwrap(), -1);
+        assert_eq!(attribute_stattarget(1, 1).unwrap(), 30);
     }
 
     fn run_track(values: &[i32], track_max: usize, cx: &MemoryContext) -> Vec<(i32, i32)> {

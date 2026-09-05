@@ -3839,6 +3839,7 @@ dependencies = [
  "pgstat",
  "planner",
  "pmsignal_seams",
+ "postgres_seams",
  "predicate_seams",
  "procarray",
  "pruneheap_seams",
@@ -3902,6 +3903,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_nodes",
+ "types_storage",
 ]
 
 [[package]]
@@ -14341,6 +14343,7 @@ dependencies = [
  "adt_quote",
  "cache_syscache",
  "clauses",
+ "commands_analyze",
  "commands_define",
  "datum",
  "dbcommands_seams",
@@ -14356,6 +14359,7 @@ dependencies = [
  "format_type",
  "funcapi",
  "guc",
+ "heaptuple",
  "init_small",
  "inval",
  "ip",
@@ -14368,8 +14372,10 @@ dependencies = [
  "nodemodifytable",
  "nodes_core",
  "pg_depend",
+ "pg_prng",
  "pgclient",
  "planner",
+ "postgres_seams",
  "relcache_seams",
  "rustc-hash",
  "superuser",

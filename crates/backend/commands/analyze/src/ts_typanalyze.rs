@@ -46,6 +46,8 @@ pub(crate) fn compute_tsvector_stats<'mcx>(
 
     let mut row_scratch = MemoryContext::new_bump("compute_tsvector_stats row scratch");
     for vector_no in 0..samplerows {
+        // ts_typanalyze.c:207: vacuum_delay_point(true) per sample row.
+        commands_vacuum::vacuum_delay_point(true)?;
         let (value, isnull) = src.fetch(vector_no as usize, stats.tupattnum);
         if isnull {
             null_cnt += 1;
@@ -110,6 +112,19 @@ pub(crate) fn compute_tsvector_stats<'mcx>(
             }
         }
         let track_len = sort_table.len() as i32;
+
+        // ts_typanalyze.c:341: emit some statistics for debug purposes.
+        elog::ereport(types_error::DEBUG3)
+            .errmsg(format!(
+                "tsvector_stats: target # mces = {}, bucket width = {}, # lexemes = {}, \
+                 hashtable size = {}, usable entries = {}",
+                num_mcelem_target,
+                bucket_width,
+                lexeme_no,
+                lexemes_tab.len(),
+                track_len
+            ))
+            .finish(types_error::ErrorLocation::new(file!(), line!() as i32, "compute_tsvector_stats"))?;
 
         let mut num_mcelem = num_mcelem_target;
         if num_mcelem < track_len {

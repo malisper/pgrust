@@ -465,6 +465,7 @@ pub fn vacuum<'mcx>(
                     vrel.va_cols,
                     params.options,
                     params.log_min_duration,
+                    bstrategy.clone(),
                     false,
                 )?;
                 snapmgr::PopActiveSnapshot()?;

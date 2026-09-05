@@ -89,6 +89,8 @@ fn install_bufmgr_seams() {
     bufmgr_seams::read_buffer_strategy::set(|rel, block, _strategy| {
         bufmgr_seams::read_buffer::call(rel, block)
     });
+    // vacuum_delay_point(true) at the C sample-row sites; nothing pending here.
+    postgres_seams::check_for_interrupts::set(|| Ok(()));
     bufmgr_seams::buffer_get_block_number::set(|buf| {
         with_fake(|f| f.buf_rel[(buf - 1) as usize].1)
     });
@@ -936,8 +938,16 @@ fn run_analyze() {
     let cx = MemoryContext::new("analyze");
     let mcx = cx.mcx();
     xact::StartTransactionCommand().unwrap();
-    commands_analyze::analyze_rel(mcx, T_OID, None, &NodeList::nil(), &VacuumParams { options: 0x02, log_min_duration: -1 }, false)
-        .unwrap();
+    commands_analyze::analyze_rel(
+        mcx,
+        T_OID,
+        None,
+        &NodeList::nil(),
+        &VacuumParams { options: 0x02, log_min_duration: -1 },
+        None,
+        false,
+    )
+    .unwrap();
     xact::CommitTransactionCommand().unwrap();
 }
 

@@ -63,6 +63,11 @@ execscan = { path = "../../backend/executor/execscan" }
 exectuples = { path = "../../backend/executor/exectuples" }
 dbcommands_seams = { path = "../../backend/commands/dbcommands_seams" }
 funcapi = { path = "../../backend/utils/fmgr/funcapi" }
+# ANALYZE on foreign tables (postgresAnalyzeForeignTable / AcquireSampleRows)
+commands_analyze = { path = "../../backend/commands/analyze" }
+heaptuple = { path = "../../backend/access/common/heaptuple" }
+pg_prng = { path = "../../common/pg_prng" }
+postgres_seams = { path = "../../backend/tcop/postgres_seams" }
 
 [dev-dependencies]
 types_portal = { path = "../../_support/types/portal" }

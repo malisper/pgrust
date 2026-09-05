@@ -86,19 +86,20 @@ pub(crate) fn compute_array_stats<'mcx>(
     // Finfo copies: element functions may re-enter typcache (range_cmp/
     // record_cmp fn_extra fills), so the entry RefCells must stay unborrowed
     // across the calls.
+    // The element hash / compare procs are fmgr calls (array_typanalyze.c:715
+    // element_hash, :698 element_compare: FunctionCall1Coll / FunctionCall2Coll)
+    // and can raise — a user-defined type's procs, or a CHECK_FOR_INTERRUPTS
+    // inside them. The error propagates up the PgResult chain as C's longjmps
+    // out of compute_array_stats; it must never become a panic.
     let hash_finfo = core::cell::RefCell::new(entry.hash_proc_finfo().clone());
     let cmp_finfo = core::cell::RefCell::new(entry.cmp_proc_finfo().clone());
-    let hash_elem = |d: Datum| -> u32 {
+    let hash_elem = |d: Datum| -> PgResult<u32> {
         let mut finfo = hash_finfo.borrow_mut();
-        types_fmgr::function_call1_coll_in(&mut finfo, coll_id, col_mcx, d)
-            .unwrap_or_else(|e| panic!("compute_array_stats: element hash failed: {e:?}"))
-            .as_u32()
+        Ok(types_fmgr::function_call1_coll_in(&mut finfo, coll_id, col_mcx, d)?.as_u32())
     };
-    let cmp_elems = |a: Datum, b: Datum| -> i32 {
+    let cmp_elems = |a: Datum, b: Datum| -> PgResult<i32> {
         let mut finfo = cmp_finfo.borrow_mut();
-        types_fmgr::function_call2_coll_in(&mut finfo, coll_id, col_mcx, a, b)
-            .unwrap_or_else(|e| panic!("compute_array_stats: element cmp failed: {e:?}"))
-            .as_i32()
+        Ok(types_fmgr::function_call2_coll_in(&mut finfo, coll_id, col_mcx, a, b)?.as_i32())
     };
 
     let num_mcelem_target = stats.attstattarget * 10;
@@ -116,6 +117,8 @@ pub(crate) fn compute_array_stats<'mcx>(
 
     let mut row_scratch = MemoryContext::new_bump("compute_array_stats row scratch");
     for array_no in 0..samplerows {
+        // array_typanalyze.c:317: vacuum_delay_point(true) per sample row.
+        commands_vacuum::vacuum_delay_point(true)?;
         let (value, isnull) = src.fetch(array_no as usize, stats.tupattnum);
         if isnull {
             continue;
@@ -154,12 +157,15 @@ pub(crate) fn compute_array_stats<'mcx>(
                     null_present = true;
                     continue;
                 }
-                let h = hash_elem(elem_value);
+                let h = hash_elem(elem_value)?;
                 let bucket = buckets.entry(h).or_insert_with(|| PgVec::new_in(col_mcx));
-                let found = bucket
-                    .iter()
-                    .copied()
-                    .find(|&idx| cmp_elems(items[idx as usize].key, elem_value) == 0);
+                let mut found = None;
+                for &idx in bucket.iter() {
+                    if cmp_elems(items[idx as usize].key, elem_value)? == 0 {
+                        found = Some(idx);
+                        break;
+                    }
+                }
                 match found {
                     Some(idx) => {
                         let it = &mut items[idx as usize];
@@ -223,6 +229,19 @@ pub(crate) fn compute_array_stats<'mcx>(
         }
         let track_len = sort_idx.len() as i32;
 
+        // array_typanalyze.c:490: emit some statistics for debug purposes.
+        elog::ereport(types_error::DEBUG3)
+            .errmsg(format!(
+                "compute_array_stats: target # mces = {}, bucket width = {}, # elements = {}, \
+                 hashtable size = {}, usable entries = {}",
+                num_mcelem_target,
+                bucket_width,
+                element_no,
+                items.len(),
+                track_len
+            ))
+            .finish(types_error::ErrorLocation::new(file!(), line!() as i32, "compute_array_stats"))?;
+
         let mut num_mcelem = num_mcelem_target;
         if num_mcelem < track_len {
             // C's qsort tie order is hash-iteration-dependent; ties at the
@@ -236,10 +255,14 @@ pub(crate) fn compute_array_stats<'mcx>(
         }
 
         if num_mcelem > 0 {
+            // array_typanalyze.c:523: qsort_interruptible over the element
+            // comparator (fallible fmgr call + CHECK_FOR_INTERRUPTS).
             let prefix = &mut sort_idx[..num_mcelem as usize];
-            prefix.sort_unstable_by(|&a, &b| {
-                cmp_elems(items[a as usize].key, items[b as usize].key).cmp(&0)
-            });
+            ::pg_qsort::pg_qsort_arg_interruptible(
+                prefix,
+                |&a, &b| cmp_elems(items[a as usize].key, items[b as usize].key),
+                postgres_seams::check_for_interrupts::call,
+            )?;
 
             let mut mcelem_values: PgVec<'mcx, Datum> =
                 mcx::vec_with_capacity_in(anl_mcx, num_mcelem as usize)?;

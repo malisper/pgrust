@@ -1119,7 +1119,14 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      CacheRegisterSyscacheCallback latch; flushed wholesale by the
     //      ATTNUM syscache callback, no session identity, never bound or
     //      reset — non-session TLS, same class as 61.
-    assert_eq!(count_tree(crates), 585, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 586, 18.6 conformance audit (2026-09-05), commands/analyze remediation
+    //   (b050-backend-commands-analyze-1): one test-only source —
+    //   66. commands/analyze/src/lib.rs (mod tests) CANCEL_PENDING —
+    //      Cell<bool> per-thread flag behind the check_for_interrupts seam
+    //      so the compute_*_stats vacuum_delay_point(true) witnesses can
+    //      raise 57014 mid-sample (unit harness fixture; counted by the
+    //      tree census, never product code — same class as 43/45/46/60/62).
+    assert_eq!(count_tree(crates), 586, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

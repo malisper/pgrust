@@ -60,6 +60,22 @@ pub fn pg_qsort_arg<T: Copy, E>(
     unsafe { qsort_rec(v.as_mut_ptr(), n, &mut cmp, &mut || Ok(())) }
 }
 
+/// C's qsort_interruptible with a fallible comparator (an fmgr comparison
+/// that can raise, e.g. analyze.c's compare_scalars): the comparator's first
+/// error or the first `Err` from `check` aborts the sort and is propagated;
+/// the slice is left as some valid permutation of its input. `check` sits
+/// exactly where ST_CHECK_FOR_INTERRUPTS sits in lib/sort_template.h.
+#[inline]
+pub fn pg_qsort_arg_interruptible<T: Copy, E>(
+    v: &mut [T],
+    mut cmp: impl FnMut(&T, &T) -> Result<i32, E>,
+    mut check: impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
+    let n = v.len();
+    // SAFETY: the pointer region is exactly v's n elements (core contract).
+    unsafe { qsort_rec(v.as_mut_ptr(), n, &mut cmp, &mut check) }
+}
+
 /// C's qsort_interruptible: infallible comparator, plus an interrupt check
 /// (`check`) called exactly where ST_CHECK_FOR_INTERRUPTS sits in
 /// lib/sort_template.h (partition-loop tails, presorted-scan iterations, and

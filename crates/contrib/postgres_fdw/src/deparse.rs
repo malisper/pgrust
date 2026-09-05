@@ -1459,6 +1459,105 @@ pub fn deparse_relation<'mcx>(
     Ok(())
 }
 
+/// deparseAnalyzeSizeSql (deparse.c:2497): the remote page count, at the
+/// LOCAL block size (C's own note: "perhaps debatable").
+pub(crate) fn deparse_analyze_size_sql<'mcx>(
+    buf: &mut PgString<'mcx>,
+    mcx: Mcx<'mcx>,
+    rel: &types_rel::Relation<'mcx>,
+) -> PgResult<()> {
+    let mut relname = PgString::new_in(mcx);
+    deparse_relation(&mut relname, mcx, rel)?;
+    buf.push_str("SELECT pg_catalog.pg_relation_size(");
+    deparse_string_literal(buf, relname.as_str());
+    buf.push_str(&format!("::pg_catalog.regclass) / {}", types_core::BLCKSZ));
+    Ok(())
+}
+
+/// deparseAnalyzeInfoSql (deparse.c:2519): the remote reltuples and relkind.
+pub(crate) fn deparse_analyze_info_sql<'mcx>(
+    buf: &mut PgString<'mcx>,
+    mcx: Mcx<'mcx>,
+    rel: &types_rel::Relation<'mcx>,
+) -> PgResult<()> {
+    let mut relname = PgString::new_in(mcx);
+    deparse_relation(&mut relname, mcx, rel)?;
+    buf.push_str("SELECT reltuples, relkind FROM pg_catalog.pg_class WHERE oid = ");
+    deparse_string_literal(buf, relname.as_str());
+    buf.push_str("::pg_catalog.regclass");
+    Ok(())
+}
+
+/// deparseAnalyzeSql (deparse.c:2559): the SELECT that fetches sample rows
+/// (every non-dropped column by its remote column_name, plus the sampling
+/// clause for the chosen method); returns the retrieved attnums.
+pub(crate) fn deparse_analyze_sql<'mcx>(
+    buf: &mut PgString<'mcx>,
+    mcx: Mcx<'mcx>,
+    rel: &types_rel::Relation<'mcx>,
+    sample_method: crate::analyze::SamplingMethod,
+    sample_frac: f64,
+) -> PgResult<Vec<i32>> {
+    use crate::analyze::SamplingMethod;
+    let relid = rel.rd_id;
+    let tupdesc = &rel.rd_att;
+    let mut retrieved_attrs: Vec<i32> = Vec::new();
+    let mut first = true;
+
+    buf.push_str("SELECT ");
+    for i in 0..tupdesc.natts as usize {
+        let att = tupdesc.attr(i);
+        // Ignore dropped columns.
+        if att.attisdropped {
+            continue;
+        }
+        if !first {
+            buf.push_str(", ");
+        }
+        first = false;
+
+        // Use attribute name or column_name option.
+        let mut colname: Option<String> = None;
+        for opt in foreigncmds::foreign::GetForeignColumnOptions(mcx, relid, (i + 1) as i16)?.iter() {
+            if opt.name == "column_name" {
+                colname = Some(opt.require_value()?.to_string());
+                break;
+            }
+        }
+        let colname = match colname {
+            Some(c) => c,
+            None => String::from_utf8_lossy(att.attname.name_str()).into_owned(),
+        };
+        append_quoted_identifier(buf, mcx, &colname)?;
+        retrieved_attrs.push((i + 1) as i32);
+    }
+    // Don't generate bad syntax for zero-column relation.
+    if first {
+        buf.push_str("NULL");
+    }
+
+    buf.push_str(" FROM ");
+    deparse_relation(buf, mcx, rel)?;
+
+    match sample_method {
+        SamplingMethod::Off => {}
+        SamplingMethod::Random => {
+            buf.push_str(&format!(" WHERE pg_catalog.random() < {sample_frac:.6}"));
+        }
+        SamplingMethod::System => {
+            buf.push_str(&format!(" TABLESAMPLE SYSTEM({:.6})", 100.0 * sample_frac));
+        }
+        SamplingMethod::Bernoulli => {
+            buf.push_str(&format!(" TABLESAMPLE BERNOULLI({:.6})", 100.0 * sample_frac));
+        }
+        SamplingMethod::Auto => {
+            // should have been resolved into actual method
+            return Err(Box::new(PgError::error("unexpected sampling method")));
+        }
+    }
+    Ok(retrieved_attrs)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn deparse_target_list<'mcx>(
     buf: &mut PgString<'mcx>,

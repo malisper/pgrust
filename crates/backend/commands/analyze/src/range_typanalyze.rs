@@ -91,6 +91,8 @@ pub(crate) fn compute_range_stats<'mcx>(
         mcx::vec_with_capacity_in(col_mcx, samplerows as usize)?;
 
     for rowno in 0..samplerows as usize {
+        // rangetypes_typanalyze.c:170: vacuum_delay_point(true) per sample row.
+        commands_vacuum::vacuum_delay_point(true)?;
         let (value, isnull) = src.fetch(rowno, stats.tupattnum);
         if isnull {
             null_cnt += 1;
@@ -153,13 +155,23 @@ pub(crate) fn compute_range_stats<'mcx>(
         stats.stadistinct = (-1.0 * (1.0 - stats.stanullfrac as f64)) as f32;
 
         if non_empty_cnt >= 2 {
-            let mut cmp_bound = |a: &RangeBound, b: &RangeBound| {
-                range_cmp_bounds(col_mcx, &mut ctx.ri, a, b)
-                    .unwrap_or_else(|e| panic!("compute_range_stats: bound cmp failed: {e:?}"))
-                    .cmp(&0)
-            };
-            lowers.sort_unstable_by(|a, b| cmp_bound(a, b));
-            uppers.sort_unstable_by(|a, b| cmp_bound(a, b));
+            // rangetypes_typanalyze.c:112 range_bound_qsort_cmp -> range_cmp_bounds:
+            // the subtype's btree comparator is an fmgr call and can raise (a
+            // user-defined opclass, or a CHECK_FOR_INTERRUPTS inside it); the
+            // error propagates out of the sort as C's longjmp does, never a
+            // panic. :282/:284 qsort_interruptible carries CHECK_FOR_INTERRUPTS.
+            let mut cmp_bound =
+                |a: &RangeBound, b: &RangeBound| range_cmp_bounds(col_mcx, &mut ctx.ri, a, b);
+            ::pg_qsort::pg_qsort_arg_interruptible(
+                &mut lowers[..],
+                &mut cmp_bound,
+                postgres_seams::check_for_interrupts::call,
+            )?;
+            ::pg_qsort::pg_qsort_arg_interruptible(
+                &mut uppers[..],
+                &mut cmp_bound,
+                postgres_seams::check_for_interrupts::call,
+            )?;
 
             let mut num_hist = non_empty_cnt;
             if num_hist > num_bins {

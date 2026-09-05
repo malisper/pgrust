@@ -9,6 +9,7 @@
 //! foreign tables (BeginForeignInsert).
 #![allow(non_snake_case)]
 
+pub mod analyze;
 pub mod connection;
 pub mod deparse;
 pub mod exec;
@@ -37,5 +38,10 @@ pub fn init_seams() {
     foreigncmds::install_fdw_import_routine(
         types_nodes::FdwKind::PostgresFdw,
         import::postgresImportForeignSchema,
+    );
+    // postgres_fdw.c:588-589 AnalyzeForeignTable / (AcquireSampleRowsFunc).
+    commands_analyze::install_fdw_analyze_routine(
+        types_nodes::FdwKind::PostgresFdw,
+        &analyze::ANALYZE_ROUTINE,
     );
 }
