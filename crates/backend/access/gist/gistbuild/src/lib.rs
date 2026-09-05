@@ -36,6 +36,13 @@ pub(crate) fn elog_error(msg: String) -> Box<PgError> {
     Box::new(PgError::error(msg))
 }
 
+/// elog(DEBUGn, ...) — the build-progress messages C emits (gistbuild.c).
+pub(crate) fn debug_msg(level: ::types_error::ErrorLevel, msg: impl Into<String>) -> PgResult<()> {
+    ::elog::ereport(level)
+        .errmsg_internal(msg)
+        .finish(::types_error::ErrorLocation::new("gistbuild.c", 0, "gistbuild"))
+}
+
 /// GistBuildMode, minus GIST_SORTED_BUILD (dispatched up front).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum GistBuildMode {
@@ -87,10 +94,14 @@ pub fn gistbuild<'mcx>(
     {
         let buffer = gistNewBuffer(index, heap)?;
         debug_assert!(buffer.block_number() == GIST_ROOT_BLKNO);
+        // gistbuild.c:301: root init + dirty + LSN under a critical section, so
+        // a failure leaves no torn, unlogged root page in shared buffers.
+        init_small::globals::StartCriticalSection();
         gist_init_buffer(&buffer, F_LEAF);
         bufmgr_seams::mark_buffer_dirty::call(buffer.buffer())?;
         gist::buf_page_mut_pub(buffer.buffer()).set_lsn(GistBuildLSN);
         bufmgr_seams::lock_buffer::call(buffer.buffer(), bufmgr_seams::BUFFER_LOCK_UNLOCK)?;
+        init_small::globals::EndCriticalSection();
         drop(buffer);
     }
 
@@ -210,6 +221,8 @@ pub fn gistbuild<'mcx>(
     )?;
 
     if build_mode == GistBuildMode::Active {
+        // gistbuild.c:323 elog(DEBUG1).
+        debug_msg(::types_error::DEBUG1, "all tuples processed, emptying buffers")?;
         let bb = bufstate.as_mut().expect("buffering active");
         buffered::gist_empty_all_buffers(&mut temp, index, heap, freespace, &mut giststate, bb)?;
         bufstate.take().expect("buffering active").gfbb.free()?;
@@ -408,6 +421,10 @@ fn levelstate_flush(
     wstate: &mut SortedWriteState<'_, '_>,
     levelstate: &mut GistLevelState,
 ) -> PgResult<()> {
+    // gistbuild.c:505 CHECK_FOR_INTERRUPTS() at flush entry, so a large sorted
+    // build honours statement_timeout / query cancel during page layout.
+    gist::check_for_interrupts()?;
+
     let scratch = MemoryContext::new("gist sorted build flush");
     let smcx = scratch.mcx();
 
@@ -450,6 +467,8 @@ fn levelstate_flush(
     levelstate.current_page = 0;
 
     for d in dist.iter_mut() {
+        // gistbuild.c:550 CHECK_FOR_INTERRUPTS() once per split page.
+        gist::check_for_interrupts()?;
         let mut buf = bulkwrite::smgr_bulk_get_buf(&wstate.bulkstate);
         {
             let mut target = page_mut_of_bulk(&mut buf);

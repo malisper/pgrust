@@ -5,7 +5,7 @@
 #![allow(non_upper_case_globals)]
 
 use types_core::{BlockNumber, Buffer, InvalidBlockNumber, OffsetNumber};
-use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED};
+use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED, PANIC};
 use types_gist::{
     page_opaque_set, page_opaque_update, GISTPageOpaqueData, GistPageSetDeleted,
     GistxlogDelete, GistxlogPageDelete, GistxlogPageSplit, GistxlogPageUpdate, F_FOLLOW_RIGHT,
@@ -63,6 +63,34 @@ fn require(cond: bool, msg: impl FnOnce() -> String) -> PgResult<()> {
     }
 }
 
+// elog(ERROR) — a catchable XX000 (startup's redo error handling owns it),
+// the level C's redo add-item / block-tag sites raise.
+#[cold]
+#[inline(never)]
+fn redo_error(msg: String) -> Box<PgError> {
+    Box::new(PgError::error(msg))
+}
+
+// elog(PANIC) — an unrecoverable redo error (gist_redo's unknown op code).
+#[cold]
+#[inline(never)]
+fn panic_err(msg: String) -> Box<PgError> {
+    Box::new(PgError::new(PANIC, msg))
+}
+
+// XLogRecGetBlockTag (xlogreader.c:2001): elog(ERROR) if the referenced block
+// is missing from the record, rather than a panic on the None.
+fn block_tag(
+    record: &XLogReaderState,
+    block_id: u8,
+) -> PgResult<(types_storage::RelFileLocator, types_core::ForkNumber, BlockNumber, Buffer)> {
+    record.block_tag_extended(block_id).ok_or_else(|| {
+        redo_error(format!(
+            "could not locate backup block with ID {block_id} in WAL record"
+        ))
+    })
+}
+
 /// IndexTupleSize() over a block-data slice, validated against what remains.
 ///
 /// C casts the block-data pointer to an IndexTuple and reads the size word out
@@ -95,13 +123,16 @@ fn page_is_leaf(page: &PageRef<'_>) -> bool {
     types_gist::GistPageIsLeaf(page)
 }
 
-fn add_item(pm: &mut PageMut<'_>, item: &[u8], off: OffsetNumber) {
+// gistxlog.c:135 (gistRedoPageUpdateRecord insert loop): PageAddItem failure
+// is elog(ERROR, "failed to add item to GiST index page, size %d bytes").
+fn add_item(pm: &mut PageMut<'_>, item: &[u8], off: OffsetNumber) -> PgResult<()> {
     if pm.add_item(item, off, 0).is_none() {
-        panic!(
+        return Err(redo_error(format!(
             "failed to add item to GiST index page, size {} bytes",
             item.len()
-        );
+        )));
     }
+    Ok(())
 }
 
 fn gistRedoClearFollowRight(record: &XLogReaderState, block_id: u8) -> PgResult<()> {
@@ -147,7 +178,10 @@ fn gistRedoPageUpdateRecord(record: &XLogReaderState) -> PgResult<()> {
             let sz = checked_index_tuple_size(&data[off..])?;
             let itup = &data[off..off + sz];
             if !pm.index_tuple_overwrite(offnum, itup) {
-                panic!("failed to add item to GiST index page, size {sz} bytes");
+                // gistxlog.c:102 elog(ERROR): catchable, not a panic.
+                return Err(redo_error(format!(
+                    "failed to add item to GiST index page, size {sz} bytes"
+                )));
             }
             off += sz;
             debug_assert!(off == data.len());
@@ -181,7 +215,7 @@ fn gistRedoPageUpdateRecord(record: &XLogReaderState) -> PgResult<()> {
             };
             while off < data.len() {
                 let sz = checked_index_tuple_size(&data[off..])?;
-                add_item(&mut pm, &data[off..off + sz], insert_off);
+                add_item(&mut pm, &data[off..off + sz], insert_off)?;
                 off += sz;
                 insert_off += 1;
             }
@@ -207,8 +241,7 @@ fn gistRedoDeleteRecord(record: &XLogReaderState) -> PgResult<()> {
     let xldata = GistxlogDelete::decode(md)?;
 
     if xlogutils::InHotStandby() {
-        let (rlocator, _, _, _) =
-            record.block_tag_extended(0).expect("gistRedoDeleteRecord: no block 0");
+        let (rlocator, _, _, _) = block_tag(record, 0)?;
         standby::ResolveRecoveryConflictWithSnapshot(
             xldata.snapshotConflictHorizon,
             xldata.isCatalogRel,
@@ -256,10 +289,7 @@ fn gistRedoPageSplitRecord(record: &XLogReaderState) -> PgResult<()> {
 
     for i in 0..xldata.npage as usize {
         let block_id = (i + 1) as u8;
-        let blkno = record
-            .block_tag_extended(block_id)
-            .expect("split block ref")
-            .2;
+        let blkno = block_tag(record, block_id)?.2;
         if blkno == GIST_ROOT_BLKNO {
             debug_assert!(i == 0);
             isrootsplit = true;
@@ -302,9 +332,15 @@ fn gistRedoPageSplitRecord(record: &XLogReaderState) -> PgResult<()> {
         );
 
         let mut insert_off = FirstOffsetNumber;
-        for _ in 0..num {
+        for j in 0..num {
             let sz = checked_index_tuple_size(&data[off..])?;
-            add_item(&mut pm, &data[off..off + sz], insert_off);
+            // gistfillbuffer (gistutil.c:49): the split redo fills via
+            // gistfillbuffer, whose message names the item, not just its size.
+            if pm.add_item(&data[off..off + sz], insert_off, 0).is_none() {
+                return Err(redo_error(format!(
+                    "failed to add item to GiST index page, item {j} out of {num}, size {sz} bytes"
+                )));
+            }
             insert_off += 1;
             off += sz;
         }
@@ -318,10 +354,7 @@ fn gistRedoPageSplitRecord(record: &XLogReaderState) -> PgResult<()> {
             });
         } else {
             let rightlink = if i < xldata.npage as usize - 1 {
-                record
-                    .block_tag_extended((i + 2) as u8)
-                    .expect("next split block ref")
-                    .2
+                block_tag(record, (i + 2) as u8)?.2
             } else {
                 xldata.origrlink
             };
@@ -424,7 +457,9 @@ pub fn gist_redo(record: &mut XLogReaderState) -> PgResult<()> {
         XLOG_GIST_PAGE_SPLIT => gistRedoPageSplitRecord(record),
         XLOG_GIST_PAGE_DELETE => gistRedoPageDelete(record),
         XLOG_GIST_ASSIGN_LSN => Ok(()), // nop; see gistGetFakeLSN
-        other => panic!("gist_redo: unknown op code {other}"),
+        // gistxlog.c:430 elog(PANIC): routed through the recovery error
+        // callback ("WAL redo at ...") instead of an unhandled Rust panic.
+        other => Err(panic_err(format!("gist_redo: unknown op code {other}"))),
     }
 }
 
@@ -452,6 +487,46 @@ pub fn gist_mask(pagedata: &mut [u8], _blkno: BlockNumber) -> PgResult<()> {
     let mut pm = unsafe { PageMut::from_raw(ptr) };
     types_gist::page_opaque_update(&mut pm, |op| op.flags &= !F_HAS_GARBAGE);
     Ok(())
+}
+
+#[cfg(test)]
+mod redo_dispatch_tests {
+    use super::*;
+
+    // gistxlog.c:430: elog(PANIC, "gist_redo: unknown op code %u", info) prints
+    // the whole info byte (xl_info & ~XLR_INFO_MASK). An unknown opcode must
+    // surface as a PANIC-level PgError routed through the recovery error
+    // callback, not an unhandled Rust panic (audit-18.6 b012 gistxlog-753671).
+    #[test]
+    fn unknown_op_code_is_a_panic_error_not_a_rust_panic() {
+        let mut rec = xlogreader_seams::DecodedXLogRecord::default();
+        rec.xl_info = 0xF0; // & !XLR_INFO_MASK == 0xF0, matches no gist opcode
+        let mut record = xlogreader_seams::XLogReaderState {
+            record: Some(rec),
+            ..Default::default()
+        };
+        let err = gist_redo(&mut record).expect_err("unknown gist opcode must not redo silently");
+        assert_eq!(err.message(), "gist_redo: unknown op code 240");
+        assert_eq!(err.level(), PANIC);
+    }
+
+    // XLogRecGetBlockTag (xlogreader.c:2001) is elog(ERROR, "could not locate
+    // backup block with ID %d in WAL record") when the block is absent; the
+    // port panicked on the None (audit-18.6 b012 gistxlog-0396bd).
+    #[test]
+    fn missing_backup_block_is_a_catchable_error() {
+        // A default record has no in-use blocks, so block 0 is absent.
+        let record = xlogreader_seams::XLogReaderState {
+            record: Some(xlogreader_seams::DecodedXLogRecord::default()),
+            ..Default::default()
+        };
+        let err = block_tag(&record, 0).expect_err("absent block must be an error");
+        assert_eq!(
+            err.message(),
+            "could not locate backup block with ID 0 in WAL record"
+        );
+        assert_eq!(err.level(), types_error::ERROR);
+    }
 }
 
 #[cfg(test)]

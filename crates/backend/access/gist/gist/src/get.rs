@@ -5,7 +5,7 @@ use ::bufmgr_seams::{self as bufmgr, BufferPin};
 use ::datum::Datum;
 use ::mcx::Mcx;
 use ::types_core::{InvalidBlockNumber, OffsetNumber};
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 use ::types_gist::state::{
     GISTScanOpaqueData, GISTSearchHeapItem, GISTSearchItem, GISTSearchQueueHeapItem,
     IndexOrderByDistance, ReconTup,
@@ -98,7 +98,11 @@ fn gistindex_keytest(
     // SAFETY: tuple is a live page item under the caller's content lock.
     if unsafe { gist_tuple_is_invalid(tuple) } {
         if page_is_leaf {
-            panic!("invalid GiST tuple found on leaf page");
+            // gistget.c:152 elog(ERROR): a catchable XX000, not a panic.
+            return Err(Box::new(
+                PgError::error("invalid GiST tuple found on leaf page")
+                    .with_sqlstate(ERRCODE_INTERNAL_ERROR),
+            ));
         }
         // pre-9.1 invalid tuple: minimum possible distances so it's always
         // followed (gistget.c:147-157).
@@ -576,7 +580,11 @@ fn publish_item(scan: &mut IndexScanDescData<'_>) {
 /// gistgettuple.
 pub fn gistgettuple(scan: &mut IndexScanDescData<'_>, dir: ScanDirection) -> PgResult<bool> {
     if dir != ::types_scan::sdir::ForwardScanDirection {
-        panic!("GiST only supports forward scan direction");
+        // gistget.c:617 elog(ERROR): a catchable XX000, not a panic.
+        return Err(Box::new(
+            PgError::error("GiST only supports forward scan direction")
+                .with_sqlstate(ERRCODE_INTERNAL_ERROR),
+        ));
     }
 
     {

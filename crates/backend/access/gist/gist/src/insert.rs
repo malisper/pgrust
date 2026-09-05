@@ -28,7 +28,22 @@ use crate::util::{
 };
 use crate::{buf_page_mut, relation_needs_wal};
 
+use ::init_small::globals::{EndCriticalSection, StartCriticalSection};
+
 const GIST_UNLOCK: i32 = bufmgr::BUFFER_LOCK_UNLOCK;
+
+// elog(ERROR, ...) — a catchable XX000, the level C raises at the internal
+// consistency-check sites below (gist.c). Inside a critical section errstart
+// promotes it to PANIC, exactly as C's ereport does via CritSectionCount.
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn gist_internal_error<T>(msg: String) -> PgResult<T> {
+    Err(Box::new(
+        ::types_error::PgError::error(msg)
+            .with_sqlstate(::types_error::ERRCODE_INTERNAL_ERROR),
+    ))
+}
 const GIST_SHARE: i32 = bufmgr::BUFFER_LOCK_SHARE;
 const GIST_EXCLUSIVE: i32 = bufmgr::BUFFER_LOCK_EXCLUSIVE;
 
@@ -167,7 +182,9 @@ pub fn gistplacetopage<'mcx>(
     let is_leaf = GistPageIsLeaf(&page);
 
     if GistFollowRight(&page) {
-        panic!("concurrent GiST page split was incomplete");
+        // gist.c:256 elog(ERROR): an interrupted concurrent split, cleaned
+        // up by the next inserter; a catchable XX000, not a panic.
+        return gist_internal_error("concurrent GiST page split was incomplete".into());
     }
     debug_assert!(!GistPageIsDeleted(&page));
 
@@ -205,9 +222,10 @@ pub fn gistplacetopage<'mcx>(
             npage += 1;
         }
         if npage > GIST_MAX_SPLIT_PAGES {
-            panic!(
+            // gist.c:327 elog(ERROR): a catchable XX000, not a panic.
+            return gist_internal_error(format!(
                 "GiST page split into too many halves ({npage}, maximum {GIST_MAX_SPLIT_PAGES})"
-            );
+            ));
         }
 
         let mut oldrlink = InvalidBlockNumber;
@@ -345,7 +363,13 @@ pub fn gistplacetopage<'mcx>(
             }
         }
 
-        // "critical section": dirty buffers, restore temp copies, WAL
+        // No ereport(ERROR) until the changes are logged (gist.c:466): an Err
+        // below escapes with CritSectionCount raised, so the recovery frame
+        // promotes it to PANIC as C's in-critical-section ereport does, rather
+        // than leaving torn/unlogged split pages dirty in shared buffers.
+        StartCriticalSection();
+
+        // critical section: dirty buffers, restore temp copies, WAL
         for d in dist.iter() {
             bufmgr::mark_buffer_dirty::call(d.buf)?;
         }
@@ -393,15 +417,18 @@ pub fn gistplacetopage<'mcx>(
             }
         }
     } else {
-        // enough space
+        // enough space. No ereport(ERROR) until logged (gist.c:543).
+        StartCriticalSection();
+
         let mut pm = buf_page_mut(buffer.buffer());
         if oldoffnum != InvalidOffsetNumber {
             if itup.len() == 1 {
                 if !pm.index_tuple_overwrite(oldoffnum, itup[0]) {
-                    panic!(
+                    // gist.c:556 elog(ERROR); PANIC inside the critical section.
+                    return gist_internal_error(format!(
                         "failed to add item to index page in \"{}\"",
                         rel.name()
-                    );
+                    ));
                 }
             } else {
                 pm.index_tuple_delete(oldoffnum);
@@ -445,6 +472,8 @@ pub fn gistplacetopage<'mcx>(
         });
         pm.set_lsn(recptr);
     }
+
+    EndCriticalSection();
 
     Ok((is_split, splitinfo))
 }
@@ -731,7 +760,10 @@ fn gistFindPath(
         state.frames[top].lsn = bufmgr::buffer_get_lsn_atomic::call(pin.buffer());
 
         if GistFollowRight(&page) {
-            panic!("concurrent GiST page split was incomplete");
+            // gist.c:963 elog(ERROR): a catchable XX000, not a panic. The
+            // content lock is released by error recovery (LWLockReleaseAll),
+            // as it is for the gistcheckpage error above.
+            return gist_internal_error("concurrent GiST page split was incomplete".into());
         }
 
         let parent_lsn = state.frames[top]
@@ -780,11 +812,12 @@ fn gistFindPath(
         drop(pin);
     }
 
-    panic!(
+    // gist.c:1015 elog(ERROR): a catchable XX000, not a panic.
+    gist_internal_error(format!(
         "failed to re-find parent of a page in index \"{}\", block {}",
         state.r.name(),
         child
-    );
+    ))
 }
 
 // gistFindCorrectParent: child's parent must be exclusively locked on entry
@@ -958,6 +991,20 @@ fn gistfixsplit<'mcx>(
     giststate: &mut GistState<'_>,
 ) -> PgResult<()> {
     let stack = state.current;
+
+    // gist.c:1207 ereport(LOG): announce the incomplete-split repair.
+    ::elog::ereport(::types_error::LOG)
+        .errmsg(format!(
+            "fixing incomplete split in index \"{}\", block {}",
+            state.r.name(),
+            state.frames[stack].blkno
+        ))
+        .finish(::types_error::ErrorLocation::new(
+            "gist.c",
+            0,
+            "gistfixsplit",
+        ))?;
+
     debug_assert!(state.frames[stack].downlinkoffnum != InvalidOffsetNumber);
 
     let mut splitinfo: Vec<GISTPageSplitInfo<'mcx>> = Vec::new();
@@ -1350,6 +1397,9 @@ fn gistprunepage(
                 0
             };
 
+        // No ereport(ERROR) until logged (gist.c:1710): an Err escaping with
+        // CritSectionCount raised is promoted to PANIC at the recovery frame.
+        StartCriticalSection();
         {
             let mut pm = buf_page_mut(buffer.buffer());
             pm.index_multi_delete(&deletable);
@@ -1363,6 +1413,7 @@ fn gistprunepage(
             gistGetFakeLSN(rel)?
         };
         buf_page_mut(buffer.buffer()).set_lsn(recptr);
+        EndCriticalSection();
     }
     Ok(())
 }

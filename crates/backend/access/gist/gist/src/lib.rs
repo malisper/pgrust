@@ -71,9 +71,15 @@ pub(crate) fn relation_needs_wal(rel: &Relation<'_>) -> bool {
                 && rel.rd_firstRelfilelocatorSubid.get() == InvalidSubTransactionId))
 }
 
-// wal_level=logical unported; const-false (heapam precedent).
-pub(crate) fn relation_is_accessible_in_logical_decoding(_rel: &Relation<'_>) -> bool {
-    false
+// RelationIsAccessibleInLogicalDecoding (utils/rel.h): the isCatalogRel flag
+// of gistxlogDelete (gistxlog.c:676) and gistxlogPageReuse (gistxlog.c:606),
+// evaluated on the HEAP relation. Standby redo uses it to invalidate obsolete
+// logical replication slots (ResolveRecoveryConflictWithSnapshot*). Mirrors
+// heapam dml.rs / nbtree lib.rs.
+pub(crate) fn relation_is_accessible_in_logical_decoding(rel: &Relation<'_>) -> bool {
+    transam_xlog_seams::xlog_logical_info_active::call()
+        && relation_needs_wal(rel)
+        && (::catalog_seams::is_catalog_relation::call(rel) || rel.is_used_as_catalog_table())
 }
 
 // The per-statement GISTSTATE insert cache (C indexInfo->ii_AmCache).

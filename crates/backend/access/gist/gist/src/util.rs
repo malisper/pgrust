@@ -9,7 +9,7 @@ use ::types_core::{
     AttrNumber, BlockNumber, ForkNumber, InvalidBlockNumber, OffsetNumber,
     XLogRecPtr, BLCKSZ, RELPERSISTENCE_TEMP,
 };
-use ::types_error::{PgError, PgResult, ERRCODE_INDEX_CORRUPTED};
+use ::types_error::{PgError, PgResult, ERRCODE_INDEX_CORRUPTED, ERRCODE_INTERNAL_ERROR};
 use ::types_gist::{
     GISTPageOpaqueData, GistEntryVector, GistPageIsDeleted,
     GISTENTRY, GIST_PAGE_ID, GiSTPageSize, TUPLE_IS_INVALID, TUPLE_IS_VALID,
@@ -177,6 +177,7 @@ pub fn gistfillbuffer(
     itup: &[&[u8]],
     off: OffsetNumber,
 ) -> PgResult<()> {
+    let _ = rel_name; // gistutil.c:49's message names the item, not the index.
     let mut off = if off == InvalidOffsetNumber {
         if page.as_ref().pd_lower() as usize
             <= ::types_storage::bufpage::SizeOfPageHeaderData
@@ -188,10 +189,18 @@ pub fn gistfillbuffer(
     } else {
         off
     };
-    for tup in itup {
+    let len = itup.len();
+    for (i, tup) in itup.iter().enumerate() {
         let l = page.add_item(tup, off, 0);
         if l.is_none() {
-            panic!("failed to add item to index page in \"{rel_name}\"");
+            // gistutil.c:49 elog(ERROR): a catchable XX000, not a panic.
+            return Err(Box::new(
+                PgError::error(format!(
+                    "failed to add item to GiST index page, item {i} out of {len}, size {} bytes",
+                    tup.len()
+                ))
+                .with_sqlstate(ERRCODE_INTERNAL_ERROR),
+            ));
         }
         off += 1;
     }

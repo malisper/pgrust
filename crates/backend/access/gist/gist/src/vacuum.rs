@@ -99,9 +99,16 @@ pub fn gistvacuumcleanup<'mcx>(
     Ok(Some(stats))
 }
 
+// RELATION_IS_LOCAL (rel.h:659): a temp table of this session, or one
+// created/rewritten in the current subtransaction — no other backend can be
+// extending it, so the extension lock can be skipped.
+fn relation_is_local(rel: &::types_rel::RelationData<'_>) -> bool {
+    rel.rd_islocaltemp
+        || rel.rd_createSubid.get() != ::types_core::InvalidSubTransactionId
+}
+
 /// gistvacuumscan: physical-order scan; the relation length is rechecked so
 /// leaf pages added by concurrent splits are visited.
-/// LockRelationForExtension around the length check: single-backend no-op.
 fn gistvacuumscan<'mcx>(
     info: &IndexVacuumInfo<'_, 'mcx>,
     stats: &mut IndexBulkDeleteResult,
@@ -131,11 +138,23 @@ fn gistvacuumscan<'mcx>(
         empty_leaf_set: std::collections::BTreeSet::new(),
     };
 
+    // gistvacuum.c:210: take the relation-extension lock across the length
+    // recheck for a shared relation, so a concurrent gistNewBuffer extension
+    // cannot expose an uninitialized all-zero page to this scan (which
+    // gistPageRecyclable would wrongly record as reusable in the FSM).
+    let need_lock = !relation_is_local(rel);
+
     let mut current: BlockNumber = GIST_ROOT_BLKNO;
     let mut num_pages;
     loop {
+        if need_lock {
+            ::lmgr::LockRelationForExtension(rel, ::types_rel::ExclusiveLock)?;
+        }
         num_pages =
             bufmgr::relation_get_number_of_blocks_in_fork::call(rel, ForkNumber::MAIN_FORKNUM)?;
+        if need_lock {
+            ::lmgr::UnlockRelationForExtension(rel, ::types_rel::ExclusiveLock)?;
+        }
         if current >= num_pages {
             break;
         }
@@ -213,7 +232,11 @@ fn gistvacuumpage(
                 }
 
                 if !todelete.is_empty() {
-                    // One WAL record per page, C-exact.
+                    // One WAL record per page, C-exact. No ereport(ERROR) until
+                    // logged (gistvacuum.c:399): an Err escaping with the count
+                    // raised is promoted to PANIC at recovery, so a torn/
+                    // unlogged page never survives dirty in shared buffers.
+                    init_small::globals::StartCriticalSection();
                     bufmgr::mark_buffer_dirty::call(pin.buffer())?;
                     {
                         let mut pm = crate::buf_page_mut(pin.buffer());
@@ -226,6 +249,7 @@ fn gistvacuumpage(
                         gistGetFakeLSN(rel)?
                     };
                     crate::buf_page_mut(pin.buffer()).set_lsn(recptr);
+                    init_small::globals::EndCriticalSection();
 
                     vstate.stats.tuples_removed += todelete.len() as f64;
                     maxoff = pin.page().max_offset_number();
@@ -400,6 +424,10 @@ fn gistdeletepage<'mcx>(
     // downlink have ended; stamp it with the next XID as that horizon.
     let txid: FullTransactionId = varsup::ReadNextFullTransactionId()?;
 
+    // No ereport(ERROR) until logged (gistvacuum.c:695): an Err escaping with
+    // the count raised is promoted to PANIC at recovery.
+    init_small::globals::StartCriticalSection();
+
     bufmgr::mark_buffer_dirty::call(leaf.buffer())?;
     GistPageSetDeleted(&mut crate::buf_page_mut(leaf.buffer()), txid);
     stats.pages_newly_deleted += 1;
@@ -415,6 +443,8 @@ fn gistdeletepage<'mcx>(
     };
     crate::buf_page_mut(parent.buffer()).set_lsn(recptr);
     crate::buf_page_mut(leaf.buffer()).set_lsn(recptr);
+
+    init_small::globals::EndCriticalSection();
 
     Ok(true)
 }

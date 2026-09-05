@@ -7009,6 +7009,7 @@ name = "gist"
 version = "0.1.0"
 dependencies = [
  "bufmgr_seams",
+ "catalog_seams",
  "datum",
  "elog",
  "fmgr_seams",
@@ -7016,6 +7017,7 @@ dependencies = [
  "genam_seams",
  "indexam_seams",
  "init_small",
+ "lmgr",
  "mcx",
  "nbtree",
  "pg_prng",
@@ -7085,6 +7087,7 @@ dependencies = [
  "bufmgr_seams",
  "bulkwrite",
  "datum",
+ "elog",
  "execindexing",
  "fd",
  "gist",

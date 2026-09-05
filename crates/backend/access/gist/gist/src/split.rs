@@ -321,7 +321,25 @@ fn gistUserPicksplit(
     }
 
     if v.splitVector.spl_left.is_empty() || v.splitVector.spl_right.is_empty() {
-        // picksplit failed to create an actual split (C DEBUG1 + cope).
+        // gistsplit.c:444 ereport(DEBUG1): the user picksplit put everything on
+        // one side. Complain (DEBUG1) but cope via genericPickSplit.
+        ::elog::ereport(::types_error::DEBUG1)
+            .errcode(::types_error::ERRCODE_INTERNAL_ERROR)
+            .errmsg(format!(
+                "picksplit method for column {} of index \"{}\" failed",
+                attno + 1,
+                r.name()
+            ))
+            .errhint(
+                "The index is not optimal. To optimize it, contact a developer, \
+                 or try to use the column as the second one in the CREATE INDEX command.",
+            )
+            .finish(::types_error::ErrorLocation::new(
+                "gistsplit.c",
+                0,
+                "gistUserPicksplit",
+            ))?;
+
         let sv = &mut v.splitVector;
         sv.spl_ldatum_exists = !v.spl_lisnull[attno];
         sv.spl_rdatum_exists = !v.spl_risnull[attno];

@@ -73,7 +73,11 @@ pub fn gist_init_buffering<'mcx>(
     indtuples_size: u64,
 ) -> PgResult<Option<BufBuild<'mcx>>> {
     let page_free_space = page_free_space_for_tuples(freespace);
-    let itup_avg_size = indtuples_size as f64 / indtuples as f64;
+    // gistbuild.c:631: itupAvgSize is a Size (size_t), so the double quotient
+    // is truncated to an integer before it is used below. Matching C's integer
+    // arithmetic here is what keeps levelStep identical (calculatePagesPerBuffer
+    // deliberately uses a `double` itupAvgSize instead — see there).
+    let itup_avg_size = (indtuples_size as f64 / indtuples as f64) as usize;
 
     // C's caveat applies: short varlenas and padding are not accounted for.
     let mut itup_min_size = SIZEOF_INDEX_TUPLE_DATA_MAXALIGNED;
@@ -82,8 +86,10 @@ pub fn gist_init_buffering<'mcx>(
         itup_min_size += if attlen < 0 { VARHDRSZ } else { attlen as usize };
     }
 
-    let avg_index_tuples_per_page = page_free_space as f64 / itup_avg_size;
-    let max_index_tuples_per_page = page_free_space as f64 / itup_min_size as f64;
+    // gistbuild.c:669-670: both are Size/Size integer divisions widened to
+    // double, not floating-point divisions.
+    let avg_index_tuples_per_page = (page_free_space / itup_avg_size.max(1)) as f64;
+    let max_index_tuples_per_page = (page_free_space / itup_min_size) as f64;
 
     // levelStep: the highest subtree depth that still fits in a quarter of
     // effective_cache_size, bounded by one in-memory page per lowest-level
@@ -107,12 +113,22 @@ pub fn gist_init_buffering<'mcx>(
     level_step -= 1;
 
     if level_step <= 0 {
+        // gistbuild.c:757 elog(DEBUG1).
+        crate::debug_msg(::types_error::DEBUG1, "failed to switch to buffered GiST build")?;
         return Ok(None);
     }
 
     let pages_per_buffer =
         calculate_pages_per_buffer(index, freespace, indtuples, indtuples_size, level_step);
     let gfbb = GistBuildBuffers::new(mcx, pages_per_buffer, level_step, gist_get_max_level(index)?)?;
+
+    // gistbuild.c:777 elog(DEBUG1).
+    crate::debug_msg(
+        ::types_error::DEBUG1,
+        format!(
+            "switched to buffered GiST build; level step = {level_step}, pagesPerBuffer = {pages_per_buffer}"
+        ),
+    )?;
 
     Ok(Some(BufBuild {
         gfbb,
@@ -317,6 +333,12 @@ fn gist_buffering_insert_tuples(
     if is_split && buffer.block_number() == GIST_ROOT_BLKNO {
         debug_assert!(level == bb.gfbb.rootlevel);
         bb.gfbb.rootlevel += 1;
+
+        // gistbuild.c:1090 elog(DEBUG2).
+        crate::debug_msg(
+            ::types_error::DEBUG2,
+            format!("splitting GiST root page, now {} levels deep", bb.gfbb.rootlevel),
+        )?;
 
         // The old root's downlinks all moved to the new children: memorize
         // the grandchildren's parents.
@@ -553,6 +575,11 @@ pub fn gist_empty_all_buffers(
                 bb.gfbb.buffers_on_levels[i].pop_front();
             }
         }
+        // gistbuild.c:1418 elog(DEBUG2).
+        crate::debug_msg(
+            ::types_error::DEBUG2,
+            format!("emptied all buffers at level {i}"),
+        )?;
     }
     Ok(())
 }

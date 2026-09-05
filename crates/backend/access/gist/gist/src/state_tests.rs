@@ -50,10 +50,18 @@ fn mock_body(
 }
 
 fn index_rel<'mcx>(mcx: ::mcx::Mcx<'mcx>, support: [Oid; GISTNProcs]) -> Relation<'mcx> {
+    index_rel_natts(mcx, support, 1)
+}
+
+fn index_rel_natts<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
+    support: [Oid; GISTNProcs],
+    natts: i16,
+) -> Relation<'mcx> {
     let mut relname = NameData::default();
     relname.namestrcpy("t_q_idx");
     let td = TupleDescData {
-        natts: 1,
+        natts: natts as i32,
         tdtypeid: 0,
         tdtypmod: -1,
         tdrefcount: 1,
@@ -213,4 +221,25 @@ fn fully_ported_opclass_is_untouched() {
     };
     assert_eq!(st.consistentFn.len(), 1);
     assert_eq!(GIST_EQUAL_PROC, 7);
+}
+
+// gist.c:1546 elog(ERROR, "numberOfAttributes %d > %d") when a (corrupted)
+// index descriptor exceeds INDEX_MAX_KEYS: a catchable XX000, not a panic
+// (audit-18.6 b012 gist-14f871).
+#[test]
+fn too_many_attributes_is_a_catchable_error() {
+    use ::types_core::fmgr::INDEX_MAX_KEYS;
+    install_mock_seams();
+    let cx = MemoryContext::new("test");
+    let natts = INDEX_MAX_KEYS as i16 + 1;
+    let rel = index_rel_natts(cx.mcx(), ported_support(), natts);
+    let err = match initGISTstate(cx.mcx(), &rel) {
+        Ok(_) => panic!("natts > INDEX_MAX_KEYS must error"),
+        Err(e) => e,
+    };
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_INTERNAL_ERROR);
+    assert_eq!(
+        err.message(),
+        format!("numberOfAttributes {natts} > {INDEX_MAX_KEYS}")
+    );
 }
