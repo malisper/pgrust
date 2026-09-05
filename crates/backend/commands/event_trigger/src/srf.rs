@@ -231,7 +231,13 @@ fn stringify_adefprivs_objtype(
         OBJECT_ROUTINE => "ROUTINES",
         OBJECT_TABLESPACE => "TABLESPACES",
         OBJECT_TYPE => "TYPES",
-        other => panic!("unsupported object type: {other:?}"),
+        // event_trigger.c:2416 elog(ERROR, ...): catchable, not a panic.
+        other => {
+            return Err(elog::ereport(ERROR)
+                .errmsg(format!("unsupported object type: {}", other as i32))
+                .into_error()
+                .into())
+        }
     })
 }
 
@@ -332,3 +338,24 @@ pub static EVENT_TRIGGER_BUILTINS: &[FmgrBuiltin] = &[
         func: fc_pg_event_trigger_ddl_commands,
     },
 ];
+
+#[cfg(test)]
+mod stringify_tests {
+    use super::*;
+    use types_nodes::parsenodes::ObjectType;
+
+    // stringify_adefprivs_objtype (event_trigger.c:2416): the default arm is
+    // elog(ERROR, "unsupported object type: %d"), a catchable error, exactly
+    // like stringify_grant_objtype's (event_trigger.c:2333).
+    #[test]
+    fn adefprivs_unsupported_objtype_is_catchable_error() {
+        for objtype in [ObjectType::OBJECT_INDEX, ObjectType::OBJECT_VIEW, ObjectType::OBJECT_PARAMETER_ACL] {
+            let e = stringify_adefprivs_objtype(objtype).unwrap_err();
+            assert_eq!(e.message(), format!("unsupported object type: {}", objtype as i32));
+            let g = stringify_grant_objtype(ObjectType::OBJECT_INDEX).unwrap_err();
+            assert_eq!(g.message(), format!("unsupported object type: {}", ObjectType::OBJECT_INDEX as i32));
+        }
+        assert_eq!(stringify_adefprivs_objtype(ObjectType::OBJECT_LARGEOBJECT).unwrap(), "LARGE OBJECTS");
+        assert_eq!(stringify_grant_objtype(ObjectType::OBJECT_PARAMETER_ACL).unwrap(), "PARAMETER");
+    }
+}

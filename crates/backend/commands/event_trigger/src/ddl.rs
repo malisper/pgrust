@@ -7,9 +7,9 @@ use mcx::{Mcx, PgVec};
 use pg_depend::{DependencyType, ObjectAddress};
 use types_core::{CommandTag, Oid, OidIsValid, NAMEDATALEN, TEXTOID};
 use types_error::{
-    PgResult, ERRCODE_AMBIGUOUS_FUNCTION, ERRCODE_DUPLICATE_OBJECT, ERRCODE_FEATURE_NOT_SUPPORTED,
+    PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_SYNTAX_ERROR,
-    ERRCODE_UNDEFINED_FUNCTION, ERRCODE_UNDEFINED_OBJECT, ERROR,
+    ERRCODE_UNDEFINED_OBJECT, ERROR,
 };
 use types_nodes::parsenodes::{AlterEventTrigStmt, CreateEventTrigStmt, ObjectType};
 use types_rel::{AccessExclusiveLock, InplaceUpdateTupleLock, RowExclusiveLock};
@@ -108,7 +108,7 @@ pub fn CreateEventTrigger<'mcx>(
             .into());
     }
 
-    let funcoid = LookupFuncName0(mcx, &stmt.funcname)?;
+    let funcoid = LookupFuncName0(&stmt.funcname)?;
     if lsyscache::function::get_func_rettype(funcoid)? != EVENT_TRIGGEROID {
         return Err(elog::ereport(ERROR)
             .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
@@ -168,31 +168,17 @@ fn validate_table_rewrite_tags(_filtervar: &str, taglist: &[&str]) -> PgResult<(
     Ok(())
 }
 
-fn LookupFuncName0(mcx: Mcx<'_>, funcname: &types_nodes::list::NodeList<'_>) -> PgResult<Oid> {
+// LookupFuncName(funcname, 0, NULL, false) (event_trigger.c:199): the lookup
+// goes through LookupFuncNameInternal(OBJECT_FUNCTION, ...), which skips
+// prokind = 'p' candidates (parse_func.c:2145), so a 0-argument procedure of
+// that name is "function f() does not exist" (42883), never "must return
+// type event_trigger".
+fn LookupFuncName0(funcname: &types_nodes::list::NodeList<'_>) -> PgResult<Oid> {
     let mut parts: Vec<&str> = Vec::with_capacity(funcname.len());
     for n in funcname.iter() {
         parts.push(n.as_string().expect("funcname holds Strings").sval);
     }
-    let candidates = catalog_namespace::FuncnameGetCandidates(mcx, &parts, 0, &[], false, false)?;
-    let oids: Vec<Oid> = candidates.iter().map(|c| c.oid).collect();
-    select_zero_arg_func(&oids, &name_list_to_string_raw(&parts))
-}
-
-fn select_zero_arg_func(oids: &[Oid], display: &str) -> PgResult<Oid> {
-    match oids {
-        [] => Err(elog::ereport(ERROR)
-            .errcode(ERRCODE_UNDEFINED_FUNCTION)
-            .errmsg(format!("function {display}() does not exist"))
-            .into_error()
-            .into()),
-        [oid] if OidIsValid(*oid) => Ok(*oid),
-        _ => Err(elog::ereport(ERROR)
-            .errcode(ERRCODE_AMBIGUOUS_FUNCTION)
-            .errmsg(format!("function name \"{display}\" is not unique"))
-            .errhint("Specify the argument list to select the function unambiguously.")
-            .into_error()
-            .into()),
-    }
+    parse_func_seams::LookupFuncName::call(&parts, 0, &[], false)
 }
 
 fn name_list_to_string(funcname: &types_nodes::list::NodeList<'_>) -> String {
@@ -200,10 +186,6 @@ fn name_list_to_string(funcname: &types_nodes::list::NodeList<'_>) -> String {
         .iter()
         .map(|n| n.as_string().expect("funcname holds Strings").sval)
         .collect();
-    name_list_to_string_raw(&parts)
-}
-
-fn name_list_to_string_raw(parts: &[&str]) -> String {
     parts.join(".")
 }
 
@@ -257,6 +239,9 @@ fn insert_event_trigger_tuple<'mcx>(
         &ObjectAddress::set(PROCEDURE_RELATION_ID, funcoid),
         DependencyType::Normal,
     )?;
+
+    // Depend on extension, if any (event_trigger.c:337).
+    pg_depend::recordDependencyOnCurrentExtension(mcx, &myself, false)?;
 
     tgrel.close(RowExclusiveLock)?;
     Ok(trigoid)
@@ -631,24 +616,6 @@ fn require_event_trigger_owner(trigoid: Oid, name: &str) -> PgResult<()> {
 #[cfg(test)]
 mod lookup_func_tests {
     use super::*;
-    use types_core::InvalidOid;
-
-    #[test]
-    fn two_zero_arg_candidates_is_ambiguous_function() {
-        let e = select_zero_arg_func(&[1, 2], "foo").unwrap_err();
-        assert_eq!(e.sqlstate(), ERRCODE_AMBIGUOUS_FUNCTION);
-        assert_eq!(e.message(), "function name \"foo\" is not unique");
-        assert_eq!(
-            e.hint(),
-            Some("Specify the argument list to select the function unambiguously.")
-        );
-    }
-
-    #[test]
-    fn invalid_oid_duplicate_marker_is_ambiguous() {
-        let e = select_zero_arg_func(&[InvalidOid], "foo").unwrap_err();
-        assert_eq!(e.sqlstate(), ERRCODE_AMBIGUOUS_FUNCTION);
-    }
 
     #[test]
     fn alter_event_trigger_non_owner_is_42501() {

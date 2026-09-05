@@ -5415,6 +5415,7 @@ dependencies = [
  "lsyscache",
  "mcx",
  "miscinit",
+ "parse_func_seams",
  "pg_attrdef",
  "pg_database",
  "pg_depend",
