@@ -348,8 +348,9 @@ fn fetch_byval_datum(image: &[u8], off: usize, elmlen: i16, inline_fetch: bool) 
     }
 }
 
-// deconstruct_array (arrayfuncs.c) over an in-memory 1-D no-nulls image;
-// byref element datums point into `image`, which must outlive them.
+// deconstruct_array (arrayfuncs.c) over an in-memory no-nulls image of any
+// dimensionality (elements walked linearly, as C does); byref element datums
+// point into `image`, which must outlive them.
 pub fn deconstruct_array_image<'mcx>(
     mcx: Mcx<'mcx>,
     image: &[u8],
@@ -402,28 +403,42 @@ fn deconstruct_1d_image<'mcx>(
         // construct_empty_array's zero-dimensional image: no elements.
         return Ok((PgVec::new_in(mcx), None));
     }
-    // This codec only handles the 1-D shape; anything else (including a
-    // truncated header) is treated as corrupt rather than trusted.
-    if image.len() < ARR_1D_HDRSZ || rd(4)? != 1 {
+    // Any dimensionality up to MAXDIM, as deconstruct_array walks the
+    // elements linearly whatever the shape (arrayfuncs.c); a truncated header
+    // or an out-of-range ndim is treated as corrupt rather than trusted.
+    let ndim = rd(4)?;
+    if ndim < 1 || ndim as usize > MAXDIM {
         return Err(corrupt());
     }
-    // nelems is content-controlled; a negative i32 must not become a huge usize
-    // (ArrayGetNItems rejects negative dims), and the count is capped at
-    // MaxArraySize exactly as ArrayGetNItems does before palloc.
-    let nelems_i32 = rd(16)?;
-    if nelems_i32 < 0 || nelems_i32 as usize > MAX_ARRAY_SIZE {
+    let ndim = ndim as usize;
+    // ARR_OVERHEAD_NONULLS(ndim): vl_len + ndim + dataoffset + elemtype, then
+    // the dims and lower bounds (16 + 8*ndim, already MAXALIGNed).
+    let hdrsz = 16 + 8 * ndim;
+    if image.len() < hdrsz {
         return Err(corrupt());
     }
-    let nelems = nelems_i32 as usize;
+    // nelems is content-controlled: ArrayGetNItems rejects a negative dim and
+    // caps the product at MaxArraySize before palloc.
+    let mut nelems: usize = 1;
+    for i in 0..ndim {
+        let dim = rd(16 + 4 * i)?;
+        if dim < 0 {
+            return Err(corrupt());
+        }
+        nelems = match nelems.checked_mul(dim as usize) {
+            Some(n) if n <= MAX_ARRAY_SIZE => n,
+            _ => return Err(corrupt()),
+        };
+    }
     // dataoffset != 0: a null bitmap follows the header and the payload starts
-    // at ARR_OVERHEAD_WITHNULLS(1, nelems) (MAXALIGN, 8). Only callers that
+    // at ARR_OVERHEAD_WITHNULLS(ndim, nelems) (MAXALIGN, 8). Only callers that
     // can represent NULL elements accept that shape.
     let dataoffset = rd(8)?;
-    let mut off = ARR_1D_HDRSZ;
+    let mut off = hdrsz;
     let mut bitmap: Option<&[u8]> = None;
     if dataoffset != 0 {
         let bitmap_bytes = (nelems + 7) / 8;
-        let expected = (ARR_1D_HDRSZ + bitmap_bytes + 7) & !7;
+        let expected = (hdrsz + bitmap_bytes + 7) & !7;
         if !allow_nulls
             || dataoffset < 0
             || dataoffset as usize != expected
@@ -431,7 +446,7 @@ fn deconstruct_1d_image<'mcx>(
         {
             return Err(corrupt());
         }
-        bitmap = Some(&image[ARR_1D_HDRSZ..ARR_1D_HDRSZ + bitmap_bytes]);
+        bitmap = Some(&image[hdrsz..hdrsz + bitmap_bytes]);
         off = expected;
     }
     let inline_fetch = elmbyval && array_fetch_inline_enabled();
@@ -530,6 +545,58 @@ mod tests {
         let out = deconstruct_array_image(mcx, &img, 4, true, b'i').unwrap();
         let got: [i32; 3] = [out[0].as_i32(), out[1].as_i32(), out[2].as_i32()];
         assert_eq!(got, [1, -7, 500]);
+    }
+
+    // deconstruct_array walks a multi-dimensional image linearly
+    // (arrayfuncs.c: nitems = ArrayGetNItems(ndim, dims)); a catalog text[]
+    // such as reloptions may legitimately be stored 2-D.
+    #[test]
+    fn deconstruct_array_image_walks_two_dimensions() {
+        let ctx = MemoryContext::new_bump("arr-2d");
+        let mcx = ctx.mcx();
+        let mut img: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+        img.extend_from_slice(&0u32.to_ne_bytes()); // vl_len, patched below
+        img.extend_from_slice(&2i32.to_ne_bytes()); // ndim
+        img.extend_from_slice(&0i32.to_ne_bytes()); // dataoffset (no nulls)
+        img.extend_from_slice(&23i32.to_ne_bytes()); // elemtype = INT4OID
+        img.extend_from_slice(&2i32.to_ne_bytes()); // dims[0]
+        img.extend_from_slice(&2i32.to_ne_bytes()); // dims[1]
+        img.extend_from_slice(&1i32.to_ne_bytes()); // lbs[0]
+        img.extend_from_slice(&1i32.to_ne_bytes()); // lbs[1]
+        for v in [10i32, 20, 30, 40] {
+            img.extend_from_slice(&v.to_ne_bytes());
+        }
+        let len = img.len() as u32;
+        img[..4].copy_from_slice(&(len << 2).to_ne_bytes());
+        let out = deconstruct_array_image(mcx, &img, 4, true, b'i').unwrap();
+        let got: alloc::vec::Vec<i32> = out.iter().map(|d| d.as_i32()).collect();
+        assert_eq!(got, [10, 20, 30, 40]);
+        // A 2-D image with a null bitmap (dataoffset = MAXALIGN(32 + 1)).
+        let mut nimg: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+        nimg.extend_from_slice(&0u32.to_ne_bytes());
+        nimg.extend_from_slice(&2i32.to_ne_bytes());
+        nimg.extend_from_slice(&40i32.to_ne_bytes()); // dataoffset
+        nimg.extend_from_slice(&23i32.to_ne_bytes());
+        nimg.extend_from_slice(&2i32.to_ne_bytes());
+        nimg.extend_from_slice(&2i32.to_ne_bytes());
+        nimg.extend_from_slice(&1i32.to_ne_bytes());
+        nimg.extend_from_slice(&1i32.to_ne_bytes());
+        nimg.push(0b1011); // element 2 is NULL
+        while nimg.len() < 40 {
+            nimg.push(0);
+        }
+        for v in [10i32, 20, 40] {
+            nimg.extend_from_slice(&v.to_ne_bytes());
+        }
+        let len = nimg.len() as u32;
+        nimg[..4].copy_from_slice(&(len << 2).to_ne_bytes());
+        let (out, nulls) = deconstruct_array_image_nulls(mcx, &nimg, 4, true, b'i').unwrap();
+        let nulls = nulls.expect("bitmap present");
+        let nulls: alloc::vec::Vec<bool> = nulls.iter().copied().collect();
+        assert_eq!(nulls, [false, false, true, false]);
+        assert_eq!([out[0].as_i32(), out[1].as_i32(), out[3].as_i32()], [10, 20, 40]);
+        // The no-nulls entry point refuses the bitmap shape.
+        assert!(deconstruct_array_image(mcx, &nimg, 4, true, b'i').is_err());
     }
 
     #[test]

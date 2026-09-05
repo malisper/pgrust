@@ -1236,6 +1236,22 @@ fn ATRewriteCatalogs<'mcx>(
                     pg_attrdef::StoreAttrDefault(mcx, &rel, cmd.num, defnode)?;
                 }
                 AlterTableType::AT_AddConstraint => {
+                    // ATParseTransformCmd at the initial examination only
+                    // (tablecmds.c:5096-5100, cur_pass == AT_PASS_ADD_CONSTR):
+                    // transformAlterTableStmt's transformTableConstraint
+                    // guards (cxt.isforeign / cxt.ispartitioned from the
+                    // relkind, parse_utilcmd.c:3577-3600) run before any
+                    // constraint work is scheduled.
+                    if pass == AT_PASS_ADD_CONSTR {
+                        let relname = rel.name().to_string();
+                        parse_utilcmd::transformAlterTableCmd(
+                            mcx,
+                            &rel,
+                            &relname,
+                            cnode,
+                            query_string,
+                        )?;
+                    }
                     // ATParseTransformCmd: PK/UNIQUE constraints become an
                     // AT_AddIndex IndexStmt scheduled for AT_PASS_ADD_INDEX.
                     let defnode = cmd.def.expect("AT_AddConstraint Constraint");

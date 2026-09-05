@@ -365,9 +365,19 @@ fn expand_short_image<'mcx>(
 }
 
 fn option_text_strs<'mcx>(mcx: Mcx<'mcx>, options: &[u8]) -> PgResult<PgVec<'mcx, &'mcx str>> {
-    let elems = datum::array_build::deconstruct_array_image(mcx, options, -1, false, b'i')?;
+    // deconstruct_array_builtin(array, TEXTOID, &optiondatums, NULL, &noptions)
+    // (reloptions.c:1365, 1455): any dimensionality; a NULL element is
+    // deconstruct_array's 22004 (nullsp == NULL).
+    let (elems, nulls) =
+        datum::array_build::deconstruct_array_image_nulls(mcx, options, -1, false, b'i')?;
     let mut out: PgVec<'mcx, &'mcx str> = mcx::vec_with_capacity_in(mcx, elems.len())?;
-    for &e in elems.iter() {
+    for (i, &e) in elems.iter().enumerate() {
+        if nulls.as_ref().is_some_and(|n| n[i]) {
+            return Err(Box::new(
+                ::types_error::PgError::error("null array element not allowed in this context")
+                    .with_sqlstate(::types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED),
+            ));
+        }
         let p = e.as_usize() as *const u8;
         // SAFETY: element datums point into the options image passed in.
         let img = unsafe { core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p)) };

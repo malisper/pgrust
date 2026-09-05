@@ -17,6 +17,7 @@ use types_nodes::rawnodes::{
     ColumnDef, Constraint, ConstrType, CreateSeqStmt, CreateStmt, IndexElem, IndexStmt, SortByDir,
     SortByNulls, TypeName,
 };
+use types_nodes::equal::{equal_opt, NodeEqual};
 use types_nodes::parsenodes::{DefElem, DefElemAction};
 use types_nodes::{
     AlterSeqStmt, CoercionForm, FuncCall, Node, NodeList, NodeTag, RangeVar, TypeCast, ValUnion,
@@ -198,7 +199,7 @@ fn typename_type_id_and_mod<'mcx>(
 
     // C typenameType errors via TypeNameToString(typeName), keeping the schema
     // qualification (parse_type.c:243/272/279), not the bare last name.
-    let (typoid, _typname) = resolveTypeNames(mcx, tn)?;
+    let (typoid, _typname) = resolveTypeNames(mcx, tn, src)?;
     if typoid == InvalidOid {
         return Err(at_tn(type_does_not_exist(&typeNameToString(tn)?)));
     }
@@ -374,7 +375,7 @@ pub fn typenameTypeId<'mcx>(
     }
     // C typenameType errors via TypeNameToString(typeName), keeping the schema
     // qualification (parse_type.c:243/272/279), not the bare last name.
-    let (typoid, _typname) = resolveTypeNames(mcx, tn)?;
+    let (typoid, _typname) = resolveTypeNames(mcx, tn, pstate.and_then(|ps| ps.p_sourcetext))?;
     if typoid == InvalidOid {
         return Err(at_tn(type_does_not_exist(&typeNameToString(tn)?)));
     }
@@ -492,7 +493,7 @@ fn lookup_type_name_oid_internal<'mcx>(
         }
         return Ok(typoid);
     }
-    let (typoid, _typname) = resolve_type_names_ext(mcx, tn, missing_ok)?;
+    let (typoid, _typname) = resolve_type_names_ext(mcx, tn, missing_ok, None)?;
     if typoid == InvalidOid {
         if missing_ok {
             return Ok(InvalidOid);
@@ -539,17 +540,22 @@ fn lookup_type_name_oid_internal<'mcx>(
 fn resolveTypeNames<'mcx, 'tn>(
     mcx: Mcx<'mcx>,
     tn: &TypeName<'tn>,
+    src: Option<&[u8]>,
 ) -> PgResult<(Oid, &'tn str)> {
-    resolve_type_names_ext(mcx, tn, false)
+    resolve_type_names_ext(mcx, tn, false, src)
 }
 
 // LookupTypeNameExtended's missing_ok also covers the explicit-schema
 // lookup: a missing schema yields InvalidOid ("type does not exist" at the
-// caller) instead of a schema error.
+// caller) instead of a schema error. `src` is the query text C's
+// setup_parser_errposition_callback (parse_type.c:177-187) reads through
+// pstate: the explicit-schema lookup's errors carry typeName->location;
+// DeconstructQualifiedName runs outside that callback and stays bare.
 fn resolve_type_names_ext<'mcx, 'tn>(
     mcx: Mcx<'mcx>,
     tn: &TypeName<'tn>,
     missing_ok: bool,
+    src: Option<&[u8]>,
 ) -> PgResult<(Oid, &'tn str)> {
     let mut names: [&str; 4] = [""; 4];
     let nnames = tn.names.len();
@@ -573,7 +579,8 @@ fn resolve_type_names_ext<'mcx, 'tn>(
 
     let typoid = match schemaname {
         Some(schemaname) => {
-            let namespace_id = catalog_namespace::LookupExplicitNamespace(schemaname, missing_ok)?;
+            let namespace_id = catalog_namespace::LookupExplicitNamespace(schemaname, missing_ok)
+                .map_err(|e| cursor_at(e, src, tn.location))?;
             if namespace_id == InvalidOid {
                 return Ok((InvalidOid, typname));
             }
@@ -710,7 +717,7 @@ pub fn parseTypeStringEsc<'mcx>(
 
     // C: LookupTypeName(NULL, typeName, ..., missing_ok = escontext is an
     // ErrorSaveContext) — a missing schema soft-NULLs under a soft context.
-    let (mut typoid, _typname) = resolve_type_names_ext(mcx, tn, esc.is_some())?;
+    let (mut typoid, _typname) = resolve_type_names_ext(mcx, tn, esc.is_some(), None)?;
     if typoid != InvalidOid && !tn.arrayBounds.is_nil() {
         typoid = syscache_seams::pg_type_typarray::call(typoid)?.unwrap_or(InvalidOid);
     }
@@ -773,35 +780,49 @@ fn typename_type_mod_src<'mcx>(
         return Err(cache_lookup_failed("type", typoid));
     };
     // Both messages render TypeNameToString in C (format_type_be for a
-    // pre-resolved TypeName, plus the %TYPE / [] decorations).
+    // pre-resolved TypeName, plus the %TYPE / [] decorations); all three
+    // typenameTypeMod errors carry parser_errposition(pstate,
+    // typeName->location) (parse_type.c:352-366, 407-410).
     if !io.typisdefined {
-        return Err(Box::new(
-            PgError::new(
-                ERROR,
-                format!(
-                    "type modifier cannot be specified for shell type \"{}\"",
-                    typeNameToString(tn)?
-                ),
-            )
-            .with_sqlstate(ERRCODE_SYNTAX_ERROR),
+        return Err(cursor_at(
+            Box::new(
+                PgError::new(
+                    ERROR,
+                    format!(
+                        "type modifier cannot be specified for shell type \"{}\"",
+                        typeNameToString(tn)?
+                    ),
+                )
+                .with_sqlstate(ERRCODE_SYNTAX_ERROR),
+            ),
+            src,
+            tn.location,
         ));
     }
     if io.typmodin == InvalidOid {
-        return Err(Box::new(
-            PgError::new(
-                ERROR,
-                format!("type modifier is not allowed for type \"{}\"", typeNameToString(tn)?),
-            )
-            .with_sqlstate(ERRCODE_SYNTAX_ERROR),
+        return Err(cursor_at(
+            Box::new(
+                PgError::new(
+                    ERROR,
+                    format!("type modifier is not allowed for type \"{}\"", typeNameToString(tn)?),
+                )
+                .with_sqlstate(ERRCODE_SYNTAX_ERROR),
+            ),
+            src,
+            tn.location,
         ));
     }
 
     #[track_caller]
     #[cold]
-    fn bad_typmod_expr() -> Box<PgError> {
-        Box::new(
-            PgError::new(ERROR, "type modifiers must be simple constants or identifiers")
-                .with_sqlstate(ERRCODE_SYNTAX_ERROR),
+    fn bad_typmod_expr(src: Option<&[u8]>, location: i32) -> Box<PgError> {
+        cursor_at(
+            Box::new(
+                PgError::new(ERROR, "type modifiers must be simple constants or identifiers")
+                    .with_sqlstate(ERRCODE_SYNTAX_ERROR),
+            ),
+            src,
+            location,
         )
     }
 
@@ -823,7 +844,7 @@ fn typename_type_mod_src<'mcx>(
             None
         };
         let Some(cstr) = cstr else {
-            return Err(bad_typmod_expr());
+            return Err(bad_typmod_expr(src, tn.location));
         };
         let mut v = mcx::vec_with_capacity_in(mcx, cstr.len() + 1)?;
         mcx::vec_append_bytes(&mut v, cstr.as_bytes())?;
@@ -1251,9 +1272,15 @@ fn transformColumnDefinition<'mcx>(
             };
             if is_serial_oid != InvalidOid {
                 if !tn.arrayBounds.is_nil() {
-                    return Err(Box::new(
-                        PgError::new(ERROR, "array of serial is not implemented".to_string())
-                            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+                    // parse_utilcmd.c:640-644: parser_errposition(pstate,
+                    // column->typeName->location).
+                    return Err(cursor_at(
+                        Box::new(
+                            PgError::new(ERROR, "array of serial is not implemented".to_string())
+                                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+                        ),
+                        src.map(str::as_bytes),
+                        tn.location,
                     ));
                 }
                 // SAFETY: parse tree is analyze-owned; no derived refs live.
@@ -1314,6 +1341,7 @@ fn transformColumnDefinition<'mcx>(
             rel,
             false,
             cxt,
+            src.map(str::as_bytes),
         )?;
 
         // DEFAULT nextval('snamespace.sname'::regclass), raw form.
@@ -1385,9 +1413,15 @@ fn transformColumnDefinition<'mcx>(
         match constraint.contype {
             ConstrType::CONSTR_DEFAULT => {
                 if saw_default {
-                    return Err(multiple_defaults(
-                        col!().colname.unwrap_or(""),
-                        relname,
+                    // parse_utilcmd.c:819-824: 42601 with
+                    // parser_errposition(pstate, constraint->location).
+                    return Err(column_syntax_error(
+                        format_args!(
+                            "multiple default values specified for column \"{}\" of table \"{relname}\"",
+                            col!().colname.unwrap_or("")
+                        ),
+                        src,
+                        constraint.location,
                     ));
                 }
                 let raw_expr = constraint.raw_expr;
@@ -1450,6 +1484,7 @@ fn transformColumnDefinition<'mcx>(
                     rel,
                     false,
                     cxt,
+                    src.map(str::as_bytes),
                 )?;
                 let when = constraint.generated_when;
                 // SAFETY: parse tree is analyze-owned; no derived refs live.
@@ -1512,14 +1547,7 @@ fn transformColumnDefinition<'mcx>(
             ConstrType::CONSTR_NOTNULL => {
                 let colname = col!().colname.expect("ColumnDef.colname");
                 if ispartitioned && constraint.is_no_inherit {
-                    return Err(Box::new(
-                        PgError::new(
-                            ERROR,
-                            "not-null constraints on partitioned tables cannot be NO INHERIT"
-                                .to_string(),
-                        )
-                        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
-                    ));
+                    return Err(partitioned_notnull_no_inherit());
                 }
                 if saw_nullable && !col_not_null {
                     // C attaches parser_errposition at every conflicting-
@@ -2003,7 +2031,6 @@ pub fn transformCreateStmt<'mcx>(
     let mut fkconstraints = NodeList::nil();
     let mut alist = NodeList::nil();
     let mut likeclauses = NodeList::nil();
-    let mut save_alist = NodeList::nil();
     for elt in stmt.tableElts.iter() {
         match elt.node_tag() {
             NodeTag::T_ColumnDef => {
@@ -2031,7 +2058,6 @@ pub fn transformCreateStmt<'mcx>(
                     columns: &mut columns,
                     nnconstraints: &mut nnconstraints,
                     likeclauses: &mut likeclauses,
-                    alist: &mut save_alist,
                     is_foreign,
                 };
                 like::transformTableLikeClause(mcx, &mut likecxt, &mut cxt, elt, query_string)?;
@@ -2060,14 +2086,7 @@ pub fn transformCreateStmt<'mcx>(
                     ConstrType::CONSTR_NOTNULL => {
                         // transformTableConstraint (parse_utilcmd.c:1074-1078).
                         if stmt.partspec.is_some() && c.is_no_inherit {
-                            return Err(Box::new(
-                                PgError::new(
-                                    ERROR,
-                                    "not-null constraints on partitioned tables cannot be NO INHERIT"
-                                        .to_string(),
-                                )
-                                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
-                            ));
+                            return Err(partitioned_notnull_no_inherit());
                         }
                         nnconstraints.lappend(mcx, elt)?
                     }
@@ -2087,6 +2106,11 @@ pub fn transformCreateStmt<'mcx>(
             other => panic!("unrecognized node type in tableElts: {other:?}"),
         }
     }
+
+    // parse_utilcmd.c:303-304: everything the element loop added to
+    // cxt.alist (serial OWNED BY, LIKE COMMENT/identity commands, in element
+    // order) moves to save_alist, appended last (376-377).
+    let save_alist = core::mem::take(&mut cxt.alist);
 
     // Table-level NOT NULL propagation (C parse_utilcmd.c:310-333).
     for nn in nnconstraints.iter() {
@@ -2191,10 +2215,8 @@ pub fn transformCreateStmt<'mcx>(
         }
     }
 
-    // C: result = blist ++ [stmt] ++ indexes ++ likeclauses ++ fk ++
-    // save_alist; C's save_alist captured the element-loop alist (serial
-    // OWNED BY + LIKE statements) before transformIndexConstraints
-    // (parse_utilcmd.c:390-395, 465-471).
+    // C: result = blist ++ [stmt] ++ cxt.alist (indexes ++ likeclauses ++
+    // fk) ++ save_alist (parse_utilcmd.c:374-377).
     let mut result = cxt.blist;
     result.lappend(mcx, stmt_node)?;
     for a in alist.iter() {
@@ -2495,7 +2517,12 @@ fn transform_index_constraints<'mcx>(
             for ip in index_params.iter() {
                 let iparam = ip.as_variant::<IndexElem>().expect("IndexElem");
                 if iparam.name == Some(key) {
-                    return Err(duplicate_key_column(key, is_primary, constraint.location));
+                    return Err(duplicate_key_column(
+                        key,
+                        is_primary,
+                        Some(src.as_bytes()),
+                        constraint.location,
+                    ));
                 }
             }
             // C: the WITHOUT OVERLAPS part must be a range or multirange type,
@@ -2596,15 +2623,15 @@ fn transform_index_constraints<'mcx>(
         let mut keep = true;
         for pnode in finalindexlist.iter() {
             let prior = pnode.as_variant::<IndexStmt>().expect("IndexStmt");
-            // C compares whereClause with equal(); predicate exclusions
-            // conservatively never merge (only identical duplicate
-            // constraints diverge: both indexes get built).
-            if index_params_equal(&index.indexParams, &prior.indexParams)
-                && index_params_equal(&index.indexIncludingParams, &prior.indexIncludingParams)
-                && exclude_op_names_equal(&index.excludeOpNames, &prior.excludeOpNames)
+            // parse_utilcmd.c:2309-2316: equal() over indexParams (every
+            // IndexElem field: expr, opclass, opclassopts, collation, ...),
+            // indexIncludingParams, whereClause and excludeOpNames, then
+            // strcmp on accessMethod and the three flags.
+            if index.indexParams.node_equal(&prior.indexParams)
+                && index.indexIncludingParams.node_equal(&prior.indexIncludingParams)
+                && equal_opt(index.whereClause, prior.whereClause)
+                && index.excludeOpNames.node_equal(&prior.excludeOpNames)
                 && index.accessMethod == prior.accessMethod
-                && index.whereClause.is_none()
-                && prior.whereClause.is_none()
                 && index.nulls_not_distinct == prior.nulls_not_distinct
                 && index.deferrable == prior.deferrable
                 && index.initdeferred == prior.initdeferred
@@ -2709,7 +2736,12 @@ pub fn transformIndexConstraintForAlter<'mcx>(
         for ip in index_params.iter() {
             let iparam = ip.as_variant::<IndexElem>().expect("IndexElem");
             if iparam.name == Some(key) {
-                return Err(duplicate_key_column(key, is_primary, constraint.location));
+                return Err(duplicate_key_column(
+                    key,
+                    is_primary,
+                    Some(query_string.as_bytes()),
+                    constraint.location,
+                ));
             }
         }
         // C isalter: resolve the WITHOUT OVERLAPS column's type on the
@@ -3040,46 +3072,6 @@ fn index_attoptions_set(mcx: Mcx<'_>, relid: Oid, attnum: i16) -> PgResult<bool>
     Ok(!isnull)
 }
 
-fn index_params_equal(a: &NodeList<'_>, b: &NodeList<'_>) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    for (x, y) in a.iter().zip(b.iter()) {
-        let xe = x.as_variant::<IndexElem>().expect("IndexElem");
-        let ye = y.as_variant::<IndexElem>().expect("IndexElem");
-        // Expression elems: C uses equal(); never merged here (see dedup note).
-        if xe.expr.is_some() || ye.expr.is_some() {
-            return false;
-        }
-        if xe.name != ye.name
-            || xe.ordering != ye.ordering
-            || xe.nulls_ordering != ye.nulls_ordering
-        {
-            return false;
-        }
-    }
-    true
-}
-
-fn exclude_op_names_equal(a: &NodeList<'_>, b: &NodeList<'_>) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    for (x, y) in a.iter().zip(b.iter()) {
-        let xs = x.as_list().expect("op name list");
-        let ys = y.as_list().expect("op name list");
-        if xs.len() != ys.len() {
-            return false;
-        }
-        for (xn, yn) in xs.iter().zip(ys.iter()) {
-            if xn.as_string().expect("op name").sval != yn.as_string().expect("op name").sval {
-                return false;
-            }
-        }
-    }
-    true
-}
-
 // Serial names live as long as the parse arena (C pallocs likewise).
 fn leak_str(s: PgString<'_>) -> &str {
     // SAFETY: PgString invariant — bytes are valid UTF-8.
@@ -3102,35 +3094,41 @@ pub(crate) fn generateSerialExtraStmts<'mcx>(
     rel: Option<&types_rel::Relation<'_>>,
     col_exists: bool,
     cxt: &mut CreateStmtCxt<'mcx>,
+    // C cxt->pstate's query text: the option errors below carry
+    // parser_errposition at the offending DefElem's location.
+    src: Option<&[u8]>,
 ) -> PgResult<(&'mcx str, &'mcx str)> {
     // C strips the non-CREATE-SEQUENCE options (SEQUENCE NAME, LOGGED/
     // UNLOGGED) from the list before handing it to CREATE SEQUENCE (they'd
-    // be redundant there), erroring on duplicates (errorConflictingDefElem;
-    // no pstate here, so no errposition — C attaches cxt->pstate's).
-    let conflicting = || -> Box<PgError> {
-        Box::new(
-            PgError::new(ERROR, "conflicting or redundant options".to_string())
-                .with_sqlstate(ERRCODE_SYNTAX_ERROR),
+    // be redundant there), erroring on duplicates (errorConflictingDefElem
+    // (defel, cxt->pstate), parse_utilcmd.c:421/429: 42601 at defel->location).
+    let conflicting = |defel: &DefElem<'mcx>| -> Box<PgError> {
+        cursor_at(
+            Box::new(
+                PgError::new(ERROR, "conflicting or redundant options".to_string())
+                    .with_sqlstate(ERRCODE_SYNTAX_ERROR),
+            ),
+            src,
+            defel.location,
         )
     };
     let mut name_el: Option<&DefElem<'mcx>> = None;
-    // Some(true) = UNLOGGED, Some(false) = LOGGED.
-    let mut logged_el_unlogged: Option<bool> = None;
+    let mut logged_el: Option<&DefElem<'mcx>> = None;
     let mut filtered = NodeList::nil();
     for opt in seqoptions.iter() {
         let defel = opt.as_variant::<DefElem>().expect("DefElem in seqoptions");
         match defel.defname {
             Some("sequence_name") => {
                 if name_el.is_some() {
-                    return Err(conflicting());
+                    return Err(conflicting(defel));
                 }
                 name_el = Some(defel);
             }
-            Some(d @ ("logged" | "unlogged")) => {
-                if logged_el_unlogged.is_some() {
-                    return Err(conflicting());
+            Some("logged" | "unlogged") => {
+                if logged_el.is_some() {
+                    return Err(conflicting(defel));
                 }
-                logged_el_unlogged = Some(d == "unlogged");
+                logged_el = Some(defel);
             }
             _ => filtered.lappend(mcx, opt)?,
         }
@@ -3206,17 +3204,23 @@ pub(crate) fn generateSerialExtraStmts<'mcx>(
     // override it (rejected on TEMP tables).
     let mut seqpersistence =
         rel.map_or(relation.relpersistence, |r| r.rd_rel.relpersistence);
-    if let Some(unlogged) = logged_el_unlogged {
+    if let Some(logged) = logged_el {
         if seqpersistence == types_core::RELPERSISTENCE_TEMP {
-            return Err(Box::new(
-                PgError::new(
-                    ERROR,
-                    "cannot set logged status of a temporary sequence".to_string(),
-                )
-                .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION),
+            // parse_utilcmd.c:502-505: 42P16 with parser_errposition(pstate,
+            // loggedEl->location).
+            return Err(cursor_at(
+                Box::new(
+                    PgError::new(
+                        ERROR,
+                        "cannot set logged status of a temporary sequence".to_string(),
+                    )
+                    .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION),
+                ),
+                src,
+                logged.location,
             ));
         }
-        seqpersistence = if unlogged {
+        seqpersistence = if logged.defname == Some("unlogged") {
             types_core::RELPERSISTENCE_UNLOGGED
         } else {
             types_core::RELPERSISTENCE_PERMANENT
@@ -3541,6 +3545,7 @@ pub fn transformAlterTableCmd<'mcx>(
                 Some(rel),
                 true,
                 &mut cxt,
+                Some(query_string.as_bytes()),
             )?;
             // SAFETY: parse tree is statement-owned; no derived refs live.
             unsafe {
@@ -3620,7 +3625,10 @@ pub fn transformAlterTableCmd<'mcx>(
                         .expect("ColumnDef.typeName")
                         .as_variant::<TypeName>()
                         .expect("TypeName");
-                    let (type_oid, _) = typenameTypeIdAndMod(mcx, None, tn)?;
+                    // C typenameTypeId(pstate, def->typeName) (parse_utilcmd.c:
+                    // 3688): the lookup errors carry typeName->location.
+                    let (type_oid, _) =
+                        typename_type_id_and_mod(mcx, Some(query_string.as_bytes()), tn)?;
                     let snamespaceid = lsyscache::get_rel_namespace(seq_relid)?;
                     let Some(snamespace) = lsyscache::get_namespace_name(mcx, snamespaceid)?
                     else {
@@ -3660,15 +3668,35 @@ pub fn transformAlterTableCmd<'mcx>(
             }
         }
         AlterTableType::AT_AddConstraint => {
-            // transformTableConstraint's reachable contypes pass through
-            // untouched here; the tablecmds caller schedules the real work.
-            // Anything else is C's elog "invalid context for constraint
-            // type" (grammar can't produce it in ADD CONSTRAINT).
+            // transformTableConstraint (parse_utilcmd.c:1035-1095) with
+            // cxt.isforeign / cxt.ispartitioned from the relkind
+            // (3577-3600): the foreign-table index-constraint refusals live
+            // in transformIndexConstraintForAlter (the tablecmds caller's
+            // prep step); the FK and NOT NULL guards are here, at analysis,
+            // before any subcommand executes. The remaining contypes pass
+            // through untouched; anything else is C's elog "invalid context
+            // for constraint type" (grammar can't produce it in ADD
+            // CONSTRAINT).
             let defnode = cmd.def.expect("AT_AddConstraint Constraint");
             let c = defnode
                 .as_variant::<types_nodes::rawnodes::Constraint>()
                 .expect("Constraint");
             match c.contype {
+                types_nodes::rawnodes::ConstrType::CONSTR_FOREIGN
+                    if rel.rd_rel.relkind == types_rel::RELKIND_FOREIGN_TABLE =>
+                {
+                    return Err(not_supported_on_foreign_tables(
+                        "foreign key",
+                        Some(query_string),
+                        c.location,
+                    ));
+                }
+                types_nodes::rawnodes::ConstrType::CONSTR_NOTNULL
+                    if rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE
+                        && c.is_no_inherit =>
+                {
+                    return Err(partitioned_notnull_no_inherit());
+                }
                 types_nodes::rawnodes::ConstrType::CONSTR_CHECK
                 | types_nodes::rawnodes::ConstrType::CONSTR_FOREIGN
                 | types_nodes::rawnodes::ConstrType::CONSTR_PRIMARY
@@ -3760,17 +3788,28 @@ fn key_column_missing(colname: &str, _location: i32) -> Box<PgError> {
     )
 }
 
+// parse_utilcmd.c:2759-2769: 42701 with parser_errposition(pstate,
+// constraint->location) on both the CREATE and the ALTER lane.
 #[track_caller]
 #[cold]
 #[inline(never)]
-fn duplicate_key_column(colname: &str, primary: bool, _location: i32) -> Box<PgError> {
+fn duplicate_key_column(
+    colname: &str,
+    primary: bool,
+    src: Option<&[u8]>,
+    location: i32,
+) -> Box<PgError> {
     let what = if primary { "primary key" } else { "unique" };
-    Box::new(
-        PgError::new(
-            ERROR,
-            format!("column \"{colname}\" appears twice in {what} constraint"),
-        )
-        .with_sqlstate(types_error::ERRCODE_DUPLICATE_COLUMN),
+    cursor_at(
+        Box::new(
+            PgError::new(
+                ERROR,
+                format!("column \"{colname}\" appears twice in {what} constraint"),
+            )
+            .with_sqlstate(types_error::ERRCODE_DUPLICATE_COLUMN),
+        ),
+        src,
+        location,
     )
 }
 
@@ -3808,19 +3847,18 @@ fn column_syntax_error(
     )
 }
 
+// transformTableConstraint's CONSTR_NOTNULL arm (parse_utilcmd.c:1073-1077):
+// 0A000, no errposition.
 #[track_caller]
 #[cold]
 #[inline(never)]
-fn multiple_defaults(colname: &str, relname: &str) -> Box<PgError> {
+fn partitioned_notnull_no_inherit() -> Box<PgError> {
     Box::new(
         PgError::new(
             ERROR,
-            format!(
-                "multiple default values specified for column \"{colname}\" of \
-                 table \"{relname}\""
-            ),
+            "not-null constraints on partitioned tables cannot be NO INHERIT".to_string(),
         )
-        .with_sqlstate(ERRCODE_SYNTAX_ERROR),
+        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
     )
 }
 

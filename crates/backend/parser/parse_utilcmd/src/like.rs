@@ -45,12 +45,14 @@ const EXPAND_OPTIONS: u32 = CREATE_TABLE_LIKE_DEFAULTS
     | CREATE_TABLE_LIKE_INDEXES
     | CREATE_TABLE_LIKE_STATISTICS;
 
+// The added-on commands (COMMENT, identity OWNED BY) go to the CreateStmtCxt's
+// alist, interleaved with the other elements' in element order (C has the one
+// cxt->alist; transformCreateStmt snapshots it after the element loop).
 pub(crate) struct LikeCxt<'a, 'mcx> {
     pub relation: &'mcx RangeVar<'mcx>,
     pub columns: &'a mut NodeList<'mcx>,
     pub nnconstraints: &'a mut NodeList<'mcx>,
     pub likeclauses: &'a mut NodeList<'mcx>,
-    pub alist: &'a mut NodeList<'mcx>,
     pub is_foreign: bool,
 }
 
@@ -124,12 +126,16 @@ fn rel_vocab_rv<'a>(rv: &'a RangeVar<'a>) -> rel_vocab::RangeVar<'a> {
     }
 }
 
+// errdetail_relkind_not_supported (catalog/pg_class.c:31-58) over the relkinds
+// transformTableLikeClause can refuse (parse_utilcmd.c:1141-1151): the
+// accepted kinds (r/v/m/c/f/p) never reach it.
 #[cold]
 #[inline(never)]
 fn errdetail_relkind_not_supported(relkind: u8) -> &'static str {
     match relkind {
         b'S' => "This operation is not supported for sequences.",
-        b'i' | b'I' => "This operation is not supported for indexes.",
+        b'i' => "This operation is not supported for indexes.",
+        b'I' => "This operation is not supported for partitioned indexes.",
         b't' => "This operation is not supported for TOAST tables.",
         _ => "This operation is not supported for this kind of relation.",
     }
@@ -246,7 +252,7 @@ pub(crate) fn transformTableLikeClause<'mcx>(
             && attribute.attcompression != 0
             && !cxt.is_foreign
         {
-            def.compression = Some(compression_method_name(attribute.attcompression as u8));
+            def.compression = Some(compression_method_name(attribute.attcompression as u8)?);
         }
         let def_node = Node::mk(mcx, def)?;
         // Copy identity if requested (parse_utilcmd.c:1214-1235): recreate
@@ -268,6 +274,7 @@ pub(crate) fn transformTableLikeClause<'mcx>(
                 None,
                 false,
                 create_cxt,
+                Some(query_string.as_bytes()),
             )?;
             // SAFETY: parse tree is analyze-owned; no derived refs live.
             unsafe {
@@ -287,7 +294,7 @@ pub(crate) fn transformTableLikeClause<'mcx>(
                     attname,
                     comment.as_str(),
                 )?;
-                cxt.alist.lappend(mcx, stmt)?;
+                create_cxt.alist.lappend(mcx, stmt)?;
             }
         }
         cxt.columns.lappend(mcx, def_node)?;
@@ -312,7 +319,7 @@ pub(crate) fn transformTableLikeClause<'mcx>(
                         conname,
                         comment.as_str(),
                     )?;
-                    cxt.alist.lappend(mcx, stmt)?;
+                    create_cxt.alist.lappend(mcx, stmt)?;
                 }
             }
         }
@@ -421,14 +428,16 @@ pub fn expandTableLikeClause<'mcx>(
             if options & wanted == 0 {
                 continue;
             }
-            let defbin = tupdesc::TupleDescGetDefaultBin(tuple_desc, (i + 1) as AttrNumber)
-                .unwrap_or_else(|| {
-                    panic!(
-                        "default expression not found for attribute {} of relation \"{}\"",
-                        i + 1,
-                        relation.name()
-                    )
-                });
+            // parse_utilcmd.c:1419-1422: an atthasdef column without its
+            // pg_attrdef row is elog(ERROR) — catchable XX000, not a panic.
+            let Some(defbin) = tupdesc::TupleDescGetDefaultBin(tuple_desc, (i + 1) as AttrNumber)
+            else {
+                return Err(Box::new(PgError::error(format!(
+                    "default expression not found for attribute {} of relation \"{}\"",
+                    i + 1,
+                    relation.name()
+                ))));
+            };
             let this_default = readfuncs::stringToNode(mcx, defbin.as_str())?;
             let (mapped, found_whole_row) =
                 rewrite_manip::map_variable_attnos(mcx, this_default, 1, 0, &attmap, types_core::InvalidOid)?;
@@ -584,13 +593,17 @@ fn whole_row_error(detail: String) -> Box<PgError> {
     )
 }
 
-// GetCompressionMethodName (toast_compression.c); any other byte is a
-// corrupted attcompression (C elogs), so the panic is an invariant guard.
-fn compression_method_name(c: u8) -> &'static str {
+// GetCompressionMethodName (toast_compression.c:305-317): any other byte is a
+// corrupted attcompression, elog(ERROR, "invalid compression method %c") —
+// a catchable XX000, never a panic.
+fn compression_method_name(c: u8) -> PgResult<&'static str> {
     match c {
-        b'p' => "pglz",
-        b'l' => "lz4",
-        _ => panic!("invalid compression method {c}"),
+        b'p' => Ok("pglz"),
+        b'l' => Ok("lz4"),
+        _ => Err(Box::new(PgError::error(format!(
+            "invalid compression method {}",
+            c as char
+        )))),
     }
 }
 
@@ -847,49 +860,39 @@ fn untransform_rel_options<'mcx>(
     d: datum::Datum,
 ) -> PgResult<NodeList<'mcx>> {
     use types_nodes::parsenodes::{DefElem, DefElemAction};
-    const TEXTOID: Oid = 25;
 
     let mut result = NodeList::nil();
     if d == datum::Datum::null() {
         return Ok(result);
     }
-    // Body past either varlena header; tuple-stored catalog arrays may come
-    // back short-headered or toasted/compressed.
+    // DatumGetArrayTypeP: a 4-byte-header image; tuple-stored catalog arrays
+    // may come back short-headered or toasted/compressed.
     let img = varlena_image(d);
     let b0 = img[0];
-    let body: &[u8] = if b0 == 0x01 || (b0 & 0x03) == 0x02 {
-        &detoast::detoast_attr(mcx, img)?.leak()[4..]
+    let image: &[u8] = if b0 == 0x01 || (b0 & 0x03) == 0x02 {
+        detoast::detoast_attr(mcx, img)?.leak()
     } else if b0 & 0x01 != 0 {
-        &img[1..]
+        let payload = &img[1..];
+        let mut v = mcx::vec_with_capacity_in(mcx, payload.len() + 4)?;
+        mcx::vec_append_bytes(&mut v, &(((payload.len() + 4) as u32) << 2).to_ne_bytes())?;
+        mcx::vec_append_bytes(&mut v, payload)?;
+        v.leak()
     } else {
-        &img[4..]
+        img
     };
-    // One-dimensional no-null text array (deconstruct_array_builtin's shape
-    // for stored reloptions; TYPALIGN_INT elements).
-    let ndim = i32::from_ne_bytes(body[0..4].try_into().unwrap());
-    if ndim == 0 {
-        return Ok(result);
-    }
-    let dataoffset = i32::from_ne_bytes(body[4..8].try_into().unwrap());
-    assert!(ndim == 1 && dataoffset == 0, "unexpected catalog text[] shape");
-    debug_assert_eq!(i32::from_ne_bytes(body[8..12].try_into().unwrap()), TEXTOID as i32);
-    let dim1 = i32::from_ne_bytes(body[12..16].try_into().unwrap()) as usize;
-    let mut off = 20usize;
-    for _ in 0..dim1 {
-        // att_align_pointer: a zero pad byte means the element was aligned.
-        if body[off] == 0 {
-            off = (off + 3) & !3;
+    // deconstruct_array_builtin(array, TEXTOID, &optiondatums, NULL, &noptions)
+    // (reloptions.c:1365): any dimensionality; a NULL element is
+    // deconstruct_array's 22004 (nullsp == NULL).
+    let (elems, nulls) =
+        datum::array_build::deconstruct_array_image_nulls(mcx, image, -1, false, b'i')?;
+    for (i, &e) in elems.iter().enumerate() {
+        if nulls.as_ref().is_some_and(|n| n[i]) {
+            return Err(Box::new(
+                PgError::error("null array element not allowed in this context")
+                    .with_sqlstate(types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED),
+            ));
         }
-        let e0 = body[off];
-        let (hdr, len) = if e0 & 0x01 != 0 {
-            (1usize, (((e0 >> 1) & 0x7F) as usize).saturating_sub(1))
-        } else {
-            let raw = u32::from_ne_bytes(body[off..off + 4].try_into().unwrap());
-            (4usize, (raw >> 2) as usize - 4)
-        };
-        let s = core::str::from_utf8(&body[off + hdr..off + hdr + len])
-            .expect("reloptions text is UTF-8");
-        off += hdr + len;
+        let s = text_str(mcx, e)?;
         // C splits at the first '='; no '=' leaves a NULL-arg DefElem.
         let (name, value) = match s.split_once('=') {
             Some((n, v)) => (n, Some(v)),
@@ -1122,7 +1125,13 @@ fn generateClonedExtStatsStmt<'mcx>(
             b'm' => "mcv",
             // Expression stats are not exposed to users.
             b'e' => continue,
-            other => panic!("unrecognized statistics kind {}", other as char),
+            // parse_utilcmd.c:2105: elog(ERROR) — catchable XX000.
+            other => {
+                return Err(Box::new(PgError::error(format!(
+                    "unrecognized statistics kind {}",
+                    other as char
+                ))))
+            }
         };
         stat_types.lappend(mcx, Node::mk_string(mcx, name)?)?;
     }
@@ -1210,23 +1219,71 @@ mod tests {
     // A 4B-headered 1-D text[] image, elements 4B-headered and INT-aligned,
     // as deconstruct_array_builtin expects stored reloptions to look.
     fn text_array_image(elems: &[&str]) -> Vec<u8> {
-        let mut body: Vec<u8> = Vec::new();
-        body.extend_from_slice(&1i32.to_ne_bytes()); // ndim
-        body.extend_from_slice(&0i32.to_ne_bytes()); // dataoffset (no nulls)
-        body.extend_from_slice(&25i32.to_ne_bytes()); // elemtype = TEXTOID
-        body.extend_from_slice(&(elems.len() as i32).to_ne_bytes()); // dim1
-        body.extend_from_slice(&1i32.to_ne_bytes()); // lbound
-        for e in elems {
-            while body.len() % 4 != 0 {
-                body.push(0);
-            }
-            body.extend_from_slice(&(((e.len() + 4) as u32) << 2).to_ne_bytes());
-            body.extend_from_slice(e.as_bytes());
+        text_array_image_shaped(&[elems.len() as i32], &elems.iter().map(|e| Some(*e)).collect::<Vec<_>>())
+    }
+
+    // The same image with explicit dims (any dimensionality) and, when an
+    // element is None, a null bitmap (dataoffset = MAXALIGN(header + bitmap)).
+    fn text_array_image_shaped(dims: &[i32], elems: &[Option<&str>]) -> Vec<u8> {
+        let has_nulls = elems.iter().any(|e| e.is_none());
+        let mut img: Vec<u8> = Vec::new();
+        img.extend_from_slice(&0u32.to_ne_bytes()); // vl_len, patched below
+        img.extend_from_slice(&(dims.len() as i32).to_ne_bytes()); // ndim
+        img.extend_from_slice(&0i32.to_ne_bytes()); // dataoffset, patched below
+        img.extend_from_slice(&25i32.to_ne_bytes()); // elemtype = TEXTOID
+        for d in dims {
+            img.extend_from_slice(&d.to_ne_bytes());
         }
-        let mut img = Vec::with_capacity(body.len() + 4);
-        img.extend_from_slice(&(((body.len() + 4) as u32) << 2).to_ne_bytes());
-        img.extend_from_slice(&body);
+        for _ in dims {
+            img.extend_from_slice(&1i32.to_ne_bytes()); // lbound
+        }
+        if has_nulls {
+            let hdr = img.len();
+            img.resize(hdr + (elems.len() + 7) / 8, 0);
+            for (i, e) in elems.iter().enumerate() {
+                if e.is_some() {
+                    img[hdr + i / 8] |= 1 << (i % 8);
+                }
+            }
+            while img.len() % 8 != 0 {
+                img.push(0);
+            }
+            let dataoffset = img.len() as i32;
+            img[8..12].copy_from_slice(&dataoffset.to_ne_bytes());
+        }
+        for e in elems.iter().flatten() {
+            while img.len() % 4 != 0 {
+                img.push(0);
+            }
+            img.extend_from_slice(&(((e.len() + 4) as u32) << 2).to_ne_bytes());
+            img.extend_from_slice(e.as_bytes());
+        }
+        let len = img.len() as u32;
+        img[..4].copy_from_slice(&(len << 2).to_ne_bytes());
         img
+    }
+
+    // reloptions.c:1365 deconstruct_array_builtin(array, TEXTOID, ..., NULL,
+    // ...): a 2-D catalog text[] is walked linearly; a NULL element is
+    // deconstruct_array's 22004 — neither shape may panic the backend.
+    #[test]
+    fn untransform_rel_options_accepts_multidim_and_refuses_nulls() {
+        let mcx = ctx().mcx();
+        let img = text_array_image_shaped(&[2, 2], &[Some("fillfactor=70"), Some("a=1"), Some("b"), Some("c=d")]);
+        let list =
+            untransform_rel_options(mcx, datum::Datum::from_usize(img.as_ptr() as usize))
+                .unwrap();
+        let names: Vec<&str> = list
+            .iter()
+            .map(|n| n.as_variant::<DefElem>().expect("DefElem").defname.unwrap())
+            .collect();
+        assert_eq!(names, ["fillfactor", "a", "b", "c"]);
+
+        let img = text_array_image_shaped(&[2], &[Some("fillfactor=70"), None]);
+        let err = untransform_rel_options(mcx, datum::Datum::from_usize(img.as_ptr() as usize))
+            .unwrap_err();
+        assert_eq!(err.message(), "null array element not allowed in this context");
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED);
     }
 
     #[test]
