@@ -5,8 +5,8 @@ use ::mcx::{Mcx, MemoryContext, PgVec};
 use ::stringinfo::StringInfo;
 use ::types_dest::CommandDest;
 use ::types_error::{
-    ErrorLocation, PgError, PgResult, ERRCODE_CONNECTION_FAILURE, ERRCODE_PROTOCOL_VIOLATION,
-    ERROR, FATAL, LOG,
+    ErrorLocation, PgError, PgResult, DEBUG1, ERRCODE_CONNECTION_DOES_NOT_EXIST,
+    ERRCODE_CONNECTION_FAILURE, ERRCODE_PROTOCOL_VIOLATION, ERROR, FATAL, LOG,
 };
 
 use crate::{
@@ -61,7 +61,13 @@ fn SocketBackend(in_buf: &mut StringInfo<'_>) -> PgResult<i32> {
                 .errmsg("unexpected EOF on client connection with an open transaction")
                 .finish(loc(369, "SocketBackend"))?;
         } else {
+            // Can't send DEBUG log messages to client at this point
+            // (postgres.c:379): the output switch precedes the report.
             elog::config::set_where_to_send_output(CommandDest::None);
+            ereport(DEBUG1)
+                .errcode(ERRCODE_CONNECTION_DOES_NOT_EXIST)
+                .errmsg_internal("unexpected EOF on client connection")
+                .finish(loc(380, "SocketBackend"))?;
         }
         return Ok(qtype);
     }
@@ -607,9 +613,9 @@ fn dispatch_message<'mcx>(
 
             simple_query::start_xact_command()?;
 
-            let was_logged = fastpath::HandleFunctionRequest(mcx, input_message)?;
+            let call = fastpath::HandleFunctionRequest(mcx, input_message)?;
 
-            match simple_query::check_log_duration(was_logged) {
+            match simple_query::check_log_duration(call.was_logged) {
                 (1, msec_str) => {
                     ereport(LOG)
                         .errmsg(format!("duration: {msec_str} ms"))
@@ -617,8 +623,12 @@ fn dispatch_message<'mcx>(
                         .finish(ErrorLocation::new("fastpath.c", 312, "HandleFunctionRequest"))?;
                 }
                 (2, msec_str) => {
+                    // fastpath.c:316
                     ereport(LOG)
-                        .errmsg(format!("duration: {msec_str} ms  fastpath function call"))
+                        .errmsg(format!(
+                            "duration: {msec_str} ms  fastpath function call: \"{}\" (OID {})",
+                            call.fname, call.fid
+                        ))
                         .errhidestmt(true)
                         .finish(ErrorLocation::new("fastpath.c", 316, "HandleFunctionRequest"))?;
                 }
@@ -634,26 +644,21 @@ fn dispatch_message<'mcx>(
             forbidden_in_wal_sender(firstchar)?;
 
             let close_type = pqformat::pq_getmsgbyte(input_message)?;
-            let close_target = {
-                let s = pqformat::pq_getmsgrawstring(input_message)?;
-                core::str::from_utf8(s)
-                    .map_err(|_| {
-                        Box::new(PgError::new(ERROR, "invalid string in message".to_string()))
-                    })?
-                    .to_string()
-            };
+            // postgres.c:4886 pq_getmsgstring: client-to-server conversion
+            // (22021 on an invalid byte sequence), as for Parse/Describe.
+            let close_target = extended_query::owned_msg_string(mcx, input_message)?;
             pqformat::pq_getmsgend(input_message)?;
 
             match close_type as u8 {
                 b'S' => {
                     if !close_target.is_empty() {
-                        prepare_seams::drop_prepared_statement::call(&close_target, false)?;
+                        prepare_seams::drop_prepared_statement::call(close_target.as_str(), false)?;
                     } else {
                         extended_query::drop_unnamed_stmt();
                     }
                 }
                 b'P' => {
-                    if let Some(portal) = portalmem::GetPortalByName(Some(&close_target)) {
+                    if let Some(portal) = portalmem::GetPortalByName(Some(close_target.as_str())) {
                         portalmem::PortalDrop(&portal, false)?;
                     }
                 }

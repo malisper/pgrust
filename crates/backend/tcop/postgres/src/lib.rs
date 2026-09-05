@@ -271,6 +271,25 @@ pub(crate) fn non_utf8_query_error() -> Box<::types_error::PgError> {
     )
 }
 
+// errdetail_abort (postgres.c:2540): the DETAIL line the aborted-transaction
+// refusal carries when MyProc->recoveryConflictPending (set by
+// ProcessRecoveryConflictInterrupt, postgres.c:3137).
+pub(crate) fn errdetail_abort() -> Option<&'static str> {
+    errdetail_abort_for(recovery_conflict_pending())
+}
+
+pub(crate) fn errdetail_abort_for(recovery_conflict_pending: bool) -> Option<&'static str> {
+    recovery_conflict_pending.then_some("Abort reason: recovery conflict")
+}
+
+fn recovery_conflict_pending() -> bool {
+    lmgr_proc::MyProc().is_some_and(|procno| {
+        lmgr_proc::GetPGProcByNumber(procno)
+            .recoveryConflictPending
+            .load(std::sync::atomic::Ordering::Relaxed)
+    })
+}
+
 pub(crate) fn get_current_timestamp() -> types_core::TimestampTz {
     // DST P2 (contract §1.2, census dedupe (c)): the private SystemTime
     // duplicate deleted; the seam is the one GetCurrentTimestamp path.

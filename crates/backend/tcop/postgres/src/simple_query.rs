@@ -4,7 +4,7 @@ use ::elog::ereport;
 use ::mcx::{Mcx, PgVec};
 use ::types_core::CommandTag;
 use ::types_dest::CommandDest;
-use ::types_error::{PgResult, ERRCODE_IN_FAILED_SQL_TRANSACTION, ERROR, LOG};
+use ::types_error::{PgResult, ERROR, LOG};
 use ::types_nodes::node_tree::Node;
 use ::types_nodes::nodes_enums::CmdType;
 use ::types_nodes::parsenodes::Query;
@@ -450,10 +450,13 @@ pub fn exec_simple_query<'mcx>(mcx: Mcx<'mcx>, query_string: &'mcx str) -> PgRes
     crate::stmt_trace::probe("q.parse");
 
     if check_log_statement(&parsetree_list)? {
-        ereport(LOG)
+        let mut rep = ereport(LOG)
             .errmsg(format!("statement: {query_string}"))
-            .errhidestmt(true)
-            .finish(loc(1069, "exec_simple_query"))?;
+            .errhidestmt(true);
+        if let Some(detail) = errdetail_execute(&parsetree_list)? {
+            rep = rep.errdetail(detail);
+        }
+        rep.finish(loc(1069, "exec_simple_query"))?;
         was_logged = true;
     }
 
@@ -477,12 +480,7 @@ pub fn exec_simple_query<'mcx>(mcx: Mcx<'mcx>, query_string: &'mcx str) -> PgRes
         tcop_dest::BeginCommand(command_tag, dest);
 
         if xact::IsAbortedTransactionBlockState() && !IsTransactionExitStmt(Some(stmt)) {
-            return Err(ereport(ERROR)
-                .errcode(ERRCODE_IN_FAILED_SQL_TRANSACTION)
-                .errmsg("current transaction is aborted, commands ignored until end of transaction block")
-                .into_error()
-                .with_funcname("exec_simple_query")
-                .into());
+            return Err(crate::extended_query::aborted_xact_error("exec_simple_query"));
         }
 
         start_xact_command()?;
@@ -631,10 +629,13 @@ pub fn exec_simple_query<'mcx>(mcx: Mcx<'mcx>, query_string: &'mcx str) -> PgRes
                 .finish(loc(1362, "exec_simple_query"))?;
         }
         (2, msec_str) => {
-            ereport(LOG)
+            let mut rep = ereport(LOG)
                 .errmsg(format!("duration: {msec_str} ms  statement: {query_string}"))
-                .errhidestmt(true)
-                .finish(loc(1367, "exec_simple_query"))?;
+                .errhidestmt(true);
+            if let Some(detail) = errdetail_execute(&parsetree_list)? {
+                rep = rep.errdetail(detail);
+            }
+            rep.finish(loc(1367, "exec_simple_query"))?;
         }
         _ => {}
     }
@@ -645,6 +646,23 @@ pub fn exec_simple_query<'mcx>(mcx: Mcx<'mcx>, query_string: &'mcx str) -> PgRes
 
 
     Ok(())
+}
+
+// errdetail_execute (postgres.c:2487): "prepare: <query>" for the first
+// EXECUTE in the list whose prepared statement exists (throw_error = false).
+fn errdetail_execute(raw_parsetree_list: &[RawStmt<'_>]) -> PgResult<Option<String>> {
+    for parsetree in raw_parsetree_list {
+        let Some(stmt) = parsetree.stmt.and_then(|s| s.as_execute_stmt()) else {
+            continue;
+        };
+        if let Some(psrc) = prepare_seams::fetch_prepared_statement_plansource::call(
+            stmt.name.unwrap_or(""),
+            false,
+        )? {
+            return Ok(Some(format!("prepare: {}", plancache::CachedPlanQueryString(psrc))));
+        }
+    }
+    Ok(None)
 }
 
 pub fn start_xact_command() -> PgResult<()> {

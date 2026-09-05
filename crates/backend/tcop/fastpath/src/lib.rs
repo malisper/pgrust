@@ -134,6 +134,17 @@ fn fetch_fp_info<'mcx>(mcx: Mcx<'mcx>, func_id: Oid) -> PgResult<FpInfo> {
     })
 }
 
+/// What HandleFunctionRequest hands back to the command loop: C's
+/// `was_logged` return plus the function name and OID its caller's
+/// duration line names (fastpath.c:316 lives inside HandleFunctionRequest in
+/// C; the pgrust caller owns check_log_duration).
+#[derive(Debug)]
+pub struct FunctionRequestOutcome {
+    pub was_logged: bool,
+    pub fname: String,
+    pub fid: Oid,
+}
+
 /// HandleFunctionRequest: read the message, look up the function, parse the
 /// arguments, invoke, send the result. Returns `was_logged`; the caller
 /// (PostgresMain's 'F' arm) runs check_log_duration — a shape divergence from
@@ -141,7 +152,7 @@ fn fetch_fp_info<'mcx>(mcx: Mcx<'mcx>, func_id: Oid) -> PgResult<FpInfo> {
 pub fn HandleFunctionRequest<'mcx>(
     mcx: Mcx<'mcx>,
     msg_buf: &mut StringInfo<'mcx>,
-) -> PgResult<bool> {
+) -> PgResult<FunctionRequestOutcome> {
     let mut was_logged = false;
 
     if xact::IsAbortedTransactionBlockState() {
@@ -238,7 +249,7 @@ pub fn HandleFunctionRequest<'mcx>(
 
     snapmgr::PopActiveSnapshot()?;
 
-    Ok(was_logged)
+    Ok(FunctionRequestOutcome { was_logged, fname: fip.fname, fid })
 }
 
 fn parse_fcall_arguments<'mcx>(
@@ -639,7 +650,7 @@ mod oat_hook_tests {
     }
 
     // One 'F' message: fid, 0 argument formats, 0 arguments, text result.
-    fn run_request() -> PgResult<bool> {
+    fn run_request() -> PgResult<FunctionRequestOutcome> {
         let ctx = MemoryContext::new("fp-oat-msg");
         let mcx = ctx.mcx();
         let mut msg = StringInfo::new_in(mcx)?;

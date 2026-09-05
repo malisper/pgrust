@@ -14,7 +14,8 @@ use ::types_dest::CommandDest;
 use ::types_error::{
     PgResult, ERRCODE_INDETERMINATE_DATATYPE, ERRCODE_INVALID_BINARY_REPRESENTATION,
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_IN_FAILED_SQL_TRANSACTION, ERRCODE_PROTOCOL_VIOLATION,
-    ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_CURSOR, ERRCODE_UNDEFINED_PSTATEMENT, ERROR, LOG,
+    ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_CURSOR, ERRCODE_UNDEFINED_PSTATEMENT, DEBUG2, ERROR,
+    LOG,
 };
 use ::types_nodes::nodes_enums::CmdType;
 use ::types_nodes::parsenodes::Query;
@@ -77,14 +78,38 @@ fn lookup_plansource(stmt_name: &str) -> PgResult<CachedPlanSourceHandle> {
     }
 }
 
+// The aborted-transaction refusal every command-loop entry raises
+// (postgres.c:1138/1495/1747/2252/2689/2766), with errdetail_abort's
+// "Abort reason: recovery conflict" DETAIL when MyProc->recoveryConflictPending.
 #[cold]
-fn aborted_xact_error(funcname: &'static str) -> Box<types_error::PgError> {
-    ereport(ERROR)
+pub(crate) fn aborted_xact_error(funcname: &'static str) -> Box<types_error::PgError> {
+    let mut rep = ereport(ERROR)
         .errcode(ERRCODE_IN_FAILED_SQL_TRANSACTION)
-        .errmsg("current transaction is aborted, commands ignored until end of transaction block")
-        .into_error()
-        .with_funcname(funcname)
-        .into()
+        .errmsg("current transaction is aborted, commands ignored until end of transaction block");
+    if let Some(detail) = crate::errdetail_abort() {
+        rep = rep.errdetail(detail);
+    }
+    rep.into_error().with_funcname(funcname).into()
+}
+
+// errdetail_params (postgres.c:2520): the "Parameters: ..." DETAIL line of
+// statement logging — governed by log_parameter_max_length, not the
+// on-error variant; BuildParamLogString (params.c:352) yields nothing under
+// a param fetch hook or in an aborted transaction.
+fn errdetail_params(mcx: Mcx<'_>, params: ParamListHandle) -> PgResult<Option<String>> {
+    let maxlen = guc_tables::backing::log_parameter_max_length();
+    if types_portal::params::num_params(params) == 0
+        || maxlen == 0
+        || types_portal::params::is_fetch_hooked(params)
+    {
+        return Ok(None);
+    }
+    let s = types_portal::params::with(params, |slice| {
+        nodes_params::build_param_log_string(mcx, slice, None, maxlen)
+    })?;
+    Ok(s
+        .filter(|s| !s.as_str().is_empty())
+        .map(|s| format!("Parameters: {}", s.as_str())))
 }
 
 pub fn pg_analyze_and_rewrite_varparams<'mcx>(
@@ -144,6 +169,14 @@ pub fn exec_parse_message<'mcx>(
     if save_log_statement_stats {
         ResetUsage();
     }
+
+    // postgres.c:1417
+    ereport(DEBUG2)
+        .errmsg_internal(format!(
+            "parse {}: {query_string}",
+            if stmt_name.is_empty() { "<unnamed>" } else { stmt_name }
+        ))
+        .finish(loc(1417, "exec_parse_message"))?;
 
     start_xact_command()?;
 
@@ -430,6 +463,15 @@ pub fn exec_bind_message<'mcx>(
     let portal_name = owned_msg_string(mcx, input_message)?;
     let stmt_name = owned_msg_string(mcx, input_message)?;
 
+    // postgres.c:1652
+    ereport(DEBUG2)
+        .errmsg_internal(format!(
+            "bind {} to {}",
+            if portal_name.is_empty() { "<unnamed>" } else { portal_name.as_str() },
+            if stmt_name.is_empty() { "<unnamed>" } else { stmt_name.as_str() }
+        ))
+        .finish(loc(1652, "exec_bind_message"))?;
+
     let psrc = lookup_plansource(stmt_name.as_str())?;
     let query_string = plancache::CachedPlanQueryString(psrc);
     let save_log_statement_stats = log_statement_stats();
@@ -545,6 +587,15 @@ pub fn exec_bind_message<'mcx>(
                 pqformat::pq_getmsgint(input_message, 4).map_err(pctx)? as i32;
             let is_null = plength == -1;
 
+            // postgres.c:1841: the parameter bytes are consumed BEFORE the
+            // format code is consulted, so a short message is 08P01 even
+            // under an unsupported format code.
+            let raw: Option<&[u8]> = if is_null {
+                None
+            } else {
+                Some(pqformat::pq_getmsgbytes(input_message, plength as usize).map_err(pctx)?)
+            };
+
             let pformat: i16 = if num_pformats > 1 {
                 pformats[paramno]
             } else if num_pformats > 0 {
@@ -557,12 +608,9 @@ pub fn exec_bind_message<'mcx>(
                 0 => {
                     let (typinput, typioparam) =
                         lsyscache::typ::getTypeInputInfo(ptype).map_err(pctx)?;
-                    let pstring = if is_null {
-                        None
-                    } else {
-                        let raw = pqformat::pq_getmsgbytes(input_message, plength as usize)
-                            .map_err(pctx)?;
-                        Some(client_to_server_cstring(pmcx, raw).map_err(pctx)?)
+                    let pstring = match raw {
+                        None => None,
+                        Some(raw) => Some(client_to_server_cstring(pmcx, raw).map_err(pctx)?),
                     };
                     // If we might need to log parameters later, save a copy
                     // of the converted string (exec_bind_message). C trims
@@ -610,41 +658,43 @@ pub fn exec_bind_message<'mcx>(
                     let (typreceive, typioparam) =
                         lsyscache::typ::getTypeBinaryInputInfo(ptype).map_err(pctx)?;
                     let mut finfo = fmgr_seams::fmgr_info::call(typreceive).map_err(pctx)?;
-                    if is_null {
-                        let v = types_fmgr::receive_function_call(
-                            &mut finfo, None, typioparam, -1, pmcx,
-                        )
-                        .map_err(pctx)?;
-                        copy_param_datum(pmcx, v, is_null, ptype).map_err(pctx)?
-                    } else {
-                        let raw = pqformat::pq_getmsgbytes(input_message, plength as usize)
+                    match raw {
+                        None => {
+                            let v = types_fmgr::receive_function_call(
+                                &mut finfo, None, typioparam, -1, pmcx,
+                            )
                             .map_err(pctx)?;
-                        // C's initReadOnlyStringInfo aliases the message buffer;
-                        // no read-only StringInfo here, so copy the param bytes.
-                        let mut pbuf = StringInfo::with_capacity_in(pmcx, plength as usize + 1)?;
-                        pbuf.append_bytes(raw)?;
-                        let pval = types_fmgr::receive_function_call(
-                            &mut finfo,
-                            Some(&mut pbuf),
-                            typioparam,
-                            -1,
-                            pmcx,
-                        )
-                        .map_err(pctx)?;
-                        if pbuf.cursor != pbuf.len() {
-                            return Err(pctx(Box::new(
-                                ereport(ERROR)
-                                    .errcode(ERRCODE_INVALID_BINARY_REPRESENTATION)
-                                    .errmsg(format!(
-                                        "incorrect binary data format in bind parameter {}",
-                                        paramno + 1
-                                    ))
-                                    .into_error()
-                                    .with_funcname("exec_bind_message"),
-                            ))
-                            .into());
+                            copy_param_datum(pmcx, v, is_null, ptype).map_err(pctx)?
                         }
-                        copy_param_datum(pmcx, pval, is_null, ptype).map_err(pctx)?
+                        Some(raw) => {
+                            // C's initReadOnlyStringInfo aliases the message buffer;
+                            // no read-only StringInfo here, so copy the param bytes.
+                            let mut pbuf =
+                                StringInfo::with_capacity_in(pmcx, plength as usize + 1)?;
+                            pbuf.append_bytes(raw)?;
+                            let pval = types_fmgr::receive_function_call(
+                                &mut finfo,
+                                Some(&mut pbuf),
+                                typioparam,
+                                -1,
+                                pmcx,
+                            )
+                            .map_err(pctx)?;
+                            if pbuf.cursor != pbuf.len() {
+                                return Err(pctx(Box::new(
+                                    ereport(ERROR)
+                                        .errcode(ERRCODE_INVALID_BINARY_REPRESENTATION)
+                                        .errmsg(format!(
+                                            "incorrect binary data format in bind parameter {}",
+                                            paramno + 1
+                                        ))
+                                        .into_error()
+                                        .with_funcname("exec_bind_message"),
+                                ))
+                                .into());
+                            }
+                            copy_param_datum(pmcx, pval, is_null, ptype).map_err(pctx)?
+                        }
                     }
                 }
                 other => {
@@ -790,13 +840,16 @@ pub fn exec_bind_message<'mcx>(
         (2, msec_str) => {
             let name = if stmt_name.is_empty() { "<unnamed>" } else { stmt_name.as_str() };
             let sep = if portal_name.is_empty() { "" } else { "/" };
-            ereport(LOG)
+            let mut rep = ereport(LOG)
                 .errmsg(format!(
                     "duration: {msec_str} ms  bind {name}{sep}{}: {query_string}",
                     portal_name.as_str()
                 ))
-                .errhidestmt(true)
-                .finish(loc(2070, "exec_bind_message"))?;
+                .errhidestmt(true);
+            if let Some(detail) = errdetail_params(mcx, params)? {
+                rep = rep.errdetail(detail);
+            }
+            rep.finish(loc(2070, "exec_bind_message"))?;
         }
         _ => {}
     }
@@ -935,14 +988,19 @@ pub fn exec_execute_message<'mcx>(
 
     let execute_is_fetch = !portal.borrow().atStart;
 
+    let portal_params = portal.borrow().portalParams;
+
     let mut was_logged = false;
     if check_log_statement_planned(&portal)? {
         let verb = if execute_is_fetch { "execute fetch from" } else { "execute" };
         let sep = if portal_name.is_empty() { "" } else { "/" };
-        ereport(LOG)
+        let mut rep = ereport(LOG)
             .errmsg(format!("{verb} {prep_stmt_name}{sep}{portal_name}: {source_text}"))
-            .errhidestmt(true)
-            .finish(loc(2231, "exec_execute_message"))?;
+            .errhidestmt(true);
+        if let Some(detail) = errdetail_params(mcx, portal_params)? {
+            rep = rep.errdetail(detail);
+        }
+        rep.finish(loc(2231, "exec_execute_message"))?;
         was_logged = true;
     }
 
@@ -963,7 +1021,6 @@ pub fn exec_execute_message<'mcx>(
     // Okay to run the portal. Set the error callback so that parameters are
     // logged; they must have been saved during the bind phase (C pushes
     // ParamsErrorCallback around PortalRun).
-    let portal_params = portal.borrow().portalParams;
     let completed = pquery::PortalRun(
         &portal,
         max_rows,
@@ -1009,12 +1066,15 @@ pub fn exec_execute_message<'mcx>(
         (2, msec_str) => {
             let verb = if execute_is_fetch { "execute fetch from" } else { "execute" };
             let sep = if portal_name.is_empty() { "" } else { "/" };
-            ereport(LOG)
+            let mut rep = ereport(LOG)
                 .errmsg(format!(
                     "duration: {msec_str} ms  {verb} {prep_stmt_name}{sep}{portal_name}: {source_text}"
                 ))
-                .errhidestmt(true)
-                .finish(loc(2348, "exec_execute_message"))?;
+                .errhidestmt(true);
+            if let Some(detail) = errdetail_params(mcx, portal_params)? {
+                rep = rep.errdetail(detail);
+            }
+            rep.finish(loc(2348, "exec_execute_message"))?;
         }
         _ => {}
     }

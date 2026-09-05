@@ -467,3 +467,21 @@ fn error_recovery_escalates_instead_of_recovering_inside_critical_section() {
         .expect_err("error_recovery must not recover with a critical section open")
         .is::<types_error::PanicExitThread>());
 }
+
+// audit-18.6 b151: errdetail_abort (postgres.c:2540) — the aborted-transaction
+// refusal carries "Abort reason: recovery conflict" exactly when
+// MyProc->recoveryConflictPending; without a PGPROC bound (this unit
+// environment) the DETAIL is absent, as for an ordinary aborted block.
+#[test]
+fn aborted_xact_error_carries_recovery_conflict_detail_only_when_pending() {
+    assert_eq!(errdetail_abort_for(false), None);
+    assert_eq!(errdetail_abort_for(true), Some("Abort reason: recovery conflict"));
+
+    let err = extended_query::aborted_xact_error("exec_execute_message");
+    assert_eq!(err.sqlstate, types_error::ERRCODE_IN_FAILED_SQL_TRANSACTION);
+    assert_eq!(
+        err.message,
+        "current transaction is aborted, commands ignored until end of transaction block"
+    );
+    assert_eq!(err.detail, None);
+}
