@@ -728,8 +728,11 @@ fn unknown_attribute(
 
 // The ParseFuncOrColumn(fn=NULL) attribute-notation leg shared by
 // transformIndirection and transformColumnRef. C returns NULL on
-// FUNCDETAIL_NOTFOUND when fn == NULL; the ported entry raises 42883 instead,
-// so that error maps back to None and the caller reports the attribute.
+// FUNCDETAIL_NOTFOUND (parse_func.c:585) AND on FUNCDETAIL_MULTIPLE
+// (parse_func.c:557) when fn == NULL; the ported entry raises 42883 / 42725
+// instead, so those errors map back to None and the caller reports the
+// attribute (42703). No other 42883/42725 can escape the is_column leg: C
+// guards both ereports with the same is_column early returns.
 fn attribute_notation_func_call<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'_, 'mcx>,
@@ -767,7 +770,11 @@ fn attribute_notation_func_call<'mcx>(
         location,
     ) {
         Ok(node) => Ok(Some(node)),
-        Err(e) if e.sqlstate() == types_error::ERRCODE_UNDEFINED_FUNCTION => Ok(None),
+        Err(e) if e.sqlstate() == types_error::ERRCODE_UNDEFINED_FUNCTION
+            || e.sqlstate() == types_error::ERRCODE_AMBIGUOUS_FUNCTION =>
+        {
+            Ok(None)
+        }
         Err(e) => Err(e),
     }
 }

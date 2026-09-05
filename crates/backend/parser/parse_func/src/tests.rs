@@ -969,3 +969,35 @@ fn cache_lookup_failures_are_catchable_xx000() {
     assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
     assert_eq!(e.level(), types_error::ERROR);
 }
+
+// parse_func.c:2217 LookupFuncName: with nargs < 0 (any arity) the
+// not-found report is "could not find a function named \"%s\"", never the
+// func_signature_string form (which would print an empty "()").
+#[test]
+fn lookup_func_name_any_arity_not_found_message() {
+    install_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let funcname =
+        NodeList::make1(mcx, Node::mk(mcx, PgStr { sval: "nosuchfn" }).unwrap()).unwrap();
+    let err = crate::LookupFuncName(&funcname, -1, &[], false).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_UNDEFINED_FUNCTION);
+    assert_eq!(err.message(), "could not find a function named \"nosuchfn\"");
+}
+
+// parse_func.c:266 / namespace.c DeconstructQualifiedName: NameListToString
+// prints EVERY part of an over-qualified name (C's funcname is an unbounded
+// List) — a 5-part name must not be truncated to 4 in the 42601 report.
+#[test]
+fn lookup_func_name_reports_every_dotted_part() {
+    install_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut funcname = NodeList::nil();
+    for p in ["a", "b", "c", "d", "e"] {
+        funcname.lappend(mcx, Node::mk(mcx, PgStr { sval: p }).unwrap()).unwrap();
+    }
+    let err = crate::LookupFuncName(&funcname, 1, &[INT4OID], false).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_SYNTAX_ERROR);
+    assert_eq!(err.message(), "improper qualified name (too many dotted names): a.b.c.d.e");
+}

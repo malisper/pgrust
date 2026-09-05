@@ -74,6 +74,8 @@ enum FuncDetail<'mcx> {
         rettype: Oid,
         retset: bool,
         declared_arg_types: PgVec<'mcx, Oid>,
+        vatype: Oid,
+        nvargs: i16,
         argdefaults: PgVec<'mcx, Node<'mcx>>,
     },
     NotFound,
@@ -116,8 +118,8 @@ pub fn ParseFuncOrColumn<'mcx>(
     location: ParseLoc,
 ) -> PgResult<Node<'mcx>> {
     debug_assert_eq!(fargs.len(), actual_arg_types.len());
-    let mut buf = [""; 4];
-    let parts = name_parts(funcname, &mut buf);
+    let parts = name_parts(mcx, funcname)?;
+    let parts = parts.as_slice();
 
     let over = fn_call.over;
 
@@ -149,6 +151,9 @@ pub fn ParseFuncOrColumn<'mcx>(
         (fargs, actual_arg_types)
     };
 
+    // C's nargs: the supplied arguments, before any defaults are appended.
+    let nargs = fargs.len();
+
     let mut argnames: PgVec<'mcx, &'mcx str> = PgVec::new_in(mcx);
     for arg in &fargs {
         match arg.as_named_arg_expr() {
@@ -175,7 +180,12 @@ pub fn ParseFuncOrColumn<'mcx>(
         }
     }
 
-    let fdresult = func_get_detail(
+    // C parse_func.c:264/273 brackets func_get_detail with
+    // setup/cancel_parser_errposition_callback: pcb_error_callback
+    // (parse_node.c:170-176) stamps the call's cursor position on any error
+    // raised during the lookup — LookupExplicitNamespace,
+    // DeconstructQualifiedName, ... — except a query cancel.
+    let fdresult = match func_get_detail(
         mcx,
         parts,
         &fargs,
@@ -184,7 +194,18 @@ pub fn ParseFuncOrColumn<'mcx>(
         actual_arg_types,
         !fn_call.func_variadic,
         proc_call,
-    )?;
+    ) {
+        Ok(r) => r,
+        Err(mut e) => {
+            if e.sqlstate() != types_error::ERRCODE_QUERY_CANCELED {
+                let pos = parser_errposition(pstate, location, mbutils::GetDatabaseEncoding());
+                if pos > 0 {
+                    e.cursor_position = Some(pos);
+                }
+            }
+            return Err(e);
+        }
+    };
 
     if proc_call
         && matches!(
@@ -206,6 +227,90 @@ pub fn ParseFuncOrColumn<'mcx>(
         ));
     }
 
+    // Conversely, if not a CALL, reject procedures.
+    if !proc_call && matches!(fdresult, FuncDetail::Procedure { .. }) {
+        return Err(wrong_object_type_hint(
+            pstate,
+            format!(
+                "{} is a procedure",
+                func_signature_string(parts, argnames.as_slice(), actual_arg_types)?
+            ),
+            "To call a procedure, use CALL.",
+            location,
+        ));
+    }
+
+    // C parse_func.c:298-349: for a plain function, procedure, OR a type
+    // coercion, complain about anything indicating an aggregate or window
+    // function — the coercion arm runs these before its early return.
+    if matches!(
+        fdresult,
+        FuncDetail::Normal { .. } | FuncDetail::Procedure { .. } | FuncDetail::Coercion { .. }
+    ) {
+        if fn_call.agg_star {
+            return Err(wrong_object_type(
+                pstate,
+                format!(
+                    "{}(*) specified, but {} is not an aggregate function",
+                    name_list_to_string(parts),
+                    name_list_to_string(parts)
+                ),
+                location,
+            ));
+        }
+        if fn_call.agg_distinct {
+            return Err(wrong_object_type(
+                pstate,
+                format!(
+                    "DISTINCT specified, but {} is not an aggregate function",
+                    name_list_to_string(parts)
+                ),
+                location,
+            ));
+        }
+        if fn_call.agg_within_group {
+            return Err(wrong_object_type(
+                pstate,
+                format!(
+                    "WITHIN GROUP specified, but {} is not an aggregate function",
+                    name_list_to_string(parts)
+                ),
+                location,
+            ));
+        }
+        if !fn_call.agg_order.is_nil() {
+            return Err(wrong_object_type(
+                pstate,
+                format!(
+                    "ORDER BY specified, but {} is not an aggregate function",
+                    name_list_to_string(parts)
+                ),
+                location,
+            ));
+        }
+        if agg_filter.is_some() {
+            return Err(wrong_object_type(
+                pstate,
+                format!(
+                    "FILTER specified, but {} is not an aggregate function",
+                    name_list_to_string(parts)
+                ),
+                location,
+            ));
+        }
+        if over.is_some() {
+            return Err(wrong_object_type(
+                pstate,
+                format!(
+                    "OVER specified, but {} is not a window function nor an aggregate \
+                     function",
+                    name_list_to_string(parts)
+                ),
+                location,
+            ));
+        }
+    }
+
     match fdresult {
         FuncDetail::Coercion { rettype } => coerce::coerce_type(
             mcx,
@@ -221,15 +326,6 @@ pub fn ParseFuncOrColumn<'mcx>(
         FuncDetail::Multiple => {
             Err(ambiguous_function(pstate, parts, argnames.as_slice(), actual_arg_types, proc_call, location))
         }
-        FuncDetail::Procedure { .. } if !proc_call => Err(wrong_object_type_hint(
-            pstate,
-            format!(
-                "{} is a procedure",
-                func_signature_string(parts, argnames.as_slice(), actual_arg_types)?
-            ),
-            "To call a procedure, use CALL.",
-            location,
-        )),
         FuncDetail::Normal {
             funcid,
             rettype,
@@ -248,69 +344,6 @@ pub fn ParseFuncOrColumn<'mcx>(
             nvargs,
             argdefaults,
         } => {
-            if fn_call.agg_star {
-                return Err(wrong_object_type(
-                    pstate,
-                    format!(
-                        "{}(*) specified, but {} is not an aggregate function",
-                        name_list_to_string(parts),
-                        name_list_to_string(parts)
-                    ),
-                    location,
-                ));
-            }
-            if fn_call.agg_distinct {
-                return Err(wrong_object_type(
-                    pstate,
-                    format!(
-                        "DISTINCT specified, but {} is not an aggregate function",
-                        name_list_to_string(parts)
-                    ),
-                    location,
-                ));
-            }
-            if fn_call.agg_within_group {
-                return Err(wrong_object_type(
-                    pstate,
-                    format!(
-                        "WITHIN GROUP specified, but {} is not an aggregate function",
-                        name_list_to_string(parts)
-                    ),
-                    location,
-                ));
-            }
-            if !fn_call.agg_order.is_nil() {
-                return Err(wrong_object_type(
-                    pstate,
-                    format!(
-                        "ORDER BY specified, but {} is not an aggregate function",
-                        name_list_to_string(parts)
-                    ),
-                    location,
-                ));
-            }
-            if agg_filter.is_some() {
-                return Err(wrong_object_type(
-                    pstate,
-                    format!(
-                        "FILTER specified, but {} is not an aggregate function",
-                        name_list_to_string(parts)
-                    ),
-                    location,
-                ));
-            }
-            if over.is_some() {
-                return Err(wrong_object_type(
-                    pstate,
-                    format!(
-                        "OVER specified, but {} is not a window function nor an aggregate \
-                         function",
-                        name_list_to_string(parts)
-                    ),
-                    location,
-                ));
-            }
-
             let mut declared_arg_types = declared_arg_types;
             // C: default types join the generic-consistency check, but the
             // defaults are NOT put into the parse node — their values may
@@ -354,12 +387,14 @@ pub fn ParseFuncOrColumn<'mcx>(
             } else {
                 fargs
             };
-            if !fargs.is_nil() && vatype == types_core::catalog::ANYOID && func_variadic {
-                let va_arr_typid = actual_arg_types[actual_arg_types.len() - 1];
-                if !OidIsValid(lsyscache::get_base_element_type(va_arr_typid)?) {
-                    return Err(variadic_not_array(pstate, &fargs));
-                }
-            }
+            check_variadic_any_is_array(
+                pstate,
+                &fargs,
+                actual_arg_types,
+                nargs,
+                vatype,
+                func_variadic,
+            )?;
             if retset {
                 check_srf_call_placement(pstate, _last_srf, location)?;
             }
@@ -533,6 +568,20 @@ pub fn ParseFuncOrColumn<'mcx>(
             } else {
                 fargs
             };
+            // C parse_func.c:755-769: the VARIADIC-"any" array check and the
+            // SRF placement check run for every fdresult, ahead of the
+            // kind-specific build (and its "cannot return sets" errors).
+            check_variadic_any_is_array(
+                pstate,
+                &fargs,
+                actual_arg_types,
+                nargs,
+                vatype,
+                func_variadic,
+            )?;
+            if retset {
+                check_srf_call_placement(pstate, _last_srf, location)?;
+            }
             if let Some(over_node) = over {
                 return build_window_func(
                     mcx, pstate, funcid, rettype, retset, fargs, true, fn_call, agg_filter,
@@ -625,7 +674,15 @@ pub fn ParseFuncOrColumn<'mcx>(
 
             Ok(aggref.seal())
         }
-        FuncDetail::WindowFunc { funcid, rettype, retset, declared_arg_types, argdefaults } => {
+        FuncDetail::WindowFunc {
+            funcid,
+            rettype,
+            retset,
+            declared_arg_types,
+            vatype,
+            nvargs,
+            argdefaults,
+        } => {
             let Some(over_node) = over else {
                 return Err(wrong_object_type(
                     pstate,
@@ -671,6 +728,36 @@ pub fn ParseFuncOrColumn<'mcx>(
             reject_internal_call(pstate, &declared_arg_types, rettype, location)?;
             let fargs =
                 make_fn_arguments(mcx, pstate, fargs, actual_arg_types, &declared_arg_types)?;
+            // C parse_func.c:719-769: the variadic packing, the
+            // VARIADIC-"any" array check and the SRF placement check are
+            // shared by every fdresult, window functions included.
+            let mut func_variadic = fn_call.func_variadic && OidIsValid(vatype);
+            let fargs = if let Some((packed, _)) = pack_variadic_args(
+                mcx,
+                pstate,
+                &fargs,
+                actual_arg_types,
+                &declared_arg_types,
+                nvargs,
+                vatype,
+            )? {
+                debug_assert!(!func_variadic);
+                func_variadic = true;
+                packed
+            } else {
+                fargs
+            };
+            check_variadic_any_is_array(
+                pstate,
+                &fargs,
+                actual_arg_types,
+                nargs,
+                vatype,
+                func_variadic,
+            )?;
+            if retset {
+                check_srf_call_placement(pstate, _last_srf, location)?;
+            }
             build_window_func(
                 mcx, pstate, funcid, rettype, retset, fargs, false, fn_call, agg_filter, parts,
                 over_node, _last_srf, location,
@@ -1436,8 +1523,8 @@ fn func_get_detail<'mcx>(
                     {
                         COERCION_PATH_RELABELTYPE => true,
                         COERCION_PATH_COERCEVIAIO => {
-                            !((source_type == RECORDOID
-                                || OidIsValid(lsyscache::get_typ_typrelid(source_type)?))
+                            // C ISCOMPLEX looks through a domain to its base.
+                            !((source_type == RECORDOID || is_complex(source_type)?)
                                 && coerce::TypeCategory(target_type)? == TYPCATEGORY_STRING)
                         }
                         _ => false,
@@ -1496,16 +1583,6 @@ fn func_get_detail<'mcx>(
     let Some(shape) = syscache_seams::lookup_pg_proc_shape::call(funcid)? else {
         return Err(cache_lookup_failed_function(funcid));
     };
-    if OidIsValid(shape.provariadic)
-        && shape.prokind != PROKIND_FUNCTION
-        && shape.prokind != PROKIND_PROCEDURE
-        && shape.prokind != PROKIND_AGGREGATE
-    {
-        panic!(
-            "func_get_detail (parse_func.c): variadic {} {funcid} unported",
-            shape.prokind
-        );
-    }
     // C: fetch and parse the argument defaults the call omitted.
     let mut argdefaults: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
     if best.ndargs > 0 {
@@ -1589,6 +1666,8 @@ fn func_get_detail<'mcx>(
             rettype: shape.prorettype,
             retset: shape.proretset,
             declared_arg_types,
+            vatype: shape.provariadic,
+            nvargs: best.nvargs,
             argdefaults,
         },
         other => panic!("unrecognized prokind: {other} (parse_func.c func_get_detail)"),
@@ -1837,12 +1916,15 @@ pub fn make_fn_arguments<'mcx>(
     Ok(out)
 }
 
-fn name_parts<'a, 'mcx>(name: &NodeList<'mcx>, buf: &'a mut [&'mcx str; 4]) -> &'a [&'mcx str] {
-    let n = name.len().min(buf.len());
-    for (i, slot) in buf.iter_mut().enumerate().take(n) {
-        *slot = name.nth(i).as_string().expect("function name list holds String nodes").sval;
+// C's funcname is an unbounded List of String nodes; every part reaches
+// DeconstructQualifiedName / NameListToString (an over-qualified name is
+// reported with ALL of its parts).
+fn name_parts<'a, 'mcx>(mcx: Mcx<'mcx>, name: &NodeList<'a>) -> PgResult<PgVec<'mcx, &'a str>> {
+    let mut parts: PgVec<'mcx, &'a str> = mcx::vec_with_capacity_in(mcx, name.len())?;
+    for n in name.iter() {
+        parts.push(n.as_string().expect("function name list holds String nodes").sval);
     }
-    &buf[..n]
+    Ok(parts)
 }
 
 fn name_list_to_string(parts: &[&str]) -> String {
@@ -1865,6 +1947,26 @@ fn func_signature_string(parts: &[&str], argnames: &[&str], argtypes: &[Oid]) ->
     }
     sig.push(')');
     Ok(sig)
+}
+
+// C parse_func.c:755-765: an "any" variadic called with explicit VARIADIC
+// marking must pass an array as its last SUPPLIED argument
+// (actual_arg_types[nargs - 1]; appended defaults sit above nargs).
+fn check_variadic_any_is_array(
+    pstate: &ParseState<'_, '_>,
+    fargs: &NodeList<'_>,
+    actual_arg_types: &[Oid],
+    nargs: usize,
+    vatype: Oid,
+    func_variadic: bool,
+) -> PgResult<()> {
+    if nargs > 0 && vatype == types_core::catalog::ANYOID && func_variadic {
+        let va_arr_typid = actual_arg_types[nargs - 1];
+        if !OidIsValid(lsyscache::get_base_element_type(va_arr_typid)?) {
+            return Err(variadic_not_array(pstate, fargs));
+        }
+    }
+    Ok(())
 }
 
 #[track_caller]
@@ -2154,18 +2256,9 @@ pub fn LookupFuncName(
     argtypes: &[Oid],
     missing_ok: bool,
 ) -> PgResult<Oid> {
-    let mut buf = [""; 4];
-    let parts = name_parts(funcname, &mut buf);
-    match lookup_func_name_internal(ObjectType::OBJECT_FUNCTION, parts, nargs, argtypes, false, missing_ok)? {
-        Ok(oid) => Ok(oid),
-        Err(true) => Err(func_name_not_unique(parts)),
-        Err(false) => {
-            if missing_ok {
-                return Ok(InvalidOid);
-            }
-            Err(function_does_not_exist(parts, &argtypes[..nargs.max(0) as usize])?)
-        }
-    }
+    let scratch = mcx::MemoryContext::new("LookupFuncName");
+    let parts = name_parts(scratch.mcx(), funcname)?;
+    lookup_func_name_seam(parts.as_slice(), nargs, argtypes, missing_ok)
 }
 
 // LookupFuncWithArgs (parse_func.c) over a grammar ObjectWithArgs (objargs
@@ -2201,7 +2294,11 @@ pub fn LookupFuncWithArgs(
             .expect("function objargs cell is non-NULL")
             .as_variant::<types_nodes::rawnodes::TypeName>()
             .expect("objargs holds TypeName nodes");
-        argoids[i] = parse_utilcmd::LookupTypeNameOidExtended(scratch.mcx(), t, missing_ok)?;
+        // C resolves with LookupTypeNameOid (parse_type.c:232-254), which
+        // returns a shell type's OID silently; the function lookup then
+        // reports the NOTICE/42883 itself.
+        argoids[i] =
+            parse_utilcmd::LookupTypeNameOidExtendedAllowShell(scratch.mcx(), t, missing_ok)?;
         if !OidIsValid(argoids[i]) {
             debug_assert!(missing_ok);
             return Ok(InvalidOid);
@@ -2209,8 +2306,8 @@ pub fn LookupFuncWithArgs(
     }
     let nargs: i16 = if args_unspecified { -1 } else { argcount as i16 };
 
-    let mut buf = [""; 4];
-    let parts = name_parts(objname, &mut buf);
+    let parts = name_parts(scratch.mcx(), objname)?;
+    let parts = parts.as_slice();
     // With an argument list the objtype filter is disabled (OBJECT_ROUTINE):
     // "object is of wrong type" beats "object doesn't exist".
     let lookup_objtype = if args_unspecified { objtype } else { OBJECT_ROUTINE };
@@ -2380,6 +2477,7 @@ fn lookup_func_with_args_seam(
     LookupFuncWithArgs(objtype_from_i32(objtype), func, missing_ok)
 }
 
+// LookupFuncName over pre-extracted name parts (also the seam entry).
 fn lookup_func_name_seam(
     parts: &[&str],
     nargs: i16,
@@ -2393,7 +2491,20 @@ fn lookup_func_name_seam(
             if missing_ok {
                 return Ok(InvalidOid);
             }
-            Err(function_does_not_exist(parts, &argtypes[..nargs.max(0) as usize])?)
+            // C parse_func.c:2210-2222: an any-arity (nargs < 0) miss is
+            // reported by name only, never through func_signature_string.
+            if nargs < 0 {
+                return Err(Box::new(
+                    ereport(ERROR)
+                        .errcode(ERRCODE_UNDEFINED_FUNCTION)
+                        .errmsg(format!(
+                            "could not find a function named \"{}\"",
+                            name_list_to_string(parts)
+                        ))
+                        .into_error(),
+                ));
+            }
+            Err(function_does_not_exist(parts, &argtypes[..nargs as usize])?)
         }
     }
 }
