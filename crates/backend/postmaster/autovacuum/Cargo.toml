@@ -33,6 +33,7 @@ postgres = { path = "../../tcop/postgres" }
 postinit = { path = "../../utils/init/postinit" }
 procsignal = { path = "../../storage/ipc/procsignal" }
 resowner = { path = "../../utils/resowner/resowner" }
+shmem = { path = "../../storage/ipc/shmem" }
 sinval = { path = "../../storage/ipc/sinval" }
 smgr = { path = "../../storage/smgr/smgr" }
 timeout_seams = { path = "../../utils/misc/timeout_seams" }

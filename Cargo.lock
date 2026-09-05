@@ -1809,6 +1809,7 @@ dependencies = [
  "procsignal",
  "reloptions",
  "resowner",
+ "shmem",
  "sinval",
  "smgr",
  "snapmgr",
@@ -8283,6 +8284,7 @@ version = "0.0.0"
 dependencies = [
  "aclchk_seams",
  "aio_core",
+ "autovacuum",
  "backend_status_seams",
  "bufmgr",
  "checkpointer",

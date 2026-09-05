@@ -15,7 +15,7 @@ use types_core::{
     BackendType, FirstNormalTransactionId, InvalidOid, MultiXactId, Oid, OidIsValid,
     ProcessingMode, TransactionId, NAMESPACE_RELATION_ID, RELATION_RELATION_ID,
 };
-use types_error::{PgError, PgResult, DEBUG1, ERROR, FATAL, LOG, WARNING};
+use types_error::{PgError, PgResult, DEBUG1, DEBUG3, ERROR, FATAL, LOG, WARNING};
 use types_nodes::parsenodes::{DropBehavior, VacuumRelation};
 use types_nodes::{Node, NodeList};
 use types_rel::lock::{AccessShareLock, AccessExclusiveLock};
@@ -191,6 +191,7 @@ fn worker_body() -> PgResult<()> {
         pgstat::pgstat_report_autovac(dbid);
 
         let top = MemoryContext::new("AutoVacWorkerInit");
+        let mut dbname = String::new();
         postinit::InitPostgres(
             top.mcx(),
             None,
@@ -198,10 +199,12 @@ fn worker_body() -> PgResult<()> {
             None,
             InvalidOid,
             postinit::INIT_PG_OVERRIDE_ALLOW_CONNS,
-            None,
+            Some(&mut dbname),
         )?;
         miscinit::SetProcessingMode(ProcessingMode::NormalProcessing);
-        elog::elog(DEBUG1, "autovacuum: processing database")?;
+        // autovacuum.c:1581: ereport(DEBUG1, errmsg_internal("autovacuum:
+        // processing database \"%s\"", dbname)).
+        elog::elog(DEBUG1, format!("autovacuum: processing database \"{dbname}\""))?;
 
         let post_auth_delay = guc_tables::vars::PostAuthDelay.read();
         if post_auth_delay > 0 {
@@ -369,7 +372,7 @@ pub fn do_autovacuum() -> PgResult<()> {
     {
         let scratch = MemoryContext::new("do_autovacuum dbform");
         let dbform = pg_database::search_database_syscache(scratch.mcx(), g::MyDatabaseId())?
-            .ok_or_else(|| PgError::error("cache lookup failed for database"))?;
+            .ok_or_else(|| PgError::error(cache_lookup_failed_for_database(g::MyDatabaseId())))?;
         if dbform.datistemplate || !dbform.datallowconn {
             DEFAULT_FREEZE_MIN_AGE.set(0);
             DEFAULT_FREEZE_TABLE_AGE.set(0);
@@ -675,10 +678,11 @@ pub fn do_autovacuum() -> PgResult<()> {
         // Claim this one, and release the lock while performing it.
         let claimed = {
             let mut l = shmem::av_lock();
-            let wi = &mut l.work_items[i];
+            let mut wi = shmem::work_item(&l, i);
             if wi.avw_used && !wi.avw_active && wi.avw_database == g::MyDatabaseId() {
                 wi.avw_active = true;
-                Some(*wi)
+                shmem::set_work_item(&mut l, i, wi);
+                Some(wi)
             } else {
                 None
             }
@@ -706,8 +710,10 @@ pub fn do_autovacuum() -> PgResult<()> {
         // And mark it done.
         {
             let mut l = shmem::av_lock();
-            l.work_items[i].avw_active = false;
-            l.work_items[i].avw_used = false;
+            let mut wi = shmem::work_item(&l, i);
+            wi.avw_active = false;
+            wi.avw_used = false;
+            shmem::set_work_item(&mut l, i, wi);
         }
     }
 
@@ -776,6 +782,11 @@ fn autovac_report_activity(tab: &AutovacTable, nspname: &str, relname: &str) {
         end -= 1;
     }
     activity.push_str(&suffix[..end]);
+
+    // Set statement_timestamp() to current time for pg_stat_activity
+    // (autovacuum.c:3238): query_start advances per relation.
+    xact::SetCurrentStatementStartTimestamp();
+
     backend_status_seams::pgstat_report_activity::call(
         backend_status_seams::BackendState::STATE_RUNNING,
         Some(&activity),
@@ -1084,6 +1095,25 @@ fn relation_needs_vacanalyze(
             vac_ins_base_thresh as f32 + vac_ins_scale_factor * reltuples * pcnt_unfrozen;
         let anlthresh = anl_base_thresh as f32 + anl_scale_factor * reltuples;
 
+        // autovacuum.c:3136/3140: the per-table threshold trace. A DEBUG
+        // elog never raises; the level test skips the rendering, as C's
+        // elog macro does when errstart declines.
+        if elog::message_level_is_interesting(DEBUG3) {
+            let _ = elog::elog(
+                DEBUG3,
+                vacanalyze_debug_line(
+                    &row.relname,
+                    vactuples,
+                    vacthresh,
+                    instuples,
+                    vacinsthresh,
+                    anltuples,
+                    anlthresh,
+                    vac_ins_base_thresh,
+                ),
+            );
+        }
+
         dovacuum = force_vacuum
             || vactuples > vacthresh
             || (vac_ins_base_thresh >= 0 && instuples > vacinsthresh);
@@ -1097,21 +1127,66 @@ fn relation_needs_vacanalyze(
     (dovacuum, doanalyze, wraparound)
 }
 
+// autovacuum.c:1937: elog(ERROR, "cache lookup failed for database %u",
+// MyDatabaseId).
+fn cache_lookup_failed_for_database(dbid: Oid) -> String {
+    format!("cache lookup failed for database {dbid}")
+}
+
+// The relation_needs_vacanalyze DEBUG3 line (autovacuum.c:3136 with insert
+// vacuums enabled, :3140 with vac_ins_base_thresh < 0): C's "%.0f" of the
+// float4 counts and thresholds promoted to double.
+#[allow(clippy::too_many_arguments)]
+fn vacanalyze_debug_line(
+    relname: &str,
+    vactuples: f32,
+    vacthresh: f32,
+    instuples: f32,
+    vacinsthresh: f32,
+    anltuples: f32,
+    anlthresh: f32,
+    vac_ins_base_thresh: i32,
+) -> String {
+    if vac_ins_base_thresh >= 0 {
+        format!(
+            "{relname}: vac: {:.0} (threshold {:.0}), ins: {:.0} (threshold {:.0}), anl: {:.0} (threshold {:.0})",
+            vactuples as f64,
+            vacthresh as f64,
+            instuples as f64,
+            vacinsthresh as f64,
+            anltuples as f64,
+            anlthresh as f64
+        )
+    } else {
+        format!(
+            "{relname}: vac: {:.0} (threshold {:.0}), ins: (disabled), anl: {:.0} (threshold {:.0})",
+            vactuples as f64,
+            vacthresh as f64,
+            anltuples as f64,
+            anlthresh as f64
+        )
+    }
+}
+
 pub fn AutoVacuumRequestWork(av_type: i32, relation_id: Oid, blkno: types_core::BlockNumber) -> bool {
     debug_assert_eq!(av_type, AVW_BRIN_SUMMARIZE_RANGE);
     let mut l = shmem::av_lock();
     for i in 0..NUM_WORKITEMS {
-        if l.work_items[i].avw_used {
+        if shmem::work_item(&l, i).avw_used {
             continue;
         }
-        l.work_items[i] = shmem::WorkItem {
-            avw_type: av_type,
-            avw_used: true,
-            avw_active: false,
-            avw_database: g::MyDatabaseId(),
-            avw_relation: relation_id,
-            avw_block_number: blkno,
-        };
+        shmem::set_work_item(
+            &mut l,
+            i,
+            shmem::WorkItem {
+                avw_type: av_type,
+                avw_used: true,
+                avw_active: false,
+                avw_database: g::MyDatabaseId(),
+                avw_relation: relation_id,
+                avw_block_number: blkno,
+            },
+        );
         return true;
     }
     false
@@ -1250,12 +1325,12 @@ mod tests {
     // end (the array is process-global).
     #[test]
     fn request_work_enqueues_and_reports_full() {
+        shmem::shmem_for_tests();
         assert!(AutoVacuumRequestWork(AVW_BRIN_SUMMARIZE_RANGE, 50042, 41));
         {
             let l = shmem::av_lock();
-            let it = l
-                .work_items
-                .iter()
+            let it = (0..NUM_WORKITEMS)
+                .map(|i| shmem::work_item(&l, i))
                 .find(|w| w.avw_used && w.avw_relation == 50042)
                 .expect("request stored a used work item");
             assert_eq!(it.avw_type, AVW_BRIN_SUMMARIZE_RANGE);
@@ -1271,9 +1346,11 @@ mod tests {
         assert_eq!(recorded, NUM_WORKITEMS);
 
         let mut l = shmem::av_lock();
-        for w in l.work_items.iter_mut() {
+        for i in 0..NUM_WORKITEMS {
+            let mut w = shmem::work_item(&l, i);
             if w.avw_used && (w.avw_relation == 50042 || w.avw_relation == 50043) {
                 w.avw_used = false;
+                shmem::set_work_item(&mut l, i, w);
             }
         }
     }
@@ -1307,5 +1384,32 @@ mod tests {
         let s = workitem_activity_string(&wi, &long, "t");
         assert_eq!(s.len(), MAX_AUTOVAC_ACTIV_LEN - 1);
         assert!(s.starts_with("autovacuum: BRIN summarize x"));
+    }
+
+    // audit-18.6 b149: the relation_needs_vacanalyze DEBUG3 trace
+    // (autovacuum.c:3136/3140) byte-matches C's "%.0f" rendering — the
+    // never-vacuumed (reltuples = -1 -> 0) table after a 90% delete, as a C
+    // 18.6 worker logged it, and the insert-vacuum-disabled form.
+    #[test]
+    fn vacanalyze_debug_line_matches_c() {
+        assert_eq!(
+            vacanalyze_debug_line("av1", 90000.0, 50.0, 100000.0, 1000.0, 190000.0, 50.0, 1000),
+            "av1: vac: 90000 (threshold 50), ins: 100000 (threshold 1000), anl: 190000 (threshold 50)"
+        );
+        assert_eq!(
+            vacanalyze_debug_line("t", 0.0, 250.0, 0.0, 1200.0, 0.0, 150.0, -1),
+            "t: vac: 0 (threshold 250), ins: (disabled), anl: 0 (threshold 150)"
+        );
+        // %.0f rounds the exact binary value, ties to even, like glibc.
+        assert_eq!(
+            vacanalyze_debug_line("h", 2.5, 50.5, 1e9, 3.5, 0.5, 1.5, 0),
+            "h: vac: 2 (threshold 50), ins: 1000000000 (threshold 4), anl: 0 (threshold 2)"
+        );
+    }
+
+    // autovacuum.c:1937: the database OID is part of the message.
+    #[test]
+    fn cache_lookup_failed_message_carries_oid() {
+        assert_eq!(cache_lookup_failed_for_database(16384), "cache lookup failed for database 16384");
     }
 }

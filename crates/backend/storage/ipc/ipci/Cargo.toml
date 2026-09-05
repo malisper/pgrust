@@ -40,6 +40,7 @@ pmsignal = { path = "../pmsignal" }
 procsignal = { path = "../procsignal" }
 aio_core = { path = "../../aio/aio_core" }
 checkpointer = { path = "../../../postmaster/checkpointer" }
+autovacuum = { path = "../../../postmaster/autovacuum" }
 slot = { path = "../../../replication/slot" }
 origin = { path = "../../../replication/origin" }
 pgarch = { path = "../../../postmaster/pgarch" }

@@ -1,13 +1,14 @@
 //! autovacuum.c: GUC homes, AutoVacuumingActive, the launcher (launcher.rs),
 //! the worker + do_autovacuum (worker.rs), cost balancing (cost.rs), and the
-//! thread-native AutoVacuumShmem (shmem.rs).
+//! "AutoVacuum Data" ShmemIndex block (shmem.rs).
 
 #![allow(non_snake_case)]
 
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 
-use guc_tables::{vars, GucVarAccessors};
-use types_error::{ErrorLocation, ERRCODE_INVALID_PARAMETER_VALUE, WARNING};
+use guc_tables::{vars, GucHookExtra, GucVarAccessors};
+use types_error::{ErrorLocation, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, WARNING};
+use types_guc::GucSource;
 
 mod cost;
 mod launcher;
@@ -15,6 +16,7 @@ mod shmem;
 mod worker;
 pub use cost::{AutoVacuumUpdateCostLimit, VacuumUpdateCosts};
 pub use launcher::{AutoVacLauncherMain, AutoVacWorkerFailed};
+pub use shmem::{AutoVacuumShmemInit, AutoVacuumShmemResetAfterCrash, AutoVacuumShmemSize};
 pub use worker::{do_autovacuum, AutoVacWorkerMain, AutoVacuumRequestWork};
 
 const AUTOVACUUM_C: &str = "src/backend/postmaster/autovacuum.c";
@@ -122,9 +124,27 @@ fn loc(lineno: i32, funcname: &'static str) -> ErrorLocation {
     ErrorLocation::new(AUTOVACUUM_C, lineno, funcname)
 }
 
+// GUC check_hook for autovacuum_work_mem (autovacuum.c:3423): -1 is the
+// fallback to maintenance_work_mem; any other value is clamped to at least
+// 64kB, as maintenance_work_mem's own minimum is.
+fn check_autovacuum_work_mem(
+    newval: &mut i32,
+    _extra: &mut Option<GucHookExtra>,
+    _source: GucSource,
+) -> PgResult<bool> {
+    if *newval == -1 {
+        return Ok(true);
+    }
+    if *newval < 64 {
+        *newval = 64;
+    }
+    Ok(true)
+}
+
 pub fn init_seams() {
     install_ints();
     install_reals();
+    guc_tables::hooks::check_autovacuum_work_mem.install(check_autovacuum_work_mem);
     vars::autovacuum_start_daemon.install(GucVarAccessors {
         get: autovacuum_start_daemon,
         set: |v| AV_START_DAEMON.store(v, Ordering::Relaxed),
@@ -150,5 +170,22 @@ fn wake_autovacuum_launcher() {
     let pid = shmem::AUTOVACUUM_LAUNCHER_PID.get();
     if pid != 0 {
         let _ = procsignal::SendThreadSignal(pid, procsignal::signums::SIGUSR2);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // audit-18.6 b149: check_autovacuum_work_mem (autovacuum.c:3423) keeps
+    // -1 (fallback) and clamps every other value below 64kB up to 64.
+    #[test]
+    fn check_autovacuum_work_mem_clamps_to_64kb() {
+        for (input, expected) in [(-1, -1), (0, 64), (32, 64), (63, 64), (64, 64), (1024, 1024)] {
+            let mut v = input;
+            let mut extra = None;
+            assert!(check_autovacuum_work_mem(&mut v, &mut extra, GucSource::PGC_S_FILE).unwrap());
+            assert_eq!(v, expected, "autovacuum_work_mem = {input}");
+        }
     }
 }

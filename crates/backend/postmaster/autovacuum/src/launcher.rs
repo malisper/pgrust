@@ -12,7 +12,7 @@ use types_core::{
     BackendType, FirstNormalTransactionId, InvalidOid, MultiXactId, Oid, OidIsValid,
     ProcessingMode, TimestampTz, TransactionId,
 };
-use types_error::{PgError, PgResult, DEBUG1, WARNING};
+use types_error::{DEBUG1, DEBUG2, PgError, PgResult, WARNING};
 use types_guc::{GucContext, GucSource};
 use types_startup::StartupData;
 use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT};
@@ -180,8 +180,6 @@ fn abort_cleanup(err: &PgError) {
 
 fn launcher_body() -> PgResult<Never> {
     libpq_pqsignal::unblock_signals();
-
-    shmem::shmem_init_once();
 
     guc::SetConfigOption("search_path", Some(""), GucContext::PGC_SUSET, GucSource::PGC_S_OVERRIDE)?;
     guc::SetConfigOption(
@@ -496,10 +494,26 @@ fn get_database_list() -> PgResult<Vec<AvwDbase>> {
                 d
             };
             // Skip invalid (interrupted-drop) databases; autovacuum can't
-            // process them anyway.
+            // process them anyway (autovacuum.c:1838).
             if att(pg_database::Anum_pg_database_datconnlimit).as_i32()
                 == pg_database::DATCONNLIMIT_INVALID_DB
             {
+                let name_d = att(pg_database::Anum_pg_database_datname);
+                // SAFETY: a NameData column datum: NAMEDATALEN readable
+                // bytes, NUL-terminated (the pg_database crate's own decode
+                // contract).
+                let bytes = unsafe {
+                    core::slice::from_raw_parts(
+                        name_d.as_usize() as *const u8,
+                        types_core::fmgr::NAMEDATALEN as usize,
+                    )
+                };
+                let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+                let datname = String::from_utf8_lossy(&bytes[..end]);
+                elog::elog(
+                    DEBUG2,
+                    format!("autovacuum: skipping invalid database \"{datname}\""),
+                )?;
                 continue;
             }
             dblist.push(AvwDbase {
