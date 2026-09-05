@@ -261,29 +261,6 @@ pub fn could_not_open_error(kind: &str, filename: &[u8], errno: i32) -> PgError 
     .with_saved_errno(errno)
 }
 
-// Whole-file tsearch_readline: lines keep trailing newlines (fgets parity);
-// Ok(Err(errno)) = open failure, for the caller's "could not open ...: %m"
-// report. Errors raised while reading carry the per-line config-file
-// context exactly as they would under C's readline callback.
-pub fn tsearch_readlines<'mcx>(
-    mcx: Mcx<'mcx>,
-    filename: &[u8],
-) -> PgResult<Result<PgVec<'mcx, PgVec<'mcx, u8>>, i32>> {
-    let mut rd = match tsearch_readline_begin(mcx, filename) {
-        Ok(rd) => rd,
-        Err(errno) => return Ok(Err(errno)),
-    };
-    let mut lines: PgVec<'mcx, PgVec<'mcx, u8>> = PgVec::new_in(mcx);
-    loop {
-        let next = rd.readline();
-        match rd.with_context(next)? {
-            Some(line) => lines.push(line),
-            None => break,
-        }
-    }
-    Ok(Ok(lines))
-}
-
 pub fn readstoplist<'mcx>(
     mcx: Mcx<'mcx>,
     fname: Option<&[u8]>,
@@ -293,11 +270,17 @@ pub fn readstoplist<'mcx>(
     if let Some(fname) = fname.filter(|f| !f.is_empty()) {
         let filename = get_tsearch_config_filename(mcx, fname, "stop")?;
         // ts_utils.c:84 — `could not open stop-word file "%s": %m`.
-        let lines = match tsearch_readlines(mcx, &filename)? {
-            Ok(lines) => lines,
+        let mut rd = match tsearch_readline_begin(mcx, &filename) {
+            Ok(rd) => rd,
             Err(errno) => return Err(could_not_open_error("stop-word", &filename, errno).into()),
         };
-        for line in &lines {
+        // ts_utils.c:87-123: the readline callback is on error_context_stack
+        // for the whole loop (wordop included).
+        loop {
+            let next = rd.readline();
+            let Some(line) = rd.with_context(next)? else {
+                break;
+            };
             let mut end = 0usize;
             while end < line.len() && !byte_isspace(line[end]) {
                 end += ::mbutils::pg_mblen(&line[end..]) as usize;
@@ -307,7 +290,7 @@ pub fn readstoplist<'mcx>(
                 continue;
             }
             let word = if lower {
-                lowerstr(mcx, &line[..end])?
+                rd.with_context(lowerstr(mcx, &line[..end]))?
             } else {
                 let mut w = vec_with_capacity_in(mcx, end)?;
                 w.extend_from_slice(&line[..end]);

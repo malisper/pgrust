@@ -45,3 +45,74 @@ fn synonym_case_and_junk_lines() {
     let cs = crate::synonym::load_synonyms(mcx, &lines, true).unwrap();
     assert_eq!(cs[1].input.as_slice(), b"UPPER");
 }
+
+fn fixtures_dir() -> String {
+    let dir = format!("{}/fixtures", env!("CARGO_MANIFEST_DIR"));
+    std::env::set_var("PGRUST_PGSHAREDIR", &dir);
+    dir
+}
+
+// ts_locale.c tsearch_readline_callback sits on error_context_stack from
+// tsearch_readline_begin to tsearch_readline_end, so every dict_thesaurus.c
+// thesaurusRead error (:210 "unexpected delimiter", :285 "unexpected end of
+// line", :260/:276 "unexpected end of line or lexeme") carries
+// `line N of configuration file "<path>": "<line>"` — the line text with its
+// trailing newline — while an encoding violation raised inside
+// tsearch_readline itself carries the line-only form.
+#[test]
+fn thesaurus_errors_carry_readline_context() {
+    let fixtures = fixtures_dir();
+    let mcx = leaked_mcx();
+    let path = |name: &str| format!("{fixtures}/tsearch_data/{name}");
+    let read = |name: &str| {
+        let mut build = crate::thesaurus::ThesaurusBuild::new(mcx);
+        crate::thesaurus::thesaurus_read(&mut build, name.as_bytes())
+            .err()
+            .unwrap_or_else(|| panic!("{name} must fail"))
+    };
+
+    let err = read("b213_ths_delim");
+    assert_eq!(err.message(), "unexpected delimiter");
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_CONFIG_FILE_ERROR);
+    assert_eq!(
+        err.context(),
+        Some(
+            format!("line 2 of configuration file \"{}\": \": bad\n\"", path("b213_ths_delim.ths"))
+                .as_str()
+        )
+    );
+
+    let err = read("b213_ths_eol");
+    assert_eq!(err.message(), "unexpected end of line");
+    assert_eq!(
+        err.context(),
+        Some(
+            format!(
+                "line 2 of configuration file \"{}\": \"alpha beta :\n\"",
+                path("b213_ths_eol.ths")
+            )
+            .as_str()
+        )
+    );
+
+    let err = read("b213_ths_lex");
+    assert_eq!(err.message(), "unexpected end of line or lexeme");
+    assert_eq!(
+        err.context(),
+        Some(
+            format!("line 2 of configuration file \"{}\": \"alpha : *\n\"", path("b213_ths_lex.ths"))
+                .as_str()
+        )
+    );
+
+    let err = read("b213_ths_enc");
+    assert!(
+        err.message().starts_with("invalid byte sequence for encoding"),
+        "{:?}",
+        err.message()
+    );
+    assert_eq!(
+        err.context(),
+        Some(format!("line 2 of configuration file \"{}\"", path("b213_ths_enc.ths")).as_str())
+    );
+}

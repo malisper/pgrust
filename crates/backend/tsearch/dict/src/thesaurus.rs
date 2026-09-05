@@ -4,7 +4,8 @@ use ::mcx::{vec_with_capacity_in, Mcx, MemoryContext, PgVec};
 use ::ts_cache::{lookup_ts_dictionary_cache, TSDictionaryCacheEntry};
 use ::ts_locale::dict_api::{lexize_result_ref, DictInitData, LexizeResult};
 use ::ts_locale::{
-    could_not_open_error, get_tsearch_config_filename, tsearch_readlines, DictSubState, TsLexeme,
+    could_not_open_error, get_tsearch_config_filename, tsearch_readline_begin, DictSubState,
+    TsLexeme,
 };
 use ::types_core::Oid;
 use ::types_error::{PgError, PgResult, ERRCODE_CONFIG_FILE_ERROR};
@@ -63,12 +64,24 @@ fn arena_alloc(arena: &mut PgVec<'static, LexemeInfo>, node: LexemeInfo) -> usiz
     arena.len() - 1
 }
 
-struct ThesaurusBuild {
+pub(crate) struct ThesaurusBuild {
     mcx: Mcx<'static>,
     wrds: PgVec<'static, TheLexeme>,
     subst: PgVec<'static, TheSubstitute>,
     nsubst: i32,
     arena: PgVec<'static, LexemeInfo>,
+}
+
+impl ThesaurusBuild {
+    pub(crate) fn new(mcx: Mcx<'static>) -> Self {
+        ThesaurusBuild {
+            mcx,
+            wrds: PgVec::new_in(mcx),
+            subst: PgVec::new_in(mcx),
+            nsubst: 0,
+            arena: PgVec::new_in(mcx),
+        }
+    }
 }
 
 fn new_lexeme(d: &mut ThesaurusBuild, word: &[u8], idsubst: u32, posinsubst: u16) -> PgResult<()> {
@@ -115,100 +128,117 @@ fn mblen(s: &[u8]) -> usize {
     ::mbutils::pg_mblen(s) as usize
 }
 
-fn thesaurus_read(d: &mut ThesaurusBuild, filename: &[u8]) -> PgResult<()> {
+// dict_thesaurus.c:168 thesaurusRead. The readline callback sits on
+// error_context_stack from tsearch_readline_begin to tsearch_readline_end,
+// so every error raised while a line is in flight — the parse errors below
+// as much as an encoding violation inside tsearch_readline — carries
+// `line N of configuration file "<path>": "<line>"` (`with_context`).
+pub(crate) fn thesaurus_read(d: &mut ThesaurusBuild, filename: &[u8]) -> PgResult<()> {
     let mcx = d.mcx;
     let path = get_tsearch_config_filename(mcx, filename, "ths")?;
     // dict_thesaurus.c:179 — `could not open thesaurus file "%s": %m`.
-    let lines = match tsearch_readlines(mcx, &path)? {
-        Ok(lines) => lines,
+    let mut rd = match tsearch_readline_begin(mcx, &path) {
+        Ok(rd) => rd,
         Err(errno) => return Err(could_not_open_error("thesaurus", &path, errno).into()),
     };
 
     let mut idsubst: u32 = 0;
-    for line in lines.iter() {
-        let mut state = TR_WAITLEX;
-        let mut beginwrd = 0usize;
-        let mut posinsubst: u32 = 0;
-        let mut nwrd: u32 = 0;
-        let mut useasis = false;
-
-        let mut i = 0usize;
-        while i < line.len() && pg_string::isspace_c_locale(line[i]) && line[i] != b'\n' && line[i] != b'\r'
-        {
-            i += mblen(&line[i..]);
-        }
-        match line.get(i) {
-            None | Some(b'#') | Some(b'\n') | Some(b'\r') => continue,
-            _ => {}
-        }
-
-        while i < line.len() {
-            let c = line[i];
-            if state == TR_WAITLEX {
-                if c == b':' {
-                    if posinsubst == 0 {
-                        return Err(config_file_error("unexpected delimiter".into()));
-                    }
-                    state = TR_WAITSUBS;
-                } else if !pg_string::isspace_c_locale(c) {
-                    beginwrd = i;
-                    state = TR_INLEX;
-                }
-            } else if state == TR_INLEX {
-                if c == b':' {
-                    new_lexeme(d, &line[beginwrd..i], idsubst, posinsubst as u16)?;
-                    posinsubst += 1;
-                    state = TR_WAITSUBS;
-                } else if pg_string::isspace_c_locale(c) {
-                    new_lexeme(d, &line[beginwrd..i], idsubst, posinsubst as u16)?;
-                    posinsubst += 1;
-                    state = TR_WAITLEX;
-                }
-            } else if state == TR_WAITSUBS {
-                if c == b'*' {
-                    useasis = true;
-                    state = TR_INSUBS;
-                    beginwrd = i + mblen(&line[i..]);
-                } else if c == b'\\' {
-                    useasis = false;
-                    state = TR_INSUBS;
-                    beginwrd = i + mblen(&line[i..]);
-                } else if !pg_string::isspace_c_locale(c) {
-                    useasis = false;
-                    beginwrd = i;
-                    state = TR_INSUBS;
-                }
-            } else if state == TR_INSUBS && pg_string::isspace_c_locale(c) {
-                if i == beginwrd {
-                    return Err(config_file_error("unexpected end of line or lexeme".into()));
-                }
-                add_wrd(d, &line[beginwrd..i], idsubst, nwrd as u16, posinsubst as u16, useasis)?;
-                nwrd += 1;
-                state = TR_WAITSUBS;
-            }
-            i += mblen(&line[i..]);
-        }
-
-        if state == TR_INSUBS {
-            if i == beginwrd {
-                return Err(config_file_error("unexpected end of line or lexeme".into()));
-            }
-            add_wrd(d, &line[beginwrd..i], idsubst, nwrd as u16, posinsubst as u16, useasis)?;
-            nwrd += 1;
-        }
-
-        idsubst += 1;
-
-        if nwrd == 0 || posinsubst == 0 {
-            return Err(config_file_error("unexpected end of line".into()));
-        }
-        if nwrd > u16::MAX as u32 || posinsubst > u16::MAX as u32 {
-            return Err(config_file_error("too many lexemes in thesaurus entry".into()));
-        }
+    loop {
+        let next = rd.readline();
+        let Some(line) = rd.with_context(next)? else {
+            break;
+        };
+        let parsed = thesaurus_line(d, &line, &mut idsubst);
+        rd.with_context(parsed)?;
     }
 
     d.nsubst = idsubst as i32;
     d.subst.truncate(d.nsubst as usize);
+    Ok(())
+}
+
+// One thesaurusRead loop iteration (dict_thesaurus.c:182-297): `idsubst`
+// advances only for a non-comment line.
+fn thesaurus_line(d: &mut ThesaurusBuild, line: &[u8], idsubst: &mut u32) -> PgResult<()> {
+    let mut state = TR_WAITLEX;
+    let mut beginwrd = 0usize;
+    let mut posinsubst: u32 = 0;
+    let mut nwrd: u32 = 0;
+    let mut useasis = false;
+
+    let mut i = 0usize;
+    while i < line.len() && pg_string::isspace_c_locale(line[i]) && line[i] != b'\n' && line[i] != b'\r'
+    {
+        i += mblen(&line[i..]);
+    }
+    match line.get(i) {
+        None | Some(b'#') | Some(b'\n') | Some(b'\r') => return Ok(()),
+        _ => {}
+    }
+
+    while i < line.len() {
+        let c = line[i];
+        if state == TR_WAITLEX {
+            if c == b':' {
+                if posinsubst == 0 {
+                    return Err(config_file_error("unexpected delimiter".into()));
+                }
+                state = TR_WAITSUBS;
+            } else if !pg_string::isspace_c_locale(c) {
+                beginwrd = i;
+                state = TR_INLEX;
+            }
+        } else if state == TR_INLEX {
+            if c == b':' {
+                new_lexeme(d, &line[beginwrd..i], *idsubst, posinsubst as u16)?;
+                posinsubst += 1;
+                state = TR_WAITSUBS;
+            } else if pg_string::isspace_c_locale(c) {
+                new_lexeme(d, &line[beginwrd..i], *idsubst, posinsubst as u16)?;
+                posinsubst += 1;
+                state = TR_WAITLEX;
+            }
+        } else if state == TR_WAITSUBS {
+            if c == b'*' {
+                useasis = true;
+                state = TR_INSUBS;
+                beginwrd = i + mblen(&line[i..]);
+            } else if c == b'\\' {
+                useasis = false;
+                state = TR_INSUBS;
+                beginwrd = i + mblen(&line[i..]);
+            } else if !pg_string::isspace_c_locale(c) {
+                useasis = false;
+                beginwrd = i;
+                state = TR_INSUBS;
+            }
+        } else if state == TR_INSUBS && pg_string::isspace_c_locale(c) {
+            if i == beginwrd {
+                return Err(config_file_error("unexpected end of line or lexeme".into()));
+            }
+            add_wrd(d, &line[beginwrd..i], *idsubst, nwrd as u16, posinsubst as u16, useasis)?;
+            nwrd += 1;
+            state = TR_WAITSUBS;
+        }
+        i += mblen(&line[i..]);
+    }
+
+    if state == TR_INSUBS {
+        if i == beginwrd {
+            return Err(config_file_error("unexpected end of line or lexeme".into()));
+        }
+        add_wrd(d, &line[beginwrd..i], *idsubst, nwrd as u16, posinsubst as u16, useasis)?;
+        nwrd += 1;
+    }
+
+    *idsubst += 1;
+
+    if nwrd == 0 || posinsubst == 0 {
+        return Err(config_file_error("unexpected end of line".into()));
+    }
+    if nwrd > u16::MAX as u32 || posinsubst > u16::MAX as u32 {
+        return Err(config_file_error("too many lexemes in thesaurus entry".into()));
+    }
     Ok(())
 }
 
@@ -447,13 +477,7 @@ fn compile_the_substitute(d: &mut DictThesaurus) -> PgResult<()> {
 
 pub fn thesaurus_init(init: &DictInitData<'static>) -> PgResult<DictThesaurus> {
     let mcx = init.mcx;
-    let mut build = ThesaurusBuild {
-        mcx,
-        wrds: PgVec::new_in(mcx),
-        subst: PgVec::new_in(mcx),
-        nsubst: 0,
-        arena: PgVec::new_in(mcx),
-    };
+    let mut build = ThesaurusBuild::new(mcx);
     let mut fileloaded = false;
     let mut subdictname: Option<&[u8]> = None;
     for (name, value) in init.dict_options.iter() {

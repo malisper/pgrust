@@ -1,7 +1,7 @@
 use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
 use ::ts_locale::dict_api::{def_get_boolean, DictInitData, LexizeResult};
 use ::ts_locale::{
-    could_not_open_error, get_tsearch_config_filename, lowerstr, tsearch_readlines, TsLexeme,
+    could_not_open_error, get_tsearch_config_filename, lowerstr, tsearch_readline_begin, TsLexeme,
     TSL_PREFIX,
 };
 use ::types_error::PgResult;
@@ -68,14 +68,57 @@ pub fn dsynonym_init(init: &DictInitData<'static>) -> PgResult<DictSyn> {
     };
     let path = get_tsearch_config_filename(mcx, filename, "syn")?;
     // dict_synonym.c:133 — `could not open synonym file "%s": %m`.
-    let lines = match tsearch_readlines(mcx, &path)? {
-        Ok(lines) => lines,
+    let mut rd = match tsearch_readline_begin(mcx, &path) {
+        Ok(rd) => rd,
         Err(errno) => return Err(could_not_open_error("synonym", &path, errno).into()),
     };
-    let syn = load_synonyms(mcx, &lines, case_sensitive)?;
+    // dict_synonym.c:138-199: the readline callback is on error_context_stack
+    // for the whole loop, so an error while a line is in flight carries it.
+    let mut syn: PgVec<'static, Syn> = PgVec::new_in(mcx);
+    loop {
+        let next = rd.readline();
+        let Some(line) = rd.with_context(next)? else {
+            break;
+        };
+        let parsed = synonym_line(mcx, &line, case_sensitive, &mut syn);
+        rd.with_context(parsed)?;
+    }
+    syn.sort_unstable_by(|a, b| a.input.as_slice().cmp(b.input.as_slice()));
     Ok(DictSyn { syn, case_sensitive })
 }
 
+// One dict_synonym.c:138-197 loop iteration.
+fn synonym_line(
+    mcx: ::mcx::Mcx<'static>,
+    line: &[u8],
+    case_sensitive: bool,
+    syn: &mut PgVec<'static, Syn>,
+) -> PgResult<()> {
+    let Some((bi, ei)) = findwrd(line, 0, None) else {
+        return Ok(());
+    };
+    if ei >= line.len() {
+        // A line with only one word. Ignore silently.
+        return Ok(());
+    }
+    let mut flags = 0u16;
+    let Some((bo, eo)) = findwrd(line, ei + 1, Some(&mut flags)) else {
+        return Ok(());
+    };
+    let (input, output) = if case_sensitive {
+        let mut i_v = vec_with_capacity_in(mcx, ei - bi)?;
+        i_v.extend_from_slice(&line[bi..ei]);
+        let mut o_v = vec_with_capacity_in(mcx, eo - bo)?;
+        o_v.extend_from_slice(&line[bo..eo]);
+        (i_v, o_v)
+    } else {
+        (lowerstr(mcx, &line[bi..ei])?, lowerstr(mcx, &line[bo..eo])?)
+    };
+    syn.push(Syn { input, output, flags });
+    Ok(())
+}
+
+#[cfg(test)]
 pub(crate) fn load_synonyms(
     mcx: ::mcx::Mcx<'static>,
     lines: &[PgVec<'static, u8>],
@@ -83,27 +126,7 @@ pub(crate) fn load_synonyms(
 ) -> PgResult<PgVec<'static, Syn>> {
     let mut syn: PgVec<'static, Syn> = PgVec::new_in(mcx);
     for line in lines.iter() {
-        let Some((bi, ei)) = findwrd(line, 0, None) else {
-            continue;
-        };
-        if ei >= line.len() {
-            // A line with only one word. Ignore silently.
-            continue;
-        }
-        let mut flags = 0u16;
-        let Some((bo, eo)) = findwrd(line, ei + 1, Some(&mut flags)) else {
-            continue;
-        };
-        let (input, output) = if case_sensitive {
-            let mut i_v = vec_with_capacity_in(mcx, ei - bi)?;
-            i_v.extend_from_slice(&line[bi..ei]);
-            let mut o_v = vec_with_capacity_in(mcx, eo - bo)?;
-            o_v.extend_from_slice(&line[bo..eo]);
-            (i_v, o_v)
-        } else {
-            (lowerstr(mcx, &line[bi..ei])?, lowerstr(mcx, &line[bo..eo])?)
-        };
-        syn.push(Syn { input, output, flags });
+        synonym_line(mcx, line, case_sensitive, &mut syn)?;
     }
     syn.sort_unstable_by(|a, b| a.input.as_slice().cmp(b.input.as_slice()));
     Ok(syn)
