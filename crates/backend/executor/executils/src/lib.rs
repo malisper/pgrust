@@ -1025,10 +1025,15 @@ pub struct WorkerInstr<'mcx> {
 // C ExecAuxRowMark's junk attnos, keyed by markType: an EPQ recheck
 // re-fetches a non-locked source rel's row by ctid (ROW_MARK_REFERENCE) or
 // re-returns the wholerow junk datum (ROW_MARK_COPY) from origslot.
+// `toid_attno` is C ExecAuxRowMark.toidAttNo: the junk "tableoid<rowmarkId>"
+// column, resolved only for inheritance/partition children
+// (erm->rti != erm->prti, ExecBuildAuxRowMark execMain.c:2611-2618) and checked
+// against erm->relid before either fetch (EvalPlanQualFetchRowMark
+// execMain.c:2825-2844); 0 for a non-child mark.
 #[derive(Clone, Copy, Debug)]
 pub enum EpqRowMarkFetch {
-    Reference { ctid_attno: i16 },
-    Copy { whole_attno: i16 },
+    Reference { ctid_attno: i16, toid_attno: i16 },
+    Copy { whole_attno: i16, toid_attno: i16 },
 }
 
 /// The ONE EPQ state store: C `EPQState`'s relsubs_* arrays, held by the

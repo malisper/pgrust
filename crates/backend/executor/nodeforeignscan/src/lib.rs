@@ -317,12 +317,18 @@ pub fn exec_end_foreign_scan<'mcx>(
 }
 
 /// `ExecReScanForeignScan` (outerPlan arm dead: init refuses pushdown plans).
+/// A pushed-down join (scanrelid == 0) resets the EPQ state of every base
+/// rti in fs_base_relids (ExecScanReScan execScan.c:127-151).
 pub fn exec_rescan_foreign_scan<'mcx>(
     node: &mut ForeignScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     (fdw_exec_routine(node.fdwroutine).rescan)(node, estate)?;
-    execscan::exec_scan_rescan(&mut node.ss, estate);
+    if node.plan.scan.scanrelid > 0 {
+        execscan::exec_scan_rescan(&mut node.ss, estate);
+    } else {
+        execscan::exec_scan_rescan_relids(&mut node.ss, estate, &node.plan.fs_base_relids);
+    }
     Ok(())
 }
 

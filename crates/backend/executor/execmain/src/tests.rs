@@ -5476,9 +5476,9 @@ mod epq_capture_w7 {
     // Y2 loud-admission-list pins below test the surviving
     // crate::epq::check_epq_plan and stay.)
 
-    /// Y2: `scanrelid == 0` pushed-down-join scans refuse LOUDLY until a
-    /// spec exercises them (lane-epq.md §2's recorded FDW gap, now pinned
-    /// for every ADMITTED scan tag as well).
+    /// Y2: a `scanrelid == 0` scan that is NOT a pushed-down join refuses
+    /// LOUDLY — C's ExecScanReScan errors on any zero-scanrelid node other
+    /// than ForeignScan/CustomScan ("unexpected scan node", execScan.c:145).
     #[test]
     #[should_panic(expected = "scanrelid == 0")]
     fn epq_w7_scanrelid_zero_refused_loudly() {
@@ -5496,6 +5496,48 @@ mod epq_capture_w7 {
         )
         .unwrap();
         crate::epq::check_epq_plan(seq);
+    }
+
+    /// audit-18.6 b076 (row a186-candidate-fp-executor-b2-a1a7463421): a
+    /// pushed-down-join ForeignScan (scanrelid == 0, base rtis in
+    /// fs_base_relids) is a legal recheck-tree member — C ExecScanReScan
+    /// resets relsubs_done for each of its base relids (execScan.c:127-151)
+    /// — so the admission list must pass it, also under the SubqueryScan
+    /// that serves its ROW_MARK_COPY row (the live shape: a foreign join in
+    /// a GROUP BY subquery of an UPDATE). Panicked on the unfixed tree.
+    #[test]
+    fn epq_b076_pushed_down_foreign_join_admitted() {
+        use ::types_nodes::bitmapset::Bitmapset;
+        use ::types_nodes::plannodes::{ForeignScan, Plan, Scan, SubqueryScan};
+        let mcx = leaked_mcx();
+        let mut base = Bitmapset::make_singleton(mcx, 2).unwrap();
+        base.add_member(mcx, 3).unwrap();
+        let fs = Node::mk(
+            mcx,
+            ForeignScan {
+                scan: Scan {
+                    plan: Plan::default(),
+                    scanrelid: 0,
+                },
+                fs_base_relids: base,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        crate::epq::check_epq_plan(fs);
+        let sq = Node::mk(
+            mcx,
+            SubqueryScan {
+                scan: Scan {
+                    plan: Plan::default(),
+                    scanrelid: 1,
+                },
+                subplan: Some(fs),
+                scanstatus: 0,
+            },
+        )
+        .unwrap();
+        crate::epq::check_epq_plan(sq);
     }
 
     /// Y2: the loud list recurses into SubqueryScan.subplan — an admitted

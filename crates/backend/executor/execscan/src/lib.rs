@@ -85,17 +85,34 @@ enum EpqFetch {
     FallThrough,
 }
 
+#[cold]
+#[inline(never)]
+fn scanrelid_zero_recheck_unsupported() -> Box<::types_error::PgError> {
+    Box::new(
+        ::types_error::PgError::error(
+            "EvalPlanQual recheck of a pushed-down foreign join is not supported",
+        )
+        .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+    )
+}
+
 // ExecScanFetch's es_epq_active arm: test-tuple substitution.
 fn epq_fetch<'mcx, N: ScanNode<'mcx>>(
     node: &mut N,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<EpqFetch> {
     let scanrelid = node.ss_mut().scanrelid;
-    assert!(
-        scanrelid > 0,
-        "ExecScanFetch (execScan.h): scanrelid == 0 EPQ arm (FDW/CustomScan \
-         join pushdown) not ported"
-    );
+    if scanrelid == 0 {
+        // C (execScan.h:48-70): a pushed-down-join ForeignScan/CustomScan
+        // that is a descendant of the recheck tree runs its recheckMtd,
+        // which for postgres_fdw replays the local outer subplan
+        // (fdw_outerpath). pgrust generates no such subplan (the planner
+        // declines join pushdown at any level with rowmarks or a DML
+        // target, plan.rs; a pushed-down join can only sit under a
+        // SubqueryScan whose ROW_MARK_COPY serves the recheck row without
+        // running this scan), so a fetch here has no C-exact answer.
+        return Err(scanrelid_zero_recheck_unsupported());
+    }
     let idx = (scanrelid - 1) as usize;
     let mcx = estate.es_query_cxt;
     let subs = estate.es_epq.as_mut().expect("EPQ scan variant under an installed EPQ state");
@@ -124,9 +141,12 @@ fn epq_fetch<'mcx, N: ScanNode<'mcx>>(
     Ok(EpqFetch::FallThrough)
 }
 
-// EvalPlanQualFetchRowMark (execMain.c), non-locking marks only: re-return
-// the origslot row's junk ctid (ROW_MARK_REFERENCE, refetched under
-// SnapshotAny) or wholerow datum (ROW_MARK_COPY) through the scan slot.
+// EvalPlanQualFetchRowMark (execMain.c:2809), non-locking marks only: for an
+// inheritance/partition child mark (erm->rti != erm->prti) first check the
+// junk tableoid against erm->relid — a child that did not produce the row is
+// inactive for this recheck (2825-2844) — then re-return the origslot row's
+// junk ctid (ROW_MARK_REFERENCE, refetched under SnapshotAny) or wholerow
+// datum (ROW_MARK_COPY) through the scan slot.
 fn epq_fetch_row_mark<'mcx, N: ScanNode<'mcx>>(
     node: &mut N,
     estate: &mut EStateData<'mcx>,
@@ -137,8 +157,28 @@ fn epq_fetch_row_mark<'mcx, N: ScanNode<'mcx>>(
     let ss_slot = node.ss_mut().ss_ScanTupleSlot;
     let scanrelid = node.ss_mut().scanrelid;
     let mut isnull = false;
+    let erm = estate.es_rowmarks[(scanrelid - 1) as usize]
+        .expect("InitPlan built the ExecRowMark for every non-locking aux rowmark");
+    if erm.rti != erm.prti {
+        let toid_attno = match rm {
+            ::executils::EpqRowMarkFetch::Reference { toid_attno, .. }
+            | ::executils::EpqRowMarkFetch::Copy { toid_attno, .. } => toid_attno,
+        };
+        let datum = exectuples::slot_getattr(estate.slot_mut(orig), toid_attno as i32, &mut isnull);
+        // non-locked rels could be on the inside of outer joins
+        if isnull {
+            exectuples::exec_clear_tuple(estate.slot_mut(ss_slot), mcx);
+            return Ok(EpqFetch::Empty);
+        }
+        debug_assert!(erm.relid != types_core::InvalidOid);
+        if datum.as_oid() != erm.relid {
+            // this child is inactive right now
+            exectuples::exec_clear_tuple(estate.slot_mut(ss_slot), mcx);
+            return Ok(EpqFetch::Empty);
+        }
+    }
     match rm {
-        ::executils::EpqRowMarkFetch::Reference { ctid_attno } => {
+        ::executils::EpqRowMarkFetch::Reference { ctid_attno, .. } => {
             let datum = exectuples::slot_getattr(
                 estate.slot_mut(orig),
                 ctid_attno as i32,
@@ -174,7 +214,7 @@ fn epq_fetch_row_mark<'mcx, N: ScanNode<'mcx>>(
                 )));
             }
         }
-        ::executils::EpqRowMarkFetch::Copy { whole_attno } => {
+        ::executils::EpqRowMarkFetch::Copy { whole_attno, .. } => {
             let datum = exectuples::slot_getattr(
                 estate.slot_mut(orig),
                 whole_attno as i32,
@@ -463,15 +503,43 @@ pub fn slot_pair<'a, 'mcx>(
     }
 }
 
-/// `ExecScanReScan`.
+/// `ExecScanReScan` (execScan.c:108) for a scan over one range-table entry.
+/// A pushed-down-join scan (scanrelid == 0) must use
+/// [`exec_scan_rescan_relids`] with its base relids: C reaches them through
+/// the node's plan (ForeignScan.fs_base_relids / CustomScan.custom_relids)
+/// and errors on any other zero-scanrelid node (execScan.c:145).
 pub fn exec_scan_rescan<'mcx>(ss: &mut ScanState<'mcx>, estate: &mut EStateData<'mcx>) {
     let mcx = estate.es_query_cxt;
     exectuples::exec_clear_tuple(estate.slot_mut(ss.ss_ScanTupleSlot), mcx);
     if estate.es_epq_active {
-        assert!(ss.scanrelid > 0, "ExecScanReScan (execScan.c): scanrelid == 0 EPQ reset not ported");
+        assert!(ss.scanrelid > 0, "ExecScanReScan (execScan.c): unexpected scan node");
         let idx = (ss.scanrelid - 1) as usize;
         let subs = estate.es_epq.as_mut().expect("EPQ rescan under an installed EPQ state");
         subs.relsubs_done[idx] = subs.relsubs_blocked[idx];
+    }
+}
+
+/// `ExecScanReScan`'s scanrelid == 0 arm (execScan.c:127-151): an FDW (or
+/// custom scan provider) replaced a join with one scan, so the EPQ reset
+/// covers every base rti of the pushed-down join, keeping each one's
+/// "blocked" status.
+pub fn exec_scan_rescan_relids<'mcx>(
+    ss: &mut ScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    relids: &::types_nodes::bitmapset::Bitmapset<'mcx>,
+) {
+    debug_assert_eq!(ss.scanrelid, 0);
+    let mcx = estate.es_query_cxt;
+    exectuples::exec_clear_tuple(estate.slot_mut(ss.ss_ScanTupleSlot), mcx);
+    if estate.es_epq_active {
+        let subs = estate.es_epq.as_mut().expect("EPQ rescan under an installed EPQ state");
+        let mut rtindex = relids.next_member(-1);
+        while rtindex >= 0 {
+            debug_assert!(rtindex > 0);
+            let idx = (rtindex - 1) as usize;
+            subs.relsubs_done[idx] = subs.relsubs_blocked[idx];
+            rtindex = relids.next_member(rtindex);
+        }
     }
 }
 

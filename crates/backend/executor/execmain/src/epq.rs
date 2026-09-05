@@ -305,9 +305,15 @@ pub(crate) fn eval_plan_qual_start<'mcx>(
 //   * T_CustomScan — UNREACHABLE UNTIL A FEATURE LANDS: pgrust has no
 //     custom-scan provider API (zero planner path-creation sites; the
 //     executor arm is in unported_nodes!), so no plan can contain one.
-//   * scanrelid == 0 pushed-down-join ForeignScan — stays on its own
-//     loud arm below (lane-epq.md §2; postgres_fdw join pushdown needs
-//     its own reviewed act + spec).
+//   * scanrelid == 0 pushed-down-join ForeignScan — ADMITTED (audit-18.6
+//     b076, scripts/execscan-epq-rowmark-e2e.sh leg B): a postgres_fdw
+//     join pushed down inside a non-pullup subquery of an UPDATE sits in
+//     the recheck tree under the SubqueryScan whose ROW_MARK_COPY serves
+//     the row; the rescan resets every fs_base_relids rti
+//     (execscan::exec_scan_rescan_relids, ExecScanReScan execScan.c:127)
+//     and the scan itself is never fetched. Any OTHER zero-scanrelid scan
+//     tag still refuses below: C's ExecScanReScan errors on it
+//     ("unexpected scan node", execScan.c:145).
 pub(crate) fn check_epq_plan(plan: Node<'_>) {
     let ok = matches!(
         plan.node_tag(),
@@ -356,10 +362,10 @@ pub(crate) fn check_epq_plan(plan: Node<'_>) {
         );
     }
     if let Some(scanrelid) = table_scan_scanrelid(plan) {
-        if scanrelid == 0 {
+        if scanrelid == 0 && plan.as_foreign_scan().is_none() {
             panic!(
-                "ExecScanFetch (execScan.h): scanrelid == 0 pushed-down-join \
-                 {:?} recheck not exercised (lane-epq.md §2 FDW gap)",
+                "ExecScanReScan (execScan.c): unexpected scan node {:?} with \
+                 scanrelid == 0 in a recheck plan",
                 plan.node_tag()
             );
         }
@@ -403,7 +409,8 @@ pub(crate) fn check_epq_plan(plan: Node<'_>) {
 }
 
 /// `scanrelid` of the ADMITTED table-scan tags (the shapes whose EPQ fetch
-/// goes through ExecScanFetch's rti-indexed relsubs arrays). Non-scan tags
+/// goes through ExecScanFetch's rti-indexed relsubs arrays; only a
+/// ForeignScan may legitimately carry 0 — a pushed-down join). Non-scan tags
 /// and the scan-shaped glue whose rti semantics differ (SubqueryScan /
 /// ValuesScan / CteScan / FunctionScan / TableFuncScan /
 /// NamedTuplestoreScan scan virtual rels; BitmapIndexScan rides its

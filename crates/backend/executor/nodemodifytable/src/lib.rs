@@ -499,18 +499,26 @@ pub fn exec_init_modify_table<'mcx>(
             let erm = estate.es_rowmarks[(rc.rti - 1) as usize]
                 .expect("InitPlan built the ExecRowMark for every PlanRowMark rti");
             use types_nodes::plannodes::RowMarkType;
-            // Inherited source marks (erm.rti != erm.prti) flow through the
-            // same wholerow/ctid fetch arms: the junk column is emitted per
-            // child rti and looked up by rowmarkId below, matching C's
-            // EvalPlanQualFetchRowMark which never branches on prti. Verified
-            // byte-identical to C on merge.sql's inheritance MERGE (release
-            // regress 230/230); a prior debug_assert here mis-fired on that
-            // legitimate case.
+            // Inherited source marks (erm.rti != erm.prti) share the parent
+            // mark's rowmarkId, so the per-child ctid/wholerow junk column
+            // is looked up by that id; ExecBuildAuxRowMark (execMain.c:2611-2618)
+            // also resolves the "tableoid<rowmarkId>" junk column for them,
+            // and EvalPlanQualFetchRowMark (execMain.c:2825-2844) compares it
+            // with erm->relid so only the child that produced the row
+            // re-fetches it (the others are inactive for this row).
+            let toid_attno = if erm.rti != erm.prti {
+                let name = format!("tableoid{}", erm.rowmarkId);
+                let n = exec_find_junk_attribute_in_tlist(outer_tlist, &name);
+                assert!(n != 0, "could not find junk {name} column");
+                n
+            } else {
+                0
+            };
             let fetch = if erm.markType == RowMarkType::ROW_MARK_COPY {
                 let name = format!("wholerow{}", erm.rowmarkId);
                 let n = exec_find_junk_attribute_in_tlist(outer_tlist, &name);
                 assert!(n != 0, "could not find junk {name} column");
-                executils::EpqRowMarkFetch::Copy { whole_attno: n }
+                executils::EpqRowMarkFetch::Copy { whole_attno: n, toid_attno }
             } else {
                 assert!(
                     erm.markType == RowMarkType::ROW_MARK_REFERENCE,
@@ -519,7 +527,7 @@ pub fn exec_init_modify_table<'mcx>(
                 let name = format!("ctid{}", erm.rowmarkId);
                 let n = exec_find_junk_attribute_in_tlist(outer_tlist, &name);
                 assert!(n != 0, "could not find junk {name} column");
-                executils::EpqRowMarkFetch::Reference { ctid_attno: n }
+                executils::EpqRowMarkFetch::Reference { ctid_attno: n, toid_attno }
             };
             epq_arowmarks.push((rc.rti, fetch));
         }

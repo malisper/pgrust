@@ -363,10 +363,16 @@ pub fn lr_accept_row<'mcx>(
                     .expect("locking mark slot made at init created the subs");
                 for aerm in node.lr_epq_arowMarks.iter() {
                     let fetch = if aerm.wholeAttNo > 0 {
-                        ::executils::EpqRowMarkFetch::Copy { whole_attno: aerm.wholeAttNo }
+                        ::executils::EpqRowMarkFetch::Copy {
+                            whole_attno: aerm.wholeAttNo,
+                            toid_attno: aerm.toidAttNo,
+                        }
                     } else {
                         debug_assert!(aerm.ctidAttNo > 0);
-                        ::executils::EpqRowMarkFetch::Reference { ctid_attno: aerm.ctidAttNo }
+                        ::executils::EpqRowMarkFetch::Reference {
+                            ctid_attno: aerm.ctidAttNo,
+                            toid_attno: aerm.toidAttNo,
+                        }
                     };
                     subs.relsubs_rowmark[(aerm.rti - 1) as usize] = Some(fetch);
                 }
