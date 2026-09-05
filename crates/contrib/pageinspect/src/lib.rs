@@ -380,6 +380,10 @@ pub(crate) fn notice(msg: impl Into<String>) -> PgResult<()> {
     elog_seams::ereport_msg::call(types_error::NOTICE, msg.into(), None)
 }
 
+pub(crate) fn elog_debug2(msg: impl Into<String>) -> PgResult<()> {
+    elog_seams::ereport_msg::call(types_error::DEBUG2, msg.into(), None)
+}
+
 // --------------------------------------------------------- relation access
 
 /// textToQualifiedNameList + makeRangeVarFromNameList + relation_openrv.
@@ -410,12 +414,22 @@ pub(crate) fn relation_open_by_text_arg<'m>(
         [s, r] => (None, Some(s.as_str()), r.as_str()),
         [c, s, r] => (Some(c.as_str()), Some(s.as_str()), r.as_str()),
         _ => {
+            // C's makeRangeVarFromNameList formats this with NameListToString(),
+            // which joins the *parsed* name list (already downcased / unquoted /
+            // whitespace-trimmed by textToQualifiedNameList) with '.' and does
+            // not re-quote (namespace.c:3597). Build the message from the split
+            // components, not the raw text argument.
+            let joined = names
+                .iter()
+                .map(|n| n.as_str())
+                .collect::<Vec<_>>()
+                .join(".");
             return Err(Box::new(
                 PgError::error(format!(
-                    "improper relation name (too many dotted names): {rawname}"
+                    "improper relation name (too many dotted names): {joined}"
                 ))
                 .with_sqlstate(types_error::ERRCODE_SYNTAX_ERROR),
-            ))
+            ));
         }
     };
     let rv = rel_vocab::RangeVar {

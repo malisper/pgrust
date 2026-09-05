@@ -8,7 +8,7 @@ use types_brin::{
 };
 use types_core::{BRIN_AM_OID, INT4OID, INT8OID, InvalidOid};
 use types_error::ERRCODE_WRONG_OBJECT_TYPE;
-use types_rel::pg_class::RELKIND_INDEX;
+use types_rel::pg_class::{RELKIND_INDEX, RELKIND_PARTITIONED_INDEX};
 
 const BRIN_SPECIAL_SIZE: usize = 8;
 
@@ -145,7 +145,12 @@ pub(crate) fn fc_brin_page_items(
 
     let index_relid = fcinfo.arg(1).as_oid();
     let index_rel = relation::relation_open(mcx, index_relid, types_rel::AccessShareLock)?;
-    if index_rel.rd_rel.relkind != RELKIND_INDEX {
+    // C brin_page_items opens the relation with index_open(), which permits both
+    // RELKIND_INDEX and RELKIND_PARTITIONED_INDEX (validate_relation_kind);
+    // only IS_BRIN then rejects non-BRIN indexes (brinfuncs.c:165).
+    if index_rel.rd_rel.relkind != RELKIND_INDEX
+        && index_rel.rd_rel.relkind != RELKIND_PARTITIONED_INDEX
+    {
         return Err(Box::new(
             PgError::error(format!("\"{}\" is not an index", index_rel.name()))
                 .with_sqlstate(ERRCODE_WRONG_OBJECT_TYPE),

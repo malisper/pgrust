@@ -55,13 +55,33 @@ struct BTPageStat {
     btpo_cycleid: u16,
 }
 
-fn get_bt_page_statistics(blkno: BlockNumber, b: &[u8]) -> BTPageStat {
+fn get_bt_page_statistics(blkno: BlockNumber, b: &[u8]) -> PgResult<BTPageStat> {
     let mut maxoff = page_max_offset_number(b);
     let o = opaque_data(&bt_opaque(b));
 
     let typ = if P_ISDELETED(&o) {
         // Deleted pages split into leaf ('d') and internal ('D').
         maxoff = 0; // don't interpret BTDeletedPageData as index tuples
+
+        // C reports the deleted page's safexid at DEBUG2 (btreefuncs.c:145/150).
+        // pg_upgrade'd deleted pages that predate the full-xid representation
+        // carry the safexid in btpo_level instead.
+        if P_HAS_FULLXID(&o) {
+            // BTPageGetDeleteXid: FullTransactionId at PageGetContents
+            // (MAXALIGN(SizeOfPageHeaderData)).
+            let safexid = r_u64(b, maxalign(SizeOfPageHeaderData));
+            let epoch = (safexid >> 32) as u32;
+            let xid = (safexid & 0xFFFF_FFFF) as u32;
+            elog_debug2(format!(
+                "deleted page from block {blkno} has safexid {epoch}:{xid}"
+            ))?;
+        } else {
+            elog_debug2(format!(
+                "deleted page from block {blkno} has safexid {}",
+                o.btpo_level
+            ))?;
+        }
+
         if P_ISLEAF(&o) || !P_HAS_FULLXID(&o) {
             'd'
         } else {
@@ -94,7 +114,7 @@ fn get_bt_page_statistics(blkno: BlockNumber, b: &[u8]) -> BTPageStat {
         }
     }
 
-    BTPageStat {
+    Ok(BTPageStat {
         blkno,
         live_items,
         dead_items,
@@ -111,7 +131,7 @@ fn get_bt_page_statistics(blkno: BlockNumber, b: &[u8]) -> BTPageStat {
         btpo_level: o.btpo_level,
         btpo_flags: o.btpo_flags,
         btpo_cycleid: o.btpo_cycleid,
-    }
+    })
 }
 
 fn stat_cstrings(stat: &BTPageStat) -> Vec<Option<String>> {
@@ -180,7 +200,7 @@ fn bt_page_stats_internal(
     let page = read_rel_page(&rel, blkno as BlockNumber)?;
     rel.close(types_rel::AccessShareLock)?;
 
-    let stat = get_bt_page_statistics(blkno as BlockNumber, page.bytes());
+    let stat = get_bt_page_statistics(blkno as BlockNumber, page.bytes())?;
 
     let tupdesc = composite_tupdesc(mcx, flinfo)?;
     cstrings_composite_result(mcx, &tupdesc, &stat_cstrings(&stat))
@@ -235,7 +255,7 @@ pub(crate) fn fc_bt_multi_page_stats(
                 break;
             }
             let page = read_rel_page(&rel, cur as BlockNumber)?;
-            let stat = get_bt_page_statistics(cur as BlockNumber, page.bytes());
+            let stat = get_bt_page_statistics(cur as BlockNumber, page.bytes())?;
             rows.push(cstrings_tuple_image(mcx, &tupdesc, &stat_cstrings(&stat))?);
         }
         rel.close(types_rel::AccessShareLock)?;
