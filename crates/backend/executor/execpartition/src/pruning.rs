@@ -521,7 +521,9 @@ fn get_matching_partitions<'mcx>(
     partprune::matching_bounds_to_partitions(mcx, boundinfo, final_result, strategy)
 }
 
-fn sup_call(f: &mut FmgrInfo, coll: Oid, a: Datum, b: Datum) -> Datum {
+// FunctionCall2Coll (fmgr.c:1149): the support function's ereport propagates
+// unchanged; a NULL result is elog(ERROR, "function %u returned NULL").
+fn sup_call(f: &mut FmgrInfo, coll: Oid, a: Datum, b: Datum) -> PgResult<Datum> {
     let mut fcinfo = LocalFcinfo::<2>::new(coll);
     // range_cmp / SQL-function support procs detoast and build by-ref
     // intermediates through the result mcx; call-lifetime scratch (sup_cmp
@@ -531,11 +533,14 @@ fn sup_call(f: &mut FmgrInfo, coll: Oid, a: Datum, b: Datum) -> Datum {
     unsafe { fcinfo.set_result_mcx(scratch.mcx()) };
     fcinfo.set_arg(0, a);
     fcinfo.set_arg(1, b);
-    let r = f
-        .invoke(&mut fcinfo)
-        .unwrap_or_else(|e| panic!("partition comparison function failed: {e:?}"));
-    assert!(!fcinfo.isnull, "partition comparison function returned NULL");
-    r
+    let r = f.invoke(&mut fcinfo)?;
+    if fcinfo.isnull {
+        return Err(Box::new(types_error::PgError::error(format!(
+            "function {} returned NULL",
+            f.fn_oid
+        ))));
+    }
+    Ok(r)
 }
 
 // perform_pruning_base_step (partprune.c), executor arm: values come from
@@ -584,7 +589,26 @@ fn perform_pruning_base_step_exec<'mcx>(
     let base = opstep.step_id as usize * partnatts as usize;
     let partcollation = &partkey.partcollation;
 
-    match strategy {
+    // The kernels take an infallible cmp (partprune.c:2852 and the
+    // range/hash sites call FunctionCall2Coll directly): the first support
+    // function failure is parked here, the search short-circuits, and the
+    // error is re-raised once the kernel returns.
+    let sup_err: core::cell::RefCell<Option<Box<types_error::PgError>>> =
+        core::cell::RefCell::new(None);
+    let sup = |f: &mut FmgrInfo, coll: Oid, a: Datum, b: Datum| -> Datum {
+        if sup_err.borrow().is_some() {
+            return Datum::from_i32(0);
+        }
+        match sup_call(f, coll, a, b) {
+            Ok(r) => r,
+            Err(e) => {
+                *sup_err.borrow_mut() = Some(e);
+                Datum::from_i32(0)
+            }
+        }
+    };
+
+    let result = match strategy {
         b'h' => partprune::get_matching_hash_bounds(
             mcx,
             boundinfo,
@@ -599,7 +623,7 @@ fn perform_pruning_base_step_exec<'mcx>(
                         continue;
                     }
                     let f = ctx.cmpfuncs[base + keyno as usize].as_mut().expect("cmpfn resolved");
-                    let h = sup_call(
+                    let h = sup(
                         f,
                         partcollation[keyno as usize],
                         values[keyno as usize],
@@ -621,7 +645,7 @@ fn perform_pruning_base_step_exec<'mcx>(
                 &opstep.nullkeys,
                 |bound| {
                     let f = cmpfuncs[base].as_mut().expect("cmpfn resolved");
-                    sup_call(f, coll, bound, values[0]).as_i32()
+                    sup(f, coll, bound, values[0]).as_i32()
                 },
             )
         }
@@ -636,10 +660,14 @@ fn perform_pruning_base_step_exec<'mcx>(
                 &opstep.nullkeys,
                 &mut |j: i32, bound: Datum| {
                     let f = cmpfuncs[base + j as usize].as_mut().expect("cmpfn resolved");
-                    sup_call(f, partcollation[j as usize], bound, values[j as usize]).as_i32()
+                    sup(f, partcollation[j as usize], bound, values[j as usize]).as_i32()
                 },
             )
         }
         other => panic!("unexpected partition strategy: {}", other as char),
+    };
+    if let Some(e) = sup_err.into_inner() {
+        return Err(e);
     }
+    result
 }

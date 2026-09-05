@@ -274,7 +274,20 @@ fn perform_pruning_base_step_planner<'mcx>(
         }
     }
 
+    // C reaches the opclass support function through FunctionCall2Coll
+    // (partbounds.c:3607 partition_list_bsearch, :3695
+    // partition_range_datum_bsearch, :4722 compute_partition_hash_value): an
+    // ereport raised inside it (a plpgsql RAISE in a user comparator) unwinds
+    // to the client unchanged, and a NULL result is elog(ERROR, "function %u
+    // returned NULL") (fmgr.c:1165). The kernels take an infallible cmp, so
+    // the first failure is parked here, the search is short-circuited, and
+    // the error is re-raised once the kernel returns.
+    let sup_err: core::cell::RefCell<Option<Box<types_error::PgError>>> =
+        core::cell::RefCell::new(None);
     let sup_call = |f: &mut types_fmgr::FmgrInfo, coll: Oid, a: datum::Datum, b: datum::Datum| {
+        if sup_err.borrow().is_some() {
+            return datum::Datum::from_i32(0);
+        }
         // range_cmp (range-typed partition keys) detoasts through the result
         // mcx; arm the frame with call-lifetime scratch.
         let scratch = ::mcx::MemoryContext::new("partprune cmp");
@@ -283,14 +296,23 @@ fn perform_pruning_base_step_planner<'mcx>(
         unsafe { fcinfo.set_result_mcx(scratch.mcx()) };
         fcinfo.set_arg(0, a);
         fcinfo.set_arg(1, b);
-        let r = f
-            .invoke(&mut fcinfo)
-            .unwrap_or_else(|e| panic!("partition comparison function failed: {e:?}"));
-        assert!(!fcinfo.isnull, "partition comparison function returned NULL");
-        r
+        match f.invoke(&mut fcinfo) {
+            Ok(r) if !fcinfo.isnull => r,
+            Ok(_) => {
+                *sup_err.borrow_mut() = Some(Box::new(types_error::PgError::error(format!(
+                    "function {} returned NULL",
+                    f.fn_oid
+                ))));
+                datum::Datum::from_i32(0)
+            }
+            Err(e) => {
+                *sup_err.borrow_mut() = Some(e);
+                datum::Datum::from_i32(0)
+            }
+        }
     };
 
-    match strategy {
+    let result = match strategy {
         PARTITION_STRATEGY_HASH => {
             let mut sf = supfuncs;
             partprune::get_matching_hash_bounds(
@@ -348,7 +370,11 @@ fn perform_pruning_base_step_planner<'mcx>(
             )
         }
         other => panic!("unexpected partition strategy: {}", other as char),
+    };
+    if let Some(e) = sup_err.into_inner() {
+        return Err(e);
     }
+    result
 }
 
 fn strip_relabel(mut n: Node<'_>) -> Node<'_> {

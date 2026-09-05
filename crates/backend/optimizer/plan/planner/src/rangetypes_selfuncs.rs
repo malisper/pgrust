@@ -210,7 +210,12 @@ fn calc_rangesel<'mcx>(
             OID_RANGE_CONTAINED_OP | OID_RANGE_LESS_EQUAL_OP => empty_frac as f64,
             OID_RANGE_CONTAINS_OP | OID_RANGE_GREATER_EQUAL_OP => 1.0,
             OID_RANGE_GREATER_OP => 1.0 - empty_frac as f64,
-            _ => panic!("unexpected operator {operator}"),
+            // rangetypes_selfuncs.c:320: elog(ERROR), a catchable XX000.
+            _ => {
+                return Err(Box::new(types_error::PgError::error(format!(
+                    "unexpected operator {operator}"
+                ))))
+            }
         };
     } else {
         let mut hist_selec = calc_hist_selectivity(run, ctx, vardata, constval, operator)?;
@@ -363,7 +368,13 @@ fn calc_hist_selectivity<'mcx>(
                 )?
             }
         }
-        _ => panic!("unknown range operator {operator}"),
+        // rangetypes_selfuncs.c:579: elog(ERROR), a catchable XX000 (an
+        // operator that RESTRICTs to rangesel without being a range operator).
+        _ => {
+            return Err(Box::new(types_error::PgError::error(format!(
+                "unknown range operator {operator}"
+            ))))
+        }
     };
 
     Ok(hist_selec)

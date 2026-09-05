@@ -152,7 +152,10 @@ pub fn networkjoinsel<'mcx>(
                 )?
             }
         }
-        other => panic!("unrecognized join type: {other}"),
+        // network_selfuncs.c:256: elog(ERROR), a catchable XX000.
+        other => {
+            return Err(Box::new(PgError::error(format!("unrecognized join type: {other}"))))
+        }
     };
     Ok(clamp_probability(selec))
 }
@@ -527,6 +530,46 @@ mod tests {
             err.message(),
             "unrecognized operator 1 for inet selectivity"
         );
+    }
+
+    // networkjoinsel (network_selfuncs.c:256): a join type outside
+    // INNER/LEFT/FULL/SEMI/ANTI is elog(ERROR, "unrecognized join type: %d"),
+    // a catchable XX000 -- never a backend panic. audit-18.6
+    // a186-candidate-fp-adt-network_selfuncs-e17306a9638431df3e17-1.
+    #[test]
+    fn networkjoinsel_unrecognized_join_type_is_ereport_xx000() {
+        crate::tests::install_fixtures();
+        let cx = ::mcx::MemoryContext::new_bump("networkjoinsel-jointype-test");
+        let mcx = cx.mcx();
+        let mut run = PlannerRun::new(mcx);
+        // Two null inet Consts: get_join_variables finds no relation on
+        // either side, exactly the path C takes before its switch.
+        let l = types_nodes::Node::mk_const(mcx, 869, -1, 0, -1, Datum::null(), true, false)
+            .unwrap();
+        let r = types_nodes::Node::mk_const(mcx, 869, -1, 0, -1, Datum::null(), true, false)
+            .unwrap();
+        let args = [run.intern_expr(l), run.intern_expr(r)];
+        let sjinfo = SpecialJoinInfo {
+            min_lefthand: crate::relnode::relids_empty(),
+            min_righthand: crate::relnode::relids_empty(),
+            syn_lefthand: crate::relnode::relids_empty(),
+            syn_righthand: crate::relnode::relids_empty(),
+            jointype: types_pathnodes::JOIN_RIGHT,
+            ojrelid: 0,
+            commute_above_l: crate::relnode::relids_empty(),
+            commute_above_r: crate::relnode::relids_empty(),
+            commute_below_l: crate::relnode::relids_empty(),
+            commute_below_r: crate::relnode::relids_empty(),
+            lhs_strict: false,
+            semi_can_btree: false,
+            semi_can_hash: false,
+            semi_operators: ::mcx::PgVec::new_in(mcx),
+            semi_rhs_exprs: ::mcx::PgVec::new_in(mcx),
+        };
+        let err = networkjoinsel(&mut run, OID_INET_SUB_OP, &args, Some(&sjinfo))
+            .expect_err("unrecognized join type must ereport");
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(err.message(), "unrecognized join type: 3");
     }
 
     #[test]

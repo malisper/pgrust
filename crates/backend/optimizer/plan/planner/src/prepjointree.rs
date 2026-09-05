@@ -1700,7 +1700,14 @@ pub(crate) fn find_dependent_phvs_in_jointree<'mcx>(
         if !rte.lateral {
             continue;
         }
-        // range_table_entry_walker legs that can carry expressions.
+        // range_table_entry_walker legs that can carry expressions
+        // (nodeFuncs.c:2832-2870): a LATERAL relation carries its outer
+        // references in the TABLESAMPLE clause.
+        if let Some(ts) = rte.tablesample {
+            if w.visit(ts)? {
+                return Ok(true);
+            }
+        }
         if let Some(sq) = rte.subquery {
             if w.visit_query_ref(sq)? {
                 return Ok(true);
@@ -4685,7 +4692,7 @@ pub fn expand_virtual_generated_columns<'mcx>(
         for child in &jt.fromlist {
             new_fromlist.lappend(
                 mcx,
-                replace_vars_in_jointree_expand(mcx, child, varno, &tlist, &phc)?,
+                replace_vars_in_jointree_expand(mcx, &parse.rtable, child, varno, &tlist, &phc)?,
             )?;
         }
         let new_quals = replace_opt(mcx, jt.quals, varno, &tlist, false, Some(&phc))?;
@@ -4785,21 +4792,106 @@ pub(crate) fn replace_vars_in_on_conflict<'mcx>(
     Ok(())
 }
 
+// The jointree leg of pullup_replace_vars under expand_virtual_generated_columns
+// (prepjointree.c:1083, generic query_tree_mutator / range_table_mutator):
+// rewrite the quals of every FromExpr / JoinExpr, and the expressions of
+// every LATERAL sibling RTE (function, VALUES, subquery, table function,
+// sampled relation) -- the only range-table places a Var of `varno` can
+// appear at this query level (the RTE legs mirror replace_vars_in_jointree,
+// prepjointree.c:2558-2600).
 fn replace_vars_in_jointree_expand<'mcx>(
     mcx: Mcx<'mcx>,
+    rtable: &NodeList<'mcx>,
     node: Node<'mcx>,
     varno: i32,
     tlist: &NodeList<'mcx>,
     phc: &PullupPhCtx<'_, 'mcx>,
 ) -> PgResult<Node<'mcx>> {
     match node.node_tag() {
-        NodeTag::T_RangeTblRef => Ok(node),
+        NodeTag::T_RangeTblRef => {
+            let rtindex = node.as_range_tbl_ref().expect("RangeTblRef").rtindex;
+            if rtindex == varno {
+                return Ok(node);
+            }
+            let other_node = rtable.nth(rtindex as usize - 1);
+            let other = other_node.as_range_tbl_entry().expect("rtable cell");
+            if other.lateral {
+                match other.rtekind {
+                    RTEKind::RTE_RELATION => {
+                        // shouldn't be marked LATERAL unless tablesample
+                        let tsc = other.tablesample.expect("LATERAL relation has a tablesample");
+                        if let Some(n) = replace_var_expr(mcx, tsc, varno, tlist, false, Some(phc))? {
+                            // SAFETY: pre-seal tree owned by this planner
+                            // invocation; exclusive fixup.
+                            unsafe {
+                                other_node.with_mut::<RangeTblEntry, _>(|r| r.tablesample = Some(n))
+                            };
+                        }
+                    }
+                    RTEKind::RTE_SUBQUERY => {
+                        let subq = other.subquery.expect("RTE_SUBQUERY has a subquery");
+                        if let Some(newq) = replace_vars_in_lateral_subquery(
+                            mcx,
+                            subq,
+                            varno,
+                            tlist,
+                            false,
+                            Some(phc),
+                            1,
+                        )? {
+                            // SAFETY: as above.
+                            unsafe {
+                                other_node
+                                    .with_mut::<RangeTblEntry, _>(|r| r.subquery = Some(newq))
+                            };
+                        }
+                    }
+                    RTEKind::RTE_FUNCTION => {
+                        if let Some(l) = map_rtfunctions(mcx, &other.functions, &mut |n| {
+                            replace_var_expr(mcx, n, varno, tlist, false, Some(phc))
+                        })? {
+                            // SAFETY: as above.
+                            unsafe {
+                                other_node.with_mut::<RangeTblEntry, _>(|r| r.functions = l)
+                            };
+                        }
+                    }
+                    RTEKind::RTE_TABLEFUNC => {
+                        let tf = other.tablefunc.expect("TABLEFUNC RTE has a tablefunc");
+                        if let Some(n) = replace_var_expr(mcx, tf, varno, tlist, false, Some(phc))? {
+                            // SAFETY: as above.
+                            unsafe {
+                                other_node.with_mut::<RangeTblEntry, _>(|r| r.tablefunc = Some(n))
+                            };
+                        }
+                    }
+                    RTEKind::RTE_VALUES => {
+                        if let Some(l) =
+                            clauses::walker::mutate_list(mcx, &other.values_lists, &mut |n| {
+                                replace_var_expr(mcx, n, varno, tlist, false, Some(phc))
+                            })?
+                        {
+                            // SAFETY: as above.
+                            unsafe {
+                                other_node.with_mut::<RangeTblEntry, _>(|r| r.values_lists = l)
+                            };
+                        }
+                    }
+                    // JOIN / CTE / NAMEDTUPLESTORE / RESULT / GROUP are never
+                    // marked LATERAL.
+                    _ => {}
+                }
+            }
+            Ok(node)
+        }
         NodeTag::T_FromExpr => {
             let f = node.as_from_expr().expect("FromExpr");
             let mut fromlist = NodeList::nil();
             for child in &f.fromlist {
-                fromlist
-                    .lappend(mcx, replace_vars_in_jointree_expand(mcx, child, varno, tlist, phc)?)?;
+                fromlist.lappend(
+                    mcx,
+                    replace_vars_in_jointree_expand(mcx, rtable, child, varno, tlist, phc)?,
+                )?;
             }
             Node::mk(
                 mcx,
@@ -4811,16 +4903,24 @@ fn replace_vars_in_jointree_expand<'mcx>(
         }
         NodeTag::T_JoinExpr => {
             let j = node.as_join_expr().expect("JoinExpr");
+            let larg = replace_vars_in_jointree_expand(mcx, rtable, j.larg, varno, tlist, phc)?;
+            let rarg = replace_vars_in_jointree_expand(mcx, rtable, j.rarg, varno, tlist, phc)?;
+            // No REPLACE_WRAP_VARFREE here: expand_virtual_generated_columns
+            // applies pullup_replace_vars through the generic query mutator
+            // (prepjointree.c:1083), not replace_vars_in_jointree, so a
+            // var-free generation expression in a FULL-join qual stays bare
+            // (and C then rejects the join as non-mergeable, 0A000).
+            let quals = replace_opt(mcx, j.quals, varno, tlist, false, Some(phc))?;
             Node::mk(
                 mcx,
                 types_nodes::JoinExpr {
                     jointype: j.jointype,
                     isNatural: j.isNatural,
-                    larg: replace_vars_in_jointree_expand(mcx, j.larg, varno, tlist, phc)?,
-                    rarg: replace_vars_in_jointree_expand(mcx, j.rarg, varno, tlist, phc)?,
+                    larg,
+                    rarg,
                     usingClause: j.usingClause.clone_in(mcx)?,
                     join_using_alias: j.join_using_alias,
-                    quals: replace_opt(mcx, j.quals, varno, tlist, false, Some(phc))?,
+                    quals,
                     alias: j.alias,
                     rtindex: j.rtindex,
                 },

@@ -8604,6 +8604,66 @@ fn estimate_array_length_skips_stats_for_varno_zero_var() {
     assert_eq!(crate::selfuncs::estimate_array_length(Some(&mut run), var).unwrap(), 10.0);
 }
 
+// strip_array_coercion (selfuncs.c:1796-1809) looks through an
+// ArrayCoerceExpr whose per-element expression is a RelabelType over a
+// CaseTestExpr -- the binary-compatible relabeling the parser emits for
+// varchar[] -> text[] -- so estimate_array_length sees the ArrayExpr
+// underneath (2 elements), and leaves a real per-element cast alone
+// (default guess 10). audit-18.6 a186-candidate-fp-adt-selfuncs-p1-f21e144a889cf324dc56-1.
+#[test]
+fn estimate_array_length_strips_binary_compatible_array_coercion() {
+    use types_nodes::primnodes::{ArrayCoerceExpr, ArrayExpr, CaseTestExpr, CoercionForm};
+    install_fixtures();
+    let cx = cx();
+    let mcx = cx.mcx();
+    let varchar_const = || Node::mk_const(mcx, 1043, -1, 100, -1, Datum::null(), true, false).unwrap();
+    let arr = Node::mk(
+        mcx,
+        ArrayExpr {
+            array_typeid: 1015,
+            array_collid: 100,
+            element_typeid: 1043,
+            elements: NodeList::make2(mcx, varchar_const(), varchar_const()).unwrap(),
+            multidims: false,
+            list_start: -1,
+            list_end: -1,
+            location: -1,
+        },
+    )
+    .unwrap();
+    let case_test =
+        Node::mk(mcx, CaseTestExpr { typeId: 1043, typeMod: -1, collation: 100 }).unwrap();
+    let relabel =
+        Node::mk_relabel_type(mcx, case_test, 25, -1, 100, CoercionForm::COERCE_IMPLICIT_CAST)
+            .unwrap();
+    let coerce = |elemexpr| {
+        Node::mk(
+            mcx,
+            ArrayCoerceExpr {
+                arg: arr,
+                elemexpr: Some(elemexpr),
+                resulttype: 1009,
+                resulttypmod: -1,
+                resultcollid: 100,
+                coerceformat: CoercionForm::COERCE_IMPLICIT_CAST,
+                location: -1,
+            },
+        )
+        .unwrap()
+    };
+    // varchar[]::text[]: binary-compatible, stripped -> the ArrayExpr's 2.
+    assert_eq!(crate::selfuncs::estimate_array_length(None, coerce(relabel)).unwrap(), 2.0);
+    // Stacked relabeling above the coercion is looked through as well.
+    let relabeled =
+        Node::mk_relabel_type(mcx, coerce(relabel), 1009, -1, 100, CoercionForm::COERCE_IMPLICIT_CAST)
+            .unwrap();
+    assert_eq!(crate::selfuncs::estimate_array_length(None, relabeled).unwrap(), 2.0);
+    // A genuine per-element cast (int4 -> int8 via a function) is not a
+    // relabeling: C keeps the ArrayCoerceExpr and falls to the default guess.
+    let func_elem = Node::mk_const(mcx, 20, -1, 0, 8, Datum::null(), true, true).unwrap();
+    assert_eq!(crate::selfuncs::estimate_array_length(None, coerce(func_elem)).unwrap(), 10.0);
+}
+
 // upstream 16fb94605c8f (18.4): remove_rel_from_restrictinfo must clear the
 // removed rel's and its outer join's relid bits from every relid set of the
 // RestrictInfo, not only clause_relids/required_relids; clause_sides_match_join

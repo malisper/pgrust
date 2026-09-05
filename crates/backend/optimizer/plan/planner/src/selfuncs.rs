@@ -4197,9 +4197,26 @@ pub fn scalararraysel<'mcx>(
     Ok(clamp_probability(s1))
 }
 
+// strip_array_coercion (selfuncs.c:1792): look through binary-compatible
+// relabelings of an array expression -- an ArrayCoerceExpr whose per-element
+// expression is a RelabelType over CaseTestExpr (varchar[] -> text[]), and
+// any RelabelType; stacked nodes are peeled one level at a time.
 fn strip_array_coercion<'mcx>(mut node: Node<'mcx>) -> Node<'mcx> {
-    while let Some(r) = node.as_relabel_type() {
-        node = r.arg;
+    loop {
+        if let Some(acoerce) = node.as_array_coerce_expr() {
+            let binary_compatible = acoerce
+                .elemexpr
+                .and_then(|e| e.as_relabel_type())
+                .is_some_and(|r| r.arg.as_case_test_expr().is_some());
+            if !binary_compatible {
+                break;
+            }
+            node = acoerce.arg;
+        } else if let Some(r) = node.as_relabel_type() {
+            node = r.arg;
+        } else {
+            break;
+        }
     }
     node
 }
@@ -4351,11 +4368,15 @@ fn generic_restriction_selectivity<'mcx>(
 
         let stats_usable =
             vardata.stats.is_some() && statistic_proc_security_check(&vardata, opcode)?;
-        let (mut mcvsel, mcvsum) = (0.0f64, 0.0f64);
+        // mcv_selectivity (selfuncs.c:780-795): mcvsel sums the matching
+        // MCV frequencies, mcvsum every MCV frequency -- the histogram
+        // covers only the 1 - nullfrac - mcvsum remainder below.
+        let (mut mcvsel, mut mcvsum) = (0.0f64, 0.0f64);
         if let Some(sslot) = vardata.slot(STATISTIC_KIND_MCV, 0).filter(|_| stats_usable) {
             // Torn-slot pairing rule (see mcv_selectivity): only values
             // paired with a frequency count.
             for (&v, &n) in sslot.values()?.iter().zip(sslot.numbers()?.iter()) {
+                mcvsum += n as f64;
                 if armed_test(&mut opproc, v)? {
                     mcvsel += n as f64;
                 }

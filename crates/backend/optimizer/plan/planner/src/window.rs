@@ -461,6 +461,13 @@ fn pull_window_input_vars<'mcx>(node: Node<'mcx>, out: &mut PgVec<'_, Node<'mcx>
                 pull_window_input_vars(v, out);
             }
         }
+        // expression_tree_walker (nodeFuncs.c:2328): named_args then args.
+        NodeTag::T_XmlExpr => {
+            let x = node.as_xml_expr().unwrap();
+            for a in x.named_args.iter().chain(x.args.iter()) {
+                pull_window_input_vars(a, out);
+            }
+        }
         other => panic!("pull_var_clause (var.c): {other:?}; window-input lane"),
     }
 }

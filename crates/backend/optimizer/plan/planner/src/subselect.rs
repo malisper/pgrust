@@ -693,21 +693,11 @@ fn convert_exists_sublink_to_join<'mcx>(
     let perm_offset = parse.rteperminfos.len() as u32;
     for srte_node in &subselect.rtable {
         let srte = srte_node.as_range_tbl_entry().expect("rtable cell");
+        // CombineRangeTables (subselect.c:1580) takes every RTE kind as is:
+        // relation, subquery, join, function, tablefunc (XMLTABLE /
+        // JSON_TABLE), VALUES, CTE, named tuplestore, result.
         // upstream 1c7358099cbe (18.4): Fix unsafe RTE_GROUP removal in simplify_EXISTS_query
         // RTE_RESULT (the converted RTE_GROUP) carries no expressions: the plain copy is exact.
-        assert!(
-            matches!(
-                srte.rtekind,
-                RTEKind::RTE_RELATION
-                    | RTEKind::RTE_SUBQUERY
-                    | RTEKind::RTE_JOIN
-                    | RTEKind::RTE_FUNCTION
-                    | RTEKind::RTE_CTE
-                    | RTEKind::RTE_RESULT
-            ),
-            "convert_EXISTS_sublink_to_join (subselect.c): {:?} RTE in EXISTS body",
-            srte.rtekind
-        );
         let new_index = if srte.perminfoindex > 0 {
             srte.perminfoindex + perm_offset
         } else {
