@@ -20944,7 +20944,7 @@ dependencies = [
  "mbutils_seams",
  "mcx",
  "miscinit",
- "pg_string",
+ "numutils",
  "pgclient",
  "pgstat",
  "postgres_seams",
@@ -20966,7 +20966,9 @@ dependencies = [
  "walreceiverfuncs",
  "walreceiverfuncs_seams",
  "walsender_seams",
+ "xact_seams",
  "xlogarchive",
+ "xlogarchive_seams",
  "xlogrecovery_seams",
 ]
 

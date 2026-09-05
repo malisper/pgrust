@@ -9,7 +9,6 @@ name = "walreceiver"
 path = "src/lib.rs"
 
 [dependencies]
-pg_string = { path = "../../../common/string" }
 mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
 adt_timestamp = { path = "../../utils/adt/adt_timestamp" }
 auxprocess = { path = "../../postmaster/auxprocess" }
@@ -24,6 +23,7 @@ libc = "0.2"
 libpq_pqsignal = { path = "../../libpq/libpq_pqsignal" }
 mcx = { path = "../../../_support/mcx" }
 miscinit = { path = "../../utils/init/miscinit" }
+numutils = { path = "../../utils/adt/numutils" }
 pgclient = { path = "../../../interfaces/pgclient" }
 pgstat = { path = "../../utils/activity/pgstat" }
 postgres_seams = { path = "../../tcop/postgres_seams" }
@@ -52,3 +52,5 @@ waiteventset = { path = "../../storage/ipc/waiteventset" }
 waiteventset_seams = { path = "../../storage/ipc/waiteventset_seams" }
 latch_seams = { path = "../../storage/ipc/latch_seams" }
 fd = { path = "../../storage/file/fd" }
+xact_seams = { path = "../../access/transam/xact_seams" }
+xlogarchive_seams = { path = "../../access/transam/xlogarchive_seams" }

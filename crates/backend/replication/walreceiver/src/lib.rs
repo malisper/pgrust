@@ -489,9 +489,11 @@ fn wal_receiver_main_inner() -> PgResult<()> {
             let xlogfname = transam_xlog::XLogFileName(tli, segno, transam_xlog::wal_segment_size());
             let recv_file = with_state(|s| s.recvFile);
             if unsafe { libc::close(recv_file) } != 0 {
+                let en = ::elog::errno::current_errno();
                 return ereport(PANIC)
+                    .with_saved_errno(en)
                     .errcode_for_file_access()
-                    .errmsg(format!("could not close WAL segment {xlogfname}"))
+                    .errmsg(format!("could not close WAL segment {xlogfname}: %m"))
                     .finish(loc(621, "WalReceiverMain"));
             }
 
@@ -577,10 +579,17 @@ fn WalRcvWaitForStartPosition(
     Ok(())
 }
 
+// ArchiveRecoveryRequested (xlogrecovery.c global): existsTimeLineHistory
+// (timeline.c:232-247) restores the history file from the archive when set.
+fn archive_recovery_requested() -> bool {
+    xlogrecovery_seams::archive_recovery_requested::is_installed()
+        && xlogrecovery_seams::archive_recovery_requested::call()
+}
+
 fn WalRcvFetchTimeLineHistoryFiles(first: TimeLineID, last: TimeLineID) -> PgResult<()> {
     for tli in first..=last {
         // There is no history file for timeline 1.
-        if tli != 1 && !timeline::existsTimeLineHistory(tli, false)? {
+        if tli != 1 && !timeline::existsTimeLineHistory(tli, archive_recovery_requested())? {
             let _ = ereport(LOG)
                 .errmsg(format!(
                     "fetching timeline history file for timeline {tli} from primary server"
@@ -687,6 +696,22 @@ fn XLogWalRcvProcessMsg(msg_type: u8, buf: &[u8], tli: TimeLineID) -> PgResult<(
     }
 }
 
+#[cfg(target_os = "macos")]
+fn errno_location() -> *mut libc::c_int {
+    // SAFETY: libc returns this thread's errno slot.
+    unsafe { libc::__error() }
+}
+#[cfg(not(target_os = "macos"))]
+fn errno_location() -> *mut libc::c_int {
+    // SAFETY: libc returns this thread's errno slot.
+    unsafe { libc::__errno_location() }
+}
+
+fn set_errno(value: i32) {
+    // SAFETY: writes this thread's errno slot.
+    unsafe { *errno_location() = value }
+}
+
 fn be_u64(b: &[u8]) -> u64 {
     u64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
 }
@@ -719,6 +744,9 @@ fn XLogWalRcvWrite(buf: &[u8], recptr_in: XLogRecPtr, tli: TimeLineID) -> PgResu
         let remaining = buf.len() - off;
         let segbytes = remaining.min(wal_segment_size as usize - startoff);
 
+        // OK to write the logs
+        set_errno(0);
+
         let start_ns = pgstat::io::pgstat_prepare_io_time(
             guc_tables::vars::track_wal_io_timing.read(),
         );
@@ -732,16 +760,20 @@ fn XLogWalRcvWrite(buf: &[u8], recptr_in: XLogRecPtr, tli: TimeLineID) -> PgResu
                 startoff as libc::off_t,
             )
         };
+        let write_errno = ::elog::errno::current_errno();
         waitevent_seams::pgstat_report_wait_end::call();
 
         if byteswritten <= 0 {
+            // if write didn't set errno, assume no disk space
+            // (walreceiver.c:1017-1019; %m renders that errno).
+            let save_errno = if write_errno == 0 { libc::ENOSPC } else { write_errno };
             let (tli_f, segno) = with_state(|s| (s.recvFileTLI, s.recvSegNo));
             let xlogfname = transam_xlog::XLogFileName(tli_f, segno, wal_segment_size);
-            let e = std::io::Error::last_os_error();
             return ereport(PANIC)
+                .with_saved_errno(save_errno)
                 .errcode_for_file_access()
                 .errmsg(format!(
-                    "could not write to WAL segment {xlogfname} at offset {startoff}, length {segbytes}: {e}"
+                    "could not write to WAL segment {xlogfname} at offset {startoff}, length {segbytes}: %m"
                 ))
                 .finish(loc(950, "XLogWalRcvWrite"));
         }
@@ -824,9 +856,11 @@ fn XLogWalRcvClose(recptr: XLogRecPtr, tli: TimeLineID) -> PgResult<()> {
 
     let recv_file = with_state(|s| s.recvFile);
     if unsafe { libc::close(recv_file) } != 0 {
+        let en = ::elog::errno::current_errno();
         return ereport(PANIC)
+            .with_saved_errno(en)
             .errcode_for_file_access()
-            .errmsg(format!("could not close WAL segment {xlogfname}"))
+            .errmsg(format!("could not close WAL segment {xlogfname}: %m"))
             .finish(loc(1063, "XLogWalRcvClose"));
     }
 
@@ -953,6 +987,30 @@ fn ProcessWalSndrMessage(wal_end: XLogRecPtr, send_time: TimestampTz) {
         d.lastMsgSendTime = send_time;
         d.lastMsgReceiptTime = last_msg_receipt_time;
     });
+
+    if ::elog::message_level_is_interesting(DEBUG2) {
+        let sendtime = timestamp_seams::timestamptz_to_str::call(send_time);
+        let receipttime = timestamp_seams::timestamptz_to_str::call(last_msg_receipt_time);
+        let apply_delay = walreceiverfuncs::GetReplicationApplyDelay();
+        let transfer_latency = walreceiverfuncs::GetReplicationTransferLatency();
+
+        // apply delay is not available
+        let _ = if apply_delay == -1 {
+            elog(
+                DEBUG2,
+                format!(
+                    "sendtime {sendtime} receipttime {receipttime} replication apply delay (N/A) transfer latency {transfer_latency} ms"
+                ),
+            )
+        } else {
+            elog(
+                DEBUG2,
+                format!(
+                    "sendtime {sendtime} receipttime {receipttime} replication apply delay {apply_delay} ms transfer latency {transfer_latency} ms"
+                ),
+            )
+        };
+    }
 }
 
 fn WalRcvComputeNextWakeup(reason: usize, now: TimestampTz) {
@@ -1016,3 +1074,204 @@ pub fn init_seams() {
 }
 
 const _: () = assert!(NAMEDATALEN == 64);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Mutex, Once};
+    use types_error::{ErrorLevel, SqlState, WARNING};
+
+    // Every emitted report, as (level, sqlstate, message), tagged with the
+    // reporting thread: one process-wide store rather than a new
+    // thread_local (the tree-wide census is pinned), so each test only ever
+    // reads and removes its own entries — tests run concurrently.
+    type Captured = (ErrorLevel, SqlState, String);
+    static CAPTURED: Mutex<Vec<(std::thread::ThreadId, Captured)>> = Mutex::new(Vec::new());
+    static RESTORE_CALLS: AtomicUsize = AtomicUsize::new(0);
+    // The test clock: one fixed "now" for get_current_timestamp.
+    const NOW: TimestampTz = 1_000_000;
+
+    fn capture_hook(error: &PgError, _output_to_server: &mut bool) {
+        CAPTURED.lock().unwrap().push((
+            std::thread::current().id(),
+            (error.level(), error.sqlstate(), error.message().to_string()),
+        ));
+    }
+
+    fn take_captured() -> Vec<Captured> {
+        let me = std::thread::current().id();
+        let mut store = CAPTURED.lock().unwrap();
+        let (mine, others): (Vec<_>, Vec<_>) = store.drain(..).partition(|(t, _)| *t == me);
+        *store = others;
+        mine.into_iter().map(|(_, c)| c).collect()
+    }
+
+    // RestoreArchivedFile stand-in: every history file "is in the archive" —
+    // it is materialised under the temp dir and its path returned.
+    fn restore_stub(
+        xlogfname: &str,
+        recovername: &str,
+        _expected_size: i64,
+        _cleanup_enabled: bool,
+    ) -> PgResult<Option<String>> {
+        RESTORE_CALLS.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(recovername, "RECOVERYHISTORY");
+        let dir = std::env::temp_dir().join(format!("pgrust_walrcv_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(xlogfname);
+        std::fs::write(&path, b"1\t0/3000000\tno recovery target specified\n").unwrap();
+        Ok(Some(path.to_string_lossy().into_owned()))
+    }
+
+    fn setup() {
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            guc_tables::init_seams();
+            // pgstat_prepare_io_time reads track_wal_io_timing (boot default off).
+            guc_tables::vars::track_wal_io_timing.install_if_absent(guc_tables::GucVarAccessors {
+                get: || false,
+                set: |_| {},
+            });
+            if !waitevent_seams::pgstat_report_wait_start::is_installed() {
+                waitevent_seams::pgstat_report_wait_start::set(|_| {});
+                waitevent_seams::pgstat_report_wait_end::set(|| {});
+            }
+            xact_seams::get_current_sub_transaction_id::set(|| 1);
+            timestamp_seams::get_current_timestamp::set(|| NOW);
+            timestamp_seams::timestamptz_to_str::set(|t| format!("<{t}>"));
+            xlogrecovery_seams::archive_recovery_requested::set(|| true);
+            xlogarchive_seams::restore_archived_file::set(restore_stub);
+            walreceiverfuncs::WalRcvShmemInit();
+        });
+    }
+
+    fn with_captured<R>(f: impl FnOnce() -> R) -> (R, Vec<Captured>) {
+        let _ = take_captured();
+        let prev = ::elog::set_emit_log_hook(Some(capture_hook));
+        let r = f();
+        ::elog::set_emit_log_hook(prev);
+        (r, take_captured())
+    }
+
+    // ereport(PANIC) unwinds the backend thread (PanicExitThread); the report
+    // it emitted first is the witness.
+    fn expect_panic(f: impl FnOnce() -> PgResult<()>) -> (SqlState, String) {
+        let (r, captured) = with_captured(|| catch_unwind(AssertUnwindSafe(f)));
+        match r {
+            Err(payload) => assert!(payload.is::<types_error::PanicExitThread>()),
+            Ok(_) => panic!("expected a PANIC unwind"),
+        }
+        let (level, sqlstate, message) = captured.last().cloned().expect("PANIC report emitted");
+        assert_eq!(level, PANIC);
+        (sqlstate, message)
+    }
+
+    // WalRcvFetchTimeLineHistoryFiles (walreceiver.c:809) asks
+    // existsTimeLineHistory, which under ArchiveRecoveryRequested restores
+    // the history file from the archive (timeline.c:232-247) — the file is
+    // then present and nothing is fetched from the primary (audit-18.6 b064
+    // row 3395df78). Without the archive consult the fetch goes to the
+    // (unestablished) primary connection.
+    #[test]
+    fn fetch_timeline_history_consults_the_archive_under_archive_recovery() {
+        setup();
+        let before = RESTORE_CALLS.load(Ordering::SeqCst);
+        let r = catch_unwind(AssertUnwindSafe(|| WalRcvFetchTimeLineHistoryFiles(2, 2)));
+        assert!(
+            matches!(r, Ok(Ok(()))),
+            "history file must come from the archive, not the primary: {r:?}"
+        );
+        assert!(RESTORE_CALLS.load(Ordering::SeqCst) > before, "RestoreArchivedFile not consulted");
+    }
+
+    fn arm_segment(recv_file: i32, segno: XLogSegNo) {
+        with_state(|s| {
+            s.recvFile = recv_file;
+            s.recvFileTLI = 1;
+            s.recvSegNo = segno;
+            s.write = 0;
+            s.flush = 0;
+        });
+    }
+
+    // XLogWalRcvWrite (walreceiver.c:1017-1030): a failed pg_pwrite PANICs
+    // with errcode_for_file_access() and "%m" — the strerror text alone
+    // (audit-18.6 b064 row 403b3c44).
+    #[test]
+    fn write_failure_reports_the_os_error_like_c() {
+        setup();
+        let segsz = transam_xlog::wal_segment_size();
+        // A read-only descriptor: pwrite fails with EBADF, deterministically.
+        let fd = unsafe { libc::open(b"/dev/null\0".as_ptr().cast(), libc::O_RDONLY) };
+        assert!(fd >= 0);
+        arm_segment(fd, transam_xlog::XLByteToSeg(0x1000, segsz));
+        let (sqlstate, message) = expect_panic(|| XLogWalRcvWrite(b"12345678", 0x1000, 1));
+        unsafe { libc::close(fd) };
+        assert_eq!(sqlstate, types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(
+            message,
+            "could not write to WAL segment 000000010000000000000000 at offset 4096, length 8: Bad file descriptor"
+        );
+    }
+
+    // The disk-full arm: ENOSPC maps to ERRCODE_DISK_FULL with
+    // "No space left on device" (/dev/full is Linux).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn write_failure_on_a_full_device_is_disk_full() {
+        setup();
+        let segsz = transam_xlog::wal_segment_size();
+        let fd = unsafe { libc::open(b"/dev/full\0".as_ptr().cast(), libc::O_WRONLY) };
+        assert!(fd >= 0);
+        arm_segment(fd, transam_xlog::XLByteToSeg(0x2000, segsz));
+        let (sqlstate, message) = expect_panic(|| XLogWalRcvWrite(b"12345678", 0x2000, 1));
+        unsafe { libc::close(fd) };
+        assert_eq!(sqlstate, types_error::ERRCODE_DISK_FULL);
+        assert_eq!(
+            message,
+            "could not write to WAL segment 000000010000000000000000 at offset 8192, length 8: No space left on device"
+        );
+    }
+
+    // XLogWalRcvClose (walreceiver.c:1138-1142): "could not close WAL segment
+    // %s: %m" carries the close(2) failure (audit-18.6 b064 row 4fa2c7f3).
+    #[test]
+    fn close_failure_reports_the_os_error_like_c() {
+        setup();
+        let segsz = transam_xlog::wal_segment_size();
+        // A descriptor no test ever opens: close(2) fails with EBADF.
+        arm_segment(1_000_000_000, 0);
+        let (sqlstate, message) = expect_panic(|| XLogWalRcvClose(segsz as XLogRecPtr + 0x1000, 1));
+        assert_eq!(sqlstate, types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(
+            message,
+            "could not close WAL segment 000000010000000000000000: Bad file descriptor"
+        );
+    }
+
+    // ProcessWalSndrMessage (walreceiver.c:1348-1374): at DEBUG2 every sender
+    // message logs send/receipt times, the apply delay and the transfer
+    // latency (audit-18.6 b064 row 81d5256a).
+    #[test]
+    fn sender_message_logs_latency_at_debug2() {
+        setup();
+        let prev = ::elog::config::log_min_messages();
+        ::elog::config::set_log_min_messages(DEBUG2);
+        let ((), captured) = with_captured(|| ProcessWalSndrMessage(0x3000100, NOW - 5_000));
+        ::elog::config::set_log_min_messages(prev);
+        assert_eq!(
+            captured.iter().map(|(_, _, m)| m.as_str()).collect::<Vec<_>>(),
+            vec![format!(
+                "sendtime <{}> receipttime <{NOW}> replication apply delay 0 ms transfer latency 5 ms",
+                NOW - 5_000
+            )]
+        );
+        // Below DEBUG2 nothing is logged.
+        ::elog::config::set_log_min_messages(WARNING);
+        let ((), captured) = with_captured(|| ProcessWalSndrMessage(0x3000200, NOW - 5_000));
+        ::elog::config::set_log_min_messages(prev);
+        assert!(captured.is_empty());
+    }
+}

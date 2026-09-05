@@ -151,14 +151,13 @@ pub fn connect_extended(
     // Set always-secure search path for connections that run SQL queries, so
     // malicious users can't redirect user code, e.g. operators
     // (libpqrcv_connect after commit b3f6b14cf48; ALWAYS_SECURE_SEARCH_PATH_SQL).
-    // recovery/040's poisoned-'=' scenario catches its absence.
+    // recovery/040's poisoned-'=' scenario catches its absence. The failure
+    // text is C's "could not clear search path: %s" (libpqwalreceiver.c:262).
     if !replication || logical {
-        match conn.exec("SELECT pg_catalog.set_config('search_path', '', false);") {
-            Ok(res) if res.status == ExecStatus::TuplesOk => {}
-            Ok(res) => {
-                return Ok(Err(format!("could not clear \"search_path\": {}", res.err)));
-            }
-            Err(e) => return Ok(Err(format!("could not clear \"search_path\": {e}"))),
+        // libpqsrv_exec's own ereports (interrupts) propagate, as in C.
+        let res = conn.exec("SELECT pg_catalog.set_config('search_path', '', false);")?;
+        if res.status != ExecStatus::TuplesOk {
+            return Ok(Err(format!("could not clear search path: {}", pchomp(&res.err))));
         }
     }
 
@@ -194,18 +193,10 @@ pub fn identify_system(conn: &mut PgConn) -> PgResult<(String, TimeLineID, XLogR
             .finish(loc("libpqrcv_identify_system")));
     }
     let sysid = text_col(&res, 0, 0);
-    // pg_strtoint32 trims C-locale isspace only; str::trim would also
-    // strip non-ASCII Unicode spaces C rejects.
-    let tli: TimeLineID = text_col(&res, 0, 1)
-        .trim_matches(|c: char| c.is_ascii() && pg_string::isspace_c_locale(c as u8))
-        .parse()
-        .map_err(|_| {
-        ereport(ERROR)
-            .errcode(ERRCODE_PROTOCOL_VIOLATION)
-            .errmsg("invalid response from primary server")
-            .errdetail("Could not parse the primary timeline ID.")
-            .into_error()
-    })?;
+    // *primary_tli = pg_strtoint32(PQgetvalue(res, 0, 1)) (libpqwalreceiver.c:460):
+    // numutils' grammar and its 22P02/22003 ereports, the int32 assigned to
+    // the unsigned TimeLineID as C does.
+    let tli = numutils::pg_strtoint32(&text_col(&res, 0, 1))? as TimeLineID;
     // Column 2 is the server's current WAL flush position.
     let xlogpos = text_col(&res, 0, 2);
     let Some(flush) = sscanf_lsn(&xlogpos) else {
@@ -369,12 +360,9 @@ pub fn end_streaming(conn: &mut PgConn) -> PgResult<TimeLineID> {
                     .errmsg("unexpected result set after end-of-streaming")
                     .finish(loc("libpqrcv_endstreaming")));
             }
-            // C-locale trim (see identify-system above). Residual recorded
-            // gap: C pg_strtoint32 ereports on garbage; unwrap_or(0) is lax.
-            next_tli = text_col(r, 0, 0)
-                .trim_matches(|c: char| c.is_ascii() && pg_string::isspace_c_locale(c as u8))
-                .parse()
-                .unwrap_or(0);
+            // *next_tli = pg_strtoint32(PQgetvalue(res, 0, 0)) (libpqwalreceiver.c:718):
+            // garbage is numutils' 22P02 ereport, not "no timeline reported".
+            next_tli = numutils::pg_strtoint32(&text_col(r, 0, 0))? as TimeLineID;
             res = conn.get_result()?;
         } else if r.status == ExecStatus::CopyOut {
             // C: if CopyDone hadn't been received from the backend yet (copy
@@ -467,20 +455,26 @@ pub fn read_timeline_history_file(
 
 /// libpqrcv_receive: (len > 0, buf) = data; (0, wait socket) = try again;
 /// (-1, _) = end of COPY stream.
+///
+/// SQLSTATEs follow libpqwalreceiver.c: only a failed PQconsumeInput (:850)
+/// is ERRCODE_CONNECTION_FAILURE; a COPY ended by anything but
+/// CommandComplete/CopyIn (:905) and a PQgetCopyData error (:912) are
+/// ERRCODE_PROTOCOL_VIOLATION. get_copy_data's Err is libpq's rawlen == -1
+/// with an error result (the server's ErrorResponse) or rawlen == -2.
 pub fn receive(conn: &mut PgConn) -> PgResult<(i32, Vec<u8>, pgsocket)> {
     let first = match conn.get_copy_data() {
         Ok(d) => d,
-        Err(e) => return receive_stream_error(&e),
+        Err(e) => return receive_stream_error(ERRCODE_PROTOCOL_VIOLATION, &e),
     };
     let data = match first {
         CopyData::Block => {
             if !conn.consume_input() {
-                return receive_stream_error(&conn.error_message());
+                return receive_stream_error(ERRCODE_CONNECTION_FAILURE, &conn.error_message());
             }
             match conn.get_copy_data() {
                 Ok(CopyData::Block) => return Ok((0, Vec::new(), conn.socket())),
                 Ok(d) => d,
-                Err(e) => return receive_stream_error(&e),
+                Err(e) => return receive_stream_error(ERRCODE_PROTOCOL_VIOLATION, &e),
             }
         }
         d => d,
@@ -506,17 +500,20 @@ pub fn receive(conn: &mut PgConn) -> PgResult<(i32, Vec<u8>, pgsocket)> {
                     Ok((-1, Vec::new(), PGINVALID_SOCKET))
                 }
                 Some(r) if r.status == ExecStatus::CopyIn => Ok((-1, Vec::new(), PGINVALID_SOCKET)),
-                _ => receive_stream_error(&conn.error_message()),
+                _ => receive_stream_error(ERRCODE_PROTOCOL_VIOLATION, &conn.error_message()),
             }
         }
         CopyData::Block => unreachable!(),
     }
 }
 
-fn receive_stream_error(err: &str) -> PgResult<(i32, Vec<u8>, pgsocket)> {
+fn receive_stream_error(
+    sqlstate: types_error::SqlState,
+    err: &str,
+) -> PgResult<(i32, Vec<u8>, pgsocket)> {
     throw(
         ereport(ERROR)
-            .errcode(ERRCODE_CONNECTION_FAILURE)
+            .errcode(sqlstate)
             .errmsg(format!("could not receive data from WAL stream: {}", pchomp(err)))
             .finish(loc("libpqrcv_receive")),
     )
@@ -613,7 +610,9 @@ mod tests {
         m
     }
 
-    fn tuples(fields: &[&str], rows: &[&[&str]]) -> Vec<u8> {
+    // RowDescription + DataRows + CommandComplete, no ReadyForQuery (the
+    // end-of-streaming result set precedes the COPY's own CommandComplete).
+    fn tuples_no_ready(fields: &[&str], rows: &[&[&str]]) -> Vec<u8> {
         let mut desc = (fields.len() as i16).to_be_bytes().to_vec();
         for f in fields {
             desc.extend_from_slice(f.as_bytes());
@@ -635,10 +634,34 @@ mod tests {
             out.extend_from_slice(&wire(b'D', &body));
         }
         out.extend_from_slice(&wire(b'C', format!("SELECT {}\0", rows.len()).as_bytes()));
+        out
+    }
+
+    fn tuples(fields: &[&str], rows: &[&[&str]]) -> Vec<u8> {
+        let mut out = tuples_no_ready(fields, rows);
         out.extend_from_slice(&wire(b'Z', b"I"));
         out
     }
 
+    // ErrorResponse (severity ERROR) with the given SQLSTATE and message.
+    fn error_response(sqlstate: &str, message: &str) -> Vec<u8> {
+        let mut body = Vec::new();
+        for (code, val) in [(b'S', "ERROR"), (b'V', "ERROR"), (b'C', sqlstate), (b'M', message)] {
+            body.push(code);
+            body.extend_from_slice(val.as_bytes());
+            body.push(0);
+        }
+        body.push(0);
+        wire(b'E', &body)
+    }
+
+    // CopyBothResponse: text format, no columns.
+    fn copy_both() -> Vec<u8> {
+        wire(b'W', &[0, 0, 0])
+    }
+
+    // Each reply answers the next client frame: a Query ('Q', recorded) or
+    // the CopyDone ('c') libpqrcv_endstreaming sends.
     fn scripted_server(replies: Vec<Vec<u8>>) -> (u16, std::thread::JoinHandle<Vec<String>>) {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -658,11 +681,13 @@ mod tests {
                 if s.read_exact(&mut t).is_err() {
                     break;
                 }
-                assert_eq!(t[0], b'Q');
+                assert!(t[0] == b'Q' || t[0] == b'c', "unexpected client frame {}", t[0] as char);
                 s.read_exact(&mut len).unwrap();
                 let mut q = vec![0u8; u32::from_be_bytes(len) as usize - 4];
                 s.read_exact(&mut q).unwrap();
-                queries.push(String::from_utf8_lossy(&q[..q.len() - 1]).into_owned());
+                if t[0] == b'Q' {
+                    queries.push(String::from_utf8_lossy(&q[..q.len() - 1]).into_owned());
+                }
                 s.write_all(&reply).unwrap();
             }
             queries
@@ -814,6 +839,119 @@ mod tests {
         assert_eq!(err.message(), "could not parse WAL location \"nope\"");
         drop(conn);
         server.join().unwrap();
+    }
+
+    // libpqrcv_identify_system (libpqwalreceiver.c:460) parses the timeline
+    // with pg_strtoint32: a non-integer column is numutils' own 22P02
+    // "invalid input syntax for type integer", not a protocol violation
+    // (audit-18.6 b064 row 4d5ef930).
+    #[test]
+    fn identify_system_rejects_a_non_integer_timeline_like_pg_strtoint32() {
+        let (port, server) = scripted_server(vec![tuples(
+            &["systemid", "timeline", "xlogpos", "dbname"],
+            &[&["1", "abc", "0/1", ""]],
+        )]);
+        let mut conn = connect_scripted(port);
+        let err = identify_system(&mut conn).unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_TEXT_REPRESENTATION);
+        assert_eq!(err.message(), "invalid input syntax for type integer: \"abc\"");
+        drop(conn);
+        server.join().unwrap();
+    }
+
+    // libpqrcv_endstreaming (libpqwalreceiver.c:718): the next timeline is
+    // pg_strtoint32(PQgetvalue(res, 0, 0)) — garbage ereports 22P02 instead
+    // of silently reading as "no timeline reported" (0)
+    // (audit-18.6 b064 row d4ddc322).
+    fn end_of_streaming_reply(next_tli: &str) -> Vec<u8> {
+        // walsender after CopyDone: the result set, then the COPY's own
+        // CommandComplete, then ReadyForQuery.
+        let mut reply = wire(b'c', &[]);
+        reply.extend_from_slice(&tuples_no_ready(
+            &["next_tli", "next_tli_startpos"],
+            &[&[next_tli, "0/3000000"]],
+        ));
+        reply.extend_from_slice(&wire(b'C', b"START_STREAMING\0"));
+        reply.extend_from_slice(&wire(b'Z', b"I"));
+        reply
+    }
+
+    #[test]
+    fn end_streaming_reads_the_next_timeline() {
+        let (port, server) = scripted_server(vec![copy_both(), end_of_streaming_reply("7")]);
+        let mut conn = connect_scripted(port);
+        assert!(start_streaming(&mut conn, None, 0x3000000, 1).unwrap());
+        assert_eq!(end_streaming(&mut conn).unwrap(), 7);
+        drop(conn);
+        assert_eq!(server.join().unwrap(), vec!["START_REPLICATION 0/3000000 TIMELINE 1"]);
+    }
+
+    #[test]
+    fn end_streaming_rejects_a_non_integer_next_timeline_like_pg_strtoint32() {
+        let (port, server) = scripted_server(vec![copy_both(), end_of_streaming_reply("abc")]);
+        let mut conn = connect_scripted(port);
+        assert!(start_streaming(&mut conn, None, 0x3000000, 1).unwrap());
+        let err = end_streaming(&mut conn).unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_TEXT_REPRESENTATION);
+        assert_eq!(err.message(), "invalid input syntax for type integer: \"abc\"");
+        drop(conn);
+        server.join().unwrap();
+    }
+
+    // libpqrcv_receive (libpqwalreceiver.c:905-914): a COPY that ends in
+    // anything but CommandComplete/CopyIn — here the walsender's ERROR mid
+    // stream, libpq's rawlen == -1 with a PGRES_FATAL_ERROR result — is
+    // ERRCODE_PROTOCOL_VIOLATION; 08006 is reserved for PQconsumeInput
+    // failing (:850) (audit-18.6 b064 row cf0e96eb).
+    #[test]
+    fn receive_reports_a_mid_stream_error_as_protocol_violation() {
+        let mut reply = copy_both();
+        reply.extend_from_slice(&error_response(
+            "58P01",
+            "requested WAL segment 000000010000000000000003 has already been removed",
+        ));
+        reply.extend_from_slice(&wire(b'Z', b"I"));
+        let (port, server) = scripted_server(vec![reply]);
+        let mut conn = connect_scripted(port);
+        assert!(start_streaming(&mut conn, None, 0x3000000, 1).unwrap());
+        let err = receive(&mut conn).unwrap_err();
+        assert_eq!(err.sqlstate(), ERRCODE_PROTOCOL_VIOLATION);
+        assert_eq!(
+            err.message(),
+            "could not receive data from WAL stream: ERROR:  requested WAL segment 000000010000000000000003 has already been removed"
+        );
+        drop(conn);
+        server.join().unwrap();
+    }
+
+    // libpqrcv_connect (libpqwalreceiver.c:262): a failed
+    // ALWAYS_SECURE_SEARCH_PATH_SQL is "could not clear search path: %s" —
+    // no quotes around the GUC name (audit-18.6 b064 row a5522518).
+    #[test]
+    fn clear_search_path_failure_uses_the_c_message() {
+        let mut reply = error_response("42501", "permission denied to set parameter");
+        reply.extend_from_slice(&wire(b'Z', b"I"));
+        let (port, server) = scripted_server(vec![reply]);
+        client_env();
+        let r = connect_extended(
+            &format!("host=127.0.0.1 port={port} user=walrcv"),
+            false,
+            false,
+            false,
+            "t",
+        );
+        match r {
+            Ok(Err(msg)) => assert_eq!(
+                msg,
+                "could not clear search path: ERROR:  permission denied to set parameter"
+            ),
+            Ok(Ok(_)) => panic!("connection must fail when search_path cannot be cleared"),
+            Err(e) => panic!("unexpected ereport: {e}"),
+        }
+        assert_eq!(
+            server.join().unwrap(),
+            vec!["SELECT pg_catalog.set_config('search_path', '', false);"]
+        );
     }
 
     // sscanf("%X/%X") acceptance: leading blanks and 0x prefixes per
