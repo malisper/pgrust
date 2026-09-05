@@ -4648,6 +4648,7 @@ fn eval_plan_qual_recheck_over_seqscan() {
             plan: pstmt.planTree,
             recheck: None,
             result_rti: 1,
+            epq_param: -1,
         };
         let mut subs = None;
         ::executils::ensure_epq_subs(&mut subs, estate.es_query_cxt, estate.epq_rtsize(), 1);
@@ -5266,6 +5267,7 @@ mod epq_seams_w5 {
                 plan: pstmt.planTree,
                 recheck: None,
                 result_rti: 1,
+                epq_param: -1,
             };
             let mut subs = None;
             ::executils::ensure_epq_subs(&mut subs, estate.es_query_cxt, estate.epq_rtsize(), 1);
@@ -5360,6 +5362,7 @@ mod epq_seams_w5 {
                 plan: pstmt.planTree,
                 recheck: None,
                 result_rti: 1,
+                epq_param: -1,
             };
             let mut subs = None;
             ::executils::ensure_epq_subs(&mut subs, estate.es_query_cxt, estate.epq_rtsize(), 1);
@@ -5948,4 +5951,200 @@ fn executor_run_arms_capture_sidecar_from_receiver() {
     for h in [store, sidecar, store2, bystander] {
         ::tuplestore::hold::end(h);
     }
+}
+
+// ---------------------------------------------------------------------------
+// audit-18.6 remediation b018 (backend/executor/execmain) unit witnesses.
+// Each fails on the unfixed tree for the C-cited reason and passes after.
+
+// EvalPlanQualStart (execMain.c:3003) admits any plan tree; a BitmapHeapScan
+// combining two index quals carries BitmapAnd/BitmapOr children (in
+// bitmapplans, not lefttree). check_epq_plan panicked on T_BitmapAnd.
+#[test]
+fn check_epq_plan_admits_bitmap_and_or() {
+    use ::types_nodes::plannodes::{
+        BitmapAnd, BitmapHeapScan, BitmapIndexScan, BitmapOr, Plan, Scan,
+    };
+
+    let mcx = leaked_mcx();
+    let mk_bis = || {
+        Node::mk(
+            mcx,
+            BitmapIndexScan {
+                scan: Scan {
+                    plan: Plan::default(),
+                    scanrelid: 1,
+                },
+                indexid: 0,
+                isshared: false,
+                indexqual: NodeList::nil(),
+                indexqualorig: NodeList::nil(),
+            },
+        )
+        .unwrap()
+    };
+    let bor = Node::mk(
+        mcx,
+        BitmapOr {
+            plan: Plan::default(),
+            isshared: false,
+            bitmapplans: NodeList::make2(mcx, mk_bis(), mk_bis()).unwrap(),
+        },
+    )
+    .unwrap();
+    let band = Node::mk(
+        mcx,
+        BitmapAnd {
+            plan: Plan::default(),
+            bitmapplans: NodeList::make2(mcx, mk_bis(), bor).unwrap(),
+        },
+    )
+    .unwrap();
+    let bhs = Node::mk(
+        mcx,
+        BitmapHeapScan {
+            scan: Scan {
+                plan: Plan {
+                    lefttree: Some(band),
+                    ..Default::default()
+                },
+                scanrelid: 1,
+            },
+            bitmapqualorig: NodeList::nil(),
+        },
+    )
+    .unwrap();
+    // Unfixed: panics "EvalPlanQualStart (execMain.c): T_BitmapAnd recheck
+    // plan ... not exercised".
+    crate::epq::check_epq_plan(bhs);
+}
+
+// ExecInitNestLoop (nodeNestloop.c:298-301): with nestParams the inner child
+// is initialized with EXEC_FLAG_REWIND CLEARED even when the parent passed
+// it down ("there is no point in REWIND support at all in the inner child").
+// A Sort inner reads that flag as randomAccess (ExecInitSort).
+#[test]
+fn nestloop_params_clear_rewind_for_inner() {
+    use ::types_nodes::list::OidList;
+    use ::types_nodes::plannodes::{Join, NestLoop, NestLoopParam, Plan, Sort};
+    use ::types_nodes::primnodes::OUTER_VAR;
+    use ::types_slot::EXEC_FLAG_REWIND;
+
+    install_seams();
+    let mcx = leaked_mcx();
+    let select1 = || {
+        let tle = Node::mk_target_entry(mcx, mk_int4_const(mcx, 1), 1, Some("?column?"), false)
+            .unwrap();
+        let mut result = Node::build::<ResultPlan>(mcx).unwrap();
+        result.plan.targetlist = NodeList::make1(mcx, tle).unwrap();
+        result.seal()
+    };
+    let outer_tle = || {
+        let v = Node::mk_var(mcx, OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap();
+        NodeList::make1(
+            mcx,
+            Node::mk_target_entry(mcx, v, 1, Some("?column?"), false).unwrap(),
+        )
+        .unwrap()
+    };
+    let mut sort = Node::build::<Sort>(mcx).unwrap();
+    sort.plan.targetlist = outer_tle();
+    sort.plan.lefttree = Some(select1());
+    sort.numCols = 1;
+    sort.sortColIdx = ::mcx::slice_borrow_in(mcx, &[1i16]).unwrap();
+    sort.sortOperators = ::mcx::slice_borrow_in(mcx, &[INT4_LT]).unwrap();
+    sort.collations = ::mcx::slice_borrow_in(mcx, &[0u32]).unwrap();
+    sort.nullsFirst = ::mcx::slice_borrow_in(mcx, &[false]).unwrap();
+    let inner = sort.seal();
+
+    let nlp = Node::mk(
+        mcx,
+        NestLoopParam {
+            paramno: 0,
+            paramval: Node::mk_var(mcx, OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap(),
+        },
+    )
+    .unwrap();
+    let mut nl = Node::build::<NestLoop>(mcx).unwrap();
+    nl.join = Join {
+        plan: Plan {
+            targetlist: outer_tle(),
+            lefttree: Some(select1()),
+            righttree: Some(inner),
+            ..Default::default()
+        },
+        jointype: ::types_nodes::JoinType::JOIN_INNER,
+        inner_unique: false,
+        joinqual: NodeList::nil(),
+    };
+    nl.nestParams = NodeList::make1(mcx, nlp).unwrap();
+
+    let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
+    pstmt.commandType = CmdType::CMD_SELECT;
+    pstmt.canSetTag = true;
+    pstmt.planTree = Some(nl.seal());
+    pstmt.paramExecTypes = OidList::make1(mcx, INT4OID).unwrap();
+    let pstmt = pstmt.seal_ref();
+
+    with_exec_data(pstmt, |data, pstmt| {
+        let ps = exec_init_node(pstmt.planTree, &mut data.estate, EXEC_FLAG_REWIND)
+            .unwrap()
+            .unwrap();
+        let crate::procnode::PlanStateNode::NestLoop(nl) = &ps else {
+            panic!("expected a NestLoop planstate");
+        };
+        let crate::procnode::PlanStateNode::Sort(s) = &*nl.inner else {
+            panic!("expected a Sort inner planstate");
+        };
+        // Unfixed: the parent's REWIND leaked through and the Sort became
+        // randomAccess.
+        assert!(
+            !s.state.randomAccess,
+            "parameterized NestLoop must clear EXEC_FLAG_REWIND for its inner child"
+        );
+    });
+}
+
+// ExecParallelRetrieveInstrumentation (execParallel.c:1035) rides
+// planstate_tree_walker, which descends into SubqueryScanState.subplan: the
+// plan-node-id set that keys worker_instrument must include the subquery's
+// nodes, or EXPLAIN ANALYZE loses every "Worker N:" line under a
+// SubqueryScan beneath a Gather.
+#[test]
+fn collect_plan_node_ids_descends_into_subquery_scan() {
+    use ::types_nodes::plannodes::{Plan, Scan, SeqScan, SubqueryScan};
+
+    let mcx = leaked_mcx();
+    let sub = Node::mk(
+        mcx,
+        SeqScan {
+            scan: Scan {
+                plan: Plan {
+                    plan_node_id: 2,
+                    ..Default::default()
+                },
+                scanrelid: 1,
+            },
+            cb_scan_cols: None,
+        },
+    )
+    .unwrap();
+    let sqs = Node::mk(
+        mcx,
+        SubqueryScan {
+            scan: Scan {
+                plan: Plan {
+                    plan_node_id: 1,
+                    ..Default::default()
+                },
+                scanrelid: 2,
+            },
+            subplan: Some(sub),
+            scanstatus: 0,
+        },
+    )
+    .unwrap();
+    let mut ids = Vec::new();
+    crate::execparallel::collect_plan_node_ids(Some(sqs), &mut ids);
+    assert_eq!(ids, vec![1, 2], "subquery nodes missing from the worker-instrument id set");
 }

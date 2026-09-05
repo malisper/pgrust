@@ -33,9 +33,14 @@ pub fn plan_implicit_scroll_ok(node: Option<Node<'_>>) -> bool {
             Some(outer) => plan_implicit_scroll_ok(Some(outer)),
             None => false,
         },
-        // amcanbackward: the only live index AM is btree (plancat.c port
-        // loud-panics on any other relam before a plan can carry it).
-        NodeTag::T_IndexScan | NodeTag::T_IndexOnlyScan => true,
+        // C: IndexSupportsBackwardScan(indexid) — the index AM's
+        // amcanbackward (btree/hash yes; gist/spgist/gin/brin/bloom/hnsw no).
+        NodeTag::T_IndexScan => {
+            index_supports_backward_scan(node.as_index_scan().expect("T_IndexScan").indexid)
+        }
+        NodeTag::T_IndexOnlyScan => index_supports_backward_scan(
+            node.as_index_only_scan().expect("T_IndexOnlyScan").indexid,
+        ),
         NodeTag::T_SeqScan
         | NodeTag::T_TidScan
         | NodeTag::T_TidRangeScan
@@ -57,6 +62,27 @@ pub fn plan_implicit_scroll_ok(node: Option<Node<'_>>) -> bool {
         }
         NodeTag::T_LockRows | NodeTag::T_Limit => plan_implicit_scroll_ok(plan.lefttree),
         _ => false,
+    }
+}
+
+/// `IndexSupportsBackwardScan` (execAmi.c:603): does the index's AM support
+/// backward scanning? C reads pg_class.relam through the syscache and asks
+/// the AM routine for `amcanbackward`; the closed AM set answers statically:
+/// only btree and hash (nbtree.c bthandler / hash.c hashhandler set it) —
+/// every other in-tree AM (gist, spgist, gin, brin) and extension AM (bloom,
+/// hnsw) leaves it false. So an undeclared cursor over a GiST index scan is
+/// NO SCROLL: FETCH BACKWARD raises "cursor can only scan forward" (55000).
+fn index_supports_backward_scan(indexid: ::types_core::Oid) -> bool {
+    // Seamless unit-fixture worlds (no syscache installed) carry no relam to
+    // consult; they keep the btree answer the fixtures were written against.
+    if !::syscache_seams::lookup_pg_class_ls_shape::is_installed() {
+        return true;
+    }
+    match ::lsyscache::get_rel_relam(indexid) {
+        Ok(relam) => matches!(relam, ::types_core::BTREE_AM_OID | ::types_core::HASH_AM_OID),
+        // C: elog(ERROR, "cache lookup failed for relation %u") — a planned
+        // index always exists; answer NO SCROLL rather than widen the policy.
+        Err(_) => false,
     }
 }
 

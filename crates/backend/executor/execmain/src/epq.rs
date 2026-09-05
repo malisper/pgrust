@@ -25,6 +25,11 @@ pub struct EpqState<'mcx> {
     pub plan: Option<Node<'mcx>>,
     pub recheck: Option<PlanStateNode<'mcx>>,
     pub result_rti: u32,
+    /// C `EPQState.epqParam` (EvalPlanQualInit): the PARAM_EXEC slot the
+    /// planner forced onto every scan node below the owner (finalize_plan's
+    /// scan_params, subselect.c), so a recheck rescan can be driven through
+    /// chgParam. `-1` = no planner-assigned param (unit fixtures only).
+    pub epq_param: i32,
 }
 
 /// `EvalPlanQual`: `Some` = new candidate tuple, `None` = skip the row.
@@ -159,6 +164,21 @@ pub(crate) fn eval_plan_qual_begin<'mcx>(
         for i in 0..subs.relsubs_done.len() {
             subs.relsubs_done[i] = subs.relsubs_blocked[i];
         }
+        // C EvalPlanQualBegin (execMain.c:2977): "Mark child plan tree as
+        // needing rescan at all scan nodes" — rcplanstate->chgParam gets
+        // epqParam, which finalize_plan forced into every scan node's
+        // params below the owner, so the deferred ExecReScan reaches every
+        // node whose params changed: Material/Sort/Hash/Memoize/Agg drop
+        // what they cached from the PREVIOUS recheck instead of replaying
+        // it. A plain (chgParam-less) rescan replays a Material's tuplestore
+        // from the last recheck, so the second row's recheck joined against
+        // the first row's test tuple and silently dropped the row.
+        if epq.epq_param >= 0 {
+            let mcx = estate.es_query_cxt;
+            let chg = ::types_nodes::bitmapset::Bitmapset::make_singleton(mcx, epq.epq_param)?;
+            let plan = epq.plan.expect("EPQ owner has a subplan");
+            return crate::execami::exec_re_scan_chg_forced(recheck, plan, estate, &chg);
+        }
         return crate::execami::exec_re_scan(recheck, estate);
     }
     eval_plan_qual_start(epq, estate)
@@ -227,6 +247,14 @@ pub(crate) fn eval_plan_qual_start<'mcx>(
 //   * MergeAppend admission forced a walker honesty extension: recurse
 //     into mergeplans (same class as the Append/SubqueryScan arms —
 //     without it the tag walk would silently admit any shape underneath).
+//   * BitmapAnd / BitmapOr (audit-18.6 remediation b018, 2026-09-04): a
+//     BitmapHeapScan combining two index quals (UPDATE t ... WHERE a = ?
+//     AND b = ?, enable_indexscan off) panicked here the moment a
+//     concurrent committed update fired the recheck; C's
+//     EvalPlanQualStart has no node-type restriction and
+//     ExecReScanBitmapAnd/Or rescan their bitmapplans. Both rescan arms
+//     were already wired in execami; the walker recurses into bitmapplans
+//     (same honesty class as Append/MergeAppend).
 // Whitelist-completion wave (fix/epq-whitelist-completion, 2026-08-05 —
 // lane-epq.md §9's close-out): the 11 tags PR #145 left refused were
 // adjudicated by SQL-reachability (live EXPLAIN + two-session probes on a
@@ -297,6 +325,8 @@ pub(crate) fn check_epq_plan(plan: Node<'_>) {
             | NodeTag::T_IndexOnlyScan
             | NodeTag::T_BitmapHeapScan
             | NodeTag::T_BitmapIndexScan
+            | NodeTag::T_BitmapAnd
+            | NodeTag::T_BitmapOr
             | NodeTag::T_NestLoop
             | NodeTag::T_MergeJoin
             | NodeTag::T_HashJoin
@@ -341,6 +371,19 @@ pub(crate) fn check_epq_plan(plan: Node<'_>) {
     }
     if let Some(ma) = plan.as_merge_append() {
         for child in ma.mergeplans.iter() {
+            check_epq_plan(child);
+        }
+    }
+    // BitmapAnd/BitmapOr carry their inputs in bitmapplans, not lefttree
+    // (nodeBitmapAnd.c/nodeBitmapOr.c); both rescan arms are wired in
+    // execami (plain + chg dispatch).
+    if let Some(ba) = plan.as_bitmap_and() {
+        for child in ba.bitmapplans.iter() {
+            check_epq_plan(child);
+        }
+    }
+    if let Some(bo) = plan.as_bitmap_or() {
+        for child in bo.bitmapplans.iter() {
             check_epq_plan(child);
         }
     }
@@ -432,4 +475,4 @@ pub fn eval_plan_qual_end<'mcx>(
     Ok(())
 }
 
-::mcx::forget_safe_struct!(EpqState<'_> { plan, recheck, result_rti });
+::mcx::forget_safe_struct!(EpqState<'_> { plan, recheck, result_rti, epq_param });

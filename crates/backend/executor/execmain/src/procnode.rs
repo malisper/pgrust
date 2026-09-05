@@ -1065,6 +1065,7 @@ pub fn exec_init_node<'mcx>(
                         plan: lr_plan.plan.lefttree,
                         recheck: None,
                         result_rti: state.lr_arowMarks.first().map_or(0, |a| a.rti),
+                        epq_param: lr_plan.epqParam,
                     };
                     PlanStateNode::LockRows(::mcx::alloc_in(
                         estate.es_query_cxt,
@@ -1145,11 +1146,15 @@ pub fn exec_init_node<'mcx>(
                             )
                         });
                     // With no nestParams the inner rescans with unchanged params, so
-                    // request cheap rescans (C's EXEC_FLAG_REWIND arm).
+                    // request cheap rescans; with nestParams there is no point in
+                    // REWIND support at all in the inner child, because it will
+                    // always be rescanned with fresh parameter values — so C also
+                    // CLEARS a REWIND the parent passed down (ExecInitNestLoop,
+                    // nodeNestloop.c:298-301).
                     let inner_eflags = if nl_plan.nestParams.is_nil() {
                         eflags | ::types_slot::EXEC_FLAG_REWIND
                     } else {
-                        eflags
+                        eflags & !::types_slot::EXEC_FLAG_REWIND
                     };
                     let inner = exec_init_node(nl_plan.join.plan.righttree, estate, inner_eflags)?
                         .unwrap_or_else(|| {
@@ -1629,6 +1634,7 @@ pub fn exec_init_node<'mcx>(
                         recheck: None,
                         // Set per-row by the dispatch closure (multi-resultrel).
                         result_rti: 0,
+                        epq_param: mt_plan.epqParam,
                     };
                     PlanStateNode::ModifyTable(::mcx::alloc_in(
                         mcx,
@@ -3702,7 +3708,24 @@ pub fn exec_shutdown_node<'mcx>(
     // C execProcnode.c:783 (ExecShutdownNode_walker).
     stack_depth_core::check_stack_depth()?;
     match node {
-        PlanStateNode::Instrumented(w) => exec_shutdown_node(&mut w.inner, estate),
+        // C execProcnode.c:795-810: a node whose instrumentation is running
+        // brackets its subtree shutdown in InstrStartNode/InstrStopNode(0),
+        // so what the shutdown itself accounts for — a Gather's worker
+        // buffer/WAL usage folded into the leader's totals by
+        // ExecParallelFinish — lands in this node's (and every ancestor's)
+        // counters, exactly as EXPLAIN (ANALYZE, BUFFERS/WAL) shows in C.
+        PlanStateNode::Instrumented(w) => {
+            let idx = w.instr_idx as usize;
+            let running = estate.es_instrumentation[idx].running;
+            if running {
+                ::instrument::instr_start_node(&mut estate.es_instrumentation[idx]);
+            }
+            let r = exec_shutdown_node(&mut w.inner, estate);
+            if running {
+                ::instrument::instr_stop_node(&mut estate.es_instrumentation[idx], 0.0);
+            }
+            r
+        }
         PlanStateNode::Result(rs) => {
             if let Some(outer) = rs.outer.as_deref_mut() {
                 exec_shutdown_node(outer, estate)?;

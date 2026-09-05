@@ -100,7 +100,7 @@ pub struct ParallelExecutorInfo {
     subtree_ids: Vec<i32>,
 }
 
-fn collect_plan_node_ids(node: Option<Node<'_>>, out: &mut Vec<i32>) {
+pub(crate) fn collect_plan_node_ids(node: Option<Node<'_>>, out: &mut Vec<i32>) {
     let Some(node) = node else { return };
     let plan = plan_of_node(node);
     out.push(plan.plan_node_id);
@@ -110,6 +110,14 @@ fn collect_plan_node_ids(node: Option<Node<'_>>, out: &mut Vec<i32>) {
         for sub in child.iter() {
             collect_plan_node_ids(Some(sub), out);
         }
+    }
+    // planstate_tree_walker descends into SubqueryScanState.subplan
+    // (execProcnode.c planstate_tree_walker_impl), so ExecParallelRetrieve-
+    // Instrumentation attaches worker_instrument to every node under a
+    // SubqueryScan too; node_child_lists deliberately returns no list for
+    // it (its subplan is a single node), so walk it here.
+    if let Some(sq) = node.as_subquery_scan() {
+        collect_plan_node_ids(sq.subplan, out);
     }
 }
 
@@ -607,10 +615,12 @@ pub fn exec_parallel_finish(pei: &mut ParallelExecutorInfo) -> PgResult<()> {
 
     parallel::WaitForParallelWorkersToFinish(pei.pcxt)?;
 
+    // C execParallel.c:1197 InstrAccumParallelQuery(&pei->buffer_usage[i],
+    // &pei->wal_usage[i]): both halves fold into the leader's totals.
     let launched = parallel::nworkers_launched(pei.pcxt);
     let usage = pei.shared.usage.lock().unwrap_or_else(|e| e.into_inner());
-    for (buf, _wal) in usage.iter().take(launched.max(0) as usize) {
-        ::instrument::instr_accum_parallel_query(buf);
+    for (buf, wal) in usage.iter().take(launched.max(0) as usize) {
+        ::instrument::instr_accum_parallel_query(buf, wal);
     }
     pei.finished = true;
     Ok(())
@@ -769,6 +779,20 @@ pub fn parallel_query_main(shared: &parallel::ParallelShared) -> PgResult<()> {
     )?;
     parallel::gtrace("w.qd.created");
 
+    // C execParallel.c:1456-1459: "Setting debug_query_string for individual
+    // workers" + "Report workers' query for monitoring purposes" — the worker
+    // shows in pg_stat_activity as active on the leader's statement (and its
+    // log lines carry the STATEMENT), instead of a stateless entry.
+    // (Seamless harnesses — this crate's gather_e2e — boot workers without
+    // a backend-status plane; every production process installs it.)
+    let _debug_query = elog::debug_query_string_scope(&exec.query_text);
+    if backend_status_seams::pgstat_report_activity::is_installed() {
+        backend_status_seams::pgstat_report_activity::call(
+            backend_status_seams::BackendState::STATE_RUNNING,
+            Some(&exec.query_text),
+        );
+    }
+
     // Worker-panic containment injection: forced fault on demand, env-gated
     // so the surface is inert in production (crash-restart-design pattern).
     let inject = std::env::var_os("PGRUST_CRASH_TEST")
@@ -872,6 +896,8 @@ pub fn parallel_query_main(shared: &parallel::ParallelShared) -> PgResult<()> {
             })
         })?;
 
+        // C execParallel.c:1517 InstrStartParallelQuery: snapshot buffer
+        // AND WAL usage so the worker reports both deltas.
         let save = ::instrument::instr_start_parallel_query();
 
         let count = if exec.tuples_needed < 0 {
@@ -886,10 +912,7 @@ pub fn parallel_query_main(shared: &parallel::ParallelShared) -> PgResult<()> {
 
         {
             let mut usage = exec.usage.lock().unwrap_or_else(|e| e.into_inner());
-            usage[me as usize] = (
-                ::instrument::instr_end_parallel_query(&save),
-                WalUsage::default(),
-            );
+            usage[me as usize] = ::instrument::instr_end_parallel_query(&save);
         }
 
         if let Some(si) = &exec.instrumentation {

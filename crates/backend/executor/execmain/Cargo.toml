@@ -109,6 +109,8 @@ guc_tables = { path = "../../utils/misc/guc_tables" }
 init_small = { path = "../../utils/init/init_small" }
 postgres_seams = { path = "../../tcop/postgres_seams" }
 backend_status_seams = { path = "../../utils/activity/backend_status_seams" }
+# ParallelQueryMain sets debug_query_string for the worker (execParallel.c:1456).
+elog = { path = "../../utils/error/elog" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 aclchk_seams = { path = "../../catalog/aclchk_seams" }
 datum = { path = "../../../_support/types/datum" }
@@ -170,7 +172,6 @@ bgworker = { path = "../../postmaster/bgworker" }
 shm_mq = { path = "../../storage/ipc/shm_mq" }
 tqueue = { path = "../tqueue" }
 shmem = { path = "../../storage/ipc/shmem" }
-elog = { path = "../../utils/error/elog" }
 guc = { path = "../../utils/misc/guc" }
 adt_bool = { path = "../../utils/adt/bool" }
 adt_float = { path = "../../utils/adt/float" }

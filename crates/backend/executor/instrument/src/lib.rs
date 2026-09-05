@@ -1,4 +1,5 @@
-// instrument.c (the parallel accum path carries WalUsage::default()).
+// instrument.c (the parallel start/end/accum trio carries both halves —
+// buffer AND WAL usage — like C).
 
 use types_core::instrument::{
     instr_time, BufferUsage, Instrumentation, WalUsage, INSTRUMENT_BUFFERS, INSTRUMENT_TIMER,
@@ -65,36 +66,62 @@ const ZERO_USAGE: BufferUsage = BufferUsage {
     temp_blk_write_time: instr_time { ticks: 0 },
 };
 
+const ZERO_WAL_USAGE: WalUsage = WalUsage {
+    wal_records: 0,
+    wal_fpi: 0,
+    wal_bytes: 0,
+    wal_buffers_full: 0,
+};
+
 std::thread_local! {
     static WORKER_CONTRIB: std::cell::Cell<BufferUsage> =
         const { std::cell::Cell::new(ZERO_USAGE) };
+    // The WAL half of InstrAccumParallelQuery: xloginsert's pgWalUsage is
+    // per-thread, so a worker's WAL never reaches the leader's counter by
+    // itself (unlike C's per-process global it is not even shared with the
+    // worker); the leader folds each worker's reported delta in here and
+    // every pgWalUsage read below adds it, mirroring WORKER_CONTRIB.
+    static WORKER_WAL_CONTRIB: std::cell::Cell<WalUsage> =
+        const { std::cell::Cell::new(ZERO_WAL_USAGE) };
 }
 
-/// `InstrStartParallelQuery` (worker side): snapshot the running totals.
-pub fn instr_start_parallel_query() -> BufferUsage {
-    pg_buffer_usage()
+/// `InstrStartParallelQuery` (worker side): snapshot the running totals
+/// (`pgBufferUsage` and `pgWalUsage`, instrument.c:208-212).
+pub fn instr_start_parallel_query() -> (BufferUsage, WalUsage) {
+    (pg_buffer_usage(), pg_wal_usage())
 }
 
-/// `InstrEndParallelQuery` (worker side): this run's usage.
-pub fn instr_end_parallel_query(save: &BufferUsage) -> BufferUsage {
-    let mut out = BufferUsage::default();
-    buffer_usage_accum_diff(&mut out, &pg_buffer_usage(), save);
-    out
+/// `InstrEndParallelQuery` (worker side): this run's usage
+/// (instrument.c:216-224 — BufferUsageAccumDiff + WalUsageAccumDiff).
+pub fn instr_end_parallel_query(save: &(BufferUsage, WalUsage)) -> (BufferUsage, WalUsage) {
+    let mut buf = BufferUsage::default();
+    buffer_usage_accum_diff(&mut buf, &pg_buffer_usage(), &save.0);
+    let mut wal = WalUsage::default();
+    wal_usage_accum_diff(&mut wal, &pg_wal_usage(), &save.1);
+    (buf, wal)
 }
 
-/// `InstrAccumParallelQuery` (leader side): fold one worker's usage into the
-/// leader's totals.
-pub fn instr_accum_parallel_query(bufusage: &BufferUsage) {
+/// `InstrAccumParallelQuery` (leader side, instrument.c:228-233): fold one
+/// worker's buffer AND WAL usage into the leader's totals.
+pub fn instr_accum_parallel_query(bufusage: &BufferUsage, walusage: &WalUsage) {
     WORKER_CONTRIB.with(|c| {
         let mut cur = c.get();
         buffer_usage_add(&mut cur, bufusage);
         c.set(cur);
     });
+    WORKER_WAL_CONTRIB.with(|c| {
+        let mut cur = c.get();
+        wal_usage_add(&mut cur, walusage);
+        c.set(cur);
+    });
 }
 
-/// `pgWalUsage` read (instrument.h global; owned by xloginsert).
+/// `pgWalUsage` read (instrument.h global; owned by xloginsert), plus the
+/// parallel workers' contributions folded in by InstrAccumParallelQuery.
 pub fn pg_wal_usage() -> WalUsage {
-    transam_xlog_seams::wal_usage::call()
+    let mut u = transam_xlog_seams::wal_usage::call();
+    WORKER_WAL_CONTRIB.with(|c| wal_usage_add(&mut u, &c.get()));
+    u
 }
 
 /// `InstrInit`.
@@ -117,7 +144,7 @@ pub fn instr_start_node(instr: &mut Instrumentation) {
         instr.bufusage_start = pg_buffer_usage();
     }
     if instr.need_walusage {
-        instr.walusage_start = transam_xlog_seams::wal_usage::call();
+        instr.walusage_start = pg_wal_usage();
     }
 }
 
@@ -141,7 +168,7 @@ pub fn instr_stop_node(instr: &mut Instrumentation, n_tuples: f64) {
     }
 
     if instr.need_walusage {
-        let current = transam_xlog_seams::wal_usage::call();
+        let current = pg_wal_usage();
         wal_usage_accum_diff(&mut instr.walusage, &current, &instr.walusage_start);
     }
 

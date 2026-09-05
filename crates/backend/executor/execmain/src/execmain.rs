@@ -319,7 +319,8 @@ pub(crate) fn executor_finish_and_park_seam(h: QueryDescHandle) -> PgResult<bool
         if fire_triggers {
             ::trigger::AfterTriggerEndQuery()?;
         }
-        Ok(())
+        // totaltime spans the after-trigger firing (see executor_finish_seam).
+        querydesc::with_qd(h, executor_finish_stop_totaltime)
     })();
     tap_executor_finish_leave::call_if(|f| f(h));
     r?;
@@ -507,15 +508,18 @@ pub(crate) fn executor_finish_seam(h: QueryDescHandle) -> PgResult<()> {
     tap_executor_finish::call_if(|f| f(h));
     // The registry borrow must drop before the after-trigger firing loop:
     // RI checks re-enter the executor through SPI (fresh QueryDesc entries).
-    // C divergence: C runs AfterTriggerEndQuery inside the totaltime
-    // Instr window (standard_ExecutorFinish); here it falls outside, so a
-    // consumer's per-statement time/bufusage exclude after-trigger work.
+    // C standard_ExecutorFinish (execMain.c:443-459) brackets BOTH
+    // ExecPostprocessPlan and AfterTriggerEndQuery in the totaltime
+    // InstrStartNode/InstrStopNode window, so EXPLAIN ANALYZE's Execution
+    // Time and pg_stat_statements' total_exec_time/bufusage include the
+    // after-trigger work (FK checks, deferred triggers); the stop therefore
+    // runs after the firing loop, under a fresh registry borrow.
     let r = (|| -> PgResult<()> {
         let fire_triggers = querydesc::with_qd(h, standard_executor_finish)?;
         if fire_triggers {
             ::trigger::AfterTriggerEndQuery()?;
         }
-        Ok(())
+        querydesc::with_qd(h, executor_finish_stop_totaltime)
     })();
     tap_executor_finish_leave::call_if(|f| f(h));
     r
@@ -1553,10 +1557,14 @@ fn exit_parallel_mode_outlined() {
     xact::ExitParallelMode();
 }
 
-/// `standard_ExecutorFinish` (execMain.c).
+/// `standard_ExecutorFinish` (execMain.c), first half: InstrStartNode +
+/// ExecPostprocessPlan. Returns whether AfterTriggerEndQuery must fire.
 // C fires AfterTriggerEndQuery before setting es_finished; the caller fires
 // it after this returns (registry-borrow discipline) — es_finished has no
-// reader during the firing loop.
+// reader during the firing loop — and then closes the totaltime window with
+// `executor_finish_stop_totaltime`, so the window spans the firing like C's
+// (execMain.c:443-459: InstrStartNode; ExecPostprocessPlan;
+// AfterTriggerEndQuery; InstrStopNode).
 pub fn standard_executor_finish(qd: &mut QueryDescData) -> PgResult<bool> {
     if let Some(t) = qd.totaltime.as_deref_mut() {
         ::instrument::instr_start_node(t);
@@ -1573,10 +1581,16 @@ pub fn standard_executor_finish(qd: &mut QueryDescData) -> PgResult<bool> {
         es.es_finished = true;
         Ok::<bool, Box<types_error::PgError>>(es.es_top_eflags & EXEC_FLAG_SKIP_TRIGGERS == 0)
     })?;
+    Ok(fire)
+}
+
+/// `standard_ExecutorFinish` (execMain.c:458), second half: the totaltime
+/// InstrStopNode after the after-trigger firing loop.
+pub fn executor_finish_stop_totaltime(qd: &mut QueryDescData) -> PgResult<()> {
     if let Some(t) = qd.totaltime.as_deref_mut() {
         ::instrument::instr_stop_node(t, 0.0);
     }
-    Ok(fire)
+    Ok(())
 }
 
 // ExecPostprocessPlan (execMain.c): run wCTE ModifyTable subplans to
