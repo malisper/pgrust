@@ -47,22 +47,15 @@ fn inline_srf_body<'a, 'mcx>(
             return Ok(None);
         }
         let q = qs.into_iter().next().expect("length checked");
-        if q.commandType == CmdType::CMD_UTILITY {
-            query_list = mcx::vec_with_capacity_in(mcx, 1)?;
-            query_list.push(q);
-        } else {
+        if q.commandType != CmdType::CMD_UTILITY {
             rewrite_handler_seams::acquire_rewrite_locks::call(mcx, &q, true, false)?;
-            query_list = rewrite_handler_seams::query_rewrite::call(mcx, q)?;
         }
+        query_list = crate::cache::pg_rewrite_query(mcx, q)?;
         if query_list.len() != 1 {
             return Ok(None);
         }
     } else {
-        let raw_list = parser_seams::raw_parser::call(
-            mcx,
-            row.prosrc.as_str(),
-            parser_seams::RawParseMode::RAW_PARSE_DEFAULT,
-        )?;
+        let raw_list = crate::cache::pg_parse_query(mcx, row.prosrc.as_str())?;
         if raw_list.len() != 1 {
             return Ok(None);
         }
@@ -73,6 +66,9 @@ fn inline_srf_body<'a, 'mcx>(
         for n in row.argnames.iter() {
             name_refs.push(n.as_str());
         }
+        // C pg_analyze_and_rewrite_withcb: unlike inline_function, rewriting
+        // cannot be skipped here.
+        crate::cache::usage_reset();
         let query = analyze_seams::parse_analyze_sql_fn::call(
             mcx,
             &raw_list[0],
@@ -83,14 +79,8 @@ fn inline_srf_body<'a, 'mcx>(
             fexpr.inputcollid,
             QueryEnvHandle::NULL,
         )?;
-        // C pg_analyze_and_rewrite_withcb: unlike inline_function, rewriting
-        // cannot be skipped here.
-        if query.commandType == CmdType::CMD_UTILITY {
-            query_list = mcx::vec_with_capacity_in(mcx, 1)?;
-            query_list.push(query);
-        } else {
-            query_list = rewrite_handler_seams::query_rewrite::call(mcx, query)?;
-        }
+        crate::cache::usage_show("PARSE ANALYSIS STATISTICS")?;
+        query_list = crate::cache::pg_rewrite_query(mcx, query)?;
         if query_list.len() != 1 {
             return Ok(None);
         }

@@ -892,10 +892,14 @@ fn preprocess_rte_expressions<'mcx>(
                 // FUNCTION RTEs that preprocess_function_rtes inlined are
                 // RTE_SUBQUERY by now. C preprocesses non-lateral functions
                 // too — uplevel correlation Vars appear without LATERAL and
-                // must become Params here — and its eval_const_expressions
-                // pass is mandatory: it inserts default arguments and converts
-                // named notation to positional. EXPRKIND_RTFUNC skips the
-                // second eval inside preprocess_expression, as in C.
+                // must become Params here (planner.c:1030-1036). The
+                // eval_const_expressions pass (default-argument insertion,
+                // named-to-positional notation, inline_function attempts)
+                // already ran in preprocess_function_rtes (prepjointree.c
+                // preprocess_function_rtes); preprocess_expression repeats it
+                // only for EXPRKIND_RTFUNC_LATERAL (planner.c:1318-1326), so
+                // no eval happens here — a second pass would attempt SQL
+                // function inlining twice per statement.
                 let kind = if rte.lateral {
                     EXPRKIND_RTFUNC_LATERAL
                 } else {
@@ -904,19 +908,11 @@ fn preprocess_rte_expressions<'mcx>(
                 let mut new_functions = NodeList::nil();
                 for f_node in &rte.functions {
                     let f = f_node.as_range_tbl_function().expect("functions cell");
-                    let funcexpr = match f.funcexpr {
-                        Some(e) => Some(clauses::eval_const_expressions_with_params(
-                            mcx,
-                            e,
-                            run.glob.bound_params,
-                        )?),
-                        None => None,
-                    };
                     let funcexpr = preprocess_expression(
                         run,
                         &parse.rtable,
                         parse.jointree,
-                        funcexpr,
+                        f.funcexpr,
                         kind,
                         parse.hasSubLinks,
                     )?;

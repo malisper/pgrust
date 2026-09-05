@@ -35,6 +35,7 @@ parser_small1 = { path = "../../parser/parser_small1" }
 format_type = { path = "../../utils/adt/format_type" }
 elog = { path = "../../utils/error/elog" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
 init_small = { path = "../../utils/init/init_small" }
 snapmgr = { path = "../../utils/time/snapmgr" }
 xact = { path = "../../access/transam/xact" }

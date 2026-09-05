@@ -194,11 +194,9 @@ fn inline_body<'a, 'mcx>(
             None => return Ok(None),
         }
     } else {
-        let raw_list = parser_seams::raw_parser::call(
-            mcx,
-            row.prosrc.as_str(),
-            parser_seams::RawParseMode::RAW_PARSE_DEFAULT,
-        )?;
+        // C pg_parse_query (PARSER bracket); the analysis below is bare
+        // transformTopLevelStmt, so no PARSE ANALYSIS bracket follows.
+        let raw_list = crate::cache::pg_parse_query(mcx, row.prosrc.as_str())?;
         if raw_list.len() != 1 {
             return Ok(None);
         }

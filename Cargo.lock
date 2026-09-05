@@ -18042,6 +18042,7 @@ dependencies = [
  "pg_proc",
  "plancache",
  "planner",
+ "postgres_seams",
  "readfuncs",
  "rewrite_handler_seams",
  "rewrite_manip",

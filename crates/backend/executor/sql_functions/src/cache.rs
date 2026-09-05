@@ -1,6 +1,5 @@
 // funccache.c (SQL slice) + sql_compile_callback/prepare_next_query
-// (functions.c). DIVERGENCE: RECORD results resolved from an expectedDesc
-// bypass the map (C hashes the resolved tupdesc identity into the key).
+// (functions.c).
 use core::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
 
@@ -20,13 +19,71 @@ use types_tuple::TupleDescData;
 use cache_syscache::{ReleaseSysCache, SearchSysCache1, SysCacheGetAttr, SysCacheKey, PROCOID};
 
 use crate::{
-    efn, is_polymorphic, lookup_failed, name_str, read_oidvector_attr, varlena_bytes, varlena_str,
+    efn, lookup_failed, name_str, read_oidvector_attr, varlena_bytes, varlena_str,
     ANUM_PG_PROC_PROARGMODES, ANUM_PG_PROC_PROARGNAMES, ANUM_PG_PROC_PROARGTYPES,
     ANUM_PG_PROC_PROKIND, ANUM_PG_PROC_PRONAME, ANUM_PG_PROC_PRORETSET, ANUM_PG_PROC_PROSQLBODY,
     ANUM_PG_PROC_PROSRC, ANUM_PG_PROC_PROVOLATILE,
 };
 
 pub(crate) const MAX_SQL_FN_ARGS: usize = types_core::FUNC_MAX_ARGS;
+
+// postgres.c's log_parser_stats brackets (ResetUsage/ShowUsage) around the
+// parse, parse-analysis and rewrite passes of a SQL function body. C reaches
+// them through pg_parse_query (postgres.c:600-620), pg_analyze_and_rewrite_
+// withcb (:762-790) and pg_rewrite_query (:796-822) from sql_compile_callback
+// (functions.c:1166), prepare_next_query (:932/:943), the plancache
+// revalidation of a function's source, fmgr_sql_validator (pg_proc.c:933/
+// 948/967), inline_function and inline_set_returning_function (clauses.c).
+fn log_parser_stats() -> bool {
+    guc_tables::backing::log_parser_stats()
+}
+
+pub(crate) fn usage_reset() {
+    if log_parser_stats() {
+        postgres_seams::reset_usage::call();
+    }
+}
+
+pub(crate) fn usage_show(title: &str) -> PgResult<()> {
+    if log_parser_stats() {
+        postgres_seams::show_usage::call(title)?;
+    }
+    Ok(())
+}
+
+// pg_parse_query (postgres.c:600-620): raw_parser under the PARSER bracket.
+pub(crate) fn pg_parse_query<'mcx>(
+    mcx: Mcx<'mcx>,
+    query_string: &str,
+) -> PgResult<PgVec<'mcx, types_nodes::rawnodes::RawStmt<'mcx>>> {
+    usage_reset();
+    let raw_parsetree_list = parser_seams::raw_parser::call(
+        mcx,
+        query_string,
+        parser_seams::RawParseMode::RAW_PARSE_DEFAULT,
+    )?;
+    usage_show("PARSER STATISTICS")?;
+    Ok(raw_parsetree_list)
+}
+
+// pg_rewrite_query (postgres.c:796-822): utilities pass through unrewritten,
+// but the REWRITER bracket is logged either way.
+pub(crate) fn pg_rewrite_query<'mcx>(
+    mcx: Mcx<'mcx>,
+    query: Query<'mcx>,
+) -> PgResult<PgVec<'mcx, Query<'mcx>>> {
+    usage_reset();
+    let querytree_list = if query.commandType == CmdType::CMD_UTILITY {
+        let mut v = PgVec::new_in(mcx);
+        v.try_reserve_exact(1).map_err(|_| mcx.oom(1))?;
+        v.push(query);
+        v
+    } else {
+        rewrite_handler_seams::query_rewrite::call(mcx, query)?
+    };
+    usage_show("REWRITER STATISTICS")?;
+    Ok(querytree_list)
+}
 
 pub(crate) struct SqlFnEntryState<'mcx> {
     pub fname: PgString<'mcx>,
@@ -70,12 +127,52 @@ impl Drop for SqlFnEntry {
     }
 }
 
-#[derive(Clone, Copy)]
+// CachedFunctionHashKey.callResultType (funccache.c:322-345): the resolved
+// composite result rowtype, compared by equalRowTypes and hashed by
+// hashRowType (tupdesc.c:777-822) — natts, tdtypeid, and per attribute name,
+// type, typmod, collation and dropped-ness; tdtypmod deliberately excluded.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct RowTypeKey {
+    tdtypeid: Oid,
+    atts: Vec<RowTypeAtt>,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct RowTypeAtt {
+    attname: Vec<u8>,
+    atttypid: Oid,
+    atttypmod: i32,
+    attcollation: Oid,
+    attisdropped: bool,
+}
+
+impl RowTypeKey {
+    fn from_desc(d: &TupleDescData<'_>) -> Self {
+        let atts = (0..d.natts.max(0) as usize)
+            .map(|i| {
+                let a = d.attr(i);
+                RowTypeAtt {
+                    attname: a.attname.name_str().to_vec(),
+                    atttypid: a.atttypid,
+                    atttypmod: a.atttypmod,
+                    attcollation: a.attcollation,
+                    attisdropped: a.attisdropped,
+                }
+            })
+            .collect();
+        RowTypeKey { tdtypeid: d.tdtypeid, atts }
+    }
+}
+
+#[derive(Clone)]
 struct FnKey {
     fn_oid: Oid,
     collation: Oid,
     argtypes: [Oid; MAX_SQL_FN_ARGS],
     nargs: u8,
+    // C's callResultType: present only when get_call_result_type resolved a
+    // composite (TYPEFUNC_COMPOSITE / TYPEFUNC_COMPOSITE_DOMAIN).
+    result_rowtype: Option<RowTypeKey>,
 }
 
 // Hash/eq the live argtype prefix only: the array is FUNC_MAX_ARGS wide and
@@ -86,6 +183,7 @@ impl PartialEq for FnKey {
             && self.collation == other.collation
             && self.nargs == other.nargs
             && self.argtypes[..self.nargs as usize] == other.argtypes[..other.nargs as usize]
+            && self.result_rowtype == other.result_rowtype
     }
 }
 
@@ -97,6 +195,7 @@ impl core::hash::Hash for FnKey {
         self.collation.hash(state);
         self.nargs.hash(state);
         self.argtypes[..self.nargs as usize].hash(state);
+        self.result_rowtype.hash(state);
     }
 }
 
@@ -265,57 +364,9 @@ fn clone_query<'mcx>(q: &Query<'mcx>) -> Query<'mcx> {
     unsafe { core::ptr::read(q as *const Query<'mcx>) }
 }
 
-fn resolve_argtypes(
-    declared: &[Oid],
-    flinfo: &fmgr::FmgrInfo,
-) -> PgResult<[Oid; MAX_SQL_FN_ARGS]> {
-    let mut out = [types_core::InvalidOid; MAX_SQL_FN_ARGS];
-    for (i, &t) in declared.iter().enumerate() {
-        out[i] = if is_polymorphic(t) {
-            let r = funcapi::get_fn_expr_argtype(Some(flinfo), i);
-            if r == types_core::InvalidOid {
-                return Err(efn(
-                    types_error::ERRCODE_DATATYPE_MISMATCH,
-                    format!(
-                        "could not determine actual type of argument declared {}",
-                        format_type::format_type_be(t)?
-                    ),
-                ));
-            }
-            r
-        } else {
-            t
-        };
-    }
-    Ok(out)
-}
-
-fn rettupdesc_is_current(entry: &Rc<SqlFnEntry>) -> PgResult<bool> {
-    entry.owned.with(|s| -> PgResult<bool> {
-        let Some(d) = s.rettupdesc.as_ref() else { return Ok(true) };
-        if d.tdtypeid == types_core::catalog::RECORDOID {
-            return Ok(true);
-        }
-        let scratch = MemoryContext::new("sqlfn revalidate");
-        let fresh =
-            typcache_seams::lookup_rowtype_tupdesc_copy::call(scratch.mcx(), d.tdtypeid, -1)?;
-        if fresh.natts != d.natts {
-            return Ok(false);
-        }
-        for i in 0..d.natts as usize {
-            let (a, b) = (d.attr(i), fresh.attr(i));
-            if a.attname.name_str() != b.attname.name_str()
-                || a.atttypid != b.atttypid
-                || a.atttypmod != b.atttypmod
-                || a.attisdropped != b.attisdropped
-            {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    })
-}
-
+// compute_function_hashkey (funccache.c:247-346): the declared input argtypes
+// with polymorphic (and RECORD) ones resolved from the call expression, plus
+// the resolved composite result rowtype when there is one.
 pub(crate) fn cached_sql_function(
     flinfo: &fmgr::FmgrInfo,
     input_collation: Oid,
@@ -325,13 +376,15 @@ pub(crate) fn cached_sql_function(
     let stamp = proc_row_stamp(fn_oid)?;
 
     let scratch = MemoryContext::new("sqlfn key");
-    let (declared, nargs) = {
+    let (declared, nargs, proname) = {
         let Some(tup) = SearchSysCache1(PROCOID, SysCacheKey::Value(Datum::from_oid(fn_oid)))?
         else {
             return Err(lookup_failed(fn_oid));
         };
         let (argv, _) = SysCacheGetAttr(PROCOID, &tup, ANUM_PG_PROC_PROARGTYPES)?;
         let a = read_oidvector_attr(scratch.mcx(), argv)?;
+        let (proname_d, _) = SysCacheGetAttr(PROCOID, &tup, ANUM_PG_PROC_PRONAME)?;
+        let proname = name_str(scratch.mcx(), proname_d)?;
         ReleaseSysCache(tup);
         let n = a.len();
         // upstream 2a03f21daf59 (18.6): Protect some fixed-size arrays that have FUNC_MAX_ARGS elements.
@@ -342,16 +395,43 @@ pub(crate) fn cached_sql_function(
                 .into_error()
                 .into());
         }
-        (a, n)
+        (a, n, proname)
     };
-    let argtypes = resolve_argtypes(&declared, flinfo)?;
-    let key = FnKey { fn_oid, collation: input_collation, argtypes, nargs: nargs as u8 };
+    let mut argtypes = [types_core::InvalidOid; MAX_SQL_FN_ARGS];
+    argtypes[..nargs].copy_from_slice(&declared);
+    // funccache.c:314-320: NULL argmodes (all inputs), fn_expr, not the
+    // validator; an unresolvable polymorphic argument is 0A000 here, before
+    // prepare_sql_fn_parse_info's 42804 could be reached.
+    funcapi::cfunc_resolve_polymorphic_argtypes(
+        &mut argtypes[..nargs],
+        &[],
+        flinfo.fn_expr,
+        false,
+        proname.as_str(),
+    )?;
+    // funccache.c:322-345 (includeResultType, true for fmgr_sql): a composite
+    // result joins the key so that ALTER TABLE/TYPE on the rowtype, or a
+    // different column definition list for a RECORD result, builds a new
+    // entry instead of reusing one compiled for another rowtype.
+    let result_rowtype = {
+        let resolved = funcapi::get_call_result_type(scratch.mcx(), flinfo, expected_desc)?;
+        match resolved.class {
+            funcapi::TypeFuncClass::Composite | funcapi::TypeFuncClass::CompositeDomain => {
+                resolved.result_tuple_desc.as_ref().map(RowTypeKey::from_desc)
+            }
+            _ => None,
+        }
+    };
+    let key = FnKey {
+        fn_oid,
+        collation: input_collation,
+        argtypes,
+        nargs: nargs as u8,
+        result_rowtype,
+    };
 
     if let Some(hit) = SQL_FN_CACHE.with(|c| c.borrow().get(&key).cloned()) {
-        // The pg_proc stamp misses ALTERs of a composite rettype's relation
-        // (C rebuilds the fcache with the plan, so it re-resolves there);
-        // revalidate the resolved rettupdesc against the current rowtype.
-        if hit.stamp == stamp && rettupdesc_is_current(&hit)? {
+        if hit.stamp == stamp {
             return Ok(hit);
         }
         SQL_FN_CACHE.with(|c| {
@@ -367,15 +447,9 @@ pub(crate) fn cached_sql_function(
         flinfo,
         expected_desc,
     )?);
-    // A RECORD rettype resolves from the CALLING context (expectedDesc /
-    // coldeflist), so the entry is context-dependent and must never be
-    // shared across call sites — C re-resolves per fn_extra fcache.
-    let cacheable = entry.owned.with(|s| s.rettype != types_core::catalog::RECORDOID);
-    if cacheable {
-        SQL_FN_CACHE.with(|c| {
-            c.borrow_mut().insert(key, entry.clone());
-        });
-    }
+    SQL_FN_CACHE.with(|c| {
+        c.borrow_mut().insert(key, entry.clone());
+    });
     Ok(entry)
 }
 
@@ -403,11 +477,7 @@ fn compile_entry(
                     qs.len()
                 }
                 None => {
-                    let raws = parser_seams::raw_parser::call(
-                        scratch.mcx(),
-                        row.prosrc.as_str(),
-                        parser_seams::RawParseMode::RAW_PARSE_DEFAULT,
-                    )?;
+                    let raws = pg_parse_query(scratch.mcx(), row.prosrc.as_str())?;
                     raws.len()
                 }
             };
@@ -517,18 +587,13 @@ fn build_query_plansource(
                 let qmcx = plancache::SourceQueryMcx(psrc);
                 let queries = sqlbody_queries(qmcx, body.as_str())?;
                 let query = queries.into_iter().nth(qindex).expect("counted at compile");
+                if query.commandType != CmdType::CMD_UTILITY {
+                    rewrite_handler_seams::acquire_rewrite_locks::call(
+                        qmcx, &query, true, false,
+                    )?;
+                }
                 let mut query_list: PgVec<'static, Query<'static>> =
-                    if query.commandType == CmdType::CMD_UTILITY {
-                        let mut v = PgVec::new_in(qmcx);
-                        v.try_reserve_exact(1).map_err(|_| qmcx.oom(1))?;
-                        v.push(query);
-                        v
-                    } else {
-                        rewrite_handler_seams::acquire_rewrite_locks::call(
-                            qmcx, &query, true, false,
-                        )?;
-                        rewrite_handler_seams::query_rewrite::call(qmcx, query)?
-                    };
+                    pg_rewrite_query(qmcx, query)?;
                 for q in query_list.iter() {
                     check_sql_fn_statement(q)?;
                 }
@@ -584,6 +649,7 @@ fn build_query_plansource(
                 for n in s.argnames.iter() {
                     name_refs.push(n.as_str());
                 }
+                usage_reset();
                 let query = analyze_seams::parse_analyze_sql_fn::call(
                     qmcx,
                     raw2,
@@ -594,15 +660,9 @@ fn build_query_plansource(
                     s.input_collation,
                     QueryEnvHandle::NULL,
                 )?;
+                usage_show("PARSE ANALYSIS STATISTICS")?;
                 let mut query_list: PgVec<'static, Query<'static>> =
-                    if query.commandType == CmdType::CMD_UTILITY {
-                        let mut v = PgVec::new_in(qmcx);
-                        v.try_reserve_exact(1).map_err(|_| qmcx.oom(1))?;
-                        v.push(query);
-                        v
-                    } else {
-                        rewrite_handler_seams::query_rewrite::call(qmcx, query)?
-                    };
+                    pg_rewrite_query(qmcx, query)?;
                 for q in query_list.iter() {
                     check_sql_fn_statement(q)?;
                 }
@@ -701,6 +761,7 @@ fn reanalyze_sql_fn(
         for n in s.argnames.iter() {
             name_refs.push(n.as_str());
         }
+        usage_reset();
         let query = analyze_seams::parse_analyze_sql_fn::call(
             qmcx,
             raw,
@@ -711,14 +772,8 @@ fn reanalyze_sql_fn(
             s.input_collation,
             query_env,
         )?;
-        if query.commandType == CmdType::CMD_UTILITY {
-            let mut v = PgVec::new_in(qmcx);
-            v.try_reserve_exact(1).map_err(|_| qmcx.oom(1))?;
-            v.push(query);
-            Ok(v)
-        } else {
-            rewrite_handler_seams::query_rewrite::call(qmcx, query)
-        }
+        usage_show("PARSE ANALYSIS STATISTICS")?;
+        pg_rewrite_query(qmcx, query)
     })
 }
 
@@ -886,7 +941,49 @@ mod fnkey_tests {
     fn key(nargs: u8, types: &[Oid]) -> FnKey {
         let mut argtypes = [types_core::InvalidOid; MAX_SQL_FN_ARGS];
         argtypes[..types.len()].copy_from_slice(types);
-        FnKey { fn_oid: 16384, collation: 100, argtypes, nargs }
+        FnKey { fn_oid: 16384, collation: 100, argtypes, nargs, result_rowtype: None }
+    }
+
+    fn rowtype(tdtypeid: Oid, atts: &[(&str, Oid, i32)]) -> RowTypeKey {
+        RowTypeKey {
+            tdtypeid,
+            atts: atts
+                .iter()
+                .map(|&(n, t, m)| RowTypeAtt {
+                    attname: n.as_bytes().to_vec(),
+                    atttypid: t,
+                    atttypmod: m,
+                    attcollation: 0,
+                    attisdropped: false,
+                })
+                .collect(),
+        }
+    }
+
+    // funccache.c cfunc_hash/cfunc_match: callResultType is part of the key
+    // (equalRowTypes: natts, tdtypeid, per-attribute name/type/typmod/
+    // collation/dropped), so distinct column definition lists for a RECORD
+    // result, or a changed named rowtype, key distinct entries.
+    #[test]
+    fn fnkey_keys_on_resolved_result_rowtype() {
+        let base = key(0, &[]);
+        let mut ab = key(0, &[]);
+        ab.result_rowtype = Some(rowtype(2249, &[("a", 23, -1), ("b", 23, -1)]));
+        let mut ab2 = key(0, &[]);
+        ab2.result_rowtype = Some(rowtype(2249, &[("a", 23, -1), ("b", 23, -1)]));
+        let mut cd = key(0, &[]);
+        cd.result_rowtype = Some(rowtype(2249, &[("c", 23, -1), ("d", 23, -1)]));
+        let mut ab_text = key(0, &[]);
+        ab_text.result_rowtype = Some(rowtype(2249, &[("a", 23, -1), ("b", 25, -1)]));
+        let mut named = key(0, &[]);
+        named.result_rowtype = Some(rowtype(16400, &[("a", 23, -1), ("b", 23, -1)]));
+
+        assert!(ab == ab2);
+        assert_eq!(fxhash(&ab), fxhash(&ab2));
+        assert!(ab != base);
+        assert!(ab != cd);
+        assert!(ab != ab_text);
+        assert!(ab != named);
     }
 
     fn fxhash(k: &FnKey) -> u64 {

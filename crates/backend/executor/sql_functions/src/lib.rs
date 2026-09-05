@@ -1328,14 +1328,10 @@ fn fc_fmgr_sql_validator(
                 let n = queries.len();
                 let mut last_list: Option<PgVec<'_, Query<'_>>> = None;
                 for (qi, q) in queries.into_iter().enumerate() {
-                    let list = if q.commandType == CmdType::CMD_UTILITY {
-                        let mut v: PgVec<'_, Query<'_>> = mcx::vec_with_capacity_in(mcx, 1)?;
-                        v.push(q);
-                        v
-                    } else {
+                    if q.commandType != CmdType::CMD_UTILITY {
                         rewrite_handler_seams::acquire_rewrite_locks::call(mcx, &q, true, false)?;
-                        rewrite_handler_seams::query_rewrite::call(mcx, q)?
-                    };
+                    }
+                    let list = cache::pg_rewrite_query(mcx, q)?;
                     for lq in list.iter() {
                         cache::check_sql_fn_statement(lq)?;
                     }
@@ -1359,11 +1355,7 @@ fn fc_fmgr_sql_validator(
                 }
                 return Ok(());
             }
-            let raw_list = parser_seams::raw_parser::call(
-                mcx,
-                &prosrc,
-                parser_seams::RawParseMode::RAW_PARSE_DEFAULT,
-            )?;
+            let raw_list = cache::pg_parse_query(mcx, &prosrc)?;
             if haspolyarg {
                 return Ok(());
             }
@@ -1375,6 +1367,7 @@ fn fc_fmgr_sql_validator(
             let n = raw_list.len();
             let mut last_list: Option<PgVec<'_, Query<'_>>> = None;
             for (i, raw) in raw_list.iter().enumerate() {
+                cache::usage_reset();
                 let query = analyze_seams::parse_analyze_sql_fn::call(
                     mcx,
                     raw,
@@ -1385,13 +1378,8 @@ fn fc_fmgr_sql_validator(
                     types_core::InvalidOid,
                     QueryEnvHandle::NULL,
                 )?;
-                let list = if query.commandType == CmdType::CMD_UTILITY {
-                    let mut v: PgVec<'_, Query<'_>> = mcx::vec_with_capacity_in(mcx, 1)?;
-                    v.push(query);
-                    v
-                } else {
-                    rewrite_handler_seams::query_rewrite::call(mcx, query)?
-                };
+                cache::usage_show("PARSE ANALYSIS STATISTICS")?;
+                let list = cache::pg_rewrite_query(mcx, query)?;
                 for lq in list.iter() {
                     cache::check_sql_fn_statement(lq)?;
                 }
