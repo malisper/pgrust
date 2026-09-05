@@ -64,6 +64,10 @@ pub enum FdwExplainProp<'a> {
 pub struct FdwExplainFlags<'a> {
     pub costs: bool,
     pub verbose: bool,
+    /// es->analyze: the plan was executed, so executor-side state (an FDW's
+    /// ri_FdwState-derived values such as postgres_fdw's clamped batch size)
+    /// exists and C's explain hooks read it.
+    pub analyze: bool,
     /// es->rtable_names (explain.c select_rtable_names_for_explain), indexed
     /// by rti - 1: EXPLAIN's deduplicated reference names ("pagg_1" for the
     /// second child scanned under the alias "pagg"). None (or out of range)

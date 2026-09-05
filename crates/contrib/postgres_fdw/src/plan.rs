@@ -1046,7 +1046,7 @@ fn foreign_join_ok<'mcx>(
 
     let relation_name = mcx_str(
         mcx,
-        &format!("({o_name}) {} JOIN ({i_name})", deparse::jointype_name(jointype)),
+        &format!("({o_name}) {} JOIN ({i_name})", deparse::jointype_name(jointype)?),
     )?;
     let relation_index =
         run.parse().rtable.len() as i32 + run.root.join_rel_list.len() as i32;

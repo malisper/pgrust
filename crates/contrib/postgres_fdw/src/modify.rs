@@ -58,7 +58,8 @@ fn mcx_str<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx str> {
 // postgresPlanForeignModify: deparse the remote DML and return the
 // fdw_private list in FdwModifyPrivateIndex order:
 // [UpdateSql, TargetAttnums, Len(values_end, -1 unless INSERT),
-//  HasReturning, RetrievedAttrs].
+//  HasReturning, RetrievedAttrs], plus a sixth pgrust-only entry: the local
+// query has a RETURNING list (C's ri_projectReturning, see the batch size).
 pub(crate) fn plan_foreign_modify<'mcx>(
     run: &mut PlannerRun<'mcx>,
     plan: &ModifyTable<'mcx>,
@@ -226,6 +227,11 @@ pub(crate) fn plan_foreign_modify<'mcx>(
         ra.lappend(mcx, a)?;
     }
     fdw_private.lappend(mcx, Node::mk_int_list(mcx, ra)?)?;
+    // Sixth entry (pgrust only): the local query has a RETURNING list. C reads
+    // resultRelInfo->ri_projectReturning in postgresGetForeignModifyBatchSize
+    // (postgres_fdw.c:2070); the plan carries it because neither the modify
+    // hooks nor the EXPLAIN hook see the ResultRelInfo here.
+    fdw_private.lappend(mcx, Node::mk_boolean(mcx, !returning_list.is_empty())?)?;
     Ok(fdw_private)
 }
 
@@ -381,6 +387,8 @@ pub(crate) fn begin_foreign_modify<'mcx>(
         .expect("fdw_private[4] is retrieved_attrs")
         .iter()
         .collect();
+    let local_returning =
+        it.next().and_then(|n| n.as_boolean()).map(|b| b.boolval).unwrap_or(false);
 
     // ExecGetResultRelCheckAsUser (execUtils.c:1489): the checkAsUser of the
     // result relation's RTEPermissionInfo, else the current user. A child
@@ -453,7 +461,9 @@ pub(crate) fn begin_foreign_modify<'mcx>(
                 && relcache_seams::relation_get_trigger_desc::call(rel.rd_id)?
                     .is_some_and(|t| t.trig_insert_before_row || t.trig_insert_after_row)
         };
-        if has_returning || has_wco || has_insert_row_triggers || target_attrs.is_empty() {
+        // C gates on ri_projectReturning — any local RETURNING list, whether
+        // or not the remote statement returns columns (postgres_fdw.c:2070).
+        if local_returning || has_wco || has_insert_row_triggers || target_attrs.is_empty() {
             1
         } else {
             let opt = get_batch_size_option(mcx, rd_id)?;
@@ -854,9 +864,12 @@ pub(crate) fn end_foreign_modify(state: Box<dyn core::any::Any>) -> PgResult<()>
     Ok(())
 }
 
-// postgresExplainForeignModify: "Remote SQL" under VERBOSE, plus "Batch
-// Size" for INSERT (recomputed plan-side; C reads ri_BatchSize). Divergence:
-// under EXPLAIN ANALYZE C additionally clamps by 65535/p_nums.
+// postgresExplainForeignModify (postgres_fdw.c:2955-2975): "Remote SQL" under
+// VERBOSE, plus "Batch Size" for INSERT. C prints ri_BatchSize, which
+// postgresGetForeignModifyBatchSize (postgres_fdw.c:2034-2094) computed from
+// the plan (RETURNING / WCO / row triggers force 1) plus, only when the plan
+// was executed (fmstate exists: EXPLAIN ANALYZE), the zero-column gate and the
+// 65535 / p_nums parameter clamp. Recomputed here from the same inputs.
 pub(crate) fn explain_foreign_modify<'mcx>(
     fdw_private: &NodeList<'mcx>,
     relid: Oid,
@@ -871,21 +884,42 @@ pub(crate) fn explain_foreign_modify<'mcx>(
     if let Some(sql) = it.next().and_then(|n| n.as_string()) {
         emit("Remote SQL", types_nodes::FdwExplainProp::Text(sql.sval))?;
     }
-    let target_attrs_empty =
-        it.next().and_then(|n| n.as_int_list()).map(|l| l.is_nil()).unwrap_or(true);
+    let target_attrs: Vec<i32> = it
+        .next()
+        .and_then(|n| n.as_int_list())
+        .map(|l| l.iter().collect())
+        .unwrap_or_default();
     let values_end = it.next().and_then(|n| n.as_integer()).map(|i| i.ival).unwrap_or(-1);
-    let has_returning =
+    let _remote_returning = it.next();
+    let _retrieved_attrs = it.next();
+    let local_returning =
         it.next().and_then(|n| n.as_boolean()).map(|b| b.boolval).unwrap_or(false);
     if values_end >= 0 {
         // INSERT: report the effective batch size.
         let has_insert_row_triggers = relcache_seams::relation_get_trigger_desc::call(relid)?
             .is_some_and(|t| t.trig_insert_before_row || t.trig_insert_after_row);
-        let batch = if has_returning || has_wco || has_insert_row_triggers || target_attrs_empty
-        {
+        let batch = if local_returning || has_wco || has_insert_row_triggers {
+            1
+        } else if flags.analyze && target_attrs.is_empty() {
+            // fmstate && list_length(fmstate->target_attrs) == 0
             1
         } else {
             let scratch = mcx::MemoryContext::new("postgres_fdw explain batch size");
-            get_batch_size_option(scratch.mcx(), relid)?.max(1)
+            let mut batch = get_batch_size_option(scratch.mcx(), relid)?.max(1);
+            if flags.analyze {
+                // fmstate->p_nums: the non-generated target columns
+                // (create_foreign_modify, postgres_fdw.c:4051-4066).
+                let mut p_nums = 0i32;
+                for &attnum in &target_attrs {
+                    if lsyscache::attribute::get_attgenerated(relid, attnum as i16)? == 0 {
+                        p_nums += 1;
+                    }
+                }
+                if p_nums > 0 {
+                    batch = batch.min(65535 / p_nums);
+                }
+            }
+            batch
         };
         emit(
             "Batch Size",

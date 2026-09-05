@@ -611,15 +611,23 @@ pub fn is_foreign_param<'mcx>(run: &PlannerRun<'mcx>, baserel: RelId, expr: Node
 
 // ---------- name / literal helpers ----------
 
-pub const fn get_jointype_name(jointype: JoinType) -> &'static str {
+pub fn get_jointype_name(jointype: JoinType) -> PgResult<&'static str> {
     match jointype {
-        JoinType::JOIN_INNER => "INNER",
-        JoinType::JOIN_LEFT => "LEFT",
-        JoinType::JOIN_RIGHT => "RIGHT",
-        JoinType::JOIN_FULL => "FULL",
-        JoinType::JOIN_SEMI => "SEMI",
-        _ => panic!("unsupported join type"),
+        JoinType::JOIN_INNER => Ok("INNER"),
+        JoinType::JOIN_LEFT => Ok("LEFT"),
+        JoinType::JOIN_RIGHT => Ok("RIGHT"),
+        JoinType::JOIN_FULL => Ok("FULL"),
+        JoinType::JOIN_SEMI => Ok("SEMI"),
+        // Shouldn't come here, but protect from buggy code (deparse.c:1660,
+        // elog(ERROR)).
+        other => Err(unsupported_join_type(other as u32)),
     }
+}
+
+#[track_caller]
+#[cold]
+fn unsupported_join_type(jointype: u32) -> Box<PgError> {
+    Box::new(PgError::error(format!("unsupported join type {jointype}")))
 }
 
 fn deparse_type_name(type_oid: Oid, typemod: i32) -> PgResult<String> {
@@ -692,10 +700,19 @@ fn deparse_expr<'mcx>(ctx: &mut DeparseCtx<'_, 'mcx>, node: Node<'mcx>) -> PgRes
         NodeTag::T_CaseExpr => deparse_case_expr(ctx, node.as_case_expr().unwrap()),
         NodeTag::T_ArrayExpr => deparse_array_expr(ctx, node.as_array_expr().unwrap()),
         NodeTag::T_Aggref => deparse_aggref(ctx, node.as_aggref().unwrap()),
-        other => Err(Box::new(PgError::error(format!(
-            "unsupported expression type for deparse: {other:?}"
-        )))),
+        other => Err(unsupported_deparse_expr(other)),
     }
+}
+
+// deparseExpr's default arm (deparse.c:2932): elog(ERROR) over the node tag.
+#[track_caller]
+#[cold]
+fn unsupported_deparse_expr(tag: NodeTag) -> Box<PgError> {
+    // C prints (int) nodeTag(node); the tag values are C's (tags.rs).
+    Box::new(PgError::error(format!(
+        "unsupported expression type for deparse: {}",
+        tag as u16
+    )))
 }
 
 fn deparse_var<'mcx>(ctx: &mut DeparseCtx<'_, 'mcx>, node: Node<'mcx>) -> PgResult<()> {
@@ -1715,14 +1732,14 @@ fn append_group_by_clause<'mcx>(
 }
 
 // get_jointype_name over the planner's numeric JoinType.
-pub(crate) fn jointype_name(jointype: types_pathnodes::JoinType) -> &'static str {
+pub(crate) fn jointype_name(jointype: types_pathnodes::JoinType) -> PgResult<&'static str> {
     match jointype {
-        types_pathnodes::JOIN_INNER => "INNER",
-        types_pathnodes::JOIN_LEFT => "LEFT",
-        types_pathnodes::JOIN_RIGHT => "RIGHT",
-        types_pathnodes::JOIN_FULL => "FULL",
-        types_pathnodes::JOIN_SEMI => "SEMI",
-        other => panic!("unsupported join type {other}"),
+        types_pathnodes::JOIN_INNER => Ok("INNER"),
+        types_pathnodes::JOIN_LEFT => Ok("LEFT"),
+        types_pathnodes::JOIN_RIGHT => Ok("RIGHT"),
+        types_pathnodes::JOIN_FULL => Ok("FULL"),
+        types_pathnodes::JOIN_SEMI => Ok("SEMI"),
+        other => Err(unsupported_join_type(other)),
     }
 }
 
@@ -1839,7 +1856,7 @@ fn deparse_from_expr_for_rel<'mcx>(
             ctx.buf.push('(');
             ctx.buf.push_str(join_sql_o.as_str());
             ctx.buf.push(' ');
-            ctx.buf.push_str(jointype_name(jointype));
+            ctx.buf.push_str(jointype_name(jointype)?);
             ctx.buf.push_str(" JOIN ");
             ctx.buf.push_str(join_sql_i.as_str());
             ctx.buf.push_str(" ON ");
@@ -2347,10 +2364,47 @@ mod tests {
 
     #[test]
     fn jointype_names() {
-        assert_eq!(get_jointype_name(JoinType::JOIN_INNER), "INNER");
-        assert_eq!(get_jointype_name(JoinType::JOIN_LEFT), "LEFT");
-        assert_eq!(get_jointype_name(JoinType::JOIN_RIGHT), "RIGHT");
-        assert_eq!(get_jointype_name(JoinType::JOIN_FULL), "FULL");
-        assert_eq!(get_jointype_name(JoinType::JOIN_SEMI), "SEMI");
+        assert_eq!(get_jointype_name(JoinType::JOIN_INNER).unwrap(), "INNER");
+        assert_eq!(get_jointype_name(JoinType::JOIN_LEFT).unwrap(), "LEFT");
+        assert_eq!(get_jointype_name(JoinType::JOIN_RIGHT).unwrap(), "RIGHT");
+        assert_eq!(get_jointype_name(JoinType::JOIN_FULL).unwrap(), "FULL");
+        assert_eq!(get_jointype_name(JoinType::JOIN_SEMI).unwrap(), "SEMI");
+        let e = get_jointype_name(JoinType::JOIN_ANTI).err().unwrap();
+        assert_eq!(e.message(), "unsupported join type 5");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        let e = jointype_name(types_pathnodes::JOIN_RIGHT_ANTI).err().unwrap();
+        assert_eq!(e.message(), "unsupported join type 7");
+    }
+
+    // deparse.c:1660 get_jointype_name: an unsupported join type is
+    // elog(ERROR, "unsupported join type %d") (XX000, catchable), never a
+    // process abort. Both faces (the nodes JoinType and the planner's numeric
+    // JoinType) are checked through catch_unwind so the witness compiles on
+    // the unfixed tree too.
+    #[test]
+    fn unsupported_jointype_is_an_error_not_a_panic() {
+        let r = std::panic::catch_unwind(|| {
+            let _ = get_jointype_name(JoinType::JOIN_ANTI);
+        });
+        assert!(r.is_ok(), "get_jointype_name(JOIN_ANTI) panicked");
+        let r = std::panic::catch_unwind(|| {
+            let _ = jointype_name(types_pathnodes::JOIN_ANTI);
+        });
+        assert!(r.is_ok(), "jointype_name(JOIN_ANTI) panicked");
+    }
+
+    // deparse.c:2932: the unsupported-node error prints the tag as an
+    // integer ("%d", (int) nodeTag(node)), not a symbolic name.
+    #[test]
+    fn unsupported_deparse_expr_prints_the_numeric_node_tag() {
+        let e = unsupported_deparse_expr(NodeTag::T_CoalesceExpr);
+        assert_eq!(
+            e.message(),
+            format!(
+                "unsupported expression type for deparse: {}",
+                NodeTag::T_CoalesceExpr as u16
+            )
+        );
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
     }
 }

@@ -54,8 +54,11 @@ struct PgFdwScanState {
 // per-call scratch (see retain_datum), plus tidin for the retrieved-ctid arm.
 pub(crate) struct AttInMeta {
     natts: usize,
-    relname: String,
-    attnames: Vec<String>,
+    // conversion_error_callback's names (postgres_fdw.c:7762-7836), resolved
+    // once: one entry per output column, plus the relation name the retrieved
+    // ctid (SelfItemPointerAttributeNumber) is reported under.
+    ctx: Vec<ConvCtx>,
+    ctid_rel: Option<String>,
     in_funcs: Vec<FmgrInfo>,
     typioparams: Vec<Oid>,
     typmods: Vec<i32>,
@@ -65,10 +68,24 @@ pub(crate) struct AttInMeta {
     tid_ioparam: Oid,
 }
 
+// The errcontext line conversion_error_callback prints for one output
+// column (postgres_fdw.c:7825-7835).
+#[derive(Clone)]
+pub(crate) enum ConvCtx {
+    /// column "<att>" of foreign table "<rel>"
+    Column(String, String),
+    /// whole-row reference to foreign table "<rel>"
+    WholeRow(String),
+    /// processing expression at position %d in select list
+    Expr,
+}
+
 impl AttInMeta {
+    /// The non-ForeignScan shape (postgres_fdw.c:7813-7824): names from the
+    /// relation itself (RelationGetRelationName + the tupdesc's attnames).
     pub(crate) fn build(relname: &str, tupdesc: &TupleDescData<'_>) -> PgResult<AttInMeta> {
         let natts = tupdesc.natts as usize;
-        let mut attnames = Vec::with_capacity(natts);
+        let mut ctx = Vec::with_capacity(natts);
         let mut in_funcs = Vec::with_capacity(natts);
         let mut typioparams = Vec::with_capacity(natts);
         let mut typmods = Vec::with_capacity(natts);
@@ -76,7 +93,10 @@ impl AttInMeta {
         let mut typbyvals = Vec::with_capacity(natts);
         for i in 0..natts {
             let att = tupdesc.attr(i);
-            attnames.push(String::from_utf8_lossy(att.attname.name_str()).into_owned());
+            ctx.push(ConvCtx::Column(
+                relname.to_string(),
+                String::from_utf8_lossy(att.attname.name_str()).into_owned(),
+            ));
             if att.attisdropped {
                 // Dropped columns never appear in retrieved_attrs (the
                 // deparser skips them); keep unresolved placeholders.
@@ -99,8 +119,8 @@ impl AttInMeta {
             lsyscache::getTypeInputInfo(types_core::catalog::TIDOID)?;
         Ok(AttInMeta {
             natts,
-            relname: relname.to_string(),
-            attnames,
+            ctx,
+            ctid_rel: Some(relname.to_string()),
             in_funcs,
             typioparams,
             typmods,
@@ -109,6 +129,63 @@ impl AttInMeta {
             tid_in: fmgr_seams::fmgr_info::call(tid_infunc)?,
             tid_ioparam,
         })
+    }
+
+    /// The ForeignScan shape (postgres_fdw.c:7770-7812): names come from the
+    /// rangetable aliases, never from the relation, for consistency between
+    /// the simple-relation and remote-join cases.
+    fn set_scan_context(&mut self, ctx: Vec<ConvCtx>, ctid_rel: Option<String>) {
+        debug_assert_eq!(ctx.len(), self.natts);
+        self.ctx = ctx;
+        self.ctid_rel = ctid_rel;
+    }
+
+    fn context_line(&self, attno: i32) -> String {
+        let ctx = if attno == types_tuple::htup::SelfItemPointerAttributeNumber {
+            self.ctid_rel.as_ref().map(|r| ConvCtx::Column(r.clone(), "ctid".to_string()))
+        } else if attno >= 1 && attno as usize <= self.ctx.len() {
+            Some(self.ctx[(attno - 1) as usize].clone())
+        } else {
+            None
+        };
+        match ctx {
+            Some(ConvCtx::WholeRow(rel)) => {
+                format!("whole-row reference to foreign table \"{rel}\"")
+            }
+            Some(ConvCtx::Column(rel, att)) => {
+                format!("column \"{att}\" of foreign table \"{rel}\"")
+            }
+            _ => format!("processing expression at position {attno} in select list"),
+        }
+    }
+}
+
+// The (relname, colnames) pair conversion_error_callback reads off an RTE's
+// eref (postgres_fdw.c:7799-7809): the alias name and the column aliases.
+fn rte_eref_names(rte: &types_nodes::parsenodes::RangeTblEntry<'_>) -> (String, Vec<String>) {
+    let Some(eref) = rte.eref else {
+        return (String::new(), Vec::new());
+    };
+    let colnames = eref
+        .colnames
+        .iter()
+        .map(|n| n.as_string().map(|s| s.sval.to_string()).unwrap_or_default())
+        .collect();
+    (eref.aliasname.unwrap_or("").to_string(), colnames)
+}
+
+// One ConvCtx for a Var of the scan (postgres_fdw.c:7795-7811): colno 0 is
+// the whole row, 1..=len(colnames) a named column, ctid by its attno, and
+// anything else falls through to the positional message.
+fn var_conv_ctx(relname: &str, colnames: &[String], colno: i32) -> ConvCtx {
+    if colno == 0 {
+        ConvCtx::WholeRow(relname.to_string())
+    } else if colno > 0 && colno as usize <= colnames.len() {
+        ConvCtx::Column(relname.to_string(), colnames[(colno - 1) as usize].clone())
+    } else if colno == types_tuple::htup::SelfItemPointerAttributeNumber {
+        ConvCtx::Column(relname.to_string(), "ctid".to_string())
+    } else {
+        ConvCtx::Expr
     }
 }
 
@@ -196,18 +273,44 @@ pub(crate) fn begin_foreign_scan<'mcx>(
         return Err(system_columns_unported());
     }
 
+    // Error-context names always come from the rangetable aliases in a scan
+    // node (postgres_fdw.c:7770-7812: rte->eref, for consistency between the
+    // simple-relation and remote-join cases), never from the relation.
     let attin = if fsplan.scan.scanrelid > 0 {
         let rel = node.ss.ss_currentRelation.as_ref().expect("base foreign scan has a relation");
-        AttInMeta::build(rel.name(), &rel.rd_att)?
+        let mut attin = AttInMeta::build(rel.name(), &rel.rd_att)?;
+        let rte = estate.es_range_table[(fsplan.scan.scanrelid - 1) as usize];
+        let (relname, colnames) = rte_eref_names(rte);
+        let natts = rel.rd_att.natts as usize;
+        let ctx = (1..=natts as i32).map(|colno| var_conv_ctx(&relname, &colnames, colno)).collect();
+        attin.set_scan_context(ctx, Some(relname));
+        attin
     } else {
-        // Join/upper scan tuples follow the fdw_scan_tlist-shaped slot.
+        // Join/upper scan tuples follow the fdw_scan_tlist-shaped slot; a Var
+        // entry names its relation's alias, an expression only its position.
         let desc = estate
             .slot(node.ss.ss_ScanTupleSlot)
             .base()
             .tts_tupleDescriptor
             .clone()
             .expect("scan slot descriptor");
-        AttInMeta::build("foreign join", &desc)?
+        let mut attin = AttInMeta::build("foreign join", &desc)?;
+        let mut ctx = Vec::with_capacity(desc.natts as usize);
+        for tle_node in fsplan.fdw_scan_tlist.iter() {
+            let tle = tle_node.as_target_entry().expect("fdw_scan_tlist holds TargetEntries");
+            let mut c = ConvCtx::Expr;
+            if let Some(var) = tle.expr.as_var() {
+                if var.varno > 0 {
+                    let rte = estate.es_range_table[(var.varno - 1) as usize];
+                    let (relname, colnames) = rte_eref_names(rte);
+                    c = var_conv_ctx(&relname, &colnames, var.varattno as i32);
+                }
+            }
+            ctx.push(c);
+        }
+        ctx.resize(desc.natts as usize, ConvCtx::Expr);
+        attin.set_scan_context(ctx, None);
+        attin
     };
 
     let (param_flinfo, param_exprs) = prepare_query_params(estate, &fsplan.fdw_exprs)?;
@@ -537,15 +640,7 @@ pub(crate) fn retain_datum(batch: mcx::Mcx<'_>, d: Datum, typlen: i16, typbyval:
 #[track_caller]
 #[cold]
 pub(crate) fn conversion_error(e: Box<PgError>, attin: &AttInMeta, attno: i32) -> Box<PgError> {
-    let line = if attno >= 1 && attno as usize <= attin.natts {
-        format!(
-            "column \"{}\" of foreign table \"{}\"",
-            attin.attnames[(attno - 1) as usize],
-            attin.relname
-        )
-    } else {
-        format!("processing expression at position {attno} in select list")
-    };
+    let line = attin.context_line(attno);
     let mut e = e;
     e.context = Some(match e.context.take() {
         Some(prev) => format!("{prev}\n{line}"),
@@ -840,7 +935,16 @@ fn complete_pending_request<'mcx>(
 ) -> PgResult<()> {
     debug_assert!(areq.callback_pending);
     areq.callback_pending = false;
-    produce_tuple_asynchronously(node, estate, areq, false)
+    produce_tuple_asynchronously(node, estate, areq, false)?;
+    // Also, we do instrumentation ourselves, if required (postgres_fdw.c:7573
+    // InstrUpdateTupleCount): this tuple bypasses ExecAsyncRequest/Notify's
+    // instrumented dispatch (execAsync.c), and ConfigureWait's wrapper stops
+    // the node with zero tuples.
+    if let Some(idx) = node.ss.instr_idx {
+        estate.es_instrumentation[idx as usize].tuplecount +=
+            if areq.result.is_some() { 1.0 } else { 0.0 };
+    }
+    Ok(())
 }
 
 // fetch_more_data_begin: create the cursor synchronously if needed, then

@@ -37,7 +37,7 @@ use types_core::xact::{
 };
 use types_core::Oid;
 use types_error::{
-    make_sqlstate, PgError, PgResult, WARNING, ERRCODE_CONNECTION_EXCEPTION,
+    make_sqlstate, PgError, PgResult, DEBUG3, WARNING, ERRCODE_CONNECTION_EXCEPTION,
     ERRCODE_CONNECTION_FAILURE, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_SQLCLIENT_UNABLE_TO_ESTABLISH_SQLCONNECTION,
     ERRCODE_S_R_E_PROHIBITED_SQL_STATEMENT_ATTEMPTED,
@@ -63,7 +63,10 @@ pub(crate) struct PendingFetch {
 }
 
 pub(crate) struct ConnCacheEntry {
-    pub(crate) conn: Option<PgConn>,
+    // Boxed so the connection keeps one address while the entry moves between
+    // the cache map and its take/put owners: C's DEBUG3 lines print the PGconn
+    // pointer and the same connection must print the same value.
+    pub(crate) conn: Option<Box<PgConn>>,
     pub(crate) pending_fetch: Option<PendingFetch>,
     // Batches drained off the wire on behalf of another scan that needed the
     // connection (C's process_pending_request completes the other node's
@@ -403,6 +406,11 @@ pub(crate) fn get_connection<'mcx>(
 
     // Invalidated + out of transaction: drop so options take effect.
     if entry.conn.is_some() && entry.invalidated && entry.xact_depth == 0 {
+        // connection.c:266, elog(DEBUG3).
+        debug3(format!(
+            "closing connection {} for option changes to take effect",
+            conn_ptr(&entry)
+        ));
         disconnect_entry(&mut entry);
     }
 
@@ -432,6 +440,19 @@ pub(crate) fn get_connection<'mcx>(
                 put_entry(key, entry);
                 return Err(e);
             }
+            // connection.c:337-343: ereport(DEBUG3) with the connection's
+            // error text as DETAIL (pchomp(PQerrorMessage)), then elog(DEBUG3).
+            let ptr = conn_ptr(&entry);
+            let detail = entry
+                .conn
+                .as_ref()
+                .map(|c| c.error_message())
+                .unwrap_or_default();
+            let _ = ereport(DEBUG3)
+                .errmsg_internal(format!("could not start remote transaction on connection {ptr}"))
+                .errdetail_internal(detail.trim_end_matches('\n').to_string())
+                .finish(loc("GetConnection"));
+            debug3(format!("closing connection {ptr} to reestablish a new one"));
             disconnect_entry(&mut entry);
             if let Err(e2) = make_new_connection(mcx, &mut entry, user) {
                 put_entry(key, entry);
@@ -516,7 +537,15 @@ fn make_new_connection<'mcx>(
         }
     }
 
-    entry.conn = Some(connect_pg_server(&server, user)?);
+    entry.conn = Some(Box::new(connect_pg_server(&server, user)?));
+    // connection.c:421, elog(DEBUG3).
+    debug3(format!(
+        "new postgres_fdw connection {} for server \"{}\" (user mapping oid {}, userid {})",
+        conn_ptr(entry),
+        server.servername,
+        user.umid,
+        user.userid
+    ));
     Ok(())
 }
 
@@ -724,6 +753,8 @@ pub(crate) fn do_sql_command(conn: &mut PgConn, sql: &str) -> PgResult<()> {
 fn begin_remote_xact(entry: &mut ConnCacheEntry) -> PgResult<()> {
     let curlevel = xact::GetCurrentTransactionNestLevel();
     if entry.xact_depth <= 0 {
+        // connection.c:864, elog(DEBUG3).
+        debug3(format!("starting remote transaction on connection {}", conn_ptr(entry)));
         let sql = if xact::IsolationIsSerializable() {
             "START TRANSACTION ISOLATION LEVEL SERIALIZABLE"
         } else {
@@ -750,6 +781,21 @@ fn disconnect_entry(entry: &mut ConnCacheEntry) {
     }
 }
 
+// C prints the PGconn pointer (%p) in its DEBUG3 lifecycle lines; the
+// heap address of the boxed PgConn is the same identity (stable for the
+// connection's life, reused only after it is freed).
+fn conn_ptr(entry: &ConnCacheEntry) -> String {
+    match entry.conn.as_ref() {
+        Some(c) => format!("{:p}", &**c as *const PgConn),
+        None => "0x0".to_string(),
+    }
+}
+
+// elog(DEBUG3, ...): never an error (DEBUG levels do not throw).
+fn debug3(msg: String) {
+    let _ = ereport(DEBUG3).errmsg_internal(msg).finish(loc("connection"));
+}
+
 // ---------- transaction callbacks ----------
 
 // pgfdw_xact_callback. The serial paths only (parallel_commit/parallel_abort
@@ -766,6 +812,11 @@ fn pgfdw_xact_callback(event: XactEvent, _arg: Datum) -> PgResult<()> {
                 continue;
             }
             if entry.xact_depth > 0 {
+                // connection.c:1067, elog(DEBUG3).
+                debug3(format!(
+                    "closing remote transaction on connection {}",
+                    conn_ptr(entry)
+                ));
                 match event {
                     XACT_EVENT_PARALLEL_PRE_COMMIT | XACT_EVENT_PRE_COMMIT => {
                         // Interrupted-state connections cannot commit.
@@ -908,6 +959,8 @@ fn pgfdw_inval_callback(_arg: Datum, cacheid: i32, hashvalue: u32) {
                     && entry.mapping_hashvalue == hashvalue);
             if matches {
                 if entry.xact_depth == 0 {
+                    // connection.c:1333, elog(DEBUG3).
+                    debug3(format!("discarding connection {}", conn_ptr(entry)));
                     disconnect_entry(entry);
                 } else {
                     entry.invalidated = true;
@@ -939,6 +992,8 @@ fn pgfdw_reset_xact_state(entry: &mut ConnCacheEntry, toplevel: bool) {
                 || entry.invalidated
                 || !entry.keep_connections)
         {
+            // connection.c:1398, elog(DEBUG3).
+            debug3(format!("discarding connection {}", conn_ptr(entry)));
             disconnect_entry(entry);
         }
     } else {
@@ -1284,6 +1339,8 @@ fn disconnect_cached_connections(server: Option<Oid>) -> PgResult<bool> {
             if entry.xact_depth > 0 {
                 in_use.push(entry.serverid);
             } else {
+                // connection.c:2457, elog(DEBUG3).
+                debug3(format!("discarding connection {}", conn_ptr(entry)));
                 disconnect_entry(entry);
                 closed_any = true;
             }

@@ -1438,6 +1438,7 @@ pub fn ExplainNode<'mcx>(
                         let flags = types_nodes::FdwExplainFlags {
                             costs: es.costs,
                             verbose: es.verbose,
+                            analyze: es.analyze,
                             rtable_names: &[],
                         };
                         f(&fdw_private, relid, has_wco, flags, &mut |label, v| {
@@ -3106,6 +3107,7 @@ fn show_foreignscan_info<'mcx>(plan_node_id: i32, es: &mut ExplainState<'mcx>) -
     let flags = types_nodes::FdwExplainFlags {
         costs: es.costs,
         verbose: es.verbose,
+        analyze: es.analyze,
         rtable_names: &rtable_names,
     };
     execmain_seams::query_desc_foreign_explain::call(qd, plan_node_id, flags, &mut |label, v| {
