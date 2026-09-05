@@ -342,3 +342,81 @@ fn expand_record_variable_drills_through_subquery_var() {
     assert_eq!(desc.attr(0).atttypid, INT4OID);
     assert_eq!(desc.attr(1).atttypid, TEXTOID);
 }
+
+/// audit-18.6 b156: FigureColname through a TypeCast keeps a strength-2 name
+/// from the raw leg the way C keeps it from the in-place-transformed node
+/// (parse_target.c:1814-1825): a VALUES subquery is "column1"
+/// (transformValuesClause), a set operation names after its leftmost arm,
+/// and SQL/XML constructs are strength 2 (parse_target.c:1955-1988).
+#[test]
+fn figure_colname_through_typecast_keeps_strong_names() {
+    use types_nodes::parsenodes::SetOperation;
+    use types_nodes::rawnodes::{SelectStmt, TypeCast, TypeName, XmlSerialize};
+    use types_nodes::{SubLink, SubLinkType, XmlExpr, XmlExprOp};
+
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let s = |v| Node::mk(mcx, PgStr { sval: v }).unwrap();
+    let cast = |arg| {
+        let mut tn = Node::build::<TypeName>(mcx).unwrap();
+        tn.names = NodeList::make2(mcx, s("pg_catalog"), s("int4")).unwrap();
+        tn.typemod = -1;
+        Node::mk(mcx, TypeCast { arg: Some(arg), typeName: Some(tn.seal()), location: 0 }).unwrap()
+    };
+    let sublink = |sub| {
+        Node::mk(
+            mcx,
+            SubLink {
+                subLinkType: SubLinkType::EXPR_SUBLINK,
+                subLinkId: 0,
+                testexpr: None,
+                operName: NodeList::nil(),
+                subselect: sub,
+                location: 0,
+            },
+        )
+        .unwrap()
+    };
+
+    // SELECT (VALUES (1))::int  ->  column1
+    let mut values = Node::build::<SelectStmt>(mcx).unwrap();
+    values.valuesLists =
+        NodeList::make1(mcx, Node::mk_list(mcx, NodeList::make1(mcx, int_const(mcx, 1, 0)).unwrap()).unwrap())
+            .unwrap();
+    let values = values.seal();
+    assert_eq!(FigureColname(sublink(values)), "column1");
+    assert_eq!(FigureColname(cast(sublink(values))), "column1");
+
+    // SELECT (SELECT 1 AS zz UNION SELECT 2)::int  ->  zz (leftmost arm)
+    let mut left = Node::build::<SelectStmt>(mcx).unwrap();
+    left.targetList = NodeList::make1(mcx, res_target(mcx, Some("zz"), int_const(mcx, 1, 0))).unwrap();
+    let left = left.seal_ref();
+    let mut right = Node::build::<SelectStmt>(mcx).unwrap();
+    right.targetList = NodeList::make1(mcx, res_target(mcx, None, int_const(mcx, 2, 0))).unwrap();
+    let right = right.seal_ref();
+    let mut setop = Node::build::<SelectStmt>(mcx).unwrap();
+    setop.op = SetOperation::SETOP_UNION;
+    setop.larg = Some(left);
+    setop.rarg = Some(right);
+    let setop = setop.seal();
+    assert_eq!(FigureColname(cast(sublink(setop))), "zz");
+
+    // SELECT xmlelement(name foo)::text  ->  xmlelement
+    let mut xe = Node::build::<XmlExpr>(mcx).unwrap();
+    xe.op = XmlExprOp::IS_XMLELEMENT;
+    xe.name = Some("foo");
+    let xe = xe.seal();
+    assert_eq!(FigureColname(xe), "xmlelement");
+    assert_eq!(FigureColname(cast(xe)), "xmlelement");
+    let mut xd = Node::build::<XmlExpr>(mcx).unwrap();
+    xd.op = XmlExprOp::IS_DOCUMENT;
+    assert_eq!(FigureColname(cast(xd.seal())), "int4");
+
+    // SELECT xmlserialize(content x as text)::varchar  ->  xmlserialize
+    let xs = Node::mk(
+        mcx,
+        XmlSerialize { xmloption: Default::default(), expr: None, typeName: None, indent: false, location: 0 },
+    )
+    .unwrap();
+    assert_eq!(FigureColname(cast(xs)), "xmlserialize");
+}

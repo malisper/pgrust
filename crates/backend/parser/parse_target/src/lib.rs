@@ -205,13 +205,42 @@ fn transformAssignedExprInternal<'mcx>(
     };
     if !indirection.is_nil() {
         let col_var = if pstate.p_is_insert {
-            Node::mk_const(mcx, attrtype, attrtypmod, attrcollation, -2, ::datum::Datum::null(), true, false)?
+            // C makeNullConst: the placeholder carries the column type's
+            // typlen/typbyval (parse_target.c:541).
+            let (typlen, typbyval) = ::lsyscache::get_typlenbyval(attrtype)?;
+            Node::mk_const(
+                mcx,
+                attrtype,
+                attrtypmod,
+                attrcollation,
+                typlen as i32,
+                ::datum::Datum::null(),
+                true,
+                typbyval,
+            )?
         } else {
             let rtindex = pstate
                 .p_target_nsitem
                 .expect("UPDATE with no target nsitem")
                 .p_rtindex;
-            Node::mk_var(mcx, rtindex, attrno as i16, attrtype, attrtypmod, attrcollation, 0)?
+            // C makeVar + var->location = location (parse_target.c:553): the
+            // subscript/field errors caret the target column.
+            Node::mk(
+                mcx,
+                types_nodes::Var {
+                    varno: rtindex,
+                    varattno: attrno as AttrNumber,
+                    vartype: attrtype,
+                    vartypmod: attrtypmod,
+                    varcollid: attrcollation,
+                    varnullingrels: types_nodes::Bitmapset::empty(),
+                    varlevelsup: 0,
+                    varreturningtype: types_nodes::VarReturningType::VAR_RETURNING_DEFAULT,
+                    varnosyn: rtindex as types_core::Index,
+                    varattnosyn: attrno as AttrNumber,
+                    location,
+                },
+            )?
         };
         return transformAssignmentIndirection(
             mcx,
@@ -375,10 +404,11 @@ fn cannot_assign_to_system_column(
     colname: Option<&str>,
     location: i32,
 ) -> Box<types_error::PgError> {
-    use types_error::{ErrorLocation, ERRCODE_SYNTAX_ERROR, ERROR};
+    use types_error::{ErrorLocation, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
+    // parse_target.c:481: ERRCODE_FEATURE_NOT_SUPPORTED.
     Box::new(
         elog::ereport(ERROR)
-            .errcode(ERRCODE_SYNTAX_ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
             .errmsg(format!("cannot assign to system column \"{}\"", colname.unwrap_or("?")))
             .errposition(parser_small1::parser_errposition(
                 pstate,
@@ -1181,6 +1211,43 @@ pub fn FigureIndexColname<'mcx>(node: Node<'mcx>) -> Option<&'mcx str> {
     name
 }
 
+/// The resname transformTargetEntry would assign to a raw SelectStmt's first
+/// output column: a set operation names after its leftmost arm
+/// (transformSetOperationStmt), a VALUES list is "column1"
+/// (transformValuesClause), else the first ResTarget's name or its value's
+/// FigureColname. C never needs this: transformSubLink scribbles the
+/// transformed Query into the raw SubLink and FigureColname reads its
+/// targetList (parse_target.c:1886-1898).
+fn raw_select_first_colname<'mcx>(
+    ss: &types_nodes::rawnodes::SelectStmt<'mcx>,
+    name: &mut Option<&'mcx str>,
+) -> bool {
+    if ss.op != types_nodes::parsenodes::SetOperation::SETOP_NONE {
+        return match ss.larg {
+            Some(larg) => raw_select_first_colname(larg, name),
+            None => false,
+        };
+    }
+    if !ss.valuesLists.is_nil() {
+        *name = Some("column1");
+        return true;
+    }
+    let Some(rt) = ss.targetList.first().and_then(|n| n.as_res_target()) else {
+        return false;
+    };
+    if let Some(n) = rt.name {
+        *name = Some(n);
+        return true;
+    }
+    if let Some(val) = rt.val {
+        let mut inner = None;
+        FigureColnameInternal(val, &mut inner);
+        *name = Some(inner.unwrap_or("?column?"));
+        return true;
+    }
+    false
+}
+
 // C's strength contract: 0 = no name, 1 = weak (type-cast name), 2 = good.
 fn FigureColnameInternal<'mcx>(node: Node<'mcx>, name: &mut Option<&'mcx str>) -> i32 {
     match node.node_tag() {
@@ -1326,19 +1393,8 @@ fn FigureColnameInternal<'mcx>(node: Node<'mcx>, name: &mut Option<&'mcx str>) -
                             }
                         }
                     } else if let Some(ss) = sl.subselect.as_select_stmt() {
-                        if let Some(rt) =
-                            ss.targetList.first().and_then(|n| n.as_res_target())
-                        {
-                            if let Some(n) = rt.name {
-                                *name = Some(n);
-                                return 2;
-                            }
-                            if let Some(val) = rt.val {
-                                let mut inner = None;
-                                FigureColnameInternal(val, &mut inner);
-                                *name = Some(inner.unwrap_or("?column?"));
-                                return 2;
-                            }
+                        if raw_select_first_colname(ss, name) {
+                            return 2;
                         }
                     }
                     0
@@ -1366,17 +1422,19 @@ fn FigureColnameInternal<'mcx>(node: Node<'mcx>, name: &mut Option<&'mcx str>) -
                 IS_XMLSERIALIZE => Some("xmlserialize"),
                 IS_DOCUMENT => None,
             };
+            // C: SQL/XML constructs act like a regular function (strength 2,
+            // parse_target.c:1955-1988), so a cast keeps the name.
             match n {
                 Some(v) => {
                     *name = Some(v);
-                    1
+                    2
                 }
                 None => 0,
             }
         }
         NodeTag::T_XmlSerialize => {
             *name = Some("xmlserialize");
-            1
+            2
         }
         NodeTag::T_JsonParseExpr => {
             *name = Some("json");
