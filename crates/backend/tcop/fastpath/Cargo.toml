@@ -29,3 +29,9 @@ snapmgr = { path = "../../utils/time/snapmgr" }
 mbutils = { path = "../../utils/mb/mbutils" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 postgres_seams = { path = "../postgres_seams" }
+objectaccess = { path = "../../catalog/objectaccess" }
+
+[dev-dependencies]
+types_snapshot = { path = "../../../_support/types/snapshot" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+xact_seams = { path = "../../access/transam/xact_seams" }

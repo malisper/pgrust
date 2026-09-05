@@ -188,6 +188,8 @@ pub fn HandleFunctionRequest<'mcx>(
             nspname.as_ref().map_or("", |s| s.as_str()),
         )?;
     }
+    // fastpath.c:246 — the hook's ereport (ereport_on_violation) is the refusal.
+    objectaccess::InvokeNamespaceSearchHook(fip.namespace, true)?;
 
     let aclresult = aclchk::object_aclcheck(
         PROCEDURE_RELATION_ID,
@@ -203,6 +205,8 @@ pub fn HandleFunctionRequest<'mcx>(
             funcname.as_ref().map_or("", |s| s.as_str()),
         )?;
     }
+    // fastpath.c:252
+    objectaccess::InvokeFunctionExecuteHook(fid)?;
 
     // Note: collation = InvalidOid, so collation-sensitive functions can't be
     // called this way.
@@ -501,5 +505,191 @@ mod tests {
         // SAFETY: `copied` lives in `msg`, which is still alive.
         let got = unsafe { core::slice::from_raw_parts(copied.as_usize() as *const u8, 8) };
         assert_eq!(got, &payload, "copied datum must retain its bytes");
+    }
+}
+
+// fastpath.c:246/252: after the schema-usage and function-execute ACL checks,
+// HandleFunctionRequest runs InvokeNamespaceSearchHook(fip->namespace, true)
+// and InvokeFunctionExecuteHook(fid) so an object_access_hook consumer
+// (sepgsql, audit modules) observes the fastpath invocation — and can refuse
+// it — before the function body runs. Catalog access is faked at the syscache
+// / fmgr seams; the ACL checks pass on the bootstrap-superuser short-circuit
+// (aclchk.c pg_namespace_aclmask_ext / object_aclmask_ext), and the snapshot
+// comes from the historic-snapshot slot so no procarray is needed.
+#[cfg(test)]
+mod oat_hook_tests {
+    use super::*;
+    use std::rc::Rc;
+    use std::sync::{Mutex, Once};
+
+    use mcx::MemoryContext;
+    use objectaccess::{ObjectAccessArg, ObjectAccessType, OAT_FUNCTION_EXECUTE};
+    use syscache_seams::PgProcShape;
+    use types_core::BOOTSTRAP_SUPERUSERID;
+    use types_fmgr::FunctionCallInfoBaseData;
+    use types_snapshot::{SnapshotData, SnapshotType};
+    use types_tuple::NameData;
+
+    const FID: Oid = 61234;
+    const NSP: Oid = 61235;
+    const INT4OID: Oid = 23;
+
+    static EVENTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    static SEAMS: Once = Once::new();
+
+    fn log(event: String) {
+        EVENTS.lock().unwrap().push(event);
+    }
+
+    fn drain() -> Vec<String> {
+        std::mem::take(&mut *EVENTS.lock().unwrap())
+    }
+
+    // The function body: reached only once every pre-call step has passed.
+    fn body(
+        _flinfo: Option<&mut FmgrInfo>,
+        _fcinfo: &mut FunctionCallInfoBaseData,
+    ) -> PgResult<Datum> {
+        log("BODY".to_string());
+        Err(ereport(ERROR)
+            .errmsg("fp witness: function body reached")
+            .into_error()
+            .into())
+    }
+
+    fn recording_hook(
+        access: ObjectAccessType,
+        class_id: Oid,
+        object_id: Oid,
+        sub_id: i32,
+        arg: &mut ObjectAccessArg<'_>,
+    ) -> PgResult<()> {
+        let detail = match arg {
+            ObjectAccessArg::NamespaceSearch(ns) => {
+                format!(" ereport={}", ns.ereport_on_violation)
+            }
+            _ => String::new(),
+        };
+        log(format!("{access:?} class={class_id} obj={object_id} sub={sub_id}{detail}"));
+        Ok(())
+    }
+
+    // sepgsql shape: the hook ereports on OAT_FUNCTION_EXECUTE.
+    fn refusing_hook(
+        access: ObjectAccessType,
+        class_id: Oid,
+        object_id: Oid,
+        sub_id: i32,
+        arg: &mut ObjectAccessArg<'_>,
+    ) -> PgResult<()> {
+        recording_hook(access, class_id, object_id, sub_id, arg)?;
+        if access == OAT_FUNCTION_EXECUTE {
+            return Err(ereport(ERROR)
+                .errmsg("fp witness: hook refused")
+                .into_error()
+                .into());
+        }
+        Ok(())
+    }
+
+    fn proc_shape(funcid: Oid) -> PgResult<Option<PgProcShape>> {
+        Ok((funcid == FID).then(|| PgProcShape {
+            pronamespace: NSP,
+            prorettype: INT4OID,
+            provariadic: InvalidOid,
+            prosupport: InvalidOid,
+            prolang: 12,
+            pronargs: 0,
+            prokind: PROKIND_FUNCTION,
+            provolatile: b'i' as i8,
+            proparallel: b's' as i8,
+            proretset: false,
+            proisstrict: false,
+            proleakproof: false,
+            prosecdef: false,
+            proconfig_isnull: true,
+        }))
+    }
+
+    fn proc_name(funcid: Oid) -> PgResult<Option<NameData>> {
+        let mut name = NameData { data: [0; 64] };
+        name.namestrcpy("fp_oat_witness");
+        Ok((funcid == FID).then_some(name))
+    }
+
+    fn proc_signature<'mcx>(
+        mcx: Mcx<'mcx>,
+        funcid: Oid,
+    ) -> PgResult<Option<(Oid, PgVec<'mcx, Oid>)>> {
+        Ok((funcid == FID).then(|| (INT4OID, PgVec::new_in(mcx))))
+    }
+
+    fn fmgr_info(funcid: Oid) -> PgResult<FmgrInfo> {
+        Ok(FmgrInfo::new(body, funcid, 0, false, false))
+    }
+
+    fn install_seams() {
+        SEAMS.call_once(|| {
+            syscache_seams::lookup_pg_proc_shape::set(proc_shape);
+            syscache_seams::pg_proc_proname::set(proc_name);
+            syscache_seams::lookup_pg_proc_signature::set(proc_signature);
+            fmgr_seams::fmgr_info::set(fmgr_info);
+            xact_seams::get_current_transaction_nest_level::set(|| 1);
+        });
+    }
+
+    // One 'F' message: fid, 0 argument formats, 0 arguments, text result.
+    fn run_request() -> PgResult<bool> {
+        let ctx = MemoryContext::new("fp-oat-msg");
+        let mcx = ctx.mcx();
+        let mut msg = StringInfo::new_in(mcx)?;
+        msg.append_bytes(&FID.to_be_bytes())?;
+        msg.append_bytes(&0u16.to_be_bytes())?;
+        msg.append_bytes(&0u16.to_be_bytes())?;
+        msg.append_bytes(&0u16.to_be_bytes())?;
+        msg.cursor = 0;
+        HandleFunctionRequest(mcx, &mut msg)
+    }
+
+    fn namespace_search_event() -> String {
+        format!("OAT_NAMESPACE_SEARCH class={NAMESPACE_RELATION_ID} obj={NSP} sub=0 ereport=true")
+    }
+
+    fn function_execute_event() -> String {
+        format!("OAT_FUNCTION_EXECUTE class={PROCEDURE_RELATION_ID} obj={FID} sub=0")
+    }
+
+    #[test]
+    fn handle_function_request_runs_object_access_hooks_before_the_body() {
+        install_seams();
+        miscinit::SetUserIdAndSecContext(BOOTSTRAP_SUPERUSERID, 0);
+        let snap_ctx: &'static MemoryContext = mcx::session_root("fp-oat-snap");
+        snapmgr::SetupHistoricSnapshot(
+            Rc::new(SnapshotData::sentinel(snap_ctx.mcx(), SnapshotType::SNAPSHOT_MVCC)),
+            None,
+        );
+        drain();
+
+        // A recording hook sees OAT_NAMESPACE_SEARCH(namespace, ereport=true)
+        // then OAT_FUNCTION_EXECUTE(fid), in fastpath.c order, before the body.
+        let prev = objectaccess::set_object_access_hook(Some(recording_hook));
+        assert!(prev.is_none(), "another hook is installed on this thread");
+        let err = run_request().expect_err("the witness body always errors");
+        assert_eq!(err.message(), "fp witness: function body reached");
+        assert_eq!(
+            drain(),
+            vec![namespace_search_event(), function_execute_event(), "BODY".to_string()]
+        );
+
+        // A hook that ereports on OAT_FUNCTION_EXECUTE stops the call: the
+        // hook's error is what HandleFunctionRequest returns and the body
+        // never runs.
+        objectaccess::set_object_access_hook(Some(refusing_hook));
+        let err = run_request().expect_err("the refusing hook errors");
+        assert_eq!(err.message(), "fp witness: hook refused");
+        assert_eq!(drain(), vec![namespace_search_event(), function_execute_event()]);
+
+        objectaccess::set_object_access_hook(None);
+        snapmgr::TeardownHistoricSnapshot(false);
     }
 }

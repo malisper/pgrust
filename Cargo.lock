@@ -6232,6 +6232,7 @@ dependencies = [
  "mbutils",
  "mcx",
  "miscinit",
+ "objectaccess",
  "postgres_seams",
  "pqformat",
  "snapmgr",
@@ -6241,7 +6242,10 @@ dependencies = [
  "types_error",
  "types_fmgr",
  "types_nodes",
+ "types_snapshot",
+ "types_tuple",
  "xact",
+ "xact_seams",
 ]
 
 [[package]]
