@@ -309,6 +309,15 @@ pub fn load_file(filename: &str, restricted: bool) -> PgResult<()> {
     Ok(())
 }
 
+// file_list membership for THIS backend (dfmgr.c: a library is "loaded" in
+// a process once internal_load_library linked it in — inherited from the
+// postmaster under shared_preload_libraries, or added by a session LOAD /
+// session_preload_libraries). Hook-only modules whose hooks are process-wide
+// gate on this to reproduce C's per-process hook installation.
+pub fn is_loaded(module_name: &str) -> bool {
+    FILE_LIST.with(|s| s.borrow().iter().any(|f| f.entry.name == module_name))
+}
+
 pub fn loaded_modules() -> Vec<LoadedModule> {
     FILE_LIST.with(|s| {
         s.borrow()

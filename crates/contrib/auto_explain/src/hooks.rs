@@ -45,6 +45,10 @@ fn loc(funcname: &'static str) -> ErrorLocation {
 
 /// `explain_ExecutorStart`.
 pub(crate) fn explain_executor_start(h: QueryDescHandle) {
+    // C: the hook exists only in a backend that loaded the library.
+    if !crate::session_loaded() {
+        return;
+    }
     // At the start of each top-level statement, decide whether to sample it.
     // In a parallel worker do nothing (the leader reports).
     if nesting_level() == 0 {
@@ -93,6 +97,12 @@ pub(crate) fn explain_executor_start(h: QueryDescHandle) {
     });
 }
 
+// The run/finish enter+leave pairs bump nesting_level unconditionally: C
+// keeps the pair balanced inside one hook frame (PG_TRY/PG_FINALLY), so a
+// LOAD 'auto_explain' issued mid-query (from a PL function) must never see a
+// gated enter and an ungated leave — the level would drift negative and
+// silence the session for good.
+
 /// `explain_ExecutorRun` (enter half).
 pub(crate) fn explain_executor_run(_h: QueryDescHandle) {
     nesting_add(1);
@@ -126,6 +136,9 @@ struct LogJob {
 /// EXPLAIN walk runs outside it (ExplainPrintPlan re-enters the QueryDesc
 /// registry through `es.qd`, which would double-borrow).
 pub(crate) fn explain_executor_end(h: QueryDescHandle) {
+    if !crate::session_loaded() {
+        return;
+    }
     let job = execmain::with_qd(h, |qd| -> Option<LogJob> {
         if qd.totaltime.is_none() || !auto_explain_enabled() {
             return None;

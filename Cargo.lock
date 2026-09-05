@@ -1746,7 +1746,6 @@ dependencies = [
  "guc_tables",
  "instrument",
  "mcx",
- "miscinit",
  "nodes_params",
  "parallel",
  "pg_prng",

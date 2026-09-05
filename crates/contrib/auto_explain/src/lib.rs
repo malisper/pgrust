@@ -8,16 +8,24 @@
 //! preloaded nothing installs into the taps and the executor pays only the
 //! `call_if` null test — the same not-loaded zero cost as pgss.
 //!
-//! Threaded-server divergence (documented, C loads per-process): hooks are
-//! process-global and can only be installed in the boot window, so hook
-//! activation requires `shared_preload_libraries`. A session-level `LOAD
-//! 'auto_explain'` still runs `_PG_init` for that session — reserving the
-//! GUC prefix exactly like C (the alter_reset corpus path) — but cannot add
-//! executor hooks after boot. The GUC gate (`log_min_duration = -1` default,
-//! per-session values) keeps per-session enable/disable semantics identical
-//! to C under shared preload.
+//! Threaded-server shape (C loads per-process): executor hooks are
+//! process-global and can only be installed in the boot window, while C's
+//! `_PG_init` installs them in whichever backend loads the library — under
+//! `shared_preload_libraries` (every backend inherits them) or a session-level
+//! `LOAD 'auto_explain'` / `session_preload_libraries` (that backend only).
+//! So the hook set registers once at boot (`init_seams`) and every hook body
+//! gates on C's per-process condition instead: the library is in THIS
+//! backend's dfmgr file_list (inherited from the postmaster under shared
+//! preload, or added by the session's own load). `_PG_init` reserves the GUC
+//! prefix exactly like C (the alter_reset corpus path) and flips the
+//! process-wide "ever loaded" latch that keeps the never-loaded cost to one
+//! relaxed atomic load per hook. The GUC gate (`log_min_duration = -1`
+//! default, per-session values) keeps per-session enable/disable semantics
+//! identical to C.
 
 #![allow(non_snake_case)]
+
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use types_error::PgResult;
 use types_fmgr::PGFunction;
@@ -25,6 +33,18 @@ use types_fmgr::PGFunction;
 mod hooks;
 
 const LIBRARY: &str = "auto_explain";
+
+// Set by `_PG_init` in any backend (postmaster under shared preload, or a
+// session LOAD). Never cleared: a process that never loaded the module pays
+// one relaxed load per executor hook and nothing else.
+static EVER_LOADED: AtomicBool = AtomicBool::new(false);
+
+/// C's "this backend has the auto_explain hooks installed": the library is
+/// in this backend's file_list (dfmgr.c internal_load_library links it there
+/// after `_PG_init`; a forked backend inherits the postmaster's list).
+pub(crate) fn session_loaded() -> bool {
+    EVER_LOADED.load(Ordering::Relaxed) && dfmgr::is_loaded(LIBRARY)
+}
 
 pub(crate) mod gucs {
     guc_tables::session_guc_cluster!(AexGucs, AEX_GUCS:
@@ -94,20 +114,11 @@ pub fn init_seams() {
         lookup,
         pg_init: Some(pg_init),
     });
-}
 
-/// `_PG_init` (auto_explain.c). C installs its executor hooks from any load
-/// context; here hook installation is boot-window-only (see module comment),
-/// so the executor-hook registration happens only under
-/// shared_preload_libraries. The GUC prefix reservation runs on every load,
-/// like C's MarkGUCPrefixReserved after the GUC definitions.
-fn pg_init() -> PgResult<()> {
-    guc::MarkGUCPrefixReserved("auto_explain");
-
-    if !miscinit::process_shared_preload_libraries_in_progress() {
-        return Ok(());
-    }
-
+    // auto_explain.c _PG_init: "Install hooks" — C does this in whichever
+    // backend loads the library (shared_preload_libraries or a session-level
+    // LOAD 'auto_explain'); the taps are boot-window-only, so the set
+    // registers here and each body gates on `session_loaded()`.
     exec_hooks::register(exec_hooks::ExecutorHooks {
         start: Some(hooks::explain_executor_start),
         run: Some(hooks::explain_executor_run),
@@ -116,6 +127,17 @@ fn pg_init() -> PgResult<()> {
         finish_leave: Some(hooks::explain_executor_finish_leave),
         end: Some(hooks::explain_executor_end),
     });
+}
 
+/// `_PG_init` (auto_explain.c:251). Runs once per loading backend — the
+/// postmaster under shared_preload_libraries, or a session's LOAD — and, as
+/// in C, never bails on the load context: the GUC prefix reservation
+/// (MarkGUCPrefixReserved after the GUC definitions) and the hook activation
+/// happen for every load. The hooks themselves are process-wide (see the
+/// module comment); this backend's activation is its dfmgr file_list entry,
+/// linked by the caller right after this returns.
+fn pg_init() -> PgResult<()> {
+    guc::MarkGUCPrefixReserved("auto_explain");
+    EVER_LOADED.store(true, Ordering::Relaxed);
     Ok(())
 }

@@ -22,7 +22,6 @@ execmain = { path = "../../backend/executor/execmain" }
 exec_hooks = { path = "../exec_hooks" }
 explain = { path = "../../backend/commands/explain" }
 instrument = { path = "../../backend/executor/instrument" }
-miscinit = { path = "../../backend/utils/init/miscinit" }
 parallel = { path = "../../backend/access/transam/parallel" }
 nodes_params = { path = "../../backend/nodes/params" }
 pg_prng = { path = "../../common/pg_prng" }
