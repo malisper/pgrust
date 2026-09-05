@@ -69,18 +69,21 @@ fn build_generation_expression<'mcx>(
 ) -> PgResult<types_nodes::Node<'mcx>> {
     let att = rel.rd_att.attr(attrno - 1);
     let constr = rel.rd_att.constr.as_deref().expect("caller checked");
-    let adbin = constr
+    // rewriteHandler.c:4601: elog(ERROR, "no generation expression found
+    // for column number %d of table \"%s\"") — a catchable XX000 on a
+    // catalog whose pg_attrdef row is missing, never a backend abort.
+    let Some(adbin) = constr
         .defval
         .iter()
         .find(|d| d.adnum == attrno as i16)
         .and_then(|d| d.adbin.as_ref())
-        .unwrap_or_else(|| {
-            panic!(
-                "no generation expression found for column number {} of table \"{}\"",
-                attrno,
-                String::from_utf8_lossy(rel.rd_rel.relname.name_str())
-            )
-        });
+    else {
+        return Err(crate::catalog::internal_error(format!(
+            "no generation expression found for column number {} of table \"{}\"",
+            attrno,
+            String::from_utf8_lossy(rel.rd_rel.relname.name_str())
+        )));
+    };
     let expr = readfuncs::stringToNode(mcx, adbin.as_str())?;
     if att.attcollation != 0 && att.attcollation != nodes_core::node_funcs::expr_collation(expr) {
         return types_nodes::Node::mk(
@@ -162,7 +165,11 @@ fn expand_generated_columns_in_expr<'mcx>(
                 },
             )?));
         }
-        if rel.rd_att.attr(v.varattno as usize - 1).attgenerated != VIRTUAL_GEN {
+        // rewriteManip.c:1858-1873 (ReplaceVarsFromTargetList_callback):
+        // a system column (varattno < 0) has no targetlist entry, and the
+        // REPLACEVARS_CHANGE_VARNO arm leaves the Var alone.
+        if v.varattno < 0 || rel.rd_att.attr(v.varattno as usize - 1).attgenerated != VIRTUAL_GEN
+        {
             return Ok(None);
         }
         let e = build_generation_expression(mcx, rel, v.varattno as usize)?;
@@ -187,6 +194,10 @@ pub struct TriggerWhenCache<'mcx> {
     states: Vec<Option<PgBox<'mcx, execexpr::ExprState<'mcx>>>>,
     scratch_old: Option<SlotData<'mcx>>,
     scratch_new: Option<SlotData<'mcx>>,
+    // C ri_PartitionCheckExpr for ExecBRInsertTriggers' tgisclone re-verify
+    // (trigger.c:2527-2536): compiled once per relation, like the WHEN
+    // states above.
+    partition_check: Option<PgBox<'mcx, execexpr::ExprState<'mcx>>>,
 }
 
 // The WHEN/UPDATE-OF half of C TriggerEnabled; borrows of the estate the
@@ -287,7 +298,7 @@ impl<'a, 'mcx> TriggerWhenEval<'a, 'mcx> {
             exectuples::exec_store_heap_tuple(s, mcx, staged);
             Ok(Some(()))
         };
-        let TriggerWhenCache { states, scratch_old, scratch_new } = &mut *self.cache;
+        let TriggerWhenCache { states, scratch_old, scratch_new, .. } = &mut *self.cache;
         stage(scratch_old, old_tup)?;
         stage(scratch_new, new_tup)?;
         let mut slots = execexpr::EvalSlots {
@@ -496,10 +507,57 @@ fn insert_row_triggers<'mcx>(
                     )
                 };
                 exectuples::exec_force_store_heap_tuple(copy, slot, mcx)?;
+                // trigger.c:2527-2536: after a cloned trigger replaced the
+                // tuple, the row may no longer fit the partition it was
+                // routed to (or COPYed into directly). ExecPartitionCheck
+                // with emitError=false, then the FEATURE_NOT_SUPPORTED
+                // error; ExecIRInsertTriggers has no such arm.
+                if !instead
+                    && trigger.tgisclone
+                    && !execpartition::exec_partition_check(
+                        mcx,
+                        &mut when.cache.partition_check,
+                        rel,
+                        slot,
+                    )?
+                {
+                    return Err(moved_row_before_trigger(mcx, trigger, rel));
+                }
             }
         }
     }
     Ok(true)
+}
+
+// ExecBRInsertTriggers (trigger.c:2529-2536): the replacement tuple of a
+// cloned trigger failed the partition constraint re-verify.
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn moved_row_before_trigger<'mcx>(
+    mcx: Mcx<'mcx>,
+    trigger: &Trigger<'_>,
+    rel: &Relation<'mcx>,
+) -> Box<PgError> {
+    let nspname = lsyscache::misc::get_namespace_name(mcx, rel.rd_rel.relnamespace)
+        .ok()
+        .flatten()
+        .map(|s| s.as_str().to_string())
+        .unwrap_or_default();
+    Box::new(
+        PgError::error(
+            "moving row to another partition during a BEFORE FOR EACH ROW trigger is not \
+             supported"
+                .to_string(),
+        )
+        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+        .with_detail(format!(
+            "Before executing trigger \"{}\", the row was to be in partition \"{}.{}\".",
+            trigger.tgname.as_str(),
+            nspname,
+            rel.name()
+        )),
+    )
 }
 
 // check_modified_virtual_generated (trigger.c:6735): a trigger-returned tuple

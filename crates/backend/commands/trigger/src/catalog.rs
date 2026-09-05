@@ -12,7 +12,7 @@ use types_error::{
     PgError, PgResult, ERRCODE_DUPLICATE_COLUMN,
     ERRCODE_DUPLICATE_OBJECT, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INSUFFICIENT_PRIVILEGE,
     ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_UNDEFINED_COLUMN,
-    ERRCODE_WRONG_OBJECT_TYPE, ERROR,
+    ERRCODE_WRONG_OBJECT_TYPE, ERROR, ERRCODE_INTERNAL_ERROR,
 };
 use types_nodes::primnodes::{Alias, Var};
 use types_nodes::rawnodes::CreateTrigStmt;
@@ -612,6 +612,9 @@ pub fn CreateTriggerFiringOn<'mcx>(
         )?;
     }
 
+    // trigger.c:1143: post creation hook for the new trigger.
+    objectaccess::InvokeObjectPostCreateHookArg(TRIGGER_RELATION_ID, trigoid, 0, is_internal)?;
+
     if partition_recurse {
         let partdesc = partdesc::RelationGetPartitionDesc(&rel, true)?;
         debug_assert!(index_oid == InvalidOid);
@@ -996,6 +999,15 @@ fn lookup_trigger_func<'mcx>(_mcx: Mcx<'mcx>, funcname: &NodeList<'mcx>) -> PgRe
     parse_func_seams::LookupFuncName::call(&parts, 0, &[], false)
 }
 
+// elog(ERROR, ...) in C: a catchable error at elog's default SQLSTATE
+// (XX000 / ERRCODE_INTERNAL_ERROR), never a backend abort.
+#[track_caller]
+#[cold]
+#[inline(never)]
+pub(crate) fn internal_error(message: String) -> Box<PgError> {
+    Box::new(PgError::error(message).with_sqlstate(ERRCODE_INTERNAL_ERROR))
+}
+
 fn name_list_to_string(names: &NodeList<'_>) -> String {
     let mut out = String::new();
     for (i, part) in names.iter().enumerate() {
@@ -1109,8 +1121,10 @@ pub fn TriggerSetParentTrigger<'mcx>(
     let keys = [scan_key(Anum_pg_trigger_oid, F_OIDEQ, Datum::from_oid(child_trig_id))];
     let mut scan =
         genam::systable_beginscan(mcx, &trig_rel, TriggerOidIndexId, true, None, &keys)?;
-    let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("could not find tuple for trigger {child_trig_id}"));
+    // trigger.c:1252: elog(ERROR, "could not find tuple for trigger %u").
+    let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+        return Err(internal_error(format!("could not find tuple for trigger {child_trig_id}")));
+    };
     let desc = trig_rel.descr();
     let mut isnull = false;
     // SAFETY: tgparentid is a fixed NOT NULL pg_trigger column.
@@ -1126,7 +1140,10 @@ pub fn TriggerSetParentTrigger<'mcx>(
     nulls.resize(natts, false);
     replace.resize(natts, false);
     if parent_trig_id != InvalidOid && tgparentid != InvalidOid {
-        panic!("trigger {child_trig_id} already has a parent trigger");
+        // trigger.c:1259: elog(ERROR, "trigger %u already has a parent trigger").
+        return Err(internal_error(format!(
+            "trigger {child_trig_id} already has a parent trigger"
+        )));
     }
     values[Anum_pg_trigger_tgparentid as usize - 1] = Datum::from_oid(parent_trig_id);
     replace[Anum_pg_trigger_tgparentid as usize - 1] = true;

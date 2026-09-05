@@ -113,8 +113,12 @@ pub fn RemoveTriggerById<'mcx>(mcx: Mcx<'mcx>, trig_oid: Oid) -> PgResult<()> {
         None,
         core::slice::from_ref(&key),
     )?;
-    let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("could not find tuple for trigger {trig_oid}"));
+    // trigger.c:1321: elog(ERROR, "could not find tuple for trigger %u").
+    let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+        return Err(crate::catalog::internal_error(format!(
+            "could not find tuple for trigger {trig_oid}"
+        )));
+    };
     let mut isnull = false;
     // SAFETY: NOT NULL pg_trigger tgrelid column under its descriptor.
     let relid = unsafe {
@@ -352,8 +356,15 @@ fn renametrig_internal<'mcx>(
     ];
     let mut scan =
         genam::systable_beginscan(mcx, tgrel, TRIGGER_RELID_NAME_INDEX_ID, true, None, &keys)?;
-    let tup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("trigger \"{actual_name}\" vanished during rename"));
+    // C renametrig_internal updates the tuple its caller found; this re-scan
+    // by (tgrelid, tgname) is the pgrust shape, and losing the row is the
+    // same catchable internal error as C's lookup failures (trigger.c:1252).
+    let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+        return Err(crate::catalog::internal_error(format!(
+            "could not find tuple for trigger \"{actual_name}\" on relation \"{}\"",
+            targetrel.name()
+        )));
+    };
     let td = tgrel.descr();
     let natts = td.natts as usize;
     let mut repl_values: mcx::PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
@@ -366,8 +377,15 @@ fn renametrig_internal<'mcx>(
     repl[3] = true;
     let mut newtup = heaptuple::heap_modify_tuple(mcx, tup, td, &repl_values, &repl_isnull, &repl)?;
     let tid = tup.t_self;
+    let mut isnull = false;
+    // SAFETY: oid is pg_trigger's NOT NULL first column under its descriptor.
+    let tgoid =
+        unsafe { types_tuple::heap_getattr(tup, Anum_pg_trigger_oid, td, &mut isnull) }.as_oid();
     genam::systable_endscan(mcx, scan)?;
     catalog_indexing::CatalogTupleUpdate(mcx, tgrel, &tid, &mut newtup)?;
+
+    // trigger.c:1644
+    objectaccess::InvokeObjectPostAlterHook(TRIGGER_RELATION_ID, tgoid, 0)?;
 
     inval::invalidate::CacheInvalidateRelcacheByRelid(targetrel.rd_id)?;
     Ok(())
@@ -523,8 +541,15 @@ pub fn EnableDisableTrigger<'mcx>(
                 None,
                 core::slice::from_ref(&key),
             )?;
-            let tup = genam::systable_getnext(mcx, &mut oscan)?
-                .unwrap_or_else(|| panic!("could not find tuple for trigger {}", hit.oid));
+            // C EnableDisableTrigger scribbles on the scan's own tuple; the
+            // re-fetch by oid failing is C's generic lookup elog
+            // (trigger.c:1252, 1321), a catchable XX000.
+            let Some(tup) = genam::systable_getnext(mcx, &mut oscan)? else {
+                return Err(crate::catalog::internal_error(format!(
+                    "could not find tuple for trigger {}",
+                    hit.oid
+                )));
+            };
             let natts = td.natts as usize;
             let mut repl_values: mcx::PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
             let mut repl_isnull: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
@@ -562,6 +587,8 @@ pub fn EnableDisableTrigger<'mcx>(
                 part.close(NoLock)?;
             }
         }
+        // trigger.c:1832: once per matched trigger, changed or not.
+        objectaccess::InvokeObjectPostAlterHook(TRIGGER_RELATION_ID, hit.oid, 0)?;
     }
     tgrel.close(RowExclusiveLock)?;
 

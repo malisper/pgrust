@@ -2307,7 +2307,10 @@ fn fire_as_triggers<'mcx>(
         return Ok(());
     };
     let (ins, upd, del) = stmt_trigger_ops(mt, false);
-    if upd && td.triggers.iter().any(|t| t.tgnattr > 0) {
+    // C ExecASUpdateTriggers (trigger.c:2967) calls ExecGetAllUpdatedCols
+    // unconditionally for the statement event's ats_modifiedcols; the
+    // UPDATE OF gate (tgnattr) reads the same set.
+    if upd && (td.trig_update_after_statement || td.triggers.iter().any(|t| t.tgnattr > 0)) {
         ensure_all_updated_cols(mt, estate, true)?;
     }
     let mcx = estate.es_query_cxt;
@@ -2331,7 +2334,13 @@ fn fire_as_triggers<'mcx>(
             modified_cols: all_updated_cols.as_ref(),
         };
         let oc = oc_transition_capture.as_ref();
-        ::trigger::ExecASUpdateTriggers(rel, &td, if oc.is_some() { oc } else { tc }, Some(&mut when))?;
+        ::trigger::ExecASUpdateTriggers(
+            rel,
+            &td,
+            if oc.is_some() { oc } else { tc },
+            Some(&mut when),
+            all_updated_cols.as_ref(),
+        )?;
     }
     if ins {
         let mut when =
@@ -2397,7 +2406,7 @@ fn exec_bs_triggers<'mcx>(
         return Ok(());
     }
     let relid = mt.root_rel().rd_id;
-    if ::trigger::before_stmt_triggers_fired(relid, event_op) {
+    if ::trigger::before_stmt_triggers_fired(relid, event_op)? {
         return Ok(());
     }
     if event_op == types_trigger::TRIGGER_EVENT_UPDATE

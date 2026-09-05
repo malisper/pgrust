@@ -26,6 +26,7 @@ table = { path = "../../access/table/table" }
 genam = { path = "../../access/index/genam" }
 heapam = { path = "../../access/heap/heapam" }
 catalog = { path = "../../catalog/catalog" }
+objectaccess = { path = "../../catalog/objectaccess" }
 pg_class = { path = "../../catalog/pg_class" }
 catalog_indexing = { path = "../../catalog/catalog_indexing" }
 pg_depend = { path = "../../catalog/pg_depend" }
@@ -67,6 +68,7 @@ rewrite_manip = { path = "../../rewrite/rewrite_manip" }
 clauses = { path = "../../optimizer/util/clauses" }
 tuplestore = { path = "../../utils/sort/tuplestore" }
 exectuples = { path = "../../executor/exectuples" }
+execpartition = { path = "../../executor/execpartition" }
 types_portal = { path = "../../../_support/types/portal" }
 pgstat = { path = "../../utils/activity/pgstat" }
 guc_tables = { path = "../../utils/misc/guc_tables" }

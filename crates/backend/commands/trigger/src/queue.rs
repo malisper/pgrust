@@ -186,14 +186,21 @@ pub fn MakeTransitionCaptureState(
             trigdesc.trig_delete_old_table,
             trigdesc.trig_insert_new_table,
         ),
-        other => panic!("unexpected CmdType: {other:?}"),
+        // trigger.c:5002: elog(ERROR, "unexpected CmdType: %d", (int) cmdType).
+        other => {
+            return Err(Box::new(
+                PgError::error(format!("unexpected CmdType: {}", other as u32))
+                    .with_sqlstate(ERRCODE_INTERNAL_ERROR),
+            ))
+        }
     };
     if !need_old_upd && !need_new_upd && !need_new_ins && !need_old_del {
         return Ok(None);
     }
     let depth = QUERY_DEPTH.with(|c| c.get());
     if depth < 0 {
-        return Err(outside_query());
+        // trigger.c:5012
+        return Err(outside_query("MakeTransitionCaptureState"));
     }
     let d = depth as usize;
     let ins_idx = if need_new_ins {
@@ -358,21 +365,22 @@ fn stmt_cmd_type(op: u32) -> CmdType {
     }
 }
 
-// before_stmt_triggers_fired (trigger.c:2896): check-and-mark on the open
-// AfterTriggersTableData, so a closed table lets BS triggers fire again.
-pub fn before_stmt_triggers_fired(relid: Oid, cmd_event: u32) -> bool {
+// before_stmt_triggers_fired (trigger.c:6588-6613): check-and-mark on the
+// open AfterTriggersTableData, so a closed table lets BS triggers fire again.
+pub fn before_stmt_triggers_fired(relid: Oid, cmd_event: u32) -> PgResult<bool> {
     let depth = QUERY_DEPTH.with(|c| c.get());
     if depth < 0 {
-        return false;
+        // trigger.c:6595-6596: "Check state, like AfterTriggerSaveEvent."
+        return Err(outside_query("before_stmt_triggers_fired"));
     }
     let idx = get_transition_table(depth as usize, relid, stmt_cmd_type(cmd_event));
-    TRANS_TABLES.with(|t| {
+    Ok(TRANS_TABLES.with(|t| {
         let mut tt = t.borrow_mut();
         let tb = &mut tt[depth as usize][idx as usize];
         let done = tb.before_trig_done;
         tb.before_trig_done = true;
         done
-    })
+    }))
 }
 
 pub(crate) fn query_depth() -> i32 {
@@ -559,8 +567,10 @@ fn mark_events(sel: EvList, immediate_only: bool, move_deferred: bool) -> PgResu
 // per-tuple scratch (C's AfterTriggerTupleContext) so the empty-queue
 // mark_events loop in every caller never pays a context create/destroy.
 fn invoke_events(sel: EvList, firing_id: CommandId, delete_ok: bool) -> PgResult<bool> {
-    let scratch = ::mcx::MemoryContext::new("AfterTriggerTupleContext");
-    let mcx = scratch.mcx();
+    // Bump backend: C's per-tuple context shape — reset is a wholesale free
+    // (the executor's per-tuple context rides the same arm; an exact-
+    // accounting Aset would demand every arena object be released first).
+    let mut scratch = ::mcx::MemoryContext::new_bump("AfterTriggerTupleContext");
     let mut i = 0;
     loop {
         // Borrow per event: firing re-enters the queue (RI SPI queries,
@@ -587,10 +597,15 @@ fn invoke_events(sel: EvList, firing_id: CommandId, delete_ok: bool) -> PgResult
         else {
             break;
         };
+        // trigger.c:4547: MemoryContextReset(per_tuple_context) per event —
+        // fetched tuples, converted images and the rebuilt tg_updatedcols
+        // set live only for one firing. Nothing AfterTriggerExecute returns
+        // points into the scratch, so the reset follows the call.
         AfterTriggerExecute(
-            mcx, ctid1, ctid2, event, tgoid, relid, table_idx, src_part, dst_part, rolid,
-            modifiedcols.as_deref(), desc.as_ref(),
+            scratch.mcx(), ctid1, ctid2, event, tgoid, relid, table_idx, src_part, dst_part,
+            rolid, modifiedcols.as_deref(), desc.as_ref(),
         )?;
+        scratch.reset();
         with_list(sel, |evs| {
             let ev = &mut evs[i];
             ev.flags &= !AFTER_TRIGGER_IN_PROGRESS;
@@ -892,6 +907,9 @@ fn AfterTriggerExecute<'mcx>(
             types_trigger_call::TriggerData::new(tg_event, &rel, None, None, trigger);
         tdata.tg_oldtable = tg_oldtable.0;
         tdata.tg_newtable = tg_newtable.0;
+        // trigger.c:4544-4545: an UPDATE event's ats_modifiedcols becomes
+        // tg_updatedcols for statement triggers too (NULL otherwise).
+        tdata.tg_updatedcols = updatedcols_ptr;
         // AFTER triggers: any returned tuple is discarded (C L4559-4567).
         let restore = become_queuing_role(rolid);
         let result =
@@ -1034,7 +1052,7 @@ fn after_trigger_save_event<'mcx>(
 ) -> PgResult<()> {
     let depth = QUERY_DEPTH.with(|c| c.get());
     if depth < 0 {
-        return Err(outside_query());
+        return Err(outside_query("AfterTriggerSaveEvent"));
     }
     let d = depth as usize;
     let partitioned = rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE;
@@ -1185,6 +1203,10 @@ fn skip_unique_key_recheck(tgfoid: Oid, tgconstrindid: Oid, recheck_indexes: &[O
 
 // AfterTriggerSaveEvent, statement-level arm (row_trigger=false): no tuples,
 // both ctids invalid. TRUNCATE never cancels a prior set (C's switch).
+// modified_cols is ExecASUpdateTriggers' ExecGetAllUpdatedCols
+// (trigger.c:2967-2972), saved as ats_modifiedcols so the statement
+// trigger's tg_updatedcols is set at firing (trigger.c:4544-4545); NULL for
+// the other operations.
 fn save_stmt_event<'mcx>(
     rel: &Relation<'mcx>,
     trigdesc: &Rc<TriggerDesc<'static>>,
@@ -1192,10 +1214,11 @@ fn save_stmt_event<'mcx>(
     tgtype_event: i16,
     transition_capture: Option<&TransitionCaptureState>,
     mut when: Option<&mut TriggerWhenEval<'_, 'mcx>>,
+    modified_cols: Option<&types_nodes::Bitmapset<'mcx>>,
 ) -> PgResult<()> {
     let depth = QUERY_DEPTH.with(|c| c.get());
     if depth < 0 {
-        return Err(outside_query());
+        return Err(outside_query("AfterTriggerSaveEvent"));
     }
     let d = depth as usize;
     if event != TRIGGER_EVENT_TRUNCATE {
@@ -1252,8 +1275,8 @@ fn save_stmt_event<'mcx>(
                 src_part: Oid::default(),
                 dst_part: Oid::default(),
                 rolid: miscinit::GetUserId(),
-                // Statement-level arm keeps tg_updatedcols unset (see fn doc).
-                modifiedcols: None,
+                modifiedcols: modified_cols
+                    .map(|b| b.iter().collect::<Vec<i32>>().into_boxed_slice()),
                 desc: Some(trigdesc.clone()),
             });
         });
@@ -1270,7 +1293,9 @@ pub fn ExecASInsertTriggers<'mcx>(
     if !trigdesc.trig_insert_after_statement {
         return Ok(());
     }
-    save_stmt_event(rel, trigdesc, TRIGGER_EVENT_INSERT, TRIGGER_TYPE_INSERT, transition_capture, when)
+    save_stmt_event(
+        rel, trigdesc, TRIGGER_EVENT_INSERT, TRIGGER_TYPE_INSERT, transition_capture, when, None,
+    )
 }
 
 pub fn ExecASDeleteTriggers<'mcx>(
@@ -1282,19 +1307,32 @@ pub fn ExecASDeleteTriggers<'mcx>(
     if !trigdesc.trig_delete_after_statement {
         return Ok(());
     }
-    save_stmt_event(rel, trigdesc, TRIGGER_EVENT_DELETE, TRIGGER_TYPE_DELETE, transition_capture, when)
+    save_stmt_event(
+        rel, trigdesc, TRIGGER_EVENT_DELETE, TRIGGER_TYPE_DELETE, transition_capture, when, None,
+    )
 }
 
+// ExecASUpdateTriggers (trigger.c:2960-2975): the statement event carries
+// ExecGetAllUpdatedCols as ats_modifiedcols -> tg_updatedcols.
 pub fn ExecASUpdateTriggers<'mcx>(
     rel: &Relation<'mcx>,
     trigdesc: &Rc<TriggerDesc<'static>>,
     transition_capture: Option<&TransitionCaptureState>,
     when: Option<&mut TriggerWhenEval<'_, 'mcx>>,
+    modified_cols: Option<&types_nodes::Bitmapset<'mcx>>,
 ) -> PgResult<()> {
     if !trigdesc.trig_update_after_statement {
         return Ok(());
     }
-    save_stmt_event(rel, trigdesc, TRIGGER_EVENT_UPDATE, TRIGGER_TYPE_UPDATE, transition_capture, when)
+    save_stmt_event(
+        rel,
+        trigdesc,
+        TRIGGER_EVENT_UPDATE,
+        TRIGGER_TYPE_UPDATE,
+        transition_capture,
+        when,
+        modified_cols,
+    )
 }
 
 // ExecASTruncateTriggers (trigger.c).
@@ -1306,7 +1344,7 @@ pub fn ExecASTruncateTriggers<'mcx>(
     if !trigdesc.trig_truncate_after_statement {
         return Ok(());
     }
-    save_stmt_event(rel, trigdesc, TRIGGER_EVENT_TRUNCATE, TRIGGER_TYPE_TRUNCATE, None, when)
+    save_stmt_event(rel, trigdesc, TRIGGER_EVENT_TRUNCATE, TRIGGER_TYPE_TRUNCATE, None, when, None)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1586,9 +1624,11 @@ fn restore_role(restore: Option<(Oid, i32)>) {
 #[track_caller]
 #[cold]
 #[inline(never)]
-fn outside_query() -> Box<PgError> {
+// elog(ERROR, "<func>() called outside of query") (trigger.c:5012, 6199,
+// 6596): the caller names itself, as C's literal texts do.
+fn outside_query(func: &str) -> Box<PgError> {
     Box::new(
-        PgError::error("AfterTriggerSaveEvent() called outside of query".to_string())
+        PgError::error(format!("{func}() called outside of query"))
             .with_sqlstate(ERRCODE_INTERNAL_ERROR),
     )
 }
@@ -1703,6 +1743,92 @@ mod tests {
 #[cfg(test)]
 mod save_event_tests {
     use super::*;
+
+    // audit-18.6 remediation b027: the three query-depth / CmdType guards
+    // that C raises as elog(ERROR) (trigger.c:5002, 5012, 6596). Each
+    // #[test] runs on a fresh thread, so afterTriggers.query_depth is -1
+    // (outside any query) unless the test opens one.
+    fn empty_desc<'m>(mcx: Mcx<'m>) -> TriggerDesc<'m> {
+        TriggerDesc {
+            triggers: mcx::PgVec::new_in(mcx),
+            trig_insert_before_row: false,
+            trig_insert_after_row: false,
+            trig_insert_instead_row: false,
+            trig_insert_before_statement: false,
+            trig_insert_after_statement: false,
+            trig_update_before_row: false,
+            trig_update_after_row: false,
+            trig_update_instead_row: false,
+            trig_update_before_statement: false,
+            trig_update_after_statement: false,
+            trig_delete_before_row: false,
+            trig_delete_after_row: false,
+            trig_delete_instead_row: false,
+            trig_delete_before_statement: false,
+            trig_delete_after_statement: false,
+            trig_truncate_before_statement: false,
+            trig_truncate_after_statement: false,
+            trig_insert_new_table: false,
+            trig_update_old_table: false,
+            trig_update_new_table: false,
+            trig_delete_old_table: false,
+        }
+    }
+
+    // trigger.c:5002: `elog(ERROR, "unexpected CmdType: %d", (int) cmdType)`
+    // is a catchable internal error, not a process panic.
+    #[test]
+    fn make_transition_capture_state_rejects_non_dml_cmdtype() {
+        let root = mcx::MemoryContext::new("b027-cmdtype");
+        let td = empty_desc(root.mcx());
+        let e = MakeTransitionCaptureState(&td, 4242, CmdType::CMD_SELECT)
+            .err()
+            .expect("CMD_SELECT is not a DML command");
+        assert_eq!(e.message(), "unexpected CmdType: 1");
+        assert_eq!(e.sqlstate(), ERRCODE_INTERNAL_ERROR);
+    }
+
+    // trigger.c:5012: the outside-of-query guard names the function that
+    // tripped it.
+    #[test]
+    fn make_transition_capture_state_outside_query_names_itself() {
+        let root = mcx::MemoryContext::new("b027-outside");
+        let mut td = empty_desc(root.mcx());
+        td.trig_insert_new_table = true;
+        assert_eq!(QUERY_DEPTH.with(|c| c.get()), -1);
+        let e = MakeTransitionCaptureState(&td, 4242, CmdType::CMD_INSERT)
+            .err()
+            .expect("query_depth is -1");
+        assert_eq!(e.message(), "MakeTransitionCaptureState() called outside of query");
+        assert_eq!(e.sqlstate(), ERRCODE_INTERNAL_ERROR);
+    }
+
+    // Signature-agnostic view of before_stmt_triggers_fired's verdict, so the
+    // witness compiles on the tree that returned a bare bool (silent false)
+    // and on the tree that returns PgResult<bool>.
+    trait Verdict {
+        fn verdict(self) -> PgResult<bool>;
+    }
+    impl Verdict for bool {
+        fn verdict(self) -> PgResult<bool> {
+            Ok(self)
+        }
+    }
+    impl Verdict for PgResult<bool> {
+        fn verdict(self) -> PgResult<bool> {
+            self
+        }
+    }
+
+    // trigger.c:6595-6596: outside a query the check is an error, never a
+    // silent "not fired yet".
+    #[test]
+    fn before_stmt_triggers_fired_outside_query_is_an_error() {
+        assert_eq!(QUERY_DEPTH.with(|c| c.get()), -1);
+        let e = before_stmt_triggers_fired(4242, TRIGGER_EVENT_INSERT).verdict().unwrap_err();
+        assert_eq!(e.message(), "before_stmt_triggers_fired() called outside of query");
+        assert_eq!(e.sqlstate(), ERRCODE_INTERNAL_ERROR);
+    }
 
     // constraint_cmd-2: the F_UNIQUE_KEY_RECHECK skip with C's NIL
     // recheckIndexes (the statement-level arm) always skips; the row arm
