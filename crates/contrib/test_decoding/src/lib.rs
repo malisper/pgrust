@@ -85,8 +85,7 @@ fn fc__pg_output_plugin_init(
     cb.stream_change_cb = Some(pg_decode_stream_change);
     cb.stream_message_cb = Some(pg_decode_stream_message);
     cb.stream_truncate_cb = Some(pg_decode_stream_truncate);
-    // C also registers stream_prepare_cb; streamed two-phase is deferred
-    // (GL-LOGDEC-1 ASK-1) — reaching it errors in the wrapper.
+    cb.stream_prepare_cb = Some(pg_decode_stream_prepare);
     Ok(Datum::from_usize(0))
 }
 
@@ -528,10 +527,17 @@ fn pg_decode_change(
         lsyscache::get_rel_namespace(relation.rd_id)?,
     )?
     .expect("relation namespace exists");
-    // C prefers get_rel_name(relrewrite) for rewrite relations; relrewrite is
-    // not carried by this port's FormData_pg_class and rewrite changes only
-    // reach plugins with receive_rewrites (unreachable without that field).
-    let relname = String::from_utf8_lossy(class_form.relname.name_str()).into_owned();
+    // class_form->relrewrite ? get_rel_name(class_form->relrewrite) :
+    // NameStr(class_form->relname) (test_decoding.c:633-635): a change on the
+    // transient rewrite heap is reported under the rewritten table's name.
+    let relrewrite = lsyscache::get_rel_relrewrite(relation.rd_id)?;
+    let relname = if relrewrite != InvalidOid {
+        lsyscache::get_rel_name(mcx, relrewrite)?
+            .map(|n| n.as_str().to_owned())
+            .unwrap_or_default()
+    } else {
+        String::from_utf8_lossy(class_form.relname.name_str()).into_owned()
+    };
     opc.out
         .push_str(&ruleutils::quote_qualified_identifier(
             Some(nspname.as_str()),
@@ -666,7 +672,9 @@ fn pg_decode_message(
         prefix,
         message.len()
     );
-    opc.out.push_str(&String::from_utf8_lossy(message));
+    // appendBinaryStringInfo (test_decoding.c:764): the payload is arbitrary
+    // bytes and goes out verbatim.
+    opc.out.as_mut_vec().extend_from_slice(message);
     OutputPluginWrite(opc, true)
 }
 
@@ -772,6 +780,55 @@ fn pg_decode_stream_abort(
     OutputPluginWrite(opc, true)
 }
 
+// pg_decode_stream_prepare (test_decoding.c:856): PREPARE of a (partially)
+// streamed transaction. The txn plugin data was allocated by the first
+// stream_start; C leaves it to the decoding context's teardown, this port
+// reclaims it here as pg_decode_prepare_txn does (the txn only sees
+// commit_prepared/rollback_prepared from now on, neither reads it).
+fn pg_decode_stream_prepare(
+    opc: &mut OutputPluginContext,
+    rb: &mut ReorderBuffer,
+    txn: TxnId,
+    _prepare_lsn: XLogRecPtr,
+) -> PgResult<()> {
+    let data = data_from(opc);
+    let p = rb.txn(txn).output_plugin_private;
+    rb.txn_mut(txn).output_plugin_private = 0;
+    let xact_wrote_changes = if p != 0 {
+        // SAFETY: exclusive owner of the stream-start allocation.
+        let txndata = unsafe { Box::from_raw(p as *mut TestDecodingTxnData) };
+        txndata.xact_wrote_changes
+    } else {
+        false
+    };
+
+    if data.skip_empty_xacts && !xact_wrote_changes {
+        return Ok(());
+    }
+
+    let gid = rb.txn(txn).gid.clone().expect("prepared txn carries a gid");
+    OutputPluginPrepareWrite(opc, true)?;
+    if data.include_xids {
+        let _ = write!(
+            opc.out,
+            "preparing streamed transaction TXN {}, txid {}",
+            quote_literal_str(&gid),
+            rb.txn(txn).xid
+        );
+    } else {
+        let _ = write!(
+            opc.out,
+            "preparing streamed transaction {}",
+            quote_literal_str(&gid)
+        );
+    }
+    if data.include_timestamp {
+        let ts = timestamptz_str(rb.txn(txn).xact_time)?;
+        let _ = write!(opc.out, " (at {ts})");
+    }
+    OutputPluginWrite(opc, true)
+}
+
 // pg_decode_stream_commit (test_decoding.c:740).
 fn pg_decode_stream_commit(
     opc: &mut OutputPluginContext,
@@ -871,7 +928,8 @@ fn pg_decode_stream_message(
             prefix,
             message.len()
         );
-        opc.out.push_str(&String::from_utf8_lossy(message));
+        // appendBinaryStringInfo (test_decoding.c:974): verbatim bytes.
+        opc.out.as_mut_vec().extend_from_slice(message);
     }
     OutputPluginWrite(opc, true)
 }

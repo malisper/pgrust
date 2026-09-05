@@ -733,6 +733,12 @@ seam_core::seam!(
     pub fn pg_class_reloftype(relid: Oid) -> PgResult<Option<Oid>>
 );
 
+// pg_class.relrewrite of a relation (None when the relation is unknown); the
+// trimmed FormData_pg_class does not carry it.
+seam_core::seam!(
+    pub fn pg_class_relrewrite(relid: Oid) -> PgResult<Option<Oid>>
+);
+
 seam_core::seam!(
     pub fn lookup_pg_transform_shape(typid: Oid, langid: Oid) -> PgResult<Option<PgTransformShape>>
 );

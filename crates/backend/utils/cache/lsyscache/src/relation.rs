@@ -33,6 +33,13 @@ pub fn get_rel_name<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<Option<PgStrin
     }
 }
 
+// Stands in for rd_rel->relrewrite (pg_class.h): the trimmed relcache form
+// does not carry it, so it is read from the pg_class syscache tuple. InvalidOid
+// when the relation is not a transient rewrite heap or is unknown.
+pub fn get_rel_relrewrite(relid: Oid) -> PgResult<Oid> {
+    Ok(syscache_seams::pg_class_relrewrite::call(relid)?.unwrap_or(InvalidOid))
+}
+
 pub fn get_rel_namespace(relid: Oid) -> PgResult<Oid> {
     Ok(match syscache_seams::lookup_pg_class_ls_shape::call(relid)? {
         Some(reltup) => reltup.relnamespace,
