@@ -3,7 +3,8 @@ use core::marker::PhantomData;
 use core::ptr::NonNull;
 
 use mcx::{check_alloc_size, Allocator, Mcx};
-use types_error::PgResult;
+use alloc::boxed::Box;
+use types_error::{PgError, PgResult};
 
 #[allow(non_camel_case_types)]
 pub type bitmapword = u64;
@@ -54,11 +55,22 @@ fn has_multiple_ones(w: bitmapword) -> bool {
     (w & w.wrapping_neg()) != w
 }
 
+// bitmapset.c:223/519/624/823/876/1040: elog(ERROR, "negative bitmapset
+// member not allowed") — XX000 (elog's default SQLSTATE).
+#[cold]
+#[inline(never)]
+fn negative_member_error() -> Box<PgError> {
+    Box::new(PgError::error("negative bitmapset member not allowed"))
+}
+
+// The infallible-shape entry points (bms_is_member, bms_del_member,
+// bms_overlap_list) raise the same ERROR as a Box<PgError> panic payload
+// (the check_stack_depth_or_panic idiom), restored losslessly by
+// pg_error_from_panic at the statement boundary.
 #[cold]
 #[inline(never)]
 fn negative_member() -> ! {
-    // C divergence: elog(ERROR, "negative bitmapset member not allowed").
-    panic!("negative bitmapset member not allowed");
+    std::panic::panic_any(negative_member_error())
 }
 
 /// C `Bitmapset *`: the NULL pointer (empty set) is `nwords == 0`. Invariant
@@ -154,7 +166,7 @@ impl<'mcx> Bitmapset<'mcx> {
 
     pub fn make_singleton(mcx: Mcx<'mcx>, x: i32) -> PgResult<Self> {
         if x < 0 {
-            negative_member();
+            return Err(negative_member_error());
         }
         let wn = wordnum(x);
         let mut s = Self::empty();
@@ -210,7 +222,7 @@ impl<'mcx> Bitmapset<'mcx> {
     #[inline]
     pub fn add_member(&mut self, mcx: Mcx<'mcx>, x: i32) -> PgResult<()> {
         if x < 0 {
-            negative_member();
+            return Err(negative_member_error());
         }
         let wn = wordnum(x);
         if wn >= self.nwords as usize {
@@ -226,7 +238,7 @@ impl<'mcx> Bitmapset<'mcx> {
             return Ok(());
         }
         if lower < 0 {
-            negative_member();
+            return Err(negative_member_error());
         }
         let uwordnum = wordnum(upper);
         if uwordnum >= self.nwords as usize {
@@ -535,6 +547,27 @@ impl<'mcx> Bitmapset<'mcx> {
             }
         }
         result
+    }
+
+    /// bms_singleton_member (bitmapset.c:672-698): the sole member, or C's
+    /// elog(ERROR) when |a| != 1.
+    pub fn singleton_member(&self) -> PgResult<i32> {
+        if self.is_empty() {
+            return Err(Box::new(PgError::error("bitmapset is empty")));
+        }
+        let mut result: i32 = -1;
+        for (i, &w) in self.word_slice().iter().enumerate() {
+            if w != 0 {
+                if result >= 0 || has_multiple_ones(w) {
+                    return Err(Box::new(PgError::error("bitmapset has multiple members")));
+                }
+                result = (i * BITS_PER_BITMAPWORD) as i32 + rightmost_one_pos(w);
+            }
+        }
+        // C: "we don't expect non-NULL sets to be empty" (the no-trailing-zero
+        // invariant makes a non-empty set carry at least one bit).
+        debug_assert!(result >= 0);
+        Ok(result)
     }
 
     pub fn get_singleton_member(&self) -> Option<i32> {

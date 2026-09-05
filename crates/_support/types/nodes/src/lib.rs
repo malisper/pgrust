@@ -1,6 +1,10 @@
 #![no_std]
 
 extern crate alloc;
+// Structured-error raises from infallible-shape entry points (a Box<PgError>
+// panic payload, see bitmapset::negative_member) need std::panic::panic_any;
+// the crate is already std-linked through stack_depth_core.
+extern crate std;
 
 // Out of line: PgError is ~0.5 KB by value; inline construction inflates every
 // allocating caller's frame and register pressure.

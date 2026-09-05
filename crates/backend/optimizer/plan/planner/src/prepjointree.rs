@@ -1783,9 +1783,16 @@ pub(crate) fn remove_result_refs<'mcx>(
     for ai in 0..run.root.append_rel_list.len() {
         debug_assert_ne!(run.root.append_rel_list[ai].parent_relid, varno as u32);
         if run.root.append_rel_list[ai].child_relid == varno as u32 {
-            let sv = *subvarno.get_or_insert_with(|| {
-                subrelids.get_singleton_member().expect("singleton subrelids")
-            });
+            // prepjointree.c:4281: bms_singleton_member complains if the set
+            // is not a singleton, computed on first use only.
+            let sv = match subvarno {
+                Some(sv) => sv,
+                None => {
+                    let sv = subrelids.singleton_member()?;
+                    subvarno = Some(sv);
+                    sv
+                }
+            };
             run.root.append_rel_list[ai].child_relid = sv as u32;
         }
         replace_appinfo_translated_vars(run, ai, &mut |n| {

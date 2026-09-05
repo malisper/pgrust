@@ -1445,7 +1445,7 @@ fn compute_partition_bounds<'mcx>(
                 && !run.root.rel(joinrel).part_rels.is_empty()
         );
         if run.root.rel(joinrel).partbounds_merged {
-            let pairs = get_matching_part_pairs(run, joinrel, rel1, rel2);
+            let pairs = get_matching_part_pairs(run, joinrel, rel1, rel2)?;
             debug_assert!(
                 pairs.0.len() == run.root.rel(joinrel).nparts as usize
                     && pairs.1.len() == run.root.rel(joinrel).nparts as usize
@@ -1464,7 +1464,7 @@ fn get_matching_part_pairs<'mcx>(
     joinrel: RelId,
     rel1: RelId,
     rel2: RelId,
-) -> (PgVec<'mcx, Option<RelId>>, PgVec<'mcx, Option<RelId>>) {
+) -> PgResult<(PgVec<'mcx, Option<RelId>>, PgVec<'mcx, Option<RelId>>)> {
     let mcx = run.mcx;
     let rel1_is_simple = is_simple_rel(&run.root, rel1);
     let rel2_is_simple = is_simple_rel(&run.root, rel2);
@@ -1477,7 +1477,7 @@ fn get_matching_part_pairs<'mcx>(
             parts2.push(None);
             continue;
         };
-        let resolve = |rel: RelId, simple: bool| -> RelId {
+        let resolve = |rel: RelId, simple: bool| -> PgResult<RelId> {
             let child_relids = crate::relnode::relids_intersect(
                 mcx,
                 &run.root.rel(child_joinrel).relids,
@@ -1488,16 +1488,16 @@ fn get_matching_part_pairs<'mcx>(
                 crate::relnode::relids_num_members(&run.root.rel(rel).relids)
             );
             if simple {
-                let varno = crate::relnode::relids_singleton_member(&child_relids)
-                    .expect("simple rel side is a single partition");
-                find_base_rel(&run.root, varno)
+                // joinrels.c:1884/1905 bms_singleton_member
+                let varno = crate::relnode::relids_singleton_member_strict(&child_relids)?;
+                Ok(find_base_rel(&run.root, varno))
             } else {
-                find_join_rel(&run.root, &child_relids)
-                    .expect("child join rel was built when planning the input join")
+                Ok(find_join_rel(&run.root, &child_relids)
+                    .expect("child join rel was built when planning the input join"))
             }
         };
-        parts1.push(Some(resolve(rel1, rel1_is_simple)));
-        parts2.push(Some(resolve(rel2, rel2_is_simple)));
+        parts1.push(Some(resolve(rel1, rel1_is_simple)?));
+        parts2.push(Some(resolve(rel2, rel2_is_simple)?));
     }
-    (parts1, parts2)
+    Ok((parts1, parts2))
 }

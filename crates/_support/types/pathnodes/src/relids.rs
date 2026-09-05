@@ -410,6 +410,27 @@ pub fn relids_is_subset(a: &Relids<'_>, b: &Relids<'_>) -> bool {
     true
 }
 
+/// bms_singleton_member (bitmapset.c:672): the sole member, or C's
+/// elog(ERROR) "bitmapset is empty" / "bitmapset has multiple members".
+/// (`relids_singleton_member` is bms_get_singleton_member.)
+pub fn relids_singleton_member_strict(a: &Relids<'_>) -> types_error::PgResult<i32> {
+    let mut found: Option<i32> = None;
+    for (i, w) in relids_word_slice(a).iter().enumerate() {
+        if *w != 0 {
+            // HAS_MULTIPLE_ONES(w) || result >= 0
+            if found.is_some() || (w & w.wrapping_neg()) != *w {
+                return Err(alloc::boxed::Box::new(types_error::PgError::error(
+                    "bitmapset has multiple members",
+                )));
+            }
+            found = Some((i * 64) as i32 + w.trailing_zeros() as i32);
+        }
+    }
+    // C: a == NULL; an allocated all-zero set has the same observable
+    // cardinality (C's invariant never produces one).
+    found.ok_or_else(|| alloc::boxed::Box::new(types_error::PgError::error("bitmapset is empty")))
+}
+
 pub fn relids_singleton_member(a: &Relids<'_>) -> Option<i32> {
     let mut found: Option<i32> = None;
     for (i, w) in relids_word_slice(a).iter().enumerate() {

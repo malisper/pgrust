@@ -12,7 +12,8 @@ use types_pathnodes::{
 use crate::relnode::{
     find_base_rel, pgvec_clone_shallow, relids_add_member, relids_copy, relids_del_member,
     relids_equal, relids_intersect, relids_is_empty, relids_is_member, relids_is_subset,
-    relids_members, relids_num_members, relids_singleton, relids_singleton_member, relids_union,
+    relids_members, relids_num_members, relids_singleton, relids_singleton_member,
+    relids_singleton_member_strict, relids_union,
 };
 use crate::run::PlannerRun;
 
@@ -26,8 +27,8 @@ pub fn remove_useless_joins<'mcx>(
             if !join_is_removable(run, &sjinfo)? {
                 continue;
             }
-            let innerrelid =
-                relids_singleton_member(&sjinfo.min_righthand).expect("single baserel");
+            // analyzejoins.c:134 bms_singleton_member
+            let innerrelid = relids_singleton_member_strict(&sjinfo.min_righthand)?;
             remove_leftjoinrel_from_query(run, innerrelid, &sjinfo)?;
             let mut nremoved = 0;
             joinlist = remove_rel_from_joinlist(run, joinlist, innerrelid, &mut nremoved);
@@ -1430,8 +1431,9 @@ fn split_selfjoin_quals<'mcx>(
         let (from, to) = {
             let ri = run.root.rinfo(rid);
             (
-                relids_singleton_member(&ri.right_relids).expect("singleton"),
-                relids_singleton_member(&ri.left_relids).expect("singleton"),
+                // analyzejoins.c:2302-2303 bms_singleton_member
+                relids_singleton_member_strict(&ri.right_relids)?,
+                relids_singleton_member_strict(&ri.left_relids)?,
             )
         };
         rewrite_manip::ChangeVarNodesExtendedSJE(mcx, rightexpr, from, to, 0)?;

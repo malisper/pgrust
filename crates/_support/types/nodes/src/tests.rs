@@ -1600,13 +1600,78 @@ fn bms_add_range() {
     }
 }
 
+// bitmapset.c:223 (bms_make_singleton), :519 (bms_is_member), :624
+// (bms_overlap_list), :823 (bms_add_member), :876 (bms_del_member), :1040
+// (bms_add_range): elog(ERROR, "negative bitmapset member not allowed") — an
+// XX000 ERROR on the ereport channel, never a bare panic. Fallible entry
+// points return it; infallible-shape ones carry it as a Box<PgError> panic
+// payload (the check_stack_depth_or_panic idiom), restored losslessly by
+// pg_error_from_panic at the statement boundary.
+fn assert_negative_member_error(err: &types_error::PgError) {
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    assert_eq!(err.message(), "negative bitmapset member not allowed");
+}
+
+fn unwind_pg_error<R>(f: impl FnOnce() -> R) -> types_error::PgError {
+    let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+        .err()
+        .expect("negative member must raise");
+    types_error::pg_error_from_panic(payload)
+        .expect("negative member raises a structured PgError, not a bare string panic")
+}
+
 #[test]
-#[should_panic(expected = "negative bitmapset member")]
-fn bms_add_range_negative_lower_is_loud() {
+fn bms_negative_member_fallible_entry_points_raise_c_elog() {
     let ctx = MemoryContext::new_bump("t");
     let mcx = ctx.mcx();
-    let mut b = Bitmapset::empty();
-    let _ = b.add_range(mcx, -1, 5);
+    let err = Bitmapset::make_singleton(mcx, -1).err().expect("bms_make_singleton");
+    assert_negative_member_error(&err);
+    let mut b = from_set(mcx, &BTreeSet::from([1]));
+    let err = b.add_member(mcx, -7).err().expect("bms_add_member");
+    assert_negative_member_error(&err);
+    let err = b.add_range(mcx, -1, 5).err().expect("bms_add_range");
+    assert_negative_member_error(&err);
+    // bitmapset.c:1032: upper < lower returns before the negative check.
+    b.add_range(mcx, 5, -1).unwrap();
+    assert_eq!(b.iter().collect::<Vec<_>>(), [1]);
+}
+
+// bitmapset.c:672-698 bms_singleton_member: elog(ERROR, "bitmapset is
+// empty") / elog(ERROR, "bitmapset has multiple members") (XX000); the sole
+// member otherwise.
+#[test]
+fn bms_singleton_member_matches_c_elog() {
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    let err = Bitmapset::empty().singleton_member().err().expect("empty set");
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    assert_eq!(err.message(), "bitmapset is empty");
+    for x in [0, 63, 64, 130] {
+        assert_eq!(from_set(mcx, &BTreeSet::from([x])).singleton_member().unwrap(), x);
+    }
+    // multiple ones in one word, and across words
+    for set in [BTreeSet::from([3, 4]), BTreeSet::from([3, 130])] {
+        let err = from_set(mcx, &set).singleton_member().err().expect("multiple members");
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(err.message(), "bitmapset has multiple members");
+    }
+}
+
+#[test]
+fn bms_negative_member_infallible_entry_points_raise_c_elog() {
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    let mut b = from_set(mcx, &BTreeSet::from([1]));
+    assert_negative_member_error(&unwind_pg_error(|| b.is_member(-1)));
+    // bitmapset.c:619-626: the list walks in order, so a leading member
+    // returns true before the negative one is seen; put the negative first.
+    assert_negative_member_error(&unwind_pg_error(|| b.overlap_list(&[-3, 1])));
+    assert!(b.overlap_list(&[1, -3]));
+    assert_negative_member_error(&unwind_pg_error(|| b.del_member(-1)));
+    // bitmapset.c:519/876: the check precedes the NULL-set short cut.
+    let empty = Bitmapset::empty();
+    assert_negative_member_error(&unwind_pg_error(|| empty.is_member(-1)));
+    assert_eq!(b.iter().collect::<Vec<_>>(), [1]);
 }
 
 #[test]
@@ -1688,15 +1753,6 @@ fn bms_overlap_list() {
     assert!(!b.overlap_list(&[4, 129, 131, 500]));
     assert!(!b.overlap_list(&[]));
     assert!(!Bitmapset::empty().overlap_list(&[-1, 2]));
-}
-
-#[test]
-#[should_panic(expected = "negative bitmapset member")]
-fn bms_overlap_list_negative_is_loud() {
-    let ctx = MemoryContext::new_bump("t");
-    let mcx = ctx.mcx();
-    let b = from_set(mcx, &BTreeSet::from([1]));
-    b.overlap_list(&[-3]);
 }
 
 #[test]

@@ -20,7 +20,8 @@ use crate::relids::{
     relids_add_member, relids_add_member_mut, relids_copy, relids_del_member, relids_difference,
     relids_empty, relids_equal, relids_from_words, relids_intersect, relids_is_empty,
     relids_is_member, relids_is_subset, relids_is_unset, relids_members, relids_num_members,
-    relids_overlap, relids_singleton, relids_singleton_member, relids_subset_compare,
+    relids_overlap, relids_singleton, relids_singleton_member, relids_singleton_member_strict,
+    relids_subset_compare,
     relids_union, relids_word_slice, SubsetCmp,
 };
 use crate::Relids;
@@ -287,6 +288,16 @@ fn assert_predicates(tag: &str, s1: &Relids<'_>, o1: &ORelids<'_>, s2: &Relids<'
     assert_eq!(relids_is_empty(s1), o_is_empty(o1), "is_empty: {tag}");
     assert_eq!(relids_num_members(s1), o_num_members(o1), "num_members: {tag}");
     assert_eq!(relids_singleton_member(s1), o_singleton_member(o1), "singleton_member: {tag}");
+    // bms_singleton_member: Ok exactly when bms_get_singleton_member finds one;
+    // otherwise C's elog(ERROR) text by cardinality.
+    match relids_singleton_member_strict(s1) {
+        Ok(x) => assert_eq!(Some(x), o_singleton_member(o1), "singleton_member_strict: {tag}"),
+        Err(e) => {
+            assert_eq!(o_singleton_member(o1), None, "singleton_member_strict: {tag}");
+            let want = if o_is_empty(o1) { "bitmapset is empty" } else { "bitmapset has multiple members" };
+            assert_eq!(e.message(), want, "singleton_member_strict: {tag}");
+        }
+    }
     let sm: Vec<i32> = relids_members(s1).collect();
     assert_eq!(sm, o_members(o1), "members: {tag}");
     for x in [-1i32, 0, 1, 5, 63, 64, 65, 100, 127, 128, 130, 4096] {
