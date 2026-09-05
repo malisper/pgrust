@@ -542,7 +542,7 @@ fn dispatch_switch<'mcx>(
             let stmt = parsetree
                 .as_variant::<types_nodes::parsenodes::ClusterStmt>()
                 .expect("ClusterStmt");
-            commands_cluster::cluster(mcx, stmt, is_top_level)?;
+            commands_cluster::cluster(mcx, stmt, source_text, is_top_level)?;
         }
         T_VacuumStmt => {
             // ExecVacuum's VACUUM half lives in commands_vacuum, the ANALYZE

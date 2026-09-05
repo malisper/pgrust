@@ -69,3 +69,9 @@ inval = { path = "../../utils/cache/inval" }
 relmapper = { path = "../../utils/cache/relmapper" }
 predicate_seams = { path = "../../storage/lmgr/predicate_seams" }
 pg_rusage = { path = "../../utils/misc/pg_rusage" }
+backend_progress = { path = "../../utils/activity/backend_progress" }
+objectaccess = { path = "../../catalog/objectaccess" }
+parser_small1 = { path = "../../parser/parser_small1" }
+mbutils = { path = "../../utils/mb/mbutils" }
+types_relscan = { path = "../../access/index/relscan" }
+heapam = { path = "../../access/heap/heapam" }

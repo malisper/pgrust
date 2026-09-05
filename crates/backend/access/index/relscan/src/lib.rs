@@ -102,6 +102,23 @@ impl IndexAmKind {
         }
     }
 
+    /// amclusterable: only btree (nbtree.c bthandler) and GiST (gist.c:78)
+    /// let CLUSTER order a heap by the index (cluster.c:512).
+    pub const fn amclusterable(self) -> bool {
+        match self {
+            IndexAmKind::Btree => true,
+            IndexAmKind::Hash => false,
+            IndexAmKind::Gin => false,
+            IndexAmKind::Gist => true,
+            IndexAmKind::Spgist => false,
+            IndexAmKind::Brin => false,
+            IndexAmKind::Hnsw => false,
+            IndexAmKind::Bloom => false,
+            #[cfg(feature = "mock")]
+            IndexAmKind::Mock => false,
+        }
+    }
+
     pub const fn has_ammarkpos(self) -> bool {
         match self {
             IndexAmKind::Btree => true,

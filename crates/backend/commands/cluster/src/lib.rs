@@ -17,6 +17,7 @@ use types_core::{AttrNumber, InvalidOid, Oid, RELATION_RELATION_ID};
 use types_error::{PgError, PgResult};
 use types_rel::{AccessExclusiveLock, AccessShareLock, NoLock, RowExclusiveLock, LOCKMODE, RELKIND_INDEX, RELKIND_TOASTVALUE};
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use backend_progress::progress;
 
 const Anum_pg_class_relnamespace: usize = 3;
 const Anum_pg_class_relam: usize = 7;
@@ -143,18 +144,24 @@ pub fn finish_heap_swap<'mcx>(
     is_system_catalog: bool,
     swap_toast_by_content: bool,
     check_constraints: bool,
-    _is_internal: bool,
+    is_internal: bool,
     frozen_xid: types_core::primitive::TransactionId,
     cutoff_multi: types_core::primitive::MultiXactId,
     newrelpersistence: u8,
 ) -> PgResult<()> {
     let mut mapped_tables: PgVec<'mcx, Oid> = PgVec::new_in(mcx);
+    // cluster.c:1461: report that we are now swapping relation files.
+    backend_progress::pgstat_progress_update_param(
+        progress::PROGRESS_CLUSTER_PHASE,
+        progress::PROGRESS_CLUSTER_PHASE_SWAP_REL_FILES,
+    );
     let (toast1, toast2) = swap_relation_files(
         mcx,
         old_heap_oid,
         new_heap_oid,
         old_heap_oid == RELATION_RELATION_ID,
         swap_toast_by_content,
+        is_internal,
         frozen_xid,
         cutoff_multi,
         &mut mapped_tables,
@@ -174,6 +181,11 @@ pub fn finish_heap_swap<'mcx>(
         } else if newrelpersistence == types_core::catalog::RELPERSISTENCE_PERMANENT {
             reindex_flags |= catalog_index::REINDEX_REL_FORCE_INDEXES_PERMANENT;
         }
+        // cluster.c:1512: report that we are now reindexing relations.
+        backend_progress::pgstat_progress_update_param(
+            progress::PROGRESS_CLUSTER_PHASE,
+            progress::PROGRESS_CLUSTER_PHASE_REBUILD_INDEX,
+        );
         let rebuilt = catalog_index::reindex_relation(
             mcx,
             old_heap_oid,
@@ -188,6 +200,12 @@ pub fn finish_heap_swap<'mcx>(
             xact::CommandCounterIncrement()?;
         }
     }
+
+    // cluster.c:1518: report that we are now doing clean up.
+    backend_progress::pgstat_progress_update_param(
+        progress::PROGRESS_CLUSTER_PHASE,
+        progress::PROGRESS_CLUSTER_PHASE_FINAL_CLEANUP,
+    );
 
     // Rebuilding pg_class: swap_relation_files couldn't touch pg_class's own
     // row, so relfrozenxid wasn't updated — do it now that the new relation
@@ -296,6 +314,7 @@ fn swap_relation_files<'mcx>(
     r2: Oid,
     target_is_pg_class: bool,
     swap_toast_by_content: bool,
+    is_internal: bool,
     frozen_xid: types_core::primitive::TransactionId,
     cutoff_multi: types_core::primitive::MultiXactId,
     mapped_tables: &mut PgVec<'mcx, Oid>,
@@ -495,6 +514,11 @@ fn swap_relation_files<'mcx>(
         }
     }
 
+    // cluster.c:1300-1307: post-alter hook for the modified relations. The
+    // change to r2 is always internal; r1 depends on the invocation context.
+    objectaccess::InvokeObjectPostAlterHookArg(RELATION_RELATION_ID, r1, 0, InvalidOid, is_internal)?;
+    objectaccess::InvokeObjectPostAlterHookArg(RELATION_RELATION_ID, r2, 0, InvalidOid, true)?;
+
     if row1.reltoastrelid != InvalidOid || row2.reltoastrelid != InvalidOid {
         if swap_toast_by_content {
             // Recursively swap the toast tables' contents; their pg_class
@@ -509,6 +533,7 @@ fn swap_relation_files<'mcx>(
                 row2.reltoastrelid,
                 target_is_pg_class,
                 true,
+                is_internal,
                 frozen_xid,
                 cutoff_multi,
                 mapped_tables,
@@ -566,6 +591,7 @@ fn swap_relation_files<'mcx>(
             toast_index2,
             target_is_pg_class,
             true,
+            is_internal,
             0,
             0,
             mapped_tables,

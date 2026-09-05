@@ -13,6 +13,7 @@ use types_rel::{
     RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_TOASTVALUE,
 };
 use types_scan::scankey::ScanKeyData;
+use backend_progress::progress;
 
 pub const CLUOPT_VERBOSE: u32 = 0x01;
 pub const CLUOPT_RECHECK: u32 = 0x02;
@@ -31,9 +32,20 @@ struct RelToCluster {
     index_oid: Oid,
 }
 
+// parser_errposition(pstate, location) over the utility statement's query
+// string: C threads the ParseState down; only its p_sourcetext is needed.
+fn errpos(source_text: &str, location: types_core::ParseLoc) -> i32 {
+    parser_small1::parser_errposition_source(
+        Some(source_text.as_bytes()),
+        location,
+        mbutils::GetDatabaseEncoding(),
+    )
+}
+
 pub fn cluster<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &ClusterStmt<'mcx>,
+    source_text: &str,
     is_top_level: bool,
 ) -> PgResult<()> {
     let mut verbose = false;
@@ -42,9 +54,11 @@ pub fn cluster<'mcx>(
         match opt.defname.unwrap_or("") {
             "verbose" => verbose = explain::defGetBoolean(opt)?,
             name => {
+                // cluster.c:125-129: the cursor points at the offending option.
                 return Err(Box::new(
                     PgError::new(ERROR, format!("unrecognized CLUSTER option \"{name}\""))
-                        .with_sqlstate(ERRCODE_SYNTAX_ERROR),
+                        .with_sqlstate(ERRCODE_SYNTAX_ERROR)
+                        .with_cursor_position(errpos(source_text, opt.location)),
                 ))
             }
         }
@@ -188,6 +202,20 @@ pub fn cluster_rel<'mcx>(
     let recheck = params.options & CLUOPT_RECHECK != 0;
     postgres_seams::check_for_interrupts::call()?;
 
+    // cluster.c:326-332: pg_stat_progress_cluster row for this backend.
+    backend_progress::pgstat_progress_start_command(
+        backend_progress::PROGRESS_COMMAND_CLUSTER,
+        table_oid,
+    );
+    backend_progress::pgstat_progress_update_param(
+        progress::PROGRESS_CLUSTER_COMMAND,
+        if index_oid != InvalidOid {
+            progress::PROGRESS_CLUSTER_COMMAND_CLUSTER
+        } else {
+            progress::PROGRESS_CLUSTER_COMMAND_VACUUM_FULL
+        },
+    );
+
     let guard = miscinit::SecContextGuard::security_restricted(old_heap.rd_rel.relowner);
     let save_nestlevel = guc::NewGUCNestLevel();
     guc::RestrictSearchPath()?;
@@ -258,6 +286,8 @@ pub fn cluster_rel<'mcx>(
 
     guc::AtEOXact_GUC(false, save_nestlevel);
     guard.restore();
+    // cluster.c:482 (the error path ends it from AbortTransaction, as C).
+    backend_progress::pgstat_progress_end_command();
     result
 }
 
@@ -284,8 +314,8 @@ pub fn check_index_is_clusterable<'mcx>(
         return Err(err);
     }
     let form = form.unwrap();
-    // amclusterable: btree only among the ported AMs (hash is not clusterable).
-    if old_index.rd_rel.relam != BTREE_AM_OID {
+    // cluster.c:512 OldIndex->rd_indam->amclusterable: btree and GiST.
+    if !types_relscan::IndexAmKind::from_relam(old_index.rd_rel.relam).amclusterable() {
         return Err(feature_err(&format!(
             "cannot cluster on index \"{}\" because access method does not support clustering",
             old_index.name()
@@ -310,7 +340,7 @@ pub fn mark_index_clustered<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     index_oid: Oid,
-    _is_internal: bool,
+    is_internal: bool,
 ) -> PgResult<()> {
     if rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE {
         return Err(feature_err("cannot mark index clustered in partitioned table"));
@@ -359,6 +389,14 @@ pub fn mark_index_clustered<'mcx>(
         } else {
             genam::systable_endscan(mcx, scan)?;
         }
+        // cluster.c:609: every index of the table is reported as altered.
+        objectaccess::InvokeObjectPostAlterHookArg(
+            INDEX_RELATION_ID,
+            this_index,
+            0,
+            InvalidOid,
+            is_internal,
+        )?;
     }
     pg_index.close(RowExclusiveLock)
 }

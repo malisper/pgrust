@@ -2,9 +2,10 @@
 // (heapam_handler.c), hosted here: heapam_handler cannot dep indexam
 // (indexam -> tableam -> heapam_handler), and heap is the only table AM so
 // the tableam dispatch formality is a direct call from copy_table_data.
+use backend_progress::progress;
 use mcx::Mcx;
-use types_core::{MultiXactId, TransactionId};
-use types_error::PgResult;
+use types_core::{InvalidBlockNumber, MultiXactId, TransactionId};
+use types_error::{PgError, PgResult, ERROR, WARNING};
 use types_rel::Relation;
 use types_scan::sdir::ScanDirection;
 use types_slot::SlotData;
@@ -96,6 +97,11 @@ pub fn copy_for_cluster<'mcx>(
 
     let mut arm = match (old_index, use_sort) {
         (Some(index), false) => {
+            // heapam_handler.c:743-752: phase + OIDOldIndex.
+            backend_progress::pgstat_progress_update_multi_param(
+                &[progress::PROGRESS_CLUSTER_PHASE, progress::PROGRESS_CLUSTER_INDEX_RELID],
+                &[progress::PROGRESS_CLUSTER_PHASE_INDEX_SCAN_HEAP, i64::from(index.rd_id)],
+            );
             let mut scan = indexam::index_beginscan(
                 mcx,
                 old_heap,
@@ -107,14 +113,28 @@ pub fn copy_for_cluster<'mcx>(
             indexam::index_rescan(&mut scan, None, None)?;
             ScanArm::Index(scan)
         }
-        _ => ScanArm::Table(tableam::table_beginscan(
-            mcx,
-            old_heap,
-            Some(std::rc::Rc::clone(&snapshot_any)),
-            0,
-            mcx::PgVec::new_in(mcx),
-        )?),
+        _ => {
+            // heapam_handler.c:762-771: scan-and-sort mode and VACUUM FULL
+            // set the phase, then the total heap blocks.
+            backend_progress::pgstat_progress_update_param(
+                progress::PROGRESS_CLUSTER_PHASE,
+                progress::PROGRESS_CLUSTER_PHASE_SEQ_SCAN_HEAP,
+            );
+            let scan = tableam::table_beginscan(
+                mcx,
+                old_heap,
+                Some(std::rc::Rc::clone(&snapshot_any)),
+                0,
+                mcx::PgVec::new_in(mcx),
+            )?;
+            backend_progress::pgstat_progress_update_param(
+                progress::PROGRESS_CLUSTER_TOTAL_HEAP_BLKS,
+                i64::from(heap_scan_nblocks(&scan)),
+            );
+            ScanArm::Table(scan)
+        }
     };
+    let mut prev_cblock = InvalidBlockNumber;
 
     let mut slot = tableam::table_slot_create(mcx, old_heap)?;
     let (mut num_tuples, mut tups_vacuumed, mut tups_recently_dead) = (0f64, 0f64, 0f64);
@@ -126,17 +146,44 @@ pub fn copy_for_cluster<'mcx>(
             ScanArm::Index(scan) => {
                 let found =
                     indexam::index_getnext_slot(mcx, scan, ScanDirection::ForwardScanDirection, &mut slot)?;
+                // Since we used no scan keys, should never need to recheck
+                // (heapam_handler.c:797-798, elog(ERROR) = XX000).
                 if found && scan.xs_recheck {
-                    panic!("CLUSTER does not support lossy index conditions");
+                    return Err(Box::new(PgError::new(
+                        ERROR,
+                        "CLUSTER does not support lossy index conditions",
+                    )));
                 }
                 found
             }
-            ScanArm::Table(scan) => tableam::table_scan_getnextslot(
-                mcx,
-                scan,
-                ScanDirection::ForwardScanDirection,
-                &mut slot,
-            )?,
+            ScanArm::Table(scan) => {
+                let found = tableam::table_scan_getnextslot(
+                    mcx,
+                    scan,
+                    ScanDirection::ForwardScanDirection,
+                    &mut slot,
+                )?;
+                let (nblocks, startblock, cblock) = heap_scan_position(scan);
+                if !found {
+                    // heapam_handler.c:803-813: if the last pages of the scan
+                    // were empty, heap_blks_scanned would lag heap_blks_total
+                    // into the next phase; pin it to the total here.
+                    backend_progress::pgstat_progress_update_param(
+                        progress::PROGRESS_CLUSTER_HEAP_BLKS_SCANNED,
+                        i64::from(nblocks),
+                    );
+                } else if prev_cblock != cblock {
+                    // heapam_handler.c:816-834: rs_cblock offset by
+                    // rs_startblock (modulo rs_nblocks) hides the wraparound
+                    // of a scan that started at an offset.
+                    backend_progress::pgstat_progress_update_param(
+                        progress::PROGRESS_CLUSTER_HEAP_BLKS_SCANNED,
+                        i64::from(cblock.wrapping_add(nblocks).wrapping_sub(startblock) % nblocks + 1),
+                    );
+                    prev_cblock = cblock;
+                }
+                found
+            }
         };
         if !fetched {
             break;
@@ -158,11 +205,38 @@ pub fn copy_for_cluster<'mcx>(
             }
             HTSV_Result::HEAPTUPLE_LIVE => false,
             HTSV_Result::HEAPTUPLE_INSERT_IN_PROGRESS => {
-                // Only reachable for our own uncommitted inserts (single
-                // backend); C warns for other xacts and copies either way.
+                // heapam_handler.c:855-868: under AccessExclusiveLock this is
+                // normally our own earlier insert; system catalogs release
+                // write locks before commit. Warn otherwise, copy either way.
+                if !is_system_catalog
+                    && !xact::TransactionIdIsCurrentTransactionId(tuple.t_data().xmin())
+                {
+                    elog_seams::ereport::call(PgError::new(
+                        WARNING,
+                        format!(
+                            "concurrent insert in progress within table \"{}\"",
+                            old_heap.name()
+                        ),
+                    ))?;
+                }
                 false
             }
             HTSV_Result::HEAPTUPLE_DELETE_IN_PROGRESS => {
+                // heapam_handler.c:870-882: same situation; treat as recently
+                // dead.
+                if !is_system_catalog
+                    && !xact::TransactionIdIsCurrentTransactionId(
+                        heapam::HeapTupleHeaderGetUpdateXid(tuple.t_data())?,
+                    )
+                {
+                    elog_seams::ereport::call(PgError::new(
+                        WARNING,
+                        format!(
+                            "concurrent delete in progress within table \"{}\"",
+                            old_heap.name()
+                        ),
+                    ))?;
+                }
                 tups_recently_dead += 1.0;
                 false
             }
@@ -211,6 +285,11 @@ pub fn copy_for_cluster<'mcx>(
                 .as_ref()
                 .map(|b| unsafe { core::slice::from_raw_parts(b.as_ptr().cast::<u8>(), b.size()) });
             tuplesort.as_mut().expect("checked").putheaptuple(tuple, itup_bytes)?;
+            // heapam_handler.c:915: scan-and-sort mode reports tuples scanned.
+            backend_progress::pgstat_progress_update_param(
+                progress::PROGRESS_CLUSTER_HEAP_TUPLES_SCANNED,
+                num_tuples as i64,
+            );
         } else {
             reform_and_rewrite_tuple(
                 mcx,
@@ -222,6 +301,15 @@ pub fn copy_for_cluster<'mcx>(
                 new_heap,
                 &mut rwstate,
             )?;
+            // heapam_handler.c:929-935: indexscan mode and VACUUM FULL report
+            // tuples scanned and written together.
+            backend_progress::pgstat_progress_update_multi_param(
+                &[
+                    progress::PROGRESS_CLUSTER_HEAP_TUPLES_SCANNED,
+                    progress::PROGRESS_CLUSTER_HEAP_TUPLES_WRITTEN,
+                ],
+                &[num_tuples as i64, num_tuples as i64],
+            );
         }
     }
 
@@ -233,12 +321,24 @@ pub fn copy_for_cluster<'mcx>(
     drop(slot);
 
     if let Some(mut ts) = tuplesort {
+        let mut n_tuples = 0f64;
+        // heapam_handler.c:955: report that we are now sorting tuples.
+        backend_progress::pgstat_progress_update_param(
+            progress::PROGRESS_CLUSTER_PHASE,
+            progress::PROGRESS_CLUSTER_PHASE_SORT_TUPLES,
+        );
         ts.performsort()?;
+        // heapam_handler.c:961: report that we are now writing the new heap.
+        backend_progress::pgstat_progress_update_param(
+            progress::PROGRESS_CLUSTER_PHASE,
+            progress::PROGRESS_CLUSTER_PHASE_WRITE_NEW_HEAP,
+        );
         loop {
             postgres_seams::check_for_interrupts::call()?;
             let Some(tuple) = ts.getheaptuple(true)? else {
                 break;
             };
+            n_tuples += 1.0;
             reform_and_rewrite_tuple(
                 mcx,
                 &tuple,
@@ -249,14 +349,37 @@ pub fn copy_for_cluster<'mcx>(
                 new_heap,
                 &mut rwstate,
             )?;
+            // heapam_handler.c:980: report n_tuples written.
+            backend_progress::pgstat_progress_update_param(
+                progress::PROGRESS_CLUSTER_HEAP_TUPLES_WRITTEN,
+                n_tuples as i64,
+            );
         }
         ts.end();
     }
 
     rewriteheap::end_heap_rewrite(rwstate, new_heap)?;
 
-    let _ = is_system_catalog;
     Ok((num_tuples, tups_vacuumed, tups_recently_dead))
+}
+
+// heapScan->rs_nblocks: the heap is the only table AM this rewrite serves
+// (copy_for_cluster hosts heapam_relation_copy_for_cluster).
+fn heap_scan_nblocks(scan: &tableam::TableScanDesc<'_>) -> types_core::BlockNumber {
+    match scan {
+        tableam::TableScanDesc::Heap(h) => h.rs_nblocks,
+        _ => 0,
+    }
+}
+
+// (rs_nblocks, rs_startblock, rs_cblock) of the heap scan.
+fn heap_scan_position(
+    scan: &tableam::TableScanDesc<'_>,
+) -> (types_core::BlockNumber, types_core::BlockNumber, types_core::BlockNumber) {
+    match scan {
+        tableam::TableScanDesc::Heap(h) => (h.rs_nblocks, h.rs_startblock, h.rs_cblock),
+        _ => (0, 0, InvalidBlockNumber),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
