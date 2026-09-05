@@ -213,14 +213,21 @@ pub fn ltree_concat(a: &[u8], b: &[u8]) -> Result<Vec<u8>, PgError> {
         ))
         .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED));
     }
-    let mut labels: Vec<&[u8]> = Vec::new();
-    for l in ta.levels() {
-        labels.push(l.name);
-    }
-    for l in tb.levels() {
-        labels.push(l.name);
-    }
-    Ok(build_ltree(&labels))
+    // ltree_op.c:392-399: r is VARSIZE(a) + VARSIZE(b) - LTREE_HDRSIZE bytes
+    // and the two payloads are memcpy'd raw -- never re-parsed by numlevel.
+    // A zero-level subltree(t, k, k) with k > 0 carries k phantom levels in
+    // its payload (see inner_subltree), and C puts them at the front of r:
+    // (subltree('a.b.c', 2, 2) || 'd')::text is 'a'. Rebuilding from
+    // levels() dropped them and promoted b's levels instead.
+    let a_payload = &a[LTREE_HDRSIZE..varsize(a)];
+    let b_payload = &b[LTREE_HDRSIZE..varsize(b)];
+    let total = LTREE_HDRSIZE + a_payload.len() + b_payload.len();
+    let mut r = vec![0u8; total];
+    set_varsize(&mut r, total);
+    write_u16(&mut r, 4, numlevel as u16);
+    r[LTREE_HDRSIZE..LTREE_HDRSIZE + a_payload.len()].copy_from_slice(a_payload);
+    r[LTREE_HDRSIZE + a_payload.len()..].copy_from_slice(b_payload);
+    Ok(r)
 }
 
 pub fn ltree_index(a: &[u8], b: &[u8], start_in: Option<i32>) -> i32 {
@@ -640,6 +647,38 @@ mod tests {
             }
         }
         out
+    }
+
+    /// ltree_op.c:396-399: ltree_concat memcpy's the raw varlena payloads of
+    /// both operands, so a zero-level subltree(t, k, k) with k > 0 (a header
+    /// claiming 0 levels over k phantom levels, see inner_subltree) puts its
+    /// phantom levels at the FRONT of the result: (subltree('a.b.c', 2, 2) ||
+    /// 'd')::text is 'a' in C, and the image is VARSIZE(a) + VARSIZE(b) -
+    /// LTREE_HDRSIZE bytes.
+    #[test]
+    fn concat_copies_raw_payload_of_zero_level_subltree() {
+        ::pg_locale::set_database_ctype_is_c(true);
+        let t = crate::io::parse_ltree(b"a.b.c").unwrap();
+        let a = inner_subltree(&t, 2, 2).unwrap();
+        assert_eq!(Ltree::new(&a).numlevel(), 0);
+        let d = crate::io::parse_ltree(b"d").unwrap();
+        let r = ltree_concat(&a, &d).unwrap();
+        assert_eq!(varsize(&r), varsize(&a) + varsize(&d) - LTREE_HDRSIZE);
+        assert_eq!(Ltree::new(&r).numlevel(), 1);
+        assert_eq!(crate::io::deparse_ltree(&r), b"a");
+
+        let t4 = crate::io::parse_ltree(b"a.b.c.d").unwrap();
+        let a3 = inner_subltree(&t4, 3, 3).unwrap();
+        let ef = crate::io::parse_ltree(b"e.f").unwrap();
+        let r = ltree_concat(&a3, &ef).unwrap();
+        assert_eq!(Ltree::new(&r).numlevel(), 2);
+        assert_eq!(crate::io::deparse_ltree(&r), b"a.b");
+        // b's payload follows a's in full, so the tail still holds e.f.
+        assert!(r.ends_with(&ef[LTREE_HDRSIZE..]));
+        // The other order is unaffected: 'e.f' || <0 levels> is 'e.f'.
+        let r = ltree_concat(&ef, &a3).unwrap();
+        assert_eq!(Ltree::new(&r).numlevel(), 2);
+        assert_eq!(crate::io::deparse_ltree(&r), b"e.f");
     }
 
     /// upstream b3c2a3d386fa: raw byte lengths never decide a '@' match.

@@ -9225,7 +9225,6 @@ dependencies = [
  "datum",
  "detoast",
  "dfmgr",
- "formatting_seams",
  "hashfn",
  "init_small",
  "mbutils",

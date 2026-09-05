@@ -4379,7 +4379,7 @@ pub fn estimate_array_length<'mcx>(
 }
 
 // generic_restriction_selectivity (selfuncs.c).
-fn generic_restriction_selectivity<'mcx>(
+pub(crate) fn generic_restriction_selectivity<'mcx>(
     run: &mut PlannerRun<'mcx>,
     oproid: Oid,
     collation: Oid,

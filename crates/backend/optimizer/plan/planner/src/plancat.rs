@@ -1107,6 +1107,12 @@ fn restriction_estimator<'mcx>(
             Some("_int_matchsel") => {
                 crate::intarray_selfuncs::int_matchsel(run, args, varrelid, other)?
             }
+            // contrib/ltree ltree_op.c:683-696 (RESTRICT of @>/<@ in
+            // ltree--1.1.sql): generic_restriction_selectivity with the
+            // InvalidOid collation and default 0.001.
+            Some("ltreeparentsel") => crate::selfuncs::generic_restriction_selectivity(
+                run, operatorid, 0, args, varrelid, 0.001,
+            )?,
             prosrc => match builtin_estimator_alias(other, prosrc) {
                 Some(foid) => {
                     restriction_estimator(run, foid, operatorid, args, inputcollid, varrelid)?
