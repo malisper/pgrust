@@ -1,7 +1,7 @@
 // storage_xlog.h + storage.c smgr_redo.
 use types_core::{BlockNumber, ForkNumber, InvalidBlockNumber, INVALID_PROC_NUMBER, MAX_FORKNUM};
 use elog::ereport;
-use types_error::{ErrorLocation, PgResult, ERRCODE_DATA_CORRUPTED, ERROR};
+use types_error::{ErrorLocation, PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERROR, PANIC};
 use types_storage::{RelFileLocator, RelFileLocatorBackend};
 use xlogreader_seams::XLogReaderState;
 
@@ -142,13 +142,24 @@ pub fn smgr_redo(record: &mut XLogReaderState) -> PgResult<()> {
         xlogutils::FreeFakeRelcacheEntry(fakerel);
         Ok(())
     } else {
-        panic!("smgr_redo: unknown op code {info}");
+        // storage.c:1094: elog(PANIC, "smgr_redo: unknown op code %u", info) —
+        // a PANIC-level XX000 report the recovery error path owns, never a
+        // Rust panic!() unwinding the startup redo thread.
+        Err(panic_err(format!("smgr_redo: unknown op code {info}")))
     }
+}
+
+// elog(PANIC) — an unrecoverable redo error (smgr_redo's unknown op code).
+#[cold]
+#[inline(never)]
+fn panic_err(msg: String) -> Box<PgError> {
+    Box::new(PgError::new(PANIC, msg))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use types_error::ERRCODE_INTERNAL_ERROR;
 
     // A crafted CRC-valid RM_SMGR record can carry fewer main-data bytes than
     // the redo arm reads at fixed offsets, or an out-of-range fork number. C's
@@ -171,6 +182,23 @@ mod tests {
                 assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
             }
         }
+    }
+
+    // storage.c:1094: elog(PANIC, "smgr_redo: unknown op code %u", info) — a
+    // PANIC-level XX000 report printing the whole info byte (xl_info &
+    // ~XLR_INFO_MASK). An unknown opcode must surface as a PANIC-level
+    // PgError routed through the recovery error path, not an unhandled Rust
+    // panic!() unwinding the startup redo thread (audit-18.6 b130
+    // c960f8b9ff634465c446).
+    #[test]
+    fn unknown_op_code_is_a_panic_error_not_a_rust_panic() {
+        let mut rec = xlogreader_seams::DecodedXLogRecord::default();
+        rec.xl_info = 0x30; // & !XLR_INFO_MASK == 0x30, neither CREATE nor TRUNCATE
+        let mut record = XLogReaderState { record: Some(rec), ..Default::default() };
+        let err = smgr_redo(&mut record).expect_err("unknown smgr opcode must not redo silently");
+        assert_eq!(err.message(), "smgr_redo: unknown op code 48");
+        assert_eq!(err.level(), PANIC);
+        assert_eq!(err.sqlstate(), ERRCODE_INTERNAL_ERROR);
     }
 
     #[test]
