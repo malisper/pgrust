@@ -203,10 +203,31 @@ fn viewdef(
     })
 }
 
+// ruleutils.c:750 pg_get_viewdef_name hands the raw text bytes to
+// textToQualifiedNameList; this crate's name path is `&str`, which cannot
+// carry a SQL_ASCII name with non-UTF-8 bytes: refuse it with the typed
+// ERRCODE_FEATURE_NOT_SUPPORTED carve (the format_type shape) instead of
+// panicking.
+#[cold]
+#[inline(never)]
+fn non_utf8_view_name() -> Box<types_error::PgError> {
+    Box::new(
+        types_error::PgError::error(format!(
+            "non-ASCII view name values are not supported yet in databases with encoding \"{}\"",
+            mbutils::GetDatabaseEncodingName()
+        ))
+        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+        .with_hint("Use a database with encoding \"UTF8\"."),
+    )
+}
+
 fn viewdef_name_arg(fcinfo: &mut Fcinfo) -> PgResult<Oid> {
     // SAFETY: arg 0 of the strict by-name pg_get_viewdef forms is text.
     let raw = unsafe { fcinfo.arg_varlena_packed(0) }?;
-    let name = core::str::from_utf8(raw.data()).expect("non-UTF-8 view name").to_owned();
+    let name = match core::str::from_utf8(raw.data()) {
+        Ok(s) => s.to_owned(),
+        Err(_) => return Err(non_utf8_view_name()),
+    };
     let ctx = MemoryContext::new("pg_get_viewdef_name");
     crate::viewdef::view_name_to_oid(ctx.mcx(), &name)
 }

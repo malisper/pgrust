@@ -711,6 +711,13 @@ fn canonicalize<'m>(
                     return Ok(None);
                 }
             }
+            // rangetypes.c:2046: should not get a null result if there was
+            // no error.
+            if lfc.isnull {
+                return Err(Box::new(PgError::error(format!(
+                    "function {other} returned NULL"
+                ))));
+            }
             let p = r.as_usize() as *const u8;
             // SAFETY: the canonical fn returned a live flat range varlena.
             let total = unsafe { ::types_tuple::varatt::varsize_any(p) };

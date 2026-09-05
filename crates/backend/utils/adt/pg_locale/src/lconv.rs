@@ -69,16 +69,42 @@ fn localeconv_non_c() -> ::types_error::PgResult<&'static PgLconv> {
     use std::collections::HashMap;
     use pgsync::{Mutex, OnceLock};
 
-    static CACHE: OnceLock<Mutex<HashMap<(String, String), &'static PgLconv>>> = OnceLock::new();
+    // The strings are converted into the database encoding (pg_locale.c:593
+    // db_encoding_convert), so the key carries it: backends of databases with
+    // different encodings share this process.
+    static CACHE: OnceLock<Mutex<HashMap<(String, String, i32), &'static PgLconv>>> =
+        OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
 
-    let key = crate::setup::monetary_and_numeric_names();
+    let names = crate::setup::monetary_and_numeric_names();
+    let key = (names.0, names.1, mbutils::GetDatabaseEncoding());
     if let Some(hit) = cache.lock().expect("lconv cache").get(&key) {
         return Ok(hit);
     }
     let built: &'static PgLconv = Box::leak(Box::new(read_lconv(&key.0, &key.1)?));
     cache.lock().expect("lconv cache").insert(key, built);
     Ok(built)
+}
+
+// db_encoding_convert (pg_locale.c:502): convert one lconv string from the
+// locale's encoding into the database encoding (pg_any_to_server also
+// validates it when no conversion applies). The result feeds a `&str`; a
+// database encoding that is not UTF-8 keeps the lossy fallback for bytes that
+// are not valid UTF-8.
+#[cfg(not(target_family = "wasm"))]
+fn db_encoding_convert(
+    mcx: ::mcx::Mcx<'_>,
+    encoding: i32,
+    raw: &[u8],
+) -> ::types_error::PgResult<String> {
+    let converted = match mbutils::pg_any_to_server(mcx, raw, encoding)? {
+        Some(v) => v.as_slice().to_vec(),
+        None => raw.to_vec(),
+    };
+    Ok(match String::from_utf8(converted) {
+        Ok(s) => s,
+        Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
+    })
 }
 
 /// PGLC_localeconv's non-C arm. C swaps LC_MONETARY/LC_NUMERIC with
@@ -104,15 +130,15 @@ fn read_lconv(monetary: &str, numeric: &str) -> ::types_error::PgResult<PgLconv>
         v.push(0);
         v
     }
-    // Copy while the locale is still installed: localeconv's pointers are only
-    // valid until we restore/free it. Lossy because a locale whose encoding
-    // differs from the database encoding can yield non-UTF-8 bytes (C converts
-    // these with db_encoding_strdup; unported).
-    unsafe fn own(p: *const c_char) -> String {
+    // Copy the raw bytes while the locale is still installed: localeconv's
+    // pointers are only valid until we restore/free it. They are in the
+    // locale's encoding; the conversion into the database encoding happens
+    // below (pg_locale.c:593-618).
+    unsafe fn own(p: *const c_char) -> Vec<u8> {
         if p.is_null() {
-            String::new()
+            Vec::new()
         } else {
-            unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
+            unsafe { CStr::from_ptr(p) }.to_bytes().to_vec()
         }
     }
 
@@ -193,6 +219,30 @@ fn read_lconv(monetary: &str, numeric: &str) -> ::types_error::PgResult<PgLconv>
         let Some(v) = out else {
             return Err(bad("lc_monetary", monetary));
         };
+        // pg_locale.c:593-618: convert from the encoding implied by
+        // LC_NUMERIC (decimal_point, thousands_sep) / LC_MONETARY (the rest)
+        // into the database encoding; an unidentifiable encoding (-1) means
+        // PG_SQL_ASCII, which only validates the bytes. grouping strings are
+        // not text and are not converted.
+        let cx = ::mcx::MemoryContext::new("PGLC_localeconv");
+        let mcx = cx.mcx();
+        let numeric_enc = match crate::chklocale::pg_get_encoding_from_locale(Some(numeric), true)? {
+            e if e < 0 => wchar::PG_SQL_ASCII,
+            e => e,
+        };
+        let monetary_enc =
+            match crate::chklocale::pg_get_encoding_from_locale(Some(monetary), true)? {
+                e if e < 0 => wchar::PG_SQL_ASCII,
+                e => e,
+            };
+        let decimal_point = db_encoding_convert(mcx, numeric_enc, &v.0)?;
+        let thousands_sep = db_encoding_convert(mcx, numeric_enc, &v.1)?;
+        let mon_decimal_point = db_encoding_convert(mcx, monetary_enc, &v.2)?;
+        let mon_thousands_sep = db_encoding_convert(mcx, monetary_enc, &v.3)?;
+        let mon_grouping = String::from_utf8_lossy(&v.4).into_owned();
+        let currency_symbol = db_encoding_convert(mcx, monetary_enc, &v.5)?;
+        let positive_sign = db_encoding_convert(mcx, monetary_enc, &v.6)?;
+        let negative_sign = db_encoding_convert(mcx, monetary_enc, &v.7)?;
         let leak = |s: String| -> &'static str {
             if s.is_empty() {
                 ""
@@ -201,14 +251,14 @@ fn read_lconv(monetary: &str, numeric: &str) -> ::types_error::PgResult<PgLconv>
             }
         };
         Ok(PgLconv {
-            decimal_point: leak(v.0),
-            thousands_sep: leak(v.1),
-            mon_decimal_point: leak(v.2),
-            mon_thousands_sep: leak(v.3),
-            mon_grouping: leak(v.4),
-            currency_symbol: leak(v.5),
-            positive_sign: leak(v.6),
-            negative_sign: leak(v.7),
+            decimal_point: leak(decimal_point),
+            thousands_sep: leak(thousands_sep),
+            mon_decimal_point: leak(mon_decimal_point),
+            mon_thousands_sep: leak(mon_thousands_sep),
+            mon_grouping: leak(mon_grouping),
+            currency_symbol: leak(currency_symbol),
+            positive_sign: leak(positive_sign),
+            negative_sign: leak(negative_sign),
             frac_digits: v.8,
             p_cs_precedes: v.9,
             n_cs_precedes: v.10,

@@ -15,20 +15,23 @@ use core::ffi::CStr;
 
 use ::datum::Datum;
 use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
-use ::types_core::Oid;
+use ::types_core::{InvalidOid, Oid};
 use ::types_error::{unpack_sqlstate, PgError, PgResult};
 use ::types_fmgr::{
     input_function_call_safe, ErrorSaveNode, FmgrBuiltin, FmgrInfo,
     FunctionCallInfoBaseData as Fcinfo, PGFunction,
 };
 
-// ValidIOData; the typname key replaces C's get_fn_expr_arg_stable constness
-// probe (fn_expr unset on our paths) — byte-equal typname reuses the cache.
+// ValidIOData (misc.c:786-810): the typname is parsed on the first call and,
+// unless get_fn_expr_arg_stable says the argument is constant, on every call
+// after that (search_path can change between rows); the I/O info is refreshed
+// only when the resolved type OID changes.
 struct ValidIOData {
+    typoid: Oid,
     typmod: i32,
     typioparam: Oid,
     inputproc: FmgrInfo,
-    typname: String,
+    typname_constant: bool,
 }
 
 #[cold]
@@ -49,21 +52,35 @@ fn input_is_valid_common(
     let typname_bytes = unsafe { fcinfo.arg_varlena_packed(1)? };
     let typname_bytes = typname_bytes.data();
 
-    let need = match flinfo.fn_extra_ref::<ValidIOData>() {
-        Some(v) => v.typname.as_bytes() != typname_bytes,
-        None => true,
+    if flinfo.fn_extra_ref::<ValidIOData>().is_none() {
+        // Detect whether the typname argument is constant.
+        let typname_constant = funcapi::get_fn_expr_arg_stable(Some(&*flinfo), 1);
+        flinfo.set_fn_extra(ValidIOData {
+            typoid: InvalidOid,
+            typmod: -1,
+            typioparam: InvalidOid,
+            inputproc: FmgrInfo::unresolved(),
+            typname_constant,
+        });
+    }
+    let (memo_typoid, typname_constant) = {
+        let v = flinfo.fn_extra_ref::<ValidIOData>().expect("populated above");
+        (v.typoid, v.typname_constant)
     };
-    if need {
+    // If the typname argument is constant, we only need to parse it the
+    // first time through.
+    if memo_typoid == InvalidOid || !typname_constant {
         let typname = String::from_utf8_lossy(typname_bytes);
         let (typoid, typmod) = parse_utilcmd::parseTypeString(mcx, &typname)?;
-        let (typiofunc, typioparam) = lsyscache::getTypeInputInfo(typoid)?;
-        let inputproc = fmgr_seams::fmgr_info::call(typiofunc)?;
-        flinfo.set_fn_extra(ValidIOData {
-            typmod,
-            typioparam,
-            inputproc,
-            typname: typname.into_owned(),
-        });
+        let v = flinfo.fn_extra_mut::<ValidIOData>().expect("populated above");
+        v.typmod = typmod;
+        // Update type-specific info if typoid changed.
+        if v.typoid != typoid {
+            let (typiofunc, typioparam) = lsyscache::getTypeInputInfo(typoid)?;
+            v.inputproc = fmgr_seams::fmgr_info::call(typiofunc)?;
+            v.typioparam = typioparam;
+            v.typoid = typoid;
+        }
     }
 
     // SAFETY: arg 0 is a non-null text datum (strict function).

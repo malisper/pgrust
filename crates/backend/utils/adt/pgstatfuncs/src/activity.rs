@@ -123,11 +123,9 @@ pub fn fc_pg_stat_get_activity(
         } else {
             nulls[2] = true;
         }
-        if !be.st_appname.is_empty() {
-            values[3] = text_datum(fcinfo, &be.st_appname)?;
-        } else {
-            nulls[3] = true;
-        }
+        // pgstatfuncs.c:374: st_appname always points at the backend's
+        // name buffer, so an empty application_name reports '' — never NULL.
+        values[3] = text_datum(fcinfo, &be.st_appname)?;
         if local.backend_xid != 0 {
             values[15] = Datum::from_oid(local.backend_xid);
         } else {

@@ -1008,20 +1008,92 @@ fn decompile_column_index_array(
 
 const ANUM_PG_CONSTRAINT_CONNAME: i32 = 2;
 
+// ruleutils.c:2203 pg_get_constraintdef_worker: pg_constraint is scanned by
+// OID under a registered transaction snapshot (RegisterSnapshot(
+// GetTransactionSnapshot())), NOT the syscache's catalog snapshot, so a
+// REPEATABLE READ transaction (or a pg_dump worker) still deparses a
+// constraint dropped after its snapshot was taken. `f` runs over the tuple
+// while the scan is open; `None` is "no such tuple".
+fn scan_pg_constraint<R>(
+    constraint_id: Oid,
+    f: impl FnOnce(&HeapTupleData<'_>) -> PgResult<R>,
+) -> PgResult<Option<R>> {
+    use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+    let cx = mcx::MemoryContext::new("pg_get_constraintdef scan");
+    let scan_mcx = cx.mcx();
+    let snapshot = snapmgr::RegisterSnapshot(Some(&snapmgr::GetTransactionSnapshot()?))?;
+    let rel = table::table_open(
+        scan_mcx,
+        types_core::catalog::CONSTRAINT_RELATION_ID,
+        types_rel::AccessShareLock,
+    )?;
+    let mut key = ScanKeyData::empty();
+    key.sk_attno = ANUM_PG_CONSTRAINT_OID as types_core::AttrNumber;
+    key.sk_strategy = BTEqualStrategyNumber;
+    key.sk_collation = types_core::catalog::C_COLLATION_OID;
+    key.sk_func = fmgr_seams::fmgr_info::call(types_core::fmgr::F_OIDEQ)?;
+    key.sk_argument = Datum::from_oid(constraint_id);
+    let keys = [key];
+    let mut scan = genam::systable_beginscan(
+        scan_mcx,
+        &rel,
+        types_core::catalog::CONSTRAINT_OID_INDEX_ID,
+        true,
+        snapshot.clone(),
+        &keys,
+    )?;
+    let tup = genam::systable_getnext(scan_mcx, &mut scan)?;
+    snapmgr::UnregisterSnapshot(snapshot.as_ref());
+    let result = match tup {
+        Some(tup) => Some(f(tup)?),
+        None => None,
+    };
+    genam::systable_endscan(scan_mcx, scan)?;
+    rel.close(types_rel::AccessShareLock)?;
+    Ok(result)
+}
+
+const ANUM_PG_CONSTRAINT_OID: i32 = 1;
+
+// The pg_constraint columns pg_get_constraintdef_worker reads (Form_pg_constraint
+// fields plus the varlena ones fetched with SysCacheGetAttr), copied out of the
+// scanned tuple before the scan ends.
+struct ConstraintRow {
+    contype: i8,
+    conrelid: Oid,
+    contypid: Oid,
+    conindid: Oid,
+    confrelid: Oid,
+    confupdtype: i8,
+    confdeltype: i8,
+    confmatchtype: i8,
+    condeferrable: bool,
+    condeferred: bool,
+    conenforced: bool,
+    convalidated: bool,
+    connoinherit: bool,
+    conperiod: bool,
+    conkey: Option<Vec<i16>>,
+    confkey: Option<Vec<i16>>,
+    confdelsetcols: Option<Vec<i16>>,
+    conexclop: Option<Vec<Oid>>,
+    conbin: Option<String>,
+}
+
 pub fn pg_get_constraintdef_command(mcx: Mcx<'_>, constraint_id: Oid) -> PgResult<String> {
-    let Some(ht) = SearchSysCache1(CONSTROID, SysCacheKey::Value(Datum::from_oid(constraint_id)))?
+    let Some((conname, conrelid, contypid)) = scan_pg_constraint(constraint_id, |t| {
+        Ok((
+            name_at(getattr(t, CONSTROID, ANUM_PG_CONSTRAINT_CONNAME)),
+            getattr(t, CONSTROID, ANUM_PG_CONSTRAINT_CONRELID).as_oid(),
+            getattr(t, CONSTROID, ANUM_PG_CONSTRAINT_CONTYPID).as_oid(),
+        ))
+    })?
     else {
         return Err(PgError::error(format!(
             "could not find tuple for constraint {constraint_id}"
         ))
         .into());
     };
-    let t = ht.tuple();
-    let conname = name_at(getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONNAME));
-    let conrelid = getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONRELID).as_oid();
-    let contypid = getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONTYPID).as_oid();
-    drop(t);
-    ReleaseSysCache(ht);
     // C emits ALTER TABLE without ONLY: CHECK re-add wants recursion and the
     // other contypes never inherit.
     let prefix = if conrelid != InvalidOid {
@@ -1052,8 +1124,8 @@ pub fn pg_get_constraintdef_worker(
     pg_get_constraintdef_worker_full(mcx, constraint_id, false, pretty_flags, missing_ok)
 }
 
-// Divergence from C: pg_get_constraintdef_worker scans pg_constraint under a
-// fresh MVCC snapshot; this reads the CONSTROID syscache.
+// pg_get_constraintdef_worker (ruleutils.c:2196): the pg_constraint row is
+// read through scan_pg_constraint under the transaction snapshot.
 fn pg_get_constraintdef_worker_full(
     mcx: Mcx<'_>,
     constraint_id: Oid,
@@ -1061,7 +1133,30 @@ fn pg_get_constraintdef_worker_full(
     pretty_flags: i32,
     missing_ok: bool,
 ) -> PgResult<Option<String>> {
-    let Some(ht) = SearchSysCache1(CONSTROID, SysCacheKey::Value(Datum::from_oid(constraint_id)))?
+    let Some(row) = scan_pg_constraint(constraint_id, |t| {
+        Ok(ConstraintRow {
+            contype: getattr(t, CONSTROID, ANUM_PG_CONSTRAINT_CONTYPE).as_i8(),
+            conrelid: getattr(t, CONSTROID, ANUM_PG_CONSTRAINT_CONRELID).as_oid(),
+            contypid: getattr(t, CONSTROID, ANUM_PG_CONSTRAINT_CONTYPID).as_oid(),
+            conindid: getattr(t, CONSTROID, ANUM_PG_CONSTRAINT_CONINDID).as_oid(),
+            confrelid: getattr(t, CONSTROID, ANUM_PG_CONSTRAINT_CONFRELID).as_oid(),
+            confupdtype: getattr(t, CONSTROID, ANUM_PG_CONSTRAINT_CONFUPDTYPE).as_i8(),
+            confdeltype: getattr(t, CONSTROID, ANUM_PG_CONSTRAINT_CONFDELTYPE).as_i8(),
+            confmatchtype: getattr(t, CONSTROID, ANUM_PG_CONSTRAINT_CONFMATCHTYPE).as_i8(),
+            condeferrable: getattr(t, CONSTROID, ANUM_PG_CONSTRAINT_CONDEFERRABLE).as_bool(),
+            condeferred: getattr(t, CONSTROID, ANUM_PG_CONSTRAINT_CONDEFERRED).as_bool(),
+            conenforced: getattr(t, CONSTROID, ANUM_PG_CONSTRAINT_CONENFORCED).as_bool(),
+            convalidated: getattr(t, CONSTROID, ANUM_PG_CONSTRAINT_CONVALIDATED).as_bool(),
+            connoinherit: getattr(t, CONSTROID, ANUM_PG_CONSTRAINT_CONNOINHERIT).as_bool(),
+            conperiod: getattr(t, CONSTROID, ANUM_PG_CONSTRAINT_CONPERIOD).as_bool(),
+            conkey: getattr_null(t, CONSTROID, ANUM_PG_CONSTRAINT_CONKEY).map(i16_array_at),
+            confkey: getattr_null(t, CONSTROID, ANUM_PG_CONSTRAINT_CONFKEY).map(i16_array_at),
+            confdelsetcols: getattr_null(t, CONSTROID, ANUM_PG_CONSTRAINT_CONFDELSETCOLS)
+                .map(i16_array_at),
+            conexclop: getattr_null(t, CONSTROID, ANUM_PG_CONSTRAINT_CONEXCLOP).map(oid_array_at),
+            conbin: getattr_null(t, CONSTROID, ANUM_PG_CONSTRAINT_CONBIN).map(text_at),
+        })
+    })?
     else {
         if missing_ok {
             return Ok(None);
@@ -1071,29 +1166,27 @@ fn pg_get_constraintdef_worker_full(
         ))
         .into());
     };
-    let t = ht.tuple();
-    let contype = getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONTYPE).as_i8();
-    let conrelid = getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONRELID).as_oid();
-    let contypid = getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONTYPID).as_oid();
-    let conindid = getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONINDID).as_oid();
-    let confrelid = getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONFRELID).as_oid();
-    let confupdtype = getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONFUPDTYPE).as_i8();
-    let confdeltype = getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONFDELTYPE).as_i8();
-    let confmatchtype = getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONFMATCHTYPE).as_i8();
-    let condeferrable = getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONDEFERRABLE).as_bool();
-    let condeferred = getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONDEFERRED).as_bool();
-    let conenforced = getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONENFORCED).as_bool();
-    let convalidated = getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONVALIDATED).as_bool();
-    let connoinherit = getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONNOINHERIT).as_bool();
-    let conperiod = getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONPERIOD).as_bool();
-    let conkey = getattr_null(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONKEY).map(i16_array_at);
-    let confkey = getattr_null(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONFKEY).map(i16_array_at);
-    let confdelsetcols =
-        getattr_null(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONFDELSETCOLS).map(i16_array_at);
-    let conexclop = getattr_null(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONEXCLOP).map(oid_array_at);
-    let conbin = getattr_null(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONBIN).map(text_at);
-    drop(t);
-    ReleaseSysCache(ht);
+    let ConstraintRow {
+        contype,
+        conrelid,
+        contypid,
+        conindid,
+        confrelid,
+        confupdtype,
+        confdeltype,
+        confmatchtype,
+        condeferrable,
+        condeferred,
+        conenforced,
+        convalidated,
+        connoinherit,
+        conperiod,
+        conkey,
+        confkey,
+        confdelsetcols,
+        conexclop,
+        conbin,
+    } = row;
 
     let mut buf = String::new();
     match contype {

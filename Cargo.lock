@@ -16252,6 +16252,7 @@ dependencies = [
  "relcache",
  "rewrite_manip",
  "ruleutils_seams",
+ "snapmgr",
  "stack_depth_core",
  "syscache_seams",
  "table",

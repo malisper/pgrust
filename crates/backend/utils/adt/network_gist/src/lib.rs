@@ -174,49 +174,64 @@ fn fc_inet_gist_consistent(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> Pg
     let key = unsafe { GkRef::at(ent.key) };
     key.validate()?;
     unsafe { *recheck = false };
-    Ok(Datum::from_bool(consistent_internal(
-        key,
-        query,
-        strategy,
-        ent.page_is_leaf,
-    )))
+    match consistent_checked(key, query, strategy, ent.page_is_leaf) {
+        Some(b) => Ok(Datum::from_bool(b)),
+        None => Err(unknown_strategy()),
+    }
 }
 
-pub fn consistent_internal(key: GkRef<'_>, query: InetRef<'_>, strategy: u16, leaf: bool) -> bool {
+// network_gist.c:327: elog(ERROR, ...) — a user opclass can register any
+// strategy number for this support function, so it must be a catchable
+// XX000, never a panic.
+#[cold]
+#[inline(never)]
+fn unknown_strategy() -> Box<::types_error::PgError> {
+    Box::new(::types_error::PgError::error("unknown strategy for inet GiST"))
+}
+
+// inet_gist_consistent body; `None` is C's trailing
+// elog(ERROR, "unknown strategy for inet GiST") (network_gist.c:327), reached
+// only by a strategy number none of the switches recognise.
+pub fn consistent_checked(
+    key: GkRef<'_>,
+    query: InetRef<'_>,
+    strategy: u16,
+    leaf: bool,
+) -> Option<bool> {
     if key.family() == 0 {
         debug_assert!(!leaf);
-        return true;
+        return Some(true);
     }
 
     if key.family() != query.family {
-        return match strategy {
+        return Some(match strategy {
             INETSTRAT_LT | INETSTRAT_LE => key.family() < query.family,
             INETSTRAT_GE | INETSTRAT_GT => key.family() > query.family,
             INETSTRAT_NE => true,
             _ => false,
-        };
+        });
     }
 
     let qbits = query.bits as i32;
     match strategy {
         INETSTRAT_SUB => {
             if leaf && key.minbits() <= qbits {
-                return false;
+                return Some(false);
             }
         }
         INETSTRAT_SUBEQ => {
             if leaf && key.minbits() < qbits {
-                return false;
+                return Some(false);
             }
         }
         INETSTRAT_SUPEQ | INETSTRAT_EQ => {
             if key.minbits() > qbits {
-                return false;
+                return Some(false);
             }
         }
         INETSTRAT_SUP => {
             if key.minbits() >= qbits {
-                return false;
+                return Some(false);
             }
         }
         _ => {}
@@ -227,34 +242,34 @@ pub fn consistent_internal(key: GkRef<'_>, query: InetRef<'_>, strategy: u16, le
 
     match strategy {
         INETSTRAT_SUB | INETSTRAT_SUBEQ | INETSTRAT_OVERLAPS | INETSTRAT_SUPEQ
-        | INETSTRAT_SUP => return order == 0,
+        | INETSTRAT_SUP => return Some(order == 0),
         INETSTRAT_LT | INETSTRAT_LE => {
             if order > 0 {
-                return false;
+                return Some(false);
             }
             if order < 0 || !leaf {
-                return true;
+                return Some(true);
             }
         }
         INETSTRAT_EQ => {
             if order != 0 {
-                return false;
+                return Some(false);
             }
             if !leaf {
-                return true;
+                return Some(true);
             }
         }
         INETSTRAT_GE | INETSTRAT_GT => {
             if order < 0 {
-                return false;
+                return Some(false);
             }
             if order > 0 || !leaf {
-                return true;
+                return Some(true);
             }
         }
         INETSTRAT_NE => {
             if order != 0 || !leaf {
-                return true;
+                return Some(true);
             }
         }
         _ => {}
@@ -265,28 +280,28 @@ pub fn consistent_internal(key: GkRef<'_>, query: InetRef<'_>, strategy: u16, le
     match strategy {
         INETSTRAT_LT | INETSTRAT_LE => {
             if key.minbits() < qbits {
-                return true;
+                return Some(true);
             }
             if key.minbits() > qbits {
-                return false;
+                return Some(false);
             }
         }
         INETSTRAT_EQ => {
             if key.minbits() != qbits {
-                return false;
+                return Some(false);
             }
         }
         INETSTRAT_GE | INETSTRAT_GT => {
             if key.minbits() > qbits {
-                return true;
+                return Some(true);
             }
             if key.minbits() < qbits {
-                return false;
+                return Some(false);
             }
         }
         INETSTRAT_NE => {
             if key.minbits() != qbits {
-                return true;
+                return Some(true);
             }
         }
         _ => {}
@@ -295,15 +310,23 @@ pub fn consistent_internal(key: GkRef<'_>, query: InetRef<'_>, strategy: u16, le
     let order = bitncmp(key.addr(), query.addr, key.maxbits());
 
     match strategy {
-        INETSTRAT_LT => order < 0,
-        INETSTRAT_LE => order <= 0,
-        INETSTRAT_EQ => order == 0,
-        INETSTRAT_GE => order >= 0,
-        INETSTRAT_GT => order > 0,
-        INETSTRAT_NE => order != 0,
-        _ => panic!("unknown strategy for inet GiST"),
+        INETSTRAT_LT => Some(order < 0),
+        INETSTRAT_LE => Some(order <= 0),
+        INETSTRAT_EQ => Some(order == 0),
+        INETSTRAT_GE => Some(order >= 0),
+        INETSTRAT_GT => Some(order > 0),
+        INETSTRAT_NE => Some(order != 0),
+        _ => None,
     }
 }
+
+// pub for proofs/network-gist (Kani C-equivalence harnesses) over the
+// registered strategies; behavior unchanged.
+pub fn consistent_internal(key: GkRef<'_>, query: InetRef<'_>, strategy: u16, leaf: bool) -> bool {
+    consistent_checked(key, query, strategy, leaf)
+        .unwrap_or_else(|| panic!("unknown strategy for inet GiST"))
+}
+
 
 // pub for proofs/network-gist (Kani C-equivalence harnesses); behavior unchanged.
 pub struct UnionParams {

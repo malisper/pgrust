@@ -2098,11 +2098,12 @@ fn ri_KeysEqual(
                     coerce::CoercionPathType::COERCION_PATH_RELABELTYPE => {}
                     _ => {
                         if !coerce::IsBinaryCoercible(att.atttypid, oprleft)? {
-                            panic!(
+                            // ri_triggers.c:3186: elog(ERROR), catchable.
+                            return Err(Box::new(PgError::error(format!(
                                 "no conversion function from {} to {}",
                                 format_type::format_type_be(att.atttypid)?,
                                 format_type::format_type_be(oprleft)?
-                            );
+                            ))));
                         }
                     }
                 }

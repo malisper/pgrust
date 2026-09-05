@@ -964,12 +964,12 @@ fn datum_image_cmp<'mcx>(
             }
         });
     }
-    debug_assert!(attlen == -2);
-    Ok(match cstring_bytes(a).cmp(cstring_bytes(b)) {
-        core::cmp::Ordering::Less => -1,
-        core::cmp::Ordering::Equal => 0,
-        core::cmp::Ordering::Greater => 1,
-    })
+    // rowtypes.c:1538 record_image_cmp: only byval, fixed-length and varlena
+    // columns compare; any other attlen (cstring's -2 included) is
+    // elog(ERROR, "unexpected attlen: %d").
+    Err(alloc::boxed::Box::new(::types_error::PgError::error(
+        alloc::format!("unexpected attlen: {attlen}"),
+    )))
 }
 
 // record_image_eq (rowtypes.c:1595) with C's datum_image_eq semantics.

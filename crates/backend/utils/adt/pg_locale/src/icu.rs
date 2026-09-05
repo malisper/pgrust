@@ -595,6 +595,12 @@ pub fn icu_validate_locale(loc_str: &str) -> PgResult<()> {
     if elevel.0 < 0 {
         return Ok(());
     }
+    // pg_locale.c:1688: downgrade to WARNING during pg_upgrade.
+    let elevel = if init_small::globals::IsBinaryUpgrade() && elevel.0 > types_error::WARNING.0 {
+        types_error::WARNING
+    } else {
+        elevel
+    };
     let hint = || {
         "To disable ICU locale validation, set the parameter \
          \"icu_validation_level\" to \"disabled\"."

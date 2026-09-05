@@ -188,3 +188,26 @@ fn common_bits_capped_equals_bitncommon() {
         }
     }
 }
+
+// network_gist.c:327: a strategy number no switch recognises falls through to
+// elog(ERROR, "unknown strategy for inet GiST") (a user opclass can register
+// any number); the checked body reports it as None instead of panicking,
+// and the family-mismatch / empty-key arms still answer like C.
+#[test]
+fn unknown_strategy_is_reported_not_panicked() {
+    let c = corpus();
+    let k = &c[4]; // 10.1.2.3
+    let img = leaf_key_image(k);
+    let key = gk(&img);
+    // Leaf entries only: like C's Assert(GIST_LEAF(ent)) before check 4, the
+    // port debug-asserts `leaf` once an unknown strategy passes the inner
+    // checks.
+    for s in [0u16, 12, 99, u16::MAX] {
+        assert_eq!(consistent_checked(key, k.iref(), s, true), None, "strategy {s}");
+        // Family mismatch: C returns false for anything but LT/LE/GE/GT/NE.
+        assert_eq!(consistent_checked(key, v("::1").iref(), s, true), Some(false));
+    }
+    for s in ALL_STRATEGIES {
+        assert!(consistent_checked(key, k.iref(), s, true).is_some(), "strategy {s}");
+    }
+}

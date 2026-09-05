@@ -1436,6 +1436,16 @@ pub fn fc_pg_tablespace_location(
             .into_error()
             .into()
     })?;
+    // misc.c:356-360: readlink() fills a MAXPGPATH buffer; a target that does
+    // not fit (rllen >= sizeof(targetpath)) is ERRCODE_PROGRAM_LIMIT_EXCEEDED.
+    const MAXPGPATH: usize = 1024;
+    if target.as_os_str().len() >= MAXPGPATH {
+        return Err(ereport(ERROR)
+            .errcode(types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+            .errmsg(format!("symbolic link \"{sourcepath}\" target is too long"))
+            .into_error()
+            .into());
+    }
     let target = target.to_string_lossy();
     Ok(varlena_result(varlena::cstring_to_text(mcx, target.as_bytes())?))
 }
