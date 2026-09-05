@@ -68,6 +68,7 @@ parser_small1 = { path = "../../parser/parser_small1" }
 mbutils = { path = "../../utils/mb/mbutils" }
 
 parallel_seams = { path = "../../access/transam/parallel_seams" }
+waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
 [dev-dependencies]
 indexcmds_seams = { path = "../indexcmds_seams" }
 bufmgr = { path = "../../storage/buffer/bufmgr" }
@@ -162,7 +163,6 @@ autovacuum = { path = "../../postmaster/autovacuum" }
 walwriter = { path = "../../postmaster/walwriter" }
 freespace = { path = "../../storage/freespace/freespace" }
 visibilitymap = { path = "../../access/heap/visibilitymap" }
-waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
 xloginsert = { path = "../../access/transam/xloginsert" }
 xloginsert_seams = { path = "../../access/transam/xloginsert_seams" }
 xlogreader = { path = "../../access/transam/xlogreader" }

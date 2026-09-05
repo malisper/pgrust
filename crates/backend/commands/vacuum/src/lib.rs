@@ -125,6 +125,28 @@ pub fn set_in_vacuum(v: bool) {
 const MIN_BAS_VAC_RING_SIZE_KB: i32 = 128;
 const MAX_BAS_VAC_RING_SIZE_KB: i32 = 16 * 1024 * 1024;
 
+/// check_vacuum_buffer_usage_limit (vacuum.c:139): the GUC check hook for
+/// vacuum_buffer_usage_limit. 0 (no ring) or an inclusive value in
+/// [MIN_BAS_VAC_RING_SIZE_KB, MAX_BAS_VAC_RING_SIZE_KB]; anything else fails
+/// with C's errdetail. The table row's min/max only bound 0..MAX, so without
+/// this hook 1..127 kB was accepted silently.
+fn check_vacuum_buffer_usage_limit(
+    newval: &mut i32,
+    _extra: &mut Option<guc_tables::GucHookExtra>,
+    _source: ::types_guc::GucSource,
+) -> PgResult<bool> {
+    if *newval == 0
+        || (*newval >= MIN_BAS_VAC_RING_SIZE_KB && *newval <= MAX_BAS_VAC_RING_SIZE_KB)
+    {
+        return Ok(true);
+    }
+    guc::GUC_check_errdetail(format!(
+        "\"{}\" must be 0 or between {} kB and {} kB.",
+        "vacuum_buffer_usage_limit", MIN_BAS_VAC_RING_SIZE_KB, MAX_BAS_VAC_RING_SIZE_KB
+    ));
+    Ok(false)
+}
+
 fn errpos(src: &str, location: ::types_core::ParseLoc) -> i32 {
     parser_small1::parser_errposition_source(
         Some(src.as_bytes()),
@@ -662,6 +684,12 @@ fn vacuum_rel<'mcx>(
     let snapshot = snapmgr::GetTransactionSnapshot()?;
     snapmgr::PushActiveSnapshot(&snapshot)?;
 
+    // vacuum.c:2085: the per-relation cancel point, deliberately inside the
+    // transaction so xact.c issues no useless WARNING; without it a cancel
+    // or statement timeout is only seen once the next relation's heap pass
+    // reaches a vacuum_delay_point.
+    postgres_seams::check_for_interrupts::call()?;
+
     let lmode = if params.options & VACOPT_FULL != 0 {
         types_rel::lock::AccessExclusiveLock
     } else {
@@ -909,6 +937,9 @@ pub fn vacuum_get_cutoffs(
     if TransactionIdPrecedes(cutoffs.OldestXmin, safe_oldest_xmin) {
         ereport(WARNING)
             .errmsg("cutoff for removing and freezing tuples is far in the past")
+            .errhint(
+                "Close open transactions soon to avoid wraparound problems.\nYou might also need to commit or roll back old prepared transactions, or drop stale replication slots.",
+            )
             .finish(loc("vacuum_get_cutoffs"))?;
     }
     if MultiXactIdPrecedes(cutoffs.OldestMxact, safe_oldest_mxact) {
@@ -1530,6 +1561,7 @@ pub fn init_seams() {
         vacuum_seams::vac_update_relstats::set(vac_update_relstats);
     }
     vacuum_seams::vacuum_delay_point::set(vacuum_delay_point);
+    guc_tables::hooks::check_vacuum_buffer_usage_limit.install(check_vacuum_buffer_usage_limit);
 }
 
 /// vac_open_indexes: just the ready indexes, each locked with `lockmode`.
@@ -1610,6 +1642,11 @@ pub fn vac_cleanup_one_index<'mcx>(
     Ok(istat)
 }
 
+/// WAIT_EVENT_VACUUM_DELAY (wait_event_names.txt, Timeout class):
+/// waitevent's WAIT_EVENT_TIMEOUT_NAMES row 7, "VacuumDelay".
+const PG_WAIT_TIMEOUT: u32 = 0x0900_0000;
+const WAIT_EVENT_VACUUM_DELAY: u32 = PG_WAIT_TIMEOUT | 7;
+
 pub fn vacuum_delay_point(is_analyze: bool) -> PgResult<()> {
     use init_small::globals as g;
 
@@ -1645,7 +1682,11 @@ pub fn vacuum_delay_point(is_analyze: bool) -> PgResult<()> {
         let delay_start = guc_tables::vars::track_cost_delay_timing
             .read()
             .then(pg_clock::MonoStamp::now);
+        // vacuum.c:2495-2497: the sleep is visible in pg_stat_activity as
+        // wait_event_type Timeout / wait_event VacuumDelay.
+        waitevent_seams::pgstat_report_wait_start::call(WAIT_EVENT_VACUUM_DELAY);
         std::thread::sleep(std::time::Duration::from_micros((msec * 1000.0) as u64));
+        waitevent_seams::pgstat_report_wait_end::call();
         if let Some(delay_start) = delay_start {
             let delay_end = pg_clock::MonoStamp::now();
             let delay_ns = delay_end.since_ns(delay_start) as i64;

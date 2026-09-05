@@ -10,6 +10,7 @@ use std::cell::Cell;
 use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::atomic::Ordering::Relaxed;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::Mutex;
 
 use mcx::{Mcx, MemoryContext, PgVec};
@@ -44,6 +45,12 @@ const RM_HEAP_ID: u8 = rmgr::RmgrIds::RM_HEAP_ID as u8;
 const RM_HEAP2_ID: u8 = rmgr::RmgrIds::RM_HEAP2_ID as u8;
 const XLOG_HEAP2_PRUNE_VACUUM_SCAN: u8 = 0x20;
 const XLOG_HEAP2_VISIBLE: u8 = 0x40;
+
+// Phase (g): while set, the CHECK_FOR_INTERRUPTS seam raises the query-cancel
+// error (a pending cancel); REL_OPENS counts relcache opens so the test can
+// tell whether vacuum_rel honoured the cancel before or after opening.
+static CANCEL_ARMED: AtomicBool = AtomicBool::new(false);
+static REL_OPENS: AtomicUsize = AtomicUsize::new(0);
 
 #[repr(align(8))]
 struct TestPage([u8; BLCKSZ]);
@@ -204,6 +211,8 @@ fn install_bufmgr_seams() {
     smgr_seams::smgr_nblocks::set(|_loc, fork| Ok(fork_nblocks(fork as u8)));
 
     xloginsert_seams::xlog_check_buffer_needs_backup::set(|_| false);
+    // AbortTransaction (phase g) resets the WAL construction scratch.
+    xloginsert_seams::xlog_reset_insertion::set(xloginsert::XLogResetInsertion);
     xloginsert_seams::xlog_insert::set(|rmid, info, fragments| {
         xloginsert::insert_record(rmid, info, 0, fragments, &[])
     });
@@ -406,6 +415,7 @@ fn install_xact_periphery_seams() {
     relcache_seams::relation_get_stat_ext_list::set(|mcx, _relid| Ok(PgVec::new_in(mcx)));
     relcache_seams::relation_id_get_relation::set(|relid| {
         assert_eq!(relid, REL_OID);
+        REL_OPENS.fetch_add(1, Relaxed);
         let ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("rel")));
         Ok(Some(Rc::new(test_relation(ctx.mcx()))))
     });
@@ -832,6 +842,23 @@ fn run_vacuum(sql: &str) {
     xact::CommitTransactionCommand().unwrap();
 }
 
+// run_vacuum for a statement expected to fail: returns ExecVacuum's error
+// and aborts the transaction it died in (PostgresMain's error recovery).
+fn run_vacuum_expect_err(sql: &str) -> Box<types_error::PgError> {
+    let sql: &'static str = Box::leak(sql.to_string().into_boxed_str());
+    let ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("vac")));
+    let mcx = ctx.mcx();
+    let list =
+        gram_core::raw_parser(mcx, sql, parser_seams::RawParseMode::RAW_PARSE_DEFAULT).unwrap();
+    let raw = list.nth(0).as_raw_stmt().unwrap();
+    let stmt = raw.stmt.unwrap().as_vacuum_stmt().expect("VacuumStmt");
+
+    xact::StartTransactionCommand().unwrap();
+    let err = commands_vacuum::ExecVacuum(mcx, stmt, "", true).expect_err("VACUUM should fail");
+    xact::AbortCurrentTransaction().unwrap();
+    err
+}
+
 #[test]
 fn vacuum_reclaims_dead_rows_e2e() {
     let dir = std::env::temp_dir().join(format!("pgrust_vacuum_e2e_{}", std::process::id()));
@@ -854,7 +881,14 @@ fn vacuum_reclaims_dead_rows_e2e() {
     shmem::init_seams();
     fd::init_seams();
     guc_tables::init_seams();
-    postgres_seams::check_for_interrupts::set(|| Ok(()));
+    postgres_seams::check_for_interrupts::set(|| {
+        if CANCEL_ARMED.load(Relaxed) {
+            return Err(types_error::PgError::error("canceling statement due to user request")
+                .with_sqlstate(types_error::ERRCODE_QUERY_CANCELED)
+                .into());
+        }
+        Ok(())
+    });
     guc_tables::vars::VacuumCostDelay.install_if_absent(guc_tables::GucVarAccessors {
         get: init_small::globals::VacuumCostDelay,
         set: init_small::globals::SetVacuumCostDelay,
@@ -1088,4 +1122,27 @@ fn vacuum_reclaims_dead_rows_e2e() {
     assert!(heap_records >= 1601, "insert+delete records decoded: {heap_records}");
     assert!(prune_scans >= 1, "xl_heap_prune VACUUM_SCAN records: {prune_scans}");
     assert!(visibles >= 1, "xl_heap_visible records: {visibles}");
+
+    // (g) vacuum.c:2085: vacuum_rel() runs CHECK_FOR_INTERRUPTS() right after
+    // taking its snapshot, so a cancel that is pending when a relation's
+    // transaction starts is honoured BEFORE the relation is opened (and before
+    // any VERBOSE "vacuuming" line). Without that cancel point the relation
+    // was opened and the cancel only surfaced inside the heap pass.
+    let opens_before = REL_OPENS.load(Relaxed);
+    CANCEL_ARMED.store(true, Relaxed);
+    let err = run_vacuum_expect_err("VACUUM (SKIP_DATABASE_STATS) t");
+    CANCEL_ARMED.store(false, Relaxed);
+    assert_eq!(
+        err.sqlstate(),
+        types_error::ERRCODE_QUERY_CANCELED,
+        "pending cancel surfaces as the query-cancel error: {err:?}"
+    );
+    assert_eq!(
+        REL_OPENS.load(Relaxed),
+        opens_before,
+        "vacuum_rel opened the relation before honouring the pending cancel"
+    );
+    with_fake(|f| {
+        assert!(f.pins.iter().all(|p| *p == 0), "leaked pins after cancel: {:?}", f.pins);
+    });
 }
