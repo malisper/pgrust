@@ -12895,6 +12895,7 @@ dependencies = [
  "types_portal",
  "utility",
  "varlena",
+ "wchar",
 ]
 
 [[package]]

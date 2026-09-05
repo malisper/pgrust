@@ -239,8 +239,8 @@ fs	crates/bin/waldesc/src/main.rs	5
 fs	crates/bin/pagemask/src/main.rs	2	DST-REVIEW(recovery-diff): offline recovered-state differential dev tool — reads a relfile, applies the rmgr rm_mask to each page, writes the masked image, invoked only by scripts/recovery-diff.sh; the two sites are File::open(in-relfile) + File::create(out-file). Not backend/in-sim code (same class as the waldesc/psql tool bins), outside the P1 Vfs choke, no in-sim consumer; routing chartered to the DST program
 # --- crates/contrib/file_fdw (3 sites) ---
 fs	crates/contrib/file_fdw/src/lib.rs	3
-# --- crates/contrib/pg_stat_statements (8 sites) ---
-fs	crates/contrib/pg_stat_statements/src/store.rs	8
+# --- crates/contrib/pg_stat_statements (6 sites) ---
+fs	crates/contrib/pg_stat_statements/src/store.rs	6
 # --- crates/port/pg_path (5 sites) ---
 fs	crates/port/pg_path/src/lib.rs	5
 # --- crates/port/pg_strong_random (4 sites) ---

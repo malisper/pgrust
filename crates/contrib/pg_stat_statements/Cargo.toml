@@ -25,6 +25,7 @@ dfmgr = { path = "../../backend/utils/fmgr/dfmgr" }
 guc_tables = { path = "../../backend/utils/misc/guc_tables" }
 elog = { path = "../../backend/utils/error/elog" }
 mbutils = { path = "../../backend/utils/mb/mbutils" }
+wchar = { path = "../../common/wchar" }
 miscinit = { path = "../../backend/utils/init/miscinit" }
 init_small = { path = "../../backend/utils/init/init_small" }
 heaptuple = { path = "../../backend/access/common/heaptuple" }

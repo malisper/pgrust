@@ -1,13 +1,15 @@
 //! Entry storage: pgss_store's counter accumulation (Welford variance),
-//! LRU-by-usage eviction, reset, and the pgss_save dump file. The C dump
-//! layout (header, major version, entry records) is kept, but entry records
-//! are written field-by-field little-endian rather than as raw C structs.
+//! LRU-by-usage eviction, reset, and the pgss_save dump file. The dump file
+//! is byte-for-byte the C 18.6 file (header, major version, raw
+//! sizeof(pgssEntry) records each followed by its NUL-terminated query text,
+//! pgssGlobalStats), so a data directory moves between C and pgrust with
+//! its statistics intact.
 
 use std::io::{Read, Write};
 
-use elog::elog;
+use elog::ereport;
 use types_core::instrument::{instr_time, BufferUsage, WalUsage};
-use types_error::LOG;
+use types_error::{ERRCODE_INVALID_PARAMETER_VALUE, LOG};
 
 use crate::{
     gucs, nesting_level, Counters, PgssEntry, PgssHashKey, PgssShared,
@@ -65,7 +67,7 @@ pub(crate) fn pgss_store(
             }
             None => query,
         };
-        entry_alloc(shared, key, text, encoding, jstate.is_some());
+        entry_alloc(shared, key, text.as_bytes(), encoding, jstate.is_some());
     }
 
     let Some(kind) = kind else { return };
@@ -133,7 +135,7 @@ pub(crate) fn pgss_store(
 pub(crate) fn entry_alloc(
     shared: &mut PgssShared,
     key: PgssHashKey,
-    query_text: &str,
+    query_text: &[u8],
     encoding: i32,
     sticky: bool,
 ) {
@@ -263,8 +265,40 @@ fn dump_path() -> Option<std::path::PathBuf> {
     init_small::globals::DataDir().map(|d| std::path::Path::new(d).join(PGSS_DUMP_FILE))
 }
 
+fn here(function: &'static str) -> types_error::ErrorLocation {
+    types_error::ErrorLocation::new(file!(), line!() as i32, function)
+}
+
+/// C `ereport(LOG, (errcode_for_file_access(), errmsg("... \"%s\": %m", ...)))`
+/// for a dump-file I/O failure: the OS reason follows the C-relative name.
+fn log_file_error(verb: &str, name: &str, err: &std::io::Error, function: &'static str) {
+    let _ = ereport(LOG)
+        .with_saved_errno(err.raw_os_error().unwrap_or(0))
+        .errcode_for_file_access()
+        .errmsg(format!("could not {verb} file \"{name}\": %m"))
+        .finish(here(function));
+}
+
 pub(crate) const COUNTER_WORDS: usize = 6 * PGSS_NUMKIND + 34;
 
+/// C `sizeof(pgssEntry)` on LP64 (x86_64 and aarch64 alike): pgssHashKey 24
+/// (Oid, Oid, int64, bool + 7 pad) + Counters 368 + Size query_offset 8 +
+/// int query_len 4 + int encoding 4 + TimestampTz stats_since 8 +
+/// TimestampTz minmax_stats_since 8 + slock_t mutex (1 or 4) padded to the
+/// 8-byte struct alignment. The dump file is these raw structs
+/// (pg_stat_statements.c:780 fwrite(entry, sizeof(pgssEntry)) /
+/// :632 fread(&temp, sizeof(pgssEntry))), so the record layout is fixed.
+pub(crate) const PGSS_ENTRY_SIZE: usize = 432;
+const ENTRY_COUNTERS_OFF: usize = 24;
+const ENTRY_QUERY_LEN_OFF: usize = 400;
+const ENTRY_ENCODING_OFF: usize = 404;
+const ENTRY_STATS_SINCE_OFF: usize = 408;
+const ENTRY_MINMAX_SINCE_OFF: usize = 416;
+/// C `sizeof(pgssGlobalStats)`: int64 dealloc + TimestampTz stats_reset.
+const GLOBAL_STATS_SIZE: usize = 16;
+
+/// The Counters struct as 64-bit words in C declaration order (every field
+/// is an 8-byte int64/uint64/double, so the words ARE the struct image).
 pub(crate) fn counters_to_words(c: &Counters) -> Vec<u64> {
     let mut w: Vec<u64> = Vec::with_capacity(COUNTER_WORDS);
     for k in 0..PGSS_NUMKIND {
@@ -401,98 +435,147 @@ pub(crate) fn counters_from_words(w: &[u64; COUNTER_WORDS]) -> Counters {
     c
 }
 
+/// One raw `pgssEntry` image (native byte order, like C's fwrite of the
+/// struct). query_offset (the offset into the query-text temp file, which C
+/// never reads back), the spinlock and the padding are zero.
+fn entry_record(key: &PgssHashKey, e: &PgssEntry) -> [u8; PGSS_ENTRY_SIZE] {
+    let mut rec = [0u8; PGSS_ENTRY_SIZE];
+    rec[0..4].copy_from_slice(&key.userid.to_ne_bytes());
+    rec[4..8].copy_from_slice(&key.dbid.to_ne_bytes());
+    rec[8..16].copy_from_slice(&key.queryid.to_ne_bytes());
+    rec[16] = u8::from(key.toplevel);
+    for (i, w) in counters_to_words(&e.counters).into_iter().enumerate() {
+        let off = ENTRY_COUNTERS_OFF + 8 * i;
+        rec[off..off + 8].copy_from_slice(&w.to_ne_bytes());
+    }
+    rec[ENTRY_QUERY_LEN_OFF..ENTRY_QUERY_LEN_OFF + 4]
+        .copy_from_slice(&(e.query_text.len() as i32).to_ne_bytes());
+    rec[ENTRY_ENCODING_OFF..ENTRY_ENCODING_OFF + 4].copy_from_slice(&e.encoding.to_ne_bytes());
+    rec[ENTRY_STATS_SINCE_OFF..ENTRY_STATS_SINCE_OFF + 8]
+        .copy_from_slice(&e.stats_since.to_ne_bytes());
+    rec[ENTRY_MINMAX_SINCE_OFF..ENTRY_MINMAX_SINCE_OFF + 8]
+        .copy_from_slice(&e.minmax_stats_since.to_ne_bytes());
+    rec
+}
+
+fn ne_u32(b: &[u8]) -> u32 {
+    u32::from_ne_bytes(b[..4].try_into().expect("4 bytes"))
+}
+fn ne_i32(b: &[u8]) -> i32 {
+    i32::from_ne_bytes(b[..4].try_into().expect("4 bytes"))
+}
+fn ne_u64(b: &[u8]) -> u64 {
+    u64::from_ne_bytes(b[..8].try_into().expect("8 bytes"))
+}
+fn ne_i64(b: &[u8]) -> i64 {
+    i64::from_ne_bytes(b[..8].try_into().expect("8 bytes"))
+}
+
+/// The dump-file body `pgss_shmem_shutdown` writes (pg_stat_statements.c:
+/// 762-800): PGSS_FILE_HEADER, PGSS_PG_MAJOR_VERSION, the entry count, then
+/// each raw pgssEntry followed by its NUL-terminated query text, and the
+/// pgssGlobalStats struct.
+pub(crate) fn write_dump<W: Write>(w: &mut W, shared: &PgssShared) -> std::io::Result<()> {
+    w.write_all(&PGSS_FILE_HEADER.to_ne_bytes())?;
+    w.write_all(&PGSS_PG_MAJOR_VERSION.to_ne_bytes())?;
+    w.write_all(&(shared.hash.len() as i32).to_ne_bytes())?;
+    for (k, e) in shared.hash.iter() {
+        w.write_all(&entry_record(k, e))?;
+        w.write_all(&e.query_text)?;
+        w.write_all(&[0u8])?;
+    }
+    w.write_all(&shared.stats.dealloc.to_ne_bytes())?;
+    w.write_all(&shared.stats.stats_reset.to_ne_bytes())?;
+    Ok(())
+}
+
+/// The load half of `pgss_shmem_startup` (pg_stat_statements.c:615-676).
+/// `Ok(false)` is C's `data_error` (bad header/version, an encoding that is
+/// not a valid backend encoding — "the only field we can easily
+/// sanity-check" — or a negative query_len, which C would index at -1);
+/// an `Err` is C's `read_error`.
+pub(crate) fn read_dump<R: Read>(r: &mut R, shared: &mut PgssShared) -> std::io::Result<bool> {
+    let mut hdr = [0u8; 12];
+    r.read_exact(&mut hdr)?;
+    let header = ne_u32(&hdr[0..4]);
+    let pgver = ne_u32(&hdr[4..8]);
+    let num = ne_i32(&hdr[8..12]);
+    if header != PGSS_FILE_HEADER || pgver != PGSS_PG_MAJOR_VERSION {
+        return Ok(false);
+    }
+    let mut rec = [0u8; PGSS_ENTRY_SIZE];
+    for _ in 0..num.max(0) {
+        r.read_exact(&mut rec)?;
+        let encoding = ne_i32(&rec[ENTRY_ENCODING_OFF..]);
+        if !wchar::pg_valid_be_encoding(encoding) {
+            return Ok(false);
+        }
+        let query_len = ne_i32(&rec[ENTRY_QUERY_LEN_OFF..]);
+        if query_len < 0 {
+            return Ok(false);
+        }
+        // C reads query_len + 1 bytes and forces the trailing NUL.
+        let mut query_text = vec![0u8; query_len as usize + 1];
+        r.read_exact(&mut query_text)?;
+        query_text.pop();
+
+        let mut words = [0u64; COUNTER_WORDS];
+        for (i, w) in words.iter_mut().enumerate() {
+            *w = ne_u64(&rec[ENTRY_COUNTERS_OFF + 8 * i..]);
+        }
+        let counters = counters_from_words(&words);
+        // C skips loading sticky entries.
+        if counters.is_sticky() {
+            continue;
+        }
+        let key = PgssHashKey {
+            userid: ne_u32(&rec[0..4]),
+            dbid: ne_u32(&rec[4..8]),
+            queryid: ne_i64(&rec[8..16]),
+            toplevel: rec[16] != 0,
+        };
+        entry_alloc(shared, key, &query_text, encoding, false);
+        if let Some(e) = shared.hash.get_mut(&key) {
+            e.counters = counters;
+            e.stats_since = ne_i64(&rec[ENTRY_STATS_SINCE_OFF..]);
+            e.minmax_stats_since = ne_i64(&rec[ENTRY_MINMAX_SINCE_OFF..]);
+        }
+    }
+    let mut stats = [0u8; GLOBAL_STATS_SIZE];
+    r.read_exact(&mut stats)?;
+    shared.stats.dealloc = ne_i64(&stats[0..8]);
+    shared.stats.stats_reset = ne_i64(&stats[8..16]);
+    Ok(true)
+}
+
 /// `pgss_shmem_startup`'s dump-file load half.
 pub(crate) fn load_dump_file(shared: &mut PgssShared) {
     let Some(path) = dump_path() else { return };
     let mut file = match std::fs::File::open(&path) {
         Ok(f) => f,
+        // No existing persisted stats file, so we're done.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
-        Err(_) => {
-            let _ = elog(LOG, format!("could not read file \"{}\"", path.display()));
+        Err(e) => {
+            log_file_error("read", PGSS_DUMP_FILE, &e, "pgss_shmem_startup");
             return;
         }
     };
 
-    let ok = (|| -> std::io::Result<bool> {
-        let mut u32buf = [0u8; 4];
-        file.read_exact(&mut u32buf)?;
-        let header = u32::from_le_bytes(u32buf);
-        file.read_exact(&mut u32buf)?;
-        let pgver = u32::from_le_bytes(u32buf);
-        file.read_exact(&mut u32buf)?;
-        let num = i32::from_le_bytes(u32buf);
-        if header != PGSS_FILE_HEADER || pgver != PGSS_PG_MAJOR_VERSION || num < 0 {
-            return Ok(false);
-        }
-        let mut u64buf = [0u8; 8];
-        for _ in 0..num {
-            file.read_exact(&mut u32buf)?;
-            let userid = u32::from_le_bytes(u32buf);
-            file.read_exact(&mut u32buf)?;
-            let dbid = u32::from_le_bytes(u32buf);
-            file.read_exact(&mut u64buf)?;
-            let queryid = i64::from_le_bytes(u64buf);
-            file.read_exact(&mut u32buf)?;
-            let toplevel = match u32::from_le_bytes(u32buf) {
-                0 => false,
-                1 => true,
-                _ => return Ok(false),
-            };
-            let mut words = [0u64; COUNTER_WORDS];
-            for w in words.iter_mut() {
-                file.read_exact(&mut u64buf)?;
-                *w = u64::from_le_bytes(u64buf);
-            }
-            file.read_exact(&mut u64buf)?;
-            let stats_since = i64::from_le_bytes(u64buf);
-            file.read_exact(&mut u64buf)?;
-            let minmax_stats_since = i64::from_le_bytes(u64buf);
-            file.read_exact(&mut u32buf)?;
-            let encoding = i32::from_le_bytes(u32buf);
-            file.read_exact(&mut u32buf)?;
-            let qlen = u32::from_le_bytes(u32buf) as usize;
-            if qlen > 1024 * 1024 * 1024 {
-                return Ok(false);
-            }
-            let mut qbuf = vec![0u8; qlen];
-            file.read_exact(&mut qbuf)?;
-            let Ok(query_text) = String::from_utf8(qbuf) else { return Ok(false) };
-
-            let counters = counters_from_words(&words);
-            // C skips loading sticky entries.
-            if counters.is_sticky() {
-                continue;
-            }
-            let key = PgssHashKey { userid, dbid, queryid, toplevel };
-            entry_alloc(shared, key, &query_text, encoding, false);
-            if let Some(e) = shared.hash.get_mut(&key) {
-                e.counters = counters;
-                e.stats_since = stats_since;
-                e.minmax_stats_since = minmax_stats_since;
-            }
-        }
-        file.read_exact(&mut u64buf)?;
-        shared.stats.dealloc = i64::from_le_bytes(u64buf);
-        file.read_exact(&mut u64buf)?;
-        shared.stats.stats_reset = i64::from_le_bytes(u64buf);
-        Ok(true)
-    })();
-
-    match ok {
-        Ok(true) => {
-            // Remove the persisted file so backups/standbys don't inherit it;
-            // a new one is written on next clean shutdown.
-            let _ = std::fs::remove_file(&path);
-        }
+    match read_dump(&mut file, shared) {
+        // Remove the persisted file so backups/standbys don't inherit it;
+        // a new one is written on next clean shutdown.
+        Ok(true) => {}
         Ok(false) => {
-            let _ = elog(LOG, format!("ignoring invalid data in file \"{}\"", path.display()));
-            let _ = std::fs::remove_file(&path);
+            let _ = ereport(LOG)
+                .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+                .errmsg(format!("ignoring invalid data in file \"{PGSS_DUMP_FILE}\""))
+                .finish(here("pgss_shmem_startup"));
         }
-        Err(_) => {
-            let _ = elog(LOG, format!("could not read file \"{}\"", path.display()));
-            let _ = std::fs::remove_file(&path);
-        }
+        Err(e) => log_file_error("read", PGSS_DUMP_FILE, &e, "pgss_shmem_startup"),
     }
+    drop(file);
+    // C: unlink(PGSS_DUMP_FILE) on every arm; errors ignored.
+    let _ = std::fs::remove_file(&path);
 }
 
 /// `pgss_shmem_shutdown` (on_shmem_exit): dump to disk on clean shutdown.
@@ -507,36 +590,30 @@ pub(crate) fn pgss_shmem_shutdown(code: i32, _arg: usize) {
     let Some(shared) = guard.as_ref() else { return };
     let Some(path) = dump_path() else { return };
     let tmp = path.with_extension("stat.tmp");
+    let tmp_name = format!("{PGSS_DUMP_FILE}.tmp");
 
     let write = (|| -> std::io::Result<()> {
         let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(&PGSS_FILE_HEADER.to_le_bytes())?;
-        f.write_all(&PGSS_PG_MAJOR_VERSION.to_le_bytes())?;
-        f.write_all(&(shared.hash.len() as i32).to_le_bytes())?;
-        for (k, e) in shared.hash.iter() {
-            f.write_all(&k.userid.to_le_bytes())?;
-            f.write_all(&k.dbid.to_le_bytes())?;
-            f.write_all(&k.queryid.to_le_bytes())?;
-            f.write_all(&u32::from(k.toplevel).to_le_bytes())?;
-            for w in counters_to_words(&e.counters) {
-                f.write_all(&w.to_le_bytes())?;
-            }
-            f.write_all(&e.stats_since.to_le_bytes())?;
-            f.write_all(&e.minmax_stats_since.to_le_bytes())?;
-            f.write_all(&e.encoding.to_le_bytes())?;
-            f.write_all(&(e.query_text.len() as u32).to_le_bytes())?;
-            f.write_all(e.query_text.as_bytes())?;
-        }
-        f.write_all(&shared.stats.dealloc.to_le_bytes())?;
-        f.write_all(&shared.stats.stats_reset.to_le_bytes())?;
+        write_dump(&mut f, shared)?;
+        // durable_rename's fsync of the old file before the rename.
         f.sync_all()?;
-        drop(f);
-        std::fs::rename(&tmp, &path)?;
         Ok(())
     })();
-
-    if write.is_err() {
-        let _ = elog(LOG, format!("could not write file \"{}\"", tmp.display()));
+    if let Err(e) = write {
+        log_file_error("write", &tmp_name, &e, "pgss_shmem_shutdown");
         let _ = std::fs::remove_file(&tmp);
+        return;
+    }
+
+    // Rename file into place, so we atomically replace any old one
+    // (durable_rename(..., LOG): a failure is logged, the .tmp is left).
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        let _ = ereport(LOG)
+            .with_saved_errno(e.raw_os_error().unwrap_or(0))
+            .errcode_for_file_access()
+            .errmsg(format!(
+                "could not rename file \"{tmp_name}\" to \"{PGSS_DUMP_FILE}\": %m"
+            ))
+            .finish(here("pgss_shmem_shutdown"));
     }
 }

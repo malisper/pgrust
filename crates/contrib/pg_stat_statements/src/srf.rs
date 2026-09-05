@@ -158,9 +158,19 @@ fn pg_stat_statements_internal(
                 push(&mut values, &mut nulls, Datum::from_i64(key.queryid));
             }
             if showtext {
-                // Inline texts are always the database encoding: C's
-                // pg_any_to_server is the identity conversion here.
-                push(&mut values, &mut nulls, text_datum(fcinfo, &entry.query_text)?);
+                // pg_stat_statements.c:1837: the text was recorded in the
+                // encoding of the database it ran in (a C-written dump can
+                // carry any backend encoding); convert it to ours.
+                let enc = mbutils::pg_any_to_server(
+                    fcinfo.result_mcx(),
+                    &entry.query_text,
+                    entry.encoding,
+                )?;
+                let text: &[u8] = match &enc {
+                    Some(converted) => converted.as_slice(),
+                    None => entry.query_text.as_slice(),
+                };
+                push(&mut values, &mut nulls, text_datum(fcinfo, text)?);
             } else {
                 push_null(&mut values, &mut nulls);
             }
@@ -169,7 +179,7 @@ fn pg_stat_statements_internal(
                 push_null(&mut values, &mut nulls);
             }
             if showtext {
-                push(&mut values, &mut nulls, text_datum(fcinfo, "<insufficient privilege>")?);
+                push(&mut values, &mut nulls, text_datum(fcinfo, b"<insufficient privilege>")?);
             } else {
                 push_null(&mut values, &mut nulls);
             }

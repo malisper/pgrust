@@ -108,7 +108,9 @@ pub(crate) struct PgssGlobalStats {
 pub(crate) struct PgssEntry {
     pub counters: Counters,
     // C: offset+len into PGSS_TEXT_FILE; inline here (see module comment).
-    pub query_text: String,
+    // Raw bytes in `encoding` (C's qtext_fetch result); pg_any_to_server
+    // converts them to the viewer's database encoding on output.
+    pub query_text: Vec<u8>,
     pub encoding: i32,
     pub stats_since: i64,
     pub minmax_stats_since: i64,
@@ -256,8 +258,8 @@ fn pg_init() -> PgResult<()> {
     Ok(())
 }
 
-pub(crate) fn text_datum(fcinfo: &Fcinfo, s: &str) -> PgResult<Datum> {
-    let img = varlena::cstring_to_text(fcinfo.result_mcx(), s.as_bytes())?;
+pub(crate) fn text_datum(fcinfo: &Fcinfo, s: &[u8]) -> PgResult<Datum> {
+    let img = varlena::cstring_to_text(fcinfo.result_mcx(), s)?;
     Ok(types_fmgr::varlena_result(img))
 }
 
