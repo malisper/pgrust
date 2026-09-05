@@ -29,6 +29,7 @@ standby = { path = "../../../storage/ipc/standby" }
 slot = { path = "../../slot" }
 reorderbuffer = { path = "../reorderbuffer" }
 snapbuild_seams = { path = "../../snapbuild_seams" }
+waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
 libc = "0.2"
 
 [dev-dependencies]

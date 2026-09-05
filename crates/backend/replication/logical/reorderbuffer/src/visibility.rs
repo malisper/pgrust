@@ -60,6 +60,10 @@ fn TransactionIdInArray(xid: TransactionId, xip: &[TransactionId]) -> bool {
     xip.binary_search(&xid).is_ok()
 }
 
+// PG_LOGICAL_MAPPINGS_DIR (reorderbuffer.h): the relative path C prints in
+// mapping-file errors.
+const PG_LOGICAL_MAPPINGS_DIR: &str = "pg_logical/mappings";
+
 // LogicalRewriteMappingData wire format (rewriteheap.h): 2x RelFileLocator
 // (3x u32 each) + 2x ItemPointerData (3x u16 each), native-endian.
 const LOGICAL_REWRITE_MAPPING_SIZE: usize = 36;
@@ -81,7 +85,7 @@ fn read_tid(b: &[u8]) -> ItemPointerData {
 // ApplyLogicalMappingFile (reorderbuffer.c:5323): stream the file's
 // (old locator/tid) -> (new locator/tid) entries into the tuplecid hash so
 // cmin/cmax lookups keep working against the rewritten catalog heap.
-fn ApplyLogicalMappingFile(
+pub(crate) fn ApplyLogicalMappingFile(
     hash: &RefCell<TupleCidHash>,
     dir: &PathBuf,
     fname: &str,
@@ -89,11 +93,10 @@ fn ApplyLogicalMappingFile(
     use std::io::Read;
 
     let path = dir.join(fname);
+    // Errors name the path as C builds it (reorderbuffer.c:5365).
+    let cpath = format!("{PG_LOGICAL_MAPPINGS_DIR}/{fname}");
     let mut file = std::fs::File::open(&path).map_err(|e| {
-        rb_file_error(
-            format!("could not open file \"{}\": %m", path.display()),
-            &e,
-        )
+        rb_file_error(format!("could not open file \"{cpath}\": %m"), &e)
     })?;
     let mut buf = [0u8; LOGICAL_REWRITE_MAPPING_SIZE];
     loop {
@@ -108,16 +111,19 @@ fn ApplyLogicalMappingFile(
                 while got < LOGICAL_REWRITE_MAPPING_SIZE {
                     match file.read(&mut buf[got..]) {
                         Ok(0) => {
-                            return Err(rb_error(format!(
-                                "could not read file \"{}\": read {got} instead of {}",
-                                path.display(),
-                                LOGICAL_REWRITE_MAPPING_SIZE
-                            )))
+                            // reorderbuffer.c:5397.
+                            return Err(rb_file_error(
+                                format!(
+                                    "could not read from file \"{cpath}\": read {got} instead of {} bytes",
+                                    LOGICAL_REWRITE_MAPPING_SIZE
+                                ),
+                                &std::io::Error::from_raw_os_error(0),
+                            ));
                         }
                         Ok(m) => got += m,
                         Err(e) => {
                             return Err(rb_file_error(
-                                format!("could not read file \"{}\": %m", path.display()),
+                                format!("could not read file \"{cpath}\": %m"),
                                 &e,
                             ))
                         }
@@ -126,7 +132,7 @@ fn ApplyLogicalMappingFile(
             }
             Err(e) => {
                 return Err(rb_file_error(
-                    format!("could not read file \"{}\": %m", path.display()),
+                    format!("could not read file \"{cpath}\": %m"),
                     &e,
                 ))
             }
@@ -151,6 +157,72 @@ fn ApplyLogicalMappingFile(
         h.entry(new_key).or_insert(ent);
     }
     Ok(())
+}
+
+// One sscanf "%x" conversion (strtoul base 16 into an unsigned int): skip
+// leading whitespace, optional sign, optional 0x/0X, then at least one hex
+// digit. Advances `pos`; None is a matching failure.
+fn scan_hex(s: &[u8], pos: &mut usize) -> Option<u32> {
+    while *pos < s.len() && s[*pos].is_ascii_whitespace() {
+        *pos += 1;
+    }
+    let mut neg = false;
+    if *pos < s.len() && (s[*pos] == b'+' || s[*pos] == b'-') {
+        neg = s[*pos] == b'-';
+        *pos += 1;
+    }
+    if *pos + 2 < s.len()
+        && s[*pos] == b'0'
+        && (s[*pos + 1] == b'x' || s[*pos + 1] == b'X')
+        && s[*pos + 2].is_ascii_hexdigit()
+    {
+        *pos += 2;
+    }
+    let start = *pos;
+    let mut v: u64 = 0;
+    while *pos < s.len() && s[*pos].is_ascii_hexdigit() {
+        let d = (s[*pos] as char).to_digit(16).expect("hex digit") as u64;
+        v = v.saturating_mul(16).saturating_add(d);
+        *pos += 1;
+    }
+    if *pos == start {
+        return None;
+    }
+    let v = v as u32;
+    Some(if neg { v.wrapping_neg() } else { v })
+}
+
+// sscanf(fname, LOGICAL_REWRITE_FORMAT, ...) with LOGICAL_REWRITE_FORMAT =
+// "map-%x-%x-%X_%X-%x-%x" (reorderbuffer.c:5501): (dboid, relid, lsn,
+// mapped_xid, create_xid), None when fewer than six conversions succeed.
+// Like sscanf, the scan stops after the sixth conversion: whatever follows
+// is ignored, and each literal ('-', '_') must match exactly.
+pub(crate) fn parse_mapping_filename(name: &str) -> Option<(u32, u32, u64, u32, u32)> {
+    let s = name.as_bytes();
+    let mut pos = 0usize;
+    let literal = |pos: &mut usize, c: u8| -> Option<()> {
+        if *pos < s.len() && s[*pos] == c {
+            *pos += 1;
+            Some(())
+        } else {
+            None
+        }
+    };
+    for &c in b"map-" {
+        literal(&mut pos, c)?;
+    }
+    let f_dboid = scan_hex(s, &mut pos)?;
+    literal(&mut pos, b'-')?;
+    let f_relid = scan_hex(s, &mut pos)?;
+    literal(&mut pos, b'-')?;
+    let f_hi = scan_hex(s, &mut pos)?;
+    literal(&mut pos, b'_')?;
+    let f_lo = scan_hex(s, &mut pos)?;
+    literal(&mut pos, b'-')?;
+    let f_mapped_xid = scan_hex(s, &mut pos)?;
+    literal(&mut pos, b'-')?;
+    let f_create_xid = scan_hex(s, &mut pos)?;
+    Some((f_dboid, f_relid, ((f_hi as u64) << 32) | f_lo as u64, f_mapped_xid, f_create_xid))
 }
 
 // UpdateLogicalMappings (reorderbuffer.c:5449): collect the rewrite-mapping
@@ -191,24 +263,11 @@ fn UpdateLogicalMappings(
         if !name.starts_with("map-") {
             continue;
         }
-        // LOGICAL_REWRITE_FORMAT: map-%x-%x-%X_%X-%x-%x
-        let rest = &name[4..];
-        let parts: Vec<&str> = rest.split('-').collect();
-        if parts.len() != 5 {
-            return Err(rb_error(format!("could not parse filename \"{name}\"")));
-        }
-        let lsn_parts: Vec<&str> = parts[2].split('_').collect();
-        let (Ok(f_dboid), Ok(f_relid), Some(Ok(f_hi)), Some(Ok(f_lo)), Ok(f_mapped_xid), Ok(f_create_xid)) = (
-            u32::from_str_radix(parts[0], 16),
-            u32::from_str_radix(parts[1], 16),
-            lsn_parts.first().map(|s| u32::from_str_radix(s, 16)),
-            lsn_parts.get(1).map(|s| u32::from_str_radix(s, 16)),
-            u32::from_str_radix(parts[3], 16),
-            u32::from_str_radix(parts[4], 16),
-        ) else {
+        let Some((f_dboid, f_relid, f_lsn, f_mapped_xid, f_create_xid)) =
+            parse_mapping_filename(&name)
+        else {
             return Err(rb_error(format!("could not parse filename \"{name}\"")));
         };
-        let f_lsn = ((f_hi as u64) << 32) | f_lo as u64;
 
         // Mapping for another database or relation.
         if f_dboid != dboid || f_relid != relid {

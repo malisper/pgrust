@@ -69,6 +69,8 @@ pub(crate) struct MySub {
     pub twophasestate: u8,
     pub enabled: bool,
     pub origin: String,
+    // synchronous_commit the worker runs with (worker.c:4734, :4092).
+    pub synccommit: String,
     pub skiplsn: XLogRecPtr,
     pub owner: Oid,
     pub ownersuperuser: bool,
@@ -213,6 +215,7 @@ fn load_subscription(mcx: Mcx<'_>, subid: Oid) -> PgResult<Option<MySub>> {
         twophasestate: sub.twophasestate,
         enabled: sub.enabled,
         origin: sub.origin.as_str().to_string(),
+        synccommit: sub.synccommit.as_str().to_string(),
         skiplsn: sub.skiplsn,
         owner: sub.owner,
         ownersuperuser: sub.ownersuperuser,
@@ -298,9 +301,24 @@ fn maybe_reread_subscription_guts(mcx: Mcx<'_>) -> PgResult<()> {
     }
 
     if let Some(n) = newsub {
+        let synccommit = n.synccommit.clone();
         MY_SUBSCRIPTION.with(|s| *s.borrow_mut() = Some(n));
+        // Change synchronous commit according to the user's wishes
+        // (worker.c:4092).
+        set_synchronous_commit(&synccommit)?;
     }
     Ok(())
+}
+
+// SetConfigOption("synchronous_commit", MySubscription->synccommit,
+// PGC_BACKEND, PGC_S_OVERRIDE) (worker.c:4734, :4092).
+fn set_synchronous_commit(synccommit: &str) -> PgResult<()> {
+    guc::SetConfigOption(
+        "synchronous_commit",
+        Some(synccommit),
+        types_guc::GucContext::PGC_BACKEND,
+        types_guc::GucSource::PGC_S_OVERRIDE,
+    )
 }
 
 // store_flush_position (worker.c): remember (local commit end, remote end).
@@ -425,6 +443,9 @@ pub(crate) fn apply_loop(conn: &mut PgConn, mut last_received: XLogRecPtr) -> Pg
     let mut last_recv_timestamp: TimestampTz = get_ts();
     let mut ping_sent = false;
 
+    // Mark as idle, before starting to loop (worker.c:3613).
+    apply::report_activity(apply::BackendState::STATE_IDLE);
+
     loop {
         postgres_seams::check_for_interrupts::call()?;
 
@@ -527,12 +548,14 @@ pub(crate) fn apply_loop(conn: &mut PgConn, mut last_received: XLogRecPtr) -> Pg
                         }
                         let start_lsn = u64::from_be_bytes(buf[1..9].try_into().unwrap());
                         let end_lsn = u64::from_be_bytes(buf[9..17].try_into().unwrap());
+                        let send_time = i64::from_be_bytes(buf[17..25].try_into().unwrap());
                         if last_received < start_lsn {
                             last_received = start_lsn;
                         }
                         if last_received < end_lsn {
                             last_received = end_lsn;
                         }
+                        launcher::my_worker_update_stats(last_received, send_time, false);
                         apply::apply_dispatch(mcx, Some(conn), &buf[25..])?;
                         if APPLY_WORKER_EXIT.get() {
                             return Ok(());
@@ -543,11 +566,13 @@ pub(crate) fn apply_loop(conn: &mut PgConn, mut last_received: XLogRecPtr) -> Pg
                             continue;
                         }
                         let end_lsn = u64::from_be_bytes(buf[1..9].try_into().unwrap());
+                        let timestamp = i64::from_be_bytes(buf[9..17].try_into().unwrap());
                         let reply_requested = buf[17] != 0;
                         if last_received < end_lsn {
                             last_received = end_lsn;
                         }
                         send_feedback(conn, last_received, reply_requested, false)?;
+                        launcher::my_worker_update_stats(last_received, timestamp, true);
                     }
                     // Other message types are purposefully ignored.
                     _ => {}
@@ -770,7 +795,13 @@ pub(crate) fn initialize_logrep_worker(
         return Ok(None);
     }
     let subname = sub.name.clone();
+    let synccommit = sub.synccommit.clone();
     MY_SUBSCRIPTION.with(|s| *s.borrow_mut() = Some(sub));
+
+    // Setup synchronous commit according to the user's wishes
+    // (worker.c:4734).
+    set_synchronous_commit(&synccommit)?;
+
     xact::CommitTransactionCommand()?;
 
     // InitializeLogRepWorker tail (worker.c:4761): register the origin-state

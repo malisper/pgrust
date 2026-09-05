@@ -23,3 +23,4 @@ xlogreader = { path = "../../../access/transam/xlogreader" }
 logical = { path = "../logical" }
 reorderbuffer = { path = "../reorderbuffer" }
 snapbuild = { path = "../snapbuild" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }

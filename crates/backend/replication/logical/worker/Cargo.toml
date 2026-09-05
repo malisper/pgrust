@@ -82,6 +82,7 @@ xact = { path = "../../../access/transam/xact" }
 shm_mq = { path = "../../../storage/ipc/shm_mq" }
 pgsync = { path = "../../../../_support/pgsync" }
 pgstat = { path = "../../../utils/activity/pgstat" }
+backend_status_seams = { path = "../../../utils/activity/backend_status_seams" }
 
 [dev-dependencies]
 adt_int = { path = "../../../utils/adt/int" }

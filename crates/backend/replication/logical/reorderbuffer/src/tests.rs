@@ -1606,3 +1606,64 @@ fn save_txn_snapshot_copies_uncopied_snapshots() {
     let stored = rb.txn(txn).snapshot_now.as_ref().unwrap();
     assert!(Rc::ptr_eq(stored, &copied), "copied snapshots are not re-copied");
 }
+
+// ---- audit-remediation b060 witnesses ---------------------------------------
+
+// UpdateLogicalMappings parses mapping file names with
+// sscanf(LOGICAL_REWRITE_FORMAT) (reorderbuffer.c:5501): the six conversions
+// decide, trailing bytes after the sixth are ignored, and the LSN separator
+// is exactly one '_' (rows a186-candidate-fp-logical-reorderbuffer-p3-
+// 38f29a7c6464322aebaf-1 and -f6c5350a40a62bd646b1-1).
+#[test]
+fn mapping_filename_parse_follows_sscanf() {
+    use crate::visibility::parse_mapping_filename;
+    let lsn = (3u64 << 32) | 4;
+    assert_eq!(parse_mapping_filename("map-1-2-3_4-5-6"), Some((1, 2, lsn, 5, 6)));
+    // sscanf returns 6 and stops: trailing junk after the sixth field is fine.
+    assert_eq!(parse_mapping_filename("map-1-2-3_4-5-6-extra"), Some((1, 2, lsn, 5, 6)));
+    // %x is greedy over hex digits: "6extra" scans as 0x6e, then stops.
+    assert_eq!(parse_mapping_filename("map-1-2-3_4-5-6extra"), Some((1, 2, lsn, 5, 0x6e)));
+    assert_eq!(parse_mapping_filename("map-1-2-3_4-5-6zzz"), Some((1, 2, lsn, 5, 6)));
+    assert_eq!(parse_mapping_filename("map-1-2-3_4-5-6.tmp"), Some((1, 2, lsn, 5, 6)));
+    // %X_%X: a second '_' fails the '-' literal after the fourth conversion.
+    assert_eq!(parse_mapping_filename("map-1-2-3_4_5-6-7"), None);
+    assert_eq!(parse_mapping_filename("map-1-2-3-4-5-6"), None);
+    assert_eq!(parse_mapping_filename("map-1-2-3_4-5"), None);
+    assert_eq!(parse_mapping_filename("map-"), None);
+    assert_eq!(parse_mapping_filename("map-x-2-3_4-5-6"), None);
+    assert_eq!(
+        parse_mapping_filename("map-a-B-c_D-e-F"),
+        Some((0xa, 0xb, (0xc << 32) | 0xd, 0xe, 0xf))
+    );
+    // %x accepts an optional 0x prefix and sign (strtoul semantics).
+    assert_eq!(parse_mapping_filename("map-0x1-2-3_4-5-6"), Some((1, 2, lsn, 5, 6)));
+    assert_eq!(
+        parse_mapping_filename("map-1-2-3_4-5--1"),
+        Some((1, 2, lsn, 5, u32::MAX))
+    );
+}
+
+// ApplyLogicalMappingFile (reorderbuffer.c:5397): a torn entry reports
+// 'could not read from file "pg_logical/mappings/<name>": read N instead of
+// 36 bytes' — the relative PG_LOGICAL_MAPPINGS_DIR path, not an absolute one
+// (row a186-candidate-fp-logical-reorderbuffer-p3-064eab6c298f40df6c15-1).
+#[test]
+fn torn_mapping_entry_reports_c_message_with_relative_path() {
+    let dir = std::env::temp_dir().join(format!("pgrust_rb_mapping_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fname = "map-1-2-3_4-5-6";
+    std::fs::write(dir.join(fname), [0u8; 20]).unwrap();
+    let hash: RefCell<crate::visibility::TupleCidHash> =
+        RefCell::new(mcx::PgFxHashMap::with_hasher_in(Default::default(), rb_mcx()));
+    let err = crate::visibility::ApplyLogicalMappingFile(&hash, &dir, fname).unwrap_err();
+    assert_eq!(
+        err.message(),
+        "could not read from file \"pg_logical/mappings/map-1-2-3_4-5-6\": read 20 instead of 36 bytes"
+    );
+    // A complete entry set and EOF: no error, nothing mapped (empty hash).
+    std::fs::write(dir.join(fname), [0u8; 36]).unwrap();
+    crate::visibility::ApplyLogicalMappingFile(&hash, &dir, fname).unwrap();
+    assert!(hash.borrow().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}

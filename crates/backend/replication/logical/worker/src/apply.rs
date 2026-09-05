@@ -36,6 +36,15 @@ use walreceiver::client::PgConn;
 
 use crate::{loc, my_sub, IN_REMOTE_TRANSACTION, REMOTE_FINAL_LSN};
 
+pub(crate) use backend_status_seams::BackendState;
+
+// pgstat_report_activity(state, NULL) (backend_status.c): the apply worker
+// reports RUNNING at the start of a remote transaction / streamed chunk and
+// IDLE once it is finished, so pg_stat_activity.state tracks it as in C.
+pub(crate) fn report_activity(state: BackendState) {
+    backend_status_seams::pgstat_report_activity::call(state, None);
+}
+
 // Message-type bytes (logicalproto.h LogicalRepMsgType).
 const MSG_BEGIN: u8 = b'B';
 const MSG_COMMIT: u8 = b'C';
@@ -183,6 +192,10 @@ pub(crate) fn receive_binary_column<'mcx>(
 
 // begin_replication_step (worker.c:501).
 pub(crate) fn begin_replication_step(mcx: Mcx<'_>) -> PgResult<()> {
+    // worker.c:503: every step is a new statement for statement_timestamp()
+    // and the statement-start bookkeeping.
+    xact::SetCurrentStatementStartTimestamp();
+
     if !xact::IsTransactionState() {
         xact::StartTransactionCommand()?;
         crate::maybe_reread_subscription(mcx)?;
@@ -274,11 +287,7 @@ pub(crate) fn apply_dispatch(
     match action {
         MSG_BEGIN => apply_handle_begin(&mut r),
         MSG_COMMIT => apply_handle_commit(mcx, conn, &mut r),
-        MSG_ORIGIN => {
-            // ORIGIN inside a remote transaction; contents unused here.
-            let _ = logicalproto::logicalrep_read_origin(&mut r)?;
-            Ok(())
-        }
+        MSG_ORIGIN => apply_handle_origin(),
         MSG_RELATION => apply_handle_relation(mcx, &mut r),
         MSG_TYPE => {
             let _ = logicalproto::logicalrep_read_typ(&mut r)?;
@@ -312,12 +321,32 @@ pub(crate) fn apply_dispatch(
     }
 }
 
+// apply_handle_origin (worker.c:1435): the ORIGIN message can only come
+// inside a streamed transaction, or inside a remote transaction before any
+// actual writes; its contents are not used.
+fn apply_handle_origin() -> PgResult<()> {
+    if !crate::stream_apply::in_streamed_transaction()
+        && (!IN_REMOTE_TRANSACTION.get()
+            || (xact::IsTransactionState()
+                && !crate::tablesync::AM_TABLESYNC_WORKER.with(std::cell::Cell::get)))
+    {
+        ereport(ERROR)
+            .errcode(ERRCODE_PROTOCOL_VIOLATION)
+            .errmsg("ORIGIN message sent out of order")
+            .finish(loc("apply_handle_origin"))?;
+        unreachable!();
+    }
+    Ok(())
+}
+
 // apply_handle_begin (worker.c:985).
 fn apply_handle_begin(r: &mut Reader<'_>) -> PgResult<()> {
     let begin = logicalproto::logicalrep_read_begin(r)?;
     REMOTE_FINAL_LSN.set(begin.final_lsn);
     crate::maybe_start_skipping_changes(begin.final_lsn);
     IN_REMOTE_TRANSACTION.set(true);
+
+    report_activity(BackendState::STATE_RUNNING);
     Ok(())
 }
 
@@ -344,6 +373,8 @@ fn apply_handle_commit(
 
     apply_handle_commit_internal(mcx, &commit)?;
     crate::tablesync::process_syncing_tables(mcx, conn, commit.end_lsn)?;
+
+    report_activity(BackendState::STATE_IDLE);
     Ok(())
 }
 
@@ -407,6 +438,8 @@ fn apply_handle_begin_prepare(r: &mut Reader<'_>) -> PgResult<()> {
     REMOTE_FINAL_LSN.set(begin.prepare_lsn);
     crate::maybe_start_skipping_changes(begin.prepare_lsn);
     IN_REMOTE_TRANSACTION.set(true);
+
+    report_activity(BackendState::STATE_RUNNING);
     Ok(())
 }
 
@@ -479,6 +512,8 @@ fn apply_handle_prepare(
     // subskiplsn is then cleared when finishing the next transaction.
     crate::stop_skipping_changes();
     crate::clear_subscription_skip_lsn(mcx, prepare_data.prepare_lsn)?;
+
+    report_activity(BackendState::STATE_IDLE);
     Ok(())
 }
 
@@ -511,6 +546,8 @@ fn apply_handle_commit_prepared(
     crate::tablesync::process_syncing_tables(mcx, conn, prepare_data.end_lsn)?;
 
     crate::clear_subscription_skip_lsn(mcx, prepare_data.end_lsn)?;
+
+    report_activity(BackendState::STATE_IDLE);
     Ok(())
 }
 
@@ -549,7 +586,10 @@ fn apply_handle_rollback_prepared(
     );
     IN_REMOTE_TRANSACTION.set(false);
 
-    crate::tablesync::process_syncing_tables(mcx, conn, rollback_data.rollback_end_lsn)
+    crate::tablesync::process_syncing_tables(mcx, conn, rollback_data.rollback_end_lsn)?;
+
+    report_activity(BackendState::STATE_IDLE);
+    Ok(())
 }
 
 // apply_handle_relation (worker.c:2318).
@@ -561,6 +601,23 @@ fn apply_handle_relation(mcx: Mcx<'_>, r: &mut Reader<'_>) -> PgResult<()> {
     let _ = mcx;
     let rel = logicalproto::logicalrep_read_rel(r)?;
     logicalrelation::logicalrep_relmap_update(&rel);
+    Ok(())
+}
+
+// slot_store_data / slot_modify_data (worker.c:811, :928): a remote column
+// the received tuple does not carry is a protocol violation.
+pub(crate) fn tuple_column_check(remoteattnum: usize, ncols: usize) -> PgResult<()> {
+    if remoteattnum >= ncols {
+        ereport(ERROR)
+            .errcode(ERRCODE_PROTOCOL_VIOLATION)
+            .errmsg(format!(
+                "logical replication column {} not found in tuple: only {} column(s) received",
+                remoteattnum + 1,
+                ncols
+            ))
+            .finish(loc("slot_store_data"))?;
+        unreachable!();
+    }
     Ok(())
 }
 
@@ -581,16 +638,7 @@ fn slot_store_data<'mcx>(
         let remote = entry.attrmap.get(i).copied().unwrap_or(-1);
         let (value, isnull) = if !att.attisdropped && remote >= 0 {
             let m = remote as usize;
-            if m >= tup.ncols {
-                ereport(ERROR)
-                    .errcode(ERRCODE_PROTOCOL_VIOLATION)
-                    .errmsg(format!(
-                        "remote tuple for relation \"{}.{}\" has fewer columns than its relation message declared",
-                        entry.remoterel.nspname, entry.remoterel.relname
-                    ))
-                    .finish(loc("slot_store_data"))?;
-                unreachable!();
-            }
+            tuple_column_check(m, tup.ncols)?;
             let bytes = tup.colvalues[m].as_deref().unwrap_or(&[]);
             slot_store_datum(
                 mcx,
@@ -699,16 +747,7 @@ fn slot_modify_data<'mcx>(
             continue;
         }
         let m = remote as usize;
-        if m >= tup.ncols {
-            ereport(ERROR)
-                .errcode(ERRCODE_PROTOCOL_VIOLATION)
-                .errmsg(format!(
-                    "remote tuple for relation \"{}.{}\" has fewer columns than its relation message declared",
-                    entry.remoterel.nspname, entry.remoterel.relname
-                ))
-                .finish(loc("slot_modify_data"))?;
-            unreachable!();
-        }
+        tuple_column_check(m, tup.ncols)?;
         if tup.colstatus[m] == LOGICALREP_COLUMN_UNCHANGED {
             continue;
         }

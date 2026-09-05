@@ -713,6 +713,8 @@ pub(crate) fn pa_stream_abort(abort: &logicalproto::LogicalRepStreamAbortData) -
             xact::CommitTransactionCommand()?;
         }
         pa_reset_subtrans();
+
+        crate::apply::report_activity(crate::apply::BackendState::STATE_IDLE);
     } else {
         // Rollback to the subxact's savepoint.
         let spname = pa_savepoint_name(subid(), subxid);

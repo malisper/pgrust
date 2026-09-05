@@ -39,6 +39,7 @@ fn test_sub(skiplsn: u64, runasowner: bool) -> super::MySub {
         twophasestate: pg_subscription::LOGICALREP_TWOPHASE_STATE_DISABLED,
         enabled: true,
         origin: "any".to_string(),
+        synccommit: "off".to_string(),
         skiplsn,
         owner: 10,
         ownersuperuser: true,
@@ -147,4 +148,53 @@ fn origin_differs_conflict_details() {
         origin_differs_detail("deleting", true, None, 731, "ts0"),
         "deleting the row that was modified by a non-existent origin in transaction 731 at ts0"
     );
+}
+
+// ---- audit-remediation b060 witnesses ---------------------------------------
+
+// worker.c:811 / :928 (slot_store_data / slot_modify_data): a remote column
+// index beyond the received tuple's ncols is ERRCODE_PROTOCOL_VIOLATION with
+// C's message (rows a186-candidate-fp-logical-worker-p1-
+// b5b0dbbbdcb1e0b76a84-1 and -fd1f387229ff79cdf6bb-1).
+#[test]
+fn tuple_column_beyond_received_ncols_is_c_protocol_violation() {
+    assert!(super::apply::tuple_column_check(0, 1).is_ok());
+    assert!(super::apply::tuple_column_check(1, 2).is_ok());
+    let err = super::apply::tuple_column_check(2, 2).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_PROTOCOL_VIOLATION);
+    assert_eq!(
+        err.message(),
+        "logical replication column 3 not found in tuple: only 2 column(s) received"
+    );
+    let err = super::apply::tuple_column_check(0, 0).unwrap_err();
+    assert_eq!(
+        err.message(),
+        "logical replication column 1 not found in tuple: only 0 column(s) received"
+    );
+}
+
+// apply_handle_origin (worker.c:1441): ORIGIN may only arrive inside a
+// streamed transaction, or inside a remote transaction before any write;
+// anywhere else it is ERRCODE_PROTOCOL_VIOLATION "ORIGIN message sent out of
+// order" (row a186-candidate-fp-logical-worker-p1-2f93a77d6a87e4c5c17e-1).
+#[test]
+fn origin_message_outside_remote_transaction_is_out_of_order() {
+    let cx = mcx::MemoryContext::new("t");
+    // SAFETY: `cx` outlives every use within this test.
+    let mcx: mcx::Mcx<'static> = unsafe { std::mem::transmute(cx.mcx()) };
+    let mut buf = vec![b'O'];
+    buf.extend_from_slice(&0x10u64.to_be_bytes());
+    buf.extend_from_slice(b"pg_16390\0");
+
+    super::IN_REMOTE_TRANSACTION.set(false);
+    let err = super::apply::apply_dispatch(mcx, None, &buf).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_PROTOCOL_VIOLATION);
+    assert_eq!(err.message(), "ORIGIN message sent out of order");
+
+    // Inside a remote transaction with no local transaction started yet
+    // (no writes so far): accepted.
+    super::IN_REMOTE_TRANSACTION.set(true);
+    assert!(!xact::IsTransactionState());
+    super::apply::apply_dispatch(mcx, None, &buf).unwrap();
+    super::IN_REMOTE_TRANSACTION.set(false);
 }

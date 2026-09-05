@@ -339,10 +339,7 @@ fn StartupDecodingContext(
     // To support two-phase logical decoding we require the whole prepare
     // family; enabling on any one of them makes a missing member fail loudly
     // in its wrapper (logical.c:246).
-    let twophase = callbacks.begin_prepare_cb.is_some()
-        || callbacks.prepare_cb.is_some()
-        || callbacks.commit_prepared_cb.is_some()
-        || callbacks.rollback_prepared_cb.is_some();
+    let twophase = twophase_from_callbacks(&callbacks);
 
     let opc = Box::into_raw(Box::new(OutputPluginContext {
         slot,
@@ -911,6 +908,28 @@ fn missing_stream_cb(which: &str) -> PgResult<()> {
     unreachable!();
 }
 
+// stream_prepare_cb_wrapper's missing-callback error (logical.c:1512): in
+// streaming mode with two-phase commits, stream_prepare_cb is required.
+fn missing_stream_prepare_cb() -> PgResult<()> {
+    ereport(ERROR)
+        .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+        .errmsg("logical streaming at prepare time requires a stream_prepare_cb callback")
+        .finish(loc("stream_prepare_cb_wrapper"))?;
+    unreachable!();
+}
+
+// logical.c:340: two-phase decoding is enabled when any of the prepare-family
+// callbacks (including stream_prepare_cb and filter_prepare_cb) is provided;
+// a missing member fails loudly in its wrapper.
+pub(crate) fn twophase_from_callbacks(callbacks: &OutputPluginCallbacks) -> bool {
+    callbacks.begin_prepare_cb.is_some()
+        || callbacks.prepare_cb.is_some()
+        || callbacks.commit_prepared_cb.is_some()
+        || callbacks.rollback_prepared_cb.is_some()
+        || callbacks.stream_prepare_cb.is_some()
+        || callbacks.filter_prepare_cb.is_some()
+}
+
 fn stream_start_cb_wrapper(rb: &mut ReorderBuffer, txn: TxnId, first_lsn: XLogRecPtr) -> PgResult<()> {
     let opc = opc_from_rb(rb);
     debug_assert!(!opc.fast_forward);
@@ -967,7 +986,7 @@ fn stream_prepare_cb_wrapper(rb: &mut ReorderBuffer, txn: TxnId, prepare_lsn: XL
     let Some(cb) = opc.callbacks.stream_prepare_cb else {
         // In streaming mode with two-phase, stream_prepare_cb is required
         // (logical.c:1288).
-        return missing_stream_cb("stream_prepare_cb");
+        return missing_stream_prepare_cb();
     };
     cb(opc, rb, txn, prepare_lsn)
 }

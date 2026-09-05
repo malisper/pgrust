@@ -1526,9 +1526,13 @@ pub fn DecodingContextFindStartpoint(ctx: &mut LogicalDecodingContext) -> PgResu
 
         LogicalDecodingProcessRecord(ctx)?;
 
+        // Only continue till we found a consistent spot.
         if logical::DecodingContextReady(ctx) {
             break;
         }
+
+        // logical.c:731: the search stays cancellable.
+        postgres_seams::check_for_interrupts::call()?;
     }
 
     let end = ctx.reader.v.EndRecPtr;

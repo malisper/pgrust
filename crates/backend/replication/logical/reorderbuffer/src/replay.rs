@@ -560,6 +560,9 @@ impl ReorderBuffer {
                 break;
             };
 
+            // reorderbuffer.c:2263: replay stays cancellable per change.
+            postgres_seams::check_for_interrupts::call()?;
+
             // The start-stream callback can only fire once the first change
             // is at hand (reorderbuffer.c:2273).
             if *prev_lsn == InvalidXLogRecPtr && streaming {

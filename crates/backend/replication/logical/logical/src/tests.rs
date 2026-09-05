@@ -62,3 +62,51 @@ fn output_plugin_must_be_named_in_output_plugin_libraries() {
     set_output_plugin_libraries(Some("pgoutput,,test_decoding"));
     assert!(super::check_output_plugin_allowed("pgoutput").is_err());
 }
+
+// ---- audit-remediation b060 witnesses ---------------------------------------
+
+// logical.c:340: ctx->twophase is set when ANY of begin_prepare_cb,
+// prepare_cb, commit_prepared_cb, rollback_prepared_cb, stream_prepare_cb or
+// filter_prepare_cb is registered (row
+// a186-candidate-fp-logical-logical-da164a0c0e8328ab5f83-1).
+#[test]
+fn twophase_enabled_by_every_prepare_family_callback() {
+    fn noop_prepare(
+        _: &mut crate::OutputPluginContext,
+        _: &mut reorderbuffer::ReorderBuffer,
+        _: reorderbuffer::TxnId,
+        _: types_core::XLogRecPtr,
+    ) -> types_error::PgResult<()> {
+        Ok(())
+    }
+    fn noop_filter_prepare(
+        _: &mut crate::OutputPluginContext,
+        _: types_core::TransactionId,
+        _: &str,
+    ) -> types_error::PgResult<bool> {
+        Ok(false)
+    }
+    let none = crate::OutputPluginCallbacks::default();
+    assert!(!crate::twophase_from_callbacks(&none));
+    let mut only_stream_prepare = crate::OutputPluginCallbacks::default();
+    only_stream_prepare.stream_prepare_cb = Some(noop_prepare);
+    assert!(crate::twophase_from_callbacks(&only_stream_prepare));
+    let mut only_filter_prepare = crate::OutputPluginCallbacks::default();
+    only_filter_prepare.filter_prepare_cb = Some(noop_filter_prepare);
+    assert!(crate::twophase_from_callbacks(&only_filter_prepare));
+    let mut only_prepare = crate::OutputPluginCallbacks::default();
+    only_prepare.prepare_cb = Some(noop_prepare);
+    assert!(crate::twophase_from_callbacks(&only_prepare));
+}
+
+// logical.c:1512: "logical streaming at prepare time requires a %s callback"
+// (row a186-candidate-fp-logical-logical-f4eea20753ce973e923a-1).
+#[test]
+fn missing_stream_prepare_cb_message_matches_c() {
+    let err = crate::missing_stream_prepare_cb().unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE);
+    assert_eq!(
+        err.message(),
+        "logical streaming at prepare time requires a stream_prepare_cb callback"
+    );
+}

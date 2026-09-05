@@ -157,6 +157,52 @@ fn find_local_index(rel: &Relation<'_>, remoterel: &LogicalRepRelation) -> Oid {
     }
 }
 
+// logicalrep_get_attrs_str (relation.c:227): the named remote columns,
+// double-quoted, comma-separated.
+fn get_attrs_str(remoterel: &LogicalRepRelation, atts: &[usize]) -> String {
+    atts.iter()
+        .map(|&i| format!("\"{}\"", remoterel.attnames[i]))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+// logicalrep_report_missing_or_gen_attrs (relation.c:255): `missing` and
+// `generated` are remote column indexes; missing columns are reported first
+// (errmsg_plural on the count).
+fn report_missing_or_gen_attrs(
+    remoterel: &LogicalRepRelation,
+    missing: &[usize],
+    generated: &[usize],
+) -> PgResult<()> {
+    if !missing.is_empty() {
+        let column = if missing.len() == 1 { "column" } else { "columns" };
+        ereport(ERROR)
+            .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+            .errmsg(format!(
+                "logical replication target relation \"{}.{}\" is missing replicated {column}: {}",
+                remoterel.nspname,
+                remoterel.relname,
+                get_attrs_str(remoterel, missing)
+            ))
+            .finish(loc("logicalrep_report_missing_or_gen_attrs"))?;
+        unreachable!();
+    }
+    if !generated.is_empty() {
+        let column = if generated.len() == 1 { "column" } else { "columns" };
+        ereport(ERROR)
+            .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+            .errmsg(format!(
+                "logical replication target relation \"{}.{}\" has incompatible generated {column}: {}",
+                remoterel.nspname,
+                remoterel.relname,
+                get_attrs_str(remoterel, generated)
+            ))
+            .finish(loc("logicalrep_report_missing_or_gen_attrs"))?;
+        unreachable!();
+    }
+    Ok(())
+}
+
 // CheckSubscriptionRelkind (execReplication.c:877-886): plain and partitioned
 // tables are valid logical replication targets; the DETAIL is
 // errdetail_relkind_not_supported(relkind).
@@ -242,7 +288,7 @@ pub fn logicalrep_rel_open<'mcx>(
         let natts = desc.natts as usize;
         entry.attrmap = vec![-1i16; natts];
         let mut missing: Vec<bool> = vec![true; remoterel.natts];
-        let mut generated_hit: Vec<String> = Vec::new();
+        let mut generated_hit: Vec<usize> = Vec::new();
         for i in 0..natts {
             let attr = desc.attr(i);
             if attr.attisdropped {
@@ -257,37 +303,19 @@ pub fn logicalrep_rel_open<'mcx>(
             entry.attrmap[i] = m;
             if m >= 0 {
                 if attr.attgenerated != 0 {
-                    generated_hit.push(attname);
+                    generated_hit.push(m as usize);
                 }
                 missing[m as usize] = false;
             }
         }
 
-        let missing_names: Vec<&str> = missing
+        let missing_idx: Vec<usize> = missing
             .iter()
             .enumerate()
             .filter(|(_, &miss)| miss)
-            .map(|(i, _)| remoterel.attnames[i].as_str())
+            .map(|(i, _)| i)
             .collect();
-        if !missing_names.is_empty() || !generated_hit.is_empty() {
-            let mut parts = Vec::new();
-            if !missing_names.is_empty() {
-                parts.push(format!("missing replicated columns: ({})", missing_names.join(", ")));
-            }
-            if !generated_hit.is_empty() {
-                parts.push(format!("generated columns: ({})", generated_hit.join(", ")));
-            }
-            ereport(ERROR)
-                .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
-                .errmsg(format!(
-                    "logical replication target relation \"{}.{}\" is misconfigured: {}",
-                    remoterel.nspname,
-                    remoterel.relname,
-                    parts.join("; ")
-                ))
-                .finish(loc("logicalrep_report_missing_or_gen_attrs"))?;
-            unreachable!();
-        }
+        report_missing_or_gen_attrs(&remoterel, &missing_idx, &generated_hit)?;
 
         mark_updatable(&mut entry)?;
         entry.localindexoid = find_local_index(&rel, &remoterel);
@@ -396,6 +424,81 @@ mod tests {
         REL_MAP.with(|m| assert!(!m.borrow()[&42].localrelvalid));
         relmap_invalidate_cb(Datum::null(), InvalidOid); // all
         REL_MAP.with(|m| assert!(!m.borrow()[&42].localrelvalid));
+    }
+
+    // ---- audit-remediation b060 witnesses -----------------------------------
+
+    // CheckSubscriptionRelkind (execReplication.c:877): the refusal carries
+    // errdetail_relkind_not_supported (row
+    // a186-candidate-fp-logical-relation-3716aede9a0956c83125-1).
+    // errdetail_relkind_not_supported lives behind pg_class_seams (bound by
+    // pg_class at boot); the unit test binds a C-shaped fake once.
+    fn fake_errdetail_relkind_not_supported(relkind: u8) -> PgResult<String> {
+        let kind = match relkind {
+            b'v' => "views",
+            b'f' => "foreign tables",
+            other => panic!("unexpected relkind {other:?}"),
+        };
+        Ok(format!("This operation is not supported for {kind}."))
+    }
+
+    #[test]
+    fn relkind_refusal_carries_c_detail() {
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(|| {
+            pg_class_seams::errdetail_relkind_not_supported::set(
+                fake_errdetail_relkind_not_supported,
+            );
+        });
+        let err = check_relkind(b'v', "public", "t").unwrap_err();
+        assert_eq!(err.sqlstate(), ERRCODE_WRONG_OBJECT_TYPE);
+        assert_eq!(
+            err.message(),
+            "cannot use relation \"public.t\" as logical replication target"
+        );
+        assert_eq!(err.detail(), Some("This operation is not supported for views."));
+        let err = check_relkind(b'f', "s", "ft").unwrap_err();
+        assert_eq!(err.detail(), Some("This operation is not supported for foreign tables."));
+        assert!(check_relkind(b'r', "public", "t").is_ok());
+        assert!(check_relkind(b'p', "public", "t").is_ok());
+    }
+
+    // logicalrep_report_missing_or_gen_attrs (relation.c:255): errmsg_plural
+    // forms, double-quoted names from logicalrep_get_attrs_str, missing
+    // reported before generated (row
+    // a186-candidate-fp-logical-relation-3e173f87971875b5f605-1).
+    #[test]
+    fn missing_and_generated_attrs_messages_match_c() {
+        let r = remoterel();
+        assert!(report_missing_or_gen_attrs(&r, &[], &[]).is_ok());
+        let err = report_missing_or_gen_attrs(&r, &[1], &[]).unwrap_err();
+        assert_eq!(err.sqlstate(), ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE);
+        assert_eq!(
+            err.message(),
+            "logical replication target relation \"public.t\" is missing replicated column: \"b\""
+        );
+        let err = report_missing_or_gen_attrs(&r, &[0, 1], &[]).unwrap_err();
+        assert_eq!(
+            err.message(),
+            "logical replication target relation \"public.t\" is missing replicated columns: \"a\", \"b\""
+        );
+        let err = report_missing_or_gen_attrs(&r, &[], &[0]).unwrap_err();
+        assert_eq!(err.sqlstate(), ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE);
+        assert_eq!(
+            err.message(),
+            "logical replication target relation \"public.t\" has incompatible generated column: \"a\""
+        );
+        let err = report_missing_or_gen_attrs(&r, &[], &[0, 1]).unwrap_err();
+        assert_eq!(
+            err.message(),
+            "logical replication target relation \"public.t\" has incompatible generated columns: \"a\", \"b\""
+        );
+        // Missing columns are reported first when both occur.
+        let err = report_missing_or_gen_attrs(&r, &[1], &[0]).unwrap_err();
+        assert_eq!(
+            err.message(),
+            "logical replication target relation \"public.t\" is missing replicated column: \"b\""
+        );
     }
 
     #[test]

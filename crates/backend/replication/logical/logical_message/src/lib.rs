@@ -10,7 +10,7 @@
 #![allow(non_snake_case)]
 
 use types_core::{Oid, XLogRecPtr};
-use types_error::PgResult;
+use types_error::{PgError, PgResult, PANIC};
 use xlogreader_seams::XLogReaderState;
 
 pub const XLOG_LOGICAL_MESSAGE: u8 = 0x00;
@@ -61,12 +61,47 @@ pub fn LogLogicalMessage(
 
 /// `logicalmsg_redo` (message.c): a no-op for WAL replay — the record only
 /// matters to logical decoding (decode.c), which reads it directly off the
-/// WAL stream rather than through redo.
+/// WAL stream rather than through redo. An unknown opcode is
+/// elog(PANIC, ...) (message.c:92), a structured PANIC-level error.
 pub fn logicalmsg_redo(record: &mut XLogReaderState) -> PgResult<()> {
     let rec = record.record.as_ref().expect("logicalmsg_redo with no decoded record");
     let info = rec.xl_info & !XLR_INFO_MASK;
     if info != XLOG_LOGICAL_MESSAGE {
-        panic!("logicalmsg_redo: unknown op code {info}");
+        return Err(Box::new(PgError::new(
+            PANIC,
+            format!("logicalmsg_redo: unknown op code {info}"),
+        )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // message.c:92: an unknown opcode in a LOGICALMSG record is
+    // elog(PANIC, "logicalmsg_redo: unknown op code %u") — a structured
+    // PANIC-level error, never an unwinding Rust panic (row
+    // a186-candidate-fp-logical-b1-173132cfe5ffd02992b8-1).
+    #[test]
+    fn redo_unknown_opcode_is_a_panic_level_error_not_a_rust_panic() {
+        let mut rec = xlogreader_seams::DecodedXLogRecord::default();
+        rec.xl_info = 0x10;
+        let mut record = XLogReaderState {
+            record: Some(rec),
+            ..Default::default()
+        };
+        let err = logicalmsg_redo(&mut record).expect_err("unknown opcode must not redo silently");
+        assert_eq!(err.level(), types_error::PANIC);
+        assert_eq!(err.message(), "logicalmsg_redo: unknown op code 16");
+
+        // The one valid opcode redoes as a no-op.
+        let mut rec = xlogreader_seams::DecodedXLogRecord::default();
+        rec.xl_info = XLOG_LOGICAL_MESSAGE;
+        let mut record = XLogReaderState {
+            record: Some(rec),
+            ..Default::default()
+        };
+        logicalmsg_redo(&mut record).unwrap();
+    }
 }

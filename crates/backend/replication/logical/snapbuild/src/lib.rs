@@ -925,7 +925,9 @@ impl SnapBuild {
         }
 
         // SAFETY: image is a live readable buffer of image.len() bytes.
-        if unsafe { libc::write(fd_, image.as_ptr().cast(), image.len()) } != image.len() as isize {
+        waitevent_seams::pgstat_report_wait_start::call(ondisk::WAIT_EVENT_SNAPBUILD_WRITE);
+        let written = unsafe { libc::write(fd_, image.as_ptr().cast(), image.len()) };
+        if written != image.len() as isize {
             let save_errno = errno::current_errno();
             fd::CloseTransientFile(fd_);
             let save_errno = if save_errno != 0 { save_errno } else { libc::ENOSPC };
@@ -935,8 +937,13 @@ impl SnapBuild {
                 .errmsg(format!("could not write to file \"{tmppath}\": %m"))
                 .finish(loc("SnapBuildSerialize"));
         }
+        waitevent_seams::pgstat_report_wait_end::call();
 
-        if fd::pg_fsync(fd_) != 0 {
+        // snapbuild.c:1680: the fsync is reported as WAIT_EVENT_SNAPBUILD_SYNC.
+        waitevent_seams::pgstat_report_wait_start::call(ondisk::WAIT_EVENT_SNAPBUILD_SYNC);
+        let synced = fd::pg_fsync(fd_);
+        waitevent_seams::pgstat_report_wait_end::call();
+        if synced != 0 {
             let save_errno = errno::current_errno();
             fd::CloseTransientFile(fd_);
             return ereport(ERROR)

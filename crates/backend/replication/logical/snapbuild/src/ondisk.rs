@@ -278,9 +278,18 @@ pub(crate) fn image_checksum(image: &[u8]) -> u32 {
     crc32c::fin_crc32c(crc)
 }
 
+// Wait events (wait_event_names.txt, IO section): snapbuild.c:1654, :1680,
+// :1937.
+const PG_WAIT_IO: u32 = 0x0A00_0000;
+pub(crate) const WAIT_EVENT_SNAPBUILD_READ: u32 = PG_WAIT_IO + 54;
+pub(crate) const WAIT_EVENT_SNAPBUILD_SYNC: u32 = PG_WAIT_IO + 55;
+pub(crate) const WAIT_EVENT_SNAPBUILD_WRITE: u32 = PG_WAIT_IO + 56;
+
 fn restore_contents(fd: i32, dest: &mut [u8], path: &str) -> PgResult<()> {
     // SAFETY: dest is a live writable buffer of dest.len() bytes.
+    waitevent_seams::pgstat_report_wait_start::call(WAIT_EVENT_SNAPBUILD_READ);
     let read_bytes = unsafe { libc::read(fd, dest.as_mut_ptr().cast(), dest.len()) };
+    waitevent_seams::pgstat_report_wait_end::call();
     if read_bytes != dest.len() as isize {
         let save_errno = errno::current_errno();
         fd::CloseTransientFile(fd);
@@ -411,24 +420,8 @@ pub fn restore_snapshot(lsn: XLogRecPtr, missing_ok: bool) -> PgResult<Option<Sn
     let committed_sz = checked_xip_bytes(committed_xcnt, "committed", &path)?;
     let catchange_sz = checked_xip_bytes(catchange_xcnt, "catchange", &path)?;
 
-    // Cross-check the counts against the file's own declared length: a legit
-    // file has length == header + committed bytes + catchange bytes (see
-    // build_image). This rejects counts that individually clear the ceiling but
-    // disagree with the header, again before any array allocation. checked_add
-    // guards against wraparound of the header + array-size sum.
-    if SNAP_BUILD_HEADER_SIZE
-        .checked_add(committed_sz)
-        .and_then(|n| n.checked_add(catchange_sz))
-        != Some(length as usize)
-    {
-        return ereport(ERROR)
-            .errcode(ERRCODE_DATA_CORRUPTED)
-            .errmsg(format!(
-                "snapbuild state file \"{path}\" has inconsistent length: {length}"
-            ))
-            .finish(loc("SnapBuildRestoreSnapshot"))
-            .map(|_| None);
-    }
+    // C never checks ondisk->length against the payload (snapbuild.c:1778):
+    // the counts (bounded above) and the CRC decide.
 
     let mut committed_bytes = Vec::new();
     if committed_xcnt > 0 {

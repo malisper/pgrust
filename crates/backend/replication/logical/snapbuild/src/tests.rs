@@ -19,6 +19,8 @@ fn setup() {
     SETUP.call_once(|| {
         reorderbuffer::init_seams();
         xact_seams::get_current_sub_transaction_id::set(|| types_core::TopSubTransactionId);
+        waitevent_seams::pgstat_report_wait_start::set(|_| {});
+        waitevent_seams::pgstat_report_wait_end::set(|| {});
         logical_hooks::logical_increase_xmin_for_slot::set(|lsn, xmin| {
             XMIN_CALLS.with(|c| c.borrow_mut().push((lsn, xmin)));
             Ok(())
@@ -548,4 +550,47 @@ fn state_discriminants_match_c() {
     assert_eq!(FullSnapshot as i32, 1);
     assert_eq!(Consistent as i32, 2);
     assert!(Start < Building && Building < FullSnapshot && FullSnapshot < Consistent);
+}
+
+// ---- audit-remediation b060 witnesses ---------------------------------------
+
+// SnapBuildRestoreSnapshot (snapbuild.c:1778) validates the magic number,
+// the version and the CRC; the length header is never checked against the
+// payload, so a CRC-valid file whose length field differs from
+// header + xid arrays restores like any other (row
+// a186-candidate-fp-logical-snapbuild-ab7478383451f9639f8f-1).
+#[test]
+fn restore_ignores_length_header_when_crc_is_valid() {
+    let _g = test_lock();
+    boot();
+    let mut rb1 = rb();
+    let mut b1 = allocate_snapshot_builder(0, 0, false, false, 0);
+    b1.process_running_xacts(&mut rb1, 0x100, &running(8, 8, &[]))
+        .unwrap();
+    rb1.xid_set_catalog_changes(9, 0x150);
+    b1.commit_txn(&mut rb1, 0x200, 9, &[], 0).unwrap();
+
+    let lsn = 0x500;
+    let path = ondisk::snapshot_path(lsn);
+    let _ = std::fs::remove_file(&path);
+    b1.serialization_point(&mut rb1, lsn).unwrap();
+
+    // SnapBuildOnDisk: magic u32 @0, checksum u32 @4, version u32 @8,
+    // length u32 @12. Bump the length and re-seal the CRC (which covers
+    // everything from `version` on).
+    let mut image = std::fs::read(&path).unwrap();
+    let len = u32::from_ne_bytes(image[12..16].try_into().unwrap());
+    assert_eq!(len as usize, image.len());
+    image[12..16].copy_from_slice(&(len + 8).to_ne_bytes());
+    let crc = ondisk::image_checksum(&image);
+    image[4..8].copy_from_slice(&crc.to_ne_bytes());
+    std::fs::write(&path, &image).unwrap();
+
+    let mut rb2 = rb();
+    let mut b2 = allocate_snapshot_builder(0, 0, false, false, 0);
+    b2.serialization_point(&mut rb2, lsn).unwrap();
+    assert_eq!(b2.current_state(), Consistent);
+    assert_eq!(&*b2.committed_xip, &[9]);
+
+    let _ = std::fs::remove_file(&path);
 }

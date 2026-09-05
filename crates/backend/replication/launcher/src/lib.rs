@@ -890,6 +890,25 @@ pub fn logicalrep_pa_worker_stop(slot: usize, generation: u16) -> PgResult<()> {
     Ok(())
 }
 
+// UpdateWorkerStats (worker.c:3573): my slot's last received LSN and the
+// message's send/receipt times; a keepalive ('k') also stamps the reply
+// LSN/time. Read back by pg_stat_subscription.
+pub fn my_worker_update_stats(last_lsn: XLogRecPtr, send_time: TimestampTz, reply: bool) {
+    if let Some(slot) = my_worker_slot() {
+        let now = timestamp_seams::get_current_timestamp::call();
+        with_ctx(|ctx| {
+            let w = &mut ctx.workers[slot];
+            w.last_lsn = last_lsn;
+            w.last_send_time = send_time;
+            w.last_recv_time = now;
+            if reply {
+                w.reply_lsn = last_lsn;
+                w.reply_time = send_time;
+            }
+        });
+    }
+}
+
 // set_stream_options' MyLogicalRepWorker->parallel_apply write (worker.c:4465).
 pub fn my_worker_set_parallel_apply(v: bool) {
     if let Some(slot) = my_worker_slot() {

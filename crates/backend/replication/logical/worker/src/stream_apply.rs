@@ -25,7 +25,7 @@ use types_error::{
 use types_rel::AccessExclusiveLock;
 use walreceiver::client::PgConn;
 
-use crate::apply::{apply_dispatch, begin_replication_step, end_replication_step};
+use crate::apply::{apply_dispatch, begin_replication_step, end_replication_step, BackendState};
 use crate::parallel::{
     self, pa_allocate_worker, pa_decr_and_wait_stream_block, pa_find_worker,
     pa_incr_pending_stream_count, pa_lock_stream, pa_lock_transaction, pa_send_data,
@@ -326,6 +326,8 @@ pub(crate) fn apply_handle_stream_start(mcx: Mcx<'static>, buf: &[u8]) -> PgResu
             return elog::elog(ERROR, "unexpected apply action: TRANS_LEADER_APPLY".to_string())
         }
     }
+
+    crate::apply::report_activity(BackendState::STATE_RUNNING);
     Ok(())
 }
 
@@ -394,6 +396,14 @@ pub(crate) fn apply_handle_stream_stop(mcx: Mcx<'static>, buf: &[u8]) -> PgResul
 
     IN_STREAMED_TRANSACTION.set(false);
     STREAM_XID.set(InvalidTransactionId);
+
+    // The parallel apply worker could be in a transaction, in which case the
+    // state is STATE_IDLEINTRANSACTION (worker.c:1743).
+    if xact::IsTransactionOrTransactionBlock() {
+        crate::apply::report_activity(BackendState::STATE_IDLEINTRANSACTION);
+    } else {
+        crate::apply::report_activity(BackendState::STATE_IDLE);
+    }
     Ok(())
 }
 
@@ -625,6 +635,7 @@ pub(crate) fn apply_spooled_messages(
     REMOTE_FINAL_LSN.set(lsn);
     // Make sure the apply_dispatch methods know we're in a remote txn.
     IN_REMOTE_TRANSACTION.set(true);
+    crate::apply::report_activity(BackendState::STATE_RUNNING);
 
     end_replication_step()?;
 
@@ -793,6 +804,8 @@ pub(crate) fn apply_handle_stream_commit(
 
     // Process any tables that are being synchronized in parallel.
     crate::tablesync::process_syncing_tables(mcx, conn, commit_data.end_lsn)?;
+
+    crate::apply::report_activity(BackendState::STATE_IDLE);
     Ok(())
 }
 
@@ -911,6 +924,8 @@ pub(crate) fn apply_handle_stream_prepare(
     // leaves it set, cleared when finishing the next transaction.
     crate::stop_skipping_changes();
     crate::clear_subscription_skip_lsn(mcx, prepare_data.prepare_lsn)?;
+
+    crate::apply::report_activity(BackendState::STATE_IDLE);
     Ok(())
 }
 

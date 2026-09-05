@@ -8913,6 +8913,7 @@ dependencies = [
  "heaptuple",
  "logical",
  "mcx",
+ "postgres_seams",
  "reorderbuffer",
  "snapbuild",
  "transam_xlog",
@@ -9032,6 +9033,7 @@ dependencies = [
  "aclchk",
  "adt_int",
  "adt_timestamp",
+ "backend_status_seams",
  "bgworker",
  "cache_syscache",
  "clauses",
@@ -17513,6 +17515,7 @@ dependencies = [
  "types_error",
  "types_snapshot",
  "types_storage",
+ "waitevent_seams",
  "xact",
  "xact_seams",
 ]
