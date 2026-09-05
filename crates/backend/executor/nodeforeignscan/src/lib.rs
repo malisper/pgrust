@@ -38,12 +38,13 @@ pub struct FdwExecRoutine {
         for<'mcx> fn(&mut ForeignScanState<'mcx>, &mut EStateData<'mcx>) -> PgResult<()>,
     pub end: for<'mcx> fn(&mut ForeignScanState<'mcx>, &mut EStateData<'mcx>) -> PgResult<()>,
     /// Emits FdwExplainProp, not ExplainState; FdwExplainFlags carries the
-    /// ExplainState bits C's hooks read (es->costs, es->verbose).
+    /// ExplainState bits C's hooks read (es->costs, es->verbose,
+    /// es->rtable_names).
     pub explain: Option<
         for<'mcx> fn(
             &mut ForeignScanState<'mcx>,
             &mut EStateData<'mcx>,
-            FdwExplainFlags,
+            FdwExplainFlags<'_>,
             &mut dyn FnMut(&str, FdwExplainProp<'_>) -> PgResult<()>,
         ) -> PgResult<()>,
     >,
@@ -329,7 +330,7 @@ pub fn exec_rescan_foreign_scan<'mcx>(
 pub fn explain_foreign_scan<'mcx>(
     node: &mut ForeignScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
-    flags: FdwExplainFlags,
+    flags: FdwExplainFlags<'_>,
     emit: &mut dyn FnMut(&str, FdwExplainProp<'_>) -> PgResult<()>,
 ) -> PgResult<()> {
     match fdw_exec_routine(node.fdwroutine).explain {

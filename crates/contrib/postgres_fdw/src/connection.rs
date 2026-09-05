@@ -799,7 +799,11 @@ fn pgfdw_xact_callback(event: XactEvent, _arg: Datum) -> PgResult<()> {
                         ));
                     }
                     XACT_EVENT_PARALLEL_COMMIT | XACT_EVENT_COMMIT | XACT_EVENT_PREPARE => {
-                        panic!("missed cleaning up connection during pre-commit");
+                        // Pre-commit should have closed the open transaction
+                        // (connection.c:1135, elog(ERROR)).
+                        return Err(Box::new(PgError::error(
+                            "missed cleaning up connection during pre-commit",
+                        )));
                     }
                     XACT_EVENT_PARALLEL_ABORT | XACT_EVENT_ABORT => {
                         pgfdw_abort_cleanup(entry, true)?;
@@ -859,10 +863,11 @@ fn pgfdw_subxact_callback(
                 continue;
             }
             if entry.xact_depth > curlevel {
-                panic!(
+                // connection.c:1226, elog(ERROR).
+                return Err(Box::new(PgError::error(format!(
                     "missed cleaning up remote subtransaction at level {}",
                     entry.xact_depth
-                );
+                ))));
             }
             if event == SUBXACT_EVENT_PRE_COMMIT_SUB {
                 // upstream c318777da8b8 (18.4): postgres_fdw: Fix handling of abort-cleanup-failed connections.

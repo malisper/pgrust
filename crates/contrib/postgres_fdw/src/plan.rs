@@ -1678,14 +1678,14 @@ fn build_tlist_to_deparse<'mcx>(
 }
 
 // postgresExplainForeignScan: "Relations" for join/upper scans (RT indexes
-// in fpinfo->relation_name translated to names), then "Remote SQL" when
-// VERBOSE. Divergence: refnames come from the RTE eref aliasname, not
-// explain.c's deduplicated rtable_names (differs only when EXPLAIN dedups a
-// repeated alias).
+// in fpinfo->relation_name translated to names; the reference name is
+// EXPLAIN's deduplicated es->rtable_names entry, else the RTE's eref
+// aliasname — postgres_fdw.c postgresExplainForeignScan), then "Remote SQL"
+// when VERBOSE.
 fn explain_foreign_scan<'mcx>(
     node: &mut ForeignScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
-    flags: types_nodes::FdwExplainFlags,
+    flags: types_nodes::FdwExplainFlags<'_>,
     emit: &mut dyn FnMut(&str, types_nodes::FdwExplainProp<'_>) -> PgResult<()>,
 ) -> PgResult<()> {
     // Direct modify (postgresExplainDirectModify): only "Remote SQL".
@@ -1761,7 +1761,13 @@ fn explain_foreign_scan<'mcx>(
                     piece.push('.');
                 }
                 deparse::append_quoted_identifier(&mut piece, mcx, relname.as_str())?;
-                let refname = rte.eref.and_then(|e| e.aliasname).unwrap_or("");
+                let refname = flags
+                    .rtable_names
+                    .get((rti - 1) as usize)
+                    .copied()
+                    .flatten()
+                    .or_else(|| rte.eref.and_then(|e| e.aliasname))
+                    .unwrap_or("");
                 if !refname.is_empty() && refname != relname.as_str() {
                     piece.push(' ');
                     deparse::append_quoted_identifier(&mut piece, mcx, refname)?;
@@ -1828,11 +1834,30 @@ static EXEC_ROUTINE: FdwExecRoutine = FdwExecRoutine {
     async_notify: Some(crate::exec::foreign_async_notify),
 };
 
+// _PG_init (option.c:588-599): runs when the library is loaded (the first
+// C-language function of the extension resolved in this backend): define
+// postgres_fdw.application_name, then reserve the prefix.
+fn pg_init() -> PgResult<()> {
+    // Unlike application_name GUC, no GUC_IS_NAME flag nor check_hook, so the
+    // value may exceed NAMEDATALEN and hold non-ASCII (the remote truncates
+    // and sanitizes it).
+    guc::DefineCustomStringVariable(
+        "postgres_fdw.application_name",
+        Some("Sets the application name to be used on the remote server."),
+        None,
+        None,
+        types_guc::PGC_USERSET,
+        0,
+    )?;
+    guc::MarkGUCPrefixReserved("postgres_fdw");
+    Ok(())
+}
+
 pub fn install() {
     dfmgr::register_builtin_library(dfmgr::BuiltinLibraryEntry {
         name: crate::LIBRARY,
         lookup,
-        pg_init: None,
+        pg_init: Some(pg_init),
     });
     planner::fdwplan::install_fdw_plan_routine(FdwKind::PostgresFdw, &PLAN_ROUTINE);
     nodeforeignscan::install_fdw_exec_routine(FdwKind::PostgresFdw, &EXEC_ROUTINE);

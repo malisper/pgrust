@@ -409,7 +409,7 @@ fn current_value(name: &str) -> String {
 }
 
 // set_config_sourcefile (guc.c:4310).
-fn set_config_sourcefile(name: &str, filename: &str, sourceline: i32) {
+pub(crate) fn set_config_sourcefile(name: &str, filename: &str, sourceline: i32) {
     with_store_mut(|reg| {
         if let Some(record) = reg.find_option_mut(name) {
             let gen = record.gen_mut();

@@ -1420,6 +1420,7 @@ pub fn ExplainNode<'mcx>(
                         let flags = types_nodes::FdwExplainFlags {
                             costs: es.costs,
                             verbose: es.verbose,
+                            rtable_names: &[],
                         };
                         f(&fdw_private, relid, has_wco, flags, &mut |label, v| {
                             match v {
@@ -3081,7 +3082,14 @@ fn show_foreignscan_info<'mcx>(plan_node_id: i32, es: &mut ExplainState<'mcx>) -
         return Ok(());
     }
     let qd = es.qd;
-    let flags = types_nodes::FdwExplainFlags { costs: es.costs, verbose: es.verbose };
+    // es->rtable_names for the hook (postgres_fdw's "Relations"); copied out
+    // so the property emitter below can borrow `es` mutably.
+    let rtable_names: Vec<Option<&'mcx str>> = es.rtable_names.to_vec();
+    let flags = types_nodes::FdwExplainFlags {
+        costs: es.costs,
+        verbose: es.verbose,
+        rtable_names: &rtable_names,
+    };
     execmain_seams::query_desc_foreign_explain::call(qd, plan_node_id, flags, &mut |label, v| {
         match v {
             types_nodes::FdwExplainProp::Text(t) => ExplainPropertyText(label, t, es),

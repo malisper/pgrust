@@ -171,8 +171,13 @@ pub fn is_foreign_expr<'mcx>(
     Ok(true)
 }
 
+// IS_UPPER_REL (pathnodes.h:873): a grouped rel, or a partitionwise child
+// grouped rel (RELOPT_OTHER_UPPER_REL).
 fn is_upper_rel(run: &PlannerRun<'_>, rel: RelId) -> bool {
-    run.root.rel(rel).reloptkind == types_pathnodes::RELOPT_UPPER_REL
+    matches!(
+        run.root.rel(rel).reloptkind,
+        types_pathnodes::RELOPT_UPPER_REL | types_pathnodes::RELOPT_OTHER_UPPER_REL
+    )
 }
 
 fn collation_result(inner: &LocCxt, collation: Oid) -> FdwCollateState {
@@ -492,7 +497,7 @@ fn foreign_expr_walker<'mcx>(
                 let srt = srt_node
                     .as_variant::<types_nodes::parsenodes::SortGroupClause>()
                     .expect("aggorder holds SortGroupClause");
-                let tle = get_sortgroupref_tle(srt.tleSortGroupRef, &agg.args);
+                let tle = get_sortgroupref_tle(srt.tleSortGroupRef, &agg.args)?;
                 let sortcoltype = expr_type(tle.expr);
                 let typentry = typcache::lookup_type_cache(
                     sortcoltype,
@@ -570,14 +575,16 @@ fn walk_opt_list<'mcx>(
 fn get_sortgroupref_tle<'mcx>(
     sortref: u32,
     target_list: &types_nodes::list::NodeList<'mcx>,
-) -> &'mcx types_nodes::TargetEntry<'mcx> {
+) -> PgResult<&'mcx types_nodes::TargetEntry<'mcx>> {
     for n in target_list.iter() {
         let tle = n.as_target_entry().expect("targetList entry");
         if tle.ressortgroupref == sortref {
-            return tle;
+            return Ok(tle);
         }
     }
-    panic!("ORDER/GROUP BY expression not found in targetlist");
+    Err(Box::new(PgError::error(
+        "ORDER/GROUP BY expression not found in targetlist",
+    )))
 }
 
 /// is_foreign_param: does this top-level expr have to be sent as a Param?
@@ -702,7 +709,7 @@ fn deparse_var<'mcx>(ctx: &mut DeparseCtx<'_, 'mcx>, node: Node<'mcx>) -> PgResu
     };
 
     if is_foreign {
-        if let Some((relno, colno)) = is_subquery_var(ctx.run, ctx.scanrel, var) {
+        if let Some((relno, colno)) = is_subquery_var(ctx.run, ctx.scanrel, var)? {
             let _ = write!(
                 ctx.buf,
                 "{SUBQUERY_REL_ALIAS_PREFIX}{relno}.{SUBQUERY_COL_ALIAS_PREFIX}{colno}"
@@ -727,9 +734,9 @@ fn is_subquery_var(
     run: &PlannerRun<'_>,
     foreignrel: RelId,
     var: &types_nodes::primnodes::Var,
-) -> Option<(i32, i32)> {
+) -> PgResult<Option<(i32, i32)>> {
     if !is_join_rel(run, foreignrel) {
-        return None;
+        return Ok(None);
     }
     let (outerrel, innerrel, in_lower) = {
         let fp = fpinfo(run.root.rel(foreignrel)).borrow();
@@ -740,7 +747,7 @@ fn is_subquery_var(
         )
     };
     if !in_lower {
-        return None;
+        return Ok(None);
     }
     let (side, make_subquery) = if types_pathnodes::relids::relids_is_member(
         var.varno,
@@ -755,7 +762,7 @@ fn is_subquery_var(
         (innerrel, fpinfo(run.root.rel(foreignrel)).borrow().make_innerrel_subquery)
     };
     if make_subquery {
-        Some(get_relation_column_alias_ids(run, side, var))
+        Ok(Some(get_relation_column_alias_ids(run, side, var)?))
     } else {
         is_subquery_var(run, side, var)
     }
@@ -765,7 +772,7 @@ fn get_relation_column_alias_ids(
     run: &PlannerRun<'_>,
     foreignrel: RelId,
     var: &types_nodes::primnodes::Var,
-) -> (i32, i32) {
+) -> PgResult<(i32, i32)> {
     let relno = fpinfo(run.root.rel(foreignrel)).borrow().relation_index;
     let rel = run.root.rel(foreignrel);
     let exprs = &run.pathtarget(rel.pathtarget_id.expect("rel has reltarget")).exprs;
@@ -773,11 +780,12 @@ fn get_relation_column_alias_ids(
         let node = *run.root.expr_node(id);
         if let Some(tlvar) = node.as_var() {
             if tlvar.varno == var.varno && tlvar.varattno == var.varattno {
-                return (relno, (i + 1) as i32);
+                return Ok((relno, (i + 1) as i32));
             }
         }
     }
-    panic!("unexpected expression in subquery output");
+    // Shouldn't get here (deparse.c:4205).
+    Err(Box::new(PgError::error("unexpected expression in subquery output")))
 }
 
 fn param_index<'mcx>(ctx: &mut DeparseCtx<'_, 'mcx>, node: Node<'mcx>) -> PgResult<usize> {
@@ -1230,7 +1238,7 @@ fn deparse_sort_group_clause<'mcx>(
     tlist: &types_nodes::list::NodeList<'mcx>,
     force_colno: bool,
 ) -> PgResult<Node<'mcx>> {
-    let tle = get_sortgroupref_tle(reference, tlist);
+    let tle = get_sortgroupref_tle(reference, tlist)?;
     let expr = tle.expr;
     if force_colno {
         debug_assert!(!tle.resjunk);
@@ -2317,6 +2325,24 @@ mod tests {
         let mut b = PgString::new_in(m);
         deparse_string_literal(&mut b, "a\\b");
         assert_eq!(b.as_str(), "E'a\\\\b'");
+    }
+
+    // tlist.c get_sortgroupref_tle: a missing sort/group ref is elog(ERROR)
+    // (XX000 "ORDER/GROUP BY expression not found in targetlist"), catchable.
+    #[test]
+    fn missing_sortgroupref_is_an_error_not_a_panic() {
+        let mcx = mcx::MemoryContext::new("t");
+        let m = mcx.mcx();
+        let expr = types_nodes::Node::mk_integer(m, 1).unwrap();
+        let tle = types_nodes::Node::mk_target_entry(m, expr, 1, None, false).unwrap();
+        let mut tlist: NodeList<'_> = NodeList::nil();
+        tlist.lappend(m, tle).unwrap();
+        let err = match get_sortgroupref_tle(7, &tlist) {
+            Ok(_) => panic!("ref 7 is absent: expected an error"),
+            Err(e) => e,
+        };
+        assert_eq!(err.message(), "ORDER/GROUP BY expression not found in targetlist");
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
     }
 
     #[test]

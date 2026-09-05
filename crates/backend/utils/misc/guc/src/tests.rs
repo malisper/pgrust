@@ -413,6 +413,53 @@ fn custom_placeholder_variables() {
     assert!(e.message().contains("unrecognized configuration parameter"));
 }
 
+// DefineCustomStringVariable (guc.c:5224 / define_custom_variable
+// guc.c:4937): a placeholder set before the library loaded is replaced and
+// its committed value and transactional (SET LOCAL) value re-applied in
+// order; a fresh definition SHOWs its NULL boot value as ''; redefining a
+// real parameter is an internal error; MarkGUCPrefixReserved afterwards
+// refuses new names under the prefix but keeps the defined ones settable.
+#[test]
+fn define_custom_string_variable_adopts_placeholder_values() {
+    setup();
+    AtStart_GUC();
+    assert_eq!(set_session("b021ext.app_name", Some("early")).unwrap(), 1);
+    let rc = set_config_option_ext(
+        "b021ext.app_name",
+        Some("local1"),
+        PGC_USERSET,
+        PGC_S_SESSION,
+        BOOTSTRAP_SUPERUSERID,
+        GUC_ACTION_LOCAL,
+        true,
+        ErrorLevel(0),
+        false,
+    )
+    .unwrap();
+    assert_eq!(rc, 1);
+    DefineCustomStringVariable("b021ext.app_name", Some("desc"), None, None, PGC_USERSET, 0)
+        .unwrap();
+    assert_eq!(show("b021ext.app_name"), Some("local1".to_string()));
+    let flags = with_store(|reg| get_config_option_flags(reg, "b021ext.app_name", false).unwrap())
+        .unwrap();
+    assert_eq!(flags & GUC_CUSTOM_PLACEHOLDER, 0);
+    AtEOXact_GUC(true, 1);
+    assert_eq!(show("b021ext.app_name"), Some("early".to_string()));
+
+    DefineCustomStringVariable("b021ext.other", Some("desc"), None, None, PGC_USERSET, 0).unwrap();
+    assert_eq!(show("b021ext.other"), Some(String::new()));
+    let e = DefineCustomStringVariable("b021ext.other", Some("desc"), None, None, PGC_USERSET, 0)
+        .unwrap_err();
+    assert_eq!(e.message(), "attempt to redefine parameter \"b021ext.other\"");
+
+    MarkGUCPrefixReserved("b021ext");
+    let e = set_session("b021ext.nope", Some("x")).unwrap_err();
+    assert!(e.message().contains("invalid configuration parameter name"));
+    assert_eq!(e.detail(), Some("\"b021ext\" is a reserved prefix."));
+    assert_eq!(set_session("b021ext.app_name", Some("later")).unwrap(), 1);
+    assert_eq!(show("b021ext.app_name"), Some("later".to_string()));
+}
+
 #[test]
 fn old_guc_names_map() {
     setup();

@@ -358,6 +358,172 @@ pub fn assignable_custom_variable_name(name: &str, skip_errors: bool) -> PgResul
     Ok(false)
 }
 
+// DefineCustomStringVariable (guc.c:5224) over define_custom_variable
+// (guc.c:4937): an extension's string GUC, defined when its library loads.
+// The value lives in the registry record (as a placeholder's does): there is
+// no valueAddr, readers use GetConfigOption. A placeholder of the same name
+// (a SET that preceded the load) is replaced and its reset, current and
+// stacked values re-applied through set_config_option_ext at WARNING, in
+// their original order (reapply_stacked_values, guc.c:5041); a
+// non-placeholder of that name is "attempt to redefine parameter".
+pub fn DefineCustomStringVariable(
+    name: &'static str,
+    short_desc: Option<&'static str>,
+    long_desc: Option<&'static str>,
+    boot_val: Option<&str>,
+    context: GucContext,
+    flags: i32,
+) -> PgResult<()> {
+    use types_guc::{config_group, config_type};
+    // init_custom_variable (guc.c:4875): a PGC_POSTMASTER custom variable
+    // after startup and GUC_LIST_QUOTE are FATAL there; no in-tree caller
+    // asks for either, so they are refused as errors here.
+    if context == types_guc::PGC_POSTMASTER {
+        return Err(Box::new(PgError::error(
+            "cannot create PGC_POSTMASTER variables after startup",
+        )));
+    }
+    if flags & types_guc::GUC_LIST_QUOTE != 0 {
+        return Err(Box::new(PgError::error(
+            "extensions cannot define GUC_LIST_QUOTE variables",
+        )));
+    }
+    let gen = model::config_generic::boot(
+        name,
+        context,
+        config_group::CUSTOM_OPTIONS,
+        short_desc,
+        long_desc,
+        flags,
+        config_type::PGC_STRING,
+    );
+    let mut var = GucVariable::String(model::config_string {
+        gen,
+        variable: &guc_tables::vars::GucPlaceholderVariable,
+        value: None,
+        boot_val: boot_val.map(str::to_owned),
+        check_hook: None,
+        assign_hook: None,
+        show_hook: None,
+        reset_val: None,
+        reset_extra: None,
+    });
+    // InitializeOneGUCOption: the default value first, even when a
+    // placeholder value is about to be applied (it may be invalid).
+    registry::initialize_one_guc_option_hooks(&mut var, false)?;
+    if let GucVariable::String(conf) = &mut var {
+        conf.reset_val = conf.boot_val.clone();
+    }
+    let holder = store::with_store_mut(|reg| reg.define_custom_variable(var))
+        .unwrap_or_else(|| Err(Box::new(PgError::error("GUC store is not initialized"))))?;
+    let Some(holder) = holder else {
+        return Ok(());
+    };
+    // First, apply the reset value if any.
+    if let Some(reset_val) = holder.reset_val.as_deref() {
+        let _ = set_config_option_ext(
+            name,
+            Some(reset_val),
+            holder.gen.reset_scontext,
+            holder.gen.reset_source,
+            holder.gen.reset_srole,
+            GUC_ACTION_SET,
+            true,
+            WARNING,
+            false,
+        );
+    }
+    // Now, apply current and stacked values, in the order they were stacked.
+    let curvalue = holder.value.clone().flatten();
+    reapply_stacked_values(
+        name,
+        &holder,
+        holder.gen.stack.as_deref(),
+        curvalue.as_deref(),
+        holder.gen.scontext,
+        holder.gen.source,
+        holder.gen.srole,
+    );
+    // Also copy over any saved source-location information.
+    if let Some(file) = holder.gen.sourcefile.as_deref() {
+        process_config::set_config_sourcefile(name, file, holder.gen.sourceline);
+    }
+    Ok(())
+}
+
+// reapply_stacked_values (guc.c:5041): recurse so the values are applied
+// bottom to top; at each level apply the passed-in value the way its stack
+// entry implies.
+fn reapply_stacked_values(
+    name: &str,
+    holder: &model::config_string,
+    stack: Option<&model::GucStack>,
+    curvalue: Option<&str>,
+    curscontext: GucContext,
+    cursource: GucSource,
+    cursrole: Oid,
+) {
+    let apply = |value: Option<&str>, scontext: GucContext, source: GucSource, srole: Oid, action: u32| {
+        let _ = set_config_option_ext(name, value, scontext, source, srole, action, true, WARNING, false);
+    };
+    let stack_string = |v: &model::config_var_value| -> Option<String> {
+        match &v.val {
+            Some(model::config_var_val::Stringval(s)) => s.clone(),
+            _ => None,
+        }
+    };
+    if let Some(entry) = stack {
+        let prior = stack_string(&entry.prior);
+        reapply_stacked_values(
+            name,
+            holder,
+            entry.prev.as_deref(),
+            prior.as_deref(),
+            entry.scontext,
+            entry.source,
+            entry.srole,
+        );
+        let depth_before = store::with_store(|reg| reg.stack_depth(name)).unwrap_or(0);
+        match entry.state {
+            model::GUC_SAVE => apply(curvalue, curscontext, cursource, cursrole, GUC_ACTION_SAVE),
+            model::GUC_SET => apply(curvalue, curscontext, cursource, cursrole, GUC_ACTION_SET),
+            model::GUC_LOCAL => apply(curvalue, curscontext, cursource, cursrole, GUC_ACTION_LOCAL),
+            model::GUC_SET_LOCAL => {
+                // First, apply the masked value as SET, then the current
+                // value as LOCAL.
+                let masked = stack_string(&entry.masked);
+                apply(
+                    masked.as_deref(),
+                    entry.masked_scontext,
+                    PGC_S_SESSION,
+                    entry.masked_srole,
+                    GUC_ACTION_SET,
+                );
+                apply(curvalue, curscontext, cursource, cursrole, GUC_ACTION_LOCAL);
+            }
+            _ => {}
+        }
+        // If we successfully made a stack entry, adjust its nest level.
+        store::with_store_mut(|reg| {
+            if reg.stack_depth(name) > depth_before {
+                if let Some(level) = reg.stack_top_nest_level(name) {
+                    *level = entry.nest_level;
+                }
+            }
+        });
+    } else if curvalue != holder.reset_val.as_deref()
+        || curscontext != holder.gen.reset_scontext
+        || cursource != holder.gen.reset_source
+        || cursrole != holder.gen.reset_srole
+    {
+        // End of the stack: a previously committed session value. Apply it,
+        // then drop the stack entry set_config_option pushed under the
+        // impression that this is a transactional assignment.
+        apply(curvalue, curscontext, cursource, cursrole, GUC_ACTION_SET);
+        store::with_store_mut(|reg| reg.drop_stack(name));
+    }
+}
+
 // MarkGUCPrefixReserved (guc.c:5285): purge existing placeholders under the
 // prefix (WARNING each), then reserve the prefix against future placeholders.
 pub fn MarkGUCPrefixReserved(class_name: &str) {

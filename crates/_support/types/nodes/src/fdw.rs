@@ -58,9 +58,15 @@ pub enum FdwExplainProp<'a> {
 
 /// The ExplainState bits C's ExplainForeignScan hooks read (same crate-cycle
 /// marshal as FdwExplainProp): file_fdw gates "Foreign File Size" on
-/// es->costs; postgres_fdw gates "Remote SQL" on es->verbose.
+/// es->costs; postgres_fdw gates "Remote SQL" on es->verbose and names the
+/// relations of a pushed-down join/aggregate through es->rtable_names.
 #[derive(Clone, Copy, Debug)]
-pub struct FdwExplainFlags {
+pub struct FdwExplainFlags<'a> {
     pub costs: bool,
     pub verbose: bool,
+    /// es->rtable_names (explain.c select_rtable_names_for_explain), indexed
+    /// by rti - 1: EXPLAIN's deduplicated reference names ("pagg_1" for the
+    /// second child scanned under the alias "pagg"). None (or out of range)
+    /// = fall back to the RTE's eref aliasname, as C.
+    pub rtable_names: &'a [Option<&'a str>],
 }

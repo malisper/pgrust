@@ -133,6 +133,60 @@ impl GucRegistry {
         Ok(())
     }
 
+    // define_custom_variable's registry half (guc.c:4937): add the new
+    // variable, or replace the placeholder of the same name (returned so the
+    // caller re-applies its reset / current / stacked values); a
+    // non-placeholder of that name is "attempt to redefine parameter".
+    // RemoveGUCFromLists (guc.c:1761) for the placeholder is folded in; the
+    // index key (the case-folded name) is unchanged, so it stays.
+    pub fn define_custom_variable(&mut self, var: GucVariable) -> PgResult<Option<config_string>> {
+        let name = var.name();
+        let Some(idx) = self.find_index(name) else {
+            self.define(var)?;
+            return Ok(None);
+        };
+        if self.vars[idx].gen().flags & types_guc::GUC_CUSTOM_PLACEHOLDER == 0 {
+            return Err(Box::new(PgError::error(format!(
+                "attempt to redefine parameter \"{name}\""
+            ))));
+        }
+        self.stacked.retain(|&i| i != idx);
+        self.reported.retain(|&i| i != idx);
+        self.nondef.retain(|&i| i != idx);
+        match std::mem::replace(&mut self.vars[idx], var) {
+            GucVariable::String(holder) => Ok(Some(holder)),
+            _ => unreachable!("a placeholder is a string variable"),
+        }
+    }
+
+    // reapply_stacked_values' stack bookkeeping (guc.c:5104, :5122): the
+    // nest level of the entry the re-application just pushed, or dropping
+    // the entry set_config_option pushed for a committed session value.
+    pub fn stack_top_nest_level(&mut self, name: &str) -> Option<&mut i32> {
+        let idx = self.find_index(name)?;
+        self.vars[idx].gen_mut().stack.as_deref_mut().map(|s| &mut s.nest_level)
+    }
+
+    pub fn stack_depth(&self, name: &str) -> usize {
+        let Some(idx) = self.find_index(name) else {
+            return 0;
+        };
+        let mut depth = 0;
+        let mut cur = self.vars[idx].gen().stack.as_deref();
+        while let Some(s) = cur {
+            depth += 1;
+            cur = s.prev.as_deref();
+        }
+        depth
+    }
+
+    pub fn drop_stack(&mut self, name: &str) {
+        if let Some(idx) = self.find_index(name) {
+            self.stacked.retain(|&i| i != idx);
+            self.vars[idx].gen_mut().stack = None;
+        }
+    }
+
     pub fn add_placeholder_variable(&mut self, name: &str) -> PgResult<usize> {
         use types_guc::{config_group, config_type};
 

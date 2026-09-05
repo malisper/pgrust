@@ -66,3 +66,5 @@ funcapi = { path = "../../backend/utils/fmgr/funcapi" }
 
 [dev-dependencies]
 types_portal = { path = "../../_support/types/portal" }
+types_startup = { path = "../../_support/types/types_startup" }
+ip = { path = "../../common/ip" }

@@ -146,10 +146,11 @@ pub(crate) fn plan_foreign_modify<'mcx>(
     {
         false
     } else {
-        panic!(
+        // postgres_fdw.c:1867, elog(ERROR).
+        return Err(Box::new(PgError::error(format!(
             "unexpected ON CONFLICT specification: {}",
             plan.onConflictAction
-        );
+        ))));
     };
 
     let mut sql: PgString<'mcx> = PgString::new_in(mcx);
@@ -201,7 +202,13 @@ pub(crate) fn plan_foreign_modify<'mcx>(
                 &mut retrieved_attrs,
             )?;
         }
-        other => panic!("unexpected operation: {other:?}"),
+        other => {
+            // postgres_fdw.c:1893, elog(ERROR).
+            return Err(Box::new(PgError::error(format!(
+                "unexpected operation: {}",
+                other as i32
+            ))));
+        }
     }
     table::table_close(rel, types_rel::lock::NoLock)?;
 
@@ -303,6 +310,9 @@ struct PgFdwModifyState {
     has_returning: bool,
     retrieved_attrs: Vec<i32>,
     attin: Option<AttInMeta>,
+    /// ModifyTable.canSetTag: a flushed batch adds the remote's row count to
+    /// es_processed only for the tag-setting statement (nodeModifyTable.c:1411).
+    can_set_tag: bool,
     ctid_attno: i16,
     // [tid output for UPDATE/DELETE] + per-non-generated-target output fns.
     p_flinfo: Vec<FmgrInfo>,
@@ -372,8 +382,14 @@ pub(crate) fn begin_foreign_modify<'mcx>(
         .iter()
         .collect();
 
-    // ExecGetResultRelCheckAsUser: the perminfo's checkAsUser, else current.
-    let rte = estate.exec_rt_fetch(rti);
+    // ExecGetResultRelCheckAsUser (execUtils.c:1489): the checkAsUser of the
+    // result relation's RTEPermissionInfo, else the current user. A child
+    // result relation (a partition / inheritance child UPDATE target, or a
+    // routed INSERT leaf) has no perminfo of its own: C reads the root target
+    // relation's through ri_RootResultRelInfo (nodeModifyTable.c:4862), which
+    // exists exactly when the plan carries rootRelation.
+    let perm_rti = if node.rootRelation > 0 { node.rootRelation } else { rti };
+    let rte = estate.exec_rt_fetch(perm_rti);
     let mut userid = miscinit::GetUserId();
     if rte.perminfoindex > 0 {
         if let Some(pis) = estate.es_rteperminfos {
@@ -489,6 +505,7 @@ pub(crate) fn begin_foreign_modify<'mcx>(
         has_returning,
         retrieved_attrs,
         attin: has_returning.then_some(attin),
+        can_set_tag: node.canSetTag,
         ctid_attno,
         p_flinfo,
         temp_mcx: mcx::MemoryContext::new_bump("postgres_fdw temporary data"),
@@ -560,6 +577,9 @@ fn execute_foreign_modify<'mcx>(
     // Batch insert: buffer this row's text params; flush at batch_size (and
     // at end-of-source via the flush hook). Batching is disabled whenever
     // RETURNING/WCO/row triggers apply, so consuming the row here is exact.
+    // A buffered row is "not inserted yet" (C ExecInsert returns NULL for it,
+    // nodeModifyTable.c:1027): the caller must not count it — the flush adds
+    // the remote's own count (postgres_fdw.c:4212 atoi(PQcmdTuples)).
     if operation == CmdType::CMD_INSERT && st.batch_size > 1 {
         let nestlevel = crate::transmission::set_transmission_modes();
         let r = (|| -> PgResult<()> {
@@ -593,7 +613,7 @@ fn execute_foreign_modify<'mcx>(
         if st.pending_rows >= st.batch_size {
             flush_pending_inserts(st, estate)?;
         }
-        return Ok(true);
+        return Ok(false);
     }
 
     // Set up the prepared statement on the remote server, if we didn't yet.
@@ -755,6 +775,12 @@ fn flush_pending_inserts<'mcx>(
     if res.status != ExecStatus::CommandOk {
         return Err(connection::remote_error(&res, Some(&st.query)));
     }
+    // ExecBatchInsert (nodeModifyTable.c:1411-1412): the rows the remote
+    // reports as inserted (ON CONFLICT DO NOTHING skips are not counted).
+    let n_rows = cmd_tuples(&res.cmd_tag);
+    if st.can_set_tag && n_rows > 0 {
+        estate.es_processed += n_rows as u64;
+    }
     st.pending_params.clear();
     st.pending_rows = 0;
     Ok(())
@@ -835,7 +861,7 @@ pub(crate) fn explain_foreign_modify<'mcx>(
     fdw_private: &NodeList<'mcx>,
     relid: Oid,
     has_wco: bool,
-    flags: types_nodes::FdwExplainFlags,
+    flags: types_nodes::FdwExplainFlags<'_>,
     emit: &mut dyn FnMut(&str, types_nodes::FdwExplainProp<'_>) -> PgResult<()>,
 ) -> PgResult<()> {
     if !flags.verbose {
@@ -1020,7 +1046,11 @@ pub(crate) fn plan_direct_modify<'mcx>(
         fdw_exprs.lappend(mcx, *p)?;
     }
     // fdw_private (FdwDirectModifyPrivateIndex order):
-    // [UpdateSql, HasReturning, RetrievedAttrs, SetProcessed].
+    // [UpdateSql, HasReturning, RetrievedAttrs, SetProcessed], plus a fifth
+    // pgrust-only entry: whether the LOCAL query has a RETURNING list. C
+    // reads that at execution as resultRelInfo->ri_projectReturning
+    // (postgres_fdw.c:2789); the ForeignScanState here cannot reach the
+    // ModifyTable's result relation, so the plan carries it.
     let mut fdw_private: NodeList<'mcx> = NodeList::nil();
     fdw_private.lappend(mcx, Node::mk_string(mcx, mcx_str(mcx, sql.as_str())?)?)?;
     fdw_private.lappend(mcx, Node::mk_boolean(mcx, !retrieved_attrs.is_empty())?)?;
@@ -1030,6 +1060,7 @@ pub(crate) fn plan_direct_modify<'mcx>(
     }
     fdw_private.lappend(mcx, Node::mk_int_list(mcx, ra)?)?;
     fdw_private.lappend(mcx, Node::mk_boolean(mcx, plan.canSetTag)?)?;
+    fdw_private.lappend(mcx, Node::mk_boolean(mcx, !returning_list.is_empty())?)?;
 
     // SAFETY: exclusive plan-tree ownership at create_plan time (the same
     // contract createplan/setrefs rely on for in-place plan rewrites).
@@ -1050,9 +1081,14 @@ pub(crate) fn plan_direct_modify<'mcx>(
 struct PgFdwDirectModifyState {
     conn_key: Oid,
     query: &'static str,
+    /// The remote statement has a RETURNING list (retrieved_attrs non-empty).
     has_returning: bool,
     retrieved_attrs: Vec<i32>,
     set_processed: bool,
+    /// The local query has a RETURNING list (C ri_projectReturning): when
+    /// `has_returning` is false, each affected row yields an all-NULL dummy
+    /// tuple (postgres_fdw.c:4654-4658, "UPDATE ... RETURNING 1").
+    local_returning: bool,
     param_flinfo: Vec<FmgrInfo>,
     param_exprs: Vec<mcx::PgBox<'static, execexpr::ExprState<'static>>>,
     /// -1 = statement not executed yet.
@@ -1114,6 +1150,11 @@ pub(crate) fn begin_direct_modify<'mcx>(
         .and_then(|n| n.as_boolean())
         .expect("fdw_private[3] is set_processed")
         .boolval;
+    let local_returning = it
+        .next()
+        .and_then(|n| n.as_boolean())
+        .expect("fdw_private[4] is the local RETURNING flag")
+        .boolval;
 
     let attin =
         if has_returning { Some(AttInMeta::build(rel.name(), &rel.rd_att)?) } else { None };
@@ -1129,6 +1170,7 @@ pub(crate) fn begin_direct_modify<'mcx>(
         has_returning,
         retrieved_attrs,
         set_processed,
+        local_returning,
         param_flinfo,
         param_exprs,
         num_tuples: -1,
@@ -1194,22 +1236,54 @@ pub(crate) fn iterate_direct_modify<'mcx>(
         execute_dml_stmt(node, estate)?;
     }
     let scan_slot = node.ss.ss_ScanTupleSlot;
+    let instr_idx = node.ss.instr_idx;
     let qmcx = estate.es_query_cxt;
     let state = dmstate(node).expect("fdw_state set by BeginDirectModify");
-    if !state.has_returning {
+    // The local query has no RETURNING: just clear the slot
+    // (postgres_fdw.c:2789-2803).
+    if !state.local_returning {
+        debug_assert!(!state.has_returning);
         if state.set_processed {
             estate.es_processed += state.num_tuples as u64;
             state.set_processed = false;
         }
+        // EXPLAIN ANALYZE's tuple count: ExecScan sees no tuple, so the
+        // affected rows are credited here (postgres_fdw.c:2801).
+        if let Some(idx) = instr_idx {
+            estate.es_instrumentation[idx as usize].tuplecount += state.num_tuples as f64;
+        }
         exectuples::exec_clear_tuple(estate.slot_mut(scan_slot), qmcx);
         return Ok(false);
     }
-    if state.next_tuple >= state.rows.len() {
+    // get_returning_data (postgres_fdw.c:4630).
+    if state.next_tuple as i64 >= state.num_tuples {
         exectuples::exec_clear_tuple(estate.slot_mut(scan_slot), qmcx);
         return Ok(false);
     }
     if state.set_processed {
         estate.es_processed += 1;
+    }
+    if !state.has_returning {
+        // "UPDATE/DELETE .. RETURNING 1": no remote column, one all-NULL
+        // dummy tuple per affected row (postgres_fdw.c:4654-4658).
+        state.next_tuple += 1;
+        let slot = estate.slot_mut(scan_slot);
+        exectuples::exec_clear_tuple(slot, qmcx);
+        {
+            let base = slot.base_mut();
+            let natts = base
+                .tts_tupleDescriptor
+                .as_ref()
+                .expect("scan slot has a descriptor")
+                .natts as usize;
+            base.tts_values.clear();
+            base.tts_values.resize(natts, Datum::null());
+            base.tts_isnull.clear();
+            base.tts_isnull.resize(natts, true);
+        }
+        exectuples::exec_store_virtual_tuple(slot);
+        estate.es_direct_returning_slot = Some(scan_slot);
+        return Ok(true);
     }
     let (values, nulls, ctid) = &state.rows[state.next_tuple];
     let ctid = *ctid;

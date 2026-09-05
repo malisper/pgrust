@@ -303,9 +303,10 @@ pub(crate) fn extract_extension_list<'mcx>(
 }
 
 // process_pgfdw_appname (option.c:500): expand the application_name escape
-// sequences. C reads MyProcPort's connect-time database/user names; we read
-// the live MyDatabaseId / session user (recorded divergence: a renamed
-// database or SET SESSION AUTHORIZATION shows the current identity).
+// sequences. %d / %u are MyProcPort's connect-time database / user names
+// (option.c:540-564): a renamed database or SET SESSION AUTHORIZATION does
+// not change them, and a process without a MyProcPort expands them to
+// nothing.
 pub(crate) fn process_pgfdw_appname(appname: &str) -> PgResult<String> {
     let mut out = String::with_capacity(appname.len());
     let mut chars = appname.chars();
@@ -337,10 +338,11 @@ pub(crate) fn process_pgfdw_appname(appname: &str) -> PgResult<String> {
                 }
             }
             Some('d') => {
-                let dbid = init_small::globals::MyDatabaseId();
-                match dbcommands_seams::get_database_name::call(dbid) {
-                    Ok(Some(name)) => out.push_str(&name),
-                    _ => out.push_str("[unknown]"),
+                if init_small::globals::HaveMyProcPort() {
+                    match init_small::globals::WithMyProcPort(|p| p.database_name.clone()) {
+                        Some(name) => out.push_str(&name),
+                        None => out.push_str("[unknown]"),
+                    }
                 }
             }
             Some('p') => {
@@ -350,17 +352,11 @@ pub(crate) fn process_pgfdw_appname(appname: &str) -> PgResult<String> {
                 );
             }
             Some('u') => {
-                let scratch = mcx::MemoryContext::new("pgfdw appname");
-                let name = {
-                    let m = scratch.mcx();
-                    miscinit::GetUserNameFromId(m, miscinit::GetSessionUserId(), true)
-                        .ok()
-                        .flatten()
-                        .map(|n| n.as_str().to_string())
-                };
-                match name {
-                    Some(n) => out.push_str(&n),
-                    None => out.push_str("[unknown]"),
+                if init_small::globals::HaveMyProcPort() {
+                    match init_small::globals::WithMyProcPort(|p| p.user_name.clone()) {
+                        Some(name) => out.push_str(&name),
+                        None => out.push_str("[unknown]"),
+                    }
                 }
             }
             // Unrecognized escapes are format errors: ignored, as C.
@@ -373,6 +369,19 @@ pub(crate) fn process_pgfdw_appname(appname: &str) -> PgResult<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // option.c:540-564: %d / %u are MyProcPort->database_name / ->user_name
+    // (the connect-time identity), not the live database / session user.
+    #[test]
+    fn appname_d_and_u_expand_the_connect_time_identity() {
+        let sock = types_startup::ClientSocket { sock: -1, raddr: ip::SockAddr::zeroed() };
+        let mut port = types_startup::Port::new(&sock);
+        port.database_name = Some("db1".to_string());
+        port.user_name = Some("alice".to_string());
+        init_small::globals::SetMyProcPort(port);
+        assert_eq!(process_pgfdw_appname("%u/%d").unwrap(), "alice/db1");
+        assert_eq!(process_pgfdw_appname("x%%y%u%").unwrap(), "x%yalice");
+    }
 
     #[test]
     fn option_matrix() {
