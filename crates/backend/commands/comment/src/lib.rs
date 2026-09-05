@@ -9,7 +9,8 @@ use mcx::Mcx;
 use types_core::fmgr::{F_INT4EQ, F_OIDEQ};
 use types_core::{AttrNumber, InvalidOid, Oid, RegProcedure};
 use types_error::{
-    PgError, PgResult, ERRCODE_UNDEFINED_DATABASE, ERRCODE_WRONG_OBJECT_TYPE, ERROR, WARNING,
+    PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_UNDEFINED_DATABASE,
+    ERRCODE_WRONG_OBJECT_TYPE, ERROR, WARNING,
 };
 use types_nodes::parsenodes::{CommentStmt, ObjectType};
 use types_rel::{
@@ -297,7 +298,23 @@ pub fn GetComment<'mcx>(
             let image =
                 unsafe { core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p)) };
             let payload = varlena::open_image(mcx, image)?;
-            let s = core::str::from_utf8(payload.as_bytes()).expect("comment UTF-8");
+            // C (comment.c:449) hands the raw database-encoding bytes back
+            // (TextDatumGetCString, no validation). The &str parse tree the
+            // callers replay this through (CommentStmt.comment) cannot carry
+            // bytes that are not UTF-8 — reachable in SQL_ASCII / LATIN* /
+            // EUC_* databases — so refuse with the same typed 0A000 the
+            // scanner's utf8_pin draws at literal entry, never a panic.
+            let Ok(s) = core::str::from_utf8(payload.as_bytes()) else {
+                return Err(Box::new(
+                    PgError::error(format!(
+                        "comments containing non-UTF-8 bytes are not supported yet in \
+                         databases with encoding \"{}\"",
+                        mbutils::GetDatabaseEncodingName()
+                    ))
+                    .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
+                    .with_hint("Use a database with encoding \"UTF8\"."),
+                ));
+            };
             Some(mcx::PgString::from_str_in(s, mcx)?)
         }
         None => None,

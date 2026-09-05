@@ -4025,6 +4025,7 @@ dependencies = [
  "fmgr_seams",
  "genam",
  "heaptuple",
+ "mbutils",
  "mcx",
  "miscinit",
  "objectaddress_seams",
