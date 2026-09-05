@@ -762,7 +762,12 @@ fn log_disconnections(_code: i32, _arg: usize) {
 pub fn PostgresMain(dbname: &str, username: &str) -> ! {
     let outcome = postgres_main_inner(dbname, username);
     if let Err(err) = outcome {
-        elog::emit_error_report_for(&err);
+        // An Err escaping here was raised with no handler installed — before
+        // PostgresMain's sigsetjmp (InitPostgres and the rest of startup; the
+        // command loop swallows its own ERRORs and only lets FATAL+ out).
+        // elog.c:375-381: with PG_exception_stack == NULL an ERROR is
+        // promoted to FATAL before it is reported.
+        elog::emit_unhandled_error_report(&err);
     }
     ipc_seams::proc_exit::call(1, init_small::globals::MyProcPid())
 }

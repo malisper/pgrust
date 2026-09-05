@@ -38,9 +38,11 @@ use openssl::x509::verify::X509VerifyFlags;
 use openssl::x509::{X509Name, X509NameRef, X509Ref, X509};
 use types_error::{
     ErrorLocation, PgResult, COMMERROR, DEBUG2, DEBUG4, ERRCODE_CONFIG_FILE_ERROR,
-    ERRCODE_PROTOCOL_VIOLATION, ERROR, FATAL, LOG,
+    ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_OUT_OF_MEMORY, ERRCODE_PROTOCOL_VIOLATION, ERROR,
+    FATAL, LOG,
 };
 use types_storage::waiteventset::{WL_LATCH_SET, WL_SOCKET_READABLE, WL_SOCKET_WRITEABLE};
+use wchar::PG_UTF8;
 
 use guc_tables::consts::{
     PG_TLS1_1_VERSION, PG_TLS1_2_VERSION, PG_TLS1_3_VERSION, PG_TLS1_VERSION, PG_TLS_ANY,
@@ -309,9 +311,8 @@ unsafe extern "C" fn info_cb(ssl: *const openssl_sys::SSL, type_: libc::c_int, a
     }
 }
 
-fn prepare_cert_name(name: &str) -> String {
+fn prepare_cert_name(bytes: &[u8]) -> String {
     const MAXLEN: usize = 71;
-    let bytes = name.as_bytes();
     let truncated = if bytes.len() > MAXLEN {
         let mut t = bytes[bytes.len() - MAXLEN..].to_vec();
         t[0] = b'.';
@@ -319,7 +320,7 @@ fn prepare_cert_name(name: &str) -> String {
         t[2] = b'.';
         String::from_utf8_lossy(&t).into_owned()
     } else {
-        name.to_string()
+        String::from_utf8_lossy(bytes).into_owned()
     };
     pg_string::pg_clean_ascii(&truncated, 0).unwrap_or_default()
 }
@@ -334,9 +335,20 @@ fn verify_cb(ok: bool, ctx: &mut openssl::x509::X509StoreContextRef) -> bool {
     let mut str = format!("Client certificate verification failed at depth {depth}: {errstring}.");
 
     if let Some(cert) = ctx.current_cert() {
-        let subject = x509_name_to_cstring(cert.subject_name());
+        // C's X509_NAME_to_cstring ereport(ERROR)s straight out of the
+        // OpenSSL callback; a Rust callback cannot unwind over FFI, so the
+        // error text rides the errdetail slot and the verify fails.
+        let (subject, issuer) = match (
+            x509_name_to_cstring(cert.subject_name()),
+            x509_name_to_cstring(cert.issuer_name()),
+        ) {
+            (Ok(s), Ok(i)) => (s, i),
+            (Err(e), _) | (_, Err(e)) => {
+                CERT_ERRDETAIL.with(|d| *d.borrow_mut() = Some(e.message().to_string()));
+                return false;
+            }
+        };
         let sub_prepared = prepare_cert_name(&subject);
-        let issuer = x509_name_to_cstring(cert.issuer_name());
         let iss_prepared = prepare_cert_name(&issuer);
         let serialno = cert
             .serial_number()
@@ -354,9 +366,42 @@ fn verify_cb(ok: bool, ctx: &mut openssl::x509::X509StoreContextRef) -> bool {
     false
 }
 
-// X509_NAME_to_cstring: "/SN=value" segments via ASN1_STRING_print_ex.
-fn x509_name_to_cstring(name: &X509NameRef) -> String {
-    cffi::x509_name_slash_format(name.as_ptr()).unwrap_or_default()
+// X509_NAME_to_cstring: "/SN=value" segments via ASN1_STRING_print_ex, then
+// pg_any_to_server(sp, size - 1, PG_UTF8) — the DN is delivered in the
+// server encoding (be-secure-openssl.c:1645-1698).
+fn x509_name_to_cstring(name: &X509NameRef) -> PgResult<Vec<u8>> {
+    let raw = match cffi::x509_name_slash_format(name.as_ptr()) {
+        Ok(b) => b,
+        Err(cffi::X509NameError::BioFailure) => {
+            return ereport(ERROR)
+                .errcode(ERRCODE_OUT_OF_MEMORY)
+                .errmsg("could not create BIO")
+                .finish(loc("X509_NAME_to_cstring"))
+                .map(|()| Vec::new());
+        }
+        Err(cffi::X509NameError::UndefNid) => {
+            return ereport(ERROR)
+                .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+                .errmsg("could not get NID for ASN1_OBJECT object")
+                .finish(loc("X509_NAME_to_cstring"))
+                .map(|()| Vec::new());
+        }
+        Err(cffi::X509NameError::NoFieldName(nid)) => {
+            return ereport(ERROR)
+                .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+                .errmsg(format!("could not convert NID {nid} to an ASN1_OBJECT structure"))
+                .finish(loc("X509_NAME_to_cstring"))
+                .map(|()| Vec::new());
+        }
+    };
+    // C converts into CurrentMemoryContext and pstrdup's the result; the
+    // conversion scratch lives only for this call.
+    let cx = mcx::MemoryContext::new("X509_NAME_to_cstring");
+    let out = match mbutils::pg_any_to_server(cx.mcx(), &raw, PG_UTF8)? {
+        Some(converted) => converted.as_slice().to_vec(),
+        None => raw,
+    };
+    Ok(out)
 }
 
 fn load_dh_file(cx: &InitCx, filename: &str) -> PgResult<Option<Dh<Params>>> {
@@ -823,7 +868,7 @@ const SSL_R_UNSUPPORTED_SSL_VERSION: u64 = 259;
 const SSL_R_WRONG_SSL_VERSION: u64 = 266;
 const SSL_R_WRONG_VERSION_NUMBER: u64 = 267;
 const SSL_R_TLSV1_ALERT_PROTOCOL_VERSION: u64 = 1070;
-const SSL_R_VERSION_TOO_HIGH: u64 = 271;
+const SSL_R_VERSION_TOO_HIGH: u64 = 166;
 const SSL_R_VERSION_TOO_LOW: u64 = 396;
 
 fn accept_failure_report(err: &openssl::ssl::Error) -> PgResult<()> {
@@ -1238,7 +1283,9 @@ pub fn be_tls_get_cipher_bits() -> i32 {
                 conn.stream
                     .ssl()
                     .current_cipher()
-                    .map(|ci| ci.bits().secret)
+                    // SSL_get_cipher_bits(ssl, &bits): the algorithm bit
+                    // count (alg_bits), not the secret bits.
+                    .map(|ci| ci.bits().algorithm)
             })
             .unwrap_or(0)
     })
@@ -1264,22 +1311,25 @@ pub fn be_tls_get_cipher() -> Option<String> {
 }
 
 // C returns "" for these when there is no peer certificate; None maps to ""
-// at the pgstat consumer.
-pub fn be_tls_get_peer_subject_name() -> Option<String> {
+// at the pgstat consumer. The bytes are in the server encoding
+// (X509_NAME_to_cstring's pg_any_to_server tail); its ERRORs propagate.
+pub fn be_tls_get_peer_subject_name() -> PgResult<Option<Vec<u8>>> {
     CONN.with(|c| {
         c.borrow()
             .as_ref()
             .and_then(|conn| conn.peer.as_ref())
             .map(|peer| x509_name_to_cstring(peer.subject_name()))
+            .transpose()
     })
 }
 
-pub fn be_tls_get_peer_issuer_name() -> Option<String> {
+pub fn be_tls_get_peer_issuer_name() -> PgResult<Option<Vec<u8>>> {
     CONN.with(|c| {
         c.borrow()
             .as_ref()
             .and_then(|conn| conn.peer.as_ref())
             .map(|peer| x509_name_to_cstring(peer.issuer_name()))
+            .transpose()
     })
 }
 
@@ -1429,5 +1479,45 @@ mod tests {
         let r = drain_handshake_wait(WL_LATCH_SET | WL_SOCKET_READABLE, true);
         assert!(r.is_err());
         assert_eq!(READ_DRAINS.load(O::SeqCst), 1);
+    }
+
+    // be-secure-openssl.c be_tls_open_server's SSL_R_* switch is spelled as
+    // numbers above; pin every number to the reason text libssl itself gives
+    // it, so a wrong constant can neither drop a HINT arm (166 IS
+    // SSL_R_VERSION_TOO_HIGH) nor add one (271 is SSL_R_BAD_LENGTH).
+    #[test]
+    fn proto_hint_reason_codes_match_libssl() {
+        openssl::init();
+        const ERR_LIB_SSL: libc::c_int = 20;
+        fn reason_text(code: u64) -> String {
+            // SAFETY: ERR_reason_error_string returns a static string or NULL.
+            unsafe {
+                let p = openssl_sys::ERR_reason_error_string(openssl_sys::ERR_PACK(
+                    ERR_LIB_SSL,
+                    0,
+                    code as libc::c_int,
+                ));
+                if p.is_null() {
+                    "<unknown reason>".to_string()
+                } else {
+                    std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned()
+                }
+            }
+        }
+        for (code, text) in [
+            (SSL_R_NO_PROTOCOLS_AVAILABLE, "no protocols available"),
+            (SSL_R_UNSUPPORTED_PROTOCOL, "unsupported protocol"),
+            (SSL_R_BAD_PROTOCOL_VERSION_NUMBER, "bad protocol version number"),
+            (SSL_R_UNKNOWN_PROTOCOL, "unknown protocol"),
+            (SSL_R_UNKNOWN_SSL_VERSION, "unknown ssl version"),
+            (SSL_R_UNSUPPORTED_SSL_VERSION, "unsupported ssl version"),
+            (SSL_R_WRONG_SSL_VERSION, "wrong ssl version"),
+            (SSL_R_WRONG_VERSION_NUMBER, "wrong version number"),
+            (SSL_R_TLSV1_ALERT_PROTOCOL_VERSION, "tlsv1 alert protocol version"),
+            (SSL_R_VERSION_TOO_HIGH, "version too high"),
+            (SSL_R_VERSION_TOO_LOW, "version too low"),
+        ] {
+            assert_eq!(reason_text(code), text, "SSL_R_ reason code {code}");
+        }
     }
 }

@@ -2229,6 +2229,8 @@ dependencies = [
  "guc_tables",
  "latch_seams",
  "libc",
+ "mbutils",
+ "mcx",
  "openssl",
  "openssl-sys",
  "pg_string",
@@ -2236,6 +2238,7 @@ dependencies = [
  "pqcomm",
  "types_error",
  "types_storage",
+ "wchar",
 ]
 
 [[package]]

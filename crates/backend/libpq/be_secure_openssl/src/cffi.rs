@@ -245,8 +245,24 @@ pub fn x509_extensions(
     Ok(out)
 }
 
-pub fn x509_name_slash_format(name: *mut ossl::X509_NAME) -> Option<String> {
-    let bio = MemBio::new()?;
+/// be-secure-openssl.c X509_NAME_to_cstring failure arms; the caller owns
+/// the ereport texts.
+pub enum X509NameError {
+    /// `BIO_new` failed (C: ERRCODE_OUT_OF_MEMORY "could not create BIO").
+    BioFailure,
+    /// `OBJ_obj2nid` returned `NID_undef` for an entry's object
+    /// (C: "could not get NID for ASN1_OBJECT object").
+    UndefNid,
+    /// Neither `OBJ_nid2sn` nor `OBJ_nid2ln` names this NID
+    /// (C: "could not convert NID %d to an ASN1_OBJECT structure").
+    NoFieldName(c_int),
+}
+
+// X509_NAME_to_cstring's BIO walk: "/SN=value" per entry in certificate
+// order, values printed with CSTRING_ASN1_FLAGS (UTF-8). The
+// pg_any_to_server tail is the caller's (needs the server encoding).
+pub fn x509_name_slash_format(name: *mut ossl::X509_NAME) -> Result<Vec<u8>, X509NameError> {
+    let bio = MemBio::new().ok_or(X509NameError::BioFailure)?;
     // SAFETY: name is a live X509_NAME; entries/objects are borrowed from it
     // and only read within this loop.
     unsafe {
@@ -255,14 +271,15 @@ pub fn x509_name_slash_format(name: *mut ossl::X509_NAME) -> Option<String> {
             let e = X509_NAME_get_entry(name, i);
             let nid = OBJ_obj2nid(X509_NAME_ENTRY_get_object(e));
             if nid == 0 {
-                return None;
+                // NID_undef
+                return Err(X509NameError::UndefNid);
             }
             let mut field = OBJ_nid2sn(nid);
             if field.is_null() {
                 field = OBJ_nid2ln(nid);
             }
             if field.is_null() {
-                return None;
+                return Err(X509NameError::NoFieldName(nid));
             }
             let field_str = std::ffi::CStr::from_ptr(field);
             let prefix = format!("/{}=", field_str.to_string_lossy());
@@ -271,7 +288,7 @@ pub fn x509_name_slash_format(name: *mut ossl::X509_NAME) -> Option<String> {
             ASN1_STRING_print_ex(bio.0, v, CSTRING_ASN1_FLAGS);
         }
     }
-    Some(String::from_utf8_lossy(&bio.contents()).into_owned())
+    Ok(bio.contents())
 }
 
 // The DN-formatting units below build X509_NAMEs directly (no TLS session)
@@ -290,6 +307,13 @@ mod tests {
             b.append_entry_by_text(f, v).unwrap();
         }
         b.build()
+    }
+
+    fn slash(name: &X509Name) -> String {
+        match x509_name_slash_format(name.as_ptr()) {
+            Ok(b) => String::from_utf8(b).unwrap(),
+            Err(_) => panic!("slash format failed"),
+        }
     }
 
     fn field(name: &X509Name, f: &str) -> DnFieldLookup {
@@ -383,15 +407,25 @@ mod tests {
             ("O", "pgrust, Inc."),
             ("CN", "tester"),
         ]);
-        assert_eq!(
-            x509_name_slash_format(n.as_ptr()).unwrap(),
-            "/C=US/ST=CA/O=pgrust\\, Inc./CN=tester"
-        );
+        assert_eq!(slash(&n), "/C=US/ST=CA/O=pgrust\\, Inc./CN=tester");
     }
 
     #[test]
     fn slash_format_utf8_value() {
         let n = build_name(&[("CN", "z\u{00fc}")]);
-        assert_eq!(x509_name_slash_format(n.as_ptr()).unwrap(), "/CN=z\u{00fc}");
+        assert_eq!(slash(&n), "/CN=z\u{00fc}");
+    }
+
+    // be-secure-openssl.c X509_NAME_to_cstring: an entry whose object has no
+    // NID (a private-arc OID the process never registered) is an ERROR
+    // ("could not get NID for ASN1_OBJECT object"), not a silently empty or
+    // partial DN.
+    #[test]
+    fn slash_format_unknown_oid_entry_is_undef_nid() {
+        let n = build_name(&[("CN", "tester"), ("1.3.6.1.4.1.99999.7", "oidval")]);
+        assert!(matches!(
+            x509_name_slash_format(n.as_ptr()),
+            Err(X509NameError::UndefNid)
+        ));
     }
 }

@@ -238,9 +238,14 @@ fn read_activity(slot: i32) -> Vec<u8> {
 }
 
 fn str_to_name(s: &str) -> [u8; NAMELEN] {
+    bytes_to_name(s.as_bytes())
+}
+
+// strlcpy(ptr, ..., NAMEDATALEN) over server-encoding bytes.
+fn bytes_to_name(b: &[u8]) -> [u8; NAMELEN] {
     let mut out = [0u8; NAMELEN];
-    let len = s.len().min(NAMELEN - 1);
-    out[..len].copy_from_slice(&s.as_bytes()[..len]);
+    let len = b.len().min(NAMELEN - 1);
+    out[..len].copy_from_slice(&b[..len]);
     out
 }
 
@@ -415,7 +420,7 @@ pub fn pgstat_bestart_initial() -> PgResult<()> {
 // block zeroed as C does. No ENABLE_GSS arm in this build (gss stays false,
 // as C built without gssapi).
 #[cfg(all(feature = "ssl", not(target_family = "wasm")))]
-fn read_ssl_status() -> (bool, PgBackendSSLStatus) {
+fn read_ssl_status() -> PgResult<(bool, PgBackendSSLStatus)> {
     let mut ssl = false;
     let lssl = PgBackendSSLStatus::zeroed();
     if g::WithMyProcPort(|p| p.ssl_in_use) {
@@ -427,32 +432,35 @@ fn read_ssl_status() -> (bool, PgBackendSSLStatus) {
                 .set(str_to_name(&be_secure_openssl::be_tls_get_version().unwrap_or_default()));
             lssl.ssl_cipher
                 .set(str_to_name(&be_secure_openssl::be_tls_get_cipher().unwrap_or_default()));
-            lssl.ssl_client_dn.set(str_to_name(
-                &be_secure_openssl::be_tls_get_peer_subject_name().unwrap_or_default(),
+            // be_tls_get_peer_subject_name / be_tls_get_peer_issuer_name:
+            // X509_NAME_to_cstring's ERRORs (NID_undef, untranslatable
+            // character) surface here, at connection start, as in C.
+            lssl.ssl_client_dn.set(bytes_to_name(
+                &be_secure_openssl::be_tls_get_peer_subject_name()?.unwrap_or_default(),
             ));
             lssl.ssl_client_serial.set(str_to_name(
                 &be_secure_openssl::be_tls_get_peer_serial().unwrap_or_default(),
             ));
-            lssl.ssl_issuer_dn.set(str_to_name(
-                &be_secure_openssl::be_tls_get_peer_issuer_name().unwrap_or_default(),
+            lssl.ssl_issuer_dn.set(bytes_to_name(
+                &be_secure_openssl::be_tls_get_peer_issuer_name()?.unwrap_or_default(),
             ));
         }
     }
-    (ssl, lssl)
+    Ok((ssl, lssl))
 }
 
 #[cfg(not(all(feature = "ssl", not(target_family = "wasm"))))]
-fn read_ssl_status() -> (bool, PgBackendSSLStatus) {
+fn read_ssl_status() -> PgResult<(bool, PgBackendSSLStatus)> {
     // C parity: !USE_SSL pgstat_bestart — st_ssl false, SSL block zeroed.
     // ssl_in_use can never be true without SSL support.
-    (false, PgBackendSSLStatus::zeroed())
+    Ok((false, PgBackendSSLStatus::zeroed()))
 }
 
 pub fn pgstat_bestart_security() -> PgResult<()> {
     let beentry = my_beentry();
     assert!(g::HaveMyProcPort());
 
-    let (ssl, lssl) = read_ssl_status();
+    let (ssl, lssl) = read_ssl_status()?;
 
     begin_write_activity(beentry);
     // SAFETY: own-backend write / cross-backend read serialized by the st_changecount protocol

@@ -51,11 +51,11 @@ mod tls_stub {
     pub fn be_tls_get_cipher() -> Option<String> {
         None
     }
-    pub fn be_tls_get_peer_subject_name() -> Option<String> {
-        None
+    pub fn be_tls_get_peer_subject_name() -> types_error::PgResult<Option<Vec<u8>>> {
+        Ok(None)
     }
-    pub fn be_tls_get_peer_issuer_name() -> Option<String> {
-        None
+    pub fn be_tls_get_peer_issuer_name() -> types_error::PgResult<Option<Vec<u8>>> {
+        Ok(None)
     }
     pub fn be_tls_get_peer_serial() -> Option<String> {
         None
@@ -231,13 +231,14 @@ fn fc_ssl_issuer_field(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
 // be_tls_get_peer_{subject,issuer}_name's strlcpy, so the DN text is
 // truncated to NAMEDATALEN - 1 bytes (matching pg_stat_ssl's NAMEDATALEN
 // columns, which the ssl TAP suite compares against).
-fn whole_dn(fcinfo: &mut Fcinfo, name: Option<String>) -> PgResult<Datum> {
+// The bytes arrive in the server encoding (X509_NAME_to_cstring's
+// pg_any_to_server tail), so cstring_to_text needs no further conversion.
+fn whole_dn(fcinfo: &mut Fcinfo, name: Option<Vec<u8>>) -> PgResult<Datum> {
     let Some(name) = name.filter(|s| !s.is_empty()) else {
         // C: `if (!*subject) PG_RETURN_NULL();`
         return null(fcinfo);
     };
-    let b = name.as_bytes();
-    let b = &b[..b.len().min(NAMEDATALEN - 1)];
+    let b = &name[..name.len().min(NAMEDATALEN - 1)];
     text_datum(fcinfo.result_mcx(), b)
 }
 
@@ -245,14 +246,14 @@ fn fc_ssl_client_dn(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRe
     if !ssl_in_use() || !peer_cert_valid() {
         return null(fcinfo);
     }
-    whole_dn(fcinfo, tls::be_tls_get_peer_subject_name())
+    whole_dn(fcinfo, tls::be_tls_get_peer_subject_name()?)
 }
 
 fn fc_ssl_issuer_dn(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     if !ssl_in_use() || !peer_cert_valid() {
         return null(fcinfo);
     }
-    whole_dn(fcinfo, tls::be_tls_get_peer_issuer_name())
+    whole_dn(fcinfo, tls::be_tls_get_peer_issuer_name()?)
 }
 
 // ssl_extension_info: SETOF (name text, value text, critical boolean).
