@@ -309,11 +309,16 @@ pub(crate) fn GetXLogBuffer(ptr: XLogRecPtr, tli: TimeLineID) -> *mut u8 {
         AdvanceXLInsertBuffer(ptr, tli, false);
         let endptr = ctl.xlblocks[idx].load(std::sync::atomic::Ordering::Acquire);
         if expected_endptr != endptr {
-            panic!(
-                "could not find WAL buffer for {:X}/{:X}",
-                ptr >> 32,
-                ptr & 0xFFFF_FFFF
-            );
+            // xlog.c:1711: elog(PANIC, ...) — the structured PANIC (log line
+            // + crash choreography), not a raw thread panic.
+            let _ = ereport(PANIC)
+                .errmsg(format!(
+                    "could not find WAL buffer for {:X}/{:X}",
+                    ptr >> 32,
+                    ptr & 0xFFFF_FFFF
+                ))
+                .finish(loc("GetXLogBuffer"));
+            unreachable!("ereport(PANIC) returned");
         }
     }
 

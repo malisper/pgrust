@@ -609,8 +609,20 @@ pub(crate) fn xlog_read_twophase_data(lsn: XLogRecPtr) -> PgResult<Vec<u8>> {
         xlogreader::XLogReaderState::allocate(ctx.mcx(), transam_xlog::wal_segment_size())?;
     let mut routine = xlogreader::LocalPageRead { wait_for_wal: true };
 
+    let result = xlog_read_twophase_record(&mut reader, &mut routine, lsn);
+    // XLogReaderFree (twophase.c:1437, and the error unwind's resource
+    // release in C): close the segment the reader opened, on every path.
+    reader.XLogReaderFree(&mut routine);
+    result
+}
+
+fn xlog_read_twophase_record(
+    reader: &mut xlogreader::XLogReaderState<'_>,
+    routine: &mut xlogreader::LocalPageRead,
+    lsn: XLogRecPtr,
+) -> PgResult<Vec<u8>> {
     reader.XLogBeginRead(lsn);
-    let record = reader.XLogReadRecord(&mut routine)?;
+    let record = reader.XLogReadRecord(routine)?;
     let (h, l) = ((lsn >> 32) as u32, lsn as u32);
     if record.is_none() {
         return match reader.errormsg() {

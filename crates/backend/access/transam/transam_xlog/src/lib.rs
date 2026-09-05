@@ -428,10 +428,12 @@ pub fn wal_consistency_checking(rmid: u8) -> bool {
 // ruling), so C's process_shared_preload_libraries deferral collapses to a
 // plain "Unrecognized key word" rejection here.
 //
-// Divergence from C: SplitIdentifierString's double-quoted-identifier syntax
-// is not reproduced (rmgr names never need quoting); the unquoted comma list
-// with surrounding whitespace, and its "List syntax is invalid." rejection of
-// empty/dangling elements, are matched exactly.
+// The list is split with SplitIdentifierString semantics (varlena.c:3581):
+// double-quoted names are taken verbatim with `""` collapsed, unquoted names
+// are downcased (so the "Unrecognized key word" detail echoes the downcased
+// word, as C's does), and the syntax rejections (empty/dangling elements,
+// whitespace inside a token, junk after a closing quote, an unterminated
+// quote) are "List syntax is invalid.".
 fn parse_wal_consistency_checking(spec: &str) -> Result<[bool; RM_N_IDS], String> {
     let mut flags = [false; RM_N_IDS];
     let maskable: Vec<(&'static str, u8)> =
@@ -447,6 +449,7 @@ fn parse_wal_consistency_checking(spec: &str) -> Result<[bool; RM_N_IDS], String
     };
 
     for tok in tokens {
+        let tok = tok.as_str();
         if tok.eq_ignore_ascii_case("all") {
             for &(_, rmid) in &maskable {
                 flags[rmid as usize] = true;
@@ -462,47 +465,89 @@ fn parse_wal_consistency_checking(spec: &str) -> Result<[bool; RM_N_IDS], String
     Ok(flags)
 }
 
-// SplitIdentifierString(rawstring, ',', ...) restricted to unquoted ASCII
-// tokens (varlena.c). Returns None on the syntax errors C's SplitIdentifierString
-// rejects with `false`: an empty element (leading/trailing/doubled separator)
-// or whitespace embedded inside a token. An all-whitespace or empty input is a
-// valid empty list.
-fn split_identifier_list(raw: &str) -> Option<Vec<&str>> {
+// SplitIdentifierString(rawstring, ',', &namelist) (varlena.c:3581-3690).
+// Returns None where C returns false: an empty unquoted element
+// (leading/trailing/doubled separator), whitespace embedded inside an
+// unquoted token, mismatched quotes, or anything but whitespace / the
+// separator after a closing quote. An all-whitespace or empty input is a
+// valid empty list. Quoted names keep their case with `""` collapsed to `"`;
+// unquoted names go through downcase_truncate_identifier; every name is
+// truncated to NAMEDATALEN-1 bytes (truncate_identifier).
+fn split_identifier_list(raw: &str) -> Option<Vec<String>> {
+    const NAMEDATALEN: usize = 64;
     let s = raw.as_bytes();
     let is_space = |b: u8| b == b' ' || b == b'\t' || b == b'\n' || b == b'\r' || b == 0x0b || b == 0x0c;
+    let skip_space = |p: &mut usize| {
+        while *p < s.len() && is_space(s[*p]) {
+            *p += 1;
+        }
+    };
+    let truncate = |mut name: String| {
+        // truncate_identifier: clip to NAMEDATALEN-1 bytes at a character
+        // boundary (pg_mbcliplen).
+        if name.len() >= NAMEDATALEN {
+            let mut cut = NAMEDATALEN - 1;
+            while !name.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            name.truncate(cut);
+        }
+        name
+    };
     let mut names = Vec::new();
     let mut p = 0usize;
-    while p < s.len() && is_space(s[p]) {
-        p += 1;
-    }
+    skip_space(&mut p);
     if p == s.len() {
         return Some(names);
     }
     loop {
-        let start = p;
-        while p < s.len() && s[p] != b',' && !is_space(s[p]) {
+        if p >= s.len() {
+            return None; // a separator with nothing after it
+        }
+        let name = if s[p] == b'"' {
+            // Quoted name --- collapse quote-quote pairs, no downcasing.
+            let mut buf: Vec<u8> = Vec::new();
+            let mut q = p + 1;
+            loop {
+                let Some(off) = s[q..].iter().position(|&b| b == b'"') else {
+                    return None; // mismatched quotes
+                };
+                buf.extend_from_slice(&s[q..q + off]);
+                let endp = q + off;
+                if s.get(endp + 1) == Some(&b'"') {
+                    // Collapse adjacent quotes into one quote, and look again.
+                    buf.push(b'"');
+                    q = endp + 2;
+                    continue;
+                }
+                p = endp + 1;
+                break;
+            }
+            String::from_utf8_lossy(&buf).into_owned()
+        } else {
+            // Unquoted name --- extends to separator or whitespace.
+            let start = p;
+            while p < s.len() && s[p] != b',' && !is_space(s[p]) {
+                p += 1;
+            }
+            if p == start {
+                return None; // empty unquoted name not allowed
+            }
+            // downcase_truncate_identifier: ASCII A-Z only under a
+            // multibyte server encoding.
+            raw[start..p].to_ascii_lowercase()
+        };
+        skip_space(&mut p);
+        if p < s.len() && s[p] == b',' {
             p += 1;
-        }
-        if p == start {
-            // empty element (e.g. "a,," or leading ",")
-            return None;
-        }
-        let tok = &raw[start..p];
-        while p < s.len() && is_space(s[p]) {
-            p += 1;
-        }
-        if p == s.len() {
-            names.push(tok);
+            skip_space(&mut p);
+            names.push(truncate(name));
+            // we expect another name, so loop back
+        } else if p == s.len() {
+            names.push(truncate(name));
             return Some(names);
-        }
-        if s[p] != b',' {
-            // whitespace inside a token ("a b")
-            return None;
-        }
-        names.push(tok);
-        p += 1;
-        while p < s.len() && is_space(s[p]) {
-            p += 1;
+        } else {
+            return None; // invalid syntax
         }
     }
 }

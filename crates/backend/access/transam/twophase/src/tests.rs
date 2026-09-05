@@ -5,6 +5,10 @@ use types_core::BackendType;
 use crate::codec::*;
 use crate::state::TwoPhaseState;
 
+// The ShmemIndex rows registered through the shmem_init_struct seam during
+// setup() (name, size), in registration order.
+static SHMEM_INDEX_NAMES: Mutex<Vec<(String, usize)>> = Mutex::new(Vec::new());
+
 fn test_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: Mutex<()> = Mutex::new(());
     LOCK.lock().unwrap_or_else(|e| e.into_inner())
@@ -58,6 +62,10 @@ fn setup() {
         shmem_seams::shmem_alloc::set(|size| {
             Ok(Box::leak(vec![0u8; size].into_boxed_slice()).as_mut_ptr())
         });
+        shmem_seams::shmem_init_struct::set(|name, size| {
+            SHMEM_INDEX_NAMES.lock().unwrap().push((name.to_owned(), size));
+            Ok((Box::leak(vec![0u8; size.max(1)].into_boxed_slice()).as_mut_ptr(), false))
+        });
         xact_seams::transaction_id_is_current_transaction_id::set(|_| false);
         xact_seams::get_current_sub_transaction_id::set(|| 1);
         static WAL_SYNC_METHOD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
@@ -84,7 +92,7 @@ fn setup() {
         procarray::init_seams();
         varsup::VarsupShmemInit();
         procarray::ProcArrayShmemInit();
-        crate::TwoPhaseShmemInit();
+        crate::TwoPhaseShmemInit().unwrap();
 
         varsup::AdvanceNextFullTransactionIdPastXid(2000).expect("advance nextXid");
 
@@ -415,4 +423,18 @@ fn process_records_rejects_malformed_stream() {
     // (4) A well-formed END sentinel still terminates cleanly.
     let rec = TwoPhaseRecordOnDisk { len: 0, rmid: twophase_rmgr::TWOPHASE_RM_END_ID, info: 0 };
     process_records(&rec.to_bytes(), 0, 42, &callbacks).expect("END sentinel terminates");
+}
+
+// twophase.c:257 TwoPhaseShmemInit registers the table via
+// ShmemInitStruct("Prepared Transaction Table", TwoPhaseShmemSize(), &found),
+// so pg_shmem_allocations lists the row. Audit
+// a186-candidate-fp-transam-twophase-66bb4fc2a6599036522e-1.
+#[test]
+fn shmem_init_registers_prepared_transaction_table_in_shmem_index() {
+    let _g = test_lock();
+    setup();
+    let rows = SHMEM_INDEX_NAMES.lock().unwrap();
+    let row = rows.iter().find(|(n, _)| n == "Prepared Transaction Table");
+    let (_, size) = row.expect("Prepared Transaction Table is missing from the ShmemIndex");
+    assert_eq!(*size, crate::TwoPhaseShmemSize());
 }

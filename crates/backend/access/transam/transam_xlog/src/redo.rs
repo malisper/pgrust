@@ -194,8 +194,12 @@ pub fn xlog_redo(record: &mut XLogReaderState) -> PgResult<()> {
             }
 
             RecoveryRestartPoint(&check_point, record);
-            // smgrdestroyall() follows in C; smgr close-all is deferred with
-            // the recovery unit.
+
+            // After replaying a checkpoint record, free all smgr objects.
+            // Otherwise we would never do so for dropped relations, as the
+            // startup does not process shared invalidation messages or call
+            // AtEOXact_SMgr() (xlog.c:8409-8415).
+            smgr_seams::smgr_destroy_all::call()?;
         }
         XLOG_CHECKPOINT_ONLINE => {
             let check_point = CheckPoint::from_bytes(main_data_checked(
@@ -245,6 +249,9 @@ pub fn xlog_redo(record: &mut XLogReaderState) -> PgResult<()> {
                 )));
             }
             RecoveryRestartPoint(&check_point, record);
+
+            // xlog.c:8475-8481: same smgrdestroyall() as the shutdown arm.
+            smgr_seams::smgr_destroy_all::call()?;
         }
         XLOG_OVERWRITE_CONTRECORD | XLOG_BACKUP_END | XLOG_RESTORE_POINT => {}
         XLOG_END_OF_RECOVERY => {

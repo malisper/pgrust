@@ -944,6 +944,9 @@ fn SummarizeWAL(
         }
     }
 
+    // XLogReaderFree (walsummarizer.c): close the segment still open in the
+    // reader before the reader goes away.
+    xlogreader.XLogReaderFree(&mut routine);
     drop(xlogreader);
 
     if summary_end_lsn > summary_start_lsn && !fast_forward {

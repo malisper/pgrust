@@ -5,6 +5,7 @@ use types_core::{
     InvalidTransactionId, Oid, ProcNumber, TimestampTz, TransactionId, XLogRecPtr,
     INVALID_PROC_NUMBER,
 };
+use types_error::PgResult;
 use types_storage::storage::SyncCell;
 
 pub const GIDSIZE: usize = 200;
@@ -145,10 +146,18 @@ pub fn TwoPhaseShmemSize() -> usize {
         + max * (core::mem::size_of::<GXact>() + core::mem::size_of::<i32>())
 }
 
-pub fn TwoPhaseShmemInit() {
+// TwoPhaseShmemInit (twophase.c:250-296): ShmemInitStruct("Prepared
+// Transaction Table", TwoPhaseShmemSize(), &found) registers the table in
+// the ShmemIndex (so pg_shmem_allocations lists it) and hands back the
+// arena the table header lives in; the per-slot GXact/prepXacts arrays are
+// process-heap slices reached from that header.
+pub fn TwoPhaseShmemInit() -> PgResult<()> {
     if TWO_PHASE_STATE.get().is_some() {
-        return;
+        return Ok(());
     }
+    let (raw, found) =
+        shmem_seams::shmem_init_struct::call("Prepared Transaction Table", TwoPhaseShmemSize())?;
+    debug_assert!(!found, "TwoPhaseShmemInit: segment already initialized");
     let max = twophase_config::max_prepared_xacts().max(0) as usize;
     let mut gxacts = Vec::with_capacity(max);
     let mut prep = Vec::with_capacity(max);
@@ -164,13 +173,25 @@ pub fn TwoPhaseShmemInit() {
         gxacts.push(g);
         prep.push(SyncCell::new(NO_GXACT));
     }
-    let shared = Box::leak(Box::new(TwoPhaseShared {
-        free_gxacts: SyncCell::new(free_head),
-        num_prep_xacts: SyncCell::new(0),
-        prep_xacts: prep.into_boxed_slice(),
-        gxacts: gxacts.into_boxed_slice(),
-    }));
-    let _ = TWO_PHASE_STATE.set(shared);
+    const {
+        assert!(core::mem::align_of::<TwoPhaseShared>() <= 64, "PG_CACHE_LINE_SIZE alignment");
+    }
+    let p = raw.cast::<TwoPhaseShared>();
+    // SAFETY: a fresh, zeroed, cache-line-aligned ShmemIndex allocation of
+    // TwoPhaseShmemSize() >= size_of::<TwoPhaseShared>() bytes (the size
+    // sums the header and the per-slot arrays), written once during
+    // single-threaded shmem init and leaked for the cluster lifetime like C
+    // shmem.
+    unsafe {
+        p.write(TwoPhaseShared {
+            free_gxacts: SyncCell::new(free_head),
+            num_prep_xacts: SyncCell::new(0),
+            prep_xacts: prep.into_boxed_slice(),
+            gxacts: gxacts.into_boxed_slice(),
+        });
+        let _ = TWO_PHASE_STATE.set(&*p);
+    }
+    Ok(())
 }
 
 /// Crash-cycle reset to the boot image (ipci ResetShmemAfterCrash walk;

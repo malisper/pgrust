@@ -1104,7 +1104,9 @@ fn read_recovery_signal_file() -> PgResult<()> {
     }
 
     if STANDBY_MODE_REQUESTED.load(Relaxed) && !init_small::globals::IsUnderPostmaster() {
+        // xlogrecovery.c:1131-1133: errcode(ERRCODE_FEATURE_NOT_SUPPORTED).
         ereport(FATAL)
+            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
             .errmsg("standby mode is not supported by single-user servers")
             .finish(loc("readRecoverySignalFile"))?;
         unreachable!()

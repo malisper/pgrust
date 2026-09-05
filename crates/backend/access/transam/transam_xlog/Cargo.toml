@@ -72,12 +72,14 @@ procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
 checkpointer_seams = { path = "../../../postmaster/checkpointer_seams" }
 types_guc = { path = "../../../../_support/types/types_guc" }
 startup_seams = { path = "../../../postmaster/startup_seams" }
+miscinit = { path = "../../../utils/init/miscinit" }
+ps_status_seams = { path = "../../../utils/misc/ps_status_seams" }
+waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
 libc = "0.2"
 
 [dev-dependencies]
 shmem = { path = "../../../storage/ipc/shmem" }
 aio_seams = { path = "../../../storage/aio/aio_seams" }
-waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
 
 [lints.rust]
 # `pgrust_sim` (non-default cfg): the GL-FLUSHSIM-1 mutation seam in

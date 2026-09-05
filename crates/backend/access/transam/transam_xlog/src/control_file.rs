@@ -241,7 +241,9 @@ pub fn CheckRequiredParameterValues() -> PgResult<()> {
     let archive = xlogrecovery_seams::archive_recovery_requested::is_installed()
         && xlogrecovery_seams::archive_recovery_requested::call();
     if archive && cf.wal_level == crate::WAL_LEVEL_MINIMAL {
+        // xlog.c:5431-5435: errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE).
         return ereport(FATAL)
+            .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
             .errmsg("WAL was generated with \"wal_level=minimal\", cannot continue recovering")
             .errdetail("This happens if you temporarily set \"wal_level=minimal\" on the server.".to_string())
             .errhint("Use a backup taken after setting \"wal_level\" to higher than \"minimal\".".to_string())

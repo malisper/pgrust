@@ -56,6 +56,7 @@ commit_ts_seams = { path = "../commit_ts_seams" }
 twophase_seams = { path = "../twophase_seams" }
 twophase_config = { path = "../twophase_config" }
 twophase_rmgr = { path = "../twophase_rmgr" }
+shmem_seams = { path = "../../../storage/ipc/shmem_seams" }
 
 [dev-dependencies]
 pg_sema_seams = { path = "../../../port/pg_sema_seams" }
@@ -68,7 +69,6 @@ deadlock_seams = { path = "../../../storage/lmgr/deadlock_seams" }
 pmsignal_seams = { path = "../../../storage/ipc/pmsignal_seams" }
 lock_seams = { path = "../../../storage/lmgr/lock_seams" }
 timeout_seams = { path = "../../../utils/misc/timeout_seams" }
-shmem_seams = { path = "../../../storage/ipc/shmem_seams" }
 condition_variable_seams = { path = "../../../storage/lmgr/condition_variable_seams" }
 autovacuum_seams = { path = "../../../postmaster/autovacuum_seams" }
 xact_seams = { path = "../xact_seams" }

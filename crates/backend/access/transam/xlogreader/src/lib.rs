@@ -572,6 +572,16 @@ impl<'mcx> XLogReaderState<'mcx> {
         core::str::from_utf8(&self.errormsg_buf).ok()
     }
 
+    /// `XLogReaderFree` (xlogreader.c:162-175): close the WAL segment the
+    /// reader still holds open through `routine.segment_close` (the buffers
+    /// go with the reader's memory context). A transient reader dropped
+    /// without this leaks the pg_wal file descriptor.
+    pub fn XLogReaderFree(&mut self, routine: &mut impl XLogSegmentRoutine) {
+        if self.v.seg.ws_file != -1 {
+            routine.segment_close(&mut self.v);
+        }
+    }
+
     pub fn XLogReaderResetError(&mut self) {
         self.errormsg_buf.clear();
         self.errormsg_deferred = false;

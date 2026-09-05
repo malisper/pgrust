@@ -5,7 +5,8 @@ use elog::{elog, ereport};
 use lwlock::{LWLockAcquire, LWLockRelease, LW_EXCLUSIVE};
 use types_core::TransactionId;
 use types_error::{
-    ErrorLocation, PgError, PgResult, DEBUG1, DEBUG2, ERRCODE_DATA_CORRUPTED, ERROR, FATAL, LOG,
+    ErrorLocation, PgError, PgResult, DEBUG1, DEBUG2, ERRCODE_DATA_CORRUPTED,
+    ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR, FATAL, LOG,
     NOTICE, PANIC,
 };
 use types_core::XLogRecPtr;
@@ -426,8 +427,17 @@ pub fn StartupXLOG() -> PgResult<()> {
             || !XLogRecPtrIsInvalid(control_file().backupStartPoint))
     {
         if xlogrecovery_seams::archive_recovery_requested::call() || control_file().backupEndRequired {
+            // xlog.c:5936-5946: two FATALs, both ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE.
+            if !XLogRecPtrIsInvalid(control_file().backupStartPoint) || control_file().backupEndRequired {
+                return ereport(FATAL)
+                    .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                    .errmsg("WAL ends before end of online backup")
+                    .errhint("All WAL generated while online backup was taken must be available at recovery.".to_string())
+                    .finish(loc("StartupXLOG"));
+            }
             return ereport(FATAL)
-                .errmsg("WAL ends before end of online backup or consistent recovery point")
+                .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                .errmsg("WAL ends before consistent recovery point")
                 .finish(loc("StartupXLOG"));
         }
     }
@@ -1016,6 +1026,43 @@ pub const DELAY_CHKPT_COMPLETE: i32 = 1 << 1;
 // LogCheckpointStart's flag words (xlog.c:6687): the recovery TAP suite
 // greps these exact strings (041 matches "restartpoint starting: immediate
 // wait"), so the hex-flags shorthand this replaced was a conformance break.
+// update_checkpoint_display (xlog.c:6864): the ps status of a process
+// running an end-of-recovery / shutdown checkpoint or a shutdown
+// restartpoint ("performing shutdown checkpoint", ...); `reset` clears it.
+// No allocation: it runs inside critical sections.
+fn update_checkpoint_display(flags: i32, restartpoint: bool, reset: bool) {
+    if flags & (CHECKPOINT_END_OF_RECOVERY | CHECKPOINT_IS_SHUTDOWN) == 0 {
+        return;
+    }
+    if !ps_status_seams::set_ps_display::is_installed() {
+        return;
+    }
+    if reset {
+        ps_status_seams::set_ps_display::call("");
+    } else {
+        ps_status_seams::set_ps_display::call(checkpoint_display_activity(flags, restartpoint));
+    }
+}
+
+// The activitymsg of update_checkpoint_display: "performing %s%s%s" with
+// (flags & CHECKPOINT_END_OF_RECOVERY) ? "end-of-recovery " : "",
+// (flags & CHECKPOINT_IS_SHUTDOWN) ? "shutdown " : "", restartpoint ?
+// "restartpoint" : "checkpoint".
+pub(crate) fn checkpoint_display_activity(flags: i32, restartpoint: bool) -> &'static str {
+    let eor = flags & CHECKPOINT_END_OF_RECOVERY != 0;
+    let shutdown = flags & CHECKPOINT_IS_SHUTDOWN != 0;
+    match (eor, shutdown, restartpoint) {
+        (true, true, true) => "performing end-of-recovery shutdown restartpoint",
+        (true, true, false) => "performing end-of-recovery shutdown checkpoint",
+        (true, false, true) => "performing end-of-recovery restartpoint",
+        (true, false, false) => "performing end-of-recovery checkpoint",
+        (false, true, true) => "performing shutdown restartpoint",
+        (false, true, false) => "performing shutdown checkpoint",
+        (false, false, true) => "performing restartpoint",
+        (false, false, false) => "performing checkpoint",
+    }
+}
+
 fn checkpoint_flag_words(flags: i32) -> String {
     let mut s = String::new();
     for (bit, word) in [
@@ -1122,6 +1169,9 @@ pub fn CreateCheckPoint(flags: i32) -> PgResult<bool> {
     if guc_tables::vars::log_checkpoints.read() {
         let _ = elog(LOG, format!("checkpoint starting:{}", checkpoint_flag_words(flags)));
     }
+
+    // Update the process title (xlog.c:7125).
+    update_checkpoint_display(flags, false, false);
 
     {
         let tv = procarray::TransamVariables();
@@ -1290,6 +1340,9 @@ pub fn CreateCheckPoint(flags: i32) -> PgResult<bool> {
         );
     }
 
+    // Reset the process title (xlog.c:7397).
+    update_checkpoint_display(flags, false, true);
+
     Ok(true)
 }
 
@@ -1348,6 +1401,9 @@ pub fn CreateRestartPoint(flags: i32) -> PgResult<bool> {
     if guc_tables::vars::log_checkpoints.read() {
         let _ = elog(LOG, format!("restartpoint starting:{}", checkpoint_flag_words(flags)));
     }
+
+    // Update the process title (xlog.c:7731).
+    update_checkpoint_display(flags, true, false);
 
     CheckPointGuts(last_ckpt.redo, flags)?;
 
@@ -1445,6 +1501,9 @@ pub fn CreateRestartPoint(flags: i32) -> PgResult<bool> {
             ),
         );
     }
+
+    // Reset the process title (xlog.c:7869).
+    update_checkpoint_display(flags, true, true);
 
     let level = if guc_tables::vars::log_checkpoints.read() { LOG } else { DEBUG2 };
     let mut report = ereport(level).errmsg(format!(

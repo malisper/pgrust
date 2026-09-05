@@ -685,9 +685,16 @@ fn flags_of(extra: &Option<guc_tables::GucHookExtra>) -> [bool; crate::RM_N_IDS]
         .unwrap()
 }
 
+// The maskable-rmgr seam installs once per test process (a second `set`
+// panics "seam installed twice"); every test that parses the GUC shares it.
+fn install_test_maskable_rmgrs() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| transam_xlog_seams::wal_consistency_maskable_rmgrs::set(test_maskable_rmgrs));
+}
+
 #[test]
 fn wal_consistency_checking_hook_accepts_and_parses() {
-    transam_xlog_seams::wal_consistency_maskable_rmgrs::set(test_maskable_rmgrs);
+    install_test_maskable_rmgrs();
 
     // Disabled settings: accepted, all-false.
     for spec in [None, Some(""), Some("   ")] {
@@ -730,4 +737,66 @@ fn wal_consistency_checking_hook_accepts_and_parses() {
     let (_ok, extra) = check(Some(""));
     crate::assign_wal_consistency_checking_hook(Some(""), extra.as_ref());
     assert!(!crate::wal_consistency_checking(18));
+}
+
+// check_wal_consistency_checking (xlog.c:4722) parses the list with
+// SplitIdentifierString (varlena.c:3581): a double-quoted element is taken
+// verbatim with `""` collapsed to `"`, an unquoted element is downcased
+// (the rejection detail echoes the downcased word), and anything after a
+// closing quote that is not whitespace / the separator is "List syntax is
+// invalid.". Audit a186-candidate-fp-transam-xlog-p2-f05906940910de3dddbf-1.
+#[test]
+fn wal_consistency_checking_parses_quoted_identifiers_like_c() {
+    install_test_maskable_rmgrs();
+    let parse = crate::parse_wal_consistency_checking;
+
+    // SET wal_consistency_checking = '"heap"': C accepts (pg_strcasecmp on
+    // the unquoted name).
+    let f = parse("\"heap\"").expect("\"heap\" is a valid quoted rmgr name");
+    assert!(f[10] && !f[11] && !f[18]);
+
+    // Quoted names keep their case and are still matched case-insensitively.
+    let f = parse("heap, \"Brin\" ,BTREE").expect("mixed quoted/unquoted list");
+    assert!(f[10] && f[11] && f[18]);
+
+    // The detail echoes the DOWNCASED unquoted word (downcase_truncate_identifier).
+    assert_eq!(parse("Foo").unwrap_err(), "Unrecognized key word: \"foo\".");
+    // A quoted word is echoed verbatim, with "" collapsed to ".
+    assert_eq!(parse("\"he\"\"ap\"").unwrap_err(), "Unrecognized key word: \"he\"ap\".");
+    assert_eq!(parse("\"\"").unwrap_err(), "Unrecognized key word: \"\".");
+    // Trailing junk after a closing quote and an unterminated quote are
+    // SplitIdentifierString `false` returns.
+    assert_eq!(parse("\"heap\"x").unwrap_err(), "List syntax is invalid.");
+    assert_eq!(parse("\"heap").unwrap_err(), "List syntax is invalid.");
+}
+
+// get_sync_bit (xlog.c:8666-8671): debug_io_direct=wal ORs PG_O_DIRECT into
+// the open flags regardless of fsync, except in the walreceiver. Audit
+// a186-candidate-fp-transam-xlog-p4-4a3a3de1fd8cbf2deb7c-1.
+#[test]
+fn get_sync_bit_sets_o_direct_for_debug_io_direct_wal() {
+    let saved_flags = fd::io_direct_flags();
+    let saved_fsync = init_small::globals::enableFsync();
+    fd::set_io_direct_flags(::types_storage::IO_DIRECT_WAL);
+    init_small::globals::set_enableFsync(false);
+    let bit = crate::write::get_sync_bit(guc_tables::consts::WAL_SYNC_METHOD_FDATASYNC);
+    fd::set_io_direct_flags(saved_flags);
+    init_small::globals::set_enableFsync(saved_fsync);
+    assert_eq!(bit, vfs::PG_O_DIRECT, "io_direct_flags & IO_DIRECT_WAL must open WAL with PG_O_DIRECT");
+}
+
+// update_checkpoint_display (xlog.c:6864-6885): the ps activity is
+// "performing %s%s%s" for end-of-recovery / shutdown checkpoints and
+// shutdown restartpoints; other checkpoints leave the title alone. Audit
+// a186-candidate-fp-transam-xlog-p3-a70efef0e3d3bf63c50e-1.
+#[test]
+fn checkpoint_display_activity_matches_c_titles() {
+    use crate::startup::checkpoint_display_activity as act;
+    assert_eq!(act(CHECKPOINT_IS_SHUTDOWN, false), "performing shutdown checkpoint");
+    assert_eq!(act(CHECKPOINT_END_OF_RECOVERY, false), "performing end-of-recovery checkpoint");
+    assert_eq!(
+        act(CHECKPOINT_END_OF_RECOVERY | CHECKPOINT_IS_SHUTDOWN, false),
+        "performing end-of-recovery shutdown checkpoint"
+    );
+    assert_eq!(act(CHECKPOINT_IS_SHUTDOWN | CHECKPOINT_IMMEDIATE, true), "performing shutdown restartpoint");
 }

@@ -142,7 +142,7 @@ pub fn CreateOrAttachShmemStructs(cfg: &ProcGlobalConfig) -> PgResult<()> {
     }
     procarray::ProcArrayShmemInit();
     backend_status_seams::backend_status_shmem_init::call()?;
-    twophase::TwoPhaseShmemInit();
+    twophase::TwoPhaseShmemInit()?;
 
     sinval::SharedInvalShmemInit()?;
 
