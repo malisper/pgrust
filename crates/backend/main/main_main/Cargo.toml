@@ -12,6 +12,26 @@ path = "src/lib.rs"
 name = "postgres"
 path = "src/bin/postgres.rs"
 
+[features]
+# The object-store client, off by default. It is the only feature in the tree
+# that pulls external dependencies, and the footprint is large: `cargo tree -p
+# main_main -e normal` gains 72 crates with the feature on (908 -> 980 nodes,
+# 2026-09-03), every one of them external. What comes in: rusty-s3 + ureq
+# (blocking HTTP, no async runtime); rustls 0.21 / rustls-webpki 0.101 /
+# webpki-roots 0.25 (an end-of-life rustls line, pinned by ureq 2) with
+# rustls-native-certs (security-framework on macOS); ring 0.17 (C and
+# assembly compiled by a `cc` build script -- native code); serde,
+# serde_derive and serde_json plus syn 3 (the tree already has syn 2, so two
+# syn builds); jiff + jiff-core (a full date/time and tz library, used for
+# request signing dates); instant-xml + xmlparser (ListObjects responses); a
+# second RustCrypto line (md-5/sha2/hmac/digest 0.11 next to the existing
+# 0.9 crates) and a second base64 (0.21 and 0.23); and url/idna with seven
+# icu_* crates and their zerovec/yoke/tinystr support. A server built without
+# it runs objkv tables against memory, so any cluster that means to keep its
+# rows is built with `--features objkv-s3`.
+default = []
+objkv-s3 = ["seams_init/objkv-s3"]
+
 [dependencies]
 ipc = { path = "../../storage/ipc/ipc" }
 libc = "0.2"

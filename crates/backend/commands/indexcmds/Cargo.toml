@@ -24,6 +24,9 @@ genam = { path = "../../access/index/genam" }
 indexcmds_seams = { path = "../indexcmds_seams" }
 pg_class_seams = { path = "../../catalog/pg_class_seams" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
+tableam = { path = "../../access/table/tableam" }
+tableam_vocab = { path = "../../access/table/tableam_vocab" }
+commands_amcmds = { path = "../amcmds" }
 amapi = { path = "../../access/index/amapi" }
 types_relscan = { path = "../../access/index/relscan" }
 parse_oper = { path = "../../parser/parse_oper" }

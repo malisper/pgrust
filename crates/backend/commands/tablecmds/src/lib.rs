@@ -275,6 +275,15 @@ pub fn BuildDescForRelation<'mcx>(
     Ok(desc)
 }
 
+/// By name: the vocab registry fills at relcache build, so it is empty in the
+/// session creating the first objkv table.
+fn is_objkv_am(amoid: Oid) -> PgResult<bool> {
+    if amoid == InvalidOid {
+        return Ok(false);
+    }
+    Ok(amoid == commands_amcmds::get_table_am_oid("objkv", true)?)
+}
+
 pub fn DefineRelation<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &CreateStmt<'mcx>,
@@ -349,10 +358,25 @@ pub fn DefineRelation<'mcx>(
                 &tableam::default_table_access_method(),
                 false,
             )?;
+            // An objkv default would send scratch tables to S3.
+            if rv.relpersistence == types_core::RELPERSISTENCE_TEMP && is_objkv_am(amoid)? {
+                amoid = commands_amcmds::get_table_am_oid("heap", false)?;
+            }
         }
         amoid
     } else {
         InvalidOid
+    };
+    if rv.relpersistence == types_core::RELPERSISTENCE_TEMP && is_objkv_am(access_method_id)? {
+        return Err(Box::new(
+            PgError::new(ERROR, "objkv cannot store temporary tables".to_string())
+                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                .with_detail(
+                    "A temporary table is discarded at disconnect, and objkv has no \
+                     per-session namespace."
+                        .to_string(),
+                ),
+        ));
     };
 
     match relkind {

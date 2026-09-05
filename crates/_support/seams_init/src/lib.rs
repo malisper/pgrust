@@ -446,7 +446,7 @@ pub fn init_all_with_transport(transport: Transport) {
     ts_cache::init_hooks();
     seclabel::init();
 
-    static EXTRA_BUILTINS: [&[types_fmgr::FmgrBuiltin]; 7] = [
+    static EXTRA_BUILTINS: [&[types_fmgr::FmgrBuiltin]; 8] = [
         adt_misc::builtins::MISC_BUILTINS,
         catalog_namespace::builtins::NAMESPACE_BUILTINS,
         format_type::builtins::FORMAT_TYPE_BUILTINS,
@@ -457,6 +457,7 @@ pub fn init_all_with_transport(transport: Transport) {
         // coverage view SRF (execmain lanev2/coverage.rs; created on demand
         // by scripts/lane-coverage-view.sql — no catalog delta by default).
         execmain::LANEV2_BUILTINS,
+        objkv_lift::LIFT_BUILTINS,
     ];
     fmgr_core::install_extra_builtins(&EXTRA_BUILTINS);
 }

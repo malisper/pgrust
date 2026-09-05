@@ -313,8 +313,22 @@ fn math_domains_and_live_pg_values() {
     assert_eq!(out8(dsinh(1.0)), "1.1752011936438014");
     assert_eq!(out8(dcosh(1.0).unwrap()), "1.5430806348152437");
     assert_eq!(out8(dtanh(1.0).unwrap()), "0.7615941559557649");
-    assert_eq!(out8(derf(1.0).unwrap()), "0.8427007929497149");
-    assert_eq!(out8(derfc(1.0).unwrap()), "0.15729920705028513");
+    // erf/erfc come straight from the platform libm, and Apple's libm differs
+    // from glibc's by exactly one ulp at 1.0 in each: erf is one ulp below
+    // (…148 vs …149), erfc one ulp above (…516 vs …513). Both arms are pinned
+    // so a libm regression on either platform is caught; the glibc digits are
+    // the live PG 18.3 values on Linux, the Apple digits were read from
+    // /usr/lib/libSystem erf(1.0)/erfc(1.0) on macOS (Darwin 25.6, 2026-09-03).
+    #[cfg(target_os = "macos")]
+    {
+        assert_eq!(out8(derf(1.0).unwrap()), "0.8427007929497148");
+        assert_eq!(out8(derfc(1.0).unwrap()), "0.15729920705028516");
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        assert_eq!(out8(derf(1.0).unwrap()), "0.8427007929497149");
+        assert_eq!(out8(derfc(1.0).unwrap()), "0.15729920705028513");
+    }
     assert_eq!(out8(dgamma(5.5).unwrap()), "52.34277778455352");
     // glibc's lgamma(10.5) differs by 1 ULP between aarch64 and x86_64;
     // funcs.rs binds the SYSTEM libm (C's parity reference), so each arm

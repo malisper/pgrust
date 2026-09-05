@@ -4,15 +4,29 @@ version = "0.1.0"
 edition.workspace = true
 publish.workspace = true
 
+[features]
+# Forwarded up to the server binary, which decides. Without it objkv tables
+# have no object store and fall back to memory, which no cluster wants but
+# every unit test does.
+default = []
+objkv-s3 = ["objkv/s3"]
+
 [dependencies]
 datum = { path = "../../../../_support/types/datum" }
 mcx = { path = "../../../../_support/mcx" }
+varlena = { path = "../../../utils/adt/varlena" }
 types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
 types_guc = { path = "../../../../_support/types/types_guc" }
 types_rel = { path = "../../../../_support/types/rel" }
 types_scan = { path = "../../../../_support/types/types_scan" }
 types_slot = { path = "../../../../_support/types/types_slot" }
+# Default features off: `objkv/s3` is the object-store client and its TLS
+# stack, and enabling it here would enable it for every build of the server,
+# whatever the top level asked for. Cargo unifies features, so one
+# non-optional `features = ["s3"]` anywhere is the whole cluster's answer.
+objkv = { path = "../../../../_support/objkv", default-features = false }
+heaptuple = { path = "../../common/heaptuple" }
 types_storage = { path = "../../../../_support/types/types_storage" }
 types_tuple = { path = "../../../../_support/types/types_tuple" }
 types_snapshot = { path = "../../../../_support/types/snapshot" }
@@ -20,6 +34,7 @@ guc_tables = { path = "../../../utils/misc/guc_tables" }
 bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
 smgr = { path = "../../../storage/smgr/smgr" }
 procarray = { path = "../../../storage/ipc/procarray" }
+ipc_seams = { path = "../../../storage/ipc/ipc_seams" }
 multixact = { path = "../../transam/multixact" }
 catalog_storage = { path = "../../../catalog/catalog_storage" }
 xact = { path = "../../transam/xact" }
@@ -27,6 +42,9 @@ xact_seams = { path = "../../transam/xact_seams" }
 guc_seams = { path = "../../../utils/misc/guc_seams" }
 elog_seams = { path = "../../../utils/error/elog_seams" }
 exectuples = { path = "../../../executor/exectuples" }
+detoast_seams = { path = "../../common/detoast_seams" }
+arrayfuncs = { path = "../../../utils/adt/arrayfuncs" }
+lsyscache = { path = "../../../utils/cache/lsyscache" }
 tableam_vocab = { path = "../tableam_vocab" }
 pgrcolumnar = { path = "../../pgrcolumnar" }
 heapam = { path = "../../heap/heapam" }
@@ -37,3 +55,6 @@ tidbitmap = { path = "../../../nodes/tidbitmap" }
 snapmgr = { path = "../../../utils/time/snapmgr" }
 init_small = { path = "../../../utils/init/init_small" }
 tableam_seams = { path = "../tableam_seams" }
+table = { path = "../table" }
+relcache_seams = { path = "../../../utils/cache/relcache_seams" }
+relation_seams = { path = "../../common/relation_seams" }

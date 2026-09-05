@@ -303,6 +303,10 @@ pub static pgrust_lane_executor: GucBoolVar = GucSlot::new("pgrust_lane_executor
 // OFF, LRU-bounded by the size GUC (KB).
 pub static pgrust_condition_cache: GucBoolVar = GucSlot::new("pgrust_condition_cache");
 pub static pgrust_condition_cache_size: GucIntVar = GucSlot::new("pgrust_condition_cache_size");
+pub static pgrust_objkv_snapshot_seq: GucIntVar = GucSlot::new("pgrust_objkv_snapshot_seq");
+pub static pgrust_objkv_retain_commits: GucIntVar = GucSlot::new("pgrust_objkv_retain_commits");
+pub static pgrust_objkv_async_queue: GucIntVar = GucSlot::new("pgrust_objkv_async_queue");
+pub static pgrust_objkv_async_commit: GucBoolVar = GucSlot::new("pgrust_objkv_async_commit");
 // pgrust-only: pgrust.parallel_engine + pgrust.runtime_dop (M5-0,
 // docs/design/m5-planner.md §2.2; no C symbol). The engine selector routes
 // covered serial shapes to the morsel runtime under `runtime`; the DOP knob

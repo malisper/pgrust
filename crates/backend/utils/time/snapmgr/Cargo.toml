@@ -12,6 +12,7 @@ mcx = { path = "../../../../_support/mcx" }
 types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
 types_snapshot = { path = "../../../../_support/types/snapshot" }
+seam_core = { path = "../../../../_support/seam_core" }
 types_resowner = { path = "../../../../_support/types/types_resowner" }
 procarray = { path = "../../../storage/ipc/procarray" }
 lmgr_proc = { path = "../../../storage/lmgr/lmgr_proc" }

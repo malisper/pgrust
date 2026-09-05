@@ -18,6 +18,10 @@ types_resowner = { path = "../../../../_support/types/types_resowner" }
 datum = { path = "../../../../_support/types/datum" }
 elog = { path = "../../error/elog" }
 init_small = { path = "../init_small" }
+objkv_marker = { path = "../../../../_support/objkv_marker" }
+tableam_vocab = { path = "../../../access/table/tableam_vocab" }
+tableam = { path = "../../../access/table/tableam" }
+types_relscan = { path = "../../../access/index/relscan" }
 miscinit = { path = "../miscinit" }
 guc = { path = "../../misc/guc" }
 guc_tables = { path = "../../misc/guc_tables" }

@@ -473,10 +473,49 @@ pub fn GetNewObjectId() -> PgResult<Oid> {
     }
 
     if tv.oidCount.load(Relaxed) == 0 {
-        transam_xlog_seams::xlog_put_next_oid::call(
-            tv.nextOid.load(Relaxed).wrapping_add(VAR_OID_PREFETCH),
-        )?;
-        tv.oidCount.store(VAR_OID_PREFETCH, Relaxed);
+        // Where the block boundary is written down. Postgres logs it and
+        // re-reads it from the control file; a cluster whose catalogs live in
+        // a bucket has neither on a machine that has just been wiped, so the
+        // bucket keeps it and hands back a start that is never below what a
+        // previous cluster already spent.
+        if ::objkv_marker::catalogs_in_bucket()
+            && tableam_seams::objkv_claim_oid_block::is_installed()
+        {
+            // Off the lock for the round trip: claiming a block is a PUT and a
+            // LIST against the object store, and every other allocator in the
+            // cluster would otherwise wait on that latency. Allocation itself
+            // stays atomic -- the block is installed back under the lock.
+            let want = tv.nextOid.load(Relaxed);
+            LWLockRelease(OidGenLock())?;
+            let claimed = tableam_seams::objkv_claim_oid_block::call(want, VAR_OID_PREFETCH);
+            LWLockAcquire(OidGenLock(), LW_EXCLUSIVE, globals::MyProcNumber())?;
+            let start = match claimed {
+                Ok(start) => start,
+                Err(e) => {
+                    LWLockRelease(OidGenLock())?;
+                    return Err(e);
+                }
+            };
+            if tv.oidCount.load(Relaxed) == 0 {
+                // The floor at the top of this function ran before the bucket
+                // was asked, so it cannot have corrected this value. Allocation
+                // wraps (`wrapping_add` below), so a long-lived cluster's
+                // marker passes u32::MAX and the bucket hands back a small
+                // start; below FirstNormalObjectId it collides with the oids
+                // initdb and genbki already assigned.
+                tv.nextOid.store(start.max(FirstNormalObjectId), Relaxed);
+                tv.oidCount.store(VAR_OID_PREFETCH, Relaxed);
+            }
+            // Otherwise another backend refilled while we were on the network.
+            // Its block is as good as ours and already installed; ours is
+            // simply never spent, which costs a range of numbers and nothing
+            // else -- the bucket hands out disjoint ranges.
+        } else {
+            transam_xlog_seams::xlog_put_next_oid::call(
+                tv.nextOid.load(Relaxed).wrapping_add(VAR_OID_PREFETCH),
+            )?;
+            tv.oidCount.store(VAR_OID_PREFETCH, Relaxed);
+        }
     }
 
     let result = tv.nextOid.load(Relaxed);

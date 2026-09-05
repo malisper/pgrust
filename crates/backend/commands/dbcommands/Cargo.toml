@@ -32,6 +32,9 @@ catalog = { path = "../../catalog/catalog" }
 catalog_indexing = { path = "../../catalog/catalog_indexing" }
 heaptuple = { path = "../../access/common/heaptuple" }
 table = { path = "../../access/table/table" }
+# For the objkv check in CREATE DATABASE: a template holding objkv tables
+# cannot be copied by copying files.
+tableam = { path = "../../access/table/tableam" }
 genam = { path = "../../access/index/genam" }
 fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
 types_fmgr = { path = "../../../_support/types/fmgr" }

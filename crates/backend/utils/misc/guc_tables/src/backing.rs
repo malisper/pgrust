@@ -49,6 +49,10 @@ crate::session_guc_cluster!(BackingSessionGucs, BACKING_SESSION_GUCS:
     // pgrust.condition_cache_size: the cache's byte budget in KB (work_mem
     // unit idiom); default 102400 KB = 100 MB, ClickHouse's
     // query_condition_cache_size default. LRU-evicted at that bound.
+    (pgrust_objkv_snapshot_seq_cell, i32, pgrust_objkv_snapshot_seq, set_pgrust_objkv_snapshot_seq, 0),
+    (pgrust_objkv_retain_commits_cell, i32, pgrust_objkv_retain_commits, set_pgrust_objkv_retain_commits, 0),
+    (pgrust_objkv_async_queue_cell, i32, pgrust_objkv_async_queue, set_pgrust_objkv_async_queue, 64),
+    (pgrust_objkv_async_commit_cell, bool, pgrust_objkv_async_commit, set_pgrust_objkv_async_commit, false),
     (pgrust_condition_cache_size_cell, i32, pgrust_condition_cache_size, set_pgrust_condition_cache_size, 102400),
     // pgrust.parallel_engine (pgrust-only, M5-0): the product parallel-engine
     // selector (consts::PARALLEL_ENGINE_*). Default RUNTIME since the M5

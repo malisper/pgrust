@@ -148,7 +148,7 @@ fs	crates/backend/libpq/fdnb/src/lib.rs	2	DST-REVIEW(p4-simnet): the SHARED nobl
 fs	crates/backend/postmaster/launch_backend/src/lib.rs	4	DST-REVIEW(night/fdlimit GL-FDLIMIT-1): +3 = report_startup_failure_to_client's raw-socket refusal (fcntl F_GETFL/F_SETFL + close) — the child-thread twin of postmaster.c's report_fork_failure_to_client, MOVED here from serverloop.rs (that row is deleted, net zero for the category): a connection whose child thread never came up is answered and closed on the accepted fd itself, with no session, no buffers and no transport provider to route through. Base 1 = the pre-existing client-socket close at child-thread exit
 # --- crates/backend/postmaster/pgarch (4 sites) ---
 fs	crates/backend/postmaster/pgarch/src/lib.rs	4
-fs	crates/backend/postmaster/postmaster/src/crash_signals.rs	1
+fs	crates/backend/postmaster/postmaster/src/crash_signals.rs	3	DST-REVIEW(crash-handler): +2 = two more libc::write(2) calls to fd 2 in the async-signal-safe hex frame dump that replaced backtrace_symbols_fd (the flush inside the frame loop and the final line). All three sites are the fatal-signal handler writing to the server log; no file is opened or read, and nothing here touches objkv
 fs	crates/backend/postmaster/postmaster/src/main_entry.rs	8
 fs	crates/backend/storage/file/vfs/src/sim_boot.rs	8	DST-REVIEW(provider-seam): the §9.3 asset ingest IS the declared host boundary — the one place the sim world is seeded from a pinned host snapshot (std::fs read-only walk, pre-schedule, digest-covered via asset_hash); sim cfg only, dead in product builds
 env	crates/backend/storage/file/vfs/src/sim_boot.rs	2	DST-REVIEW(provider-seam): PGRUST_PGSHAREDIR/PGRUST_TZDIR are sim-harness asset locators consumed once at boot ingest (§9.3); sim cfg only, dead in product builds
@@ -872,3 +872,26 @@ rawsync	crates/backend/tcop/postgres_seams/src/lib.rs	2	DST-REVIEW(night/stmt-as
 spawn	crates/backend/executor/execmain/src/lanev2/stmt_task.rs	1	DST-REVIEW(night/stmt-as-task-2): the quantum-yield sweeper thread (pgsync::thread::Builder, spawned once on the first armed span under the DEFAULT-OFF PGRUST_STMT_TASK_YIELD; a pure timer/observer on the waiter timed-park surface — the slease-v2 pg-slease-sweeper precedent verbatim; wasm arm cannot exist and the spawn is cfg'd out)
 fs	crates/backend/access/parquet_read/src/lib.rs	5	DST-REVIEW(t46 compose, night/parquet-reader): the reader crate's footer/dictionary/page positioned reads (File::open + pread class, read-only COPY FORMAT parquet source; the branch never paid its ledger — no standard CONFIRM ran there); P1 Vfs choke routing rides the crate-wide migration
 fs	crates/backend/commands/copy/src/memheadroom.rs	2	DST-REVIEW(night/copyfast): kernel pseudo-file probes (/proc/self/cgroup + the /sys/fs/cgroup hierarchy walk + /proc/meminfo) for the memruns auto budget — read-only host-posture introspection on the load-vehicle knob path, never data-file I/O; Vfs choke routing rides the crate-wide migration
+
+# objkv: Postgres tables in an S3 bucket (PR #92). The store is a blocking
+# HTTP client by design, the writer and compactor are daemon threads that
+# exist only once the bucket is opened, and the tests reach the fault
+# points through the environment. None of it runs unless a table uses the
+# access method; routing onto the sanctioned surfaces rides objkv's own
+# follow-up, not this ratchet.
+blocking	crates/_support/objkv/src/s3.rs	1	DST-REVIEW(objkv): retry backoff sleep between S3 attempts (ureq, blocking client by design)
+blocking	crates/backend/access/table/tableam/src/objkv_am.rs	4	DST-REVIEW(objkv): writer/compactor condvar waits with a 1s lost-wakeup backstop, and the writer's retry backoff
+env	crates/backend/access/table/tableam/src/objkv_am.rs	5	DST-REVIEW(objkv): S3 endpoint/bucket/credentials (no GUC can name a secret), plus two test-only fault points read once per commit
+env	crates/backend/access/table/tableam/src/objkv_index.rs	1	DST-REVIEW(objkv): PGRUST_OBJKV_TRACE, the scan trace the end-to-end scripts assert on
+fs	crates/_support/objkv_marker/src/lib.rs	1	DST-REVIEW(objkv): the one-line marker in the data directory that says the catalogs live in the bucket, read before the Vfs exists
+fs	crates/backend/access/objkv/objkv_lift/src/lib.rs	4	DST-REVIEW(objkv): writing and fsyncing that marker at the end of the lift (write, sync, rename, dir sync)
+once	crates/_support/objkv_marker/src/lib.rs	1	DST-REVIEW(objkv): the marker's read-once latch — P3 row-19 pure env-read init closure
+once	crates/backend/access/table/tableam/src/objkv_am.rs	2	DST-REVIEW(objkv): the store client and the writer/compactor thread start, once per process on first use of the bucket
+rawsync	crates/_support/objkv/src/run.rs	1	DST-REVIEW(objkv): the per-run block cache mutex, held for a map lookup only
+rawsync	crates/_support/objkv/src/store.rs	1	DST-REVIEW(objkv): the in-memory test store's map mutex
+rawsync	crates/_support/objkv_marker/src/lib.rs	1	DST-REVIEW(objkv): the marker's read-once latch is a std::sync::OnceLock (the crate has no mutex); same cell as the `once` row above
+rawsync	crates/backend/access/table/tableam/src/objkv_am.rs	1	DST-REVIEW(objkv): the storage lock; every S3 round trip is made outside it
+spawn	crates/backend/access/table/tableam/src/objkv_am.rs	2	DST-REVIEW(objkv): the writer threads and the compactor thread, daemons started on first use of the bucket
+spawn	crates/_support/objkv/src/lease.rs	1	DST-REVIEW(objkv): the lease heartbeat thread, started once per Db::open, renewing the single-writer lease every HEARTBEAT_MS
+blocking	crates/_support/objkv/src/lease.rs	1	DST-REVIEW(objkv): the heartbeat's 250 ms sleep slices between renewals; the stop flag is checked every slice
+time	crates/_support/objkv/src/lease.rs	1	DST-REVIEW(objkv): SystemClock::now_ms, the wall clock the lease expiry is written in; the Db and lease tests inject a FakeClock

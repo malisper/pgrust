@@ -227,6 +227,20 @@ pub fn ExecuteTruncateGuts<'mcx>(
         if rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE {
             continue;
         }
+        // An objkv relation has no local file to reset. Emptying it writes one
+        // small object saying "empty from here", staged into this
+        // transaction's commit like any other write, so it rolls back, a
+        // snapshot from before it still sees the rows, and collection can drop
+        // what is under it. The alternative -- a tombstone per row -- would put
+        // a hundred million of them in one object.
+        if tableam::table_is_objkv(rel) {
+            tableam::objkv_truncate(mcx, rel)?;
+            // Commit processing clears the relation's live and dead counts off
+            // the back of this; without it they describe a table that is gone.
+            // No toast reset: objkv relations do not have one.
+            pgstat::relation::pgstat_count_truncate(rel.rd_id, rel.rd_rel.relisshared);
+            continue;
+        }
         if rel.rd_createSubid.get() == my_subid
             || rel.rd_newRelfilelocatorSubid.get() == my_subid
         {

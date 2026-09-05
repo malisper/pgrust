@@ -42,11 +42,31 @@ pub(crate) fn RelationInitTableAccessMethod(relkind: u8, relam: Oid) -> PgResult
     {
         return Ok(());
     }
+    // The sentinel is in no pg_am, and asking opens pg_am, which arrives
+    // back here: unbounded, and a stack overflow on the first query.
+    if relam == ::objkv_marker::NAILED_AM {
+        tableam_vocab::register_objkv_table_am(relam);
+        return Ok(());
+    }
+    // Nor is the registry an optimisation here: pg_am is objkv too.
+    if tableam_vocab::is_objkv_am_oid(relam)
+        || tableam_vocab::is_pgrcolumnar_am_oid(relam)
+        || tableam_vocab::is_heap_am_oid(relam)
+    {
+        return Ok(());
+    }
     // pgrcolumnar is identified by pg_am.amname, not amhandler: the closed-AM
     // engine never invokes handlers (docs/design/pgrcolumnar-impl.md §7.1).
-    if syscache_seams::pg_am_amname::call(relam)?.as_deref() == Some("cbstore") {
-        tableam_vocab::register_pgrcolumnar_table_am(relam);
-        return Ok(());
+    match syscache_seams::pg_am_amname::call(relam)?.as_deref() {
+        Some("cbstore") => {
+            tableam_vocab::register_pgrcolumnar_table_am(relam);
+            return Ok(());
+        }
+        Some("objkv") => {
+            tableam_vocab::register_objkv_table_am(relam);
+            return Ok(());
+        }
+        _ => {}
     }
     match syscache_seams::pg_am_amhandler::call(relam)? {
         Some(F_HEAP_TABLEAM_HANDLER) => {
@@ -269,6 +289,15 @@ pub fn RelationBuildDesc(
 }
 
 // formrdesc: nailed-catalog bootstrap from the hardcoded genbki descriptors.
+/// How the nailed catalogs are stored, without reading a catalog: relam lives
+/// in pg_class, and reading pg_class needs the answer. The marker settles it.
+fn nailed_relam() -> Oid {
+    match ::objkv_marker::catalog_am() {
+        0 => HEAP_TABLE_AM_OID,
+        am => am,
+    }
+}
+
 pub fn formrdesc(cat: &BootstrapCatalog) -> PgResult<()> {
     let mcx = cache_mcx();
     let relid = cat.relid;
@@ -306,7 +335,7 @@ pub fn formrdesc(cat: &BootstrapCatalog) -> PgResult<()> {
         relnamespace: PG_CATALOG_NAMESPACE,
         reltype: cat.rowtype_id,
         relowner: InvalidOid,
-        relam: HEAP_TABLE_AM_OID,
+        relam: nailed_relam(),
         relfilenode: InvalidRelFileNumber,
         reltablespace: if cat.shared { GLOBALTABLESPACE_OID } else { InvalidOid },
         relpages: 0,

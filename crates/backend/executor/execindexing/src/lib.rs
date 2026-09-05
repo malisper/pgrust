@@ -339,7 +339,14 @@ pub fn BuildIndexInfo<'mcx>(mcx: Mcx<'mcx>, index: &Relation<'_>) -> PgResult<In
 /// strategy/operator/proc per key column for the ON CONFLICT arbiter probe.
 pub fn BuildSpeculativeIndexInfo(index: &Relation<'_>, ii: &mut IndexInfo) -> PgResult<()> {
     debug_assert!(ii.ii_Unique);
-    if index.rd_rel.relam != ::types_core::catalog::BTREE_AM_OID {
+    // By kind, not by oid: objkv's index AM has its own pg_am row but borrows
+    // btree's handler and opclasses, so the equality operators below resolve.
+    // Refusing here named the index, when what cannot do ON CONFLICT is the
+    // table -- and the table AM says so itself, a few frames on.
+    if !matches!(
+        ::types_relscan::IndexAmKind::from_relam(index.rd_rel.relam),
+        ::types_relscan::IndexAmKind::Btree | ::types_relscan::IndexAmKind::Objkv
+    ) {
         return Err(unported("ON CONFLICT arbiter over a non-btree unique index"));
     }
     let indnkeyatts = ii.ii_NumIndexKeyAttrs as usize;

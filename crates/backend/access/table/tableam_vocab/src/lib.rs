@@ -227,6 +227,10 @@ pub const HEAP_TABLE_AM_OID: Oid = 2;
 pub enum TableAm {
     Heap,
     Pgrcolumnar,
+    /// Object-store storage: rows live as key/value entries in immutable S3
+    /// objects, and visibility is decided by commit sequence number rather than
+    /// xmin/xmax. See `crates/_support/objkv`.
+    Objkv,
 }
 
 impl TableAm {
@@ -242,6 +246,8 @@ impl TableAm {
                     Some(TableAm::Heap)
                 } else if relam != 0 && is_registered_pgrcolumnar_am(relam) {
                     Some(TableAm::Pgrcolumnar)
+                } else if relam != 0 && is_registered_objkv_am(relam) {
+                    Some(TableAm::Objkv)
                 } else {
                     None
                 }
@@ -294,6 +300,12 @@ fn is_registered_heap_am(relam: Oid) -> bool {
     HEAP_HANDLER_AMS.with(|v| v.borrow().contains(&relam))
 }
 
+/// Whether this oid is already known to be heap's -- answerable without a
+/// catalog lookup, which matters when the catalogs are not heap.
+pub fn is_heap_am_oid(relam: Oid) -> bool {
+    relam != 0 && is_registered_heap_am(relam)
+}
+
 pub fn register_heap_table_am(relam: Oid) {
     HEAP_HANDLER_AMS.with(|v| {
         let mut v = v.borrow_mut();
@@ -321,6 +333,56 @@ fn is_registered_pgrcolumnar_am(relam: Oid) -> bool {
 /// RelationData, not a Relation).
 pub fn is_pgrcolumnar_am_oid(relam: Oid) -> bool {
     relam != 0 && is_registered_pgrcolumnar_am(relam)
+}
+
+thread_local! {
+    // pg_am oids whose amname is "objkv". Identified by name at relcache build,
+    // exactly as pgrcolumnar is: the handler is never invoked.
+    static OBJKV_AMS: std::cell::RefCell<Vec<Oid>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+thread_local! {
+    // pg_am oids whose amname is "objkv_btree". Beside the table AMs so the
+    // storage manager can ask one question: is this data in the bucket?
+    static OBJKV_INDEX_AMS: std::cell::RefCell<Vec<Oid>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+pub fn register_objkv_index_am(relam: Oid) {
+    OBJKV_INDEX_AMS.with(|v| {
+        let mut v = v.borrow_mut();
+        if !v.contains(&relam) {
+            v.push(relam);
+        }
+    });
+}
+
+pub fn is_objkv_index_am_oid(relam: Oid) -> bool {
+    relam != 0 && OBJKV_INDEX_AMS.with(|v| v.borrow().contains(&relam))
+}
+
+/// Whether this `relam` keeps its data in the bucket, table or index.
+pub fn is_objkv_relam(relam: Oid) -> bool {
+    is_objkv_am_oid(relam) || is_objkv_index_am_oid(relam)
+}
+
+#[cold]
+fn is_registered_objkv_am(relam: Oid) -> bool {
+    OBJKV_AMS.with(|v| v.borrow().contains(&relam))
+}
+
+pub fn is_objkv_am_oid(relam: Oid) -> bool {
+    relam != 0 && is_registered_objkv_am(relam)
+}
+
+pub fn register_objkv_table_am(relam: Oid) {
+    OBJKV_AMS.with(|v| {
+        let mut v = v.borrow_mut();
+        if !v.contains(&relam) {
+            v.push(relam);
+        }
+    });
 }
 
 pub fn register_pgrcolumnar_table_am(relam: Oid) {

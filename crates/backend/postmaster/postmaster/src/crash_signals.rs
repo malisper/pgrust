@@ -67,15 +67,54 @@ extern "C" fn crash_handler(sig: i32, info: *mut libc::siginfo_t, _uctx: *mut li
     unsafe {
         libc::write(2, w.buf.as_ptr() as *const libc::c_void, w.at);
     }
-    // Best-effort frame dump (glibc backtrace is not async-signal-safe; the
-    // disposition is already restored, so a fault here dies under SIG_DFL).
-    #[cfg(target_os = "linux")]
-    // SAFETY: see above; addresses are written raw to fd 2.
+    // Frame addresses, not symbol names.
+    //
+    // Neither backtrace(3) call is on the async-signal-safe list, and the
+    // hazards are platform-specific:
+    //
+    //   * glibc: backtrace_symbols_fd() does NOT call malloc (its man page
+    //     says so; that is the point of the _fd variant). The hazard is
+    //     backtrace() itself, which on its first call dlopen()s libgcc_s to
+    //     find the unwinder, and dlopen allocates and takes the loader lock.
+    //     If the fault interrupted malloc or the loader, that first call can
+    //     deadlock instead of crashing.
+    //   * macOS: backtrace() is a plain frame walk, but backtrace_symbols_fd()
+    //     calls dladdr(), which takes dyld's locks; a fault inside dyld or
+    //     the allocator hangs the handler.
+    //
+    // A hung handler is worse than a bare crash: the process never reaches
+    // the raise() below, so there is no core file and no exit. Symbolizing
+    // is therefore left to whoever reads the log; only raw addresses are
+    // written here, with the same write(2) as the line above:
+    //
+    //     atos -o <binary> <addr>...        (macOS)
+    //     addr2line -fpe <binary> <addr>... (Linux)
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    // SAFETY: write(2) is async-signal-safe and the Writer below is a
+    // bounds-clamped stack buffer (no allocation, no panic path). backtrace()
+    // is best-effort: on glibc its first-ever call may allocate (see above),
+    // which is a hang risk, not a memory-safety one. The disposition is
+    // already restored, so a fault here dies under SIG_DFL rather than
+    // recursing.
     unsafe {
         let mut frames = [core::ptr::null_mut::<libc::c_void>(); 64];
         let n = libc::backtrace(frames.as_mut_ptr(), frames.len() as i32);
         if n > 0 {
-            libc::backtrace_symbols_fd(frames.as_ptr(), n, 2);
+            let mut fbuf = [0u8; 160];
+            let mut fw = Writer { buf: &mut fbuf, at: 0 };
+            fw.put(b"pgrust: backtrace:");
+            for f in frames.iter().take(n as usize) {
+                // Flush before a frame that might not fit, so a long trace
+                // spans several writes rather than being silently cut.
+                if fw.at + 20 > fw.buf.len() {
+                    libc::write(2, fw.buf.as_ptr() as *const libc::c_void, fw.at);
+                    fw.at = 0;
+                }
+                fw.put(b" 0x");
+                fw.hex(*f as usize as u64);
+            }
+            fw.put(b"\n");
+            libc::write(2, fw.buf.as_ptr() as *const libc::c_void, fw.at);
         }
     }
     // SAFETY: raise(2) is async-signal-safe.

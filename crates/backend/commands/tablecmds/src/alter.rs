@@ -1690,6 +1690,31 @@ fn ATRewriteTableOne<'mcx>(
             unported("ATRewriteTable rewrite flags");
         }
         let old_heap = table::table_open(mcx, tab.relid, NoLock)?;
+        // A rewrite builds a second relation and swaps the files underneath.
+        // objkv has no file to swap: the rows stay where they are, and the new
+        // column layout is applied to images that do not have it. That reads
+        // back as a number nobody wrote rather than as an error, which is the
+        // one outcome worth refusing outright.
+        if tableam::table_is_objkv(&old_heap) {
+            let name = old_heap.name().to_string();
+            old_heap.close(NoLock)?;
+            return Err(Box::new(
+                PgError::new(
+                    ERROR,
+                    format!("cannot rewrite objkv table \"{name}\""),
+                )
+                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
+                .with_detail(
+                    "Changing a column's type rewrites the table, and an objkv \
+                     table's rows are in the object store."
+                        .to_string(),
+                )
+                .with_hint(
+                    "Add a new column, copy the values across, and drop the old one."
+                        .to_string(),
+                ),
+            ));
+        }
         if catalog::IsSystemRelation(&old_heap) {
             return Err(Box::new(
                 PgError::new(

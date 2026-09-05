@@ -1,0 +1,16 @@
+[package]
+name = "objkv_build"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+datum = { path = "../../../../_support/types/datum" }
+execindexing = { path = "../../../executor/execindexing" }
+exectuples = { path = "../../../executor/exectuples" }
+mcx = { path = "../../../../_support/mcx" }
+tableam = { path = "../../table/tableam" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_rel = { path = "../../../../_support/types/rel" }
+types_slot = { path = "../../../../_support/types/types_slot" }
+objkv = { path = "../../../../_support/objkv" }

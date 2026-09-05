@@ -286,7 +286,13 @@ fn resolve_index_am(name: Option<&str>) -> PgResult<IndexAmInfo> {
             ERRCODE_UNDEFINED_OBJECT,
         ));
     };
-    let kind = amapi::GetIndexAmRoutine(amhandler);
+    // objkv borrows btree's handler, so the handler cannot tell them apart;
+    // the name can, exactly as it does for the objkv table AM.
+    let kind = if name == amapi::OBJKV_INDEX_AM {
+        types_relscan::IndexAmKind::Objkv
+    } else {
+        amapi::GetIndexAmRoutine(amhandler)
+    };
     let (amcanorder, amcanunique, amcanmulticol, amcaninclude) = index_am_flags(kind);
     Ok(IndexAmInfo {
         oid,
@@ -297,6 +303,142 @@ fn resolve_index_am(name: Option<&str>) -> PgResult<IndexAmInfo> {
         amcanmulticol,
         amcaninclude,
     })
+}
+
+/// Redirects a btree request rather than refusing it: entries must land in
+/// the same commit object as the rows, and PRIMARY KEY and UNIQUE ask for
+/// btree by name.
+/// Whether `relam` is objkv's table access method.
+///
+/// The registry and the catalog, because neither alone answers everywhere.
+///
+/// The registry fills when a relation's relcache entry is built, and it is
+/// per-backend. Today the table has always been opened by the time DefineIndex
+/// runs, so the registry is warm -- but nothing here makes that true, and the
+/// relam above is read straight out of pg_class with no relcache entry built.
+/// An empty registry would leave an objkv table's index on plain btree, which
+/// writes it to a local file while its rows are in the bucket: exactly the
+/// split that stops a fresh machine coming back whole. tablecmds resolves the
+/// same question by name for the same reason.
+///
+/// The catalog lookup alone is not enough either. On a cluster whose catalogs
+/// live in the bucket, the nailed ones carry a sentinel relam that is nobody's
+/// pg_am row, and only the registry knows it.
+fn is_objkv_table_am(relam: Oid) -> PgResult<bool> {
+    if relam == types_core::InvalidOid {
+        return Ok(false);
+    }
+    if tableam_vocab::is_objkv_am_oid(relam) {
+        return Ok(true);
+    }
+    Ok(relam == commands_amcmds::get_table_am_oid("objkv", true)?)
+}
+
+fn objkv_index_am(
+    am: IndexAmInfo,
+    table_id: Oid,
+    stmt: &IndexStmt<'_>,
+) -> PgResult<IndexAmInfo> {
+    if !is_objkv_table_am(lsyscache::get_rel_relam(table_id)?)? {
+        if am.kind == types_relscan::IndexAmKind::Objkv {
+            return Err(err(
+                format!(
+                    "access method \"{}\" can only index objkv tables",
+                    amapi::OBJKV_INDEX_AM
+                ),
+                types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+            ));
+        }
+        return Ok(am);
+    }
+
+    if stmt.concurrent {
+        return Err(err(
+            "objkv tables do not support CREATE INDEX CONCURRENTLY yet".to_string(),
+            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+        ));
+    }
+    // Inverts the rule the key shape is built on -- a NULL entry carries its
+    // own rowid so many NULLs stay legal. Accepting it would silently not
+    // enforce the constraint.
+    if stmt.nulls_not_distinct {
+        return Err(err(
+            "objkv indexes do not support NULLS NOT DISTINCT".to_string(),
+            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+        ));
+    }
+
+    match am.kind {
+        types_relscan::IndexAmKind::Objkv => Ok(am),
+        types_relscan::IndexAmKind::Btree => {
+            let oid = commands_amcmds::get_index_am_oid(amapi::OBJKV_INDEX_AM, true)?;
+            if oid == InvalidOid {
+                return Err(Box::new(
+                    PgError::new(
+                        ERROR,
+                        format!(
+                            "objkv tables need the \"{}\" access method, which does not exist",
+                            amapi::OBJKV_INDEX_AM
+                        ),
+                    )
+                    .with_sqlstate(ERRCODE_UNDEFINED_OBJECT)
+                    .with_hint(format!(
+                        "CREATE ACCESS METHOD {} TYPE INDEX HANDLER bthandler;",
+                        amapi::OBJKV_INDEX_AM
+                    )),
+                ));
+            }
+            resolve_index_am(Some(amapi::OBJKV_INDEX_AM))
+        }
+        other => Err(Box::new(
+            PgError::new(
+                ERROR,
+                format!(
+                    "objkv tables support only btree-style indexes; \"{}\" is not one",
+                    am.name
+                ),
+            )
+            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .with_detail(format!("The requested access method resolves to {other:?}.")),
+        )),
+    }
+}
+
+/// Refuses what the key encoding cannot order. Every one of these would
+/// otherwise be a silently mis-sorted index rather than an error.
+fn objkv_check_columns(
+    kind: types_relscan::IndexAmKind,
+    typeIds: &[Oid],
+    collationIds: &[Oid],
+    nkeys: usize,
+) -> PgResult<()> {
+    if kind != types_relscan::IndexAmKind::Objkv {
+        return Ok(());
+    }
+    for i in 0..nkeys {
+        if !tableam::objkv_index::supports_type(typeIds[i]) {
+            return Err(err(
+                format!(
+                    "objkv indexes cannot order column {} (type OID {})",
+                    i + 1,
+                    typeIds[i]
+                ),
+                types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+            )
+            );
+        }
+        if !tableam::objkv_index::supports_collation(collationIds[i]) {
+            return Err(err(
+                format!(
+                    "objkv indexes support only the C collation; column {} uses another",
+                    i + 1
+                ),
+                types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+            )
+            );
+        }
+    }
+    Ok(())
 }
 
 // (amcanorder, amcanunique, amcanmulticol, amcaninclude) per builtin handler.
@@ -311,6 +453,10 @@ fn index_am_flags(kind: types_relscan::IndexAmKind) -> (bool, bool, bool, bool) 
         Brin => (false, false, true, false),
         // contrib/bloom blhandler: multicolumn only.
         Bloom => (false, false, true, false),
+        // Ordering, but only the one the key encoding has: ascending, nulls
+        // last. A column declared otherwise is refused below rather than
+        // stored in an order the bucket does not hold.
+        Objkv => (true, true, true, false),
         #[allow(unreachable_patterns)]
         _ => (false, false, false, false),
     }
@@ -455,7 +601,7 @@ pub fn DefineIndex<'mcx>(
         )?;
     }
     let exclusion = !stmt.excludeOpNames.is_nil() || stmt.iswithoutoverlaps;
-    let am = resolve_index_am(stmt.accessMethod)?;
+    let am = objkv_index_am(resolve_index_am(stmt.accessMethod)?, tableId, stmt)?;
     let (accessMethodId, amname, amcanorder, amcanunique, amcanmulticol, amcaninclude) = (
         am.oid,
         am.name.as_str(),
@@ -700,6 +846,8 @@ pub fn DefineIndex<'mcx>(
         amcanorder,
         Some(&mut root_save_nestlevel),
     )?;
+
+    objkv_check_columns(am.kind, &typeIds, &collationIds, numberOfKeyAttributes)?;
 
     if stmt.primary {
         catalog_index::index_check_primary_key(mcx, &rel, &indexInfo, is_alter_table)?;
@@ -1593,10 +1741,19 @@ fn ComputeIndexAttrs<'mcx>(
         if let Some(lvl) = ddl_save_nestlevel.as_deref_mut() {
             guc::AtEOXact_GUC(false, *lvl);
         }
-        let resolved = if !attribute.opclass.is_nil() {
-            ResolveOpClass(&attribute.opclass, atttype, amname, accessMethodId)
+        // No opclasses of its own: the encoding orders the keys, and the
+        // operators are btree's.
+        let opclass_am = if types_relscan::IndexAmKind::from_relam(accessMethodId)
+            == types_relscan::IndexAmKind::Objkv
+        {
+            types_core::BTREE_AM_OID
         } else {
-            GetDefaultOpClass(atttype, accessMethodId)
+            accessMethodId
+        };
+        let resolved = if !attribute.opclass.is_nil() {
+            ResolveOpClass(&attribute.opclass, atttype, amname, opclass_am)
+        } else {
+            GetDefaultOpClass(atttype, opclass_am)
         };
         if let Some(lvl) = ddl_save_nestlevel.as_deref_mut() {
             *lvl = guc::NewGUCNestLevel();

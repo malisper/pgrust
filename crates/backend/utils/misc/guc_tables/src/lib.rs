@@ -208,6 +208,22 @@ fn install_guc_tables_owned_vars() {
         get: backing::pgrust_condition_cache_size,
         set: backing::set_pgrust_condition_cache_size,
     });
+    vars::pgrust_objkv_retain_commits.install(GucVarAccessors {
+        get: backing::pgrust_objkv_retain_commits,
+        set: backing::set_pgrust_objkv_retain_commits,
+    });
+    vars::pgrust_objkv_async_queue.install(GucVarAccessors {
+        get: backing::pgrust_objkv_async_queue,
+        set: backing::set_pgrust_objkv_async_queue,
+    });
+    vars::pgrust_objkv_async_commit.install(GucVarAccessors {
+        get: backing::pgrust_objkv_async_commit,
+        set: backing::set_pgrust_objkv_async_commit,
+    });
+    vars::pgrust_objkv_snapshot_seq.install(GucVarAccessors {
+        get: backing::pgrust_objkv_snapshot_seq,
+        set: backing::set_pgrust_objkv_snapshot_seq,
+    });
     vars::pgrust_parallel_engine.install(GucVarAccessors {
         get: backing::pgrust_parallel_engine,
         set: backing::set_pgrust_parallel_engine,
