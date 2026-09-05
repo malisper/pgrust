@@ -11,7 +11,7 @@ use ::execexpr::{
 use ::executils::{EStateData, EcxtId, ExecSlotId};
 use ::mcx::{PgBox, PgVec};
 use ::nodehash::{HashBuildInput, HashJoinTupleHdr, HashState};
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult};
 use ::types_nodes::plannodes::HashJoin;
 use ::types_nodes::JoinType;
 use ::types_slot::{TupleSlotKind, EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
@@ -238,8 +238,13 @@ pub fn exec_init_hash_join<'mcx>(
     let mut hash_strict: ::mcx::PgVec<'mcx, bool> = ::mcx::PgVec::new_in(mcx);
     for i in 0..n {
         let hashop = node.hashoperators.nth(i);
-        let (left, right) = lsyscache::get_op_hash_functions(hashop)?
-            .unwrap_or_else(|| panic!("ExecInitHashJoin: hash operator {hashop} lacks hash functions"));
+        // C nodeHashjoin.c:855-861: a hash operator without hash support
+        // functions is a catchable elog(ERROR) (XX000), not a crash.
+        let (left, right) = lsyscache::get_op_hash_functions(hashop)?.ok_or_else(|| {
+            Box::new(PgError::error(format!(
+                "could not find hash function for hash operator {hashop}"
+            )))
+        })?;
         outer_hashfns.push(left);
         inner_hashfns.push(right);
         collations.push(node.hashcollations.nth(i));
