@@ -326,7 +326,15 @@ fn recovery_create_dbdir(path: &str, only_tblspc: bool) -> PgResult<()> {
             .errmsg(format!("creating missing directory: {path}"))
             .finish(loc("recovery_create_dbdir"))?;
     }
-    fd::pg_mkdir_p(path)
+    // dbcommands.c:3300: a failed mkdir here halts recovery (PANIC) rather
+    // than surfacing as a catchable ERROR over a half-built directory tree.
+    fd::pg_mkdir_p(path).map_err(|e| {
+        ereport(PANIC)
+            .with_saved_errno(e.saved_errno().unwrap_or(0))
+            .errmsg(format!("could not create missing directory \"{path}\": %m"))
+            .into_error()
+            .into()
+    })
 }
 
 /// The main data of an RM_DBASE record is fully attacker-controlled at the WAL
@@ -546,6 +554,26 @@ mod tests {
         }
         // Exactly the required length is accepted.
         require_dbase_len(&vec![0u8; 16], 16, "XLOG_DBASE_CREATE_FILE_COPY").unwrap();
+    }
+
+    /// dbcommands.c:3300: a pg_mkdir_p failure while re-creating a missing
+    /// database/tablespace directory during redo is ereport(PANIC) "could not
+    /// create missing directory ..." — recovery halts rather than surfacing a
+    /// catchable ERROR that could leave the directory tree inconsistent.
+    #[test]
+    fn recovery_create_dbdir_mkdir_failure_is_panic() {
+        if !xlogrecovery_seams::reached_consistency::is_installed() {
+            xlogrecovery_seams::reached_consistency::set(|| false);
+        }
+        // A path under a non-directory can never be created (ENOTDIR).
+        let path = "/dev/null/b097_missing/16384";
+        let err = recovery_create_dbdir(path, false).err().expect("mkdir under /dev/null must fail");
+        assert_eq!(err.level(), PANIC);
+        assert!(
+            err.message().starts_with("could not create missing directory \"/dev/null/b097_missing/16384\": "),
+            "{}",
+            err.message()
+        );
     }
 
     #[test]

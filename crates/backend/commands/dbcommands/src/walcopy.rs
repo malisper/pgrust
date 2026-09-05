@@ -15,6 +15,18 @@ use types_tuple::{HeapTupleData, ItemPointerData};
 
 use crate::XLOG_DBASE_CREATE_WAL_LOG;
 
+// The PG_VERSION fsync failure of CreateDirAndVersionFile (dbcommands.c:513):
+// raised at data_sync_elevel(ERROR) — PANIC unless data_sync_retry is on,
+// since un-synced data must not be retried at a catchable level (fd.c:4001).
+fn version_file_fsync_error(versionfile: &str, errno: i32) -> Box<types_error::PgError> {
+    ereport(fd::data_sync_elevel(ERROR))
+        .with_saved_errno(errno)
+        .errcode_for_file_access()
+        .errmsg(format!("could not fsync file \"{versionfile}\": %m"))
+        .into_error()
+        .into()
+}
+
 const RelationRelationId: Oid = 1259;
 const PG_MAJORVERSION: &str = "18";
 
@@ -271,12 +283,7 @@ pub(crate) fn CreateDirAndVersionFile(
 
     if fd::pg_fsync(fdnum) != 0 {
         let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
-        return Err(ereport(ERROR)
-            .errcode_for_file_access()
-            .with_saved_errno(errno)
-            .errmsg(format!("could not fsync file \"{versionfile}\": %m"))
-            .into_error()
-            .into());
+        return Err(version_file_fsync_error(&versionfile, errno));
     }
     fd::fsync_fname(dbpath, true)?;
 
@@ -298,4 +305,26 @@ pub(crate) fn CreateDirAndVersionFile(
         res?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// dbcommands.c:513: a failed fsync of the new database's PG_VERSION is
+    /// raised at data_sync_elevel(ERROR) — PANIC at the data_sync_retry=off
+    /// default (fd.c:4001), never a catchable ERROR that lets the transaction
+    /// roll back over un-synced data.
+    #[test]
+    fn version_file_fsync_failure_is_data_sync_elevel() {
+        let err = version_file_fsync_error("/base/16384/PG_VERSION", libc::EIO);
+        assert_eq!(err.level(), fd::data_sync_elevel(ERROR));
+        assert_eq!(err.level(), types_error::PANIC, "data_sync_retry defaults to off");
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_IO_ERROR);
+        assert!(
+            err.message().starts_with("could not fsync file \"/base/16384/PG_VERSION\": "),
+            "{}",
+            err.message()
+        );
+    }
 }

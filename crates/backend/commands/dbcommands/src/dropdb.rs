@@ -282,8 +282,29 @@ fn dropdb_guts(
             .into());
     }
 
-    // Replication-slot checks ride the replication lane (no slot subsystem
-    // exists, so zero slots is the true count).
+    // Active logical slots on the target refuse the drop (dbcommands.c:1749).
+    // The database lock held here keeps new slots from being created on it
+    // and existing ones from becoming active. Uninstalled seam = no slot
+    // subsystem booted (unit trees), where zero slots is the true count.
+    let (_, _, nslots_active) = if slot_seams::replication_slots_count_db_slots::is_installed() {
+        slot_seams::replication_slots_count_db_slots::call(db_id)?
+    } else {
+        (false, 0, 0)
+    };
+    if nslots_active > 0 {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_OBJECT_IN_USE)
+            .errmsg(format!(
+                "database \"{dbname}\" is used by an active logical replication slot"
+            ))
+            .errdetail_plural(
+                format!("There is {nslots_active} active slot."),
+                format!("There are {nslots_active} active slots."),
+                nslots_active as u64,
+            )
+            .into_error()
+            .into());
+    }
 
     let nsubscriptions = count_db_subscriptions(mcx, db_id)?;
     if nsubscriptions > 0 {

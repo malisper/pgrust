@@ -508,6 +508,7 @@ fn createdb_guts<'mcx>(
                     .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
                     .errmsg("LOCATION is not supported anymore".to_string())
                     .errhint("Consider using tablespaces instead.".to_string())
+                    .errposition(defel.location + 1)
                     .finish(loc("createdb"))?;
                 continue;
             }

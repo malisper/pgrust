@@ -42,6 +42,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // ReplicationSlotsCountDBSlots (slot.c): (any, nslots, nactive) over the
+    // in-use logical slots of dboid — dropdb (dbcommands.c:1749) refuses the
+    // drop while nactive > 0.
+    pub fn replication_slots_count_db_slots(
+        dboid: types_core::Oid,
+    ) -> types_error::PgResult<(bool, i32, i32)>
+);
+
+seam_core::seam!(
     // ReplicationSlotsDropDBSlots (slot.c) — dropdb (dbcommands.c:1852) and
     // dbase_redo's XLOG_DBASE_DROP arm drop the database's slots.
     pub fn replication_slots_drop_db_slots(dboid: types_core::Oid) -> types_error::PgResult<()>
