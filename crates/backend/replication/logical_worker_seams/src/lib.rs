@@ -17,6 +17,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // IsLogicalParallelApplyWorker (worker.c:4905): IsLogicalWorker() &&
+    // am_parallel_apply_worker(). pqmq's mq_putmessage (pqmq.c:170) reads it
+    // to pick PROCSIG_PARALLEL_APPLY_MESSAGE over PROCSIG_PARALLEL_MESSAGE
+    // without depending on the worker crate.
+    pub fn is_logical_parallel_apply_worker() -> bool
+);
+
+seam_core::seam!(
     // HandleParallelApplyMessageInterrupt (applyparallelworker.c): runs on
     // the leader thread from the PROCSIG_PARALLEL_APPLY_MESSAGE arm.
     pub fn handle_parallel_apply_message_interrupt()

@@ -1009,4 +1009,8 @@ pub fn init_seams() {
         HandleParallelApplyMessageInterrupt,
     );
     logical_worker_seams::process_parallel_apply_messages::set(ProcessParallelApplyMessages);
+    // IsLogicalParallelApplyWorker (worker.c:4905): IsLogicalWorker() &&
+    // am_parallel_apply_worker(); MyParallelShared is only ever set in a PA
+    // worker, so the second conjunct implies the first.
+    logical_worker_seams::is_logical_parallel_apply_worker::set(am_parallel_apply_worker);
 }

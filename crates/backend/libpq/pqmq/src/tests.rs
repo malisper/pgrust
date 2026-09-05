@@ -245,3 +245,118 @@ fn parse_errornotice_rejects_garbage() {
     let err = pq_parse_errornotice(&mut msg).unwrap_err();
     assert_eq!(err.message, "unrecognized error field code: 90");
 }
+
+// pqmq.c:168-178: with a parallel leader configured, a logical parallel apply
+// worker signals PROCSIG_PARALLEL_APPLY_MESSAGE; every other sender (a
+// parallel-query worker) signals PROCSIG_PARALLEL_MESSAGE. Witnessed through
+// the leader-side SIGUSR1 dispatch (procsignal_sigusr1_handler), which routes
+// each reason to its seam.
+static PARALLEL_MESSAGE_HITS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static PARALLEL_APPLY_MESSAGE_HITS: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
+static IS_PARALLEL_APPLY_WORKER: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn install_signal_witness_seams() {
+    use std::sync::atomic::Ordering::SeqCst;
+    static SEAMS: Once = Once::new();
+    SEAMS.call_once(|| {
+        parallel_seams::handle_parallel_message_interrupt::set(|| {
+            PARALLEL_MESSAGE_HITS.fetch_add(1, SeqCst);
+        });
+        logical_worker_seams::handle_parallel_apply_message_interrupt::set(|| {
+            PARALLEL_APPLY_MESSAGE_HITS.fetch_add(1, SeqCst);
+        });
+        logical_worker_seams::is_logical_parallel_apply_worker::set(|| {
+            IS_PARALLEL_APPLY_WORKER.load(SeqCst)
+        });
+        procsignal::ProcSignalShmemInit();
+    });
+}
+
+#[test]
+fn putmessage_signals_leader_by_worker_kind() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let _s = serial();
+    setup();
+    // MaxBackends is a per-thread global (setup() sized it on another test
+    // thread); ProcSignalShmemInit sizes the slot array from it.
+    init_small::globals::SetMaxBackends(4 + 3 + 2 + 2 + NUM_SPECIAL_WORKER_PROCS);
+    install_signal_witness_seams();
+    // Sender and "leader" are the same backend: the signal lands in our own
+    // ProcSignal slot and the handler dispatches it.
+    become_backend(0, 7304);
+    procsignal::ProcSignalInit(&[]).unwrap();
+    let (tx, mut rx) = queue_pair();
+    pq_redirect_to_shm_mq(tx);
+    pq_set_parallel_leader(7304, 0);
+
+    // Parallel-query worker (C: the Assert(IsParallelWorker()) arm).
+    IS_PARALLEL_APPLY_WORKER.store(false, SeqCst);
+    assert_eq!(pqcomm::pq_putmessage(b'N', b"from a parallel worker").unwrap(), 0);
+    procsignal::procsignal_sigusr1_handler();
+    assert_eq!(PARALLEL_MESSAGE_HITS.load(SeqCst), 1);
+    assert_eq!(PARALLEL_APPLY_MESSAGE_HITS.load(SeqCst), 0);
+    assert!(matches!(rx.receive(true).unwrap(), shm_mq::ShmMqRecv::Success(_)));
+
+    // Logical parallel apply worker (C: the IsLogicalParallelApplyWorker() arm).
+    IS_PARALLEL_APPLY_WORKER.store(true, SeqCst);
+    assert_eq!(pqcomm::pq_putmessage(b'N', b"from a parallel apply worker").unwrap(), 0);
+    procsignal::procsignal_sigusr1_handler();
+    assert_eq!(
+        (PARALLEL_MESSAGE_HITS.load(SeqCst), PARALLEL_APPLY_MESSAGE_HITS.load(SeqCst)),
+        (1, 1),
+        "pqmq.c:170: a logical parallel apply worker must signal PROCSIG_PARALLEL_APPLY_MESSAGE"
+    );
+    assert!(matches!(rx.receive(true).unwrap(), shm_mq::ShmMqRecv::Success(_)));
+
+    IS_PARALLEL_APPLY_WORKER.store(false, SeqCst);
+    teardown_redirect();
+    drop(rx);
+}
+
+// pqmq.c:290/293/320: the integer fields go through pg_strtoint32, so bad
+// text is ERRCODE_INVALID_TEXT_REPRESENTATION and overflow is
+// ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE, with numutils' messages.
+#[test]
+fn parse_errornotice_int_fields_use_pg_strtoint32() {
+    use types_error::{ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE};
+    let ctx = mcx::MemoryContext::new("pqmq-test");
+
+    for code in [b'P', b'p', b'L'] {
+        let mut msg = errnotice_msg(&ctx, &[(b'M', b"m"), (code, b"9999999999")]);
+        let err = pq_parse_errornotice(&mut msg).unwrap_err();
+        assert_eq!(err.sqlstate, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE, "field {}", code as char);
+        assert_eq!(err.message, "value \"9999999999\" is out of range for type integer");
+
+        let mut msg = errnotice_msg(&ctx, &[(b'M', b"m"), (code, b"invalid")]);
+        let err = pq_parse_errornotice(&mut msg).unwrap_err();
+        assert_eq!(err.sqlstate, ERRCODE_INVALID_TEXT_REPRESENTATION, "field {}", code as char);
+        assert_eq!(err.message, "invalid input syntax for type integer: \"invalid\"");
+    }
+
+    // pg_strtoint32 grammar: surrounding whitespace, a sign, digit separators.
+    let mut msg = errnotice_msg(&ctx, &[(b'M', b"m"), (b'P', b" +1_000 "), (b'L', b"-0x10")]);
+    let edata = pq_parse_errornotice(&mut msg).unwrap();
+    assert_eq!(edata.cursor_position, Some(1000));
+    assert_eq!(edata.location.as_ref().map(|l| l.lineno), Some(-16));
+}
+
+// pqmq.c:219: MemSet leaves filename/lineno/funcname empty, so a message
+// without F/L/R fields carries no location at all (no LOCATION line under
+// log_error_verbosity = verbose).
+#[test]
+fn parse_errornotice_without_source_fields_has_no_location() {
+    let ctx = mcx::MemoryContext::new("pqmq-test");
+    let mut msg = errnotice_msg(&ctx, &[(b'V', b"NOTICE"), (b'C', b"00000"), (b'M', b"hello")]);
+    let edata = pq_parse_errornotice(&mut msg).unwrap();
+    assert_eq!(edata.level, NOTICE);
+    assert_eq!(edata.message, "hello");
+    assert_eq!(edata.location, None, "no F/L/R field: C reports no location");
+
+    // A lone L field still yields a location with only lineno set.
+    let mut msg = errnotice_msg(&ctx, &[(b'M', b"m"), (b'L', b"42")]);
+    let edata = pq_parse_errornotice(&mut msg).unwrap();
+    let loc = edata.location.expect("L field present");
+    assert_eq!((loc.filename, loc.lineno, loc.funcname), (None, 42, None));
+}

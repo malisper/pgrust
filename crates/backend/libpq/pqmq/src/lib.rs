@@ -103,11 +103,20 @@ fn mq_putmessage(msgtype: u8, s: &[u8]) -> PgResult<i32> {
 
             let leader_pid = PQ_MQ_PARALLEL_LEADER_PID.with(Cell::get);
             if leader_pid != 0 {
-                // C's IsLogicalParallelApplyWorker branch is unported
-                // (no logical parallel apply workers).
+                // pqmq.c:170-178: a logical parallel apply worker wakes its
+                // leader with PROCSIG_PARALLEL_APPLY_MESSAGE, any other
+                // (parallel-query) worker with PROCSIG_PARALLEL_MESSAGE. The
+                // seam is installed by the logical worker crate at boot; a
+                // binary without it has no parallel apply workers.
+                use logical_worker_seams::is_logical_parallel_apply_worker as is_pa_worker;
+                let reason = if is_pa_worker::is_installed() && is_pa_worker::call() {
+                    ProcSignalReason::PROCSIG_PARALLEL_APPLY_MESSAGE
+                } else {
+                    ProcSignalReason::PROCSIG_PARALLEL_MESSAGE
+                };
                 procsignal::SendProcSignal(
                     leader_pid,
-                    ProcSignalReason::PROCSIG_PARALLEL_MESSAGE,
+                    reason,
                     PQ_MQ_PARALLEL_LEADER_PROC_NUMBER.with(Cell::get),
                 );
             }
@@ -145,6 +154,9 @@ fn elog_error(msg: String) -> Box<PgError> {
 
 pub fn pq_parse_errornotice(msg: &mut StringInfo<'_>) -> PgResult<PgError> {
     let mut edata = PgError::new(ERROR, String::new());
+    // pqmq.c:219 MemSet: no filename/lineno/funcname until the F/L/R fields
+    // supply them (PgError::new records this construction site otherwise).
+    edata.location = None;
     let mut filename: Option<String> = None;
     let mut lineno: i32 = 0;
     let mut funcname: Option<String> = None;
@@ -190,10 +202,10 @@ pub fn pq_parse_errornotice(msg: &mut StringInfo<'_>) -> PgResult<PgError> {
             _ if code == PG_DIAG_MESSAGE_DETAIL.0 => edata.detail = Some(value),
             _ if code == PG_DIAG_MESSAGE_HINT.0 => edata.hint = Some(value),
             _ if code == PG_DIAG_STATEMENT_POSITION.0 => {
-                edata.cursor_position = Some(parse_int_field(&value)?)
+                edata.cursor_position = Some(numutils::pg_strtoint32(&value)?)
             }
             _ if code == PG_DIAG_INTERNAL_POSITION.0 => {
-                edata.internal_position = Some(parse_int_field(&value)?)
+                edata.internal_position = Some(numutils::pg_strtoint32(&value)?)
             }
             _ if code == PG_DIAG_INTERNAL_QUERY.0 => edata.internal_query = Some(value),
             _ if code == PG_DIAG_CONTEXT.0 => edata.context = Some(value),
@@ -203,7 +215,7 @@ pub fn pq_parse_errornotice(msg: &mut StringInfo<'_>) -> PgResult<PgError> {
             _ if code == PG_DIAG_DATATYPE_NAME.0 => edata.datatype_name = Some(value),
             _ if code == PG_DIAG_CONSTRAINT_NAME.0 => edata.constraint_name = Some(value),
             _ if code == PG_DIAG_SOURCE_FILE.0 => filename = Some(value),
-            _ if code == PG_DIAG_SOURCE_LINE.0 => lineno = parse_int_field(&value)?,
+            _ if code == PG_DIAG_SOURCE_LINE.0 => lineno = numutils::pg_strtoint32(&value)?,
             _ if code == PG_DIAG_SOURCE_FUNCTION.0 => funcname = Some(value),
             _ => return Err(elog_error(format!("unrecognized error field code: {code}"))),
         }
@@ -218,14 +230,6 @@ pub fn pq_parse_errornotice(msg: &mut StringInfo<'_>) -> PgResult<PgError> {
     }
 
     Ok(edata)
-}
-
-// pg_strtoint32 on our own %d-formatted fields.
-fn parse_int_field(value: &str) -> PgResult<i32> {
-    value
-        .trim()
-        .parse::<i32>()
-        .map_err(|_| elog_error(format!("invalid input syntax for type integer: \"{value}\"")))
 }
 
 #[cfg(test)]

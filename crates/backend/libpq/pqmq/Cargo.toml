@@ -11,6 +11,8 @@ path = "src/lib.rs"
 [dependencies]
 elog = { path = "../../utils/error/elog" }
 init_small = { path = "../../utils/init/init_small" }
+logical_worker_seams = { path = "../../replication/logical_worker_seams" }
+numutils = { path = "../../utils/adt/numutils" }
 pqcomm = { path = "../pqcomm" }
 pqformat = { path = "../pqformat" }
 procsignal = { path = "../../storage/ipc/procsignal" }
@@ -27,6 +29,7 @@ latch = { path = "../../storage/ipc/latch" }
 lmgr_proc = { path = "../../storage/lmgr/lmgr_proc" }
 lmgr_proc_seams = { path = "../../storage/lmgr/lmgr_proc_seams" }
 mcx = { path = "../../../_support/mcx" }
+parallel_seams = { path = "../../access/transam/parallel_seams" }
 pg_sema_seams = { path = "../../port/pg_sema_seams" }
 postgres_seams = { path = "../../tcop/postgres_seams" }
 s_lock_seams = { path = "../../storage/lmgr/s_lock_seams" }
