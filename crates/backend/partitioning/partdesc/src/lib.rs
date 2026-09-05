@@ -10,13 +10,17 @@ use datum::Datum;
 use mcx::{Mcx, MemoryContext, PgHashMap, PgVec};
 use types_core::{InvalidOid, InvalidTransactionId, Oid, TransactionId};
 use types_error::{PgError, PgResult};
+use types_core::AttrNumber;
 use types_nodes::rawnodes::PartitionBoundSpec;
-use types_nodes::NodeList;
+use types_nodes::{Node, NodeList};
 use types_rel::{Relation, RELKIND_PARTITIONED_TABLE};
+use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 
 use partbounds::PartitionBoundInfoData;
 
 const RELOID: i32 = cache_syscache::cacheinfo::RELOID;
+#[allow(non_upper_case_globals)] // C-parity name
+const Anum_pg_class_oid: i32 = 1;
 #[allow(non_upper_case_globals)] // C-parity name
 const Anum_pg_class_relpartbound: i32 = 34;
 
@@ -82,8 +86,10 @@ pub fn RelationGetPartitionDesc(
 ) -> PgResult<Rc<PartitionDescData>> {
     debug_assert!(rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE);
     let relid = rel.rd_id;
+    // partdesc.c:83-86: with no active snapshot detached partitions are not
+    // omitted either, so the cached descriptor serves that case too.
     if let Some(d) = with_state(|st| st.descs.get(&relid).map(Rc::clone)) {
-        if !d.detached_exist || !omit_detached {
+        if !d.detached_exist || !omit_detached || !snapmgr::ActiveSnapshotSet() {
             return Ok(d);
         }
     }
@@ -103,44 +109,49 @@ pub fn RelationGetPartitionDesc(
 
 // text varlena -> &str; long bound lists arrive pglz-compressed inline or as
 // external TOAST pointers into pg_class's TOAST table (C TextDatumGetCString
-// detoasts either form via pg_detoast_datum_packed).
-fn text_to_str<'mcx>(mcx: ::mcx::Mcx<'mcx>, d: Datum) -> &'mcx str {
+// detoasts either form via pg_detoast_datum_packed).  C hands the bytes to
+// stringToNode unvalidated (partdesc.c:198) and a corrupted image ends in
+// one of its elogs; our reader takes &str, so an image that is not UTF-8
+// is reported as partdesc.c:281's "invalid relpartbound" elog for the
+// partition rather than a backend abort.
+fn text_to_str<'mcx>(mcx: ::mcx::Mcx<'mcx>, d: Datum, inhrelid: Oid) -> PgResult<&'mcx str> {
     let p = d.as_usize() as *const u8;
-    // SAFETY: syscache text attribute; header forms dispatched as C VARATT_IS_*.
-    unsafe {
+    // SAFETY: catalog text attribute; header forms dispatched as C VARATT_IS_*.
+    let bytes: &'mcx [u8] = unsafe {
         let b0 = *p;
-        let (len, off) = if b0 & 0x01 != 0 {
+        if b0 & 0x01 != 0 {
             if b0 == 0x01 {
                 // External TOAST pointer (C VARATT_IS_EXTERNAL).
-                return detoast_text_to_str(mcx, p);
+                detoast_text_bytes(mcx, p)?
+            } else {
+                core::slice::from_raw_parts(p.add(1), (((b0 as usize) >> 1) & 0x7F) - 1)
             }
-            ((((b0 as usize) >> 1) & 0x7F) - 1, 1)
         } else {
             let w = u32::from_ne_bytes(core::slice::from_raw_parts(p, 4).try_into().unwrap());
             if w & 0x02 != 0 {
-                return detoast_text_to_str(mcx, p);
+                detoast_text_bytes(mcx, p)?
+            } else {
+                core::slice::from_raw_parts(p.add(4), (w as usize >> 2) - 4)
             }
-            ((w as usize >> 2) - 4, 4)
-        };
-        core::str::from_utf8(core::slice::from_raw_parts(p.add(off), len))
-            .expect("non-UTF-8 relpartbound")
-    }
+        }
+    };
+    core::str::from_utf8(bytes).map_err(|_| invalid_relpartbound(inhrelid))
 }
 
-// External or compressed relpartbound image -> flat &str via detoast_attr.
+// External or compressed relpartbound image -> flat payload bytes via
+// detoast_attr (a detoast failure is its own elog, as in C).
 //
 // # Safety
 // `p` points to a live varlena image (toast pointer or compressed 4B form).
-unsafe fn detoast_text_to_str<'mcx>(mcx: ::mcx::Mcx<'mcx>, p: *const u8) -> &'mcx str {
+unsafe fn detoast_text_bytes<'mcx>(mcx: ::mcx::Mcx<'mcx>, p: *const u8) -> PgResult<&'mcx [u8]> {
     let total = ::types_tuple::varatt::varsize_any(p);
     let raw = core::slice::from_raw_parts(p, total);
-    let flat = ::detoast_seams::detoast_attr::call(mcx, raw).expect("detoast relpartbound");
+    let flat = ::detoast_seams::detoast_attr::call(mcx, raw)?;
     let (ptr, len) = (flat.as_ptr(), flat.len());
     core::mem::forget(flat);
     // detoast_attr returns the full 4-byte-header image; the payload follows.
     // Arena-backed until mcx reset; forget only skips the vec's own dealloc.
-    let s = core::slice::from_raw_parts(ptr.add(4), len - 4);
-    core::str::from_utf8(s).expect("non-UTF-8 relpartbound")
+    Ok(core::slice::from_raw_parts(ptr.add(4), len - 4))
 }
 
 // partdesc.c:279 elog(ERROR, "missing relpartbound for relation %u") -- the
@@ -164,6 +175,62 @@ fn invalid_relpartbound(inhrelid: Oid) -> Box<PgError> {
     )))
 }
 
+// partdesc.c:295 elog(ERROR, "expected partdefid %u, but got %u"): the
+// bound says DEFAULT but pg_partitioned_table.partdefid names another
+// relation -- a corrupt catalog, reported rather than routed on.
+#[cold]
+#[inline(never)]
+fn expected_partdefid(inhrelid: Oid, partdefid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "expected partdefid {inhrelid}, but got {partdefid}"
+    )))
+}
+
+// partdesc.c:225-256: the syscache could not supply a relpartbound (a
+// concurrent ATTACH PARTITION may have committed after the catcache last
+// saw the row, or DETACH CONCURRENTLY may be mid-way); read pg_class
+// directly for the tuple.  None when the row is gone (dropped meanwhile)
+// or its relpartbound is NULL.
+fn relpartbound_from_pg_class<'mcx>(
+    mcx: Mcx<'mcx>,
+    inhrelid: Oid,
+) -> PgResult<Option<Node<'mcx>>> {
+    let pg_class = table::table_open(
+        mcx,
+        types_core::catalog::RELATION_RELATION_ID,
+        types_rel::AccessShareLock,
+    )?;
+    // C ScanKeyInit(Anum_pg_class_oid, BTEqualStrategyNumber, F_OIDEQ, oid).
+    let mut key = ScanKeyData::empty();
+    key.sk_attno = Anum_pg_class_oid as AttrNumber;
+    key.sk_strategy = BTEqualStrategyNumber;
+    key.sk_collation = InvalidOid;
+    key.sk_func = fmgr_seams::fmgr_info::call(types_core::fmgr::F_OIDEQ)?;
+    key.sk_argument = Datum::from_oid(inhrelid);
+    let mut scan =
+        genam::systable_beginscan(mcx, &pg_class, catalog::ClassOidIndexId, true, None, &[key])?;
+    let mut boundspec = None;
+    // One tuple in the normal case, none if the table was dropped meanwhile.
+    if let Some(tuple) = genam::systable_getnext(mcx, &mut scan)? {
+        let mut isnull = false;
+        // SAFETY: a pg_class tuple read under pg_class's own descriptor.
+        let datum = unsafe {
+            ::types_tuple::heap_getattr(
+                tuple,
+                Anum_pg_class_relpartbound,
+                pg_class.descr(),
+                &mut isnull,
+            )
+        };
+        if !isnull {
+            boundspec = Some(readfuncs::stringToNode(mcx, text_to_str(mcx, datum, inhrelid)?)?);
+        }
+    }
+    genam::systable_endscan(mcx, scan)?;
+    pg_class.close(types_rel::AccessShareLock)?;
+    Ok(boundspec)
+}
+
 #[inline(never)]
 fn RelationBuildPartitionDesc(
     rel: &Relation<'_>,
@@ -182,55 +249,78 @@ fn RelationBuildPartitionDesc(
     let scratch = MemoryContext::new("partition descriptor scratch");
     let smcx = scratch.mcx();
 
-    let mut detached_exist = false;
-    let mut detached_xmin = InvalidTransactionId;
-    let inhoids = pg_inherits::find_inheritance_children_extended(
-        smcx,
-        relid,
-        omit_detached,
-        types_rel::NoLock,
-        Some(&mut detached_exist),
-        Some(&mut detached_xmin),
-    )?;
-    let nparts = inhoids.len();
+    // partdesc.c:134-276: the child list and every bound are read together;
+    // a bound the syscache cannot supply is re-read from pg_class directly,
+    // and if that still yields nothing the whole walk restarts once after
+    // AcceptInvalidationMessages() (DETACH CONCURRENTLY resets relpartbound
+    // in a second transaction after marking the pg_inherits row pending, so
+    // the list and the bounds can otherwise disagree).  Once only: a single
+    // DETACH CONCURRENTLY can affect us at a time, and a corrupt catalog
+    // must not loop forever.
+    let mut retried = false;
+    let (inhoids, detached_exist, detached_xmin, boundspecs, is_leaf) = 'retry: loop {
+        let mut detached_exist = false;
+        let mut detached_xmin = InvalidTransactionId;
+        let inhoids = pg_inherits::find_inheritance_children_extended(
+            smcx,
+            relid,
+            omit_detached,
+            types_rel::NoLock,
+            Some(&mut detached_exist),
+            Some(&mut detached_xmin),
+        )?;
+        let nparts = inhoids.len();
+        let mut is_leaf: PgVec<'_, bool> = mcx::vec_with_capacity_in(smcx, nparts)?;
+        let mut boundspecs: Vec<&PartitionBoundSpec<'_>> = Vec::with_capacity(nparts);
 
-    let mut oids: PgVec<'_, Oid> = mcx::vec_with_capacity_in(smcx, nparts)?;
-    let mut is_leaf: PgVec<'_, bool> = mcx::vec_with_capacity_in(smcx, nparts)?;
-    let mut boundspecs: Vec<&PartitionBoundSpec<'_>> = Vec::with_capacity(nparts);
+        for &inhrelid in inhoids.iter() {
+            // Try fetching the tuple from the catcache, for speed.
+            let mut boundspec: Option<Node<'_>> = None;
+            if let Some(tuple) = cache_syscache::SearchSysCache1(
+                RELOID,
+                cache_syscache::SysCacheKey::Value(Datum::from_oid(inhrelid)),
+            )? {
+                let (datum, isnull) =
+                    cache_syscache::SysCacheGetAttr(RELOID, &tuple, Anum_pg_class_relpartbound)?;
+                if !isnull {
+                    boundspec =
+                        Some(readfuncs::stringToNode(smcx, text_to_str(smcx, datum, inhrelid)?)?);
+                }
+                cache_syscache::ReleaseSysCache(tuple);
+            }
+            if boundspec.is_none() {
+                boundspec = relpartbound_from_pg_class(smcx, inhrelid)?;
+                if boundspec.is_none() && !retried {
+                    inval::local::AcceptInvalidationMessages()?;
+                    retried = true;
+                    continue 'retry;
+                }
+            }
 
-    for &inhrelid in inhoids.iter() {
-        // C partdesc.c:187-276 treats a RELOID miss (and a NULL relpartbound)
-        // as "the syscache is behind a concurrent ATTACH/DETACH CONCURRENTLY":
-        // it re-reads pg_class directly and retries the whole loop once.  The
-        // terminal outcome once the retry still finds nothing is
-        // `elog(ERROR, "missing relpartbound for relation %u", inhrelid)`
-        // (partdesc.c:279) -- a catchable XX000, never a backend abort.  We
-        // do not yet implement the direct-scan retry (see below), but the
-        // failure mode must at minimum be that catchable error rather than a
-        // panic that kills the backend.
-        let Some(tuple) = cache_syscache::SearchSysCache1(
-            RELOID,
-            cache_syscache::SysCacheKey::Value(Datum::from_oid(inhrelid)),
-        )?
-        else {
-            return Err(missing_relpartbound(inhrelid));
-        };
-        let (datum, isnull) =
-            cache_syscache::SysCacheGetAttr(RELOID, &tuple, Anum_pg_class_relpartbound)?;
-        if isnull {
-            cache_syscache::ReleaseSysCache(tuple);
-            return Err(missing_relpartbound(inhrelid));
+            // Sanity checks (partdesc.c:278-281).
+            let Some(node) = boundspec else {
+                return Err(missing_relpartbound(inhrelid));
+            };
+            let Some(spec) = node.as_variant::<PartitionBoundSpec>() else {
+                return Err(invalid_relpartbound(inhrelid));
+            };
+
+            // partdesc.c:289-297: a DEFAULT bound must be the partition that
+            // pg_partitioned_table.partdefid names.
+            if spec.is_default {
+                let partdefid = partcache::get_default_partition_oid(relid)?;
+                if partdefid != inhrelid {
+                    return Err(expected_partdefid(inhrelid, partdefid));
+                }
+            }
+
+            boundspecs.push(spec);
+            is_leaf.push(lsyscache::get_rel_relkind(inhrelid)? != RELKIND_PARTITIONED_TABLE as i8);
         }
-        let node = readfuncs::stringToNode(smcx, text_to_str(smcx, datum))?;
-        cache_syscache::ReleaseSysCache(tuple);
-        // partdesc.c:281 elog(ERROR, "invalid relpartbound for relation %u").
-        let Some(spec) = node.as_variant::<PartitionBoundSpec>() else {
-            return Err(invalid_relpartbound(inhrelid));
-        };
-        boundspecs.push(spec);
-        oids.push(inhrelid);
-        is_leaf.push(lsyscache::get_rel_relkind(inhrelid)? != RELKIND_PARTITIONED_TABLE as i8);
-    }
+        break (inhoids, detached_exist, detached_xmin, boundspecs, is_leaf);
+    };
+    let nparts = inhoids.len();
+    let oids = inhoids;
 
     let cmcx = with_state(|st| st.mcx);
     let desc = if nparts > 0 {
@@ -386,7 +476,31 @@ mod tests {
         let mut image = [0u8; 18];
         image[0] = 0x01;
         image[1] = ::types_tuple::varatt::VARTAG_ONDISK;
-        let s = text_to_str(cx.mcx(), Datum::from_usize(image.as_ptr() as usize));
+        let s = text_to_str(cx.mcx(), Datum::from_usize(image.as_ptr() as usize), 1).unwrap();
         assert_eq!(s, "{LIST (a, b, c)}");
+    }
+
+    // audit-18.6 b094: C's RelationBuildPartitionDesc hands the relpartbound
+    // bytes to stringToNode unvalidated (partdesc.c:198 TextDatumGetCString);
+    // whatever a corrupted catalog holds ends in an elog(ERROR), never in a
+    // backend abort.  A non-UTF-8 image must therefore not panic here.
+    #[test]
+    fn non_utf8_relpartbound_does_not_panic() {
+        let cx = MemoryContext::new("partdesc non-utf8 test");
+        // 1B short header: (payload + header byte) << 1 | 1, then two bytes
+        // that are not valid UTF-8 in any position.
+        let image: [u8; 3] = [(3u8 << 1) | 0x01, 0xff, 0xfe];
+        let d = Datum::from_usize(image.as_ptr() as usize);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            text_to_str(cx.mcx(), d, 16396).map(|_| ())
+        }));
+        let Ok(result) = outcome else {
+            panic!("non-UTF-8 relpartbound must not panic");
+        };
+        // partdesc.c:281's elog for the partition: catchable XX000.
+        let err = result.expect_err("non-UTF-8 relpartbound must be an error");
+        assert_eq!(err.message(), "invalid relpartbound for relation 16396");
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(err.level(), types_error::ERROR);
     }
 }

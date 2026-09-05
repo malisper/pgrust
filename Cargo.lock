@@ -11820,8 +11820,11 @@ name = "partdesc"
 version = "0.1.0"
 dependencies = [
  "cache_syscache",
+ "catalog",
  "datum",
  "detoast_seams",
+ "fmgr_seams",
+ "genam",
  "inval",
  "lsyscache",
  "mcx",
@@ -11833,10 +11836,12 @@ dependencies = [
  "rewrite_manip",
  "snapmgr",
  "stack_depth_core",
+ "table",
  "types_core",
  "types_error",
  "types_nodes",
  "types_rel",
+ "types_scan",
  "types_tuple",
 ]
 
