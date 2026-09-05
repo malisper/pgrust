@@ -34,3 +34,4 @@ adt_acl = { path = "../../utils/adt/acl" }
 miscinit = { path = "../../utils/init/miscinit" }
 superuser = { path = "../../utils/misc/superuser" }
 dependency_seams = { path = "../../catalog/dependency_seams" }
+objectaccess = { path = "../../catalog/objectaccess" }

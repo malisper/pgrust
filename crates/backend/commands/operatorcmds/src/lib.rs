@@ -18,7 +18,7 @@ use types_error::{
 use types_nodes::parsenodes::{AlterOperatorStmt, ObjectType, ObjectWithArgs};
 use types_nodes::rawnodes::TypeName;
 use types_nodes::NodeList;
-use types_rel::RowExclusiveLock;
+use types_rel::{NoLock, RowExclusiveLock};
 
 use pg_operator::{
     form_of_tuple, makeOperatorDependencies, Anum_pg_operator_oprcanhash,
@@ -60,11 +60,20 @@ fn type_acl_check(typeId: Oid) -> PgResult<()> {
         adt_acl::ACL_USAGE,
     )?;
     if aclresult != aclchk::ACLCHECK_OK {
-        // aclcheck_error_type
-        let name = format_type::format_type_be(typeId)?;
-        aclchk::aclcheck_error(aclresult, ObjectType::OBJECT_TYPE, &name)?;
+        aclcheck_error_type(aclresult, typeId)?;
     }
     Ok(())
+}
+
+// aclcheck_error_type (aclchk.c): arrays report their element type.
+fn aclcheck_error_type(aclerr: i32, type_oid: Oid) -> PgResult<()> {
+    let element_type = lsyscache::get_element_type(type_oid)?;
+    let type_oid = if element_type != InvalidOid { element_type } else { type_oid };
+    aclchk::aclcheck_error(
+        aclerr,
+        ObjectType::OBJECT_TYPE,
+        &format_type::format_type_be(type_oid)?,
+    )
 }
 
 // DefineOperator (operatorcmds.c): decode the CREATE OPERATOR DefElem list
@@ -580,7 +589,10 @@ pub fn AlterOperator<'mcx>(
         OperatorUpd(mcx, oprId, commutatorOid, negatorOid, false)?;
     }
 
-    catalog.close(RowExclusiveLock)?;
+    objectaccess::InvokeObjectPostAlterHook(OPERATOR_RELATION_ID, oprId, 0)?;
+
+    // C closes with NoLock: the RowExclusiveLock is held to commit.
+    catalog.close(NoLock)?;
 
     Ok(address)
 }

@@ -10993,6 +10993,7 @@ dependencies = [
  "lsyscache",
  "mcx",
  "miscinit",
+ "objectaccess",
  "parse_func",
  "parse_oper",
  "parse_utilcmd",
