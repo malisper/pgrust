@@ -244,8 +244,11 @@ pub fn LockAcquireExtended(
             debug_assert!((*lock).nGranted <= (*lock).nRequested);
         }
         lwlock::LWLockRelease(partition_lock)?;
-        remove_locallock_if_unused(&localtag);
-
+        // lock.c:1152-1153 removes the unused LOCALLOCK here and then still
+        // reads the (freed but addressable) entry for the failure log below.
+        // Our table lookup cannot do that, so the removal waits until the
+        // logging is done: same observable order of effects, no dangling
+        // lookup ("missing LOCALLOCK" under the partition lock).
         if dontWait {
             if logLockFailure {
                 let modename = crate::GetLockmodeName(lockmethodid, lockmode);
@@ -268,8 +271,10 @@ pub fn LockAcquireExtended(
                     Some(format!("{noun}: {holders}, Wait queue: {waiters}.")),
                 )?;
             }
+            remove_locallock_if_unused(&localtag);
             return Ok(LOCKACQUIRE_NOT_AVAIL);
         }
+        remove_locallock_if_unused(&localtag);
         deadlock_seams::dead_lock_report::call()?;
         unreachable!("DeadLockReport returned");
     }

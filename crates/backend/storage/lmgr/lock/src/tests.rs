@@ -5,7 +5,7 @@ use std::sync::{Condvar, Mutex, Once, OnceLock};
 
 use init_small::globals as g;
 use types_core::BackendType;
-use types_error::PgError;
+use types_error::{ErrorLevel, PgError};
 use types_storage::lock::{
     AccessExclusiveLock, AccessShareLock, DeadLockState, ExclusiveLock, RowExclusiveLock,
     ShareLock, LOCKACQUIRE_ALREADY_HELD, LOCKACQUIRE_NOT_AVAIL, LOCKACQUIRE_OK, LOCKTAG,
@@ -24,6 +24,23 @@ const CFG: lmgr_proc::ProcGlobalConfig = lmgr_proc::ProcGlobalConfig {
 };
 
 static NEXT_PID: AtomicI32 = AtomicI32::new(9100);
+
+// Every ereport_msg the crate emits (level, message, detail), for the
+// message-bytes witnesses below.
+fn logged() -> &'static Mutex<Vec<(ErrorLevel, String, Option<String>)>> {
+    static LOGGED: OnceLock<Mutex<Vec<(ErrorLevel, String, Option<String>)>>> = OnceLock::new();
+    LOGGED.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+// Autovacuum-cancel injection (ProcSleep's BlockedByAutoVacuum arm):
+// procno of the waiter that must take a deadlock-timeout alert on its next
+// latch wait; procno whose deadlock check reports BlockedByAutoVacuum; the
+// "autovacuum worker" procno DeadLockCheck would name; and the errno the
+// kill() stand-in returns.
+static DEADLOCK_ALERT_PENDING: AtomicI32 = AtomicI32::new(-1);
+static BLOCKED_BY_AUTOVAC: AtomicI32 = AtomicI32::new(-1);
+static AUTOVAC_BLOCKER: AtomicI32 = AtomicI32::new(-1);
+static SIGNAL_ERRNO: AtomicI32 = AtomicI32::new(0);
 // Nonzero so a stale PGPROC.waitStart is distinguishable from a cleared one.
 const TEST_WAIT_START: i64 = 1_234_567;
 
@@ -96,6 +113,15 @@ fn setup() {
             }
         });
         latch_seams::wait_latch_my_latch::set(|_, _, _| {
+            // Deadlock-timeout injection: the armed waiter takes the timeout
+            // alert (CheckDeadLockAlert, as the SIGALRM path would) instead of
+            // parking, exactly once.
+            let me = lmgr_proc::MyProc().unwrap_or(-1);
+            if me >= 0 && DEADLOCK_ALERT_PENDING.compare_exchange(me, -1, SeqCst, SeqCst).is_ok()
+            {
+                lmgr_proc::CheckDeadLockAlert();
+                return types_storage::waiteventset::WL_LATCH_SET;
+            }
             my_latch_wait();
             types_storage::waiteventset::WL_LATCH_SET
         });
@@ -116,7 +142,13 @@ fn setup() {
         pmsignal_seams::register_postmaster_child_active::set(|| {});
 
         deadlock_seams::init_dead_lock_checking::set(|| Ok(()));
-        deadlock_seams::dead_lock_check::set(|_| DeadLockState::NoDeadLock);
+        deadlock_seams::dead_lock_check::set(|procno| {
+            if procno == BLOCKED_BY_AUTOVAC.load(SeqCst) {
+                DeadLockState::BlockedByAutoVacuum
+            } else {
+                DeadLockState::NoDeadLock
+            }
+        });
         deadlock_seams::dead_lock_report::set(|| {
             Err(Box::new(PgError::new(
                 types_error::ERROR,
@@ -124,7 +156,10 @@ fn setup() {
             )))
         });
         deadlock_seams::remember_simple_deadlock::set(|_, _, _, _| {});
-        deadlock_seams::get_blocking_autovacuum_procno::set(|| None);
+        deadlock_seams::get_blocking_autovacuum_procno::set(|| {
+            let p = AUTOVAC_BLOCKER.load(SeqCst);
+            (p >= 0).then_some(p)
+        });
 
         resowner::init_seams();
 
@@ -140,8 +175,12 @@ fn setup() {
 
         ps_status_seams::set_ps_display_suffix::set(|_| {});
         ps_status_seams::set_ps_display_remove_suffix::set(|| {});
-        elog_seams::ereport_msg::set(|_, _, _| Ok(()));
+        elog_seams::ereport_msg::set(|level, msg, detail| {
+            logged().lock().unwrap_or_else(|e| e.into_inner()).push((level, msg, detail));
+            Ok(())
+        });
         lmgr_seams::describe_lock_tag::set(|tag| format!("{tag:?}"));
+        procsignal_seams::send_thread_signal::set(|_, _| SIGNAL_ERRNO.load(SeqCst));
 
         shmem_seams::add_size::set(|a, b| Ok(a.checked_add(b).expect("size overflow")));
         shmem_seams::mul_size::set(|a, b| Ok(a.checked_mul(b).expect("size overflow")));
@@ -568,4 +607,154 @@ fn strong_lock_release_publishes_prior_sinval_store() {
         }
     }
     reader.join().unwrap();
+}
+
+// lock.c:1152-1183 (LockAcquireExtended, dontWait && logLockFailure): the
+// LOCALLOCK is removed when nLocks == 0 and the holders/waiters detail is
+// gathered afterwards from the (still-addressable) entry. pgrust must not
+// look the removed LOCALLOCK up again by tag — the lookup panicked
+// "missing LOCALLOCK" under the partition lock (audit row
+// a186-candidate-fp-lmgr-lock-p1-492af03fce58eed9a851-1).
+#[test]
+fn dontwait_with_log_lock_failure_logs_holders_instead_of_panicking() {
+    become_backend();
+    let holder_pid = g::MyProcPid();
+    let tag = LOCKTAG::transaction(4248);
+    assert_eq!(
+        LockAcquire(&tag, ExclusiveLock, false, false).unwrap(),
+        LOCKACQUIRE_OK
+    );
+    let t = std::thread::spawn(move || {
+        become_backend();
+        let my_pid = g::MyProcPid();
+        let r = LockAcquireExtended(&tag, ShareLock, false, true, true, true).unwrap();
+        assert_eq!(r, LOCKACQUIRE_NOT_AVAIL);
+        my_pid
+    });
+    let waiter_pid = t.join().expect("dontWait + logLockFailure must not panic");
+    assert!(LockRelease(&tag, ExclusiveLock, false).unwrap());
+
+    let expected_msg = format!(
+        "process {waiter_pid} could not obtain ShareLock on {:?}",
+        tag
+    );
+    let expected_detail = format!("Process holding the lock: {holder_pid}, Wait queue: .");
+    let hit = {
+        let logs = logged().lock().unwrap_or_else(|e| e.into_inner());
+        logs.iter()
+            .find(|(level, msg, _)| *level == types_error::LOG && *msg == expected_msg)
+            .map(|(_, _, detail)| detail.clone())
+            .unwrap_or_else(|| panic!("no LOG line {expected_msg:?} in {logs:?}"))
+    };
+    assert_eq!(hit.as_deref(), Some(expected_detail.as_str()));
+}
+
+// lock.c:4521-4522 (lock_twophase_standby_recover): an unknown lock method in
+// the 2PC record is `elog(ERROR, "unrecognized lock method: %d")` before any
+// use of the record (audit row a186-candidate-fp-lmgr-lock-p2-0b6df8edbe26b4c45258-1).
+#[test]
+fn twophase_standby_recover_rejects_unknown_lock_method() {
+    become_backend();
+    for bad_method in [0u8, 3u8] {
+        let mut tag = rel_tag(6100);
+        tag.locktag_lockmethodid = bad_method;
+        // ShareLock: not the AccessExclusiveLock arm, so nothing downstream
+        // masks a missing check.
+        // TwoPhaseLockRecord image (lock.c:4508-4519): LOCKTAG then lockmode.
+        let mut rec = [0u8; crate::twophase::SIZEOF_TWOPHASE_LOCK_RECORD];
+        rec[0..4].copy_from_slice(&tag.locktag_field1.to_ne_bytes());
+        rec[4..8].copy_from_slice(&tag.locktag_field2.to_ne_bytes());
+        rec[8..12].copy_from_slice(&tag.locktag_field3.to_ne_bytes());
+        rec[12..14].copy_from_slice(&tag.locktag_field4.to_ne_bytes());
+        rec[14] = tag.locktag_type;
+        rec[15] = tag.locktag_lockmethodid;
+        rec[16..20].copy_from_slice(&ShareLock.to_ne_bytes());
+        let err = lock_twophase_standby_recover(4300, 0, &rec)
+            .expect_err("unknown lock method must be an ERROR, not Ok(())");
+        let text = format!("{err:?}");
+        assert!(
+            text.contains(&format!("unrecognized lock method: {bad_method}")),
+            "unexpected error for lockmethodid {bad_method}: {text}"
+        );
+    }
+}
+
+// proc.c:1577-1580 (ProcSleep -> cancel of a blocking autovacuum worker): a
+// kill() failure other than ESRCH is reported as WARNING "could not send
+// signal to process %d: %m" — strerror text, not the raw errno (audit row
+// a186-candidate-fp-lmgr-proc-a4aa426bb91e5ff4c708-1).
+#[test]
+fn autovacuum_cancel_failure_warning_carries_strerror_text() {
+    become_backend();
+    let autovac_procno = lmgr_proc::MyProc().unwrap();
+    let autovac_pid = g::MyProcPid();
+    let autovac = lmgr_proc::GetPGProcByNumber(autovac_procno);
+    // Look like an autovacuum worker that is not doing wraparound protection:
+    // statusFlags live in ProcGlobal's mirror, indexed by pgxactoff.
+    let off = (MAX_BACKENDS - 1) as usize;
+    let saved_off = autovac.pgxactoff.swap(off as i32, SeqCst);
+    lmgr_proc::ProcGlobal().statusFlags[off].store(types_storage::storage::PROC_IS_AUTOVACUUM, SeqCst);
+
+    let tag = LOCKTAG::transaction(4249);
+    assert_eq!(
+        LockAcquire(&tag, ExclusiveLock, false, false).unwrap(),
+        LOCKACQUIRE_OK
+    );
+
+    const EPERM: i32 = 1;
+    let (tx, rx) = std::sync::mpsc::channel::<i32>();
+    let t = std::thread::spawn(move || {
+        become_backend();
+        let me = lmgr_proc::MyProc().unwrap();
+        // Arm the injection for THIS waiter: its first latch wait takes the
+        // deadlock-timeout alert, the check reports BlockedByAutoVacuum
+        // naming the holder, and the signal stand-in fails with EPERM.
+        AUTOVAC_BLOCKER.store(autovac_procno, SeqCst);
+        SIGNAL_ERRNO.store(EPERM, SeqCst);
+        BLOCKED_BY_AUTOVAC.store(me, SeqCst);
+        DEADLOCK_ALERT_PENDING.store(me, SeqCst);
+        tx.send(me).unwrap();
+        let r = LockAcquire(&tag, ShareLock, false, false).unwrap();
+        assert_eq!(r, LOCKACQUIRE_OK);
+        assert!(LockRelease(&tag, ShareLock, false).unwrap());
+    });
+    let waiter = rx.recv().unwrap();
+    // Let the waiter reach the cancel arm before the holder releases.
+    let expected = format!(
+        "could not send signal to process {autovac_pid}: Operation not permitted"
+    );
+    let mut seen = false;
+    for _ in 0..20_000 {
+        if logged()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|(level, msg, _)| *level == types_error::WARNING && msg.starts_with("could not send signal to process"))
+        {
+            seen = true;
+            break;
+        }
+        std::thread::yield_now();
+        std::thread::sleep(std::time::Duration::from_micros(100));
+    }
+    assert!(LockRelease(&tag, ExclusiveLock, false).unwrap());
+    t.join().unwrap();
+    assert_ne!(DEADLOCK_ALERT_PENDING.load(SeqCst), waiter, "alert never consumed");
+    lmgr_proc::ProcGlobal().statusFlags[off].store(0, SeqCst);
+    autovac.pgxactoff.store(saved_off, SeqCst);
+    BLOCKED_BY_AUTOVAC.store(-1, SeqCst);
+    AUTOVAC_BLOCKER.store(-1, SeqCst);
+    SIGNAL_ERRNO.store(0, SeqCst);
+    assert!(seen, "no WARNING about the failed signal was logged");
+    let warnings: Vec<String> = logged()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter(|(level, msg, _)| *level == types_error::WARNING && msg.starts_with("could not send signal to process"))
+        .map(|(_, msg, _)| msg.clone())
+        .collect();
+    assert!(
+        warnings.iter().any(|m| *m == expected),
+        "expected {expected:?}, got {warnings:?}"
+    );
 }

@@ -393,6 +393,9 @@ pub fn lock_twophase_postabort(xid: TransactionId, info: u16, recdata: &[u8]) ->
 
 pub fn lock_twophase_standby_recover(xid: TransactionId, _info: u16, recdata: &[u8]) -> PgResult<()> {
     let (locktag, lockmode) = decode_lock_record(recdata)?;
+    // lock.c:4521-4522: an unknown lock method is elog(ERROR,
+    // "unrecognized lock method: %d") before the record is acted on.
+    crate::lock_method_by_id(locktag.locktag_lockmethodid as types_storage::lock::LOCKMETHODID)?;
     if lockmode == crate::AccessExclusiveLock
         && locktag.locktag_type == LOCKTAG_RELATION
     {

@@ -1596,10 +1596,14 @@ pub fn ResetDeadlockWaitState() {
     GOT_DEADLOCK_TIMEOUT.set(false);
 }
 
-pub fn ProcWaitForSignal(wait_event_info: u32) {
+// proc.c:2007-2013. The trailing CHECK_FOR_INTERRUPTS is what keeps every
+// caller that loops on this wait (GetSafeSnapshot, LockBufferForCleanup,
+// recovery-conflict waits) cancellable: a pending cancel/die comes back as
+// the Err, exactly like C's longjmp out of ProcessInterrupts.
+pub fn ProcWaitForSignal(wait_event_info: u32) -> PgResult<()> {
     latch_seams::wait_latch_my_latch::call(WL_LATCH_SET | WL_EXIT_ON_PM_DEATH, 0, wait_event_info);
     latch_seams::reset_latch_my_latch::call();
-    // C ends with CHECK_FOR_INTERRUPTS(); the interrupt machinery owns that.
+    postgres_seams::check_for_interrupts::call()
 }
 
 pub fn ProcSendSignal(procNumber: ProcNumber) -> PgResult<()> {

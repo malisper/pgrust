@@ -1145,7 +1145,14 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      section / cleanup-delay-point / elog(ERROR)-arm witnesses (unit
     //      harness fixture; counted by the tree census, never product code —
     //      same class as 43/45/46/50/60).
-    assert_eq!(count_tree(crates), 589, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+        // 590, 18.6 conformance audit (2026-09-05), lmgr remediation
+    //   (b043-backend-storage-lmgr-1): one test-only source —
+    //   70. storage/lmgr/lmgr_proc/src/tests.rs CANCEL_PENDING — Cell<bool>
+    //      per-thread pending-cancel flag behind the CHECK_FOR_INTERRUPTS
+    //      seam for the ProcWaitForSignal interrupt witness (unit harness
+    //      fixture; counted by the tree census, never product code — same
+    //      class as 43/45/46/60/62/63).
+    assert_eq!(count_tree(crates), 590, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

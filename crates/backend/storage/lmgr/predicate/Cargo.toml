@@ -9,6 +9,7 @@ name = "predicate"
 path = "src/lib.rs"
 
 [dependencies]
+elog_seams = { path = "../../../utils/error/elog_seams" }
 predicate_seams = { path = "../predicate_seams" }
 mcx = { path = "../../../../_support/mcx" }
 types_core = { path = "../../../../_support/types/types_core" }
@@ -49,7 +50,6 @@ shmem_seams = { path = "../../ipc/shmem_seams" }
 deadlock_seams = { path = "../deadlock_seams" }
 timeout_seams = { path = "../../../utils/misc/timeout_seams" }
 timestamp_seams = { path = "../../../utils/adt/timestamp_seams" }
-elog_seams = { path = "../../../utils/error/elog_seams" }
 ps_status_seams = { path = "../../../utils/misc/ps_status_seams" }
 file_seams = { path = "../../file/file_seams" }
 sync_seams = { path = "../../sync/sync_seams" }

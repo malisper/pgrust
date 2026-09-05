@@ -8840,6 +8840,7 @@ dependencies = [
  "init_small",
  "ipc_seams",
  "latch_seams",
+ "libc",
  "lmgr_proc",
  "lmgr_seams",
  "lock_seams",

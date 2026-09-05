@@ -409,7 +409,7 @@ pub fn ResolveRecoveryConflictWithLock(locktag: LOCKTAG, logging_conflict: bool)
     }
 
     // Wait to be signaled by the release of the relation lock.
-    lmgr_proc::ProcWaitForSignal(PG_WAIT_LOCK | locktag.locktag_type as u32);
+    lmgr_proc::ProcWaitForSignal(PG_WAIT_LOCK | locktag.locktag_type as u32)?;
 
     // If ltime was reached, exit; the next call cancels the holders.
     if !GOT_STANDBY_LOCK_TIMEOUT.load(Relaxed) && GOT_STANDBY_DEADLOCK_TIMEOUT.load(Relaxed) {
@@ -427,7 +427,7 @@ pub fn ResolveRecoveryConflictWithLock(locktag: LOCKTAG, logging_conflict: bool)
             // it; it calls back with logging_conflict=false and we wait again.
             if !logging_conflict {
                 GOT_STANDBY_DEADLOCK_TIMEOUT.store(false, Relaxed);
-                lmgr_proc::ProcWaitForSignal(PG_WAIT_LOCK | locktag.locktag_type as u32);
+                lmgr_proc::ProcWaitForSignal(PG_WAIT_LOCK | locktag.locktag_type as u32)?;
             }
         }
     }
@@ -463,7 +463,7 @@ pub fn ResolveRecoveryConflictWithBufferPin() -> PgResult<()> {
     }
 
     // Woken only by UnpinBuffer() or the timeouts above.
-    lmgr_proc::ProcWaitForSignal(WAIT_EVENT_BUFFER_PIN);
+    lmgr_proc::ProcWaitForSignal(WAIT_EVENT_BUFFER_PIN)?;
 
     if GOT_STANDBY_DELAY_TIMEOUT.load(Relaxed) {
         SendRecoveryConflictWithBufferPin(PROCSIG_RECOVERY_CONFLICT_BUFFERPIN)?;

@@ -453,8 +453,23 @@ pub fn ProcSleep(localtag: &LOCALLOCKTAG) -> PgResult<ProcWaitStatus> {
 /// proc.c's DS_BLOCKED_BY_AUTOVACUUM arm: SIGINT the autovacuum worker that
 /// hard-blocks us, unless it is working to prevent Xid wraparound.
 #[cold]
+// elog's %m expansion (strerror(errno)); C prints the text, so a NULL from
+// strerror is not expected for any errno kill() returns.
+fn strerror(errnum: i32) -> String {
+    // SAFETY: strerror returns a pointer to a NUL-terminated process-lifetime
+    // string; it is copied out immediately.
+    unsafe {
+        let ptr = libc::strerror(errnum);
+        if ptr.is_null() {
+            format!("unrecognized error {errnum}")
+        } else {
+            std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned()
+        }
+    }
+}
+
 fn cancel_blocking_autovacuum(lock: *mut LOCK, lockmode: LOCKMODE) -> PgResult<()> {
-    // libc constants inlined; the lock crate is seams-only.
+    // Signal/errno constants inlined (the seam takes plain ints).
     const SIGINT: i32 = 2;
     const ESRCH: i32 = 3;
 
@@ -498,9 +513,11 @@ fn cancel_blocking_autovacuum(lock: *mut LOCK, lockmode: LOCKMODE) -> PgResult<(
         // kill(pid, SIGINT); the worker exiting first is expected (ESRCH).
         let err = procsignal_seams::send_thread_signal::call(pid, SIGINT);
         if err != 0 && err != ESRCH {
+            // proc.c:1579 "could not send signal to process %d: %m" — %m is
+            // strerror(errno), not the number.
             elog_seams::ereport_msg::call(
                 WARNING,
-                format!("could not send signal to process {pid}: errno {err}"),
+                format!("could not send signal to process {pid}: {}", strerror(err)),
                 None,
             )?;
         }

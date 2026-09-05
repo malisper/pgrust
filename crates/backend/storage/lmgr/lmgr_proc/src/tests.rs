@@ -15,6 +15,29 @@ const MAX_BACKENDS: i32 = MAX_CONNECTIONS + 3 + MAX_WORKER_PROCESSES + 2 + NUM_S
 
 static SEMA_CREATED: AtomicUsize = AtomicUsize::new(0);
 
+// CHECK_FOR_INTERRUPTS stand-in: a per-thread pending cancel that the seam
+// raises as C's 57014, plus a call counter.
+static CFI_CALLS: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    static CANCEL_PENDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+// Signature-agnostic view of ProcWaitForSignal's outcome so the witness
+// compiles against both the unported `()` shape and the C shape (PgResult).
+trait WaitOutcome {
+    fn interrupted(self) -> bool;
+}
+impl WaitOutcome for () {
+    fn interrupted(self) -> bool {
+        false
+    }
+}
+impl WaitOutcome for PgResult<()> {
+    fn interrupted(self) -> bool {
+        self.is_err()
+    }
+}
+
 // GL-CONNSLOT-1 injection flags: arm to make the corresponding seam panic
 // ONCE (swap-consumed) inside a PGPROC-release path.
 static SYNCREP_PANIC: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -68,6 +91,19 @@ fn setup() {
             cv.notify_all();
         });
 
+        postgres_seams::check_for_interrupts::set(|| {
+            CFI_CALLS.fetch_add(1, SeqCst);
+            if CANCEL_PENDING.with(|c| c.get()) {
+                return Err(Box::new(
+                    types_error::PgError::new(
+                        types_error::ERROR,
+                        "canceling statement due to user request",
+                    )
+                    .with_sqlstate(types_error::ERRCODE_QUERY_CANCELED),
+                ));
+            }
+            Ok(())
+        });
         s_lock_seams::perform_spin_delay::set(|_| std::thread::yield_now());
         s_lock_seams::finish_spin_delay::set(|_| {});
         s_lock_seams::set_spins_per_delay::set(|_| {});
@@ -388,7 +424,7 @@ fn signals_and_deadlock_alert() {
     CheckDeadLockAlert();
     assert!(GotDeadlockTimeout());
 
-    ProcWaitForSignal(0);
+    ProcWaitForSignal(0).unwrap();
 }
 
 #[test]
@@ -568,4 +604,28 @@ fn concurrent_backend_claims_are_disjoint() {
     unique.dedup();
     assert_eq!(unique.len(), procnos.len());
     assert!(procnos.iter().all(|&p| p < MAX_CONNECTIONS));
+}
+
+// proc.c:2007-2013 ProcWaitForSignal: WaitLatch, ResetLatch, then
+// CHECK_FOR_INTERRUPTS() — a pending cancel/die surfaces from the wait itself,
+// so callers that loop on ProcWaitForSignal (GetSafeSnapshot,
+// LockBufferForCleanup, recovery conflicts) stay cancellable (audit row
+// a186-candidate-fp-lmgr-proc-c1d991432357b539b652-1).
+#[test]
+fn proc_wait_for_signal_checks_for_interrupts() {
+    setup();
+    thread_globals(505);
+
+    CANCEL_PENDING.with(|c| c.set(false));
+    let before = CFI_CALLS.load(SeqCst);
+    assert!(!ProcWaitForSignal(0).interrupted());
+    assert!(
+        CFI_CALLS.load(SeqCst) > before,
+        "ProcWaitForSignal must call CHECK_FOR_INTERRUPTS after ResetLatch"
+    );
+
+    CANCEL_PENDING.with(|c| c.set(true));
+    let interrupted = ProcWaitForSignal(0).interrupted();
+    CANCEL_PENDING.with(|c| c.set(false));
+    assert!(interrupted, "a pending query cancel must surface from ProcWaitForSignal");
 }

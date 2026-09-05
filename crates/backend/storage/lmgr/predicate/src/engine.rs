@@ -25,7 +25,7 @@ use types_core::{
     VirtualTransactionId,
 };
 use types_error::{
-    PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_FEATURE_NOT_SUPPORTED,
+    PgError, PgResult, DEBUG2, ERRCODE_DATA_CORRUPTED, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_OUT_OF_MEMORY, ERRCODE_T_R_SERIALIZATION_FAILURE,
 };
 use types_hash::hsearch::{
@@ -745,7 +745,7 @@ fn GetSafeSnapshot<'m>(snapshot: &mut SnapshotData<'m>, mcx: mcx::Mcx<'m>) -> Pg
                 || SxactIsROUnsafe(mysx))
             {
                 LWLockRelease(SerializableXactHashLock())?;
-                lmgr_proc::ProcWaitForSignal(WAIT_EVENT_SAFE_SNAPSHOT);
+                lmgr_proc::ProcWaitForSignal(WAIT_EVENT_SAFE_SNAPSHOT)?;
                 LWLockAcquire(SerializableXactHashLock(), LW_EXCLUSIVE, procno)?;
             }
             (*mysx).flags &= !SXACT_FLAG_DEFERRABLE_WAITING;
@@ -758,7 +758,12 @@ fn GetSafeSnapshot<'m>(snapshot: &mut SnapshotData<'m>, mcx: mcx::Mcx<'m>) -> Pg
 
         LWLockRelease(SerializableXactHashLock())?;
 
-        // Snapshot was unsafe; release and retry with a new one.
+        // Snapshot was unsafe; release and retry with a new one
+        // (predicate.c:1603).
+        elog_seams::ereport::call(
+            PgError::new(DEBUG2, "deferrable snapshot was unsafe; trying a new one")
+                .with_sqlstate(ERRCODE_T_R_SERIALIZATION_FAILURE),
+        )?;
         ReleasePredicateLocks(false, false)?;
     }
 

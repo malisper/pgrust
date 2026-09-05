@@ -114,7 +114,9 @@ pub fn LockBufferForCleanup(buffer: Buffer) -> PgResult<()> {
             lmgr_proc::SetStartupBufferPinWaitBufId(-1);
             waited?;
         } else {
-            lmgr_proc::ProcWaitForSignal(PG_WAIT_BUFFERPIN);
+            // On a cancel raised here PIN_COUNT_WAIT_BUF stays set, so the
+            // abort path's UnlockBuffers clears BM_PIN_COUNT_WAITER (as in C).
+            lmgr_proc::ProcWaitForSignal(PG_WAIT_BUFFERPIN)?;
         }
         // ProcWaitForSignal can return on unrelated latch sets; clear the
         // waiter flag only if it is still ours, then retry.
