@@ -501,6 +501,8 @@ pub fn CreateStatistics<'mcx>(
 
     statrel.close(RowExclusiveLock)?;
 
+    objectaccess::InvokeObjectPostCreateHook(StatisticExtRelationId, statoid, 0)?;
+
     inval::invalidate::CacheInvalidateRelcache(&rel)?;
 
     rel.close(NoLock)?;
@@ -642,6 +644,8 @@ pub fn AlterStatistics<'mcx>(
     let otid = oldtup.t_self;
     genam::systable_endscan(mcx, scan)?;
     catalog_indexing::CatalogTupleUpdate(mcx, &rel, &otid, &mut newtup)?;
+
+    objectaccess::InvokeObjectPostAlterHook(StatisticExtRelationId, stxoid, 0)?;
 
     rel.close(RowExclusiveLock)?;
     Ok(pg_depend::ObjectAddress::set(StatisticExtRelationId, stxoid))

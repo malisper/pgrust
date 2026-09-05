@@ -42,3 +42,4 @@ outfuncs = { path = "../../nodes/outfuncs" }
 nodes_core = { path = "../../nodes/nodes_core" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 commands_comment = { path = "../comment" }
+objectaccess = { path = "../../catalog/objectaccess" }

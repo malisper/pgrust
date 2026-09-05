@@ -18434,6 +18434,7 @@ dependencies = [
  "mcx",
  "miscinit_seams",
  "nodes_core",
+ "objectaccess",
  "outfuncs",
  "pg_class_seams",
  "pg_depend",
