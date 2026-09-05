@@ -9,6 +9,19 @@ use crate::state::TwoPhaseState;
 // setup() (name, size), in registration order.
 static SHMEM_INDEX_NAMES: Mutex<Vec<(String, usize)>> = Mutex::new(Vec::new());
 
+// Every pgstat_report_wait_start(info) the crate issued through the
+// waitevent seam, in order (wait_event.h PG_WAIT_IO class ids: the
+// positions of the waitevent crate's IO name table).
+static WAIT_EVENTS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+const PG_WAIT_IO: u32 = 0x0A00_0000;
+const WAIT_EVENT_TWOPHASE_FILE_READ: u32 = PG_WAIT_IO | 62;
+const WAIT_EVENT_TWOPHASE_FILE_SYNC: u32 = PG_WAIT_IO | 63;
+const WAIT_EVENT_TWOPHASE_FILE_WRITE: u32 = PG_WAIT_IO | 64;
+
+fn record_wait_start(info: u32) {
+    WAIT_EVENTS.lock().unwrap().push(info);
+}
+
 fn test_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: Mutex<()> = Mutex::new(());
     LOCK.lock().unwrap_or_else(|e| e.into_inner())
@@ -44,7 +57,7 @@ fn setup() {
         miscinit_seams::switch_to_shared_latch::set(|| {});
         miscinit_seams::switch_back_to_local_latch::set(|| {});
         waitevent_seams::pgstat_set_wait_event_storage::set(|_| {});
-        waitevent_seams::pgstat_report_wait_start::set(|_| {});
+        waitevent_seams::pgstat_report_wait_start::set(record_wait_start);
         waitevent_seams::pgstat_report_wait_end::set(|| {});
         waitevent_seams::pgstat_reset_wait_event_storage::set(|| {});
         ipc_seams::on_shmem_exit::set(|_, _| {});
@@ -347,13 +360,85 @@ fn state_file_roundtrip_and_corruption() {
         .is_none());
 }
 
+// ReadTwoPhaseFile (twophase.c:1328-1333) rejects a too-small state file
+// with errmsg_plural, so a 1-byte file says "1 byte"; the read is bracketed
+// by WAIT_EVENT_TWOPHASE_FILE_READ (1347/1361) and RecreateTwoPhaseFile's
+// write + fsync by WAIT_EVENT_TWOPHASE_FILE_WRITE / _SYNC (1749-1779).
+// Audit a186-verified-fp-transam-twophase-a92c3e3abbf434d880d9-1 (+ the
+// candidate twin 06d742fc) and a186-candidate-fp-transam-twophase-583bbea9.
+#[test]
+fn state_file_size_error_and_wait_events_match_c() {
+    let _l = test_lock();
+    setup();
+
+    let path = crate::files::two_phase_file_path(901);
+    std::fs::write(&path, b"x").unwrap();
+    let err = crate::files::read_twophase_file(901, false).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_DATA_CORRUPTED);
+    assert_eq!(
+        err.message(),
+        format!("incorrect size of file \"{path}\": 1 byte"),
+        "C errmsg_plural picks the singular for a 1-byte file"
+    );
+    std::fs::remove_file(&path).unwrap();
+
+    let hdr = TwoPhaseFileHeader {
+        magic: TWOPHASE_MAGIC,
+        total_len: 0,
+        xid: 902,
+        database: 5,
+        prepared_at: 7,
+        owner: 10,
+        nsubxacts: 0,
+        ncommitrels: 0,
+        nabortrels: 0,
+        ncommitstats: 0,
+        nabortstats: 0,
+        ninvalmsgs: 0,
+        initfileinval: false,
+        gidlen: 2,
+        origin_lsn: 0,
+        origin_timestamp: 0,
+    };
+    let mut content = Vec::new();
+    content.extend_from_slice(&hdr.to_bytes());
+    content.extend_from_slice(b"g\0\0\0\0\0\0\0");
+    content.extend_from_slice(&TwoPhaseRecordOnDisk { len: 0, rmid: 0, info: 0 }.to_bytes());
+    let total = (content.len() + 4) as u32;
+    content[4..8].copy_from_slice(&total.to_ne_bytes());
+
+    WAIT_EVENTS.lock().unwrap().clear();
+    crate::files::recreate_two_phase_file(902, &content).expect("recreate");
+    let after_write = WAIT_EVENTS.lock().unwrap().clone();
+    assert!(
+        after_write.contains(&WAIT_EVENT_TWOPHASE_FILE_WRITE)
+            && after_write.contains(&WAIT_EVENT_TWOPHASE_FILE_SYNC),
+        "RecreateTwoPhaseFile must report TwophaseFileWrite + TwophaseFileSync, got {after_write:?}"
+    );
+    WAIT_EVENTS.lock().unwrap().clear();
+    crate::files::read_twophase_file(902, false).expect("read ok").expect("present");
+    let after_read = WAIT_EVENTS.lock().unwrap().clone();
+    assert!(
+        after_read.contains(&WAIT_EVENT_TWOPHASE_FILE_READ),
+        "ReadTwoPhaseFile must report TwophaseFileRead, got {after_read:?}"
+    );
+    crate::files::remove_two_phase_file(902, true).expect("remove");
+}
+
 #[test]
 fn gid_helpers() {
     assert_eq!(crate::TwoPhaseTransactionGid(3, 77).unwrap(), "pg_gid_3_77");
-    assert!(crate::IsTwoPhaseTransactionGidForSubid(3, "pg_gid_3_77"));
-    assert!(!crate::IsTwoPhaseTransactionGidForSubid(4, "pg_gid_3_77"));
-    assert!(!crate::IsTwoPhaseTransactionGidForSubid(3, "pg_gid_3_77x"));
-    assert!(!crate::IsTwoPhaseTransactionGidForSubid(3, "somegid"));
+    assert!(crate::IsTwoPhaseTransactionGidForSubid(3, "pg_gid_3_77").unwrap());
+    assert!(!crate::IsTwoPhaseTransactionGidForSubid(4, "pg_gid_3_77").unwrap());
+    assert!(!crate::IsTwoPhaseTransactionGidForSubid(3, "pg_gid_3_77x").unwrap());
+    assert!(!crate::IsTwoPhaseTransactionGidForSubid(3, "somegid").unwrap());
+    // sscanf-shaped: "%u" consumes the digits, the reconstruction rejects
+    // the non-canonical spelling; a zero xid raises 08P01 (twophase.c:2688).
+    assert!(!crate::IsTwoPhaseTransactionGidForSubid(3, "pg_gid_+3_77").unwrap());
+    assert!(!crate::IsTwoPhaseTransactionGidForSubid(3, "pg_gid_3_077").unwrap());
+    let err = crate::IsTwoPhaseTransactionGidForSubid(3, "pg_gid_3_0").unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_PROTOCOL_VIOLATION);
+    assert_eq!(err.message(), "invalid two-phase transaction ID");
 }
 
 // AtProcExit_Twophase (twophase.c): the before_shmem_exit hook registered by

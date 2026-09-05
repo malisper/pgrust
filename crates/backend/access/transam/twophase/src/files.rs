@@ -12,6 +12,27 @@ use crate::here;
 
 pub const TWOPHASE_DIR: &str = "pg_twophase";
 
+// wait_event.h PG_WAIT_IO class; ids are the positions of the waitevent
+// crate's IO name table (pinned by its tests).
+const PG_WAIT_IO: u32 = 0x0A00_0000;
+const WAIT_EVENT_TWOPHASE_FILE_READ: u32 = PG_WAIT_IO | 62;
+const WAIT_EVENT_TWOPHASE_FILE_SYNC: u32 = PG_WAIT_IO | 63;
+const WAIT_EVENT_TWOPHASE_FILE_WRITE: u32 = PG_WAIT_IO | 64;
+
+// pgstat_report_wait_start/end (wait_event.h) around the two-phase state
+// file I/O (twophase.c:1347/1361, 1749/1769, 1775/1779). The seams are
+// uninstalled in substrate test binaries without wait-event storage.
+fn report_wait_start(wait_event_info: u32) {
+    if waitevent_seams::pgstat_report_wait_start::is_installed() {
+        waitevent_seams::pgstat_report_wait_start::call(wait_event_info);
+    }
+}
+fn report_wait_end() {
+    if waitevent_seams::pgstat_report_wait_end::is_installed() {
+        waitevent_seams::pgstat_report_wait_end::call();
+    }
+}
+
 /// `AdjustToFullTransactionId`: recover the epoch for a bare xid known to
 /// precede-or-equal nextXid.
 fn adjust_to_full_transaction_id(xid: TransactionId) -> FullTransactionId {
@@ -114,9 +135,14 @@ fn read_twophase_body(fd: i32, path: &str) -> PgResult<Vec<u8>> {
         + maxalign(SIZEOF_TWOPHASE_RECORD_ON_DISK)
         + 4) as i64;
     if st_size < lower || st_size > MAX_ALLOC_SIZE as i64 {
+        // twophase.c:1328-1333: errmsg_plural on st_size ("1 byte").
         ereport(ERROR)
             .errcode(ERRCODE_DATA_CORRUPTED)
-            .errmsg(format!("incorrect size of file \"{path}\": {st_size} bytes"))
+            .errmsg_plural(
+                format!("incorrect size of file \"{path}\": {st_size} byte"),
+                format!("incorrect size of file \"{path}\": {st_size} bytes"),
+                st_size.max(0) as u64,
+            )
             .finish(here("ReadTwoPhaseFile"))?;
     }
     let crc_offset = (st_size - 4) as usize;
@@ -131,6 +157,9 @@ fn read_twophase_body(fd: i32, path: &str) -> PgResult<Vec<u8>> {
 
     let mut buf = vec![0u8; st_size as usize];
     // Freshly opened transient fd: whole-file positional read at offset 0.
+    // twophase.c:1347-1361: WAIT_EVENT_TWOPHASE_FILE_READ around the read;
+    // C's error arms leave the wait event set for the error cleanup.
+    report_wait_start(WAIT_EVENT_TWOPHASE_FILE_READ);
     let r = fd::pg_pread(fd, &mut buf, 0);
     if r != st_size as isize {
         if r < 0 {
@@ -147,6 +176,7 @@ fn read_twophase_body(fd: i32, path: &str) -> PgResult<Vec<u8>> {
                 .finish(here("ReadTwoPhaseFile"))?;
         }
     }
+    report_wait_end();
     Ok(buf)
 }
 
@@ -166,6 +196,9 @@ pub(crate) fn recreate_two_phase_file(xid: TransactionId, content: &[u8]) -> PgR
 
     let result = (|| -> PgResult<()> {
         let mut write_off: i64 = 0;
+        // twophase.c:1749-1769: WAIT_EVENT_TWOPHASE_FILE_WRITE around the
+        // content + CRC writes.
+        report_wait_start(WAIT_EVENT_TWOPHASE_FILE_WRITE);
         for chunk in [content, &crc.to_ne_bytes()[..]] {
             // Positional write at the tracked append offset (O_TRUNC fd).
             let w = fd::pg_pwrite(fd, chunk, write_off);
@@ -184,6 +217,9 @@ pub(crate) fn recreate_two_phase_file(xid: TransactionId, content: &[u8]) -> PgR
                     .finish(here("RecreateTwoPhaseFile"))?;
             }
         }
+        report_wait_end();
+        // twophase.c:1775-1779: WAIT_EVENT_TWOPHASE_FILE_SYNC around pg_fsync.
+        report_wait_start(WAIT_EVENT_TWOPHASE_FILE_SYNC);
         if fd::sync::pg_fsync(fd) != 0 {
             ereport(ERROR)
                 .with_saved_errno(get_errno())
@@ -191,6 +227,7 @@ pub(crate) fn recreate_two_phase_file(xid: TransactionId, content: &[u8]) -> PgR
                 .errmsg(format!("could not fsync file \"{path}\": %m"))
                 .finish(here("RecreateTwoPhaseFile"))?;
         }
+        report_wait_end();
         Ok(())
     })();
     let close_rc = fd::desc::CloseTransientFile(fd);

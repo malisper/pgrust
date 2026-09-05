@@ -57,16 +57,26 @@ pub struct TransamVariablesShared {
     pub oldestClogXid: AtomicU32,       // [XactTruncationLock]
 }
 
-static TRANSAM_VARIABLES: OnceLock<TransamVariablesShared> = OnceLock::new();
+// TransamVariables: lives in the ShmemInitStruct("TransamVariables") arena
+// (varsup.c:52-60) so pg_shmem_allocations lists it; leaked for the cluster
+// lifetime like C shmem.
+static TRANSAM_VARIABLES: OnceLock<&'static TransamVariablesShared> = OnceLock::new();
 
 pub fn TransamVariables() -> &'static TransamVariablesShared {
     TRANSAM_VARIABLES
         .get()
+        .copied()
         .unwrap_or_else(|| panic!("VarsupShmemInit has not run"))
 }
 
+// sizeof(TransamVariablesData) (transam.h): 11 x 4-byte + 3 x 8-byte
+// fields with the natural padding = 72 on every 18.6 platform — the size
+// C's VarsupShmemSize reports and pg_shmem_allocations shows. The Rust
+// image (word atomics) is laid out inside it.
+const SIZEOF_TRANSAM_VARIABLES_DATA: usize = 72;
+
 pub fn VarsupShmemSize() -> Size {
-    core::mem::size_of::<TransamVariablesShared>()
+    SIZEOF_TRANSAM_VARIABLES_DATA
 }
 
 fn boot_image() -> TransamVariablesShared {
@@ -95,8 +105,36 @@ fn boot_image() -> TransamVariablesShared {
 }
 
 pub fn VarsupShmemInit() {
+    // varsup.c:52-60: ShmemInitStruct("TransamVariables",
+    // sizeof(TransamVariablesData), &found) registers the ShmemIndex row
+    // (pg_shmem_allocations) and hands back the arena the boot image is
+    // written into (!IsUnderPostmaster: Assert(!found), memset 0). Substrate
+    // test binaries without a shmem seam keep a heap image: the row is the
+    // only thing the seam adds. A ShmemIndex failure here is C's boot-time
+    // "out of shared memory" FATAL, not a user-reachable path.
+    const {
+        assert!(core::mem::size_of::<TransamVariablesShared>() <= SIZEOF_TRANSAM_VARIABLES_DATA);
+        assert!(core::mem::align_of::<TransamVariablesShared>() <= 64, "PG_CACHE_LINE_SIZE alignment");
+    }
+    let shared: &'static TransamVariablesShared = if shmem_seams::shmem_init_struct::is_installed() {
+        let (raw, found) =
+            shmem_seams::shmem_init_struct::call("TransamVariables", SIZEOF_TRANSAM_VARIABLES_DATA)
+                .unwrap_or_else(|e| panic!("VarsupShmemInit: {}", e.message()));
+        debug_assert!(!found, "VarsupShmemInit: segment already initialized");
+        let p = raw.cast::<TransamVariablesShared>();
+        // SAFETY: a fresh, zeroed, cache-line-aligned ShmemIndex allocation
+        // of SIZEOF_TRANSAM_VARIABLES_DATA >= size_of::<TransamVariablesShared>()
+        // bytes (asserted above), written once during single-threaded shmem
+        // init and leaked for the cluster lifetime like C shmem.
+        unsafe {
+            p.write(boot_image());
+            &*p
+        }
+    } else {
+        Box::leak(Box::new(boot_image()))
+    };
     TRANSAM_VARIABLES
-        .set(boot_image())
+        .set(shared)
         .unwrap_or_else(|_| panic!("VarsupShmemInit called twice"));
 }
 

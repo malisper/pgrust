@@ -75,6 +75,9 @@ startup_seams = { path = "../../../postmaster/startup_seams" }
 miscinit = { path = "../../../utils/init/miscinit" }
 ps_status_seams = { path = "../../../utils/misc/ps_status_seams" }
 waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
+pgtz = { path = "../../../timezone/pgtz" }
+localtime = { path = "../../../timezone/localtime" }
+strftime = { path = "../../../timezone/strftime" }
 libc = "0.2"
 
 [dev-dependencies]

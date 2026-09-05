@@ -1060,7 +1060,7 @@ pub fn AlterSubscription<'mcx>(
                 // transactions carry this subscription's GID pattern.
                 if update_two_phase
                     && sub.twophasestate == LOGICALREP_TWOPHASE_STATE_ENABLED
-                    && twophase::LookupGXactBySubid(subid)
+                    && twophase::LookupGXactBySubid(subid)?
                 {
                     return Err((*err(
                         "cannot disable \"two_phase\" when prepared transactions exist",

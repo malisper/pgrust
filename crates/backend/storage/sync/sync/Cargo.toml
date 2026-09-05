@@ -25,10 +25,12 @@ fd = { path = "../../file/fd" }
 latch = { path = "../../ipc/latch" }
 sync_seams = { path = "../sync_seams" }
 checkpointer_seams = { path = "../../../postmaster/checkpointer_seams" }
+transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+pg_clock = { path = "../../../../port/pg_clock" }
 libc = "0.2"
 
 [dev-dependencies]
-guc_tables = { path = "../../../utils/misc/guc_tables" }
 xact_seams = { path = "../../../access/transam/xact_seams" }
 aio_seams = { path = "../../aio/aio_seams" }
 waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }

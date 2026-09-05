@@ -570,6 +570,10 @@ fn checkpoint_no_sync_seams_child() {
     crate::ctl::XLogCtl().SharedRecoveryState.store(RECOVERY_STATE_DONE, Relaxed);
     xlogutils::set_in_recovery(false);
 
+    // CheckpointStats.ckpt_start_t (xlog.c:6964) is stamped before the
+    // sync seams are reached.
+    timestamp_seams::get_current_timestamp::set(|| 0);
+
     // Sync seams deliberately NOT installed: the checkpoint must panic
     // loudly, never report success without fsync.
     let _ = crate::CreateCheckPoint(CHECKPOINT_IMMEDIATE);
@@ -597,6 +601,85 @@ fn checkpoint_without_sync_seams_is_loud() {
     assert!(
         text.contains("seam not installed: sync_seams::"),
         "must fail loudly at the sync seam, got: {text}"
+    );
+}
+
+// ReadControlFile (xlog.c:4541-4547) reports an invalid segment size with
+// errmsg_plural: xlog_seg_size = 1 reads "(1 byte)". Runs as a child process
+// because ReadControlFile reads the process-global DataDir that
+// insert_flush_smoke also owns.
+// Audit a186-candidate-fp-transam-xlog-p2-44ba836f77f0e758da0c-1.
+#[test]
+#[ignore = "child of read_control_file_one_byte_segment_size_is_singular"]
+fn read_control_file_one_byte_segment_child() {
+    use crate::control_file::*;
+
+    let dir = std::env::temp_dir().join(format!("pgrust_ctl1_test_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("global")).unwrap();
+    init_small::globals::SetDataDir(dir.to_str().unwrap());
+    init_seams_once();
+    fd::InitFileAccess();
+
+    let seg = 16 * 1024 * 1024;
+    let redo = seg as u64 + SizeOfXLogLongPHD as u64;
+    let mut cf = ControlFileData::ZEROED;
+    cf.system_identifier = 0x1122_3344_5566_7788;
+    cf.pg_control_version = PG_CONTROL_VERSION;
+    cf.catalog_version_no = CATALOG_VERSION_NO;
+    cf.state = DB_SHUTDOWNED;
+    cf.checkPoint = redo;
+    cf.checkPointCopy.redo = redo;
+    cf.checkPointCopy.ThisTimeLineID = 1;
+    cf.checkPointCopy.PrevTimeLineID = 1;
+    cf.checkPointCopy.nextXid = types_core::FullTransactionId::from_epoch_and_xid(0, 3);
+    cf.unloggedLSN = FirstNormalUnloggedLSN;
+    cf.maxAlign = 8;
+    cf.floatFormat = FLOATFORMAT_VALUE;
+    cf.blcksz = 8192;
+    cf.relseg_size = 131072;
+    cf.xlog_blcksz = 8192;
+    cf.xlog_seg_size = 1;
+    cf.nameDataLen = 64;
+    cf.indexMaxKeys = 32;
+    cf.toast_max_chunk_size = TOAST_MAX_CHUNK_SIZE;
+    cf.loblksize = 2048;
+    cf.float8ByVal = true;
+    cf.crc = controldata_utils::crc_of_image(&cf.to_disk_bytes());
+    let mut image = vec![0u8; PG_CONTROL_FILE_SIZE];
+    image[..controldata_utils::SIZEOF_CONTROL_FILE_DATA].copy_from_slice(&cf.to_disk_bytes());
+    std::fs::write(dir.join("global/pg_control"), &image).unwrap();
+
+    let err = ReadControlFile().unwrap_err();
+    let _ = std::fs::remove_dir_all(&dir);
+    println!(
+        "CTL1 sqlstate_is_22023={} message={}",
+        err.sqlstate() == types_error::ERRCODE_INVALID_PARAMETER_VALUE,
+        err.message()
+    );
+}
+
+#[test]
+fn read_control_file_one_byte_segment_size_is_singular() {
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "tests::read_control_file_one_byte_segment_child",
+            "--exact",
+            "--ignored",
+            "--test-threads=1",
+            "--nocapture",
+        ])
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "child failed: {text}");
+    assert!(
+        text.contains("CTL1 sqlstate_is_22023=true message=invalid WAL segment size in control file (1 byte)\n"),
+        "C prints '(1 byte)' for xlog_seg_size = 1, got: {text}"
     );
 }
 

@@ -30,10 +30,10 @@ xact_seams = { path = "../xact_seams" }
 miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
 syscache_seams = { path = "../../../utils/cache/syscache_seams" }
 dbcommands_seams = { path = "../../../commands/dbcommands_seams" }
+shmem_seams = { path = "../../../storage/ipc/shmem_seams" }
 
 [dev-dependencies]
 libc = "0.2"
-shmem_seams = { path = "../../../storage/ipc/shmem_seams" }
 file_seams = { path = "../../../storage/file/file_seams" }
 sync_seams = { path = "../../../storage/sync/sync_seams" }
 pgstat_seams = { path = "../../../utils/activity/pgstat_seams" }

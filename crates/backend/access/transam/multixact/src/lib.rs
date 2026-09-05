@@ -1774,26 +1774,19 @@ pub fn MultiXactAdvanceNextMXact(
     min_multi: MultiXactId,
     min_multi_offset: MultiXactOffset,
 ) -> PgResult<()> {
+    // multixact.c:2683-2693. The "MultiXact: setting next multi/offset"
+    // messages there are debug_elog3(DEBUG2, ...), compiled out unless
+    // MULTIXACT_DEBUG (multixact.c:406-416): a release C server never logs
+    // them, so neither does pgrust.
     let st = MultiXactState();
     LWLockAcquire(MultiXactGenLock(), LW_EXCLUSIVE, globals::MyProcNumber())?;
-    let mut set_multi = false;
-    let mut set_offset = false;
     if MultiXactIdPrecedes(st.nextMXact.load(Relaxed), min_multi) {
         st.nextMXact.store(min_multi, Relaxed);
-        set_multi = true;
     }
     if MultiXactOffsetPrecedes(st.nextOffset.load(Relaxed), min_multi_offset) {
         st.nextOffset.store(min_multi_offset, Relaxed);
-        set_offset = true;
     }
     LWLockRelease(MultiXactGenLock())?;
-
-    if set_multi {
-        dlog(DEBUG1, format!("MultiXact: setting next multi to {min_multi}"));
-    }
-    if set_offset {
-        dlog(DEBUG1, format!("MultiXact: setting next offset to {min_multi_offset}"));
-    }
     Ok(())
 }
 

@@ -27,6 +27,15 @@ pub fn CheckXLogRemoved(segno: XLogSegNo, tli: TimeLineID) -> PgResult<()> {
     Ok(())
 }
 
+// PrevCheckPointDistance / CheckPointDistanceEstimate (xlog.c), read by
+// LogCheckpointEnd and XLOGfileslop.
+pub(crate) fn prev_check_point_distance() -> f64 {
+    PREV_CHECK_POINT_DISTANCE.get()
+}
+pub(crate) fn check_point_distance_estimate() -> f64 {
+    CHECK_POINT_DISTANCE_ESTIMATE.get()
+}
+
 pub(crate) fn UpdateCheckPointDistanceEstimate(nbytes: u64) {
     let nbytes = nbytes as f64;
     PREV_CHECK_POINT_DISTANCE.set(nbytes);

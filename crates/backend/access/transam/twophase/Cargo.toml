@@ -57,13 +57,13 @@ twophase_seams = { path = "../twophase_seams" }
 twophase_config = { path = "../twophase_config" }
 twophase_rmgr = { path = "../twophase_rmgr" }
 shmem_seams = { path = "../../../storage/ipc/shmem_seams" }
+waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
 
 [dev-dependencies]
 pg_sema_seams = { path = "../../../port/pg_sema_seams" }
 s_lock_seams = { path = "../../../storage/lmgr/s_lock_seams" }
 latch_seams = { path = "../../../storage/ipc/latch_seams" }
 miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
-waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
 ipc_seams = { path = "../../../storage/ipc/ipc_seams" }
 deadlock_seams = { path = "../../../storage/lmgr/deadlock_seams" }
 pmsignal_seams = { path = "../../../storage/ipc/pmsignal_seams" }

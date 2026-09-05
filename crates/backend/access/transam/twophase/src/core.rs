@@ -772,38 +772,86 @@ pub fn TwoPhaseTransactionGid(subid: Oid, xid: TransactionId) -> PgResult<String
     Ok(format!("pg_gid_{subid}_{xid}"))
 }
 
-/// `IsTwoPhaseTransactionGidForSubid`.
-pub fn IsTwoPhaseTransactionGidForSubid(subid: Oid, gid: &str) -> bool {
+/// `IsTwoPhaseTransactionGidForSubid` (twophase.c:2700-2727). The
+/// reconstruction through `TwoPhaseTransactionGid` is unguarded in C: a
+/// matching-subid GID whose xid part is 0 raises 08P01 "invalid two-phase
+/// transaction ID" (twophase.c:2688) instead of answering false.
+pub fn IsTwoPhaseTransactionGidForSubid(subid: Oid, gid: &str) -> PgResult<bool> {
+    // sscanf(gid, "pg_gid_%u_%u", ...) == 2: %u accepts an optional sign
+    // and leading whitespace and stops at the first non-digit; the
+    // reconstruction below rejects anything but the canonical spelling.
     let Some(rest) = gid.strip_prefix("pg_gid_") else {
-        return false;
+        return Ok(false);
     };
-    let mut parts = rest.splitn(2, '_');
-    let (Some(subid_str), Some(xid_str)) = (parts.next(), parts.next()) else {
-        return false;
+    let (subid_from_gid, rest) = scan_u32(rest);
+    let Some(subid_from_gid) = subid_from_gid else {
+        return Ok(false);
     };
-    let (Ok(subid_from_gid), Ok(xid_from_gid)) =
-        (subid_str.parse::<Oid>(), xid_str.parse::<TransactionId>())
-    else {
-        return false;
+    let Some(rest) = rest.strip_prefix('_') else {
+        return Ok(false);
+    };
+    let (xid_from_gid, _) = scan_u32(rest);
+    let Some(xid_from_gid) = xid_from_gid else {
+        return Ok(false);
     };
     if subid != subid_from_gid {
-        return false;
+        return Ok(false);
     }
-    matches!(TwoPhaseTransactionGid(subid, xid_from_gid), Ok(tmp) if tmp == gid)
+    let tmp = TwoPhaseTransactionGid(subid, xid_from_gid)?;
+    Ok(tmp == gid)
 }
 
-/// `LookupGXactBySubid`.
-pub fn LookupGXactBySubid(subid: Oid) -> bool {
+// One sscanf "%u" conversion: optional leading whitespace, optional sign,
+// at least one digit (wrapping on overflow like strtoul's 32-bit truncation);
+// returns the value and the unconsumed remainder.
+fn scan_u32(s: &str) -> (Option<u32>, &str) {
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() && b[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    let mut neg = false;
+    if i < b.len() && (b[i] == b'+' || b[i] == b'-') {
+        neg = b[i] == b'-';
+        i += 1;
+    }
+    let start = i;
+    let mut v: u64 = 0;
+    while i < b.len() && b[i].is_ascii_digit() {
+        v = v.wrapping_mul(10).wrapping_add((b[i] - b'0') as u64);
+        i += 1;
+    }
+    if i == start {
+        return (None, s);
+    }
+    let v = v as u32;
+    (Some(if neg { v.wrapping_neg() } else { v }), &s[i..])
+}
+
+/// `LookupGXactBySubid` (twophase.c:2735-2757). An ERROR raised by the GID
+/// check inside the scan releases TwoPhaseStateLock through C's error
+/// cleanup; here it is released explicitly before propagating.
+pub fn LookupGXactBySubid(subid: Oid) -> PgResult<bool> {
     let st = TwoPhaseState();
     let mut found = false;
     lock_twophase_state(LW_SHARED);
     for i in 0..unsafe { st.num_prep_xacts.get() } {
         let g = st.gxact(st.prep_xact(i));
-        if unsafe { g.valid.get() } && IsTwoPhaseTransactionGidForSubid(subid, unsafe { g.gid.get() }.as_str()) {
-            found = true;
-            break;
+        if !unsafe { g.valid.get() } {
+            continue;
+        }
+        match IsTwoPhaseTransactionGidForSubid(subid, unsafe { g.gid.get() }.as_str()) {
+            Ok(true) => {
+                found = true;
+                break;
+            }
+            Ok(false) => {}
+            Err(e) => {
+                unlock_twophase_state();
+                return Err(e);
+            }
         }
     }
     unlock_twophase_state();
-    found
+    Ok(found)
 }

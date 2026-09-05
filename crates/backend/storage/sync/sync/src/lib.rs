@@ -6,10 +6,10 @@
 
 use core::cell::{Cell, RefCell};
 
-use ::elog::ereport;
+use ::elog::{elog, ereport};
 use ::mcx::{MemoryContext, PgHashMap, PgVec};
 use ::types_core::BackendType;
-use ::types_error::{ErrorLocation, PgError, PgResult, ERRCODE_OUT_OF_MEMORY, ERROR, WARNING};
+use ::types_error::{ErrorLocation, PgError, PgResult, DEBUG1, ERRCODE_OUT_OF_MEMORY, ERROR, WARNING};
 use ::types_storage::sync::{FileTag, FileTagOpResult, SyncRequestHandler, SyncRequestType};
 
 type CycleCtr = u16;
@@ -266,6 +266,12 @@ pub fn ProcessSyncRequests() -> PgResult<()> {
     })
     .expect("pendingOps checked above")?;
 
+    // sync.c:242-249: the sync performance metrics reported at checkpoint
+    // end (CheckpointStats.ckpt_sync_rels/longest/agg; microseconds).
+    let mut processed: i32 = 0;
+    let mut longest: u64 = 0;
+    let mut total_elapsed: u64 = 0;
+
     let mut absorb_counter = FSYNCS_PER_ABSORB;
     for tag in tags {
         let is_new = with_pending(|p| p.ops.get(&tag).map(|e| e.cycle_ctr == new_ctr))
@@ -290,8 +296,33 @@ pub fn ProcessSyncRequests() -> PgResult<()> {
                 if canceled {
                     break;
                 }
+                // sync.c:329-354: INSTR_TIME around the fsync; on success
+                // update the timing statistics and, under log_checkpoints,
+                // elog(DEBUG1, "checkpoint sync: number=%d file=%s time=%.3f ms").
+                let sync_start = pg_clock::MonoStamp::now();
                 let r = syncfiletag(&tag)?;
                 if r.result == 0 {
+                    let elapsed = sync_start.elapsed_ns() / 1000;
+                    if elapsed > longest {
+                        longest = elapsed;
+                    }
+                    total_elapsed += elapsed;
+                    processed += 1;
+                    // log_checkpoints is installed by the guc owner; substrate
+                    // test binaries without it run the fsync loop silently.
+                    if guc_tables::vars::log_checkpoints.installed()
+                        && guc_tables::vars::log_checkpoints.read()
+                    {
+                        let _ = elog(
+                            DEBUG1,
+                            format!(
+                                "checkpoint sync: number={} file={} time={:.3} ms",
+                                processed,
+                                r.path,
+                                elapsed as f64 / 1000.0
+                            ),
+                        );
+                    }
                     break;
                 }
 
@@ -321,7 +352,12 @@ pub fn ProcessSyncRequests() -> PgResult<()> {
         }
     }
 
-    // CheckpointStats.ckpt_sync_rels/longest/agg pend the stats unit.
+    // sync.c:184-186: return the sync performance metrics for the
+    // checkpoint-end report (the seam is uninstalled in substrate test
+    // binaries without transam_xlog).
+    if transam_xlog_seams::record_ckpt_sync_stats::is_installed() {
+        transam_xlog_seams::record_ckpt_sync_stats::call(processed, longest, total_elapsed);
+    }
     SYNC_IN_PROGRESS.with(|c| c.set(false));
     Ok(())
 }

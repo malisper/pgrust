@@ -45,6 +45,17 @@ thread_local! {
     static CKPT_WRITE_T: Cell<i64> = const { Cell::new(0) };
     static CKPT_SYNC_T: Cell<i64> = const { Cell::new(0) };
     static CKPT_SYNC_END_T: Cell<i64> = const { Cell::new(0) };
+    // The rest of CheckpointStatsData (xlog.h): ckpt_start_t/ckpt_end_t,
+    // ckpt_bufs_written (BufferSync, bufmgr.c:3626), ckpt_sync_rels /
+    // ckpt_longest_sync / ckpt_agg_sync_time (ProcessSyncRequests,
+    // sync.c:184-186, microseconds) — reported through the
+    // transam_xlog_seams checkpoint-stats slots.
+    static CKPT_START_T: Cell<i64> = const { Cell::new(0) };
+    static CKPT_END_T: Cell<i64> = const { Cell::new(0) };
+    static CKPT_BUFS_WRITTEN: Cell<i32> = const { Cell::new(0) };
+    static CKPT_SYNC_RELS: Cell<i32> = const { Cell::new(0) };
+    static CKPT_LONGEST_SYNC: Cell<u64> = const { Cell::new(0) };
+    static CKPT_AGG_SYNC_TIME: Cell<u64> = const { Cell::new(0) };
 }
 
 // TimestampDifferenceMilliseconds (utils/adt/timestamp.c): clamp negatives to
@@ -61,11 +72,33 @@ fn timestamp_difference_milliseconds(start_time: i64, stop_time: i64) -> i64 {
     }
 }
 
-// LogCheckpointEnd's unconditional arm (xlog.c:6730-6738): accumulate the
-// write and sync phase durations into PendingCheckpointerStats, in
-// milliseconds, regardless of log_checkpoints. The seams are uninstalled in
-// substrate test binaries without pgstat; skipping there loses only stats.
-fn accumulate_checkpoint_timing() {
+// CreateCheckPoint / CreateRestartPoint (xlog.c:6963-6964, 7724-7725):
+// MemSet(&CheckpointStats, 0) + ckpt_start_t = GetCurrentTimestamp().
+fn reset_checkpoint_stats() {
+    CKPT_SEGS_ADDED.set(0);
+    CKPT_SEGS_REMOVED.set(0);
+    CKPT_SEGS_RECYCLED.set(0);
+    CKPT_SLRU_WRITTEN.set(0);
+    CKPT_WRITE_T.set(0);
+    CKPT_SYNC_T.set(0);
+    CKPT_SYNC_END_T.set(0);
+    CKPT_END_T.set(0);
+    CKPT_BUFS_WRITTEN.set(0);
+    CKPT_SYNC_RELS.set(0);
+    CKPT_LONGEST_SYNC.set(0);
+    CKPT_AGG_SYNC_TIME.set(0);
+    CKPT_START_T.set(timestamp_seams::get_current_timestamp::call());
+}
+
+// LogCheckpointEnd (xlog.c:6720-6817). The unconditional arm (6730-6738)
+// accumulates the write and sync phase durations into
+// PendingCheckpointerStats, in milliseconds, regardless of log_checkpoints
+// (the seams are uninstalled in substrate test binaries without pgstat;
+// skipping there loses only stats); the log line (6770-6816) is gated on
+// log_checkpoints.
+fn log_checkpoint_end(restartpoint: bool) {
+    CKPT_END_T.set(timestamp_seams::get_current_timestamp::call());
+
     let write_msecs = timestamp_difference_milliseconds(CKPT_WRITE_T.get(), CKPT_SYNC_T.get());
     let sync_msecs = timestamp_difference_milliseconds(CKPT_SYNC_T.get(), CKPT_SYNC_END_T.get());
     if pgstat_seams::pgstat_count_checkpointer_write_time::is_installed() {
@@ -74,6 +107,67 @@ fn accumulate_checkpoint_timing() {
     if pgstat_seams::pgstat_count_checkpointer_sync_time::is_installed() {
         pgstat_seams::pgstat_count_checkpointer_sync_time::call(sync_msecs);
     }
+
+    if !guc_tables::vars::log_checkpoints.read() {
+        return;
+    }
+
+    let total_msecs = timestamp_difference_milliseconds(CKPT_START_T.get(), CKPT_END_T.get());
+    // Timing values in CheckpointStats are microseconds; ceiling-divide to
+    // milliseconds for printing.
+    let longest_msecs = ((CKPT_LONGEST_SYNC.get() + 999) / 1000) as i64;
+    let sync_rels = CKPT_SYNC_RELS.get();
+    let average_sync_time: u64 = if sync_rels > 0 {
+        CKPT_AGG_SYNC_TIME.get() / sync_rels as u64
+    } else {
+        0
+    };
+    let average_msecs = ((average_sync_time + 999) / 1000) as i64;
+
+    let bufs_written = CKPT_BUFS_WRITTEN.get();
+    let cf = control_file();
+    let (lsn, redo) = (cf.checkPoint, cf.checkPointCopy.redo);
+    let _ = elog(
+        LOG,
+        format!(
+            "{} complete: wrote {} buffers ({:.1}%), wrote {} SLRU buffers; {} WAL file(s) added, {} removed, {} recycled; write={}.{:03} s, sync={}.{:03} s, total={}.{:03} s; sync files={}, longest={}.{:03} s, average={}.{:03} s; distance={} kB, estimate={} kB; lsn={:X}/{:X}, redo lsn={:X}/{:X}",
+            if restartpoint { "restartpoint" } else { "checkpoint" },
+            bufs_written,
+            bufs_written as f64 * 100.0 / init_small::globals::NBuffers() as f64,
+            CKPT_SLRU_WRITTEN.get(),
+            CKPT_SEGS_ADDED.get(),
+            CKPT_SEGS_REMOVED.get(),
+            CKPT_SEGS_RECYCLED.get(),
+            write_msecs / 1000,
+            write_msecs % 1000,
+            sync_msecs / 1000,
+            sync_msecs % 1000,
+            total_msecs / 1000,
+            total_msecs % 1000,
+            sync_rels,
+            longest_msecs / 1000,
+            longest_msecs % 1000,
+            average_msecs / 1000,
+            average_msecs % 1000,
+            (crate::removal::prev_check_point_distance() / 1024.0) as i32,
+            (crate::removal::check_point_distance_estimate() / 1024.0) as i32,
+            lsn >> 32,
+            lsn as u32,
+            redo >> 32,
+            redo as u32,
+        ),
+    );
+}
+
+// bufmgr.c:3626 (BufferSync): CheckpointStats.ckpt_bufs_written += num_written.
+pub(crate) fn count_ckpt_bufs_written(num_written: i32) {
+    CKPT_BUFS_WRITTEN.set(CKPT_BUFS_WRITTEN.get() + num_written);
+}
+// sync.c:184-186 (ProcessSyncRequests): the sync performance metrics.
+pub(crate) fn record_ckpt_sync_stats(rels: i32, longest_us: u64, agg_us: u64) {
+    CKPT_SYNC_RELS.set(rels);
+    CKPT_LONGEST_SYNC.set(longest_us);
+    CKPT_AGG_SYNC_TIME.set(agg_us);
 }
 
 pub(crate) fn count_ckpt_slru_written() {
@@ -97,11 +191,28 @@ fn data_path(rel: &str) -> String {
     format!("{dir}/{rel}")
 }
 
+// str_time (xlog.c:5236-5246): pg_strftime("%Y-%m-%d %H:%M:%S %Z",
+// pg_localtime(&tnow, log_timezone)). C NULL-derefs when log_timezone is
+// unset; it never is by StartupXLOG (pg_timezone_initialize runs in
+// PostmasterMain / the standalone InitPostgres path), so loud here too.
+fn str_time(tnow: i64) -> String {
+    let tz = pgtz::log_timezone().expect("log_timezone not initialized");
+    let tm = localtime::pg_localtime(tnow, tz).expect("pg_localtime failed for the control file time");
+    let mut buf = [0u8; 128];
+    let len = strftime::pg_strftime(&mut buf, b"%Y-%m-%d %H:%M:%S %Z", &tm).unwrap_or(0);
+    String::from_utf8_lossy(&buf[..len]).into_owned()
+}
+
 pub(crate) fn ValidateXLOGDirectoryStructure() -> PgResult<()> {
+    // xlog.c:4095-4146: every FATAL carries errcode_for_file_access() (the
+    // stat/mkdir errno; ENOTDIR-shaped "exists but isn't a directory" arms
+    // keep the successful stat's errno like C), and the mkdir arm adds %m.
     let pg_wal = data_path(XLOGDIR);
     let mut fi = fd::FileInfo::zeroed();
     if !(fd::pg_stat(&pg_wal, &mut fi) == 0 && fi.is_dir()) {
         return ereport(FATAL)
+            .with_saved_errno(fd::get_errno())
+            .errcode_for_file_access()
             .errmsg(format!("required WAL directory \"{XLOGDIR}\" does not exist"))
             .finish(loc("ValidateXLOGDirectoryStructure"));
     }
@@ -111,6 +222,8 @@ pub(crate) fn ValidateXLOGDirectoryStructure() -> PgResult<()> {
         if fd::pg_stat(&path, &mut fi) == 0 {
             if !fi.is_dir() {
                 return ereport(FATAL)
+                    .with_saved_errno(fd::get_errno())
+                    .errcode_for_file_access()
                     .errmsg(format!("required WAL directory \"{XLOGDIR}/{sub}\" does not exist"))
                     .finish(loc("ValidateXLOGDirectoryStructure"));
             }
@@ -118,7 +231,9 @@ pub(crate) fn ValidateXLOGDirectoryStructure() -> PgResult<()> {
             let _ = elog(LOG, format!("creating missing WAL directory \"{XLOGDIR}/{sub}\""));
             if fd::MakePGDirectory(&path) < 0 {
                 return ereport(FATAL)
-                    .errmsg(format!("could not create missing directory \"{XLOGDIR}/{sub}\""))
+                    .with_saved_errno(fd::get_errno())
+                    .errcode_for_file_access()
+                    .errmsg(format!("could not create missing directory \"{XLOGDIR}/{sub}\": %m"))
                     .finish(loc("ValidateXLOGDirectoryStructure"));
             }
         }
@@ -176,20 +291,49 @@ pub fn StartupXLOG() -> PgResult<()> {
             .finish(loc("StartupXLOG"));
     }
 
-    let state = control_file().state;
-    let announce = |msg: String| {
-        let level = if init_small::globals::IsPostmasterEnvironment() { LOG } else { NOTICE };
-        let _ = elog(level, msg);
-    };
+    // xlog.c:5502-5552: every banner ends in str_time(ControlFile->time)
+    // (the checkPointCopy time for DB_IN_ARCHIVE_RECOVERY); only the
+    // DB_SHUTDOWNED arm drops to NOTICE in standalone mode ("don't be
+    // chatty"); the two in-recovery arms carry a HINT.
+    let cf = control_file();
+    let state = cf.state;
+    let cf_time = str_time(cf.time);
     match state {
-        DB_SHUTDOWNED => announce("database system was shut down".into()),
-        DB_SHUTDOWNED_IN_RECOVERY => announce("database system was shut down in recovery".into()),
-        DB_SHUTDOWNING => announce("database system shutdown was interrupted; last known up".into()),
-        DB_IN_CRASH_RECOVERY => announce("database system was interrupted while in recovery".into()),
-        DB_IN_ARCHIVE_RECOVERY => {
-            announce("database system was interrupted while in recovery at log time".into())
+        DB_SHUTDOWNED => {
+            let level = if init_small::globals::IsPostmasterEnvironment() { LOG } else { NOTICE };
+            let _ = elog(level, format!("database system was shut down at {cf_time}"));
         }
-        DB_IN_PRODUCTION => announce("database system was interrupted; last known up".into()),
+        DB_SHUTDOWNED_IN_RECOVERY => {
+            let _ = elog(LOG, format!("database system was shut down in recovery at {cf_time}"));
+        }
+        DB_SHUTDOWNING => {
+            let _ = elog(
+                LOG,
+                format!("database system shutdown was interrupted; last known up at {cf_time}"),
+            );
+        }
+        DB_IN_CRASH_RECOVERY => {
+            let _ = ereport(LOG)
+                .errmsg(format!("database system was interrupted while in recovery at {cf_time}"))
+                .errhint(
+                    "This probably means that some data is corrupted and you will have to use the last backup for recovery.",
+                )
+                .finish(loc("StartupXLOG"));
+        }
+        DB_IN_ARCHIVE_RECOVERY => {
+            let _ = ereport(LOG)
+                .errmsg(format!(
+                    "database system was interrupted while in recovery at log time {}",
+                    str_time(cf.checkPointCopy.time)
+                ))
+                .errhint(
+                    "If this has occurred more than once some data might be corrupted and you might need to choose an earlier recovery target.",
+                )
+                .finish(loc("StartupXLOG"));
+        }
+        DB_IN_PRODUCTION => {
+            let _ = elog(LOG, format!("database system was interrupted; last known up at {cf_time}"));
+        }
         _ => {
             return ereport(FATAL)
                 .errcode(ERRCODE_DATA_CORRUPTED)
@@ -788,10 +932,14 @@ fn XLogInitNewTimeline(
         let f = crate::write::XLogFileInit(start_log_seg_no, new_tli)?;
         // SAFETY: f is the open fd returned by XLogFileInit.
         if unsafe { libc::close(f) } != 0 {
+            // xlog.c:5303-5312: save errno across XLogFileName;
+            // errcode_for_file_access() + %m.
+            let save_errno = fd::get_errno();
             let fname = XLogFileName(new_tli, start_log_seg_no, wal_segsz);
-            let e = std::io::Error::last_os_error();
             return ereport(ERROR)
-                .errmsg(format!("could not close file \"{fname}\": {e}"))
+                .with_saved_errno(save_errno)
+                .errcode_for_file_access()
+                .errmsg(format!("could not close file \"{fname}\": %m"))
                 .finish(loc("XLogInitNewTimeline"));
         }
     }
@@ -1096,10 +1244,8 @@ pub fn CreateCheckPoint(flags: i32) -> PgResult<bool> {
         return Err(Box::new(PgError::new(ERROR, "can't create a checkpoint during recovery")));
     }
 
-    CKPT_SEGS_ADDED.set(0);
-    CKPT_SEGS_REMOVED.set(0);
-    CKPT_SEGS_RECYCLED.set(0);
-    CKPT_SLRU_WRITTEN.set(0);
+    // xlog.c:6963-6964
+    reset_checkpoint_stats();
 
     sync_seams::sync_pre_checkpoint::call()?;
 
@@ -1128,6 +1274,10 @@ pub fn CreateCheckPoint(flags: i32) -> PgResult<bool> {
         && last_important_lsn == control_file().checkPoint
     {
         init_small::globals::EndCriticalSection();
+        // xlog.c:7018
+        let _ = ereport(DEBUG1)
+            .errmsg_internal("checkpoint skipped because system is idle")
+            .finish(loc("CreateCheckPoint"));
         return Ok(false);
     }
 
@@ -1328,22 +1478,8 @@ pub fn CreateCheckPoint(flags: i32) -> PgResult<bool> {
         )?;
     }
 
-    // LogCheckpointEnd (xlog.c): timing accumulation is unconditional; only
-    // the log line below is gated on log_checkpoints.
-    accumulate_checkpoint_timing();
-
-    if guc_tables::vars::log_checkpoints.read() {
-        let _ = elog(
-            LOG,
-            format!(
-                "checkpoint complete: wrote {} SLRU buffers; {} WAL file(s) added, {} removed, {} recycled",
-                CKPT_SLRU_WRITTEN.get(),
-                CKPT_SEGS_ADDED.get(),
-                CKPT_SEGS_REMOVED.get(),
-                CKPT_SEGS_RECYCLED.get()
-            ),
-        );
-    }
+    // xlog.c:7392: LogCheckpointEnd(false).
+    log_checkpoint_end(false);
 
     // Reset the process title (xlog.c:7397).
     update_checkpoint_display(flags, false, true);
@@ -1398,10 +1534,8 @@ pub fn CreateRestartPoint(flags: i32) -> PgResult<bool> {
     WALInsertLockRelease();
     ctl.info_lck.with(|| ctl.RedoRecPtr.store(last_ckpt.redo, Relaxed));
 
-    CKPT_SEGS_ADDED.set(0);
-    CKPT_SEGS_REMOVED.set(0);
-    CKPT_SEGS_RECYCLED.set(0);
-    CKPT_SLRU_WRITTEN.set(0);
+    // xlog.c:7724-7725
+    reset_checkpoint_stats();
 
     if guc_tables::vars::log_checkpoints.read() {
         let _ = elog(LOG, format!("restartpoint starting:{}", checkpoint_flag_words(flags)));
@@ -1491,21 +1625,8 @@ pub fn CreateRestartPoint(flags: i32) -> PgResult<bool> {
         )?;
     }
 
-    // LogCheckpointEnd(true) (xlog.c): timing accumulation is unconditional.
-    accumulate_checkpoint_timing();
-
-    if guc_tables::vars::log_checkpoints.read() {
-        let _ = elog(
-            LOG,
-            format!(
-                "restartpoint complete: wrote {} SLRU buffers; {} WAL file(s) added, {} removed, {} recycled",
-                CKPT_SLRU_WRITTEN.get(),
-                CKPT_SEGS_ADDED.get(),
-                CKPT_SEGS_REMOVED.get(),
-                CKPT_SEGS_RECYCLED.get()
-            ),
-        );
-    }
+    // xlog.c:7866: LogCheckpointEnd(true).
+    log_checkpoint_end(true);
 
     // Reset the process title (xlog.c:7869).
     update_checkpoint_display(flags, true, true);

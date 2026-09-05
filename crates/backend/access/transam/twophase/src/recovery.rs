@@ -1,10 +1,10 @@
-use elog::ereport;
+use elog::{elog, ereport};
 use lwlock::LW_EXCLUSIVE;
 use types_core::{
     RepOriginId, TransactionId, TransactionIdFollows, TransactionIdFollowsOrEquals,
     TransactionIdPrecedes, XLogRecPtr, INVALID_PROC_NUMBER,
 };
-use types_error::{ErrorLevel, PgResult, ERRCODE_DATA_CORRUPTED, ERROR, LOG, WARNING};
+use types_error::{ErrorLevel, PgResult, DEBUG2, ERRCODE_DATA_CORRUPTED, ERROR, LOG, WARNING};
 
 use crate::codec::{BufferLayout, TwoPhaseFileHeader};
 use crate::core::{
@@ -93,6 +93,12 @@ pub(crate) fn prepare_redo_add_locked(
     if origin_id != 0 {
         origin_seams::replorigin_advance::call(origin_id, hdr.origin_lsn, end_lsn, false, false)?;
     }
+
+    // twophase.c:2559
+    let _ = elog(
+        DEBUG2,
+        format!("added 2PC data in shared memory for transaction {}", hdr.xid),
+    );
     Ok(())
 }
 
@@ -111,6 +117,8 @@ pub(crate) fn prepare_redo_remove_locked(xid: TransactionId, give_warning: bool)
     if found == NO_GXACT {
         return Ok(());
     }
+    // twophase.c:2602
+    let _ = elog(DEBUG2, format!("removing 2PC data for transaction {xid}"));
     if unsafe { st.gxact(found).ondisk.get() } {
         files::remove_two_phase_file(xid, give_warning)?;
     }

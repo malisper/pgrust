@@ -57,6 +57,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // CheckpointStats.ckpt_bufs_written += num_written (bufmgr.c:3626,
+    // BufferSync) — the LogCheckpointEnd "wrote %d buffers" field.
+    pub fn count_ckpt_bufs_written(num_written: i32)
+);
+
+seam_core::seam!(
+    // CheckpointStats.ckpt_sync_rels / ckpt_longest_sync /
+    // ckpt_agg_sync_time (sync.c:184-186, ProcessSyncRequests; the times
+    // are microseconds) — the LogCheckpointEnd "sync files=" fields.
+    pub fn record_ckpt_sync_stats(rels: i32, longest_us: u64, agg_us: u64)
+);
+
+seam_core::seam!(
     // XLogLogicalInfoActive() (xlog.h): wal_level >= logical.
     pub fn xlog_logical_info_active() -> bool
 );

@@ -150,9 +150,14 @@ pub fn ReadControlFile() -> PgResult<()> {
 
     let wal_segment_size = cf.xlog_seg_size as i32;
     if !IsValidWalSegSize(wal_segment_size) {
+        // xlog.c:4541-4547: errmsg_plural on the segment size ("1 byte").
         return ereport(ERROR)
             .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
-            .errmsg(format!("invalid WAL segment size in control file ({wal_segment_size} bytes)"))
+            .errmsg_plural(
+                format!("invalid WAL segment size in control file ({wal_segment_size} byte)"),
+                format!("invalid WAL segment size in control file ({wal_segment_size} bytes)"),
+                wal_segment_size.max(0) as u64,
+            )
             .errdetail("The WAL segment size must be a power of two between 1 MB and 1 GB.".to_string())
             .finish(loc("ReadControlFile"));
     }

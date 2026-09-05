@@ -18,6 +18,12 @@ fn shmem_registry() -> &'static Mutex<std::collections::HashMap<String, usize>> 
     R.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
+// ShmemIndex name -> requested size (pg_shmem_allocations.size).
+fn shmem_sizes() -> &'static Mutex<std::collections::HashMap<String, usize>> {
+    static R: OnceLock<Mutex<std::collections::HashMap<String, usize>>> = OnceLock::new();
+    R.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
 fn setup() {
     static SETUP: Once = Once::new();
     SETUP.call_once(|| {
@@ -40,6 +46,7 @@ fn setup() {
             let p = unsafe { std::alloc::alloc_zeroed(layout) };
             assert!(!p.is_null());
             reg.insert(name.to_string(), p.expose_provenance());
+            shmem_sizes().lock().unwrap().insert(name.to_string(), size);
             Ok((p, false))
         });
         shmem_seams::add_size::set(|a, b| Ok(a + b));
@@ -393,4 +400,21 @@ fn object_id_generator_prefetches_and_advances() {
 
     // moving the counter backwards is refused
     assert!(SetNextObjectId(FirstGenbkiObjectId).is_err());
+}
+
+// varsup.c:52-60 VarsupShmemInit: ShmemInitStruct("TransamVariables",
+// sizeof(TransamVariablesData), &found) registers the ShmemIndex row that
+// pg_shmem_allocations lists (C 18.6: size 72 on every 64-bit platform).
+// Audit a186-candidate-fp-transam-varsup-3b02606d589d71e21a73-1.
+#[test]
+fn shmem_init_registers_transam_variables_in_shmem_index() {
+    let _l = test_lock();
+    setup();
+    let sizes = shmem_sizes().lock().unwrap();
+    assert_eq!(
+        sizes.get("TransamVariables").copied(),
+        Some(72),
+        "TransamVariables is missing from the ShmemIndex (or has the wrong size): {:?}",
+        sizes.iter().collect::<Vec<_>>()
+    );
 }

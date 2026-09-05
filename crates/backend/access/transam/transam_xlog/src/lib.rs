@@ -651,6 +651,8 @@ pub fn init_seams() {
     s::xlog_flush_commit::set(write::XLogFlushPipelined);
     s::xlog_needs_flush::set(write::XLogNeedsFlush);
     s::count_ckpt_slru_written::set(startup::count_ckpt_slru_written);
+    s::count_ckpt_bufs_written::set(startup::count_ckpt_bufs_written);
+    s::record_ckpt_sync_stats::set(startup::record_ckpt_sync_stats);
     s::xlog_logical_info_active::set(XLogLogicalInfoActive);
     s::xlog_standby_info_active::set(XLogStandbyInfoActive);
     s::recovery_in_progress::set(insert::RecoveryInProgress);

@@ -631,6 +631,7 @@ pub fn BufferSync(flags: i32) -> PgResult<()> {
         // C balances via a min-heap over per-tablespace progress; tablespace
         // counts are tiny, so a linear min scan gives the same write order.
         let mut num_processed = 0usize;
+        let mut num_written: i32 = 0;
         let mut live = scratch.per_ts.len();
         while live > 0 {
             let ts_i = scratch
@@ -652,6 +653,7 @@ pub fn BufferSync(flags: i32) -> PgResult<()> {
                 // pg_stat_checkpointer.buffers_written).
                 if SyncOneBuffer(buf_id, false, &mut wb)? & BUF_WRITTEN != 0 {
                     pgstat::checkpointer::pgstat_count_checkpointer_buffers_written();
+                    num_written += 1;
                 }
             }
 
@@ -674,10 +676,12 @@ pub fn BufferSync(flags: i32) -> PgResult<()> {
         }
 
         IssuePendingWritebacks(&mut wb, IOContext::IOCONTEXT_NORMAL)?;
-        // CheckpointStats (the log-line struct: ckpt_bufs_written and the
-        // write=/sync= phase timestamps that also feed
-        // pg_stat_checkpointer.write_time/sync_time) pends the stats unit;
-        // buffers_written above is counted directly.
+        // bufmgr.c:3626: CheckpointStats.ckpt_bufs_written += num_written
+        // (the LogCheckpointEnd "wrote %d buffers" field; the seam is
+        // uninstalled in substrate test binaries without transam_xlog).
+        if transam_xlog_seams::count_ckpt_bufs_written::is_installed() {
+            transam_xlog_seams::count_ckpt_bufs_written::call(num_written);
+        }
         Ok(())
     })
 }
