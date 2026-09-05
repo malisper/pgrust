@@ -40,23 +40,33 @@ impl MultiSort {
     }
 
     // ApplySortComparator (sortsupport.h): nulls sort last, forward order.
-    pub fn compare_dim(&mut self, dim: usize, a: Datum, an: bool, b: Datum, bn: bool) -> i32 {
+    // The comparator is an fmgr call (extended_stats.c:881 multi_sort_compare,
+    // mcv.c:471 sort_item_compare): a user-defined btree support function
+    // can raise, and that ereport propagates as the Err (C longjmps out of
+    // the sort); it must never become a panic.
+    pub fn compare_dim(
+        &mut self,
+        dim: usize,
+        a: Datum,
+        an: bool,
+        b: Datum,
+        bn: bool,
+    ) -> PgResult<i32> {
         if an {
             if bn {
-                return 0;
+                return Ok(0);
             }
-            return 1;
+            return Ok(1);
         }
         if bn {
-            return -1;
+            return Ok(-1);
         }
         let d = &mut self.dims[dim];
         // Comparators (numeric_cmp etc.) detoast by-ref args through the
         // result mcx; call-lifetime scratch (ANALYZE cold path).
         let scratch = ::mcx::MemoryContext::new("multi_sort compare_dim");
-        types_fmgr::function_call2_coll_in(&mut d.cmp, d.collation, scratch.mcx(), a, b)
-            .unwrap_or_else(|e| panic!("multi_sort_compare: comparison failed: {e:?}"))
-            .as_i32()
+        Ok(types_fmgr::function_call2_coll_in(&mut d.cmp, d.collation, scratch.mcx(), a, b)?
+            .as_i32())
     }
 }
 
@@ -81,16 +91,17 @@ impl<'mcx> ItemStore<'mcx> {
         (self.values[i], self.isnull[i])
     }
 
-    pub fn compare(&self, mss: &mut MultiSort, a: SortItem, b: SortItem) -> i32 {
+    // multi_sort_compare (extended_stats.c:872).
+    pub fn compare(&self, mss: &mut MultiSort, a: SortItem, b: SortItem) -> PgResult<i32> {
         for dim in 0..mss.dims.len() {
             let (av, an) = self.value(a, dim);
             let (bv, bn) = self.value(b, dim);
-            let c = mss.compare_dim(dim, av, an, bv, bn);
+            let c = mss.compare_dim(dim, av, an, bv, bn)?;
             if c != 0 {
-                return c;
+                return Ok(c);
             }
         }
-        0
+        Ok(0)
     }
 
     pub fn compare_dims(
@@ -100,23 +111,62 @@ impl<'mcx> ItemStore<'mcx> {
         end: usize,
         a: SortItem,
         b: SortItem,
-    ) -> i32 {
+    ) -> PgResult<i32> {
         for dim in start..=end {
             let (av, an) = self.value(a, dim);
             let (bv, bn) = self.value(b, dim);
-            let c = mss.compare_dim(dim, av, an, bv, bn);
+            let c = mss.compare_dim(dim, av, an, bv, bn)?;
             if c != 0 {
-                return c;
+                return Ok(c);
             }
         }
-        0
+        Ok(0)
     }
+}
+
+// CHECK_FOR_INTERRUPTS() (miscadmin.h): the InterruptPending fast path, then
+// ProcessInterrupts through the tcop seam (a raised cancel/die is the Err).
+pub fn check_for_interrupts() -> PgResult<()> {
+    if init_small::globals::InterruptPending() {
+        return postgres_seams::check_for_interrupts::call();
+    }
+    Ok(())
 }
 
 // port/qsort.c (Bentley & McIlroy), exact algorithm: equal-key output order
 // is a byte-format parity requirement for the serialized statistics.
 // Canonical shared port: crates/_support/pg_qsort.
-pub use ::pg_qsort::pg_qsort;
+//
+// Every sort in this crate is C's qsort_interruptible (extended_stats.c:1110
+// build_sorted_items, mvdistinct.c:491, mcv.c:456/527/695): a long sort of a
+// large multi-column sample must answer a query cancel. The two entry points:
+//
+// - `qsort_interruptible`: infallible comparator, the interrupt check placed
+//   exactly at lib/sort_template.h's ST_CHECK_FOR_INTERRUPTS points
+//   (mcv.c:456 compare_sort_item_count).
+// - `qsort_interruptible_arg`: fmgr comparator that can raise (multi_sort_compare,
+//   sort_item_compare, compare_datums_simple). The first comparator error
+//   aborts the sort and propagates, as C's ereport longjmps out. The
+//   CHECK_FOR_INTERRUPTS rides the comparator call: it runs at least at every
+//   template check point (each of which is adjacent to a comparison), never
+//   touches the data, and so leaves the permutation pg_qsort-exact; the
+//   InterruptPending fast path makes the extra checks a thread-local load.
+pub fn qsort_interruptible<T: Copy>(
+    v: &mut [T],
+    cmp: impl FnMut(&T, &T) -> i32,
+) -> PgResult<()> {
+    ::pg_qsort::pg_qsort_interruptible(v, cmp, check_for_interrupts)
+}
+
+pub fn qsort_interruptible_arg<T: Copy>(
+    v: &mut [T],
+    mut cmp: impl FnMut(&T, &T) -> PgResult<i32>,
+) -> PgResult<()> {
+    ::pg_qsort::pg_qsort_arg(v, |a, b| {
+        check_for_interrupts()?;
+        cmp(a, b)
+    })
+}
 
 fn missing_lt_opr(typid: Oid) -> Box<PgError> {
     PgError::error(format!(
@@ -129,6 +179,51 @@ fn missing_lt_opr(typid: Oid) -> Box<PgError> {
 mod tests {
     use super::*;
     use types_error::ERRCODE_INTERNAL_ERROR;
+
+    // A comparator that raises (a user-defined btree support function) must
+    // abort the sort with its own error, as C's ereport longjmps out of
+    // qsort_interruptible; pre-fix the port panicked in compare_dim.
+    #[test]
+    fn comparator_error_propagates_out_of_the_sort() {
+        let mut v = [5u32, 3, 9, 1, 7, 2, 8, 6, 4];
+        let e = qsort_interruptible_arg(&mut v, |a, b| {
+            if *a == 9 || *b == 9 {
+                return Err(PgError::error("comparator raised").into());
+            }
+            Ok((*a as i64 - *b as i64).signum() as i32)
+        })
+        .unwrap_err();
+        assert_eq!(e.message(), "comparator raised");
+        let mut w = [5u32, 3, 9, 1, 7, 2, 8, 6, 4];
+        qsort_interruptible_arg(&mut w, |a, b| Ok((*a as i64 - *b as i64).signum() as i32))
+            .unwrap();
+        assert_eq!(w, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    }
+
+    // qsort_interruptible: a pending interrupt (query cancel) is answered
+    // from inside the sort, through the CHECK_FOR_INTERRUPTS seam.
+    #[test]
+    fn pending_interrupt_aborts_the_sort() {
+        fn cancel() -> PgResult<()> {
+            init_small::globals::SetInterruptPending(false);
+            Err(PgError::error("canceling statement due to user request").into())
+        }
+        if !postgres_seams::check_for_interrupts::is_installed() {
+            postgres_seams::check_for_interrupts::set(cancel);
+        }
+        let mut v = [5u32, 3, 9, 1, 7, 2, 8, 6, 4];
+        init_small::globals::SetInterruptPending(true);
+        let e = qsort_interruptible_arg(&mut v, |a, b| Ok((*a as i64 - *b as i64).signum() as i32))
+            .unwrap_err();
+        assert_eq!(e.message(), "canceling statement due to user request");
+        init_small::globals::SetInterruptPending(true);
+        let e = qsort_interruptible(&mut v, |a, b| (*a as i64 - *b as i64).signum() as i32)
+            .unwrap_err();
+        assert_eq!(e.message(), "canceling statement due to user request");
+        assert!(!init_small::globals::InterruptPending());
+        qsort_interruptible(&mut v, |a, b| (*a as i64 - *b as i64).signum() as i32).unwrap();
+        assert_eq!(v, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    }
 
     #[test]
     fn json_missing_lt_opr_is_ereport_xx000() {

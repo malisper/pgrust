@@ -19,7 +19,9 @@ use datum::Datum;
 use mcx::{Mcx, PgVec};
 use types_core::fmgr::F_OIDEQ;
 use types_core::{AttrNumber, Oid};
-use types_error::{ErrorLocation, PgResult, WARNING};
+use types_error::{
+    ErrorLocation, PgError, PgResult, PG_DIAG_SCHEMA_NAME, PG_DIAG_TABLE_NAME, WARNING,
+};
 use types_rel::Relation;
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_tuple::{HeapTupleData, TupleDescData};
@@ -106,22 +108,23 @@ fn getattr(tup: &HeapTupleData<'_>, attnum: i32, desc: &TupleDescData<'_>) -> (D
     (d, isnull)
 }
 
-// Inline varlena payload; external/compressed never occur for the fresh
-// int2vector/char[] catalog values read here.
-fn varlena_body<'a>(d: Datum) -> &'a [u8] {
+// Varlena payload of a catalog array datum, detoasted (C's DatumGetArrayTypeP
+// on stxkind: pg_statistic_ext has a TOAST table, and a catalog UPDATE can
+// leave the array compressed or external).
+fn varlena_body<'mcx>(mcx: Mcx<'mcx>, d: Datum) -> PgResult<&'mcx [u8]> {
     let p = d.as_usize() as *const u8;
     // SAFETY: non-null varlena datum into a live catalog tuple.
     unsafe {
         let b0 = *p;
         if b0 == 0x01 || (b0 & 0x03) == 0x02 {
-            panic!("statistics: unexpected toasted catalog array");
+            return Ok(&detoast::detoast_attr(mcx, expression::varlena_image(d))?.leak()[4..]);
         }
         if b0 & 0x01 != 0 {
             let len = ((b0 as usize) >> 1) & 0x7F;
-            core::slice::from_raw_parts(p.add(1), len - 1)
+            Ok(core::slice::from_raw_parts(p.add(1), len - 1))
         } else {
             let w = u32::from_ne_bytes(*(p as *const [u8; 4]));
-            core::slice::from_raw_parts(p.add(4), ((w as usize) >> 2) - 4)
+            Ok(core::slice::from_raw_parts(p.add(4), ((w as usize) >> 2) - 4))
         }
     }
 }
@@ -130,10 +133,26 @@ fn read_i32(b: &[u8], off: usize) -> i32 {
     i32::from_ne_bytes(b[off..off + 4].try_into().unwrap())
 }
 
-// 1-D no-null array payload: 20-byte header, then elements.
-fn array_elems(body: &[u8]) -> (usize, &[u8]) {
-    assert_eq!(read_i32(body, 0), 1, "stx array is not 1-D");
-    assert_eq!(read_i32(body, 4), 0, "stx array has nulls");
+const CHAROID: Oid = 18;
+
+// stxkind (extended_stats.c:470): ARR_NDIM == 1, no nulls (dataoffset 0),
+// element type "char"; anything else is C's elog(ERROR). 20-byte header,
+// then the elements.
+fn stxkind_elems(body: &[u8]) -> PgResult<(usize, &[u8])> {
+    if body.len() < 20
+        || read_i32(body, 0) != 1
+        || read_i32(body, 4) != 0
+        || read_i32(body, 8) as Oid != CHAROID
+    {
+        return Err(PgError::error("stxkind is not a 1-D char array").into());
+    }
+    let n = read_i32(body, 12) as usize;
+    Ok((n, &body[20..]))
+}
+
+// stxkeys: an int2vector (always 1-D, no nulls by construction); C reads
+// stxkeys.dim1 / stxkeys.values without a check.
+fn stxkeys_elems(body: &[u8]) -> (usize, &[u8]) {
     let n = read_i32(body, 12) as usize;
     (n, &body[20..])
 }
@@ -168,7 +187,7 @@ pub fn fetch_statentries_for_relation<'mcx>(
         }
 
         let (keys_d, _) = getattr(tup, Anum_pg_statistic_ext_stxkeys, desc);
-        let (nkeys, keydata) = array_elems(varlena_body(keys_d));
+        let (nkeys, keydata) = stxkeys_elems(varlena_body(mcx, keys_d)?);
         let mut columns: PgVec<'mcx, AttrNumber> = mcx::vec_with_capacity_in(mcx, nkeys)?;
         for i in 0..nkeys {
             columns.push(i16::from_ne_bytes(keydata[i * 2..i * 2 + 2].try_into().unwrap()));
@@ -178,7 +197,7 @@ pub fn fetch_statentries_for_relation<'mcx>(
         let stattarget = if target_null { -1 } else { target_d.as_i16() as i32 };
 
         let (kind_d, _) = getattr(tup, Anum_pg_statistic_ext_stxkind, desc);
-        let (nkinds, kinddata) = array_elems(varlena_body(kind_d));
+        let (nkinds, kinddata) = stxkind_elems(varlena_body(mcx, kind_d)?)?;
         let mut types: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, nkinds)?;
         types.extend_from_slice(&kinddata[..nkinds]);
 
@@ -303,19 +322,25 @@ pub fn BuildRelationExtStatistics<'mcx, F: ExprStatsCompute<'mcx>>(
         let Some(stats) =
             lookup_var_attr_stats(mcx, bmcx, &stat.columns, &stat.exprs, colstats, expr_compute)?
         else {
-            let nsp = lsyscache::get_namespace_name(bmcx, onerel.rd_rel.relnamespace)?
-                .map(|s| s.as_str().to_string())
-                .unwrap_or_default();
-            ereport(WARNING)
-                .errcode(types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
-                .errmsg(format!(
-                    "statistics object \"{}.{}\" could not be computed for relation \"{}.{}\"",
-                    core::str::from_utf8(&stat.schema).unwrap_or("?"),
-                    core::str::from_utf8(&stat.name).unwrap_or("?"),
-                    nsp,
-                    onerel.name(),
-                ))
-                .finish(ErrorLocation { filename: None, lineno: 0, funcname: None })?;
+            // extended_stats.c:172: report this fact (except in autovacuum),
+            // with errtable(onerel)'s schema/table fields.
+            if !am_autovacuum_worker() {
+                let nsp = lsyscache::get_namespace_name(bmcx, onerel.rd_rel.relnamespace)?
+                    .map(|s| s.as_str().to_string())
+                    .unwrap_or_default();
+                ereport(WARNING)
+                    .errcode(types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
+                    .errmsg(format!(
+                        "statistics object \"{}.{}\" could not be computed for relation \"{}.{}\"",
+                        core::str::from_utf8(&stat.schema).unwrap_or("?"),
+                        core::str::from_utf8(&stat.name).unwrap_or("?"),
+                        nsp,
+                        onerel.name(),
+                    ))
+                    .err_generic_string(PG_DIAG_SCHEMA_NAME, nsp)?
+                    .err_generic_string(PG_DIAG_TABLE_NAME, onerel.name())?
+                    .finish(ErrorLocation { filename: None, lineno: 0, funcname: None })?;
+            }
             continue;
         };
         let stattarget = statext_compute_stattarget(stat.stattarget, &stats);
@@ -342,10 +367,14 @@ pub fn BuildRelationExtStatistics<'mcx, F: ExprStatsCompute<'mcx>>(
                     mcv_ser = Some(mcv::statext_mcv_serialize(bmcx, &m, &data.stats)?);
                 }
             } else if t == STATS_EXT_EXPRESSIONS {
-                assert!(
-                    !stat.exprs.is_empty(),
-                    "requested expression stats, but there are no expressions"
-                );
+                // extended_stats.c:217: elog(ERROR) (a catalog edit can put
+                // 'e' into stxkind without stxexprs).
+                if stat.exprs.is_empty() {
+                    return Err(PgError::error(
+                        "requested expression stats, but there are no expressions",
+                    )
+                    .into());
+                }
                 let rows_stats = expr_compute.compute(mcx, onerel, &stat.exprs, stattarget, rows)?;
                 exprstats = Some(expression::serialize_expr_stats(bmcx, &rows_stats)?);
             }
@@ -461,31 +490,17 @@ fn make_build_data<'mcx, 'b>(
     Ok(StatsBuildData { numrows, attnums, stats: statsv, values, nulls })
 }
 
-// toast_raw_datum_size (detoast.c), for the WIDTH_THRESHOLD test.
+// AmAutoVacuumWorkerProcess() (miscadmin.h).
+fn am_autovacuum_worker() -> bool {
+    miscinit::GetMyBackendType() == types_core::BackendType::AutovacWorker
+}
+
+// toast_raw_datum_size (detoast.c), for the WIDTH_THRESHOLD test. Every
+// varlena form C handles: on-disk external, indirect, expanded (an
+// expression's ExecEvalExpr result is stored as-is, extended_stats.c:2611),
+// compressed, short, plain.
 fn raw_datum_size(d: Datum) -> usize {
-    let p = d.as_usize() as *const u8;
-    // SAFETY: byref varlena datum into live sample-tuple memory.
-    unsafe {
-        let b0 = *p;
-        if b0 == 0x01 {
-            let tag = *p.add(1);
-            if tag != 18 {
-                panic!("raw_datum_size: unsupported vartag {tag}");
-            }
-            let mut raw = [0u8; 4];
-            core::ptr::copy_nonoverlapping(p.add(2), raw.as_mut_ptr(), 4);
-            i32::from_ne_bytes(raw) as usize
-        } else if b0 & 0x01 != 0 {
-            let len = ((b0 as usize) >> 1) & 0x7F;
-            len - 1 + 4
-        } else if (b0 & 0x03) == 0x02 {
-            let ext = u32::from_ne_bytes(*(p.add(4) as *const [u8; 4]));
-            (ext & 0x3FFF_FFFF) as usize + 4
-        } else {
-            let w = u32::from_ne_bytes(*(p as *const [u8; 4]));
-            (w >> 2) as usize
-        }
-    }
+    detoast::toast_raw_datum_size(expression::varlena_image(d))
 }
 
 fn is_plain_inline(d: Datum) -> bool {
@@ -569,10 +584,81 @@ pub fn build_sorted_items<'mcx>(
         items.push(SortItem { off, count: 0 });
     }
     let store = ItemStore { values, isnull, width };
-    sortitem::pg_qsort(&mut items, |a, b| store.compare(mss, *a, *b));
+    // extended_stats.c:1110 qsort_interruptible(items, nrows, ..., multi_sort_compare, mss)
+    sortitem::qsort_interruptible_arg(&mut items, |a, b| store.compare(mss, *a, *b))?;
     // Detoasted images ride mcx until teardown; from ANALYZE this is an
     // exact-accounting Aset that is dropped, never reset (reset would trip
     // the leak assert on these forgotten bytes).
     core::mem::forget(keepalive);
     Ok(Some((items, store)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn int4_array<'m>(mcx: Mcx<'m>, vals: &[i32]) -> PgVec<'m, u8> {
+        let elems: Vec<Datum> = vals.iter().map(|v| Datum::from_i32(*v)).collect();
+        arrayfuncs::construct_md_array(
+            mcx,
+            &elems,
+            None,
+            1,
+            &[vals.len() as i32],
+            &[1],
+            types_core::INT4OID,
+            4,
+            true,
+            b'i',
+        )
+        .unwrap()
+    }
+
+    // build_sorted_items' WIDTH_THRESHOLD test is toast_raw_datum_size
+    // (detoast.c), which reads through an expanded datum (EOH_get_flat_size)
+    // — the form an expression's ExecEvalExpr result can take. Pre-fix the
+    // port panicked on any vartag but ONDISK.
+    #[test]
+    fn raw_datum_size_reads_expanded_datums() {
+        let parent = mcx::MemoryContext::new("raw_datum_size test");
+        let img = int4_array(parent.mcx(), &[7, 8, 9]);
+        let flat = Datum::from_usize(img.as_ptr() as usize);
+        let mut meta = arrayfuncs::expanded::ArrayMetaState {
+            element_type: types_core::INT4OID,
+            typlen: 4,
+            typbyval: true,
+            typalign: b'i',
+        };
+        let expanded = arrayfuncs::expanded::expand_array(flat, &parent, Some(&mut meta)).unwrap();
+        assert!(!is_plain_inline(expanded));
+        assert_eq!(raw_datum_size(flat), img.len());
+        assert_eq!(raw_datum_size(expanded), img.len());
+    }
+
+    // stxkind must be a 1-D, null-free "char" array (extended_stats.c:470):
+    // C's elog(ERROR) text, never an assertion.
+    #[test]
+    fn stxkind_shape_errors_are_elog_error() {
+        fn arr(ndim: i32, dataoffset: i32, elemtype: i32, n: i32, elems: &[u8]) -> Vec<u8> {
+            let mut b = Vec::new();
+            for w in [ndim, dataoffset, elemtype, n, 1] {
+                b.extend_from_slice(&w.to_ne_bytes());
+            }
+            b.extend_from_slice(elems);
+            b
+        }
+        let ok = arr(1, 0, 18, 2, b"dm");
+        let (n, data) = stxkind_elems(&ok).unwrap();
+        assert_eq!((n, &data[..n]), (2, &b"dm"[..]));
+        for bad in [
+            arr(2, 0, 18, 2, b"dm"),
+            arr(1, 24, 18, 2, b"dm"),
+            arr(1, 0, 25, 2, b"dm"),
+            Vec::new(),
+        ] {
+            let e = stxkind_elems(&bad).unwrap_err();
+            assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+            assert_eq!(e.message(), "stxkind is not a 1-D char array");
+        }
+    }
 }

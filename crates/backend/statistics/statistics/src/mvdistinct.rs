@@ -126,13 +126,14 @@ fn ndistinct_for_combination<'mcx>(
     for off in 0..numrows {
         items.push(SortItem { off: off as u32, count: 0 });
     }
-    crate::sortitem::pg_qsort(&mut items, |a, b| store.compare(&mut mss, *a, *b));
+    // mvdistinct.c:491 qsort_interruptible(items, numrows, ..., multi_sort_compare, mss)
+    crate::sortitem::qsort_interruptible_arg(&mut items, |a, b| store.compare(&mut mss, *a, *b))?;
 
     let mut f1 = 0i32;
     let mut cnt = 1i32;
     let mut d = 1i32;
     for i in 1..numrows {
-        if store.compare(&mut mss, items[i], items[i - 1]) != 0 {
+        if store.compare(&mut mss, items[i], items[i - 1])? != 0 {
             if cnt == 1 {
                 f1 += 1;
             }

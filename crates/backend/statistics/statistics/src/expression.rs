@@ -56,7 +56,7 @@ pub trait ExprStatsCompute<'mcx> {
     ) -> PgResult<PgVec<'mcx, Option<ExprStatsRow<'mcx>>>>;
 }
 
-fn varlena_image<'a>(d: Datum) -> &'a [u8] {
+pub(crate) fn varlena_image<'a>(d: Datum) -> &'a [u8] {
     let p = d.as_usize() as *const u8;
     // SAFETY: varlena header declares the image length.
     unsafe {

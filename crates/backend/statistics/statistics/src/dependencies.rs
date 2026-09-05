@@ -82,7 +82,7 @@ fn dependency_degree(
     let mut n_supporting_rows = 0i64;
     for i in 1..=nitems {
         if i == nitems
-            || store.compare_dims(&mut mss, 0, k - 2, items[i - 1], items[i]) != 0
+            || store.compare_dims(&mut mss, 0, k - 2, items[i - 1], items[i])? != 0
         {
             if n_violations == 0 {
                 n_supporting_rows += group_size;
@@ -93,7 +93,7 @@ fn dependency_degree(
         }
         let (av, an) = store.value(items[i - 1], k - 1);
         let (bv, bn) = store.value(items[i], k - 1);
-        if mss.compare_dim(k - 1, av, an, bv, bn) != 0 {
+        if mss.compare_dim(k - 1, av, an, bv, bn)? != 0 {
             n_violations += 1;
         }
         group_size += 1;

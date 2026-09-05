@@ -3,7 +3,9 @@ use mcx::{Mcx, PgVec};
 use types_core::Oid;
 use types_error::{PgError, PgResult};
 
-use crate::sortitem::{pg_qsort, ItemStore, MultiSort, SortItem};
+use crate::sortitem::{
+    qsort_interruptible, qsort_interruptible_arg, ItemStore, MultiSort, SortItem,
+};
 use crate::{build_mss, build_sorted_items, ColStats, StatsBuildData, STATS_MAX_DIMENSIONS};
 
 pub const STATS_MCV_MAGIC: u32 = 0xE1A651C2;
@@ -80,11 +82,12 @@ pub fn statext_mcv_build<'mcx>(
         {
             let store_ref = &store;
             let mss_ref = &mut mss;
-            pg_qsort(&mut f, |a, b| {
+            // mcv.c:527 qsort_interruptible(result[dim], ..., sort_item_compare, ssup)
+            qsort_interruptible_arg(&mut f, |a, b| {
                 let (av, an) = store_ref.value(*a, dim);
                 let (bv, bn) = store_ref.value(*b, dim);
                 mss_ref.compare_dim(dim, av, an, bv, bn)
-            });
+            })?;
         }
         let mut sorted: PgVec<'_, SortItem> = mcx::vec_with_capacity_in(mcx, ngroups)?;
         sorted.extend_from_slice(&f);
@@ -92,7 +95,7 @@ pub fn statext_mcv_build<'mcx>(
         for i in 1..ngroups {
             let (av, an) = store.value(sorted[i - 1], dim);
             let (bv, bn) = store.value(sorted[i], dim);
-            if mss.compare_dim(dim, av, an, bv, bn) == 0 {
+            if mss.compare_dim(dim, av, an, bv, bn)? == 0 {
                 f[ndistinct - 1].count += sorted[i].count;
                 continue;
             }
@@ -113,7 +116,7 @@ pub fn statext_mcv_build<'mcx>(
             values.push(v);
             isnull.push(n);
             let f = &freqs[dim];
-            let idx = bsearch_dim(f, &store, &mut mss, dim, v, n);
+            let idx = bsearch_dim(f, &store, &mut mss, dim, v, n)?;
             base_frequency *= f[idx].count as f64 / numrows as f64;
         }
         mcv_items.push(MCVItem {
@@ -139,15 +142,15 @@ fn bsearch_dim(
     dim: usize,
     v: Datum,
     isnull: bool,
-) -> usize {
+) -> PgResult<usize> {
     let mut lo = 0usize;
     let mut hi = f.len();
     while lo < hi {
         let mid = (lo + hi) / 2;
         let (mv, mn) = store.value(f[mid], dim);
-        let c = mss.compare_dim(dim, v, isnull, mv, mn);
+        let c = mss.compare_dim(dim, v, isnull, mv, mn)?;
         match c.cmp(&0) {
-            core::cmp::Ordering::Equal => return mid,
+            core::cmp::Ordering::Equal => return Ok(mid),
             core::cmp::Ordering::Greater => lo = mid + 1,
             core::cmp::Ordering::Less => hi = mid,
         }
@@ -166,15 +169,16 @@ fn build_distinct_groups<'mcx>(
     groups.push(SortItem { off: items[0].off, count: 1 });
     let mut j = 0usize;
     for i in 1..numrows {
-        if store.compare(mss, items[i], items[i - 1]) != 0 {
+        if store.compare(mss, items[i], items[i - 1])? != 0 {
             groups.push(SortItem { off: items[i].off, count: 0 });
             j += 1;
         }
         groups[j].count += 1;
     }
     let ngroups = groups.len();
-    // compare_sort_item_count: descending by count, C-exact qsort tie order.
-    pg_qsort(&mut groups, |a, b| {
+    // mcv.c:456 qsort_interruptible(groups, ..., compare_sort_item_count):
+    // descending by count, C-exact qsort tie order.
+    qsort_interruptible(&mut groups, |a, b| {
         if a.count == b.count {
             0
         } else if a.count > b.count {
@@ -182,7 +186,7 @@ fn build_distinct_groups<'mcx>(
         } else {
             1
         }
-    });
+    })?;
     Ok((groups, ngroups))
 }
 
@@ -260,10 +264,11 @@ pub fn statext_mcv_serialize<'mcx>(
         };
 
         if !vals.is_empty() {
-            pg_qsort(&mut vals, |a, b| mss.compare_dim(0, *a, false, *b, false));
+            // mcv.c:695 qsort_interruptible(values[dim], ..., compare_datums_simple, ssup)
+            qsort_interruptible_arg(&mut vals, |a, b| mss.compare_dim(0, *a, false, *b, false))?;
             let mut ndistinct = 1usize;
             for i in 1..vals.len() {
-                if mss.compare_dim(0, vals[i - 1], false, vals[i], false) == 0 {
+                if mss.compare_dim(0, vals[i - 1], false, vals[i], false)? == 0 {
                     continue;
                 }
                 vals[ndistinct] = vals[i];
@@ -384,7 +389,7 @@ pub fn statext_mcv_serialize<'mcx>(
                 let mut found = None;
                 while lo < hi {
                     let mid = (lo + hi) / 2;
-                    let c = mss.compare_dim(0, item.values[dim], false, vals[mid], false);
+                    let c = mss.compare_dim(0, item.values[dim], false, vals[mid], false)?;
                     match c.cmp(&0) {
                         core::cmp::Ordering::Equal => {
                             found = Some(mid);
