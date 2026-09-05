@@ -1,7 +1,8 @@
 #![allow(unused_unsafe)]
 
 use super::*;
-use ::types_hash::hsearch::{HASH_FUNCTION, HASH_PARTITION, HASH_SHARED_MEM};
+use ::types_error::{ERRCODE_FEATURE_NOT_SUPPORTED, ERROR, FATAL, PANIC};
+use ::types_hash::hsearch::{HASH_ATTACH, HASH_FUNCTION, HASH_PARTITION, HASH_SHARED_MEM};
 use std::sync::Once;
 
 fn search(t: *mut HTAB, k: *const u8, a: HASHACTION) -> PgResult<(*mut u8, bool)> {
@@ -445,12 +446,89 @@ fn reset_after_crash_restores_boot_image() {
     hash_destroy(table);
 }
 
+// audit-18.6 b163: an unported flag combination is a typed refusal
+// (ERRCODE_FEATURE_NOT_SUPPORTED), never a panic. C dynahash.c:375 accepts a
+// growable shared table; this port only preallocates shared tables.
 #[test]
-#[should_panic(expected = "HASH_SHARED_MEM requires HASH_FIXED_SIZE")]
-fn shared_without_fixed_size_panics() {
+fn shared_without_fixed_size_is_a_typed_refusal() {
     install_test_seams();
     let ctl = ctl(4, 8);
-    let _ = hash_create("shpanic", 8, &ctl, HASH_ELEM | HASH_BLOBS | HASH_SHARED_MEM);
+    let e = hash_create("shgrow", 8, &ctl, HASH_ELEM | HASH_BLOBS | HASH_SHARED_MEM)
+        .err()
+        .expect("HASH_SHARED_MEM without HASH_FIXED_SIZE must be a typed refusal");
+    assert_eq!(e.level(), ERROR);
+    assert_eq!(e.sqlstate(), ERRCODE_FEATURE_NOT_SUPPORTED);
+    assert_eq!(
+        e.message(),
+        "shared hash table \"shgrow\" without HASH_FIXED_SIZE is not supported"
+    );
+}
+
+// audit-18.6 b163: C dynahash.c:491 HASH_ATTACH re-attaches to an existing
+// shared header; here one address space makes attach the shmem index's job,
+// so the flag is a typed refusal, never a panic.
+#[test]
+fn attach_is_a_typed_refusal() {
+    install_test_seams();
+    let ctl = ctl(4, 8);
+    let e = hash_create(
+        "shattach",
+        8,
+        &ctl,
+        HASH_ELEM | HASH_BLOBS | HASH_SHARED_MEM | HASH_FIXED_SIZE | HASH_ATTACH,
+    )
+    .err()
+    .expect("HASH_ATTACH must be a typed refusal");
+    assert_eq!(e.level(), ERROR);
+    assert_eq!(e.sqlstate(), ERRCODE_FEATURE_NOT_SUPPORTED);
+    assert_eq!(e.message(), "attaching to hash table \"shattach\" is not supported");
+}
+
+// audit-18.6 b163: C dynahash.c:1783-1793 hash_corrupted is elog(FATAL) for a
+// local table and elog(PANIC) for a shared one — a reportable error that ends
+// the backend / the cluster through the error machinery, not a Rust panic.
+// A NULL directory segment is the corruption hash_initial_lookup detects
+// (dynahash.c:1774-1775); every bucket of a small table lives in segment 0.
+unsafe fn corrupt_segment_zero_and_probe(table: *mut HTAB) -> Box<PgError> {
+    let slot = (*table).dir;
+    let saved = *slot;
+    *slot = ptr::null_mut();
+    let key = 7u32.to_ne_bytes();
+    let r = search(table, key.as_ptr(), HASH_FIND);
+    *slot = saved;
+    r.err().expect("lookup through a NULL directory segment must be an error")
+}
+
+#[test]
+fn corrupted_local_table_is_a_fatal_error() {
+    install_test_seams();
+    let ctl = ctl(4, 8);
+    let table = hash_create("corrupt_local", 8, &ctl, HASH_ELEM | HASH_BLOBS).unwrap();
+    unsafe {
+        let e = corrupt_segment_zero_and_probe(table);
+        assert_eq!(e.level(), FATAL);
+        assert_eq!(e.message(), "hash table \"corrupt_local\" corrupted");
+    }
+    hash_destroy(table);
+}
+
+#[test]
+fn corrupted_shared_table_is_a_panic_error() {
+    install_test_seams();
+    let ctl = ctl(4, 8);
+    let table = hash_create(
+        "corrupt_shared",
+        8,
+        &ctl,
+        HASH_ELEM | HASH_BLOBS | HASH_SHARED_MEM | HASH_FIXED_SIZE,
+    )
+    .unwrap();
+    unsafe {
+        let e = corrupt_segment_zero_and_probe(table);
+        assert_eq!(e.level(), PANIC);
+        assert_eq!(e.message(), "hash table \"corrupt_shared\" corrupted");
+    }
+    hash_destroy(table);
 }
 
 #[test]

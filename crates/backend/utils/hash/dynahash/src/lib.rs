@@ -11,7 +11,9 @@ use core::sync::atomic::{AtomicI32, Ordering};
 use ::elog::elog;
 use ::mcx::{Allocator, MemoryContext};
 use ::types_core::Size;
-use ::types_error::{PgError, ERRCODE_OUT_OF_MEMORY, WARNING};
+use ::types_error::{
+    PgError, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_OUT_OF_MEMORY, FATAL, PANIC, WARNING,
+};
 use ::types_error::PgResult;
 use ::types_hash::hsearch::{
     HashCompareFunc, HashValueFunc, HASHACTION, HASHCTL, HASHELEMENT, HASHHDR, HASHSEGMENT, HTAB,
@@ -259,13 +261,20 @@ pub fn hash_create(tabname: &str, nelem: i64, info: &HASHCTL, flags: i32) -> PgR
         // One process = one address space, so a shared table lives on the
         // ordinary heap — but growth allocates through the table's private
         // (single-threaded) MemoryContext, so only fully preallocated shared
-        // tables are thread-safe under the partition-lock protocol.
-        panic!("dynahash: HASH_SHARED_MEM requires HASH_FIXED_SIZE (table \"{tabname}\")");
+        // tables are thread-safe under the partition-lock protocol. C
+        // (dynahash.c:375) accepts a growable shared table; unported here,
+        // so a typed refusal rather than a panic (audit-18.6 b163).
+        return Err(unsupported_error(format!(
+            "shared hash table \"{tabname}\" without HASH_FIXED_SIZE is not supported"
+        )));
     }
     if flags & HASH_ATTACH != 0 {
         // Attach re-finds an existing table by name via the shmem index; that
-        // layer (ShmemInitHash) owns attach semantics in this port.
-        panic!("dynahash: HASH_ATTACH not supported (table \"{tabname}\")");
+        // layer (ShmemInitHash) owns attach semantics in this port. C
+        // (dynahash.c:491) re-attaches to info->hctl; typed refusal here.
+        return Err(unsupported_error(format!(
+            "attaching to hash table \"{tabname}\" is not supported"
+        )));
     }
 
     let context = if flags & HASH_CONTEXT != 0 {
@@ -651,7 +660,7 @@ pub fn hash_search_with_hash_value(
             let _ = expand_table(hashp);
         }
 
-        let (mut prev_bucket_ptr, _) = hash_initial_lookup(hashp, hashvalue);
+        let (mut prev_bucket_ptr, _) = hash_initial_lookup(hashp, hashvalue)?;
         let mut curr_bucket = *prev_bucket_ptr;
 
         // SAFETY: match_ is installed by hash_create.
@@ -750,7 +759,7 @@ pub fn hash_update_hash_key(
         }
 
         let (mut prev_bucket_ptr, bucket) =
-            hash_initial_lookup(hashp, (*existing_element).hashvalue);
+            hash_initial_lookup(hashp, (*existing_element).hashvalue)?;
         let mut curr_bucket = *prev_bucket_ptr;
         while !curr_bucket.is_null() {
             if curr_bucket == existing_element {
@@ -768,7 +777,7 @@ pub fn hash_update_hash_key(
         let old_prev_ptr = prev_bucket_ptr;
 
         let newhashvalue = do_hash(hashp, new_key_ptr);
-        let (mut prev_bucket_ptr, newbucket) = hash_initial_lookup(hashp, newhashvalue);
+        let (mut prev_bucket_ptr, newbucket) = hash_initial_lookup(hashp, newhashvalue)?;
         let mut curr_bucket = *prev_bucket_ptr;
 
         // SAFETY: match_/keycopy installed by hash_create.
@@ -931,7 +940,7 @@ pub fn hash_seq_init_with_hash_value(
     status.hasHashvalue = true;
     status.hashvalue = hashvalue;
     unsafe {
-        let (bucket_ptr, bucket) = hash_initial_lookup(hashp, hashvalue);
+        let (bucket_ptr, bucket) = hash_initial_lookup(hashp, hashvalue)?;
         status.curBucket = bucket;
         status.curEntry = *bucket_ptr;
     }
@@ -1179,7 +1188,10 @@ unsafe fn element_alloc(hashp: *mut HTAB, nelem: i32, freelist_idx: usize) -> bo
 }
 
 #[inline]
-unsafe fn hash_initial_lookup(hashp: *mut HTAB, hashvalue: u32) -> (*mut *mut HASHELEMENT, u32) {
+unsafe fn hash_initial_lookup(
+    hashp: *mut HTAB,
+    hashvalue: u32,
+) -> PgResult<(*mut *mut HASHELEMENT, u32)> {
     let hctl = (*hashp).hctl;
     let bucket = calc_bucket(hctl, hashvalue);
 
@@ -1188,16 +1200,22 @@ unsafe fn hash_initial_lookup(hashp: *mut HTAB, hashvalue: u32) -> (*mut *mut HA
 
     let segp = *(*hashp).dir.offset(segment_num as isize);
     if segp.is_null() {
-        hash_corrupted(hashp);
+        return Err(hash_corrupted(hashp));
     }
-    (segp.offset(segment_ndx as isize), bucket)
+    Ok((segp.offset(segment_ndx as isize), bucket))
 }
 
+/// dynahash.c:1783-1793: corruption in a shared table forces a systemwide
+/// restart (PANIC); in a local table it shuts down this one backend (FATAL).
+/// Reported through the error machinery, not a Rust panic (audit-18.6 b163).
 #[cold]
 #[inline(never)]
-unsafe fn hash_corrupted(hashp: *mut HTAB) -> ! {
-    // C: elog(PANIC) shared / elog(FATAL) local; both end the world here too.
-    panic!("hash table \"{}\" corrupted", tabname_str(hashp));
+unsafe fn hash_corrupted(hashp: *mut HTAB) -> Box<PgError> {
+    let level = if (*hashp).isshared { PANIC } else { FATAL };
+    Box::new(PgError::new(
+        level,
+        format!("hash table \"{}\" corrupted", tabname_str(hashp)),
+    ))
 }
 
 unsafe fn tabname_str(hashp: *const HTAB) -> std::borrow::Cow<'static, str> {
@@ -1215,6 +1233,13 @@ unsafe fn tabname_str(hashp: *const HTAB) -> std::borrow::Cow<'static, str> {
 fn oom_error(shared: bool) -> Box<PgError> {
     let msg = if shared { "out of shared memory" } else { "out of memory" };
     Box::new(PgError::error(msg).with_sqlstate(ERRCODE_OUT_OF_MEMORY))
+}
+
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn unsupported_error(msg: String) -> Box<PgError> {
+    Box::new(PgError::error(msg).with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED))
 }
 
 #[track_caller]
