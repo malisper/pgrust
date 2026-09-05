@@ -154,7 +154,10 @@ pub fn fc_pg_terminate_backend(
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     let pid = fcinfo.arg_i32(0);
-    let timeout = fcinfo.arg_i64(1);
+    // signalfuncs.c:241 `int timeout = PG_GETARG_INT64(1)`: the int64 is
+    // narrowed to a C int before the sign check (3000000000 wraps negative,
+    // 4294967296 wraps to 0 = no wait).
+    let timeout = fcinfo.arg_i64(1) as i32;
 
     if timeout < 0 {
         return Err(elog::ereport(types_error::ERROR)
@@ -185,7 +188,7 @@ pub fn fc_pg_terminate_backend(
     }
 
     if r == SIGNAL_BACKEND_SUCCESS && timeout > 0 {
-        Ok(Datum::from_bool(pg_wait_until_termination(pid, timeout)?))
+        Ok(Datum::from_bool(pg_wait_until_termination(pid, i64::from(timeout))?))
     } else {
         Ok(Datum::from_bool(r == SIGNAL_BACKEND_SUCCESS))
     }

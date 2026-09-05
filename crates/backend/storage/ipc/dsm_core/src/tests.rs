@@ -8,6 +8,9 @@ use crate::dsm::*;
 use crate::dsm_impl::*;
 
 static TEST_LOCK: Mutex<()> = Mutex::new(());
+// pgstat wait reporting trace: each start pushes its wait_event_info, each
+// end pushes 0.
+static WAIT_EVENTS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 static REGISTERED_EXITS: AtomicUsize = AtomicUsize::new(0);
 static EXIT_CALLBACKS: Mutex<Vec<(fn(i32, usize), usize)>> = Mutex::new(Vec::new());
 
@@ -21,6 +24,13 @@ fn bringup() -> MutexGuard<'static, ()> {
             Ok(p)
         });
         shmem_seams::add_size::set(|a, b| Ok(a.checked_add(b).unwrap()));
+        elog::init_seams();
+        waitevent_seams::pgstat_report_wait_start::set(|info| {
+            WAIT_EVENTS.lock().unwrap().push(info);
+        });
+        waitevent_seams::pgstat_report_wait_end::set(|| {
+            WAIT_EVENTS.lock().unwrap().push(0);
+        });
         shmem_seams::mul_size::set(|a, b| Ok(a.checked_mul(b).unwrap()));
         ipc_seams::on_shmem_exit::set(|cb, arg| {
             REGISTERED_EXITS.fetch_add(1, Ordering::Relaxed);
@@ -203,7 +213,6 @@ fn erroring_callback_leaves_rest_for_retry() {
     assert_eq!(*CB_TRACE.lock().unwrap(), vec![2]);
     dsm_detach(id).unwrap();
     assert_eq!(*CB_TRACE.lock().unwrap(), vec![2, 1]);
-    init_small::globals::ResumeInterrupts();
 }
 
 #[test]
@@ -312,4 +321,85 @@ fn guc_defaults() {
     assert_eq!(dynamic_shared_memory_type(), DSM_IMPL_POSIX);
     assert_eq!(min_dynamic_shared_memory(), 0);
     assert_eq!(DYNAMIC_SHARED_MEMORY_OPTIONS.len(), 3);
+}
+
+// dsm.c:813 — dsm_detach runs the on-detach callbacks under HOLD_INTERRUPTS
+// and RESUME_INTERRUPTS afterwards; a callback ERROR must not leave the
+// holdoff count raised (C's longjmp handler resets it; the Err return here
+// has to release it itself), on the propagating path and on the Drop
+// (WARNING-demoted) path alike. A leaked holdoff disables query cancel and
+// statement_timeout for the rest of the session.
+#[test]
+fn erroring_detach_callback_does_not_leak_interrupt_holdoff() {
+    let _g = bringup();
+    CB_TRACE.lock().unwrap().clear();
+    let before = init_small::globals::InterruptHoldoffCount();
+
+    let seg = dsm_create(32, 0).unwrap().unwrap();
+    let id = dsm_pin_mapping(seg);
+    on_dsm_detach(id, err_cb, 21).unwrap();
+    assert!(dsm_detach(id).is_err());
+    assert_eq!(
+        init_small::globals::InterruptHoldoffCount(),
+        before,
+        "InterruptHoldoffCount leaked by the erroring detach callback"
+    );
+    dsm_detach(id).unwrap();
+    assert_eq!(init_small::globals::InterruptHoldoffCount(), before);
+
+    let seg = dsm_create(32, 0).unwrap().unwrap();
+    on_dsm_detach(seg.id(), err_cb, 22).unwrap();
+    drop(seg);
+    assert_eq!(
+        init_small::globals::InterruptHoldoffCount(),
+        before,
+        "InterruptHoldoffCount leaked by the Drop-demoted detach error"
+    );
+}
+
+// dsm_impl.c:366 — a request the platform cannot size is reported at the
+// caller's elevel ("could not resize shared memory segment ... : %m",
+// ERRCODE_OUT_OF_MEMORY for EFBIG/ENOMEM) and DSM_OP_CREATE returns false;
+// it never aborts the process.
+#[test]
+fn create_reports_unrepresentable_size_as_error_not_panic() {
+    let _g = bringup();
+    let handle: types_storage::dsm_handle = 0xDEAD_BEE0;
+    let mut ma: *mut u8 = std::ptr::null_mut();
+    let mut ms: usize = 0;
+    let err = dsm_impl_op(DsmOp::Create, handle, usize::MAX, &mut ma, &mut ms, types_error::ERROR)
+        .expect_err("oversized create is an ERROR, not a panic");
+    assert!(
+        err.message.starts_with("could not resize shared memory segment \"/PostgreSQL.3735928544\" to 18446744073709551615 bytes: "),
+        "{}",
+        err.message
+    );
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_OUT_OF_MEMORY);
+    assert!(ma.is_null() && ms == 0);
+
+    // WARNING elevel: false, no Err (dsm.c retries under a new handle).
+    let ok = dsm_impl_op(DsmOp::Create, handle, usize::MAX, &mut ma, &mut ms, WARNING).unwrap();
+    assert!(!ok);
+    // Nothing was registered under that handle.
+    assert!(!dsm_impl_op(DsmOp::Attach, handle, 0, &mut ma, &mut ms, WARNING).unwrap());
+}
+
+// dsm_impl.c:366 — segment allocation is bracketed by
+// pgstat_report_wait_start(WAIT_EVENT_DSM_ALLOCATE) / pgstat_report_wait_end
+// (pg_stat_activity wait_event DsmAllocate, class IO).
+#[test]
+fn create_reports_dsm_allocate_wait_event() {
+    // wait_event_names.txt IO row "DsmAllocate" (waitevent IO row 25).
+    const PG_WAIT_IO: u32 = 0x0A00_0000;
+    const WAIT_EVENT_DSM_ALLOCATE: u32 = PG_WAIT_IO | 25;
+    let _g = bringup();
+    WAIT_EVENTS.lock().unwrap().clear();
+    let seg = dsm_create(64, 0).unwrap().unwrap();
+    let trace = std::mem::take(&mut *WAIT_EVENTS.lock().unwrap());
+    assert_eq!(
+        trace,
+        vec![WAIT_EVENT_DSM_ALLOCATE, 0],
+        "segment allocation must report DsmAllocate"
+    );
+    dsm_detach(seg.into_id()).unwrap();
 }

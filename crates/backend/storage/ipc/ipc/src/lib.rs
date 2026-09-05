@@ -335,10 +335,11 @@ pub fn cancel_before_shmem_exit(function: BeforeShmemExitCallback, arg: Datum) -
             BEFORE_SHMEM_EXIT_INDEX.with(|c| c.set(i - 1));
             Ok(())
         }
+        // ipc.c:409: 0x%PRIxPTR — the whole Datum word.
         _ => Err(Box::new(PgError::error(format!(
             "before_shmem_exit callback ({:#x},{:#x}) is not the latest entry",
             function as usize,
-            arg.as_i32() as usize
+            arg.as_usize()
         )))),
     }
 }
@@ -418,14 +419,17 @@ pub fn swap_exit_callback_lists(saved: &mut ExitCallbackLists) {
     saved.on_proc_index = cur;
 }
 
+// ipc.c:442/444: elog(FATAL, ...) — never a catchable ERROR.
 pub fn check_on_shmem_exit_lists_are_empty() -> PgResult<()> {
     if BEFORE_SHMEM_EXIT_INDEX.with(Cell::get) != 0 {
-        return Err(Box::new(PgError::error(
+        return Err(Box::new(PgError::new(
+            FATAL,
             "before_shmem_exit has been called prematurely",
         )));
     }
     if ON_SHMEM_EXIT_INDEX.with(Cell::get) != 0 {
-        return Err(Box::new(PgError::error(
+        return Err(Box::new(PgError::new(
+            FATAL,
             "on_shmem_exit has been called prematurely",
         )));
     }

@@ -477,9 +477,20 @@ pub fn ProcArrayApplyRecoveryInfo(running: &RunningTransactionsData<'_>) -> PgRe
                 return elog(ERROR, "KnownAssignedXids is not empty");
             }
 
-            // xidLogicalComparator: RUNNING_XACTS only carries normal xids
-            // of one epoch, so plain unsigned order is the modular order.
-            xids.sort_unstable();
+            // xidLogicalComparator (xid.c): modular TransactionIdPrecedes
+            // order. A running-xacts snapshot can straddle the 2^32
+            // wraparound (4294967295 and 3 both in flight), and
+            // KnownAssignedXidsAdd rejects any insertion that does not
+            // follow the previous one modularly.
+            xids.sort_unstable_by(|&a, &b| {
+                if TransactionIdPrecedes(a, b) {
+                    std::cmp::Ordering::Less
+                } else if TransactionIdPrecedes(b, a) {
+                    std::cmp::Ordering::Greater
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            });
 
             for i in 0..xids.len() {
                 if i > 0 && xids[i - 1] == xids[i] {

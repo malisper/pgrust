@@ -680,16 +680,24 @@ pub fn dsm_detach_all() -> PgResult<()> {
 /// leaves the remaining detach work for error recovery, as in C).
 pub fn dsm_detach(seg: DsmSegmentId) -> PgResult<()> {
     // Pop each callback before invoking it so a callback error that re-enters
-    // here cannot recurse infinitely; interrupts held as in C.
+    // here cannot recurse infinitely; interrupts held as in C (dsm.c:813
+    // HOLD_INTERRUPTS .. RESUME_INTERRUPTS). C's ERROR longjmps to a handler
+    // that resets InterruptHoldoffCount; the Err returned here does not, so
+    // the hold is released on the error path too — a leaked holdoff would
+    // disable query cancel and statement_timeout for the session.
     globals::HoldInterrupts();
-    loop {
-        let cb = with_desc(seg, |d| d.on_detach.pop());
-        match cb {
-            Some(cb) => (cb.function)(seg, cb.arg)?,
-            None => break,
+    let callbacks = (|| -> PgResult<()> {
+        loop {
+            let cb = with_desc(seg, |d| d.on_detach.pop());
+            match cb {
+                Some(cb) => (cb.function)(seg, cb.arg)?,
+                None => break,
+            }
         }
-    }
+        Ok(())
+    })();
     globals::ResumeInterrupts();
+    callbacks?;
 
     // Remove the mapping before decrementing the refcount, so whoever sees a
     // zero count knows no mappings remain.

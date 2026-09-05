@@ -41,3 +41,19 @@ fn denied_error_surfaces_sqlstate_and_detail() {
     assert!(msg.contains("permission denied to terminate process"), "{msg}");
     assert!(msg.contains("SUPERUSER attribute"), "{msg}");
 }
+
+// signalfuncs.c:241 — `int timeout = PG_GETARG_INT64(1)`: the int64 argument
+// is narrowed to a C int before the sign check, so 3000000000 wraps negative
+// and is rejected with 22003 "timeout" must not be negative (and 2^32 wraps
+// to 0 = no wait).
+#[test]
+fn terminate_timeout_narrows_to_int_like_c() {
+    setup();
+    let mut fci = ::types_fmgr::LocalFcinfo::<2>::new(0);
+    fci.set_arg(0, Datum::from_i32(12345));
+    fci.set_arg(1, Datum::from_i64(3_000_000_000));
+    let err = fc_pg_terminate_backend(None, &mut fci)
+        .expect_err("timeout 3000000000 narrows to a negative int in C");
+    let msg = format!("{err:?}");
+    assert!(msg.contains("must not be negative"), "{msg}");
+}

@@ -846,6 +846,10 @@ pub fn ProcArrayClearTransaction() -> PgResult<()> {
     Ok(())
 }
 
+// wait_event_names.txt IPC row "ProcarrayGroupUpdate" (waitevent IPC row 41).
+const PG_WAIT_IPC: u32 = 0x0800_0000;
+const WAIT_EVENT_PROCARRAY_GROUP_UPDATE: u32 = PG_WAIT_IPC | 41;
+
 fn ProcArrayGroupClearXid(procno: ProcNumber, latestXid: TransactionId) -> PgResult<()> {
     let hdr = ProcGlobal();
     let proc = GetPGProcByNumber(procno);
@@ -870,6 +874,13 @@ fn ProcArrayGroupClearXid(procno: ProcNumber, latestXid: TransactionId) -> PgRes
 
     if nextidx != INVALID_PROC_NUMBER as u32 {
         let mut extra_waits = 0;
+        // pgstat_report_wait_start(WAIT_EVENT_PROCARRAY_GROUP_UPDATE): the
+        // follower's sleep shows as ProcarrayGroupUpdate in pg_stat_activity.
+        // Reporting is diagnostics; unit tests run without the activity seams.
+        let report = waitevent_seams::pgstat_report_wait_start::is_installed();
+        if report {
+            waitevent_seams::pgstat_report_wait_start::call(WAIT_EVENT_PROCARRAY_GROUP_UPDATE);
+        }
         loop {
             // PGSemaphoreLock acts as a read barrier.
             lmgr_proc_seams::pg_semaphore_lock::call(procno);
@@ -877,6 +888,9 @@ fn ProcArrayGroupClearXid(procno: ProcNumber, latestXid: TransactionId) -> PgRes
                 break;
             }
             extra_waits += 1;
+        }
+        if report {
+            waitevent_seams::pgstat_report_wait_end::call();
         }
         debug_assert_eq!(
             proc.procArrayGroupNext.value.load(Relaxed),
@@ -1736,9 +1750,9 @@ enum GlobalVisHorizonKind {
 fn GlobalVisHorizonKindForRel(rel: &types_rel::RelationData<'_>) -> GlobalVisHorizonKind {
     if rel.rd_rel.relisshared || transam_xlog_seams::recovery_in_progress::call() {
         GlobalVisHorizonKind::Shared
-    // C also classifies RelationIsAccessibleInLogicalDecoding rels as catalog;
-    // that predicate is false while wal_level < logical (the only shipped level).
-    } else if catalog_seams::is_catalog_relation::call(rel) {
+    } else if catalog_seams::is_catalog_relation::call(rel)
+        || relation_is_accessible_in_logical_decoding(rel)
+    {
         GlobalVisHorizonKind::Catalog
     } else if !(rel.rd_islocaltemp || rel.rd_createSubid.get() != types_core::InvalidSubTransactionId)
     {
@@ -1746,6 +1760,20 @@ fn GlobalVisHorizonKindForRel(rel: &types_rel::RelationData<'_>) -> GlobalVisHor
     } else {
         GlobalVisHorizonKind::Temp
     }
+}
+
+// RelationIsAccessibleInLogicalDecoding (utils/rel.h):
+//   XLogLogicalInfoActive() && RelationNeedsWAL(rel) &&
+//   (IsCatalogRelation(rel) || RelationIsUsedAsCatalogTable(rel))
+// The IsCatalogRelation arm is the caller's own first test, and under
+// wal_level=logical XLogStandbyInfoActive() holds, so RelationNeedsWAL
+// reduces to RelationIsPermanent. Uninstalled seam = unit-test process
+// (wal_level below logical).
+fn relation_is_accessible_in_logical_decoding(rel: &types_rel::RelationData<'_>) -> bool {
+    transam_xlog_seams::xlog_logical_info_active::is_installed()
+        && transam_xlog_seams::xlog_logical_info_active::call()
+        && rel.is_permanent()
+        && rel.is_used_as_catalog_table()
 }
 
 // C's rel == NULL arm (GlobalVisHorizonKindForRel(NULL) == VISHORIZON_SHARED).
@@ -1882,9 +1910,44 @@ pub fn GetOldestTransactionIdConsideredRunning() -> PgResult<TransactionId> {
     Ok(ComputeXidHorizons()?.oldest_considered_running)
 }
 
-// Seam shape folds C's GetVirtualXIDsDelayingChkpt snapshot + the
-// HaveVirtualXIDsDelayingChkpt recheck into one "any current holder" probe.
-pub fn HaveVirtualXIDsDelayingChkpt(delay_type: i32) -> bool {
+/// GetVirtualXIDsDelayingChkpt (procarray.c:3043): the vxids currently
+/// holding `delay_type` delay flags. The checkpointer snapshots this once
+/// and then waits only for these (xlog.c CreateCheckPoint), so transactions
+/// that start delaying later never hold up the running checkpoint.
+pub fn GetVirtualXIDsDelayingChkpt(delay_type: i32) -> Vec<types_core::VirtualTransactionId> {
+    debug_assert!(delay_type != 0);
+    let arrayP = procArray();
+    let hdr = ProcGlobal();
+    let my_procno = MyProc().expect("no MyProc");
+    let mut vxids = Vec::with_capacity(arrayP.maxProcs as usize);
+
+    LWLockAcquire(ProcArrayLock(), LW_SHARED, my_procno)
+        .expect("ProcArrayLock for GetVirtualXIDsDelayingChkpt");
+    // SAFETY: [PAL] serialized by ProcArrayLock
+    for index in 0..unsafe { arrayP.numProcs.get() } as usize {
+        // SAFETY: [PAL] serialized by ProcArrayLock
+        let pgprocno = unsafe { arrayP.pgprocnos[index].get() };
+        let proc = &hdr.allProcs[pgprocno as usize];
+        if proc.delayChkptFlags.load(Relaxed) & delay_type != 0 {
+            let vxid = types_core::VirtualTransactionId {
+                procNumber: proc.vxid.procNumber.load(Relaxed),
+                localTransactionId: proc.vxid.lxid.load(Relaxed),
+            };
+            if vxid.localTransactionId != InvalidLocalTransactionId {
+                vxids.push(vxid);
+            }
+        }
+    }
+    let _ = LWLockRelease(ProcArrayLock());
+    vxids
+}
+
+/// HaveVirtualXIDsDelayingChkpt (procarray.c:3084): are any of the
+/// snapshotted `vxids` still delaying `delay_type`?
+pub fn HaveVirtualXIDsDelayingChkpt(
+    vxids: &[types_core::VirtualTransactionId],
+    delay_type: i32,
+) -> bool {
     debug_assert!(delay_type != 0);
     let arrayP = procArray();
     let hdr = ProcGlobal();
@@ -1898,8 +1961,16 @@ pub fn HaveVirtualXIDsDelayingChkpt(delay_type: i32) -> bool {
         // SAFETY: [PAL] serialized by ProcArrayLock
         let pgprocno = unsafe { arrayP.pgprocnos[index].get() };
         let proc = &hdr.allProcs[pgprocno as usize];
+        let vxid = types_core::VirtualTransactionId {
+            procNumber: proc.vxid.procNumber.load(Relaxed),
+            localTransactionId: proc.vxid.lxid.load(Relaxed),
+        };
         if proc.delayChkptFlags.load(Relaxed) & delay_type != 0
-            && proc.vxid.lxid.load(Relaxed) != InvalidLocalTransactionId
+            && vxid.localTransactionId != InvalidLocalTransactionId
+            && vxids.iter().any(|v| {
+                v.procNumber == vxid.procNumber
+                    && v.localTransactionId == vxid.localTransactionId
+            })
         {
             result = true;
             break;
@@ -2264,6 +2335,7 @@ pub fn init_seams() {
     procarray_seams::get_oldest_transaction_id_considered_running::set(|| {
         GetOldestTransactionIdConsideredRunning().expect("GetOldestTransactionIdConsideredRunning")
     });
+    procarray_seams::get_virtual_xids_delaying_chkpt::set(GetVirtualXIDsDelayingChkpt);
     procarray_seams::have_virtual_xids_delaying_chkpt::set(HaveVirtualXIDsDelayingChkpt);
     procarray_seams::record_known_assigned_transaction_ids::set(RecordKnownAssignedTransactionIds);
     procarray_seams::expire_tree_known_assigned_transaction_ids::set(

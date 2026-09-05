@@ -988,13 +988,24 @@ fn CheckPointGuts(check_point_redo: XLogRecPtr, flags: i32) -> PgResult<()> {
 }
 
 fn wait_for_delay_chkpt(delay_type: i32) -> PgResult<()> {
+    // xlog.c CreateCheckPoint: snapshot the delaying vxids ONCE, then wait
+    // (do-while, 10 ms) only until THOSE have left their critical sections;
+    // transactions that start delaying afterwards do not hold up this
+    // checkpoint (a continuous commit stream would otherwise starve it).
     // A checkpoint that skips the delay-chkpt wait can capture a torn
     // multi-record update; uninstalled probe must be loud, never a skip.
-    while procarray_seams::have_virtual_xids_delaying_chkpt::call(delay_type) {
+    let vxids = procarray_seams::get_virtual_xids_delaying_chkpt::call(delay_type);
+    if vxids.is_empty() {
+        return Ok(());
+    }
+    loop {
         if sync_seams::absorb_sync_requests::is_installed() {
             sync_seams::absorb_sync_requests::call()?;
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
+        if !procarray_seams::have_virtual_xids_delaying_chkpt::call(&vxids, delay_type) {
+            break;
+        }
     }
     Ok(())
 }

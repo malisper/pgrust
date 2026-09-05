@@ -311,3 +311,41 @@ fn exit_callback_panic_reraises_killed_by_signal() {
     on_exit_reset();
     init_small::globals::SetIsUnderPostmaster(false);
 }
+
+// ipc.c:409 — the "not the latest entry" message prints the whole Datum
+// word (0x%PRIxPTR), not its low 32 bits.
+#[test]
+fn cancel_before_shmem_exit_reports_the_full_datum_word() {
+    install();
+    fn cb_a(_: i32, _: Datum) -> PgResult<()> {
+        Ok(())
+    }
+    fn cb_b(_: i32, _: Datum) -> PgResult<()> {
+        Ok(())
+    }
+    let arg = Datum::from_i64(0x1_0000_0005);
+    before_shmem_exit(cb_a, arg).unwrap();
+    before_shmem_exit(cb_b, arg).unwrap();
+    let err = cancel_before_shmem_exit(cb_a, arg).unwrap_err();
+    assert!(
+        err.message.ends_with(",0x100000005) is not the latest entry"),
+        "{}",
+        err.message
+    );
+    on_exit_reset();
+}
+
+// ipc.c:442/444 — a prematurely registered shmem-exit callback is
+// elog(FATAL), never a catchable ERROR.
+#[test]
+fn check_lists_not_empty_is_fatal() {
+    install();
+    on_shmem_exit(|_, _| {}, 0);
+    let err = check_on_shmem_exit_lists_are_empty().unwrap_err();
+    assert_eq!(err.level(), FATAL, "{}", err.message);
+    on_exit_reset();
+    before_shmem_exit(|_, _| Ok(()), Datum::from_i32(0)).unwrap();
+    let err = check_on_shmem_exit_lists_are_empty().unwrap_err();
+    assert_eq!(err.level(), FATAL, "{}", err.message);
+    on_exit_reset();
+}

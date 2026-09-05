@@ -83,10 +83,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    // GetVirtualXIDsDelayingChkpt + HaveVirtualXIDsDelayingChkpt wait loop
-    // inputs (procarray.c): snapshot the vxids holding `type` delay flags.
-    // Empty result = nothing to wait for.
-    pub fn have_virtual_xids_delaying_chkpt(delay_type: i32) -> bool
+    // GetVirtualXIDsDelayingChkpt (procarray.c:3043): snapshot the vxids
+    // holding `delay_type` delay flags. Empty result = nothing to wait for.
+    pub fn get_virtual_xids_delaying_chkpt(delay_type: i32) -> Vec<types_core::VirtualTransactionId>
+);
+
+seam_core::seam!(
+    // HaveVirtualXIDsDelayingChkpt (procarray.c:3084): are any of the
+    // snapshotted `vxids` still delaying `delay_type`?
+    pub fn have_virtual_xids_delaying_chkpt<'a>(
+        vxids: &'a [types_core::VirtualTransactionId],
+        delay_type: i32,
+    ) -> bool
 );
 
 seam_core::seam!(

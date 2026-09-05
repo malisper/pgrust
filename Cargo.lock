@@ -5252,6 +5252,7 @@ dependencies = [
  "types_error",
  "types_guc",
  "types_storage",
+ "waitevent_seams",
 ]
 
 [[package]]

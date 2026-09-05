@@ -7,8 +7,8 @@ use types_core::BackendType;
 // over the my_backend() call-site count or InitProcess FATALs mid-suite.
 const MAX_CONNECTIONS: i32 = 24;
 // Bump when claim_other() call sites grow: the claimable simulated-backend
-// range is MAX_BACKENDS - MAX_CONNECTIONS (16 today for 16 claim_other()s).
-const MAX_WORKER_PROCESSES: i32 = 9;
+// range is MAX_BACKENDS - MAX_CONNECTIONS (19 today for 18 claim_other()s).
+const MAX_WORKER_PROCESSES: i32 = 12;
 const NUM_SPECIAL: i32 = types_storage::storage::NUM_SPECIAL_WORKER_PROCS;
 const MAX_BACKENDS: i32 = MAX_CONNECTIONS + 3 + MAX_WORKER_PROCESSES + 2 + NUM_SPECIAL;
 
@@ -18,6 +18,10 @@ fn test_lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 static RECOVERY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+// pgstat wait reporting trace: each start pushes its wait_event_info, each
+// end pushes 0.
+static WAIT_EVENTS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 
 struct RecoveryOn;
 impl RecoveryOn {
@@ -42,7 +46,18 @@ fn setup() {
 
         pg_sema_seams::pg_semaphore_create::set(|_| {});
         pg_sema_seams::pg_semaphore_reset::set(|_| {});
-        pg_sema_seams::pg_semaphore_lock::set(|_| {});
+        // A follower in ProcArrayGroupClearXid sleeps on its semaphore until
+        // the leader clears its membership; no leader runs in these tests,
+        // so the fake semaphore plays the leader for a group member.
+        pg_sema_seams::pg_semaphore_lock::set(|procno| {
+            let proc = GetPGProcByNumber(procno);
+            if proc.procArrayGroupMember.load(Relaxed) {
+                proc.procArrayGroupNext
+                    .value
+                    .store(INVALID_PROC_NUMBER as u32, Relaxed);
+                proc.procArrayGroupMember.store(false, Relaxed);
+            }
+        });
         pg_sema_seams::pg_semaphore_unlock::set(|_| {});
         s_lock_seams::perform_spin_delay::set(|_| std::thread::yield_now());
         s_lock_seams::finish_spin_delay::set(|_| {});
@@ -57,8 +72,12 @@ fn setup() {
         miscinit_seams::switch_to_shared_latch::set(|| {});
         miscinit_seams::switch_back_to_local_latch::set(|| {});
         waitevent_seams::pgstat_set_wait_event_storage::set(|_| {});
-        waitevent_seams::pgstat_report_wait_start::set(|_| {});
-        waitevent_seams::pgstat_report_wait_end::set(|| {});
+        waitevent_seams::pgstat_report_wait_start::set(|info| {
+            WAIT_EVENTS.lock().unwrap().push(info);
+        });
+        waitevent_seams::pgstat_report_wait_end::set(|| {
+            WAIT_EVENTS.lock().unwrap().push(0);
+        });
         waitevent_seams::pgstat_reset_wait_event_storage::set(|| {});
         ipc_seams::on_shmem_exit::set(|_, _| {});
         deadlock_seams::init_dead_lock_checking::set(|| Ok(()));
@@ -1208,4 +1227,140 @@ fn snapshot_arrays_demand_grow_and_decay() {
 
     GetPGProcByNumber(me).xmin.value.store(0, Relaxed);
     set_transaction_xmin(InvalidTransactionId);
+}
+
+// procarray.c:1204 — ProcArrayApplyRecoveryInfo sorts the running xids with
+// xidLogicalComparator (modular TransactionIdPrecedes order), so a snapshot
+// straddling the 2^32 wraparound inserts 4294967294, 4294967295 before 3;
+// plain unsigned order puts 3 first and KnownAssignedXidsAdd then rejects
+// 4294967294 with "out-of-order XID insertion in KnownAssignedXids".
+#[test]
+fn apply_recovery_info_orders_wrapped_xids_modularly() {
+    let _g = test_lock();
+    setup();
+    kax::kax_reset();
+    xlogutils::set_standby_state(xlogutils::STANDBY_INITIALIZED);
+
+    // The xid counter has wrapped: nextXid is epoch 1 / xid 5.
+    let tv = TransamVariables();
+    tv.nextXid.store(FullTransactionId::from_epoch_and_xid(1, 5).value, Relaxed);
+    tv.latestCompletedXid.store(FullTransactionId::from_epoch_and_xid(1, 4).value, Relaxed);
+
+    ProcArrayInitRecovery(5);
+    assert_eq!(kax::latest_observed_xid(), 4);
+
+    let mcx = leaked_mcx();
+    let mut xids = mcx::vec_with_capacity_in(mcx, 3).unwrap();
+    // Record order is arbitrary (the primary walks the proc array).
+    xids.push(3);
+    xids.push(4294967295);
+    xids.push(4294967294);
+    let running = RunningTransactionsData {
+        xcnt: 3,
+        subxcnt: 0,
+        subxid_status: types_storage::storage::SUBXIDS_IN_ARRAY,
+        nextXid: 5,
+        oldestRunningXid: 4294967294,
+        oldestDatabaseRunningXid: 4294967294,
+        latestCompletedXid: 4,
+        xids,
+    };
+    ProcArrayApplyRecoveryInfo(&running).expect("wrapped running-xacts snapshot applies");
+
+    assert_eq!(xlogutils::standby_state(), xlogutils::STANDBY_SNAPSHOT_READY);
+    assert_eq!(kax::get_all(InvalidTransactionId), vec![4294967294, 4294967295, 3]);
+    kax::kax_reset();
+    xlogutils::set_standby_state(xlogutils::STANDBY_DISABLED);
+}
+
+// procarray.c:3043/3084 + xlog.c CreateCheckPoint — the checkpointer
+// snapshots the vxids delaying the checkpoint once
+// (GetVirtualXIDsDelayingChkpt) and then waits only for THOSE
+// (HaveVirtualXIDsDelayingChkpt(vxids, ...)): a transaction that starts
+// delaying after the snapshot never holds up this checkpoint.
+#[test]
+fn delaying_chkpt_wait_tracks_the_snapshot_not_newcomers() {
+    const DELAY_CHKPT_START: i32 = 1 << 0;
+    let _g = test_lock();
+    let _me = my_backend();
+    let a = claim_other();
+    let b = claim_other();
+    other_proc_running(a, 1200);
+    other_proc_running(b, 1201);
+    let pa = GetPGProcByNumber(a);
+    let pb = GetPGProcByNumber(b);
+    pa.vxid.procNumber.store(a, Relaxed);
+    pa.vxid.lxid.store(11, Relaxed);
+    pb.vxid.procNumber.store(b, Relaxed);
+    pb.vxid.lxid.store(12, Relaxed);
+
+    // A is inside its commit critical section when the checkpoint starts.
+    pa.delayChkptFlags.store(DELAY_CHKPT_START, Relaxed);
+    let snapshot = GetVirtualXIDsDelayingChkpt(DELAY_CHKPT_START);
+    assert_eq!(snapshot.len(), 1);
+    assert_eq!((snapshot[0].procNumber, snapshot[0].localTransactionId), (a, 11));
+    assert!(HaveVirtualXIDsDelayingChkpt(&snapshot, DELAY_CHKPT_START));
+
+    // A leaves; B enters afterwards. C's wait loop, keyed on the snapshot
+    // taken above, is done: B is not one of the snapshotted vxids.
+    pa.delayChkptFlags.store(0, Relaxed);
+    pb.delayChkptFlags.store(DELAY_CHKPT_START, Relaxed);
+    assert!(
+        !HaveVirtualXIDsDelayingChkpt(&snapshot, DELAY_CHKPT_START),
+        "a transaction that started delaying after the snapshot must not delay this checkpoint"
+    );
+    // A later snapshot sees B (the next checkpoint waits for it).
+    assert!(HaveVirtualXIDsDelayingChkpt(
+        &GetVirtualXIDsDelayingChkpt(DELAY_CHKPT_START),
+        DELAY_CHKPT_START
+    ));
+
+    pb.delayChkptFlags.store(0, Relaxed);
+    pa.vxid.lxid.store(InvalidLocalTransactionId, Relaxed);
+    pb.vxid.lxid.store(InvalidLocalTransactionId, Relaxed);
+    other_proc_end(a, 1200);
+    other_proc_end(b, 1201);
+}
+
+// procarray.c:827/836 — a ProcArrayGroupClearXid follower brackets its
+// semaphore sleep with pgstat_report_wait_start(WAIT_EVENT_PROCARRAY_GROUP_UPDATE)
+// / pgstat_report_wait_end (pg_stat_activity wait_event ProcarrayGroupUpdate).
+#[test]
+fn group_clear_xid_follower_reports_procarray_group_update_wait() {
+    // wait_event_names.txt IPC row "ProcarrayGroupUpdate" (waitevent row 41).
+    const PG_WAIT_IPC: u32 = 0x0800_0000;
+    const WAIT_EVENT_PROCARRAY_GROUP_UPDATE: u32 = PG_WAIT_IPC | 41;
+    let _g = test_lock();
+    let me = my_backend();
+    let leader = claim_other();
+    other_proc_running(leader, 1300);
+    let hdr = ProcGlobal();
+    let lp = GetPGProcByNumber(leader);
+    lp.procArrayGroupMember.store(true, Relaxed);
+    lp.procArrayGroupNext
+        .value
+        .store(INVALID_PROC_NUMBER as u32, Relaxed);
+    hdr.procArrayGroupFirst.value.store(leader as u32, Relaxed);
+
+    let mp = GetPGProcByNumber(me);
+    mp.xid.value.store(1301, Relaxed);
+    WAIT_EVENTS.lock().unwrap().clear();
+    // Joining behind `leader` makes us a follower: we sleep until the (fake)
+    // leader clears our membership.
+    ProcArrayGroupClearXid(me, 1301).expect("follower returns once cleared");
+    let trace = std::mem::take(&mut *WAIT_EVENTS.lock().unwrap());
+    assert_eq!(
+        trace,
+        vec![WAIT_EVENT_PROCARRAY_GROUP_UPDATE, 0],
+        "follower must report ProcarrayGroupUpdate around its semaphore wait"
+    );
+    assert!(!mp.procArrayGroupMember.load(Relaxed));
+
+    // Restore: the fake leader never ran the real clear.
+    mp.xid.value.store(InvalidTransactionId, Relaxed);
+    hdr.procArrayGroupFirst
+        .value
+        .store(INVALID_PROC_NUMBER as u32, Relaxed);
+    lp.procArrayGroupMember.store(false, Relaxed);
+    other_proc_end(leader, 1300);
 }

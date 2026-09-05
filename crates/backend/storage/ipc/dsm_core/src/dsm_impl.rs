@@ -79,9 +79,15 @@ static REGIONS: Mutex<Vec<Region>> = Mutex::new(Vec::new());
 
 const REGION_ALIGN: usize = 4096;
 
-fn region_layout(size: usize) -> Layout {
-    Layout::from_size_align(size.max(1), REGION_ALIGN).expect("dsm region layout")
+// None when the request cannot be represented (size > isize::MAX - align):
+// dsm_impl_posix_resize's ftruncate/posix_fallocate failure arm.
+fn region_layout(size: usize) -> Option<Layout> {
+    Layout::from_size_align(size.max(1), REGION_ALIGN).ok()
 }
+
+// wait_event_names.txt IO row "DsmAllocate" (waitevent IO row 25).
+const PG_WAIT_IO: u32 = 0x0A00_0000;
+const WAIT_EVENT_DSM_ALLOCATE: u32 = PG_WAIT_IO | 25;
 
 fn segment_name(handle: dsm_handle) -> String {
     format!("/PostgreSQL.{handle}")
@@ -120,9 +126,34 @@ pub fn dsm_impl_op(
             if regions.iter().any(|r| r.handle == handle) {
                 return Ok(false);
             }
+            // dsm_impl_posix_resize: a request the platform cannot size fails
+            // with EFBIG ("could not resize ... : %m", ERRCODE_OUT_OF_MEMORY)
+            // and DSM_OP_CREATE returns false; never a process abort.
+            let Some(layout) = region_layout(request_size) else {
+                drop(regions);
+                report_errno(
+                    elevel,
+                    libc::EFBIG,
+                    format!(
+                        "could not resize shared memory segment \"{}\" to {request_size} bytes: %m",
+                        segment_name(handle)
+                    ),
+                )?;
+                return Ok(false);
+            };
+            // pgstat_report_wait_start(WAIT_EVENT_DSM_ALLOCATE) brackets the
+            // allocation (dsm_impl.c:366). Reporting is diagnostics; unit
+            // tests run without the activity seams.
+            let report = waitevent_seams::pgstat_report_wait_start::is_installed();
+            if report {
+                waitevent_seams::pgstat_report_wait_start::call(WAIT_EVENT_DSM_ALLOCATE);
+            }
             // Zeroed like fresh shm/tmpfs pages; consumers rely on it.
             // SAFETY: layout size is non-zero.
-            let ptr = unsafe { alloc_zeroed(region_layout(request_size)) };
+            let ptr = unsafe { alloc_zeroed(layout) };
+            if report {
+                waitevent_seams::pgstat_report_wait_end::call();
+            }
             if ptr.is_null() {
                 drop(regions);
                 report_errno(
@@ -187,9 +218,11 @@ pub fn dsm_impl_op(
             };
             match region {
                 Some(r) => {
-                    // SAFETY: allocated by Create with this same layout; the
-                    // refcount protocol guarantees no live mappings remain.
-                    unsafe { dealloc(r.addr as *mut u8, region_layout(r.size)) };
+                    // SAFETY: allocated by Create with this same layout (so
+                    // it is representable); the refcount protocol guarantees
+                    // no live mappings remain.
+                    let layout = region_layout(r.size).expect("region layout validated at create");
+                    unsafe { dealloc(r.addr as *mut u8, layout) };
                     Ok(true)
                 }
                 None => {
