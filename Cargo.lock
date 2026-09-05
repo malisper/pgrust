@@ -12536,6 +12536,7 @@ dependencies = [
  "catalog_index",
  "datum",
  "dfmgr",
+ "guc_tables",
  "lmgr_seams",
  "lsyscache",
  "mcx",

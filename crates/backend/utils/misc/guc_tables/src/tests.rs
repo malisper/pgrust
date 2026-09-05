@@ -85,12 +85,16 @@ fn table_counts_match_compiled_backend_shape() {
     //   (0 = auto), formerly the PGRUST_SQE_THREADS env spelling.
     // upstream 2a29b607dbbb (18.6, CVE-2026-6471): String +1
     //   output_plugin_libraries (-> 80) = 473 — the C 18.6 GUC.
+    // audit-remediation b090 (contrib/pg_prewarm/autoprewarm.c:128 _PG_init
+    //   DefineCustomIntVariable): Int +1 pg_prewarm.autoprewarm_interval
+    //   (-> 178) = 474 — the C 18.6 custom GUC, statically defined like
+    //   auto_explain.*.
     assert_eq!(ConfigureNamesBool.len(), 140);
-    assert_eq!(ConfigureNamesInt.len(), 177);
+    assert_eq!(ConfigureNamesInt.len(), 178);
     assert_eq!(ConfigureNamesReal.len(), 28);
     assert_eq!(ConfigureNamesString.len(), 80);
     assert_eq!(ConfigureNamesEnum.len(), 48);
-    assert_eq!(all_settings().count(), 473);
+    assert_eq!(all_settings().count(), 474);
     assert_eq!(GucContext_Names.len(), PGC_USERSET as usize + 1);
     assert_eq!(GucSource_Names.len(), PGC_S_SESSION as usize + 1);
     assert_eq!(config_group_names.len(), DEVELOPER_OPTIONS as usize + 1);
@@ -362,4 +366,37 @@ fn lz4_build_config_is_reflected_in_option_sets() {
         panic!("max_stack_depth should be an int GUC");
     };
     assert_eq!(stack.boot_val, GucDefaultValue::Int(100));
+}
+
+// contrib/pg_prewarm/autoprewarm.c:128-138 (_PG_init): DefineCustomIntVariable
+// "pg_prewarm.autoprewarm_interval" — default 300, range 0..INT_MAX/1000,
+// PGC_SIGHUP, GUC_UNIT_S, no hooks. Defined before the
+// process_shared_preload_libraries_in_progress check, so every backend that
+// loads the library has it (SHOW -> "5min"; SET -> 55P02 "cannot be changed
+// now"). Regression for audit-18.6 b090
+// (a186-candidate-fp-contrib-pg_prewarm-autoprewarm-0ff933858b20be8ef07c-1):
+// pgrust knew no such GUC (42704 on SHOW, a bare placeholder on SET).
+#[test]
+fn pg_prewarm_autoprewarm_interval_matches_autoprewarm_c() {
+    let GucSetting::Int(interval) = find("pg_prewarm.autoprewarm_interval") else {
+        panic!("pg_prewarm.autoprewarm_interval should be an int GUC");
+    };
+    assert_eq!(interval.context, PGC_SIGHUP);
+    assert_eq!(interval.group, CUSTOM_OPTIONS);
+    assert_eq!(interval.flags, GUC_UNIT_S);
+    assert_eq!(interval.boot_val, GucDefaultValue::Int(300));
+    assert_eq!(interval.min, 0);
+    assert_eq!(interval.max, i32::MAX / 1000);
+    assert_eq!(
+        interval.short_desc,
+        Some("Sets the interval between dumps of shared buffers")
+    );
+    assert_eq!(
+        interval.long_desc,
+        Some("If set to zero, time-based dumping is disabled.")
+    );
+    assert!(interval.check_hook.is_none());
+    assert!(interval.assign_hook.is_none());
+    assert!(interval.show_hook.is_none());
+    assert_eq!(interval.variable.c_symbol(), "autoprewarm_interval");
 }

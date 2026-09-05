@@ -1,7 +1,13 @@
-//! `contrib/pg_prewarm/pg_prewarm.c` — the `pg_prewarm()` SQL function.
-//! autoprewarm.c (bgworker/shmem) is unported; its two SQL symbols resolve
-//! for `CREATE FUNCTION`'s C validator and raise a clean
-//! feature-not-supported error when called.
+//! `contrib/pg_prewarm/pg_prewarm.c` — the `pg_prewarm()` SQL function —
+//! plus autoprewarm.c's `pg_prewarm.autoprewarm_interval` GUC (_PG_init:128,
+//! defined in every backend that loads the library; the table row is in
+//! guc_tables, the C static's cell is here). The rest of autoprewarm.c
+//! (leader bgworker, shmem state, dump file, the preload-only
+//! `pg_prewarm.autoprewarm` GUC and prefix reservation) is unported; its
+//! two SQL symbols resolve for `CREATE FUNCTION`'s C validator and raise a
+//! clean feature-not-supported error when called.
+
+use std::sync::atomic::{AtomicI32, Ordering};
 
 use datum::Datum;
 use types_core::{BlockNumber, ForkNumber, Oid, OidIsValid, BLCKSZ};
@@ -20,6 +26,21 @@ use types_storage::storage::ReadBufferMode;
 use types_storage::RelFileLocatorBackend;
 
 const LIBRARY: &str = "pg_prewarm";
+
+// autoprewarm.c:120 `static int autoprewarm_interval = 300` (dump interval,
+// seconds). PGC_SIGHUP, so a process-global cell like the backend's
+// sighup-scope GUCs, not a per-session backing. Only the unported leader
+// worker reads it (autoprewarm_main:213); SHOW/pg_settings go through the
+// registry.
+static AUTOPREWARM_INTERVAL: AtomicI32 = AtomicI32::new(300);
+
+fn autoprewarm_interval() -> i32 {
+    AUTOPREWARM_INTERVAL.load(Ordering::Relaxed)
+}
+
+fn set_autoprewarm_interval(v: i32) {
+    AUTOPREWARM_INTERVAL.store(v, Ordering::Relaxed);
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PrewarmType {
@@ -271,10 +292,18 @@ fn lookup(function: &str) -> Option<PGFunction> {
 }
 
 pub fn init_seams() {
+    use guc_tables::GucVarAccessors;
+    guc_tables::vars::autoprewarm_interval.install(GucVarAccessors {
+        get: autoprewarm_interval,
+        set: set_autoprewarm_interval,
+    });
     dfmgr::register_builtin_library(dfmgr::BuiltinLibraryEntry {
         name: LIBRARY,
         lookup,
-        // pg_prewarm.c's PG_MODULE_MAGIC_EXT has no _PG_init.
+        // autoprewarm.c:126 _PG_init: the interval GUC is defined statically
+        // above; its remaining work (the preload-only pg_prewarm.autoprewarm
+        // GUC, MarkGUCPrefixReserved, apw_start_leader_worker) belongs to
+        // the unported worker.
         pg_init: None,
     });
 }

@@ -420,6 +420,10 @@ pub static aex_log_nested_statements: GucBoolVar =
 pub static aex_log_format: GucEnumVar = GucSlot::new("auto_explain_log_format");
 pub static aex_log_level: GucEnumVar = GucSlot::new("auto_explain_log_level");
 pub static aex_sample_rate: GucRealVar = GucSlot::new("auto_explain_sample_rate");
+// pg_prewarm custom GUC (contrib/pg_prewarm/autoprewarm.c:120 static int
+// autoprewarm_interval; :128 _PG_init DefineCustomIntVariable), statically
+// defined like auto_explain.*; the cell lives in crates/contrib/pg_prewarm.
+pub static autoprewarm_interval: GucIntVar = GucSlot::new("autoprewarm_interval");
 // pgrust-only: pgrust.resource_counters (no C symbol; PGC_INTERNAL,
 // value computed by hooks::show_resource_counters — the simharness F8
 // resource-baseline hook channel; the fd crate owns backing + hook).

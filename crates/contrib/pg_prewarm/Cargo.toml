@@ -28,3 +28,4 @@ bufmgr = { path = "../../backend/storage/buffer/bufmgr" }
 smgr = { path = "../../backend/storage/smgr/smgr" }
 postgres_seams = { path = "../../backend/tcop/postgres_seams" }
 dfmgr = { path = "../../backend/utils/fmgr/dfmgr" }
+guc_tables = { path = "../../backend/utils/misc/guc_tables" }
