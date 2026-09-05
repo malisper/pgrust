@@ -15780,6 +15780,7 @@ dependencies = [
  "lsyscache",
  "mcx",
  "miscinit",
+ "objectaccess",
  "outfuncs",
  "parse_expr",
  "parser_analyze",

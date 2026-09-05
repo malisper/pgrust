@@ -24,6 +24,9 @@ use types_rel::{
 };
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 
+#[cfg(test)]
+mod tests;
+
 // get_relkind_objtype (tablecmds.c), rule-relevant subset only.
 fn get_relkind_objtype(relkind: u8) -> types_nodes::parsenodes::ObjectType {
     match relkind {
@@ -65,12 +68,29 @@ fn eq_key(attno: AttrNumber, func: RegProcedure, arg: Datum) -> ScanKeyData {
     key
 }
 
+// namestrcpy (name.c): strlcpy into a NAMEDATALEN block — a name of
+// NAMEDATALEN-1 bytes or more is cut to NAMEDATALEN-1 bytes and
+// NUL-terminated. The stored image of a rule name.
 fn name_image<'mcx>(mcx: Mcx<'mcx>, name: &str) -> PgResult<mcx::PgVec<'mcx, u8>> {
     let n = NAMEDATALEN as usize;
-    assert!(name.len() < n, "namestrcpy truncation unported: {name:?}");
+    let len = name.len().min(n - 1);
     let mut buf: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, n)?;
-    mcx::vec_append_bytes(&mut buf, name.as_bytes())?;
-    mcx::vec_append_bytes(&mut buf, &[0u8; 64][..n - name.len()])?;
+    mcx::vec_append_bytes(&mut buf, &name.as_bytes()[..len])?;
+    mcx::vec_append_bytes(&mut buf, &[0u8; 64][..n - len])?;
+    Ok(buf)
+}
+
+// The RULERELNAME lookup key: C hands SearchSysCache2 the raw C string
+// (rewriteSupport.c:99, rewriteDefine.c:82/697/803) and nameeq compares
+// strncmp(..., NAMEDATALEN), so the key is the name's first NAMEDATALEN
+// bytes — a name of NAMEDATALEN bytes or more carries no NUL and matches no
+// stored rule (every stored name is NUL-terminated within NAMEDATALEN-1).
+fn name_key<'mcx>(mcx: Mcx<'mcx>, name: &str) -> PgResult<mcx::PgVec<'mcx, u8>> {
+    let n = NAMEDATALEN as usize;
+    let len = name.len().min(n);
+    let mut buf: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, n)?;
+    mcx::vec_append_bytes(&mut buf, &name.as_bytes()[..len])?;
+    mcx::vec_append_bytes(&mut buf, &[0u8; 64][..n - len])?;
     Ok(buf)
 }
 
@@ -94,19 +114,20 @@ fn InsertRule<'mcx>(
 
     let rel = table::table_open(mcx, REWRITE_RELATION_ID, RowExclusiveLock)?;
 
-    let rname = name_image(mcx, rulname)?;
+    let rkey = name_key(mcx, rulname)?;
     let keys = [
         eq_key(Anum_pg_rewrite_ev_class, F_OIDEQ, Datum::from_oid(eventrel_oid)),
         eq_key(
             Anum_pg_rewrite_rulename,
             F_NAMEEQ,
-            Datum::from_usize(rname.as_ptr() as usize),
+            Datum::from_usize(rkey.as_ptr() as usize),
         ),
     ];
     let mut scan =
         genam::systable_beginscan(mcx, &rel, REWRITE_REL_RULENAME_INDEX_ID, true, None, &keys)?;
     let oldtup = genam::systable_getnext(mcx, &mut scan)?;
 
+    let rname = name_image(mcx, rulname)?;
     let evqual_text = varlena::cstring_to_text(mcx, evqual.as_bytes())?;
     let action_text = varlena::cstring_to_text(mcx, actiontree.as_bytes())?;
     let mut values = [
@@ -197,6 +218,9 @@ fn InsertRule<'mcx>(
         )?;
     }
 
+    // Post creation hook for new rule
+    objectaccess::InvokeObjectPostCreateHook(REWRITE_RELATION_ID, rule_oid, 0)?;
+
     rel.close(RowExclusiveLock)?;
     Ok(rule_oid)
 }
@@ -226,7 +250,7 @@ pub fn DefineQueryRewrite<'mcx>(
                 event_relation.name()
             ))
             .with_sqlstate(ERRCODE_WRONG_OBJECT_TYPE)
-            .with_detail(relkind_not_supported_detail(relkind)),
+            .with_detail(relkind_not_supported_detail(relkind)?),
         ));
     }
     if !init_small::globals::allowSystemTableMods() && catalog::IsSystemRelation(&event_relation) {
@@ -292,7 +316,7 @@ pub fn DefineQueryRewrite<'mcx>(
                 event_relation.name()
             ))
             .with_sqlstate(ERRCODE_WRONG_OBJECT_TYPE)
-            .with_detail(relkind_not_supported_detail(relkind)),
+            .with_detail(relkind_not_supported_detail(relkind)?),
         ));
     }
     if action.is_nil() {
@@ -625,9 +649,10 @@ fn invalid_object(msg: &str) -> Box<PgError> {
     Box::new(PgError::error(msg).with_sqlstate(ERRCODE_INVALID_OBJECT_DEFINITION))
 }
 
-// errdetail_relkind_not_supported (pg_class.c).
-fn relkind_not_supported_detail(relkind: u8) -> &'static str {
-    match relkind {
+// errdetail_relkind_not_supported (pg_class.c:26): an unknown relkind is
+// elog(ERROR, "unrecognized relkind: '%c'") — catchable, never a panic.
+fn relkind_not_supported_detail(relkind: u8) -> PgResult<&'static str> {
+    Ok(match relkind {
         b'r' => "This operation is not supported for tables.",
         b'i' => "This operation is not supported for indexes.",
         b'S' => "This operation is not supported for sequences.",
@@ -638,8 +663,13 @@ fn relkind_not_supported_detail(relkind: u8) -> &'static str {
         b'f' => "This operation is not supported for foreign tables.",
         b'p' => "This operation is not supported for partitioned tables.",
         b'I' => "This operation is not supported for partitioned indexes.",
-        other => panic!("unrecognized relkind: {other}"),
-    }
+        other => {
+            return Err(Box::new(PgError::error(format!(
+                "unrecognized relkind: '{}'",
+                other as char
+            ))))
+        }
+    })
 }
 
 const Anum_pg_rewrite_ev_enabled: AttrNumber = 5;
@@ -652,7 +682,7 @@ pub fn EnableDisableRule<'mcx>(
 ) -> PgResult<()> {
     let owning_rel = rel.rd_id;
     let pg_rewrite = table::table_open(mcx, REWRITE_RELATION_ID, RowExclusiveLock)?;
-    let rname = name_image(mcx, rulename)?;
+    let rname = name_key(mcx, rulename)?;
     let keys = [
         eq_key(Anum_pg_rewrite_ev_class, F_OIDEQ, Datum::from_oid(owning_rel)),
         eq_key(
@@ -693,6 +723,9 @@ pub fn EnableDisableRule<'mcx>(
     let td = pg_rewrite.descr();
     let mut isnull = false;
     // SAFETY: pg_rewrite row under its own descriptor; declared columns.
+    let rule_oid =
+        unsafe { types_tuple::heap_getattr(tup, Anum_pg_rewrite_oid as i32, td, &mut isnull) }
+            .as_oid();
     let cur_enabled =
         unsafe { types_tuple::heap_getattr(tup, Anum_pg_rewrite_ev_enabled as i32, td, &mut isnull) }
             .as_u8();
@@ -717,6 +750,9 @@ pub fn EnableDisableRule<'mcx>(
     } else {
         genam::systable_endscan(mcx, scan)?;
     }
+
+    objectaccess::InvokeObjectPostAlterHook(REWRITE_RELATION_ID, rule_oid, 0)?;
+
     pg_rewrite.close(RowExclusiveLock)?;
     if changed {
         inval::invalidate::CacheInvalidateRelcache(rel)?;
@@ -766,39 +802,70 @@ pub fn RemoveRewriteRuleById<'mcx>(mcx: Mcx<'mcx>, rule_oid: Oid) -> PgResult<()
     Ok(())
 }
 
-// RenameRewriteRule (rewriteDefine.c). Permission/relkind checks happen
-// after table_openrv, unlike C's pre-lock RangeVarCallbackForRenameRule.
+// RangeVarCallbackForRenameRule (rewriteDefine.c:743): permissions and
+// integrity checks before the AccessExclusiveLock is acquired, so a
+// non-owner (or an index / composite type / system catalog) is refused at
+// once instead of queueing behind other sessions' locks.
+fn rename_rule_callback(rv: &rel_vocab::RangeVar<'_>, relid: Oid) -> PgResult<()> {
+    if relid == types_core::InvalidOid {
+        return Ok(()); // concurrently dropped
+    }
+    let relkind = lsyscache::get_rel_relkind(relid)? as u8;
+    if relkind == 0 {
+        return Ok(()); // concurrently dropped (C: !HeapTupleIsValid)
+    }
+    // only tables and views can have rules
+    if relkind != RELKIND_RELATION && relkind != RELKIND_VIEW && relkind != RELKIND_PARTITIONED_TABLE
+    {
+        return Err(Box::new(
+            PgError::error(format!("relation \"{}\" cannot have rules", rv.relname))
+                .with_sqlstate(ERRCODE_WRONG_OBJECT_TYPE)
+                .with_detail(relkind_not_supported_detail(relkind)?),
+        ));
+    }
+    // IsSystemClass(relid, form): catalog OID or a TOAST-namespace class.
+    if !init_small::globals::allowSystemTableMods()
+        && (catalog::IsCatalogRelationOid(relid)
+            || catalog::IsToastNamespace(lsyscache::get_rel_namespace(relid)?))
+    {
+        return Err(Box::new(
+            PgError::error(format!(
+                "permission denied: \"{}\" is a system catalog",
+                rv.relname
+            ))
+            .with_sqlstate(ERRCODE_INSUFFICIENT_PRIVILEGE),
+        ));
+    }
+    // you must own the table to rename one of its rules
+    if !aclchk::object_ownercheck(RELATION_RELATION_ID, relid, miscinit::GetUserId())? {
+        aclchk::aclcheck_error(aclchk::ACLCHECK_NOT_OWNER, get_relkind_objtype(relkind), rv.relname)?;
+    }
+    Ok(())
+}
+
+// RenameRewriteRule (rewriteDefine.c:780).
 pub fn RenameRewriteRule<'mcx>(
     mcx: Mcx<'mcx>,
     relation: &rel_vocab::RangeVar<'mcx>,
     old_name: &str,
     new_name: &str,
 ) -> PgResult<ObjectAddress> {
-    let targetrel = table::table_openrv(mcx, relation, AccessExclusiveLock)?;
-    let relkind = targetrel.rd_rel.relkind;
-    if relkind != RELKIND_RELATION && relkind != RELKIND_VIEW && relkind != RELKIND_PARTITIONED_TABLE
-    {
-        return Err(Box::new(
-            PgError::error(format!("relation \"{}\" cannot have rules", targetrel.name()))
-                .with_sqlstate(ERRCODE_WRONG_OBJECT_TYPE)
-                .with_detail(relkind_not_supported_detail(relkind)),
-        ));
-    }
-    if !init_small::globals::allowSystemTableMods() && catalog::IsSystemRelation(&targetrel) {
-        return Err(Box::new(
-            PgError::error(format!(
-                "permission denied: \"{}\" is a system catalog",
-                targetrel.name()
-            ))
-            .with_sqlstate(ERRCODE_INSUFFICIENT_PRIVILEGE),
-        ));
-    }
-    if !aclchk::object_ownercheck(RELATION_RELATION_ID, targetrel.rd_id, miscinit::GetUserId())? {
-        aclchk::aclcheck_error(aclchk::ACLCHECK_NOT_OWNER, get_relkind_objtype(relkind), targetrel.name())?;
-    }
+    // Look up name, check permissions, and acquire lock (which we will NOT
+    // release until end of transaction).
+    let mut callback = |rv: &rel_vocab::RangeVar<'_>, relid: Oid, _oldrelid: Oid| {
+        rename_rule_callback(rv, relid)
+    };
+    let relid = catalog_namespace::RangeVarGetRelidExtended(
+        relation,
+        AccessExclusiveLock,
+        0,
+        Some(&mut callback),
+    )?;
+    // Have lock already, so just need to build relcache entry.
+    let targetrel = table::table_open(mcx, relid, types_rel::NoLock)?;
 
     let pg_rewrite = table::table_open(mcx, REWRITE_RELATION_ID, RowExclusiveLock)?;
-    let oldrname = name_image(mcx, old_name)?;
+    let oldrname = name_key(mcx, old_name)?;
     let keys = [
         eq_key(Anum_pg_rewrite_ev_class, F_OIDEQ, Datum::from_oid(targetrel.rd_id)),
         eq_key(
@@ -878,6 +945,9 @@ pub fn RenameRewriteRule<'mcx>(
     let otid = ruletup.t_self;
     genam::systable_endscan(mcx, scan)?;
     catalog_indexing::CatalogTupleUpdate(mcx, &pg_rewrite, &otid, &mut newtup)?;
+
+    objectaccess::InvokeObjectPostAlterHook(REWRITE_RELATION_ID, rule_oid, 0)?;
+
     pg_rewrite.close(RowExclusiveLock)?;
 
     inval::invalidate::CacheInvalidateRelcache(&targetrel)?;
@@ -894,7 +964,7 @@ pub fn get_rewrite_oid<'mcx>(
     missing_ok: bool,
 ) -> PgResult<Oid> {
     let pg_rewrite = table::table_open(mcx, REWRITE_RELATION_ID, types_rel::AccessShareLock)?;
-    let rname = name_image(mcx, rulename)?;
+    let rname = name_key(mcx, rulename)?;
     let keys = [
         eq_key(Anum_pg_rewrite_ev_class, F_OIDEQ, Datum::from_oid(relid)),
         eq_key(

@@ -39,3 +39,4 @@ inval = { path = "../../utils/cache/inval" }
 rewrite_define_seams = { path = "../rewrite_define_seams" }
 aclchk = { path = "../../catalog/aclchk" }
 miscinit = { path = "../../utils/init/miscinit" }
+objectaccess = { path = "../../catalog/objectaccess" }
