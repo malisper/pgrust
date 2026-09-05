@@ -175,13 +175,17 @@ pub fn init_seams() {
     sequence_seams::do_setval::set(do_setval_entry);
     sequence_seams::delete_sequence_tuple::set(delete_sequence_tuple_entry);
     sequence_seams::define_sequence::set(define_sequence_entry);
-    sequence_seams::alter_sequence::set(AlterSequence);
+    sequence_seams::alter_sequence::set(alter_sequence_entry);
     sequence_seams::reset_sequence::set(ResetSequence);
     sequence_seams::sequence_change_persistence::set(SequenceChangePersistence);
 }
 
 fn define_sequence_entry<'mcx>(mcx: Mcx<'mcx>, seq: &CreateSeqStmt<'mcx>) -> PgResult<Oid> {
     DefineSequence(mcx, None, seq)
+}
+
+fn alter_sequence_entry<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterSeqStmt<'mcx>) -> PgResult<Oid> {
+    AlterSequence(mcx, None, stmt)
 }
 
 fn my_lxid() -> LocalTransactionId {
@@ -285,7 +289,15 @@ fn read_seq_tuple(rel: &Relation<'_>) -> PgResult<(Buffer, SeqTuple)> {
 
 // RelationNeedsWAL (rel.h), including the wal_level=minimal skip-WAL clause.
 fn relation_needs_wal(rel: &Relation<'_>) -> bool {
-    rel.rd_rel.relpersistence == RELPERSISTENCE_PERMANENT
+    relation_needs_wal_as(rel, rel.rd_rel.relpersistence)
+}
+
+// RelationNeedsWAL evaluated against an explicit persistence: after
+// RelationSetNewRelfilenumber the C relcache rebuild refreshes
+// rel->rd_rel->relpersistence in place, but our open handle keeps the
+// pre-CCI snapshot (fill_seq_fork_with_data receives the NEW persistence).
+fn relation_needs_wal_as(rel: &Relation<'_>, persistence: u8) -> bool {
+    persistence == RELPERSISTENCE_PERMANENT
         && (transam_xlog_seams::xlog_standby_info_active::call()
             || (rel.rd_createSubid.get() == types_core::InvalidSubTransactionId
                 && rel.rd_firstRelfilelocatorSubid.get() == types_core::InvalidSubTransactionId))
@@ -358,7 +370,12 @@ fn fill_seq_fork_with_data(
         ItemPointerSet(&mut hdr.t_ctid, 0, 1);
     }
 
-    if persistence == RELPERSISTENCE_PERMANENT {
+    // sequence.c:394-396: check the comment above nextval_internal()'s
+    // equivalent call. RelationNeedsWAL, not persistence alone: under
+    // wal_level=minimal a permanent sequence created (or given a new
+    // relfilenumber) in this transaction is synced at commit instead.
+    let needs_wal = relation_needs_wal_as(rel, persistence);
+    if needs_wal {
         xact::GetTopTransactionId()?;
     }
 
@@ -373,8 +390,8 @@ fn fill_seq_fork_with_data(
         ));
     }
 
-    if persistence == RELPERSISTENCE_PERMANENT || forknum == types_core::ForkNumber::INIT_FORKNUM
-    {
+    // sequence.c:408: RelationNeedsWAL(rel) || forkNum == INIT_FORKNUM.
+    if needs_wal || forknum == types_core::ForkNumber::INIT_FORKNUM {
         let xlrec = rd_locator_bytes(rel);
         let recptr = xloginsert_seams::xlog_insert_record::call(
             RM_SEQ_ID,
@@ -427,10 +444,26 @@ fn def_get_i64(defel: &DefElem<'_>) -> PgResult<i64> {
     }
 }
 
+// parser_errposition(pstate, location): the cursor only when a ParseState
+// with source text is at hand (C's parser_errposition is a no-op on a NULL
+// pstate / negative location).
+fn cursor_at(pstate: Option<&parser_small1::ParseState<'_, '_>>, location: i32) -> Option<i32> {
+    let ps = pstate?;
+    let pos = parser_small1::parser_errposition(ps, location, mbutils::GetDatabaseEncoding());
+    (pos > 0).then_some(pos)
+}
+
+// errorConflictingDefElem (define.c): ERRCODE_SYNTAX_ERROR with
+// parser_errposition(pstate, defel->location).
 #[track_caller]
 #[cold]
-fn conflicting_def_elem() -> Box<PgError> {
-    err("conflicting or redundant options".into(), ERRCODE_SYNTAX_ERROR)
+fn conflicting_def_elem(
+    pstate: Option<&parser_small1::ParseState<'_, '_>>,
+    defel: &DefElem<'_>,
+) -> Box<PgError> {
+    let mut e = err("conflicting or redundant options".into(), ERRCODE_SYNTAX_ERROR);
+    e.cursor_position = cursor_at(pstate, defel.location);
+    e
 }
 
 struct InitParamsOut<'mcx> {
@@ -473,17 +506,20 @@ fn init_params<'mcx>(
             "cycle" => &mut is_cycled,
             "owned_by" => {
                 if owned_by.is_some() {
-                    return Err(conflicting_def_elem());
+                    return Err(conflicting_def_elem(pstate, defel));
                 }
                 owned_by =
                     Some(defel.arg.expect("owned_by arg").as_list().expect("owned_by name list"));
                 continue;
             }
             "sequence_name" => {
-                return Err(err(
+                // sequence.c:1355-1358: parser_errposition(pstate, defel->location).
+                let mut e = err(
                     "invalid sequence option SEQUENCE NAME".into(),
                     ERRCODE_SYNTAX_ERROR,
-                ))
+                );
+                e.cursor_position = cursor_at(pstate, defel.location);
+                return Err(e);
             }
             other => {
                 return Err(Box::new(PgError::new(
@@ -493,7 +529,7 @@ fn init_params<'mcx>(
             }
         };
         if slot.is_some() {
-            return Err(conflicting_def_elem());
+            return Err(conflicting_def_elem(pstate, defel));
         }
         *slot = Some(defel);
         need_seq_rewrite = true;
@@ -843,7 +879,14 @@ fn get_relkind_objtype(relkind: u8) -> types_nodes::parsenodes::ObjectType {
     }
 }
 
-pub fn AlterSequence<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterSeqStmt<'mcx>) -> PgResult<Oid> {
+// sequence.c:439 AlterSequence(ParseState *pstate, AlterSeqStmt *stmt): the
+// utility ParseState reaches init_params (sequence.c:488) so option errors
+// and the AS-type lookup carry the statement's cursor.
+pub fn AlterSequence<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: Option<&parser_small1::ParseState<'_, '_>>,
+    stmt: &AlterSeqStmt<'mcx>,
+) -> PgResult<Oid> {
     let rv = stmt.sequence.expect("AlterSeqStmt.sequence");
     let v = rel_vocab::RangeVar {
         catalogname: rv.catalogname,
@@ -926,7 +969,7 @@ pub fn AlterSequence<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterSeqStmt<'mcx>) -> PgResul
     };
     bufmgr::UnlockReleaseBuffer(buf)?;
 
-    let p = init_params(mcx, None, &stmt.options, stmt.for_identity, false, &mut form, &mut dataform)?;
+    let p = init_params(mcx, pstate, &stmt.options, stmt.for_identity, false, &mut form, &mut dataform)?;
 
     if p.need_seq_rewrite {
         if relation_needs_wal(&seqrel) {
@@ -962,6 +1005,10 @@ pub fn AlterSequence<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterSeqStmt<'mcx>) -> PgResul
     let pgs_nulls = [false; Natts_pg_sequence];
     let mut newtup = heaptuple::heap_form_tuple(mcx, rel.descr(), &pgs_values, &pgs_nulls)?;
     catalog_indexing::CatalogTupleUpdate(mcx, &rel, &otid, &mut newtup)?;
+
+    // sequence.c:530
+    objectaccess::InvokeObjectPostAlterHook(RELATION_RELATION_ID, relid, 0)?;
+
     rel.close(RowExclusiveLock)?;
     seqrel.close(NoLock)?;
     Ok(relid)
@@ -1251,17 +1298,21 @@ pub fn nextval_advance(
 
     // Pre-log SEQ_LOG_VALS extra fetches; also force a record for the first
     // update after a checkpoint or replay would fail to advance the sequence.
+    // C (sequence.c:716/726) is unchecked int64 arithmetic under -fwrapv on
+    // the user-chosen CACHE (init_params only rejects cache <= 0): CACHE near
+    // 2^63 wraps fetch negative and `while (fetch)` (:731) still runs until
+    // the bound arm breaks with rescnt > 0 — mirrored, never a panic.
     if log < fetch || !is_called {
-        fetch += SEQ_LOG_VALS;
+        fetch = fetch.wrapping_add(SEQ_LOG_VALS);
         log = fetch;
         logit = true;
     } else if lsn_le_redo() {
-        fetch += SEQ_LOG_VALS;
+        fetch = fetch.wrapping_add(SEQ_LOG_VALS);
         log = fetch;
         logit = true;
     }
 
-    while fetch > 0 {
+    while fetch != 0 {
         if incby > 0 {
             if (maxv >= 0 && next > maxv - incby) || (maxv < 0 && next + incby > maxv) {
                 if rescnt > 0 {
@@ -1287,9 +1338,9 @@ pub fn nextval_advance(
                 next += incby;
             }
         }
-        fetch -= 1;
+        fetch = fetch.wrapping_sub(1);
         if rescnt < cache {
-            log -= 1;
+            log = log.wrapping_sub(1);
             rescnt += 1;
             last = next;
             if rescnt == 1 {
@@ -1298,7 +1349,7 @@ pub fn nextval_advance(
         }
     }
 
-    log -= fetch;
+    log = log.wrapping_sub(fetch); // adjust for any unfetched numbers
     debug_assert!(log >= 0);
 
     Ok(NextvalAdvance { result, last, next, log, logit })
@@ -1687,6 +1738,118 @@ mod tests {
         opts.lappend(mcx, defel(mcx, "increment", int_arg(mcx, 2))).unwrap();
         let e = run_init(mcx, &opts).err().expect("error expected");
         assert!(e.message().contains("conflicting or redundant options"));
+    }
+
+    fn defel_at<'mcx>(
+        mcx: Mcx<'mcx>,
+        name: &'mcx str,
+        arg: Option<Node<'mcx>>,
+        location: i32,
+    ) -> Node<'mcx> {
+        Node::mk(
+            mcx,
+            DefElem {
+                defnamespace: None,
+                defname: Some(name),
+                arg,
+                defaction: types_nodes::parsenodes::DefElemAction::DEFELEM_UNSPEC,
+                location,
+            },
+        )
+        .unwrap()
+    }
+
+    fn run_init_with_source<'mcx>(
+        mcx: Mcx<'mcx>,
+        source: &'static str,
+        opts: &NodeList<'mcx>,
+    ) -> PgResult<(SeqFormLocal, SeqDataFormLocal)> {
+        let mut pstate = parser_small1::make_parsestate(mcx, None);
+        pstate.p_sourcetext = Some(source.as_bytes());
+        let mut form = SeqFormLocal {
+            seqtypid: INT8OID,
+            seqstart: 0,
+            seqincrement: 1,
+            seqmax: 0,
+            seqmin: 0,
+            seqcache: 1,
+            seqcycle: false,
+        };
+        let mut dataform = SeqDataFormLocal { last_value: 0, log_cnt: 0, is_called: false };
+        let r = init_params(mcx, Some(&pstate), opts, false, true, &mut form, &mut dataform);
+        parser_small1::free_parsestate(pstate).unwrap();
+        r.map(|_| (form, dataform))
+    }
+
+    // sequence.c:1286-1342 errorConflictingDefElem(defel, pstate): the
+    // duplicate option's own location becomes the error cursor
+    // (audit-18.6 b102, fp-commands-sequence-3667fee7).
+    #[test]
+    fn init_params_conflicting_option_carries_cursor() {
+        let mcx = ctx().mcx();
+        let src = "CREATE SEQUENCE s INCREMENT 1 INCREMENT 2";
+        let second = src.rfind("INCREMENT").unwrap() as i32;
+        let mut opts =
+            NodeList::make1(mcx, defel_at(mcx, "increment", int_arg(mcx, 1), 18)).unwrap();
+        opts.lappend(mcx, defel_at(mcx, "increment", int_arg(mcx, 2), second)).unwrap();
+        let e = run_init_with_source(mcx, src, &opts).err().expect("error expected");
+        assert_eq!(e.message(), "conflicting or redundant options");
+        assert_eq!(e.sqlstate(), ERRCODE_SYNTAX_ERROR);
+        assert_eq!(e.cursor_position, Some(second + 1), "cursor on the second INCREMENT");
+
+        // OWNED BY twice: same arm (sequence.c:1342).
+        let src2 = "CREATE SEQUENCE s OWNED BY NONE OWNED BY NONE";
+        let second2 = src2.rfind("OWNED").unwrap() as i32;
+        fn none<'m>(mcx: Mcx<'m>) -> Option<Node<'m>> {
+            let n = Node::mk(mcx, types_nodes::String { sval: "none" }).unwrap();
+            Some(Node::mk(mcx, NodeList::make1(mcx, n).unwrap()).unwrap())
+        }
+        let mut opts2 =
+            NodeList::make1(mcx, defel_at(mcx, "owned_by", none(mcx), 18)).unwrap();
+        opts2.lappend(mcx, defel_at(mcx, "owned_by", none(mcx), second2)).unwrap();
+        let e = run_init_with_source(mcx, src2, &opts2).err().expect("error expected");
+        assert_eq!(e.message(), "conflicting or redundant options");
+        assert_eq!(e.cursor_position, Some(second2 + 1), "cursor on the second OWNED BY");
+    }
+
+    // sequence.c:1355-1358: "invalid sequence option SEQUENCE NAME" carries
+    // parser_errposition(pstate, defel->location).
+    #[test]
+    fn init_params_sequence_name_carries_cursor() {
+        let mcx = ctx().mcx();
+        let src = "CREATE SEQUENCE s SEQUENCE NAME foo";
+        let loc = src.rfind("SEQUENCE").unwrap() as i32;
+        let name = Node::mk(mcx, types_nodes::String { sval: "foo" }).unwrap();
+        let arg = Some(Node::mk(mcx, NodeList::make1(mcx, name).unwrap()).unwrap());
+        let opts = NodeList::make1(mcx, defel_at(mcx, "sequence_name", arg, loc)).unwrap();
+        let e = run_init_with_source(mcx, src, &opts).err().expect("error expected");
+        assert_eq!(e.message(), "invalid sequence option SEQUENCE NAME");
+        assert_eq!(e.sqlstate(), ERRCODE_SYNTAX_ERROR);
+        assert_eq!(e.cursor_position, Some(loc + 1));
+    }
+
+    // sequence.c:716/726 `fetch = log = fetch + SEQ_LOG_VALS` is unchecked
+    // int64 arithmetic (-fwrapv): CACHE 2^63-8 wraps fetch negative, the
+    // `while (fetch)` loop runs until the MAXVALUE arm breaks with rescnt > 0,
+    // and C answers 1 with 2..100 cached, log_cnt 0 (audit-18.6 b102,
+    // fp-commands-sequence-7226f1d9: the port panicked "attempt to add with
+    // overflow" here).
+    #[test]
+    fn nextval_advance_huge_cache_wraps_like_c() {
+        let adv = nextval_advance(1, 0, false, 1, 100, 1, 9223372036854775800, false, || false)
+            .expect("C returns normally");
+        assert_eq!(adv.result, 1);
+        assert_eq!(adv.last, 100);
+        assert_eq!(adv.next, 100);
+        assert_eq!(adv.log, 0);
+        assert!(adv.logit);
+        // Second call on the page C leaves behind (last_value 100, is_called):
+        // the cache is exhausted at MAXVALUE.
+        assert_eq!(
+            nextval_advance(100, 0, true, 1, 100, 1, 9223372036854775800, false, || false)
+                .err(),
+            Some(NextvalBound::Max)
+        );
     }
 
     #[test]

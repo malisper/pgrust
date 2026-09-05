@@ -948,7 +948,16 @@ fn slow_switch<'mcx>(
                         let altstmt = stmt
                             .as_variant::<types_nodes::AlterSeqStmt>()
                             .expect("AlterSeqStmt");
-                        let seqoid = sequence::AlterSequence(mcx, altstmt)?;
+                        // utility.c:1675 AlterSequence(pstate, stmt): the
+                        // statement's ParseState reaches init_params.
+                        let mut pstate = parser_small1::make_parsestate(mcx, None);
+                        {
+                            let mut v: mcx::PgVec<'mcx, u8> = mcx::PgVec::new_in(mcx);
+                            mcx::vec_append_bytes(&mut v, source_text.as_bytes())?;
+                            pstate.p_sourcetext = Some(v.leak());
+                        }
+                        let seqoid = sequence::AlterSequence(mcx, Some(&pstate), altstmt)?;
+                        parser_small1::free_parsestate(pstate)?;
                         event_trigger::EventTriggerCollectSimpleCommand(
                             ObjectAddress::set(types_core::RELATION_RELATION_ID, seqoid),
                             INVALID_OBJECT_ADDRESS,
@@ -1294,7 +1303,15 @@ fn slow_switch<'mcx>(
                 unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
             let altstmt =
                 stmt_node.as_variant::<types_nodes::AlterSeqStmt>().expect("AlterSeqStmt");
-            let seqoid = sequence::AlterSequence(mcx, altstmt)?;
+            // utility.c:1675 AlterSequence(pstate, stmt).
+            let mut pstate = parser_small1::make_parsestate(mcx, None);
+            {
+                let mut v: mcx::PgVec<'mcx, u8> = mcx::PgVec::new_in(mcx);
+                mcx::vec_append_bytes(&mut v, source_text.as_bytes())?;
+                pstate.p_sourcetext = Some(v.leak());
+            }
+            let seqoid = sequence::AlterSequence(mcx, Some(&pstate), altstmt)?;
+            parser_small1::free_parsestate(pstate)?;
             Ok(Some(ObjectAddress::set(types_core::RELATION_RELATION_ID, seqoid)))
         }
         T_CreateDomainStmt => {
