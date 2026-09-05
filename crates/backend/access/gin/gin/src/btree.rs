@@ -353,7 +353,8 @@ fn ginFindParents<'r, T: GinBt<'r>>(
                 predictNumber: 1,
                 parent: root_id,
             });
-            ginFinishSplitAt(mcx, rel, btree, stack, ptr, false, None)?;
+            // ginbtree.c:271 ginFinishOldSplit(btree, ptr, NULL, GIN_EXCLUSIVE)
+            ginFinishOldSplitAt(mcx, rel, btree, stack, ptr, None, GIN_EXCLUSIVE)?;
         }
 
         // SAFETY: pin + exclusive lock held.
@@ -398,7 +399,8 @@ fn ginFindParents<'r, T: GinBt<'r>>(
                     predictNumber: 1,
                     parent: root_id,
                 });
-                ginFinishSplitAt(mcx, rel, btree, stack, ptr, false, None)?;
+                // ginbtree.c:300 ginFinishOldSplit(btree, ptr, NULL, GIN_EXCLUSIVE)
+                ginFinishOldSplitAt(mcx, rel, btree, stack, ptr, None, GIN_EXCLUSIVE)?;
             }
         }
 
@@ -796,6 +798,16 @@ pub(crate) fn ginFinishOldSplitAt<'r, T: GinBt<'r>>(
     buildStats: Option<&mut GinStatsData>,
     access: i32,
 ) -> PgResult<()> {
+    // ginbtree.c:782
+    elog::elog(
+        ::types_error::DEBUG1,
+        format!(
+            "finishing incomplete split of block {} in gin index \"{}\"",
+            stack.frame(at).blkno,
+            rel.name()
+        ),
+    )?;
+
     let buffer = stack.frame(at).buffer;
     if access == GIN_SHARE {
         bm::lock_buffer::call(buffer, GIN_UNLOCK)?;

@@ -45,8 +45,8 @@ pub(crate) const GIN_EXCLUSIVE: i32 = bm::BUFFER_LOCK_EXCLUSIVE;
 pub mod build {
     pub use crate::bulk::BuildAccumulator;
     pub use crate::util::{
-        ginExtractEntries, ginUpdateStats, initGinState, GinInitBuffer, GinInitMetabuffer,
-        GinNewBuffer,
+        gin_build_init_pages, ginExtractEntries, ginUpdateStats, initGinState, GinInitBuffer,
+        GinInitMetabuffer, GinNewBuffer,
     };
     pub use crate::{check_for_interrupts, relation_needs_wal};
 }
@@ -289,3 +289,5 @@ pub fn init_seams() {
 mod tests;
 #[cfg(test)]
 mod scanver_tests;
+#[cfg(test)]
+mod rem_b084_tests;

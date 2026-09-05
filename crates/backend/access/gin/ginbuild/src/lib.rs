@@ -10,8 +10,8 @@ use ::types_error::PgResult;
 use ::types_rel::Relation;
 
 use gin::build::{
-    check_for_interrupts, ginExtractEntries, ginUpdateStats, initGinState, relation_needs_wal,
-    BuildAccumulator, GinInitBuffer, GinInitMetabuffer, GinNewBuffer,
+    check_for_interrupts, gin_build_init_pages, ginExtractEntries, ginUpdateStats, initGinState,
+    relation_needs_wal, BuildAccumulator, GinInitBuffer, GinInitMetabuffer, GinNewBuffer,
 };
 use gin::ginEntryInsert;
 
@@ -65,14 +65,9 @@ pub fn ginbuild<'mcx>(
 
     let meta_buffer = GinNewBuffer(index)?;
     let root_buffer = GinNewBuffer(index)?;
-    GinInitMetabuffer(meta_buffer);
-    bm::mark_buffer_dirty::call(meta_buffer)?;
-    GinInitBuffer(root_buffer, GIN_LEAF);
-    bm::mark_buffer_dirty::call(root_buffer)?;
-    bm::lock_buffer::call(meta_buffer, GIN_UNLOCK)?;
-    bm::release_buffer::call(meta_buffer)?;
-    bm::lock_buffer::call(root_buffer, GIN_UNLOCK)?;
-    bm::release_buffer::call(root_buffer)?;
+    // gininsert.c:643-652: START_CRIT_SECTION .. END_CRIT_SECTION around the
+    // metapage/root initialization (ginbuildempty's shape).
+    gin_build_init_pages(meta_buffer, root_buffer)?;
 
     build_stats.nEntryPages += 1;
 

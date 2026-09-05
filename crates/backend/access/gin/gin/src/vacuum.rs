@@ -126,7 +126,7 @@ fn xlog_vacuum_page(rel: &Relation<'_>, buffer: Buffer) -> PgResult<()> {
 
 /// ginDeletePage. All three pages are already exclusively locked by
 /// ginScanToDelete's stack; this function adds pins only.
-fn ginDeletePage(
+pub(crate) fn ginDeletePage(
     gvs: &mut GinVacuumState<'_, '_, '_, '_>,
     delete_blkno: BlockNumber,
     left_blkno: BlockNumber,
@@ -142,6 +142,10 @@ fn ginDeletePage(
     let rightlink = { page_opaque(&unsafe { page_ref(d_buffer) }).rightlink };
 
     predicate_seams::predicate_lock_page_combine::call(rel, delete_blkno, rightlink)?;
+
+    // ginvacuum.c:161 START_CRIT_SECTION (an Err escaping with the count
+    // raised is promoted to PANIC by the xact layer, as C's elog does).
+    init_small::globals::StartCriticalSection();
 
     {
         // SAFETY: pin + exclusive lock held.
@@ -199,6 +203,9 @@ fn ginDeletePage(
     bm::release_buffer::call(p_buffer)?;
     bm::release_buffer::call(l_buffer)?;
     bm::release_buffer::call(d_buffer)?;
+
+    // ginvacuum.c:231 END_CRIT_SECTION.
+    init_small::globals::EndCriticalSection();
 
     gvs.stats.pages_newly_deleted += 1;
     gvs.stats.pages_deleted += 1;
@@ -626,19 +633,12 @@ fn ginbulkdelete_guts<'mcx>(
         blkno = page_opaque(&unsafe { page_ref(buffer) }).rightlink;
 
         if let Some(tmp) = res_page {
-            {
-                // PageRestoreTempPage.
-                // SAFETY: pin + exclusive lock held.
-                let mut page = unsafe { page_mut(buffer) };
-                // SAFETY: borrow confined here.
-                let bytes = unsafe { crate::page_bytes_mut(&mut page) };
-                bytes.copy_from_slice(tmp.as_bytes());
-            }
-            bm::mark_buffer_dirty::call(buffer)?;
-            xlog_vacuum_page(rel, buffer)?;
+            ginbulkdelete_restore_page(rel, buffer, tmp.as_bytes())?;
+        } else {
+            // ginvacuum.c:667-670
+            bm::lock_buffer::call(buffer, GIN_UNLOCK)?;
+            bm::release_buffer::call(buffer)?;
         }
-        bm::lock_buffer::call(buffer, GIN_UNLOCK)?;
-        bm::release_buffer::call(buffer)?;
 
         vacuum_delay_point()?;
 
@@ -658,6 +658,32 @@ fn ginbulkdelete_guts<'mcx>(
     Ok(stats)
 }
 
+/// ginvacuum.c:658-666 (ginbulkdelete): install the vacuumed entry-page
+/// image, WAL-log it and release the buffer inside one critical section.
+pub(crate) fn ginbulkdelete_restore_page(
+    rel: &Relation<'_>,
+    buffer: Buffer,
+    tmp: &[u8],
+) -> PgResult<()> {
+    // An Err escaping with the count raised is promoted to PANIC by the
+    // xact layer, as C's elog does.
+    init_small::globals::StartCriticalSection();
+    {
+        // PageRestoreTempPage.
+        // SAFETY: pin + exclusive lock held.
+        let mut page = unsafe { page_mut(buffer) };
+        // SAFETY: borrow confined here.
+        let bytes = unsafe { crate::page_bytes_mut(&mut page) };
+        bytes.copy_from_slice(tmp);
+    }
+    bm::mark_buffer_dirty::call(buffer)?;
+    xlog_vacuum_page(rel, buffer)?;
+    bm::lock_buffer::call(buffer, GIN_UNLOCK)?;
+    bm::release_buffer::call(buffer)?;
+    init_small::globals::EndCriticalSection();
+    Ok(())
+}
+
 /// ginvacuumcleanup.
 pub fn ginvacuumcleanup<'mcx>(
     mcx: Mcx<'mcx>,
@@ -667,13 +693,14 @@ pub fn ginvacuumcleanup<'mcx>(
     let rel = info.index;
 
     if info.analyze_only {
-        // Autovacuum analyze cleans up pending insertions; plain ANALYZE is a
-        // no-op.
+        // ginvacuum.c:708-716: an autovacuum analyze cleans up pending
+        // insertions (stats updated only when the caller passed some); a
+        // plain ANALYZE is a no-op. Either way the caller's stats (NULL from
+        // analyze.c) are returned unchanged.
+        let mut stats = stats;
         if am_autovacuum_worker() {
             let state = initGinState(rel)?;
-            let mut s = stats.unwrap_or_default();
-            ginInsertCleanup(mcx, rel, &state, false, true, true, Some(&mut s))?;
-            return Ok(Some(s));
+            ginInsertCleanup(mcx, rel, &state, false, true, true, stats.as_mut())?;
         }
         return Ok(stats);
     }

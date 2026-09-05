@@ -45,30 +45,44 @@ pub fn initGinState(rel: &Relation<'_>) -> PgResult<GinState> {
     })
 }
 
+/// indexam.c index_getprocinfo: elog(ERROR) XX000 "missing support function
+/// %d for attribute %d of index \"%s\"".
+fn missing_support_function(
+    rel: &Relation<'_>,
+    procnum: u16,
+    i: usize,
+) -> PgResult<Box<::types_error::PgError>> {
+    let cx = ::mcx::MemoryContext::new("gin support proc probe");
+    let relname = lsyscache::get_rel_name(cx.mcx(), rel.rd_id)?
+        .map_or_else(String::new, |n| n.as_str().to_string());
+    Ok(Box::new(
+        ::types_error::PgError::error(format!(
+            "missing support function {procnum} for attribute {} of index \"{relname}\"",
+            i + 1
+        ))
+        .with_sqlstate(::types_error::ERRCODE_INTERNAL_ERROR),
+    ))
+}
+
 fn init_gin_col(rel: &Relation<'_>, i: usize) -> PgResult<GinColState> {
     let opcintype = rel.rd_opcintype[i];
     let opfamily = rel.rd_opfamily[i];
 
-    // C's initGinState fetches extractQuery through index_getprocinfo, which
-    // errors here (not later, at planning) when the opclass omits it —
-    // CREATE OPERATOR CLASS ... USING gin does not require FUNCTION 2/3.
+    // C's initGinState fetches extractValue, then extractQuery, through
+    // index_getprocinfo (ginutil.c:160-165), which errors here (not later, at
+    // planning) when the opclass omits one — CREATE OPERATOR CLASS ... USING
+    // gin does not require FUNCTION 2/3. Proc 2 is probed first, as in C.
+    let extract =
+        lsyscache::get_opfamily_proc(opfamily, opcintype, opcintype, GIN_EXTRACTVALUE_PROC as i16)?;
+    if extract == InvalidOid {
+        return Err(missing_support_function(rel, GIN_EXTRACTVALUE_PROC, i)?);
+    }
     if lsyscache::get_opfamily_proc(opfamily, opcintype, opcintype, GIN_EXTRACTQUERY_PROC as i16)?
         == InvalidOid
     {
-        let cx = ::mcx::MemoryContext::new("gin extractQuery probe");
-        let relname = lsyscache::get_rel_name(cx.mcx(), rel.rd_id)?
-            .map_or_else(String::new, |n| n.as_str().to_string());
-        return Err(Box::new(
-            ::types_error::PgError::error(format!(
-                "missing support function {GIN_EXTRACTQUERY_PROC} for attribute {} of index \"{relname}\"",
-                i + 1
-            ))
-            .with_sqlstate(::types_error::ERRCODE_INTERNAL_ERROR),
-        ));
+        return Err(missing_support_function(rel, GIN_EXTRACTQUERY_PROC, i)?);
     }
 
-    let extract =
-        lsyscache::get_opfamily_proc(opfamily, opcintype, opcintype, GIN_EXTRACTVALUE_PROC as i16)?;
     let opclass = match extract {
         opclass::F_GIN_EXTRACT_JSONB => GinOpclass::JsonbOps,
         opclass::F_GIN_EXTRACT_JSONB_PATH => GinOpclass::JsonbPathOps,
@@ -512,6 +526,10 @@ pub fn ginUpdateStats(rel: &Relation<'_>, stats: &GinStatsData, is_build: bool) 
     let metabuffer = bm::read_buffer::call(rel, GIN_METAPAGE_BLKNO)?;
     bm::lock_buffer::call(metabuffer, crate::GIN_EXCLUSIVE)?;
 
+    // ginutil.c:666 START_CRIT_SECTION (an Err escaping with the count raised
+    // is promoted to PANIC by the xact layer, as C's elog does).
+    init_small::globals::StartCriticalSection();
+
     let metadata = {
         // SAFETY: pin + exclusive lock held.
         let mut page = unsafe { page_mut(metabuffer) };
@@ -554,5 +572,26 @@ pub fn ginUpdateStats(rel: &Relation<'_>, stats: &GinStatsData, is_build: bool) 
 
     bm::lock_buffer::call(metabuffer, crate::GIN_UNLOCK)?;
     bm::release_buffer::call(metabuffer)?;
+
+    // ginutil.c:705 END_CRIT_SECTION.
+    init_small::globals::EndCriticalSection();
+    Ok(())
+}
+
+/// gininsert.c:643-652 (ginbuild): initialize the metapage and the root
+/// page of a fresh index inside one critical section; both buffers arrive
+/// pinned + exclusively locked (GinNewBuffer) and leave unlocked/unpinned.
+pub fn gin_build_init_pages(meta_buffer: Buffer, root_buffer: Buffer) -> PgResult<()> {
+    init_small::globals::StartCriticalSection();
+    GinInitMetabuffer(meta_buffer);
+    bm::mark_buffer_dirty::call(meta_buffer)?;
+    GinInitBuffer(root_buffer, GIN_LEAF);
+    bm::mark_buffer_dirty::call(root_buffer)?;
+
+    bm::lock_buffer::call(meta_buffer, crate::GIN_UNLOCK)?;
+    bm::release_buffer::call(meta_buffer)?;
+    bm::lock_buffer::call(root_buffer, crate::GIN_UNLOCK)?;
+    bm::release_buffer::call(root_buffer)?;
+    init_small::globals::EndCriticalSection();
     Ok(())
 }

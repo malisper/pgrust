@@ -6,8 +6,9 @@
 
 use gin_vocab::*;
 use types_core::{BlockNumber, Buffer, InvalidBlockNumber, OffsetNumber, BLCKSZ};
-use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED};
+use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_FEATURE_NOT_SUPPORTED};
 use types_storage::bufpage::{PageMut, SizeOfPageHeaderData as SIZE_OF_PAGE_HEADER};
+use types_storage::RelFileLocator;
 use types_tuple::itemptr::{FirstOffsetNumber, ItemPointerData};
 use xlogreader_seams::XLogReaderState;
 use xlogutils::{XLogInitBufferForRedo, XLogReadBufferForRedo, BLK_NEEDS_REDO, BLK_RESTORED};
@@ -121,6 +122,21 @@ fn error_err(msg: String) -> Box<PgError> {
     Box::new(PgError::error(msg))
 }
 
+/// The pre-9.4 uncompressed posting-tree leaf lane (ginxlog.c:132-164) is
+/// unported: ERRCODE_FEATURE_NOT_SUPPORTED with a REINDEX hint, never a
+/// panic in the recovery thread.
+#[cold]
+#[inline(never)]
+fn unsupported_uncompressed_leaf() -> Box<PgError> {
+    Box::new(
+        PgError::error(
+            "uncompressed (pre-9.4 format) GIN posting-tree leaf pages are not supported",
+        )
+        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
+        .with_hint("Rebuild the index with REINDEX."),
+    )
+}
+
 /// Malformed replayed WAL is a corruption condition, not a bug: report it as a
 /// catchable ERRCODE_DATA_CORRUPTED error so the startup/recovery thread fails
 /// the record instead of panicking (which would SIGABRT and re-panic at the
@@ -230,7 +246,12 @@ fn redo_create_ptree(record: &XLogReaderState) -> PgResult<()> {
 }
 
 /// ginRedoInsertEntry.
-fn redo_insert_entry(buffer: Buffer, rightblkno: BlockNumber, rdata: &[u8]) -> PgResult<()> {
+fn redo_insert_entry(
+    buffer: Buffer,
+    locator: RelFileLocator,
+    rightblkno: BlockNumber,
+    rdata: &[u8],
+) -> PgResult<()> {
     // ginxlogInsertEntry: offset @0, isDelete @2, tuple @4 (variable length).
     require_len(rdata, 4, "insert-entry")?;
     let offset = u16::from_ne_bytes([rdata[0], rdata[1]]) as OffsetNumber;
@@ -262,7 +283,12 @@ fn redo_insert_entry(buffer: Buffer, rightblkno: BlockNumber, rdata: &[u8]) -> P
     }
 
     if page.add_item(&tuple[..tuplen], offset, 0).is_none() {
-        return Err(error_err("failed to add item to index page".into()));
+        // ginxlog.c:96-104: BufferGetTag(buffer) -> the block's locator (the
+        // record's block reference names the same relation file).
+        return Err(error_err(format!(
+            "failed to add item to index page in {}/{}/{}",
+            locator.spcOid, locator.dbOid, locator.relNumber
+        )));
     }
     Ok(())
 }
@@ -272,12 +298,12 @@ fn redo_recompress(buffer: Buffer, rdata: &[u8]) -> PgResult<()> {
     // SAFETY: redo lock protocol.
     let bytes = unsafe { page_bytes_mut(buffer) };
     if opaque_of(bytes).flags & GIN_COMPRESSED == 0 {
-        // INVARIANT: pgrust WAL never describes pre-9.4 pages — every posting-tree
-        // leaf is stamped GIN_COMPRESSED at creation (gin_xlog/src/lib.rs:152 redo
-        // create-ptree, gin/src/datapage.rs:1171, :658-659) and there is no
-        // pg_upgrade lineage; C keeps the uncompressed lane (gindatapage.c:139-199)
-        // only for pg_upgrade'd pages.
-        panic!("gin redo recompress on non-GIN_COMPRESSED leaf: pgrust WAL never describes pre-9.4 pages (gin_xlog/src/lib.rs:152, gin/src/datapage.rs:1171)");
+        // ginxlog.c:132-164 converts a pre-9.4 (uncompressed) leaf in place
+        // before replaying. pgrust writes every posting-tree leaf
+        // GIN_COMPRESSED (redo_create_ptree, gin/src/datapage.rs) and has no
+        // pg_upgrade lineage, so the conversion lane is unported: a typed
+        // refusal (the read side's shape) instead of a recovery-thread panic.
+        return Err(unsupported_uncompressed_leaf());
     }
 
     // ginxlogRecompressDataLeaf: nactions @0 (uint16), action stream follows.
@@ -391,9 +417,8 @@ fn redo_recompress(buffer: Buffer, rdata: &[u8]) -> PgResult<()> {
                 oldoff += segsize;
                 segno += 1;
             }
-            other => {
-                return Err(corrupt_err(format!("GIN redo recompress: unexpected leaf action {other}")))
-            }
+            // ginxlog.c:298 elog(ERROR) XX000.
+            other => return Err(error_err(format!("unexpected GIN leaf action: {other}"))),
         }
     }
 
@@ -610,7 +635,7 @@ fn redo_insert(record: &XLogReaderState) -> PgResult<()> {
         if is_data {
             redo_insert_data(buffer, is_leaf, right_child_blkno, payload)?;
         } else {
-            redo_insert_entry(buffer, right_child_blkno, payload)?;
+            redo_insert_entry(buffer, record.block(0).rlocator, right_child_blkno, payload)?;
         }
         set_lsn(buffer, lsn);
         bufmgr_seams::mark_buffer_dirty::call(buffer)?;
@@ -1017,6 +1042,96 @@ mod tests {
         assert!(checked_posting_item_offset(1, 5).is_ok());
         assert!(checked_posting_item_offset(5, 5).is_ok());
         assert!(checked_posting_item_offset(6, 5).is_ok());
+    }
+
+    // --- audit-18.6 remediation b084 witnesses (redo arms over a fake buffer) ---
+
+    /// Fake buffer table for the redo arms: buffer id -> leaked BLCKSZ image.
+    /// Process-wide (the seam is a global), keyed so concurrent tests never
+    /// share a buffer id.
+    static REDO_PAGES: std::sync::Mutex<std::collections::BTreeMap<Buffer, usize>> =
+        std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+    #[repr(C, align(8))]
+    struct FakePage([u8; BLCKSZ]);
+
+    fn install_fake_page(buffer: Buffer, flags: u16) -> &'static mut [u8] {
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(|| {
+            bufmgr_seams::buffer_get_page::set(|buf| {
+                let addr = *REDO_PAGES
+                    .lock()
+                    .unwrap()
+                    .get(&buf)
+                    .unwrap_or_else(|| panic!("no fake page for buffer {buf}"));
+                core::ptr::NonNull::new(addr as *mut u8).unwrap()
+            });
+        });
+        let page: &'static mut FakePage = Box::leak(Box::new(FakePage([0u8; BLCKSZ])));
+        gin_init_page_bytes(&mut page.0, flags);
+        REDO_PAGES.lock().unwrap().insert(buffer, page.0.as_mut_ptr() as usize);
+        &mut page.0
+    }
+
+    // ginxlog.c:96-104: a PageAddItem failure names the relation file
+    // (BufferGetTag) — "failed to add item to index page in %u/%u/%u".
+    #[test]
+    fn insert_entry_add_item_failure_names_relation_file() {
+        let bytes = install_fake_page(9101, GIN_LEAF);
+        // A full page: pd_upper == pd_lower leaves no room for any tuple.
+        let lower = u16::from_ne_bytes([bytes[12], bytes[13]]);
+        bytes[14..16].copy_from_slice(&lower.to_ne_bytes());
+
+        // ginxlogInsertEntry: offset 1, no delete, one 16-byte index tuple.
+        let mut rdata = vec![0u8; 4 + 16];
+        rdata[0..2].copy_from_slice(&1u16.to_ne_bytes());
+        rdata[4 + 6..4 + 8].copy_from_slice(&16u16.to_ne_bytes());
+
+        let err = redo_insert_entry(
+            9101,
+            RelFileLocator::new(1663, 5, 16391),
+            InvalidBlockNumber,
+            &rdata,
+        )
+        .err()
+        .expect("PageAddItem on a full page fails");
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(err.message(), "failed to add item to index page in 1663/5/16391");
+    }
+
+    // ginxlog.c:298: an unknown action code is elog(ERROR) XX000
+    // "unexpected GIN leaf action: %u" (not a data-corruption XX001).
+    #[test]
+    fn recompress_unknown_action_is_internal_error_with_c_message() {
+        let bytes = install_fake_page(9102, GIN_DATA | GIN_LEAF | GIN_COMPRESSED);
+        // One well-formed segment on the page so the action addresses a
+        // current segment (past-the-end is a different, corruption arm).
+        let nbytes = 4usize;
+        let total = size_of_gin_posting_list(nbytes);
+        bytes[GinDataPageDataOffset + 6..GinDataPageDataOffset + 8]
+            .copy_from_slice(&(nbytes as u16).to_ne_bytes());
+        set_data_page_data_size(bytes, total);
+
+        // nactions = 1; action stream: segno 0, action 5 (unknown).
+        let rdata = [1u8, 0, 0, 5];
+        let err = redo_recompress(9102, &rdata).err().expect("unknown action is an error");
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(err.message(), "unexpected GIN leaf action: 5");
+    }
+
+    // ginxlog.c:132-164 (pre-9.4 leaf conversion) is unported: a typed
+    // ERRCODE_FEATURE_NOT_SUPPORTED refusal, never a recovery-thread panic.
+    #[test]
+    fn recompress_on_uncompressed_leaf_is_typed_refusal_not_panic() {
+        let bytes = install_fake_page(9103, GIN_DATA | GIN_LEAF);
+        set_data_page_data_size(bytes, 0);
+        let rdata = [0u8, 0];
+        let err = redo_recompress(9103, &rdata).err().expect("uncompressed leaf is refused");
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+        assert_eq!(
+            err.message(),
+            "uncompressed (pre-9.4 format) GIN posting-tree leaf pages are not supported"
+        );
     }
 
     #[test]

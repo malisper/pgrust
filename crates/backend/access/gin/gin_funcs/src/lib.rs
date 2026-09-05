@@ -57,11 +57,13 @@ pub fn fc_gin_clean_pending_list(
     let indexoid = fcinfo.arg(0).as_oid();
     let mcx = fcinfo.result_mcx();
 
-    if transam_xlog::RecoveryInProgress() {
+    // ginfast.c:1034: index_open runs first (its "relation with OID %u does
+    // not exist" wins over the recovery check on a standby).
+    let indexRel = indexam_seams::index_open::call(mcx, indexoid, RowExclusiveLock)?;
+
+    if transam_xlog_seams::recovery_in_progress::call() {
         return Err(recovery_in_progress_error());
     }
-
-    let indexRel = indexam_seams::index_open::call(mcx, indexoid, RowExclusiveLock)?;
 
     if !is_gin_index(&indexRel) {
         return Err(not_a_gin_index(&indexRel));
@@ -158,5 +160,38 @@ mod tests {
             assert!(b.strict);
             assert!(!b.retset);
         }
+    }
+}
+
+#[cfg(test)]
+mod rem_b084_tests {
+    use super::*;
+    use ::types_error::ERRCODE_UNDEFINED_TABLE;
+    use ::types_fmgr::LocalFcinfo;
+
+    // ginfast.c:1032-1037: index_open(indexoid) runs before the
+    // RecoveryInProgress() check, so on a standby an unknown OID reports
+    // 42P01 "relation with OID %u does not exist", not 55000.
+    #[test]
+    fn clean_pending_list_opens_index_before_recovery_check() {
+        transam_xlog_seams::recovery_in_progress::set(|| true);
+        indexam_seams::index_open::set(|_mcx, relation_id, _lockmode| {
+            Err(Box::new(
+                PgError::error(format!("relation with OID {relation_id} does not exist"))
+                    .with_sqlstate(ERRCODE_UNDEFINED_TABLE),
+            ))
+        });
+
+        let cx = ::mcx::MemoryContext::new("b084");
+        let mut fcinfo = LocalFcinfo::<1>::new(0);
+        // SAFETY: the context outlives the call.
+        unsafe { fcinfo.set_result_mcx(cx.mcx()) };
+        fcinfo.set_arg(0, Datum::from_oid(9999999));
+
+        let err = fc_gin_clean_pending_list(None, &mut fcinfo)
+            .err()
+            .expect("unknown index OID is an error");
+        assert_eq!(err.sqlstate(), ERRCODE_UNDEFINED_TABLE);
+        assert_eq!(err.message(), "relation with OID 9999999 does not exist");
     }
 }

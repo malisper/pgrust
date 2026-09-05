@@ -39,6 +39,7 @@ gin_btree_seams = { path = "../gin_btree_seams" }
 gin_int4_seams = { path = "../gin_int4_seams" }
 nbtree = { path = "../../nbtree/nbtree" }
 detoast = { path = "../../common/detoast" }
+elog = { path = "../../../utils/error/elog" }
 adt_jsonb = { path = "../../../utils/adt/jsonb" }
 arrayfuncs = { path = "../../../utils/adt/arrayfuncs" }
 varlena = { path = "../../../utils/adt/varlena" }
@@ -55,6 +56,8 @@ miscinit = { path = "../../../utils/init/miscinit" }
 
 [dev-dependencies]
 pglz = { path = "../../../../common/pglz" }
+lock_seams = { path = "../../../storage/lmgr/lock_seams" }
+syscache_seams = { path = "../../../utils/cache/syscache_seams" }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(pgrust_sim)"] }

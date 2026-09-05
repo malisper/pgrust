@@ -506,6 +506,17 @@ fn entry_load_more_items(
         stepright = false;
     }
 
+    // ginget.c:712
+    elog::elog(
+        ::types_error::DEBUG2,
+        format!(
+            "entryLoadMoreItems, {}/{}, skip: {}",
+            gin_item_pointer_block(advance_past),
+            gin_item_pointer_offset(advance_past),
+            i32::from(!stepright)
+        ),
+    )?;
+
     loop {
         entry.offset = 0;
         entry.list.clear();
@@ -1273,6 +1284,7 @@ pub fn gingetbitmap(
         xs_snapshot,
         keyData,
         xs_pgstat_index_scans,
+        xs_nsearches,
         opaque,
         ..
     } = scan;
@@ -1285,6 +1297,8 @@ pub fn gingetbitmap(
     ginFreeScanKeys(so)?;
     ginNewScanKey(rel, keyData.as_slice(), so)?;
     *xs_pgstat_index_scans += 1;
+    // ginscan.c:489-490 (ginNewScanKey): scan->instrument->nsearches++.
+    *xs_nsearches += 1;
 
     if so.isVoidRes {
         return Ok(0);
