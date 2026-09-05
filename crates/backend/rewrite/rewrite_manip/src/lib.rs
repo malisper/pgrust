@@ -56,7 +56,10 @@ fn mva_mutate<'mcx>(
             let attno = var.varattno;
             if attno > 0 {
                 if attno as usize > attnums.len() || attnums[attno as usize - 1] == 0 {
-                    panic!("unexpected varattno {attno} in expression to be mapped");
+                    // rewriteManip.c:1595 elog(ERROR): catchable, not a panic.
+                    return Err(internal(&format!(
+                        "unexpected varattno {attno} in expression to be mapped"
+                    )));
                 }
                 let mut newvar = Var {
                     varnullingrels: var.varnullingrels.clone_in(mcx)?,
@@ -1725,17 +1728,15 @@ fn ReplaceVarFromTargetList<'mcx>(
                 Node::mk(mcx, newvar)
             }
             ReplaceVarsNoMatchOption::SubstituteNull => {
-                // C wraps coerce_null_to_domain; CREATE DOMAIN is unreachable
-                // on this base, so a plain NULL Const is C-identical.
+                // rewriteManip.c:1876: a domain-typed Var gets a
+                // CoerceToDomain node so a NOT NULL domain constraint fires.
                 let (typlen, typbyval) = lsyscache::get_typlenbyval(var.vartype)?;
-                Node::mk_const(
+                coerce::coerce_null_to_domain(
                     mcx,
                     var.vartype,
                     var.vartypmod,
                     var.varcollid,
                     typlen as i32,
-                    datum::Datum::null(),
-                    true,
                     typbyval,
                 )
             }

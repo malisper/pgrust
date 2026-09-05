@@ -16145,6 +16145,7 @@ dependencies = [
 name = "rewrite_manip"
 version = "0.1.0"
 dependencies = [
+ "coerce",
  "datum",
  "lsyscache",
  "mcx",

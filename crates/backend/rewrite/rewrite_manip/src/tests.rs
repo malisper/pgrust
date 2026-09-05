@@ -253,3 +253,44 @@ fn sublink_recursion_bumps_the_level() {
     assert!(!contain_aggs_of_level(local, 0).unwrap());
     assert_eq!(locate_agg_of_level(local, 0).unwrap(), -1);
 }
+
+// map_variable_attnos_mutator (rewriteManip.c:1595): a varattno beyond the
+// map or pointing at a dropped column (attnums[attno-1] == 0) is a catchable
+// elog(ERROR, "unexpected varattno %d in expression to be mapped") —
+// ERRCODE_INTERNAL_ERROR — never a panic.
+#[test]
+fn map_variable_attnos_bad_attno_is_catchable_internal_error() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let attnums: [i16; 2] = [3, 0];
+    // attno 2 maps to a dropped column (0 entry).
+    let dropped = Node::mk(
+        mcx,
+        Var { varno: 1, varattno: 2, vartype: 23, varlevelsup: 0, ..Default::default() },
+    )
+    .unwrap();
+    let err = crate::map_variable_attnos(mcx, dropped, 1, 0, &attnums, 0)
+        .err()
+        .expect("dropped-column attno must be an error");
+    assert_eq!(err.message(), "unexpected varattno 2 in expression to be mapped");
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    // attno 5 exceeds maplen.
+    let beyond = Node::mk(
+        mcx,
+        Var { varno: 1, varattno: 5, vartype: 23, varlevelsup: 0, ..Default::default() },
+    )
+    .unwrap();
+    let err = crate::map_variable_attnos(mcx, beyond, 1, 0, &attnums, 0)
+        .err()
+        .expect("out-of-range attno must be an error");
+    assert_eq!(err.message(), "unexpected varattno 5 in expression to be mapped");
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    // A valid attno still maps.
+    let ok = Node::mk(
+        mcx,
+        Var { varno: 1, varattno: 1, vartype: 23, varlevelsup: 0, ..Default::default() },
+    )
+    .unwrap();
+    let (mapped, _) = crate::map_variable_attnos(mcx, ok, 1, 0, &attnums, 0).unwrap();
+    assert_eq!(mapped.as_var().unwrap().varattno, 3);
+}

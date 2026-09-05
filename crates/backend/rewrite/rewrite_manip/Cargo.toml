@@ -17,3 +17,4 @@ lsyscache = { path = "../../utils/cache/lsyscache" }
 parse_relation = { path = "../../parser/parse_relation" }
 outfuncs = { path = "../../nodes/outfuncs" }
 readfuncs = { path = "../../nodes/readfuncs" }
+coerce = { path = "../../parser/coerce" }
