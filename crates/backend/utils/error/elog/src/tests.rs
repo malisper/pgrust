@@ -215,6 +215,43 @@ fn throw_error_data_emits_warnings_and_skips_uninteresting() {
     assert_eq!(seen.as_slice(), ["watch out".to_owned()]);
 }
 
+// elog.c:375-381 (errstart): with no exception handler an ERROR is reported
+// as FATAL (the startup process, the postmaster, pre-sigsetjmp prologues);
+// other levels are reported as they are.
+#[test]
+fn unhandled_error_report_promotes_error_to_fatal() {
+    let _guard = lock();
+    reset_guc();
+    FlushErrorState();
+
+    static SEEN: Mutex<Vec<(ErrorLevel, String)>> = Mutex::new(Vec::new());
+    fn hook(error: &PgError, _output_to_server: &mut bool) {
+        SEEN.lock().unwrap().push((error.level, error.message.clone()));
+    }
+    SEEN.lock().unwrap().clear();
+    let previous = set_emit_log_hook(Some(hook));
+
+    let mut error = PgError::error("maximum number of prepared transactions reached");
+    error.hint = Some("Increase \"max_prepared_transactions\" (currently 0).".to_owned());
+    emit_unhandled_error_report(&error);
+    emit_unhandled_error_report(&PgError::warning("still a warning"));
+    emit_unhandled_error_report(&PgError::new(PANIC, "still a panic"));
+
+    set_emit_log_hook(previous);
+
+    let seen = SEEN.lock().unwrap();
+    assert_eq!(
+        seen.as_slice(),
+        [
+            (FATAL, "maximum number of prepared transactions reached".to_owned()),
+            (WARNING, "still a warning".to_owned()),
+            (PANIC, "still a panic".to_owned()),
+        ]
+    );
+    // The caller's value is untouched: the promotion is the report's alone.
+    assert_eq!(error.level, ERROR);
+}
+
 #[test]
 fn error_stack_mutators_and_recursion_guard() {
     let _guard = lock();

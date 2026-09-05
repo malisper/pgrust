@@ -390,6 +390,24 @@ pub fn emit_error_report_for(error: &PgError) {
     }
 }
 
+/// No-handler arm of errstart (elog.c:375-381): with `PG_exception_stack ==
+/// NULL` -- the postmaster, the startup process, any process before its
+/// sigsetjmp -- an ERROR is promoted to FATAL before it is reported.  Errors
+/// are values here and reach a handler-less exit path as `Err` after
+/// construction, so the promotion belongs to that path's report, not to
+/// `errstart`; the exit itself (proc_exit(1)) stays the caller's.
+#[cold]
+#[inline(never)]
+pub fn emit_unhandled_error_report(error: &PgError) {
+    if error.level == ERROR {
+        let mut promoted = error.clone();
+        promoted.level = FATAL;
+        emit_error_report_for(&promoted);
+        return;
+    }
+    emit_error_report_for(error);
+}
+
 /// Catch-boundary arm of C's critical-section contract (miscadmin.h): any
 /// ERROR raised between START_CRIT_SECTION and END_CRIT_SECTION must be a
 /// PANIC. `errstart` enforces that for ereport-path errors; hand-built

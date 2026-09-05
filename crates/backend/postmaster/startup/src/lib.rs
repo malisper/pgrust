@@ -108,8 +108,11 @@ fn StartupProcExit(_code: i32, _arg: usize) {
     }
 }
 
+// The startup process never establishes an exception handler
+// (PG_exception_stack == NULL for its whole life): errstart promotes every
+// ERROR it raises to FATAL (elog.c:375-381) and it exits with code 1.
 fn fatal_exit(e: &PgError) -> ! {
-    elog::emit_error_report_for(e);
+    elog::emit_unhandled_error_report(e);
     ipc::proc_exit(1, g::MyProcPid())
 }
 

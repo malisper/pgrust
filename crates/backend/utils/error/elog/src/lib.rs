@@ -37,7 +37,7 @@ pub use sink::{
     EmitLogHook, FrontendRedirect,
 };
 pub use stack::{
-    emit_error_report_for, ereport_msg, err_generic_string, errbacktrace, errcode,
+    emit_error_report_for, emit_unhandled_error_report, ereport_msg, err_generic_string, errbacktrace, errcode,
     errcode_for_file_access, errcode_for_socket_access, errcontext_msg, errdetail,
     errdetail_internal, errdetail_log, errdetail_log_plural, errdetail_plural, errfinish,
     errhidecontext, errhidestmt, errhint, errhint_internal, errhint_plural, errmsg,
