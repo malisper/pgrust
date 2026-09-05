@@ -57,6 +57,18 @@ static SEAMS: Once = Once::new();
 
 fn install_seams() {
     SEAMS.call_once(|| {
+        // CHECK_FOR_INTERRUPTS's ProcessInterrupts leg: a pending interrupt
+        // on this thread cancels the statement (57014) and clears the flag.
+        postgres_seams::check_for_interrupts::set(|| {
+            if init_small::globals::InterruptPending() {
+                init_small::globals::SetInterruptPending(false);
+                return Err(Box::new(
+                    ::types_error::PgError::error("canceling statement due to user request")
+                        .with_sqlstate(::types_error::ERRCODE_QUERY_CANCELED),
+                ));
+            }
+            Ok(())
+        });
         miscinit_seams::get_user_id::set(|| 10);
         miscinit_seams::is_bootstrap_processing_mode::set(|| false);
         fmgr_core::init_seams();
@@ -3116,4 +3128,92 @@ fn collect_aggrefs_walks_unlisted_node_families() {
     crate::collect_aggrefs(wrapped, &mut out).unwrap();
     assert_eq!(out.len(), 1);
     assert_eq!(out[0].1.aggfnoid, COUNT_STAR_OID);
+}
+
+// audit-18.6 remediation batch b080 (backend/executor/nodeagg) witnesses.
+mod rem_b080 {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    fn init_count_star<'mcx>(
+        estate: &mut EStateData<'mcx>,
+    ) -> (crate::AggStateData<'mcx>, ExecSlotId) {
+        let mcx = estate.es_query_cxt;
+        let outer_desc = one_col_desc(mcx, INT4OID, 4, TYPALIGN_INT);
+        let outer_id = estate.exec_init_extra_tuple_slot(Some(outer_desc), TupleSlotKind::Virtual);
+        let result_desc = one_col_desc(leaked_mcx(), INT8OID, 8, TYPALIGN_DOUBLE);
+        // SAFETY: the plan is leaked ('static) and read-only.
+        let agg = unsafe { shorten(mk_count_star_agg(leaked_mcx())) };
+        (exec_init_agg(agg, estate, 0, result_desc, None).unwrap(), outer_id)
+    }
+
+    static SHUTDOWN_FIRED: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe fn shutdown_cb(_arg: *mut ()) {
+        SHUTDOWN_FIRED.fetch_add(1, Ordering::SeqCst);
+    }
+
+    // ExecEndAgg (nodeAgg.c:4456-4459): ReScanExprContext on the aggcontexts
+    // runs every AggRegisterCallback shutdown callback BEFORE the outer plan
+    // is ended, not at estate teardown.
+    #[test]
+    fn exec_end_agg_runs_shutdown_callbacks_before_teardown() {
+        install_seams();
+        let estate_owner = create_executor_state(Box::leak(Box::new(MemoryContext::new("q"))));
+        let mut estate_owner = estate_owner.unwrap();
+        estate_owner.with_mut(|estate| {
+            let (mut state, outer_id) = init_count_star(estate);
+            exec_agg(&mut state, estate, feeder(outer_id, &[1, 2, 3])).unwrap().unwrap();
+            // What an aggregate support function does through
+            // AggRegisterCallback(fcinfo, ...).
+            // SAFETY: a null arg the callback never reads; fires at most once.
+            unsafe {
+                state.agg_node.as_ref().register_shutdown_callback(shutdown_cb, core::ptr::null_mut())
+            };
+            assert_eq!(SHUTDOWN_FIRED.load(Ordering::SeqCst), 0);
+            crate::exec_end_agg(&mut state);
+            assert_eq!(
+                SHUTDOWN_FIRED.load(Ordering::SeqCst),
+                1,
+                "ExecEndAgg must run the agg shutdown callbacks (nodeAgg.c:4456)"
+            );
+        });
+        // The estate teardown must not fire it a second time.
+        assert_eq!(SHUTDOWN_FIRED.load(Ordering::SeqCst), 1);
+    }
+
+    // ExecAgg (nodeAgg.c:2249): CHECK_FOR_INTERRUPTS() at the top of every
+    // call, independent of the child's own cancel points.
+    #[test]
+    fn exec_agg_checks_for_interrupts_at_entry() {
+        install_seams();
+        let estate_owner = create_executor_state(Box::leak(Box::new(MemoryContext::new("q"))));
+        let mut estate_owner = estate_owner.unwrap();
+        estate_owner.with_mut(|estate| {
+            let (mut state, outer_id) = init_count_star(estate);
+            init_small::globals::SetInterruptPending(true);
+            let got = exec_agg(&mut state, estate, feeder(outer_id, &[1, 2, 3]));
+            init_small::globals::SetInterruptPending(false);
+            let err = match got {
+                Err(e) => e,
+                Ok(_) => panic!("ExecAgg ran to completion with an interrupt pending"),
+            };
+            assert_eq!(err.sqlstate(), ::types_error::ERRCODE_QUERY_CANCELED);
+            crate::exec_end_agg(&mut state);
+        });
+    }
+
+    // hashagg_batch_read (nodeAgg.c:3128): a short tape read is
+    // errcode_for_file_access(), not ERRCODE_INTERNAL_ERROR.
+    #[test]
+    fn hashagg_batch_tape_eof_is_a_file_access_error() {
+        // errcode_for_file_access() classifies by the errno in effect (elog.c
+        // errcode_for_file_access: ENOENT -> 58P01, unmapped -> XX000); a
+        // failed stat leaves ENOENT behind, as a stale errno would in C.
+        assert!(std::fs::metadata("/nonexistent-b080-tape-dir/tape").is_err());
+        let err = crate::tape_eof_error(4, 2);
+        assert_eq!(err.sqlstate(), ::types_error::ERRCODE_UNDEFINED_FILE);
+        assert!(err.message().starts_with("unexpected EOF for"), "{}", err.message());
+    }
 }

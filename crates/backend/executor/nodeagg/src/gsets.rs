@@ -1184,6 +1184,8 @@ pub(crate) fn agg_retrieve_hash_table<'mcx>(
 ) -> PgResult<Option<ExecSlotId>> {
     let mcx = estate.es_query_cxt;
     loop {
+        // agg_retrieve_hash_table_in_memory (nodeAgg.c:2895): per entry.
+        crate::check_for_interrupts()?;
         estate.reset_expr_context(node.ps_ExprContext);
         // After exhausting the in-memory tables, try refilling from a
         // spilled batch (agg_retrieve_hash_table's outer retry in C); only
@@ -1341,6 +1343,9 @@ where
     let mcx = estate.es_query_cxt;
     if gs.sort_in.is_some() {
         let GroupingSetsState { sort_in, sort_out, sort_slot, .. } = gs;
+        // fetch_input_tuple (nodeAgg.c:556): the sorted path has no child
+        // node to supply cancel points.
+        crate::check_for_interrupts()?;
         if !sort_in.as_mut().unwrap().gettupleslot(true, false, sort_slot, mcx)? {
             return Ok(None);
         }

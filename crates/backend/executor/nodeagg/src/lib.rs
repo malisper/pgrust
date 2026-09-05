@@ -14,7 +14,7 @@ use std::ptr::NonNull;
 use std::rc::Rc;
 
 use ::datum::{Datum, NullableDatum};
-use ::types_fmgr::{AggStateNode, FmNodePtr, FmgrInfo, LocalFcinfo};
+use ::types_fmgr::{AggStateNode, FmNodePtr, FmgrInfo, FunctionCallInfoBaseData, LocalFcinfo};
 use ::execexpr::{
     exec_build_agg_projection_info_subplans, exec_build_agg_qual_subplans, exec_eval_expr,
     exec_project, exec_qual, AggBind,
@@ -27,7 +27,7 @@ use ::sort_storage::{LogicalTapeSet, TapeIdx};
 use ::executils::{EStateData, EcxtId, ExecSlotId};
 use ::mcx::{vec_with_capacity_in, Allocator, MemoryContext, PgBox, PgVec};
 use ::types_core::catalog::PROCEDURE_RELATION_ID;
-use ::types_core::Oid;
+use ::types_core::{Oid, FUNC_MAX_ARGS};
 use ::types_error::{PgError, PgResult};
 use ::types_nodes::node_tree::Node;
 use ::types_nodes::plannodes::Agg;
@@ -125,6 +125,38 @@ pub struct AggStateData<'mcx> {
 
 const MAX_ORDERED_TRANS_ARGS: usize = 8;
 
+// CHECK_FOR_INTERRUPTS() (miscadmin.h): the flag test inline, ProcessInterrupts
+// (the postgres_seams leg) out of line.
+#[inline(always)]
+pub(crate) fn check_for_interrupts() -> PgResult<()> {
+    if init_small::globals::InterruptPending() {
+        return check_for_interrupts_slow();
+    }
+    Ok(())
+}
+
+#[cold]
+#[inline(never)]
+fn check_for_interrupts_slow() -> PgResult<()> {
+    postgres_seams::check_for_interrupts::call()
+}
+
+// C's SizeForFunctionCallInfo(FUNC_MAX_ARGS) frame, query-lifetime in the
+// arena: the LocalFcinfo stack frames of this crate cover the common arity,
+// and an aggregate wider than them owns one of these instead (AggregateCreate
+// bounds every aggregate at FUNC_MAX_ARGS - 1 arguments, pg_aggregate.c:126).
+fn alloc_wide_fcinfo<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
+    collation: Oid,
+) -> PgResult<NonNull<LocalFcinfo<FUNC_MAX_ARGS>>> {
+    let layout = Layout::new::<LocalFcinfo<FUNC_MAX_ARGS>>();
+    let raw = mcx.allocate(layout).map_err(|_| mcx.oom(layout.size()))?;
+    let p: NonNull<LocalFcinfo<FUNC_MAX_ARGS>> = raw.cast();
+    // SAFETY: fresh allocation of the exact layout; the frame has no drop glue.
+    unsafe { p.write(LocalFcinfo::<FUNC_MAX_ARGS>::new(collation)) };
+    Ok(p)
+}
+
 // C AggStatePerTransData's non-presorted DISTINCT/ORDER BY slice
 // (build_pertrans_for_aggref): the evaltrans program parks each row's args in
 // `scratch` and raises `flag`; collect_ordered_input feeds the tuplesort and
@@ -155,6 +187,10 @@ struct PerTransSortData<'mcx> {
     equalfn_multi: Option<PgBox<'mcx, ExprState<'mcx>>>,
     transfn: FmgrInfo,
     agg_collation: Oid,
+    // C build_pertrans_for_aggref sizes transfn_fcinfo by numTransArgs: the
+    // replay paths run on a MAX_ORDERED_TRANS_ARGS stack frame, and an
+    // aggregate wider than that owns this arena frame of the C maximum.
+    wide_fcinfo: Option<NonNull<LocalFcinfo<FUNC_MAX_ARGS>>>,
     scratch: NonNull<NullableDatum>,
     flag: NonNull<bool>,
     // Lane-v2 exact-DISTINCT set hosting (distinctset.rs, pgrcolumnar-v2 plan
@@ -195,6 +231,29 @@ struct PerTransSortData<'mcx> {
 }
 
 impl PerTransSortData<'_> {
+    /// C's persistent `transfn_fcinfo`, armed for one replay batch: the
+    /// caller's stack frame when the arity fits, else the entry's arena
+    /// frame (`wide_fcinfo`) with its header re-armed.
+    #[inline]
+    fn arm_transfn_fcinfo<'a>(
+        &self,
+        small: &'a mut LocalFcinfo<MAX_ORDERED_TRANS_ARGS>,
+    ) -> &'a mut FunctionCallInfoBaseData {
+        let fcinfo: &'a mut FunctionCallInfoBaseData = match self.wide_fcinfo {
+            // SAFETY: query-lifetime arena frame owned by this entry; the
+            // replay paths never re-enter, so this is the sole live
+            // reference for the caller's batch.
+            Some(p) => {
+                let wide = unsafe { &mut *p.as_ptr() };
+                wide.rearm(self.agg_collation);
+                &mut **wide
+            }
+            None => &mut **small,
+        };
+        fcinfo.nargs = (self.num_trans_inputs + 1) as i16;
+        fcinfo
+    }
+
     /// Whether this entry runs SET-MODE right now: a set-capable
     /// non-presorted entry always does; a set-capable presorted entry only
     /// under the lane's skip-sort arming (`force_distinct_set` — the input
@@ -216,11 +275,13 @@ fn init_pertrans_sort<'mcx>(
 ) -> PgResult<(PerTransSortData<'mcx>, AggOrderedSpec)> {
     let num_inputs = aggref.args.len();
     let num_trans_inputs = aggref.aggargtypes.len();
-    assert!(
-        num_trans_inputs + 1 <= MAX_ORDERED_TRANS_ARGS,
-        "build_pertrans_for_aggref (nodeAgg.c): {num_trans_inputs} ordered trans inputs \
-         exceed the replay fcinfo"
-    );
+    // C build_pertrans_for_aggref: transfn_fcinfo is sized by numTransArgs
+    // (nodeAgg.c:4183); an arity past the stack frame takes the arena frame.
+    let wide_fcinfo = if num_trans_inputs + 1 > MAX_ORDERED_TRANS_ARGS {
+        Some(alloc_wide_fcinfo(mcx, agg_collation)?)
+    } else {
+        None
+    };
     // By construction aggorder is a prefix of aggdistinct
     // (transformDistinctClause).
     let sortlist =
@@ -407,6 +468,7 @@ fn init_pertrans_sort<'mcx>(
             equalfn_multi,
             transfn,
             agg_collation,
+            wide_fcinfo,
             scratch,
             flag,
             set_kind,
@@ -640,6 +702,10 @@ struct PerAggData<'mcx> {
     num_final_args: u16,
     agg_collation: Oid,
     resulttype_len: i16,
+    // C finalize_aggregate's LOCAL_FCINFO(fcinfo, FUNC_MAX_ARGS): the
+    // MAX_FINAL_ARGS stack frame covers the common arity, and a wider
+    // finalfn owns this arena frame of the C maximum.
+    wide_fcinfo: Option<NonNull<LocalFcinfo<FUNC_MAX_ARGS>>>,
     direct_args: PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>>,
 }
 
@@ -1174,6 +1240,11 @@ pub fn exec_init_agg<'mcx>(
             direct_args.push(es);
         }
 
+        let wide_fcinfo = if num_final_args as usize > MAX_FINAL_ARGS {
+            Some(alloc_wide_fcinfo(mcx, aggref.inputcollid)?)
+        } else {
+            None
+        };
         let transno = aggref.aggtransno as usize;
         peragg.push(PerAggData {
             transno: transno as u32,
@@ -1184,6 +1255,7 @@ pub fn exec_init_agg<'mcx>(
             num_final_args,
             agg_collation: aggref.inputcollid,
             resulttype_len,
+            wide_fcinfo,
             direct_args,
         });
         let transfn_oid = if do_combine {
@@ -2317,9 +2389,17 @@ fn hashagg_spill_tuple<'mcx>(
 #[cold]
 #[inline(never)]
 fn tape_eof_error(requested: usize, got: usize) -> Box<PgError> {
-    Box::new(PgError::error(format!(
-        "unexpected EOF for hashagg batch tape: requested {requested} bytes, read {got} bytes"
-    )))
+    // hashagg_batch_read (nodeAgg.c:3128): errcode_for_file_access() +
+    // errmsg_internal (C prints the LogicalTape pointer, which has no stable
+    // rendering here).
+    Box::new(
+        ::elog::ereport(::types_error::ERROR)
+            .errcode_for_file_access()
+            .errmsg_internal(format!(
+                "unexpected EOF for hashagg batch tape: requested {requested} bytes, read {got} bytes"
+            ))
+            .into_error(),
+    )
 }
 
 // hashagg_batch_read (nodeAgg.c): None = tape exhausted.
@@ -3111,8 +3191,8 @@ fn advance_presorted_distinct<'mcx>(
 
     // SAFETY: transno < numtrans of the once-allocated pergroup array.
     let pg = unsafe { pergroup_base.as_ptr().add(ps.transno) };
-    let mut fcinfo = LocalFcinfo::<MAX_ORDERED_TRANS_ARGS>::fresh(ps.agg_collation);
-    fcinfo.nargs = (ps.num_trans_inputs + 1) as i16;
+    let mut small = LocalFcinfo::<MAX_ORDERED_TRANS_ARGS>::fresh(ps.agg_collation);
+    let fcinfo = ps.arm_transfn_fcinfo(&mut small);
     fcinfo.context = Some(agg_node.cast());
     // SAFETY: as the equalfn arming above.
     unsafe { fcinfo.set_result_mcx(estate.ecxt(tmp).per_tuple_mcx()) };
@@ -3121,7 +3201,7 @@ fn advance_presorted_distinct<'mcx>(
         fcinfo.args[i + 1] = unsafe { ps.scratch.as_ptr().add(i).read() };
     }
     advance_transition_function(
-        &mut fcinfo,
+        &mut *fcinfo,
         &mut ps.transfn,
         typ,
         ps.num_trans_inputs,
@@ -3133,7 +3213,7 @@ fn advance_presorted_distinct<'mcx>(
 // C advance_transition_function (nodeAgg.c): the sorted-input replay of the
 // transfn; by-ref result discipline mirrors execexpr's agg_plain_trans_byref.
 fn advance_transition_function(
-    fcinfo: &mut LocalFcinfo<MAX_ORDERED_TRANS_ARGS>,
+    fcinfo: &mut FunctionCallInfoBaseData,
     transfn: &mut FmgrInfo,
     typ: TransTyp,
     num_trans_inputs: usize,
@@ -3233,8 +3313,8 @@ pub(crate) fn process_ordered_aggregates_set<'mcx>(
         // SAFETY: transno < numtrans of the once-allocated pergroup array.
         let pg = unsafe { pergroup_base.as_ptr().add(ps.transno) };
         let typ = trans_typ[ps.transno];
-        let mut fcinfo = LocalFcinfo::<MAX_ORDERED_TRANS_ARGS>::fresh(ps.agg_collation);
-        fcinfo.nargs = (ps.num_trans_inputs + 1) as i16;
+        let mut small = LocalFcinfo::<MAX_ORDERED_TRANS_ARGS>::fresh(ps.agg_collation);
+        let fcinfo = ps.arm_transfn_fcinfo(&mut small);
         fcinfo.context = Some(agg_node.cast());
         // SAFETY: the per-tuple context outlives every call below (resets
         // recycle the same context object).
@@ -3309,7 +3389,7 @@ pub(crate) fn process_ordered_aggregates_set<'mcx>(
                     estate.reset_expr_context(tmp);
                     fcinfo.args[1] = nd;
                     advance_transition_function(
-                        &mut fcinfo,
+                        &mut *fcinfo,
                         &mut ps.transfn,
                         typ,
                         ps.num_trans_inputs,
@@ -3419,7 +3499,7 @@ pub(crate) fn process_ordered_aggregates_set<'mcx>(
                 }
                 fcinfo.args[1] = nd;
                 advance_transition_function(
-                    &mut fcinfo,
+                    &mut *fcinfo,
                     &mut ps.transfn,
                     typ,
                     ps.num_trans_inputs,
@@ -3444,6 +3524,8 @@ pub(crate) fn process_ordered_aggregates_set<'mcx>(
                 if !got {
                     break;
                 }
+                // process_ordered_aggregate_multi (nodeAgg.c:973).
+                check_for_interrupts()?;
                 let matched = if ps.num_distinct_cols > 0 && have_old {
                     let (s1, s2) = (
                         // Two disjoint options; split borrows via as_mut.
@@ -3472,7 +3554,7 @@ pub(crate) fn process_ordered_aggregates_set<'mcx>(
                         }
                     }
                     advance_transition_function(
-                        &mut fcinfo,
+                        &mut *fcinfo,
                         &mut ps.transfn,
                         typ,
                         ps.num_trans_inputs,
@@ -3539,6 +3621,8 @@ pub fn exec_agg<'mcx, F>(
 where
     F: FnMut(&mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>>,
 {
+    // ExecAgg (nodeAgg.c:2249).
+    check_for_interrupts()?;
     if node.agg_done {
         return Ok(None);
     }
@@ -4890,54 +4974,60 @@ pub(crate) fn finalize_aggregates<'mcx>(
             }
             continue;
         }
-        let mut direct: [NullableDatum; MAX_FINAL_ARGS] =
-            [NullableDatum::null(); MAX_FINAL_ARGS];
+        // C LOCAL_FCINFO(fcinfo, FUNC_MAX_ARGS): the stack frame covers the
+        // common arity; a wider finalfn takes the per-agg arena frame.
+        let mut small = LocalFcinfo::<MAX_FINAL_ARGS>::fresh(pa.agg_collation);
+        let fcinfo: &mut FunctionCallInfoBaseData = match pa.wide_fcinfo {
+            // SAFETY: query-lifetime arena frame owned by this peragg; the
+            // finalize path never re-enters, so this is the sole live
+            // reference for the call.
+            Some(p) => {
+                let wide = unsafe { &mut *p.as_ptr() };
+                wide.rearm(pa.agg_collation);
+                &mut **wide
+            }
+            None => &mut *small,
+        };
         let mut anynull = false;
-        assert!(
-            pa.direct_args.len() < MAX_FINAL_ARGS,
-            "finalize_aggregate (nodeAgg.c): {} direct args not supported",
-            pa.direct_args.len()
-        );
+        // The current group's representative tuple: AGG_SORTED holds it in
+        // persort; grouping sets hold it in the gsets projection slot.
+        let mut outer = match persort.as_mut() {
+            Some(ps) => Some(&mut ps.first_slot),
+            None => gsets.as_mut().map(|gs| &mut gs.first_slot),
+        };
+        // Direct arguments go into arg positions 1 and up (nodeAgg.c:1065),
+        // evaluated even without a finalfn so side-effects happen.
         for (i, es) in pa.direct_args.iter_mut().enumerate() {
-            // The current group's representative tuple: AGG_SORTED holds it
-            // in persort; grouping sets hold it in the gsets projection slot.
-            let outer = match persort.as_mut() {
-                Some(ps) => Some(&mut ps.first_slot),
-                None => gsets.as_mut().map(|gs| &mut gs.first_slot),
-            };
-            let mut slots = EvalSlots { scan: None, inner: None, outer };
+            let mut slots = EvalSlots { scan: None, inner: None, outer: outer.as_deref_mut() };
             let nd = exec_eval_expr(es, &mut slots)?;
-            direct[i] = nd;
+            fcinfo.args[i + 1] = nd;
             anynull |= nd.isnull;
         }
         let (value, isnull) = match pa.finalfn.as_mut() {
             None => (trans_value, pg.trans_value_is_null),
             Some(flinfo) => {
-                assert!(
-                    (pa.num_final_args as usize) <= MAX_FINAL_ARGS,
-                    "finalize_aggregate (nodeAgg.c): {} finalfn args not supported",
-                    pa.num_final_args
-                );
-                let mut fcinfo = LocalFcinfo::<MAX_FINAL_ARGS>::fresh(pa.agg_collation);
-                fcinfo.nargs = pa.num_final_args as i16;
+                let num_final_args = pa.num_final_args as usize;
+                fcinfo.nargs = num_final_args as i16;
                 fcinfo.context = Some(agg_node.cast());
                 // SAFETY: the per-tuple context outlives this stack frame's
                 // single call.
                 unsafe { fcinfo.set_result_mcx(per_tuple) };
                 fcinfo.args[0] =
                     NullableDatum { value: trans_value, isnull: pg.trans_value_is_null };
-                for i in 0..pa.direct_args.len() {
-                    fcinfo.args[i + 1] = direct[i];
+                anynull |= pg.trans_value_is_null;
+                // Fill any remaining argument positions with nulls
+                // (nodeAgg.c:1101): the arena frame keeps the last call's.
+                for i in pa.direct_args.len() + 1..num_final_args {
+                    fcinfo.args[i] = NullableDatum::null();
+                    anynull = true;
                 }
-                anynull |= pg.trans_value_is_null
-                    || pa.num_final_args as usize > pa.direct_args.len() + 1;
                 // SAFETY: query-lifetime node; no &mut lives across the call.
                 let agg = unsafe { agg_node.as_ref() };
                 agg.set_current_agg(NonNull::from(pa.aggref).cast(), pa.trans_shared);
                 let out = if flinfo.fn_strict && anynull {
                     (Datum::null(), true)
                 } else {
-                    let result = flinfo.invoke(&mut fcinfo)?;
+                    let result = flinfo.invoke(fcinfo)?;
                     let isnull = fcinfo.isnull;
                     // C MakeExpandedObjectReadOnly on the result.
                     // SAFETY: a non-null varlena result points at a live image.
@@ -5257,6 +5347,8 @@ fn agg_retrieve_hash_table<'mcx>(
 ) -> PgResult<Option<ExecSlotId>> {
     let mcx = estate.es_query_cxt;
     loop {
+        // agg_retrieve_hash_table_in_memory (nodeAgg.c:2895): per entry.
+        check_for_interrupts()?;
         estate.reset_expr_context(node.ps_ExprContext);
 
         let pergroup = {
@@ -5368,6 +5460,12 @@ pub fn exec_end_agg(node: &mut AggStateData<'_>) {
         et.release_frames();
     }
     node.ps_ResultTupleDesc = None;
+    // ExecEndAgg (nodeAgg.c:4456): ReScanExprContext on the agg/hash contexts
+    // runs the AggRegisterCallback shutdown callbacks here, before the caller
+    // ends the outer child (the node's drop at query-context reset only
+    // catches what an error path left behind).
+    // SAFETY: sole access path to the node during end.
+    unsafe { node.agg_node.as_mut() }.reset();
 }
 
 /// `ExecReScanAgg` (nodeAgg.c) AGG_PLAIN arm; the caller rescans the outer
@@ -5521,7 +5619,7 @@ mcx::forget_safe_nodrop!(TransTyp, HashAggBatch);
 // die with the struct's normal drop).
 mcx::forget_safe_struct!(
     PerAggData<'_> { transno, aggref, trans_shared, num_final_args,
-        agg_collation, resulttype_len;
+        agg_collation, resulttype_len, wide_fcinfo;
         finalfn, serialfn, direct_args },
     PerSortData<'_> { have_pending; first_slot, pending_slot, eq },
     HashSpillState<'_> { mode, ever_spilled, batches, all_cols_needed,
