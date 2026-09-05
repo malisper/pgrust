@@ -74,3 +74,22 @@ pub mod stemmers {
 
 #[cfg(test)]
 mod tests;
+
+// dict_snowball.so's entry points (PG_MODULE_MAGIC_EXT, no _PG_init):
+// snowball_create.sql declares dsnowball_init/dsnowball_lexize as LANGUAGE C
+// AS '$libdir/dict_snowball', so fmgr's C-language leg resolves them through
+// the dfmgr library registry (fmgr.c fmgr_info_C_lang -> dfmgr.c
+// load_external_function), which records the library's first use in the
+// session for pg_get_loaded_modules.
+pub fn init_seams() {
+    dfmgr::register_builtin_library(dfmgr::BuiltinLibraryEntry {
+        name: builtins::SNOWBALL_LIBRARY,
+        lookup: |symbol| {
+            builtins::SNOWBALL_CLANG
+                .iter()
+                .find(|(name, _, _)| *name == symbol)
+                .map(|&(_, _, func)| func)
+        },
+        pg_init: None,
+    });
+}

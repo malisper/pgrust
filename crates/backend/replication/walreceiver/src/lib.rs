@@ -1071,6 +1071,19 @@ pub fn wal_rcv_get_state_string(state: WalRcvState) -> &'static str {
 
 pub fn init_seams() {
     walreceiverfuncs_seams::wal_rcv_force_reply::set(WalRcvForceReply);
+    // libpqwalreceiver.so (libpqwalreceiver.c:40-43 PG_MODULE_MAGIC_EXT, name
+    // "libpqwalreceiver"): a loadable library with no SQL-callable symbols,
+    // so LOAD 'libpqwalreceiver' succeeds and lists it in
+    // pg_get_loaded_modules. Its _PG_init (:124-129) only publishes
+    // WalReceiverFunctions for the walreceiver process, and errors solely
+    // when that pointer is already set — a state no backend can reach; the
+    // client is compiled into this crate (client.rs), so there is nothing to
+    // publish here.
+    dfmgr::register_builtin_library(dfmgr::BuiltinLibraryEntry {
+        name: "libpqwalreceiver",
+        lookup: |_| None,
+        pg_init: None,
+    });
 }
 
 const _: () = assert!(NAMEDATALEN == 64);

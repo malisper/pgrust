@@ -333,6 +333,14 @@ macro_rules! inherited {
             // high-VU OLTP) and LRU-thrashing the VFD cache at 48 fds
             // instead of ~max_files_per_process.
             max_safe_fds: i32,
+            // dfmgr.c's file_list and guc.c's reserved_class_prefix: process
+            // statics in C, written by the postmaster's
+            // shared_preload_libraries _PG_init calls and inherited by every
+            // forked child, so a backend lists the preloaded modules in
+            // pg_get_loaded_modules, never re-runs their _PG_init on LOAD,
+            // and keeps their GUC prefixes reserved.
+            file_list: dfmgr::FileList,
+            reserved_class_prefixes: Vec<String>,
             $($field: $ty,)+
         }
         impl Inherited {
@@ -340,6 +348,8 @@ macro_rules! inherited {
                 Self {
                     data_dir: init_small::globals::DataDir(),
                     max_safe_fds: fd::max_safe_fds(),
+                    file_list: dfmgr::file_list_snapshot(),
+                    reserved_class_prefixes: guc::reserved_class_prefixes(),
                     $($field: init_small::globals::$get(),)+
                 }
             }
@@ -348,6 +358,8 @@ macro_rules! inherited {
                     init_small::globals::SetDataDir(dd);
                 }
                 fd::vfd::set_max_safe_fds_value(self.max_safe_fds);
+                dfmgr::file_list_inherit(&self.file_list);
+                guc::inherit_reserved_class_prefixes(&self.reserved_class_prefixes);
                 $(init_small::globals::$set(self.$field);)+
             }
         }

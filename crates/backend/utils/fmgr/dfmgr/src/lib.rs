@@ -44,9 +44,24 @@ pub struct BuiltinLibraryEntry {
 
 static BUILTIN_LIBRARIES: Mutex<Vec<BuiltinLibraryEntry>> = Mutex::new(Vec::new());
 
+#[derive(Clone)]
 struct LoadedFile {
     filename: String,
     entry: BuiltinLibraryEntry,
+}
+
+// file_list is a process static in C (dfmgr.c:59-60): a forked backend
+// inherits the postmaster's shared_preload_libraries loads, so they list in
+// pg_get_loaded_modules and a later LOAD of one never re-runs _PG_init.
+#[derive(Clone, Default)]
+pub struct FileList(Vec<LoadedFile>);
+
+// The DynamicFileList walk (get_first_loaded_module/get_next_loaded_module +
+// get_loaded_module_details, dfmgr.c:427-453): this backend's loaded
+// libraries in load order, each with the filename it was opened under.
+pub struct LoadedModule {
+    pub library_path: String,
+    pub module_name: &'static str,
 }
 
 thread_local! {
@@ -294,10 +309,23 @@ pub fn load_file(filename: &str, restricted: bool) -> PgResult<()> {
     Ok(())
 }
 
-// DynamicFileList walk (dfmgr.c get_first_loaded_module/get_next_loaded_module)
-// for pg_get_loaded_modules: this backend's loaded libraries, load order.
-pub fn loaded_module_names() -> Vec<&'static str> {
-    FILE_LIST.with(|s| s.borrow().iter().map(|f| f.entry.name).collect())
+pub fn loaded_modules() -> Vec<LoadedModule> {
+    FILE_LIST.with(|s| {
+        s.borrow()
+            .iter()
+            .map(|f| LoadedModule { library_path: f.filename.clone(), module_name: f.entry.name })
+            .collect()
+    })
+}
+
+// The postmaster's file_list, captured on its thread for a child thread's
+// fork-inherited globals (launch_backend).
+pub fn file_list_snapshot() -> FileList {
+    FILE_LIST.with(|s| FileList(s.borrow().clone()))
+}
+
+pub fn file_list_inherit(list: &FileList) {
+    FILE_LIST.with(|s| *s.borrow_mut() = list.0.clone());
 }
 
 pub fn load_external_function(
@@ -341,6 +369,10 @@ mod tests {
         set_pkglib(&pkglib);
         dynamic_library_path_set(Some("$libdir".to_owned()));
         pkglib
+    }
+
+    fn loaded_module_names() -> Vec<&'static str> {
+        loaded_modules().into_iter().map(|m| m.module_name).collect()
     }
 
     #[track_caller]
@@ -506,5 +538,51 @@ mod tests {
             ERRCODE_UNDEFINED_FILE,
             "could not access file \"$foo\": No such file or directory",
         );
+    }
+
+    #[test]
+    fn loaded_module_carries_the_opened_filename() {
+        let pkglib = setup();
+        load_file("tlib", false).unwrap();
+        let m = loaded_modules();
+        assert_eq!(m.len(), 1);
+        assert_eq!(
+            (m[0].module_name, m[0].library_path.as_str()),
+            ("tlib", format!("{pkglib}/tlib{DLSUFFIX}").as_str())
+        );
+    }
+
+    #[test]
+    fn inherited_file_list_skips_pg_init_in_the_child() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static INITS: AtomicUsize = AtomicUsize::new(0);
+        let pkglib = setup();
+        register_builtin_library(BuiltinLibraryEntry {
+            name: "tinh",
+            lookup: |_| None,
+            pg_init: Some(|| {
+                INITS.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }),
+        });
+        load_file("tinh", false).unwrap();
+        assert_eq!(INITS.load(Ordering::SeqCst), 1);
+        let snapshot = file_list_snapshot();
+        std::thread::spawn(move || {
+            set_pkglib(&pkglib);
+            dynamic_library_path_set(Some("$libdir".to_owned()));
+            assert!(loaded_modules().is_empty());
+            file_list_inherit(&snapshot);
+            assert_eq!(loaded_module_names(), vec!["tinh"]);
+            // C: the backend finds the postmaster's entry in file_list, so
+            // LOAD of a preloaded library neither stats nor re-inits it.
+            load_file("tinh", false).unwrap();
+            load_file("$libdir/tinh", false).unwrap();
+            assert_eq!(INITS.load(Ordering::SeqCst), 1);
+            assert_eq!(loaded_module_names(), vec!["tinh"]);
+        })
+        .join()
+        .unwrap();
+        assert_eq!(loaded_module_names(), vec!["tinh"]);
     }
 }

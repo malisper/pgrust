@@ -9,6 +9,7 @@ types_fmgr = { path = "../../../_support/types/fmgr" }
 datum = { path = "../../../_support/types/datum" }
 mcx = { path = "../../../_support/mcx" }
 types_error = { path = "../../../_support/types/types_error" }
+dfmgr = { path = "../../utils/fmgr/dfmgr" }
 ts_locale = { path = "../../tsearch/ts_locale" }
 mbutils = { path = "../../utils/mb/mbutils" }
 wchar = { path = "../../../common/wchar" }

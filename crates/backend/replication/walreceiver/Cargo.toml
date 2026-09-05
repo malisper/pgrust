@@ -12,6 +12,7 @@ path = "src/lib.rs"
 mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
 adt_timestamp = { path = "../../utils/adt/adt_timestamp" }
 auxprocess = { path = "../../postmaster/auxprocess" }
+dfmgr = { path = "../../utils/fmgr/dfmgr" }
 elog = { path = "../../utils/error/elog" }
 guc_file = { path = "../../utils/misc/guc_file" }
 guc_tables = { path = "../../utils/misc/guc_tables" }

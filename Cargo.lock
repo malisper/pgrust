@@ -5206,6 +5206,7 @@ name = "dict_snowball"
 version = "0.1.0"
 dependencies = [
  "datum",
+ "dfmgr",
  "mbutils",
  "mcx",
  "pg_locale",
@@ -8503,6 +8504,7 @@ dependencies = [
  "bgworker",
  "bgwriter",
  "checkpointer",
+ "dfmgr",
  "elog",
  "fd",
  "guc",
@@ -16553,6 +16555,7 @@ dependencies = [
  "dblink",
  "deadlock",
  "detoast",
+ "dict_snowball",
  "dsm_core",
  "elog",
  "event_trigger",
@@ -20947,6 +20950,7 @@ version = "0.0.0"
 dependencies = [
  "adt_timestamp",
  "auxprocess",
+ "dfmgr",
  "elog",
  "fd",
  "guc_file",

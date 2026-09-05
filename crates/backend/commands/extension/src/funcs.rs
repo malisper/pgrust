@@ -215,10 +215,10 @@ pub fn fc_pg_extension_config_dump(
     Ok(Datum::from_usize(0))
 }
 
-// pg_get_loaded_modules (extension.c). No-dlopen carve: modules are builtin
-// registry entries; every core module's PG_MODULE_MAGIC_EXT carries its own
-// name and PG_VERSION, so those columns are derived, and file_name takes the
-// jit.c DLSUFFIX shape.
+// pg_get_loaded_modules (extension.c:2974-3018). No-dlopen carve: modules are
+// builtin registry entries; every shipped module's PG_MODULE_MAGIC_EXT carries
+// its own name and PG_VERSION, so those columns are derived. file_name is the
+// basename of the filename the library was opened under (:3007-3011).
 pub fn fc_pg_get_loaded_modules(
     flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
@@ -228,12 +228,15 @@ pub fn fc_pg_get_loaded_modules(
     let mcx = unsafe { fcinfo.result_mcx_detached() };
     let mut srf = funcapi::InitMaterializedSRF(mcx, flinfo, fcinfo, 0)?;
 
-    for name in dfmgr::loaded_module_names() {
-        let file_name = format!("{name}.so");
+    for module in dfmgr::loaded_modules() {
+        // For security reasons, we don't show the directory path.
+        let library_path = module.library_path.as_str();
+        let file_name =
+            &library_path[pg_path::last_dir_separator(library_path).map_or(0, |i| i + 1)..];
         let values = [
-            text_datum(mcx, name)?,
+            text_datum(mcx, module.module_name)?,
             text_datum(mcx, guc_tables::consts::PG_COMPAT_VERSION)?,
-            text_datum(mcx, &file_name)?,
+            text_datum(mcx, file_name)?,
         ];
         srf.putvalues(&values, &[false; 3])?;
     }

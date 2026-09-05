@@ -625,70 +625,40 @@ fn fmgr_info_pg_proc(
         C_LANGUAGE_ID => match lookup_c_func(function_id, row.xmin, row.tid) {
             Some(f) => f,
             None => {
-                // fmgr_info_C_lang: the dlopen'd symbol is the prosrc name;
-                // resolve against the registered PL entry points, then the
-                // shipped native-library tables, then the in-process
-                // ported-library registry keyed by probin (dfmgr).
+                // fmgr_info_C_lang (fmgr.c:349-365): prosrc is the link
+                // symbol, probin the library; load_external_function always
+                // goes through internal_load_library (dfmgr.c:118-121), so a
+                // library's first use in the session runs its _PG_init and
+                // links it into file_list (dfmgr.c:297-306) — the registered
+                // PL entry points and dict_snowball are dfmgr libraries like
+                // every other C-language probin (no-dlopen carve,
+                // docs/design/carve-ratifications.md §2).
                 let cx = ::mcx::MemoryContext::new("fmgr_info prosrc");
                 let prosrc = syscache_seams::lookup_pg_proc_prosrc::call(cx.mcx(), function_id)?
                     .unwrap_or_else(|| panic!("fmgr: null prosrc for function {function_id}"));
-                let user_fn = match registered_c_lang_fn(&prosrc).or_else(|| {
-                    ::dict_snowball::builtins::SNOWBALL_CLANG
-                        .iter()
-                        .find(|(name, _, _)| *name == prosrc.as_str())
-                        .map(|&(_, _, func)| func)
-                }) {
-                    Some(f) => f,
-                    None => {
-                        let probin =
-                            syscache_seams::lookup_pg_proc_probin::call(cx.mcx(), function_id)?
-                                .unwrap_or_else(|| {
-                                    panic!("fmgr: null probin for C function {function_id}")
-                                });
-                        ::dfmgr::load_external_function(&probin, &prosrc, true)?
-                            .expect("signal_not_found=true returned no function")
-                    }
-                };
+                let probin = syscache_seams::lookup_pg_proc_probin::call(cx.mcx(), function_id)?
+                    .unwrap_or_else(|| panic!("fmgr: null probin for C function {function_id}"));
+                let user_fn = ::dfmgr::load_external_function(&probin, &prosrc, true)?
+                    .expect("signal_not_found=true returned no function");
                 record_c_func(function_id, row.xmin, row.tid, user_fn);
                 user_fn
             }
         },
         lang => {
-            // fmgr_info_other_lang: adopt the language call handler's entry
-            // point (the handler is a C-language function; dispatch by its
-            // prosrc name).
+            // fmgr_info_other_lang (fmgr.c:418-441): look up the language's
+            // call handler and adopt its entry point through a recursive
+            // fmgr_info_cxt_security(lanplcallfoid, ..., ignore_security =
+            // true) (:435-437) — the handler is a C-language function, so
+            // its library loads (and records) exactly like any other.
             // fmgr.c:426-428 elog(ERROR, "cache lookup failed for language
             // %u", language) -- catchable, SQLSTATE XX000 (elog's default at
             // ERROR); it unwinds the transaction, never the backend.
             let Some(langrow) = syscache_seams::lookup_pg_language_fmgr::call(lang)? else {
                 return Err(language_lookup_failed(lang));
             };
-            let cx = ::mcx::MemoryContext::new("fmgr_info prosrc");
-            let hsrc =
-                syscache_seams::lookup_pg_proc_prosrc::call(cx.mcx(), langrow.lanplcallfoid)?
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "fmgr: null prosrc for call handler {}",
-                            langrow.lanplcallfoid
-                        )
-                    });
-            match registered_c_lang_fn(&hsrc) {
-                Some(f) => f,
-                // Backstop behind the CREATE LANGUAGE fence (proclang.rs):
-                // a catalog that already carries a language whose handler is
-                // not registered errors cleanly rather than panicking
-                // (no-dlopen carve, docs/design/carve-ratifications.md §2).
-                None => {
-                    return Err(alloc::boxed::Box::new(
-                        PgError::error(alloc::format!(
-                            "language handler function \"{}\" is not supported \
-                             (language {lang} of function {function_id})",
-                            hsrc.as_str()
-                        ))
-                        .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
-                    ))
-                }
-            }
+            let mut plfinfo = FmgrInfo::unresolved();
+            fmgr_info_pg_proc(langrow.lanplcallfoid, &mut plfinfo, true)?;
+            plfinfo.fn_addr
         }
     };
     finfo.fn_addr = fn_addr;

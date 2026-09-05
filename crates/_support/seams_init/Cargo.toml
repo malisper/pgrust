@@ -16,6 +16,7 @@ sequence = { path = "../../backend/commands/sequence" }
 pg_constraint = { path = "../../backend/catalog/pg_constraint" }
 extension = { path = "../../backend/commands/extension" }
 detoast = { path = "../../backend/access/common/detoast" }
+dict_snowball = { path = "../../backend/snowball/dict_snowball" }
 heaptoast = { path = "../../backend/access/heap/heaptoast" }
 printtup = { path = "../../backend/access/common/printtup" }
 relation = { path = "../../backend/access/common/relation" }

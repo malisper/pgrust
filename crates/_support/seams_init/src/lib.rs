@@ -401,6 +401,7 @@ pub fn init_all_with_transport(transport: Transport) {
     pg_proc::init_seams();
     regress_lib::init_seams();
     plpgsql::init_seams();
+    dict_snowball::init_seams();
     fmgr_core::register_late_builtins(adt_geo::builtins::GEO_BUILTINS);
     fmgr_core::register_late_builtins(gistproc::GISTPROC_BUILTINS);
     fmgr_core::register_late_builtins(commands_constraint::CONSTRAINT_BUILTINS);

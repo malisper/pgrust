@@ -83,9 +83,19 @@ thread_local! {
     static GUC_CHECK_ERROR: RefCell<GucCheckError> = RefCell::new(GucCheckError::default());
     // static int GUCNestLevel = 0 (guc.c:231).
     static GUC_NEST_LEVEL: Cell<i32> = const { Cell::new(0) };
-    // static List *reserved_class_prefix (guc.c:78); per-backend in C, so
-    // session-scoped TLS here.
+    // static List *reserved_class_prefix (guc.c:78): a process static, so
+    // session-scoped TLS here, seeded from the postmaster's list at child
+    // launch the way fork inherits it (shared_preload_libraries _PG_init
+    // reservations hold in every backend).
     static RESERVED_CLASS_PREFIX: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+pub fn reserved_class_prefixes() -> Vec<String> {
+    RESERVED_CLASS_PREFIX.with(|s| s.borrow().clone())
+}
+
+pub fn inherit_reserved_class_prefixes(prefixes: &[String]) {
+    RESERVED_CLASS_PREFIX.with(|s| *s.borrow_mut() = prefixes.to_vec());
 }
 
 pub fn reset_guc_check_error() {
