@@ -511,6 +511,14 @@ fn collect_node_subplans<'mcx>(
             walk_list(&mut out, &plan.qual);
             walk_list(&mut out, &node.as_tid_scan().unwrap().tidquals);
         }
+        // ExecInitTidRangeScan: projection, qual, then TidExprListCreate
+        // compiles the range bounds with the scan as parent
+        // (nodeTidrangescan.c:66/69).
+        NodeTag::T_TidRangeScan => {
+            walk_list(&mut out, &plan.targetlist);
+            walk_list(&mut out, &plan.qual);
+            walk_list(&mut out, &node.as_tid_range_scan().unwrap().tidrangequals);
+        }
         // Scans: projection compiles before the qual (C ExecInitSeqScan).
         _ => {
             walk_list(&mut out, &plan.targetlist);

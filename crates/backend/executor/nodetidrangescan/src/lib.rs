@@ -3,7 +3,9 @@
 
 extern crate alloc;
 
-use ::execexpr::{exec_eval_expr, exec_init_expr, EvalSlots, ExprState};
+use ::execexpr::{
+    exec_eval_expr, exec_init_expr_subplans, EvalSlots, ExprState, ParamBind, SubplanCompileEnv,
+};
 use ::execscan::{exec_scan, exec_scan_rescan, ScanNode, ScanState};
 use ::executils::{EStateData, ExecSlotId};
 use ::mcx::{Mcx, PgBox, PgVec};
@@ -59,13 +61,16 @@ fn elog_internal(message: &'static str) -> Box<PgError> {
     Box::new(PgError::error(message.to_string()))
 }
 
-// MakeTidOpExpr + TidExprListCreate (nodeTidrangescan.c).
+// MakeTidOpExpr + TidExprListCreate (nodeTidrangescan.c). C compiles each
+// bound with `&tidstate->ss.ps` as parent (nodeTidrangescan.c:66/69), so a
+// SubPlan inside a range bound is initialized by ExecInitSubPlan under the
+// scan; `sub` is that owning-node compile environment.
 fn tid_expr_list_create<'mcx>(
     mcx: Mcx<'mcx>,
     node: &TidRangeScan<'mcx>,
-    estate: &mut EStateData<'mcx>,
+    params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
 ) -> PgResult<PgVec<'mcx, TidOpExpr<'mcx>>> {
-    let params = estate.param_bind();
     let mut tidexprs: PgVec<'mcx, TidOpExpr<'mcx>> = PgVec::new_in(mcx);
 
     for expr in &node.tidrangequals {
@@ -81,8 +86,8 @@ fn tid_expr_list_create<'mcx>(
         } else {
             return Err(elog_internal("could not identify CTID variable"));
         };
-        let exprstate =
-            exec_init_expr(mcx, Some(other), params)?.expect("tid bound exprstate");
+        let exprstate = exec_init_expr_subplans(mcx, Some(other), params, sub)?
+            .expect("tid bound exprstate");
 
         let (exprtype, inclusive) = match op.opno {
             TID_LESS_EQ_OPERATOR | TID_LESS_OPERATOR => (
@@ -247,7 +252,9 @@ pub fn exec_init_tid_range_scan<'mcx>(
         ::execexpr::exec_init_qual_subplans(mcx, &node.scan.plan.qual, params, env)
     })?;
 
-    let trss_tidexprs = tid_expr_list_create(mcx, node, estate)?;
+    let trss_tidexprs = ::executils::with_subplan_compile_env(estate, |env| {
+        tid_expr_list_create(mcx, node, params, env)
+    })?;
 
     Ok(TidRangeScanState {
         ss,
