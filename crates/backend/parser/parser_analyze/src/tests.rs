@@ -935,6 +935,9 @@ mod from_where {
                 Ok(Some(shape))
             });
             table::init_seams();
+            // Row-expression witnesses reach transformRowExpr's
+            // transformExpressionList seam (parse_target owns it).
+            parse_target::init_seams();
             super::init_seams_once();
         });
     }
@@ -1810,9 +1813,15 @@ mod from_where {
         assert_eq!(oc.exclRelTlist.len(), 3);
         let t0 = oc.exclRelTlist.nth(0).as_target_entry().unwrap();
         assert_eq!((t0.resno, t0.expr.as_var().unwrap().varattno), (1, 1));
+        // C BuildOnConflictExcludedTargetlist (analyze.c:1309) names every
+        // non-dropped entry after its attribute (pstrdup(NameStr(attname))).
+        assert_eq!(t0.resname, Some("x"));
+        let t1 = oc.exclRelTlist.nth(1).as_target_entry().unwrap();
+        assert_eq!((t1.resno, t1.resname), (2, Some("y")));
         let tw = oc.exclRelTlist.nth(2).as_target_entry().unwrap();
         assert!(tw.resjunk);
         assert_eq!((tw.resno, tw.expr.as_var().unwrap().varattno), (0, 0));
+        assert_eq!(tw.resname, None);
 
         let q =
             analyze_sql(mcx, "INSERT INTO u VALUES (1, 'foo') ON CONFLICT DO NOTHING").unwrap();
@@ -1822,6 +1831,94 @@ mod from_where {
         assert_eq!(oc.exclRelIndex, 0);
         assert!(oc.exclRelTlist.is_nil() && oc.onConflictSet.is_nil());
         assert_eq!(q.rtable.len(), 1);
+    }
+
+    // C transformInsertRow (analyze.c:1083-1101): a lone row expression with
+    // exactly as many columns as the INSERT expects adds the "extra
+    // parentheses" HINT to "INSERT has more target columns than expressions";
+    // count_rowexpr_columns (analyze.c:1347) sees raw RowExprs and, for the
+    // INSERT ... SELECT form, a RECORD Var whose subquery tlist entry is one.
+    #[test]
+    fn insert_row_expr_column_count_hint() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        const HINT: &str = "The insertion source is a row expression containing the same \
+                            number of columns expected by the INSERT. Did you accidentally \
+                            use extra parentheses?";
+
+        for sql in [
+            "INSERT INTO t (x, y) VALUES ((1, 2))",
+            "INSERT INTO t (x, y) VALUES ((1, 2)), ((3, 4))",
+            "INSERT INTO t (x, y) SELECT (1, 2)",
+            "INSERT INTO t (x, y) SELECT ROW(1, 2)",
+            "INSERT INTO t (x, y) SELECT (1, 2) FROM (SELECT 1) s",
+        ] {
+            let err = analyze_sql(mcx, sql).map(|_| ()).unwrap_err();
+            assert_eq!(err.message, "INSERT has more target columns than expressions", "{sql}");
+            assert_eq!(err.sqlstate(), types_error::ERRCODE_SYNTAX_ERROR, "{sql}");
+            assert_eq!(err.hint(), Some(HINT), "{sql}");
+            // parser_errposition on the first unmatched column: 1-based "y".
+            assert_eq!(err.cursor_position(), Some(19), "{sql}");
+        }
+
+        // Column-count mismatch, a Var over a plain (non-RowExpr) subquery
+        // column, and no target column list: no HINT (C returns -1 / stmtcols
+        // == NIL).
+        for sql in [
+            "INSERT INTO t (x, y) VALUES ((1, 2, 3))",
+            "INSERT INTO t (x, y) SELECT z FROM (SELECT (1, 2) AS z) s",
+            "INSERT INTO t (x, y) SELECT (SELECT (1, 2))",
+        ] {
+            let err = analyze_sql(mcx, sql).map(|_| ()).unwrap_err();
+            assert_eq!(err.message, "INSERT has more target columns than expressions", "{sql}");
+            assert_eq!(err.hint(), None, "{sql}");
+        }
+    }
+
+    // C transformCreateTableAsStmt (analyze.c:3215): a materialized view
+    // whose query references a bound parameter is refused with 0A000 —
+    // PARAM_EXTERN is reachable through the extended protocol's Parse
+    // parameter types and SPI/PL/pgSQL EXECUTE ... USING.
+    #[test]
+    fn matview_with_bound_parameter_is_0a000() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        // rtable-free probes: isQueryUsingTempRelation (which runs first)
+        // opens every RTE_RELATION through relation_open, not fixtured here.
+        for sql in [
+            "CREATE MATERIALIZED VIEW mv AS SELECT $1",
+            "CREATE MATERIALIZED VIEW mv AS SELECT 1 WHERE $1 = 1",
+            "CREATE MATERIALIZED VIEW mv AS SELECT $1 + 1 AS x",
+        ] {
+            let list =
+                gram_core::raw_parser(mcx, sql, parser_seams::RawParseMode::RAW_PARSE_DEFAULT)
+                    .unwrap();
+            let raw = list.nth(0).as_raw_stmt().unwrap();
+            let src = mcx::slice_borrow_in(mcx, sql.as_bytes()).unwrap();
+            // SAFETY: byte-for-byte copy of a &str.
+            let src: &str = unsafe { core::str::from_utf8_unchecked(src) };
+            let err = parse_analyze_fixedparams(mcx, raw, src, &[INT4OID], Default::default())
+                .map(|_| ())
+                .unwrap_err();
+            assert_eq!(err.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED, "{sql}");
+            assert_eq!(
+                err.message,
+                "materialized views may not be defined using bound parameters",
+                "{sql}"
+            );
+            assert_eq!(err.cursor_position(), None, "{sql}");
+        }
+
+        // The same query as a plain CREATE TABLE AS is accepted with the
+        // parameter bound (C only gates OBJECT_MATVIEW).
+        let sql = "CREATE TABLE ct AS SELECT $1";
+        let list = gram_core::raw_parser(mcx, sql, parser_seams::RawParseMode::RAW_PARSE_DEFAULT)
+            .unwrap();
+        let raw = list.nth(0).as_raw_stmt().unwrap();
+        let q = parse_analyze_fixedparams(mcx, raw, sql, &[INT4OID], Default::default()).unwrap();
+        assert_eq!(q.commandType, CmdType::CMD_UTILITY);
     }
 
     #[test]

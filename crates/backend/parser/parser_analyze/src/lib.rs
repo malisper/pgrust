@@ -497,7 +497,7 @@ fn transformCreateTableAsStmt<'mcx>(
     }
     let into_node = stmt.into.expect("CreateTableAsStmt.into");
     let inner = stmt.query.expect("CreateTableAsStmt has a query");
-    let query = transformStmt(mcx, pstate, inner)?;
+    let mut query = transformStmt(mcx, pstate, inner)?;
     if is_matview {
         let matview_err = |msg: &'static str| {
             elog::ereport(types_error::ERROR)
@@ -516,8 +516,22 @@ fn transformCreateTableAsStmt<'mcx>(
                 matview_err("materialized views must not use temporary tables or views").into()
             );
         }
-        // query_contains_extern_params: PARAM_EXTERN is unreachable — every
-        // live analysis entry passes zero fixed params.
+        // A materialized view can't be defined with bound parameters
+        // (analyze.c:3215): PARAM_EXTERN reaches here through the extended
+        // protocol's Parse parameter types and SPI/PL/pgSQL EXECUTE ... USING.
+        // query_contains_extern_params walks &'mcx nodes; park the Query in
+        // the arena for the walk, then move it back out of the (dead) slot.
+        let slot: *mut Query<'mcx> = mcx::leak_in(mcx::alloc_in(mcx, query)?);
+        // SAFETY: the walk's shared borrows end before the take; the arena
+        // slot is reachable only through `slot`.
+        let has_extern = parser_small1::query_contains_extern_params(unsafe { &*slot })?;
+        query = mem::take(unsafe { &mut *slot });
+        if has_extern {
+            return Err(matview_err(
+                "materialized views may not be defined using bound parameters",
+            )
+            .into());
+        }
         let into = into_node
             .as_variant::<types_nodes::rawnodes::IntoClause>()
             .expect("IntoClause");
@@ -1844,11 +1858,11 @@ pub fn BuildOnConflictExcludedTargetlist<'mcx>(
     let mut tlist = types_nodes::NodeList::nil();
     for i in 0..targetrel.rd_att.natts as usize {
         let attr = targetrel.rd_att.attr(i);
-        let var = if attr.attisdropped {
+        let (var, name) = if attr.attisdropped {
             // Any claimed type works for the placeholder null.
-            Node::mk_const(mcx, INT4OID, -1, 0, 4, datum::Datum::from_i32(0), true, true)?
+            (Node::mk_const(mcx, INT4OID, -1, 0, 4, datum::Datum::from_i32(0), true, true)?, None)
         } else {
-            Node::mk_var(
+            let var = Node::mk_var(
                 mcx,
                 excl_rel_index,
                 (i + 1) as types_core::AttrNumber,
@@ -1856,9 +1870,13 @@ pub fn BuildOnConflictExcludedTargetlist<'mcx>(
                 attr.atttypmod,
                 attr.attcollation,
                 0,
-            )?
+            )?;
+            // C: name = pstrdup(NameStr(attr->attname)).
+            let name = mcx::slice_borrow_in(mcx, attr.attname.name_str())?;
+            // SAFETY: catalog attnames are UTF-8; byte-for-byte copy.
+            (var, Some(unsafe { core::str::from_utf8_unchecked(name) }))
         };
-        tlist.lappend(mcx, Node::mk_target_entry(mcx, var, (i + 1) as i16, None, false)?)?;
+        tlist.lappend(mcx, Node::mk_target_entry(mcx, var, (i + 1) as i16, name, false)?)?;
     }
 
     let whole_row =
@@ -2192,12 +2210,25 @@ pub(crate) fn transformInsertRow<'mcx>(
         ));
     }
     if !stmtcols.is_nil() && exprlist.len() < icolumns.len() {
+        // C: for INSERT ... SELECT (a,b,c) FROM ... the user accidentally
+        // created a RowExpr instead of separate columns; add a hint when
+        // that seems to be the problem.
         let col = icolumns.nth(exprlist.len()).as_res_target().expect("ResTarget");
-        return Err(insert_row_length_error(
+        let mut err = insert_row_length_error(
             pstate,
             "INSERT has more target columns than expressions",
             col.location,
-        ));
+        );
+        if exprlist.len() == 1
+            && count_rowexpr_columns(pstate, exprlist.nth(0)) == icolumns.len() as i32
+        {
+            err.hint = Some(
+                "The insertion source is a row expression containing the same number of \
+                 columns expected by the INSERT. Did you accidentally use extra parentheses?"
+                    .to_string(),
+            );
+        }
+        return Err(err);
     }
 
     let mut result = types_nodes::NodeList::nil();
@@ -2220,6 +2251,41 @@ pub(crate) fn transformInsertRow<'mcx>(
         result.lappend(mcx, expr)?;
     }
     Ok(result)
+}
+
+// C count_rowexpr_columns (analyze.c): if the expression is a RowExpr, or a
+// Var over a subselect-in-FROM output column that is one, its column count;
+// else -1. Serves only the transformInsertRow hint.
+fn count_rowexpr_columns(pstate: &ParseState<'_, '_>, expr: Node<'_>) -> i32 {
+    if let Some(row) = expr.as_row_expr() {
+        return row.args.len() as i32;
+    }
+    if let Some(var) = expr.as_var() {
+        let attnum = var.varattno;
+        if attnum > 0 && var.vartype == types_core::catalog::RECORDOID {
+            let rte =
+                parse_relation::GetRTEByRangeTablePosn(pstate, var.varno, var.varlevelsup as i32);
+            if rte.rtekind == types_nodes::parsenodes::RTEKind::RTE_SUBQUERY {
+                // Subselect-in-FROM: examine sub-select's output expr.
+                let ste = rte
+                    .subquery
+                    .expect("RTE_SUBQUERY carries its Query")
+                    .targetList
+                    .iter()
+                    .map(|n| n.as_target_entry().expect("targetlist holds TargetEntries"))
+                    .find(|t| t.resno == attnum);
+                match ste {
+                    Some(ste) if !ste.resjunk => {
+                        if let Some(row) = ste.expr.as_row_expr() {
+                            return row.args.len() as i32;
+                        }
+                    }
+                    _ => return -1,
+                }
+            }
+        }
+    }
+    -1
 }
 
 fn strip_assignment_indirection(mut expr: Node<'_>) -> Node<'_> {
