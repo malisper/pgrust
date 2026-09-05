@@ -56,7 +56,18 @@ pub fn RelFileLocatorSkippingWAL(rlocator: RelFileLocator) -> bool {
 }
 
 pub fn SerializePendingSyncs() -> Vec<(RelFileLocator, bool)> {
-    PENDING_SYNCS.with_borrow(|p| p.iter().map(|s| (s.rlocator, s.is_truncated)).collect())
+    // storage.c:626-630: a relation dropped at commit (pendingDeletes with
+    // atCommit) leaves the list before workers see it — its
+    // RelFileLocatorSkippingWAL must answer false there, as in the leader
+    // after smgrDoPendingSyncs.
+    PENDING.with_borrow(|deletes| {
+        PENDING_SYNCS.with_borrow(|p| {
+            p.iter()
+                .filter(|s| !deletes.iter().any(|d| d.at_commit && d.rlocator == s.rlocator))
+                .map(|s| (s.rlocator, s.is_truncated))
+                .collect()
+        })
+    })
 }
 
 pub fn RestorePendingSyncs(syncs: &[(RelFileLocator, bool)]) {
@@ -79,7 +90,13 @@ pub fn RelationCreateStorage(
         RELPERSISTENCE_TEMP => (init_small::globals::MyProcNumber(), false),
         RELPERSISTENCE_UNLOGGED => (INVALID_PROC_NUMBER, false),
         RELPERSISTENCE_PERMANENT => (INVALID_PROC_NUMBER, true),
-        _ => panic!("invalid relpersistence: {relpersistence}"),
+        _ => {
+            // storage.c:146 elog(ERROR, "invalid relpersistence: %c", ...):
+            // XX000 with the byte rendered as a character.
+            let mut msg = b"invalid relpersistence: ".to_vec();
+            msg.push(relpersistence);
+            return Err(types_error::PgError::error_raw_message(msg).into());
+        }
     };
 
     let key = RelFileLocatorBackend { locator: rlocator, backend: proc_number };
@@ -165,12 +182,26 @@ pub fn RelationTruncate(rel: &types_rel::RelationData<'_>, nblocks: BlockNumber)
     proc.delayChkptFlags.fetch_or(DELAY_CHKPT_START | DELAY_CHKPT_COMPLETE, Relaxed);
 
     init_small::globals::StartCriticalSection();
-    if relation_needs_wal(rel) {
-        let lsn = log_smgrtruncate(&key.locator, nblocks)?;
-        transam_xlog::XLogFlush(lsn)?;
+    let critical = (|| -> PgResult<()> {
+        if relation_needs_wal(rel) {
+            let lsn = log_smgrtruncate(&key.locator, nblocks)?;
+            transam_xlog::XLogFlush(lsn)?;
+        }
+        smgr::smgrtruncate(key, &forks[..nforks], &old_blocks[..nforks], &blocks[..nforks])
+    })();
+    // An Err inside the critical section is C's PANIC (elog.c errstart's
+    // ERROR->PANIC promotion between START_CRIT_SECTION/END_CRIT_SECTION),
+    // never a recoverable Err: a catcher that recovers (autovacuum's
+    // PG_CATCH, a plpgsql EXCEPTION block) would keep CritSectionCount and
+    // the delayChkptFlags above set for the rest of its life and every
+    // later checkpoint would wait on them. Guarded here, not just at the
+    // tcop catch boundary, so non-tcop callers get the same contract (the
+    // xact commit/abort record precedent).
+    if let Err(err) = &critical {
+        elog::panic_on_crit_section_escape(err);
     }
-    smgr::smgrtruncate(key, &forks[..nforks], &old_blocks[..nforks], &blocks[..nforks])?;
     init_small::globals::EndCriticalSection();
+    critical?;
 
     proc.delayChkptFlags.fetch_and(!(DELAY_CHKPT_START | DELAY_CHKPT_COMPLETE), Relaxed);
 

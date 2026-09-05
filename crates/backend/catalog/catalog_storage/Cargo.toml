@@ -29,5 +29,15 @@ guc_tables = { path = "../../utils/misc/guc_tables" }
 visibilitymap = { path = "../../access/heap/visibilitymap" }
 freespace = { path = "../../storage/freespace/freespace" }
 lmgr_proc = { path = "../../storage/lmgr/lmgr_proc" }
+elog = { path = "../../utils/error/elog" }
 
 [dev-dependencies]
+fd = { path = "../../storage/file/fd" }
+xact_seams = { path = "../../access/transam/xact_seams" }
+aio_seams = { path = "../../storage/aio/aio_seams" }
+waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
+pgstat_seams = { path = "../../utils/activity/pgstat_seams" }
+relpath_seams = { path = "../../../common/relpath_seams" }
+sync_seams = { path = "../../storage/sync/sync_seams" }
+tablespace_seams = { path = "../../commands/tablespace_seams" }
+pg_sema_seams = { path = "../../port/pg_sema_seams" }
