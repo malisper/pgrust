@@ -442,12 +442,14 @@ fn exec_init_sub_plan_expr<'mcx>(
     agg: Option<::execexpr::AggBind>,
 ) -> PgResult<NonNull<()>> {
     let mcx = estate.es_query_cxt;
-    // C ExecSubPlan's sanity check: only a MULTIEXPR SubPlan may carry
-    // setParams into the expression lane.
-    assert!(
-        subplan.setParam.is_nil() || subplan.subLinkType == SubLinkType::MULTIEXPR_SUBLINK,
-        "cannot set parent params from subquery"
-    );
+    // nodeSubplan.c:80 (ExecSubPlan's sanity check, raised once at init here
+    // rather than per evaluation): only a MULTIEXPR SubPlan may carry
+    // setParams into the expression lane. elog(ERROR), never a panic.
+    if !subplan.setParam.is_nil() && subplan.subLinkType != SubLinkType::MULTIEXPR_SUBLINK {
+        return Err(Box::new(PgError::error(
+            "cannot set parent params from subquery",
+        )));
+    }
     let cell = estate
         .es_subplanstates
         .get((subplan.plan_id - 1) as usize)
@@ -555,7 +557,11 @@ fn init_hashed_state<'mcx>(
         debug_assert!(b.boolop == ::types_nodes::primnodes::BoolExprType::AND_EXPR);
         oplist.extend(b.args.iter());
     } else {
-        panic!("unrecognized testexpr type: {:?}", testexpr.node_tag());
+        // nodeSubplan.c:935: elog(ERROR, "unrecognized testexpr type: %d").
+        return Err(Box::new(PgError::error(format!(
+            "unrecognized testexpr type: {}",
+            testexpr.node_tag() as u16
+        ))));
     }
 
     let ncols = oplist.len();
@@ -611,24 +617,25 @@ fn init_hashed_state<'mcx>(
         flinfo.fn_expr = Some(::execexpr::erase_fn_expr(mcx, *op_node)?);
         cur_eq_funcs.push(flinfo);
 
-        // nodeSubplan.c:986: get_compatible_hash_operators(opno, NULL, &rhs);
-        // failure is elog(ERROR) (catchable XX000), never a backend crash.
+        // nodeSubplan.c:986 get_compatible_hash_operators(opno, NULL, &rhs)
+        // and :995 get_op_hash_functions: both lookup failures are
+        // elog(ERROR) (catchable XX000), never a backend crash.
         let Some((_, rhs_eq_oper)) =
             lsyscache::get_compatible_hash_operators(opexpr.opno, false, true)?
         else {
-            return Err(Box::new(types_error::PgError::error(format!(
+            return Err(Box::new(PgError::error(format!(
                 "could not find compatible hash operator for operator {}",
                 opexpr.opno
             ))));
         };
         tab_eq_funcoids.push(lsyscache::get_opcode(rhs_eq_oper)?);
-        let (left_hashfn, right_hashfn) = lsyscache::get_op_hash_functions(opexpr.opno)?
-            .unwrap_or_else(|| {
-                panic!(
-                    "could not find hash function for hash operator {}",
-                    opexpr.opno
-                )
-            });
+        let Some((left_hashfn, right_hashfn)) = lsyscache::get_op_hash_functions(opexpr.opno)?
+        else {
+            return Err(Box::new(PgError::error(format!(
+                "could not find hash function for hash operator {}",
+                opexpr.opno
+            ))));
+        };
         lhs_hash_funcs.push(fmgr_core::fmgr_info(left_hashfn)?);
         tab_hash_funcs.push(right_hashfn);
         tab_collations.push(opexpr.inputcollid);
@@ -722,6 +729,9 @@ pub(crate) unsafe fn subplan_expr_eval_hook<'a, 'b, 'mcx>(
     // C execExprInterp.c:5314 (ExecEvalSubPlan): nested-subplan execution
     // recursion passes through this hook.
     stack_depth_core::check_stack_depth()?;
+    // nodeSubplan.c:71 (ExecSubPlan): CHECK_FOR_INTERRUPTS() at the subplan
+    // evaluation boundary, before either strategy runs.
+    crate::cfi()?;
     // SAFETY: caller contract; the 'mcx erased here is the estate's own.
     let sstate = unsafe { &mut *p.cast::<SubPlanExprState<'_>>().as_ptr() };
     let saved_dir = estate.es_direction;
@@ -1438,10 +1448,6 @@ fn find_partial_match<'mcx>(
     lhs_slot: ExecSlotId,
     main_table: bool,
 ) -> PgResult<bool> {
-    // nodeSubplan.c:71 (ExecSubPlan's CFI): this full-hashtable scan runs
-    // once per outer row; without a cancel point here the only CFI is the
-    // outer scan's per-page one.
-    crate::cfi()?;
     let mcx = estate.es_query_cxt;
     let ncols = h.key_col_idx.len();
     let ht = if main_table {
@@ -1451,6 +1457,12 @@ fn find_partial_match<'mcx>(
     }
     .expect("partial-match table exists");
     for ix in 0..ht.num_entries() as u32 {
+        // nodeSubplan.c:738: CHECK_FOR_INTERRUPTS() per scanned entry.
+        crate::cfi()?;
+        // nodeSubplan.c:671 (execTuplesUnequal): MemoryContextReset of the
+        // eval context before every tuple comparison, so by-ref detoast
+        // copies never accumulate across one probe's full-table scan.
+        h.hashtempcxt.reset();
         let tup = ht.entry_tuple(ix);
         // SAFETY: entry images live in table_ctx until the next rebuild.
         unsafe { exectuples::exec_store_minimal_tuple_ptr(&mut h.probe_slot, mcx, tup) };
@@ -1459,8 +1471,9 @@ fn find_partial_match<'mcx>(
         let lhs = unsafe {
             &mut *(&mut estate.es_tupleTable[lhs_slot.0 as usize] as *mut SlotData<'mcx>)
         };
-        // Eq-proc detoasts ride hashtempcxt (reset per probe by the caller),
-        // C's short-lived-context discipline — never query-lifetime memory.
+        // Eq-proc detoasts ride hashtempcxt (reset per tuple above and per
+        // probe by the caller), C's short-lived-context discipline — never
+        // query-lifetime memory.
         if !exec_tuples_unequal(
             h.hashtempcxt.mcx(),
             lhs,

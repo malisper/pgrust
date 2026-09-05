@@ -1727,6 +1727,11 @@ fn instrument_node<'mcx>(
         );
     }
     ::instrument::instr_init(&mut estate.es_instrumentation[idx], estate.es_instrument);
+    // execProcnode.c:417: InstrAlloc(1, es_instrument, result->async_capable)
+    // — an async-capable node's first-tuple time tracks async batches
+    // (instrument.c InstrStopNode's async_mode arm).
+    estate.es_instrumentation[idx].async_mode =
+        node.as_plan().expect("plan-tree node").async_capable;
     // InstrCountFiltered1/2 target for the scan driver.
     if let Some(ss) = scan_state_of(&mut inner) {
         ss.instr_idx = Some(idx as u32);
@@ -1812,11 +1817,11 @@ pub fn exec_proc_node<'mcx>(
         PlanStateNode::Limit(l) => limit_arm(l, estate),
         PlanStateNode::LockRows(l) => lockrows_arm(l, estate),
         PlanStateNode::BitmapHeapScan(b) => bitmap_heap_scan_arm(b, estate),
-        PlanStateNode::BitmapIndexScan(_)
-        | PlanStateNode::BitmapAnd(_)
-        | PlanStateNode::BitmapOr(_) => {
-            panic!("bitmap-producing node does not support ExecProcNode call convention")
-        }
+        // nodeBitmapIndexscan.c:41 / nodeBitmapAnd.c:44 / nodeBitmapOr.c:45:
+        // the pro-forma ExecProcNode stubs are elog(ERROR), never a panic.
+        PlanStateNode::BitmapIndexScan(_) => Err(no_exec_proc_node_convention("BitmapIndexScan")),
+        PlanStateNode::BitmapAnd(_) => Err(no_exec_proc_node_convention("BitmapAnd")),
+        PlanStateNode::BitmapOr(_) => Err(no_exec_proc_node_convention("BitmapOr")),
         PlanStateNode::ModifyTable(mps) => modify_table_arm(mps, estate),
         PlanStateNode::Append(a) => append_arm(a, estate),
         PlanStateNode::MergeAppend(m) => merge_append_arm(m, estate),
@@ -3064,6 +3069,14 @@ fn merge_join_arm<'mcx>(
 /// parity like this).
 #[cold]
 #[inline(never)]
+#[cold]
+#[inline(never)]
+fn no_exec_proc_node_convention(node: &str) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "{node} node does not support ExecProcNode call convention"
+    )))
+}
+
 fn exec_proc_node_instr<'mcx>(
     w: &mut PgBox<'mcx, InstrumentedNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
@@ -3101,8 +3114,10 @@ pub fn multi_exec_bitmap_node<'mcx>(
     node: &mut PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<::tidbitmap::TIDBitmap<'mcx>> {
-    // C execProcnode.c:511 (MultiExecProcNode).
+    // C execProcnode.c:511-513 (MultiExecProcNode): check_stack_depth()
+    // then CHECK_FOR_INTERRUPTS(), before any node-specific work.
     stack_depth_core::check_stack_depth()?;
+    crate::cfi()?;
     if crate::p8census::armed() {
         if let Some(t) = census_tag(node) {
             crate::p8census::tick_exec(t, estate);
@@ -3146,7 +3161,8 @@ pub fn multi_exec_bitmap_node<'mcx>(
                     break;
                 }
             }
-            Ok(result.expect("BitmapAnd with no subplans"))
+            // nodeBitmapAnd.c:160: elog(ERROR), never a panic.
+            result.ok_or_else(|| Box::new(PgError::error("BitmapAnd doesn't support zero inputs")))
         }
         // MultiExecBitmapOr: BitmapIndexScan children add into the shared
         // result (C's biss_result hand-off); other children get unioned.
@@ -3195,7 +3211,8 @@ pub fn multi_exec_bitmap_node<'mcx>(
                     }
                 }
             }
-            Ok(result.expect("BitmapOr with no subplans"))
+            // nodeBitmapOr.c:178: elog(ERROR), never a panic.
+            result.ok_or_else(|| Box::new(PgError::error("BitmapOr doesn't support zero inputs")))
         }
         _ => panic!("MultiExecProcNode: node type does not produce a bitmap"),
     }
@@ -3808,11 +3825,14 @@ pub fn exec_shutdown_node<'mcx>(
         }
         // ExecShutdownHash: hand the table's instrumentation to the estate
         // (C: HashState.hinstrument) before EXPLAIN reads it.
+        // C execProcnode.c:798 walks the children first (planstate_tree_walker
+        // before the node's own arm): outer, the Hash's child, then
+        // ExecShutdownHash + ExecShutdownHashJoin.
         PlanStateNode::HashJoin(hj) => {
             let hj = &mut **hj;
-            ::nodehashjoin::exec_shutdown_hash_join(&hj.state, &mut hj.hash.state, estate)?;
             exec_shutdown_node(&mut hj.outer, estate)?;
-            exec_shutdown_node(&mut hj.hash.child, estate)
+            exec_shutdown_node(&mut hj.hash.child, estate)?;
+            ::nodehashjoin::exec_shutdown_hash_join(&hj.state, &mut hj.hash.state, estate)
         }
         PlanStateNode::MergeJoin(mj) => {
             exec_shutdown_node(&mut mj.outer, estate)?;
@@ -3820,15 +3840,17 @@ pub fn exec_shutdown_node<'mcx>(
         }
         // ExecShutdownGather/GatherMerge: reap workers so instrumentation is
         // final before EXPLAIN reads it; the context survives for rescan.
+        // C execProcnode.c:798: the leader's copy of the child subtree shuts
+        // down before the workers are reaped and the DSM torn down.
         PlanStateNode::Gather(g) => {
             let g = &mut **g;
-            crate::nodegather::exec_shutdown_gather(&mut g.state, estate)?;
-            exec_shutdown_node(&mut g.outer, estate)
+            exec_shutdown_node(&mut g.outer, estate)?;
+            crate::nodegather::exec_shutdown_gather(&mut g.state, estate)
         }
         PlanStateNode::GatherMerge(gm) => {
             let gm = &mut **gm;
-            crate::nodegathermerge::exec_shutdown_gather_merge(&mut gm.state, estate)?;
-            exec_shutdown_node(&mut gm.outer, estate)
+            exec_shutdown_node(&mut gm.outer, estate)?;
+            crate::nodegathermerge::exec_shutdown_gather_merge(&mut gm.state, estate)
         }
     }
 }

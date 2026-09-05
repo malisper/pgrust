@@ -340,11 +340,16 @@ pub fn exec_re_scan<'mcx>(
             let gm = &mut **gm;
             crate::nodegathermerge::exec_rescan_gather_merge(&mut gm.state, &mut gm.outer, estate)
         }
-        // execAmi.c has no ModifyTable rescan arm ("node type not supported").
-        PlanStateNode::ModifyTable(_) => {
-            panic!("ExecReScan (execAmi.c): node type 232 does not support ExecReScan")
-        }
+        // execAmi.c:142 -> ExecReScanModifyTable (nodeModifyTable.c:5322):
+        // elog(ERROR, "ExecReScanModifyTable is not implemented").
+        PlanStateNode::ModifyTable(_) => Err(rescan_modify_table_not_implemented()),
     }
+}
+
+#[cold]
+#[inline(never)]
+fn rescan_modify_table_not_implemented() -> Box<PgError> {
+    Box::new(PgError::error("ExecReScanModifyTable is not implemented"))
 }
 
 /// `ExecReScan` with a non-NULL chgParam (execAmi.c): the SubPlan scan lane's
@@ -843,9 +848,8 @@ pub(crate) fn exec_re_scan_chg_forced<'mcx>(
                 exec_re_scan_with_chg(&mut gm.outer, outer_plan, estate, chg)?;
             }
         }
-        PlanStateNode::ModifyTable(_) => {
-            panic!("ExecReScan (execAmi.c): node type 232 does not support ExecReScan")
-        }
+        // nodeModifyTable.c:5322: elog(ERROR), never a panic.
+        PlanStateNode::ModifyTable(_) => return Err(rescan_modify_table_not_implemented()),
     }
     Ok(())
 }
@@ -995,7 +999,7 @@ fn planstate_tag(node: &PlanStateNode<'_>) -> NodeTag {
 }
 
 #[cold]
-fn unrecognized_node_type(node: &PlanStateNode<'_>) -> Box<PgError> {
+pub(crate) fn unrecognized_node_type(node: &PlanStateNode<'_>) -> Box<PgError> {
     Box::new(PgError::error(format!(
         "unrecognized node type: {}",
         planstate_tag(node) as u16

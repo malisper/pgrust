@@ -38,7 +38,22 @@ fn install_seams() {
         backend_status_seams::pgstat_report_query_id::set(|_, _| {});
         // Lane-v2 is on by default (2026-07-14); its per-batch CFI goes
         // through this seam, so the fake-heap end-to-end tests need it.
-        postgres_seams::check_for_interrupts::set(|| Ok(()));
+        // ProcessInterrupts' cancel leg for the CHECK_FOR_INTERRUPTS
+        // witnesses (rem_b144): an armed InterruptPending (thread-local) is
+        // a 57014 unless a skip credit absorbs that one check.
+        postgres_seams::check_for_interrupts::set(|| {
+            if init_small::globals::InterruptPending() {
+                if rem_b144::cfi_skip_one() {
+                    return Ok(());
+                }
+                init_small::globals::SetInterruptPending(false);
+                return Err(Box::new(
+                    ::types_error::PgError::error("canceling statement due to user request")
+                        .with_sqlstate(::types_error::ERRCODE_QUERY_CANCELED),
+                ));
+            }
+            Ok(())
+        });
         syscache_seams::lookup_pg_type_shape::set(|typid| {
             Ok(match typid {
                 INT4OID => Some(PgTypeShape {
@@ -6365,4 +6380,361 @@ fn collect_plan_node_ids_descends_into_subquery_scan() {
     let mut ids = Vec::new();
     crate::execparallel::collect_plan_node_ids(Some(sqs), &mut ids);
     assert_eq!(ids, vec![1, 2], "subquery nodes missing from the worker-instrument id set");
+}
+
+// --- audit-18.6 remediation batch b144 (execmain-2) witnesses ---
+//
+// Each test asserts the C-exact outcome (an elog(ERROR)-shaped PgError, a
+// CHECK_FOR_INTERRUPTS() cancel, an InstrAlloc async_mode) and fails on the
+// unfixed tree (panic / completed run / async_mode false).
+mod rem_b144 {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    use ::executils::AsyncRequest;
+    use ::types_nodes::NodeTag;
+
+    use super::*;
+    use crate::procnode::{multi_exec_bitmap_node, BitmapCombineState};
+    use crate::PlanStateNode;
+
+    // The tests that arm InterruptPending share the seam's skip counter, so
+    // they run one at a time.
+    static CFI_LOCK: Mutex<()> = Mutex::new(());
+    static CFI_SKIP: AtomicUsize = AtomicUsize::new(0);
+
+    /// The test CFI seam consumes one skip credit per armed check; true =
+    /// report Ok for this check.
+    pub(super) fn cfi_skip_one() -> bool {
+        CFI_SKIP
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok()
+    }
+
+    fn empty_bitmap_node<'mcx>(mcx: ::mcx::Mcx<'mcx>, and: bool) -> PlanStateNode<'mcx> {
+        let st = ::mcx::alloc_in(
+            mcx,
+            BitmapCombineState {
+                substates: ::mcx::PgVec::new_in(mcx),
+            },
+        )
+        .unwrap();
+        if and {
+            PlanStateNode::BitmapAnd(st)
+        } else {
+            PlanStateNode::BitmapOr(st)
+        }
+    }
+
+    // nodeBitmapAnd.c:44 / nodeBitmapOr.c:45 / nodeBitmapIndexscan.c:41:
+    // ExecProcNode on a bitmap-producing node is elog(ERROR), not a panic.
+    #[test]
+    fn bitmap_nodes_refuse_exec_proc_node_as_errors() {
+        install_seams();
+        let pstmt = mk_select1_pstmt(leaked_mcx(), None);
+        with_exec_data(pstmt, |data, _pstmt| {
+            let estate = &mut data.estate;
+            let mcx = estate.es_query_cxt;
+            for (and, msg) in [
+                (
+                    true,
+                    "BitmapAnd node does not support ExecProcNode call convention",
+                ),
+                (
+                    false,
+                    "BitmapOr node does not support ExecProcNode call convention",
+                ),
+            ] {
+                let mut node = empty_bitmap_node(mcx, and);
+                let err = match exec_proc_node(&mut node, estate) {
+                    Err(e) => e,
+                    Ok(_) => panic!("ExecProcNode on a bitmap node returned a slot"),
+                };
+                assert_eq!(err.message(), msg);
+                assert_eq!(err.sqlstate(), ::types_error::ERRCODE_INTERNAL_ERROR);
+            }
+        });
+    }
+
+    // nodeBitmapAnd.c:160 / nodeBitmapOr.c:178: zero inputs is elog(ERROR).
+    #[test]
+    fn bitmap_combine_zero_inputs_is_an_error() {
+        install_seams();
+        let pstmt = mk_select1_pstmt(leaked_mcx(), None);
+        with_exec_data(pstmt, |data, _pstmt| {
+            let estate = &mut data.estate;
+            let mcx = estate.es_query_cxt;
+            for (and, msg) in [
+                (true, "BitmapAnd doesn't support zero inputs"),
+                (false, "BitmapOr doesn't support zero inputs"),
+            ] {
+                let mut node = empty_bitmap_node(mcx, and);
+                let err = match multi_exec_bitmap_node(&mut node, estate) {
+                    Err(e) => e,
+                    Ok(_) => panic!("MultiExecProcNode on an empty bitmap node returned a bitmap"),
+                };
+                assert_eq!(err.message(), msg);
+                assert_eq!(err.sqlstate(), ::types_error::ERRCODE_INTERNAL_ERROR);
+            }
+        });
+    }
+
+    // execProcnode.c:513 (MultiExecProcNode): CHECK_FOR_INTERRUPTS() at
+    // entry, before any node-specific work.
+    #[test]
+    fn multi_exec_bitmap_node_checks_for_interrupts_at_entry() {
+        install_seams();
+        let _serial = CFI_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let pstmt = mk_select1_pstmt(leaked_mcx(), None);
+        with_exec_data(pstmt, |data, _pstmt| {
+            let estate = &mut data.estate;
+            let mcx = estate.es_query_cxt;
+            let mut node = empty_bitmap_node(mcx, true);
+            CFI_SKIP.store(0, Ordering::SeqCst);
+            init_small::globals::SetInterruptPending(true);
+            let got = multi_exec_bitmap_node(&mut node, estate);
+            init_small::globals::SetInterruptPending(false);
+            let err = match got {
+                Err(e) => e,
+                Ok(_) => panic!("MultiExecProcNode ran with an interrupt pending"),
+            };
+            assert_eq!(err.sqlstate(), ::types_error::ERRCODE_QUERY_CANCELED);
+        });
+    }
+
+    // execAsync.c:42/101: a requestee that is not async-capable is
+    // elog(ERROR, "unrecognized node type: %d"), not a panic.
+    #[test]
+    fn async_request_on_non_async_node_is_an_error() {
+        install_seams();
+        let pstmt = mk_select1_pstmt(leaked_mcx(), None);
+        with_exec_data(pstmt, |data, pstmt| {
+            let mut ps = exec_init_node(pstmt.planTree, &mut data.estate, 0)
+                .unwrap()
+                .unwrap();
+            let expected = format!("unrecognized node type: {}", NodeTag::T_ResultState as u16);
+            let mut areq = AsyncRequest {
+                requestor_plan_id: 0,
+                request_index: 0,
+                callback_pending: false,
+                request_complete: false,
+                result: None,
+            };
+            let err =
+                match crate::execasync::exec_async_request(&mut ps, &mut data.estate, &mut areq) {
+                    Err(e) => e,
+                    Ok(()) => panic!("ExecAsyncRequest accepted a Result node"),
+                };
+            assert_eq!(err.message(), expected);
+            let err =
+                match crate::execasync::exec_async_notify(&mut ps, &mut data.estate, &mut areq) {
+                    Err(e) => e,
+                    Ok(()) => panic!("ExecAsyncNotify accepted a Result node"),
+                };
+            assert_eq!(err.message(), expected);
+            crate::exec_end_node(&mut ps, &mut data.estate).unwrap();
+        });
+    }
+
+    fn mk_result_pstmt_async<'mcx>(
+        mcx: ::mcx::Mcx<'mcx>,
+        async_capable: bool,
+    ) -> &'mcx PlannedStmt<'mcx> {
+        let tle = Node::mk_target_entry(mcx, mk_int4_const(mcx, 1), 1, Some("?column?"), false)
+            .unwrap();
+        let mut result = Node::build::<ResultPlan>(mcx).unwrap();
+        result.plan.targetlist = NodeList::make1(mcx, tle).unwrap();
+        result.plan.async_capable = async_capable;
+        let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
+        pstmt.commandType = CmdType::CMD_SELECT;
+        pstmt.canSetTag = true;
+        pstmt.planTree = Some(result.seal());
+        pstmt.seal_ref()
+    }
+
+    // execProcnode.c:417: InstrAlloc(1, es_instrument, result->async_capable)
+    // puts an async-capable node's instrumentation in async mode.
+    #[test]
+    fn instrumentation_of_async_capable_node_is_in_async_mode() {
+        install_seams();
+        for async_capable in [true, false] {
+            let pstmt = mk_result_pstmt_async(leaked_mcx(), async_capable);
+            with_exec_data(pstmt, |data, pstmt| {
+                data.estate.es_instrument = ::types_core::instrument::INSTRUMENT_TIMER;
+                let mut ps = exec_init_node(pstmt.planTree, &mut data.estate, 0)
+                    .unwrap()
+                    .unwrap();
+                assert!(matches!(ps, PlanStateNode::Instrumented(_)));
+                assert_eq!(data.estate.es_instrumentation[0].async_mode, async_capable);
+                crate::exec_end_node(&mut ps, &mut data.estate).unwrap();
+            });
+        }
+    }
+
+    // Outer Result projecting one expression SubPlan (plan_id 1) whose body
+    // is a Result projecting the constant 7 (plan_node_id 1).
+    fn mk_expr_subplan_pstmt<'mcx>(
+        mcx: ::mcx::Mcx<'mcx>,
+        subplan: ::types_nodes::SubPlan<'mcx>,
+    ) -> &'mcx PlannedStmt<'mcx> {
+        let body_tle =
+            Node::mk_target_entry(mcx, mk_int4_const(mcx, 7), 1, Some("b"), false).unwrap();
+        let mut body = Node::build::<ResultPlan>(mcx).unwrap();
+        body.plan.targetlist = NodeList::make1(mcx, body_tle).unwrap();
+        body.plan.plan_node_id = 1;
+        let body = body.seal();
+
+        let sub = Node::mk(mcx, subplan).unwrap();
+        let out_tle = Node::mk_target_entry(mcx, sub, 1, Some("s"), false).unwrap();
+        let mut outer = Node::build::<ResultPlan>(mcx).unwrap();
+        outer.plan.targetlist = NodeList::make1(mcx, out_tle).unwrap();
+
+        let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
+        pstmt.commandType = CmdType::CMD_SELECT;
+        pstmt.canSetTag = true;
+        pstmt.planTree = Some(outer.seal());
+        pstmt.subplans = ::types_nodes::list::OptNodeList::make1(mcx, Some(body)).unwrap();
+        pstmt.paramExecTypes = ::types_nodes::list::OidList::make1(mcx, INT4OID).unwrap();
+        pstmt.seal_ref()
+    }
+
+    fn init_expr_subplan_pstmt<R>(
+        pstmt: &'static PlannedStmt<'static>,
+        f: impl for<'mcx> FnOnce(
+            Result<(), Box<types_error::PgError>>,
+            &mut ExecData<'mcx>,
+        ) -> R,
+    ) -> R {
+        with_exec_data(pstmt, |data, pstmt| {
+            data.estate.es_instrument = ::types_core::instrument::INSTRUMENT_TIMER;
+            {
+                let n = pstmt.paramExecTypes.len();
+                let es = &mut data.estate;
+                es.es_param_exec_vals.extend(core::iter::repeat_n(
+                    ::types_portal::params::ParamExecData::EMPTY,
+                    n,
+                ));
+                es.es_param_subplans.extend(core::iter::repeat_n(None, n));
+            }
+            let r = crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).map(|_| ());
+            let r = f(r, data);
+            let ExecData { estate, planstate } = data;
+            if let Some(ps) = planstate.as_mut() {
+                crate::exec_end_node(ps, estate).unwrap();
+            }
+            for i in 0..estate.es_subplanstates.len() {
+                let cell = estate.es_subplanstates[i];
+                // SAFETY: init_plan's arena cell (standard_executor_end's shape).
+                let slot =
+                    unsafe { &mut *cell.0.cast::<Option<crate::PlanStateNode<'_>>>().as_ptr() };
+                if let Some(mut sub) = slot.take() {
+                    crate::exec_end_node(&mut sub, estate).unwrap();
+                }
+            }
+            estate.exec_reset_tuple_table(false);
+            r
+        })
+    }
+
+    // nodeSubplan.c:80: a non-MULTIEXPR SubPlan carrying setParams is
+    // elog(ERROR, "cannot set parent params from subquery"), not an assert.
+    #[test]
+    fn subplan_with_parent_set_params_is_an_error() {
+        install_seams();
+        let mcx = leaked_mcx();
+        let pstmt = mk_expr_subplan_pstmt(
+            mcx,
+            ::types_nodes::SubPlan {
+                subLinkType: ::types_nodes::SubLinkType::EXPR_SUBLINK,
+                plan_id: 1,
+                plan_name: Some("SubPlan 1"),
+                firstColType: INT4OID,
+                firstColTypmod: -1,
+                setParam: ::types_nodes::IntList::make1(mcx, 0).unwrap(),
+                ..Default::default()
+            },
+        );
+        init_expr_subplan_pstmt(pstmt, |r, _data| {
+            let err = match r {
+                Err(e) => e,
+                Ok(()) => panic!("ExecInitSubPlan accepted setParams on an EXPR SubPlan"),
+            };
+            assert_eq!(err.message(), "cannot set parent params from subquery");
+            assert_eq!(err.sqlstate(), ::types_error::ERRCODE_INTERNAL_ERROR);
+        });
+    }
+
+    // nodeSubplan.c:935: a hashed SubPlan whose testexpr is neither an OpExpr
+    // nor an AND BoolExpr is elog(ERROR, "unrecognized testexpr type: %d").
+    #[test]
+    fn hashed_subplan_with_unrecognized_testexpr_is_an_error() {
+        install_seams();
+        let mcx = leaked_mcx();
+        let pstmt = mk_expr_subplan_pstmt(
+            mcx,
+            ::types_nodes::SubPlan {
+                subLinkType: ::types_nodes::SubLinkType::ANY_SUBLINK,
+                testexpr: Some(mk_bool_const(mcx, true)),
+                plan_id: 1,
+                plan_name: Some("SubPlan 1"),
+                firstColType: INT4OID,
+                firstColTypmod: -1,
+                useHashTable: true,
+                ..Default::default()
+            },
+        );
+        init_expr_subplan_pstmt(pstmt, |r, _data| {
+            let err = match r {
+                Err(e) => e,
+                Ok(()) => panic!("ExecInitSubPlan accepted a Const testexpr for a hashed SubPlan"),
+            };
+            assert_eq!(
+                err.message(),
+                format!("unrecognized testexpr type: {}", NodeTag::T_Const as u16)
+            );
+            assert_eq!(err.sqlstate(), ::types_error::ERRCODE_INTERNAL_ERROR);
+        });
+    }
+
+    // nodeSubplan.c:71 (ExecSubPlan): CHECK_FOR_INTERRUPTS() on entry, before
+    // the subplan body runs. The outer Result's own entry check absorbs the
+    // one skip credit; the next check must be the subplan boundary's, so the
+    // body (plan_node_id 1, instrumented) is never started.
+    #[test]
+    fn exec_sub_plan_checks_for_interrupts_at_entry() {
+        install_seams();
+        let _serial = CFI_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mcx = leaked_mcx();
+        let pstmt = mk_expr_subplan_pstmt(
+            mcx,
+            ::types_nodes::SubPlan {
+                subLinkType: ::types_nodes::SubLinkType::EXPR_SUBLINK,
+                plan_id: 1,
+                plan_name: Some("SubPlan 1"),
+                firstColType: INT4OID,
+                firstColTypmod: -1,
+                ..Default::default()
+            },
+        );
+        init_expr_subplan_pstmt(pstmt, |r, data| {
+            r.unwrap();
+            let ExecData { estate, planstate } = data;
+            let ps = planstate.as_mut().unwrap();
+            CFI_SKIP.store(1, Ordering::SeqCst);
+            init_small::globals::SetInterruptPending(true);
+            let got = exec_proc_node(ps, estate);
+            init_small::globals::SetInterruptPending(false);
+            CFI_SKIP.store(0, Ordering::SeqCst);
+            let err = match got {
+                Err(e) => e,
+                Ok(_) => panic!("the SubPlan ran to completion with an interrupt pending"),
+            };
+            assert_eq!(err.sqlstate(), ::types_error::ERRCODE_QUERY_CANCELED);
+            let body = &estate.es_instrumentation[1];
+            assert!(
+                body.starttime.is_zero() && body.tuplecount == 0.0,
+                "the subplan body ran before ExecSubPlan's CHECK_FOR_INTERRUPTS()"
+            );
+        });
+    }
 }

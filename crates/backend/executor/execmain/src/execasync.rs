@@ -28,7 +28,8 @@ pub(crate) fn exec_async_request<'mcx>(
             ::instrument::instr_stop_node(&mut estate.es_instrumentation[idx], n);
             r
         }
-        _ => panic!("ExecAsyncRequest (execAsync.c): unrecognized requestee node type"),
+        // execAsync.c:42: elog(ERROR, "unrecognized node type: %d").
+        other => Err(crate::execami::unrecognized_node_type(other)),
     }
 }
 
@@ -51,7 +52,8 @@ pub(crate) fn exec_async_configure_wait<'mcx>(
             ::instrument::instr_stop_node(&mut estate.es_instrumentation[idx], 0.0);
             r
         }
-        _ => panic!("ExecAsyncConfigureWait (execAsync.c): unrecognized requestee node type"),
+        // execAsync.c:75: elog(ERROR, "unrecognized node type: %d").
+        other => Err(crate::execami::unrecognized_node_type(other)),
     }
 }
 
@@ -73,6 +75,7 @@ pub(crate) fn exec_async_notify<'mcx>(
             ::instrument::instr_stop_node(&mut estate.es_instrumentation[idx], n);
             r
         }
-        _ => panic!("ExecAsyncNotify (execAsync.c): unrecognized requestee node type"),
+        // execAsync.c:101: elog(ERROR, "unrecognized node type: %d").
+        other => Err(crate::execami::unrecognized_node_type(other)),
     }
 }
