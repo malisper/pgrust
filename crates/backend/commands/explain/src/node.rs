@@ -503,6 +503,14 @@ fn collect_node_subplans<'mcx>(
                 != 0;
             collect_agg_input_subplans(mcx, &mut out, combine);
         }
+        // ExecInitTidScan: projection, qual, then TidExprListCreate compiles
+        // the tidquals with the scan as parent (nodeTidscan.c:91/94), so a
+        // SubPlan in a TID Cond lands on the scan's subPlan list.
+        NodeTag::T_TidScan => {
+            walk_list(&mut out, &plan.targetlist);
+            walk_list(&mut out, &plan.qual);
+            walk_list(&mut out, &node.as_tid_scan().unwrap().tidquals);
+        }
         // Scans: projection compiles before the qual (C ExecInitSeqScan).
         _ => {
             walk_list(&mut out, &plan.targetlist);

@@ -71,8 +71,10 @@ fn process_interrupts() -> PgResult<()> {
     postgres_seams::check_for_interrupts::call()
 }
 
+/// C's CHECK_FOR_INTERRUPTS: inline flag test, cold out-of-line service
+/// (shared with the scan nodes' own per-tuple checks, e.g. nodeTidscan.c:389).
 #[inline(always)]
-fn check_for_interrupts() -> PgResult<()> {
+pub fn check_for_interrupts() -> PgResult<()> {
     if init_small::globals::InterruptPending() {
         return process_interrupts();
     }

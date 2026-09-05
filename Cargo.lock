@@ -10678,6 +10678,7 @@ dependencies = [
  "execscan",
  "exectuples",
  "executils",
+ "format_type",
  "mcx",
  "tableam",
  "types_core",

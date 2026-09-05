@@ -4,7 +4,9 @@
 
 extern crate alloc;
 
-use ::execexpr::{exec_eval_expr, exec_init_expr, EvalSlots, ExprState};
+use ::execexpr::{
+    exec_eval_expr, exec_init_expr_subplans, EvalSlots, ExprState, ParamBind, SubplanCompileEnv,
+};
 use ::execscan::{exec_scan, exec_scan_rescan, ScanNode, ScanState};
 use ::executils::{EStateData, ExecSlotId};
 use ::mcx::{Mcx, PgBox, PgVec};
@@ -54,15 +56,18 @@ fn elog_internal(message: &'static str) -> Box<PgError> {
     Box::new(PgError::error(message.to_string()))
 }
 
-// TidExprListCreate (nodeTidscan.c).
+// TidExprListCreate (nodeTidscan.c). C compiles every tid expression with
+// `&tidstate->ss.ps` as parent (nodeTidscan.c:91/94), so a SubPlan inside a
+// parameterized TID qual is initialized by ExecInitSubPlan under the scan;
+// `sub` is that owning-node compile environment.
 fn tid_expr_list_create<'mcx>(
     mcx: Mcx<'mcx>,
     node: &TidScan<'mcx>,
-    estate: &mut EStateData<'mcx>,
+    params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
 ) -> PgResult<(PgVec<'mcx, TidExpr<'mcx>>, bool)> {
     let mut tidexprs: PgVec<'mcx, TidExpr<'mcx>> = PgVec::new_in(mcx);
     let mut is_current_of = false;
-    let params = estate.param_bind();
 
     for expr in &node.tidquals {
         let tidexpr = if let Some(op) = expr.as_op_expr() {
@@ -76,13 +81,13 @@ fn tid_expr_list_create<'mcx>(
                 return Err(elog_internal("could not identify CTID variable"));
             };
             TidExpr {
-                exprstate: exec_init_expr(mcx, Some(other), params)?,
+                exprstate: exec_init_expr_subplans(mcx, Some(other), params, sub)?,
                 kind: TidExprKind::Single,
             }
         } else if let Some(saex) = expr.as_scalar_array_op_expr() {
             debug_assert!(is_ctid_var(saex.args.nth(0)));
             TidExpr {
-                exprstate: exec_init_expr(mcx, Some(saex.args.nth(1)), params)?,
+                exprstate: exec_init_expr_subplans(mcx, Some(saex.args.nth(1)), params, sub)?,
                 kind: TidExprKind::Array,
             }
         } else if let Some(cexpr) = expr.as_current_of_expr() {
@@ -119,9 +124,10 @@ fn datum_array_bytes<'m>(mcx: Mcx<'m>, v: ::datum::Datum) -> PgResult<&'m [u8]> 
     }
 }
 
-// fetch_cursor_param_value (execCurrent.c). Params are materialized
-// (no paramFetch hook), so the REFCURSOR type check cannot fail without a
-// planner bug — that arm is a loud panic, not C's 42804.
+// fetch_cursor_param_value (execCurrent.c). Params are materialized (no
+// paramFetch hook: plpgsql's datum table is bound into es_param_list_info
+// before ExecutorStart), so the list index is C's `&paramInfo->params[id-1]`
+// arm; the REFCURSOR safety check keeps C's 42804 report.
 fn fetch_cursor_param_value<'m>(
     mcx: Mcx<'m>,
     estate: &EStateData<'m>,
@@ -133,18 +139,41 @@ fn fetch_cursor_param_value<'m>(
             let prm = &params[param_id as usize - 1];
             if prm.ptype != ::types_core::InvalidOid && !prm.isnull {
                 if prm.ptype != REFCURSOROID {
-                    panic!(
-                        "fetch_cursor_param_value (execCurrent.c): parameter {param_id} \
-                         has type {} not refcursor",
-                        prm.ptype
-                    );
+                    // execCurrent.c:278
+                    return Err(Box::new(
+                        PgError::error(format!(
+                            "type of parameter {param_id} ({}) does not match that when \
+                             preparing the plan ({})",
+                            ::format_type::format_type_be(prm.ptype)?,
+                            ::format_type::format_type_be(REFCURSOROID)?,
+                        ))
+                        .with_sqlstate(::types_error::ERRCODE_DATATYPE_MISMATCH),
+                    ));
                 }
+                // TextDatumGetCString: the raw bytes of the refcursor value.
                 let image = datum_array_bytes(mcx, prm.value)?;
                 let payload = ::varlena::open_image(mcx, image)?;
                 let bytes = payload.as_bytes();
                 let mut owned = ::mcx::vec_with_capacity_in(mcx, bytes.len())?;
                 ::mcx::vec_append_bytes(&mut owned, bytes)?;
-                return Ok(core::str::from_utf8(owned.leak()).expect("refcursor value utf8"));
+                return match core::str::from_utf8(owned.leak()) {
+                    Ok(name) => Ok(name),
+                    // A SQL_ASCII database lets the value carry bytes no
+                    // portal name can (portal names are UTF-8 &str under the
+                    // UTF-8-only carve), so C's GetPortalByName lookup in
+                    // execCurrentOf (execCurrent.c:70) can only miss: report
+                    // its 34000 with the bytes verbatim, as C does.
+                    Err(_) => {
+                        let mut msg = alloc::vec::Vec::with_capacity(bytes.len() + 24);
+                        msg.extend_from_slice(b"cursor \"");
+                        msg.extend_from_slice(bytes);
+                        msg.extend_from_slice(b"\" does not exist");
+                        Err(Box::new(
+                            PgError::error_raw_message(msg)
+                                .with_sqlstate(::types_error::ERRCODE_UNDEFINED_CURSOR),
+                        ))
+                    }
+                };
             }
         }
     }
@@ -338,6 +367,9 @@ impl<'mcx> ScanNode<'mcx> for TidScanState<'mcx> {
             } else {
                 self.tss_TidPtr += 1;
             }
+
+            // nodeTidscan.c:389 CHECK_FOR_INTERRUPTS per rejected TID.
+            ::execscan::check_for_interrupts()?;
         }
 
         exectuples::exec_clear_tuple(estate.slot_mut(slot_id), mcx);
@@ -383,7 +415,9 @@ pub fn exec_init_tid_scan<'mcx>(
         ::execexpr::exec_init_qual_subplans(mcx, &node.scan.plan.qual, params, env)
     })?;
 
-    let (tss_tidexprs, tss_isCurrentOf) = tid_expr_list_create(mcx, node, estate)?;
+    let (tss_tidexprs, tss_isCurrentOf) = ::executils::with_subplan_compile_env(estate, |env| {
+        tid_expr_list_create(mcx, node, params, env)
+    })?;
 
     Ok(TidScanState {
         ss,
