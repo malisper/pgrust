@@ -292,12 +292,23 @@ pub(crate) fn add_relation_new_constraints_ext<'mcx>(
                     }
                 }
                 if single {
-                    // C get_attname(..., missing_ok=true): a whole-row Var's
-                    // attno 0 yields no column name.
-                    if let Some(attno) = unique_attno.filter(|&a| a >= 1) {
-                        let att = rel.rd_att.attr(attno as usize - 1);
-                        colname =
-                            Some(core::str::from_utf8(att.attname.name_str()).expect("attname"));
+                    // C get_attname(..., missing_ok=true) (heap.c:2604): a
+                    // whole-row Var's attno 0 yields no column name; system
+                    // columns resolve from their pg_attribute rows.
+                    match unique_attno {
+                        Some(attno) if attno >= 1 => {
+                            let att = rel.rd_att.attr(attno as usize - 1);
+                            colname = Some(
+                                core::str::from_utf8(att.attname.name_str()).expect("attname"),
+                            );
+                        }
+                        Some(attno) if attno < 0 => {
+                            let att = catalog_heap::SystemAttributeDefinition(attno)?;
+                            colname = Some(
+                                core::str::from_utf8(att.attname.name_str()).expect("attname"),
+                            );
+                        }
+                        _ => {}
                     }
                 }
                 let name = pg_constraint::ChooseConstraintName(
@@ -1004,6 +1015,24 @@ pub(crate) fn set_relation_num_checks<'mcx>(
     )?;
     let reltup = genam::systable_getnext(mcx, &mut scan)?
         .ok_or_else(|| crate::cache_lookup_failed("relation", rel.rd_id))?;
+    let mut isnull = false;
+    // SAFETY: relchecks is a fixed NOT NULL pg_class column under pg_class's
+    // own descriptor.
+    let cur_checks = unsafe {
+        types_tuple::heap_getattr(
+            reltup,
+            Anum_pg_class_relchecks as i32,
+            relrel.descr(),
+            &mut isnull,
+        )
+    }
+    .as_i16();
+    if cur_checks == numchecks {
+        // Skip the disk update, but force relcache inval anyway (heap.c:3205).
+        genam::systable_endscan(mcx, scan)?;
+        inval::invalidate::CacheInvalidateRelcache(rel)?;
+        return relrel.close(RowExclusiveLock);
+    }
     let natts = relrel.descr().natts as usize;
     let mut repl_values: PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
     let mut repl_isnull: PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;

@@ -5111,6 +5111,13 @@ pub fn expand_generated_columns_in_expr<'mcx>(
                     },
                 )?));
             }
+            // A system column (varattno < 0) has no targetlist entry:
+            // ReplaceVarFromTargetList's nomatch arm keeps the Var
+            // (REPLACEVARS_CHANGE_VARNO onto the same rt_index,
+            // rewriteManip.c:1880-1893); it is not a descriptor slot.
+            if v.varattno < 0 || v.varattno as usize > rel.rd_att.natts as usize {
+                return Ok(None);
+            }
             if rel.rd_att.attr(v.varattno as usize - 1).attgenerated != VIRTUAL_GEN {
                 return Ok(None);
             }

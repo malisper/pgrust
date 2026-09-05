@@ -1381,7 +1381,9 @@ fn collect_con_rows<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<Vec<
                 )
             };
             if isnull {
-                panic!("null conbin for constraint \"{conname}\"");
+                return Err(null_conbin_for_constraint(
+                    get(pg_constraint::Anum_pg_constraint_oid).as_oid(),
+                ));
             }
             // decompile_conbin: DirectFunctionCall2(pg_get_expr); the result
             // text lives in flinfo's fn_extra scratch — copy out before drop.
@@ -1406,7 +1408,7 @@ fn collect_con_rows<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<Vec<
             let attnum = pg_constraint::extractNotNullColumn(mcx, tup, desc)?;
             let att = rel.rd_att.attr(attnum as usize - 1);
             if att.attisdropped {
-                panic!("found not-null constraint on dropped columns");
+                return Err(notnull_constraint_on_dropped_column());
             }
             Some(core::str::from_utf8(att.attname.name_str()).expect("attname UTF-8").to_string())
         } else {
@@ -1646,10 +1648,7 @@ pub(crate) fn RemoveInheritance<'mcx>(
             continue;
         }
         if ccon.coninhcount <= 0 {
-            panic!(
-                "relation {} has non-inherited constraint \"{}\"",
-                child_rel.rd_id, ccon.conname
-            );
+            return Err(non_inherited_constraint(child_rel.rd_id, &ccon.conname));
         }
         let newcount = ccon.coninhcount - 1;
         let mut fields: PgVec<'mcx, (AttrNumber, datum::Datum)> = PgVec::new_in(mcx);
@@ -1666,11 +1665,11 @@ pub(crate) fn RemoveInheritance<'mcx>(
         pg_constraint::update_constraint_fields(mcx, ccon.oid, &fields)?;
     }
     if !connames.is_empty() || !nncolumns.is_empty() {
-        panic!(
-            "{} unmatched constraints while removing inheritance from \"{child_name}\" to \
-             \"{parent_name}\"",
-            connames.len() + nncolumns.len()
-        );
+        return Err(unmatched_constraints(
+            connames.len() + nncolumns.len(),
+            &child_name,
+            &parent_name,
+        ));
     }
 
     drop_parent_dependency(
@@ -1855,5 +1854,69 @@ mod panic_hygiene_tests {
         assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
         assert_eq!(super::compression_method_name(b'p').unwrap(), "pglz");
         assert_eq!(super::compression_method_name(b'l').unwrap(), "lz4");
+    }
+}
+
+// elog(ERROR, "null conbin for constraint %u") (tablecmds.c:17495 decompile_conbin).
+#[cold]
+#[inline(never)]
+pub(crate) fn null_conbin_for_constraint(conoid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!("null conbin for constraint {conoid}")))
+}
+
+// elog(ERROR, "found not-null constraint on dropped columns")
+// (tablecmds.c:17765 MergeConstraintsIntoExisting).
+#[cold]
+#[inline(never)]
+pub(crate) fn notnull_constraint_on_dropped_column() -> Box<PgError> {
+    Box::new(PgError::error("found not-null constraint on dropped columns"))
+}
+
+// elog(ERROR, "relation %u has non-inherited constraint \"%s\"")
+// (tablecmds.c:18162 RemoveInheritance).
+#[cold]
+#[inline(never)]
+pub(crate) fn non_inherited_constraint(relid: Oid, conname: &str) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "relation {relid} has non-inherited constraint \"{conname}\""
+    )))
+}
+
+// elog(ERROR, "%d unmatched constraints while removing inheritance from \"%s\" to \"%s\"")
+// (tablecmds.c:18176 RemoveInheritance).
+#[cold]
+#[inline(never)]
+pub(crate) fn unmatched_constraints(n: usize, child: &str, parent: &str) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "{n} unmatched constraints while removing inheritance from \"{child}\" to \"{parent}\""
+    )))
+}
+
+#[cfg(test)]
+mod elog_hygiene_tests_b088 {
+    // The catalog-consistency arms of decompile_conbin,
+    // MergeConstraintsIntoExisting and RemoveInheritance are elog(ERROR)s in C
+    // (tablecmds.c:17495, 17765, 18162, 18176): catchable XX000, never a panic.
+    #[test]
+    fn inheritance_consistency_arms_are_catchable_xx000() {
+        let r = std::panic::catch_unwind(|| super::null_conbin_for_constraint(16384));
+        let e = r.expect("null_conbin_for_constraint panicked");
+        assert_eq!(e.message(), "null conbin for constraint 16384");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        let r = std::panic::catch_unwind(super::notnull_constraint_on_dropped_column);
+        let e = r.expect("notnull_constraint_on_dropped_column panicked");
+        assert_eq!(e.message(), "found not-null constraint on dropped columns");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        let r = std::panic::catch_unwind(|| super::non_inherited_constraint(16384, "c_chk"));
+        let e = r.expect("non_inherited_constraint panicked");
+        assert_eq!(e.message(), "relation 16384 has non-inherited constraint \"c_chk\"");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        let r = std::panic::catch_unwind(|| super::unmatched_constraints(2, "child", "parent"));
+        let e = r.expect("unmatched_constraints panicked");
+        assert_eq!(
+            e.message(),
+            "2 unmatched constraints while removing inheritance from \"child\" to \"parent\""
+        );
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
     }
 }

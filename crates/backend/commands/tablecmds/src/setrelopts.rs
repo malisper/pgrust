@@ -156,13 +156,15 @@ fn update_one<'mcx>(
                 reloptions::index_reloptions(mcx, relam, new_options.as_deref(), true)?;
             }
             _ => {
+                // tablecmds.c:16755-16760
                 genam::systable_endscan(mcx, scan)?;
                 return Err(Box::new(
                     types_error::PgError::new(
                         ERROR,
-                        format!("cannot set options for relation {relid}"),
+                        format!("cannot set options for relation \"{}\"", rel.name()),
                     )
-                    .with_sqlstate(ERRCODE_WRONG_OBJECT_TYPE),
+                    .with_sqlstate(ERRCODE_WRONG_OBJECT_TYPE)
+                    .with_detail(pg_class_seams::errdetail_relkind_not_supported::call(relkind)?),
                 ));
             }
         }

@@ -203,15 +203,7 @@ pub fn RemoveRelations<'mcx>(mcx: Mcx<'mcx>, drop: &DropStmt<'mcx>) -> PgResult<
             ));
         }
     }
-    let expected_relkind = match drop.removeType {
-        ObjectType::OBJECT_TABLE => RELKIND_RELATION,
-        ObjectType::OBJECT_INDEX => types_rel::RELKIND_INDEX,
-        ObjectType::OBJECT_SEQUENCE => types_rel::RELKIND_SEQUENCE,
-        ObjectType::OBJECT_VIEW => types_rel::RELKIND_VIEW,
-        ObjectType::OBJECT_MATVIEW => types_rel::RELKIND_MATVIEW,
-        ObjectType::OBJECT_FOREIGN_TABLE => types_rel::RELKIND_FOREIGN_TABLE,
-        other => panic!("unrecognized drop object type: {other:?}"),
-    };
+    let expected_relkind = drop_expected_relkind(drop.removeType)?;
 
     let mut objects = catalog_dependency::ObjectAddresses::new();
 
@@ -229,6 +221,7 @@ pub fn RemoveRelations<'mcx>(mcx: Mcx<'mcx>, drop: &DropStmt<'mcx>) -> PgResult<
         let actual_relkind = core::cell::Cell::new(0u8);
         let actual_relpersistence = core::cell::Cell::new(0u8);
         let heap_oid = core::cell::Cell::new(InvalidOid);
+        let part_parent_oid = core::cell::Cell::new(InvalidOid);
         let mut callback = |rv: &RangeVar<'_>, relOid: Oid, oldRelOid: Oid| {
             RangeVarCallbackForDropRelation(
                 mcx,
@@ -240,6 +233,7 @@ pub fn RemoveRelations<'mcx>(mcx: Mcx<'mcx>, drop: &DropStmt<'mcx>) -> PgResult<
                 &actual_relkind,
                 &actual_relpersistence,
                 &heap_oid,
+                &part_parent_oid,
             )
         };
         let relOid = catalog_namespace::RangeVarGetRelidExtended(
@@ -296,18 +290,50 @@ pub fn RemoveRelations<'mcx>(mcx: Mcx<'mcx>, drop: &DropStmt<'mcx>) -> PgResult<
     catalog_dependency::performMultipleDeletions(mcx, &objects, drop.behavior, flags)
 }
 
+// RemoveRelations' removeType -> relkind switch (tablecmds.c:1580-1612).
+fn drop_expected_relkind(remove_type: ObjectType) -> PgResult<u8> {
+    Ok(match remove_type {
+        ObjectType::OBJECT_TABLE => RELKIND_RELATION,
+        ObjectType::OBJECT_INDEX => types_rel::RELKIND_INDEX,
+        ObjectType::OBJECT_SEQUENCE => types_rel::RELKIND_SEQUENCE,
+        ObjectType::OBJECT_VIEW => types_rel::RELKIND_VIEW,
+        ObjectType::OBJECT_MATVIEW => types_rel::RELKIND_MATVIEW,
+        ObjectType::OBJECT_FOREIGN_TABLE => types_rel::RELKIND_FOREIGN_TABLE,
+        // tablecmds.c:1609 elog(ERROR): catchable XX000 carrying the enum value.
+        other => {
+            return Err(Box::new(PgError::error(format!(
+                "unrecognized drop object type: {}",
+                other as i32
+            ))));
+        }
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn RangeVarCallbackForDropRelation<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &RangeVar<'_>,
     relOid: Oid,
-    _oldRelOid: Oid,
+    oldRelOid: Oid,
     expected_relkind: u8,
     heap_lockmode: types_storage::lock::LOCKMODE,
     actual_relkind: &core::cell::Cell<u8>,
     actual_relpersistence: &core::cell::Cell<u8>,
     heap_oid_out: &core::cell::Cell<Oid>,
+    part_parent_oid_out: &core::cell::Cell<Oid>,
 ) -> PgResult<()> {
+    // If we previously locked some other index's heap, and the name we're
+    // looking up no longer refers to that relation, release the now-useless
+    // lock (tablecmds.c:1730-1734).
+    if relOid != oldRelOid && heap_oid_out.get() != InvalidOid {
+        lmgr::UnlockRelationOid(heap_oid_out.get(), heap_lockmode)?;
+        heap_oid_out.set(InvalidOid);
+    }
+    // Similarly for a previously locked partition parent (tablecmds.c:1741-1745).
+    if relOid != oldRelOid && part_parent_oid_out.get() != InvalidOid {
+        lmgr::UnlockRelationOid(part_parent_oid_out.get(), AccessExclusiveLock)?;
+        part_parent_oid_out.set(InvalidOid);
+    }
     if relOid == InvalidOid {
         return Ok(());
     }
@@ -403,10 +429,8 @@ fn RangeVarCallbackForDropRelation<'mcx>(
     }
 
     if expected_relkind == types_rel::RELKIND_INDEX {
-        // C locks the index's heap before the index (deadlock ordering).
-        // DIVERGENCE: the lookup-retry unlock bookkeeping (state->heapOid)
-        // is dropped; a stale-lookup retry leaves an extra heap lock held
-        // until end of transaction.
+        // C locks the index's heap before the index (deadlock ordering);
+        // the oid is remembered so a lookup retry can release it.
         let heap_oid = catalog_index::IndexGetRelation(mcx, relOid, true)?;
         heap_oid_out.set(heap_oid);
         if heap_oid != InvalidOid {
@@ -414,10 +438,10 @@ fn RangeVarCallbackForDropRelation<'mcx>(
         }
     }
 
-    // Queries lock parents before partitions; same DIVERGENCE note as above
-    // for the retry bookkeeping (state->partParentOid).
+    // Queries lock parents before partitions (tablecmds.c:1838-1845).
     if relispartition {
         let part_parent_oid = pg_inherits::get_partition_parent(mcx, relOid, true)?;
+        part_parent_oid_out.set(part_parent_oid);
         if part_parent_oid != InvalidOid {
             lmgr::LockRelationOid(part_parent_oid, AccessExclusiveLock)?;
         }
@@ -460,5 +484,25 @@ mod rangevar_from_name_list_tests {
         assert_eq!(rv.catalogname, Some("cat"));
         assert_eq!(rv.schemaname, Some("sch"));
         assert_eq!(rv.relname, "rel");
+    }
+}
+
+#[cfg(test)]
+mod elog_hygiene_tests {
+    use types_nodes::parsenodes::ObjectType;
+
+    // tablecmds.c:1609 elog(ERROR, "unrecognized drop object type: %d"):
+    // catchable XX000 carrying the enum value, never a panic.
+    #[test]
+    fn unrecognized_drop_object_type_is_a_catchable_xx000() {
+        let r = std::panic::catch_unwind(|| super::drop_expected_relkind(ObjectType::OBJECT_TYPE));
+        let r = r.expect("drop_expected_relkind(OBJECT_TYPE) panicked");
+        let e = r.expect_err("OBJECT_TYPE is not a DROP relation type");
+        assert_eq!(
+            e.message(),
+            format!("unrecognized drop object type: {}", ObjectType::OBJECT_TYPE as i32)
+        );
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(super::drop_expected_relkind(ObjectType::OBJECT_TABLE).unwrap(), b'r');
     }
 }

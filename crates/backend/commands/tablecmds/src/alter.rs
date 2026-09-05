@@ -779,7 +779,7 @@ pub(crate) fn ATSimplePermissions(
     let actual_target = at_simple_actual_target(rel.rd_rel.relkind);
     if actual_target & allowed_targets == 0 {
         let Some(action_str) = alter_table_type_to_string(cmdtype) else {
-            panic!("invalid ALTER action attempted on relation \"{}\"", rel.name());
+            return Err(invalid_alter_action(rel.name()));
         };
         return Err(Box::new(
             PgError::new(
@@ -5077,6 +5077,7 @@ fn set_index_storage_properties<'mcx>(
             continue;
         };
         update_pg_attribute(mcx, indexoid, (pos + 1) as AttrNumber, fields)?;
+        objectaccess::InvokeObjectPostAlterHook(RELATION_RELATION_ID, rel.rd_id, (pos + 1) as i32)?;
         indrel.close(AccessExclusiveLock)?;
     }
     Ok(())
@@ -5107,17 +5108,27 @@ fn ATExecAddConstraint<'mcx>(
             mcx, wqueue, rel, constr, recurse, &old_desc, lockmode,
         );
     }
-    // unported: ATExecAddConstraint non-FOREIGN constraint types
-    // (CHECK/NOT NULL ALTER lane)
-    let _ = constr.contype;
-    Err(Box::new(
-        PgError::new(
-            ERROR,
-            "ALTER TABLE ... ADD CONSTRAINT for this constraint type is not supported yet"
-                .to_string(),
-        )
-        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
-    ))
+    Err(unrecognized_constraint_type(constr.contype))
+}
+
+// ATExecAddConstraint's default arm (tablecmds.c:9861): CHECK/NOT NULL are
+// routed to ATAddCheckNNConstraint and PK/UNIQUE/EXCLUSION become AT_AddIndex
+// before this point, so only a contype the grammar cannot produce lands here.
+#[cold]
+#[inline(never)]
+pub(crate) fn unrecognized_constraint_type(contype: ConstrType) -> Box<PgError> {
+    // elog(ERROR, "unrecognized constraint type: %d"): catchable XX000.
+    Box::new(PgError::error(format!("unrecognized constraint type: {}", contype as i32)))
+}
+
+// elog(ERROR, "invalid ALTER action attempted on relation \"%s\"")
+// (tablecmds.c:6800 ATSimplePermissions).
+#[cold]
+#[inline(never)]
+pub(crate) fn invalid_alter_action(relname: &str) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "invalid ALTER action attempted on relation \"{relname}\""
+    )))
 }
 
 // ATExecAddInherit / ATExecDropInherit exec wrappers; the catalog work lives
@@ -5284,18 +5295,14 @@ fn validate_constraint_children<'mcx>(
                 childrel.close(NoLock)?;
             }
             Some(colname) => {
-                let childcon = find_notnull_constraint_by_colname(mcx, childoid, colname)?
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "cache lookup failed for not-null constraint on column \
-                             \"{colname}\" of relation \"{}\"",
-                            lsyscache::relation::get_rel_name(mcx, childoid)
-                                .ok()
-                                .flatten()
-                                .map(|s| s.as_str().to_string())
-                                .unwrap_or_default()
-                        )
-                    });
+                let Some(childcon) = find_notnull_constraint_by_colname(mcx, childoid, colname)?
+                else {
+                    // tablecmds.c:13296 elog(ERROR): catchable XX000.
+                    let relname = lsyscache::relation::get_rel_name(mcx, childoid)?
+                        .map(|s| s.as_str().to_string())
+                        .unwrap_or_default();
+                    return Err(notnull_constraint_lookup_failed(colname, &relname));
+                };
                 if childcon.convalidated {
                     continue;
                 }
@@ -6548,7 +6555,8 @@ fn TryReuseIndex<'mcx>(
             stmt_node
                 .with_mut::<types_nodes::rawnodes::IndexStmt, _>(|s| {
                     s.oldNumber = old_number;
-                    s.oldCreateSubid = 0;
+                    s.oldCreateSubid = irel.rd_createSubid.get();
+                    s.oldFirstRelfilelocatorSubid = irel.rd_firstRelfilelocatorSubid.get();
                 })
                 .expect("IndexStmt");
         }
@@ -7836,7 +7844,9 @@ fn ATExecSetAccessMethodNoStorage<'mcx>(
             new_access_method,
         )?;
     }
-    Ok(())
+    // make the relam and dependency changes visible (tablecmds.c:16645)
+    xact::CommandCounterIncrement()?;
+    objectaccess::InvokeObjectPostAlterHook(RELATION_RELATION_ID, rel.rd_id, 0)
 }
 
 // drop_parent_dependency (tablecmds.c:16351) generalized to refclassid;
@@ -8098,6 +8108,11 @@ fn ATExecGenericOptions<'mcx>(
         heaptuple::heap_modify_tuple(mcx, &tp, ftrel.descr(), &repl_val, &repl_null, &repl_repl)?;
     let otid = tp.t_self;
     catalog_indexing::CatalogTupleUpdate(mcx, &ftrel, &otid, &mut newtup)?;
+
+    // Invalidate relcache so that all sessions will refresh any cached plans
+    // that might depend on the old options (tablecmds.c:18775).
+    inval::invalidate::CacheInvalidateRelcache(rel)?;
+    objectaccess::InvokeObjectPostAlterHook(types_core::FOREIGN_TABLE_RELATION_ID, rel.rd_id, 0)?;
 
     ftrel.close(RowExclusiveLock)
 }
@@ -8369,6 +8384,25 @@ mod elog_hygiene_tests {
             e.message(),
             "cache lookup failed for not-null constraint on column \"id\" of relation \"t\""
         );
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    }
+}
+
+#[cfg(test)]
+mod elog_hygiene_tests_b088 {
+    use types_nodes::rawnodes::ConstrType;
+
+    // ATSimplePermissions' no-grammar-name arm and ATExecAddConstraint's
+    // default arm are elog(ERROR)s in C (tablecmds.c:6800, 9861): catchable
+    // XX000 with C's message bytes, never a panic and never 0A000.
+    #[test]
+    fn alter_action_and_constraint_type_arms_are_catchable_xx000() {
+        let r = std::panic::catch_unwind(|| super::invalid_alter_action("t"));
+        let e = r.expect("invalid_alter_action panicked");
+        assert_eq!(e.message(), "invalid ALTER action attempted on relation \"t\"");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        let e = super::unrecognized_constraint_type(ConstrType::CONSTR_DEFAULT);
+        assert_eq!(e.message(), "unrecognized constraint type: 2");
         assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
     }
 }

@@ -35,9 +35,6 @@ const F_RI_FKEY_SETDEFAULT_UPD: Oid = 1653;
 const F_RI_FKEY_NOACTION_DEL: Oid = 1654;
 const F_RI_FKEY_NOACTION_UPD: Oid = 1655;
 
-const BTREE_AM_OID: Oid = 403;
-
-
 #[track_caller]
 #[cold]
 #[inline(never)]
@@ -50,11 +47,8 @@ fn err(msg: String, sqlstate: types_error::SqlState) -> Box<PgError> {
 #[cold]
 fn require_foreign_contype(contype: types_nodes::rawnodes::ConstrType) -> PgResult<()> {
     if contype != types_nodes::rawnodes::ConstrType::CONSTR_FOREIGN {
-        return Err(err(
-            "ALTER TABLE ... ADD CONSTRAINT for this constraint type is not supported yet"
-                .to_string(),
-            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
-        ));
+        // tablecmds.c:9861 elog(ERROR): catchable XX000.
+        return Err(crate::alter::unrecognized_constraint_type(contype));
     }
     Ok(())
 }
@@ -421,7 +415,7 @@ fn at_add_foreign_key_constraint<'mcx>(
                 format!(
                     "Could not translate compare type {cmptype} for operator family \"{}\" of access method \"{}\".",
                     famname.as_str(),
-                    get_am_name_closed(amid)
+                    get_am_name(amid)
                 ),
             ));
             pkrel.close(NoLock)?;
@@ -671,7 +665,7 @@ fn add_fk_recurse_referenced<'mcx>(
             }
             let part_index_id = pg_inherits::index_get_partition(mcx, part_rel.rd_id, index_oid)?;
             if part_index_id == InvalidOid {
-                panic!("index for {index_oid} not found in partition {}", part_rel.name());
+                return Err(partition_index_not_found(index_oid, part_rel.name()));
             }
             let (child_constr, _) = add_fk_constraint(
                 mcx,
@@ -1096,16 +1090,23 @@ fn fetch_pg_index_fk_shape(indexoid: Oid) -> PgResult<PgIndexFkShape> {
 }
 
 // Closed-set get_am_name (pg_am.dat) for error details.
-fn get_am_name_closed(amid: Oid) -> &'static str {
-    match amid {
-        BTREE_AM_OID => "btree",
-        405 => "hash",
-        2742 => "gin",
-        783 => "gist",
-        4000 => "spgist",
-        3580 => "brin",
-        _ => "???",
-    }
+// get_am_name (amcmds.c:246): pg_am.amname through the AMOID syscache, or
+// NULL (printed as "???" by errdetail's %s) when the AM does not exist.
+fn get_am_name(amid: Oid) -> String {
+    const Anum_pg_am_amname: i32 = 2;
+    let Ok(Some(tup)) = cache_syscache::SearchSysCache1(
+        cache_syscache::cacheinfo::AMOID,
+        cache_syscache::SysCacheKey::Value(datum::Datum::from_oid(amid)),
+    ) else {
+        return "???".to_string();
+    };
+    cache_syscache::SysCacheGetAttrNotNull(cache_syscache::cacheinfo::AMOID, &tup, Anum_pg_am_amname)
+        .map(|d| {
+            // SAFETY: amname is the row's inline NameData column.
+            let nd = unsafe { *(d.as_usize() as *const types_tuple::NameData) };
+            core::str::from_utf8(nd.name_str()).unwrap_or("???").to_string()
+        })
+        .unwrap_or_else(|_| "???".to_string())
 }
 
 // transformFkeyGetPrimaryKey (tablecmds.c).
@@ -1816,10 +1817,10 @@ fn get_foreign_key_action_triggers<'mcx>(
         }
     }
     if delete_trigger_oid == InvalidOid {
-        panic!("could not find ON DELETE action trigger of foreign key constraint {conoid}");
+        return Err(fk_trigger_not_found("ON DELETE action trigger", conoid));
     }
     if update_trigger_oid == InvalidOid {
-        panic!("could not find ON UPDATE action trigger of foreign key constraint {conoid}");
+        return Err(fk_trigger_not_found("ON UPDATE action trigger", conoid));
     }
     genam::systable_endscan(mcx, scan)?;
     trig_rel.close(types_rel::RowExclusiveLock)?;
@@ -1867,10 +1868,10 @@ fn get_foreign_key_check_triggers<'mcx>(
         }
     }
     if insert_trigger_oid == InvalidOid {
-        panic!("could not find ON INSERT check triggers of foreign key constraint {conoid}");
+        return Err(fk_trigger_not_found("ON INSERT check triggers", conoid));
     }
     if update_trigger_oid == InvalidOid {
-        panic!("could not find ON UPDATE check triggers of foreign key constraint {conoid}");
+        return Err(fk_trigger_not_found("ON UPDATE check triggers", conoid));
     }
     genam::systable_endscan(mcx, scan)?;
     trig_rel.close(types_rel::RowExclusiveLock)?;
@@ -2307,7 +2308,7 @@ fn clone_fk_referenced<'mcx>(
 
         let part_index_id = pg_inherits::index_get_partition(mcx, partition_rel.rd_id, index_oid)?;
         if part_index_id == InvalidOid {
-            panic!("index for {index_oid} not found in partition {}", partition_rel.name());
+            return Err(partition_index_not_found(index_oid, partition_rel.name()));
         }
 
         // The constraint's own action triggers parent the equivalents that
@@ -3271,15 +3272,17 @@ fn alter_constr_update_constraint_entry<'mcx>(
 mod panic_hygiene_tests {
     use types_nodes::rawnodes::ConstrType;
 
+    // tablecmds.c:9861 elog(ERROR, "unrecognized constraint type: %d"):
+    // catchable XX000 carrying the ConstrType value, never 0A000.
     #[test]
     fn non_fk_contype_errors_instead_of_panicking() {
         assert!(super::require_foreign_contype(ConstrType::CONSTR_FOREIGN).is_ok());
         for contype in [ConstrType::CONSTR_CHECK, ConstrType::CONSTR_PRIMARY] {
             let e = super::require_foreign_contype(contype).unwrap_err();
-            assert_eq!(e.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+            assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
             assert_eq!(
                 e.message(),
-                "ALTER TABLE ... ADD CONSTRAINT for this constraint type is not supported yet"
+                format!("unrecognized constraint type: {}", contype as i32)
             );
         }
     }
@@ -3313,6 +3316,48 @@ mod elog_hygiene_tests {
         assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
         let e = super::key_columns_not_both_collatable();
         assert_eq!(e.message(), "key columns are not both collatable");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    }
+}
+
+// elog(ERROR, "could not find %s of foreign key constraint %u")
+// (tablecmds.c:12122/12125 action triggers, 12188/12191 check triggers).
+#[cold]
+#[inline(never)]
+pub(crate) fn fk_trigger_not_found(which: &str, conoid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "could not find {which} of foreign key constraint {conoid}"
+    )))
+}
+
+// elog(ERROR, "index for %u not found in partition %s")
+// (tablecmds.c:11396 CloneFkReferenced, 10868 addFkRecurseReferenced).
+#[cold]
+#[inline(never)]
+pub(crate) fn partition_index_not_found(index_oid: Oid, partname: &str) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "index for {index_oid} not found in partition {partname}"
+    )))
+}
+
+#[cfg(test)]
+mod elog_hygiene_tests_b088 {
+    // The trigger/partition-index consistency arms of GetForeignKeyActionTriggers,
+    // GetForeignKeyCheckTriggers, CloneFkReferenced and addFkRecurseReferenced
+    // are elog(ERROR)s in C (tablecmds.c:12122, 12188, 11396, 10868): catchable
+    // XX000, never a panic.
+    #[test]
+    fn fk_trigger_and_partition_index_arms_are_catchable_xx000() {
+        let r = std::panic::catch_unwind(|| super::fk_trigger_not_found("ON INSERT check triggers", 16384));
+        let e = r.expect("fk_trigger_not_found panicked");
+        assert_eq!(
+            e.message(),
+            "could not find ON INSERT check triggers of foreign key constraint 16384"
+        );
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        let r = std::panic::catch_unwind(|| super::partition_index_not_found(16385, "p1"));
+        let e = r.expect("partition_index_not_found panicked");
+        assert_eq!(e.message(), "index for 16385 not found in partition p1");
         assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
     }
 }

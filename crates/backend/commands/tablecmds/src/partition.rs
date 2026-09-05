@@ -399,7 +399,10 @@ pub(crate) fn transformPartitionBound<'mcx>(
         return Ok(result.seal());
     }
 
-    let colinfo = |i: usize| -> PgResult<(String, Oid, i32, Oid)> {
+    // Column name for error reports: get_attname for a column key, else
+    // list_nth(partexprs, exprno) deparsed -- the caller supplies exprno
+    // exactly as C's cursor does (parse_utilcmd.c:4396-4402, 4516-4524).
+    let colinfo = |i: usize, exprno: usize| -> PgResult<(String, Oid, i32, Oid)> {
         let attno = key.partattrs[i];
         let colname = if attno != 0 {
             // get_attname via the open parent's descriptor (the syscache seam
@@ -409,7 +412,6 @@ pub(crate) fn transformPartitionBound<'mcx>(
                 .expect("non-UTF-8 attname")
                 .to_string()
         } else {
-            let exprno = key.partattrs[..i].iter().filter(|&&a| a == 0).count();
             let expr = key
                 .partexprs
                 .iter()
@@ -425,7 +427,7 @@ pub(crate) fn transformPartitionBound<'mcx>(
             if spec.strategy != b'l' {
                 return Err(invalid_bound_spec("list", pstate, spec.location));
             }
-            let (colname, coltype, coltypmod, partcollation) = colinfo(0)?;
+            let (colname, coltype, coltypmod, partcollation) = colinfo(0, 0)?;
             let mut listdatums = NodeList::nil();
             for cell in spec.listdatums.iter() {
                 let value = transformPartitionBoundValue(
@@ -465,6 +467,11 @@ pub(crate) fn transformPartitionBound<'mcx>(
                 (&spec.upperdatums, &mut upper_out),
             ] {
                 // transformPartitionRangeBounds + validateInfiniteBounds.
+                // C's expression cursor j (parse_utilcmd.c:4461, 4524) only
+                // advances for a non-MINVALUE/MAXVALUE expression bound, so an
+                // uncastable value after an infinite expression bound is
+                // reported against the EARLIER expression; kept as is.
+                let mut j = 0usize;
                 let mut seen_kind: Option<PartitionRangeDatumKind> = None;
                 for (i, cell) in bounds.iter().enumerate() {
                     let mut prd = Node::build::<PartitionRangeDatum>(mcx)?;
@@ -486,7 +493,12 @@ pub(crate) fn transformPartitionBound<'mcx>(
                     if infinite {
                         prd.kind = kind;
                     } else {
-                        let (colname, coltype, coltypmod, partcollation) = colinfo(i)?;
+                        let exprno = j;
+                        if key.partattrs[i] == 0 {
+                            j += 1;
+                        }
+                        let (colname, coltype, coltypmod, partcollation) =
+                            colinfo(i, exprno)?;
                         let value = transformPartitionBoundValue(
                             mcx,
                             pstate,
@@ -575,15 +587,18 @@ fn transformPartitionBoundValue<'mcx>(
         return Err(cannot_cast_bound(mcx, pstate, col_type, col_name, parse_expr::expr_location(val)));
     };
     if value.as_variant::<types_nodes::primnodes::Const>().is_none() {
+        // parse_utilcmd.c:4650-4656: expression_planner, then evaluate_expr
+        // unconditionally -- it is what stamps the partition key's collation
+        // on the resulting Const (a folded Const keeps the expression's own
+        // collation otherwise).
         parse_collate::assign_expr_collations(mcx, pstate, value)?;
         value = clauses::eval_const_expressions(mcx, value)?;
+        value = execexpr::evaluate_expr(mcx, value, col_type, col_typmod, part_collation)?;
         if value.as_variant::<types_nodes::primnodes::Const>().is_none() {
-            value = execexpr::evaluate_expr(mcx, value, col_type, col_typmod, part_collation)?;
+            return Err(Box::new(PgError::error(
+                "could not evaluate partition bound expression",
+            )));
         }
-        assert!(
-            value.as_variant::<types_nodes::primnodes::Const>().is_some(),
-            "could not evaluate partition bound expression"
-        );
     } else {
         // coerce_to_target_type doesn't insert the partition collation.
         // SAFETY: freshly transformed tree; no derived refs live.

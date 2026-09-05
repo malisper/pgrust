@@ -691,11 +691,17 @@ fn MergeConstraintsIntoExisting<'mcx>(
                     && pcon.condeferred == ccon.condeferred
                     && decompile_conbin(
                         mcx,
-                        pcon.conbin.as_ref().expect("check conbin").as_str(),
+                        pcon.conbin
+                            .as_ref()
+                            .ok_or_else(|| crate::inheritance::null_conbin_for_constraint(pcon.oid))?
+                            .as_str(),
                         parent_rel.rd_id,
                     )? == decompile_conbin(
                         mcx,
-                        ccon.conbin.as_ref().expect("check conbin").as_str(),
+                        ccon.conbin
+                            .as_ref()
+                            .ok_or_else(|| crate::inheritance::null_conbin_for_constraint(ccon.oid))?
+                            .as_str(),
                         child_rel.rd_id,
                     )?;
                 if !peq {
@@ -927,6 +933,7 @@ fn AttachPartitionEnsureIndexes<'mcx>(
         if !found {
             let (stmt, con_oid) =
                 parse_utilcmd::generateClonedIndexStmt(mcx, None, &idx_rel, &attmap)?;
+            // tablecmds.c:20782: is_alter_table = true, everything else off.
             indexcmds_seams::define_index::call(
                 mcx,
                 attachrel.rd_id,
@@ -934,7 +941,7 @@ fn AttachPartitionEnsureIndexes<'mcx>(
                 InvalidOid,
                 idx_rel.rd_id,
                 con_oid,
-                false,
+                true,
                 false,
                 false,
                 false,
@@ -1072,7 +1079,11 @@ fn QueuePartitionConstraintValidation<'mcx>(
     }
 
     if scanrel.rd_rel.relkind == RELKIND_RELATION {
-        let mut tab = AlteredTableInfo::new(mcx, scanrel);
+        // Grab a work queue entry (tablecmds.c:20255 ATGetQueueEntry): the
+        // relation may already be queued, e.g. by CloneForeignKeyConstraints.
+        let tabidx = crate::alter::ATGetQueueEntry(mcx, wqueue, scanrel);
+        let tab = &mut wqueue[tabidx];
+        debug_assert!(tab.partition_constraint.is_none());
         tab.partition_constraint = Some(
             part_constraint
                 .iter()
@@ -1080,7 +1091,6 @@ fn QueuePartitionConstraintValidation<'mcx>(
                 .expect("partition constraint is a single implicit-AND node"),
         );
         tab.validate_default = validate_default;
-        wqueue.push(tab);
     } else if scanrel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE {
         let pdesc = partdesc::RelationGetPartitionDesc(scanrel, true)?;
         for &part_oid in pdesc.oids.iter() {
@@ -1517,11 +1527,10 @@ fn RemoveInheritance<'mcx>(
                 continue;
             }
             if ccon.coninhcount <= 0 {
-                panic!(
-                    "relation {} has non-inherited constraint \"{}\"",
+                return Err(crate::inheritance::non_inherited_constraint(
                     child_rel.rd_id,
-                    ccon.name.as_str()
-                );
+                    ccon.name.as_str(),
+                ));
             }
             let keys = [oid_scankey(pg_constraint::Anum_pg_constraint_conrelid as usize, child_rel.rd_id)];
             let mut scan = genam::systable_beginscan(
@@ -1562,12 +1571,11 @@ fn RemoveInheritance<'mcx>(
             genam::systable_endscan(mcx, scan)?;
         }
         if !connames.is_empty() || !nncolumns.is_empty() {
-            panic!(
-                "{} unmatched constraints while removing inheritance from \"{}\" to \"{}\"",
+            return Err(crate::inheritance::unmatched_constraints(
                 connames.len() + nncolumns.len(),
                 child_rel.name(),
-                parent_rel.name()
-            );
+                parent_rel.name(),
+            ));
         }
         let _ = (matched_names, matched_cols);
     }
