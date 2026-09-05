@@ -24,7 +24,7 @@ with_company() {  # with_company <statement>; the answer is in OUT
         [ "$n" -ge 1 ] 2>/dev/null && break
         sleep 1
     done
-    OUT=$(sql "$1")
+    OUT=$(sqlv "$1")
     kill "$sleeper" 2>/dev/null; wait "$sleeper" 2>/dev/null
     # Killing psql does not instantly retire its backend.
     for i in $(seq 1 30); do
@@ -45,6 +45,7 @@ echo "1. the lift refuses company"
 # Shared catalogs belong to every database, so quiet here is not enough.
 with_company "SELECT pgrust_objkv_lift();"
 contains "refused while another backend is connected" "only session" "$OUT"
+check "with sqlstate 55006 object_in_use" "55006" "$(sqlstate_of "$OUT")"
 
 echo "2. the lift runs"
 OUT=$(sql "SELECT pgrust_objkv_lift();")
@@ -56,11 +57,14 @@ OUT=$(sql "SELECT pgrust_objkv_lift_verify();")
 contains "$OUT" "identical" "$OUT"
 
 echo "4. lifting twice is refused"
-contains "a second lift is refused" "already lifted" "$(sql "SELECT pgrust_objkv_lift();")"
+OUT=$(sqlv "SELECT pgrust_objkv_lift();")
+contains "a second lift is refused" "already lifted" "$OUT"
+check "with sqlstate 55000 object_not_in_prerequisite_state" "55000" "$(sqlstate_of "$OUT")"
 
 echo "5. the flip needs every database"
-OUT=$(sql "SELECT pgrust_objkv_lift_finish();")
+OUT=$(sqlv "SELECT pgrust_objkv_lift_finish();")
 contains "refused, naming the unlifted databases" "not lifted yet" "$OUT"
+check "with sqlstate 55000 object_not_in_prerequisite_state" "55000" "$(sqlstate_of "$OUT")"
 
 echo "6. lift the rest"
 for db in $(sql "SELECT datname FROM pg_database WHERE datallowconn AND datname <> 'postgres' ORDER BY oid;"); do
@@ -70,6 +74,7 @@ done
 echo "7. the flip refuses company too"
 with_company "SELECT pgrust_objkv_lift_finish();"
 contains "refused while another backend is connected" "only session" "$OUT"
+check "with sqlstate 55006 object_in_use" "55006" "$(sqlstate_of "$OUT")"
 
 echo "8. and then it flips"
 contains "flipped" "catalogs are in the bucket" "$(sql "SELECT pgrust_objkv_lift_finish();")"

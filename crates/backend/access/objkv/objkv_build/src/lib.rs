@@ -47,8 +47,14 @@ pub fn objkvbuild<'mcx>(
         ::execindexing::prepare_index_predicate(mcx, indexInfo)?;
     }
 
+    // As btbuild reports them: every row read is a heap tuple, and only the
+    // rows a partial index keeps are index tuples. The first lands in the
+    // table's pg_class.reltuples, so counting only the kept rows would shrink
+    // the planner's idea of the table after CREATE INDEX ... WHERE.
+    let mut heap_tuples = 0.0;
     let mut n = 0.0;
     for (rowid, image) in rows {
+        heap_tuples += 1.0;
         let tid = tableam::objkv_am::tid_of(rowid);
         tableam::objkv_am::store_image(mcx, &mut slot, &image, tid)?;
         if partial && !::execindexing::index_predicate_passes(mcx, mcx, indexInfo, &mut slot)? {
@@ -68,7 +74,7 @@ pub fn objkvbuild<'mcx>(
         n += 1.0;
     }
 
-    Ok(BuildResult { heap_tuples: n, index_tuples: n })
+    Ok(BuildResult { heap_tuples, index_tuples: n })
 }
 
 /// The entry an index holds for one stored row, for

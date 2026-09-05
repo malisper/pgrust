@@ -30,7 +30,30 @@ WANT_VIEW=$(must "SELECT count(*) FROM big_payments;")
 WANT_GONE=$(must "SELECT count(*) FROM ledger WHERE id = 100;")
 echo "  $WANT_COUNT rows, sum $WANT_SUM, view sees $WANT_VIEW"
 
+echo "1b. what the lift refuses to carry"
+# Only catalogs and objkv relations exist after the flip. A heap table's rows
+# are in a file the deletion below takes with it, and a sequence's state is a
+# local file too; so a lift that finds either refuses and names it, rather
+# than producing a database where the table exists and reads empty.
+must "CREATE TABLE stayed_local (id int, note text);" >/dev/null
+must "INSERT INTO stayed_local VALUES (1,'on local disk'),(2,'and so is this'),(3,'gone after the flip');" >/dev/null
+OUT=$(sqlv "SELECT pgrust_objkv_lift();")
+contains "a heap table with rows is refused"     "stored outside the bucket" "$OUT"
+contains "and named, with its kind and its AM"   "public.stayed_local (table, heap)" "$OUT"
+contains "as the one relation (its TOAST table is folded into it)" "1 relation(s)" "$OUT"
+check    "with sqlstate 0A000 feature_not_supported" "0A000" "$(sqlstate_of "$OUT")"
+must "DROP TABLE stayed_local;" >/dev/null
+must "CREATE TABLE numbered (id serial PRIMARY KEY, note text COLLATE \"C\") USING objkv;" >/dev/null
+OUT=$(sqlv "SELECT pgrust_objkv_lift();")
+contains "a serial column's sequence is refused" "sequences are not lifted" "$OUT"
+contains "and named"                             "numbered_id_seq" "$OUT"
+check    "with sqlstate 0A000 feature_not_supported" "0A000" "$(sqlstate_of "$OUT")"
+must "DROP TABLE numbered;" >/dev/null
+check "dropping them leaves the cluster quiet" "0" \
+      "$(sql "SELECT count(*) FROM pg_class WHERE relname IN ('stayed_local','numbered','numbered_id_seq');")"
+
 echo "2. move the catalogs into the bucket"
+# The refusals above staged nothing, so this lift is the first.
 lift_all
 cp "$PGDATA/objkv_catalogs" "$SAVED" || die "no marker to save"
 echo "  saved the marker outside the data directory:"
@@ -41,6 +64,13 @@ contains "DDL before the restart is refused" "moved to the bucket" \
          "$(sql "CREATE TABLE too_soon (id int) USING objkv;")"
 stop
 boot
+# CREATE DATABASE copies files, and a lifted database's catalogs are rows in
+# the bucket: from template0 as much as any other, the copy would have no
+# readable catalogs, so it is refused outright.
+OUT=$(sqlv "CREATE DATABASE too_late TEMPLATE template0;")
+contains "CREATE DATABASE after the flip is refused" "catalogs are in the objkv bucket" "$OUT"
+check    "with sqlstate 0A000 feature_not_supported" "0A000" "$(sqlstate_of "$OUT")"
+check    "and no database was left behind" "0" "$(sql "SELECT count(*) FROM pg_database WHERE datname = 'too_late';")"
 
 echo "2b. and a whole schema built after the flip, catalogs and all"
 # Its pg_class, pg_attribute and pg_index rows are objkv rows from the start,
@@ -84,6 +114,8 @@ check "its view"                "$WANT_AFTER_VIEW" "$(sql "SELECT count(*) FROM 
 check "its index is objkv's"    "objkv_btree"      "$(am_of ledger_after_who)"
 check "and what was dropped stayed dropped" "0" \
       "$(sql "SELECT count(*) FROM pg_class WHERE relname = 'dropped_after';")"
+check "and so did the heap table and the serial the lift refused" "0" \
+      "$(sql "SELECT count(*) FROM pg_class WHERE relname IN ('stayed_local','numbered','numbered_id_seq');")"
 check "and it still answers"    "payee-42" "$(idx "SELECT who FROM ledger WHERE who = 'payee-42';")"
 shows "and the plan reads the index, not the whole table" "ledger_who" \
       "$(plan "SELECT who FROM ledger WHERE who = 'payee-42';")"

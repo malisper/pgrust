@@ -56,4 +56,22 @@ sql_in scope_tpl "DROP TABLE scope_probe;" >/dev/null
 contains "still refused after DROP TABLE" "tables stored in objkv" \
          "$(sql "CREATE DATABASE scope_after_drop TEMPLATE scope_tpl;")"
 
+echo "5. after the flip there is no CREATE DATABASE, from any template"
+# CREATE DATABASE copies a template's files; a lifted database's catalogs are
+# rows in the bucket, so the copy would have no readable catalogs. template0
+# is no exception: its local files sit under a cluster-wide marker saying the
+# catalogs are elsewhere, and the clone's first connection would die opening
+# pg_class. Refused up front, naming why.
+install_ams   # scope_tpl was given only the table AM above; a lift needs both
+install_lift
+lift_all
+stop; boot
+for tpl in template0 template1; do
+    OUT=$(sqlv "CREATE DATABASE scope_late TEMPLATE $tpl;")
+    contains "TEMPLATE $tpl is refused"               "catalogs are in the objkv bucket" "$OUT"
+    check    "with sqlstate 0A000 feature_not_supported" "0A000" "$(sqlstate_of "$OUT")"
+done
+check "and no database was left behind" "0" "$(sql "SELECT count(*) FROM pg_database WHERE datname = 'scope_late';")"
+check "while the lifted ones still answer" "from-b" "$(sql_in scope_b "SELECT tag FROM scope_probe;")"
+
 finish "database scope"

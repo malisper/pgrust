@@ -65,6 +65,14 @@ check "async rows are all there" "$N" "$(sql "SELECT count(*) FROM gc WHERE who 
 
 # A conflict is decided at pre-commit, before anyone is told anything, so
 # async changes nothing here: B commits first, A's commit is refused.
+#
+# Known divergence from Postgres. Under READ COMMITTED Postgres would make B's
+# UPDATE wait for A's transaction, let A commit, then re-evaluate B's row and
+# apply it: both updates land, v ends at 2, and nobody sees 40001. objkv
+# takes no row locks and validates at commit: B does not wait, and A -- whose
+# read of the row is now stale -- is refused at COMMIT with 40001. v still
+# ends at 2. The isolation contract is in objkv_am.rs and docs/objkv.md; this
+# step pins it so a change is noticed, not to bless it.
 OUT=$(psql -h "$SOCKDIR" -p "$PORT" -d postgres -tA <<SQL 2>&1
 SET pgrust.objkv_async_commit = on;
 BEGIN;
@@ -74,8 +82,8 @@ COMMIT;
 SQL
 )
 echo "$OUT" | grep -q "serialize access" \
-    && echo "  ok: the loser still gets 40001 under async commit" \
-    || { echo "  FAIL: no serialization failure under async commit: $OUT"; RC=1; }
+    && echo "  ok: known divergence from Postgres: the loser gets 40001 at COMMIT (also under async commit), where Postgres READ COMMITTED would block B and let both updates land" \
+    || { echo "  FAIL: no serialization failure under async commit (known divergence from Postgres; see the comment above): $OUT"; RC=1; }
 check "and the winner's value stands" "2" "$(sql "SELECT v FROM ac WHERE id = 1;")"
 
 # An abort after the write was queued must leave nothing behind.

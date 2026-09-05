@@ -51,6 +51,12 @@ impl Client {
                 .timeout_read(REQUEST_TIMEOUT)
                 .timeout_write(REQUEST_TIMEOUT)
                 .timeout_connect(REQUEST_TIMEOUT)
+                // Never follow a redirect. S3 answers 301/307 for a bucket in
+                // another region or one just created; ureq would re-send a
+                // PUT as a GET, or hand back the 3xx as success, and either
+                // way a commit that never landed would be acknowledged. A
+                // redirect is a misconfiguration and is reported as one.
+                .redirects(0)
                 .build(),
             bucket,
             creds: Credentials::new(access_key, secret_key),
@@ -71,6 +77,7 @@ impl Client {
     }
 
     /// `PUT` with `If-None-Match: *` — the primitive the whole design rests on.
+    /// Only a 2xx is `Written`; `execute` turns everything else into an error.
     pub fn put_if_absent(&self, key: &str, body: &[u8]) -> io::Result<PutOutcome> {
         let mut action = self.bucket.put_object(Some(&self.creds), key);
         action.headers_mut().insert("if-none-match", "*");
@@ -218,6 +225,12 @@ impl Client {
                 r.into_reader()
                     .read_to_end(&mut buf)
                     .map_err(|e| Fail::Transport(e.to_string()))?;
+                // ureq reports only 4xx and 5xx as errors; a 3xx (or anything
+                // else outside 2xx) comes back here as `Ok`, and would pass for
+                // a stored object. Success is 2xx and nothing else.
+                if !(200..300).contains(&status) {
+                    return Err(Fail::Status(status, String::from_utf8_lossy(&buf).into_owned()));
+                }
                 Ok(Response { status, body: buf })
             }
             Err(ureq::Error::Status(code, r)) => {
@@ -334,5 +347,69 @@ mod tests {
         assert!(!Fail::Status(412, String::new()).retryable());
         assert!(!Fail::Status(404, String::new()).retryable());
         assert!(!Fail::Status(403, String::new()).retryable());
+        assert!(!Fail::Status(301, String::new()).retryable(), "a redirect is a misconfiguration");
+        assert!(!Fail::Status(307, String::new()).retryable());
+    }
+
+    /// One HTTP exchange served by hand on a local socket, answering with
+    /// the given status line and no body, and returning the request line.
+    fn serve_once(status_line: &'static str) -> (String, std::thread::JoinHandle<String>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let h = std::thread::spawn(move || {
+            use std::io::{BufRead, BufReader, Write};
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(sock.try_clone().unwrap());
+            let mut request = String::new();
+            reader.read_line(&mut request).unwrap();
+            // Drain the headers so the client's body write does not fail.
+            let mut line = String::new();
+            let mut content_length = 0usize;
+            loop {
+                line.clear();
+                reader.read_line(&mut line).unwrap();
+                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    content_length = v.trim().parse().unwrap_or(0);
+                }
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+            }
+            let mut body = vec![0u8; content_length];
+            std::io::Read::read_exact(&mut reader, &mut body).unwrap();
+            let reply = format!(
+                "HTTP/1.1 {status_line}\r\nLocation: http://127.0.0.1:1/elsewhere\r\n\
+                 Content-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            sock.write_all(reply.as_bytes()).unwrap();
+            request
+        });
+        (format!("http://{addr}"), h)
+    }
+
+    #[test]
+    fn a_redirected_put_is_an_error_not_a_write() {
+        for status in ["307 Temporary Redirect", "301 Moved Permanently"] {
+            let (endpoint, server) = serve_once(status);
+            let c = client(&endpoint);
+            let err = c.put_if_absent("commit/1", b"x").unwrap_err().to_string();
+            let code = &status[..3];
+            assert!(err.contains(&format!("s3 status {code}")), "got: {err}");
+            let request = server.join().unwrap();
+            assert!(request.starts_with("PUT "), "the redirect was not followed: {request}");
+        }
+    }
+
+    #[test]
+    fn a_redirected_get_or_delete_is_an_error_too() {
+        let (endpoint, server) = serve_once("302 Found");
+        let err = client(&endpoint).get("k").unwrap_err().to_string();
+        assert!(err.contains("s3 status 302"), "got: {err}");
+        server.join().unwrap();
+
+        let (endpoint, server) = serve_once("307 Temporary Redirect");
+        let err = client(&endpoint).delete("k").unwrap_err().to_string();
+        assert!(err.contains("s3 status 307"), "got: {err}");
+        server.join().unwrap();
     }
 }

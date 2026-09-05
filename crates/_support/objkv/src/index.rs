@@ -1,6 +1,8 @@
 //! Index reads over the store. The key format lives in `index_key`; writes are
-//! staged by the table AM into the same commit object as the row changes,
-//! which is what keeps an index and its table from ever disagreeing.
+//! staged by the table AM into the same commit object as the row changes, so
+//! what is durable of an index and its table never disagrees. The parts that
+//! can still disagree are above this layer: the unique-constraint read check
+//! in `objkv_index::insert` and the collector's liveness rule in `db`.
 
 use std::io;
 
@@ -84,10 +86,11 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::db::Db;
     use crate::commit::Op;
+    use crate::db::{Conflict, Db, Outcome};
     use crate::index_key::{entry_key, payload, seek_prefix, Col};
     use crate::key::LATEST;
+    use crate::s3::PutOutcome;
     use crate::store::{MemStore, Store};
 
     const IDX: u32 = 7;
@@ -105,15 +108,51 @@ mod tests {
         w
     }
 
+    fn db() -> (Arc<dyn Store>, Db) {
+        let s = Arc::new(MemStore::new()) as Arc<dyn Store>;
+        let d = Db::open(Arc::clone(&s)).unwrap();
+        (s, d)
+    }
+
+    /// Does the PUT the AM's writer would do, and reports back.
+    fn fly(d: &mut Db, s: &Arc<dyn Store>) {
+        if let Some(f) = d.take_flight() {
+            match s.put_if_absent(&f.key, &f.bytes).unwrap() {
+                PutOutcome::Written => d.flight_written(f.first),
+                PutOutcome::AlreadyExists => d.flight_lost(&f).unwrap(),
+            }
+        }
+    }
+
+    /// One backend's whole transaction on the shared `Db`: stages against
+    /// `snap` as `xid`, writes, waits, confirms. `Err` is the conflict
+    /// detector refusing it.
+    fn commit_at(
+        d: &mut Db,
+        s: &Arc<dyn Store>,
+        w: BTreeMap<Vec<u8>, Op>,
+        xid: u32,
+        snap: u64,
+    ) -> Result<u64, Conflict> {
+        let (t, seq) = d.stage_commit(w, xid, snap, true).unwrap()?.expect("non-empty");
+        fly(d, s);
+        match d.take_outcome(t) {
+            Some(Outcome::Durable(x)) => assert_eq!(x, seq),
+            other => panic!("expected Durable, got {other:?}"),
+        }
+        d.mark_confirmed(seq);
+        Ok(seq)
+    }
+
+    /// A transaction that read nothing, so nothing can conflict with it.
+    fn commit(d: &mut Db, s: &Arc<dyn Store>, w: BTreeMap<Vec<u8>, Op>) -> u64 {
+        commit_at(d, s, w, 0, LATEST).unwrap()
+    }
+
     #[test]
     fn an_equality_lookup_finds_every_matching_row() {
-        let s = Arc::new(MemStore::new()) as Arc<dyn Store>;
-        let mut db = Db::open(Arc::clone(&s)).unwrap();
-        let seq = db
-            .commit_batch(writes(&[("bob", 1), ("bob", 2), ("carol", 3)], false), 0)
-            .unwrap()
-            .unwrap();
-        db.mark_confirmed(seq);
+        let (s, mut db) = db();
+        commit(&mut db, &s, writes(&[("bob", 1), ("bob", 2), ("carol", 3)], false));
 
         let p = seek_prefix(DB, IDX, &[Col::Text(b"bob")], false).unwrap();
         let mut ids = lookup(&db.view(), &p, LATEST).unwrap();
@@ -131,10 +170,8 @@ mod tests {
     fn a_unique_lookup_reads_the_rowid_out_of_the_payload() {
         // The unique shape has nowhere in the key to put the rowid, so this is
         // the path that proves the payload carries it.
-        let s = Arc::new(MemStore::new()) as Arc<dyn Store>;
-        let mut db = Db::open(Arc::clone(&s)).unwrap();
-        let seq = db.commit_batch(writes(&[("bob", 42)], true), 0).unwrap().unwrap();
-        db.mark_confirmed(seq);
+        let (s, mut db) = db();
+        commit(&mut db, &s, writes(&[("bob", 42)], true));
 
         let p = seek_prefix(DB, IDX, &[Col::Text(b"bob")], true).unwrap();
         assert_eq!(lookup(&db.view(), &p, LATEST).unwrap(), vec![42]);
@@ -142,19 +179,13 @@ mod tests {
 
     #[test]
     fn a_deleted_entry_stops_matching() {
-        let s = Arc::new(MemStore::new()) as Arc<dyn Store>;
-        let mut db = Db::open(Arc::clone(&s)).unwrap();
-        let seq = db
-            .commit_batch(writes(&[("bob", 1), ("bob", 2)], false), 0)
-            .unwrap()
-            .unwrap();
-        db.mark_confirmed(seq);
+        let (s, mut db) = db();
+        commit(&mut db, &s, writes(&[("bob", 1), ("bob", 2)], false));
 
         // What an UPDATE that moves a value away, or a DELETE, writes.
         let mut w = BTreeMap::new();
         w.insert(entry_key(DB, IDX, &[Col::Text(b"bob")], 1, false).unwrap(), Op::Delete);
-        let seq = db.commit_batch(w, 0).unwrap().unwrap();
-        db.mark_confirmed(seq);
+        commit(&mut db, &s, w);
 
         let p = seek_prefix(DB, IDX, &[Col::Text(b"bob")], false).unwrap();
         assert_eq!(lookup(&db.view(), &p, LATEST).unwrap(), vec![2]);
@@ -162,14 +193,11 @@ mod tests {
 
     #[test]
     fn a_lookup_reads_as_of_its_snapshot() {
-        let s = Arc::new(MemStore::new()) as Arc<dyn Store>;
-        let mut db = Db::open(Arc::clone(&s)).unwrap();
-        let seq = db.commit_batch(writes(&[("bob", 1)], false), 0).unwrap().unwrap();
-        db.mark_confirmed(seq);
+        let (s, mut db) = db();
+        commit(&mut db, &s, writes(&[("bob", 1)], false));
         let before = db.current_seq();
 
-        let seq = db.commit_batch(writes(&[("bob", 2)], false), 0).unwrap().unwrap();
-        db.mark_confirmed(seq);
+        commit(&mut db, &s, writes(&[("bob", 2)], false));
 
         let p = seek_prefix(DB, IDX, &[Col::Text(b"bob")], false).unwrap();
         assert_eq!(lookup(&db.view(), &p, before).unwrap(), vec![1], "the older snapshot");
@@ -181,22 +209,16 @@ mod tests {
     #[test]
     fn two_writers_of_one_unique_value_collide() {
         // The uniqueness mechanism, at the layer where it actually happens.
-        // Both transactions insert 'bob' for different rows without seeing each
-        // other; because a unique entry is keyed on the value alone, they write
-        // the same key and the conflict detector refuses the second.
-        let s = Arc::new(MemStore::new()) as Arc<dyn Store>;
-        let mut a = Db::open(Arc::clone(&s)).unwrap();
-        let mut b = Db::open_with(Arc::clone(&s)).unwrap();
-        let snap = a.current_seq();
+        // Two backends (xids 1 and 2) on the one shared `Db` insert 'bob' for
+        // different rows from the same snapshot, without seeing each other;
+        // because a unique entry is keyed on the value alone, they write the
+        // same key and the conflict detector refuses the second.
+        let (s, mut db) = db();
+        let snap = db.current_seq();
 
-        let seq = a
-            .commit_batch_at(writes(&[("bob", 1)], true), 1, snap)
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        a.mark_confirmed(seq);
+        commit_at(&mut db, &s, writes(&[("bob", 1)], true), 1, snap).unwrap();
 
-        let lost = b.commit_batch_at(writes(&[("bob", 2)], true), 2, snap).unwrap();
+        let lost = commit_at(&mut db, &s, writes(&[("bob", 2)], true), 2, snap);
         let conflict = lost.expect_err("the second insert of one unique value must be refused");
         assert_eq!(
             conflict.key,
@@ -209,20 +231,17 @@ mod tests {
     fn two_writers_of_null_into_a_unique_index_both_succeed() {
         // Postgres allows any number of NULLs in a unique column. NULL entries
         // keep their rowid, so they land on different keys and nothing collides.
-        let s = Arc::new(MemStore::new()) as Arc<dyn Store>;
-        let mut a = Db::open(Arc::clone(&s)).unwrap();
-        let mut b = Db::open_with(Arc::clone(&s)).unwrap();
-        let snap = a.current_seq();
+        let (s, mut db) = db();
+        let snap = db.current_seq();
 
         let mut wa = BTreeMap::new();
         wa.insert(entry_key(DB, IDX, &[Col::Null], 1, true).unwrap(), Op::Put(payload(1)));
-        let seq = a.commit_batch_at(wa, 1, snap).unwrap().unwrap().unwrap();
-        a.mark_confirmed(seq);
+        commit_at(&mut db, &s, wa, 1, snap).unwrap();
 
         let mut wb = BTreeMap::new();
         wb.insert(entry_key(DB, IDX, &[Col::Null], 2, true).unwrap(), Op::Put(payload(2)));
         assert!(
-            b.commit_batch_at(wb, 2, snap).unwrap().is_ok(),
+            commit_at(&mut db, &s, wb, 2, snap).is_ok(),
             "a second NULL in a unique column is legal"
         );
     }
@@ -231,20 +250,10 @@ mod tests {
     fn a_nonunique_index_does_not_refuse_a_duplicate() {
         // The other half of the shape rule: two rows sharing a value in a
         // non-unique index must not look like a conflict.
-        let s = Arc::new(MemStore::new()) as Arc<dyn Store>;
-        let mut a = Db::open(Arc::clone(&s)).unwrap();
-        let mut b = Db::open_with(Arc::clone(&s)).unwrap();
-        let snap = a.current_seq();
+        let (s, mut db) = db();
+        let snap = db.current_seq();
 
-        let seq = a
-            .commit_batch_at(writes(&[("bob", 1)], false), 1, snap)
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        a.mark_confirmed(seq);
-        assert!(b
-            .commit_batch_at(writes(&[("bob", 2)], false), 2, snap)
-            .unwrap()
-            .is_ok());
+        commit_at(&mut db, &s, writes(&[("bob", 1)], false), 1, snap).unwrap();
+        assert!(commit_at(&mut db, &s, writes(&[("bob", 2)], false), 2, snap).is_ok());
     }
 }

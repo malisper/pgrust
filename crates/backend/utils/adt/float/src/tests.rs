@@ -313,9 +313,17 @@ fn math_domains_and_live_pg_values() {
     assert_eq!(out8(dsinh(1.0)), "1.1752011936438014");
     assert_eq!(out8(dcosh(1.0).unwrap()), "1.5430806348152437");
     assert_eq!(out8(dtanh(1.0).unwrap()), "0.7615941559557649");
-    // erf/erfc come straight from the platform libm, and Apple's differs from
-    // glibc's by one ulp at 1.0 (…148 vs …149). PG built on macOS prints the
-    // same …148, so the glibc digits are only the live values on Linux.
+    // erf/erfc come straight from the platform libm, and Apple's libm differs
+    // from glibc's by exactly one ulp at 1.0 in each: erf is one ulp below
+    // (…148 vs …149), erfc one ulp above (…516 vs …513). Both arms are pinned
+    // so a libm regression on either platform is caught; the glibc digits are
+    // the live PG 18.3 values on Linux, the Apple digits were read from
+    // /usr/lib/libSystem erf(1.0)/erfc(1.0) on macOS (Darwin 25.6, 2026-09-03).
+    #[cfg(target_os = "macos")]
+    {
+        assert_eq!(out8(derf(1.0).unwrap()), "0.8427007929497148");
+        assert_eq!(out8(derfc(1.0).unwrap()), "0.15729920705028516");
+    }
     #[cfg(not(target_os = "macos"))]
     {
         assert_eq!(out8(derf(1.0).unwrap()), "0.8427007929497149");

@@ -10,15 +10,24 @@
 //!
 //! `db` leads because oids repeat across databases; shared catalogs take
 //! `00000000`. Left of the version suffix is an ordinary row key, so entries
-//! get snapshot reads and tombstones free. Hex keeps bytewise order in an
-//! S3-safe charset, at 2x the bytes.
+//! get snapshot reads and tombstones free.
+//!
+//! The tuple goes in as hex, which keeps bytewise order and holds three
+//! invariants the readers lean on: a key never contains 0x00 (the store
+//! resumes a scan by appending one), never contains 0xff (the table AM's
+//! upper bound is a prefix plus one), and has `/` only between fields (the
+//! splitters below count on it). It costs 2x the bytes. A key is never an S3
+//! object name -- keys live inside commit and run objects -- so no charset or
+//! length rule of S3's applies here.
 
 use std::io;
 
-/// Largest encoded tuple that fits an S3 key once hex-doubled and prefixed:
-/// 1024 bytes less 54 of worst-case overhead. Over this, insert errors as
-/// btree does -- never truncate, since a truncated key is a wrong key.
-pub const MAX_ENCODED: usize = 400;
+/// Largest encoded tuple, before hexing. Btree's limit on an 8K page
+/// (`BTMaxItemSize`, 2704 bytes at version 4), so an index row that fits in
+/// Postgres fits here; the store frames keys with a 32-bit length and has no
+/// limit of its own. Over this, insert errors as btree does -- never
+/// truncate, since a truncated key is a wrong key.
+pub const MAX_ENCODED: usize = 2704;
 
 /// A column's tag byte says whether a value follows and how it is stored.
 /// The four sort together as the options ask: a nulls-first NULL under
@@ -38,6 +47,7 @@ pub struct ColOpt {
     pub nulls_first: bool,
 }
 
+#[cfg(test)]
 pub const ASC: ColOpt = ColOpt { desc: false, nulls_first: false };
 
 pub fn is_null_tag(tag: u8) -> bool {
@@ -69,11 +79,17 @@ pub enum Col<'a> {
     /// `name`: fixed 64 bytes, C collation, compared as a string. The trailing
     /// NUL padding is not part of the value, so it is trimmed.
     Name(&'a [u8]),
-    /// `oidvector` / `int2vector`: element by element, then by length. pg_proc
-    /// lookups key on these.
+    /// `oidvector` / `int2vector`: shorter vectors first, then element by
+    /// element -- `btoidvectorcmp`'s order, which compares the lengths before
+    /// any element. pg_proc lookups key on these.
     Vector(&'a [u64]),
     Uuid(&'a [u8; 16]),
     Text(&'a [u8]),
+    /// `char(n)`: stored blank-padded to `n`, but `bpcharcmp` compares with
+    /// the trailing blanks stripped, so `'a'` and `'a  '` are one value. The
+    /// padding is trimmed before encoding, on entries and on bounds alike --
+    /// a padded entry against an unpadded bound is a miss with no error.
+    Bpchar(&'a [u8]),
     /// Both float widths, single precision widened -- exactly, and in order --
     /// so a `float8` bound can be compared against a `float4` column without
     /// rounding it first. Postgres sorts NaN above every number and treats the
@@ -131,13 +147,12 @@ fn encode_body(col: &Col<'_>, out: &mut Vec<u8>) {
         Col::Oid(v) => out.extend_from_slice(&v.to_be_bytes()),
         Col::Char(c) => out.push(c),
         Col::Vector(v) => {
-            // Tagged 0x01 with a 0x00 terminator, so a vector that is a prefix of
-            // another sorts first.
+            // The element count first, as btoidvectorcmp compares; fixed
+            // width, so the encoding is prefix-free without a terminator.
+            out.extend_from_slice(&(v.len() as u32).to_be_bytes());
             for e in v {
-                out.push(0x01);
                 out.extend_from_slice(&e.to_be_bytes());
             }
-            out.push(0x00);
         }
         Col::Name(n) => {
             let end = n.iter().position(|&b| b == 0).unwrap_or(n.len());
@@ -145,8 +160,16 @@ fn encode_body(col: &Col<'_>, out: &mut Vec<u8>) {
         }
         Col::Uuid(u) => out.extend_from_slice(u),
         Col::Text(s) => encode_string(s, out),
+        Col::Bpchar(s) => encode_string(trim_blanks(s), out),
         Col::Float8(v) => out.extend_from_slice(&float_bytes(v)),
     }
+}
+
+/// `bcTruelen`: trailing 0x20 bytes only. A multibyte character never ends in
+/// one, so the byte test is the character test in every server encoding.
+fn trim_blanks(s: &[u8]) -> &[u8] {
+    let end = s.iter().rposition(|&b| b != b' ').map_or(0, |i| i + 1);
+    &s[..end]
 }
 
 /// 0x00 escapes to 0x00 0xff and the string ends 0x00 0x00, so the
@@ -265,21 +288,18 @@ fn string_end(b: &[u8], mut at: usize, inv: bool) -> Option<usize> {
     }
 }
 
-/// Past the `00` that ends a vector; each element is `01` and eight bytes.
-fn vector_end(b: &[u8], mut at: usize, inv: bool) -> Option<usize> {
-    let (end, elem) = if inv { (0xff, 0xfe) } else { (0x00, 0x01) };
-    loop {
-        let x = *b.get(at)?;
-        if x == end {
-            return Some(at + 1);
-        } else if x == elem {
-            at += 9;
-        } else {
-            return None;
+/// Past a vector: a four-byte element count, then eight bytes an element.
+fn vector_end(b: &[u8], at: usize, inv: bool) -> Option<usize> {
+    let mut n: [u8; 4] = b.get(at..at + 4)?.try_into().ok()?;
+    if inv {
+        for x in &mut n {
+            *x = !*x;
         }
     }
+    Some(at + 4 + u32::from_be_bytes(n) as usize * 8)
 }
 
+#[cfg(test)]
 pub fn encode(cols: &[Col<'_>]) -> Vec<u8> {
     encode_with(cols, &[])
 }
@@ -293,12 +313,24 @@ pub fn encode_with(cols: &[Col<'_>], opts: &[ColOpt]) -> Vec<u8> {
     out
 }
 
-fn hex_into(bytes: &[u8], out: &mut Vec<u8>) {
+/// The tuple's place in the key. Hex is what delivers the module doc's three
+/// invariants -- no 0x00, no 0xff, no `/` inside the tuple -- and it keeps
+/// bytewise order. The table AM builds its bounds out of the same digits.
+pub fn hex_into(bytes: &[u8], out: &mut Vec<u8>) {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     for &b in bytes {
         out.push(HEX[(b >> 4) as usize]);
         out.push(HEX[(b & 0xf) as usize]);
     }
+}
+
+/// The inverse: `None` if the digits are not a whole number of hex pairs.
+pub fn unhex(hex: &[u8]) -> Option<Vec<u8>> {
+    if hex.len() % 2 != 0 {
+        return None;
+    }
+    let digit = |b: u8| (b as char).to_digit(16).map(|d| d as u8);
+    hex.chunks(2).map(|p| Some(digit(p[0])? << 4 | digit(p[1])?)).collect()
 }
 
 fn too_long(len: usize) -> io::Error {
@@ -313,13 +345,8 @@ fn unique_on_value_alone(unique: bool, cols: &[Col<'_>]) -> bool {
     unique && !cols.iter().any(Col::is_null)
 }
 
-/// The key an entry is stored under, which is also what conflict detection
-/// matches on.
-///
-/// A unique index keys on the value alone, so two transactions inserting it
-/// write the same key and collide -- that collision is the whole uniqueness
-/// mechanism. A non-unique index adds the rowid, since sharing a value is
-/// normal there.
+/// `entry_key_with` at the default options, for tests.
+#[cfg(test)]
 pub fn entry_key(
     db: u32,
     index_id: u32,
@@ -330,6 +357,15 @@ pub fn entry_key(
     entry_key_with(db, index_id, cols, &[], rowid, unique)
 }
 
+/// The key an entry is stored under, which is also what conflict detection
+/// matches on.
+///
+/// A unique index keys on the value alone, so two *concurrent* transactions
+/// inserting it write the same key and the conflict detector refuses the
+/// later one. That is the concurrent half of uniqueness; a serial duplicate
+/// -- the first entry already committed and visible -- is a plain overwrite
+/// at this layer, and is caught by the read check in `objkv_index::insert`.
+/// A non-unique index adds the rowid, since sharing a value is normal there.
 pub fn entry_key_with(
     db: u32,
     index_id: u32,
@@ -362,7 +398,8 @@ pub fn index_prefix(db: u32, index_id: u32, unique: bool) -> Vec<u8> {
     p
 }
 
-/// Where a scan starts for an exact value or a leading-column prefix.
+/// `seek_prefix_with` at the default options, for tests.
+#[cfg(test)]
 pub fn seek_prefix(
     db: u32,
     index_id: u32,
@@ -372,6 +409,7 @@ pub fn seek_prefix(
     seek_prefix_with(db, index_id, cols, &[], unique)
 }
 
+/// Where a scan starts for an exact value or a leading-column prefix.
 pub fn seek_prefix_with(
     db: u32,
     index_id: u32,
@@ -392,7 +430,7 @@ pub fn payload(rowid: u64) -> Vec<u8> {
     rowid.to_be_bytes().to_vec()
 }
 
-pub fn payload_rowid(payload: &[u8]) -> Option<u64> {
+fn payload_rowid(payload: &[u8]) -> Option<u64> {
     Some(u64::from_be_bytes(payload.try_into().ok()?))
 }
 
@@ -673,8 +711,58 @@ mod tests {
     }
 
     #[test]
+    fn bpchar_ignores_its_padding_and_orders_as_text() {
+        // `'a'::char(3)` is stored as `a  `; bpcharcmp says it equals `'a'`.
+        // The bound arrives unpadded (typmod -1) and the entry padded, and the
+        // two must meet on one key.
+        assert_eq!(enc(&[Col::Bpchar(b"a  ")]), enc(&[Col::Bpchar(b"a")]));
+        assert_eq!(enc(&[Col::Bpchar(b"a  ")]), enc(&[Col::Text(b"a")]));
+        assert_eq!(enc(&[Col::Bpchar(b"   ")]), enc(&[Col::Bpchar(b"")]));
+        // Only trailing blanks go; an inner one is part of the value.
+        assert_ne!(enc(&[Col::Bpchar(b"a b")]), enc(&[Col::Bpchar(b"ab")]));
+        assert_eq!(enc(&[Col::Bpchar(b"a b ")]), enc(&[Col::Text(b"a b")]));
+        // And a multibyte value padded to its width: `c3 a9 20` is `é`.
+        assert_eq!(enc(&[Col::Bpchar(b"\xc3\xa9 ")]), enc(&[Col::Text(b"\xc3\xa9")]));
+        assert_sorted(
+            "bpchar",
+            &[Col::Bpchar(b"a   "), Col::Bpchar(b"a b "), Col::Bpchar(b"ab  "), Col::Bpchar(b"b   ")],
+        );
+        let widths = [Width::Str];
+        let e = enc(&[Col::Bpchar(b"hi  ")]);
+        let (a, b) = column_spans(&e, &widths).unwrap()[0];
+        assert_eq!(decode_string(&e[a + 1..b]).unwrap(), b"hi", "the trimmed value is what the key holds");
+    }
+
+    #[test]
+    fn vectors_sort_by_length_first_as_btoidvectorcmp_does() {
+        // btoidvectorcmp returns the length difference before looking at any
+        // element, so (2) < (1,2) even though 2 > 1.
+        assert_sorted(
+            "oidvector",
+            &[
+                Col::Vector(&[]),
+                Col::Vector(&[2]),
+                Col::Vector(&[1, 2]),
+                Col::Vector(&[1, 3]),
+                Col::Vector(&[2, 0]),
+                Col::Vector(&[0, 0, 0]),
+            ],
+        );
+        // Prefix-free: a vector's key is never a prefix of a longer one's, so
+        // a following column cannot bleed into the comparison.
+        let short = enc(&[Col::Vector(&[1]), Col::Int4(i32::MAX)]);
+        let long = enc(&[Col::Vector(&[1, 0]), Col::Int4(i32::MIN)]);
+        assert!(short < long);
+        let widths = [Width::Vector, Width::Fixed(4)];
+        let spans = column_spans(&long, &widths).unwrap();
+        assert_eq!(spans[0], (0, 1 + 4 + 16));
+        assert_eq!(spans[1].1, long.len());
+    }
+
+    #[test]
     fn an_oversized_key_is_refused_rather_than_truncated() {
-        // A truncated key collides with every value sharing its first 400 bytes.
+        // A truncated key collides with every value sharing its first
+        // MAX_ENCODED bytes.
         let big = vec![b'x'; MAX_ENCODED + 1];
         let err = entry_key(DB, 1, &[Col::Text(&big)], 1, false).unwrap_err();
         assert!(err.to_string().contains("exceeds maximum"), "{err}");
@@ -741,13 +829,23 @@ mod tests {
     }
 
     #[test]
-    fn keys_are_safe_ascii() {
-        let k = entry_key(DB, 1, &[Col::Text(b"\x00\xff hi"), Col::Null], 7, false).unwrap();
-        assert!(
-            k.iter().all(|&b| b.is_ascii_alphanumeric() || b == b'/'),
-            "S3 keys stay in a safe charset: {}",
+    fn keys_hold_no_nul_ff_or_slash_inside_a_field() {
+        // The three invariants the readers lean on: the store resumes a scan
+        // by appending 0x00, the table AM bounds a range with a trailing 0xff,
+        // and both split fields on `/`. A tuple with all three bytes in it
+        // must not leak any of them into the key.
+        let k = entry_key(DB, 1, &[Col::Text(b"\x00\xff/hi"), Col::Null], 7, false).unwrap();
+        assert!(!k.contains(&0x00) && !k.contains(&0xff), "{}", String::from_utf8_lossy(&k));
+        assert_eq!(
+            k.iter().filter(|&&b| b == b'/').count(),
+            4,
+            "db / kind / index / tuple / rowid: {}",
             String::from_utf8_lossy(&k)
         );
+        // The tuple field is the hex of exactly what was encoded.
+        let tuple = k.split(|&b| b == b'/').nth(3).unwrap();
+        assert_eq!(unhex(tuple), Some(encode(&[Col::Text(b"\x00\xff/hi"), Col::Null])));
+        assert_eq!(unhex(b"abc"), None, "an odd digit count is not a tuple");
     }
 
     #[test]

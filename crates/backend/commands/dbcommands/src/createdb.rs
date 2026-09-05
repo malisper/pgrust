@@ -33,6 +33,15 @@ use crate::{
     GLOBALTABLESPACE_OID, TableSpaceRelationId, XLOG_DBASE_CREATE_FILE_COPY,
 };
 
+/// Whether this cluster's catalogs have been lifted into the objkv bucket:
+/// pg_database is then an objkv relation, and the relcache already knows.
+fn catalogs_in_bucket(mcx: Mcx<'_>) -> PgResult<bool> {
+    let rel = table::table_open(mcx, DATABASE_RELATION_ID, AccessShareLock)?;
+    let lifted = tableam::is_objkv_relam(rel.rd_rel.relam);
+    table::table_close(rel, AccessShareLock)?;
+    Ok(lifted)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CreateDBStrategy {
     WalLog,
@@ -424,7 +433,49 @@ pub fn createdb<'mcx>(mcx: Mcx<'mcx>, stmt: &CreatedbStmt<'mcx>) -> PgResult<Oid
             .into());
     }
 
-    // Copying files misses the bucket: the clone reads empty.
+    if !src.datistemplate
+        && !adt_acl::has_privs_of_role(miscinit::GetUserId(), src.datdba)?
+    {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)
+            .errmsg(format!("permission denied to copy database \"{dbtemplate}\""))
+            .into_error()
+            .into());
+    }
+
+    // After the objkv lift a database's catalogs are rows in the bucket, and
+    // this command still copies files. A clone of template1 would have no
+    // catalogs at all; a clone of template0 would have local ones under a
+    // cluster-wide marker saying they are in the bucket, and its first
+    // connection dies opening pg_class. Neither is a database, so neither is
+    // offered. Decided from the relcache, not the store: a cluster that never
+    // heard of objkv does not open one to find that out.
+    if catalogs_in_bucket(mcx)? {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(
+                "cannot create a database: this cluster's catalogs are in the objkv bucket"
+                    .to_string(),
+            )
+            .errdetail(
+                "CREATE DATABASE copies a template's files, and a lifted database's catalogs \
+                 are rows in the object store, not files. The copy would have no readable \
+                 catalogs, from template0 as much as from any other template."
+                    .to_string(),
+            )
+            .errhint(
+                "Create every database the cluster needs before running \
+                 pgrust_objkv_lift_finish(). CREATE DATABASE on a lifted cluster is not \
+                 supported yet."
+                    .to_string(),
+            )
+            .into_error()
+            .into());
+    }
+
+    // Before the lift, a template holding objkv tables is the same mistake at
+    // a smaller scale: copying files misses the bucket, and the clone's
+    // tables exist and read as empty.
     if tableam::objkv_am::database_has_rows(src_dboid)? {
         return Err(ereport(ERROR)
             .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
@@ -436,19 +487,10 @@ pub fn createdb<'mcx>(mcx: Mcx<'mcx>, stmt: &CreatedbStmt<'mcx>) -> PgResult<Oid
                     .to_string(),
             )
             .errhint(
-                "Create the database from template0 and load the objkv tables into it."
+                "Create the database from a template without objkv tables and load the \
+                 objkv tables into it."
                     .to_string(),
             )
-            .into_error()
-            .into());
-    }
-
-    if !src.datistemplate
-        && !adt_acl::has_privs_of_role(miscinit::GetUserId(), src.datdba)?
-    {
-        return Err(ereport(ERROR)
-            .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)
-            .errmsg(format!("permission denied to copy database \"{dbtemplate}\""))
             .into_error()
             .into());
     }

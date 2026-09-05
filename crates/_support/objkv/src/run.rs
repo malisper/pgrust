@@ -51,9 +51,11 @@ pub trait RangeSource {
 
 impl RangeSource for &[u8] {
     fn range(&self, offset: u64, len: u64) -> io::Result<Vec<u8>> {
-        let (s, e) = (offset as usize, (offset + len) as usize);
+        let past = || io::Error::other("range past end of object");
+        let s = usize::try_from(offset).map_err(|_| past())?;
+        let e = offset.checked_add(len).and_then(|e| usize::try_from(e).ok()).ok_or_else(past)?;
         if e > self.len() {
-            return Err(io::Error::other("range past end of object"));
+            return Err(past());
         }
         Ok(self[s..e].to_vec())
     }
@@ -181,56 +183,96 @@ impl BlockCache {
     }
 }
 
+/// The bloom and index of a run, parsed from wherever its bytes are.
+struct Meta {
+    bloom: Bloom,
+    index: Vec<(Vec<u8>, u64, u32)>,
+    entry_count: u64,
+}
+
+/// Two ranged reads of `src`: the trailer, then bloom and index in one call.
+fn read_meta<S: RangeSource>(src: &S) -> io::Result<Meta> {
+    let size = src.size();
+    if size < TRAILER_LEN {
+        return Err(io::Error::other("object too small to be a run"));
+    }
+    let t = src.range(size - TRAILER_LEN, TRAILER_LEN)?;
+    if t.len() != TRAILER_LEN as usize {
+        return Err(io::Error::other("short read of the run trailer"));
+    }
+    if get_u32(&t, 40) != MAGIC {
+        return Err(io::Error::other("bad run magic"));
+    }
+    let bloom_off = get_u64(&t, 0);
+    let bloom_len = get_u32(&t, 8) as u64;
+    let index_off = get_u64(&t, 12);
+    let index_len = get_u32(&t, 20) as u64;
+    // The single bloom+index fetch below depends on them being adjacent.
+    if bloom_off.checked_add(bloom_len) != Some(index_off)
+        || index_off.checked_add(index_len).is_none_or(|end| end > size - TRAILER_LEN)
+    {
+        return Err(io::Error::other("run metadata is not contiguous"));
+    }
+    let entry_count = get_u64(&t, 28);
+    let want_crc = get_u32(&t, 36);
+
+    let meta = src.range(bloom_off, bloom_len + index_len)?;
+    if meta.len() as u64 != bloom_len + index_len {
+        return Err(io::Error::other("short read of the run metadata"));
+    }
+    let got_crc = crc32c::pg_comp_crc32c(0xffff_ffff, &meta) ^ 0xffff_ffff;
+    if want_crc != got_crc {
+        return Err(io::Error::other("run metadata checksum mismatch"));
+    }
+
+    let bloom = Bloom::from_bytes(meta[..bloom_len as usize].to_vec());
+    let ibytes = &meta[bloom_len as usize..];
+    let mut index = Vec::new();
+    let mut p = 0usize;
+    let short = || io::Error::other("run index is truncated");
+    while p < ibytes.len() {
+        let klen = crate::commit::get_u32_checked(ibytes, p).ok_or_else(short)? as usize;
+        p += 4;
+        let key = ibytes.get(p..p.checked_add(klen).ok_or_else(short)?).ok_or_else(short)?.to_vec();
+        p += klen;
+        let off = ibytes
+            .get(p..p + 8)
+            .map(|b| u64::from_le_bytes(b.try_into().expect("8 bytes")))
+            .ok_or_else(short)?;
+        p += 8;
+        let len = crate::commit::get_u32_checked(ibytes, p).ok_or_else(short)?;
+        p += 4;
+        index.push((key, off, len));
+    }
+    Ok(Meta { bloom, index, entry_count })
+}
+
 impl<S: RangeSource> Run<S> {
     /// Two ranged GETs: the trailer, then bloom and index in one call.
     pub fn open(src: S) -> io::Result<Run<S>> {
-        let size = src.size();
-        if size < TRAILER_LEN {
-            return Err(io::Error::other("object too small to be a run"));
-        }
-        let t = src.range(size - TRAILER_LEN, TRAILER_LEN)?;
-        if get_u32(&t, 40) != MAGIC {
-            return Err(io::Error::other("bad run magic"));
-        }
-        let bloom_off = get_u64(&t, 0);
-        let bloom_len = get_u32(&t, 8) as u64;
-        let index_off = get_u64(&t, 12);
-        let index_len = get_u32(&t, 20) as u64;
-        // The single bloom+index fetch below depends on them being adjacent.
-        if index_off != bloom_off + bloom_len {
-            return Err(io::Error::other("run metadata is not contiguous"));
-        }
-        let entry_count = get_u64(&t, 28);
-        let want_crc = get_u32(&t, 36);
+        let meta = read_meta(&src)?;
+        Ok(Run::with_meta(src, meta))
+    }
 
-        let meta = src.range(bloom_off, bloom_len + index_len)?;
-        let got_crc = crc32c::pg_comp_crc32c(0xffff_ffff, &meta) ^ 0xffff_ffff;
-        if want_crc != got_crc {
-            return Err(io::Error::other("run metadata checksum mismatch"));
+    /// The same run, parsed from a copy of its bytes already in memory --
+    /// the compactor has just built it -- so the swap costs no round trip.
+    /// Blocks are still read from `src` later.
+    pub fn open_from_bytes(src: S, bytes: &[u8]) -> io::Result<Run<S>> {
+        if bytes.len() as u64 != src.size() {
+            return Err(io::Error::other("run bytes do not match the object size"));
         }
+        let meta = read_meta(&bytes)?;
+        Ok(Run::with_meta(src, meta))
+    }
 
-        let bloom = Bloom::from_bytes(meta[..bloom_len as usize].to_vec());
-        let ibytes = &meta[bloom_len as usize..];
-        let mut index = Vec::new();
-        let mut p = 0usize;
-        while p < ibytes.len() {
-            let klen = get_u32(ibytes, p) as usize;
-            p += 4;
-            let key = ibytes[p..p + klen].to_vec();
-            p += klen;
-            let off = get_u64(ibytes, p);
-            p += 8;
-            let len = get_u32(ibytes, p);
-            p += 4;
-            index.push((key, off, len));
-        }
-        Ok(Run {
+    fn with_meta(src: S, meta: Meta) -> Run<S> {
+        Run {
             src,
-            bloom,
-            index,
-            entry_count,
+            bloom: meta.bloom,
+            index: meta.index,
+            entry_count: meta.entry_count,
             cache: Mutex::new(BlockCache { cap: DEFAULT_CACHE_BYTES, ..Default::default() }),
-        })
+        }
     }
 
     /// Where the run is read from: the object it lives in.
@@ -263,23 +305,12 @@ impl<S: RangeSource> Run<S> {
         }
     }
 
-    /// Every entry whose key starts with `prefix`, in key order.
-    ///
-    /// Seeks rather than scans: the sparse index picks the first block that
-    /// can hold the prefix, and the walk stops at the first key past it. This
-    /// is what makes an index lookup cost a couple of ranged GETs instead of a
-    /// read of the whole run -- the difference between an index being worth
-    /// having and not.
-    /// Every stored key in `[lo, hi)`, in order.
+    /// Every stored key in `[lo, hi)`, in order, stopping once `limit`
+    /// distinct rows have been seen.
     ///
     /// Bounds are plain byte strings and the range is half-open, so "greater
     /// than this value" and "up to and including it" are both expressed by
     /// where the caller puts the bound rather than by a flag here.
-    pub fn scan_range(&self, lo: &[u8], hi: &[u8]) -> io::Result<Vec<(Vec<u8>, Op)>> {
-        self.scan_range_limited(lo, hi, crate::key::LATEST, usize::MAX)
-    }
-
-    /// The same, stopping once `limit` distinct rows have been seen.
     ///
     /// Stored keys carry a version suffix, so one row can appear several
     /// times; the limit counts rows. Taking the first `limit` from each layer
@@ -408,6 +439,13 @@ impl<S: RangeSource> Run<S> {
         Ok(out)
     }
 
+    /// Every entry whose key starts with `prefix`, in key order.
+    ///
+    /// Seeks rather than scans: the sparse index picks the first block that
+    /// can hold the prefix, and the walk stops at the first key past it. This
+    /// is what makes an index lookup cost a couple of ranged GETs instead of a
+    /// read of the whole run -- the difference between an index being worth
+    /// having and not.
     pub fn scan_prefix(&self, prefix: &[u8]) -> io::Result<Vec<(Vec<u8>, Op)>> {
         if self.index.is_empty() {
             return Ok(Vec::new());
@@ -444,17 +482,9 @@ impl<S: RangeSource> Run<S> {
         Ok(out)
     }
 
-    /// The same as `locate_at`, named for callers outside this module that
-    /// need the versioned key as well as the value.
-    pub fn locate_stamped_at(
-        &self,
-        row_key: &[u8],
-        snapshot: u64,
-    ) -> io::Result<Option<(Vec<u8>, Op)>> {
-        self.locate_at(row_key, snapshot)
-    }
-
-    fn locate_at(&self, row_key: &[u8], snapshot: u64) -> io::Result<Option<(Vec<u8>, Op)>> {
+    /// The version of `row_key` live at `snapshot`, with its versioned key,
+    /// so the caller can read the sequence number off it.
+    pub fn locate_at(&self, row_key: &[u8], snapshot: u64) -> io::Result<Option<(Vec<u8>, Op)>> {
         if !self.bloom.may_contain(row_key) || self.index.is_empty() {
             return Ok(None);
         }
@@ -489,8 +519,9 @@ impl<S: RangeSource> Run<S> {
         self.cache.lock().unwrap().cap = cap;
     }
 
-    /// Every entry in key order, tombstones included. Used by compaction, so it
-    /// fetches whole blocks rather than ranges — the one read path that is
+    /// Every entry in key order, tombstones included. Used by compaction: one
+    /// ranged GET per block, straight from the source and past the cache,
+    /// since nothing it reads will be read again -- the one read path that is
     /// allowed to be expensive.
     pub fn scan(&self) -> io::Result<Vec<(Vec<u8>, Op)>> {
         // No with_capacity on entry_count: it comes off the trailer, which no
@@ -714,6 +745,20 @@ mod tests {
         let run = Run::open(bytes.as_slice()).unwrap();
         assert_eq!(run.get_at(b"b", LATEST).unwrap(), Some(Op::Delete));
         assert_eq!(run.get_at(b"c", LATEST).unwrap(), None);
+    }
+
+    #[test]
+    fn a_run_opened_from_its_bytes_reads_no_metadata_over_the_wire() {
+        let bytes = build(&entries(3000));
+        let src = Counting { bytes: bytes.as_slice(), reads: std::cell::Cell::new(0) };
+        let run = Run::open_from_bytes(src, &bytes).unwrap();
+        assert_eq!(run.src.reads.get(), 0, "trailer and index came from memory");
+        assert_eq!(run.entry_count, 3000);
+        assert_eq!(run.get_at(b"key00000042", LATEST).unwrap(), Some(Op::Put(vec![b'v'; 100])));
+        assert_eq!(run.src.reads.get(), 1, "the block itself still comes from the source");
+
+        let short = &bytes[..bytes.len() - 1];
+        assert!(Run::open_from_bytes(short, &bytes).is_err(), "size mismatch is refused");
     }
 
     #[test]

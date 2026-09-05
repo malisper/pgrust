@@ -47,13 +47,43 @@ check "a range on the first column only" "200" \
       "$(idx "SELECT count(*) FROM events WHERE day >= 50 AND day < 52;")"
 
 echo "4b. a bound of another type"
-# The operator hands over a value of its own type. Where the two encode alike
-# (every string type) the comparison is honest; where they do not it is
-# refused rather than silently mis-sorted.
+# The operator hands over a value of its own type. Every string type encodes
+# alike, so a text bound on a name column is compared as it is. An integer
+# bound of another width is restated at the column's width before it is
+# encoded (objkv_index.rs, fit_int): a literal the column cannot hold keeps
+# its Postgres answer instead of being refused or mis-sorted.
 check "a text bound on a name column works" "t" \
       "$(idx "SELECT count(*) > 0 FROM pg_class WHERE relname LIKE 'pg\_cl%';")"
-contains "a wider integer bound is refused, not mis-sorted" "comparing a column of type" \
-         "$(idx "SELECT count(*) FROM events WHERE id > 5000000000;")"
+check "an int8 literal above int4 range: > matches nothing" "0" \
+      "$(idx "SELECT count(*) FROM events WHERE id > 5000000000;")"
+check "and < matches everything" "$ROWS" \
+      "$(idx "SELECT count(*) FROM events WHERE id < 5000000000;")"
+check "below int4 range: > matches everything" "$ROWS" \
+      "$(idx "SELECT count(*) FROM events WHERE id > -5000000000;")"
+check "and = matches nothing" "0" \
+      "$(idx "SELECT count(*) FROM events WHERE id = 5000000000;")"
+# The other way round: a bigint and a smallint column probed with a plain
+# int4 literal, cross-checked against a forced table read (tbl, via agree).
+sql "CREATE TABLE widths (b bigint PRIMARY KEY, s smallint NOT NULL) USING objkv;" >/dev/null
+sql "CREATE INDEX widths_s ON widths (s);" >/dev/null
+sql "INSERT INTO widths SELECT CASE WHEN g <= 500 THEN g ELSE g * 3000000000::bigint END, (g % 200) - 100 FROM generate_series(1,1000) g;" >/dev/null
+check "the rows are in" "1000" "$(sql "SELECT count(*) FROM widths;")"
+shows "bigint = int4 literal goes through the index" "Index" "$(plan "SELECT s FROM widths WHERE b = 42;")"
+agree "bigint = int4 literal, the right row"     "SELECT s FROM widths WHERE b = 42;"
+check "and exactly one"                          "1" "$(idx "SELECT count(*) FROM widths WHERE b = 42;")"
+agree "bigint > int4 literal"                    "SELECT count(*) FROM widths WHERE b > 400;"
+agree "bigint BETWEEN two int4 literals"         "SELECT string_agg(b::text, ',' ORDER BY b) FROM widths WHERE b BETWEEN 10 AND 13;"
+agree "bigint = an int8 literal above int4 range" "SELECT s FROM widths WHERE b = 1503000000000;"
+shows "smallint = int4 literal goes through the index" "Index" "$(plan "SELECT count(*) FROM widths WHERE s = 7;")"
+agree "smallint = int4 literal"                  "SELECT count(*) FROM widths WHERE s = 7;"
+agree "smallint = a negative int4 literal"       "SELECT count(*) FROM widths WHERE s = -99;"
+agree "smallint < int4 literal"                  "SELECT count(*) FROM widths WHERE s < -90;"
+check "smallint = a literal it cannot hold"      "0"    "$(idx "SELECT count(*) FROM widths WHERE s = 100000;")"
+check "smallint < a literal it cannot hold"      "1000" "$(idx "SELECT count(*) FROM widths WHERE s < 100000;")"
+check "smallint > a literal below its range"     "1000" "$(idx "SELECT count(*) FROM widths WHERE s > -100000;")"
+check "smallint > a literal it cannot hold"      "0"    "$(idx "SELECT count(*) FROM widths WHERE s > 100000;")"
+agree "smallint IN a list with one member too wide" "SELECT count(*) FROM widths WHERE s IN (7, 100000);"
+sql "DROP TABLE widths;" >/dev/null
 
 echo "5. a range reads the rows it needs and not the table"
 trace_mark

@@ -26,12 +26,15 @@ echo "2. a session that slipped in creates a table"
 check "created in $FIRST after its lift" "CREATE TABLE" "$(sql_in "$FIRST" "CREATE TABLE slipped_in (id int);")"
 
 echo "3. the next lift refuses"
-OUT=$(sql_in "$LAST" "SELECT pgrust_objkv_lift();")
+OUT=$(DB="$LAST" sqlv "SELECT pgrust_objkv_lift();")
 contains "refused, naming the stale lift" "has written since" "$OUT"
+check "with sqlstate 55000 object_not_in_prerequisite_state" "55000" "$(sqlstate_of "$OUT")"
 echo "  $(echo "$OUT" | head -1)"
 
 echo "4. and so does the flip"
-contains "refused" "has written since" "$(sql "SELECT pgrust_objkv_lift_finish();")"
+OUT=$(sqlv "SELECT pgrust_objkv_lift_finish();")
+contains "refused" "has written since" "$OUT"
+check "with sqlstate 55000 object_not_in_prerequisite_state" "55000" "$(sqlstate_of "$OUT")"
 [ -f "$PGDATA/objkv_catalogs" ] && fail "a marker was written" || ok "no marker written"
 
 echo "5. the refusal is about the write, not the company"

@@ -137,7 +137,14 @@ ROLLBACK;
 SQL
 )"
 
-echo "5b. two sessions upserting the same key"
+echo "5b. two sessions upserting the same key (known divergence from Postgres)"
+# Known divergence from Postgres. There the second upsert blocks on the
+# first's uncommitted key, and once it commits takes the DO UPDATE path:
+# both succeed and hits is exactly 2, every time. objkv takes no key locks:
+# the loser is refused at COMMIT with 40001 (accepted below as the only
+# legitimate failure), and hits is 1 or 2 depending on who read what first.
+# The isolation contract is in objkv_am.rs and docs/objkv.md; this step pins
+# it so a change is noticed, not to bless it.
 sql "CREATE TABLE ord_race (id int PRIMARY KEY, hits int) USING objkv;" >/dev/null
 race() {
     txn <<SQL
@@ -167,7 +174,8 @@ for r in 1 2; do
 done
 check "exactly one row exists" "1" "$(sql "SELECT count(*) FROM ord_race;")"
 # Either serialization order is legitimate; what is not is two winners.
-check "and nobody was told they won twice" "t" "$(sql "SELECT hits IN (1,2) FROM ord_race;")"
+check "known divergence from Postgres: hits is 1 or 2 and a racer may get 40001, where Postgres would block and always reach 2" \
+      "t" "$(sql "SELECT hits IN (1,2) FROM ord_race;")"
 sql "DROP TABLE ord_race;" >/dev/null
 
 echo "6. prepared statements and cursors"

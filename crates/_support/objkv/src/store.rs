@@ -20,8 +20,10 @@ pub trait Store: Send + Sync {
     ///
     /// The only destructive operation here. Everything else in this design is
     /// append-only, which is why a crash has never been able to lose data --
-    /// an interrupted write leaves rubbish, not a hole. This one can, so its
-    /// caller reads the replacement back before calling it.
+    /// an interrupted write leaves rubbish, not a hole. This one can, so it
+    /// is only ever pointed at what is provably garbage: a replaced run after
+    /// its replacement has been read back, a folded commit object, a marker
+    /// or lease object the bucket no longer needs.
     fn delete(&self, key: &str) -> io::Result<()>;
 }
 
@@ -72,7 +74,11 @@ impl Store for MemStore {
     fn get_range(&self, key: &str, offset: u64, len: u64) -> io::Result<Option<Vec<u8>>> {
         let o = self.objects.lock().unwrap();
         let Some(b) = o.get(key) else { return Ok(None) };
-        let (s, e) = (offset as usize, ((offset + len) as usize).min(b.len()));
+        let s = usize::try_from(offset).map_err(|_| io::Error::other("range offset overflow"))?;
+        let e = offset
+            .checked_add(len)
+            .and_then(|e| usize::try_from(e).ok())
+            .map_or(b.len(), |e| e.min(b.len()));
         if s > b.len() {
             return Err(io::Error::other("range past end of object"));
         }

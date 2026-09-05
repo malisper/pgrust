@@ -27,10 +27,13 @@
 
 use ::datum::Datum;
 use ::mcx::Mcx;
-use ::types_core::catalog::PG_CATALOG_NAMESPACE;
+use ::tableam::HEAP_TABLE_AM_OID;
+use ::types_core::catalog::{BTREE_AM_OID, PG_CATALOG_NAMESPACE, PG_TOAST_NAMESPACE};
 use ::types_core::{InvalidOid, Oid};
-use ::types_error::{PgError, PgResult};
-use ::types_fmgr::FmgrBuiltin;
+use ::types_error::{
+    PgError, PgResult, SqlState, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_OBJECT_IN_USE,
+    ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+};
 use ::types_rel::Relation;
 use ::types_storage::lock::AccessShareLock;
 
@@ -38,6 +41,23 @@ mod builtins;
 pub use builtins::LIFT_BUILTINS;
 
 const RELKIND_RELATION: u8 = b'r';
+const RELKIND_INDEX: u8 = b'i';
+const RELKIND_SEQUENCE: u8 = b'S';
+const RELKIND_TOAST: u8 = b't';
+const RELKIND_MATVIEW: u8 = b'm';
+const RELKIND_PARTITIONED: u8 = b'p';
+
+fn relkind_word(relkind: u8) -> &'static str {
+    match relkind {
+        RELKIND_RELATION => "table",
+        RELKIND_INDEX => "index",
+        RELKIND_SEQUENCE => "sequence",
+        RELKIND_TOAST => "toast table",
+        RELKIND_MATVIEW => "materialized view",
+        RELKIND_PARTITIONED => "partitioned table",
+        _ => "relation",
+    }
+}
 
 // pg_class/pg_database column numbers and oids, spelled out as vacuum does
 // rather than imported: these are bootstrap facts, not catalog lookups.
@@ -56,6 +76,12 @@ const Anum_pg_class_relkind: usize = 18;
 const Anum_pg_database_oid: usize = 1;
 const Anum_pg_database_datname: usize = 2;
 const Anum_pg_database_datallowconn: usize = 7;
+const NamespaceRelationId: Oid = 2615;
+const Anum_pg_namespace_oid: usize = 1;
+const Anum_pg_namespace_nspname: usize = 2;
+const AccessMethodRelationId: Oid = 2601;
+const Anum_pg_am_oid: usize = 1;
+const Anum_pg_am_amname: usize = 2;
 
 fn getattr(
     tup: &::types_tuple::HeapTupleData<'_>,
@@ -101,31 +127,56 @@ fn name_of(d: Datum) -> String {
 /// pg_am's oid for objkv, by name: the AM is a catalog row, so there is no
 /// compiled-in oid.
 fn am_oid_named(mcx: Mcx<'_>, want: &str) -> PgResult<Oid> {
-    const AccessMethodRelationId: Oid = 2601;
-    const Anum_pg_am_oid: usize = 1;
-    const Anum_pg_am_amname: usize = 2;
+    let found = am_names(mcx)?
+        .into_iter()
+        .find_map(|(oid, name)| (name == want).then_some(oid));
+    found.ok_or_else(|| {
+        let (kind, handler) = if want == "objkv" {
+            ("TABLE", "heap_tableam_handler")
+        } else {
+            ("INDEX", "bthandler")
+        };
+        refuse(
+            ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+            format!("objkv lift: no access method named {want} in this database"),
+            format!("CREATE ACCESS METHOD {want} TYPE {kind} HANDLER {handler}; then lift again."),
+        )
+    })
+}
+
+/// Every access method in this database, by oid: the lift names them in its
+/// refusals, and the two it needs are looked up here.
+fn am_names(mcx: Mcx<'_>) -> PgResult<Vec<(Oid, String)>> {
     let rel = ::table::table_open(mcx, AccessMethodRelationId, AccessShareLock)?;
     let desc = rel.descr();
-    let mut found = InvalidOid;
+    let mut out = Vec::new();
     let mut scan = ::genam::systable_beginscan(mcx, &rel, InvalidOid, false, None, &[])?;
     while let Some(tup) = ::genam::systable_getnext(mcx, &mut scan)? {
-        if name_of(getattr(tup, Anum_pg_am_amname, desc)) == want {
-            found = getattr(tup, Anum_pg_am_oid, desc).as_oid();
-            break;
-        }
+        out.push((
+            getattr(tup, Anum_pg_am_oid, desc).as_oid(),
+            name_of(getattr(tup, Anum_pg_am_amname, desc)),
+        ));
     }
     ::genam::systable_endscan(mcx, scan)?;
     ::table::table_close(rel, AccessShareLock)?;
-    if found == InvalidOid {
-        return Err(err(format!(
-            "objkv lift: no access method named {want} in this database"
-        )));
-    }
-    Ok(found)
+    Ok(out)
 }
 
-fn objkv_am_oid(mcx: Mcx<'_>) -> PgResult<Oid> {
-    am_oid_named(mcx, "objkv")
+/// Every schema, by oid, so a refusal can name `schema.relation`.
+fn namespace_names(mcx: Mcx<'_>) -> PgResult<Vec<(Oid, String)>> {
+    let rel = ::table::table_open(mcx, NamespaceRelationId, AccessShareLock)?;
+    let desc = rel.descr();
+    let mut out = Vec::new();
+    let mut scan = ::genam::systable_beginscan(mcx, &rel, InvalidOid, false, None, &[])?;
+    while let Some(tup) = ::genam::systable_getnext(mcx, &mut scan)? {
+        out.push((
+            getattr(tup, Anum_pg_namespace_oid, desc).as_oid(),
+            name_of(getattr(tup, Anum_pg_namespace_nspname, desc)),
+        ));
+    }
+    ::genam::systable_endscan(mcx, scan)?;
+    ::table::table_close(rel, AccessShareLock)?;
+    Ok(out)
 }
 
 /// Both: a lifted catalog's indexes must be objkv indexes too, or a btree
@@ -167,19 +218,30 @@ fn refuse_if_written_since_lifts(now: u64) -> PgResult<()> {
     for (key, record) in ::tableam::objkv_am::lift_records_keyed()? {
         let Some(then) = record_field::<u64>(&record, "xid=") else { continue };
         if then != now {
-            return Err(err(format!(
-                "objkv lift: the cluster has written since {key} was lifted \
-                 (transaction counter {then} then, {now} now), so that copy is stale. \
-                 Clear the lift records in the bucket and lift every database again \
-                 with nothing else connected."
-            )));
+            return Err(refuse(
+                ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+                format!(
+                    "objkv lift: the cluster has written since {key} was lifted \
+                     (transaction counter {then} then, {now} now), so that copy is stale."
+                ),
+                "Clear the lift records in the bucket and lift every database again \
+                 with nothing else connected.",
+            ));
         }
     }
     Ok(())
 }
 
+/// An internal error: something the lift did not expect, with no operator
+/// action to name.
 fn err(what: String) -> Box<PgError> {
     Box::new(PgError::error(what))
+}
+
+/// A refusal: a condition the operator can see and fix, under the sqlstate
+/// that says which kind, with the fix in the hint.
+fn refuse(sqlstate: SqlState, what: String, hint: impl Into<String>) -> Box<PgError> {
+    Box::new(PgError::error(what).with_sqlstate(sqlstate).with_hint(hint))
 }
 
 struct Target {
@@ -188,7 +250,10 @@ struct Target {
     shared: bool,
 }
 
-fn targets(mcx: Mcx<'_>, shared: bool) -> PgResult<Vec<Target>> {
+/// The system tables: relkind `r` in a system schema. `information_schema`'s
+/// four `sql_*` tables are initdb's as much as pg_catalog is, and heap; they
+/// are lifted with the catalogs so they do not have to be refused.
+fn targets(mcx: Mcx<'_>, shared: bool, rw: &Rewrite) -> PgResult<Vec<Target>> {
     let pgclass = ::table::table_open(mcx, RelationRelationId, AccessShareLock)?;
     let desc = pgclass.descr();
     let mut out = Vec::new();
@@ -198,7 +263,7 @@ fn targets(mcx: Mcx<'_>, shared: bool) -> PgResult<Vec<Target>> {
         if get(Anum_pg_class_relkind).as_u8() != RELKIND_RELATION {
             continue;
         }
-        if get(Anum_pg_class_relnamespace).as_oid() != PG_CATALOG_NAMESPACE {
+        if !rw.namespaces.contains(&get(Anum_pg_class_relnamespace).as_oid()) {
             continue;
         }
         if get(Anum_pg_class_relisshared).as_bool() != shared {
@@ -228,10 +293,14 @@ fn refuse_unless_alone(mcx: Mcx<'_>, what: &str) -> PgResult<()> {
     ::genam::systable_endscan(mcx, scan)?;
     ::table::table_close(pgdb, AccessShareLock)?;
     if others > 1 {
-        return Err(err(format!(
-            "objkv lift: {} other backend(s) are connected; the {what} must be the only session in the cluster",
-            others - 1
-        )));
+        return Err(refuse(
+            ERRCODE_OBJECT_IN_USE,
+            format!(
+                "objkv lift: {} other backend(s) are connected; the {what} must be the only session in the cluster",
+                others - 1
+            ),
+            "Disconnect every other session, including any autovacuum worker, and run it again.",
+        ));
     }
     Ok(())
 }
@@ -242,27 +311,141 @@ struct Ams {
     index: Oid,
 }
 
-/// its relkind, since the bucket copy is the one that will be read. Rewriting
-/// an *index* row to the table access method makes the index claim to be a
-/// table, and bootstrap fails with "could not open critical system index".
-/// Rows with no access method -- views, sequences -- keep a relam of zero.
+/// The storage facts of one pg_class row.
+struct ClassRow {
+    oid: Oid,
+    name: String,
+    namespace: Oid,
+    relkind: u8,
+    relam: Oid,
+}
+
+fn class_row(
+    tup: &::types_tuple::HeapTupleData<'_>,
+    desc: &::types_tuple::TupleDescData<'_>,
+) -> ClassRow {
+    let get = |n| getattr(tup, n, desc);
+    ClassRow {
+        oid: get(Anum_pg_class_oid).as_oid(),
+        name: name_of(get(Anum_pg_class_relname)),
+        namespace: get(Anum_pg_class_relnamespace).as_oid(),
+        relkind: get(Anum_pg_class_relkind).as_u8(),
+        relam: get(Anum_pg_class_relam).as_oid(),
+    }
+}
+
+fn class_rows(mcx: Mcx<'_>) -> PgResult<Vec<ClassRow>> {
+    let rel = ::table::table_open(mcx, RelationRelationId, AccessShareLock)?;
+    let desc = rel.descr();
+    let mut out = Vec::new();
+    let mut scan = ::genam::systable_beginscan(mcx, &rel, InvalidOid, false, None, &[])?;
+    while let Some(tup) = ::genam::systable_getnext(mcx, &mut scan)? {
+        out.push(class_row(tup, desc));
+    }
+    ::genam::systable_endscan(mcx, scan)?;
+    ::table::table_close(rel, AccessShareLock)?;
+    Ok(out)
+}
+
+/// What the bucket's copy of a pg_class row says about where its rows are.
+enum Disposition {
+    /// As it is: no access method, or objkv already.
+    Keep,
+    /// A catalog on heap or btree: the bucket copy names objkv instead.
+    Rewrite(Oid),
+    /// Anything else. Its rows are in a local file the flip stops reading,
+    /// and relabelling it objkv would make it read as empty, not as wrong.
+    Refuse,
+}
+
+/// The one rule for `relam` in the bucket, applied by the lift and checked
+/// by the audit before it: exactly the system tables' own heap storage, their
+/// toast tables and their btree indexes become objkv. Rewriting an *index*
+/// row to the table access method makes the index claim to be a table, and
+/// bootstrap fails with "could not open critical system index". Rows with no
+/// access method -- views, composite types -- keep a relam of zero.
+struct Rewrite {
+    ams: Ams,
+    /// The system schemas: pg_catalog, and information_schema by name since
+    /// initdb creates it with no fixed oid.
+    namespaces: Vec<Oid>,
+    /// Every relation in those schemas, so `pg_toast.pg_toast_<oid>` can be
+    /// told from a user table's toast table by who it serves.
+    catalog_oids: Vec<Oid>,
+}
+
+impl Rewrite {
+    fn load(mcx: Mcx<'_>) -> PgResult<Rewrite> {
+        let ams = ams_of(mcx)?;
+        let mut namespaces = vec![PG_CATALOG_NAMESPACE];
+        namespaces.extend(
+            namespace_names(mcx)?
+                .into_iter()
+                .filter_map(|(oid, name)| (name == "information_schema").then_some(oid)),
+        );
+        let catalog_oids = class_rows(mcx)?
+            .into_iter()
+            .filter(|r| namespaces.contains(&r.namespace))
+            .map(|r| r.oid)
+            .collect();
+        Ok(Rewrite { ams, namespaces, catalog_oids })
+    }
+
+    fn serves_a_catalog(&self, row: &ClassRow) -> bool {
+        if row.namespace == PG_TOAST_NAMESPACE {
+            return toast_owner(&row.name).is_some_and(|owner| self.catalog_oids.contains(&owner));
+        }
+        self.namespaces.contains(&row.namespace)
+    }
+
+    fn disposition(&self, row: &ClassRow) -> Disposition {
+        if row.relam == InvalidOid || row.relam == self.ams.table || row.relam == self.ams.index {
+            return Disposition::Keep;
+        }
+        if !self.serves_a_catalog(row) {
+            return Disposition::Refuse;
+        }
+        match (row.relkind, row.relam) {
+            (RELKIND_RELATION | RELKIND_TOAST, HEAP_TABLE_AM_OID) => {
+                Disposition::Rewrite(self.ams.table)
+            }
+            (RELKIND_INDEX, BTREE_AM_OID) => Disposition::Rewrite(self.ams.index),
+            _ => Disposition::Refuse,
+        }
+    }
+}
+
+/// `pg_toast_<oid>` and `pg_toast_<oid>_index`: the relation served.
+fn toast_owner(name: &str) -> Option<Oid> {
+    let digits: String = name
+        .strip_prefix("pg_toast_")?
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
+}
+
 fn with_relam(
     mcx: Mcx<'_>,
     tup: &::types_tuple::HeapTupleData<'_>,
     desc: &::types_tuple::TupleDescData<'_>,
-    ams: Ams,
+    rw: &Rewrite,
 ) -> PgResult<Vec<u8>> {
-    const RELKIND_INDEX: u8 = b'i';
-    const RELKIND_MATVIEW: u8 = b'm';
-    const RELKIND_PARTITIONED: u8 = b'p';
-    const RELKIND_TOAST: u8 = b't';
-
-    let relkind = getattr(tup, Anum_pg_class_relkind, desc).as_u8();
-    let am = match relkind {
-        RELKIND_RELATION | RELKIND_MATVIEW | RELKIND_PARTITIONED | RELKIND_TOAST => ams.table,
-        RELKIND_INDEX => ams.index,
-        // Giving a view a table access method is how something tries to scan one.
-        _ => return Ok(tup_image(mcx, tup, desc)?),
+    let row = class_row(tup, desc);
+    let am = match rw.disposition(&row) {
+        Disposition::Keep => return tup_image(mcx, tup, desc),
+        Disposition::Rewrite(am) => am,
+        // `refuse_unless_liftable` runs first and names these; reaching here
+        // is a row created between the audit and this scan.
+        Disposition::Refuse => {
+            return Err(err(format!(
+                "objkv lift: {} ({}, relam {}) is neither a catalog nor objkv and cannot be \
+                 copied into the bucket",
+                row.name,
+                relkind_word(row.relkind),
+                row.relam
+            )))
+        }
     };
 
     let natts = desc.natts as usize;
@@ -286,10 +469,121 @@ fn tup_image(
         .to_vec())
 }
 
+/// Everything the flip would leave behind, named, before anything is staged.
+///
+/// After the flip a relation's rows are wherever its relam says, and the
+/// rewrite only knows what to say about the catalogs. Any other relation on
+/// heap or btree keeps a local file nothing reads afterwards -- `SELECT`
+/// would answer no rows, not an error -- so the lift refuses while the fix is
+/// one statement. Sequences are refused apart: their state is a local file
+/// too, and the bucket has no place for it yet. And an objkv row pointing
+/// into a local toast relation reads fine today and dereferences nothing on a
+/// blank machine. `verify` asks the same question, so a relation created
+/// between the lift and the check is named there rather than at the flip.
+fn refuse_unless_liftable(mcx: Mcx<'_>, rw: &Rewrite) -> PgResult<()> {
+    let rows = class_rows(mcx)?;
+    let mut foreign: Vec<&ClassRow> =
+        rows.iter().filter(|r| matches!(rw.disposition(r), Disposition::Refuse)).collect();
+    // A refused table's toast table is refused for the same reason; naming
+    // the table is enough.
+    let refused: Vec<Oid> = foreign.iter().map(|r| r.oid).collect();
+    foreign.retain(|r| {
+        r.namespace != PG_TOAST_NAMESPACE
+            || !toast_owner(&r.name).is_some_and(|owner| refused.contains(&owner))
+    });
+    if !foreign.is_empty() {
+        let schemas = namespace_names(mcx)?;
+        let ams = am_names(mcx)?;
+        let lookup = |list: &[(Oid, String)], oid: Oid| -> String {
+            list.iter()
+                .find_map(|(o, n)| (*o == oid).then(|| n.clone()))
+                .unwrap_or_else(|| oid.to_string())
+        };
+        let named: Vec<String> = foreign
+            .iter()
+            .map(|r| {
+                format!(
+                    "{}.{} ({}, {})",
+                    lookup(&schemas, r.namespace),
+                    r.name,
+                    relkind_word(r.relkind),
+                    lookup(&ams, r.relam)
+                )
+            })
+            .collect();
+        return Err(refuse(
+            ERRCODE_FEATURE_NOT_SUPPORTED,
+            format!(
+                "objkv lift: {} relation(s) are stored outside the bucket and would read as \
+                 empty after the flip: {}",
+                named.len(),
+                named.join(", ")
+            ),
+            "Only catalogs and objkv relations survive the flip. Recreate each one USING \
+             objkv (indexes USING objkv_btree) or drop it, then lift again.",
+        ));
+    }
+
+    let sequences: Vec<String> = rows
+        .iter()
+        .filter(|r| r.relkind == RELKIND_SEQUENCE)
+        .map(|r| r.name.clone())
+        .collect();
+    if !sequences.is_empty() {
+        return Err(refuse(
+            ERRCODE_FEATURE_NOT_SUPPORTED,
+            format!(
+                "objkv lift: sequences are not lifted, and this database has {}: {}",
+                sequences.len(),
+                sequences.join(", ")
+            ),
+            "A sequence's state is a local file the bucket does not carry, so nextval() on \
+             a blank machine would have nothing to read. Drop the sequences (and the \
+             serial or identity columns that own them) before lifting.",
+        ));
+    }
+
+    let db = ::init_small::globals::MyDatabaseId();
+    for r in rows.iter().filter(|r| {
+        r.relam == rw.ams.table && matches!(r.relkind, RELKIND_RELATION | RELKIND_MATVIEW | RELKIND_TOAST)
+    }) {
+        let external = ::tableam::objkv_am::scan_rows(db, r.oid, ::objkv::key::LATEST)?
+            .iter()
+            .filter(|(_, image)| image_has_external(image))
+            .count();
+        if external > 0 {
+            return Err(refuse(
+                ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+                format!(
+                    "objkv lift: {external} row(s) of {} point into a local toast relation, \
+                     which the bucket does not carry",
+                    r.name
+                ),
+                "Rewrite those rows so their values are stored inline (UPDATE ... SET col = \
+                 col on a server whose objkv insert path flattens them), then lift again.",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Whether a stored heap-tuple image has a column left in a toast relation.
+fn image_has_external(image: &[u8]) -> bool {
+    const AT: usize = core::mem::offset_of!(::types_tuple::HeapTupleHeaderData, t_infomask);
+    image.len() >= AT + 2
+        && (u16::from_ne_bytes([image[AT], image[AT + 1]]) & ::types_tuple::HEAP_HASEXTERNAL) != 0
+}
+
 /// Flattened, which is why this is not a byte copy: a catalog row can carry a
 /// toast pointer into a local toast relation, and a bucket row that
 /// dereferences local disk is the finish-line test failing invisibly.
-fn lift_rows(mcx: Mcx<'_>, scope: u32, t: &Target, oid_high: &mut u32) -> PgResult<u64> {
+fn lift_rows(
+    mcx: Mcx<'_>,
+    scope: u32,
+    t: &Target,
+    oid_high: &mut u32,
+    rw: &Rewrite,
+) -> PgResult<u64> {
     let rel = ::table::table_open(mcx, t.relid, AccessShareLock)?;
     let desc = rel.descr();
     let is_pg_class = t.relid == RelationRelationId;
@@ -301,7 +595,7 @@ fn lift_rows(mcx: Mcx<'_>, scope: u32, t: &Target, oid_high: &mut u32) -> PgResu
 
         // relam is rewritten now: the bucket copy is the one that will be read.
         let image = if is_pg_class {
-            with_relam(mcx, flat.as_tuple(), desc, ams_of(mcx)?)?
+            with_relam(mcx, flat.as_tuple(), desc, rw)?
         } else {
             flat.image().to_vec()
         };
@@ -354,10 +648,9 @@ fn shared_relation_oids(mcx: Mcx<'_>) -> PgResult<Vec<Oid>> {
 
 /// pg_class, pg_attribute and pg_index rows describing the shared relations,
 /// copied into scope 0 so they can be read before a database is chosen.
-fn lift_shared_catalog_rows(mcx: Mcx<'_>, oid_high: &mut u32) -> PgResult<u64> {
+fn lift_shared_catalog_rows(mcx: Mcx<'_>, oid_high: &mut u32, rw: &Rewrite) -> PgResult<u64> {
     let wanted = shared_relation_oids(mcx)?;
 
-    let ams = ams_of(mcx)?;
     let mut n = 0u64;
 
     {
@@ -371,7 +664,7 @@ fn lift_shared_catalog_rows(mcx: Mcx<'_>, oid_high: &mut u32) -> PgResult<u64> {
             }
             *oid_high = (*oid_high).max(oid);
             let flat = ::heaptoast_seams::toast_flatten_tuple::call(mcx, tup, desc)?;
-            let image = with_relam(mcx, flat.as_tuple(), desc, ams)?;
+            let image = with_relam(mcx, flat.as_tuple(), desc, rw)?;
             ::tableam::objkv_am::insert_row(0, RelationRelationId, image)?;
             n += 1;
         }
@@ -510,33 +803,42 @@ pub fn lift(mcx: Mcx<'_>) -> PgResult<String> {
     refuse_unless_alone(mcx, "lift")?;
     let xid = next_xid()?;
     refuse_if_written_since_lifts(xid)?;
+    let rw = Rewrite::load(mcx)?;
+    refuse_unless_liftable(mcx, &rw)?;
     let mut report = String::new();
     if !scope_recorded(0)? {
-        report.push_str(&lift_scope(mcx, 0, true, xid)?);
+        report.push_str(&lift_scope(mcx, 0, true, xid, &rw)?);
         report.push('\n');
     }
     let db = ::init_small::globals::MyDatabaseId();
-    report.push_str(&lift_scope(mcx, db, false, xid)?);
+    report.push_str(&lift_scope(mcx, db, false, xid, &rw)?);
     Ok(report)
 }
 
-fn lift_scope(mcx: Mcx<'_>, scope: u32, shared: bool, xid: u64) -> PgResult<String> {
+fn lift_scope(
+    mcx: Mcx<'_>,
+    scope: u32,
+    shared: bool,
+    xid: u64,
+    rw: &Rewrite,
+) -> PgResult<String> {
     // The record is what "already lifted" means, written inside the same commit
     // object as the rows so it cannot disagree with them. A scope holding objkv
     // keys is a different condition -- the normal case, and the reason to lift.
     if scope_recorded(scope)? {
-        return Err(err(format!(
-            "objkv lift: scope {scope:08x} is already lifted; clearing it is an operator action, \
-             not something a lift does on its own"
-        )));
+        return Err(refuse(
+            ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+            format!("objkv lift: scope {scope:08x} is already lifted"),
+            "Clearing a lifted scope is an operator action, not something a lift does on its own.",
+        ));
     }
 
-    let targets = targets(mcx, shared)?;
+    let targets = targets(mcx, shared, rw)?;
     let mut rows = 0u64;
     let mut entries = 0u64;
     let mut oid_high = 0u32;
     for t in &targets {
-        rows += lift_rows(mcx, scope, t, &mut oid_high)?;
+        rows += lift_rows(mcx, scope, t, &mut oid_high, rw)?;
     }
     if shared {
         // Scope 0 needs its own small catalog too: boot builds the shared critical
@@ -544,7 +846,7 @@ fn lift_scope(mcx: Mcx<'_>, scope: u32, shared: bool, xid: u64) -> PgResult<Stri
         // per-database pg_class and pg_attribute -- so the lookup asks scope 0 and
         // finds nothing ("could not open critical system index 2671"). Postgres never
         // meets this because pg_class is a local file anyone can read.
-        rows += lift_shared_catalog_rows(mcx, &mut oid_high)?;
+        rows += lift_shared_catalog_rows(mcx, &mut oid_high, rw)?;
     }
     for t in &targets {
         entries += lift_indexes(mcx, scope, t)?;
@@ -558,19 +860,21 @@ fn lift_scope(mcx: Mcx<'_>, scope: u32, shared: bool, xid: u64) -> PgResult<Stri
     // The counter says whether that happened.
     let after = next_xid()?;
     if after != xid {
-        return Err(err(format!(
-            "objkv lift: the cluster wrote while scope {scope:08x} was being copied \
-             (transaction counter {xid} then, {after} now); nothing was recorded. \
-             Run the lift again with nothing else connected."
-        )));
+        return Err(refuse(
+            ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+            format!(
+                "objkv lift: the cluster wrote while scope {scope:08x} was being copied \
+                 (transaction counter {xid} then, {after} now); nothing was recorded."
+            ),
+            "Run the lift again with nothing else connected.",
+        ));
     }
 
-    let ams = ams_of(mcx)?;
     let record = format!(
         "v1 relations={} rows={rows} entries={entries} oid_high={oid_high} am={} iam={} xid={xid}",
         targets.len(),
-        ams.table,
-        ams.index
+        rw.ams.table,
+        rw.ams.index
     );
     ::tableam::objkv_am::stage_raw(record_key(scope), record.clone().into_bytes());
 
@@ -589,6 +893,11 @@ fn scope_recorded(scope: u32) -> PgResult<bool> {
 /// wrong row and that is the only interesting failure.
 pub fn verify(mcx: Mcx<'_>) -> PgResult<String> {
     require_superuser()?;
+    // The same refusal as the lift's: a heap table created since would pass a
+    // row-for-row comparison of the catalogs and still read as empty after
+    // the flip.
+    let rw = Rewrite::load(mcx)?;
+    refuse_unless_liftable(mcx, &rw)?;
     let db = ::init_small::globals::MyDatabaseId();
     let mut checked = 0usize;
     let mut rows = 0u64;
@@ -603,12 +912,12 @@ pub fn verify(mcx: Mcx<'_>) -> PgResult<String> {
             // catalogs whole. Those are exactly the rows boot reads to open
             // the shared critical indexes, so leaving them out would let a
             // wrong one pass a check that calls itself complete.
-            let (c, r) = verify_shared_extras(mcx)?;
+            let (c, r) = verify_shared_extras(mcx, &rw)?;
             checked += c;
             rows += r;
         }
-        for t in &targets(mcx, shared)? {
-            let (local, bucket) = (local_sums(mcx, t)?, bucket_sums(scope, t.relid)?);
+        for t in &targets(mcx, shared, &rw)? {
+            let (local, bucket) = (local_sums(mcx, t, &rw)?, bucket_sums(scope, t.relid)?);
             if local.len() != bucket.len() {
                 return Err(err(format!(
                     "objkv lift verify: {} has {} local rows and {} in the bucket",
@@ -632,13 +941,13 @@ pub fn verify(mcx: Mcx<'_>) -> PgResult<String> {
 
 /// The scope-0 copies `targets(mcx, true)` does not name, compared row for
 /// row against the same subset predicates `lift_shared_catalog_rows` used.
-fn verify_shared_extras(mcx: Mcx<'_>) -> PgResult<(usize, u64)> {
+fn verify_shared_extras(mcx: Mcx<'_>, rw: &Rewrite) -> PgResult<(usize, u64)> {
     let wanted = shared_relation_oids(mcx)?;
     let mut checked = 0usize;
     let mut rows = 0u64;
 
     let mut compare = |relid: Oid, key: Option<usize>, name: &str| -> PgResult<()> {
-        let local = local_sums_subset(mcx, relid, key, &wanted)?;
+        let local = local_sums_subset(mcx, relid, key, &wanted, rw)?;
         let bucket = bucket_sums(0, relid)?;
         if local.len() != bucket.len() {
             return Err(err(format!(
@@ -674,11 +983,11 @@ fn local_sums_subset(
     relid: Oid,
     key: Option<usize>,
     wanted: &[Oid],
+    rw: &Rewrite,
 ) -> PgResult<Vec<u32>> {
     let rel = ::table::table_open(mcx, relid, AccessShareLock)?;
     let desc = rel.descr();
     let is_pg_class = relid == RelationRelationId;
-    let ams = if is_pg_class { ams_of(mcx)? } else { Ams { table: InvalidOid, index: InvalidOid } };
     let mut out = Vec::new();
     let mut scan = ::genam::systable_beginscan(mcx, &rel, InvalidOid, false, None, &[])?;
     while let Some(tup) = ::genam::systable_getnext(mcx, &mut scan)? {
@@ -691,7 +1000,7 @@ fn local_sums_subset(
         // pg_class rows were rewritten on the way in, so both sides have to be
         // asked the same question -- as `local_sums` does for the same reason.
         let image = if is_pg_class {
-            with_relam(mcx, flat.as_tuple(), desc, ams)?
+            with_relam(mcx, flat.as_tuple(), desc, rw)?
         } else {
             flat.image().to_vec()
         };
@@ -707,11 +1016,10 @@ fn crc(bytes: &[u8]) -> u32 {
     ::crc32c::pg_comp_crc32c(0xffff_ffff, bytes) ^ 0xffff_ffff
 }
 
-fn local_sums(mcx: Mcx<'_>, t: &Target) -> PgResult<Vec<u32>> {
+fn local_sums(mcx: Mcx<'_>, t: &Target, rw: &Rewrite) -> PgResult<Vec<u32>> {
     let rel = ::table::table_open(mcx, t.relid, AccessShareLock)?;
     let desc = rel.descr();
     let is_pg_class = t.relid == RelationRelationId;
-    let ams = if is_pg_class { ams_of(mcx)? } else { Ams { table: InvalidOid, index: InvalidOid } };
     let mut out = Vec::new();
     let mut scan = ::genam::systable_beginscan(mcx, &rel, InvalidOid, false, None, &[])?;
     while let Some(tup) = ::genam::systable_getnext(mcx, &mut scan)? {
@@ -720,7 +1028,7 @@ fn local_sums(mcx: Mcx<'_>, t: &Target) -> PgResult<Vec<u32>> {
         // local rows against them would report every row as differing. The
         // check is worthless unless both sides are the same question.
         let image = if is_pg_class {
-            with_relam(mcx, flat.as_tuple(), desc, ams)?
+            with_relam(mcx, flat.as_tuple(), desc, rw)?
         } else {
             flat.image().to_vec()
         };
@@ -774,10 +1082,11 @@ pub fn finish(mcx: Mcx<'_>) -> PgResult<String> {
     ::table::table_close(pgdb, AccessShareLock)?;
 
     if !missing.is_empty() {
-        return Err(err(format!(
-            "objkv lift: not lifted yet: {}. Run pgrust_objkv_lift() in each.",
-            missing.join(", ")
-        )));
+        return Err(refuse(
+            ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+            format!("objkv lift: not lifted yet: {}.", missing.join(", ")),
+            "Run pgrust_objkv_lift() in each.",
+        ));
     }
 
     // Vouch for the lifts durably first: a commit is confirmed by the next one's
@@ -790,7 +1099,7 @@ pub fn finish(mcx: Mcx<'_>) -> PgResult<String> {
     // initdb's value and hands a second relation a number already in use.
     // Nothing else writes it until the first relation is created, and by then
     // the number has already been handed out.
-    ::tableam::objkv_am::claim_oid_block(oid_high_water()? + 1, 0)?;
+    ::tableam::objkv_am::claim_oid_block(oid_high_water()?.saturating_add(1), 0)?;
 
     // Before the file exists: the marker is read once per process and cached,
     // and this process must keep the pre-flip answer it booted with.

@@ -6,7 +6,13 @@
 use std::io;
 
 pub const MAGIC: u32 = 0x4f4b_4356; // "OKCV"
-pub const VERSION: u8 = 1;
+/// Format 2 carries the writer's lease epoch where format 1 carried a
+/// `confirmed_through` watermark and a self-confirmed flag. Every object a
+/// writer produces is the commit once it lands, so nothing vouches for
+/// anything; the epoch is what lets a later open tell a stale writer's object
+/// from the owner's (see `lease.rs`). Format 1 objects are refused: a bucket
+/// written by an older objkv has to be migrated, not guessed at.
+pub const VERSION: u8 = 2;
 const HEADER_LEN: usize = 44;
 
 /// A batch object: several commits that landed in one PUT. Group commit
@@ -35,21 +41,16 @@ pub struct Commit {
     /// The sorted run this commit is layered on top of; readers walk commits
     /// back to here before consulting run files.
     pub base_run_id: u64,
-    /// Names the writing transaction in the log when a crash orphans this
-    /// object. Often 0, and never consulted for correctness.
+    /// Names the writing transaction. A discard marker repeats it so the
+    /// marker can be matched to the object it judges; otherwise it is only
+    /// for the log.
     pub xid: u32,
-    /// Every commit at or below this was known committed when this was written.
-    pub confirmed_through: u64,
-    /// This PUT *was* the whole commit, so nothing need vouch for it. What
-    /// Postgres writes: the object landing is the commit, as a WAL commit
-    /// record is, and an abort after it is recorded by a discard marker.
-    /// False on the `commit_batch` path, which confirms separately.
-    pub self_confirmed: bool,
+    /// The lease epoch of the writer that produced this object. An object
+    /// whose epoch is below a later owner's takeover fence is a stale
+    /// writer's and is never applied.
+    pub epoch: u64,
     pub entries: Vec<Entry>,
 }
-
-/// `flags` bit 0.
-const FLAG_SELF_CONFIRMED: u8 = 1;
 
 pub fn key_for(seq: u64) -> String {
     format!("commit/{seq:016x}")
@@ -77,19 +78,45 @@ impl Commit {
         let mut out = Vec::with_capacity(HEADER_LEN + payload.len() + 4);
         put_u32(&mut out, MAGIC);
         out.push(VERSION);
-        out.push(if self.self_confirmed { FLAG_SELF_CONFIRMED } else { 0 });
-        out.extend_from_slice(&[0, 0]); // reserved
+        out.extend_from_slice(&[0, 0, 0]); // flags, reserved
         put_u64(&mut out, self.seq);
         put_u64(&mut out, self.base_run_id);
         put_u32(&mut out, self.entries.len() as u32);
         put_u32(&mut out, payload.len() as u32);
         put_u32(&mut out, self.xid);
-        put_u64(&mut out, self.confirmed_through);
+        put_u64(&mut out, self.epoch);
         debug_assert_eq!(out.len(), HEADER_LEN);
         out.extend_from_slice(&payload);
         let crc = crc32c::pg_comp_crc32c(0xffff_ffff, &out) ^ 0xffff_ffff;
         put_u32(&mut out, crc);
         out
+    }
+
+    /// `encode`, refusing anything the u32 length fields cannot describe. A
+    /// commit past 4 GiB would land with a wrong payload length and make the
+    /// bucket unopenable, so the writer checks before the PUT.
+    pub fn encode_checked(&self) -> io::Result<Vec<u8>> {
+        let too_big = |what: &str| {
+            io::Error::other(format!("objkv: commit too large to encode: {what} exceeds 4 GiB"))
+        };
+        let mut payload: u64 = 0;
+        for e in &self.entries {
+            if e.key.len() > u32::MAX as usize {
+                return Err(too_big("a key"));
+            }
+            let vlen = match &e.op {
+                Op::Put(v) => v.len(),
+                Op::Delete => 0,
+            };
+            if vlen > u32::MAX as usize {
+                return Err(too_big("a value"));
+            }
+            payload += 4 + e.key.len() as u64 + 1 + 4 + vlen as u64;
+        }
+        if self.entries.len() > u32::MAX as usize || payload > u32::MAX as u64 {
+            return Err(too_big("the payload"));
+        }
+        Ok(self.encode())
     }
 
     /// Never panics: length fields come off the network and may disagree with
@@ -109,7 +136,11 @@ impl Commit {
             return Err(bad("bad magic"));
         }
         if buf[4] != VERSION {
-            return Err(bad(&format!("unsupported version {}", buf[4])));
+            return Err(bad(&format!(
+                "unsupported version {} (this objkv reads format {VERSION} only; an older \
+                 bucket must be migrated, not opened)",
+                buf[4]
+            )));
         }
 
         let body = &buf[..buf.len() - 4];
@@ -123,9 +154,8 @@ impl Commit {
         let base_run_id = get_u64(buf, 16);
         let count = get_u32(buf, 24) as usize;
         let payload_len = get_u32(buf, 28) as usize;
-        let self_confirmed = buf[5] & FLAG_SELF_CONFIRMED != 0;
         let xid = get_u32(buf, 32);
-        let confirmed_through = get_u64(buf, 36);
+        let epoch = get_u64(buf, 36);
         // The payload must reach the checksum and stop there. Fitting inside
         // the object is not enough: a shorter length that lands on an entry
         // boundary parses cleanly and silently drops every write after it.
@@ -152,7 +182,14 @@ impl Commit {
                         .ok_or_else(|| bad("value runs past the payload"))?
                         .to_vec(),
                 ),
-                1 => Op::Delete,
+                1 => {
+                    // A tombstone carries no value; a length here would be
+                    // bytes the decoder skipped without reading.
+                    if vlen != 0 {
+                        return Err(bad("a delete entry with a value length"));
+                    }
+                    Op::Delete
+                }
                 t => return Err(bad(&format!("unknown entry tag {t}"))),
             };
             p += vlen;
@@ -169,7 +206,14 @@ impl Commit {
         if entries.windows(2).any(|w| w[0].key >= w[1].key) {
             return Err(bad("entries are not in sorted key order"));
         }
-        Ok(Commit { seq, base_run_id, xid, confirmed_through, self_confirmed, entries })
+        Ok(Commit { seq, base_run_id, xid, epoch, entries })
+    }
+
+    /// The CRC32C an encoded copy of this commit ends in: a fingerprint a
+    /// discard marker can carry, so the marker is matched to the object it
+    /// judges rather than to whatever later lands under the same number.
+    pub fn fingerprint(encoded: &[u8]) -> u32 {
+        get_u32_checked(encoded, encoded.len().saturating_sub(4)).unwrap_or(0)
     }
 
     /// Latest write for `key` in this commit, or `None` if untouched.
@@ -184,7 +228,6 @@ impl Commit {
             .map(|i| &self.entries[i].op)
     }
 
-    /// Every entry whose key starts with `prefix`, in key order.
     /// The entries in `[lo, hi)`. Sorted, so both ends are a binary search.
     pub fn ranged(&self, lo: &[u8], hi: &[u8]) -> &[Entry] {
         let start = self.entries.partition_point(|e| e.key.as_slice() < lo);
@@ -192,6 +235,7 @@ impl Commit {
         &self.entries[start..end.max(start)]
     }
 
+    /// Every entry whose key starts with `prefix`, in key order.
     pub fn prefixed(&self, prefix: &[u8]) -> &[Entry] {
         let start = self
             .entries
@@ -211,18 +255,26 @@ impl Commit {
 /// numbers need not be contiguous: one can be dropped between staging and the
 /// write, and a gap in the numbering is not an error anywhere.
 pub fn encode_batch(commits: &[Commit]) -> Vec<u8> {
-    debug_assert!(!commits.is_empty());
     debug_assert!(commits.windows(2).all(|w| w[0].seq < w[1].seq));
+    let encoded: Vec<Vec<u8>> = commits.iter().map(Commit::encode).collect();
+    let members: Vec<&[u8]> = encoded.iter().map(Vec::as_slice).collect();
+    encode_batch_members(&members)
+}
+
+/// The same from members already encoded: the writer encodes each commit
+/// once, at staging, and the fingerprint a discard marker carries is of
+/// those exact bytes.
+pub fn encode_batch_members(members: &[&[u8]]) -> Vec<u8> {
+    debug_assert!(!members.is_empty());
     let mut out = Vec::new();
     put_u32(&mut out, BATCH_MAGIC);
     out.push(BATCH_VERSION);
     out.extend_from_slice(&[0, 0, 0]);
-    put_u32(&mut out, commits.len() as u32);
+    put_u32(&mut out, members.len() as u32);
     debug_assert_eq!(out.len(), BATCH_HEADER_LEN);
-    for c in commits {
-        let bytes = c.encode();
+    for bytes in members {
         put_u32(&mut out, bytes.len() as u32);
-        out.extend_from_slice(&bytes);
+        out.extend_from_slice(bytes);
     }
     let crc = crc32c::pg_comp_crc32c(0xffff_ffff, &out) ^ 0xffff_ffff;
     put_u32(&mut out, crc);
@@ -232,6 +284,12 @@ pub fn encode_batch(commits: &[Commit]) -> Vec<u8> {
 /// The commits in one object, whichever form it takes. In ascending sequence
 /// order, which a batch is required to keep.
 pub fn decode_object(buf: &[u8]) -> io::Result<Vec<Commit>> {
+    Ok(decode_members(buf)?.into_iter().map(|(c, _)| c).collect())
+}
+
+/// `decode_object`, with each member's fingerprint (see
+/// [`Commit::fingerprint`]) so the open can match discard markers to them.
+pub fn decode_members(buf: &[u8]) -> io::Result<Vec<(Commit, u32)>> {
     fn bad(what: &str) -> io::Error {
         io::Error::other(format!("malformed batch object: {what}"))
     }
@@ -239,7 +297,7 @@ pub fn decode_object(buf: &[u8]) -> io::Result<Vec<Commit>> {
         return Err(bad("shorter than a magic number"));
     }
     if get_u32(buf, 0) != BATCH_MAGIC {
-        return Ok(vec![Commit::decode(buf)?]);
+        return Ok(vec![(Commit::decode(buf)?, Commit::fingerprint(buf))]);
     }
     if buf.len() < BATCH_HEADER_LEN + 4 {
         return Err(bad("shorter than a header"));
@@ -266,12 +324,12 @@ pub fn decode_object(buf: &[u8]) -> io::Result<Vec<Commit>> {
         if out.len() == count {
             return Err(bad("more members than the header declares"));
         }
-        out.push(Commit::decode(member)?);
+        out.push((Commit::decode(member)?, Commit::fingerprint(member)));
     }
     if out.len() != count {
         return Err(bad("fewer members than the header declares"));
     }
-    if out.windows(2).any(|w| w[0].seq >= w[1].seq) {
+    if out.windows(2).any(|w| w[0].0.seq >= w[1].0.seq) {
         return Err(bad("members are not in sequence order"));
     }
     Ok(out)
@@ -304,8 +362,7 @@ mod tests {
             seq: 123,
             base_run_id: 5,
             xid: 4242,
-            confirmed_through: 6,
-            self_confirmed: false,
+            epoch: 6,
             // Sorted and unique, as a commit built from a BTreeMap always is.
             entries: vec![
                 Entry { key: b"alpha".to_vec(), op: Op::Put(b"one".to_vec()) },
@@ -327,8 +384,7 @@ mod tests {
             seq: 1,
             base_run_id: 0,
             xid: 1,
-            confirmed_through: 0,
-            self_confirmed: false,
+            epoch: 0,
             entries: vec![],
         };
         assert_eq!(Commit::decode(&c.encode()).unwrap(), c);
@@ -418,6 +474,44 @@ mod tests {
         for n in 0..good.len() {
             let _ = decode_object(&good[..n]); // never panics
         }
+    }
+
+    #[test]
+    fn a_fingerprint_names_the_bytes_and_nothing_else() {
+        let a = sample().encode();
+        let mut b = sample();
+        b.xid += 1;
+        let b = b.encode();
+        assert_eq!(Commit::fingerprint(&a), Commit::fingerprint(&sample().encode()));
+        assert_ne!(Commit::fingerprint(&a), Commit::fingerprint(&b));
+        let members = decode_members(&encode_batch(&[sample()])).unwrap();
+        assert_eq!(members[0].1, Commit::fingerprint(&a), "a batch member keeps its own fingerprint");
+    }
+
+    #[test]
+    fn an_older_format_is_refused_by_name() {
+        let mut b = sample().encode();
+        b[4] = 1;
+        let n = b.len();
+        let crc = crc32c::pg_comp_crc32c(0xffff_ffff, &b[..n - 4]) ^ 0xffff_ffff;
+        b[n - 4..].copy_from_slice(&crc.to_le_bytes());
+        let err = Commit::decode(&b).unwrap_err().to_string();
+        assert!(err.contains("unsupported version 1"), "{err}");
+    }
+
+    #[test]
+    fn a_delete_with_a_value_length_is_corrupt() {
+        let c = Commit { entries: vec![Entry { key: b"k".to_vec(), op: Op::Delete }], ..sample() };
+        let mut b = c.encode();
+        // The delete's vlen field sits right after its tag byte.
+        let at = HEADER_LEN + 4 + 1 + 1;
+        assert_eq!(b[at - 1], 1, "the tag byte before it says delete");
+        b[at..at + 4].copy_from_slice(&3u32.to_le_bytes());
+        let n = b.len();
+        let crc = crc32c::pg_comp_crc32c(0xffff_ffff, &b[..n - 4]) ^ 0xffff_ffff;
+        b[n - 4..].copy_from_slice(&crc.to_le_bytes());
+        let err = Commit::decode(&b).unwrap_err().to_string();
+        assert!(err.contains("delete entry"), "{err}");
     }
 
     #[test]

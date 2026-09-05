@@ -17,6 +17,10 @@
 # OBJKV_TEST_ROOT, OBJKV_TIMING=1 to include the load-sensitive timing checks.
 
 set -uo pipefail
+# run_all.sh runs each script under a timeout. A signal would otherwise kill
+# this shell without its EXIT trap, leaving the server up and the port taken
+# for the next run; exiting from the handler runs the trap, which stops it.
+trap 'echo "  FAIL: killed by a signal (timed out?)" >&2; exit 124' TERM INT ALRM
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NAME="$(basename "$0" .sh)"
@@ -44,6 +48,7 @@ objkv_default_port() {
         group_commit)    echo 5419;;  stale_lift)     echo 5420;;
         partial_expression) echo 5421;;  analyze)     echo 5422;;
         last_commit)     echo 5423;;  desc_index)     echo 5424;;
+        snapshot_survives_collection) echo 5425;;
         *)               echo 5488;;
     esac
 }
@@ -78,6 +83,10 @@ timing_enabled() { [ "${OBJKV_TIMING:-0}" != 0 ]; }
 
 psqlx()  { psql -h "$SOCKDIR" -p "$PORT" -X "$@"; }
 sql()    { psqlx -d "${DB:-postgres}" -tAc "$1" 2>&1; }
+# The same, with the sqlstate on the ERROR line ("ERROR:  55006: ...").
+sqlv()   { psqlx -d "${DB:-postgres}" -tA -v VERBOSITY=verbose -c "$1" 2>&1; }
+# sqlstate_of <verbose output>: the five-character code, or nothing.
+sqlstate_of() { echo "$1" | sed -n 's/^ERROR:  \([0-9A-Z][0-9A-Z][0-9A-Z][0-9A-Z][0-9A-Z]\):.*/\1/p' | head -1; }
 sql_in() { psqlx -d "$1" -tAc "$2" 2>&1; }
 # A whole transaction down one connection, from stdin.
 txn()    { psqlx -d "${DB:-postgres}" -tA 2>&1; }

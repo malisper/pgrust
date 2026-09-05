@@ -10794,7 +10794,6 @@ dependencies = [
 name = "objkv_lift"
 version = "0.1.0"
 dependencies = [
- "catalog",
  "crc32c",
  "datum",
  "execindexing",

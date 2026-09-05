@@ -20,7 +20,6 @@ indexam = { path = "../../index/indexam" }
 relcache = { path = "../../../utils/cache/relcache" }
 heaptoast_seams = { path = "../../heap/heaptoast_seams" }
 heaptuple = { path = "../../common/heaptuple" }
-catalog = { path = "../../../catalog/catalog" }
 init_small = { path = "../../../utils/init/init_small" }
 procarray = { path = "../../../storage/ipc/procarray" }
 varsup = { path = "../../transam/varsup" }
