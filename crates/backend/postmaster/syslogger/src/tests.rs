@@ -188,3 +188,99 @@ fn update_metainfo_datafile_writes_current_logfiles() {
 
     std::env::set_current_dir(saved_cwd).unwrap();
 }
+
+/// syslogger.c:1228-1229: logfile_open opens under
+/// `umask(~(Log_file_mode | S_IWUSR))`, so a NEW file gets
+/// `0666 & (Log_file_mode | S_IWUSR)` — fopen's 0666 base never yields
+/// execute bits (config.sgml) — and an EXISTING file keeps its mode
+/// (umask plays no part in "a"/"w" on an existing file).
+#[cfg(unix)]
+#[test]
+fn logfile_open_mode_matches_c_fopen_under_umask() {
+    use std::os::unix::fs::PermissionsExt;
+    let _g = lock();
+    let dir = std::env::temp_dir().join(format!("sysltest-mode-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("mode.log");
+    let _ = std::fs::remove_file(&path);
+    let mode_of = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    let open = |mode: &str| {
+        let fh = logfile_open(path.to_str().unwrap(), mode, true).unwrap();
+        assert!(!fh.is_null(), "logfile_open({mode}) failed");
+        unsafe { libc::fclose(fh) };
+    };
+    let saved = LOG_FILE_MODE.swap(0o755, Relaxed);
+
+    // fresh file, log_file_mode = 0755: C creates 0644 (no execute bits)
+    open("a");
+    assert_eq!(mode_of(&path), 0o644, "new file: 0666 & (0755 | S_IWUSR)");
+
+    // fresh file, log_file_mode = 0400: S_IWUSR is always kept
+    std::fs::remove_file(&path).unwrap();
+    LOG_FILE_MODE.store(0o400, Relaxed);
+    open("a");
+    assert_eq!(mode_of(&path), 0o600, "new file: 0666 & (0400 | S_IWUSR)");
+
+    // pre-existing file: neither "a" nor "w" changes its mode
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+    LOG_FILE_MODE.store(0o600, Relaxed);
+    open("a");
+    assert_eq!(mode_of(&path), 0o640, "existing file, append: mode preserved");
+    open("w");
+    assert_eq!(mode_of(&path), 0o640, "existing file, truncate: mode preserved");
+
+    LOG_FILE_MODE.store(saved, Relaxed);
+    let _ = std::fs::remove_file(&path);
+}
+
+/// syslogger.c:526 (read from the logger pipe) and :625 (pipe(2) for the
+/// syslog pipe) report with errcode_for_socket_access, not
+/// errcode_for_file_access: EMFILE/ENFILE/ENOMEM/EIO are XX000, the
+/// connection-class errnos are 08006.
+#[test]
+fn logger_pipe_errors_use_socket_access_sqlstates() {
+    use types_error::{ERRCODE_CONNECTION_FAILURE, ERRCODE_INTERNAL_ERROR};
+    let sqlstate = |errnum: i32, message: &str| {
+        logger_pipe_report(FATAL, errnum, message).into_error().sqlstate()
+    };
+    let create = "could not create pipe for syslog: %m";
+    let read = "could not read from logger pipe: %m";
+    assert_eq!(sqlstate(libc::EMFILE, create), ERRCODE_INTERNAL_ERROR);
+    assert_eq!(sqlstate(libc::ENFILE, create), ERRCODE_INTERNAL_ERROR);
+    assert_eq!(sqlstate(libc::ENOMEM, create), ERRCODE_INTERNAL_ERROR);
+    assert_eq!(sqlstate(libc::EIO, read), ERRCODE_INTERNAL_ERROR);
+    assert_eq!(sqlstate(libc::ECONNRESET, read), ERRCODE_CONNECTION_FAILURE);
+    assert_eq!(sqlstate(libc::EPIPE, read), ERRCODE_CONNECTION_FAILURE);
+    let err = logger_pipe_report(FATAL, libc::EMFILE, create).into_error();
+    assert_eq!(err.message, format!("could not create pipe for syslog: {}", elog::errno::strerror(libc::EMFILE)));
+}
+
+/// syslogger.c:1424: `pg_strftime(filename + len, MAXPGPATH - len, ...)`
+/// formats up to MAXPGPATH - len - 1 bytes (the last slot is the NUL); one
+/// byte more overflows and leaves "<Log_directory>/".
+#[test]
+fn logfile_getname_formats_up_to_maxpgpath_minus_len_minus_one() {
+    let _g = lock();
+    let saved_dir = LOG_DIRECTORY.lock().unwrap().replace("log".to_string());
+    let saved_tz = pgtz::log_timezone();
+    pgtz::set_log_timezone(Some(pgtz::pg_tzset(b"GMT").expect("GMT always parses")));
+
+    let len = "log/".len();
+    let fits = "x".repeat(MAXPGPATH - len - 1);
+    let saved_name = LOG_FILENAME.lock().unwrap().replace(fits.clone());
+    let name = logfile_getname(0, None);
+    assert_eq!(name.len(), MAXPGPATH - 1);
+    assert_eq!(name, format!("log/{fits}"));
+
+    let over = "x".repeat(MAXPGPATH - len);
+    *LOG_FILENAME.lock().unwrap() = Some(over);
+    assert_eq!(logfile_getname(0, None), "log/");
+
+    // the default pattern still expands normally
+    *LOG_FILENAME.lock().unwrap() = Some("postgresql-%Y-%m-%d_%H%M%S.log".to_string());
+    assert_eq!(logfile_getname(0, None), "log/postgresql-1970-01-01_000000.log");
+
+    *LOG_FILENAME.lock().unwrap() = saved_name;
+    *LOG_DIRECTORY.lock().unwrap() = saved_dir;
+    pgtz::set_log_timezone(saved_tz);
+}

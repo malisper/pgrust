@@ -21,7 +21,7 @@ use elog::ereport;
 use init_small::globals as g;
 use types_core::{pg_time_t, BackendType, MAXPGPATH};
 use types_error::{
-    ErrorLocation, PgError, PgResult, DEBUG1, FATAL, LOG, LOG_DESTINATION_CSVLOG,
+    ErrorLevel, ErrorLocation, PgError, PgResult, DEBUG1, FATAL, LOG, LOG_DESTINATION_CSVLOG,
     LOG_DESTINATION_JSONLOG, LOG_DESTINATION_STDERR,
 };
 use types_startup::StartupData;
@@ -368,10 +368,7 @@ pub fn SysLoggerMain(startup_data: &StartupData) -> ! {
                 if bytes_read < 0 {
                     let e = last_errno();
                     if e != libc::EINTR {
-                        ereport(LOG)
-                            .with_saved_errno(e)
-                            .errcode_for_file_access()
-                            .errmsg("could not read from logger pipe: %m")
+                        logger_pipe_report(LOG, e, "could not read from logger pipe: %m")
                             .finish(loc("SysLoggerMain"))?;
                     }
                 } else if bytes_read > 0 {
@@ -445,10 +442,7 @@ pub fn SysLogger_Start(child_slot: i32) -> PgResult<i32> {
         #[cfg(target_family = "wasm")]
         let pipe_rc = -1;
         if pipe_rc < 0 {
-            ereport(FATAL)
-                .with_saved_errno(last_errno())
-                .errcode_for_file_access()
-                .errmsg("could not create pipe for syslog: %m")
+            logger_pipe_report(FATAL, last_errno(), "could not create pipe for syslog: %m")
                 .finish(loc("SysLogger_Start"))?;
         }
         SYSLOG_PIPE_R.store(fds[0], Relaxed);
@@ -655,22 +649,41 @@ pub fn write_syslogger_file(buffer: &[u8], destination: i32) {
     }
 }
 
-/// C sets a temporary umask so fopen creates the file as
-/// Log_file_mode|S_IWUSR; umask is process-wide here, so create narrow and
-/// fchmod to the exact C mode instead.
+/// Report builder for the syslog pipe's read (syslogger.c:526) and create
+/// (syslogger.c:625) failures: C classifies the pipe as a socket
+/// (errcode_for_socket_access), not a file.
+fn logger_pipe_report(level: ErrorLevel, errnum: i32, message: &str) -> elog::ErrorBuilder {
+    ereport(level)
+        .with_saved_errno(errnum)
+        .errcode_for_socket_access()
+        .errmsg(message)
+}
+
+/// C (syslogger.c:1228-1229) sets a temporary umask of
+/// ~(Log_file_mode | S_IWUSR) around fopen(): a file fopen CREATES gets
+/// 0666 & (Log_file_mode | S_IWUSR) — fopen's 0666 base never yields
+/// execute bits — and a file that already exists keeps its mode ("a"/"w"
+/// do not touch it). umask is process-wide here, so create narrow with
+/// O_EXCL and fchmod only the file we created to the exact C mode.
 fn logfile_open(filename: &str, mode: &str, allow_errors: bool) -> PgResult<*mut libc::FILE> {
-    let file_mode = ((LOG_FILE_MODE.load(Relaxed) as u32 | 0o200) & 0o777) as libc::mode_t;
-    let oflags = libc::O_WRONLY
-        | libc::O_CREAT
-        | if mode == "w" { libc::O_TRUNC } else { libc::O_APPEND };
+    let file_mode = ((LOG_FILE_MODE.load(Relaxed) as u32 | 0o200) & 0o666) as libc::mode_t;
+    let oflags = libc::O_WRONLY | if mode == "w" { libc::O_TRUNC } else { libc::O_APPEND };
     let c_filename = std::ffi::CString::new(filename).expect("log path contains NUL");
 
     let fh = unsafe {
-        let fd = libc::open(c_filename.as_ptr(), oflags, 0o600 as libc::c_uint);
+        let open =
+            |flags: libc::c_int| libc::open(c_filename.as_ptr(), flags, 0o600 as libc::c_uint);
+        // Create (O_EXCL) and stamp the C mode; on EEXIST reopen the
+        // existing file with its mode untouched.
+        let mut fd = open(oflags | libc::O_CREAT | libc::O_EXCL);
+        if fd >= 0 {
+            libc::fchmod(fd, file_mode);
+        } else if last_errno() == libc::EEXIST {
+            fd = open(oflags);
+        }
         if fd < 0 {
             std::ptr::null_mut()
         } else {
-            libc::fchmod(fd, file_mode);
             let c_mode =
                 std::ffi::CString::new(if mode == "w" { "w" } else { "a" }).unwrap();
             let fh = libc::fdopen(fd, c_mode.as_ptr());
@@ -807,9 +820,10 @@ fn logfile_getname(timestamp: pg_time_t, suffix: Option<&str>) -> String {
     let len = filename.len();
     let tz = pgtz::log_timezone().expect("log_timezone not initialized");
     if let Some(tm) = localtime::pg_localtime(timestamp, tz) {
+        // syslogger.c:1424: pg_strftime(filename + len, MAXPGPATH - len, ...)
+        // — the NUL slot is inside that size, so MAXPGPATH - len - 1 bytes fit.
         let mut buf = [0u8; MAXPGPATH];
-        let cap = (MAXPGPATH - len).saturating_sub(1);
-        if let Some(n) = strftime::pg_strftime(&mut buf[..cap], Log_filename().as_bytes(), &tm) {
+        if let Some(n) = strftime::pg_strftime(&mut buf[..MAXPGPATH - len], Log_filename().as_bytes(), &tm) {
             filename.push_str(&String::from_utf8_lossy(&buf[..n]));
         }
     }
