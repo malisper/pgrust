@@ -1068,17 +1068,21 @@ fn get_simple_binary_op_name(mcx: Mcx<'_>, expr: &OpExpr<'_>) -> Option<String> 
 }
 
 fn is_simple_node(node: Node<'_>, parent: Option<Node<'_>>, pretty_flags: i32) -> bool {
-    let Some(parent) = parent else {
-        return false;
-    };
     match node.node_tag() {
+        // single words: always simple (ruleutils.c:8858-8865), parent unused
         NodeTag::T_Var
         | NodeTag::T_Const
         | NodeTag::T_Param
         | NodeTag::T_CoerceToDomainValue
         | NodeTag::T_SetToDefault
-        | NodeTag::T_CurrentOfExpr => true,
-
+        | NodeTag::T_CurrentOfExpr => return true,
+        _ => {}
+    }
+    // Every remaining arm consults the parent node.
+    let Some(parent) = parent else {
+        return false;
+    };
+    match node.node_tag() {
         NodeTag::T_SubscriptingRef
         | NodeTag::T_ArrayExpr
         | NodeTag::T_RowExpr
@@ -1101,6 +1105,10 @@ fn is_simple_node(node: Node<'_>, parent: Option<Node<'_>>, pretty_flags: i32) -
         NodeTag::T_FieldSelect => parent.node_tag() != NodeTag::T_FieldSelect,
         NodeTag::T_FieldStore => parent.node_tag() != NodeTag::T_FieldStore,
 
+        // ruleutils.c:8906: maybe simple, check args
+        NodeTag::T_CoerceToDomain => {
+            is_simple_node(node.as_coerce_to_domain().unwrap().arg, Some(node), pretty_flags)
+        }
         NodeTag::T_RelabelType => {
             is_simple_node(node.as_relabel_type().unwrap().arg, Some(node), pretty_flags)
         }
@@ -1116,6 +1124,11 @@ fn is_simple_node(node: Node<'_>, parent: Option<Node<'_>>, pretty_flags: i32) -
         NodeTag::T_ReturningExpr => {
             is_simple_node(node.as_returning_expr().unwrap().retexpr, Some(node), pretty_flags)
         }
+        // ruleutils.c:9064: maybe simple, check args (a NULL arg is not simple)
+        NodeTag::T_JsonValueExpr => match node.as_json_value_expr().unwrap().raw_expr {
+            Some(arg) => is_simple_node(arg, Some(node), pretty_flags),
+            None => false,
+        },
 
         NodeTag::T_OpExpr => {
             if pretty_flags & crate::PRETTYFLAG_PAREN != 0

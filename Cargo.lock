@@ -713,6 +713,8 @@ name = "adt_network"
 version = "0.1.0"
 dependencies = [
  "datum",
+ "elog",
+ "guc_tables",
  "hashfn",
  "hyperloglog",
  "init_small",
@@ -736,7 +738,9 @@ dependencies = [
  "arrayfuncs",
  "datum",
  "detoast_seams",
+ "elog",
  "funcapi_srf",
+ "guc_tables",
  "hashfn",
  "hyperloglog",
  "init_small",

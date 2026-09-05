@@ -5,7 +5,7 @@ use std::rc::Rc;
 use datum::Datum;
 use mcx::{Mcx, MemoryContext};
 use types_core::{AttrNumber, Oid};
-use types_error::PgResult;
+use types_error::{PgError, PgResult};
 use types_nodes::primnodes::Alias;
 use types_nodes::{Node, RangeTblEntry, RTEKind};
 use types_rel::AccessShareLock;
@@ -182,7 +182,13 @@ pub fn pg_get_triggerdef_worker(
         TRIGGER_TYPE_BEFORE => "BEFORE",
         TRIGGER_TYPE_AFTER => "AFTER",
         TRIGGER_TYPE_INSTEAD => "INSTEAD OF",
-        other => panic!("unexpected tgtype value: {other}"),
+        // ruleutils.c:959: elog(ERROR) with the raw tgtype, catchable.
+        _ => {
+            return Err(Box::new(PgError::error(format!(
+                "unexpected tgtype value: {}",
+                trig.tgtype
+            ))))
+        }
     });
 
     let mut findx = 0;

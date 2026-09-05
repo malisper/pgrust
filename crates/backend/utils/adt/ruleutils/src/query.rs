@@ -118,6 +118,8 @@ pub(crate) fn set_rtable_names<'mcx>(
         }
     }
     for (i, rte) in dpns.rtable.iter().enumerate() {
+        // ruleutils.c:3942: CHECK_FOR_INTERRUPTS() per range-table entry.
+        crate::check_for_interrupts()?;
         let refname: Option<String> = if rels_used.is_some_and(|ru| !ru.is_member(i as i32 + 1)) {
             None
         } else if let Some(alias) = rte.alias {
@@ -189,7 +191,13 @@ pub(crate) fn set_deparse_for_query<'mcx>(
         dpns.rtable_columns.push(DeparseColumns::default());
     }
     if let Some(jt) = query.jointree {
-        dpns.unique_using = from_expr_children(jt).any(|n| has_dangerous_join_using(&dpns, n));
+        dpns.unique_using = false;
+        for n in from_expr_children(jt) {
+            if has_dangerous_join_using(&dpns, n)? {
+                dpns.unique_using = true;
+                break;
+            }
+        }
         let parent_using: Vec<String> = Vec::new();
         for child in from_expr_children(jt) {
             set_using_names(&mut dpns, child, &parent_using)?;
@@ -226,12 +234,24 @@ fn from_expr_children<'a, 'mcx>(
     jt.fromlist.iter()
 }
 
-fn has_dangerous_join_using(dpns: &DeparseNamespace<'_>, jtnode: Node<'_>) -> bool {
+// ruleutils.c:4190/4365/5081/5088: elog(ERROR, "unrecognized node type in
+// jointree: %d"), catchable; the tag numbers are nodetags.h's.
+#[cold]
+#[inline(never)]
+fn unrecognized_jointree_node(tag: NodeTag) -> Box<PgError> {
+    Box::new(PgError::error(format!("unrecognized node type in jointree: {}", tag as u16)))
+}
+
+fn has_dangerous_join_using(dpns: &DeparseNamespace<'_>, jtnode: Node<'_>) -> PgResult<bool> {
     match jtnode.node_tag() {
-        NodeTag::T_RangeTblRef => false,
+        NodeTag::T_RangeTblRef => Ok(false),
         NodeTag::T_FromExpr => {
-            from_expr_children(jtnode.as_from_expr().unwrap())
-                .any(|n| has_dangerous_join_using(dpns, n))
+            for n in from_expr_children(jtnode.as_from_expr().unwrap()) {
+                if has_dangerous_join_using(dpns, n)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
         }
         NodeTag::T_JoinExpr => {
             let j = jtnode.as_join_expr().unwrap();
@@ -239,21 +259,21 @@ fn has_dangerous_join_using(dpns: &DeparseNamespace<'_>, jtnode: Node<'_>) -> bo
                 let jrte = dpns.rtable[j.rtindex as usize - 1];
                 for i in 0..jrte.joinmergedcols as usize {
                     if jrte.joinaliasvars.nth(i).node_tag() != NodeTag::T_Var {
-                        return true;
+                        return Ok(true);
                     }
                 }
             }
-            has_dangerous_join_using(dpns, j.larg) || has_dangerous_join_using(dpns, j.rarg)
+            Ok(has_dangerous_join_using(dpns, j.larg)? || has_dangerous_join_using(dpns, j.rarg)?)
         }
-        other => panic!("has_dangerous_join_using: unrecognized jointree node {other:?}"),
+        other => Err(unrecognized_jointree_node(other)),
     }
 }
 
-fn jt_rtindex(node: Node<'_>) -> usize {
+fn jt_rtindex(node: Node<'_>) -> PgResult<usize> {
     match node.node_tag() {
-        NodeTag::T_RangeTblRef => node.as_range_tbl_ref().unwrap().rtindex as usize,
-        NodeTag::T_JoinExpr => node.as_join_expr().unwrap().rtindex as usize,
-        other => panic!("identify_join_columns: unrecognized jointree node {other:?}"),
+        NodeTag::T_RangeTblRef => Ok(node.as_range_tbl_ref().unwrap().rtindex as usize),
+        NodeTag::T_JoinExpr => Ok(node.as_join_expr().unwrap().rtindex as usize),
+        other => Err(unrecognized_jointree_node(other)),
     }
 }
 
@@ -261,9 +281,9 @@ fn identify_join_columns(
     j: &JoinExpr<'_>,
     jrte: &RangeTblEntry<'_>,
     colinfo: &mut DeparseColumns,
-) {
-    colinfo.leftrti = jt_rtindex(j.larg);
-    colinfo.rightrti = jt_rtindex(j.rarg);
+) -> PgResult<()> {
+    colinfo.leftrti = jt_rtindex(j.larg)?;
+    colinfo.rightrti = jt_rtindex(j.rarg)?;
     let numjoincols = jrte.joinaliasvars.len();
     debug_assert_eq!(
         numjoincols,
@@ -286,6 +306,7 @@ fn identify_join_columns(
         }
     }
     debug_assert_eq!(jcolno, numjoincols);
+    Ok(())
 }
 
 fn expand_colnames_array_to(colinfo: &mut DeparseColumns, n: usize) {
@@ -359,7 +380,7 @@ fn set_using_names(
             let jidx = j.rtindex as usize - 1;
             let rte = dpns.rtable[jidx];
             let mut colinfo = std::mem::take(&mut dpns.rtable_columns[jidx]);
-            identify_join_columns(j, rte, &mut colinfo);
+            identify_join_columns(j, rte, &mut colinfo)?;
             let leftidx = colinfo.leftrti - 1;
             let rightidx = colinfo.rightrti - 1;
 
@@ -430,7 +451,7 @@ fn set_using_names(
             set_using_names(dpns, j.larg, &child_using)?;
             set_using_names(dpns, j.rarg, &child_using)
         }
-        other => panic!("set_using_names: unrecognized jointree node {other:?}"),
+        other => Err(unrecognized_jointree_node(other)),
     }
 }
 
@@ -1404,10 +1425,11 @@ pub(crate) fn process_indirection<'mcx>(
                 let fstore = node.as_field_store().unwrap();
                 let typrelid = lsyscache::get_typ_typrelid(fstore.resulttype)?;
                 if typrelid == types_core::InvalidOid {
-                    panic!(
+                    // ruleutils.c:12972: elog(ERROR) naming the type, catchable.
+                    return Err(Box::new(PgError::error(format!(
                         "argument type {} of FieldStore is not a tuple type",
-                        fstore.resulttype
-                    );
+                        format_type::format_type_be(fstore.resulttype)?
+                    ))));
                 }
                 // Stored rules carry exactly one target field.
                 debug_assert!(fstore.fieldnums.len() == 1);

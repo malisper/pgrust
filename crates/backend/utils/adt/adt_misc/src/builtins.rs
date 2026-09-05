@@ -19,11 +19,12 @@ fn is_ident_cont(c: u8) -> bool {
 #[cold]
 #[inline(never)]
 fn invalid_ident_err(qualname: &[u8], detail: Option<&str>) -> Box<PgError> {
-    let e = PgError::error(format!(
-        "string is not a valid identifier: \"{}\"",
-        String::from_utf8_lossy(qualname)
-    ))
-    .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE);
+    // misc.c:895-983: text_to_cstring(qualname) verbatim in the message --
+    // raw server-encoding bytes, not re-encoded (NUL truncates, as in C).
+    let mut msg = b"string is not a valid identifier: \"".to_vec();
+    msg.extend_from_slice(qualname);
+    msg.push(b'"');
+    let e = PgError::error_raw_message(msg).with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE);
     Box::new(match detail {
         Some(d) => e.with_detail(d),
         None => e,
@@ -919,10 +920,13 @@ fn current_logfile(fcinfo: &mut Fcinfo, logfmt: Option<&[u8]>) -> PgResult<Datum
     if let Some(f) = logfmt {
         if f != b"stderr" && f != b"csvlog" && f != b"jsonlog" {
             return Err(Box::new(
-                PgError::error(format!(
-                    "log format \"{}\" is not supported",
-                    String::from_utf8_lossy(f)
-                ))
+                // misc.c:1016: the log format bytes verbatim in the message.
+                PgError::error_raw_message({
+                    let mut msg = b"log format \"".to_vec();
+                    msg.extend_from_slice(f);
+                    msg.extend_from_slice(b"\" is not supported");
+                    msg
+                })
                 .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE)
                 .with_hint(
                     "The supported log formats are \"stderr\", \"csvlog\", and \"jsonlog\".",
@@ -1454,8 +1458,9 @@ pub fn fc_pg_tablespace_location(
             .into_error()
             .into());
     }
-    let target = target.to_string_lossy();
-    Ok(varlena_result(varlena::cstring_to_text(mcx, target.as_bytes())?))
+    // misc.c:363: cstring_to_text(targetpath) -- the readlink bytes verbatim.
+    use std::os::unix::ffi::OsStrExt;
+    Ok(varlena_result(varlena::cstring_to_text(mcx, target.as_os_str().as_bytes())?))
 }
 
 pub const MISC_BUILTINS: &[FmgrBuiltin] = &[

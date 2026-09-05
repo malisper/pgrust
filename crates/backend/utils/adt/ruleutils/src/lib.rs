@@ -443,7 +443,8 @@ pub(crate) fn generate_operator_name(
             opname.lappend(mcx, Node::mk_string(mcx, str_in(mcx, &oprname)?)?)?;
             parse_oper::left_oper(&pstate, &opname, arg2, true, -1)?.map(|op| op.oid)
         }
-        other => panic!("unrecognized oprkind: {other}"),
+        // ruleutils.c:13428: elog(ERROR), catchable.
+        other => return Err(Box::new(PgError::error(format!("unrecognized oprkind: {other}")))),
     };
     if resolved == Some(operid) {
         return Ok(oprname);
@@ -1269,20 +1270,32 @@ fn pg_get_constraintdef_worker_full(
                 FKCONSTR_MATCH_FULL => buf.push_str(" MATCH FULL"),
                 FKCONSTR_MATCH_PARTIAL => buf.push_str(" MATCH PARTIAL"),
                 FKCONSTR_MATCH_SIMPLE => {}
-                other => panic!("unrecognized confmatchtype: {other}"),
+                // ruleutils.c:2310: elog(ERROR), catchable.
+                other => {
+                    return Err(Box::new(PgError::error(format!(
+                        "unrecognized confmatchtype: {other}"
+                    ))))
+                }
             }
-            let action = |t: i8| match t {
-                FKCONSTR_ACTION_NOACTION => None,
-                FKCONSTR_ACTION_RESTRICT => Some("RESTRICT"),
-                FKCONSTR_ACTION_CASCADE => Some("CASCADE"),
-                FKCONSTR_ACTION_SETNULL => Some("SET NULL"),
-                FKCONSTR_ACTION_SETDEFAULT => Some("SET DEFAULT"),
-                other => panic!("unrecognized FK action: {other}"),
+            // ruleutils.c:2336/2362: elog(ERROR) naming the column, catchable.
+            let action = |t: i8, column: &str| -> PgResult<Option<&'static str>> {
+                Ok(match t {
+                    FKCONSTR_ACTION_NOACTION => None,
+                    FKCONSTR_ACTION_RESTRICT => Some("RESTRICT"),
+                    FKCONSTR_ACTION_CASCADE => Some("CASCADE"),
+                    FKCONSTR_ACTION_SETNULL => Some("SET NULL"),
+                    FKCONSTR_ACTION_SETDEFAULT => Some("SET DEFAULT"),
+                    other => {
+                        return Err(Box::new(PgError::error(format!(
+                            "unrecognized {column}: {other}"
+                        ))))
+                    }
+                })
             };
-            if let Some(s) = action(confupdtype) {
+            if let Some(s) = action(confupdtype, "confupdtype")? {
                 buf.push_str(&format!(" ON UPDATE {s}"));
             }
-            if let Some(s) = action(confdeltype) {
+            if let Some(s) = action(confdeltype, "confdeltype")? {
                 buf.push_str(&format!(" ON DELETE {s}"));
             }
             if let Some(cols) = confdelsetcols {
@@ -1381,10 +1394,14 @@ fn pg_get_constraintdef_worker_full(
             .expect("missing_ok=false");
             buf.push_str(&indexdef);
         }
-        other => gap(
-            "pg_get_constraintdef",
-            &format!("constraint type '{}'", (other as u8) as char),
-        ),
+        other => {
+            // ruleutils.c:2594: elog(ERROR, "invalid constraint type \"%c\"")
+            // with the raw byte, catchable.
+            let mut msg = b"invalid constraint type \"".to_vec();
+            msg.push(other as u8);
+            msg.push(b'"');
+            return Err(Box::new(PgError::error_raw_message(msg)));
+        }
     }
 
     if condeferrable {
@@ -1540,7 +1557,12 @@ pub fn pg_get_partkeydef_worker(
         PARTITION_STRATEGY_HASH => "HASH",
         PARTITION_STRATEGY_LIST => "LIST",
         PARTITION_STRATEGY_RANGE => "RANGE",
-        other => panic!("unexpected partition strategy: {other}"),
+        // ruleutils.c:2021: elog(ERROR), catchable.
+        other => {
+            return Err(Box::new(PgError::error(format!(
+                "unexpected partition strategy: {other}"
+            ))))
+        }
     };
     let mut buf = String::new();
     if !attrs_only {

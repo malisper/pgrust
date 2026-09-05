@@ -130,12 +130,50 @@ impl NumericAbbrevState {
             return false;
         }
         let abbr_card = self.abbr_card.estimate();
+        // numeric.c:2255-2290: the trace_sort LOG line around each decision.
         if abbr_card > 100000.0 {
+            if trace_sort() {
+                trace_log(format!(
+                    "numeric_abbrev: estimation ends at cardinality {abbr_card:.6} after {} values ({memtupcount} rows)",
+                    self.input_count
+                ));
+            }
             self.estimating = false;
             return false;
         }
-        abbr_card < self.input_count as f64 / 10000.0 + 0.5
+        if abbr_card < self.input_count as f64 / 10000.0 + 0.5 {
+            if trace_sort() {
+                trace_log(format!(
+                    "numeric_abbrev: aborting abbreviation at cardinality {abbr_card:.6} below threshold {:.6} after {} values ({memtupcount} rows)",
+                    self.input_count as f64 / 10000.0 + 0.5,
+                    self.input_count
+                ));
+            }
+            return true;
+        }
+        if trace_sort() {
+            trace_log(format!(
+                "numeric_abbrev: cardinality {abbr_card:.6} after {} values ({memtupcount} rows)",
+                self.input_count
+            ));
+        }
+        false
     }
+}
+
+/// C `trace_sort` (tuplesort.c) as numeric.c reads it; off until the
+/// tuplesort crate installs the GUC.
+fn trace_sort() -> bool {
+    guc_tables::vars::trace_sort.installed() && guc_tables::vars::trace_sort.read()
+}
+
+/// C `elog(LOG, ...)` under trace_sort: LOG never raises.
+#[cold]
+#[inline(never)]
+fn trace_log(message: String) {
+    let _ = elog::ereport(types_error::LOG)
+        .errmsg_internal(message)
+        .finish(types_error::ErrorLocation::new(file!(), line!() as i32, "numeric_abbrev_abort"));
 }
 
 impl Default for NumericAbbrevState {

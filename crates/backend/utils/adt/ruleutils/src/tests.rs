@@ -566,3 +566,38 @@ fn lcs_none_and_setop_none_are_elog_errors() {
     assert_eq!(err.message(), "unrecognized set op: 0");
     assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
 }
+
+// audit-18.6 b168 a186-candidate-fp-adt-ruleutils-p2-63752ef20d65ef4898f7-1:
+// an unexpected node in the jointree fromlist is elog(ERROR, "unrecognized
+// node type in jointree: %d") (ruleutils.c:4190 has_dangerous_join_using),
+// never a panic. T_Const = 7 in nodetags.h.
+#[test]
+fn unexpected_jointree_node_is_elog_error() {
+    let action = include_str!("fixtures/v1_action.txt")
+        .replacen(":jointree {FROMEXPR :fromlist <>", &format!(":jointree {{FROMEXPR :fromlist ({CONST_NEG5})"), 1);
+    assert!(action.contains(":fromlist ({CONST"), "fixture jointree not rewritten");
+    let err = query_def_err(&action);
+    assert_eq!(err.message(), "unrecognized node type in jointree: 7");
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+}
+
+// audit-18.6 b168 a186-candidate-fp-adt-ruleutils-p3-c2298cc0c5be26a9d5b6-1:
+// make_ruledef (ruleutils.c:5395-5397): stringToNode("<>") is NIL and an
+// empty ev_action list is elog(ERROR, "invalid empty ev_action list").
+#[test]
+fn empty_ev_action_list_is_elog_error() {
+    install();
+    let ctx = MemoryContext::new("ruleutils empty ev_action");
+    let mcx = ctx.mcx();
+    let row = super::ruledef::PgRewriteRow {
+        rulename: "r".to_string(),
+        ev_class: REL_OID,
+        ev_type: b'1',
+        is_instead: false,
+        ev_qual: "<>".to_string(),
+        ev_action: "<>".to_string(),
+    };
+    let err = super::ruledef::make_ruledef(mcx, &row, 0).err().expect("make_ruledef raises");
+    assert_eq!(err.message(), "invalid empty ev_action list");
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+}

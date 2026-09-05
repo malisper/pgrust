@@ -73,12 +73,50 @@ impl NetworkAbbrevState {
             return false;
         }
         let card = self.abbr_card.estimate();
+        // network.c:502-535: the trace_sort LOG line around each decision.
         if card > 100000.0 {
+            if trace_sort() {
+                trace_log(format!(
+                    "network_abbrev: estimation ends at cardinality {card:.6} after {} values ({memtupcount} rows)",
+                    self.input_count
+                ));
+            }
             self.estimating = false;
             return false;
         }
-        card < self.input_count as f64 / 2000.0 + 0.5
+        if card < self.input_count as f64 / 2000.0 + 0.5 {
+            if trace_sort() {
+                trace_log(format!(
+                    "network_abbrev: aborting abbreviation at cardinality {card:.6} below threshold {:.6} after {} values ({memtupcount} rows)",
+                    self.input_count as f64 / 2000.0 + 0.5,
+                    self.input_count
+                ));
+            }
+            return true;
+        }
+        if trace_sort() {
+            trace_log(format!(
+                "network_abbrev: cardinality {card:.6} after {} values ({memtupcount} rows)",
+                self.input_count
+            ));
+        }
+        false
     }
+}
+
+/// C `trace_sort` (tuplesort.c) as network.c reads it; off until the
+/// tuplesort crate installs the GUC.
+fn trace_sort() -> bool {
+    guc_tables::vars::trace_sort.installed() && guc_tables::vars::trace_sort.read()
+}
+
+/// C `elog(LOG, ...)` under trace_sort: LOG never raises.
+#[cold]
+#[inline(never)]
+fn trace_log(message: String) {
+    let _ = elog::ereport(types_error::LOG)
+        .errmsg_internal(message)
+        .finish(types_error::ErrorLocation::new(file!(), line!() as i32, "network_abbrev_abort"));
 }
 
 impl Default for NetworkAbbrevState {

@@ -30,13 +30,13 @@ const ANUM_PG_REWRITE_IS_INSTEAD: i32 = 6;
 const ANUM_PG_REWRITE_EV_QUAL: i32 = 7;
 const ANUM_PG_REWRITE_EV_ACTION: i32 = 8;
 
-struct PgRewriteRow {
-    rulename: String,
-    ev_class: Oid,
-    ev_type: u8,
-    is_instead: bool,
-    ev_qual: String,
-    ev_action: String,
+pub(crate) struct PgRewriteRow {
+    pub(crate) rulename: String,
+    pub(crate) ev_class: Oid,
+    pub(crate) ev_type: u8,
+    pub(crate) is_instead: bool,
+    pub(crate) ev_qual: String,
+    pub(crate) ev_action: String,
 }
 
 pub(crate) fn req(td: &TupleDescData<'_>, tup: &HeapTupleData<'_>, attno: i32) -> Datum {
@@ -136,10 +136,18 @@ pub(crate) fn rule_event_keyword(rulename: &str, ev_type: u8) -> PgResult<&'stat
     }
 }
 
-fn make_ruledef(mcx: Mcx<'_>, rule: &PgRewriteRow, pretty_flags: i32) -> PgResult<String> {
-    let actions_node = readfuncs::stringToNode(mcx, &rule.ev_action)?;
-    let actions = actions_node.as_list().expect("ev_action is a List");
-    assert!(!actions.is_nil(), "invalid empty ev_action list");
+pub(crate) fn make_ruledef(mcx: Mcx<'_>, rule: &PgRewriteRow, pretty_flags: i32) -> PgResult<String> {
+    // ruleutils.c:5395-5397: stringToNode("<>") is NIL, and an empty action
+    // list is elog(ERROR), catchable.
+    let actions = readfuncs::stringToNodeNullable(mcx, &rule.ev_action)?
+        .and_then(|node| node.as_list())
+        .filter(|actions| !actions.is_nil());
+    let Some(actions) = actions else {
+        return Err(Box::new(PgError::error("invalid empty ev_action list")));
+    };
+    // ruleutils.c:5399/5531: the rule's relation is open (AccessShareLock)
+    // while its definition is built.
+    let ev_relation = table::table_open(mcx, rule.ev_class, AccessShareLock)?;
 
     let mut ctx = DeparseContext::new(mcx, pretty_flags);
     ctx.wrap_column = WRAP_COLUMN_DEFAULT;
@@ -206,5 +214,6 @@ fn make_ruledef(mcx: Mcx<'_>, rule: &PgRewriteRow, pretty_flags: i32) -> PgResul
         get_query_def(query, &mut ctx, view_result_desc, true)?;
         ctx.buf.push(';');
     }
+    ev_relation.close(AccessShareLock)?;
     Ok(ctx.buf)
 }
