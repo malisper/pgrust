@@ -415,7 +415,11 @@ pub fn extract_notnull_column<'mcx>(
     mcx::vec_append_bytes(&mut full, &(((total as u32) << 2).to_ne_bytes()))?;
     mcx::vec_append_bytes(&mut full, body)?;
     let elems = datum::array_build::deconstruct_array_image(mcx, &full, 2, true, b's')?;
-    assert!(elems.len() == 1, "extractNotNullColumn: conkey with {} elements", elems.len());
+    // pg_constraint.c:716-720: ARR_DIMS(arr)[0] != 1 is
+    // elog(ERROR, "conkey is not a 1-D smallint array") — XX000, catchable.
+    if elems.len() != 1 {
+        return Err(conkey_not_1d_smallint());
+    }
     Ok(elems[0].as_i16())
 }
 
@@ -851,11 +855,13 @@ pub fn RemoveConstraintById<'mcx>(mcx: Mcx<'mcx>, con_id: Oid) -> PgResult<()> {
     if conrelid != InvalidOid {
         let rel = table::table_open(mcx, conrelid, types_rel::AccessExclusiveLock)?;
         if contype == CONSTRAINT_CHECK {
-            decrement_relchecks(mcx, conrelid)?;
+            decrement_relchecks(mcx, conrelid, rel.name())?;
         }
         rel.close(types_rel::NoLock)?;
     } else if contypid == InvalidOid {
-        panic!("constraint {con_id} is not of a known type");
+        // pg_constraint.c:985: elog(ERROR, "constraint %u is not of a known
+        // type") — XX000, catchable; the backend survives.
+        return Err(Box::new(PgError::error(format!("constraint {con_id} is not of a known type"))));
     }
     let tid = tup.t_self;
     catalog_indexing::CatalogTupleDelete(&con_rel, &tid)?;
@@ -889,7 +895,7 @@ fn rel_name_for_error<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<String> {
     Ok(name)
 }
 
-fn decrement_relchecks<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<()> {
+fn decrement_relchecks<'mcx>(mcx: Mcx<'mcx>, relid: Oid, relname: &str) -> PgResult<()> {
     let pgrel = table::table_open(mcx, types_core::RELATION_RELATION_ID, RowExclusiveLock)?;
     let keys = [eq_key(1, F_OIDEQ, Datum::from_oid(relid))];
     let mut scan =
@@ -904,7 +910,11 @@ fn decrement_relchecks<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<()> {
         types_tuple::heap_getattr(reltup, Anum_pg_class_relchecks as i32, desc, &mut isnull)
     }
     .as_i16();
-    assert!(relchecks > 0, "relation {relid} has relchecks = 0");
+    // pg_constraint.c:961-963: elog(ERROR, "relation \"%s\" has relchecks =
+    // 0", RelationGetRelationName(rel)) — XX000 naming the relation.
+    if relchecks == 0 {
+        return Err(Box::new(PgError::error(format!("relation \"{relname}\" has relchecks = 0"))));
+    }
     let natts = desc.natts as usize;
     let mut repl_values: PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
     let mut repl_isnull: PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
@@ -1063,7 +1073,10 @@ fn extract_not_null_column<'mcx>(mcx: Mcx<'mcx>, conkey: Datum) -> PgResult<Attr
     mcx::vec_append_bytes(&mut full, &(((total as u32) << 2).to_ne_bytes()))?;
     mcx::vec_append_bytes(&mut full, body)?;
     let elems = datum::array_build::deconstruct_array_image(mcx, &full, 2, true, b's')?;
-    assert!(elems.len() == 1, "not-null constraint with {} conkey entries", elems.len());
+    // pg_constraint.c:716-720: elog(ERROR, "conkey is not a 1-D smallint array").
+    if elems.len() != 1 {
+        return Err(conkey_not_1d_smallint());
+    }
     Ok(elems[0].as_i16())
 }
 
@@ -1182,6 +1195,12 @@ pub fn get_relation_constraint_oid<'mcx>(
 // never a backend abort.
 #[cold]
 #[inline(never)]
+// pg_constraint.c:720 / :1309 / :1509: elog(ERROR, "conkey is not a 1-D
+// smallint array") — XX000 at level ERROR.
+fn conkey_not_1d_smallint() -> Box<PgError> {
+    Box::new(PgError::error("conkey is not a 1-D smallint array".to_string()))
+}
+
 fn constraint_lookup_failed(con_id: Oid) -> Box<PgError> {
     Box::new(PgError::error(format!("cache lookup failed for constraint {con_id}")))
 }
@@ -1246,11 +1265,9 @@ pub fn get_relation_constraint_attnos<'mcx>(
         let desc = con_rel.descr();
         constraint_oid = getattr(&con_rel, tup, Anum_pg_constraint_oid).0.as_oid();
         if let Some(img) = fk_array_image(mcx, tup, desc, Anum_pg_constraint_conkey)? {
-            let mut out = [0i16; INDEX_MAX_KEYS];
-            let n = fk_i16_array(&img, "conkey is not a 1-D smallint array", &mut out)?;
-            for &attnum in &out[..n] {
-                conattnos.push(attnum);
-            }
+            // pg_constraint.c:1304-1319: numcols is not bounded by
+            // INDEX_MAX_KEYS here; a negative dims[0] is the same elog.
+            conattnos = fk_i16_vec(mcx, &img, "conkey is not a 1-D smallint array")?;
         }
     }
     genam::systable_endscan(mcx, scan)?;
@@ -1295,10 +1312,9 @@ pub fn get_primary_key_attnos<'mcx>(
             .ok_or_else(|| {
                 Box::new(PgError::error(format!("null conkey for constraint {con_oid}")))
             })?;
-        let mut out = [0i16; INDEX_MAX_KEYS];
-        let n = fk_i16_array(&img, "conkey is not a 1-D smallint array", &mut out)?;
-        let mut pkattnos: PgVec<'mcx, i16> = PgVec::new_in(mcx);
-        pkattnos.extend_from_slice(&out[..n]);
+        // pg_constraint.c:1504-1509: numkeys < 0 is the same elog; the count
+        // is otherwise unbounded.
+        let pkattnos = fk_i16_vec(mcx, &img, "conkey is not a 1-D smallint array")?;
         result = Some((pkattnos, con_oid));
         break;
     }
@@ -1451,17 +1467,30 @@ pub fn ConstraintSetParentConstraint<'mcx>(
         replace[anum as usize - 1] = true;
     };
     if parent_constr_id != InvalidOid {
+        // pg_constraint.c:1150-1152: C's Assert(coninhcount == 0) is a
+        // cassert-only arm; the catchable check is on conparentid —
+        // elog(ERROR, "constraint %u already has a parent constraint").
         if conparentid != InvalidOid {
-            panic!("constraint {child_constr_id} already has a parent constraint");
+            return Err(Box::new(PgError::error(format!(
+                "constraint {child_constr_id} already has a parent constraint"
+            ))));
         }
-        assert!(prior_inhcount == 0, "attach of constraint {child_constr_id} with coninhcount {prior_inhcount}");
+        // pg_constraint.c:1155-1159: pg_add_s16_overflow(coninhcount, 1) →
+        // ERRCODE_PROGRAM_LIMIT_EXCEEDED "too many inheritance parents".
+        let Some(inhcount) = prior_inhcount.checked_add(1) else {
+            return Err(Box::new(
+                PgError::new(ERROR, "too many inheritance parents".to_string())
+                    .with_sqlstate(types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+            ));
+        };
         set(Anum_pg_constraint_conislocal, Datum::from_bool(false));
-        set(Anum_pg_constraint_coninhcount, Datum::from_i16(1));
+        set(Anum_pg_constraint_coninhcount, Datum::from_i16(inhcount));
         set(Anum_pg_constraint_conparentid, Datum::from_oid(parent_constr_id));
     } else {
-        assert!(prior_inhcount == 1, "detach of constraint {child_constr_id} with coninhcount {prior_inhcount}");
+        // pg_constraint.c:1174-1180: coninhcount-- (int16 arithmetic; the
+        // Assert(coninhcount == 0) after it is cassert-only).
         set(Anum_pg_constraint_conislocal, Datum::from_bool(true));
-        set(Anum_pg_constraint_coninhcount, Datum::from_i16(prior_inhcount - 1));
+        set(Anum_pg_constraint_coninhcount, Datum::from_i16(prior_inhcount.wrapping_sub(1)));
         set(Anum_pg_constraint_conparentid, Datum::from_oid(InvalidOid));
     }
     let mut newtup = heaptuple::heap_modify_tuple(mcx, tup, desc, &values, &nulls, &replace)?;
@@ -1662,30 +1691,68 @@ fn fk_array_image<'mcx>(
 
 // C's malformed-array arms are elog(ERROR, ...) — XX000, the backend
 // survives (pg_constraint.c DeconstructFkConstraintRow) — not panics.
-fn fk_array_nelems(img: &[u8], elemtype: Oid, errmsg: &str) -> PgResult<usize> {
+//
+// ARR_NDIM / ARR_HASNULL / ARR_ELEMTYPE check; returns ARR_DIMS(arr)[0]
+// as C reads it (an int, possibly negative — each C site checks the sign
+// with its own message, so the caller decides).
+fn fk_array_nelems(img: &[u8], elemtype: Oid, errmsg: &str) -> PgResult<i32> {
     let rd = |off: usize| i32::from_ne_bytes(img[off..off + 4].try_into().unwrap());
     if !(img.len() >= ARR_1D_HDRSZ && rd(4) == 1 && rd(8) == 0 && rd(12) as u32 == elemtype) {
         return Err(Box::new(PgError::error(errmsg.to_string())));
     }
-    Ok(rd(16) as usize)
+    Ok(rd(16))
 }
 
-fn fk_i16_array(img: &[u8], errmsg: &str, out: &mut [i16; INDEX_MAX_KEYS]) -> PgResult<usize> {
+// The elements the image actually holds for a claimed count: C reads
+// ARR_DATA_PTR blindly; an image shorter than its dims[0] is reported with
+// the caller's elog rather than read past the varlena.
+fn fk_array_body_len(img: &[u8], n: i32, elemsize: usize, errmsg: &str) -> PgResult<usize> {
+    if n < 0 {
+        return Err(Box::new(PgError::error(errmsg.to_string())));
+    }
+    let n = n as usize;
+    if img.len() < ARR_1D_HDRSZ + elemsize * n {
+        return Err(Box::new(PgError::error(errmsg.to_string())));
+    }
+    Ok(n)
+}
+
+// Fixed INDEX_MAX_KEYS-slot readers (DeconstructFkConstraintRow arms): copy
+// up to INDEX_MAX_KEYS elements and hand back C's raw count for the
+// caller's own range check (pg_constraint.c:1562 "foreign key constraint
+// cannot have %d columns").
+fn fk_i16_array(img: &[u8], errmsg: &str, out: &mut [i16; INDEX_MAX_KEYS]) -> PgResult<i32> {
     let n = fk_array_nelems(img, INT2OID, errmsg)?;
-    for (i, o) in out.iter_mut().enumerate().take(n) {
+    let have = fk_array_body_len(img, n, 2, errmsg)?;
+    for (i, o) in out.iter_mut().enumerate().take(have) {
         let off = ARR_1D_HDRSZ + 2 * i;
         *o = i16::from_ne_bytes(img[off..off + 2].try_into().unwrap());
     }
     Ok(n)
 }
 
-fn fk_oid_array(img: &[u8], errmsg: &str, out: &mut [Oid; INDEX_MAX_KEYS]) -> PgResult<usize> {
+fn fk_oid_array(img: &[u8], errmsg: &str, out: &mut [Oid; INDEX_MAX_KEYS]) -> PgResult<i32> {
     let n = fk_array_nelems(img, types_core::OIDOID, errmsg)?;
-    for (i, o) in out.iter_mut().enumerate().take(n) {
+    let have = fk_array_body_len(img, n, 4, errmsg)?;
+    for (i, o) in out.iter_mut().enumerate().take(have) {
         let off = ARR_1D_HDRSZ + 4 * i;
         *o = u32::from_ne_bytes(img[off..off + 4].try_into().unwrap());
     }
     Ok(n)
+}
+
+// Unbounded reader (get_relation_constraint_attnos :1304-1319,
+// get_primary_key_attnos :1504-1515): C builds a Bitmapset from every
+// element; a negative dims[0] is the same "not a 1-D smallint array" elog.
+fn fk_i16_vec<'mcx>(mcx: Mcx<'mcx>, img: &[u8], errmsg: &str) -> PgResult<PgVec<'mcx, i16>> {
+    let n = fk_array_nelems(img, INT2OID, errmsg)?;
+    let n = fk_array_body_len(img, n, 2, errmsg)?;
+    let mut v: PgVec<'mcx, i16> = mcx::vec_with_capacity_in(mcx, n)?;
+    for i in 0..n {
+        let off = ARR_1D_HDRSZ + 2 * i;
+        v.push(i16::from_ne_bytes(img[off..off + 2].try_into().unwrap()));
+    }
+    Ok(v)
 }
 
 pub fn DeconstructFkConstraintRow<'mcx>(
@@ -1717,12 +1784,13 @@ pub fn DeconstructFkConstraintRow<'mcx>(
 
     let conkey = req(Anum_pg_constraint_conkey, "conkey")?;
     let numkeys = fk_i16_array(&conkey, "conkey is not a 1-D smallint array", &mut out.conkey)?;
-    if !(numkeys > 0 && numkeys <= INDEX_MAX_KEYS) {
+    // pg_constraint.c:1562-1563.
+    if !(numkeys > 0 && numkeys <= INDEX_MAX_KEYS as i32) {
         return Err(Box::new(PgError::error(format!(
             "foreign key constraint cannot have {numkeys} columns"
         ))));
     }
-    out.numfks = numkeys;
+    out.numfks = numkeys as usize;
 
     let confkey = req(Anum_pg_constraint_confkey, "confkey")?;
     let bad_confkey = "confkey is not a 1-D smallint array";
@@ -1743,11 +1811,15 @@ pub fn DeconstructFkConstraintRow<'mcx>(
     }
 
     if let Some(img) = fk_array_image(mcx, tup, desc, Anum_pg_constraint_confdelsetcols)? {
-        out.num_fk_del_set_cols = fk_i16_array(
-            &img,
-            "confdelsetcols is not a 1-D smallint array",
-            &mut out.fk_del_set_cols,
-        )?;
+        // pg_constraint.c:1633-1641 copies dims[0] elements into the
+        // caller's INDEX_MAX_KEYS buffer unchecked; a wider image is
+        // reported with the same elog rather than overrun.
+        let bad = "confdelsetcols is not a 1-D smallint array";
+        let n = fk_i16_array(&img, bad, &mut out.fk_del_set_cols)?;
+        if n > INDEX_MAX_KEYS as i32 {
+            return Err(Box::new(PgError::error(bad.to_string())));
+        }
+        out.num_fk_del_set_cols = n as usize;
     }
 
     Ok(out)
@@ -1842,6 +1914,45 @@ mod tests {
             assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
             assert_eq!(e.level(), types_error::ERROR);
         }
+    }
+
+    // A 4B-header int2[] image: vl_len, ndim, dataoffset, elemtype,
+    // dims[0], lbound[0], then the elements.
+    fn int2_array_image(ndim: i32, dims0: i32, elems: &[i16]) -> Vec<u8> {
+        let total = super::ARR_1D_HDRSZ + 2 * elems.len();
+        let mut v = Vec::with_capacity(total);
+        v.extend_from_slice(&(((total as u32) << 2).to_ne_bytes()));
+        v.extend_from_slice(&ndim.to_ne_bytes());
+        v.extend_from_slice(&0i32.to_ne_bytes());
+        v.extend_from_slice(&(types_core::catalog::INT2OID as i32).to_ne_bytes());
+        v.extend_from_slice(&dims0.to_ne_bytes());
+        v.extend_from_slice(&1i32.to_ne_bytes());
+        for e in elems {
+            v.extend_from_slice(&e.to_ne_bytes());
+        }
+        v
+    }
+
+    // pg_constraint.c:1309 (get_relation_constraint_attnos) and :1506
+    // (get_primary_key_attnos) reject a negative dims[0] with
+    // elog(ERROR, "conkey is not a 1-D smallint array") — XX000, catchable.
+    // pgrust cast the negative count to usize and ran off the image.
+    #[test]
+    fn negative_conkey_dims_is_catchable_xx000() {
+        let img = int2_array_image(1, -1, &[1]);
+        let mut out = [0i16; super::INDEX_MAX_KEYS];
+        let e = super::fk_i16_array(&img, "conkey is not a 1-D smallint array", &mut out)
+            .err()
+            .expect("negative dims[0] must be an error, not a count");
+        assert_eq!(e.message(), "conkey is not a 1-D smallint array");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(e.level(), types_error::ERROR);
+        // The ndim/elemtype arms are unchanged: a 2-D image is the same elog.
+        let msg = "conkey is not a 1-D smallint array";
+        let e = super::fk_i16_array(&int2_array_image(2, 1, &[1]), msg, &mut out)
+            .err()
+            .expect("2-D image must be an error");
+        assert_eq!(e.message(), "conkey is not a 1-D smallint array");
     }
 
     use types_core::catalog::INT4OID;
