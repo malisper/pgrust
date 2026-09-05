@@ -495,6 +495,14 @@ string_var!(
 );
 
 int_var!(I_huge_pages, huge_pages, set_huge_pages, 2); // HUGE_PAGES_TRY
+// shared_memory_type (guc_tables.c): read by PGSharedMemoryCreate's huge_pages
+// interlock (sysv_shmem.c:730); the thread model has no other consumer.
+int_var!(
+    I_shared_memory_type,
+    shared_memory_type,
+    set_shared_memory_type,
+    2
+); // SHMEM_TYPE_MMAP
 int_var!(
     I_huge_pages_status,
     huge_pages_status,

@@ -228,3 +228,178 @@ fn check_huge_page_size_platform_gate() {
     );
     assert_eq!(HUGE_PAGE_SIZE_SELECTABLE, cfg!(any(target_os = "linux", target_os = "android")));
 }
+
+// ---------------------------------------------------------------------------
+// PGSharedMemoryCreate's startup interlocks (sysv_shmem.c:702-870). Audit rows
+// a186-candidate-fp-port-sysv_shmem-{79ac1c53,53018cea,78cb3328}-1.
+
+impl Segment {
+    /// A segment at a chosen key: the shape a C postmaster leaves behind for
+    /// the data directory whose inode the key is.
+    fn create_keyed(key: libc::key_t) -> Segment {
+        // SAFETY: IPC_CREAT|IPC_EXCL mints a segment at exactly this key or
+        // fails; no shared state.
+        let id = unsafe {
+            libc::shmget(
+                key,
+                std::mem::size_of::<PGShmemHeader>(),
+                libc::IPC_CREAT | libc::IPC_EXCL | 0o600,
+            )
+        };
+        assert!(
+            id >= 0,
+            "shmget(key {key}) failed: {} — a segment already sits at this scratch directory's inode",
+            std::io::Error::last_os_error()
+        );
+        Segment { id, attached: None }
+    }
+
+    fn exists(&self) -> bool {
+        let mut st: libc::shmid_ds = unsafe { std::mem::zeroed() };
+        // SAFETY: IPC_STAT only writes the caller-owned shmid_ds.
+        unsafe { libc::shmctl(self.id, libc::IPC_STAT, &mut st) == 0 }
+    }
+}
+
+fn datadir_ino(dir: &str) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(dir).unwrap().ino()
+}
+
+static DSM_CLEANUP_SEEN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+fn record_dsm_cleanup(handle: u32) -> types_error::PgResult<()> {
+    DSM_CLEANUP_SEEN.store(handle, std::sync::atomic::Ordering::Relaxed);
+    Ok(())
+}
+
+/// What the FATAL path reported before exiting: (sqlstate, message, hint).
+/// A process-wide record (no new thread_local: the census is pinned); the
+/// emit hook itself is per-thread, so only this test's own reports land here.
+static EMITTED: std::sync::Mutex<Vec<(types_error::SqlState, String, Option<String>)>> =
+    std::sync::Mutex::new(Vec::new());
+
+fn record_emitted(error: &types_error::PgError, _output_to_server: &mut bool) {
+    EMITTED.lock().unwrap().push((error.sqlstate, error.message.clone(), error.hint.clone()));
+}
+
+/// The FATAL path (elog stack.rs) reports, then proc_exit(1)s through the
+/// ipc seam: install it as a panic so the refusal is observable, as
+/// miscinit's first-contact tests do.
+fn setup_fatal_seams() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        elog::init_seams();
+        pgstat_seams::pgstat_set_session_end_cause_fatal::set(|| {});
+        init_small_seams::my_proc_pid::set(|| std::process::id() as i32);
+        ipc_seams::proc_exit::set(|code, _pid| panic!("proc_exit({code})"));
+    });
+}
+
+/// Runs `f`, which must refuse with a FATAL; returns the exit payload and
+/// what was reported.
+fn refuses(
+    f: impl FnOnce() -> types_error::PgResult<()>,
+) -> (String, (types_error::SqlState, String, Option<String>)) {
+    setup_fatal_seams();
+    EMITTED.lock().unwrap().clear();
+    let previous = elog::set_emit_log_hook(Some(record_emitted));
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    elog::set_emit_log_hook(previous);
+    let payload = match unwound {
+        Ok(r) => panic!("expected a FATAL refusal; the call returned {r:?} instead"),
+        Err(payload) => payload,
+    };
+    let exit = match payload.downcast::<String>() {
+        Ok(s) => *s,
+        Err(payload) => match payload.downcast::<&'static str>() {
+            Ok(s) => (*s).to_owned(),
+            Err(_) => "<non-string panic payload>".to_owned(),
+        },
+    };
+    let reported = EMITTED.lock().unwrap().last().cloned().expect("the FATAL was reported before exiting");
+    (exit, reported)
+}
+
+// sysv_shmem.c:796-804: a segment keyed by DataDir's inode, carrying our
+// header, with a process still attached (the orphaned-backend shape after
+// postmaster.pid was removed) is FATAL F0001 with C's message and hint; once
+// nobody is attached the walk recycles it (dsm cleanup on its control handle,
+// then IPC_RMID) and startup proceeds.
+#[test]
+fn create_walk_refuses_a_datadir_segment_still_in_use_then_recycles_it() {
+    use crate::probe_key_space;
+
+    let dir = scratch_datadir("walk-attached");
+    let ino = datadir_ino(&dir);
+    let key = ino as libc::key_t;
+    let mut seg = Segment::create_keyed(key);
+    seg.write_postgres_header(&dir);
+    // SAFETY: write_postgres_header left our own mapping attached.
+    unsafe { (*(seg.attached.unwrap() as *mut PGShmemHeader)).dsm_control = 0x2a };
+
+    let (exit, (sqlstate, message, hint)) = refuses(|| probe_key_space(&dir, ino, record_dsm_cleanup));
+    assert_eq!(exit, "proc_exit(1)");
+    assert_eq!(sqlstate, types_error::ERRCODE_LOCK_FILE_EXISTS, "{message}");
+    assert_eq!(
+        message,
+        format!(
+            "pre-existing shared memory block (key {}, ID {}) is still in use",
+            key as i64 as u64,
+            seg.id
+        )
+    );
+    assert_eq!(
+        hint.as_deref(),
+        Some(format!("Terminate any old server processes associated with data directory \"{dir}\".").as_str())
+    );
+    assert!(seg.exists(), "a refused segment must be left alone");
+
+    seg.detach();
+    probe_key_space(&dir, ino, record_dsm_cleanup).unwrap();
+    assert_eq!(DSM_CLEANUP_SEEN.load(std::sync::atomic::Ordering::Relaxed), 0x2a);
+    assert!(!seg.exists(), "an unattached segment of this data directory is recycled");
+    seg.id = -1;
+}
+
+// sysv_shmem.c:826-828: a segment at our seed key that is not ours (no
+// header) is FOREIGN — the walk steps to the next key and leaves it alone.
+#[test]
+fn create_walk_steps_past_a_foreign_segment_at_the_seed_key() {
+    use crate::probe_key_space;
+
+    let dir = scratch_datadir("walk-foreign");
+    let ino = datadir_ino(&dir);
+    let mut seg = Segment::create_keyed(ino as libc::key_t);
+    seg.attach();
+
+    probe_key_space(&dir, ino, record_dsm_cleanup).unwrap();
+    assert!(seg.exists(), "a foreign segment is never zapped");
+}
+
+// sysv_shmem.c:722-733, in C's order; plus pgrust's typed refusal where C
+// would go on to mmap the main region with MAP_HUGETLB.
+#[test]
+fn huge_pages_on_is_refused_like_c() {
+    use crate::{huge_pages_startup_gate, MAP_HUGETLB_AVAILABLE};
+    use guc_tables::consts::{HUGE_PAGES_OFF, HUGE_PAGES_ON, HUGE_PAGES_TRY, SHMEM_TYPE_MMAP, SHMEM_TYPE_SYSV};
+
+    const PLATFORM: &str = "huge pages not supported on this platform";
+    const SHMTYPE: &str = "huge pages not supported with the current \"shared_memory_type\" setting";
+
+    for hp in [HUGE_PAGES_OFF, HUGE_PAGES_TRY] {
+        for smt in [SHMEM_TYPE_MMAP, SHMEM_TYPE_SYSV] {
+            for hugetlb in [false, true] {
+                assert_eq!(huge_pages_startup_gate(hp, smt, hugetlb), Ok(()));
+            }
+        }
+    }
+    // Without MAP_HUGETLB the platform check comes first, whatever the type.
+    assert_eq!(huge_pages_startup_gate(HUGE_PAGES_ON, SHMEM_TYPE_MMAP, false), Err(PLATFORM));
+    assert_eq!(huge_pages_startup_gate(HUGE_PAGES_ON, SHMEM_TYPE_SYSV, false), Err(PLATFORM));
+    // With it, a non-mmap type is C's second refusal ...
+    assert_eq!(huge_pages_startup_gate(HUGE_PAGES_ON, SHMEM_TYPE_SYSV, true), Err(SHMTYPE));
+    // ... and mmap + on, which C honours with MAP_HUGETLB, is pgrust's typed
+    // refusal: no region exists to map.
+    assert_eq!(huge_pages_startup_gate(HUGE_PAGES_ON, SHMEM_TYPE_MMAP, true), Err(PLATFORM));
+    assert_eq!(MAP_HUGETLB_AVAILABLE, cfg!(any(target_os = "linux", target_os = "android")));
+}

@@ -10,12 +10,17 @@
 //! attached to the segment. That is the migrate-from-C first-contact path,
 //! and it is the only reason this file exists here.
 //!
-//! What is NOT ported, because it has no thread-model counterpart: segment
-//! creation (`InternalIpcMemoryCreate`, `PGSharedMemoryCreate`), the
-//! anonymous-mmap main region, `PGSharedMemoryReAttach`/`Detach`, huge-page
-//! plumbing (that lives in bufmgr::hugepages), and the key-space recycling
-//! walk. Of `PGSharedMemoryAttach` only the probe shape exists here — attachAt
-//! stays NULL, exactly as `PGSharedMemoryIsInUse` calls it in C.
+//! `PGSharedMemoryCreate` exists here as its two startup interlocks only
+//! (audit rows a186-candidate-fp-port-sysv_shmem-{79ac1c53,53018cea,78cb3328}):
+//! the huge_pages/shared_memory_type refusals (sysv_shmem.c:723-733) and the
+//! key-space walk from DataDir's inode (sysv_shmem.c:764-855) that refuses to
+//! start while a segment of this data directory still has processes attached
+//! and recycles one nobody is attached to. What it does NOT do, because the
+//! thread model has no counterpart: mint a segment of its own
+//! (`InternalIpcMemoryCreate`), map the anonymous main region, or write line 7
+//! of `postmaster.pid`; `PGSharedMemoryReAttach`/`Detach` stay unported. Of
+//! `PGSharedMemoryAttach` only the probe shape exists here — attachAt stays
+//! NULL, exactly as `PGSharedMemoryIsInUse` calls it in C.
 
 #![allow(non_snake_case)]
 
@@ -57,6 +62,13 @@ pub fn PGSharedMemoryIsInUse(_id1: u64, id2: u64) -> PgResult<bool> {
 
 #[cfg(not(target_family = "wasm"))]
 fn detach(addr: *mut libc::c_void) -> PgResult<()> {
+    detach_at(addr, 324, "PGSharedMemoryIsInUse")
+}
+
+/// C's `if (shmdt(addr) < 0) elog(LOG, "shmdt(%p) failed: %m", addr)`, at the
+/// caller's own line (PGSharedMemoryIsInUse:324, PGSharedMemoryCreate:846).
+#[cfg(not(target_family = "wasm"))]
+fn detach_at(addr: *mut libc::c_void, line: i32, func: &'static str) -> PgResult<()> {
     // SAFETY: `addr` is the mapping PGSharedMemoryAttach just returned from
     // shmat, and no reference into it outlives this call.
     if unsafe { libc::shmdt(addr) } < 0 {
@@ -64,11 +76,7 @@ fn detach(addr: *mut libc::c_void) -> PgResult<()> {
         elog::ereport(types_error::LOG)
             .with_saved_errno(errnum)
             .errmsg_internal(format!("shmdt({addr:p}) failed: %m"))
-            .finish(types_error::ErrorLocation::new(
-                "sysv_shmem.c",
-                324,
-                "PGSharedMemoryIsInUse",
-            ))?;
+            .finish(types_error::ErrorLocation::new("sysv_shmem.c", line, func))?;
     }
     Ok(())
 }
@@ -190,6 +198,171 @@ pub fn PGSharedMemoryAttach(_shmId: libc::c_int) -> (IpcMemoryState, *mut libc::
 
 #[cfg(target_family = "wasm")]
 fn detach(_addr: *mut libc::c_void) -> PgResult<()> {
+    Ok(())
+}
+
+/// C `PGSharedMemoryCreate`'s `#if !defined(MAP_HUGETLB)` (sysv_shmem.c:723):
+/// the flag exists on Linux (and Android's libc) only.
+pub const MAP_HUGETLB_AVAILABLE: bool = cfg!(any(target_os = "linux", target_os = "android"));
+
+/// The huge_pages refusals of C `PGSharedMemoryCreate` (sysv_shmem.c:722-733),
+/// in C's order: without MAP_HUGETLB, `huge_pages = on` is "not supported on
+/// this platform"; with it, `on` under a non-mmap `shared_memory_type` is "not
+/// supported with the current "shared_memory_type" setting". Where C would
+/// then go on to mmap the main region with MAP_HUGETLB (Linux, mmap), pgrust
+/// has no region to map: thread-shared state lives on the process heap, so
+/// `on` cannot be honoured and is refused with the platform message — the
+/// typed refusal of an unported feature, never the silent `huge_pages_status
+/// = off` boot the audit found. `try` and `off` pass everywhere, as in C.
+pub fn huge_pages_startup_gate(
+    huge_pages: i32,
+    shared_memory_type: i32,
+    map_hugetlb: bool,
+) -> Result<(), &'static str> {
+    use guc_tables::consts::{HUGE_PAGES_ON, SHMEM_TYPE_MMAP};
+
+    if huge_pages != HUGE_PAGES_ON {
+        return Ok(());
+    }
+    if !map_hugetlb {
+        return Err("huge pages not supported on this platform");
+    }
+    if shared_memory_type != SHMEM_TYPE_MMAP {
+        return Err("huge pages not supported with the current \"shared_memory_type\" setting");
+    }
+    Err("huge pages not supported on this platform")
+}
+
+/// C `PGSharedMemoryCreate` (sysv_shmem.c:702-870) as far as the thread model
+/// reaches: stat DataDir, the huge_pages refusals, then the key-space walk.
+/// `dsm_cleanup` is `dsm_cleanup_using_control_segment` (dsm.c), run on the
+/// control handle of a recycled segment exactly where C runs it; ipci passes
+/// the real one, tests pass a recorder.
+///
+/// The walk is C's loop minus the segment C ends it by creating: C tries
+/// `InternalIpcMemoryCreate(key)` first and only probes a key it could not
+/// create at, so the key it stops at is the first one with no segment behind
+/// it. Here a key with no segment (shmget → ENOENT) ends the walk the same
+/// way; every other key is probed with the same `PGSharedMemoryAttach` and
+/// acted on with C's arms (ATTACHED/ANALYSIS_FAILURE → FATAL, ENOENT → retry,
+/// FOREIGN → next key, UNATTACHED → dsm cleanup + IPC_RMID).
+pub fn PGSharedMemoryCreate(dsm_cleanup: fn(u32) -> PgResult<()>) -> PgResult<()> {
+    let datadir = init_small::globals::DataDir().unwrap_or("");
+    let mut statbuf = vfs::FileInfo::zeroed();
+    if fd::sync::pg_stat(datadir, &mut statbuf) != 0 {
+        let errnum = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        return elog::ereport(types_error::FATAL)
+            .with_saved_errno(errnum)
+            .errcode_for_file_access()
+            .errmsg(format!("could not stat data directory \"{datadir}\": %m"))
+            .finish(types_error::ErrorLocation::new("sysv_shmem.c", 716, "PGSharedMemoryCreate"));
+    }
+
+    let huge_pages = guc_tables::vars::huge_pages.read();
+    let shared_memory_type = guc_tables::vars::shared_memory_type.read();
+    if let Err(msg) = huge_pages_startup_gate(huge_pages, shared_memory_type, MAP_HUGETLB_AVAILABLE) {
+        return elog::ereport(types_error::ERROR)
+            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(msg)
+            .finish(types_error::ErrorLocation::new("sysv_shmem.c", 723, "PGSharedMemoryCreate"));
+    }
+
+    probe_key_space(datadir, statbuf.ino, dsm_cleanup)
+}
+
+/// The key-space walk of C `PGSharedMemoryCreate` (sysv_shmem.c:764-855),
+/// seeded with DataDir's inode. See [`PGSharedMemoryCreate`].
+#[cfg(not(target_family = "wasm"))]
+pub fn probe_key_space(datadir: &str, ino: u64, dsm_cleanup: fn(u32) -> PgResult<()>) -> PgResult<()> {
+    use types_storage::PGShmemHeader;
+
+    // C: `IpcMemoryKey NextShmemSegID = statbuf.st_ino` — key_t is int, the
+    // inode is truncated to it exactly as C's assignment does.
+    let mut next_key = ino as libc::key_t;
+    loop {
+        // SAFETY: shmget with no IPC_CREAT only looks a key up.
+        let shmid = unsafe { libc::shmget(next_key, std::mem::size_of::<PGShmemHeader>(), 0) };
+        let (state, oldaddr) = if shmid < 0 {
+            let errnum = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+            match errnum {
+                // No segment behind this key: C's InternalIpcMemoryCreate
+                // succeeds here and its loop ends.
+                libc::ENOENT => break,
+                // C: "shmget() failure is typically EACCES, hence SHMSTATE_FOREIGN".
+                libc::EACCES => (IpcMemoryState::Foreign, std::ptr::null_mut()),
+                // Any other failure (ENOSYS: no System V IPC at all) means no
+                // Postgres segment can exist for this key space; C would fail
+                // creating its own, pgrust needs none.
+                _ => break,
+            }
+        } else {
+            PGSharedMemoryAttach(shmid)
+        };
+
+        let key = next_key as i64 as u64;
+        match state {
+            IpcMemoryState::AnalysisFailure | IpcMemoryState::Attached => {
+                if !oldaddr.is_null() {
+                    detach_at(oldaddr, 846, "PGSharedMemoryCreate")?;
+                }
+                return elog::ereport(types_error::FATAL)
+                    .errcode(types_error::ERRCODE_LOCK_FILE_EXISTS)
+                    .errmsg(format!(
+                        "pre-existing shared memory block (key {key}, ID {}) is still in use",
+                        shmid as i64 as u64
+                    ))
+                    .errhint(format!(
+                        "Terminate any old server processes associated with data directory \"{datadir}\"."
+                    ))
+                    .finish(types_error::ErrorLocation::new("sysv_shmem.c", 798, "PGSharedMemoryCreate"));
+            }
+            IpcMemoryState::Enoent => {
+                // To our surprise, some other process deleted it since our
+                // shmget. Try that same key again.
+                elog::elog(
+                    types_error::LOG,
+                    format!(
+                        "shared memory block (key {key}, ID {}) deleted during startup",
+                        shmid as i64 as u64
+                    ),
+                )?;
+            }
+            IpcMemoryState::Foreign => next_key += 1,
+            IpcMemoryState::Unattached => {
+                // The segment pertains to DataDir, and every process that had
+                // used it has died or detached. Zap it, if possible, and any
+                // associated dynamic shared memory segments, as well. If that
+                // fails, assume the segment belongs to someone else after all,
+                // and try the next candidate.
+                // SAFETY: UNATTACHED is only returned with the mapping still
+                // attached and its header already validated by the probe.
+                let dsm_control = unsafe { (*(oldaddr as *const PGShmemHeader)).dsm_control };
+                if dsm_control != 0 {
+                    dsm_cleanup(dsm_control)?;
+                }
+                // SAFETY: our own data directory's abandoned segment.
+                let removed = unsafe { libc::shmctl(shmid, libc::IPC_RMID, std::ptr::null_mut()) } == 0;
+                detach_at(oldaddr, 846, "PGSharedMemoryCreate")?;
+                if !removed {
+                    next_key += 1;
+                    continue;
+                }
+                // The key is free now: C's next InternalIpcMemoryCreate at it
+                // succeeds and ends the loop.
+                break;
+            }
+        }
+        if !oldaddr.is_null() && state != IpcMemoryState::Unattached {
+            detach_at(oldaddr, 846, "PGSharedMemoryCreate")?;
+        }
+    }
+    Ok(())
+}
+
+// wasm32: no System V IPC and no other process, so the key space is empty —
+// the walk ends at its first key without a syscall.
+#[cfg(target_family = "wasm")]
+pub fn probe_key_space(_datadir: &str, _ino: u64, _dsm_cleanup: fn(u32) -> PgResult<()>) -> PgResult<()> {
     Ok(())
 }
 

@@ -96,6 +96,12 @@ pub fn CreateSharedMemoryAndSemaphores(fastpath_lock_groups_per_backend: i32) ->
     let (size, _num_semas) = CalculateShmemSize(&cfg)?;
     elog::elog(DEBUG3, format!("invoking IpcMemoryCreate(size={size})"))?;
 
+    // PGSharedMemoryCreate (sysv_shmem.c:702): the huge_pages refusals and the
+    // key-space walk that refuses to start over a segment of this data
+    // directory still in use (recycling an abandoned one, dsm cleanup
+    // included); the segment itself has no thread-model counterpart.
+    sysv_shmem::PGSharedMemoryCreate(dsm_core::dsm::dsm_cleanup_using_control_segment)?;
+
     // C reports this from PGSharedMemoryCreate; thread-shared state never
     // mmaps with MAP_HUGETLB, so huge pages are always off (never "unknown").
     guc::SetConfigOption("huge_pages_status", Some("off"), PGC_INTERNAL, PGC_S_DYNAMIC_DEFAULT)?;

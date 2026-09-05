@@ -599,6 +599,10 @@ fn install_guc_tables_owned_vars() {
         get: backing::huge_pages,
         set: backing::set_huge_pages,
     });
+    vars::shared_memory_type.install(GucVarAccessors {
+        get: backing::shared_memory_type,
+        set: backing::set_shared_memory_type,
+    });
     vars::compute_query_id.install(GucVarAccessors {
         get: backing::compute_query_id,
         set: backing::set_compute_query_id,

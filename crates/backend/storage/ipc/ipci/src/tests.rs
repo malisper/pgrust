@@ -105,6 +105,11 @@ fn bringup() {
         init_seams();
     });
     guc::store::initialize_guc_options().unwrap();
+    // PGSharedMemoryCreate stats DataDir and walks the System V key space
+    // from its inode (sysv_shmem.c:716, :764): give it a real directory.
+    let dir = std::env::temp_dir().join(format!("pgrust-ipci-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    init_small::globals::SetDataDir(dir.to_str().unwrap());
     // Unseeded prng = xoroshiro zero fixed point; InitProcessGlobals seeds it.
     pg_prng::global_prng(|prng| prng.seed(42));
     g::SetNBuffers(16);

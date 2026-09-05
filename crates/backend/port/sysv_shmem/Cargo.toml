@@ -23,3 +23,10 @@ guc_tables = { path = "../../utils/misc/guc_tables" }
 guc_seams = { path = "../../utils/misc/guc_seams" }
 types_guc = { path = "../../../_support/types/types_guc" }
 libc = "0.2"
+
+[dev-dependencies]
+# The key-space walk's FATAL refusal exits through elog's proc_exit seam; the
+# tests install it as a panic (miscinit's first-contact tests do the same).
+pgstat_seams = { path = "../../utils/activity/pgstat_seams" }
+init_small_seams = { path = "../../utils/init/init_small_seams" }
+ipc_seams = { path = "../../storage/ipc/ipc_seams" }

@@ -18,6 +18,8 @@ init_small = { path = "../../../utils/init/init_small" }
 guc = { path = "../../../utils/misc/guc" }
 guc_tables = { path = "../../../utils/misc/guc_tables" }
 shmem = { path = "../shmem" }
+# PGSharedMemoryCreate's startup interlocks (sysv_shmem.c:702-870).
+sysv_shmem = { path = "../../../port/sysv_shmem" }
 dsm_core = { path = "../dsm_core" }
 dsm_registry = { path = "../dsm_registry" }
 lwlock = { path = "../../lmgr/lwlock" }
