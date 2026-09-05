@@ -1,18 +1,22 @@
 // nodeIncrementalSort.c: two-mode sort over prefix-sorted input. The outer
 // child stays with the ExecProcNode dispatcher via a fetch closure (nodesort
-// precedent). Prefix-key equality is an ExprState program (nodeunique
-// precedent) rather than C's per-column fcinfo loop; C compares last presorted
-// column first and the program preserves that order.
+// precedent). Prefix-key equality is C's per-column fcinfo loop
+// (preparePresortedCols / isCurrentGroup): the equality function of each
+// presorted key is fmgr_info'd once, called as eq(pivot, tuple) from the
+// last presorted column backwards, with no EXECUTE-ACL check and a NULL
+// result raised as "function %u returned NULL".
 #![allow(non_snake_case)]
 
+use core::ptr::NonNull;
 use std::rc::Rc;
 
-use ::execexpr::{exec_build_grouping_equal, exec_qual, EvalSlots, ExprState};
 use ::executils::{EStateData, EcxtId, ExecSlotId};
-use ::mcx::{vec_with_capacity_in, Mcx, PgBox};
+use ::mcx::{Mcx, MemoryContext, PgVec};
 use ::tuplesort::{Tuplesort, TUPLESORT_ALLOWBOUNDED, TUPLESORT_NONE};
 use ::types_core::instrument::IncrementalSortInfo;
-use ::types_error::PgResult;
+use ::types_core::Oid;
+use ::types_error::{PgError, PgResult};
+use ::types_fmgr::FmgrInfo;
 use ::types_nodes::plannodes::IncrementalSort;
 use ::types_scan::sdir::{ForwardScanDirection, ScanDirectionIsForward};
 use ::types_slot::{SlotData, TupleSlotKind, EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
@@ -50,7 +54,22 @@ pub struct IncrementalSortState<'mcx> {
     prefixsort_state: Option<Tuplesort>,
     group_pivot: SlotData<'mcx>,
     transfer_tuple: SlotData<'mcx>,
-    presorted_eq: Option<PgBox<'mcx, ExprState<'mcx>>>,
+    presorted: Option<PresortedKeys<'mcx>>,
+}
+
+// C PresortedKeyData: the pre-cached equality function of one presorted key.
+struct PresortedKeyData {
+    attno: i16,
+    flinfo: FmgrInfo,
+    collation: Oid,
+}
+
+struct PresortedKeys<'mcx> {
+    keys: PgVec<'mcx, PresortedKeyData>,
+    // The per-tuple context of ps_ExprContext: the result mcx of every
+    // equality call (C: CurrentMemoryContext). Every compare site resets
+    // ps_ExprContext afterwards.
+    per_tuple: NonNull<MemoryContext>,
 }
 
 /// `ExecInitIncrementalSort` minus child linkage: the caller (execProcnode's
@@ -88,45 +107,93 @@ pub fn exec_init_incremental_sort<'mcx>(
         prefixsort_state: None,
         group_pivot,
         transfer_tuple,
-        presorted_eq: None,
+        presorted: None,
     }
 }
 
-// preparePresortedCols: equality resolved once into an ExprState program.
-fn prepare_presorted_cols<'mcx>(
+// preparePresortedCols: the equality function of every presorted key,
+// resolved once.
+//
+// # Safety
+// `per_tuple`'s context outlives every later compare (it is ps_ExprContext's
+// per-tuple context, arena-boxed by ExprContextData, released with the node).
+unsafe fn prepare_presorted_cols<'mcx>(
     node: &mut IncrementalSortState<'mcx>,
     mcx: Mcx<'mcx>,
+    per_tuple: Mcx<'_>,
 ) -> PgResult<()> {
-    let n = node.plan.nPresortedCols as usize;
-    let mut eqfuncoids = vec_with_capacity_in(mcx, n)?;
+    let plannode = node.plan;
+    let n = plannode.nPresortedCols as usize;
+    let mut keys = PgVec::new_in(mcx);
     for i in 0..n {
-        let sortop = node.plan.sort.sortOperators[i];
-        let (equality_op, _) = lsyscache::amop::get_equality_op_for_ordering_op(sortop)?
-            .unwrap_or_else(|| {
-                panic!("missing equality operator for ordering operator {sortop}")
-            });
-        eqfuncoids.push(lsyscache::get_opcode(equality_op)?);
+        let sortop = plannode.sort.sortOperators[i];
+        // C: get_equality_op_for_ordering_op returns InvalidOid both when the
+        // operator is no ordering operator and when its opfamily has no
+        // equality member; the guard is elog(ERROR) (nodeIncrementalSort.c:185).
+        let equality_op = lsyscache::amop::get_equality_op_for_ordering_op(sortop)?
+            .map_or(0, |(equality_op, _)| equality_op);
+        if equality_op == 0 {
+            return Err(Box::new(PgError::error(format!(
+                "missing equality operator for ordering operator {sortop}"
+            ))));
+        }
+        let equality_func = lsyscache::get_opcode(equality_op)?;
+        if equality_func == 0 {
+            // C: elog(ERROR, ...) (nodeIncrementalSort.c:190).
+            return Err(Box::new(PgError::error(format!(
+                "missing function for operator {equality_op}"
+            ))));
+        }
+        // C: fmgr_info_cxt (nodeIncrementalSort.c:193) — no EXECUTE-ACL
+        // check on this path (ExecBuildGroupingEqual's is nodeUnique's, not
+        // this node's).
+        let flinfo = fmgr_core::fmgr_info(equality_func)?;
+        keys.push(PresortedKeyData {
+            attno: plannode.sort.sortColIdx[i],
+            flinfo,
+            collation: plannode.sort.collations[i],
+        });
     }
-    node.presorted_eq = Some(exec_build_grouping_equal(
-        mcx,
-        node.outer_desc.as_ref().expect("incremental sort already ended"),
-        node.outer_desc.as_ref().expect("incremental sort already ended"),
-        &node.plan.sort.sortColIdx[..n],
-        &eqfuncoids,
-        &node.plan.sort.collations[..n],
-    )?);
+    node.presorted = Some(PresortedKeys { keys, per_tuple: NonNull::from(per_tuple.context()) });
     Ok(())
 }
 
-// isCurrentGroup: NULL == NULL matches (grouping-equal semantics, as C). The
-// caller resets ps_ExprContext afterwards.
+// isCurrentGroup: compare from the last presorted column backwards;
+// NULL-vs-NULL matches, NULL-vs-value does not; otherwise eq(pivot, tuple)
+// (args[0] = pivot, args[1] = tuple — nodeIncrementalSort.c:248). A NULL
+// result is "function %u returned NULL" (nodeIncrementalSort.c:258), raised
+// by function_call2_coll_in. The caller resets ps_ExprContext afterwards.
 fn is_current_group<'a, 'mcx>(
-    eq: &mut ExprState<'mcx>,
+    presorted: &mut PresortedKeys<'mcx>,
     pivot: &'a mut SlotData<'mcx>,
     tuple: &'a mut SlotData<'mcx>,
 ) -> PgResult<bool> {
-    let mut slots = EvalSlots { scan: None, inner: Some(tuple), outer: Some(pivot) };
-    exec_qual(Some(eq), &mut slots)
+    // SAFETY: prepare_presorted_cols's contract — the armed context is live
+    // for the node's whole life.
+    let mcx = unsafe { presorted.per_tuple.as_ref() }.mcx();
+    for key in presorted.keys.iter_mut().rev() {
+        let mut isnull_a = false;
+        let mut isnull_b = false;
+        let datum_a = exectuples::slot_getattr(pivot, key.attno as i32, &mut isnull_a);
+        let datum_b = exectuples::slot_getattr(tuple, key.attno as i32, &mut isnull_b);
+        if isnull_a || isnull_b {
+            if isnull_a == isnull_b {
+                continue;
+            }
+            return Ok(false);
+        }
+        let result = ::types_fmgr::function_call2_coll_in(
+            &mut key.flinfo,
+            key.collation,
+            mcx,
+            datum_a,
+            datum_b,
+        )?;
+        if !result.as_bool() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn fullsort_opts(bounded: bool) -> i32 {
@@ -215,7 +282,7 @@ fn switch_to_presorted_prefix_mode<'mcx>(
                 )?;
             }
             let matched = is_current_group(
-                node.presorted_eq.as_mut().expect("presorted_eq prepared"),
+                node.presorted.as_mut().expect("presorted keys prepared"),
                 &mut node.group_pivot,
                 &mut node.transfer_tuple,
             )?;
@@ -297,17 +364,16 @@ where
     if node.execution_status == ExecStatus::LoadFullsort {
         match &mut node.fullsort_state {
             None => {
-                prepare_presorted_cols(node, mcx)?;
                 // The prefix eq detoasts compressed by-ref keys through the
-                // frame's result mcx; every eval site resets ps_ExprContext
-                // after the compare (C: econtext per-tuple memory).
-                // SAFETY: the ps_ExprContext outlives the program (same
-                // estate).
+                // per-tuple result mcx; every compare site resets
+                // ps_ExprContext afterwards (C: econtext per-tuple memory).
+                // SAFETY: the ps_ExprContext outlives the node (same estate).
                 unsafe {
-                    node.presorted_eq
-                        .as_mut()
-                        .expect("presorted_eq prepared")
-                        .arm_result_mcx_raw(estate.ecxt(node.ps_ExprContext).per_tuple_mcx())
+                    prepare_presorted_cols(
+                        node,
+                        mcx,
+                        estate.ecxt(node.ps_ExprContext).per_tuple_mcx(),
+                    )?
                 };
                 node.fullsort_state = Some(Tuplesort::begin_heap(
                     node.outer_desc.clone().expect("incremental sort already ended"),
@@ -372,7 +438,7 @@ where
                 }
             } else {
                 let matched = is_current_group(
-                    node.presorted_eq.as_mut().expect("presorted_eq prepared"),
+                    node.presorted.as_mut().expect("presorted keys prepared"),
                     &mut node.group_pivot,
                     estate.slot_mut(outer_id),
                 )?;
@@ -436,7 +502,7 @@ where
                 break;
             };
             let matched = is_current_group(
-                node.presorted_eq.as_mut().expect("presorted_eq prepared"),
+                node.presorted.as_mut().expect("presorted keys prepared"),
                 &mut node.group_pivot,
                 estate.slot_mut(outer_id),
             )?;
@@ -483,7 +549,7 @@ where
 pub fn exec_end_incremental_sort(node: &mut IncrementalSortState<'_>) {
     node.fullsort_state = None;
     node.prefixsort_state = None;
-    node.presorted_eq = None;
+    node.presorted = None;
     node.ps_ResultTupleDesc = None;
     node.outer_desc = None;
     node.group_pivot.base_mut().tts_tupleDescriptor = None;
@@ -498,7 +564,7 @@ mcx::forget_safe_struct!(
         bounded, bound, execution_status, outer_node_done, bound_done,
         n_fullsort_remaining;
         ps_ResultTupleDesc, outer_desc, fullsort_state, prefixsort_state,
-        group_pivot, transfer_tuple, presorted_eq },
+        group_pivot, transfer_tuple, presorted },
 );
 
 /// `ExecReScanIncrementalSort` node-local half. The caller always rescans the

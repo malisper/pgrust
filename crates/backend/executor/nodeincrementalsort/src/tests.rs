@@ -18,17 +18,31 @@ const INT4OID: u32 = 23;
 const INT4_LT: u32 = 97;
 const INT4_EQ: u32 = 96;
 const F_INT4EQ: u32 = 65;
+const F_INT4LE: u32 = 149;
 const INTEGER_BTREE_FAM: u32 = 1976;
 const BTREE_AM: u32 = 403;
 const F_BTINT4SORTSUPPORT: u32 = 3130;
 const BT_EQUAL_STRATEGY: i16 = 3;
 
+// Synthetic btree opfamilies over int4 (pathkeys-valid: strategy 1 plus a
+// sort-support proc), differing only in their equality member:
+//   ASYM:   equality operator's function is int4le — eq(a, b) := a <= b, so
+//           the operand order of isCurrentGroup is observable;
+//   NOEQ:   no equality member (preparePresortedCols's first elog(ERROR));
+//   NOFUNC: equality operator whose oprcode is InvalidOid (its second).
+const ASYM_LT: u32 = 90001;
+const ASYM_EQ: u32 = 90002;
+const ASYM_FAM: u32 = 90100;
+const NOEQ_LT: u32 = 90003;
+const NOEQ_FAM: u32 = 90200;
+const NOFUNC_LT: u32 = 90005;
+const NOFUNC_EQ: u32 = 90006;
+const NOFUNC_FAM: u32 = 90300;
+
 static SEAMS: Once = Once::new();
 
 fn install_seams() {
     SEAMS.call_once(|| {
-        miscinit_seams::get_user_id::set(|| 10);
-        aclchk_seams::object_aclcheck::set(|_classid, _objid, _roleid, _mode| Ok(0));
         syscache_seams::lookup_pg_type_shape::set(|typid| {
             Ok((typid == INT4OID).then_some(PgTypeShape {
                 typlen: 4,
@@ -39,10 +53,16 @@ fn install_seams() {
             }))
         });
         syscache_seams::lookup_pg_amop_members_by_operator::set(|mcx, opno| {
-            assert_eq!(opno, INT4_LT);
+            let amopfamily = match opno {
+                INT4_LT => INTEGER_BTREE_FAM,
+                ASYM_LT => ASYM_FAM,
+                NOEQ_LT => NOEQ_FAM,
+                NOFUNC_LT => NOFUNC_FAM,
+                other => panic!("unexpected operator {other}"),
+            };
             let mut v = PgVec::new_in(mcx);
             v.push(syscache_seams::PgAmopMemberShape {
-                amopfamily: INTEGER_BTREE_FAM,
+                amopfamily,
                 amoplefttype: INT4OID,
                 amoprighttype: INT4OID,
                 amopstrategy: 1,
@@ -51,26 +71,38 @@ fn install_seams() {
             Ok(v)
         });
         syscache_seams::lookup_pg_opfamily_shape::set(|opfid| {
-            Ok((opfid == INTEGER_BTREE_FAM).then(|| syscache_seams::PgOpfamilyShape {
-                opfmethod: BTREE_AM,
-                opfname: ::types_tuple::NameData::default(),
+            Ok(matches!(opfid, INTEGER_BTREE_FAM | ASYM_FAM | NOEQ_FAM | NOFUNC_FAM).then(|| {
+                syscache_seams::PgOpfamilyShape {
+                    opfmethod: BTREE_AM,
+                    opfname: ::types_tuple::NameData::default(),
+                }
             }))
         });
         syscache_seams::lookup_pg_amop_by_strategy::set(|opfamily, left, right, strategy| {
-            assert_eq!(
-                (opfamily, left, right, strategy),
-                (INTEGER_BTREE_FAM, INT4OID, INT4OID, BT_EQUAL_STRATEGY)
-            );
-            Ok(INT4_EQ)
+            assert_eq!((left, right, strategy), (INT4OID, INT4OID, BT_EQUAL_STRATEGY));
+            Ok(match opfamily {
+                INTEGER_BTREE_FAM => INT4_EQ,
+                ASYM_FAM => ASYM_EQ,
+                NOEQ_FAM => 0,
+                NOFUNC_FAM => NOFUNC_EQ,
+                other => panic!("unexpected opfamily {other}"),
+            })
         });
         syscache_seams::lookup_pg_operator_shape::set(|opno| {
-            Ok((opno == INT4_EQ).then_some(syscache_seams::PgOperatorShape { oprnamespace: 11,
+            let oprcode = match opno {
+                INT4_EQ => F_INT4EQ,
+                ASYM_EQ => F_INT4LE,
+                NOFUNC_EQ => 0,
+                _ => return Ok(None),
+            };
+            Ok(Some(syscache_seams::PgOperatorShape {
+                oprnamespace: 11,
                 oprleft: INT4OID,
                 oprright: INT4OID,
                 oprresult: 16,
-                oprcom: INT4_EQ,
+                oprcom: opno,
                 oprnegate: 518,
-                oprcode: F_INT4EQ,
+                oprcode,
                 oprrest: 101,
                 oprjoin: 105,
                 oprcanmerge: true,
@@ -78,7 +110,8 @@ fn install_seams() {
             }))
         });
         syscache_seams::lookup_pg_amproc::set(|opfamily, left, right, procnum| {
-            assert_eq!((opfamily, left, right, procnum), (INTEGER_BTREE_FAM, INT4OID, INT4OID, 2));
+            assert!(matches!(opfamily, INTEGER_BTREE_FAM | ASYM_FAM | NOEQ_FAM | NOFUNC_FAM));
+            assert_eq!((left, right, procnum), (INT4OID, INT4OID, 2));
             Ok(F_BTINT4SORTSUPPORT)
         });
     });
@@ -117,11 +150,15 @@ fn int4_desc(mcx: Mcx<'static>, natts: i32) -> Rc<TupleDescData<'static>> {
     })
 }
 
-fn mk_plan(mcx: Mcx<'static>, n_presorted: i32) -> &'static IncrementalSort<'static> {
+fn mk_plan(
+    mcx: Mcx<'static>,
+    n_presorted: i32,
+    prefix_sortop: u32,
+) -> &'static IncrementalSort<'static> {
     let mut plan = Node::build::<IncrementalSort>(mcx).unwrap();
     plan.sort.numCols = 2;
     plan.sort.sortColIdx = ::mcx::slice_borrow_in(mcx, &[1i16, 2]).unwrap();
-    plan.sort.sortOperators = ::mcx::slice_borrow_in(mcx, &[INT4_LT, INT4_LT]).unwrap();
+    plan.sort.sortOperators = ::mcx::slice_borrow_in(mcx, &[prefix_sortop, INT4_LT]).unwrap();
     plan.sort.collations = ::mcx::slice_borrow_in(mcx, &[0u32, 0]).unwrap();
     plan.sort.nullsFirst = ::mcx::slice_borrow_in(mcx, &[false, false]).unwrap();
     plan.nPresortedCols = n_presorted;
@@ -160,12 +197,19 @@ impl Feed {
 fn setup(
     rows: Vec<(Option<i32>, i32)>,
 ) -> (IncrementalSortState<'static>, EStateData<'static>, Feed) {
+    setup_with_sortop(rows, INT4_LT)
+}
+
+fn setup_with_sortop(
+    rows: Vec<(Option<i32>, i32)>,
+    prefix_sortop: u32,
+) -> (IncrementalSortState<'static>, EStateData<'static>, Feed) {
     install_seams();
     let mcx = leaked_mcx();
     let desc = int4_desc(mcx, 2);
     let mut estate = EStateData::new_in(mcx);
     let in_slot = estate.exec_init_extra_tuple_slot(Some(desc.clone()), TupleSlotKind::Virtual);
-    let plan = mk_plan(mcx, 1);
+    let plan = mk_plan(mcx, 1, prefix_sortop);
     let node = exec_init_incremental_sort(plan, &mut estate, 0, &desc, desc.clone());
     let feed = Feed { slot: in_slot, rows, next: 0 };
     (node, estate, feed)
@@ -272,4 +316,41 @@ fn rescan_resorts_from_scratch() {
     feed.next = 0;
     let out = drain(&mut node, &mut estate, &mut feed, None);
     assert_eq!(out, expected_sorted(rows));
+}
+
+// nodeIncrementalSort.c:248-249: fcinfo->args[0] = pivot, args[1] = tuple.
+// With eq(a, b) := a <= b over distinct ascending prefix keys, C's
+// eq(pivot, tuple) is always true — one group, sorted by the suffix key
+// only — whereas eq(tuple, pivot) is true only for equal keys.
+#[test]
+fn is_current_group_passes_pivot_then_tuple() {
+    let rows: Vec<(Option<i32>, i32)> = (0..100).map(|i| (Some(i), (i * 37) % 101)).collect();
+    let (mut node, mut estate, mut feed) = setup_with_sortop(rows.clone(), ASYM_LT);
+    let out = drain(&mut node, &mut estate, &mut feed, None);
+    let mut expected = rows;
+    expected.sort_by_key(|&(_, b)| b);
+    assert_eq!(out, expected);
+}
+
+// nodeIncrementalSort.c:185: elog(ERROR), not a process panic, when the
+// ordering operator's opfamily has no equality member.
+#[test]
+fn missing_equality_operator_is_an_error() {
+    let rows: Vec<(Option<i32>, i32)> = (0..40).map(|i| (Some(i), i)).collect();
+    let (mut node, mut estate, mut feed) = setup_with_sortop(rows, NOEQ_LT);
+    let err = exec_incremental_sort(&mut node, &mut estate, |es| feed.fetch(es)).unwrap_err();
+    assert_eq!(
+        err.message(),
+        format!("missing equality operator for ordering operator {NOEQ_LT}")
+    );
+}
+
+// nodeIncrementalSort.c:190: the equality operator's oprcode is checked
+// before any function lookup.
+#[test]
+fn missing_operator_function_is_an_error() {
+    let rows: Vec<(Option<i32>, i32)> = (0..40).map(|i| (Some(i), i)).collect();
+    let (mut node, mut estate, mut feed) = setup_with_sortop(rows, NOFUNC_LT);
+    let err = exec_incremental_sort(&mut node, &mut estate, |es| feed.fetch(es)).unwrap_err();
+    assert_eq!(err.message(), format!("missing function for operator {NOFUNC_EQ}"));
 }
