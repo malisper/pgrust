@@ -2,17 +2,36 @@ use super::*;
 use mcx::{Mcx, MemoryContext, PgVec};
 use std::cell::Cell;
 use std::rc::Rc;
-use std::sync::Once;
+use std::sync::{Mutex, Once};
 use types_core::{INVALID_PROC_NUMBER, RELPERSISTENCE_PERMANENT};
+use types_error::{ErrorLevel, PgError, PgResult, ERRCODE_INTERNAL_ERROR, LOG};
 use types_rel::{LockInfoData, LockRelId, RELKIND_RELATION, REPLICA_IDENTITY_DEFAULT};
 use types_tuple::{NameData, TupleDescData};
 
 const MY_TEMP_TOAST_NS: Oid = 16999;
 
+/// Server-log capture: (level, message, detail) of every ereport_msg report
+/// on this test binary.
+static LOGS: Mutex<Vec<(ErrorLevel, String, Option<String>)>> = Mutex::new(Vec::new());
+
+fn capture_log(elevel: ErrorLevel, msg: String, detail: Option<String>) -> PgResult<()> {
+    LOGS.lock().unwrap_or_else(|e| e.into_inner()).push((elevel, msg, detail));
+    Ok(())
+}
+
+fn take_logs() -> Vec<(ErrorLevel, String, Option<String>)> {
+    std::mem::take(&mut *LOGS.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
 fn install_seams() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         namespace_seams::is_temp_toast_namespace::set(|ns| ns == MY_TEMP_TOAST_NS);
+        elog_seams::ereport_msg::set(capture_log);
+        // fmgr.c:132 fmgr_info_cxt_security: a lookup miss is elog(ERROR).
+        fmgr_seams::fmgr_info::set(|fid| {
+            Err(Box::new(PgError::error(format!("cache lookup failed for function {fid}"))))
+        });
         init_seams();
     });
 }
@@ -234,4 +253,124 @@ fn misc_predicates() {
         assert!(IsCatalogTextUniqueIndexOid(oid));
     }
     assert!(!IsCatalogTextUniqueIndexOid(AuthIdRolnameIndexId));
+}
+
+// ---- audit-18.6 b176: catalog.c GetNewOidWithIndex / GetNewRelFileNumber ----
+
+// catalog.c:581 elog(ERROR, "invalid relpersistence: %c"): a catchable XX000
+// with the byte printed as a character, never a panic.
+#[test]
+fn get_new_relfilenumber_invalid_relpersistence_is_catchable_xx000() {
+    install_seams();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let err = GetNewRelFileNumber(mcx, 0, None, b'x')
+        .expect_err("invalid relpersistence must be a catchable ERROR");
+    assert_eq!(err.sqlstate(), ERRCODE_INTERNAL_ERROR);
+    assert_eq!(err.message(), "invalid relpersistence: x");
+}
+
+// catalog.c:574 ProcNumberForTempRelations(): a parallel worker probes temp
+// relfilenumber collisions under its LEADER's proc number, not its own.
+#[test]
+fn temp_relfilenumber_probes_under_leader_proc_number() {
+    install_seams();
+    init_small::globals::SetMyProcNumber(7);
+    init_small::globals::SetParallelLeaderProcNumber(3);
+    assert_eq!(crate::oid::relfilenumber_proc_number(b't').unwrap(), 3);
+    init_small::globals::SetParallelLeaderProcNumber(INVALID_PROC_NUMBER);
+    assert_eq!(crate::oid::relfilenumber_proc_number(b't').unwrap(), 7);
+    assert_eq!(crate::oid::relfilenumber_proc_number(b'p').unwrap(), INVALID_PROC_NUMBER);
+    assert_eq!(crate::oid::relfilenumber_proc_number(b'u').unwrap(), INVALID_PROC_NUMBER);
+    init_small::globals::SetMyProcNumber(INVALID_PROC_NUMBER);
+}
+
+// catalog.c:479 ScanKeyInit -> fmgr_info(F_OIDEQ): an fmgr failure is a
+// catchable elog(ERROR), never a panic.
+#[test]
+fn oid_eq_key_propagates_fmgr_info_error() {
+    install_seams();
+    let err = crate::oid::oid_eq_key(1, 5).err().expect("fmgr_info failure must propagate");
+    assert_eq!(err.sqlstate(), ERRCODE_INTERNAL_ERROR);
+    assert_eq!(err.message(), "cache lookup failed for function 184");
+}
+
+// catalog.c:493-535: no LOG traffic below GETNEWOID_LOG_THRESHOLD collisions.
+#[test]
+fn get_new_oid_few_collisions_log_nothing() {
+    install_seams();
+    let _ = take_logs();
+    let mut next = 100u32;
+    let oid = crate::oid::get_new_oid_loop(
+        "pg_class",
+        || {
+            next += 1;
+            Ok(next)
+        },
+        |oid| Ok(oid < 106),
+    )
+    .unwrap();
+    assert_eq!(oid, 106);
+    assert!(take_logs().is_empty());
+}
+
+// catalog.c:493-535: past 1,000,000 collisions, LOG "still searching" with the
+// plural DETAIL at 1M and 2M retries (exponential interval), then the
+// completion LOG once an OID is found.
+#[test]
+fn get_new_oid_million_collisions_log_progress_and_completion() {
+    install_seams();
+    let _ = take_logs();
+    let mut next = 0u32;
+    let oid = crate::oid::get_new_oid_loop(
+        "pg_class",
+        || {
+            next += 1;
+            Ok(next)
+        },
+        |oid| Ok(oid <= 2_000_000),
+    )
+    .unwrap();
+    assert_eq!(oid, 2_000_001);
+    let logs = take_logs();
+    let still = "still searching for an unused OID in relation \"pg_class\"".to_string();
+    assert_eq!(
+        logs,
+        vec![
+            (
+                LOG,
+                still.clone(),
+                Some("OID candidates have been checked 1000000 times, but no unused OID has been found yet.".to_string()),
+            ),
+            (
+                LOG,
+                still,
+                Some("OID candidates have been checked 2000000 times, but no unused OID has been found yet.".to_string()),
+            ),
+            (
+                LOG,
+                "new OID has been assigned in relation \"pg_class\" after 2000001 retries".to_string(),
+                None,
+            ),
+        ]
+    );
+}
+
+// catalog.c:511-519: the log interval doubles up to GETNEWOID_LOG_MAX_INTERVAL,
+// then grows by GETNEWOID_LOG_MAX_INTERVAL per report.
+#[test]
+fn get_new_oid_log_interval_schedule() {
+    let mut before_log = 1_000_000u64;
+    let mut schedule = Vec::new();
+    for _ in 0..10 {
+        before_log = crate::oid::next_retries_before_log(before_log);
+        schedule.push(before_log);
+    }
+    assert_eq!(
+        schedule,
+        [
+            2_000_000, 4_000_000, 8_000_000, 16_000_000, 32_000_000, 64_000_000, 128_000_000,
+            256_000_000, 384_000_000, 512_000_000
+        ]
+    );
 }

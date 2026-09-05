@@ -19,6 +19,7 @@ types_error = { path = "../../../_support/types/types_error" }
 types_scan = { path = "../../../_support/types/types_scan" }
 types_snapshot = { path = "../../../_support/types/snapshot" }
 types_storage = { path = "../../../_support/types/types_storage" }
+elog_seams = { path = "../../utils/error/elog_seams" }
 fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 genam = { path = "../../access/index/genam" }
