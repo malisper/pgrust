@@ -227,7 +227,7 @@ fn rescan_resets_async_state_and_replays() {
         notify_calls: 0,
     };
     assert_eq!(drain(&mut node, &mut estate, &mut driver).len(), 2);
-    exec_rescan_append(&mut node);
+    exec_rescan_append(&mut node, &mut estate, &mut driver).unwrap();
     driver.children[0].rows_left = 1;
     driver.children[1].rows_left = 1;
     assert_eq!(drain(&mut node, &mut estate, &mut driver).len(), 2);
@@ -244,6 +244,8 @@ fn setup_wait_backend() {
         waitevent_seams::pgstat_report_wait_end::set(|| {});
         waiteventset::init_seams();
         latch::init_seams();
+        // The reset loop's CHECK_FOR_INTERRUPTS: nothing pending in tests.
+        postgres_seams::check_for_interrupts::set(|| Ok(()));
     });
     let pid = NEXT_PID.fetch_add(1, SeqCst);
     init_small::globals::SetMyProcPid(pid);
@@ -291,6 +293,68 @@ fn pending_children_complete_through_event_wait() {
     assert_eq!(sorted, vec![slot(0, 1).0, slot(0, 2).0, slot(1, 1).0]);
     assert!(driver.configure_calls >= 2);
     assert!(driver.notify_calls >= 2);
+    // SAFETY: closing test-owned fds.
+    unsafe {
+        libc::close(r0);
+        libc::close(w0);
+        libc::close(r1);
+        libc::close(w1);
+    }
+}
+
+// ExecReScanAppend -> ExecAppendAsyncReset (nodeAppend.c:428, 1128): a
+// rescan with a request still callback-pending (the consumer stopped early,
+// as LIMIT does) waits for and completes that request before resetting it,
+// so the requestee ends up where C leaves it: its abandoned result produced
+// (and discarded), not silently un-requested.
+#[test]
+fn rescan_drains_pending_async_requests_before_reset() {
+    setup_wait_backend();
+    let mcx = leaked_mcx();
+    let mut estate = EStateData::new_in(mcx);
+    let mut node = init_state(mcx, &mut estate, 2, &[0, 1]);
+    let (r0, w0) = socketpair();
+    let (r1, w1) = socketpair();
+    // Only child 0 is readable: the first pull completes child 0's request
+    // and leaves child 1 callback-pending, as a LIMIT 1 above would.
+    // SAFETY: writing one byte to a test-owned socket.
+    unsafe {
+        assert_eq!(libc::write(w0, b"x".as_ptr().cast(), 1), 1);
+    }
+    let mut driver = MockDriver {
+        children: vec![
+            MockChild { mode: ChildMode::AsyncViaEvent(r0), rows_left: 2, emitted: 0 },
+            MockChild { mode: ChildMode::AsyncViaEvent(r1), rows_left: 2, emitted: 0 },
+        ],
+        configure_calls: 0,
+        notify_calls: 0,
+    };
+    let first = exec_append(&mut node, &mut estate, &mut driver).unwrap();
+    assert_eq!(first, Some(slot(0, 1)));
+    assert_eq!(driver.notify_calls, 1);
+    assert_eq!(driver.children[1].emitted, 0);
+    // Child 1's event arrives while the consumer is done with this scan.
+    // SAFETY: as above.
+    unsafe {
+        assert_eq!(libc::write(w1, b"x".as_ptr().cast(), 1), 1);
+    }
+    let notify_before = driver.notify_calls;
+    exec_rescan_append(&mut node, &mut estate, &mut driver).unwrap();
+    // The pending request was completed through the event wait (C's
+    // ExecAppendAsyncReset loop): notified once, its tuple produced and
+    // discarded by the reset.
+    assert_eq!(
+        driver.notify_calls,
+        notify_before + 1,
+        "rescan must drain the callback-pending request before resetting it"
+    );
+    assert_eq!(driver.children[1].emitted, 1);
+    // The replay picks up after the drained tuple: the second row of each
+    // child, never child 1's first row again.
+    let out = drain(&mut node, &mut estate, &mut driver);
+    let mut sorted: Vec<u32> = out.iter().map(|s| s.0).collect();
+    sorted.sort_unstable();
+    assert_eq!(sorted, vec![slot(0, 2).0, slot(1, 2).0]);
     // SAFETY: closing test-owned fds.
     unsafe {
         libc::close(r0);

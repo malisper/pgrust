@@ -297,10 +297,15 @@ pub fn exec_re_scan<'mcx>(
         // ExecReScanAppend: every subplan rescanned (chgParam always NULL).
         PlanStateNode::Append(a) => {
             let a = &mut **a;
+            // Async requests are reset (drained) before the subplans rescan.
+            ::nodeappend::exec_rescan_append(
+                &mut a.state,
+                estate,
+                &mut crate::procnode::AppendChildrenDriver { substates: &mut a.substates },
+            )?;
             for sub in a.substates.iter_mut() {
                 exec_re_scan(sub, estate)?;
             }
-            ::nodeappend::exec_rescan_append(&mut a.state);
             Ok(())
         }
         // ExecReScanMergeAppend: every subplan rescanned (chgParam always NULL).
@@ -756,11 +761,17 @@ pub(crate) fn exec_re_scan_chg_forced<'mcx>(
         }
         PlanStateNode::Append(a) => {
             let a = &mut **a;
+            // Async requests are reset (drained) before the subplans rescan.
+            ::nodeappend::exec_rescan_append_chg(
+                &mut a.state,
+                estate,
+                &mut crate::procnode::AppendChildrenDriver { substates: &mut a.substates },
+                chg,
+            )?;
             let subplans = &plan.as_append().expect("Append plan").appendplans;
             for (sub, &origin) in a.substates.iter_mut().zip(a.subplan_origin.iter()) {
                 exec_re_scan_with_chg(sub, subplans.nth(origin as usize), estate, chg)?;
             }
-            ::nodeappend::exec_rescan_append_chg(&mut a.state, chg);
         }
         PlanStateNode::MergeAppend(m) => {
             let m = &mut **m;

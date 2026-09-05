@@ -464,28 +464,32 @@ pub fn exec_end_append(node: &mut AppendState<'_>) {
     node.as_prune_state = None;
 }
 
-pub fn exec_rescan_append(node: &mut AppendState<'_>) {
+// ExecReScanAppend (nodeAppend.c), node-local half: the host rescans the
+// subplans after this returns (C rescans them after the async reset too).
+pub fn exec_rescan_append<'mcx, D: AppendAsyncDriver<'mcx>>(
+    node: &mut AppendState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    driver: &mut D,
+) -> PgResult<()> {
+    // If there are any async subplans, reset async requests made for them.
     if node.as_nasyncplans > 0 {
-        let mut i = node.as_asyncplans.next_member(-1);
-        while i >= 0 {
-            let areq = node.as_asyncrequests[i as usize]
-                .as_mut()
-                .expect("async subplan has a request");
-            areq.callback_pending = false;
-            areq.request_complete = false;
-            areq.result = None;
-            i = node.as_asyncplans.next_member(i);
-        }
-        node.as_asyncresults.clear();
-        node.as_nasyncremain = 0;
-        node.as_needrequest = Bitmapset::empty();
+        exec_append_async_reset(node, estate, driver)?;
     }
     node.as_whichplan = INVALID_SUBPLAN_INDEX;
     node.as_syncdone = false;
     node.as_begun = false;
+    Ok(())
 }
 
-pub fn exec_rescan_append_chg<'mcx>(node: &mut AppendState<'mcx>, chg: &Bitmapset<'mcx>) {
+pub fn exec_rescan_append_chg<'mcx, D: AppendAsyncDriver<'mcx>>(
+    node: &mut AppendState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    driver: &mut D,
+    chg: &Bitmapset<'mcx>,
+) -> PgResult<()> {
+    if node.as_nasyncplans > 0 {
+        exec_append_async_reset(node, estate, driver)?;
+    }
     if let Some(ps) = node.as_prune_state.as_ref() {
         if chg.overlap(&ps.execparamids) {
             node.as_valid_subplans_identified = false;
@@ -493,7 +497,68 @@ pub fn exec_rescan_append_chg<'mcx>(node: &mut AppendState<'mcx>, chg: &Bitmapse
             node.as_valid_asyncplans = Bitmapset::empty();
         }
     }
-    exec_rescan_append(node);
+    node.as_whichplan = INVALID_SUBPLAN_INDEX;
+    node.as_syncdone = false;
+    node.as_begun = false;
+    Ok(())
+}
+
+// ExecAppendAsyncReset (nodeAppend.c:1128): drain the in-flight async
+// requests (a LIMIT above may have abandoned them mid-fetch) before resetting
+// them, so the requestees are left where C leaves them for the rescan.
+fn exec_append_async_reset<'mcx, D: AppendAsyncDriver<'mcx>>(
+    node: &mut AppendState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    driver: &mut D,
+) -> PgResult<()> {
+    // We should never be called when there are no async subplans.
+    debug_assert!(node.as_nasyncplans > 0);
+    // Drain pending async requests if any. We force the as_syncdone flag to
+    // be true so that exec_append_async_event_wait waits until at least one
+    // event occurs.
+    node.as_syncdone = true;
+    loop {
+        // When called from exec_append_async_event_wait, postgres_fdw (and
+        // possibly other FDWs) will skip configuration of events for pending
+        // requests in some cases if as_needrequest isn't empty. To avoid
+        // that, discard results we already have. Note that we need to do
+        // this on every iteration, as the call to that function may produce
+        // new results.
+        node.as_asyncresults.clear();
+        node.as_needrequest = Bitmapset::empty();
+        let mut found = false;
+        let mut i = node.as_asyncplans.next_member(-1);
+        while i >= 0 {
+            let areq = node.as_asyncrequests[i as usize].expect("async subplan has a request");
+            if areq.callback_pending {
+                found = true;
+                break;
+            }
+            i = node.as_asyncplans.next_member(i);
+        }
+        if !found {
+            break;
+        }
+        postgres_seams::check_for_interrupts::call()?;
+        // Wait or poll for async events.
+        exec_append_async_event_wait(node, estate, driver)?;
+    }
+    // Reset async requests.
+    let mut i = node.as_asyncplans.next_member(-1);
+    while i >= 0 {
+        let areq = node.as_asyncrequests[i as usize]
+            .as_mut()
+            .expect("async subplan has a request");
+        debug_assert!(!areq.callback_pending);
+        areq.request_complete = false;
+        areq.result = None;
+        i = node.as_asyncplans.next_member(i);
+    }
+    // Reset state variables.
+    debug_assert!(node.as_asyncresults.is_empty());
+    debug_assert!(node.as_needrequest.is_empty());
+    node.as_nasyncremain = 0;
+    Ok(())
 }
 
 // ---- async halves (nodeAppend.c "Asynchronous Append Support") ----

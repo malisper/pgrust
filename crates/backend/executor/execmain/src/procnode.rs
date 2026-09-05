@@ -2703,8 +2703,8 @@ fn append_arm<'mcx>(
 
 // The host half of nodeappend's AppendAsyncDriver: sync pulls recurse through
 // exec_proc_node; async dispatch goes through execasync (execAsync.c).
-struct AppendChildrenDriver<'a, 'mcx> {
-    substates: &'a mut ::mcx::PgVec<'mcx, PlanStateNode<'mcx>>,
+pub(crate) struct AppendChildrenDriver<'a, 'mcx> {
+    pub(crate) substates: &'a mut ::mcx::PgVec<'mcx, PlanStateNode<'mcx>>,
 }
 
 impl<'a, 'mcx> ::nodeappend::AppendAsyncDriver<'mcx> for AppendChildrenDriver<'a, 'mcx> {
