@@ -40,6 +40,8 @@ miscinit = { path = "../../utils/init/miscinit" }
 init_small = { path = "../../utils/init/init_small" }
 lock_seams = { path = "../../storage/lmgr/lock_seams" }
 lmgr = { path = "../../storage/lmgr/lmgr" }
+sinval = { path = "../../storage/ipc/sinval" }
+numutils = { path = "../../utils/adt/numutils" }
 rel_vocab = { path = "../../../_support/types/rel_vocab" }
 elog = { path = "../../utils/error/elog" }
 

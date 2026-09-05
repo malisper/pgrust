@@ -66,15 +66,39 @@ fn init_priv_privtype_matches_pg_init_privs_h() {
 fn init_priv_owner_route_covers_grantable_syscache_classes() {
     // (cacheid, owner attnum) per objectaddress.c's ObjectProperty rows.
     assert_eq!(
-        grant::init_priv_owner_route(types_core::FOREIGN_DATA_WRAPPER_RELATION_ID),
+        grant::init_priv_owner_route(types_core::FOREIGN_DATA_WRAPPER_RELATION_ID).unwrap(),
         (cache_syscache::cacheinfo::FOREIGNDATAWRAPPEROID, 3, "foreign-data wrapper"),
     );
     assert_eq!(
-        grant::init_priv_owner_route(types_core::FOREIGN_SERVER_RELATION_ID),
+        grant::init_priv_owner_route(types_core::FOREIGN_SERVER_RELATION_ID).unwrap(),
         (cache_syscache::cacheinfo::FOREIGNSERVEROID, 3, "foreign server"),
     );
     // pg_class.relowner.
-    assert_eq!(grant::init_priv_owner_route(RELATION_RELATION_ID).1, 6);
+    assert_eq!(grant::init_priv_owner_route(RELATION_RELATION_ID).unwrap().1, 6);
+}
+
+#[test]
+fn init_priv_owner_route_unknown_class_matches_objectaddress_elog() {
+    // get_object_property_data (objectaddress.c:2777): pg_parameter_acl and
+    // pg_largeobject have no ObjectProperty row.
+    for classid in [6243u32, 2613u32] {
+        let e = grant::init_priv_owner_route(classid).unwrap_err();
+        assert_eq!(e.message, format!("unrecognized class ID: {classid}"));
+        assert_eq!(e.sqlstate, types_error::ERRCODE_INTERNAL_ERROR);
+    }
+}
+
+#[test]
+fn init_priv_owner_route_unknown_class_is_catchable() {
+    // RemoveRoleFromInitPriv on a pg_parameter_acl (6243) init-priv row —
+    // an extension-script GRANT SET ON PARAMETER followed by DROP OWNED —
+    // reaches C's get_object_property_data elog(ERROR) "unrecognized class
+    // ID: 6243" (objectaddress.c:2777); the route must raise that catchable
+    // error, never panic the backend thread.
+    let r = std::panic::catch_unwind(|| {
+        let _ = grant::init_priv_owner_route(6243);
+    });
+    assert!(r.is_ok(), "init_priv_owner_route(6243) must not panic");
 }
 
 #[test]

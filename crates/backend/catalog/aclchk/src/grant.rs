@@ -21,7 +21,7 @@ use types_core::catalog::{
     ATTRIBUTE_RELATION_ID, DATABASE_RELATION_ID, LANGUAGE_RELATION_ID, NAMESPACE_RELATION_ID,
     PROCEDURE_RELATION_ID, RELATION_RELATION_ID, TYPE_RELATION_ID,
 };
-use types_core::{Oid, OidIsValid};
+use types_core::{InvalidOid, Oid, OidIsValid};
 use types_error::{
     PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_GRANT_OPERATION,
     ERRCODE_SYNTAX_ERROR, ERRCODE_WARNING_PRIVILEGE_NOT_GRANTED,
@@ -230,7 +230,7 @@ fn restrict_and_check_grant(
         if let (ObjectType::OBJECT_COLUMN, Some(colname)) = (objtype, colname) {
             return Err(err(
                 format!(
-                    "permission denied for column {colname} of relation {objname}"
+                    "permission denied for column \"{colname}\" of relation \"{objname}\""
                 ),
                 types_error::ERRCODE_INSUFFICIENT_PRIVILEGE,
             ));
@@ -419,10 +419,51 @@ fn exec_grant_stmt_oids<'mcx>(mcx: Mcx<'mcx>, istmt: &mut InternalGrant<'_, '_>)
     Ok(())
 }
 
+// get_object_address's lookup/lock/recheck loop (objectaddress.c:1146-1204)
+// for the non-relation classes objectNamesToOids reaches through it: after
+// the AccessShareLock is granted the name is re-resolved whenever shared
+// invalidation messages arrived during the wait, so a name dropped by a
+// concurrent transaction fails with the lookup's own "does not exist" error
+// (missing_ok = false) instead of carrying a stale OID into ExecGrant_*.
+fn lookup_and_lock_object(
+    classid: Oid,
+    shared: bool,
+    mut lookup: impl FnMut() -> PgResult<Oid>,
+) -> PgResult<Oid> {
+    let lockmode = AccessShareLock;
+    let mut old_oid = InvalidOid;
+    loop {
+        let inval_count = sinval::SharedInvalidMessageCounter();
+        let oid = lookup()?;
+        if OidIsValid(old_oid) {
+            // Retrying: the same answer means the object we locked is still
+            // the one the name denotes; otherwise give up the wrong lock.
+            if old_oid == oid {
+                return Ok(oid);
+            }
+            if shared {
+                lmgr::UnlockSharedObject(classid, old_oid, 0, lockmode)?;
+            } else {
+                lmgr::UnlockDatabaseObject(classid, old_oid, 0, lockmode)?;
+            }
+        }
+        if shared {
+            lmgr::LockSharedObject(classid, oid, 0, lockmode)?;
+        } else {
+            lmgr::LockDatabaseObject(classid, oid, 0, lockmode)?;
+        }
+        if inval_count == sinval::SharedInvalidMessageCounter() {
+            return Ok(oid);
+        }
+        old_oid = oid;
+    }
+}
+
 // objectNamesToOids (aclchk.c) + the get_object_address arms it reaches
 // (objectaddress.c); every resolved object takes C's AccessShareLock
-// (LockDatabaseObject / LockSharedObject), without the C post-lock existence
-// recheck loop.
+// (LockDatabaseObject / LockSharedObject) through the post-lock recheck loop
+// (lookup_and_lock_object); relations go through RangeVarGetRelid, which
+// carries its own.
 fn object_names_to_oids<'mcx>(
     mcx: Mcx<'mcx>,
     objtype: ObjectType,
@@ -448,9 +489,9 @@ fn object_names_to_oids<'mcx>(
         ObjectType::OBJECT_FUNCTION | ObjectType::OBJECT_PROCEDURE | ObjectType::OBJECT_ROUTINE => {
             for cell in objnames.iter() {
                 let owa = cell.as_object_with_args().expect("ObjectWithArgs");
-                let oid =
-                    parse_func_seams::LookupFuncWithArgs::call(objtype as i32, owa, false)?;
-                lmgr::LockDatabaseObject(PROCEDURE_RELATION_ID, oid, 0, AccessShareLock)?;
+                let oid = lookup_and_lock_object(PROCEDURE_RELATION_ID, false, || {
+                    parse_func_seams::LookupFuncWithArgs::call(objtype as i32, owa, false)
+                })?;
                 objects.push(oid);
             }
         }
@@ -477,31 +518,32 @@ fn object_names_to_oids<'mcx>(
                 // 42809 "is not a domain" — never 42704 (round-18, gramwalk
                 // seed 652549418283084977: `grant all on domain k_int` where
                 // an earlier `create type k_int;` left a shell).
-                let oid = parse_utilcmd_seams::LookupTypeNameOidAllowShell::call(mcx, &tn)?;
-                if objtype == ObjectType::OBJECT_DOMAIN {
-                    check_is_domain(oid, typname)?;
-                }
-                lmgr::LockDatabaseObject(TYPE_RELATION_ID, oid, 0, AccessShareLock)?;
+                let oid = lookup_and_lock_object(TYPE_RELATION_ID, false, || {
+                    let oid = parse_utilcmd_seams::LookupTypeNameOidAllowShell::call(mcx, &tn)?;
+                    if objtype == ObjectType::OBJECT_DOMAIN {
+                        check_is_domain(oid, typname)?;
+                    }
+                    Ok(oid)
+                })?;
                 objects.push(oid);
             }
         }
         ObjectType::OBJECT_DATABASE => {
             for cell in objnames.iter() {
                 let name = cell.as_string().expect("database name").sval;
-                let oid = dbcommands_seams::get_database_oid::call(mcx, name, false)?;
-                lmgr::LockSharedObject(DATABASE_RELATION_ID, oid, 0, AccessShareLock)?;
+                let oid = lookup_and_lock_object(DATABASE_RELATION_ID, true, || {
+                    dbcommands_seams::get_database_oid::call(mcx, name, false)
+                })?;
                 objects.push(oid);
             }
         }
         ObjectType::OBJECT_TABLESPACE => {
             for cell in objnames.iter() {
                 let name = cell.as_string().expect("tablespace name").sval;
-                let oid = tablespace_seams::get_tablespace_oid::call(mcx, name, false)?;
-                lmgr::LockSharedObject(
+                let oid = lookup_and_lock_object(
                     types_core::catalog::TABLE_SPACE_RELATION_ID,
-                    oid,
-                    0,
-                    AccessShareLock,
+                    true,
+                    || tablespace_seams::get_tablespace_oid::call(mcx, name, false),
                 )?;
                 objects.push(oid);
             }
@@ -509,30 +551,35 @@ fn object_names_to_oids<'mcx>(
         ObjectType::OBJECT_LANGUAGE => {
             for cell in objnames.iter() {
                 let name = cell.as_string().expect("language name").sval;
-                let oid = adt_acl::get_language_oid(name, false)?;
-                lmgr::LockDatabaseObject(LANGUAGE_RELATION_ID, oid, 0, AccessShareLock)?;
+                let oid = lookup_and_lock_object(LANGUAGE_RELATION_ID, false, || {
+                    adt_acl::get_language_oid(name, false)
+                })?;
                 objects.push(oid);
             }
         }
         ObjectType::OBJECT_LARGEOBJECT => {
             let scratch = mcx::MemoryContext::new("objectNamesToOids");
             for cell in objnames.iter() {
-                let oid = oidparse(cell)?;
-                if !pg_largeobject::LargeObjectExists(scratch.mcx(), oid)? {
-                    return Err(err(
-                        format!("large object {oid} does not exist"),
-                        types_error::ERRCODE_UNDEFINED_OBJECT,
-                    ));
-                }
-                lmgr::LockDatabaseObject(pg_largeobject::LargeObjectRelationId, oid, 0, AccessShareLock)?;
+                let oid =
+                    lookup_and_lock_object(pg_largeobject::LargeObjectRelationId, false, || {
+                        let oid = oidparse(cell)?;
+                        if !pg_largeobject::LargeObjectExists(scratch.mcx(), oid)? {
+                            return Err(err(
+                                format!("large object {oid} does not exist"),
+                                types_error::ERRCODE_UNDEFINED_OBJECT,
+                            ));
+                        }
+                        Ok(oid)
+                    })?;
                 objects.push(oid);
             }
         }
         ObjectType::OBJECT_SCHEMA => {
             for cell in objnames.iter() {
                 let name = cell.as_string().expect("schema name").sval;
-                let oid = catalog_namespace::get_namespace_oid(name, false)?;
-                lmgr::LockDatabaseObject(NAMESPACE_RELATION_ID, oid, 0, AccessShareLock)?;
+                let oid = lookup_and_lock_object(NAMESPACE_RELATION_ID, false, || {
+                    catalog_namespace::get_namespace_oid(name, false)
+                })?;
                 objects.push(oid);
             }
         }
@@ -554,12 +601,10 @@ fn object_names_to_oids<'mcx>(
         ObjectType::OBJECT_FDW => {
             for cell in objnames.iter() {
                 let name = cell.as_string().expect("foreign-data wrapper name").sval;
-                let oid = foreigncmds_seams::get_foreign_data_wrapper_oid::call(name, false)?;
-                lmgr::LockDatabaseObject(
+                let oid = lookup_and_lock_object(
                     types_core::FOREIGN_DATA_WRAPPER_RELATION_ID,
-                    oid,
-                    0,
-                    AccessShareLock,
+                    false,
+                    || foreigncmds_seams::get_foreign_data_wrapper_oid::call(name, false),
                 )?;
                 objects.push(oid);
             }
@@ -567,12 +612,10 @@ fn object_names_to_oids<'mcx>(
         ObjectType::OBJECT_FOREIGN_SERVER => {
             for cell in objnames.iter() {
                 let name = cell.as_string().expect("foreign server name").sval;
-                let oid = foreigncmds_seams::get_foreign_server_oid::call(name, false)?;
-                lmgr::LockDatabaseObject(
+                let oid = lookup_and_lock_object(
                     types_core::FOREIGN_SERVER_RELATION_ID,
-                    oid,
-                    0,
-                    AccessShareLock,
+                    false,
+                    || foreigncmds_seams::get_foreign_server_oid::call(name, false),
                 )?;
                 objects.push(oid);
             }
@@ -728,18 +771,16 @@ fn check_is_domain(type_oid: Oid, typname: &types_nodes::list::NodeList<'_>) -> 
     Ok(())
 }
 
-// oidparse (oid.c).
+// oidparse (oid.c:264-278): an Integer verbatim; a Float — the lexer's form
+// for integer literals above int32 — through uint32in_subr (numutils.c), so
+// hex/octal/signed spellings are accepted and out-of-range values raise 22003
+// "value ... is out of range for type oid" (22P02 only for malformed text).
 fn oidparse(node: types_nodes::Node<'_>) -> PgResult<Oid> {
     if let Some(i) = node.as_integer() {
         return Ok(i.ival as Oid);
     }
     if let Some(f) = node.as_float() {
-        return f.fval.parse::<u32>().map_err(|_| {
-            err(
-                format!("invalid input syntax for type {}: \"{}\"", "oid", f.fval),
-                types_error::ERRCODE_INVALID_TEXT_REPRESENTATION,
-            )
-        });
+        return numutils::uint32in_subr(f.fval, false, "oid", None).map(|(v, _)| v);
     }
     panic!("oidparse: unexpected node type");
 }
@@ -1487,13 +1528,16 @@ fn record_extension_init_priv_worker<'mcx>(
     rel.close(RowExclusiveLock)
 }
 
-// objectaddress.c's get_object_catcache_oid/get_object_attnum_owner subset;
+// RemoveRoleFromInitPriv's owner route (aclchk.c:4934-4942):
+// objectaddress.c's get_object_catcache_oid/get_object_attnum_owner subset,
 // hosted here because catalog_objectaddress depends on this crate. Covers
-// every class the GRANT lanes can record init privs for through a syscache;
-// pg_largeobject_metadata and pg_parameter_acl stay out, as in C (no
-// syscache / no owner column respectively).
-pub(crate) fn init_priv_owner_route(classid: Oid) -> (i32, i32, &'static str) {
-    if classid == RELATION_RELATION_ID {
+// every class the GRANT lanes can record init privs for through a syscache.
+// A class without an ObjectProperty row (pg_parameter_acl 6243,
+// pg_largeobject 2613 as ExecGrant_Largeobject records it) fails in C at
+// get_object_property_data (objectaddress.c:2777) with elog(ERROR)
+// "unrecognized class ID: %u" — mirrored here, never a panic.
+pub(crate) fn init_priv_owner_route(classid: Oid) -> PgResult<(i32, i32, &'static str)> {
+    let route = if classid == RELATION_RELATION_ID {
         (RELOID, ANUM_PG_CLASS_RELOWNER, "relation")
     } else if classid == TYPE_RELATION_ID {
         (cache_syscache::cacheinfo::TYPEOID, 4, "type")
@@ -1516,12 +1560,15 @@ pub(crate) fn init_priv_owner_route(classid: Oid) -> (i32, i32, &'static str) {
             CLASS_FOREIGN_SERVER.descr,
         )
     } else {
-        panic!("RemoveRoleFromInitPriv (aclchk.c): owner lookup for object class {classid} unported")
-    }
+        return Err(Box::new(PgError::error(format!(
+            "unrecognized class ID: {classid}"
+        ))));
+    };
+    Ok(route)
 }
 
 fn init_priv_owner(classid: Oid, objid: Oid) -> PgResult<Oid> {
-    let (cacheid, owner_attnum, descr) = init_priv_owner_route(classid);
+    let (cacheid, owner_attnum, descr) = init_priv_owner_route(classid)?;
 
     let Some(tuple) = SearchSysCache1(cacheid, SysCacheKey::Value(Datum::from_oid(objid)))? else {
         return Err(Box::new(PgError::error(format!(

@@ -14,7 +14,7 @@ use types_error::{
     ERRCODE_SYNTAX_ERROR,
 };
 use types_nodes::parsenodes::{
-    AlterDefaultPrivilegesStmt, DropBehavior, ObjectType, RoleSpecType,
+    AlterDefaultPrivilegesStmt, DefElem, DropBehavior, ObjectType, RoleSpecType,
 };
 use types_rel::RowExclusiveLock;
 
@@ -51,6 +51,18 @@ fn err(msg: String, sqlstate: types_error::SqlState) -> Box<PgError> {
     Box::new(PgError::error(msg).with_sqlstate(sqlstate))
 }
 
+// errorConflictingDefElem (define.c) as ExecAlterDefaultPrivilegesStmt
+// reaches it with ProcessUtilitySlow's pstate (aclchk.c:937/942):
+// parser_errposition(pstate, defel->location) puts the cursor on the
+// repeated IN SCHEMA / FOR ROLE clause.
+fn conflicting_def_elem(defel: &DefElem<'_>) -> Box<PgError> {
+    let mut e = err("conflicting or redundant options".into(), ERRCODE_SYNTAX_ERROR);
+    if defel.location >= 0 {
+        e.cursor_position = Some(defel.location + 1);
+    }
+    e
+}
+
 struct InternalDefaultACL<'mcx> {
     roleid: Oid,
     nspid: Oid,
@@ -77,13 +89,13 @@ pub fn ExecAlterDefaultPrivilegesStmt<'mcx>(
         match defel.defname.unwrap_or("") {
             "schemas" => {
                 if dnspnames.is_some() {
-                    return Err(err("conflicting or redundant options".into(), ERRCODE_SYNTAX_ERROR));
+                    return Err(conflicting_def_elem(defel));
                 }
                 dnspnames = defel.arg;
             }
             "roles" => {
                 if drolespecs.is_some() {
-                    return Err(err("conflicting or redundant options".into(), ERRCODE_SYNTAX_ERROR));
+                    return Err(conflicting_def_elem(defel));
                 }
                 drolespecs = defel.arg;
             }
@@ -581,6 +593,13 @@ pub fn get_user_default_acl<'mcx>(
         schema_acl.as_deref().unwrap_or(&[]),
         owner_id,
     )?;
+    // aclmerge (acl.c:510-513) returns NULL when both inputs are empty — a
+    // global row holding {} and no per-schema row — and NULL never equals the
+    // non-empty hard-wired default, so C returns NULL: the object gets a NULL
+    // ACL (built-in privileges), not an empty one that locks the owner out.
+    if result.is_empty() {
+        return Ok(None);
+    }
 
     aclitemsort(&mut result);
     aclitemsort(&mut def_acl);
