@@ -4,8 +4,9 @@
 
 extern crate alloc;
 
-// Per-thread pool arm only (see `local_pool_on`); everything else stays no_std.
-#[cfg(feature = "std")]
+// Per-thread pool arm (see `local_pool_on`) and the session-root retiring
+// flag; unit tests link std as well. Everything else stays no_std.
+#[cfg(any(feature = "std", test))]
 extern crate std;
 
 use core::alloc::Layout;
@@ -899,6 +900,31 @@ pub fn register_session_cleanup_phase(phase: SessionCleanupPhase, f: SessionClea
     }
 }
 
+// Set while a `session_root*` context is being retired at teardown, so
+// `reset_noncore` skips its mid-life exact-accounting leak-check for the
+// final wholesale arena release (see `retire_session_root`). Per-thread
+// wherever std is linked (the server graph enables `std`; unit tests link it
+// too). A no_std consumer has no per-thread state (as the pools above) and
+// shares one process-wide flag behind the same `.with(&Cell<bool>)` shape.
+#[cfg(any(feature = "std", test))]
+std::thread_local! {
+    static SESSION_ROOT_RETIRING: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+}
+#[cfg(not(any(feature = "std", test)))]
+static SESSION_ROOT_RETIRING: RetiringFlag = RetiringFlag(core::sync::atomic::AtomicBool::new(false));
+#[cfg(not(any(feature = "std", test)))]
+struct RetiringFlag(core::sync::atomic::AtomicBool);
+#[cfg(not(any(feature = "std", test)))]
+impl RetiringFlag {
+    fn with<R>(&self, f: impl FnOnce(&core::cell::Cell<bool>) -> R) -> R {
+        use core::sync::atomic::Ordering::Relaxed;
+        let cell = core::cell::Cell::new(self.0.load(Relaxed));
+        let r = f(&cell);
+        self.0.store(cell.get(), Relaxed);
+        r
+    }
+}
+
 /// Session-lifetime root context: the `Box::leak(Box::new(MemoryContext))`
 /// shape (stable `&'static` handle, no TLS dtor state machine) plus a
 /// registered teardown that reclaims the context's arena — and everything in
@@ -912,13 +938,6 @@ pub fn register_session_cleanup_phase(phase: SessionCleanupPhase, f: SessionClea
 /// reading freed memory — see [`MemoryContext::check_live`]. The residual
 /// leak is bounded (one shell + its keeper block per session root), matching
 /// the crate's pre-existing "leak at thread exit" fallback.
-std::thread_local! {
-    /// Set while a `session_root*` context is being retired at teardown, so
-    /// `reset_noncore` skips its mid-life exact-accounting leak-check for the
-    /// final wholesale arena release (see `retire_session_root`).
-    static SESSION_ROOT_RETIRING: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
-}
-
 pub fn session_root(name: &'static str) -> &'static MemoryContext {
     session_root_from(MemoryContext::new(name))
 }
@@ -1364,11 +1383,16 @@ impl MemoryContext {
         match &mut self.backend {
             Backend::Aset(set) => {
                 set.get_mut().reset();
+                // aset.c:537-597 AllocSetReset: every chunk is released
+                // whether or not it was pfree'd, so nothing stays charged
+                // (a stale charge here outlived the arena it accounted for).
+                acct.self_used.set(0);
                 acct.arena_footprint.set(0);
                 acct.arena_nblocks.set(0);
                 acct.self_peak.set(0);
             }
             Backend::Malloc => {
+                acct.self_used.set(0);
                 acct.arena_footprint.set(0);
                 acct.arena_nblocks.set(0);
                 acct.self_peak.set(0);

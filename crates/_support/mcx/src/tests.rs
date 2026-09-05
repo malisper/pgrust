@@ -114,6 +114,34 @@ fn bump_context_reset_reclaims_and_reuses() {
     assert_eq!(ctx.peak(), ctx.stats().peak);
 }
 
+// aset.c:537-597 AllocSetReset releases every chunk of the set whether or not
+// it was pfree'd first and leaves context->mem_allocated at the keeper
+// baseline: after a reset nothing is charged. A charge still outstanding at
+// reset is the release-build shape of a leaked owner (a PgVec whose Drop
+// never ran; the leak-detector debug_assert in reset_noncore is skipped only
+// under the session-root wholesale teardown, which is also the one way a
+// dev-profile test reaches the release arm). The arena is released either
+// way; the accounting must follow it, or used()/subtree_used() keep the
+// stale bytes for the life of the context and grow by them on every cycle.
+#[test]
+fn aset_reset_returns_charged_bytes_to_zero() {
+    let mut ctx = MemoryContext::new("t");
+    let v: PgVec<u8> = vec_with_capacity_in(ctx.mcx(), 4096).unwrap();
+    assert_eq!(ctx.used(), 4096);
+    core::mem::forget(v);
+    SESSION_ROOT_RETIRING.with(|r| r.set(true));
+    ctx.reset();
+    SESSION_ROOT_RETIRING.with(|r| r.set(false));
+    assert_eq!(ctx.used(), 0, "AllocSetReset leaves nothing charged");
+    assert_eq!(ctx.subtree_used(), 0);
+    assert_eq!(ctx.peak(), 0);
+    // The context accounts from zero again afterwards.
+    let w: PgVec<u8> = vec_with_capacity_in(ctx.mcx(), 64).unwrap();
+    assert_eq!(ctx.used(), 64);
+    drop(w);
+    assert_eq!(ctx.used(), 0);
+}
+
 #[test]
 fn reset_callbacks_fire_lifo_on_reset_and_drop() {
     use core::cell::RefCell;
