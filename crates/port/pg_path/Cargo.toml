@@ -9,3 +9,4 @@ path = "src/lib.rs"
 
 [dependencies]
 libc = "0.2"
+wait_error = { path = "../../common/wait_error" }

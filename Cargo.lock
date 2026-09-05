@@ -9307,6 +9307,7 @@ dependencies = [
  "memwatchdog",
  "mimalloc",
  "pg_locale",
+ "pg_path",
  "pgsync",
  "postgres_seams",
  "postmaster",
@@ -12658,6 +12659,7 @@ name = "pg_path"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "wait_error",
 ]
 
 [[package]]

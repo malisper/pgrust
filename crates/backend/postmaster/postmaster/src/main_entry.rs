@@ -37,8 +37,14 @@ pub fn InitProcessGlobals() {
 }
 
 fn getInstallationPaths(argv0: &str) {
-    let exe = match pg_path::find_my_exec(argv0, |m| {
-        let _ = elog::ereport(LOG)
+    let exe = match pg_path::find_my_exec(argv0, |code, m| {
+        // exec.c:65 log_error = ereport(LOG, (errcodefn, errmsg(...))).
+        let b = elog::ereport(LOG);
+        let b = match code.sqlstate() {
+            Some(s) => b.errcode(types_error::make_sqlstate(s)),
+            None => b.errcode_for_file_access(),
+        };
+        let _ = b
             .errmsg(m)
             .finish(types_error::ErrorLocation::new(file!(), line!() as i32, "find_my_exec"));
     }) {

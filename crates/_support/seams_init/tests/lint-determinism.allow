@@ -241,8 +241,8 @@ fs	crates/bin/pagemask/src/main.rs	2	DST-REVIEW(recovery-diff): offline recovere
 fs	crates/contrib/file_fdw/src/lib.rs	3
 # --- crates/contrib/pg_stat_statements (6 sites) ---
 fs	crates/contrib/pg_stat_statements/src/store.rs	6
-# --- crates/port/pg_path (5 sites) ---
-fs	crates/port/pg_path/src/lib.rs	5
+# --- crates/port/pg_path (6 sites) ---
+fs	crates/port/pg_path/src/lib.rs	6	DST-REVIEW(audit-18.6 b200): +1 = the exec.c ports (find_other_exec/pipe_read_line/pclose_check popen-and-read-first-line of "<sibling> -V", getpwuid_r home lookup) — process-startup executable location, C-exact strerror/errno surface, no Rust caller yet (frontend tools/EXEC_BACKEND unported); Vfs routing (s2.1) chartered to the DST program
 # --- crates/port/pg_strong_random (4 sites) ---
 fs	crates/port/pg_strong_random/src/os.rs	4	DST-REVIEW(ws-rng): path-only move lib.rs->os.rs with the sanctioned entropy funnel internals (s2.3, dev-urandom fd); budget unchanged, ratchet-neutral — flagged per s4.2 (WS-RNG's one out-of-category touch)
 fs	crates/backend/access/transam/transam_xlog/src/startup.rs	3	DST-REVIEW(t27-train): t27-train merge reconciliation — site landed in the t26 recovery/metalfix re-board (post-dates the DST census seed @ 3fee87ff0); routing onto the fd/vfd Vfs choke (s2.1) chartered to the DST program (t28)
@@ -392,7 +392,7 @@ env	crates/backend/utils/misc/guc/src/select.rs	1
 env	crates/backend/utils/misc/guc/src/store.rs	12	DST-REVIEW(t34-config): 8->10 = initialize_guc_options_from_environment boot-seed env reads for the env->GUC migration (fac980a36; PGRUST_* seeds read once at postmaster boot) — knobs-registry routing chartered to the DST program; +1 DST-REVIEW(m41-flip): the pgrust.runtime_vacuum_pool boot seed (GL-M41-3 flip), same class; +1 DST-REVIEW(sqe-main-merge ci2): the PGRUST_SQE_THREADS boot seed (pgrust.sqe_threads GUC, e5b7823420), same boot-seed class
 env	crates/backend/utils/misc/tzparser/src/lib.rs	2
 env	crates/port/pg_clock/src/sim.rs	2	DST-REVIEW(ws-clk): PGRUST_SIM_CLOCK_MODE/PGRUST_SIM_WALL_BASE readers, cfg(pgrust_sim)-only (no product reader); absorbed by the s2.5 knobs-registry charter
-env	crates/port/pg_path/src/lib.rs	1
+env	crates/port/pg_path/src/lib.rs	4	DST-REVIEW(audit-18.6 b200): 1->4 = path.c:1022 get_home_path $HOME read + exec.c set_pglocale_pgservice PGSYSCONFDIR probe/setenv(...,0) (main.c:125 port, process startup before any GUC, C-exact); knobs-registry routing (s2.5) chartered to the DST program
 env	crates/port/pg_strong_random/src/sim.rs	1	DST-REVIEW(ws-rng): PGRUST_SIM_SEED knob read (R-KNOBS, s2.3); pgrust_sim-cfg-only — no product reader exists; retires onto the P2 knobs-registry charter when that lands
 env	crates/backend/executor/execgrouping/src/lib.rs	1	DST-REVIEW(t27-train): t27-train merge reconciliation — site landed in the t26 recovery/metalfix re-board (post-dates the DST census seed @ 3fee87ff0); routing onto the knobs registry (s2.5) chartered to the DST program (t28)
 env	crates/pl/plpgsql/src/handler.rs	1	DST-REVIEW(t27-train): spi-compile-residual car (PROCPERF P2) PGRUST_* knob gate landed post-census; routing onto the knobs registry (s2.5) chartered to the DST program (t28)

@@ -73,8 +73,14 @@ pub fn InitStandaloneProcess(argv0: &str) -> PgResult<()> {
 
     /* Compute paths, no postmaster to inherit from */
     if g::my_exec_path()[0] == 0 {
-        let exe = pg_path::find_my_exec(argv0, |m| {
-            let _ = ereport(types_error::LOG)
+        let exe = pg_path::find_my_exec(argv0, |code, m| {
+            // exec.c:65 log_error = ereport(LOG, (errcodefn, errmsg(...))).
+            let b = ereport(types_error::LOG);
+            let b = match code.sqlstate() {
+                Some(s) => b.errcode(types_error::make_sqlstate(s)),
+                None => b.errcode_for_file_access(),
+            };
+            let _ = b
                 .errmsg(m)
                 .finish(ErrorLocation::new(file!(), line!() as i32, "find_my_exec"));
         })

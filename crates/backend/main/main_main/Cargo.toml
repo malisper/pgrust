@@ -48,6 +48,7 @@ init_small = { path = "../../utils/init/init_small" }
 stack_depth = { path = "../../utils/misc/stack_depth" }
 ps_status = { path = "../../utils/misc/ps_status" }
 pg_locale = { path = "../../utils/adt/pg_locale" }
+pg_path = { path = "../../../port/pg_path" }
 postmaster = { path = "../../postmaster/postmaster" }
 memwatchdog = { path = "../../postmaster/memwatchdog" }
 # GL-CONCMEM-1: the POOL-QOS memory governor's fallback usage probe

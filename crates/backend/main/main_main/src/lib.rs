@@ -1,7 +1,7 @@
 #![allow(non_snake_case)]
 
 use mcx::Mcx;
-use types_error::{ErrorLocation, PgResult, FATAL};
+use types_error::{ErrorLocation, PgResult, FATAL, LOG};
 
 // wasm32: no LC_* names in the wasi libc crate; musl numbering (the
 // pg_locale wasm arm's convention, matching the linked wasi-libc).
@@ -243,10 +243,24 @@ pub fn pg_main(argv: &[String]) -> PgResult<()> {
         }
     }
 
-    // set_pglocale_pgservice: NLS/gettext unported; PGSYSCONFDIR default suffices.
-
     let main_context = mcx::MemoryContext::new("Main");
     let mcx = main_context.mcx();
+
+    // main.c:125. Its find_my_exec reports failures at LOG level (exec.c:65
+    // log_error) — the first of the two LOG lines C prints on a bad argv[0];
+    // NLS is not built, so only the PGSYSCONFDIR half remains after that.
+    pg_path::set_pglocale_pgservice(
+        argv.first().map(|s| s.as_str()).unwrap_or("postgres"),
+        pg_path::PG_TEXTDOMAIN_POSTGRES,
+        |code, m| {
+            let b = elog::ereport(LOG);
+            let b = match code.sqlstate() {
+                Some(s) => b.errcode(types_error::make_sqlstate(s)),
+                None => b.errcode_for_file_access(),
+            };
+            let _ = b.errmsg(m).finish(loc(125, "set_pglocale_pgservice"));
+        },
+    );
     init_locale(mcx, "LC_COLLATE", LC_COLLATE, "")?;
     init_locale(mcx, "LC_CTYPE", LC_CTYPE, "")?;
     init_locale(mcx, "LC_MESSAGES", LC_MESSAGES, "")?;
