@@ -769,6 +769,9 @@ pub fn index_create<'mcx>(
         &indexTupDesc,
         relkind,
         relpersistence,
+        // shared_relation = heapRelation->rd_rel->relisshared (index.c:792);
+        // always false here after the index.c:877 post-initdb refusal above.
+        heapRelation.rd_rel.relisshared,
         // mapped_relation = RelationIsMapped(heapRelation) (index.c:786);
         // indexes on mapped catalogs are themselves mapped.
         heapRelation.is_mapped(),
@@ -789,6 +792,7 @@ pub fn index_create<'mcx>(
         &form,
         indexTupDesc.natts as i16,
         indexRelationId,
+        InvalidOid,
         InvalidOid,
         None,
         extra.reloptions,

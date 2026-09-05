@@ -80,25 +80,32 @@ pub fn make_new_heap<'mcx>(
             // "the new heap is not a shared relation, even if we are
             // rebuilding a shared rel. However, we do make the new heap
             // mapped if the source is mapped" (cluster.c:751-756).
+            shared: false,
             mapped: old_heap.is_mapped(),
             allow_system_table_mods: true,
             reloptions: reloptions.as_deref(),
+            // cluster.c:777 relrewrite = OIDOldHeap.
+            relrewrite: old_heap_oid,
         },
         &old_heap.rd_att,
     )?;
 
-    xact::CommandCounterIncrement()?;
-    // C threads relrewrite through heap_create_with_catalog; setting it on the
-    // now-visible row is the same catalog end-state.
-    set_relrewrite(mcx, oid_new_heap, old_heap_oid)?;
+    // "Advance command counter so that the newly-created relation's catalog
+    // tuples will be visible to table_open" (cluster.c:787).
     xact::CommandCounterIncrement()?;
 
+    // cluster.c:789-813: the new toast table takes the old toast's
+    // reloptions and relrewrite = the old toast (toasting.c:64-68
+    // NewHeapCreateToastTable), opened at the caller's lockmode.
     if old_heap.rd_rel.reltoastrelid != InvalidOid {
-        // C creates the new toast with the old toast's reloptions and
-        // relrewrite = old toast oid; relrewrite is reset to 0 at swap end
-        // either way (single-backend: mid-xact catalog state only).
         let toast_options = pg_class_reloptions_image(mcx, old_heap.rd_rel.reltoastrelid)?;
-        catalog_toasting::NewRelationCreateToastTable(mcx, oid_new_heap, toast_options.as_deref())?;
+        catalog_toasting::NewHeapCreateToastTable(
+            mcx,
+            oid_new_heap,
+            toast_options.as_deref(),
+            lockmode,
+            old_heap.rd_rel.reltoastrelid,
+        )?;
     }
     old_heap.close(NoLock)?;
     Ok(oid_new_heap)

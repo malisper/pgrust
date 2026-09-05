@@ -941,11 +941,14 @@ pub fn DefineRelation<'mcx>(
             relkind,
             relpersistence,
             reloftype: of_type_id,
+            // tablecmds.c:1077-1078: shared_relation = false, mapped_relation = false.
+            shared: false,
             mapped: false,
             // tablecmds.c:1082 passes the allowSystemTableMods GUC through,
             // lifting heap_create's system-namespace refusal (heap.c:316).
             allow_system_table_mods: init_small::globals::allowSystemTableMods(),
             reloptions: reloptions.as_deref(),
+            relrewrite: InvalidOid,
         },
         &descriptor,
     )?;

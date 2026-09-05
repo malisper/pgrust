@@ -22,6 +22,7 @@ use types_tuple::{FormData_pg_attribute, TupleDescData, TYPALIGN_DOUBLE, TYPSTOR
 use crate::SysAtt;
 
 const Natts_pg_class: usize = 34;
+const GLOBALTABLESPACE_OID: Oid = 1664;
 const Anum_pg_class_relacl: usize = 32;
 const Anum_pg_class_reloptions: usize = 33;
 const Anum_pg_class_relpartbound: usize = 34;
@@ -309,6 +310,7 @@ pub fn heap_create<'mcx>(
     tupdesc: &TupleDescData<'_>,
     relkind: u8,
     relpersistence: u8,
+    shared_relation: bool,
     mapped_relation: bool,
     allow_system_table_mods: bool,
     create_storage: bool,
@@ -347,6 +349,25 @@ pub fn heap_create<'mcx>(
         reltablespace = InvalidOid;
     }
 
+    // relcache.c:3566-3568 (RelationBuildLocalRelation): the hardwired
+    // shared-relation list must agree with the caller's flag; a shared
+    // toast/index for a shared catalog created after initdb (binary-upgrade
+    // preset OIDs, allow_system_table_mods) fails here in C too.
+    if shared_relation != catalog::IsSharedRelation(relid) {
+        return Err(Box::new(PgError::error(format!(
+            "shared_relation flag for \"{relname}\" does not match IsSharedRelation({relid})"
+        ))));
+    }
+    // A shared relation whose OID is on that list is only built in
+    // bootstrap; pgrust's relcache has no post-initdb shared build.
+    if shared_relation {
+        return Err(err(
+            format!("cannot create shared relation \"{relname}\""),
+            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+        )
+        .with_detail("Creating shared relations after initdb is not supported.")
+        .into());
+    }
     let rel = relcache::local::RelationBuildLocalRelation(
         relname,
         relnamespace,
@@ -356,7 +377,7 @@ pub fn heap_create<'mcx>(
         accessmtd,
         relfilenumber,
         reltablespace,
-        false,
+        shared_relation,
         mapped_relation,
         relpersistence,
         relkind,
@@ -398,6 +419,7 @@ pub fn InsertPgClassTuple<'mcx>(
     natts: i16,
     new_rel_oid: Oid,
     reloftype: Oid,
+    relrewrite: Oid,
     relacl: Option<&[u8]>,
     reloptions: Option<&[u8]>,
 ) -> PgResult<()> {
@@ -432,7 +454,7 @@ pub fn InsertPgClassTuple<'mcx>(
     values[25] = Datum::from_bool(rd_rel.relispopulated);
     values[26] = Datum::from_char(rd_rel.relreplident as i8);
     values[27] = Datum::from_bool(rd_rel.relispartition);
-    values[28] = Datum::from_oid(InvalidOid); // relrewrite
+    values[28] = Datum::from_oid(relrewrite);
     values[29] = Datum::from_transaction_id(rd_rel.relfrozenxid);
     values[30] = Datum::from_transaction_id(rd_rel.relminmxid);
     match relacl {
@@ -463,6 +485,7 @@ fn AddNewRelationTuple<'mcx>(
     relkind: u8,
     relfrozenxid: TransactionId,
     relminmxid: MultiXactId,
+    relrewrite: Oid,
     relacl: Option<&[u8]>,
     reloptions: Option<&[u8]>,
 ) -> PgResult<()> {
@@ -486,6 +509,7 @@ fn AddNewRelationTuple<'mcx>(
         new_rel_desc.rd_att.natts as i16,
         new_rel_oid,
         reloftype,
+        relrewrite,
         relacl,
         reloptions,
     )
@@ -643,11 +667,18 @@ pub struct HeapCreateParams<'a> {
     pub relkind: u8,
     pub relpersistence: u8,
     pub reloftype: Oid,
+    // heap.c shared_relation: true only for a shared catalog's toast table
+    // (toasting.c:241 "Toast table is shared if and only if its parent is").
+    pub shared: bool,
     // RelationIsMapped(source): CLUSTER/VACUUM FULL transient heaps for
     // mapped catalogs must themselves be mapped (cluster.c make_new_heap).
     pub mapped: bool,
     pub allow_system_table_mods: bool,
     pub reloptions: Option<&'a [u8]>,
+    // heap.c:1129 "link to original relation during a table rewrite":
+    // pg_class.relrewrite of a transient heap (cluster.c make_new_heap) or of
+    // its toast table (toasting.c OIDOldToast); InvalidOid otherwise.
+    pub relrewrite: Oid,
 }
 
 pub fn heap_create_with_catalog<'mcx>(
@@ -698,6 +729,13 @@ pub fn heap_create_with_catalog<'mcx>(
              that doesn't conflict with any existing type.",
         )
         .into());
+    }
+
+    // heap.c:1221-1222: shared relations must be in pg_global (last-ditch check).
+    if p.shared && p.reltablespace != GLOBALTABLESPACE_OID {
+        return Err(Box::new(PgError::error(
+            "shared relations must be placed in pg_global tablespace",
+        )));
     }
     // C moveArrayTypeName returns true WITHOUT renaming when the colliding
     // type is a shell: TypeCreate then fills the shell in place, reusing its
@@ -824,6 +862,7 @@ pub fn heap_create_with_catalog<'mcx>(
         tupdesc,
         p.relkind,
         p.relpersistence,
+        p.shared,
         p.mapped,
         p.allow_system_table_mods,
         // create_storage = true is correct even for binary upgrade: the
@@ -898,6 +937,7 @@ pub fn heap_create_with_catalog<'mcx>(
         p.relkind,
         relfrozenxid,
         relminmxid,
+        p.relrewrite,
         relacl.as_deref(),
         p.reloptions,
     )?;

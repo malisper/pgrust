@@ -1,4 +1,4 @@
-// toasting.c; bootstrap/binary-upgrade arms are unreached here.
+// toasting.c; bootstrap arms are unreached here.
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
@@ -43,7 +43,7 @@ pub fn NewRelationCreateToastTable<'mcx>(
     relOid: Oid,
     reloptions: Option<&[u8]>,
 ) -> PgResult<()> {
-    CheckAndCreateToastTable(mcx, relOid, reloptions, AccessExclusiveLock, false)
+    CheckAndCreateToastTable(mcx, relOid, reloptions, AccessExclusiveLock, false, InvalidOid)
 }
 
 pub fn AlterTableCreateToastTable<'mcx>(
@@ -52,7 +52,20 @@ pub fn AlterTableCreateToastTable<'mcx>(
     reloptions: Option<&[u8]>,
     lockmode: types_rel::LOCKMODE,
 ) -> PgResult<()> {
-    CheckAndCreateToastTable(mcx, relOid, reloptions, lockmode, true)
+    CheckAndCreateToastTable(mcx, relOid, reloptions, lockmode, true, InvalidOid)
+}
+
+// toasting.c:64-68: the transient heap of a table rewrite (CLUSTER, VACUUM
+// FULL, ALTER TABLE rewrites) gets its toast table with relrewrite =
+// OIDOldToast, the old heap's toast table.
+pub fn NewHeapCreateToastTable<'mcx>(
+    mcx: Mcx<'mcx>,
+    relOid: Oid,
+    reloptions: Option<&[u8]>,
+    lockmode: types_rel::LOCKMODE,
+    OIDOldToast: Oid,
+) -> PgResult<()> {
+    CheckAndCreateToastTable(mcx, relOid, reloptions, lockmode, false, OIDOldToast)
 }
 
 fn CheckAndCreateToastTable<'mcx>(
@@ -61,9 +74,10 @@ fn CheckAndCreateToastTable<'mcx>(
     reloptions: Option<&[u8]>,
     lockmode: types_rel::LOCKMODE,
     check: bool,
+    OIDOldToast: Oid,
 ) -> PgResult<()> {
     let rel = table::table_open(mcx, relOid, lockmode)?;
-    create_toast_table(mcx, &rel, reloptions, lockmode, check)?;
+    create_toast_table(mcx, &rel, reloptions, lockmode, check, OIDOldToast)?;
     rel.close(NoLock)
 }
 
@@ -73,6 +87,7 @@ fn create_toast_table<'mcx>(
     reloptions: Option<&[u8]>,
     lockmode: types_rel::LOCKMODE,
     check: bool,
+    OIDOldToast: Oid,
 ) -> PgResult<bool> {
     let relOid = rel.rd_id;
 
@@ -88,8 +103,14 @@ fn create_toast_table<'mcx>(
         // provided a TOAST table OID (the old cluster had one).
         return Ok(false);
     }
+    // toasting.c:192-193 elog(ERROR, ...): a catchable cross-check error
+    // (SQLSTATE XX000), not a backend abort.  Reached with a preset toast
+    // OID in binary-upgrade mode by ALTER TABLE ... SET (reloptions)
+    // (ShareUpdateExclusiveLock).
     if check && lockmode != AccessExclusiveLock {
-        panic!("AccessExclusiveLock required to add toast table.");
+        return Err(Box::new(types_error::PgError::error(
+            "AccessExclusiveLock required to add toast table.",
+        )));
     }
 
     let toast_relname = format!("pg_toast_{relOid}");
@@ -112,12 +133,6 @@ fn create_toast_table<'mcx>(
         PG_TOAST_NAMESPACE
     };
 
-    // Mapped parents are supported (the CLUSTER/VACUUM FULL transient heap
-    // for a mapped catalog); shared toast creation only happens in bootstrap.
-    if rel.rd_rel.relisshared {
-        unported("create_toast_table: shared parent relations");
-    }
-
     let toast_relid = catalog_heap::heap_create_with_catalog(
         mcx,
         &catalog_heap::HeapCreateParams {
@@ -129,10 +144,15 @@ fn create_toast_table<'mcx>(
             relkind: RELKIND_TOASTVALUE,
             relpersistence: rel.rd_rel.relpersistence,
             reloftype: InvalidOid,
+            // "Toast table is shared if and only if its parent is" (toasting.c:241);
+            // after initdb heap_create refuses it exactly as C's relcache does.
+            shared: rel.rd_rel.relisshared,
             // "It's mapped if and only if its parent is, too" (toasting.c:244).
             mapped: rel.is_mapped(),
             allow_system_table_mods: true,
             reloptions,
+            // toasting.c:266 relrewrite = OIDOldToast (heap.c:1348).
+            relrewrite: OIDOldToast,
         },
         &tupdesc,
     )?;
