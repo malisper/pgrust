@@ -606,13 +606,29 @@ impl<'mcx> PlScanner<'mcx> {
         self.cur_line_num
     }
 
-    /// plpgsql_scanner_errposition (pl_scanner.c): 1-based char position.
+    /// plpgsql_scanner_errposition (pl_scanner.c:504): 1-based char position.
     pub fn errposition(&self, location: i32) -> i32 {
         parser_small1::parser_errposition_source(
             Some(self.scanbuf),
             location,
             wchar::PG_UTF8,
         )
+    }
+
+    /// plpgsql_scanner_errposition (pl_scanner.c:504-515): a PL/pgSQL parse
+    /// error is positioned as an INTERNAL error — internalerrposition(pos)
+    /// plus internalerrquery(scanorig), the function body — never as an
+    /// outer-statement cursor; a negative location sets nothing.
+    pub fn internal_errposition(
+        &self,
+        b: elog::ErrorBuilder,
+        location: i32,
+    ) -> elog::ErrorBuilder {
+        if location < 0 {
+            return b;
+        }
+        b.internalerrposition(self.errposition(location))
+            .internalerrquery(String::from_utf8_lossy(self.scanbuf).into_owned())
     }
 
     /// plpgsql_yyerror (pl_scanner.c:534): quotes the single token at
@@ -625,12 +641,9 @@ impl<'mcx> PlScanner<'mcx> {
             let near = self.span_text(lloc, lloc + self.yyleng);
             format!("{message} at or near \"{near}\"")
         };
-        Box::new(
-            elog::ereport(types_error::ERROR)
-                .errcode(types_error::ERRCODE_SYNTAX_ERROR)
-                .errmsg(msg)
-                .errposition(self.errposition(lloc))
-                .into_error(),
-        )
+        let b = elog::ereport(types_error::ERROR)
+            .errcode(types_error::ERRCODE_SYNTAX_ERROR)
+            .errmsg(msg);
+        Box::new(self.internal_errposition(b, lloc).into_error())
     }
 }

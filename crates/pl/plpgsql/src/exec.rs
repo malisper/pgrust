@@ -111,8 +111,10 @@ impl RecDesc {
             dropped: Vec::with_capacity(natts),
         };
         for a in td.attrs.iter() {
-            d.names
-                .push(String::from_utf8_lossy(a.attname.name_str()).to_ascii_lowercase());
+            // attname as stored: expanded_record_lookup_field compares the
+            // (scanner-downcased or quoted) field name with namestrcmp,
+            // case-sensitively (expandedrecord.c:1032).
+            d.names.push(String::from_utf8_lossy(a.attname.name_str()).into_owned());
             d.types.push(a.atttypid);
             d.typmods.push(a.atttypmod);
             d.typlens.push(a.attlen);
@@ -168,9 +170,9 @@ pub enum RecFieldRef {
 }
 
 // expanded_record_lookup_field: user columns, then system attributes.
-pub fn rec_lookup_field(desc: &RecDesc, want: &str, fieldname: &str) -> Option<RecFieldRef> {
+pub fn rec_lookup_field(desc: &RecDesc, fieldname: &str) -> Option<RecFieldRef> {
     for (i, n) in desc.names.iter().enumerate() {
-        if !desc.dropped[i] && n == want {
+        if !desc.dropped[i] && n == fieldname {
             return Some(RecFieldRef::User(i));
         }
     }
@@ -1087,7 +1089,9 @@ impl<'a> Estate<'a> {
             match item.itemtype {
                 NsType::Var => {
                     if let PlDatum::Var(v) = &func.datums[item.itemno as usize] {
-                        let key = item.name.to_ascii_lowercase();
+                        // Names as the scanners left them (downcased unless
+                        // quoted): resolve_column_ref compares with strcmp.
+                        let key = item.name.clone();
                         let t = self.var_type(v.dno);
                         let info = (key.clone(), v.dno, t.typoid, t.atttypmod, t.collation);
                         if !have(&names, &key) {
@@ -1097,7 +1101,7 @@ impl<'a> Estate<'a> {
                     }
                 }
                 NsType::Rec => {
-                    let recname = item.name.to_ascii_lowercase();
+                    let recname = item.name.clone();
                     let recno = item.itemno;
                     let (rec_t, rec_m) = self.rec_param_type_mod(recno)?;
                     let marker = (recname.clone(), recno, rec_t, rec_m, types_core::InvalidOid);
@@ -1123,10 +1127,7 @@ impl<'a> Estate<'a> {
                         if let PlDatum::RecField(f) = d {
                             if f.recparentno == recno {
                                 if let Some((t, m, c)) = self.recfield_type(f)? {
-                                    let key = format!(
-                                        "{recname}.{}",
-                                        f.fieldname.to_ascii_lowercase()
-                                    );
+                                    let key = format!("{recname}.{}", f.fieldname);
                                     let info = (key.clone(), f.dno, t, m, c);
                                     if is_visible_rec_binding && !have(&names, &key) {
                                         names.push(info.clone());
@@ -1152,7 +1153,7 @@ impl<'a> Estate<'a> {
                 NsType::Row => {}
                 NsType::Label => {
                     if !item.name.is_empty() {
-                        let label = item.name.to_ascii_lowercase();
+                        let label = item.name.clone();
                         for (k, dno, t, m, c) in pending.drain(..) {
                             let lk = format!("{label}.{k}");
                             if !have(&names, &lk) {
@@ -1401,8 +1402,7 @@ impl<'a> Estate<'a> {
             self.instantiate_empty_rec(f.recparentno)?;
         }
         if let DatumVal::Rec(Some(rv)) = &self.datums[f.recparentno as usize] {
-            let want = f.fieldname.to_ascii_lowercase();
-            match rec_lookup_field(&rv.desc, &want, &f.fieldname) {
+            match rec_lookup_field(&rv.desc, &f.fieldname) {
                 Some(RecFieldRef::User(i)) => {
                     let t = rv.desc.types[i];
                     let coll = lsyscache::typ::get_typcollation(t)?;
@@ -1477,8 +1477,7 @@ impl<'a> Estate<'a> {
                     self.instantiate_empty_rec(f.recparentno)?;
                 }
                 if let DatumVal::Rec(Some(rv)) = &self.datums[f.recparentno as usize] {
-                    let want = f.fieldname.to_ascii_lowercase();
-                    let found = rec_lookup_field(&rv.desc, &want, &f.fieldname);
+                    let found = rec_lookup_field(&rv.desc, &f.fieldname);
                     if let Some(found) = found {
                         let (current, fetched) = match found {
                             RecFieldRef::User(i) => (rv.desc.types[i], (rv.values[i], rv.nulls[i])),
@@ -2995,7 +2994,6 @@ impl<'a> Estate<'a> {
             }
             PlDatum::RecField(f) => {
                 let recno = f.recparentno;
-                let want = f.fieldname.to_ascii_lowercase();
                 let recname = match &self.func.datums[recno as usize] {
                     PlDatum::Rec(r) => r.refname.clone(),
                     _ => String::new(),
@@ -3009,7 +3007,7 @@ impl<'a> Estate<'a> {
                 let DatumVal::Rec(Some(rv)) = &self.datums[recno as usize] else {
                     panic!("plpgsql exec_assign_value: rec \"{recname}\" valueless after instantiate");
                 };
-                let i = match rec_lookup_field(&rv.desc, &want, &f.fieldname) {
+                let i = match rec_lookup_field(&rv.desc, &f.fieldname) {
                     Some(RecFieldRef::User(i)) => i,
                     Some(RecFieldRef::Sys(_)) => {
                         return Err(exec_err(
@@ -3145,23 +3143,11 @@ impl<'a> Estate<'a> {
                         "cannot assign non-composite value to a row variable".to_string(),
                     ));
                 }
+                // C exec_move_row_from_datum -> exec_move_row_from_fields
+                // (pl_exec.c:7796, 7181-7330): the ROW arm, including the
+                // strict_multi_assignment check.
                 let (desc, _src, values, nulls, _) = self.deconstruct_composite(value)?;
-                let natts = desc.types.len();
-                let mut anum = 0usize;
-                for dno in varnos {
-                    while anum < natts && desc.dropped[anum] {
-                        anum += 1;
-                    }
-                    let (v, vn, vt, vm) = if anum < natts {
-                        let r = (values[anum], nulls[anum], desc.types[anum], desc.typmods[anum]);
-                        anum += 1;
-                        r
-                    } else {
-                        (Datum::null(), true, UNKNOWNOID, -1)
-                    };
-                    self.exec_assign_value(dno, v, vn, vt, vm)?;
-                }
-                Ok(())
+                self.move_row_fields_into_varnos(&varnos, &desc, |anum| (values[anum], nulls[anum]))
             }
         }
     }
@@ -3976,10 +3962,23 @@ impl<'a> Estate<'a> {
         if let Some(h) = err_hint {
             b = b.errhint(h);
         }
-        // pl_exec.c:3909 — the `ereport(stmt->elog_level, ...)` that RAISE
-        // lands on (verified against the REL_18_3 source, and against what a
-        // stock server reports for the same RAISE).
-        b.finish(types_error::ErrorLocation::new("pl_exec.c", 3909, "exec_stmt_raise"))?;
+        // pl_exec.c:3909-3923 — the `ereport(stmt->elog_level, ...)` that
+        // RAISE lands on carries err_generic_string for COLUMN, CONSTRAINT,
+        // DATATYPE, TABLE and SCHEMA at every level, not only at ERROR.
+        let mut e = b.into_error();
+        set_raise_fields(
+            &mut e,
+            err_column,
+            err_constraint,
+            err_datatype,
+            err_table,
+            err_schema,
+        );
+        elog::ThrowErrorData(e.with_error_location(types_error::ErrorLocation::new(
+            "pl_exec.c",
+            3909,
+            "exec_stmt_raise",
+        )))?;
         Ok(RC_OK)
     }
 
@@ -4380,9 +4379,25 @@ impl<'a> Estate<'a> {
         i: usize,
     ) -> PgResult<()> {
         let (desc, _src) = self.rec_desc_of(tuptab)?;
+        self.move_row_fields_into_varnos(varnos, &desc, |anum| {
+            spi::tuptable_with(tuptab, |t| {
+                spi::SPI_getbinval(&t.vals[i], &t.tupdesc, (anum + 1) as i32)
+            })
+        })
+    }
+
+    // exec_move_row_from_fields' ROW arm (pl_exec.c:7181-7330) over an
+    // explicit varno list: sources are read positionally with dropped
+    // columns skipped, a missing source becomes NULL, and
+    // strict_multi_assignment (pl_exec.c:7196-7202, 7288-7297, 7315-7330)
+    // reports a short or a long source at the configured level.
+    fn move_row_fields_into_varnos(
+        &mut self,
+        varnos: &[Dno],
+        desc: &RecDesc,
+        mut fetch: impl FnMut(usize) -> (Datum, bool),
+    ) -> PgResult<()> {
         let natts = desc.types.len();
-        // strict_multi_assignment over the ROW arm (pl_exec.c:7196-7202,
-        // 7386-7411).
         let sma_level =
             crate::handler::extra_checks_level(crate::comp::XCHECK_STRICTMULTIASSIGNMENT)?;
         let mut anum = 0usize;
@@ -4391,9 +4406,7 @@ impl<'a> Estate<'a> {
                 anum += 1;
             }
             let (v, isnull, vt, vm) = if anum < natts {
-                let (v, isnull) = spi::tuptable_with(tuptab, |t| {
-                    spi::SPI_getbinval(&t.vals[i], &t.tupdesc, (anum + 1) as i32)
-                });
+                let (v, isnull) = fetch(anum);
                 let r = (v, isnull, desc.types[anum], desc.typmods[anum]);
                 anum += 1;
                 r

@@ -97,13 +97,8 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
         msg: String,
         location: i32,
     ) -> Box<PgError> {
-        Box::new(
-            elog::ereport(ERROR)
-                .errcode(code)
-                .errmsg(msg)
-                .errposition(self.sc.errposition(location))
-                .into_error(),
-        )
+        let b = elog::ereport(ERROR).errcode(code).errmsg(msg);
+        Box::new(self.sc.internal_errposition(b, location).into_error())
     }
 
     fn expect(&mut self, tok: i32, expected_msg: &str) -> PgResult<Tok> {
@@ -1009,8 +1004,8 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
             let is_error = self.comp.extra_errors & crate::comp::XCHECK_SHADOWVAR != 0;
             let b = elog::ereport(if is_error { ERROR } else { types_error::WARNING })
                 .errcode(types_error::ERRCODE_DUPLICATE_ALIAS)
-                .errmsg(format!("variable \"{name}\" shadows a previously defined variable"))
-                .errposition(self.sc.errposition(loc));
+                .errmsg(format!("variable \"{name}\" shadows a previously defined variable"));
+            let b = self.sc.internal_errposition(b, loc);
             if is_error {
                 return Err(Box::new(b.into_error()));
             }
@@ -1072,7 +1067,10 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
         loop {
             let t = self.yylex()?;
             if t.0 == 0 {
-                return Err(self.yyerror("unexpected end of function definition", t.2));
+                // pl_gram.y proc_sect has no EOF rule of its own: bison
+                // reports the plain "syntax error", which plpgsql_yyerror
+                // (pl_scanner.c:538-546) renders "at end of input".
+                return Err(self.yyerror("syntax error", t.2));
             }
             if stops.contains(&t.0) {
                 self.push_back(&t)?;
@@ -1195,29 +1193,32 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
         }
     }
 
-    // cursor_variable (pl_gram.y:2282): must be a refcursor-typed Var.
+    // cursor_variable (pl_gram.y:2282-2303): a plain Var (no row, record,
+    // record field, or array element — the next token must not be '[')
+    // of type refcursor.
     fn cursor_variable(&mut self) -> PgResult<Dno> {
         let t = self.yylex()?;
         if t.0 == T_DATUM {
-            let w = t.1.wdatum.as_ref().expect("T_DATUM");
-            if let PlDatum::Var(v) = &self.comp.datums[w.dno as usize] {
-                if v.datatype.typoid == REFCURSOROID {
-                    return Ok(w.dno);
-                }
+            let dno = t.1.wdatum.as_ref().expect("T_DATUM").dno;
+            let is_var = matches!(&self.comp.datums[dno as usize], PlDatum::Var(_));
+            if !is_var || self.peek()? == ('[' as i32) {
+                return Err(self.gram_err_pos(
+                    types_error::ERRCODE_DATATYPE_MISMATCH,
+                    "cursor variable must be a simple variable".to_string(),
+                    t.2,
+                ));
+            }
+            let PlDatum::Var(v) = &self.comp.datums[dno as usize] else {
+                unreachable!("cursor_variable: datum {dno} is a Var");
+            };
+            if v.datatype.typoid != REFCURSOROID {
                 return Err(self.gram_err_pos(
                     types_error::ERRCODE_DATATYPE_MISMATCH,
                     format!("variable \"{}\" must be of type cursor or refcursor", v.refname),
                     t.2,
                 ));
             }
-            let name = self.comp.datums[t.1.wdatum.as_ref().unwrap().dno as usize]
-                .refname()
-                .to_string();
-            return Err(self.gram_err_pos(
-                types_error::ERRCODE_DATATYPE_MISMATCH,
-                format!("variable \"{name}\" must be of type cursor or refcursor"),
-                t.2,
-            ));
+            return Ok(dno);
         }
         Err(self.current_token_is_not_variable(&t))
     }
@@ -1759,6 +1760,9 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
         }
     }
 
+    // for_control's target resolution: the EXECUTE loop refuses a bad
+    // target with 42804 (pl_gram.y:1399-1403), the query loop with 42601
+    // (pl_gram.y:1592-1596) — same message, different SQLSTATE.
     fn query_for_target(
         &mut self,
         name: &str,
@@ -1766,6 +1770,7 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
         var_loc: i32,
         scalar: Option<Dno>,
         rowrec: Option<Dno>,
+        code: types_error::SqlState,
     ) -> PgResult<Dno> {
         if let Some(r) = rowrec {
             self.check_assignable(r, var_loc)?;
@@ -1775,7 +1780,7 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
             return self.make_scalar_list1(name, s, var_lineno, var_loc);
         }
         Err(self.gram_err_pos(
-            types_error::ERRCODE_DATATYPE_MISMATCH,
+            code,
             "loop variable of loop over rows must be a record variable or list of scalar variables"
                 .to_string(),
             var_loc,
@@ -1804,7 +1809,14 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
                     }
                 }
             }
-            let var = self.query_for_target(&name, var_lineno, var_loc, scalar, rowrec)?;
+            let var = self.query_for_target(
+                &name,
+                var_lineno,
+                var_loc,
+                scalar,
+                rowrec,
+                types_error::ERRCODE_DATATYPE_MISMATCH,
+            )?;
             let (body, end_label, end_loc) = self.parse_loop_body()?;
             self.check_labels(label.as_deref(), end_label.as_deref(), end_loc)?;
             self.comp.ns_pop();
@@ -1917,7 +1929,14 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
                 ));
             }
             self.check_sql_expr(&expr1.query, expr1.parse_mode, expr1loc)?;
-            let var = self.query_for_target(&name, var_lineno, var_loc, scalar, rowrec)?;
+            let var = self.query_for_target(
+                &name,
+                var_lineno,
+                var_loc,
+                scalar,
+                rowrec,
+                ERRCODE_SYNTAX_ERROR,
+            )?;
             let (body, end_label, end_loc) = self.parse_loop_body()?;
             self.check_labels(label.as_deref(), end_label.as_deref(), end_loc)?;
             self.comp.ns_pop();
@@ -2150,14 +2169,11 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
         if self.fn_retset {
             let t = self.yylex()?;
             if t.0 != (';' as i32) {
-                return Err(Box::new(
-                    elog::ereport(ERROR)
-                        .errcode(types_error::ERRCODE_DATATYPE_MISMATCH)
-                        .errmsg("RETURN cannot have a parameter in function returning set")
-                        .errhint("Use RETURN NEXT or RETURN QUERY.")
-                        .errposition(self.sc.errposition(t.2))
-                        .into_error(),
-                ));
+                let b = elog::ereport(ERROR)
+                    .errcode(types_error::ERRCODE_DATATYPE_MISMATCH)
+                    .errmsg("RETURN cannot have a parameter in function returning set")
+                    .errhint("Use RETURN NEXT or RETURN QUERY.");
+                return Err(Box::new(self.sc.internal_errposition(b, t.2).into_error()));
             }
             return Ok(PlStmt::Return { lineno, expr: None, retvarno: -1 });
         }
@@ -2549,22 +2565,24 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
             let vt = self.yylex()?;
             let target = if vt.0 == T_DATUM {
                 let w = vt.1.wdatum.as_ref().expect("T_DATUM");
-                self.check_assignable(w.dno, vt.2)?;
-                match &self.comp.datums[w.dno as usize] {
-                    PlDatum::Row(_) | PlDatum::Rec(_) => {
-                        let nm = if !w.ident.is_empty() {
-                            w.ident.clone()
-                        } else {
-                            w.idents.join(".")
-                        };
-                        return Err(self.gram_err_pos(
-                            ERRCODE_SYNTAX_ERROR,
-                            format!("\"{nm}\" is not a scalar variable"),
-                            vt.2,
-                        ));
-                    }
-                    _ => w.dno,
+                let (dno, nm) = (
+                    w.dno,
+                    if !w.ident.is_empty() { w.ident.clone() } else { w.idents.join(".") },
+                );
+                self.check_assignable(dno, vt.2)?;
+                // pl_gram.y:1163-1174: a row, a record, or an array element
+                // (next token '[') is "not a scalar variable".
+                let not_scalar =
+                    matches!(&self.comp.datums[dno as usize], PlDatum::Row(_) | PlDatum::Rec(_))
+                        || self.peek()? == ('[' as i32);
+                if not_scalar {
+                    return Err(self.gram_err_pos(
+                        ERRCODE_SYNTAX_ERROR,
+                        format!("\"{nm}\" is not a scalar variable"),
+                        vt.2,
+                    ));
                 }
+                dno
             } else {
                 return Err(self.current_token_is_not_variable(&vt));
             };
@@ -2899,6 +2917,10 @@ pub fn getdiag_kindname(kind: i32) -> &'static str {
 }
 
 #[cfg(test)]
+#[path = "gram_audit_b081_tests.rs"]
+mod audit_b081_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -2965,14 +2987,16 @@ mod tests {
         let err = parser.parse_function_body().unwrap_err();
         assert_eq!(err.sqlstate, types_error::ERRCODE_SYNTAX_ERROR);
         assert_eq!(err.message, "syntax error at or near \"[\"");
-        assert_eq!(err.cursor_position, Some(12));
+        // plpgsql_scanner_errposition: an internal position over the body.
+        assert_eq!(err.internal_position, Some(12));
+        assert_eq!(err.cursor_position, None);
 
         let cx = mcx::MemoryContext::new("plpgsql syntax error test");
         let mut comp = crate::comp::CompState::new();
         let mut parser = parser_for!(cx, comp, b"begin raise notice 'x' ");
         let err = parser.parse_function_body().unwrap_err();
         assert_eq!(err.message, "syntax error at end of input");
-        assert_eq!(err.cursor_position, Some(24));
+        assert_eq!(err.internal_position, Some(24));
     }
 
     // A datatype error is positioned at the datatype's 1-based offset in the

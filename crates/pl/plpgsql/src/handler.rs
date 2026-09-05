@@ -324,6 +324,20 @@ const PROARGMODE_TABLE: i8 = b't' as i8;
 const PROKIND_FUNCTION: i8 = b'f' as i8;
 const PROKIND_PROCEDURE: i8 = b'p' as i8;
 
+// funccache.c:304-310 (compute_function_hashkey): a pg_proc row written by
+// a server with a larger FUNC_MAX_ARGS would overrun the fixed-size hashkey
+// argtypes array, so the row is refused before anything reads its argument
+// list — the parser cannot have checked this for a catalog-edited row.
+fn check_pronargs(nargs: usize) -> PgResult<()> {
+    if nargs > pg_proc::FUNC_MAX_ARGS {
+        return Err(crate::exec::exec_err(
+            types_error::ERRCODE_TOO_MANY_ARGUMENTS,
+            format!("cannot pass more than {} arguments to a function", pg_proc::FUNC_MAX_ARGS),
+        ));
+    }
+    Ok(())
+}
+
 fn read_proc_row(fn_oid: Oid) -> PgResult<ProcInfo> {
     let cx = mcx::MemoryContext::new("plpgsql compile proc row");
     let mcx = cx.mcx();
@@ -339,6 +353,7 @@ fn read_proc_row(fn_oid: Oid) -> PgResult<ProcInfo> {
     let (prokind_d, _) = SysCacheGetAttr(PROCOID, &tup, ANUM_PG_PROC_PROKIND)?;
     let (pronargs, _) = SysCacheGetAttr(PROCOID, &tup, ANUM_PG_PROC_PRONARGS)?;
     let nargs = pronargs.as_i16() as usize;
+    check_pronargs(nargs)?;
     // get_func_arg_info (funcapi.c): proallargtypes supersedes proargtypes
     // when present; proargmodes rides along.
     let (allarg_d, allarg_null) = SysCacheGetAttr(PROCOID, &tup, ANUM_PG_PROC_PROALLARGTYPES)?;
@@ -476,6 +491,12 @@ fn do_compile(
     call_expr: Option<types_core::fmgr::FnExprErased>,
 ) -> PgResult<PlFunction> {
     let mut proc = read_proc_row(fn_oid)?;
+    // pl_comp.c:489 / :623: a trigger's return type is unknown yet, and
+    // fn_retset is false whatever proretset says (RETURNS SETOF trigger
+    // compiles and runs like RETURNS trigger).
+    if is_dml_trigger || is_event_trigger {
+        proc.retset = false;
+    }
     // plpgsql_compile_error_callback covers header processing too: pre-parse
     // errors report "near line 1" (scanner initialized, nothing consumed).
     let hdr_ctx = |e: Box<types_error::PgError>| {
@@ -1896,6 +1917,16 @@ fn plpgsql_exec_trigger(
     }
 
     estate.frame.text.set(Some("during function exit"));
+    // pl_exec.c:1064-1067.
+    if func.fn_retset {
+        return Err(attach_exec_context(
+            crate::exec::exec_err(
+                types_error::ERRCODE_DATATYPE_MISMATCH,
+                "trigger procedure cannot return a set".to_string(),
+            ),
+            &estate,
+        ));
+    }
     fcinfo.isnull = false;
     if estate.retisnull || !TRIGGER_FIRED_FOR_ROW(ev) {
         return Ok(Datum::null());

@@ -64,7 +64,9 @@ impl Default for VarParamState {
 
 #[derive(Clone, Copy)]
 pub struct PlpgsqlNameEntry<'p> {
-    /// Down-cased dotted key: "v", "label.v", "rec.f", "label.rec.f".
+    /// Dotted key as the PL/pgSQL scanner left the names (downcased unless
+    /// quoted): "v", "label.v", "rec.f", "label.rec.f". Matched exactly, as
+    /// C's resolve_column_ref / plpgsql_ns_lookup compare with strcmp.
     pub key: &'p str,
     pub dno: i32,
     pub typoid: Oid,
@@ -365,9 +367,9 @@ pub fn plpgsql_resolve_column_ref<'mcx>(
     if fields.is_empty() || fields.len() > 3 {
         return Ok(None);
     }
-    let key = fields.join(".").to_ascii_lowercase();
+    let key = fields.join(".");
     if fields.len() >= 2 {
-        let prefix = fields[..fields.len() - 1].join(".").to_ascii_lowercase();
+        let prefix = fields[..fields.len() - 1].join(".");
         if parstate.valueless_recs.iter().any(|r| *r == prefix) {
             let recname = fields[fields.len() - 2];
             // C's error comes from exec_get_datum_type_info (no cursor);
@@ -398,7 +400,7 @@ pub fn plpgsql_resolve_column_ref<'mcx>(
     }
     if error_if_no_field && fields.len() >= 2 {
         // C reports against the last-1 prefix that named a rec/row.
-        let prefix = fields[..fields.len() - 1].join(".").to_ascii_lowercase();
+        let prefix = fields[..fields.len() - 1].join(".");
         if parstate.recs.iter().any(|r| *r == prefix) {
             let recname = fields[fields.len() - 2];
             let field = fields[fields.len() - 1];
