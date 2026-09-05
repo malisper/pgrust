@@ -62,16 +62,23 @@ pub fn item_slice_mut<'a>(pm: &'a mut PageMut<'_>, offnum: OffsetNumber) -> &'a 
     unsafe { core::slice::from_raw_parts_mut(pm.as_mut_ptr().add(off), len as usize) }
 }
 
+/// C: elog(ERROR, "unexpected SPGiST tuple state: %d", tupstate) — the
+/// corrupted-page checks of spgdoinsert.c/spgscan.c/spgvacuum.c are catchable
+/// XX000 errors (a plpgsql EXCEPTION block catches them), never a panic.
 #[cold]
 #[inline(never)]
-pub fn tuple_state_error(tupstate: u8) -> ! {
-    panic!("unexpected SPGiST tuple state: {tupstate}")
+#[track_caller]
+pub fn tuple_state_error(tupstate: u8) -> Box<PgError> {
+    Box::new(PgError::error(format!("unexpected SPGiST tuple state: {tupstate}")))
 }
 
+/// C: elog(ERROR, "failed to add item of size %u to SPGiST index page", size)
+/// (spgdoinsert.c:170 et al., spgutils.c:1285) — catchable XX000, not a panic.
 #[cold]
 #[inline(never)]
-pub fn add_item_failed(size: usize) -> ! {
-    panic!("failed to add item of size {size} to SPGiST index page")
+#[track_caller]
+pub fn add_item_failed(size: usize) -> Box<PgError> {
+    Box::new(PgError::error(format!("failed to add item of size {size} to SPGiST index page")))
 }
 
 #[cold]
@@ -301,7 +308,10 @@ pub fn spgGetCache(index: &Relation<'_>) -> PgResult<SpGistCache> {
     let mut config_fn = fmgr_seams::fmgr_info::call(config_oid)?;
     let cfgin = spgConfigIn { attType: atttype };
     {
-        let mut frame = ::types_fmgr::LocalFcinfo::<2>::new(0);
+        // C: FunctionCall2Coll(procinfo, index->rd_indcollation[spgKeyColumn], ...)
+        let mut frame = ::types_fmgr::LocalFcinfo::<2>::new(
+            index.rd_indcollation.first().copied().unwrap_or(InvalidOid),
+        );
         frame.set_arg(0, Datum::from_usize(&cfgin as *const spgConfigIn as usize));
         frame.set_arg(
             1,
@@ -553,8 +563,9 @@ pub fn SpGistGetBuffer(
 ) -> PgResult<Buffer> {
     let mut cache = spgGetCache(index)?;
 
-    if need_space as usize > SPGIST_PAGE_CAPACITY {
-        panic!("desired SPGiST tuple size is too big");
+    // C (spgutils.c:576): int comparison, elog(ERROR) — catchable XX000.
+    if need_space > SPGIST_PAGE_CAPACITY as i32 {
+        return Err(Box::new(PgError::error("desired SPGiST tuple size is too big")));
     }
 
     need_space += SpGistGetTargetPageFreeSpace(index) as i32;
@@ -1135,7 +1146,7 @@ pub fn spgExtractNodeLabels(
     if node_tuple_has_nulls(&inner[first_off..]) {
         for (_, off) in inner_tuple_nodes(inner) {
             if !node_tuple_has_nulls(&inner[off..]) {
-                panic!("some but not all node labels are null in SPGiST inner tuple");
+                return Err(mixed_null_labels());
             }
         }
         Ok(false)
@@ -1143,12 +1154,19 @@ pub fn spgExtractNodeLabels(
         for (_, off) in inner_tuple_nodes(inner) {
             let node = &inner[off..];
             if node_tuple_has_nulls(node) {
-                panic!("some but not all node labels are null in SPGiST inner tuple");
+                return Err(mixed_null_labels());
             }
             out.push(node_label_datum(node, state)?);
         }
         Ok(true)
     }
+}
+
+// C (spgutils.c:1173/1184): elog(ERROR) — catchable XX000.
+#[cold]
+#[inline(never)]
+fn mixed_null_labels() -> Box<PgError> {
+    Box::new(PgError::error("some but not all node labels are null in SPGiST inner tuple"))
 }
 
 /// SGNTDATUM.
@@ -1187,7 +1205,7 @@ pub fn SpGistPageAddNewItem(
     item: &[u8],
     start_offset: Option<&mut OffsetNumber>,
     error_ok: bool,
-) -> OffsetNumber {
+) -> PgResult<OffsetNumber> {
     let size = item.len();
     let opaque = page_opaque(&pm.as_ref());
 
@@ -1236,17 +1254,17 @@ pub fn SpGistPageAddNewItem(
                 }
                 _ => panic!("failed to add item of size {size} to SPGiST index page"),
             }
-            return offnum;
+            return Ok(offnum);
         }
     }
 
     match pm.add_item(item, InvalidOffsetNumber, 0) {
-        Some(o) => o,
+        Some(o) => Ok(o),
         None => {
             if !error_ok {
-                add_item_failed(size);
+                return Err(add_item_failed(size));
             }
-            InvalidOffsetNumber
+            Ok(InvalidOffsetNumber)
         }
     }
 }
@@ -1330,5 +1348,93 @@ mod inline_datum_tests {
         };
         // Empty image is fine: by-value datums are read by width, not pointer.
         assert!(validate_inline_datum(&[], 0, &desc).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod node_label_tests {
+    use super::*;
+    use std::rc::Rc;
+
+    fn mock_proc(
+        _f: Option<&mut ::types_fmgr::FmgrInfo>,
+        _fc: &mut ::types_fmgr::FunctionCallInfoBaseData,
+    ) -> PgResult<Datum> {
+        Ok(Datum::from_usize(0))
+    }
+
+    fn desc(type_: ::types_core::Oid, attlen: i16, attbyval: bool) -> SpGistTypeDesc {
+        SpGistTypeDesc { type_, attlen, attbyval, attalign: b's' as i8, attstorage: b'p' as i8 }
+    }
+
+    fn state<'m>(mcx: Mcx<'m>) -> SpGistState<'m> {
+        let text = desc(25, -1, false);
+        let int2 = desc(21, 2, true);
+        let fi = || ::types_fmgr::FmgrInfo::new(mock_proc, 0, 2, true, false);
+        SpGistState {
+            config: spgConfigOut {
+                prefixType: 25,
+                labelType: 21,
+                leafType: 25,
+                canReturnData: true,
+                longValuesOK: true,
+            },
+            attType: text,
+            attLeafType: text,
+            attPrefixType: text,
+            attLabelType: int2,
+            leafTupDesc: Rc::new(TupleDescData {
+                natts: 1,
+                tdtypeid: 0,
+                tdtypmod: -1,
+                tdrefcount: 1,
+                constr: None,
+                compact_attrs: ::mcx::PgVec::new_in(mcx),
+                attrs: ::mcx::PgVec::new_in(mcx),
+            }),
+            redirectXid: 0,
+            isBuild: false,
+            indexCollation: 0,
+            chooseFn: fi(),
+            picksplitFn: fi(),
+            compressFn: fi(),
+            frame1: ::types_fmgr::LocalFcinfo::new(0),
+            frame2: ::types_fmgr::LocalFcinfo::new(0),
+        }
+    }
+
+    // An inner tuple image with two label-less (8-byte) node tuples; node 1
+    // carries INDEX_NULL_MASK, node 2 does not.
+    fn mixed_null_inner() -> Vec<u8> {
+        let mut v = vec![0u8; SGITHDRSZ + 16];
+        SpGistInnerTupleHeader {
+            tupstate: SPGIST_LIVE,
+            allTheSame: false,
+            nNodes: 2,
+            prefixSize: 0,
+            size: (SGITHDRSZ + 16) as u16,
+        }
+        .encode(&mut v);
+        v[SGITHDRSZ + 6..SGITHDRSZ + 8].copy_from_slice(&(8u16 | INDEX_NULL_MASK).to_ne_bytes());
+        v[SGITHDRSZ + 14..SGITHDRSZ + 16].copy_from_slice(&8u16.to_ne_bytes());
+        v
+    }
+
+    // spgutils.c:1173 spgExtractNodeLabels: a mixture of NULL and non-NULL
+    // node labels is elog(ERROR, "some but not all node labels are null in
+    // SPGiST inner tuple") — a catchable XX000, never a panic (audit row
+    // spgutils-18230dc8).
+    #[test]
+    fn mixed_null_labels_error_not_panic() {
+        let ctx = ::mcx::MemoryContext::new("spgExtractNodeLabels test");
+        let st = state(ctx.mcx());
+        let inner = mixed_null_inner();
+        assert!(node_tuple_has_nulls(&inner[SGITHDRSZ..]));
+        assert!(!node_tuple_has_nulls(&inner[SGITHDRSZ + 8..]));
+        let mut out = Vec::new();
+        let err = spgExtractNodeLabels(&st, &inner, &mut out)
+            .expect_err("mixed null/non-null labels must be rejected");
+        assert_eq!(err.message(), "some but not all node labels are null in SPGiST inner tuple");
+        assert_eq!(err.sqlstate(), ::types_error::ERRCODE_INTERNAL_ERROR);
     }
 }

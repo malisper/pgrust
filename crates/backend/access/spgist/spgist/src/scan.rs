@@ -665,7 +665,10 @@ fn spg_inner_test(
         }
 
         if hdr.allTheSame && out_n != 0 && out_n != n_nodes {
-            panic!("inconsistent inner_consistent results for allTheSame inner tuple");
+            // C (spgscan.c:700): elog(ERROR) — catchable XX000.
+            return Err(Box::new(PgError::error(
+                "inconsistent inner_consistent results for allTheSame inner tuple",
+            )));
         }
     } else {
         node_numbers.extend(0..n_nodes as i32);
@@ -759,7 +762,7 @@ fn spg_test_leaf_tuple(
                 return Ok(SpGistBreakOffsetNumber);
             }
         }
-        tuple_state_error(st);
+        return Err(tuple_state_error(st));
     }
 
     debug_assert!(ItemPointerIsValid(
@@ -897,7 +900,7 @@ fn spg_walk(
                         );
                         continue; // goto redirect
                     }
-                    tuple_state_error(st);
+                    return Err(tuple_state_error(st));
                 }
                 // SAFETY: the item stays live under our share lock for the
                 // duration of spg_inner_test (C reads it in place too).

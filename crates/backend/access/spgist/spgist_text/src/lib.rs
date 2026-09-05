@@ -450,7 +450,9 @@ fn fc_spg_text_inner_consistent(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) 
                 BTEqualStrategyNumber => r == 0 && in_text.len() >= this_len,
                 BTGreaterEqualStrategyNumber | BTGreaterStrategyNumber => r >= 0,
                 RTPrefixStrategyNumber => r == 0,
-                other => return Err(unrecognized_strategy(other)),
+                // C (spgtextproc.c:550) reports in->scankeys[j].sk_strategy,
+                // the original number, not the SPG_STRATEGY_ADDITION-adjusted copy.
+                _ => return Err(unrecognized_strategy(key.sk_strategy)),
             };
             if !res {
                 break;
@@ -576,7 +578,8 @@ fn fc_spg_text_leaf_consistent(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -
             BTEqualStrategyNumber => r == 0,
             BTGreaterEqualStrategyNumber => r >= 0,
             BTGreaterStrategyNumber => r > 0,
-            other => return Err(unrecognized_strategy(other)),
+            // C (spgtextproc.c:690): the original sk_strategy, as above.
+            _ => return Err(unrecognized_strategy(key.sk_strategy)),
         };
         if !res {
             break;
@@ -609,3 +612,91 @@ pub const SPGIST_TEXT_BUILTINS: &[FmgrBuiltin] = &[
     b(4030, "spg_text_inner_consistent", 2, fc_spg_text_inner_consistent),
     b(4031, "spg_text_leaf_consistent", 2, fc_spg_text_leaf_consistent),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ::types_core::C_COLLATION_OID;
+    use ::types_scan::ScanKeyData;
+
+    fn scankey(strategy: u16, arg: Datum) -> ScanKeyData {
+        ScanKeyData {
+            sk_flags: 0,
+            sk_attno: 1,
+            sk_strategy: strategy,
+            sk_subtype: 0,
+            sk_collation: C_COLLATION_OID,
+            sk_func: FmgrInfo::new(fc_spg_text_config, 0, 2, true, false),
+            sk_argument: arg,
+        }
+    }
+
+    // spgtextproc.c:550: the switch runs on a local copy with
+    // SPG_STRATEGY_ADDITION subtracted, but the default arm reports
+    // `in->scankeys[j].sk_strategy` — the ORIGINAL number (16), not the
+    // decremented 6 (audit row spgtextproc-27ed5e5b). C collation makes the
+    // collation-aware strategy take the subtracting path.
+    #[test]
+    fn inner_consistent_reports_the_original_strategy_number() {
+        let ctx = ::mcx::MemoryContext::new("spgist_text inner_consistent test");
+        let mcx = ctx.mcx();
+        let query = form_text_datum(mcx, b"k").unwrap();
+        let keys = [scankey(16, query)];
+        let labels = [Datum::from_i16(b'k' as i16)];
+        let input = spgInnerConsistentIn {
+            scankeys: keys.as_ptr(),
+            orderbys: core::ptr::null(),
+            nkeys: 1,
+            norderbys: 0,
+            reconstructedValue: Datum::from_usize(0),
+            traversalValue: 0,
+            traversalMemoryContext: mcx,
+            level: 0,
+            returnData: false,
+            allTheSame: false,
+            hasPrefix: false,
+            prefixDatum: Datum::from_usize(0),
+            nNodes: 1,
+            nodeLabels: labels.as_ptr(),
+        };
+        let mut out = spgInnerConsistentOut::default();
+        let mut frame: ::types_fmgr::LocalFcinfo<2> = ::types_fmgr::LocalFcinfo::fresh(C_COLLATION_OID);
+        // SAFETY: ctx outlives the call.
+        unsafe { frame.set_result_mcx(mcx) };
+        frame.set_arg(0, Datum::from_usize(&input as *const spgInnerConsistentIn as usize));
+        frame.set_arg(1, Datum::from_usize(&mut out as *mut spgInnerConsistentOut as usize));
+        let err = fc_spg_text_inner_consistent(None, &mut frame).unwrap_err();
+        assert_eq!(err.message(), "unrecognized strategy number: 16");
+        assert_eq!(err.sqlstate(), ::types_error::ERRCODE_INTERNAL_ERROR);
+    }
+
+    // spgtextproc.c:690: same contract on the leaf side.
+    #[test]
+    fn leaf_consistent_reports_the_original_strategy_number() {
+        let ctx = ::mcx::MemoryContext::new("spgist_text leaf_consistent test");
+        let mcx = ctx.mcx();
+        let query = form_text_datum(mcx, b"k5").unwrap();
+        let leaf = form_text_datum(mcx, b"k5").unwrap();
+        let keys = [scankey(16, query)];
+        let input = spgLeafConsistentIn {
+            scankeys: keys.as_ptr(),
+            orderbys: core::ptr::null(),
+            nkeys: 1,
+            norderbys: 0,
+            reconstructedValue: Datum::from_usize(0),
+            traversalValue: 0,
+            level: 0,
+            returnData: false,
+            leafDatum: leaf,
+        };
+        let mut out = spgLeafConsistentOut::default();
+        let mut frame: ::types_fmgr::LocalFcinfo<2> = ::types_fmgr::LocalFcinfo::fresh(C_COLLATION_OID);
+        // SAFETY: ctx outlives the call.
+        unsafe { frame.set_result_mcx(mcx) };
+        frame.set_arg(0, Datum::from_usize(&input as *const spgLeafConsistentIn as usize));
+        frame.set_arg(1, Datum::from_usize(&mut out as *mut spgLeafConsistentOut as usize));
+        let err = fc_spg_text_leaf_consistent(None, &mut frame).unwrap_err();
+        assert_eq!(err.message(), "unrecognized strategy number: 16");
+        assert_eq!(err.sqlstate(), ::types_error::ERRCODE_INTERNAL_ERROR);
+    }
+}

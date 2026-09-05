@@ -8,7 +8,7 @@ use ::types_core::xact::{TransactionIdFollowsOrEquals, TransactionIdPrecedes};
 use ::types_core::{
     BlockNumber, Buffer, ForkNumber, InvalidBlockNumber, OffsetNumber, TransactionId,
 };
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult};
 use ::types_rel::Relation;
 use ::types_spgist::xlog::{
     spgxlogState, spgxlogVacuumLeaf, spgxlogVacuumRedirect, spgxlogVacuumRoot,
@@ -139,10 +139,11 @@ fn vacuum_leaf_page(
                             || next > max
                             || predecessor[next as usize] != InvalidOffsetNumber
                         {
-                            panic!(
+                            // C (spgvacuum.c:177): elog(ERROR) — catchable XX000.
+                            return Err(Box::new(PgError::error(format!(
                                 "inconsistent tuple chain links in page {blkno} of index \"{}\"",
                                 index.name()
-                            );
+                            ))));
                         }
                         predecessor[next as usize] = i;
                     }
@@ -194,7 +195,7 @@ fn vacuum_leaf_page(
             while j != InvalidOffsetNumber {
                 let lt = item_slice(&page, j);
                 if tuple_state(lt) != SPGIST_LIVE {
-                    tuple_state_error(tuple_state(lt));
+                    return Err(tuple_state_error(tuple_state(lt)));
                 }
 
                 if deletable[j as usize] {
@@ -229,7 +230,8 @@ fn vacuum_leaf_page(
     }
 
     if n_deletable != to_dead.len() + to_placeholder.len() + move_src.len() {
-        panic!("inconsistent counts of deletable tuples");
+        // C (spgvacuum.c:326): elog(ERROR) — catchable XX000.
+        return Err(Box::new(PgError::error("inconsistent counts of deletable tuples")));
     }
     debug_assert!(n_deletable <= MaxIndexTuplesPerPage);
 
@@ -326,7 +328,7 @@ fn vacuum_leaf_root(
             let lt = item_slice(&page, i);
             if tuple_state(lt) != SPGIST_LIVE {
                 // all tuples on root should be live
-                tuple_state_error(tuple_state(lt));
+                return Err(tuple_state_error(tuple_state(lt)));
             }
             let hdr = SpGistLeafTupleHeader::decode(lt);
             debug_assert!(ItemPointerIsValid(&hdr.heapPtr));
@@ -377,9 +379,10 @@ fn vacuum_redirect_and_placeholder(
     let mut first_placeholder = InvalidOffsetNumber;
     let mut has_non_placeholder = false;
     let mut has_update = false;
-    // isCatalogRel: RelationIsAccessibleInLogicalDecoding const-false
-    let is_catalog_rel = false;
-    let _ = heaprel;
+    // C (spgvacuum.c:508): xlrec.isCatalogRel =
+    // RelationIsAccessibleInLogicalDecoding(heaprel) — standby redo resolves
+    // logical-decoding snapshot conflicts from it.
+    let is_catalog_rel = ::nbtree::relation_is_accessible_in_logical_decoding(heaprel);
 
     let vistest = procarray_seams::global_vis_test_for::call(heaprel);
 
@@ -569,7 +572,11 @@ fn spgprocesspending(state: &mut SpgVacState<'_, '_, '_>) -> PgResult<()> {
             mark_pending_done(&mut state.pending, idx);
         } else if is_leaf {
             if SpGistBlockIsRoot(blkno) {
-                panic!("redirection leads to root page of index \"{}\"", index.name());
+                // C (spgvacuum.c:721): elog(ERROR) — catchable XX000.
+                return Err(Box::new(PgError::error(format!(
+                    "redirection leads to root page of index \"{}\"",
+                    index.name()
+                ))));
             }
 
             vacuum_leaf_page(state, index, buffer, blkno, true)?;
@@ -607,7 +614,7 @@ fn spgprocesspending(state: &mut SpgVacState<'_, '_, '_>) -> PgResult<()> {
                             SPGIST_REDIRECT => {
                                 queued.push(SpGistDeadTupleHeader::decode(inner).pointer);
                             }
-                            other => tuple_state_error(other),
+                            other => return Err(tuple_state_error(other)),
                         }
                     }
                     for t in &queued {

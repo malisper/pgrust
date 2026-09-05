@@ -70,7 +70,7 @@ fn addLeafTuple(
     if current.offnum == InvalidOffsetNumber || SpGistBlockIsRoot(current.blkno) {
         leaf_set_next_offset(leaf_tuple, InvalidOffsetNumber);
         let mut pm = page(current);
-        current.offnum = SpGistPageAddNewItem(&mut pm, leaf_tuple, None, false);
+        current.offnum = SpGistPageAddNewItem(&mut pm, leaf_tuple, None, false)?;
         xlrec.offnumLeaf = current.offnum;
 
         if parent.buffer != InvalidBuffer {
@@ -84,7 +84,7 @@ fn addLeafTuple(
         if head_state == SPGIST_LIVE {
             let head_next = leaf_next_offset(item_slice(&pm.as_ref(), current.offnum));
             leaf_set_next_offset(leaf_tuple, head_next);
-            let offnum = SpGistPageAddNewItem(&mut pm, leaf_tuple, None, false);
+            let offnum = SpGistPageAddNewItem(&mut pm, leaf_tuple, None, false)?;
             // re-get head: it may have moved on the page
             let head = item_slice_mut(&mut pm, current.offnum);
             leaf_set_next_offset(head, offnum);
@@ -94,13 +94,13 @@ fn addLeafTuple(
             leaf_set_next_offset(leaf_tuple, InvalidOffsetNumber);
             pm.index_tuple_delete(current.offnum);
             if pm.add_item(leaf_tuple, current.offnum, 0) != Some(current.offnum) {
-                add_item_failed(leaf_tuple.len());
+                return Err(add_item_failed(leaf_tuple.len()));
             }
             // WAL replay distinguishes this case by equal offnums
             xlrec.offnumLeaf = current.offnum;
             xlrec.offnumHeadLeaf = current.offnum;
         } else {
-            tuple_state_error(head_state);
+            return Err(tuple_state_error(head_state));
         }
     }
 
@@ -171,7 +171,7 @@ fn checkSplitConditions(
         } else if st == SPGIST_DEAD {
             debug_assert!(i == current.offnum);
         } else {
-            tuple_state_error(st);
+            return Err(tuple_state_error(st));
         }
         i = leaf_next_offset(it);
     }
@@ -216,7 +216,7 @@ fn moveLeafs<'m>(
                 to_delete.push(i);
                 replace_dead = true;
             } else {
-                tuple_state_error(st);
+                return Err(tuple_state_error(st));
             }
             i = leaf_next_offset(it);
         }
@@ -253,7 +253,7 @@ fn moveLeafs<'m>(
                 v
             };
             let mut npm = buf_page_mut(nbuf);
-            r = SpGistPageAddNewItem(&mut npm, &img, Some(&mut start_offset), false);
+            r = SpGistPageAddNewItem(&mut npm, &img, Some(&mut start_offset), false)?;
             to_insert.push(r);
             leafdata.extend_from_slice(&img);
         }
@@ -262,7 +262,7 @@ fn moveLeafs<'m>(
     leaf_set_next_offset(new_leaf_tuple, r);
     {
         let mut npm = buf_page_mut(nbuf);
-        r = SpGistPageAddNewItem(&mut npm, new_leaf_tuple, Some(&mut start_offset), false);
+        r = SpGistPageAddNewItem(&mut npm, new_leaf_tuple, Some(&mut start_offset), false)?;
     }
     to_insert.push(r);
     leafdata.extend_from_slice(new_leaf_tuple);
@@ -451,7 +451,7 @@ fn doPickSplit<'m>(
                     to_delete.push(i);
                     space_to_delete += leaf_size(it) + SIZEOF_ITEM_ID_DATA;
                 } else {
-                    tuple_state_error(st);
+                    return Err(tuple_state_error(st));
                 }
             }
         } else {
@@ -472,7 +472,7 @@ fn doPickSplit<'m>(
                     debug_assert!(i == current.offnum);
                     to_delete.push(i);
                 } else {
-                    tuple_state_error(st);
+                    return Err(tuple_state_error(st));
                 }
                 i = leaf_next_offset(it);
             }
@@ -829,7 +829,7 @@ fn doPickSplit<'m>(
                 new_leafs[i].as_slice(),
                 Some(&mut start_offsets[sel as usize]),
                 false,
-            )
+            )?
         };
         to_insert.push(newoffset);
 
@@ -851,7 +851,7 @@ fn doPickSplit<'m>(
         current.buffer = parent.buffer;
         current.offnum = {
             let mut pm = page(current);
-            SpGistPageAddNewItem(&mut pm, inner_tuple.as_slice(), None, false)
+            SpGistPageAddNewItem(&mut pm, inner_tuple.as_slice(), None, false)?
         };
         xlrec.offnumInner = current.offnum;
         xlrec.innerIsParent = true;
@@ -869,7 +869,7 @@ fn doPickSplit<'m>(
         current.blkno = bufmgr::buffer_get_block_number::call(current.buffer);
         current.offnum = {
             let mut pm = page(current);
-            SpGistPageAddNewItem(&mut pm, inner_tuple.as_slice(), None, false)
+            SpGistPageAddNewItem(&mut pm, inner_tuple.as_slice(), None, false)?
         };
         xlrec.offnumInner = current.offnum;
         bufmgr::mark_buffer_dirty::call(current.buffer)?;
@@ -897,7 +897,7 @@ fn doPickSplit<'m>(
                 .unwrap_or(InvalidOffsetNumber)
         };
         if current.offnum != FirstOffsetNumber {
-            add_item_failed(inner_size);
+            return Err(add_item_failed(inner_size));
         }
         xlrec.offnumInner = current.offnum;
         xlrec.offnumParent = InvalidOffsetNumber;
@@ -1147,7 +1147,7 @@ fn spgAddNodeAction<'m>(
             if pm.add_item(&new_inner_tuple.as_slice()[..new_size], current.offnum, 0)
                 != Some(current.offnum)
             {
-                add_item_failed(new_size);
+                return Err(add_item_failed(new_size));
             }
         }
         bufmgr::mark_buffer_dirty::call(current.buffer)?;
@@ -1204,7 +1204,7 @@ fn spgAddNodeAction<'m>(
 
         current.offnum = {
             let mut pm = page(current);
-            SpGistPageAddNewItem(&mut pm, &new_inner_tuple.as_slice()[..new_size], None, false)
+            SpGistPageAddNewItem(&mut pm, &new_inner_tuple.as_slice()[..new_size], None, false)?
         };
         xlrec.offnumNew = current.offnum;
         bufmgr::mark_buffer_dirty::call(current.buffer)?;
@@ -1221,7 +1221,7 @@ fn spgAddNodeAction<'m>(
             let mut spm = buf_page_mut(save_current.buffer);
             spm.index_tuple_delete(save_current.offnum);
             if spm.add_item(&dt, save_current.offnum, 0) != Some(save_current.offnum) {
-                add_item_failed(SGDTSIZE);
+                return Err(add_item_failed(SGDTSIZE));
             }
             if state.isBuild {
                 page_opaque_update(&mut spm, |op| op.nPlaceholder += 1);
@@ -1381,7 +1381,7 @@ fn spgSplitNodeAction<'m>(
         pm.index_tuple_delete(current.offnum);
         match pm.add_item(&prefix_tuple.as_slice()[..prefix_size], current.offnum, 0) {
             Some(o) if o == current.offnum => {}
-            _ => add_item_failed(prefix_size),
+            _ => return Err(add_item_failed(prefix_size)),
         }
     }
     xlrec.offnumPrefix = current.offnum;
@@ -1392,13 +1392,13 @@ fn spgSplitNodeAction<'m>(
         postfix_blkno = current.blkno;
         let mut pm = page(current);
         postfix_offset =
-            SpGistPageAddNewItem(&mut pm, &postfix_tuple.as_slice()[..postfix_size], None, false);
+            SpGistPageAddNewItem(&mut pm, &postfix_tuple.as_slice()[..postfix_size], None, false)?;
         xlrec.postfixBlkSame = true;
     } else {
         postfix_blkno = bufmgr::buffer_get_block_number::call(new_buffer);
         let mut pm = buf_page_mut(new_buffer);
         postfix_offset =
-            SpGistPageAddNewItem(&mut pm, &postfix_tuple.as_slice()[..postfix_size], None, false);
+            SpGistPageAddNewItem(&mut pm, &postfix_tuple.as_slice()[..postfix_size], None, false)?;
         bufmgr::mark_buffer_dirty::call(new_buffer)?;
         xlrec.postfixBlkSame = false;
     }
@@ -1571,7 +1571,11 @@ pub fn spgdoinsert<'m>(
             let pm = page(&current);
             let stores_nulls = SpGistPageStoresNulls(&pm.as_ref());
             if isnull != stores_nulls {
-                panic!("SPGiST index page {} has wrong nulls flag", current.blkno);
+                // C (spgdoinsert.c:2104): elog(ERROR) — catchable XX000.
+                return Err(Box::new(PgError::error(format!(
+                    "SPGiST index page {} has wrong nulls flag",
+                    current.blkno
+                ))));
             }
         }
 

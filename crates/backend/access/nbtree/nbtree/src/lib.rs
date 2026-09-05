@@ -165,7 +165,7 @@ fn relation_data_needs_wal(rel: &::types_rel::RelationData<'_>) -> bool {
 /// RelationIsAccessibleInLogicalDecoding (utils/rel.h): the isCatalogRel flag
 /// of xl_btree_delete (nbtpage.c:1527) and xl_btree_reuse_page
 /// (nbtpage.c:947), evaluated on the HEAP relation.
-pub(crate) fn relation_is_accessible_in_logical_decoding(rel: &::types_rel::RelationData<'_>) -> bool {
+pub fn relation_is_accessible_in_logical_decoding(rel: &::types_rel::RelationData<'_>) -> bool {
     transam_xlog_seams::xlog_logical_info_active::call()
         && relation_data_needs_wal(rel)
         && (catalog_seams::is_catalog_relation::call(rel) || rel.is_used_as_catalog_table())

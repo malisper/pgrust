@@ -66,11 +66,15 @@ fn item_slice<'a>(pm: &'a PageMut<'_>, offnum: OffsetNumber) -> &'a [u8] {
 }
 
 // addOrReplaceTuple.
-fn add_or_replace_tuple(pm: &mut PageMut<'_>, tuple: &[u8], offset: OffsetNumber) {
+// C (spgxlog.c:58/69): both failures are elog(ERROR) — catchable, reaching
+// the redo caller as Err rather than unwinding the startup thread.
+fn add_or_replace_tuple(pm: &mut PageMut<'_>, tuple: &[u8], offset: OffsetNumber) -> PgResult<()> {
     if offset <= pm.as_ref().max_offset_number() {
         let st = tuple_state(item_slice(pm, offset));
         if st != SPGIST_PLACEHOLDER {
-            panic!("SPGiST tuple to be replaced is not a placeholder");
+            return Err(Box::new(PgError::error(
+                "SPGiST tuple to be replaced is not a placeholder",
+            )));
         }
         page_opaque_update(pm, |op| {
             debug_assert!(op.nPlaceholder > 0);
@@ -80,8 +84,18 @@ fn add_or_replace_tuple(pm: &mut PageMut<'_>, tuple: &[u8], offset: OffsetNumber
     }
     debug_assert!(offset <= pm.as_ref().max_offset_number() + 1);
     if pm.add_item(tuple, offset, 0) != Some(offset) {
-        panic!("failed to add item of size {} to SPGiST index page", tuple.len());
+        return Err(add_item_failed(tuple.len()));
     }
+    Ok(())
+}
+
+// C: elog(ERROR, "failed to add item of size %u to SPGiST index page", size)
+// (spgxlog.c:69/134/315/396/513) — catchable XX000.
+#[cold]
+#[inline(never)]
+#[track_caller]
+fn add_item_failed(size: usize) -> Box<PgError> {
+    Box::new(PgError::error(format!("failed to add item of size {size} to SPGiST index page")))
 }
 
 #[cold]
@@ -184,7 +198,7 @@ fn spgRedoAddLeaf(record: &XLogReaderState) -> PgResult<()> {
         let mut pm = unsafe { page_mut(buffer) };
 
         if xldata.offnumLeaf != xldata.offnumHeadLeaf {
-            add_or_replace_tuple(&mut pm, &leaf_tuple[..leaf_size], xldata.offnumLeaf);
+            add_or_replace_tuple(&mut pm, &leaf_tuple[..leaf_size], xldata.offnumLeaf)?;
             if xldata.offnumHeadLeaf != InvalidOffsetNumber {
                 let new_next = leaf_next_offset(leaf_tuple);
                 let head = item_slice_mut(&mut pm, xldata.offnumHeadLeaf);
@@ -196,7 +210,7 @@ fn spgRedoAddLeaf(record: &XLogReaderState) -> PgResult<()> {
             if pm.add_item(&leaf_tuple[..leaf_size], xldata.offnumLeaf, 0)
                 != Some(xldata.offnumLeaf)
             {
-                panic!("failed to add item of size {leaf_size} to SPGiST index page");
+                return Err(add_item_failed(leaf_size));
             }
         }
 
@@ -257,7 +271,7 @@ fn spgRedoMoveLeafs(record: &XLogReaderState) -> PgResult<()> {
         for &off in to_insert.iter() {
             let lt = &md[p..];
             let sz = checked_leaf_size(lt)?;
-            add_or_replace_tuple(&mut pm, &lt[..sz], off);
+            add_or_replace_tuple(&mut pm, &lt[..sz], off)?;
             p += sz;
         }
         pm.set_lsn(lsn);
@@ -320,7 +334,7 @@ fn spgRedoAddNode(record: &XLogReaderState) -> PgResult<()> {
             pm.index_tuple_delete(xldata.offnum);
             if pm.add_item(&inner_tuple[..inner_size], xldata.offnum, 0) != Some(xldata.offnum)
             {
-                panic!("failed to add item of size {inner_size} to SPGiST index page");
+                return Err(add_item_failed(inner_size));
             }
             pm.set_lsn(lsn);
             bufmgr_seams::mark_buffer_dirty::call(buffer)?;
@@ -343,7 +357,7 @@ fn spgRedoAddNode(record: &XLogReaderState) -> PgResult<()> {
         if action == BLK_NEEDS_REDO {
             // SAFETY: redo pin+lock contract.
             let mut pm = unsafe { page_mut(buffer) };
-            add_or_replace_tuple(&mut pm, &inner_tuple[..inner_size], xldata.offnumNew);
+            add_or_replace_tuple(&mut pm, &inner_tuple[..inner_size], xldata.offnumNew)?;
             if xldata.parentBlk == 1 {
                 let parent = item_slice_mut(&mut pm, xldata.offnumParent);
                 spgUpdateNodeLink(parent, xldata.nodeI as i32, blkno_new, xldata.offnumNew);
@@ -377,7 +391,7 @@ fn spgRedoAddNode(record: &XLogReaderState) -> PgResult<()> {
             };
             pm.index_tuple_delete(xldata.offnum);
             if pm.add_item(&dt, xldata.offnum, 0) != Some(xldata.offnum) {
-                panic!("failed to add item of size {SGDTSIZE} to SPGiST index page");
+                return Err(add_item_failed(SGDTSIZE));
             }
             if xldata.stateSrc.isBuild {
                 page_opaque_update(&mut pm, |op| op.nPlaceholder += 1);
@@ -435,7 +449,7 @@ fn spgRedoSplitTuple(record: &XLogReaderState) -> PgResult<()> {
         if action == BLK_NEEDS_REDO {
             // SAFETY: redo pin+lock contract.
             let mut pm = unsafe { page_mut(buffer) };
-            add_or_replace_tuple(&mut pm, &postfix_tuple[..postfix_size], xldata.offnumPostfix);
+            add_or_replace_tuple(&mut pm, &postfix_tuple[..postfix_size], xldata.offnumPostfix)?;
             pm.set_lsn(lsn);
             bufmgr_seams::mark_buffer_dirty::call(buffer)?;
         }
@@ -453,10 +467,10 @@ fn spgRedoSplitTuple(record: &XLogReaderState) -> PgResult<()> {
         if pm.add_item(&prefix_tuple[..prefix_size], xldata.offnumPrefix, 0)
             != Some(xldata.offnumPrefix)
         {
-            panic!("failed to add item of size {prefix_size} to SPGiST index page");
+            return Err(add_item_failed(prefix_size));
         }
         if xldata.postfixBlkSame {
-            add_or_replace_tuple(&mut pm, &postfix_tuple[..postfix_size], xldata.offnumPostfix);
+            add_or_replace_tuple(&mut pm, &postfix_tuple[..postfix_size], xldata.offnumPostfix)?;
         }
         pm.set_lsn(lsn);
         bufmgr_seams::mark_buffer_dirty::call(buffer)?;
@@ -572,7 +586,7 @@ fn spgRedoPickSplit(record: &XLogReaderState) -> PgResult<()> {
         }
         // SAFETY: redo pin+lock contract.
         let mut pm = unsafe { page_mut(buffer) };
-        add_or_replace_tuple(&mut pm, &lt[..sz], to_insert[i]);
+        add_or_replace_tuple(&mut pm, &lt[..sz], to_insert[i])?;
     }
 
     if src_needs_redo && src_buffer != InvalidBuffer {
@@ -600,7 +614,7 @@ fn spgRedoPickSplit(record: &XLogReaderState) -> PgResult<()> {
     if action == BLK_NEEDS_REDO {
         // SAFETY: redo pin+lock contract.
         let mut pm = unsafe { page_mut(inner_buffer) };
-        add_or_replace_tuple(&mut pm, &inner_tuple[..inner_size], xldata.offnumInner);
+        add_or_replace_tuple(&mut pm, &inner_tuple[..inner_size], xldata.offnumInner)?;
         if xldata.innerIsParent {
             let parent = item_slice_mut(&mut pm, xldata.offnumParent);
             spgUpdateNodeLink(parent, xldata.nodeI as i32, blkno_inner, xldata.offnumInner);
@@ -807,7 +821,11 @@ pub fn spg_redo(record: &mut XLogReaderState) -> PgResult<()> {
         XLOG_SPGIST_VACUUM_LEAF => spgRedoVacuumLeaf(record),
         XLOG_SPGIST_VACUUM_ROOT => spgRedoVacuumRoot(record),
         XLOG_SPGIST_VACUUM_REDIRECT => spgRedoVacuumRedirect(record),
-        other => panic!("spg_redo: unknown op code {other}"),
+        // C (spgxlog.c:968): elog(PANIC, "spg_redo: unknown op code %u", info).
+        other => Err(Box::new(PgError::new(
+            types_error::PANIC,
+            format!("spg_redo: unknown op code {other}"),
+        ))),
     }
 }
 
@@ -874,5 +892,47 @@ mod tests {
         let e = checked_inner_size(&big).unwrap_err();
         assert_eq!(e.sqlstate(), ERRCODE_DATA_CORRUPTED);
     }
-}
+    // spgxlog.c:968: an unrecognised opcode is elog(PANIC, "spg_redo: unknown
+    // op code %u", info) — a PANIC-level PgError the recovery loop escalates
+    // (the info byte is xl_info & ~XLR_INFO_MASK, so 0x90 prints 144) — never
+    // a Rust panic unwinding the startup thread (audit row spgxlog-e7d10a21).
+    #[test]
+    fn spg_redo_unknown_opcode_is_a_panic_level_error() {
+        let mut rec = xlogreader_seams::DecodedXLogRecord::default();
+        rec.xl_info = 0x90;
+        let mut record = XLogReaderState { record: Some(rec), ..Default::default() };
+        let err = spg_redo(&mut record).expect_err("unknown spgist opcode must not redo silently");
+        assert_eq!(err.message(), "spg_redo: unknown op code 144");
+        assert_eq!(err.level(), types_error::PANIC);
+    }
 
+    #[repr(align(8))]
+    struct PageBuf([u8; ::types_core::BLCKSZ]);
+
+    // spgxlog.c:58 addOrReplaceTuple: replacing a tuple that is not a
+    // placeholder is elog(ERROR, "SPGiST tuple to be replaced is not a
+    // placeholder") — a catchable error reaching the redo caller as Err, never
+    // a panic (audit row spgxlog-8fc9d3b1). The page is an in-memory SP-GiST
+    // leaf page holding one LIVE 16-byte leaf tuple at offset 1.
+    #[test]
+    fn add_or_replace_tuple_non_placeholder_errors_not_panics() {
+        let mut buf = Box::new(PageBuf([0u8; ::types_core::BLCKSZ]));
+        // SAFETY: exclusively owned, page-aligned BLCKSZ buffer living for the test.
+        let mut pm = unsafe {
+            PageMut::from_raw(core::ptr::NonNull::new(buf.0.as_mut_ptr()).unwrap())
+        };
+        types_spgist::SpGistInitPage(&mut pm, SPGIST_LEAF);
+        let mut live = [0u8; 16];
+        live[0..4].copy_from_slice(&(16u32 << 2).to_ne_bytes()); // tupstate LIVE, size 16
+        assert_eq!(pm.add_item(&live, 1, 0), Some(1));
+        assert_eq!(tuple_state(item_slice(&pm, 1)), SPGIST_LIVE);
+
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            add_or_replace_tuple(&mut pm, &live, 1)
+        }));
+        let r = outcome.expect("addOrReplaceTuple must not panic on a non-placeholder");
+        let e = r.expect_err("replacing a LIVE tuple must be the C elog(ERROR)");
+        assert_eq!(e.message(), "SPGiST tuple to be replaced is not a placeholder");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    }
+}
