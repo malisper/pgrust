@@ -225,7 +225,13 @@ fn check_timezone_value(value: &str, log_only: bool) -> PgResult<Option<&'static
             }
             return Ok(new_tz);
         }
-        if let Ok(hours) = value.parse::<f64>() {
+        // Try it as a numeric number of hours (possibly fractional):
+        // strtod(*newval, &endptr) with endptr != *newval && *endptr == '\0'
+        // (variable.c:329) — leading isspace() bytes skipped, hex floats and
+        // inf/nan words accepted, and the whole string must be consumed.
+        let scan = guc::cnum::c_strtod(value.as_bytes());
+        if scan.consumed != 0 && scan.consumed == value.len() {
+            let hours = scan.value;
             let gmtoffset = (-hours * SECS_PER_HOUR as f64) as i64;
             let new_tz = tz::pg_tzset_offset(gmtoffset);
             if new_tz.is_none() {
@@ -635,43 +641,15 @@ pub fn show_role() -> String {
     vars::role_string.read().unwrap_or_else(|| "none".to_string())
 }
 
-// canonicalize_path (port/path.c, Unix arms), inlined until the port unit lands.
-pub fn canonicalize_path(path: &str) -> String {
-    let absolute = path.starts_with('/');
-    let mut parts: Vec<&str> = Vec::new();
-    for comp in path.split('/') {
-        match comp {
-            "" | "." => {}
-            ".." => {
-                if let Some(last) = parts.last() {
-                    if *last != ".." {
-                        parts.pop();
-                        continue;
-                    }
-                }
-                if !absolute {
-                    parts.push("..");
-                }
-            }
-            c => parts.push(c),
-        }
-    }
-    let body = parts.join("/");
-    match (absolute, body.is_empty()) {
-        (true, true) => "/".to_string(),
-        (true, false) => format!("/{body}"),
-        (false, true) => ".".to_string(),
-        (false, false) => body,
-    }
-}
-
 pub fn check_canonical_path(
     newval: &mut Option<String>,
     _extra: &mut Option<GucHookExtra>,
     _source: GucSource,
 ) -> PgResult<bool> {
+    // canonicalize_path (port/path.c) never enlarges the string; an empty
+    // path is returned as-is (path.c:414). NULL is external_pid_file's default.
     if let Some(val) = newval.as_deref() {
-        *newval = Some(canonicalize_path(val));
+        *newval = Some(pg_path::canonicalize_path(val));
     }
     Ok(true)
 }

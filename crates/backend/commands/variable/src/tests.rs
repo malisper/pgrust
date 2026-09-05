@@ -222,14 +222,22 @@ fn session_authorization_null_and_no_transaction() {
 
 #[test]
 fn canonicalize_path_matches_path_c() {
-    assert_eq!(canonicalize_path("/a//b/./c/.."), "/a/b");
-    assert_eq!(canonicalize_path("/../.."), "/");
-    assert_eq!(canonicalize_path("../.."), "../..");
-    assert_eq!(canonicalize_path("../dir/.."), "..");
-    assert_eq!(canonicalize_path("a/.."), ".");
-    assert_eq!(canonicalize_path("/a/b///"), "/a/b");
-    assert_eq!(canonicalize_path("/"), "/");
-    assert_eq!(canonicalize_path("log"), "log");
+    // The hook delegates to the port unit; these pins stay as a hook-level
+    // witness of path.c's state machine.
+    for (input, expect) in [
+        ("/a//b/./c/..", "/a/b"),
+        ("/../..", "/"),
+        ("../..", "../.."),
+        ("../dir/..", ".."),
+        ("a/..", "."),
+        ("/a/b///", "/a/b"),
+        ("/", "/"),
+        ("log", "log"),
+    ] {
+        let mut val = Some(input.to_string());
+        assert!(check_canonical_path(&mut val, &mut None, PGC_S_SESSION).unwrap());
+        assert_eq!(val.as_deref(), Some(expect), "input {input:?}");
+    }
 }
 
 #[test]
@@ -317,4 +325,63 @@ fn login_settings_apply_datestyle_default_and_only_warn_on_garbage() {
     assert_eq!(guc::store::get_string("DateStyle").unwrap().as_deref(), Some("German, MDY"));
     apply("DateStyle=bogus").unwrap();
     assert_eq!(guc::store::get_string("DateStyle").unwrap().as_deref(), Some("German, MDY"));
+}
+
+// audit-18.6 b195 (variable.c:329 check_timezone): C parses the numeric-hours
+// arm with strtod(), which skips leading isspace() bytes and accepts hex
+// floats, then requires the WHOLE string to be consumed.
+#[test]
+fn timezone_numeric_hours_follow_strtod() {
+    setup();
+    for (input, expect) in [
+        (" 5", "<+05>-05"),
+        (" +2", "<+02>-02"),
+        ("\t-3.5", "<-03:30>+03:30"),
+        ("0x1", "<+01>-01"),
+        ("1e1", "<+10>-10"),
+        (".5", "<+00:30>-00:30"),
+    ] {
+        let mut val = Some(input.to_string());
+        let mut extra = None;
+        assert!(
+            check_timezone(&mut val, &mut extra, PGC_S_SESSION).unwrap(),
+            "{input:?} must be accepted as numeric hours"
+        );
+        assign_timezone(val.as_deref(), extra.as_ref());
+        assert_eq!(show_timezone(), expect, "input {input:?}");
+    }
+    // Trailing bytes are not numeric (strtod stops early): C falls through to
+    // pg_tzset, which does not know " UTC" either.
+    let mut val = Some(" UTC".to_string());
+    assert!(!check_timezone(&mut val, &mut None, PGC_S_SESSION).unwrap());
+    // "inf" is numeric for strtod: -inf hours saturates to LONG_MIN and
+    // pg_tzset_offset fails ("UTC timezone offset is out of range"), never a
+    // panic.
+    let mut val = Some("inf".to_string());
+    assert!(!check_timezone(&mut val, &mut None, PGC_S_SESSION).unwrap());
+}
+
+// audit-18.6 b195 (variable.c:1067 check_canonical_path -> port/path.c:414):
+// canonicalize_path returns an EMPTY path as-is; only a non-empty path that
+// reduces to nothing becomes ".".
+#[test]
+fn canonical_path_empty_stays_empty() {
+    setup();
+    for (input, expect) in [
+        ("", ""),
+        (".", "."),
+        ("a/..", "."),
+        ("./", "."),
+        ("/a/../b/", "/b"),
+        ("/..", "/"),
+        ("../dir/..", ".."),
+        ("a//b/./c", "a/b/c"),
+    ] {
+        let mut val = Some(input.to_string());
+        assert!(check_canonical_path(&mut val, &mut None, PGC_S_SESSION).unwrap());
+        assert_eq!(val.as_deref(), Some(expect), "input {input:?}");
+    }
+    let mut val = None;
+    assert!(check_canonical_path(&mut val, &mut None, PGC_S_SESSION).unwrap());
+    assert_eq!(val, None);
 }

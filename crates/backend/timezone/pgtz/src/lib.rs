@@ -225,7 +225,11 @@ pub fn pg_tzset(tzname: &[u8]) -> Option<&'static PgTz> {
 /// Fixed-GMT-offset zone: seconds, positive = west of Greenwich (POSIX sign
 /// convention); the displayable abbreviation uses the ISO convention.
 pub fn pg_tzset_offset(gmtoffset: i64) -> Option<&'static PgTz> {
-    let mut absoffset = if gmtoffset < 0 { -gmtoffset } else { gmtoffset };
+    // pgtz.c:322 `absoffset = (gmtoffset < 0) ? -gmtoffset : gmtoffset`:
+    // for LONG_MIN (check_timezone's (long) cast of an infinite/huge hours
+    // value) C's negation wraps and the resulting "<+-...>" name fails
+    // pg_tzset; the outcome is NULL, so return it directly.
+    let mut absoffset = if gmtoffset < 0 { gmtoffset.checked_neg()? } else { gmtoffset };
 
     let mut offsetstr = [0u8; 64];
     let mut olen = 0usize;

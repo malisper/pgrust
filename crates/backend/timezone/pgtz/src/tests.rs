@@ -119,3 +119,13 @@ fn enumerate_walks_the_tree() {
     assert!(saw_ny, "America/New_York must be enumerated");
     assert!(count > 100, "expected a real tz tree, got {count}");
 }
+
+// audit-18.6 b195: check_timezone's numeric arm hands pg_tzset_offset the
+// (long) cast of -hours*3600, which for "inf" is LONG_MIN. C's -LONG_MIN
+// wraps into an unparsable "<+-...>" name and pg_tzset returns NULL; the
+// port must fail the same way instead of panicking on the negation.
+#[test]
+fn tzset_offset_long_min_fails_without_panic() {
+    setup();
+    assert!(pg_tzset_offset(i64::MIN).is_none());
+}
