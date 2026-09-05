@@ -752,14 +752,27 @@ fn wal_read_reports_wal_read_wait_event() {
     // wait_event.h PG_WAIT_IO class, WalRead id (waitevent crate IO name table).
     const PG_WAIT_IO: u32 = 0x0A00_0000;
     const WAIT_EVENT_WAL_READ: u32 = PG_WAIT_IO | 75;
-    static STARTS: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
-    static ENDS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    // The seams are process-global (set-once) and the sibling WALRead tests in
+    // this binary (wal_read_preads_across_segments,
+    // wal_read_failed_pread_is_not_counted) pread concurrently through the
+    // same recorder once it is installed, so every report is keyed by the
+    // reporting thread and only this thread's reports are witnessed.
+    use std::thread::ThreadId;
+    static STARTS: std::sync::Mutex<Vec<(ThreadId, u32)>> = std::sync::Mutex::new(Vec::new());
+    static ENDS: std::sync::Mutex<Vec<ThreadId>> = std::sync::Mutex::new(Vec::new());
     if !waitevent_seams::pgstat_report_wait_start::is_installed() {
-        waitevent_seams::pgstat_report_wait_start::set(|info| STARTS.lock().unwrap().push(info));
+        waitevent_seams::pgstat_report_wait_start::set(|info| {
+            STARTS.lock().unwrap().push((std::thread::current().id(), info))
+        });
         waitevent_seams::pgstat_report_wait_end::set(|| {
-            ENDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            ENDS.lock().unwrap().push(std::thread::current().id());
         });
     }
+    let me = std::thread::current().id();
+    let my_starts = || -> Vec<u32> {
+        STARTS.lock().unwrap().iter().filter(|(t, _)| *t == me).map(|(_, i)| *i).collect()
+    };
+    let my_ends = || ENDS.lock().unwrap().iter().filter(|t| **t == me).count();
 
     let mut w = WalSim::new();
     w.append(0, 0x10, 1, &main_data_body(b"payload"));
@@ -797,18 +810,17 @@ fn wal_read_reports_wal_read_wait_event() {
         ..Default::default()
     };
     let mut out = vec![0u8; 4096];
-    STARTS.lock().unwrap().clear();
-    let ends_before = ENDS.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(my_starts().is_empty());
+    let ends_before = my_ends();
     let res = WALRead(&mut v, &mut FileSegs { path: seg_path }, &mut out, w.base + 100, 4096, 1)
         .unwrap();
     assert!(res.is_ok());
-    let starts = STARTS.lock().unwrap().clone();
     assert_eq!(
-        starts,
+        my_starts(),
         vec![WAIT_EVENT_WAL_READ],
         "WALRead must report exactly one WAIT_EVENT_WAL_READ around its pread"
     );
-    assert_eq!(ENDS.load(std::sync::atomic::Ordering::Relaxed), ends_before + 1);
+    assert_eq!(my_ends(), ends_before + 1);
     unsafe { libc::close(v.seg.ws_file) };
     std::fs::remove_dir_all(&dir).ok();
 }
