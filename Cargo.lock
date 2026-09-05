@@ -4725,6 +4725,7 @@ dependencies = [
  "types_core",
  "types_error",
  "vfs",
+ "waitevent_seams",
 ]
 
 [[package]]

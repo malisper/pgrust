@@ -11,6 +11,7 @@ use core::mem::{offset_of, size_of, size_of_val};
 
 use crc32c::{fin_crc32c, pg_comp_crc32c, CRC32C_INIT};
 use elog::ereport;
+use elog::errno::strerror;
 use types_core::{
     pg_time_t, FullTransactionId, MultiXactId, MultiXactOffset, Oid, TimeLineID, TransactionId,
     XLogRecPtr,
@@ -427,6 +428,30 @@ fn c_path(path: &str) -> std::ffi::CString {
     std::ffi::CString::new(path.as_bytes()).unwrap_or_else(|_| std::ffi::CString::new("").unwrap())
 }
 
+// wait_event_names.txt IO section (waitevent's WAIT_EVENT_IO_NAMES order):
+// ControlFileSyncUpdate = 11, ControlFileWriteUpdate = 13 under PG_WAIT_IO.
+const PG_WAIT_IO: u32 = 0x0A00_0000;
+const WAIT_EVENT_CONTROL_FILE_SYNC_UPDATE: u32 = PG_WAIT_IO | 11;
+const WAIT_EVENT_CONTROL_FILE_WRITE_UPDATE: u32 = PG_WAIT_IO | 13;
+
+/// controldata_utils.c `#ifndef FRONTEND` pgstat_report_wait_start: the
+/// backend installs the wait seams at boot (seams_init); a process that
+/// never installs them (frontend bins, plain crate tests) IS C's FRONTEND
+/// build, where the calls are compiled out.
+#[inline]
+fn wait_start(wait_event_info: u32) {
+    if waitevent_seams::pgstat_report_wait_start::is_installed() {
+        waitevent_seams::pgstat_report_wait_start::call(wait_event_info);
+    }
+}
+
+#[inline]
+fn wait_end() {
+    if waitevent_seams::pgstat_report_wait_end::is_installed() {
+        waitevent_seams::pgstat_report_wait_end::call();
+    }
+}
+
 /// get_controlfile(DataDir, &crc_ok): the CRC verdict is returned, not raised.
 pub fn get_controlfile(datadir: &str) -> PgResult<(ControlFileData, bool)> {
     get_controlfile_by_exact_path(&format!("{datadir}/{XLOG_CONTROL_FILE}"))
@@ -438,7 +463,7 @@ pub fn get_controlfile_by_exact_path(path: &str) -> PgResult<(ControlFileData, b
     let cpath = c_path(path);
     let fd = vfs::open(&cpath, libc::O_RDONLY, 0);
     if fd < 0 {
-        let e = std::io::Error::from_raw_os_error(vfs::get_errno());
+        let e = strerror(vfs::get_errno());
         ereport(ERROR)
             .errcode_for_file_access()
             .errmsg(format!("could not open file \"{path}\" for reading: {e}"))
@@ -458,7 +483,7 @@ pub fn get_controlfile_by_exact_path(path: &str) -> PgResult<(ControlFileData, b
             if en == libc::EINTR {
                 continue;
             }
-            let e = std::io::Error::from_raw_os_error(en);
+            let e = strerror(en);
             vfs::close(fd);
             ereport(ERROR)
                 .errcode_for_file_access()
@@ -468,13 +493,22 @@ pub fn get_controlfile_by_exact_path(path: &str) -> PgResult<(ControlFileData, b
         }
         r += n as usize;
     }
-    vfs::close(fd);
     if r != SIZEOF_CONTROL_FILE_DATA {
+        vfs::close(fd);
         ereport(ERROR)
             .errcode(ERRCODE_DATA_CORRUPTED)
             .errmsg(format!(
                 "could not read file \"{path}\": read {r} of {SIZEOF_CONTROL_FILE_DATA}"
             ))
+            .finish(loc(F))?;
+        unreachable!()
+    }
+    // controldata_utils.c:125: CloseTransientFile(fd) != 0 is an ERROR.
+    if vfs::close(fd) != 0 {
+        let e = strerror(vfs::get_errno());
+        ereport(ERROR)
+            .errcode_for_file_access()
+            .errmsg(format!("could not close file \"{path}\": {e}"))
             .finish(loc(F))?;
         unreachable!()
     }
@@ -517,7 +551,7 @@ pub fn update_controlfile(
     let cpath = c_path(&path);
     let fd = vfs::open(&cpath, libc::O_RDWR, 0);
     if fd < 0 {
-        let e = std::io::Error::from_raw_os_error(vfs::get_errno());
+        let e = strerror(vfs::get_errno());
         return ereport(PANIC)
             .errcode_for_file_access()
             .errmsg(format!("could not open file \"{path}\": {e}"))
@@ -527,6 +561,7 @@ pub fn update_controlfile(
     // Single pwrite of the whole PG_CONTROL_FILE_SIZE image at offset 0 —
     // the 512 B sector-atomicity floor (PG_CONTROL_MAX_SAFE_SIZE) rides one
     // syscall, as before.
+    wait_start(WAIT_EVENT_CONTROL_FILE_WRITE_UPDATE);
     let mut written = 0usize;
     while written < buffer.len() {
         let w = vfs::pwrite(fd, &buffer[written..], written as libc::off_t);
@@ -535,7 +570,7 @@ pub fn update_controlfile(
             if en == libc::EINTR {
                 continue;
             }
-            let e = std::io::Error::from_raw_os_error(en);
+            let e = strerror(en);
             vfs::close(fd);
             return ereport(PANIC)
                 .errcode_for_file_access()
@@ -544,16 +579,29 @@ pub fn update_controlfile(
         }
         written += w as usize;
     }
+    wait_end();
 
-    if do_sync && vfs::fsync(fd) != 0 {
-        let e = std::io::Error::from_raw_os_error(vfs::get_errno());
-        vfs::close(fd);
+    if do_sync {
+        wait_start(WAIT_EVENT_CONTROL_FILE_SYNC_UPDATE);
+        if vfs::fsync(fd) != 0 {
+            let e = strerror(vfs::get_errno());
+            vfs::close(fd);
+            return ereport(PANIC)
+                .errcode_for_file_access()
+                .errmsg(format!("could not fsync file \"{path}\": {e}"))
+                .finish(loc(F));
+        }
+        wait_end();
+    }
+
+    // controldata_utils.c:272: close(fd) != 0 is a PANIC.
+    if vfs::close(fd) != 0 {
+        let e = strerror(vfs::get_errno());
         return ereport(PANIC)
             .errcode_for_file_access()
-            .errmsg(format!("could not fsync file \"{path}\": {e}"))
+            .errmsg(format!("could not close file \"{path}\": {e}"))
             .finish(loc(F));
     }
-    vfs::close(fd);
 
     Ok(())
 }

@@ -90,8 +90,78 @@ fn short_file_is_data_corrupted_error() {
 
 #[test]
 fn missing_file_is_open_error() {
+    // controldata_utils.c:91 — `could not open file "%s" for reading: %m`;
+    // %m is strerror(errno), never std's `(os error N)` suffix.
     let err = get_controlfile_by_exact_path("/nonexistent/pg_control").unwrap_err();
-    assert!(format!("{err:?}").contains("could not open file"));
+    assert_eq!(
+        err.message(),
+        format!(
+            "could not open file \"/nonexistent/pg_control\" for reading: {}",
+            elog::errno::strerror(libc::ENOENT)
+        )
+    );
+    assert!(!err.message().contains("os error"), "{}", err.message());
+}
+
+// --- wait-event witness (controldata_utils.c:235/250 backend arm) ----------
+// pgstat_report_wait_start(WAIT_EVENT_CONTROL_FILE_WRITE_UPDATE) brackets the
+// write, pgstat_report_wait_start(WAIT_EVENT_CONTROL_FILE_SYNC_UPDATE) the
+// fsync, each closed by pgstat_report_wait_end(). The wait seams are
+// installed ONCE per test process with a recorder keyed by thread id (tests
+// run concurrently; each asserts only its own thread's trace).
+
+const PG_WAIT_IO: u32 = 0x0A00_0000;
+// wait_event_names.txt IO section order (waitevent's WAIT_EVENT_IO_NAMES):
+// ControlFileSyncUpdate = 11, ControlFileWriteUpdate = 13.
+const WAIT_EVENT_CONTROL_FILE_SYNC_UPDATE: u32 = PG_WAIT_IO | 11;
+const WAIT_EVENT_CONTROL_FILE_WRITE_UPDATE: u32 = PG_WAIT_IO | 13;
+
+static WAIT_TRACE: std::sync::Mutex<Vec<(std::thread::ThreadId, u32)>> =
+    std::sync::Mutex::new(Vec::new());
+static WAIT_SEAMS: std::sync::Once = std::sync::Once::new();
+
+fn record_wait_start(info: u32) {
+    WAIT_TRACE.lock().unwrap().push((std::thread::current().id(), info));
+}
+
+fn record_wait_end() {
+    record_wait_start(0);
+}
+
+fn install_wait_recorder() {
+    WAIT_SEAMS.call_once(|| {
+        waitevent_seams::pgstat_report_wait_start::set(record_wait_start);
+        waitevent_seams::pgstat_report_wait_end::set(record_wait_end);
+    });
+}
+
+fn my_wait_trace() -> Vec<u32> {
+    let me = std::thread::current().id();
+    WAIT_TRACE.lock().unwrap().iter().filter(|(t, _)| *t == me).map(|(_, e)| *e).collect()
+}
+
+#[test]
+fn update_controlfile_reports_control_file_wait_events() {
+    install_wait_recorder();
+    let dir = std::env::temp_dir().join(format!("cdu_wait_{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("global")).unwrap();
+    std::fs::write(dir.join("global/pg_control"), fixture_bytes()).unwrap();
+    let datadir = dir.to_str().unwrap();
+    let (mut cf, _) = get_controlfile(datadir).unwrap();
+
+    // do_sync = true: write span, then sync span.
+    update_controlfile(datadir, &mut cf, true).unwrap();
+    assert_eq!(
+        my_wait_trace(),
+        vec![WAIT_EVENT_CONTROL_FILE_WRITE_UPDATE, 0, WAIT_EVENT_CONTROL_FILE_SYNC_UPDATE, 0]
+    );
+
+    // do_sync = false: the sync span is skipped (C: inside `if (do_sync)`).
+    WAIT_TRACE.lock().unwrap().retain(|(t, _)| *t != std::thread::current().id());
+    update_controlfile(datadir, &mut cf, false).unwrap();
+    assert_eq!(my_wait_trace(), vec![WAIT_EVENT_CONTROL_FILE_WRITE_UPDATE, 0]);
+
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]

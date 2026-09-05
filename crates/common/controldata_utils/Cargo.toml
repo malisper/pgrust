@@ -18,3 +18,12 @@ crc32c = { path = "../../port/crc32c" }
 elog = { path = "../../backend/utils/error/elog" }
 types_core = { path = "../../_support/types/types_core" }
 types_error = { path = "../../_support/types/types_error" }
+# controldata_utils.c:235/250 `#ifndef FRONTEND` pgstat_report_wait_* arm:
+# the wait seams (seam_core only — no backend cone); a process that never
+# installs them (frontend bins, plain crate tests) is C's FRONTEND build.
+waitevent_seams = { path = "../../backend/utils/activity/waitevent_seams" }
+
+# `pgrust_sim` (non-default cfg, set only by the sim harness RUSTFLAGS): the
+# close-fault witness tests/sim_close_fault.rs lives behind it.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(pgrust_sim)'] }
