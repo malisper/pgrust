@@ -836,7 +836,14 @@ pub fn AtEOXact_Snapshot(is_commit: bool, reset_xmin: bool) -> PgResult<()> {
         }
 
         let leftover_registered = is_commit && !s.registered.is_empty();
-        let leftover_active = if is_commit { s.active.len() } else { 0 };
+        // snapmgr.c:1078-1079: C prints each unpopped ActiveSnapshotElt's
+        // address (%p); the element addresses are taken before the stack is
+        // reset, exactly where C walks it.
+        let leftover_active: Vec<usize> = if is_commit {
+            s.active.iter().map(|elt| elt as *const ActiveSnapshotElt as usize).collect()
+        } else {
+            Vec::new()
+        };
 
         s.active.clear();
         s.registered.clear();
@@ -854,9 +861,11 @@ pub fn AtEOXact_Snapshot(is_commit: bool, reset_xmin: bool) -> PgResult<()> {
             .errmsg_internal("registered snapshots seem to remain after cleanup")
             .finish(loc("AtEOXact_Snapshot"))?;
     }
-    for _ in 0..leftover_active {
+    for active in leftover_active {
+        // elog(WARNING, "snapshot %p still active", active) — glibc's %p is
+        // "0x" + lowercase hex, which is Rust's {:#x} of the address.
         ereport(WARNING)
-            .errmsg_internal("snapshot still active")
+            .errmsg_internal(format!("snapshot {active:#x} still active"))
             .finish(loc("AtEOXact_Snapshot"))?;
     }
 
@@ -1052,10 +1061,13 @@ pub fn DeleteAllExportedSnapshotFiles() {
         match fd::ReadDirExtended(s_dir, SNAPSHOT_EXPORT_DIR, types_error::LOG) {
             Ok(Some(de)) => {
                 let buf = format!("{SNAPSHOT_EXPORT_DIR}/{}", de.d_name);
+                // snapmgr.c:1606-1609: ereport(LOG, (errcode_for_file_access(),
+                // errmsg("could not remove file \"%s\": %m", buf))).
                 if fd::pg_unlink(&buf) < 0 {
                     let _ = ereport(types_error::LOG)
                         .with_saved_errno(fd::get_errno())
-                        .errmsg(format!("could not unlink file \"{buf}\": %m"))
+                        .errcode_for_file_access()
+                        .errmsg(format!("could not remove file \"{buf}\": %m"))
                         .finish(loc("DeleteAllExportedSnapshotFiles"));
                 }
             }
@@ -1140,9 +1152,10 @@ pub fn ImportSnapshot(idstr: &str) -> PgResult<()> {
         let n = fd::pg_pread(snapfd, &mut chunk, off);
         if n < 0 {
             fd::CloseTransientFile(snapfd);
+            // snapmgr.c:1459: elog(ERROR, "could not read file \"%s\": %m",
+            // path) — an elog, so SQLSTATE XX000 (no errcode_for_file_access).
             return Err(ereport(ERROR)
                 .with_saved_errno(fd::get_errno())
-                .errcode_for_file_access()
                 .errmsg(format!("could not read file \"{path}\": %m"))
                 .into_error()
                 .with_error_location(loc("ImportSnapshot"))

@@ -3,7 +3,9 @@ use init_small::globals as g;
 use std::sync::{Mutex, Once};
 use types_core::{BackendType, ProcNumber};
 
-const MAX_CONNECTIONS: i32 = 16;
+// One backend PGPROC per test thread (my_backend never releases it): keep a
+// margin over the number of tests in this file.
+const MAX_CONNECTIONS: i32 = 32;
 const MAX_WORKER_PROCESSES: i32 = 2;
 const NUM_SPECIAL: i32 = 2;
 const MAX_BACKENDS: i32 = MAX_CONNECTIONS + 3 + MAX_WORKER_PROCESSES + 2 + NUM_SPECIAL;
@@ -562,4 +564,121 @@ fn import_snapshot_missing_file_is_fd_routed() {
         "unexpected ImportSnapshot error: {}",
         err.message
     );
+}
+
+// ---------------------------------------------------------------------------
+// audit-18.6 remediation b212 (fp-time-snapmgr): C-exact error channels.
+// ---------------------------------------------------------------------------
+
+static EMITTED: Mutex<Vec<(types_error::ErrorLevel, types_error::SqlState, String)>> =
+    Mutex::new(Vec::new());
+
+fn capture_hook(error: &types_error::PgError, _output_to_server: &mut bool) {
+    EMITTED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push((error.level, error.sqlstate, error.message.clone()));
+}
+
+fn captured(f: impl FnOnce()) -> Vec<(types_error::ErrorLevel, types_error::SqlState, String)> {
+    EMITTED.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
+    let previous = elog::set_emit_log_hook(Some(capture_hook));
+    f();
+    elog::set_emit_log_hook(previous);
+    std::mem::take(&mut *EMITTED.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+}
+
+// snapmgr.c:1459: a read failure on an existing snapshot file is
+// elog(ERROR, "could not read file \"%s\": %m", path) — SQLSTATE XX000, not
+// errcode_for_file_access(). A directory named like a snapshot id opens
+// O_RDONLY and fails the read with EISDIR on every platform.
+#[test]
+fn import_snapshot_read_failure_is_internal_error_sqlstate() {
+    let _g = test_lock();
+    my_backend();
+    let root = scratch_dir("snapimportdir");
+    let _cwd = enter_dir(&root);
+    vfs_mkdir("pg_snapshots");
+    vfs_mkdir("pg_snapshots/00000003-00000002-1");
+    end_xact();
+
+    ISO_USES_XACT_SNAPSHOT.set(true);
+    let err = ImportSnapshot("00000003-00000002-1").unwrap_err();
+    ISO_USES_XACT_SNAPSHOT.set(false);
+    assert!(
+        err.message.starts_with("could not read file \"pg_snapshots/00000003-00000002-1\": "),
+        "unexpected ImportSnapshot error: {}",
+        err.message
+    );
+    assert_eq!(
+        err.sqlstate,
+        types_error::ERRCODE_INTERNAL_ERROR,
+        "C reports the read failure with elog(ERROR) => XX000, got {}",
+        err.message
+    );
+}
+
+// snapmgr.c:1078-1079: every ActiveSnapshotElt left on the stack at commit is
+// elog(WARNING, "snapshot %p still active", active) — the element address in
+// the message.
+#[test]
+fn eoxact_commit_warns_with_the_leftover_active_snapshot_address() {
+    let _g = test_lock();
+    my_backend();
+
+    let snap = GetTransactionSnapshot().unwrap();
+    PushActiveSnapshot(&snap).unwrap();
+    PushActiveSnapshot(&snap).unwrap();
+    drop(snap);
+
+    let seen = captured(end_xact);
+    let warnings: Vec<&String> = seen
+        .iter()
+        .filter(|(level, _, msg)| *level == WARNING && msg.ends_with("still active"))
+        .map(|(_, _, msg)| msg)
+        .collect();
+    assert_eq!(warnings.len(), 2, "one WARNING per unpopped active snapshot: {seen:?}");
+    for msg in warnings {
+        let addr = msg
+            .strip_prefix("snapshot 0x")
+            .and_then(|rest| rest.strip_suffix(" still active"))
+            .unwrap_or_else(|| panic!("C prints \"snapshot %p still active\", got {msg:?}"));
+        assert!(
+            !addr.is_empty() && addr.bytes().all(|b| b.is_ascii_hexdigit()),
+            "%p renders as 0x + lowercase hex, got {msg:?}"
+        );
+        assert_eq!(addr, addr.to_ascii_lowercase(), "%p is lowercase hex: {msg:?}");
+    }
+    assert!(!ActiveSnapshotSet());
+}
+
+// snapmgr.c:1606-1609: an entry of pg_snapshots/ that cannot be unlinked at
+// crash-recovery cleanup is ereport(LOG, (errcode_for_file_access(),
+// errmsg("could not remove file \"%s\": %m", buf))). A non-empty directory
+// is never unlinkable (EISDIR on Linux, EPERM on macOS).
+#[test]
+fn delete_all_exported_snapshot_files_logs_could_not_remove() {
+    let _g = test_lock();
+    my_backend();
+    let root = scratch_dir("snapcleanup");
+    let _cwd = enter_dir(&root);
+    vfs_mkdir("pg_snapshots");
+    vfs_mkdir("pg_snapshots/AAAA-junkdir");
+    vfs_mkdir("pg_snapshots/AAAA-junkdir/keep");
+
+    let seen = captured(DeleteAllExportedSnapshotFiles);
+    let logs: Vec<_> = seen.iter().filter(|(level, _, _)| *level == types_error::LOG).collect();
+    assert_eq!(logs.len(), 1, "exactly one LOG line for the one entry: {seen:?}");
+    let (_, sqlstate, msg) = logs[0];
+    assert!(
+        msg.starts_with("could not remove file \"pg_snapshots/AAAA-junkdir\": "),
+        "C says \"could not remove file\", got {msg:?}"
+    );
+    assert!(
+        *sqlstate == types_error::ERRCODE_WRONG_OBJECT_TYPE
+            || *sqlstate == types_error::ERRCODE_INSUFFICIENT_PRIVILEGE,
+        "errcode_for_file_access() of EISDIR/EPERM, got {sqlstate:?}"
+    );
+    // The entry survives (nothing else was touched).
+    assert!(vfs::open(&cpath("pg_snapshots/AAAA-junkdir/keep"), libc::O_RDONLY, 0) >= 0);
 }
