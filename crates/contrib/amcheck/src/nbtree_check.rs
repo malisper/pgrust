@@ -18,8 +18,9 @@ use ::types_core::{
     XLogRecPtr, BLCKSZ, BTREE_AM_OID, INDEX_MAX_KEYS,
 };
 use ::types_error::{
-    PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_FEATURE_NOT_SUPPORTED,
-    ERRCODE_INDEX_CORRUPTED, ERRCODE_T_R_SERIALIZATION_FAILURE,
+    PgError, PgResult, DEBUG1, ERRCODE_DATA_CORRUPTED, ERRCODE_FEATURE_NOT_SUPPORTED,
+    ERRCODE_INDEX_CORRUPTED, ERRCODE_INTERNAL_ERROR, ERRCODE_NO_DATA,
+    ERRCODE_T_R_SERIALIZATION_FAILURE,
 };
 use ::types_rel::Relation;
 use ::types_storage::buf::{BufferAccessStrategy, BufferAccessStrategyType};
@@ -291,6 +292,22 @@ fn bt_check_every_level<'mcx>(
     rootdescend: bool,
     checkunique: bool,
 ) -> PgResult<()> {
+    // verify_nbtree.c:390-395
+    elog_seams::ereport::call(PgError::new(
+        DEBUG1,
+        if !readonly {
+            format!(
+                "verifying consistency of tree structure for index \"{}\"",
+                rel.name()
+            )
+        } else {
+            format!(
+                "verifying consistency of tree structure for index \"{}\" with cross-level checks",
+                rel.name()
+            )
+        },
+    ))?;
+
     let mut state = BtreeCheckState {
         mcx,
         scratch: MemoryContext::new_bump("amcheck context"),
@@ -377,7 +394,23 @@ fn bt_check_every_level<'mcx>(
     let metapage = palloc_btree_page(&state, BTREE_METAPAGE)?;
     let metad = page_meta(&metapage.page());
     drop(metapage);
-    // C divergence: the DEBUG1 "harmless fast root mismatch" report is omitted.
+    // verify_nbtree.c:507-514
+    if metad.btm_fastroot != metad.btm_root {
+        elog_seams::ereport::call(
+            PgError::new(
+                DEBUG1,
+                format!(
+                    "harmless fast root mismatch in index \"{}\"",
+                    state.rel.name()
+                ),
+            )
+            .with_sqlstate(ERRCODE_NO_DATA)
+            .with_detail(format!(
+                "Fast root block {} (level {}) differs from true root block {} (level {}).",
+                metad.btm_fastroot, metad.btm_fastlevel, metad.btm_root, metad.btm_level
+            )),
+        )?;
+    }
 
     let mut previouslevel = INVALID_BTREE_LEVEL;
     let mut current = BtreeLevel {
@@ -412,6 +445,16 @@ fn bt_check_every_level<'mcx>(
         let heaptuplespresent = &mut state.heaptuplespresent;
         let scratch = &mut state.scratch;
 
+        // verify_nbtree.c:586-588
+        elog_seams::ereport::call(PgError::new(
+            DEBUG1,
+            format!(
+                "verifying that tuples from index \"{}\" are present in \"{}\"",
+                rel_alias.name(),
+                heaprel_alias.name()
+            ),
+        ))?;
+
         // C divergence: table_index_build_scan builds its own heap scan and does not read our registered snapshot (acceptable for committed data).
         table_index_build_scan(
             scan_mcx,
@@ -434,7 +477,21 @@ fn bt_check_every_level<'mcx>(
                 )
             },
         )?;
-        // C divergence: the DEBUG1 "finished verifying presence" report is omitted.
+        // verify_nbtree.c:593-596
+        elog_seams::ereport::call(PgError::new(
+            DEBUG1,
+            format!(
+                "finished verifying presence of {} tuples from table \"{}\" with bitset {:.2}% set",
+                state.heaptuplespresent,
+                state.heaprel.name(),
+                100.0
+                    * state
+                        .filter
+                        .as_ref()
+                        .expect("filter set for heapallindexed")
+                        .prop_bits_set()
+            ),
+        ))?;
     }
 
     if let Some(snap) = state.snapshot.as_ref() {
@@ -453,6 +510,22 @@ fn bt_check_level_from_leftmost<'mcx>(
         istruerootlevel: false,
     };
 
+    // verify_nbtree.c:645-647
+    elog_seams::ereport::call(PgError::new(
+        DEBUG1,
+        format!(
+            "verifying level {}{}",
+            level.level,
+            if level.istruerootlevel {
+                " (true root level)"
+            } else if level.level == 0 {
+                " (leaf level)"
+            } else {
+                ""
+            }
+        ),
+    ))?;
+
     let mut leftcurrent: BlockNumber = P_NONE;
     let mut current: BlockNumber = level.leftmost;
 
@@ -460,6 +533,9 @@ fn bt_check_level_from_leftmost<'mcx>(
     state.previncompletesplit = false;
 
     loop {
+        // verify_nbtree.c:654-655: don't rely on CHECK_FOR_INTERRUPTS() calls at lower level
+        postgres_seams::check_for_interrupts::call()?;
+
         state.targetblock = current;
         let page = palloc_btree_page(state, state.targetblock)?;
         state.targetlsn = page.page().lsn();
@@ -489,7 +565,18 @@ fn bt_check_level_from_leftmost<'mcx>(
                     state.rel.name()
                 )));
             }
-            // C divergence: DEBUG1 "concurrently deleted" omitted.
+            // verify_nbtree.c:691-695
+            elog_seams::ereport::call(
+                PgError::new(
+                    DEBUG1,
+                    format!(
+                        "block {} of index \"{}\" concurrently deleted",
+                        current,
+                        state.rel.name()
+                    ),
+                )
+                .with_sqlstate(ERRCODE_NO_DATA),
+            )?;
             skip_middle = true;
         } else if nextleveldown.leftmost == InvalidBlockNumber {
             if state.readonly {
@@ -627,6 +714,9 @@ fn bt_target_page_check(state: &mut BtreeCheckState<'_>) -> PgResult<()> {
     let mut offset = P_FIRSTDATAKEY(&topaque);
     while offset <= max {
         let mut unique_checked = false;
+
+        // verify_nbtree.c:1307
+        postgres_seams::check_for_interrupts::call()?;
 
         let itemid =
             page_get_item_id_careful(state, state.targetblock, &state.target_page(), offset)?;
@@ -966,6 +1056,9 @@ fn bt_right_page_check_scankey<'mcx>(
     let mut targetnext = targetnext_start;
     let rightpage;
     loop {
+        // verify_nbtree.c:1912
+        postgres_seams::check_for_interrupts::call()?;
+
         let page = palloc_btree_page(state, targetnext)?;
         let op = page_opaque(&page.page());
         if !P_IGNORE(&op) || P_RIGHTMOST(&op) {
@@ -1376,7 +1469,24 @@ fn bt_downlink_missing_check(
     let pagelsn = page.lsn();
 
     if rightsplit {
-        // C divergence: DEBUG1 "harmless interrupted page split" omitted.
+        // verify_nbtree.c:2605-2612
+        elog_seams::ereport::call(
+            PgError::new(
+                DEBUG1,
+                format!(
+                    "harmless interrupted page split detected in index \"{}\"",
+                    state.rel.name()
+                ),
+            )
+            .with_sqlstate(ERRCODE_NO_DATA)
+            .with_detail(format!(
+                "Block={} level={} left sibling={} page lsn={}.",
+                blkno,
+                opaque.btpo_level,
+                opaque.btpo_prev,
+                fmt_lsn(pagelsn)
+            )),
+        )?;
         return Ok(());
     }
 
@@ -1391,6 +1501,15 @@ fn bt_downlink_missing_check(
         ));
     }
 
+    // verify_nbtree.c:2636-2637: descend from the given page, which is an internal page
+    elog_seams::ereport::call(PgError::new(
+        DEBUG1,
+        format!(
+            "checking for interrupted multi-level deletion due to missing downlink in index \"{}\"",
+            state.rel.name()
+        ),
+    ))?;
+
     let mut level = opaque.btpo_level;
     let itemid = page_get_item_id_careful(state, blkno, page, P_FIRSTDATAKEY(&opaque))?;
     let itup = page_item(page, itemid);
@@ -1399,6 +1518,9 @@ fn bt_downlink_missing_check(
     let mut child;
     let mut copaque;
     loop {
+        // verify_nbtree.c:2645
+        postgres_seams::check_for_interrupts::call()?;
+
         child = palloc_btree_page(state, childblk)?;
         copaque = page_opaque(&child.page());
         if P_ISLEAF(&copaque) {
@@ -1487,12 +1609,31 @@ fn bt_leftmost_ignoring_half_dead(
     while reached != P_NONE && all_half_dead {
         let page = palloc_btree_page(state, reached)?;
         let op = page_opaque(&page.page());
+
+        // verify_nbtree.c:1031
+        postgres_seams::check_for_interrupts::call()?;
         all_half_dead = P_ISHALFDEAD(&op)
             && reached != start
             && reached != reached_from
             && op.btpo_next == reached_from;
         if all_half_dead {
-            // C divergence: DEBUG1 "harmless interrupted page deletion" omitted.
+            // verify_nbtree.c:1047-1053: pagelsn should point to an XLOG_BTREE_MARK_PAGE_HALFDEAD
+            elog_seams::ereport::call(
+                PgError::new(
+                    DEBUG1,
+                    format!(
+                        "harmless interrupted page deletion detected in index \"{}\"",
+                        state.rel.name()
+                    ),
+                )
+                .with_sqlstate(ERRCODE_NO_DATA)
+                .with_detail(format!(
+                    "Block={} right block={} page lsn={}.",
+                    reached,
+                    reached_from,
+                    fmt_lsn(page.page().lsn())
+                )),
+            )?;
             reached_from = reached;
             reached = op.btpo_prev;
         }
@@ -1540,7 +1681,21 @@ fn bt_recheck_sibling_links(
         UnlockReleaseBuffer(lbuf)?;
 
         if btpo_prev_from_target == leftcurrent {
-            // C divergence: DEBUG1 "harmless concurrent page split" omitted.
+            // verify_nbtree.c:1173-1179: report split in left sibling, not target (or new target)
+            elog_seams::ereport::call(
+                PgError::new(
+                    DEBUG1,
+                    format!(
+                        "harmless concurrent page split detected in index \"{}\"",
+                        state.rel.name()
+                    ),
+                )
+                .with_sqlstate(ERRCODE_INTERNAL_ERROR)
+                .with_detail(format!(
+                    "Block={} new right sibling={} original right sibling={}.",
+                    leftcurrent, newtargetblock, state.targetblock
+                )),
+            )?;
             return Ok(());
         }
         state.targetblock = newtargetblock;
@@ -1780,7 +1935,36 @@ fn bt_entry_unique_check(
     }
 
     if !has_visible_entry && l_vis.blkno != InvalidBlockNumber && l_vis.blkno != targetblock {
-        // C divergence: DEBUG1 "index uniqueness can not be checked" omitted.
+        // verify_nbtree.c:985-1001
+        let posting = if l_vis.posting_index >= 0 {
+            format!(" posting {}", l_vis.posting_index)
+        } else {
+            String::new()
+        };
+        let (lblk, loff) = match l_vis.tid.as_ref() {
+            Some(t) => (
+                ItemPointerGetBlockNumberNoCheck(t),
+                ItemPointerGetOffsetNumberNoCheck(t),
+            ),
+            None => (0, 0),
+        };
+        elog_seams::ereport::call(
+            PgError::new(
+                DEBUG1,
+                format!(
+                    "index uniqueness can not be checked for index tid=({},{}) in index \"{}\"",
+                    targetblock,
+                    offset,
+                    state.rel.name()
+                ),
+            )
+            .with_sqlstate(ERRCODE_NO_DATA)
+            .with_detail(format!(
+                "It doesn't have visible heap tids and key is equal to the tid=({},{}){} (points to heap tid=({},{})).",
+                l_vis.blkno, l_vis.offset, posting, lblk, loff
+            ))
+            .with_hint("VACUUM the table and repeat the check."),
+        )?;
     }
     Ok(())
 }

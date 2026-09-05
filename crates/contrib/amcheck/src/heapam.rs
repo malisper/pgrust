@@ -15,8 +15,8 @@ use types_core::xact::{
     TransactionIdPrecedes,
 };
 use types_error::{
-    PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_PARAMETER_VALUE,
-    ERRCODE_WRONG_OBJECT_TYPE,
+    PgError, PgResult, DEBUG1, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_PARAMETER_VALUE,
+    ERRCODE_READ_ONLY_SQL_TRANSACTION, ERRCODE_WRONG_OBJECT_TYPE,
 };
 use types_fmgr::{
     varlena_result, FmgrInfo, FunctionCallInfoBaseData as Fcinfo,
@@ -643,12 +643,15 @@ fn check_tuple_attribute<'mcx>(
     let infomask = tuphdr.t_infomask;
     let thisatt = &rel.rd_att.compact_attrs[ctx.attnum as usize];
     let attlen = thisatt.attlen;
+    // verify_heapam.c:1677/1697/1743 print the int16 attlen with %u after int
+    // promotion: -1 (varlena) renders as 4294967295, -2 (cstring) as 4294967294.
+    let attlen_u = (attlen as i32) as u32;
     let attalignby = thisatt.attalignby;
     let t_hoff = tuphdr.t_hoff as u32;
 
     if t_hoff + ctx.offset > ctx.lp_len as u32 {
         report(ctx, srf, format!(
-            "attribute with length {attlen} starts at offset {} beyond total tuple length {}",
+            "attribute with length {attlen_u} starts at offset {} beyond total tuple length {}",
             t_hoff + ctx.offset, ctx.lp_len
         ))?;
         return Ok(false);
@@ -667,7 +670,7 @@ fn check_tuple_attribute<'mcx>(
         ctx.offset = unsafe { att_addlength_pointer(ctx.offset, attlen, tp.add(ctx.offset as usize)) };
         if t_hoff + ctx.offset > ctx.lp_len as u32 {
             report(ctx, srf, format!(
-                "attribute with length {attlen} ends at offset {} beyond total tuple length {}",
+                "attribute with length {attlen_u} ends at offset {} beyond total tuple length {}",
                 t_hoff + ctx.offset, ctx.lp_len
             ))?;
             return Ok(false);
@@ -691,7 +694,7 @@ fn check_tuple_attribute<'mcx>(
 
     if t_hoff + ctx.offset > ctx.lp_len as u32 {
         report(ctx, srf, format!(
-            "attribute with length {attlen} ends at offset {} beyond total tuple length {}",
+            "attribute with length {attlen_u} ends at offset {} beyond total tuple length {}",
             t_hoff + ctx.offset, ctx.lp_len
         ))?;
         return Ok(false);
@@ -1029,6 +1032,18 @@ pub(crate) fn verify_heapam(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) 
     if rel.rd_rel.relpersistence == types_core::catalog::RELPERSISTENCE_UNLOGGED
         && transam_xlog::RecoveryInProgress()
     {
+        // verify_heapam.c:356-364: no relation fork during recovery; behave
+        // as if the relation is empty, after the DEBUG1 report.
+        elog_seams::ereport::call(
+            PgError::new(
+                DEBUG1,
+                format!(
+                    "cannot verify unlogged relation \"{}\" during recovery, skipping",
+                    rel.name()
+                ),
+            )
+            .with_sqlstate(ERRCODE_READ_ONLY_SQL_TRANSACTION),
+        )?;
         rel.close(AccessShareLock)?;
         return Ok(srf.finish(fcinfo));
     }
