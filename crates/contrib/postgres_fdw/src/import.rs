@@ -293,12 +293,11 @@ pub fn postgresImportForeignSchema<'mcx>(
         return Err(connection::remote_error(&res, Some(&buf)));
     }
 
-    // DIVERGENCE from C: the local schema is baked into the emitted name.
-    // C leaves it unqualified and utility.c overwrites relation->schemaname
-    // after parsing; pgrust parse trees are immutable once built (see
-    // utility's exec_import_foreign_schema_commands).
-    let local_schema = stmt.local_schema.expect("ImportForeignSchemaStmt.local_schema");
-
+    // postgres_fdw.c:5648: the name is emitted unqualified; ImportForeignSchema
+    // overwrites relation->schemaname with the IMPORT's local schema after
+    // parsing (utility's exec_import_foreign_schema_commands does the same),
+    // and the unqualified text is what import_error_callback shows as the
+    // internal query when the command fails.
     let mut commands: PgVec<'mcx, &'mcx str> = PgVec::new_in(mcx);
     let numrows = res.rows.len();
     let mut i = 0usize;
@@ -306,8 +305,6 @@ pub fn postgresImportForeignSchema<'mcx>(
         let tablename = col(&res.rows[i], 0)?.unwrap_or("");
         let mut sql = String::new();
         sql.push_str("CREATE FOREIGN TABLE ");
-        push_quoted_ident(&mut sql, mcx, local_schema)?;
-        sql.push('.');
         push_quoted_ident(&mut sql, mcx, tablename)?;
         sql.push_str(" (\n");
         let mut first_item = true;

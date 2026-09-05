@@ -147,7 +147,14 @@ fn parse_func_options<'mcx>(
                 out.validator_given = true;
                 out.fdwvalidator = lookup_fdw_validator_func(def)?;
             }
-            other => panic!("option \"{}\" not recognized", other.unwrap_or("")),
+            // foreigncmds.c:560 elog(ERROR, ...): a catchable XX000, never a
+            // backend abort (gram.y only produces "handler"/"validator").
+            other => {
+                return Err(Box::new(PgError::error(format!(
+                    "option \"{}\" not recognized",
+                    other.unwrap_or("")
+                ))));
+            }
         }
     }
     Ok(out)
@@ -1209,6 +1216,71 @@ pub fn ImportForeignSchema<'mcx>(
     import(mcx, stmt, server.serverid)
 }
 
+/// import_error_callback (foreigncmds.c:1616-1633) and its registration on
+/// error_context_stack around each FDW-returned command (:1536-1543, :1603).
+/// An error carrying a parser position (a syntax error, an unknown type in
+/// the generated CREATE FOREIGN TABLE, ...) is converted into an internal
+/// syntax error report -- errposition(0), internalerrposition(pos),
+/// internalerrquery(cmd) -- so the client sees the caret against the text the
+/// FDW generated rather than the IMPORT statement; once the table name is
+/// known (`set_tablename`, C's callback_arg.tablename) the
+/// "importing foreign table" context line follows. Non-ERROR reports reach
+/// the callback through elog's emit hook; an ERROR carries no callback
+/// context at emit time (elog returns it to the raiser), so the caller
+/// transposes it on the Err path (`transpose`), once per command, as C runs
+/// the callback once per stack frame.
+pub struct ImportErrorContext {
+    cmd: String,
+    tablename: std::rc::Rc<std::cell::RefCell<Option<String>>>,
+    callback: u64,
+}
+
+impl ImportErrorContext {
+    pub fn push(cmd: &str) -> ImportErrorContext {
+        let tablename: std::rc::Rc<std::cell::RefCell<Option<String>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(None));
+        let callback = {
+            let tablename = std::rc::Rc::clone(&tablename);
+            let cmd = cmd.to_owned();
+            ::elog::push_emit_context_callback(Box::new(move |e| {
+                import_error_callback(e, &cmd, tablename.borrow().as_deref());
+            }))
+        };
+        ImportErrorContext { cmd: cmd.to_owned(), tablename, callback }
+    }
+
+    /// C: callback_arg.tablename = cstmt->base.relation->relname (:1585),
+    /// reset to NULL once the statement has run (:1601).
+    pub fn set_tablename(&self, tablename: Option<&str>) {
+        *self.tablename.borrow_mut() = tablename.map(str::to_owned);
+    }
+
+    pub fn transpose(&self, mut e: Box<PgError>) -> Box<PgError> {
+        import_error_callback(&mut e, &self.cmd, self.tablename.borrow().as_deref());
+        e
+    }
+}
+
+impl Drop for ImportErrorContext {
+    fn drop(&mut self) {
+        // C: error_context_stack = sqlerrcontext.previous (:1603).
+        ::elog::pop_emit_context_callback(self.callback);
+    }
+}
+
+// import_error_callback (foreigncmds.c:1616-1633).
+fn import_error_callback(e: &mut PgError, cmd: &str, tablename: Option<&str>) {
+    // If it's a syntax error, convert to internal syntax error report.
+    if let Some(syntaxerrposition) = e.cursor_position.filter(|&p| p > 0) {
+        e.cursor_position = None;
+        e.internal_position = Some(syntaxerrposition);
+        e.internal_query = Some(cmd.to_owned());
+    }
+    if let Some(tablename) = tablename {
+        e.add_context_line(format!("importing foreign table \"{tablename}\""));
+    }
+}
+
 pub fn init_seams() {
     foreigncmds_seams::postgresql_fdw_validator::set(|mcx, options, catalog| {
         options::postgresql_fdw_validator(mcx, options, catalog)
@@ -1243,6 +1315,27 @@ pub(crate) fn cache_lookup_failed_attribute(attnum: i16, relid: Oid) -> Box<PgEr
     Box::new(PgError::error(format!(
         "cache lookup failed for attribute {attnum} of relation {relid}"
     )))
+}
+
+#[cfg(test)]
+mod parse_func_options_tests {
+    use super::*;
+    use types_nodes::node_tree::Node;
+
+    // foreigncmds.c:560 elog(ERROR, "option \"%s\" not recognized") -- a
+    // catchable XX000 for a DefElem gram.y never produces (only "handler"
+    // and "validator" exist), not a backend abort.
+    #[test]
+    fn unknown_func_option_is_a_catchable_xx000() {
+        let ctx = mcx::MemoryContext::new("foreigncmds-test");
+        let mcx = ctx.mcx();
+        let def = Node::mk(mcx, DefElem { defname: Some("bogus"), ..DefElem::default() }).unwrap();
+        let opts = NodeList::make1(mcx, def).unwrap();
+        let e = parse_func_options(mcx, &opts, "").err().expect("unrecognized option is an error");
+        assert_eq!(e.message(), "option \"bogus\" not recognized");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(e.level(), types_error::ERROR);
+    }
 }
 
 #[cfg(test)]

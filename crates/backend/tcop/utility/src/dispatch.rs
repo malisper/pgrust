@@ -1968,11 +1968,16 @@ fn exec_import_foreign_schema_commands<'mcx>(
 ) -> PgResult<()> {
     let mut dest = tcop_dest::CreateDestReceiver(types_dest::CommandDest::None);
     for cmd in commands {
+        // C foreigncmds.c:1536-1543: import_error_callback on
+        // error_context_stack for everything this command raises (parse
+        // included); popped when `errctx` drops (:1603).
+        let errctx = foreigncmds::ImportErrorContext::push(cmd);
         let raw_parsetree_list = parser_seams::raw_parser::call(
             mcx,
             cmd,
             parser_seams::RawParseMode::RAW_PARSE_DEFAULT,
-        )?;
+        )
+        .map_err(|e| errctx.transpose(e))?;
         for rs in raw_parsetree_list.iter() {
             let node = rs.stmt.expect("raw parse tree");
             let Some(cstmt) =
@@ -1993,6 +1998,8 @@ fn exec_import_foreign_schema_commands<'mcx>(
             if !foreigncmds::IsImportableForeignTable(relname, stmt) {
                 continue;
             }
+            // C: callback_arg.tablename = cstmt->base.relation->relname.
+            errctx.set_tablename(Some(relname));
             // C foreigncmds.c:1582 — force the creation schema to the IMPORT
             // statement's local_schema so the FDW-returned command text cannot
             // redirect the new object into another (permission-unchecked)
@@ -2008,17 +2015,13 @@ fn exec_import_foreign_schema_commands<'mcx>(
             )?;
             // SAFETY: `node` was just parsed from `cmd`; nothing else references
             // it. The refs derived from it above (`cstmt`, `relation`, `relname`)
-            // are not used after this call — `relname` is re-derived below.
+            // are not used after this call — `errctx` holds its own copy of the
+            // table name.
             unsafe {
                 node.with_mut::<types_nodes::rawnodes::CreateForeignTableStmt, _>(|c| {
                     c.base.relation = Some(local_relation);
                 });
             }
-            let relname = node
-                .as_variant::<types_nodes::rawnodes::CreateForeignTableStmt>()
-                .and_then(|c| c.base.relation)
-                .and_then(|r| r.relname)
-                .expect("CreateForeignTableStmt.relation.relname");
             let pstmt = PlannedStmt {
                 commandType: CmdType::CMD_UTILITY,
                 canSetTag: false,
@@ -2028,7 +2031,8 @@ fn exec_import_foreign_schema_commands<'mcx>(
                 ..PlannedStmt::default()
             };
             let mut qc = QueryCompletion::default();
-            // C: import_error_callback's errcontext, added on the way out.
+            // C: import_error_callback runs for an ERROR at errfinish; here it
+            // transposes the propagating error on the way out.
             ProcessUtility(
                 mcx,
                 &pstmt,
@@ -2040,11 +2044,10 @@ fn exec_import_foreign_schema_commands<'mcx>(
                 &mut dest,
                 Some(&mut qc),
             )
-            .map_err(|mut e| {
-                e.add_context_line(format!("importing foreign table \"{relname}\""));
-                e
-            })?;
-            xact::CommandCounterIncrement()?;
+            .map_err(|e| errctx.transpose(e))?;
+            xact::CommandCounterIncrement().map_err(|e| errctx.transpose(e))?;
+            // C: callback_arg.tablename = NULL.
+            errctx.set_tablename(None);
         }
     }
     Ok(())
