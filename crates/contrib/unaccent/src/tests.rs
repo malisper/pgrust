@@ -67,3 +67,28 @@ fn duplicate_source_keeps_first() {
     let trie = trie_from(mcx, "a X\na Y\n");
     assert_eq!(lexize(mcx, &trie, "a").as_deref(), Some("X"));
 }
+
+// unaccent.c:105 initTrie reads the rules file through tsearch_readline,
+// whose error_context_stack callback (ts_locale.c:185) stamps every report
+// raised while the file is open with `line N of configuration file "..."`
+// — the line-only form for an encoding violation inside tsearch_readline
+// itself (its bytes are not printable), which is a hard ERROR
+// (ERRCODE_CHARACTER_NOT_IN_REPERTOIRE is not the skipped
+// ERRCODE_UNTRANSLATABLE_CHARACTER of initTrie:293).
+#[test]
+fn init_trie_errors_carry_readline_context() {
+    let dir = format!("{}/fixtures", env!("CARGO_MANIFEST_DIR"));
+    std::env::set_var("PGRUST_PGSHAREDIR", &dir);
+    let mcx = leaked_mcx();
+    let err = crate::init_trie(mcx, b"unaccent_badenc").err().expect("encoding violation");
+    assert!(
+        err.message().starts_with("invalid byte sequence for encoding"),
+        "{:?}",
+        err.message()
+    );
+    assert_eq!(
+        err.context(),
+        Some(format!("line 1 of configuration file \"{dir}/tsearch_data/unaccent_badenc.rules\"").as_str()),
+        "an error inside tsearch_readline carries the line-only context"
+    );
+}

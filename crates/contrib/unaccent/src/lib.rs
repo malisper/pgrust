@@ -5,7 +5,10 @@
 
 use ::mcx::{alloc_in, vec_with_capacity_in, Mcx, PgVec};
 use ::ts_locale::dict_api::{lexize_result_ref, DictInitData, LexizeResult};
-use ::ts_locale::{byte_isspace, get_tsearch_config_filename, TsLexeme, TSL_FILTER};
+use ::ts_locale::{
+    byte_isspace, could_not_open_error, get_tsearch_config_filename, tsearch_readline_begin,
+    TsLexeme, TsearchReadline, TSL_FILTER,
+};
 use ::types_core::OidIsValid;
 use ::types_error::{
     PgError, PgResult, ERRCODE_CONFIG_FILE_ERROR, ERRCODE_INVALID_PARAMETER_VALUE,
@@ -35,7 +38,10 @@ impl UnaccentTrie {
         Ok(self.nodes.len() - 1)
     }
 
-    fn place(&mut self, mcx: Mcx<'static>, src: &[u8], replace_to: &[u8]) -> PgResult<()> {
+    // placeChar; Ok(false) = the source string was already placed (C warns
+    // "duplicate source strings" there and keeps the first — the caller,
+    // holding the reader, reports it under the readline context).
+    fn place(&mut self, mcx: Mcx<'static>, src: &[u8], replace_to: &[u8]) -> PgResult<bool> {
         debug_assert!(!src.is_empty());
         if self.nodes.is_empty() {
             self.new_node(mcx)?;
@@ -45,16 +51,12 @@ impl UnaccentTrie {
             let b = b as usize;
             if i == src.len() - 1 {
                 if self.nodes[node][b].replace != 0 {
-                    let _ = ::elog::ThrowErrorData(
-                        PgError::warning("duplicate source strings, first one will be used")
-                            .with_sqlstate(ERRCODE_CONFIG_FILE_ERROR),
-                    );
-                } else {
-                    let mut r = vec_with_capacity_in(mcx, replace_to.len())?;
-                    r.extend_from_slice(replace_to);
-                    self.replacements.push(r);
-                    self.nodes[node][b].replace = self.replacements.len() as u32;
+                    return Ok(false);
                 }
+                let mut r = vec_with_capacity_in(mcx, replace_to.len())?;
+                r.extend_from_slice(replace_to);
+                self.replacements.push(r);
+                self.nodes[node][b].replace = self.replacements.len() as u32;
             } else {
                 if self.nodes[node][b].next == 0 {
                     let new = self.new_node(mcx)?;
@@ -63,7 +65,7 @@ impl UnaccentTrie {
                 node = (self.nodes[node][b].next - 1) as usize;
             }
         }
-        Ok(())
+        Ok(true)
     }
 
     fn find_replace_to(&self, src: &[u8]) -> Option<(usize, usize)> {
@@ -91,35 +93,12 @@ impl UnaccentTrie {
     }
 }
 
-fn config_warning(msg: &str) {
+fn config_warning(msg: &str, rd: &TsearchReadline<'_>) {
     let _ = ::elog::ThrowErrorData(
-        PgError::warning(msg).with_sqlstate(ERRCODE_CONFIG_FILE_ERROR),
+        PgError::warning(msg)
+            .with_sqlstate(ERRCODE_CONFIG_FILE_ERROR)
+            .with_context(rd.context()),
     );
-}
-
-fn read_rules_lines<'mcx>(
-    mcx: Mcx<'mcx>,
-    filename: &[u8],
-) -> PgResult<Result<PgVec<'mcx, PgVec<'mcx, u8>>, std::io::Error>> {
-    let path = String::from_utf8_lossy(filename).into_owned();
-    let raw = match std::fs::read(&path) {
-        Ok(b) => b,
-        Err(e) => return Ok(Err(e)),
-    };
-    let mut lines: PgVec<'mcx, PgVec<'mcx, u8>> = PgVec::new_in(mcx);
-    for chunk in raw.split_inclusive(|&b| b == b'\n') {
-        match ::mbutils::pg_any_to_server(mcx, chunk, ::wchar::PG_UTF8) {
-            Ok(Some(v)) => lines.push(v),
-            Ok(None) => {
-                let mut v = vec_with_capacity_in(mcx, chunk.len())?;
-                v.extend_from_slice(chunk);
-                lines.push(v);
-            }
-            Err(e) if e.sqlstate() == ERRCODE_UNTRANSLATABLE_CHARACTER => continue,
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(Ok(lines))
 }
 
 // C initTrie's line parser, states as in C: 0 initial, 1 in src, 2 after
@@ -217,46 +196,47 @@ fn parse_rule_line(line: &[u8]) -> Result<Option<(&[u8], Vec<u8>)>, i32> {
 
 fn init_trie(mcx: Mcx<'static>, filename: &[u8]) -> PgResult<UnaccentTrie> {
     let path = get_tsearch_config_filename(mcx, filename, "rules")?;
-    let lines = match read_rules_lines(mcx, &path)? {
-        Ok(lines) => lines,
-        Err(e) => {
-            // C: could not open unaccent file "%s": %m — strerror(errno).
-            let errno_text = e
-                .raw_os_error()
-                .map(strerror_text)
-                .unwrap_or_else(|| e.to_string());
-            return Err(PgError::error(format!(
-                "could not open unaccent file \"{}\": {errno_text}",
-                String::from_utf8_lossy(&path)
-            ))
-            .with_sqlstate(ERRCODE_CONFIG_FILE_ERROR)
-            .into());
-        }
+    // C:107 — could not open unaccent file "%s": %m — fopen's errno.
+    let mut rd = match tsearch_readline_begin(mcx, &path) {
+        Ok(rd) => rd,
+        Err(errno) => return Err(could_not_open_error("unaccent", &path, errno).into()),
     };
     let mut trie = UnaccentTrie {
         nodes: PgVec::new_in(mcx),
         replacements: PgVec::new_in(mcx),
     };
-    for line in lines.iter() {
-        match parse_rule_line(line) {
-            Ok(Some((src, trg))) => trie.place(mcx, src, &trg)?,
+    // tsearch_readline_callback sits on error_context_stack from begin to
+    // end: every WARNING and ERROR raised while the file is open carries
+    // the line-in-flight context (C:265/269, placeChar:72, and the reader's
+    // own encoding errors — line-only, C:185).
+    loop {
+        let line = match rd.readline() {
+            Ok(Some(line)) => line,
+            Ok(None) => break,
+            // C:293 — an untranslatable character skips the line.
+            Err(e) if e.sqlstate() == ERRCODE_UNTRANSLATABLE_CHARACTER => continue,
+            Err(e) => return rd.with_context(Err(e)),
+        };
+        match parse_rule_line(&line) {
+            Ok(Some((src, trg))) => {
+                let placed = trie.place(mcx, src, &trg);
+                if !rd.with_context(placed)? {
+                    // placeChar:72
+                    config_warning("duplicate source strings, first one will be used", &rd);
+                }
+            }
             Ok(None) => {}
-            Err(-1) => {
-                config_warning("invalid syntax: more than two strings in unaccent rule")
-            }
-            Err(_) => {
-                config_warning("invalid syntax: unfinished quoted string in unaccent rule")
-            }
+            Err(-1) => config_warning(
+                "invalid syntax: more than two strings in unaccent rule",
+                &rd,
+            ),
+            Err(_) => config_warning(
+                "invalid syntax: unfinished quoted string in unaccent rule",
+                &rd,
+            ),
         }
     }
     Ok(trie)
-}
-
-fn strerror_text(errno: i32) -> String {
-    // SAFETY: strerror returns a static NUL-terminated string for any errno.
-    unsafe { core::ffi::CStr::from_ptr(libc::strerror(errno)) }
-        .to_string_lossy()
-        .into_owned()
 }
 
 fn invalid_param(msg: impl Into<String>) -> Box<PgError> {

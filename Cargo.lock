@@ -20504,7 +20504,6 @@ dependencies = [
  "datum",
  "dfmgr",
  "elog",
- "libc",
  "lsyscache",
  "mbutils",
  "mcx",
@@ -20515,7 +20514,6 @@ dependencies = [
  "types_error",
  "types_fmgr",
  "varlena",
- "wchar",
 ]
 
 [[package]]

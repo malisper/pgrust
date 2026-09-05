@@ -241,8 +241,6 @@ fs	crates/bin/pagemask/src/main.rs	2	DST-REVIEW(recovery-diff): offline recovere
 fs	crates/contrib/file_fdw/src/lib.rs	3
 # --- crates/contrib/pg_stat_statements (8 sites) ---
 fs	crates/contrib/pg_stat_statements/src/store.rs	8
-# --- crates/contrib/unaccent (1 sites) ---
-fs	crates/contrib/unaccent/src/lib.rs	1
 # --- crates/port/pg_path (5 sites) ---
 fs	crates/port/pg_path/src/lib.rs	5
 # --- crates/port/pg_strong_random (4 sites) ---
