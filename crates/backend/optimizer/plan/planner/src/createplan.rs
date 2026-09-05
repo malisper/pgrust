@@ -95,6 +95,34 @@ fn create_plan_recurse<'mcx>(
     }
 }
 
+// createplan.c:4933-4956: with a single hash clause whose outer side is a
+// plain column reference (looking through a RelabelType) of a base
+// relation, the Hash node carries that column's identity -- skewTable /
+// skewColumn / skewInherit -- for the executor's skew optimization of
+// multi-batch joins; anything else leaves skewTable invalid.
+pub(crate) fn hashjoin_skew_info(
+    run: &PlannerRun<'_>,
+    hashclauses: &NodeList<'_>,
+) -> (types_core::Oid, i16, bool) {
+    if hashclauses.len() != 1 {
+        return (0, 0, false);
+    }
+    let Some(op) = hashclauses.nth(0).as_op_expr() else {
+        return (0, 0, false);
+    };
+    let mut node = op.args.nth(0);
+    if let Some(r) = node.as_relabel_type() {
+        node = r.arg;
+    }
+    if let Some(var) = node.as_var() {
+        let rte = run.rte(var.varno as usize);
+        if rte.rtekind == types_nodes::parsenodes::RTEKind::RTE_RELATION {
+            return (rte.relid, var.varattno, rte.inh);
+        }
+    }
+    (0, 0, false)
+}
+
 // use_physical_tlist (createplan.c), plain-baserel arm.
 fn use_physical_tlist(run: &PlannerRun<'_>, best_path: PathId, flags: i32) -> bool {
     if flags & (CP_EXACT_TLIST | CP_SMALL_TLIST) != 0 {
@@ -388,7 +416,27 @@ fn create_scan_plan<'mcx>(
         v
     };
 
-    let gating_clauses = get_gating_quals(run, &scan_clauses)?;
+    let gating_clauses = {
+        let kind = run.root.rel(rel_id).reloptkind;
+        if kind == types_pathnodes::RELOPT_JOINREL || kind == types_pathnodes::RELOPT_OTHER_JOINREL {
+            // createplan.c:610-624: a scan that replaces a join (a pushed-down
+            // foreign join) carries the join's RestrictInfos in the path
+            // itself (fdw_restrictinfo); the pseudoconstant gating quals come
+            // from there -- a join rel has no baserestrictinfo.
+            let join_clauses: mcx::PgVec<'mcx, RinfoId> = match run.root.path(best_path) {
+                PathNode::ForeignPath(fp) => {
+                    crate::relnode::pgvec_clone_shallow(mcx, &fp.fdw_restrictinfo)
+                }
+                other => panic!(
+                    "create_scan_plan (createplan.c:615): pathtype {} over a join rel",
+                    other.base().pathtype
+                ),
+            };
+            get_gating_quals(run, &join_clauses)?
+        } else {
+            get_gating_quals(run, &scan_clauses)?
+        }
+    };
     // A gating Result can project, so the scan needn't honor tlist flags.
     let flags = if gating_clauses.is_nil() { flags } else { 0 };
 
@@ -1496,7 +1544,7 @@ fn create_bitmap_scan_plan<'mcx>(
     let scan_relid = run.root.rel(baserelid).relid;
     debug_assert!(scan_relid > 0);
 
-    let (bitmapqualplan, indexquals, mut bitmapqualorig, _indexecs) =
+    let (bitmapqualplan, indexquals, mut bitmapqualorig, indexecs) =
         create_bitmap_subplan(run, bitmapqual)?;
 
     // scan_clauses minus indexquals (C list_member -> equal()).
@@ -1507,6 +1555,11 @@ fn create_bitmap_scan_plan<'mcx>(
         }
         let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
         if indexquals.iter().any(|q| types_nodes::equal(q, clause)) {
+            continue;
+        }
+        // createplan.c:3257: derived from the same EquivalenceClass as a
+        // top-level indexqual -- redundant with it.
+        if run.root.rinfo(rid).parent_ec.is_some_and(|pec| indexecs.contains(&pec)) {
             continue;
         }
         if !clauses::contain_mutable_functions(clause)?
@@ -1716,12 +1769,10 @@ fn create_bitmap_subplan<'mcx>(
     for ic in indexclauses.iter() {
         let rid = ic.rinfo.expect("IndexClause rinfo");
         debug_assert!(!run.root.rinfo(rid).pseudoconstant);
-        if let Some(pec) = run.root.rinfo(rid).parent_ec {
-            // Derived from the same EC as an already-included clause.
-            if indexecs.contains(&pec) {
-                continue;
-            }
-        }
+        // createplan.c:3485-3494: every index clause goes into subquals
+        // (the lossy-page recheck) and subindexquals unconditionally; the
+        // parent ECs are only collected for create_bitmap_scan_plan's
+        // qpqual redundancy test.
         subquals.lappend(mcx, *run.root.expr_node(run.root.rinfo(rid).clause))?;
         for &qid in ic.indexquals.iter() {
             subindexquals.lappend(mcx, *run.root.expr_node(run.root.rinfo(qid).clause))?;
@@ -4163,6 +4214,7 @@ fn create_hashjoin_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> Pg
     let outer_relids =
         crate::relnode::relids_copy(mcx, &run.root.rel(run.root.path(outer_path).base().parent).relids);
     let switched = get_switched_clauses(run, &hash_rinfos, &outer_relids)?;
+    let (skew_table, skew_column, skew_inherit) = hashjoin_skew_info(run, &switched);
 
     let mut hashoperators: OidList<'mcx> = OidList::nil();
     let mut hashcollations: OidList<'mcx> = OidList::nil();
@@ -4191,6 +4243,9 @@ fn create_hashjoin_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> Pg
     hash_plan.plan.lefttree = Some(inner_plan);
     hash_plan.plan.righttree = None;
     hash_plan.hashkeys = inner_hashkeys;
+    hash_plan.skewTable = skew_table;
+    hash_plan.skewColumn = skew_column;
+    hash_plan.skewInherit = skew_inherit;
     // copy_plan_costsize + Hash startup == total (EXPLAIN-only).
     // disabled_nodes MUST ride along (createplan.c:5532): without it the
     // Hash node reads 0 while its child carries the count, so
@@ -4840,6 +4895,22 @@ fn create_append_plan<'mcx>(
 // Ordered Append/MergeAppend child (create_append_plan / create_merge_append_
 // plan, createplan.c): pin the child's sort columns to the parent's and add a
 // Sort when the subpath isn't sufficiently ordered.
+// createplan.c:1347 / :1519: a child whose sort columns don't line up with
+// the Append / MergeAppend's own is elog(ERROR) "<Parent> child's targetlist
+// doesn't match <Parent>" -- a catchable XX000, never a panic.
+pub(crate) fn check_ordered_append_child_sort_cols(
+    sub_cols: &[i16],
+    node_cols: &[i16],
+    parent_label: &str,
+) -> PgResult<()> {
+    if sub_cols != node_cols {
+        return Err(Box::new(types_error::PgError::error(format!(
+            "{parent_label} child's targetlist doesn't match {parent_label}"
+        ))));
+    }
+    Ok(())
+}
+
 fn prepare_ordered_append_child<'mcx>(
     run: &mut PlannerRun<'mcx>,
     subplan: Node<'mcx>,
@@ -4867,10 +4938,11 @@ fn prepare_ordered_append_child<'mcx>(
         (new_sp.expect("lefttree"), cols)
     };
     debug_assert_eq!(sub_cols.sort_col_idx.len(), node_cols.sort_col_idx.len());
-    assert!(
-        sub_cols.sort_col_idx.as_slice() == node_cols.sort_col_idx.as_slice(),
-        "{parent_label} child's targetlist doesn't match {parent_label}"
-    );
+    check_ordered_append_child_sort_cols(
+        sub_cols.sort_col_idx.as_slice(),
+        node_cols.sort_col_idx.as_slice(),
+        parent_label,
+    )?;
     debug_assert!(sub_cols.sort_operators.as_slice() == node_cols.sort_operators.as_slice());
     debug_assert!(sub_cols.collations.as_slice() == node_cols.collations.as_slice());
     debug_assert!(sub_cols.nulls_first.as_slice() == node_cols.nulls_first.as_slice());

@@ -13699,6 +13699,7 @@ dependencies = [
  "copyfuncs",
  "costsize",
  "datum",
+ "detoast",
  "equivclass",
  "execexpr",
  "execmain",

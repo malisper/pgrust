@@ -1479,7 +1479,14 @@ pub fn estimate_multivariate_ndistinct<'mcx>(
             break;
         }
     }
-    let Some(ndistinct) = item_ndistinct else { panic!("corrupt MVNDistinct entry") };
+    // selfuncs.c:4485: elog(ERROR), a catchable XX000 -- ndistinct statistics
+    // include every attribute combination, so a missing item means the
+    // stored stxdndistinct does not belong to this statistics object.
+    let Some(ndistinct) = item_ndistinct else {
+        return Err(Box::new(types_error::PgError::error(
+            "corrupt MVNDistinct entry".to_string(),
+        )));
+    };
 
     let mut consumed: Vec<bool> = Vec::with_capacity(nodes.len());
     for &node in nodes {

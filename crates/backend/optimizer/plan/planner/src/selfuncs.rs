@@ -174,8 +174,14 @@ pub fn nulltestsel<'mcx>(
         } else {
             1.0 - freq_null
         }
-    } else if matches!(arg.as_var(), Some(v) if v.varattno < 0) {
-        // System attributes are never NULL (C's varattno < 0 arm).
+    } else if vardata
+        .var
+        .is_some_and(|id| run.root.expr_node(id).as_var().is_some_and(|v| v.varattno < 0))
+    {
+        // System attributes are never NULL (selfuncs.c:1746, varattno < 0).
+        // The test runs on vardata.var -- the Var examine_variable exposed
+        // under any binary-compatible RelabelType (tableoid::regclass IS
+        // NULL) -- not on the raw argument node.
         if is_null {
             0.0
         } else {
@@ -916,6 +922,8 @@ fn convert_to_scalar(
     const VARCHAROID: Oid = 1043;
     const INETOID: Oid = 869;
     const CIDROID: Oid = 650;
+    const MACADDROID: Oid = 829;
+    const MACADDR8OID: Oid = 774;
     match valuetypid {
         CHAROID | BPCHAROID | VARCHAROID | TEXTOID | NAMEOID => {
             let val = convert_string_datum(mcx, value, valuetypid, collid)?;
@@ -929,7 +937,10 @@ fn convert_to_scalar(
             }
             Some(convert_bytea_to_scalar(value, lobound, hibound))
         }
-        INETOID | CIDROID => {
+        // Built-in network types (selfuncs.c:4713-4716): inet, cidr,
+        // macaddr and macaddr8 all interpolate through
+        // convert_network_to_scalar.
+        INETOID | CIDROID | MACADDROID | MACADDR8OID => {
             let v = convert_network_to_scalar(value, valuetypid)?;
             let lo = convert_network_to_scalar(lobound, boundstypid)?;
             let hi = convert_network_to_scalar(hibound, boundstypid)?;
@@ -1001,6 +1012,31 @@ fn convert_timevalue_to_scalar(value: Datum, typid: Oid) -> Option<f64> {
 fn convert_network_to_scalar(value: Datum, typid: Oid) -> Option<f64> {
     const INETOID: Oid = 869;
     const CIDROID: Oid = 650;
+    const MACADDROID: Oid = 829;
+    const MACADDR8OID: Oid = 774;
+    // network.c:1495-1514: the macaddr / macaddr8 arms fold the fixed-length
+    // by-reference octets into a double exactly as C does (the high half
+    // scaled by 256^3 / 256^4, the low half added).
+    if typid == MACADDROID {
+        let p = value.as_usize() as *const u8;
+        // SAFETY: macaddr is a 6-byte fixed-length by-reference datum.
+        let m: &[u8; 6] = unsafe { &*(p as *const [u8; 6]) };
+        let mut res = ((m[0] as u32) << 16 | (m[1] as u32) << 8 | m[2] as u32) as f64;
+        res *= 256.0 * 256.0 * 256.0;
+        res += ((m[3] as u32) << 16 | (m[4] as u32) << 8 | m[5] as u32) as f64;
+        return Some(res);
+    }
+    if typid == MACADDR8OID {
+        let p = value.as_usize() as *const u8;
+        // SAFETY: macaddr8 is an 8-byte fixed-length by-reference datum.
+        let m: &[u8; 8] = unsafe { &*(p as *const [u8; 8]) };
+        let mut res =
+            ((m[0] as u32) << 24 | (m[1] as u32) << 16 | (m[2] as u32) << 8 | m[3] as u32) as f64;
+        res *= 256.0 * 256.0 * 256.0 * 256.0;
+        res += ((m[4] as u32) << 24 | (m[5] as u32) << 16 | (m[6] as u32) << 8 | m[7] as u32)
+            as f64;
+        return Some(res);
+    }
     if typid != INETOID && typid != CIDROID {
         return None;
     }
@@ -1171,7 +1207,7 @@ fn convert_one_bytea_to_scalar(value: &[u8]) -> f64 {
     num
 }
 
-fn convert_numeric_to_scalar(value: Datum, typid: Oid) -> Option<f64> {
+pub(crate) fn convert_numeric_to_scalar(value: Datum, typid: Oid) -> Option<f64> {
     const NUMERICOID: Oid = 1700;
     const INT2OID: Oid = 21;
     const INT4OID: Oid = 23;
@@ -1185,6 +1221,11 @@ fn convert_numeric_to_scalar(value: Datum, typid: Oid) -> Option<f64> {
     const REGOPERATOROID: Oid = 2204;
     const REGCLASSOID: Oid = 2205;
     const REGTYPEOID: Oid = 2206;
+    const REGCOLLATIONOID: Oid = 4191;
+    const REGCONFIGOID: Oid = 3734;
+    const REGDICTIONARYOID: Oid = 3769;
+    const REGROLEOID: Oid = 4096;
+    const REGNAMESPACEOID: Oid = 4089;
     match typid {
         BOOLOID => Some(value.as_bool() as i32 as f64),
         INT2OID => Some(value.as_i16() as f64),
@@ -1192,8 +1233,10 @@ fn convert_numeric_to_scalar(value: Datum, typid: Oid) -> Option<f64> {
         INT8OID => Some(value.as_i64() as f64),
         FLOAT4OID => Some(value.as_f32() as f64),
         FLOAT8OID => Some(value.as_f64()),
+        // selfuncs.c:4766-4778: every OID-alias type is treated as an integer.
         OIDOID | REGPROCOID | REGPROCEDUREOID | REGOPEROID | REGOPERATOROID | REGCLASSOID
-        | REGTYPEOID => Some(value.as_u32() as f64),
+        | REGTYPEOID | REGCOLLATIONOID | REGCONFIGOID | REGDICTIONARYOID | REGROLEOID
+        | REGNAMESPACEOID => Some(value.as_u32() as f64),
         NUMERICOID => {
             Some(adt_numeric::numeric_float8_no_overflow_any(varlena_datum_payload(value)))
         }
@@ -1872,6 +1915,10 @@ pub fn get_variable_numdistinct(
         stanullfrac = stats.stanullfrac as f64;
     } else if vardata.vartype == BOOLOID {
         stadistinct = 2.0;
+    } else if vardata.rel.is_some_and(|r| run.root.rel(r).rtekind == types_pathnodes::RTE_VALUES) {
+        // selfuncs.c:6316: a column of a VALUES RTE is assumed unique (and
+        // all non-null).
+        stadistinct = -1.0;
     } else {
         let attno = vardata
             .var
@@ -3936,29 +3983,32 @@ pub(crate) fn varlena_datum_payload<'a>(value: Datum) -> &'a [u8] {
     }
 }
 
-// PG_DETOAST_DATUM's short-header arm: layout-sensitive readers (array/range
-// deserializers) need 4B offsets, so a short const expands into `mcx`.
+// PG_DETOAST_DATUM (selfuncs.c:1945 DatumGetArrayTypeP): layout-sensitive
+// readers (array/range deserializers) need a plain 4B-header image, so a
+// short-header, compressed or external (TOAST pointer) datum is unpacked,
+// decompressed or fetched into `mcx` through detoast_attr; a plain inline
+// image is used in place. A planner Const can carry any of these forms --
+// a STABLE function folded at estimation time returns its heap datum
+// verbatim -- so none of them may be refused here.
 pub(crate) fn varlena_image_any<'a>(mcx: mcx::Mcx<'a>, value: Datum) -> PgResult<&'a [u8]> {
     let p = value.as_usize() as *const u8;
     debug_assert!(!p.is_null());
-    // SAFETY: by-ref inline varlena datum, readable for its header size.
+    // SAFETY: by-ref varlena datum, readable for its header and for the
+    // size that header declares (VARSIZE_ANY).
     unsafe {
         let b0 = *p;
-        if b0 & 0x01 == 0x01 {
-            assert!(b0 != 0x01, "varlena_image_any: external toast datum");
-            let total = ((b0 >> 1) & 0x7F) as usize;
-            let payload = core::slice::from_raw_parts(p.add(1), total - 1);
-            let mut img = mcx::vec_with_capacity_in(mcx, total - 1 + datum::varlena::VARHDRSZ)?;
-            mcx::vec_append_bytes(
-                &mut img,
-                &datum::varlena::set_varsize_4b(total - 1 + datum::varlena::VARHDRSZ),
-            )?;
-            mcx::vec_append_bytes(&mut img, payload)?;
-            Ok(img.leak())
-        } else {
-            assert!(b0 & 0x03 == 0, "varlena_image_any: compressed datum");
-            Ok(datum::VarlenaRef::from_ptr(p).as_bytes())
+        if b0 & 0x03 == 0 {
+            return Ok(datum::VarlenaRef::from_ptr(p).as_bytes());
         }
+        let len = if b0 == 0x01 {
+            types_tuple::varatt::VARHDRSZ_EXTERNAL + types_tuple::varatt::vartag_size(*p.add(1))
+        } else if b0 & 0x01 == 0x01 {
+            ((b0 >> 1) & 0x7F) as usize
+        } else {
+            (u32::from_ne_bytes(*(p as *const [u8; 4])) >> 2) as usize
+        };
+        let img = core::slice::from_raw_parts(p, len);
+        Ok(detoast::detoast_attr(mcx, img)?.leak())
     }
 }
 

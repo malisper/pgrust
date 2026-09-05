@@ -925,10 +925,14 @@ fn consider_parallel_mergejoin<'mcx>(
     Ok(())
 }
 
+// ExecMaterializesOutput (execAmi.c:636): Material, FunctionScan,
+// TableFuncScan (XMLTABLE / JSON_TABLE keep their rows in a tuplestore),
+// CteScan, NamedTuplestoreScan, WorkTableScan and Sort.
 fn exec_materializes_output(pathtype: u16) -> bool {
     pathtype == tag16(NodeTag::T_Material)
         || pathtype == tag16(NodeTag::T_Sort)
         || pathtype == tag16(NodeTag::T_FunctionScan)
+        || pathtype == tag16(NodeTag::T_TableFuncScan)
         || pathtype == tag16(NodeTag::T_CteScan)
         || pathtype == tag16(NodeTag::T_NamedTuplestoreScan)
         || pathtype == tag16(NodeTag::T_WorkTableScan)

@@ -8738,3 +8738,200 @@ fn remove_rel_from_restrictinfo_cleans_every_relid_set() {
     assert!(relids_is_member(1, &ri.required_relids));
     assert!(relids_is_member(1, &ri.left_relids));
 }
+
+// audit-18.6 remediation batch b058 (backend/optimizer/plan): unit witnesses
+// for the internal-reach rows (each cites the C site the fix must match).
+mod audit_b058 {
+    use super::*;
+    use mcx::PgVec;
+    use types_pathnodes::relids::{relids_equal, relids_singleton};
+    use types_pathnodes::{
+        EquivalenceClass, ParamPathInfo, Path, PathNode, RelId, RelOptInfo, RinfoId,
+        RELOPT_BASEREL,
+    };
+
+    fn mk_rel<'mcx>(run: &mut crate::run::PlannerRun<'mcx>, relid: u32) -> RelId {
+        let mcx = run.mcx;
+        let mut rel = RelOptInfo::new(mcx);
+        rel.relid = relid;
+        rel.relids = relids_singleton(mcx, relid);
+        rel.reloptkind = RELOPT_BASEREL;
+        let id = run.root.alloc_rel(rel);
+        while run.root.simple_rel_array.len() <= relid as usize {
+            run.root.simple_rel_array.push(None);
+        }
+        run.root.simple_rel_array[relid as usize] = Some(id);
+        run.root.simple_rel_array_size =
+            run.root.simple_rel_array_size.max(relid as i32 + 1);
+        id
+    }
+
+    fn mk_seq_path<'mcx>(
+        run: &mut crate::run::PlannerRun<'mcx>,
+        rel: RelId,
+        total: f64,
+        param_rel: Option<u32>,
+    ) -> types_pathnodes::PathId {
+        let param_info = param_rel.map(|r| {
+            mcx::alloc_in(
+                run.mcx,
+                ParamPathInfo {
+                    ppi_req_outer: relids_singleton(run.mcx, r),
+                    ppi_rows: 10.0,
+                    ppi_clauses: PgVec::new_in(run.mcx),
+                    ppi_serials: types_pathnodes::relids::relids_empty(),
+                },
+            )
+            .unwrap()
+        });
+        let path = Path {
+            type_: types_pathnodes::tag16(NodeTag::T_Path),
+            pathtype: types_pathnodes::tag16(NodeTag::T_SeqScan),
+            parent: rel,
+            pathtarget_id: None,
+            param_info,
+            parallel_aware: false,
+            parallel_safe: true,
+            parallel_workers: 0,
+            rows: 10.0,
+            disabled_nodes: 0,
+            startup_cost: 0.0,
+            total_cost: total,
+            pathkeys: PgVec::new_in(run.mcx),
+        };
+        run.root.alloc_path(PathNode::Path(path))
+    }
+
+    // convert_numeric_to_scalar (selfuncs.c:4766-4778) treats every OID
+    // alias type as an integer, the five newer reg* types included.
+    // a186-candidate-fp-adt-selfuncs-p2-3a6d4a3b903291140df5-1
+    #[test]
+    fn convert_numeric_to_scalar_covers_every_reg_type() {
+        for typid in [4191u32, 3734, 3769, 4096, 4089] {
+            assert_eq!(
+                crate::selfuncs::convert_numeric_to_scalar(Datum::from_u32(4711), typid),
+                Some(4711.0),
+                "typid {typid}"
+            );
+        }
+        // Control: a non-numeric type still reports "can't convert".
+        assert_eq!(crate::selfuncs::convert_numeric_to_scalar(Datum::from_u32(4711), 25), None);
+    }
+
+    // query_planner (planmain.c:291-293): a final rel whose only path is
+    // parameterized -- set_cheapest fell back to best_param_path -- is
+    // elog(ERROR) "failed to construct the join relation" (XX000), never a
+    // panic. a186-candidate-fp-plan-b1-37711f12a5d32d238348-1 and
+    // a186-candidate-fp-plan-b1-f84272d3e75814db0ea6-1.
+    #[test]
+    fn query_planner_refuses_a_parameterized_only_final_rel_as_xx000() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        let mut run = crate::run::PlannerRun::new(mcx);
+        let rel = mk_rel(&mut run, 1);
+        let p = mk_seq_path(&mut run, rel, 10.0, Some(2));
+        crate::pathnode::add_path(&mut run, rel, p);
+        crate::pathnode::set_cheapest(&mut run, rel).unwrap();
+        let cheapest = run.root.rel(rel).cheapest_total_path.expect("best_param_path fallback");
+        assert!(run.root.path(cheapest).base().param_info.is_some());
+        let err = crate::planmain::check_final_rel(&run.root, rel).unwrap_err();
+        assert_eq!(err.message(), "failed to construct the join relation");
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        // Control: an unparameterized path makes the rel usable.
+        let q = mk_seq_path(&mut run, rel, 20.0, None);
+        crate::pathnode::add_path(&mut run, rel, q);
+        crate::pathnode::set_cheapest(&mut run, rel).unwrap();
+        crate::planmain::check_final_rel(&run.root, rel).unwrap();
+    }
+
+    // create_append_plan (createplan.c:1347) / create_merge_append_plan
+    // (:1519): a child whose sort columns don't line up is elog(ERROR)
+    // "<Parent> child's targetlist doesn't match <Parent>" (XX000), never a
+    // panic. a186-candidate-fp-plan-createplan-p1-c98094e714a99d5badb9-1
+    #[test]
+    fn ordered_append_child_sort_column_mismatch_is_xx000() {
+        let err = crate::createplan::check_ordered_append_child_sort_cols(&[1, 3], &[1, 2], "Append")
+            .unwrap_err();
+        assert_eq!(err.message(), "Append child's targetlist doesn't match Append");
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        let err =
+            crate::createplan::check_ordered_append_child_sort_cols(&[2], &[1], "MergeAppend")
+                .unwrap_err();
+        assert_eq!(err.message(), "MergeAppend child's targetlist doesn't match MergeAppend");
+        crate::createplan::check_ordered_append_child_sort_cols(&[1, 2], &[1, 2], "Append").unwrap();
+    }
+
+    // create_hashjoin_plan (createplan.c:4933-4956): a single hash clause
+    // whose outer side is a base-relation column (through a RelabelType)
+    // supplies skewTable / skewColumn / skewInherit to the Hash node.
+    // a186-candidate-fp-plan-createplan-p2-d8fd6244fcb940da5cac-1
+    #[test]
+    fn hashjoin_skew_info_identifies_the_outer_base_column() {
+        use types_nodes::primnodes::{CoercionForm, OpExpr};
+        let cx = cx();
+        let mcx = cx.mcx();
+        let parse = table_query(mcx, None);
+        let mut run = crate::run::PlannerRun::new(mcx);
+        crate::subquery::subquery_planner(&mut run, leak_q(mcx, parse), false, 0.0, None).unwrap();
+        fn eq<'m>(mcx: Mcx<'m>, lhs: Node<'m>) -> Node<'m> {
+            let konst = Node::mk_const(mcx, 23, -1, 0, 4, Datum::from_i32(7), false, true).unwrap();
+            Node::mk(
+                mcx,
+                OpExpr {
+                    opno: INT4EQ_OP,
+                    opfuncid: INT4EQ_PROC,
+                    opresulttype: 16,
+                    opretset: false,
+                    opcollid: 0,
+                    inputcollid: 0,
+                    args: NodeList::make2(mcx, lhs, konst).unwrap(),
+                    location: -1,
+                },
+            )
+            .unwrap()
+        }
+        let var = Node::mk_var(mcx, 1, 2, 23, -1, 0, 0).unwrap();
+        let one = NodeList::make1(mcx, eq(mcx, var)).unwrap();
+        assert_eq!(crate::createplan::hashjoin_skew_info(&run, &one), (TBL, 2, false));
+        // A binary-compatible relabeling of the column is looked through.
+        let relabeled =
+            Node::mk_relabel_type(mcx, var, 26, -1, 0, CoercionForm::COERCE_IMPLICIT_CAST).unwrap();
+        let one_relabeled = NodeList::make1(mcx, eq(mcx, relabeled)).unwrap();
+        assert_eq!(crate::createplan::hashjoin_skew_info(&run, &one_relabeled), (TBL, 2, false));
+        // Controls: a non-Var outer side, or more than one clause, gives no skew table.
+        let konst = Node::mk_const(mcx, 23, -1, 0, 4, Datum::from_i32(1), false, true).unwrap();
+        let non_var = NodeList::make1(mcx, eq(mcx, konst)).unwrap();
+        assert_eq!(crate::createplan::hashjoin_skew_info(&run, &non_var), (0, 0, false));
+        let two = NodeList::make2(mcx, eq(mcx, var), eq(mcx, var)).unwrap();
+        assert_eq!(crate::createplan::hashjoin_skew_info(&run, &two), (0, 0, false));
+    }
+
+    // remove_rel_from_eclass (analyzejoins.c:810): an EC that never
+    // mentioned the removed rel is left alone, its ec_derives cache
+    // included. a186-candidate-fp-plan-analyzejoins-c16afbb7346b619fedfd-1
+    #[test]
+    fn remove_rel_from_eclass_leaves_unrelated_ecs_and_their_derives_alone() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        let mut run = crate::run::PlannerRun::new(mcx);
+        let mut unrelated = EquivalenceClass::new(mcx);
+        unrelated.ec_relids = relids_singleton(mcx, 1u32);
+        unrelated.ec_derives_list.push(RinfoId(7));
+        let unrelated = run.root.alloc_ec(unrelated);
+        let mut touched = EquivalenceClass::new(mcx);
+        touched.ec_relids = relids_singleton(mcx, 2u32);
+        touched.ec_derives_list.push(RinfoId(8));
+        let touched = run.root.alloc_ec(touched);
+
+        crate::analyzejoins::remove_rel_from_eclass_subst(&mut run, unrelated, 2, 3).unwrap();
+        let e = run.root.ec(unrelated);
+        assert!(relids_equal(&e.ec_relids, &relids_singleton(mcx, 1)));
+        assert_eq!(e.ec_derives_list.len(), 1, "unrelated EC keeps its derived clauses");
+
+        // Control: an EC mentioning the removed rel is rewritten and cleared.
+        crate::analyzejoins::remove_rel_from_eclass_subst(&mut run, touched, 2, 3).unwrap();
+        let e = run.root.ec(touched);
+        assert!(relids_equal(&e.ec_relids, &relids_singleton(mcx, 3)));
+        assert!(e.ec_derives_list.is_empty());
+    }
+}

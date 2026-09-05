@@ -811,6 +811,20 @@ fn btcanreturn() -> bool {
 // Returnable fallback rides the indexam_seams slot installed here.
 pub fn index_can_return(mcx: mcx::Mcx<'_>, index_oid: Oid, attno: i32) -> PgResult<bool> {
     let rel = indexam::index_open(mcx, index_oid, types_rel::AccessShareLock)?;
+    // RELATION_CHECKS (indexam.c:75-84, run by index_can_return at :837): an
+    // index currently being rebuilt, or pending rebuild, refuses access
+    // with ERRCODE_FEATURE_NOT_SUPPORTED.
+    if types_rel::reindex::ReindexIsProcessingIndex(rel.rd_id) {
+        let err = Box::new(
+            types_error::PgError::error(format!(
+                "cannot access index \"{}\" while it is being reindexed",
+                rel.name()
+            ))
+            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+        );
+        indexam::index_close(rel, types_rel::AccessShareLock)?;
+        return Err(err);
+    }
     let res = match types_relscan::IndexAmKind::from_relam(rel.rd_rel.relam) {
         types_relscan::IndexAmKind::Btree => btcanreturn(),
         types_relscan::IndexAmKind::Gist => gist::gistcanreturn(&rel, attno),

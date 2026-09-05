@@ -99,12 +99,30 @@ pub fn query_planner<'mcx>(
     crate::inherit::distribute_row_identity_vars(run)?;
 
     let final_rel = crate::allpaths::make_one_rel(run, &joinlist)?;
-    if run.root.rel(final_rel).cheapest_total_path.is_none()
-        || run.root.rel(final_rel).pathlist.is_empty()
-    {
-        panic!("failed to construct the join relation");
-    }
+    check_final_rel(&run.root, final_rel)?;
     Ok(final_rel)
+}
+
+// planmain.c:291-293: the top join relation must own an unparameterized
+// cheapest_total_path (set_cheapest falls back to best_param_path when no
+// unparameterized path exists, so param_info must be tested too); anything
+// else is elog(ERROR) "failed to construct the join relation", a catchable
+// XX000, never a panic.
+pub(crate) fn check_final_rel(
+    root: &types_pathnodes::PlannerInfo<'_>,
+    final_rel: RelId,
+) -> PgResult<()> {
+    let rel = root.rel(final_rel);
+    let usable = match rel.cheapest_total_path {
+        Some(p) if !rel.pathlist.is_empty() => root.path(p).base().param_info.is_none(),
+        _ => false,
+    };
+    if !usable {
+        return Err(Box::new(types_error::PgError::error(
+            "failed to construct the join relation".to_string(),
+        )));
+    }
+    Ok(())
 }
 
 // add_base_rels_to_query (initsplan.c): FromExpr items handled by the caller.

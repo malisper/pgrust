@@ -877,6 +877,40 @@ pub(crate) fn add_paths_to_append_rel(
         crate::pathnode::add_partial_path(run, rel, pid);
     }
 
+    // allpaths.c:1700-1720: with a single live child the Append inherits
+    // any ordering of the child's path, so every partial path of that child
+    // that carries pathkeys (beyond the cheapest one, used above) also
+    // becomes an ordered partial Append -- the input a Gather Merge needs.
+    if partial_subpaths_valid && live_childrels.len() == 1 {
+        let childrel = live_childrels[0];
+        let ordered: mcx::PgVec<'_, types_pathnodes::PathId> = {
+            let mut v = mcx::PgVec::new_in(mcx);
+            for &p in run.root.rel(childrel).partial_pathlist.iter().skip(1) {
+                if !run.root.path(p).base().pathkeys.is_empty() {
+                    v.push(p);
+                }
+            }
+            v
+        };
+        for &path in ordered.iter() {
+            let workers = run.root.path(path).base().parallel_workers;
+            let mut subs: mcx::PgVec<'_, types_pathnodes::PathId> = mcx::PgVec::new_in(mcx);
+            subs.push(path);
+            let pid = crate::pathnode::create_append_path(
+                run,
+                rel,
+                mcx::PgVec::new_in(mcx),
+                subs,
+                mcx::PgVec::new_in(mcx),
+                &crate::relnode::RELIDS_UNSET,
+                workers,
+                true,
+                partial_rows,
+            )?;
+            crate::pathnode::add_partial_path(run, rel, pid);
+        }
+    }
+
     // Parallel-aware append mixing partial and non-partial subpaths: only
     // worthwhile when some child has a substantially cheaper non-partial path.
     if pa_subpaths_valid && !pa_nonpartial_subpaths.is_empty() {
@@ -1436,8 +1470,10 @@ fn set_rel_consider_parallel(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -
     let rte = run.rte(rti);
     match rte.rtekind {
         RTEKind::RTE_RELATION => {
-            // Workers can't read the leader's temp buffers.
-            if lsyscache::get_rel_persistence(rte.relid)? != b'p' as i8 {
+            // Workers can't read the leader's temp buffers
+            // (allpaths.c:623: only RELPERSISTENCE_TEMP is excluded; an
+            // UNLOGGED table lives in shared buffers and stays parallel-safe).
+            if lsyscache::get_rel_persistence(rte.relid)? == b't' as i8 {
                 return Ok(());
             }
             // M4-S4 at consider_parallel grain (the partitioned hole,

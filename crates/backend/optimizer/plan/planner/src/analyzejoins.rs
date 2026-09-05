@@ -1213,12 +1213,17 @@ fn remove_rel_from_query_subst(
 }
 
 // remove_rel_from_eclass (analyzejoins.c), subst form (sjinfo == NULL).
-fn remove_rel_from_eclass_subst(
+pub(crate) fn remove_rel_from_eclass_subst(
     run: &mut PlannerRun<'_>,
     ec: EcId,
     relid: i32,
     subst: i32,
 ) -> PgResult<()> {
+    // analyzejoins.c:810: an EC that never mentioned the removed rel is
+    // left alone -- in particular its ec_derives cache survives.
+    if !relids_is_member(relid, &run.root.ec(ec).ec_relids) {
+        return Ok(());
+    }
     let mcx = run.mcx;
     let v = adjust_relid_set(run, &run.root.ec(ec).ec_relids, relid, subst);
     run.root.ec_mut(ec).ec_relids = v;

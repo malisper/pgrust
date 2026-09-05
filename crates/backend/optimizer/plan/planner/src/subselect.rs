@@ -1709,8 +1709,21 @@ pub(crate) fn cost_subplan<'mcx>(
     Ok(())
 }
 
+// ExecMaterializesOutput (execAmi.c:636): the plan node types that keep
+// their output in a tuplestore, so an uncorrelated rescan costs nothing to
+// start -- Material, FunctionScan, TableFuncScan, CteScan,
+// NamedTuplestoreScan, WorkTableScan and Sort.
 fn exec_materializes_output(tag: NodeTag) -> bool {
-    matches!(tag, NodeTag::T_Sort | NodeTag::T_Material)
+    matches!(
+        tag,
+        NodeTag::T_Material
+            | NodeTag::T_FunctionScan
+            | NodeTag::T_TableFuncScan
+            | NodeTag::T_CteScan
+            | NodeTag::T_NamedTuplestoreScan
+            | NodeTag::T_WorkTableScan
+            | NodeTag::T_Sort
+    )
 }
 
 fn simplify_exists_query<'mcx>(run: &mut PlannerRun<'mcx>, query: &mut Query<'mcx>) -> PgResult<bool> {
