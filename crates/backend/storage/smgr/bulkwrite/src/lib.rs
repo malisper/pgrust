@@ -3,7 +3,8 @@
 #![allow(non_snake_case)]
 
 use types_core::{BlockNumber, ForkNumber, InvalidSubTransactionId, XLogRecPtr, BLCKSZ, INVALID_PROC_NUMBER};
-use types_error::PgResult;
+use elog::ereport;
+use types_error::{ErrorLocation, PgResult, DEBUG1};
 use types_rel::Relation;
 use types_storage::{RelFileLocatorBackend, DELAY_CHKPT_START};
 
@@ -100,6 +101,10 @@ pub fn smgr_bulk_finish(mut state: BulkWriteState) -> PgResult<()> {
         if state.start_RedoRecPtr != transam_xlog::GetRedoRecPtr() {
             proc.delayChkptFlags.fetch_and(!DELAY_CHKPT_START, Relaxed);
             smgr::smgrimmedsync(state.smgr, state.forknum)?;
+            // bulk_write.c:214
+            ereport(DEBUG1)
+                .errmsg_internal("flushed relation because a checkpoint occurred concurrently")
+                .finish(ErrorLocation::new(file!(), line!() as i32, "smgr_bulk_finish"))?;
         } else {
             smgr::smgrregistersync(state.smgr, state.forknum)?;
             proc.delayChkptFlags.fetch_and(!DELAY_CHKPT_START, Relaxed);

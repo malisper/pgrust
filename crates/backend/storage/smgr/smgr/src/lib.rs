@@ -935,17 +935,18 @@ pub fn init_seams() {
         })?
     });
     smgr_seams::smgr_startreadv::set(|rlocator, forknum, blocknum, pages| {
-        // smgrstartreadv: interrupts held so the resolved fd cannot be closed
-        // before pgaio_io_start_readv consumes it; an ereport unwinds past the
-        // resume, exactly like C's longjmp (error recovery resets the count).
+        // smgrstartreadv (smgr.c:753-761): interrupts held so the resolved fd
+        // cannot be closed before pgaio_io_start_readv consumes it. C's
+        // RESUME_INTERRUPTS is skipped by an ereport's longjmp, but errfinish
+        // (elog.c:528) has zeroed InterruptHoldoffCount by then; here an Err
+        // is a value a catcher (plpgsql EXCEPTION) can keep alive without
+        // touching the counters, so the bracket balances on BOTH paths.
         init_small::globals::HoldInterrupts();
         let result = opened(rlocator, |r| match r.which {
             SmgrKind::Md => md::mdstartreadv(rlocator, &mut r.md, forknum, blocknum, pages),
         })
         .and_then(|inner| inner);
-        if result.is_ok() {
-            init_small::globals::ResumeInterrupts();
-        }
+        init_small::globals::ResumeInterrupts();
         result
     });
     smgr_seams::aio_smgr_reopen::set(|td, op, temp_procno, offset| {

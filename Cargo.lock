@@ -2801,6 +2801,7 @@ name = "bulkwrite"
 version = "0.1.0"
 dependencies = [
  "bufmgr",
+ "elog",
  "lmgr_proc",
  "smgr",
  "transam_xlog",

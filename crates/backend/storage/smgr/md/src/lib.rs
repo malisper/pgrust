@@ -17,6 +17,7 @@ use ::types_error::{
     ErrorLocation, PgResult, DEBUG1, ERROR, ERRCODE_DATA_CORRUPTED, ERRCODE_DISK_FULL,
     ERRCODE_PROGRAM_LIMIT_EXCEEDED, FATAL, WARNING,
 };
+use ::types_storage::bufpage::PG_IO_ALIGN_SIZE;
 use ::types_storage::file::{File, FILE_EXTEND_METHOD_WRITE_ZEROS, IO_DIRECT_DATA};
 use ::types_storage::smgr::{
     MdRelnState, MdfdVec, EXTENSION_CREATE, EXTENSION_CREATE_RECOVERY, EXTENSION_DONT_OPEN,
@@ -94,6 +95,15 @@ fn in_recovery() -> bool {
 fn io_direct_data() -> bool {
     (fd::io_direct_flags() & IO_DIRECT_DATA) != 0
 }
+
+// md.c:1815 palloc_aligned(BLCKSZ, PG_IO_ALIGN_SIZE, MCXT_ALLOC_ZERO): the
+// block that pads a short prior segment must be I/O-aligned so the write is
+// legal on an O_DIRECT descriptor (debug_io_direct=data, EINVAL otherwise).
+// A read-only static carries the same bytes without the per-call allocation.
+#[repr(align(4096))]
+struct IoAlignedZeroBlock([u8; BLCKSZ]);
+const _: () = assert!(core::mem::align_of::<IoAlignedZeroBlock>() == PG_IO_ALIGN_SIZE);
+static ZERO_BLOCK: IoAlignedZeroBlock = IoAlignedZeroBlock([0u8; BLCKSZ]);
 
 #[inline]
 fn relpath(rlocator: RelFileLocatorBackend, forknum: ForkNumber) -> String {
@@ -978,6 +988,12 @@ pub fn mdnblocks(
         // walk that raced a size mutation (connscale §6b').
         match nblocks_cache::lookup_or_begin_walk(rlocator.locator, forknum) {
             Ok(cached) => {
+                // md.c:1230: segment 0 is opened (EXTENSION_FAIL) before any
+                // answer, so a backend whose fork file is gone from disk
+                // errors "could not open file" instead of reporting a size.
+                // The cache stands in for the lseek walk only, never for the
+                // open (a no-op once the fork is open, as in C).
+                mdopenfork(rlocator, st, forknum, EXTENSION_FAIL)?;
                 if nblocks_validate() {
                     validate_cached(rlocator, st, forknum, cached)?;
                 }
@@ -1479,13 +1495,12 @@ fn _mdfd_getseg(
             if nblocks < RELSEG_SIZE {
                 // Pad the short prior segment to RELSEG_SIZE with a zero block
                 // so segment-boundary math holds when creating the next one.
-                let zerobuf = [0u8; BLCKSZ];
                 mdextend(
                     rlocator,
                     st,
                     forknum,
                     nextsegno * RELSEG_SIZE - 1,
-                    &zerobuf,
+                    &ZERO_BLOCK.0,
                     skip_fsync,
                 )?;
             }
