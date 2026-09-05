@@ -10670,6 +10670,7 @@ dependencies = [
  "lsyscache",
  "mcx",
  "nodes_core",
+ "postgres_seams",
  "tupdesc",
  "tuplestore",
  "types_core",

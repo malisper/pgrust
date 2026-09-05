@@ -17,6 +17,7 @@ init_small = { path = "../../utils/init/init_small" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 mcx = { path = "../../../_support/mcx" }
 nodes_core = { path = "../../nodes/nodes_core" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
 tupdesc = { path = "../../access/common/tupdesc" }
 tuplestore = { path = "../../utils/sort/tuplestore" }
 types_core = { path = "../../../_support/types/types_core" }

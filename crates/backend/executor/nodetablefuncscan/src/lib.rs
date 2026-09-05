@@ -5,19 +5,21 @@
 extern crate alloc;
 
 use alloc::rc::Rc;
+use core::alloc::Layout;
 use core::ffi::CStr;
+use core::ptr::NonNull;
 
 use ::adt_jsonpath_exec::json_table::JsonTableExecContext;
 use ::adt_jsonpath_exec::JsonPathVariable;
 use ::adt_xml::xmltable::XmlTableContext;
 use ::datum::{Datum, NullableDatum};
 use ::execexpr::{
-    exec_eval_expr, exec_init_expr, exec_init_expr_with_case_test, EvalSlots,
-    ExprState,
+    exec_eval_expr, exec_init_expr_subplans, exec_init_expr_with_case_test_subplans,
+    EvalSlots, ExprState,
 };
 use ::execscan::{exec_scan_epq, exec_scan_extended, ScanNode, ScanState};
 use ::executils::{EStateData, EcxtId, ExecSlotId};
-use ::mcx::{Mcx, PgBox, PgVec};
+use ::mcx::{Allocator, Mcx, MemoryContext, PgBox, PgVec};
 use ::types_core::Oid;
 use ::types_error::{PgError, PgResult, ERRCODE_NULL_VALUE_NOT_ALLOWED};
 use ::types_fmgr::{input_function_call, FmgrInfo};
@@ -45,6 +47,30 @@ pub struct TableFuncScanState<'mcx> {
     tstore: Option<Tuplestore>,
     ordinal: i32,
     cstr_scratch: PgVec<'mcx, u8>,
+    // C perTableCxt ("TableFunc per value context", nodeTableFuncscan.c:170):
+    // per-one-call (one result table) lifetime data — the JSON_TABLE exec
+    // context, PASSING values, detoasted documents — reset at the end of
+    // every tfuncFetchRows (line 330), so a LATERAL join over many outer
+    // rows keeps flat memory instead of leaking every call into
+    // es_query_cxt. Arena-slot + estate reset-callback ownership, the
+    // nodefunctionscan make_arg_ctx idiom.
+    per_table_mcx: NonNull<MemoryContext>,
+}
+
+// C perTableCxt lifetime (AllocSetContextCreate under es_query_cxt, freed by
+// FreeExecutorState's recursive delete): the context VALUE lives in the
+// estate arena at a stable address and the estate context's reset callback
+// is the reclaim point (fires exactly once, before the arena bytes go).
+fn make_per_table_ctx(mcx: Mcx<'_>) -> PgResult<NonNull<MemoryContext>> {
+    let layout = Layout::new::<MemoryContext>();
+    let raw = mcx.allocate(layout).map_err(|_| mcx.oom(layout.size()))?;
+    let p: NonNull<MemoryContext> = raw.cast();
+    // SAFETY: fresh allocation of the exact layout.
+    unsafe { p.write(mcx.context().new_child_bump("TableFunc per value context")) };
+    // SAFETY: fires exactly once, before the arena bytes are reclaimed.
+    mcx.context()
+        .register_reset_callback(move || unsafe { core::ptr::drop_in_place(p.as_ptr()) });
+    Ok(p)
 }
 
 impl<'mcx> ScanNode<'mcx> for TableFuncScanState<'mcx> {
@@ -144,34 +170,46 @@ pub fn exec_init_table_func_scan<'mcx>(
         })?
     };
 
-    let init_one = |e: Option<::types_nodes::Node<'mcx>>,
-                    estate: &mut EStateData<'mcx>|
-     -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
-        Ok(exec_init_expr(mcx, e, estate.param_bind())?.expect("non-NULL expression"))
-    };
-    let docexpr = init_one(tf.docexpr, estate)?;
-    let rowexpr = exec_init_expr(mcx, tf.rowexpr, estate.param_bind())?;
+    // C ExecInitTableFuncScan (nodeTableFuncscan.c:177-190) compiles every
+    // TableFunc expression with (PlanState *) scanstate as the parent, so a
+    // SubPlan or initplan Param inside a document / row / namespace / column
+    // / DEFAULT / PASSING expression (LATERAL XMLTABLE ... DEFAULT (SELECT
+    // t.id), JSON_TABLE((SELECT ...), ...)) attaches to this node.
+    let pb = estate.param_bind();
     let mut ns_uris: PgVec<'_, PgBox<'mcx, ExprState<'mcx>>> = PgVec::new_in(mcx);
-    for e in &tf.ns_uris {
-        ns_uris.push(init_one(Some(e), estate)?);
-    }
     let mut colexprs: PgVec<'_, Option<PgBox<'mcx, ExprState<'mcx>>>> = PgVec::new_in(mcx);
-    for e in tf.colexprs.iter() {
-        colexprs.push(exec_init_expr(mcx, e, estate.param_bind())?);
-    }
     let mut coldefexprs: PgVec<'_, Option<PgBox<'mcx, ExprState<'mcx>>>> = PgVec::new_in(mcx);
-    for e in tf.coldefexprs.iter() {
-        coldefexprs.push(exec_init_expr(mcx, e, estate.param_bind())?);
-    }
     // NULL cells are FOR ORDINALITY columns.
     let mut colvalexprs: PgVec<'_, Option<PgBox<'mcx, ExprState<'mcx>>>> = PgVec::new_in(mcx);
-    for e in tf.colvalexprs.iter() {
-        colvalexprs.push(exec_init_expr_with_case_test(mcx, e, estate.param_bind())?);
-    }
     let mut passingvalexprs: PgVec<'_, PgBox<'mcx, ExprState<'mcx>>> = PgVec::new_in(mcx);
-    for e in tf.passingvalexprs.iter() {
-        passingvalexprs.push(init_one(Some(e), estate)?);
-    }
+    let (docexpr, rowexpr) =
+        ::executils::with_subplan_compile_env(estate, |env| -> PgResult<_> {
+            let docexpr = exec_init_expr_subplans(mcx, tf.docexpr, pb, env)?
+                .expect("non-NULL expression");
+            let rowexpr = exec_init_expr_subplans(mcx, tf.rowexpr, pb, env)?;
+            for e in &tf.ns_uris {
+                ns_uris.push(
+                    exec_init_expr_subplans(mcx, Some(e), pb, env)?
+                        .expect("non-NULL expression"),
+                );
+            }
+            for e in tf.colexprs.iter() {
+                colexprs.push(exec_init_expr_subplans(mcx, e, pb, env)?);
+            }
+            for e in tf.coldefexprs.iter() {
+                coldefexprs.push(exec_init_expr_subplans(mcx, e, pb, env)?);
+            }
+            for e in tf.colvalexprs.iter() {
+                colvalexprs.push(exec_init_expr_with_case_test_subplans(mcx, e, pb, env)?);
+            }
+            for e in tf.passingvalexprs.iter() {
+                passingvalexprs.push(
+                    exec_init_expr_subplans(mcx, Some(e), pb, env)?
+                        .expect("non-NULL expression"),
+                );
+            }
+            Ok((docexpr, rowexpr))
+        })?;
 
     Ok(TableFuncScanState {
         ss,
@@ -189,7 +227,25 @@ pub fn exec_init_table_func_scan<'mcx>(
         tstore: None,
         ordinal: 0,
         cstr_scratch: PgVec::new_in(mcx),
+        per_table_mcx: make_per_table_ctx(mcx)?,
     })
+}
+
+/// C ExecEvalExpr on a TableFunc expression compiled under this node: a
+/// state carrying a SubPlan step or a pending-initplan PARAM_EXEC fetch
+/// rides the executils suspension driver (nodefunctionscan precedent); the
+/// plain kernel serves the rest. The result mcx is armed by the caller.
+fn eval_armed<'mcx>(
+    expr: &mut ExprState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    ecxt: EcxtId,
+) -> PgResult<NullableDatum> {
+    if expr.has_subplan() || !expr.param_exec_deps().is_empty() {
+        ::executils::exec_eval_expr_with_subplans(expr, estate, ecxt)
+    } else {
+        let mut slots = EvalSlots { scan: None, inner: None, outer: None };
+        exec_eval_expr(expr, &mut slots)
+    }
 }
 
 impl<'mcx> TableFuncScanState<'mcx> {
@@ -200,6 +256,10 @@ impl<'mcx> TableFuncScanState<'mcx> {
         let work_mem = init_small::globals::work_mem();
         let mut store = Tuplestore::begin_heap(false, false, work_mem);
 
+        // C MemoryContextSwitchTo(tstate->perTableCxt) (line 290): the
+        // previous call's error path left its data behind, as C leaves it
+        // to the next reset.
+        self.per_table_reset();
         if self.tf.functype == TableFuncType::TFT_JSON_TABLE {
             self.fetch_rows_json(&mut store, estate, ecxt)?;
         } else {
@@ -208,10 +268,29 @@ impl<'mcx> TableFuncScanState<'mcx> {
             ctx.destroy();
             r?;
         }
+        // C MemoryContextReset(tstate->perTableCxt) (line 330): every row is
+        // in the tuplestore by now.
+        self.per_table_reset();
 
         store.rescan()?;
         self.tstore = Some(store);
         Ok(())
+    }
+
+    fn per_table_reset(&mut self) {
+        // SAFETY: arena slot armed by make_per_table_ctx; exclusive during
+        // the scan (dropped only by the estate reset callback).
+        unsafe { self.per_table_mcx.as_mut() }.reset();
+    }
+
+    /// The per-table context as an `'mcx`-stamped handle for the
+    /// scan-lifetime containers it feeds (JsonTableExecContext, PASSING
+    /// values, detoasted documents).
+    fn per_table(&self) -> Mcx<'mcx> {
+        // SAFETY: the context value lives in the estate arena for the whole
+        // plan ('mcx); everything allocated through this handle is consumed
+        // (copied into the tuplestore / libxml) before the next reset.
+        unsafe { self.per_table_mcx.as_ref().mcx() }
     }
 
     // tfuncFetchRows/Initialize/LoadRows, JSON_TABLE shape: PASSING args are
@@ -224,7 +303,7 @@ impl<'mcx> TableFuncScanState<'mcx> {
         estate: &mut EStateData<'mcx>,
         ecxt: EcxtId,
     ) -> PgResult<()> {
-        let mcx = estate.es_query_cxt;
+        let mcx = self.per_table();
         let je = self
             .tf
             .docexpr
@@ -242,10 +321,9 @@ impl<'mcx> TableFuncScanState<'mcx> {
             let src = self.tf.passingvalexprs.nth(i);
             let expr = &mut self.passingvalexprs[i];
             // PASSING values are read on every row-pattern reset; results go
-            // to the scan-lifetime context (C: perTableCxt).
+            // to the per-table context (C: perTableCxt).
             expr.arm_result_mcx(mcx);
-            let mut slots = EvalSlots { scan: None, inner: None, outer: None };
-            let NullableDatum { value, isnull } = exec_eval_expr(expr, &mut slots)?;
+            let NullableDatum { value, isnull } = eval_armed(expr, estate, ecxt)?;
             args.push(JsonPathVariable {
                 name: name.as_bytes(),
                 typid: ::nodes_core::node_funcs::expr_type(src),
@@ -268,6 +346,8 @@ impl<'mcx> TableFuncScanState<'mcx> {
         let mut values: PgVec<'_, Datum> = mcx::vec_from_elem_in(mcx, Datum::null(), natts);
         let mut nulls: PgVec<'_, bool> = mcx::vec_from_elem_in(mcx, true, natts);
         while jt.fetch_row()? {
+            // C tfuncLoadRows CHECK_FOR_INTERRUPTS() (nodeTableFuncscan.c:465).
+            ::postgres_seams::check_for_interrupts::call()?;
             for colno in 0..natts {
                 let (img, ordinal) = jt.current_row(colno);
                 let (value, isnull) = match img {
@@ -284,9 +364,7 @@ impl<'mcx> TableFuncScanState<'mcx> {
                             unsafe {
                                 expr.arm_result_mcx_raw(estate.ecxt(ecxt).per_tuple_mcx())
                             };
-                            let mut slots =
-                                EvalSlots { scan: None, inner: None, outer: None };
-                            let nd = exec_eval_expr(expr, &mut slots)?;
+                            let nd = eval_armed(expr, estate, ecxt)?;
                             (nd.value, nd.isnull)
                         }
                         None => (Datum::from_i32(ordinal), false),
@@ -333,7 +411,7 @@ impl<'mcx> TableFuncScanState<'mcx> {
         estate: &mut EStateData<'mcx>,
         ecxt: EcxtId,
     ) -> PgResult<()> {
-        let mcx = estate.es_query_cxt;
+        let mcx = self.per_table();
         ctx.set_document(varlena_payload(mcx, doc)?)?;
 
         debug_assert_eq!(self.ns_uris.len(), self.tf.ns_names.len());
@@ -393,12 +471,14 @@ impl<'mcx> TableFuncScanState<'mcx> {
         ecxt: EcxtId,
     ) -> PgResult<()> {
         let natts = self.tupdesc.natts as usize;
-        let mcx = estate.es_query_cxt;
+        let mcx = self.per_table();
         let mut values: PgVec<'_, Datum> = mcx::vec_from_elem_in(mcx, Datum::null(), natts);
         let mut nulls: PgVec<'_, bool> = mcx::vec_from_elem_in(mcx, true, natts);
         let ordinalitycol = self.tf.ordinalitycol;
 
         while ctx.fetch_row()? {
+            // C tfuncLoadRows CHECK_FOR_INTERRUPTS() (nodeTableFuncscan.c:465).
+            ::postgres_seams::check_for_interrupts::call()?;
             for colno in 0..natts {
                 if colno as i32 == ordinalitycol {
                     values[colno] = Datum::from_i32(self.ordinal);
@@ -452,6 +532,7 @@ impl<'mcx> TableFuncScanState<'mcx> {
         estate: &mut EStateData<'mcx>,
         ecxt: EcxtId,
     ) -> PgResult<NullableDatum> {
+        let per_table = self.per_table();
         let expr = match *pick {
             EvalPick::Doc => &mut self.docexpr,
             EvalPick::Row => self.rowexpr.as_mut().expect("XMLTABLE row filter expr"),
@@ -459,11 +540,18 @@ impl<'mcx> TableFuncScanState<'mcx> {
             EvalPick::Col(i) => self.colexprs[i].as_mut().expect("column filter expr"),
             EvalPick::Def(i) => self.coldefexprs[i].as_mut().expect("column default expr"),
         };
-        // SAFETY: the per-tuple context outlives this evaluation; results are
-        // consumed (copied into libxml / the tuplestore) before its reset.
-        unsafe { expr.arm_result_mcx_raw(estate.ecxt(ecxt).per_tuple_mcx()) };
-        let mut slots = EvalSlots { scan: None, inner: None, outer: None };
-        exec_eval_expr(expr, &mut slots)
+        if let EvalPick::Def(_) = *pick {
+            // C tfuncLoadRows evaluates DEFAULT under ecxt_per_tuple_memory
+            // (line 456); the value is copied into the tuplestore before the
+            // reset.
+            // SAFETY: the per-tuple context outlives this evaluation.
+            unsafe { expr.arm_result_mcx_raw(estate.ecxt(ecxt).per_tuple_mcx()) };
+        } else {
+            // C tfuncFetchRows / tfuncInitialize run under perTableCxt
+            // (line 290): document, namespace, row and column filters.
+            expr.arm_result_mcx(per_table);
+        }
+        eval_armed(expr, estate, ecxt)
     }
 }
 
@@ -532,10 +620,12 @@ pub fn exec_rescan_table_func_scan_chg<'mcx>(
     Ok(())
 }
 
-// Exempt: tstore released in exec_end_table_func_scan; the rest is plain data.
+// Exempt: tstore released in exec_end_table_func_scan; per_table_mcx is a
+// NonNull to an arena slot whose context value the estate-reset callback
+// drops (make_per_table_ctx); the rest is plain data.
 mcx::forget_safe_struct!(
     TableFuncScanState<'_> {
-        ss, tf, ordinal;
+        ss, tf, ordinal, per_table_mcx;
         docexpr, rowexpr, ns_uris, colexprs, coldefexprs, colvalexprs,
         passingvalexprs, in_functions, typioparams, tupdesc, tstore,
         cstr_scratch

@@ -186,13 +186,26 @@ pub fn exec_init_expr_with_case_test<'mcx>(
     node: Option<Node<'mcx>>,
     params: ParamBind<'mcx>,
 ) -> PgResult<Option<PgBox<'mcx, ExprState<'mcx>>>> {
+    exec_init_expr_with_case_test_subplans(mcx, node, params, None)
+}
+
+/// [`exec_init_expr_with_case_test`] with SubPlan compile support wired
+/// (C ExecInitExprList(tf->colvalexprs, (PlanState *) scanstate) in
+/// ExecInitTableFuncScan: the JSON_TABLE column expressions compile under
+/// the owning scan node, so SubPlans and initplan Params inside them resolve).
+pub fn exec_init_expr_with_case_test_subplans<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: Option<Node<'mcx>>,
+    params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
+) -> PgResult<Option<PgBox<'mcx, ExprState<'mcx>>>> {
     let Some(node) = node else {
         return Ok(None);
     };
     let mut state = ExprState::new_boxed_in(mcx)?;
-    create_expr_setup_steps(&mut state, mcx, &[node], None, params, None)?;
+    create_expr_setup_steps(&mut state, mcx, &[node], None, params, sub)?;
     let rout = state.result_out();
-    init_expr_rec(node, &mut state, mcx, rout, None, params, None)?;
+    init_expr_rec(node, &mut state, mcx, rout, None, params, sub)?;
     push_step(&mut state, mcx, Step::DoneReturn)?;
     ready_expr(&mut state);
     Ok(Some(state))
