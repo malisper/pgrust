@@ -598,8 +598,9 @@ fn create_slot_use_snapshot(
     let cmd = create_slot_use_snapshot_cmd(slotname, failover);
     let res = conn.exec(&cmd)?;
     if res.status != ExecStatus::TuplesOk {
+        // libpqwalreceiver.c:1036: ERRCODE_PROTOCOL_VIOLATION.
         ereport(ERROR)
-            .errcode(ERRCODE_CONNECTION_FAILURE)
+            .errcode(types_error::ERRCODE_PROTOCOL_VIOLATION)
             .errmsg(format!("could not create replication slot \"{slotname}\": {}", res.err))
             .finish(loc("create_slot_use_snapshot"))?;
     }

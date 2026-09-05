@@ -56,3 +56,8 @@ guc_tables = { path = "../../utils/misc/guc_tables" }
 types_fmgr = { package = "types_fmgr", path = "../../../_support/types/fmgr" }
 transam_xlog = { path = "../../access/transam/transam_xlog" }
 transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
+objectaccess = { path = "../../catalog/objectaccess" }
+event_trigger_seams = { path = "../event_trigger_seams" }
+pg_class_seams = { path = "../../catalog/pg_class_seams" }
+parser_small1 = { path = "../../parser/parser_small1" }
+mbutils = { path = "../../utils/mb/mbutils" }

@@ -157,15 +157,18 @@ fn find_local_index(rel: &Relation<'_>, remoterel: &LogicalRepRelation) -> Oid {
     }
 }
 
-// CheckSubscriptionRelkind (pg_subscription.c): plain and partitioned tables
-// are valid logical replication targets.
+// CheckSubscriptionRelkind (execReplication.c:877-886): plain and partitioned
+// tables are valid logical replication targets; the DETAIL is
+// errdetail_relkind_not_supported(relkind).
 pub fn check_relkind(relkind: u8, nspname: &str, relname: &str) -> PgResult<()> {
     if relkind != b'r' && relkind != b'p' {
+        let detail = pg_class_seams::errdetail_relkind_not_supported::call(relkind)?;
         ereport(ERROR)
             .errcode(ERRCODE_WRONG_OBJECT_TYPE)
             .errmsg(format!(
                 "cannot use relation \"{nspname}.{relname}\" as logical replication target"
             ))
+            .errdetail(detail)
             .finish(loc("logicalrep_rel_open"))?;
     }
     Ok(())

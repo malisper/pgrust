@@ -22,6 +22,15 @@ pub(crate) fn replorigin_by_name(roname: &str, missing_ok: bool) -> PgResult<Rep
     ::origin::replorigin_by_name(roname, missing_ok)
 }
 
+// replorigin_get_progress (origin.c): the origin's remote_lsn, as read by
+// ALTER SUBSCRIPTION ... SKIP (subscriptioncmds.c:1562).
+pub(crate) fn replorigin_get_progress(
+    node: RepOriginId,
+    flush: bool,
+) -> PgResult<types_core::primitive::XLogRecPtr> {
+    ::origin::replorigin_get_progress(node, flush)
+}
+
 pub(crate) fn replorigin_drop_by_name(
     mcx: Mcx<'_>,
     name: &str,

@@ -1908,7 +1908,7 @@ fn slow_switch<'mcx>(
                 >(stmt)
             };
             // C: address = CreateSubscription(...), collected by the shared tail.
-            let address = subscriptioncmds::CreateSubscription(mcx, stmt, is_top_level)?;
+            let address = subscriptioncmds::CreateSubscription(mcx, source_text, stmt, is_top_level)?;
             Ok(Some(address))
         }
         T_AlterSubscriptionStmt => {
@@ -1923,7 +1923,7 @@ fn slow_switch<'mcx>(
                 >(stmt)
             };
             // C: address = AlterSubscription(...), collected by the shared tail.
-            let address = subscriptioncmds::AlterSubscription(mcx, stmt, is_top_level)?;
+            let address = subscriptioncmds::AlterSubscription(mcx, source_text, stmt, is_top_level)?;
             Ok(Some(address))
         }
         T_DropSubscriptionStmt => {

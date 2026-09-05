@@ -6,9 +6,11 @@
 #![allow(non_snake_case)]
 
 use mcx::Mcx;
+use types_core::Oid;
 use types_error::{
     PgError, PgResult, ERRCODE_CONNECTION_FAILURE, ERRCODE_FEATURE_NOT_SUPPORTED,
-    ERRCODE_INTERNAL_ERROR, ERRCODE_UNDEFINED_OBJECT, WARNING,
+    ERRCODE_INTERNAL_ERROR, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_UNDEFINED_OBJECT,
+    LOG, WARNING,
 };
 
 use walreceiver::client::{ExecStatus, PgConn, QueryResult};
@@ -40,11 +42,31 @@ fn exec_or_fail(
     Ok(res)
 }
 
-// GetPublicationsStr (pg_publication.c): comma-separated quoted literals.
+// quote_literal_cstr (quote.c:103 -> quote_literal_internal:47): a backslash
+// anywhere forces the E'' form with backslashes doubled, so a publisher
+// running standard_conforming_strings = off decodes the name correctly.
+pub(crate) fn quote_literal_cstr(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len() * 2 + 3);
+    if raw.contains('\\') {
+        out.push('E');
+    }
+    out.push('\'');
+    for ch in raw.chars() {
+        if ch == '\'' || ch == '\\' {
+            out.push(ch);
+        }
+        out.push(ch);
+    }
+    out.push('\'');
+    out
+}
+
+// GetPublicationsStr (pg_subscription.c:41) with quote_literal = true:
+// comma-separated quote_literal_cstr renderings.
 fn publications_str(publications: &[&str]) -> String {
     publications
         .iter()
-        .map(|p| format!("'{}'", p.replace('\'', "''")))
+        .map(|p| quote_literal_cstr(p))
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -83,44 +105,87 @@ pub(crate) fn check_publications(conn: &mut PgConn, publications: &[&str]) -> Pg
     Ok(())
 }
 
-// check_publications_origin (subscriptioncmds.c): with origin=NONE and
-// copy_data, warn when the publisher itself subscribes to the same tables
-// (potential non-local origins in the initial copy). No-op otherwise, like C.
+// check_publications_origin (subscriptioncmds.c:2130): with origin = NONE
+// (pg_strcasecmp, 2143) and copy_data, warn when the publisher itself
+// subscribes to the same tables — or to a partition / ancestor of them
+// (2149-2153) — excluding the relations already present locally
+// (subrel_local_oids, the ALTER ... REFRESH arm, 2164-2178). No-op otherwise.
 pub(crate) fn check_publications_origin(
+    mcx: Mcx<'_>,
     conn: &mut PgConn,
     publications: &[&str],
     copydata: bool,
     origin: Option<&str>,
+    subrel_local_oids: &[Oid],
     subname: &str,
 ) -> PgResult<()> {
-    if !copydata || origin != Some("none") {
+    let Some(origin) = origin else {
+        return Ok(());
+    };
+    if !copydata || !origin.eq_ignore_ascii_case(pg_subscription::LOGICALREP_ORIGIN_NONE) {
         return Ok(());
     }
-    let cmd = format!(
-        "SELECT DISTINCT P.pubname AS pubname FROM pg_publication P, LATERAL \
-         pg_get_publication_tables(P.pubname) GPT JOIN pg_subscription_rel PS ON \
-         (GPT.relid = PS.srrelid), pg_class C JOIN pg_namespace N ON (N.oid = \
-         C.relnamespace) WHERE C.oid = GPT.relid AND P.pubname IN ({})",
+    let mut cmd = format!(
+        "SELECT DISTINCT P.pubname AS pubname\n\
+         FROM pg_publication P,\n\
+         LATERAL pg_get_publication_tables(P.pubname) GPT\n\
+         JOIN pg_subscription_rel PS ON (GPT.relid = PS.srrelid OR \
+         GPT.relid IN (SELECT relid FROM pg_partition_ancestors(PS.srrelid) UNION \
+         SELECT relid FROM pg_partition_tree(PS.srrelid))),\n\
+         pg_class C JOIN pg_namespace N ON (N.oid = C.relnamespace)\n\
+         WHERE C.oid = GPT.relid AND P.pubname IN ({})\n",
         publications_str(publications)
     );
+    for &relid in subrel_local_oids {
+        let schemaname = lsyscache::misc::get_namespace_name(
+            mcx,
+            lsyscache::relation::get_rel_namespace(relid)?,
+        )?
+        .map(|s| s.as_str().to_string())
+        .unwrap_or_default();
+        let tablename = lsyscache::relation::get_rel_name(mcx, relid)?
+            .map(|s| s.as_str().to_string())
+            .unwrap_or_default();
+        cmd.push_str(&format!(
+            "AND NOT (N.nspname = {} AND C.relname = {})\n",
+            quote_literal_cstr(&schemaname),
+            quote_literal_cstr(&tablename)
+        ));
+    }
     let res = exec_or_fail(
         conn,
         &cmd,
         "receive list of replicated tables from the publisher",
         ERRCODE_CONNECTION_FAILURE,
     )?;
-    if !res.rows.is_empty() {
-        let list =
-            res.rows.iter().map(|r| format!("\"{}\"", row_text(r, 0))).collect::<Vec<_>>().join(", ");
+    // list_append_unique over the DISTINCT rows.
+    let mut publist: Vec<String> = Vec::new();
+    for r in &res.rows {
+        let pubname = row_text(r, 0);
+        if !publist.contains(&pubname) {
+            publist.push(pubname);
+        }
+    }
+    if !publist.is_empty() {
+        // GetPublicationsStr(publist, pubnames, false): "name" renderings.
+        let list = publist.iter().map(|p| format!("\"{p}\"")).collect::<Vec<_>>().join(", ");
         elog::ereport(WARNING)
+            .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
             .errmsg(format!(
                 "subscription \"{subname}\" requested copy_data with origin = NONE but might copy \
                  data that had a different origin"
             ))
-            .errdetail(format!(
-                "The subscription being created subscribes to a publication ({list}) that contains \
-                 tables that are written to by other subscriptions."
-            ))
+            .errdetail_plural(
+                format!(
+                    "The subscription being created subscribes to a publication ({list}) that \
+                     contains tables that are written to by other subscriptions."
+                ),
+                format!(
+                    "The subscription being created subscribes to publications ({list}) that \
+                     contain tables that are written to by other subscriptions."
+                ),
+                publist.len() as u64,
+            )
             .errhint("Verify that initial data copied from the publisher tables did not come from other origins.")
             .finish(types_error::ErrorLocation::new(
                 "src/backend/commands/subscriptioncmds.c",
@@ -201,12 +266,13 @@ pub(crate) fn walrcv_create_slot(
     );
     let res = conn.exec(&cmd)?;
     if res.status != ExecStatus::TuplesOk {
+        // libpqwalreceiver.c:1036: ERRCODE_PROTOCOL_VIOLATION.
         return Err(err(
             format!(
                 "could not create replication slot \"{slotname}\": {}",
                 res.err.clone()
             ),
-            ERRCODE_CONNECTION_FAILURE,
+            types_error::ERRCODE_PROTOCOL_VIOLATION,
         ));
     }
     // upstream a6a2eb9f6024 (18.6): Check CREATE_REPLICATION_SLOT response shape in libpqwalreceiver
@@ -214,8 +280,10 @@ pub(crate) fn walrcv_create_slot(
     Ok(())
 }
 
-// ReplicationSlotDropAtPubNode (subscriptioncmds.c): DROP_REPLICATION_SLOT on
-// the publisher; missing_ok downgrades the error to a WARNING like C.
+// ReplicationSlotDropAtPubNode (subscriptioncmds.c:1938): DROP_REPLICATION_SLOT
+// on the publisher. With missing_ok, a 42704 (ERRCODE_UNDEFINED_OBJECT)
+// failure is a server-log LOG line (1966-1972), never client-visible at the
+// default client_min_messages.
 pub(crate) fn drop_slot_at_pub_node(
     conn: &mut PgConn,
     slotname: &str,
@@ -231,8 +299,10 @@ pub(crate) fn drop_slot_at_pub_node(
         return Ok(());
     }
     let msg = res.err.clone();
-    if missing_ok && msg.contains("does not exist") {
-        elog::ereport(WARNING)
+    // res->sqlstate == ERRCODE_UNDEFINED_OBJECT (42704).
+    let undefined_object = res.diag.as_ref().is_some_and(|d| d.sqlstate == "42704");
+    if res.status == ExecStatus::Error && missing_ok && undefined_object {
+        elog::ereport(LOG)
             .errmsg(format!("could not drop replication slot \"{slotname}\" on publisher: {msg}"))
             .finish(types_error::ErrorLocation::new(
                 "src/backend/commands/subscriptioncmds.c",
@@ -284,6 +354,12 @@ pub(crate) fn AlterSubscription_refresh<'mcx>(
         }
     };
 
+    // C 986-987: pg_subscription_rel is opened with AccessExclusiveLock before
+    // the first removal and held until commit (1065 table_close NoLock), so a
+    // concurrent lock holder blocks the refresh and the rel states cannot
+    // change underneath it.
+    let mut subrel_lock: Option<types_rel::Relation<'mcx>> = None;
+
     let refreshed = (|| -> PgResult<Vec<(types_core::Oid, u8)>> {
         if let Some(v) = validate_publications {
             check_publications(&mut wrconn, v)?;
@@ -297,10 +373,12 @@ pub(crate) fn AlterSubscription_refresh<'mcx>(
         subrel_local_oids.sort_unstable();
 
         check_publications_origin(
+            mcx,
             &mut wrconn,
             publications,
             copy_data,
             Some(&sub.origin),
+            &subrel_local_oids,
             subname,
         )?;
 
@@ -351,6 +429,13 @@ pub(crate) fn AlterSubscription_refresh<'mcx>(
             if pubrel_local_oids.binary_search(&relid).is_ok() {
                 continue;
             }
+            if subrel_lock.is_none() {
+                subrel_lock = Some(table::table_open(
+                    mcx,
+                    pg_subscription::SubscriptionRelRelationId,
+                    types_rel::AccessExclusiveLock,
+                )?);
+            }
             let (state, _lsn) = pg_subscription::GetSubscriptionRelState(mcx, sub.oid, relid)?;
             removed.push((relid, state));
             pg_subscription::RemoveSubscriptionRel(mcx, sub.oid, relid)?;
@@ -359,9 +444,17 @@ pub(crate) fn AlterSubscription_refresh<'mcx>(
                 let originname = format!("pg_{}_{relid}", sub.oid);
                 origin::replorigin_drop_by_name(mcx, &originname, true, false)?;
             }
+            // C 1023-1027: get_namespace_name(get_rel_namespace(relid)) and
+            // get_rel_name(relid).
+            let nspname = lsyscache::get_namespace_name(mcx, lsyscache::get_rel_namespace(relid)?)?
+                .map(|s| s.as_str().to_string())
+                .unwrap_or_default();
+            let relname = lsyscache::get_rel_name(mcx, relid)?
+                .map(|s| s.as_str().to_string())
+                .unwrap_or_default();
             let _ = elog::elog(
                 DEBUG1,
-                format!("table with OID {relid} removed from subscription \"{subname}\""),
+                format!("table \"{nspname}.{relname}\" removed from subscription \"{subname}\""),
             );
         }
         Ok(removed)
@@ -394,6 +487,11 @@ pub(crate) fn AlterSubscription_refresh<'mcx>(
         Err(e) => Err(e),
     };
     drop(wrconn);
+    // C 1064-1065: table_close(rel, NoLock) — the AccessExclusiveLock is
+    // held till the end of the transaction.
+    if let Some(rel) = subrel_lock {
+        rel.close(types_rel::NoLock)?;
+    }
     result
 }
 
@@ -451,5 +549,19 @@ mod tests {
         note_published_table(&mut tablelist, "public".into(), "u".into()).unwrap();
         note_published_table(&mut tablelist, "other".into(), "t".into()).unwrap();
         assert_eq!(tablelist.len(), 3);
+    }
+
+    // quote_literal_cstr (quote.c:47-71): a backslash anywhere selects the
+    // E'' form with backslashes doubled; quotes are always doubled. Unfixed
+    // pgrust sent '<name>' with only quotes doubled, which a publisher at
+    // standard_conforming_strings = off decoded as an escape string.
+    #[test]
+    fn publication_names_are_quote_literal_cstr() {
+        assert_eq!(quote_literal_cstr("pub1"), "'pub1'");
+        assert_eq!(quote_literal_cstr("it's"), "'it''s'");
+        assert_eq!(quote_literal_cstr("p\\n"), "E'p\\\\n'");
+        assert_eq!(quote_literal_cstr("a'\\b"), "E'a''\\\\b'");
+        assert_eq!(quote_literal_cstr(""), "''");
+        assert_eq!(publications_str(&["pub1", "p\\n"]), "'pub1', E'p\\\\n'");
     }
 }

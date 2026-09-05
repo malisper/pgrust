@@ -90,13 +90,35 @@ fn loc(func: &'static str) -> ErrorLocation {
     ErrorLocation::new(site.file(), site.line() as i32, func)
 }
 
-fn conflicting_def_elem(defel: &DefElem<'_>) -> Box<PgError> {
+// errorConflictingDefElem (define.c:371): parser_errposition converts the
+// DefElem's byte location into a character position (parse_node.c), so the
+// caret lands on the option even after multibyte characters.
+fn conflicting_def_elem(defel: &DefElem<'_>, source_text: &str) -> Box<PgError> {
     let mut e = PgError::error("conflicting or redundant options")
         .with_sqlstate(ERRCODE_SYNTAX_ERROR);
-    if defel.location >= 0 {
-        e.cursor_position = Some(defel.location + 1);
+    let pos = parser_small1::parser_errposition_source(
+        Some(source_text.as_bytes()),
+        defel.location,
+        mbutils::GetDatabaseEncoding(),
+    );
+    if pos > 0 {
+        e.cursor_position = Some(pos);
     }
     Box::new(e)
+}
+
+// LSN_FORMAT_ARGS: "%X/%X".
+fn lsn_format(lsn: XLogRecPtr) -> String {
+    format!("{:X}/{:X}", (lsn >> 32) as u32, lsn as u32)
+}
+
+// ReplicationSlotNameForTablesync (tablesync.c:1302); the canonical impl +
+// format test live in logicalworker.
+fn tablesync_slot_name(subid: Oid, relid: Oid) -> String {
+    format!(
+        "pg_{subid}_sync_{relid}_{}",
+        transam_xlog::control_file::GetSystemIdentifier()
+    )
 }
 
 fn getattr(td: &TupleDescData<'_>, tup: &HeapTupleData<'_>, attno: i32) -> (Datum, bool) {
@@ -194,6 +216,7 @@ fn defGetStreamingMode(mcx: Mcx<'_>, def: &DefElem<'_>) -> PgResult<u8> {
 
 fn parse_subscription_options<'mcx>(
     mcx: Mcx<'mcx>,
+    source_text: &str,
     stmt_options: &NodeList<'mcx>,
     supported_opts: u32,
 ) -> PgResult<SubOpts<'mcx>> {
@@ -231,25 +254,25 @@ fn parse_subscription_options<'mcx>(
 
         if is_set(supported_opts, SUBOPT_CONNECT) && defname == "connect" {
             if is_set(opts.specified_opts, SUBOPT_CONNECT) {
-                return Err(conflicting_def_elem(defel));
+                return Err(conflicting_def_elem(defel, source_text));
             }
             opts.specified_opts |= SUBOPT_CONNECT;
             opts.connect = commands_define::defGetBoolean(defel)?;
         } else if is_set(supported_opts, SUBOPT_ENABLED) && defname == "enabled" {
             if is_set(opts.specified_opts, SUBOPT_ENABLED) {
-                return Err(conflicting_def_elem(defel));
+                return Err(conflicting_def_elem(defel, source_text));
             }
             opts.specified_opts |= SUBOPT_ENABLED;
             opts.enabled = commands_define::defGetBoolean(defel)?;
         } else if is_set(supported_opts, SUBOPT_CREATE_SLOT) && defname == "create_slot" {
             if is_set(opts.specified_opts, SUBOPT_CREATE_SLOT) {
-                return Err(conflicting_def_elem(defel));
+                return Err(conflicting_def_elem(defel, source_text));
             }
             opts.specified_opts |= SUBOPT_CREATE_SLOT;
             opts.create_slot = commands_define::defGetBoolean(defel)?;
         } else if is_set(supported_opts, SUBOPT_SLOT_NAME) && defname == "slot_name" {
             if is_set(opts.specified_opts, SUBOPT_SLOT_NAME) {
-                return Err(conflicting_def_elem(defel));
+                return Err(conflicting_def_elem(defel, source_text));
             }
             opts.specified_opts |= SUBOPT_SLOT_NAME;
             let name = commands_define::defGetString(mcx, defel)?;
@@ -261,7 +284,7 @@ fn parse_subscription_options<'mcx>(
             }
         } else if is_set(supported_opts, SUBOPT_COPY_DATA) && defname == "copy_data" {
             if is_set(opts.specified_opts, SUBOPT_COPY_DATA) {
-                return Err(conflicting_def_elem(defel));
+                return Err(conflicting_def_elem(defel, source_text));
             }
             opts.specified_opts |= SUBOPT_COPY_DATA;
             opts.copy_data = commands_define::defGetBoolean(defel)?;
@@ -269,7 +292,7 @@ fn parse_subscription_options<'mcx>(
             && defname == "synchronous_commit"
         {
             if is_set(opts.specified_opts, SUBOPT_SYNCHRONOUS_COMMIT) {
-                return Err(conflicting_def_elem(defel));
+                return Err(conflicting_def_elem(defel, source_text));
             }
             opts.specified_opts |= SUBOPT_SYNCHRONOUS_COMMIT;
             let val = commands_define::defGetString(mcx, defel)?;
@@ -286,31 +309,31 @@ fn parse_subscription_options<'mcx>(
             )?;
         } else if is_set(supported_opts, SUBOPT_REFRESH) && defname == "refresh" {
             if is_set(opts.specified_opts, SUBOPT_REFRESH) {
-                return Err(conflicting_def_elem(defel));
+                return Err(conflicting_def_elem(defel, source_text));
             }
             opts.specified_opts |= SUBOPT_REFRESH;
             opts.refresh = commands_define::defGetBoolean(defel)?;
         } else if is_set(supported_opts, SUBOPT_BINARY) && defname == "binary" {
             if is_set(opts.specified_opts, SUBOPT_BINARY) {
-                return Err(conflicting_def_elem(defel));
+                return Err(conflicting_def_elem(defel, source_text));
             }
             opts.specified_opts |= SUBOPT_BINARY;
             opts.binary = commands_define::defGetBoolean(defel)?;
         } else if is_set(supported_opts, SUBOPT_STREAMING) && defname == "streaming" {
             if is_set(opts.specified_opts, SUBOPT_STREAMING) {
-                return Err(conflicting_def_elem(defel));
+                return Err(conflicting_def_elem(defel, source_text));
             }
             opts.specified_opts |= SUBOPT_STREAMING;
             opts.streaming = defGetStreamingMode(mcx, defel)?;
         } else if is_set(supported_opts, SUBOPT_TWOPHASE_COMMIT) && defname == "two_phase" {
             if is_set(opts.specified_opts, SUBOPT_TWOPHASE_COMMIT) {
-                return Err(conflicting_def_elem(defel));
+                return Err(conflicting_def_elem(defel, source_text));
             }
             opts.specified_opts |= SUBOPT_TWOPHASE_COMMIT;
             opts.twophase = commands_define::defGetBoolean(defel)?;
         } else if is_set(supported_opts, SUBOPT_DISABLE_ON_ERR) && defname == "disable_on_error" {
             if is_set(opts.specified_opts, SUBOPT_DISABLE_ON_ERR) {
-                return Err(conflicting_def_elem(defel));
+                return Err(conflicting_def_elem(defel, source_text));
             }
             opts.specified_opts |= SUBOPT_DISABLE_ON_ERR;
             opts.disableonerr = commands_define::defGetBoolean(defel)?;
@@ -318,25 +341,25 @@ fn parse_subscription_options<'mcx>(
             && defname == "password_required"
         {
             if is_set(opts.specified_opts, SUBOPT_PASSWORD_REQUIRED) {
-                return Err(conflicting_def_elem(defel));
+                return Err(conflicting_def_elem(defel, source_text));
             }
             opts.specified_opts |= SUBOPT_PASSWORD_REQUIRED;
             opts.passwordrequired = commands_define::defGetBoolean(defel)?;
         } else if is_set(supported_opts, SUBOPT_RUN_AS_OWNER) && defname == "run_as_owner" {
             if is_set(opts.specified_opts, SUBOPT_RUN_AS_OWNER) {
-                return Err(conflicting_def_elem(defel));
+                return Err(conflicting_def_elem(defel, source_text));
             }
             opts.specified_opts |= SUBOPT_RUN_AS_OWNER;
             opts.runasowner = commands_define::defGetBoolean(defel)?;
         } else if is_set(supported_opts, SUBOPT_FAILOVER) && defname == "failover" {
             if is_set(opts.specified_opts, SUBOPT_FAILOVER) {
-                return Err(conflicting_def_elem(defel));
+                return Err(conflicting_def_elem(defel, source_text));
             }
             opts.specified_opts |= SUBOPT_FAILOVER;
             opts.failover = commands_define::defGetBoolean(defel)?;
         } else if is_set(supported_opts, SUBOPT_ORIGIN) && defname == "origin" {
             if is_set(opts.specified_opts, SUBOPT_ORIGIN) {
-                return Err(conflicting_def_elem(defel));
+                return Err(conflicting_def_elem(defel, source_text));
             }
             opts.specified_opts |= SUBOPT_ORIGIN;
             let val = commands_define::defGetString(mcx, defel)?;
@@ -352,7 +375,7 @@ fn parse_subscription_options<'mcx>(
         } else if is_set(supported_opts, SUBOPT_LSN) && defname == "lsn" {
             let lsn_str = commands_define::defGetString(mcx, defel)?;
             if is_set(opts.specified_opts, SUBOPT_LSN) {
-                return Err(conflicting_def_elem(defel));
+                return Err(conflicting_def_elem(defel, source_text));
             }
             let lsn = if lsn_str == "none" {
                 InvalidXLogRecPtr
@@ -512,8 +535,11 @@ fn merge_publications<'mcx>(
     Ok(merged)
 }
 
+// CreateSubscription (subscriptioncmds.c:565); `source_text` stands in for
+// pstate->p_sourcetext (cursor positions of option errors).
 pub fn CreateSubscription<'mcx>(
     mcx: Mcx<'mcx>,
+    source_text: &str,
     stmt: &CreateSubscriptionStmt<'mcx>,
     is_top_level: bool,
 ) -> PgResult<ObjectAddress> {
@@ -536,7 +562,7 @@ pub fn CreateSubscription<'mcx>(
         | SUBOPT_RUN_AS_OWNER
         | SUBOPT_FAILOVER
         | SUBOPT_ORIGIN;
-    let opts = parse_subscription_options(mcx, &stmt.options, supported_opts)?;
+    let opts = parse_subscription_options(mcx, source_text, &stmt.options, supported_opts)?;
 
     if opts.create_slot {
         xact::PreventInTransactionBlock(
@@ -686,11 +712,14 @@ pub fn CreateSubscription<'mcx>(
         let pubname_strs: Vec<&str> = pubnames.iter().copied().collect();
         let connected = (|| -> PgResult<()> {
             connect::check_publications(&mut wrconn, &pubname_strs)?;
+            // C 750-751: no local relations to exclude (NULL, 0).
             connect::check_publications_origin(
+                mcx,
                 &mut wrconn,
                 &pubname_strs,
                 opts.copy_data,
                 Some(opts.origin),
+                &[],
                 subname,
             )?;
 
@@ -769,6 +798,9 @@ pub fn CreateSubscription<'mcx>(
     if opts.enabled {
         launcher::ApplyLauncherWakeupAtCommit();
     }
+
+    // subscriptioncmds.c:840.
+    objectaccess::InvokeObjectPostCreateHook(SubscriptionRelationId, subid, 0)?;
 
     Ok(ObjectAddress::set(SubscriptionRelationId, subid))
 }
@@ -871,8 +903,11 @@ pub fn UpdateTwoPhaseState(mcx: Mcx<'_>, suboid: Oid, new_state: u8) -> PgResult
     rel.close(RowExclusiveLock)
 }
 
+// AlterSubscription (subscriptioncmds.c:1126); `source_text` stands in for
+// pstate->p_sourcetext (cursor positions of option errors).
 pub fn AlterSubscription<'mcx>(
     mcx: Mcx<'mcx>,
+    source_text: &str,
     stmt: &AlterSubscriptionStmt<'mcx>,
     is_top_level: bool,
 ) -> PgResult<ObjectAddress> {
@@ -935,7 +970,7 @@ pub fn AlterSubscription<'mcx>(
                 | SUBOPT_RUN_AS_OWNER
                 | SUBOPT_FAILOVER
                 | SUBOPT_ORIGIN;
-            let opts = parse_subscription_options(mcx, &stmt.options, supported_opts)?;
+            let opts = parse_subscription_options(mcx, source_text, &stmt.options, supported_opts)?;
 
             if is_set(opts.specified_opts, SUBOPT_SLOT_NAME) {
                 if sub.enabled && opts.slot_name.is_none() {
@@ -1007,8 +1042,20 @@ pub fn AlterSubscription<'mcx>(
                     ));
                 }
 
-                // logicalrep_workers_find: no logical replication workers can
-                // exist here, so the worker-running error branch is dead.
+                // C 1309-1313: a DISABLE in this transaction has not stopped
+                // the workers yet; altering two_phase under a live apply or
+                // tablesync worker could replicate an already-prepared
+                // transaction again.
+                if !launcher::logicalrep_workers_find(subid, true).is_empty() {
+                    return Err((*err(
+                        "cannot alter \"two_phase\" when logical replication worker is still \
+                         running",
+                        ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+                    ))
+                    .with_hint("Try again after some time.")
+                    .into());
+                }
+
                 // two_phase cannot be disabled if any uncommitted prepared
                 // transactions carry this subscription's GID pattern.
                 if update_two_phase
@@ -1053,7 +1100,7 @@ pub fn AlterSubscription<'mcx>(
         }
 
         ALTER_SUBSCRIPTION_ENABLED => {
-            let opts = parse_subscription_options(mcx, &stmt.options, SUBOPT_ENABLED)?;
+            let opts = parse_subscription_options(mcx, source_text, &stmt.options, SUBOPT_ENABLED)?;
             debug_assert!(is_set(opts.specified_opts, SUBOPT_ENABLED));
 
             if sub.slotname.is_none() && opts.enabled {
@@ -1089,7 +1136,7 @@ pub fn AlterSubscription<'mcx>(
 
         ALTER_SUBSCRIPTION_SET_PUBLICATION => {
             let supported_opts = SUBOPT_COPY_DATA | SUBOPT_REFRESH;
-            let opts = parse_subscription_options(mcx, &stmt.options, supported_opts)?;
+            let opts = parse_subscription_options(mcx, source_text, &stmt.options, supported_opts)?;
 
             let pubnames = publist_names(mcx, &stmt.publication)?;
             let (pub_datum, img) = publication_list_to_array(mcx, &pubnames)?;
@@ -1139,7 +1186,7 @@ pub fn AlterSubscription<'mcx>(
             let isadd = stmt.kind == ALTER_SUBSCRIPTION_ADD_PUBLICATION;
 
             let supported_opts = SUBOPT_REFRESH | SUBOPT_COPY_DATA;
-            let opts = parse_subscription_options(mcx, &stmt.options, supported_opts)?;
+            let opts = parse_subscription_options(mcx, source_text, &stmt.options, supported_opts)?;
 
             let publist =
                 merge_publications(mcx, &sub.publications, &stmt.publication, isadd, subname)?;
@@ -1214,7 +1261,7 @@ pub fn AlterSubscription<'mcx>(
                 ));
             }
 
-            let opts = parse_subscription_options(mcx, &stmt.options, SUBOPT_COPY_DATA)?;
+            let opts = parse_subscription_options(mcx, source_text, &stmt.options, SUBOPT_COPY_DATA)?;
 
             if sub.twophasestate == LOGICALREP_TWOPHASE_STATE_ENABLED && opts.copy_data {
                 return Err(Box::new(
@@ -1237,15 +1284,25 @@ pub fn AlterSubscription<'mcx>(
         }
 
         ALTER_SUBSCRIPTION_SKIP => {
-            let opts = parse_subscription_options(mcx, &stmt.options, SUBOPT_LSN)?;
+            let opts = parse_subscription_options(mcx, source_text, &stmt.options, SUBOPT_LSN)?;
             debug_assert!(is_set(opts.specified_opts, SUBOPT_LSN));
 
             if opts.lsn != InvalidXLogRecPtr {
                 let originname = origin::ReplicationOriginNameForLogicalRep(subid, InvalidOid);
-                let _originid = origin::replorigin_by_name(&originname, false)?;
-                // replorigin_get_progress reads shmem state no apply worker
-                // ever writes here, so remote_lsn is always invalid and the
-                // greater-than-origin-LSN check cannot fire.
+                let originid = origin::replorigin_by_name(&originname, false)?;
+                let remote_lsn = origin::replorigin_get_progress(originid, false)?;
+
+                // C 1565-1570: the given LSN must be at least a future LSN.
+                if remote_lsn != InvalidXLogRecPtr && opts.lsn < remote_lsn {
+                    return Err(err(
+                        format!(
+                            "skip WAL location (LSN {}) must be greater than origin LSN {}",
+                            lsn_format(opts.lsn),
+                            lsn_format(remote_lsn)
+                        ),
+                        ERRCODE_INVALID_PARAMETER_VALUE,
+                    ));
+                }
             }
 
             values[(Anum_pg_subscription_subskiplsn - 1) as usize] = Datum::from_u64(opts.lsn);
@@ -1306,6 +1363,9 @@ pub fn AlterSubscription<'mcx>(
 
     rel.close(RowExclusiveLock)?;
 
+    // subscriptioncmds.c:1640.
+    objectaccess::InvokeObjectPostAlterHook(SubscriptionRelationId, subid, 0)?;
+
     // Wake up related replication workers to handle this change quickly
     // (subscriptioncmds.c:1617): a worker idling against a quiet publisher
     // otherwise keeps the pre-ALTER parameters until its next wakeup.
@@ -1351,6 +1411,9 @@ pub fn DropSubscription<'mcx>(
         aclchk::aclcheck_error(ACLCHECK_NOT_OWNER, ObjectType::OBJECT_SUBSCRIPTION, subname)?;
     }
 
+    // DROP hook for the subscription being removed (subscriptioncmds.c:1712).
+    objectaccess::InvokeObjectDropHook(SubscriptionRelationId, subid, 0)?;
+
     lmgr::LockSharedObject(SubscriptionRelationId, subid, 0, AccessExclusiveLock)?;
 
     let sub = GetSubscription(mcx, subid, false)?.expect("missing_ok=false yields an error");
@@ -1359,6 +1422,11 @@ pub fn DropSubscription<'mcx>(
     if slotname.is_some() {
         xact::PreventInTransactionBlock(is_top_level, "DROP SUBSCRIPTION")?;
     }
+
+    // subscriptioncmds.c:1752-1753: sql_drop event triggers list the
+    // subscription (a no-op without an active event-trigger state).
+    let myself = ObjectAddress::set(SubscriptionRelationId, subid);
+    event_trigger_seams::event_trigger_sql_drop_add_object::call(mcx, &myself, true, true)?;
 
     let tid = tup.as_tuple().t_self;
     catalog_indexing::CatalogTupleDelete(&rel, &tid)?;
@@ -1395,24 +1463,17 @@ pub fn DropSubscription<'mcx>(
         return rel.close(NoLock);
     }
 
-    // Drop the slot(s) at the publisher (subscriptioncmds.c:1810). Connection
-    // failure with a slot to drop is an ERROR with C's hint.
+    // Drop the slot(s) at the publisher (subscriptioncmds.c:1863-1878).
+    // Without a slot name a connection failure finishes the command quietly
+    // (1869-1875: "be tidy"); with one it is ReportSlotConnectionError.
     let must_use_password = sub.passwordrequired && !superuser::superuser_arg(sub.owner)?;
     let mut wrconn = match connect::connect(mcx, sub.conninfo.as_str(), must_use_password, subname)? {
         Ok(conn) => conn,
         Err(errmsg) => {
-            if slotname.is_none() {
-                // Only tablesync-origin cleanup was pending; C warns and returns.
-                elog::ereport(types_error::WARNING)
-                    .errmsg(format!("could not connect to publisher when attempting to drop replication slot: {errmsg}"))
-                    .finish(loc("DropSubscription"))?;
+            let Some(slot) = slotname else {
                 return rel.close(NoLock);
-            }
-            return Err(err(
-                format!("could not connect to publisher when attempting to drop replication slot \"{}\": {errmsg}", slotname.unwrap_or("")),
-                ERRCODE_CONNECTION_FAILURE,
-            )
-            .into());
+            };
+            return Err(ReportSlotConnectionError(&rstates, subid, slot, &errmsg)?);
         }
     };
 
@@ -1426,13 +1487,7 @@ pub fn DropSubscription<'mcx>(
                 continue;
             }
             if rstate.state != pg_subscription::SUBREL_STATE_SYNCDONE {
-                // ReplicationSlotNameForTablesync (tablesync.c:1302); same
-                // local rendering as the REFRESH path (connect.rs).
-                let syncslot = format!(
-                    "pg_{subid}_sync_{}_{}",
-                    rstate.relid,
-                    transam_xlog::control_file::GetSystemIdentifier()
-                );
+                let syncslot = tablesync_slot_name(subid, rstate.relid);
                 connect::drop_slot_at_pub_node(&mut wrconn, &syncslot, true)?;
             }
         }
@@ -1445,6 +1500,42 @@ pub fn DropSubscription<'mcx>(
     dropped?;
 
     rel.close(NoLock)
+}
+
+// ReportSlotConnectionError (subscriptioncmds.c:2351): one WARNING per
+// tablesync slot that may still exist (so the user can drop them by hand),
+// then the connection-failure ERROR with the DISABLE / slot_name = NONE hint.
+fn ReportSlotConnectionError(
+    rstates: &[pg_subscription::SubscriptionRelState],
+    subid: Oid,
+    slotname: &str,
+    errmsg: &str,
+) -> PgResult<Box<PgError>> {
+    for rstate in rstates {
+        // Only cleanup resources of tablesync workers.
+        if rstate.relid == InvalidOid {
+            continue;
+        }
+        if rstate.state != pg_subscription::SUBREL_STATE_SYNCDONE {
+            let syncslot = tablesync_slot_name(subid, rstate.relid);
+            elog::elog(
+                WARNING,
+                format!("could not drop tablesync replication slot \"{syncslot}\""),
+            )?;
+        }
+    }
+    Ok((*err(
+        format!(
+            "could not connect to publisher when attempting to drop replication slot \
+             \"{slotname}\": {errmsg}"
+        ),
+        ERRCODE_CONNECTION_FAILURE,
+    ))
+    .with_hint(
+        "Use ALTER SUBSCRIPTION ... DISABLE to disable the subscription, and then use ALTER \
+         SUBSCRIPTION ... SET (slot_name = NONE) to disassociate it from the slot.",
+    )
+    .into())
 }
 
 fn AlterSubscriptionOwner_internal<'mcx>(
@@ -1508,6 +1599,9 @@ fn AlterSubscriptionOwner_internal<'mcx>(
     catalog_indexing::CatalogTupleUpdate(mcx, rel, &otid, &mut new_tup)?;
 
     pg_shdepend::changeDependencyOnOwner(mcx, SubscriptionRelationId, subid, new_owner_id)?;
+
+    // subscriptioncmds.c:2046.
+    objectaccess::InvokeObjectPostAlterHook(SubscriptionRelationId, subid, 0)?;
 
     // Wake up related background processes to handle this change quickly
     // (subscriptioncmds.c:2022-2023).
@@ -1580,15 +1674,19 @@ pub fn init_seams() {
     pg_shdepend::alter_subscription_owner_oid::set(AlterSubscriptionOwner_oid);
 }
 
-// CheckSubscriptionRelkind (catalog/pg_subscription.c): logical replication
-// targets must be plain or partitioned tables.
+// CheckSubscriptionRelkind (execReplication.c:877-886): logical replication
+// targets must be plain or partitioned tables; the DETAIL is
+// errdetail_relkind_not_supported(relkind).
 fn CheckSubscriptionRelkind(relkind: u8, nspname: &str, relname: &str) -> PgResult<()> {
     // RELKIND_RELATION 'r' / RELKIND_PARTITIONED_TABLE 'p'.
     if relkind != b'r' && relkind != b'p' {
-        return Err(err(
+        let detail = pg_class_seams::errdetail_relkind_not_supported::call(relkind)?;
+        return Err((*err(
             format!("cannot use relation \"{nspname}.{relname}\" as logical replication target"),
             types_error::ERRCODE_WRONG_OBJECT_TYPE,
-        ));
+        ))
+        .with_detail(detail)
+        .into());
     }
     Ok(())
 }
@@ -1606,5 +1704,14 @@ mod cache_lookup_error_tests {
         assert_eq!(e.message(), "cache lookup failed for subscription oid 16384");
         assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
         assert_eq!(e.level(), types_error::ERROR);
+    }
+
+    // LSN_FORMAT_ARGS renders "%X/%X" (subscriptioncmds.c:1568-1569 message).
+    #[test]
+    fn lsn_format_matches_lsn_format_args() {
+        assert_eq!(lsn_format(0x500), "0/500");
+        assert_eq!(lsn_format(0x1000), "0/1000");
+        assert_eq!(lsn_format((1u64 << 32) | 0xABCDEF), "1/ABCDEF");
+        assert_eq!(lsn_format(0), "0/0");
     }
 }
