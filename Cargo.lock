@@ -7995,6 +7995,7 @@ dependencies = [
  "lmgr",
  "lock",
  "lsyscache",
+ "mbutils",
  "mbutils_seams",
  "mcx",
  "miscinit",

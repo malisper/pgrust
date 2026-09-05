@@ -1056,7 +1056,7 @@ fn slow_switch<'mcx>(
             let stmt = parsetree
                 .as_variant::<types_nodes::parsenodes::ReindexStmt>()
                 .expect("ReindexStmt");
-            indexcmds::ExecReindex(mcx, stmt, is_top_level)?;
+            indexcmds::ExecReindex(mcx, stmt, source_text, is_top_level)?;
             Ok(None)
         }
 

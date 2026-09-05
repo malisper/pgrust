@@ -17,7 +17,8 @@ use types_core::{
 use types_error::{
     PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_INDETERMINATE_COLLATION,
     ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_TOO_MANY_COLUMNS,
-    ERRCODE_UNDEFINED_COLUMN, ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
+    ERRCODE_INTERNAL_ERROR, ERRCODE_UNDEFINED_COLUMN, ERRCODE_UNDEFINED_OBJECT,
+    ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
 use types_nodes::rawnodes::{IndexElem, IndexStmt, SortByDir, SortByNulls};
 use types_rel::{InplaceUpdateTupleLock, Relation, ShareLock, RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION};
@@ -465,8 +466,13 @@ pub fn DefineIndex<'mcx>(
     skip_build: bool,
     quiet: bool,
 ) -> PgResult<Oid> {
-    let concurrent = stmt.concurrent
-        && lsyscache::get_rel_persistence(tableId)? != RELPERSISTENCE_TEMP;
+    let mut root_save_nestlevel = guc::NewGUCNestLevel();
+    guc::RestrictSearchPath()?;
+
+    // C (indexcmds.c:594-606) opens the nest level BEFORE the GUC_ACTION_SAVE
+    // override, so AtEOXact_GUC(false, root_save_nestlevel) below reverts the
+    // empty default_tablespace; issued outside the level it survived every
+    // pop and leaked '' into the session until transaction end.
     if stmt.reset_default_tblspc {
         guc::set_config_option(
             "default_tablespace",
@@ -479,10 +485,9 @@ pub fn DefineIndex<'mcx>(
             false,
         )?;
     }
+    let concurrent = stmt.concurrent
+        && lsyscache::get_rel_persistence(tableId)? != RELPERSISTENCE_TEMP;
     let exclusion = !stmt.excludeOpNames.is_nil() || stmt.iswithoutoverlaps;
-
-    let mut root_save_nestlevel = guc::NewGUCNestLevel();
-    guc::RestrictSearchPath()?;
 
     let numberOfKeyAttributes = stmt.indexParams.len();
     // C: allIndexParams = list_concat_copy(indexParams, indexIncludingParams);
@@ -618,7 +623,9 @@ pub fn DefineIndex<'mcx>(
                 ChooseRelationName(mcx, rel.name(), None, "pkey", namespaceId, true)?
             } else if stmt.isconstraint {
                 let addition = ChooseIndexNameAddition(mcx, &indexColNames)?;
-                let suffix = if exclusion { "excl" } else { "key" };
+                // C ChooseIndexName (indexcmds.c:2709-2720): "excl" only for
+                // an EXCLUDE list; UNIQUE ... WITHOUT OVERLAPS is "key".
+                let suffix = if !stmt.excludeOpNames.is_nil() { "excl" } else { "key" };
                 ChooseRelationName(mcx, rel.name(), Some(addition.as_str()), suffix, namespaceId, true)?
             } else {
                 ChooseIndexName(mcx, rel.name(), namespaceId, &indexColNames)?
@@ -789,11 +796,17 @@ pub fn DefineIndex<'mcx>(
                 eq_strategy,
             )?;
             if ptkey_eqop == InvalidOid {
-                panic!(
-                    "missing operator {}({},{}) in partition opfamily {}",
-                    eq_strategy, key.partopcintype[i], key.partopcintype[i],
-                    key.partopfamily[i]
-                );
+                // C elog(ERROR) (indexcmds.c:1024): a catchable XX000, never
+                // a backend panic (reachable by a superuser's opclass with
+                // FUNCTION 1 alone, since DefineOpClass never runs amvalidate).
+                return Err(Box::new(
+                    PgError::error(format!(
+                        "missing operator {}({},{}) in partition opfamily {}",
+                        eq_strategy, key.partopcintype[i], key.partopcintype[i],
+                        key.partopfamily[i]
+                    ))
+                    .with_sqlstate(ERRCODE_INTERNAL_ERROR),
+                ));
             }
             if key.partattrs[i] == 0 {
                 return Err(Box::new(
@@ -1385,7 +1398,13 @@ pub fn IndexSetParentIndex<'mcx>(
             }
             .as_oid();
             if inhparent != parentOid {
-                panic!("bogus pg_inherit row: inhrelid {partRelid} inhparent {inhparent}");
+                // C elog(ERROR) (indexcmds.c:4530): corrupt catalog, XX000.
+                return Err(Box::new(
+                    PgError::error(format!(
+                        "bogus pg_inherit row: inhrelid {partRelid} inhparent {inhparent}"
+                    ))
+                    .with_sqlstate(ERRCODE_INTERNAL_ERROR),
+                ));
             }
             false
         }
@@ -1471,7 +1490,9 @@ fn update_relispartition<'mcx>(mcx: Mcx<'mcx>, relationId: Oid, newval: bool) ->
             types_tuple::heap_getattr(tup, Anum_pg_class_relispartition as i32, class_rel.descr(), &mut isnull)
         }
         .as_bool();
-        assert!(cur != newval, "update_relispartition: no-op write for relation {relationId}");
+        // C Assert (indexcmds.c:4606): debug-only; a release build writes
+        // the (unchanged) value rather than aborting.
+        debug_assert!(cur != newval, "update_relispartition: no-op write for relation {relationId}");
     }
     let desc = class_rel.descr();
     let natts = desc.natts as usize;

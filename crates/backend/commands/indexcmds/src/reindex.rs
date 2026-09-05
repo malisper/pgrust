@@ -9,8 +9,9 @@ use mcx::Mcx;
 use pg_depend::ObjectAddress;
 use types_core::{InvalidOid, Oid, RELATION_RELATION_ID};
 use types_error::{
-    PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
-    ERRCODE_SYNTAX_ERROR, ERRCODE_WRONG_OBJECT_TYPE, ERROR, WARNING,
+    PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INTERNAL_ERROR,
+    ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_SYNTAX_ERROR, ERRCODE_WRONG_OBJECT_TYPE,
+    ERROR, WARNING,
 };
 
 // Every path in this file is reached only from ExecReindex, i.e. an actual
@@ -49,6 +50,7 @@ fn err(msg: String, sqlstate: types_error::SqlState) -> Box<PgError> {
 pub fn ExecReindex<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &ReindexStmt<'mcx>,
+    source_text: &str,
     is_top_level: bool,
 ) -> PgResult<()> {
     let mut concurrently = false;
@@ -61,10 +63,18 @@ pub fn ExecReindex<'mcx>(
             "concurrently" => concurrently = explain::defGetBoolean(opt)?,
             "tablespace" => tablespacename = Some(explain::defGetString(mcx, opt)?),
             name => {
-                return Err(err(
-                    format!("unrecognized REINDEX option \"{name}\""),
-                    ERRCODE_SYNTAX_ERROR,
-                ))
+                // C: parser_errposition(pstate, opt->location) (indexcmds.c:2862).
+                return Err(Box::new(
+                    (*err(
+                        format!("unrecognized REINDEX option \"{name}\""),
+                        ERRCODE_SYNTAX_ERROR,
+                    ))
+                    .with_cursor_position(parser_small1::parser_errposition_source(
+                        Some(source_text.as_bytes()),
+                        opt.location,
+                        mbutils::GetDatabaseEncoding(),
+                    )),
+                ));
             }
         }
     }
@@ -759,7 +769,11 @@ fn ReindexRelationConcurrently<'mcx>(
         index_ids[i].table_id = heapRel.rd_id;
 
         if indexRel.rd_rel.relpersistence == RELPERSISTENCE_TEMP as u8 {
-            panic!("cannot reindex a temporary table concurrently");
+            // C elog(ERROR) (indexcmds.c:3957): XX000, never a panic.
+            return Err(Box::new(
+                PgError::error("cannot reindex a temporary table concurrently")
+                    .with_sqlstate(ERRCODE_INTERNAL_ERROR),
+            ));
         }
 
         let concurrent_name = crate::define::ChooseRelationName(
