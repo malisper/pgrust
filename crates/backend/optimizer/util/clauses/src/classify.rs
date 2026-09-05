@@ -1,6 +1,6 @@
 use lsyscache::{func_parallel, func_strict, func_volatile, get_func_leakproof};
 use types_core::{Oid, OidIsValid};
-use types_error::PgResult;
+use types_error::{PgError, PgResult};
 use types_nodes::primnodes::{Param, ParamKind, ScalarArrayOpExpr};
 use types_nodes::{Bitmapset, Node, NodeTag};
 
@@ -234,24 +234,30 @@ struct MaxParallelHazard {
 }
 
 impl MaxParallelHazard {
-    fn test(&mut self, proparallel: i8) -> bool {
+    fn test(&mut self, proparallel: i8) -> PgResult<bool> {
         test_hazard(proparallel, self.max_interesting, &mut self.max_hazard)
     }
 }
 
-fn test_hazard(proparallel: i8, max_interesting: i8, max_hazard: &mut i8) -> bool {
+// max_parallel_hazard_test (clauses.c:828): an unrecognized proparallel is
+// elog(ERROR, "unrecognized proparallel value \"%c\"") — a catchable XX000
+// (reachable through a catalog edit of pg_proc.proparallel), never a panic.
+fn test_hazard(proparallel: i8, max_interesting: i8, max_hazard: &mut i8) -> PgResult<bool> {
     match proparallel {
-        PROPARALLEL_SAFE => false,
+        PROPARALLEL_SAFE => Ok(false),
         PROPARALLEL_RESTRICTED => {
             debug_assert!(*max_hazard != PROPARALLEL_UNSAFE);
             *max_hazard = proparallel;
-            max_interesting == proparallel
+            Ok(max_interesting == proparallel)
         }
         PROPARALLEL_UNSAFE => {
             *max_hazard = proparallel;
-            true
+            Ok(true)
         }
-        other => panic!("unrecognized proparallel value \"{}\"", other as u8 as char),
+        other => Err(Box::new(PgError::error(format!(
+            "unrecognized proparallel value \"{}\"",
+            other as u8 as char
+        )))),
     }
 }
 
@@ -259,7 +265,7 @@ impl<'mcx> NodeWalker<'mcx> for MaxParallelHazard {
     fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
         let (mi, mh) = (self.max_interesting, &mut self.max_hazard);
         if check_functions_in_node(node, &mut |f| {
-            Ok(test_hazard(func_parallel(f)?, mi, mh))
+            test_hazard(func_parallel(f)?, mi, mh)
         })? {
             return Ok(true);
         }
@@ -267,17 +273,17 @@ impl<'mcx> NodeWalker<'mcx> for MaxParallelHazard {
             // Tag verdict first, then C recurses into payload children we
             // cannot reach yet — the walker's deferred arm keeps that loud.
             NodeTag::T_CoerceToDomain | NodeTag::T_WindowFunc | NodeTag::T_SubLink => {
-                if self.test(PROPARALLEL_RESTRICTED) {
+                if self.test(PROPARALLEL_RESTRICTED)? {
                     return Ok(true);
                 }
                 expression_tree_walker(node, self)
             }
-            NodeTag::T_NextValueExpr => Ok(self.test(PROPARALLEL_UNSAFE)),
+            NodeTag::T_NextValueExpr => self.test(PROPARALLEL_UNSAFE),
             NodeTag::T_SubPlan => {
                 // The subplan's output params are safe within its testexpr
                 // (and only there); args get no such exemption.
                 let sp = node.as_sub_plan().unwrap();
-                if !sp.parallel_safe && self.test(PROPARALLEL_RESTRICTED) {
+                if !sp.parallel_safe && self.test(PROPARALLEL_RESTRICTED)? {
                     return Ok(true);
                 }
                 let save_len = self.safe_param_ids.len();
@@ -304,7 +310,7 @@ impl<'mcx> NodeWalker<'mcx> for MaxParallelHazard {
                 if p.paramkind != ParamKind::PARAM_EXEC
                     || !self.safe_param_ids.contains(&p.paramid)
                 {
-                    return Ok(self.test(PROPARALLEL_RESTRICTED));
+                    return self.test(PROPARALLEL_RESTRICTED);
                 }
                 Ok(false)
             }
@@ -651,7 +657,7 @@ impl<'mcx> NodeWalker<'mcx> for ConvertSaop {
                             lsyscache::get_op_hash_functions_ext(sa.opno, lefttype)?
                         {
                             if l == r {
-                                if saop_const_array_nitems(c.constvalue)
+                                if saop_const_array_nitems(c.constvalue)?
                                     >= MIN_ARRAY_SIZE_FOR_HASHED_SAOP
                                 {
                                     // SAFETY: caller holds the just-planned tree
@@ -676,7 +682,7 @@ impl<'mcx> NodeWalker<'mcx> for ConvertSaop {
                                 lsyscache::get_op_hash_functions_ext(negator, lefttype)?
                             {
                                 if l == r {
-                                    if saop_const_array_nitems(c.constvalue)
+                                    if saop_const_array_nitems(c.constvalue)?
                                         >= MIN_ARRAY_SIZE_FOR_HASHED_SAOP
                                     {
                                         let negfuncid = lsyscache::get_opcode(negator)?;
@@ -819,7 +825,7 @@ fn is_strict_saop(
         if c.constisnull {
             return Ok(false);
         }
-        return Ok(saop_const_array_nitems(c.constvalue) > 0);
+        return Ok(saop_const_array_nitems(c.constvalue)? > 0);
     }
     if let Some(a) = rightop.as_array_expr() {
         return Ok(!a.elements.is_nil() && !a.multidims);
@@ -827,36 +833,63 @@ fn is_strict_saop(
     Ok(false)
 }
 
-// Header-relative dims read: works for 1B and 4B array images (bound-param
-// array consts can be short-form); external/compressed stays loud.
-fn saop_const_array_nitems(value: datum::Datum) -> i64 {
+// DatumGetArrayTypeP + ArrayGetNItems(ARR_NDIM, ARR_DIMS) (is_strict_saop,
+// clauses.c:2074; convert_saop_to_hashed_saop, clauses.c:2341). An array
+// Const carries whatever header form its source datum had — a bound
+// parameter is copied verbatim by the PARAM_EXTERN substitution (datumCopy),
+// so a TOASTed column value arrives 1B-short, 4B-compressed or external —
+// and C's PG_DETOAST_DATUM unpacks every form before the dims are read. The
+// detoasted image lives only as long as the dims read: a private bump arena,
+// bulk-freed on return.
+fn saop_const_array_nitems(value: datum::Datum) -> PgResult<i64> {
+    fn nitems(body: &[u8]) -> i64 {
+        let rd = |off: usize| i32::from_ne_bytes(body[off..off + 4].try_into().unwrap());
+        let ndim = rd(0);
+        if ndim == 0 {
+            return 0;
+        }
+        let mut n = 1i64;
+        for i in 0..ndim as usize {
+            n *= rd(12 + 4 * i) as i64;
+        }
+        n
+    }
     let p = value.as_usize() as *const u8;
-    // SAFETY: non-null inline varlena array const, readable per its header.
-    let body: &[u8] = unsafe {
+    // SAFETY: non-null by-ref varlena array datum, readable for its
+    // header-declared (VARSIZE_ANY) size.
+    let image: &[u8] = unsafe {
         let b0 = *p;
-        if b0 & 0x01 == 0x01 {
-            assert!(b0 != 0x01, "is_strict_saop: external toast array const");
+        if b0 == 0x01 {
+            // VARATT_IS_EXTERNAL: 2-byte header + VARTAG_SIZE(tag) body
+            // (postgres.h): ondisk 16, indirect 8, expanded 8 (a pointer).
+            let tag = *p.add(1);
+            let body = match tag {
+                18 => 16,
+                1 | 2 | 3 => core::mem::size_of::<usize>(),
+                other => panic!("saop_const_array_nitems: unknown vartag {other}"),
+            };
+            core::slice::from_raw_parts(p, 2 + body)
+        } else if b0 & 0x01 == 0x01 {
+            // VARATT_IS_1B: the dims follow the one-byte header directly.
             let total = ((b0 >> 1) & 0x7F) as usize;
-            core::slice::from_raw_parts(p.add(1), total - 1)
+            return Ok(nitems(core::slice::from_raw_parts(p.add(1), total - 1)));
         } else {
-            assert!(b0 & 0x03 == 0, "is_strict_saop: compressed array const");
-            let img = core::slice::from_raw_parts(
-                p,
-                arrayfuncs::arr_size(core::slice::from_raw_parts(p, 4)),
-            );
-            &img[4..]
+            let size = arrayfuncs::arr_size(core::slice::from_raw_parts(p, 4));
+            let img = core::slice::from_raw_parts(p, size);
+            if b0 & 0x03 == 0 {
+                // VARATT_IS_4B_U: plain image, dims after the 4-byte header.
+                return Ok(nitems(&img[4..]));
+            }
+            // VARATT_IS_4B_C: compressed inline image.
+            img
         }
     };
-    let rd = |off: usize| i32::from_ne_bytes(body[off..off + 4].try_into().unwrap());
-    let ndim = rd(0);
-    if ndim == 0 {
-        return 0;
-    }
-    let mut n = 1i64;
-    for i in 0..ndim as usize {
-        n *= rd(12 + 4 * i) as i64;
-    }
-    n
+    let scratch = mcx::MemoryContext::new_bump("saop_const_array_nitems");
+    let plain = detoast_seams::detoast_attr::call(scratch.mcx(), image)?;
+    let n = nitems(&plain.as_slice()[4..]);
+    drop(plain);
+    drop(scratch);
+    Ok(n)
 }
 
 pub fn find_nonnullable_rels<'mcx>(
@@ -1189,10 +1222,14 @@ fn find_nonnullable_vars_walker<'mcx>(
             )?;
         }
         NodeTag::T_CoerceViaIO => {
+            // C (clauses.c:1869): "not clear this is useful, but it can't
+            // hurt" — the argument is walked with top_level=false, unlike
+            // find_nonnullable_rels_walker (clauses.c:1611), so a NullTest
+            // or BooleanTest under an I/O coercion never certifies its Var.
             result = find_nonnullable_vars_walker(
                 mcx,
                 Some(node.as_coerce_via_io().unwrap().arg),
-                top_level,
+                false,
             )?;
         }
         NodeTag::T_NullTest => {

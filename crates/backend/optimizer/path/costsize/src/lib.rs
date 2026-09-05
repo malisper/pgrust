@@ -904,11 +904,11 @@ pub fn cost_ctescan(
         (baserel.relid, baserel.rtekind, baserel.tuples, baserel.rows)
     };
     debug_assert!(relid > 0 && rtekind == types_pathnodes::RTE_CTE);
-    assert!(
-        run.root.path(path_id).base().param_info.is_none(),
-        "cost_ctescan (costsize.c): parameterized path; M2 lateral lane"
-    );
-    let rows = base_rows;
+    // Mark the path with the correct row estimate (costsize.c:1721).
+    let rows = match run.root.path(path_id).base().param_info.as_deref() {
+        Some(ppi) => ppi.ppi_rows,
+        None => base_rows,
+    };
 
     let mut startup_cost = 0.0;
     let mut cpu_per_tuple = gucs::cpu_tuple_cost();
@@ -973,8 +973,11 @@ pub fn cost_namedtuplestorescan(
         (baserel.relid, baserel.rtekind, baserel.tuples, baserel.rows)
     };
     debug_assert!(relid > 0 && rtekind == types_pathnodes::RTE_NAMEDTUPLESTORE);
-    debug_assert!(run.root.path(path_id).base().param_info.is_none());
-    let rows = base_rows;
+    // Mark the path with the correct row estimate (costsize.c:1763).
+    let rows = match run.root.path(path_id).base().param_info.as_deref() {
+        Some(ppi) => ppi.ppi_rows,
+        None => base_rows,
+    };
 
     let mut startup_cost = 0.0;
     let mut cpu_per_tuple = gucs::cpu_tuple_cost();

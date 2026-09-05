@@ -166,6 +166,16 @@ fn substitute_bound_param<'mcx>(
 // datumCopy (datum.c) scoped to bound-parameter substitution; by-ref varlena
 // sources carry any header form (fmgr_sql binds raw tuple datums: short 1B
 // headers and toast pointers included), so the -1 arm is C's VARSIZE_ANY.
+//
+// C copies a compressed image or an on-disk/indirect toast pointer verbatim
+// because every C consumer of the resulting Const detoasts on read
+// (DatumGetArrayTypeP, DatumGetTextPP, ...). The pgrust planner's Const
+// readers (estimate_array_length, predtest, partprune, like_support, the
+// stats comparators) rely on the documented invariant that a planner Const
+// is a plain or 1B-short image, so the substitution is the one place that
+// unpacks: the compressed/external forms are detoasted into `mcx` here.
+// Observable behaviour (plans, estimates, results) is C's; only the memory
+// form of the Const differs.
 fn datum_copy_in<'mcx>(mcx: Mcx<'mcx>, value: Datum, typlen: i16) -> PgResult<Datum> {
     let p = value.as_usize() as *const u8;
     if p.is_null() {
@@ -178,20 +188,26 @@ fn datum_copy_in<'mcx>(mcx: Mcx<'mcx>, value: Datum, typlen: i16) -> PgResult<Da
             unsafe {
                 let b0 = *p;
                 if b0 == 0x01 {
-                    // VARHDRSZ_EXTERNAL + VARTAG_SIZE (postgres.h); the toast
-                    // pointer itself is copied, exactly datumCopy.
-                    2 + match *p.add(1) {
+                    // VARHDRSZ_EXTERNAL + VARTAG_SIZE (postgres.h).
+                    let body = match *p.add(1) {
                         18 => 16,
                         1 => 8,
                         2 | 3 => panic!(
                             "datum_copy_in: expanded-object flatten (EOH_flatten_into) unported"
                         ),
                         tag => panic!("datum_copy_in: unknown vartag {tag}"),
-                    }
+                    };
+                    let img = core::slice::from_raw_parts(p, 2 + body);
+                    return detoast_into(mcx, img);
                 } else if b0 & 0x01 != 0 {
                     (b0 as usize >> 1) & 0x7F
                 } else {
-                    datum::VarlenaRef::from_ptr(p).varsize()
+                    let size = datum::VarlenaRef::from_ptr(p).varsize();
+                    if b0 & 0x03 != 0 {
+                        // VARATT_IS_4B_C: unpack the compressed inline image.
+                        return detoast_into(mcx, core::slice::from_raw_parts(p, size));
+                    }
+                    size
                 }
             }
         }
@@ -212,6 +228,13 @@ fn datum_copy_in<'mcx>(mcx: Mcx<'mcx>, value: Datum, typlen: i16) -> PgResult<Da
     let src = unsafe { core::slice::from_raw_parts(p, size) };
     let out = mcx::slice_in(mcx, src)?;
     Ok(Datum::from_usize(out.leak().as_ptr() as usize))
+}
+
+// PG_DETOAST_DATUM of a compressed or external varlena image into `mcx`; the
+// plain 4B-header result is the Const's value.
+fn detoast_into<'mcx>(mcx: Mcx<'mcx>, image: &[u8]) -> PgResult<Datum> {
+    let plain = detoast_seams::detoast_attr::call(mcx, image)?;
+    Ok(Datum::from_usize(plain.leak().as_ptr() as usize))
 }
 
 fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option<Node<'mcx>>> {
@@ -1084,11 +1107,26 @@ fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option
             }
         }
         NodeTag::T_CoerceToDomainValue | NodeTag::T_SetToDefault => Ok(None),
+        // C (clauses.c:3369-3385): every SQLValueFunction is stable, so in
+        // estimation mode the current value is evaluated into a Const (the
+        // selectivity code then sees a real bound); otherwise just a copy.
+        NodeTag::T_SQLValueFunction => {
+            if !cx.estimate {
+                return Ok(None);
+            }
+            let svf = node.as_sql_value_function().unwrap();
+            Ok(Some(clauses_seams::evaluate_expr::call(
+                cx.mcx,
+                node,
+                svf.r#type,
+                svf.typmod,
+                InvalidOid,
+            )?))
+        }
         NodeTag::T_Var
         | NodeTag::T_Const
         | NodeTag::T_RangeTblRef
         | NodeTag::T_CurrentOfExpr
-        | NodeTag::T_SQLValueFunction
         | NodeTag::T_NextValueExpr
         | NodeTag::T_MergeSupportFunc
         | NodeTag::T_SortGroupClause => Ok(None),
@@ -1275,9 +1313,7 @@ fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option
                     }
                 }
             }
-            // C also const-folds a Const arg via ece_evaluate_expr — unfolded
-            // here (runtime FieldSelect evaluates it identically).
-            Ok(Some(Node::mk(
+            let newfselect = Node::mk(
                 cx.mcx,
                 types_nodes::FieldSelect {
                     arg,
@@ -1286,7 +1322,30 @@ fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option
                     resulttypmod: fs.resulttypmod,
                     resultcollid: fs.resultcollid,
                 },
-            )?))
+            )?;
+            // C (clauses.c:3479-3489): a Const argument whose rowtype still
+            // matches the FieldSelect is folded to a Const through
+            // ece_evaluate_expr(newfselect) — exprType/exprTypmod/
+            // exprCollation of a FieldSelect are its result* fields.
+            if let Some(con) = arg.as_const() {
+                if rowtype_field_matches(
+                    cx.mcx,
+                    con.consttype,
+                    fs.fieldnum as i32,
+                    fs.resulttype,
+                    fs.resulttypmod,
+                    fs.resultcollid,
+                )? {
+                    return Ok(Some(clauses_seams::evaluate_expr::call(
+                        cx.mcx,
+                        newfselect,
+                        fs.resulttype,
+                        fs.resulttypmod,
+                        fs.resultcollid,
+                    )?));
+                }
+            }
+            Ok(Some(newfselect))
         }
         NodeTag::T_PlaceHolderVar => {
             let phv = node.as_place_holder_var().unwrap();
@@ -1556,10 +1615,22 @@ fn expand_function_arguments_opt<'mcx>(
 
     if has_named_args {
         let args = reorder_function_arguments(mcx, args, pronargs, funcid)?;
-        Ok(Some(recheck_cast_function_args(mcx, args, result_type, proargtypes.as_slice())?))
+        Ok(Some(recheck_cast_function_args(
+            mcx,
+            args,
+            result_type,
+            proargtypes.as_slice(),
+            shape.prorettype,
+        )?))
     } else if args.len() < pronargs {
         let args = add_function_defaults(mcx, args, pronargs, funcid)?;
-        Ok(Some(recheck_cast_function_args(mcx, args, result_type, proargtypes.as_slice())?))
+        Ok(Some(recheck_cast_function_args(
+            mcx,
+            args,
+            result_type,
+            proargtypes.as_slice(),
+            shape.prorettype,
+        )?))
     } else {
         Ok(None)
     }
@@ -1636,22 +1707,38 @@ fn add_function_defaults<'mcx>(
     Ok(out)
 }
 
+// fetch_function_defaults (clauses.c:4386): SysCacheGetAttrNotNull raises a
+// catchable XX000 on a NULL proargdefaults (reachable when a stored query
+// tree — a view — is planned after a catalog edit); castNode(List, ...) is
+// an Assert in C, so a non-List node tree is refused here with a typed error
+// rather than a panic.
 fn fetch_function_defaults<'mcx>(mcx: Mcx<'mcx>, funcid: Oid) -> PgResult<NodeList<'mcx>> {
     let src = syscache_seams::pg_proc_proargdefaults::call(mcx, funcid)?
         .ok_or_else(|| func_lookup_failed(funcid))?
-        .unwrap_or_else(|| panic!("proargdefaults is null for function {funcid}"));
+        .ok_or_else(|| {
+            Box::new(PgError::error(
+                "unexpected null value in cached tuple for catalog pg_proc column proargdefaults"
+                    .to_string(),
+            ))
+        })?;
     let node = readfuncs::stringToNode(mcx, src.as_str())?;
     let Some(list) = node.as_list() else {
-        panic!("proargdefaults of {funcid} is not a List");
+        return Err(Box::new(PgError::error(format!(
+            "proargdefaults of function {funcid} is not a List"
+        ))));
     };
     list.clone_in(mcx)
 }
 
+// recheck_cast_function_args (clauses.c:4433): the polymorphic result type
+// is re-resolved from the declared pg_proc.prorettype over the now-complete
+// argument list and must still equal the parser's answer.
 fn recheck_cast_function_args<'mcx>(
     mcx: Mcx<'mcx>,
     args: NodeList<'mcx>,
     result_type: Oid,
     proargtypes: &[Oid],
+    prorettype: Oid,
 ) -> PgResult<NodeList<'mcx>> {
     if args.len() > FUNC_MAX_ARGS {
         return Err(Box::new(PgError::error("too many function arguments".to_string())));
@@ -1669,9 +1756,10 @@ fn recheck_cast_function_args<'mcx>(
     let rettype = coerce::enforce_generic_type_consistency(
         actual_arg_types.as_slice(),
         declared_arg_types.as_mut_slice(),
-        result_type,
+        prorettype,
         false,
     )?;
+    // let's just check we got the same answer as the parser did ...
     if result_type != rettype {
         return Err(Box::new(PgError::error(
             "function's resolved result type changed during planning".to_string(),

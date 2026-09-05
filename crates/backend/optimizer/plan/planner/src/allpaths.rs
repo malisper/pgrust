@@ -1346,10 +1346,10 @@ fn set_function_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> Pg
 // set_result_pathlist (allpaths.c): one Result path, parameterized only by
 // lateral refs (join quals never push into a Result scan).
 // set_namedtuplestore_pathlist (allpaths.c); sizing ran in set_rel_size (the
-// RTE_RESULT split here), required_outer empty on this lane.
+// RTE_RESULT split here); required_outer = rel->lateral_relids.
 fn set_namedtuplestore_pathlist(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> {
-    debug_assert!(crate::relnode::relids_is_unset(&run.root.rel(rel).lateral_relids));
-    let path = crate::pathnode::create_namedtuplestorescan_path(run, rel)?;
+    let required_outer = crate::relnode::relids_copy(run.mcx, &run.root.rel(rel).lateral_relids);
+    let path = crate::pathnode::create_namedtuplestorescan_path(run, rel, &required_outer)?;
     add_path(run, rel, path);
     Ok(())
 }

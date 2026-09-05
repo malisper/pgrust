@@ -3452,6 +3452,7 @@ dependencies = [
  "coerce",
  "copyfuncs",
  "datum",
+ "detoast_seams",
  "fmgr_core",
  "lsyscache",
  "mcx",

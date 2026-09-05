@@ -1627,13 +1627,18 @@ pub fn create_resultscan_path<'mcx>(
     Ok(id)
 }
 
-// create_ctescan_path (pathnode.c); required_outer empty on this lane.
+// create_ctescan_path (pathnode.c:2332): required_outer is the scan rel's
+// lateral_relids (a PlaceHolderVar evaluated at the CTE scan can carry
+// lateral references), so the path is parameterized like every other scan.
 pub fn create_ctescan_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel_id: RelId,
     pathkeys: PgVec<'mcx, PathKey>,
+    required_outer: &types_pathnodes::Relids<'mcx>,
 ) -> PgResult<PathId> {
+    let param_info = get_baserel_parampathinfo(run, rel_id, required_outer)?;
     let mut path = base_path(run, NodeTag::T_Path, NodeTag::T_CteScan, rel_id);
+    path.param_info = param_info;
     path.parallel_aware = false;
     path.parallel_safe = run.root.rel(rel_id).consider_parallel;
     path.pathkeys = pathkeys;
@@ -1642,12 +1647,15 @@ pub fn create_ctescan_path<'mcx>(
     Ok(id)
 }
 
-// create_namedtuplestorescan_path (pathnode.c); required_outer empty on this lane.
+// create_namedtuplestorescan_path (pathnode.c:2358).
 pub fn create_namedtuplestorescan_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel_id: RelId,
+    required_outer: &types_pathnodes::Relids<'mcx>,
 ) -> PgResult<PathId> {
+    let param_info = get_baserel_parampathinfo(run, rel_id, required_outer)?;
     let mut path = base_path(run, NodeTag::T_Path, NodeTag::T_NamedTuplestoreScan, rel_id);
+    path.param_info = param_info;
     path.parallel_aware = false;
     path.parallel_safe = run.root.rel(rel_id).consider_parallel;
     let id = run.root.alloc_path(PathNode::Path(path));
@@ -1655,12 +1663,15 @@ pub fn create_namedtuplestorescan_path<'mcx>(
     Ok(id)
 }
 
-// create_worktablescan_path (pathnode.c); required_outer empty on this lane.
+// create_worktablescan_path (pathnode.c:2410).
 pub fn create_worktablescan_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel_id: RelId,
+    required_outer: &types_pathnodes::Relids<'mcx>,
 ) -> PgResult<PathId> {
+    let param_info = get_baserel_parampathinfo(run, rel_id, required_outer)?;
     let mut path = base_path(run, NodeTag::T_Path, NodeTag::T_WorkTableScan, rel_id);
+    path.param_info = param_info;
     path.parallel_aware = false;
     path.parallel_safe = run.root.rel(rel_id).consider_parallel;
     let id = run.root.alloc_path(PathNode::Path(path));
