@@ -825,7 +825,7 @@ pub fn min_join_parameterization<'mcx>(
 // same server, with compatible users, inherits the FDW identity so
 // GetForeignJoinPaths can fire. A zero userid means "current user"; matching
 // it against an explicit current-user side sets useridiscurrent.
-fn set_foreign_rel_properties<'mcx>(
+pub(crate) fn set_foreign_rel_properties<'mcx>(
     joinrel: &mut types_pathnodes::RelOptInfo<'mcx>,
     outer_rel: &types_pathnodes::RelOptInfo<'mcx>,
     inner_rel: &types_pathnodes::RelOptInfo<'mcx>,

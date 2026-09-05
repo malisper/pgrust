@@ -30,7 +30,7 @@ pub fn create_plan<'mcx>(run: &mut PlannerRun<'mcx>, best_path: PathId) -> PgRes
         apply_tlist_labeling(plan, run.processed_tlist());
     }
     crate::subselect::ss_attach_initplans(run, plan)?;
-    assert!(run.root.curOuterParams.is_empty(), "unassigned NestLoopParams");
+    check_nestloop_params_assigned(run.root.curOuterParams.len())?;
     run.root.plan_params.clear();
     Ok(plan)
 }
@@ -2586,14 +2586,14 @@ fn create_unique_plan<'mcx>(
     let mut grp_collations: mcx::PgVec<'mcx, types_core::Oid> = mcx::PgVec::new_in(mcx);
     for &uid in uniq_expr_ids.iter() {
         let uniqexpr = *run.root.expr_node(uid);
-        let tle = subplan_tlist
-            .iter()
-            .find(|n| {
+        let tle = unique_plan_lookup(
+            subplan_tlist.iter().find(|n| {
                 types_nodes::equal(n.as_target_entry().expect("tlist cell").expr, uniqexpr)
-            })
-            .unwrap_or_else(|| panic!("failed to find unique expression in subplan tlist"))
-            .as_target_entry()
-            .unwrap();
+            }),
+            || "failed to find unique expression in subplan tlist".to_string(),
+        )?
+        .as_target_entry()
+        .unwrap();
         grp_col_idx.push(tle.resno);
         grp_collations.push(expr_collation(tle.expr));
     }
@@ -2602,10 +2602,10 @@ fn create_unique_plan<'mcx>(
     if umethod == types_pathnodes::UNIQUE_PATH_HASH {
         let mut grp_operators: mcx::PgVec<'mcx, types_core::Oid> = mcx::PgVec::new_in(mcx);
         for &in_oper in in_operators.iter() {
-            let (_, eq_oper) = lsyscache::get_compatible_hash_operators(in_oper)?
-                .unwrap_or_else(|| {
-                    panic!("could not find compatible hash operator for operator {in_oper}")
-                });
+            let (_, eq_oper) = unique_plan_lookup(
+                lsyscache::get_compatible_hash_operators(in_oper)?,
+                || format!("could not find compatible hash operator for operator {in_oper}"),
+            )?;
             grp_operators.push(eq_oper);
         }
 
@@ -2631,17 +2631,15 @@ fn create_unique_plan<'mcx>(
     let mut nulls_first: mcx::PgVec<'mcx, bool> = mcx::PgVec::new_in(mcx);
     for (pos, &in_oper) in in_operators.iter().enumerate() {
         let sortop = lsyscache::amop::get_ordering_op_for_equality_op(in_oper, false)?;
-        assert!(
-            sortop != 0,
-            "could not find ordering operator for equality operator {in_oper}"
-        );
+        let sortop = unique_plan_lookup((sortop != 0).then_some(sortop), || {
+            format!("could not find ordering operator for equality operator {in_oper}")
+        })?;
         let eqop = lsyscache::amop::get_equality_op_for_ordering_op(sortop)?
             .map(|(op, _)| op)
             .unwrap_or(0);
-        assert!(
-            eqop != 0,
-            "could not find equality operator for ordering operator {sortop}"
-        );
+        let eqop = unique_plan_lookup((eqop != 0).then_some(eqop), || {
+            format!("could not find equality operator for ordering operator {sortop}")
+        })?;
         let tle_node = subplan_tlist
             .iter()
             .find(|n| n.as_target_entry().expect("tlist cell").resno == grp_col_idx[pos])
@@ -3201,12 +3199,19 @@ fn expr_collation(node: Node<'_>) -> types_core::Oid {
     }
 }
 
-fn clamp_cardinality_to_long(x: f64) -> i64 {
-    if x < i64::MAX as f64 {
-        x as i64
-    } else {
-        i64::MAX
+// clamp_cardinality_to_long (costsize.c:265): NaN and anything at or above
+// LONG_MAX clamp to LONG_MAX, non-positive estimates to 0.
+pub(crate) fn clamp_cardinality_to_long(x: f64) -> i64 {
+    if x.is_nan() {
+        return i64::MAX;
     }
+    if x <= 0.0 {
+        return 0;
+    }
+    if x >= i64::MAX as f64 {
+        return i64::MAX;
+    }
+    x as i64
 }
 
 // build_path_tlist (createplan.c).
@@ -5607,4 +5612,28 @@ fn reparameterize_path_by_child<'mcx>(
         run.root.path_mut(path).base_mut().pathtarget_id = Some(new_pt);
     }
     Ok(Some(path))
+}
+
+// createplan.c:371-372: NestLoopParams left in root->curOuterParams after
+// the plan tree is built are elog(ERROR) "failed to assign all
+// NestLoopParams to plan nodes" -- a catchable XX000, never a panic.
+pub(crate) fn check_nestloop_params_assigned(unassigned: usize) -> PgResult<()> {
+    if unassigned != 0 {
+        return Err(Box::new(types_error::PgError::error(
+            "failed to assign all NestLoopParams to plan nodes",
+        )));
+    }
+    Ok(())
+}
+
+// createplan.c:1809 / :1833 / :1874 / :1885: create_unique_plan's "shouldn't
+// happen" lookups are elog(ERROR)s (XX000), never panics.
+pub(crate) fn unique_plan_lookup<T>(
+    found: Option<T>,
+    message: impl FnOnce() -> String,
+) -> PgResult<T> {
+    match found {
+        Some(v) => Ok(v),
+        None => Err(Box::new(types_error::PgError::error(message()))),
+    }
 }

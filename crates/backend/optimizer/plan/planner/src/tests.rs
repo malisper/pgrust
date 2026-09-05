@@ -8743,6 +8743,211 @@ fn remove_rel_from_restrictinfo_cleans_every_relid_set() {
     assert!(relids_is_member(1, &ri.left_relids));
 }
 
+// audit-18.6 remediation batch b082 (backend/optimizer/plan): unit witnesses
+// for the internal-reach rows (each cites the C site the fix must match).
+mod audit_b082 {
+    use super::*;
+    use types_nodes::primnodes::{MergeSupportFunc, PlaceHolderVar};
+    use types_pathnodes::PlannerParamItem;
+
+    // paramassign.c:543: a subquery parameter Var whose rel is not in
+    // curOuterRels is elog(ERROR) "non-LATERAL parameter required by
+    // subquery" (XX000), never a panic.
+    // a186-candidate-fp-util-paramassign-aa44ea04c80a6dbaa84f-1 (Var arm) and
+    // a186-candidate-fp-util-paramassign-8006435219d95f0067e4-1 (PHV arm share
+    // the message).
+    #[test]
+    fn process_subquery_nestloop_params_non_lateral_var_is_xx000() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        let mut run = crate::run::PlannerRun::new(mcx);
+        let var = Node::mk_var(mcx, 3, 1, 23, -1, 0, 0).unwrap();
+        let item = run.intern_expr(var);
+        let pid = run.root.alloc_planner_param_item(PlannerParamItem { item, paramId: 0 });
+        // curOuterRels is empty: rel 3 is not an outer rel of this nestloop.
+        let err = crate::paramassign::process_subquery_nestloop_params(&mut run, &[pid])
+            .unwrap_err();
+        assert_eq!(err.message(), "non-LATERAL parameter required by subquery");
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    }
+
+    // paramassign.c:597: a subplan param item that is neither a Var nor a
+    // PlaceHolderVar is elog(ERROR) "unexpected type of subquery parameter"
+    // (XX000). a186-candidate-fp-util-paramassign-d0d5823db7f577967e80-1
+    #[test]
+    fn process_subquery_nestloop_params_unexpected_item_is_xx000() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        let mut run = crate::run::PlannerRun::new(mcx);
+        let konst = Node::mk_const(mcx, 23, -1, 0, 4, Datum::from_i32(7), false, true).unwrap();
+        let item = run.intern_expr(konst);
+        let pid = run.root.alloc_planner_param_item(PlannerParamItem { item, paramId: 0 });
+        let err = crate::paramassign::process_subquery_nestloop_params(&mut run, &[pid])
+            .unwrap_err();
+        assert_eq!(err.message(), "unexpected type of subquery parameter");
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    }
+
+    // paramassign.c:334: a MergeSupportFunc with no enclosing MERGE level is
+    // elog(ERROR) "MergeSupportFunc found outside MERGE" (XX000).
+    // a186-candidate-fp-util-paramassign-912a5001c757a5193e39-1
+    #[test]
+    fn replace_outer_merge_support_outside_merge_is_xx000() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        let mut run = crate::run::PlannerRun::new(mcx);
+        let msf = MergeSupportFunc { msftype: 25, msfcollid: 0, location: -1 };
+        let node = Node::mk(mcx, MergeSupportFunc { msftype: 25, msfcollid: 0, location: -1 })
+            .unwrap();
+        let err = crate::paramassign::replace_outer_merge_support(&mut run, &msf, node)
+            .unwrap_err();
+        assert_eq!(err.message(), "MergeSupportFunc found outside MERGE");
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    }
+
+    // placeholder.c:105-106: a PlaceHolderVar first seen after
+    // placeholdersFrozen is elog(ERROR) "too late to create a new
+    // PlaceHolderInfo" (XX000).
+    // a186-candidate-fp-util-placeholder-1212473c787a48cc9a17-1
+    #[test]
+    fn find_placeholder_info_after_freeze_is_xx000() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        let mut run = crate::run::PlannerRun::new(mcx);
+        run.root.placeholdersFrozen = true;
+        let konst = Node::mk_const(mcx, 23, -1, 0, 4, Datum::from_i32(1), false, true).unwrap();
+        let mut phrels = types_nodes::Bitmapset::empty();
+        phrels.add_member(mcx, 1).unwrap();
+        let phv = PlaceHolderVar {
+            phexpr: konst,
+            phrels,
+            phnullingrels: types_nodes::Bitmapset::empty(),
+            phid: 1,
+            phlevelsup: 0,
+        };
+        let err = crate::placeholder::find_placeholder_info(&mut run, &phv).unwrap_err();
+        assert_eq!(err.message(), "too late to create a new PlaceHolderInfo");
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        assert!(run.root.placeholder_list.is_empty());
+    }
+
+    // analyzejoins.c:141-142 / :2760-2761.
+    // a186-candidate-fp-plan-analyzejoins-3c6bc1456acd078aff38-1
+    #[test]
+    fn joinlist_removal_miss_is_xx000() {
+        let err = crate::analyzejoins::check_joinlist_removed(0, 4).unwrap_err();
+        assert_eq!(err.message(), "failed to find relation 4 in joinlist");
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        let err = crate::analyzejoins::check_joinlist_removed(2, 7).unwrap_err();
+        assert_eq!(err.message(), "failed to find relation 7 in joinlist");
+        crate::analyzejoins::check_joinlist_removed(1, 4).unwrap();
+    }
+
+    // plancat.c:143-151: a relkind without a table AM (a view planned
+    // without its ON SELECT rule) is ERRCODE_WRONG_OBJECT_TYPE "cannot open
+    // relation \"%s\"" + errdetail_relkind_not_supported, never a panic;
+    // foreign / partitioned tables and sequences pass.
+    // a186-candidate-fp-util-plancat-a2d180fec9d411393002-1
+    #[test]
+    fn relation_without_table_am_is_wrong_object_type() {
+        pg_class_seams::errdetail_relkind_not_supported::set(|relkind| {
+            Ok(format!("This operation is not supported for relkind {}.", relkind as char))
+        });
+        let err = crate::plancat::check_relation_has_table_am(b'v', "vv").unwrap_err();
+        assert_eq!(err.message(), "cannot open relation \"vv\"");
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_WRONG_OBJECT_TYPE);
+        assert_eq!(err.detail(), Some("This operation is not supported for relkind v."));
+        for relkind in [b'r', b'm', b't', b'S', b'f', b'p'] {
+            crate::plancat::check_relation_has_table_am(relkind, "ok").unwrap();
+        }
+    }
+
+    // plancat.c:2003 / :2043: "invalid restriction selectivity: %f" /
+    // "invalid join selectivity: %f" (XX000), never a panic.
+    // a186-candidate-fp-util-plancat-c96b58bb4bdf34478383-1 and
+    // a186-candidate-fp-util-plancat-6cd24bcedf54eae4401c-1 (range arm).
+    #[test]
+    fn selectivity_out_of_range_is_xx000() {
+        let err = crate::plancat::check_selectivity_range(1.5, "restriction").unwrap_err();
+        assert_eq!(err.message(), "invalid restriction selectivity: 1.500000");
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        let err = crate::plancat::check_selectivity_range(-0.5, "join").unwrap_err();
+        assert_eq!(err.message(), "invalid join selectivity: -0.500000");
+        assert_eq!(crate::plancat::check_selectivity_range(0.42, "restriction").unwrap(), 0.42);
+        assert_eq!(crate::plancat::check_selectivity_range(0.0, "join").unwrap(), 0.0);
+        assert_eq!(crate::plancat::check_selectivity_range(1.0, "join").unwrap(), 1.0);
+    }
+
+    // createplan.c:371-372.
+    // a186-candidate-fp-plan-createplan-p1-52c305208546471af598-1
+    #[test]
+    fn unassigned_nestloop_params_is_xx000() {
+        let err = crate::createplan::check_nestloop_params_assigned(1).unwrap_err();
+        assert_eq!(err.message(), "failed to assign all NestLoopParams to plan nodes");
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        crate::createplan::check_nestloop_params_assigned(0).unwrap();
+    }
+
+    // createplan.c:1809 / :1833 / :1874 / :1885.
+    // a186-candidate-fp-plan-createplan-p1-d4439ad7b86f3b99ee83-1
+    #[test]
+    fn unique_plan_lookup_miss_is_xx000() {
+        let err = crate::createplan::unique_plan_lookup::<u32>(None, || {
+            format!("could not find compatible hash operator for operator {}", 96)
+        })
+        .unwrap_err();
+        assert_eq!(err.message(), "could not find compatible hash operator for operator 96");
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        let err = crate::createplan::unique_plan_lookup::<u32>(None, || {
+            "failed to find unique expression in subplan tlist".to_string()
+        })
+        .unwrap_err();
+        assert_eq!(err.message(), "failed to find unique expression in subplan tlist");
+        assert_eq!(
+            crate::createplan::unique_plan_lookup(Some(5u32), || unreachable!()).unwrap(),
+            5
+        );
+    }
+
+    // costsize.c:265-275 clamp_cardinality_to_long: NaN -> LONG_MAX, x <= 0
+    // -> 0, x >= LONG_MAX -> LONG_MAX, else truncation.
+    // a186-candidate-fp-path-costsize-p1-a53fbe484edc8c99ce93-1
+    #[test]
+    fn clamp_cardinality_to_long_matches_costsize() {
+        use crate::createplan::clamp_cardinality_to_long as clamp;
+        assert_eq!(clamp(-3.0), 0);
+        assert_eq!(clamp(-0.5), 0);
+        assert_eq!(clamp(0.0), 0);
+        assert_eq!(clamp(f64::NAN), i64::MAX);
+        assert_eq!(clamp(2.9), 2);
+        assert_eq!(clamp(1e30), i64::MAX);
+        assert_eq!(clamp(i64::MAX as f64), i64::MAX);
+    }
+
+    // selfuncs.c:2434: "unrecognized join type: %d" (XX000).
+    // a186-candidate-fp-adt-selfuncs-p1-cdf1ac1eac8dcba114fe-1
+    #[test]
+    fn eqjoinsel_unrecognized_jointype_is_xx000() {
+        let err = crate::selfuncs::eqjoinsel_unrecognized_jointype(99).unwrap_err();
+        assert_eq!(err.message(), "unrecognized join type: 99");
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    }
+
+    // appendinfo.c:873 and inherit.c:404-405 (XX000, never panics).
+    // a186-candidate-fp-util-appendinfo-a4556c12a230644cc8d6-1 and
+    // a186-candidate-fp-util-inherit-fbeab785769f9fdd566d-1
+    #[test]
+    fn inherit_internal_errors_are_xx000() {
+        let err = crate::inherit::row_identity_name_conflict("ctid").unwrap_err();
+        assert_eq!(err.message(), "conflicting uses of row-identity name \"ctid\"");
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        let err = crate::inherit::check_partition_not_other_temp(true).unwrap_err();
+        assert_eq!(err.message(), "temporary relation from another session found as partition");
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        crate::inherit::check_partition_not_other_temp(false).unwrap();
+    }
+}
+
 // audit-18.6 remediation batch b058 (backend/optimizer/plan): unit witnesses
 // for the internal-reach rows (each cites the C site the fix must match).
 mod audit_b058 {

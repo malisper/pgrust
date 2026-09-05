@@ -31,7 +31,7 @@ pub fn remove_useless_joins<'mcx>(
             remove_leftjoinrel_from_query(run, innerrelid, &sjinfo)?;
             let mut nremoved = 0;
             joinlist = remove_rel_from_joinlist(run, joinlist, innerrelid, &mut nremoved);
-            assert!(nremoved == 1, "failed to find relation {innerrelid} in joinlist");
+            check_joinlist_removed(nremoved, innerrelid)?;
             run.root.join_info_list.remove(i);
             continue 'restart;
         }
@@ -1689,7 +1689,19 @@ pub fn remove_useless_self_joins<'mcx>(
     for relid in relids_members(&to_remove) {
         let mut nremoved = 0;
         joinlist = remove_rel_from_joinlist(run, joinlist, relid, &mut nremoved);
-        assert!(nremoved == 1, "failed to find relation {relid} in joinlist");
+        check_joinlist_removed(nremoved, relid)?;
     }
     Ok(joinlist)
+}
+
+// analyzejoins.c:141-142 / :2760-2761: a rel that the joinlist walk did not
+// remove exactly once is elog(ERROR) "failed to find relation %d in
+// joinlist" -- a catchable XX000, never a panic.
+pub(crate) fn check_joinlist_removed(nremoved: i32, relid: i32) -> PgResult<()> {
+    if nremoved != 1 {
+        return Err(Box::new(types_error::PgError::error(format!(
+            "failed to find relation {relid} in joinlist"
+        ))));
+    }
+    Ok(())
 }

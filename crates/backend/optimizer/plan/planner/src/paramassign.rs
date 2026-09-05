@@ -280,9 +280,10 @@ pub(crate) fn replace_outer_merge_support<'mcx>(
         .find(|&i| {
             run.suspended_roots[i].root.command_type == types_nodes::CmdType::CMD_MERGE
         })
-        .unwrap_or_else(|| {
-            panic!("replace_outer_merge_support (paramassign.c): MergeSupportFunc found outside MERGE")
-        });
+        .ok_or_else(|| {
+            // paramassign.c:334: elog(ERROR), a catchable XX000.
+            Box::new(types_error::PgError::error("MergeSupportFunc found outside MERGE"))
+        })?;
     let mcx = run.mcx;
     let ptype = msf.msftype;
     let copy = rewrite_manip::copy_node(mcx, msf_node)?;
@@ -399,8 +400,10 @@ pub(crate) fn replace_nestloop_param_placeholdervar<'mcx>(
     Node::mk(mcx, prm)
 }
 
-/// process_subquery_nestloop_params (paramassign.c), Var arm (PHVs are loud
-/// upstream).
+/// process_subquery_nestloop_params (paramassign.c). The "non-LATERAL
+/// parameter required by subquery" / "unexpected type of subquery
+/// parameter" guards (:543 / :574 / :597) are elog(ERROR)s -- catchable
+/// XX000s, never panics.
 pub(crate) fn process_subquery_nestloop_params<'mcx>(
     run: &mut PlannerRun<'mcx>,
     subplan_params: &[types_pathnodes::NodeId],
@@ -416,7 +419,7 @@ pub(crate) fn process_subquery_nestloop_params<'mcx>(
             types_nodes::NodeTag::T_Var => {
                 let var = item.as_var().unwrap();
                 if !crate::relnode::relids_is_member(var.varno, &run.root.curOuterRels) {
-                    panic!("non-LATERAL parameter required by subquery");
+                    return Err(non_lateral_parameter());
                 }
             }
             types_nodes::NodeTag::T_PlaceHolderVar => {
@@ -425,13 +428,14 @@ pub(crate) fn process_subquery_nestloop_params<'mcx>(
                 let eval_at =
                     crate::relnode::relids_copy(mcx, &run.root.phinfo(phid).ph_eval_at);
                 if !crate::relnode::relids_is_subset(&eval_at, &run.root.curOuterRels) {
-                    panic!("non-LATERAL parameter required by subquery");
+                    return Err(non_lateral_parameter());
                 }
             }
-            other => panic!(
-                "process_subquery_nestloop_params (paramassign.c): unexpected type of \
-                 subquery parameter {other:?}"
-            ),
+            _ => {
+                return Err(Box::new(types_error::PgError::error(
+                    "unexpected type of subquery parameter",
+                )));
+            }
         }
         let mut present = false;
         for i in 0..run.root.curOuterParams.len() {
@@ -549,4 +553,9 @@ pub(crate) fn identify_current_nestloop_params<'mcx>(
         }
     }
     Ok(result)
+}
+
+#[cold]
+fn non_lateral_parameter() -> Box<types_error::PgError> {
+    Box::new(types_error::PgError::error("non-LATERAL parameter required by subquery"))
 }

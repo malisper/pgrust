@@ -241,12 +241,19 @@ fn expand_partitioned_rtentry<'mcx>(
     let mut i = live_parts.next_member(-1);
     while i >= 0 {
         let child_oid = oids[i as usize];
-        let childrel = table::table_open(mcx, child_oid, lockmode)?;
-        assert!(
-            !(childrel.rd_rel.relpersistence == types_core::RELPERSISTENCE_TEMP
-                && !childrel.rd_islocaltemp),
-            "temporary relation from another session found as partition"
-        );
+        // inherit.c:393-398: a partition detached and dropped since the
+        // PartitionDesc was read no longer opens; it is treated as pruned.
+        let Some(childrel) = table::try_table_open(mcx, child_oid, lockmode)? else {
+            let cur = crate::relnode::relids_take(&mut run.root.rel_mut(relinfo).live_parts);
+            run.root.rel_mut(relinfo).live_parts =
+                crate::relnode::relids_del_member(mcx, &cur, i);
+            i = live_parts.next_member(i);
+            continue;
+        };
+        check_partition_not_other_temp(
+            childrel.rd_rel.relpersistence == types_core::RELPERSISTENCE_TEMP
+                && !childrel.rd_islocaltemp,
+        )?;
         let child_rti =
             expand_single_inheritance_child(run, parent_rti, parentrel, &childrel, top_parentrc)?;
         let childrelinfo = crate::relnode::build_simple_rel_child(run, child_rti, relinfo)?;
@@ -1206,7 +1213,7 @@ pub fn add_row_identity_var<'mcx>(
                 crate::relnode::relids_add_member(mcx, &cur, rtindex);
             return Ok(());
         }
-        panic!("conflicting uses of row-identity name \"{rowid_name}\"");
+        return row_identity_name_conflict(rowid_name);
     }
 
     let rowidvar = run.intern_expr(rowid_node);
@@ -1487,4 +1494,25 @@ pub fn get_translated_update_targetlist<'mcx>(
     let colnos =
         adjust_inherited_attnums_multilevel(run, colnos_src.as_slice(), relid, result_relation);
     Ok((tl, colnos))
+}
+
+// inherit.c:404-405: a partition that is another session's temporary
+// relation is elog(ERROR) "temporary relation from another session found as
+// partition" -- a catchable XX000, never a panic.
+pub(crate) fn check_partition_not_other_temp(is_other_temp: bool) -> PgResult<()> {
+    if is_other_temp {
+        return Err(Box::new(types_error::PgError::error(
+            "temporary relation from another session found as partition",
+        )));
+    }
+    Ok(())
+}
+
+// appendinfo.c:873: two row-identity registrations under one name with
+// different Vars are elog(ERROR) "conflicting uses of row-identity name
+// \"%s\"" -- a catchable XX000, never a panic.
+pub(crate) fn row_identity_name_conflict(rowid_name: &str) -> PgResult<()> {
+    Err(Box::new(types_error::PgError::error(format!(
+        "conflicting uses of row-identity name \"{rowid_name}\""
+    ))))
 }

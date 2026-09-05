@@ -101,7 +101,10 @@ impl<'mcx> PredIter<'mcx> {
     }
 }
 
-fn predicate_classify<'mcx>(node: Node<'mcx>) -> PgResult<(PredClass, PredIter<'mcx>)> {
+fn predicate_classify<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: Node<'mcx>,
+) -> PgResult<(PredClass, PredIter<'mcx>)> {
     if let Some(list) = node.as_list() {
         return Ok((PredClass::And, PredIter::List(list.as_slice())));
     }
@@ -118,7 +121,7 @@ fn predicate_classify<'mcx>(node: Node<'mcx>) -> PgResult<(PredClass, PredIter<'
         if let Some(arraynode) = saop.args.as_slice().get(1).copied() {
             if let Some(c) = arraynode.as_const() {
                 if !c.constisnull {
-                    let nelems = const_array_nelems(c)?;
+                    let nelems = const_array_nelems(mcx, c)?;
                     if nelems <= MAX_SAOP_ARRAY_SIZE {
                         return Ok((class, PredIter::ArrayConst(saop)));
                     }
@@ -149,8 +152,9 @@ fn predicate_classify<'mcx>(node: Node<'mcx>) -> PgResult<(PredClass, PredIter<'
 // The ndim > MAXDIM cell has no C answer to match (C hands ArrayGetNItems a
 // bare `const int *` and reads past the dims area); array_get_n_items_safe
 // raises the dimension-count error there by design.
-fn const_array_nelems(c: &Const) -> PgResult<i32> {
-    let body = crate::selfuncs::varlena_datum_payload(c.constvalue);
+fn const_array_nelems<'mcx>(mcx: Mcx<'mcx>, c: &Const) -> PgResult<i32> {
+    let img = array_const_image(mcx, c.constvalue)?;
+    let body = &img[datum::varlena::VARHDRSZ..];
     let rd = |off: usize| i32::from_ne_bytes(body[off..off + 4].try_into().unwrap());
     let ndim = rd(0);
     let mut dims = [0i32; arrayutils::MAXDIM as usize];
@@ -161,13 +165,42 @@ fn const_array_nelems(c: &Const) -> PgResult<i32> {
     arrayutils::array_get_n_items(ndim, &dims[..n])
 }
 
+// DatumGetArrayTypeP (predtest.c:878 / :1054, PG_DETOAST_DATUM): the array
+// Const's image in plain 4B-header form. A planner Const carries whatever
+// image its datum came with -- a plpgsql variable bound as a custom-plan
+// Const keeps the compressed heap form, a STABLE function folded at
+// estimation time returns its datum verbatim -- so a short-header,
+// compressed or external image is unpacked into `mcx` through detoast_attr;
+// a plain inline image is used in place.
+fn array_const_image<'mcx>(mcx: Mcx<'mcx>, value: datum::Datum) -> PgResult<&'mcx [u8]> {
+    let p = value.as_usize() as *const u8;
+    debug_assert!(!p.is_null());
+    // SAFETY: by-ref varlena datum, readable for its header and for the
+    // size that header declares (VARSIZE_ANY).
+    unsafe {
+        let b0 = *p;
+        let len = if b0 == 0x01 {
+            types_tuple::varatt::VARHDRSZ_EXTERNAL + types_tuple::varatt::vartag_size(*p.add(1))
+        } else if b0 & 0x01 == 0x01 {
+            ((b0 >> 1) & 0x7F) as usize
+        } else {
+            (u32::from_ne_bytes(*(p as *const [u8; 4])) >> 2) as usize
+        };
+        let img = core::slice::from_raw_parts(p, len);
+        if b0 & 0x03 == 0 {
+            return Ok(img);
+        }
+        Ok(detoast::detoast_attr(mcx, img)?.leak())
+    }
+}
+
 fn arrayconst_components<'mcx>(
     mcx: Mcx<'mcx>,
     saop: &types_nodes::primnodes::ScalarArrayOpExpr<'mcx>,
 ) -> PgResult<PgVec<'mcx, Node<'mcx>>> {
     let scalar = saop.args.nth(0);
     let arrayconst = saop.args.nth(1).as_const().expect("classified as Const array");
-    let img = crate::selfuncs::varlena_image_any(mcx, arrayconst.constvalue)?;
+    let img = array_const_image(mcx, arrayconst.constvalue)?;
     let elemtype = arrayfuncs::arr_elemtype(img);
     let (elmlen, elmbyval, elmalign) = lsyscache::get_typlenbyvalalign(elemtype)?;
     let (values, nulls) =
@@ -232,8 +265,8 @@ fn predicate_implied_by_recurse<'mcx>(
     predicate: Node<'mcx>,
     weak: bool,
 ) -> PgResult<bool> {
-    let (pclass, pred_info) = predicate_classify(predicate)?;
-    let (cclass, clause_info) = predicate_classify(clause)?;
+    let (pclass, pred_info) = predicate_classify(mcx, predicate)?;
+    let (cclass, clause_info) = predicate_classify(mcx, clause)?;
     match (cclass, pclass) {
         (PredClass::And, PredClass::And) => {
             for &pitem in pred_info.components(mcx)?.as_slice() {
@@ -318,8 +351,8 @@ fn predicate_refuted_by_recurse<'mcx>(
     predicate: Node<'mcx>,
     weak: bool,
 ) -> PgResult<bool> {
-    let (pclass, pred_info) = predicate_classify(predicate)?;
-    let (cclass, clause_info) = predicate_classify(clause)?;
+    let (pclass, pred_info) = predicate_classify(mcx, predicate)?;
+    let (cclass, clause_info) = predicate_classify(mcx, clause)?;
     match cclass {
         PredClass::And => match pclass {
             PredClass::And => {
@@ -481,7 +514,7 @@ fn predicate_implied_by_simple_clause<'mcx>(
             && !predntest.argisrow
         {
             if let Some(arg) = predntest.arg {
-                if clause_is_strict_for(clause, arg, true)? {
+                if clause_is_strict_for(mcx, clause, arg, true)? {
                     return Ok(true);
                 }
             }
@@ -522,7 +555,7 @@ fn predicate_refuted_by_simple_clause<'mcx>(
             }
             if weak {
                 if let Some(carg) = clausentest.arg {
-                    if clause_is_strict_for(predicate, carg, true)? {
+                    if clause_is_strict_for(mcx, predicate, carg, true)? {
                         return Ok(true);
                     }
                 }
@@ -547,7 +580,7 @@ fn predicate_refuted_by_simple_clause<'mcx>(
                 }
             }
             if let Some(parg) = predntest.arg {
-                if clause_is_strict_for(clause, parg, true)? {
+                if clause_is_strict_for(mcx, clause, parg, true)? {
                     return Ok(true);
                 }
             }
@@ -594,9 +627,8 @@ fn extract_strong_not_arg(clause: Node<'_>) -> Option<Node<'_>> {
 }
 
 // Can clause be proven NULL (or FALSE, when allow_false) given subexpr NULL?
-// C's ArrayCoerceExpr/ConvertRowtypeExpr arms are dead: those tags are outside
-// this repo's expression vocabulary.
 fn clause_is_strict_for<'mcx>(
+    mcx: Mcx<'mcx>,
     mut clause: Node<'mcx>,
     mut subexpr: Node<'mcx>,
     allow_false: bool,
@@ -615,7 +647,7 @@ fn clause_is_strict_for<'mcx>(
     if let Some(op) = clause.as_op_expr() {
         if lsyscache::op_strict(op.opno)? {
             for arg in op.args.iter() {
-                if clause_is_strict_for(arg, subexpr, false)? {
+                if clause_is_strict_for(mcx, arg, subexpr, false)? {
                     return Ok(true);
                 }
             }
@@ -625,7 +657,7 @@ fn clause_is_strict_for<'mcx>(
     if let Some(f) = clause.as_func_expr() {
         if lsyscache::func_strict(f.funcid)? {
             for arg in f.args.iter() {
-                if clause_is_strict_for(arg, subexpr, false)? {
+                if clause_is_strict_for(mcx, arg, subexpr, false)? {
                     return Ok(true);
                 }
             }
@@ -633,17 +665,28 @@ fn clause_is_strict_for<'mcx>(
         }
     }
 
+    // predtest.c:1517-1526: CoerceViaIO is strict, ArrayCoerceExpr is strict
+    // for its array argument (whatever the per-element expression is),
+    // ConvertRowtypeExpr is strict at the row level, CoerceToDomain is strict.
     if let Some(c) = clause.as_coerce_via_io() {
-        return clause_is_strict_for(c.arg, subexpr, false);
+        return clause_is_strict_for(mcx, c.arg, subexpr, false);
+    }
+    if let Some(c) = clause.as_array_coerce_expr() {
+        return clause_is_strict_for(mcx, c.arg, subexpr, false);
+    }
+    if let Some(c) = clause.as_convert_rowtype_expr() {
+        return clause_is_strict_for(mcx, c.arg, subexpr, false);
     }
     if let Some(c) = clause.as_coerce_to_domain() {
-        return clause_is_strict_for(c.arg, subexpr, false);
+        return clause_is_strict_for(mcx, c.arg, subexpr, false);
     }
 
     if let Some(saop) = clause.as_scalar_array_op_expr() {
         let scalarnode = saop.args.nth(0);
         let arraynode = saop.args.nth(1);
-        if clause_is_strict_for(scalarnode, subexpr, false)? && lsyscache::op_strict(saop.opno)? {
+        if clause_is_strict_for(mcx, scalarnode, subexpr, false)?
+            && lsyscache::op_strict(saop.opno)?
+        {
             if allow_false && saop.useOr {
                 return Ok(true);
             }
@@ -652,7 +695,7 @@ fn clause_is_strict_for<'mcx>(
                 if c.constisnull {
                     return Ok(true);
                 }
-                nelems = const_array_nelems(c)?;
+                nelems = const_array_nelems(mcx, c)?;
             } else if let Some(a) = arraynode.as_array_expr() {
                 if !a.multidims {
                     nelems = a.elements.len() as i32;
@@ -662,7 +705,7 @@ fn clause_is_strict_for<'mcx>(
                 return Ok(true);
             }
         }
-        return clause_is_strict_for(arraynode, subexpr, false);
+        return clause_is_strict_for(mcx, arraynode, subexpr, false);
     }
 
     if let Some(c) = clause.as_const() {
@@ -1225,34 +1268,34 @@ mod tests {
         );
 
         // Valid plane, unchanged: nelems is the dims product.
-        assert_eq!(const_array_nelems(&corrupt_array_const(mcx, 1, &[3])).unwrap(), 3);
+        assert_eq!(const_array_nelems(mcx, &corrupt_array_const(mcx, 1, &[3])).unwrap(), 3);
         assert_eq!(
-            const_array_nelems(&corrupt_array_const(mcx, 2, &[3, 4])).unwrap(),
+            const_array_nelems(mcx, &corrupt_array_const(mcx, 2, &[3, 4])).unwrap(),
             12
         );
         // C's `ndim <= 0 -> return 0` arm: a VALUE, not an error. (Must not
         // over-tighten: 0 elements still classifies as an array Const.)
         for ndim in [0, -1, i32::MIN] {
             assert_eq!(
-                const_array_nelems(&corrupt_array_const(mcx, ndim, &[])).unwrap(),
+                const_array_nelems(mcx, &corrupt_array_const(mcx, ndim, &[])).unwrap(),
                 0,
                 "ndim={ndim}"
             );
         }
         // Negative dimension (UB-LB overflowed) -> C's first ereturn.
-        let e = const_array_nelems(&corrupt_array_const(mcx, 1, &[-1])).unwrap_err();
+        let e = const_array_nelems(mcx, &corrupt_array_const(mcx, 1, &[-1])).unwrap_err();
         assert_eq!(e.message(), size_msg);
         assert_eq!(e.sqlstate, types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED);
         // int32 product overflow -> C's second ereturn.
-        let e = const_array_nelems(&corrupt_array_const(mcx, 2, &[100_000, 100_000])).unwrap_err();
+        let e = const_array_nelems(mcx, &corrupt_array_const(mcx, 2, &[100_000, 100_000])).unwrap_err();
         assert_eq!(e.message(), size_msg);
         // Over MaxArraySize (but no int32 overflow) -> C's third ereturn.
-        let e = const_array_nelems(&corrupt_array_const(mcx, 1, &[200_000_000])).unwrap_err();
+        let e = const_array_nelems(mcx, &corrupt_array_const(mcx, 1, &[200_000_000])).unwrap_err();
         assert_eq!(e.message(), size_msg);
         // ndim > MAXDIM: no C answer; pgrust raises the dimension-count error
         // rather than reading past the dims area, and above all does not panic.
         for ndim in [7, 1000, i32::MAX] {
-            let e = const_array_nelems(&corrupt_array_const(mcx, ndim, &[1; 6])).unwrap_err();
+            let e = const_array_nelems(mcx, &corrupt_array_const(mcx, ndim, &[1; 6])).unwrap_err();
             assert_eq!(
                 e.message(),
                 std::format!(
@@ -1296,5 +1339,153 @@ mod tests {
         let e = predicate_refuted_by(mcx, &[pred], &[clause], false)
             .expect_err("corrupt array Const must be an error, not a panic");
         assert_eq!(e.sqlstate, types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+    }
+
+    // audit-18.6 remediation batch b082.
+    // predtest.c:878 / :1054: C reads the ScalarArrayOpExpr's array Const
+    // through DatumGetArrayTypeP (PG_DETOAST_DATUM), so a short-header,
+    // compressed or external image is unpacked before ARR_NDIM / ARR_DIMS
+    // are read. A planner Const carries any of these forms -- a plpgsql
+    // variable holding a compressed array bound as a custom-plan Const, a
+    // STABLE function folded at estimation time -- so none may be refused.
+    // a186-candidate-fp-util-predtest-5a2a72d306ca644e14ce-1
+    fn int4_array_payload(n: i32) -> std::vec::Vec<u8> {
+        let mut p = std::vec::Vec::new();
+        p.extend_from_slice(&1i32.to_ne_bytes()); // ndim
+        p.extend_from_slice(&0i32.to_ne_bytes()); // dataoffset (no nulls)
+        p.extend_from_slice(&23u32.to_ne_bytes()); // int4 elemtype
+        p.extend_from_slice(&n.to_ne_bytes()); // dims[0]
+        p.extend_from_slice(&1i32.to_ne_bytes()); // lbound[0]
+        for i in 0..n {
+            p.extend_from_slice(&(i * 10).to_ne_bytes());
+        }
+        p
+    }
+
+    enum Form {
+        Plain,
+        Short,
+        Compressed,
+    }
+
+    fn array_const_in_form<'mcx>(mcx: Mcx<'mcx>, payload: &[u8], form: Form) -> Const {
+        let mut img = mcx::vec_with_capacity_in(mcx, payload.len() + 8 + payload.len() / 8 + 2)
+            .unwrap();
+        match form {
+            Form::Plain => {
+                mcx::vec_append_bytes(&mut img, &datum::varlena::set_varsize_4b(4 + payload.len()))
+                    .unwrap();
+                mcx::vec_append_bytes(&mut img, payload).unwrap();
+            }
+            Form::Short => {
+                let total = 1 + payload.len();
+                assert!(total <= 0x7F);
+                mcx::vec_append_bytes(&mut img, &[((total as u8) << 1) | 0x01]).unwrap();
+                mcx::vec_append_bytes(&mut img, payload).unwrap();
+            }
+            Form::Compressed => {
+                // pglz stream of literals only: each control byte 0x00 announces
+                // eight literal bytes (postgres.h VARATT_4B_C + pg_lzcompress.c).
+                let mut stream = std::vec::Vec::new();
+                for chunk in payload.chunks(8) {
+                    stream.push(0u8);
+                    stream.extend_from_slice(chunk);
+                }
+                let total = 8 + stream.len();
+                mcx::vec_append_bytes(
+                    &mut img,
+                    &types_tuple::varatt::set_varsize_4b_c_word(total as u32).to_ne_bytes(),
+                )
+                .unwrap();
+                // va_tcinfo: raw size, compression method id 0 (pglz) in the
+                // top two bits.
+                mcx::vec_append_bytes(&mut img, &(payload.len() as u32).to_ne_bytes()).unwrap();
+                mcx::vec_append_bytes(&mut img, &stream).unwrap();
+            }
+        }
+        let ptr = img.as_slice().as_ptr() as usize;
+        core::mem::forget(img); // bump-allocated; lives as long as the context
+        Const {
+            consttype: 1007, // int4[]
+            consttypmod: -1,
+            constcollid: 0,
+            constlen: -1,
+            constvalue: datum::Datum::from_usize(ptr),
+            constisnull: false,
+            constbyval: false,
+            location: -1,
+        }
+    }
+
+    #[test]
+    fn const_array_nelems_detoasts_every_const_image_form() {
+        setup();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        let payload = int4_array_payload(3);
+        assert_eq!(
+            const_array_nelems(mcx, &array_const_in_form(mcx, &payload, Form::Plain)).unwrap(),
+            3
+        );
+        assert_eq!(
+            const_array_nelems(mcx, &array_const_in_form(mcx, &payload, Form::Short)).unwrap(),
+            3
+        );
+        assert_eq!(
+            const_array_nelems(mcx, &array_const_in_form(mcx, &payload, Form::Compressed)).unwrap(),
+            3
+        );
+        // A longer array whose short form would not fit: plain and compressed.
+        let payload = int4_array_payload(40);
+        assert_eq!(
+            const_array_nelems(mcx, &array_const_in_form(mcx, &payload, Form::Plain)).unwrap(),
+            40
+        );
+        assert_eq!(
+            const_array_nelems(mcx, &array_const_in_form(mcx, &payload, Form::Compressed)).unwrap(),
+            40
+        );
+    }
+
+    // predtest.c:1520-1525: ArrayCoerceExpr is strict for its array argument
+    // and ConvertRowtypeExpr is strict at the row level, so `a::text[] = ...`
+    // proves `a IS NOT NULL` (a partial-index predicate) exactly like C.
+    // a186-candidate-fp-util-predtest-80e25eb3f37c04f3ae19-1
+    #[test]
+    fn clause_is_strict_for_sees_through_array_and_rowtype_coercions() {
+        use types_nodes::primnodes::{ArrayCoerceExpr, CoercionForm, ConvertRowtypeExpr};
+        setup();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        let a = var(mcx, 2);
+        let a2 = var(mcx, 2);
+        let other = var(mcx, 3);
+        let coerced = Node::mk(
+            mcx,
+            ArrayCoerceExpr {
+                arg: a,
+                elemexpr: None,
+                resulttype: 1009,
+                resulttypmod: -1,
+                resultcollid: 100,
+                coerceformat: CoercionForm::COERCE_EXPLICIT_CAST,
+                location: -1,
+            },
+        )
+        .unwrap();
+        assert!(clause_is_strict_for(mcx, coerced, a2, false).unwrap());
+        assert!(!clause_is_strict_for(mcx, coerced, other, false).unwrap());
+        let converted = Node::mk(
+            mcx,
+            ConvertRowtypeExpr {
+                arg: a,
+                resulttype: 16384,
+                convertformat: CoercionForm::COERCE_IMPLICIT_CAST,
+                location: -1,
+            },
+        )
+        .unwrap();
+        assert!(clause_is_strict_for(mcx, converted, a2, false).unwrap());
+        assert!(!clause_is_strict_for(mcx, converted, other, false).unwrap());
     }
 }

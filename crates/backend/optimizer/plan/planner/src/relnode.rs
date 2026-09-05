@@ -631,9 +631,7 @@ fn set_joinrel_partition_key_exprs<'mcx>(
     Ok(())
 }
 
-// build_child_join_rel (relnode.c); set_foreign_rel_properties and
-// add_child_join_rel_equivalences are dead on this lane (no FDWs, eclass-lite
-// never sets has_eclass_joins and child pathkeys come from child index paths).
+// build_child_join_rel (relnode.c).
 pub fn build_child_join_rel<'mcx>(
     run: &mut crate::run::PlannerRun<'mcx>,
     outer_rel: RelId,
@@ -669,6 +667,14 @@ pub fn build_child_join_rel<'mcx>(
     joinrel.has_eclass_joins = run.root.rel(parent_joinrel).has_eclass_joins;
     joinrel.pathtarget_id =
         Some(run.root.alloc_pathtarget(types_pathnodes::PathTarget::new(mcx)));
+    // relnode.c:957: a child join of two foreign rels on one server inherits
+    // the FDW identity (serverid / userid / fdwroutine) so GetForeignJoinPaths
+    // fires for the child join too.
+    crate::joinrels::set_foreign_rel_properties(
+        &mut joinrel,
+        run.root.rel(outer_rel),
+        run.root.rel(inner_rel),
+    );
     let joinrel = run.root.alloc_rel(joinrel);
 
     build_child_join_reltarget(run, parent_joinrel, joinrel, appinfos)?;

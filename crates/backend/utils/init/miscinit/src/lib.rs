@@ -196,6 +196,17 @@ pub fn init_seams() {
     s::process_session_preload_libraries::set(preload::process_session_preload_libraries);
     s::process_shmem_requests::set(process_shmem_requests);
     preload::install_preload_guc_vars();
+    install_ignore_system_indexes_guc_var();
+}
+
+// guc_tables.c binds ignore_system_indexes to the IgnoreSystemIndexes global
+// that genam.c and plancat.c read; the GUC store writes through this slot so
+// `-c ignore_system_indexes=on` (PGC_BACKEND, PGOPTIONS) reaches them.
+fn install_ignore_system_indexes_guc_var() {
+    guc_tables::vars::IgnoreSystemIndexes.install(guc_tables::GucVarAccessors {
+        get: IgnoreSystemIndexes,
+        set: SetIgnoreSystemIndexes,
+    });
 }
 
 #[cfg(test)]

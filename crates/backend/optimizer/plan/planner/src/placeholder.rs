@@ -59,10 +59,12 @@ pub fn find_placeholder_info<'mcx>(
         debug_assert!(run.root.phinfo(*id).phid == phv.phid);
         return Ok(*id);
     }
-    assert!(
-        !run.root.placeholdersFrozen,
-        "too late to create a new PlaceHolderInfo"
-    );
+    // placeholder.c:105-106: elog(ERROR), a catchable XX000, never a panic.
+    if run.root.placeholdersFrozen {
+        return Err(Box::new(types_error::PgError::error(
+            "too late to create a new PlaceHolderInfo",
+        )));
+    }
 
     // DIVERGENCE from C's pull_varnos(root, phexpr): a nested PHV inside
     // phexpr contributes phrels here, not ph_eval_at. The C-shaped eval_at

@@ -25,6 +25,13 @@ fn relkind_has_table_am(relkind: u8) -> bool {
     matches!(relkind, RELKIND_RELATION | RELKIND_MATVIEW | RELKIND_TOASTVALUE)
 }
 
+// IsSystemRelation (catalog.c:105) -> IsSystemClass: a catalog relation
+// (pinned OID range) or a TOAST-namespace relation.
+fn is_system_relation(relation: &Relation<'_>) -> bool {
+    relation.rd_id < types_core::catalog::FirstUnpinnedObjectId
+        || relation.rd_rel.relnamespace == types_core::catalog::PG_TOAST_NAMESPACE
+}
+
 pub fn get_relation_info<'mcx>(
     run: &mut PlannerRun<'mcx>,
     relation_object_id: Oid,
@@ -36,13 +43,7 @@ pub fn get_relation_info<'mcx>(
 
     let relation = table::table_open(mcx, relation_object_id, NoLock)?;
     let relkind = relation.rd_rel.relkind;
-    if !(relkind_has_table_am(relkind)
-        || relkind == RELKIND_SEQUENCE
-        || relkind == types_rel::RELKIND_FOREIGN_TABLE
-        || relkind == types_rel::RELKIND_PARTITIONED_TABLE)
-    {
-        panic!("get_relation_info (plancat.c): relkind {relkind}; M2 foreign lane");
-    }
+    check_relation_has_table_am(relkind, relation.name())?;
     // C's !RelationIsPermanent && RecoveryInProgress guard: no hot-standby
     // sessions exist, so the recovery arm is compile-time false.
 
@@ -95,7 +96,11 @@ pub fn get_relation_info<'mcx>(
 
     // A partitioned parent keeps its (partitioned) indexes in indexlist for
     // uniqueness proofs; a traditional inheritance parent keeps none.
-    let hasindex = if inhparent && relkind != types_rel::RELKIND_PARTITIONED_TABLE {
+    // plancat.c:218-222: indexes on system catalogs are ignored when
+    // IgnoreSystemIndexes is set (the ignore_system_indexes GUC / -P).
+    let hasindex = if (inhparent && relkind != types_rel::RELKIND_PARTITIONED_TABLE)
+        || (miscinit::IgnoreSystemIndexes() && is_system_relation(&relation))
+    {
         false
     } else {
         relation.rd_rel.relhasindex
@@ -983,7 +988,8 @@ pub fn has_unique_index(run: &PlannerRun<'_>, rel: RelId, attno: i16) -> bool {
     false
 }
 
-// Proname of a dynamic-oid (extension) estimator proc; None for builtins.
+// Prosrc of a dynamic-oid (extension or user-created) estimator proc -- the
+// name fmgr resolves it by; None for builtins.
 #[cold]
 fn dynamic_estimator_name(procid: Oid) -> PgResult<Option<String>> {
     const FIRST_NORMAL_OBJECT_ID: Oid = 16384;
@@ -991,11 +997,13 @@ fn dynamic_estimator_name(procid: Oid) -> PgResult<Option<String>> {
         return Ok(None);
     }
     let cx = ::mcx::MemoryContext::new("plancat estimator probe");
-    let name = lsyscache::get_func_name(cx.mcx(), procid)?.map(|n| n.as_str().to_string());
+    let name = syscache_seams::lookup_pg_proc_prosrc::call(cx.mcx(), procid)?
+        .map(|n| n.as_str().to_string());
     Ok(name)
 }
 
-// restriction_selectivity (plancat.c): closed-set oprrest dispatch.
+// restriction_selectivity (plancat.c): the oprrest estimator, dispatched
+// natively (C's OidFunctionCall4Coll).
 pub fn restriction_selectivity<'mcx>(
     run: &mut PlannerRun<'mcx>,
     operatorid: Oid,
@@ -1003,11 +1011,28 @@ pub fn restriction_selectivity<'mcx>(
     inputcollid: Oid,
     varrelid: i32,
 ) -> PgResult<f64> {
-    const F_EQSEL: Oid = 101;
     let oprrest = crate::syscache_memo::get_oprrest(run, operatorid)?;
     if oprrest == 0 {
         return Ok(0.5);
     }
+    let result = restriction_estimator(run, oprrest, operatorid, args, inputcollid, varrelid)?;
+    check_selectivity_range(result, "restriction")
+}
+
+// The oprrest procedure body: every built-in estimator dispatches on its
+// canonical oid; an extension estimator is matched by its prosrc (the C
+// symbol fmgr would resolve); a user-created LANGUAGE internal function is
+// the built-in its prosrc names (fmgr.c fmgr_internal_function) and
+// re-dispatches on that oid.
+fn restriction_estimator<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    oprrest: Oid,
+    operatorid: Oid,
+    args: &[NodeId],
+    inputcollid: Oid,
+    varrelid: i32,
+) -> PgResult<f64> {
+    const F_EQSEL: Oid = 101;
     const F_NEQSEL: Oid = 102;
     const F_SCALARLTSEL: Oid = 103;
     const F_SCALARGTSEL: Oid = 104;
@@ -1066,7 +1091,7 @@ pub fn restriction_selectivity<'mcx>(
         3560 => crate::network_selfuncs::networksel(run, operatorid, args, varrelid)?,
         3686 => crate::ts_selfuncs::tsmatchsel(run, args, varrelid)?,
         3817 => crate::array_selfuncs::arraycontsel(run, operatorid, args, varrelid)?,
-        // Extension estimators carry dynamic oids; match by proname. The
+        // Extension estimators carry dynamic oids; match by prosrc. The
         // intarray _sel wrappers substitute the built-in operator OID and
         // call arraycontsel, exactly as their C bodies do.
         other => match dynamic_estimator_name(other)?.as_deref() {
@@ -1082,21 +1107,42 @@ pub fn restriction_selectivity<'mcx>(
             Some("_int_matchsel") => {
                 crate::intarray_selfuncs::int_matchsel(run, args, varrelid, other)?
             }
-            _ => panic!(
-                "restriction_selectivity (plancat.c): oprrest {other}; M2 selfuncs lane"
-            ),
+            prosrc => match builtin_estimator_alias(other, prosrc) {
+                Some(foid) => {
+                    restriction_estimator(run, foid, operatorid, args, inputcollid, varrelid)?
+                }
+                None => return Err(unsupported_estimator("restriction", other)),
+            },
         },
     };
-    if !(0.0..=1.0).contains(&result) {
-        panic!("invalid restriction selectivity: {result}");
-    }
     Ok(result)
 }
 
-// join_selectivity (plancat.c): closed-set oprjoin dispatch. The scalar
-// inequality estimators return DEFAULT_INEQ_SEL with no arg inspection.
+// join_selectivity (plancat.c): the oprjoin estimator, dispatched natively
+// (C's OidFunctionCall5Coll). The scalar inequality estimators return
+// DEFAULT_INEQ_SEL with no arg inspection.
 pub fn join_selectivity<'mcx>(
     run: &mut PlannerRun<'mcx>,
+    operatorid: Oid,
+    args: &[NodeId],
+    inputcollid: Oid,
+    jointype: types_pathnodes::JoinType,
+    sjinfo: Option<&types_pathnodes::SpecialJoinInfo<'mcx>>,
+) -> PgResult<f64> {
+    let oprjoin = lsyscache::get_oprjoin(operatorid)?;
+    if oprjoin == 0 {
+        return Ok(0.5);
+    }
+    let result = join_estimator(run, oprjoin, operatorid, args, inputcollid, jointype, sjinfo)?;
+    check_selectivity_range(result, "join")
+}
+
+// The oprjoin procedure body; see restriction_estimator for the dispatch
+// rules.
+#[allow(clippy::too_many_arguments)]
+fn join_estimator<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    oprjoin: Oid,
     operatorid: Oid,
     args: &[NodeId],
     inputcollid: Oid,
@@ -1112,10 +1158,6 @@ pub fn join_selectivity<'mcx>(
     const F_POSITIONJOINSEL: Oid = 1301;
     const F_CONTJOINSEL: Oid = 1303;
     const DEFAULT_INEQ_SEL: f64 = 0.3333333333333333;
-    let oprjoin = lsyscache::get_oprjoin(operatorid)?;
-    if oprjoin == 0 {
-        return Ok(0.5);
-    }
     let result = match oprjoin {
         F_EQJOINSEL => {
             crate::selfuncs::eqjoinsel(run, operatorid, args, jointype, sjinfo, inputcollid)?
@@ -1143,13 +1185,36 @@ pub fn join_selectivity<'mcx>(
             Some("_int_overlap_joinsel") => crate::array_selfuncs::arraycontjoinsel(2750),
             Some("_int_contains_joinsel") => crate::array_selfuncs::arraycontjoinsel(2751),
             Some("_int_contained_joinsel") => crate::array_selfuncs::arraycontjoinsel(2752),
-            _ => panic!("join_selectivity (plancat.c): oprjoin {other}; M2 selfuncs lane"),
+            prosrc => match builtin_estimator_alias(other, prosrc) {
+                Some(foid) => join_estimator(
+                    run, foid, operatorid, args, inputcollid, jointype, sjinfo,
+                )?,
+                None => return Err(unsupported_estimator("join", other)),
+            },
         },
     };
-    if !(0.0..=1.0).contains(&result) {
-        panic!("invalid join selectivity: {result}");
-    }
     Ok(result)
+}
+
+// fmgr_internal_function (fmgr.c): a LANGUAGE internal function created by
+// the user is an alias of the built-in whose name is its prosrc; None when
+// the prosrc names no built-in (a C-language function of an extension this
+// build does not carry) or is the procedure itself.
+fn builtin_estimator_alias(procid: Oid, prosrc: Option<&str>) -> Option<Oid> {
+    let foid = fmgr_core::fmgr_internal_function(prosrc?);
+    (foid != 0 && foid != procid).then_some(foid)
+}
+
+// An estimator procedure the planner cannot invoke: C calls it through
+// fmgr (plancat.c:1999 / :2039); here it is a typed refusal, never a panic.
+#[cold]
+fn unsupported_estimator(kind: &str, procid: Oid) -> Box<types_error::PgError> {
+    Box::new(
+        types_error::PgError::error(format!(
+            "{kind} selectivity estimator function {procid} is not supported"
+        ))
+        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+    )
 }
 
 // function_selectivity (plancat.c): SupportRequestSelectivity dispatch on the
@@ -1768,4 +1833,36 @@ pub(crate) fn topn_nonint_enabled() -> bool {
 /// stay ON. (Own copy of m5_suppress's `tier2_car_kill_spelling_on`.)
 fn topn_nonint_kill_spelling_on(v: Option<&str>) -> bool {
     !matches!(v, Some("0") | Some("off"))
+}
+
+// plancat.c:143-151: a relation without a table AM can be planned only if it
+// is a foreign or partitioned table (sequences carry the heap AM); anything
+// else -- a view whose ON SELECT rule went missing -- is
+// ERRCODE_WRONG_OBJECT_TYPE "cannot open relation \"%s\"" with
+// errdetail_relkind_not_supported, never a panic.
+pub(crate) fn check_relation_has_table_am(relkind: u8, relname: &str) -> PgResult<()> {
+    if relkind_has_table_am(relkind)
+        || relkind == RELKIND_SEQUENCE
+        || relkind == types_rel::RELKIND_FOREIGN_TABLE
+        || relkind == types_rel::RELKIND_PARTITIONED_TABLE
+    {
+        return Ok(());
+    }
+    Err(Box::new(
+        types_error::PgError::error(format!("cannot open relation \"{relname}\""))
+            .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+            .with_detail(pg_class_seams::errdetail_relkind_not_supported::call(relkind)?),
+    ))
+}
+
+// plancat.c:2003 / :2043: an estimator result outside [0, 1] is elog(ERROR)
+// "invalid <restriction|join> selectivity: %f" -- a catchable XX000, never a
+// panic.
+pub(crate) fn check_selectivity_range(result: f64, kind: &str) -> PgResult<f64> {
+    if (0.0..=1.0).contains(&result) {
+        return Ok(result);
+    }
+    Err(Box::new(types_error::PgError::error(format!(
+        "invalid {kind} selectivity: {result:.6}"
+    ))))
 }

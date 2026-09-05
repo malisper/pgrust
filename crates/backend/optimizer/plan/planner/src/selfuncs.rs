@@ -3236,7 +3236,7 @@ pub fn eqjoinsel<'mcx>(
             };
             semi.min(inner_rows * selec_inner)
         }
-        other => panic!("eqjoinsel (selfuncs.c): jointype {other}"),
+        other => eqjoinsel_unrecognized_jointype(other)?,
     };
     Ok(clamp_probability(selec))
 }
@@ -4935,4 +4935,14 @@ fn strip_all_phvs_mutator<'mcx>(
         clauses::expression_tree_mutator(mcx, node, &mut |n| mutate(mcx, n))
     }
     Ok(mutate(mcx, node)?.unwrap_or(node))
+}
+
+// selfuncs.c:2434: a join type eqjoinsel does not know is elog(ERROR)
+// "unrecognized join type: %d" -- a catchable XX000, never a panic.
+pub(crate) fn eqjoinsel_unrecognized_jointype(
+    jointype: types_pathnodes::JoinType,
+) -> PgResult<f64> {
+    Err(Box::new(types_error::PgError::error(format!(
+        "unrecognized join type: {jointype}"
+    ))))
 }
