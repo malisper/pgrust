@@ -2,8 +2,8 @@
 // CREATE PUBLICATION/SUBSCRIPTION), registered as a builtin library like
 // test_decoding.
 //
-// Ported: streaming + two-phase protocol families (streamed two-phase still
-// defers stream_prepare_cb — see plugin init), row-filter publications
+// Ported: streaming + two-phase protocol families (including streamed
+// two-phase: stream_prepare_cb), row-filter publications
 // (per-pubaction ExprStates with the UPDATE INSERT/DELETE transform),
 // publish_via_partition_root attribute remapping, column lists, FOR ALL
 // TABLES, schema publications, and replication-origin forwarding
@@ -37,8 +37,8 @@ use logicalproto::{
     logicalrep_write_commit, logicalrep_write_commit_prepared, logicalrep_write_delete,
     logicalrep_write_insert, logicalrep_write_message, logicalrep_write_prepare,
     logicalrep_write_rel, logicalrep_write_rollback_prepared, logicalrep_write_stream_abort,
-    logicalrep_write_stream_commit, logicalrep_write_stream_start, logicalrep_write_stream_stop,
-    logicalrep_write_truncate,
+    logicalrep_write_stream_commit, logicalrep_write_stream_prepare, logicalrep_write_stream_start,
+    logicalrep_write_stream_stop, logicalrep_write_truncate,
     logicalrep_write_typ, logicalrep_write_update, LOGICALREP_PROTO_MAX_VERSION_NUM,
     LOGICALREP_PROTO_MIN_VERSION_NUM, LOGICALREP_PROTO_STREAM_PARALLEL_VERSION_NUM,
     LOGICALREP_PROTO_STREAM_VERSION_NUM, LOGICALREP_PROTO_TWOPHASE_VERSION_NUM,
@@ -48,14 +48,15 @@ use mcx::{MemoryContext, Mcx, PgBox};
 use reorderbuffer::{
     ReorderBuffer, ReorderBufferChange, ReorderBufferChangeData, ReorderBufferChangeType, TxnId,
 };
-use types_core::catalog::FirstGenbkiObjectId;
+use types_core::catalog::{FirstGenbkiObjectId, ATTRIBUTE_GENERATED_STORED};
 use types_core::{
     InvalidOid, InvalidRepOriginId, InvalidTransactionId, InvalidXLogRecPtr, Oid, RepOriginId,
     TransactionId, XLogRecPtr,
 };
 use types_error::{
     ErrorLocation, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_NAME,
-    ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_SYNTAX_ERROR, ERROR, WARNING,
+    ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+    ERRCODE_SYNTAX_ERROR, ERROR, WARNING,
 };
 use types_fmgr::{FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction};
 use types_nodes::bitmapset::Bitmapset;
@@ -239,10 +240,8 @@ fn fc__pg_output_plugin_init(
     cb.stream_change_cb = Some(pgoutput_change);
     cb.stream_message_cb = Some(pgoutput_message);
     cb.stream_truncate_cb = Some(pgoutput_truncate);
-    // C also registers stream_prepare_cb (streamed two-phase); deliberately
-    // NOT registered: a streamed transaction reaching PREPARE errors with the
-    // wrapper's own "logical streaming requires a stream_prepare_cb callback"
-    // (GL-LOGDEC-1 ASK-1 — named follow-up increment).
+    // transaction streaming - two-phase commit (pgoutput.c:286)
+    cb.stream_prepare_cb = Some(pgoutput_stream_prepare_txn);
     Ok(Datum::from_usize(0))
 }
 
@@ -253,43 +252,67 @@ fn conflicting_option() -> PgResult<()> {
         .finish(loc("parse_output_parameters"))
 }
 
-fn parse_bool_value(name: &str, value: Option<&str>) -> PgResult<bool> {
-    match value {
-        None => Ok(true),
-        Some(v) => match adt_bool::parse_bool(v) {
-            Some(b) => Ok(b),
-            None => {
-                ereport(ERROR)
-                    .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
-                    .errmsg(format!(
-                        "could not parse value \"{v}\" for parameter \"{name}\""
-                    ))
-                    .finish(loc("parse_output_parameters"))?;
-                unreachable!()
-            }
-        },
-    }
-}
+// The DefElem args pgoutput can receive are a string or nothing: the
+// replication grammar's plugin_opt_arg is `SCONST | /* EMPTY */`
+// (repl_gram.y) and the SQL interface always passes text pairs
+// (logicalfuncs.c), so only defGet*'s NULL and T_String arms apply here.
 
-// defGetStreamingMode (subscriptioncmds.c).
-fn parse_streaming_mode(value: Option<&str>) -> PgResult<u8> {
-    let Some(v) = value else {
-        return Ok(LOGICALREP_STREAM_ON);
-    };
-    if v.eq_ignore_ascii_case("parallel") {
-        return Ok(LOGICALREP_STREAM_PARALLEL);
-    }
-    match adt_bool::parse_bool(v) {
-        Some(true) => Ok(LOGICALREP_STREAM_ON),
-        Some(false) => Ok(LOGICALREP_STREAM_OFF),
+// defGetString (define.c:35).
+fn def_get_string<'a>(defname: &str, arg: Option<&'a str>) -> PgResult<&'a str> {
+    match arg {
+        Some(v) => Ok(v),
         None => {
             ereport(ERROR)
                 .errcode(ERRCODE_SYNTAX_ERROR)
-                .errmsg(format!("{v} requires a Boolean value or \"parallel\""))
-                .finish(loc("defGetStreamingMode"))?;
+                .errmsg(format!("{defname} requires a parameter"))
+                .finish(loc("defGetString"))?;
             unreachable!()
         }
     }
+}
+
+// defGetBoolean (define.c:94).
+fn def_get_boolean(defname: &str, arg: Option<&str>) -> PgResult<bool> {
+    // If no parameter value given, assume "true" is meant.
+    let Some(sval) = arg else {
+        return Ok(true);
+    };
+    // The set of strings accepted here should match up with the grammar's
+    // opt_boolean_or_string production.
+    if sval.eq_ignore_ascii_case("true") || sval.eq_ignore_ascii_case("on") {
+        return Ok(true);
+    }
+    if sval.eq_ignore_ascii_case("false") || sval.eq_ignore_ascii_case("off") {
+        return Ok(false);
+    }
+    ereport(ERROR)
+        .errcode(ERRCODE_SYNTAX_ERROR)
+        .errmsg(format!("{defname} requires a Boolean value"))
+        .finish(loc("defGetBoolean"))?;
+    unreachable!()
+}
+
+// defGetStreamingMode (subscriptioncmds.c:2500).
+fn def_get_streaming_mode(defname: &str, arg: Option<&str>) -> PgResult<u8> {
+    // If no parameter value given, assume "true" is meant.
+    let Some(sval) = arg else {
+        return Ok(LOGICALREP_STREAM_ON);
+    };
+    // Allow "false", "true", "off", "on" or "parallel".
+    if sval.eq_ignore_ascii_case("false") || sval.eq_ignore_ascii_case("off") {
+        return Ok(LOGICALREP_STREAM_OFF);
+    }
+    if sval.eq_ignore_ascii_case("true") || sval.eq_ignore_ascii_case("on") {
+        return Ok(LOGICALREP_STREAM_ON);
+    }
+    if sval.eq_ignore_ascii_case("parallel") {
+        return Ok(LOGICALREP_STREAM_PARALLEL);
+    }
+    ereport(ERROR)
+        .errcode(ERRCODE_SYNTAX_ERROR)
+        .errmsg(format!("{defname} requires a Boolean value or \"parallel\""))
+        .finish(loc("defGetStreamingMode"))?;
+    unreachable!()
 }
 
 // parse_output_parameters (pgoutput.c:289).
@@ -364,35 +387,35 @@ fn parse_output_parameters(
                     conflicting_option()?;
                 }
                 binary_option_given = true;
-                data.binary = parse_bool_value(name, value_str)?;
+                data.binary = def_get_boolean(name, value_str)?;
             }
             "messages" => {
                 if messages_option_given {
                     conflicting_option()?;
                 }
                 messages_option_given = true;
-                data.messages = parse_bool_value(name, value_str)?;
+                data.messages = def_get_boolean(name, value_str)?;
             }
             "streaming" => {
                 if streaming_given {
                     conflicting_option()?;
                 }
                 streaming_given = true;
-                data.streaming = parse_streaming_mode(value_str)?;
+                data.streaming = def_get_streaming_mode(name, value_str)?;
             }
             "two_phase" => {
                 if two_phase_option_given {
                     conflicting_option()?;
                 }
                 two_phase_option_given = true;
-                data.two_phase = parse_bool_value(name, value_str)?;
+                data.two_phase = def_get_boolean(name, value_str)?;
             }
             "origin" => {
                 if origin_option_given {
                     conflicting_option()?;
                 }
                 origin_option_given = true;
-                let origin = value_str.unwrap_or("");
+                let origin = def_get_string(name, value_str)?;
                 if origin.eq_ignore_ascii_case("none") {
                     data.publish_no_origin = true;
                 } else if origin.eq_ignore_ascii_case("any") {
@@ -838,6 +861,35 @@ fn pgoutput_stream_commit(
 
     cleanup_rel_sync_cache(xid, true);
     Ok(())
+}
+
+// pgoutput_stream_prepare_txn (pgoutput.c:1952): PREPARE callback for
+// streaming two-phase commit — notify the downstream to prepare the
+// transaction.
+fn pgoutput_stream_prepare_txn(
+    opc: &mut OutputPluginContext,
+    rb: &mut ReorderBuffer,
+    txn: TxnId,
+    prepare_lsn: XLogRecPtr,
+) -> PgResult<()> {
+    debug_assert!(rb.txn(txn).is_streamed());
+
+    OutputPluginUpdateProgress(opc, false)?;
+
+    let t = rb.txn(txn);
+    let (end_lsn, prepare_time, xid) = (t.end_lsn, t.xact_time, t.xid);
+    let gid = t.gid.clone().expect("prepared txn carries a gid");
+
+    OutputPluginPrepareWrite(opc, true)?;
+    logicalrep_write_stream_prepare(
+        opc.out.as_mut_vec(),
+        prepare_lsn,
+        end_lsn,
+        prepare_time,
+        xid,
+        &gid,
+    );
+    OutputPluginWrite(opc, true)
 }
 
 // cleanup_rel_sync_cache (pgoutput.c:2352): drop the finished streamed xid
@@ -1350,6 +1402,7 @@ fn load_publications(pubnames: &[String]) -> PgResult<Vec<OwnedPublication>> {
             }),
             None => {
                 let _ = ereport(WARNING)
+                    .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
                     .errmsg(format!("skipped loading publication \"{pubname}\""))
                     .errdetail("The publication does not exist at this point in the WAL.")
                     .errhint("Create the publication if it does not exist.")
@@ -1777,12 +1830,69 @@ fn form_if_virtual<'c>(
     )?))
 }
 
-// check_and_init_gencol (pgoutput.c:1062).
+// RelationIdGetRelation(entry->publish_as_relid) (pgoutput.c:1066/1127):
+// the relation whose schema is published — the partition's root ancestor
+// under publish_via_partition_root, else `relation` itself.
+fn publish_as_relation(
+    entry: &RelationSyncEntry,
+    relation: &RelationData<'static>,
+) -> PgResult<Option<Rc<RelationData<'static>>>> {
+    if entry.publish_as_relid == relation.rd_id {
+        return Ok(None);
+    }
+    Ok(Some(
+        relcache::store::RelationIdGetRelation(entry.publish_as_relid)?
+            .unwrap_or_else(|| panic!("could not open relation {}", entry.publish_as_relid)),
+    ))
+}
+
+// "%s.%s" of get_namespace_name(RelationGetNamespace(relation)) and
+// RelationGetRelationName(relation) (pgoutput.c:1113/1191).
+fn qualified_relname(mcx: Mcx<'_>, relation: &RelationData<'static>) -> PgResult<String> {
+    let nsp = lsyscache::get_namespace_name(mcx, relation.rd_rel.relnamespace)?;
+    Ok(format!(
+        "{}.{}",
+        nsp.as_deref().unwrap_or("(null)"),
+        String::from_utf8_lossy(relation.rd_rel.relname.name_str())
+    ))
+}
+
+// pub_form_cols_map (pg_publication.c:641): every publishable column of the
+// relation as raw attnums — dropped columns never, generated columns only
+// when STORED and the publication asks for stored generated columns (a
+// VIRTUAL generated column is never replicated).
+fn pub_form_cols_map(relation: &RelationData<'static>, include_gencols_type: u8) -> Vec<i16> {
+    let desc = &relation.rd_att;
+    let mut result = Vec::new();
+    for i in 0..desc.natts as usize {
+        let att = desc.attr(i);
+        if att.attisdropped {
+            continue;
+        }
+        if att.attgenerated != 0 {
+            // We only support replication of STORED generated cols.
+            if att.attgenerated as u8 != ATTRIBUTE_GENERATED_STORED {
+                continue;
+            }
+            // User hasn't requested to replicate STORED generated cols.
+            if include_gencols_type != PUBLISH_GENCOLS_STORED {
+                continue;
+            }
+        }
+        result.push(att.attnum);
+    }
+    result
+}
+
+// check_and_init_gencol (pgoutput.c:1062). `relation` is the changed
+// relation; the checks run over entry->publish_as_relid.
 fn check_and_init_gencol(
     entry: &mut RelationSyncEntry,
     publications: &[&OwnedPublication],
     relation: &RelationData<'static>,
 ) -> PgResult<()> {
+    let opened = publish_as_relation(entry, relation)?;
+    let relation: &RelationData<'static> = opened.as_deref().unwrap_or(relation);
     let desc = &relation.rd_att;
     let gencolpresent = (0..desc.natts as usize).any(|i| desc.attr(i).attgenerated != 0);
     if !gencolpresent {
@@ -1805,7 +1915,7 @@ fn check_and_init_gencol(
                 .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
                 .errmsg(format!(
                     "cannot use different values of publish_generated_columns for table \"{}\" in different publications",
-                    String::from_utf8_lossy(relation.rd_rel.relname.name_str())
+                    qualified_relname(ctx.mcx(), relation)?
                 ))
                 .finish(loc("check_and_init_gencol"))?;
         }
@@ -1840,11 +1950,15 @@ fn owned_to_publication<'mcx>(
 
 // pgoutput_column_list_init (pgoutput.c:1122). entry.columns is the raw-attnum
 // list (ascending); differing lists across publications are an error, per C.
+// `relation` is the changed relation; the lists are formed and compared over
+// entry->publish_as_relid.
 fn pgoutput_column_list_init(
     entry: &mut RelationSyncEntry,
     publications: &[&OwnedPublication],
     relation: &RelationData<'static>,
 ) -> PgResult<()> {
+    let opened = publish_as_relation(entry, relation)?;
+    let relation: &RelationData<'static> = opened.as_deref().unwrap_or(relation);
     let ctx = MemoryContext::new("pgoutput_column_list_init");
     let mcx = ctx.mcx();
     let mut first = true;
@@ -1864,21 +1978,7 @@ fn pgoutput_column_list_init(
             // Non-column-list publication: all publishable columns
             // (pub_form_cols_map).
             if relcols.is_none() && publications.len() > 1 {
-                let desc = &relation.rd_att;
-                let mut all = Vec::new();
-                for i in 0..desc.natts as usize {
-                    let att = desc.attr(i);
-                    if att.attisdropped {
-                        continue;
-                    }
-                    if att.attgenerated != 0
-                        && entry.include_gencols_type != PUBLISH_GENCOLS_STORED
-                    {
-                        continue;
-                    }
-                    all.push(att.attnum);
-                }
-                relcols = Some(all);
+                relcols = Some(pub_form_cols_map(relation, entry.include_gencols_type));
             }
             relcols.clone()
         };
@@ -1891,7 +1991,7 @@ fn pgoutput_column_list_init(
                 .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
                 .errmsg(format!(
                     "cannot use different column lists for table \"{}\" in different publications",
-                    String::from_utf8_lossy(relation.rd_rel.relname.name_str())
+                    qualified_relname(mcx, relation)?
                 ))
                 .finish(loc("pgoutput_column_list_init"))?;
         }
@@ -2087,6 +2187,139 @@ mod tests {
         assert_eq!(map_changetype_pubaction(reorderbuffer::Insert), PUBACTION_INSERT);
         assert_eq!(map_changetype_pubaction(reorderbuffer::Update), PUBACTION_UPDATE);
         assert_eq!(map_changetype_pubaction(reorderbuffer::Delete), PUBACTION_DELETE);
+    }
+
+    fn fresh_data() -> PGOutputData {
+        PGOutputData {
+            protocol_version: 0,
+            publication_names: Vec::new(),
+            binary: false,
+            messages: false,
+            streaming: LOGICALREP_STREAM_OFF,
+            two_phase: false,
+            publish_no_origin: false,
+            in_streaming: false,
+            publications: Vec::new(),
+        }
+    }
+
+    fn opts(pairs: &[(&str, Option<&str>)]) -> Vec<(String, Option<String>)> {
+        pairs
+            .iter()
+            .map(|(n, v)| (n.to_string(), v.map(|v| v.to_string())))
+            .collect()
+    }
+
+    // defGetBoolean (define.c:94) on the T_String / NULL args the
+    // replication grammar and the SQL interface can produce: only
+    // true/false/on/off (case-insensitive) are Booleans; anything else is
+    // ERRCODE_SYNTAX_ERROR "<option> requires a Boolean value".
+    #[test]
+    fn boolean_options_follow_def_get_boolean() {
+        for (name, proto) in [("binary", "1"), ("messages", "1"), ("two_phase", "3")] {
+            for bad in ["notabool", "1", "0", "yes", "t", ""] {
+                let mut data = fresh_data();
+                let err = parse_output_parameters(
+                    &opts(&[
+                        (name, Some(bad)),
+                        ("proto_version", Some(proto)),
+                        ("publication_names", Some("pub")),
+                    ]),
+                    &mut data,
+                )
+                .unwrap_err();
+                assert_eq!(err.message(), format!("{name} requires a Boolean value"), "{name}={bad}");
+                assert_eq!(err.sqlstate(), ERRCODE_SYNTAX_ERROR, "{name}={bad}");
+            }
+        }
+        for (v, want) in [(Some("ON"), true), (Some("False"), false), (Some("tRuE"), true), (None, true)] {
+            let mut data = fresh_data();
+            parse_output_parameters(
+                &opts(&[
+                    ("binary", v),
+                    ("proto_version", Some("1")),
+                    ("publication_names", Some("pub")),
+                ]),
+                &mut data,
+            )
+            .unwrap();
+            assert_eq!(data.binary, want, "binary={v:?}");
+        }
+    }
+
+    // defGetStreamingMode (subscriptioncmds.c:2500): false/off/true/on/
+    // parallel, else ERRCODE_SYNTAX_ERROR naming the OPTION, not the value.
+    #[test]
+    fn streaming_option_follows_def_get_streaming_mode() {
+        for bad in ["foo", "t", "1", "yes", ""] {
+            let mut data = fresh_data();
+            let err = parse_output_parameters(
+                &opts(&[
+                    ("streaming", Some(bad)),
+                    ("proto_version", Some("2")),
+                    ("publication_names", Some("pub")),
+                ]),
+                &mut data,
+            )
+            .unwrap_err();
+            assert_eq!(
+                err.message(),
+                "streaming requires a Boolean value or \"parallel\"",
+                "streaming={bad}"
+            );
+            assert_eq!(err.sqlstate(), ERRCODE_SYNTAX_ERROR, "streaming={bad}");
+        }
+        for (v, want) in [
+            (Some("Off"), LOGICALREP_STREAM_OFF),
+            (Some("FALSE"), LOGICALREP_STREAM_OFF),
+            (Some("on"), LOGICALREP_STREAM_ON),
+            (Some("true"), LOGICALREP_STREAM_ON),
+            (Some("PARALLEL"), LOGICALREP_STREAM_PARALLEL),
+            (None, LOGICALREP_STREAM_ON),
+        ] {
+            let mut data = fresh_data();
+            parse_output_parameters(
+                &opts(&[
+                    ("streaming", v),
+                    ("proto_version", Some("4")),
+                    ("publication_names", Some("pub")),
+                ]),
+                &mut data,
+            )
+            .unwrap();
+            assert_eq!(data.streaming, want, "streaming={v:?}");
+        }
+    }
+
+    // defGetString (define.c:35): an option given without an argument is a
+    // syntax error "<option> requires a parameter".
+    #[test]
+    fn origin_without_argument_is_a_syntax_error() {
+        let mut data = fresh_data();
+        let err = parse_output_parameters(
+            &opts(&[
+                ("origin", None),
+                ("proto_version", Some("1")),
+                ("publication_names", Some("pub")),
+            ]),
+            &mut data,
+        )
+        .unwrap_err();
+        assert_eq!(err.message(), "origin requires a parameter");
+        assert_eq!(err.sqlstate(), ERRCODE_SYNTAX_ERROR);
+
+        let mut data = fresh_data();
+        let err = parse_output_parameters(
+            &opts(&[
+                ("origin", Some("")),
+                ("proto_version", Some("1")),
+                ("publication_names", Some("pub")),
+            ]),
+            &mut data,
+        )
+        .unwrap_err();
+        assert_eq!(err.message(), "unrecognized origin value: \"\"");
+        assert_eq!(err.sqlstate(), ERRCODE_INVALID_PARAMETER_VALUE);
     }
 
     #[test]
