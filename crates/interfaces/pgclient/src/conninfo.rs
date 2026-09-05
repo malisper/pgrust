@@ -78,7 +78,27 @@ pub fn lookup_option(keyword: &str) -> Option<&'static ConnOption> {
     CONNINFO_OPTIONS.iter().find(|o| o.keyword == keyword)
 }
 
+// fe-connect.c uri_prefix_length: the two URI designators PQconninfoParse /
+// parse_connection_string route to conninfo_uri_parse.
+fn uri_prefix_length(s: &str) -> usize {
+    const URI_DESIGNATOR: &str = "postgresql://";
+    const SHORT_URI_DESIGNATOR: &str = "postgres://";
+    if s.starts_with(URI_DESIGNATOR) {
+        URI_DESIGNATOR.len()
+    } else if s.starts_with(SHORT_URI_DESIGNATOR) {
+        SHORT_URI_DESIGNATOR.len()
+    } else {
+        0
+    }
+}
+
 pub fn parse_conninfo(s: &str) -> Result<Vec<(String, String)>, String> {
+    // conninfo_uri_parse is unported: refuse the URI form by name instead of
+    // letting the keyword=value grammar mis-parse it ("missing \"=\"" /
+    // "invalid connection option \"postgresql:///db?host\"").
+    if uri_prefix_length(s) != 0 {
+        return Err("connection URIs (postgresql://) are not supported".into());
+    }
     let b = s.as_bytes();
     let mut i = 0;
     let mut opts: Vec<(String, String)> = Vec::new();

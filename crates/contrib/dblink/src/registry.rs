@@ -117,16 +117,32 @@ pub fn with_named<R>(name: &str, f: impl FnOnce(Option<&mut RemoteConn>) -> R) -
     Ok(NAMED.with(|m| f(m.borrow_mut().get_mut(&key))))
 }
 
-pub fn create_named(name: &str, conn: PgConn) -> PgResult<()> {
+// createNewConnection (dblink.c:2579): the hash entry is made BEFORE the
+// connect attempt ("if we need a hashtable entry, make that first, since it
+// might fail", dblink_connect:321) — the truncation NOTICE and the
+// "duplicate connection name" 42710 must precede any network traffic. The
+// entry itself only becomes visible via `store_named` once the connection
+// is up (C's rconn->conn stays NULL until then; a failed connect
+// deleteConnection()s it), so nothing is reserved in the map here.
+pub fn reserve_named(name: &str) -> PgResult<()> {
     let key = conn_key(name, true)?;
     NAMED.with(|m| {
-        let mut m = m.borrow_mut();
-        if m.contains_key(&key) {
+        if m.borrow().contains_key(&key) {
             return Err(Box::new(
                 PgError::error("duplicate connection name").with_sqlstate(ERRCODE_DUPLICATE_OBJECT),
             ));
         }
-        m.insert(key, RemoteConn::new(conn));
+        Ok(())
+    })
+}
+
+// dblink_connect's "all OK, save away the conn" (rconn->conn = conn) after a
+// `reserve_named` on the same name; the NOTICE was already emitted there.
+pub fn store_named(name: &str, conn: PgConn) -> PgResult<()> {
+    let key = conn_key(name, false)?;
+    NAMED.with(|m| {
+        let prev = m.borrow_mut().insert(key, RemoteConn::new(conn));
+        debug_assert!(prev.is_none(), "store_named without reserve_named");
         Ok(())
     })
 }

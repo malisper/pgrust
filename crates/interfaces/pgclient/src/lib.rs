@@ -1709,6 +1709,25 @@ mod tests {
         assert!(parse_conninfo("host='x").err().unwrap().contains("unterminated"));
     }
 
+    // libpq dispatches "postgresql://" / "postgres://" strings to
+    // conninfo_uri_parse (fe-connect.c uri_prefix_length); that parser is
+    // unported, so the URI form must be refused by name rather than fall
+    // into the keyword=value parser (audit-18.6 b045 row 7).
+    #[test]
+    fn conninfo_uri_refused_by_name() {
+        for uri in [
+            "postgresql://user:secret@localhost:5432/postgres",
+            "postgres://localhost/db",
+            "postgresql:///postgres?host=/tmp&port=5432",
+        ] {
+            let e = parse_conninfo(uri).err().unwrap();
+            assert_eq!(e, "connection URIs (postgresql://) are not supported", "{uri}");
+            assert_eq!(resolve_conninfo(uri).err().unwrap(), e, "{uri}");
+        }
+        // Not a prefix match: a keyword that merely contains the designator.
+        assert!(parse_conninfo("dbname=postgresql://x").is_ok());
+    }
+
     #[test]
     fn conninfo_rejects_unknown_keyword() {
         assert_eq!(

@@ -6,7 +6,7 @@ use std::ffi::CString;
 
 use datum::Datum;
 use pgclient::{ExecStatus, QueryResult, RowSink};
-use types_error::{PgError, PgResult, ERRCODE_DATATYPE_MISMATCH};
+use types_error::{PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_FEATURE_NOT_SUPPORTED};
 use types_fmgr::{FmgrInfo, FunctionCallInfoBaseData as Fcinfo, SetFunctionReturnMode};
 use types_tuple::TupleDescData;
 
@@ -123,7 +123,12 @@ fn build_row(
         if attinmeta.dropped[i] {
             continue;
         }
-        if let Some(bytes) = cols.get(i).copied().flatten() {
+        // C BuildTupleFromCStrings (execTuples.c:2345) calls InputFunctionCall
+        // on EVERY attribute, NULL included: a domain's input function is
+        // non-strict and enforces NOT NULL / CHECK on the NULL value
+        // (domain_in -> domain_check_input, 23502). Skipping the call for a
+        // NULL column silently stored a NULL into a NOT NULL domain.
+        let cstr = if let Some(bytes) = cols.get(i).copied().flatten() {
             // dblink pins the remote client_encoding to the local database
             // encoding at connect (lib.rs), but honoring that is entirely up to
             // the remote: a hostile/compromised server, an honest SQL_ASCII
@@ -140,19 +145,43 @@ fn build_row(
             // This covers both the streaming TupleSink::row path and
             // materialize_result, which funnel every remote column through here.
             mbutils::pg_verifymbstr(bytes, false)?;
-            let cstr = CString::new(bytes)
-                .map_err(|_| Box::new(PgError::error("remote value contains embedded NUL byte")))?;
-            values[i] = types_fmgr::input_function_call(
-                &mut attinmeta.in_funcs[i],
-                Some(&cstr),
-                attinmeta.typioparams[i],
-                attinmeta.typmods[i],
-                scratch,
-            )?;
-            isnull[i] = false;
-        }
+            Some(
+                CString::new(bytes)
+                    .map_err(|_| Box::new(PgError::error("remote value contains embedded NUL byte")))?,
+            )
+        } else {
+            None
+        };
+        values[i] = types_fmgr::input_function_call(
+            &mut attinmeta.in_funcs[i],
+            cstr.as_deref(),
+            attinmeta.typioparams[i],
+            attinmeta.typmods[i],
+            scratch,
+        )?;
+        isnull[i] = cstr.is_none();
     }
     srf.putvalues(&values, &isnull)
+}
+
+// materializeResult (dblink.c:905) / storeRow (dblink.c:1216): the call's
+// result type must resolve to a composite; a RECORD with no column
+// definition list is the specific 0A000, anything else C's elog. funcapi's
+// InitMaterializedSRF only knows the elog form (funcapi.c parity), so the
+// RECORD arm is checked here first, exactly where C checks it.
+fn check_result_rowtype(mcx: mcx::Mcx<'_>, flinfo: &FmgrInfo, fcinfo: &mut Fcinfo) -> PgResult<()> {
+    let expected_desc = fcinfo.rsinfo_mut().and_then(|rsi| rsi.expectedDesc);
+    // SAFETY: expectedDesc contract — the executor armed it with the scan
+    // tupdesc, live for the duration of this call.
+    let expected = expected_desc.map(|p| unsafe { p.cast::<TupleDescData<'_>>().as_ref() });
+    match funcapi::get_call_result_type(mcx, flinfo, expected)?.class {
+        funcapi::TypeFuncClass::Composite => Ok(()),
+        funcapi::TypeFuncClass::Record => Err(Box::new(
+            PgError::error("function returning record called in context that cannot accept type record")
+                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+        )),
+        _ => Err(Box::new(PgError::error("return type must be a row type"))),
+    }
 }
 
 // The RowSink for exec_streaming (dblink's synchronous, single-row-mode path).
@@ -205,6 +234,7 @@ impl RowSink for TupleSink<'_, '_> {
         }
         // SAFETY: constructor contract; no other live borrow of fcinfo here.
         let fcinfo = unsafe { &mut *self.fcinfo_ptr };
+        check_result_rowtype(self.mcx, self.flinfo, fcinfo)?;
         let srf = funcapi::InitMaterializedSRF(self.mcx, self.flinfo, fcinfo, 0)?;
         let attinmeta = AttInMeta::build(&srf.tupdesc)?;
         if nfields != attinmeta.natts {
@@ -237,6 +267,7 @@ pub fn materialize_result(
         return materialize_command_status(mcx, fcinfo, &res.cmd_tag);
     }
     let fcinfo_ptr: *mut Fcinfo = fcinfo;
+    check_result_rowtype(mcx, flinfo, fcinfo)?;
     let mut srf = funcapi::InitMaterializedSRF(mcx, flinfo, fcinfo, 0)?;
     let mut attinmeta = AttInMeta::build(&srf.tupdesc)?;
     if res.nfields != attinmeta.natts {
@@ -263,8 +294,11 @@ pub(crate) fn materialize_command_status(
     tag: &str,
 ) -> PgResult<Datum> {
     let tupdesc = crate::single_text_tupdesc(mcx, "status")?;
+    // C materializeQueryResult (dblink.c:1065) / materializeResult (:936):
+    // tuplestore_begin_heap(true, false, work_mem) — random access, so a
+    // backward scan (SCROLL cursor FETCH PRIOR) is served by the store itself.
     let mut store =
-        tuplestore::Tuplestore::begin_heap(false, false, init_small::globals::work_mem());
+        tuplestore::Tuplestore::begin_heap(true, false, init_small::globals::work_mem());
     let d = types_fmgr::varlena_result(varlena::cstring_to_text(mcx, tag.as_bytes())?);
     store.putvalues(&tupdesc, &[d], &[false])?;
     // C materializeResult: `rsinfo->setDesc = tupdesc` publishes the exact

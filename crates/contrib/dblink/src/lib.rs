@@ -224,6 +224,12 @@ fn fc_dblink_connect(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
     let connstr = registry::get_connect_string(mcx, &conname_or_str)?.unwrap_or(conname_or_str);
     registry::connstr_check(&connstr)?;
     let we = registry::we_connect()?;
+    // C dblink_connect:321 "if we need a hashtable entry, make that first,
+    // since it might fail": createNewConnection (truncation NOTICE +
+    // 42710 duplicate name) runs BEFORE libpqsrv_connect.
+    if let Some(name) = &connname {
+        registry::reserve_named(name)?;
+    }
     let enc = mbutils::GetDatabaseEncodingName();
     let conn = match pgclient::connect_db(&connstr, Some(enc), we)? {
         Ok(c) => c,
@@ -235,7 +241,7 @@ fn fc_dblink_connect(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
         return Err(e);
     }
     match &connname {
-        Some(name) => registry::create_named(name, conn)?,
+        Some(name) => registry::store_named(name, conn)?,
         None => registry::set_unnamed(conn),
     }
     text_result(mcx, "OK")
