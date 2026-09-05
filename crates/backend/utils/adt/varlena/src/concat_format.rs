@@ -422,10 +422,10 @@ fn string_conversion<'mcx>(
     let s = output_to_bytes(finfo, mcx, value)?;
     match conversion {
         b'I' => {
-            let ident = core::str::from_utf8(s)
-                .expect("format %I: output function produced invalid UTF-8");
-            let quoted = format_type::quote_identifier(ident);
-            append_padded(out, quoted.as_bytes(), flags, width)
+            // varlena.c:6326-6330: the output function's bytes go straight to
+            // the byte-oriented quote_identifier(); no encoding check.
+            let quoted = format_type::quote_identifier_bytes(s);
+            append_padded(out, &quoted, flags, width)
         }
         b'L' => {
             let mut q: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, s.len() * 2 + 3)?;

@@ -139,22 +139,19 @@ pub fn fc_xml_is_well_formed_content(
 
 use ::types_core::catalog::XMLOID;
 
-fn arg_array_image<'a>(fcinfo: &'a Fcinfo, i: usize) -> &'a [u8] {
-    // SAFETY: strict fn — arg i is a non-null array varlena; regular arrays
-    // are 4B-header images (detoast handled by arg_varlena_packed upstream of
-    // deconstruct would lose the header, so read the raw image).
-    unsafe {
-        let p = fcinfo.arg_ptr(i);
-        let total = ::types_tuple::varatt::varsize_any(p);
-        core::slice::from_raw_parts(p, total)
-    }
+// xml.c:4527 / 4573 PG_GETARG_ARRAYTYPE_P(2): the namespace-mapping array is
+// detoasted (out-of-line, compressed, or a 1-byte-header image straight off a
+// heap tuple) before xpath_internal reads its dimensions.
+fn arg_array_image<'mcx>(fcinfo: &Fcinfo, i: usize, mcx: Mcx<'mcx>) -> PgResult<::mcx::PgVec<'mcx, u8>> {
+    arrayfuncs::builtins::arg_array_bytes(fcinfo, i, mcx)
 }
 
 pub fn fc_xpath(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let xpath_expr = arg_text(fcinfo, 0)?;
     let data = arg_text(fcinfo, 1)?;
-    let namespaces = arg_array_image(fcinfo, 2);
     let mcx = fcinfo.result_mcx();
+    let namespaces = arg_array_image(fcinfo, 2, mcx)?;
+    let namespaces: &[u8] = &namespaces;
 
     let mut items: Vec<Vec<u8>> = Vec::new();
     crate::xpath::xpath_internal(xpath_expr, data, Some(namespaces), Some(&mut items))?;
@@ -174,8 +171,8 @@ pub fn fc_xpath(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult
 pub fn fc_xpath_exists(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let xpath_expr = arg_text(fcinfo, 0)?;
     let data = arg_text(fcinfo, 1)?;
-    let namespaces = arg_array_image(fcinfo, 2);
-    let n = crate::xpath::xpath_internal(xpath_expr, data, Some(namespaces), None)?;
+    let namespaces = arg_array_image(fcinfo, 2, fcinfo.result_mcx())?;
+    let n = crate::xpath::xpath_internal(xpath_expr, data, Some(&namespaces[..]), None)?;
     Ok(Datum::from_bool(n > 0))
 }
 

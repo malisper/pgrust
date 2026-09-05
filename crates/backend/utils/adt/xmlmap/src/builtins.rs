@@ -9,10 +9,10 @@ use types_fmgr::{varlena_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData
 fn arg_str<'a>(fcinfo: &'a Fcinfo, i: usize) -> PgResult<&'a str> {
     // SAFETY: catalog arg i is a non-null text/refcursor varlena (strict fn).
     let bytes = unsafe { fcinfo.arg_varlena_packed(i)? }.data();
-    Ok(core::str::from_utf8(bytes).unwrap_or_else(|_| panic!("non-UTF-8 text argument")))
+    core::str::from_utf8(bytes).map_err(|_| crate::non_utf8_unsupported("text arguments"))
 }
 
-fn arg_name<'a>(fcinfo: &'a Fcinfo, i: usize) -> &'a str {
+fn arg_name<'a>(fcinfo: &'a Fcinfo, i: usize) -> PgResult<&'a str> {
     let p = fcinfo.arg(i).as_usize() as *const u8;
     // SAFETY: catalog arg i is a NameData pointer (64-byte NUL-terminated).
     unsafe {
@@ -21,7 +21,7 @@ fn arg_name<'a>(fcinfo: &'a Fcinfo, i: usize) -> &'a str {
             len += 1;
         }
         core::str::from_utf8(core::slice::from_raw_parts(p, len))
-            .unwrap_or_else(|_| panic!("non-UTF-8 name argument"))
+            .map_err(|_| crate::non_utf8_unsupported("name arguments"))
     }
 }
 
@@ -61,7 +61,7 @@ fn name_fam(
     fcinfo: &mut Fcinfo,
     f: fn(&str, bool, bool, &str) -> PgResult<String>,
 ) -> PgResult<Datum> {
-    let schemaname = arg_name(fcinfo, 0);
+    let schemaname = arg_name(fcinfo, 0)?;
     let nulls = fcinfo.arg(1).as_bool();
     let tableforest = fcinfo.arg(2).as_bool();
     let targetns = arg_str(fcinfo, 3)?;

@@ -70,8 +70,10 @@ fn cached_meta<'f>(
     Ok(flinfo.fn_extra_mut::<ArrayMetaState>().unwrap())
 }
 
-// Flatten an array-typed argument into an owned, MAXALIGN'd flat image.
-pub(crate) fn arg_array_bytes<'mcx>(
+// Flatten an array-typed argument into an owned, MAXALIGN'd flat image
+// (PG_GETARG_ARRAYTYPE_P: detoasts out-of-line, compressed and short-header
+// images alike).
+pub fn arg_array_bytes<'mcx>(
     fcinfo: &Fcinfo,
     i: usize,
     mcx: ::mcx::Mcx<'mcx>,

@@ -35,7 +35,28 @@ fn with_scratch<R>(f: impl FnOnce(Mcx<'_>, &ResMcx) -> PgResult<R>) -> PgResult<
 
 fn xml_name(ident: &[u8], fully_escaped: bool, escape_period: bool) -> PgResult<String> {
     let v = adt_xml::map_sql_identifier_to_xml_name(ident, fully_escaped, escape_period)?;
-    Ok(String::from_utf8(v).unwrap_or_else(|_| panic!("non-UTF-8 XML name")))
+    String::from_utf8(v).map_err(|_| non_utf8_unsupported("identifiers"))
+}
+
+// xml.c's mapping functions work on raw server-encoding bytes: a targetns or
+// cursor/schema name is appended to the document verbatim, catalog names go
+// through map_sql_identifier_to_xml_name (which rejects bytes that are not
+// valid in UTF-8 with ERRCODE_CHARACTER_NOT_IN_REPERTOIRE, 22021).  This crate
+// builds the document as a `String`, which cannot carry non-UTF-8 bytes, so
+// such input (reachable only in a SQL_ASCII database) is refused with the
+// same typed ERRCODE_FEATURE_NOT_SUPPORTED shape as tcop's SQL_ASCII
+// non-ASCII query-string carve -- never a panic.
+#[cold]
+#[inline(never)]
+pub(crate) fn non_utf8_unsupported(what: &str) -> Box<types_error::PgError> {
+    Box::new(
+        types_error::PgError::error(format!(
+            "non-ASCII {what} of SQL/XML mapping functions are not supported yet in databases with encoding \"{}\"",
+            mbutils::GetDatabaseEncodingName()
+        ))
+        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+        .with_hint("Use a database with encoding \"UTF8\"."),
+    )
 }
 
 // C reports the cache misses on this path with
@@ -277,7 +298,9 @@ fn table_to_xml_internal(
         let name = adt_regproc::regclassout(mcx, relid)?;
         Ok(format!(
             "SELECT * FROM {}",
-            core::str::from_utf8(&name).expect("regclassout is UTF-8").trim_end_matches('\0')
+            core::str::from_utf8(&name)
+                .map_err(|_| non_utf8_unsupported("relation names"))?
+                .trim_end_matches('\0')
         ))
     })?;
     let tablename = rel_name_opt(relid)?;
@@ -852,7 +875,7 @@ fn map_sql_type_to_xml_name(typeoid: Oid, typmod: i32) -> PgResult<String> {
                 .ok_or_else(|| cache_lookup_failed("type", typeoid))?;
             let typtype = lsyscache::typ::get_typtype(typeoid)?;
             let name = core::str::from_utf8(typname.name_str())
-                .unwrap_or_else(|_| panic!("non-UTF-8 pg_type.typname"))
+                .map_err(|_| non_utf8_unsupported("type names"))?
                 .to_owned();
             let nspname = namespace_name(typnamespace)?;
             let dbname = database_name()?;

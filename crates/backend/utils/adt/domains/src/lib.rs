@@ -6,7 +6,7 @@
 
 use datum::Datum;
 use types_core::Oid;
-use types_error::{PgError, PgResult, ERRCODE_DATATYPE_MISMATCH};
+use types_error::{PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_UNDEFINED_OBJECT};
 use types_fmgr::{
     input_function_call_safe, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo,
 };
@@ -21,10 +21,14 @@ struct DomainIOData {
 }
 
 fn domain_state_setup(domainType: Oid, binary: bool) -> PgResult<DomainIOData> {
+    // domains.c:91 validates domainType through lookup_type_cache(), whose
+    // miss is the user-facing typcache.c:471-473 ereport (domain_in /
+    // domain_recv are callable from SQL with an arbitrary OID).
     let Some(base) = syscache_seams::pg_type_base_shape::call(domainType)? else {
-        return Err(Box::new(PgError::error(format!(
-            "cache lookup failed for type {domainType}"
-        ))));
+        return Err(Box::new(
+            PgError::error(format!("type with OID {domainType} does not exist"))
+                .with_sqlstate(ERRCODE_UNDEFINED_OBJECT),
+        ));
     };
     if base.typtype != TYPTYPE_DOMAIN {
         let t = format_type::format_type_be(domainType).unwrap_or_else(|_| domainType.to_string());
@@ -213,5 +217,24 @@ mod tests {
         assert!(esc.error_occurred());
         let mut esc = SoftErrorContext::new(false);
         assert!(!domain_check_safe(Datum::null(), true, 1, &mut esc).unwrap());
+    }
+
+    // audit-18.6 a186-candidate-fp-adt-domains-4ac55b6371915f873e14-1:
+    // domains.c:91 lookup_type_cache() on a bogus OID (domain_in is callable
+    // from SQL with any OID) is the user-facing typcache.c:471-473 error
+    // "type with OID %u does not exist", ERRCODE_UNDEFINED_OBJECT (42704).
+    #[test]
+    fn bogus_domain_oid_is_undefined_object() {
+        syscache_seams::pg_type_base_shape::set(|_| Ok(None));
+        let expect_err = |r: PgResult<DomainIOData>| match r {
+            Err(e) => e,
+            Ok(_) => panic!("bogus domain OID must fail"),
+        };
+        let err = expect_err(domain_state_setup(999999, false));
+        assert_eq!(err.message(), "type with OID 999999 does not exist");
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_UNDEFINED_OBJECT);
+        let err = expect_err(domain_state_setup(0, true));
+        assert_eq!(err.message(), "type with OID 0 does not exist");
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_UNDEFINED_OBJECT);
     }
 }

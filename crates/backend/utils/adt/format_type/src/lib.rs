@@ -32,6 +32,25 @@ fn type_lookup_failed(typid: Oid) -> Box<PgError> {
     Box::new(PgError::error(format!("cache lookup failed for type {typid}")))
 }
 
+// C format_type_extended (format_type.c:300-320) hands NameStr(typname) /
+// the nspname to the byte-oriented quote_identifier(), so a SQL_ASCII catalog
+// name carrying non-UTF-8 bytes prints quoted.  This crate builds its result
+// as a `String`, which cannot carry those bytes: refuse them with a typed
+// ERRCODE_FEATURE_NOT_SUPPORTED (the same carve shape as the SQL_ASCII
+// non-ASCII query-string refusal in tcop) instead of panicking.
+#[cold]
+#[inline(never)]
+fn non_utf8_catalog_name(what: &str) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "non-ASCII {what} values are not supported yet in databases with encoding \"{}\"",
+            mbutils_seams::get_database_encoding_name::call()
+        ))
+        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+        .with_hint("Use a database with encoding \"UTF8\"."),
+    )
+}
+
 pub const FORMAT_TYPE_TYPEMOD_GIVEN: u16 = 0x01;
 pub const FORMAT_TYPE_ALLOW_INVALID: u16 = 0x02;
 pub const FORMAT_TYPE_FORCE_QUALIFY: u16 = 0x04;
@@ -133,7 +152,7 @@ pub fn format_type_extended(
         Some(name) => name,
         None => {
             let name = core::str::from_utf8(shape.typname.name_str())
-                .unwrap_or_else(|_| panic!("non-UTF-8 pg_type.typname"));
+                .map_err(|_| non_utf8_catalog_name("pg_type.typname"))?;
             // C: quote_qualified_identifier(NULL-if-visible nspname, typname).
             let mut quoted = String::new();
             // C qualifies purely on visibility (no OID gate): initdb-created
@@ -152,7 +171,7 @@ pub fn format_type_extended(
                     let nsp = syscache_seams::pg_namespace_nspname::call(t.typnamespace)?
                         .ok_or_else(|| type_lookup_failed(named_oid))?;
                     let nsp = core::str::from_utf8(nsp.name_str())
-                        .unwrap_or_else(|_| panic!("non-UTF-8 pg_namespace.nspname"));
+                        .map_err(|_| non_utf8_catalog_name("pg_namespace.nspname"))?;
                     quoted.push_str(&quote_identifier(nsp));
                 }
                 quoted.push('.');
@@ -222,7 +241,22 @@ pub fn type_maximum_size(type_oid: Oid, typemod: i32) -> i32 {
 
 /// C `quote_identifier` (ruleutils.c).
 pub fn quote_identifier(ident: &str) -> std::borrow::Cow<'_, str> {
-    let bytes = ident.as_bytes();
+    match quote_identifier_bytes(ident.as_bytes()) {
+        std::borrow::Cow::Borrowed(_) => std::borrow::Cow::Borrowed(ident),
+        // Quoting only inserts ASCII '"' bytes, so the result stays UTF-8.
+        std::borrow::Cow::Owned(v) => std::borrow::Cow::Owned(
+            String::from_utf8(v).expect("quote_identifier: quoting a str yields a str"),
+        ),
+    }
+}
+
+/// C `quote_identifier` (ruleutils.c:13062) over raw server-encoding bytes:
+/// C classifies each byte (`a`-`z`, `0`-`9`, `_` are safe, anything else
+/// forces quoting) and doubles embedded `"` bytes; it never decodes the
+/// identifier, so a SQL_ASCII identifier with non-UTF-8 bytes is quoted
+/// verbatim (varlena.c:6330 text_format `%I` relies on this).
+pub fn quote_identifier_bytes(ident: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    let bytes = ident;
     let mut safe = matches!(bytes.first(), Some(b'a'..=b'z' | b'_'));
     if safe {
         safe = bytes
@@ -245,14 +279,14 @@ pub fn quote_identifier(ident: &str) -> std::borrow::Cow<'_, str> {
     if safe {
         return std::borrow::Cow::Borrowed(ident);
     }
-    let mut quoted = String::with_capacity(ident.len() + 2);
-    quoted.push('"');
-    for ch in ident.chars() {
-        if ch == '"' {
-            quoted.push('"');
+    let mut quoted: Vec<u8> = Vec::with_capacity(ident.len() + 2);
+    quoted.push(b'"');
+    for &ch in ident {
+        if ch == b'"' {
+            quoted.push(b'"');
         }
         quoted.push(ch);
     }
-    quoted.push('"');
+    quoted.push(b'"');
     std::borrow::Cow::Owned(quoted)
 }

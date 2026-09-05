@@ -15,7 +15,7 @@
 use ::datum::{Datum, Varlena, VarlenaRef};
 use ::types_core::{Oid, CSTRINGOID};
 use ::types_error::{
-    PgError, PgResult, ERRCODE_ARRAY_SUBSCRIPT_ERROR, ERRCODE_DATATYPE_MISMATCH,
+    PgError, PgResult, ERRCODE_ARRAY_SUBSCRIPT_ERROR,
 };
 use ::types_fmgr::{
     byref_result, overlaps_common, varlena_result, FmgrBuiltin, FmgrInfo,
@@ -422,10 +422,11 @@ pub fn array_get_integer_typmods(
     // SAFETY: strict fn — arg 0 is a non-null, detoasted cstring[] datum.
     let image = unsafe { VarlenaRef::from_ptr(fcinfo.arg_ptr(0)) }.as_bytes();
     let rd = |off: usize| i32::from_ne_bytes(image[off..off + 4].try_into().unwrap());
+    // arrayutils.c:240-243: ERRCODE_ARRAY_ELEMENT_ERROR (2202E).
     if rd(12) as Oid != CSTRINGOID {
         return Err(Box::new(
             PgError::error("typmod array must be type cstring[]")
-                .with_sqlstate(ERRCODE_DATATYPE_MISMATCH),
+                .with_sqlstate(::types_error::ERRCODE_ARRAY_ELEMENT_ERROR),
         ));
     }
     if rd(4) != 1 {

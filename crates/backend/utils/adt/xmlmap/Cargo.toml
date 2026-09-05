@@ -13,6 +13,7 @@ elog = { path = "../../error/elog" }
 execexpr = { path = "../../../executor/execexpr" }
 init_small = { path = "../../init/init_small" }
 lsyscache = { path = "../../cache/lsyscache" }
+mbutils = { path = "../../mb/mbutils" }
 mcx = { path = "../../../../_support/mcx" }
 adt_regproc = { path = "../regproc" }
 spi = { path = "../../../executor/spi" }

@@ -1392,6 +1392,47 @@ mod format_variadic {
         let armed = MemoryContext::new_bump("t");
         run(&armed);
     }
+
+    // audit-18.6 a186-verified-fp-cache-ts_cache-a5b4ef5d8aa9f8785472-1 /
+    // a186-verified-fp-catalog-namespace-p1-16474fbe6e07600a677a-1:
+    // varlena.c:6326-6330 text_format %I hands the output-function bytes to
+    // the byte-oriented quote_identifier(), so a SQL_ASCII value with
+    // non-UTF-8 bytes is quoted verbatim ("caf\xe9" -> "\"caf\xe9\"").
+    #[test]
+    fn pct_i_quotes_non_utf8_bytes_verbatim() {
+        install();
+        let armed = MemoryContext::new("t");
+        let ctx = MemoryContext::new("format args");
+        let mcx = ctx.mcx();
+        let elems = [
+            cstring_to_text(mcx, b"caf\xe9").unwrap(),
+            cstring_to_text(mcx, b"t\xff").unwrap(),
+            cstring_to_text(mcx, b"plain").unwrap(),
+        ];
+        let datums: Vec<Datum> = elems
+            .iter()
+            .map(|t| Datum::from_usize(t.as_bytes().as_ptr() as usize))
+            .collect();
+        let array =
+            arrayfuncs::construct_array(mcx, &datums, TEXTOID, -1, false, b'i').unwrap();
+        let fmt = cstring_to_text(mcx, b"%I|%I|%I").unwrap();
+
+        let mut fcinfo = LocalFcinfo::<2>::new(C);
+        fcinfo.set_arg(0, Datum::from_usize(fmt.as_bytes().as_ptr() as usize));
+        fcinfo.set_arg(1, Datum::from_usize(array.as_ptr() as usize));
+        // SAFETY: armed outlives the call and the result reads below.
+        unsafe { fcinfo.set_result_mcx(armed.mcx()) };
+
+        let mut flinfo = FmgrInfo::unresolved();
+        let out = crate::concat_format::fc_text_format(Some(&mut flinfo), &mut fcinfo).unwrap();
+        let p = out.as_usize() as *const u8;
+        // SAFETY: live text varlena result.
+        let data = unsafe {
+            let n = types_tuple::varatt::varsize_any(p);
+            core::slice::from_raw_parts(p.add(4), n - 4)
+        };
+        assert_eq!(data, &b"\"caf\xe9\"|\"t\xff\"|plain"[..]);
+    }
 }
 
 mod pg_column_funcs {

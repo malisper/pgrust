@@ -2296,3 +2296,60 @@ fn set_element_on_empty_expanded_container_matches_c() {
     let (ndim, dims, lbs) = crate::foundation::read_dims_lbounds(&img);
     assert_eq!((ndim, dims[0], lbs[0]), (1, 1, 5));
 }
+
+// audit-18.6 a186-candidate-fp-adt-arrayfuncs-p1-d8c696171763a7ee9c93-1:
+// arrayfuncs.c:332-336 -- the "array size exceeds the maximum allowed" guard
+// in array_in is ereturn(escontext, ...): under a soft error context (SQL
+// pg_input_is_valid / pg_input_error_info) the failure is recorded and NULL
+// returned, never raised.  A fixed-length 1024-byte element type at 1048577
+// elements crosses MaxAllocSize without materializing any element data.
+fn fc_fixed1024_in(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    static ELEM: [u8; 1024] = [0u8; 1024];
+    Ok(Datum::from_usize(ELEM.as_ptr() as usize))
+}
+
+#[test]
+fn array_in_size_limit_is_soft_under_escontext() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let m = ArrayIoMeta {
+        element_type: 77777,
+        typlen: 1024,
+        typbyval: false,
+        typalign: b'i',
+        typdelim: b',',
+        typioparam: 77777,
+    };
+    let mut ip = FmgrInfo::new(fc_fixed1024_in, 77778, 1, true, false);
+    let n = 1_048_577usize; // 1024 * n = 1073742848 > MaxAllocSize 1073741823
+    let mut lit = String::with_capacity(2 * n + 2);
+    lit.push('{');
+    for i in 0..n {
+        if i > 0 {
+            lit.push(',');
+        }
+        lit.push('a');
+    }
+    lit.push('}');
+
+    // No escontext: a hard ERROR 54000 (C ereport via ereturn's NULL context).
+    let err = array_in(mcx, &lit, &m, &mut ip, -1, None).unwrap_err();
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+    assert_eq!(err.message(), "array size exceeds the maximum allowed (1073741823)");
+
+    // Soft: recorded in the ErrorSaveNode, Ok(None) returned.
+    let mut esc = ::types_fmgr::ErrorSaveNode::new(true);
+    let r = array_in(mcx, &lit, &m, &mut ip, -1, Some(&mut esc)).unwrap();
+    assert!(r.is_none(), "soft failure returns NULL");
+    assert!(esc.ctx.error_occurred());
+    let saved = esc.ctx.take_error().expect("details wanted");
+    assert_eq!(saved.sqlstate(), ::types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+    assert_eq!(saved.message(), "array size exceeds the maximum allowed (1073741823)");
+
+    // Details not wanted: only the occurred flag (pg_input_is_valid shape).
+    let mut esc = ::types_fmgr::ErrorSaveNode::new(false);
+    let r = array_in(mcx, &lit, &m, &mut ip, -1, Some(&mut esc)).unwrap();
+    assert!(r.is_none());
+    assert!(esc.ctx.error_occurred());
+    assert!(esc.ctx.error().is_none());
+}

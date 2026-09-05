@@ -3,7 +3,7 @@ use types_core::catalog::{BPCHAROID, INT4OID, TEXTOID, VARCHAROID};
 use types_core::InvalidOid;
 use types_tuple::NameData;
 
-use crate::{format_type_be, format_type_with_typemod, quote_identifier};
+use crate::{format_type_be, format_type_with_typemod, quote_identifier, quote_identifier_bytes};
 
 const VARCHARTYPMODOUT: types_core::Oid = 2915;
 
@@ -51,9 +51,17 @@ fn install_fixture() {
                 INT4ARRAYOID => Some(shape("_int4", INT4OID, F_ARRAY_SUBSCRIPT_HANDLER)),
                 20000 => Some(shape("mytype", InvalidOid, InvalidOid)),
                 20001 => Some(shape("othertype", InvalidOid, InvalidOid)),
+                // A SQL_ASCII catalog name carrying a non-UTF-8 byte.
+                20002 => {
+                    let mut s = shape("x", InvalidOid, InvalidOid);
+                    s.typname = NameData::default();
+                    s.typname.data[..4].copy_from_slice(b"bad\xff");
+                    Some(s)
+                }
                 _ => None,
             })
         });
+        mbutils_seams::get_database_encoding_name::set(|| "SQL_ASCII");
         syscache_seams::pg_type_io_shape::set(|typid| {
             Ok(Some(syscache_seams::PgTypeIoShape {
                 oid: typid,
@@ -203,4 +211,36 @@ fn quote_identifier_honors_quote_all_identifiers() {
     assert_eq!(quote_identifier("mixedCase"), "\"mixedCase\"");
     guc_tables::vars::quote_all_identifiers.write(false);
     assert_eq!(quote_identifier("plain"), "plain");
+}
+
+// audit-18.6 a186-verified-fp-catalog-namespace-p1-38055fc254e15cbf1827-1:
+// C format_type_extended (format_type.c:300-320) never decodes the catalog
+// name; a SQL_ASCII typname with a 0xFF byte must not take the backend down
+// with a panic.  pgrust cannot carry the bytes in its String result, so the
+// contract here is a catchable typed error (ERRCODE_FEATURE_NOT_SUPPORTED),
+// never a panic.
+#[test]
+fn non_utf8_typname_is_typed_error_not_panic() {
+    let _g = qai_lock();
+    install_fixture();
+    let err = format_type_be(20002).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+    assert!(err.message().contains("pg_type.typname"), "{}", err.message());
+    assert!(err.message().contains("SQL_ASCII"), "{}", err.message());
+}
+
+// ruleutils.c:13062 quote_identifier is byte-oriented: only a-z, 0-9 and _
+// are safe, embedded '"' bytes double, everything else (non-UTF-8 bytes
+// included) is copied verbatim inside the quotes.
+#[test]
+fn quote_identifier_bytes_matches_c() {
+    let _g = qai_lock();
+    assert_eq!(quote_identifier_bytes(b"abc_1").as_ref(), &b"abc_1"[..]);
+    assert_eq!(quote_identifier_bytes(b"Abc").as_ref(), &b"\"Abc\""[..]);
+    assert_eq!(quote_identifier_bytes(b"select").as_ref(), &b"\"select\""[..]);
+    assert_eq!(quote_identifier_bytes(b"a\"b").as_ref(), &b"\"a\"\"b\""[..]);
+    assert_eq!(quote_identifier_bytes(b"caf\xe9").as_ref(), &b"\"caf\xe9\""[..]);
+    assert_eq!(quote_identifier_bytes(b"t\xff").as_ref(), &b"\"t\xff\""[..]);
+    assert_eq!(quote_identifier_bytes(b"").as_ref(), &b"\"\""[..]);
+    assert_eq!(quote_identifier("caf\u{e9}"), "\"caf\u{e9}\"");
 }

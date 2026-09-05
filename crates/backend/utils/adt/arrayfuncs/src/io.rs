@@ -134,7 +134,11 @@ pub fn array_in<'mcx>(
         return Ok(Some(construct_empty_array(mcx, meta.element_type)?));
     }
 
-    let img = construct_md_array(
+    // arrayfuncs.c:332-336 (and the ArrayGetNItemsSafe / MAXDIM checks
+    // upstream of it) are ereturn(escontext, ...) sites: the size guards
+    // this shared constructor raises as hard errors go to the soft context
+    // here, exactly as C does for "array size exceeds the maximum allowed".
+    let img = match construct_md_array(
         mcx,
         &values,
         Some(&nulls),
@@ -145,7 +149,13 @@ pub fn array_in<'mcx>(
         meta.typlen,
         meta.typbyval,
         meta.typalign,
-    )?;
+    ) {
+        Ok(img) => img,
+        Err(e) if e.sqlstate() == ERRCODE_PROGRAM_LIMIT_EXCEEDED => {
+            return soft(escontext, *e);
+        }
+        Err(e) => return Err(e),
+    };
     Ok(Some(img))
 }
 

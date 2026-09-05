@@ -965,3 +965,24 @@ fn timeofday_survives_long_zone_abbreviations() {
         "{s}"
     );
 }
+
+// audit-18.6 a186-candidate-fp-adt-b1-72db331f0f5e8b0deb71-1:
+// arrayutils.c:240-243 ArrayGetIntegerTypmods raises ERRCODE_ARRAY_ELEMENT_ERROR
+// (2202E) when the typmod array is not cstring[].
+#[test]
+fn typmod_array_element_type_error_sqlstate() {
+    // One-dimensional int4[] {1}: vl_len, ndim, dataoffset, elemtype, dim, lbound, data.
+    let mut img: Vec<u8> = Vec::new();
+    img.extend_from_slice(&[0u8; 4]);
+    for w in [1u32, 0, 23, 1, 1, 1] {
+        img.extend_from_slice(&w.to_ne_bytes());
+    }
+    let hdr = ::datum::varlena::set_varsize_4b(img.len());
+    img[..4].copy_from_slice(&hdr);
+    let mut fci = ::types_fmgr::LocalFcinfo::<1>::new(0);
+    fci.set_arg(0, ::datum::Datum::from_usize(img.as_ptr() as usize));
+    let mut out = [0i32; 8];
+    let err = crate::builtins::array_get_integer_typmods(&fci, &mut out, "too many").unwrap_err();
+    assert_eq!(err.message(), "typmod array must be type cstring[]");
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_ARRAY_ELEMENT_ERROR);
+}
