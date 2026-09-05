@@ -794,10 +794,14 @@ pub fn changeDependenciesOn<'mcx>(
     oldRefObjectId: Oid,
     newRefObjectId: Oid,
 ) -> PgResult<i64> {
-    if isObjectPinned(&ObjectAddress::set(refClassId, oldRefObjectId)) {
+    let old_addr = ObjectAddress::set(refClassId, oldRefObjectId);
+    if isObjectPinned(&old_addr) {
+        // pg_depend.c:665: errmsg("cannot remove dependency on %s because it
+        // is a system object", getObjectDescription(&objAddr, false)).
         return Err(Box::new(
             types_error::PgError::error(format!(
-                "cannot remove dependency on object {refClassId}/{oldRefObjectId} because it is a system object"
+                "cannot remove dependency on {} because it is a system object",
+                describe_object(mcx, &old_addr)?
             ))
             .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
         ));
@@ -1388,21 +1392,28 @@ pub fn getIdentitySequence<'mcx>(
         relid = *ancestors.last().expect("partition has ancestors");
         attnum = lsyscache::attribute::get_attnum(relid, attname.as_str())? as i32;
         if attnum == 0 {
-            panic!(
+            // pg_depend.c:1166: elog(ERROR, ...) — catchable XX000.
+            return Err(Box::new(types_error::PgError::error(format!(
                 "cache lookup failed for attribute \"{}\" of relation {relid}",
                 attname.as_str()
-            );
+            ))));
         }
     }
     let seqlist = getOwnedSequences_internal(mcx, relid, attnum, Some(DependencyType::Internal))?;
     if seqlist.len() > 1 {
-        panic!("more than one owned sequence found for column {relid}.{attnum}");
+        // pg_depend.c:1173: elog(ERROR, "more than one owned sequence found").
+        return Err(Box::new(types_error::PgError::error(
+            "more than one owned sequence found".to_string(),
+        )));
     }
     let Some(&seq) = seqlist.first() else {
         if missing_ok {
             return Ok(types_core::InvalidOid);
         }
-        panic!("no owned sequence found for identity column {relid}.{attnum}");
+        // pg_depend.c:1179: elog(ERROR, "no owned sequence found").
+        return Err(Box::new(types_error::PgError::error(
+            "no owned sequence found".to_string(),
+        )));
     };
     Ok(seq)
 }
@@ -1533,7 +1544,38 @@ mod tests {
                 }))
             });
             namespace_seams::type_is_visible::set(|_| Ok(true));
+            // getObjectDescription stand-in: only the pinned pg_class row
+            // the changeDependenciesOn witness names.
+            objectaddress_seams::get_object_description::set(
+                |_mcx, class_id, object_id, _subid, _missing_ok| {
+                    Ok((class_id == types_core::RELATION_RELATION_ID
+                        && object_id == PINNED_PG_CLASS)
+                        .then(|| "table pg_class".to_string()))
+                },
+            );
         });
+    }
+
+    const PINNED_PG_CLASS: Oid = 1259;
+
+    // pg_depend.c:665 changeDependenciesOn: a pinned oldRefObjectId is
+    // refused with ERRCODE_FEATURE_NOT_SUPPORTED and errmsg("cannot remove
+    // dependency on %s because it is a system object",
+    // getObjectDescription(&objAddr, false)) — the object DESCRIPTION, not
+    // raw class/object OIDs.  The pinned check precedes every catalog
+    // access, so the witness needs no pg_depend heap.
+    #[test]
+    fn change_dependencies_on_pinned_reports_object_description() {
+        install_seams();
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        let e = changeDependenciesOn(mcx, types_core::RELATION_RELATION_ID, PINNED_PG_CLASS, 70020)
+            .unwrap_err();
+        assert_eq!(
+            e.message(),
+            "cannot remove dependency on table pg_class because it is a system object"
+        );
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
     }
 
     const UNPINNED_TYPE: Oid = 70001;
