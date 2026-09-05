@@ -15513,6 +15513,7 @@ dependencies = [
 name = "relcache_build"
 version = "0.0.0"
 dependencies = [
+ "amapi",
  "cache_syscache",
  "catalog_seams",
  "datum",

@@ -4,12 +4,26 @@
 
 use mcx::{Mcx, PgVec};
 use types_core::{InvalidOid, Oid, BTREE_AM_OID, INTERNALOID, VOIDOID};
-use types_error::PgResult;
+use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 
 pub const AMOP_SEARCH: i8 = b's' as i8;
 pub const AMOP_ORDER: i8 = b'o' as i8;
 
 pub use syscache_seams::{PgAmopRow, PgAmprocRow};
+
+#[cfg(test)]
+mod tests;
+
+// amvalidate.c:54 elog(ERROR, "cannot validate operator family without ordered data").
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn unordered_data() -> Box<PgError> {
+    Box::new(
+        PgError::error("cannot validate operator family without ordered data")
+            .with_sqlstate(ERRCODE_INTERNAL_ERROR),
+    )
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct OpFamilyOpFuncGroup {
@@ -28,8 +42,9 @@ pub fn identify_opfamily_groups<'mcx>(
     proclist: &[PgAmprocRow],
     proclist_ordered: bool,
 ) -> PgResult<PgVec<'mcx, OpFamilyOpFuncGroup>> {
+    // amvalidate.c:53-54: elog(ERROR), a catchable XX000.
     if !oprlist_ordered || !proclist_ordered {
-        panic!("cannot validate operator family without ordered data");
+        return Err(unordered_data());
     }
 
     let mut result: PgVec<'mcx, OpFamilyOpFuncGroup> = PgVec::new_in(mcx);

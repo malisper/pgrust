@@ -1,7 +1,10 @@
 use core::cell::RefCell;
 use core::mem::ManuallyDrop;
 
-use cache_syscache::{ReleaseSysCache, SearchSysCache1, SysCacheGetAttr, SysCacheKey, AMOID, INDEXRELID};
+use cache_syscache::{
+    ReleaseSysCache, SearchSysCache1, SysCacheGetAttr, SysCacheGetAttrNotNull, SysCacheKey,
+    AMOID, INDEXRELID,
+};
 use datum::Datum;
 use mcx::{Mcx, MemoryContext, PgHashMap, PgVec};
 use relcache::schemapg::{
@@ -41,6 +44,8 @@ const Anum_pg_amproc_amprocrighttype: i32 = 4;
 const Anum_pg_amproc_amprocnum: i32 = 5;
 const Anum_pg_amproc_amproc: i32 = 6;
 
+const Anum_pg_am_amhandler: i32 = 3;
+
 const Anum_pg_index_indexrelid: i32 = 1;
 const Anum_pg_index_indrelid: i32 = 2;
 const Anum_pg_index_indnatts: i32 = 3;
@@ -64,10 +69,13 @@ const Anum_pg_index_indpred: i32 = 21;
 const Anum_pg_opclass_opcfamily: i32 = 6;
 const Anum_pg_opclass_opcintype: i32 = 7;
 
-// RelationInitIndexAccessInfo (relcache.c). C also resolves rd_amhandler/
-// rd_indam (amapi dispatches on rd_rel.relam here) and preloads the
-// rd_support array (rd_supportinfo resolves lazily per key column), so the
-// pg_am probe and the pg_amproc scan are structurally subsumed.
+// RelationInitIndexAccessInfo (relcache.c). C resolves rd_amhandler from the
+// pg_am row (relcache.c:1484-1487) and rd_indam through it
+// (InitIndexAmRoutine, relcache.c:1432 GetIndexAmRoutine) — done the same way
+// below, so a relam with no pg_am row or a handler that is not an index AM
+// is C's catchable XX000, never a panic. The rd_support array is preloaded
+// here (rd_supportinfo resolves lazily per key column), so the pg_amproc
+// scan is structurally subsumed.
 pub(crate) fn relation_init_index_access_info(
     mcx: Mcx<'static>,
     relid: Oid,
@@ -79,14 +87,25 @@ pub(crate) fn relation_init_index_access_info(
     };
     // relcache.c:1483-1487: the index's pg_am row must exist -- a relam
     // with no pg_am row is elog(ERROR, "cache lookup failed for access
-    // method %u"), never the closed-set panic from_relam raises.
-    match SearchSysCache1(AMOID, SysCacheKey::Value(Datum::from_oid(form.relam)))? {
-        Some(amtup) => ReleaseSysCache(amtup),
-        None => {
-            ReleaseSysCache(tup);
-            return Err(access_method_lookup_failed(form.relam));
+    // method %u"), never a closed-set panic -- and rd_amhandler is the row's
+    // amhandler. The AM is then dispatched on that handler
+    // (InitIndexAmRoutine, relcache.c:1432 GetIndexAmRoutine), never on the
+    // relam OID, so a pg_am row pointing at a non-handler proc errors like C.
+    let am_kind = match SearchSysCache1(AMOID, SysCacheKey::Value(Datum::from_oid(form.relam)))? {
+        Some(amtup) => {
+            let amhandler = SysCacheGetAttrNotNull(AMOID, &amtup, Anum_pg_am_amhandler);
+            ReleaseSysCache(amtup);
+            amhandler.map(|d| d.as_oid()).and_then(amapi::GetIndexAmRoutine)
         }
-    }
+        None => Err(access_method_lookup_failed(form.relam)),
+    };
+    let am_kind = match am_kind {
+        Ok(k) => k,
+        Err(e) => {
+            ReleaseSysCache(tup);
+            return Err(e);
+        }
+    };
     let get = |attno: i32| -> PgResult<Datum> {
         let (d, isnull) = SysCacheGetAttr(INDEXRELID, &tup, attno)?;
         if isnull {
@@ -112,9 +131,7 @@ pub(crate) fn relation_init_index_access_info(
     };
     indkey.extend_from_slice(keyvals);
 
-    // amroutine->amsupport per handler; from_relam covers non-builtin AMs
-    // over builtin handlers.
-    let am_kind = types_relscan::IndexAmKind::from_relam(form.relam);
+    // amroutine->amsupport per handler.
     let amsupport = match am_kind {
         types_relscan::IndexAmKind::Btree => BTNProcs,
         types_relscan::IndexAmKind::Hash => HASHNProcs,

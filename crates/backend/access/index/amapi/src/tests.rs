@@ -6,7 +6,7 @@ use datum::Datum;
 use mcx::{Mcx, MemoryContext, PgVec};
 use types_pathnodes::{COMPARE_LT, COMPARE_NE};
 use types_tuple::{
-    CompactAttribute, FormData_pg_attribute, TupleDescData, ATTNULLABLE_UNRESTRICTED,
+    CompactAttribute, FormData_pg_attribute, NameData, TupleDescData, ATTNULLABLE_UNRESTRICTED,
 };
 
 use super::*;
@@ -106,9 +106,32 @@ fn constants_match_pg_am_h() {
 
 #[test]
 fn handler_dispatch_is_the_closed_set() {
-    assert_eq!(GetIndexAmRoutine(F_BTHANDLER), IndexAmKind::Btree);
-    let unknown = std::panic::catch_unwind(|| GetIndexAmRoutine(999));
-    assert!(unknown.is_err());
+    fn named(name: &str) -> NameData {
+        let mut n = NameData::default();
+        n.namestrcpy(name);
+        n
+    }
+    syscache_seams::pg_proc_proname::set(|funcid| {
+        Ok(match funcid {
+            5000 => Some(named("blhandler")),
+            5001 => Some(named("int4pl")),
+            _ => None,
+        })
+    });
+    assert_eq!(GetIndexAmRoutine(F_BTHANDLER).unwrap(), IndexAmKind::Btree);
+    assert_eq!(GetIndexAmRoutine(F_BRINHANDLER).unwrap(), IndexAmKind::Brin);
+    assert_eq!(GetIndexAmRoutine(5000).unwrap(), IndexAmKind::Bloom);
+    // fmgr.c:183: OidFunctionCall0 on a handler with no pg_proc row.
+    let e = GetIndexAmRoutine(999).unwrap_err();
+    assert_eq!(e.message, "cache lookup failed for function 999");
+    assert_eq!(e.sqlstate(), ERRCODE_INTERNAL_ERROR);
+    // amapi.c:42: a proc that is not an index AM handler.
+    let e = GetIndexAmRoutine(5001).unwrap_err();
+    assert_eq!(
+        e.message,
+        "index access method handler function 5001 did not return an IndexAmRoutine struct"
+    );
+    assert_eq!(e.sqlstate(), ERRCODE_INTERNAL_ERROR);
 }
 
 #[test]

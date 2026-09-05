@@ -5,7 +5,9 @@ use cache_syscache::cacheinfo::AMOID;
 use cache_syscache::{ReleaseSysCache, SearchSysCache1, SysCacheGetAttrNotNull, SysCacheKey};
 use datum::Datum;
 use types_core::{InvalidOid, Oid, BTREE_AM_OID};
-use types_error::{PgError, PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE};
+use types_error::{
+    PgError, PgResult, ERRCODE_INTERNAL_ERROR, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+};
 use types_pathnodes::{CompareType, COMPARE_GT, COMPARE_INVALID};
 use types_relscan::IndexAmKind;
 use types_scan::scankey::{BTMaxStrategyNumber, InvalidStrategy, StrategyNumber};
@@ -23,32 +25,39 @@ const Anum_pg_am_amtype: i32 = 4;
 const NAMEDATALEN: usize = 64;
 
 /// C calls the handler by OID and gets a palloc'd IndexAmRoutine; the closed
-/// AM set makes the routine the IndexAmKind enum. No catalog access, so safe
-/// while bootstrapping catalog indexes (relcache relies on that).
-pub fn GetIndexAmRoutine(amhandler: Oid) -> IndexAmKind {
-    match amhandler {
+/// AM set makes the routine the IndexAmKind enum. The builtin handlers need
+/// no catalog access, so this is safe while bootstrapping catalog indexes
+/// (relcache relies on that). Any other handler resolves the way C's
+/// OidFunctionCall0(amhandler) does: no pg_proc row is fmgr.c:183 "cache
+/// lookup failed for function %u"; a proc that is not one of the ported
+/// handlers is amapi.c:42 "index access method handler function %u did not
+/// return an IndexAmRoutine struct" — catchable XX000s, never a panic.
+pub fn GetIndexAmRoutine(amhandler: Oid) -> PgResult<IndexAmKind> {
+    Ok(match amhandler {
         F_BTHANDLER => IndexAmKind::Btree,
         F_HASHHANDLER => IndexAmKind::Hash,
         F_GINHANDLER => IndexAmKind::Gin,
         F_GISTHANDLER => IndexAmKind::Gist,
         F_SPGHANDLER => IndexAmKind::Spgist,
         F_BRINHANDLER => IndexAmKind::Brin,
-        other => resolve_extension_handler(other),
-    }
+        other => return resolve_extension_handler(other),
+    })
 }
 
 // Non-builtin amhandler (extension AM): map by the handler proc's C symbol.
 // Catalog access is fine here — bootstrap only reaches the builtin arms.
-fn resolve_extension_handler(amhandler: Oid) -> IndexAmKind {
-    if let Ok(Some(name)) = syscache_seams::pg_proc_proname::call(amhandler) {
-        if name.name_str() == b"hnswhandler" {
-            return IndexAmKind::Hnsw;
-        }
-        if name.name_str() == b"blhandler" {
-            return IndexAmKind::Bloom;
-        }
+// Anything else is the backstop behind the CREATE ACCESS METHOD fence
+// (amcmds.rs refuses non-builtin handlers with a clean 0A000): only a
+// catalog written outside that fence (allow_system_table_mods, restore)
+// reaches it, and it raises what C raises (no-dlopen carve,
+// docs/design/carve-ratifications.md §2).
+fn resolve_extension_handler(amhandler: Oid) -> PgResult<IndexAmKind> {
+    match syscache_seams::pg_proc_proname::call(amhandler)? {
+        Some(name) if name.name_str() == b"hnswhandler" => Ok(IndexAmKind::Hnsw),
+        Some(name) if name.name_str() == b"blhandler" => Ok(IndexAmKind::Bloom),
+        Some(_) => Err(not_an_am_routine(amhandler)),
+        None => Err(proc_lookup_failed(amhandler)),
     }
-    unported_handler(amhandler)
 }
 
 pub fn GetIndexAmRoutineByAmId(amoid: Oid, noerror: bool) -> PgResult<Option<IndexAmKind>> {
@@ -82,7 +91,7 @@ pub fn GetIndexAmRoutineByAmId(amoid: Oid, noerror: bool) -> PgResult<Option<Ind
     }
 
     ReleaseSysCache(tuple);
-    Ok(Some(GetIndexAmRoutine(amhandler)))
+    Ok(Some(GetIndexAmRoutine(amhandler)?))
 }
 
 pub fn IndexAmTranslateStrategy(
@@ -398,14 +407,30 @@ pub fn known_index_am_handler(amhandler: Oid) -> bool {
     }
 }
 
-// Backstop behind the CREATE ACCESS METHOD fence (amcmds.rs, which refuses
-// non-builtin handlers with a clean 0A000): only a catalog written outside
-// that fence can reach these (no-dlopen carve,
-// docs/design/carve-ratifications.md §2).
+// amapi.c:42 elog(ERROR, "index access method handler function %u did not
+// return an IndexAmRoutine struct").
+#[track_caller]
 #[cold]
 #[inline(never)]
-fn unported_handler(amhandler: Oid) -> ! {
-    panic!("index AM handler function {amhandler} is not in the closed in-tree AM set (no-dlopen carve, docs/design/carve-ratifications.md; CREATE ACCESS METHOD fences this at DDL time)")
+fn not_an_am_routine(amhandler: Oid) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "index access method handler function {amhandler} did not return an IndexAmRoutine struct"
+        ))
+        .with_sqlstate(ERRCODE_INTERNAL_ERROR),
+    )
+}
+
+// fmgr.c:183 fmgr_info_cxt_security elog(ERROR, "cache lookup failed for
+// function %u"): what OidFunctionCall0 raises for a handler with no pg_proc row.
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn proc_lookup_failed(amhandler: Oid) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!("cache lookup failed for function {amhandler}"))
+            .with_sqlstate(ERRCODE_INTERNAL_ERROR),
+    )
 }
 
 #[track_caller]
@@ -452,28 +477,18 @@ fn no_handler(name: String) -> Box<PgError> {
 #[cfg(test)]
 mod tests;
 
-// from_relam's lazy resolver: pg_am.amhandler -> builtin IndexAmRoutine
-// (relcache/GetIndexAmRoutineByAmId path); None only when the pg_am row is
-// missing, so the caller's loud panic stands.
+// from_relam's lazy resolver: pg_am.amhandler -> IndexAmRoutine (the
+// relcache/GetIndexAmRoutineByAmId path). None when the pg_am row is missing
+// or its handler is unresolvable; relcache build raises the C error for both
+// before any index of that AM can be opened, so from_relam's loud panic is
+// unreachable from SQL and stands as the internal invariant.
 fn resolve_index_am_kind(amoid: Oid) -> Option<IndexAmKind> {
     let tuple = SearchSysCache1(AMOID, SysCacheKey::Value(Datum::from_oid(amoid))).ok()??;
     let amhandler = SysCacheGetAttrNotNull(AMOID, &tuple, Anum_pg_am_amhandler)
         .map(|d| d.as_oid())
         .ok()?;
     ReleaseSysCache(tuple);
-    if !matches!(
-        amhandler,
-        F_BTHANDLER | F_HASHHANDLER | F_GINHANDLER | F_GISTHANDLER | F_SPGHANDLER | F_BRINHANDLER
-    ) {
-        // Extension AM: identify by the handler proc's C symbol.
-        let name = syscache_seams::pg_proc_proname::call(amhandler).ok()??;
-        return match name.name_str() {
-            b"hnswhandler" => Some(IndexAmKind::Hnsw),
-            b"blhandler" => Some(IndexAmKind::Bloom),
-            _ => None,
-        };
-    }
-    Some(GetIndexAmRoutine(amhandler))
+    GetIndexAmRoutine(amhandler).ok()
 }
 
 pub fn init_seams() {

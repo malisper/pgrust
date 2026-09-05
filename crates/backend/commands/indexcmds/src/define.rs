@@ -311,7 +311,7 @@ fn resolve_index_am(name: Option<&str>) -> PgResult<IndexAmInfo> {
             ERRCODE_UNDEFINED_OBJECT,
         ));
     };
-    let kind = amapi::GetIndexAmRoutine(amhandler);
+    let kind = amapi::GetIndexAmRoutine(amhandler)?;
     let (amcanorder, amcanunique, amcanmulticol, amcaninclude) = index_am_flags(kind);
     Ok(IndexAmInfo {
         oid,

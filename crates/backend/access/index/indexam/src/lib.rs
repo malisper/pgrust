@@ -146,9 +146,13 @@ pub fn index_insert<'mcx>(
     relation_checks(indexRelation)?;
     let kind = IndexAmKind::from_relam(indexRelation.rd_rel.relam);
 
+    // indexam.c:225-228: an AM without ampredlocks is predicate-locked at
+    // relation grain on the INDEX (index_beginscan_internal), so the
+    // rw-conflict check is against indexRelation — the heap's own check
+    // happens in heap_insert and never sees the index's SIREAD locks.
     if !kind.ampredlocks() {
         predicate::CheckForSerializableConflictIn(
-            heapRelation,
+            indexRelation,
             None,
             types_core::InvalidBlockNumber,
         )?;
