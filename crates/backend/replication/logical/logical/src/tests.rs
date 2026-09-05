@@ -110,3 +110,21 @@ fn missing_stream_prepare_cb_message_matches_c() {
         "logical streaming at prepare time requires a stream_prepare_cb callback"
     );
 }
+
+// ---- audit-remediation b137 witnesses ---------------------------------------
+
+// logical.c:148: the standby wal_level guard message is "... on the primary"
+// with no trailing "server" (row
+// a186-candidate-fp-logical-logical-5d27db2fb40ad5f19058-1).
+#[test]
+fn standby_wal_level_error_omits_trailing_server_word() {
+    let err = super::standby_wal_level_below_logical_error();
+    assert_eq!(
+        err.sqlstate(),
+        types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE
+    );
+    assert_eq!(
+        err.message(),
+        "logical decoding on standby requires \"wal_level\" >= \"logical\" on the primary"
+    );
+}

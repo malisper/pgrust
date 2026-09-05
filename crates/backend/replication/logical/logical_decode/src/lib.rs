@@ -10,7 +10,7 @@ use snapbuild::SnapBuildState;
 use types_core::{
     InvalidOid, Oid, RepOriginId, TimestampTz, TransactionId, TransactionIdIsValid, XLogRecPtr,
 };
-use types_error::{ErrorLocation, PgResult, ERRCODE_DATA_CORRUPTED, ERROR};
+use types_error::{ErrorLocation, PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERROR, FATAL};
 use types_storage::{RelFileLocator, SharedInvalidationMessage};
 use types_tuple::{BlockIdData, ItemPointerData, SizeofHeapTupleHeader};
 use xact::{
@@ -367,8 +367,20 @@ fn parse_xact_invals(data: &[u8]) -> PgResult<Vec<SharedInvalidationMessage>> {
     let mut off = SIZE_OF_XACT_INVALS;
     for _ in 0..nmsgs {
         let bytes: [u8; MSG_SIZE] = data[off..off + MSG_SIZE].try_into().expect("in bounds");
-        let msg = SharedInvalidationMessage::from_wire_bytes(bytes)
-            .expect("valid shared-invalidation message in XLOG_XACT_INVALIDATIONS");
+        // C stores the message array verbatim at decode; an unrecognized id
+        // only trips elog(FATAL, "unrecognized SI message ID: %d") when the
+        // message is later executed (inval.c LocalExecuteInvalidationMessage).
+        // pgrust parses eagerly, so match that FATAL here rather than panicking
+        // with a Rust unwind on hostile/corrupt WAL.
+        let msg = match SharedInvalidationMessage::from_wire_bytes(bytes) {
+            Some(msg) => msg,
+            None => {
+                return Err(Box::new(PgError::new(
+                    FATAL,
+                    format!("unrecognized SI message ID: {}", bytes[0] as i8),
+                )))
+            }
+        };
         msgs.push(msg);
         off += MSG_SIZE;
     }
@@ -1890,5 +1902,23 @@ mod tests {
         let data = u32::MAX.to_ne_bytes();
         let e = super::parse_xact_invals(&data).err().unwrap();
         assert_eq!(e.sqlstate(), types_error::ERRCODE_DATA_CORRUPTED);
+    }
+
+    // An unrecognized SI message id in the record body must become a
+    // structured FATAL error ("unrecognized SI message ID: %d", inval.c) — as
+    // C reaches when the message is executed — never a Rust unwind panic (row
+    // a186-candidate-fp-logical-decode-9266fabec18947cc0899-1).
+    #[test]
+    fn xact_invals_unrecognized_id_is_fatal_not_panic() {
+        const MSG_SIZE: usize = types_storage::SHARED_INVALIDATION_MESSAGE_SIZE;
+        let mut data = vec![0u8; super::SIZE_OF_XACT_INVALS + MSG_SIZE];
+        // nmsgs = 1.
+        data[0..4].copy_from_slice(&1u32.to_ne_bytes());
+        // One message whose id byte (0x80 => -128 as i8) is a negative id
+        // outside the recognized -1..-? set, so from_wire_bytes returns None.
+        data[super::SIZE_OF_XACT_INVALS] = 0x80;
+        let e = super::parse_xact_invals(&data).err().unwrap();
+        assert_eq!(e.level(), types_error::FATAL);
+        assert_eq!(e.message(), "unrecognized SI message ID: -128");
     }
 }

@@ -23,7 +23,7 @@ use types_core::{
     TransactionIdIsValid, TransactionIdPrecedes, XLogRecPtr,
 };
 use types_error::{
-    ErrorLocation, PgResult, ERRCODE_ACTIVE_SQL_TRANSACTION, ERRCODE_INSUFFICIENT_PRIVILEGE,
+    ErrorLocation, PgError, PgResult, ERRCODE_ACTIVE_SQL_TRANSACTION, ERRCODE_INSUFFICIENT_PRIVILEGE,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_SYNTAX_ERROR, ERROR, LOG,
 };
 use types_rel::RelationData;
@@ -239,6 +239,18 @@ fn opc_from_rb(rb: &ReorderBuffer) -> &'static mut OutputPluginContext {
     unsafe { &mut *(rb.private_data as *mut OutputPluginContext) }
 }
 
+// logical.c:148 standby wal_level guard. C's message is "... on the primary"
+// with no trailing "server".
+fn standby_wal_level_below_logical_error() -> Box<PgError> {
+    Box::new(
+        PgError::error(
+            "logical decoding on standby requires \"wal_level\" >= \"logical\" on the primary"
+                .to_string(),
+        )
+        .with_sqlstate(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+    )
+}
+
 pub fn CheckLogicalDecodingRequirements() -> PgResult<()> {
     CheckSlotRequirements()?;
 
@@ -265,13 +277,7 @@ pub fn CheckLogicalDecodingRequirements() -> PgResult<()> {
         // slot creation and at decoding startup, and XLOG_PARAMETER_CHANGE
         // invalidates existing logical slots on a wal_level drop.
         if transam_xlog::GetActiveWalLevelOnStandby() < transam_xlog::WAL_LEVEL_LOGICAL {
-            ereport(ERROR)
-                .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
-                .errmsg(
-                    "logical decoding on standby requires \"wal_level\" >= \"logical\" on the primary server",
-                )
-                .finish(loc("CheckLogicalDecodingRequirements"))?;
-            unreachable!();
+            return Err(standby_wal_level_below_logical_error());
         }
     }
     Ok(())
@@ -632,7 +638,8 @@ fn startup_cb_maybe(ctx: &mut LogicalDecodingContext, is_init: bool) -> PgResult
         debug_assert!(!opc.fast_forward);
         opc.accept_writes = false;
         opc.end_xact = false;
-        cb(opc, is_init)?;
+        let r = cb(&mut *opc, is_init);
+        with_output_plugin_context(opc, "startup", InvalidXLogRecPtr, r)?;
     }
     // The plugin's startup callback finalizes ctx->streaming (pgoutput turns
     // it off unless the subscriber negotiated it); only then wire the
@@ -664,7 +671,8 @@ impl LogicalDecodingContext {
             debug_assert!(!opc.fast_forward);
             opc.accept_writes = false;
             opc.end_xact = false;
-            cb(opc)?;
+            let r = cb(&mut *opc);
+            with_output_plugin_context(opc, "shutdown", InvalidXLogRecPtr, r)?;
         }
 
         let LogicalDecodingContext {
@@ -797,6 +805,44 @@ fn LoadOutputPlugin(callbacks: &mut OutputPluginCallbacks, plugin: &str) -> PgRe
     Ok(())
 }
 
+// output_plugin_error_callback (logical.c:825): every output-plugin callback
+// wrapper runs with an error-context frame naming the slot, plugin, callback
+// and (where the callback has an associated LSN) its report location, so an
+// ERROR raised inside the plugin carries the CONTEXT line. pgrust has no live
+// error_context_stack for the ERROR path, so the context attaches on error
+// propagation where C pushed the callback.
+#[cold]
+#[inline(never)]
+fn attach_output_plugin_context(
+    opc: &OutputPluginContext,
+    callback_name: &str,
+    report_location: XLogRecPtr,
+    err: Box<PgError>,
+) -> Box<PgError> {
+    let d = unsafe { opc.slot.data.get() };
+    let name = String::from_utf8_lossy(d.name.name_str()).into_owned();
+    let plugin = String::from_utf8_lossy(d.plugin.name_str()).into_owned();
+    let ctx = if report_location != InvalidXLogRecPtr {
+        format!(
+            "slot \"{name}\", output plugin \"{plugin}\", in the {callback_name} callback, associated LSN {:X}/{:X}",
+            (report_location >> 32) as u32,
+            report_location as u32
+        )
+    } else {
+        format!("slot \"{name}\", output plugin \"{plugin}\", in the {callback_name} callback")
+    };
+    Box::new(PgError::from(err).add_context(ctx))
+}
+
+fn with_output_plugin_context<T>(
+    opc: &OutputPluginContext,
+    callback_name: &str,
+    report_location: XLogRecPtr,
+    res: PgResult<T>,
+) -> PgResult<T> {
+    res.map_err(|e| attach_output_plugin_context(opc, callback_name, report_location, e))
+}
+
 fn begin_cb_wrapper(rb: &mut ReorderBuffer, txn: TxnId) -> PgResult<()> {
     let opc = opc_from_rb(rb);
     debug_assert!(!opc.fast_forward);
@@ -805,7 +851,9 @@ fn begin_cb_wrapper(rb: &mut ReorderBuffer, txn: TxnId) -> PgResult<()> {
     opc.write_location = rb.txn(txn).first_lsn;
     opc.end_xact = false;
     let cb = opc.callbacks.begin_cb.expect("begin callback registered");
-    cb(opc, rb, txn)
+    let report_location = rb.txn(txn).first_lsn;
+    let r = cb(&mut *opc, rb, txn);
+    with_output_plugin_context(opc, "begin", report_location, r)
 }
 
 fn commit_cb_wrapper(rb: &mut ReorderBuffer, txn: TxnId, commit_lsn: XLogRecPtr) -> PgResult<()> {
@@ -816,7 +864,9 @@ fn commit_cb_wrapper(rb: &mut ReorderBuffer, txn: TxnId, commit_lsn: XLogRecPtr)
     opc.write_location = rb.txn(txn).end_lsn;
     opc.end_xact = true;
     let cb = opc.callbacks.commit_cb.expect("commit callback registered");
-    cb(opc, rb, txn, commit_lsn)
+    let report_location = rb.txn(txn).final_lsn;
+    let r = cb(&mut *opc, rb, txn, commit_lsn);
+    with_output_plugin_context(opc, "commit", report_location, r)
 }
 
 #[cold]
@@ -843,7 +893,9 @@ fn begin_prepare_cb_wrapper(rb: &mut ReorderBuffer, txn: TxnId) -> PgResult<()> 
     let Some(cb) = opc.callbacks.begin_prepare_cb else {
         return missing_prepare_family_cb("begin_prepare_cb");
     };
-    cb(opc, rb, txn)
+    let report_location = rb.txn(txn).first_lsn;
+    let r = cb(&mut *opc, rb, txn);
+    with_output_plugin_context(opc, "begin_prepare", report_location, r)
 }
 
 fn prepare_cb_wrapper(rb: &mut ReorderBuffer, txn: TxnId, prepare_lsn: XLogRecPtr) -> PgResult<()> {
@@ -857,7 +909,9 @@ fn prepare_cb_wrapper(rb: &mut ReorderBuffer, txn: TxnId, prepare_lsn: XLogRecPt
     let Some(cb) = opc.callbacks.prepare_cb else {
         return missing_prepare_family_cb("prepare_cb");
     };
-    cb(opc, rb, txn, prepare_lsn)
+    let report_location = rb.txn(txn).final_lsn;
+    let r = cb(&mut *opc, rb, txn, prepare_lsn);
+    with_output_plugin_context(opc, "prepare", report_location, r)
 }
 
 fn commit_prepared_cb_wrapper(
@@ -875,7 +929,9 @@ fn commit_prepared_cb_wrapper(
     let Some(cb) = opc.callbacks.commit_prepared_cb else {
         return missing_prepare_family_cb("commit_prepared_cb");
     };
-    cb(opc, rb, txn, commit_lsn)
+    let report_location = rb.txn(txn).final_lsn;
+    let r = cb(&mut *opc, rb, txn, commit_lsn);
+    with_output_plugin_context(opc, "commit_prepared", report_location, r)
 }
 
 fn rollback_prepared_cb_wrapper(
@@ -894,7 +950,9 @@ fn rollback_prepared_cb_wrapper(
     let Some(cb) = opc.callbacks.rollback_prepared_cb else {
         return missing_prepare_family_cb("rollback_prepared_cb");
     };
-    cb(opc, rb, txn, prepare_end_lsn, prepare_time)
+    let report_location = rb.txn(txn).final_lsn;
+    let r = cb(&mut *opc, rb, txn, prepare_end_lsn, prepare_time);
+    with_output_plugin_context(opc, "rollback_prepared", report_location, r)
 }
 
 #[cold]
@@ -941,7 +999,9 @@ fn stream_start_cb_wrapper(rb: &mut ReorderBuffer, txn: TxnId, first_lsn: XLogRe
     let Some(cb) = opc.callbacks.stream_start_cb else {
         return missing_stream_cb("stream_start_cb");
     };
-    cb(opc, rb, txn)
+    let report_location = first_lsn;
+    let r = cb(&mut *opc, rb, txn);
+    with_output_plugin_context(opc, "stream_start", report_location, r)
 }
 
 fn stream_stop_cb_wrapper(rb: &mut ReorderBuffer, txn: TxnId, last_lsn: XLogRecPtr) -> PgResult<()> {
@@ -955,7 +1015,9 @@ fn stream_stop_cb_wrapper(rb: &mut ReorderBuffer, txn: TxnId, last_lsn: XLogRecP
     let Some(cb) = opc.callbacks.stream_stop_cb else {
         return missing_stream_cb("stream_stop_cb");
     };
-    cb(opc, rb, txn)
+    let report_location = last_lsn;
+    let r = cb(&mut *opc, rb, txn);
+    with_output_plugin_context(opc, "stream_stop", report_location, r)
 }
 
 fn stream_abort_cb_wrapper(rb: &mut ReorderBuffer, txn: TxnId, abort_lsn: XLogRecPtr) -> PgResult<()> {
@@ -969,7 +1031,9 @@ fn stream_abort_cb_wrapper(rb: &mut ReorderBuffer, txn: TxnId, abort_lsn: XLogRe
     let Some(cb) = opc.callbacks.stream_abort_cb else {
         return missing_stream_cb("stream_abort_cb");
     };
-    cb(opc, rb, txn, abort_lsn)
+    let report_location = abort_lsn;
+    let r = cb(&mut *opc, rb, txn, abort_lsn);
+    with_output_plugin_context(opc, "stream_abort", report_location, r)
 }
 
 fn stream_prepare_cb_wrapper(rb: &mut ReorderBuffer, txn: TxnId, prepare_lsn: XLogRecPtr) -> PgResult<()> {
@@ -988,7 +1052,9 @@ fn stream_prepare_cb_wrapper(rb: &mut ReorderBuffer, txn: TxnId, prepare_lsn: XL
         // (logical.c:1288).
         return missing_stream_prepare_cb();
     };
-    cb(opc, rb, txn, prepare_lsn)
+    let report_location = rb.txn(txn).final_lsn;
+    let r = cb(&mut *opc, rb, txn, prepare_lsn);
+    with_output_plugin_context(opc, "stream_prepare", report_location, r)
 }
 
 fn stream_commit_cb_wrapper(rb: &mut ReorderBuffer, txn: TxnId, commit_lsn: XLogRecPtr) -> PgResult<()> {
@@ -1002,7 +1068,9 @@ fn stream_commit_cb_wrapper(rb: &mut ReorderBuffer, txn: TxnId, commit_lsn: XLog
     let Some(cb) = opc.callbacks.stream_commit_cb else {
         return missing_stream_cb("stream_commit_cb");
     };
-    cb(opc, rb, txn, commit_lsn)
+    let report_location = rb.txn(txn).final_lsn;
+    let r = cb(&mut *opc, rb, txn, commit_lsn);
+    with_output_plugin_context(opc, "stream_commit", report_location, r)
 }
 
 fn stream_change_cb_wrapper(
@@ -1021,7 +1089,9 @@ fn stream_change_cb_wrapper(
     let Some(cb) = opc.callbacks.stream_change_cb else {
         return missing_stream_cb("stream_change_cb");
     };
-    cb(opc, rb, txn, relation, change)
+    let report_location = change.lsn;
+    let r = cb(&mut *opc, rb, txn, relation, change);
+    with_output_plugin_context(opc, "stream_change", report_location, r)
 }
 
 fn stream_message_cb_wrapper(
@@ -1043,7 +1113,9 @@ fn stream_message_cb_wrapper(
     opc.write_xid = txn.map(|t| rb.txn(t).xid).unwrap_or(InvalidTransactionId);
     opc.write_location = lsn;
     opc.end_xact = false;
-    cb(opc, rb, txn, lsn, transactional, prefix, message)
+    let report_location = lsn;
+    let r = cb(&mut *opc, rb, txn, lsn, transactional, prefix, message);
+    with_output_plugin_context(opc, "stream_message", report_location, r)
 }
 
 fn stream_truncate_cb_wrapper(
@@ -1062,7 +1134,9 @@ fn stream_truncate_cb_wrapper(
     let Some(cb) = opc.callbacks.stream_truncate_cb else {
         return missing_stream_cb("stream_truncate_cb");
     };
-    cb(opc, rb, txn, relations, change)
+    let report_location = change.lsn;
+    let r = cb(&mut *opc, rb, txn, relations, change);
+    with_output_plugin_context(opc, "stream_truncate", report_location, r)
 }
 
 pub fn filter_prepare_cb_wrapper(
@@ -1077,7 +1151,8 @@ pub fn filter_prepare_cb_wrapper(
         .callbacks
         .filter_prepare_cb
         .expect("filter_prepare callback registered");
-    cb(opc, xid, gid)
+    let r = cb(&mut *opc, xid, gid);
+    with_output_plugin_context(opc, "filter_prepare", InvalidXLogRecPtr, r)
 }
 
 fn change_cb_wrapper(
@@ -1093,7 +1168,9 @@ fn change_cb_wrapper(
     opc.write_location = change.lsn;
     opc.end_xact = false;
     let cb = opc.callbacks.change_cb.expect("change callback registered");
-    cb(opc, rb, txn, relation, change)
+    let report_location = change.lsn;
+    let r = cb(&mut *opc, rb, txn, relation, change);
+    with_output_plugin_context(opc, "change", report_location, r)
 }
 
 fn truncate_cb_wrapper(
@@ -1111,7 +1188,9 @@ fn truncate_cb_wrapper(
     opc.write_xid = rb.txn(txn).xid;
     opc.write_location = change.lsn;
     opc.end_xact = false;
-    cb(opc, rb, txn, relations, change)
+    let report_location = change.lsn;
+    let r = cb(&mut *opc, rb, txn, relations, change);
+    with_output_plugin_context(opc, "truncate", report_location, r)
 }
 
 fn message_cb_wrapper(
@@ -1134,7 +1213,9 @@ fn message_cb_wrapper(
     };
     opc.write_location = message_lsn;
     opc.end_xact = false;
-    cb(opc, rb, txn, message_lsn, transactional, prefix, message)
+    let report_location = message_lsn;
+    let r = cb(&mut *opc, rb, txn, message_lsn, transactional, prefix, message);
+    with_output_plugin_context(opc, "message", report_location, r)
 }
 
 fn update_progress_txn_cb_wrapper(
@@ -1148,7 +1229,8 @@ fn update_progress_txn_cb_wrapper(
     opc.write_xid = rb.txn(txn).xid;
     opc.write_location = lsn;
     opc.end_xact = false;
-    OutputPluginUpdateProgress(opc, false)
+    let r = OutputPluginUpdateProgress(&mut *opc, false);
+    with_output_plugin_context(opc, "update_progress_txn", lsn, r)
 }
 
 pub fn filter_by_origin_cb_wrapper(
@@ -1162,7 +1244,8 @@ pub fn filter_by_origin_cb_wrapper(
         .callbacks
         .filter_by_origin_cb
         .expect("filter_by_origin callback registered");
-    cb(opc, origin_id)
+    let r = cb(&mut *opc, origin_id);
+    with_output_plugin_context(opc, "filter_by_origin", InvalidXLogRecPtr, r)
 }
 
 pub fn LogicalIncreaseXminForSlot(current_lsn: XLogRecPtr, xmin: TransactionId) -> PgResult<()> {

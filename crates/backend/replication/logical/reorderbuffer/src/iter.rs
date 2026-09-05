@@ -1,5 +1,5 @@
 use types_core::XLogRecPtr;
-use types_error::PgResult;
+use types_error::{PgResult, DEBUG2};
 
 use crate::{dl_delete, dl_iter, ChangeId, ReorderBuffer, TxnId, INVALID_ID};
 
@@ -219,7 +219,15 @@ impl ReorderBuffer {
             entry.file = file;
             entry.segno = segno;
             if restored? > 0 {
-                // Successfully restored changes from disk.
+                // Successfully restored changes from disk (reorderbuffer.c:1479).
+                let _ = elog::elog(
+                    DEBUG2,
+                    format!(
+                        "restored {}/{} changes from disk",
+                        self.txn(entry_txn).nentries_mem as u32,
+                        self.txn(entry_txn).nentries as u32
+                    ),
+                );
                 let next_head = self.txn(entry_txn).changes.head;
                 debug_assert!(next_head != INVALID_ID);
                 debug_assert!(self.txn(entry_txn).nentries_mem > 0);

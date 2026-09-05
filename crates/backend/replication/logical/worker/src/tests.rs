@@ -198,3 +198,84 @@ fn origin_message_outside_remote_transaction_is_out_of_order() {
     super::apply::apply_dispatch(mcx, None, &buf).unwrap();
     super::IN_REMOTE_TRANSACTION.set(false);
 }
+
+// should_refetch_tuple (execReplication.c:135): TM_Invisible is
+// elog(ERROR, "attempted to lock invisible tuple") and any unexpected status
+// is "unexpected table_tuple_lock status: %u" (with the colon); concurrent
+// update/delete retry at LOG (rows
+// a186-candidate-fp-executor-execReplication-330cd77daffe6513e1c7-1 and
+// a186-candidate-fp-executor-execReplication-c4eea761e16efc36738d-1).
+#[test]
+fn should_refetch_tuple_maps_lock_results_c_exactly() {
+    use tableam_real::TM_Result;
+    assert!(matches!(
+        super::apply::should_refetch_tuple(TM_Result::TM_Ok, false),
+        Ok(super::apply::LockOutcome::Ok)
+    ));
+    assert!(matches!(
+        super::apply::should_refetch_tuple(TM_Result::TM_Updated, false),
+        Ok(super::apply::LockOutcome::Retry)
+    ));
+    assert!(matches!(
+        super::apply::should_refetch_tuple(TM_Result::TM_Deleted, false),
+        Ok(super::apply::LockOutcome::Retry)
+    ));
+
+    let inv = super::apply::should_refetch_tuple(TM_Result::TM_Invisible, false).unwrap_err();
+    assert_eq!(inv.message(), "attempted to lock invisible tuple");
+
+    let unexpected =
+        super::apply::should_refetch_tuple(TM_Result::TM_BeingModified, false).unwrap_err();
+    assert_eq!(
+        unexpected.message(),
+        "unexpected table_tuple_lock status: 5"
+    );
+}
+
+// set_stream_options (worker.c:4463/4476): proto_version and streaming mode are
+// negotiated against the publisher's server version, not hardcoded to 4 /
+// "parallel" (row a186-candidate-fp-logical-worker-p2-f9a3c01dea37ab25410f-1).
+#[test]
+fn stream_options_negotiate_by_server_version() {
+    use pg_subscription::{LOGICALREP_STREAM_OFF, LOGICALREP_STREAM_ON, LOGICALREP_STREAM_PARALLEL};
+
+    assert_eq!(super::logicalrep_proto_version(180006), 4);
+    assert_eq!(super::logicalrep_proto_version(160000), 4);
+    assert_eq!(super::logicalrep_proto_version(150005), 3);
+    assert_eq!(super::logicalrep_proto_version(140010), 2);
+    assert_eq!(super::logicalrep_proto_version(130000), 1);
+
+    // >= 16 + parallel mode -> "parallel"; older publishers degrade.
+    assert_eq!(
+        super::logicalrep_streaming_str(180006, LOGICALREP_STREAM_PARALLEL),
+        Some("parallel")
+    );
+    assert_eq!(
+        super::logicalrep_streaming_str(150000, LOGICALREP_STREAM_PARALLEL),
+        Some("on")
+    );
+    assert_eq!(
+        super::logicalrep_streaming_str(140000, LOGICALREP_STREAM_ON),
+        Some("on")
+    );
+    assert_eq!(
+        super::logicalrep_streaming_str(130000, LOGICALREP_STREAM_PARALLEL),
+        None
+    );
+    assert_eq!(
+        super::logicalrep_streaming_str(180006, LOGICALREP_STREAM_OFF),
+        None
+    );
+}
+
+// maybe_reread_subscription (worker.c:4064): a superuser-owned subscription
+// whose owner loses superuser must restart (row
+// a186-candidate-fp-logical-worker-p2-ff9cfa15c8364174721a-1).
+#[test]
+fn owner_superuser_revoked_predicate() {
+    assert!(super::owner_superuser_revoked(true, false));
+    assert!(!super::owner_superuser_revoked(true, true));
+    assert!(!super::owner_superuser_revoked(false, false));
+    // A non-superuser owner gaining superuser is not a revoke.
+    assert!(!super::owner_superuser_revoked(false, true));
+}

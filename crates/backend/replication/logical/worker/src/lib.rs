@@ -300,6 +300,32 @@ fn maybe_reread_subscription_guts(mcx: Mcx<'_>) -> PgResult<()> {
         return Ok(());
     }
 
+    // worker.c:4064: exit if the subscription owner's superuser privileges
+    // have been revoked (an apply/tablesync worker owned by a now-non-superuser
+    // must restart so it re-checks password_required and re-authenticates).
+    if let Some(n) = &newsub {
+        if owner_superuser_revoked(my_sub(|o| o.ownersuperuser), n.ownersuperuser) {
+            let name = my_sub(|s| s.name.clone());
+            if parallel::am_parallel_apply_worker() {
+                let _ = elog::elog(
+                    LOG,
+                    format!(
+                        "logical replication parallel apply worker for subscription \"{name}\" will stop because the subscription owner's superuser privileges have been revoked"
+                    ),
+                );
+            } else {
+                let _ = elog::elog(
+                    LOG,
+                    format!(
+                        "logical replication worker for subscription \"{name}\" will restart because the subscription owner's superuser privileges have been revoked"
+                    ),
+                );
+                APPLY_WORKER_EXIT.set(true);
+            }
+            return Ok(());
+        }
+    }
+
     if let Some(n) = newsub {
         let synccommit = n.synccommit.clone();
         MY_SUBSCRIPTION.with(|s| *s.borrow_mut() = Some(n));
@@ -308,6 +334,12 @@ fn maybe_reread_subscription_guts(mcx: Mcx<'_>) -> PgResult<()> {
         set_synchronous_commit(&synccommit)?;
     }
     Ok(())
+}
+
+// worker.c:4064: a superuser-owned subscription whose owner is no longer a
+// superuser must restart.
+pub(crate) fn owner_superuser_revoked(old_superuser: bool, new_superuser: bool) -> bool {
+    !new_superuser && old_superuser
 }
 
 // SetConfigOption("synchronous_commit", MySubscription->synccommit,
@@ -604,6 +636,40 @@ pub(crate) fn start_logical_streaming_on(
     start_logical_streaming_opts(conn, slotname, startpos, false)
 }
 
+// set_stream_options's proto_version negotiation (worker.c:4463): the newest
+// protocol the publisher can speak.
+pub(crate) fn logicalrep_proto_version(server_version: i32) -> u32 {
+    if server_version >= 160000 {
+        // LOGICALREP_PROTO_STREAM_PARALLEL_VERSION_NUM
+        4
+    } else if server_version >= 150000 {
+        // LOGICALREP_PROTO_TWOPHASE_VERSION_NUM
+        3
+    } else if server_version >= 140000 {
+        // LOGICALREP_PROTO_STREAM_VERSION_NUM
+        2
+    } else {
+        // LOGICALREP_PROTO_VERSION_NUM
+        1
+    }
+}
+
+// set_stream_options's streaming-mode negotiation (worker.c:4476): "parallel"
+// needs a >= 16 publisher and the parallel stream mode; "on" needs a >= 14
+// publisher and any non-off stream mode; otherwise streaming is not requested.
+pub(crate) fn logicalrep_streaming_str(
+    server_version: i32,
+    stream_mode: u8,
+) -> Option<&'static str> {
+    if server_version >= 160000 && stream_mode == pg_subscription::LOGICALREP_STREAM_PARALLEL {
+        Some("parallel")
+    } else if server_version >= 140000 && stream_mode != pg_subscription::LOGICALREP_STREAM_OFF {
+        Some("on")
+    } else {
+        None
+    }
+}
+
 fn start_logical_streaming_opts(
     conn: &mut PgConn,
     slotname: &str,
@@ -620,13 +686,18 @@ fn start_logical_streaming_opts(
         )
     });
 
-    // set_stream_options (worker.c:4437): streaming=parallel (CREATE
-    // SUBSCRIPTION's default) requests abort info on the wire and marks this
-    // worker parallel-capable; pa_can_start decides per transaction whether a
-    // parallel apply worker actually takes it (serial spooling remains the
-    // fallback). two_phase is requested only by run_apply_worker's
+    // set_stream_options (worker.c:4452): negotiate proto_version and the
+    // streaming mode against the publisher's server version. streaming=parallel
+    // (CREATE SUBSCRIPTION's default) requests abort info on the wire and marks
+    // this worker parallel-capable, but only against a >= 16 publisher; against
+    // an older publisher we fall back to plain "on" (>= 14) or no streaming,
+    // and proto_version drops accordingly, or the publisher rejects
+    // START_REPLICATION. two_phase is requested only by run_apply_worker's
     // PENDING->ENABLED transition.
-    let parallel = stream_mode == pg_subscription::LOGICALREP_STREAM_PARALLEL;
+    let server_version = conn.server_version();
+    let proto_version = logicalrep_proto_version(server_version);
+    let streaming_str = logicalrep_streaming_str(server_version, stream_mode);
+    let parallel = streaming_str == Some("parallel");
     launcher::my_worker_set_parallel_apply(parallel);
     let pubnames = publications
         .iter()
@@ -635,7 +706,7 @@ fn start_logical_streaming_opts(
         .join(",");
     let pubnames_literal = format!("'{}'", pubnames.replace('\'', "''"));
     let mut cmd = format!(
-        "START_REPLICATION SLOT \"{}\" LOGICAL {:X}/{:X} (proto_version '4'",
+        "START_REPLICATION SLOT \"{}\" LOGICAL {:X}/{:X} (proto_version '{proto_version}'",
         slot.replace('"', "\"\""),
         (startpos >> 32) as u32,
         startpos as u32
@@ -647,10 +718,8 @@ fn start_logical_streaming_opts(
     if binary {
         cmd.push_str(", binary 'true'");
     }
-    if parallel {
-        cmd.push_str(", streaming 'parallel'");
-    } else if stream_mode != pg_subscription::LOGICALREP_STREAM_OFF {
-        cmd.push_str(", streaming 'on'");
+    if let Some(streaming) = streaming_str {
+        cmd.push_str(&format!(", streaming '{streaming}'"));
     }
     if two_phase {
         cmd.push_str(", two_phase 'on'");
@@ -749,6 +818,14 @@ pub(crate) fn initialize_logrep_worker(
 
     inval::invalidate::CacheRegisterSyscacheCallback(
         cache_syscache::cacheinfo::SUBSCRIPTIONOID,
+        subscription_change_cb,
+        datum::Datum::null(),
+    )?;
+    // worker.c:4745: also re-read the subscription when the owner role's
+    // catalog row changes, so a revoked superuser attribute (or altered
+    // password requirement) is noticed and acted on by maybe_reread_subscription.
+    inval::invalidate::CacheRegisterSyscacheCallback(
+        cache_syscache::cacheinfo::AUTHOID,
         subscription_change_cb,
         datum::Datum::null(),
     )?;

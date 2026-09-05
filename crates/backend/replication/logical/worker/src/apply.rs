@@ -26,7 +26,8 @@ use mcx::Mcx;
 use types_core::{InvalidOid, Oid};
 use types_error::{
     PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_BINARY_REPRESENTATION,
-    ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_PROTOCOL_VIOLATION, ERROR, LOG,
+    ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_PROTOCOL_VIOLATION,
+    ERRCODE_T_R_SERIALIZATION_FAILURE, ERROR, LOG,
 };
 use types_rel::Relation;
 use types_scan::scankey::{ScanKeyData, BTEqualStrategyNumber, SK_ISNULL, SK_SEARCHNULL};
@@ -1115,9 +1116,56 @@ fn find_repl_tuple_by_index<'mcx>(
     Ok(found)
 }
 
-enum LockOutcome {
+#[derive(Debug)]
+pub(crate) enum LockOutcome {
     Ok,
     Retry,
+}
+
+// should_refetch_tuple (execReplication.c:135): map a table_tuple_lock result
+// to the apply-side retry/error outcome. C logs the concurrent update/delete
+// cases at LOG with 40001, raises "attempted to lock invisible tuple" for
+// TM_Invisible, and "unexpected table_tuple_lock status: %u" (with the colon)
+// for anything else.
+pub(crate) fn should_refetch_tuple(
+    res: tableam_real::TM_Result,
+    moved_partitions: bool,
+) -> PgResult<LockOutcome> {
+    use tableam_real::TM_Result;
+    match res {
+        TM_Result::TM_Ok => Ok(LockOutcome::Ok),
+        TM_Result::TM_Updated => {
+            let msg = if moved_partitions {
+                "tuple to be locked was already moved to another partition due to concurrent update, retrying"
+            } else {
+                "concurrent update, retrying"
+            };
+            ereport(LOG)
+                .errcode(ERRCODE_T_R_SERIALIZATION_FAILURE)
+                .errmsg(msg)
+                .finish(loc("should_refetch_tuple"))?;
+            Ok(LockOutcome::Retry)
+        }
+        TM_Result::TM_Deleted => {
+            ereport(LOG)
+                .errcode(ERRCODE_T_R_SERIALIZATION_FAILURE)
+                .errmsg("concurrent delete, retrying")
+                .finish(loc("should_refetch_tuple"))?;
+            Ok(LockOutcome::Retry)
+        }
+        TM_Result::TM_Invisible => {
+            ereport(ERROR)
+                .errmsg("attempted to lock invisible tuple")
+                .finish(loc("should_refetch_tuple"))?;
+            unreachable!();
+        }
+        other => {
+            ereport(ERROR)
+                .errmsg(format!("unexpected table_tuple_lock status: {}", other as u32))
+                .finish(loc("should_refetch_tuple"))?;
+            unreachable!();
+        }
+    }
 }
 
 mod tableam {
@@ -1147,17 +1195,17 @@ mod tableam {
             0,
             &mut tmfd,
         )?;
-        Ok(match res {
-            TM_Result::TM_Ok => LockOutcome::Ok,
-            TM_Result::TM_Updated | TM_Result::TM_Deleted => LockOutcome::Retry,
-            TM_Result::TM_SelfModified => LockOutcome::Ok,
-            other => {
-                return Err(Box::new(types_error::PgError::error(format!(
-                    "unexpected table_tuple_lock status {}",
-                    other as u32
-                ))))
-            }
-        })
+        // TM_SelfModified is not reachable through the apply-side lock (the
+        // worker never locks its own uncommitted tuple); C's should_refetch
+        // has no such case. Keep pgrust's existing Ok mapping for it and route
+        // everything else through the C-exact should_refetch_tuple.
+        if let TM_Result::TM_SelfModified = res {
+            return Ok(LockOutcome::Ok);
+        }
+        super::should_refetch_tuple(
+            res,
+            ::types_tuple::ItemPointerIndicatesMovedPartitions(&tmfd.ctid),
+        )
     }
 }
 
