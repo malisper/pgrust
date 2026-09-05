@@ -41,6 +41,7 @@ condition_variable = { path = "../../../storage/lmgr/condition_variable" }
 types_storage = { path = "../../../../_support/types/types_storage" }
 xact = { path = "../xact" }
 adt_timestamp = { path = "../../../utils/adt/adt_timestamp" }
+adt_datetime = { path = "../../../utils/adt/adt_datetime" }
 adt_pg_lsn = { path = "../../../utils/adt/pg_lsn" }
 slot = { path = "../../../replication/slot" }
 pg_string = { path = "../../../../common/string" }

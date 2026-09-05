@@ -21807,6 +21807,7 @@ version = "0.0.0"
 dependencies = [
  "aclchk_seams",
  "adt_bool",
+ "adt_datetime",
  "adt_float",
  "adt_pg_lsn",
  "adt_timestamp",

@@ -15,10 +15,17 @@ use condition_variable::{
 };
 use elog::{elog, ereport};
 use types_core::{TimeLineID, TimestampTz, TransactionId, XLogRecPtr};
-use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_INVALID_PARAMETER_VALUE, FATAL, LOG, WARNING};
+use types_error::{
+    PgError, PgResult, DEBUG2, ERRCODE_DATA_CORRUPTED, ERRCODE_INVALID_PARAMETER_VALUE, FATAL, LOG,
+    WARNING,
+};
 use types_storage::latch::LatchHandle;
 use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT};
 
+use adt_datetime::{
+    fsec_t, pg_tm, DateTimeErrorExtra, DecodeDateTime, ParseDateTime, DTK_DATE, MAXDATEFIELDS,
+    MAXDATELEN,
+};
 use crate::{data_path, loc, lsn_fmt, InvalidXLogRecPtr, PROMOTE_SIGNAL_FILE};
 
 pub const MAXFNAMELEN: usize = 64;
@@ -590,6 +597,8 @@ pub(crate) fn recoveryApplyDelay(reader: &xlogreader::XLogReaderState<'_>) -> Pg
         if msecs <= 0 {
             break;
         }
+        // xlogrecovery.c:3087.
+        let _ = elog(DEBUG2, format!("recovery apply delay {msecs} milliseconds"));
         let _ = latch::WaitLatch(
             Some(recovery_wakeup_latch()),
             WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
@@ -777,13 +786,56 @@ pub(crate) fn install_guc_hooks() {
         }
     });
 
+    // check_recovery_target_time (xlogrecovery.c:4960-5010): the four literal
+    // special values are rejected first; then ParseDateTime + DecodeDateTime,
+    // and only a DTK_DATE result is a recovery target (epoch/infinity/
+    // -infinity, which timestamptz_in would accept, are rejected); a
+    // tm2timestamp overflow is GUC_check_errdetail("Timestamp out of range:
+    // \"%s\".").
     hooks::check_recovery_target_time.install(|newval, _extra, _source| {
         if let Some(v) = newval.as_deref() {
             if !v.is_empty() {
                 if matches!(v, "now" | "today" | "tomorrow" | "yesterday") {
                     return Ok(false);
                 }
-                if adt_timestamp::timestamptz_in(v, -1, None).is_err() {
+                let mut workbuf = [0u8; MAXDATELEN + MAXDATEFIELDS];
+                let mut field: [&[u8]; MAXDATEFIELDS] = [b""; MAXDATEFIELDS];
+                let mut ftype = [0i32; MAXDATEFIELDS];
+                let mut nf = 0usize;
+                let mut dtype = 0i32;
+                let mut tm = pg_tm::default();
+                let mut fsec: fsec_t = 0;
+                let mut tz = 0i32;
+                let mut extra = DateTimeErrorExtra::default();
+                let mut dterr = ParseDateTime(
+                    v.as_bytes(),
+                    &mut workbuf,
+                    &mut field,
+                    &mut ftype,
+                    MAXDATEFIELDS,
+                    &mut nf,
+                );
+                if dterr == 0 {
+                    dterr = DecodeDateTime(
+                        &field[..nf],
+                        &ftype[..nf],
+                        nf,
+                        &mut dtype,
+                        &mut tm,
+                        &mut fsec,
+                        Some(&mut tz),
+                        &mut extra,
+                    );
+                }
+                if dterr != 0 {
+                    return Ok(false);
+                }
+                if dtype != DTK_DATE {
+                    return Ok(false);
+                }
+                let mut timestamp = 0;
+                if adt_timestamp::tm2timestamp(&tm, fsec, Some(tz), &mut timestamp).is_err() {
+                    guc_check_errdetail(format!("Timestamp out of range: \"{v}\"."));
                     return Ok(false);
                 }
             }

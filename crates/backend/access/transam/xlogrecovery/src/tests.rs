@@ -4,7 +4,7 @@
 #![cfg(not(pgrust_sim))]
 
 use super::*;
-use controldata_utils::{CheckPoint, ControlFileData, SIZEOF_CHECKPOINT};
+use controldata_utils::{CheckPoint, ControlFileData};
 use transam_xlog::control_file::{
     FirstNormalUnloggedLSN, FLOATFORMAT_VALUE, PG_CONTROL_FILE_SIZE, PG_CONTROL_VERSION,
     TOAST_MAX_CHUNK_SIZE,
@@ -265,16 +265,18 @@ fn write_control_file(dir: &std::path::Path, ckpt_loc: XLogRecPtr, ckpt: &CheckP
     std::fs::write(dir.join("global/pg_control"), &image).unwrap();
 }
 
-fn checkpoint_record_bytes(loc: XLogRecPtr, ckpt: &CheckPoint) -> Vec<u8> {
-    let tot_len = SizeOfXLogRecord + 2 + SIZEOF_CHECKPOINT;
+// One record with a short main-data chunk (XLR_BLOCK_ID_DATA_SHORT), CRC'd.
+fn record_bytes(loc: XLogRecPtr, rmid: u8, info: u8, main_data: &[u8]) -> Vec<u8> {
+    assert!(main_data.len() < 256);
+    let tot_len = SizeOfXLogRecord + 2 + main_data.len();
     let mut rec = vec![0u8; tot_len];
     rec[0..4].copy_from_slice(&(tot_len as u32).to_ne_bytes());
     rec[8..16].copy_from_slice(&(loc - 0x28).to_ne_bytes());
-    rec[16] = XLOG_CHECKPOINT_SHUTDOWN;
-    rec[17] = RM_XLOG_ID;
+    rec[16] = info;
+    rec[17] = rmid;
     rec[24] = 255; // XLR_BLOCK_ID_DATA_SHORT
-    rec[25] = SIZEOF_CHECKPOINT as u8;
-    rec[26..26 + SIZEOF_CHECKPOINT].copy_from_slice(&ckpt.to_bytes());
+    rec[25] = main_data.len() as u8;
+    rec[26..26 + main_data.len()].copy_from_slice(main_data);
     let crc = crc32c::fin_crc32c(crc32c::pg_comp_crc32c(
         crc32c::pg_comp_crc32c(crc32c::CRC32C_INIT, &rec[SizeOfXLogRecord..]),
         &rec[..20],
@@ -283,9 +285,14 @@ fn checkpoint_record_bytes(loc: XLogRecPtr, ckpt: &CheckPoint) -> Vec<u8> {
     rec
 }
 
-fn write_segment_with_checkpoint(dir: &std::path::Path, ckpt_loc: XLogRecPtr, ckpt: &CheckPoint) {
-    let segno = ckpt_loc / SEG as u64;
-    let page_addr = ckpt_loc - ckpt_loc % 8192;
+fn checkpoint_record_bytes(loc: XLogRecPtr, ckpt: &CheckPoint) -> Vec<u8> {
+    record_bytes(loc, RM_XLOG_ID, XLOG_CHECKPOINT_SHUTDOWN, &ckpt.to_bytes())
+}
+
+// Timeline-1 segment holding `rec` at `loc` (long page header on the first page).
+fn write_segment_with_record(dir: &std::path::Path, loc: XLogRecPtr, rec: &[u8]) {
+    let segno = loc / SEG as u64;
+    let page_addr = loc - loc % 8192;
     let mut seg = vec![0u8; SEG as usize];
     seg[0..2].copy_from_slice(&0xD118u16.to_ne_bytes());
     seg[2..4].copy_from_slice(&XLP_LONG_HEADER.to_ne_bytes());
@@ -294,11 +301,30 @@ fn write_segment_with_checkpoint(dir: &std::path::Path, ckpt_loc: XLogRecPtr, ck
     seg[24..32].copy_from_slice(&SYS_ID.to_ne_bytes());
     seg[32..36].copy_from_slice(&(SEG as u32).to_ne_bytes());
     seg[36..40].copy_from_slice(&8192u32.to_ne_bytes());
-    let rec = checkpoint_record_bytes(ckpt_loc, ckpt);
-    let off = (ckpt_loc % SEG as u64) as usize;
-    seg[off..off + rec.len()].copy_from_slice(&rec);
+    let off = (loc % SEG as u64) as usize;
+    seg[off..off + rec.len()].copy_from_slice(rec);
     let name = transam_xlog::XLogFileName(1, segno, SEG);
     std::fs::write(dir.join("pg_wal").join(name), &seg).unwrap();
+}
+
+fn write_segment_with_checkpoint(dir: &std::path::Path, ckpt_loc: XLogRecPtr, ckpt: &CheckPoint) {
+    write_segment_with_record(dir, ckpt_loc, &checkpoint_record_bytes(ckpt_loc, ckpt));
+}
+
+// One-shot process init shared by the recovery-driving units (seam/hook
+// installs refuse a second install).
+fn install_boot_seams() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        guc_tables::init_seams();
+        transam_xlog::init_seams();
+        xlogprefetcher::init_seams();
+        xlogprefetcher::XLogPrefetchShmemInit();
+        guc_tables::vars::maintenance_io_concurrency
+            .install_if_absent(guc_tables::GucVarAccessors { get: || 10, set: |_| {} });
+    });
+    install_crate_seams();
+    install_timeline_seams();
 }
 
 fn install_timeline_seams() {
@@ -345,14 +371,7 @@ fn clean_shutdown_boot_path() {
     }
     init_small::globals::SetDataDir(dir.to_str().unwrap());
     init_small::globals::set_enableFsync(false);
-    guc_tables::init_seams();
-    transam_xlog::init_seams();
-    xlogprefetcher::init_seams();
-    xlogprefetcher::XLogPrefetchShmemInit();
-    guc_tables::vars::maintenance_io_concurrency
-        .install_if_absent(guc_tables::GucVarAccessors { get: || 10, set: |_| {} });
-    install_crate_seams();
-    install_timeline_seams();
+    install_boot_seams();
     // XLogPageRead brackets pg_pread with WAIT_EVENT_WAL_READ
     // (xlogrecovery.c:3434/3441/3466); record what the boot reports.
     if !waitevent_seams::pgstat_report_wait_start::is_installed() {
@@ -819,4 +838,384 @@ fn backup_label_with_non_utf8_label_byte_starts_recovery_like_c() {
         "DEBUG1 backup label line missing; got {msgs:?}"
     );
     assert!(msgs.contains(&"backup timeline 1 in file \"backup_label\"".to_string()));
+}
+
+// ---------------------------------------------------------------------------
+// WAL-source state machine witnesses (audit-18.6 b206): the startup process's
+// interrupt/promote/walreceiver periphery as seams, driven in-process.
+
+// ProcessStartupProcInterrupts stand-in: runs the test's hook (the SIGHUP /
+// promote work C does there), one hook at a time under DATADIR_LOCK.
+static INTERRUPT_HOOK: std::sync::Mutex<Option<fn()>> = std::sync::Mutex::new(None);
+static PROMOTE_SIGNALED: AtomicBool = AtomicBool::new(false);
+// A walreceiver stand-in: WalRcvStreaming()/WalRcvRunning() while up,
+// ShutdownWalRcv() takes it down.
+static WALRCV_UP: AtomicBool = AtomicBool::new(false);
+
+fn install_startup_process_seams() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        if !startup_seams::process_startup_proc_interrupts::is_installed() {
+            startup_seams::process_startup_proc_interrupts::set(|| {
+                let hook = *INTERRUPT_HOOK.lock().unwrap();
+                if let Some(hook) = hook {
+                    hook();
+                }
+                Ok(())
+            });
+        }
+        if !startup_seams::is_promote_signaled::is_installed() {
+            startup_seams::is_promote_signaled::set(|| PROMOTE_SIGNALED.load(Relaxed));
+            startup_seams::reset_promote_signaled::set(|| PROMOTE_SIGNALED.store(false, Relaxed));
+        }
+        if !walreceiverfuncs_seams::wal_rcv_streaming::is_installed() {
+            walreceiverfuncs_seams::wal_rcv_streaming::set(|| WALRCV_UP.load(Relaxed));
+            walreceiverfuncs_seams::wal_rcv_running::set(|| WALRCV_UP.load(Relaxed));
+            walreceiverfuncs_seams::shutdown_wal_rcv::set(|| {
+                WALRCV_UP.store(false, Relaxed);
+                Ok(())
+            });
+            walreceiverfuncs_seams::get_wal_rcv_flush_rec_ptr::set(|| {
+                (WALRCV_FLUSHED_UPTO.load(Relaxed), InvalidXLogRecPtr, 1)
+            });
+            walreceiverfuncs_seams::wal_rcv_force_reply::set(|| {});
+        }
+    });
+}
+
+// A booted-looking data directory: control file read (wal_segment_size),
+// empty pg_wal, the crate/timeline/boot seams installed.
+fn boot_fixture(tag: &str) -> std::path::PathBuf {
+    let dir = fixture_datadir(tag);
+    for sub in ["global", "pg_wal"] {
+        std::fs::create_dir_all(dir.join(sub)).unwrap();
+    }
+    init_small::globals::set_enableFsync(false);
+    install_boot_seams();
+    let ckpt_loc: XLogRecPtr = SEG as u64 + SizeOfXLogLongPHD as u64;
+    let ckpt = make_checkpoint(ckpt_loc);
+    write_control_file(&dir, ckpt_loc, &ckpt);
+    transam_xlog::ReadControlFile().unwrap();
+    dir
+}
+
+fn restart_log_count() -> usize {
+    REPORTS
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| e.message() == "WAL receiver process shutdown requested")
+        .count()
+}
+
+static STREAM_WAKES: AtomicU32 = AtomicU32::new(0);
+static DISTANCES_AT_FIRST_WAKE: std::sync::Mutex<Option<(i32, i32, i32)>> =
+    std::sync::Mutex::new(None);
+// The walreceiver stand-in's flushed-up-to pointer (GetWalRcvFlushRecPtr).
+static WALRCV_FLUSHED_UPTO: AtomicU64 = AtomicU64::new(0);
+static PENDING_AFTER_ON_STREAM_RELOAD: AtomicBool = AtomicBool::new(false);
+
+// The startup interrupt work of the stream-idle scenario, per wake-up.
+fn stream_idle_interrupt() {
+    let wake = STREAM_WAKES.fetch_add(1, Relaxed) + 1;
+    if wake == 1 {
+        // Back from the idle WaitLatch (xlogrecovery.c:4034): what
+        // pg_stat_recovery_prefetch showed while the standby waited.
+        *DISTANCES_AT_FIRST_WAKE.lock().unwrap() =
+            Some(xlogprefetcher::xlog_prefetch_shared_distances());
+        // A SIGHUP with changed primary_conninfo while currentSource ==
+        // XLOG_FROM_STREAM and the walreceiver is up (StartupRereadConfig ->
+        // StartupRequestWalReceiverRestart). The request is observed and
+        // cleared: the restart arm itself (XLogShutdownWalRcv +
+        // RequestXLogStreaming) needs XLogCtl, which this unit does not boot.
+        StartupRequestWalReceiverRestart();
+        PENDING_AFTER_ON_STREAM_RELOAD.store(PENDING_WALRCV_RESTART.with(Cell::get), Relaxed);
+        PENDING_WALRCV_RESTART.with(|c| c.set(false));
+        // WAL arrives: the walreceiver flushed past the requested page.
+        WALRCV_FLUSHED_UPTO.store(SEG as u64 + 2 * 8192, Relaxed);
+    }
+}
+
+struct StreamIdleRun {
+    distances_at_first_wake: Option<(i32, i32, i32)>,
+    reports: Vec<types_error::PgError>,
+    on_stream_reload_logged: usize,
+    on_stream_reload_pending: bool,
+    off_stream_reloads_logged: usize,
+    off_stream_reload_pending: bool,
+    stream_result: i32,
+    pg_wal_result: i32,
+}
+
+// Leg 1 — WaitForWALToBecomeAvailable in standby mode, XLOG_FROM_STREAM with
+// the walreceiver up and nothing flushed yet: one idle wait
+// (xlogrecovery.c:4006-4037); the interrupt hook then delivers a reload and
+// the flush, and the segment opens from pg_wal (XLREAD_SUCCESS).
+// Leg 2 — crash recovery (XLOG_FROM_PG_WAL) asking for a segment no timeline
+// has: XLogFileReadAnyTLI fails it (XLREAD_FAIL).
+// StartupRequestWalReceiverRestart is exercised off-stream before leg 1
+// (XLOG_FROM_ANY) and after leg 2 (XLOG_FROM_PG_WAL), and on-stream from the hook.
+fn run_stream_idle_scenario() -> StreamIdleRun {
+    let _g = datadir_lock();
+    let dir = boot_fixture("stream_idle");
+    install_startup_process_seams();
+    *INTERRUPT_HOOK.lock().unwrap() = Some(stream_idle_interrupt);
+    STREAM_WAKES.store(0, Relaxed);
+    *DISTANCES_AT_FIRST_WAKE.lock().unwrap() = None;
+    WALRCV_FLUSHED_UPTO.store(InvalidXLogRecPtr, Relaxed);
+    PENDING_AFTER_ON_STREAM_RELOAD.store(false, Relaxed);
+    PROMOTE_SIGNALED.store(false, Relaxed);
+    WALRCV_UP.store(true, Relaxed);
+    RECOVERY_TARGET_TLI.store(1, Relaxed);
+    IN_ARCHIVE_RECOVERY.store(true, Relaxed);
+    STANDBY_MODE.store(true, Relaxed);
+    PENDING_WALRCV_RESTART.with(|c| c.set(false));
+    REPORTS.lock().unwrap().clear();
+    let prev_min = elog::config::log_min_messages();
+    elog::config::set_log_min_messages(types_error::DEBUG2);
+    let prev = elog::set_emit_log_hook(Some(capture_report));
+
+    // No WAL source chosen yet (currentSource == XLOG_FROM_ANY), walreceiver
+    // up: a reload requests nothing (xlogrecovery.c:4430).
+    StartupRequestWalReceiverRestart();
+    let mut off_stream_reloads_logged = restart_log_count();
+    let mut off_stream_reload_pending = PENDING_WALRCV_RESTART.with(Cell::get);
+    PENDING_WALRCV_RESTART.with(|c| c.set(false));
+
+    latch::OwnLatch(targets::recovery_wakeup_latch()).unwrap();
+    latch::SetLatch(targets::recovery_wakeup_latch());
+    // A stale pre-state in pg_stat_recovery_prefetch's instantaneous columns.
+    xlogprefetcher::xlog_prefetch_poke_shared_distances(4032, 64, 0);
+    // The segment the walreceiver is writing (opened once data arrives).
+    std::fs::write(
+        dir.join("pg_wal").join(transam_xlog::XLogFileName(1, 1, SEG)),
+        vec![0u8; 8192],
+    )
+    .unwrap();
+    let mut src = PageSource::new();
+    src.cur_source = XLogSource::Stream;
+    src.cur_file_tli = 1;
+    src.read_seg_no = 1;
+    src.replay_tli = 1;
+    let rec_ptr = SEG as u64 + 8192;
+    let stream_result = src.wait_for_wal(rec_ptr, rec_ptr, InvalidXLogRecPtr, false);
+    src.close_read_file();
+    let on_stream_reload_logged = restart_log_count() - off_stream_reloads_logged;
+    let on_stream_reload_pending = PENDING_AFTER_ON_STREAM_RELOAD.load(Relaxed);
+
+    // Leg 2: crash recovery reading pg_wal, segment 2 absent on every
+    // timeline.
+    WALRCV_UP.store(false, Relaxed);
+    STANDBY_MODE.store(false, Relaxed);
+    IN_ARCHIVE_RECOVERY.store(false, Relaxed);
+    let mut src = PageSource::new();
+    src.read_seg_no = 2;
+    src.replay_tli = 1;
+    let rec_ptr = 2 * SEG as u64 + 8192;
+    let pg_wal_result = src.wait_for_wal(rec_ptr, rec_ptr, InvalidXLogRecPtr, false);
+
+    // Reading pg_wal (currentSource == XLOG_FROM_PG_WAL) with a walreceiver
+    // up: C ignores the reload.
+    WALRCV_UP.store(true, Relaxed);
+    PENDING_WALRCV_RESTART.with(|c| c.set(false));
+    let before = restart_log_count();
+    StartupRequestWalReceiverRestart();
+    off_stream_reloads_logged += restart_log_count() - before;
+    off_stream_reload_pending |= PENDING_WALRCV_RESTART.with(Cell::get);
+    PENDING_WALRCV_RESTART.with(|c| c.set(false));
+
+    latch::DisownLatch(targets::recovery_wakeup_latch());
+    elog::set_emit_log_hook(prev);
+    elog::config::set_log_min_messages(prev_min);
+    *INTERRUPT_HOOK.lock().unwrap() = None;
+    WALRCV_UP.store(false, Relaxed);
+    let reports = REPORTS.lock().unwrap().clone();
+    let _ = std::fs::remove_dir_all(&dir);
+    StreamIdleRun {
+        distances_at_first_wake: *DISTANCES_AT_FIRST_WAKE.lock().unwrap(),
+        reports,
+        on_stream_reload_logged,
+        on_stream_reload_pending,
+        off_stream_reloads_logged,
+        off_stream_reload_pending,
+        stream_result: stream_result.expect("leg 1 ends in XLREAD_SUCCESS, not an error"),
+        pg_wal_result: pg_wal_result.expect("leg 2 ends in XLREAD_FAIL, not an error"),
+    }
+}
+
+// xlogrecovery.c:4028-4029: XLogPrefetcherComputeStats(xlogprefetcher) runs
+// before every idle WaitLatch for streamed WAL, so pg_stat_recovery_prefetch
+// shows the caught-up state (wal_distance 0) while the standby waits; the
+// pre-fix port went from KnownAssignedTransactionIdsIdleMaintenance straight
+// to the wait and the view kept the last distance-triggered values. Audit
+// a186-verified-fp-transam-xlogrecovery-p2-fc4e81b81c20729c4b34-1.
+#[test]
+fn stream_idle_wait_refreshes_recovery_prefetch_stats_like_c() {
+    let run = run_stream_idle_scenario();
+    assert_eq!(run.stream_result, XLREAD_SUCCESS);
+    let distances = run.distances_at_first_wake.expect("the idle wait was reached");
+    assert_ne!(
+        distances,
+        (4032, 64, 0),
+        "pg_stat_recovery_prefetch kept its stale distances across the idle wait"
+    );
+    assert_eq!(distances.0, 0, "wal_distance while idle and caught up: {distances:?}");
+}
+
+// xlogrecovery.c:4430: StartupRequestWalReceiverRestart requests the restart
+// only while currentSource == XLOG_FROM_STREAM (and WalRcvRunning()); the
+// pre-fix port dropped the source test, so a reload while reading from the
+// archive or pg_wal with a walreceiver still up logged "WAL receiver process
+// shutdown requested" and set pendingWalRcvRestart. Audit
+// a186-candidate-fp-transam-xlogrecovery-p2-f4f3dbf626ae9a41247b-1.
+#[test]
+fn walreceiver_restart_request_needs_stream_source_like_c() {
+    let run = run_stream_idle_scenario();
+    assert_eq!(run.stream_result, XLREAD_SUCCESS);
+    assert_eq!(run.pg_wal_result, XLREAD_FAIL);
+    assert_eq!(
+        run.on_stream_reload_logged, 1,
+        "on-stream reload with the walreceiver up must log the shutdown request"
+    );
+    assert!(run.on_stream_reload_pending, "on-stream reload must set pendingWalRcvRestart");
+    assert_eq!(
+        run.off_stream_reloads_logged, 0,
+        "off-stream reloads must not log \"WAL receiver process shutdown requested\""
+    );
+    assert!(!run.off_stream_reload_pending, "off-stream reload set pendingWalRcvRestart");
+}
+
+// xlogrecovery.c:4414-4419: when no expected timeline has the segment,
+// XLogFileReadAnyTLI reports ereport(DEBUG2, errcode_for_file_access(),
+// "could not open file \"%s\": %m") for the front timeline's path with
+// errno = ENOENT before returning -1; the pre-fix port returned silently.
+// Audit a186-candidate-fp-transam-xlogrecovery-p2-6238a76d0efbfb3b2ecf-1.
+#[test]
+fn missing_segment_on_every_timeline_is_logged_at_debug2_like_c() {
+    let run = run_stream_idle_scenario();
+    assert_eq!(run.pg_wal_result, XLREAD_FAIL);
+    let expected = "could not open file \"pg_wal/000000010000000000000002\": No such file or directory";
+    let hit = run
+        .reports
+        .iter()
+        .find(|e| e.message() == expected)
+        .unwrap_or_else(|| {
+            panic!(
+                "no {expected:?} report; got {:?}",
+                run.reports.iter().map(|e| e.message().to_string()).collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(hit.level, types_error::DEBUG2);
+    assert_eq!(hit.sqlstate(), types_error::ERRCODE_UNDEFINED_FILE);
+}
+
+static APPLY_DELAY_WAKES: AtomicU32 = AtomicU32::new(0);
+
+fn apply_delay_interrupt() {
+    let wake = APPLY_DELAY_WAKES.fetch_add(1, Relaxed) + 1;
+    if wake == 1 {
+        // The delay wait must not sleep.
+        latch::SetLatch(targets::recovery_wakeup_latch());
+    } else {
+        // "This might change recovery_min_apply_delay" (xlogrecovery.c:3066):
+        // a reload that drops the delay ends the loop.
+        guc_tables::vars::recovery_min_apply_delay.write(0);
+    }
+}
+
+// xlogrecovery.c:3087: each pass of recoveryApplyDelay's wait loop logs
+// elog(DEBUG2, "recovery apply delay %ld milliseconds", msecs); the pre-fix
+// port waited silently. A commit record with xact_time == now and
+// recovery_min_apply_delay = 1000 gives one 1000 ms pass. Audit
+// a186-candidate-fp-transam-xlogrecovery-p2-b7c3b1b4a1d2a14c9511-1.
+#[test]
+fn recovery_apply_delay_logs_debug2_like_c() {
+    let _g = datadir_lock();
+    let dir = boot_fixture("apply_delay");
+    install_startup_process_seams();
+    WALRCV_UP.store(false, Relaxed);
+    STANDBY_MODE.store(false, Relaxed);
+    IN_ARCHIVE_RECOVERY.store(false, Relaxed);
+    let loc: XLogRecPtr = SEG as u64 + SizeOfXLogLongPHD as u64;
+    // xl_xact_commit without XLOG_XACT_HAS_INFO: xact_time only.
+    let commit = record_bytes(loc, xact::RM_XACT_ID, xact::XLOG_XACT_COMMIT, &0i64.to_ne_bytes());
+    write_segment_with_record(&dir, loc, &commit);
+    RECOVERY_TARGET_TLI.store(1, Relaxed);
+
+    let cx = mcx::MemoryContext::new("apply delay witness");
+    let mut reader = XLogReaderState::allocate(cx.mcx(), SEG).unwrap();
+    reader.system_identifier = SYS_ID;
+    reader.XLogReaderSetDecodeBuffer(guc_tables::vars::wal_decode_buffer_size.read() as usize);
+    reader.XLogBeginRead(loc);
+    let mut src = PageSource::new();
+    src.replay_tli = 1;
+    assert_eq!(reader.XLogReadRecord(&mut src).unwrap(), Some(loc));
+    src.close_read_file();
+    assert_eq!(reader.XLogRecGetRmid(), xact::RM_XACT_ID);
+
+    guc_tables::vars::recovery_min_apply_delay.write(1000);
+    REACHED_CONSISTENCY.store(true, Relaxed);
+    ARCHIVE_RECOVERY_REQUESTED.store(true, Relaxed);
+    *INTERRUPT_HOOK.lock().unwrap() = Some(apply_delay_interrupt);
+    APPLY_DELAY_WAKES.store(0, Relaxed);
+    latch::OwnLatch(targets::recovery_wakeup_latch()).unwrap();
+    REPORTS.lock().unwrap().clear();
+    let prev_min = elog::config::log_min_messages();
+    elog::config::set_log_min_messages(types_error::DEBUG2);
+    let prev = elog::set_emit_log_hook(Some(capture_report));
+
+    let delayed = targets::recoveryApplyDelay(&reader);
+
+    elog::set_emit_log_hook(prev);
+    elog::config::set_log_min_messages(prev_min);
+    latch::DisownLatch(targets::recovery_wakeup_latch());
+    *INTERRUPT_HOOK.lock().unwrap() = None;
+    guc_tables::vars::recovery_min_apply_delay.write(0);
+    REACHED_CONSISTENCY.store(false, Relaxed);
+    ARCHIVE_RECOVERY_REQUESTED.store(false, Relaxed);
+    let reports = REPORTS.lock().unwrap().clone();
+    drop(reader);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(delayed.unwrap(), "the commit record was delayed");
+    assert!(APPLY_DELAY_WAKES.load(Relaxed) >= 2, "the wait loop ran at least one pass");
+    let expected = "recovery apply delay 1000 milliseconds";
+    let hit = reports.iter().find(|e| e.message() == expected).unwrap_or_else(|| {
+        panic!(
+            "no {expected:?} report; got {:?}",
+            reports.iter().map(|e| e.message().to_string()).collect::<Vec<_>>()
+        )
+    });
+    assert_eq!(hit.level, types_error::DEBUG2);
+}
+
+// check_recovery_target_time (xlogrecovery.c:4980-5006): ParseDateTime /
+// DecodeDateTime must yield DTK_DATE — 'infinity', '-infinity' and 'epoch'
+// (DTK_LATE / DTK_EARLY / DTK_EPOCH) are rejected like now/today/tomorrow/
+// yesterday, and a tm2timestamp overflow carries GUC_check_errdetail
+// "Timestamp out of range: \"%s\".". The pre-fix hook rejected only the four
+// literal words and accepted whatever timestamptz_in parsed. Audit
+// a186-verified-fp-transam-xlogrecovery-p2-bca11a0cf6e3cad4e15f-1.
+#[test]
+fn check_recovery_target_time_rejects_non_date_tokens_like_c() {
+    for token in ["infinity", "-infinity", "epoch", "now", "today", "tomorrow", "yesterday"] {
+        let (r, details) = run_check_hook(&guc_tables::hooks::check_recovery_target_time, token);
+        assert!(matches!(r, Ok(false)), "{token}: got {r:?}");
+        assert!(details.is_empty(), "{token}: unexpected detail {details:?}");
+    }
+    let (r, details) = run_check_hook(
+        &guc_tables::hooks::check_recovery_target_time,
+        "294277-01-01 00:00:00+00",
+    );
+    assert!(matches!(r, Ok(false)), "got {r:?}");
+    assert_eq!(
+        details,
+        vec!["Timestamp out of range: \"294277-01-01 00:00:00+00\".".to_string()]
+    );
+    let (r, details) =
+        run_check_hook(&guc_tables::hooks::check_recovery_target_time, "2024-01-01 00:00:00+00");
+    assert!(matches!(r, Ok(true)), "got {r:?}");
+    assert!(details.is_empty());
+    let (r, _) = run_check_hook(&guc_tables::hooks::check_recovery_target_time, "");
+    assert!(matches!(r, Ok(true)));
 }

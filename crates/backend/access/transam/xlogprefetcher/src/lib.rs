@@ -11,7 +11,7 @@
 #![allow(non_upper_case_globals)]
 
 use std::cell::Cell;
-use std::sync::atomic::{AtomicI32, AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering::Relaxed};
 use std::sync::OnceLock;
 
 use datum::Datum;
@@ -115,6 +115,9 @@ fn lrq_prefetch(
     while lrq.inflight < lrq.max_inflight && lrq.inflight + lrq.completed < lrq.size - 1 {
         debug_assert!((lrq.head + 1) % lrq.size != lrq.tail);
         let head = lrq.head as usize;
+        // lrq_inflight/lrq_completed as the page-read callback would see them.
+        PAGE_READ_IO_DEPTH.store(lrq.inflight, Relaxed);
+        PAGE_READ_COMPLETED.store(lrq.completed, Relaxed);
         match next(&mut lrq.queue[head].lsn)? {
             LsnReadQueueNextStatus::Again => return Ok(()),
             LsnReadQueueNextStatus::Io => {
@@ -277,6 +280,31 @@ pub fn xlog_prefetch_poke_shared_distances(wal_distance: i32, block_distance: i3
     s.wal_distance.store(wal_distance, Relaxed);
     s.block_distance.store(block_distance, Relaxed);
     s.io_depth.store(io_depth, Relaxed);
+}
+
+// XLogPrefetcherComputeStats from inside the page-read callback
+// (xlogrecovery.c:4029, the idle WaitLatch of WaitForWALToBecomeAvailable).
+// C reaches the global xlogprefetcher from XLogPageRead; here the callback
+// runs inside XLogPrefetcherReadRecord with the prefetcher and the reader
+// borrowed, so the prefetcher publishes the lrq counters the pass needs
+// before every read-ahead step and adopts the pass's next_stats_shm_lsn
+// afterwards. Startup-process state, single writer (like SharedStats).
+static PAGE_READ_IO_DEPTH: AtomicU32 = AtomicU32::new(0);
+static PAGE_READ_COMPLETED: AtomicU32 = AtomicU32::new(0);
+static PAGE_READ_NEXT_STATS_LSN: AtomicU64 = AtomicU64::new(0);
+
+pub fn XLogPrefetcherComputeStatsAtPageRead(read_rec_ptr: XLogRecPtr) {
+    // The callback blocks only with the reader's nonblocking flag clear
+    // (WaitForWALToBecomeAvailable returns XLREAD_WOULDBLOCK first otherwise),
+    // and the reader sets that flag from XLogReaderHasQueuedRecordOrError: the
+    // decode queue is empty here, so C's tail-minus-head wal_distance is 0.
+    let io_depth = PAGE_READ_IO_DEPTH.load(Relaxed);
+    let completed = PAGE_READ_COMPLETED.load(Relaxed);
+    let s = shared_stats();
+    s.io_depth.store(io_depth as i32, Relaxed);
+    s.block_distance.store((io_depth + completed) as i32, Relaxed);
+    s.wal_distance.store(0, Relaxed);
+    PAGE_READ_NEXT_STATS_LSN.store(read_rec_ptr + XLOGPREFETCHER_STATS_DISTANCE, Relaxed);
 }
 
 // C: plain increment through pg_atomic_write_u64 — single writer (startup).
@@ -636,6 +664,13 @@ impl<'mcx> XLogPrefetcher<'mcx> {
             });
             self.streaming_read = Some(lrq);
             result?;
+        }
+
+        // A ComputeStats pass made from the page-read callback moved the
+        // stats LSN (C: the pass wrote prefetcher->next_stats_shm_lsn).
+        let from_page_read = PAGE_READ_NEXT_STATS_LSN.swap(0, Relaxed);
+        if from_page_read != 0 {
+            self.next_stats_shm_lsn = from_page_read;
         }
 
         let Some(lsn) = reader.XLogNextRecord() else {

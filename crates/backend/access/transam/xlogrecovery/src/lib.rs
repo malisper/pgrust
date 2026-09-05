@@ -128,6 +128,10 @@ thread_local! {
     // StartupRequestWalReceiverRestart) must reach them without it — all on
     // the startup thread.
     static PENDING_WALRCV_RESTART: Cell<bool> = const { Cell::new(false) };
+    // currentSource (xlogrecovery.c file static) mirrored out of PageSource
+    // for StartupRequestWalReceiverRestart: the SIGHUP seam runs while the
+    // reader has the struct borrowed.
+    static CURRENT_SOURCE: Cell<XLogSource> = const { Cell::new(XLogSource::Any) };
     static WALRCV_STARTED_WITH: RefCell<Option<(String, String, bool)>> =
         const { RefCell::new(None) };
     // XLogReceiptTime/XLogReceiptSource (xlogrecovery.c file statics). NOT
@@ -197,6 +201,7 @@ enum ReadFailCode {
     FileAccess(i32),
 }
 
+// Discriminants are C's XLogSource values (XLOG_FROM_ANY = 0 .. XLOG_FROM_STREAM = 3).
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum XLogSource {
     Any,
@@ -260,6 +265,9 @@ struct PageSource {
     cur_source: XLogSource,
     cur_file_tli: TimeLineID,
     last_source_failed: bool,
+    // reader->ReadRecPtr at the page read in progress: the stats-LSN base of
+    // the XLogPrefetcherComputeStats pass made before the idle stream wait.
+    read_rec_ptr: XLogRecPtr,
     expected_tles: Vec<Tle>,
     emode: ErrorLevel,
     fetching_ckpt: bool,
@@ -280,6 +288,15 @@ struct PageSource {
 }
 
 impl PageSource {
+    // currentSource is also read by StartupRequestWalReceiverRestart on the
+    // SIGHUP path (ProcessStartupProcInterrupts), which runs while this
+    // struct is borrowed by the reader: every assignment publishes the value
+    // to the thread-local mirror CURRENT_SOURCE.
+    fn set_cur_source(&mut self, source: XLogSource) {
+        self.cur_source = source;
+        CURRENT_SOURCE.with(|c| c.set(source));
+    }
+
     fn new() -> Self {
         PageSource {
             read_file: -1,
@@ -289,6 +306,7 @@ impl PageSource {
             cur_source: XLogSource::Any,
             cur_file_tli: 0,
             last_source_failed: false,
+            read_rec_ptr: InvalidXLogRecPtr,
             expected_tles: Vec::new(),
             emode: LOG,
             fetching_ckpt: false,
@@ -447,6 +465,16 @@ impl PageSource {
         if !fresh || found >= 0 {
             self.expected_tles = tles;
         }
+        if found < 0 {
+            // xlogrecovery.c:4414-4419: couldn't find it; for simplicity
+            // complain about the front timeline, with errno = ENOENT.
+            let path = transam_xlog::XLogFilePath(RECOVERY_TARGET_TLI.load(Relaxed), segno, wal_segsz);
+            ereport(DEBUG2)
+                .with_saved_errno(libc::ENOENT)
+                .errcode_for_file_access()
+                .errmsg(format!("could not open file \"{path}\": %m"))
+                .finish(loc("XLogFileReadAnyTLI"))?;
+        }
         Ok(found)
     }
 
@@ -499,13 +527,14 @@ impl PageSource {
         let mut streaming_reply_sent = false;
 
         if !IN_ARCHIVE_RECOVERY.load(Relaxed) {
-            self.cur_source = XLogSource::PgWal;
+            self.set_cur_source(XLogSource::PgWal);
         } else if self.cur_source == XLogSource::Any
             || (!StandbyMode() && self.cur_source == XLogSource::Stream)
         {
             self.last_source_failed = false;
-            self.cur_source = XLogSource::Archive;
+            self.set_cur_source(XLogSource::Archive);
         }
+        CURRENT_SOURCE.with(|c| c.set(self.cur_source));
 
         loop {
             let old_source = self.cur_source;
@@ -526,7 +555,7 @@ impl PageSource {
                         if !StandbyMode() {
                             return Ok(XLREAD_FAIL);
                         }
-                        self.cur_source = XLogSource::Stream;
+                        self.set_cur_source(XLogSource::Stream);
                         start_walreceiver = true;
                     }
                     XLogSource::Stream => {
@@ -539,7 +568,7 @@ impl PageSource {
                         if targets::timeline_goal() == RecoveryTargetTimeLineGoal::Latest
                             && self.rescan_latest_timeline(self.replay_tli, replay_lsn)?
                         {
-                            self.cur_source = XLogSource::Archive;
+                            self.set_cur_source(XLogSource::Archive);
                         } else {
                             let now = timestamp_seams::get_current_timestamp::call();
                             let retry_ms =
@@ -568,19 +597,21 @@ impl PageSource {
                             }
                             self.last_fail_time =
                                 timestamp_seams::get_current_timestamp::call();
-                            self.cur_source = XLogSource::Archive;
+                            self.set_cur_source(XLogSource::Archive);
                         }
                     }
                     XLogSource::Any => {
+                        // xlogrecovery.c:3776: elog(ERROR, "unexpected WAL
+                        // source %d", currentSource).
                         ereport(ERROR)
-                            .errmsg("unexpected WAL source".to_string())
+                            .errmsg(format!("unexpected WAL source {}", self.cur_source as i32))
                             .finish(loc("WaitForWALToBecomeAvailable"))?;
         unreachable!()
                     }
                 }
             } else if self.cur_source == XLogSource::PgWal && IN_ARCHIVE_RECOVERY.load(Relaxed) {
                 // Prefer the archive over pg_wal for the next file.
-                self.cur_source = XLogSource::Archive;
+                self.set_cur_source(XLogSource::Archive);
             }
 
             if self.cur_source != old_source {
@@ -723,6 +754,9 @@ impl PageSource {
                         if procarray_seams::known_assigned_transaction_ids_idle_maintenance::is_installed() {
                             procarray_seams::known_assigned_transaction_ids_idle_maintenance::call();
                         }
+                        // xlogrecovery.c:4029: update pg_stat_recovery_prefetch
+                        // before sleeping.
+                        xlogprefetcher::XLogPrefetcherComputeStatsAtPageRead(self.read_rec_ptr);
                         let _ = latch::WaitLatch(
                             Some(targets::recovery_wakeup_latch()),
                             WL_LATCH_SET | WL_EXIT_ON_PM_DEATH,
@@ -733,8 +767,10 @@ impl PageSource {
                     }
                 }
                 XLogSource::Any => {
+                    // xlogrecovery.c:4044: elog(ERROR, "unexpected WAL
+                    // source %d", currentSource).
                     ereport(ERROR)
-                        .errmsg("unexpected WAL source".to_string())
+                        .errmsg(format!("unexpected WAL source {}", self.cur_source as i32))
                         .finish(loc("WaitForWALToBecomeAvailable"))?;
         unreachable!()
                 }
@@ -834,6 +870,7 @@ impl XLogReaderRoutine for PageSource {
                     return Ok(XLREAD_WOULDBLOCK);
                 }
                 let replay_lsn = REPLAY_END_REC_PTR.load(Relaxed);
+                self.read_rec_ptr = v.ReadRecPtr;
                 match self.wait_for_wal(
                     target_page_ptr + req_len as u64,
                     target_rec_ptr,
@@ -1049,7 +1086,7 @@ fn read_record(
             check_recovery_consistency(rec)?;
 
             rec.src.last_source_failed = false;
-            rec.src.cur_source = XLogSource::Any;
+            rec.src.set_cur_source(XLogSource::Any);
             continue;
         }
 
@@ -2468,14 +2505,13 @@ pub fn StartupRereadWalRcvConfig() {
     }
 }
 
-// StartupRequestWalReceiverRestart (xlogrecovery.c:4417). C also checks
-// currentSource == XLOG_FROM_STREAM; the Recovery struct holding cur_source
-// is moved out of RECOVERY during the redo loop, so the running-walreceiver
-// check stands alone (recorded divergence: a transient non-stream source with
-// a live walreceiver requests a restart C would skip — the pending flag is
-// consumed and cleared by the next stream attempt either way).
+// StartupRequestWalReceiverRestart (xlogrecovery.c:4428-4437): only while
+// currentSource == XLOG_FROM_STREAM and a walreceiver is running. The Recovery
+// struct holding cur_source is borrowed by the reader during the redo loop, so
+// the source is read from its thread-local mirror.
 pub fn StartupRequestWalReceiverRestart() {
-    if walreceiverfuncs_seams::wal_rcv_running::is_installed()
+    if CURRENT_SOURCE.with(Cell::get) == XLogSource::Stream
+        && walreceiverfuncs_seams::wal_rcv_running::is_installed()
         && walreceiverfuncs_seams::wal_rcv_running::call()
     {
         let _ = elog(LOG, "WAL receiver process shutdown requested".to_string());
