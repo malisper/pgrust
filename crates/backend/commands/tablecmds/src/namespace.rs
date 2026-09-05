@@ -201,10 +201,7 @@ pub fn AlterRelationNamespaceInternal<'mcx>(
                 new_nsp_oid,
             )? != 1
         {
-            panic!(
-                "could not change schema dependency for relation \"{}\"",
-                relname.as_str()
-            );
+            return Err(schema_dependency_change_failed(relname.as_str()));
         }
     }
     if !already_done {
@@ -295,4 +292,27 @@ fn AlterSeqNamespaces<'mcx>(
     }
     genam::systable_endscan(mcx, scan)?;
     dep_rel.close(types_rel::AccessShareLock)
+}
+
+// elog(ERROR, "could not change schema dependency for relation \"%s\"")
+// (tablecmds.c:19156 AlterRelationNamespaceInternal).
+#[cold]
+#[inline(never)]
+pub(crate) fn schema_dependency_change_failed(relname: &str) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "could not change schema dependency for relation \"{relname}\""
+    )))
+}
+
+#[cfg(test)]
+mod elog_hygiene_tests_b208 {
+    // AlterRelationNamespaceInternal's changeDependencyFor != 1 arm is an
+    // elog(ERROR) in C (tablecmds.c:19156): catchable XX000, never a panic.
+    #[test]
+    fn schema_dependency_arm_is_catchable_xx000() {
+        let r = std::panic::catch_unwind(|| super::schema_dependency_change_failed("t"));
+        let e = r.expect("schema_dependency_change_failed panicked");
+        assert_eq!(e.message(), "could not change schema dependency for relation \"t\"");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    }
 }

@@ -472,7 +472,9 @@ pub(crate) fn transformPartitionBound<'mcx>(
                 // uncastable value after an infinite expression bound is
                 // reported against the EARLIER expression; kept as is.
                 let mut j = 0usize;
-                let mut seen_kind: Option<PartitionRangeDatumKind> = None;
+                // (kind, location) of every element, for validateInfiniteBounds.
+                let mut kinds: mcx::PgVec<'_, (PartitionRangeDatumKind, i32)> =
+                    mcx::PgVec::new_in(mcx);
                 for (i, cell) in bounds.iter().enumerate() {
                     let mut prd = Node::build::<PartitionRangeDatum>(mcx)?;
                     let mut kind = PartitionRangeDatumKind::Value;
@@ -517,16 +519,22 @@ pub(crate) fn transformPartitionBound<'mcx>(
                         prd.value = Some(value);
                     }
                     prd.location = parse_expr::expr_location(cell);
-                    // validateInfiniteBounds: once MINVALUE/MAXVALUE, the
-                    // rest must repeat it.
-                    if let Some(k) = seen_kind {
-                        if k != kind {
-                            return Err(infinite_bounds_error(pstate, k, prd.location));
-                        }
-                    } else if kind != PartitionRangeDatumKind::Value {
-                        seen_kind = Some(kind);
-                    }
+                    kinds.push((kind, prd.location));
                     out.lappend(mcx, prd.seal())?;
+                }
+                // validateInfiniteBounds (parse_utilcmd.c:4557, 4571-4604)
+                // runs only after EVERY element was transformed: once
+                // MINVALUE/MAXVALUE, the rest must repeat it.
+                let mut seen_kind = PartitionRangeDatumKind::Value;
+                for &(kind, location) in kinds.iter() {
+                    if seen_kind == kind {
+                        continue;
+                    }
+                    if seen_kind == PartitionRangeDatumKind::Value {
+                        seen_kind = kind;
+                    } else {
+                        return Err(infinite_bounds_error(pstate, seen_kind, location));
+                    }
                 }
             }
             result.lowerdatums = lower_out;
@@ -775,7 +783,7 @@ pub(crate) fn CloneRowTriggersToPartition<'mcx>(
         }
         let timing = trig.tgtype & TRIGGER_TYPE_TIMING_MASK;
         if timing != TRIGGER_TYPE_BEFORE && timing != TRIGGER_TYPE_AFTER {
-            panic!("unexpected trigger \"{}\" found", trig.tgname.as_str());
+            return Err(unexpected_trigger_found(trig.tgname.as_str()));
         }
         let qual = match &trig.tgqual {
             Some(q) => {
@@ -863,4 +871,25 @@ pub(crate) fn has_partition_attrs<'mcx>(
         }
     }
     Ok(false)
+}
+
+// elog(ERROR, "unexpected trigger \"%s\" found") (tablecmds.c:20848
+// CloneRowTriggersToPartition).
+#[cold]
+#[inline(never)]
+pub(crate) fn unexpected_trigger_found(tgname: &str) -> Box<PgError> {
+    Box::new(PgError::error(format!("unexpected trigger \"{tgname}\" found")))
+}
+
+#[cfg(test)]
+mod elog_hygiene_tests_b208 {
+    // CloneRowTriggersToPartition's unexpected-timing arm is an elog(ERROR)
+    // in C (tablecmds.c:20848): catchable XX000, never a panic.
+    #[test]
+    fn unexpected_trigger_arm_is_catchable_xx000() {
+        let r = std::panic::catch_unwind(|| super::unexpected_trigger_found("trg"));
+        let e = r.expect("unexpected_trigger_found panicked");
+        assert_eq!(e.message(), "unexpected trigger \"trg\" found");
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    }
 }

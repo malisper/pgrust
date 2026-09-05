@@ -1512,6 +1512,8 @@ fn ATRewriteCatalogs<'mcx>(
                         cmd.recurse,
                         types_rel::ShareRowExclusiveLock,
                     )?;
+                    // tablecmds.c:17254 ATExecEnableDisableTrigger
+                    objectaccess::InvokeObjectPostAlterHook(RELATION_RELATION_ID, rel.rd_id, 0)?;
                 }
                 AlterTableType::AT_EnableRule => {
                     rewrite_define::EnableDisableRule(
@@ -1520,6 +1522,8 @@ fn ATRewriteCatalogs<'mcx>(
                         cmd.name.expect("ENABLE RULE has a name"),
                         b'O',
                     )?;
+                    // tablecmds.c:17269 ATExecEnableDisableRule
+                    objectaccess::InvokeObjectPostAlterHook(RELATION_RELATION_ID, rel.rd_id, 0)?;
                 }
                 AlterTableType::AT_EnableAlwaysRule => {
                     rewrite_define::EnableDisableRule(
@@ -1528,6 +1532,8 @@ fn ATRewriteCatalogs<'mcx>(
                         cmd.name.expect("ENABLE ALWAYS RULE has a name"),
                         b'A',
                     )?;
+                    // tablecmds.c:17269 ATExecEnableDisableRule
+                    objectaccess::InvokeObjectPostAlterHook(RELATION_RELATION_ID, rel.rd_id, 0)?;
                 }
                 AlterTableType::AT_EnableReplicaRule => {
                     rewrite_define::EnableDisableRule(
@@ -1536,6 +1542,8 @@ fn ATRewriteCatalogs<'mcx>(
                         cmd.name.expect("ENABLE REPLICA RULE has a name"),
                         b'R',
                     )?;
+                    // tablecmds.c:17269 ATExecEnableDisableRule
+                    objectaccess::InvokeObjectPostAlterHook(RELATION_RELATION_ID, rel.rd_id, 0)?;
                 }
                 AlterTableType::AT_DisableRule => {
                     rewrite_define::EnableDisableRule(
@@ -1544,6 +1552,8 @@ fn ATRewriteCatalogs<'mcx>(
                         cmd.name.expect("DISABLE RULE has a name"),
                         b'D',
                     )?;
+                    // tablecmds.c:17269 ATExecEnableDisableRule
+                    objectaccess::InvokeObjectPostAlterHook(RELATION_RELATION_ID, rel.rd_id, 0)?;
                 }
                 AlterTableType::AT_EnableRowSecurity => {
                     ATExecSetRowSecurity(mcx, &rel, true)?;
@@ -7005,7 +7015,7 @@ fn ATExecReplicaIdentity<'mcx>(
             return relation_mark_replica_identity(mcx, rel, stmt.identity_type, InvalidOid);
         }
         REPLICA_IDENTITY_INDEX => {}
-        other => panic!("unexpected identity type {other}"),
+        other => return Err(unexpected_identity_type(other)),
     }
 
     let index_name = stmt.name.expect("REPLICA IDENTITY USING INDEX name");
@@ -7660,10 +7670,13 @@ pub fn AlterTableMoveAll<'mcx>(
         } else {
             stmt.orig_tablespacename.unwrap_or("")
         };
-        elog_seams::ereport_msg::call(
-            NOTICE,
-            format!("no matching relations in tablespace \"{tsname}\" found"),
-            None,
+        // tablecmds.c:17163-17166: errcode(ERRCODE_NO_DATA_FOUND).
+        elog_seams::ereport::call(
+            PgError::new(
+                NOTICE,
+                format!("no matching relations in tablespace \"{tsname}\" found"),
+            )
+            .with_sqlstate(types_error::ERRCODE_NO_DATA_FOUND),
         )?;
     }
 
@@ -8384,6 +8397,27 @@ mod elog_hygiene_tests {
             e.message(),
             "cache lookup failed for not-null constraint on column \"id\" of relation \"t\""
         );
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    }
+}
+
+// elog(ERROR, "unexpected identity type %u") (tablecmds.c:18563
+// ATExecReplicaIdentity).
+#[cold]
+#[inline(never)]
+pub(crate) fn unexpected_identity_type(identity_type: u8) -> Box<PgError> {
+    Box::new(PgError::error(format!("unexpected identity type {identity_type}")))
+}
+
+#[cfg(test)]
+mod elog_hygiene_tests_b208 {
+    // ATExecReplicaIdentity's unknown-identity arm is an elog(ERROR) in C
+    // (tablecmds.c:18563): catchable XX000, never a panic.
+    #[test]
+    fn identity_type_arm_is_catchable_xx000() {
+        let r = std::panic::catch_unwind(|| super::unexpected_identity_type(b'x'));
+        let e = r.expect("unexpected_identity_type panicked");
+        assert_eq!(e.message(), "unexpected identity type 120");
         assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
     }
 }

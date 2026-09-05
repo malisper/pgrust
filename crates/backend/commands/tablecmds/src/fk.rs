@@ -907,6 +907,12 @@ pub(crate) fn validate_foreign_key_constraint<'mcx>(
     rel: &Relation<'mcx>,
     item: &FkValidateItem<'mcx>,
 ) -> PgResult<()> {
+    // tablecmds.c:13729 ereport(DEBUG1, errmsg_internal(...)).
+    elog_seams::ereport::call(PgError::new(
+        types_error::DEBUG1,
+        format!("validating foreign key constraint \"{}\"", item.conname),
+    ))?;
+
     let pkrel = table::table_open(mcx, item.refrelid, types_rel::RowShareLock)?;
 
     let trig = types_trigger::Trigger {
@@ -2076,7 +2082,9 @@ pub(crate) fn queue_fk_constraint_validation<'mcx>(
         }
     }
 
-    pg_constraint::SetConstraintValidated(mcx, con.oid)
+    pg_constraint::SetConstraintValidated(mcx, con.oid)?;
+    // tablecmds.c:13125
+    objectaccess::InvokeObjectPostAlterHook(types_core::CONSTRAINT_RELATION_ID, con.oid, 0)
 }
 
 // RemoveInheritedConstraint (tablecmds.c): drop the per-partition constraint
@@ -3042,12 +3050,7 @@ fn alter_constr_inheritability<'mcx>(
             let childcon = crate::alter::find_notnull_constraint_by_colname(
                 mcx, childoid, &col_name,
             )?
-            .unwrap_or_else(|| {
-                panic!(
-                    "cache lookup failed for not-null constraint on column \"{col_name}\" of \
-                     relation {childoid}"
-                )
-            });
+            .ok_or_else(|| notnull_child_constraint_lookup_failed(&col_name, childoid))?;
             debug_assert!(childcon.coninhcount > 0);
             pg_constraint::update_constraint_fields(
                 mcx,
@@ -3129,6 +3132,9 @@ fn alter_constr_trigger_deferrability<'mcx>(
         let mut newtup = heaptuple::heap_modify_tuple(mcx, tup, desc, &values, &nulls, &replace)?;
         let otid = tup.t_self;
         catalog_indexing::CatalogTupleUpdate(mcx, &trig_rel, &otid, &mut newtup)?;
+        // tablecmds.c:12761
+        let tgoid = getattr(tup, desc, Anum_pg_trigger_oid).as_oid();
+        objectaccess::InvokeObjectPostAlterHook(TriggerRelationId, tgoid, 0)?;
     }
     genam::systable_endscan(mcx, scan)?;
     trig_rel.close(types_rel::RowExclusiveLock)
@@ -3263,6 +3269,8 @@ fn alter_constr_update_constraint_entry<'mcx>(
     }
     let n_final = n;
     pg_constraint::update_constraint_fields(mcx, conoid, &fields[..n_final])?;
+    // tablecmds.c:12906
+    objectaccess::InvokeObjectPostAlterHook(types_core::CONSTRAINT_RELATION_ID, conoid, 0)?;
     inval::invalidate::CacheInvalidateRelcacheByRelid(conrelid)
 }
 
@@ -3338,6 +3346,33 @@ pub(crate) fn partition_index_not_found(index_oid: Oid, partname: &str) -> Box<P
     Box::new(PgError::error(format!(
         "index for {index_oid} not found in partition {partname}"
     )))
+}
+
+// elog(ERROR, "cache lookup failed for not-null constraint on column \"%s\"
+// of relation %u") (tablecmds.c:12680 ATExecAlterConstrInheritability).
+#[cold]
+#[inline(never)]
+pub(crate) fn notnull_child_constraint_lookup_failed(col_name: &str, childoid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "cache lookup failed for not-null constraint on column \"{col_name}\" of relation \
+         {childoid}"
+    )))
+}
+
+#[cfg(test)]
+mod elog_hygiene_tests_b208 {
+    // ATExecAlterConstrInheritability's missing-child-constraint arm is an
+    // elog(ERROR) in C (tablecmds.c:12680): catchable XX000, never a panic.
+    #[test]
+    fn notnull_child_lookup_arm_is_catchable_xx000() {
+        let r = std::panic::catch_unwind(|| super::notnull_child_constraint_lookup_failed("a", 16384));
+        let e = r.expect("notnull_child_constraint_lookup_failed panicked");
+        assert_eq!(
+            e.message(),
+            "cache lookup failed for not-null constraint on column \"a\" of relation 16384"
+        );
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    }
 }
 
 #[cfg(test)]
