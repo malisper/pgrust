@@ -53,6 +53,10 @@ thread_local! {
     static READS: Cell<u32> = const { Cell::new(0) };
     static DIRTY_HINTS: Cell<u32> = const { Cell::new(0) };
     static WAL: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    // CritSectionCount observed at each xlog_insert_record call (audit
+    // b002: C brackets every btree page mutation + XLogInsert in
+    // START/END_CRIT_SECTION; a WAL insert seen at count 0 is a divergence).
+    static WAL_CRIT: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
     static NEXT_LSN: Cell<u64> = const { Cell::new(0x1000) };
     static PRED_LOCK_RELATION_CALLS: Cell<u32> = const { Cell::new(0) };
     // A key a concurrent writer inserts into the (empty) index while the
@@ -147,12 +151,32 @@ fn install() {
             Ok((buf, 1))
         });
         transam_xlog_seams::xlog_standby_info_active::set(|| false);
+        transam_xlog_seams::xlog_logical_info_active::set(|| false);
+        catalog_seams::is_catalog_relation::set(|_rel| false);
         xloginsert_seams::xlog_insert_record::set(|rmid, info, _flags, _main, _bufs| {
             assert_eq!(rmid, ::rmgr::RM_BTREE_ID as u8);
             WAL.with(|w| w.borrow_mut().push(info));
+            WAL_CRIT.with(|w| w.borrow_mut().push(init_small::globals::CritSectionCount()));
             let lsn = NEXT_LSN.get() + 8;
             NEXT_LSN.set(lsn);
             Ok(lsn)
+        });
+        // toast_compress_datum stand-in (index_form_tuple's TOAST_INDEX_HACK
+        // arm): a run of one byte "compresses" to a 16-byte image with a
+        // compressed 4B header; anything else is incompressible (None), the
+        // way pglz reports random bytes.
+        heaptoast_seams::toast_compress_datum::set(|mcx, value, _cmethod| {
+            let payload = &value[4..];
+            if payload.len() < 32 || payload.iter().any(|b| *b != payload[0]) {
+                return Ok(None);
+            }
+            let mut v: PgVec<'_, u8> = ::mcx::vec_with_capacity_in(mcx, 16)?;
+            // VARATT_IS_4B_C: little-endian (len << 2) | 0x02
+            ::mcx::vec_append_bytes(&mut v, &((16u32 << 2) | 0x02).to_le_bytes())?;
+            // va_tcinfo: rawsize (cmethod bits 0 = pglz)
+            ::mcx::vec_append_bytes(&mut v, &(payload.len() as u32).to_le_bytes())?;
+            ::mcx::vec_append_bytes(&mut v, &[payload[0]; 8])?;
+            Ok(Some(v))
         });
         predicate_seams::check_for_serializable_conflict_in::set(|_rel, _tid, _blk| Ok(()));
         predicate_seams::check_table_for_serializable_conflict_in::set(|_rel| Ok(()));
@@ -194,6 +218,11 @@ fn wal_infos() -> Vec<u8> {
 
 fn reset_wal() {
     WAL.with(|w| w.borrow_mut().clear());
+    WAL_CRIT.with(|w| w.borrow_mut().clear());
+}
+
+fn wal_crit_counts() -> Vec<u32> {
+    WAL_CRIT.with(|w| w.borrow().clone())
 }
 
 // Page builders (int4 single-key-column index).
@@ -1868,4 +1897,298 @@ fn serializable_qualless_scan_rechecks_empty_index_after_relation_lock() {
     assert_eq!(PRED_LOCK_RELATION_CALLS.with(Cell::get), 1);
     assert_eq!(seen, vec![10], "key inserted before the relation lock is seen");
     assert_eq!(PINS.with(Cell::get), 0, "no pins leaked");
+}
+
+// ---------------------------------------------------------------------------
+// Audit 18.6 remediation, batch b002-backend-access-nbtree-1 witnesses.
+// Each test pins a C-18.6 behaviour the audit found diverging; the C site is
+// cited on the assertion.
+
+/// Tupdesc with BOTH attribute arrays populated (the way relcache tupdescs
+/// arrive): `(attlen, attbyval, attstorage)` per column, 4-byte alignment.
+fn audit_tupdesc<'m>(mcx: Mcx<'m>, specs: &[(i16, bool, i8)]) -> TupleDescData<'m> {
+    let mut compact = PgVec::new_in(mcx);
+    let mut attrs = PgVec::new_in(mcx);
+    for (i, (attlen, attbyval, attstorage)) in specs.iter().enumerate() {
+        compact.push(CompactAttribute {
+            attcacheoff: Cell::new(-1),
+            attlen: *attlen,
+            attbyval: *attbyval,
+            attispackable: *attlen == -1 && *attstorage != ::types_tuple::TYPSTORAGE_PLAIN,
+            atthasmissing: false,
+            attisdropped: false,
+            attgenerated: false,
+            attnullability: 0,
+            attalignby: 4,
+        });
+        attrs.push(::types_tuple::FormData_pg_attribute {
+            attnum: (i + 1) as i16,
+            attlen: *attlen,
+            attbyval: *attbyval,
+            attalign: ::types_tuple::TYPALIGN_INT,
+            attstorage: *attstorage,
+            attcompression: 0,
+            ..Default::default()
+        });
+    }
+    TupleDescData {
+        natts: specs.len() as i32,
+        tdtypeid: 0,
+        tdtypmod: -1,
+        tdrefcount: 1,
+        constr: None,
+        compact_attrs: compact,
+        attrs,
+    }
+}
+
+/// A 4B-header varlena datum over `payload`, allocated in `mcx`.
+fn varlena_datum<'m>(mcx: Mcx<'m>, payload: &[u8]) -> Datum {
+    let mut v: PgVec<'m, u8> = ::mcx::vec_with_capacity_in(mcx, payload.len() + 4).unwrap();
+    ::mcx::vec_append_bytes(&mut v, &::datum::varlena::set_varsize_4b(payload.len() + 4)).unwrap();
+    ::mcx::vec_append_bytes(&mut v, payload).unwrap();
+    Datum::from_usize(v.leak().as_ptr() as usize)
+}
+
+fn patch_metapage(f: impl FnOnce(&mut BTMetaPageData)) {
+    PAGES.with(|p| {
+        let pages = p.borrow();
+        // SAFETY: metapage contents at +24 on the leaked metapage.
+        unsafe {
+            let m = pages[0]
+                .as_ptr()
+                .cast::<u8>()
+                .add(SizeOfPageHeaderData)
+                .cast::<BTMetaPageData>();
+            let mut md = m.read();
+            f(&mut md);
+            m.write(md);
+        }
+    });
+}
+
+// index_form_tuple_context (indextuple.c:121): a varlena wider than
+// TOAST_INDEX_TARGET = MaxHeapTupleSize / 16 = 510 bytes (heaptoast.h:68) is
+// compressed in-line before it reaches the page. The 2040-byte target the
+// port used left every 511..2040-byte value raw (index rows up to 4x wider
+// than C's; multi-column rows C accepts fail the 2704-byte limit).
+#[test]
+fn index_form_tuple_compresses_varlenas_over_toast_index_target() {
+    install();
+    let cx = MemoryContext::new("t");
+    let mcx = cx.mcx();
+    let td = audit_tupdesc(mcx, &[(-1, false, ::types_tuple::TYPSTORAGE_EXTENDED)]);
+
+    let big = varlena_datum(mcx, &[b'a'; 1500]);
+    let tup = crate::itup::index_form_tuple(mcx, &td, &[big], &[false]).unwrap();
+    let sz = unsafe { crate::itup::index_tuple_size(tup.as_ptr()) };
+    assert!(sz < 64, "1500-byte compressible value must be stored compressed, got {sz} bytes");
+
+    let small = varlena_datum(mcx, &[b'a'; 400]);
+    let tup = crate::itup::index_form_tuple(mcx, &td, &[small], &[false]).unwrap();
+    let sz = unsafe { crate::itup::index_tuple_size(tup.as_ptr()) };
+    assert!(sz >= 404, "400-byte value is under the target and stays raw, got {sz} bytes");
+}
+
+// index_truncate_tuple (indextuple.c:591): CreateTupleDescTruncatedCopy
+// copies pg_attribute for the kept columns, so index_form_tuple can read
+// attstorage of a retained, still-raw varlena wider than TOAST_INDEX_TARGET
+// (incompressible data). The port built the truncated tupdesc with an empty
+// pg_attribute array and panicked (index out of bounds) on every page split
+// whose pivot kept such a column.
+#[test]
+fn index_truncate_tuple_keeps_pg_attribute_for_wide_raw_varlena() {
+    install();
+    let cx = MemoryContext::new("t");
+    let mcx = cx.mcx();
+    let td = audit_tupdesc(
+        mcx,
+        &[
+            (-1, false, ::types_tuple::TYPSTORAGE_EXTENDED),
+            (4, true, ::types_tuple::TYPSTORAGE_PLAIN),
+        ],
+    );
+    let payload: Vec<u8> = (0..2200u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+    let wide = varlena_datum(mcx, &payload);
+    let src = crate::itup::index_form_tuple(mcx, &td, &[wide, Datum::from_i32(7)], &[false, false])
+        .unwrap();
+
+    let trunc = unsafe { crate::itup::index_truncate_tuple(mcx, &td, src.as_ptr(), 1) }
+        .expect("truncation keeps the wide first column");
+
+    let td1 = audit_tupdesc(mcx, &[(-1, false, ::types_tuple::TYPSTORAGE_EXTENDED)]);
+    let mut isnull = true;
+    let d = unsafe { crate::itup::index_getattr(trunc.as_ptr(), 1, &td1, &mut isnull) };
+    assert!(!isnull);
+    let p = d.as_usize() as *const u8;
+    let img = unsafe { core::slice::from_raw_parts(p, ::types_tuple::varatt::varsize_any(p)) };
+    assert_eq!(&img[4..], &payload[..], "kept column is byte-identical");
+    // (both images MAXALIGN to the same size here: 2204 + 8 vs 2204 + 4 + 8)
+    assert!(
+        unsafe { crate::itup::index_tuple_size(trunc.as_ptr()) }
+            <= unsafe { crate::itup::index_tuple_size(src.as_ptr()) },
+        "indextuple.c:625 Assert(IndexTupleSize(truncated) <= IndexTupleSize(source))"
+    );
+}
+
+// Every btree page mutation + XLogInsert runs between START_CRIT_SECTION and
+// END_CRIT_SECTION in C: _bt_getroot (nbtpage.c:455/504), _bt_insertonpg
+// (nbtinsert.c:1275/1399), _bt_split (nbtinsert.c:1932/2064), _bt_newlevel
+// (nbtinsert.c:2501/2600), _bt_dedup_pass (nbtdedup.c:240/270). An ERROR
+// raised inside (WAL insertion failure) must escalate to PANIC instead of
+// leaving a modified, unlogged page in shared buffers. The xlog seam records
+// CritSectionCount at every record it accepts.
+#[test]
+#[cfg_attr(miri, ignore)] // bulk-insert loop: not Miri-feasible
+fn every_btree_wal_insert_runs_inside_a_critical_section() {
+    install();
+    build_empty_index(true);
+    let cx = MemoryContext::new("t");
+    let rel = index_rel(cx.mcx());
+    prime_supportinfo(&rel);
+
+    // root creation, leaf inserts, dedup passes (1200 duplicates), then
+    // sequential keys: rightmost splits, downlink posts and the root split.
+    for i in 1..=1200u32 {
+        insert_key(&rel, &rel, 42, tid(i, 1));
+    }
+    for k in 1..=1500u32 {
+        insert_key(&rel, &rel, 100 + k as i32, tid(2000 + k, 1));
+    }
+
+    let infos = wal_infos();
+    let crit = wal_crit_counts();
+    assert_eq!(infos.len(), crit.len());
+    for kind in [
+        ::types_nbtree::XLOG_BTREE_NEWROOT,
+        ::types_nbtree::XLOG_BTREE_INSERT_LEAF,
+        ::types_nbtree::XLOG_BTREE_DEDUP,
+        ::types_nbtree::XLOG_BTREE_SPLIT_R,
+        ::types_nbtree::XLOG_BTREE_INSERT_UPPER,
+    ] {
+        assert!(infos.contains(&kind), "scenario must emit xlinfo {kind:#x}");
+    }
+    assert!(
+        infos.iter().filter(|i| **i == ::types_nbtree::XLOG_BTREE_NEWROOT).count() >= 2,
+        "root creation (_bt_getroot) and root split (_bt_newlevel)"
+    );
+    let outside: Vec<u8> = infos
+        .iter()
+        .zip(crit.iter())
+        .filter(|(_, c)| **c == 0)
+        .map(|(i, _)| *i)
+        .collect();
+    assert!(
+        outside.is_empty(),
+        "btree WAL records inserted with CritSectionCount == 0 (xlinfo): {outside:#x?}"
+    );
+    assert_eq!(init_small::globals::CritSectionCount(), 0, "critical sections balanced");
+    assert_eq!(PINS.with(Cell::get), 0, "no pins leaked");
+}
+
+// _bt_getmeta (nbtpage.c:155-167): both metapage sanity errors are plain
+// ereport(ERROR, errcode(ERRCODE_INDEX_CORRUPTED), errmsg(...)) — no errhint.
+#[test]
+fn getmeta_errors_match_c_without_a_reindex_hint() {
+    install();
+    let cx = MemoryContext::new("t");
+
+    build_empty_index(true);
+    patch_metapage(|m| m.btm_magic = 0);
+    let rel = index_rel(cx.mcx());
+    let err = crate::bt_metaversion(&rel).unwrap_err();
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_INDEX_CORRUPTED);
+    assert_eq!(err.message(), "index \"t_idx\" is not a btree");
+    assert_eq!(err.hint(), None, "nbtpage.c:157 carries no errhint");
+
+    build_empty_index(true);
+    patch_metapage(|m| m.btm_version = 1);
+    let rel = index_rel(cx.mcx());
+    let err = crate::bt_metaversion(&rel).unwrap_err();
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_INDEX_CORRUPTED);
+    assert_eq!(
+        err.message(),
+        "version mismatch in index \"t_idx\": file version 1, current version 4, minimal supported version 2"
+    );
+    assert_eq!(err.hint(), None, "nbtpage.c:164 carries no errhint");
+    assert_eq!(PINS.with(Cell::get), 0, "no pins leaked");
+}
+
+// _bt_findinsertloc (nbtinsert.c:908-979) keeps a !heapkeyspace lane for
+// version-2/3 indexes that reach a cluster through pg_upgrade. That lane is
+// not ported: inserting must be a typed refusal, never a backend panic.
+#[test]
+fn insert_into_a_version3_index_is_a_typed_refusal_not_a_panic() {
+    install();
+    build_empty_index(false);
+    patch_metapage(|m| m.btm_version = ::types_nbtree::BTREE_NOVAC_VERSION);
+    let cx = MemoryContext::new("t");
+    let rel = index_rel(cx.mcx());
+    prime_supportinfo(&rel);
+
+    let err = crate::btinsert(
+        cx.mcx(),
+        &rel,
+        &[Datum::from_i32(1)],
+        &[false],
+        &tid(10, 1),
+        &rel,
+        ::types_nbtree::genam::IndexUniqueCheck::UNIQUE_CHECK_NO,
+        false,
+    )
+    .unwrap_err();
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+    assert!(err.message().contains("version 2/3"), "message names the on-disk format: {}", err.message());
+    assert_eq!(init_small::globals::CritSectionCount(), 0);
+    assert_eq!(PINS.with(Cell::get), 0, "no pins leaked on the refusal");
+}
+
+// _bt_endpoint (nbtsearch.c:2753): a direction that is neither forward nor
+// backward is elog(ERROR, "invalid scan direction: %d"), not a backward read.
+#[test]
+fn endpoint_rejects_no_movement_scan_direction() {
+    install();
+    build_single_leaf_index(&[1, 2, 3]);
+    let cx = MemoryContext::new("t");
+    let rel = index_rel(cx.mcx());
+    let mut scan = begin_scan(cx.mcx(), &rel, &[]);
+    let err = crate::btgettuple(&mut scan, ::types_scan::sdir::NoMovementScanDirection)
+        .expect_err("NoMovementScanDirection is an error in _bt_endpoint");
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_INTERNAL_ERROR);
+    assert_eq!(err.message(), "invalid scan direction: 0");
+    crate::btendscan(&mut scan).unwrap();
+    assert_eq!(PINS.with(Cell::get), 0, "no pins leaked");
+}
+
+// _bt_check_third_page (nbtutils.c:4245): the 1/3-of-a-page ereport carries
+// errtableconstraint(heap, indexname) — PG_DIAG_TABLE_NAME / CONSTRAINT_NAME
+// (and SCHEMA_NAME when the namespace resolves) on the wire.
+#[test]
+fn oversized_tuple_error_carries_errtableconstraint_fields() {
+    install();
+    let cx = MemoryContext::new("t");
+    let mcx = cx.mcx();
+    let rel = index_rel(mcx);
+    let heap = heap_relation(mcx);
+
+    #[repr(C, align(8))]
+    struct Oversized([u8; 2712]);
+    let mut img = Oversized([0u8; 2712]);
+    assert!(2712 > ::types_nbtree::BTMaxItemSize);
+    unsafe {
+        crate::itup::set_t_tid(img.0.as_mut_ptr(), tid(42, 7));
+        crate::itup::set_t_info(img.0.as_mut_ptr(), 2712);
+    }
+    let mut leaf = new_page(BTP_LEAF, 0, P_NONE, P_NONE);
+    let page = unsafe {
+        ::types_storage::bufpage::PageMut::from_raw(core::ptr::NonNull::new_unchecked(
+            leaf.0.as_mut_ptr(),
+        ))
+    };
+
+    let err = unsafe { crate::bt_check_third_page(mcx, &rel, &heap, true, &page.as_ref(), img.0.as_ptr()) }
+        .unwrap_err();
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+    assert_eq!(err.table_name(), Some("t"), "errtableconstraint: heap relation name");
+    assert_eq!(err.constraint_name(), Some("t_idx"), "errtableconstraint: index name as constraint");
 }

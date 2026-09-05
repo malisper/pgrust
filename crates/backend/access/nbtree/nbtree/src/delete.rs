@@ -142,8 +142,8 @@ pub(crate) unsafe fn bt_delitems_delete_check<'mcx>(
     let page = buf.page();
 
     let mut snapshot_conflict_horizon = table_index_delete_tuples(mcx, heap_rel, delstate)?;
-    // RelationIsAccessibleInLogicalDecoding const-false (heapam DML divergence)
-    let is_catalog_rel = false;
+    // nbtpage.c:1527 isCatalogRel = RelationIsAccessibleInLogicalDecoding(heapRel)
+    let is_catalog_rel = crate::relation_is_accessible_in_logical_decoding(heap_rel);
 
     if !transam_xlog_seams::xlog_standby_info_active::call() {
         snapshot_conflict_horizon = InvalidTransactionId;

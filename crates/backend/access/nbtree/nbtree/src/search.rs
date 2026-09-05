@@ -1748,9 +1748,15 @@ fn bt_endpoint(ctx: &mut ScanCtx<'_, '_>, dir: ScanDirection) -> PgResult<bool> 
         debug_assert!(P_ISLEAF(&opaque));
         if ScanDirectionIsForward(dir) {
             P_FIRSTDATAKEY(&opaque)
-        } else {
+        } else if ScanDirectionIsBackward(dir) {
             debug_assert!(P_RIGHTMOST(&opaque));
             page.max_offset_number()
+        } else {
+            // nbtsearch.c:2753 elog(ERROR, "invalid scan direction: %d")
+            return Err(Box::new(::types_error::PgError::error(format!(
+                "invalid scan direction: {}",
+                dir as i32
+            ))));
         }
     };
     ctx.so.currPos.buf = pin.into_buffer();

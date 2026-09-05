@@ -6,6 +6,7 @@ use ::mcx::{vec_with_capacity_in, Mcx};
 use ::tableam::{TM_IndexDelete, TM_IndexDeleteOp, TM_IndexStatus};
 use ::types_core::{OffsetNumber, BLCKSZ};
 use ::types_error::{PgError, PgResult};
+use init_small::globals::{EndCriticalSection, StartCriticalSection};
 use ::types_nbtree::dedup::BTDedupState;
 use ::types_nbtree::{
     BTMaxItemSize, BTPageOpaqueData, MaxTIDsPerBTreePage, BTP_HAS_GARBAGE,
@@ -131,7 +132,11 @@ pub(crate) unsafe fn bt_dedup_pass(
         write_opaque(&mut newpage, &nopaque);
     }
 
-    // critical section: PageRestoreTempPage + WAL, no early returns.
+    // nbtdedup.c:240 START_CRIT_SECTION: PageRestoreTempPage + WAL. An
+    // ERROR raised in here (WAL insertion failure) is a PANIC in C, never a
+    // catchable error that leaves the rewritten page unlogged in shared
+    // buffers; the `?` sites below escalate through CritSectionCount.
+    StartCriticalSection();
     {
         let orig = page_of_mut(buf);
         // SAFETY: whole-page overwrite under the exclusive lock held by caller.
@@ -163,6 +168,8 @@ pub(crate) unsafe fn bt_dedup_pass(
         )?;
         page_of_mut(buf).set_lsn(recptr);
     }
+    // nbtdedup.c:270
+    EndCriticalSection();
 
     debug_assert!(
         pagesaving < newitemsz || buf.page().exact_free_space() >= newitemsz

@@ -37,3 +37,6 @@ postgres_seams = { path = "../../../tcop/postgres_seams" }
 catalog = { path = "../../../catalog/catalog" }
 procarray = { path = "../../../storage/ipc/procarray" }
 clauses = { path = "../../../optimizer/util/clauses" }
+
+[dev-dependencies]
+syscache_seams = { path = "../../../utils/cache/syscache_seams" }

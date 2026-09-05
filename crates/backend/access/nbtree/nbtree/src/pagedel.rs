@@ -475,8 +475,12 @@ fn bt_mark_page_halfdead(
         bt_tuple_set_downlink(trunctuple.as_mut_ptr(), tp);
         bt_tuple_set_natts(trunctuple.as_mut_ptr(), 0, false);
     }
+    // nbtpage.c:2244 elog(ERROR) — inside the critical section, so it
+    // escalates to PANIC through CritSectionCount exactly as C's does.
     if !page_of_mut(leafbuf).index_tuple_overwrite(P_HIKEY, &trunctuple) {
-        panic!("could not overwrite high key in half-dead page");
+        return Err(Box::new(PgError::error(
+            "could not overwrite high key in half-dead page",
+        )));
     }
 
     bufmgr::mark_buffer_dirty::call(subtreeparent.buffer())?;
@@ -600,12 +604,14 @@ fn bt_unlink_halfdead_page(
     bt_lockbuf(rel, &target_pin, BT_WRITE)?;
     {
         let opaque = page_opaque(&target_pin.page());
+        // nbtpage.c:2471 elog(ERROR): ERRCODE_INTERNAL_ERROR; only the left
+        // link check (2475) is an ERRCODE_INDEX_CORRUPTED ereport.
         if P_RIGHTMOST(&opaque) || P_ISROOT(&opaque) || P_ISDELETED(&opaque) {
-            return Err(corrupt(format!(
+            return Err(Box::new(PgError::error(format!(
                 "target page changed status unexpectedly in block {} of index \"{}\"",
                 target,
                 rel.name()
-            )));
+            ))));
         }
         if opaque.btpo_prev != leftsib {
             return Err(corrupt(format!(
@@ -624,23 +630,25 @@ fn bt_unlink_halfdead_page(
             || !P_ISLEAF(&opaque)
             || !P_ISHALFDEAD(&opaque)
         {
-            return Err(corrupt(format!(
+            // nbtpage.c:2485 elog(ERROR)
+            return Err(Box::new(PgError::error(format!(
                 "target leaf page changed status unexpectedly in block {} of index \"{}\"",
                 target,
                 rel.name()
-            )));
+            ))));
         }
         InvalidBlockNumber
     } else {
         let page = target_pin.page();
         let opaque = page_opaque(&page);
         if P_FIRSTDATAKEY(&opaque) != page.max_offset_number() || P_ISLEAF(&opaque) {
-            return Err(corrupt(format!(
+            // nbtpage.c:2497 elog(ERROR)
+            return Err(Box::new(PgError::error(format!(
                 "target internal page on level {} changed status unexpectedly in block {} of index \"{}\"",
                 targetlevel,
                 target,
                 rel.name()
-            )));
+            ))));
         }
         let finaldataitem = page_item(&page, page.item_id(P_FIRSTDATAKEY(&opaque)));
         // SAFETY: pinned+locked page item.

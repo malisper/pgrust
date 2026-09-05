@@ -271,7 +271,11 @@ pub fn index_form_tuple<'mcx>(
     let mut untoasted: [Datum; INDEX_MAX_KEYS as usize] = [Datum::from_usize(0); INDEX_MAX_KEYS as usize];
     untoasted[..natts].copy_from_slice(&values[..natts]);
 
-    const TOAST_INDEX_TARGET: usize = 8160 / 4; // MaximumBytesPerTuple(4)
+    // heaptoast.h:68: TOAST_INDEX_TARGET = MaxHeapTupleSize / 16 (510 bytes);
+    // any wider extended/main varlena is compressed in-line. (The btree 1/3
+    // page limit, MaximumBytesPerTuple(4) = 2040, is a different number and
+    // is enforced by _bt_check_third_page.)
+    const TOAST_INDEX_TARGET: usize = ::types_storage::bufpage::MaxHeapTupleSize / 16;
 
     for i in 0..natts {
         let att = tupdesc.compact_attr(i);
@@ -368,10 +372,17 @@ pub(crate) unsafe fn index_truncate_tuple<'mcx>(
         return copy_index_tuple(mcx, source);
     }
 
-    // CreateTupleDescTruncatedCopy: fill only reads compact_attrs[..natts].
+    // CreateTupleDescTruncatedCopy (tupdesc.c): both the compact attributes
+    // (heap_fill_tuple) and pg_attribute (index_form_tuple reads attstorage /
+    // attcompression of a retained varlena still wider than
+    // TOAST_INDEX_TARGET) for the kept columns.
     let mut compact = ::mcx::vec_with_capacity_in(mcx, leavenatts)?;
     for i in 0..leavenatts {
         compact.push(tupdesc.compact_attr(i).clone());
+    }
+    let mut attrs = ::mcx::vec_with_capacity_in(mcx, leavenatts)?;
+    for att in tupdesc.attrs.iter().take(leavenatts) {
+        attrs.push(*att);
     }
     let truncdesc = TupleDescData {
         natts: leavenatts as i32,
@@ -380,7 +391,7 @@ pub(crate) unsafe fn index_truncate_tuple<'mcx>(
         tdrefcount: -1,
         constr: None,
         compact_attrs: compact,
-        attrs: PgVec::new_in(mcx),
+        attrs,
     };
 
     let mut values = [Datum::null(); INDEX_MAX_KEYS as usize];

@@ -82,6 +82,7 @@ pub(crate) fn xl_btree_reuse_page(
     locator: RelFileLocator,
     block: BlockNumber,
     safexid: FullTransactionId,
+    is_catalog_rel: bool,
 ) -> [u8; 25] {
     let mut b = [0u8; 25];
     b[0..4].copy_from_slice(&locator.spcOid.to_ne_bytes());
@@ -89,8 +90,7 @@ pub(crate) fn xl_btree_reuse_page(
     b[8..12].copy_from_slice(&locator.relNumber.to_ne_bytes());
     b[12..16].copy_from_slice(&block.to_ne_bytes());
     b[16..24].copy_from_slice(&safexid.value.to_ne_bytes());
-    // isCatalogRel: RelationIsAccessibleInLogicalDecoding const-false.
-    b[24] = 0;
+    b[24] = is_catalog_rel as u8;
     b
 }
 

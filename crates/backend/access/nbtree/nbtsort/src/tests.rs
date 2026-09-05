@@ -129,8 +129,11 @@ fn buildadd_oversized_detail_names_heap_not_index() {
         set_t_info(img.0.as_mut_ptr(), 2712);
     }
 
+    // errtableconstraint's schema lookup (nbtutils.c:4245) goes through syscache.
+    static NSP: std::sync::Once = std::sync::Once::new();
+    NSP.call_once(|| syscache_seams::pg_namespace_nspname::set(|_| Ok(None)));
     let err = unsafe {
-        nbtree::bt_check_third_page(&index, &heap, true, &page.as_ref(), img.0.as_ptr())
+        nbtree::bt_check_third_page(mcx, &index, &heap, true, &page.as_ref(), img.0.as_ptr())
     }
     .unwrap_err();
 

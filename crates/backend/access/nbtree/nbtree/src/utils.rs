@@ -1145,7 +1145,12 @@ unsafe fn bt_check_rowcompare(
         BTLessEqualStrategyNumber => cmpresult <= 0,
         BTGreaterEqualStrategyNumber => cmpresult >= 0,
         BTGreaterStrategyNumber => cmpresult > 0,
-        other => panic!("unexpected strategy number {other}"),
+        // nbtutils.c:3153 elog(ERROR)
+        other => {
+            return Err(Box::new(::types_error::PgError::error(format!(
+                "unexpected strategy number {other}"
+            ))))
+        }
     };
 
     if !result && !forcenonrequired {
@@ -1873,6 +1878,7 @@ unsafe fn bt_keep_natts(
 #[cold]
 #[inline(never)]
 pub unsafe fn bt_check_third_page(
+    mcx: Mcx<'_>,
     rel: &Relation<'_>,
     heap: &Relation<'_>,
     needheaptidspace: bool,
@@ -1903,24 +1909,30 @@ pub unsafe fn bt_check_third_page(
     } else {
         (BTREE_NOVAC_VERSION, BTMaxItemSizeNoHeapTid)
     };
-    Err(Box::new(
-        ::types_error::PgError::error(format!(
-            "index row size {itemsz} exceeds btree version {version} maximum {max} for index \"{}\"",
-            rel.name()
-        ))
-        .with_sqlstate(::types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED)
-        .with_detail(format!(
-            "Index row references tuple ({},{}) in relation \"{}\".",
-            ::types_tuple::itemptr::ItemPointerGetBlockNumberNoCheck(&tid),
-            tid.ip_posid,
-            heap.name()
-        ))
-        .with_hint(
-            "Values larger than 1/3 of a buffer page cannot be indexed.\n\
-             Consider a function index of an MD5 hash of the value, \
-             or use full text indexing.",
-        ),
+    // nbtutils.c:4245 errtableconstraint(heap, RelationGetRelationName(rel)):
+    // schema/table/constraint names on the wire (constraint-mapping clients).
+    let mut err = ::types_error::PgError::error(format!(
+        "index row size {itemsz} exceeds btree version {version} maximum {max} for index \"{}\"",
+        rel.name()
     ))
+    .with_sqlstate(::types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+    .with_detail(format!(
+        "Index row references tuple ({},{}) in relation \"{}\".",
+        ::types_tuple::itemptr::ItemPointerGetBlockNumberNoCheck(&tid),
+        tid.ip_posid,
+        heap.name()
+    ))
+    .with_hint(
+        "Values larger than 1/3 of a buffer page cannot be indexed.\n\
+         Consider a function index of an MD5 hash of the value, \
+         or use full text indexing.",
+    )
+    .with_table_name(heap.name().to_owned())
+    .with_constraint_name(rel.name().to_owned());
+    if let Ok(Some(nsp)) = lsyscache::misc::get_namespace_name(mcx, heap.namespace()) {
+        err = err.with_schema_name(nsp.as_str().to_owned());
+    }
+    Err(Box::new(err))
 }
 
 // btvacinfo: cross-backend shared state, a process static guarded by a Mutex

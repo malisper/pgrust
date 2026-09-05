@@ -61,8 +61,12 @@ pub fn btbuild<'mcx>(
     index: &Relation<'mcx>,
     indexInfo: &mut IndexInfo<'mcx>,
 ) -> PgResult<IndexBuildResult> {
+    // nbtsort.c:320 elog(ERROR): a catchable internal error, not a panic.
     if bufmgr::RelationGetNumberOfBlocksInFork(index, ForkNumber::MAIN_FORKNUM)? != 0 {
-        panic!("index \"{}\" already contains data", index.name());
+        return Err(Box::new(::types_error::PgError::error(format!(
+            "index \"{}\" already contains data",
+            index.name()
+        ))));
     }
 
     let mut sortstate = spool_begin(heap, index, indexInfo)?;
@@ -396,6 +400,12 @@ unsafe fn buildadd<'mcx>(
     itup: ITup,
     truncextra: usize,
 ) -> PgResult<()> {
+    // nbtsort.c:802 CHECK_FOR_INTERRUPTS(): the load phase honours cancel /
+    // statement_timeout per tuple, not only after the whole index is written.
+    if init_small::globals::InterruptPending() {
+        postgres_seams::check_for_interrupts::call()?;
+    }
+
     let itupsz = maxalign(index_tuple_size(itup));
     let isleaf = levels[level_idx].level == 0;
     let last_truncextra = levels[level_idx].lastextra;
@@ -405,7 +415,7 @@ unsafe fn buildadd<'mcx>(
     if itupsz > BTMaxItemSize {
         let state = &mut levels[level_idx];
         let page = page_mut_of(&mut state.buf);
-        nbtree::bt_check_third_page(wstate.index, wstate.heap, isleaf, &page.as_ref(), itup)?;
+        nbtree::bt_check_third_page(mcx, wstate.index, wstate.heap, isleaf, &page.as_ref(), itup)?;
     }
 
     let pgspc = {
@@ -535,10 +545,16 @@ fn uppershutdown<'mcx>(
     let mut rootblkno = P_NONE;
     let mut rootlevel = 0u32;
 
-    let nlevels = levels.len();
-    for i in 0..nlevels {
+    // nbtsort.c:1075 `for (s = state; s != NULL; s = s->btps_next)`: the
+    // walk is over the LIVE level list — posting the last page's downlink
+    // into the parent level may split that level's last page and create a
+    // new top level (buildadd pushes it), which must then be finished and
+    // become the root. A length snapshotted before the loop stranded that
+    // new level unwritten and stamped the old top's last page as root.
+    let mut i = 0;
+    while i < levels.len() {
         let blkno = levels[i].blkno;
-        if i + 1 == nlevels {
+        if i + 1 == levels.len() {
             let state = &mut levels[i];
             let mut page = page_mut_of(&mut state.buf);
             let mut op = read_opaque(&page);
@@ -561,6 +577,7 @@ fn uppershutdown<'mcx>(
         let buf = core::mem::replace(&mut state.buf, empty);
         let blkno = state.blkno;
         bulkwrite::smgr_bulk_write(&mut wstate.bulkstate, blkno, buf, true)?;
+        i += 1;
     }
 
     let mut metabuf = bulkwrite::smgr_bulk_get_buf(&wstate.bulkstate);

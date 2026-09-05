@@ -152,10 +152,23 @@ pub fn btbeginscan<'mcx>(
 
 // RelationNeedsWAL (rel.h); XLogIsNeeded ≡ the xlog_standby_info_active seam.
 pub(crate) fn relation_needs_wal(rel: &Relation<'_>) -> bool {
+    relation_data_needs_wal(rel)
+}
+
+fn relation_data_needs_wal(rel: &::types_rel::RelationData<'_>) -> bool {
     rel.is_permanent()
         && (transam_xlog_seams::xlog_standby_info_active::call()
             || (rel.rd_createSubid.get() == InvalidSubTransactionId
                 && rel.rd_firstRelfilelocatorSubid.get() == InvalidSubTransactionId))
+}
+
+/// RelationIsAccessibleInLogicalDecoding (utils/rel.h): the isCatalogRel flag
+/// of xl_btree_delete (nbtpage.c:1527) and xl_btree_reuse_page
+/// (nbtpage.c:947), evaluated on the HEAP relation.
+pub(crate) fn relation_is_accessible_in_logical_decoding(rel: &::types_rel::RelationData<'_>) -> bool {
+    transam_xlog_seams::xlog_logical_info_active::call()
+        && relation_data_needs_wal(rel)
+        && (catalog_seams::is_catalog_relation::call(rel) || rel.is_used_as_catalog_table())
 }
 
 /// btrescan. `scankey: None` restarts with the keys already in scan.keyData.

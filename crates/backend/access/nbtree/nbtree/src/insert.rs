@@ -14,6 +14,7 @@ use ::types_core::{
     AttrNumber, BlockNumber, InvalidBlockNumber, OffsetNumber, TransactionId, INDEX_MAX_KEYS,
 };
 use ::types_error::{PgError, PgResult, ERRCODE_UNIQUE_VIOLATION};
+use init_small::globals::{EndCriticalSection, StartCriticalSection};
 use ::types_nbtree::{
     BTMetaPageData, BTPageOpaqueData, BTP_HAS_GARBAGE, BTP_INCOMPLETE_SPLIT, BTP_ROOT,
     BTP_SPLIT_END, BTREE_METAPAGE, BTREE_NOVAC_VERSION, BT_READ, BT_WRITE, P_FIRSTDATAKEY,
@@ -939,6 +940,7 @@ unsafe fn bt_findinsertloc<'mcx>(
     if insertstate.itemsz > ::types_nbtree::BTMaxItemSize {
         let pin = insertstate.buf.as_ref().expect("pinned");
         bt_check_third_page(
+            mcx,
             rel,
             heap_rel,
             insertstate.itup_key.heapkeyspace,
@@ -953,13 +955,20 @@ unsafe fn bt_findinsertloc<'mcx>(
         debug_assert!(P_ISLEAF(&opaque) && !P_INCOMPLETE_SPLIT(&opaque));
     }
     debug_assert!(!insertstate.bounds_valid || checkingunique);
-    // INVARIANT: every pgrust metapage is created at BTREE_VERSION 4
-    // (nbtree/src/page.rs:567 _bt_initmetapage, called from nbtsort/src/lib.rs:161
-    // btbuildempty and nbtsort/src/lib.rs:562 btbuild) and there is no pg_upgrade
-    // lineage, so heapkeyspace is always true here; C nbtinsert.c keeps the v2/v3
-    // lane only for pg_upgrade'd indexes.
+    // nbtinsert.c:908-979: the !heapkeyspace lane (version 2/3 metapages,
+    // which only reach a cluster through pg_upgrade from PostgreSQL <= 11)
+    // is not ported. pgrust never creates such an index (page.rs
+    // _bt_initmetapage stamps BTREE_VERSION 4), but a data directory can
+    // carry one: refuse with a typed error, never a backend panic.
     if !insertstate.itup_key.heapkeyspace {
-        panic!("btree insert on a !heapkeyspace (version 2/3) index, which pgrust never creates (nbtree/src/page.rs:567 stamps BTREE_VERSION 4)");
+        return Err(Box::new(
+            PgError::error(format!(
+                "cannot insert into index \"{}\": btree version 2/3 (pre-PostgreSQL 12) on-disk format is not supported",
+                rel.name()
+            ))
+            .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .with_hint("Run REINDEX to rebuild the index in the version 4 format."),
+        ));
     }
     debug_assert!(insertstate.itup_key.scantid.is_some());
 
@@ -1252,7 +1261,11 @@ unsafe fn bt_insertonpg<'mcx>(
             }
         }
 
-        // critical section: page image mutation + WAL, no early returns.
+        // nbtinsert.c:1275 START_CRIT_SECTION: page image mutation + WAL. An
+        // ERROR in here is a PANIC in C (the `?` sites escalate through
+        // CritSectionCount), never a catchable error leaving a dirty,
+        // unlogged page behind.
+        StartCriticalSection();
         {
             let mut page = page_of_mut(&buf);
             if let Some((_, nposting, _)) = swapped.as_ref() {
@@ -1371,6 +1384,8 @@ unsafe fn bt_insertonpg<'mcx>(
             }
             page_of_mut(&buf).set_lsn(recptr);
         }
+        // nbtinsert.c:1399
+        EndCriticalSection();
 
         if let Some(metapin) = metabuf {
             bt_relbuf(rel, metapin)?;
@@ -1653,6 +1668,10 @@ unsafe fn bt_split<'mcx>(
         sbuf = Some(pin);
     }
 
+    // nbtinsert.c:1932 START_CRIT_SECTION: from here until the split is
+    // logged nothing may raise a catchable ERROR (the original page is about
+    // to be overwritten with the left half).
+    StartCriticalSection();
     {
         let orig = page_of_mut(buf);
         // SAFETY: PageRestoreTempPage — whole-page overwrite under the
@@ -1780,6 +1799,8 @@ unsafe fn bt_split<'mcx>(
             buf_page_mut(cpin.buffer()).set_lsn(recptr);
         }
     }
+    // nbtinsert.c:2064
+    EndCriticalSection();
 
     if let Some(spin) = sbuf {
         bt_relbuf(rel, spin)?;
@@ -2033,6 +2054,10 @@ unsafe fn bt_newlevel<'mcx>(
     core::ptr::copy_nonoverlapping(hk, right_item.as_mut_ptr(), right_item_sz);
     bt_tuple_set_downlink(right_item.as_mut_ptr(), rbkno);
 
+    // nbtinsert.c:2501 START_CRIT_SECTION: no catchable ERROR from here until
+    // the newroot record is logged.
+    StartCriticalSection();
+
     {
         let mut metad = crate::page::page_meta(&metabuf.page());
         if metad.btm_version < BTREE_NOVAC_VERSION {
@@ -2144,6 +2169,8 @@ unsafe fn bt_newlevel<'mcx>(
         page_of_mut(&rootbuf).set_lsn(recptr);
         page_of_mut(&metabuf).set_lsn(recptr);
     }
+    // nbtinsert.c:2600
+    EndCriticalSection();
 
     bt_relbuf(rel, metabuf)?;
     Ok(rootbuf)

@@ -6,6 +6,7 @@ use ::bufmgr_seams::{self as bufmgr, BufferPin};
 use ::types_core::xact::{FirstNormalFullTransactionId, FullTransactionId};
 use ::types_core::{BlockNumber, Buffer, ForkNumber, InvalidBlockNumber, BLCKSZ};
 use ::types_error::{PgError, PgResult, ERRCODE_INDEX_CORRUPTED};
+use init_small::globals::{EndCriticalSection, StartCriticalSection};
 use ::types_nbtree::{
     BTDeletedPageData, BTMetaPageData, BTPageOpaqueData, BTP_DELETED, BTP_HALF_DEAD,
     BTP_HAS_FULLXID, BTP_LEAF, BTP_META, BTP_ROOT, P_HAS_FULLXID, P_IGNORE, P_ISDELETED, P_ISMETA,
@@ -108,17 +109,22 @@ fn bt_getmeta(rel: &Relation<'_>, metapin: &BufferPin) -> PgResult<BTMetaPageDat
     let metaopaque = page_opaque(&page);
     let metad = page_meta(&page);
 
+    // nbtpage.c:155-167: plain ereport(ERROR, ERRCODE_INDEX_CORRUPTED) — no
+    // errhint on either metapage sanity check (unlike _bt_checkpage's).
     if !P_ISMETA(&metaopaque) || metad.btm_magic != BTREE_MAGIC {
-        return Err(index_corrupted(format!(
-            "index \"{}\" is not a btree",
-            rel.name()
-        )));
+        return Err(Box::new(
+            PgError::error(format!("index \"{}\" is not a btree", rel.name()))
+                .with_sqlstate(ERRCODE_INDEX_CORRUPTED),
+        ));
     }
     if metad.btm_version < BTREE_MIN_VERSION || metad.btm_version > BTREE_VERSION {
-        return Err(index_corrupted(format!(
-            "version mismatch in index \"{}\": file version {}, current version {}, minimal supported version {}",
-            rel.name(), metad.btm_version, BTREE_VERSION, BTREE_MIN_VERSION
-        )));
+        return Err(Box::new(
+            PgError::error(format!(
+                "version mismatch in index \"{}\": file version {}, current version {}, minimal supported version {}",
+                rel.name(), metad.btm_version, BTREE_VERSION, BTREE_MIN_VERSION
+            ))
+            .with_sqlstate(ERRCODE_INDEX_CORRUPTED),
+        ));
     }
     Ok(metad)
 }
@@ -329,6 +335,10 @@ pub(crate) fn bt_getroot<'mcx>(
 
         let rootpin = bt_allocbuf(rel, heaprel.expect("BT_WRITE getroot requires heaprel"))?;
         let rootblkno = rootpin.block_number();
+
+        // nbtpage.c:455 START_CRIT_SECTION: root page init + metapage update
+        // + WAL; an ERROR in here is a PANIC in C.
+        StartCriticalSection();
         {
             let mut rootpage = page_of_mut(&rootpin);
             write_opaque(
@@ -385,6 +395,8 @@ pub(crate) fn bt_getroot<'mcx>(
             page_of_mut(&rootpin).set_lsn(recptr);
             page_of_mut(&metapin).set_lsn(recptr);
         }
+        // nbtpage.c:504
+        EndCriticalSection();
 
         // swap the new root's write lock for the read lock callers expect.
         bt_unlockbuf(rel, &rootpin)?;
@@ -629,12 +641,13 @@ pub(crate) fn bt_allocbuf(rel: &Relation<'_>, heaprel: &::types_rel::RelationDat
                 if crate::relation_needs_wal(rel)
                     && transam_xlog_seams::xlog_standby_info_active::call()
                 {
-                    // RelationIsAccessibleInLogicalDecoding const-false
-                    // (pruneheap precedent): isCatalogRel = false.
+                    // nbtpage.c:947 isCatalogRel =
+                    // RelationIsAccessibleInLogicalDecoding(heaprel)
                     let xlrec = crate::wal::xl_btree_reuse_page(
                         rel.rd_locator.get(),
                         blkno,
                         bt_page_get_delete_xid(&pin.page()),
+                        crate::relation_is_accessible_in_logical_decoding(heaprel),
                     );
                     ::xloginsert_seams::xlog_insert_record::call(
                         ::rmgr::RM_BTREE_ID as u8,
