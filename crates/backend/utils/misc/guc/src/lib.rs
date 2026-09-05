@@ -8,6 +8,7 @@ pub mod array;
 pub mod autotune;
 pub mod cnum;
 pub mod enum_lookup;
+pub mod help_config;
 pub mod layers;
 pub mod model;
 pub mod name;

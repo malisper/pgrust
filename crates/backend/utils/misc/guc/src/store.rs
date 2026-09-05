@@ -69,7 +69,8 @@ pub fn pg_reload_time() -> i64 {
     PG_RELOAD_TIME.get()
 }
 
-fn build_variable(setting: GucSetting) -> Option<GucVariable> {
+// Also help_config.rs (build_guc_variables' table without hooks).
+pub(crate) fn build_variable(setting: GucSetting) -> Option<GucVariable> {
     let name = setting.name();
     let gen = |vartype: config_type| {
         config_generic::boot(

@@ -1092,3 +1092,46 @@ fn check_hook_may_read_the_store() {
     assert_eq!(set_session("createrole_self_grant", Some("reset")).unwrap(), 1);
     assert_eq!(get_string("createrole_self_grant"), Some(Some(String::new())));
 }
+
+// help_config.c printMixedStruct rows as postgres 18.6 --describe-config
+// prints them (bool/int/real show the pre-InitializeOneGUCOption reset_val
+// zero; strings/enums their boot_val), displayStruct hiding, C ordering.
+#[test]
+fn describe_config_rows_match_c() {
+    setup();
+    // Enum option sets that live in GUC slots are installed by their owning
+    // units (transam_xlog/dsm/aio), which this test binary does not link;
+    // stub them empty (the guc_funcs SHOW ALL tests do the same) — their
+    // rows print an empty value column here, so the asserted ENUM row is an
+    // Inline-options one.
+    for slot in [
+        &guc_tables::option_sets::archive_mode_options,
+        &guc_tables::option_sets::dynamic_shared_memory_options,
+        &guc_tables::option_sets::io_method_options,
+        &guc_tables::option_sets::recovery_target_action_options,
+        &guc_tables::option_sets::wal_level_options,
+        &guc_tables::option_sets::wal_sync_method_options,
+    ] {
+        slot.install_if_absent(&[]);
+    }
+    let text = crate::help_config::guc_info_text();
+    let lines: Vec<&str> = text.lines().collect();
+    for want in [
+        "enable_seqscan\tuser\tQuery Tuning / Planner Method Configuration\tBOOLEAN\tFALSE\t\t\tEnables the planner's use of sequential-scan plans.\t",
+        "shared_buffers\tpostmaster\tResource Usage / Memory\tINTEGER\t0\t16\t1073741823\tSets the number of shared memory buffers used by the server.\t",
+        "cpu_tuple_cost\tuser\tQuery Tuning / Planner Cost Constants\tREAL\t0\t0\t1.79769e+308\tSets the planner's estimate of the cost of processing each tuple (row).\t",
+        "log_line_prefix\tsighup\tReporting and Logging / What to Log\tSTRING\t%m [%p] \t\t\tControls information prefixed to each log line.\tAn empty string means no prefix.",
+        "wal_compression\tsuperuser\tWrite-Ahead Log / Settings\tENUM\toff\t\t\tCompresses full-page writes written in WAL file with specified method.\t",
+    ] {
+        assert!(lines.contains(&want), "missing row: {want:?}");
+    }
+    // displayStruct: GUC_DISALLOW_IN_FILE / GUC_NOT_IN_SAMPLE / GUC_NO_SHOW_ALL
+    // rows never print (config_file is GUC_DISALLOW_IN_FILE; C omits it).
+    assert!(!lines.iter().any(|l| l.starts_with("config_file\t")), "config_file must be hidden");
+    // guc_var_compare order.
+    for w in lines.windows(2) {
+        let (a, b) = (w[0].split('\t').next().unwrap(), w[1].split('\t').next().unwrap());
+        assert_ne!(guc_name_compare(a, b), std::cmp::Ordering::Greater, "{a} before {b}");
+    }
+    assert!(lines.len() >= 300, "only {} rows", lines.len());
+}

@@ -43,6 +43,7 @@ libc = "0.2"
 mcx = { path = "../../../_support/mcx" }
 types_error = { path = "../../../_support/types/types_error" }
 elog = { path = "../../utils/error/elog" }
+guc = { path = "../../utils/misc/guc" }
 init_small = { path = "../../utils/init/init_small" }
 stack_depth = { path = "../../utils/misc/stack_depth" }
 ps_status = { path = "../../utils/misc/ps_status" }

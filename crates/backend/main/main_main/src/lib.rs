@@ -301,9 +301,8 @@ pub fn pg_main(argv: &[String]) -> PgResult<()> {
         DispatchOption::Forkchild => {
             panic!("DISPATCH_FORKCHILD reached without EXEC_BACKEND")
         }
-        DispatchOption::DescribeConfig => {
-            panic!("GucInfoMain unported: unit backend-utils-misc-help-config")
-        }
+        // main.c:220: GucInfoMain() prints the GUC table and exits 0.
+        DispatchOption::DescribeConfig => guc::help_config::GucInfoMain(),
         DispatchOption::Single => {
             // main.c:222: PostgresSingleUserMain(argc, argv,
             // strdup(get_user_name_or_exit(progname))). Exits the process.
@@ -358,21 +357,31 @@ fn get_user_name_or_exit(progname: &str) -> String {
         (uid, libc::getpwuid(uid))
     };
     if pw.is_null() {
-        let err = std::io::Error::last_os_error();
-        let detail = if err.raw_os_error().unwrap_or(0) != 0 {
-            err.to_string()
-        } else {
-            "user does not exist".to_string()
-        };
-        elog::write_stderr(&format!(
-            "{progname}: could not look up effective user ID {user_id}: {detail}\n"
-        ));
+        let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        let errstr = user_lookup_errstr(user_id as i64, errno);
+        elog::write_stderr(&format!("{progname}: {errstr}\n"));
         std::process::exit(1);
     }
     // SAFETY: non-NULL passwd from getpwuid has a NUL-terminated pw_name.
     unsafe { std::ffi::CStr::from_ptr((*pw).pw_name) }
         .to_string_lossy()
         .into_owned()
+}
+
+// get_user_name (src/common/username.c:55-57): the getpwuid failure text,
+// "could not look up effective user ID %ld: %s" with errno's strerror text
+// or "user does not exist" when errno stayed clear.
+#[cfg(not(target_family = "wasm"))]
+fn user_lookup_errstr(user_id: i64, errno: i32) -> String {
+    let detail = if errno != 0 {
+        // SAFETY: strerror returns a NUL-terminated static string.
+        unsafe { std::ffi::CStr::from_ptr(libc::strerror(errno)) }
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        "user does not exist".to_string()
+    };
+    format!("could not look up effective user ID {user_id}: {detail}")
 }
 
 #[cfg(not(target_family = "wasm"))] // wasm32: only the native getpwuid path clears errno
@@ -455,6 +464,25 @@ mod tests {
         assert_eq!(parse_dispatch_option("forkchild"), DispatchOption::Postmaster);
         assert_eq!(parse_dispatch_option("nonsense"), DispatchOption::Postmaster);
         assert_eq!(parse_dispatch_option(""), DispatchOption::Postmaster);
+    }
+
+    // username.c:55: `errno ? strerror(errno) : _("user does not exist")` —
+    // the strerror text alone, never Rust's "(os error N)" suffix.
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn user_lookup_errstr_is_strerror() {
+        // SAFETY: strerror returns a NUL-terminated static string.
+        let want = unsafe { std::ffi::CStr::from_ptr(libc::strerror(libc::EIO)) }
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            user_lookup_errstr(7, libc::EIO),
+            format!("could not look up effective user ID 7: {want}")
+        );
+        assert_eq!(
+            user_lookup_errstr(7, 0),
+            "could not look up effective user ID 7: user does not exist"
+        );
     }
 
     #[test]

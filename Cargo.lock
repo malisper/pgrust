@@ -9235,6 +9235,7 @@ dependencies = [
  "antithesis-instrumentation",
  "antithesis_sdk",
  "elog",
+ "guc",
  "init_small",
  "ipc",
  "libc",
