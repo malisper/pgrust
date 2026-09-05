@@ -98,22 +98,31 @@ pub(crate) fn orderby_node_outputs(
     Ok((box_datum.as_usize(), row_ptr))
 }
 
-pub fn getQuadrant(centroid: &Point, tst: &Point) -> i16 {
+pub fn getQuadrant(centroid: &Point, tst: &Point) -> PgResult<i16> {
     if (point_above(tst, centroid) || point_horiz(tst, centroid))
         && (point_right(tst, centroid) || point_vert(tst, centroid))
     {
-        return 1;
+        return Ok(1);
     }
     if point_below(tst, centroid) && (point_right(tst, centroid) || point_vert(tst, centroid)) {
-        return 2;
+        return Ok(2);
     }
     if (point_below(tst, centroid) || point_horiz(tst, centroid)) && point_left(tst, centroid) {
-        return 3;
+        return Ok(3);
     }
     if point_above(tst, centroid) && point_left(tst, centroid) {
-        return 4;
+        return Ok(4);
     }
-    panic!("getQuadrant: impossible case");
+    // spgquadtreeproc.c:77: `elog(ERROR, "getQuadrant: impossible case")`.
+    // Reachable from SQL with a NaN coordinate (all FP predicates false); it
+    // must raise a catchable XX000 error, not panic the backend thread.
+    Err(impossible_quadrant())
+}
+
+#[cold]
+#[inline(never)]
+fn impossible_quadrant() -> Box<PgError> {
+    Box::new(PgError::error("getQuadrant: impossible case".to_string()))
 }
 
 pub fn getQuadrantArea(bbox: &BOX, centroid: &Point, quadrant: i32) -> BOX {
@@ -175,7 +184,7 @@ fn fc_spg_quad_choose(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResul
     let (in_point, centroid) = unsafe { (point_at(input.datum), point_at(input.prefixDatum)) };
 
     *out = spgChooseOut::MatchNode {
-        nodeN: getQuadrant(&centroid, &in_point) as i32 - 1,
+        nodeN: getQuadrant(&centroid, &in_point)? as i32 - 1,
         levelAdd: 0,
         restDatum: input.datum,
     };
@@ -213,7 +222,7 @@ fn fc_spg_quad_picksplit(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRe
         // SAFETY: point-typed leaf datums.
         let p = unsafe { point_at(d) };
         leaf.push(d);
-        map.push(getQuadrant(&centroid, &p) as i32 - 1);
+        map.push(getQuadrant(&centroid, &p)? as i32 - 1);
     }
     out.mapTuplesToNodes = map.as_mut_ptr();
     core::mem::forget(map);
@@ -280,7 +289,7 @@ fn fc_spg_quad_inner_consistent(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) 
                 }
             }
             RTSameStrategyNumber => {
-                which &= 1 << getQuadrant(&centroid, &query);
+                which &= 1 << getQuadrant(&centroid, &query)?;
             }
             RTBelowStrategyNumber | RTOldBelowStrategyNumber => {
                 if point_above(&centroid, &query) {
@@ -300,13 +309,13 @@ fn fc_spg_quad_inner_consistent(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) 
                 } else {
                     let mut r = 0;
                     let mut p = boxQuery.low;
-                    r |= 1 << getQuadrant(&centroid, &p);
+                    r |= 1 << getQuadrant(&centroid, &p)?;
                     p.y = boxQuery.high.y;
-                    r |= 1 << getQuadrant(&centroid, &p);
+                    r |= 1 << getQuadrant(&centroid, &p)?;
                     p = boxQuery.high;
-                    r |= 1 << getQuadrant(&centroid, &p);
+                    r |= 1 << getQuadrant(&centroid, &p)?;
                     p.x = boxQuery.low.x;
-                    r |= 1 << getQuadrant(&centroid, &p);
+                    r |= 1 << getQuadrant(&centroid, &p)?;
                     which &= r;
                 }
             }

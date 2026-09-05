@@ -12,7 +12,7 @@ use ::datum::Datum;
 use ::mcx::Mcx;
 use ::types_core::geo::{Point, BOX};
 use ::types_core::Oid;
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult};
 use ::types_fmgr::{FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
 use ::types_scan::scankey::{
     RTAboveStrategyNumber, RTBelowStrategyNumber, RTContainedByStrategyNumber,
@@ -28,6 +28,24 @@ use ::types_spgist::state::{
 
 const BOXOID: Oid = 603;
 const POLYGONOID: Oid = 604;
+
+// geo_spgist.c:691/831: `elog(ERROR, "unrecognized strategy: %d", strategy)`.
+// A corrupted/crafted scankey or a custom opclass binding an unsupported
+// strategy must raise a catchable XX000 error, not panic the backend thread.
+#[cold]
+#[inline(never)]
+fn unrecognized_strategy(strategy: u16) -> Box<PgError> {
+    Box::new(PgError::error(format!("unrecognized strategy: {strategy}")))
+}
+
+// geo_spgist.c:544: `elog(ERROR, "unrecognized scankey subtype: %d", ...)`.
+#[cold]
+#[inline(never)]
+fn unrecognized_scankey_subtype(subtype: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "unrecognized scankey subtype: {subtype}"
+    )))
+}
 const VOIDOID: Oid = 2278;
 // fmgroids.h F_DIST_POLYP (dist_polyp).
 const F_DIST_POLYP: Oid = 3292;
@@ -387,7 +405,7 @@ fn scankey_bbox(mcx: Mcx<'_>, sk: &ScanKeyData, recheck: Option<&mut bool>) -> P
             let poly = unsafe { ::types_fmgr::datum_varlena_packed(sk.sk_argument, mcx) }?;
             Ok(BOX::from_datum_bytes(&poly.data()[4..36]))
         }
-        other => panic!("unrecognized scankey subtype: {other}"),
+        other => Err(unrecognized_scankey_subtype(other)),
     }
 }
 
@@ -463,7 +481,7 @@ fn fc_spg_box_quad_inner_consistent(
                 RTOverAboveStrategyNumber => overAbove4D(&next_rect_box, query),
                 RTBelowStrategyNumber => below4D(&next_rect_box, query),
                 RTOverBelowStrategyNumber => overBelow4D(&next_rect_box, query),
-                other => panic!("unrecognized strategy number: {other}"),
+                other => return Err(unrecognized_strategy(other)),
             };
             if !flag {
                 break;
@@ -538,7 +556,7 @@ fn fc_spg_box_quad_leaf_consistent(
             RTOverAboveStrategyNumber => box_overabove(&leaf, &query),
             RTBelowStrategyNumber => box_below(&leaf, &query),
             RTOverBelowStrategyNumber => box_overbelow(&leaf, &query),
-            other => panic!("unrecognized strategy number: {other}"),
+            other => return Err(unrecognized_strategy(other)),
         };
         if !flag {
             break;

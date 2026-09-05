@@ -32,6 +32,17 @@ fn unrecognized_strategy(strategy: u16) -> Box<PgError> {
     )))
 }
 
+// spgkdtreeproc.c:62/173: `elog(ERROR, "allTheSame should not occur for k-d
+// trees")`. A crafted/corrupted inner tuple with the allTheSame flag set must
+// raise a catchable XX000 error, not panic the backend thread.
+#[cold]
+#[inline(never)]
+fn alltthesame_kd() -> Box<PgError> {
+    Box::new(PgError::error(
+        "allTheSame should not occur for k-d trees".to_string(),
+    ))
+}
+
 // SAFETY: datum points at a live 16-byte point image (opclass protocol).
 #[inline]
 unsafe fn point_at(d: Datum) -> Point {
@@ -79,7 +90,7 @@ fn fc_spg_kd_choose(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<
     let out = unsafe { &mut *(fcinfo.arg(1).as_usize() as *mut spgChooseOut) };
 
     if input.allTheSame {
-        panic!("allTheSame should not occur for k-d trees");
+        return Err(alltthesame_kd());
     }
     debug_assert!(input.hasPrefix);
     debug_assert!(input.nNodes == 2);
@@ -176,7 +187,7 @@ fn fc_spg_kd_inner_consistent(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
     debug_assert!(input.hasPrefix);
     let coord = input.prefixDatum.as_f64();
     if input.allTheSame {
-        panic!("allTheSame should not occur for k-d trees");
+        return Err(alltthesame_kd());
     }
     debug_assert!(input.nNodes == 2);
 
@@ -335,6 +346,33 @@ pub const SPGIST_KD_BUILTINS: &[FmgrBuiltin] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // spgkdtreeproc.c:62: a k-d inner tuple must never carry the allTheSame
+    // flag (the choose method never produces one). A crafted/corrupted page
+    // that sets it must raise a catchable XX000 error, not panic the backend
+    // thread. Witness: before the fix `fc_spg_kd_choose` executed
+    // `panic!(...)`, which this #[test] would see as a test-failing panic;
+    // after the fix it returns the C-exact elog(ERROR) as Err.
+    #[test]
+    fn kd_choose_all_the_same_errors_not_panics() {
+        let input = spgChooseIn {
+            datum: Datum::null(),
+            leafDatum: Datum::null(),
+            level: 0,
+            allTheSame: true,
+            hasPrefix: true,
+            prefixDatum: Datum::null(),
+            nNodes: 2,
+            nodeLabels: core::ptr::null(),
+        };
+        let mut out = spgChooseOut::None;
+        let mut frame: ::types_fmgr::LocalFcinfo<2> = ::types_fmgr::LocalFcinfo::fresh(0);
+        frame.set_arg(0, Datum::from_usize(&input as *const spgChooseIn as usize));
+        frame.set_arg(1, Datum::from_usize(&mut out as *mut spgChooseOut as usize));
+        let err = fc_spg_kd_choose(None, &mut frame).unwrap_err();
+        assert_eq!(err.message(), "allTheSame should not occur for k-d trees");
+        assert_eq!(err.sqlstate(), ::types_error::ERRCODE_INTERNAL_ERROR);
+    }
 
     fn pts(xs: &[f64]) -> Vec<(Point, i32)> {
         xs.iter()

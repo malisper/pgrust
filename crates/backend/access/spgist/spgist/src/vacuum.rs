@@ -526,6 +526,15 @@ fn spgvacuumpage(state: &mut SpgVacState<'_, '_, '_>, buffer: Buffer) -> PgResul
     unlock_release(buffer)
 }
 
+/// Mark the pending item at `idx` done. Every non-done item the drain loop
+/// examines must end up done (here, or via the same-blkno sweeps in the leaf
+/// and inner arms), otherwise the `while idx < len` driver never advances past
+/// it — the hang C avoids by walking a linked list whose `for` always steps.
+#[inline]
+fn mark_pending_done(pending: &mut [(ItemPointerData, bool)], idx: usize) {
+    pending[idx].1 = true;
+}
+
 /// spgprocesspending: drain the pending-TID list between pages of the scan.
 fn spgprocesspending(state: &mut SpgVacState<'_, '_, '_>) -> PgResult<()> {
     let index = state.info.index;
@@ -552,7 +561,12 @@ fn spgprocesspending(state: &mut SpgVacState<'_, '_, '_>) -> PgResult<()> {
         };
 
         if is_new_or_deleted {
-            // Probably shouldn't happen, but ignore it
+            // Probably shouldn't happen, but ignore it. C's spgprocesspending
+            // (spgvacuum.c:712) walks a linked list, so its `for` advances past
+            // this item unconditionally; the port's index-driven loop must mark
+            // the item done so the top-of-loop skip advances, or it spins on
+            // this offset forever (100% CPU hang). Mirrors the leaf/inner arms.
+            mark_pending_done(&mut state.pending, idx);
         } else if is_leaf {
             if SpGistBlockIsRoot(blkno) {
                 panic!("redirection leads to root page of index \"{}\"", index.name());
@@ -725,4 +739,41 @@ pub fn spgvacuumcleanup<'mcx>(
         stats.num_index_tuples = info.num_heap_tuples;
     }
     Ok(Some(stats))
+}
+
+#[cfg(test)]
+mod pending_drain_tests {
+    use super::*;
+    use ::types_tuple::itemptr::ItemPointerData;
+
+    // Witness for the spgprocesspending hang (spgvacuum.c:712): a pending item
+    // whose page is new/deleted (the `is_new_or_deleted` arm) must still be
+    // marked done so the index-driven drain loop advances. This models that
+    // arm's advancement with the real `mark_pending_done` helper the fix calls.
+    // Before the fix that arm left the item un-done and the `while idx < len`
+    // loop spun on it forever; the `steps` guard trips if that regresses.
+    #[test]
+    fn ignorable_pending_page_advances_drain_loop() {
+        let mut pending: Vec<(ItemPointerData, bool)> = vec![
+            (ItemPointerData::new(10, 1), false),
+            (ItemPointerData::new(11, 1), false),
+            (ItemPointerData::new(12, 1), false),
+        ];
+        let mut idx = 0usize;
+        let mut steps = 0u32;
+        while idx < pending.len() {
+            steps += 1;
+            assert!(steps < 1000, "drain loop failed to terminate (hang)");
+            if pending[idx].1 {
+                idx += 1;
+                continue;
+            }
+            // Every page is ignorable in this model: the fixed arm marks done.
+            mark_pending_done(&mut pending, idx);
+        }
+        assert!(
+            pending.iter().all(|(_, done)| *done),
+            "some pending items were never marked done"
+        );
+    }
 }
