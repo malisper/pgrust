@@ -294,15 +294,12 @@ fn init_prune_context<'mcx>(
                             .unwrap_or_else(|e| panic!("fmgr_info({cmpfn}) failed: {e:?}")),
                     );
                     if expr.node_tag() != NodeTag::T_Const {
-                        let mut state =
+                        // The result mcx is armed per evaluation with the
+                        // prune econtext's per-tuple memory (partprune.c:3823
+                        // ExecEvalExprSwitchContext), reset after every
+                        // pruning pass (execPartition.c:2544).
+                        ctx.exprstates[stateidx] =
                             execexpr::exec_init_expr_subplans(mcx, Some(expr), params, env)?;
-                        if let Some(st) = state.as_mut() {
-                            // By-ref step-expr results land in the query mcx (C:
-                            // node econtext per-tuple; pruning runs per rescan,
-                            // not per row — bounded growth).
-                            st.arm_result_mcx(mcx);
-                        }
-                        ctx.exprstates[stateidx] = state;
                     }
                 }
             }
@@ -392,11 +389,13 @@ pub fn exec_find_matching_subplans<'mcx>(
     debug_assert!(initial_prune || prunestate.do_exec_prune);
     debug_assert!(validsubplan_rtis.is_some() || !initial_prune);
     let mut result = Bitmapset::empty();
+    let econtext = prunestate.econtext;
     for hi in 0..prunestate.hierarchies.len() {
         find_matching_subplans_recurse(
             &mut prunestate.hierarchies[hi],
             0,
             estate,
+            econtext,
             initial_prune,
             &mut result,
             &mut validsubplan_rtis,
@@ -412,6 +411,7 @@ fn find_matching_subplans_recurse<'mcx>(
     prunedata: &mut Vec<PartitionedRelPruningData<'mcx>>,
     idx: usize,
     estate: &mut EStateData<'mcx>,
+    econtext: EcxtId,
     initial_prune: bool,
     validsubplans: &mut Bitmapset<'mcx>,
     validsubplan_rtis: &mut Option<&mut Bitmapset<'mcx>>,
@@ -420,9 +420,9 @@ fn find_matching_subplans_recurse<'mcx>(
     stack_depth_core::check_stack_depth()?;
     let mcx = estate.es_query_cxt;
     let partset = if initial_prune && !prunedata[idx].pinfo.initial_pruning_steps.is_nil() {
-        get_matching_partitions(&mut prunedata[idx], estate, true)?
+        get_matching_partitions(&mut prunedata[idx], estate, econtext, true)?
     } else if !initial_prune && !prunedata[idx].pinfo.exec_pruning_steps.is_nil() {
-        get_matching_partitions(&mut prunedata[idx], estate, false)?
+        get_matching_partitions(&mut prunedata[idx], estate, econtext, false)?
     } else {
         prunedata[idx].present_parts.clone_in(mcx)?
     };
@@ -445,6 +445,7 @@ fn find_matching_subplans_recurse<'mcx>(
                     prunedata,
                     partidx as usize,
                     estate,
+                    econtext,
                     initial_prune,
                     validsubplans,
                     validsubplan_rtis,
@@ -461,6 +462,7 @@ fn find_matching_subplans_recurse<'mcx>(
 fn get_matching_partitions<'mcx>(
     pprune: &mut PartitionedRelPruningData<'mcx>,
     estate: &mut EStateData<'mcx>,
+    econtext: EcxtId,
     initial: bool,
 ) -> PgResult<Bitmapset<'mcx>> {
     let mcx = estate.es_query_cxt;
@@ -478,28 +480,15 @@ fn get_matching_partitions<'mcx>(
     let ctx = if initial { pprune.initial_ctx.as_mut() } else { pprune.exec_ctx.as_mut() }
         .expect("prune context initialized for this pass");
 
-    // RESIDUAL eager arm: prune-step expressions evaluate deep inside
-    // perform_pruning_base_step_exec with no suspension driver in reach, so
-    // pending initplan params are still force-run here rather than lazily at
-    // first fetch (C ExecEvalParamExec). Observable divergence would need an
-    // erroring initplan inside an untaken short-circuit arm of a pruning
-    // steps expression — not reachable from planner-built prune steps today
-    // (each step's expr is a single comparison value).
-    let mut deps: Vec<u32> = Vec::new();
-    for st in ctx.exprstates.iter().flatten() {
-        deps.extend_from_slice(st.param_exec_deps());
-    }
-    if !deps.is_empty() {
-        executils::exec_eval_param_exec_params(estate, &deps)?;
-    }
-
     let mut results: Vec<Option<PruneStepResult<'mcx>>> = Vec::new();
     results.resize_with(num_steps, || None);
     for step in steps.iter() {
         match step.node_tag() {
             NodeTag::T_PartitionPruneStepOp => {
                 let op = step.as_partition_prune_step_op().unwrap();
-                let res = perform_pruning_base_step_exec(mcx, ctx, &partkey, boundinfo, op)?;
+                let res = perform_pruning_base_step_exec(
+                    estate, econtext, ctx, &partkey, boundinfo, op,
+                )?;
                 results[op.step_id as usize] = Some(res);
             }
             NodeTag::T_PartitionPruneStepCombine => {
@@ -544,16 +533,19 @@ fn sup_call(f: &mut FmgrInfo, coll: Oid, a: Datum, b: Datum) -> PgResult<Datum> 
 }
 
 // perform_pruning_base_step (partprune.c), executor arm: values come from
-// Consts or the compiled ExprStates (empty EvalSlots — pruning exprs carry no
-// Vars); a NULL comparison value prunes everything (strict operators only).
+// Consts or the compiled ExprStates (the prune econtext binds no tuple —
+// pruning exprs carry no Vars); a NULL comparison value prunes everything
+// (strict operators only).
 fn perform_pruning_base_step_exec<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    econtext: EcxtId,
     ctx: &mut PruneContext<'mcx>,
     partkey: &PartitionKeyData,
     boundinfo: &partbounds::PartitionBoundInfoData<'static>,
     opstep: &PartitionPruneStepOp<'mcx>,
 ) -> PgResult<PruneStepResult<'mcx>> {
     debug_assert_eq!(opstep.exprs.len(), opstep.cmpfns.len());
+    let mcx = estate.es_query_cxt;
     let partnatts = partkey.partnatts as i32;
     let strategy = partkey.strategy as u8;
     let mut values = [Datum::null(); PARTITION_MAX_KEYS];
@@ -574,8 +566,16 @@ fn perform_pruning_base_step_exec<'mcx>(
                 let state = ctx.exprstates[stateidx]
                     .as_mut()
                     .expect("non-Const step expr has an ExprState");
-                let mut slots = execexpr::EvalSlots { scan: None, inner: None, outer: None };
-                let nd = execexpr::exec_eval_expr(state, &mut slots)?;
+                // partkey_datum_from_expr (partprune.c:3823):
+                // ExecEvalExprSwitchContext in the prune econtext's per-tuple
+                // memory, through the suspension driver so a PARAM_EXEC
+                // bound to a not-yet-run initplan runs it at first fetch
+                // (ExecEvalParamExec) — an untaken COALESCE/CASE arm's
+                // initplan stays un-run.
+                // SAFETY: the per-tuple context object outlives the plan
+                // (reset-only; see ExprContextData::per_tuple).
+                unsafe { state.arm_result_mcx_raw(estate.ecxt(econtext).per_tuple_mcx()) };
+                let nd = executils::exec_eval_expr_with_subplans(state, estate, econtext)?;
                 (nd.value, nd.isnull)
             };
             if isnull {

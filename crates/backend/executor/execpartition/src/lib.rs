@@ -182,6 +182,8 @@ impl<'mcx> PartitionTupleRouting<'mcx> {
         // ExecFindPartition's default_index arm, execPartition.c).
         let mut pending_default_check = false;
         loop {
+            // execPartition.c:300: CHECK_FOR_INTERRUPTS() per level.
+            postgres_seams::check_for_interrupts::call()?;
             // C ExecFindPartition's per-level tupmap conversion.
             if self.dispatches[dispatch_idx].tupmap.is_some() {
                 let PartitionTupleRouting { dispatches, dispatch_slots, .. } = &mut *self;
@@ -263,15 +265,20 @@ impl<'mcx> PartitionTupleRouting<'mcx> {
                         values[i] =
                             exectuples::slot_getattr(cur_slot, attno as i32, &mut isnull[i]);
                     } else {
-                        let state = keystate_item
-                            .next()
-                            .expect("wrong number of partition key expressions");
+                        // execPartition.c:1337.
+                        let Some(state) = keystate_item.next() else {
+                            return Err(wrong_number_of_partition_key_expressions());
+                        };
                         let mut slots =
                             execexpr::EvalSlots { scan: Some(cur_slot), inner: None, outer: None };
                         let r = execexpr::exec_eval_expr(state, &mut slots)?;
                         values[i] = r.value;
                         isnull[i] = r.isnull;
                     }
+                }
+                // execPartition.c:1348: leftover expressions are the same error.
+                if keystate_item.next().is_some() {
+                    return Err(wrong_number_of_partition_key_expressions());
                 }
                 let Some(boundinfo) = pd.partdesc.boundinfo.as_ref() else {
                     return Err(no_partition_error(mcx, pd, &values, &isnull));
@@ -450,15 +457,17 @@ pub fn slot_value_description<'mcx>(
     let relid = rel.rd_id;
     let mut table_perm = false;
     let mut any_perm = false;
-    let mut userid = Oid::default();
+    // execMain.c:2415: with RLS active for the relation, return nothing at
+    // all (the per-column and modified-column arms below would leak).
     if rls_seams::check_enable_rls::call(relid, Oid::default(), true)?
-        != rls_seams::CheckEnableRls::RlsEnabled
+        == rls_seams::CheckEnableRls::RlsEnabled
     {
-        userid = miscinit_seams::get_user_id::call();
-        if aclchk_seams::pg_class_aclcheck_ext::call(relid, userid, ACL_SELECT)?.0 == ACLCHECK_OK {
-            table_perm = true;
-            any_perm = true;
-        }
+        return Ok(None);
+    }
+    let userid = miscinit_seams::get_user_id::call();
+    if aclchk_seams::pg_class_aclcheck_ext::call(relid, userid, ACL_SELECT)?.0 == ACLCHECK_OK {
+        table_perm = true;
+        any_perm = true;
     }
     exectuples::slot_getallattrs(slot);
     let mut buf = String::from("(");
@@ -576,13 +585,13 @@ fn get_partition_for_tuple(
                         0,
                         boundinfo.datum(last as usize, 0),
                         values[0],
-                    );
+                    )?;
                     if cmpval == 0 {
                         return Ok(boundinfo.indexes[last as usize]);
                     }
                 }
                 let mut equal = false;
-                bound_offset = list_bsearch(supfuncs, key, boundinfo, values[0], &mut equal);
+                bound_offset = list_bsearch(supfuncs, key, boundinfo, values[0], &mut equal)?;
                 if bound_offset >= 0 && equal {
                     part_index = boundinfo.indexes[bound_offset as usize];
                 }
@@ -600,7 +609,7 @@ fn get_partition_for_tuple(
                         &boundinfo.datums[last * w..(last + 1) * w],
                         &boundinfo.kind[last * w..(last + 1) * w],
                         values,
-                    );
+                    )?;
                     if cmpval == 0 {
                         return Ok(boundinfo.indexes[last + 1]);
                     }
@@ -612,7 +621,7 @@ fn get_partition_for_tuple(
                             &boundinfo.datums[m * w..(m + 1) * w],
                             &boundinfo.kind[m * w..(m + 1) * w],
                             values,
-                        );
+                        )?;
                         if cmpval > 0 {
                             return Ok(boundinfo.indexes[m]);
                         }
@@ -620,11 +629,17 @@ fn get_partition_for_tuple(
                 }
                 let mut equal = false;
                 bound_offset =
-                    range_datum_bsearch(supfuncs, key, boundinfo, values, &mut equal);
+                    range_datum_bsearch(supfuncs, key, boundinfo, values, &mut equal)?;
                 part_index = boundinfo.indexes[(bound_offset + 1) as usize];
             }
         }
-        other => panic!("unexpected partition strategy: {}", other as char),
+        // execPartition.c:1570: elog(ERROR, "unexpected partition strategy: %d").
+        other => {
+            return Err(Box::new(PgError::error(format!(
+                "unexpected partition strategy: {}",
+                other as i32
+            ))));
+        }
     }
 
     if part_index < 0 {
@@ -643,8 +658,17 @@ fn get_partition_for_tuple(
     Ok(part_index)
 }
 
+// execPartition.c:1337/1348.
+#[cold]
+#[inline(never)]
+fn wrong_number_of_partition_key_expressions() -> Box<PgError> {
+    Box::new(PgError::error("wrong number of partition key expressions"))
+}
+
 // FunctionCall2Coll over the dispatch-resolved supfunc (per-row path; the
-// partcache RefCell copies stay off it).
+// partcache RefCell copies stay off it). The support function's ereport
+// propagates unchanged (execPartition.c:1469 get_partition_for_tuple); a
+// NULL result is elog(ERROR, "function %u returned NULL") (fmgr.c:1149).
 #[inline]
 fn sup_cmp(
     supfuncs: &mut [FmgrInfo],
@@ -652,7 +676,7 @@ fn sup_cmp(
     col: usize,
     a: Datum,
     b: Datum,
-) -> i32 {
+) -> PgResult<i32> {
     // range_cmp (range-typed partition keys) detoasts through the result
     // mcx; arm the frame with call-lifetime scratch.
     let scratch = ::mcx::MemoryContext::new("partsupfunc cmp");
@@ -661,11 +685,14 @@ fn sup_cmp(
     unsafe { fcinfo.set_result_mcx(scratch.mcx()) };
     fcinfo.set_arg(0, a);
     fcinfo.set_arg(1, b);
-    let r = supfuncs[col]
-        .invoke(&mut fcinfo)
-        .unwrap_or_else(|e| panic!("partition support function failed: {e:?}"));
-    assert!(!fcinfo.isnull, "partition support function returned NULL");
-    r.as_i32()
+    let r = supfuncs[col].invoke(&mut fcinfo)?;
+    if fcinfo.isnull {
+        return Err(Box::new(PgError::error(format!(
+            "function {} returned NULL",
+            supfuncs[col].fn_oid
+        ))));
+    }
+    Ok(r.as_i32())
 }
 
 fn list_bsearch(
@@ -674,12 +701,12 @@ fn list_bsearch(
     boundinfo: &PartitionBoundInfoData<'_>,
     value: Datum,
     is_equal: &mut bool,
-) -> i32 {
+) -> PgResult<i32> {
     let mut lo: i32 = -1;
     let mut hi: i32 = boundinfo.ndatums as i32 - 1;
     while lo < hi {
         let mid = (lo + hi + 1) / 2;
-        let cmpval = sup_cmp(supfuncs, key, 0, boundinfo.datum(mid as usize, 0), value);
+        let cmpval = sup_cmp(supfuncs, key, 0, boundinfo.datum(mid as usize, 0), value)?;
         if cmpval <= 0 {
             lo = mid;
             *is_equal = cmpval == 0;
@@ -690,7 +717,7 @@ fn list_bsearch(
             hi = mid - 1;
         }
     }
-    lo
+    Ok(lo)
 }
 
 fn rbound_datum_cmp(
@@ -699,20 +726,20 @@ fn rbound_datum_cmp(
     rb_datums: &[Datum],
     rb_kind: &[i8],
     tuple_datums: &[Datum],
-) -> i32 {
+) -> PgResult<i32> {
     let mut cmpval = -1;
     for i in 0..tuple_datums.len() {
         if rb_kind[i] == KIND_MINVALUE {
-            return -1;
+            return Ok(-1);
         } else if rb_kind[i] == KIND_MAXVALUE {
-            return 1;
+            return Ok(1);
         }
-        cmpval = sup_cmp(supfuncs, key, i, rb_datums[i], tuple_datums[i]);
+        cmpval = sup_cmp(supfuncs, key, i, rb_datums[i], tuple_datums[i])?;
         if cmpval != 0 {
             break;
         }
     }
-    cmpval
+    Ok(cmpval)
 }
 
 fn range_datum_bsearch(
@@ -721,7 +748,7 @@ fn range_datum_bsearch(
     boundinfo: &PartitionBoundInfoData<'_>,
     values: &[Datum],
     is_equal: &mut bool,
-) -> i32 {
+) -> PgResult<i32> {
     let w = boundinfo.width;
     let mut lo: i32 = -1;
     let mut hi: i32 = boundinfo.ndatums as i32 - 1;
@@ -734,7 +761,7 @@ fn range_datum_bsearch(
             &boundinfo.datums[m * w..(m + 1) * w],
             &boundinfo.kind[m * w..(m + 1) * w],
             values,
-        );
+        )?;
         if cmpval <= 0 {
             lo = mid;
             *is_equal = cmpval == 0;
@@ -745,7 +772,7 @@ fn range_datum_bsearch(
             hi = mid - 1;
         }
     }
-    lo
+    Ok(lo)
 }
 
 // ExecBuildSlotPartitionKeyDescription + the "no partition found" report.
@@ -795,9 +822,10 @@ fn no_partition_error(
             .with_sqlstate(ERRCODE_CHECK_VIOLATION),
         );
     }
+    // ExecFindPartition passes maxfieldlen = 64 (execPartition.c:328).
+    const MAX_FIELD_LEN: usize = 64;
     let mut keydesc = String::from("(");
-    // pg_get_partkeydef_columns handles expression keys (C truncates values
-    // at maxfieldlen=64; standing residual here).
+    // pg_get_partkeydef_columns handles expression keys.
     let cols = ruleutils_seams::pg_get_partkeydef_columns::call(mcx, pd.rel.rd_id)
         .ok()
         .flatten()
@@ -825,7 +853,18 @@ fn no_partition_error(
             Ok(String::from_utf8_lossy(s.to_bytes()).into_owned())
         })()
         .unwrap_or_default();
-        keydesc.push_str(&out);
+        // execPartition.c:1684-1693: clip at maxfieldlen bytes on a
+        // character boundary (pg_mbcliplen) and append "...".
+        if out.len() <= MAX_FIELD_LEN {
+            keydesc.push_str(&out);
+        } else {
+            let mut end = MAX_FIELD_LEN;
+            while !out.is_char_boundary(end) {
+                end -= 1;
+            }
+            keydesc.push_str(&out[..end]);
+            keydesc.push_str("...");
+        }
     }
     keydesc.push(')');
     Box::new(

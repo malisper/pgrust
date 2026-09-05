@@ -5836,6 +5836,7 @@ dependencies = [
  "partcache",
  "partdesc",
  "partprune",
+ "postgres_seams",
  "rls_seams",
  "ruleutils_seams",
  "stack_depth_core",
