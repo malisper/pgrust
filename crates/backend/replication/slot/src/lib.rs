@@ -40,6 +40,14 @@ use types_tuple::NameData;
 
 pub const PG_REPLSLOT_DIR: &str = "pg_replslot";
 
+// wait_event_names.txt WaitEventIO rows (eventId = row order within the
+// section; slru does the same for its rows).
+const PG_WAIT_IO: u32 = 0x0A00_0000;
+const WAIT_EVENT_REPLICATION_SLOT_READ: u32 = PG_WAIT_IO + 46;
+const WAIT_EVENT_REPLICATION_SLOT_RESTORE_SYNC: u32 = PG_WAIT_IO + 47;
+const WAIT_EVENT_REPLICATION_SLOT_SYNC: u32 = PG_WAIT_IO + 48;
+const WAIT_EVENT_REPLICATION_SLOT_WRITE: u32 = PG_WAIT_IO + 49;
+
 // wait_event_names.txt IPC section index of ReplicationSlotDrop.
 const WAIT_EVENT_REPLICATION_SLOT_DROP: u32 = 0x0800_0000 + 49;
 
@@ -1608,7 +1616,18 @@ pub fn StartupReplicationSlots() -> PgResult<()> {
         }
     };
     for entry in entries {
-        let Ok(entry) = entry else { break };
+        // ReadDir -> ReadDirExtended(..., ERROR) (fd.c): a readdir failure
+        // ends startup, it never leaves the remaining slots unrestored.
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                return ereport(ERROR)
+                    .with_saved_errno(e.raw_os_error().unwrap_or(0))
+                    .errcode_for_file_access()
+                    .errmsg(format!("could not read directory \"{PG_REPLSLOT_DIR}\": %m"))
+                    .finish(loc("StartupReplicationSlots"));
+            }
+        };
         let file_name = entry.file_name();
         let Some(name) = file_name.to_str() else { continue };
         if name == "." || name == ".." {
@@ -1712,12 +1731,15 @@ fn SaveSlotToPath(slot: &'static ReplicationSlot, dir: &str, elevel: ErrorLevel)
     let slotdata = slot.with_mutex(|| unsafe { slot.data.get() });
     let image = ondisk::serialize_state_file(&slotdata);
 
+    fd::set_errno(0);
+    waitevent_seams::pgstat_report_wait_start::call(WAIT_EVENT_REPLICATION_SLOT_WRITE);
     // SAFETY: image is a live readable buffer of ON_DISK_SIZE bytes.
     if unsafe { libc::write(fd_, image.as_ptr().cast(), image.len()) } != image.len() as isize {
         let mut save_errno = errno::current_errno();
         if save_errno == 0 {
             save_errno = libc::ENOSPC;
         }
+        waitevent_seams::pgstat_report_wait_end::call();
         fd::CloseTransientFile(fd_);
         c_unlink(&tmppath);
         LWLockRelease(&slot.io_in_progress_lock)?;
@@ -1728,9 +1750,13 @@ fn SaveSlotToPath(slot: &'static ReplicationSlot, dir: &str, elevel: ErrorLevel)
             .finish(loc("SaveSlotToPath"))?;
         return Ok(());
     }
+    waitevent_seams::pgstat_report_wait_end::call();
 
+    // fsync the temporary file
+    waitevent_seams::pgstat_report_wait_start::call(WAIT_EVENT_REPLICATION_SLOT_SYNC);
     if fd::pg_fsync(fd_) != 0 {
         let save_errno = errno::current_errno();
+        waitevent_seams::pgstat_report_wait_end::call();
         fd::CloseTransientFile(fd_);
         c_unlink(&tmppath);
         LWLockRelease(&slot.io_in_progress_lock)?;
@@ -1741,6 +1767,7 @@ fn SaveSlotToPath(slot: &'static ReplicationSlot, dir: &str, elevel: ErrorLevel)
             .finish(loc("SaveSlotToPath"))?;
         return Ok(());
     }
+    waitevent_seams::pgstat_report_wait_end::call();
 
     if fd::CloseTransientFile(fd_) != 0 {
         let save_errno = errno::current_errno();
@@ -1788,17 +1815,12 @@ fn SaveSlotToPath(slot: &'static ReplicationSlot, dir: &str, elevel: ErrorLevel)
     Ok(())
 }
 
+// `name` is a pg_replslot directory entry (slot.c:2240): C builds the slot
+// paths from it as-is and takes the slot's name from the state file, so an
+// operator-placed directory under any name restores. The entry is one
+// readdir(3) component ("." / ".." already skipped), which cannot contain a
+// path separator, so the interpolations below cannot leave pg_replslot.
 fn RestoreSlotFromDisk(name: &str) -> PgResult<()> {
-    // Defense in depth: the slot name comes from an on-disk directory entry and
-    // is interpolated into pg_replslot/... paths below (temp-file unlink, state
-    // read, recursive rmtree). A crafted name (e.g. containing "/" or "..")
-    // could therefore escape the pg_replslot directory. Validate it with the
-    // same check applied to names arriving from SQL before it touches any path.
-    // (C trusts these names; the port's path interpolation makes this
-    // necessary.) A name failing validation raises a catchable error rather
-    // than being used in a path operation.
-    ReplicationSlotValidateName(name, ERROR)?;
-
     let slotdir = format!("{PG_REPLSLOT_DIR}/{name}");
     let tmppath = format!("{slotdir}/state.tmp");
 
@@ -1823,6 +1845,9 @@ fn RestoreSlotFromDisk(name: &str) -> PgResult<()> {
             .finish(loc("RestoreSlotFromDisk"));
     }
 
+    // Sync state file before we're reading from it. We might have crashed
+    // while it wasn't synced yet and we shouldn't continue on that basis.
+    waitevent_seams::pgstat_report_wait_start::call(WAIT_EVENT_REPLICATION_SLOT_RESTORE_SYNC);
     if fd::pg_fsync(fd_) != 0 {
         return ereport(PANIC)
             .with_saved_errno(errno::current_errno())
@@ -1830,15 +1855,18 @@ fn RestoreSlotFromDisk(name: &str) -> PgResult<()> {
             .errmsg(format!("could not fsync file \"{path}\": %m"))
             .finish(loc("RestoreSlotFromDisk"));
     }
+    waitevent_seams::pgstat_report_wait_end::call();
 
     g::StartCriticalSection();
     fd::fsync_fname(&slotdir, true)?;
     g::EndCriticalSection();
 
     let mut buf = [0u8; ON_DISK_SIZE];
+    waitevent_seams::pgstat_report_wait_start::call(WAIT_EVENT_REPLICATION_SLOT_READ);
     // SAFETY: buf is a live writable buffer of ON_DISK_SIZE bytes.
     let read_bytes =
         unsafe { libc::read(fd_, buf.as_mut_ptr().cast(), ON_DISK_CONSTANT_SIZE) } as i64;
+    waitevent_seams::pgstat_report_wait_end::call();
     if read_bytes != ON_DISK_CONSTANT_SIZE as i64 {
         if read_bytes < 0 {
             return ereport(PANIC)
@@ -1886,10 +1914,12 @@ fn RestoreSlotFromDisk(name: &str) -> PgResult<()> {
             .finish(loc("RestoreSlotFromDisk"));
     }
 
+    waitevent_seams::pgstat_report_wait_start::call(WAIT_EVENT_REPLICATION_SLOT_READ);
     // SAFETY: buf's tail holds `length` == PERSISTENT_DATA_SIZE bytes.
     let read_bytes = unsafe {
         libc::read(fd_, buf.as_mut_ptr().add(ON_DISK_CONSTANT_SIZE).cast(), length as usize)
     } as i64;
+    waitevent_seams::pgstat_report_wait_end::call();
     if read_bytes != length as i64 {
         if read_bytes < 0 {
             return ereport(PANIC)

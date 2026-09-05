@@ -20,6 +20,7 @@ mcx = { path = "../../../_support/mcx" }
 crc32c = { path = "../../../port/crc32c" }
 slot_seams = { path = "../slot_seams" }
 pgstat = { path = "../../utils/activity/pgstat" }
+waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
 walsender_config = { path = "../walsender_config" }
 walsender_seams = { path = "../walsender_seams" }
 ipc_seams = { path = "../../storage/ipc/ipc_seams" }
@@ -52,7 +53,6 @@ libc = "0.2"
 # twophase crate's test setup, minus its own state).
 pg_sema_seams = { path = "../../port/pg_sema_seams" }
 latch_seams = { path = "../../storage/ipc/latch_seams" }
-waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
 deadlock_seams = { path = "../../storage/lmgr/deadlock_seams" }
 pmsignal_seams = { path = "../../storage/ipc/pmsignal_seams" }
 lock_seams = { path = "../../storage/lmgr/lock_seams" }

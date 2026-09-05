@@ -189,6 +189,15 @@ fn invalidation_cause_names() {
 fn shmem_setup() {
     static SETUP: std::sync::Once = std::sync::Once::new();
     SETUP.call_once(|| {
+        // The file-state tests drive the real pg_replslot code paths, which
+        // address PG_REPLSLOT_DIR relative to the data directory (cwd).
+        let dir = std::env::temp_dir().join(format!("pgrust_slot_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(crate::PG_REPLSLOT_DIR)).unwrap();
+        std::env::set_current_dir(&dir).unwrap();
+        init_small::globals::SetDataDir(dir.to_str().unwrap());
+        init_small::globals::set_enableFsync(false);
+
         init_small::globals::SetMaxConnections(8);
         init_small::globals::set_max_worker_processes(2);
         init_small::globals::SetMaxBackends(17);
@@ -212,8 +221,8 @@ fn shmem_setup() {
         miscinit_seams::switch_to_shared_latch::set(|| {});
         miscinit_seams::switch_back_to_local_latch::set(|| {});
         waitevent_seams::pgstat_set_wait_event_storage::set(|_| {});
-        waitevent_seams::pgstat_report_wait_start::set(|_| {});
-        waitevent_seams::pgstat_report_wait_end::set(|| {});
+        waitevent_seams::pgstat_report_wait_start::set(|w| wait_log().push(w));
+        waitevent_seams::pgstat_report_wait_end::set(|| wait_log().push(0));
         waitevent_seams::pgstat_reset_wait_event_storage::set(|| {});
         ipc_seams::on_shmem_exit::set(|_, _| {});
         deadlock_seams::init_dead_lock_checking::set(|| Ok(()));
@@ -238,7 +247,15 @@ fn shmem_setup() {
         superuser_seams::superuser_arg::set(|_| Ok(false));
 
         walsender_config::init_seams();
-        guc_tables::vars::max_replication_slots.write(2);
+        guc_tables::vars::max_replication_slots.write(4);
+        // RestoreSlotFromDisk refuses a physical slot under wal_level < replica
+        // (xlog.c owns the cell; absent here, as XLOGbuffers below).
+        static WAL_LEVEL: std::sync::atomic::AtomicI32 =
+            std::sync::atomic::AtomicI32::new(transam_xlog::WAL_LEVEL_REPLICA);
+        guc_tables::vars::wal_level.install_if_absent(guc_tables::GucVarAccessors {
+            get: || WAL_LEVEL.load(std::sync::atomic::Ordering::Relaxed),
+            set: |v| WAL_LEVEL.store(v, std::sync::atomic::Ordering::Relaxed),
+        });
 
         lwlock::CreateLWLocks(false).unwrap();
         lmgr_proc::init_seams();
@@ -271,6 +288,7 @@ fn shmem_setup() {
 fn release_of_ephemeral_slot_leaves_the_dropped_entry_untouched() {
     use crate::{MyReplicationSlot, ReplicationSlotCtl, ReplicationSlotRelease, SetMyReplicationSlot};
 
+    let _array = slot_array_guard();
     shmem_setup();
     let s = &ReplicationSlotCtl()[0];
 
@@ -301,4 +319,162 @@ fn release_of_ephemeral_slot_leaves_the_dropped_entry_untouched() {
         assert_eq!(s.effective_xmin.get(), 1234);
         assert_eq!(s.inactive_since.get(), 0);
     }
+}
+
+// Serializes the tests that touch the shared slot array / pg_replslot.
+fn slot_array_guard() -> std::sync::MutexGuard<'static, ()> {
+    static SLOT_ARRAY: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    SLOT_ARRAY.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+// Wait-event recorder behind the waitevent seams (0 = pgstat_report_wait_end).
+fn wait_log() -> std::sync::MutexGuard<'static, Vec<u32>> {
+    static WAITS: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+    WAITS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+// wait_event_names.txt (18.6) WaitEventIO section, in file order: the
+// REPLICATION_SLOT_* rows are eventIds 46..49 of class PG_WAIT_IO.
+const PG_WAIT_IO: u32 = 0x0A00_0000;
+const WAIT_EVENT_REPLICATION_SLOT_READ: u32 = PG_WAIT_IO + 46;
+const WAIT_EVENT_REPLICATION_SLOT_RESTORE_SYNC: u32 = PG_WAIT_IO + 47;
+const WAIT_EVENT_REPLICATION_SLOT_SYNC: u32 = PG_WAIT_IO + 48;
+const WAIT_EVENT_REPLICATION_SLOT_WRITE: u32 = PG_WAIT_IO + 49;
+
+// The slot-IO subsequence of the recorded wait events: each REPLICATION_SLOT_*
+// start and the pgstat_report_wait_end (0) that closes it. Other classes
+// (lwlock waits from concurrent tests) are dropped.
+fn slot_io_waits() -> Vec<u32> {
+    let mut out = Vec::new();
+    let mut open = false;
+    for &w in wait_log().iter() {
+        if (WAIT_EVENT_REPLICATION_SLOT_READ..=WAIT_EVENT_REPLICATION_SLOT_WRITE).contains(&w) {
+            out.push(w);
+            open = true;
+        } else if w == 0 && open {
+            out.push(0);
+            open = false;
+        }
+    }
+    out
+}
+
+fn in_use_slot_names() -> Vec<String> {
+    crate::ReplicationSlotCtl()
+        .iter()
+        // SAFETY: single-threaded access under slot_array_guard.
+        .filter(|s| unsafe { s.in_use.get() })
+        // SAFETY: as above.
+        .map(|s| String::from_utf8_lossy(unsafe { s.data.get() }.name.name_str()).into_owned())
+        .collect()
+}
+
+fn release_all_slots() {
+    for s in crate::ReplicationSlotCtl() {
+        // SAFETY: single-threaded access under slot_array_guard.
+        unsafe {
+            s.in_use.set(false);
+            s.active_pid.set(0);
+            s.dirty.set(false);
+        }
+    }
+}
+
+fn physical_slot_data(name: &str) -> ReplicationSlotPersistentData {
+    let mut d = ReplicationSlotPersistentData::default();
+    d.name.namestrcpy(name);
+    d.persistency = RS_PERSISTENT;
+    d.database = types_core::InvalidOid;
+    d.restart_lsn = 0x0000_0001_0100_0000;
+    d
+}
+
+// slot.c:2208-2240 StartupReplicationSlots restores every non-".tmp"
+// directory entry of pg_replslot via RestoreSlotFromDisk, which (slot.c:2484)
+// builds the path from the directory-entry name as-is and takes the slot's
+// name from the state file — C never validates the entry name, so an
+// operator-restored copy under a name outside [a-z0-9_]{1,63} boots and shows
+// up as a second slot of the same name (audit fp-replication-slot FP-slot-3 /
+// fp-logical-reorderbuffer-p2 FP-reorderbuffer_p2-4: C lists fp3_s1 twice,
+// pgrust ERRORed "contains invalid character" in the startup process and the
+// postmaster shut down).
+#[test]
+fn startup_restores_every_pg_replslot_entry_by_state_file_name() {
+    let _array = slot_array_guard();
+    shmem_setup();
+    fd::InitFileAccess();
+
+    let image = serialize_state_file(&physical_slot_data("fp3_s1"));
+    for dir in ["fp3_s1", "fp3-s1"] {
+        let path = format!("{}/{dir}", crate::PG_REPLSLOT_DIR);
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(format!("{path}/state"), image).unwrap();
+    }
+
+    let r = crate::StartupReplicationSlots();
+    let names = in_use_slot_names();
+    release_all_slots();
+    for dir in ["fp3_s1", "fp3-s1"] {
+        let _ = std::fs::remove_dir_all(format!("{}/{dir}", crate::PG_REPLSLOT_DIR));
+    }
+
+    r.unwrap_or_else(|e| panic!("C 18.6 boots this pg_replslot (slot.c:2240): {e:?}"));
+    assert_eq!(names, ["fp3_s1", "fp3_s1"]);
+}
+
+// slot.c:2384-2422 SaveSlotToPath wraps the state-file write in
+// WAIT_EVENT_REPLICATION_SLOT_WRITE and its fsync in
+// WAIT_EVENT_REPLICATION_SLOT_SYNC; slot.c:2526-2583 RestoreSlotFromDisk wraps
+// the pre-read fsync in WAIT_EVENT_REPLICATION_SLOT_RESTORE_SYNC and each of the
+// two reads in WAIT_EVENT_REPLICATION_SLOT_READ (audit fp-replication-slot:
+// pgrust reported none of them, so pg_stat_activity never showed
+// ReplicationSlotWrite / ReplicationSlotSync during slot flushes).
+#[test]
+fn slot_state_file_io_reports_wait_events() {
+    let _array = slot_array_guard();
+    shmem_setup();
+    fd::InitFileAccess();
+
+    // A freshly allocated in-memory entry, as ReplicationSlotCreate leaves it
+    // just before CreateSlotOnDisk.
+    let s = crate::ReplicationSlotCtl()
+        .iter()
+        // SAFETY: single-threaded access under slot_array_guard.
+        .find(|s| !unsafe { s.in_use.get() })
+        .expect("a free slot entry");
+    // SAFETY: as above.
+    unsafe {
+        s.data.set(physical_slot_data("wsave"));
+        s.in_use.set(true);
+        s.active_pid.set(4242);
+    }
+
+    wait_log().clear();
+    let saved = crate::CreateSlotOnDisk(s);
+    let save_waits = slot_io_waits();
+
+    wait_log().clear();
+    let restored = crate::RestoreSlotFromDisk("wsave");
+    let restore_waits = slot_io_waits();
+
+    release_all_slots();
+    let _ = std::fs::remove_dir_all(format!("{}/wsave", crate::PG_REPLSLOT_DIR));
+
+    saved.unwrap();
+    restored.unwrap();
+    assert_eq!(
+        save_waits,
+        [WAIT_EVENT_REPLICATION_SLOT_WRITE, 0, WAIT_EVENT_REPLICATION_SLOT_SYNC, 0]
+    );
+    assert_eq!(
+        restore_waits,
+        [
+            WAIT_EVENT_REPLICATION_SLOT_RESTORE_SYNC,
+            0,
+            WAIT_EVENT_REPLICATION_SLOT_READ,
+            0,
+            WAIT_EVENT_REPLICATION_SLOT_READ,
+            0,
+        ]
+    );
 }
