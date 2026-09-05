@@ -4,17 +4,21 @@ use types_nodes::node_tree::Node;
 use types_nodes::nodes_enums::CmdType;
 use types_nodes::parsenodes::Query;
 use types_nodes::plannodes::PlannedStmt;
+use types_error::PgResult;
 use types_nodes::rawnodes::{RawStmt, SelectStmt};
 use types_nodes::NodeTag;
 
 use crate::loc;
 
-pub fn GetCommandLogLevel(parsetree: Node<'_>) -> i32 {
+// GetCommandLogLevel (utility.c): C ereports out of the EXPLAIN option probe
+// (defGetBoolean) and the EXECUTE look-through (FetchPreparedStatement), so
+// the level is a PgResult here and check_log_statement propagates it.
+pub fn GetCommandLogLevel(parsetree: Node<'_>) -> PgResult<i32> {
     use NodeTag::*;
-    match parsetree.node_tag() {
+    let lev = match parsetree.node_tag() {
         T_RawStmt => {
             let raw: &RawStmt<'_> = parsetree.as_variant().unwrap();
-            GetCommandLogLevel(raw.stmt.expect("RawStmt.stmt is NULL"))
+            GetCommandLogLevel(raw.stmt.expect("RawStmt.stmt is NULL"))?
         }
 
         T_InsertStmt | T_DeleteStmt | T_UpdateStmt | T_MergeStmt => LOGSTMT_MOD,
@@ -52,29 +56,39 @@ pub fn GetCommandLogLevel(parsetree: Node<'_>) -> i32 {
 
         T_PrepareStmt => {
             let stmt = parsetree.as_prepare_stmt().unwrap();
-            GetCommandLogLevel(stmt.query.expect("PREPARE has a query"))
+            GetCommandLogLevel(stmt.query.expect("PREPARE has a query"))?
         }
-        // C recurses into the entry's retained raw parse tree; plancache does
-        // not retain raw trees, which is C's own else-branch: LOGSTMT_ALL.
-        T_ExecuteStmt => LOGSTMT_ALL,
+
+        T_ExecuteStmt => {
+            // Look through an EXECUTE to the referenced stmt: the entry's
+            // retained raw parse tree (plansource->raw_parse_tree), else
+            // LOGSTMT_ALL (no such statement, or no raw tree retained).
+            let stmt = parsetree.as_execute_stmt().unwrap();
+            let ps = prepare::FetchPreparedStatement(stmt.name.unwrap_or(""), false)?;
+            match ps.and_then(|ps| plancache::CachedPlanRawParseTree(ps.plansource)) {
+                Some(raw) => GetCommandLogLevel(raw.stmt.expect("RawStmt.stmt is NULL"))?,
+                None => LOGSTMT_ALL,
+            }
+        }
 
         T_ExplainStmt => {
             let stmt = parsetree.as_explain_stmt().unwrap();
             let mut analyze = false;
+            // Look through an EXPLAIN ANALYZE to the contained stmt.
             for opt in stmt.options.iter() {
                 let opt = opt.as_def_elem().expect("EXPLAIN options are DefElems");
                 if opt.defname == Some("analyze") {
-                    // C ereports through this probe; here a malformed value
-                    // panics and the statement itself raises the real error.
-                    analyze = explain::defGetBoolean(opt)
-                        .expect("analyze option requires a Boolean value");
+                    // C ereports (42601 "analyze requires a Boolean value")
+                    // out of this probe, ahead of parse analysis.
+                    analyze = explain::defGetBoolean(opt)?;
                 }
                 // don't break: explain.c will use the last value.
             }
             if analyze {
-                return GetCommandLogLevel(stmt.query.expect("ExplainStmt.query is NULL"));
+                GetCommandLogLevel(stmt.query.expect("ExplainStmt.query is NULL"))?
+            } else {
+                LOGSTMT_ALL
             }
-            LOGSTMT_ALL
         }
 
         T_CopyStmt => {
@@ -173,12 +187,12 @@ pub fn GetCommandLogLevel(parsetree: Node<'_>) -> i32 {
 
         T_PlannedStmt => {
             let stmt: &PlannedStmt<'_> = parsetree.as_variant().unwrap();
-            level_for_command_type(stmt.commandType, stmt.utilityStmt)
+            level_for_command_type(stmt.commandType, stmt.utilityStmt)?
         }
 
         T_Query => {
             let stmt: &Query<'_> = parsetree.as_variant().unwrap();
-            level_for_command_type(stmt.commandType, stmt.utilityStmt)
+            level_for_command_type(stmt.commandType, stmt.utilityStmt)?
         }
 
         other => {
@@ -187,14 +201,15 @@ pub fn GetCommandLogLevel(parsetree: Node<'_>) -> i32 {
                 .finish(loc("GetCommandLogLevel"));
             LOGSTMT_ALL
         }
-    }
+    };
+    Ok(lev)
 }
 
-fn level_for_command_type(command_type: CmdType, utility_stmt: Option<Node<'_>>) -> i32 {
+fn level_for_command_type(command_type: CmdType, utility_stmt: Option<Node<'_>>) -> PgResult<i32> {
     match command_type {
-        CmdType::CMD_SELECT => LOGSTMT_ALL,
+        CmdType::CMD_SELECT => Ok(LOGSTMT_ALL),
         CmdType::CMD_UPDATE | CmdType::CMD_INSERT | CmdType::CMD_DELETE | CmdType::CMD_MERGE => {
-            LOGSTMT_MOD
+            Ok(LOGSTMT_MOD)
         }
         CmdType::CMD_UTILITY => {
             GetCommandLogLevel(utility_stmt.expect("CMD_UTILITY with NULL utilityStmt"))
@@ -203,7 +218,7 @@ fn level_for_command_type(command_type: CmdType, utility_stmt: Option<Node<'_>>)
             let _ = ::elog::ereport(WARNING)
                 .errmsg(format!("unrecognized commandType: {}", other as i32))
                 .finish(loc("GetCommandLogLevel"));
-            LOGSTMT_ALL
+            Ok(LOGSTMT_ALL)
         }
     }
 }

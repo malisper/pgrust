@@ -936,7 +936,7 @@ pub fn exec_execute_message<'mcx>(
     let execute_is_fetch = !portal.borrow().atStart;
 
     let mut was_logged = false;
-    if check_log_statement_planned(&portal) {
+    if check_log_statement_planned(&portal)? {
         let verb = if execute_is_fetch { "execute fetch from" } else { "execute" };
         let sep = if portal_name.is_empty() { "" } else { "/" };
         ereport(LOG)
@@ -1029,37 +1029,42 @@ pub fn exec_execute_message<'mcx>(
 // check_log_statement (postgres.c), PlannedStmt-list flavor; the per-stmt
 // probe is GetCommandLogLevel's T_PlannedStmt arm inlined (no Node wrapper
 // exists for a bare PlannedStmt).
-fn check_log_statement_planned(portal: &Portal<'static>) -> bool {
+fn check_log_statement_planned(portal: &Portal<'static>) -> PgResult<bool> {
     use guc_tables::consts::{LOGSTMT_ALL, LOGSTMT_NONE};
     let log_statement = guc_tables::backing::log_statement();
 
     if log_statement == LOGSTMT_NONE {
-        return false;
+        return Ok(false);
     }
     if log_statement == LOGSTMT_ALL {
-        return true;
+        return Ok(true);
     }
 
     let stmts = portal.borrow().stmts;
     if stmts.is_null() {
-        return false;
+        return Ok(false);
     }
     pquery::stmt_list::with(stmts, |stmts| {
-        stmts.iter().any(|stmt| planned_stmt_log_level(stmt) <= log_statement)
+        for stmt in stmts.iter() {
+            if planned_stmt_log_level(stmt)? <= log_statement {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     })
 }
 
-fn planned_stmt_log_level(stmt: &PlannedStmt<'_>) -> i32 {
+fn planned_stmt_log_level(stmt: &PlannedStmt<'_>) -> PgResult<i32> {
     use guc_tables::consts::{LOGSTMT_ALL, LOGSTMT_MOD};
     match stmt.commandType {
-        CmdType::CMD_SELECT => LOGSTMT_ALL,
+        CmdType::CMD_SELECT => Ok(LOGSTMT_ALL),
         CmdType::CMD_INSERT | CmdType::CMD_UPDATE | CmdType::CMD_DELETE | CmdType::CMD_MERGE => {
-            LOGSTMT_MOD
+            Ok(LOGSTMT_MOD)
         }
         CmdType::CMD_UTILITY => utility_seams::get_command_log_level::call(
             stmt.utilityStmt.expect("CMD_UTILITY stmt has utilityStmt"),
         ),
-        _ => LOGSTMT_ALL,
+        _ => Ok(LOGSTMT_ALL),
     }
 }
 

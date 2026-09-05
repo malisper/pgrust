@@ -26,7 +26,9 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    pub fn get_command_log_level(parsetree: Node<'_>) -> i32
+    // GetCommandLogLevel (utility.c): errors out of the EXPLAIN option probe
+    // and the EXECUTE look-through, as C ereports there.
+    pub fn get_command_log_level(parsetree: Node<'_>) -> PgResult<i32>
 );
 
 seam_core::seam!(

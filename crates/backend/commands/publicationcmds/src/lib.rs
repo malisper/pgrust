@@ -870,11 +870,13 @@ fn PublicationDropSchemas(mcx: Mcx<'_>, pubid: Oid, schemas: &[Oid], missing_ok:
     Ok(())
 }
 
+// CreatePublication (publicationcmds.c): returns the publication's address
+// for ProcessUtilitySlow's event-trigger collection tail.
 pub fn CreatePublication<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &CreatePublicationStmt<'mcx>,
     query_string: &str,
-) -> PgResult<()> {
+) -> PgResult<ObjectAddress> {
     let pubname = stmt.pubname.expect("CreatePublicationStmt.pubname");
 
     let aclresult = aclchk::object_aclcheck(
@@ -983,7 +985,7 @@ pub fn CreatePublication<'mcx>(
             ))?;
     }
 
-    Ok(())
+    Ok(ObjectAddress::set(PublicationRelationId, puboid))
 }
 
 struct PubTupleFields {

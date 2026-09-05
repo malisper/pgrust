@@ -449,7 +449,7 @@ pub fn exec_simple_query<'mcx>(mcx: Mcx<'mcx>, query_string: &'mcx str) -> PgRes
     let parsetree_list = pg_parse_query(mcx, query_string)?;
     crate::stmt_trace::probe("q.parse");
 
-    if check_log_statement(&parsetree_list) {
+    if check_log_statement(&parsetree_list)? {
         ereport(LOG)
             .errmsg(format!("statement: {query_string}"))
             .errhidestmt(true)
@@ -700,25 +700,27 @@ pub(crate) fn IsTransactionExitStmt(parsetree: Option<Node<'_>>) -> bool {
 
 use crate::extended_query::drop_unnamed_stmt;
 
-fn check_log_statement(stmt_list: &PgVec<'_, RawStmt<'_>>) -> bool {
+// check_log_statement (postgres.c): GetCommandLogLevel ereports out of the
+// EXPLAIN option probe and the EXECUTE look-through, so the probe is fallible.
+fn check_log_statement(stmt_list: &PgVec<'_, RawStmt<'_>>) -> PgResult<bool> {
     use guc_tables::consts::{LOGSTMT_ALL, LOGSTMT_NONE};
     let log_statement = guc_tables::backing::log_statement();
 
     if log_statement == LOGSTMT_NONE {
-        return false;
+        return Ok(false);
     }
     if log_statement == LOGSTMT_ALL {
-        return true;
+        return Ok(true);
     }
 
     for raw in stmt_list.iter() {
         let Some(stmt) = raw.stmt else { continue };
-        if utility_seams::get_command_log_level::call(stmt) <= log_statement {
-            return true;
+        if utility_seams::get_command_log_level::call(stmt)? <= log_statement {
+            return Ok(true);
         }
     }
 
-    false
+    Ok(false)
 }
 
 // check_log_duration (postgres.c:2427), full C shape: log_min_duration_sample

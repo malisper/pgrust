@@ -130,13 +130,13 @@ fn command_log_levels() {
     let mcx = ctx.mcx();
 
     let select = Node::mk(mcx, SelectStmt::default()).unwrap();
-    assert_eq!(GetCommandLogLevel(select), LOGSTMT_ALL);
+    assert_eq!(GetCommandLogLevel(select).unwrap(), LOGSTMT_ALL);
 
-    assert_eq!(GetCommandLogLevel(trans_node(&ctx, TRANS_STMT_COMMIT)), LOGSTMT_ALL);
+    assert_eq!(GetCommandLogLevel(trans_node(&ctx, TRANS_STMT_COMMIT)).unwrap(), LOGSTMT_ALL);
 
     let insert_query =
         Node::mk(mcx, Query { commandType: CmdType::CMD_INSERT, ..Query::default() }).unwrap();
-    assert_eq!(GetCommandLogLevel(insert_query), LOGSTMT_MOD);
+    assert_eq!(GetCommandLogLevel(insert_query).unwrap(), LOGSTMT_MOD);
 
     let util_query = Node::mk(
         mcx,
@@ -147,20 +147,20 @@ fn command_log_levels() {
         },
     )
     .unwrap();
-    assert_eq!(GetCommandLogLevel(util_query), LOGSTMT_ALL);
+    assert_eq!(GetCommandLogLevel(util_query).unwrap(), LOGSTMT_ALL);
 
     let copy_from = Node::mk(
         mcx,
         types_nodes::parsenodes::CopyStmt { is_from: true, ..Default::default() },
     )
     .unwrap();
-    assert_eq!(GetCommandLogLevel(copy_from), LOGSTMT_MOD);
+    assert_eq!(GetCommandLogLevel(copy_from).unwrap(), LOGSTMT_MOD);
     let copy_to = Node::mk(
         mcx,
         types_nodes::parsenodes::CopyStmt { is_from: false, ..Default::default() },
     )
     .unwrap();
-    assert_eq!(GetCommandLogLevel(copy_to), LOGSTMT_ALL);
+    assert_eq!(GetCommandLogLevel(copy_to).unwrap(), LOGSTMT_ALL);
 }
 
 #[test]
@@ -312,7 +312,10 @@ fn seams_installed() {
     let ctx = MemoryContext::new("t");
     let node = trans_node(&ctx, TRANS_STMT_BEGIN);
     assert_eq!(utility_seams::create_command_tag::call(node), CMDTAG_BEGIN);
-    assert_eq!(utility_seams::get_command_log_level::call(node), guc_tables::consts::LOGSTMT_ALL);
+    assert_eq!(
+        utility_seams::get_command_log_level::call(node).unwrap(),
+        guc_tables::consts::LOGSTMT_ALL
+    );
     assert!(!utility_seams::utility_returns_tuples::call(node));
     assert!(utility_seams::utility_tuple_descriptor::call(node).unwrap().is_none());
     assert!(utility_seams::process_utility::is_installed());
@@ -470,7 +473,7 @@ fn explain_log_level_and_descriptor() {
     )
     .unwrap();
     // Plain EXPLAIN never recurses; EXPLAIN ANALYZE takes the inner level.
-    assert_eq!(GetCommandLogLevel(plain), LOGSTMT_ALL);
+    assert_eq!(GetCommandLogLevel(plain).unwrap(), LOGSTMT_ALL);
 
     let analyze = Node::mk(
         mcx,
@@ -485,7 +488,7 @@ fn explain_log_level_and_descriptor() {
         },
     )
     .unwrap();
-    assert_eq!(GetCommandLogLevel(analyzed), LOGSTMT_MOD);
+    assert_eq!(GetCommandLogLevel(analyzed).unwrap(), LOGSTMT_MOD);
 
     assert!(UtilityReturnsTuples(plain));
     let desc = UtilityTupleDescriptor(plain).unwrap().unwrap();
@@ -519,4 +522,68 @@ fn fetch_stmt_tag_returns_and_descriptor() {
     assert_eq!(CreateCommandTag(mv), CMDTAG_MOVE);
     assert!(!UtilityReturnsTuples(mv));
     assert!(UtilityTupleDescriptor(mv).unwrap().is_none());
+}
+
+// CreateCommandTag (utility.c:2905) T_CreateTableAsStmt: the objtype switch
+// has a `default: tag = CMDTAG_UNKNOWN` arm. Only internal AST construction
+// reaches it (the grammar builds OBJECT_TABLE / OBJECT_MATVIEW), but C never
+// aborts there.
+#[test]
+fn create_table_as_tag_covers_every_objtype() {
+    use types_nodes::parsenodes::ObjectType;
+    use types_nodes::rawnodes::CreateTableAsStmt;
+
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mk = |objtype, is_select_into| {
+        Node::mk(
+            mcx,
+            CreateTableAsStmt { objtype, is_select_into, ..CreateTableAsStmt::default() },
+        )
+        .unwrap()
+    };
+    assert_eq!(CreateCommandTag(mk(ObjectType::OBJECT_TABLE, false)), CMDTAG_CREATE_TABLE_AS);
+    assert_eq!(CreateCommandTag(mk(ObjectType::OBJECT_TABLE, true)), CMDTAG_SELECT_INTO);
+    assert_eq!(
+        CreateCommandTag(mk(ObjectType::OBJECT_MATVIEW, false)),
+        CMDTAG_CREATE_MATERIALIZED_VIEW
+    );
+    assert_eq!(CreateCommandTag(mk(ObjectType::OBJECT_VIEW, false)), CMDTAG_UNKNOWN);
+    assert_eq!(CreateCommandTag(mk(ObjectType::OBJECT_SEQUENCE, true)), CMDTAG_UNKNOWN);
+}
+
+// GetCommandLogLevel (utility.c:3545) T_ExplainStmt: the ANALYZE probe is
+// defGetBoolean, so a non-Boolean value is C's 42601 raised out of the
+// probe (check_log_statement runs it before parse analysis). And
+// T_ExecuteStmt (utility.c:3382): an unknown statement name is LOGSTMT_ALL
+// (FetchPreparedStatement with throw = false).
+#[test]
+fn log_level_explain_probe_raises_c_syntax_error() {
+    use guc_tables::consts::LOGSTMT_ALL;
+    use types_nodes::parsenodes::{DefElem, ExecuteStmt, ExplainStmt};
+
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let select = Node::mk(mcx, SelectStmt::default()).unwrap();
+    let foo = Node::mk(mcx, types_nodes::String { sval: "foo" }).unwrap();
+    let analyze = Node::mk(
+        mcx,
+        DefElem { defname: Some("analyze"), arg: Some(foo), ..DefElem::default() },
+    )
+    .unwrap();
+    let explain = Node::mk(
+        mcx,
+        ExplainStmt {
+            query: Some(select),
+            options: types_nodes::list::NodeList::make1(mcx, analyze).unwrap(),
+        },
+    )
+    .unwrap();
+    let err = GetCommandLogLevel(explain).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_SYNTAX_ERROR);
+    assert_eq!(err.message(), "analyze requires a Boolean value");
+
+    let exec =
+        Node::mk(mcx, ExecuteStmt { name: Some("b093_nosuch"), ..ExecuteStmt::default() }).unwrap();
+    assert_eq!(GetCommandLogLevel(exec).unwrap(), LOGSTMT_ALL);
 }

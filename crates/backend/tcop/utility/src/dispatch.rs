@@ -38,33 +38,6 @@ fn set_query_completion(qc: &mut Option<&mut QueryCompletion>, tag: types_core::
     }
 }
 
-// Uncollected command types stay loud instead of silently missing from
-// pg_event_trigger_ddl_commands. C collects every one of these via
-// EventTriggerCollectSimpleCommand (event_trigger.c) and never errors here;
-// porting collection per command type is the event-trigger-collection lane.
-// Until then the refusal is a clean 0A000, not a panic: it fires only while
-// an event trigger with ddl_command_end/sql_drop is active, and erroring
-// aborts the (sub)transaction, so no half-collected DDL escapes.
-fn collect_gap(what: &str) -> PgResult<()> {
-    if event_trigger::EventTriggerCollectionActive() {
-        return Err(Box::new(
-            ::elog::ereport(types_error::ERROR)
-                .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
-                .errmsg(format!(
-                    "{what} is not supported while an event trigger with a \
-                     ddl_command_end or sql_drop tag exists"
-                ))
-                .errdetail(
-                    "Collecting this command for pg_event_trigger_ddl_commands() is not \
-                     implemented yet; the command is refused rather than firing the \
-                     trigger with it missing.",
-                )
-                .into_error(),
-        ));
-    }
-    Ok(())
-}
-
 // ProcessUtility_hook (hook-surface.md section 2): enter/leave pair so a
 // consumer (pg_stat_statements) can wrap the call with timing, zero the
 // pstmt queryId, and track nesting. The leave fires on the error path too
@@ -1157,18 +1130,12 @@ fn slow_switch<'mcx>(
         }
 
         T_RenameStmt => {
-            // C: address = ExecRenameStmt (alter.c); arms without a ported
-            // address surface stay loud under active collection.
+            // C: address = ExecRenameStmt (alter.c), collected by the shared
+            // tail (utility.c:1780).
             let stmt = parsetree
                 .as_variant::<types_nodes::parsenodes::RenameStmt>()
                 .expect("RenameStmt");
-            match exec_rename_stmt_inner(mcx, stmt)? {
-                Some(address) => Ok(Some(address)),
-                None => {
-                    collect_gap("RENAME")?;
-                    Ok(None)
-                }
-            }
+            Ok(Some(exec_rename_stmt_inner(mcx, stmt)?))
         }
 
         T_DropStmt => {
@@ -1875,10 +1842,9 @@ fn slow_switch<'mcx>(
                 >(stmt)
             };
             // C: address = CreatePublication(...), collected by the shared
-            // tail. pgrust's CreatePublication returns (), so no address is
-            // available to stash from here (see publicationcmds).
-            commands_publicationcmds::CreatePublication(mcx, stmt, source_text)?;
-            Ok(None)
+            // tail (utility.c:1861).
+            let address = commands_publicationcmds::CreatePublication(mcx, stmt, source_text)?;
+            Ok(Some(address))
         }
         T_AlterPublicationStmt => {
             let stmt = parsetree
@@ -2155,27 +2121,23 @@ fn exec_rename_stmt<'mcx>(mcx: Mcx<'mcx>, parsetree: Node<'_>) -> PgResult<()> {
     exec_rename_stmt_inner(mcx, stmt).map(|_| ())
 }
 
-// C ExecRenameStmt returns the renamed object's address for the collection
-// tail; arms whose ports do not surface an address yet return None (the
-// T_RenameStmt dispatch arm stays loud for those under active collection).
+// ExecRenameStmt (alter.c): every arm returns the renamed object's address
+// for the collection tail (InvalidObjectAddress for a missing_ok skip).
 fn exec_rename_stmt_inner<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &types_nodes::parsenodes::RenameStmt<'_>,
-) -> PgResult<Option<ObjectAddress>> {
-    match stmt.renameType {
+) -> PgResult<ObjectAddress> {
+    let address = match stmt.renameType {
         types_nodes::parsenodes::ObjectType::OBJECT_DATABASE => {
-            dbcommands::RenameDatabase(
+            let dbid = dbcommands::RenameDatabase(
                 mcx,
                 stmt.subname.expect("RENAME DATABASE subname"),
                 stmt.newname.expect("RENAME DATABASE newname"),
             )?;
+            ObjectAddress::set(types_core::DATABASE_RELATION_ID, dbid)
         }
-        types_nodes::parsenodes::ObjectType::OBJECT_TABLE => {
-            tablecmds::RenameRelation(mcx, stmt)?;
-        }
-        types_nodes::parsenodes::ObjectType::OBJECT_COLUMN => {
-            tablecmds::renameatt(mcx, stmt)?;
-        }
+        types_nodes::parsenodes::ObjectType::OBJECT_TABLE => tablecmds::RenameRelation(mcx, stmt)?,
+        types_nodes::parsenodes::ObjectType::OBJECT_COLUMN => tablecmds::renameatt(mcx, stmt)?,
         types_nodes::parsenodes::ObjectType::OBJECT_POLICY => {
             // Retention contract as unify_stmt_lifetime.
             let stmt = unsafe {
@@ -2184,7 +2146,7 @@ fn exec_rename_stmt_inner<'mcx>(
                     &types_nodes::parsenodes::RenameStmt<'mcx>,
                 >(stmt)
             };
-            return Ok(Some(commands_policy::rename_policy(mcx, stmt)?));
+            commands_policy::rename_policy(mcx, stmt)?
         }
         types_nodes::parsenodes::ObjectType::OBJECT_TRIGGER => {
             // Retention contract as unify_stmt_lifetime.
@@ -2194,10 +2156,10 @@ fn exec_rename_stmt_inner<'mcx>(
                     &types_nodes::parsenodes::RenameStmt<'mcx>,
                 >(stmt)
             };
-            trigger::renametrig(mcx, stmt)?;
+            trigger::renametrig(mcx, stmt)?
         }
         types_nodes::parsenodes::ObjectType::OBJECT_TABCONSTRAINT => {
-            tablecmds::RenameConstraint(mcx, stmt)?;
+            tablecmds::RenameConstraint(mcx, stmt)?
         }
         types_nodes::parsenodes::ObjectType::OBJECT_RULE => {
             // Retention contract as unify_stmt_lifetime.
@@ -2221,7 +2183,7 @@ fn exec_rename_stmt_inner<'mcx>(
                 &rv,
                 stmt.subname.expect("RenameStmt.subname"),
                 stmt.newname.expect("RenameStmt.newname"),
-            )?;
+            )?
         }
         types_nodes::parsenodes::ObjectType::OBJECT_AGGREGATE
         | types_nodes::parsenodes::ObjectType::OBJECT_COLLATION
@@ -2249,18 +2211,16 @@ fn exec_rename_stmt_inner<'mcx>(
                     &types_nodes::parsenodes::RenameStmt<'mcx>,
                 >(stmt)
             };
-            return Ok(Some(commands_alter::ExecRenameStmt_generic(mcx, stmt)?));
+            commands_alter::ExecRenameStmt_generic(mcx, stmt)?
         }
         types_nodes::parsenodes::ObjectType::OBJECT_INDEX
         | types_nodes::parsenodes::ObjectType::OBJECT_SEQUENCE
         | types_nodes::parsenodes::ObjectType::OBJECT_VIEW
         | types_nodes::parsenodes::ObjectType::OBJECT_MATVIEW
         | types_nodes::parsenodes::ObjectType::OBJECT_FOREIGN_TABLE => {
-            tablecmds::RenameRelation(mcx, stmt)?;
+            tablecmds::RenameRelation(mcx, stmt)?
         }
-        types_nodes::parsenodes::ObjectType::OBJECT_ATTRIBUTE => {
-            tablecmds::renameatt(mcx, stmt)?;
-        }
+        types_nodes::parsenodes::ObjectType::OBJECT_ATTRIBUTE => tablecmds::renameatt(mcx, stmt)?,
         types_nodes::parsenodes::ObjectType::OBJECT_DOMAIN
         | types_nodes::parsenodes::ObjectType::OBJECT_TYPE => {
             // Retention contract as unify_stmt_lifetime.
@@ -2270,7 +2230,7 @@ fn exec_rename_stmt_inner<'mcx>(
                     &types_nodes::parsenodes::RenameStmt<'mcx>,
                 >(stmt)
             };
-            typecmds::RenameType(mcx, stmt)?;
+            typecmds::RenameType(mcx, stmt)?
         }
         types_nodes::parsenodes::ObjectType::OBJECT_DOMCONSTRAINT => {
             // Retention contract as unify_stmt_lifetime.
@@ -2280,21 +2240,23 @@ fn exec_rename_stmt_inner<'mcx>(
                     &types_nodes::parsenodes::RenameStmt<'mcx>,
                 >(stmt)
             };
-            typecmds::RenameDomainConstraint(mcx, stmt)?;
+            typecmds::RenameDomainConstraint(mcx, stmt)?
         }
         types_nodes::parsenodes::ObjectType::OBJECT_TABLESPACE => {
-            commands_tablespace::RenameTableSpace(
+            let spcid = commands_tablespace::RenameTableSpace(
                 mcx,
                 stmt.subname.expect("RenameStmt.subname"),
                 stmt.newname.expect("RenameStmt.newname"),
             )?;
+            ObjectAddress::set(commands_tablespace::TableSpaceRelationId, spcid)
         }
         types_nodes::parsenodes::ObjectType::OBJECT_SCHEMA => {
-            schemacmds::RenameSchema(
+            let nspid = schemacmds::RenameSchema(
                 mcx,
                 stmt.subname.expect("RenameStmt.subname"),
                 stmt.newname.expect("RenameStmt.newname"),
             )?;
+            ObjectAddress::set(catalog::NamespaceRelationId, nspid)
         }
         types_nodes::parsenodes::ObjectType::OBJECT_ROLE => {
             let roleid = user::RenameRole(
@@ -2302,7 +2264,7 @@ fn exec_rename_stmt_inner<'mcx>(
                 stmt.subname.expect("RenameStmt.subname"),
                 stmt.newname.expect("RenameStmt.newname"),
             )?;
-            return Ok(Some(ObjectAddress::set(catalog::AuthIdRelationId, roleid)));
+            ObjectAddress::set(catalog::AuthIdRelationId, roleid)
         }
         other => {
             // C ExecRenameStmt's default arm (alter.c REL_18_3:
@@ -2313,8 +2275,8 @@ fn exec_rename_stmt_inner<'mcx>(
                 "unrecognized rename stmt type: {other:?}"
             ))));
         }
-    }
-    Ok(None)
+    };
+    Ok(address)
 }
 
 fn exec_create_stats_stmt<'mcx>(
@@ -2422,10 +2384,12 @@ fn exec_index_stmt<'mcx>(
                 && relkind != types_rel::RELKIND_PARTITIONED_TABLE
                 && relkind != types_rel::RELKIND_FOREIGN_TABLE
             {
-                panic!(
+                // C elog(ERROR) (utility.c:1512): an internal error, never
+                // an abort.
+                return Err(Box::new(types_error::PgError::error(format!(
                     "unexpected relkind \"{}\" on partition \"{}\"",
                     relkind as char, rv.relname
-                );
+                ))));
             }
             if relkind == types_rel::RELKIND_FOREIGN_TABLE && (stmt.unique || stmt.primary) {
                 return Err(Box::new(

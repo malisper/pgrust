@@ -1830,6 +1830,12 @@ pub fn CachedPlanQueryString(h: CachedPlanSourceHandle) -> &'static str {
     with_source(h, |src| src.query_string)
 }
 
+// plansource->raw_parse_tree: the retained raw statement (None for a source
+// created from an already-analyzed Query, as C's NULL).
+pub fn CachedPlanRawParseTree(h: CachedPlanSourceHandle) -> Option<&'static RawStmt<'static>> {
+    with_source(h, |src| src.raw_parse_tree)
+}
+
 pub fn CachedPlanNumParams(h: CachedPlanSourceHandle) -> usize {
     with_source(h, |src| src.param_types.len())
 }

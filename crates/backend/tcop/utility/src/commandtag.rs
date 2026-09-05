@@ -256,7 +256,8 @@ pub fn CreateCommandTag(parsetree: Node<'_>) -> CommandTag {
                 types_nodes::parsenodes::ObjectType::OBJECT_MATVIEW => {
                     CMDTAG_CREATE_MATERIALIZED_VIEW
                 }
-                other => panic!("unexpected CreateTableAsStmt.objtype {other:?}"),
+                // C's default arm (utility.c:2905).
+                _ => CMDTAG_UNKNOWN,
             }
         }
         T_RefreshMatViewStmt => CMDTAG_REFRESH_MATERIALIZED_VIEW,

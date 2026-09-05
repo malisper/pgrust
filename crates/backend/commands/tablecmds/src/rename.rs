@@ -3,7 +3,8 @@
 // renames.
 use datum::Datum;
 use mcx::Mcx;
-use types_core::{InvalidOid, Oid, RELATION_RELATION_ID};
+use pg_depend::ObjectAddress;
+use types_core::{InvalidOid, Oid, CONSTRAINT_RELATION_ID, RELATION_RELATION_ID};
 use types_error::{
     PgError, PgResult, ERRCODE_DEPENDENT_OBJECTS_STILL_EXIST, ERRCODE_DUPLICATE_TABLE,
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_UNDEFINED_COLUMN,
@@ -183,7 +184,9 @@ pub(crate) fn find_typed_table_dependencies<'mcx>(
 }
 
 // renameatt: ALTER TABLE ... RENAME [COLUMN] ... TO ...
-pub fn renameatt<'mcx>(mcx: Mcx<'mcx>, stmt: &RenameStmt<'_>) -> PgResult<()> {
+// renameatt (tablecmds.c): returns the column's address (relid, attnum) for
+// the event-trigger collection tail; InvalidObjectAddress on a missing_ok skip.
+pub fn renameatt<'mcx>(mcx: Mcx<'mcx>, stmt: &RenameStmt<'_>) -> PgResult<ObjectAddress> {
     let relid = rename_lookup_rangevar(
         mcx,
         stmt.relation.expect("RenameStmt.relation"),
@@ -198,9 +201,9 @@ pub fn renameatt<'mcx>(mcx: Mcx<'mcx>, stmt: &RenameStmt<'_>) -> PgResult<()> {
             ),
             None,
         )?;
-        return Ok(());
+        return Ok(ObjectAddress::set(InvalidOid, InvalidOid));
     }
-    renameatt_internal(
+    let attnum = renameatt_internal(
         mcx,
         relid,
         stmt.subname.expect("RenameStmt.subname"),
@@ -209,7 +212,8 @@ pub fn renameatt<'mcx>(mcx: Mcx<'mcx>, stmt: &RenameStmt<'_>) -> PgResult<()> {
         false,
         0,
         stmt.behavior,
-    )
+    )?;
+    Ok(ObjectAddress::sub_set(RELATION_RELATION_ID, relid, attnum as i32))
 }
 
 fn renameatt_internal<'mcx>(
@@ -221,7 +225,7 @@ fn renameatt_internal<'mcx>(
     recursing: bool,
     expected_parents: i32,
     behavior: DropBehavior,
-) -> PgResult<()> {
+) -> PgResult<i16> {
     let rel = relation_seams::relation_open::call(mcx, relid, AccessExclusiveLock)?;
     renameatt_check(
         mcx,
@@ -302,7 +306,8 @@ fn renameatt_internal<'mcx>(
         &[(Anum_pg_attribute_attname, Datum::from_usize(namebuf.as_ptr() as usize))],
     )?;
     objectaccess::InvokeObjectPostAlterHook(RELATION_RELATION_ID, relid, attnum as i32)?;
-    rel.close(NoLock)
+    rel.close(NoLock)?;
+    Ok(attnum)
 }
 
 fn attname_lookup_local<'mcx>(
@@ -315,7 +320,7 @@ fn attname_lookup_local<'mcx>(
 
 // RenameConstraint + rename_constraint_internal (tablecmds.c), relation arm;
 // domain constraints ride the typecmds lane.
-pub fn RenameConstraint<'mcx>(mcx: Mcx<'mcx>, stmt: &RenameStmt<'_>) -> PgResult<()> {
+pub fn RenameConstraint<'mcx>(mcx: Mcx<'mcx>, stmt: &RenameStmt<'_>) -> PgResult<ObjectAddress> {
     let relid = rename_lookup_rangevar(
         mcx,
         stmt.relation.expect("RenameStmt.relation"),
@@ -330,7 +335,7 @@ pub fn RenameConstraint<'mcx>(mcx: Mcx<'mcx>, stmt: &RenameStmt<'_>) -> PgResult
             ),
             None,
         )?;
-        return Ok(());
+        return Ok(ObjectAddress::set(InvalidOid, InvalidOid));
     }
     rename_constraint_internal(
         mcx,
@@ -351,7 +356,7 @@ fn rename_constraint_internal<'mcx>(
     recurse: bool,
     recursing: bool,
     expected_parents: i32,
-) -> PgResult<()> {
+) -> PgResult<ObjectAddress> {
     let rel = relation_seams::relation_open::call(mcx, myrelid, AccessExclusiveLock)?;
     let _ = recursing;
     renameatt_check(
@@ -435,12 +440,13 @@ fn rename_constraint_internal<'mcx>(
         pg_constraint::RenameConstraintById(mcx, con.oid, newconname)?;
     }
     inval::invalidate::CacheInvalidateRelcacheByRelid(myrelid)?;
-    rel.close(NoLock)
+    rel.close(NoLock)?;
+    Ok(ObjectAddress::set(CONSTRAINT_RELATION_ID, con.oid))
 }
 
 // RenameRelation: ALTER TABLE/INDEX/SEQUENCE/VIEW/MATVIEW/FOREIGN TABLE
 // RENAME TO ...
-pub fn RenameRelation<'mcx>(mcx: Mcx<'mcx>, stmt: &RenameStmt<'_>) -> PgResult<()> {
+pub fn RenameRelation<'mcx>(mcx: Mcx<'mcx>, stmt: &RenameStmt<'_>) -> PgResult<ObjectAddress> {
     let mut is_index_stmt =
         stmt.renameType == types_nodes::parsenodes::ObjectType::OBJECT_INDEX;
     let relid = loop {
@@ -464,7 +470,7 @@ pub fn RenameRelation<'mcx>(mcx: Mcx<'mcx>, stmt: &RenameStmt<'_>) -> PgResult<(
                 ),
                 None,
             )?;
-            return Ok(());
+            return Ok(ObjectAddress::set(InvalidOid, InvalidOid));
         }
         let relkind = lsyscache::get_rel_relkind(relid)? as u8;
         let obj_is_index = relkind == types_rel::RELKIND_INDEX
@@ -475,7 +481,8 @@ pub fn RenameRelation<'mcx>(mcx: Mcx<'mcx>, stmt: &RenameStmt<'_>) -> PgResult<(
         lmgr::UnlockRelationOid(relid, lockmode)?;
         is_index_stmt = obj_is_index;
     };
-    RenameRelationInternal(mcx, relid, stmt.newname.expect("RenameStmt.newname"), is_index_stmt)
+    RenameRelationInternal(mcx, relid, stmt.newname.expect("RenameStmt.newname"), is_index_stmt)?;
+    Ok(ObjectAddress::set(RELATION_RELATION_ID, relid))
 }
 
 pub fn RenameRelationInternal<'mcx>(

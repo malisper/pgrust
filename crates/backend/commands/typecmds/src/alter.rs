@@ -4,7 +4,8 @@ use datum::Datum;
 use mcx::{Mcx, PgVec};
 use pg_depend::{DependencyType, ObjectAddress};
 use types_core::{
-    AttrNumber, InvalidOid, Oid, DEFAULT_COLLATION_OID, RELATION_RELATION_ID, TYPE_RELATION_ID,
+    AttrNumber, InvalidOid, Oid, CONSTRAINT_RELATION_ID, DEFAULT_COLLATION_OID,
+    RELATION_RELATION_ID, TYPE_RELATION_ID,
 };
 use types_error::{
     PgError, PgResult, ERRCODE_CHECK_VIOLATION, ERRCODE_DUPLICATE_OBJECT,
@@ -858,7 +859,9 @@ fn domain_column_violation<'mcx>(
     ))
 }
 
-pub fn RenameType<'mcx>(mcx: Mcx<'mcx>, stmt: &RenameStmt<'mcx>) -> PgResult<()> {
+// RenameType (typecmds.c): returns the type's address for the event-trigger
+// collection tail.
+pub fn RenameType<'mcx>(mcx: Mcx<'mcx>, stmt: &RenameStmt<'mcx>) -> PgResult<ObjectAddress> {
     let names = stmt.object.expect("RenameStmt.object").as_list().expect("name list");
     let new_type_name = stmt.newname.expect("RenameStmt.newname");
     let typename = typename_from_list(mcx, names)?;
@@ -884,16 +887,20 @@ pub fn RenameType<'mcx>(mcx: Mcx<'mcx>, stmt: &RenameStmt<'mcx>) -> PgResult<()>
     // If the type is composite, rename the associated pg_class entry too;
     // RenameRelationInternal calls RenameTypeInternal automatically.
     if row.typtype == TYPTYPE_COMPOSITE {
-        tablecmds_seams::rename_relation_internal::call(mcx, row.typrelid, new_type_name, false)
+        tablecmds_seams::rename_relation_internal::call(mcx, row.typrelid, new_type_name, false)?;
     } else {
-        pg_type::RenameTypeInternal(mcx, type_oid, new_type_name, row.typnamespace)
+        pg_type::RenameTypeInternal(mcx, type_oid, new_type_name, row.typnamespace)?;
     }
+    Ok(ObjectAddress::set(TYPE_RELATION_ID, type_oid))
 }
 
 // RenameConstraint (tablecmds.c) OBJECT_DOMCONSTRAINT arm: domain constraints
 // have no index/inheritance legs, so the rename collapses to
 // get_domain_constraint_oid + RenameConstraintById.
-pub fn RenameDomainConstraint<'mcx>(mcx: Mcx<'mcx>, stmt: &RenameStmt<'mcx>) -> PgResult<()> {
+pub fn RenameDomainConstraint<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &RenameStmt<'mcx>,
+) -> PgResult<ObjectAddress> {
     let names = stmt.object.expect("RenameStmt.object").as_list().expect("name list");
     let typename = typename_from_list(mcx, names)?;
     let (typid, _) = parse_utilcmd::typenameTypeIdAndMod(mcx, None, &typename)?;
@@ -905,7 +912,8 @@ pub fn RenameDomainConstraint<'mcx>(mcx: Mcx<'mcx>, stmt: &RenameStmt<'mcx>) -> 
         stmt.subname.expect("RenameStmt.subname"),
         false,
     )?;
-    pg_constraint::RenameConstraintById(mcx, con_oid, stmt.newname.expect("RenameStmt.newname"))
+    pg_constraint::RenameConstraintById(mcx, con_oid, stmt.newname.expect("RenameStmt.newname"))?;
+    Ok(ObjectAddress::set(CONSTRAINT_RELATION_ID, con_oid))
 }
 
 pub fn AlterTypeOwner<'mcx>(

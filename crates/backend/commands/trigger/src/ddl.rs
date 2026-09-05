@@ -2,6 +2,7 @@
 // (trigger.c), incl. partitioned-table rename recursion.
 use datum::Datum;
 use mcx::Mcx;
+use pg_depend::ObjectAddress;
 use types_core::fmgr::{F_NAMEEQ, F_OIDEQ};
 use types_core::{InvalidOid, Oid};
 use types_error::{
@@ -202,7 +203,9 @@ fn rename_trigger_relkind_callback(rv: &rel_vocab::RangeVar<'_>, relid: Oid) -> 
 // renametrig (trigger.c): RangeVarGetRelidExtended with the relkind callback,
 // then table_open(relid, NoLock); the owner/system-catalog checks of
 // RangeVarCallbackForRenameTrigger are applied to the opened rel.
-pub fn renametrig<'mcx>(mcx: Mcx<'mcx>, stmt: &RenameStmt<'mcx>) -> PgResult<()> {
+// renametrig (trigger.c): returns the trigger's address for the event-trigger
+// collection tail.
+pub fn renametrig<'mcx>(mcx: Mcx<'mcx>, stmt: &RenameStmt<'mcx>) -> PgResult<ObjectAddress> {
     let rvn = stmt.relation.expect("RenameStmt.relation");
     let rv = rel_vocab::RangeVar {
         catalogname: rvn.catalogname,
@@ -306,7 +309,7 @@ pub fn renametrig<'mcx>(mcx: Mcx<'mcx>, stmt: &RenameStmt<'mcx>) -> PgResult<()>
 
     tgrel.close(RowExclusiveLock)?;
     targetrel.close(NoLock)?;
-    Ok(())
+    Ok(ObjectAddress::set(TRIGGER_RELATION_ID, tgoid))
 }
 
 fn renametrig_internal<'mcx>(
