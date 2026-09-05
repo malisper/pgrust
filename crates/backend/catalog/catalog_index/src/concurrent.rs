@@ -344,13 +344,27 @@ pub fn index_concurrently_build<'mcx>(
     index_set_state_flags(mcx, indexRelationId, IndexStateFlagsAction::CreateSetReady)
 }
 
-// validate_index (index.c:3350); progress reporting unported.
+// validate_index (index.c:3350).
 pub fn validate_index<'mcx>(
     mcx: Mcx<'mcx>,
     heapId: Oid,
     indexId: Oid,
     snapshot: &snapmgr::Snapshot,
 ) -> PgResult<()> {
+    use backend_progress::progress::*;
+
+    // index.c:3389-3404: phase VALIDATE_IDXSCAN, counters reset.
+    backend_progress::pgstat_progress_update_multi_param(
+        &[
+            PROGRESS_CREATEIDX_PHASE,
+            PROGRESS_CREATEIDX_TUPLES_DONE,
+            PROGRESS_CREATEIDX_TUPLES_TOTAL,
+            PROGRESS_SCAN_BLOCKS_DONE,
+            PROGRESS_SCAN_BLOCKS_TOTAL,
+        ],
+        &[PROGRESS_CREATEIDX_PHASE_VALIDATE_IDXSCAN, 0, 0, 0, 0],
+    );
+
     let heapRelation = table::table_open(mcx, heapId, ShareUpdateExclusiveLock)?;
 
     let guard = miscinit::SecContextGuard::security_restricted(heapRelation.rd_rel.relowner);
@@ -378,8 +392,18 @@ pub fn validate_index<'mcx>(
         let mut cb = |tid: &types_tuple::itemptr::ItemPointerData| state.collect(tid);
         indexam::index_bulk_delete_collect(mcx, &ivinfo, &mut cb)?;
     }
+    // Execute the sort (index.c:3462-3473).
+    backend_progress::pgstat_progress_update_multi_param(
+        &[PROGRESS_CREATEIDX_PHASE, PROGRESS_SCAN_BLOCKS_DONE, PROGRESS_SCAN_BLOCKS_TOTAL],
+        &[PROGRESS_CREATEIDX_PHASE_VALIDATE_SORT, 0, 0],
+    );
     state.tuplesort.performsort()?;
 
+    // Now scan the heap and "merge" it with the index (index.c:3479-3480).
+    backend_progress::pgstat_progress_update_param(
+        PROGRESS_CREATEIDX_PHASE,
+        PROGRESS_CREATEIDX_PHASE_VALIDATE_TABLESCAN,
+    );
     execindexing::table_index_validate_scan(
         mcx,
         &heapRelation,
@@ -390,6 +414,18 @@ pub fn validate_index<'mcx>(
     )?;
 
     indexam::index_insert_cleanup(&indexRelation, &mut indexInfo.ii_AmCache)?;
+
+    // index.c:3493-3495: elog(DEBUG2) with %.0f counts (not translated).
+    elog_seams::ereport::call(
+        ::types_error::PgError::new(
+            ::types_error::DEBUG2,
+            format!(
+                "validate_index found {:.0} heap tuples, {:.0} index tuples; inserted {:.0} missing tuples",
+                state.htups, state.itups, state.tups_inserted
+            ),
+        )
+        .with_location("index.c", 3493, "validate_index"),
+    )?;
 
     guc::AtEOXact_GUC(false, save_nestlevel);
     guard.restore();
@@ -425,7 +461,7 @@ pub fn index_concurrently_swap<'mcx>(
                 &key,
             )?;
             let tup = genam::systable_getnext(mcx, &mut scan)?
-                .unwrap_or_else(|| panic!("could not find tuple for relation {relid}"));
+                .ok_or_else(|| crate::relation_tuple_missing(relid))?;
             let (nd, _) = getattr_null(tup, Anum_pg_class_relname as i32, desc);
             let p = nd.as_usize() as *const u8;
             // SAFETY: name column: fixed 64-byte in-place image.
@@ -452,7 +488,7 @@ pub fn index_concurrently_swap<'mcx>(
                 &key,
             )?;
             let tup = genam::systable_getnext(mcx, &mut scan)?
-                .unwrap_or_else(|| panic!("could not find tuple for relation {relid}"));
+                .ok_or_else(|| crate::relation_tuple_missing(relid))?;
             let mut values: mcx::PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
             let mut nulls: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
             let mut replace: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
@@ -485,7 +521,7 @@ pub fn index_concurrently_swap<'mcx>(
             let mut scan =
                 genam::systable_beginscan(mcx, &pg_index, IndexRelidIndexId, true, None, &key)?;
             let tup = genam::systable_getnext(mcx, &mut scan)?
-                .unwrap_or_else(|| panic!("could not find tuple for relation {oldIndexId}"));
+                .ok_or_else(|| crate::relation_tuple_missing(oldIndexId))?;
             let g = |a: i32| getattr_null(tup, a, desc).0.as_bool();
             let r = (
                 g(Anum_pg_index_indisprimary),
@@ -503,7 +539,7 @@ pub fn index_concurrently_swap<'mcx>(
             let mut scan =
                 genam::systable_beginscan(mcx, &pg_index, IndexRelidIndexId, true, None, &key)?;
             let tup = genam::systable_getnext(mcx, &mut scan)?
-                .unwrap_or_else(|| panic!("could not find tuple for relation {relid}"));
+                .ok_or_else(|| crate::relation_tuple_missing(relid))?;
             let mut values: mcx::PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
             let mut nulls: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
             let mut replace: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;

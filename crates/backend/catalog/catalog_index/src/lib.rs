@@ -97,6 +97,43 @@ pub(crate) fn opclass_lookup_failed(opclass: Oid) -> Box<PgError> {
     Box::new(PgError::error(format!("cache lookup failed for opclass {opclass}")))
 }
 
+// index.c:1602/:1606/:1632/:1636/:2947 and relcache.c:3825 raise a vanished
+// pg_class / pg_index row with `elog(ERROR, "could not find tuple for
+// relation %u", oid)` -- catchable, level ERROR, SQLSTATE XX000.  Never a
+// backend abort.
+#[cold]
+#[inline(never)]
+pub(crate) fn relation_tuple_missing(relid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!("could not find tuple for relation {relid}")))
+}
+
+// relcache.c:3891 RelationSetNewRelfilenumber: `elog(ERROR, "relation \"%s\"
+// does not have storage", RelationGetRelationName(relation))` for a relkind
+// that has neither a table AM nor storage.
+#[cold]
+#[inline(never)]
+pub(crate) fn relation_has_no_storage(relname: &str) -> Box<PgError> {
+    Box::new(PgError::error(format!("relation \"{relname}\" does not have storage")))
+}
+
+// index.c:2588 CompareIndexInfo: `elog(ERROR, "incorrect attribute map")`
+// when the map is shorter than an index column's attribute number.
+#[cold]
+#[inline(never)]
+pub(crate) fn incorrect_attribute_map() -> Box<PgError> {
+    Box::new(PgError::error("incorrect attribute map"))
+}
+
+// index.c:2587-2588: the attribute map must cover every index attribute
+// number of info2 before it is consulted.
+#[inline]
+pub(crate) fn check_attribute_map_covers(maplen: usize, attno: AttrNumber) -> PgResult<()> {
+    if (maplen as i64) < attno as i64 {
+        return Err(incorrect_attribute_map());
+    }
+    Ok(())
+}
+
 // Set-once, consume-once binary-upgrade overrides (index.c globals).
 macro_rules! next_oid_override {
     ($cell:ident, $setter:ident, $take:ident) => {
@@ -685,10 +722,14 @@ pub fn index_create<'mcx>(
 
     if lsyscache::get_relname_relid(indexRelationName, namespaceId)? != InvalidOid {
         if extra.flags & INDEX_CREATE_IF_NOT_EXISTS != 0 {
-            elog_seams::ereport_msg::call(
-                types_error::NOTICE,
-                format!("relation \"{indexRelationName}\" already exists, skipping"),
-                None,
+            // index.c:899-902: the NOTICE carries errcode(ERRCODE_DUPLICATE_TABLE)
+            // (42P07), which psql shows under VERBOSITY verbose.
+            elog_seams::ereport::call(
+                PgError::new(
+                    types_error::NOTICE,
+                    format!("relation \"{indexRelationName}\" already exists, skipping"),
+                )
+                .with_sqlstate(ERRCODE_DUPLICATE_TABLE),
             )?;
             pg_class.close(RowExclusiveLock)?;
             return Ok((InvalidOid, InvalidOid));
@@ -974,6 +1015,14 @@ pub fn index_create<'mcx>(
         unported("index_create: bootstrap-mode index_register");
     }
 
+    // Post creation hook for new index (index.c:1229-1230).
+    objectaccess::InvokeObjectPostCreateHookArg(
+        RELATION_RELATION_ID,
+        indexRelationId,
+        0,
+        extra.is_internal,
+    )?;
+
     xact::CommandCounterIncrement()?;
 
     // Validate opclass-specific options (index.c:1243-1248).
@@ -1206,6 +1255,22 @@ pub fn index_build<'mcx>(
         .with_location("index.c", 3034, "index_build"),
     )?;
 
+    // Set up initial progress report status (index.c:3085-3102).
+    {
+        use backend_progress::progress::*;
+        backend_progress::pgstat_progress_update_multi_param(
+            &[
+                PROGRESS_CREATEIDX_PHASE,
+                PROGRESS_CREATEIDX_SUBPHASE,
+                PROGRESS_CREATEIDX_TUPLES_DONE,
+                PROGRESS_CREATEIDX_TUPLES_TOTAL,
+                PROGRESS_SCAN_BLOCKS_DONE,
+                PROGRESS_SCAN_BLOCKS_TOTAL,
+            ],
+            &[PROGRESS_CREATEIDX_PHASE_BUILD, PROGRESS_CREATEIDX_SUBPHASE_INITIALIZE, 0, 0, 0, 0],
+        );
+    }
+
     let stats = match am_kind {
         types_relscan::IndexAmKind::Btree => {
             let r = nbtsort::btbuild(mcx, heapRelation, indexRelation, indexInfo)?;
@@ -1359,7 +1424,8 @@ fn index_update_stats<'mcx>(
         &[key],
     )?
     else {
-        panic!("could not find tuple for relation {relid}");
+        // index.c:2946-2947 elog(ERROR): catchable, not a backend abort.
+        return Err(relation_tuple_missing(relid));
     };
 
     let desc = pg_class.descr();
@@ -1427,9 +1493,7 @@ pub fn CompareIndexInfo<'mcx>(
         return Ok(false);
     }
     for i in 0..info1.ii_NumIndexAttrs as usize {
-        if (attmap.len() as i32) < info2.ii_IndexAttrNumbers[i] as i32 {
-            panic!("incorrect attribute map");
-        }
+        check_attribute_map_covers(attmap.len(), info2.ii_IndexAttrNumbers[i])?;
         if !(info1.ii_IndexAttrNumbers[i] == 0 && info2.ii_IndexAttrNumbers[i] == 0) {
             if info1.ii_IndexAttrNumbers[i] == 0 || info2.ii_IndexAttrNumbers[i] == 0 {
                 return Ok(false);
@@ -1576,6 +1640,37 @@ mod tests {
             assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
             assert_eq!(e.level(), types_error::ERROR);
         }
+    }
+
+    // index.c:2947 / relcache.c:3825 "could not find tuple for relation %u",
+    // relcache.c:3891 "relation \"%s\" does not have storage" and index.c:2588
+    // "incorrect attribute map" are elog(ERROR) sites -- catchable, level
+    // ERROR, SQLSTATE XX000, C's message bytes.  pgrust used to panic!().
+    #[test]
+    fn elog_error_sites_are_catchable_xx000() {
+        for (e, want) in [
+            (relation_tuple_missing(16384), "could not find tuple for relation 16384"),
+            (relation_has_no_storage("v"), "relation \"v\" does not have storage"),
+            (incorrect_attribute_map(), "incorrect attribute map"),
+        ] {
+            assert_eq!(e.message(), want);
+            assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+            assert_eq!(e.level(), types_error::ERROR);
+        }
+    }
+
+    // index.c:2587 `if (attmap->maplen < info2->ii_IndexAttrNumbers[i])
+    // elog(ERROR, ...)`: a map of length n covers attribute numbers 1..=n
+    // (and 0, an expression column); n+1 is the error.
+    #[test]
+    fn attribute_map_length_check_matches_index_c() {
+        assert!(check_attribute_map_covers(2, 0).is_ok());
+        assert!(check_attribute_map_covers(2, 1).is_ok());
+        assert!(check_attribute_map_covers(2, 2).is_ok());
+        let e = check_attribute_map_covers(2, 3).unwrap_err();
+        assert_eq!(e.message(), "incorrect attribute map");
+        assert_eq!(e.level(), types_error::ERROR);
+        assert!(check_attribute_map_covers(0, 1).is_err());
     }
 
     // index.h constr_flags bits; INDEX_CONSTR_CREATE_REMOVE_OLD_DEPS rides

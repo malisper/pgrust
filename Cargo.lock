@@ -3003,6 +3003,7 @@ name = "catalog_index"
 version = "0.1.0"
 dependencies = [
  "autovacuum_seams",
+ "backend_progress",
  "bloom_build",
  "brin_build",
  "bufmgr",
@@ -3037,6 +3038,7 @@ dependencies = [
  "nbtree",
  "nbtsort",
  "nodes_core",
+ "objectaccess",
  "outfuncs",
  "pg_constraint",
  "pg_depend",
