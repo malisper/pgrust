@@ -8,7 +8,7 @@ use ::elog::ereport;
 use ::mcx::{Mcx, MemoryContext, PgVec};
 use ::types_dest::CommandDest;
 use ::types_error::{
-    PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR,
+    ErrorLocation, PgResult, DEBUG3, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR,
 };
 use ::types_nodes::node_tree::Node;
 use ::types_nodes::nodes_enums::CmdType;
@@ -33,6 +33,15 @@ use ::cmdtag::InitializeQueryCompletion;
 use ::snapmgr::Snapshot;
 use ::tcop_dest::DestReceiver;
 use ::utility_seams::{PROCESS_UTILITY_QUERY, PROCESS_UTILITY_TOPLEVEL};
+
+/// Error-location face for the C-parity elog sites below (pquery.c's
+/// `__FILE__`/`__LINE__`/`__func__`): pgrust is Rust, so report where in OUR
+/// source this was raised; `#[track_caller]` resolves to the call site.
+#[track_caller]
+fn loc(funcname: &'static str) -> ErrorLocation {
+    let site = core::panic::Location::caller();
+    ErrorLocation::new(site.file(), site.line() as i32, funcname)
+}
 
 pub mod stmt_list;
 #[cfg(test)]
@@ -617,6 +626,9 @@ pub fn PortalRun<'mcx>(
     let strategy = portal.borrow().strategy;
     let log_stats = guc_tables::backing::log_executor_stats();
     if log_stats && strategy != PORTAL_MULTI_QUERY {
+        // pquery.c:708 — the DEBUG3 marker precedes ResetUsage; PORTAL_MULTI_QUERY
+        // logs its own stats per query.
+        ereport(DEBUG3).errmsg_internal("PortalRun").finish(loc("PortalRun"))?;
         postgres_seams::reset_usage::call();
     }
 
@@ -822,8 +834,9 @@ fn FillPortalStore(portal: &Portal<'static>, is_top_level: bool) -> PgResult<()>
             PortalRunUtility(portal, h, 0, is_top_level, true, &mut treceiver, Some(&mut qc))?;
         }
         other => {
+            // pquery.c:799 — elog(ERROR, "unrecognized portal strategy: %d", ...)
             return Err(ereport(ERROR)
-                .errmsg_internal(format!("unsupported portal strategy: {}", other as u32))
+                .errmsg_internal(format!("unrecognized portal strategy: {}", other as u32))
                 .into_error()
                 .into());
         }
@@ -1146,8 +1159,10 @@ pub fn PortalRunFetch(
                 }
                 DoPortalRunFetch(portal, fdirection, count, dest)
             }
-            other => Err(ereport(ERROR)
-                .errmsg_internal(format!("unsupported portal strategy: {}", other as u32))
+            // pquery.c:1434 — elog(ERROR, "unsupported portal strategy"): no
+            // strategy number in the message.
+            _ => Err(ereport(ERROR)
+                .errmsg_internal("unsupported portal strategy")
                 .into_error()
                 .into()),
         }

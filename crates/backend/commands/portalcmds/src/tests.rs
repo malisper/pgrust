@@ -691,6 +691,34 @@ fn cursor_name_errors_match_c_sqlstates() {
     assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_CURSOR_NAME);
 }
 
+// audit-18.6 b126: pquery.c:1434 PortalRunFetch's default arm is
+// elog(ERROR, "unsupported portal strategy") with NO strategy number — a
+// FETCH against a PORTAL_MULTI_QUERY portal (a Bind of an INSERT over the
+// extended protocol, then FETCH 1 FROM p) reports exactly that primary
+// message (XX000).
+#[test]
+fn fetch_on_multi_query_portal_reports_c_message() {
+    install_fixtures();
+    let mcx = leaked_mcx();
+    push_snapshot();
+    let cstmt = mk_declare(mcx, "cmq", 0);
+    PerformCursorOpen(mcx, cstmt, "DECLARE cmq CURSOR FOR SELECT 1", ParamListHandle::NULL, false)
+        .unwrap();
+    snapmgr::PopActiveSnapshot().unwrap();
+
+    let portal = portalmem::GetPortalByName(Some("cmq")).expect("cursor portal exists");
+    portal.borrow_mut().strategy = ::types_portal::PORTAL_MULTI_QUERY;
+    let mut none = tcop_dest::DestReceiver::DoNothing;
+    let err = pquery::PortalRunFetch(&portal, FETCH_FORWARD, 1, &mut none).unwrap_err();
+    assert_eq!(err.message(), "unsupported portal strategy");
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    drop(portal);
+    // Restore the strategy so the failed portal tears down through the
+    // PORTAL_ONE_SELECT cleanup path.
+    portalmem::GetPortalByName(Some("cmq")).unwrap().borrow_mut().strategy = PORTAL_ONE_SELECT;
+    PerformPortalClose(Some("cmq")).unwrap();
+}
+
 // SCROLL cursor over a live seqscan executor with the store knob OFF: the
 // FETCH/MOVE sequence pins C's cursor semantics, with FETCH_ABSOLUTE's
 // rewind leg and MOVE BACKWARD ALL driving ExecutorRewind → ExecReScan

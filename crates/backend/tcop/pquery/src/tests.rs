@@ -664,4 +664,5 @@ mod e2e {
         assert_eq!(cmdtag::GetCommandTagName(qc.commandTag), "EXPLAIN");
         assert_eq!(qc.nprocessed, 1);
     }
+
 }
