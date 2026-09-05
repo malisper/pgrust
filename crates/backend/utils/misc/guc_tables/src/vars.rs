@@ -424,6 +424,15 @@ pub static aex_sample_rate: GucRealVar = GucSlot::new("auto_explain_sample_rate"
 // autoprewarm_interval; :128 _PG_init DefineCustomIntVariable), statically
 // defined like auto_explain.*; the cell lives in crates/contrib/pg_prewarm.
 pub static autoprewarm_interval: GucIntVar = GucSlot::new("autoprewarm_interval");
+// pg_trgm custom GUCs (contrib/pg_trgm/trgm_op.c:145 _PG_init, three
+// DefineCustomRealVariable over the trgm_op.c:24-26 double statics),
+// statically defined like auto_explain.*; the cells live in
+// crates/contrib/pg_trgm.
+pub static pg_trgm_similarity_threshold: GucRealVar = GucSlot::new("similarity_threshold");
+pub static pg_trgm_word_similarity_threshold: GucRealVar =
+    GucSlot::new("word_similarity_threshold");
+pub static pg_trgm_strict_word_similarity_threshold: GucRealVar =
+    GucSlot::new("strict_word_similarity_threshold");
 // pgrust-only: pgrust.resource_counters (no C symbol; PGC_INTERNAL,
 // value computed by hooks::show_resource_counters — the simharness F8
 // resource-baseline hook channel; the fd crate owns backing + hook).

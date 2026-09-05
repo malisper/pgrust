@@ -12925,6 +12925,7 @@ dependencies = [
 name = "pg_trgm"
 version = "0.0.0"
 dependencies = [
+ "adt_float",
  "adt_oracle_compat",
  "arrayfuncs",
  "crc32c",
@@ -12934,6 +12935,7 @@ dependencies = [
  "gin_trgm_seams",
  "gin_vocab",
  "guc",
+ "guc_tables",
  "init_small",
  "mbutils",
  "mcx",
@@ -12943,6 +12945,7 @@ dependencies = [
  "regex_core",
  "reloptions",
  "rustc-hash",
+ "transam_xlog",
  "ts_locale",
  "types_core",
  "types_error",

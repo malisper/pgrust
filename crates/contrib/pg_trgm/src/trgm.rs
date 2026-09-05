@@ -38,13 +38,32 @@ pub struct TrgmEnv<'a> {
     pub tolower: &'a dyn Fn(&[u8]) -> Vec<u8>,
 }
 
-// CMPTRGM with the historical signed-char ordering (the trigrams in the
-// regression data are ASCII, where signed and unsigned agree; high-bit CRC
-// bytes take the signed ordering the reference platform produced).
+// trgm_op.c:219 CMPTRGM_CHOOSE: the cluster's default char signedness
+// (ControlFile->default_char_signedness, xlog.c:4625 GetDefaultCharSignedness)
+// picks CMPTRGM_SIGNED or CMPTRGM_UNSIGNED. A fresh initdb is signed
+// (xlog.c:4287); pg_upgrade --set-char-signedness / pg_resetwal
+// --char-signedness can make a cluster unsigned, and then every trigram sort
+// and bsearch (and show_trgm's order) follows the unsigned byte order.
+// Before the control file is read (unit tests, the verification harness)
+// the initdb default applies.
+#[inline]
+fn default_char_signed() -> bool {
+    !transam_xlog::control_file::control_file_loaded()
+        || transam_xlog::control_file::GetDefaultCharSignedness()
+}
+
 #[inline]
 pub fn cmp_trgm(a: &Trgm, b: &Trgm) -> core::cmp::Ordering {
+    cmp_trgm_as(default_char_signed(), a, b)
+}
+
+// CMPTRGM_SIGNED (signed = true) / CMPTRGM_UNSIGNED (signed = false):
+// bytewise, each char compared as signed or unsigned char.
+#[inline]
+pub fn cmp_trgm_as(signed: bool, a: &Trgm, b: &Trgm) -> core::cmp::Ordering {
     for i in 0..3 {
-        match (a[i] as i8).cmp(&(b[i] as i8)) {
+        let o = if signed { (a[i] as i8).cmp(&(b[i] as i8)) } else { a[i].cmp(&b[i]) };
+        match o {
             core::cmp::Ordering::Equal => continue,
             other => return other,
         }
@@ -622,6 +641,23 @@ mod tests {
         // like_escape('20%') pattern "20%" -> {"  2"," 20"}
         let t = generate_wildcard_trgm(b"20%", &env, &crc);
         assert_eq!(show(&t), vec!["  2", " 20"]);
+    }
+
+    // trgm_op.c:219 CMPTRGM_CHOOSE (audit-18.6 b150): high-bit bytes sort
+    // after ASCII as unsigned chars and before them as signed chars.
+    #[test]
+    fn cmp_trgm_follows_char_signedness() {
+        use core::cmp::Ordering;
+        let hi: Trgm = [0xc6, 0xc3, 0xcf];
+        let lo: Trgm = [b' ', b' ', b'a'];
+        assert_eq!(cmp_trgm_as(true, &hi, &lo), Ordering::Less);
+        assert_eq!(cmp_trgm_as(false, &hi, &lo), Ordering::Greater);
+        assert_eq!(cmp_trgm_as(false, &[0x12, 0xc4, 0x4a], &lo), Ordering::Less);
+        assert_eq!(cmp_trgm_as(true, &[0x76, 0xa4, 0x0e], &[0x76, 0x0d, 0x7f]), Ordering::Less);
+        assert_eq!(cmp_trgm_as(false, &[0x76, 0xa4, 0x0e], &[0x76, 0x0d, 0x7f]), Ordering::Greater);
+        assert_eq!(cmp_trgm_as(false, &hi, &hi), Ordering::Equal);
+        // No control file read in this process: the initdb default (signed).
+        assert_eq!(cmp_trgm(&hi, &lo), Ordering::Less);
     }
 
     #[test]

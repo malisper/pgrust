@@ -13,10 +13,14 @@
 //! Both GiST consistent/distance keep C's fn_extra cache of the extracted
 //! query trigrams (and graph) across calls.
 //!
-//! Thresholds: C's DefineCustomRealVariable GUCs ride this repo's placeholder
-//! custom-GUC store (SET pg_trgm.* works); reads parse the placeholder string
-//! or fall back to the C defaults. DIVERGENCE: an out-of-range SET only
-//! errors when the value is read, not at SET time.
+//! Thresholds: trgm_op.c:145 _PG_init's three DefineCustomRealVariable GUCs
+//! are defined statically in guc_tables (the auto_explain.* pattern; this
+//! port has no DefineCustomXxxVariable machinery), so SET range-checks
+//! 0.0 .. 1.0 at SET time and pg_settings carries the rows; the C double
+//! statics (trgm_op.c:24-26) are the per-session cells below. _PG_init's
+//! MarkGUCPrefixReserved("pg_trgm") runs from pg_init when the library
+//! loads. (Divergence shared with auto_explain.*: the GUCs exist before the
+//! library is loaded, where C would still treat them as placeholders.)
 
 pub mod gist;
 pub mod regexp;
@@ -25,7 +29,7 @@ pub mod trgm;
 use datum::Datum;
 use mcx::MemoryContext;
 use gin_vocab::TrgmPackedGraph;
-use types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
+use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
 use types_fmgr::{
     byref_result, varlena_result, FmgrInfo, FnExtra, FunctionCallInfoBaseData as Fcinfo,
     PGFunction,
@@ -80,23 +84,26 @@ fn make_env() -> TrgmEnv<'static> {
 // Threshold GUCs (pg_trgm.*_threshold).
 // ===========================================================================
 
-fn threshold(name: &str, default: f64) -> f64 {
-    match guc::GetConfigOption(name, true, false) {
-        Ok(Some(s)) => s.parse::<f64>().unwrap_or(default),
-        _ => default,
-    }
+// trgm_op.c:24-26: `double similarity_threshold = 0.3f` &co — the GUC-backed
+// statics (the bootValue is the float literal widened to double).
+mod gucs {
+    guc_tables::session_guc_cluster!(TrgmGucs, TRGM_GUCS:
+        (similarity_threshold_cell, f64, similarity_threshold, set_similarity_threshold, (0.3f32) as f64),
+        (word_similarity_threshold_cell, f64, word_similarity_threshold, set_word_similarity_threshold, (0.6f32) as f64),
+        (strict_word_similarity_threshold_cell, f64, strict_word_similarity_threshold, set_strict_word_similarity_threshold, (0.5f32) as f64),
+    );
 }
 
 pub fn similarity_threshold() -> f64 {
-    threshold("pg_trgm.similarity_threshold", 0.3)
+    gucs::similarity_threshold()
 }
 
 pub fn word_similarity_threshold() -> f64 {
-    threshold("pg_trgm.word_similarity_threshold", 0.6)
+    gucs::word_similarity_threshold()
 }
 
 pub fn strict_word_similarity_threshold() -> f64 {
-    threshold("pg_trgm.strict_word_similarity_threshold", 0.5)
+    gucs::strict_word_similarity_threshold()
 }
 
 fn index_strategy_get_limit(strategy: u16) -> PgResult<f64> {
@@ -247,20 +254,17 @@ fc_word_ops! {
 }
 
 fn fc_set_limit(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // trgm_op.c:234 set_limit: the float4 is rendered by float4out and handed
+    // to SetConfigOption, whose guc.c validation owns the range/NaN errors
+    // (with their %g spellings).
     let [a] = fcinfo.args_n::<1>();
     let nlimit = a.value.as_f32();
-    // C guc.c: error iff value < min || value > max. NaN comparisons are
-    // false, so set_limit(NaN) succeeds (Range.contains rejects NaN).
-    if nlimit < 0.0 || nlimit > 1.0 {
-        return Err(PgError::error(format!(
-            "{nlimit} is outside the valid range for parameter \"pg_trgm.similarity_threshold\" (0 .. 1)"
-        ))
-        .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE)
-        .into());
-    }
+    let mut buf = [0u8; adt_float::MAXDOUBLEWIDTH];
+    let n = adt_float::float4out(nlimit, &mut buf);
+    let nlimit_str = core::str::from_utf8(&buf[..n]).expect("float4out output is ASCII");
     guc::SetConfigOption(
         "pg_trgm.similarity_threshold",
-        Some(&format!("{nlimit}")),
+        Some(nlimit_str),
         types_guc::GucContext::PGC_USERSET,
         types_guc::GucSource::PGC_S_SESSION,
     )?;
@@ -431,6 +435,18 @@ fc_gin_stub! {
     fc_gin_trgm_triconsistent: "gin_trgm_triconsistent";
 }
 
+// trgm_gin.c:24 gin_extract_trgm: the pre-9.1 opclass-definition
+// compatibility symbol, dispatching on the argument count to the value /
+// query extractors (here their fmgr stubs, as the GIN core never reaches
+// them via fmgr either).
+fn fc_gin_extract_trgm(f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    match fcinfo.nargs() {
+        3 => fc_gin_extract_value_trgm(f, fcinfo),
+        7 => fc_gin_extract_query_trgm(f, fcinfo),
+        _ => Err(PgError::error("unexpected number of arguments to gin_extract_trgm").into()),
+    }
+}
+
 // ===========================================================================
 // gist_trgm_ops fmgr wrappers (trgm_gist.c; tsgistidx protocol precedent).
 // ===========================================================================
@@ -498,12 +514,17 @@ fn image_result(fcinfo: &Fcinfo, img: &[u8]) -> PgResult<Datum> {
     byref_result(fcinfo.result_mcx(), img)
 }
 
+// trgm_gist.c:59 / :69: ERRCODE_FEATURE_NOT_SUPPORTED.
 fn fc_gtrgm_in(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    Err(PgError::error("cannot accept a value of type gtrgm").into())
+    Err(PgError::error("cannot accept a value of type gtrgm")
+        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
+        .into())
 }
 
 fn fc_gtrgm_out(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    Err(PgError::error("cannot display a value of type gtrgm").into())
+    Err(PgError::error("cannot display a value of type gtrgm")
+        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
+        .into())
 }
 
 fn fc_gtrgm_compress(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -779,6 +800,7 @@ fn lookup(function: &str) -> Option<PGFunction> {
         "gtrgm_union" => fc_gtrgm_union,
         "gtrgm_same" => fc_gtrgm_same,
         "gtrgm_options" => fc_gtrgm_options,
+        "gin_extract_trgm" => fc_gin_extract_trgm,
         "gin_extract_value_trgm" => fc_gin_extract_value_trgm,
         "gin_extract_query_trgm" => fc_gin_extract_query_trgm,
         "gin_trgm_consistent" => fc_gin_trgm_consistent,
@@ -787,11 +809,33 @@ fn lookup(function: &str) -> Option<PGFunction> {
     })
 }
 
+// trgm_op.c:145 _PG_init: the three GUCs are defined statically (guc_tables);
+// the prefix reservation (trgm_op.c:189) runs at library load.
+fn pg_init() -> PgResult<()> {
+    guc::MarkGUCPrefixReserved("pg_trgm");
+    Ok(())
+}
+
 pub fn init_seams() {
+    use guc_tables::GucVarAccessors;
+    guc_tables::vars::pg_trgm_similarity_threshold.install_if_absent(GucVarAccessors {
+        get: gucs::similarity_threshold,
+        set: gucs::set_similarity_threshold,
+    });
+    guc_tables::vars::pg_trgm_word_similarity_threshold.install_if_absent(GucVarAccessors {
+        get: gucs::word_similarity_threshold,
+        set: gucs::set_word_similarity_threshold,
+    });
+    guc_tables::vars::pg_trgm_strict_word_similarity_threshold.install_if_absent(
+        GucVarAccessors {
+            get: gucs::strict_word_similarity_threshold,
+            set: gucs::set_strict_word_similarity_threshold,
+        },
+    );
     dfmgr::register_builtin_library(dfmgr::BuiltinLibraryEntry {
         name: LIBRARY,
         lookup,
-        pg_init: None,
+        pg_init: Some(pg_init),
     });
     gin_trgm_seams::trgm_extract_value::set(trgm_extract_value);
     gin_trgm_seams::trgm_extract_query::set(trgm_extract_query);

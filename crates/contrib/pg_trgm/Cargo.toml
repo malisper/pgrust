@@ -24,11 +24,14 @@ types_gist = { path = "../../_support/types/gist" }
 types_tuple = { path = "../../_support/types/types_tuple" }
 dfmgr = { path = "../../backend/utils/fmgr/dfmgr" }
 guc = { path = "../../backend/utils/misc/guc" }
+guc_tables = { path = "../../backend/utils/misc/guc_tables" }
 types_guc = { path = "../../_support/types/types_guc" }
 mbutils = { path = "../../backend/utils/mb/mbutils" }
 ts_locale = { path = "../../backend/tsearch/ts_locale" }
 oracle_compat = { package = "adt_oracle_compat", path = "../../backend/utils/adt/oracle_compat" }
 crc32c = { path = "../../port/crc32c" }
+adt_float = { path = "../../backend/utils/adt/float" }
+transam_xlog = { path = "../../backend/access/transam/transam_xlog" }
 detoast = { path = "../../backend/access/common/detoast" }
 varlena = { path = "../../backend/utils/adt/varlena" }
 arrayfuncs = { path = "../../backend/utils/adt/arrayfuncs" }

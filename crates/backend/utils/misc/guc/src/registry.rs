@@ -580,12 +580,16 @@ pub fn parse_and_validate_value(
                 ParseNum::Err { hint } => return Err(invalid_value_error(name, value, hint).into()),
             };
             if newval < conf.min || newval > conf.max {
+                // guc.c: "%g%s%s is outside the valid range ..." — %g, so
+                // 1e10 prints "1e+10" and Infinity "Infinity".
                 let (unit, sp) = unit_and_space(gen.flags);
                 return Err(err(
                     ERRCODE_INVALID_PARAMETER_VALUE,
                     format!(
-                        "{newval}{sp}{unit} is outside the valid range for parameter \"{name}\" ({}{sp}{unit} .. {}{sp}{unit})",
-                        conf.min, conf.max
+                        "{}{sp}{unit} is outside the valid range for parameter \"{name}\" ({}{sp}{unit} .. {}{sp}{unit})",
+                        fmt_g(newval),
+                        fmt_g(conf.min),
+                        fmt_g(conf.max)
                     ),
                 )
                 .into());

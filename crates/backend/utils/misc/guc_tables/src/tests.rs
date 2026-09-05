@@ -89,12 +89,17 @@ fn table_counts_match_compiled_backend_shape() {
     //   DefineCustomIntVariable): Int +1 pg_prewarm.autoprewarm_interval
     //   (-> 178) = 474 — the C 18.6 custom GUC, statically defined like
     //   auto_explain.*.
+    // audit-remediation b150 (contrib/pg_trgm/trgm_op.c:145 _PG_init, three
+    //   DefineCustomRealVariable): Real +3 pg_trgm.similarity_threshold /
+    //   word_similarity_threshold / strict_word_similarity_threshold
+    //   (-> 31) = 477 — the C 18.6 custom GUCs, statically defined like
+    //   auto_explain.*.
     assert_eq!(ConfigureNamesBool.len(), 140);
     assert_eq!(ConfigureNamesInt.len(), 178);
-    assert_eq!(ConfigureNamesReal.len(), 28);
+    assert_eq!(ConfigureNamesReal.len(), 31);
     assert_eq!(ConfigureNamesString.len(), 80);
     assert_eq!(ConfigureNamesEnum.len(), 48);
-    assert_eq!(all_settings().count(), 474);
+    assert_eq!(all_settings().count(), 477);
     assert_eq!(GucContext_Names.len(), PGC_USERSET as usize + 1);
     assert_eq!(GucSource_Names.len(), PGC_S_SESSION as usize + 1);
     assert_eq!(config_group_names.len(), DEVELOPER_OPTIONS as usize + 1);
@@ -399,4 +404,51 @@ fn pg_prewarm_autoprewarm_interval_matches_autoprewarm_c() {
     assert!(interval.assign_hook.is_none());
     assert!(interval.show_hook.is_none());
     assert_eq!(interval.variable.c_symbol(), "autoprewarm_interval");
+}
+
+// contrib/pg_trgm/trgm_op.c:145-190 (_PG_init): three DefineCustomRealVariable
+// GUCs — pg_trgm.similarity_threshold (0.3f), word_similarity_threshold
+// (0.6f), strict_word_similarity_threshold (0.5f); each 0.0 .. 1.0,
+// PGC_USERSET, flags 0, no hooks, the C bootValue being the float literal
+// widened to double. Regression for audit-18.6 b150
+// (a186-candidate-fp-contrib-pg_trgm-trgm_op-d92afd7477a9c4dfd11d-1):
+// pgrust rode the placeholder store, so SET accepted any value.
+#[test]
+fn pg_trgm_thresholds_match_trgm_op_c() {
+    for (name, boot, desc, symbol) in [
+        (
+            "pg_trgm.similarity_threshold",
+            0.3f32 as f64,
+            "Sets the threshold used by the % operator.",
+            "similarity_threshold",
+        ),
+        (
+            "pg_trgm.word_similarity_threshold",
+            0.6f32 as f64,
+            "Sets the threshold used by the <% operator.",
+            "word_similarity_threshold",
+        ),
+        (
+            "pg_trgm.strict_word_similarity_threshold",
+            0.5f32 as f64,
+            "Sets the threshold used by the <<% operator.",
+            "strict_word_similarity_threshold",
+        ),
+    ] {
+        let GucSetting::Real(t) = find(name) else {
+            panic!("{name} should be a real GUC");
+        };
+        assert_eq!(t.context, PGC_USERSET, "{name}");
+        assert_eq!(t.group, CUSTOM_OPTIONS, "{name}");
+        assert_eq!(t.flags, 0, "{name}");
+        assert_eq!(t.boot_val, GucDefaultValue::Real(boot), "{name}");
+        assert_eq!(t.min, 0.0, "{name}");
+        assert_eq!(t.max, 1.0, "{name}");
+        assert_eq!(t.short_desc, Some(desc), "{name}");
+        assert_eq!(t.long_desc, Some("Valid range is 0.0 .. 1.0."), "{name}");
+        assert!(t.check_hook.is_none(), "{name}");
+        assert!(t.assign_hook.is_none(), "{name}");
+        assert!(t.show_hook.is_none(), "{name}");
+        assert_eq!(t.variable.c_symbol(), symbol, "{name}");
+    }
 }
