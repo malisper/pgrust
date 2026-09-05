@@ -17,8 +17,8 @@ use types_error::{
 use types_nodes::parsenodes::{AlterPolicyStmt, CreatePolicyStmt, ObjectType, RenameStmt};
 use types_nodes::{Node, NodeList};
 use types_rel::pg_class::{
-    RELKIND_FOREIGN_TABLE, RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
-    RELKIND_SEQUENCE, RELKIND_VIEW,
+    RELKIND_FOREIGN_TABLE, RELKIND_INDEX, RELKIND_MATVIEW, RELKIND_PARTITIONED_INDEX,
+    RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_SEQUENCE, RELKIND_VIEW,
 };
 use types_rel::{AccessExclusiveLock, AccessShareLock, NoLock, Relation, RowExclusiveLock};
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
@@ -160,8 +160,11 @@ fn text_datum(mcx: Mcx<'_>, s: &str) -> PgResult<Datum> {
     Ok(Datum::from_usize(img.as_ptr() as usize))
 }
 
+// objectaddress.c:6186 get_relkind_objtype: unexpected relkinds (and
+// RELKIND_TOASTVALUE) say OBJECT_TABLE rather than failing.
 fn get_relkind_objtype(relkind: u8) -> ObjectType {
     match relkind {
+        RELKIND_INDEX | RELKIND_PARTITIONED_INDEX => ObjectType::OBJECT_INDEX,
         RELKIND_SEQUENCE => ObjectType::OBJECT_SEQUENCE,
         RELKIND_VIEW => ObjectType::OBJECT_VIEW,
         RELKIND_MATVIEW => ObjectType::OBJECT_MATVIEW,
@@ -408,6 +411,9 @@ pub fn CreatePolicy<'mcx>(mcx: Mcx<'mcx>, stmt: &CreatePolicyStmt<'mcx>) -> PgRe
     }
     record_role_dependencies(mcx, &myself, &role_oids)?;
 
+    // policy.c:748
+    objectaccess::InvokeObjectPostCreateHook(POLICY_RELATION_ID, policy_id, 0)?;
+
     inval::invalidate::CacheInvalidateRelcache(&target_table)?;
 
     target_table.close(NoLock)?;
@@ -614,6 +620,9 @@ pub fn AlterPolicy<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterPolicyStmt<'mcx>) -> PgResu
     deleteSharedDependencyRecordsFor(mcx, POLICY_RELATION_ID, policy_id, 0)?;
     record_role_dependencies(mcx, &myself, &role_oids)?;
 
+    // policy.c:1084
+    objectaccess::InvokeObjectPostAlterHook(POLICY_RELATION_ID, policy_id, 0)?;
+
     inval::invalidate::CacheInvalidateRelcache(&target_table)?;
 
     target_table.close(NoLock)?;
@@ -674,6 +683,9 @@ pub fn rename_policy<'mcx>(mcx: Mcx<'mcx>, stmt: &RenameStmt<'mcx>) -> PgResult<
     let otid = policy_tuple.t_self;
     genam::systable_endscan(mcx, scan)?;
     catalog_indexing::CatalogTupleUpdate(mcx, &pg_policy_rel, &otid, &mut new_tuple)?;
+
+    // policy.c:1186
+    objectaccess::InvokeObjectPostAlterHook(POLICY_RELATION_ID, opoloid, 0)?;
 
     inval::invalidate::CacheInvalidateRelcache(&target_table)?;
 
@@ -763,6 +775,9 @@ pub fn RemoveRoleFromObjectPolicy<'mcx>(
         deleteSharedDependencyRecordsFor(mcx, POLICY_RELATION_ID, policy_id, 0)?;
         let myself = ObjectAddress::set(POLICY_RELATION_ID, policy_id);
         record_role_dependencies(mcx, &myself, &remaining)?;
+
+        // policy.c:529
+        objectaccess::InvokeObjectPostAlterHook(POLICY_RELATION_ID, policy_id, 0)?;
 
         xact::CommandCounterIncrement()?;
 
