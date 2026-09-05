@@ -3777,10 +3777,14 @@ impl<'a> Estate<'a> {
             ));
         }
 
+        // C keeps err_code as an int where MAKE_SQLSTATE('0','0','0','0','0')
+        // == 0 is "unset": `if (err_code)` at pl_exec.c:3850 lets a later
+        // USING ERRCODE override SQLSTATE '00000' and pl_exec.c:3890 defaults
+        // it to ERRCODE_RAISE_EXCEPTION. None here models exactly that 0.
         let mut err_code: Option<SqlState> = None;
         let mut cond: Option<String> = None;
         if let Some(cn) = condname {
-            err_code = Some(recognize_err_condition(cn)?);
+            err_code = raise_err_code(recognize_err_condition(cn)?);
             cond = Some(cn.clone());
         }
 
@@ -3852,7 +3856,7 @@ impl<'a> Estate<'a> {
                     if err_code.is_some() {
                         return Err(dup("ERRCODE"));
                     }
-                    err_code = Some(recognize_err_condition(&extval)?);
+                    err_code = raise_err_code(recognize_err_condition(&extval)?);
                     cond = Some(extval);
                 }
                 PLPGSQL_RAISEOPTION_MESSAGE => {
@@ -5306,6 +5310,12 @@ fn fetch_direction_of(direction: i32) -> types_portal::FetchDirection {
 }
 
 // plpgsql_recognize_err_condition(allow_sqlstate=true) returning the state.
+// exec_stmt_raise's `int err_code` (pl_exec.c:3828): SQLSTATE 00000 is the
+// integer 0, i.e. "no code given".
+fn raise_err_code(code: SqlState) -> Option<SqlState> {
+    (code.0 != 0).then_some(code)
+}
+
 fn recognize_err_condition(condname: &str) -> PgResult<SqlState> {
     if condname.len() == 5
         && condname

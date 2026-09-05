@@ -647,9 +647,11 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
                     }
                     K_DECLARE => continue,
                     LESS_LESS => {
-                        return Err(self.gram_err(
+                        // pl_gram.y:499-503: parser_errposition(@1), the "<<".
+                        return Err(self.gram_err_pos(
                             ERRCODE_SYNTAX_ERROR,
                             "block label must be placed before DECLARE, not after".to_string(),
+                            dt.2,
                         ));
                     }
                     _ => {
@@ -1018,19 +1020,22 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
 
     fn decl_aliasitem(&mut self) -> PgResult<(NsType, i32)> {
         let t = self.yylex()?;
+        // pl_gram.y:663/678/704: "does not exist" carries parser_errposition(@1).
         let nsi = if t.0 == T_WORD {
             let ident = &t.1.word.as_ref().expect("T_WORD").ident;
             self.comp.ns_lookup(self.comp.ns_top, false, ident, None, None).ok_or_else(|| {
-                self.gram_err(
+                self.gram_err_pos(
                     types_error::ERRCODE_UNDEFINED_OBJECT,
                     format!("variable \"{ident}\" does not exist"),
+                    t.2,
                 )
             })?
         } else if let Some(kw) = Self::unreserved_keyword_name(&t) {
             self.comp.ns_lookup(self.comp.ns_top, false, kw, None, None).ok_or_else(|| {
-                self.gram_err(
+                self.gram_err_pos(
                     types_error::ERRCODE_UNDEFINED_OBJECT,
                     format!("variable \"{kw}\" does not exist"),
+                    t.2,
                 )
             })?
         } else if t.0 == T_CWORD {
@@ -1049,9 +1054,10 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
                 None
             };
             found.ok_or_else(|| {
-                self.gram_err(
+                self.gram_err_pos(
                     types_error::ERRCODE_UNDEFINED_OBJECT,
                     format!("variable \"{}\" does not exist", idents.join(".")),
+                    t.2,
                 )
             })?
         } else {
@@ -2919,6 +2925,10 @@ pub fn getdiag_kindname(kind: i32) -> &'static str {
 #[cfg(test)]
 #[path = "gram_audit_b081_tests.rs"]
 mod audit_b081_tests;
+
+#[cfg(test)]
+#[path = "gram_audit_b202_tests.rs"]
+mod audit_b202_tests;
 
 #[cfg(test)]
 mod tests {
