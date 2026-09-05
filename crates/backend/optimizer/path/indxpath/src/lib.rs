@@ -636,16 +636,16 @@ fn ec_member_matches_indexcol(
     em: types_pathnodes::EmId,
     index: &IndexOptInfo<'_>,
     indexcol: usize,
-) -> bool {
+) -> PgResult<bool> {
     use types_core::BTREE_AM_OID;
     debug_assert!(indexcol < index.nkeycolumns as usize);
     let cur_family = index.opfamily[indexcol];
     let cur_collation = index.indexcollations[indexcol];
     if index.relam == BTREE_AM_OID && !run.root.ec(ec).ec_opfamilies.contains(&cur_family) {
-        return false;
+        return Ok(false);
     }
     if !index_coll_matches_expr_coll(cur_collation, run.root.ec(ec).ec_collation) {
-        return false;
+        return Ok(false);
     }
     match_index_to_operand(
         run,
@@ -722,7 +722,7 @@ fn match_boolean_index_clause<'mcx>(
     let mcx = run.mcx;
     let clause = *run.root.expr_node(run.root.rinfo(rinfo).clause);
     let mut op = None;
-    if match_index_to_operand(run, clause, indexcol, index) {
+    if match_index_to_operand(run, clause, indexcol, index)? {
         op = Some(planner_seams::make_opclause::call(
             mcx,
             BOOLEAN_EQUAL_OPERATOR,
@@ -737,7 +737,7 @@ fn match_boolean_index_clause<'mcx>(
             .args
             .first()
             .expect("NOT has one arg");
-        if match_index_to_operand(run, arg, indexcol, index) {
+        if match_index_to_operand(run, arg, indexcol, index)? {
             op = Some(planner_seams::make_opclause::call(
                 mcx,
                 BOOLEAN_EQUAL_OPERATOR,
@@ -756,7 +756,7 @@ fn match_boolean_index_clause<'mcx>(
             _ => None,
         };
         if let Some(v) = wanted {
-            if match_index_to_operand(run, arg, indexcol, index) {
+            if match_index_to_operand(run, arg, indexcol, index)? {
                 op = Some(planner_seams::make_opclause::call(
                     mcx,
                     BOOLEAN_EQUAL_OPERATOR,
@@ -826,7 +826,7 @@ fn match_clause_to_indexcol<'mcx>(
             let f = clause.as_func_expr().unwrap();
             let funcid = f.funcid;
             for (indexarg, op) in f.args.iter().enumerate() {
-                if match_index_to_operand(run, op, indexcol, index) {
+                if match_index_to_operand(run, op, indexcol, index)? {
                     return get_index_clause_from_support(
                         run,
                         rinfo,
@@ -842,7 +842,7 @@ fn match_clause_to_indexcol<'mcx>(
         NodeTag::T_NullTest if index.amsearchnulls => {
             let nt = clause.as_null_test().unwrap();
             if !nt.argisrow
-                && match_index_to_operand(run, nt.arg.expect("NullTest.arg"), indexcol, index)
+                && match_index_to_operand(run, nt.arg.expect("NullTest.arg"), indexcol, index)?
             {
                 return Ok(Some(IndexClause {
                     rinfo: Some(rinfo),
@@ -898,12 +898,12 @@ fn match_rowcompare_to_indexcol<'mcx>(
     // Match on operator opfamily membership, not the RowCompareExpr's own
     // opfamilies (reverse-sort families make those a matter of chance).
     let var_on_left;
-    if match_index_to_operand(run, leftop, indexcol, index)
+    if match_index_to_operand(run, leftop, indexcol, index)?
         && !vars::pull_varnos(run.mcx, rightop)?.is_member(index_relid as i32)
         && !clauses::contain_volatile_functions(rightop)?
     {
         var_on_left = true;
-    } else if match_index_to_operand(run, rightop, indexcol, index)
+    } else if match_index_to_operand(run, rightop, indexcol, index)?
         && !vars::pull_varnos(run.mcx, leftop)?.is_member(index_relid as i32)
         && !clauses::contain_volatile_functions(leftop)?
     {
@@ -983,7 +983,7 @@ fn expand_indexqual_rowcompare<'mcx>(
         // The Var side can match any key column of the index.
         let mut matched = None;
         for i in 0..index.nkeycolumns as usize {
-            if match_index_to_operand(run, varop, i, index)
+            if match_index_to_operand(run, varop, i, index)?
                 && lsyscache::run_memo::get_op_opfamily_strategy(run, expr_op, index.opfamily[i])?
                     == op_strategy
                 && index_coll_matches_expr_coll(
@@ -1041,14 +1041,13 @@ fn expand_indexqual_rowcompare<'mcx>(
                 righttypes[k],
                 op_strategy as i16,
             )?;
-            assert!(
-                expr_op != 0,
-                "missing operator {}({},{}) in opfamily {}",
-                op_strategy,
-                lefttypes[k],
-                righttypes[k],
-                opfamilies[k]
-            );
+            // indxpath.c:3653-3655 ("should not happen"): elog(ERROR), catchable.
+            if expr_op == 0 {
+                return Err(Box::new(types_error::PgError::error(format!(
+                    "missing operator {}({},{}) in opfamily {}",
+                    op_strategy, lefttypes[k], righttypes[k], opfamilies[k]
+                ))));
+            }
             ops.push(expr_op);
         }
         ops
@@ -1124,8 +1123,8 @@ fn match_opclause_to_indexcol<'mcx>(
     }
     let leftop = op.args.nth(0);
     let rightop = op.args.nth(1);
-    let left_matches = match_index_to_operand(run, leftop, indexcol, index);
-    let right_matches = match_index_to_operand(run, rightop, indexcol, index);
+    let left_matches = match_index_to_operand(run, leftop, indexcol, index)?;
+    let right_matches = match_index_to_operand(run, rightop, indexcol, index)?;
 
     if left_matches
         && !relids_is_member(index_relid as i32, &run.root.rinfo(rinfo).right_relids)
@@ -1200,7 +1199,7 @@ fn match_saopclause_to_indexcol<'mcx>(
     let rightop = saop.args.nth(1);
     let right_relids = vars::pull_varnos(run.mcx, rightop)?;
 
-    if match_index_to_operand(run, leftop, indexcol, index)
+    if match_index_to_operand(run, leftop, indexcol, index)?
         && !right_relids.is_member(index_relid as i32)
         && !clauses::contain_volatile_functions(rightop)?
         && index_coll_matches_expr_coll(index.indexcollations[indexcol], saop.inputcollid)
@@ -1259,13 +1258,13 @@ fn match_orclause_to_indexcol<'mcx>(
         let leftop = sub.args.nth(0);
         let rightop = sub.args.nth(1);
         let const_expr;
-        if match_index_to_operand(run, leftop, indexcol, index)
+        if match_index_to_operand(run, leftop, indexcol, index)?
             && !vars::pull_varnos(mcx, rightop)?.is_member(index_relid)
             && !clauses::contain_volatile_functions(rightop)?
         {
             index_expr = Some(leftop);
             const_expr = rightop;
-        } else if match_index_to_operand(run, rightop, indexcol, index)
+        } else if match_index_to_operand(run, rightop, indexcol, index)?
             && !vars::pull_varnos(mcx, leftop)?.is_member(index_relid)
             && !clauses::contain_volatile_functions(leftop)?
         {
@@ -1590,9 +1589,8 @@ pub fn match_index_to_operand<'mcx>(
     mut operand: Node<'mcx>,
     indexcol: usize,
     index: &IndexOptInfo<'_>,
-) -> bool {
-    operand = vars::strip_noop_phvs(run.mcx, operand)
-        .expect("strip_noop_phvs: arena allocation failed");
+) -> PgResult<bool> {
+    operand = vars::strip_noop_phvs(run.mcx, operand)?;
     while operand.node_tag() == NodeTag::T_RelabelType {
         operand = operand.as_relabel_type().unwrap().arg;
     }
@@ -1604,7 +1602,7 @@ pub fn match_index_to_operand<'mcx>(
                 && indkey == var.varattno as i32
                 && var.varnullingrels.is_empty()
             {
-                return true;
+                return Ok(true);
             }
         }
     } else {
@@ -1614,19 +1612,22 @@ pub fn match_index_to_operand<'mcx>(
                 pos += 1;
             }
         }
-        let id = *index
-            .indexprs
-            .get(pos)
-            .expect("wrong number of index expressions");
+        // indxpath.c:4470-4479: fewer indexprs than zero indexkeys is
+        // elog(ERROR) "wrong number of index expressions", catchable.
+        let Some(&id) = index.indexprs.get(pos) else {
+            return Err(Box::new(types_error::PgError::error(
+                "wrong number of index expressions".to_string(),
+            )));
+        };
         let mut indexkey = *run.root.expr_node(id);
         if indexkey.node_tag() == NodeTag::T_RelabelType {
             indexkey = indexkey.as_relabel_type().unwrap().arg;
         }
         if types_nodes::equal(indexkey, operand) {
-            return true;
+            return Ok(true);
         }
     }
-    false
+    Ok(false)
 }
 
 // match_pathkeys_to_index (indxpath.c): ORDER BY expressions of the form
@@ -1713,12 +1714,12 @@ fn match_clause_to_ordering_op<'mcx>(
     }
 
     let commuted;
-    if match_index_to_operand(run, leftop, indexcol, index)
+    if match_index_to_operand(run, leftop, indexcol, index)?
         && !vars::contain_var_clause(rightop)?
         && !clauses::contain_volatile_functions(rightop)?
     {
         commuted = false;
-    } else if match_index_to_operand(run, rightop, indexcol, index)
+    } else if match_index_to_operand(run, rightop, indexcol, index)?
         && !vars::contain_var_clause(leftop)?
         && !clauses::contain_volatile_functions(leftop)?
     {
@@ -2265,7 +2266,7 @@ fn group_similar_or_args<'mcx>(
                 continue;
             }
             for colnum in 0..index.nkeycolumns as usize {
-                if match_index_to_operand(run, nonconst, colnum, index) {
+                if match_index_to_operand(run, nonconst, colnum, index)? {
                     m.indexnum = indexnum as i32;
                     m.colnum = colnum as i32;
                     m.opno = opno;
@@ -2828,7 +2829,7 @@ pub fn relation_has_unique_index_ext<'mcx>(
                 }
                 let o = clause.as_op_expr().expect("mergejoinable clause is an OpExpr");
                 let rexpr = if outer_is_left { o.args.nth(1) } else { o.args.nth(0) };
-                if match_index_to_operand(run, rexpr, c, ind) {
+                if match_index_to_operand(run, rexpr, c, ind)? {
                     matched = true;
                     if extra_clauses.is_some()
                         && types_pathnodes::relids::relids_num_members(
@@ -2849,7 +2850,7 @@ pub fn relation_has_unique_index_ext<'mcx>(
             }
             if !matched {
                 for (j, &expr) in exprlist.iter().enumerate() {
-                    if !match_index_to_operand(run, expr, c, ind) {
+                    if !match_index_to_operand(run, expr, c, ind)? {
                         continue;
                     }
                     if !lsyscache::amop::op_in_opfamily(oprlist[j], ind.opfamily[c])? {
@@ -2879,3 +2880,6 @@ pub fn relation_has_unique_index_ext<'mcx>(
     }
     Ok(false)
 }
+
+#[cfg(test)]
+mod tests;

@@ -1225,7 +1225,7 @@ pub fn create_seqscan_path<'mcx>(
     path.parallel_safe = run.root.rel(rel_id).consider_parallel;
     path.parallel_workers = parallel_workers;
     let id = run.root.alloc_path(PathNode::Path(path));
-    costsize::cost_seqscan(run, id, rel_id);
+    costsize::cost_seqscan(run, id, rel_id)?;
     Ok(id)
 }
 
@@ -1831,7 +1831,7 @@ pub fn create_bitmap_heap_path<'mcx>(
     path.parallel_workers = parallel_degree;
     let node = types_pathnodes::BitmapHeapPath { path, bitmapqual: Some(bitmapqual) };
     let id = run.root.alloc_path(PathNode::BitmapHeapPath(node));
-    costsize::cost_bitmap_heap_scan(run, id, rel_id, bitmapqual, loop_count);
+    costsize::cost_bitmap_heap_scan(run, id, rel_id, bitmapqual, loop_count)?;
     Ok(id)
 }
 
@@ -2993,7 +2993,7 @@ pub fn relation_has_unique_index_for<'mcx>(
                 } else {
                     o.args.nth(0)
                 });
-                if planner_seams::match_index_to_operand::call(run, rexpr, c, ind) {
+                if planner_seams::match_index_to_operand::call(run, rexpr, c, ind)? {
                     matched = true;
                     break;
                 }
@@ -3001,8 +3001,7 @@ pub fn relation_has_unique_index_for<'mcx>(
             if !matched {
                 for (j, &expr_id) in exprlist.iter().enumerate() {
                     let expr = *run.root.expr_node(expr_id);
-                    if !planner_seams::match_index_to_operand::call(run, strip_relabel(expr), c, ind)
-                    {
+                    if !planner_seams::match_index_to_operand::call(run, strip_relabel(expr), c, ind)? {
                         continue;
                     }
                     if !lsyscache::amop::op_in_opfamily(oprlist[j], ind.opfamily[c])? {

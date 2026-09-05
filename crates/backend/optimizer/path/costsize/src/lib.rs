@@ -42,10 +42,11 @@ pub fn clamp_width_est(tuple_width: i64) -> i32 {
     tuple_width as i32
 }
 
-// get_tablespace_page_costs (spccache.c): reloptions unported, so every
-// tablespace reads the GUC defaults (divergence owned by the spccache unit).
-pub fn get_tablespace_page_costs(_spcid: u32) -> (f64, f64) {
-    (gucs::random_page_cost(), gucs::seq_page_cost())
+// get_tablespace_page_costs (spccache.c:182-205): the relation's tablespace
+// options (pg_tablespace.spcoptions random_page_cost / seq_page_cost) when
+// set, else the session GUCs; the syscache read lives in spccache.
+pub fn get_tablespace_page_costs(mcx: mcx::Mcx<'_>, spcid: u32) -> PgResult<(f64, f64)> {
+    spccache::get_tablespace_page_costs(mcx, spcid, gucs::random_page_cost(), gucs::seq_page_cost())
 }
 
 // cost_qual_eval (costsize.c) with the rinfo->eval_cost cache (lesson 10).
@@ -425,6 +426,11 @@ fn cost_qual_eval_walker<'mcx>(
         NodeTag::T_ReturningExpr => {
             cost_qual_eval_walker(run.as_deref_mut(), node.as_returning_expr().unwrap().retexpr, cost)
         }
+        // costsize.c:5003-5007: this routine is never applied to an
+        // un-planned expression; a SubLink here is elog(ERROR), catchable.
+        NodeTag::T_SubLink => Err(Box::new(types_error::PgError::error(
+            "cannot handle unplanned sub-select".to_string(),
+        ))),
         other => panic!("cost_qual_eval_walker (costsize.c): {other:?}; M2 expression lane"),
     }
 }
@@ -735,7 +741,11 @@ fn pgrcolumnar_scan_col_fraction(
     (needed as f64 / total as f64).clamp(0.0, 1.0)
 }
 
-pub fn cost_seqscan(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId, rel: RelId) {
+pub fn cost_seqscan(
+    run: &mut PlannerRun<'_>,
+    path_id: types_pathnodes::PathId,
+    rel: RelId,
+) -> PgResult<()> {
     let (relid, rtekind, reltablespace, pages, tuples, base_rows) = {
         let baserel = run.root.rel(rel);
         (
@@ -755,7 +765,7 @@ pub fn cost_seqscan(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId, 
     };
 
     let mut startup_cost = 0.0;
-    let (_, spc_seq_page_cost) = get_tablespace_page_costs(reltablespace);
+    let (_, spc_seq_page_cost) = get_tablespace_page_costs(run.mcx, reltablespace)?;
     let disk_run_cost =
         spc_seq_page_cost * pages as f64 * pgrcolumnar_scan_col_fraction(run, rel, path_id);
 
@@ -784,6 +794,7 @@ pub fn cost_seqscan(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId, 
     p.disabled_nodes = if gucs::enable_seqscan() { 0 } else { 1 };
     p.startup_cost = startup_cost;
     p.total_cost = startup_cost + cpu_run_cost + disk_run_cost;
+    Ok(())
 }
 
 // cost_samplescan (costsize.c). TABLESAMPLE parameter expressions are
@@ -818,7 +829,7 @@ pub fn cost_samplescan(
         None => base_rows,
     };
     let mut startup_cost = 0.0;
-    let (spc_random_page_cost, spc_seq_page_cost) = get_tablespace_page_costs(reltablespace);
+    let (spc_random_page_cost, spc_seq_page_cost) = get_tablespace_page_costs(run.mcx, reltablespace)?;
     // NextSampleBlock implies random access, else sequential (as C).
     let spc_page_cost = if tsm.has_next_sample_block() {
         spc_random_page_cost
@@ -1295,7 +1306,7 @@ pub fn cost_index(
         )
     };
     let tuples_fetched = clamp_row_est(am.index_selectivity * baserel_tuples);
-    let (spc_random_page_cost, spc_seq_page_cost) = get_tablespace_page_costs(reltablespace);
+    let (spc_random_page_cost, spc_seq_page_cost) = get_tablespace_page_costs(run.mcx, reltablespace)?;
 
     let (max_io_cost, min_io_cost, rand_heap_pages) = if loop_count > 1.0 {
         // Repeated scans: scale tuples by the scan count in the Mackert and
@@ -1564,7 +1575,7 @@ pub fn cost_bitmap_heap_scan(
     rel: RelId,
     bitmapqual: types_pathnodes::PathId,
     loop_count: f64,
-) {
+) -> PgResult<()> {
     let (relid, rtekind, reltablespace, pages, base_rows) = {
         let baserel = run.root.rel(rel);
         (
@@ -1586,7 +1597,7 @@ pub fn cost_bitmap_heap_scan(
 
     let mut startup_cost = index_total_cost;
     let t = if pages > 1 { pages as f64 } else { 1.0 };
-    let (spc_random_page_cost, spc_seq_page_cost) = get_tablespace_page_costs(reltablespace);
+    let (spc_random_page_cost, spc_seq_page_cost) = get_tablespace_page_costs(run.mcx, reltablespace)?;
     // Interpolate between random (few pages) and sequential (most of the
     // table) per-page cost, nonlinearly, as C.
     let cost_per_page = if pages_fetched >= 2.0 {
@@ -1622,6 +1633,7 @@ pub fn cost_bitmap_heap_scan(
     p.disabled_nodes = if gucs::enable_bitmapscan() { 0 } else { 1 };
     p.startup_cost = startup_cost;
     p.total_cost = startup_cost + run_cost;
+    Ok(())
 }
 
 pub fn cost_material(
@@ -1691,7 +1703,7 @@ pub fn cost_tidscan(
     let mut quals: PgVec<'_, RinfoId> = PgVec::new_in(run.mcx);
     quals.extend(tidquals.iter().copied());
     let tid_qual_cost = cost_qual_eval(run, &quals)?;
-    let (spc_random_page_cost, _) = get_tablespace_page_costs(reltablespace);
+    let (spc_random_page_cost, _) = get_tablespace_page_costs(run.mcx, reltablespace)?;
     let mut run_cost = spc_random_page_cost * ntuples;
 
     let qpqual_cost = get_restriction_qual_cost(run, rel, path_id)?;
@@ -1756,7 +1768,7 @@ pub fn cost_tidrangescan(
     let nseqpages = pages - 1.0;
 
     let tid_qual_cost = cost_qual_eval(run, &quals)?;
-    let (spc_random_page_cost, spc_seq_page_cost) = get_tablespace_page_costs(reltablespace);
+    let (spc_random_page_cost, spc_seq_page_cost) = get_tablespace_page_costs(run.mcx, reltablespace)?;
     let mut run_cost = spc_random_page_cost + spc_seq_page_cost * nseqpages;
 
     let qpqual_cost = get_restriction_qual_cost(run, rel, path_id)?;
@@ -3731,6 +3743,25 @@ fn exec_supports_mark_restore(run: &PlannerRun<'_>, path_id: PathId) -> bool {
             _ => false,
         };
     }
+    // execAmi.c:465-497: a single-subpath Append / MergeAppend is dropped
+    // from the final plan (setrefs), so its mark/restore ability is the
+    // child's; with more subpaths neither node can mark/restore.
+    if pathtype == tag16(NodeTag::T_Append) {
+        return match node {
+            types_pathnodes::PathNode::AppendPath(ap) if ap.subpaths.len() == 1 => {
+                exec_supports_mark_restore(run, ap.subpaths[0])
+            }
+            _ => false,
+        };
+    }
+    if pathtype == tag16(NodeTag::T_MergeAppend) {
+        return match node {
+            types_pathnodes::PathNode::MergeAppendPath(mp) if mp.subpaths.len() == 1 => {
+                exec_supports_mark_restore(run, mp.subpaths[0])
+            }
+            _ => false,
+        };
+    }
     false
 }
 
@@ -3805,14 +3836,17 @@ pub fn initial_cost_mergejoin(
         } else {
             run.root.path(inner_path).base().pathkeys[0]
         };
-        assert!(
-            opathkey.pk_opfamily == ipathkey.pk_opfamily
-                && run.root.ec(opathkey.pk_eclass.unwrap()).ec_collation
-                    == run.root.ec(ipathkey.pk_eclass.unwrap()).ec_collation
-                && opathkey.pk_cmptype == ipathkey.pk_cmptype
-                && opathkey.pk_nulls_first == ipathkey.pk_nulls_first,
-            "left and right pathkeys do not match in mergejoin"
-        );
+        // costsize.c:3610-3615 ("debugging check"): elog(ERROR), catchable.
+        if opathkey.pk_opfamily != ipathkey.pk_opfamily
+            || run.root.ec(opathkey.pk_eclass.unwrap()).ec_collation
+                != run.root.ec(ipathkey.pk_eclass.unwrap()).ec_collation
+            || opathkey.pk_cmptype != ipathkey.pk_cmptype
+            || opathkey.pk_nulls_first != ipathkey.pk_nulls_first
+        {
+            return Err(Box::new(types_error::PgError::error(
+                "left and right pathkeys do not match in mergejoin".to_string(),
+            )));
+        }
 
         let cache = cached_scansel(run, firstclause, &opathkey)?;
         let left_is_outer = types_pathnodes::relids::relids_is_subset(
@@ -4715,5 +4749,100 @@ mod tests {
         );
         let p = run.root.path(agg).base();
         assert_eq!((p.startup_cost, p.total_cost), (1000.0, 2000.0));
+    }
+
+    // costsize.c:5003-5007: cost_qual_eval_walker applied to an un-planned
+    // SubLink is elog(ERROR) "cannot handle unplanned sub-select" (XX000,
+    // catchable), never a panic.
+    #[test]
+    fn cost_qual_eval_walker_reports_unplanned_sublink() {
+        use types_nodes::primnodes::Const;
+        use types_nodes::{Node, NodeList, SubLink, SubLinkType};
+        let ctx = mcx::MemoryContext::new_bump("costsize-test");
+        let mcx = ctx.mcx();
+        let subselect = Node::mk(
+            mcx,
+            Const {
+                consttype: types_core::catalog::INT4OID,
+                consttypmod: -1,
+                constcollid: 0,
+                constlen: 4,
+                constvalue: datum::Datum::from_i32(1),
+                constisnull: false,
+                constbyval: true,
+                location: -1,
+            },
+        )
+        .unwrap();
+        let sublink = Node::mk(
+            mcx,
+            SubLink {
+                subLinkType: SubLinkType::EXISTS_SUBLINK,
+                subLinkId: 0,
+                testexpr: None,
+                operName: NodeList::nil(),
+                subselect,
+                location: -1,
+            },
+        )
+        .unwrap();
+        let mut cost = types_pathnodes::QualCost::default();
+        let err = super::cost_qual_eval_walker(None, sublink, &mut cost)
+            .expect_err("C elog(ERROR)s on an unplanned sub-select");
+        assert_eq!(err.message(), "cannot handle unplanned sub-select");
+    }
+
+    // costsize.c:3610-3615: initial_cost_mergejoin's "debugging check" on the
+    // first outer/inner pathkey pair is elog(ERROR) "left and right pathkeys
+    // do not match in mergejoin" (XX000, catchable), never a panic.
+    #[test]
+    fn initial_cost_mergejoin_reports_mismatched_pathkeys() {
+        use types_nodes::NodeTag;
+        use types_pathnodes::run::PlannerRun;
+        use types_pathnodes::{tag16, EquivalenceClass, Path, PathKey, PathNode, RelId, RinfoId};
+        let ctx = mcx::MemoryContext::new_bump("costsize-test");
+        let mcx = ctx.mcx();
+        let mut run = PlannerRun::new(mcx);
+        let mut ec_c = EquivalenceClass::new(mcx);
+        ec_c.ec_collation = 950; // "C"
+        let ec_c = run.root.alloc_ec(ec_c);
+        let mut ec_posix = EquivalenceClass::new(mcx);
+        ec_posix.ec_collation = 951; // "POSIX"
+        let ec_posix = run.root.alloc_ec(ec_posix);
+        let mut mk_path = || {
+            run.root.alloc_path(PathNode::Path(Path {
+                type_: tag16(NodeTag::T_Path),
+                pathtype: tag16(NodeTag::T_SeqScan),
+                parent: RelId(0),
+                pathtarget_id: None,
+                param_info: None,
+                parallel_aware: false,
+                parallel_safe: false,
+                parallel_workers: 0,
+                rows: 100.0,
+                disabled_nodes: 0,
+                startup_cost: 0.0,
+                total_cost: 10.0,
+                pathkeys: mcx::PgVec::new_in(mcx),
+            }))
+        };
+        let outer = mk_path();
+        let inner = mk_path();
+        let pk = |ec| PathKey { pk_eclass: Some(ec), pk_opfamily: 1976, pk_cmptype: 1, pk_nulls_first: false };
+        // (JoinCostWorkspace is not Debug, so no expect_err.)
+        let err = match super::initial_cost_mergejoin(
+            &mut run,
+            types_pathnodes::JOIN_INNER,
+            &[RinfoId(0)],
+            outer,
+            inner,
+            &[pk(ec_c)],
+            &[pk(ec_posix)],
+            0,
+        ) {
+            Err(e) => e,
+            Ok(_) => panic!("C elog(ERROR)s on mismatched merge pathkeys"),
+        };
+        assert_eq!(err.message(), "left and right pathkeys do not match in mergejoin");
     }
 }

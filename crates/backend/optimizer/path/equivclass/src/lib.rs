@@ -537,7 +537,7 @@ pub fn add_setop_child_rel_equivalences<'mcx>(
     child_rel: RelId,
     child_tlist: &types_nodes::list::NodeList<'mcx>,
     setop_pathkeys: &[types_pathnodes::PathKey],
-) {
+) -> PgResult<()> {
     let mcx = run.mcx;
     let mut pks = setop_pathkeys.iter();
     for tle_node in child_tlist {
@@ -545,7 +545,12 @@ pub fn add_setop_child_rel_equivalences<'mcx>(
         if tle.resjunk {
             continue;
         }
-        let pk = pks.next().expect("too few pathkeys for set operation");
+        // equivclass.c:3099-3100: elog(ERROR), catchable.
+        let Some(pk) = pks.next() else {
+            return Err(Box::new(types_error::PgError::error(
+                "too few pathkeys for set operation".to_string(),
+            )));
+        };
         let ec = pk.pk_eclass.expect("canonical pathkey has an eclass");
         // generate_union_paths adds the parent member first; its JoinDomain
         // covers the child member too.
@@ -573,6 +578,7 @@ pub fn add_setop_child_rel_equivalences<'mcx>(
         idx = relids_add_member(mcx, &idx, i as u32);
     }
     run.root.rel_mut(child_rel).eclass_indexes = idx;
+    Ok(())
 }
 
 // jdomain is always the top domain: sort/group expressions are top-level.
@@ -907,6 +913,62 @@ fn generate_base_implied_equalities_broken(run: &mut PlannerRun<'_>, ec: EcId) -
     Ok(())
 }
 
+// add_outer_joins_to_relids (joinrels.c): canonical joinrel relids include
+// the OJ's own relid plus any identity-3-pushed-down joins completed here.
+// Hosted in this crate because generate_join_implied_equalities (below)
+// needs it for a child inner rel's nominal relids; joinrels.rs calls it too.
+pub fn add_outer_joins_to_relids<'mcx>(
+    run: &PlannerRun<'mcx>,
+    input_relids: Relids<'mcx>,
+    sjinfo: Option<&SpecialJoinInfo<'mcx>>,
+    mut pushed_down_joins: Option<&mut PgVec<'mcx, SpecialJoinInfo<'mcx>>>,
+) -> Relids<'mcx> {
+    let mcx = run.mcx;
+    let Some(sj) = sjinfo else { return input_relids };
+    if sj.ojrelid == 0 {
+        return input_relids;
+    }
+    if sj.jointype != types_pathnodes::JOIN_LEFT {
+        return relids_add_member(mcx, &input_relids, sj.ojrelid);
+    }
+    // Pushed into a lower join's RHS per identity 3: our outputs are not the
+    // final state of our RHS yet.
+    if !relids_is_subset(&sj.commute_below_l, &input_relids) {
+        return input_relids;
+    }
+    let mut input_relids = relids_add_member(mcx, &input_relids, sj.ojrelid);
+    if !relids_is_empty(&sj.commute_above_l) {
+        let mut commute_above_rels = relids_copy(mcx, &sj.commute_above_l);
+        // join_info_list is bottom-up, so one pass suffices.
+        for i in 0..run.root.join_info_list.len() {
+            let othersj = &run.root.join_info_list[i];
+            if othersj.ojrelid == sj.ojrelid
+                || othersj.ojrelid == 0
+                || othersj.jointype != types_pathnodes::JOIN_LEFT
+            {
+                continue;
+            }
+            if !relids_is_member(othersj.ojrelid as i32, &commute_above_rels) {
+                continue;
+            }
+            if !relids_is_member(othersj.ojrelid as i32, &input_relids)
+                && relids_is_subset(&othersj.min_lefthand, &input_relids)
+                && relids_is_subset(&othersj.min_righthand, &input_relids)
+                && relids_is_subset(&othersj.commute_below_l, &input_relids)
+            {
+                input_relids = relids_add_member(mcx, &input_relids, othersj.ojrelid);
+                let othersj = run.root.join_info_list[i].clone();
+                commute_above_rels =
+                    relids_union(mcx, &commute_above_rels, &othersj.commute_above_l);
+                if let Some(pushed) = pushed_down_joins.as_mut() {
+                    pushed.push(othersj);
+                }
+            }
+        }
+    }
+    input_relids
+}
+
 pub fn generate_join_implied_equalities<'mcx>(
     run: &mut PlannerRun<'mcx>,
     join_relids: &Relids<'mcx>,
@@ -922,12 +984,16 @@ pub fn generate_join_implied_equalities<'mcx>(
     let is_child = !relids_is_empty(&run.root.rel(inner_rel).top_parent_relids);
     let (nominal_inner_relids, nominal_join_relids) = if is_child {
         let ninner = relids_copy(mcx, &run.root.rel(inner_rel).top_parent_relids);
-        let mut njoin = relids_union(mcx, outer_relids, &ninner);
-        if let Some(s) = sjinfo {
-            if s.ojrelid != 0 {
-                njoin = relids_add_member(mcx, &njoin, s.ojrelid);
-            }
-        }
+        // equivclass.c:1572: the outer join's own relid joins the nominal set
+        // only under the commutation rules of add_outer_joins_to_relids
+        // (identity 3: commute_below_l first, then any commute_above_l joins
+        // completed here) — not unconditionally.
+        let njoin = add_outer_joins_to_relids(
+            run,
+            relids_union(mcx, outer_relids, &ninner),
+            sjinfo,
+            None,
+        );
         (ninner, njoin)
     } else {
         (relids_copy(mcx, &inner_relids), relids_copy(mcx, join_relids))
@@ -1450,7 +1516,7 @@ fn reconsider_outer_join_clause<'mcx>(
                 relids_copy(mcx, &inner_relids),
                 min_security,
             )?;
-            let jdomain = find_join_domain(run, &sjinfo.syn_righthand);
+            let jdomain = find_join_domain(run, &sjinfo.syn_righthand)?;
             if process_equivalence(run, &mut newrinfo, jdomain)? {
                 derived = true;
             }
@@ -1539,7 +1605,7 @@ fn reconsider_full_join_clause<'mcx>(
                     relids_copy(mcx, &left_relids),
                     min_security,
                 )?;
-                let jdomain = find_join_domain(run, &sjinfo.syn_lefthand);
+                let jdomain = find_join_domain(run, &sjinfo.syn_lefthand)?;
                 if process_equivalence(run, &mut newrinfo, jdomain)? {
                     matchleft = true;
                 }
@@ -1555,7 +1621,7 @@ fn reconsider_full_join_clause<'mcx>(
                     relids_copy(mcx, &right_relids),
                     min_security,
                 )?;
-                let jdomain = find_join_domain(run, &sjinfo.syn_righthand);
+                let jdomain = find_join_domain(run, &sjinfo.syn_righthand)?;
                 if process_equivalence(run, &mut newrinfo, jdomain)? {
                     matchright = true;
                 }
@@ -1700,13 +1766,17 @@ pub fn remove_rel_from_eclasses(run: &mut PlannerRun<'_>, relid: i32, ojrelid: i
     }
 }
 
-pub fn find_join_domain(run: &PlannerRun<'_>, relids: &Relids<'_>) -> usize {
+// find_join_domain (equivclass.c:2618-2630): the first (smallest) domain
+// enclosed by relids; none is elog(ERROR), catchable.
+pub fn find_join_domain(run: &PlannerRun<'_>, relids: &Relids<'_>) -> PgResult<usize> {
     for (i, jd) in run.root.join_domains.iter().enumerate() {
         if relids_is_subset(&jd.jd_relids, relids) {
-            return i;
+            return Ok(i);
         }
     }
-    panic!("failed to find appropriate JoinDomain");
+    Err(Box::new(types_error::PgError::error(
+        "failed to find appropriate JoinDomain".to_string(),
+    )))
 }
 
 pub fn exprs_known_equal(
@@ -1823,7 +1893,7 @@ pub fn generate_implied_equalities_for_column<'mcx, F>(
     prohibited_rels: &Relids<'mcx>,
 ) -> PgResult<PgVec<'mcx, RinfoId>>
 where
-    F: FnMut(&PlannerRun<'mcx>, RelId, EcId, EmId) -> bool,
+    F: FnMut(&PlannerRun<'mcx>, RelId, EcId, EmId) -> PgResult<bool>,
 {
     let mcx = run.mcx;
     let mut result: PgVec<'mcx, RinfoId> = PgVec::new_in(mcx);
@@ -1851,7 +1921,7 @@ where
         for m in 0..candidates.len() {
             let em_id = candidates[m];
             if relids_equal(&run.root.em(em_id).em_relids, &rel_relids)
-                && callback(run, rel, cur_ec, em_id)
+                && callback(run, rel, cur_ec, em_id)?
             {
                 cur_em = Some(em_id);
                 break;
@@ -2154,3 +2224,6 @@ fn ec_search_derived_clause_for_ems(
     }
     None
 }
+
+#[cfg(test)]
+mod tests;

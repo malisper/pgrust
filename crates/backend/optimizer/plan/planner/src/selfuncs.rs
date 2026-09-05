@@ -450,7 +450,7 @@ fn get_actual_variable_range<'mcx>(
             || index.hypothetical
             || !index.canreturn[0]
             || collation != index.indexcollations[0]
-            || !crate::indxpath::match_index_to_operand(run, var_node, 0, &index)
+            || !crate::indxpath::match_index_to_operand(run, var_node, 0, &index)?
         {
             continue;
         }
@@ -2383,7 +2383,7 @@ fn genericcostestimate(
         1.0
     };
 
-    let (spc_random_page_cost, _) = crate::costsize::get_tablespace_page_costs(reltablespace);
+    let (spc_random_page_cost, _) = crate::costsize::get_tablespace_page_costs(run.mcx, reltablespace)?;
 
     let num_scans = num_sa_scans * loop_count;
     let mut index_total_cost = if num_scans > 1.0 {
@@ -2545,7 +2545,7 @@ fn brincostestimate(
     let baserel_pages = run.root.rel(index_rel).pages as f64;
 
     let (spc_random_page_cost, spc_seq_page_cost) =
-        crate::costsize::get_tablespace_page_costs(reltablespace);
+        crate::costsize::get_tablespace_page_costs(run.mcx, reltablespace)?;
 
     // Fetch pagesPerRange/revmapNumPages from the index itself (a lock is
     // already held from plancat).
@@ -4687,7 +4687,7 @@ fn gincostestimate(
         None,
     )?;
 
-    let (spc_random_page_cost, _) = crate::costsize::get_tablespace_page_costs(reltablespace);
+    let (spc_random_page_cost, _) = crate::costsize::get_tablespace_page_costs(run.mcx, reltablespace)?;
 
     // Examine quals: search-entry and partial-match counts.
     let mut counts = GinQualCounts {

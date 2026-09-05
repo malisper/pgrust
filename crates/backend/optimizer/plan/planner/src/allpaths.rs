@@ -1417,7 +1417,7 @@ fn set_tablesample_rel_size(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) ->
     let (pages, tuples) = {
         let r = run.root.rel(rel);
         let (spc_random_page_cost, _) =
-            crate::costsize::get_tablespace_page_costs(r.reltablespace);
+            crate::costsize::get_tablespace_page_costs(run.mcx, r.reltablespace)?;
         tsm.sample_scan_get_sample_size(
             run.mcx,
             &tsc.args,

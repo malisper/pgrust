@@ -9,7 +9,7 @@ use types_pathnodes::{
 };
 
 use crate::relnode::{
-    find_base_rel, relids_add_member, relids_copy, relids_equal, relids_is_member,
+    find_base_rel, relids_copy, relids_equal, relids_is_member,
     relids_is_subset, relids_overlap, relids_union,
 };
 use crate::run::PlannerRun;
@@ -348,8 +348,12 @@ pub fn make_join_rel(
     };
 
     let mut pushed_down_joins: PgVec<'_, SpecialJoinInfo<'_>> = PgVec::new_in(run.mcx);
-    joinrelids =
-        add_outer_joins_to_relids(run, joinrelids, &match_sjinfo, &mut pushed_down_joins);
+    joinrelids = crate::equivclass::add_outer_joins_to_relids(
+        run,
+        joinrelids,
+        match_sjinfo.as_ref(),
+        Some(&mut pushed_down_joins),
+    );
     let (rel1, rel2) = if reversed { (rel2, rel1) } else { (rel1, rel2) };
 
     let sjinfo = match match_sjinfo {
@@ -368,58 +372,6 @@ pub fn make_join_rel(
     }
     populate_joinrel_with_paths(run, rel1, rel2, joinrel, &sjinfo, &restrictlist)?;
     Ok(Some(joinrel))
-}
-
-// add_outer_joins_to_relids (joinrels.c): canonical joinrel relids include
-// the OJ's own relid plus any identity-3-pushed-down joins completed here.
-fn add_outer_joins_to_relids<'mcx>(
-    run: &PlannerRun<'mcx>,
-    input_relids: Relids<'mcx>,
-    sjinfo: &Option<SpecialJoinInfo<'mcx>>,
-    pushed_down_joins: &mut PgVec<'mcx, SpecialJoinInfo<'mcx>>,
-) -> Relids<'mcx> {
-    let mcx = run.mcx;
-    let Some(sj) = sjinfo else { return input_relids };
-    if sj.ojrelid == 0 {
-        return input_relids;
-    }
-    if sj.jointype != JOIN_LEFT {
-        return relids_add_member(mcx, &input_relids, sj.ojrelid);
-    }
-    // Pushed into a lower join's RHS per identity 3: our outputs are not the
-    // final state of our RHS yet.
-    if !relids_is_subset(&sj.commute_below_l, &input_relids) {
-        return input_relids;
-    }
-    let mut input_relids = relids_add_member(mcx, &input_relids, sj.ojrelid);
-    if !crate::relnode::relids_is_empty(&sj.commute_above_l) {
-        let mut commute_above_rels = relids_copy(mcx, &sj.commute_above_l);
-        // join_info_list is bottom-up, so one pass suffices.
-        for i in 0..run.root.join_info_list.len() {
-            let othersj = &run.root.join_info_list[i];
-            if othersj.ojrelid == sj.ojrelid
-                || othersj.ojrelid == 0
-                || othersj.jointype != JOIN_LEFT
-            {
-                continue;
-            }
-            if !relids_is_member(othersj.ojrelid as i32, &commute_above_rels) {
-                continue;
-            }
-            if !relids_is_member(othersj.ojrelid as i32, &input_relids)
-                && relids_is_subset(&othersj.min_lefthand, &input_relids)
-                && relids_is_subset(&othersj.min_righthand, &input_relids)
-                && relids_is_subset(&othersj.commute_below_l, &input_relids)
-            {
-                input_relids = relids_add_member(mcx, &input_relids, othersj.ojrelid);
-                let othersj = run.root.join_info_list[i].clone();
-                commute_above_rels =
-                    relids_union(mcx, &commute_above_rels, &othersj.commute_above_l);
-                pushed_down_joins.push(othersj);
-            }
-        }
-    }
-    input_relids
 }
 
 // restriction_is_constant_false (joinrels.c).

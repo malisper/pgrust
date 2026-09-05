@@ -17,7 +17,7 @@ use crate::{
     SearchSysCache3, SearchSysCache4, SearchSysCacheExists, SearchSysCacheList, SearchSysCacheList1,
     SysCacheGetAttr, SysCacheKey,
 };
-use crate::cacheinfo::{AMOID, COLLNAMEENCNSP, COLLOID, AGGFNOID, AMOPOPID, AMOPSTRATEGY, AMPROCNUM, ATTNUM, CLAAMNAMENSP, OPFAMILYAMNAMENSP, CLAOID, OPFAMILYOID, PROCNAMEARGSNSP, AUTHNAME, ENUMOID, ENUMTYPOIDNAME, AUTHOID, CASTSOURCETARGET, CONSTROID, INDEXRELID, NAMESPACENAME, NAMESPACEOID, OPERNAMENSP, TSCONFIGNAMENSP, TSCONFIGOID, TSDICTNAMENSP, TSDICTOID, TYPENAMENSP, ATTNAME, OPEROID, PROCOID, RELNAMENSP, RELOID, SEQRELID, STATEXTDATASTXOID, STATEXTOID, STATRELATTINH, TYPEOID};
+use crate::cacheinfo::{AMOID, COLLNAMEENCNSP, COLLOID, AGGFNOID, AMOPOPID, AMOPSTRATEGY, AMPROCNUM, ATTNUM, CLAAMNAMENSP, OPFAMILYAMNAMENSP, CLAOID, OPFAMILYOID, PROCNAMEARGSNSP, AUTHNAME, ENUMOID, ENUMTYPOIDNAME, AUTHOID, CASTSOURCETARGET, CONSTROID, INDEXRELID, NAMESPACENAME, NAMESPACEOID, OPERNAMENSP, TSCONFIGNAMENSP, TSCONFIGOID, TSDICTNAMENSP, TSDICTOID, TYPENAMENSP, ATTNAME, OPEROID, PROCOID, RELNAMENSP, RELOID, SEQRELID, STATEXTDATASTXOID, STATEXTOID, STATRELATTINH, TABLESPACEOID, TYPEOID};
 
 const ANUM_PG_CLASS_OID: i32 = 1;
 const ANUM_PG_CLASS_RELFILENODE: i32 = 8;
@@ -2926,6 +2926,43 @@ fn pg_attribute_attoptions<'mcx>(
     Ok(Some(out))
 }
 
+// spccache.c get_tablespace: SearchSysCache1(TABLESPACEOID) +
+// SysCacheGetAttr(spcoptions); the varlena image is copied into mcx so the
+// caller parses it after ReleaseSysCache.
+fn pg_tablespace_spcoptions<'mcx>(mcx: Mcx<'mcx>, spcid: Oid) -> PgResult<Option<Option<Datum>>> {
+    const ANUM_PG_TABLESPACE_SPCOPTIONS: i32 = 5;
+    let Some(tuple) =
+        SearchSysCache1(TABLESPACEOID, SysCacheKey::Value(Datum::from_oid(spcid)))?
+    else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let out = match getattr_nullable(&t, TABLESPACEOID, ANUM_PG_TABLESPACE_SPCOPTIONS) {
+        None => None,
+        Some(d) => {
+            let src = d.as_usize() as *const u8;
+            // Same bounds discipline as pg_attribute_attoptions: the varlena
+            // header must sit inside the tuple image before its length is
+            // trusted, then the whole image is bounded against the tuple.
+            let avail = tuple_bytes_from(&t, src)?;
+            if avail < 1 {
+                return Err(corrupt_attr_error(
+                    "spcoptions varlena header extends past tuple image",
+                ));
+            }
+            // SAFETY: avail >= 1, so the varlena header word is inside the image.
+            let len = unsafe { types_tuple::varatt::varsize_any(src) };
+            check_tuple_slice(&t, src, len)?;
+            // SAFETY: `[src, src+len)` validated against the tuple image above.
+            let bytes = unsafe { core::slice::from_raw_parts(src, len) };
+            Some(Datum::from_usize(mcx::slice_in(mcx, bytes)?.leak().as_ptr() as usize))
+        }
+    };
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some(out))
+}
+
 fn pg_type_typnamespace(typid: Oid) -> PgResult<Option<Oid>> {
     let Some(tuple) = SearchSysCache1(TYPEOID, SysCacheKey::Value(Datum::from_oid(typid)))? else {
         return Ok(None);
@@ -2991,6 +3028,7 @@ pub(crate) fn install() {
     syscache_seams::lookup_pg_enum_by_oid::set(lookup_pg_enum_by_oid);
     syscache_seams::lookup_pg_enum_by_typid_label::set(lookup_pg_enum_by_typid_label);
     syscache_seams::pg_attribute_attoptions::set(pg_attribute_attoptions);
+    syscache_seams::pg_tablespace_spcoptions::set(pg_tablespace_spcoptions);
     syscache_seams::pg_type_typnamespace::set(pg_type_typnamespace);
     syscache_seams::search_syscache_exists_reloid::set(search_syscache_exists_reloid);
     syscache_seams::search_syscache_exists_procoid::set(search_syscache_exists_procoid);

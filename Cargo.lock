@@ -4879,6 +4879,7 @@ dependencies = [
  "nodememoize",
  "nodes_core",
  "planner_seams",
+ "spccache",
  "table",
  "tablesample",
  "tidbitmap",
@@ -17667,6 +17668,22 @@ dependencies = [
  "types_resowner",
  "waitevent_seams",
  "xact_seams",
+]
+
+[[package]]
+name = "spccache"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "guc_tables",
+ "init_small",
+ "mcx",
+ "reloptions",
+ "syscache_seams",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_tuple",
 ]
 
 [[package]]

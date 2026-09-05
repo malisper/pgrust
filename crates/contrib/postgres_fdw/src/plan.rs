@@ -715,10 +715,10 @@ fn postgres_get_foreign_paths<'mcx>(
                 |run, _rel, _ec, em| {
                     let expr = run.root.em(em).em_expr;
                     if let Some(cur) = current {
-                        return types_nodes::equal::equal(
+                        return Ok(types_nodes::equal::equal(
                             *run.root.expr_node(expr),
                             *run.root.expr_node(cur),
-                        );
+                        ));
                     }
                     if already_used.iter().any(|&u| {
                         types_nodes::equal::equal(
@@ -726,10 +726,10 @@ fn postgres_get_foreign_paths<'mcx>(
                             *run.root.expr_node(u),
                         )
                     }) {
-                        return false;
+                        return Ok(false);
                     }
                     current = Some(expr);
-                    true
+                    Ok(true)
                 },
                 &prohibited,
             )?;

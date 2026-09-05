@@ -175,7 +175,7 @@ fn build_setop_child_paths<'mcx>(
             rel,
             child_tlist,
             interesting_pathkeys,
-        );
+        )?;
     }
 
     crate::costsize::set_subquery_size_estimates(run, rel)?;

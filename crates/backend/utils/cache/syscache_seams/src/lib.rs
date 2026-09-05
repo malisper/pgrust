@@ -437,6 +437,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // SysCacheGetAttr(TABLESPACEOID tuple, spcoptions) + datumCopy into mcx
+    // (spccache.c get_tablespace). Outer None mirrors !HeapTupleIsValid;
+    // inner None mirrors isnull.
+    pub fn pg_tablespace_spcoptions<'mcx>(
+        mcx: Mcx<'mcx>,
+        spcid: Oid,
+    ) -> PgResult<Option<Option<Datum>>>
+);
+
+seam_core::seam!(
     pub fn lookup_pg_cast_oid(sourcetypeid: Oid, targettypeid: Oid) -> PgResult<Oid>
 );
 

@@ -179,7 +179,7 @@ seam_core::seam!(
         operand: Node<'mcx>,
         indexcol: usize,
         index: &'a IndexOptInfo<'mcx>,
-    ) -> bool
+    ) -> PgResult<bool>
 );
 
 seam_core::seam!(

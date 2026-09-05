@@ -262,11 +262,12 @@ fn ec_member_matches_ctid(
     rel: RelId,
     _ec: types_pathnodes::EcId,
     em: types_pathnodes::EmId,
-) -> bool {
-    run.root
+) -> PgResult<bool> {
+    Ok(run
+        .root
         .expr_node(run.root.em(em).em_expr)
         .as_var()
-        .is_some_and(|v| is_ctid_var(v, run.root.rel(rel).relid))
+        .is_some_and(|v| is_ctid_var(v, run.root.rel(rel).relid)))
 }
 
 // create_tidscan_paths (tidpath.c). True = CurrentOf path forced; caller adds
@@ -308,7 +309,7 @@ pub fn create_tidscan_paths<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) -> PgR
             let ec = types_pathnodes::EcId(i as u32);
             for m in 0..run.root.ec(ec).ec_members.len() {
                 let em = run.root.ec(ec).ec_members[m];
-                if ec_member_matches_ctid(run, rel, ec, em) {
+                if ec_member_matches_ctid(run, rel, ec, em)? {
                     maybe_tid = true;
                     break 'ecs;
                 }
