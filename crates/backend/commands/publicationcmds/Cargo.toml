@@ -28,6 +28,7 @@ catalog = { path = "../../catalog/catalog" }
 catalog_namespace = { path = "../../catalog/catalog_namespace" }
 catalog_indexing = { path = "../../catalog/catalog_indexing" }
 catalog_dependency = { path = "../../catalog/catalog_dependency" }
+objectaccess = { path = "../../catalog/objectaccess" }
 pg_depend = { path = "../../catalog/pg_depend" }
 pg_shdepend = { path = "../../catalog/pg_shdepend" }
 pg_publication = { path = "../../catalog/pg_publication" }
@@ -52,6 +53,8 @@ parse_relation = { path = "../../parser/parse_relation" }
 parse_clause = { path = "../../parser/parse_clause" }
 parse_collate = { path = "../../parser/parse_collate" }
 commands_define = { path = "../commands_define" }
+event_trigger_seams = { path = "../event_trigger_seams" }
+cmdtag = { path = "../../tcop/cmdtag" }
 dbcommands = { path = "../dbcommands" }
 publicationcmds_seams = { path = "../publicationcmds_seams" }
 fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }

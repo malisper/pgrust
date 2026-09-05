@@ -762,12 +762,19 @@ fn get_relkind_objtype(relkind: u8) -> ObjectType {
     }
 }
 
+// PublicationAddTables (publicationcmds.c:1859): `stmt` is C's
+// AlterPublicationStmt pointer, NULL from CreatePublication. When it is set
+// the command collects each added relation itself (ProcessUtilitySlow marks
+// T_AlterPublicationStmt commandCollected) and runs the post-create hook.
 fn PublicationAddTables<'mcx>(
     mcx: Mcx<'mcx>,
     pubid: Oid,
     rels: &[PubRelOpen<'mcx>],
     if_not_exists: bool,
+    stmt: Option<&AlterPublicationStmt<'mcx>>,
 ) -> PgResult<()> {
+    debug_assert!(stmt.is_none_or(|s| !s.for_all_tables));
+
     for pub_rel in rels {
         let rel = &pub_rel.relation;
         if !aclchk::object_ownercheck(RELATION_RELATION_ID, rel.rd_id, miscinit::GetUserId())? {
@@ -782,7 +789,16 @@ fn PublicationAddTables<'mcx>(
             whereClause: pub_rel.whereClause,
             columns: &pub_rel.columns,
         };
-        publication_add_relation(mcx, pubid, &pri, if_not_exists)?;
+        let obj = publication_add_relation(mcx, pubid, &pri, if_not_exists)?;
+        if stmt.is_some() {
+            // publicationcmds.c:1880-1884
+            event_trigger_seams::event_trigger_collect_simple_command::call(
+                obj,
+                ObjectAddress::set(InvalidOid, InvalidOid),
+                cmdtag::GetCommandTagEnum(b"ALTER PUBLICATION"),
+            );
+            objectaccess::InvokeObjectPostCreateHook(PublicationRelRelationId, obj.objectId, 0)?;
+        }
     }
     Ok(())
 }
@@ -835,9 +851,28 @@ fn PublicationDropTables<'mcx>(
     Ok(())
 }
 
-fn PublicationAddSchemas(mcx: Mcx<'_>, pubid: Oid, schemas: &[Oid], if_not_exists: bool) -> PgResult<()> {
+// PublicationAddSchemas (publicationcmds.c:1938): `stmt` as in
+// PublicationAddTables.
+fn PublicationAddSchemas<'mcx>(
+    mcx: Mcx<'mcx>,
+    pubid: Oid,
+    schemas: &[Oid],
+    if_not_exists: bool,
+    stmt: Option<&AlterPublicationStmt<'mcx>>,
+) -> PgResult<()> {
+    debug_assert!(stmt.is_none_or(|s| !s.for_all_tables));
+
     for &schemaid in schemas {
-        publication_add_schema(mcx, pubid, schemaid, if_not_exists)?;
+        let obj = publication_add_schema(mcx, pubid, schemaid, if_not_exists)?;
+        if stmt.is_some() {
+            // publicationcmds.c:1953-1957
+            event_trigger_seams::event_trigger_collect_simple_command::call(
+                obj,
+                ObjectAddress::set(InvalidOid, InvalidOid),
+                cmdtag::GetCommandTagEnum(b"ALTER PUBLICATION"),
+            );
+            objectaccess::InvokeObjectPostCreateHook(PublicationNamespaceRelationId, obj.objectId, 0)?;
+        }
     }
     Ok(())
 }
@@ -961,17 +996,20 @@ pub fn CreatePublication<'mcx>(
                 !schemaidlist.is_empty(),
                 opts.publish_via_partition_root,
             )?;
-            PublicationAddTables(mcx, puboid, &rels, true)?;
+            PublicationAddTables(mcx, puboid, &rels, true, None)?;
             CloseTableList(rels)?;
         }
 
         if !schemaidlist.is_empty() {
             LockSchemaList(&schemaidlist)?;
-            PublicationAddSchemas(mcx, puboid, &schemaidlist, true)?;
+            PublicationAddSchemas(mcx, puboid, &schemaidlist, true, None)?;
         }
     }
 
     rel.close(RowExclusiveLock)?;
+
+    // publicationcmds.c:966
+    objectaccess::InvokeObjectPostCreateHook(PublicationRelationId, puboid, 0)?;
 
     if transam_xlog::wal_level() != transam_xlog::WAL_LEVEL_LOGICAL {
         elog::ereport(WARNING)
@@ -1138,6 +1176,15 @@ fn AlterPublicationOptions<'mcx>(
         InvalidatePublicationRels(&relids)?;
     }
 
+    // publicationcmds.c:1167-1171: the ALTER PUBLICATION command collects
+    // itself (ProcessUtilitySlow's commandCollected), then the post-alter hook.
+    event_trigger_seams::event_trigger_collect_simple_command::call(
+        ObjectAddress::set(PublicationRelationId, fields.oid),
+        ObjectAddress::set(InvalidOid, InvalidOid),
+        cmdtag::GetCommandTagEnum(b"ALTER PUBLICATION"),
+    );
+    objectaccess::InvokeObjectPostAlterHook(PublicationRelationId, fields.oid, 0)?;
+
     Ok(())
 }
 
@@ -1186,7 +1233,7 @@ fn AlterPublicationTables<'mcx>(
                 publish_schema,
                 fields.pubviaroot,
             )?;
-            PublicationAddTables(mcx, pubid, &rels, false)?;
+            PublicationAddTables(mcx, pubid, &rels, false, Some(stmt))?;
         }
         AlterPublicationAction::AP_DropObjects => {
             PublicationDropTables(mcx, pubid, &rels, false)?;
@@ -1250,7 +1297,7 @@ fn AlterPublicationTables<'mcx>(
             }
 
             PublicationDropTables(mcx, pubid, &delrels, true)?;
-            PublicationAddTables(mcx, pubid, &rels, true)?;
+            PublicationAddTables(mcx, pubid, &rels, true, Some(stmt))?;
             CloseTableList(delrels)?;
         }
     }
@@ -1298,7 +1345,7 @@ fn AlterPublicationSchemas<'mcx>(
                     ));
                 }
             }
-            PublicationAddSchemas(mcx, fields.oid, schemaidlist, false)?;
+            PublicationAddSchemas(mcx, fields.oid, schemaidlist, false, Some(stmt))?;
         }
         AlterPublicationAction::AP_DropObjects => {
             PublicationDropSchemas(mcx, fields.oid, schemaidlist, false)?;
@@ -1312,7 +1359,7 @@ fn AlterPublicationSchemas<'mcx>(
                 .collect();
             LockSchemaList(&delschemas)?;
             PublicationDropSchemas(mcx, fields.oid, &delschemas, true)?;
-            PublicationAddSchemas(mcx, fields.oid, schemaidlist, true)?;
+            PublicationAddSchemas(mcx, fields.oid, schemaidlist, true, Some(stmt))?;
         }
     }
     Ok(())
@@ -1606,6 +1653,8 @@ fn alter_owner_scan<'mcx>(
     if let Some((mut new_tuple, otid)) = update {
         catalog_indexing::CatalogTupleUpdate(mcx, &rel, &otid, &mut new_tuple)?;
         pg_shdepend::changeDependencyOnOwner(mcx, PublicationRelationId, pubid, newOwnerId)?;
+        // publicationcmds.c:2050
+        objectaccess::InvokeObjectPostAlterHook(PublicationRelationId, pubid, 0)?;
     }
     rel.close(RowExclusiveLock)?;
     Ok(pubid)
