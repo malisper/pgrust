@@ -1,6 +1,6 @@
-// tsearchcmds.c. LOUD divergences: event-trigger collection, pg_shdepend flush
-// on ALTER (owner is pinned, so C's delete+re-record of shared deps is a no-op
-// here).
+// tsearchcmds.c. LOUD divergences: event-trigger collection (SCT_Simple stands
+// in for SCT_AlterTSConfig; the SRF rows are identical), object-access hooks
+// (elided repo-wide).
 #![allow(non_snake_case, non_upper_case_globals)]
 
 pub mod deflist;
@@ -339,6 +339,8 @@ fn make_dictionary_dependencies(
 ) -> PgResult<ObjectAddress> {
     let myself = ObjectAddress::set(TSDictionaryRelationId, dictOid);
     pg_depend::recordDependencyOnOwner(mcx, myself.classId, myself.objectId, owner)?;
+    // dependency on extension (tsearchcmds.c:320)
+    pg_depend::recordDependencyOnCurrentExtension(mcx, &myself, false)?;
     let mut refs = [
         ObjectAddress::set(NAMESPACE_RELATION_ID, namespaceoid),
         ObjectAddress::set(TSTemplateRelationId, templId),
@@ -761,11 +763,16 @@ fn make_configuration_dependencies<'mcx>(
     mapRel: Option<&Relation<'mcx>>,
 ) -> PgResult<ObjectAddress> {
     let myself = ObjectAddress::set(TSConfigRelationId, cfgOid);
+    // for ALTER case, first flush old dependencies, except extension deps
+    // (tsearchcmds.c:825-829). The shared flush is NOT a no-op: a normal
+    // (unpinned) owner has a live `o` row that must go before it is re-recorded.
     if remove_old {
         pg_depend::deleteDependencyRecordsFor(mcx, myself.classId, myself.objectId, true)?;
-        // C also flushes pg_shdepend; the pinned owner recorded nothing there.
+        pg_shdepend::deleteSharedDependencyRecordsFor(mcx, myself.classId, myself.objectId, 0)?;
     }
     pg_depend::recordDependencyOnOwner(mcx, myself.classId, myself.objectId, owner)?;
+    // dependency on extension (tsearchcmds.c:848)
+    pg_depend::recordDependencyOnCurrentExtension(mcx, &myself, remove_old)?;
 
     let mut refs: PgVec<'mcx, ObjectAddress> = PgVec::new_in(mcx);
     refs.push(ObjectAddress::set(NAMESPACE_RELATION_ID, namespaceoid));

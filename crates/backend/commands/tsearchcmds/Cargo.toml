@@ -24,6 +24,7 @@ catalog_namespace = { path = "../../catalog/catalog_namespace" }
 catalog_dependency = { path = "../../catalog/catalog_dependency" }
 commands_define = { path = "../commands_define" }
 pg_depend = { path = "../../catalog/pg_depend" }
+pg_shdepend = { path = "../../catalog/pg_shdepend" }
 aclchk = { path = "../../catalog/aclchk" }
 miscinit = { path = "../../utils/init/miscinit" }
 superuser = { path = "../../utils/misc/superuser" }

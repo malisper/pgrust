@@ -19540,6 +19540,7 @@ dependencies = [
  "miscinit",
  "parse_func_seams",
  "pg_depend",
+ "pg_shdepend",
  "pg_string",
  "rel_vocab",
  "superuser",
