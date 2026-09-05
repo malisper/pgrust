@@ -16,6 +16,7 @@ datum = { path = "../../../_support/types/datum" }
 types_nodes = { path = "../../../_support/types/nodes" }
 types_rel = { path = "../../../_support/types/rel" }
 types_scan = { path = "../../../_support/types/types_scan" }
+types_slot = { path = "../../../_support/types/types_slot" }
 indexam = { path = "../../access/index/indexam" }
 tidbitmap = { path = "../../nodes/tidbitmap" }
 nodeindexscan = { path = "../nodeindexscan" }

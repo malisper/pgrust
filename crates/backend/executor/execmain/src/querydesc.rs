@@ -685,11 +685,32 @@ pub(crate) fn query_desc_bitmap_instrument_seam(
     }
 }
 
+/// show_indexsearches_info (explain.c:3847-3887): the local process's
+/// `*_Instrument.nsearches` plus the sum of every worker's `winstrument`
+/// slot for this IndexScan/IndexOnlyScan/BitmapIndexScan node. Workers are
+/// thread-native (no DSM): their per-node counts arrive as the
+/// `WorkerInstr.index` side table (`es_index_instrumentation` republished
+/// at end of run).
 pub(crate) fn query_desc_index_searches_seam(h: QueryDescHandle, plan_node_id: i32) -> Option<u64> {
-    match query_desc_instr_extra(h, plan_node_id)? {
-        crate::procnode::InstrExtra::IndexSearches(n) => Some(n),
-        _ => None,
-    }
+    let local = match query_desc_instr_extra(h, plan_node_id)? {
+        crate::procnode::InstrExtra::IndexSearches(n) => n,
+        _ => return None,
+    };
+    let workers = with_qd(h, |qd| {
+        let exec = qd.exec.as_ref()?;
+        exec.with(|d| {
+            Some(
+                d.estate
+                    .es_worker_instrument
+                    .iter()
+                    .flat_map(|w| w.index.iter().filter(|(id, _)| *id == plan_node_id))
+                    .map(|(_, n)| *n)
+                    .sum::<u64>(),
+            )
+        })
+    })
+    .unwrap_or(0);
+    Some(local + workers)
 }
 
 /// Gather/GatherMerge nworkers_launched (EXPLAIN's Workers Launched).

@@ -15,6 +15,7 @@ use ::types_error::PgResult;
 use ::types_nodes::plannodes::BitmapIndexScan;
 use ::types_rel::{NoLock, Relation};
 use ::types_scan::scankey::ScanKeyData;
+use ::types_slot::EXEC_FLAG_EXPLAIN_ONLY;
 
 pub fn init_seams() {}
 
@@ -27,6 +28,10 @@ pub struct BitmapIndexScanState<'mcx> {
     // null array, so no scan at all).
     pub biss_Runtime: Option<PgBox<'mcx, RuntimeKeysState<'mcx>>>,
     pub biss_ArrayKeys: PgVec<'mcx, IndexArrayKeyInfo<'mcx>>,
+    /// C `ss.ps.plan->plan_node_id`: the key under which this node's
+    /// `biss_Instrument.nsearches` is republished to the estate (the
+    /// thread-native stand-in for `biss_SharedInfo`'s DSM slot).
+    pub biss_PlanNodeId: i32,
 }
 
 pub fn exec_init_bitmap_index_scan<'mcx>(
@@ -35,6 +40,23 @@ pub fn exec_init_bitmap_index_scan<'mcx>(
     estate: &mut EStateData<'mcx>,
     eflags: i32,
 ) -> PgResult<BitmapIndexScanState<'mcx>> {
+    // C nodeBitmapIndexscan.c:272: plain EXPLAIN stops here — the index is
+    // neither opened nor locked and no scan keys are built ("This allows an
+    // index-advisor plugin to EXPLAIN a plan containing references to
+    // nonexistent indexes"; an EXPLAIN of a cached generic plan takes no
+    // index lock, AcquireExecutorLocks covers tables only). The plan never
+    // runs; exec_end_bitmap_index_scan closes nothing (C: "no-op if we
+    // didn't open it").
+    if eflags & EXEC_FLAG_EXPLAIN_ONLY != 0 {
+        return Ok(BitmapIndexScanState {
+            biss_ScanDesc: None,
+            biss_RelationDesc: None,
+            biss_ScanKeys: PgVec::new_in(mcx),
+            biss_Runtime: None,
+            biss_ArrayKeys: PgVec::new_in(mcx),
+            biss_PlanNodeId: node.scan.plan.plan_node_id,
+        });
+    }
     // C nodeBitmapIndexscan.c:276: rellockmode unconditionally — a reused
     // generic plan gets no planner locks and AcquireExecutorLocks covers
     // tables only.
@@ -89,7 +111,24 @@ pub fn exec_init_bitmap_index_scan_rel<'mcx>(
         biss_ScanKeys,
         biss_Runtime,
         biss_ArrayKeys: array_keys,
+        biss_PlanNodeId: node.scan.plan.plan_node_id,
     })
+}
+
+/// C `biss_Instrument.nsearches` (execnodes.h:1805; the AM bumps it through
+/// `scan->instrument`): republish the scan's running search count to the
+/// estate under this node's plan_node_id. In a parallel worker this is the
+/// per-worker `winstrument` slot the leader sums in show_indexsearches_info
+/// (explain.c:3879-3887); ANALYZE-only, like C's `instrument` pointer.
+#[inline]
+fn republish_nsearches(
+    estate: &mut EStateData<'_>,
+    plan_node_id: i32,
+    scandesc: &IndexScanDescData<'_>,
+) {
+    if estate.es_instrument != 0 {
+        estate.instr_set_index_nsearches(plan_node_id, scandesc.xs_nsearches);
+    }
 }
 
 /// C's biss_result hand-off from BitmapOr; returns ntuples added.
@@ -132,6 +171,7 @@ pub fn multi_exec_bitmap_index_scan_into<'mcx>(
             .as_deref_mut()
             .expect("scan desc initialized above");
         n_tuples += index_getbitmap(scandesc, tbm)? as f64;
+        republish_nsearches(estate, node.biss_PlanNodeId, scandesc);
         check_for_interrupts()?;
         doscan = exec_index_advance_array_keys(&mut node.biss_ArrayKeys, &mut node.biss_ScanKeys);
         if doscan {
@@ -298,6 +338,7 @@ pub fn multi_exec_bitmap_index_scan_clamped_into<'mcx>(
         .expect("scan desc initialized above");
     index_rescan(scandesc, Some(&node.biss_ScanKeys), None)?;
     let n_tuples = index_getbitmap(scandesc, tbm)? as f64;
+    republish_nsearches(estate, node.biss_PlanNodeId, scandesc);
     check_for_interrupts()?;
     Ok(n_tuples)
 }
@@ -458,5 +499,6 @@ const _: fn(&BitmapIndexScanState<'_>) = |v| {
         biss_ScanKeys: _,
         biss_Runtime: _,
         biss_ArrayKeys: _,
+        biss_PlanNodeId: _,
     } = v;
 };

@@ -941,7 +941,10 @@ pub fn parallel_query_main(shared: &parallel::ParallelShared) -> PgResult<()> {
             // ACCUMULATES into the worker's slot (nodeBitmapHeapscan.c:
             // 290-291 `si->exact_pages += node->stats.exact_pages;`): each
             // relaunch starts from a zeroed BitmapHeapScanState, so the slot
-            // must sum every rescan's pages for EXPLAIN ANALYZE.
+            // must sum every rescan's pages for EXPLAIN ANALYZE — and the
+            // index search counts likewise (nodeBitmapIndexscan.c:204,
+            // nodeIndexscan.c:816, nodeIndexonlyscan.c: `winstrument->
+            // nsearches += node->*_Instrument.nsearches;`).
             let mut workers = si.workers.lock().unwrap_or_else(|e| e.into_inner());
             let slot = &mut workers[me as usize];
             match slot {
@@ -958,7 +961,12 @@ pub fn parallel_query_main(shared: &parallel::ParallelShared) -> PgResult<()> {
                     prev.incsort = report.incsort;
                     prev.agg = report.agg;
                     prev.hash = report.hash;
-                    prev.index = report.index;
+                    for (id, n) in report.index {
+                        match prev.index.iter_mut().find(|(pid, _)| *pid == id) {
+                            Some((_, acc)) => *acc += n,
+                            None => prev.index.push((id, n)),
+                        }
+                    }
                     for (id, bi) in report.bitmap {
                         match prev.bitmap.iter_mut().find(|(pid, _)| *pid == id) {
                             Some((_, acc)) => {

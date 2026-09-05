@@ -9988,6 +9988,7 @@ dependencies = [
  "types_nodes",
  "types_rel",
  "types_scan",
+ "types_slot",
 ]
 
 [[package]]

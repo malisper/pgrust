@@ -815,3 +815,77 @@ fn build_wait_reports_parallel_bitmap_scan_wait_event() {
         "pgstat_report_wait_end must clear the event after the wake"
     );
 }
+
+// audit-18.6 b197 (nodeBitmapIndexscan.c:191-205, execnodes.h:1805,
+// explain.c:3866-3873): the bitmap index scan's search count is C's
+// `biss_Instrument.nsearches`, published per node so a parallel worker's
+// count reaches the leader's EXPLAIN ANALYZE (the thread-native stand-in for
+// the `biss_SharedInfo` DSM slot). Under instrumentation the estate must
+// carry a (plan_node_id, nsearches >= 1) entry after the build; without
+// instrumentation (C: `ss.ps.instrument == NULL`) nothing is published.
+#[test]
+fn bitmap_index_scan_republishes_nsearches_under_instrumentation() {
+    let _g = serial();
+    with_mcx(|mcx| {
+        let pages: &[&[i32]] = &[&[30, 5, 40, 12], &[7, 25, 90]];
+        let mut c = setup(mcx, pages, OP_INT4GT, F_INT4GT, 10);
+        assert_eq!(c.estate.es_instrument, 0);
+        let tbm = multi_exec_bitmap_index_scan(&mut c.biss, &mut c.estate).unwrap();
+        assert!(!tbm.is_empty());
+        assert!(
+            c.estate.es_index_instrumentation.is_empty(),
+            "no instrumentation requested, but nsearches was published: {:?}",
+            c.estate.es_index_instrumentation.iter().collect::<Vec<_>>()
+        );
+        nodebitmapindexscan::exec_rescan_bitmap_index_scan(&mut c.biss, &mut c.estate).unwrap();
+        c.estate.es_instrument = 1;
+        let tbm = multi_exec_bitmap_index_scan(&mut c.biss, &mut c.estate).unwrap();
+        assert!(!tbm.is_empty());
+        // The witness plan is `Plan::default()`: plan_node_id 0.
+        let id = 0;
+        let got = c
+            .estate
+            .es_index_instrumentation
+            .iter()
+            .find_map(|(pid, n)| (*pid == id).then_some(*n));
+        assert!(
+            matches!(got, Some(n) if n >= 2),
+            "bitmap index scan under es_instrument must republish nsearches for plan node {id} \
+             (two searches so far), got {got:?}"
+        );
+        teardown(c);
+    });
+}
+
+// audit-18.6 b197 (nodeBitmapIndexscan.c:272): under EXEC_FLAG_EXPLAIN_ONLY
+// ExecInitBitmapIndexScan returns before index_open — "This allows an
+// index-advisor plugin to EXPLAIN a plan containing references to
+// nonexistent indexes" — with no index relation, lock or scan keys. The
+// plan here names an index OID that exists nowhere and has no range table,
+// so any attempt to lock or open the index fails; C succeeds.
+#[test]
+fn explain_only_bitmap_index_scan_opens_nothing() {
+    let _g = serial();
+    with_mcx(|mcx| {
+        let mut estate = EStateData::new_in(mcx);
+        let mut plan = mk_bitmap_index_scan(mcx, OP_INT4GT, F_INT4GT, 10);
+        plan.indexid = 4_000_000_000;
+        plan.scan.plan.plan_node_id = 7;
+        let mut biss = nodebitmapindexscan::exec_init_bitmap_index_scan(
+            mcx,
+            &plan,
+            &mut estate,
+            ::types_slot::EXEC_FLAG_EXPLAIN_ONLY,
+        )
+        .expect("plain EXPLAIN must not open, lock or key a (nonexistent) index");
+        assert!(biss.biss_RelationDesc.is_none());
+        assert!(biss.biss_ScanDesc.is_none());
+        assert!(biss.biss_ScanKeys.is_empty());
+        assert!(biss.biss_Runtime.is_none());
+        assert!(biss.biss_ArrayKeys.is_empty());
+        // ExecEndBitmapIndexScan: "no-op if we didn't open it".
+        nodebitmapindexscan::exec_end_bitmap_index_scan(&mut biss).unwrap();
+        estate.exec_reset_tuple_table(false);
+        quiesced();
+    });
+}
