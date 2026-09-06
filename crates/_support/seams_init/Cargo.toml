@@ -111,6 +111,7 @@ libpq_pqsignal = { path = "../../backend/libpq/libpq_pqsignal" }
 pqcomm = { path = "../../backend/libpq/pqcomm" }
 pqcomm_simnet = { path = "../../backend/libpq/pqcomm_simnet" }
 pqcomm_stdio = { path = "../../backend/libpq/pqcomm_stdio" }
+pqcomm_hostpipes = { path = "../../backend/libpq/pqcomm_hostpipes" }
 pqformat = { path = "../../backend/libpq/pqformat" }
 vars = { path = "../../backend/optimizer/util/vars" }
 parser_driver = { path = "../../backend/parser/parser_driver" }

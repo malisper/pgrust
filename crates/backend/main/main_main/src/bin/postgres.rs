@@ -285,9 +285,9 @@ fn main() {
 fn run() {
     // Transport provider resolution (§2.4 seam): one argv peek, once, before
     // any seam install — set-once at boot is the house pattern. Everything
-    // but `--stdio-wire` / `--stdio-wire-threaded` / `--sim-net` (all the C
-    // dispatch options included) boots the socket provider, i.e. the
-    // unchanged native byte path.
+    // but `--stdio-wire` / `--stdio-wire-threaded` / `--sim-net` /
+    // `--host-pipes` (all the C dispatch options included) boots the socket
+    // provider, i.e. the unchanged native byte path.
     let arg1 = std::env::args().nth(1);
     let transport = match arg1.as_deref() {
         Some("--stdio-wire") => seams_init::Transport::StdioWire,
@@ -296,6 +296,11 @@ fn run() {
         Some("--stdio-wire-threaded") => seams_init::Transport::StdioWire,
         #[cfg(pgrust_sim)]
         Some("--sim-net") => seams_init::Transport::SimNet,
+        // NOT a dispatch option: --host-pipes only picks the transport and
+        // then falls through to the NORMAL postmaster dispatch (main_main
+        // parses "host-pipes" as DispatchOption::Postmaster, and
+        // PostmasterMain's own getopt skips this argv[1]).
+        Some("--host-pipes") => seams_init::Transport::HostPipes,
         _ => seams_init::Transport::Socket,
     };
     seams_init::init_all_with_transport(transport);

@@ -69,3 +69,15 @@ seam_core::seam!(
     // treats the connection as alive.
     pub fn pq_check_connection() -> PgResult<bool>
 );
+
+seam_core::seam!(
+    // pgrust extension (no C counterpart): does this transport OWN its
+    // listener rather than bind one? Installed only by the host-pipes
+    // provider, whose listener is a file descriptor the host hands us
+    // (there is nothing to bind: WASI p1 has no socket()). PostmasterMain
+    // asks — through `is_installed()`, so every other transport keeps C's
+    // control flow byte-for-byte — before running its listen_addresses /
+    // unix_socket_directories loops; when true it calls listen_server_port
+    // exactly once with no address, no port and no socket directory.
+    pub fn transport_owns_listener() -> bool
+);

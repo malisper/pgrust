@@ -14933,6 +14933,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "pqcomm_hostpipes"
+version = "0.0.0"
+dependencies = [
+ "be_secure_seams",
+ "elog",
+ "fdnb",
+ "ip",
+ "ipc_seams",
+ "libc",
+ "pgsync",
+ "postgres_seams",
+ "pqcomm",
+ "pqcomm_seams",
+ "types_core",
+ "types_error",
+ "types_startup",
+ "types_storage",
+]
+
+[[package]]
 name = "pqcomm_seams"
 version = "0.0.0"
 dependencies = [
@@ -17125,6 +17145,7 @@ dependencies = [
  "postmaster",
  "postmaster_startup",
  "pqcomm",
+ "pqcomm_hostpipes",
  "pqcomm_simnet",
  "pqcomm_stdio",
  "pqformat",

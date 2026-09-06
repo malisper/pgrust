@@ -167,3 +167,53 @@ fn default_hints_resolve_numeric_host() {
     assert_ne!(pg_getaddrinfo_default_hints("no.such.host.invalid", &mut out), 0);
     assert!(out.is_empty());
 }
+
+/// `parse_numeric_host` must produce the EXACT bytes the system resolver
+/// produces for the same numeric address under AI_NUMERICHOST. It is the
+/// wasm arm's whole implementation (WASI p1 has no resolver), and the only
+/// place its sockaddr layout can be checked against a real libc is here —
+/// so check it here, byte for byte, for both families and a port.
+#[test]
+fn numeric_host_matches_getaddrinfo() {
+    for (host, family, port) in [
+        ("127.0.0.1", libc::AF_INET, 0u16),
+        ("127.0.0.1", libc::AF_INET, 5432),
+        ("10.0.0.0", libc::AF_INET, 0),
+        ("255.255.255.0", libc::AF_INET, 0),
+        ("::1", libc::AF_INET6, 0),
+        ("::1", libc::AF_INET6, 5432),
+        ("fe80::1", libc::AF_INET6, 0),
+        ("ffff:ffff:ffff:ffff::", libc::AF_INET6, 0),
+    ] {
+        let hint = AddrInfoHint {
+            flags: libc::AI_NUMERICHOST,
+            family: libc::AF_UNSPEC,
+            socktype: 0,
+        };
+        let mut out = Vec::new();
+        let serv = port.to_string();
+        let servname = if port == 0 { None } else { Some(serv.as_str()) };
+        let rc = pg_getaddrinfo_all(Some(host), servname, &hint, &mut out);
+        assert_eq!(rc, 0, "system getaddrinfo failed for {host}");
+        let sys_addr = out[0].addr;
+
+        let (fam, ours) = parse_numeric_host(host, port).expect("numeric parse");
+        assert_eq!(fam, family, "{host}");
+        assert_eq!(fam, out[0].family, "{host}");
+        assert_eq!(ours.salen, sys_addr.salen, "{host} salen");
+        let n = ours.salen as usize;
+        assert_eq!(&ours.addr[..n], &sys_addr.addr[..n], "{host} sockaddr bytes");
+        pg_freeaddrinfo_all(hint.family, out);
+    }
+}
+
+/// A name is NOT a numeric address: the caller's EAI_NONAME arm (the hba
+/// parser then records the token as a deferred hostname, as C does).
+#[test]
+fn numeric_host_declines_names_and_junk() {
+    assert!(parse_numeric_host("localhost", 0).is_none());
+    assert!(parse_numeric_host("example.com", 0).is_none());
+    assert!(parse_numeric_host("", 0).is_none());
+    assert!(parse_numeric_host("127.0.0.1/32", 0).is_none());
+    assert!(parse_numeric_host("fe80::1%eth0", 0).is_none());
+}

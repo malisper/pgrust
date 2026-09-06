@@ -507,6 +507,11 @@ mod tests {
             DispatchOption::StdioWireThreaded
         );
         assert_eq!(parse_dispatch_option("forkchild"), DispatchOption::Postmaster);
+        // --host-pipes selects a TRANSPORT, not a main: the argv[1] peek in
+        // bin/postgres.rs consumes it and dispatch must still land on the
+        // real postmaster (that IS the point — a postmaster with N backend
+        // threads and no sockets anywhere).
+        assert_eq!(parse_dispatch_option("host-pipes"), DispatchOption::Postmaster);
         assert_eq!(parse_dispatch_option("nonsense"), DispatchOption::Postmaster);
         assert_eq!(parse_dispatch_option(""), DispatchOption::Postmaster);
     }

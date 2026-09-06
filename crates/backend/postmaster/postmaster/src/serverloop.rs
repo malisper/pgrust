@@ -19,12 +19,27 @@ use crate::{
 
 const SECS_PER_MINUTE: i64 = 60;
 
+// wasm32 + atomics: the native wait set encodes "are we accepting
+// connections?" by whether the listen fds are registered in it. Nothing is
+// registered there on this target, so the answer has to be remembered
+// explicitly for ServerLoop's probe arm. Postmaster-thread state, exactly
+// like pm_wait_set itself.
+#[cfg(all(target_family = "wasm", target_feature = "atomics"))]
+thread_local! {
+    static PM_ACCEPTING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 pub fn ConfigurePostmasterWaitSet(accept_connections: bool) -> PgResult<()> {
+    #[cfg(all(target_family = "wasm", target_feature = "atomics"))]
+    PM_ACCEPTING.set(accept_connections);
     with_pm(|pm| -> PgResult<()> {
         if let Some(set) = pm.pm_wait_set.take() {
             waiteventset::FreeWaitEventSet(set);
         }
+        #[cfg(not(all(target_family = "wasm", target_feature = "atomics")))]
         let n = if accept_connections { 1 + pm.listen_sockets.len() } else { 1 };
+        #[cfg(all(target_family = "wasm", target_feature = "atomics"))]
+        let n = 1;
         let set = waiteventset::CreateWaitEventSet(n as i32)?;
         waiteventset::AddWaitEventToSet(
             set,
@@ -33,6 +48,13 @@ pub fn ConfigurePostmasterWaitSet(accept_connections: bool) -> PgResult<()> {
             init_small::globals::MyLatch(),
             None,
         )?;
+        // wasm32 + atomics: NO socket events exist on this target — the
+        // wait-event backend rejects any registration carrying a real fd
+        // (WASI p1 has no sockets, and a host-pipes listener is a plain
+        // fd the host answers poll_oneoff for, not an epoll-able object).
+        // ServerLoop's wasm arm probes the listener with a zero-timeout
+        // poll instead; the set here carries the latch alone.
+        #[cfg(not(all(target_family = "wasm", target_feature = "atomics")))]
         if accept_connections {
             for fd in &pm.listen_sockets {
                 waiteventset::AddWaitEventToSet(set, WL_SOCKET_ACCEPT, *fd, None, None)?;
@@ -178,6 +200,88 @@ pub(crate) fn shutdown_stall_due(
         && (now - state_since) >= bound
 }
 
+/// One postmaster wait: the events the loop below then services. Native
+/// (unchanged): `WaitEventSetWait` on the set configured above — the latch
+/// plus every listen socket, in the kernel's readiness backend.
+#[cfg(not(all(target_family = "wasm", target_feature = "atomics")))]
+fn pm_wait_for_events(events: &mut [WaitEvent]) -> PgResult<i32> {
+    let set = with_pm(|pm| pm.pm_wait_set).expect("pm_wait_set configured");
+    waiteventset::WaitEventSetWait(
+        set,
+        DetermineSleepTime(),
+        events,
+        0, /* postmaster posts no wait_events */
+    )
+}
+
+/// wasm32 + atomics: the same wait, minus the one thing this target does
+/// not have — a readiness backend that takes file descriptors. A wait set
+/// here can carry the LATCH ONLY (waiteventset/wasm_threads.rs rejects any
+/// event with a real fd), so the listener cannot be waited on; it is
+/// PROBED instead, with a zero-timeout `poll` the wasm host answers through
+/// `poll_oneoff` on the SAB pipe backing the fd.
+///
+/// The cost is accept latency: a connection announced while we are parked
+/// waits up to [`PM_ACCEPT_POLL_MS`] for the next probe. Accepted for the
+/// spike deliberately — it is bounded, it costs one poll per 50 ms in an
+/// otherwise idle postmaster, and the real fix is host-driven: the host
+/// already knows when it wrote a connection record, so it should also set
+/// the postmaster latch (or make the listener fd's readiness itself wake a
+/// waiter), at which point this arm collapses back to an untimed wait.
+#[cfg(all(target_family = "wasm", target_feature = "atomics"))]
+fn pm_wait_for_events(events: &mut [WaitEvent]) -> PgResult<i32> {
+    use types_storage::waiteventset::{WL_TIMEOUT, WL_LATCH_SET as WL_LATCH};
+
+    let timeout = DetermineSleepTime().min(PM_ACCEPT_POLL_MS);
+    let bits = latch::WaitLatch(
+        init_small::globals::MyLatch(),
+        WL_LATCH | WL_TIMEOUT,
+        timeout,
+        0, /* postmaster posts no wait_events */
+    )?;
+
+    let mut n = 0usize;
+    if bits & WL_LATCH != 0 && n < events.len() {
+        events[n] = WaitEvent { pos: 0, user_data: None, events: WL_LATCH, fd: PGINVALID_SOCKET };
+        n += 1;
+    }
+    // Same accept condition the native set encodes by registering the fds.
+    if PM_ACCEPTING.get() {
+        let fds = with_pm(|pm| pm.listen_sockets.clone());
+        for fd in fds {
+            if n >= events.len() {
+                break;
+            }
+            if !listener_is_readable(fd) {
+                continue;
+            }
+            events[n] =
+                WaitEvent { pos: n as i32, user_data: None, events: WL_SOCKET_ACCEPT, fd };
+            n += 1;
+        }
+    }
+    // n == 0 is the native timeout return (0 events); the loop body simply
+    // does not run and the periodic work below it still does.
+    Ok(n as i32)
+}
+
+/// Zero-timeout readiness probe for a host-owned listener fd. STRICT, unlike
+/// `fdnb::poll_ready`: only a genuine POLLIN counts. A poll error or a dead
+/// fd must NOT be read as "a connection record is waiting" — accept_connection
+/// blocks for a full 16-byte record, so a false positive would park the
+/// postmaster forever.
+#[cfg(all(target_family = "wasm", target_feature = "atomics"))]
+fn listener_is_readable(fd: i32) -> bool {
+    let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+    // SAFETY: pfd is a valid single-entry pollfd for the duration of the call.
+    let rc = unsafe { libc::poll(&mut pfd, 1, 0) };
+    rc > 0 && (pfd.revents & libc::POLLIN) != 0
+}
+
+/// The wasm accept-probe cadence, in milliseconds. See `pm_wait_for_events`.
+#[cfg(all(target_family = "wasm", target_feature = "atomics"))]
+const PM_ACCEPT_POLL_MS: i64 = 50;
+
 pub fn ServerLoop() -> PgResult<i32> {
     // M1: spawn the morsel-runtime worker pool at postmaster start. DEFAULT ON
     // since the M5 boarding flip (runtime::runtime_enabled: `PGRUST_RUNTIME=0`
@@ -219,13 +323,7 @@ pub fn ServerLoop() -> PgResult<i32> {
     let mut events = [WaitEvent::default(); MAXLISTEN];
 
     loop {
-        let set = with_pm(|pm| pm.pm_wait_set).expect("pm_wait_set configured");
-        let nevents = waiteventset::WaitEventSetWait(
-            set,
-            DetermineSleepTime(),
-            &mut events,
-            0, /* postmaster posts no wait_events */
-        )?;
+        let nevents = pm_wait_for_events(&mut events)?;
 
         for event in events.iter().take(nevents.max(0) as usize) {
             if event.events & WL_LATCH_SET != 0 {

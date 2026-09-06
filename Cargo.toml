@@ -148,6 +148,7 @@ members = [
     "crates/backend/libpq/pqcomm",
     "crates/backend/libpq/pqmq",
     "crates/backend/libpq/pqcomm_stdio",
+    "crates/backend/libpq/pqcomm_hostpipes",
     "crates/backend/libpq/fdnb",
     "crates/backend/libpq/pqcomm_simnet",
     "crates/backend/storage/large_object",

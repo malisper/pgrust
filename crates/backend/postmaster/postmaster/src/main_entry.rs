@@ -144,6 +144,10 @@ fn parse_long_option(optarg: &str) -> (String, Option<String>) {
     (name.replace('-', "_"), value)
 }
 
+/// The transport-selecting argv[1] the postmaster must skip; the peek that
+/// consumes it lives in main_main's bin/postgres.rs (§2.4 transport seam).
+const HOST_PIPES_OPTION: &str = "--host-pipes";
+
 fn set_config_argv(name: &str, value: &str) -> PgResult<()> {
     guc::SetConfigOption(name, Some(value), GucContext::PGC_POSTMASTER, GucSource::PGC_S_ARGV)
 }
@@ -223,6 +227,23 @@ pub fn CheckMain(argv: &[String]) -> PgResult<()> {
     std::process::exit(0)
 }
 
+/// Host-pipes: a listen GUC that cannot be honoured. Returns None (so the
+/// caller's bind loop is skipped whole) and says so once, loudly, if the
+/// operator actually set one — silence would look like the address was
+/// bound.
+fn ignore_listen_guc(host_owns_listener: bool, name: &str, value: Option<String>) -> Option<String> {
+    if !host_owns_listener {
+        return value;
+    }
+    if value.as_deref().is_some_and(|v| !v.is_empty()) {
+        let _ = elog::ereport(WARNING)
+            .errmsg(format!("{name} is ignored by the host-pipes transport"))
+            .errdetail("Connections arrive on the host-provided listener descriptor.")
+            .finish(loc(1205, "PostmasterMain"));
+    }
+    None
+}
+
 pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
     let mut user_d_option: Option<String> = None;
     let mut output_config_variable: Option<String> = None;
@@ -284,7 +305,14 @@ pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
     guc_seams::initialize_guc_options::call()?;
     stack_depth::adjust_max_stack_depth_from_rlimit()?;
 
-    let mut args = argv.iter().skip(1).peekable();
+    // pgrust extension: `--host-pipes` is argv[1] ONLY, consumed by the
+    // transport peek in bin/postgres.rs (seams_init::Transport::HostPipes)
+    // long before a GUC exists, and then falls through to the normal
+    // postmaster dispatch. Skip it here exactly as process_postgres_switches
+    // skips --single/--stdio-wire; without this the getopt below reads it as
+    // a `--name=value` GUC and dies with "--host-pipes requires a value".
+    let skip = if argv.get(1).is_some_and(|a| a == HOST_PIPES_OPTION) { 2 } else { 1 };
+    let mut args = argv.iter().skip(skip).peekable();
     while let Some(arg) = args.next() {
         let Some(rest) = arg.strip_prefix('-') else {
             write_stderr(format!("{PROGNAME}: invalid argument: \"{arg}\"\nTry \"{PROGNAME} --help\" for more information.\n"));
@@ -628,7 +656,38 @@ pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
 
     ipc_seams::on_proc_exit::call(close_server_ports_cb, 0);
 
-    let listen_addresses = guc_tables::vars::ListenAddresses.read();
+    // pgrust extension (host-pipes transport): the listener is a fd the
+    // HOST owns and handed us — there is no address to parse, no port to
+    // bind, no socket file to create, and (on wasm, the target this exists
+    // for) no socket() at all. Ask the transport provider first: the seam is
+    // installed by pqcomm_hostpipes alone, so `is_installed()` false is
+    // every other transport keeping C's control flow byte-for-byte.
+    let host_owns_listener = pqcomm_seams::transport_owns_listener::is_installed()
+        && pqcomm_seams::transport_owns_listener::call();
+    if host_owns_listener {
+        // One call, no address, no port, no socket dir — the provider reads
+        // the fd out of the environment and ignores all three. Any failure
+        // is fatal for the same reason C's "could not create any TCP/IP
+        // sockets" is: a server nobody can reach is not a server.
+        with_pm(|pm| {
+            pqcomm_seams::listen_server_port::call(None, 0, None, &mut pm.listen_sockets, MAXLISTEN)
+        })?;
+        // The lock file's listen-address line is what pg_ctl and psql read to
+        // find the server; "" is C's own value for "no TCP listener" and is
+        // the truth here (the host, not the filesystem, publishes the way in).
+        miscinit::AddToDataDirLockFile(LOCK_FILE_LINE_LISTEN_ADDR, "")?;
+        listen_addr_saved = true;
+    }
+
+    // host_owns_listener suppresses BOTH bind loops below (None short-
+    // circuits them without touching their bodies): with a host-owned
+    // listener the GUCs are meaningless, and honouring them would open the
+    // very sockets this transport exists to do without.
+    let listen_addresses = ignore_listen_guc(
+        host_owns_listener,
+        "listen_addresses",
+        guc_tables::vars::ListenAddresses.read(),
+    );
     if let Some(listen_addresses) = listen_addresses.filter(|s| !s.is_empty()) {
         let mut success = 0;
         // SplitGUCList(rawstring, ',', &elemlist) (postmaster.c:1125): empty
@@ -676,7 +735,11 @@ pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
         }
     }
 
-    let unix_dirs = guc_tables::vars::Unix_socket_directories.read();
+    let unix_dirs = ignore_listen_guc(
+        host_owns_listener,
+        "unix_socket_directories",
+        guc_tables::vars::Unix_socket_directories.read(),
+    );
     if let Some(unix_dirs) = unix_dirs.filter(|s| !s.is_empty()) {
         let mut success = 0;
         // SplitDirectoriesString(rawstring, ',', &elemlist)

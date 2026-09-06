@@ -19,6 +19,15 @@ pub enum Transport {
     /// product builds).
     #[cfg(pgrust_sim)]
     SimNet,
+    /// Every connection is a PAIR OF FILE DESCRIPTORS handed to the server
+    /// by its host, and the listener is a host-owned fd carrying one
+    /// fixed-size record per new connection (pqcomm_hostpipes):
+    /// --host-pipes on any target. Unlike StdioWire this is a REAL
+    /// postmaster with N concurrent backend threads, so the provider
+    /// installs the postmaster half of the seam (listen/accept) as well —
+    /// and it needs no socket() anywhere, which is what makes a
+    /// multi-session server possible on wasm32-wasip1-threads.
+    HostPipes,
 }
 
 // One line per crate: the full seam-install closure for the postgres binary.
@@ -190,6 +199,13 @@ pub fn init_all_with_transport(transport: Transport) {
         #[cfg(pgrust_sim)]
         Transport::SimNet => {
             pqcomm_simnet::init_transport_seams();
+            pqcomm::init_socket_gucs();
+        }
+        // Host-pipes: the fourth provider into the same slots — both
+        // halves, since this one runs the real postmaster (listen/accept
+        // ride the same set-once pair the sim-net split freed).
+        Transport::HostPipes => {
+            pqcomm_hostpipes::init_transport_seams();
             pqcomm::init_socket_gucs();
         }
     }

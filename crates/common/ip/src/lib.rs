@@ -68,16 +68,91 @@ pub struct PgAddrInfo {
     pub addr: SockAddr,
 }
 
+/// Parse a NUMERIC host address into exactly the sockaddr bytes
+/// `getaddrinfo(host, NULL, {AI_NUMERICHOST})` produces, with no resolver
+/// and no libc: `std::net`'s address parser plus the sockaddr_in /
+/// sockaddr_in6 layout (identical on glibc, musl and wasi-libc — the only
+/// libcs this workspace targets). `None` means "not a numeric address",
+/// which is the caller's `EAI_NONAME` arm, exactly as C's AI_NUMERICHOST
+/// getaddrinfo reports a hostname.
+///
+/// This exists because WASI p1 has NO resolver at all: without it the wasm
+/// arm below fails every numeric address, and a stock initdb `pg_hba.conf`
+/// (whose `host ... 127.0.0.1/32` lines are parsed through this call) makes
+/// `load_hba` return false and the postmaster FATAL at boot — a hard
+/// blocker for ANY wasm postmaster, sockets or not. Kept target-independent
+/// precisely so the byte layout is testable natively against the real
+/// getaddrinfo (`tests::numeric_host_matches_getaddrinfo`).
+pub fn parse_numeric_host(host: &str, port: u16) -> Option<(i32, SockAddr)> {
+    // C's getaddrinfo does not accept a scope suffix under AI_NUMERICHOST
+    // without AI_V4MAPPED/scope handling; neither do we (the token then
+    // reads as a hostname, C's behaviour).
+    let ip: std::net::IpAddr = host.parse().ok()?;
+    let mut sa = SockAddr::zeroed();
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            // struct sockaddr_in: u16 family, u16 port (network order),
+            // u32 addr (network order), 8 bytes padding.
+            sa.addr[0..2].copy_from_slice(&(sys::AF_INET as u16).to_ne_bytes());
+            sa.addr[2..4].copy_from_slice(&port.to_be_bytes());
+            sa.addr[4..8].copy_from_slice(&v4.octets());
+            sa.salen = 16;
+            Some((sys::AF_INET, sa))
+        }
+        std::net::IpAddr::V6(v6) => {
+            // struct sockaddr_in6: u16 family, u16 port (network order),
+            // u32 flowinfo, 16-byte address, u32 scope_id.
+            sa.addr[0..2].copy_from_slice(&(sys::AF_INET6 as u16).to_ne_bytes());
+            sa.addr[2..4].copy_from_slice(&port.to_be_bytes());
+            sa.addr[8..24].copy_from_slice(&v6.octets());
+            sa.salen = 28;
+            Some((sys::AF_INET6, sa))
+        }
+    }
+}
+
 // Resolved addresses replace `result`'s contents (C zeroes *result first).
+//
+// wasm32: WASI p1 has no resolver — no DNS, no /etc/hosts, no getaddrinfo.
+// Numeric addresses need none of that and are answered here (the hba
+// parser's only use of this call); anything else reports EAI_NONAME, which
+// is what C reports for a name under AI_NUMERICHOST and what the hba parser
+// turns into a deferred `hostname` entry.
 #[cfg(target_family = "wasm")]
 pub fn pg_getaddrinfo_all(
-    _hostname: Option<&str>,
-    _servname: Option<&str>,
-    _hint: &AddrInfoHint,
+    hostname: Option<&str>,
+    servname: Option<&str>,
+    hint: &AddrInfoHint,
     result: &mut Vec<PgAddrInfo>,
 ) -> i32 {
     result.clear();
-    wasm_netdb::EAI_FAIL
+
+    let port = match servname {
+        Some(s) => match s.parse::<u16>() {
+            Ok(p) => p,
+            Err(_) => return sys::EAI_NONAME,
+        },
+        None => 0,
+    };
+    let Some(host) = hostname.filter(|h| !h.is_empty()) else {
+        // A NULL/empty node means "the wildcard bind address" — only
+        // ListenServerPort asks that, and this target binds nothing.
+        return wasm_netdb::EAI_FAIL;
+    };
+    let Some((family, addr)) = parse_numeric_host(host, port) else {
+        return sys::EAI_NONAME;
+    };
+    if hint.family != sys::AF_UNSPEC && hint.family != family {
+        return sys::EAI_NONAME;
+    }
+    result.push(PgAddrInfo {
+        flags: 0,
+        family,
+        socktype: if hint.socktype == 0 { sys::SOCK_STREAM } else { hint.socktype },
+        protocol: 0,
+        addr,
+    });
+    0
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -170,13 +245,29 @@ fn getaddrinfo_inet(
 pub fn pg_freeaddrinfo_all(_hint_ai_family: i32, _ai: Vec<PgAddrInfo>) {}
 
 // Unlike standard getnameinfo, node/service are filled even on failure.
+//
+// wasm32: no resolver (see pg_getaddrinfo_all). AF_UNIX needs none — C's own
+// getnameinfo_unix is a pure formatting routine — and it is the family every
+// host-pipes connection carries, so it is answered exactly as natively;
+// everything else reports the failure arm.
 #[cfg(target_family = "wasm")]
 pub fn pg_getnameinfo_all(
-    _addr: &SockAddr,
+    addr: &SockAddr,
     node: Option<&mut String>,
     service: Option<&mut String>,
     _flags: i32,
 ) -> i32 {
+    if sockaddr_family(addr) == sys::AF_UNIX {
+        if let Some(n) = node {
+            *n = "[local]".to_string();
+        }
+        if let Some(s) = service {
+            // The unnamed AF_UNIX peer this target ever sees (host-pipes)
+            // has an empty path; C prints the sun_path, i.e. "".
+            s.clear();
+        }
+        return 0;
+    }
     // C failure arm: out-buffers filled even on failure.
     if let Some(n) = node {
         *n = "???".to_string();

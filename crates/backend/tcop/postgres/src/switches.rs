@@ -45,7 +45,9 @@ fn is_dispatch_option(name: &str) -> bool {
     // DispatchOptionNames (main.c) minus forkchild (EXEC_BACKEND only).
     let bare = name.split('=').next().unwrap_or(name);
     // + the pgrust-extension stdio-wire / stdio-wire-threaded / sim-net
-    // modes (main_main dispatch).
+    // modes (main_main dispatch), and host-pipes — which selects a
+    // TRANSPORT rather than a main, but is read by the same argv[1] peek
+    // and so carries the same must-be-first rule.
     matches!(
         bare,
         "check"
@@ -55,6 +57,7 @@ fn is_dispatch_option(name: &str) -> bool {
             | "stdio-wire"
             | "stdio-wire-threaded"
             | "sim-net"
+            | "host-pipes"
     )
 }
 
@@ -87,13 +90,14 @@ fn process_postgres_switches_inner(
     let mut errs = 0usize;
     let mut i = 1usize;
     // Ignore the initial --single (or pgrust --stdio-wire /
-    // --stdio-wire-threaded / --sim-net) argument, if present.
+    // --stdio-wire-threaded / --sim-net / --host-pipes) argument, if present.
     if secure
         && argv.get(1).is_some_and(|a| {
             a == "--single"
                 || a == "--stdio-wire"
                 || a == "--stdio-wire-threaded"
                 || a == "--sim-net"
+                || a == "--host-pipes"
         })
     {
         i = 2;
