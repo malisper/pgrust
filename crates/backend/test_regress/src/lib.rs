@@ -711,19 +711,76 @@ fn test_atomic_uint64() -> PgResult<()> {
     Ok(())
 }
 
+// s_lock.c:98 s_lock: the contended-acquisition loop (TAS_SPIN + the
+// perform/finish_spin_delay backoff); returns the delay count like C.
+fn s_lock(
+    lock: &types_storage::Spinlock,
+    file: &'static str,
+    line: i32,
+    func: &'static str,
+) -> i32 {
+    let mut delay_status = s_lock_seams::SpinDelayStatus::new(file, line, func);
+    while lock.tas_spin() != 0 {
+        s_lock_seams::perform_spin_delay::call(&mut delay_status);
+    }
+    s_lock_seams::finish_spin_delay::call(&delay_status);
+    delay_status.delays
+}
+
+// s_lock.h S_LOCK: one TAS, then s_lock() for the contended case.
+fn spin_lock_acquire(lock: &types_storage::Spinlock, func: &'static str) {
+    if lock.tas() != 0 {
+        s_lock(lock, file!(), line!() as i32, func);
+    }
+}
+
+// regress.c:638 test_spinlock: the spinlock embedded between two padding
+// members, driven through the SpinLock*/S_* API, s_lock(), and TAS/TAS_SPIN
+// (types_storage::Spinlock is the port's slock_t: tas/tas_spin/unlock).
 fn test_spinlock() -> PgResult<()> {
+    #[repr(C)]
     struct TestLockStruct {
         data_before: [u8; 4],
-        lock: std::sync::Mutex<()>,
+        lock: types_storage::Spinlock,
         data_after: [u8; 4],
     }
     let s = TestLockStruct {
         data_before: *b"abcd",
-        lock: std::sync::Mutex::new(()),
+        lock: types_storage::Spinlock::new(),
         data_after: *b"ef12",
     };
-    drop(s.lock.lock().unwrap());
-    drop(s.lock.lock().unwrap());
+
+    /* test basic operations via the SpinLock* API (S_INIT_LOCK == S_UNLOCK) */
+    s.lock.unlock();
+    spin_lock_acquire(&s.lock, "test_spinlock");
+    s.lock.unlock();
+
+    /* test basic operations via underlying S_* API */
+    s.lock.unlock();
+    spin_lock_acquire(&s.lock, "test_spinlock");
+    s.lock.unlock();
+
+    /* and that "contended" acquisition works */
+    s_lock(&s.lock, "testfile", 17, "testfunc");
+    s.lock.unlock();
+
+    /*
+     * Check, using TAS directly, that a single spin cycle doesn't block
+     * when acquiring an already acquired lock.
+     */
+    spin_lock_acquire(&s.lock, "test_spinlock");
+    if s.lock.tas() == 0 {
+        return Err(err("acquired already held spinlock".to_string()));
+    }
+    if s.lock.tas_spin() == 0 {
+        return Err(err("acquired already held spinlock".to_string()));
+    }
+    s.lock.unlock();
+
+    /*
+     * Verify that after all of this the non-lock contents are still
+     * correct.
+     */
     if &s.data_before != b"abcd" {
         return Err(err("padding before spinlock modified".to_string()));
     }
@@ -1430,12 +1487,70 @@ mod tests {
         assert!(!init_small::globals::InterruptPending());
     }
 
+    // s_lock.c backoff seams for the spinlock arms: set-once per process,
+    // shared by every test in this binary that reaches test_spinlock.
+    static FINISH_SPIN_DELAY_CALLS: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+    fn install_spin_delay_seams() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            s_lock_seams::perform_spin_delay::set(|_| std::thread::yield_now());
+            s_lock_seams::finish_spin_delay::set(|_| {
+                FINISH_SPIN_DELAY_CALLS.fetch_add(1, Ordering::SeqCst);
+            });
+        });
+    }
+
     #[test]
     fn atomics() {
+        install_spin_delay_seams();
         assert!(test_atomic_flag().is_ok());
         assert!(test_atomic_uint32().is_ok());
         assert!(test_atomic_uint64().is_ok());
         assert!(test_spinlock().is_ok());
+    }
+
+    /// regress.c:638 test_spinlock exercises the real spinlock primitives:
+    /// its `s_lock(&lock, "testfile", 17, "testfunc")` arm (regress.c:668)
+    /// runs s_lock.c's contended-acquire loop, which ends in
+    /// finish_spin_delay() even when the lock was free — so the ported test
+    /// must engage that seam at least once per call. The former Mutex stand-in
+    /// never did.
+    #[test]
+    fn spinlock_arm_runs_s_lock_backoff() {
+        install_spin_delay_seams();
+        let before = FINISH_SPIN_DELAY_CALLS.load(Ordering::SeqCst);
+        assert!(test_spinlock().is_ok());
+        let after = FINISH_SPIN_DELAY_CALLS.load(Ordering::SeqCst);
+        assert!(
+            after > before,
+            "test_spinlock never reached s_lock()/finish_spin_delay (before={before} after={after})"
+        );
+    }
+
+    /// regress.c:678-683: TAS / TAS_SPIN on an already held spinlock must
+    /// fail, and the padding around the lock word must stay untouched — the
+    /// contract test_spinlock asserts against the types_storage primitive.
+    #[test]
+    fn spinlock_tas_refuses_held_lock_and_keeps_padding() {
+        #[repr(C)]
+        struct TestLockStruct {
+            data_before: [u8; 4],
+            lock: types_storage::Spinlock,
+            data_after: [u8; 4],
+        }
+        let s = TestLockStruct {
+            data_before: *b"abcd",
+            lock: types_storage::Spinlock::new(),
+            data_after: *b"ef12",
+        };
+        assert_eq!(s.lock.tas(), 0, "S_LOCK on a free lock");
+        assert_ne!(s.lock.tas(), 0, "acquired already held spinlock (TAS)");
+        assert_ne!(s.lock.tas_spin(), 0, "acquired already held spinlock (TAS_SPIN)");
+        s.lock.unlock();
+        assert!(s.lock.is_free());
+        assert_eq!(&s.data_before, b"abcd", "padding before spinlock modified");
+        assert_eq!(&s.data_after, b"ef12", "padding after spinlock modified");
     }
 
     #[test]

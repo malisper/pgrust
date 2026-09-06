@@ -15584,6 +15584,7 @@ dependencies = [
  "pglz",
  "postgres_seams",
  "relpath",
+ "s_lock_seams",
  "superuser",
  "typcache",
  "types_core",

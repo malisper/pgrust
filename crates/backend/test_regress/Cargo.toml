@@ -40,6 +40,7 @@ init_small = { path = "../utils/init/init_small" }
 postgres_seams = { path = "../tcop/postgres_seams" }
 funcapi = { path = "../utils/fmgr/funcapi" }
 namespace_seams = { path = "../catalog/namespace_seams" }
+s_lock_seams = { path = "../storage/lmgr/s_lock_seams" }
 libc = "0.2"
 
 [dev-dependencies]
