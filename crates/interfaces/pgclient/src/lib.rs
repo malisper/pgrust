@@ -609,18 +609,25 @@ impl PgConn {
         &self.opts
     }
 
+    // libpqrcv_get_conninfo (libpqwalreceiver.c:365-388): walk PQconninfo()'s
+    // table-ordered option copy, skip debug ('D' dispchar) and empty options,
+    // and obfuscate every option whose dispchar carries '*' (password,
+    // sslpassword, oauth_client_secret) as "********".
     pub fn display_conninfo(&self) -> String {
         let mut out = String::new();
-        for (k, v) in &self.opts {
-            if v.is_empty() {
+        for o in CONNINFO_OPTIONS {
+            if o.dispchar.contains('D') {
                 continue;
             }
+            let Some(v) = opt(&self.opts, o.keyword).filter(|v| !v.is_empty()) else {
+                continue;
+            };
             if !out.is_empty() {
                 out.push(' ');
             }
-            out.push_str(k);
+            out.push_str(o.keyword);
             out.push('=');
-            out.push_str(if k == "password" { "********" } else { v });
+            out.push_str(if o.dispchar.contains('*') { "********" } else { v });
         }
         out
     }
@@ -2170,6 +2177,40 @@ mod tests {
         assert!(lookup("server").is_none());
         fn lookup(k: &str) -> Option<&'static ConnOption> {
             conninfo::lookup_option(k)
+        }
+    }
+
+    // libpqwalreceiver.c:365-388 libpqrcv_get_conninfo walks PQconninfo()'s
+    // table-ordered copy of the options: debug ('D') and empty options are
+    // skipped, and EVERY option whose dispchar carries '*' (password,
+    // sslpassword, oauth_client_secret) is shown as "********" — the string
+    // lands in pg_stat_wal_receiver.conninfo.
+    #[test]
+    fn display_conninfo_masks_every_secure_option_in_table_order() {
+        let (mut conn, _server) = test_conn();
+        conn.opts = [
+            ("sslpassword", "keysecret"),
+            ("port", "5433"),
+            ("oauth_client_secret", "oauthsecret"),
+            ("replication", "true"),
+            ("host", "primary"),
+            ("application_name", ""),
+            ("scram_client_key", "abc"),
+            ("password", "pwsecret"),
+            ("sslkeylogfile", "/tmp/keys"),
+            ("user", "rep"),
+        ]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        let shown = conn.display_conninfo();
+        assert_eq!(
+            shown,
+            "user=rep password=******** host=primary port=5433 \
+             sslpassword=******** oauth_client_secret=********"
+        );
+        for secret in ["keysecret", "oauthsecret", "pwsecret", "/tmp/keys", "abc"] {
+            assert!(!shown.contains(secret), "{secret:?} leaked into {shown:?}");
         }
     }
     // PQsendQueryStart's CONNECTION_BAD arm: every sender refuses with libpq's text.
