@@ -30,7 +30,9 @@ pub fn RelationGetTriggerDesc(relid: Oid) -> PgResult<Option<Rc<TriggerDesc<'sta
         return Ok(Some(Rc::clone(cached)));
     }
     // The scan re-enters the relcache; no borrow held across it.
-    let built = relcache_build_seams::build_trigger_desc::call(cache_mcx(), relid)?;
+    // RelationGetRelationName(relation) for the trigger.c:1936/1950 messages.
+    let relname = String::from_utf8_lossy(rel.rd_rel.relname.name_str()).into_owned();
+    let built = relcache_build_seams::build_trigger_desc::call(cache_mcx(), relid, &relname)?;
     let Some(desc) = built else {
         return Ok(None);
     };

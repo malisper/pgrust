@@ -332,3 +332,15 @@ fn vector_fit_len_clamps_to_varlena_extent() {
     // A header-only image with a claimed element yields nothing.
     assert_eq!(crate::vector_fit_len(array::VECTOR_HDRSZ, 1, elemsz), 0);
 }
+
+#[test]
+fn trigger_null_field_message_quotes_relation_name() {
+    // trigger.c:1936/1950: elog(ERROR, "<field> is null in trigger for
+    // relation \"%s\"", RelationGetRelationName(relation)) -- the quoted
+    // name, not the OID (audit-18.6 b242 commands-trigger-p1-2ffbac76).
+    let err = crate::triggers::corrupt("my_table", "tgargs");
+    assert_eq!(err.message(), "tgargs is null in trigger for relation \"my_table\"");
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    let err = crate::triggers::corrupt("t", "tgattr");
+    assert_eq!(err.message(), "tgattr is null in trigger for relation \"t\"");
+}

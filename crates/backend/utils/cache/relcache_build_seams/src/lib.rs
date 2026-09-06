@@ -142,6 +142,7 @@ seam_core::seam!(
     pub fn build_trigger_desc(
         mcx: Mcx<'static>,
         relid: Oid,
+        relname: &str,
     ) -> PgResult<Option<types_trigger::TriggerDesc<'static>>>
 );
 

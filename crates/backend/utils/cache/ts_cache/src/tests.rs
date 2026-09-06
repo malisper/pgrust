@@ -99,3 +99,50 @@ fn deflist_vt_is_whitespace() {
     // A non-ASCII byte is NOT whitespace; it lands in the key.
     assert_eq!(items(b"\xffk=1")[0].0, "\u{fffd}k");
 }
+
+// lookup_ts_config_cache's pg_ts_config_map walk (ts_cache.c:483-530):
+// audit-18.6 b242 ts_cache-972f5042 / 6e0bd48f.
+fn config_map_of(rows: &[(i32, Oid)]) -> PgResult<PgVec<'static, ListDictionary>> {
+    let root: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("CacheMemoryContext")));
+    build_config_map(root.mcx(), rows.iter().copied())
+}
+
+fn config_map_err(rows: &[(i32, Oid)]) -> String {
+    // ListDictionary carries no Debug (PgVec<'static, Oid> in the cache
+    // context); expect_err on the unit-mapped result keeps the assert honest.
+    config_map_of(rows).map(|_| ()).expect_err("must error").message().to_string()
+}
+
+#[test]
+fn config_map_first_offending_row_in_index_order_wins() {
+    // 101 asciiword rows then a maptokentype=300 row: C errors on the 101st
+    // asciiword row (ts_cache.c:527) before the out-of-range row is seen.
+    let mut rows: Vec<(i32, Oid)> = (1..=101).map(|i| (1, 10000 + i as Oid)).collect();
+    rows.push((300, 3765));
+    assert_eq!(config_map_err(&rows), "too many pg_ts_config_map entries for one token type");
+    // 100 asciiword rows then the 300 row: the range check fires (ts_cache.c:504).
+    rows.remove(100);
+    assert_eq!(config_map_err(&rows), "maptokentype value 300 is out of range");
+    assert_eq!(config_map_err(&[(0, 3765)]), "maptokentype value 0 is out of range");
+}
+
+#[test]
+fn config_map_out_of_order_rows_error() {
+    // ts_cache.c:506: the index order (maptokentype, mapseqno) is verified.
+    assert_eq!(config_map_err(&[(2, 3765), (1, 3765)]), "maptokentype entries are out of order");
+}
+
+#[test]
+fn config_map_shape_matches_c() {
+    // lenmap = maxtokentype + 1 with empty lists for the token types without
+    // entries (ts_cache.c:544); no map at all for a configuration without rows.
+    let map = config_map_of(&[(1, 11), (1, 12), (3, 13)]).expect("map");
+    assert_eq!(map.len(), 4);
+    assert!(map[0].dict_ids.is_empty());
+    assert_eq!(map[1].dict_ids.as_slice(), [11 as Oid, 12].as_slice());
+    assert!(map[2].dict_ids.is_empty());
+    assert_eq!(map[3].dict_ids.as_slice(), [13 as Oid].as_slice());
+    let hundred: Vec<(i32, Oid)> = (1..=100).map(|i| (5, i as Oid)).collect();
+    assert_eq!(config_map_of(&hundred).expect("100 per token type is the cap")[5].dict_ids.len(), 100);
+    assert!(config_map_of(&[]).expect("no rows").is_empty());
+}

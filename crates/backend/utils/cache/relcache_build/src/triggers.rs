@@ -55,6 +55,7 @@ fn name_datum_str(tup: &HeapTupleData<'_>, d: datum::Datum) -> String {
 pub(crate) fn build_trigger_desc(
     mcx: Mcx<'static>,
     relid: Oid,
+    relname: &str,
 ) -> PgResult<Option<TriggerDesc<'static>>> {
     let cx = MemoryContext::new("RelationBuildTriggers");
     let smcx = cx.mcx();
@@ -74,7 +75,7 @@ pub(crate) fn build_trigger_desc(
         let tgtype = req(td, tup, Anum_pg_trigger_tgtype)?.as_i16();
         let (attr_d, attr_null) = getattr(td, tup, Anum_pg_trigger_tgattr);
         if attr_null {
-            return Err(corrupt(relid, "tgattr"));
+            return Err(corrupt(relname, "tgattr"));
         }
         // int2vector image: 24-byte 1-D array header, dim1 at offset 16.
         let (tgnattr, tgattr) = {
@@ -93,7 +94,7 @@ pub(crate) fn build_trigger_desc(
         if tgnargs > 0 {
             let (args_d, args_null) = getattr(td, tup, Anum_pg_trigger_tgargs);
             if args_null {
-                return Err(corrupt(relid, "tgargs"));
+                return Err(corrupt(relname, "tgargs"));
             }
             let args_image = detoast_image(mcx, args_d)?;
             let bytes = &args_image[datum::varlena::VARHDRSZ..];
@@ -251,12 +252,14 @@ fn detoast_image<'mcx>(mcx: Mcx<'mcx>, d: datum::Datum) -> PgResult<PgVec<'mcx, 
     detoast::detoast_attr(mcx, raw)
 }
 
+// C trigger.c:1936/1950: elog(ERROR, "<field> is null in trigger for relation
+// \"%s\"", RelationGetRelationName(relation)) -- the quoted relation name.
 #[track_caller]
 #[cold]
 #[inline(never)]
-fn corrupt(relid: Oid, field: &str) -> Box<PgError> {
+pub(crate) fn corrupt(relname: &str, field: &str) -> Box<PgError> {
     Box::new(
-        PgError::error(format!("{field} is null in trigger for relation {relid}"))
+        PgError::error(format!("{field} is null in trigger for relation \"{relname}\""))
             .with_sqlstate(ERRCODE_INTERNAL_ERROR),
     )
 }

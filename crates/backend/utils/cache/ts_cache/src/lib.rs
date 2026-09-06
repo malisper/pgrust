@@ -52,9 +52,12 @@ pub struct TSDictionaryCacheEntry {
     pub dict_id: Oid,
     pub isvalid: Cell<bool>,
     pub lexize_oid: Oid,
-    // Owns dict_data and everything the init method allocated.
-    // Heap-pinned: Mcx handles into it live inside dict_data (PgVec allocators).
-    _dict_ctx: Option<std::boxed::Box<MemoryContext>>,
+    // Owns dict_data and everything the init method allocated: C's per-entry
+    // dictCtx, a child of CacheMemoryContext identified by the dictionary
+    // name (ts_cache.c:312-316), kept whether or not the template has an
+    // init method. Heap-pinned: Mcx handles into it live inside dict_data
+    // (PgVec allocators).
+    _dict_ctx: std::boxed::Box<MemoryContext>,
     pub dict_data: usize,
     lexize: RefCell<FmgrInfo>,
 }
@@ -99,6 +102,10 @@ pub struct TSConfigCacheEntry {
 }
 
 struct TsCacheState {
+    // C keeps the TS caches (and each dictionary's dictCtx) under
+    // CacheMemoryContext (ts_cache.c:312); the crate's own session root
+    // carries that name so the memory-context view shows C's parentage.
+    root: &'static MemoryContext,
     mcx: Mcx<'static>,
     parsers: PgHashMap<'static, Oid, Rc<TSParserCacheEntry>>,
     dicts: PgHashMap<'static, Oid, Rc<TSDictionaryCacheEntry>>,
@@ -121,7 +128,8 @@ fn with_state<R>(f: impl FnOnce(&mut TsCacheState) -> R) -> R {
     STATE.with(|cell| {
         let mut slot = cell.borrow_mut();
         let st = slot.get_or_insert_with(|| {
-            let mcx = ::mcx::session_root("TsCacheContext").mcx();
+            let root = ::mcx::session_root("CacheMemoryContext");
+            let mcx = root.mcx();
             // LIFO: drop the state properly before the context free (any
             // global-heap entry contents are released by the drop glue).
             ::mcx::register_session_cleanup(Box::new(|| {
@@ -132,6 +140,7 @@ fn with_state<R>(f: impl FnOnce(&mut TsCacheState) -> R) -> R {
                 });
             }));
             ManuallyDrop::new(TsCacheState {
+                root,
                 mcx,
                 parsers: PgHashMap::with_capacity_in(4, mcx),
                 dicts: PgHashMap::with_capacity_in(8, mcx),
@@ -270,7 +279,10 @@ pub fn lookup_ts_dictionary_cache(dictId: Oid) -> PgResult<Rc<TSDictionaryCacheE
         return Ok(hit);
     }
 
-    let ctx = std::boxed::Box::new(MemoryContext::new("TS dictionary"));
+    // C ts_cache.c:312-316: AllocSetContextCreate(CacheMemoryContext,
+    // "TS dictionary") + MemoryContextCopyAndSetIdentifier(dictname).
+    let root = with_state(|st| st.root);
+    let ctx = std::boxed::Box::new(root.new_child("TS dictionary"));
     let (template_oid, init_oid, lexize_oid, dict_data);
     {
         // SAFETY: 'static stands for "as long as the Box in _dict_ctx lives";
@@ -290,11 +302,14 @@ pub fn lookup_ts_dictionary_cache(dictId: Oid) -> PgResult<Rc<TSDictionaryCacheE
         init_oid = tmpl.tmplinit;
         lexize_oid = tmpl.tmpllexize;
         if lexize_oid == InvalidOid {
+            // C ts_cache.c:279 formats template->tmpllexize (InvalidOid here).
             return Err(PgError::error(format!(
-                "text search template {template_oid} has no lexize method"
+                "text search template {lexize_oid} has no lexize method"
             ))
             .into());
         }
+
+        ctx.set_ident(Some(&*String::from_utf8_lossy(dict.dictname.name_str())));
 
         dict_data = if init_oid != InvalidOid {
             let mut dict_options: PgVec<'_, (PgVec<'_, u8>, PgVec<'_, u8>)> = PgVec::new_in(dmcx);
@@ -323,7 +338,7 @@ pub fn lookup_ts_dictionary_cache(dictId: Oid) -> PgResult<Rc<TSDictionaryCacheE
         dict_id: dictId,
         isvalid: Cell::new(true),
         lexize_oid,
-        _dict_ctx: if init_oid != InvalidOid { Some(ctx) } else { None },
+        _dict_ctx: ctx,
         dict_data,
         lexize: RefCell::new(fmgr_seams::fmgr_info::call(lexize_oid)?),
     });
@@ -350,6 +365,49 @@ fn ensure_config_callbacks() -> PgResult<()> {
         with_state(|st| st.config_cb_registered = true);
     }
     Ok(())
+}
+
+// The pg_ts_config_map walk of lookup_ts_config_cache (ts_cache.c:483-530),
+// rows in TSConfigMapIndexId order (mapcfg, maptokentype, mapseqno). Every
+// row is range-checked, order-checked and counted against MAXDICTSPERTT as
+// it is seen, so the FIRST offending row in index order raises its error:
+// a 101st entry for one token type errors before a later out-of-range
+// token type is reached. lenmap = maxtokentype + 1 (C:544), empty lists for
+// the token types without entries, no map at all for a config without rows.
+fn build_config_map(
+    state_mcx: Mcx<'static>,
+    rows: impl IntoIterator<Item = (i32, Oid)>,
+) -> PgResult<PgVec<'static, ListDictionary>> {
+    let mut map: PgVec<'static, ListDictionary> = PgVec::new_in(state_mcx);
+    let mut maxtokentype = 0i32;
+    for (toktype, mapdict) in rows {
+        if toktype <= 0 || toktype as usize > MAXTOKENTYPE {
+            return Err(
+                PgError::error(format!("maptokentype value {toktype} is out of range")).into()
+            );
+        }
+        if toktype < maxtokentype {
+            return Err(PgError::error("maptokentype entries are out of order").into());
+        }
+        if toktype > maxtokentype {
+            // starting a new token type (C:507-518)
+            while map.len() <= toktype as usize {
+                map.push(ListDictionary { dict_ids: PgVec::new_in(state_mcx) });
+            }
+            maxtokentype = toktype;
+            map[toktype as usize].dict_ids.push(mapdict);
+        } else {
+            // continuing data for current token type (C:520-529)
+            let dicts = &mut map[toktype as usize].dict_ids;
+            if dicts.len() >= MAXDICTSPERTT {
+                return Err(
+                    PgError::error("too many pg_ts_config_map entries for one token type").into()
+                );
+            }
+            dicts.push(mapdict);
+        }
+    }
+    Ok(map)
 }
 
 pub fn lookup_ts_config_cache(cfgId: Oid) -> PgResult<Rc<TSConfigCacheEntry>> {
@@ -380,31 +438,7 @@ pub fn lookup_ts_config_cache(cfgId: Oid) -> PgResult<Rc<TSConfigCacheEntry>> {
     let scratch = MemoryContext::new("ts_config map scan");
     let rows = syscache_seams::pg_ts_config_map_shapes::call(scratch.mcx(), cfgId)?;
 
-    let mut maxtokentype = 0usize;
-    for r in rows.iter() {
-        let toktype = r.maptokentype;
-        if toktype <= 0 || toktype as usize > MAXTOKENTYPE {
-            return Err(
-                PgError::error(format!("maptokentype value {toktype} is out of range")).into()
-            );
-        }
-        maxtokentype = toktype as usize;
-    }
-    let lenmap = if rows.is_empty() { 0 } else { maxtokentype + 1 };
-    let mut map: PgVec<'static, ListDictionary> = PgVec::new_in(state_mcx);
-    map.try_reserve_exact(lenmap).map_err(|_| state_mcx.oom(lenmap))?;
-    for _ in 0..lenmap {
-        map.push(ListDictionary { dict_ids: PgVec::new_in(state_mcx) });
-    }
-    for r in rows.iter() {
-        let dicts = &mut map[r.maptokentype as usize].dict_ids;
-        if dicts.len() >= MAXDICTSPERTT {
-            return Err(
-                PgError::error("too many pg_ts_config_map entries for one token type").into()
-            );
-        }
-        dicts.push(r.mapdict);
-    }
+    let map = build_config_map(state_mcx, rows.iter().map(|r| (r.maptokentype, r.mapdict)))?;
 
     let entry = Rc::new(TSConfigCacheEntry {
         cfg_id: cfgId,
@@ -573,10 +607,15 @@ fn check_default_text_search_config(
     };
     if cfg_id == InvalidOid {
         if source == types_guc::GucSource::PGC_S_TEST {
-            elog::elog(
-                types_error::NOTICE,
-                format!("text search configuration \"{val}\" does not exist"),
-            )?;
+            // C ts_cache.c:646-648: ereport(NOTICE, errcode(ERRCODE_UNDEFINED_OBJECT), ...)
+            elog::ereport(types_error::NOTICE)
+                .errcode(ERRCODE_UNDEFINED_OBJECT)
+                .errmsg(format!("text search configuration \"{val}\" does not exist"))
+                .finish(types_error::ErrorLocation::new(
+                    file!(),
+                    line!() as i32,
+                    "check_default_text_search_config",
+                ))?;
             return Ok(true);
         }
         return Ok(false);
