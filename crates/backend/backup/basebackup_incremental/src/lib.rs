@@ -57,7 +57,7 @@ use types_core::{
     BLCKSZ,
 };
 use types_error::{
-    ErrorLocation, PgResult, ERRCODE_INTERNAL_ERROR,
+    ErrorLocation, PgResult, DEBUG1, ERRCODE_INTERNAL_ERROR,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR,
 };
 use types_storage::RelFileLocator;
@@ -143,20 +143,24 @@ pub fn CreateIncrementalBackupInfo(system_identifier: u64) -> IncrementalBackupI
     }
 }
 
-/// The MAX_ALLOC_SIZE admission check for the manifest accumulation buffer,
+/// The MaxAllocSize admission check for the manifest accumulation buffer,
 /// split out so the bound is unit-testable without allocating ~1 GB. `len` is
-/// the bytes already buffered, `needed` the size of the incoming chunk;
-/// rejects when the total would exceed the ceiling C's StringInfo enforces.
-/// (`len` is kept <= MAX_ALLOC_SIZE by this very check, so `saturating_sub`
+/// the bytes already buffered, `needed` the size of the incoming chunk.
+///
+/// C: enlargeStringInfo (stringinfo.c:357) — `appendBinaryStringInfo` on
+/// ib->buf rejects `needed >= MaxAllocSize - str->len` (the buffer keeps one
+/// byte for its terminating NUL) with ERRCODE_PROGRAM_LIMIT_EXCEEDED and the
+/// StringInfo message + detail, which are what a replication client sees.
+/// (`len` is kept < MAX_ALLOC_SIZE by this very check, so `saturating_sub`
 /// never actually saturates — it is belt-and-suspenders.)
 fn check_manifest_capacity(len: usize, needed: usize) -> PgResult<()> {
-    if needed > MAX_ALLOC_SIZE.saturating_sub(len) {
+    if needed >= MAX_ALLOC_SIZE.saturating_sub(len) {
         return Err(elog::PgError::error(format!(
-            "backup manifest exceeds maximum allowed length ({MAX_ALLOC_SIZE} bytes)"
+            "string buffer exceeds maximum allowed length ({MAX_ALLOC_SIZE} bytes)"
         ))
         .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
         .with_detail(format!(
-            "Cannot enlarge manifest buffer containing {len} bytes by {needed} more bytes."
+            "Cannot enlarge string buffer containing {len} bytes by {needed} more bytes."
         ))
         .into());
     }
@@ -176,8 +180,8 @@ impl IncrementalBackupInfo {
     /// allocation and is held to the same ceiling every C StringInfo
     /// enforces — MAX_ALLOC_SIZE (1 GB - 1). A replication client that
     /// streams an unbounded run of CopyData packets is rejected with a
-    /// catchable ERRCODE_PROGRAM_LIMIT_EXCEEDED, matching C's
-    /// enlargeStringInfo overflow ERROR, instead of driving the process
+    /// catchable ERRCODE_PROGRAM_LIMIT_EXCEEDED carrying C's
+    /// enlargeStringInfo overflow ERROR text, instead of driving the process
     /// into an infallible-allocation abort. Growth uses `try_reserve`, so an
     /// allocator failure short of the cap also surfaces as a per-command
     /// out-of-memory ERROR (C: palloc failure is a catchable ERROR, not a
@@ -554,6 +558,11 @@ fn merge_required_summaries<'mcx>(
                 .finish(loc("PrepareForIncrementalBackup"))?;
             unreachable!();
         }
+        // C: basebackup_incremental.c:584 — one DEBUG1 line per summary
+        // file, naming the path it was opened under (FilePathName).
+        ereport(DEBUG1)
+            .errmsg_internal(format!("reading WAL summary file \"{path}\""))
+            .finish(loc("PrepareForIncrementalBackup"))?;
 
         // C: ReadWalSummary — a positioned FileRead loop with C's error text.
         let mut filepos: i64 = 0;

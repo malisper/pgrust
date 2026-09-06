@@ -144,23 +144,37 @@ fn append_manifest_bounded_to_max_alloc_size() {
     // A small chunk from empty is always accepted (the normal path).
     check_manifest_capacity(0, 1 << 20).unwrap();
 
-    // The buffer may fill exactly up to the MAX_ALLOC_SIZE ceiling that C's
-    // StringInfo enforces on every buffer — total == MAX_ALLOC_SIZE is fine.
-    check_manifest_capacity(0, MAX_ALLOC_SIZE).unwrap();
-    check_manifest_capacity(MAX_ALLOC_SIZE - 10, 10).unwrap();
+    // C: enlargeStringInfo (stringinfo.c:357) rejects when
+    // `needed >= MaxAllocSize - len`, i.e. the buffer may hold at most
+    // MaxAllocSize - 1 bytes (one byte is the terminating NUL).
+    check_manifest_capacity(0, MAX_ALLOC_SIZE - 1).unwrap();
+    check_manifest_capacity(MAX_ALLOC_SIZE - 10, 9).unwrap();
 
-    // One byte past the ceiling is rejected with a catchable, per-command
-    // ERROR (ERRCODE_PROGRAM_LIMIT_EXCEEDED) instead of an unbounded,
-    // infallible allocation that would exhaust memory / abort the process.
-    // This is the resource-exhaustion guard: a replication client streaming
-    // an endless run of CopyData packets cannot grow the buffer without limit.
+    // Exactly MaxAllocSize is already too much (audit row 6a2ae93a9e31:
+    // the port accepted total == MaxAllocSize, C does not).
+    let e = check_manifest_capacity(MAX_ALLOC_SIZE - 10, 10).err().unwrap();
+    assert_eq!(e.sqlstate(), ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+    check_manifest_capacity(0, MAX_ALLOC_SIZE).err().unwrap();
+
+    // Past the ceiling: a catchable, per-command ERROR
+    // (ERRCODE_PROGRAM_LIMIT_EXCEEDED) instead of an unbounded, infallible
+    // allocation that would exhaust memory / abort the process — with C's
+    // enlargeStringInfo message and detail, byte for byte (stringinfo.c:359).
     let e = check_manifest_capacity(MAX_ALLOC_SIZE - 10, 11).err().unwrap();
     assert_eq!(e.sqlstate(), ERRCODE_PROGRAM_LIMIT_EXCEEDED);
-    assert!(
-        e.message()
-            .contains("backup manifest exceeds maximum allowed length"),
-        "unexpected message: {}",
-        e.message()
+    assert_eq!(
+        e.message(),
+        format!("string buffer exceeds maximum allowed length ({MAX_ALLOC_SIZE} bytes)")
+    );
+    assert_eq!(
+        e.detail(),
+        Some(
+            format!(
+                "Cannot enlarge string buffer containing {} bytes by 11 more bytes.",
+                MAX_ALLOC_SIZE - 10
+            )
+            .as_str()
+        )
     );
 }
 
@@ -445,6 +459,67 @@ fn merge_reads_and_combines_summary_files() {
     let missing = ws(9, 0x9000, 0xA000);
     let msg = errmsg_of(merge_required_summaries(mcx, &[missing], &dir));
     assert!(msg.starts_with("could not open file"), "{msg}");
+}
+
+// Captured ereport lines for the DEBUG1 witness below. A process-wide store
+// (not a thread_local): the emit hook is installed on the test thread only,
+// so nothing else writes here.
+static LOG_LINES: std::sync::Mutex<Vec<(types_error::ErrorLevel, String)>> =
+    std::sync::Mutex::new(Vec::new());
+
+fn capture_log_line(err: &types_error::PgError, _output_to_server: &mut bool) {
+    LOG_LINES.lock().unwrap().push((err.level(), err.message().to_string()));
+}
+
+fn take_log_lines() -> Vec<(types_error::ErrorLevel, String)> {
+    std::mem::take(&mut *LOG_LINES.lock().unwrap())
+}
+
+// basebackup_incremental.c:584: before each summary file is read,
+// ereport(DEBUG1, errmsg_internal("reading WAL summary file \"%s\"",
+// FilePathName(wsio.file))) — one line per required summary, naming the
+// path the file was opened under (audit row 3fc13907d6c5).
+#[test]
+fn reading_wal_summary_file_debug1_is_c_exact() {
+    fd_setup();
+    let dir = scratch_summaries_dir();
+    let cx = MemoryContext::new("merge-debug1-test");
+    let mcx = cx.mcx();
+
+    let ws1 = ws(1, 0x1000, 0x2000);
+    let ws2 = ws(1, 0x2000, 0x3000);
+    for w in [&ws1, &ws2] {
+        let mut tab = BlockRefTable::new(mcx);
+        tab.mark_block_modified(rl(1663, 5, 16384), ForkNumber::MAIN_FORKNUM, 1).unwrap();
+        write_summary_file(&dir, w, &tab);
+    }
+
+    let saved_min = elog::config::log_min_messages();
+    elog::config::set_log_min_messages(types_error::DEBUG1);
+    let prev = elog::set_emit_log_hook(Some(capture_log_line));
+    take_log_lines();
+    let result = merge_required_summaries(mcx, &[ws1, ws2], &dir);
+    let lines = take_log_lines();
+    elog::set_emit_log_hook(prev);
+    elog::config::set_log_min_messages(saved_min);
+    result.unwrap();
+
+    let debug1: Vec<&str> = lines
+        .iter()
+        .filter(|(lvl, _)| *lvl == types_error::DEBUG1)
+        .map(|(_, m)| m.as_str())
+        .collect();
+    let want = [
+        format!(
+            "reading WAL summary file \"{dir}/{:08X}{:08X}{:08X}{:08X}{:08X}.summary\"",
+            1, 0, 0x1000, 0, 0x2000
+        ),
+        format!(
+            "reading WAL summary file \"{dir}/{:08X}{:08X}{:08X}{:08X}{:08X}.summary\"",
+            1, 0, 0x2000, 0, 0x3000
+        ),
+    ];
+    assert_eq!(debug1, [want[0].as_str(), want[1].as_str()], "all lines: {lines:?}");
 }
 
 // ---------------------------------------------------------------------------
