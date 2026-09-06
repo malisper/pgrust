@@ -39,6 +39,44 @@
 // perform, because the second spawner on this target is the session thread
 // creating the pg-timeout-timer thread while the process instance is parked.
 //
+// PIPE FDS, AND THE FD NUMBER PLAN (the whole of it, documented here once).
+//
+// The guest no longer has exactly three host-backed descriptors. `--host-pipes`
+// (crates/backend/libpq/pqcomm_hostpipes) makes a postmaster whose listener AND
+// every session's two byte channels are plain fds the host hands it, so this
+// file carries a REGISTRY of them: `fd -> { in?: SabPipe, out?: SabPipe }`,
+// where `in` is the pipe the GUEST READS and `out` the pipe the GUEST WRITES.
+// `fd_read`/`fd_write`/`fd_close`/`fd_fdstat_get` consult it before anything
+// else — before the base `Vfs` and before the `--fs broker` adapter, which
+// claims every fd >= its fdBase and would otherwise swallow a pipe fd — and
+// `poll_oneoff` answers FD_READ/FD_WRITE readiness for any registered fd.
+//
+//   fd 0        stdin           { in:  the driver->guest SabPipe }
+//   fd 1        stdout          { out: the guest->driver SabPipe }
+//   fd 2        stderr          { sink: onStderr }  — see below
+//   fd 1000     host-pipes listener (PGRUST_HOSTPIPES_LISTEN_FD), guest reads
+//   fd 1001+2k  session k's in_fd   (guest reads client->server bytes)
+//   fd 1002+2k  session k's out_fd  (guest writes server->client bytes)
+//
+// fd 2 is an entry like the others but carries a `sink` callback rather than a
+// pipe: stderr is a per-instance postMessage relay and SabPipe is SPSC, so N
+// instances cannot share one stderr ring. Its readiness is "never readable,
+// always writable", which is what a pipe to a live reader answers anyway.
+//
+// FILE fds are numbered per instance and must not collide, because the guest's
+// fd table is process-global (shared memory) while each instance's file table
+// is its own JS Map. The process instance allocates from 4; pool slot `s`
+// allocates from `4 + 2000*(s+1)` (`fdBase`, honoured by BOTH the base `Vfs`
+// and the broker adapter). 2000 apart leaves the 1000..1999 window free for
+// pipe fds and gives the process instance 996 file descriptors.
+//
+// The registry crosses agents as DESCRIPTORS, not objects: `descriptors()`
+// yields `{ [fd]: { in?: {sab,capacity}, out?: {…} } }`, which travels in the
+// spawn/prewarm message and is rebuilt with `PipeRegistry.from()` in the pool
+// worker. Both sides then hold DIFFERENT JS objects over the SAME
+// SharedArrayBuffers, so a close performed by one instance is seen by every
+// other through the pipe's shared CLOSED word — never through JS-local state.
+//
 // STORAGE, and the limit that used to be here. `--fs copy` (the default, and
 // what checkpoint (a) shipped) still gives every worker its OWN Vfs from its
 // own copy of the packed image, so the process instance and the session
@@ -225,6 +263,95 @@ export class SpawnDesk {
   }
 }
 
+// ---------------------------------------------------------------------------
+// PipeRegistry — the host-backed fd table. See "PIPE FDS, AND THE FD NUMBER
+// PLAN" at the top of this file.
+// ---------------------------------------------------------------------------
+
+// WASI preview1 errnos this file answers with, and the two filetypes.
+const WASI_ESUCCESS = 0;
+const WASI_EBADF = 8;
+const WASI_EPIPE = 64;
+const WASI_FILETYPE_CHARACTER_DEVICE = 2;
+
+/** The host-pipes listener fd. Mirrored into PGRUST_HOSTPIPES_LISTEN_FD. */
+export const HOSTPIPES_LISTEN_FD = 1000;
+/** Session k's (in_fd, out_fd): the guest READS in_fd and WRITES out_fd. */
+export function sessionFds(k) {
+  return { inFd: HOSTPIPES_LISTEN_FD + 1 + 2 * k, outFd: HOSTPIPES_LISTEN_FD + 2 + 2 * k };
+}
+/**
+ * The WASI fd an instance's FILE table allocates from. Disjoint per agent so
+ * two instances never hand the same fd number to two different files: the
+ * guest's fd table is process-global, ours are not.
+ */
+export const PROCESS_FD_BASE = 4;
+export const SLOT_FD_STRIDE = 2000;
+export function slotFdBase(slot) {
+  return PROCESS_FD_BASE + SLOT_FD_STRIDE * (slot + 1);
+}
+
+export class PipeRegistry {
+  constructor(entries = new Map()) {
+    this.entries = entries;
+  }
+
+  /** Rebuild in another agent from `descriptors()` (SABs clone by reference). */
+  static from(desc) {
+    const r = new PipeRegistry();
+    for (const [fd, e] of Object.entries(desc || {})) {
+      r.register(Number(fd), {
+        in: e.in ? SabPipe.from(e.in) : null,
+        out: e.out ? SabPipe.from(e.out) : null,
+      });
+    }
+    return r;
+  }
+
+  /** `in` = the pipe the guest reads; `out` = the pipe the guest writes. */
+  register(fd, { in: inPipe = null, out: outPipe = null, sink = null } = {}) {
+    this.entries.set(fd, { in: inPipe, out: outPipe, sink });
+    return this;
+  }
+
+  get(fd) {
+    return this.entries.get(fd);
+  }
+
+  has(fd) {
+    return this.entries.has(fd);
+  }
+
+  /** Structured-cloneable; `sink` entries are local to their agent and skipped. */
+  descriptors() {
+    const out = {};
+    for (const [fd, e] of this.entries) {
+      if (!e.in && !e.out) continue;
+      out[fd] = {
+        in: e.in ? e.in.descriptor() : null,
+        out: e.out ? e.out.descriptor() : null,
+      };
+    }
+    return out;
+  }
+
+  /** Data waiting, or the writer is gone (EOF is readable — read returns 0). */
+  readable(fd) {
+    const e = this.entries.get(fd);
+    if (!e || !e.in) return false;
+    return e.in.available() > 0 || e.in.closed;
+  }
+
+  /** Space in the ring, or the pipe is closed (so the write can surface EPIPE). */
+  writable(fd) {
+    const e = this.entries.get(fd);
+    if (!e) return false;
+    if (e.sink) return true;
+    if (!e.out) return false;
+    return e.out.room() > 0 || e.out.closed;
+  }
+}
+
 // The import object + WASI state for ONE instance (the process instance or one
 // spawned thread's instance).
 export function makeThreadsHost({
@@ -243,6 +370,11 @@ export function makeThreadsHost({
   // `--fs broker`: the seam from wasm/broker-fs.js. null (`--fs copy`) leaves every byte of
   // this function's behaviour exactly as it was.
   fs = null,
+  // Host-backed fds BEYOND stdio: a PipeRegistry, or the plain descriptor
+  // object one travels as. See "PIPE FDS, AND THE FD NUMBER PLAN" above.
+  pipes = null,
+  // Where this instance's FILE table allocates fds from (per-agent, disjoint).
+  fdBase = PROCESS_FD_BASE,
 }) {
   const info = inspectImports(wasmModule);
   if (!info.memory) {
@@ -269,6 +401,14 @@ export function makeThreadsHost({
     stdout.write(bytes);
   };
 
+  // fd 0/1/2 are registry entries like any other host-backed fd; anything the
+  // caller hands us (the host-pipes listener, the session fd pairs) joins them.
+  const registry =
+    pipes instanceof PipeRegistry ? pipes : PipeRegistry.from(pipes || {});
+  registry.register(0, { in: stdin });
+  registry.register(1, { out: stdout });
+  registry.register(2, { sink: onStderr || (() => {}) });
+
   const h = makeWasi({
     image: imageU8,
     manifest,
@@ -276,6 +416,7 @@ export function makeThreadsHost({
     onStderr,
     argv,
     env,
+    fdBase,
   });
   // Imported memory: the host owns it, so it is known BEFORE instantiation
   // (the single-threaded host sets it from instance.exports.memory after).
@@ -291,26 +432,6 @@ export function makeThreadsHost({
       yield { ptr: view.getUint32(base, true), len: view.getUint32(base + 4, true) };
     }
   }
-
-  const innerRead = wasi.fd_read;
-  // fd 0: the ONE blocking primitive of the whole design. Everything else
-  // delegates to the stock host.
-  wasi.fd_read = (fd, iovsPtr, iovsLen, nreadPtr) => {
-    if (fd !== 0) return innerRead(fd, iovsPtr, iovsLen, nreadPtr);
-    let total = 0;
-    for (const { ptr, len } of iovs(iovsPtr, iovsLen)) {
-      if (len === 0) continue;
-      const scratch = new Uint8Array(len);
-      const n = stdin.readInto(scratch, len); // BLOCKS; 0 == EOF
-      if (n > 0) {
-        u8().set(scratch.subarray(0, n), ptr);
-        total = n;
-      }
-      break; // one pipe read per call, like read(2) on a pipe
-    }
-    dv().setUint32(nreadPtr, total, true);
-    return 0; // ESUCCESS; total == 0 is EOF, which is what the guest wants
-  };
 
   // Chrome refuses crypto.getRandomValues() on a view backed by a
   // SharedArrayBuffer ("The provided ArrayBufferView value must not be
@@ -333,25 +454,38 @@ export function makeThreadsHost({
     return 0;
   };
 
-  // poll_oneoff, for real. Two callers matter on this target:
+  // poll_oneoff, for real. Three callers matter on this target:
   //   * the emulated-noblock probe (fdnb::poll_ready -> poll(2)) — must
-  //     answer honestly for fd 0, or a "non-blocking" read would park in
+  //     answer honestly for a pipe fd, or a "non-blocking" read would park in
   //     Atomics.wait;
   //   * every timed sleep std lowers to a clock subscription
   //     (std::thread::sleep, nanosleep) — the single-threaded host answers
   //     those "already fired", which turns a sleep into a busy spin. A
   //     backend that must honour statement_timeout while another thread runs
-  //     the timer cannot spin: it has to give the CPU up.
+  //     the timer cannot spin: it has to give the CPU up;
+  //   * the host-pipes transport. `pqcomm_hostpipes::poll_bounded` polls
+  //     POLLIN/POLLOUT with a 100ms interrupt bound before every session
+  //     read/write, and `ServerLoop`'s wasm arm probes the LISTENER with a
+  //     STRICT zero-timeout poll — a false "readable" there parks the
+  //     postmaster in a blocking 16-byte read forever. So a registered fd is
+  //     answered from its ring's real state and never optimistically.
   //
   // Subscription layout (48 bytes): userdata u64 @0, tag u8 @8; clock arm =
   // id u32 @16, timeout u64 ns @24, precision u64 @32, flags u16 @40 (bit 0
-  // = SUBSCRIPTION_CLOCK_ABSTIME); fd arm = fd u32 @16. Event layout (32
-  // bytes): userdata u64 @0, errno u16 @8, type u8 @10, nbytes u64 @16,
-  // flags u16 @24.
+  // = SUBSCRIPTION_CLOCK_ABSTIME); fd arm = fd u32 @16. tag 0 = clock,
+  // 1 = fd_read, 2 = fd_write. Event layout (32 bytes): userdata u64 @0,
+  // errno u16 @8, type u8 @10, nbytes u64 @16, flags u16 @24.
   //
-  // Every fd OTHER than 0 keeps the stock always-ready answer (the guest
-  // only ever polls its stdio here, and fd 1/2 writes never block).
+  // An fd that is NOT in the registry keeps the stock always-ready answer: it
+  // is a file in the Vfs or the broker store, and those never block.
   const parkWord = new Int32Array(new SharedArrayBuffer(4));
+  // Longest single park; the guest re-polls. Well under Atomics.wait's 2^31ms.
+  const POLL_PARK_CAP_MS = 60000;
+  // Slice length when several pipes must be watched at once: SabPipe's futex
+  // word is per pipe, so N of them cannot be waited on atomically. One sub is
+  // the only shape the guest actually uses (poll(2) with a single fd), so this
+  // is a correctness backstop, not a hot path.
+  const POLL_SLICE_MS = 2;
   wasi.poll_oneoff = (inPtr, outPtr, nsubs, neventsPtr) => {
     const view = dv();
     const subs = [];
@@ -376,16 +510,21 @@ export function makeThreadsHost({
         if (nearestMs === null || s.deadlineMs < nearestMs) nearestMs = s.deadlineMs;
       } else {
         s.fd = view.getUint32(p + 16, true);
+        s.pipe = registry.has(s.fd);
       }
       subs.push(s);
     }
 
-    // A subscription is ready now if it is a non-fd-0 fd (always), fd 0 with
-    // data or at EOF, or a clock whose deadline has already passed.
-    const ready = (s, elapsedMs) =>
-      s.tag === 0
-        ? s.deadlineMs <= elapsedMs
-        : s.fd !== 0 || stdin.available() > 0 || stdin.closed;
+    // A subscription is ready now if it is a clock whose deadline has passed,
+    // an unregistered fd (always — a file), or a registered fd whose ring says
+    // so: readable = bytes queued or the writer closed (EOF is readable, and
+    // the read that follows returns 0); writable = room in the ring or the
+    // pipe is closed (so the write surfaces EPIPE instead of parking).
+    const ready = (s, elapsedMs) => {
+      if (s.tag === 0) return s.deadlineMs <= elapsedMs;
+      if (!s.pipe) return true;
+      return s.tag === 2 ? registry.writable(s.fd) : registry.readable(s.fd);
+    };
 
     if (nsubs === 0) {
       view.setUint32(neventsPtr, 0, true);
@@ -396,13 +535,36 @@ export function makeThreadsHost({
     let elapsed = 0;
     if (!subs.some((s) => ready(s, 0))) {
       // Nothing is ready: block. Bounded by the nearest clock deadline, or
-      // forever-ish when the guest asked for an untimed wait (clamped well
-      // under the 2^31 ms Atomics.wait ceiling; the guest re-polls).
-      const budget = nearestMs === null ? 60000 : Math.min(nearestMs, 60000);
-      const fdWait = subs.some((s) => s.tag === 1 && s.fd === 0);
+      // forever-ish when the guest asked for an untimed wait (the guest
+      // re-polls).
+      const budget = nearestMs === null ? POLL_PARK_CAP_MS : Math.min(nearestMs, POLL_PARK_CAP_MS);
+      // Every pipe subscription that is not already satisfied, as
+      // (pipe object, which readiness) pairs.
+      const waits = [];
+      for (const s of subs) {
+        if (s.tag === 0 || !s.pipe) continue;
+        const e = registry.get(s.fd);
+        const p = s.tag === 2 ? e.out : e.in;
+        if (p) waits.push({ pipe: p, write: s.tag === 2 });
+      }
       if (budget > 0) {
-        if (fdWait) stdin.waitReadable(budget);
-        else Atomics.wait(parkWord, 0, 0, budget);
+        if (waits.length === 1) {
+          // The shape every real caller has: one fd, one deadline. Park on
+          // that pipe's own futex word — a byte landing wakes us at once.
+          const w = waits[0];
+          if (w.write) w.pipe.waitWritable(budget);
+          else w.pipe.waitReadable(budget);
+        } else if (waits.length === 0) {
+          Atomics.wait(parkWord, 0, 0, budget);
+        } else {
+          const deadline = start + budget;
+          for (;;) {
+            const rem = deadline - Date.now();
+            if (rem <= 0) break;
+            if (subs.some((s) => ready(s, Date.now() - start))) break;
+            Atomics.wait(parkWord, 0, 0, Math.min(rem, POLL_SLICE_MS));
+          }
+        }
       }
       elapsed = Date.now() - start;
       // We slept the whole budget unless an fd woke us (in which case that
@@ -434,6 +596,100 @@ export function makeThreadsHost({
   // host installed as the fallback for everything it does not own, and the trace ring must wrap
   // whatever ends up being called.
   if (fs) wasi = fs.compose(wasi);
+
+  // ---------------------------------------------------------------------
+  // Host-backed pipe fds, LAST — after the fd-0 stdio arrangement the base
+  // host builds and after the broker adapter, because the adapter owns every
+  // fd >= its fdBase and a session fd (1001+) would otherwise be answered by
+  // the store. Pipe fds take precedence over both; everything else falls
+  // through untouched.
+  // ---------------------------------------------------------------------
+  {
+    const innerRead = wasi.fd_read;
+    const innerWrite = wasi.fd_write;
+    const innerClose = wasi.fd_close;
+    const innerFdstat = wasi.fd_fdstat_get;
+
+    wasi.fd_read = (fd, iovsPtr, iovsLen, nreadPtr) => {
+      const e = registry.get(fd);
+      if (!e) return innerRead(fd, iovsPtr, iovsLen, nreadPtr);
+      if (!e.in) return WASI_EBADF; // write-only end of a pipe pair
+      let total = 0;
+      for (const { ptr, len } of iovs(iovsPtr, iovsLen)) {
+        if (len === 0) continue;
+        const scratch = new Uint8Array(len);
+        const n = e.in.readInto(scratch, len); // BLOCKS; 0 == EOF
+        if (n > 0) {
+          u8().set(scratch.subarray(0, n), ptr);
+          total = n;
+        }
+        break; // one pipe read per call, like read(2) on a pipe
+      }
+      dv().setUint32(nreadPtr, total, true);
+      return WASI_ESUCCESS; // total == 0 is EOF, which is what the guest wants
+    };
+
+    wasi.fd_write = (fd, iovsPtr, iovsLen, nwrittenPtr) => {
+      const e = registry.get(fd);
+      if (!e) return innerWrite(fd, iovsPtr, iovsLen, nwrittenPtr);
+      // Gather: WASI hands a vector, a pipe takes one contiguous run.
+      let len = 0;
+      for (const { len: l } of iovs(iovsPtr, iovsLen)) len += l;
+      const bytes = new Uint8Array(len);
+      let off = 0;
+      for (const { ptr, len: l } of iovs(iovsPtr, iovsLen)) {
+        if (l === 0) continue;
+        bytes.set(u8().slice(ptr, ptr + l), off);
+        off += l;
+      }
+      if (e.sink) {
+        if (len) e.sink(bytes);
+        dv().setUint32(nwrittenPtr, len, true);
+        return WASI_ESUCCESS;
+      }
+      if (!e.out) return WASI_EBADF; // read-only end of a pipe pair
+      if (e.out.closed) return WASI_EPIPE;
+      // A SHORT write is the seam's normal vocabulary (every caller loops),
+      // and it is what keeps this interruptible: park until at least one byte
+      // fits, then take whatever the ring has room for. A `block: true` write
+      // of the whole buffer would hold the guest thread past the point where
+      // its interrupt handlers should have run.
+      let n = e.out.write(bytes, { block: false });
+      while (n === 0 && len > 0 && !e.out.closed) {
+        e.out.waitWritable(100);
+        n = e.out.write(bytes, { block: false });
+      }
+      if (n === 0 && len > 0) return WASI_EPIPE;
+      dv().setUint32(nwrittenPtr, n, true);
+      return WASI_ESUCCESS;
+    };
+
+    wasi.fd_close = (fd) => {
+      const e = registry.get(fd);
+      if (!e) return innerClose(fd);
+      // stdio stays alive for the life of the instance, exactly as the base
+      // host keeps fds 0-3: the driver owns those two rings and closes them.
+      if (fd <= 2) return WASI_ESUCCESS;
+      // Everything else really does close, through the pipe's SHARED closed
+      // word — the whole point of the registry crossing agents as SABs. The
+      // entry itself stays: another instance must be able to observe the
+      // close, and the guest's fd table is process-global.
+      if (e.in) e.in.close();
+      if (e.out) e.out.close();
+      return WASI_ESUCCESS;
+    };
+
+    wasi.fd_fdstat_get = (fd, bufPtr) => {
+      const e = registry.get(fd);
+      if (!e) return innerFdstat(fd, bufPtr);
+      const view = dv();
+      view.setUint8(bufPtr, WASI_FILETYPE_CHARACTER_DEVICE);
+      view.setUint16(bufPtr + 2, 0, true); // no fdflags: these stay BLOCKING
+      view.setBigUint64(bufPtr + 8, 0xffffffffffffffffn, true);
+      view.setBigUint64(bufPtr + 16, 0xffffffffffffffffn, true);
+      return WASI_ESUCCESS;
+    };
+  }
 
   // Diagnostics: keep the last `trace` WASI calls in a ring so a guest abort
   // (which arrives as a bare `RuntimeError: unreachable`, and whose Rust-side
@@ -514,7 +770,7 @@ export function makeThreadsHost({
     put(i.module, i.name, fn);
   }
 
-  return { imports, wasi, vfs: h.vfs, fs, info, traceRing, traceHead };
+  return { imports, wasi, vfs: h.vfs, fs, info, traceRing, traceHead, pipes: registry };
 }
 
 // ---------------------------------------------------------------------------
@@ -595,6 +851,11 @@ export function makeSpawner({
   fsMode = 'copy',
   bundleUrl = null,
   poolChannels = [],
+  // The host-backed fd registry as DESCRIPTORS (see the header): a spawned
+  // backend must see the same listener and session fds the process instance
+  // does, and it must see them through the same SharedArrayBuffers so a close
+  // on one side is visible on the other.
+  pipes = null,
 }) {
   const url = threadWorkerUrl(base);
   const workers = [];
@@ -641,6 +902,8 @@ export function makeSpawner({
       fs: fsMode,
       bundleUrl,
       channel: poolChannels[slot] || null,
+      pipes,
+      fdBase: slotFdBase(slot),
     };
     w.postMessage(payload, relay ? [imageCopy, relay] : [imageCopy]);
     return rec;

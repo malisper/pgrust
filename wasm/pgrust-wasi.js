@@ -191,7 +191,7 @@ function nowSec() { return Math.floor(Date.now() / 1000); }
 const PREOPEN_FD = 3;
 const ALL_RIGHTS = 0xFFFFFFFFFFFFFFFFn;
 
-export function makeWasi({ image, manifest, vfs: existingVfs, stdinBytes, stdinStream, onStdout, onStderr, argv: argvOverride, env: envOverride, pipes }) {
+export function makeWasi({ image, manifest, vfs: existingVfs, stdinBytes, stdinStream, onStdout, onStderr, argv: argvOverride, env: envOverride, fdBase, pipes }) {
   const vfs = existingVfs || new Vfs(image, manifest);
 
   const argv = argvOverride || [
@@ -227,7 +227,13 @@ export function makeWasi({ image, manifest, vfs: existingVfs, stdinBytes, stdinS
   fds.set(1, { kind: 'stdout' });
   fds.set(2, { kind: 'stderr' });
   fds.set(PREOPEN_FD, { kind: 'dir', path: '/', node: vfs.get('/') });
-  let nextFd = PREOPEN_FD + 1;
+  // Where this instance's OPEN FILES start. Default PREOPEN_FD+1, unchanged
+  // for every single-instance caller. The threads target passes a per-agent
+  // base instead: the guest's fd table is process-global (one shared linear
+  // memory, N instances) while this Map is private to one instance, so two
+  // agents allocating from 4 would hand the SAME fd number to two different
+  // files. See "PIPE FDS, AND THE FD NUMBER PLAN" in wasm/threads-host.js.
+  let nextFd = Number.isSafeInteger(fdBase) && fdBase > PREOPEN_FD ? fdBase : PREOPEN_FD + 1;
   // Host-provided pipe fds (the psql <-> postgres cross-connect; increment 2
   // of the Rust-psql plan). `pipes` maps fd number ->
   //   { kind:'piperead', stream }   stream = { ready, isEof, take, wait }

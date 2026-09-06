@@ -66,7 +66,7 @@ export async function loadRepackedBundle(url) {
  * `memory.buffer` on every call by design: a shared memory grows underneath the host and a
  * cached view goes stale.
  */
-export function createBrokerFs({ bundle, channel, memory, label = 'guest', onLog, requestTimeoutMs }) {
+export function createBrokerFs({ bundle, channel, memory, label = 'guest', onLog, requestTimeoutMs, fdBase }) {
   const attached = bundle.RepackedChannel.attach(channel);
   const client = new bundle.RepackedSyncClient(attached, {
     requestTimeoutMs: requestTimeoutMs || DEFAULT_REQUEST_TIMEOUT_MS,
@@ -74,6 +74,11 @@ export function createBrokerFs({ bundle, channel, memory, label = 'guest', onLog
   const adapter = bundle.createWasiPreview1Fs({
     client,
     memory: () => memory.buffer,
+    // Per-agent fd base (wasm/threads-host.js, "PIPE FDS, AND THE FD NUMBER
+    // PLAN"): the adapter owns fd 3 and every fd >= fdBase, and N instances
+    // sharing one guest fd table must not allocate overlapping fd numbers.
+    // Undefined keeps the library default (preopenFd + 1 = 4).
+    fdBase,
     // A JS exception thrown out of a WASI import leaves wasm as a foreign exception, which the
     // guest's nounwind frames turn into a bare `RuntimeError: unreachable` with no Rust message
     // at all. The adapter already converts every throw into EIO; this is where the stack we

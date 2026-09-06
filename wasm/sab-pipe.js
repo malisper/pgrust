@@ -78,6 +78,11 @@ export class SabPipe {
     return (Atomics.load(this.hdr, H_WRITE) - Atomics.load(this.hdr, H_READ)) | 0;
   }
 
+  // Producer side's twin of available(): how many bytes fit right now.
+  room() {
+    return this.capacity - this.available();
+  }
+
   close() {
     Atomics.store(this.hdr, H_CLOSED, 1);
     this._bump();
@@ -145,6 +150,25 @@ export class SabPipe {
       // window between the check and the wait (it returns 'not-equal').
       const seq = Atomics.load(this.hdr, H_SEQ);
       if (this.available() > 0 || this.closed) return true;
+      const rem = deadline - Date.now();
+      if (rem <= 0) return false;
+      Atomics.wait(this.hdr, H_SEQ, seq, rem);
+    }
+  }
+
+  // Producer side, BOUNDED blocking readiness wait — waitReadable's mirror,
+  // and what the host's `poll_oneoff` lands on for an FD_WRITE subscription
+  // (pqcomm_hostpipes::secure_write polls POLLOUT with a 100ms interrupt
+  // bound before every write). Returns true once at least one byte fits or
+  // the pipe is closed (a closed pipe is "ready" so the caller's write can
+  // surface EPIPE instead of parking), false when `timeoutMs` elapsed first.
+  // Same SEQ-first discipline as waitReadable: a state change in the window
+  // between the check and the wait makes Atomics.wait return 'not-equal'.
+  waitWritable(timeoutMs) {
+    const deadline = Date.now() + Math.max(0, timeoutMs);
+    for (;;) {
+      const seq = Atomics.load(this.hdr, H_SEQ);
+      if (this.room() > 0 || this.closed) return true;
       const rem = deadline - Date.now();
       if (rem <= 0) return false;
       Atomics.wait(this.hdr, H_SEQ, seq, rem);

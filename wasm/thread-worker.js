@@ -49,7 +49,16 @@
 // Node entry is thread-worker.mjs (a one-line re-export of this file) so
 // Node's module resolution sees ESM without relying on syntax detection.
 
-import { makeThreadsHost, makeSpawner, SpawnDesk, GuestExit, IS_NODE, EAGAIN } from './threads-host.js';
+import {
+  makeThreadsHost,
+  makeSpawner,
+  SpawnDesk,
+  PipeRegistry,
+  PROCESS_FD_BASE,
+  GuestExit,
+  IS_NODE,
+  EAGAIN,
+} from './threads-host.js';
 import { SabPipe } from './sab-pipe.js';
 import { createBrokerFs, loadRepackedBundle } from './broker-fs.js';
 
@@ -83,7 +92,7 @@ let prewarmed = null; // { instance, host, exports } for a spawned-thread worker
 // `--fs broker`: build THIS instance's filesystem seam onto the coordinator's one store. Awaited
 // here, in the worker's async bootstrap, precisely because it may not be awaited later — a
 // thread-spawn handler is microseconds from a futex park and can await nothing.
-async function brokerFsFor(msg, label) {
+async function brokerFsFor(msg, label, fdBase) {
   if (msg.fs !== 'broker') return null;
   if (!msg.channel) throw new Error(`${label}: --fs broker but no broker channel was handed to this worker`);
   const bundle = await loadRepackedBundle(msg.bundleUrl);
@@ -92,6 +101,7 @@ async function brokerFsFor(msg, label) {
     channel: msg.channel,
     memory: msg.memory,
     label,
+    fdBase,
     onLog: (text) => post({ type: 'log', text }),
   });
 }
@@ -99,7 +109,7 @@ async function brokerFsFor(msg, label) {
 async function runProcess(msg) {
   const stdin = SabPipe.from(msg.stdin);
   const stdout = SabPipe.from(msg.stdout);
-  const fs = await brokerFsFor(msg, 'process');
+  const fs = await brokerFsFor(msg, 'process', PROCESS_FD_BASE);
 
   const spawner = makeSpawner({
     wasmModule: msg.module,
@@ -117,6 +127,8 @@ async function runProcess(msg) {
     fsMode: msg.fs || 'copy',
     bundleUrl: msg.bundleUrl || null,
     poolChannels: msg.poolChannels || [],
+    // Every pool slot rebuilds the SAME pipes from these descriptors.
+    pipes: msg.pipes || null,
     // Spawn bookkeeping the PROCESS instance itself observes (it is not yet
     // parked when it posts these); everything the spawned thread observes
     // goes out on that thread's own relay port instead.
@@ -137,6 +149,8 @@ async function runProcess(msg) {
     label: 'process',
     trace: msg.trace || 0,
     fs,
+    pipes: PipeRegistry.from(msg.pipes || {}),
+    fdBase: PROCESS_FD_BASE,
   });
 
   post({
@@ -188,7 +202,7 @@ async function prewarmThread(msg) {
   const stdout = SabPipe.from(msg.stdout);
   const desk = SpawnDesk.from(msg.desk);
   const slot = msg.slot | 0;
-  const fs = await brokerFsFor(msg, `thread-slot-${slot}`);
+  const fs = await brokerFsFor(msg, `thread-slot-${slot}`, msg.fdBase);
   const host = makeThreadsHost({
     wasmModule: msg.module,
     memory: msg.memory,
@@ -222,6 +236,11 @@ async function prewarmThread(msg) {
     label: 'thread',
     trace: msg.trace || 0,
     fs,
+    // The listener and every session fd, over the SAME SharedArrayBuffers the
+    // process instance holds — so this backend thread reads the client bytes
+    // the driver wrote, and its `secure_close` is seen by everyone.
+    pipes: PipeRegistry.from(msg.pipes || {}),
+    fdBase: msg.fdBase,
   });
   const instance = await WebAssembly.instantiate(msg.module, host.imports);
   if (typeof instance.exports.wasi_thread_start !== 'function') {

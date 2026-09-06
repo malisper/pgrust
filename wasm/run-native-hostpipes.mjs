@@ -24,14 +24,11 @@
 // asks what kind of fd it is — read/write/poll is the whole contract, which is
 // precisely what makes a SharedArrayBuffer pipe a legal backing on wasm.)
 //
-// Scenario (each step wall-clock logged, every assertion hard):
-//   1. cross-session visibility: A creates + inserts, B sees the committed row
-//   2. row-lock BLOCKING: B's UPDATE must not complete while A's transaction
-//      holds the row, and must complete once A commits — proving two backend
-//      THREADS really do block on each other through shared memory
-//   3. lock_timeout: B gives up with SQLSTATE 55P03 in ~300ms
-//   4. distinct backend pids, clean 'X' termination, SIGINT fast shutdown with
-//      exit code 0 and a shutdown checkpoint in the log
+// The SCENARIO is not here: it is wasm/hostpipes-scenario.js, so that the wasm
+// arm (run-node-wire-threads.mjs --dispatch postmaster) runs the SAME two
+// sessions over SharedArrayBuffer pipes and worker threads. This file supplies
+// only the two host-specific halves — `openSession` over spawn()'s stdio fds,
+// and a `shutdown` that is a real SIGINT to a real process.
 //
 // Usage:
 //   node wasm/run-native-hostpipes.mjs [--fresh] [--scratch DIR] [--datadir DIR]
@@ -42,7 +39,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { encodeQuery, encodeStartup, parseMessage, TERMINATE, WireReader } from './wire.js';
+import { encodeQuery, encodeStartup, TERMINATE, WireReader } from './wire.js';
+import { runHostPipesScenario } from './hostpipes-scenario.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..');
@@ -241,27 +239,54 @@ class Session {
   }
 }
 
-function withTimeout(promise, timeoutMs) {
-  // Resolves { done: true, value } or { done: false } — never rejects, and
-  // never cancels `promise` (a blocked query is awaited again later).
-  let timer;
-  return Promise.race([
-    promise.then((value) => {
-      clearTimeout(timer);
-      return { done: true, value };
-    }),
-    new Promise((r) => {
-      timer = setTimeout(() => r({ done: false }), timeoutMs);
-    }),
-  ]);
+// ---- the run ----------------------------------------------------------------
+
+// The scenario's session factory, native flavour: fds 4/5 for A and 6/7 for B,
+// announced on the listener (fd 3) as a 16-byte HPGP record.
+let nextSession = 0;
+async function openSession(name) {
+  const k = nextSession++;
+  const inFd = 4 + 2 * k;
+  const outFd = 5 + 2 * k;
+  log(`announcing session ${name} on (in=${inFd}, out=${outFd})`);
+  announceConnection(inFd, outFd);
+  const s = new Session(name, child.stdio[inFd], child.stdio[outFd]);
+  const hello = await s.startup({
+    user: 'postgres',
+    database: 'postgres',
+    application_name: `hostpipes-${name}`,
+  });
+  return {
+    name,
+    handshake: hello.msgs,
+    send: (sql) => s.send(sql),
+    query: (sql) => s.query(sql),
+    terminate: () => s.terminate(),
+    waitClosed: (timeoutMs) => waitForClose(s, timeoutMs),
+  };
 }
 
-const rows = (msgs) => msgs.filter((m) => m.t === 'D').map((m) => parseMessage('D', m.body).values);
-const errs = (msgs) => msgs.filter((m) => m.t === 'E').map((m) => parseMessage('E', m.body).fields);
-const tags = (msgs) => msgs.filter((m) => m.t === 'C').map((m) => parseMessage('C', m.body).tag);
-const summarize = (msgs) => msgs.map((m) => m.t).join('');
-
-// ---- the run ----------------------------------------------------------------
+// Fast shutdown, native flavour: an actual SIGINT to an actual pid.
+async function shutdown() {
+  const shutStart = performance.now();
+  child.kill('SIGINT');
+  const gone = await waitForExit(30000);
+  log(`  postmaster stopped in ${(performance.now() - shutStart).toFixed(0)}ms`);
+  const ckpt = /checkpoint starting: shutdown/i.test(serverLog) ||
+    /checkpoint complete/i.test(serverLog);
+  return {
+    notes: [`SIGINT -> exit code ${exitCode}${exitSignal ? `/${exitSignal}` : ''}`],
+    checks: [
+      { ok: gone, what: 'postmaster exited after SIGINT' },
+      { ok: exitCode === 0, what: `exit code 0 (got ${exitCode}${exitSignal ? `/${exitSignal}` : ''})` },
+      { ok: ckpt, what: 'log shows the shutdown checkpoint' },
+      {
+        ok: /database system is shut down/i.test(serverLog),
+        what: 'log shows "database system is shut down"',
+      },
+    ],
+  };
+}
 
 async function main() {
   log(`spawned ${BIN} --host-pipes (pid ${child.pid}); listener = fd 3`);
@@ -270,123 +295,10 @@ async function main() {
   check(ready, 'postmaster reached "ready to accept connections" with NO listen socket');
   if (!ready) return;
 
-  // --- session A ---
-  log('announcing session A on (in=4, out=5)');
-  const tA = performance.now();
-  announceConnection(4, 5);
-  const A = new Session('A', child.stdio[4], child.stdio[5]);
-  const aHello = await A.startup({
-    user: 'postgres',
-    database: 'postgres',
-    application_name: 'hostpipes-A',
-  });
-  log(`  A handshake ${(performance.now() - tA).toFixed(0)}ms: ${summarize(aHello.msgs)}`);
-  check(aHello.msgs.some((m) => m.t === 'Z'), 'A: ReadyForQuery after startup');
-
-  // --- session B ---
-  log('announcing session B on (in=6, out=7)');
-  const tB = performance.now();
-  announceConnection(6, 7);
-  const B = new Session('B', child.stdio[6], child.stdio[7]);
-  const bHello = await B.startup({
-    user: 'postgres',
-    database: 'postgres',
-    application_name: 'hostpipes-B',
-  });
-  log(`  B handshake ${(performance.now() - tB).toFixed(0)}ms: ${summarize(bHello.msgs)}`);
-  check(bHello.msgs.some((m) => m.t === 'Z'), 'B: ReadyForQuery after startup');
-
-  // ---- 1. cross-session visibility ----
-  log('step 1: A creates + inserts, B reads');
-  let t = performance.now();
-  const create = await A.query('CREATE TABLE lock_t(id int primary key, v int)');
-  log(`  A CREATE TABLE ${(performance.now() - t).toFixed(0)}ms: ${tags(create.msgs)}`);
-  check(tags(create.msgs).includes('CREATE TABLE'), 'A: CREATE TABLE');
-  t = performance.now();
-  const insert = await A.query('INSERT INTO lock_t VALUES (1, 0)');
-  log(`  A INSERT ${(performance.now() - t).toFixed(0)}ms: ${tags(insert.msgs)}`);
-  check(tags(insert.msgs).includes('INSERT 0 1'), 'A: INSERT 0 1');
-  t = performance.now();
-  const count = await B.query('SELECT count(*) FROM lock_t');
-  log(`  B SELECT count(*) ${(performance.now() - t).toFixed(0)}ms -> ${JSON.stringify(rows(count.msgs))}`);
-  check(rows(count.msgs)[0]?.[0] === '1', "B sees A's committed row (count = 1)");
-
-  // ---- 2. row lock: B must BLOCK on A ----
-  log('step 2: A holds a row lock, B must block on it');
-  check(tags((await A.query('BEGIN')).msgs).includes('BEGIN'), 'A: BEGIN');
-  const upd1 = await A.query('UPDATE lock_t SET v = 1 WHERE id = 1');
-  check(tags(upd1.msgs).includes('UPDATE 1'), 'A: UPDATE 1 (transaction stays open)');
-
-  const bStart = performance.now();
-  const bUpdate = B.send('UPDATE lock_t SET v = 2 WHERE id = 1');
-  const early = await withTimeout(bUpdate, 500);
-  log(`  B UPDATE still blocked after ${(performance.now() - bStart).toFixed(0)}ms: ${!early.done}`);
-  check(!early.done, 'B: UPDATE does NOT complete while A holds the row lock (500ms)');
-
-  t = performance.now();
-  const commit = await A.query('COMMIT');
-  log(`  A COMMIT ${(performance.now() - t).toFixed(0)}ms: ${tags(commit.msgs)}`);
-  check(tags(commit.msgs).includes('COMMIT'), 'A: COMMIT');
-
-  const released = await withTimeout(bUpdate, 1000);
-  const bWait = performance.now() - bStart;
-  log(`  B UPDATE completed ${bWait.toFixed(0)}ms after it was sent: ${released.done ? tags(released.value.msgs) : 'TIMED OUT'}`);
-  check(released.done, "B: UPDATE completes within 1s of A's COMMIT");
-  check(released.done && tags(released.value.msgs).includes('UPDATE 1'), 'B: UPDATE 1');
-  check(bWait >= 500, `B's wall time >= 500ms (measured ${bWait.toFixed(0)}ms)`);
-
-  t = performance.now();
-  const v2 = await B.query('SELECT v FROM lock_t WHERE id = 1');
-  log(`  B SELECT v ${(performance.now() - t).toFixed(0)}ms -> ${JSON.stringify(rows(v2.msgs))}`);
-  check(rows(v2.msgs)[0]?.[0] === '2', "B's update won: v = 2");
-
-  // ---- 3. lock_timeout ----
-  log('step 3: lock_timeout gives up with 55P03');
-  check(tags((await A.query('BEGIN')).msgs).includes('BEGIN'), 'A: BEGIN (2nd)');
-  check(
-    tags((await A.query('UPDATE lock_t SET v = 3 WHERE id = 1')).msgs).includes('UPDATE 1'),
-    'A: UPDATE 1 (holding again)',
-  );
-  check(tags((await B.query("SET lock_timeout = '300ms'")).msgs).includes('SET'), 'B: SET lock_timeout');
-
-  const ltStart = performance.now();
-  const timedOut = await B.query('UPDATE lock_t SET v = 4 WHERE id = 1');
-  const ltMs = performance.now() - ltStart;
-  const fields = errs(timedOut.msgs)[0] || {};
-  log(`  B UPDATE errored after ${ltMs.toFixed(0)}ms: ${fields.C} ${fields.M}`);
-  check(fields.C === '55P03', `B: SQLSTATE 55P03 (got ${fields.C})`);
-  check(ltMs >= 250 && ltMs <= 900, `B: lock_timeout fired in ~300ms (measured ${ltMs.toFixed(0)}ms)`);
-
-  check(tags((await A.query('ROLLBACK')).msgs).includes('ROLLBACK'), 'A: ROLLBACK');
-  check(tags((await B.query('RESET lock_timeout')).msgs).includes('RESET'), 'B: RESET lock_timeout');
-  const vAfter = await B.query('SELECT v FROM lock_t WHERE id = 1');
-  log(`  B SELECT v -> ${JSON.stringify(rows(vAfter.msgs))}`);
-  check(rows(vAfter.msgs)[0]?.[0] === '2', 'v is still 2 after the rolled-back UPDATE');
-
-  // ---- 4. distinct backends, clean shutdown ----
-  log('step 4: distinct backend pids, clean termination, fast shutdown');
-  const pidA = rows((await A.query('SELECT pg_backend_pid()')).msgs)[0]?.[0];
-  const pidB = rows((await B.query('SELECT pg_backend_pid()')).msgs)[0]?.[0];
-  log(`  pg_backend_pid: A=${pidA} B=${pidB}`);
-  check(!!pidA && !!pidB && pidA !== pidB, `two distinct backends (A=${pidA}, B=${pidB})`);
-
-  A.terminate();
-  B.terminate();
-  const closedA = await waitForClose(A, 5000);
-  const closedB = await waitForClose(B, 5000);
-  check(closedA, 'A: server closed the session fds after Terminate (EOF)');
-  check(closedB, 'B: server closed the session fds after Terminate (EOF)');
-
-  const shutStart = performance.now();
-  child.kill('SIGINT'); // fast shutdown
-  const gone = await waitForExit(30000);
-  log(`  postmaster stopped in ${(performance.now() - shutStart).toFixed(0)}ms`);
-  check(gone, 'postmaster exited after SIGINT');
-  check(exitCode === 0, `exit code 0 (got ${exitCode}${exitSignal ? `/${exitSignal}` : ''})`);
-  const ckpt = /checkpoint starting: shutdown/i.test(serverLog) ||
-    /checkpoint complete/i.test(serverLog);
-  check(ckpt, 'log shows the shutdown checkpoint');
-  check(/database system is shut down/i.test(serverLog), 'log shows "database system is shut down"');
+  const result = await runHostPipesScenario({ openSession, shutdown, log });
+  for (const c of result.checks) {
+    if (!c.ok) failures.push(c.what);
+  }
 }
 
 function waitForClose(session, timeoutMs) {
