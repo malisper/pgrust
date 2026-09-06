@@ -219,9 +219,26 @@ fn filename_and_open_failures() {
     let e = load_err(&dir, "IncNope");
     assert!(e.message.unwrap().starts_with("could not read time zone file \"Nope\":"));
 
+    // tzparser.c:337-345: the message is "%m" (strerror) and the hint names
+    // my_exec_path as "the file", not the timezonesets directory. Audit
+    // a186-candidate-fp-misc-tzparser-061baade400a1e4a475f-1.
+    let mut exec = init_small::globals::my_exec_path();
+    let exec_path = "/opt/pgrust-b246/bin/postgres";
+    exec[..exec_path.len()].copy_from_slice(exec_path.as_bytes());
+    exec[exec_path.len()] = 0;
+    init_small::globals::set_my_exec_path(exec);
     let e = load_err(&format!("{dir}/absent"), "Default");
-    assert!(e.message.unwrap().starts_with("could not open directory"));
-    assert!(e.hint.is_some());
+    assert_eq!(
+        e.message.as_deref(),
+        Some(format!("could not open directory \"{dir}/absent\": No such file or directory").as_str())
+    );
+    assert_eq!(
+        e.hint.as_deref(),
+        Some(
+            "This may indicate an incomplete PostgreSQL installation, or that the file \
+             \"/opt/pgrust-b246/bin/postgres\" has been moved away from its proper location."
+        )
+    );
 }
 
 #[test]

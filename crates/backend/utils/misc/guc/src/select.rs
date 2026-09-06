@@ -13,6 +13,12 @@ fn nonempty(v: Option<String>) -> Option<String> {
     v.filter(|s| !s.is_empty())
 }
 
+// C's "%m": strerror(errno) of the failed stat(), never io::Error's Display
+// text (which appends " (os error N)").
+fn percent_m(e: &std::io::Error) -> String {
+    elog::errno::strerror(e.raw_os_error().unwrap_or(0))
+}
+
 // SelectConfigFiles (guc.c:1784). Ok(false) = C's "return false" (caller
 // exits with status 2).
 pub fn SelectConfigFiles(user_d_option: Option<&str>, progname: &str) -> PgResult<bool> {
@@ -24,7 +30,11 @@ pub fn SelectConfigFiles(user_d_option: Option<&str>, progname: &str) -> PgResul
 
     if let Some(dir) = configdir.as_deref() {
         if let Err(e) = std::fs::metadata(dir) {
-            write_stderr(&format!("{progname}: could not access directory \"{dir}\": {e}\n"));
+            // guc.c:1798
+            write_stderr(&format!(
+                "{progname}: could not access directory \"{dir}\": {}\n",
+                percent_m(&e)
+            ));
             if e.kind() == std::io::ErrorKind::NotFound {
                 write_stderr(
                     "Run initdb or pg_basebackup to initialize a PostgreSQL data directory.\n",
@@ -51,8 +61,10 @@ pub fn SelectConfigFiles(user_d_option: Option<&str>, progname: &str) -> PgResul
 
     let config_file_name = guc_tables::vars::ConfigFileName.read().unwrap_or_default();
     if let Err(e) = std::fs::metadata(&config_file_name) {
+        // guc.c:1832
         write_stderr(&format!(
-            "{progname}: could not access the server configuration file \"{config_file_name}\": {e}\n"
+            "{progname}: could not access the server configuration file \"{config_file_name}\": {}\n",
+            percent_m(&e)
         ));
         return Ok(false);
     }

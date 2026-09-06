@@ -265,8 +265,13 @@ fn parse_tz_file<'mcx>(
                     "could not open directory \"{dir}\": {}",
                     elog::errno::strerror(de.raw_os_error().unwrap_or(0))
                 ));
+                // tzparser.c:342: the hint names my_exec_path, the file
+                // whose location the share dir is derived from.
+                let exec = init_small::globals::my_exec_path();
+                let len = exec.iter().position(|&b| b == 0).unwrap_or(exec.len());
+                let exec_path = String::from_utf8_lossy(&exec[..len]);
                 GUC_check_errhint(format!(
-                    "This may indicate an incomplete PostgreSQL installation, or that the directory \"{dir}\" has been moved away from its proper location."
+                    "This may indicate an incomplete PostgreSQL installation, or that the file \"{exec_path}\" has been moved away from its proper location."
                 ));
                 return false;
             }

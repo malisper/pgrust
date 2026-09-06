@@ -55,6 +55,10 @@ pgsync::process_global! {
 // INJ_NAME_MAXLEN (injection_point.c:56).
 const INJ_NAME_MAXLEN: usize = 64;
 
+// MAX_INJECTION_POINTS (injection_point.c:74): C's shmem entry array is
+// fixed-size, so attaching past it is an error (injection_point.c:324).
+const MAX_INJECTION_POINTS: usize = 128;
+
 // Wait machinery, mirroring the C module's InjectionPointSharedState:
 // fixed wait slots (name + wakeup counter) plus one condition variable.
 const INJ_MAX_WAIT: usize = 8;
@@ -98,6 +102,9 @@ pub fn attach(name: &str, action: &str) -> PgResult<()> {
         return Err(Box::new(PgError::error(format!(
             "injection point \"{name}\" already defined"
         ))));
+    }
+    if reg.len() >= MAX_INJECTION_POINTS {
+        return Err(Box::new(PgError::error("too many injection points")));
     }
     reg.push((name.to_string(), action));
     N_ATTACHED.store(reg.len(), Relaxed);
@@ -221,8 +228,46 @@ fn wait(name: &str) -> PgResult<()> {
 mod tests {
     use super::*;
 
+    // The registry is process-global: tests that attach hold this so the
+    // capacity test's full registry never starves a sibling's attach.
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn test_guard() -> std::sync::MutexGuard<'static, ()> {
+        TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    // injection_point.c:74,324: MAX_INJECTION_POINTS (128) shmem slots; the
+    // 129th distinct attach is elog(ERROR, "too many injection points").
+    // Audit a186-candidate-fp-misc-injection_point-e61f4f024566df40b33a-1.
+    #[test]
+    fn too_many_injection_points_matches_c() {
+        let _g = test_guard();
+        let mut mine = Vec::new();
+        loop {
+            let n = REGISTRY.lock().unwrap().len();
+            if n >= 128 {
+                break;
+            }
+            let name = format!("crash-skips-cap-{}", mine.len());
+            attach(&name, "notice").unwrap();
+            mine.push(name);
+        }
+        let err = attach("crash-skips-cap-overflow", "notice").unwrap_err();
+        assert_eq!(err.message(), "too many injection points");
+        assert!(!is_attached("crash-skips-cap-overflow"));
+        // Freeing one slot lets the next attach succeed, as C's generation
+        // scan reuses a detached entry.
+        assert!(detach(&mine.pop().unwrap()));
+        attach("crash-skips-cap-overflow", "notice").unwrap();
+        assert!(detach("crash-skips-cap-overflow"));
+        for name in mine {
+            assert!(detach(&name));
+        }
+    }
+
     #[test]
     fn attach_detach_lifecycle() {
+        let _g = test_guard();
         assert!(!is_attached("crash-skips-test-point"));
         injection_point("crash-skips-test-point").unwrap();
 
@@ -254,6 +299,7 @@ mod tests {
     // a186-candidate-fp-misc-injection_point-8a80633bd2916a715c32-1.
     #[test]
     fn name_length_limit_matches_c() {
+        let _g = test_guard();
         let long = "x".repeat(64);
         let err = attach(&long, "notice").unwrap_err();
         assert_eq!(
