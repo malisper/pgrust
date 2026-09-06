@@ -10985,6 +10985,7 @@ dependencies = [
  "lsyscache",
  "mcx",
  "miscinit",
+ "objectaccess",
  "opclasscmds_seams",
  "parse_func",
  "parse_oper",

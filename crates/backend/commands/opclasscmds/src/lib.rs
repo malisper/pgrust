@@ -82,12 +82,14 @@ pub(crate) fn cache_lookup_failed(what: &str, oid: Oid) -> Box<PgError> {
     Box::new(PgError::error(format!("cache lookup failed for {what} {oid}")))
 }
 
-fn name_parts<'a, 'mcx>(names: &NodeList<'mcx>, buf: &'a mut [&'mcx str; 4]) -> &'a [&'mcx str] {
-    let n = names.len().min(buf.len());
-    for (i, slot) in buf.iter_mut().enumerate().take(n) {
-        *slot = names.nth(i).as_string().expect("name list holds String nodes").sval;
-    }
-    &buf[..n]
+// C passes the parser's name List through untouched; DeconstructQualifiedName
+// (namespace.c) renders the WHOLE list in its too-many-dotted-names /
+// cross-database errors, so every part is carried, never a fixed prefix.
+fn name_parts<'mcx>(names: &NodeList<'mcx>) -> Vec<&'mcx str> {
+    names
+        .iter()
+        .map(|n| n.as_string().expect("name list holds String nodes").sval)
+        .collect()
 }
 
 // get_am_name (amcmds.c:192-206) for messages; a missing AM renders the way
@@ -138,9 +140,8 @@ fn get_index_am_oid(amname: &str) -> PgResult<Oid> {
 // OpFamilyCacheLookup + get_opfamily_oid (opclasscmds.c): resolve a possibly
 // qualified opfamily name for an AM.
 pub fn get_opfamily_oid(amID: Oid, opfamilyname: &NodeList<'_>, missing_ok: bool) -> PgResult<Oid> {
-    let mut buf = [""; 4];
-    let parts = name_parts(opfamilyname, &mut buf);
-    let (schemaname, opfname) = catalog_namespace::DeconstructQualifiedName(parts)?;
+    let parts = name_parts(opfamilyname);
+    let (schemaname, opfname) = catalog_namespace::DeconstructQualifiedName(&parts)?;
     let opfID = match schemaname {
         Some(schemaname) => {
             let namespaceId = catalog_namespace::LookupExplicitNamespace(schemaname, missing_ok)?;
@@ -167,9 +168,8 @@ pub fn get_opfamily_oid(amID: Oid, opfamilyname: &NodeList<'_>, missing_ok: bool
 
 // OpClassCacheLookup + get_opclass_oid (opclasscmds.c).
 pub fn get_opclass_oid(amID: Oid, opclassname: &NodeList<'_>, missing_ok: bool) -> PgResult<Oid> {
-    let mut buf = [""; 4];
-    let parts = name_parts(opclassname, &mut buf);
-    let (schemaname, opcname) = catalog_namespace::DeconstructQualifiedName(parts)?;
+    let parts = name_parts(opclassname);
+    let (schemaname, opcname) = catalog_namespace::DeconstructQualifiedName(&parts)?;
     let opcID = match schemaname {
         Some(schemaname) => {
             let namespaceId = catalog_namespace::LookupExplicitNamespace(schemaname, missing_ok)?;
@@ -262,6 +262,9 @@ fn CreateOpFamily(
         cmdtag::GetCommandTagEnum(b"CREATE OPERATOR FAMILY"),
     );
 
+    // Post creation hook for new operator family (opclasscmds.c:321).
+    objectaccess::InvokeObjectPostCreateHook(OPERATOR_FAMILY_RELATION_ID, opfamilyoid, 0)?;
+
     rel.close(RowExclusiveLock)?;
     Ok(myself)
 }
@@ -335,9 +338,8 @@ fn typename_type_id(mcx: Mcx<'_>, n: Node<'_>) -> PgResult<Oid> {
 
 // DefineOpClass: define a new index operator class.
 pub fn DefineOpClass<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateOpClassStmt<'mcx>) -> PgResult<ObjectAddress> {
-    let mut buf = [""; 4];
-    let parts = name_parts(&stmt.opclassname, &mut buf);
-    let (namespaceoid, opcname) = catalog_namespace::QualifiedNameGetCreationNamespace(mcx, parts)?;
+    let parts = name_parts(&stmt.opclassname);
+    let (namespaceoid, opcname) = catalog_namespace::QualifiedNameGetCreationNamespace(mcx, &parts)?;
 
     namespace_create_check(mcx, namespaceoid)?;
 
@@ -585,6 +587,9 @@ pub fn DefineOpClass<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateOpClassStmt<'mcx>) -> Pg
         cmdtag::GetCommandTagEnum(b"CREATE OPERATOR CLASS"),
     );
 
+    // Post creation hook for new operator class (opclasscmds.c:759).
+    objectaccess::InvokeObjectPostCreateHook(OPERATOR_CLASS_RELATION_ID, opclassoid, 0)?;
+
     rel.close(RowExclusiveLock)?;
     Ok(myself)
 }
@@ -594,9 +599,8 @@ pub fn DefineOpFamily<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &CreateOpFamilyStmt<'mcx>,
 ) -> PgResult<ObjectAddress> {
-    let mut buf = [""; 4];
-    let parts = name_parts(&stmt.opfamilyname, &mut buf);
-    let (namespaceoid, opfname) = catalog_namespace::QualifiedNameGetCreationNamespace(mcx, parts)?;
+    let parts = name_parts(&stmt.opfamilyname);
+    let (namespaceoid, opfname) = catalog_namespace::QualifiedNameGetCreationNamespace(mcx, &parts)?;
 
     namespace_create_check(mcx, namespaceoid)?;
 
@@ -1022,8 +1026,7 @@ fn addFamilyMember(list: &mut mcx::PgVec<'_, OpFamilyMember>, member: OpFamilyMe
 }
 
 fn opfamily_display(opfamilyname: &NodeList<'_>) -> String {
-    let mut buf = [""; 4];
-    name_parts(opfamilyname, &mut buf).join(".")
+    name_parts(opfamilyname).join(".")
 }
 
 // Dump the operators to pg_amop, with their pg_depend entries.
@@ -1130,6 +1133,9 @@ fn storeOperators(
                 if op.ref_is_hard { DependencyType::Normal } else { DependencyType::Auto },
             )?;
         }
+
+        // Post create hook of this access method operator (opclasscmds.c:1571).
+        objectaccess::InvokeObjectPostCreateHook(ACCESS_METHOD_OPERATOR_RELATION_ID, entryoid, 0)?;
     }
 
     rel.close(RowExclusiveLock)
@@ -1223,6 +1229,9 @@ fn storeProcedures(
                 if proc.ref_is_hard { DependencyType::Normal } else { DependencyType::Auto },
             )?;
         }
+
+        // Post create hook of access method procedure (opclasscmds.c:1684).
+        objectaccess::InvokeObjectPostCreateHook(ACCESS_METHOD_PROCEDURE_RELATION_ID, entryoid, 0)?;
     }
 
     rel.close(RowExclusiveLock)
@@ -1386,6 +1395,38 @@ mod tests {
         let e = am_not_index("heap");
         assert_eq!(e.sqlstate(), ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE);
         assert_eq!(e.message(), "access method \"heap\" is not of type INDEX");
+    }
+
+    fn name_list<'mcx>(mcx: Mcx<'mcx>, parts: &[&'mcx str]) -> NodeList<'mcx> {
+        let mut list = NodeList::nil();
+        for p in parts {
+            list.lappend(mcx, Node::mk_string(mcx, p).unwrap()).unwrap();
+        }
+        list
+    }
+
+    // C DeconstructQualifiedName (namespace.c) reports the WHOLE name list
+    // through NameListToString for >3 parts, so a five-part opclass/opfamily
+    // name must surface as "a.b.c.d.e" -- never a truncated prefix.  The
+    // error is raised before any catalog access, so no booted backend is
+    // needed.  (audit-18.6 b215 row 3a746fd1e8c518ec774f-1)
+    #[test]
+    fn dotted_opclass_names_beyond_four_parts_are_reported_whole() {
+        let root = mcx::session_root("opclass-dotted-names");
+        let mcx = root.mcx();
+        let five = name_list(mcx, &["a", "b", "c", "d", "e"]);
+        let e = get_opfamily_oid(BTREE_AM_OID, &five, false).unwrap_err();
+        assert_eq!(e.sqlstate(), ERRCODE_SYNTAX_ERROR);
+        assert_eq!(e.message(), "improper qualified name (too many dotted names): a.b.c.d.e");
+        let e = get_opclass_oid(BTREE_AM_OID, &five, false).unwrap_err();
+        assert_eq!(e.message(), "improper qualified name (too many dotted names): a.b.c.d.e");
+
+        let seven = name_list(mcx, &["a", "b", "c", "d", "e", "f", "g"]);
+        let e = get_opclass_oid(BTREE_AM_OID, &seven, false).unwrap_err();
+        assert_eq!(
+            e.message(),
+            "improper qualified name (too many dotted names): a.b.c.d.e.f.g"
+        );
     }
 }
 
