@@ -16,7 +16,9 @@ use scram_common::{
     SCRAM_SHA_256_NAME,
 };
 use timingsafe_bcmp::timingsafe_bcmp;
-use types_error::{ErrorLocation, PgResult, ERRCODE_INTERNAL_ERROR, ERROR, LOG};
+use types_error::{
+    ErrorLocation, PgResult, ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_PARAMETER_VALUE, ERROR, LOG,
+};
 
 use std::cell::Cell;
 
@@ -109,7 +111,7 @@ pub fn pg_be_scram_build_secret<'mcx>(mcx: Mcx<'mcx>, password: &str) -> PgResul
     };
 
     let mut saltbuf = [0u8; SCRAM_DEFAULT_SALT_LEN];
-    if let Some(fixed) = test_fixed_salt() {
+    if let Some(fixed) = test_fixed_salt()? {
         saltbuf = fixed;
     } else if !pg_strong_random::pg_strong_random(&mut saltbuf) {
         elog::ereport(ERROR)
@@ -122,13 +124,23 @@ pub fn pg_be_scram_build_secret<'mcx>(mcx: Mcx<'mcx>, password: &str) -> PgResul
 }
 
 // Test-only determinism hook (DIVERGENCE, no C counterpart): a fixed salt for
-// byte-parity e2es, taken from PGRUST_SCRAM_FIXED_SALT_B64. Malformed = panic.
-fn test_fixed_salt() -> Option<[u8; SCRAM_DEFAULT_SALT_LEN]> {
-    let v = std::env::var("PGRUST_SCRAM_FIXED_SALT_B64").ok()?;
-    let decoded = b64dec(v.as_bytes()).expect("PGRUST_SCRAM_FIXED_SALT_B64: invalid base64");
-    let mut salt = [0u8; SCRAM_DEFAULT_SALT_LEN];
-    salt.copy_from_slice(&decoded);
-    Some(salt)
+// byte-parity e2es, taken from PGRUST_SCRAM_FIXED_SALT_B64. Unset = C's
+// random salt. A value that is not the base64 of exactly 16 bytes is an
+// ereport(ERROR), never a panic: C's pg_be_scram_build_secret
+// (auth-scram.c:501) cannot crash the backend from CREATE ROLE ... PASSWORD.
+fn test_fixed_salt() -> PgResult<Option<[u8; SCRAM_DEFAULT_SALT_LEN]>> {
+    let Ok(v) = std::env::var("PGRUST_SCRAM_FIXED_SALT_B64") else {
+        return Ok(None);
+    };
+    let decoded = b64dec(v.as_bytes()).unwrap_or_default();
+    let Ok(salt) = <[u8; SCRAM_DEFAULT_SALT_LEN]>::try_from(decoded.as_slice()) else {
+        return elog::ereport(ERROR)
+            .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+            .errmsg("PGRUST_SCRAM_FIXED_SALT_B64 must be the base64 encoding of exactly 16 bytes")
+            .finish(loc("pg_be_scram_build_secret"))
+            .map(|_| None);
+    };
+    Ok(Some(salt))
 }
 
 pub fn scram_verify_plain_password(

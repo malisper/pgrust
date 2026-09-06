@@ -58,14 +58,85 @@ fn verify_plain_password_matches_and_rejects() {
     assert!(!scram_verify_plain_password(cx.mcx(), "user", b"pencil2", RFC7677_SECRET).unwrap());
 }
 
+// The fixed-salt hook is process-global (an environment variable), so every
+// test that touches pg_be_scram_build_secret serialises on this lock.
+fn fixed_salt_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+struct FixedSaltEnv(std::sync::MutexGuard<'static, ()>);
+
+impl FixedSaltEnv {
+    fn set(value: &str) -> Self {
+        let guard = fixed_salt_env_lock();
+        std::env::set_var("PGRUST_SCRAM_FIXED_SALT_B64", value);
+        FixedSaltEnv(guard)
+    }
+}
+
+impl Drop for FixedSaltEnv {
+    fn drop(&mut self) {
+        std::env::remove_var("PGRUST_SCRAM_FIXED_SALT_B64");
+    }
+}
+
 #[test]
 fn build_secret_round_trips_through_verify() {
     install_cfi();
+    let _env = fixed_salt_env_lock();
     let cx = MemoryContext::new("scram-build-test");
     let secret = pg_be_scram_build_secret(cx.mcx(), "s3kret").unwrap();
     assert!(secret.as_str().starts_with("SCRAM-SHA-256$4096:"));
     assert!(scram_verify_plain_password(cx.mcx(), "u", b"s3kret", secret.as_str()).unwrap());
     assert!(!scram_verify_plain_password(cx.mcx(), "u", b"other", secret.as_str()).unwrap());
+}
+
+// Test hook (no C counterpart): a well-formed PGRUST_SCRAM_FIXED_SALT_B64
+// replaces the pg_strong_random salt; the rest of the secret is C's
+// scram_build_secret over that salt (fixture pinned in notes/scram-lane.md).
+#[test]
+fn fixed_salt_hook_uses_the_given_salt() {
+    install_cfi();
+    let _env = FixedSaltEnv::set("AAECAwQFBgcICQoLDA0ODw==");
+    let cx = MemoryContext::new("scram-fixed-salt-test");
+    let secret = pg_be_scram_build_secret(cx.mcx(), "secret").unwrap();
+    assert_eq!(
+        secret.as_str(),
+        "SCRAM-SHA-256$4096:AAECAwQFBgcICQoLDA0ODw==$\
+         THoPhoTAuqyoQsK4dUHncUzgfD8fdmhsgKZhWVqNP5U=:\
+         7YiHMMi2OcXGRogub03Ek06JRZ9bkhTOdCzHa5iPLiQ="
+    );
+}
+
+// A malformed hook value must surface as an ereport(ERROR), never a panic:
+// C (auth-scram.c:501) never panics here, and the hook must not turn an
+// operator's environment into a backend crash on CREATE ROLE ... PASSWORD.
+fn fixed_salt_hook_err(value: &str) -> Box<types_error::PgError> {
+    install_cfi();
+    let _env = FixedSaltEnv::set(value);
+    let cx = MemoryContext::new("scram-fixed-salt-err-test");
+    pg_be_scram_build_secret(cx.mcx(), "secret").unwrap_err()
+}
+
+#[test]
+fn fixed_salt_hook_rejects_invalid_base64_without_panic() {
+    let err = fixed_salt_hook_err("not_valid_b64!");
+    assert_eq!(err.sqlstate(), make_sqlstate(*b"22023"));
+    assert_eq!(
+        err.message(),
+        "PGRUST_SCRAM_FIXED_SALT_B64 must be the base64 encoding of exactly 16 bytes"
+    );
+}
+
+#[test]
+fn fixed_salt_hook_rejects_wrong_length_without_panic() {
+    // 8 decoded bytes: base64 is valid, the length is not.
+    let err = fixed_salt_hook_err("AAECAwQFBgc=");
+    assert_eq!(err.sqlstate(), make_sqlstate(*b"22023"));
+    // 24 decoded bytes: too long is rejected the same way.
+    let err = fixed_salt_hook_err("AAECAwQFBgcICQoLDA0ODxAREhMUFRYX");
+    assert_eq!(err.sqlstate(), make_sqlstate(*b"22023"));
 }
 
 use auth_sasl::{
