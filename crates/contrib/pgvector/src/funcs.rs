@@ -21,7 +21,7 @@ pub(crate) fn image_datum(img: PgVec<'_, u8>) -> Datum {
 }
 
 // SAFETY contract of callers: arg i is a non-null vector varlena (strict fns).
-unsafe fn arg_vector<'a>(fcinfo: &'a Fcinfo, i: usize) -> PgResult<VecView<'a>> {
+pub(crate) unsafe fn arg_vector<'a>(fcinfo: &'a Fcinfo, i: usize) -> PgResult<VecView<'a>> {
     let v = unsafe { fcinfo.arg_varlena_packed(i)? };
     VecView::from_payload(v.data())
 }
