@@ -25,7 +25,12 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 
 TOOLCHAIN="${PGRUST_WASM_TOOLCHAIN:-nightly-2026-07-17}"
-TARGET=wasm32-wasip1
+# PGRUST_WASM_TARGET selects the wasm target. Default wasm32-wasip1 (the
+# gate's target; unchanged). wasm32-wasip1-threads is the SPIKE arm
+# (spike/wasip1-threads): wasi-libc pthreads over a SHARED imported memory,
+# so the guest's `wasi` `thread-spawn` import is the host's job and every
+# instance must be handed the same WebAssembly.Memory.
+TARGET="${PGRUST_WASM_TARGET:-wasm32-wasip1}"
 LEDGER="$ROOT/wasm/wasm-crate-ledger.md"
 
 # re2 is a build.rs probe; force the stub engine deterministically on wasm.
@@ -36,6 +41,17 @@ export PGRUST_FORCE_NO_RE2=1
 # turns legitimate executor recursion into "stack depth limit exceeded".
 # Any PGRUST_WASM_RUSTFLAGS override MUST carry all three flags.
 export RUSTFLAGS="${PGRUST_WASM_RUSTFLAGS:--C panic=unwind -C target-feature=+exception-handling -C link-arg=-zstack-size=67108864}"
+
+# wasm32-wasip1-threads pins --import-memory --shared-memory in its target
+# spec, so the MODULE's declared memory limits must match the limits of the
+# WebAssembly.Memory the JS host creates and passes in as an import. Pin them
+# here rather than leaving wasm-ld's derived initial size to drift: 256MiB
+# initial (static data + the 64MiB main shadow stack above must fit under it)
+# and the 4GiB wasm32 ceiling as the maximum. Both are 64KiB multiples.
+if [ "$TARGET" = "wasm32-wasip1-threads" ]; then
+    RUSTFLAGS="$RUSTFLAGS -C link-arg=--initial-memory=${PGRUST_WASM_INITIAL_MEMORY:-268435456} -C link-arg=--max-memory=${PGRUST_WASM_MAX_MEMORY:-4294967296}"
+    export RUSTFLAGS
+fi
 
 if ! rustup toolchain list | grep -q "^${TOOLCHAIN}"; then
     echo "wasm-build: installing pinned toolchain ${TOOLCHAIN}" >&2

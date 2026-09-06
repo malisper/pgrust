@@ -36,7 +36,7 @@ pub use extended_query::{
 };
 pub use main_loop::PostgresMain;
 pub use single_user::PostgresSingleUserMain;
-pub use stdio_wire::PostgresStdioWireMain;
+pub use stdio_wire::{PostgresStdioWireMain, PostgresStdioWireThreadedMain};
 #[cfg(pgrust_sim)]
 pub use sim_net::PostgresSimNetMain;
 pub use simple_query::{
@@ -48,6 +48,7 @@ pub fn init_seams() {
     postgres_seams::postgres_main::set(postgres_main_seam);
     postgres_seams::postgres_single_user_main::set(PostgresSingleUserMain);
     postgres_seams::postgres_stdio_wire_main::set(PostgresStdioWireMain);
+    postgres_seams::postgres_stdio_wire_threaded_main::set(PostgresStdioWireThreadedMain);
     #[cfg(pgrust_sim)]
     postgres_seams::postgres_sim_net_main::set(PostgresSimNetMain);
     postgres_seams::check_for_interrupts::set(check_for_interrupts);

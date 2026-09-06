@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>pgrust wasm32-wasip1-threads spike</title>
+<!--
+  The browser arm of spike/wasip1-threads checkpoint (a): one pgwire session
+  served by a real Postgres backend running on a wasi-threads thread, spawned
+  through the host's `wasi` `thread-spawn` import. No JSPI.
+
+  MUST be served cross-origin isolated (SharedArrayBuffer + shared
+  WebAssembly.Memory are gated on it):
+
+      node wasm/serve-coi.mjs 8081
+      # the threads build is not a packed asset — link it in first:
+      ln -s ../../target/wasm32-wasip1-threads/wasm-release/postgres.wasm \
+            wasm/assets/postgres-threads.wasm
+      open http://localhost:8081/threads.html
+
+  Every step is console.log'd; the last line is
+  `VERDICT: threads-browser PASS` or `VERDICT: threads-browser FAIL <reason>`.
+-->
+<style>
+  body { font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; margin: 1rem; background: #101317; color: #d6dde5; }
+  h1 { font-size: 15px; font-weight: 600; margin: 0 0 .75rem; }
+  #log { white-space: pre-wrap; background: #05070a; border: 1px solid #222b35; border-radius: 4px; padding: .75rem; height: 80vh; overflow: auto; }
+</style>
+</head>
+<body>
+<h1>pgrust — wasm32-wasip1-threads spike (checkpoint a)</h1>
+<div id="log"></div>
+<script type="module" src="./threads-page.js"></script>
+</body>
+</html>

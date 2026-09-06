@@ -350,6 +350,12 @@ pub fn pg_main(argv: &[String]) -> PgResult<()> {
             let username = get_user_name_or_exit(&progname);
             postgres_seams::postgres_stdio_wire_main::call(argv, &username)
         }
+        DispatchOption::StdioWireThreaded => {
+            // pgrust extension: same identity story as --stdio-wire; the
+            // session itself runs on the spawned wire-session thread.
+            let username = get_user_name_or_exit(&progname);
+            postgres_seams::postgres_stdio_wire_threaded_main::call(argv, &username)
+        }
         #[cfg(pgrust_sim)]
         DispatchOption::SimNet => {
             // P4 sim-net (sim builds only): same identity story as the
@@ -496,6 +502,10 @@ mod tests {
         assert_eq!(parse_dispatch_option("describe-config"), DispatchOption::DescribeConfig);
         assert_eq!(parse_dispatch_option("single"), DispatchOption::Single);
         assert_eq!(parse_dispatch_option("stdio-wire"), DispatchOption::StdioWire);
+        assert_eq!(
+            parse_dispatch_option("stdio-wire-threaded"),
+            DispatchOption::StdioWireThreaded
+        );
         assert_eq!(parse_dispatch_option("forkchild"), DispatchOption::Postmaster);
         assert_eq!(parse_dispatch_option("nonsense"), DispatchOption::Postmaster);
         assert_eq!(parse_dispatch_option(""), DispatchOption::Postmaster);

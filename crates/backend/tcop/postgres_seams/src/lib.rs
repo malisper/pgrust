@@ -22,6 +22,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // PostgresStdioWireThreadedMain (pgrust extension, no C counterpart):
+    // --stdio-wire's ladder VERBATIM, but run on a spawned "wire-session"
+    // thread while the main thread only joins it. The wasm32-wasip1-threads
+    // arm (the host's `wasi` `thread-spawn` import must carry a real
+    // Postgres session for the threads spike); native it is the
+    // differential arm. argv[1] == "--stdio-wire-threaded"; username is the
+    // fallback identity (the startup packet's user wins). Exits the
+    // process; never returns.
+    pub fn postgres_stdio_wire_threaded_main(argv: &[String], username: &str) -> !
+);
+
+seam_core::seam!(
     // ProcessClientReadInterrupt(blocked) (tcop/postgres.c); Err is the
     // ereport(FATAL) "terminating connection" path.
     pub fn process_client_read_interrupt(blocked: bool) -> types_error::PgResult<()>

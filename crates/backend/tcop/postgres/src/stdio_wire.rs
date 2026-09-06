@@ -14,11 +14,20 @@
 //! Boot ladder = PostgresSingleUserMain's, verbatim; the session half =
 //! backend_startup::wire_session_initialize (startup packet + trust
 //! AuthenticationOk) + InitProcess + PostgresMain with
-//! whereToSendOutput = Remote. Identity: the startup packet names
-//! user/database on the wire, but the standalone InitPostgres arm
-//! (!IsUnderPostmaster) runs the session as the bootstrap superuser —
-//! trust-by-construction, like --single; hba enforcement stays with the
-//! postmaster path.
+//! whereToSendOutput = Remote.
+//!
+//! [`PostgresStdioWireThreadedMain`] (--stdio-wire-threaded) is the same
+//! ladder on a spawned "wire-session" thread, with the main thread doing
+//! nothing but join it. Native it is a differential arm of the mode above
+//! (the transcripts are byte-identical); on wasm32-wasip1-threads it is the
+//! point of the exercise — the whole backend rides the host's `wasi`
+//! `thread-spawn` import, so the guest's blocking stdin read blocks a Worker
+//! instead of needing JSPI to suspend the main one.
+//!
+//! Identity: the startup packet names user/database on the wire, but the
+//! standalone InitPostgres arm (!IsUnderPostmaster) runs the session as the
+//! bootstrap superuser — trust-by-construction, like --single; hba
+//! enforcement stays with the postmaster path.
 
 use ::types_error::PgResult;
 use ::types_guc::GucContext;
@@ -50,6 +59,68 @@ pub fn PostgresStdioWireMain(argv: &[String], username: &str) -> ! {
         // !IsUnderPostmaster — the shutdown checkpoint among them).
         Some(p) => std::process::exit(p.code),
         None => std::panic::resume_unwind(payload),
+    }
+}
+
+// The session thread's stack: the same 64MiB the sim-net session threads
+// take (sim_net.rs), and the same budget the wasm main stack is linked with
+// — `-c max_stack_depth=60000` must stay under it.
+const WIRE_SESSION_STACK_BYTES: usize = 64 * 1024 * 1024;
+
+pub fn PostgresStdioWireThreadedMain(argv: &[String], username: &str) -> ! {
+    // 'static for the spawn: argv/username are the process's, but the
+    // session outlives this frame's borrows by construction.
+    let argv: Vec<String> = argv.to_vec();
+    let username = username.to_string();
+
+    let session = std::thread::Builder::new()
+        .name("wire-session".to_string())
+        .stack_size(WIRE_SESSION_STACK_BYTES)
+        .spawn(move || -> i32 {
+            // One backend = one thread: the depth guard's base is a
+            // thread-local, so it is recorded HERE (launch_backend does the
+            // same at every backend-thread spawn). Without it the spawned
+            // thread's base stays NULL and check_stack_depth never fires.
+            let _ = stack_depth::set_stack_base();
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                || -> core::convert::Infallible {
+                    let err = match stdio_wire_main_inner(&argv, &username) {
+                        Ok(never) => match never {},
+                        Err(err) => err,
+                    };
+                    // A FATAL that unwound as Err (rather than
+                    // ereport-finish): report it, then take C's
+                    // proc_exit(1).
+                    elog::emit_error_report_for(&err);
+                    ipc_seams::proc_exit::call(1, init_small::globals::MyProcPid())
+                },
+            ));
+            let payload = match outcome {
+                Ok(never) => match never {},
+                Err(payload) => payload,
+            };
+            match payload.downcast_ref::<ipc::ProcExitThread>() {
+                // Exit callbacks already ran (ipc::proc_exit drains inline
+                // when !IsUnderPostmaster — the shutdown checkpoint among
+                // them). The process exit itself belongs to the joiner.
+                Some(p) => p.code,
+                None => std::panic::resume_unwind(payload),
+            }
+        });
+
+    let session = match session {
+        Ok(handle) => handle,
+        Err(err) => {
+            elog::write_stderr(&format!("could not spawn wire session thread: {err}\n"));
+            std::process::exit(1);
+        }
+    };
+
+    match session.join() {
+        Ok(code) => std::process::exit(code),
+        // Not a proc_exit: re-raise the session's panic on the main thread,
+        // exactly where the single-threaded arm would have raised it.
+        Err(payload) => std::panic::resume_unwind(payload),
     }
 }
 

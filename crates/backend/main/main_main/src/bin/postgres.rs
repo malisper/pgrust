@@ -285,11 +285,15 @@ fn main() {
 fn run() {
     // Transport provider resolution (§2.4 seam): one argv peek, once, before
     // any seam install — set-once at boot is the house pattern. Everything
-    // but `--stdio-wire` / `--sim-net` (all the C dispatch options included)
-    // boots the socket provider, i.e. the unchanged native byte path.
+    // but `--stdio-wire` / `--stdio-wire-threaded` / `--sim-net` (all the C
+    // dispatch options included) boots the socket provider, i.e. the
+    // unchanged native byte path.
     let arg1 = std::env::args().nth(1);
     let transport = match arg1.as_deref() {
         Some("--stdio-wire") => seams_init::Transport::StdioWire,
+        // Same provider, different thread: the threaded mode differs only in
+        // WHICH thread runs the ladder (postgres/stdio_wire.rs).
+        Some("--stdio-wire-threaded") => seams_init::Transport::StdioWire,
         #[cfg(pgrust_sim)]
         Some("--sim-net") => seams_init::Transport::SimNet,
         _ => seams_init::Transport::Socket,

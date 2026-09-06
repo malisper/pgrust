@@ -226,7 +226,13 @@ export function makeWasi({ image, manifest, vfs: existingVfs, stdinBytes, stdinS
   const num = (x) => (typeof x === 'bigint' ? Number(x) : x);
 
   function readStr(ptr, len) {
-    return dec.decode(u8().subarray(ptr, ptr + len));
+    // .slice(), not .subarray(): with the wasm32-wasip1-threads build the
+    // memory is a SharedArrayBuffer, and TextDecoder.decode() REFUSES a
+    // shared-backed view in Chrome ("The provided ArrayBufferView value must
+    // not be shared" — the same [AllowShared] rule that bites
+    // crypto.getRandomValues). slice() hands it a private copy; paths are
+    // short, so the copy is free, and the single-threaded arm is unaffected.
+    return dec.decode(u8().slice(ptr, ptr + len));
   }
   // Resolve a WASI (dirfd, path) pair. Guest paths arrive preopen-relative;
   // wasi-libc maps absolute paths onto the "/" preopen for us, but be liberal

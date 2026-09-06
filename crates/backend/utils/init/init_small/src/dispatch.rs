@@ -15,6 +15,11 @@ pub enum DispatchOption {
     // wasm32-wasip1 client-server mode — WASI p1 has no socket(); native
     // --stdio-wire is the differential arm.
     StdioWire,
+    // pgrust extension (no C counterpart): --stdio-wire's session, but run
+    // on a spawned "wire-session" thread while the main thread only joins
+    // it. The wasm32-wasip1-threads arm — the host's `wasi` `thread-spawn`
+    // import carries the whole backend; native it is the differential arm.
+    StdioWireThreaded,
     // pgrust extension (P4 sim-net, `--cfg pgrust_sim` builds only): one
     // deterministic wire-protocol session over the in-memory sim-net
     // transport pair, driven by the in-process scripted client.
@@ -30,6 +35,7 @@ const DISPATCH_OPTION_NAMES: &[(DispatchOption, &str)] = &[
     (DispatchOption::DescribeConfig, "describe-config"),
     (DispatchOption::Single, "single"),
     (DispatchOption::StdioWire, "stdio-wire"),
+    (DispatchOption::StdioWireThreaded, "stdio-wire-threaded"),
     #[cfg(pgrust_sim)]
     (DispatchOption::SimNet, "sim-net"),
 ];
