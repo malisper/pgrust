@@ -305,7 +305,11 @@ async function main() {
 
   const expect = (cond, msg) => { if (!cond) failures.push(msg); };
   note(`page: spawned thread ids: [${spawnedTids.join(', ')}]`);
-  expect(spawnedTids.length >= 1, 'no thread was spawned via wasi.thread-spawn');
+  // The control arm (dispatch stdio-wire) runs the session on the wasm main
+  // thread and never spawns; it passes on the wire results alone.
+  if (dispatch === 'stdio-wire-threaded') {
+    expect(spawnedTids.length >= 1, 'no thread was spawned via wasi.thread-spawn');
+  }
   expect(spawnedTids.every((t) => t > 0), `thread ids must be positive: ${spawnedTids}`);
   const r1 = rows.get('SELECT 1') || [];
   expect(r1.length === 1 && r1[0] === '1', `SELECT 1 returned ${JSON.stringify(r1)}`);

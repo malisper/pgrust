@@ -294,7 +294,11 @@ try {
 // ---- assertions -----------------------------------------------------------
 const expect = (cond, msg) => { if (!cond) failures.push(msg); };
 
-expect(spawnedTids.length >= 1, 'no thread was spawned via wasi.thread-spawn');
+// The control arm (dispatch stdio-wire) runs the session on the wasm main
+// thread and never spawns; it passes on the wire results alone.
+if (dispatch === 'stdio-wire-threaded') {
+  expect(spawnedTids.length >= 1, 'no thread was spawned via wasi.thread-spawn');
+}
 expect(spawnedTids.every((t) => t > 0), `thread ids must be positive: ${spawnedTids}`);
 note(`spawned thread ids: [${spawnedTids.join(', ')}]`);
 

@@ -4,15 +4,29 @@
 // they call:
 //
 //   role 'process'        — created by the driver (Node) or the page (browser).
-//                           Prewarms the thread pool, instantiates, runs
-//                           `_start()`. This is where `wasi` `thread-spawn`
-//                           is answered.
+//                           Instantiates FIRST, then prewarms the thread pool,
+//                           then runs `_start()`. This is where `wasi`
+//                           `thread-spawn` is answered.
 //   role 'thread-prewarm' — created by the process worker BEFORE the guest is
 //                           started. Instantiates over the same shared memory
 //                           and answers `ready`; then parks on its message
 //                           queue.
 //   role 'thread-start'   — the actual spawn: call
 //                           `wasi_thread_start(tid, start_arg)`.
+//
+// Why the process instance MUST be instantiated before any pool worker: with
+// --shared-memory, wasm-ld's start function (__wasm_init_memory) runs in every
+// instance, but only the FIRST instance to run it initializes the passive data
+// segments — and, in that same instance only, the main thread's TLS block
+// (its per-instance `__tls_base` global is set and the TLS template copied).
+// Every later instance finds memory initialized and skips both. A spawned
+// thread gets its TLS from `wasi_thread_start` (__wasm_init_tls), so pool
+// instances never notice; the process instance runs `_start` on the wasm main
+// thread with whatever `__tls_base` it was left with. When a pool worker
+// instantiated first, that was garbage: every lazy `thread_local!` on the main
+// thread reported "cannot access a Thread Local Storage value during or after
+// destruction" (std's TLS state byte read as Destroyed) before the first line
+// of output. Root-caused 2026-09-06; the order below is the fix.
 //
 // Why prewarm: by the time the guest calls thread-spawn it is microseconds
 // away from parking in pthread_join (memory.atomic.wait), which blocks the
@@ -75,9 +89,6 @@ async function runProcess(msg) {
     onEvent: (e) => post(e),
   });
 
-  await spawner.prewarm(msg.poolSize || 1);
-  post({ type: 'pool-ready', size: msg.poolSize || 1 });
-
   const host = makeThreadsHost({
     wasmModule: msg.module,
     memory: msg.memory,
@@ -105,6 +116,12 @@ async function runProcess(msg) {
 
   const instance = await WebAssembly.instantiate(msg.module, host.imports);
   post({ type: 'instantiated', exports: Object.keys(instance.exports).slice(0, 32) });
+
+  // Pool AFTER the process instance (see the header: the first instantiation
+  // owns memory + main-thread TLS init) and BEFORE `_start` (thread-spawn
+  // cannot await).
+  await spawner.prewarm(msg.poolSize || 1);
+  post({ type: 'pool-ready', size: msg.poolSize || 1 });
 
   let code = 0;
   try {
