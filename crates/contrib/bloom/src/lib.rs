@@ -26,13 +26,22 @@ fn lookup(function: &str) -> Option<PGFunction> {
     })
 }
 
-// CREATE FUNCTION validation target only; the closed AM set dispatches via
-// IndexAmKind, never through fmgr (fc_hnswhandler precedent).
+// blutils.c:103-165 blhandler: the handler proc's fmgr entry. C makeNode()s
+// an IndexAmRoutine in CurrentMemoryContext and PG_RETURN_POINTERs it; for
+// the closed AM set the routine IS the IndexAmKind (amapi::GetIndexAmRoutine
+// resolves this proc by name and never comes through here), so the datum is
+// a pointer to the kind allocated in the call's result context. Reachable
+// from SQL: bloom--1.0.sql declares the proc non-strict, so an aggregate
+// with STYPE = internal and FINALFUNC = blhandler calls it (with a NULL or
+// the transition state), and the value is only ever seen by
+// index_am_handler_out (0A000), IS NULL and pg_typeof.
 fn fc_blhandler(
     _f: Option<&mut types_fmgr::FmgrInfo>,
-    _fcinfo: &mut types_fmgr::FunctionCallInfoBaseData,
+    fcinfo: &mut types_fmgr::FunctionCallInfoBaseData,
 ) -> types_error::PgResult<datum::Datum> {
-    panic!("blhandler: the closed AM set dispatches via IndexAmKind, never through fmgr")
+    let amroutine: &types_relscan::IndexAmKind =
+        mcx::alloc_leak_in(fcinfo.result_mcx(), types_relscan::IndexAmKind::Bloom)?;
+    Ok(datum::Datum::from_usize(amroutine as *const types_relscan::IndexAmKind as usize))
 }
 
 pub fn init_seams() {
