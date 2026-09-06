@@ -5,8 +5,10 @@
 // Thread-model renderings (see notes/recovery-standby-tail-state.md):
 // - C's file-static `session_replication_state` pointer is a thread-local
 //   Option<&'static ReplicationState>; acquired_by holds MyProcPid as in C.
-// - The shmem ReplicationStateCtl array is a leaked boot allocation behind a
-//   OnceLock (the slot crate's pattern); crash-cycle reset rewrites in place.
+// - The shmem ReplicationStateCtl array is registered in the ShmemIndex
+//   (ShmemInitStruct("ReplicationOriginState") with C's size, origin.c:557)
+//   and lives as a leaked boot allocation behind a OnceLock (the slot crate's
+//   pattern); crash-cycle reset rewrites in place.
 // - The exported globals replorigin_session_origin{,_lsn,_timestamp} are
 //   thread-locals exposed through origin_seams for xact's commit records.
 #![allow(non_snake_case)]
@@ -464,17 +466,51 @@ pub fn replorigin_by_oid(
 // Shmem-array lifecycle
 // ---------------------------------------------------------------------------
 
-pub fn ReplicationOriginShmemInit() {
+// C layout of the ShmemIndex block (origin.c) at 18.6, x86-64 and aarch64
+// Linux alike: ReplicationStateCtl { int tranche_id; ReplicationState
+// states[FLEXIBLE_ARRAY_MEMBER] } puts `states` at offset 8;
+// ReplicationState { RepOriginId roident (2, pad 6); XLogRecPtr remote_lsn
+// (8); XLogRecPtr local_lsn (8); int acquired_by (4); LWLock lock (16);
+// ConditionVariable origin_cv (12) } is 56 bytes. The live state stays the
+// Rust-typed array (thread model); the index row carries C's size.
+const C_OFFSETOF_REPLICATION_STATE_CTL_STATES: usize = 8;
+const C_SIZE_OF_REPLICATION_STATE: usize = 56;
+
+/// ReplicationOriginShmemSize (origin.c:534): 0 when
+/// max_active_replication_origins == 0, else offsetof(ReplicationStateCtl,
+/// states) + max_active_replication_origins * sizeof(ReplicationState).
+pub fn ReplicationOriginShmemSize() -> PgResult<usize> {
+    let mut size = 0;
     let n = max_active_replication_origins();
     if n == 0 {
-        return;
+        return Ok(size);
     }
-    let states: Box<[ReplicationState]> = (0..n).map(|_| initial_state()).collect();
-    let len = states.len();
-    let ptr = Box::into_raw(states) as *mut ReplicationState;
-    if REPLICATION_STATES.set(StatesPtr { ptr, len }).is_err() {
-        panic!("ReplicationOriginShmemInit already ran");
+    size = shmem::add_size(size, C_OFFSETOF_REPLICATION_STATE_CTL_STATES)?;
+    size = shmem::add_size(size, shmem::mul_size(n as usize, C_SIZE_OF_REPLICATION_STATE)?)?;
+    Ok(size)
+}
+
+/// ReplicationOriginShmemInit (origin.c:557): ShmemInitStruct(
+/// "ReplicationOriginState", ReplicationOriginShmemSize()) registers the
+/// block in the ShmemIndex, so pg_shmem_allocations lists it; a fresh segment
+/// (!found) boots every state (roident invalid, lsns 0, acquired_by 0, the
+/// lock and origin_cv initialized), a re-entry leaves the live array alone.
+pub fn ReplicationOriginShmemInit() -> PgResult<()> {
+    let n = max_active_replication_origins();
+    if n == 0 {
+        return Ok(());
     }
+    let (_raw, found) =
+        shmem::ShmemInitStruct("ReplicationOriginState", ReplicationOriginShmemSize()?)?;
+    if !found {
+        let states: Box<[ReplicationState]> = (0..n).map(|_| initial_state()).collect();
+        let len = states.len();
+        let ptr = Box::into_raw(states) as *mut ReplicationState;
+        if REPLICATION_STATES.set(StatesPtr { ptr, len }).is_err() {
+            panic!("ReplicationOriginShmemInit: fresh segment but the state array already exists");
+        }
+    }
+    Ok(())
 }
 
 pub fn ReplicationOriginShmemResetAfterCrash() {

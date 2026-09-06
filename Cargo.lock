@@ -11153,6 +11153,7 @@ dependencies = [
  "origin_seams",
  "pgsync",
  "postgres_seams",
+ "shmem",
  "table",
  "transam_xlog",
  "transam_xlog_seams",

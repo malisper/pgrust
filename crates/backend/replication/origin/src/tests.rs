@@ -78,3 +78,27 @@ fn replorigin_redo_parse_rejects_truncated_records() {
         );
     }
 }
+
+// audit-18.6 b219: origin.c:557 ReplicationOriginShmemInit registers the
+// ReplicationStateCtl array as ShmemInitStruct("ReplicationOriginState",
+// ReplicationOriginShmemSize()) — offsetof(ReplicationStateCtl, states) = 8
+// plus max_active_replication_origins (default 10) x sizeof(ReplicationState)
+// = 56 -> 568 bytes at 18.6 (x86-64 and aarch64 Linux alike) — so a re-entry
+// finds it (C's `found`) and pg_shmem_allocations lists it.
+#[test]
+fn shmem_init_registers_replication_origin_state_in_shmem_index() {
+    assert_eq!(max_active_replication_origins(), 10);
+    assert_eq!(
+        ReplicationOriginShmemSize().unwrap(),
+        568,
+        "origin.c:534 offsetof(ReplicationStateCtl, states) + 10 * sizeof(ReplicationState)"
+    );
+    ReplicationOriginShmemInit().unwrap();
+    // origin.c:566 `found`: a re-entry reuses the block, never re-boots the array.
+    ReplicationOriginShmemInit().unwrap();
+    let (_, found) = shmem::ShmemInitStruct("ReplicationOriginState", 568).unwrap();
+    assert!(
+        found,
+        "ReplicationOriginShmemInit must register \"ReplicationOriginState\" (568 bytes) in the ShmemIndex"
+    );
+}

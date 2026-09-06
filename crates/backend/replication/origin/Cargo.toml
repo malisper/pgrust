@@ -25,6 +25,7 @@ lwlock = { path = "../../storage/lmgr/lwlock" }
 lmgr = { path = "../../storage/lmgr/lmgr" }
 condition_variable = { path = "../../storage/lmgr/condition_variable" }
 ipc = { path = "../../storage/ipc/ipc" }
+shmem = { path = "../../storage/ipc/shmem" }
 init_small = { path = "../../utils/init/init_small" }
 fd = { path = "../../storage/file/fd" }
 crc32c = { path = "../../../port/crc32c" }
