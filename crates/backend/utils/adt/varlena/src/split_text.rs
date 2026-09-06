@@ -5,8 +5,8 @@ use types_core::{Oid, TEXTOID};
 use types_error::PgResult;
 use types_fmgr::{byref_result, FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
 
-use crate::{text_position_get_match_len, text_position_get_match_off, text_position_next,
-    text_position_setup, texteq};
+use crate::{check_for_interrupts, text_position_get_match_len, text_position_get_match_off,
+    text_position_next, text_position_setup, texteq};
 
 fn accum_field<'m>(
     mcx: Mcx<'m>,
@@ -33,12 +33,13 @@ fn accum_field<'m>(
 
 // C split_text (varlena.c): field boundaries only, shared by the array
 // (text_to_array) and table/SRF (text_to_table) output arms below.
-struct TableField {
+#[derive(Debug)]
+pub(crate) struct TableField {
     bytes: Vec<u8>,
     is_null: bool,
 }
 
-fn split_fields(fcinfo: &Fcinfo) -> PgResult<Vec<TableField>> {
+pub(crate) fn split_fields(fcinfo: &Fcinfo) -> PgResult<Vec<TableField>> {
     let mut out = Vec::new();
     if fcinfo.argisnull(0) {
         return Ok(out);
@@ -79,6 +80,8 @@ fn split_fields(fcinfo: &Fcinfo) -> PgResult<Vec<TableField>> {
                 let mut state = text_position_setup(&inputstring, sep, collation)?;
                 let mut start = 0usize;
                 loop {
+                    // varlena.c:4911: CHECK_FOR_INTERRUPTS() per field.
+                    check_for_interrupts()?;
                     let found = text_position_next(&mut state)?;
                     let chunk = if found {
                         &inputstring[start..text_position_get_match_off(&state)]
@@ -97,6 +100,8 @@ fn split_fields(fcinfo: &Fcinfo) -> PgResult<Vec<TableField>> {
             let mut off = 0usize;
             while off < inputstring.len() {
                 let l = mbutils::pg_mblen_range(&inputstring[off..])? as usize;
+                // varlena.c:4962: CHECK_FOR_INTERRUPTS() per character.
+                check_for_interrupts()?;
                 push(&mut out, &inputstring[off..off + l])?;
                 off += l;
             }
@@ -174,6 +179,8 @@ pub fn fc_text_to_array(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
                 let mut state = text_position_setup(&inputstring, sep, collation)?;
                 let mut start = 0usize;
                 loop {
+                    // varlena.c:4911: CHECK_FOR_INTERRUPTS() per field.
+                    check_for_interrupts()?;
                     let found = text_position_next(&mut state)?;
                     let chunk = if found {
                         &inputstring[start..text_position_get_match_off(&state)]
@@ -194,6 +201,8 @@ pub fn fc_text_to_array(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
             let mut off = 0usize;
             while off < inputstring.len() {
                 let l = mbutils::pg_mblen_range(&inputstring[off..])? as usize;
+                // varlena.c:4962: CHECK_FOR_INTERRUPTS() per character.
+                check_for_interrupts()?;
                 astate = Some(accum_field(
                     mcx,
                     astate.take(),

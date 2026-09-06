@@ -76,6 +76,47 @@ pub const SPI_OK_MERGE_RETURNING: i32 = 19;
 
 pub const SPI_OPT_NONATOMIC: i32 = 1 << 0;
 
+/// C `SPI_result_code_string` (spi.c:1972): any SPI return code as its
+/// symbolic name, for error messages; an unrecognized code renders as
+/// "Unrecognized SPI code %d".
+pub fn SPI_result_code_string(code: i32) -> std::borrow::Cow<'static, str> {
+    use std::borrow::Cow;
+    Cow::Borrowed(match code {
+        SPI_ERROR_CONNECT => "SPI_ERROR_CONNECT",
+        SPI_ERROR_COPY => "SPI_ERROR_COPY",
+        SPI_ERROR_OPUNKNOWN => "SPI_ERROR_OPUNKNOWN",
+        SPI_ERROR_UNCONNECTED => "SPI_ERROR_UNCONNECTED",
+        SPI_ERROR_ARGUMENT => "SPI_ERROR_ARGUMENT",
+        SPI_ERROR_PARAM => "SPI_ERROR_PARAM",
+        SPI_ERROR_TRANSACTION => "SPI_ERROR_TRANSACTION",
+        SPI_ERROR_NOATTRIBUTE => "SPI_ERROR_NOATTRIBUTE",
+        SPI_ERROR_NOOUTFUNC => "SPI_ERROR_NOOUTFUNC",
+        SPI_ERROR_TYPUNKNOWN => "SPI_ERROR_TYPUNKNOWN",
+        SPI_ERROR_REL_DUPLICATE => "SPI_ERROR_REL_DUPLICATE",
+        SPI_ERROR_REL_NOT_FOUND => "SPI_ERROR_REL_NOT_FOUND",
+        SPI_OK_CONNECT => "SPI_OK_CONNECT",
+        SPI_OK_FINISH => "SPI_OK_FINISH",
+        SPI_OK_FETCH => "SPI_OK_FETCH",
+        SPI_OK_UTILITY => "SPI_OK_UTILITY",
+        SPI_OK_SELECT => "SPI_OK_SELECT",
+        SPI_OK_SELINTO => "SPI_OK_SELINTO",
+        SPI_OK_INSERT => "SPI_OK_INSERT",
+        SPI_OK_DELETE => "SPI_OK_DELETE",
+        SPI_OK_UPDATE => "SPI_OK_UPDATE",
+        SPI_OK_CURSOR => "SPI_OK_CURSOR",
+        SPI_OK_INSERT_RETURNING => "SPI_OK_INSERT_RETURNING",
+        SPI_OK_DELETE_RETURNING => "SPI_OK_DELETE_RETURNING",
+        SPI_OK_UPDATE_RETURNING => "SPI_OK_UPDATE_RETURNING",
+        SPI_OK_REWRITTEN => "SPI_OK_REWRITTEN",
+        SPI_OK_REL_REGISTER => "SPI_OK_REL_REGISTER",
+        SPI_OK_REL_UNREGISTER => "SPI_OK_REL_UNREGISTER",
+        SPI_OK_TD_REGISTER => "SPI_OK_TD_REGISTER",
+        SPI_OK_MERGE => "SPI_OK_MERGE",
+        SPI_OK_MERGE_RETURNING => "SPI_OK_MERGE_RETURNING",
+        _ => return Cow::Owned(format!("Unrecognized SPI code {code}")),
+    })
+}
+
 pub(crate) struct SpiConnection {
     pub processed: u64,
     pub tuptable: Option<u64>,

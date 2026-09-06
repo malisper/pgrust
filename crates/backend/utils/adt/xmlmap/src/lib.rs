@@ -112,8 +112,13 @@ fn database_name() -> PgResult<String> {
 fn query_to_oid_list(query: &str) -> PgResult<Vec<Oid>> {
     let spi_result = spi::SPI_execute(query, true, 0)?;
     if spi_result != spi::SPI_OK_SELECT {
+        // xml.c:2793: elog(ERROR, "SPI_execute returned %s for %s",
+        // SPI_result_code_string(spi_result), query).
         return Err(ereport(ERROR)
-            .errmsg(format!("SPI_execute returned {spi_result} for {query}"))
+            .errmsg(format!(
+                "SPI_execute returned {} for {query}",
+                spi::SPI_result_code_string(spi_result)
+            ))
             .into_error()
             .into());
     }

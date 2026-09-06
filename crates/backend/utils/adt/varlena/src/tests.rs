@@ -1566,3 +1566,151 @@ fn text_to_qualified_name_list_trailing_dot_errors() {
     let err = textToQualifiedNameList(cx.mcx(), "a.").unwrap_err();
     assert_eq!(err.sqlstate, types_error::ERRCODE_INVALID_NAME);
 }
+
+// CHECK_FOR_INTERRUPTS() inside the varlena scan loops (varlena.c:4295
+// replace_text, :4911/:4962 split_text): a pending query cancel is answered
+// from inside the loop, through the ported ProcessInterrupts seam, instead of
+// only after the whole input has been consumed.
+mod interrupts {
+    use std::sync::{Mutex, Once};
+    use std::thread::ThreadId;
+
+    use datum::Datum;
+    use types_error::{PgError, PgResult, ERRCODE_QUERY_CANCELED};
+    use types_fmgr::LocalFcinfo;
+
+    use super::*;
+    use crate::split_text::{fc_text_to_array, split_fields};
+
+    // The seam is process-wide and set-once; a cancel is keyed on the
+    // arming thread (a set: the three tests arm concurrently) so sibling
+    // tests in this binary never observe another test's cancel.
+    static ARMED: Mutex<Vec<ThreadId>> = Mutex::new(Vec::new());
+    static INSTALL: Once = Once::new();
+
+    // ProcessInterrupts mock: consumes the pending cancel and raises C's
+    // 57014, as postgres.c's query-cancel arm does.
+    fn process_interrupts() -> PgResult<()> {
+        let me = std::thread::current().id();
+        let mut armed = ARMED.lock().unwrap();
+        if let Some(i) = armed.iter().position(|t| *t == me) {
+            armed.swap_remove(i);
+            init_small::globals::SetInterruptPending(false);
+            return Err(PgError::error("canceling statement due to user request")
+                .with_sqlstate(ERRCODE_QUERY_CANCELED)
+                .into());
+        }
+        Ok(())
+    }
+
+    fn install() {
+        INSTALL.call_once(|| {
+            if !postgres_seams::check_for_interrupts::is_installed() {
+                postgres_seams::check_for_interrupts::set(process_interrupts);
+            }
+        });
+    }
+
+    // Arm: InterruptPending (the CHECK_FOR_INTERRUPTS fast path) plus this
+    // thread's entry in the set the seam mock answers for.
+    fn arm_cancel() {
+        ARMED.lock().unwrap().push(std::thread::current().id());
+        init_small::globals::SetInterruptPending(true);
+    }
+
+    fn disarm_cancel() {
+        let me = std::thread::current().id();
+        ARMED.lock().unwrap().retain(|t| *t != me);
+        init_small::globals::SetInterruptPending(false);
+    }
+
+    fn cancel_consumed() -> bool {
+        let me = std::thread::current().id();
+        !ARMED.lock().unwrap().contains(&me)
+    }
+
+    fn text_image(s: &[u8]) -> Vec<u8> {
+        let mut v = datum::varlena::set_varsize_4b(4 + s.len()).to_vec();
+        v.extend_from_slice(s);
+        v
+    }
+
+    fn assert_canceled(err: Box<PgError>) {
+        assert_eq!(err.sqlstate(), ERRCODE_QUERY_CANCELED);
+        assert_eq!(err.message, "canceling statement due to user request");
+        assert!(cancel_consumed(), "the cancel was answered by the seam, not left pending");
+    }
+
+    #[test]
+    fn replace_text_answers_pending_cancel_inside_the_match_loop() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        // varlena.c:4295: CHECK_FOR_INTERRUPTS() at the top of the do-while
+        // over matches — the very first iteration answers the cancel.
+        arm_cancel();
+        assert_canceled(replace_text(mcx, b"aaaa", b"a", b"b", C).unwrap_err());
+
+        // Consumed: the same call now completes.
+        assert_eq!(replace_text(mcx, b"aaaa", b"a", b"b", C).unwrap().data(), b"bbbb");
+
+        // No match: the loop is never entered, so a pending cancel is NOT
+        // consumed here (C returns src_text before the loop).
+        arm_cancel();
+        assert_eq!(replace_text(mcx, b"abc", b"z", b"x", C).unwrap().data(), b"abc");
+        assert!(!cancel_consumed());
+        disarm_cancel();
+    }
+
+    #[test]
+    fn text_to_array_answers_pending_cancel_in_both_split_loops() {
+        install();
+        let ctx = MemoryContext::new_bump("t");
+        let input = text_image(b"a,b,c");
+        let sep = text_image(b",");
+
+        // varlena.c:4911: the non-null separator loop.
+        let mut fcinfo = LocalFcinfo::<2>::new(C);
+        // SAFETY: ctx outlives this call.
+        unsafe { fcinfo.set_result_mcx(ctx.mcx()) };
+        fcinfo.set_arg(0, Datum::from_usize(input.as_ptr() as usize));
+        fcinfo.set_arg(1, Datum::from_usize(sep.as_ptr() as usize));
+        arm_cancel();
+        assert_canceled(fc_text_to_array(None, &mut fcinfo).unwrap_err());
+        assert!(fc_text_to_array(None, &mut fcinfo).is_ok());
+
+        // varlena.c:4962: the NULL-separator per-character loop.
+        let mut fcinfo = LocalFcinfo::<2>::new(C);
+        // SAFETY: ctx outlives this call.
+        unsafe { fcinfo.set_result_mcx(ctx.mcx()) };
+        fcinfo.set_arg(0, Datum::from_usize(input.as_ptr() as usize));
+        fcinfo.set_arg_null(1);
+        arm_cancel();
+        assert_canceled(fc_text_to_array(None, &mut fcinfo).unwrap_err());
+        assert!(fc_text_to_array(None, &mut fcinfo).is_ok());
+    }
+
+    #[test]
+    fn text_to_table_split_answers_pending_cancel_in_both_split_loops() {
+        install();
+        let input = text_image(b"a,b,c");
+        let sep = text_image(b",");
+
+        // varlena.c:4911 via the table (SRF) arm's shared field split.
+        let mut fcinfo = LocalFcinfo::<2>::new(C);
+        fcinfo.set_arg(0, Datum::from_usize(input.as_ptr() as usize));
+        fcinfo.set_arg(1, Datum::from_usize(sep.as_ptr() as usize));
+        arm_cancel();
+        assert_canceled(split_fields(&fcinfo).unwrap_err());
+        assert_eq!(split_fields(&fcinfo).unwrap().len(), 3);
+
+        // varlena.c:4962 via the table arm.
+        let mut fcinfo = LocalFcinfo::<2>::new(C);
+        fcinfo.set_arg(0, Datum::from_usize(input.as_ptr() as usize));
+        fcinfo.set_arg_null(1);
+        arm_cancel();
+        assert_canceled(split_fields(&fcinfo).unwrap_err());
+        assert_eq!(split_fields(&fcinfo).unwrap().len(), 5);
+    }
+}

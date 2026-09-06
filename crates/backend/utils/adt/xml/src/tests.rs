@@ -147,3 +147,52 @@ fn xpath_namespace_node_casts_to_string() {
     assert_eq!(n, 1);
     assert_eq!(out, vec![b"http://127.0.0.1".to_vec()]);
 }
+
+// xml.c:2243-2262 xml_errorHandler: outside LEGACY strictness, level >=
+// XML_ERR_ERROR is buffered for xml_ereport, level >= XML_ERR_WARNING is
+// ereport(WARNING)ed, and everything below (libxml's informational level)
+// is ereport(NOTICE)ed — never dropped.
+#[test]
+fn xml_error_handler_reports_below_warning_level_as_notice() {
+    use core::ffi::c_void;
+    use std::ffi::CString;
+
+    use crate::errhandler::{
+        set_strictness_for_test, take_pending_reports, xml_error_handler, PG_XML_STRICTNESS_ALL,
+    };
+    use crate::libxml::xmlErrorHdr;
+
+    fn raise(level: i32, message: &str) {
+        let msg = CString::new(message).unwrap();
+        let mut err = xmlErrorHdr {
+            domain: 1, // XML_FROM_PARSER
+            code: 0,
+            message: msg.as_ptr() as *mut _,
+            level,
+            file: core::ptr::null_mut(),
+            line: 0,
+            str1: core::ptr::null_mut(),
+            str2: core::ptr::null_mut(),
+            str3: core::ptr::null_mut(),
+            int1: 0,
+            int2: 0,
+            ctxt: core::ptr::null_mut(),
+            node: core::ptr::null_mut(),
+        };
+        // SAFETY: a fully initialised xmlError header, live for the call.
+        unsafe { xml_error_handler(core::ptr::null_mut(), &mut err as *mut _ as *mut c_void) };
+    }
+
+    set_strictness_for_test(PG_XML_STRICTNESS_ALL);
+    raise(1, "a warning\n"); // XML_ERR_WARNING
+    raise(0, "an informational diagnostic\n"); // XML_ERR_NONE
+    let reports = take_pending_reports();
+    assert_eq!(
+        reports,
+        vec![
+            (types_error::WARNING, "a warning".to_string()),
+            (types_error::NOTICE, "an informational diagnostic".to_string()),
+        ]
+    );
+    set_strictness_for_test(0);
+}

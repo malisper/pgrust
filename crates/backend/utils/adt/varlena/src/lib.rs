@@ -779,6 +779,22 @@ pub fn textpos(t1: &[u8], t2: &[u8], collid: Oid) -> PgResult<i32> {
     text_position(t1, t2, collid)
 }
 
+// CHECK_FOR_INTERRUPTS() (miscadmin.h): the InterruptPending fast path
+// inline, ProcessInterrupts through the postgres seam only when it is set.
+#[inline]
+pub(crate) fn check_for_interrupts() -> PgResult<()> {
+    if init_small::globals::InterruptPending() {
+        return check_for_interrupts_slow();
+    }
+    Ok(())
+}
+
+#[cold]
+#[inline(never)]
+fn check_for_interrupts_slow() -> PgResult<()> {
+    postgres_seams::check_for_interrupts::call()
+}
+
 // replace_text (varlena.c): replace all occurrences of from_sub with to_sub.
 pub fn replace_text<'mcx>(
     mcx: Mcx<'mcx>,
@@ -800,6 +816,9 @@ pub fn replace_text<'mcx>(
     let mut str: Vec<u8> = Vec::new();
 
     loop {
+        // varlena.c:4295: CHECK_FOR_INTERRUPTS() per match.
+        check_for_interrupts()?;
+
         str.extend_from_slice(&src[start_ptr..curr_ptr]);
         str.extend_from_slice(to_sub);
         start_ptr = curr_ptr + state.last_match_len;

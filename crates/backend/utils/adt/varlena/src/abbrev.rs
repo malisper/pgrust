@@ -98,13 +98,7 @@ impl VarStrAbbrevState {
         let abbrev_distinct = self.abbr_card.estimate().max(1.0);
         let key_distinct = memtupcount as f64;
 
-        if abbrev_distinct > key_distinct * self.prop_card {
-            if memtupcount > 10000 {
-                self.prop_card *= 0.65;
-            }
-            return false;
-        }
-        true
+        self.decide(memtupcount, abbrev_distinct, key_distinct)
     }
 
     /// `varstr_abbrev_abort`.
@@ -115,14 +109,55 @@ impl VarStrAbbrevState {
         let abbrev_distinct = self.abbr_card.estimate().max(1.0);
         let key_distinct = self.full_card.estimate().max(1.0);
 
+        self.decide(memtupcount, abbrev_distinct, key_distinct)
+    }
+
+    // varlena.c:2577-2653: the cost-model decision, with C's two trace_sort
+    // LOG lines around it (elog(LOG) at :2581 before the decision and :2648
+    // on abort; %f = six decimals).
+    fn decide(&mut self, memtupcount: i32, abbrev_distinct: f64, key_distinct: f64) -> bool {
+        if trace_sort() {
+            let norm_abbrev_card = abbrev_distinct / memtupcount as f64;
+            trace_log(format!(
+                "varstr_abbrev: abbrev_distinct after {memtupcount}: {abbrev_distinct:.6} \
+                 (key_distinct: {key_distinct:.6}, norm_abbrev_card: {norm_abbrev_card:.6}, \
+                 prop_card: {:.6})",
+                self.prop_card
+            ));
+        }
+
         if abbrev_distinct > key_distinct * self.prop_card {
             if memtupcount > 10000 {
                 self.prop_card *= 0.65;
             }
             return false;
         }
+
+        if trace_sort() {
+            trace_log(format!(
+                "varstr_abbrev: aborted abbreviation at {memtupcount} \
+                 (abbrev_distinct: {abbrev_distinct:.6}, key_distinct: {key_distinct:.6}, \
+                 prop_card: {:.6})",
+                self.prop_card
+            ));
+        }
         true
     }
+}
+
+/// C `trace_sort` (tuplesort.c) as varlena.c reads it; off until the
+/// tuplesort crate installs the GUC.
+fn trace_sort() -> bool {
+    guc_tables::vars::trace_sort.installed() && guc_tables::vars::trace_sort.read()
+}
+
+/// C `elog(LOG, ...)` under trace_sort: LOG never raises.
+#[cold]
+#[inline(never)]
+fn trace_log(message: String) {
+    let _ = elog::ereport(types_error::LOG)
+        .errmsg_internal(message)
+        .finish(types_error::ErrorLocation::new(file!(), line!() as i32, "varstr_abbrev_abort"));
 }
 
 #[cfg(test)]

@@ -4,7 +4,7 @@
 
 use core::ffi::{c_uchar, c_void};
 
-use ::types_error::{PgError, SqlState, WARNING};
+use ::types_error::{ErrorLevel, PgError, SqlState, NOTICE, WARNING};
 
 use crate::libxml::{
     self, xml2, xmlErrorHdr, xmlNode, xmlNodeHdr, xmlParserCtxtHdr, xmlParserInputHdr,
@@ -43,7 +43,9 @@ struct XmlErrCtx {
     strictness: i32,
     err_occurred: bool,
     err_buf: String,
-    pending_warnings: Vec<String>,
+    // xml.c:2253-2262 ereports WARNINGs/NOTICEs from inside the handler;
+    // deferred here (level, message) in arrival order.
+    pending_reports: Vec<(ErrorLevel, String)>,
 }
 
 std::thread_local! {
@@ -52,7 +54,7 @@ std::thread_local! {
             strictness: 0,
             err_occurred: false,
             err_buf: String::new(),
-            pending_warnings: Vec::new(),
+            pending_reports: Vec::new(),
         })
     };
 }
@@ -64,15 +66,35 @@ fn loc(func: &'static str) -> ::types_error::ErrorLocation {
     ::types_error::ErrorLocation::new(site.file(), site.line() as i32, func)
 }
 
-// C ereports WARNINGs inside the handler (xml.c:2253); elog from a
-// libxml-invoked callback is unsafe in our unwind model, so they flush here.
+// C ereports WARNINGs (xml.c:2253) and NOTICEs (xml.c:2258) inside the
+// handler; elog from a libxml-invoked callback is unsafe in our unwind
+// model, so they flush here at their recorded level.
 pub fn flush_xml_warnings() {
-    let warnings = XML_ERR_CTX.with(|c| std::mem::take(&mut c.borrow_mut().pending_warnings));
-    for w in warnings {
-        let _ = elog::ereport(WARNING)
-            .errmsg_internal(w)
+    let reports = XML_ERR_CTX.with(|c| std::mem::take(&mut c.borrow_mut().pending_reports));
+    for (level, msg) in reports {
+        let _ = elog::ereport(level)
+            .errmsg_internal(msg)
             .finish(loc("xml_errorHandler"));
     }
+}
+
+// Test taps: the handler runs inside a libxml callback with no session, so
+// the unit witness sets the strictness directly and drains what the handler
+// deferred for ereport (level, message) instead of observing elog output.
+#[cfg(test)]
+pub(crate) fn set_strictness_for_test(strictness: i32) {
+    XML_ERR_CTX.with(|c| {
+        let mut c = c.borrow_mut();
+        c.strictness = strictness;
+        c.err_occurred = false;
+        c.err_buf.clear();
+        c.pending_reports.clear();
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn take_pending_reports() -> Vec<(ErrorLevel, String)> {
+    XML_ERR_CTX.with(|c| std::mem::take(&mut c.borrow_mut().pending_reports))
 }
 
 fn append_line_separator(buf: &mut String) {
@@ -247,7 +269,10 @@ pub unsafe extern "C" fn xml_error_handler(_user_data: *mut c_void, error: *mut 
                 c.err_occurred = true;
             });
         } else if level >= XML_ERR_WARNING {
-            XML_ERR_CTX.with(|c| c.borrow_mut().pending_warnings.push(msg));
+            XML_ERR_CTX.with(|c| c.borrow_mut().pending_reports.push((WARNING, msg)));
+        } else {
+            // xml.c:2258: ereport(NOTICE, errmsg_internal("%s", ...)).
+            XML_ERR_CTX.with(|c| c.borrow_mut().pending_reports.push((NOTICE, msg)));
         }
     }
 }
@@ -275,7 +300,7 @@ pub fn pg_xml_init(strictness: i32) {
         c.strictness = strictness;
         c.err_occurred = false;
         c.err_buf.clear();
-        c.pending_warnings.clear();
+        c.pending_reports.clear();
     });
 }
 

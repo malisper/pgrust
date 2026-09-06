@@ -152,3 +152,49 @@ fn register_relation_roundtrip() {
     assert_eq!(SPI_register_relation(&enr).unwrap(), SPI_OK_REL_REGISTER);
     SPI_finish().unwrap();
 }
+
+// spi.c:1972 SPI_result_code_string: every documented code by name, and the
+// "Unrecognized SPI code %d" fallback (SPI_ERROR_COPY's neighbour -5 is
+// unassigned in spi.h).
+#[test]
+fn result_code_string_matches_spi_c() {
+    let named = [
+        (SPI_ERROR_CONNECT, "SPI_ERROR_CONNECT"),
+        (SPI_ERROR_COPY, "SPI_ERROR_COPY"),
+        (SPI_ERROR_OPUNKNOWN, "SPI_ERROR_OPUNKNOWN"),
+        (SPI_ERROR_UNCONNECTED, "SPI_ERROR_UNCONNECTED"),
+        (SPI_ERROR_ARGUMENT, "SPI_ERROR_ARGUMENT"),
+        (SPI_ERROR_PARAM, "SPI_ERROR_PARAM"),
+        (SPI_ERROR_TRANSACTION, "SPI_ERROR_TRANSACTION"),
+        (SPI_ERROR_NOATTRIBUTE, "SPI_ERROR_NOATTRIBUTE"),
+        (SPI_ERROR_NOOUTFUNC, "SPI_ERROR_NOOUTFUNC"),
+        (SPI_ERROR_TYPUNKNOWN, "SPI_ERROR_TYPUNKNOWN"),
+        (SPI_ERROR_REL_DUPLICATE, "SPI_ERROR_REL_DUPLICATE"),
+        (SPI_ERROR_REL_NOT_FOUND, "SPI_ERROR_REL_NOT_FOUND"),
+        (SPI_OK_CONNECT, "SPI_OK_CONNECT"),
+        (SPI_OK_FINISH, "SPI_OK_FINISH"),
+        (SPI_OK_FETCH, "SPI_OK_FETCH"),
+        (SPI_OK_UTILITY, "SPI_OK_UTILITY"),
+        (SPI_OK_SELECT, "SPI_OK_SELECT"),
+        (SPI_OK_SELINTO, "SPI_OK_SELINTO"),
+        (SPI_OK_INSERT, "SPI_OK_INSERT"),
+        (SPI_OK_DELETE, "SPI_OK_DELETE"),
+        (SPI_OK_UPDATE, "SPI_OK_UPDATE"),
+        (SPI_OK_CURSOR, "SPI_OK_CURSOR"),
+        (SPI_OK_INSERT_RETURNING, "SPI_OK_INSERT_RETURNING"),
+        (SPI_OK_DELETE_RETURNING, "SPI_OK_DELETE_RETURNING"),
+        (SPI_OK_UPDATE_RETURNING, "SPI_OK_UPDATE_RETURNING"),
+        (SPI_OK_REWRITTEN, "SPI_OK_REWRITTEN"),
+        (SPI_OK_REL_REGISTER, "SPI_OK_REL_REGISTER"),
+        (SPI_OK_REL_UNREGISTER, "SPI_OK_REL_UNREGISTER"),
+        (SPI_OK_TD_REGISTER, "SPI_OK_TD_REGISTER"),
+        (SPI_OK_MERGE, "SPI_OK_MERGE"),
+        (SPI_OK_MERGE_RETURNING, "SPI_OK_MERGE_RETURNING"),
+    ];
+    for (code, name) in named {
+        assert_eq!(SPI_result_code_string(code), name, "code {code}");
+    }
+    assert_eq!(SPI_result_code_string(0), "Unrecognized SPI code 0");
+    assert_eq!(SPI_result_code_string(-5), "Unrecognized SPI code -5");
+    assert_eq!(SPI_result_code_string(20), "Unrecognized SPI code 20");
+}
