@@ -65,3 +65,43 @@ fn parse_errors() {
     let e = parse_synchronous_standby_names("s1,").unwrap_err();
     assert_eq!(e, "syntax error at end of input");
 }
+
+#[test]
+fn parse_num_sync_is_c_atoi() {
+    // syncrep_gram.y:106 config->num_sync = atoi(num_sync), i.e. (int) strtol:
+    // a value that fits a 64-bit long wraps modulo 2^32 on the narrowing cast,
+    // and strtol clamps to LONG_MAX beyond that (low 32 bits all set -> -1).
+    // check_synchronous_standby_names (syncrep.c:1087) then rejects
+    // num_sync <= 0 quoting the wrapped value.
+    assert_eq!(p("2147483647 (s1)").num_sync, i32::MAX);
+    assert_eq!(p("2147483648 (s1)").num_sync, i32::MIN);
+    assert_eq!(p("4294967296 (s1)").num_sync, 0);
+    assert_eq!(p("4294967297 (s1)").num_sync, 1);
+    assert_eq!(p("99999999999999999999999 (s1)").num_sync, -1);
+    assert_eq!(p("any 9223372036854775807 (s1)").num_sync, -1);
+    assert_eq!(p("first 9223372036854775808 (s1)").num_sync, -1);
+    assert_eq!(p("0 (s1)").num_sync, 0);
+}
+
+#[test]
+fn syntax_error_reports_yytext() {
+    // syncrep_scanner.l:165 syncrep_yyerror formats yytext — the offending
+    // token's raw text as typed: keywords keep the user's casing, a quoted
+    // name errors on its closing dquote (the <xd>{xdstop} token), "*" is "*".
+    for (input, detail) in [
+        ("s1, any", "syntax error at or near \"any\""),
+        ("s1, First", "syntax error at or near \"First\""),
+        ("s1 aNy", "syntax error at or near \"aNy\""),
+        ("Any (s1)", "syntax error at or near \"(\""),
+        ("s1 \"x\"", "syntax error at or near \"\"\""),
+        ("s1 *", "syntax error at or near \"*\""),
+        ("s1 ; s2", "syntax error at or near \";\""),
+        ("2 (s1) x", "syntax error at or near \"x\""),
+        ("2 (s1) 33", "syntax error at or near \"33\""),
+        ("\"unterminated", "unterminated quoted identifier at end of input"),
+        ("any 2", "syntax error at end of input"),
+        ("any", "syntax error at end of input"),
+    ] {
+        assert_eq!(parse_synchronous_standby_names(input).unwrap_err(), detail, "input {input:?}");
+    }
+}

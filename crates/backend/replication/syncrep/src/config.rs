@@ -21,13 +21,22 @@ enum Token {
     Comma,
     LParen,
     RParen,
-    Junk(String),
+    Junk,
+}
+
+/// One scanned token with its yytext (syncrep_scanner.l): the raw text the
+/// flex rule matched, which syncrep_yyerror quotes verbatim. A quoted name's
+/// token is the closing dquote (<xd>{xdstop}), so its yytext is `"`.
+#[derive(Debug, PartialEq)]
+struct Tok {
+    kind: Token,
+    yytext: String,
 }
 
 // syncrep_scanner.l: whitespace-skipping tokenizer. Identifiers are
 // ident_start [A-Za-z\200-\377_] then ident_cont [A-Za-z\200-\377_0-9$];
 // double-quoted names use "" as an escaped quote; "*" is a NAME.
-fn scan(input: &str) -> Result<Vec<Token>, String> {
+fn scan(input: &str) -> Result<Vec<Tok>, String> {
     let b = input.as_bytes();
     let mut toks = Vec::new();
     let mut i = 0;
@@ -59,7 +68,7 @@ fn scan(input: &str) -> Result<Vec<Token>, String> {
                         name.push_str(&input[start..j]);
                     }
                 }
-                toks.push(Token::Name(name));
+                toks.push(Tok { kind: Token::Name(name), yytext: "\"".into() });
                 i = j;
             }
             b'0'..=b'9' => {
@@ -67,22 +76,23 @@ fn scan(input: &str) -> Result<Vec<Token>, String> {
                 while i < b.len() && b[i].is_ascii_digit() {
                     i += 1;
                 }
-                toks.push(Token::Num(input[start..i].to_string()));
+                let text = input[start..i].to_string();
+                toks.push(Tok { kind: Token::Num(text.clone()), yytext: text });
             }
             b'*' => {
-                toks.push(Token::Name("*".into()));
+                toks.push(Tok { kind: Token::Name("*".into()), yytext: "*".into() });
                 i += 1;
             }
             b',' => {
-                toks.push(Token::Comma);
+                toks.push(Tok { kind: Token::Comma, yytext: ",".into() });
                 i += 1;
             }
             b'(' => {
-                toks.push(Token::LParen);
+                toks.push(Tok { kind: Token::LParen, yytext: "(".into() });
                 i += 1;
             }
             b')' => {
-                toks.push(Token::RParen);
+                toks.push(Tok { kind: Token::RParen, yytext: ")".into() });
                 i += 1;
             }
             c if c.is_ascii_alphabetic() || c == b'_' || c >= 0x80 => {
@@ -97,36 +107,40 @@ fn scan(input: &str) -> Result<Vec<Token>, String> {
                     i += 1;
                 }
                 let word = &input[start..i];
-                if word.eq_ignore_ascii_case("any") {
-                    toks.push(Token::Any);
+                let kind = if word.eq_ignore_ascii_case("any") {
+                    Token::Any
                 } else if word.eq_ignore_ascii_case("first") {
-                    toks.push(Token::First);
+                    Token::First
                 } else {
-                    toks.push(Token::Name(word.to_string()));
-                }
+                    Token::Name(word.to_string())
+                };
+                toks.push(Tok { kind, yytext: word.to_string() });
             }
             _ => {
-                toks.push(Token::Junk(input[i..].chars().next().unwrap().to_string()));
-                i += input[i..].chars().next().unwrap().len_utf8();
+                // Bytes >= 0x80 are ident_start, so junk is always one ASCII byte.
+                let text = input[i..].chars().next().unwrap().to_string();
+                i += text.len();
+                toks.push(Tok { kind: Token::Junk, yytext: text });
             }
         }
     }
     Ok(toks)
 }
 
-fn syntax_error(toks: &[Token], pos: usize) -> String {
-    // syncrep_yyerror: "syntax error at or near \"%s\"" / "at end of input".
+fn syntax_error(toks: &[Tok], pos: usize) -> String {
+    // syncrep_yyerror (syncrep_scanner.l:165): "%s at or near \"%s\"" with
+    // yytext of the offending lookahead token, or "%s at end of input".
     match toks.get(pos) {
-        Some(Token::Any) => "syntax error at or near \"ANY\"".into(),
-        Some(Token::First) => "syntax error at or near \"FIRST\"".into(),
-        Some(Token::Name(s)) | Some(Token::Num(s)) | Some(Token::Junk(s)) => {
-            format!("syntax error at or near \"{s}\"")
-        }
-        Some(Token::Comma) => "syntax error at or near \",\"".into(),
-        Some(Token::LParen) => "syntax error at or near \"(\"".into(),
-        Some(Token::RParen) => "syntax error at or near \")\"".into(),
+        Some(t) => format!("syntax error at or near \"{}\"", t.yytext),
         None => "syntax error at end of input".into(),
     }
+}
+
+/// syncrep_gram.y:106 `config->num_sync = atoi(num_sync)`: (int) strtol() of
+/// a digit string — strtol saturates at LONG_MAX (64-bit) on overflow and the
+/// narrowing cast keeps the low 32 bits.
+fn c_atoi(digits: &str) -> i32 {
+    digits.parse::<i64>().unwrap_or(i64::MAX) as i32
 }
 
 /// syncrep_gram.y:
@@ -140,22 +154,24 @@ pub fn parse_synchronous_standby_names(input: &str) -> Result<SyncRepConfigData,
     let toks = scan(input)?;
     let mut pos = 0;
 
-    let (num_sync_str, method, parenthesized) = match toks.first() {
+    let kind = |pos: usize| toks.get(pos).map(|t| &t.kind);
+
+    let (num_sync_str, method, parenthesized) = match kind(0) {
         Some(Token::Any) | Some(Token::First) => {
-            let method = if toks[0] == Token::Any { SYNC_REP_QUORUM } else { SYNC_REP_PRIORITY };
+            let method = if kind(0) == Some(&Token::Any) { SYNC_REP_QUORUM } else { SYNC_REP_PRIORITY };
             pos = 1;
-            let Some(Token::Num(n)) = toks.get(pos) else {
+            let Some(Token::Num(n)) = kind(pos) else {
                 return Err(syntax_error(&toks, pos));
             };
             let n = n.clone();
             pos += 1;
-            if toks.get(pos) != Some(&Token::LParen) {
+            if kind(pos) != Some(&Token::LParen) {
                 return Err(syntax_error(&toks, pos));
             }
             pos += 1;
             (n, method, true)
         }
-        Some(Token::Num(n)) if toks.get(1) == Some(&Token::LParen) => {
+        Some(Token::Num(n)) if kind(1) == Some(&Token::LParen) => {
             let n = n.clone();
             pos = 2;
             (n, SYNC_REP_PRIORITY, true)
@@ -166,14 +182,14 @@ pub fn parse_synchronous_standby_names(input: &str) -> Result<SyncRepConfigData,
     // standby_list
     let mut members = Vec::new();
     loop {
-        match toks.get(pos) {
+        match kind(pos) {
             Some(Token::Name(s)) | Some(Token::Num(s)) => {
                 members.push(s.clone());
                 pos += 1;
             }
             _ => return Err(syntax_error(&toks, pos)),
         }
-        if toks.get(pos) == Some(&Token::Comma) {
+        if kind(pos) == Some(&Token::Comma) {
             pos += 1;
             continue;
         }
@@ -181,7 +197,7 @@ pub fn parse_synchronous_standby_names(input: &str) -> Result<SyncRepConfigData,
     }
 
     if parenthesized {
-        if toks.get(pos) != Some(&Token::RParen) {
+        if kind(pos) != Some(&Token::RParen) {
             return Err(syntax_error(&toks, pos));
         }
         pos += 1;
@@ -190,8 +206,7 @@ pub fn parse_synchronous_standby_names(input: &str) -> Result<SyncRepConfigData,
         return Err(syntax_error(&toks, pos));
     }
 
-    // C: atoi() of the NUM token.
-    let num_sync = num_sync_str.parse::<i32>().unwrap_or(i32::MAX);
+    let num_sync = c_atoi(&num_sync_str);
 
     Ok(SyncRepConfigData { num_sync, syncrep_method: method, members })
 }

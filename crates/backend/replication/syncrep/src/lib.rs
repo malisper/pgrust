@@ -18,7 +18,7 @@ use pgsync::RwLock;
 use elog::ereport;
 use types_core::{InvalidXLogRecPtr, ProcNumber, XLogRecPtr};
 use types_error::{
-    ErrorLocation, PgResult, DEBUG1, ERRCODE_ADMIN_SHUTDOWN, ERRCODE_SYNTAX_ERROR, LOG, WARNING,
+    ErrorLocation, PgResult, DEBUG1, DEBUG3, ERRCODE_ADMIN_SHUTDOWN, ERRCODE_SYNTAX_ERROR, LOG, WARNING,
 };
 use types_storage::storage::{proclist_head, proclist_node, PGPROC, SYNC_REP_LOCK};
 use types_storage::waiteventset::{WL_LATCH_SET, WL_POSTMASTER_DEATH};
@@ -628,6 +628,7 @@ pub fn SyncRepReleaseWaiters() -> PgResult<()> {
     };
 
     // Set the lsn first so woken backends release up to this location.
+    let mut released = [0i32; NUM_SYNC_REP_WAIT_MODE];
     for (mode, ptr) in [
         (SYNC_REP_WAIT_WRITE, write_ptr),
         (SYNC_REP_WAIT_FLUSH, flush_ptr),
@@ -635,10 +636,26 @@ pub fn SyncRepReleaseWaiters() -> PgResult<()> {
     ] {
         if ctl.sync_rep_lsn[mode as usize].load(Relaxed) < ptr {
             ctl.sync_rep_lsn[mode as usize].store(ptr, Relaxed);
-            SyncRepWakeQueue(false, mode);
+            released[mode as usize] = SyncRepWakeQueue(false, mode);
         }
     }
-    unlock_sync_rep()
+    unlock_sync_rep()?;
+
+    // syncrep.c:569
+    ereport(DEBUG3)
+        .errmsg_internal(format!(
+            "released {} procs up to write {:X}/{:X}, {} procs up to flush {:X}/{:X}, {} procs up to apply {:X}/{:X}",
+            released[SYNC_REP_WAIT_WRITE as usize],
+            (write_ptr >> 32) as u32,
+            write_ptr as u32,
+            released[SYNC_REP_WAIT_FLUSH as usize],
+            (flush_ptr >> 32) as u32,
+            flush_ptr as u32,
+            released[SYNC_REP_WAIT_APPLY as usize],
+            (apply_ptr >> 32) as u32,
+            apply_ptr as u32,
+        ))
+        .finish(loc(569, "SyncRepReleaseWaiters"))
 }
 
 // SyncRepWakeQueue (syncrep.c:907): caller holds SyncRepLock exclusive.
