@@ -40,10 +40,18 @@
 // "ready to accept connections" on stderr, and then announces each connection
 // with a 16-byte HPGP record on the listener. Two backends on two wasi threads
 // then run wasm/hostpipes-scenario.js — the same scenario the native arm runs.
-// fd numbering is threads-host.js's: listener 1000, session k at 1001+2k /
-// 1002+2k. `--fs copy` only in this lane.
+// fd numbering is threads-host.js's: wake 999, listener 1000, session k at
+// 1001+2k / 1002+2k.
 //
-// Usage: node run-node-wire-threads.mjs [--stderr FILE] [--pool N]
+// The lane ENDS with a real shutdown: closing the listener pipe is EOF on the
+// postmaster's listener, which pqcomm_hostpipes turns into a fast-shutdown
+// request (the SIGINT flags + the postmaster latch, through
+// postmaster_seams::signal_postmaster_fast_shutdown). The driver then waits
+// for the guest to exit on its own and asserts exit 0 plus the shutdown
+// checkpoint in the log — nothing here calls worker.terminate() to end the
+// server any more.
+//
+// Usage: node run-node-wire-threads.mjs [--stderr FILE] [--pool N] [--workers N]
 //        [--dispatch stdio-wire|stdio-wire-threaded|postmaster] [--fs copy|broker]
 //        [--trace N]
 // Env: PGRUST_WASM_THREADS (path to the threads postgres.wasm),
@@ -69,6 +77,7 @@ import {
   storageWorkerUrl,
   PipeRegistry,
   HOSTPIPES_LISTEN_FD,
+  HOSTPIPES_WAKE_FD,
   sessionFds,
 } from './threads-host.js';
 import { runHostPipesScenario } from './hostpipes-scenario.js';
@@ -122,13 +131,30 @@ const TRACE = Number(argAfter('--trace') || 0);
 const POOL_SIZE = Number(argAfter('--pool') || (POSTMASTER ? 12 : 4));
 // --fs broker routes every guest FILE call to one store in a coordinator worker; --fs copy
 // (default) keeps checkpoint (a)'s per-worker private copy of the packed image.
-const FS_MODE = argAfter('--fs') || 'copy';
+// The postmaster lane defaults to `--fs broker`: its shutdown is real now, and
+// the shutdown CHECKPOINT can only complete against the ONE store the backends
+// wrote (see postmasterShutdown). The wire lanes keep `--fs copy`.
+const FS_MODE = argAfter('--fs') || (POSTMASTER ? 'broker' : 'copy');
 if (FS_MODE !== 'copy' && FS_MODE !== 'broker') throw new Error(`unknown --fs ${FS_MODE}`);
-// The postmaster lane's default is `--fs copy`, and that is the arm this bite
-// scores. `--fs broker` is NOT refused: it was probed here and passes too, and
-// it is the arm on which the shutdown path's explicit CHECKPOINT actually
-// completes (under copy the checkpointer has its own private Vfs and cannot
-// see the backends' relation files — see postmasterShutdown below).
+// max_parallel_workers, and therefore the size of the postmaster's WARM
+// STANDBY POOL (launch_backend::wpool: `target()` IS max_parallel_workers).
+// The guest's boot default is 16 and autotune would put it at the core count;
+// either is more standby threads than a FIXED host pool of `--pool N` slots
+// can give without starving the aux processes. So the lane sizes it, the way
+// any host with a bounded thread supply must: 2 standbys, well inside the
+// headroom left by the startup process, checkpointer, bgwriter, WAL writer,
+// memory watchdog, timeout timer and the session backends.
+const POOL_WORKERS = Number(argAfter('--workers') ?? 2);
+// --no-wake withholds PGRUST_HOSTPIPES_WAKE_FD from the guest, so the
+// postmaster falls back to its timed accept probe. The A/B that measures what
+// the host-driven wake is worth: same module, same machine, one env var.
+const NO_WAKE = process.argv.includes('--no-wake');
+// `--fs broker` is the arm the postmaster lane is SCORED on now that its
+// shutdown is real: the shutdown checkpoint is the checkpointer thread
+// writing the store, and only the broker gives it the same store the backends
+// wrote. `--fs copy` still runs, and is still reported verbatim — under it the
+// checkpointer has its own private Vfs and cannot see the backends' relation
+// files (see postmasterShutdown below).
 const BUNDLE_URL = process.env.PGRUST_REPACKED_BUNDLE || repackedBundleUrl(import.meta.url);
 const errFd = stderrFile ? fs.openSync(stderrFile, 'w') : 2;
 
@@ -155,6 +181,10 @@ if (POSTMASTER) {
   argv.push('-c', 'listen_addresses=', '-c', 'unix_socket_directories=');
   // So the checkpoint the shutdown path can (or cannot) run is visible in the log.
   argv.push('-c', 'log_checkpoints=on');
+  // The warm standby pool is ON in this lane (that is the point of sizing it):
+  // `wpool::maintain()` now spawns at most `target - population` standbys per
+  // postmaster lap, so a bounded target is a bounded thread claim.
+  argv.push('-c', `max_parallel_workers=${POOL_WORKERS}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -275,10 +305,17 @@ const SESSION_COUNT = 3;
 const CONN_MAGIC = 0x50475048; // "HPGP" in stream order
 const pipeRegistry = new PipeRegistry();
 let listenerPipe = null;
+let wakePipe = null;
 const sessionPipes = [];
 if (POSTMASTER) {
   listenerPipe = SabPipe.create(1 << 12); // 16-byte records; a page is plenty
   pipeRegistry.register(HOSTPIPES_LISTEN_FD, { in: listenerPipe });
+  // The postmaster's wake channel: BOTH ends of one ring on one fd (see
+  // threads-host.js HOSTPIPES_WAKE_FD). Sized far past anything that can
+  // queue — the postmaster drains it on every wake, and a full ring would
+  // make a guest thread's SetLatch block, which SetLatch may never do.
+  wakePipe = SabPipe.create(1 << 16);
+  pipeRegistry.register(HOSTPIPES_WAKE_FD, { in: wakePipe, out: wakePipe });
   for (let k = 0; k < SESSION_COUNT; k++) {
     const { inFd, outFd } = sessionFds(k);
     const toGuest = SabPipe.create(1 << 20); // driver -> backend (guest READS)
@@ -288,7 +325,7 @@ if (POSTMASTER) {
     sessionPipes.push({ k, inFd, outFd, toGuest, fromGuest });
   }
   note(
-    `host-pipes: listener fd ${HOSTPIPES_LISTEN_FD}; sessions ` +
+    `host-pipes: listener fd ${HOSTPIPES_LISTEN_FD}, wake fd ${HOSTPIPES_WAKE_FD}; sessions ` +
       sessionPipes.map((p) => `${p.k}=(in ${p.inFd}, out ${p.outFd})`).join(', '),
   );
 }
@@ -300,6 +337,7 @@ let exitCode = null;
 let exitFrom = null;
 const stderrChunks = [];
 let serverLog = '';
+let poolFinal = null;
 
 const worker = makeWorker(threadWorkerUrl(import.meta.url), { name: 'pgrust-process' });
 
@@ -315,6 +353,10 @@ const exitedPromise = new Promise((r) => { exited = r; });
 
 function handleMessage(m) {
   switch (m.type) {
+    case 'pool-final':
+      poolFinal = m.slots;
+      note(`host: pool slots at guest exit: ${m.slots.map((x) => `${x.slot}=${x.state}`).join(' ')}`);
+      break;
     case 'pool-ready':
       note(`host: thread pool ready (${m.size})`);
       poolReady();
@@ -399,18 +441,12 @@ worker.postMessage(
       // (pqcomm_hostpipes::LISTEN_FD_ENV); without it PostmasterMain FATALs.
       ...(POSTMASTER
         ? {
+            // The two channels that can name a host-owned fd. The listener is
+            // required (pqcomm_hostpipes::LISTEN_FD_ENV; PostmasterMain FATALs
+            // without it); the wake fd is OPTIONAL — drop it and the
+            // postmaster falls back to its 50ms accept probe.
             PGRUST_HOSTPIPES_LISTEN_FD: String(HOSTPIPES_LISTEN_FD),
-            // The postmaster keeps a WARM STANDBY POOL of max_parallel_workers
-            // (8) pre-spawned backend threads, and `wpool::maintain()` loops
-            // `while POPULATION < target()` — POPULATION is charged by the
-            // CHILD once it runs, so on a host whose thread start is not
-            // instant the loop overshoots and spawns until thread-spawn fails.
-            // Measured here: it claimed EVERY pool slot (12 of 12, then 20 of
-            // 20) before the startup process could get its timeout-timer
-            // thread, and the startup process panicked on the -EAGAIN. This is
-            // the pool's own documented kill switch — no Rust change, and a
-            // fixed prewarmed pool has no room for warm standbys anyway.
-            PGRUST_NO_WORKER_POOL: '1',
+            ...(NO_WAKE ? {} : { PGRUST_HOSTPIPES_WAKE_FD: String(HOSTPIPES_WAKE_FD) }),
           }
         : {}),
     },
@@ -508,6 +544,7 @@ async function runQuery(sql, { expectError = false } = {}) {
 // try that would swallow its own failures).
 class LaneDone extends Error {}
 
+const acceptLatencies = [];
 const T0 = Date.now();
 const stamp = () => String(Date.now() - T0).padStart(6);
 const plog = (line) => note(`[${stamp()}ms] ${line}`);
@@ -521,6 +558,16 @@ function announceConnection(inFd, outFd) {
   view.setUint32(12, 0, true);
   const n = listenerPipe.write(rec, { block: false });
   if (n !== 16) throw new Error(`listener ring would not take a whole record (${n}/16)`);
+  wakePostmaster();
+}
+
+// The host half of the accept wake. Without it a connection record just sits
+// in the listener ring until the postmaster's next probe; with it the
+// postmaster's single `poll` on the wake fd returns at once (its waiter is in
+// fd-park mode on this very fd, so a guest SetLatch lands here too).
+function wakePostmaster() {
+  if (!wakePipe) return;
+  wakePipe.write(new Uint8Array([0]), { block: false });
 }
 
 // One session over one (in, out) SabPipe pair. Same shape as the native
@@ -534,6 +581,7 @@ class PipeSession {
     this.reader = new WireReader();
     this.collector = null;
     this.closed = false;
+    this.onFirstByte = null;
     this.pump = (async () => {
       const scratch = new Uint8Array(65536);
       for (;;) {
@@ -546,6 +594,15 @@ class PipeSession {
   }
 
   _feed(bytes) {
+    // The first byte the backend writes is the accept-to-first-response
+    // latency: the postmaster had to WAKE, accept the record, spawn the
+    // backend thread and let it read the startup packet. It is the number
+    // the host-driven wake moves.
+    if (this.onFirstByte) {
+      const cb = this.onFirstByte;
+      this.onFirstByte = null;
+      cb();
+    }
     this.reader.feed(bytes);
     for (;;) {
       const m = this.reader.next();
@@ -619,8 +676,10 @@ async function openPipeSession(name) {
   const slot = sessionPipes[nextSession++];
   if (!slot) throw new Error(`no host-pipe pair left for session ${name}`);
   plog(`announcing session ${name} on (in=${slot.inFd}, out=${slot.outFd})`);
+  const announcedAt = Date.now();
   announceConnection(slot.inFd, slot.outFd);
   const s = new PipeSession(name, slot.toGuest, slot.fromGuest);
+  s.onFirstByte = () => acceptLatencies.push({ name, ms: Date.now() - announcedAt });
   slot.session = s;
   const hello = await Promise.race([
     s.startup({ user: 'postgres', database: 'postgres', application_name: `hostpipes-${name}` }),
@@ -638,26 +697,29 @@ async function openPipeSession(name) {
   };
 }
 
-// SHUTDOWN, and what this target can honestly offer. There are no signals on
-// wasm: `main_entry`'s `pqsignal` is a documented no-op there, the postmaster
-// registers no THREAD signal handlers (`pqsignal_thread`) and holds no
-// procsignal slot, so nothing a backend or the host can do reaches
-// `handle_pm_shutdown_request_signal`. Closing the listener does NOT shut the
-// postmaster down either: `accept_connection`'s EOF arm logs, backs off 100ms
-// and returns Err, which ServerLoop drops on the floor. So there is NO
-// SHUTDOWN CHECKPOINT here, and there cannot be one without a Rust-side wasm
-// shutdown entry point. What this does instead, least destructive first:
+// SHUTDOWN — a REAL one, and the same one the native driver performs.
 //
-//   1. ask a third session for an explicit CHECKPOINT — the closest analogue
-//      that exists. Under `--fs copy` it is EXPECTED to fail: the checkpointer
-//      thread has its own private Vfs copy and cannot see the relation files
-//      the backends created in theirs. Recorded as a note with the exact
-//      server-log reason, never as a pass/fail (it is a storage-lane property,
-//      not a postmaster one);
-//   2. close the listener pipe and check the postmaster NOTICED — that EOF is
-//      the only thing resembling a stop signal this target can deliver, and
-//      seeing it logged proves the postmaster is still alive and looping;
-//   3. terminate the workers.
+// There are still no signals on wasm (main_entry's `pqsignal` is a documented
+// no-op there), and that no longer matters: the STOP SIGNAL of this transport
+// is the listener reaching EOF. `pqcomm_hostpipes::accept_connection` turns
+// that EOF into `postmaster_seams::signal_postmaster_fast_shutdown` — the
+// very handler a SIGINT runs — so the postmaster raises
+// PENDING_PM_FAST_SHUTDOWN_REQUEST, sets its own latch, and walks the
+// ordinary PM_STOP_BACKENDS -> PM_WAIT_BACKENDS -> shutdown checkpoint ->
+// exit(0) ceremony. Nothing wasm-specific is involved, which is exactly why
+// the native driver can (and does) prove the same arm.
+//
+// Order here, least destructive first:
+//   1. ask a third session for an explicit CHECKPOINT. Under `--fs broker`
+//      this completes; under `--fs copy` it is EXPECTED to fail (the
+//      checkpointer thread has its own private Vfs and cannot see the
+//      relation files the backends created in theirs). Recorded as a note
+//      with the server-log reason, never as a pass/fail — it is a storage-lane
+//      property, not a postmaster one;
+//   2. close the listener pipe and poke the wake fd, then WAIT FOR THE GUEST
+//      TO EXIT ON ITS OWN. Assert exit code 0, the fast-shutdown request, the
+//      shutdown checkpoint and "database system is shut down" in the log, and
+//      that every pool slot came back idle (no guest thread left running).
 async function postmasterShutdown() {
   const notes = [];
   const checks = [];
@@ -685,21 +747,76 @@ async function postmasterShutdown() {
     notes.push(`explicit CHECKPOINT could not be attempted: ${e && e.message ? e.message : e}`);
   }
 
-  const before = serverLog.length;
+  const shutStart = Date.now();
+  plog('closing the host-pipes listener: that EOF IS the fast-shutdown request');
   listenerPipe.close();
-  await new Promise((r) => setTimeout(r, 400));
-  const sawEof = /listener reached end of file/i.test(serverLog.slice(before));
-  checks.push({
-    ok: sawEof,
-    what: 'postmaster observed the listener EOF (still alive and looping at shutdown time)',
-  });
+  wakePostmaster();
+  const gone = await Promise.race([
+    exitedPromise.then(() => true),
+    new Promise((r) => setTimeout(() => r(false), 60000)),
+  ]);
+  const shutMs = Date.now() - shutStart;
+  plog(`  postmaster stopped in ${shutMs}ms (exit ${exitCode} from ${exitFrom})`);
+  // The last stderr chunks can still be in flight on the worker's message
+  // queue when `exit` lands; give them one turn.
+  await new Promise((r) => setTimeout(r, 300));
+
+  // Pool slots at exit. `idle`/`empty` = the guest thread returned (or the
+  // slot was never used); `running` = a guest thread that never came back.
+  // Some of those are expected, and none of them is a postmaster CHILD:
+  //   * four process-lifetime threads — `pg-timeout-timer` (C's SIGALRM),
+  //     `pg:memwatchdog`, `pg-bgjobs-dispatcher`, `pg-slease-sweeper` — none
+  //     of which holds a pmchild slot, so PM_WAIT_BACKENDS never waits on
+  //     them and process exit is what reclaims them, in C as here;
+  //   * up to `max_parallel_workers` PARKED WARM STANDBYS. A clean shutdown
+  //     does not retire the pool (only reload's `wpool::flush` and crash
+  //     reinit's `flush_for_crash` do), so a parked standby is reclaimed by
+  //     process exit too; whether its `recv()` error arm happens to be
+  //     scheduled before `proc_exit` is a race, and measured both ways.
+  // Anything BEYOND that bound is a real child that failed to stop.
+  const LIFETIME_THREADS = 4 + POOL_WORKERS;
+  const running = (poolFinal || []).filter((x) => x.state === 'running');
+  const midSpawn = (poolFinal || []).filter((x) => x.state === 'claimed' || x.state === 'start');
+  notes.push(`listener close -> guest exit in ${shutMs}ms`);
   notes.push(
-    'closing the listener does NOT stop the postmaster: accept_connection logs the EOF, ' +
-      'backs off 100ms and returns Err, which ServerLoop discards',
+    poolFinal
+      ? `pool slots at exit: ${poolFinal.map((x) => `${x.slot}=${x.state}`).join(' ')} ` +
+        `(${running.length} still running; up to ${LIFETIME_THREADS} are expected and ` +
+        'are NOT postmaster children: 4 process-lifetime threads — pg-timeout-timer, ' +
+        `pg:memwatchdog, pg-bgjobs-dispatcher, pg-slease-sweeper — plus up to ${POOL_WORKERS} ` +
+        'parked warm standbys)'
+      : 'the process worker never reported its pool slots (guest did not return from _start)',
   );
-  notes.push(
-    'no signal exists on wasm, so no fast shutdown and no SHUTDOWN CHECKPOINT: ' +
-      'the workers are terminated instead',
+  checks.push(
+    { ok: gone, what: 'postmaster exited after the listener closed (no terminate(), no signal)' },
+    { ok: exitCode === 0, what: `exit code 0 (got ${exitCode})` },
+    {
+      ok: /received fast shutdown request/i.test(serverLog),
+      what: 'log shows "received fast shutdown request" (the SIGINT flags, raised by the EOF)',
+    },
+    {
+      ok: /host-pipes listener closed: fast shutdown requested/i.test(serverLog),
+      what: 'log shows the transport attributing the shutdown to the listener close',
+    },
+    {
+      ok: /checkpoint starting: shutdown/i.test(serverLog),
+      what: 'log shows the SHUTDOWN CHECKPOINT',
+    },
+    {
+      ok: /database system is shut down/i.test(serverLog),
+      what: 'log shows "database system is shut down"',
+    },
+    {
+      ok: !!poolFinal && midSpawn.length === 0,
+      what: `no pool slot is stuck mid-spawn at exit (${midSpawn.length} claimed/start)`,
+    },
+    {
+      ok: !!poolFinal && running.length <= LIFETIME_THREADS,
+      what:
+        `every postmaster CHILD thread returned: ${running.length} slot(s) still running, ` +
+        `at most ${LIFETIME_THREADS} non-child threads allowed ` +
+        `(4 process-lifetime + ${POOL_WORKERS} parked standbys)`,
+    },
   );
   return { notes, checks };
 }
@@ -802,6 +919,23 @@ if (POSTMASTER) {
     `the postmaster spawned only ${spawnedTids.length} thread(s); expected the aux ` +
       'threads plus two backends',
   );
+  note(
+    `accept latency (announce -> backend's first byte, wake fd ${NO_WAKE ? 'OFF' : 'ON'}): ` +
+      acceptLatencies.map((a) => `${a.name}=${a.ms}ms`).join(' '),
+  );
+  const freeSlots = (poolFinal || []).filter((x) => x.state === 'empty' || x.state === 'idle').length;
+  note(
+    `pool: ${POOL_SIZE} slots, ${spawnedTids.length} thread(s) started ` +
+      `(max_parallel_workers=${POOL_WORKERS} warm standbys), ${freeSlots} slot(s) free at exit`,
+  );
+  // The coordinator holds the ONE store the checkpointer just wrote through;
+  // it must be stopped by its doorbell (it is parked in Atomics.wait and
+  // cannot be reached by postMessage), and only AFTER the guest is gone.
+  if (storageWorker) {
+    doorbell.requestStop();
+    await Promise.race([storageStoppedPromise, new Promise((r) => setTimeout(r, 5000))]);
+    try { storageWorker.terminate(); } catch { /* already gone */ }
+  }
   try { worker.terminate(); } catch { /* already gone */ }
   if (failures.length) {
     for (const f of failures) note(`DRIVER-FAIL: ${f}`);

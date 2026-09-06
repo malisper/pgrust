@@ -18,6 +18,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // kill(PostmasterPid, SIGINT)'s thread rendering: run the postmaster's
+    // FAST-shutdown handler (pend PENDING_PM_FAST_SHUTDOWN_REQUEST +
+    // PENDING_PM_SHUTDOWN_REQUEST, then set the PM latch), so a caller that
+    // has no signal to send — a TRANSPORT that just watched its listener
+    // reach EOF, or a wasm host that has no signals at all — reaches the
+    // one shutdown path the state machine owns instead of inventing a
+    // second one. Deliberately the SIGINT flavour and nothing wider: a
+    // listener close is "no more connections will arrive", which is exactly
+    // what fast shutdown means, and the caller must not be able to pick
+    // immediate shutdown (that skips the shutdown checkpoint).
+    pub fn signal_postmaster_fast_shutdown()
+);
+
+seam_core::seam!(
     // C `PgStartTime` (timestamp.c global, written once by the postmaster).
     pub fn pg_start_time() -> i64
 );

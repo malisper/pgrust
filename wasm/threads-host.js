@@ -54,6 +54,8 @@
 //   fd 0        stdin           { in:  the driver->guest SabPipe }
 //   fd 1        stdout          { out: the guest->driver SabPipe }
 //   fd 2        stderr          { sink: onStderr }  — see below
+//   fd 999      host-pipes postmaster WAKE token pipe (PGRUST_HOSTPIPES_WAKE_FD),
+//               guest reads AND writes the same ring (see HOSTPIPES_WAKE_FD)
 //   fd 1000     host-pipes listener (PGRUST_HOSTPIPES_LISTEN_FD), guest reads
 //   fd 1001+2k  session k's in_fd   (guest reads client->server bytes)
 //   fd 1002+2k  session k's out_fd  (guest writes server->client bytes)
@@ -261,6 +263,20 @@ export class SpawnDesk {
   markDone(slot) {
     this.markIdle(slot);
   }
+
+  /// Per-slot state, by name. The shutdown lane's evidence that every guest
+  /// thread the postmaster started actually RETURNED: a slot left `running`
+  /// after the process exited is a thread that never came back.
+  snapshot() {
+    const names = ['empty', 'idle', 'claimed', 'start', 'running'];
+    const n = this.poolSize;
+    const out = [];
+    for (let slot = 0; slot < n; slot++) {
+      const st = Atomics.load(this.a, this._base(slot) + S_STATE);
+      out.push({ slot, state: names[st] || `state-${st}`, tid: Atomics.load(this.a, this._base(slot) + S_TID) });
+    }
+    return out;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -276,6 +292,21 @@ const WASI_FILETYPE_CHARACTER_DEVICE = 2;
 
 /** The host-pipes listener fd. Mirrored into PGRUST_HOSTPIPES_LISTEN_FD. */
 export const HOSTPIPES_LISTEN_FD = 1000;
+/**
+ * The postmaster WAKE fd (PGRUST_HOSTPIPES_WAKE_FD), one below the listener
+ * so the 1001+2k session window is untouched. Registered as BOTH ends of ONE
+ * SabPipe — `{ in: wake, out: wake }` — because that is exactly what it is:
+ * a token channel whose writers are (a) this host, right after it puts a
+ * connection record on the listener or closes it, and (b) any GUEST thread
+ * whose `SetLatch` finds the postmaster in waiter fd-park mode; and whose
+ * single reader is the postmaster, which drains and discards.
+ *
+ * The bytes mean nothing, which is what makes several writers legal on a
+ * ring whose ordinary contract is single-producer: two racing 1-byte writes
+ * can leave one byte of garbage behind the other, and a reader that throws
+ * every byte away cannot tell or care. Nothing else may ever be written here.
+ */
+export const HOSTPIPES_WAKE_FD = 999;
 /** Session k's (in_fd, out_fd): the guest READS in_fd and WRITES out_fd. */
 export function sessionFds(k) {
   return { inFd: HOSTPIPES_LISTEN_FD + 1 + 2 * k, outFd: HOSTPIPES_LISTEN_FD + 2 + 2 * k };
@@ -943,7 +974,11 @@ export function makeSpawner({
     }
   }
 
-  return { prewarm, spawn, spawned, desk, terminateAll };
+  function poolSnapshot() {
+    return desk.snapshot();
+  }
+
+  return { prewarm, spawn, spawned, desk, terminateAll, poolSnapshot };
 }
 
 export { SabPipe, GuestExit, EAGAIN };

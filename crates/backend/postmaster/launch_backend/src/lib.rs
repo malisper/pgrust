@@ -1089,9 +1089,11 @@ pub mod wpool {
 
     static AVAILABLE: Mutex<Vec<Standby>> = Mutex::new(Vec::new());
     // Live standby THREADS (prelude, parked, or running a task). Incremented
-    // at spawn, decremented by the thread itself on any exit (rotation or
-    // retire). Claims do NOT decrement: a retention claim comes back, and
-    // counting it as gone made maintain() over-replenish, overshoot the
+    // by the PARENT before the OS spawn (see spawn_standby: a post-spawn
+    // credit can add back a child that already exited), decremented by the
+    // thread itself on any exit (rotation or retire) and by the parent on a
+    // spawn failure. Claims do NOT decrement: a retention claim comes back,
+    // and counting it as gone made maintain() over-replenish, overshoot the
     // target at park, and shrink-retire live retained standbys.
     static POPULATION: AtomicI32 = AtomicI32::new(0);
     // Task-pids whose exit announce parked the thread; consumed by
@@ -1140,13 +1142,36 @@ pub mod wpool {
         }
     }
 
+    /// The replenish deficit for ONE `maintain()` lap: how many standbys are
+    /// missing, computed ONCE. Pure, so the accounting law below is
+    /// unit-pinned rather than argued about.
+    ///
+    /// The law: a lap may spawn at most `target - population`, and never a
+    /// negative count. Re-reading POPULATION inside the spawn loop is what
+    /// broke: the charge is dropped by the standby THREAD
+    /// (`PopulationCharge`), so a standby that dies during the lap — a
+    /// prelude panic, a host that cannot really start the thread — puts the
+    /// count back and invites the loop to spawn its replacement immediately,
+    /// and again, and again. On a host whose threads come from a FIXED pool
+    /// (wasm: `wasi thread-spawn` hands out one prewarmed worker per slot)
+    /// that runaway claims every slot in the machine, and the next thread
+    /// anything else needs — timeout.c's timer thread, at startup-process
+    /// time — fails with EAGAIN and PANICs the startup process. Bounding the
+    /// lap makes a dying standby cost one spawn per lap, not one per
+    /// iteration.
+    pub(crate) fn replenish_deficit(population: i32, target: i32) -> i32 {
+        (target - population).max(0)
+    }
+
     /// Postmaster thread only: Inherited/GUC snapshot capture must match
     /// postmaster_child_launch's launcher-side capture.
     pub fn maintain() {
-        while POPULATION.load(Relaxed) < target() {
+        let mut deficit = replenish_deficit(POPULATION.load(Relaxed), target());
+        while deficit > 0 {
             if !spawn_standby() {
                 return;
             }
+            deficit -= 1;
         }
         // POPULATION only falls when the woken threads exit; bound the pops
         // locally or this loop would drain the whole pool.
@@ -1208,6 +1233,17 @@ pub mod wpool {
         };
         let (tx, rx) = pgsync::mpsc::sync_channel::<StandbyTask>(1);
         let (ack_tx, ack_rx) = pgsync::mpsc::sync_channel::<()>(1);
+        // Charge the population BEFORE the OS spawn, not after it returns.
+        // The charge is dropped by the child (`PopulationCharge` below), and
+        // a child can run to completion — or panic in its prelude — before
+        // `Builder::spawn` has even returned to us. Crediting afterwards then
+        // ADDS BACK a standby that is already gone: POPULATION dips to -1 and
+        // climbs to 0, `maintain()` sees a full deficit again, and the next
+        // lap spawns another. Charging parent-side makes the count "standbys
+        // this postmaster has committed to", which is the quantity
+        // `maintain()` actually needs; the only path that must un-charge is
+        // the spawn FAILURE arm, where no child exists to drop it.
+        POPULATION.fetch_add(1, Relaxed);
         // PERMIT-S2 (F2): the wpool spawn door — pooled standbys register
         // parent-side BEFORE the OS spawn, exactly like the
         // postmaster_child_launch door above. No-op unless PGRUST_SIM_SCHED=1.
@@ -1271,7 +1307,6 @@ pub mod wpool {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .push((spawn_pid, handle));
-                POPULATION.fetch_add(1, Relaxed);
                 available().push(Standby {
                     pid: spawn_pid,
                     tx,
@@ -1281,6 +1316,8 @@ pub mod wpool {
                 true
             }
             Err(_) => {
+                // No child exists to drop the charge taken above.
+                POPULATION.fetch_sub(1, Relaxed);
                 // F3 shape: retire the never-entered slot so the failed
                 // spawn cannot leak a Runnable ghost into the schedule.
                 #[cfg(pgrust_sim)]

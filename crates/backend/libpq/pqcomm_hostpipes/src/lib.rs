@@ -86,6 +86,27 @@ use types_startup::{ClientSocket, Port};
 /// no `socket()` and no name service).
 pub const LISTEN_FD_ENV: &str = "PGRUST_HOSTPIPES_LISTEN_FD";
 
+/// The environment variable naming a host-owned POSTMASTER WAKE fd, if the
+/// host offers one. OPTIONAL: without it the postmaster falls back to the
+/// timed accept probe it used before (ServerLoop's wasm arm). With it, the
+/// named fd is a host-backed pipe that is BOTH ends at once — the guest
+/// writes a token byte to it and reads the token back off it — and it is the
+/// single object the postmaster blocks on:
+///
+///   * the HOST writes a byte after every connection record it puts on the
+///     listener, and after closing the listener, so an accept no longer waits
+///     for the next probe tick;
+///   * a GUEST thread's `SetLatch` on the postmaster latch writes the same
+///     byte, because the postmaster's waiter is in fd-park mode for the
+///     duration of the block (`waiter::adopt_wake_pipe`) — the wake route
+///     `pipe(2)` gives every native backend, handed in by the host instead
+///     because WASI p1 has no `pipe(2)`.
+///
+/// The bytes carry no information: they are wake tokens, drained and thrown
+/// away. That is what makes the several-writers-one-reader arrangement sound
+/// on a ring whose ordinary contract is single-producer.
+pub const WAKE_FD_ENV: &str = "PGRUST_HOSTPIPES_WAKE_FD";
+
 /// Connection-record magic: little-endian `0x50475048` = the bytes
 /// `H P G P` in stream order (a host writing the ASCII tag byte-by-byte and
 /// a host writing a LE u32 agree).
@@ -185,7 +206,17 @@ fn poll_bounded(fd: i32, events: i16) -> i32 {
 // ---------------------------------------------------------------------------
 
 fn listen_fd_from_env() -> Option<i32> {
-    std::env::var(LISTEN_FD_ENV).ok()?.trim().parse::<i32>().ok().filter(|fd| *fd >= 0)
+    fd_from_env(LISTEN_FD_ENV)
+}
+
+fn fd_from_env(name: &str) -> Option<i32> {
+    std::env::var(name).ok()?.trim().parse::<i32>().ok().filter(|fd| *fd >= 0)
+}
+
+/// The host's postmaster-wake fd ([`WAKE_FD_ENV`]), or None when the host
+/// offers none. Read by ServerLoop's wasm arm at first wait.
+pub fn wake_fd() -> Option<i32> {
+    fd_from_env(WAKE_FD_ENV)
 }
 
 /// `ListenServerPort` for this transport: there is nothing to bind. The host
@@ -264,16 +295,43 @@ fn accept_connection(server_fd: i32) -> PgResult<ClientSocket> {
             return Err(accept_failed());
         }
         if n == 0 {
-            // The host closed the listener: C's accept() on a dead listen
-            // socket is an error the postmaster logs and retries; there is
-            // no retry that helps here, but the shape is the same (Err is
-            // the caller's STATUS_ERROR arm). Sleep as the socket provider
-            // does so a permanently-EOF listener cannot spin the postmaster
-            // at 100% CPU (it stays readable forever).
+            // EOF ON THE LISTENER IS THIS TRANSPORT'S STOP SIGNAL.
+            //
+            // The host owns the listener; the only way it ever reaches EOF is
+            // that the host closed its write end, and the only thing that can
+            // mean is "no further connection will be announced". On a socket
+            // that state is unreachable (a listen socket has no writer), so C
+            // has no arm for it; here it is the exact information a SIGINT
+            // carries, and it arrives on a channel every host has — including
+            // one with no signals at all (wasm: main_entry's `pqsignal` is a
+            // documented no-op there, so a process signal can reach nothing).
+            //
+            // So: raise the SAME pending flags the SIGINT handler raises and
+            // set the postmaster latch, through the seam that IS that handler
+            // (postmaster_seams::signal_postmaster_fast_shutdown). The state
+            // machine then runs the ordinary PM_STOP_BACKENDS ->
+            // PM_WAIT_BACKENDS -> shutdown checkpoint -> exit(0) ceremony; no
+            // second shutdown path exists and none is invented here. NOT
+            // cfg'd to wasm on purpose: the native driver drives this exact
+            // arm, which is what proves the wasm lane's shutdown is the real
+            // one.
+            //
+            // Anti-spin: an EOF listener stays readable forever, so returning
+            // Err on a still-accepting loop would burn a core. The shutdown
+            // request IS the fix — process_pm_shutdown_request reaches
+            // PM_STOP_BACKENDS, which calls ConfigurePostmasterWaitSet(false)
+            // and deregisters the listener (ServerLoop also stops probing and
+            // accepting the moment a shutdown is pending). Only when no
+            // postmaster installed the seam is there nothing to stop the
+            // spin, and then we fall back to the socket provider's back-off.
             let _ = ereport(LOG)
-                .errmsg("host-pipes listener reached end of file")
+                .errmsg("host-pipes listener closed: fast shutdown requested")
                 .finish(loc("accept_connection"));
-            sleep_after_accept_failure();
+            if postmaster_seams::signal_postmaster_fast_shutdown::is_installed() {
+                postmaster_seams::signal_postmaster_fast_shutdown::call();
+            } else {
+                sleep_after_accept_failure();
+            }
             return Err(accept_failed());
         }
         got += n as usize;
@@ -477,6 +535,13 @@ fn transport_owns_listener() -> bool {
     true
 }
 
+/// `transport_wake_fd` for this transport: the host's postmaster-wake fd, or
+/// `PGINVALID_SOCKET` when the host named none (the postmaster then keeps
+/// whatever wait its target already had). See [`WAKE_FD_ENV`].
+fn transport_wake_fd() -> i32 {
+    wake_fd().unwrap_or(types_core::PGINVALID_SOCKET)
+}
+
 /// Install the host-pipes provider into the transport seam slots — both
 /// halves: the per-connection half (`pq_init`, `secure_*`) like the stdio
 /// provider, AND the postmaster half (`listen_server_port`,
@@ -500,6 +565,7 @@ pub fn init_transport_seams() {
     pqcomm_seams::listen_server_port::set(listen_server_port);
     pqcomm_seams::accept_connection::set(accept_connection);
     pqcomm_seams::transport_owns_listener::set(transport_owns_listener);
+    pqcomm_seams::transport_wake_fd::set(transport_wake_fd);
     // pq_check_connection is left VACANT, as the stdio provider leaves it:
     // it is the socket transport's WL_SOCKET_CLOSED poll, and the caller
     // (ProcessInterrupts' CLIENT_CONNECTION_CHECK arm) treats a vacant seam
@@ -538,6 +604,35 @@ mod tests {
         assert_eq!("  3 ".trim().parse::<i32>().ok(), Some(3));
         assert_eq!("-1".parse::<i32>().ok().filter(|fd| *fd >= 0), None);
         assert_eq!("nope".parse::<i32>().ok(), None);
+    }
+
+    /// The wake fd is OPTIONAL and shares the listener fd's parse rules: a
+    /// missing or garbage value declines (and the postmaster keeps whatever
+    /// wait its target already had), never degrades to fd 0.
+    #[test]
+    fn wake_fd_env_is_optional_and_parsed_like_the_listener() {
+        assert_eq!(std::env::var(WAKE_FD_ENV).ok(), None);
+        assert_eq!(wake_fd(), None);
+        assert_eq!(transport_wake_fd(), types_core::PGINVALID_SOCKET);
+        assert_ne!(WAKE_FD_ENV, LISTEN_FD_ENV);
+    }
+
+    /// EOF on the listener is a SHUTDOWN, not a retry: the arm calls the
+    /// fast-shutdown seam when one is installed. Pinned here as the seam
+    /// contract (the flags it raises are pinned in postmaster's tests, and
+    /// the whole path end-to-end by wasm/run-native-hostpipes.mjs).
+    #[test]
+    fn listener_eof_asks_for_a_fast_shutdown_through_the_seam() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        // seam_core installs are set-once per process; this test binary has
+        // no postmaster, so the slot is free.
+        postmaster_seams::signal_postmaster_fast_shutdown::set(|| {
+            CALLS.fetch_add(1, Ordering::Release);
+        });
+        assert!(postmaster_seams::signal_postmaster_fast_shutdown::is_installed());
+        postmaster_seams::signal_postmaster_fast_shutdown::call();
+        assert_eq!(CALLS.load(Ordering::Acquire), 1);
     }
 
     /// The 16-byte record decodes little-endian at the documented offsets.

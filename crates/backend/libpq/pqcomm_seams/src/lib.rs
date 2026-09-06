@@ -71,6 +71,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // pgrust extension (no C counterpart): a HOST-OWNED fd the postmaster
+    // may block on for "something happened", or PGINVALID_SOCKET when this
+    // transport offers none (every transport but host-pipes, and host-pipes
+    // itself when its host did not hand one in). Installed by the host-pipes
+    // provider; read once, at the postmaster's first wait, by ServerLoop's
+    // wasm arm — the target where a listen fd cannot be registered in a wait
+    // set and the postmaster would otherwise have to POLL for connections.
+    // The fd is both ends of one pipe: the host writes a wake token when it
+    // announces a connection or closes the listener, and the postmaster's
+    // own waiter writes the same token from fd-park mode, so a guest-side
+    // `SetLatch` and a host-side event wake the same single block.
+    pub fn transport_wake_fd() -> i32
+);
+
+seam_core::seam!(
     // pgrust extension (no C counterpart): does this transport OWN its
     // listener rather than bind one? Installed only by the host-pipes
     // provider, whose listener is a file descriptor the host hands us

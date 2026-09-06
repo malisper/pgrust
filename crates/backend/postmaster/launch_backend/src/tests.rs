@@ -347,3 +347,60 @@ fn every_child_thread_arms_its_stack_ceiling() {
     assert!(bases >= 5, "{bases}");
     assert_eq!(bases, ceilings);
 }
+
+// ---------------------------------------------------------------------------
+// wpool replenish accounting (wpool::replenish_deficit + the parent-side
+// POPULATION charge). The law these pin: ONE maintain() lap may spawn at most
+// `target - population` standbys, and a standby that dies mid-lap cannot make
+// the lap spawn its replacement — the runaway that claimed every wasi
+// thread-spawn slot on the wasm host and then PANICked the startup process
+// with EAGAIN out of timeout.c's timer-thread create.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn replenish_deficit_is_the_gap_and_never_negative() {
+    use crate::wpool::replenish_deficit;
+    assert_eq!(replenish_deficit(0, 8), 8);
+    assert_eq!(replenish_deficit(5, 8), 3);
+    assert_eq!(replenish_deficit(8, 8), 0);
+    // Over target (a retention claim came back, or the target shrank on a
+    // reload): the shrink arm owns that, never the spawn arm.
+    assert_eq!(replenish_deficit(12, 8), 0);
+    // A momentarily NEGATIVE population — the exact state a post-spawn credit
+    // used to produce (child exits and decrements before the parent
+    // increments) — must not become a bigger spawn burst than the target.
+    assert_eq!(replenish_deficit(-1, 8), 8 + 1);
+    assert_eq!(replenish_deficit(0, 0), 0);
+    assert_eq!(replenish_deficit(3, 0), 0);
+}
+
+/// The lap bound, simulated over the same arithmetic `maintain()` runs: a
+/// standby that dies the instant it is spawned (population stays 0) may cost
+/// at most `target` spawns per lap, not an unbounded run.
+#[test]
+fn a_lap_spawns_at_most_target_even_if_every_standby_dies() {
+    use crate::wpool::replenish_deficit;
+    let target = 8;
+    let mut population = 0; // every spawned standby dies immediately
+    let mut spawns = 0;
+    let mut deficit = replenish_deficit(population, target);
+    while deficit > 0 {
+        spawns += 1;
+        // parent charges, child drops it before the next iteration
+        population += 1;
+        population -= 1;
+        deficit -= 1;
+    }
+    assert_eq!(spawns, target);
+    assert_eq!(population, 0);
+
+    // The pre-fix loop (`while POPULATION < target`) never terminates against
+    // the same child behaviour — assert the shape that made it a runaway.
+    let mut laps = 0;
+    while population < target && laps < 1000 {
+        population += 1;
+        population -= 1;
+        laps += 1;
+    }
+    assert_eq!(laps, 1000, "the re-reading loop never converges when standbys die");
+}

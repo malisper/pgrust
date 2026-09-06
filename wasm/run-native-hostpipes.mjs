@@ -28,11 +28,21 @@
 // arm (run-node-wire-threads.mjs --dispatch postmaster) runs the SAME two
 // sessions over SharedArrayBuffer pipes and worker threads. This file supplies
 // only the two host-specific halves — `openSession` over spawn()'s stdio fds,
-// and a `shutdown` that is a real SIGINT to a real process.
+// and a `shutdown`.
+//
+// SHUTDOWN, and why it is the interesting half. The default is NOT a signal:
+// it CLOSES THE LISTENER (fd 3). `pqcomm_hostpipes::accept_connection` reads
+// that EOF and raises the fast-shutdown flags through
+// `postmaster_seams::signal_postmaster_fast_shutdown` — the same handler a
+// SIGINT runs — so the postmaster performs the ordinary fast shutdown,
+// checkpoint and all. That arm is CFG-FREE, which is the whole point: the
+// wasm host (which has no signals at all) depends on it, and this native
+// driver is what proves it. `--shutdown sigint` keeps the old comparison.
 //
 // Usage:
 //   node wasm/run-native-hostpipes.mjs [--fresh] [--scratch DIR] [--datadir DIR]
 //                                      [--bin PATH] [--pgbin DIR]
+//                                      [--shutdown listener-close|sigint]
 
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -59,6 +69,11 @@ const DATADIR = path.resolve(opt('--datadir', path.join(SCRATCH, 'datadir')));
 const BIN = path.resolve(opt('--bin', path.join(ROOT, 'target/debug/postgres')));
 const PGBIN = opt('--pgbin', '/usr/lib/postgresql/18/bin');
 const LOGFILE = path.resolve(opt('--logfile', path.join(SCRATCH, 'postmaster.log')));
+const SHUTDOWN_MODE = opt('--shutdown', 'listener-close');
+if (!['listener-close', 'sigint'].includes(SHUTDOWN_MODE)) {
+  console.log(`VERDICT: hostpipes-native FAIL (unknown --shutdown ${SHUTDOWN_MODE})`);
+  process.exit(1);
+}
 
 const CONN_MAGIC = 0x50475048;
 
@@ -266,30 +281,59 @@ async function openSession(name) {
   };
 }
 
-// Fast shutdown, native flavour: an actual SIGINT to an actual pid.
+// Fast shutdown. Default: CLOSE THE LISTENER — the transport's own stop
+// signal, and the only one a wasm host could ever deliver. `--shutdown sigint`
+// sends a real SIGINT to a real pid instead, for comparison; both must land in
+// exactly the same place (fast shutdown, shutdown checkpoint, exit 0), because
+// the EOF arm raises the SIGINT flags rather than inventing a second path.
 async function shutdown() {
   const shutStart = performance.now();
-  child.kill('SIGINT');
+  const byClose = SHUTDOWN_MODE === 'listener-close';
+  if (byClose) {
+    log('closing the listener (fd 3): that EOF IS the fast-shutdown request');
+    child.stdio[3].end();
+  } else {
+    log('sending SIGINT');
+    child.kill('SIGINT');
+  }
   const gone = await waitForExit(30000);
   log(`  postmaster stopped in ${(performance.now() - shutStart).toFixed(0)}ms`);
-  const ckpt = /checkpoint starting: shutdown/i.test(serverLog) ||
-    /checkpoint complete/i.test(serverLog);
+  const checks = [
+    { ok: gone, what: `postmaster exited after ${byClose ? 'the listener close' : 'SIGINT'}` },
+    { ok: exitCode === 0, what: `exit code 0 (got ${exitCode}${exitSignal ? `/${exitSignal}` : ''})` },
+    {
+      ok: /checkpoint starting: shutdown/i.test(serverLog),
+      what: 'log shows "checkpoint starting: shutdown"',
+    },
+    {
+      ok: /received fast shutdown request/i.test(serverLog),
+      what: 'log shows "received fast shutdown request"',
+    },
+    {
+      ok: /database system is shut down/i.test(serverLog),
+      what: 'log shows "database system is shut down"',
+    },
+  ];
+  if (byClose) {
+    checks.push({
+      ok: /host-pipes listener closed: fast shutdown requested/i.test(serverLog),
+      what: 'log shows the transport attributing the shutdown to the listener EOF',
+    });
+    checks.push({
+      ok: !/host-pipes listener reached end of file/i.test(serverLog),
+      what: 'the old "listener reached end of file, back off and retry" arm is gone',
+    });
+  }
   return {
-    notes: [`SIGINT -> exit code ${exitCode}${exitSignal ? `/${exitSignal}` : ''}`],
-    checks: [
-      { ok: gone, what: 'postmaster exited after SIGINT' },
-      { ok: exitCode === 0, what: `exit code 0 (got ${exitCode}${exitSignal ? `/${exitSignal}` : ''})` },
-      { ok: ckpt, what: 'log shows the shutdown checkpoint' },
-      {
-        ok: /database system is shut down/i.test(serverLog),
-        what: 'log shows "database system is shut down"',
-      },
+    notes: [
+      `${byClose ? 'listener close' : 'SIGINT'} -> exit code ${exitCode}${exitSignal ? `/${exitSignal}` : ''}`,
     ],
+    checks,
   };
 }
 
 async function main() {
-  log(`spawned ${BIN} --host-pipes (pid ${child.pid}); listener = fd 3`);
+  log(`spawned ${BIN} --host-pipes (pid ${child.pid}); listener = fd 3; shutdown = ${SHUTDOWN_MODE}`);
 
   const ready = await waitForLog(/database system is ready to accept connections/, 120000);
   check(ready, 'postmaster reached "ready to accept connections" with NO listen socket');

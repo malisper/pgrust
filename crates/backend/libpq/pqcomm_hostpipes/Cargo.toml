@@ -14,6 +14,7 @@ types_error = { path = "../../../_support/types/types_error" }
 types_startup = { path = "../../../_support/types/types_startup" }
 types_storage = { path = "../../../_support/types/types_storage" }
 postgres_seams = { path = "../../tcop/postgres_seams" }
+postmaster_seams = { path = "../../postmaster/postmaster_seams" }
 ipc_seams = { path = "../../storage/ipc/ipc_seams" }
 pqcomm = { path = "../pqcomm" }
 pqcomm_seams = { path = "../pqcomm_seams" }

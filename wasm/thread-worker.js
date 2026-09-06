@@ -175,9 +175,16 @@ async function runProcess(msg) {
   let code = 0;
   try {
     instance.exports._start();
+    // The guest returned from _start (a postmaster that finished its
+    // shutdown ceremony, or a session that ran out of input). This is the
+    // only moment the pool's slot states can be read and reported: from here
+    // until now this JS thread was parked in the guest's futexes.
+    post({ type: 'pool-final', slots: spawner.poolSnapshot() });
   } catch (e) {
-    if (e instanceof GuestExit) code = e.code;
-    else {
+    if (e instanceof GuestExit) {
+      code = e.code;
+      post({ type: 'pool-final', slots: spawner.poolSnapshot() });
+    } else {
       post({
         type: 'error',
         from: 'process',

@@ -639,6 +639,45 @@ mod global {
         Ok(pipefd[0])
     }
 
+    /// Adopt a HOST-PROVIDED wake pipe for this thread's waiter slot.
+    ///
+    /// `ensure_wake_pipe` creates one with `pipe(2)`; WASI p1 has no
+    /// `pipe(2)`, and yet the wasm postmaster needs precisely what a wake
+    /// pipe is for — a wake route a KERNEL-STYLE BLOCK can see, because it
+    /// blocks in `poll_oneoff` on a host-owned fd rather than on this slot's
+    /// condvar. The wasm host hands one in instead (the host-pipes
+    /// transport's `PGRUST_HOSTPIPES_WAKE_FD`), and this is the door.
+    ///
+    /// `rfd` and `wfd` may be the SAME fd: a host pipe that is both ends at
+    /// once is a legal backing (nothing here reads the bytes for content —
+    /// they are wake tokens). Returns false when this slot already has a
+    /// wake pipe (never silently replaces one: the fds belong to whoever
+    /// created them) or when either fd is negative.
+    pub fn adopt_wake_pipe(rfd: i32, wfd: i32) -> bool {
+        if rfd < 0 || wfd < 0 {
+            return false;
+        }
+        let idx = current_slot();
+        let mut g = slot(idx).lock();
+        if g.wake_rfd >= 0 || g.wake_wfd >= 0 {
+            return false;
+        }
+        g.wake_rfd = rfd;
+        g.wake_wfd = wfd;
+        true
+    }
+
+    /// Release an adopted wake pipe WITHOUT closing its fds (the host owns
+    /// them). The slot's `Drop` closes whatever fds it holds, which is right
+    /// for a `pipe(2)` it created and wrong for a borrowed host fd; a thread
+    /// that adopted one calls this before it exits. Idempotent.
+    pub fn release_adopted_wake_pipe() {
+        let idx = current_slot();
+        let mut g = slot(idx).lock();
+        g.wake_rfd = -1;
+        g.wake_wfd = -1;
+    }
+
     /// This thread's wake-pipe read fd (must exist).
     pub fn wake_read_fd() -> i32 {
         let idx = current_slot();
@@ -738,9 +777,9 @@ mod global {
 
 #[cfg(not(loom))]
 pub use global::{
-    begin_fd_park, current_handle, describe_word, drain_wake_fd, end_fd_park, ensure_wake_pipe,
-    now_ms, park, park_timeout, recheck_cadence_ms, reissue_current_token, sleep, unpark,
-    unpark_word, wake_read_fd,
+    adopt_wake_pipe, begin_fd_park, current_handle, describe_word, drain_wake_fd, end_fd_park,
+    ensure_wake_pipe, now_ms, park, park_timeout, recheck_cadence_ms, reissue_current_token,
+    release_adopted_wake_pipe, sleep, unpark, unpark_word, wake_read_fd,
 };
 
 // ===========================================================================
@@ -890,6 +929,15 @@ mod model_global {
         panic!("waiter::wake_read_fd: no wake pipe exists under loom models")
     }
 
+    /// No host hands a model an fd (the global layer's doc explains what the
+    /// real one is for); declining keeps every caller on its no-fd path.
+    pub fn adopt_wake_pipe(_rfd: i32, _wfd: i32) -> bool {
+        false
+    }
+
+    /// Nothing was ever adopted, so there is nothing to release.
+    pub fn release_adopted_wake_pipe() {}
+
     /// Mode bookkeeping identical to the global layer's (the slot core owns
     /// the state machine); there is no pipe to register.
     pub fn begin_fd_park() -> bool {
@@ -942,9 +990,9 @@ mod model_global {
 
 #[cfg(loom)]
 pub use model_global::{
-    begin_fd_park, current_handle, describe_word, drain_wake_fd, end_fd_park, ensure_wake_pipe,
-    now_ms, park, park_timeout, recheck_cadence_ms, reissue_current_token, sleep, unpark,
-    unpark_word, wake_read_fd,
+    adopt_wake_pipe, begin_fd_park, current_handle, describe_word, drain_wake_fd, end_fd_park,
+    ensure_wake_pipe, now_ms, park, park_timeout, recheck_cadence_ms, reissue_current_token,
+    release_adopted_wake_pipe, sleep, unpark, unpark_word, wake_read_fd,
 };
 
 #[cfg(all(test, not(loom)))]

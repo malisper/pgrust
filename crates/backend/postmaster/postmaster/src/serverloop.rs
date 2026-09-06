@@ -27,6 +27,11 @@ const SECS_PER_MINUTE: i64 = 60;
 #[cfg(all(target_family = "wasm", target_feature = "atomics"))]
 thread_local! {
     static PM_ACCEPTING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    // The host's postmaster-wake fd, resolved ONCE at the first wait:
+    // -2 = not resolved, -1 = the host offers none (fall back to the timed
+    // accept probe), >= 0 = the adopted fd. Postmaster-thread state, like
+    // PM_ACCEPTING and pm_wait_set.
+    static PM_WAKE_FD: std::cell::Cell<i32> = const { std::cell::Cell::new(-2) };
 }
 
 pub fn ConfigurePostmasterWaitSet(accept_connections: bool) -> PgResult<()> {
@@ -217,42 +222,67 @@ fn pm_wait_for_events(events: &mut [WaitEvent]) -> PgResult<i32> {
 /// wasm32 + atomics: the same wait, minus the one thing this target does
 /// not have — a readiness backend that takes file descriptors. A wait set
 /// here can carry the LATCH ONLY (waiteventset/wasm_threads.rs rejects any
-/// event with a real fd), so the listener cannot be waited on; it is
-/// PROBED instead, with a zero-timeout `poll` the wasm host answers through
-/// `poll_oneoff` on the SAB pipe backing the fd.
+/// event with a real fd), so the listener cannot be REGISTERED; it is probed
+/// with a zero-timeout `poll` the wasm host answers through `poll_oneoff`.
 ///
-/// The cost is accept latency: a connection announced while we are parked
-/// waits up to [`PM_ACCEPT_POLL_MS`] for the next probe. Accepted for the
-/// spike deliberately — it is bounded, it costs one poll per 50 ms in an
-/// otherwise idle postmaster, and the real fix is host-driven: the host
-/// already knows when it wrote a connection record, so it should also set
-/// the postmaster latch (or make the listener fd's readiness itself wake a
-/// waiter), at which point this arm collapses back to an untimed wait.
+/// What the block itself is depends on whether the transport handed us a
+/// HOST WAKE FD (`pqcomm_seams::transport_wake_fd`):
+///
+/// * **With one** (`pm_park_on_wake_fd`) the postmaster blocks in ONE
+///   `poll` on that fd for the FULL `DetermineSleepTime()`, and every event
+///   that matters writes a token to it: the host after it announces a
+///   connection or closes the listener, and this thread's own waiter — in
+///   fd-park mode for the duration of the block — on any `SetLatch`. That is
+///   the epoll+wake-pipe arrangement the native postmaster has, with the
+///   host supplying the pipe WASI p1 cannot create. Accept latency stops
+///   being a poll period and becomes a notify.
+///
+/// * **Without one** the old shape stands: a timed `WaitLatch` bounded by
+///   [`PM_ACCEPT_POLL_MS`] plus a probe, so a connection announced while we
+///   are parked waits up to 50 ms. Bounded and correct, just slow — and it
+///   is what any host that does not offer a wake fd still gets.
 #[cfg(all(target_family = "wasm", target_feature = "atomics"))]
 fn pm_wait_for_events(events: &mut [WaitEvent]) -> PgResult<i32> {
     use types_storage::waiteventset::{WL_TIMEOUT, WL_LATCH_SET as WL_LATCH};
 
-    let timeout = DetermineSleepTime().min(PM_ACCEPT_POLL_MS);
-    let bits = latch::WaitLatch(
-        init_small::globals::MyLatch(),
-        WL_LATCH | WL_TIMEOUT,
-        timeout,
-        0, /* postmaster posts no wait_events */
-    )?;
+    let timeout = DetermineSleepTime();
+    match pm_wake_fd() {
+        Some(fd) => pm_park_on_wake_fd(fd, timeout),
+        None => {
+            // No host wake route: block on the latch alone, bounded so the
+            // listener probe below still runs on a cadence.
+            latch::WaitLatch(
+                init_small::globals::MyLatch(),
+                WL_LATCH | WL_TIMEOUT,
+                timeout.min(PM_ACCEPT_POLL_MS),
+                0, /* postmaster posts no wait_events */
+            )?;
+        }
+    }
 
     let mut n = 0usize;
-    if bits & WL_LATCH != 0 && n < events.len() {
+    // The latch is authoritative whichever way the block ended — exactly the
+    // native backends' post-`epoll_wait` test (epoll.rs, wasm_threads.rs).
+    let latch_set = init_small::globals::MyLatch()
+        .map(|l| latch::latch_ref(l).is_set())
+        .unwrap_or(false);
+    if latch_set && n < events.len() {
         events[n] = WaitEvent { pos: 0, user_data: None, events: WL_LATCH, fd: PGINVALID_SOCKET };
         n += 1;
     }
-    // Same accept condition the native set encodes by registering the fds.
-    if PM_ACCEPTING.get() {
+    // Same accept condition the native set encodes by registering the fds,
+    // plus the anti-spin gate a host-owned listener needs: once a shutdown is
+    // pending the listener is at EOF (that is what requested the shutdown),
+    // and EOF is permanently "readable". Probing it again would accept again,
+    // request again, and burn the postmaster thread until the state machine
+    // gets round to ConfigurePostmasterWaitSet(false).
+    if PM_ACCEPTING.get() && !pm_shutdown_pending() {
         let fds = with_pm(|pm| pm.listen_sockets.clone());
         for fd in fds {
             if n >= events.len() {
                 break;
             }
-            if !listener_is_readable(fd) {
+            if !fd_is_readable(fd) {
                 continue;
             }
             events[n] =
@@ -265,13 +295,151 @@ fn pm_wait_for_events(events: &mut [WaitEvent]) -> PgResult<i32> {
     Ok(n as i32)
 }
 
-/// Zero-timeout readiness probe for a host-owned listener fd. STRICT, unlike
+/// Is a shutdown already requested or under way? The accept gate below and
+/// ServerLoop's own share it: a host-pipes listener at EOF is readable
+/// forever, so "accept once more" has to become "never again" the instant
+/// the EOF has been turned into a shutdown request.
+pub(crate) fn pm_shutdown_pending() -> bool {
+    crate::PENDING_PM_SHUTDOWN_REQUEST.load(Ordering::Acquire)
+        || with_pm(|pm| pm.shutdown > NoShutdown || pm.fatal_error)
+}
+
+/// The host's postmaster-wake fd, adopted into this thread's waiter slot on
+/// first use so that `SetLatch` from any other thread writes a token to it
+/// (waiter fd-park mode). Resolved once; a host that offers none is
+/// remembered as none and never asked again.
+#[cfg(all(target_family = "wasm", target_feature = "atomics"))]
+fn pm_wake_fd() -> Option<i32> {
+    let cached = PM_WAKE_FD.get();
+    if cached != -2 {
+        return (cached >= 0).then_some(cached);
+    }
+    let fd = if pqcomm_seams::transport_wake_fd::is_installed() {
+        pqcomm_seams::transport_wake_fd::call()
+    } else {
+        PGINVALID_SOCKET
+    };
+    let adopted = fd >= 0 && waiter::adopt_wake_pipe(fd, fd);
+    PM_WAKE_FD.set(if adopted { fd } else { -1 });
+    if adopted {
+        report(
+            LOG,
+            format!(
+                "postmaster waits on host wake fd {fd}: connection announcements and \
+                 latch wakes both arrive as readability"
+            ),
+            1758,
+            "pm_wake_fd",
+        );
+    } else {
+        report(
+            LOG,
+            format!(
+                "no host wake fd on this transport: the postmaster probes its listener \
+                 every {PM_ACCEPT_POLL_MS}ms instead"
+            ),
+            1758,
+            "pm_wake_fd",
+        );
+    }
+    adopted.then_some(fd)
+}
+
+/// One postmaster block on the host wake fd. The latch protocol is
+/// `waiteventset::wait_loop`'s, verbatim: publish the waker, arm
+/// maybe_sleeping, re-check `is_set`, enter fd-park, block, leave fd-park,
+/// disarm. Everything that changes the postmaster's mind — a child exit
+/// announce, a pmsignal, a reload, the host announcing a connection, the
+/// host closing the listener — ends the block.
+#[cfg(all(target_family = "wasm", target_feature = "atomics"))]
+fn pm_park_on_wake_fd(wake_fd: i32, timeout: i64) {
+    use std::sync::atomic::Ordering::{Release, SeqCst};
+
+    let l = init_small::globals::MyLatch().map(latch::latch_ref);
+    let mut fd_parked = false;
+    if let Some(l) = l {
+        if !l.is_set() {
+            // Dekker arm: publish the wake route first, then maybe_sleeping
+            // (SeqCst store), then re-check — the Acquire pairing lives in
+            // latch::set_latch (notes/latch-atomics.md).
+            l.waker.store(waiter::current_handle().as_u64(), Release);
+            l.set_maybe_sleeping(true);
+        }
+        if l.is_set() {
+            // Already set: report it without blocking, as the native loop
+            // does (it degrades the block to a zero-timeout poll).
+            l.set_maybe_sleeping(false);
+            drain_wake_fd(wake_fd);
+            return;
+        }
+        // From here a SetLatch aimed at this thread writes the wake fd
+        // instead of signalling the slot's condvar — the only route a
+        // `poll` block can see. `false` = a notification already landed
+        // before we armed; degrade to a poll rather than block on it.
+        fd_parked = waiter::begin_fd_park();
+    }
+
+    let mut block_ms = if fd_parked { timeout } else { 0 };
+    if fd_parked {
+        // GL-RECWAKE-1: a lost cross-thread wake must cost one cadence
+        // period, not the caller's whole deadline — the same bound
+        // waiteventset::wait_loop puts on its fd-park laps.
+        let cadence = waiter::recheck_cadence_ms();
+        if cadence > 0 && (block_ms < 0 || block_ms > cadence) {
+            block_ms = cadence;
+        }
+    }
+    poll_readable(wake_fd, block_ms);
+
+    if let Some(l) = l {
+        if fd_parked {
+            waiter::end_fd_park();
+        }
+        if l.maybe_sleeping.load(SeqCst) != 0 {
+            l.set_maybe_sleeping(false);
+        }
+    }
+    drain_wake_fd(wake_fd);
+}
+
+/// Throw away every wake token queued on the wake fd. The bytes carry no
+/// information (waiter's `send_wake_byte` writes a zero, the host writes
+/// whatever it likes) — draining is what keeps the ring from filling and the
+/// next block from returning instantly on a stale token. Bounded: a wake fd
+/// that reported readable but yields nothing must not spin the postmaster.
+#[cfg(all(target_family = "wasm", target_feature = "atomics"))]
+fn drain_wake_fd(fd: i32) {
+    let mut buf = [0u8; 256];
+    for _ in 0..64 {
+        if !fd_is_readable(fd) {
+            return;
+        }
+        // SAFETY: buf is valid writable memory of the stated length.
+        let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+        if n <= 0 {
+            return;
+        }
+    }
+}
+
+/// `poll(fd, POLLIN, timeout_ms)`; the return value is deliberately ignored
+/// — the caller re-tests every predicate afterwards, exactly as the native
+/// backends re-test `latch.is_set` after `epoll_wait`.
+#[cfg(all(target_family = "wasm", target_feature = "atomics"))]
+fn poll_readable(fd: i32, timeout_ms: i64) {
+    let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+    let t = timeout_ms.clamp(-1, i32::MAX as i64) as i32;
+    // SAFETY: pfd is a valid single-entry pollfd for the duration of the call.
+    unsafe { libc::poll(&mut pfd, 1, t) };
+}
+
+/// Zero-timeout readiness probe for a host-owned fd. STRICT, unlike
 /// `fdnb::poll_ready`: only a genuine POLLIN counts. A poll error or a dead
 /// fd must NOT be read as "a connection record is waiting" — accept_connection
 /// blocks for a full 16-byte record, so a false positive would park the
 /// postmaster forever.
 #[cfg(all(target_family = "wasm", target_feature = "atomics"))]
-fn listener_is_readable(fd: i32) -> bool {
+fn fd_is_readable(fd: i32) -> bool {
     let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
     // SAFETY: pfd is a valid single-entry pollfd for the duration of the call.
     let rc = unsafe { libc::poll(&mut pfd, 1, 0) };
@@ -345,7 +513,15 @@ pub fn ServerLoop() -> PgResult<i32> {
                 crate::process_pm_pmsignal()?;
             }
 
-            if event.events & WL_SOCKET_ACCEPT != 0 {
+            // The accept gate carries one condition C's does not need: a
+            // transport whose listener is a HOST-OWNED fd can see that fd
+            // reach EOF, and EOF is readable FOREVER. The host-pipes
+            // provider turns that EOF into a fast-shutdown request, so from
+            // the moment one is pending there is nothing left to accept —
+            // accepting again would only re-read the EOF (and re-request).
+            // C's listen socket cannot reach this state, which is why its
+            // loop has no such test.
+            if event.events & WL_SOCKET_ACCEPT != 0 && !pm_shutdown_pending() {
                 if let Ok(s) = pqcomm_seams::accept_connection::call(event.fd) {
                     let _ = BackendStartup(s);
                     // The child thread shares the fd table: the socket is

@@ -1011,6 +1011,12 @@ pub fn init_seams() {
     postmaster_seams::pm_service_pending::set(pm_service_pending);
     postmaster_seams::signal_postmaster_sigusr1::set(|| handle_pm_pmsignal_signal(procsignal::signums::SIGUSR1));
     postmaster_seams::signal_postmaster_sighup::set(|| handle_pm_reload_request_signal(procsignal::signums::SIGHUP));
+    // The SIGINT rendering: a transport whose listener reached EOF (and, on
+    // wasm, anything at all — there are no signals there) asks for a fast
+    // shutdown through exactly the handler a real SIGINT would run.
+    postmaster_seams::signal_postmaster_fast_shutdown::set(|| {
+        handle_pm_shutdown_request_signal(procsignal::signums::SIGINT)
+    });
     postmaster_seams::pg_start_time::set(main_entry::pg_start_time);
     postmaster_seams::set_pg_start_time::set(main_entry::set_pg_start_time);
 }

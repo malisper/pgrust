@@ -43,6 +43,73 @@ fn shutdown_signal_handlers_set_most_immediate() {
     PENDING_PM_IMMEDIATE_SHUTDOWN_REQUEST.store(false, Ordering::Release);
 }
 
+/// The listener-EOF shutdown route: the seam a transport calls when its
+/// host-owned listener reaches EOF must raise EXACTLY the flags a SIGINT
+/// raises (fast + shutdown, never immediate), and nothing else. This is the
+/// whole contract `pqcomm_hostpipes::accept_connection` relies on.
+#[test]
+fn fast_shutdown_seam_raises_the_sigint_flags() {
+    use std::sync::atomic::Ordering;
+    let _g = SHUTDOWN_FLAGS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    for f in [
+        &PENDING_PM_SHUTDOWN_REQUEST,
+        &PENDING_PM_FAST_SHUTDOWN_REQUEST,
+        &PENDING_PM_IMMEDIATE_SHUTDOWN_REQUEST,
+    ] {
+        f.store(false, Ordering::Release);
+    }
+
+    // The installer is init_seams'; call the body it installs directly so the
+    // test does not depend on seam-install order across the test binary.
+    handle_pm_shutdown_request_signal(procsignal::signums::SIGINT);
+
+    assert!(PENDING_PM_FAST_SHUTDOWN_REQUEST.load(Ordering::Acquire));
+    assert!(PENDING_PM_SHUTDOWN_REQUEST.load(Ordering::Acquire));
+    assert!(
+        !PENDING_PM_IMMEDIATE_SHUTDOWN_REQUEST.load(Ordering::Acquire),
+        "a closed listener must never escalate to immediate shutdown: that \
+         skips the shutdown checkpoint"
+    );
+
+    for f in [
+        &PENDING_PM_SHUTDOWN_REQUEST,
+        &PENDING_PM_FAST_SHUTDOWN_REQUEST,
+        &PENDING_PM_IMMEDIATE_SHUTDOWN_REQUEST,
+    ] {
+        f.store(false, Ordering::Release);
+    }
+}
+
+/// The accept gate's anti-spin term. A host-owned listener at EOF stays
+/// readable forever, so the moment a shutdown is pending the loop must stop
+/// accepting — otherwise every lap re-reads the EOF.
+#[test]
+fn accept_stops_once_a_shutdown_is_pending() {
+    use std::sync::atomic::Ordering;
+    let _g = SHUTDOWN_FLAGS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    PENDING_PM_SHUTDOWN_REQUEST.store(false, Ordering::Release);
+    with_pm(|pm| {
+        pm.shutdown = NoShutdown;
+        pm.fatal_error = false;
+    });
+    assert!(!serverloop::pm_shutdown_pending());
+
+    // The pending FLAG alone closes the gate (the request has not been
+    // processed yet — that is exactly the lap after the EOF).
+    PENDING_PM_SHUTDOWN_REQUEST.store(true, Ordering::Release);
+    assert!(serverloop::pm_shutdown_pending());
+    PENDING_PM_SHUTDOWN_REQUEST.store(false, Ordering::Release);
+
+    // ...and so does the processed state, after the flag is cleared.
+    with_pm(|pm| pm.shutdown = FastShutdown);
+    assert!(serverloop::pm_shutdown_pending());
+    with_pm(|pm| pm.shutdown = NoShutdown);
+
+    with_pm(|pm| pm.fatal_error = true);
+    assert!(serverloop::pm_shutdown_pending());
+    with_pm(|pm| pm.fatal_error = false);
+}
+
 #[test]
 fn can_accept_connections_matches_c_gates() {
     use types_startup::CacState;
