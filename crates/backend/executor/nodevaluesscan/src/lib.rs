@@ -62,7 +62,9 @@ impl<'mcx> ScanNode<'mcx> for ValuesScanState<'mcx> {
             return Ok(false);
         }
 
-        estate.ecxt_mut(self.rowcontext).reset();
+        // nodeValuesscan.c:101: ReScanExprContext, "not just ResetExprContext
+        // because we want any registered shutdown callbacks to be called".
+        estate.ecxt_mut(self.rowcontext).rescan();
 
         if self.exprstatelists[self.curr_idx as usize].is_some() {
             let rowcontext = self.rowcontext;

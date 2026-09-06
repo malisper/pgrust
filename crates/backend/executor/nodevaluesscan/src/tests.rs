@@ -143,3 +143,41 @@ fn rescan_and_backward() {
     exec_rescan_values_scan(&mut state, &mut estate).unwrap();
     assert_eq!(pull_row(&mut state, &mut estate).unwrap(), vec![(10, false)]);
 }
+
+/// nodeValuesscan.c:101 — ValuesNext runs `ReScanExprContext(econtext)`,
+/// "not just ResetExprContext because we want any registered shutdown
+/// callbacks to be called", before evaluating the next row.  A callback
+/// registered while row 1 was evaluated must therefore have fired by the
+/// time row 2 comes back; a rewind-only reset never fires it.
+static ROWCXT_SHUTDOWN_FIRED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn rowcxt_shutdown_cb(_m: Mcx<'_>, arg: Datum) {
+    ROWCXT_SHUTDOWN_FIRED.fetch_add(arg.as_usize() as u64, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[test]
+fn next_row_runs_prior_rows_shutdown_callbacks() {
+    use std::sync::atomic::Ordering::SeqCst;
+    install_seams();
+    let mcx = leaked_mcx();
+    let plan = mk_values_plan(mcx, &[&[Some(1)], &[Some(2)], &[Some(3)]]);
+    let mut estate = EStateData::new_in(mcx);
+    let mut state = exec_init_values_scan(mcx, plan, &mut estate).unwrap();
+    let rowcontext = state.rowcontext;
+
+    assert_eq!(pull_row(&mut state, &mut estate).unwrap(), vec![(1, false)]);
+    // Something evaluated inside row 1 registered a shutdown callback on
+    // the row econtext (C: RegisterExprContextCallback on rsi->econtext).
+    let before = ROWCXT_SHUTDOWN_FIRED.load(SeqCst);
+    estate.ecxt_mut(rowcontext).register_shutdown_callback(rowcxt_shutdown_cb, Datum::from_usize(1));
+    assert_eq!(ROWCXT_SHUTDOWN_FIRED.load(SeqCst), before, "registering must not fire");
+
+    // C ValuesNext: ReScanExprContext(econtext) fires it before row 2.
+    assert_eq!(pull_row(&mut state, &mut estate).unwrap(), vec![(2, false)]);
+    assert_eq!(ROWCXT_SHUTDOWN_FIRED.load(SeqCst), before + 1, "shutdown callback not run between VALUES rows");
+
+    // ShutdownExprContext empties the list: row 3 does not fire it again.
+    assert_eq!(pull_row(&mut state, &mut estate).unwrap(), vec![(3, false)]);
+    assert_eq!(ROWCXT_SHUTDOWN_FIRED.load(SeqCst), before + 1);
+    assert!(pull_row(&mut state, &mut estate).is_none());
+}
