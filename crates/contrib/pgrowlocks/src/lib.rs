@@ -124,9 +124,13 @@ fn relation_open_by_text_arg<'m>(
         [s, r] => (None, Some(s.as_str()), r.as_str()),
         [c, s, r] => (Some(c.as_str()), Some(s.as_str()), r.as_str()),
         _ => {
+            // namespace.c:3578 formats this with NameListToString(names): the
+            // parsed list (downcased / unquoted / whitespace-trimmed) joined by
+            // '.', never the raw text argument.
             return Err(Box::new(
                 PgError::error(format!(
-                    "improper relation name (too many dotted names): {rawname}"
+                    "improper relation name (too many dotted names): {}",
+                    names.join(".")
                 ))
                 .with_sqlstate(types_error::ERRCODE_SYNTAX_ERROR),
             ))
