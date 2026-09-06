@@ -49,6 +49,8 @@ types_rel = { path = "../../../../_support/types/rel" }
 types_storage = { path = "../../../../_support/types/types_storage" }
 latch = { path = "../../ipc/latch" }
 postgres_seams = { path = "../../../tcop/postgres_seams" }
+ps_status_seams = { path = "../../../utils/misc/ps_status_seams" }
+timestamp_seams = { path = "../../../utils/adt/timestamp_seams" }
 
 [dev-dependencies]
 relpath = { path = "../../../../common/relpath" }

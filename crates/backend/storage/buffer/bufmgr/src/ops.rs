@@ -10,6 +10,7 @@ use types_error::{ErrorLocation, PgResult, ERROR};
 use types_storage::buf::{
     buftag, BM_DIRTY, BM_JUST_DIRTIED, BM_LOCKED, BM_PIN_COUNT_WAITER,
 };
+use types_storage::storage::ProcSignalReason;
 use types_storage::bufpage::PageRef;
 
 use crate::buf_hdr::{
@@ -63,12 +64,19 @@ pub fn ConditionalLockBuffer(buffer: Buffer) -> PgResult<bool> {
     LWLockConditionalAcquire(&shared_desc(buffer).content_lock, LW_EXCLUSIVE)
 }
 
-/// LockBufferForCleanup (bufmgr.c): loops until it holds the exclusive
+/// LockBufferForCleanup (bufmgr.c:5703): loops until it holds the exclusive
 /// content lock with pincount 1; waits on ProcWaitForSignal, woken by
-/// UnpinBuffer's WakePinCountWaiter.
+/// UnpinBuffer's WakePinCountWaiter. The startup process (InHotStandby)
+/// instead waits via ResolveRecoveryConflictWithBufferPin, shows "waiting"
+/// in its ps title and, when log_recovery_conflict_waits is on, logs the
+/// conflict once it has waited longer than deadlock_timeout (and again when
+/// resolved) — bufmgr.c:5742-5812.
 pub fn LockBufferForCleanup(buffer: Buffer) -> PgResult<()> {
     debug_assert!(BufferIsPinned(buffer));
     debug_assert!(pin_count_wait_buf() == -1);
+    let mut wait_start: types_core::TimestampTz = 0;
+    let mut waiting = false;
+    let mut logged_recovery_conflict = false;
     if buffer >= 0 && crate::privref::GetPrivateRefCount(buffer) != 1 {
         // Uncollected uring prefetch reads hold thread-owned pins (AtEOXact
         // precedent); wait them out before the pinned-once check.
@@ -85,6 +93,24 @@ pub fn LockBufferForCleanup(buffer: Buffer) -> PgResult<()> {
         debug_assert!(buffer_refcount(buf_state) > 0);
         if buffer_refcount(buf_state) == 1 {
             UnlockBufHdr(desc, buf_state);
+            // Emit the log message if recovery conflict on buffer pin was
+            // resolved but the startup process waited longer than
+            // deadlock_timeout for it (bufmgr.c:5747-5750).
+            if logged_recovery_conflict {
+                standby_seams::log_recovery_conflict::call(
+                    ProcSignalReason::PROCSIG_RECOVERY_CONFLICT_BUFFERPIN,
+                    wait_start,
+                    timestamp_seams::get_current_timestamp::call(),
+                    None,
+                    false,
+                )?;
+            }
+            if waiting {
+                // reset ps display to remove the suffix if we added one
+                if ps_status_seams::set_ps_display_remove_suffix::is_installed() {
+                    ps_status_seams::set_ps_display_remove_suffix::call();
+                }
+            }
             return Ok(());
         }
         if buf_state & BM_PIN_COUNT_WAITER != 0 {
@@ -107,6 +133,40 @@ pub fn LockBufferForCleanup(buffer: Buffer) -> PgResult<()> {
         if xlogutils_seams::in_hot_standby::is_installed()
             && xlogutils_seams::in_hot_standby::call()
         {
+            if !waiting {
+                // adjust the process title to indicate that it's waiting
+                // (bufmgr.c:5779)
+                if ps_status_seams::set_ps_display_suffix::is_installed() {
+                    ps_status_seams::set_ps_display_suffix::call("waiting");
+                }
+                waiting = true;
+            }
+            // Emit the log message if the startup process is waiting longer
+            // than deadlock_timeout for recovery conflict on buffer pin.
+            // Skipped the first time through: the wait start timestamp is
+            // set after this logic (bufmgr.c:5785-5803).
+            if wait_start != 0 && !logged_recovery_conflict {
+                let now = timestamp_seams::get_current_timestamp::call();
+                // TimestampDifferenceExceeds(waitStart, now, DeadlockTimeout)
+                if now - wait_start >= lmgr_proc::globals::DeadlockTimeout() as i64 * 1000 {
+                    standby_seams::log_recovery_conflict::call(
+                        ProcSignalReason::PROCSIG_RECOVERY_CONFLICT_BUFFERPIN,
+                        wait_start,
+                        now,
+                        None,
+                        true,
+                    )?;
+                    logged_recovery_conflict = true;
+                }
+            }
+            // Set the wait start timestamp if logging is enabled and first
+            // time through (bufmgr.c:5808-5809).
+            if wait_start == 0
+                && guc_tables::vars::log_recovery_conflict_waits.installed()
+                && guc_tables::vars::log_recovery_conflict_waits.read()
+            {
+                wait_start = timestamp_seams::get_current_timestamp::call();
+            }
             // Startup-process arm: on error PIN_COUNT_WAIT_BUF stays set so
             // the abort path's UnlockBuffers clears BM_PIN_COUNT_WAITER.
             lmgr_proc::SetStartupBufferPinWaitBufId(buffer - 1);

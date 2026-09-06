@@ -55,8 +55,8 @@ pub use ops::{
 pub use bgwriter_sync::{BgBufferSync, BgwSyncState};
 pub use write::{BufferSync, CheckPointBuffers, FlushOneBuffer, PageSetChecksumInplace};
 pub use pin::{
-    AtEOXact_Buffers, BufferIsPinned, CheckBufferIsPinnedOnce, IncrBufferRefCount, ReleaseBuffer,
-    UnlockBuffers,
+    AtEOXact_Buffers, BufferIsPinned, CheckBufferIsPinnedOnce, DebugPrintBufferRefcount,
+    IncrBufferRefCount, ReleaseBuffer, UnlockBuffers,
 };
 pub use privref::{debug_all_private_pins, GetPrivateRefCount, ReservePrivateRefCountEntry};
 pub use evict::{EvictAllUnpinnedBuffers, EvictCounts, EvictRelUnpinnedBuffers, EvictUnpinnedBuffer};

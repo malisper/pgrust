@@ -36,11 +36,43 @@ fn ResOwnerReleaseBufferPin(res: Datum) {
     UnpinBufferNoOwner(GetBufferDescriptor(buffer - 1));
 }
 
+/// ResOwnerPrintBufferPin (bufmgr.c:6593): DebugPrintBufferRefcount of the
+/// leaked pin.
 fn ResOwnerPrintBufferPin<'a>(mcx: mcx::Mcx<'a>, res: Datum) -> PgResult<mcx::PgString<'a>> {
-    let buffer = res.as_i32();
-    mcx::PgString::from_str_in(
-        &format!("buffer {buffer} (refcount={})", GetPrivateRefCount(buffer)),
-        mcx,
+    mcx::PgString::from_str_in(&DebugPrintBufferRefcount(res.as_i32()), mcx)
+}
+
+/// DebugPrintBufferRefcount (bufmgr.c:4190-4222): a local buffer reports its
+/// LocalRefCount and the backend-qualified relpath; a shared one its private
+/// refcount and the plain relpath.
+pub fn DebugPrintBufferRefcount(buffer: Buffer) -> String {
+    debug_assert!(BufferIsValid(buffer));
+    let (desc, loccount, backend): (&BufferDesc, i32, types_core::ProcNumber) = if buffer < 0 {
+        (
+            crate::localbuf::local_desc(buffer),
+            crate::localbuf::local_ref_count(buffer),
+            globals::MyProcNumber(),
+        )
+    } else {
+        (
+            GetBufferDescriptor(buffer - 1),
+            GetPrivateRefCount(buffer),
+            types_core::INVALID_PROC_NUMBER,
+        )
+    };
+    // theoretically we should lock the bufhdr here
+    let buf_state = desc.state.load(Ordering::Relaxed);
+    let tag = desc.tag();
+    format!(
+        "[{buffer:03}] (rel={}, blockNum={}, flags=0x{:x}, refcount={} {loccount})",
+        crate::read::relpath_backend_desc(
+            types_storage::RelFileLocator::new(tag.spcOid, tag.dbOid, tag.relNumber),
+            backend,
+            tag.forkNum,
+        ),
+        tag.blockNum,
+        buf_state & types_storage::buf::BUF_FLAG_MASK,
+        buffer_refcount(buf_state),
     )
 }
 

@@ -2158,3 +2158,342 @@ fn b039_batched_read_caps_at_the_strategy_pin_limit() {
     assert_eq!(last_readv, 8);
     ReleaseBuffer(b).unwrap();
 }
+
+// ---- audit-18.6 b244 witnesses ----
+
+fn b244_tblspc_smgr(rel: u32) -> RelFileLocatorBackend {
+    RelFileLocatorBackend {
+        locator: RelFileLocator {
+            spcOid: 16385,
+            dbOid: 5,
+            relNumber: rel,
+        },
+        backend: globals::MyProcNumber(),
+    }
+}
+
+// localbuf.c:401-402 ExtendBufferedRelLocal: the limit message renders
+// relpath(smgr_rlocator, fork) — tablespace directory and fork suffix
+// included — not a hand-rolled base/<db>/t<proc>_<rel>.
+#[test]
+fn b244_extend_local_beyond_max_block_number_reports_relpath() {
+    let _g = setup();
+    setup_extend_seams();
+    setup_b039_seams();
+    use types_resowner::{ResourceOwner, RESOURCE_RELEASE_BEFORE_LOCKS};
+    let rel = 9950u32;
+    NBLOCKS.lock().unwrap().insert(rel, types_core::MaxBlockNumber - 1);
+    let smgr = b244_tblspc_smgr(rel);
+
+    let save = resowner::CurrentResourceOwner();
+    let owner = resowner::ResourceOwnerCreate(ResourceOwner::NULL, "b244-extend-local").unwrap();
+    resowner::SetCurrentResourceOwner(owner);
+    let mut buffers = [types_core::InvalidBuffer; 2];
+    let res = crate::localbuf::ExtendBufferedRelLocal(
+        smgr,
+        ForkNumber::FSM_FORKNUM,
+        2,
+        types_core::InvalidBlockNumber,
+        &mut buffers,
+    );
+    resowner::ResourceOwnerRelease(owner, RESOURCE_RELEASE_BEFORE_LOCKS, false, true).unwrap();
+    resowner::SetCurrentResourceOwner(save);
+    resowner::ResourceOwnerDelete(owner);
+    NBLOCKS.lock().unwrap().remove(&rel);
+
+    let err = res.expect_err("extending past MaxBlockNumber is an ERROR");
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+    assert_eq!(
+        err.message(),
+        format!(
+            "cannot extend relation pg_tblspc/16385/{}/5/t{}_{rel}_fsm beyond {} blocks",
+            types_storage::TABLESPACE_VERSION_DIRECTORY,
+            globals::MyProcNumber(),
+            types_core::MaxBlockNumber
+        )
+    );
+}
+
+// localbuf.c:640-645 InvalidateLocalBuffer: "block %u of %s is still
+// referenced (local %d)" with relpathbackend(locator, MyProcNumber, fork) —
+// no "relation " word, tablespace directory and fork rendered.
+#[test]
+fn b244_invalidate_local_buffer_message_is_relpathbackend() {
+    let _g = setup();
+    setup_b039_seams();
+    let rel = 9951u32;
+    let smgr = b244_tblspc_smgr(rel);
+    let b = ReadBuffer_common(
+        smgr,
+        types_core::RELPERSISTENCE_TEMP,
+        ForkNumber::VISIBILITYMAP_FORKNUM,
+        0,
+        ReadBufferMode::Normal,
+        None,
+    )
+    .unwrap()
+    .0;
+    assert!(b < 0);
+    assert_eq!(crate::localbuf::local_ref_count(b), 1);
+
+    let res = DropRelationLocalBuffers(smgr.locator, ForkNumber::VISIBILITYMAP_FORKNUM, 0);
+    // Our pin is still ours whatever happened: release it before asserting.
+    ReleaseBuffer(b).unwrap();
+    let err = res.expect_err("dropping a pinned local buffer is an ERROR");
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    assert_eq!(
+        err.message(),
+        format!(
+            "block 0 of pg_tblspc/16385/{}/5/t{}_{rel}_vm is still referenced (local 1)",
+            types_storage::TABLESPACE_VERSION_DIRECTORY,
+            globals::MyProcNumber(),
+        )
+    );
+    DropRelationAllLocalBuffers(smgr.locator).unwrap();
+}
+
+// bufmgr.c:6593 ResOwnerPrintBufferPin -> DebugPrintBufferRefcount
+// (bufmgr.c:4190-4222): "[%03d] (rel=%s, blockNum=%u, flags=0x%x,
+// refcount=%u %d)" where a local buffer reports LocalRefCount and the
+// backend-qualified relpath, a shared one GetPrivateRefCount.
+#[test]
+fn b244_resowner_print_buffer_pin_is_debug_print_buffer_refcount() {
+    let _g = setup();
+    let print = crate::pin::buffer_pin_desc().DebugPrint.expect("buffer pins print");
+    let cx = ::mcx::MemoryContext::new("b244-print");
+
+    let rel = 9952u32;
+    let lb = read_local_blk(rel, 3);
+    let lb2 = read_local_blk(rel, 3);
+    assert_eq!(lb2, lb);
+    assert_eq!(crate::localbuf::local_ref_count(lb), 2);
+    let state = crate::localbuf::local_desc(lb).state.load(Ordering::Relaxed);
+    let s = print(cx.mcx(), datum::Datum::from_i32(lb)).unwrap();
+    assert_eq!(
+        s.as_str(),
+        format!(
+            "[{lb:03}] (rel=base/5/t{}_{rel}, blockNum=3, flags=0x{:x}, refcount=1 2)",
+            globals::MyProcNumber(),
+            state & types_storage::buf::BUF_FLAG_MASK
+        )
+    );
+    ReleaseBuffer(lb).unwrap();
+    ReleaseBuffer(lb).unwrap();
+    DropRelationAllLocalBuffers(rloc(rel)).unwrap();
+
+    let rel = 9953u32;
+    let b = read_blk(rel, 1);
+    let state = GetBufferDescriptor(b - 1).state.load(Ordering::Relaxed);
+    let s = print(cx.mcx(), datum::Datum::from_i32(b)).unwrap();
+    assert_eq!(
+        s.as_str(),
+        format!(
+            "[{b:03}] (rel=base/5/{rel}, blockNum=1, flags=0x{:x}, refcount={} 1)",
+            state & types_storage::buf::BUF_FLAG_MASK,
+            state & BUF_REFCOUNT_MASK
+        )
+    );
+    ReleaseBuffer(b).unwrap();
+}
+
+// localbuf.c:922-926 GetLocalBufferStorage: local buffer blocks live in a
+// memory context of their own, "LocalBufferContext" under TopMemoryContext,
+// created on first use (so it is a pg_backend_memory_contexts row).
+static B244_ROOT_NAMES: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+
+fn b244_observe_root(w: ::mcx::RootWeak) {
+    if let Some(t) = w.tree_stats() {
+        B244_ROOT_NAMES.lock().unwrap().push(t.name);
+    }
+}
+
+#[test]
+fn b244_local_buffer_storage_lives_in_local_buffer_context() {
+    let _g = setup();
+    ::mcx::set_root_observer(b244_observe_root);
+    let rel = 9954u32;
+    // A fresh backend thread: its local buffers (and their storage context)
+    // are created after the observer is in place.
+    let worker = std::thread::spawn(move || {
+        become_backend();
+        let owner =
+            resowner::ResourceOwnerCreate(types_resowner::ResourceOwner::NULL, "b244-localctx")
+                .unwrap();
+        resowner::SetCurrentResourceOwner(owner);
+        let b = read_local_blk(rel, 0);
+        assert!(b < 0);
+        ReleaseBuffer(b).unwrap();
+        DropRelationAllLocalBuffers(rloc(rel)).unwrap();
+        AtEOXact_Buffers(true);
+    });
+    worker.join().unwrap();
+    let names = B244_ROOT_NAMES.lock().unwrap().clone();
+    assert!(
+        names.contains(&"LocalBufferContext"),
+        "local buffer storage must be allocated in LocalBufferContext; roots seen: {names:?}"
+    );
+}
+
+// bufmgr.c:5742-5812 LockBufferForCleanup in the startup process
+// (InHotStandby): the ps title gets the "waiting" suffix while it waits,
+// and with log_recovery_conflict_waits on, a wait longer than
+// deadlock_timeout is logged (LogRecoveryConflict BUFFERPIN still_waiting)
+// and logged again once resolved; the suffix is removed on success.
+static B244_HOT_STANDBY: AtomicBool = AtomicBool::new(false);
+static B244_LOG_WAITS: AtomicBool = AtomicBool::new(false);
+static B244_RELEASE: AtomicBool = AtomicBool::new(false);
+static B244_WAIT_BUFFER: AtomicI32 = AtomicI32::new(0);
+static B244_RESOLVE_CALLS: AtomicI32 = AtomicI32::new(0);
+static B244_CONFLICT_LOG: std::sync::Mutex<Vec<(i32, i64, i64, bool, bool)>> =
+    std::sync::Mutex::new(Vec::new());
+static B244_PS_EVENTS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+fn b244_now_usec() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_micros() as i64
+}
+
+fn b244_in_hot_standby() -> bool {
+    B244_HOT_STANDBY.load(Ordering::Relaxed)
+}
+
+// ResolveRecoveryConflictWithBufferPin stand-in: the first wait returns
+// unresolved (C: a signal-driven wakeup) after more than deadlock_timeout;
+// the second lets the holder unpin and returns once the pin count is 1.
+fn b244_resolve_recovery_conflict_with_buffer_pin() -> PgResult<()> {
+    let n = B244_RESOLVE_CALLS.fetch_add(1, Ordering::Relaxed);
+    if n == 0 {
+        std::thread::sleep(std::time::Duration::from_millis(40));
+    } else {
+        B244_RELEASE.store(true, Ordering::Release);
+        let desc = GetBufferDescriptor(B244_WAIT_BUFFER.load(Ordering::Relaxed) - 1);
+        while desc.state.load(Ordering::Acquire) & BUF_REFCOUNT_MASK != 1 {
+            std::thread::yield_now();
+        }
+    }
+    Ok(())
+}
+
+fn b244_log_recovery_conflict(
+    reason: types_storage::storage::ProcSignalReason,
+    wait_start: types_core::TimestampTz,
+    now: types_core::TimestampTz,
+    wait_list: Option<&[types_storage::storage::VirtualTransactionId]>,
+    still_waiting: bool,
+) -> PgResult<()> {
+    B244_CONFLICT_LOG.lock().unwrap().push((
+        reason as i32,
+        wait_start,
+        now,
+        wait_list.is_some(),
+        still_waiting,
+    ));
+    Ok(())
+}
+
+fn b244_set_ps_display_suffix(suffix: &str) {
+    B244_PS_EVENTS.lock().unwrap().push(format!("suffix:{suffix}"));
+}
+
+fn b244_set_ps_display_remove_suffix() {
+    B244_PS_EVENTS.lock().unwrap().push("remove".to_string());
+}
+
+fn setup_b244_standby_seams() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        if !xlogutils_seams::in_hot_standby::is_installed() {
+            xlogutils_seams::in_hot_standby::set(b244_in_hot_standby);
+        }
+        if !standby_seams::resolve_recovery_conflict_with_buffer_pin::is_installed() {
+            standby_seams::resolve_recovery_conflict_with_buffer_pin::set(
+                b244_resolve_recovery_conflict_with_buffer_pin,
+            );
+        }
+        if !standby_seams::log_recovery_conflict::is_installed() {
+            standby_seams::log_recovery_conflict::set(b244_log_recovery_conflict);
+        }
+        if !ps_status_seams::set_ps_display_suffix::is_installed() {
+            ps_status_seams::set_ps_display_suffix::set(b244_set_ps_display_suffix);
+        }
+        if !ps_status_seams::set_ps_display_remove_suffix::is_installed() {
+            ps_status_seams::set_ps_display_remove_suffix::set(b244_set_ps_display_remove_suffix);
+        }
+        if !timestamp_seams::get_current_timestamp::is_installed() {
+            timestamp_seams::get_current_timestamp::set(b244_now_usec);
+        }
+        guc_tables::vars::log_recovery_conflict_waits.install_if_absent(
+            guc_tables::GucVarAccessors {
+                get: || B244_LOG_WAITS.load(Ordering::Relaxed),
+                set: |v| B244_LOG_WAITS.store(v, Ordering::Relaxed),
+            },
+        );
+    });
+}
+
+#[test]
+fn b244_cleanup_lock_in_hot_standby_logs_conflict_and_marks_ps_waiting() {
+    let _g = setup();
+    setup_b244_standby_seams();
+    let rel = 9955u32;
+    let b = read_blk(rel, 0);
+    B244_WAIT_BUFFER.store(b, Ordering::Relaxed);
+    B244_RELEASE.store(false, Ordering::Relaxed);
+    B244_RESOLVE_CALLS.store(0, Ordering::Relaxed);
+    B244_CONFLICT_LOG.lock().unwrap().clear();
+    B244_PS_EVENTS.lock().unwrap().clear();
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        become_backend();
+        let owner =
+            resowner::ResourceOwnerCreate(types_resowner::ResourceOwner::NULL, "b244-pin-holder")
+                .unwrap();
+        resowner::SetCurrentResourceOwner(owner);
+        let b2 = read_blk(rel, 0);
+        tx.send(b2).unwrap();
+        while !B244_RELEASE.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+        ReleaseBuffer(b2).unwrap();
+    });
+    let b2 = rx.recv().unwrap();
+    assert_eq!(b2, b);
+
+    let saved_timeout = lmgr_proc::globals::DeadlockTimeout();
+    lmgr_proc::globals::set_DeadlockTimeout(10);
+    guc_tables::vars::log_recovery_conflict_waits.write(true);
+    B244_HOT_STANDBY.store(true, Ordering::Relaxed);
+    let before = b244_now_usec();
+    let res = LockBufferForCleanup(b);
+    B244_HOT_STANDBY.store(false, Ordering::Relaxed);
+    guc_tables::vars::log_recovery_conflict_waits.write(false);
+    lmgr_proc::globals::set_DeadlockTimeout(saved_timeout);
+    B244_RELEASE.store(true, Ordering::Release);
+    holder.join().unwrap();
+    res.unwrap();
+
+    let state = GetBufferDescriptor(b - 1).state.load(Ordering::Acquire);
+    assert_eq!(state & BUF_REFCOUNT_MASK, 1, "cleanup lock implies pincount 1");
+    assert_eq!(crate::pin::pin_count_wait_buf(), -1);
+    UnlockReleaseBuffer(b).unwrap();
+
+    assert_eq!(B244_RESOLVE_CALLS.load(Ordering::Relaxed), 2, "two waits before pincount 1");
+    let log = B244_CONFLICT_LOG.lock().unwrap().clone();
+    let bufferpin = types_storage::storage::ProcSignalReason::PROCSIG_RECOVERY_CONFLICT_BUFFERPIN
+        as i32;
+    assert_eq!(log.len(), 2, "logged once while waiting, once when resolved: {log:?}");
+    let (reason, start, now, has_list, still) = log[0];
+    assert_eq!((reason, has_list, still), (bufferpin, false, true));
+    assert!(start >= before && now - start >= 10_000, "waited past deadlock_timeout: {log:?}");
+    let (reason, start2, now2, has_list, still) = log[1];
+    assert_eq!((reason, has_list, still), (bufferpin, false, false));
+    assert_eq!(start2, start, "the resolved report carries the same wait start");
+    assert!(now2 >= now);
+    assert_eq!(
+        *B244_PS_EVENTS.lock().unwrap(),
+        vec!["suffix:waiting".to_string(), "remove".to_string()]
+    );
+}

@@ -42,6 +42,11 @@ struct LocalBufs {
     next_buf_in_block: usize,
     num_bufs_in_block: usize,
     total_bufs_allocated: usize,
+    // GetLocalBufferStorage's `static MemoryContext LocalBufferContext`
+    // (localbuf.c:906): created under TopMemoryContext on first use, so the
+    // block storage is a context of its own in pg_backend_memory_contexts /
+    // MemoryContextStats output.
+    storage_cx: Option<&'static MemoryContext>,
 }
 
 thread_local! {
@@ -109,6 +114,7 @@ fn init_local_buffers(slot: &mut Option<LocalBufs>) -> PgResult<()> {
         next_buf_in_block: 0,
         num_bufs_in_block: 0,
         total_bufs_allocated: 0,
+        storage_cx: None,
     });
     Ok(())
 }
@@ -376,9 +382,11 @@ pub(crate) fn GetLocalVictimBuffer() -> PgResult<Buffer> {
     let id = local_bufid(buffer);
     with(|lb| {
         if lb.blocks[id].get().is_null() {
-            lb.blocks[id].set(get_local_buffer_storage(lb));
+            let block = get_local_buffer_storage(lb)?;
+            lb.blocks[id].set(block);
         }
-    });
+        Ok::<(), Box<types_error::PgError>>(())
+    })?;
     let state = with(|lb| state_of(&lb.descs[id]));
     if state & BM_DIRTY != 0 {
         FlushLocalBuffer(buffer)?;
@@ -402,15 +410,19 @@ fn InvalidateLocalBuffer(buffer: Buffer, check_unreferenced: bool) -> PgResult<(
         let desc = &lb.descs[id];
         let tag = desc.tag();
         if check_unreferenced && lb.ref_counts[id].get() != 0 {
+            // localbuf.c:640-645: relpathbackend(locator, MyProcNumber, fork)
+            // renders tablespace and fork; there is no "relation " word.
             return Err(Box::new(
                 types_error::PgError::new(
                     ERROR,
                     format!(
-                        "block {} of relation base/{}/t{}_{} is still referenced (local {})",
+                        "block {} of {} is still referenced (local {})",
                         tag.blockNum,
-                        tag.dbOid,
-                        init_small::globals::MyProcNumber(),
-                        tag.relNumber,
+                        crate::read::relpath_backend_desc(
+                            RelFileLocator::new(tag.spcOid, tag.dbOid, tag.relNumber),
+                            init_small::globals::MyProcNumber(),
+                            tag.forkNum,
+                        ),
                         lb.ref_counts[id].get()
                     ),
                 )
@@ -582,11 +594,10 @@ pub(crate) fn ExtendBufferedRelLocal(
     if first_block as u64 + extend_by as u64 >= MaxBlockNumber as u64 {
         ereport(ERROR)
             .errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+            // localbuf.c:401-402: relpath(bmr.smgr->smgr_rlocator, fork).
             .errmsg(format!(
-                "cannot extend relation base/{}/t{}_{} beyond {} blocks",
-                smgr.locator.dbOid,
-                smgr.backend,
-                smgr.locator.relNumber,
+                "cannot extend relation {} beyond {} blocks",
+                crate::read::relpath_backend_desc(smgr.locator, smgr.backend, fork),
                 MaxBlockNumber
             ))
             .finish(ErrorLocation::new(file!(), line!() as i32, "ExtendBufferedRelLocal"))?;
@@ -650,19 +661,34 @@ pub(crate) fn ExtendBufferedRelLocal(
     Ok((first_block, extend_by))
 }
 
-fn get_local_buffer_storage(lb: &mut LocalBufs) -> *mut u8 {
+/// GetLocalBufferStorage (localbuf.c:900-948): blocks are carved from
+/// chunks allocated in LocalBufferContext, a context of its own under
+/// TopMemoryContext created on first use (localbuf.c:922-926), I/O aligned
+/// (MemoryContextAllocAligned, localbuf.c:937-940); an allocation failure is
+/// C's ereport(ERROR, 53200 "out of memory"), never a panic.
+fn get_local_buffer_storage(lb: &mut LocalBufs) -> PgResult<*mut u8> {
     debug_assert!(lb.total_bufs_allocated < lb.descs.len());
     if lb.next_buf_in_block >= lb.num_bufs_in_block {
+        let cx = match lb.storage_cx {
+            Some(cx) => cx,
+            None => {
+                let cx: &'static MemoryContext = ::mcx::session_root("LocalBufferContext");
+                lb.storage_cx = Some(cx);
+                cx
+            }
+        };
+        // Start with a 16-buffer request; subsequent ones double each time,
+        // capped at what all remaining local buffers need and MaxAllocSize.
         let mut num_bufs = (lb.num_bufs_in_block * 2).max(16);
         num_bufs = num_bufs.min(lb.descs.len() - lb.total_bufs_allocated);
         num_bufs = num_bufs.min(MAX_ALLOC_SIZE / BLCKSZ);
-        let layout =
-            core::alloc::Layout::from_size_align(num_bufs * BLCKSZ, PG_IO_ALIGN_SIZE)
-                .expect("local buffer chunk layout");
-        // SAFETY: non-zero layout; chunk is session-lifetime (C never frees it).
-        let chunk = unsafe { std::alloc::alloc(layout) };
-        assert!(!chunk.is_null(), "out of memory");
-        lb.cur_block = chunk;
+        let size = num_bufs * BLCKSZ;
+        let layout = core::alloc::Layout::from_size_align(size, PG_IO_ALIGN_SIZE)
+            .expect("local buffer chunk layout");
+        // The chunk lives for the session (C never frees it): the context's
+        // teardown reclaims it wholesale.
+        let chunk = cx.mcx().alloc_uninit_bytes(layout).map_err(|_| Box::new(cx.mcx().oom(size)))?;
+        lb.cur_block = chunk.as_ptr();
         lb.next_buf_in_block = 0;
         lb.num_bufs_in_block = num_bufs;
     }
@@ -670,7 +696,7 @@ fn get_local_buffer_storage(lb: &mut LocalBufs) -> *mut u8 {
     let this_buf = unsafe { lb.cur_block.add(lb.next_buf_in_block * BLCKSZ) };
     lb.next_buf_in_block += 1;
     lb.total_bufs_allocated += 1;
-    this_buf
+    Ok(this_buf)
 }
 
 fn CheckForLocalBufferLeaks() {
