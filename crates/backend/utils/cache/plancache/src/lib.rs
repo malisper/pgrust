@@ -236,6 +236,11 @@ fn leak_ctx(name: &'static str) -> *mut MemoryContext {
     Box::into_raw(Box::new(MemoryContext::new(name)))
 }
 
+fn ctx_ref<'a>(ctx: *mut MemoryContext) -> &'a MemoryContext {
+    // SAFETY: leak_ctx provenance (see ctx_mcx).
+    unsafe { &*ctx }
+}
+
 fn ctx_mcx(ctx: *mut MemoryContext) -> Mcx<'static> {
     // SAFETY: ctx came from leak_ctx and is reclaimed only after its owning
     // registry slot (the only path to it) is removed.
@@ -407,6 +412,18 @@ fn create_cached_plan_flags(
     let mcx = ctx_mcx(source_ctx);
     let qs = mcx::slice_borrow_in(mcx, query_string.as_bytes())?;
     let query_string: &'static str = core::str::from_utf8(qs).expect("query_string is UTF-8");
+    // plancache.c:223: MemoryContextSetIdentifier(source_context,
+    // plansource->query_string). set_ident copies; every observer clips the
+    // identifier (mcxtfuncs.c MEMORY_CONTEXT_IDENT_DISPLAY_SIZE = 1024 bytes,
+    // mcxt.c MemoryContextStatsPrint 100 bytes), so store that prefix on a
+    // character boundary rather than a second copy of a long statement.
+    {
+        let mut n = query_string.len().min(1024);
+        while !query_string.is_char_boundary(n) {
+            n -= 1;
+        }
+        ctx_ref(source_ctx).set_ident(Some(&query_string[..n]));
+    }
     let bail = |e| {
         reclaim_ctx(query_ctx);
         reclaim_ctx(source_ctx);

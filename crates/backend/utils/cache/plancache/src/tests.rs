@@ -984,3 +984,19 @@ fn role_callback_invalidates_only_role_dependent_plans() {
         }
     }
 }
+
+// plancache.c:222-223 CreateCachedPlan: plansource->query_string =
+// pstrdup(query_string); MemoryContextSetIdentifier(source_context,
+// plansource->query_string) — the CachedPlanSource context is identified by
+// its query text (pg_backend_memory_contexts.ident, the memory-context dump).
+#[test]
+fn cached_plan_source_context_ident_is_the_query_string() {
+    install();
+    let scratch = test_mcx();
+    let raw = select_raw(scratch);
+    let h = CreateCachedPlan(Some(&raw), "SELECT 1 AS ident_probe", CommandTag::SELECT).unwrap();
+    // SAFETY: source_ctx is a leak_ctx pointer alive until DropCachedPlan.
+    let ident = with_cache(|pc| unsafe { (*source_mut(pc, h).source_ctx).ident() });
+    assert_eq!(ident.as_deref(), Some("SELECT 1 AS ident_probe"));
+    DropCachedPlan(h);
+}

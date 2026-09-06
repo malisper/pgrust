@@ -558,3 +558,25 @@ fn cleanup_hook_failure_leaves_hook_armed() {
     CLEANUP_FAILS.set(false);
     PortalDrop(&portal, false).unwrap();
 }
+
+// portalmem.c:225 CreatePortal: MemoryContextSetIdentifier(portalContext,
+// portal->name[0] ? portal->name : "<unnamed>") — the unnamed portal's
+// context is identified too (pg_backend_memory_contexts.ident, the
+// pg_log_backend_memory_contexts dump line).
+#[test]
+fn unnamed_portal_context_ident_is_unnamed() {
+    setup();
+    let unnamed = CreatePortal("", false, false).unwrap();
+    let named = CreatePortal("c_ident", false, false).unwrap();
+    let ident_of = |p: &Portal<'static>| {
+        p.borrow().portalContext.as_ref().expect("portalContext").ident()
+    };
+    assert_eq!(ident_of(&unnamed).as_deref(), Some("<unnamed>"));
+    assert_eq!(ident_of(&named).as_deref(), Some("c_ident"));
+    PortalDrop(&named, false).unwrap();
+    PortalDrop(&unnamed, false).unwrap();
+    // A parked (recycled) context comes back re-identified, never stale.
+    let again = CreatePortal("", false, false).unwrap();
+    assert_eq!(ident_of(&again).as_deref(), Some("<unnamed>"));
+    PortalDrop(&again, false).unwrap();
+}

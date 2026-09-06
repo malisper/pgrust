@@ -238,12 +238,11 @@ pub fn CreatePortal(name: &str, allowDup: bool, dupSilent: bool) -> PgResult<Por
             }
             None => PgBox::new_in(m.top.new_child("PortalContext"), mcx),
         };
-        if !name_copy.is_empty() {
-            // C: MemoryContextSetIdentifier(portalContext, name or "<unnamed>").
-            // Skipped for the unnamed portal: set_ident allocates a String per
-            // call where C stores a static pointer (an internal issue's 100 Ir/q).
-            portal_context.set_ident(Some(name_copy.as_str()));
-        }
+        // portalmem.c:225: MemoryContextSetIdentifier(portalContext,
+        // portal->name[0] ? portal->name : "<unnamed>") — the unnamed portal
+        // is identified too (pg_backend_memory_contexts.ident, the
+        // memory-context dump line).
+        portal_context.set_ident(Some(if name_copy.is_empty() { "<unnamed>" } else { name_copy.as_str() }));
         let mut data = PortalData {
             name: name_copy,
             prepStmtName: None,
