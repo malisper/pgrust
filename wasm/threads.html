@@ -4,9 +4,11 @@
 <meta charset="utf-8">
 <title>pgrust wasm32-wasip1-threads spike</title>
 <!--
-  The browser arm of spike/wasip1-threads checkpoint (a): one pgwire session
-  served by a real Postgres backend running on a wasi-threads thread, spawned
-  through the host's `wasi` `thread-spawn` import. No JSPI.
+  The browser arm of spike/wasip1-threads: one pgwire session served by a real
+  Postgres backend running on a wasi-threads thread, spawned through the host's
+  `wasi` `thread-spawn` import — or, with ?dispatch=postmaster, the REAL
+  postmaster over host-owned pipe fds with two backends on two wasi threads and
+  a real fast shutdown. No JSPI.
 
   MUST be served cross-origin isolated (SharedArrayBuffer + shared
   WebAssembly.Memory are gated on it):
@@ -21,15 +23,28 @@
         wasm/vendor/pglite-opfs-repacked.js
       open http://localhost:8081/threads.html
 
-  Query string: ?dispatch=stdio-wire|stdio-wire-threaded (default threaded),
-  ?pool=N (prewarmed wasi-thread pool, default 4 — the guest wants a session
-  thread AND a pg-timeout-timer thread), ?fs=copy|broker (default copy; broker
-  puts ONE repacked store in a dedicated coordinator worker and every instance
-  reaches it over a SharedArrayBuffer channel), ?trace=N, ?wasm=, ?vfs=,
-  ?bundle=.
+  Query string:
+    ?dispatch=stdio-wire|stdio-wire-threaded|postmaster (default threaded)
+    ?fs=copy|broker    default copy for the wire lanes, broker for postmaster;
+                       broker puts ONE repacked store in a dedicated coordinator
+                       worker every instance reaches over a SAB channel
+    ?pool=N            prewarmed wasi-thread pool; default 4 for the wire lanes
+                       (a session thread AND a pg-timeout-timer thread), 12 for
+                       postmaster (startup, checkpointer, bgwriter, WAL writer,
+                       watchdog, timer, standbys, two backends, headroom)
+    ?workers=N         postmaster only: max_parallel_workers, i.e. the warm
+                       standby pool size (default 2) — the driver's --workers
+    ?nowake=1          postmaster only: withhold PGRUST_HOSTPIPES_WAKE_FD so the
+                       postmaster falls back to its timed accept probe — the
+                       driver's --no-wake (?wake=0 is a synonym)
+    ?timeout=MS        the driver's PGRUST_THREADS_TIMEOUT_MS (default 180000)
+    ?gucs=a=b,c=d      the driver's PGRUST_WIRE_GUCS (default
+                       timezone=UTC,log_timezone=UTC)
+    ?trace=N, ?wasm=, ?vfs=, ?bundle=
 
   Every step is console.log'd; the last line is
-  `VERDICT: threads-browser PASS` or `VERDICT: threads-browser FAIL <reason>`.
+  `VERDICT: threads-browser PASS|FAIL fs=<mode>` for the wire lanes and
+  `VERDICT: postmaster-browser PASS|FAIL fs=<mode>` for ?dispatch=postmaster.
 -->
 <style>
   body { font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; margin: 1rem; background: #101317; color: #d6dde5; }
