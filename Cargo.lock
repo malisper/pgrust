@@ -15912,6 +15912,7 @@ name = "repl_scanner"
 version = "0.0.0"
 dependencies = [
  "elog",
+ "mbutils",
  "mcx",
  "parser_small1",
  "types_core",

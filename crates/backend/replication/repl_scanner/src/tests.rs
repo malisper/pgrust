@@ -162,3 +162,81 @@ fn is_replication_command_recognizes_introducers() {
     // TIMELINE (not TIMELINE_HISTORY) is a keyword but not an introducer.
     assert!(!is_replication_command("TIMELINE 1").unwrap());
 }
+
+// scansup.c:53 (`pg_database_encoding_max_length() == 1`) and scansup.c:97
+// (`pg_mbcliplen`, mbutils.c:1209 -> DatabaseEncoding) read the DATABASE
+// encoding: in a SQL_ASCII database (max length 1) C clips a >= NAMEDATALEN
+// identifier at exactly NAMEDATALEN-1 bytes, never backing off to a UTF-8
+// character boundary. `pg_mbcliplen` keeps 62 'a' + the lone 0xC3 lead byte
+// of "é" (63 bytes) -- bytes the UTF-8-only engine cannot carry, so the
+// ratified SQL_ASCII enforcement (docs/design/carve-ratifications.md §11:
+// scan_fgram utf8_pin spelling) is the 0A000 refusal, never a silently
+// shorter identifier (the pre-fix scanner clipped at the UTF-8 boundary,
+// 62 bytes, and the slot got CREATED under a name C rejects).
+fn with_database_encoding<R>(enc: wchar::pg_enc, body: impl FnOnce() -> R) -> R {
+    let saved = mbutils::GetDatabaseEncoding();
+    mbutils::SetDatabaseEncoding(enc).unwrap();
+    let r = body();
+    mbutils::SetDatabaseEncoding(saved).unwrap();
+    r
+}
+
+fn straddle_input(quoted: bool) -> String {
+    // 62 'a' + "é" (0xC3 0xA9) = 64 bytes = NAMEDATALEN.
+    let body = format!("{}\u{e9}", "a".repeat(62));
+    assert_eq!(body.len(), 64);
+    if quoted {
+        format!("\"{body}\"")
+    } else {
+        body
+    }
+}
+
+#[test]
+fn sql_ascii_truncation_clips_at_namedatalen_minus_one_bytes() {
+    let expected_msg = "query strings with non-ASCII characters are not supported yet in \
+                        databases with encoding \"SQL_ASCII\"";
+    with_database_encoding(wchar::PG_SQL_ASCII, || {
+        // <xd>{xdstop}: repl_scanner.l:196 truncate_identifier(..., true).
+        let err = replication_lex_all(&straddle_input(true))
+            .expect_err("C keeps 63 bytes incl. a lone 0xC3: not representable, must refuse");
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+        assert_eq!(err.message(), expected_msg);
+        assert_eq!(err.hint(), Some("Use a database with encoding \"UTF8\"."));
+
+        // {identifier}: repl_scanner.l:211 downcase_truncate_identifier(..., true).
+        let err = replication_lex_all(&straddle_input(false))
+            .expect_err("unquoted arm clips the same way (scansup.c:60 -> truncate_identifier)");
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+        assert_eq!(err.message(), expected_msg);
+    });
+}
+
+#[test]
+fn sql_ascii_truncation_on_a_character_boundary_keeps_the_character() {
+    // 61 'a' + "é" + 'x' = 65 bytes: byte 63 ends "é" in both encodings, so
+    // C and the UTF-8 arm agree on 61 'a' + "é" (live C 18.6 witness).
+    let input = format!("\"{}\u{e9}x\"", "a".repeat(61));
+    let want = Token::Ident(format!("{}\u{e9}", "a".repeat(61)));
+    with_database_encoding(wchar::PG_SQL_ASCII, || {
+        assert_eq!(lex(&input), vec![want.clone()]);
+    });
+    with_database_encoding(wchar::PG_UTF8, || {
+        assert_eq!(lex(&input), vec![want.clone()]);
+    });
+}
+
+#[test]
+fn utf8_truncation_backs_off_to_the_character_boundary() {
+    // UTF8 database: pg_mbcliplen drops the whole "é" (would end at byte 64).
+    with_database_encoding(wchar::PG_UTF8, || {
+        assert_eq!(
+            lex(&straddle_input(true)),
+            vec![Token::Ident("a".repeat(62))]
+        );
+        assert_eq!(
+            lex(&straddle_input(false)),
+            vec![Token::Ident("a".repeat(62))]
+        );
+    });
+}

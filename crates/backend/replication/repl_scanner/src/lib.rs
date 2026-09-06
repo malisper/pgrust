@@ -1,9 +1,13 @@
 //! Port of `repl_scanner.l`: hand-written matcher (no flex runtime).
 //!
-//! C-divergence: identifier folding needs a `Mcx` + encoding; this scanner
-//! uses a scratch `MemoryContext` and assumes `PG_UTF8` (no ambient
-//! `GetDatabaseEncoding()`). `Token` owns plain `String`, not
-//! `PgString<'mcx>`, so the scratch context can drop per call.
+//! Identifier folding needs a `Mcx` + encoding: this scanner uses a scratch
+//! `MemoryContext` and, like C's scansup.c (`pg_database_encoding_max_length`
+//! at :53, `pg_mbcliplen` at :97), the ambient `GetDatabaseEncoding()`.
+//! `Token` owns plain `String`, not `PgString<'mcx>`, so the scratch context
+//! can drop per call; a folded/clipped identifier that is not UTF-8 (only
+//! possible in a SQL_ASCII database, where C clips at a byte count) draws
+//! the ratified SQL_ASCII enforcement (carve-ratifications.md §11) instead of
+//! a lossy rendering.
 
 #![allow(non_snake_case)]
 
@@ -13,9 +17,7 @@ use std::vec::Vec;
 use elog::ereport;
 use mcx::MemoryContext;
 use types_core::primitive::XLogRecPtr;
-use types_error::{PgError, PgResult, ERRCODE_SYNTAX_ERROR, ERROR};
-
-const SCANNER_ENCODING: wchar::pg_enc = wchar::PG_UTF8;
+use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_SYNTAX_ERROR, ERROR};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Token {
@@ -132,7 +134,7 @@ impl<'a> Scanner<'a> {
                     self.pos += 2;
                 } else {
                     self.pos += 1;
-                    return Ok(Token::Sconst(bytes_to_string(&lit)));
+                    return Ok(Token::Sconst(bytes_to_string(&lit)?));
                 }
             } else {
                 lit.push(ch);
@@ -162,8 +164,14 @@ impl<'a> Scanner<'a> {
                 self.pos += 1;
                 let mut folded = mcx::slice_in(self.mcx.mcx(), &lit)
                     .map_err(|_| replication_yyerror("out of memory"))?;
-                parser_small1::truncate_identifier(&mut folded, true, SCANNER_ENCODING)?;
-                return Ok(Token::Ident(bytes_to_string(&folded)));
+                // repl_scanner.l:196 truncate_identifier(str, len, true):
+                // scansup.c:97 pg_mbcliplen clips in the DATABASE encoding.
+                parser_small1::truncate_identifier(
+                    &mut folded,
+                    true,
+                    mbutils::GetDatabaseEncoding(),
+                )?;
+                return Ok(Token::Ident(bytes_to_string(&folded)?));
             } else {
                 lit.push(ch);
                 self.pos += 1;
@@ -224,13 +232,16 @@ impl<'a> Scanner<'a> {
             return Ok(tok);
         }
 
+        // repl_scanner.l:211 downcase_truncate_identifier(yytext, len, true):
+        // scansup.c:53 reads pg_database_encoding_max_length() for the
+        // single-byte downcase arm and :97 pg_mbcliplen for the clip.
         let folded = parser_small1::downcase_truncate_identifier(
             self.mcx.mcx(),
             word,
             true,
-            SCANNER_ENCODING,
+            mbutils::GetDatabaseEncoding(),
         )?;
-        Ok(Token::Ident(bytes_to_string(&folded)))
+        Ok(Token::Ident(bytes_to_string(&folded)?))
     }
 }
 
@@ -322,8 +333,27 @@ fn parse_decimal_u32(bytes: &[u8]) -> u32 {
     acc as u32
 }
 
-fn bytes_to_string(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).into_owned()
+// C hands the literal/identifier bytes on verbatim; `Token` carries a
+// `String`. Query text is UTF-8 by the time it reaches this scanner (tcop
+// non_utf8_query_error), so only a SQL_ASCII clip that lands inside a
+// multibyte sequence (pg_mbcliplen counts bytes there) or a single-byte
+// locale downcase can produce non-UTF-8 here: the ratified SQL_ASCII
+// enforcement (carve-ratifications.md §11, scan_fgram `utf8_pin` spelling)
+// refuses rather than substituting U+FFFD for bytes C would keep.
+fn bytes_to_string(bytes: &[u8]) -> PgResult<String> {
+    match core::str::from_utf8(bytes) {
+        Ok(s) => Ok(s.to_owned()),
+        Err(_) => Err(ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(format!(
+                "query strings with non-ASCII characters are not supported yet in databases \
+                 with encoding \"{}\"",
+                mbutils::GetDatabaseEncodingName()
+            ))
+            .errhint("Use a database with encoding \"UTF8\".")
+            .into_error()
+            .into()),
+    }
 }
 
 pub fn replication_lex_all(input: &str) -> PgResult<Vec<Token>> {
