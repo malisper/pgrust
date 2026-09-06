@@ -36,6 +36,32 @@
 // exit 0 plus the shutdown checkpoint lines — nothing here calls worker.terminate() to end the
 // server.
 //
+// PERSISTENCE (?port). The coordinator's store is port-agnostic (wasm/storage-worker.js).
+// `?port=memory` (the default) keeps it in the coordinator's heap, so every run re-seeds from
+// the packed image and nothing outlives the page. `?port=opfs` puts it in ONE dedicated OPFS
+// directory instead, and then a RELOAD FINDS THE DATA. That turns the postmaster lane into a
+// two-run proof, which is what `?phase` selects:
+//
+//   ?phase=persist  the ordinary scenario, then session C also creates `persist_t` and inserts
+//                   one row before its CHECKPOINT, then the ordinary listener-close shutdown.
+//   ?phase=verify   a SECOND page load against the same directory with no reset. The
+//                   coordinator must report `restored: true`, the two-session scenario is
+//                   skipped entirely, and one session reads back the row `persist_t` holds and
+//                   the `lock_t` the persist run's scenario left behind.
+//
+// The verdict noun carries both, so a grep can never confuse the two runs or confuse either
+// with the memory-port lane:
+//
+//   VERDICT: postmaster-browser PASS fs=broker                         (?port=memory)
+//   VERDICT: postmaster-browser PASS fs=broker port=opfs phase=persist
+//   VERDICT: postmaster-browser PASS fs=broker port=opfs phase=verify
+//
+// ?crash=1 is the persist phase with the ending removed: the process worker is TERMINATED with
+// the listener still open (no EOF, so no fast-shutdown request and no shutdown checkpoint) and
+// the coordinator is terminated without its doorbell stop, without a final strictSync and
+// without close(). What the next `?phase=verify` finds is then the store's real recovery
+// behaviour rather than its clean-close behaviour.
+//
 // THE PAGE'S MAIN THREAD NEVER BLOCKS. Every wait on a SharedArrayBuffer here goes through
 // SabPipe.readAsync (Atomics.waitAsync) or a setTimeout poll; Atomics.wait belongs to the
 // workers, which are allowed to use it.
@@ -44,6 +70,18 @@
 //   ?wasm=assets/postgres-threads.wasm   the wasm32-wasip1-threads build
 //   ?vfs=assets/vfs                      prefix for vfs.img + vfs.json
 //   ?bundle=vendor/pglite-opfs-repacked.js  the @pgxsinkit/pglite-opfs-repacked ESM bundle
+//
+// The full query interface of this page:
+//   ?dispatch=stdio-wire|stdio-wire-threaded|postmaster   which lane (default threaded wire)
+//   ?fs=copy|broker            per-worker private image, or ONE store in the coordinator
+//   ?port=memory|opfs          where that ONE store lives (broker only; default memory)
+//   ?opfsdir=NAME              the OPFS root directory the store owns (default pgrust-pgdata)
+//   ?durability=relaxed|strict what the coordinator syncs between the guest's own fsyncs
+//   ?reset=1                   delete the OPFS directory before opening it
+//   ?extent=N                  the store's extent size (creation-time identity; default 8192)
+//   ?phase=persist|verify      the two halves of the reload proof (postmaster + port=opfs)
+//   ?crash=1                   end the persist phase by terminating both workers, uncleanly
+//   ?pool=N ?workers=N ?nowake=1 ?timeout=MS ?trace=N ?gucs=... ?wasm= ?vfs= ?bundle=
 // Neither the threads build nor the library bundle is a packed asset, so link both in first:
 //   ln -s ../../target/wasm32-wasip1-threads/wasm-release/postgres.wasm \
 //         wasm/assets/postgres-threads.wasm
@@ -68,7 +106,14 @@ import {
   HOSTPIPES_WAKE_FD,
   sessionFds,
 } from './threads-host.js';
-import { runHostPipesScenario } from './hostpipes-scenario.js';
+// Aliased: `main()` already has its own `rows` (the wire lanes' result map), and an import named
+// `rows` would sit in its TDZ for the whole function.
+import {
+  runHostPipesScenario,
+  rows as wireRows,
+  tags as wireTags,
+  errs as wireErrs,
+} from './hostpipes-scenario.js';
 import { loadRepackedBundle, repackedBundleUrl } from './broker-fs.js';
 import {
   WireReader,
@@ -113,6 +158,36 @@ const TRACE = Number(params.get('trace') || 0);
 // against the ONE store the backends wrote. The wire lanes default to copy.
 const FS_MODE = params.get('fs') || (POSTMASTER ? 'broker' : 'copy');
 if (FS_MODE !== 'copy' && FS_MODE !== 'broker') throw new Error(`unknown ?fs=${FS_MODE}`);
+// ?port selects where the coordinator's ONE store lives: `memory` (its heap, gone with the
+// page) or `opfs` (one dedicated OPFS directory, found again by the next load). Only the broker
+// lane has a coordinator at all, so ?port=opfs without ?fs=broker is a caller error, not a
+// silent no-op.
+const PORT_KIND = params.get('port') || 'memory';
+if (PORT_KIND !== 'memory' && PORT_KIND !== 'opfs') throw new Error(`unknown ?port=${PORT_KIND}`);
+if (PORT_KIND === 'opfs' && FS_MODE !== 'broker') throw new Error('?port=opfs needs ?fs=broker');
+// The OPFS root directory the store owns. One store per directory, and the store insists the
+// directory hold nothing but its own four files.
+const OPFS_DIR = params.get('opfsdir') || 'pgrust-pgdata';
+// What the coordinator syncs BETWEEN the guest's own fsyncs (which are store-wide strict syncs
+// in both modes). See wasm/storage-worker.js's DURABILITY note.
+const DURABILITY = params.get('durability') || 'relaxed';
+if (DURABILITY !== 'relaxed' && DURABILITY !== 'strict') throw new Error(`unknown ?durability=${DURABILITY}`);
+// Empty the OPFS directory before opening it: the "start from the packed image again" switch.
+const RESET = params.get('reset') === '1';
+// The store's extent size, chosen ONCE when the directory is created and an identity of it
+// afterwards. Reopening with a different valid value is `ExtentSizeMismatchError`, which is the
+// cheapest way to see the coordinator's error mapping do its job.
+const EXTENT = Number(params.get('extent') || 0);
+// The two halves of the reload proof. `none` is the ordinary lane on whichever port.
+const PHASE = params.get('phase') || 'none';
+if (!['none', 'persist', 'verify'].includes(PHASE)) throw new Error(`unknown ?phase=${PHASE}`);
+if (PHASE !== 'none' && !(POSTMASTER && PORT_KIND === 'opfs')) {
+  throw new Error('?phase needs ?dispatch=postmaster&port=opfs');
+}
+// End the persist phase by terminating both workers instead of shutting down: no listener EOF,
+// no shutdown checkpoint, no coordinator close. What the store keeps is then its RECOVERY.
+const CRASH = params.get('crash') === '1';
+if (CRASH && PHASE !== 'persist') throw new Error('?crash=1 needs ?phase=persist');
 // max_parallel_workers, and therefore the size of the postmaster's WARM STANDBY POOL
 // (launch_backend::wpool: `target()` IS max_parallel_workers). The guest's boot default is 16
 // and autotune would put it at the core count; either is more standby threads than a FIXED
@@ -145,12 +220,35 @@ function note(line) {
 // the other: `threads-browser` for the single-session wire lanes,
 // `postmaster-browser` for the host-pipes postmaster lane.
 const LANE = POSTMASTER ? 'postmaster-browser' : 'threads-browser';
+// The persistence lanes append their own two coordinates, so a grep for one run can never match
+// the other and neither can match the memory-port lane (which keeps its verdict byte-identical).
+const VERDICT_TAIL = PORT_KIND === 'opfs' ? ` port=opfs phase=${PHASE}` : '';
 function verdict(ok, reason) {
-  if (ok) console.log(`VERDICT: ${LANE} PASS fs=${FS_MODE}`);
-  else console.log(`VERDICT: ${LANE} FAIL fs=${FS_MODE} ${reason}`);
+  if (ok) console.log(`VERDICT: ${LANE} PASS fs=${FS_MODE}${VERDICT_TAIL}`);
+  else console.log(`VERDICT: ${LANE} FAIL fs=${FS_MODE}${VERDICT_TAIL} ${reason}`);
   document.title = ok ? `${LANE} PASS` : `${LANE} FAIL`;
   window.__pgrustThreadsVerdict = ok ? 'PASS' : `FAIL ${reason}`;
 }
+
+// The store's stable error classes, each with the one thing the operator can DO about it. The
+// coordinator sends the error's name beside its stack precisely so this table can be consulted.
+const STORE_ERROR_REMEDY = {
+  StoreOwnedError:
+    'another live owner still holds the four sync access handles — close the other tab/worker ' +
+    '(or wait for a terminated run to be reaped) and retry',
+  StoreRecreationRequiredError:
+    'this build does not accept the directory\'s format identity — delete the whole directory ' +
+    'and start fresh (?reset=1)',
+  ExtentSizeMismatchError:
+    'the directory was created with a different extent size — omit the override or use the stored value',
+  CorruptStoreError: 'the activated authority is invalid — restore a backup or recreate (?reset=1)',
+  UnexpectedStoreEntryError:
+    'the directory is not dedicated to this store — choose an empty ?opfsdir, or ?reset=1',
+  StoreLimitError: 'the store hit a hard limit — recover space, or recreate at a larger extent size',
+  StoreFailedError: 'the live store is poisoned — reopen it and inspect the cause below',
+  StoreClosedError: 'the store was already closed — this is a coordinator lifecycle bug',
+  NotAllowedError: 'OPFS denied createSyncAccessHandle() in this scope — it must run in a worker',
+};
 
 // The same GUC argv as the single-threaded wire lane (wiresession.js
 // defaultWireArgv), with the dispatch mode in argv[1]. Spelled out here rather
@@ -234,7 +332,14 @@ async function main() {
     `page: shared memory ${memory.buffer.byteLength / 1048576}MiB, ` +
       `SharedArrayBuffer=${memory.buffer instanceof SharedArrayBuffer}`,
   );
-  note(`page: storage --fs ${FS_MODE}`);
+  note(
+    `page: storage --fs ${FS_MODE}` +
+      (FS_MODE === 'broker'
+        ? ` port=${PORT_KIND}` +
+          (PORT_KIND === 'opfs' ? ` opfsdir=${OPFS_DIR} durability=${DURABILITY} reset=${RESET}` : '') +
+          (PHASE === 'none' ? '' : ` phase=${PHASE}${CRASH ? ' crash=1' : ''}`)
+        : ''),
+  );
 
   // ---- the storage coordinator, started BEFORE anything else ---------------
   // Its store must be seeded and every channel attached before the first backend can ask for
@@ -243,6 +348,9 @@ async function main() {
   let storageWorker = null;
   let doorbell = null;
   let channels = [];
+  // Whether the coordinator opened an EXISTING store rather than seeding a fresh one. The whole
+  // claim of ?phase=verify, so it is asserted rather than merely logged.
+  let storageRestored = null;
   let storageStoppedResolve;
   const storageStoppedPromise = new Promise((r) => { storageStoppedResolve = r; });
 
@@ -261,9 +369,15 @@ async function main() {
     onWorkerMessage(storageWorker, (m) => {
       switch (m.type) {
         case 'storage-ready':
+          storageRestored = m.restored === true;
           note(
-            `page: storage coordinator ready — seeded ${m.files} files / ${m.dirs} dirs ` +
-              `(${m.bytes} bytes) in ${m.seedMs}ms; /pgdata holds ${m.datadirFiles} files ` +
+            `page: storage coordinator ready — port=${m.port}` +
+              (m.opfsDir ? ` dir=${m.opfsDir}` : '') +
+              ` durability=${m.durability} restored=${m.restored}; store opened in ${m.openMs}ms; ` +
+              (m.restored
+                ? 'seed SKIPPED (the store already held a datadir); '
+                : `seeded ${m.files} files / ${m.dirs} dirs (${m.bytes} bytes) in ${m.seedMs}ms; `) +
+              `/pgdata holds ${m.datadirFiles} files ` +
               `(${m.datadirBytes} bytes); arena ${(m.arenaBytes / 1048576).toFixed(1)}MiB ` +
               `at ${m.extentSize}B extents; channels [${m.channels.join(', ')}]`,
           );
@@ -274,15 +388,23 @@ async function main() {
           break;
         case 'storage-stopped':
           note(
-            `page: storage coordinator stopped — /pgdata now holds ${m.datadirFiles} files ` +
+            `page: storage coordinator stopped — strictSync ${m.syncMs}ms, close ${m.closeMs}ms, ` +
+              `flushes ${Object.entries(m.flushes || {}).map(([k, v]) => `${k}=${v}`).join(' ')}; ` +
+              `/pgdata now holds ${m.datadirFiles} files ` +
               `(${m.datadirBytes} bytes) against ${m.seededFiles} files (${m.seededBytes} bytes) at ` +
-              `seed: the session's writes landed in the ONE store (delta ` +
+              `open: the session's writes landed in the ONE store (delta ` +
               `${m.datadirFiles - m.seededFiles} files, ${m.datadirBytes - m.seededBytes} bytes)`,
           );
           storageStoppedResolve();
           break;
         case 'storage-error':
-          failures.push(`storage worker error: ${m.message}`);
+          // The store's typed failures name their own remedy — StoreOwnedError means another
+          // live owner still holds the four handles, StoreRecreationRequiredError means delete
+          // the directory (?reset=1), ExtentSizeMismatchError means this directory was created
+          // at a different ?extent. Printing the NAME is the difference between an actionable
+          // line and "the storage worker failed".
+          failures.push(`storage worker ${m.errorName || 'Error'}: ${m.message}`);
+          note(`page: storage ERROR ${m.errorName || 'Error'} — ${STORE_ERROR_REMEDY[m.errorName] || 'see the stack below'}`);
           note(`page: storage ERROR ${m.message}`);
           storageReady();
           storageStoppedResolve();
@@ -303,7 +425,13 @@ async function main() {
         manifest,
         channels: channels.map((c) => c.transfer()),
         doorbell: doorbell.buffer,
-        options: {},
+        options: {
+          port: PORT_KIND,
+          opfsDir: OPFS_DIR,
+          durability: DURABILITY,
+          reset: RESET,
+          ...(EXTENT ? { extentSize: EXTENT } : {}),
+        },
       },
       [imageBuf],
     );
@@ -537,6 +665,9 @@ async function main() {
   // =========================================================================
 
   const acceptLatencies = [];
+  // Set by the crash variant so the ordinary end-of-lane teardown does not "fix" the very thing
+  // the variant exists to leave broken.
+  let crashed = false;
   const T0 = Date.now();
   const stamp = () => String(Date.now() - T0).padStart(6);
   const plog = (line) => note(`[${stamp()}ms] ${line}`);
@@ -771,11 +902,28 @@ async function main() {
   //   2. close the listener pipe and poke the wake fd, then WAIT FOR THE GUEST TO EXIT ON ITS
   //      OWN. Assert exit code 0, the fast-shutdown request, the shutdown checkpoint and
   //      "database system is shut down" in the log, and that every pool slot came back idle.
+  // The two statements ?phase=persist leaves behind for ?phase=verify to find. They ride on the
+  // shutdown's session C rather than on a fourth session because that session already exists for
+  // the explicit CHECKPOINT, and the CHECKPOINT is exactly the boundary they want to be before.
+  const PERSIST_SQL = [
+    ['CREATE TABLE persist_t(id int primary key, note text)', 'CREATE TABLE'],
+    ["INSERT INTO persist_t VALUES (1, 'survived reload')", 'INSERT 0 1'],
+  ];
+
   async function postmasterShutdown() {
     const notes = [];
     const checks = [];
     try {
       const C = await openPipeSession('C');
+      if (PHASE === 'persist') {
+        for (const [sql, wanted] of PERSIST_SQL) {
+          const tp = Date.now();
+          const rp = await C.query(sql);
+          const got = wireTags(rp.msgs);
+          plog(`  C ${sql} ${Date.now() - tp}ms: ${got.join(',') || wireErrs(rp.msgs).map((f) => `${f.C} ${f.M}`).join(' | ')}`);
+          checks.push({ ok: got.includes(wanted), what: `persist: ${sql} -> ${wanted} (got ${got.join(',') || 'nothing'})` });
+        }
+      }
       const t = Date.now();
       const r = await C.query('CHECKPOINT');
       const tagList = r.msgs.filter((m) => m.t === 'C').map((m) => parseMessage('C', m.body).tag);
@@ -796,6 +944,31 @@ async function main() {
       await C.waitClosed(5000);
     } catch (e) {
       notes.push(`explicit CHECKPOINT could not be attempted: ${e && e.message ? e.message : e}`);
+    }
+
+    // ---- ?crash=1: the ending, removed --------------------------------------
+    // Everything below this point is a CLEAN stop: the listener EOF the postmaster turns into a
+    // fast shutdown, its shutdown checkpoint, and the coordinator's own strictSync + close().
+    // The crash variant does none of it. The process worker is killed with the listener still
+    // open, so the guest never learns it is stopping; the coordinator is killed while parked in
+    // Atomics.wait, so its four OPFS handles are released by the browser reaping the worker and
+    // NOT by close(). Whatever the next `?phase=verify` finds is therefore the store's recovery
+    // behaviour — for `relaxed` that is "the longest valid metadata-log prefix", which may be
+    // short of the last write.
+    if (CRASH) {
+      crashed = true;
+      plog('CRASH: terminating the process worker with the listener still OPEN (no EOF, no fast-shutdown request)');
+      try { worker.terminate(); } catch { /* already gone */ }
+      // One turn so the process worker is actually gone before the store's owner is, rather than
+      // the two races being resolved by luck.
+      await new Promise((r) => setTimeout(r, 250));
+      plog('CRASH: terminating the storage coordinator — no doorbell stop, no strictSync, no close()');
+      try { storageWorker.terminate(); } catch { /* already gone */ }
+      notes.push(
+        'crash variant: both workers terminated; the store was never closed and never finally synced — ' +
+          'the next open sees only what the guest\'s own fsyncs (and any amortization) had already flushed',
+      );
+      return { notes, checks };
     }
 
     const shutStart = Date.now();
@@ -865,6 +1038,58 @@ async function main() {
     return { notes, checks };
   }
 
+  /**
+   * ?phase=verify — the SECOND load, against the directory the persist run left behind.
+   *
+   * The two-session scenario is skipped on purpose: it would CREATE `lock_t` again, and the
+   * whole question here is whether the one from the previous page load is still there. So this
+   * lane only reads, and it reads two different things — a table the persist run created just
+   * before its CHECKPOINT (`persist_t`) and a table the scenario created much earlier and then
+   * updated twice (`lock_t`) — before running the ordinary shutdown.
+   */
+  async function runVerifyLane() {
+    const check = (cond, what) => {
+      if (cond) plog(`  ok   ${what}`);
+      else {
+        plog(`  FAIL ${what}`);
+        failures.push(what);
+      }
+    };
+    check(storageRestored === true, `coordinator reopened an EXISTING store (restored=${storageRestored})`);
+
+    const V = await openPipeSession('V');
+    plog(`  V handshake: ${V.handshake.map((m) => m.t).join('')}`);
+    check(V.handshake.some((m) => m.t === 'Z'), 'V: ReadyForQuery after startup');
+
+    let t = Date.now();
+    const noteRow = await V.query('SELECT note FROM persist_t WHERE id = 1');
+    const noteRows = wireRows(noteRow.msgs);
+    plog(
+      `  V SELECT note FROM persist_t ${Date.now() - t}ms -> ${JSON.stringify(noteRows)}` +
+        (wireErrs(noteRow.msgs).length ? ` err ${wireErrs(noteRow.msgs).map((f) => `${f.C} ${f.M}`).join(' | ')}` : ''),
+    );
+    check(
+      noteRows[0]?.[0] === 'survived reload',
+      `persist_t row survived the reload (got ${JSON.stringify(noteRows)})`,
+    );
+
+    t = Date.now();
+    const cnt = await V.query('SELECT count(*) FROM lock_t');
+    const cntRows = wireRows(cnt.msgs);
+    plog(
+      `  V SELECT count(*) FROM lock_t ${Date.now() - t}ms -> ${JSON.stringify(cntRows)}` +
+        (wireErrs(cnt.msgs).length ? ` err ${wireErrs(cnt.msgs).map((f) => `${f.C} ${f.M}`).join(' | ')}` : ''),
+    );
+    check(cntRows[0]?.[0] === '1', `lock_t from the persist run's scenario survived (got ${JSON.stringify(cntRows)})`);
+
+    V.terminate();
+    check(await V.waitClosed(5000), 'V: server closed the session fds after Terminate (EOF)');
+
+    const result = (await postmasterShutdown()) || {};
+    for (const n of result.notes || []) plog(`  note ${n}`);
+    for (const c of result.checks || []) check(c.ok, c.what);
+  }
+
   async function runPostmasterLane() {
     await Promise.race([
       poolReadyPromise,
@@ -876,6 +1101,10 @@ async function main() {
     plog(`postmaster ready: ${ready}`);
     if (!ready) {
       failures.push('postmaster never reached "ready to accept connections"');
+      return;
+    }
+    if (PHASE === 'verify') {
+      await runVerifyLane();
       return;
     }
     const result = await runHostPipesScenario({
@@ -933,10 +1162,14 @@ async function main() {
     // instantly (measured: up to ~2s), so a couple of `path_open failed -> EIO`
     // lines from an ALREADY-EXITED guest can still trail the verdict. They are
     // an artefact of a page outliving its run, not a lane failure.
+    // ?crash=1 already terminated both workers, deliberately without any of this.
+    if (crashed) return;
     try { worker.terminate(); } catch { /* already gone */ }
     // The coordinator holds the ONE store the checkpointer just wrote through;
     // it must be stopped by its doorbell (it is parked in Atomics.wait and
-    // cannot be reached by postMessage), and only AFTER the guest is gone.
+    // cannot be reached by postMessage), and only AFTER the guest is gone. With
+    // ?port=opfs this is also what RELEASES the four sync access handles, so the
+    // next load does not meet StoreOwnedError.
     if (storageWorker) {
       doorbell.requestStop();
       await Promise.race([storageStoppedPromise, new Promise((r) => setTimeout(r, 5000))]);
