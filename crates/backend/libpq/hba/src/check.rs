@@ -3,7 +3,7 @@ use std::net::IpAddr;
 use ip::SockAddr;
 use types_core::init::uaImplicitReject;
 use types_core::Oid;
-use types_error::{PgResult, DEBUG2, ERRCODE_INTERNAL_ERROR, LOG};
+use types_error::{PgResult, DEBUG2, LOG};
 use types_startup::{
     ctHostGSS, ctHostSSL, ctLocal, ipCmpAll, ipCmpMask, ipCmpSameHost, ipCmpSameNet, AuthToken,
     HbaLine, IPCompareMethod, Port,
@@ -11,7 +11,7 @@ use types_startup::{
 
 use crate::parse_hba::enable_gss;
 use crate::{
-    pg_strcasecmp, report_plain, token_has_regexp, token_is_keyword, token_is_member_check,
+    pg_strcasecmp, report_log, token_has_regexp, token_is_keyword, token_is_member_check,
     token_matches, token_matches_insensitive, with_parsed_hba_lines,
 };
 
@@ -233,11 +233,11 @@ pub(crate) fn check_hostname(port: &mut Port, hostname: &str) -> PgResult<bool> 
             .any(|gai| sockaddr_to_ipaddr(&gai.addr) == client_ip);
 
     if !found {
-        report_plain(
+        // elog(DEBUG2, ...): no errcode, the below-ERROR default 00000.
+        report_log(
             DEBUG2,
             1155,
             "check_hostname",
-            ERRCODE_INTERNAL_ERROR,
             format!(
                 "pg_hba.conf host name \"{hostname}\" rejected because address resolution did not return a match with IP address of client"
             ),
@@ -293,17 +293,21 @@ pub(crate) fn check_same_host_or_net(
         }
     });
 
-    if res.is_err() {
-        report_plain(
-            LOG,
-            1249,
-            "check_same_host_or_net",
-            ERRCODE_INTERNAL_ERROR,
-            "error enumerating network interfaces".to_string(),
-        )?;
+    if let Err(e) = res {
+        report_ifaddr_enumeration_error(e.raw_os_error().unwrap_or(0))?;
         return Ok(false);
     }
     Ok(result)
+}
+
+// hba.c:1221 — the pg_foreach_ifaddr() < 0 report of check_same_host_or_net:
+// ereport(LOG, errmsg("error enumerating network interfaces: %m")) with no
+// errcode (the LOG default, 00000).
+pub(crate) fn report_ifaddr_enumeration_error(errno: i32) -> PgResult<()> {
+    elog::ereport(LOG)
+        .with_saved_errno(errno)
+        .errmsg("error enumerating network interfaces: %m")
+        .finish(crate::loc(1221, "check_same_host_or_net"))
 }
 
 pub fn check_hba(port: &mut Port) -> PgResult<()> {

@@ -1067,3 +1067,129 @@ fn authfuzz_mutation_no_panic() {
         af_drive(&buf);
     }
 }
+
+// ========================================================================
+// audit-18.6 remediation b205: server-log report shape (SQLSTATE / CONTEXT /
+// %m) of the hba.c reports that C raises without an explicit errcode.
+
+static LOGGED: Mutex<Vec<(std::thread::ThreadId, types_error::PgError)>> = Mutex::new(Vec::new());
+
+fn record_log(error: &types_error::PgError, _output_to_server: &mut bool) {
+    LOGGED
+        .lock()
+        .unwrap()
+        .push((std::thread::current().id(), error.clone()));
+}
+
+// Runs `f` with the emit-log hook capturing this thread's reports; returns
+// the reports in emission order.
+fn capture_logs<T>(f: impl FnOnce() -> T) -> (T, Vec<types_error::PgError>) {
+    setup();
+    let me = std::thread::current().id();
+    LOGGED.lock().unwrap().retain(|r| r.0 != me);
+    let prev = elog::set_emit_log_hook(Some(record_log));
+    let out = f();
+    elog::set_emit_log_hook(prev);
+    let logged = LOGGED
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| r.0 == me)
+        .map(|r| r.1.clone())
+        .collect();
+    (out, logged)
+}
+
+fn sqlstate_str(e: &types_error::PgError) -> String {
+    String::from_utf8_lossy(&types_error::unpack_sqlstate(e.sqlstate)).into_owned()
+}
+
+// hba.c:2984 / :3009 — check_usermap's two LOG reports carry no errcode(),
+// so the CSV/JSON log column is 00000, not XX000.
+#[test]
+fn check_usermap_mismatch_logs_default_sqlstate() {
+    let (rc, logged) = capture_logs(|| check_usermap(None, "alice", "bob", false).unwrap());
+    assert_eq!(rc, STATUS_ERROR);
+    assert_eq!(logged.len(), 1, "{logged:?}");
+    assert_eq!(
+        logged[0].message(),
+        "provided user name (alice) and authenticated user name (bob) do not match"
+    );
+    assert_eq!(logged[0].level, LOG);
+    assert_eq!(sqlstate_str(&logged[0]), "00000");
+
+    let (rc, logged) = capture_logs(|| {
+        check_usermap(Some("nosuchmap_b205"), "alice", "osuser", false).unwrap()
+    });
+    assert_eq!(rc, STATUS_ERROR);
+    assert_eq!(logged.len(), 1, "{logged:?}");
+    assert_eq!(
+        logged[0].message(),
+        "no match in usermap \"nosuchmap_b205\" for user \"alice\" authenticated as \"osuser\""
+    );
+    assert_eq!(sqlstate_str(&logged[0]), "00000");
+}
+
+// hba.c:1221 — "error enumerating network interfaces: %m" at LOG with the
+// default SQLSTATE (the message carries strerror(errno) after ": ").
+#[test]
+fn ifaddr_enumeration_failure_report_has_errno_and_default_sqlstate() {
+    let ((), logged) = capture_logs(|| {
+        crate::check::report_ifaddr_enumeration_error(libc::ENOMEM).unwrap()
+    });
+    assert_eq!(logged.len(), 1, "{logged:?}");
+    assert_eq!(
+        logged[0].message(),
+        format!(
+            "error enumerating network interfaces: {}",
+            elog::errno::strerror(libc::ENOMEM)
+        )
+    );
+    assert_eq!(logged[0].level, LOG);
+    assert_eq!(sqlstate_str(&logged[0]), "00000");
+}
+
+// hba.c:662 tokenize_error_callback — every report raised while
+// tokenize_auth_file is on the stack carries 'line %d of configuration file
+// "%s"' CONTEXT, one line per nested tokenize frame (innermost first).
+#[test]
+fn tokenize_reports_carry_line_context() {
+    // include_if_exists on a missing file: open failure (58P01) + the
+    // "skipping" LOG (no errcode → 00000), both with the line-3 context.
+    let content = "local all postgres trust\n\ninclude_if_exists /nonexistent/b205_missing.conf\n";
+    let hba_path = write_temp("ctx_hba.conf", content);
+    let (ok, logged) = capture_logs(|| load_hba_content("ctx_hba.conf", content));
+    assert!(ok, "include_if_exists of a missing file still loads: {logged:?}");
+    let open_err = logged
+        .iter()
+        .find(|e| e.message().starts_with("could not open file \"/nonexistent/b205_missing.conf\""))
+        .unwrap_or_else(|| panic!("no open-failure report: {logged:?}"));
+    let skip = logged
+        .iter()
+        .find(|e| e.message() == "skipping missing authentication file \"/nonexistent/b205_missing.conf\"")
+        .unwrap_or_else(|| panic!("no skipping report: {logged:?}"));
+    let ctx3 = format!("line 3 of configuration file \"{hba_path}\"");
+    assert_eq!(open_err.context.as_deref(), Some(ctx3.as_str()));
+    assert_eq!(sqlstate_str(open_err), "58P01");
+    assert_eq!(skip.context.as_deref(), Some(ctx3.as_str()));
+    assert_eq!(sqlstate_str(skip), "00000");
+
+    // A self-including file: depth 11 fails with "maximum nesting depth
+    // exceeded" under ten nested include-file frames plus the outer line.
+    let selfinc = write_temp("b205_selfinc.conf", "include b205_selfinc.conf\n");
+    let content = "local all postgres trust\ninclude b205_selfinc.conf\n";
+    let hba2_path = write_temp("ctx2_hba.conf", content);
+    let (ok, logged) = capture_logs(|| load_hba_content("ctx2_hba.conf", content));
+    assert!(!ok, "nesting overflow fails the load");
+    let depth = logged
+        .iter()
+        .find(|e| e.message() == format!("could not open file \"{selfinc}\": maximum nesting depth exceeded"))
+        .unwrap_or_else(|| panic!("no nesting-depth report: {logged:?}"));
+    let mut expected: Vec<String> = std::iter::repeat_n(
+        format!("line 1 of configuration file \"{selfinc}\""),
+        10,
+    )
+    .collect();
+    expected.push(format!("line 2 of configuration file \"{hba2_path}\""));
+    assert_eq!(depth.context.as_deref(), Some(expected.join("\n").as_str()));
+}

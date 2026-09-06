@@ -1,11 +1,12 @@
 use std::cell::Cell;
 use std::path::PathBuf;
+use std::rc::Rc;
 
-use types_error::{ErrorLevel, PgResult, ERRCODE_INTERNAL_ERROR};
+use types_error::{ErrorLevel, PgResult};
 use types_startup::AuthToken;
 
 use crate::token::{free_auth_file, make_auth_token, next_token, open_auth_file, FileHandle};
-use crate::{report_plain, TokenizedAuthLine, CONF_FILE_START_DEPTH};
+use crate::{report_log, TokenizedAuthLine, CONF_FILE_START_DEPTH};
 
 // errno after a failed open_auth_file (C reads the ambient errno for the
 // include_if_exists ENOENT test).
@@ -74,11 +75,10 @@ pub(crate) fn tokenize_include_file(
     let inc_file = match open_auth_file(&inc_fullname, elevel, depth, err_msg)? {
         None => {
             if LAST_OPEN_ERRNO.with(Cell::get) == libc::ENOENT && missing_ok {
-                report_plain(
+                report_log(
                     elevel,
                     479,
                     "tokenize_include_file",
-                    ERRCODE_INTERNAL_ERROR,
                     format!("skipping missing authentication file \"{inc_fullname}\""),
                 )?;
                 *err_msg = None;
@@ -126,6 +126,36 @@ pub(crate) fn tokenize_expand_file(
     Ok(())
 }
 
+// tokenize_error_callback (hba.c:662): while tokenize_auth_file is on the
+// stack every report carries 'line %d of configuration file "%s"' CONTEXT.
+// The callback reads the live line number (C: callback_arg.linenum follows
+// line_number); nested include frames push their own, innermost first, and
+// the guard pops on every exit (C: error_context_stack = previous).
+struct TokenizeErrorContext {
+    linenum: Rc<Cell<i32>>,
+    callback: u64,
+}
+
+impl TokenizeErrorContext {
+    fn push(filename: &str, line_number: i32) -> Self {
+        let linenum = Rc::new(Cell::new(line_number));
+        let callback = {
+            let linenum = Rc::clone(&linenum);
+            let filename = filename.to_owned();
+            elog::push_emit_context_callback(Box::new(move |e| {
+                e.add_context_line(crate::line_context(linenum.get(), &filename));
+            }))
+        };
+        TokenizeErrorContext { linenum, callback }
+    }
+}
+
+impl Drop for TokenizeErrorContext {
+    fn drop(&mut self) {
+        elog::pop_emit_context_callback(self.callback);
+    }
+}
+
 pub fn tokenize_auth_file(
     filename: &str,
     file: &FileHandle,
@@ -135,6 +165,7 @@ pub fn tokenize_auth_file(
 ) -> PgResult<()> {
     let mut lines = LineIter::new(&file.content);
     let mut line_number: i32 = 1;
+    let errcontext = TokenizeErrorContext::push(filename, line_number);
 
     if depth == CONF_FILE_START_DEPTH {
         tok_lines.clear();
@@ -228,6 +259,7 @@ pub fn tokenize_auth_file(
         }
 
         line_number += continuations + 1;
+        errcontext.linenum.set(line_number);
     }
 
     Ok(())

@@ -167,16 +167,17 @@ pub(crate) fn regexec_auth_token(
     let cx = mcx::MemoryContext::new("regexec_auth_token");
     let wpat =
         mbutils_seams::pg_mb2wchar_with_len::call(cx.mcx(), &token.string.as_bytes()[1..])?;
-    // Recompile of a parse-validated pattern (see regcomp_auth_token).
+    // Recompile of a parse-validated pattern (see regcomp_auth_token). C
+    // executes the stored regex_t and cannot fail here; a recompile
+    // refusal (engine state diverged since parse time) is surfaced as a
+    // regexec failure — the callers' non-REG_OKAY arm — never a panic.
     let re = match regex_core_seams::pg_regcomp::call(
         &wpat,
         REG_ADVANCED,
         types_core::catalog::C_COLLATION_OID,
     )? {
         RegcompResult::Compiled(re) => re,
-        RegcompResult::Failed(f) => {
-            panic!("regexec_auth_token: parse-validated pattern failed to recompile: {}", f.message)
-        }
+        RegcompResult::Failed(f) => return Ok(Err(f.message)),
     };
     let wstr = mbutils_seams::pg_mb2wchar_with_len::call(cx.mcx(), matchstr.as_bytes())?;
     let result = match regex_core_seams::pg_regexec::call(&re, &wstr, 0, pmatch)? {

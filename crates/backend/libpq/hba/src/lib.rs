@@ -144,6 +144,18 @@ pub(crate) fn report_plain(
     ereport(elevel).errcode(sqlstate).errmsg(msg).finish(loc(cline, func))
 }
 
+// ereport(elevel, (errmsg(...))) with no errcode(): the level's default
+// SQLSTATE (00000 below WARNING), as C's check_usermap / tokenize_include_file
+// / check_hostname reports carry.
+pub(crate) fn report_log(
+    elevel: ErrorLevel,
+    cline: i32,
+    func: &'static str,
+    msg: String,
+) -> PgResult<()> {
+    ereport(elevel).errmsg(msg).finish(loc(cline, func))
+}
+
 pub fn load_hba() -> PgResult<bool> {
     let hba_file_name = hba_file_name();
 
@@ -254,11 +266,10 @@ pub fn check_usermap(
         } else if pg_user == system_user {
             return Ok(STATUS_OK);
         }
-        report_plain(
+        report_log(
             LOG,
             2984,
             "check_usermap",
-            types_error::ERRCODE_INTERNAL_ERROR,
             format!(
                 "provided user name ({pg_user}) and authenticated user name ({system_user}) do not match"
             ),
@@ -286,11 +297,10 @@ pub fn check_usermap(
     })?;
 
     if !found_entry && !error {
-        report_plain(
+        report_log(
             LOG,
             3009,
             "check_usermap",
-            types_error::ERRCODE_INTERNAL_ERROR,
             format!(
                 "no match in usermap \"{usermap_name}\" for user \"{pg_user}\" authenticated as \"{system_user}\""
             ),
