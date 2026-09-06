@@ -68,6 +68,35 @@ pub fn LogStandbySnapshot() -> PgResult<XLogRecPtr> {
     })
 }
 
+// standby.c:1378-1393 LogCurrentRunningXacts: the two DEBUG2 snapshot lines.
+fn running_xacts_snapshot_message(
+    running: &procarray::RunningTransactions<'_>,
+    recptr: XLogRecPtr,
+) -> String {
+    if running.subxid_overflow {
+        format!(
+            "snapshot of {} running transactions overflowed (lsn {:X}/{:X} oldest xid {} latest complete {} next xid {})",
+            running.xcnt,
+            recptr >> 32,
+            recptr as u32,
+            running.oldest_running_xid,
+            running.latest_completed_xid,
+            running.next_xid,
+        )
+    } else {
+        format!(
+            "snapshot of {}+{} running transaction ids (lsn {:X}/{:X} oldest xid {} latest complete {} next xid {})",
+            running.xcnt,
+            running.subxcnt,
+            recptr >> 32,
+            recptr as u32,
+            running.oldest_running_xid,
+            running.latest_completed_xid,
+            running.next_xid,
+        )
+    }
+}
+
 fn running_xacts_header(
     running: &procarray::RunningTransactions<'_>,
 ) -> [u8; MIN_SIZE_OF_XACT_RUNNING_XACTS] {
@@ -99,34 +128,7 @@ fn LogCurrentRunningXacts(running: &procarray::RunningTransactions<'_>) -> PgRes
         &[],
     )?;
 
-    if running.subxid_overflow {
-        elog(
-            DEBUG2,
-            format!(
-                "snapshot of {} running transactions overflowed (lsn {:X}/{:08X} oldest xid {} latest complete {} next xid {})",
-                running.xcnt,
-                recptr >> 32,
-                recptr as u32,
-                running.oldest_running_xid,
-                running.latest_completed_xid,
-                running.next_xid,
-            ),
-        )?;
-    } else {
-        elog(
-            DEBUG2,
-            format!(
-                "snapshot of {}+{} running transaction ids (lsn {:X}/{:08X} oldest xid {} latest complete {} next xid {})",
-                running.xcnt,
-                running.subxcnt,
-                recptr >> 32,
-                recptr as u32,
-                running.oldest_running_xid,
-                running.latest_completed_xid,
-                running.next_xid,
-            ),
-        )?;
-    }
+    elog(DEBUG2, running_xacts_snapshot_message(running, recptr))?;
 
     transam_xlog::XLogSetAsyncXactLSN(recptr);
 

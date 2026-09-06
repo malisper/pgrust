@@ -444,3 +444,17 @@ fn epoll_ctl_failure_message_is_c_exact() {
     // SAFETY: closing the fd opened above.
     unsafe { libc::close(fd) };
 }
+
+// waiteventset.c:1970-1985 drain(): C names its wake mechanism in the
+// error text -- WAIT_USE_SIGNALFD on the epoll build (Linux, :110) and the
+// self-pipe everywhere else (:112). "%m" is appended by elog_error_m.
+#[test]
+fn drain_error_messages_match_c() {
+    let (eof, failed) = if cfg!(target_os = "linux") {
+        ("unexpected EOF on signalfd", "read() on signalfd failed")
+    } else {
+        ("unexpected EOF on self-pipe", "read() on self-pipe failed")
+    };
+    assert_eq!(DRAIN_EOF_MESSAGE, eof);
+    assert_eq!(DRAIN_READ_FAILED_MESSAGE, failed);
+}

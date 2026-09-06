@@ -527,10 +527,23 @@ pub fn WaitEventSetCanReportClosed() -> bool {
 pub(crate) fn drain() -> PgResult<()> {
     match waiter::drain_wake_fd() {
         Ok(()) => Ok(()),
-        Err(0) => Err(wes_error("unexpected EOF on waiter wake pipe")),
-        Err(_errno) => Err(elog_error_m("read() on waiter wake pipe failed")),
+        Err(0) => Err(wes_error(DRAIN_EOF_MESSAGE)),
+        Err(_errno) => Err(elog_error_m(DRAIN_READ_FAILED_MESSAGE)),
     }
 }
+
+// waiteventset.c:1970-1985 drain(): the elog(ERROR) texts name C's wake
+// mechanism -- WAIT_USE_SIGNALFD on the epoll build (:110, Linux) and the
+// self-pipe on every other build (:112). The port's wake pipe stands in
+// for both; the texts follow the C build of the same platform.
+#[cfg(target_os = "linux")]
+const DRAIN_EOF_MESSAGE: &str = "unexpected EOF on signalfd";
+#[cfg(target_os = "linux")]
+const DRAIN_READ_FAILED_MESSAGE: &str = "read() on signalfd failed";
+#[cfg(not(target_os = "linux"))]
+const DRAIN_EOF_MESSAGE: &str = "unexpected EOF on self-pipe";
+#[cfg(not(target_os = "linux"))]
+const DRAIN_READ_FAILED_MESSAGE: &str = "read() on self-pipe failed";
 
 fn now_millis() -> i64 {
     // DST P2 (contract §1.3): the named waiteventset gap — timeout math on

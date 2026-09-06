@@ -1,4 +1,5 @@
 use super::*;
+use types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED;
 
 #[test]
 fn init_struct_create_then_attach() {
@@ -51,11 +52,21 @@ fn size_arithmetic_checks_overflow() {
     assert_eq!(mul_size(0, usize::MAX).unwrap(), 0);
     assert_eq!(mul_size(usize::MAX, 0).unwrap(), 0);
 
+    // mcxt.c:1694-1700 add_size_error / :1713-1719 mul_size_error (18.6 moved
+    // both out of shmem.c; the pre-18 "requested shared memory size overflows
+    // size_t" text is gone).
     let err = add_size(usize::MAX, 1).unwrap_err();
     assert_eq!(err.sqlstate, ERRCODE_PROGRAM_LIMIT_EXCEEDED);
-    assert_eq!(err.message, "requested shared memory size overflows size_t");
+    assert_eq!(
+        err.message,
+        format!("invalid memory allocation request size {} + 1", usize::MAX)
+    );
     let err = mul_size(usize::MAX, 2).unwrap_err();
     assert_eq!(err.sqlstate, ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+    assert_eq!(
+        err.message,
+        format!("invalid memory allocation request size {} * 2", usize::MAX)
+    );
 }
 
 #[test]
@@ -129,4 +140,68 @@ fn alloc_of_unrepresentable_size_is_out_of_memory_error_not_panic() {
             "not enough shared memory for data structure \"b118_unrepresentable\" ({size} bytes requested)"
         )
     );
+}
+
+// shmem.c:428-436: an index entry that cannot be created is
+// ERRCODE_OUT_OF_MEMORY "could not create ShmemIndex entry for data
+// structure \"%s\"", not an allocator abort. The reservation helper is the
+// one arm Vec::push would have aborted in; a capacity-overflow reservation
+// drives it deterministically.
+#[test]
+fn index_entry_allocation_failure_is_out_of_memory_error() {
+    let mut index: Vec<ShmemIndexEnt> = Vec::new();
+    let err = shmem_index_reserve(&mut index, usize::MAX, "b245_index_full").unwrap_err();
+    assert_eq!(err.sqlstate, ERRCODE_OUT_OF_MEMORY);
+    assert_eq!(
+        err.message,
+        "could not create ShmemIndex entry for data structure \"b245_index_full\""
+    );
+    shmem_index_reserve(&mut index, 1, "b245_index_ok").unwrap();
+}
+
+// shmem.c:210-215: an entry's off is the bump value its own allocation
+// consumed (C derives it from the pointer). Bumps from other threads landing
+// between the carve and the index insert must not shift it: every bump --
+// anonymous or indexed -- owns a distinct cache-line-aligned offset.
+#[test]
+fn index_entry_off_is_the_entrys_own_bump() {
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let hammers: Vec<_> = (0..4)
+        .map(|_| {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                let mut offs = Vec::new();
+                while !stop.load(Ordering::Relaxed) {
+                    let mut allocated = 0;
+                    let (p, off) = ShmemAllocRaw(1, &mut allocated);
+                    assert!(!p.is_null());
+                    offs.push(off);
+                }
+                offs
+            })
+        })
+        .collect();
+    for i in 0..256 {
+        let name = format!("b245_off_{i}");
+        let (_, found) = ShmemInitStruct(&name, 1).unwrap();
+        assert!(!found);
+    }
+    stop.store(true, Ordering::Relaxed);
+    let mut offs: Vec<usize> = hammers
+        .into_iter()
+        .flat_map(|h| h.join().unwrap())
+        .collect();
+    let index = SHMEM_INDEX.lock().unwrap();
+    let entries: Vec<&ShmemIndexEnt> =
+        index.iter().filter(|e| e.name.starts_with("b245_off_")).collect();
+    assert_eq!(entries.len(), 256);
+    for e in &entries {
+        assert_eq!(e.allocated_size, PG_CACHE_LINE_SIZE);
+        offs.push(e.off);
+    }
+    let total = offs.len();
+    offs.sort_unstable();
+    offs.dedup();
+    assert_eq!(offs.len(), total, "a bump offset was attributed twice");
+    assert!(offs.iter().all(|off| off % PG_CACHE_LINE_SIZE == 0));
 }

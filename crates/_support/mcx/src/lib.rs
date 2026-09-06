@@ -1969,6 +1969,23 @@ pub fn check_alloc_size(request: usize) -> PgResult<()> {
     Ok(())
 }
 
+/// C mcxt.c:1684 `add_size()`: overflow-checked `s1 + s2`
+/// (ERRCODE_PROGRAM_LIMIT_EXCEEDED, mcxt.c:1694 add_size_error).
+#[inline]
+pub fn add_size(s1: usize, s2: usize) -> PgResult<usize> {
+    match s1.checked_add(s2) {
+        Some(result) => Ok(result),
+        None => Err(add_size_error(s1, s2)),
+    }
+}
+
+#[cold]
+fn add_size_error(s1: usize, s2: usize) -> alloc::boxed::Box<PgError> {
+    PgError::error(alloc::format!("invalid memory allocation request size {s1} + {s2}"))
+        .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+        .into()
+}
+
 /// C mcxt.c `mul_size()`: the overflow-checked `count * sizeof(type)` that
 /// `palloc_array()` / `palloc_mul()` size through (ERRCODE_PROGRAM_LIMIT_EXCEEDED).
 // upstream e1c30458a10f (18.4): Make palloc_array() and friends safe against integer overflow.

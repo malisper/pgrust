@@ -903,16 +903,6 @@ fn elog_error(message: impl Into<String>) -> Box<PgError> {
     Box::new(PgError::error(message))
 }
 
-// shmem.c add_size, private mirror of the unported helper.
-fn add_size(s1: usize, s2: usize) -> PgResult<usize> {
-    s1.checked_add(s2).ok_or_else(|| {
-        Box::new(
-            PgError::error("requested shared memory size overflows size_t")
-                .with_sqlstate(::types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-        )
-    })
-}
-
 // --- Slot functions (tableam.c) ---
 
 pub fn table_slot_callbacks(relation: &Relation<'_>) -> TupleSlotKind {
@@ -2226,7 +2216,7 @@ pub fn table_parallelscan_estimate(
             std::mem::size_of::<ParallelBlockTableScanDescData>()
         }
     };
-    sz = add_size(sz, am_sz)?;
+    sz = mcx::add_size(sz, am_sz)?;
 
     Ok(sz)
 }

@@ -17,9 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use elog::ereport;
-use types_error::{
-    ErrorLocation, PgResult, ERRCODE_OUT_OF_MEMORY, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR,
-};
+use types_error::{ErrorLocation, PgResult, ERRCODE_OUT_OF_MEMORY, ERROR};
 
 #[cfg(test)]
 mod tests;
@@ -58,9 +56,12 @@ fn CACHELINEALIGN(len: usize) -> Option<usize> {
         .map(|n| n & !(PG_CACHE_LINE_SIZE - 1))
 }
 
-fn ShmemAllocRaw(size: usize, allocated_size: &mut usize) -> *mut u8 {
+// Returns (space, off): `off` is the bump counter's value this request
+// consumed (C: newStart = ShmemSegHdr->freeoffset under ShmemLock,
+// shmem.c:210-215), i.e. the entry's (char *) location - ShmemSegHdr.
+fn ShmemAllocRaw(size: usize, allocated_size: &mut usize) -> (*mut u8, usize) {
     let Some(padded) = CACHELINEALIGN(size) else {
-        return std::ptr::null_mut();
+        return (std::ptr::null_mut(), 0);
     };
     *allocated_size = padded;
     // C: freeoffset + padded > totalsize -> NULL; the heap-backed segment's
@@ -68,17 +69,17 @@ fn ShmemAllocRaw(size: usize, allocated_size: &mut usize) -> *mut u8 {
     // out-of-shared-memory ERROR (shmem.c:159), never a panic.
     let Ok(layout) = Layout::from_size_align(padded.max(PG_CACHE_LINE_SIZE), PG_CACHE_LINE_SIZE)
     else {
-        return std::ptr::null_mut();
+        return (std::ptr::null_mut(), 0);
     };
-    SHMEM_FREEOFFSET.fetch_add(padded, Ordering::Relaxed);
+    let off = SHMEM_FREEOFFSET.fetch_add(padded, Ordering::Relaxed);
     // SAFETY: layout has non-zero size. Zeroed to match a fresh C segment;
     // leaked for the cluster lifetime, as C shmem is never freed.
-    unsafe { std::alloc::alloc_zeroed(layout) }
+    (unsafe { std::alloc::alloc_zeroed(layout) }, off)
 }
 
 pub fn ShmemAlloc(size: usize) -> PgResult<*mut u8> {
     let mut allocated_size = 0;
-    let new_space = ShmemAllocRaw(size, &mut allocated_size);
+    let (new_space, _) = ShmemAllocRaw(size, &mut allocated_size);
     if new_space.is_null() {
         out_of_shmem(size, "ShmemAlloc")?;
         unreachable!();
@@ -88,7 +89,23 @@ pub fn ShmemAlloc(size: usize) -> PgResult<*mut u8> {
 
 pub fn ShmemAllocNoError(size: usize) -> *mut u8 {
     let mut allocated_size = 0;
-    ShmemAllocRaw(size, &mut allocated_size)
+    ShmemAllocRaw(size, &mut allocated_size).0
+}
+
+// shmem.c:428-436: hash_search(ShmemIndex, name, HASH_ENTER_NULL) returning
+// NULL (no room for the index entry) is ERRCODE_OUT_OF_MEMORY "could not
+// create ShmemIndex entry for data structure \"%s\"", raised after the index
+// lock is released -- never an allocator abort.
+fn shmem_index_reserve(
+    index: &mut Vec<ShmemIndexEnt>,
+    additional: usize,
+    name: &str,
+) -> PgResult<()> {
+    if index.try_reserve(additional).is_err() {
+        could_not_create_index_entry(name)?;
+        unreachable!();
+    }
+    Ok(())
 }
 
 pub fn ShmemInitStruct(name: &str, size: usize) -> PgResult<(*mut u8, bool)> {
@@ -105,8 +122,15 @@ pub fn ShmemInitStruct(name: &str, size: usize) -> PgResult<(*mut u8, bool)> {
         return Ok((std::ptr::with_exposed_provenance_mut(ent.location), true));
     }
 
+    // C enters the index entry (shmem.c:428) before carving the space
+    // (:453); the entry slot is secured first here too.
+    if let Err(e) = shmem_index_reserve(&mut index, 1, name) {
+        drop(index);
+        return Err(e);
+    }
+
     let mut allocated_size = 0;
-    let struct_ptr = ShmemAllocRaw(size, &mut allocated_size);
+    let (struct_ptr, off) = ShmemAllocRaw(size, &mut allocated_size);
     if struct_ptr.is_null() {
         drop(index);
         not_enough_shmem(name, size)?;
@@ -117,32 +141,19 @@ pub fn ShmemInitStruct(name: &str, size: usize) -> PgResult<(*mut u8, bool)> {
         location: struct_ptr.expose_provenance(),
         size,
         allocated_size,
-        off: SHMEM_FREEOFFSET.load(Ordering::Relaxed) - allocated_size,
+        off,
     });
     Ok((struct_ptr, false))
 }
 
+// add_size/mul_size live in mcxt.c at 18.6 (mcxt.c:1684/:1703); the
+// shmem-facing names delegate so every caller raises the one C text.
 pub fn add_size(s1: usize, s2: usize) -> PgResult<usize> {
-    match s1.checked_add(s2) {
-        Some(result) => Ok(result),
-        None => {
-            size_overflow("add_size")?;
-            unreachable!();
-        }
-    }
+    mcx::add_size(s1, s2)
 }
 
 pub fn mul_size(s1: usize, s2: usize) -> PgResult<usize> {
-    if s1 == 0 || s2 == 0 {
-        return Ok(0);
-    }
-    match s1.checked_mul(s2) {
-        Some(result) => Ok(result),
-        None => {
-            size_overflow("mul_size")?;
-            unreachable!();
-        }
-    }
+    mcx::mul_size(s1, s2)
 }
 
 pub fn ShmemLockAcquire() {
@@ -190,6 +201,17 @@ fn not_enough_shmem(name: &str, size: usize) -> PgResult<()> {
 
 #[cold]
 #[inline(never)]
+fn could_not_create_index_entry(name: &str) -> PgResult<()> {
+    ereport(ERROR)
+        .errcode(ERRCODE_OUT_OF_MEMORY)
+        .errmsg(format!(
+            "could not create ShmemIndex entry for data structure \"{name}\""
+        ))
+        .finish(loc("ShmemInitStruct"))
+}
+
+#[cold]
+#[inline(never)]
 fn size_mismatch(name: &str, expected: usize, actual: usize) -> PgResult<()> {
     ereport(ERROR)
         .errmsg(format!(
@@ -197,15 +219,6 @@ fn size_mismatch(name: &str, expected: usize, actual: usize) -> PgResult<()> {
              expected {expected}, actual {actual}"
         ))
         .finish(loc("ShmemInitStruct"))
-}
-
-#[cold]
-#[inline(never)]
-fn size_overflow(func: &'static str) -> PgResult<()> {
-    ereport(ERROR)
-        .errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
-        .errmsg("requested shared memory size overflows size_t")
-        .finish(loc(func))
 }
 
 // pg_numa_available (shmem.c): pg_numa_init() != -1. This build has no

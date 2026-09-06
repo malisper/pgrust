@@ -265,3 +265,34 @@ fn unknown_op_code_is_a_logged_panic() {
         "captured log: {log:?}"
     );
 }
+
+// standby.c:1378/1386: the DEBUG2 snapshot lines print the LSN with
+// LSN_FORMAT_ARGS under "%X/%X" -- no zero padding of the low word at 18.6
+// (C: "lsn 0/17A4040"; the padded "lsn 0/017A4040" is not C).
+#[test]
+fn running_xacts_snapshot_message_formats_lsn_like_c() {
+    let xids = [900u32];
+    let running = procarray::RunningTransactions {
+        xids: &xids,
+        xcnt: 0,
+        subxcnt: 0,
+        subxid_overflow: false,
+        next_xid: 754,
+        oldest_running_xid: 754,
+        latest_completed_xid: 753,
+        oldest_database_running_xid: 754,
+    };
+    assert_eq!(
+        running_xacts_snapshot_message(&running, 0x017A_4040),
+        "snapshot of 0+0 running transaction ids (lsn 0/17A4040 oldest xid 754 latest complete 753 next xid 754)"
+    );
+    let overflowed = procarray::RunningTransactions {
+        subxid_overflow: true,
+        xcnt: 3,
+        ..running
+    };
+    assert_eq!(
+        running_xacts_snapshot_message(&overflowed, 0x0000_0001_0000_000Au64 as XLogRecPtr),
+        "snapshot of 3 running transactions overflowed (lsn 1/A oldest xid 754 latest complete 753 next xid 754)"
+    );
+}
