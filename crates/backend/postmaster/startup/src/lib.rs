@@ -109,8 +109,13 @@ pub fn ProcessStartupProcInterrupts() -> PgResult<()> {
 
 fn StartupProcExit(_code: i32, _arg: usize) {
     if xlogutils::standby_state() != xlogutils::STANDBY_DISABLED {
-        standby_seams::shutdown_recovery_transaction_environment::call()
-            .unwrap_or_else(|e| panic!("ShutdownRecoveryTransactionEnvironment: {e:?}"));
+        // An ERROR raised here (startup.c:207) is promoted to FATAL —
+        // no exception stack and proc_exit in progress (elog.c:375-381) —
+        // and errfinish re-enters proc_exit(1) (elog.c:587), which finishes
+        // the remaining exit callbacks with code 1.
+        if let Err(e) = standby_seams::shutdown_recovery_transaction_environment::call() {
+            fatal_exit(&e);
+        }
     }
 }
 
@@ -218,8 +223,13 @@ pub fn has_startup_progress_timeout_expired() -> Option<(i64, i32)> {
         return None;
     }
     let now = timestamp_seams::get_current_timestamp::call();
+    // TimestampDifference (timestamp.c:1730): a stop time at or before the
+    // start time (clock stepped back) is reported as zero elapsed.
     let diff = now - STARTUP_PROGRESS_PHASE_START_TIME.get();
     STARTUP_PROGRESS_TIMER_EXPIRED.store(false, Relaxed);
+    if diff <= 0 {
+        return Some((0, 0));
+    }
     Some((diff / 1_000_000, (diff % 1_000_000) as i32))
 }
 
