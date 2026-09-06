@@ -5,10 +5,13 @@ use parser_small1::make_parsestate;
 use syscache_seams::{PgOperatorShape, PgProcShape};
 use types_core::catalog::{INT4OID, TEXTOID, UNKNOWNOID};
 use types_core::InvalidOid;
-use types_error::{ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_UNDEFINED_FUNCTION};
+use types_error::{
+    ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_FUNCTION,
+    ERRCODE_UNDEFINED_SCHEMA,
+};
 use types_nodes::{Node, NodeList, String as PgStr};
 
-use crate::{compatible_oper_opid, make_op, oper};
+use crate::{compatible_oper_opid, left_oper, make_op, oper, LookupOperName};
 
 const INT4_PLUS_OP: types_core::Oid = 551;
 const INT4PL_PROC: types_core::Oid = 177;
@@ -38,6 +41,9 @@ fn install_fixture() {
         // always visible, so error strings stay unqualified (C TypeIsVisible).
         namespace_seams::type_is_visible::set(|_| Ok(true));
         pg_inherits_seams::type_inherits_from::set(|_, _| Ok(false));
+        // No schema exists in the rig: every explicit OPERATOR(schema.op)
+        // lookup fails with 3F000 (the make_oper_cache_key errposition arm).
+        syscache_seams::lookup_pg_namespace_oid_by_name::set(|_| Ok(InvalidOid));
         syscache_seams::lookup_pg_operator_candidates::set(|mcx, name, l, r| {
             if name == "@@" {
                 CANDIDATE_PROBES.fetch_add(1, Ordering::Relaxed);
@@ -454,4 +460,71 @@ fn operator_returning_internal_is_0a000() {
     .unwrap_err();
     assert_eq!(err.sqlstate(), ERRCODE_FEATURE_NOT_SUPPORTED);
     assert_eq!(err.message(), "functions returning type \"internal\" cannot be called explicitly");
+}
+
+fn str_node<'mcx>(mcx: Mcx<'mcx>, s: &'static str) -> Node<'mcx> {
+    Node::mk(mcx, PgStr { sval: s }).unwrap()
+}
+
+// parse_oper.c:981-983 (audit-18.6 b221): make_oper_cache_key arms the
+// parser errposition callback around LookupExplicitNamespace, so a missing
+// (or USAGE-denied) explicit schema reports the OPERATOR() cursor.
+#[test]
+fn explicit_schema_lookup_error_carries_operator_cursor() {
+    install_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    pstate.p_sourcetext = Some("SELECT 1 OPERATOR(b221_nosuch.+) 2".as_bytes());
+    let name = NodeList::make2(mcx, str_node(mcx, "b221_nosuch"), str_node(mcx, "+")).unwrap();
+
+    // OPERATOR token at byte offset 9: cursor 10 (1-based).
+    let err = oper(&pstate, &name, INT4OID, INT4OID, false, 9).map(|_| ()).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_UNDEFINED_SCHEMA);
+    assert_eq!(err.message(), "schema \"b221_nosuch\" does not exist");
+    assert_eq!(err.cursor_position(), Some(10));
+
+    // left_oper (prefix form) shares the same cache-key arm.
+    let err = left_oper(&pstate, &name, INT4OID, false, 9).map(|_| ()).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_UNDEFINED_SCHEMA);
+    assert_eq!(err.cursor_position(), Some(10));
+
+    // location -1 (compatible_oper_opid callers): C's parser_errposition
+    // leaves the cursor alone.
+    let err = oper(&pstate, &name, INT4OID, INT4OID, false, -1).map(|_| ()).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_UNDEFINED_SCHEMA);
+    assert_eq!(err.cursor_position(), None);
+}
+
+// parse_oper.c:966 -> namespace.c DeconstructQualifiedName (audit-18.6
+// b221): the whole operator name list is deconstructed, so "too many dotted
+// names" lists every element, expression and DDL forms alike, with no
+// cursor (C raises it before arming the errposition callback).
+#[test]
+fn too_many_dotted_names_reports_every_element() {
+    install_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    pstate.p_sourcetext = Some("SELECT 1 OPERATOR(a.b.c.d.e.+) 2".as_bytes());
+    let mut name =
+        NodeList::make3(mcx, str_node(mcx, "a"), str_node(mcx, "b"), str_node(mcx, "c")).unwrap();
+    name.lappend(mcx, str_node(mcx, "d")).unwrap();
+    name.lappend(mcx, str_node(mcx, "e")).unwrap();
+    name.lappend(mcx, str_node(mcx, "+")).unwrap();
+    const MSG: &str = "improper qualified name (too many dotted names): a.b.c.d.e.+";
+
+    let err = oper(&pstate, &name, INT4OID, INT4OID, false, 9).map(|_| ()).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_SYNTAX_ERROR);
+    assert_eq!(err.message(), MSG);
+    assert_eq!(err.cursor_position(), None);
+
+    let err = left_oper(&pstate, &name, INT4OID, false, 9).map(|_| ()).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_SYNTAX_ERROR);
+    assert_eq!(err.message(), MSG);
+
+    // DDL lookup (DROP/ALTER OPERATOR): LookupOperName -> OpernameGetOprid.
+    let err = LookupOperName(&name, INT4OID, INT4OID, false).map(|_| ()).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_SYNTAX_ERROR);
+    assert_eq!(err.message(), MSG);
 }

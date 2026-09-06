@@ -16,8 +16,8 @@ use types_core::catalog::{INTERNALOID, UNKNOWNOID};
 use types_core::{InvalidOid, Oid, OidIsValid, ParseLoc};
 use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_AMBIGUOUS_FUNCTION, ERRCODE_FEATURE_NOT_SUPPORTED,
-    ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_FUNCTION, ERRCODE_UNDEFINED_OBJECT,
-    ERRCODE_WRONG_OBJECT_TYPE, ERROR,
+    ERRCODE_QUERY_CANCELED, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_FUNCTION,
+    ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
 use types_nodes::{CoercionForm, Node, NodeList, OpExpr, OptNodeList, ScalarArrayOpExpr};
 
@@ -100,12 +100,51 @@ pub fn PassivateOprCache() {
     });
 }
 
-fn name_parts<'a, 'mcx>(opname: &NodeList<'mcx>, buf: &'a mut [&'mcx str; 4]) -> &'a [&'mcx str] {
-    let n = opname.len().min(buf.len());
-    for (i, slot) in buf.iter_mut().enumerate().take(n) {
-        *slot = opname.nth(i).as_string().expect("operator name list holds String nodes").sval;
+fn name_part<'mcx>(opname: &NodeList<'mcx>, i: usize) -> &'mcx str {
+    opname.nth(i).as_string().expect("operator name list holds String nodes").sval
+}
+
+// C hands the whole name List to DeconstructQualifiedName (namespace.c); the
+// stack buffer keeps the <=4-part hot path allocation-free, and a longer list
+// can only ever reach DeconstructQualifiedName's "improper qualified name"
+// arm, which formats EVERY dotted element (NameListToString) — so it is
+// raised here from the full list rather than a truncated slice.
+fn name_parts<'a, 'mcx>(
+    opname: &NodeList<'mcx>,
+    buf: &'a mut [&'mcx str; 4],
+) -> PgResult<&'a [&'mcx str]> {
+    if opname.len() > buf.len() {
+        let joined = (0..opname.len()).map(|i| name_part(opname, i)).collect::<Vec<_>>().join(".");
+        return Err(catalog_namespace::improper_qualified_name_joined(joined));
     }
-    &buf[..n]
+    let n = opname.len();
+    for (i, slot) in buf.iter_mut().enumerate().take(n) {
+        *slot = name_part(opname, i);
+    }
+    Ok(&buf[..n])
+}
+
+// pcb_error_callback (parse_node.c:170-180): every error raised while the
+// parser errposition callback is armed gets parser_errposition(pstate,
+// location), except ERRCODE_QUERY_CANCELED. The callback shim is retired
+// tree-wide; the position is attached on the Err path of the guarded call.
+#[cold]
+#[inline(never)]
+fn attach_parser_errposition(
+    pstate: &ParseState<'_, '_>,
+    location: ParseLoc,
+    e: Box<PgError>,
+) -> Box<PgError> {
+    if e.sqlstate() == ERRCODE_QUERY_CANCELED {
+        return e;
+    }
+    // parser_errposition returns 0 without touching the cursor when the
+    // location or source text is unavailable (parse_node.c:111-116).
+    let pos = parser_errposition(pstate, location, mbutils::GetDatabaseEncoding());
+    if pos <= 0 {
+        return e;
+    }
+    Box::new((*e).with_cursor_position(pos))
 }
 
 // LookupOperName (parse_oper.c) with pstate=NULL, location=-1: exact-match
@@ -117,7 +156,7 @@ pub fn LookupOperName(
     noError: bool,
 ) -> PgResult<Oid> {
     let mut buf = [""; 4];
-    let parts = name_parts(opername, &mut buf);
+    let parts = name_parts(opername, &mut buf)?;
     let result = catalog_namespace::OpernameGetOprid(parts, oprleft, oprright)?;
     if OidIsValid(result) {
         return Ok(result);
@@ -166,11 +205,15 @@ pub fn LookupOperWithArgs(
     LookupOperName(oper_name, oids[0], oids[1], noError)
 }
 
+// make_oper_cache_key (parse_oper.c:958-996); pstate/location only report
+// the error position of the explicit-schema lookup.
 fn make_oper_cache_key(
+    pstate: &ParseState<'_, '_>,
     key: &mut OprCacheKey,
     parts: &[&str],
     ltypeId: Oid,
     rtypeId: Oid,
+    location: ParseLoc,
 ) -> PgResult<bool> {
     let (schemaname, opername) = catalog_namespace::DeconstructQualifiedName(parts)?;
 
@@ -180,7 +223,10 @@ fn make_oper_cache_key(
     key.right_arg = rtypeId;
 
     if let Some(schemaname) = schemaname {
-        key.search_path[0] = catalog_namespace::LookupExplicitNamespace(schemaname, false)?;
+        // parse_oper.c:981-983: search only in the exact schema given, under
+        // setup_parser_errposition_callback(pstate, location).
+        key.search_path[0] = catalog_namespace::LookupExplicitNamespace(schemaname, false)
+            .map_err(|e| attach_parser_errposition(pstate, location, e))?;
     } else if catalog_namespace::fetch_search_path_array(&mut key.search_path)?
         > MAX_CACHED_PATH_LEN
     {
@@ -226,7 +272,7 @@ pub fn oper(
     location: ParseLoc,
 ) -> PgResult<Option<Operator>> {
     let mut buf = [""; 4];
-    let parts = name_parts(opname, &mut buf);
+    let parts = name_parts(opname, &mut buf)?;
     let mut ltypeId = ltypeId;
     let mut rtypeId = rtypeId;
 
@@ -236,7 +282,7 @@ pub fn oper(
         right_arg: InvalidOid,
         search_path: [InvalidOid; MAX_CACHED_PATH_LEN],
     };
-    let key_ok = make_oper_cache_key(&mut key, parts, ltypeId, rtypeId)?;
+    let key_ok = make_oper_cache_key(pstate, &mut key, parts, ltypeId, rtypeId, location)?;
 
     if key_ok {
         let cached = with_opr_cache(|map| map.get(&key).copied().unwrap_or(InvalidOid))?;
@@ -301,7 +347,7 @@ pub fn left_oper(
     location: ParseLoc,
 ) -> PgResult<Option<Operator>> {
     let mut buf = [""; 4];
-    let parts = name_parts(opname, &mut buf);
+    let parts = name_parts(opname, &mut buf)?;
 
     let mut key = OprCacheKey {
         oprname: [0; NAMEDATALEN],
@@ -309,7 +355,7 @@ pub fn left_oper(
         right_arg: InvalidOid,
         search_path: [InvalidOid; MAX_CACHED_PATH_LEN],
     };
-    let key_ok = make_oper_cache_key(&mut key, parts, InvalidOid, arg)?;
+    let key_ok = make_oper_cache_key(pstate, &mut key, parts, InvalidOid, arg, location)?;
 
     if key_ok {
         let cached = with_opr_cache(|map| map.get(&key).copied().unwrap_or(InvalidOid))?;
@@ -384,7 +430,7 @@ fn compatible_oper(
     }
     if !noError {
         let mut buf = [""; 4];
-        let parts = name_parts(opname, &mut buf);
+        let parts = name_parts(opname, &mut buf)?;
         return Err(coercion_error(pstate, parts, arg1, arg2, location));
     }
     Ok(None)
@@ -475,7 +521,7 @@ pub fn make_op<'mcx>(
 
     if !OidIsValid(op.shape.oprcode) {
         let mut buf = [""; 4];
-        let parts = name_parts(opname, &mut buf);
+        let parts = name_parts(opname, &mut buf)?;
         return Err(shell_error(pstate, parts, &op, location));
     }
 
@@ -599,7 +645,7 @@ pub fn make_scalar_array_op<'mcx>(
 
     if !OidIsValid(op.shape.oprcode) {
         let mut buf = [""; 4];
-        let parts = name_parts(opname, &mut buf);
+        let parts = name_parts(opname, &mut buf)?;
         return Err(shell_error(pstate, parts, &op, location));
     }
 
