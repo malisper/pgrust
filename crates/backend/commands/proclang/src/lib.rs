@@ -64,11 +64,25 @@ pub fn CreateProceduralLanguage<'mcx>(
         ));
     }
 
+    // Return types of the inline and validator functions are ignored.
+    let inline_oid = if !stmt.plinline.is_nil() {
+        parse_func::LookupFuncName(&stmt.plinline, 1, &[INTERNALOID], false)?
+    } else {
+        InvalidOid
+    };
+    let val_oid = if !stmt.plvalidator.is_nil() {
+        parse_func::LookupFuncName(&stmt.plvalidator, 1, &[OIDOID], false)?
+    } else {
+        InvalidOid
+    };
+
     // No-dlopen carve (docs/design/carve-ratifications.md §2): pgrust never
     // loads C shared objects, so a language handler can only ever dispatch
     // if its prosrc names a registered in-tree PL entry point. C defers this
     // to call time (dlopen); here the fence sits at CREATE LANGUAGE so the
-    // catalog never carries a language that cannot run.
+    // catalog never carries a language that cannot run. It runs after the
+    // inline/validator lookups so every error C itself raises (proclang.c:
+    // 73-100: handler, then INLINE, then VALIDATOR) keeps C's precedence.
     {
         let cx = mcx::MemoryContext::new("CreateProceduralLanguage handler check");
         let prosrc = syscache_seams::lookup_pg_proc_prosrc::call(cx.mcx(), handler_oid)?
@@ -91,18 +105,6 @@ pub fn CreateProceduralLanguage<'mcx>(
             ));
         }
     }
-
-    // Return types of the inline and validator functions are ignored.
-    let inline_oid = if !stmt.plinline.is_nil() {
-        parse_func::LookupFuncName(&stmt.plinline, 1, &[INTERNALOID], false)?
-    } else {
-        InvalidOid
-    };
-    let val_oid = if !stmt.plvalidator.is_nil() {
-        parse_func::LookupFuncName(&stmt.plvalidator, 1, &[OIDOID], false)?
-    } else {
-        InvalidOid
-    };
 
     let rel = table::table_open(mcx, LanguageRelationId, RowExclusiveLock)?;
 
@@ -188,7 +190,8 @@ pub fn CreateProceduralLanguage<'mcx>(
         DependencyType::Normal,
     )?;
 
-    // InvokeObjectPostCreateHook: object-access hooks are elided repo-wide.
+    // proclang.c:212 post creation hook for the new (or replaced) language.
+    objectaccess::InvokeObjectPostCreateHook(LanguageRelationId, myself.objectId, 0)?;
 
     rel.close(RowExclusiveLock)?;
     Ok(myself)

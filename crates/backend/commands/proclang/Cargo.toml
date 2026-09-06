@@ -22,6 +22,7 @@ catalog_indexing = { path = "../../catalog/catalog_indexing" }
 heaptuple = { path = "../../access/common/heaptuple" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 miscinit = { path = "../../utils/init/miscinit" }
+objectaccess = { path = "../../catalog/objectaccess" }
 parse_func = { path = "../../parser/parse_func" }
 pg_depend = { path = "../../catalog/pg_depend" }
 superuser = { path = "../../utils/misc/superuser" }
