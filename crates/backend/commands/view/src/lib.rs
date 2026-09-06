@@ -291,8 +291,12 @@ fn ReplaceViewQuery<'mcx>(
     Ok(view_oid)
 }
 
-// checkViewColumns (view.c): the old column list must be an initial prefix of
-// the new one, with names/types/collations unchanged.
+// checkViewColumns (view.c:266): the old column list must be an initial prefix
+// of the new one, with names/types/collations unchanged. C compares the names
+// with strcmp on NameStr bytes and spells them with %s (view.c:287-293): they
+// are byte strings, never decoded — a SQL_ASCII catalog may carry high-bit
+// bytes in attname — so the messages are built as bytes and sent verbatim
+// (PgError::error_raw_message), the way elog does for C's %s of raw bytes.
 fn checkViewColumns(
     mcx: Mcx<'_>,
     newdesc: &types_tuple::TupleDescData<'_>,
@@ -302,6 +306,11 @@ fn checkViewColumns(
         Box::new(
             PgError::error(msg).with_sqlstate(types_error::ERRCODE_INVALID_TABLE_DEFINITION),
         )
+    };
+    // errmsg("... \"%s\" ...") over NameStr bytes: concatenate the pieces as bytes.
+    let invalid_raw = |parts: &[&[u8]]| -> PgError {
+        PgError::error_raw_message(parts.concat())
+            .with_sqlstate(types_error::ERRCODE_INVALID_TABLE_DEFINITION)
     };
     if newdesc.natts < olddesc.natts {
         return Err(invalid("cannot drop columns from view".to_string()));
@@ -314,16 +323,17 @@ fn checkViewColumns(
             return Err(invalid("cannot drop columns from view".to_string()));
         }
 
-        let newname = core::str::from_utf8(newattr.attname.name_str())
-            .expect("attribute name is UTF-8");
-        let oldname = core::str::from_utf8(oldattr.attname.name_str())
-            .expect("attribute name is UTF-8");
+        let newname = newattr.attname.name_str();
+        let oldname = oldattr.attname.name_str();
         if newname != oldname {
             return Err(Box::new(
-                PgError::error(format!(
-                    "cannot change name of view column \"{oldname}\" to \"{newname}\""
-                ))
-                .with_sqlstate(types_error::ERRCODE_INVALID_TABLE_DEFINITION)
+                invalid_raw(&[
+                    b"cannot change name of view column \"",
+                    oldname,
+                    b"\" to \"",
+                    newname,
+                    b"\"",
+                ])
                 .with_hint(
                     "Use ALTER VIEW ... RENAME COLUMN ... to change name of view column instead.",
                 ),
@@ -331,11 +341,16 @@ fn checkViewColumns(
         }
 
         if newattr.atttypid != oldattr.atttypid || newattr.atttypmod != oldattr.atttypmod {
-            return Err(invalid(format!(
-                "cannot change data type of view column \"{oldname}\" from {} to {}",
-                format_type::format_type_with_typemod(oldattr.atttypid, oldattr.atttypmod)?,
-                format_type::format_type_with_typemod(newattr.atttypid, newattr.atttypmod)?,
-            )));
+            return Err(Box::new(invalid_raw(&[
+                b"cannot change data type of view column \"",
+                oldname,
+                b"\" from ",
+                format_type::format_type_with_typemod(oldattr.atttypid, oldattr.atttypmod)?
+                    .as_bytes(),
+                b" to ",
+                format_type::format_type_with_typemod(newattr.atttypid, newattr.atttypmod)?
+                    .as_bytes(),
+            ])));
         }
 
         if newattr.attcollation != oldattr.attcollation {
@@ -344,11 +359,15 @@ fn checkViewColumns(
                     .map(|n| n.to_string())
                     .unwrap_or_default())
             };
-            return Err(invalid(format!(
-                "cannot change collation of view column \"{oldname}\" from \"{}\" to \"{}\"",
-                collname(oldattr.attcollation)?,
-                collname(newattr.attcollation)?,
-            )));
+            return Err(Box::new(invalid_raw(&[
+                b"cannot change collation of view column \"",
+                oldname,
+                b"\" from \"",
+                collname(oldattr.attcollation)?.as_bytes(),
+                b"\" to \"",
+                collname(newattr.attcollation)?.as_bytes(),
+                b"\"",
+            ])));
         }
     }
     Ok(())
