@@ -93,6 +93,9 @@ fn install_oper_fixture() {
                     "+" => v.push((551, 11)),
                     "=" => v.push((96, 11)),
                     "<>" => v.push((518, 11)),
+                    // 9901: a set-returning "=" (proc 9902, SETOF bool) for
+                    // the make_distinct_op opretset leg.
+                    "~=" => v.push((9901, 11)),
                     _ => {}
                 }
             }
@@ -138,14 +141,26 @@ fn install_oper_fixture() {
                     oprcanmerge: false,
                     oprcanhash: false,
                 }),
+                9901 => Some(syscache_seams::PgOperatorShape { oprnamespace: 11,
+                    oprleft: INT4OID,
+                    oprright: INT4OID,
+                    oprresult: types_core::catalog::BOOLOID,
+                    oprcom: InvalidOid,
+                    oprnegate: InvalidOid,
+                    oprcode: 9902,
+                    oprrest: InvalidOid,
+                    oprjoin: InvalidOid,
+                    oprcanmerge: false,
+                    oprcanhash: false,
+                }),
                 _ => None,
             })
         });
         syscache_seams::pg_operator_name_candidates_exist::set(|name, _| {
-            Ok(name == "+" || name == "=" || name == "<>")
+            Ok(name == "+" || name == "=" || name == "<>" || name == "~=")
         });
         syscache_seams::lookup_pg_proc_shape::set(|funcid| {
-            Ok(matches!(funcid, 177 | 65 | 144).then_some(syscache_seams::PgProcShape {
+            Ok(matches!(funcid, 177 | 65 | 144 | 9902).then_some(syscache_seams::PgProcShape {
                 prolang: 12,
                 prosecdef: false,
                 proconfig_isnull: true,
@@ -157,7 +172,7 @@ fn install_oper_fixture() {
                 prokind: b'f' as i8,
                 provolatile: b'i' as i8,
                 proparallel: b's' as i8,
-                proretset: false,
+                proretset: funcid == 9902,
                 proisstrict: true,
                 proleakproof: false,
             }))
@@ -275,6 +290,53 @@ fn a_expr_nullif_transforms_to_null_if_expr() {
     assert_eq!(n.args.len(), 2);
     assert_eq!(n.location, 9);
     assert_eq!(expr_type(out), INT4OID);
+}
+
+// parse_expr.c:3098 make_distinct_op: a set-returning "=" is refused with
+// ERRCODE_DATATYPE_MISMATCH and a cursor on the construct, even where an SRF
+// is otherwise allowed (SELECT target list).
+#[test]
+fn a_expr_distinct_set_returning_op_errors() {
+    install_oper_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    pstate.p_sourcetext = Some(b"SELECT 1 IS DISTINCT FROM 2");
+    let name = NodeList::make1(mcx, Node::mk(mcx, PgStr { sval: "~=" }).unwrap()).unwrap();
+    let aexpr = Node::mk_a_expr(
+        mcx,
+        A_Expr_Kind::AEXPR_DISTINCT,
+        name,
+        Some(int_const(mcx, 1, 7)),
+        Some(int_const(mcx, 2, 26)),
+        9,
+    )
+    .unwrap();
+
+    let err = transformExpr(mcx, &mut pstate, aexpr, ParseExprKind::EXPR_KIND_SELECT_TARGET)
+        .map(|_| ())
+        .unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_DATATYPE_MISMATCH);
+    assert_eq!(err.message(), "IS DISTINCT FROM must not return a set");
+    assert_eq!(err.cursor_position(), Some(10));
+
+    // AEXPR_NOT_DISTINCT shares make_distinct_op (and the message names
+    // IS DISTINCT FROM, as in C).
+    let name = NodeList::make1(mcx, Node::mk(mcx, PgStr { sval: "~=" }).unwrap()).unwrap();
+    let aexpr = Node::mk_a_expr(
+        mcx,
+        A_Expr_Kind::AEXPR_NOT_DISTINCT,
+        name,
+        Some(int_const(mcx, 1, 7)),
+        Some(int_const(mcx, 2, 26)),
+        9,
+    )
+    .unwrap();
+    let err = transformExpr(mcx, &mut pstate, aexpr, ParseExprKind::EXPR_KIND_SELECT_TARGET)
+        .map(|_| ())
+        .unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_DATATYPE_MISMATCH);
+    assert_eq!(err.message(), "IS DISTINCT FROM must not return a set");
 }
 
 #[test]

@@ -1410,8 +1410,12 @@ fn make_distinct_op<'mcx>(
     if op.opresulttype != types_core::catalog::BOOLOID {
         return Err(distinct_requires_boolean_eq(pstate, location));
     }
-    // C NodeSetTag(result, T_DistinctExpr): same struct, new tag. make_op's
-    // retset panic covers C's opretset ereport leg.
+    // parse_expr.c:3098 — make_op only checks SRF placement; a set-returning
+    // "=" that is placeable (SELECT target list) is refused here.
+    if op.opretset {
+        return Err(distinct_must_not_return_set(pstate, location));
+    }
+    // C NodeSetTag(result, T_DistinctExpr): same struct, new tag.
     Node::mk(
         mcx,
         types_nodes::DistinctExpr {
@@ -1972,6 +1976,26 @@ fn distinct_requires_boolean_eq(
         elog::ereport(ERROR)
             .errcode(ERRCODE_DATATYPE_MISMATCH)
             .errmsg("IS DISTINCT FROM requires = operator to yield boolean".to_string())
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "make_distinct_op")),
+    )
+}
+
+#[cold]
+fn distinct_must_not_return_set(
+    pstate: &ParseState<'_, '_>,
+    location: types_core::ParseLoc,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_DATATYPE_MISMATCH, ERROR};
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_DATATYPE_MISMATCH)
+            .errmsg("IS DISTINCT FROM must not return a set".to_string())
             .errposition(parser_small1::parser_errposition(
                 pstate,
                 location,

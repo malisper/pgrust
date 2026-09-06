@@ -60,29 +60,30 @@ pub fn subscript_handler_for(container_type: Oid) -> PgResult<Option<(SubscriptH
     }
 }
 
+// parse_node.c:269-275 (no subscripting routines: cursor on the container
+// expression) and :319-323 (the handler left refrestype invalid: C attaches
+// no parser_errposition) share the message; `location` is None for the latter.
 #[track_caller]
 #[cold]
 fn cannot_subscript(
     pstate: &ParseState<'_, '_>,
     container_type: Oid,
-    location: ParseLoc,
+    location: Option<ParseLoc>,
 ) -> Box<PgError> {
     let t = format_type::format_type_be(container_type)
         .unwrap_or_else(|_| container_type.to_string());
-    Box::new(
-        elog::ereport(ERROR)
-            .errcode(ERRCODE_DATATYPE_MISMATCH)
-            .errmsg(format!(
-                "cannot subscript type {t} because it does not support subscripting"
-            ))
-            .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
-            .into_error()
-            .with_error_location(ErrorLocation::new(
-                "parse_node.c",
-                0,
-                "transformContainerSubscripts",
-            )),
-    )
+    let mut report = elog::ereport(ERROR).errcode(ERRCODE_DATATYPE_MISMATCH).errmsg(format!(
+        "cannot subscript type {t} because it does not support subscripting"
+    ));
+    if let Some(location) = location {
+        let encoding = mbutils::GetDatabaseEncoding();
+        report = report.errposition(parser_errposition(pstate, location, encoding));
+    }
+    Box::new(report.into_error().with_error_location(ErrorLocation::new(
+        "parse_node.c",
+        0,
+        "transformContainerSubscripts",
+    )))
 }
 
 #[track_caller]
@@ -117,7 +118,7 @@ pub fn transformContainerSubscripts<'mcx>(
     }
 
     let Some((handler, element_type)) = subscript_handler_for(container_type)? else {
-        return Err(cannot_subscript(pstate, container_type, expr_location(container_base)));
+        return Err(cannot_subscript(pstate, container_type, Some(expr_location(container_base))));
     };
 
     let mut is_slice = false;
@@ -148,7 +149,7 @@ pub fn transformContainerSubscripts<'mcx>(
     }
 
     if sbsref.refrestype == InvalidOid {
-        return Err(cannot_subscript(pstate, container_type, expr_location(container_base)));
+        return Err(cannot_subscript(pstate, container_type, None));
     }
     Ok(sbsref.seal())
 }
