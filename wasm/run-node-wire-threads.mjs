@@ -22,9 +22,22 @@
 // stays free to pump the pipes — the guest parks the JS thread it runs on the
 // moment it joins.
 //
+// STORAGE (--fs). `--fs copy` (the default) is checkpoint (a)'s arrangement: every
+// worker builds its OWN Vfs from its own copy of the packed image, so the process
+// instance and the session instance have independent filesystems. `--fs broker`
+// replaces that with ONE store in a dedicated coordinator worker
+// (wasm/storage-worker.js): this thread mints a doorbell and POOL_SIZE+1
+// SharedArrayBuffer channels, starts the coordinator FIRST and waits for it to seed
+// the store from the packed image, and only then creates the process worker — which
+// hands one channel to each prewarmed pool worker and keeps one for itself. The
+// packed image is transferred to the coordinator and to nobody else.
+//
 // Usage: node run-node-wire-threads.mjs [--stderr FILE] [--pool N]
+//        [--dispatch stdio-wire|stdio-wire-threaded] [--fs copy|broker] [--trace N]
 // Env: PGRUST_WASM_THREADS (path to the threads postgres.wasm),
 //      PGRUST_VFS (prefix for vfs.img/vfs.json),
+//      PGRUST_REPACKED_BUNDLE (URL of the @pgxsinkit/pglite-opfs-repacked browser
+//      bundle; defaults to ./vendor/pglite-opfs-repacked.js — see wasm/broker-fs.js),
 //      PGRUST_WIRE_GUCS (comma-separated extra -c GUCs; default pins
 //      timezone=UTC,log_timezone=UTC for transcript identity with the native
 //      arm), PGRUST_THREADS_TIMEOUT_MS.
@@ -41,7 +54,9 @@ import {
   newMessageChannel,
   onPortMessage,
   threadWorkerUrl,
+  storageWorkerUrl,
 } from './threads-host.js';
+import { loadRepackedBundle, repackedBundleUrl } from './broker-fs.js';
 import {
   WireReader,
   encodeStartup,
@@ -78,6 +93,11 @@ const TRACE = Number(argAfter('--trace') || 0);
 // create a worker on demand (it may not await), so an undersized pool is a
 // hard -EAGAIN — every refusal is logged below.
 const POOL_SIZE = Number(argAfter('--pool') || 4);
+// --fs broker routes every guest FILE call to one store in a coordinator worker; --fs copy
+// (default) keeps checkpoint (a)'s per-worker private copy of the packed image.
+const FS_MODE = argAfter('--fs') || 'copy';
+if (FS_MODE !== 'copy' && FS_MODE !== 'broker') throw new Error(`unknown --fs ${FS_MODE}`);
+const BUNDLE_URL = process.env.PGRUST_REPACKED_BUNDLE || repackedBundleUrl(import.meta.url);
 const errFd = stderrFile ? fs.openSync(stderrFile, 'w') : 2;
 
 const failures = [];
@@ -107,6 +127,92 @@ const manifest = JSON.parse(fs.readFileSync(vfsPrefix + '.json', 'utf8'));
 
 const memory = createSharedMemory();
 note(`shared memory: ${memory.buffer.byteLength / 1048576}MiB initial, shared=${memory.buffer instanceof SharedArrayBuffer}`);
+note(`storage: --fs ${FS_MODE}`);
+
+// ---------------------------------------------------------------------------
+// --fs broker: the storage coordinator, started BEFORE anything else. Its store must be
+// seeded and every channel attached before the first backend can ask for a file — and once
+// its blocking serveForever() loop is entered it never reaches its event loop again, so
+// there is no attaching anything afterwards.
+// ---------------------------------------------------------------------------
+let storageWorker = null;
+let doorbell = null;
+let channels = [];
+let storageStoppedResolve = null;
+const storageStoppedPromise = new Promise((r) => { storageStoppedResolve = r; });
+
+if (FS_MODE === 'broker') {
+  const bundle = await loadRepackedBundle(BUNDLE_URL);
+  note(`storage: bundle ${BUNDLE_URL}`);
+  doorbell = bundle.RepackedDoorbell.create();
+  // One channel per pool slot PLUS one for the process instance: the protocol is one request
+  // in flight per channel, so two agents may never share one.
+  channels = Array.from({ length: POOL_SIZE + 1 }, (_unused, i) =>
+    bundle.RepackedChannel.create({ id: i + 1, doorbell }),
+  );
+  storageWorker = makeWorker(storageWorkerUrl(import.meta.url), { name: 'pgrust-storage' });
+  let storageReady = null;
+  const storageReadyPromise = new Promise((r) => { storageReady = r; });
+  onWorkerMessage(storageWorker, (m) => {
+    switch (m.type) {
+      case 'storage-ready':
+        note(
+          `storage: coordinator ready — seeded ${m.files} files / ${m.dirs} dirs ` +
+            `(${m.bytes} bytes) in ${m.seedMs}ms; /pgdata holds ${m.datadirFiles} files ` +
+            `(${m.datadirBytes} bytes); arena ${(m.arenaBytes / 1048576).toFixed(1)}MiB ` +
+            `at ${m.extentSize}B extents; channels [${m.channels.join(', ')}]`,
+        );
+        storageReady();
+        break;
+      case 'storage-log':
+        note(`storage: ${m.text}`);
+        break;
+      case 'storage-stopped':
+        note(
+          `storage: coordinator stopped — /pgdata now holds ${m.datadirFiles} files ` +
+            `(${m.datadirBytes} bytes) against ${m.seededFiles} files (${m.seededBytes} bytes) at seed: ` +
+            `the session's writes landed in the ONE store (delta ${m.datadirFiles - m.seededFiles} files, ` +
+            `${m.datadirBytes - m.seededBytes} bytes)`,
+        );
+        storageStoppedResolve();
+        break;
+      case 'storage-error':
+        failures.push(`storage worker error: ${m.message}`);
+        note(`storage: ERROR ${m.message}`);
+        storageReady();
+        storageStoppedResolve();
+        break;
+      default:
+        note(`storage: unhandled message ${JSON.stringify(m.type)}`);
+    }
+  });
+  onWorkerError(storageWorker, (e) => {
+    failures.push(`storage worker threw: ${e && e.stack ? e.stack : e}`);
+    storageStoppedResolve();
+  });
+  storageWorker.postMessage(
+    {
+      kind: 'boot',
+      bundleUrl: BUNDLE_URL,
+      image: imageBuf,
+      manifest,
+      channels: channels.map((c) => c.transfer()),
+      doorbell: doorbell.buffer,
+      options: {},
+    },
+    [imageBuf],
+  );
+  await Promise.race([
+    storageReadyPromise,
+    new Promise((_, rej) => setTimeout(() => rej(new Error('storage coordinator seed timeout')), 120000)),
+  ]);
+}
+
+// With --fs broker the packed image now lives in the coordinator's store (and its ArrayBuffer
+// was transferred there); every instance gets an EMPTY base Vfs, which the WASI adapter sits on
+// top of and never consults.
+const guestImage = FS_MODE === 'broker' ? new ArrayBuffer(0) : imageBuf;
+const guestManifest = FS_MODE === 'broker' ? { dirs: ['/'], files: [] } : manifest;
 
 const stdinPipe = SabPipe.create(1 << 20);
 const stdoutPipe = SabPipe.create(1 << 22);
@@ -192,8 +298,12 @@ worker.postMessage(
     role: 'process',
     module: wasmModule,
     memory,
-    image: imageBuf,
-    manifest,
+    image: guestImage,
+    manifest: guestManifest,
+    fs: FS_MODE,
+    bundleUrl: BUNDLE_URL,
+    channel: channels.length ? channels[0].transfer() : null,
+    poolChannels: channels.slice(1).map((c) => c.transfer()),
     stdin: stdinPipe.descriptor(),
     stdout: stdoutPipe.descriptor(),
     argv,
@@ -208,7 +318,7 @@ worker.postMessage(
     trace: TRACE,
     relayPorts: relayChannels.map((c) => c.port2),
   },
-  [imageBuf, ...relayChannels.map((c) => c.port2)],
+  [guestImage, ...relayChannels.map((c) => c.port2)],
 );
 for (const c of relayChannels) onPortMessage(c.port1, (m) => handleMessage(m));
 
@@ -385,12 +495,29 @@ expect(r2.length === 1 && r2[0] === '2', `SELECT 2 after the cancel returned ${J
 
 expect(exitCode === 0, `guest exit code ${exitCode} (want 0)`);
 
+const fiveStatementMs = [
+  'SELECT 1',
+  'SELECT count(*) FROM pg_class',
+  'CREATE TABLE spike_t(a int)',
+  'INSERT INTO spike_t SELECT generate_series(1,1000)',
+  'SELECT sum(a) FROM spike_t',
+].reduce((sum, sql) => sum + (timings.get(sql) ?? 0), 0);
+note(`timing: five-statement block total ${fiveStatementMs}ms (fs=${FS_MODE})`);
+
 try { worker.terminate(); } catch { /* already gone */ }
+
+// The coordinator is parked in Atomics.wait and cannot be reached by postMessage; the doorbell
+// is the only way to ask its loop to return, which is exactly why it lives in shared memory.
+if (storageWorker) {
+  doorbell.requestStop();
+  await Promise.race([storageStoppedPromise, new Promise((r) => setTimeout(r, 5000))]);
+  try { storageWorker.terminate(); } catch { /* already gone */ }
+}
 
 if (failures.length) {
   for (const f of failures) note(`DRIVER-FAIL: ${f}`);
-  note('VERDICT: threads-node FAIL');
+  note(`VERDICT: threads-node FAIL fs=${FS_MODE}`);
   process.exit(1);
 }
-note('VERDICT: threads-node PASS');
+note(`VERDICT: threads-node PASS fs=${FS_MODE}`);
 process.exit(0);

@@ -11,12 +11,24 @@
 // WebAssembly.Memory are gated on it. The page logs `self.crossOriginIsolated`
 // first so a run that silently lost isolation cannot masquerade as a pass.
 //
-// Assets (both overridable by query string):
+// STORAGE (?fs). `?fs=copy` (the default) is checkpoint (a)'s arrangement: every worker
+// builds its OWN Vfs from its own copy of the packed image. `?fs=broker` replaces that with
+// ONE store in a dedicated coordinator worker (wasm/storage-worker.js): the page mints a
+// doorbell and pool+1 SharedArrayBuffer channels, starts the coordinator FIRST and waits for
+// it to seed the store, then creates the process worker — which hands one channel to each
+// prewarmed pool worker and keeps one for itself.
+//
+// Assets (all overridable by query string):
 //   ?wasm=assets/postgres-threads.wasm   the wasm32-wasip1-threads build
 //   ?vfs=assets/vfs                      prefix for vfs.img + vfs.json
-// The threads build is not one of the packed assets, so link it in first:
+//   ?bundle=vendor/pglite-opfs-repacked.js  the @pgxsinkit/pglite-opfs-repacked ESM bundle
+// Neither the threads build nor the library bundle is a packed asset, so link both in first:
 //   ln -s ../../target/wasm32-wasip1-threads/wasm-release/postgres.wasm \
 //         wasm/assets/postgres-threads.wasm
+//   mkdir -p wasm/vendor && ln -sfn \
+//     /path/to/pgxsinkit/packages/pglite-opfs-repacked/dist/browser-bundle.js \
+//     wasm/vendor/pglite-opfs-repacked.js
+//   # the bundle is emitted by `bun run build:public-packages` in the pgxsinkit repo
 
 import { SabPipe } from './sab-pipe.js';
 import {
@@ -28,7 +40,9 @@ import {
   newMessageChannel,
   onPortMessage,
   threadWorkerUrl,
+  storageWorkerUrl,
 } from './threads-host.js';
+import { loadRepackedBundle, repackedBundleUrl } from './broker-fs.js';
 import {
   WireReader,
   encodeStartup,
@@ -55,6 +69,12 @@ const POOL_SIZE = Number(params.get('pool') || 4);
 // ?trace=N keeps the last N WASI calls of each instance and dumps them with any
 // guest abort — the only way to attribute a bare `RuntimeError: unreachable`.
 const TRACE = Number(params.get('trace') || 0);
+// ?fs=broker routes every guest FILE call to one store in a coordinator worker; ?fs=copy
+// (default) keeps checkpoint (a)'s per-worker private copy of the packed image.
+const FS_MODE = params.get('fs') || 'copy';
+const BUNDLE_URL = params.get('bundle')
+  ? new URL(params.get('bundle'), location.href).href
+  : repackedBundleUrl(import.meta.url);
 
 const out = document.getElementById('log');
 const failures = [];
@@ -66,8 +86,8 @@ function note(line) {
   }
 }
 function verdict(ok, reason) {
-  if (ok) console.log('VERDICT: threads-browser PASS');
-  else console.log(`VERDICT: threads-browser FAIL ${reason}`);
+  if (ok) console.log(`VERDICT: threads-browser PASS fs=${FS_MODE}`);
+  else console.log(`VERDICT: threads-browser FAIL fs=${FS_MODE} ${reason}`);
   document.title = ok ? 'threads-browser PASS' : 'threads-browser FAIL';
   window.__pgrustThreadsVerdict = ok ? 'PASS' : `FAIL ${reason}`;
 }
@@ -138,6 +158,90 @@ async function main() {
     `page: shared memory ${memory.buffer.byteLength / 1048576}MiB, ` +
       `SharedArrayBuffer=${memory.buffer instanceof SharedArrayBuffer}`,
   );
+  note(`page: storage --fs ${FS_MODE}`);
+
+  // ---- the storage coordinator, started BEFORE anything else ---------------
+  // Its store must be seeded and every channel attached before the first backend can ask for
+  // a file; once its blocking serveForever() loop is entered it never reaches its event loop
+  // again, so there is no attaching anything afterwards.
+  let storageWorker = null;
+  let doorbell = null;
+  let channels = [];
+  let storageStoppedResolve;
+  const storageStoppedPromise = new Promise((r) => { storageStoppedResolve = r; });
+
+  if (FS_MODE === 'broker') {
+    const bundle = await loadRepackedBundle(BUNDLE_URL);
+    note(`page: storage bundle ${BUNDLE_URL}`);
+    doorbell = bundle.RepackedDoorbell.create();
+    // One channel per pool slot PLUS one for the process instance: the protocol is one request
+    // in flight per channel, so two agents may never share one.
+    channels = Array.from({ length: POOL_SIZE + 1 }, (_unused, i) =>
+      bundle.RepackedChannel.create({ id: i + 1, doorbell }),
+    );
+    storageWorker = makeWorker(storageWorkerUrl(import.meta.url), { name: 'pgrust-storage' });
+    let storageReady;
+    const storageReadyPromise = new Promise((r) => { storageReady = r; });
+    onWorkerMessage(storageWorker, (m) => {
+      switch (m.type) {
+        case 'storage-ready':
+          note(
+            `page: storage coordinator ready — seeded ${m.files} files / ${m.dirs} dirs ` +
+              `(${m.bytes} bytes) in ${m.seedMs}ms; /pgdata holds ${m.datadirFiles} files ` +
+              `(${m.datadirBytes} bytes); arena ${(m.arenaBytes / 1048576).toFixed(1)}MiB ` +
+              `at ${m.extentSize}B extents; channels [${m.channels.join(', ')}]`,
+          );
+          storageReady();
+          break;
+        case 'storage-log':
+          note(`page: storage ${m.text}`);
+          break;
+        case 'storage-stopped':
+          note(
+            `page: storage coordinator stopped — /pgdata now holds ${m.datadirFiles} files ` +
+              `(${m.datadirBytes} bytes) against ${m.seededFiles} files (${m.seededBytes} bytes) at ` +
+              `seed: the session's writes landed in the ONE store (delta ` +
+              `${m.datadirFiles - m.seededFiles} files, ${m.datadirBytes - m.seededBytes} bytes)`,
+          );
+          storageStoppedResolve();
+          break;
+        case 'storage-error':
+          failures.push(`storage worker error: ${m.message}`);
+          note(`page: storage ERROR ${m.message}`);
+          storageReady();
+          storageStoppedResolve();
+          break;
+        default:
+          note(`page: storage unhandled message ${JSON.stringify(m.type)}`);
+      }
+    });
+    onWorkerError(storageWorker, (e) => {
+      failures.push(`storage worker threw: ${e && e.message ? e.message : e}`);
+      storageStoppedResolve();
+    });
+    storageWorker.postMessage(
+      {
+        kind: 'boot',
+        bundleUrl: BUNDLE_URL,
+        image: imageBuf,
+        manifest,
+        channels: channels.map((c) => c.transfer()),
+        doorbell: doorbell.buffer,
+        options: {},
+      },
+      [imageBuf],
+    );
+    await Promise.race([
+      storageReadyPromise,
+      new Promise((_, rej) => setTimeout(() => rej(new Error('storage coordinator seed timeout')), 180000)),
+    ]);
+  }
+
+  // With ?fs=broker the packed image now lives in the coordinator's store (and its ArrayBuffer
+  // was transferred there); every instance gets an EMPTY base Vfs the WASI adapter sits on top
+  // of and never consults.
+  const guestImage = FS_MODE === 'broker' ? new ArrayBuffer(0) : imageBuf;
+  const guestManifest = FS_MODE === 'broker' ? { dirs: ['/'], files: [] } : manifest;
 
   const stdinPipe = SabPipe.create(1 << 20);
   const stdoutPipe = SabPipe.create(1 << 22);
@@ -220,8 +324,12 @@ async function main() {
       role: 'process',
       module: wasmModule,
       memory,
-      image: imageBuf,
-      manifest,
+      image: guestImage,
+      manifest: guestManifest,
+      fs: FS_MODE,
+      bundleUrl: BUNDLE_URL,
+      channel: channels.length ? channels[0].transfer() : null,
+      poolChannels: channels.slice(1).map((c) => c.transfer()),
       stdin: stdinPipe.descriptor(),
       stdout: stdoutPipe.descriptor(),
       argv: threadedWireArgv(),
@@ -236,7 +344,7 @@ async function main() {
       trace: TRACE,
       relayPorts: relayChannels.map((c) => c.port2),
     },
-    [imageBuf, ...relayChannels.map((c) => c.port2)],
+    [guestImage, ...relayChannels.map((c) => c.port2)],
   );
 
   // ---- the pgwire pump (this thread never blocks) --------------------------
@@ -390,7 +498,19 @@ async function main() {
 
   expect(exitCode === 0, `guest exit code ${exitCode} (want 0)`);
 
+  const fiveStatementMs = STATEMENTS.reduce((sum, sql) => sum + (timings.get(sql) ?? 0), 0);
+  note(`page: timing five-statement block total ${fiveStatementMs}ms (fs=${FS_MODE})`);
+
   try { worker.terminate(); } catch { /* already gone */ }
+
+  // The coordinator is parked in Atomics.wait and cannot be reached by postMessage; the
+  // doorbell is the only way to ask its loop to return, which is exactly why it lives in
+  // shared memory.
+  if (storageWorker) {
+    doorbell.requestStop();
+    await Promise.race([storageStoppedPromise, new Promise((r) => setTimeout(r, 5000))]);
+    try { storageWorker.terminate(); } catch { /* already gone */ }
+  }
 }
 
 try {

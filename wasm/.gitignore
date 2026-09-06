@@ -10,3 +10,6 @@ assets/psql.wasm.br
 assets/psql.wasm.gz
 # Local pre-upload bundle assembled by deploy.sh stage — never committed.
 deploy-staging/
+# The @pgxsinkit/pglite-opfs-repacked ESM bundle the `--fs broker` lane imports — a symlink to
+# another repo's dist output, never a checked-in copy. See wasm/broker-fs.js.
+vendor/

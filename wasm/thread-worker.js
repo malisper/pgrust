@@ -38,11 +38,20 @@
 // anything — a dynamic import, a worker's module load — would deadlock. So all
 // of that happens up front and thread-spawn is a bare postMessage.
 //
+// STORAGE. With `--fs copy` (the default) each role still builds its own Vfs
+// from its own copy of the packed image. With `--fs broker` the driver hands
+// this worker ONE SharedArrayBuffer channel to the storage coordinator, and
+// `brokerFsFor()` below turns it into a WASI filesystem adapter composed over
+// the host's WASI object — so every file call lands on the ONE store while fd
+// 0/1/2 and every non-filesystem import are untouched. Each role releases its
+// store descriptors when its guest thread returns (`releaseFs`).
+//
 // Node entry is thread-worker.mjs (a one-line re-export of this file) so
 // Node's module resolution sees ESM without relying on syntax detection.
 
 import { makeThreadsHost, makeSpawner, SpawnDesk, GuestExit, IS_NODE, EAGAIN } from './threads-host.js';
 import { SabPipe } from './sab-pipe.js';
+import { createBrokerFs, loadRepackedBundle } from './broker-fs.js';
 
 const nodeWt = IS_NODE ? await import('node:worker_threads') : null;
 const port = IS_NODE ? nodeWt.parentPort : self;
@@ -71,9 +80,26 @@ function log(text) {
 
 let prewarmed = null; // { instance, host, exports } for a spawned-thread worker
 
+// `--fs broker`: build THIS instance's filesystem seam onto the coordinator's one store. Awaited
+// here, in the worker's async bootstrap, precisely because it may not be awaited later — a
+// thread-spawn handler is microseconds from a futex park and can await nothing.
+async function brokerFsFor(msg, label) {
+  if (msg.fs !== 'broker') return null;
+  if (!msg.channel) throw new Error(`${label}: --fs broker but no broker channel was handed to this worker`);
+  const bundle = await loadRepackedBundle(msg.bundleUrl);
+  return createBrokerFs({
+    bundle,
+    channel: msg.channel,
+    memory: msg.memory,
+    label,
+    onLog: (text) => post({ type: 'log', text }),
+  });
+}
+
 async function runProcess(msg) {
   const stdin = SabPipe.from(msg.stdin);
   const stdout = SabPipe.from(msg.stdout);
+  const fs = await brokerFsFor(msg, 'process');
 
   const spawner = makeSpawner({
     wasmModule: msg.module,
@@ -88,6 +114,9 @@ async function runProcess(msg) {
     relayPorts: msg.relayPorts || [],
     poolSize: msg.poolSize || 1,
     trace: msg.trace || 0,
+    fsMode: msg.fs || 'copy',
+    bundleUrl: msg.bundleUrl || null,
+    poolChannels: msg.poolChannels || [],
     // Spawn bookkeeping the PROCESS instance itself observes (it is not yet
     // parked when it posts these); everything the spawned thread observes
     // goes out on that thread's own relay port instead.
@@ -107,6 +136,7 @@ async function runProcess(msg) {
     spawn: (startArg) => spawner.spawn(startArg),
     label: 'process',
     trace: msg.trace || 0,
+    fs,
   });
 
   post({
@@ -143,6 +173,7 @@ async function runProcess(msg) {
       code = 70;
     }
   }
+  releaseFs(host, 'process');
   // stdout EOF: the driver's async reader must not hang after the guest goes.
   stdout.close();
   post({ type: 'exit', from: 'process', code });
@@ -157,6 +188,7 @@ async function prewarmThread(msg) {
   const stdout = SabPipe.from(msg.stdout);
   const desk = SpawnDesk.from(msg.desk);
   const slot = msg.slot | 0;
+  const fs = await brokerFsFor(msg, `thread-slot-${slot}`);
   const host = makeThreadsHost({
     wasmModule: msg.module,
     memory: msg.memory,
@@ -189,6 +221,7 @@ async function prewarmThread(msg) {
     },
     label: 'thread',
     trace: msg.trace || 0,
+    fs,
   });
   const instance = await WebAssembly.instantiate(msg.module, host.imports);
   if (typeof instance.exports.wasi_thread_start !== 'function') {
@@ -207,22 +240,38 @@ async function prewarmThread(msg) {
   threadCommandLoop();
 }
 
+// `--fs broker`: a guest thread that has returned holds nothing, but the COORDINATOR still holds
+// every store descriptor it opened until someone says otherwise. This is that someone; without it
+// the coordinator leaks a thread's fds until the whole channel detaches.
+function releaseFs(host, who) {
+  if (!host || !host.fs) return;
+  try {
+    const released = host.fs.closeAll();
+    post({ type: 'log', text: `${who}: released ${released} store descriptor(s) on the coordinator` });
+  } catch (e) {
+    post({ type: 'log', text: `${who}: releasing store descriptors failed: ${e && e.message ? e.message : e}` });
+  }
+}
+
 // One `wasi_thread_start` run. Returns false once the process is over.
 function runThread(tid, startArg) {
   const { instance } = prewarmed;
   post({ type: 'thread-entered', tid, startArg });
   try {
     instance.exports.wasi_thread_start(tid, startArg);
+    releaseFs(prewarmed.host, `thread ${tid}`);
     post({ type: 'thread-done', tid, trace: prewarmed.host.traceHead.slice() });
     return true;
   } catch (e) {
     if (e instanceof GuestExit) {
       // proc_exit from a spawned thread: the process is over, and nobody is
       // left to join us — announce it so the driver does not hang.
+      releaseFs(prewarmed.host, `thread ${tid}`);
       prewarmed.stdout.close();
       post({ type: 'exit', from: 'thread', tid, code: e.code });
       return false;
     }
+    releaseFs(prewarmed.host, `thread ${tid}`);
     post({
       type: 'error',
       from: 'thread',

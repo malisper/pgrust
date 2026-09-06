@@ -39,14 +39,23 @@
 // perform, because the second spawner on this target is the session thread
 // creating the pg-timeout-timer thread while the process instance is parked.
 //
-// KNOWN LIMIT, checkpoint (a): every worker builds its OWN Vfs from its own
-// copy of the packed image, so the process instance and the session instance
-// have INDEPENDENT filesystems that diverge the moment either writes. That is
-// fine here because --stdio-wire-threaded runs the whole ladder (boot half
-// included) on the one spawned session thread and the main thread only joins.
-// A shared storage coordinator (one authoritative VFS behind a lock, or the
-// VFS bytes themselves in shared memory) is checkpoint (b)+ work, not this
-// spike's.
+// STORAGE, and the limit that used to be here. `--fs copy` (the default, and
+// what checkpoint (a) shipped) still gives every worker its OWN Vfs from its
+// own copy of the packed image, so the process instance and the session
+// instance have INDEPENDENT filesystems that diverge the moment either writes.
+// That was survivable only because --stdio-wire-threaded runs the whole ladder
+// (boot half included) on the one spawned session thread and the main thread
+// only joins; a SECOND backend is impossible on it.
+//
+// `--fs broker` removes it. One dedicated coordinator worker
+// (wasm/storage-worker.js) owns a single repacked store seeded from the packed
+// image, and every instance reaches it over its own SharedArrayBuffer channel,
+// blocking in Atomics.wait — the only shape that can work, because a thread
+// running wasm parks in futexes and can never observe a promise. The `fs`
+// option below is where that lands: it composes a WASI preview1 filesystem
+// adapter over this host's WASI object, so every FILE call moves to the one
+// store while fd 0/1/2 and every non-filesystem import stay exactly as built
+// here. See wasm/broker-fs.js.
 
 import { makeWasi, GuestExit, monotonicNs } from './pgrust-wasi.js';
 import { SabPipe } from './sab-pipe.js';
@@ -231,6 +240,9 @@ export function makeThreadsHost({
   spawn,
   label = 'guest',
   trace = 0,
+  // `--fs broker`: the seam from wasm/broker-fs.js. null (`--fs copy`) leaves every byte of
+  // this function's behaviour exactly as it was.
+  fs = null,
 }) {
   const info = inspectImports(wasmModule);
   if (!info.memory) {
@@ -269,7 +281,7 @@ export function makeThreadsHost({
   // (the single-threaded host sets it from instance.exports.memory after).
   h.setMemory(memory);
 
-  const wasi = h.wasi;
+  let wasi = h.wasi;
   const u8 = () => new Uint8Array(memory.buffer);
   const dv = () => new DataView(memory.buffer);
   function* iovs(ptr, n) {
@@ -416,6 +428,13 @@ export function makeThreadsHost({
     return 0;
   };
 
+  // `--fs broker`: hand every FILE call to the coordinator's one store. This has to happen
+  // AFTER the three overrides above and BEFORE the trace wrapper: the adapter dispatches on the
+  // fd (or the dirfd), so it must see the fd-0 read, the random_get and the poll_oneoff this
+  // host installed as the fallback for everything it does not own, and the trace ring must wrap
+  // whatever ends up being called.
+  if (fs) wasi = fs.compose(wasi);
+
   // Diagnostics: keep the last `trace` WASI calls in a ring so a guest abort
   // (which arrives as a bare `RuntimeError: unreachable`, and whose Rust-side
   // message the elog panic hook suppresses for PgError payloads) can still be
@@ -495,7 +514,7 @@ export function makeThreadsHost({
     put(i.module, i.name, fn);
   }
 
-  return { imports, wasi, vfs: h.vfs, info, traceRing, traceHead };
+  return { imports, wasi, vfs: h.vfs, fs, info, traceRing, traceHead };
 }
 
 // ---------------------------------------------------------------------------
@@ -545,6 +564,11 @@ export function threadWorkerUrl(base) {
   return new URL(IS_NODE ? './thread-worker.mjs' : './thread-worker.js', base);
 }
 
+// `--fs broker`: the dedicated storage coordinator, same .mjs/.js split.
+export function storageWorkerUrl(base) {
+  return new URL(IS_NODE ? './storage-worker.mjs' : './storage-worker.js', base);
+}
+
 // The thread-spawn implementation for whichever instance owns spawning (the
 // process instance in this spike). Thread ids start at 1 and stay small, as
 // the wasi-threads ABI asks.
@@ -565,6 +589,12 @@ export function makeSpawner({
   relayPorts = [],
   poolSize = 1,
   trace = 0,
+  // `--fs broker`: the library bundle URL every pool worker imports, and ONE channel per slot.
+  // Each thread needs its own channel — the protocol is one request in flight per channel, and
+  // two threads sharing one would corrupt each other's replies.
+  fsMode = 'copy',
+  bundleUrl = null,
+  poolChannels = [],
 }) {
   const url = threadWorkerUrl(base);
   const workers = [];
@@ -589,8 +619,9 @@ export function makeSpawner({
         onEvent({ type: 'error', slot, message: String(e && e.message ? e.message : e) });
       });
     });
-    // Each spawned thread gets its own VFS, hence its own copy of the image
-    // bytes (see the KNOWN LIMIT note at the top of this file).
+    // `--fs copy`: each spawned thread gets its own VFS, hence its own copy of the image bytes.
+    // `--fs broker`: nothing to copy — the image is already in the coordinator's store, and this
+    // worker's base `Vfs` is an empty stub the adapter sits on top of.
     const imageCopy = image.slice(0);
     const relay = relayPorts[slot] || null;
     const payload = {
@@ -607,6 +638,9 @@ export function makeSpawner({
       trace,
       desk: desk.descriptor(),
       slot,
+      fs: fsMode,
+      bundleUrl,
+      channel: poolChannels[slot] || null,
     };
     w.postMessage(payload, relay ? [imageCopy, relay] : [imageCopy]);
     return rec;

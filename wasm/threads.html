@@ -12,14 +12,21 @@
   WebAssembly.Memory are gated on it):
 
       node wasm/serve-coi.mjs 8081
-      # the threads build is not a packed asset — link it in first:
+      # neither the threads build nor the storage library bundle is a packed
+      # asset — link both in first:
       ln -s ../../target/wasm32-wasip1-threads/wasm-release/postgres.wasm \
             wasm/assets/postgres-threads.wasm
+      mkdir -p wasm/vendor && ln -sfn \
+        /path/to/pgxsinkit/packages/pglite-opfs-repacked/dist/browser-bundle.js \
+        wasm/vendor/pglite-opfs-repacked.js
       open http://localhost:8081/threads.html
 
   Query string: ?dispatch=stdio-wire|stdio-wire-threaded (default threaded),
   ?pool=N (prewarmed wasi-thread pool, default 4 — the guest wants a session
-  thread AND a pg-timeout-timer thread), ?trace=N, ?wasm=, ?vfs=.
+  thread AND a pg-timeout-timer thread), ?fs=copy|broker (default copy; broker
+  puts ONE repacked store in a dedicated coordinator worker and every instance
+  reaches it over a SharedArrayBuffer channel), ?trace=N, ?wasm=, ?vfs=,
+  ?bundle=.
 
   Every step is console.log'd; the last line is
   `VERDICT: threads-browser PASS` or `VERDICT: threads-browser FAIL <reason>`.
