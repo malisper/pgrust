@@ -86,8 +86,76 @@ fn raw_parser_parses_select_1() {
     assert_eq!(stmts.len(), 1);
 }
 
+// parser.c:42 raw_parser accepts every RawParseMode; under RAW_PARSE_TYPE_NAME
+// gram.y's parse_toplevel yields a TypeName list (not RawStmt). The RawStmt-typed
+// seam cannot return that shape; a caller asking for it must get a catchable
+// elog(ERROR)-style XX000, not a process panic (audit-18.6
+// a186-candidate-fp-parser-parser-3927db86cf686806eaf9-1).
 #[test]
-#[should_panic(expected = "gram")]
-fn base_yylex_is_deferred() {
-    crate::base_yylex();
+fn raw_parser_type_name_mode_is_a_catchable_error_not_a_panic() {
+    let ctx = MemoryContext::new("t");
+    let err = crate::raw_parser(ctx.mcx(), "int", parser_seams::RawParseMode::RAW_PARSE_TYPE_NAME)
+        .err()
+        .expect("TYPE_NAME through the RawStmt seam is an error");
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    assert_eq!(err.message(), "unexpected node type: T_TypeName");
+}
+
+// The TYPE_NAME consumer (parse_type.c typeStringToTypeName) reads the TypeName
+// list straight from gram_core::raw_parser — the C-exact port of parser.c:42
+// for every mode.
+#[test]
+fn gram_core_raw_parser_serves_type_name_mode() {
+    let ctx = MemoryContext::new("t");
+    let list = gram_core::raw_parser(
+        ctx.mcx(),
+        "int",
+        parser_seams::RawParseMode::RAW_PARSE_TYPE_NAME,
+    )
+    .unwrap();
+    assert_eq!(list.len(), 1);
+    assert!(list.first().unwrap().as_type_name().is_some());
+}
+
+// parser.c:111 base_yylex is the lookahead filter between scanner and grammar;
+// its port lives inside gram_core's Parser and is reached through raw_parser.
+// Every merge arm (parser.c:172-372: FORMAT_LA, NOT_LA, NULLS_LA, WITH_LA,
+// WITHOUT_LA, UIDENT/USCONST + UESCAPE) is exercised here through the seam
+// (audit-18.6 a186-candidate-fp-parser-parser-6cee8c22c54827d13e8b-1).
+#[test]
+fn base_yylex_lookahead_merges_are_reached_through_raw_parser() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let ok = |q: &str| {
+        let stmts = crate::raw_parser(mcx, q, parser_seams::RawParseMode::RAW_PARSE_DEFAULT)
+            .unwrap_or_else(|e| panic!("{q}: {}", e.message()));
+        assert_eq!(stmts.len(), 1, "{q}");
+    };
+    ok("select json_serialize('1' format json)");
+    ok("select 1 where 'a' not like 'b' and 1 not in (2) and 1 not between 0 and 2");
+    ok("select 1 order by 1 nulls first");
+    ok("create table t (a timestamp with time zone, b time without time zone)");
+    ok("select * from unnest(array[1]) with ordinality");
+    ok(r"select U&'d\0061t\+000061', U&'d!0061t!+000061' uescape '!'");
+    ok(r#"select U&"d\0061t\+000061" from t"#);
+
+    // parser.c:272-280: the UESCAPE tail errors are scanner_yyerror syntax errors
+    // positioned at the third token.
+    let err = crate::raw_parser(
+        mcx,
+        r"select U&'\0041' uescape '+'",
+        parser_seams::RawParseMode::RAW_PARSE_DEFAULT,
+    )
+    .err()
+    .unwrap();
+    assert_eq!(err.message(), "invalid Unicode escape character at or near \"'+'\"");
+    assert_eq!(err.cursor_position(), Some(26));
+    let err = crate::raw_parser(
+        mcx,
+        r"select U&'\0041' uescape 1",
+        parser_seams::RawParseMode::RAW_PARSE_DEFAULT,
+    )
+    .err()
+    .unwrap();
+    assert_eq!(err.message(), "UESCAPE must be followed by a simple string literal at or near \"1\"");
 }
