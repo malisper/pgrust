@@ -479,3 +479,44 @@ fn union_frozen_matches_live_union() {
         }
     }
 }
+
+// audit-18.6 b239 (tbm_calculate_entries above MaxAllocSize)
+
+#[test]
+fn calculate_entries_matches_c_above_maxallocsize() {
+    // tidbitmap.c:1555-1558: nbuckets = maxbytes / (sizeof(PagetableEntry) +
+    // 2 * sizeof(Pointer)), clamped to [16, INT_MAX - 1] and nothing else —
+    // the pagetable is allocated MCXT_ALLOC_HUGE (tidbitmap.c:1503), so
+    // work_mem >= 1GB legitimately buys tens of millions of exact entries.
+    let per_entry =
+        core::mem::size_of::<PagetableEntry>() + 2 * core::mem::size_of::<*const u8>();
+    // C: 4 (blockno) + 1 (status) + 1 + 1 (bools) + pad + 5 bitmapwords = 48.
+    assert_eq!(core::mem::size_of::<PagetableEntry>(), 48);
+    let one_gb = 1usize << 30;
+    let two_gb = 2usize << 30;
+    assert_eq!(tbm_calculate_entries(one_gb), (one_gb / per_entry) as i32);
+    assert_eq!(tbm_calculate_entries(two_gb), (two_gb / per_entry) as i32);
+    assert_eq!(tbm_calculate_entries(two_gb), 33_554_432);
+    // safety limit (INT_MAX - 1) and sanity limit (16)
+    assert_eq!(tbm_calculate_entries(usize::MAX), i32::MAX - 1);
+    assert_eq!(tbm_calculate_entries(1), 16);
+}
+
+#[test]
+fn pagetable_grows_past_maxallocsize() {
+    // tidbitmap.c:1503 pagetable_allocate: MemoryContextAllocExtended(..,
+    // MCXT_ALLOC_HUGE | MCXT_ALLOC_ZERO) — the pagetable bucket array may
+    // exceed MaxAllocSize, which is what lets a >1GB work_mem keep every
+    // page exact instead of lossifying. Only the control bytes are touched,
+    // so the reservation costs virtual memory, not resident memory.
+    let ctx = MemoryContext::new("t");
+    let mut tbm = TIDBitmap::new(ctx.mcx(), 2usize << 30);
+    tbm.add_tuples(&[tid(1, 1), tid(2, 1)], false).unwrap();
+    let table = tbm.pagetable.as_mut().expect("two pages => TBM_HASH");
+    let want = mcx::MAX_ALLOC_SIZE / core::mem::size_of::<(BlockNumber, PagetableEntry)>() + 1;
+    table
+        .try_reserve(want)
+        .expect("pagetable reservation above MaxAllocSize is admitted (MCXT_ALLOC_HUGE)");
+    assert!(table.capacity() >= want);
+    assert_eq!(table.len(), 2);
+}

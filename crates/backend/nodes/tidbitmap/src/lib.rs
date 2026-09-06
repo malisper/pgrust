@@ -1,4 +1,6 @@
-// tidbitmap.c. Pagetable is PgFxHashMap (C: simplehash + murmurhash32). The
+// tidbitmap.c. Pagetable is a hashbrown map (C: simplehash + murmurhash32)
+// whose bucket array is allocated through the huge (MCXT_ALLOC_HUGE) entry
+// point, as C's pagetable_allocate does (tidbitmap.c:1503). The
 // shared iteration lane is thread-native: the frozen arrays + cursor C parks
 // in DSA live in an Arc (std containers: cross-thread memory, outside mcx
 // accounting like ParallelTableScanDescShared).
@@ -7,7 +9,9 @@ extern crate alloc;
 
 use std::sync::{Arc, Mutex};
 
-use mcx::{Mcx, PgFxHashMap, PgVec};
+use allocator_api2::alloc::{AllocError, Allocator, Layout};
+use core::ptr::NonNull;
+use mcx::{Mcx, PgVec};
 use types_core::{BlockNumber, OffsetNumber, BLCKSZ};
 use types_error::{PgError, PgResult};
 use types_nodes::{bitmapword, BITS_PER_BITMAPWORD};
@@ -96,10 +100,67 @@ struct TbmSharedCursor {
     schunkbit: i32,
 }
 
+/// C `pagetable_allocate` (tidbitmap.c:1497-1504): the pagetable's element
+/// array is allocated with `MCXT_ALLOC_HUGE`, so it may exceed MaxAllocSize
+/// when work_mem is large. This allocator routes hashbrown's bucket-array
+/// allocations through [`Mcx::alloc_uninit_bytes_huge`] (admitted against
+/// MaxAllocHugeSize) instead of the 1GB-ceilinged `Allocator::allocate`.
+/// hashbrown only ever allocates fresh arrays and frees old ones (as
+/// simplehash's SH_GROW), so allocate + deallocate are the whole surface.
+#[derive(Clone, Copy)]
+struct McxHuge<'mcx>(Mcx<'mcx>);
+
+// SAFETY (trait contract): delegates to the underlying `Mcx` allocator; a
+// block handed out by `allocate` is released to the same context by
+// `deallocate` with the layout it was allocated with.
+unsafe impl Allocator for McxHuge<'_> {
+    #[inline]
+    fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        let p = self.0.alloc_uninit_bytes_huge(layout)?;
+        Ok(NonNull::slice_from_raw_parts(p, layout.size()))
+    }
+
+    #[inline]
+    unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
+        // SAFETY: per the trait contract, `ptr`/`layout` came from `allocate`
+        // above, which is the same `Mcx` allocation.
+        unsafe { self.0.deallocate(ptr, layout) }
+    }
+}
+
+/// C `pagetable_hash` (simplehash keyed by BlockNumber). A newtype over the
+/// huge-allocated hashbrown map (local type for the `ForgetSafe` impl);
+/// derefs to the map.
+struct Pagetable<'mcx>(
+    hashbrown::HashMap<BlockNumber, PagetableEntry, rustc_hash::FxBuildHasher, McxHuge<'mcx>>,
+);
+
+impl<'mcx> core::ops::Deref for Pagetable<'mcx> {
+    type Target =
+        hashbrown::HashMap<BlockNumber, PagetableEntry, rustc_hash::FxBuildHasher, McxHuge<'mcx>>;
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl core::ops::DerefMut for Pagetable<'_> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+// SAFETY: as mcx's impl for `Mcx`-allocated maps — the bucket array is
+// arena bytes of the owning context (huge entry point of the same `Mcx`),
+// and BlockNumber/PagetableEntry have no drop glue; forgetting the map at
+// reset leaks nothing outside the arena.
+unsafe impl mcx::ForgetSafe for Pagetable<'_> {}
+
 pub struct TIDBitmap<'mcx> {
     mcx: Mcx<'mcx>,
     status: TbmStatus,
-    pagetable: Option<PgFxHashMap<'mcx, BlockNumber, PagetableEntry>>,
+    pagetable: Option<Pagetable<'mcx>>,
     nentries: i32,
     maxentries: i32,
     npages: i32,
@@ -152,19 +213,17 @@ impl TbmIterateResult<'_> {
     }
 }
 
+/// C `tbm_calculate_entries` (tidbitmap.c:1545-1561): estimate the number
+/// of hashtable entries that fit in maxbytes, counting sizeof(PagetableEntry)
+/// plus two Pointers per entry for the iteration readout arrays; clamped to
+/// [16, INT_MAX - 1] only. There is no MaxAllocSize ceiling: the pagetable is
+/// allocated MCXT_ALLOC_HUGE (see [`McxHuge`]).
 pub fn tbm_calculate_entries(maxbytes: usize) -> i32 {
     let nbuckets = maxbytes
         / (core::mem::size_of::<PagetableEntry>() + 2 * core::mem::size_of::<*const u8>());
-    // C DIVERGENCE (documented): C's pagetable is simplehash with
-    // SH_ALLOCATE = MCXT_ALLOC_HUGE, so with work_mem > 1GB it may exceed
-    // MaxAllocSize. Our PgFxHashMap grows through the (now ceilinged)
-    // allocator, so clamp maxentries such that the table stays under the
-    // ceiling; past it the bitmap lossifies earlier than C would (a
-    // performance difference, never a results difference). /2 leaves room
-    // for hashbrown's power-of-two bucket rounding + load factor.
-    let ceiling = (::mcx::MAX_ALLOC_SIZE / 2)
-        / (core::mem::size_of::<PagetableEntry>() + 2 * core::mem::size_of::<*const u8>());
-    nbuckets.clamp(16, ceiling.min((i32::MAX - 1) as usize)) as i32
+    let nbuckets = nbuckets.min((i32::MAX - 1) as usize); /* safety limit */
+    let nbuckets = nbuckets.max(16); /* sanity limit */
+    nbuckets as i32
 }
 
 #[cold]
@@ -196,7 +255,8 @@ impl<'mcx> TIDBitmap<'mcx> {
 
     fn create_pagetable(&mut self) -> PgResult<()> {
         debug_assert!(self.status != TbmStatus::Hash && self.pagetable.is_none());
-        let mut table = PgFxHashMap::with_hasher_in(Default::default(), self.mcx);
+        let mut table =
+            Pagetable(hashbrown::HashMap::with_hasher_in(Default::default(), McxHuge(self.mcx)));
         table.try_reserve(128).map_err(|_| self.mcx.oom(128))?;
         if self.status == TbmStatus::OnePage {
             table.insert(self.entry1.blockno, self.entry1);

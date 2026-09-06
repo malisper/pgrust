@@ -19279,8 +19279,10 @@ dependencies = [
 name = "tidbitmap"
 version = "0.1.0"
 dependencies = [
+ "allocator-api2",
  "hashbrown",
  "mcx",
+ "rustc-hash",
  "types_core",
  "types_error",
  "types_nodes",
