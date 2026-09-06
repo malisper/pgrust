@@ -294,6 +294,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // (worker number, memoize stats) pairs (C MemoizeState.shared_info).
+    pub fn query_desc_worker_memoize_instrument(
+        query_desc: QueryDescHandle,
+        plan_node_id: i32,
+    ) -> Option<Vec<(i32, MemoizeInstrumentation)>>
+);
+
+seam_core::seam!(
     // (worker number, incsort info) pairs (C IncrementalSortState.shared_info).
     pub fn query_desc_worker_incsort_instrument(
         query_desc: QueryDescHandle,

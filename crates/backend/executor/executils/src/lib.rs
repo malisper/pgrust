@@ -16,7 +16,8 @@ use ::queryenvironment::QueryEnvironment;
 use ::snapmgr::Snapshot;
 use ::types_core::instrument::{
     AggregateInstrumentation, BitmapHeapScanInstrumentation, HashInstrumentation,
-    IncrementalSortInfo, Instrumentation, RuntimeEaPipeline, TuplesortInstrumentation,
+    IncrementalSortInfo, Instrumentation, MemoizeInstrumentation, RuntimeEaPipeline,
+    TuplesortInstrumentation,
 };
 use ::types_core::CommandId;
 use ::types_error::{PgError, PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE};
@@ -1020,6 +1021,9 @@ pub struct WorkerInstr<'mcx> {
     pub hash: PgVec<'mcx, (i32, HashInstrumentation)>,
     pub index: PgVec<'mcx, (i32, u64)>,
     pub bitmap: PgVec<'mcx, (i32, BitmapHeapScanInstrumentation)>,
+    /// C SharedMemoizeInfo.sinstrument[worker]: the stats ExecEndMemoize
+    /// copied out of the worker (mem_peak already resolved).
+    pub memoize: PgVec<'mcx, (i32, MemoizeInstrumentation)>,
 }
 
 // C ExecAuxRowMark's junk attnos, keyed by markType: an EPQ recheck

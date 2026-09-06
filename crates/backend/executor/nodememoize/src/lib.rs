@@ -4,7 +4,11 @@
 // C's post-eviction entry re-finds are unnecessary; the LRU is intrusive
 // links on the entries themselves rather than on the key. Memory accounting
 // uses C's LP64 struct sizes so EXPLAIN numbers match byte-for-byte.
-// Parallel (DSM) arms are dead until the parallel lanes land.
+// Parallel workers (C ExecMemoizeEstimate/InitializeDSM/InitializeWorker/
+// RetrieveInstrumentation): the only DSM traffic is the per-worker stats
+// copy ExecEndMemoize makes, which execparallel takes from `memoize_stats`
+// into the worker's instrumentation report (WorkerInstr.memoize) for
+// EXPLAIN's per-worker stanza; the node itself needs no shared state.
 #![allow(non_snake_case)]
 
 use core::alloc::Layout;

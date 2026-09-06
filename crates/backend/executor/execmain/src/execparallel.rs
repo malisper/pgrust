@@ -15,7 +15,7 @@ use ::mcx::PgVec;
 use ::tcop_dest::DestReceiver;
 use ::types_core::instrument::{
     AggregateInstrumentation, BufferUsage, HashInstrumentation, IncrementalSortInfo,
-    Instrumentation, TuplesortInstrumentation, WalUsage,
+    Instrumentation, MemoizeInstrumentation, TuplesortInstrumentation, WalUsage,
 };
 use ::types_dest::CommandDest;
 use ::types_error::PgResult;
@@ -47,6 +47,7 @@ pub(crate) struct WorkerInstrReport {
     hash: Vec<(i32, HashInstrumentation)>,
     index: Vec<(i32, u64)>,
     bitmap: Vec<(i32, types_core::instrument::BitmapHeapScanInstrumentation)>,
+    memoize: Vec<(i32, MemoizeInstrumentation)>,
 }
 
 struct SharedInstrumentation {
@@ -685,6 +686,7 @@ fn retrieve_instrumentation(
             hash: PgVec::new_in(mcx),
             index: PgVec::new_in(mcx),
             bitmap: PgVec::new_in(mcx),
+            memoize: PgVec::new_in(mcx),
         };
         wi.sort
             .try_reserve_exact(w.sort.len())
@@ -710,6 +712,10 @@ fn retrieve_instrumentation(
             .try_reserve_exact(w.bitmap.len())
             .map_err(|_| mcx.oom(1))?;
         wi.bitmap.extend(w.bitmap.iter().copied());
+        wi.memoize
+            .try_reserve_exact(w.memoize.len())
+            .map_err(|_| mcx.oom(1))?;
+        wi.memoize.extend(w.memoize.iter().copied());
         estate.es_worker_instrument.push(wi);
     }
     Ok(())
@@ -919,9 +925,25 @@ pub fn parallel_query_main(shared: &parallel::ParallelShared) -> PgResult<()> {
             let report = querydesc::with_qd(qd, |q| {
                 let x = q.exec.as_mut().expect("worker executor state");
                 x.with_mut(|d| {
-                    let es = &mut d.estate;
+                    let querydesc::ExecData { estate: es, planstate } = d;
                     for i in es.es_instrumentation.iter_mut() {
                         ::instrument::instr_end_loop(i);
+                    }
+                    // ExecEndMemoize (nodeMemoize.c:1117-1128): a parallel
+                    // worker copies every Memoize node's stats, mem_peak
+                    // resolved from mem_used, into its SharedMemoizeInfo
+                    // slot. The stats live on the planstates (read through
+                    // the same walk EXPLAIN uses); one entry per
+                    // instrumented Memoize node under the Gather.
+                    let mut memoize = Vec::new();
+                    if let Some(ps) = planstate.as_mut() {
+                        for id in 0..es.es_instrumentation.len() {
+                            if let Some(crate::procnode::InstrExtra::Memoize(m)) =
+                                crate::procnode::planstate_instr_extra(ps, es, id as u32)
+                            {
+                                memoize.push((id as i32, m));
+                            }
+                        }
                     }
                     WorkerInstrReport {
                         instrument: es.es_instrumentation.iter().copied().collect(),
@@ -931,6 +953,7 @@ pub fn parallel_query_main(shared: &parallel::ParallelShared) -> PgResult<()> {
                         hash: es.es_hash_instrumentation.iter().copied().collect(),
                         index: es.es_index_instrumentation.iter().copied().collect(),
                         bitmap: es.es_bitmap_instrumentation.iter().copied().collect(),
+                        memoize,
                     }
                 })
             });
@@ -961,6 +984,8 @@ pub fn parallel_query_main(shared: &parallel::ParallelShared) -> PgResult<()> {
                     prev.incsort = report.incsort;
                     prev.agg = report.agg;
                     prev.hash = report.hash;
+                    // ExecEndMemoize memcpy's the whole slot: latest run wins.
+                    prev.memoize = report.memoize;
                     for (id, n) in report.index {
                         match prev.index.iter_mut().find(|(pid, _)| *pid == id) {
                             Some((_, acc)) => *acc += n,

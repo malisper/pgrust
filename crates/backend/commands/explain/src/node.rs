@@ -3105,7 +3105,7 @@ fn show_material_info<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) {
     }
 }
 
-// show_memoize_info (explain.c); the parallel-worker stanza has no lane.
+// show_memoize_info (explain.c).
 fn show_memoize_info<'mcx>(
     node: Node<'mcx>,
     ancestors: Option<&Ancestors<'_, 'mcx>>,
@@ -3130,10 +3130,8 @@ fn show_memoize_info<'mcx>(
         return Ok(());
     }
     let id = plan_of(node).plan_node_id;
-    let Some(si) = execmain_seams::query_desc_memoize_instrument::call(es.qd, id) else {
-        return Ok(());
-    };
-    if si.cache_misses > 0 {
+    let leader = execmain_seams::query_desc_memoize_instrument::call(es.qd, id);
+    if let Some(si) = leader.filter(|si| si.cache_misses > 0) {
         let mem_peak_kb = (si.mem_peak + 1023) / 1024;
         if es.format != EXPLAIN_FORMAT_TEXT {
             ExplainPropertyInteger("Cache Hits", None, si.cache_hits as i64, es);
@@ -3152,6 +3150,43 @@ fn show_memoize_info<'mcx>(
                 si.cache_overflows,
                 mem_peak_kb
             );
+        }
+    }
+    // The shared_info worker stanza (explain.c show_memoize_info): workers
+    // that never ran the node (no miss) are skipped; ExecEndMemoize already
+    // resolved the worker's mem_peak, so no mem_used fallback here.
+    let Some(workers) = execmain_seams::query_desc_worker_memoize_instrument::call(es.qd, id)
+    else {
+        return Ok(());
+    };
+    for (n, si) in workers {
+        if si.cache_misses == 0 {
+            continue;
+        }
+        if es.workers_state.is_some() {
+            explain_open_worker(n as usize, es);
+        }
+        let mem_peak_kb = (si.mem_peak + 1023) / 1024;
+        if es.format == EXPLAIN_FORMAT_TEXT {
+            crate::format::ExplainIndentText(es);
+            append!(
+                es,
+                "Hits: {}  Misses: {}  Evictions: {}  Overflows: {}  Memory Usage: {}kB\n",
+                si.cache_hits,
+                si.cache_misses,
+                si.cache_evictions,
+                si.cache_overflows,
+                mem_peak_kb
+            );
+        } else {
+            ExplainPropertyInteger("Cache Hits", None, si.cache_hits as i64, es);
+            ExplainPropertyInteger("Cache Misses", None, si.cache_misses as i64, es);
+            ExplainPropertyInteger("Cache Evictions", None, si.cache_evictions as i64, es);
+            ExplainPropertyInteger("Cache Overflows", None, si.cache_overflows as i64, es);
+            ExplainPropertyInteger("Peak Memory Usage", Some("kB"), mem_peak_kb as i64, es);
+        }
+        if es.workers_state.is_some() {
+            explain_close_worker(n as usize, es);
         }
     }
     Ok(())

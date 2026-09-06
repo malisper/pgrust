@@ -134,6 +134,9 @@ pub fn init_seams() {
     execmain_seams::query_desc_worker_incsort_instrument::set(
         querydesc::query_desc_worker_incsort_instrument_seam,
     );
+    execmain_seams::query_desc_worker_memoize_instrument::set(
+        querydesc::query_desc_worker_memoize_instrument_seam,
+    );
     // --- WS-CA wave-10 (cursors inc-2, contract §4; escalation EX-CA-1) ---
     execmain_seams::cursor_plan_current_of_eligible::set(
         execcurrent::cursor_plan_current_of_eligible_seam,

@@ -786,6 +786,32 @@ pub(crate) fn query_desc_worker_sort_instrument_seam(
     })
 }
 
+/// (worker number, memoize stats) pairs for one plan node (C
+/// MemoizeState.shared_info->sinstrument, ExecMemoizeRetrieveInstrumentation).
+pub(crate) fn query_desc_worker_memoize_instrument_seam(
+    h: QueryDescHandle,
+    plan_node_id: i32,
+) -> Option<Vec<(i32, types_core::instrument::MemoizeInstrumentation)>> {
+    with_qd(h, |qd| {
+        let exec = qd.exec.as_ref()?;
+        exec.with(|d| {
+            let out: Vec<_> = d
+                .estate
+                .es_worker_instrument
+                .iter()
+                .enumerate()
+                .flat_map(|(n, w)| {
+                    w.memoize
+                        .iter()
+                        .filter(|(id, _)| *id == plan_node_id)
+                        .map(move |(_, mi)| (n as i32, *mi))
+                })
+                .collect();
+            (!out.is_empty()).then_some(out)
+        })
+    })
+}
+
 /// (worker number, bitmap heap scan stats) pairs for one plan node (C
 /// BitmapHeapScanState.sinstrument).
 pub(crate) fn query_desc_worker_bitmap_instrument_seam(
