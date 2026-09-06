@@ -337,8 +337,12 @@ fn file_get_options<'mcx>(
         options.lappend(mcx, def)?;
     }
 
+    // C file_fdw.c:436: the validator should have refused this, but check
+    // again (elog(ERROR) — ERRCODE_INTERNAL_ERROR); never a panic.
     let Some(filename) = filename else {
-        panic!("either filename or program is required for file_fdw foreign tables");
+        return Err(Box::new(PgError::error(
+            "either filename or program is required for file_fdw foreign tables",
+        )));
     };
     Ok((filename, is_program, options))
 }
