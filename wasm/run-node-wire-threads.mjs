@@ -22,7 +22,7 @@
 // stays free to pump the pipes — the guest parks the JS thread it runs on the
 // moment it joins.
 //
-// Usage: node run-node-wire-threads.mjs [--stderr FILE]
+// Usage: node run-node-wire-threads.mjs [--stderr FILE] [--pool N]
 // Env: PGRUST_WASM_THREADS (path to the threads postgres.wasm),
 //      PGRUST_VFS (prefix for vfs.img/vfs.json),
 //      PGRUST_WIRE_GUCS (comma-separated extra -c GUCs; default pins
@@ -42,7 +42,14 @@ import {
   onPortMessage,
   threadWorkerUrl,
 } from './threads-host.js';
-import { WireReader, encodeStartup, encodeQuery, TERMINATE, canonMessage } from './wire.js';
+import {
+  WireReader,
+  encodeStartup,
+  encodeQuery,
+  TERMINATE,
+  canonMessage,
+  parseMessage,
+} from './wire.js';
 // argv ONLY — nothing from wiresession.js's JSPI session class is
 // constructed here (see the no-JSPI note in threads-host.js).
 import { defaultWireArgv } from './wiresession.js';
@@ -64,6 +71,13 @@ const stderrFile = argAfter('--stderr');
 // keeps the last N WASI calls per instance and dumps them with any guest abort.
 const dispatch = argAfter('--dispatch') || 'stdio-wire-threaded';
 const TRACE = Number(argAfter('--trace') || 0);
+// --pool N sizes the prewarmed wasi-thread pool. The guest asks for more than
+// one thread now: the session thread (threaded dispatch only) AND the
+// pg-timeout-timer thread that statement_timeout needs, plus whatever the
+// executor runtime wants if it is ever enabled here. thread-spawn cannot
+// create a worker on demand (it may not await), so an undersized pool is a
+// hard -EAGAIN — every refusal is logged below.
+const POOL_SIZE = Number(argAfter('--pool') || 4);
 const errFd = stderrFile ? fs.openSync(stderrFile, 'w') : 2;
 
 const failures = [];
@@ -98,6 +112,7 @@ const stdinPipe = SabPipe.create(1 << 20);
 const stdoutPipe = SabPipe.create(1 << 22);
 
 const spawnedTids = [];
+const spawnRefusals = [];
 let exitCode = null;
 let exitFrom = null;
 const stderrChunks = [];
@@ -107,7 +122,6 @@ const worker = makeWorker(threadWorkerUrl(import.meta.url), { name: 'pgrust-proc
 // One relay channel per pool slot: a spawned thread reports to THIS thread
 // directly, because the process worker is parked in a futex for the whole
 // session and could not relay anything until after the fact.
-const POOL_SIZE = 2;
 const relayChannels = Array.from({ length: POOL_SIZE }, () => newMessageChannel());
 
 let poolReady = null;
@@ -129,7 +143,11 @@ function handleMessage(m) {
       break;
     case 'spawn':
       spawnedTids.push(m.tid);
-      note(`host: wasi thread-spawn(start_arg=${m.startArg}) -> tid ${m.tid}`);
+      note(`host: wasi thread-spawn(start_arg=${m.startArg}) by ${m.from} -> tid ${m.tid} (slot ${m.slot})`);
+      break;
+    case 'spawn-refused':
+      spawnRefusals.push(m);
+      note(`host: wasi thread-spawn(start_arg=${m.startArg}) by ${m.from} -> -EAGAIN (pool of ${m.poolSize} exhausted)`);
       break;
     case 'thread-entered':
       note(`host: wasi_thread_start(tid=${m.tid}, start_arg=${m.startArg}) entered`);
@@ -237,7 +255,35 @@ async function untilReadyForQuery(what) {
   }
 }
 
-const rows = new Map(); // sql -> [[values...]]
+const rows = new Map(); // sql -> [values...]
+const timings = new Map(); // sql -> ms from sending Q to ReadyForQuery
+const sqlstates = new Map(); // sql -> [SQLSTATE of every ErrorResponse]
+
+// One simple-query round trip, timed from the Q write to ReadyForQuery. This
+// is the measurement the timeout tests turn on: the guest's wall time, seen
+// from outside, with no clock of the guest's involved.
+async function runQuery(sql, { expectError = false } = {}) {
+  note(`>>> Q ${sql}`);
+  const t0 = Date.now();
+  send(encodeQuery(sql));
+  const msgs = await untilReadyForQuery(sql);
+  const ms = Date.now() - t0;
+  const got = [];
+  const states = [];
+  for (const { t, body } of msgs) {
+    note(canonMessage(t, body));
+    if (t === 'D') got.push(canonMessage(t, body).slice(2));
+    if (t === 'E') {
+      states.push(parseMessage(t, body).fields.C || '?');
+      if (!expectError) failures.push(`error running ${sql}`);
+    }
+  }
+  rows.set(sql, got);
+  timings.set(sql, ms);
+  sqlstates.set(sql, states);
+  note(`--- ${sql} took ${ms}ms${states.length ? ` sqlstate=${states.join(',')}` : ''}`);
+  return { msgs, ms, rows: got, sqlstates: states };
+}
 
 try {
   await Promise.race([
@@ -266,17 +312,19 @@ try {
     'SELECT sum(a) FROM spike_t',
   ];
   for (const sql of statements) {
-    note(`>>> Q ${sql}`);
-    send(encodeQuery(sql));
-    const msgs = await untilReadyForQuery(sql);
-    const got = [];
-    for (const { t, body } of msgs) {
-      note(canonMessage(t, body));
-      if (t === 'D') got.push(canonMessage(t, body).slice(2));
-      if (t === 'E') failures.push(`error running ${sql}`);
-    }
-    rows.set(sql, got);
+    await runQuery(sql);
   }
+
+  // ---- timed waits and timeouts -----------------------------------------
+  // Both exercise the same two pieces: the pg-timeout-timer thread (a real
+  // wasi thread now) and the timed latch park pg_sleep loops on. The first
+  // proves the park actually sleeps rather than spinning or returning at
+  // once; the second proves a DIFFERENT thread can interrupt it.
+  await runQuery('SELECT pg_sleep(0.2)');
+  await runQuery("SET statement_timeout = '300ms'");
+  await runQuery('SELECT pg_sleep(5)', { expectError: true });
+  await runQuery('RESET statement_timeout');
+  await runQuery('SELECT 2');
 
   note('>>> X');
   send(TERMINATE);
@@ -300,7 +348,8 @@ if (dispatch === 'stdio-wire-threaded') {
   expect(spawnedTids.length >= 1, 'no thread was spawned via wasi.thread-spawn');
 }
 expect(spawnedTids.every((t) => t > 0), `thread ids must be positive: ${spawnedTids}`);
-note(`spawned thread ids: [${spawnedTids.join(', ')}]`);
+note(`spawned thread ids: [${spawnedTids.join(', ')}] (pool ${POOL_SIZE}, ${spawnRefusals.length} EAGAIN refusals)`);
+expect(spawnRefusals.length === 0, `${spawnRefusals.length} thread-spawn refusals (pool of ${POOL_SIZE} too small)`);
 
 const r1 = rows.get('SELECT 1') || [];
 expect(r1.length === 1 && r1[0] === '1', `SELECT 1 returned ${JSON.stringify(r1)}`);
@@ -310,6 +359,29 @@ expect(rc.length === 1 && Number(rc[0]) > 0, `pg_class count returned ${JSON.str
 
 const rs = rows.get('SELECT sum(a) FROM spike_t') || [];
 expect(rs.length === 1 && rs[0] === '500500', `sum(a) returned ${JSON.stringify(rs)}`);
+
+// pg_sleep(0.2) must actually sleep: a poll_oneoff that answers "already
+// fired" or a latch park that returns immediately would come back in ~0ms.
+const sleepMs = timings.get('SELECT pg_sleep(0.2)');
+note(`timing: pg_sleep(0.2) round trip ${sleepMs}ms`);
+expect(sleepMs !== undefined && sleepMs >= 190, `pg_sleep(0.2) took ${sleepMs}ms (want >= 190)`);
+
+// statement_timeout must cancel a running pg_sleep(5) from the timer thread.
+const cancelMs = timings.get('SELECT pg_sleep(5)');
+const cancelStates = sqlstates.get('SELECT pg_sleep(5)') || [];
+note(`timing: pg_sleep(5) under statement_timeout=300ms cancelled after ${cancelMs}ms, sqlstate ${cancelStates.join(',') || 'NONE'}`);
+expect(
+  cancelStates.includes('57014'),
+  `pg_sleep(5) under statement_timeout returned sqlstates ${JSON.stringify(cancelStates)} (want 57014)`,
+);
+expect(
+  cancelMs !== undefined && cancelMs < 2000,
+  `statement_timeout cancel took ${cancelMs}ms (want < 2000)`,
+);
+
+// ...and the session must survive the cancel.
+const r2 = rows.get('SELECT 2') || [];
+expect(r2.length === 1 && r2[0] === '2', `SELECT 2 after the cancel returned ${JSON.stringify(r2)}`);
 
 expect(exitCode === 0, `guest exit code ${exitCode} (want 0)`);
 

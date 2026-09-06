@@ -130,6 +130,27 @@ export class SabPipe {
     }
   }
 
+  // Consumer side, BOUNDED blocking readiness wait — the poll(2) half of the
+  // blocking read above. Returns true once at least one byte is readable or
+  // the producer closed, false when `timeoutMs` elapsed first. This is what
+  // the host's `poll_oneoff` lands on when the guest polls fd 0 with a
+  // deadline (a `WaitLatch`-style "data or timer, whichever first"); without
+  // it the only honest answers would be "spin" or "block forever".
+  // Blocks in Atomics.wait, so only an agent allowed to block may call it.
+  waitReadable(timeoutMs) {
+    const deadline = Date.now() + Math.max(0, timeoutMs);
+    for (;;) {
+      // Load SEQ FIRST: any state change after this point bumps it, so the
+      // Atomics.wait below cannot sleep through a write that lands in the
+      // window between the check and the wait (it returns 'not-equal').
+      const seq = Atomics.load(this.hdr, H_SEQ);
+      if (this.available() > 0 || this.closed) return true;
+      const rem = deadline - Date.now();
+      if (rem <= 0) return false;
+      Atomics.wait(this.hdr, H_SEQ, seq, rem);
+    }
+  }
+
   // Consumer side, NON-blocking: -1 = would block, 0 = EOF, >0 = byte count.
   readIntoNow(u8, maxLen) {
     const want = Math.min(maxLen, u8.length);

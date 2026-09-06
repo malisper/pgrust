@@ -6,6 +6,11 @@ use crate::{drain, elog_error_m, os_error, Latch, PgResult, WaitEvent, WaitEvent
 use types_core::PGINVALID_SOCKET;
 use types_storage::waiteventset::{WL_LATCH_SET, WL_POSTMASTER_DEATH};
 
+// Latch waits block in kevent() with the waiter's wake-pipe read end
+// registered, so the generic loop puts this thread's waiter into fd-park
+// mode for the duration of the block.
+pub(crate) const LATCH_FD_PARK: bool = true;
+
 pub(crate) struct BackendSet {
     kqueue_fd: i32,
     ret_events: Vec<libc::kevent>,

@@ -123,11 +123,17 @@ fn timer() -> &'static TimerShared {
         // gates on its first grant, so its deadline parks drive virtual
         // time and its fire-wakes are scheduled ops instead of External
         // (OS-timed) wakes. Native arm = the std re-export, byte-identical.
-        // wasm32: wasm32-wasip1 has no threads, so no timer can fire
-        // asynchronously (and no SIGALRM exists either) — armed timeouts
-        // are recorded but never fire. Known limitation of the boot
-        // increment: statement_timeout/lock_timeout are inert on wasm.
-        #[cfg(not(target_family = "wasm"))]
+        // wasm WITHOUT atomics (wasm32-wasip1): no threads, so no timer can
+        // fire asynchronously (and no SIGALRM exists either) — armed
+        // timeouts are recorded but never fire. Known limitation of the boot
+        // increment: statement_timeout/lock_timeout are inert there.
+        // wasm WITH atomics (wasm32-wasip1-threads) DOES have threads —
+        // wasi-libc pthreads over a shared memory, lowered to the host's
+        // `wasi` `thread-spawn` import — and its std Mutex/Condvar are the
+        // futex (`memory.atomic.wait32`) implementations, so this thread
+        // parks and the backend's SetLatch wake reaches it exactly as
+        // natively. Gate on the absence of threads, not on wasm.
+        #[cfg(not(all(target_family = "wasm", not(target_feature = "atomics"))))]
         pgsync::thread::Builder::new()
             .name("pg-timeout-timer".into())
             .spawn(move || timer_thread(shared))

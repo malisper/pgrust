@@ -27,9 +27,15 @@ mod backend;
 #[cfg(not(any(target_os = "linux", target_family = "wasm")))]
 #[path = "kqueue.rs"]
 mod backend;
-// wasm32: compile-clean stub; the functional WASI poll_oneoff backend is the
-// P5 boot increment (docs/design/dst-and-wasm.md §5).
-#[cfg(target_family = "wasm")]
+// wasm32 + atomics (wasm32-wasip1-threads): real threads over a shared
+// memory, so a latch CAN be set from another thread while this one blocks —
+// the wait is a waiter park, not a sleep.
+#[cfg(all(target_family = "wasm", target_feature = "atomics"))]
+#[path = "wasm_threads.rs"]
+mod backend;
+// wasm32 without atomics (wasm32-wasip1): one thread, no wake source at all;
+// compile-clean stub that blocks on time (docs/design/dst-and-wasm.md §5).
+#[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
 #[path = "wasm_stub.rs"]
 mod backend;
 
@@ -117,8 +123,10 @@ pub fn InitializeWaitEventSupport() -> PgResult<()> {
 
     // The waiter wake pipe replaces C's self-pipe (created eagerly here to
     // keep the per-backend fd accounting where it always was).
-    // wasm32: no pipe(2) on WASI; the wasm backend blocks on time alone
-    // (single thread — no cross-thread wakes exist to route).
+    // wasm32: no pipe(2) on WASI, on either wasm target. Without atomics
+    // there is nothing to route (one thread, no wake sources); with atomics
+    // the wasm_threads backend parks on the waiter itself, which needs no
+    // fd — see backend::LATCH_FD_PARK.
     #[cfg(not(target_family = "wasm"))]
     {
         if let Err(errno) = waiter::ensure_wake_pipe() {
@@ -161,8 +169,9 @@ fn wakeup_read_fd() -> i32 {
     waiter::wake_read_fd()
 }
 
-// wasm32: no wake pipe exists; latch events carry no fd (the wasm backend
-// blocks on time alone and the generic loop re-checks latch.is_set).
+// wasm32: no wake pipe exists on either wasm target; latch events carry no
+// fd. Without atomics the backend blocks on time alone; with atomics it
+// parks on the waiter and is woken through the handle in Latch.waker.
 #[cfg(target_family = "wasm")]
 fn wakeup_read_fd() -> i32 {
     PGINVALID_SOCKET
@@ -441,10 +450,13 @@ fn wait_loop(
                 // Poll once with zero timeout for non-latch events that fit.
                 cur_timeout = 0;
                 timeout = 0;
-            } else {
+            } else if backend::LATCH_FD_PARK {
                 // fd-park: unparks aimed at this thread now write the wake
                 // pipe registered in this set. A notification that already
                 // landed (wake-before-park) degrades the block to a poll.
+                // (Backends that have no wake pipe — wasm — block on the
+                // waiter INSIDE wait_block instead, so the waiter must stay
+                // in Idle mode here for park_core to accept it.)
                 fd_parked = waiter::begin_fd_park();
                 if !fd_parked {
                     cur_timeout = 0;

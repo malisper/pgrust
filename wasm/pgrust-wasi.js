@@ -27,6 +27,9 @@
 //   - poll_oneoff reports clock subscriptions as immediately fired (no
 //     blocking primitive in a COEP-less browser worker); --single never
 //     sleeps on the boot/battery path. sock_recv/sock_send return NOTSUP.
+//     (The cross-origin-isolated threads host OVERRIDES poll_oneoff with a
+//     real timed wait — wasm/threads-host.js — because a backend that must
+//     honour statement_timeout does sleep.)
 
 // WASI preview1 errno values.
 const E = {
@@ -43,6 +46,24 @@ const FDFLAG = { APPEND: 1 };
 
 class GuestExit extends Error {
   constructor(code) { super(`guest exited with code ${code}`); this.code = code; }
+}
+
+// CLOCK_MONOTONIC in nanoseconds. `performance.now()` alone is NOT usable on
+// the threads target: it is relative to the calling agent's `timeOrigin`, and
+// every Worker in a browser gets its OWN time origin — so the backend thread's
+// deadline and the pg-timeout-timer thread's "is it expired yet" reading would
+// be minutes apart, in different directions, on different workers. Anchoring
+// with `timeOrigin` puts every agent on the one Unix-epoch-based timeline
+// while keeping the sub-millisecond resolution (`performance.now()` is
+// monotonic within an agent, and `timeOrigin` is a constant). Node happens to
+// share one process-wide `timeOrigin` across worker_threads, so this is a
+// no-op there.
+export function monotonicNs() {
+  if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
+    const origin = typeof performance.timeOrigin === 'number' ? performance.timeOrigin : 0;
+    return BigInt(Math.round((origin + performance.now()) * 1e6));
+  }
+  return BigInt(Date.now()) * 1000000n;
 }
 
 // ---------------------------------------------------------------------------
@@ -331,14 +352,7 @@ export function makeWasi({ image, manifest, vfs: existingVfs, stdinBytes, stdinS
       return E.SUCCESS;
     },
     clock_time_get(id, _precision, outPtr) {
-      let ns;
-      if (id === 1) {
-        const now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
-        ns = BigInt(Math.round(now * 1e6));
-      } else {
-        ns = BigInt(Date.now()) * 1000000n;
-      }
-      dv().setBigUint64(outPtr, ns, true);
+      dv().setBigUint64(outPtr, id === 1 ? monotonicNs() : BigInt(Date.now()) * 1000000n, true);
       return E.SUCCESS;
     },
     random_get(ptr, len) {

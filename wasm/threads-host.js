@@ -34,7 +34,10 @@
 // parks the WHOLE JS thread the instance runs on. So the spawn handler may not
 // await anything — its worker must already exist and already be instantiated.
 // Hence the prewarmed pool below: workers are created and instantiated while
-// the guest is still cold, and thread-spawn is just a postMessage.
+// the guest is still cold, and thread-spawn is a bare shared-memory publish
+// (SpawnDesk) that any instance — including an already-spawned thread — can
+// perform, because the second spawner on this target is the session thread
+// creating the pg-timeout-timer thread while the process instance is parked.
 //
 // KNOWN LIMIT, checkpoint (a): every worker builds its OWN Vfs from its own
 // copy of the packed image, so the process instance and the session instance
@@ -45,7 +48,7 @@
 // VFS bytes themselves in shared memory) is checkpoint (b)+ work, not this
 // spike's.
 
-import { makeWasi, GuestExit } from './pgrust-wasi.js';
+import { makeWasi, GuestExit, monotonicNs } from './pgrust-wasi.js';
 import { SabPipe } from './sab-pipe.js';
 
 export const PAGE_BYTES = 65536;
@@ -87,6 +90,131 @@ export function inspectImports(wasmModule) {
 
 // wasi-libc turns a negative thread-spawn result into a failed pthread_create.
 const EAGAIN = 6;
+
+// ---------------------------------------------------------------------------
+// SpawnDesk — the pool, addressed through shared memory instead of ports.
+//
+// Checkpoint (a) routed `thread-spawn` through the process worker's
+// `postMessage`, which only works for the ONE spawn the process instance
+// makes. Two things break that now:
+//
+//   * a SPAWNED thread must be able to spawn. The pg-timeout-timer thread is
+//     created lazily by whichever backend first arms a timeout, and under
+//     `--stdio-wire-threaded` that backend is the session thread, not the
+//     process instance;
+//   * the process worker cannot broker it. From the moment the guest joins,
+//     that JS thread is parked in a futex for the whole session and will not
+//     turn its event loop again — a spawn request relayed to it would be
+//     answered after the fact, if at all. And `thread-spawn` may not await
+//     (the caller is microseconds from parking in `pthread_join`).
+//
+// So the pool lives in a SharedArrayBuffer every instance holds. A spawner
+// CASes a slot from IDLE to CLAIMED, allocates a tid with Atomics.add, writes
+// the start_arg, publishes START and notifies; the slot's worker is parked in
+// `Atomics.wait` on that same word and runs `wasi_thread_start`. No awaits,
+// no ports, and it works identically from any agent.
+//
+// Layout (Int32Array): header [0]=nextTid, [1]=poolSize; then one 4-slot
+// record per pool slot at HDR + slot*SLOT: [state, tid, startArg, spare].
+const DESK_HDR = 4;
+const DESK_SLOT = 4;
+const D_NEXT_TID = 0;
+const D_POOL_SIZE = 1;
+const S_STATE = 0;
+const S_TID = 1;
+const S_ARG = 2;
+// EMPTY: the slot's worker has not finished instantiating yet.
+const SLOT_EMPTY = 0;
+const SLOT_IDLE = 1;
+const SLOT_CLAIMED = 2;
+const SLOT_START = 3;
+const SLOT_RUNNING = 4;
+
+export class SpawnDesk {
+  static create(poolSize) {
+    const sab = new SharedArrayBuffer((DESK_HDR + poolSize * DESK_SLOT) * 4);
+    const desk = new SpawnDesk(sab);
+    Atomics.store(desk.a, D_POOL_SIZE, poolSize);
+    return desk;
+  }
+
+  static from(desc) {
+    return new SpawnDesk(desc.sab);
+  }
+
+  constructor(sab) {
+    this.sab = sab;
+    this.a = new Int32Array(sab);
+  }
+
+  descriptor() {
+    return { sab: this.sab };
+  }
+
+  get poolSize() {
+    return Atomics.load(this.a, D_POOL_SIZE);
+  }
+
+  _base(slot) {
+    return DESK_HDR + slot * DESK_SLOT;
+  }
+
+  // Worker side: this slot is instantiated and about to park on its state
+  // word. Called once, before the command loop.
+  markIdle(slot) {
+    const b = this._base(slot);
+    Atomics.store(this.a, b + S_STATE, SLOT_IDLE);
+    Atomics.notify(this.a, b + S_STATE);
+  }
+
+  // Worker side: block until a spawner publishes START on this slot; returns
+  // { tid, startArg }. Blocks in Atomics.wait, so worker agents only.
+  awaitCommand(slot) {
+    const b = this._base(slot);
+    for (;;) {
+      const state = Atomics.load(this.a, b + S_STATE);
+      if (state === SLOT_START) {
+        const cmd = {
+          tid: Atomics.load(this.a, b + S_TID),
+          startArg: Atomics.load(this.a, b + S_ARG),
+        };
+        Atomics.store(this.a, b + S_STATE, SLOT_RUNNING);
+        return cmd;
+      }
+      // Wait on the value we just observed: a publish that lands in this
+      // window makes the wait return 'not-equal' instead of sleeping.
+      Atomics.wait(this.a, b + S_STATE, state);
+    }
+  }
+
+  // Spawner side: claim a free slot for `startArg`. Returns the positive tid,
+  // or -1 when the pool is exhausted (the caller answers -EAGAIN, which is
+  // what wasi-libc turns into a failed pthread_create). Synchronous: no
+  // await, no worker creation — a spawn handler may do neither.
+  claim(startArg) {
+    const n = this.poolSize;
+    for (let slot = 0; slot < n; slot++) {
+      const b = this._base(slot);
+      if (Atomics.compareExchange(this.a, b + S_STATE, SLOT_IDLE, SLOT_CLAIMED) !== SLOT_IDLE) {
+        continue;
+      }
+      const tid = Atomics.add(this.a, D_NEXT_TID, 1) + 1;
+      Atomics.store(this.a, b + S_TID, tid);
+      Atomics.store(this.a, b + S_ARG, startArg);
+      Atomics.store(this.a, b + S_STATE, SLOT_START);
+      Atomics.notify(this.a, b + S_STATE);
+      return { tid, slot };
+    }
+    return { tid: -1, slot: -1 };
+  }
+
+  // Worker side: `wasi_thread_start` returned, so this instance is reusable.
+  // (A thread that never returns — the timer thread — holds its slot for the
+  // life of the process, which is exactly a real pthread's behaviour.)
+  markDone(slot) {
+    this.markIdle(slot);
+  }
+}
 
 // The import object + WASI state for ONE instance (the process instance or one
 // spawned thread's instance).
@@ -193,28 +321,94 @@ export function makeThreadsHost({
     return 0;
   };
 
-  // The emulated-noblock probe (fdnb::poll_ready -> poll(2) -> poll_oneoff)
-  // must answer honestly for fd 0, or a "non-blocking" read would park in
-  // Atomics.wait. Everything else keeps the stock always-ready answer, which
-  // is what the single-threaded host does too.
+  // poll_oneoff, for real. Two callers matter on this target:
+  //   * the emulated-noblock probe (fdnb::poll_ready -> poll(2)) — must
+  //     answer honestly for fd 0, or a "non-blocking" read would park in
+  //     Atomics.wait;
+  //   * every timed sleep std lowers to a clock subscription
+  //     (std::thread::sleep, nanosleep) — the single-threaded host answers
+  //     those "already fired", which turns a sleep into a busy spin. A
+  //     backend that must honour statement_timeout while another thread runs
+  //     the timer cannot spin: it has to give the CPU up.
+  //
+  // Subscription layout (48 bytes): userdata u64 @0, tag u8 @8; clock arm =
+  // id u32 @16, timeout u64 ns @24, precision u64 @32, flags u16 @40 (bit 0
+  // = SUBSCRIPTION_CLOCK_ABSTIME); fd arm = fd u32 @16. Event layout (32
+  // bytes): userdata u64 @0, errno u16 @8, type u8 @10, nbytes u64 @16,
+  // flags u16 @24.
+  //
+  // Every fd OTHER than 0 keeps the stock always-ready answer (the guest
+  // only ever polls its stdio here, and fd 1/2 writes never block).
+  const parkWord = new Int32Array(new SharedArrayBuffer(4));
   wasi.poll_oneoff = (inPtr, outPtr, nsubs, neventsPtr) => {
     const view = dv();
-    let fired = 0;
+    const subs = [];
+    let nearestMs = null; // ms from now to the earliest clock deadline
     for (let i = 0; i < nsubs; i++) {
-      const sub = inPtr + i * 48;
-      const userdataLo = view.getUint32(sub, true);
-      const userdataHi = view.getUint32(sub + 4, true);
-      const tag = view.getUint8(sub + 8);
-      if (tag === 1 /* fd_read */) {
-        const subFd = view.getUint32(sub + 16, true);
-        if (subFd === 0 && stdin.available() === 0 && !stdin.closed) continue;
+      const p = inPtr + i * 48;
+      const s = {
+        lo: view.getUint32(p, true),
+        hi: view.getUint32(p + 4, true),
+        tag: view.getUint8(p + 8),
+      };
+      if (s.tag === 0 /* clock */) {
+        const clockId = view.getUint32(p + 16, true);
+        const timeoutNs = view.getBigUint64(p + 24, true);
+        const abstime = (view.getUint16(p + 40, true) & 1) !== 0;
+        if (abstime) {
+          const nowNs = clockId === 1 ? monotonicNs() : BigInt(Date.now()) * 1000000n;
+          s.deadlineMs = Number(timeoutNs - nowNs) / 1e6;
+        } else {
+          s.deadlineMs = Number(timeoutNs) / 1e6;
+        }
+        if (nearestMs === null || s.deadlineMs < nearestMs) nearestMs = s.deadlineMs;
+      } else {
+        s.fd = view.getUint32(p + 16, true);
       }
+      subs.push(s);
+    }
+
+    // A subscription is ready now if it is a non-fd-0 fd (always), fd 0 with
+    // data or at EOF, or a clock whose deadline has already passed.
+    const ready = (s, elapsedMs) =>
+      s.tag === 0
+        ? s.deadlineMs <= elapsedMs
+        : s.fd !== 0 || stdin.available() > 0 || stdin.closed;
+
+    if (nsubs === 0) {
+      view.setUint32(neventsPtr, 0, true);
+      return 0;
+    }
+
+    const start = Date.now();
+    let elapsed = 0;
+    if (!subs.some((s) => ready(s, 0))) {
+      // Nothing is ready: block. Bounded by the nearest clock deadline, or
+      // forever-ish when the guest asked for an untimed wait (clamped well
+      // under the 2^31 ms Atomics.wait ceiling; the guest re-polls).
+      const budget = nearestMs === null ? 60000 : Math.min(nearestMs, 60000);
+      const fdWait = subs.some((s) => s.tag === 1 && s.fd === 0);
+      if (budget > 0) {
+        if (fdWait) stdin.waitReadable(budget);
+        else Atomics.wait(parkWord, 0, 0, budget);
+      }
+      elapsed = Date.now() - start;
+      // We slept the whole budget unless an fd woke us (in which case that
+      // fd is ready below). Date.now()'s granularity must not be allowed to
+      // report "0 events" on a pure sleep — the caller would re-poll for a
+      // deadline it has already reached, forever.
+      if (budget > 0 && !subs.some((s) => ready(s, elapsed))) elapsed = budget;
+    }
+
+    let fired = 0;
+    for (const s of subs) {
+      if (!ready(s, elapsed)) continue;
       const evt = outPtr + fired * 32;
       fired++;
-      view.setUint32(evt, userdataLo, true);
-      view.setUint32(evt + 4, userdataHi, true);
+      view.setUint32(evt, s.lo, true);
+      view.setUint32(evt + 4, s.hi, true);
       view.setUint16(evt + 8, 0, true);
-      view.setUint8(evt + 10, tag);
+      view.setUint8(evt + 10, s.tag);
       view.setBigUint64(evt + 16, 0n, true);
       view.setUint16(evt + 24, 0, true);
     }
@@ -287,7 +481,7 @@ export function makeThreadsHost({
     if (info.threadSpawn && i.module === info.threadSpawn.module && i.name === info.threadSpawn.name) {
       put(i.module, i.name, (startArg) => {
         if (!spawn) {
-          console.error(`[${label}] thread-spawn refused (nested spawn is out of scope)`);
+          console.error(`[${label}] thread-spawn refused (no spawn desk on this instance)`);
           return -EAGAIN;
         }
         return spawn(startArg | 0);
@@ -369,28 +563,30 @@ export function makeSpawner({
   base,
   onEvent,
   relayPorts = [],
+  poolSize = 1,
   trace = 0,
 }) {
   const url = threadWorkerUrl(base);
-  const idle = [];
-  const byTid = new Map();
+  const workers = [];
   const spawned = [];
-  let nextTid = 1;
+  // Created here (the process worker knows the pool size) and handed to every
+  // pool worker, so each of them can spawn too — see SpawnDesk above.
+  const desk = SpawnDesk.create(poolSize);
 
   function newWorker(slot) {
     const w = makeWorker(url, { name: `wasi-thread-slot-${slot}` });
-    const rec = { worker: w, ready: null, tid: null };
+    const rec = { worker: w, ready: null, slot };
     rec.ready = new Promise((resolve, reject) => {
       onWorkerMessage(w, (m) => {
         if (m && m.type === 'ready') {
           resolve(rec);
           return;
         }
-        onEvent(Object.assign({ tid: rec.tid }, m));
+        onEvent(Object.assign({ slot }, m));
       });
       onWorkerError(w, (e) => {
         reject(e);
-        onEvent({ type: 'error', tid: rec.tid, message: String(e && e.message ? e.message : e) });
+        onEvent({ type: 'error', slot, message: String(e && e.message ? e.message : e) });
       });
     });
     // Each spawned thread gets its own VFS, hence its own copy of the image
@@ -409,6 +605,8 @@ export function makeSpawner({
       env,
       relay,
       trace,
+      desk: desk.descriptor(),
+      slot,
     };
     w.postMessage(payload, relay ? [imageCopy, relay] : [imageCopy]);
     return rec;
@@ -417,27 +615,29 @@ export function makeSpawner({
   async function prewarm(n = 1) {
     const recs = [];
     for (let i = 0; i < n; i++) recs.push(newWorker(i));
-    for (const r of recs) idle.push(await r.ready);
+    for (const r of recs) workers.push(await r.ready);
   }
 
   // Synchronous by construction — no await, no worker creation.
   function spawn(startArg) {
-    const rec = idle.shift();
-    if (!rec) {
-      onEvent({ type: 'error', message: 'thread-spawn: prewarm pool exhausted' });
+    const { tid, slot } = desk.claim(startArg);
+    if (tid < 0) {
+      onEvent({
+        type: 'spawn-refused',
+        from: 'process',
+        startArg,
+        poolSize: desk.poolSize,
+        errno: EAGAIN,
+      });
       return -EAGAIN;
     }
-    const tid = nextTid++;
-    rec.tid = tid;
-    byTid.set(tid, rec);
     spawned.push(tid);
-    onEvent({ type: 'spawn', tid, startArg });
-    rec.worker.postMessage({ role: 'thread-start', tid, startArg });
+    onEvent({ type: 'spawn', from: 'process', tid, slot, startArg });
     return tid;
   }
 
   function terminateAll() {
-    for (const rec of [...idle, ...byTid.values()]) {
+    for (const rec of workers) {
       try {
         rec.worker.terminate();
       } catch {
@@ -446,7 +646,7 @@ export function makeSpawner({
     }
   }
 
-  return { prewarm, spawn, spawned, byTid, terminateAll };
+  return { prewarm, spawn, spawned, desk, terminateAll };
 }
 
-export { SabPipe, GuestExit };
+export { SabPipe, GuestExit, EAGAIN };

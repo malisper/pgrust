@@ -29,7 +29,14 @@ import {
   onPortMessage,
   threadWorkerUrl,
 } from './threads-host.js';
-import { WireReader, encodeStartup, encodeQuery, TERMINATE, canonMessage } from './wire.js';
+import {
+  WireReader,
+  encodeStartup,
+  encodeQuery,
+  TERMINATE,
+  canonMessage,
+  parseMessage,
+} from './wire.js';
 
 const params = new URLSearchParams(location.search);
 const wasmUrl = params.get('wasm') || 'assets/postgres-threads.wasm';
@@ -39,7 +46,12 @@ const vfsPrefix = params.get('vfs') || 'assets/vfs';
 // own thread and `wasi` `thread-spawn` is never called. It isolates "does this
 // build run in this engine at all" from "does the spawned thread work".
 const dispatch = params.get('dispatch') || 'stdio-wire-threaded';
-const POOL_SIZE = 2;
+// ?pool=N sizes the prewarmed wasi-thread pool. More than one thread is asked
+// for now: the session thread (threaded dispatch only) AND the
+// pg-timeout-timer thread statement_timeout needs. thread-spawn cannot create
+// a worker on demand (it may not await), so an undersized pool is a hard
+// -EAGAIN; every refusal is logged and fails the run.
+const POOL_SIZE = Number(params.get('pool') || 4);
 // ?trace=N keeps the last N WASI calls of each instance and dumps them with any
 // guest abort — the only way to attribute a bare `RuntimeError: unreachable`.
 const TRACE = Number(params.get('trace') || 0);
@@ -131,6 +143,7 @@ async function main() {
   const stdoutPipe = SabPipe.create(1 << 22);
 
   const spawnedTids = [];
+  const spawnRefusals = [];
   let exitCode = null;
   let exitFrom = null;
   let poolReady;
@@ -153,7 +166,11 @@ async function main() {
         break;
       case 'spawn':
         spawnedTids.push(m.tid);
-        note(`page: wasi thread-spawn(start_arg=${m.startArg}) -> tid ${m.tid}`);
+        note(`page: wasi thread-spawn(start_arg=${m.startArg}) by ${m.from} -> tid ${m.tid} (slot ${m.slot})`);
+        break;
+      case 'spawn-refused':
+        spawnRefusals.push(m);
+        note(`page: wasi thread-spawn(start_arg=${m.startArg}) by ${m.from} -> -EAGAIN (pool of ${m.poolSize} exhausted)`);
         break;
       case 'thread-entered':
         note(`page: wasi_thread_start(tid=${m.tid}, start_arg=${m.startArg}) entered`);
@@ -280,18 +297,47 @@ async function main() {
   if (!sawKey) failures.push('no BackendKeyData in handshake');
 
   const rows = new Map();
-  for (const sql of STATEMENTS) {
+  const timings = new Map();
+  const sqlstates = new Map();
+
+  // One simple-query round trip, timed from the Q write to ReadyForQuery —
+  // the guest's wall time as seen from outside, with no clock of the guest's
+  // involved. Same shape and same assertions as run-node-wire-threads.mjs.
+  async function runQuery(sql, { expectError = false } = {}) {
     note(`>>> Q ${sql}`);
+    const t0 = Date.now();
     send(encodeQuery(sql));
     const msgs = await untilReadyForQuery(sql);
+    const ms = Date.now() - t0;
     const got = [];
+    const states = [];
     for (const { t, body } of msgs) {
       note(canonMessage(t, body));
       if (t === 'D') got.push(canonMessage(t, body).slice(2));
-      if (t === 'E') failures.push(`error running ${sql}`);
+      if (t === 'E') {
+        states.push(parseMessage(t, body).fields.C || '?');
+        if (!expectError) failures.push(`error running ${sql}`);
+      }
     }
     rows.set(sql, got);
+    timings.set(sql, ms);
+    sqlstates.set(sql, states);
+    note(`--- ${sql} took ${ms}ms${states.length ? ` sqlstate=${states.join(',')}` : ''}`);
   }
+
+  for (const sql of STATEMENTS) {
+    await runQuery(sql);
+  }
+
+  // ---- timed waits and timeouts -------------------------------------------
+  // Both exercise the pg-timeout-timer thread (a real wasi thread now) and
+  // the timed latch park pg_sleep loops on: the first proves the park sleeps
+  // instead of spinning, the second that ANOTHER thread can interrupt it.
+  await runQuery('SELECT pg_sleep(0.2)');
+  await runQuery("SET statement_timeout = '300ms'");
+  await runQuery('SELECT pg_sleep(5)', { expectError: true });
+  await runQuery('RESET statement_timeout');
+  await runQuery('SELECT 2');
 
   note('>>> X');
   send(TERMINATE);
@@ -304,7 +350,8 @@ async function main() {
   note(`=== exit ${exitCode} (from ${exitFrom})`);
 
   const expect = (cond, msg) => { if (!cond) failures.push(msg); };
-  note(`page: spawned thread ids: [${spawnedTids.join(', ')}]`);
+  note(`page: spawned thread ids: [${spawnedTids.join(', ')}] (pool ${POOL_SIZE}, ${spawnRefusals.length} EAGAIN refusals)`);
+  expect(spawnRefusals.length === 0, `${spawnRefusals.length} thread-spawn refusals (pool of ${POOL_SIZE} too small)`);
   // The control arm (dispatch stdio-wire) runs the session on the wasm main
   // thread and never spawns; it passes on the wire results alone.
   if (dispatch === 'stdio-wire-threaded') {
@@ -317,6 +364,30 @@ async function main() {
   expect(rcnt.length === 1 && Number(rcnt[0]) > 0, `pg_class count returned ${JSON.stringify(rcnt)}`);
   const rsum = rows.get('SELECT sum(a) FROM spike_t') || [];
   expect(rsum.length === 1 && rsum[0] === '500500', `sum(a) returned ${JSON.stringify(rsum)}`);
+
+  // pg_sleep(0.2) must actually sleep: a poll_oneoff answering "already
+  // fired", or a latch park returning at once, would come back in ~0ms.
+  const sleepMs = timings.get('SELECT pg_sleep(0.2)');
+  note(`page: timing pg_sleep(0.2) round trip ${sleepMs}ms`);
+  expect(sleepMs !== undefined && sleepMs >= 190, `pg_sleep(0.2) took ${sleepMs}ms (want >= 190)`);
+
+  // statement_timeout must cancel a running pg_sleep(5) from the timer thread.
+  const cancelMs = timings.get('SELECT pg_sleep(5)');
+  const cancelStates = sqlstates.get('SELECT pg_sleep(5)') || [];
+  note(`page: timing pg_sleep(5) under statement_timeout=300ms cancelled after ${cancelMs}ms, sqlstate ${cancelStates.join(',') || 'NONE'}`);
+  expect(
+    cancelStates.includes('57014'),
+    `pg_sleep(5) under statement_timeout returned sqlstates ${JSON.stringify(cancelStates)} (want 57014)`,
+  );
+  expect(
+    cancelMs !== undefined && cancelMs < 2000,
+    `statement_timeout cancel took ${cancelMs}ms (want < 2000)`,
+  );
+
+  // ...and the session must survive the cancel.
+  const r2 = rows.get('SELECT 2') || [];
+  expect(r2.length === 1 && r2[0] === '2', `SELECT 2 after the cancel returned ${JSON.stringify(r2)}`);
+
   expect(exitCode === 0, `guest exit code ${exitCode} (want 0)`);
 
   try { worker.terminate(); } catch { /* already gone */ }

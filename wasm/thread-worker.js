@@ -8,11 +8,15 @@
 //                           then runs `_start()`. This is where `wasi`
 //                           `thread-spawn` is answered.
 //   role 'thread-prewarm' — created by the process worker BEFORE the guest is
-//                           started. Instantiates over the same shared memory
-//                           and answers `ready`; then parks on its message
-//                           queue.
-//   role 'thread-start'   — the actual spawn: call
-//                           `wasi_thread_start(tid, start_arg)`.
+//                           started. Instantiates over the same shared memory,
+//                           answers `ready`, and then parks in `Atomics.wait`
+//                           on its SpawnDesk slot — NOT on its message queue:
+//                           the spawn that starts it may come from a thread
+//                           that cannot await (see threads-host.js SpawnDesk),
+//                           and every start command therefore arrives through
+//                           shared memory. Each `wasi_thread_start(tid,
+//                           start_arg)` runs to completion and the slot goes
+//                           back to idle.
 //
 // Why the process instance MUST be instantiated before any pool worker: with
 // --shared-memory, wasm-ld's start function (__wasm_init_memory) runs in every
@@ -37,7 +41,7 @@
 // Node entry is thread-worker.mjs (a one-line re-export of this file) so
 // Node's module resolution sees ESM without relying on syntax detection.
 
-import { makeThreadsHost, makeSpawner, GuestExit, IS_NODE } from './threads-host.js';
+import { makeThreadsHost, makeSpawner, SpawnDesk, GuestExit, IS_NODE, EAGAIN } from './threads-host.js';
 import { SabPipe } from './sab-pipe.js';
 
 const nodeWt = IS_NODE ? await import('node:worker_threads') : null;
@@ -82,6 +86,7 @@ async function runProcess(msg) {
     env: msg.env,
     base: import.meta.url,
     relayPorts: msg.relayPorts || [],
+    poolSize: msg.poolSize || 1,
     trace: msg.trace || 0,
     // Spawn bookkeeping the PROCESS instance itself observes (it is not yet
     // parked when it posts these); everything the spawned thread observes
@@ -150,6 +155,8 @@ async function prewarmThread(msg) {
   }
   const stdin = SabPipe.from(msg.stdin);
   const stdout = SabPipe.from(msg.stdout);
+  const desk = SpawnDesk.from(msg.desk);
+  const slot = msg.slot | 0;
   const host = makeThreadsHost({
     wasmModule: msg.module,
     memory: msg.memory,
@@ -160,9 +167,26 @@ async function prewarmThread(msg) {
     onStderr: (bytes) => post({ type: 'stderr', from: 'thread', bytes }),
     argv: msg.argv,
     env: msg.env,
-    // Nested spawn (a thread spawning a thread) is out of scope for
-    // checkpoint (a): answered as EAGAIN, loudly, rather than silently.
-    spawn: null,
+    // Nested spawn: a thread spawning a thread is the NORMAL case now — the
+    // pg-timeout-timer thread is created by whichever backend arms the first
+    // timeout, which under --stdio-wire-threaded is the session thread. The
+    // desk makes that a bare shared-memory publish, so this handler still
+    // awaits nothing (threads-host.js SpawnDesk).
+    spawn: (startArg) => {
+      const { tid, slot: target } = desk.claim(startArg);
+      if (tid < 0) {
+        post({
+          type: 'spawn-refused',
+          from: 'thread',
+          startArg,
+          poolSize: desk.poolSize,
+          errno: EAGAIN,
+        });
+        return -EAGAIN;
+      }
+      post({ type: 'spawn', from: 'thread', tid, slot: target, startArg });
+      return tid;
+    },
     label: 'thread',
     trace: msg.trace || 0,
   });
@@ -176,39 +200,49 @@ async function prewarmThread(msg) {
     port.postMessage({ type: 'ready' });
     return;
   }
-  prewarmed = { instance, host, stdout };
+  prewarmed = { instance, host, stdout, desk, slot };
   port.postMessage({ type: 'ready' }); // to the spawner, not the driver
+  // From here this worker's event loop is BLOCKED for good: every start
+  // command arrives through shared memory instead (see the header).
+  threadCommandLoop();
 }
 
-function startThread(msg) {
-  if (!prewarmed) {
-    post({ type: 'error', from: 'thread', message: 'thread-start before prewarm' });
-    return;
-  }
+// One `wasi_thread_start` run. Returns false once the process is over.
+function runThread(tid, startArg) {
   const { instance } = prewarmed;
-  post({ type: 'thread-entered', tid: msg.tid, startArg: msg.startArg });
+  post({ type: 'thread-entered', tid, startArg });
   try {
-    instance.exports.wasi_thread_start(msg.tid, msg.startArg);
-    post({
-      type: 'thread-done',
-      tid: msg.tid,
-      trace: prewarmed.host.traceHead.slice(),
-    });
+    instance.exports.wasi_thread_start(tid, startArg);
+    post({ type: 'thread-done', tid, trace: prewarmed.host.traceHead.slice() });
+    return true;
   } catch (e) {
     if (e instanceof GuestExit) {
-      // proc_exit from the spawned thread: the process is over, and nobody is
+      // proc_exit from a spawned thread: the process is over, and nobody is
       // left to join us — announce it so the driver does not hang.
       prewarmed.stdout.close();
-      post({ type: 'exit', from: 'thread', tid: msg.tid, code: e.code });
-      return;
+      post({ type: 'exit', from: 'thread', tid, code: e.code });
+      return false;
     }
     post({
       type: 'error',
       from: 'thread',
-      tid: msg.tid,
+      tid,
       message: String(e && e.stack ? e.stack : e),
       trace: prewarmed.host.traceHead.slice(),
     });
+    return false;
+  }
+}
+
+function threadCommandLoop() {
+  const { desk, slot } = prewarmed;
+  desk.markIdle(slot);
+  for (;;) {
+    const cmd = desk.awaitCommand(slot);
+    if (!runThread(cmd.tid, cmd.startArg)) return;
+    // The guest thread returned normally (pthread exit): this instance is
+    // reusable, exactly as a real pool thread would be.
+    desk.markDone(slot);
   }
 }
 
@@ -222,8 +256,6 @@ onMessage((msg) => {
     prewarmThread(msg).catch((e) =>
       post({ type: 'error', from: 'thread', message: String(e && e.stack ? e.stack : e) }),
     );
-  } else if (msg.role === 'thread-start') {
-    startThread(msg);
   } else {
     log(`unknown role ${msg.role}`);
   }

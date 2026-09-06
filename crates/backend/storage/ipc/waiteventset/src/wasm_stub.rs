@@ -16,6 +16,13 @@
 use crate::{wes_error, Latch, PgResult, WaitEvent, WaitEventSetData};
 use types_core::PGINVALID_SOCKET;
 
+// No wake pipe exists here either, but this target has ONE thread: nothing
+// can unpark this waiter while it sleeps, so the fd-park mode the generic
+// loop enters is pure bookkeeping (waiter::begin_fd_park's wasm arm) and is
+// kept as-is. The atomics target is the one that must stay out of fd-park
+// mode — see wasm_threads.rs.
+pub(crate) const LATCH_FD_PARK: bool = true;
+
 pub(crate) struct BackendSet {}
 
 impl BackendSet {

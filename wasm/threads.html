@@ -17,6 +17,10 @@
             wasm/assets/postgres-threads.wasm
       open http://localhost:8081/threads.html
 
+  Query string: ?dispatch=stdio-wire|stdio-wire-threaded (default threaded),
+  ?pool=N (prewarmed wasi-thread pool, default 4 — the guest wants a session
+  thread AND a pg-timeout-timer thread), ?trace=N, ?wasm=, ?vfs=.
+
   Every step is console.log'd; the last line is
   `VERDICT: threads-browser PASS` or `VERDICT: threads-browser FAIL <reason>`.
 -->
