@@ -11,7 +11,7 @@
 use ::mcx::Mcx;
 use ::stringinfo::StringInfo;
 use ::types_core::{XLogRecPtr, TEXTOID};
-use ::types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
+use ::types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_OUT_OF_MEMORY};
 use ::types_fmgr::{
     varlena_result, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction,
 };
@@ -78,7 +78,18 @@ fn InitXLogReaderState<'m>(
         return Err(param_err(format!("could not read WAL at LSN {}", lsn_fmt(lsn))));
     }
 
-    let mut reader = XLogReaderState::allocate(mcx, transam_xlog::wal_segment_size())?;
+    // pg_walinspect.c:114-125: XLogReaderAllocate is NO_OOM (a NULL return
+    // for any of its buffers) and the extension reports the failure itself.
+    let mut reader = match XLogReaderState::allocate(mcx, transam_xlog::wal_segment_size()) {
+        Ok(reader) => reader,
+        Err(_) => {
+            return Err(Box::new(
+                PgError::error("out of memory")
+                    .with_sqlstate(ERRCODE_OUT_OF_MEMORY)
+                    .with_detail("Failed while allocating a WAL reading processor."),
+            ));
+        }
+    };
     let mut routine = LocalPageRead { wait_for_wal: false };
 
     let first_valid_record = reader.XLogFindNextRecord(&mut routine, lsn)?;
@@ -638,4 +649,31 @@ pub fn init_seams() {
         // pg_walinspect.c's PG_MODULE_MAGIC_EXT has no _PG_init.
         pg_init: None,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ::mcx::MemoryContext;
+
+    /// pg_walinspect.c:120-125 — when the WAL reader cannot be allocated,
+    /// InitXLogReaderState raises ERRCODE_OUT_OF_MEMORY "out of memory" with
+    /// DETAIL "Failed while allocating a WAL reading processor." (the reader
+    /// is allocated NO_OOM; the extension owns the report). A context whose
+    /// limit is below the reader's first buffer makes the allocation fail
+    /// before any WAL is touched.
+    #[test]
+    fn reader_allocation_failure_reports_walinspect_detail() {
+        let ctx = MemoryContext::new("walinspect-test").with_limit(64);
+        let err = match InitXLogReaderState(ctx.mcx(), XLOG_BLCKSZ as u64) {
+            Err(e) => e,
+            Ok(_) => panic!("64-byte limit must reject the WAL reader allocation"),
+        };
+        assert_eq!(err.sqlstate, ERRCODE_OUT_OF_MEMORY);
+        assert_eq!(err.message, "out of memory");
+        assert_eq!(
+            err.detail.as_deref(),
+            Some("Failed while allocating a WAL reading processor.")
+        );
+    }
 }
