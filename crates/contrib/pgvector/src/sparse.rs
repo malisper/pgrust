@@ -42,8 +42,12 @@ impl<'a> SparseVecView<'a> {
             return Err(PgError::error("corrupt sparsevec datum").into());
         }
         let v = SparseVecView { data };
-        if v.nnz() > SPARSEVEC_MAX_NNZ as usize || data.len() < SPARSEVEC_PAYLOAD_HDR + v.nnz() * 8
-        {
+        // Structural check only. SPARSEVEC_MAX_NNZ is an *input* limit in C
+        // (sparsevec_in's element cap and sparsevec_recv's CheckNnz); the
+        // casts (array_to_sparsevec, vector_to_sparsevec, ...) produce and C
+        // reads back datums with any nnz <= dim, so it must not be enforced
+        // on stored values.
+        if data.len() < SPARSEVEC_PAYLOAD_HDR + v.nnz() * 8 {
             return Err(PgError::error("corrupt sparsevec datum").into());
         }
         Ok(v)
@@ -773,6 +777,29 @@ mod tests {
             check_index_step(Some(2), 1, 5).unwrap_err().message(),
             "sparsevec indices must be in ascending order"
         );
+    }
+
+    #[test]
+    fn from_payload_accepts_nnz_above_the_input_limit() {
+        // array_to_sparsevec/vector_to_sparsevec may legitimately produce
+        // more than SPARSEVEC_MAX_NNZ non-zeros (C only caps the text and
+        // binary input paths); reading such a datum back must work.
+        let nnz = SPARSEVEC_MAX_NNZ as usize + 1;
+        let mut img = Vec::with_capacity(SPARSEVEC_PAYLOAD_HDR + nnz * 8);
+        img.extend_from_slice(&(nnz as i32).to_ne_bytes());
+        img.extend_from_slice(&(nnz as i32).to_ne_bytes());
+        img.extend_from_slice(&0i32.to_ne_bytes());
+        for i in 0..nnz {
+            img.extend_from_slice(&(i as i32).to_ne_bytes());
+        }
+        for _ in 0..nnz {
+            img.extend_from_slice(&1.0f32.to_ne_bytes());
+        }
+        let v = SparseVecView::from_payload(&img).expect("readable");
+        assert_eq!(v.nnz(), nnz);
+        assert_eq!(v.index(nnz - 1), (nnz - 1) as i32);
+        // A truncated payload is still rejected.
+        assert!(SparseVecView::from_payload(&img[..img.len() - 1]).is_err());
     }
 
     #[test]
