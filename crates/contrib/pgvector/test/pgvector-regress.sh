@@ -21,17 +21,30 @@ fi
 # Tests whose features pgrust does not ship (bit opclass, ivfflat).
 SKIP_RE='^(bit|hnsw_bit|ivfflat_.*)$'
 if [ $# -eq 0 ]; then
-  set -- $(cd "$SRC/test/sql" && ls *.sql | sed 's/\.sql$//' | grep -Ev "$SKIP_RE")
+  tests=()
+  for f in "$SRC"/test/sql/*.sql; do
+    [ -e "$f" ] || continue   # unmatched glob
+    t=$(basename "$f" .sql)
+    [[ $t =~ $SKIP_RE ]] || tests+=("$t")
+  done
+  set -- ${tests[@]+"${tests[@]}"}
 fi
+[ $# -gt 0 ] || { echo "no tests selected" >&2; exit 2; }
 
 PSQL=${PSQL:-/usr/lib/postgresql/18/bin/psql}
 DB=pgvector_regress_$$
-"$PSQL" -h "$HOST" -p "$PORT" -U "$USER" -X -q -d postgres -c "CREATE DATABASE $DB" >/dev/null
-trap '[ "$KEEP" = 1 ] || "$PSQL" -h "$HOST" -p "$PORT" -U "$USER" -X -q -d postgres -c "DROP DATABASE $DB" >/dev/null' EXIT
-"$PSQL" -h "$HOST" -p "$PORT" -U "$USER" -X -q -d "$DB" -c "CREATE EXTENSION vector" >/dev/null
-
 OUT=$(mktemp -d); mkdir -p "$SRC/test/results"
 fail=0
+# -k keeps the database and the output directory; otherwise the output is
+# kept only when a test failed (the FAIL line names its diff).
+cleanup() {
+  [ "$KEEP" = 1 ] || "$PSQL" -h "$HOST" -p "$PORT" -U "$USER" -X -q -d postgres -c "DROP DATABASE $DB" >/dev/null || true
+  [ "$KEEP" = 1 ] || [ "$fail" != 0 ] || rm -rf "$OUT"
+}
+"$PSQL" -h "$HOST" -p "$PORT" -U "$USER" -X -q -d postgres -c "CREATE DATABASE $DB" >/dev/null
+trap cleanup EXIT
+"$PSQL" -h "$HOST" -p "$PORT" -U "$USER" -X -q -d "$DB" -c "CREATE EXTENSION vector" >/dev/null
+
 for t in "$@"; do
   ( cd "$SRC/test" && "$PSQL" -h "$HOST" -p "$PORT" -U "$USER" -X -a -q -d "$DB" -f "sql/$t.sql" ) \
     > "$OUT/$t.raw" 2>&1 || true
