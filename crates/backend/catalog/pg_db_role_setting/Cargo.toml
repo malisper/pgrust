@@ -22,6 +22,7 @@ types_tuple = { path = "../../../_support/types/types_tuple" }
 genam = { path = "../../access/index/genam" }
 table = { path = "../../access/table/table" }
 catalog_indexing = { path = "../catalog_indexing" }
+objectaccess = { path = "../objectaccess" }
 pg_db_role_setting_seams = { path = "../pg_db_role_setting_seams" }
 types_nodes = { path = "../../../_support/types/nodes" }
 elog = { path = "../../utils/error/elog" }

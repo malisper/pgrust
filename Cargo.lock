@@ -12335,6 +12335,7 @@ dependencies = [
  "guc_funcs",
  "heaptuple",
  "mcx",
+ "objectaccess",
  "pg_db_role_setting_seams",
  "table",
  "types_core",

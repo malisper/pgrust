@@ -179,6 +179,16 @@ pub fn AlterSetting<'mcx>(
         catalog_indexing::CatalogTupleInsert(mcx, &rel, &mut newtuple)?;
     }
 
+    // pg_db_role_setting.c:155 — InvokeObjectPostAlterHookArg(
+    //     DbRoleSettingRelationId, databaseid, 0, roleid, false)
+    objectaccess::InvokeObjectPostAlterHookArg(
+        DbRoleSettingRelationId,
+        databaseid,
+        0,
+        roleid,
+        false,
+    )?;
+
     genam::systable_endscan(mcx, scan)?;
     rel.close(types_rel::NoLock)
 }
