@@ -133,12 +133,17 @@ fn varlena_payload(image: &[u8]) -> &[u8] {
     }
 }
 
+/// C `TextDatumGetCString` (pg_subscription.c:111): the catalog bytes as
+/// stored, never validated. `PgString` is UTF-8 by invariant, so a non-UTF-8
+/// value (a SQL_ASCII database) is transcoded lossily instead of panicking —
+/// the policy `textarray_to_stringlist` already applies to publication names.
 fn text_pgstring<'mcx>(mcx: Mcx<'mcx>, d: Datum) -> PgResult<PgString<'mcx>> {
     let img = detoast_datum(mcx, d)?;
-    PgString::from_str_in(
-        core::str::from_utf8(varlena_payload(&img)).expect("catalog text attr is UTF-8"),
-        mcx,
-    )
+    let bytes = varlena_payload(&img);
+    match core::str::from_utf8(bytes) {
+        Ok(s) => PgString::from_str_in(s, mcx),
+        Err(_) => PgString::from_str_in(&String::from_utf8_lossy(bytes), mcx),
+    }
 }
 
 pub fn GetPublicationsStr<'mcx>(
