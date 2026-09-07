@@ -12,6 +12,11 @@
 //      really blocking on each other through shared memory is the whole claim
 //   3. lock_timeout — B gives up with SQLSTATE 55P03 in ~300ms, which needs a
 //      timer running on a third thread while B is parked
+//   3.5 cross-session NOTIFY — B notifies a channel an IDLE A is LISTENing on,
+//      and the gap is timed over 20 rounds at swept cadences. That gap is the
+//      transport's: it is how long A's park in `secure_read` takes to notice a
+//      latch another backend set (0-100ms with the interrupt poll alone, a
+//      notify with a wake fd)
 //   4. distinct pg_backend_pid(), clean 'X' termination of both, then whatever
 //      shutdown the host can offer
 //
@@ -24,6 +29,7 @@
 //     query(sql)   -> Promise<{ msgs, elapsed }>,   // send + await
 //     terminate()  -> void,                          // write 'X'
 //     waitClosed(timeoutMs) -> Promise<boolean>,     // server closed our end?
+//     onNotify?(cb)-> void,   // OPTIONAL: cb(msg, atMs) per NotificationResponse
 //   }
 //   shutdown() -> Promise<{ checks?: [{ ok, what }], notes?: [string] }>
 //
@@ -39,6 +45,32 @@ export const rows = (msgs) => msgs.filter((m) => m.t === 'D').map((m) => parseMe
 export const errs = (msgs) => msgs.filter((m) => m.t === 'E').map((m) => parseMessage('E', m.body).fields);
 export const tags = (msgs) => msgs.filter((m) => m.t === 'C').map((m) => parseMessage('C', m.body).tag);
 export const summarize = (msgs) => msgs.map((m) => m.t).join('');
+
+/** Rounds in the notify-latency step (3.5). Ten of them cover one poll period. */
+const NOTIFY_ROUNDS = 20;
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** NotificationResponse body: pid i32, then channel and payload as C strings. */
+export function notifyPayload(body) {
+  const s = new TextDecoder().decode(body.subarray(4));
+  return s.split('\0')[1] || '';
+}
+
+/** min / median / p95 / max / mean, each to one decimal, over a ms sample. */
+export function stats(xs) {
+  if (xs.length === 0) return { min: 0, median: 0, p95: 0, max: 0, mean: 0 };
+  const v = [...xs].sort((a, b) => a - b);
+  const at = (q) => v[Math.min(v.length - 1, Math.floor(q * v.length))];
+  const r = (x) => Number(x.toFixed(1));
+  return {
+    min: r(v[0]),
+    median: r(at(0.5)),
+    p95: r(at(0.95)),
+    max: r(v[v.length - 1]),
+    mean: r(v.reduce((a, b) => a + b, 0) / v.length),
+  };
+}
 
 /**
  * Resolves { done: true, value } or { done: false } — never rejects, and never
@@ -61,7 +93,21 @@ export function withTimeout(promise, timeoutMs) {
  * Run the scenario. Returns { ok, failures, checks, timings }; every step is
  * wall-clock logged through `log`.
  */
-export async function runHostPipesScenario({ openSession, shutdown, log = () => {} }) {
+export async function runHostPipesScenario({
+  openSession,
+  shutdown,
+  log = () => {},
+  // OPTIONAL, and only for measurement: hold both sessions idle for this long
+  // before terminating them, sampling `cpu()` across the window. What a
+  // BLOCKED backend costs when nothing is happening is the other half of the
+  // wake-fd question — the interrupt poll buys its 100 ms bound with one wake
+  // per session per period, and a park on a wake fd buys its notify with
+  // none. `cpu()` returns { user, system } in MICROseconds over the whole
+  // process (Node's `process.cpuUsage`), which on this host counts every
+  // guest thread: they are worker threads of it.
+  idleMs = 0,
+  cpu = null,
+}) {
   // `log` is the HOST's logger and owns the wall-clock stamp (both drivers
   // already print one, and two clocks in one transcript is a bug report
   // waiting to happen). Every line below carries its own step timing.
@@ -161,6 +207,82 @@ export async function runHostPipesScenario({ openSession, shutdown, log = () => 
   const vAfter = await B.query('SELECT v FROM lock_t WHERE id = 1');
   say(`  B SELECT v -> ${JSON.stringify(rows(vAfter.msgs))}`);
   check(rows(vAfter.msgs)[0]?.[0] === '2', 'v is still 2 after the rolled-back UPDATE');
+
+  // ---- 3.5 cross-session NOTIFY to an IDLE listener ----
+  //
+  // The one property the transport itself decides. A `NOTIFY` from B sets
+  // A's latch; A is parked in `secure_read` on its session pipe, and how
+  // long the payload takes to come out the other side is exactly how long
+  // that park takes to notice a latch. With the interrupt poll alone it is
+  // uniform over [0, 100) ms; with a wake fd in the connection record (or a
+  // native backend's own `pipe(2)`) the park ends on the SetLatch itself.
+  //
+  // Skipped when the host's session objects cannot report an unsolicited
+  // message — the scenario contract's `onNotify` is optional.
+  if (typeof A.onNotify === 'function') {
+    say('step 3.5: NOTIFY from B reaches an IDLE listening A');
+    check(tags((await A.query('LISTEN probe')).msgs).includes('LISTEN'), 'A: LISTEN probe');
+    let pending = null;
+    A.onNotify((m, at) => {
+      if (pending) {
+        const p = pending;
+        pending = null;
+        p({ payload: notifyPayload(m.body), at });
+      }
+    });
+    const gaps = [];
+    let lost = 0;
+    for (let i = 0; i < NOTIFY_ROUNDS; i += 1) {
+      const arrival = new Promise((r) => {
+        pending = r;
+      });
+      // B's statement RESOLVING is t0, so what is measured is the gap a
+      // second session introduces and nothing of B's own work.
+      await B.query(`NOTIFY probe, 'p${i}'`);
+      const t0 = performance.now();
+      const got = await withTimeout(arrival, 5000);
+      if (!got.done) {
+        lost += 1;
+        pending = null;
+        continue;
+      }
+      gaps.push(Math.max(0, got.value.at - t0));
+      // Sweep the gap between rounds across a whole 100 ms poll period: a
+      // FIXED cadence phase-locks to the poll and samples one point of the
+      // distribution fifty times over.
+      await sleep(20 + 10 * (i % 10));
+    }
+    const st = stats(gaps);
+    timings.notify = { rounds: NOTIFY_ROUNDS, delivered: gaps.length, lost, ...st };
+    say(
+      `  NOTIFY -> idle listener over ${gaps.length}/${NOTIFY_ROUNDS} rounds: ` +
+        `min ${st.min}ms median ${st.median}ms p95 ${st.p95}ms max ${st.max}ms mean ${st.mean}ms`,
+    );
+    check(lost === 0, `every NOTIFY reached the idle listener (${lost} lost)`);
+    check(tags((await A.query('UNLISTEN probe')).msgs).includes('UNLISTEN'), 'A: UNLISTEN probe');
+  }
+
+  // ---- 3.6 what two IDLE backends cost (opt-in) ----
+  if (idleMs > 0) {
+    say(`step 3.6: both sessions idle for ${idleMs}ms`);
+    const before = cpu ? cpu() : null;
+    const w0 = performance.now();
+    await sleep(idleMs);
+    const wall = performance.now() - w0;
+    if (before) {
+      const after = cpu();
+      const usedMs = (after.user - before.user + after.system - before.system) / 1000;
+      timings.idle = {
+        wallMs: Number(wall.toFixed(0)),
+        cpuMs: Number(usedMs.toFixed(1)),
+        cpuPct: Number(((usedMs / wall) * 100).toFixed(2)),
+      };
+      say(
+        `  idle ${wall.toFixed(0)}ms cost ${usedMs.toFixed(1)}ms of CPU across every thread ` +
+          `(${timings.idle.cpuPct}% of one core)`,
+      );
+    }
+  }
 
   // ---- 4. distinct backends, clean termination, shutdown ----
   say('step 4: distinct backend pids, clean termination, shutdown');

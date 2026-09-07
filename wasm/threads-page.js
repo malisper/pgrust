@@ -105,6 +105,7 @@ import {
   HOSTPIPES_LISTEN_FD,
   HOSTPIPES_WAKE_FD,
   sessionFds,
+  sessionWakeFd,
 } from './threads-host.js';
 // Aliased: `main()` already has its own `rows` (the wire lanes' result map), and an import named
 // `rows` would sit in its TDZ for the whole function.
@@ -474,15 +475,27 @@ async function main() {
     pipeRegistry.register(HOSTPIPES_WAKE_FD, { in: wakePipe, out: wakePipe });
     for (let k = 0; k < SESSION_COUNT; k++) {
       const { inFd, outFd } = sessionFds(k);
-      const toGuest = SabPipe.create(1 << 20); // page -> backend (guest READS)
-      const fromGuest = SabPipe.create(1 << 22); // backend -> page (guest WRITES)
+      // One gate per session (sab-pipe.js "THE GATE"): the rings a backend can be waiting on
+      // share a futex word, so the host parks a `poll` over its in_fd AND its wake fd on ONE
+      // Atomics.wait instead of slicing between them.
+      const gate = SabPipe.createGate();
+      const toGuest = SabPipe.create(1 << 20, { gate }); // page -> backend (guest READS)
+      const fromGuest = SabPipe.create(1 << 22, { gate }); // backend -> page (guest WRITES)
       pipeRegistry.register(inFd, { in: toGuest });
       pipeRegistry.register(outFd, { out: fromGuest });
-      sessionPipes.push({ k, inFd, outFd, toGuest, fromGuest });
+      // This session's WAKE ring, both ends of one ring on one fd exactly as the postmaster's:
+      // a SetLatch aimed at this backend writes a token here, which is what ends its blocked
+      // read at once instead of at the end of its 100 ms interrupt poll.
+      const wakeFd = sessionWakeFd(k);
+      const wake = SabPipe.create(1 << 16, { gate });
+      pipeRegistry.register(wakeFd, { in: wake, out: wake });
+      sessionPipes.push({ k, inFd, outFd, wakeFd, toGuest, fromGuest, wake });
     }
     note(
       `page: host-pipes listener fd ${HOSTPIPES_LISTEN_FD}, wake fd ${HOSTPIPES_WAKE_FD}; sessions ` +
-        sessionPipes.map((p) => `${p.k}=(in ${p.inFd}, out ${p.outFd})`).join(', '),
+        sessionPipes
+          .map((p) => `${p.k}=(in ${p.inFd}, out ${p.outFd}, wake ${p.wakeFd})`)
+          .join(', '),
     );
   }
   const pipeDescriptors = pipeRegistry.descriptors();
@@ -672,13 +685,14 @@ async function main() {
   const stamp = () => String(Date.now() - T0).padStart(6);
   const plog = (line) => note(`[${stamp()}ms] ${line}`);
 
-  function announceConnection(inFd, outFd) {
+  function announceConnection(inFd, outFd, wakeFd = 0) {
     const rec = new Uint8Array(16);
     const view = new DataView(rec.buffer);
     view.setUint32(0, CONN_MAGIC, true);
     view.setInt32(4, inFd, true);
     view.setInt32(8, outFd, true);
-    view.setUint32(12, 0, true);
+    // The record's wake_fd: this session's token ring, or 0 for "none".
+    view.setInt32(12, wakeFd, true);
     const n = listenerPipe.write(rec, { block: false });
     if (n !== 16) throw new Error(`listener ring would not take a whole record (${n}/16)`);
     wakePostmaster();
@@ -705,6 +719,7 @@ async function main() {
       this.collector = null;
       this.closed = false;
       this.onFirstByte = null;
+      this.onNotify = null;
       this.pump = (async () => {
         const scratch = new Uint8Array(65536);
         for (;;) {
@@ -730,6 +745,12 @@ async function main() {
       for (;;) {
         const m = this.reader.next();
         if (!m) break;
+        // NotificationResponse: the one message a backend sends UNASKED, and what the
+        // scenario's notify-latency step times. Stamped the instant it is framed.
+        if (m.t === 'A' && this.onNotify) {
+          this.onNotify(m, performance.now());
+          continue;
+        }
         if (!this.collector) continue; // unsolicited (NoticeResponse etc.)
         this.collector.msgs.push(m);
         if (m.t === 'Z') {
@@ -800,7 +821,7 @@ async function main() {
     if (!slot) throw new Error(`no host-pipe pair left for session ${name}`);
     plog(`announcing session ${name} on (in=${slot.inFd}, out=${slot.outFd})`);
     const announcedAt = Date.now();
-    announceConnection(slot.inFd, slot.outFd);
+    announceConnection(slot.inFd, slot.outFd, slot.wakeFd || 0);
     const s = new PipeSession(name, slot.toGuest, slot.fromGuest);
     s.onFirstByte = () => acceptLatencies.push({ name, ms: Date.now() - announcedAt });
     slot.session = s;
@@ -817,6 +838,9 @@ async function main() {
       query: (sql) => s.query(sql),
       terminate: () => s.terminate(),
       waitClosed: (ms) => s.waitClosed(ms),
+      onNotify: (cb) => {
+        s.onNotify = cb;
+      },
     };
   }
 

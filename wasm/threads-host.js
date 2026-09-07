@@ -54,6 +54,8 @@
 //   fd 0        stdin           { in:  the driver->guest SabPipe }
 //   fd 1        stdout          { out: the guest->driver SabPipe }
 //   fd 2        stderr          { sink: onStderr }  — see below
+//   fd 900+k    session k's WAKE token pipe (the connection record's wake_fd),
+//               guest reads AND writes the same ring (see sessionWakeFd)
 //   fd 999      host-pipes postmaster WAKE token pipe (PGRUST_HOSTPIPES_WAKE_FD),
 //               guest reads AND writes the same ring (see HOSTPIPES_WAKE_FD)
 //   fd 1000     host-pipes listener (PGRUST_HOSTPIPES_LISTEN_FD), guest reads
@@ -312,6 +314,30 @@ export function sessionFds(k) {
   return { inFd: HOSTPIPES_LISTEN_FD + 1 + 2 * k, outFd: HOSTPIPES_LISTEN_FD + 2 + 2 * k };
 }
 /**
+ * Session k's WAKE fd — the postmaster's ring (HOSTPIPES_WAKE_FD) per
+ * session, and registered the same way: `{ in: wake, out: wake }`, one ring
+ * the backend reads and any guest thread writes.
+ *
+ * It is what a BLOCKED backend adds to its `poll` beside its own in_fd, so a
+ * `SetLatch` from another backend — an async NOTIFY, a cancel, a fast
+ * shutdown — ends the block AT ONCE instead of at the end of the guest's
+ * 100 ms interrupt poll (`pqcomm_hostpipes::wait_client_io`). Its fd travels
+ * in the connection record's `wake_fd` field; a host that leaves that 0
+ * leaves its backends on the poll, which is exactly what they did before.
+ *
+ * Numbered DOWNWARD from the postmaster's 999, so the documented
+ * `1001 + 2k` / `1002 + 2k` session window and the 1000..1999 pipe window
+ * are both untouched. 900..998 is 99 sessions.
+ */
+export const HOSTPIPES_SESSION_WAKE_FD_BASE = 900;
+export function sessionWakeFd(k) {
+  const fd = HOSTPIPES_SESSION_WAKE_FD_BASE + k;
+  if (fd >= HOSTPIPES_WAKE_FD) {
+    throw new Error(`session ${k} would take wake fd ${fd}, which is the postmaster's window`);
+  }
+  return fd;
+}
+/**
  * The WASI fd an instance's FILE table allocates from. Disjoint per agent so
  * two instances never hand the same fd number to two different files: the
  * guest's fd table is process-global, ours are not.
@@ -512,11 +538,19 @@ export function makeThreadsHost({
   const parkWord = new Int32Array(new SharedArrayBuffer(4));
   // Longest single park; the guest re-polls. Well under Atomics.wait's 2^31ms.
   const POLL_PARK_CAP_MS = 60000;
-  // Slice length when several pipes must be watched at once: SabPipe's futex
-  // word is per pipe, so N of them cannot be waited on atomically. One sub is
-  // the only shape the guest actually uses (poll(2) with a single fd), so this
-  // is a correctness backstop, not a hot path.
+  // Slice length when several pipes must be watched at once AND they do not
+  // share a gate: SabPipe's futex word is per pipe, so N ungated pipes cannot
+  // be waited on atomically. Gated groups take the branch above this one and
+  // park on the group's single word; this remains the correctness backstop
+  // for a driver that registers ungated pipes, never a hot path.
   const POLL_SLICE_MS = 2;
+  // The one word this set of waits can be parked on: the gate every waited
+  // pipe shares, or null (different groups, or ungated pipes).
+  const commonGate = (waits) => {
+    const first = waits[0].pipe.gateSab;
+    if (!first) return null;
+    return waits.every((w) => w.pipe.gateSab === first) ? waits[0].pipe.gateWord() : null;
+  };
   wasi.poll_oneoff = (inPtr, outPtr, nsubs, neventsPtr) => {
     const view = dv();
     const subs = [];
@@ -564,6 +598,11 @@ export function makeThreadsHost({
 
     const start = Date.now();
     let elapsed = 0;
+    // Set when a park ended before its budget on a wake that readied nothing
+    // (a gate bump from a foreign pipe). It matters below: a park that ran to
+    // the end of its budget licenses the clock event, and one that did not
+    // must not be reported as if it had.
+    let earlyWake = false;
     if (!subs.some((s) => ready(s, 0))) {
       // Nothing is ready: block. Bounded by the nearest clock deadline, or
       // forever-ish when the guest asked for an untimed wait (the guest
@@ -588,12 +627,34 @@ export function makeThreadsHost({
         } else if (waits.length === 0) {
           Atomics.wait(parkWord, 0, 0, budget);
         } else {
+          // Several fds. The shape that matters is a BLOCKED backend watching
+          // its session pipe and its wake ring at once
+          // (`pqcomm_hostpipes::wait_client_io`): both belong to the same
+          // session, so both bump the same gate and ONE park covers them —
+          // bytes wake it, and so does a `SetLatch` from another backend.
+          const gate = commonGate(waits);
           const deadline = start + budget;
           for (;;) {
             const rem = deadline - Date.now();
             if (rem <= 0) break;
-            if (subs.some((s) => ready(s, Date.now() - start))) break;
-            Atomics.wait(parkWord, 0, 0, Math.min(rem, POLL_SLICE_MS));
+            if (gate) {
+              // Gate FIRST, then the readiness test: a bump in the window
+              // makes the wait return 'not-equal' rather than sleep through
+              // it (SabPipe's SEQ-first discipline, one level up).
+              const seq = SabPipe.gateSeq(gate);
+              if (subs.some((s) => ready(s, Date.now() - start))) break;
+              SabPipe.waitGate(gate, seq, rem);
+              // A gate bump that readied nothing is a foreign wake (a wake
+              // token, say): fall out and let the guest re-poll, which is
+              // where it processes interrupts.
+              if (SabPipe.gateSeq(gate) !== seq) {
+                earlyWake = !subs.some((x) => ready(x, Date.now() - start));
+                break;
+              }
+            } else {
+              if (subs.some((s) => ready(s, Date.now() - start))) break;
+              Atomics.wait(parkWord, 0, 0, Math.min(rem, POLL_SLICE_MS));
+            }
           }
         }
       }
@@ -602,7 +663,7 @@ export function makeThreadsHost({
       // fd is ready below). Date.now()'s granularity must not be allowed to
       // report "0 events" on a pure sleep — the caller would re-poll for a
       // deadline it has already reached, forever.
-      if (budget > 0 && !subs.some((s) => ready(s, elapsed))) elapsed = budget;
+      if (budget > 0 && !earlyWake && !subs.some((s) => ready(s, elapsed))) elapsed = budget;
     }
 
     let fired = 0;

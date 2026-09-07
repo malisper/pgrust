@@ -199,6 +199,7 @@ class Session {
     this.reader = new WireReader();
     this.collector = null;
     this.closed = false;
+    this.onNotify = null;
     rd.on('data', (b) => this._feed(b));
     rd.on('end', () => {
       this.closed = true;
@@ -210,6 +211,13 @@ class Session {
     for (;;) {
       const m = this.reader.next();
       if (!m) break;
+      // NotificationResponse: the one message a backend sends UNASKED, and
+      // the whole point of the scenario's notify-latency step. Stamped the
+      // instant it is framed, never inside a collection.
+      if (m.t === 'A' && this.onNotify) {
+        this.onNotify(m, performance.now());
+        continue;
+      }
       if (!this.collector) continue; // unsolicited (NoticeResponse etc.)
       this.collector.msgs.push(m);
       if (m.t === 'Z') {
@@ -278,6 +286,9 @@ async function openSession(name) {
     query: (sql) => s.query(sql),
     terminate: () => s.terminate(),
     waitClosed: (timeoutMs) => waitForClose(s, timeoutMs),
+    onNotify: (cb) => {
+      s.onNotify = cb;
+    },
   };
 }
 

@@ -35,8 +35,17 @@
 //!   0       u32   magic      0x50475048 — the bytes "HPGP" in stream order
 //!   4       i32   in_fd      server READS client->server bytes here
 //!   8       i32   out_fd     server WRITES server->client bytes here
-//!   12      u32   reserved   must be 0 today; ignored (forward slot)
+//!   12      i32   wake_fd    this session's WAKE token ring, or 0 for none
 //! ```
+//!
+//! `wake_fd` is the slot the first cut of this record reserved. It is
+//! OPTIONAL and 0 means "none" (fd 0 is stdin and can never be a wake ring),
+//! so a host that predates it announces connections exactly as before. When
+//! present it names a host-backed pipe that is BOTH ends at once — the
+//! backend reads it and any thread writes it — which the backend adopts as
+//! its waiter's wake pipe for the life of the session. See "Blocking
+//! semantics" below: it is what makes a `SetLatch` from another backend
+//! reach a session parked in a `read`.
 //!
 //! `accept_connection` reads exactly one record with a BLOCKING `read`,
 //! looping over short reads and EINTR, and returns a `ClientSocket` whose
@@ -53,12 +62,35 @@
 //! channel between two threads, not a per-write lookup.
 //!
 //! **Blocking semantics.** Both session fds stay in BLOCKING mode, exactly
-//! as the stdio provider leaves fds 0/1: a blocking `read` IS the wait, and
-//! the emulated-noblock arms delegate to the shared `fdnb` crate (a
-//! zero-timeout `poll(2)`, which works on pipes natively and reaches the
-//! wasm host's `poll_oneoff`). No `FeBeWaitSet` is created, so no socket
-//! event is ever registered — the wasm wait-event backend rejects those by
-//! construction.
+//! as the stdio provider leaves fds 0/1, and the emulated-noblock arms
+//! delegate to the shared `fdnb` crate (a zero-timeout `poll(2)`, which
+//! works on pipes natively and reaches the wasm host's `poll_oneoff`).
+//!
+//! A BLOCKED byte op is where this transport used to differ from C in the
+//! one way that a client can feel. C blocks in
+//! `WaitEventSetWait(FeBeWaitSet, …)` on `WL_SOCKET_READABLE | WL_LATCH_SET`,
+//! so a backend that sets an idle session's latch — an async NOTIFY, a
+//! cancel, a fast shutdown — wakes it AT ONCE. This provider had no wait set
+//! and polled the fd with a [`INTERRUPT_POLL_MS`] bound instead, which made
+//! every latch-carried event arrive uniformly 0–100 ms late (measured: a
+//! cross-session NOTIFY to an IDLE listener, median ~50 ms).
+//!
+//! [`wait_client_io`] restores C's property with the pieces this transport
+//! has: a `poll(2)` over TWO fds — the session fd and this backend's WAKE fd
+//! — is the wait set, and the waiter's FD-PARK mode is `WL_LATCH_SET`
+//! (`SetLatch` from any thread then writes a token byte to that wake fd
+//! instead of signalling a condvar the poll cannot see). The wake fd is
+//! this thread's own `pipe(2)` natively (`waiter::ensure_wake_pipe`) and the
+//! host-announced ring on wasm, where WASI p1 has no `pipe(2)`. The
+//! [`INTERRUPT_POLL_MS`] poll remains as the FALLBACK for a connection with
+//! no wake fd at all — a wasm host that announces `wake_fd = 0`, which is
+//! every host built before the slot was filled in.
+//!
+//! Still no `FeBeWaitSet`: a `WaitEventSet` cannot hold these fds. The wasm
+//! backend rejects every event with a real fd by construction (WASI p1 has
+//! no sockets, and its wait is a futex park no host fd can reach), and a
+//! pipe PAIR would need two socket positions where C's set has one, since
+//! `ModifyWaitEvent` can change an event's mask but never its fd.
 //!
 //! **Close.** The backend closes BOTH fds at session end (`secure_close`,
 //! also registered as an `on_proc_exit` callback by `pq_init`) and drops the
@@ -102,6 +134,12 @@ pub const LISTEN_FD_ENV: &str = "PGRUST_HOSTPIPES_LISTEN_FD";
 ///     `pipe(2)` gives every native backend, handed in by the host instead
 ///     because WASI p1 has no `pipe(2)`.
 ///
+/// This is the POSTMASTER's ring and nothing else: a session backend gets
+/// its own through the connection record's `wake_fd` field. Sharing one
+/// would be unsound in the one way that matters — both sides DRAIN, and a
+/// backend that swallowed the token announcing a connection would leave the
+/// postmaster asleep on it.
+///
 /// The bytes carry no information: they are wake tokens, drained and thrown
 /// away. That is what makes the several-writers-one-reader arrangement sound
 /// on a ring whose ordinary contract is single-producer.
@@ -112,22 +150,40 @@ pub const WAKE_FD_ENV: &str = "PGRUST_HOSTPIPES_WAKE_FD";
 /// a host writing a LE u32 agree).
 pub const CONN_RECORD_MAGIC: u32 = 0x5047_5048;
 
-/// Fixed connection-record size, in bytes (magic, in_fd, out_fd, reserved).
+/// Fixed connection-record size, in bytes (magic, in_fd, out_fd, wake_fd).
 pub const CONN_RECORD_LEN: usize = 16;
 
-/// `in_fd -> out_fd` for every live host-pipes connection. Written by the
-/// postmaster thread at accept, read by the backend thread at `pq_init`,
-/// erased at close. See the crate docs ("The fd pair map"): this exists
-/// because `ClientSocket` carries a single fd and a pipe pair is two.
-static OUT_FDS: LazyLock<Mutex<HashMap<i32, i32>>> =
+/// `in_fd -> (out_fd, wake_fd)` for every live host-pipes connection.
+/// Written by the postmaster thread at accept, read by the backend thread at
+/// `pq_init`, erased at close. See the crate docs ("The fd pair map"): this
+/// exists because `ClientSocket` carries a single fd and a host-pipes
+/// connection is a pipe pair plus (optionally) a wake ring.
+static OUT_FDS: LazyLock<Mutex<HashMap<i32, (i32, i32)>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// One host-pipes session's fds, as the backend thread holds them. The
+/// host-pipes twin of pqcomm::socket's CLIENT_STATE (which is
+/// (sock, noblock, ssl_in_use); TLS never runs on this transport, the fd is
+/// a pair, and the wake fd is what a BLOCKED op parks on next to it).
+#[derive(Clone, Copy)]
+struct Conn {
+    in_fd: i32,
+    out_fd: i32,
+    /// The fd a blocked op adds to its `poll` so a `SetLatch` ends the wait,
+    /// or `PGINVALID_SOCKET` when this connection has no wake route (the
+    /// [`INTERRUPT_POLL_MS`] fallback). Natively this thread's own `pipe(2)`
+    /// (waiter-owned); on wasm the host ring named in the connection record.
+    wake_fd: i32,
+    /// True when `wake_fd` is a HOST fd this thread ADOPTED: released at
+    /// close and never closed, because the host owns it. False for the
+    /// waiter's own `pipe(2)`, which the waiter slot closes at thread exit.
+    wake_adopted: bool,
+    noblock: bool,
+}
+
 thread_local! {
-    // Some((in_fd, out_fd, noblock)) once this backend's pq_init ran — the
-    // host-pipes twin of pqcomm::socket's CLIENT_STATE (which is
-    // (sock, noblock, ssl_in_use); TLS never runs on this transport, and
-    // the fd is a pair).
-    static STATE: Cell<Option<(i32, i32, bool)>> = const { Cell::new(None) };
+    // Some(Conn) once this backend's pq_init ran.
+    static STATE: Cell<Option<Conn>> = const { Cell::new(None) };
 }
 
 #[track_caller]
@@ -166,13 +222,15 @@ fn ssize_result(n: isize, e: i32) -> Result<usize, i32> {
     }
 }
 
-fn state() -> Option<(i32, i32, bool)> {
+fn state() -> Option<Conn> {
     STATE.get()
 }
 
-/// How long a BLOCKED byte op parks before checking interrupts again, in ms.
+/// How long a BLOCKED byte op parks before checking interrupts again, in ms
+/// — on a connection with NO WAKE FD, which is the only place this is still
+/// reached ([`wait_client_io`]).
 ///
-/// This bound is the whole reason the blocking arms below poll instead of
+/// This bound is the whole reason a wake-less blocking arm polls instead of
 /// calling `read`/`write` straight: an uninterruptible block is a wedge. The
 /// socket provider blocks in `WaitEventSetWait(FeBeWaitSet, ...)`, which the
 /// latch wakes, and calls `ProcessClientRead/WriteInterrupt(true)` on every
@@ -183,9 +241,11 @@ fn state() -> Option<(i32, i32, bool)> {
 /// session backend forever: PM_WAIT_BACKENDS then stalls the full 60 s to
 /// the GL-GANGWEDGE watchdog, escalates to immediate shutdown, and the
 /// postmaster force-exits with code 1 — a clean `SIGINT` turned into crash
-/// recovery by one idle client. Polling with a bound restores C's property
-/// at the cost of one wake per 100 ms per BLOCKED session (an idle backend
-/// only; nothing on the hot path polls at all).
+/// recovery by one idle client. Polling with a bound restores the SAFETY
+/// property at the cost of one wake per 100 ms per BLOCKED session — but it
+/// only ever restores the WORST CASE of C's latency: with the poll alone,
+/// everything the latch carries arrives uniformly 0–100 ms late. That is
+/// what the wake fd removes.
 const INTERRUPT_POLL_MS: i32 = 100;
 
 /// `poll(fd, events, INTERRUPT_POLL_MS)`: >0 ready, 0 timeout, <0 error.
@@ -199,6 +259,193 @@ fn poll_bounded(fd: i32, events: i16) -> i32 {
         return 1; // N2: fall through and let the op surface the error
     }
     rc
+}
+
+/// `poll({fd, events}, {wake_fd, POLLIN}, timeout_ms)`. Returns
+/// `(fd fired, wake_fd fired, rc)`. ANY revent on the session fd counts as
+/// fired — POLLHUP/POLLERR mean the following read/write must run and
+/// surface EOF or the errno, exactly as `poll_bounded`'s `rc > 0` did.
+fn poll_pair(fd: i32, events: i16, wake_fd: i32, timeout_ms: i64) -> (bool, bool, i32) {
+    let mut pfds = [
+        libc::pollfd { fd, events, revents: 0 },
+        libc::pollfd { fd: wake_fd, events: libc::POLLIN, revents: 0 },
+    ];
+    let t = timeout_ms.clamp(-1, i32::MAX as i64) as i32;
+    // SAFETY: pfds is a valid 2-entry pollfd array for the duration of the call.
+    let rc = unsafe { libc::poll(pfds.as_mut_ptr(), 2, t) };
+    (pfds[0].revents != 0, pfds[1].revents != 0, rc)
+}
+
+/// STRICT zero-timeout readiness probe (ServerLoop's `fd_is_readable`): only
+/// a genuine POLLIN counts, so a dead fd can never be read as "a token is
+/// waiting" and turned into a BLOCKING read on the wasm host's pipes.
+fn wake_fd_readable(fd: i32) -> bool {
+    let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+    // SAFETY: pfd is a valid single-entry pollfd for the duration of the call.
+    let rc = unsafe { libc::poll(&mut pfd, 1, 0) };
+    rc > 0 && (pfd.revents & libc::POLLIN) != 0
+}
+
+/// Throw away every wake token queued on this backend's wake fd — the twin
+/// of ServerLoop's `drain_wake_fd`, and bounded for the same reason: the
+/// bytes carry no information, draining is only what keeps the ring from
+/// filling and the next park from returning on a stale token, and a wake fd
+/// that reports readable but yields nothing must not spin a backend.
+///
+/// Poll-gated on every lap because the wasm host's pipes are BLOCKING (the
+/// native ones are `O_NONBLOCK` and would answer EAGAIN).
+fn drain_wake_fd(fd: i32) {
+    let mut buf = [0u8; 256];
+    for _ in 0..64 {
+        if !wake_fd_readable(fd) {
+            return;
+        }
+        // SAFETY: buf is valid writable memory of the stated length.
+        let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+        if n <= 0 {
+            return;
+        }
+    }
+}
+
+/// ONE blocked lap on a session fd. `true` = attempt the I/O now (the fd
+/// reported ready, or the poll failed and the op must surface the real
+/// errno — fdnb's N2 rule); `false` = the caller runs
+/// `ProcessClientRead/WriteInterrupt(true)` and comes back, exactly as C
+/// does on every `FeBeWaitSet` wake that carried `WL_LATCH_SET`.
+///
+/// The latch half is `waiteventset::wait_loop`'s protocol and ServerLoop's
+/// `pm_park_on_wake_fd`, verbatim: publish the waker into `Latch.waker`,
+/// arm `maybe_sleeping`, RE-CHECK `is_set` (the Dekker arm — the Acquire
+/// pairing lives in `latch::set_latch`), enter fd-park so a cross-thread
+/// unpark writes the wake fd instead of signalling a condvar, block, leave
+/// fd-park, disarm. A set latch is RESET here and reported as "not ready",
+/// which is `be_secure::secure_read`'s `reset_latch_my_latch` + `continue`.
+///
+/// With no wake fd (`PGINVALID_SOCKET`) this degrades to the historical
+/// [`INTERRUPT_POLL_MS`] poll: nothing else can end a park early, so the
+/// bound IS the interrupt latency.
+fn wait_client_io(fd: i32, events: i16, wake_fd: i32) -> bool {
+    use std::sync::atomic::Ordering::{Release, SeqCst};
+
+    if wake_fd < 0 {
+        return poll_bounded(fd, events) > 0;
+    }
+
+    let handle = init_small::globals::MyLatch();
+    let l = handle.map(latch::latch_ref);
+    let mut fd_parked = false;
+    if let Some(l) = l {
+        if !l.is_set() {
+            l.waker.store(waiter::current_handle().as_u64(), Release);
+            l.set_maybe_sleeping(true);
+        }
+        if l.is_set() {
+            // Already set: report it without blocking, as the native wait
+            // loop does (it degrades the block to a zero-timeout poll).
+            l.set_maybe_sleeping(false);
+            reset_my_latch(handle);
+            drain_wake_fd(wake_fd);
+            return false;
+        }
+        fd_parked = waiter::begin_fd_park();
+    }
+
+    // How long this lap may block. Every route that matters ends it — bytes
+    // on the session fd, a token on the wake fd — so the only bound left is
+    // GL-RECWAKE-1's lost-wake backstop, the same one `wait_loop` and
+    // `pm_park_on_wake_fd` apply to their fd-parked laps. `fd_parked ==
+    // false` means a notification landed before we armed: degrade to a
+    // zero-timeout probe rather than block on it.
+    let mut block_ms: i64 = if fd_parked { -1 } else { 0 };
+    if fd_parked {
+        let cadence = waiter::recheck_cadence_ms();
+        if cadence > 0 {
+            block_ms = cadence;
+        }
+    }
+    let (data_ready, wake_ready, rc) = poll_pair(fd, events, wake_fd, block_ms);
+
+    let mut latch_fired = false;
+    if let Some(l) = l {
+        if fd_parked {
+            waiter::end_fd_park();
+        }
+        if l.maybe_sleeping.load(SeqCst) != 0 {
+            l.set_maybe_sleeping(false);
+        }
+        // The latch is authoritative whichever way the poll ended — the
+        // native backends' post-`epoll_wait` test (epoll.rs, wasm_threads.rs).
+        if l.is_set() {
+            reset_my_latch(handle);
+            latch_fired = true;
+        }
+    }
+    if wake_ready {
+        drain_wake_fd(wake_fd);
+    }
+    if latch_fired {
+        return false; // the caller processes interrupts, then comes back
+    }
+    if rc < 0 && errno() != libc::EINTR {
+        return true; // N2: let the op surface the error
+    }
+    data_ready
+}
+
+fn reset_my_latch(handle: Option<types_storage::latch::LatchHandle>) {
+    if let Some(h) = handle {
+        latch::ResetLatch(h);
+    }
+}
+
+/// Resolve this backend's wake route, once, at `pq_init`.
+///
+/// `record_wake_fd` is the connection record's `wake_fd` (0 = the host
+/// offered none). A host fd is ADOPTED into this thread's waiter slot — the
+/// same door the postmaster uses for its own (`waiter::adopt_wake_pipe`),
+/// both ends being one ring because the bytes are wake tokens and nothing
+/// else. Without one we ask the waiter for its own `pipe(2)`, which is what
+/// every native backend has and what WASI p1 cannot make (ENOSYS there).
+///
+/// Returns `(wake_fd, adopted)`; `PGINVALID_SOCKET` selects the
+/// [`INTERRUPT_POLL_MS`] fallback.
+fn adopt_wake_route(record_wake_fd: i32) -> (i32, bool) {
+    if record_wake_fd > 0 && waiter::adopt_wake_pipe(record_wake_fd, record_wake_fd) {
+        return (record_wake_fd, true);
+    }
+    match waiter::ensure_wake_pipe() {
+        Ok(rfd) => (rfd, false),
+        Err(_) => (types_core::PGINVALID_SOCKET, false),
+    }
+}
+
+/// LOG the arrangement ONCE per process: the first session backend says how
+/// blocked ops wait here, every later one is silent (one line per connection
+/// would be noise on a busy postmaster). The postmaster logs its own wake
+/// route the same way (`ServerLoop::pm_wake_fd`).
+fn log_wake_route_once(wake_fd: i32) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static SAID: AtomicBool = AtomicBool::new(false);
+    if SAID.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let _ = if wake_fd >= 0 {
+        ereport(LOG)
+            .errmsg(format!(
+                "host-pipes sessions wait on their pipe and their wake fd \
+                 (this one: {wake_fd}): a SetLatch ends a blocked read at once"
+            ))
+            .finish(loc("pq_init"))
+    } else {
+        ereport(LOG)
+            .errmsg(format!(
+                "host-pipes sessions have no wake fd: blocked reads poll every \
+                 {INTERRUPT_POLL_MS}ms, so a latch wake lands up to that late"
+            ))
+            .errhint("The host names one per connection in the record's wake_fd field.")
+            .finish(loc("pq_init"))
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -340,20 +587,26 @@ fn accept_connection(server_fd: i32) -> PgResult<ClientSocket> {
     let magic = u32::from_le_bytes([rec[0], rec[1], rec[2], rec[3]]);
     let in_fd = i32::from_le_bytes([rec[4], rec[5], rec[6], rec[7]]);
     let out_fd = i32::from_le_bytes([rec[8], rec[9], rec[10], rec[11]]);
-    if magic != CONN_RECORD_MAGIC || in_fd < 0 || out_fd < 0 {
+    // OPTIONAL, and 0 means "none" (fd 0 is stdin): a host that predates the
+    // field announces connections unchanged and its backends take the
+    // INTERRUPT_POLL_MS fallback. A NEGATIVE value is a desynchronised
+    // stream, which the check below is terminal about.
+    let wake_fd = i32::from_le_bytes([rec[12], rec[13], rec[14], rec[15]]);
+    if magic != CONN_RECORD_MAGIC || in_fd < 0 || out_fd < 0 || wake_fd < 0 {
         // A desynchronised listener stream is unrecoverable (we cannot know
         // where the next record starts), so this is loud and terminal for
         // the connection, not a skipped byte.
         let _ = ereport(LOG)
             .errmsg_internal(format!(
-                "invalid host-pipes connection record (magic {magic:#010x}, in_fd {in_fd}, out_fd {out_fd})"
+                "invalid host-pipes connection record (magic {magic:#010x}, in_fd {in_fd}, \
+                 out_fd {out_fd}, wake_fd {wake_fd})"
             ))
             .finish(loc("accept_connection"));
         sleep_after_accept_failure();
         return Err(accept_failed());
     }
 
-    OUT_FDS.lock().unwrap_or_else(|e| e.into_inner()).insert(in_fd, out_fd);
+    OUT_FDS.lock().unwrap_or_else(|e| e.into_inner()).insert(in_fd, (out_fd, wake_fd));
 
     Ok(ClientSocket {
         sock: in_fd,
@@ -390,8 +643,8 @@ fn local_raddr() -> ip::SockAddr {
 /// consumed into thread-local state.
 fn pq_init(client_sock: &ClientSocket) -> PgResult<Port> {
     let in_fd = client_sock.sock;
-    let out_fd = OUT_FDS.lock().unwrap_or_else(|e| e.into_inner()).get(&in_fd).copied();
-    let Some(out_fd) = out_fd else {
+    let pair = OUT_FDS.lock().unwrap_or_else(|e| e.into_inner()).get(&in_fd).copied();
+    let Some((out_fd, record_wake_fd)) = pair else {
         return ereport(ERROR)
             .errmsg_internal(format!("no host-pipes output fd registered for input fd {in_fd}"))
             .finish(loc("pq_init"))
@@ -400,7 +653,11 @@ fn pq_init(client_sock: &ClientSocket) -> PgResult<Port> {
 
     let port = Port::new(client_sock);
     pqcomm::pq_init_buffers()?;
-    STATE.set(Some((in_fd, out_fd, false)));
+    // The wake route is per THREAD (a waiter slot is), so it is claimed here,
+    // on the backend thread that will do the blocking, and never at accept.
+    let (wake_fd, wake_adopted) = adopt_wake_route(record_wake_fd);
+    log_wake_route_once(wake_fd);
+    STATE.set(Some(Conn { in_fd, out_fd, wake_fd, wake_adopted, noblock: false }));
     // The socket provider registers socket_close here for the same reason:
     // a session that ends any way at all (X, FATAL, SIGTERM) must release
     // its client I/O. Ours actually closes the fds — nothing else will, and
@@ -415,15 +672,17 @@ fn pq_init(client_sock: &ClientSocket) -> PgResult<Port> {
 pub fn secure_read(buf: &mut [u8]) -> PgResult<Result<usize, i32>> {
     postgres_seams::process_client_read_interrupt::call(false)?;
 
-    let Some((in_fd, _, noblock)) = state() else {
+    let Some(conn) = state() else {
         return Ok(Err(libc::EBADF));
     };
+    let (in_fd, noblock) = (conn.in_fd, conn.noblock);
 
     let (n, e) = loop {
-        if !noblock && poll_bounded(in_fd, libc::POLLIN) <= 0 {
-            // Not readable yet (or a signal cut the poll short): this is the
-            // BLOCKED state, so process interrupts exactly as the socket
-            // provider does on every FeBeWaitSet wake, then wait again.
+        if !noblock && !wait_client_io(in_fd, libc::POLLIN, conn.wake_fd) {
+            // Not readable yet (the latch fired, or a lost-wake recheck lap
+            // expired): this is the BLOCKED state, so process interrupts
+            // exactly as the socket provider does on every FeBeWaitSet wake,
+            // then wait again.
             postgres_seams::process_client_read_interrupt::call(true)?;
             continue;
         }
@@ -452,12 +711,13 @@ pub fn secure_read(buf: &mut [u8]) -> PgResult<Result<usize, i32>> {
 pub fn secure_write(buf: &[u8]) -> PgResult<Result<usize, i32>> {
     postgres_seams::process_client_write_interrupt::call(false)?;
 
-    let Some((_, out_fd, noblock)) = state() else {
+    let Some(conn) = state() else {
         return Ok(Err(libc::EBADF));
     };
+    let (out_fd, noblock) = (conn.out_fd, conn.noblock);
 
     let (n, e) = loop {
-        if !noblock && poll_bounded(out_fd, libc::POLLOUT) <= 0 {
+        if !noblock && !wait_client_io(out_fd, libc::POLLOUT, conn.wake_fd) {
             postgres_seams::process_client_write_interrupt::call(true)?;
             continue;
         }
@@ -489,11 +749,11 @@ pub fn secure_write(buf: &[u8]) -> PgResult<Result<usize, i32>> {
 fn set_port_noblock(noblock: bool) -> bool {
     // Mode is emulated (fdnb's zero-timeout poll), never an fcntl: the fds
     // stay blocking so a plain read IS the wait. Same as the stdio provider.
-    let Some((in_fd, out_fd, _)) = state() else {
+    let Some(conn) = state() else {
         // The socket provider's "no client connection" answer before pq_init.
         return false;
     };
-    STATE.set(Some((in_fd, out_fd, noblock)));
+    STATE.set(Some(Conn { noblock, ..conn }));
     true
 }
 
@@ -502,15 +762,24 @@ fn set_port_noblock(noblock: bool) -> bool {
 /// two fds plus its map entry. Idempotent: the on_proc_exit callback and an
 /// explicit call cannot double-close.
 fn secure_close() {
-    let Some((in_fd, out_fd, _)) = STATE.replace(None) else {
+    let Some(conn) = STATE.replace(None) else {
         return;
     };
-    OUT_FDS.lock().unwrap_or_else(|e| e.into_inner()).remove(&in_fd);
+    OUT_FDS.lock().unwrap_or_else(|e| e.into_inner()).remove(&conn.in_fd);
+    if conn.wake_adopted {
+        // Hand the HOST's wake ring back BEFORE the fds go: the waiter slot
+        // closes whatever fds it holds when this thread exits, which is
+        // right for a `pipe(2)` it made and wrong for a borrowed one. Not
+        // closed here either — the ring belongs to the host, and a closed
+        // one would report readable (EOF) forever to whoever it hands it to
+        // next.
+        waiter::release_adopted_wake_pipe();
+    }
     // SAFETY: both fds belong to this session and are closed exactly once
     // (STATE was taken above, so a second call returns early).
     unsafe {
-        libc::close(in_fd);
-        libc::close(out_fd);
+        libc::close(conn.in_fd);
+        libc::close(conn.out_fd);
     }
 }
 
@@ -635,16 +904,41 @@ mod tests {
         assert_eq!(CALLS.load(Ordering::Acquire), 1);
     }
 
-    /// The 16-byte record decodes little-endian at the documented offsets.
+    /// The 16-byte record decodes little-endian at the documented offsets,
+    /// wake_fd included — the field the reserved slot became.
     #[test]
     fn record_layout_is_le_at_documented_offsets() {
         let mut rec = [0u8; CONN_RECORD_LEN];
         rec[0..4].copy_from_slice(&CONN_RECORD_MAGIC.to_le_bytes());
         rec[4..8].copy_from_slice(&7i32.to_le_bytes());
         rec[8..12].copy_from_slice(&9i32.to_le_bytes());
+        rec[12..16].copy_from_slice(&11i32.to_le_bytes());
         assert_eq!(u32::from_le_bytes([rec[0], rec[1], rec[2], rec[3]]), CONN_RECORD_MAGIC);
         assert_eq!(i32::from_le_bytes([rec[4], rec[5], rec[6], rec[7]]), 7);
         assert_eq!(i32::from_le_bytes([rec[8], rec[9], rec[10], rec[11]]), 9);
+        assert_eq!(i32::from_le_bytes([rec[12], rec[13], rec[14], rec[15]]), 11);
         assert_eq!(rec.len(), 16);
+    }
+
+    /// A host that predates the wake_fd field writes zero there, and zero
+    /// means "no wake route" — never fd 0 (stdin), which is a real fd on
+    /// every host this transport runs on.
+    #[test]
+    fn wake_fd_zero_means_no_wake_route() {
+        let rec = [0u8; CONN_RECORD_LEN];
+        let wake_fd = i32::from_le_bytes([rec[12], rec[13], rec[14], rec[15]]);
+        assert_eq!(wake_fd, 0);
+        // adopt_wake_route's guard is `> 0`, so 0 falls through to the
+        // waiter's own pipe(2) (native) or to no route at all (wasm).
+        assert!(!(wake_fd > 0));
+    }
+
+    /// The blocked-lap bound: with a wake fd the lap is the waiter's recheck
+    /// cadence (a lost-wake backstop), and without one it is the poll bound
+    /// — which is then the whole interrupt latency.
+    #[test]
+    fn interrupt_poll_is_the_wake_less_bound() {
+        assert_eq!(INTERRUPT_POLL_MS, 100);
+        assert!(waiter::recheck_cadence_ms() > INTERRUPT_POLL_MS as i64);
     }
 }

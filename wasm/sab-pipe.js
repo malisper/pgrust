@@ -30,6 +30,22 @@
 // SPSC is the contract: exactly one agent writes and exactly one reads a given
 // pipe. In the threads spike, stdin is driver->guest and stdout is
 // guest->driver, and only the wire-session thread does wire I/O.
+//
+// THE GATE (optional). A futex word can only be waited on one at a time, and
+// each pipe's is its own SEQ — so an agent that must watch SEVERAL pipes at
+// once (a guest `poll(2)` over its session fd AND its wake fd: see
+// wasm/threads-host.js `poll_oneoff`) can only slice its wait between them,
+// which is polling by another name. A GATE fixes that: a shared one-slot
+// Int32Array that every pipe holding it bumps and notifies alongside its own
+// SEQ, so one `Atomics.wait` covers the whole group. Bumping SEQ FIRST and
+// the gate second is deliberate — a waiter woken by the gate re-reads the
+// pipes' own state, which is already published.
+//
+// A gate is per GROUP, never global: give one to the pipes of a single
+// session (its two byte channels and its wake ring) and an idle backend wakes
+// on its own traffic and nothing else. Sharing one across sessions would be
+// correct and would also wake every idle backend on every other session's
+// byte. Pipes without a gate behave exactly as before.
 
 const HDR_I32 = 4;
 const H_READ = 0;
@@ -38,36 +54,71 @@ const H_CLOSED = 2;
 const H_SEQ = 3;
 
 export class SabPipe {
-  // capacity must be a power of two.
-  static create(capacity = 1 << 20) {
+  // A gate for a group of pipes: one shared futex word, bumped by every pipe
+  // that holds it. Structured-cloneable (a SharedArrayBuffer clones by
+  // reference), so it travels in `descriptor()` like the ring itself.
+  static createGate() {
+    return new SharedArrayBuffer(4);
+  }
+
+  // capacity must be a power of two. `gate` is an optional SharedArrayBuffer
+  // from `createGate()`, shared with the other pipes of the same group.
+  static create(capacity = 1 << 20, { gate = null } = {}) {
     if ((capacity & (capacity - 1)) !== 0) {
       throw new Error(`SabPipe capacity must be a power of two, got ${capacity}`);
     }
     const sab = new SharedArrayBuffer(HDR_I32 * 4 + capacity);
-    return new SabPipe(sab, capacity);
+    return new SabPipe(sab, capacity, gate);
   }
 
   // Rehydrate the same pipe in another agent from the transferred descriptor.
   static from(desc) {
-    return new SabPipe(desc.sab, desc.capacity);
+    return new SabPipe(desc.sab, desc.capacity, desc.gate || null);
   }
 
-  constructor(sab, capacity) {
+  constructor(sab, capacity, gate = null) {
     this.sab = sab;
     this.capacity = capacity;
     this.mask = capacity - 1;
     this.hdr = new Int32Array(sab, 0, HDR_I32);
     this.buf = new Uint8Array(sab, HDR_I32 * 4, capacity);
+    // Both the raw SAB (to hand on) and the view (to bump).
+    this.gateSab = gate;
+    this.gate = gate ? new Int32Array(gate) : null;
   }
 
   // Structured-cloneable handle (SharedArrayBuffer is cloned by reference).
   descriptor() {
-    return { sab: this.sab, capacity: this.capacity };
+    return { sab: this.sab, capacity: this.capacity, gate: this.gateSab };
+  }
+
+  // The group's futex word, or null. Two pipes are in the same group iff
+  // they were built from the same gate SAB — compare `gateSab`, not this.
+  gateWord() {
+    return this.gate;
+  }
+
+  // Read the gate BEFORE testing readiness, then `Atomics.wait` on that value:
+  // any bump in the window makes the wait return 'not-equal' instead of
+  // sleeping through it. Same SEQ-first discipline as waitReadable.
+  static gateSeq(gate) {
+    return Atomics.load(gate, 0);
+  }
+
+  // Park on a group gate until it moves or `timeoutMs` elapses. Returns
+  // nothing: the caller re-tests every pipe it cares about, exactly as a
+  // kernel poll's caller re-tests its fds.
+  static waitGate(gate, seq, timeoutMs) {
+    if (timeoutMs > 0) Atomics.wait(gate, 0, seq, timeoutMs);
   }
 
   _bump() {
     Atomics.add(this.hdr, H_SEQ, 1);
     Atomics.notify(this.hdr, H_SEQ);
+    if (this.gate) {
+      Atomics.add(this.gate, 0, 1);
+      Atomics.notify(this.gate, 0);
+    }
   }
 
   get closed() {

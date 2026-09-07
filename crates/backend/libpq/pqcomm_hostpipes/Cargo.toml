@@ -16,6 +16,12 @@ types_storage = { path = "../../../_support/types/types_storage" }
 postgres_seams = { path = "../../tcop/postgres_seams" }
 postmaster_seams = { path = "../../postmaster/postmaster_seams" }
 ipc_seams = { path = "../../storage/ipc/ipc_seams" }
+# The blocked-byte wait is the latch's, not a poll period: MyLatch (init_small),
+# its Dekker protocol + ResetLatch (latch), and the waiter fd-park mode that
+# turns a cross-thread SetLatch into a byte on this backend's wake fd (waiter).
+init_small = { path = "../../utils/init/init_small" }
+latch = { path = "../../storage/ipc/latch" }
+waiter = { path = "../../storage/ipc/waiter" }
 pqcomm = { path = "../pqcomm" }
 pqcomm_seams = { path = "../pqcomm_seams" }
 be_secure_seams = { path = "../be_secure_seams" }

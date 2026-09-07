@@ -95,6 +95,7 @@ import {
   HOSTPIPES_LISTEN_FD,
   HOSTPIPES_WAKE_FD,
   sessionFds,
+  sessionWakeFd,
 } from './threads-host.js';
 import { runHostPipesScenario } from './hostpipes-scenario.js';
 import { loadRepackedBundle, repackedBundleUrl } from './broker-fs.js';
@@ -165,6 +166,15 @@ const POOL_WORKERS = Number(argAfter('--workers') ?? 2);
 // postmaster falls back to its timed accept probe. The A/B that measures what
 // the host-driven wake is worth: same module, same machine, one env var.
 const NO_WAKE = process.argv.includes('--no-wake');
+// --no-session-wake withholds the connection record's wake_fd, so a BLOCKED
+// backend falls back to its 100 ms interrupt poll. The A/B that measures what
+// the per-session wake ring is worth (see the notify-latency step in
+// hostpipes-scenario.js): same module, same machine, one field.
+const NO_SESSION_WAKE = process.argv.includes('--no-session-wake');
+// --idle-ms N holds both sessions idle for N ms inside the scenario and
+// reports the CPU every thread of this process burned across the window: what
+// a BLOCKED backend costs, which is the price side of the wake-fd A/B.
+const IDLE_MS = Number(argAfter('--idle-ms') || 0);
 // `--fs broker` is the arm the postmaster lane is SCORED on now that its
 // shutdown is real: the shutdown checkpoint is the checkpointer thread
 // writing the store, and only the broker gives it the same store the backends
@@ -388,15 +398,29 @@ if (POSTMASTER) {
   pipeRegistry.register(HOSTPIPES_WAKE_FD, { in: wakePipe, out: wakePipe });
   for (let k = 0; k < SESSION_COUNT; k++) {
     const { inFd, outFd } = sessionFds(k);
-    const toGuest = SabPipe.create(1 << 20); // driver -> backend (guest READS)
-    const fromGuest = SabPipe.create(1 << 22); // backend -> driver (guest WRITES)
+    // ONE GATE PER SESSION (sab-pipe.js "THE GATE"): the three rings a
+    // backend can be waiting on share a futex word, so the host can park a
+    // `poll` over its in_fd AND its wake fd on ONE `Atomics.wait` instead of
+    // slicing between them. Per session, never global — an idle backend then
+    // wakes on its own traffic and not on every other session's byte.
+    const gate = SabPipe.createGate();
+    const toGuest = SabPipe.create(1 << 20, { gate }); // driver -> backend (guest READS)
+    const fromGuest = SabPipe.create(1 << 22, { gate }); // backend -> driver (guest WRITES)
     pipeRegistry.register(inFd, { in: toGuest });
     pipeRegistry.register(outFd, { out: fromGuest });
-    sessionPipes.push({ k, inFd, outFd, toGuest, fromGuest });
+    // This session's WAKE ring: both ends of one ring on one fd, exactly as
+    // the postmaster's. Written by any guest thread whose `SetLatch` finds
+    // this backend fd-parked, drained by the backend on every wake. Sized
+    // far past anything that can queue, because a full ring would make a
+    // SetLatch BLOCK, which SetLatch may never do.
+    const wakeFd = sessionWakeFd(k);
+    const wake = NO_SESSION_WAKE ? null : SabPipe.create(1 << 16, { gate });
+    if (wake) pipeRegistry.register(wakeFd, { in: wake, out: wake });
+    sessionPipes.push({ k, inFd, outFd, toGuest, fromGuest, wakeFd: wake ? wakeFd : 0, wake });
   }
   note(
     `host-pipes: listener fd ${HOSTPIPES_LISTEN_FD}, wake fd ${HOSTPIPES_WAKE_FD}; sessions ` +
-      sessionPipes.map((p) => `${p.k}=(in ${p.inFd}, out ${p.outFd})`).join(', '),
+      sessionPipes.map((p) => `${p.k}=(in ${p.inFd}, out ${p.outFd}, wake ${p.wakeFd || 'off'})`).join(', '),
   );
 }
 const pipeDescriptors = pipeRegistry.descriptors();
@@ -619,13 +643,16 @@ const T0 = Date.now();
 const stamp = () => String(Date.now() - T0).padStart(6);
 const plog = (line) => note(`[${stamp()}ms] ${line}`);
 
-function announceConnection(inFd, outFd) {
+function announceConnection(inFd, outFd, wakeFd = 0) {
   const rec = new Uint8Array(16);
   const view = new DataView(rec.buffer);
   view.setUint32(0, CONN_MAGIC, true);
   view.setInt32(4, inFd, true);
   view.setInt32(8, outFd, true);
-  view.setUint32(12, 0, true);
+  // The record's wake_fd: this session's token ring, or 0 for "none" (which
+  // is what every host wrote before the field existed, and what
+  // --no-session-wake reproduces).
+  view.setInt32(12, wakeFd, true);
   const n = listenerPipe.write(rec, { block: false });
   if (n !== 16) throw new Error(`listener ring would not take a whole record (${n}/16)`);
   wakePostmaster();
@@ -652,6 +679,7 @@ class PipeSession {
     this.collector = null;
     this.closed = false;
     this.onFirstByte = null;
+    this.onNotify = null;
     this.pump = (async () => {
       const scratch = new Uint8Array(65536);
       for (;;) {
@@ -677,6 +705,13 @@ class PipeSession {
     for (;;) {
       const m = this.reader.next();
       if (!m) break;
+      // NotificationResponse: the one message a backend sends UNASKED, and
+      // the whole point of the scenario's notify-latency step. Stamped the
+      // instant it is framed, never inside a collection.
+      if (m.t === 'A' && this.onNotify) {
+        this.onNotify(m, performance.now());
+        continue;
+      }
       if (!this.collector) continue; // unsolicited (NoticeResponse etc.)
       this.collector.msgs.push(m);
       if (m.t === 'Z') {
@@ -747,7 +782,7 @@ async function openPipeSession(name) {
   if (!slot) throw new Error(`no host-pipe pair left for session ${name}`);
   plog(`announcing session ${name} on (in=${slot.inFd}, out=${slot.outFd})`);
   const announcedAt = Date.now();
-  announceConnection(slot.inFd, slot.outFd);
+  announceConnection(slot.inFd, slot.outFd, slot.wakeFd || 0);
   const s = new PipeSession(name, slot.toGuest, slot.fromGuest);
   s.onFirstByte = () => acceptLatencies.push({ name, ms: Date.now() - announcedAt });
   slot.session = s;
@@ -764,6 +799,9 @@ async function openPipeSession(name) {
     query: (sql) => s.query(sql),
     terminate: () => s.terminate(),
     waitClosed: (ms) => s.waitClosed(ms),
+    onNotify: (cb) => {
+      s.onNotify = cb;
+    },
   };
 }
 
@@ -907,6 +945,11 @@ async function runPostmasterLane() {
     openSession: openPipeSession,
     shutdown: postmasterShutdown,
     log: plog,
+    idleMs: IDLE_MS,
+    // Every guest thread is a worker thread of THIS process, so one
+    // process-wide sample covers the postmaster, both backends and every aux
+    // thread — which is the number an idle-cost claim needs.
+    cpu: () => process.cpuUsage(),
   });
   for (const c of result.checks) if (!c.ok) failures.push(c.what);
   note(
@@ -914,6 +957,21 @@ async function runPostmasterLane() {
       `lock_timeout ${result.timings.lockTimeoutMs?.toFixed(0)}ms, ` +
       `pids A=${result.timings.pidA} B=${result.timings.pidB}`,
   );
+  const idle = result.timings.idle;
+  if (idle) {
+    note(
+      `idle cost (2 blocked backends, per-session wake fd ${NO_SESSION_WAKE ? 'OFF' : 'ON'}): ` +
+        `${idle.cpuMs}ms CPU over ${idle.wallMs}ms wall = ${idle.cpuPct}% of one core`,
+    );
+  }
+  const n = result.timings.notify;
+  if (n) {
+    note(
+      `notify latency (idle listener, per-session wake fd ${NO_SESSION_WAKE ? 'OFF' : 'ON'}): ` +
+        `${n.delivered}/${n.rounds} delivered, min ${n.min}ms median ${n.median}ms ` +
+        `p95 ${n.p95}ms max ${n.max}ms mean ${n.mean}ms`,
+    );
+  }
 }
 
 try {
