@@ -40,6 +40,7 @@ relation_seams = { path = "../../../access/common/relation_seams" }
 detoast = { path = "../../../access/common/detoast" }
 parse_relation = { path = "../../../parser/parse_relation" }
 rewrite_manip = { path = "../../../rewrite/rewrite_manip" }
+rewrite_handler_seams = { path = "../../../rewrite/rewrite_handler_seams" }
 guc = { path = "../../misc/guc" }
 guc_tables = { path = "../../misc/guc_tables" }
 types_guc = { path = "../../../../_support/types/types_guc" }

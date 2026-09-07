@@ -184,8 +184,9 @@ pub(crate) fn make_ruledef(mcx: Mcx<'_>, rule: &PgRewriteRow, pretty_flags: i32)
             Some((_, sub)) => sub,
             None => first,
         };
-        // C AcquireRewriteLocks here; names read the live catalogs unlocked
-        // (get_query_def precedent).
+        // ruleutils.c:5474-5475: must acquire locks right away; see notes in
+        // get_query_def().
+        rewrite_handler_seams::acquire_rewrite_locks::call(mcx, query, false, false)?;
         let dpns = set_deparse_for_query(mcx, query, &[])?;
         ctx.varprefix = query.rtable.len() != 1;
         ctx.indent_level = PRETTYINDENT_STD;

@@ -1889,18 +1889,34 @@ pub fn all_rows_selectable<'mcx>(
     Ok(true)
 }
 
-// statistic_proc_security_check (selfuncs.c); C's DEBUG2 log is dropped.
+// statistic_proc_security_check (selfuncs.c:6253-6270).
 pub(crate) fn statistic_proc_security_check(
     vardata: &VariableStatData<'_>,
     func_oid: Oid,
 ) -> PgResult<bool> {
     if vardata.acl_ok {
-        return Ok(true);
+        return Ok(true); // have SELECT privs and no securityQuals
     }
     if func_oid == 0 {
         return Ok(false);
     }
-    lsyscache::get_func_leakproof(func_oid)
+    if lsyscache::get_func_leakproof(func_oid)? {
+        return Ok(true);
+    }
+    // selfuncs.c:6265-6267: ereport(DEBUG2, errmsg_internal("not using
+    // statistics because function \"%s\" is not leakproof",
+    // get_func_name(func_oid))). get_func_name is NULL for an unknown
+    // function, which C's %s prints as "(null)".
+    let name = syscache_seams::pg_proc_proname::call(func_oid)?;
+    let name = name
+        .as_ref()
+        .map_or_else(|| "(null)".to_string(), |n| String::from_utf8_lossy(n.name_str()).into_owned());
+    elog_seams::ereport_msg::call(
+        types_error::DEBUG2,
+        format!("not using statistics because function \"{name}\" is not leakproof"),
+        None,
+    )?;
+    Ok(false)
 }
 
 // get_variable_numdistinct (selfuncs.c). Returns (ndistinct, isdefault).

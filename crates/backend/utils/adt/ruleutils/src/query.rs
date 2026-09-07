@@ -702,8 +702,12 @@ pub(crate) fn get_query_def<'mcx>(
     } else {
         (&query.targetList, query.havingQual, query.rtable.len())
     };
-    // C AcquireRewriteLocks the rtable here; lock acquisition is another
-    // lane, so names/columns read the live catalogs unlocked.
+    // ruleutils.c:5653-5663: before we begin to examine the query, acquire
+    // locks on referenced relations and fix up deleted columns in JOIN RTEs,
+    // so the catalog reads below are consistent. We are only deparsing, so
+    // AccessShareLock is enough. The tree is scribbled on (relkind,
+    // joinaliasvars), as C assumes it may be.
+    rewrite_handler_seams::acquire_rewrite_locks::call(ctx.mcx, query, false, false)?;
     let dpns = set_deparse_for_query(ctx.mcx, query, &ctx.namespaces)?;
 
     let save_varprefix = ctx.varprefix;

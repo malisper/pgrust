@@ -10,8 +10,12 @@ use ::types_error::{ErrorLocation, PgResult, WARNING};
 use ::types_fmgr::{
     varlena_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction,
 };
-use ::types_storage::ProcSignalReason::PROCSIG_LOG_MEMORY_CONTEXT;
+use ::types_core::ProcNumber;
+use ::types_storage::ProcSignalReason::{self, PROCSIG_LOG_MEMORY_CONTEXT};
 use elog::ereport;
+
+#[cfg(test)]
+mod tests;
 
 const MEMORY_CONTEXT_IDENT_DISPLAY_SIZE: usize = 1024;
 const COLS: usize = 10;
@@ -132,30 +136,60 @@ pub fn fc_pg_log_backend_memory_contexts(
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     let pid = fcinfo.arg_i32(0);
+    let found = log_backend_memory_contexts(
+        pid,
+        |pid| {
+            // mcxtfuncs.c:273-275: a backend (BackendPidGetProc) or an
+            // auxiliary process (AuxiliaryPidGetProc, proc.c:1124 -- the
+            // NUM_AUXILIARY_PROCS slots only, never an arbitrary PGPROC).
+            procarray::BackendPidGetProc(pid)
+                .map(|p| p.vxid.procNumber.load(Relaxed))
+                .or_else(|| lmgr_proc::AuxiliaryPidGetProc(pid))
+        },
+        |pid, reason, proc_number| {
+            if procsignal::SendProcSignal(pid, reason, proc_number) < 0 {
+                // C's %m renders the errno SendProcSignal left (ESRCH).
+                Err(elog::errno::current_errno())
+            } else {
+                Ok(())
+            }
+        },
+    )?;
+    Ok(Datum::from_bool(found))
+}
 
-    let mut proc = procarray::BackendPidGetProc(pid);
-    if proc.is_none() {
-        proc = lmgr_proc::ProcGlobal()
-            .allProcs
-            .iter()
-            .find(|p| pid != 0 && p.pid.load(Relaxed) == pid);
-    }
-    let Some(proc) = proc else {
+// pg_log_backend_memory_contexts (mcxtfuncs.c:258-300) over an injectable
+// process lookup (BackendPidGetProc / AuxiliaryPidGetProc -> ProcNumber) and
+// signal send (SendProcSignal; Err carries the errno it set): the
+// "lookup succeeded, signal failed" arm is a backend leaving its ProcSignal
+// slot between the two calls, which no SQL-level harness can force.
+fn log_backend_memory_contexts(
+    pid: i32,
+    lookup: impl FnOnce(i32) -> Option<ProcNumber>,
+    send: impl FnOnce(i32, ProcSignalReason, ProcNumber) -> Result<(), i32>,
+) -> PgResult<bool> {
+    // BackendPidGetProc() and AuxiliaryPidGetProc() return NULL if the pid
+    // isn't valid; by the time we signal, a process found here may have
+    // terminated on its own -- both arms are WARNINGs so a
+    // loop-through-resultset will not abort.
+    let Some(proc_number) = lookup(pid) else {
         ereport(WARNING)
             .errmsg(format!("PID {pid} is not a PostgreSQL server process"))
             .finish(loc("pg_log_backend_memory_contexts"))?;
-        return Ok(Datum::from_bool(false));
+        return Ok(false);
     };
 
-    let proc_number = proc.vxid.procNumber.load(Relaxed);
-    if procsignal::SendProcSignal(pid, PROCSIG_LOG_MEMORY_CONTEXT, proc_number) < 0 {
+    if let Err(errno) = send(pid, PROCSIG_LOG_MEMORY_CONTEXT, proc_number) {
+        // mcxtfuncs.c:297-298: "could not send signal to process %d: %m" --
+        // the strerror text of the errno SendProcSignal set (ESRCH).
         ereport(WARNING)
-            .errmsg(format!("could not send signal to process {pid}"))
+            .with_saved_errno(errno)
+            .errmsg(format!("could not send signal to process {pid}: %m"))
             .finish(loc("pg_log_backend_memory_contexts"))?;
-        return Ok(Datum::from_bool(false));
+        return Ok(false);
     }
 
-    Ok(Datum::from_bool(true))
+    Ok(true)
 }
 
 const fn b(foid: types_core::Oid, name: &'static str, retset: bool, func: PGFunction) -> FmgrBuiltin {

@@ -16464,6 +16464,7 @@ dependencies = [
  "rel_vocab",
  "relation_seams",
  "relcache",
+ "rewrite_handler_seams",
  "rewrite_manip",
  "ruleutils_seams",
  "snapmgr",

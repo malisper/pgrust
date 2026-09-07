@@ -461,8 +461,7 @@ pub fn pg_get_functiondef_worker(mcx: Mcx<'_>, funcid: Oid) -> PgResult<Option<S
     Ok(Some(buf))
 }
 
-// print_function_sqlbody (ruleutils.c:3556). C AcquireRewriteLocks each
-// query; lock acquisition is another lane (matches get_query_def note).
+// print_function_sqlbody (ruleutils.c:3556).
 fn print_function_sqlbody(mcx: Mcx<'_>, buf: &mut String, proc: &PgProcRow) -> PgResult<()> {
     let info = func_arg_info(proc)?;
     let mut dpns = crate::query::DeparseNamespace::empty(Vec::new());
@@ -476,6 +475,9 @@ fn print_function_sqlbody(mcx: Mcx<'_>, buf: &mut String, proc: &PgProcRow) -> P
         buf.push_str("BEGIN ATOMIC\n");
         for q in stmts.iter() {
             let query = q.as_query().expect("prosqlbody stmt is a Query");
+            // ruleutils.c:3590-3591: it seems advisable to get at least
+            // AccessShareLock on rels.
+            rewrite_handler_seams::acquire_rewrite_locks::call(mcx, query, false, false)?;
             let mut ctx =
                 crate::deparse::DeparseContext::new(mcx, crate::PRETTYFLAG_INDENT);
             ctx.namespaces.push(dpns.clone());
@@ -491,6 +493,8 @@ fn print_function_sqlbody(mcx: Mcx<'_>, buf: &mut String, proc: &PgProcRow) -> P
         buf.push_str("END");
     } else {
         let query = n.as_query().expect("prosqlbody is a Query");
+        // ruleutils.c:3604-3605.
+        rewrite_handler_seams::acquire_rewrite_locks::call(mcx, query, false, false)?;
         let mut ctx = crate::deparse::DeparseContext::new(mcx, 0);
         ctx.namespaces.push(dpns);
         ctx.wrap_column = crate::viewdef::WRAP_COLUMN_DEFAULT;

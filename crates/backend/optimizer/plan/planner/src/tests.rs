@@ -15,6 +15,19 @@ use crate::planner;
 // Serializes tests that flip or observe planner strategy GUCs.
 pub(crate) static GUC_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+// (level, message) of every ereport_msg the planner emitted, tree-wide.
+pub(crate) fn logged() -> &'static std::sync::Mutex<Vec<(types_error::ErrorLevel, String)>> {
+    static LOGGED: std::sync::Mutex<Vec<(types_error::ErrorLevel, String)>> =
+        std::sync::Mutex::new(Vec::new());
+    &LOGGED
+}
+
+fn named(s: &str) -> types_tuple::NameData {
+    let mut n = types_tuple::NameData::default();
+    n.namestrcpy(s);
+    n
+}
+
 pub(crate) fn install_fixtures() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
@@ -23,6 +36,18 @@ pub(crate) fn install_fixtures() {
         aclchk_seams::pg_class_aclmask::set(|_, _, mask, _| Ok(mask));
         backend_status_seams::pgstat_report_plan_id::set(|_, _| {});
         postgres_seams::check_for_interrupts::set(|| Ok(()));
+        // ereport(DEBUG2, ...) lines the planner emits (predtest.c:2017,
+        // selfuncs.c:6265) land here for the tests to inspect.
+        elog_seams::ereport_msg::set(|level, msg, _detail| {
+            logged().lock().unwrap_or_else(|e| e.into_inner()).push((level, msg));
+            Ok(())
+        });
+        syscache_seams::pg_proc_proname::set(|funcid| {
+            Ok(match funcid {
+                177 => Some(named("int4pl")),
+                _ => None,
+            })
+        });
         // get_rel_name for a relation with no pg_class row (C prints "(null)").
         syscache_seams::pg_class_relname::set(|_| Ok(None));
         syscache_seams::lookup_pg_type_shape::set(|typid| {
@@ -9538,4 +9563,40 @@ mod audit_b172 {
         assert_eq!(p.paramtype, 23);
         assert_eq!(p.location, 17);
     }
+}
+
+// audit-18.6 w2-009 a186-candidate-fp-adt-selfuncs-p3-9aa41568bf4490a7a1ad-1:
+// statistic_proc_security_check (selfuncs.c:6253-6270) reports the refusal to
+// use statistics through a non-leakproof function as
+// ereport(DEBUG2, errmsg_internal("not using statistics because function
+// \"%s\" is not leakproof", get_func_name(func_oid))).
+#[test]
+fn statistic_proc_security_check_logs_non_leakproof_at_debug2() {
+    install_fixtures();
+    let vardata = crate::selfuncs::VariableStatData {
+        var: None,
+        rel: None,
+        vartype: 23,
+        isunique: false,
+        stats: None,
+        acl_ok: false,
+    };
+    // acl_ok: no lookup, no log.
+    let ok = crate::selfuncs::VariableStatData { acl_ok: true, ..vardata };
+    assert!(crate::selfuncs::statistic_proc_security_check(&ok, 177).unwrap());
+    // InvalidOid: refused silently (selfuncs.c:6259).
+    let before = logged().lock().unwrap_or_else(|e| e.into_inner()).len();
+    assert!(!crate::selfuncs::statistic_proc_security_check(&vardata, 0).unwrap());
+    assert_eq!(logged().lock().unwrap_or_else(|e| e.into_inner()).len(), before);
+    // int4pl (177) is not leakproof in the fixture: refused with the DEBUG2 line.
+    assert!(!crate::selfuncs::statistic_proc_security_check(&vardata, 177).unwrap());
+    let lines: Vec<(types_error::ErrorLevel, String)> =
+        logged().lock().unwrap_or_else(|e| e.into_inner())[before..].to_vec();
+    assert_eq!(
+        lines,
+        vec![(
+            types_error::DEBUG2,
+            "not using statistics because function \"int4pl\" is not leakproof".to_string()
+        )]
+    );
 }

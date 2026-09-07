@@ -18,6 +18,18 @@ const F_VARCHAROUT: Oid = 1045;
 
 std::thread_local! {
     static OUT: core::cell::RefCell<Vec<u8>> = const { core::cell::RefCell::new(Vec::new()) };
+    static REWRITE_LOCK_CALLS: core::cell::RefCell<Vec<(bool, bool)>> =
+        const { core::cell::RefCell::new(Vec::new()) };
+}
+
+fn record_rewrite_locks<'mcx>(
+    _mcx: Mcx<'mcx>,
+    _query: &types_nodes::parsenodes::Query<'mcx>,
+    for_execute: bool,
+    for_update_pushed_down: bool,
+) -> PgResult<()> {
+    REWRITE_LOCK_CALLS.with(|c| c.borrow_mut().push((for_execute, for_update_pushed_down)));
+    Ok(())
 }
 
 fn cstring_out(bytes: &[u8]) -> Datum {
@@ -174,6 +186,9 @@ fn install() {
             }))
         });
         namespace_seams::type_is_visible::set(|_| Ok(true));
+        // AcquireRewriteLocks (rewriteHandler.c) as the deparser reaches it:
+        // record every call and its (forExecute, forUpdatePushedDown) flags.
+        rewrite_handler_seams::acquire_rewrite_locks::set(record_rewrite_locks);
         // CHECK_FOR_INTERRUPTS(): a pending cancel raises 57014, as
         // ProcessInterrupts does for QueryCancelPending.
         postgres_seams::check_for_interrupts::set(|| {
@@ -518,6 +533,34 @@ fn deparse_checks_for_interrupts() {
     assert_eq!(err.sqlstate(), types_error::ERRCODE_QUERY_CANCELED);
     // With no interrupt pending the same trees deparse.
     assert!(deparse_expression_pretty(mcx, node, REL_OID, false, PRETTYFLAG_INDENT).is_ok());
+}
+
+// audit-18.6 w2-009 a186-candidate-fp-adt-ruleutils-p3-ef9ce4957f7488166a94-1:
+// get_query_def (ruleutils.c:5663) calls AcquireRewriteLocks(query, false,
+// false) before deparsing -- AccessShareLock on every relation the query
+// mentions and the dropped-column fix-up of JOIN joinaliasvars -- so the
+// catalog reads that follow are consistent under concurrent DDL. pgrust
+// deparsed the tree with no lock walk at all.
+#[test]
+fn get_query_def_acquires_rewrite_locks() {
+    install();
+    let ctx = MemoryContext::new("ruleutils test");
+    let mcx = ctx.mcx();
+    // v1: a single SELECT with no subqueries, so exactly one get_query_def
+    // runs (a subquery RTE re-enters get_query_def and re-locks, as C does).
+    let action = include_str!("fixtures/v1_action.txt");
+    let q = readfuncs::stringToNode(mcx, action.trim_end()).unwrap();
+    let q = q.as_list().unwrap().nth(0).as_query().unwrap();
+    REWRITE_LOCK_CALLS.with(|c| c.borrow_mut().clear());
+    let mut dctx = deparse::DeparseContext::new(mcx, PRETTYFLAG_INDENT);
+    dctx.wrap_column = 0;
+    query::get_query_def(q, &mut dctx, None, true).unwrap();
+    let calls = REWRITE_LOCK_CALLS.with(|c| c.borrow().clone());
+    assert_eq!(
+        calls,
+        vec![(false, false)],
+        "get_query_def must AcquireRewriteLocks(query, false, false) exactly once per query"
+    );
 }
 
 fn query_def_err(action: &str) -> Box<PgError> {
