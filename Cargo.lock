@@ -8562,6 +8562,7 @@ dependencies = [
  "mcx",
  "miscinit",
  "pg_depend",
+ "objectaccess",
  "pg_largeobject",
  "snapmgr",
  "table",

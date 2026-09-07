@@ -27,6 +27,7 @@ catalog_indexing = { path = "../../catalog/catalog_indexing" }
 catalog_dependency = { path = "../../catalog/catalog_dependency" }
 pg_largeobject = { path = "../../catalog/pg_largeobject" }
 pg_depend = { path = "../../catalog/pg_depend" }
+objectaccess = { path = "../../catalog/objectaccess" }
 aclchk = { path = "../../catalog/aclchk" }
 adt_acl = { path = "../../utils/adt/acl" }
 miscinit = { path = "../../utils/init/miscinit" }

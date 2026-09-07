@@ -117,7 +117,7 @@ pub fn init_seams() {
 }
 
 #[cold]
-fn corrupt_page(loid: Oid, pageno: i32, size: usize) -> Box<types_error::PgError> {
+fn corrupt_page(loid: Oid, pageno: i32, size: i32) -> Box<types_error::PgError> {
     ereport(ERROR)
         .errcode(ERRCODE_DATA_CORRUPTED)
         .errmsg(format!(
@@ -125,6 +125,18 @@ fn corrupt_page(loid: Oid, pageno: i32, size: usize) -> Box<types_error::PgError
         ))
         .into_error()
         .into()
+}
+
+// getdatafield's data-field length check (inv_api.c:148-153) over the
+// varlena header word of a pg_largeobject data column: C's `int len =
+// VARSIZE(datafield) - VARHDRSZ` is signed, so a header word shorter than
+// VARHDRSZ reports a negative size instead of wrapping.
+fn datafield_len(loid: Oid, pageno: i32, varsize: usize) -> PgResult<usize> {
+    let len = varsize as i64 - VARHDRSZ as i64;
+    if len < 0 || len > LOBLKSIZE as i64 {
+        return Err(corrupt_page(loid, pageno, len as i32));
+    }
+    Ok(len as usize)
 }
 
 // HeapTupleHasNulls paranoia + GETSTRUCT + getdatafield: pageno, tid, and the
@@ -161,25 +173,22 @@ fn read_lo_page<'mcx>(
         if varatt::varatt_is_1b_e(p) || (!varatt::varatt_is_1b(p) && !varatt::varatt_is_4b_u(p)) {
             let image = core::slice::from_raw_parts(p, varatt::varsize_any(p));
             let flat = detoast::detoast_attr(mcx, image)?;
-            let payload = &flat[VARHDRSZ..];
-            if payload.len() > LOBLKSIZE_USZ {
-                return Err(corrupt_page(loid, pageno, payload.len()));
-            }
-            out.len = payload.len();
-            out.data[..payload.len()].copy_from_slice(payload);
+            let len = datafield_len(loid, pageno, flat.len())?;
+            out.len = len;
+            out.data[..len].copy_from_slice(&flat[VARHDRSZ..VARHDRSZ + len]);
         } else if varatt::varatt_is_1b(p) {
-            let len = varatt::varsize_1b(p) - varatt::VARHDRSZ_SHORT;
-            if len > LOBLKSIZE_USZ {
-                return Err(corrupt_page(loid, pageno, len));
-            }
+            // A short header's payload length equals the length C sees after
+            // detoast_attr re-forms it with a 4-byte header.
+            let len = datafield_len(
+                loid,
+                pageno,
+                varatt::varsize_1b(p) - varatt::VARHDRSZ_SHORT + VARHDRSZ,
+            )?;
             out.len = len;
             out.data[..len]
                 .copy_from_slice(core::slice::from_raw_parts(p.add(varatt::VARHDRSZ_SHORT), len));
         } else {
-            let len = varatt::varsize_4b(p) - VARHDRSZ;
-            if len > LOBLKSIZE_USZ {
-                return Err(corrupt_page(loid, pageno, len));
-            }
+            let len = datafield_len(loid, pageno, varatt::varsize_4b(p))?;
             out.len = len;
             out.data[..len]
                 .copy_from_slice(core::slice::from_raw_parts(p.add(VARHDRSZ), len));
@@ -196,7 +205,8 @@ pub fn inv_create<'mcx>(mcx: Mcx<'mcx>, lobjId: Oid) -> PgResult<Oid> {
     // for backwards-compatibility reasons.
     pg_depend::recordDependencyOnOwner(mcx, LargeObjectRelationId, lobjId_new, miscinit::GetUserId())?;
 
-    // InvokeObjectPostCreateHook: no object_access_hook can be installed.
+    // Post creation hook for new large object (inv_api.c:194).
+    objectaccess::InvokeObjectPostCreateHook(LargeObjectRelationId, lobjId_new, 0)?;
 
     xact::CommandCounterIncrement()?;
 
@@ -701,4 +711,26 @@ pub fn inv_truncate<'mcx>(
     xact::CommandCounterIncrement()?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // inv_api.c:148-153: `int len = VARSIZE(datafield) - VARHDRSZ` is signed,
+    // so a corrupt 4-byte header word smaller than VARHDRSZ is reported as a
+    // negative size under ERRCODE_DATA_CORRUPTED, never a wrap or a panic.
+    #[test]
+    fn getdatafield_reports_a_negative_size_for_a_short_header_word() {
+        for (varsize, expect) in [(3usize, -1), (0, -4), (LOBLKSIZE_USZ + VARHDRSZ + 1, 2049)] {
+            let err = datafield_len(1234, 7, varsize).expect_err("out-of-range data field");
+            assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
+            assert_eq!(
+                err.message(),
+                format!("pg_largeobject entry for OID 1234, page 7 has invalid data field size {expect}")
+            );
+        }
+        assert_eq!(datafield_len(1234, 7, VARHDRSZ).unwrap(), 0);
+        assert_eq!(datafield_len(1234, 7, LOBLKSIZE_USZ + VARHDRSZ).unwrap(), LOBLKSIZE_USZ);
+    }
 }
