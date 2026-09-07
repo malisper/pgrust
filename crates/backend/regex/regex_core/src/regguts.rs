@@ -235,7 +235,24 @@ pub struct Nfa {
     pub flags: i32,
     pub minmatchall: i32,
     pub maxmatchall: i32,
+    /// C regguts.h: `lastsb`/`lastsbused`/`lastab`/`lastabused` — states
+    /// and arcs come out of doubling batches (regc_nfa.c newstate:155-186,
+    /// allocarc:379-408) and REG_MAX_COMPILE_SPACE is charged per batch.
+    /// The arenas hold the objects; these counters reproduce the batch
+    /// geometry so the charge matches C byte for byte.
+    pub lastsb_nstates: usize,
+    pub lastsbused: usize,
+    pub lastab_narcs: usize,
+    pub lastabused: usize,
+    /// Batch bytes this NFA has charged (the part of C's
+    /// `nfa->v->spaceused` that freenfa gives back, regc_nfa.c:117/124).
     pub spaceused: usize,
+    /// C `nfa->v->spaceused` as it stood when this NFA was created: the
+    /// primary NFA's charge, which a sub-NFA (regcomp.c nfanode:2371
+    /// `newnfa(v, v->cm, v->nfa)`) shares the budget with. The parent
+    /// allocates nothing while a sub-NFA lives, so parent_spaceused +
+    /// spaceused is exactly C's counter.
+    pub parent_spaceused: usize,
 }
 
 

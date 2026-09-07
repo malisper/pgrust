@@ -94,7 +94,6 @@ pub struct Vars<'mcx> {
     pub ntree: i32,
     pub lacons: Vec<Subre>,
     pub nlacons: i32,
-    pub spaceused: usize,
     pub parse_depth: u32,
 }
 
@@ -2559,7 +2558,9 @@ pub fn nfanode(
 ) -> RegResult<(i64, Cnfa)> {
     let mut ret: i64 = 0;
 
-    let mut nfa = newnfa(v.mcx, &mut v.cm, true)?; // NOERRZ
+    // C regcomp.c:2371 newnfa(v, v->cm, v->nfa): the sub-NFA shares the
+    // compilation's REG_MAX_COMPILE_SPACE budget with the primary NFA.
+    let mut nfa = newnfa(v.mcx, &mut v.cm, Some(&v.nfa))?; // NOERRZ
     let init = nfa.init;
     let final_ = nfa.final_;
     dupnfa_cross(v.mcx, &mut nfa, &mut v.nfa, &mut v.cm, begin, end, init, final_)?;
@@ -2638,7 +2639,7 @@ pub fn pg_regcomp<'mcx>(
 
     let mut cm = empty_colormap();
     crate::regex_foundation::initcm(mcx, &mut cm)?;
-    let nfa = newnfa(mcx, &mut cm, false)?;
+    let nfa = newnfa(mcx, &mut cm, None)?;
 
     let mut subs: Vec<Option<NodeId>> = Vec::new();
     subs.resize(10, None);
@@ -2667,7 +2668,6 @@ pub fn pg_regcomp<'mcx>(
         ntree: 0,
         lacons: Vec::new(),
         nlacons: 0,
-        spaceused: 0,
         parse_depth: 0,
     };
 

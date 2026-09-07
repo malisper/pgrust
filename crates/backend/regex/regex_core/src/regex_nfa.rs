@@ -27,9 +27,35 @@ pub const COMPATIBLE: i32 = 3;
 pub const REPLACEARC: i32 = 4;
 
 
+/// C regguts.h:463-465
+/// `REG_MAX_COMPILE_SPACE = 500000 * (sizeof(struct state) + 4 * sizeof(struct arc))`,
+/// in C's own LP64 byte units (regguts.h:330 struct state = 56 bytes,
+/// regguts.h:303 struct arc = 72 bytes) so the threshold is C's threshold
+/// whatever this port's layout is.
+pub const C_SIZEOF_STATE: usize = 56;
+pub const C_SIZEOF_ARC: usize = 72;
+pub const REG_MAX_COMPILE_SPACE: usize = 500_000 * (C_SIZEOF_STATE + 4 * C_SIZEOF_ARC);
+
+/// regguts.h:321-323 / 348-350: a batch header is a chain pointer plus a
+/// size_t count — `offsetof(struct statebatch, s)` ==
+/// `offsetof(struct arcbatch, a)` == 16 on LP64.
+const C_BATCH_HEADER: usize = 16;
+/// regguts.h:327-328 / 353-354.
+const FIRSTSBSIZE: usize = 32;
+const MAXSBSIZE: usize = 1024;
+const FIRSTABSIZE: usize = 64;
+const MAXABSIZE: usize = 1024;
+
+/// regguts.h:351 `STATEBATCHSIZE(n)`.
 #[inline]
-pub fn reg_max_compile_space() -> usize {
-    500_000 * (core::mem::size_of::<State>() + 4 * core::mem::size_of::<Arc>())
+const fn statebatchsize(nstates: usize) -> usize {
+    nstates * C_SIZEOF_STATE + C_BATCH_HEADER
+}
+
+/// regguts.h:325 `ARCBATCHSIZE(n)`.
+#[inline]
+const fn arcbatchsize(narcs: usize) -> usize {
+    narcs * C_SIZEOF_ARC + C_BATCH_HEADER
 }
 
 
@@ -60,7 +86,14 @@ impl Nfa {
 }
 
 
-pub fn newnfa<'mcx>(mcx: Mcx<'mcx>, cm: &mut ColorMap, has_parent: bool) -> RegResult<Nfa> {
+/// C regc_nfa.c:47-100 `newnfa(v, cm, parent)`: `parent` is NULL for the
+/// primary NFA and the primary NFA for a sub-NFA (regcomp.c nfanode:2371).
+/// A sub-NFA shares the compilation's REG_MAX_COMPILE_SPACE budget with its
+/// parent (`nfa->v->spaceused`), so it starts charged with everything the
+/// parent already holds.
+pub fn newnfa<'mcx>(mcx: Mcx<'mcx>, cm: &mut ColorMap, parent: Option<&Nfa>) -> RegResult<Nfa> {
+    let has_parent = parent.is_some();
+    let parent_spaceused = parent.map_or(0, |p| p.parent_spaceused + p.spaceused);
     let placeholder = StateId(0);
     let mut nfa = Nfa {
         state_arena: Vec::new(),
@@ -79,7 +112,12 @@ pub fn newnfa<'mcx>(mcx: Mcx<'mcx>, cm: &mut ColorMap, has_parent: bool) -> RegR
         flags: 0,
         minmatchall: -1,
         maxmatchall: -1,
+        lastsb_nstates: 0,
+        lastsbused: 0,
+        lastab_narcs: 0,
+        lastabused: 0,
         spaceused: 0,
+        parent_spaceused,
     };
 
     nfa.post = newfstate(mcx, &mut nfa, b'@')?; // number 0
@@ -105,6 +143,13 @@ pub fn newnfa<'mcx>(mcx: Mcx<'mcx>, cm: &mut ColorMap, has_parent: bool) -> RegR
 pub fn freenfa(mut nfa: Nfa) {
     nfa.state_arena = Vec::new();
     nfa.arc_arena = Vec::new();
+    // C regc_nfa.c:113-126: every batch is freed and its bytes given back to
+    // nfa->v->spaceused (the parent's charge is untouched: parent_spaceused
+    // was a snapshot, and the parent allocated nothing meanwhile).
+    nfa.lastsb_nstates = 0;
+    nfa.lastsbused = 0;
+    nfa.lastab_narcs = 0;
+    nfa.lastabused = 0;
     nfa.spaceused = 0;
     nfa.live_states = None;
     nfa.slast = None;
@@ -123,10 +168,25 @@ pub fn newstate<'mcx>(_mcx: Mcx<'mcx>, nfa: &mut Nfa) -> RegResult<StateId> {
         nfa.free_states = nfa.st(f).next;
         s = f;
     } else {
-        if nfa.spaceused >= reg_max_compile_space() {
-            return Err(err_etoobig());
+        // C regc_nfa.c:155-186: take the next slot of the last statebatch,
+        // else charge a new (doubled, capped) batch against the whole
+        // compilation's budget — nfa->v->spaceused, i.e. this NFA plus the
+        // parent it was compiled from — BEFORE allocating it.
+        if nfa.lastsb_nstates != 0 && nfa.lastsbused < nfa.lastsb_nstates {
+            nfa.lastsbused += 1;
+        } else {
+            if nfa.parent_spaceused + nfa.spaceused >= REG_MAX_COMPILE_SPACE {
+                return Err(err_etoobig());
+            }
+            let nstates = if nfa.lastsb_nstates != 0 {
+                (nfa.lastsb_nstates * 2).min(MAXSBSIZE)
+            } else {
+                FIRSTSBSIZE
+            };
+            nfa.spaceused += statebatchsize(nstates);
+            nfa.lastsb_nstates = nstates;
+            nfa.lastsbused = 1;
         }
-        nfa.spaceused += core::mem::size_of::<State>();
         let idx = nfa.state_arena.len() as u32;
         nfa.state_arena.try_reserve(1)?;
         nfa.state_arena.push(State {
@@ -225,10 +285,22 @@ fn allocarc<'mcx>(_mcx: Mcx<'mcx>, nfa: &mut Nfa) -> RegResult<ArcId> {
         nfa.free_arcs = nfa.ar(a).outchain;
         return Ok(a);
     }
-    if nfa.spaceused >= reg_max_compile_space() {
-        return Err(err_etoobig());
+    // C regc_nfa.c:379-408: same batch discipline as newstate, on arcbatches.
+    if nfa.lastab_narcs != 0 && nfa.lastabused < nfa.lastab_narcs {
+        nfa.lastabused += 1;
+    } else {
+        if nfa.parent_spaceused + nfa.spaceused >= REG_MAX_COMPILE_SPACE {
+            return Err(err_etoobig());
+        }
+        let narcs = if nfa.lastab_narcs != 0 {
+            (nfa.lastab_narcs * 2).min(MAXABSIZE)
+        } else {
+            FIRSTABSIZE
+        };
+        nfa.spaceused += arcbatchsize(narcs);
+        nfa.lastab_narcs = narcs;
+        nfa.lastabused = 1;
     }
-    nfa.spaceused += core::mem::size_of::<Arc>();
     let idx = nfa.arc_arena.len() as u32;
     nfa.arc_arena.try_reserve(1)?;
     nfa.arc_arena.push(Arc {
