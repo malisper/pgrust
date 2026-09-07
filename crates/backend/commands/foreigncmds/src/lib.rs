@@ -1150,6 +1150,40 @@ fn fdw_import_routine(kind: types_nodes::FdwKind) -> Option<ImportForeignSchemaF
     Some(unsafe { core::mem::transmute::<usize, ImportForeignSchemaFn>(p) })
 }
 
+/// `FdwRoutine.ExecForeignTruncate` (fdwapi.h): the TRUNCATE half of the
+/// routine, per-provider and installed at init_seams time, keyed by
+/// [`FdwKind`] — the same split-routine shape as ImportForeignSchema above.
+/// A provider with no entry is C's `fdw_routine->ExecForeignTruncate == NULL`
+/// (tablecmds.c:2396 refuses the table with 0A000). `rels` are the foreign
+/// tables of ONE server (ExecuteTruncateGuts groups by serverid,
+/// tablecmds.c:2168-2201).
+pub type ExecForeignTruncateFn = for<'mcx> fn(
+    Mcx<'mcx>,
+    &[&types_rel::Relation<'mcx>],
+    DropBehavior,
+    bool,
+) -> PgResult<()>;
+
+static TRUNCATE_ROUTINES: [core::sync::atomic::AtomicUsize; types_nodes::NUM_FDW_KINDS] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; types_nodes::NUM_FDW_KINDS];
+
+pub fn install_fdw_truncate_routine(kind: types_nodes::FdwKind, f: ExecForeignTruncateFn) {
+    TRUNCATE_ROUTINES[kind.index()]
+        .store(f as usize, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// `GetFdwRoutineByServerId(serverid)->ExecForeignTruncate`: None is C's NULL
+/// slot.
+pub fn fdw_truncate_routine(kind: types_nodes::FdwKind) -> Option<ExecForeignTruncateFn> {
+    let p = TRUNCATE_ROUTINES[kind.index()].load(core::sync::atomic::Ordering::Relaxed);
+    if p == 0 {
+        return None;
+    }
+    // SAFETY: the slot only ever holds an ExecForeignTruncateFn stored by
+    // install_fdw_truncate_routine.
+    Some(unsafe { core::mem::transmute::<usize, ExecForeignTruncateFn>(p) })
+}
+
 /// IsImportableForeignTable (foreign.c): the LIMIT TO / EXCEPT filter, applied
 /// by the caller to each statement the FDW returned.
 pub fn IsImportableForeignTable(tablename: &str, stmt: &ImportForeignSchemaStmt<'_>) -> bool {

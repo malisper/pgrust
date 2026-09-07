@@ -281,7 +281,7 @@ fn get_batch_size_option(mcx: Mcx<'_>, relid: Oid) -> PgResult<i32> {
     Ok(batch_size)
 }
 
-fn parse_bool(value: &str) -> bool {
+pub(crate) fn parse_bool(value: &str) -> bool {
     // defGetBoolean's accepted spellings; validator-checked upstream.
     matches!(
         value.to_ascii_lowercase().as_str(),

@@ -2,7 +2,8 @@
 //! planner arms (rel size/paths/plan, remote estimates, join and
 //! grouped-aggregate pushdown), the connection layer (connection.c over
 //! `crates/interfaces/pgclient`), the scan executor (cursor-batched, async),
-//! and DML (per-row prepared statements, batch insert, direct modify).
+//! DML (per-row prepared statements, batch insert, direct modify), and
+//! TRUNCATE (postgresExecForeignTruncate).
 //! Unported: sort/LIMIT (ORDERED/FINAL) pushdown, pathkey paths
 //! (add_paths_with_pathkeys_for_rel), EPQ-capable pushed join paths under
 //! UPDATE/DELETE/row locks, row triggers on foreign tables, COPY into
@@ -20,6 +21,7 @@ pub mod plan;
 pub mod relinfo;
 pub mod shippable;
 pub mod transmission;
+pub mod truncate;
 
 use types_error::ErrorLocation;
 
@@ -38,6 +40,11 @@ pub fn init_seams() {
     foreigncmds::install_fdw_import_routine(
         types_nodes::FdwKind::PostgresFdw,
         import::postgresImportForeignSchema,
+    );
+    // postgres_fdw.c:595 ExecForeignTruncate.
+    foreigncmds::install_fdw_truncate_routine(
+        types_nodes::FdwKind::PostgresFdw,
+        truncate::postgresExecForeignTruncate,
     );
     // postgres_fdw.c:588-589 AnalyzeForeignTable / (AcquireSampleRowsFunc).
     commands_analyze::install_fdw_analyze_routine(

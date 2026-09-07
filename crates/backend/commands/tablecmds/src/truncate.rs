@@ -230,8 +230,21 @@ pub fn ExecuteTruncateGuts<'mcx>(
     }
 
     let my_subid = xact::GetCurrentSubTransactionId();
+    // ForeignTruncateInfo (tablecmds.c:2168-2201): the foreign tables of each
+    // foreign server, so every server truncates its tables in one callback.
+    // C keys a hash table by server OID; first-seen order stands in for its
+    // iteration order (one server = one entry either way).
+    let mut ft_groups: Vec<(Oid, Vec<&Relation<'mcx>>)> = Vec::new();
     for rel in rels.iter() {
         if rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE {
+            continue;
+        }
+        if rel.rd_rel.relkind == types_rel::RELKIND_FOREIGN_TABLE {
+            let serverid = foreigncmds::foreign::GetForeignServerIdByRelId(rel.rd_id)?;
+            match ft_groups.iter_mut().find(|(sid, _)| *sid == serverid) {
+                Some((_, group)) => group.push(rel),
+                None => ft_groups.push((serverid, vec![rel])),
+            }
             continue;
         }
         if rel.rd_createSubid.get() == my_subid
@@ -263,6 +276,15 @@ pub fn ExecuteTruncateGuts<'mcx>(
             )?;
         }
         pgstat::relation::pgstat_count_truncate(rel.rd_id, rel.rd_rel.relisshared);
+    }
+    // Now go through the groups and truncate foreign tables
+    // (tablecmds.c:2266-2292): truncate_check_rel has already proved every
+    // server's wrapper carries ExecForeignTruncate.
+    for (serverid, group) in ft_groups.iter() {
+        let kind = foreigncmds::foreign::GetFdwRoutineByServerId(mcx, *serverid)?;
+        let routine = foreigncmds::fdw_truncate_routine(kind)
+            .expect("truncate_check_rel() has checked that already");
+        routine(mcx, group, behavior, restart_seqs)?;
     }
     for &seq_relid in seq_relids.iter() {
         sequence_seams::reset_sequence::call(mcx, seq_relid)?;
@@ -391,18 +413,19 @@ fn truncate_check_rel(
     relname: &str,
 ) -> PgResult<()> {
     if relkind == types_rel::RELKIND_FOREIGN_TABLE {
-        // C resolves the routine first, so a handlerless wrapper errors
-        // "foreign-data wrapper ... has no handler" before this 0A000; no
-        // in-tree FDW models ExecForeignTruncate, so resolution otherwise
-        // always falls through to the cannot-truncate error.
+        // Only foreign tables whose wrapper supports TRUNCATE
+        // (fdwroutine->ExecForeignTruncate, tablecmds.c:2391-2401). C resolves
+        // the routine first, so a handlerless wrapper errors "foreign-data
+        // wrapper ... has no handler" before this 0A000.
         let serverid = foreigncmds::foreign::GetForeignServerIdByRelId(relid)?;
-        let _routine = foreigncmds::foreign::GetFdwRoutineByServerId(mcx, serverid)?;
-        return Err(Box::new(
-            PgError::new(ERROR, format!("cannot truncate foreign table \"{relname}\""))
-                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
-        ));
-    }
-    if relkind != RELKIND_RELATION && relkind != RELKIND_PARTITIONED_TABLE {
+        let kind = foreigncmds::foreign::GetFdwRoutineByServerId(mcx, serverid)?;
+        if foreigncmds::fdw_truncate_routine(kind).is_none() {
+            return Err(Box::new(
+                PgError::new(ERROR, format!("cannot truncate foreign table \"{relname}\""))
+                    .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+            ));
+        }
+    } else if relkind != RELKIND_RELATION && relkind != RELKIND_PARTITIONED_TABLE {
         return Err(Box::new(
             PgError::new(ERROR, format!("\"{relname}\" is not a table"))
                 .with_sqlstate(ERRCODE_WRONG_OBJECT_TYPE),

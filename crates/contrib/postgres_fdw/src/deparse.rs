@@ -1459,6 +1459,30 @@ pub fn deparse_relation<'mcx>(
     Ok(())
 }
 
+/// deparseTruncateSql (deparse.c:2644): `TRUNCATE <rels> {RESTART|CONTINUE}
+/// IDENTITY [RESTRICT|CASCADE]` over one server's foreign tables.
+pub(crate) fn deparse_truncate_sql<'mcx>(
+    buf: &mut PgString<'mcx>,
+    mcx: Mcx<'mcx>,
+    rels: &[&types_rel::Relation<'mcx>],
+    behavior: types_nodes::parsenodes::DropBehavior,
+    restart_seqs: bool,
+) -> PgResult<()> {
+    buf.push_str("TRUNCATE ");
+    for (i, rel) in rels.iter().enumerate() {
+        if i > 0 {
+            buf.push_str(", ");
+        }
+        deparse_relation(buf, mcx, rel)?;
+    }
+    buf.push_str(if restart_seqs { " RESTART IDENTITY" } else { " CONTINUE IDENTITY" });
+    match behavior {
+        types_nodes::parsenodes::DropBehavior::DROP_RESTRICT => buf.push_str(" RESTRICT"),
+        types_nodes::parsenodes::DropBehavior::DROP_CASCADE => buf.push_str(" CASCADE"),
+    }
+    Ok(())
+}
+
 /// deparseAnalyzeSizeSql (deparse.c:2497): the remote page count, at the
 /// LOCAL block size (C's own note: "perhaps debatable").
 pub(crate) fn deparse_analyze_size_sql<'mcx>(
