@@ -1,4 +1,4 @@
-//! Port of `src/common/compression.c` (PostgreSQL 18.3): shared code for
+//! Port of `src/common/compression.c` (PostgreSQL 18.6): shared code for
 //! compression methods and specifications.
 //!
 //! A compression specification specifies the parameters that should be used
@@ -83,6 +83,37 @@ pub fn get_compress_algorithm_name(algorithm: PgCompressAlgorithm) -> &'static s
         PgCompressAlgorithm::Gzip => "gzip",
         PgCompressAlgorithm::Lz4 => "lz4",
         PgCompressAlgorithm::Zstd => "zstd",
+    }
+}
+
+/// C `parse_compress_options` (compression.c:426, `#ifdef FRONTEND`).
+///
+/// Basic parsing of a value specified through a command-line option,
+/// commonly -Z/--compress, by the frontend utilities (pg_dump, pg_basebackup,
+/// pg_receivewal). The parsing consists of a METHOD:DETAIL string fed later
+/// to [`parse_compress_specification`]. This only extracts METHOD and DETAIL;
+/// if only an integer is found, the method is implied by the value specified.
+///
+/// Returns `(algorithm, detail)`; C's `*detail = NULL` is `None`.
+pub fn parse_compress_options(option: &str) -> (String, Option<String>) {
+    // Check whether the compression specification consists of a bare
+    // integer. For backward-compatibility, assume "none" if the integer
+    // found is zero and "gzip" otherwise. (compression.c:439-452: strtol
+    // with *endp == '\0'; an empty option converts nothing, endp == option,
+    // result 0.)
+    let (result, consumed) = strtol10(option);
+    if consumed == option.len() {
+        if result == 0 {
+            return ("none".to_string(), None);
+        }
+        return ("gzip".to_string(), Some(option.to_string()));
+    }
+
+    // Check whether there is a compression detail following the algorithm
+    // name (compression.c:458-475: split at the first ':').
+    match option.find(':') {
+        None => (option.to_string(), None),
+        Some(sep) => (option[..sep].to_string(), Some(option[sep + 1..].to_string())),
     }
 }
 

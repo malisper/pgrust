@@ -169,3 +169,76 @@ fn boolean_forms() {
         let _ = s;
     }
 }
+
+// C `parse_compress_options` (compression.c:426, FRONTEND): the -Z/--compress
+// splitter used by pg_dump / pg_basebackup / pg_receivewal.
+#[test]
+fn parse_options_bare_integer_zero_is_none() {
+    // compression.c:441-446: a bare 0 means "none" with no detail.
+    assert_eq!(parse_compress_options("0"), ("none".to_string(), None));
+    assert_eq!(parse_compress_options("-0"), ("none".to_string(), None));
+    // strtol("") converts nothing, endp == option, *endp == '\0', result 0.
+    assert_eq!(parse_compress_options(""), ("none".to_string(), None));
+}
+
+#[test]
+fn parse_options_bare_integer_nonzero_is_gzip() {
+    // compression.c:447-451: any other bare integer implies gzip, and the
+    // detail is the ORIGINAL option text (pstrdup(option)), not a
+    // re-rendering of the parsed value.
+    assert_eq!(parse_compress_options("5"), ("gzip".to_string(), Some("5".to_string())));
+    assert_eq!(parse_compress_options("+7"), ("gzip".to_string(), Some("+7".to_string())));
+    assert_eq!(parse_compress_options(" 9"), ("gzip".to_string(), Some(" 9".to_string())));
+    assert_eq!(parse_compress_options("-1"), ("gzip".to_string(), Some("-1".to_string())));
+}
+
+#[test]
+fn parse_options_method_only() {
+    // compression.c:459-463: no ':' → the whole option is the algorithm.
+    assert_eq!(parse_compress_options("gzip"), ("gzip".to_string(), None));
+    assert_eq!(parse_compress_options("zstd"), ("zstd".to_string(), None));
+    // Not an integer and not a known name: C does not validate here.
+    assert_eq!(parse_compress_options("bogus"), ("bogus".to_string(), None));
+    assert_eq!(parse_compress_options("5x"), ("5x".to_string(), None));
+    // strtol converts nothing on a bare sign; *endp is '+', so ':' lookup.
+    assert_eq!(parse_compress_options("+"), ("+".to_string(), None));
+}
+
+#[test]
+fn parse_options_method_and_detail() {
+    // compression.c:464-474: split at the FIRST ':'; detail is everything
+    // after it (may itself contain ':' or be empty).
+    assert_eq!(
+        parse_compress_options("gzip:5"),
+        ("gzip".to_string(), Some("5".to_string()))
+    );
+    assert_eq!(
+        parse_compress_options("zstd:level=3,long"),
+        ("zstd".to_string(), Some("level=3,long".to_string()))
+    );
+    assert_eq!(parse_compress_options("lz4:"), ("lz4".to_string(), Some(String::new())));
+    assert_eq!(parse_compress_options(":5"), (String::new(), Some("5".to_string())));
+    assert_eq!(
+        parse_compress_options("a:b:c"),
+        ("a".to_string(), Some("b:c".to_string()))
+    );
+}
+
+#[test]
+fn parse_options_feeds_specification_like_pg_dump() {
+    // pg_dump.c:683-700 shape: split, then parse_compress_algorithm +
+    // parse_compress_specification on the pieces.
+    let (alg, detail) = parse_compress_options("gzip:7");
+    let alg = parse_compress_algorithm(&alg).expect("gzip");
+    let spec = parse_compress_specification(alg, detail.as_deref());
+    assert_eq!(spec.algorithm, PgCompressAlgorithm::Gzip);
+    assert_eq!(spec.level, 7);
+    assert!(validate_compress_specification(&spec).is_none());
+
+    let (alg, detail) = parse_compress_options("0");
+    let alg = parse_compress_algorithm(&alg).expect("none");
+    let spec = parse_compress_specification(alg, detail.as_deref());
+    assert_eq!(spec.algorithm, PgCompressAlgorithm::None);
+    assert_eq!(spec.level, 0);
+    assert!(validate_compress_specification(&spec).is_none());
+}
