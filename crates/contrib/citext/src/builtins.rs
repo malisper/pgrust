@@ -4,7 +4,7 @@
 
 use datum::Datum;
 use types_error::PgResult;
-use types_fmgr::{varlena_result, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction};
+use types_fmgr::{FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction};
 
 const LIBRARY: &str = "citext";
 
@@ -88,20 +88,21 @@ fc_citext_pattern_bool_op! {
     fc_citext_pattern_ge: |r: i32| r >= 0;
 }
 
-// `citext_smaller`/`citext_larger` (citext.c): return whichever operand sorts
-// smaller/larger, verbatim (the winning input's own bytes, not re-lowered).
+// `citext_smaller`/`citext_larger` (citext.c:391-411): return whichever
+// operand sorts smaller/larger — the winning input datum itself
+// (`PG_RETURN_TEXT_P(result)` on the `PG_GETARG_TEXT_PP` pointer), so a
+// stored short-header value keeps its header form, exactly like
+// `text_smaller`/`text_larger`. Never re-materialized.
 fn citext_minmax(fcinfo: &mut Fcinfo, want_smaller: bool) -> PgResult<Datum> {
     // SAFETY: catalog args are non-null citext/text varlenas (strict fn).
     let (a, b) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?) };
-    let (a, b) = (a.data(), b.data());
-    let cmp = crate::citextcmp(a, b, fcinfo.get_collation())?;
+    let cmp = crate::citextcmp(a.data(), b.data(), fcinfo.get_collation())?;
     let winner = if (want_smaller && cmp < 0) || (!want_smaller && cmp > 0) {
         a
     } else {
         b
     };
-    let mcx = fcinfo.result_mcx();
-    Ok(varlena_result(varlena::cstring_to_text(mcx, winner)?))
+    Ok(Datum::from_usize(winner.as_ptr() as usize))
 }
 
 fn fc_citext_smaller(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {

@@ -33,20 +33,24 @@ pub fn citextcmp(left: &[u8], right: &[u8], collid: Oid) -> PgResult<i32> {
     varlena::varstr_cmp(&lcstr, &rcstr, collid)
 }
 
-/// `internal_citext_pattern_cmp` (citext.c): byte comparison of the
+/// `internal_citext_pattern_cmp` (citext.c:86-93): byte comparison of the
 /// lowercased operands with a length tiebreak (no collation).
+///
+/// C returns the raw `memcmp(lcstr, rcstr, Min(llen, rlen))` result when the
+/// common prefix differs — the difference of the first differing bytes, as
+/// unsigned chars, on every libc the oracle runs on — and only the length
+/// tiebreak normalizes to -1/1. `citext_pattern_cmp` exposes that int4
+/// verbatim (C: `'a'` vs `'c'` = -2), so the byte difference is kept here.
 pub fn citext_pattern_cmp(left: &[u8], right: &[u8]) -> PgResult<i32> {
     let lcstr = lower(left)?;
     let rcstr = lower(right)?;
-    let cmp_len = lcstr.len().min(rcstr.len());
-    Ok(match lcstr[..cmp_len].cmp(&rcstr[..cmp_len]) {
+    if let Some((l, r)) = lcstr.iter().zip(rcstr.iter()).find(|(l, r)| l != r) {
+        return Ok(i32::from(*l) - i32::from(*r));
+    }
+    Ok(match lcstr.len().cmp(&rcstr.len()) {
         core::cmp::Ordering::Less => -1,
         core::cmp::Ordering::Greater => 1,
-        core::cmp::Ordering::Equal => match lcstr.len().cmp(&rcstr.len()) {
-            core::cmp::Ordering::Less => -1,
-            core::cmp::Ordering::Greater => 1,
-            core::cmp::Ordering::Equal => 0,
-        },
+        core::cmp::Ordering::Equal => 0,
     })
 }
 
@@ -138,6 +142,22 @@ mod tests {
         assert_eq!(citext_pattern_cmp(b"ab", b"AB").unwrap(), 0);
         assert!(citext_pattern_cmp(b"AB", b"ABC").unwrap() < 0);
         assert!(citext_pattern_cmp(b"ABC", b"AB").unwrap() > 0);
+    }
+
+    // internal_citext_pattern_cmp (citext.c:86) returns the raw memcmp()
+    // result when the common prefix differs — the difference of the first
+    // differing (unsigned) bytes — and normalizes to -1/1 only in the length
+    // tiebreak (citext.c:87-93). The SQL function citext_pattern_cmp exposes
+    // that int4 verbatim (C: 'a' vs 'c' = -2, 'A' vs 'z' = -25).
+    #[test]
+    fn pattern_cmp_returns_memcmp_byte_difference() {
+        init();
+        assert_eq!(citext_pattern_cmp(b"a", b"c").unwrap(), -2);
+        assert_eq!(citext_pattern_cmp(b"c", b"a").unwrap(), 2);
+        assert_eq!(citext_pattern_cmp(b"A", b"z").unwrap(), -25);
+        assert_eq!(citext_pattern_cmp(b"ab", b"ABC").unwrap(), -1);
+        assert_eq!(citext_pattern_cmp(b"abc", b"AB").unwrap(), 1);
+        assert_eq!(citext_pattern_cmp(b"abc", b"ABC").unwrap(), 0);
     }
 
     #[test]
