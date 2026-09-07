@@ -123,7 +123,7 @@ impl CompactAttribute {
                 TYPALIGN_CHAR => 1,
                 TYPALIGN_DOUBLE => ALIGNOF_DOUBLE,
                 TYPALIGN_SHORT => ALIGNOF_SHORT,
-                _ => panic!("invalid attalign value: {}", src.attalign),
+                _ => panic!("invalid attalign value: {}", src.attalign as u8 as char),
             },
         }
     }
@@ -206,5 +206,27 @@ impl<'mcx> TupleDescData<'mcx> {
 
     pub fn populate_compact_attribute(&mut self, attnum: usize) {
         self.compact_attrs[attnum] = CompactAttribute::populate_from(&self.attrs[attnum]);
+    }
+}
+
+#[cfg(test)]
+mod compact_attribute_tests {
+    extern crate std;
+    use super::*;
+
+    // tupdesc.c:105 elog(ERROR, "invalid attalign value: %c", src->attalign):
+    // the message carries the attalign byte as a character, never its
+    // decimal value.
+    #[test]
+    fn invalid_attalign_message_is_the_character() {
+        let src = FormData_pg_attribute { attalign: b'z' as i8, ..Default::default() };
+        let payload = std::panic::catch_unwind(|| CompactAttribute::populate_from(&src))
+            .expect_err("invalid attalign must raise");
+        let msg = payload
+            .downcast_ref::<std::string::String>()
+            .map(|s| s.as_str())
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .expect("string panic payload");
+        assert_eq!(msg, "invalid attalign value: z");
     }
 }
