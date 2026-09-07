@@ -92,9 +92,8 @@ pub fn DefineAggregate<'mcx>(
     let mut numDirectArgs: i32 = 0;
     let mut proparallel = PROPARALLEL_UNSAFE;
 
-    let mut buf = [""; 4];
-    let parts = name_parts(name, &mut buf);
-    let (aggNamespace, aggName) = catalog_namespace::QualifiedNameGetCreationNamespace(mcx, parts)?;
+    let parts = name_parts(name);
+    let (aggNamespace, aggName) = catalog_namespace::QualifiedNameGetCreationNamespace(mcx, &parts)?;
 
     let aclresult = aclchk::object_aclcheck(
         NAMESPACE_RELATION_ID,
@@ -408,12 +407,15 @@ fn extractModify(mcx: Mcx<'_>, defel: &DefElem<'_>) -> PgResult<i8> {
     }
 }
 
-fn name_parts<'a, 'mcx>(names: &NodeList<'mcx>, buf: &'a mut [&'mcx str; 4]) -> &'a [&'mcx str] {
-    let n = names.len().min(buf.len());
-    for (i, slot) in buf.iter_mut().enumerate().take(n) {
-        *slot = names.nth(i).as_string().expect("name list holds String nodes").sval;
-    }
-    &buf[..n]
+// C passes the parser's name List through untouched (aggregatecmds.c:101);
+// DeconstructQualifiedName (namespace.c) renders the WHOLE list in its
+// too-many-dotted-names / cross-database errors, so every part is carried,
+// never a fixed-size prefix.
+fn name_parts<'mcx>(names: &NodeList<'mcx>) -> Vec<&'mcx str> {
+    names
+        .iter()
+        .map(|n| n.as_string().expect("name list holds String nodes").sval)
+        .collect()
 }
 
 #[cfg(test)]
