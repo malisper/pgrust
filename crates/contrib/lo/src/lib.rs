@@ -19,17 +19,42 @@ fn internal_err(msg: String) -> Box<PgError> {
     Box::new(PgError::error(msg))
 }
 
-// C's atooid: (Oid) strtoul(x, NULL, 10).
+// C's atooid (postgres_ext.h:43): (Oid) strtoul(x, NULL, 10).  glibc
+// strtoul skips C-locale isspace, takes one optional '+'/'-' (a negative
+// value wraps modulo 2^64), returns ULONG_MAX when the magnitude overflows
+// unsigned long, and ignores trailing garbage; the Oid cast then truncates.
 fn atooid(s: &[u8]) -> Oid {
     let mut i = 0;
-    while i < s.len() && (s[i] == b' ' || s[i] == b'\t') {
+    while i < s.len() && matches!(s[i], b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r') {
         i += 1;
     }
-    let mut val: u32 = 0;
+    let mut neg = false;
+    match s.get(i) {
+        Some(b'-') => {
+            neg = true;
+            i += 1;
+        }
+        Some(b'+') => i += 1,
+        _ => {}
+    }
+    let mut acc: u64 = 0;
+    let mut overflow = false;
     while i < s.len() && s[i].is_ascii_digit() {
-        val = val.wrapping_mul(10).wrapping_add((s[i] - b'0') as u32);
+        if !overflow {
+            match acc.checked_mul(10).and_then(|v| v.checked_add(u64::from(s[i] - b'0'))) {
+                Some(v) => acc = v,
+                None => overflow = true,
+            }
+        }
         i += 1;
     }
+    let val = if overflow {
+        u64::MAX
+    } else if neg {
+        acc.wrapping_neg()
+    } else {
+        acc
+    };
     val as Oid
 }
 
@@ -117,4 +142,30 @@ pub fn init_seams() {
         lookup,
         pg_init: None,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::atooid;
+
+    // postgres_ext.h:43 — atooid(x) is (Oid) strtoul(x, NULL, 10): C-locale
+    // isspace skip, one optional sign, ULONG_MAX on overflow, then the Oid
+    // truncation.  lo.c:87/104 feed it SPI_getvalue() text of any column type.
+    #[test]
+    fn atooid_has_strtoul_semantics() {
+        assert_eq!(atooid(b"43210"), 43210);
+        assert_eq!(atooid(b" \t43210"), 43210);
+        assert_eq!(atooid(b"+43210"), 43210);
+        assert_eq!(atooid(b"\n\x0b\x0c\r43210"), 43210);
+        assert_eq!(atooid(b" +43210xyz"), 43210);
+        assert_eq!(atooid(b"-1"), 4294967295);
+        assert_eq!(atooid(b"-4294967296"), 0);
+        assert_eq!(atooid(b"4294967296"), 0);
+        assert_eq!(atooid(b"99999999999999999999999"), 4294967295);
+        assert_eq!(atooid(b"-99999999999999999999999"), 4294967295);
+        assert_eq!(atooid(b"abc"), 0);
+        assert_eq!(atooid(b""), 0);
+        assert_eq!(atooid(b"+"), 0);
+        assert_eq!(atooid(b"- 5"), 0);
+    }
 }
