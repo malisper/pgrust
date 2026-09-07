@@ -4113,6 +4113,7 @@ dependencies = [
  "rewrite_handler_seams",
  "rls",
  "snapmgr",
+ "syscache_seams",
  "table",
  "tableam",
  "tableam_vocab",

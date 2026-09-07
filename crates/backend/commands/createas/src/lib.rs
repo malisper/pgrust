@@ -7,7 +7,7 @@ use createas_seams::IntoRelState;
 use mcx::Mcx;
 use types_core::{InvalidOid, Oid};
 use types_error::{
-    PgResult, ERRCODE_DUPLICATE_TABLE, ERRCODE_FEATURE_NOT_SUPPORTED,
+    PgError, PgResult, ERRCODE_DUPLICATE_TABLE, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INDETERMINATE_COLLATION, ERRCODE_SYNTAX_ERROR, ERROR, NOTICE,
 };
 use types_nodes::nodes_enums::CmdType;
@@ -19,6 +19,9 @@ use types_portal::{
 };
 use types_slot::{SlotData, EXEC_FLAG_WITH_NO_DATA};
 use types_tuple::TupleDescData;
+
+#[cfg(test)]
+mod tests;
 
 pub fn init_seams() {
     createas_seams::intorel_startup::set(intorel_startup);
@@ -133,7 +136,13 @@ pub fn ExecCreateTableAs<'mcx>(
     let mut dest = tcop_dest::DestReceiver::IntoRel(IntoRelState::new(mcx, into_node));
 
     let rewritten = rewrite_handler_seams::query_rewrite::call(mcx, query)?;
-    assert_eq!(rewritten.len(), 1, "unexpected rewrite result for CREATE TABLE AS SELECT");
+    // createas.c:317-318: SELECT should never rewrite to more or less than
+    // one SELECT query — elog(ERROR), not an abort.
+    if rewritten.len() != 1 {
+        return Err(Box::new(PgError::error(
+            "unexpected rewrite result for CREATE TABLE AS SELECT",
+        )));
+    }
     let query = rewritten.into_iter().next().expect("checked above");
     debug_assert!(query.commandType == CmdType::CMD_SELECT);
 

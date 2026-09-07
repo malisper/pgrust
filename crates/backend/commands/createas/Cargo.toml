@@ -45,3 +45,6 @@ tableam = { path = "../../access/table/tableam" }
 tablecmds = { path = "../tablecmds" }
 tcop_dest = { path = "../../tcop/dest" }
 xact = { path = "../../access/transam/xact" }
+
+[dev-dependencies]
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
