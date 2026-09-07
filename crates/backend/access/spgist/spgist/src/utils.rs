@@ -261,6 +261,23 @@ pub fn index_getprocid(index: &Relation<'_>, attno_0based: usize, procnum: u16) 
         .unwrap_or(InvalidOid)
 }
 
+/// C index_getprocinfo (indexam.c:951-959): the key column's parsed opclass
+/// options (RelationGetIndexAttOptions) ride every support proc's fn_expr.
+/// Uninstalled seam = unit-test / bootstrap paths, where no opclass has
+/// options (as gist's initGISTstate).
+pub fn index_opclass_options(
+    index: &Relation<'_>,
+) -> PgResult<Option<Box<::types_fmgr::OpclassOptions>>> {
+    if !indexam_seams::relation_get_index_att_options::is_installed() {
+        return Ok(None);
+    }
+    let attoptions = indexam_seams::relation_get_index_att_options::call(index)?;
+    Ok(attoptions
+        .get(spgKeyColumn)
+        .and_then(|o| o.as_ref())
+        .map(|img| Box::new(::types_fmgr::OpclassOptions(img.clone()))))
+}
+
 // GetIndexInputType (spgutils.c); single-key AM.
 fn get_index_input_type(index: &Relation<'_>) -> PgResult<Oid> {
     let opcintype = index.rd_opcintype[spgKeyColumn];
@@ -306,6 +323,13 @@ pub fn spgGetCache(index: &Relation<'_>) -> PgResult<SpGistCache> {
         ))));
     }
     let mut config_fn = fmgr_seams::fmgr_info::call(config_oid)?;
+    // C spgutils.c:215 index_getprocinfo: the config proc sees the column's
+    // opclass options on fn_expr (indexam.c:951-959).
+    let config_opts = index_opclass_options(index)?;
+    if let Some(o) = &config_opts {
+        // SAFETY: config_opts outlives the call below.
+        unsafe { config_fn.set_opclass_options(o) };
+    }
     let cfgin = spgConfigIn { attType: atttype };
     {
         // C: FunctionCall2Coll(procinfo, index->rd_indcollation[spgKeyColumn], ...)
@@ -425,7 +449,7 @@ pub fn initSpGistState<'mcx>(
         ::types_fmgr::FmgrInfo::unresolved()
     };
 
-    Ok(SpGistState {
+    let mut state = SpGistState {
         config: cache.config,
         attType: cache.attType,
         attLeafType: cache.attLeafType,
@@ -438,9 +462,14 @@ pub fn initSpGistState<'mcx>(
         chooseFn: resolve(SPGIST_CHOOSE_PROC)?,
         picksplitFn: resolve(SPGIST_PICKSPLIT_PROC)?,
         compressFn: compress,
+        opclassOptions: None,
         frame1: ::types_fmgr::LocalFcinfo::<1>::new(0),
         frame2: ::types_fmgr::LocalFcinfo::<2>::new(0),
-    })
+    };
+    // C index_getprocinfo: choose/picksplit/compress see the column's opclass
+    // options (spgdoinsert.c:828/1934/1952).
+    state.set_opclass_options(index_opclass_options(index)?);
+    Ok(state)
 }
 
 // ---------------------------------------------------------------------------
@@ -1367,7 +1396,7 @@ mod node_label_tests {
         SpGistTypeDesc { type_, attlen, attbyval, attalign: b's' as i8, attstorage: b'p' as i8 }
     }
 
-    fn state<'m>(mcx: Mcx<'m>) -> SpGistState<'m> {
+    pub(super) fn state<'m>(mcx: Mcx<'m>) -> SpGistState<'m> {
         let text = desc(25, -1, false);
         let int2 = desc(21, 2, true);
         let fi = || ::types_fmgr::FmgrInfo::new(mock_proc, 0, 2, true, false);
@@ -1398,6 +1427,7 @@ mod node_label_tests {
             chooseFn: fi(),
             picksplitFn: fi(),
             compressFn: fi(),
+            opclassOptions: None,
             frame1: ::types_fmgr::LocalFcinfo::new(0),
             frame2: ::types_fmgr::LocalFcinfo::new(0),
         }
@@ -1436,5 +1466,34 @@ mod node_label_tests {
             .expect_err("mixed null/non-null labels must be rejected");
         assert_eq!(err.message(), "some but not all node labels are null in SPGiST inner tuple");
         assert_eq!(err.sqlstate(), ::types_error::ERRCODE_INTERNAL_ERROR);
+    }
+}
+
+#[cfg(test)]
+mod opclass_options_tests {
+    use super::node_label_tests::state;
+    use ::types_fmgr::OpclassOptions;
+
+    // indexam.c:951-959 index_getprocinfo, reached from spgutils.c:215 and
+    // spgdoinsert.c:828/1934/1952: every resolved support proc carries the
+    // key column's opclass options on fn_expr; an unresolved compress proc
+    // (never looked up in C) carries none (audit row spgscan-6704c03f).
+    #[test]
+    fn support_procs_carry_opclass_options() {
+        let ctx = ::mcx::MemoryContext::new("spgist opclass options test");
+        let mut st = state(ctx.mcx());
+        assert_eq!(st.chooseFn.opclass_options(), None);
+
+        let mut img = vec![0u8; 8];
+        img[4..8].copy_from_slice(&2024i32.to_ne_bytes());
+        let img = img.into_boxed_slice();
+        st.set_opclass_options(Some(Box::new(OpclassOptions(img.clone()))));
+        assert_eq!(st.chooseFn.opclass_options(), Some(&img[..]));
+        assert_eq!(st.picksplitFn.opclass_options(), Some(&img[..]));
+        assert_eq!(st.compressFn.opclass_options(), None, "unresolved compress proc");
+
+        st.compressFn.fn_oid = 4242;
+        st.set_opclass_options(Some(Box::new(OpclassOptions(img.clone()))));
+        assert_eq!(st.compressFn.opclass_options(), Some(&img[..]));
     }
 }

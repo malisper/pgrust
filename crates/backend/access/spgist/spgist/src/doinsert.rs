@@ -1278,6 +1278,30 @@ fn spgAddNodeAction<'m>(
     Ok(())
 }
 
+/// spgdoinsert.c:1768-1769: the prefix tuple of an inner-tuple split "must
+/// fit in the space that innerTuple now occupies".
+fn split_prefix_fits(prefix_size: usize, inner_size: usize) -> PgResult<()> {
+    if prefix_size > inner_size {
+        // elog(ERROR): a catchable XX000, not a panic.
+        return Err(Box::new(PgError::error(
+            "SPGiST inner-tuple split must not produce longer prefix",
+        )));
+    }
+    Ok(())
+}
+
+/// spgdoinsert.c:2293-2295: "AddNode is not sensible if nodes don't have
+/// labels".
+fn add_node_requires_labels(in_choose: &spgChooseIn) -> PgResult<()> {
+    if in_choose.nodeLabels.is_null() {
+        // elog(ERROR): a catchable XX000, not a panic.
+        return Err(Box::new(PgError::error(
+            "cannot add a node to an inner tuple without node labels",
+        )));
+    }
+    Ok(())
+}
+
 fn spgSplitNodeAction<'m>(
     mcx: Mcx<'m>,
     index: &Relation<'_>,
@@ -1333,9 +1357,7 @@ fn spgSplitNodeAction<'m>(
         let prefix_tuple =
             spgFormInnerTuple(mcx, state, prefixHasPrefix, prefixPrefixDatum, &prefix_slices)?;
 
-        if inner_tuple_size(prefix_tuple.as_slice()) > inner_hdr.size as usize {
-            panic!("SPGiST inner-tuple split must not produce longer prefix");
-        }
+        split_prefix_fits(inner_tuple_size(prefix_tuple.as_slice()), inner_hdr.size as usize)?;
 
         let old_nodes: PgVec<'m, &[u8]> = {
             let mut v = ::mcx::vec_with_capacity_in(mcx, inner_hdr.nNodes as usize)?;
@@ -1746,9 +1768,7 @@ pub fn spgdoinsert<'m>(
                         continue 'outer;
                     }
                     spgChooseOut::AddNode { nodeLabel, nodeN } => {
-                        if in_choose.nodeLabels.is_null() {
-                            panic!("cannot add a node to an inner tuple without node labels");
-                        }
+                        add_node_requires_labels(&in_choose)?;
                         spgAddNodeAction(
                             mcx, index, state, &mut current, &parent, nodeN, nodeLabel,
                         )?;
@@ -1809,5 +1829,48 @@ unsafe fn detoast_is_compressed(p: *const u8) -> bool {
         (hdr & 0x03) == 0x02
     } else {
         (hdr & 0xC000_0000) == 0x4000_0000
+    }
+}
+
+#[cfg(test)]
+mod choose_result_tests {
+    use super::*;
+
+    // spgdoinsert.c:1769 elog(ERROR): an opclass choose method returning
+    // spgSplitTuple with a prefix tuple larger than the inner tuple it
+    // replaces is a catchable XX000 error, never a panic (audit row
+    // spgdoinsert-884020c4).
+    #[test]
+    fn split_longer_prefix_is_catchable_error() {
+        assert!(split_prefix_fits(32, 32).is_ok());
+        let err = split_prefix_fits(33, 32).expect_err("longer prefix must be rejected");
+        assert_eq!(err.message(), "SPGiST inner-tuple split must not produce longer prefix");
+        assert_eq!(err.sqlstate(), ::types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(err.level(), ::types_error::ERROR);
+    }
+
+    // spgdoinsert.c:2295 elog(ERROR): spgAddNode against an inner tuple whose
+    // nodes carry no labels is a catchable XX000 error, never a panic (audit
+    // row spgdoinsert-f79b01f2).
+    #[test]
+    fn add_node_without_labels_is_catchable_error() {
+        let labels = [Datum::from_i32(1), Datum::from_i32(2)];
+        let mut input = spgChooseIn {
+            datum: Datum::null(),
+            leafDatum: Datum::null(),
+            level: 0,
+            allTheSame: false,
+            hasPrefix: false,
+            prefixDatum: Datum::null(),
+            nNodes: 2,
+            nodeLabels: labels.as_ptr(),
+        };
+        assert!(add_node_requires_labels(&input).is_ok());
+        input.nodeLabels = core::ptr::null();
+        let err =
+            add_node_requires_labels(&input).expect_err("label-less AddNode must be rejected");
+        assert_eq!(err.message(), "cannot add a node to an inner tuple without node labels");
+        assert_eq!(err.sqlstate(), ::types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(err.level(), ::types_error::ERROR);
     }
 }

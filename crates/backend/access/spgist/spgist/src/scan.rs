@@ -27,14 +27,10 @@ const MaxOffsetNumber: u16 = (::types_core::BLCKSZ / 4) as u16;
 const SpGistBreakOffsetNumber: u16 = InvalidOffsetNumber;
 const SpGistRedirectOffsetNumber: u16 = MaxOffsetNumber + 1;
 
+// C fmgr_info_copy: struct copy (fn_expr and its opclass options included)
+// with fn_extra reset — FmgrInfo's Clone.
 fn fmgr_info_copy(src: &::types_fmgr::FmgrInfo) -> ::types_fmgr::FmgrInfo {
-    ::types_fmgr::FmgrInfo::new(
-        src.fn_addr,
-        src.fn_oid,
-        src.fn_nargs,
-        src.fn_strict,
-        src.fn_retset,
-    )
+    src.clone()
 }
 
 #[cold]
@@ -67,8 +63,18 @@ pub fn spgbeginscan<'mcx>(
     if leaf_oid == 0 {
         return Err(missing_scan_proc(r, SPGIST_LEAF_CONSISTENT_PROC));
     }
-    let inner_fn = fmgr_seams::fmgr_info::call(inner_oid)?;
-    let leaf_fn = fmgr_seams::fmgr_info::call(leaf_oid)?;
+    let mut inner_fn = fmgr_seams::fmgr_info::call(inner_oid)?;
+    let mut leaf_fn = fmgr_seams::fmgr_info::call(leaf_oid)?;
+    // C index_getprocinfo (indexam.c:951-959): both consistent procs carry
+    // the key column's opclass options on fn_expr; the image is owned by the
+    // state that moves into the scan opaque with them.
+    if let Some(o) = &state.opclassOptions {
+        // SAFETY: the box lives in so.state.opclassOptions for the scan.
+        unsafe {
+            inner_fn.set_opclass_options(o);
+            leaf_fn.set_opclass_options(o);
+        }
+    }
     let index_collation = r.rd_indcollation.first().copied().unwrap_or(0);
 
     let so = SpGistScanOpaqueData {
@@ -1032,5 +1038,55 @@ pub fn spggettuple(scan: &mut IndexScanDescData<'_>, dir: ScanDirection) -> PgRe
         if done {
             return Ok(false);
         }
+    }
+}
+
+#[cfg(test)]
+mod scan_tests {
+    use super::fmgr_info_copy;
+    use crate::utils::tuple_state_error;
+    use ::types_fmgr::{FmgrInfo, OpclassOptions};
+    use ::types_spgist::SPGIST_PLACEHOLDER;
+
+    fn body(
+        _flinfo: Option<&mut FmgrInfo>,
+        _fcinfo: &mut ::types_fmgr::FunctionCallInfoBaseData,
+    ) -> ::types_error::PgResult<::datum::Datum> {
+        Ok(::datum::Datum::from_i32(0))
+    }
+
+    // spgscan.c:365-370 / fmgr.c fmgr_info_copy: the scan's copies of the
+    // consistent procs (and spgPrepareScanKeys' sk_func copies) carry the
+    // opclass options Const index_getprocinfo attached to fn_expr; a copy
+    // that drops fn_expr hands PG_GET_OPCLASS_OPTIONS() NULL (audit row
+    // spgscan-6704c03f).
+    #[test]
+    fn scan_proc_copy_keeps_opclass_options() {
+        let mut img = vec![0u8; 8];
+        img[4..8].copy_from_slice(&2024i32.to_ne_bytes());
+        let opts = Box::new(OpclassOptions(img.into_boxed_slice()));
+        let mut src = FmgrInfo::new(body, 1, 2, true, false);
+        // SAFETY: opts outlives both carriers.
+        unsafe { src.set_opclass_options(&opts) };
+
+        let dst = fmgr_info_copy(&src);
+        assert_eq!(dst.opclass_options(), src.opclass_options());
+        let siglen = dst
+            .opclass_options()
+            .map(|o| i32::from_ne_bytes(o[4..8].try_into().unwrap()));
+        assert_eq!(siglen, Some(2024));
+        assert!(dst.fn_extra.is_none());
+        assert_eq!((dst.fn_oid, dst.fn_nargs, dst.fn_strict, dst.fn_retset), (1, 2, true, false));
+    }
+
+    // spgscan.c:798/910 elog(ERROR): a placeholder (or otherwise unexpected)
+    // tuple state met by spgTestLeafTuple/spgWalk is a catchable XX000 error
+    // with C's message, never a panic (audit row spgscan-536f0848).
+    #[test]
+    fn unexpected_tuple_state_is_catchable_error() {
+        let err = tuple_state_error(SPGIST_PLACEHOLDER);
+        assert_eq!(err.message(), "unexpected SPGiST tuple state: 3");
+        assert_eq!(err.sqlstate(), ::types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(err.level(), ::types_error::ERROR);
     }
 }

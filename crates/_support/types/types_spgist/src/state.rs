@@ -7,7 +7,7 @@ use ::datum::Datum;
 use ::mcx::{Mcx, MemoryContext};
 use ::types_core::{Oid, TransactionId};
 use ::types_error::PgResult;
-use ::types_fmgr::{FmgrInfo, LocalFcinfo};
+use ::types_fmgr::{FmgrInfo, LocalFcinfo, OpclassOptions};
 use ::types_scan::scankey::ScanKeyData;
 use ::types_storage::bufpage::MaxIndexTuplesPerPage;
 use ::types_tuple::itemptr::ItemPointerData;
@@ -29,6 +29,11 @@ pub struct SpGistState<'mcx> {
     pub chooseFn: FmgrInfo,
     pub picksplitFn: FmgrInfo,
     pub compressFn: FmgrInfo,
+    // The key column's parsed opclass options image (C: the Const that
+    // index_getprocinfo hangs on every support proc's fn_expr, allocated in
+    // rd_indexcxt); boxed so the FmgrInfos' fn_expr stays valid as the
+    // state moves.
+    pub opclassOptions: Option<Box<OpclassOptions>>,
 
     pub frame1: LocalFcinfo<1>,
     pub frame2: LocalFcinfo<2>,
@@ -37,6 +42,26 @@ pub struct SpGistState<'mcx> {
 impl SpGistState<'_> {
     pub fn has_compress(&self) -> bool {
         self.compressFn.fn_oid != 0
+    }
+
+    /// C index_getprocinfo (indexam.c:951-959): each resolved support proc
+    /// of the key column carries the column's opclass options on fn_expr
+    /// (spgdoinsert.c:828 picksplit, :1934 choose, :1952 compress); an
+    /// unresolved compress proc is never looked up, so it gets none.
+    pub fn set_opclass_options(&mut self, opts: Option<Box<OpclassOptions>>) {
+        self.opclassOptions = opts;
+        let Some(o) = &self.opclassOptions else {
+            return;
+        };
+        // SAFETY: the box lives in self.opclassOptions, dropped with the
+        // FmgrInfos it serves.
+        unsafe {
+            self.chooseFn.set_opclass_options(o);
+            self.picksplitFn.set_opclass_options(o);
+            if self.compressFn.fn_oid != 0 {
+                self.compressFn.set_opclass_options(o);
+            }
+        }
     }
 
     pub fn call_compress(&mut self, mcx: Mcx<'_>, datum: Datum) -> PgResult<Datum> {
