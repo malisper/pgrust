@@ -1174,7 +1174,7 @@ fn finalize_grouping_exprs<'mcx>(
                             "arguments to GROUPING must be grouping expressions of the \
                              associated query level"
                                 .into(),
-                            grouping_arg_location(expr),
+                            nodes_core::expr_location(expr),
                             "finalize_grouping_exprs",
                         ));
                     };
@@ -1245,23 +1245,6 @@ fn grouping_var_ref(grp: &[(Node<'_>, Index)], var: &types_nodes::primnodes::Var
         }
     }
     None
-}
-
-// Local slice of C exprLocation over transformed GROUPING() arguments (the
-// full accessor lives in parse_expr, above this crate); -1 is C's default arm.
-fn grouping_arg_location(node: Node<'_>) -> ParseLoc {
-    match node.node_tag() {
-        NodeTag::T_Var => node.as_var().unwrap().location,
-        NodeTag::T_Const => node.as_const().unwrap().location,
-        NodeTag::T_Param => node.as_param().unwrap().location,
-        NodeTag::T_Aggref => node.as_aggref().unwrap().location,
-        NodeTag::T_GroupingFunc => node.as_grouping_func().unwrap().location,
-        NodeTag::T_WindowFunc => node.as_window_func().unwrap().location,
-        NodeTag::T_OpExpr => node.as_op_expr().unwrap().location,
-        NodeTag::T_FuncExpr => node.as_func_expr().unwrap().location,
-        NodeTag::T_RelabelType => node.as_relabel_type().unwrap().location,
-        _ => -1,
-    }
 }
 
 // substitute_grouped_columns (parse_agg.c:1335-1590): grouped expressions in
