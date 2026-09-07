@@ -1043,3 +1043,98 @@ fn reset_install_xlog_file_segment_active_takes_control_file_lock() {
     crate::startup::ResetInstallXLogFileSegmentActive().unwrap();
     assert!(!XLogCtl().InstallXLogFileSegmentActive.load(Relaxed));
 }
+
+// xlog.c:8452-8454 (XLOG_CHECKPOINT_ONLINE): the replayed checkpoint's
+// oldestXid is adopted iff TransactionIdPrecedes(TransamVariables->oldestXid,
+// checkPoint.oldestXid) — a MODULAR comparison — and adopted through
+// SetTransactionIdLimit, which also recomputes the vac/warn/stop/wrap
+// limits. A primary that froze past the 2^32 boundary ships an oldestXid
+// that is numerically SMALLER than the standby's pre-wrap value but
+// modularly LATER; an unsigned `<` leaves the standby's horizon stuck on
+// the pre-wrap value. Audit a186-candidate-fp-transam-xlog-p4-daa29892ce672c518c5c-1.
+fn redo_seams_once() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        xlogutils::init_seams();
+        xlogrecovery_seams::get_current_replay_rec_ptr::set(|| (0, 1));
+        smgr_seams::smgr_destroy_all::set(|| Ok(()));
+        varsup::VarsupShmemInit();
+    });
+}
+
+fn online_checkpoint_record(
+    ckpt: &CheckPoint,
+    buf: &mut Vec<u8>,
+) -> xlogreader_seams::XLogReaderState {
+    *buf = ckpt.to_bytes().to_vec();
+    let rec = xlogreader_seams::DecodedXLogRecord {
+        xl_info: XLOG_CHECKPOINT_ONLINE,
+        xl_rmid: RM_XLOG_ID,
+        main_data: buf.as_ptr(),
+        main_data_len: buf.len() as u32,
+        ..Default::default()
+    };
+    xlogreader_seams::XLogReaderState { record: Some(rec), ..Default::default() }
+}
+
+#[test]
+fn online_checkpoint_redo_advances_oldest_xid_across_wraparound() {
+    use crate::ctl::XLOGShmemInit;
+    use std::sync::atomic::Ordering::Relaxed;
+
+    let _gate = control_file_lock_gate();
+    init_seams_once();
+    create_lwlocks_once();
+    redo_seams_once();
+    XLOGShmemInit();
+
+    let tv = varsup::TransamVariables();
+    // Standby state from its startup checkpoint: horizon just below 2^32,
+    // counter already wrapped into epoch 1.
+    let pre_wrap_oldest: types_core::TransactionId = 4_294_900_000;
+    tv.oldestXid.store(pre_wrap_oldest, Relaxed);
+    tv.oldestXidDB.store(1, Relaxed);
+    tv.nextXid
+        .store(types_core::FullTransactionId::from_epoch_and_xid(1, 2000).value, Relaxed);
+
+    // The primary froze everything after wrapping: oldestXid = 1500 is
+    // modularly later than 4_294_900_000 (TransactionIdPrecedes is true)
+    // though numerically smaller.
+    let mut ckpt = CheckPoint::ZEROED;
+    ckpt.ThisTimeLineID = 1;
+    ckpt.PrevTimeLineID = 1;
+    ckpt.nextXid = types_core::FullTransactionId::from_epoch_and_xid(1, 2000);
+    ckpt.oldestXid = 1500;
+    ckpt.oldestXidDB = 5;
+    ckpt.nextMulti = 1;
+    ckpt.nextMultiOffset = 1;
+    ckpt.oldestMulti = 1;
+    ckpt.oldestMultiDB = 1;
+    assert!(types_core::TransactionIdPrecedes(pre_wrap_oldest, ckpt.oldestXid));
+
+    let mut buf = Vec::new();
+    let mut state = online_checkpoint_record(&ckpt, &mut buf);
+    crate::redo::xlog_redo(&mut state).unwrap();
+
+    assert_eq!(
+        tv.oldestXid.load(Relaxed),
+        1500,
+        "online checkpoint redo must adopt a modularly-later oldestXid across wraparound"
+    );
+    assert_eq!(tv.oldestXidDB.load(Relaxed), 5, "SetTransactionIdLimit carries oldestXidDB");
+    // SetTransactionIdLimit (varsup.c:424-444) recomputes the wrap limit
+    // from the adopted horizon.
+    assert_eq!(
+        tv.xidWrapLimit.load(Relaxed),
+        1500u32.wrapping_add(types_core::MaxTransactionId >> 1)
+    );
+
+    // And a checkpoint whose oldestXid is modularly OLDER (a stale primary
+    // checkpoint) must not move the horizon backwards.
+    let mut stale = ckpt;
+    stale.oldestXid = 4_294_950_000;
+    let mut buf2 = Vec::new();
+    let mut state2 = online_checkpoint_record(&stale, &mut buf2);
+    crate::redo::xlog_redo(&mut state2).unwrap();
+    assert_eq!(tv.oldestXid.load(Relaxed), 1500);
+}

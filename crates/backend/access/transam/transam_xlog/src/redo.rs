@@ -224,8 +224,14 @@ pub fn xlog_redo(record: &mut XLogReaderState) -> PgResult<()> {
                     check_point.oldestMultiDB,
                 )?;
             }
-            if tv.oldestXid.load(Relaxed) < check_point.oldestXid {
-                tv.oldestXid.store(check_point.oldestXid, Relaxed);
+            // xlog.c:8452-8454: adopt the record's oldestXid iff it is
+            // MODULARLY later (TransactionIdPrecedes, not an unsigned
+            // compare, so a horizon frozen past the 2^32 boundary still
+            // advances), and adopt it through SetTransactionIdLimit so the
+            // vac/warn/stop/wrap limits and oldestXidDB follow.
+            if types_core::TransactionIdPrecedes(tv.oldestXid.load(Relaxed), check_point.oldestXid)
+            {
+                varsup::SetTransactionIdLimit(check_point.oldestXid, check_point.oldestXidDB)?;
             }
             // ControlFile->checkPointCopy always tracks the latest ckpt XID.
             // Hold ControlFileLock across the mutation, matching C's xlog_redo

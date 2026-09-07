@@ -1027,3 +1027,40 @@ fn query_task_binder_restores_clean_helper_across_outcomes() {
         assert_eq!(join.join().unwrap(), 0);
     }
 }
+
+// parallel.c:242-246: InitializeParallelDSM launches nothing while
+// !INTERRUPTS_CAN_BE_PROCESSED(), whose third term is QueryCancelHoldoffCount
+// (miscadmin.h:131-133): a cancel holdoff alone must force nworkers = 0, as
+// InterruptHoldoffCount and CritSectionCount already do. The dop-1 lever
+// (statement_task_shared) is the same guard and refuses the same way.
+// Audit a186-candidate-fp-transam-parallel-86a0e5d088ff4d4c8ebf-1.
+#[test]
+fn cancel_holdoff_forces_zero_workers() {
+    let _s = serial();
+    let _w = Watchdog::arm(180, "cancel_holdoff_forces_zero_workers");
+    setup();
+
+    g::SetMyDatabaseId(InvalidOid);
+    begin_parallel_ready_xact();
+
+    g::HoldCancelInterrupts();
+    let pcxt = parallel::CreateParallelContext("postgres", "substrate_e2e_noop", 2).unwrap();
+    let init = parallel::InitializeParallelDSM(pcxt);
+    let shared = parallel::statement_task_shared(parallel::QueryTaskBindingPolicy::default());
+    g::ResumeCancelInterrupts();
+
+    init.unwrap();
+    assert_eq!(
+        parallel::nworkers(pcxt),
+        0,
+        "QueryCancelHoldoffCount > 0 must pretend no workers were requested (parallel.c:245)"
+    );
+    assert_eq!(parallel::nworkers_to_launch(pcxt), 0);
+    assert!(
+        shared.unwrap().is_none(),
+        "statement_task_shared must refuse under a cancel holdoff like InitializeParallelDSM"
+    );
+
+    parallel::DestroyParallelContext(pcxt).unwrap();
+    end_parallel_ready_xact();
+}

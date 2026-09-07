@@ -393,7 +393,11 @@ pub fn InitializeParallelDSM(id: ParallelContextId) -> PgResult<()> {
     gtrace("l.dsm.begin");
     let mut nworkers = with_pcxt(id, |p| p.nworkers);
 
-    if g::InterruptHoldoffCount() != 0 || g::CritSectionCount() != 0 {
+    // parallel.c:242-246: while non-interruptible (INTERRUPTS_CAN_BE_PROCESSED
+    // is false — interrupt holdoff, critical section, OR cancel holdoff) it
+    // is unsafe to launch workers whose interrupts we could not process, so
+    // pretend none were requested.
+    if !g::InterruptsCanBeProcessed() {
         nworkers = 0;
     }
     // Session DSM (C GetSessionDsmHandle nworkers=0 arm): threads share the
@@ -540,7 +544,8 @@ pub fn shared_for(id: ParallelContextId) -> Arc<ParallelShared> {
 pub fn statement_task_shared(
     policy: QueryTaskBindingPolicy,
 ) -> PgResult<Option<Arc<ParallelShared>>> {
-    if g::InterruptHoldoffCount() != 0 || g::CritSectionCount() != 0 {
+    // Same guard as InitializeParallelDSM (parallel.c:245).
+    if !g::InterruptsCanBeProcessed() {
         return Ok(None);
     }
     // The launched path serializes the leader's uncommitted-enum sets

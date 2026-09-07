@@ -24,8 +24,8 @@ use types_core::{
     TransactionIdPrecedes, BLCKSZ,
 };
 use types_error::{
-    ErrorLocation, PgResult, DEBUG1, ERRCODE_DATA_CORRUPTED, ERRCODE_INTERNAL_ERROR,
-    ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR, LOG, WARNING,
+    ErrorLocation, PgError, PgResult, DEBUG1, ERRCODE_DATA_CORRUPTED, ERRCODE_INTERNAL_ERROR,
+    ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR, LOG, PANIC, WARNING,
 };
 use types_guc::GucSource;
 use types_storage::multixact::{ISUPDATE_from_mxstatus, MultiXactMember, MultiXactStatus};
@@ -2331,7 +2331,9 @@ pub fn multixact_redo(record: &mut XLogReaderState) -> PgResult<()> {
         res?;
         released
     } else {
-        panic!("multixact_redo: unknown op code {info}");
+        // multixact.c:3713: elog(PANIC, "multixact_redo: unknown op code %u", info)
+        // — a reported PANIC, never a Rust unwind of the startup thread.
+        Err(Box::new(PgError::new(PANIC, format!("multixact_redo: unknown op code {info}"))))
     }
 }
 

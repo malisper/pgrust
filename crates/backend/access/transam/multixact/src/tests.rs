@@ -815,3 +815,16 @@ fn corrupt_negative_member_count_is_c_palloc_error() {
     assert_eq!(err.sqlstate(), ERRCODE_INTERNAL_ERROR);
     assert_eq!(err.level, ERROR);
 }
+
+// multixact.c:3713: an unrecognized multixact WAL opcode is
+// elog(PANIC, "multixact_redo: unknown op code %u", info) — a reported PANIC
+// with C's message bytes, not a Rust panic unwinding the startup thread.
+// Audit a186-candidate-fp-transam-multixact-p2-34355a19140ba027ceed-1.
+#[test]
+fn multixact_redo_unknown_op_code_is_c_panic_report() {
+    let rec = xlogreader_seams::DecodedXLogRecord { xl_info: 0x70, ..Default::default() };
+    let mut state = XLogReaderState { record: Some(rec), ..Default::default() };
+    let err = multixact_redo(&mut state).unwrap_err();
+    assert_eq!(err.level, types_error::PANIC);
+    assert_eq!(err.message(), "multixact_redo: unknown op code 112");
+}
