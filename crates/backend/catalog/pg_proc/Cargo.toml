@@ -36,6 +36,8 @@ varlena = { path = "../../utils/adt/varlena" }
 readfuncs = { path = "../../nodes/readfuncs" }
 nodes_core = { path = "../../nodes/nodes_core" }
 format_type = { path = "../../utils/adt/format_type" }
+adt_regproc = { path = "../../utils/adt/regproc" }
+objectaccess = { path = "../objectaccess" }
 fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
 dfmgr = { path = "../../utils/fmgr/dfmgr" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }

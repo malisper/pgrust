@@ -12725,6 +12725,7 @@ version = "0.1.0"
 dependencies = [
  "aclchk",
  "aclchk_seams",
+ "adt_regproc",
  "cache_syscache",
  "catalog",
  "catalog_indexing",
@@ -12743,6 +12744,7 @@ dependencies = [
  "mcx",
  "miscinit_seams",
  "nodes_core",
+ "objectaccess",
  "outfuncs",
  "pg_depend",
  "pgstat",

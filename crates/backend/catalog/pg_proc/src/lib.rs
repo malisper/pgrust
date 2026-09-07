@@ -224,21 +224,6 @@ pub fn build_oidvector_image<'mcx>(mcx: Mcx<'mcx>, oids: &[Oid]) -> PgResult<mcx
     Ok(out)
 }
 
-// format_procedure (regproc.c) minus the schema-qualification visibility
-// walk; identical for search_path-visible names.
-fn format_procedure_lite(name: &str, argtypes: &[Oid]) -> PgResult<String> {
-    let mut sig = String::from(name);
-    sig.push('(');
-    for (i, &a) in argtypes.iter().enumerate() {
-        if i > 0 {
-            sig.push(',');
-        }
-        sig.push_str(&format_type::format_type_be(a)?);
-    }
-    sig.push(')');
-    Ok(sig)
-}
-
 // C: TextDatumGetCString — strip the 1B/4B varlena header (or detoast)
 // before treating the payload as text.
 fn text_datum_to_string(mcx: Mcx<'_>, d: Datum) -> PgResult<String> {
@@ -628,7 +613,7 @@ pub fn ProcedureCreateWithTransforms<'mcx>(
                     .with_sqlstate(ERRCODE_INVALID_FUNCTION_DEFINITION)
                     .with_hint(format!(
                         "Use {dropcmd} {} first.",
-                        format_procedure_lite(a.procedureName, a.parameterTypes)?
+                        adt_regproc::format_procedure(mcx, old_oid)?
                     )),
             ));
         }
@@ -691,7 +676,7 @@ pub fn ProcedureCreateWithTransforms<'mcx>(
                     .with_detail("Row type defined by OUT parameters is different.".to_string())
                     .with_hint(format!(
                         "Use {dropcmd} {} first.",
-                        format_procedure_lite(a.procedureName, a.parameterTypes)?
+                        adt_regproc::format_procedure(mcx, old_oid)?
                     )),
                 ));
             }
@@ -784,7 +769,7 @@ pub fn ProcedureCreateWithTransforms<'mcx>(
                         .with_sqlstate(ERRCODE_INVALID_FUNCTION_DEFINITION)
                         .with_hint(format!(
                             "Use {dropcmd} {} first.",
-                            format_procedure_lite(a.procedureName, a.parameterTypes)?
+                            adt_regproc::format_procedure(mcx, old_oid)?
                         )),
                     ));
                 }
@@ -809,7 +794,7 @@ pub fn ProcedureCreateWithTransforms<'mcx>(
                     .with_sqlstate(ERRCODE_INVALID_FUNCTION_DEFINITION)
                     .with_hint(format!(
                         "Use {dropcmd} {} first.",
-                        format_procedure_lite(a.procedureName, a.parameterTypes)?
+                        adt_regproc::format_procedure(mcx, old_oid)?
                     )),
                 ));
             }
@@ -840,7 +825,7 @@ pub fn ProcedureCreateWithTransforms<'mcx>(
                         .with_sqlstate(ERRCODE_INVALID_FUNCTION_DEFINITION)
                         .with_hint(format!(
                             "Use {dropcmd} {} first.",
-                            format_procedure_lite(a.procedureName, a.parameterTypes)?
+                            adt_regproc::format_procedure(mcx, old_oid)?
                         )),
                     ));
                 }
@@ -946,6 +931,9 @@ pub fn ProcedureCreateWithTransforms<'mcx>(
         }
     }
     pg_depend::recordDependencyOnCurrentExtension(mcx, &myself, is_update)?;
+
+    // Post creation hook for new function (pg_proc.c:694).
+    objectaccess::InvokeObjectPostCreateHook(PROCEDURE_RELATION_ID, retval, 0)?;
 
     rel.close(RowExclusiveLock)?;
 
