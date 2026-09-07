@@ -8,6 +8,7 @@ pub mod xlog;
 
 use ::types_core::{BlockNumber, OffsetNumber, TransactionId, BLCKSZ};
 use ::types_storage::bufpage::{PageMut, PageRef, SizeOfPageHeaderData};
+use ::types_error::{PgError, PgResult};
 use ::types_tuple::itemptr::ItemPointerData;
 
 pub const SPGIST_CONFIG_PROC: u16 = 1;
@@ -522,19 +523,27 @@ pub fn spgFormDeadTuple(
     storage
 }
 
-/// spgUpdateNodeLink over a mutable inner-tuple image.
-pub fn spgUpdateNodeLink(inner: &mut [u8], nodeN: i32, blkno: BlockNumber, offset: OffsetNumber) {
+/// spgUpdateNodeLink (spgdoinsert.c:51-69) over a mutable inner-tuple image.
+pub fn spgUpdateNodeLink(
+    inner: &mut [u8],
+    nodeN: i32,
+    blkno: BlockNumber,
+    offset: OffsetNumber,
+) -> PgResult<()> {
     let hdr = SpGistInnerTupleHeader::decode(inner);
     let mut off = SGITHDRSZ + hdr.prefixSize as usize;
     for i in 0..hdr.nNodes as i32 {
         if i == nodeN {
             let tid = ItemPointerData::new(blkno, offset);
             node_tuple_set_tid(&mut inner[off..], &tid);
-            return;
+            return Ok(());
         }
         off += node_tuple_size(&inner[off..]);
     }
-    panic!("failed to find requested node {nodeN} in SPGiST inner tuple");
+    // C (spgdoinsert.c:67): elog(ERROR) — catchable XX000.
+    Err(Box::new(PgError::error(format!(
+        "failed to find requested node {nodeN} in SPGiST inner tuple"
+    ))))
 }
 
 /// spgPageIndexMultiDelete: replace `itemnos` with dead tuples, preserving
@@ -581,5 +590,34 @@ pub fn spgPageIndexMultiDelete(
         } else if tupstate == SPGIST_PLACEHOLDER {
             page_opaque_update(pm, |op| op.nPlaceholder += 1);
         }
+    }
+}
+
+#[cfg(test)]
+mod node_link_tests {
+    //! Witness for spgdoinsert.c:67: a node index past the inner tuple's
+    //! nNodes is a catchable ERROR (XX000) with C's message, not a panic.
+    use super::*;
+
+    #[test]
+    fn update_node_link_out_of_range_is_c_error() {
+        let mut img = vec![0u8; SGITHDRSZ + SGNTHDRSZ];
+        SpGistInnerTupleHeader {
+            tupstate: SPGIST_LIVE,
+            allTheSame: false,
+            nNodes: 1,
+            prefixSize: 0,
+            size: img.len() as u16,
+        }
+        .encode(&mut img);
+        img[SGITHDRSZ + 6..SGITHDRSZ + 8].copy_from_slice(&(SGNTHDRSZ as u16).to_ne_bytes());
+
+        spgUpdateNodeLink(&mut img, 0, 11, 2).unwrap();
+        let tid = node_tuple_tid(&img[SGITHDRSZ..]);
+        assert_eq!(tid, ItemPointerData::new(11, 2));
+
+        let e = spgUpdateNodeLink(&mut img, 1, 11, 2).expect_err("node 1 does not exist");
+        assert_eq!(e.message(), "failed to find requested node 1 in SPGiST inner tuple");
+        assert_eq!(e.sqlstate(), ::types_error::ERRCODE_INTERNAL_ERROR);
     }
 }

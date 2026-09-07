@@ -228,7 +228,7 @@ fn spgRedoAddLeaf(record: &XLogReaderState) -> PgResult<()> {
             // SAFETY: redo pin+lock contract.
             let mut pm = unsafe { page_mut(buffer) };
             let tuple = item_slice_mut(&mut pm, xldata.offnumParent);
-            spgUpdateNodeLink(tuple, xldata.nodeI as i32, blkno_leaf, xldata.offnumLeaf);
+            spgUpdateNodeLink(tuple, xldata.nodeI as i32, blkno_leaf, xldata.offnumLeaf)?;
             pm.set_lsn(lsn);
             bufmgr_seams::mark_buffer_dirty::call(buffer)?;
         }
@@ -308,7 +308,7 @@ fn spgRedoMoveLeafs(record: &XLogReaderState) -> PgResult<()> {
         // SAFETY: redo pin+lock contract.
         let mut pm = unsafe { page_mut(buffer) };
         let tuple = item_slice_mut(&mut pm, xldata.offnumParent);
-        spgUpdateNodeLink(tuple, xldata.nodeI as i32, blkno_dst, to_insert[n_insert - 1]);
+        spgUpdateNodeLink(tuple, xldata.nodeI as i32, blkno_dst, to_insert[n_insert - 1])?;
         pm.set_lsn(lsn);
         bufmgr_seams::mark_buffer_dirty::call(buffer)?;
     }
@@ -360,7 +360,7 @@ fn spgRedoAddNode(record: &XLogReaderState) -> PgResult<()> {
             add_or_replace_tuple(&mut pm, &inner_tuple[..inner_size], xldata.offnumNew)?;
             if xldata.parentBlk == 1 {
                 let parent = item_slice_mut(&mut pm, xldata.offnumParent);
-                spgUpdateNodeLink(parent, xldata.nodeI as i32, blkno_new, xldata.offnumNew);
+                spgUpdateNodeLink(parent, xldata.nodeI as i32, blkno_new, xldata.offnumNew)?;
             }
             pm.set_lsn(lsn);
             bufmgr_seams::mark_buffer_dirty::call(buffer)?;
@@ -400,7 +400,7 @@ fn spgRedoAddNode(record: &XLogReaderState) -> PgResult<()> {
             }
             if xldata.parentBlk == 0 {
                 let parent = item_slice_mut(&mut pm, xldata.offnumParent);
-                spgUpdateNodeLink(parent, xldata.nodeI as i32, blkno_new, xldata.offnumNew);
+                spgUpdateNodeLink(parent, xldata.nodeI as i32, blkno_new, xldata.offnumNew)?;
             }
             pm.set_lsn(lsn);
             bufmgr_seams::mark_buffer_dirty::call(buffer)?;
@@ -415,7 +415,7 @@ fn spgRedoAddNode(record: &XLogReaderState) -> PgResult<()> {
                 // SAFETY: redo pin+lock contract.
                 let mut pm = unsafe { page_mut(buffer) };
                 let parent = item_slice_mut(&mut pm, xldata.offnumParent);
-                spgUpdateNodeLink(parent, xldata.nodeI as i32, blkno_new, xldata.offnumNew);
+                spgUpdateNodeLink(parent, xldata.nodeI as i32, blkno_new, xldata.offnumNew)?;
                 pm.set_lsn(lsn);
                 bufmgr_seams::mark_buffer_dirty::call(buffer)?;
             }
@@ -617,7 +617,7 @@ fn spgRedoPickSplit(record: &XLogReaderState) -> PgResult<()> {
         add_or_replace_tuple(&mut pm, &inner_tuple[..inner_size], xldata.offnumInner)?;
         if xldata.innerIsParent {
             let parent = item_slice_mut(&mut pm, xldata.offnumParent);
-            spgUpdateNodeLink(parent, xldata.nodeI as i32, blkno_inner, xldata.offnumInner);
+            spgUpdateNodeLink(parent, xldata.nodeI as i32, blkno_inner, xldata.offnumInner)?;
         }
         pm.set_lsn(lsn);
         bufmgr_seams::mark_buffer_dirty::call(inner_buffer)?;
@@ -640,7 +640,7 @@ fn spgRedoPickSplit(record: &XLogReaderState) -> PgResult<()> {
             // SAFETY: redo pin+lock contract.
             let mut pm = unsafe { page_mut(parent_buffer) };
             let parent = item_slice_mut(&mut pm, xldata.offnumParent);
-            spgUpdateNodeLink(parent, xldata.nodeI as i32, blkno_inner, xldata.offnumInner);
+            spgUpdateNodeLink(parent, xldata.nodeI as i32, blkno_inner, xldata.offnumInner)?;
             pm.set_lsn(lsn);
             bufmgr_seams::mark_buffer_dirty::call(parent_buffer)?;
         }

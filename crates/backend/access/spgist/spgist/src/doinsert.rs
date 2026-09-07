@@ -45,7 +45,7 @@ fn saveNodeLink(
 ) -> PgResult<()> {
     let mut pm = page(parent);
     let inner = item_slice_mut(&mut pm, parent.offnum);
-    spgUpdateNodeLink(inner, parent.node, blkno, offnum);
+    spgUpdateNodeLink(inner, parent.node, blkno, offnum)?;
     bufmgr::mark_buffer_dirty::call(parent.buffer)?;
     Ok(())
 }
@@ -638,11 +638,8 @@ fn doPickSplit<'m>(
     let mut leaf_sizes: PgVec<'m, i32> = PgVec::new_in(mcx);
     leaf_sizes.resize(out.n_nodes, 0);
     for i in 0..max_to_include {
-        let nn = out.map_tuples_to_nodes[i];
-        if nn < 0 || nn as usize >= out.n_nodes {
-            panic!("inconsistent result of SPGiST picksplit function");
-        }
-        leaf_sizes[nn as usize] += (new_leafs[i].size() + SIZEOF_ITEM_ID_DATA) as i32;
+        let nn = picksplit_node_index(out.map_tuples_to_nodes[i], out.n_nodes)?;
+        leaf_sizes[nn] += (new_leafs[i].size() + SIZEOF_ITEM_ID_DATA) as i32;
     }
 
     // choose the inner-tuple page
@@ -724,23 +721,15 @@ fn doPickSplit<'m>(
             let node_of_new = out.map_tuples_to_nodes[n_tuples - 1] as usize;
             leaf_sizes[node_of_new] -=
                 (new_leafs[n_tuples - 1].size() + SIZEOF_ITEM_ID_DATA) as i32;
-            let mut curspace = current_free_space as i64;
-            let mut newspace =
-                buf_page_mut(new_leaf_buffer).as_ref().exact_free_space() as i64;
-            for i in 0..out.n_nodes {
-                if (leaf_sizes[i] as i64) <= curspace {
-                    node_page_select[i] = 0;
-                    curspace -= leaf_sizes[i] as i64;
-                } else {
-                    node_page_select[i] = 1;
-                    newspace -= leaf_sizes[i] as i64;
-                }
-            }
-            if curspace < 0 || newspace < 0 {
-                panic!("failed to divide leaf tuple groups across pages");
-            }
+            divide_leaf_groups(
+                &leaf_sizes,
+                current_free_space as i64,
+                buf_page_mut(new_leaf_buffer).as_ref().exact_free_space() as i64,
+                &mut node_page_select,
+            )?;
         } else {
-            panic!("failed to divide leaf tuple groups across pages");
+            // C (spgdoinsert.c:1115-1118): we already excluded the new tuple.
+            return Err(failed_to_divide_leaf_groups());
         }
         leaf_page_select.clear();
         for i in 0..n_to_insert {
@@ -1063,15 +1052,7 @@ fn spgMatchNodeAction(
     let pm = page(current);
     let pr = pm.as_ref();
     let inner = item_slice(&pr, current.offnum);
-    let hdr = SpGistInnerTupleHeader::decode(inner);
-    if nodeN < 0 || nodeN >= hdr.nNodes as i32 {
-        panic!("failed to find requested node {nodeN} in SPGiST inner tuple");
-    }
-    let mut node_off = SGITHDRSZ + hdr.prefixSize as usize;
-    for _ in 0..nodeN {
-        node_off += node_tuple_size(&inner[node_off..]);
-    }
-    let tid = node_tuple_tid(&inner[node_off..]);
+    let tid = locate_node(inner, nodeN)?;
 
     if ItemPointerIsValid(&tid) {
         current.blkno = ::types_tuple::itemptr::ItemPointerGetBlockNumber(&tid);
@@ -1357,12 +1338,7 @@ fn spgSplitNodeAction<'m>(
         unreachable!("spgSplitNodeAction on a non-splitTuple result")
     };
 
-    if prefixNNodes <= 0 || prefixNNodes > SGITMAXNNODES as i32 {
-        panic!("invalid number of prefix nodes: {prefixNNodes}");
-    }
-    if childNodeN < 0 || childNodeN >= prefixNNodes {
-        panic!("invalid child node number: {childNodeN}");
-    }
+    check_split_tuple_output(prefixNNodes, childNodeN)?;
 
     let (mut prefix_tuple, postfix_tuple, old_inner_size, old_all_the_same) = {
         let pm = page(current);
@@ -1463,11 +1439,11 @@ fn spgSplitNodeAction<'m>(
     xlrec.offnumPostfix = postfix_offset;
 
     // set the downlink in both the WAL image and the on-page copy
-    spgUpdateNodeLink(prefix_tuple.as_mut_slice(), childNodeN, postfix_blkno, postfix_offset);
+    spgUpdateNodeLink(prefix_tuple.as_mut_slice(), childNodeN, postfix_blkno, postfix_offset)?;
     {
         let mut pm = page(current);
         let on_page = item_slice_mut(&mut pm, current.offnum);
-        spgUpdateNodeLink(on_page, childNodeN, postfix_blkno, postfix_offset);
+        spgUpdateNodeLink(on_page, childNodeN, postfix_blkno, postfix_offset)?;
     }
 
     bufmgr::mark_buffer_dirty::call(current.buffer)?;
@@ -1600,7 +1576,14 @@ pub fn spgdoinsert<'m>(
     crate::check_for_interrupts()?;
 
     let result = 'outer: loop {
-        crate::check_for_interrupts()?;
+        // C (spgdoinsert.c:2044-2048): INTERRUPTS_PENDING_CONDITION() —
+        // non-destructive. We hold buffer lock(s) after the first iteration,
+        // so ProcessInterrupts couldn't throw a cancel here; break out with
+        // result = false (the caller restarts the insertion unless the
+        // post-release CHECK_FOR_INTERRUPTS below throws).
+        if init_small::globals::InterruptPending() {
+            break 'outer false;
+        }
 
         let mut is_new = false;
         if current.blkno == InvalidBlockNumber {
@@ -1706,7 +1689,12 @@ pub fn spgdoinsert<'m>(
         if process_inner {
             // process_inner_tuple
             loop {
-                crate::check_for_interrupts()?;
+                // C (spgdoinsert.c:2170-2174): same non-destructive check, so
+                // a broken choose function looping on add/split requests
+                // still yields to a cancel.
+                if init_small::globals::InterruptPending() {
+                    break 'outer false;
+                }
 
                 let (in_choose, n_nodes, all_the_same) = {
                     let pm = page(&current);
@@ -1756,17 +1744,7 @@ pub fn spgdoinsert<'m>(
                 }
 
                 if all_the_same {
-                    match &mut out {
-                        spgChooseOut::AddNode { .. } => {
-                            panic!("cannot add a node to an allTheSame inner tuple")
-                        }
-                        spgChooseOut::MatchNode { nodeN, .. } => {
-                            *nodeN = pg_prng::global_prng(|p| {
-                                p.u64_range(0, (n_nodes - 1) as u64)
-                            }) as i32;
-                        }
-                        _ => {}
-                    }
+                    resolve_all_the_same_choice(&mut out, n_nodes)?;
                 }
 
                 match out {
@@ -1868,6 +1846,220 @@ unsafe fn detoast_is_compressed(p: *const u8) -> bool {
         (hdr & 0x03) == 0x02
     } else {
         (hdr & 0xC000_0000) == 0x4000_0000
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Opclass-output guards: the spgdoinsert.c elog(ERROR) sites that police what
+// a choose/picksplit support function handed back.
+// ---------------------------------------------------------------------------
+
+/// spgdoinsert.c:955-957 — one picksplit `mapTuplesToNodes[]` entry as an
+/// index into the node array.
+fn picksplit_node_index(n: i32, n_nodes: usize) -> PgResult<usize> {
+    if n < 0 || n as usize >= n_nodes {
+        // C (spgdoinsert.c:957): elog(ERROR) — catchable XX000.
+        return Err(Box::new(PgError::error(
+            "inconsistent result of SPGiST picksplit function",
+        )));
+    }
+    Ok(n as usize)
+}
+
+/// spgdoinsert.c:1100-1113 — assign each node's leaf group to the current
+/// page (0) or the new leaf page (1); both space budgets must stay >= 0.
+fn divide_leaf_groups(
+    leaf_sizes: &[i32],
+    mut curspace: i64,
+    mut newspace: i64,
+    node_page_select: &mut [u8],
+) -> PgResult<()> {
+    for (i, &size) in leaf_sizes.iter().enumerate() {
+        if (size as i64) <= curspace {
+            node_page_select[i] = 0;
+            curspace -= size as i64;
+        } else {
+            node_page_select[i] = 1;
+            newspace -= size as i64;
+        }
+    }
+    if curspace < 0 || newspace < 0 {
+        return Err(failed_to_divide_leaf_groups());
+    }
+    Ok(())
+}
+
+/// spgdoinsert.c:1112 and :1117.
+fn failed_to_divide_leaf_groups() -> Box<PgError> {
+    // elog(ERROR) — catchable XX000.
+    Box::new(PgError::error("failed to divide leaf tuple groups across pages"))
+}
+
+/// spgdoinsert.c:1481-1489 — SGITITERATE to node `nodeN` and return its
+/// downlink.
+fn locate_node(inner: &[u8], nodeN: i32) -> PgResult<ItemPointerData> {
+    let hdr = SpGistInnerTupleHeader::decode(inner);
+    if nodeN < 0 || nodeN >= hdr.nNodes as i32 {
+        // C (spgdoinsert.c:1489): elog(ERROR) — catchable XX000.
+        return Err(Box::new(PgError::error(format!(
+            "failed to find requested node {nodeN} in SPGiST inner tuple"
+        ))));
+    }
+    let mut node_off = SGITHDRSZ + hdr.prefixSize as usize;
+    for _ in 0..nodeN {
+        node_off += node_tuple_size(&inner[node_off..]);
+    }
+    Ok(node_tuple_tid(&inner[node_off..]))
+}
+
+/// spgdoinsert.c:1733-1741 — sanity of a spgSplitTuple choose output.
+fn check_split_tuple_output(prefixNNodes: i32, childNodeN: i32) -> PgResult<()> {
+    // C (spgdoinsert.c:1735, :1740): elog(ERROR) — catchable XX000.
+    if prefixNNodes <= 0 || prefixNNodes > SGITMAXNNODES as i32 {
+        return Err(Box::new(PgError::error(format!(
+            "invalid number of prefix nodes: {prefixNNodes}"
+        ))));
+    }
+    if childNodeN < 0 || childNodeN >= prefixNNodes {
+        return Err(Box::new(PgError::error(format!(
+            "invalid child node number: {childNodeN}"
+        ))));
+    }
+    Ok(())
+}
+
+/// spgdoinsert.c:2205-2218 — an allTheSame inner tuple admits no AddNode;
+/// a MatchNode descends into a random one of its nodes.
+fn resolve_all_the_same_choice(out: &mut spgChooseOut, n_nodes: i32) -> PgResult<()> {
+    match out {
+        spgChooseOut::AddNode { .. } => {
+            // C (spgdoinsert.c:2212): elog(ERROR) — catchable XX000.
+            Err(Box::new(PgError::error(
+                "cannot add a node to an allTheSame inner tuple",
+            )))
+        }
+        spgChooseOut::MatchNode { nodeN, .. } => {
+            *nodeN = pg_prng::global_prng(|p| p.u64_range(0, (n_nodes - 1) as u64)) as i32;
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod opclass_output_guard_tests {
+    //! Witnesses for the spgdoinsert.c elog(ERROR) guards on opclass output.
+    //! C raises a catchable ERROR (XX000, the elog default) with these exact
+    //! message bytes; a Rust `panic!` at the same site is the divergence.
+    use super::*;
+    use ::types_error::ERRCODE_INTERNAL_ERROR;
+    use ::types_tuple::itemptr::ItemPointerGetBlockNumber;
+
+    fn assert_c_error<T: core::fmt::Debug>(r: PgResult<T>, msg: &str) {
+        match r {
+            Err(e) => {
+                assert_eq!(e.message(), msg, "message bytes differ from C");
+                assert_eq!(e.sqlstate(), ERRCODE_INTERNAL_ERROR, "elog(ERROR) is XX000");
+            }
+            Ok(v) => panic!("expected error {msg:?}, got Ok({v:?})"),
+        }
+    }
+
+    // spgdoinsert.c:955-957
+    #[test]
+    fn picksplit_mapping_out_of_range_is_c_error() {
+        assert_eq!(picksplit_node_index(2, 3).unwrap(), 2);
+        assert_c_error(
+            picksplit_node_index(3, 3),
+            "inconsistent result of SPGiST picksplit function",
+        );
+        assert_c_error(
+            picksplit_node_index(-1, 3),
+            "inconsistent result of SPGiST picksplit function",
+        );
+    }
+
+    // spgdoinsert.c:1100-1113
+    #[test]
+    fn leaf_groups_overflowing_both_pages_is_c_error() {
+        let mut sel = [9u8; 2];
+        divide_leaf_groups(&[40, 40], 50, 50, &mut sel).unwrap();
+        assert_eq!(sel, [0, 1], "first group on the current page, second on the new page");
+        let mut sel = [9u8; 2];
+        assert_c_error(
+            divide_leaf_groups(&[100, 100], 50, 50, &mut sel),
+            "failed to divide leaf tuple groups across pages",
+        );
+    }
+
+    // spgdoinsert.c:1115-1118 (the "already excluded the new tuple" arm)
+    #[test]
+    fn excluded_new_tuple_arm_is_c_error() {
+        let r: PgResult<()> = Err(failed_to_divide_leaf_groups());
+        assert_c_error(r, "failed to divide leaf tuple groups across pages");
+    }
+
+    // A two-node inner tuple with no prefix: header, then two 8-byte node
+    // tuples (t_tid at 0..6, t_info = size at 6..8).
+    fn two_node_inner_tuple() -> Vec<u8> {
+        let mut img = vec![0u8; SGITHDRSZ + 2 * SGNTHDRSZ];
+        SpGistInnerTupleHeader {
+            tupstate: SPGIST_LIVE,
+            allTheSame: false,
+            nNodes: 2,
+            prefixSize: 0,
+            size: img.len() as u16,
+        }
+        .encode(&mut img);
+        for (i, tid) in [ItemPointerData::new(7, 3), ItemPointerData::new(9, 5)].iter().enumerate() {
+            let off = SGITHDRSZ + i * SGNTHDRSZ;
+            node_tuple_set_tid(&mut img[off..], tid);
+            img[off + 6..off + 8].copy_from_slice(&(SGNTHDRSZ as u16).to_ne_bytes());
+        }
+        img
+    }
+
+    // spgdoinsert.c:1481-1489
+    #[test]
+    fn match_node_out_of_range_is_c_error() {
+        let img = two_node_inner_tuple();
+        let tid = locate_node(&img, 1).unwrap();
+        assert_eq!((ItemPointerGetBlockNumber(&tid), tid.ip_posid), (9, 5));
+        assert_c_error(locate_node(&img, 2), "failed to find requested node 2 in SPGiST inner tuple");
+        assert_c_error(locate_node(&img, -1), "failed to find requested node -1 in SPGiST inner tuple");
+    }
+
+    // spgdoinsert.c:1733-1741
+    #[test]
+    fn split_tuple_bad_prefix_or_child_is_c_error() {
+        check_split_tuple_output(2, 1).unwrap();
+        assert_c_error(check_split_tuple_output(0, 0), "invalid number of prefix nodes: 0");
+        assert_c_error(
+            check_split_tuple_output(SGITMAXNNODES as i32 + 1, 0),
+            "invalid number of prefix nodes: 8192",
+        );
+        assert_c_error(check_split_tuple_output(2, 2), "invalid child node number: 2");
+        assert_c_error(check_split_tuple_output(2, -1), "invalid child node number: -1");
+    }
+
+    // spgdoinsert.c:2211-2212
+    #[test]
+    fn all_the_same_add_node_is_c_error() {
+        let mut out = spgChooseOut::SplitTuple {
+            prefixHasPrefix: false,
+            prefixPrefixDatum: Datum::null(),
+            prefixNNodes: 1,
+            prefixNodeLabels: core::ptr::null(),
+            childNodeN: 0,
+            postfixHasPrefix: false,
+            postfixPrefixDatum: Datum::null(),
+        };
+        resolve_all_the_same_choice(&mut out, 4).unwrap();
+        let mut out = spgChooseOut::AddNode { nodeLabel: Datum::null(), nodeN: 0 };
+        assert_c_error(
+            resolve_all_the_same_choice(&mut out, 4),
+            "cannot add a node to an allTheSame inner tuple",
+        );
     }
 }
 
