@@ -271,6 +271,7 @@ if (FS_MODE === 'broker') {
   );
   storageWorker = makeWorker(storageWorkerUrl(import.meta.url), { name: 'pgrust-storage' });
   let storageReady = null;
+  let storageFailure = null;
   const storageReadyPromise = new Promise((r) => { storageReady = r; });
   onWorkerMessage(storageWorker, (m) => {
     switch (m.type) {
@@ -312,6 +313,7 @@ if (FS_MODE === 'broker') {
       case 'storage-error':
         failures.push(`storage worker error: ${m.message}`);
         note(`storage: ERROR ${m.message}`);
+        storageFailure = m.message;
         storageReady();
         storageStoppedResolve();
         break;
@@ -339,6 +341,15 @@ if (FS_MODE === 'broker') {
     storageReadyPromise,
     new Promise((_, rej) => setTimeout(() => rej(new Error('storage coordinator seed timeout')), 120000)),
   ]);
+  // A coordinator that failed to come up has no store to answer with, so starting the guest buys
+  // nothing but a 60s broker timeout per request and a stack naming the transport rather than the
+  // cause. Stop at the cause — the lane's own try/catch is a long way below here.
+  if (storageFailure !== null) {
+    try { storageWorker.terminate(); } catch { /* already gone */ }
+    for (const f of failures) note(`DRIVER-FAIL: ${f}`);
+    note(`VERDICT: ${POSTMASTER ? 'postmaster-node' : 'threads-node'} FAIL fs=${FS_MODE}`);
+    process.exit(1);
+  }
 }
 
 // With --fs broker the packed image now lives in the coordinator's store (and its ArrayBuffer

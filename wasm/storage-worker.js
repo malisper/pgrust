@@ -36,6 +36,13 @@
 // keeps the decision on the only thing that matters to the guest (is there a datadir to boot
 // from) rather than on a store-format detail.
 //
+// It asks the ROOT STORE, and it asks BEFORE the mounts are opened. Both matter: the composite
+// creates a placeholder directory for every mount prefix in the root store (recursively), so a
+// prefix below the datadir would answer the question by creating its subject. And the answer is
+// CHECKED against the manifest once the seed has run — a coordinator that reports "seeded 0 files"
+// and comes up anyway just moves the failure to the guest, which dies on an empty datadir with
+// `invalid value for parameter "TimeZone"` and no hint of where that came from.
+//
 // DURABILITY (`options.durability`). The broker's `fd_sync` is ALREADY a store-wide
 // `strictSync()` — the guest's own fsyncs are durability boundaries in both modes, and the
 // seed and the close are strict in both modes. The mode selects what happens BETWEEN those:
@@ -70,6 +77,10 @@
 // extents cost 107 MiB of arena for 41 MB of data where 8 KiB costs 43 MiB. Override with
 // `options.extentSize`. It is an identity of an EXISTING store: reopening with a different
 // one raises `ExtentSizeMismatchError`, which is reported by name like every other store error.
+
+// The one path the fresh/existing fork is about. Everything else in the image (the timezone
+// database under /share, say) rides along with it but never decides anything.
+const DATADIR = '/pgdata';
 
 const IS_NODE = typeof process !== 'undefined' && !!process.versions && !!process.versions.node;
 const nodeWt = IS_NODE ? await import('node:worker_threads') : null;
@@ -217,6 +228,16 @@ async function boot(msg) {
   }
   const rootVfs = await bundle.RepackedVfs.open(storePort, { extentSize });
 
+  // THE FRESH/EXISTING FORK, asked HERE — of the root store, before a single mount exists. See the
+  // header: the datadir decides, not the store. `MountedRepackedVfs` mkdirs a placeholder directory
+  // for every mount prefix in the ROOT store (`-p`, so every parent too), so a prefix INSIDE the
+  // datadir — `/pgdata/pg_tblspc`, the in-place-tablespace shape — conjures `/pgdata` into
+  // existence and makes a brand-new store answer "this is a reopen". Asked after the composite is
+  // built, the fork would then skip the seed and hand the guest an empty datadir, which surfaces
+  // far away as `invalid value for parameter "TimeZone"` at startup. This order is right for a
+  // prefix in either place.
+  const fresh = absent(bundle, rootVfs, DATADIR);
+
   // Every declared mount is its own store on its own port. `durable: false` for a memory mount is a
   // DECLARATION, not an inference: the library never guesses durability from the port.
   const mountSpecs = Array.isArray(options.mounts) ? options.mounts : [];
@@ -225,6 +246,10 @@ async function boot(msg) {
     const prefix = normalize(bundle, spec.prefix);
     const kind = spec.port || 'memory';
     if (kind !== 'memory') throw new Error(`unknown mount port ${kind} at ${prefix}`);
+    // A mount AT the datadir would move the whole datadir into a second store, which the fork above
+    // cannot see and a volatile port would throw away at every stop. Refuse it by name rather than
+    // silently seeding into it. (A prefix BELOW the datadir is the supported, interesting case.)
+    if (prefix === DATADIR) throw new Error(`a mount may not claim the datadir itself (${DATADIR})`);
     const mountVfs = await bundle.RepackedVfs.open(new bundle.MemoryRepackedPort(), { extentSize });
     mounted.push({ prefix, port: kind, durable: false, vfs: mountVfs });
   }
@@ -238,9 +263,6 @@ async function boot(msg) {
   const openMs = Date.now() - tOpen;
   const nowMs = BigInt(Date.now());
   const EEXIST = bundle.WASI_ERRNO.EXIST;
-
-  // THE FRESH/EXISTING FORK. See the header: the datadir decides, not the store.
-  const fresh = absent(bundle, vfs, '/pgdata');
 
   // `mkdir` reports EEXIST for a path that is already there even with `recursive`, so an
   // idempotent seed has to swallow exactly that one errno and nothing else.
@@ -275,7 +297,25 @@ async function boot(msg) {
     vfs.strictSync();
   }
   const seedMs = Date.now() - tSeed;
-  const seeded = walk(vfs, '/pgdata');
+  const seeded = walk(vfs, DATADIR);
+
+  // LOUD, never "seeded 0 files". The two ways this can go wrong — a seed that wrote nothing, and a
+  // reopen of a datadir that is not there — both leave a coordinator that comes up perfectly and a
+  // guest that dies minutes later on a symptom (an empty datadir reads as `invalid value for
+  // parameter "TimeZone"`). Assert the datadir against the manifest right here, where the cause is,
+  // and fail the boot: `storage-error` is already fatal to the driver.
+  const wanted = (msg.manifest.files || []).filter((f) =>
+    normalize(bundle, f.path).startsWith(`${DATADIR}/`),
+  ).length;
+  if (wanted > 0 && (fresh ? seeded.files < wanted : seeded.files === 0)) {
+    const where = mounted.length ? ` (mounts: ${mounted.map((m) => `${m.prefix}=${m.port}`).join(', ')})` : '';
+    throw new Error(
+      fresh
+        ? `datadir seed wrote ${seeded.files} of ${wanted} manifest files under ${DATADIR}${where}`
+        : `${DATADIR} was taken for an EXISTING datadir but holds no files at all; the seed was ` +
+          `skipped and the guest would boot on an empty datadir${where}`,
+    );
+  }
 
   doorbell = bundle.RepackedDoorbell.attach(msg.doorbell);
   const broker = new bundle.RepackedSyncBroker({
@@ -317,7 +357,7 @@ async function boot(msg) {
   // The proof that this really was ONE store: every backend wrote into it, so the datadir the
   // coordinator holds at the end is BIGGER than the one it seeded. (Under --fs copy those writes
   // died with each worker's private Vfs.)
-  const after = walk(vfs, '/pgdata');
+  const after = walk(vfs, DATADIR);
   // Strict sync BEFORE close, explicitly. `close()` performs one itself on an open store, but
   // the two are separately timed here and an OPFS store's whole point is that the next open
   // finds this state — including finding its four handles RELEASED, so a later open does not
