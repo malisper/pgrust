@@ -83,10 +83,10 @@ pub fn DefineOperator<'mcx>(
     names: &NodeList<'mcx>,
     parameters: &NodeList<'mcx>,
 ) -> PgResult<ObjectAddress> {
-    let mut buf = [""; 4];
-    let parts = name_parts(names, &mut buf);
+    // QualifiedNameGetCreationNamespace over the whole list (operatorcmds.c:92).
+    let parts = name_parts(names);
     let (oprNamespace, oprName) =
-        catalog_namespace::QualifiedNameGetCreationNamespace(mcx, parts)?;
+        catalog_namespace::QualifiedNameGetCreationNamespace(mcx, &parts)?;
 
     let aclresult = aclchk::object_aclcheck(
         NAMESPACE_RELATION_ID,
@@ -333,14 +333,13 @@ fn ValidateOperatorReference(
 ) -> PgResult<Oid> {
     let (oid, defined) = OperatorLookup(name, leftTypeId, rightTypeId)?;
 
-    let mut buf = [""; 4];
-    let parts = name_parts(name, &mut buf);
+    let parts = name_parts(name);
     if !OidIsValid(oid) {
         return Err(err(
             ERRCODE_UNDEFINED_FUNCTION,
             format!(
                 "operator does not exist: {}",
-                parse_oper::op_signature_string(parts, leftTypeId, rightTypeId)?
+                parse_oper::op_signature_string(&parts, leftTypeId, rightTypeId)?
             ),
         ));
     }
@@ -349,7 +348,7 @@ fn ValidateOperatorReference(
             ERRCODE_UNDEFINED_FUNCTION,
             format!(
                 "operator is only a shell: {}",
-                parse_oper::op_signature_string(parts, leftTypeId, rightTypeId)?
+                parse_oper::op_signature_string(&parts, leftTypeId, rightTypeId)?
             ),
         ));
     }
@@ -597,12 +596,14 @@ pub fn AlterOperator<'mcx>(
     Ok(address)
 }
 
-fn name_parts<'a, 'mcx>(names: &NodeList<'mcx>, buf: &'a mut [&'mcx str; 4]) -> &'a [&'mcx str] {
-    let n = names.len().min(buf.len());
-    for (i, slot) in buf.iter_mut().enumerate().take(n) {
-        *slot = names.nth(i).as_string().expect("name list holds String nodes").sval;
-    }
-    &buf[..n]
+// C passes the parser's name List through untouched; DeconstructQualifiedName
+// (namespace.c:3304) renders the WHOLE list in its too-many-dotted-names /
+// cross-database errors, so every part is carried, never a fixed prefix.
+fn name_parts<'mcx>(names: &NodeList<'mcx>) -> Vec<&'mcx str> {
+    names
+        .iter()
+        .map(|n| n.as_string().expect("name list holds String nodes").sval)
+        .collect()
 }
 
 pub fn init_seams() {

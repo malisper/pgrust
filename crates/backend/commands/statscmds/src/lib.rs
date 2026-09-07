@@ -207,12 +207,17 @@ pub fn CreateStatistics<'mcx>(
     }
 
     let (namespace_id, namestr): (Oid, String) = if !stmt.defnames.is_nil() {
-        let mut parts: [&str; 4] = [""; 4];
-        let nparts = stmt.defnames.len().min(4);
-        for (i, n) in stmt.defnames.iter().take(4).enumerate() {
-            parts[i] = n.as_string().expect("name String").sval;
-        }
-        let (schemaname, name) = catalog_namespace::DeconstructQualifiedName(&parts[..nparts])?;
+        // C hands the whole defnames List to QualifiedNameGetCreationNamespace
+        // (statscmds.c:162); DeconstructQualifiedName (namespace.c:3304) names
+        // EVERY part in its too-many-dotted-names / cross-database errors.
+        let parts: PgVec<'_, &str> = {
+            let mut v = mcx::vec_with_capacity_in(mcx, stmt.defnames.len())?;
+            for n in stmt.defnames.iter() {
+                v.push(n.as_string().expect("name String").sval);
+            }
+            v
+        };
+        let (schemaname, name) = catalog_namespace::DeconstructQualifiedName(&parts)?;
         let nsp_rv = rel_vocab::RangeVar {
             catalogname: None,
             schemaname,
