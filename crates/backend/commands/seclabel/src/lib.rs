@@ -38,10 +38,9 @@ struct LabelProvider {
     hook: check_object_relabel_type,
 }
 
-const MAX_LABEL_PROVIDERS: usize = 8;
-
+// seclabel.c label_provider_list: an unbounded List in TopMemoryContext.
 struct ProviderRegistry {
-    providers: [Option<LabelProvider>; MAX_LABEL_PROVIDERS],
+    providers: Vec<LabelProvider>,
 }
 
 #[track_caller]
@@ -52,21 +51,16 @@ fn invalid_parameter(message: String) -> Box<PgError> {
 
 impl ProviderRegistry {
     const fn new() -> Self {
-        Self { providers: [None; MAX_LABEL_PROVIDERS] }
+        Self { providers: Vec::new() }
     }
 
+    // seclabel.c:579 register_label_provider: lappend, never full.
     fn register(&mut self, name: &'static str, hook: check_object_relabel_type) {
-        for slot in &mut self.providers {
-            if slot.is_none() {
-                *slot = Some(LabelProvider { name, hook });
-                return;
-            }
-        }
-        panic!("security label provider registry full ({MAX_LABEL_PROVIDERS} slots)");
+        self.providers.push(LabelProvider { name, hook });
     }
 
     fn resolve(&self, requested: Option<&str>) -> PgResult<LabelProvider> {
-        let mut loaded = self.providers.iter().flatten();
+        let mut loaded = self.providers.iter();
         match requested {
             None => {
                 let Some(first) = loaded.next() else {
@@ -559,6 +553,27 @@ mod tests {
         assert_eq!(err.sqlstate, ERRCODE_INVALID_PARAMETER_VALUE);
         assert_eq!(reg.resolve(Some("selinux")).unwrap().name, "selinux");
         assert_eq!(reg.resolve(Some("dummy")).unwrap().name, "dummy");
+    }
+
+    // seclabel.c:579 register_label_provider: the registry is an unbounded
+    // List (lappend in TopMemoryContext); any number of providers may load.
+    #[test]
+    fn register_is_unbounded_like_c() {
+        let mut reg = ProviderRegistry::new();
+        let names: [&'static str; 9] = [
+            "p1", "p2", "p3", "p4", "p5", "p6", "p7", "p8", "p9",
+        ];
+        for name in names {
+            reg.register(name, ok_hook);
+        }
+        for name in names {
+            assert_eq!(reg.resolve(Some(name)).unwrap().name, name);
+        }
+        let err = reg.resolve(None).unwrap_err();
+        assert_eq!(
+            err.message,
+            "must specify provider when multiple security label providers have been loaded"
+        );
     }
 
     #[test]
