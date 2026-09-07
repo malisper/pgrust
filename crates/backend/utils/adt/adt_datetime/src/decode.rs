@@ -1394,13 +1394,13 @@ pub fn DecodeDateTime<'a>(
                                 tm,
                                 fsec,
                                 if have_tz { Some(&mut tzv) } else { None },
-                            );
+                            )?;
                         }
                         DTK_YESTERDAY | DTK_TODAY | DTK_TOMORROW => {
                             tmask = DTK_DATE_M;
                             *dtype = DTK_DATE;
                             let mut cur_tm = pg_tm::default();
-                            tz::GetCurrentDateTime(&mut cur_tm);
+                            tz::GetCurrentDateTime(&mut cur_tm)?;
                             let delta = match val {
                                 DTK_YESTERDAY => -1,
                                 DTK_TODAY => 0,
@@ -1864,7 +1864,7 @@ pub fn DecodeTimeOnly<'a>(
                         DTK_NOW => {
                             tmask = DTK_TIME_M;
                             *dtype = DTK_TIME;
-                            tz::GetCurrentTimeUsec(tm, fsec, None);
+                            tz::GetCurrentTimeUsec(tm, fsec, None)?;
                         }
                         DTK_ZULU => {
                             tmask = DTK_TIME_M | DTK_M(TZ);
@@ -1998,7 +1998,7 @@ pub fn DecodeTimeOnly<'a>(
             return Ok(DTERR_BAD_FORMAT);
         }
         if fmask & DTK_DATE_M == 0 {
-            tz::GetCurrentDateTime(&mut tt);
+            tz::GetCurrentDateTime(&mut tt)?;
         } else {
             if fmask & DTK_DATE_M != DTK_DATE_M {
                 return Ok(DTERR_BAD_FORMAT);
@@ -2021,7 +2021,7 @@ pub fn DecodeTimeOnly<'a>(
             return Ok(DTERR_BAD_FORMAT);
         }
         if fmask & DTK_DATE_M == 0 {
-            tz::GetCurrentDateTime(&mut tt);
+            tz::GetCurrentDateTime(&mut tt)?;
         } else {
             if fmask & DTK_DATE_M != DTK_DATE_M {
                 return Ok(DTERR_BAD_FORMAT);

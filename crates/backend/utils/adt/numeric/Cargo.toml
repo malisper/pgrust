@@ -9,6 +9,7 @@ name = "adt_numeric"
 path = "src/lib.rs"
 
 [dependencies]
+clauses_seams = { path = "../../../optimizer/util/clauses_seams" }
 elog = { path = "../../error/elog" }
 guc_tables = { path = "../../misc/guc_tables" }
 arrayfuncs = { path = "../arrayfuncs" }

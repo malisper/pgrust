@@ -1197,7 +1197,7 @@ pub fn set_function_size_estimates<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId)
     }
     let mut tuples = 0.0f64;
     for &fexpr in funcexprs.iter() {
-        let ntup = expression_returns_set_rows(fexpr)?;
+        let ntup = expression_returns_set_rows(run, fexpr)?;
         if ntup > tuples {
             tuples = ntup;
         }
@@ -1207,13 +1207,16 @@ pub fn set_function_size_estimates<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId)
 }
 
 // expression_returns_set_rows (clauses.c); the OpExpr opretset arm is dead
-// (no set-returning operators resolve on this lane).
-pub fn expression_returns_set_rows(clause: Node<'_>) -> PgResult<f64> {
+// (no set-returning operators resolve on this lane). root reaches
+// get_function_rows as its bound params (the support functions'
+// estimate_expression_value(req->root, arg)).
+pub fn expression_returns_set_rows(run: &PlannerRun<'_>, clause: Node<'_>) -> PgResult<f64> {
     if let Some(fe) = clause.as_func_expr() {
         if fe.funcretset {
             return Ok(clamp_row_est(planner_seams::get_function_rows::call(
                 fe.funcid,
                 Some(clause),
+                run.glob.bound_params,
             )?));
         }
     }

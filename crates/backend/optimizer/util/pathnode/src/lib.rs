@@ -231,7 +231,7 @@ pub fn create_set_projection_path<'mcx>(
     let mut tlist_rows = 1.0f64;
     for i in 0..run.root.pathtarget(target_id).exprs.len() {
         let id = run.root.pathtarget(target_id).exprs[i];
-        let itemrows = costsize::expression_returns_set_rows(*run.root.expr_node(id))?;
+        let itemrows = costsize::expression_returns_set_rows(run, *run.root.expr_node(id))?;
         if tlist_rows < itemrows {
             tlist_rows = itemrows;
         }

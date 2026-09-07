@@ -4349,9 +4349,9 @@ fn step_sql_value_function(
 ) -> PgResult<()> {
     use ::types_nodes::primnodes::SQLValueFunctionOp as Op;
     let value = match op {
-        Op::SVFOP_CURRENT_DATE => Datum::from_i32(adt_date::GetSQLCurrentDate()),
+        Op::SVFOP_CURRENT_DATE => Datum::from_i32(adt_date::GetSQLCurrentDate()?),
         Op::SVFOP_CURRENT_TIME | Op::SVFOP_CURRENT_TIME_N => {
-            let t = adt_date::GetSQLCurrentTime(typmod);
+            let t = adt_date::GetSQLCurrentTime(typmod)?;
             // SAFETY: compile-allocated 12-byte 8-aligned image
             // slot owned by this step (steps.rs note).
             unsafe {
@@ -4364,7 +4364,7 @@ fn step_sql_value_function(
             Datum::from_i64(adt_timestamp::GetSQLCurrentTimestamp(typmod))
         }
         Op::SVFOP_LOCALTIME | Op::SVFOP_LOCALTIME_N => {
-            Datum::from_i64(adt_date::GetSQLLocalTime(typmod))
+            Datum::from_i64(adt_date::GetSQLLocalTime(typmod)?)
         }
         Op::SVFOP_LOCALTIMESTAMP | Op::SVFOP_LOCALTIMESTAMP_N => {
             Datum::from_i64(adt_timestamp::GetSQLLocalTimestamp(typmod)?)

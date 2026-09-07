@@ -377,6 +377,7 @@ dependencies = [
 name = "adt_int"
 version = "0.1.0"
 dependencies = [
+ "clauses_seams",
  "datum",
  "funcapi",
  "hashfn",
@@ -396,6 +397,7 @@ dependencies = [
 name = "adt_int8"
 version = "0.1.0"
 dependencies = [
+ "clauses_seams",
  "datum",
  "funcapi",
  "hashfn",
@@ -737,6 +739,7 @@ version = "0.1.0"
 dependencies = [
  "adt_float",
  "arrayfuncs",
+ "clauses_seams",
  "datum",
  "detoast_seams",
  "elog",
@@ -965,6 +968,7 @@ dependencies = [
  "adt_datetime",
  "adt_float",
  "adt_numeric",
+ "clauses_seams",
  "datum",
  "elog",
  "fd",
@@ -14281,6 +14285,7 @@ dependencies = [
  "catalog_index_seams",
  "catalog_storage_seams",
  "catcache",
+ "clauses",
  "cmdtag",
  "combocid_seams",
  "commands_async",

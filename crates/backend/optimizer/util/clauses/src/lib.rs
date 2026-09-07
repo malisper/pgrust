@@ -36,6 +36,13 @@ pub use fold::{
 };
 pub fn init_seams() {
     clauses_seams::eval_const_expressions::set(fold::eval_const_expressions);
+    clauses_seams::estimate_expression_value::set(|mcx, node, bound_params_raw| {
+        fold::estimate_expression_value_with_params(
+            mcx,
+            node,
+            ::types_portal::ParamListHandle(bound_params_raw),
+        )
+    });
 }
 
 pub use walker::{

@@ -504,6 +504,8 @@ fn install_fixtures() {
         parser_analyze::init_seams();
         rewrite_handler::init_seams();
         planner::init_seams();
+        // generate_series row estimates ride clauses_seams::estimate_expression_value
+        clauses::init_seams();
         execmain::init_seams();
         xact::init_seams();
         elog::init_seams();

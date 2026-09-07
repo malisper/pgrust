@@ -1,8 +1,9 @@
 // Planner support-request nodes (supportnodes.h). Stack-built by the planner,
 // passed to prosupport functions as a pointer Datum; tag-first repr(C) so the
 // callee can demux on the leading NodeTag alone. C's `root` is omitted:
-// PlannerInfo never crosses the fmgr boundary here (Param estimation, its only
-// consumer, is unported).
+// PlannerInfo never crosses the fmgr boundary here; its one consumer, the
+// SupportRequestRows estimators' estimate_expression_value(req->root, arg),
+// reads root->glob->boundParams, carried as `bound_params_raw`.
 use crate::node_tree::Node;
 use crate::tags::NodeTag;
 use types_core::Oid;
@@ -13,6 +14,10 @@ pub struct SupportRequestRows<'mcx> {
     pub funcid: Oid,
     pub node: Option<Node<'mcx>>,
     pub rows: f64,
+    // root->glob->boundParams as the types_portal::ParamListHandle's raw bits
+    // (0 = NULL): the estimators hand it to
+    // clauses_seams::estimate_expression_value.
+    pub bound_params_raw: u64,
 }
 
 // operator oid -> selectivity; errors propagate through the fmgr call.
@@ -131,7 +136,18 @@ impl<'mcx> SupportRequestIndexCondition<'mcx> {
 
 impl<'mcx> SupportRequestRows<'mcx> {
     pub fn new(funcid: Oid, node: Option<Node<'mcx>>) -> Self {
-        SupportRequestRows { tag: NodeTag::T_SupportRequestRows, funcid, node, rows: 0.0 }
+        SupportRequestRows {
+            tag: NodeTag::T_SupportRequestRows,
+            funcid,
+            node,
+            rows: 0.0,
+            bound_params_raw: 0,
+        }
+    }
+
+    pub fn with_bound_params_raw(mut self, bound_params_raw: u64) -> Self {
+        self.bound_params_raw = bound_params_raw;
+        self
     }
 }
 

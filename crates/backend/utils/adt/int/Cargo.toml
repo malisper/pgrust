@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+clauses_seams = { path = "../../../optimizer/util/clauses_seams" }
 datum = { path = "../../../../_support/types/datum" }
 funcapi = { path = "../../fmgr/funcapi" }
 hashfn = { path = "../../../../common/hashfn" }

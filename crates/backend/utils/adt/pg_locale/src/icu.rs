@@ -55,6 +55,18 @@ fn errname(api: &IcuApi, status: UErrorCode) -> String {
     ffi::u_errorName_str(api, status)
 }
 
+// pg_locale_icu.c:488-489 strncoll_icu_utf8: an ICU failure status is
+// ereport(ERROR, errmsg("collation failed: %s", u_errorName(status))) — the
+// ereport default SQLSTATE XX000. The comparator lanes (varstr_cmp, sort
+// support, btree) return i32, so the error rides the tree's PgError-payload
+// unwind channel, recovered by pg_error_from_panic at the statement boundary
+// (tuplesort's shim_cmp is the precedent).
+#[cold]
+#[inline(never)]
+fn collation_failed(api: &IcuApi, status: UErrorCode) -> ! {
+    std::panic::panic_any(icu_error(format!("collation failed: {}", errname(api, status))))
+}
+
 // pg_enc2icu_tbl (encnames.c); None entries are not supported by ICU.
 fn get_encoding_name_for_icu(encoding: i32) -> Option<&'static str> {
     Some(match encoding {
@@ -280,7 +292,7 @@ pub(crate) fn strncoll(arg1: &[u8], arg2: &[u8], locale: IcuLocale) -> i32 {
             )
         };
         if ffi::U_FAILURE(status) {
-            panic!("collation failed: {}", errname(api, status));
+            collation_failed(api, status);
         }
         return result;
     }
@@ -760,4 +772,40 @@ pub fn icu_locale_display_name_ascii(localename: &str) -> Option<String> {
         return None;
     }
     Some(shown.iter().map(|&u| u as u8 as char).collect())
+}
+
+#[cfg(test)]
+mod collation_failed_tests {
+    use super::*;
+
+    // pg_locale_icu.c:488-489: the failure arm of strncoll_icu_utf8 is an
+    // ereport(ERROR) whose message is "collation failed: <u_errorName>" and
+    // whose SQLSTATE is the ereport default XX000 -- a structured error the
+    // backend reports as such, never an unstructured panic. The comparator
+    // lanes (varstr_cmp, sort support, btree) return i32, so the error rides
+    // the tree's PgError-payload unwind channel (recovered by
+    // pg_error_from_panic at the statement boundary; tuplesort's shim_cmp is
+    // the precedent). ICU itself has no failure injection over valid UTF-8,
+    // so the arm is exercised directly with U_ILLEGAL_ARGUMENT_ERROR (1)
+    // (row a186-candidate-fp-adt-pg_locale_icu-7c9a51ca5e5bda654367-1).
+    #[test]
+    fn icu_collation_failure_is_structured_internal_error() {
+        let Some(api) = ffi::try_icu() else {
+            return; // no loadable libicu: the C-without---with-icu arm
+        };
+        const U_ILLEGAL_ARGUMENT_ERROR: UErrorCode = 1;
+        // unwind-ok: test witness
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            collation_failed(api, U_ILLEGAL_ARGUMENT_ERROR)
+        }));
+        let payload = r.expect_err("collation_failed never returns");
+        let err = types_error::pg_error_from_panic(payload)
+            .unwrap_or_else(|_| panic!("expected a structured PgError, got an unstructured panic"));
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(
+            err.message(),
+            format!("collation failed: {}", errname(api, U_ILLEGAL_ARGUMENT_ERROR))
+        );
+        assert_eq!(err.message(), "collation failed: U_ILLEGAL_ARGUMENT_ERROR");
+    }
 }

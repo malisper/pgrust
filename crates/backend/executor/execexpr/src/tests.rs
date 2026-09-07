@@ -1683,7 +1683,7 @@ fn sql_value_function_datetime_ops() {
         );
 
         let r = eval(mk_svf(mcx, Op::SVFOP_CURRENT_DATE, 1082, -1));
-        assert_eq!(r.value.as_i32(), adt_date::GetSQLCurrentDate());
+        assert_eq!(r.value.as_i32(), adt_date::GetSQLCurrentDate().unwrap());
 
         let r = eval(mk_svf(mcx, Op::SVFOP_LOCALTIME_N, 1083, 0));
         assert_eq!(r.value.as_i64() % 1_000_000, 0);

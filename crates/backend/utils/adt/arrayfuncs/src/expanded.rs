@@ -6,7 +6,7 @@ use ::datum::expandeddatum::{
 use ::datum::Datum;
 use ::mcx::{slice_in, vec_with_capacity_in, Mcx, MemoryContext, PgVec};
 use ::types_core::Oid;
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
 
 use crate::construct::{copy_array_els, deconstruct_array};
 use crate::foundation::{
@@ -265,6 +265,21 @@ fn att_addlength_datum(cur: usize, typlen: i16, typbyval: bool, value: Datum) ->
     }
 }
 
+// array_expanded.c:268-272: ereport(ERROR, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+// "array size exceeds the maximum allowed (%d)"). The ExpandedObjectMethods
+// table is infallible (C longjmps out of it), so the error rides the tree's
+// PgError-payload unwind channel, recovered by pg_error_from_panic at the
+// statement boundary (adt_numeric's undersized_numeric_error is the
+// precedent).
+#[cold]
+#[inline(never)]
+fn array_size_exceeds_limit() -> ! {
+    std::panic::panic_any(
+        PgError::error(format!("array size exceeds the maximum allowed ({MAX_ALLOC_SIZE})"))
+            .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+    )
+}
+
 unsafe fn ea_get_flat_size(eohptr: *mut ExpandedObjectHeader) -> usize {
     let eah = &mut *(eohptr as *mut ExpandedArrayHeader);
     assert_eq!(eah.ea_magic, EA_MAGIC);
@@ -285,9 +300,7 @@ unsafe fn ea_get_flat_size(eohptr: *mut ExpandedObjectHeader) -> usize {
         nbytes = att_addlength_datum(nbytes, eah.typlen, eah.typbyval, dvalues[i]);
         nbytes = att_align_nominal(nbytes, eah.typalign);
         if nbytes > MAX_ALLOC_SIZE {
-            // The methods table cannot carry PgResult (C ereports here);
-            // reachable only for >1GB element payloads.
-            panic!("array size exceeds the maximum allowed ({MAX_ALLOC_SIZE})");
+            array_size_exceeds_limit();
         }
     }
     nbytes += if dnulls.is_some() {
@@ -407,4 +420,71 @@ pub fn deconstruct_expanded_array(eah: &mut ExpandedArrayHeader) -> PgResult<()>
 
 pub fn expanded_array_data_bounds(eah: &ExpandedArrayHeader) -> Option<(usize, usize)> {
     eah.fvalue.as_ref().map(|f| (arr_data_offset(f), arr_size(f)))
+}
+
+#[cfg(test)]
+mod flat_size_limit_tests {
+    use super::*;
+
+    // Two varlena headers that CLAIM ~576 MiB each (no body: EA_get_flat_size
+    // only reads the length words, array_expanded.c:266 att_addlength_datum),
+    // so the summed flat size crosses MaxAllocSize on the second element.
+    fn claimed_varlena(len: usize) -> Datum {
+        let hdr: &'static mut [u8; 4] = Box::leak(Box::new(((len as u32) << 2).to_le_bytes()));
+        Datum::from_usize(hdr.as_ptr() as usize)
+    }
+
+    fn dvalues_only_text_array(claims: &[usize]) -> Box<ExpandedArrayHeader> {
+        let mut eah = Box::new(ExpandedArrayHeader::empty(MemoryContext::new("flat size limit")));
+        eah.ndims = 1;
+        eah.dims[0] = claims.len() as i32;
+        eah.lbound[0] = 1;
+        eah.element_type = 25;
+        eah.typlen = -1;
+        eah.typbyval = false;
+        eah.typalign = b'i';
+        eah.nelems = claims.len() as i32;
+        eah.dvalueslen = claims.len() as i32;
+        let mut dvalues: PgVec<'static, Datum> =
+            vec_with_capacity_in(eah.obj_mcx(), claims.len()).unwrap();
+        for &c in claims {
+            dvalues.push(claimed_varlena(c));
+        }
+        eah.dvalues = Some(dvalues);
+        eah
+    }
+
+    // array_expanded.c:268-272: a flattened payload past MaxAllocSize is
+    // ereport(ERROR, ERRCODE_PROGRAM_LIMIT_EXCEEDED, "array size exceeds the
+    // maximum allowed (%d)") -- a structured error the backend reports with
+    // SQLSTATE 54000, never an unstructured panic
+    // (row a186-candidate-fp-adt-array_expanded-207175d313430eabbd6a-1).
+    #[test]
+    fn flat_size_past_max_alloc_size_is_program_limit_exceeded_error() {
+        let mut eah = dvalues_only_text_array(&[0x2400_0000, 0x2400_0000]);
+        let p = core::ptr::from_mut(&mut *eah).cast::<ExpandedObjectHeader>();
+        // unwind-ok: test witness
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            ea_get_flat_size(p)
+        }));
+        let payload = r.expect_err("flat size past MaxAllocSize must not succeed");
+        let err = ::types_error::pg_error_from_panic(payload)
+            .unwrap_or_else(|_| panic!("expected a structured PgError, got an unstructured panic"));
+        assert_eq!(err.sqlstate(), ::types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+        assert_eq!(
+            err.message(),
+            format!("array size exceeds the maximum allowed ({MAX_ALLOC_SIZE})")
+        );
+        assert_eq!(eah.flat_size, 0, "no flat size is cached after the error");
+    }
+
+    #[test]
+    fn flat_size_under_max_alloc_size_is_computed_and_cached() {
+        let mut eah = dvalues_only_text_array(&[0x2400_0000, 0x1000]);
+        let p = core::ptr::from_mut(&mut *eah).cast::<ExpandedObjectHeader>();
+        let n = unsafe { ea_get_flat_size(p) };
+        // both elements int-aligned, no nulls bitmap, 1-D overhead
+        assert_eq!(n, 0x2400_0000 + 0x1000 + arr_overhead_nonulls(1));
+        assert_eq!(eah.flat_size, n);
+    }
 }

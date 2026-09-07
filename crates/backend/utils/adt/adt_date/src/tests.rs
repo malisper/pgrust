@@ -215,13 +215,13 @@ fn zoneless_time_in_lives_on_tz_seams() {
 #[test]
 fn sql_current_time_lives_on_tz_seams() {
     gmt_session();
-    let t = GetSQLLocalTime(-1);
+    let t = GetSQLLocalTime(-1).unwrap();
     assert!((0..=USECS_PER_DAY).contains(&t));
-    let ct = GetSQLCurrentTime(-1);
+    let ct = GetSQLCurrentTime(-1).unwrap();
     assert!((0..=USECS_PER_DAY).contains(&ct.time));
-    let d = GetSQLCurrentDate();
+    let d = GetSQLCurrentDate().unwrap();
     // repeat hits the SQL_CURRENT_DATE_CACHE memo
-    assert_eq!(GetSQLCurrentDate(), d);
+    assert_eq!(GetSQLCurrentDate().unwrap(), d);
     assert!(IS_VALID_DATE(d));
 }
 

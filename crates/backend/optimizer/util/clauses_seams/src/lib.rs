@@ -13,6 +13,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // clauses::fold::estimate_expression_value_with_params for the prosupport
+    // SupportRequestRows estimators (int.c/int8.c/numeric.c/timestamp.c
+    // generate_series_*_support: C's estimate_expression_value(req->root,
+    // arg)); bound_params_raw is root->glob->boundParams as the
+    // types_portal::ParamListHandle's raw bits (0 = NULL). Installed by
+    // clauses — the adt crates cannot depend on it (clauses -> adt_numeric
+    // cycles).
+    pub fn estimate_expression_value<'mcx>(
+        mcx: Mcx<'mcx>,
+        node: Node<'mcx>,
+        bound_params_raw: u64,
+    ) -> PgResult<Node<'mcx>>
+);
+
+seam_core::seam!(
     pub fn evaluate_expr<'mcx>(
         mcx: Mcx<'mcx>,
         expr: Node<'mcx>,

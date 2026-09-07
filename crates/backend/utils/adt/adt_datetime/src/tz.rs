@@ -320,21 +320,29 @@ fn from_snapshot(s: &timestamp_seams::CurrentTimeUsec, tm: &mut pg_tm) {
     tm.tm_zone = s.tm_zone;
 }
 
-// DIVERGENCE: C ereports "timestamp out of range" (22008); the callers here
-// (DecodeDateTime and friends) return dterr codes and cannot carry a PgError,
-// so an out-of-range transaction timestamp panics instead.
+// datetime.c:423-431 GetCurrentTimeUsec: a transaction start timestamp that
+// timestamp2tm rejects is ereport(ERROR, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE,
+// "timestamp out of range"); the seam (adt_timestamp::GetCurrentTimeUsec)
+// raises exactly that error and the decoders carry it out through their
+// PgResult.
 #[allow(non_snake_case)]
-pub fn GetCurrentDateTime(tm: &mut pg_tm) {
-    let s = timestamp_seams::get_current_datetime::call().expect("timestamp out of range");
+pub fn GetCurrentDateTime(tm: &mut pg_tm) -> PgResult<()> {
+    let s = timestamp_seams::get_current_datetime::call()?;
     from_snapshot(&s, tm);
+    Ok(())
 }
 
 #[allow(non_snake_case)]
-pub fn GetCurrentTimeUsec(tm: &mut pg_tm, fsec: &mut fsec_t, tzp: Option<&mut i32>) {
-    let s = timestamp_seams::get_current_time_usec::call().expect("timestamp out of range");
+pub fn GetCurrentTimeUsec(
+    tm: &mut pg_tm,
+    fsec: &mut fsec_t,
+    tzp: Option<&mut i32>,
+) -> PgResult<()> {
+    let s = timestamp_seams::get_current_time_usec::call()?;
     from_snapshot(&s, tm);
     *fsec = s.fsec;
     if let Some(tzp) = tzp {
         *tzp = s.tz;
     }
+    Ok(())
 }

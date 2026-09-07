@@ -814,15 +814,17 @@ pub fn timetz_time(timetz: &TimeTzADT) -> TimeADT {
     timetz.time
 }
 
-pub fn time_timetz(time: TimeADT) -> TimeTzADT {
+// date.c:2902 time_timetz: GetCurrentDateTime's "timestamp out of range"
+// (22008) is the caller's error.
+pub fn time_timetz(time: TimeADT) -> PgResult<TimeTzADT> {
     let mut tm = pg_tm::default();
     let mut fsec: fsec_t = 0;
-    tz::GetCurrentDateTime(&mut tm);
+    tz::GetCurrentDateTime(&mut tm)?;
     time2tm(time, &mut tm, &mut fsec);
     let z = tz::session_timezone()
         .unwrap_or_else(|| panic!("session timezone not initialized (pg_timezone_initialize) — time_timetz"));
     let tzoff = tz::DetermineTimeZoneOffset(&mut tm, z);
-    TimeTzADT { time, zone: tzoff }
+    Ok(TimeTzADT { time, zone: tzoff })
 }
 
 pub fn timestamptz_timetz(timestamp: TimestampTz) -> PgResult<Option<TimeTzADT>> {
@@ -847,11 +849,14 @@ std::thread_local! {
         const { core::cell::Cell::new((0, 0, 0, 0)) };
 }
 
-pub fn GetSQLCurrentDate() -> DateADT {
+// date.c:326/358/378 GetSQLCurrentDate/GetSQLCurrentTime/GetSQLLocalTime:
+// GetCurrentDateTime/GetCurrentTimeUsec's "timestamp out of range" (22008)
+// is the caller's error.
+pub fn GetSQLCurrentDate() -> PgResult<DateADT> {
     let mut tm = pg_tm::default();
-    tz::GetCurrentDateTime(&mut tm);
+    tz::GetCurrentDateTime(&mut tm)?;
 
-    SQL_CURRENT_DATE_CACHE.with(|c| {
+    Ok(SQL_CURRENT_DATE_CACHE.with(|c| {
         let (y, m, d, date) = c.get();
         if (tm.tm_year, tm.tm_mon, tm.tm_mday) == (y, m, d) {
             return date;
@@ -859,28 +864,28 @@ pub fn GetSQLCurrentDate() -> DateADT {
         let date = date2j(tm.tm_year, tm.tm_mon, tm.tm_mday) - POSTGRES_EPOCH_JDATE;
         c.set((tm.tm_year, tm.tm_mon, tm.tm_mday, date));
         date
-    })
+    }))
 }
 
-pub fn GetSQLCurrentTime(typmod: i32) -> TimeTzADT {
+pub fn GetSQLCurrentTime(typmod: i32) -> PgResult<TimeTzADT> {
     let mut tm = pg_tm::default();
     let mut fsec: fsec_t = 0;
     let mut tzoff = 0;
-    tz::GetCurrentTimeUsec(&mut tm, &mut fsec, Some(&mut tzoff));
+    tz::GetCurrentTimeUsec(&mut tm, &mut fsec, Some(&mut tzoff))?;
     let mut result = TimeTzADT::default();
     tm2timetz(&tm, fsec, tzoff, &mut result);
     AdjustTimeForTypmod(&mut result.time, typmod);
-    result
+    Ok(result)
 }
 
-pub fn GetSQLLocalTime(typmod: i32) -> TimeADT {
+pub fn GetSQLLocalTime(typmod: i32) -> PgResult<TimeADT> {
     let mut tm = pg_tm::default();
     let mut fsec: fsec_t = 0;
     let mut tzoff = 0;
-    tz::GetCurrentTimeUsec(&mut tm, &mut fsec, Some(&mut tzoff));
+    tz::GetCurrentTimeUsec(&mut tm, &mut fsec, Some(&mut tzoff))?;
     let mut result = tm2time(&tm, fsec);
     AdjustTimeForTypmod(&mut result, typmod);
-    result
+    Ok(result)
 }
 
 // hashfunc.c hashint8's fold of int64 to a hashable u32 (hashfunc.c unit

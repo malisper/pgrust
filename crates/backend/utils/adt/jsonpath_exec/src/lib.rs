@@ -1962,7 +1962,7 @@ impl<'a, 'x, 'mcx: 'a> ExecCtx<'a, 'x, 'mcx> {
                     }
                     ParsedDatetime::Time(t) => {
                         self.check_timezone_is_used("time", "timetz")?;
-                        ParsedDatetime::TimeTz(time_timetz_tz(t))
+                        ParsedDatetime::TimeTz(time_timetz_tz(t)?)
                     }
                     ParsedDatetime::TimeTz(_) => value,
                     ParsedDatetime::TimestampTz(ts) => ParsedDatetime::TimeTz(
@@ -2276,7 +2276,7 @@ enum PredOp<'a> {
 }
 
 /// C: time_timetz cast core (date.c) — attaches the session zone.
-fn time_timetz_tz(t: TimeADT) -> TimeTzADT {
+fn time_timetz_tz(t: TimeADT) -> PgResult<TimeTzADT> {
     adt_date::time_timetz(t)
 }
 
@@ -2575,13 +2575,13 @@ fn compare_datetime(
         (Time(t1), Time(t2)) => adt_date::time_cmp_internal(*t1, *t2),
         (Time(t1), TimeTz(t2)) => {
             check_tz("time", "timetz")?;
-            adt_date::timetz_cmp_internal(&adt_date::time_timetz(*t1), t2)
+            adt_date::timetz_cmp_internal(&adt_date::time_timetz(*t1)?, t2)
         }
         (Time(_), Date(_) | Timestamp(_) | TimestampTz(_)) => return Ok(None),
 
         (TimeTz(t1), Time(t2)) => {
             check_tz("time", "timetz")?;
-            adt_date::timetz_cmp_internal(t1, &adt_date::time_timetz(*t2))
+            adt_date::timetz_cmp_internal(t1, &adt_date::time_timetz(*t2)?)
         }
         (TimeTz(t1), TimeTz(t2)) => adt_date::timetz_cmp_internal(t1, t2),
         (TimeTz(_), Date(_) | Timestamp(_) | TimestampTz(_)) => return Ok(None),

@@ -6,6 +6,7 @@ use std::cell::{Cell, RefCell};
 use mcx::{vec_from_elem_in, PgVec};
 use types_core::{BlockNumber, Oid};
 use types_error::PgResult;
+use types_portal::ParamListHandle;
 use types_pathnodes::{IndexOptInfo, NodeId, RelId};
 use types_rel::{NoLock, Relation, RELKIND_RELATION};
 use types_tuple::htup::FirstLowInvalidHeapAttributeNumber;
@@ -1334,16 +1335,22 @@ pub fn add_function_cost(funcid: Oid, cost: &mut types_pathnodes::QualCost) -> P
     Ok(())
 }
 
-// get_function_rows (plancat.c); root is not threaded (support functions on
-// this lane read only Const args).
-pub fn get_function_rows(funcid: Oid, node: Option<types_nodes::Node<'_>>) -> PgResult<f64> {
+// get_function_rows (plancat.c); of root, the support functions read only
+// root->glob->boundParams (their estimate_expression_value), carried on the
+// request as the ParamListHandle's raw bits.
+pub fn get_function_rows(
+    funcid: Oid,
+    node: Option<types_nodes::Node<'_>>,
+    bound_params: ParamListHandle,
+) -> PgResult<f64> {
     // plancat.c:2194 elog(ERROR, "cache lookup failed for function %u") --
     // catchable XX000, not a backend abort.
     let Some(shape) = syscache_seams::pg_proc_cost_shape::call(funcid)? else {
         return Err(crate::cache_lookup_failed("function", funcid));
     };
     if shape.prosupport != 0 {
-        let mut req = types_nodes::supportnodes::SupportRequestRows::new(funcid, node);
+        let mut req = types_nodes::supportnodes::SupportRequestRows::new(funcid, node)
+            .with_bound_params_raw(bound_params.0);
         let addr = core::ptr::from_mut(&mut req) as usize;
         let result =
             fmgr_core::oid_function_call1_coll(shape.prosupport, 0, datum::Datum::from_usize(addr))?;

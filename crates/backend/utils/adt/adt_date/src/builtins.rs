@@ -971,7 +971,7 @@ pub fn fc_timetz_scale(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
 }
 
 pub fn fc_time_timetz(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    timetz_result(fcinfo, &crate::time_timetz(fcinfo.arg_i64(0)))
+    timetz_result(fcinfo, &crate::time_timetz(fcinfo.arg_i64(0))?)
 }
 
 pub fn fc_timestamptz_timetz(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {

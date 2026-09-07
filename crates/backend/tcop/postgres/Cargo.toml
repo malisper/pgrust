@@ -132,6 +132,7 @@ parse_expr = { path = "../../parser/parse_expr" }
 parser_analyze = { path = "../../parser/parser_analyze" }
 rewrite_handler = { path = "../../rewrite/rewrite_handler" }
 planner = { path = "../../optimizer/plan/planner" }
+clauses = { path = "../../optimizer/util/clauses" }
 execmain = { path = "../../executor/execmain" }
 execmain_seams = { path = "../../executor/execmain_seams" }
 utility = { path = "../utility" }

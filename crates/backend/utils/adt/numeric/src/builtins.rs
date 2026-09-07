@@ -1201,15 +1201,19 @@ unsafe fn num_from_const_datum<'a>(fcinfo: &'a Fcinfo, d: Datum) -> PgResult<Num
     }
 }
 
-// SupportRequestRows over all-Const args; anything else returns NULL so
-// callers fall back (C estimates planner-folded exprs — Param estimation
-// unported, same divergence as generate_series_int4_support).
+// generate_series_numeric_support (numeric.c:1840-1930): SupportRequestRows
+// over the ESTIMATED argument values (numeric.c:1858-1863
+// estimate_expression_value(req->root, arg)); anything that does not fold to
+// a Const returns NULL so callers fall back to prorows.
 pub fn fc_generate_series_numeric_support(
     _flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     let [a] = fcinfo.args_n::<1>();
     let p = a.value.as_usize() as *mut ();
+    // The estimated argument trees live in this bump arena and die with it;
+    // the request's node lifetime is unified with it below.
+    let cx = ::mcx::MemoryContext::new_bump("generate_series support estimate");
     // SAFETY: prosupport contract — the internal arg points at a live
     // tag-first support-request node exclusively owned by this call.
     let Some(req) = (unsafe { ::types_nodes::supportnodes::support_request_rows_mut(p) }) else {
@@ -1219,30 +1223,52 @@ pub fn fc_generate_series_numeric_support(
         Some(fe) => &fe.args,
         None => return Ok(Datum::from_usize(0)),
     };
-    let mut vals = [Datum::null(); 3];
-    let nargs = args.len();
-    for (i, arg) in args.iter().enumerate() {
-        match arg.as_const() {
-            Some(c) if c.constisnull => {
-                req.rows = 0.0;
-                return Ok(Datum::from_usize(p as usize));
-            }
-            Some(c) => vals[i] = c.constvalue,
-            None => return Ok(Datum::from_usize(0)),
-        }
+    let mut it = args.iter();
+    let (Some(arg1), Some(arg2)) = (it.next(), it.next()) else {
+        return Ok(Datum::from_usize(0));
+    };
+    let arg3 = it.next();
+    // We can use estimated argument values here (stable expressions and bound
+    // Params fold to Consts under estimate_expression_value).
+    let bound_params_raw = req.bound_params_raw;
+    let estimate =
+        |arg| ::clauses_seams::estimate_expression_value::call(cx.mcx(), arg, bound_params_raw);
+    let arg1 = estimate(arg1)?;
+    let arg2 = estimate(arg2)?;
+    let arg3 = match arg3 {
+        Some(a) => Some(estimate(a)?),
+        None => None,
+    };
+    // If any argument is constant NULL, we can safely assume that zero rows
+    // are returned. Otherwise, if they're all non-NULL constants, we can
+    // calculate the number of rows that will be returned.
+    let is_null_const = |n: ::types_nodes::Node<'_>| n.as_const().is_some_and(|c| c.constisnull);
+    if is_null_const(arg1) || is_null_const(arg2) || arg3.is_some_and(is_null_const) {
+        req.rows = 0.0;
+        return Ok(Datum::from_usize(p as usize));
     }
-    // SAFETY: non-null numeric Const datums per the constisnull check above.
+    let (Some(c1), Some(c2)) = (arg1.as_const(), arg2.as_const()) else {
+        return Ok(Datum::from_usize(0));
+    };
+    let c3 = match arg3 {
+        Some(a) => match a.as_const() {
+            Some(c) => Some(c),
+            None => return Ok(Datum::from_usize(0)),
+        },
+        None => None,
+    };
+    // SAFETY: non-null numeric Const datums per the constisnull check above
+    // (the estimated Consts live in cx, which outlives the row computation).
     let (start, stop) = unsafe {
         (
-            num_from_const_datum(fcinfo, vals[0])?,
-            num_from_const_datum(fcinfo, vals[1])?,
+            num_from_const_datum(fcinfo, c1.constvalue)?,
+            num_from_const_datum(fcinfo, c2.constvalue)?,
         )
     };
-    let step = if nargs >= 3 {
+    let step = match c3 {
         // SAFETY: as above.
-        Some(unsafe { num_from_const_datum(fcinfo, vals[2]) }?)
-    } else {
-        None
+        Some(c) => Some(unsafe { num_from_const_datum(fcinfo, c.constvalue) }?),
+        None => None,
     };
     match crate::series::generate_series_numeric_rows(start, stop, step)? {
         Some(rows) => {

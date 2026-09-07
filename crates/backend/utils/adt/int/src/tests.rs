@@ -432,6 +432,11 @@ fn generate_series_support_rows_estimate() {
     )
     .unwrap();
 
+    // int.c:1632 estimate_expression_value over each argument: a Const is
+    // its own estimate, so the identity stands in for the clauses installer.
+    if !::clauses_seams::estimate_expression_value::is_installed() {
+        ::clauses_seams::estimate_expression_value::set(|_, node, _| Ok(node));
+    }
     let mut req = SupportRequestRows::new(1067, Some(fe));
     let addr = core::ptr::from_mut(&mut req) as usize;
     let mut fci = LocalFcinfo::<1>::new(0);

@@ -3066,7 +3066,7 @@ fn estimate_num_groups_core<'mcx>(
         }
         // SRFs are estimated as scalars here; the end result is scaled up by
         // the largest SRF rowcount instead.
-        let this_srf_multiplier = crate::costsize::expression_returns_set_rows(node)?;
+        let this_srf_multiplier = crate::costsize::expression_returns_set_rows(run, node)?;
         if srf_multiplier < this_srf_multiplier {
             srf_multiplier = this_srf_multiplier;
         }

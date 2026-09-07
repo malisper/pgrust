@@ -162,7 +162,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    pub fn get_function_rows<'a>(funcid: u32, node: Option<Node<'a>>) -> PgResult<f64>
+    // plancat.c get_function_rows(root, funcid, node): bound_params is
+    // root->glob->boundParams for the support function's
+    // estimate_expression_value.
+    pub fn get_function_rows<'a>(
+        funcid: u32,
+        node: Option<Node<'a>>,
+        bound_params: ParamListHandle,
+    ) -> PgResult<f64>
 );
 
 seam_core::seam!(

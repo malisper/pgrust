@@ -1038,16 +1038,21 @@ fn interval_to_microseconds(i: &Interval) -> f64 {
         + i.time as f64
 }
 
-// generate_series_timestamp_support (OID 6354): SupportRequestRows over
-// all-Const args; anything else returns NULL so callers fall back (the int4
-// support precedent - planner-folded exprs are read as Consts directly).
+// generate_series_timestamp_support (OID 6354; timestamp.c:6861-6942):
+// SupportRequestRows over the ESTIMATED argument values (timestamp.c:6878-6881
+// estimate_expression_value(req->root, arg) — C reads lthird unconditionally,
+// every generate_series over timestamps carries a step); anything that does
+// not fold to a Const returns NULL so callers fall back to prorows.
 pub fn fc_generate_series_timestamp_support(
     _flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     let [a] = fcinfo.args_n::<1>();
     let p = a.value.as_usize() as *mut ();
-    // SAFETY: prosupport contract - the internal arg points at a live
+    // The estimated argument trees live in this bump arena and die with it;
+    // the request's node lifetime is unified with it below.
+    let cx = ::mcx::MemoryContext::new_bump("generate_series support estimate");
+    // SAFETY: prosupport contract — the internal arg points at a live
     // tag-first support-request node exclusively owned by this call.
     let Some(req) = (unsafe { ::types_nodes::supportnodes::support_request_rows_mut(p) }) else {
         return Ok(Datum::from_usize(0));
@@ -1056,23 +1061,46 @@ pub fn fc_generate_series_timestamp_support(
         Some(fe) => &fe.args,
         None => return Ok(Datum::from_usize(0)),
     };
-    let mut consts = [Datum::null(); 3];
-    for (i, arg) in args.iter().enumerate().take(3) {
-        match arg.as_const() {
-            Some(c) if c.constisnull => {
-                req.rows = 0.0;
-                return Ok(Datum::from_usize(p as usize));
-            }
-            Some(c) => consts[i] = c.constvalue,
-            None => return Ok(Datum::from_usize(0)),
-        }
-    }
-    if args.iter().count() < 3 {
+    let mut it = args.iter();
+    let (Some(arg1), Some(arg2)) = (it.next(), it.next()) else {
         return Ok(Datum::from_usize(0));
+    };
+    let arg3 = it.next();
+    // We can use estimated argument values here (stable expressions and bound
+    // Params fold to Consts under estimate_expression_value).
+    let bound_params_raw = req.bound_params_raw;
+    let estimate =
+        |arg| ::clauses_seams::estimate_expression_value::call(cx.mcx(), arg, bound_params_raw);
+    let arg1 = estimate(arg1)?;
+    let arg2 = estimate(arg2)?;
+    let arg3 = match arg3 {
+        Some(a) => Some(estimate(a)?),
+        None => None,
+    };
+    // If any argument is constant NULL, we can safely assume that zero rows
+    // are returned. Otherwise, if they're all non-NULL constants, we can
+    // calculate the number of rows that will be returned.
+    let is_null_const = |n: ::types_nodes::Node<'_>| n.as_const().is_some_and(|c| c.constisnull);
+    if is_null_const(arg1) || is_null_const(arg2) || arg3.is_some_and(is_null_const) {
+        req.rows = 0.0;
+        return Ok(Datum::from_usize(p as usize));
     }
-    let start = consts[0].as_i64();
-    let finish = consts[1].as_i64();
-    let step = interval_from_const_datum(consts[2]);
+    let (Some(c1), Some(c2)) = (arg1.as_const(), arg2.as_const()) else {
+        return Ok(Datum::from_usize(0));
+    };
+    let c3 = match arg3 {
+        Some(a) => match a.as_const() {
+            Some(c) => Some(c),
+            None => return Ok(Datum::from_usize(0)),
+        },
+        None => None,
+    };
+    let Some(c3) = c3 else {
+        return Ok(Datum::from_usize(0));
+    };
+    let start = c1.constvalue.as_i64();
+    let finish = c2.constvalue.as_i64();
+    let step = interval_from_const_datum(c3.constvalue);
 
     if crate::TIMESTAMP_NOT_FINITE(start)
         || crate::TIMESTAMP_NOT_FINITE(finish)

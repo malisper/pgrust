@@ -393,15 +393,19 @@ pub fn fc_generate_series_step_int4(
     }
 }
 
-// generate_series_int4_support (OID 3994): SupportRequestRows over all-Const
-// args; anything else returns NULL so callers fall back (C: estimate the
-// planner-folded exprs — we read Consts directly, Param estimation unported).
+// generate_series_int4_support (OID 3994; int.c:1614-1687): SupportRequestRows
+// over the ESTIMATED argument values (int.c:1631-1637
+// estimate_expression_value(req->root, arg)); anything that does not fold to
+// a Const returns NULL so callers fall back to prorows.
 pub fn fc_generate_series_int4_support(
     _flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     let [a] = fcinfo.args_n::<1>();
     let p = a.value.as_usize() as *mut ();
+    // The estimated argument trees live in this bump arena and die with it;
+    // the request's node lifetime is unified with it below.
+    let cx = ::mcx::MemoryContext::new_bump("generate_series support estimate");
     // SAFETY: prosupport contract — the internal arg points at a live
     // tag-first support-request node exclusively owned by this call.
     let Some(req) = (unsafe { ::types_nodes::supportnodes::support_request_rows_mut(p) }) else {
@@ -411,22 +415,45 @@ pub fn fc_generate_series_int4_support(
         Some(fe) => &fe.args,
         None => return Ok(Datum::from_usize(0)),
     };
-    let mut vals = [1i32; 3];
-    for (i, arg) in args.iter().enumerate() {
-        match arg.as_const() {
-            Some(c) if c.constisnull => {
-                req.rows = 0.0;
-                return Ok(Datum::from_usize(p as usize));
-            }
-            Some(c) => vals[i] = c.constvalue.as_i32(),
-            None => return Ok(Datum::from_usize(0)),
-        }
+    let mut it = args.iter();
+    let (Some(arg1), Some(arg2)) = (it.next(), it.next()) else {
+        return Ok(Datum::from_usize(0));
+    };
+    let arg3 = it.next();
+    // We can use estimated argument values here (stable expressions and bound
+    // Params fold to Consts under estimate_expression_value).
+    let bound_params_raw = req.bound_params_raw;
+    let estimate =
+        |arg| ::clauses_seams::estimate_expression_value::call(cx.mcx(), arg, bound_params_raw);
+    let arg1 = estimate(arg1)?;
+    let arg2 = estimate(arg2)?;
+    let arg3 = match arg3 {
+        Some(a) => Some(estimate(a)?),
+        None => None,
+    };
+    // If any argument is constant NULL, we can safely assume that zero rows
+    // are returned. Otherwise, if they're all non-NULL constants, we can
+    // calculate the number of rows that will be returned.
+    let is_null_const = |n: ::types_nodes::Node<'_>| n.as_const().is_some_and(|c| c.constisnull);
+    if is_null_const(arg1) || is_null_const(arg2) || arg3.is_some_and(is_null_const) {
+        req.rows = 0.0;
+        return Ok(Datum::from_usize(p as usize));
     }
-    match crate::series::generate_series_int4_rows(
-        vals[0] as f64,
-        vals[1] as f64,
-        vals[2] as f64,
-    ) {
+    let (Some(c1), Some(c2)) = (arg1.as_const(), arg2.as_const()) else {
+        return Ok(Datum::from_usize(0));
+    };
+    let c3 = match arg3 {
+        Some(a) => match a.as_const() {
+            Some(c) => Some(c),
+            None => return Ok(Datum::from_usize(0)),
+        },
+        None => None,
+    };
+    // Use double arithmetic to avoid overflow hazards.
+    let start = c1.constvalue.as_i32() as f64;
+    let finish = c2.constvalue.as_i32() as f64;
+    let step = c3.map_or(1.0, |c| c.constvalue.as_i32() as f64);
+    match crate::series::generate_series_int4_rows(start, finish, step) {
         Some(rows) => {
             req.rows = rows;
             Ok(Datum::from_usize(p as usize))
