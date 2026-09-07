@@ -56,6 +56,15 @@
 // over one concatenated byte image that pgrust-wasi.js's `Vfs` reads (wasm/pack-vfs.mjs
 // writes it). Every directory is created and every file written once, in manifest order.
 //
+// MOUNTS (`options.mounts`). A list of { prefix, port } the storage OWNER declares — the guest is
+// never told a mount exists. Each one serves that path prefix from a SECOND store, and the
+// coordinator hands the broker one `MountedRepackedVfs` over the lot; the broker cannot tell it from
+// a single store. A `memory` mount is declared VOLATILE, so a store-wide `strictSync()` skips it:
+// there is nothing durable behind it, and charging every guest fsync for it would buy nothing.
+// The point of the arrangement is that a symlink can cross the boundary — `pg_tblspc/<oid>` lives in
+// the durable root and points at the mount — and the per-port file counts reported at stop are what
+// prove a relation file really landed in the mount's store rather than in the root's.
+//
 // EXTENT SIZE. Default 8 KiB, the store's minimum, rather than its own 64 KiB default: the
 // datadir is 1,477 mostly-tiny files and each one rounds up to a whole extent, so 64 KiB
 // extents cost 107 MiB of arena for 41 MB of data where 8 KiB costs 43 MiB. Override with
@@ -83,24 +92,32 @@ function normalize(bundle, path) {
 
 let doorbell = null;
 
-/** Recursive file count + byte total under one path, for the before/after datadir report. */
+/**
+ * Recursive file count + byte total under one path, for the before/after datadir report.
+ *
+ * `lstat`, and symlinks are counted but never descended into: a tablespace link points at a whole
+ * second tree, and following it would count that tree twice (once here, once in its own port's
+ * walk) and would break outright on a dangling link.
+ */
 function walk(vfs, path) {
   let files = 0;
   let bytes = 0;
+  let links = 0;
   const stack = [path];
   while (stack.length) {
     const dir = stack.pop();
     for (const name of vfs.readdir(dir)) {
       const child = dir === '/' ? `/${name}` : `${dir}/${name}`;
-      const stat = vfs.stat(child);
+      const stat = vfs.lstat(child);
       if (stat.kind === 'directory') stack.push(child);
+      else if (stat.kind === 'symlink') links += 1;
       else {
         files += 1;
         bytes += Number(stat.size);
       }
     }
   }
-  return { files, bytes };
+  return { files, bytes, links };
 }
 
 /** `true` iff `path` does not exist; any other rejection is the caller's problem. */
@@ -198,7 +215,26 @@ async function boot(msg) {
   } else {
     storePort = new bundle.MemoryRepackedPort();
   }
-  const vfs = await bundle.RepackedVfs.open(storePort, { extentSize });
+  const rootVfs = await bundle.RepackedVfs.open(storePort, { extentSize });
+
+  // Every declared mount is its own store on its own port. `durable: false` for a memory mount is a
+  // DECLARATION, not an inference: the library never guesses durability from the port.
+  const mountSpecs = Array.isArray(options.mounts) ? options.mounts : [];
+  const mounted = [];
+  for (const spec of mountSpecs) {
+    const prefix = normalize(bundle, spec.prefix);
+    const kind = spec.port || 'memory';
+    if (kind !== 'memory') throw new Error(`unknown mount port ${kind} at ${prefix}`);
+    const mountVfs = await bundle.RepackedVfs.open(new bundle.MemoryRepackedPort(), { extentSize });
+    mounted.push({ prefix, port: kind, durable: false, vfs: mountVfs });
+  }
+  const vfs =
+    mounted.length === 0
+      ? rootVfs
+      : new bundle.MountedRepackedVfs({
+          root: rootVfs,
+          mounts: mounted.map((m) => ({ prefix: m.prefix, vfs: m.vfs, durable: m.durable })),
+        });
   const openMs = Date.now() - tOpen;
   const nowMs = BigInt(Date.now());
   const EEXIST = bundle.WASI_ERRNO.EXIST;
@@ -267,6 +303,7 @@ async function boot(msg) {
     datadirBytes: seeded.bytes,
     extentSize,
     arenaBytes: Number(metrics.totalExtents) * extentSize,
+    mounts: mounted.map((m) => ({ prefix: m.prefix, port: m.port, durable: m.durable })),
     channels: broker.attachedIds(),
   });
 
@@ -292,6 +329,14 @@ async function boot(msg) {
   // anything: relaxed reaches the platform on the guest's fsyncs and on amortization, strict
   // adds one arena+metadata pair per mutating request.
   const flushes = vfs.metrics().flushes;
+  // PER-PORT counts, walked against each underlying store directly rather than through the
+  // composite: which store a file actually landed in is the only thing that tells a real mount
+  // apart from a path-prefix illusion. The root store holds an EMPTY placeholder directory at each
+  // prefix (a name, so a listing of its parent shows it), so it contributes nothing there.
+  const ports = [
+    { name: 'root', port: portKind, durable: true, root: '/', ...walk(rootVfs, '/') },
+    ...mounted.map((m) => ({ name: m.prefix, port: m.port, durable: m.durable, root: '/', ...walk(m.vfs, '/') })),
+  ];
   const tClose = Date.now();
   vfs.close();
   post({
@@ -305,6 +350,7 @@ async function boot(msg) {
     seededBytes: seeded.bytes,
     datadirFiles: after.files,
     datadirBytes: after.bytes,
+    ports,
   });
 }
 

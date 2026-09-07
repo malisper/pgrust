@@ -51,9 +51,25 @@
 // checkpoint in the log — nothing here calls worker.terminate() to end the
 // server any more.
 //
+// A SCRIPTED WIRE LANE (--sql FILE). The wire lanes normally run one fixed
+// five-statement scenario plus the sleep/timeout block, and score themselves on
+// it. `--sql FILE` replaces that block with one statement per line (the same
+// convention run-node-wire.mjs uses, `--` comment lines skipped) and drops the
+// scenario-specific assertions with it; the handshake, the thread-spawn
+// bookkeeping and the guest exit code are still asserted, and every statement's
+// canonical transcript is still printed. It is how a one-off proof — a
+// tablespace, a recovery shape — gets run against the REAL threaded lane and its
+// broker store instead of against a second hand-built harness.
+//
+// MOUNTS (--mount PREFIX=PORT). Forwarded to the storage coordinator, which
+// serves that path prefix from a SECOND store (wasm/storage-worker.js). The point
+// is two ports under one guest filesystem: a `memory` mount is volatile by
+// declaration, so a store-wide fsync skips it, and its per-port file count at
+// stop is the evidence of which store a relation file actually landed in.
+//
 // Usage: node run-node-wire-threads.mjs [--stderr FILE] [--pool N] [--workers N]
 //        [--dispatch stdio-wire|stdio-wire-threaded|postmaster] [--fs copy|broker]
-//        [--trace N]
+//        [--sql FILE] [--mount PREFIX=memory] [--trace N]
 // Env: PGRUST_WASM_THREADS (path to the threads postgres.wasm),
 //      PGRUST_VFS (prefix for vfs.img/vfs.json),
 //      PGRUST_REPACKED_BUNDLE (URL of the @pgxsinkit/pglite-opfs-repacked browser
@@ -156,6 +172,35 @@ const NO_WAKE = process.argv.includes('--no-wake');
 // checkpointer has its own private Vfs and cannot see the backends' relation
 // files (see postmasterShutdown below).
 const BUNDLE_URL = process.env.PGRUST_REPACKED_BUNDLE || repackedBundleUrl(import.meta.url);
+
+// --sql FILE: one statement per line, '--' comment lines skipped, exactly as
+// run-node-wire.mjs reads it. `null` keeps the built-in five-statement scenario
+// and the assertions that are only meaningful against it.
+const sqlFile = argAfter('--sql');
+const scriptStatements = sqlFile
+  ? fs
+      .readFileSync(sqlFile, 'utf8')
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l && !l.startsWith('--'))
+  : null;
+if (scriptStatements && POSTMASTER) throw new Error('--sql applies to the wire lanes, not --dispatch postmaster');
+
+// --mount PREFIX=PORT, repeatable. Only the storage coordinator ever sees these;
+// the guest is never told a mount exists, which is the whole point.
+const MOUNTS = process.argv.flatMap((arg, index) => {
+  if (arg !== '--mount') return [];
+  const spec = process.argv[index + 1];
+  const at = spec ? spec.indexOf('=') : -1;
+  if (at <= 0) throw new Error(`--mount wants PREFIX=PORT, got ${JSON.stringify(spec)}`);
+  const prefix = spec.slice(0, at);
+  const port = spec.slice(at + 1);
+  if (!prefix.startsWith('/') || prefix === '/') throw new Error(`--mount prefix must be absolute: ${prefix}`);
+  if (port !== 'memory') throw new Error(`--mount port must be 'memory', got ${JSON.stringify(port)}`);
+  return [{ prefix, port }];
+});
+if (MOUNTS.length > 0 && FS_MODE !== 'broker') throw new Error('--mount requires --fs broker');
+
 const errFd = stderrFile ? fs.openSync(stderrFile, 'w') : 2;
 
 const failures = [];
@@ -236,6 +281,12 @@ if (FS_MODE === 'broker') {
             `(${m.datadirBytes} bytes); arena ${(m.arenaBytes / 1048576).toFixed(1)}MiB ` +
             `at ${m.extentSize}B extents; channels [${m.channels.join(', ')}]`,
         );
+        if ((m.mounts || []).length > 0) {
+          note(
+            `storage: mounts ` +
+              m.mounts.map((x) => `${x.prefix}=${x.port}${x.durable ? '' : ' (volatile)'}`).join(', '),
+          );
+        }
         storageReady();
         break;
       case 'storage-log':
@@ -248,6 +299,14 @@ if (FS_MODE === 'broker') {
             `the session's writes landed in the ONE store (delta ${m.datadirFiles - m.seededFiles} files, ` +
             `${m.datadirBytes - m.seededBytes} bytes)`,
         );
+        // Per-PORT counts: which store each file actually landed in is the only
+        // thing that distinguishes a real mount from a path-prefix illusion.
+        for (const p of m.ports || []) {
+          note(
+            `storage: port ${p.name} (${p.port}${p.durable ? '' : ', volatile'}) holds ` +
+              `${p.files} files (${p.bytes} bytes) under ${p.root}`,
+          );
+        }
         storageStoppedResolve();
         break;
       case 'storage-error':
@@ -272,7 +331,7 @@ if (FS_MODE === 'broker') {
       manifest,
       channels: channels.map((c) => c.transfer()),
       doorbell: doorbell.buffer,
-      options: {},
+      options: { mounts: MOUNTS },
     },
     [imageBuf],
   );
@@ -869,27 +928,35 @@ try {
   if (!sawAuthOk) failures.push('no AuthenticationOk in handshake');
   if (!sawKey) failures.push('no BackendKeyData in handshake');
 
-  const statements = [
-    'SELECT 1',
-    'SELECT count(*) FROM pg_class',
-    'CREATE TABLE spike_t(a int)',
-    'INSERT INTO spike_t SELECT generate_series(1,1000)',
-    'SELECT sum(a) FROM spike_t',
-  ];
-  for (const sql of statements) {
-    await runQuery(sql);
-  }
+  if (scriptStatements) {
+    // A scripted lane runs the file and nothing else: an error is still recorded
+    // in `failures` by runQuery, so a proof that fails is a FAIL verdict.
+    for (const sql of scriptStatements) {
+      await runQuery(sql);
+    }
+  } else {
+    const statements = [
+      'SELECT 1',
+      'SELECT count(*) FROM pg_class',
+      'CREATE TABLE spike_t(a int)',
+      'INSERT INTO spike_t SELECT generate_series(1,1000)',
+      'SELECT sum(a) FROM spike_t',
+    ];
+    for (const sql of statements) {
+      await runQuery(sql);
+    }
 
-  // ---- timed waits and timeouts -----------------------------------------
-  // Both exercise the same two pieces: the pg-timeout-timer thread (a real
-  // wasi thread now) and the timed latch park pg_sleep loops on. The first
-  // proves the park actually sleeps rather than spinning or returning at
-  // once; the second proves a DIFFERENT thread can interrupt it.
-  await runQuery('SELECT pg_sleep(0.2)');
-  await runQuery("SET statement_timeout = '300ms'");
-  await runQuery('SELECT pg_sleep(5)', { expectError: true });
-  await runQuery('RESET statement_timeout');
-  await runQuery('SELECT 2');
+    // ---- timed waits and timeouts ---------------------------------------
+    // Both exercise the same two pieces: the pg-timeout-timer thread (a real
+    // wasi thread now) and the timed latch park pg_sleep loops on. The first
+    // proves the park actually sleeps rather than spinning or returning at
+    // once; the second proves a DIFFERENT thread can interrupt it.
+    await runQuery('SELECT pg_sleep(0.2)');
+    await runQuery("SET statement_timeout = '300ms'");
+    await runQuery('SELECT pg_sleep(5)', { expectError: true });
+    await runQuery('RESET statement_timeout');
+    await runQuery('SELECT 2');
+  }
 
   note('>>> X');
   send(TERMINATE);
@@ -952,48 +1019,59 @@ if (dispatch === 'stdio-wire-threaded') {
   expect(spawnedTids.length >= 1, 'no thread was spawned via wasi.thread-spawn');
 }
 
-const r1 = rows.get('SELECT 1') || [];
-expect(r1.length === 1 && r1[0] === '1', `SELECT 1 returned ${JSON.stringify(r1)}`);
+// The five-statement scenario and its timing/cancel assertions only mean
+// something when the lane actually ran them; --sql replaced the whole block, and
+// its own failures are already in `failures` (runQuery records every
+// ErrorResponse it was not told to expect).
+if (!scriptStatements) {
+  const r1 = rows.get('SELECT 1') || [];
+  expect(r1.length === 1 && r1[0] === '1', `SELECT 1 returned ${JSON.stringify(r1)}`);
 
-const rc = rows.get('SELECT count(*) FROM pg_class') || [];
-expect(rc.length === 1 && Number(rc[0]) > 0, `pg_class count returned ${JSON.stringify(rc)}`);
+  const rc = rows.get('SELECT count(*) FROM pg_class') || [];
+  expect(rc.length === 1 && Number(rc[0]) > 0, `pg_class count returned ${JSON.stringify(rc)}`);
 
-const rs = rows.get('SELECT sum(a) FROM spike_t') || [];
-expect(rs.length === 1 && rs[0] === '500500', `sum(a) returned ${JSON.stringify(rs)}`);
+  const rs = rows.get('SELECT sum(a) FROM spike_t') || [];
+  expect(rs.length === 1 && rs[0] === '500500', `sum(a) returned ${JSON.stringify(rs)}`);
 
-// pg_sleep(0.2) must actually sleep: a poll_oneoff that answers "already
-// fired" or a latch park that returns immediately would come back in ~0ms.
-const sleepMs = timings.get('SELECT pg_sleep(0.2)');
-note(`timing: pg_sleep(0.2) round trip ${sleepMs}ms`);
-expect(sleepMs !== undefined && sleepMs >= 190, `pg_sleep(0.2) took ${sleepMs}ms (want >= 190)`);
+  // pg_sleep(0.2) must actually sleep: a poll_oneoff that answers "already
+  // fired" or a latch park that returns immediately would come back in ~0ms.
+  const sleepMs = timings.get('SELECT pg_sleep(0.2)');
+  note(`timing: pg_sleep(0.2) round trip ${sleepMs}ms`);
+  expect(sleepMs !== undefined && sleepMs >= 190, `pg_sleep(0.2) took ${sleepMs}ms (want >= 190)`);
 
-// statement_timeout must cancel a running pg_sleep(5) from the timer thread.
-const cancelMs = timings.get('SELECT pg_sleep(5)');
-const cancelStates = sqlstates.get('SELECT pg_sleep(5)') || [];
-note(`timing: pg_sleep(5) under statement_timeout=300ms cancelled after ${cancelMs}ms, sqlstate ${cancelStates.join(',') || 'NONE'}`);
-expect(
-  cancelStates.includes('57014'),
-  `pg_sleep(5) under statement_timeout returned sqlstates ${JSON.stringify(cancelStates)} (want 57014)`,
-);
-expect(
-  cancelMs !== undefined && cancelMs < 2000,
-  `statement_timeout cancel took ${cancelMs}ms (want < 2000)`,
-);
+  // statement_timeout must cancel a running pg_sleep(5) from the timer thread.
+  const cancelMs = timings.get('SELECT pg_sleep(5)');
+  const cancelStates = sqlstates.get('SELECT pg_sleep(5)') || [];
+  note(`timing: pg_sleep(5) under statement_timeout=300ms cancelled after ${cancelMs}ms, sqlstate ${cancelStates.join(',') || 'NONE'}`);
+  expect(
+    cancelStates.includes('57014'),
+    `pg_sleep(5) under statement_timeout returned sqlstates ${JSON.stringify(cancelStates)} (want 57014)`,
+  );
+  expect(
+    cancelMs !== undefined && cancelMs < 2000,
+    `statement_timeout cancel took ${cancelMs}ms (want < 2000)`,
+  );
 
-// ...and the session must survive the cancel.
-const r2 = rows.get('SELECT 2') || [];
-expect(r2.length === 1 && r2[0] === '2', `SELECT 2 after the cancel returned ${JSON.stringify(r2)}`);
+  // ...and the session must survive the cancel.
+  const r2 = rows.get('SELECT 2') || [];
+  expect(r2.length === 1 && r2[0] === '2', `SELECT 2 after the cancel returned ${JSON.stringify(r2)}`);
+}
 
 expect(exitCode === 0, `guest exit code ${exitCode} (want 0)`);
 
-const fiveStatementMs = [
-  'SELECT 1',
-  'SELECT count(*) FROM pg_class',
-  'CREATE TABLE spike_t(a int)',
-  'INSERT INTO spike_t SELECT generate_series(1,1000)',
-  'SELECT sum(a) FROM spike_t',
-].reduce((sum, sql) => sum + (timings.get(sql) ?? 0), 0);
-note(`timing: five-statement block total ${fiveStatementMs}ms (fs=${FS_MODE})`);
+if (scriptStatements) {
+  const scriptedMs = scriptStatements.reduce((sum, sql) => sum + (timings.get(sql) ?? 0), 0);
+  note(`timing: ${scriptStatements.length}-statement script (${sqlFile}) total ${scriptedMs}ms (fs=${FS_MODE})`);
+} else {
+  const fiveStatementMs = [
+    'SELECT 1',
+    'SELECT count(*) FROM pg_class',
+    'CREATE TABLE spike_t(a int)',
+    'INSERT INTO spike_t SELECT generate_series(1,1000)',
+    'SELECT sum(a) FROM spike_t',
+  ].reduce((sum, sql) => sum + (timings.get(sql) ?? 0), 0);
+  note(`timing: five-statement block total ${fiveStatementMs}ms (fs=${FS_MODE})`);
+}
 
 try { worker.terminate(); } catch { /* already gone */ }
 
