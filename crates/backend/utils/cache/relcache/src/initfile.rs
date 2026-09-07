@@ -864,6 +864,7 @@ fn parse_entry(rd: &mut Rd<'_>, mcx: Mcx<'static>) -> Option<(RelationData<'stat
                 missing: PgVec::new_in(mcx),
                 num_defval: 0,
                 num_check: 0,
+                relchecks: 0,
                 has_not_null: true,
                 has_generated_stored: false,
                 has_generated_virtual: false,

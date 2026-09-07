@@ -158,7 +158,12 @@ pub struct TupleConstr<'mcx> {
     pub check: PgVec<'mcx, ConstrCheck<'mcx>>,
     pub missing: PgVec<'mcx, AttrMissing>,
     pub num_defval: u16,
+    // CheckNNConstraintFetch's found count (relcache.c:4699), as C.
     pub num_check: u16,
+    // C rd_rel->relchecks (pg_class.relchecks), carried here because the
+    // trimmed FormData_pg_class has no such field: ExecConstraints gates on
+    // it and ExecRelCheck compares it against num_check (execMain.c:1796).
+    pub relchecks: i16,
     pub has_not_null: bool,
     pub has_generated_stored: bool,
     pub has_generated_virtual: bool,

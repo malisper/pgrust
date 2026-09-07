@@ -177,6 +177,7 @@ pub(crate) fn relation_build_tuple_desc(
             TupleConstr {
                 num_defval: defval.len() as u16,
                 num_check: check.len() as u16,
+                relchecks,
                 defval,
                 check,
                 missing,

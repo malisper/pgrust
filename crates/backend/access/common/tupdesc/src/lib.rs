@@ -166,6 +166,7 @@ pub fn CreateTupleDescCopyConstr<'mcx>(
                 missing,
                 num_defval: constr.num_defval,
                 num_check: constr.num_check,
+                relchecks: constr.relchecks,
                 has_not_null: constr.has_not_null,
                 has_generated_stored: constr.has_generated_stored,
                 has_generated_virtual: constr.has_generated_virtual,

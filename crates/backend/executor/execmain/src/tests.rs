@@ -6739,3 +6739,43 @@ mod rem_b144 {
         });
     }
 }
+
+// nodeGatherMerge.c:597 load_tuple_array / :714 gm_readnext_tuple: a tuple-
+// queue receive error during the nowait prefetch is an ERROR at once (C's
+// TupleQueueReaderNext ereports through), never swallowed into "nothing
+// buffered". The source stands in for a worker queue whose second read
+// hits shm_mq_receive's corrupt-length-word ERROR (shm_mq.c:715,
+// ERRCODE_PROGRAM_LIMIT_EXCEEDED; tqueue's
+// reader_next_raises_shm_mq_receive_error drives the real transport).
+#[test]
+fn gather_merge_prefetch_surfaces_tuple_queue_receive_error() {
+    struct FaultingSource {
+        reads: usize,
+        tuple: Vec<u8>,
+    }
+    impl crate::nodegathermerge::GmTupleSource for FaultingSource {
+        fn next_tuple(&mut self, nowait: bool, done: &mut bool) -> ::types_error::PgResult<Option<&[u8]>> {
+            assert!(nowait, "the prefetch never blocks");
+            *done = false;
+            self.reads += 1;
+            if self.reads == 1 {
+                return Ok(Some(&self.tuple));
+            }
+            Err(Box::new(
+                ::types_error::PgError::error(
+                    "invalid message size 1073741824 in shared memory queue",
+                )
+                .with_sqlstate(::types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+            ))
+        }
+    }
+    install_seams();
+    let mut source = FaultingSource { reads: 0, tuple: vec![0u8; 24] };
+    let mut buf = crate::nodegathermerge::GmTupleBuffer::new();
+    let err = crate::nodegathermerge::gm_prefetch(&mut source, &mut buf)
+        .expect_err("the prefetch must raise the tuple queue receive error");
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+    assert_eq!(err.message(), "invalid message size 1073741824 in shared memory queue");
+    assert_eq!(source.reads, 2, "the error stops the prefetch at once");
+    assert_eq!(buf.ntuples, 1, "the tuple read before the error stays buffered");
+}

@@ -188,6 +188,26 @@ impl ShmMq {
         self.mq_bytes_written.store(cur + n as u64, Ordering::Relaxed);
     }
 
+    /// Receive-side fault-injection seam (tests only): append raw ring bytes
+    /// as if a sender had written them, with no length framing and no size
+    /// check, so a test can plant a corrupt length word and reach
+    /// shm_mq_receive's "invalid message size" ERROR (shm_mq.c:715). Engine
+    /// code never calls this; the sender path is `ShmMqHandle::send`.
+    #[doc(hidden)]
+    pub fn inject_raw_ring_bytes_for_test(&self, bytes: &[u8]) {
+        let ringsize = self.mq_ring_size;
+        let written = self.bytes_written();
+        let used = (written - self.bytes_read()) as usize;
+        assert!(used + bytes.len() <= ringsize, "fault injection would overflow the ring");
+        for (i, b) in bytes.iter().enumerate() {
+            let offset = (written as usize + i) % ringsize;
+            // SAFETY: an in-bounds, not-yet-written ring byte; the receiver
+            // reads it only after inc_bytes_written publishes it.
+            unsafe { *self.ring_ptr(offset) = *b };
+        }
+        self.inc_bytes_written(bytes.len());
+    }
+
     // `me` is the handle's attach-time identity, NOT MyProcNumber(): handles
     // are dropped during FATAL unwinds after the exit callbacks (ProcKill)
     // already released this thread's proc identity — C never hits this order

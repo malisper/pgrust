@@ -850,6 +850,8 @@ pub(crate) fn apply_handle_stream_prepare(
             )?;
             crate::apply::apply_handle_prepare_internal(&prepare_data)?;
             xact::CommitTransactionCommand()?;
+            // worker.c:1412.
+            pgstat::pending::pgstat_report_stat(false);
 
             // The prepare record is always flushed; an invalid local LSN is ok.
             crate::store_flush_position(prepare_data.end_lsn, types_core::InvalidXLogRecPtr);

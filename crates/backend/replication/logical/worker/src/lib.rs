@@ -27,6 +27,7 @@ use types_error::{
 use walreceiver::client::{CopyData, PgConn};
 
 mod apply;
+mod conflict;
 mod parallel;
 mod stream_apply;
 mod tablesync;
@@ -555,6 +556,12 @@ pub(crate) fn apply_loop(conn: &mut PgConn, mut last_received: XLogRecPtr) -> Pg
                         }
                     }
                     send_feedback(conn, last_received, request_reply, request_reply)?;
+
+                    // worker.c:3833: force reporting so long idle periods do
+                    // not delay stats arbitrarily; only outside a transaction.
+                    if !xact::IsTransactionState() {
+                        pgstat::pending::pgstat_report_stat(true);
+                    }
                 }
 
                 if !conn.consume_input() {

@@ -261,6 +261,7 @@ fn with_constraints<'m>(mcx: Mcx<'m>) -> TupleDescData<'m> {
                 missing,
                 num_defval: 1,
                 num_check: 1,
+                relchecks: 1,
                 has_not_null: true,
                 has_generated_stored: false,
                 has_generated_virtual: false,

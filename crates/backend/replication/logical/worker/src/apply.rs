@@ -413,6 +413,10 @@ pub(crate) fn apply_handle_commit_internal(
             xact::CommitTransactionCommand()?;
         }
 
+        // worker.c:2305: flush pending stats (conflict counters among them)
+        // now that no transaction is open.
+        pgstat::pending::pgstat_report_stat(false);
+
         let local_end = transam_xlog_seams::xact_last_commit_end::call();
         crate::store_flush_position(commit.end_lsn, local_end);
     } else {
@@ -498,6 +502,8 @@ fn apply_handle_prepare(
     apply_handle_prepare_internal(&prepare_data)?;
     end_replication_step()?;
     xact::CommitTransactionCommand()?;
+    // worker.c:1141.
+    pgstat::pending::pgstat_report_stat(false);
 
     // The prepare record is always flushed, so acknowledging the remote_end
     // LSN with an invalid local LSN is fine (worker.c:1131).
@@ -539,6 +545,8 @@ fn apply_handle_commit_prepared(
     twophase::FinishPreparedTransaction(&gid, true)?;
     end_replication_step()?;
     xact::CommitTransactionCommand()?;
+    // worker.c:1208.
+    pgstat::pending::pgstat_report_stat(false);
 
     let local_end = transam_xlog_seams::xact_last_commit_end::call();
     crate::store_flush_position(prepare_data.end_lsn, local_end);
@@ -579,6 +587,9 @@ fn apply_handle_rollback_prepared(
 
         crate::clear_subscription_skip_lsn(mcx, rollback_data.rollback_end_lsn)?;
     }
+
+    // worker.c:1269.
+    pgstat::pending::pgstat_report_stat(false);
 
     // The rollback WAL record is always flushed (worker.c:1259).
     crate::store_flush_position(
@@ -776,7 +787,7 @@ fn slot_modify_data<'mcx>(
 // commit timestamp data (timestamp, origin) of the transaction that created
 // that version; the data half is None when track_commit_timestamp is off or
 // the xid is outside the retained commit-ts range, as C's false return.
-fn get_tuple_transaction_info(
+pub(crate) fn get_tuple_transaction_info(
     localslot: &SlotData<'_>,
 ) -> PgResult<(types_core::TransactionId, Option<(types_core::TimestampTz, types_core::RepOriginId)>)> {
     let mut isnull = false;
@@ -796,62 +807,87 @@ fn get_tuple_transaction_info(
     Ok((xmin, commit_ts::TransactionIdGetCommitTsData(xmin)?))
 }
 
-// errdetail_apply_conflict's origin-differs explanation (conflict.c),
-// rendered into this file's single-line conflict LOG convention (C's DETAIL
-// sentence, lowercased, without the trailing period).
-pub(crate) fn origin_differs_detail(
-    action: &str,
-    localorigin_valid: bool,
-    origin_name: Option<&str>,
-    localxmin: types_core::TransactionId,
-    ts: &str,
-) -> String {
-    match (localorigin_valid, origin_name) {
-        (false, _) => format!(
-            "{action} the row that was modified locally in transaction {localxmin} at {ts}"
-        ),
-        (true, Some(name)) => format!(
-            "{action} the row that was modified by a different origin \"{name}\" in transaction {localxmin} at {ts}"
-        ),
-        // The origin that modified this row has been removed.
-        (true, None) => format!(
-            "{action} the row that was modified by a non-existent origin in transaction {localxmin} at {ts}"
-        ),
-    }
-}
-
-// ReportApplyConflict for CT_UPDATE_ORIGIN_DIFFERS / CT_DELETE_ORIGIN_DIFFERS
-// (conflict.c; called from worker.c:2696,2879), rendered as this file's
-// conflict LOG lines.
-fn report_origin_differs_conflict(
-    mcx: Mcx<'_>,
+// The origin-differs LOG report (worker.c:2708-2725 / :2889-2899 /
+// :3109-3127): ReportApplyConflict for CT_UPDATE_ORIGIN_DIFFERS (the remote
+// new tuple stored into a fresh slot for the DETAIL) or
+// CT_DELETE_ORIGIN_DIFFERS. `remoteslot` is the search tuple, `localslot`
+// the local row it found.
+#[allow(clippy::too_many_arguments)]
+fn report_origin_differs<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
     entry: &LogicalRepRelMapEntry,
-    updating: bool,
+    remoteslot: &mut SlotData<'mcx>,
+    localslot: &mut SlotData<'mcx>,
+    newtup: Option<&LogicalRepTupleData>,
     localxmin: types_core::TransactionId,
     localorigin: types_core::RepOriginId,
     localts: types_core::TimestampTz,
 ) -> PgResult<()> {
-    let localorigin_valid = localorigin != types_core::InvalidRepOriginId;
-    let origin_name = if localorigin_valid {
-        origin::replorigin_by_oid(mcx, localorigin, true)?
-    } else {
-        None
+    use crate::conflict::{report_apply_conflict, ConflictTupleInfo, ConflictType};
+    // The new tuple's datums live in this cache's scratch until the report
+    // is done (see slot_store_data's InFuncs discipline).
+    let mut infuncs = InFuncs::new(rel.rd_att.natts as usize);
+    let mut newslot = match newtup {
+        Some(newtup) => {
+            let mut slot = tableam_real::table_slot_create(mcx, rel)?;
+            slot_store_data(mcx, &mut slot, entry, rel, newtup, &mut infuncs)?;
+            Some(slot)
+        }
+        None => None,
     };
-    let ts = adt_timestamp::timestamptz_to_str(localts);
-    let detail = origin_differs_detail(
-        if updating { "updating" } else { "deleting" },
-        localorigin_valid,
-        origin_name.as_deref(),
-        localxmin,
-        &ts,
-    );
-    let conflict = if updating { "update_origin_differs" } else { "delete_origin_differs" };
-    let (nsp, name) = (&entry.remoterel.nspname, &entry.remoterel.relname);
-    let _ = elog::elog(
-        LOG,
-        format!("conflict detected on relation \"{nsp}.{name}\": conflict={conflict}; {detail}"),
-    );
-    Ok(())
+    let ty = if newtup.is_some() {
+        ConflictType::UpdateOriginDiffers
+    } else {
+        ConflictType::DeleteOriginDiffers
+    };
+    let mut conflicttuple = [ConflictTupleInfo {
+        slot: Some(localslot),
+        indexoid: InvalidOid,
+        xmin: localxmin,
+        origin: localorigin,
+        ts: localts,
+    }];
+    report_apply_conflict(mcx, rel, LOG, ty, Some(remoteslot), newslot.as_mut(), &mut conflicttuple)
+}
+
+// The missing-row LOG report (worker.c:2746-2754 / :2911-2915 / :3083-3089):
+// ReportApplyConflict for CT_UPDATE_MISSING (the remote new tuple stored into
+// the unused local slot, as C reuses it) or CT_DELETE_MISSING.
+fn report_row_missing<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    entry: &LogicalRepRelMapEntry,
+    remoteslot: &mut SlotData<'mcx>,
+    localslot: &mut SlotData<'mcx>,
+    newtup: Option<&LogicalRepTupleData>,
+) -> PgResult<()> {
+    use crate::conflict::{report_apply_conflict, ConflictTupleInfo, ConflictType};
+    let mut infuncs = InFuncs::new(rel.rd_att.natts as usize);
+    let mut conflicttuple = [ConflictTupleInfo::missing()];
+    match newtup {
+        Some(newtup) => {
+            slot_store_data(mcx, localslot, entry, rel, newtup, &mut infuncs)?;
+            report_apply_conflict(
+                mcx,
+                rel,
+                LOG,
+                ConflictType::UpdateMissing,
+                Some(remoteslot),
+                Some(localslot),
+                &mut conflicttuple,
+            )
+        }
+        None => report_apply_conflict(
+            mcx,
+            rel,
+            LOG,
+            ConflictType::DeleteMissing,
+            Some(remoteslot),
+            None,
+            &mut conflicttuple,
+        ),
+    }
 }
 
 // The run_as_owner arm shared by the DML handlers (worker.c:2427 etc.) and
@@ -1208,10 +1244,11 @@ mod tableam {
         if let TM_Result::TM_SelfModified = res {
             return Ok(LockOutcome::Ok);
         }
-        super::should_refetch_tuple(
-            res,
-            ::types_tuple::ItemPointerIndicatesMovedPartitions(&tmfd.ctid),
-        )
+        // tmfd.ctid is only filled for TM_Updated (C reads it in that arm
+        // alone; ItemPointerGetOffsetNumber asserts on the zeroed one).
+        let moved = matches!(res, TM_Result::TM_Updated)
+            && ::types_tuple::ItemPointerIndicatesMovedPartitions(&tmfd.ctid);
+        super::should_refetch_tuple(res, moved)
     }
 }
 
@@ -1375,7 +1412,14 @@ fn do_insert<'mcx>(
 
     tableam_real::simple_table_tuple_insert(mcx, rel, slot)?;
 
+    // InitConflictIndexes (worker.c:2502) + ExecSimpleRelationInsert's
+    // conflict arm (execReplication.c:614-651): the unique, non-deferrable
+    // indexes are the arbiters; a potential conflict is checked after the
+    // insert (no extra scan when conflicts are rare) and reported as
+    // insert_exists instead of the plain unique-violation error.
     let mut index_state = execindexing::ExecOpenIndices(mcx, rel, false)?;
+    let conflict_indexes = crate::conflict::init_conflict_indexes(&index_state);
+    let mut conflict = false;
     let recheck_indexes = if index_state.num_indices() > 0 {
         let eval_cx = mcx::MemoryContext::new("ApplyIndexEval");
         let r = execindexing::ExecInsertIndexTuples(
@@ -1384,15 +1428,27 @@ fn do_insert<'mcx>(
             &mut index_state,
             rel,
             slot,
-            false,
-            None,
-            &[],
+            !conflict_indexes.is_empty(),
+            Some(&mut conflict),
+            &conflict_indexes,
             false,
         )?;
         r.to_vec()
     } else {
         Vec::new()
     };
+    if conflict {
+        crate::conflict::check_and_report_conflict(
+            mcx,
+            rel,
+            &mut index_state,
+            crate::conflict::ConflictType::InsertExists,
+            &recheck_indexes,
+            &conflict_indexes,
+            None,
+            slot,
+        )?;
+    }
     execindexing::ExecCloseIndices(index_state)?;
 
     // AFTER ROW INSERT triggers (execReplication.c:629). C passes no
@@ -1510,7 +1566,11 @@ fn do_update<'mcx>(
     let mut recheck_indexes: Vec<Oid> = Vec::new();
     if !matches!(update_indexes, TU_UpdateIndexes::TU_None) {
         let only_summarizing = matches!(update_indexes, TU_UpdateIndexes::TU_Summarizing);
+        // InitConflictIndexes (worker.c:2735) + ExecSimpleRelationUpdate's
+        // conflict arm (execReplication.c:717-730): see do_insert.
         let mut index_state = execindexing::ExecOpenIndices(mcx, rel, false)?;
+        let conflict_indexes = crate::conflict::init_conflict_indexes(&index_state);
+        let mut conflict = false;
         if index_state.num_indices() > 0 {
             let eval_cx = mcx::MemoryContext::new("ApplyIndexEval");
             let r = execindexing::ExecInsertIndexTuples(
@@ -1519,12 +1579,24 @@ fn do_update<'mcx>(
                 &mut index_state,
                 rel,
                 slot,
-                false,
-                None,
-                &[],
+                !conflict_indexes.is_empty(),
+                Some(&mut conflict),
+                &conflict_indexes,
                 only_summarizing,
             )?;
             recheck_indexes = r.to_vec();
+        }
+        if conflict {
+            crate::conflict::check_and_report_conflict(
+                mcx,
+                rel,
+                &mut index_state,
+                crate::conflict::ConflictType::UpdateExists,
+                &recheck_indexes,
+                &conflict_indexes,
+                Some(searchslot),
+                slot,
+            )?;
         }
         execindexing::ExecCloseIndices(index_state)?;
     }
@@ -1665,21 +1737,30 @@ fn apply_handle_tuple_routing<'mcx>(
                 let (localxmin, ctsdata) = get_tuple_transaction_info(&localslot)?;
                 if let Some((localts, localorigin)) = ctsdata {
                     if localorigin != origin::replorigin_session_origin() {
-                        report_origin_differs_conflict(
-                            mcx, &part_entry, false, localxmin, localorigin, localts,
+                        report_origin_differs(
+                            mcx,
+                            &partrel,
+                            &part_entry,
+                            &mut remoteslot_part,
+                            &mut localslot,
+                            None,
+                            localxmin,
+                            localorigin,
+                            localts,
                         )?;
                     }
                 }
                 do_delete(mcx, &partrel, &mut localslot)?;
             } else {
-                let (nsp, name) = (&part_entry.remoterel.nspname, &part_entry.remoterel.relname);
-                let _ = elog::elog(
-                    LOG,
-                    format!(
-                        "conflict detected on relation \"{nsp}.{name}\": conflict=delete_missing; \
-                         could not find the row to be deleted"
-                    ),
-                );
+                // The tuple to be deleted could not be found (worker.c:2911).
+                report_row_missing(
+                    mcx,
+                    &partrel,
+                    &part_entry,
+                    &mut remoteslot_part,
+                    &mut localslot,
+                    None,
+                )?;
             }
             Ok(())
         }
@@ -1696,22 +1777,30 @@ fn apply_handle_tuple_routing<'mcx>(
             let found =
                 find_repl_tuple(mcx, &partrel, &part_entry, &mut remoteslot_part, &mut localslot)?;
             if !found {
-                // The tuple to be updated could not be found (worker.c:3213).
-                let (nsp, name) = (&part_entry.remoterel.nspname, &part_entry.remoterel.relname);
-                let _ = elog::elog(
-                    LOG,
-                    format!(
-                        "conflict detected on relation \"{nsp}.{name}\": conflict=update_missing; \
-                         could not find the row to be updated"
-                    ),
-                );
+                // The tuple to be updated could not be found (worker.c:3083).
+                report_row_missing(
+                    mcx,
+                    &partrel,
+                    &part_entry,
+                    &mut remoteslot_part,
+                    &mut localslot,
+                    Some(newtup),
+                )?;
                 return Ok(());
             }
             let (localxmin, ctsdata) = get_tuple_transaction_info(&localslot)?;
             if let Some((localts, localorigin)) = ctsdata {
                 if localorigin != origin::replorigin_session_origin() {
-                    report_origin_differs_conflict(
-                        mcx, &part_entry, true, localxmin, localorigin, localts,
+                    report_origin_differs(
+                        mcx,
+                        &partrel,
+                        &part_entry,
+                        &mut remoteslot_part,
+                        &mut localslot,
+                        Some(newtup),
+                        localxmin,
+                        localorigin,
+                        localts,
                     )?;
                 }
             }
@@ -1879,7 +1968,17 @@ fn apply_handle_update(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> {
         let (localxmin, ctsdata) = get_tuple_transaction_info(&localslot)?;
         if let Some((localts, localorigin)) = ctsdata {
             if localorigin != origin::replorigin_session_origin() {
-                report_origin_differs_conflict(mcx, &entry, true, localxmin, localorigin, localts)?;
+                report_origin_differs(
+                    mcx,
+                    &rel,
+                    &entry,
+                    &mut remoteslot,
+                    &mut localslot,
+                    Some(&upd.newtup),
+                    localxmin,
+                    localorigin,
+                    localts,
+                )?;
             }
         }
 
@@ -1891,15 +1990,8 @@ fn apply_handle_update(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> {
         let updated = apply_updated_cols(mcx, &rel, &entry, &upd.newtup)?;
         do_update(mcx, &rel, &mut localslot, &mut newslot, Some(&updated))?;
     } else {
-        let (nsp, name) =
-            (&entry.remoterel.nspname, &entry.remoterel.relname);
-        let _ = elog::elog(
-            LOG,
-            format!(
-                "conflict detected on relation \"{nsp}.{name}\": conflict=update_missing; \
-                 could not find the row to be updated"
-            ),
-        );
+        // The tuple to be updated could not be found (worker.c:2740).
+        report_row_missing(mcx, &rel, &entry, &mut remoteslot, &mut localslot, Some(&upd.newtup))?;
     }
 
     trigger::AfterTriggerEndQuery()?;
@@ -1953,21 +2045,24 @@ fn apply_handle_delete(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> {
         let (localxmin, ctsdata) = get_tuple_transaction_info(&localslot)?;
         if let Some((localts, localorigin)) = ctsdata {
             if localorigin != origin::replorigin_session_origin() {
-                report_origin_differs_conflict(mcx, &entry, false, localxmin, localorigin, localts)?;
+                report_origin_differs(
+                    mcx,
+                    &rel,
+                    &entry,
+                    &mut remoteslot,
+                    &mut localslot,
+                    None,
+                    localxmin,
+                    localorigin,
+                    localts,
+                )?;
             }
         }
 
         do_delete(mcx, &rel, &mut localslot)?;
     } else {
-        let (nsp, name) =
-            (&entry.remoterel.nspname, &entry.remoterel.relname);
-        let _ = elog::elog(
-            LOG,
-            format!(
-                "conflict detected on relation \"{nsp}.{name}\": conflict=delete_missing; \
-                 could not find the row to be deleted"
-            ),
-        );
+        // The tuple to be deleted could not be found (worker.c:2908).
+        report_row_missing(mcx, &rel, &entry, &mut remoteslot, &mut localslot, None)?;
     }
 
     trigger::AfterTriggerEndQuery()?;

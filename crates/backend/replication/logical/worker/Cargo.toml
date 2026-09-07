@@ -31,6 +31,7 @@ commit_ts = { path = "../../../access/transam/commit_ts" }
 clauses = { path = "../../../optimizer/util/clauses" }
 execexpr = { path = "../../../executor/execexpr" }
 execindexing = { path = "../../../executor/execindexing" }
+genam = { path = "../../../access/index/genam" }
 execpartition = { path = "../../../executor/execpartition" }
 amapi = { path = "../../../access/index/amapi" }
 format_type = { path = "../../../utils/adt/format_type" }

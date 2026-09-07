@@ -132,23 +132,49 @@ fn default_fill_column_filter() {
     assert!(!needs_default_fill(false, b's' as i8, -1));
 }
 
-// errdetail_apply_conflict's origin-differs sentences (conflict.c), in the
-// port's lowercased single-line rendering.
+// errdetail_apply_conflict's conflict-type sentences (conflict.c:200-275),
+// C's text byte for byte: origin forms for the origin-differs types, and the
+// with/without commit-timestamp forms for the unique-index types.
 #[test]
-fn origin_differs_conflict_details() {
-    use super::apply::origin_differs_detail;
+fn conflict_type_detail_sentences() {
+    use super::conflict::{conflict_type_detail, ConflictType};
     assert_eq!(
-        origin_differs_detail("updating", false, None, 731, "ts0"),
-        "updating the row that was modified locally in transaction 731 at ts0"
+        conflict_type_detail(ConflictType::UpdateOriginDiffers, "", 731, Some("ts0"), None),
+        "Updating the row that was modified locally in transaction 731 at ts0."
     );
     assert_eq!(
-        origin_differs_detail("updating", true, Some("o1"), 731, "ts0"),
-        "updating the row that was modified by a different origin \"o1\" in transaction 731 at ts0"
+        conflict_type_detail(ConflictType::UpdateOriginDiffers, "", 731, Some("ts0"), Some(Some("o1"))),
+        "Updating the row that was modified by a different origin \"o1\" in transaction 731 at ts0."
     );
     assert_eq!(
-        origin_differs_detail("deleting", true, None, 731, "ts0"),
-        "deleting the row that was modified by a non-existent origin in transaction 731 at ts0"
+        conflict_type_detail(ConflictType::DeleteOriginDiffers, "", 731, Some("ts0"), Some(None)),
+        "Deleting the row that was modified by a non-existent origin in transaction 731 at ts0."
     );
+    assert_eq!(
+        conflict_type_detail(ConflictType::InsertExists, "t_pkey", 731, None, None),
+        "Key already exists in unique index \"t_pkey\", modified in transaction 731."
+    );
+    assert_eq!(
+        conflict_type_detail(ConflictType::UpdateExists, "t_pkey", 731, Some("ts0"), None),
+        "Key already exists in unique index \"t_pkey\", modified locally in transaction 731 at ts0."
+    );
+    assert_eq!(
+        conflict_type_detail(ConflictType::MultipleUniqueConflicts, "t_pkey", 731, Some("ts0"), Some(Some("o1"))),
+        "Key already exists in unique index \"t_pkey\", modified by origin \"o1\" in transaction 731 at ts0."
+    );
+    assert_eq!(
+        conflict_type_detail(ConflictType::InsertExists, "t_pkey", 731, Some("ts0"), Some(None)),
+        "Key already exists in unique index \"t_pkey\", modified by a non-existent origin in transaction 731 at ts0."
+    );
+    assert_eq!(
+        conflict_type_detail(ConflictType::UpdateMissing, "", 0, None, None),
+        "Could not find the row to be updated."
+    );
+    assert_eq!(
+        conflict_type_detail(ConflictType::DeleteMissing, "", 0, None, None),
+        "Could not find the row to be deleted."
+    );
+    assert_eq!(ConflictType::MultipleUniqueConflicts as usize, 6);
 }
 
 // ---- audit-remediation b060 witnesses ---------------------------------------

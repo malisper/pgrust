@@ -45,6 +45,8 @@ types_tuple = { path = "../../../_support/types/types_tuple" }
 types_core = { path = "../../../_support/types/types_core" }
 datum = { path = "../../../_support/types/datum" }
 lmgr = { path = "../../storage/lmgr/lmgr" }
+types_storage = { path = "../../../_support/types/types_storage" }
+catalog = { path = "../../catalog/catalog" }
 relcache_seams = { path = "../../utils/cache/relcache_seams" }
 execscan = { path = "../execscan" }
 rewrite_manip = { path = "../../rewrite/rewrite_manip" }
@@ -142,7 +144,6 @@ types_core = { path = "../../../_support/types/types_core" }
 types_dest = { path = "../../../_support/types/types_dest" }
 types_portal = { path = "../../../_support/types/portal" }
 types_scan = { path = "../../../_support/types/types_scan" }
-types_storage = { path = "../../../_support/types/types_storage" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
 varsup = { path = "../../access/transam/varsup" }
 waitevent_seams = { path = "../../utils/activity/waitevent_seams" }

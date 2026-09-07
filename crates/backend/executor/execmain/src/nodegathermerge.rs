@@ -53,14 +53,23 @@ impl TupleBuf {
 
 // GMReaderTupleBuffer (nodeGatherMerge.c).
 #[derive(Default)]
-struct GmTupleBuffer {
+pub(crate) struct GmTupleBuffer {
     tuple: Vec<TupleBuf>,
     // The slot's current tuple lives outside `tuple` so refills never
     // overwrite it while stored.
     cur: TupleBuf,
-    ntuples: usize,
+    pub(crate) ntuples: usize,
     read_counter: usize,
     done: bool,
+}
+
+impl GmTupleBuffer {
+    // gather_merge_setup's per-reader buffer: MAX_TUPLE_STORE empty slots.
+    pub(crate) fn new() -> Self {
+        let mut buf = GmTupleBuffer::default();
+        buf.tuple.resize_with(MAX_TUPLE_STORE, TupleBuf::default);
+        buf
+    }
 }
 
 pub struct GatherMergeState<'mcx> {
@@ -150,9 +159,7 @@ pub fn exec_init_gather_merge<'mcx>(
             estate.exec_init_extra_tuple_slot(Some(tup_desc.clone()), TupleSlotKind::MinimalTuple);
         worker_slots.push(slot);
         gm_slots.push(None);
-        let mut buf = GmTupleBuffer::default();
-        buf.tuple.resize_with(MAX_TUPLE_STORE, TupleBuf::default);
-        tuple_buffers.push(buf);
+        tuple_buffers.push(GmTupleBuffer::new());
     }
 
     let gm_heap = mcx::vec_with_capacity_in(mcx, nreaders + 1)?;
@@ -319,7 +326,7 @@ fn gather_merge_init<'mcx>(
                     node.gm_heap.push(i as i32);
                 }
             } else if i > 0 {
-                load_tuple_array(node, i);
+                load_tuple_array(node, i)?;
             }
         }
         for i in 1..=nreaders {
@@ -377,28 +384,52 @@ fn gather_merge_getnext<'mcx>(
     }
 }
 
-/// `load_tuple_array` (nodeGatherMerge.c). Nowait prefetch errors surface on
-/// the next demanded read (C reports immediately; the retry hits the same
-/// error).
-fn load_tuple_array(node: &mut GatherMergeState<'_>, reader: usize) {
+/// `load_tuple_array` (nodeGatherMerge.c:597): a tuple-queue error during the
+/// nowait prefetch is raised at once, as C's TupleQueueReaderNext ereports.
+fn load_tuple_array(node: &mut GatherMergeState<'_>, reader: usize) -> PgResult<()> {
     if reader == 0 {
-        return;
+        return Ok(());
     }
     let b = reader - 1;
-    let readers = &mut node.reader;
-    let buf = &mut node.tuple_buffers[b];
+    gm_prefetch(&mut node.reader[b], &mut node.tuple_buffers[b])
+}
+
+/// One worker's tuple queue as gm_prefetch reads it (TupleQueueReaderNext's
+/// contract): the next tuple image, None when nothing is ready (nowait) or
+/// the queue is exhausted (`done`), Err for a transport error.
+pub(crate) trait GmTupleSource {
+    fn next_tuple(&mut self, nowait: bool, done: &mut bool) -> PgResult<Option<&[u8]>>;
+}
+
+impl GmTupleSource for tqueue::TupleQueueReader {
+    #[inline]
+    fn next_tuple(&mut self, nowait: bool, done: &mut bool) -> PgResult<Option<&[u8]>> {
+        self.next(nowait, done)
+    }
+}
+
+/// The per-reader body of `load_tuple_array`: fill the tuple array with
+/// nowait reads of one worker's queue (gm_readnext_tuple,
+/// nodeGatherMerge.c:714).
+pub(crate) fn gm_prefetch(
+    reader: &mut impl GmTupleSource,
+    buf: &mut GmTupleBuffer,
+) -> PgResult<()> {
     if buf.ntuples == buf.read_counter {
         buf.ntuples = 0;
         buf.read_counter = 0;
     }
     for i in buf.ntuples..MAX_TUPLE_STORE {
+        // gm_readnext_tuple (nodeGatherMerge.c:721) CHECK_FOR_INTERRUPTS.
+        crate::cfi()?;
         let mut done = buf.done;
-        let got = match readers[b].next(true, &mut done) {
+        let got = match reader.next_tuple(true, &mut done) {
             Ok(Some(bytes)) => {
                 buf.tuple[i].store(bytes);
                 true
             }
-            Ok(None) | Err(_) => false,
+            Ok(None) => false,
+            Err(e) => return Err(e),
         };
         buf.done = done;
         if !got {
@@ -406,6 +437,7 @@ fn load_tuple_array(node: &mut GatherMergeState<'_>, reader: usize) {
         }
         buf.ntuples += 1;
     }
+    Ok(())
 }
 
 /// `gather_merge_readnext` + `gm_readnext_tuple` (nodeGatherMerge.c).
@@ -467,7 +499,7 @@ fn gather_merge_readnext<'mcx>(
             node.gm_slots[reader] = None;
             return Ok(false);
         }
-        load_tuple_array(node, reader);
+        load_tuple_array(node, reader)?;
     }
 
     let ptr = node.tuple_buffers[reader - 1].cur.tuple_ptr();

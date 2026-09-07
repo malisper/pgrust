@@ -291,3 +291,22 @@ fn send_after_reader_detach_returns_false() {
 
     assert!(!tqueue_send_bytes(&mut queue, &tuple_image(0)).unwrap());
 }
+
+// shm_mq.c:715 shm_mq_receive: a length word past MaxAllocSize is an
+// ERRCODE_PROGRAM_LIMIT_EXCEEDED ERROR raised through TupleQueueReaderNext
+// (the fault Gather Merge's prefetch must surface at once). The word is
+// planted through ShmMq's test-only injection seam.
+#[test]
+fn reader_next_raises_shm_mq_receive_error() {
+    let _s = serial();
+    setup();
+    become_backend(0, 7400);
+    let (mq, ledger) = batched_pair(0, 2);
+    mq.inject_raw_ring_bytes_for_test(&0x4000_0000usize.to_ne_bytes());
+    let mut reader = batched_reader(&mq, &ledger);
+    let mut done = false;
+    let err = reader.next(true, &mut done).expect_err("corrupt length word must error");
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+    assert_eq!(err.message(), "invalid message size 1073741824 in shared memory queue");
+    assert!(!done);
+}

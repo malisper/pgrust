@@ -30,7 +30,7 @@ use types_nodes::{Node, NodeTag};
 use types_rel::{Relation, RELKIND_RELATION};
 use types_slot::{SlotData, TupleSlotKind, EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
 use types_snapshot::{SnapshotData, SNAPSHOT_ANY};
-use types_tuple::itemptr::ItemPointerSetInvalid;
+use types_tuple::itemptr::{ItemPointerIsValid, ItemPointerSetInvalid};
 use types_tuple::{ItemPointerData, TupleDescData};
 
 // The FDW-modify half of C's FdwRoutine (fdwapi.h), installed per FdwKind by
@@ -132,6 +132,9 @@ pub struct ResultRelExec<'mcx> {
     // lookup without re-borrowing estate.es_relations.
     rd_id: Oid,
     relkind: u8,
+    // C ri_needLockTagTuple (execMain.c:1260 InitResultRelInfo): an inplace-
+    // update catalog's rows are updated under InplaceUpdateTupleLock.
+    ri_needLockTagTuple: bool,
     ri_newTupleSlot: Option<ExecSlotId>,
     ri_oldTupleSlot: Option<ExecSlotId>,
     // ri_ReturningSlot: the DELETE ... RETURNING old-tuple slot.
@@ -1253,6 +1256,7 @@ fn init_result_rel<'mcx>(
         rti,
         rd_id,
         relkind,
+        ri_needLockTagTuple: catalog::IsInplaceUpdateOid(rd_id),
         ri_newTupleSlot: merge_new_slot,
         ri_oldTupleSlot: merge_old_slot,
         ri_ReturningSlot: None,
@@ -1942,9 +1946,21 @@ pub fn mt_accept_row<'mcx>(
                 if !mt.rel().ri_projectNewInfoValid {
                     exec_init_update_projection(mt, estate)?;
                 }
+                // nodeModifyTable.c:4536-4538: lock the row of an inplace-
+                // update catalog before fetching its latest version.
+                let tuplock = mt.rel().ri_needLockTagTuple;
+                if tuplock {
+                    inplace_tuple_lock(mt, estate, &tupleid, true)?;
+                }
                 fetch_old_row_version(mt, estate, &tupleid)?;
                 let slot = exec_get_update_new_tuple(mt, estate, plan_slot)?;
-                match exec_update(mt, estate, &mut tupleid, slot, &mut *epq_eval)? {
+                let updated = exec_update(mt, estate, &mut tupleid, slot, &mut *epq_eval)?;
+                // nodeModifyTable.c:4553-4554: unlock the tid ExecUpdate
+                // leaves in tupleid (the EPQ leg may have moved it).
+                if tuplock {
+                    inplace_tuple_lock(mt, estate, &tupleid, false)?;
+                }
+                match updated {
                     UpdateResult::NotModified => {}
                     UpdateResult::Modified => {
                         if mt.rel().project_returning.is_some() {
@@ -2641,9 +2657,13 @@ fn exec_merge_matched<'mcx>(
             return Ok(None);
         }
     }
+    // C lockedtid (3119): the inplace-update lock this call holds, if any.
+    let mut lockedtid = ItemPointerData::default();
+    ItemPointerSetInvalid(&mut lockedtid);
     match oldtup {
         // View target: the wholerow junk attr is the old row (C 3040-3045).
         Some(old_tup) => {
+            debug_assert!(!mt.rel().ri_needLockTagTuple);
             let old_id = mt.rel().ri_oldTupleSlot.expect("ExecInitMergeTupleSlots ran");
             let mcx = estate.es_query_cxt;
             exectuples::exec_force_store_heap_tuple(
@@ -2652,7 +2672,15 @@ fn exec_merge_matched<'mcx>(
                 mcx,
             )?;
         }
-        None => fetch_old_row_version(mt, estate, tupleid)?,
+        None => {
+            // nodeModifyTable.c:3128-3137: this locks even for DELETE, for
+            // DO NOTHING and for rows that match no WHEN clause.
+            if mt.rel().ri_needLockTagTuple {
+                inplace_tuple_lock(mt, estate, tupleid, true)?;
+                lockedtid = *tupleid;
+            }
+            fetch_old_row_version(mt, estate, tupleid)?;
+        }
     }
 
     // The retained join condition picks the action list: satisfied = MATCHED,
@@ -2661,18 +2689,30 @@ fn exec_merge_matched<'mcx>(
     // -update restarts: only the recheck leg may switch it (C actionStates).
     let mut use_by_source = !merge_join_qual_passes(mt, estate, plan_slot)?;
 
-    loop {
+    let rslot = loop {
         match exec_merge_matched_scan(
-            mt, estate, plan_slot, tupleid, &mut use_by_source, matched, epq_eval,
+            mt,
+            estate,
+            plan_slot,
+            tupleid,
+            &mut lockedtid,
+            &mut use_by_source,
+            matched,
+            epq_eval,
         )? {
-            MergeMatchedOutcome::Done(rslot) => return Ok(rslot),
+            MergeMatchedOutcome::Done(rslot) => break rslot,
             MergeMatchedOutcome::Restart => continue,
             MergeMatchedOutcome::NotMatched => {
                 *matched = false;
-                return Ok(None);
+                break None;
             }
         }
+    };
+    // out: (nodeModifyTable.c:3611-3613).
+    if ItemPointerIsValid(&lockedtid) {
+        inplace_tuple_lock(mt, estate, &lockedtid, false)?;
     }
+    Ok(rslot)
 }
 
 // The ri_MergeJoinCondition ExecQual (scan = old target tuple, inner = plan
@@ -2872,11 +2912,13 @@ fn merge_project_not_matched<'mcx>(
 // One pass over the MATCHED (or NOT MATCHED BY SOURCE) action list — the
 // lmerge_matched body. `use_by_source` is the caller-held actionStates
 // choice; the concurrent-update recheck leg may flip it to BY SOURCE.
+#[allow(clippy::too_many_arguments)]
 fn exec_merge_matched_scan<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
     plan_slot: ExecSlotId,
     tupleid: &mut ItemPointerData,
+    lockedtid: &mut ItemPointerData,
     use_by_source: &mut bool,
     matched: &mut bool,
     epq_eval: &mut impl FnMut(
@@ -3176,6 +3218,15 @@ fn exec_merge_matched_scan<'mcx>(
                             );
                             if isnull {
                                 *matched = false;
+                            }
+                            // nodeModifyTable.c:3463-3470: retag the inplace-
+                            // update lock to the chain's latest version.
+                            if mt.rel().ri_needLockTagTuple {
+                                if ItemPointerIsValid(lockedtid) {
+                                    inplace_tuple_lock(mt, estate, lockedtid, false)?;
+                                }
+                                inplace_tuple_lock(mt, estate, tupleid, true)?;
+                                *lockedtid = *tupleid;
                             }
                             fetch_old_row_version(mt, estate, tupleid)?;
                             if *matched {
@@ -4169,6 +4220,26 @@ fn fetch_old_row_version<'mcx>(
     Ok(())
 }
 
+// LockTuple / UnlockTuple(InplaceUpdateTupleLock) on the result relation's
+// row (nodeModifyTable.c:4538/:4554, the ExecUpdate EPQ retag :2638-2643 and
+// the ExecMergeMatched sites :3128-3137/:3463-3470/:3611-3613): serializes a
+// regular UPDATE of an inplace-update catalog against heap_inplace_lock.
+fn inplace_tuple_lock(
+    mt: &ModifyTableState<'_>,
+    estate: &EStateData<'_>,
+    tid: &ItemPointerData,
+    lock: bool,
+) -> PgResult<()> {
+    let rel = estate.es_relations[(mt.rel().rti - 1) as usize]
+        .as_ref()
+        .expect("result relation opened");
+    if lock {
+        lmgr::LockTuple(rel, tid, types_storage::lock::InplaceUpdateTupleLock)
+    } else {
+        lmgr::UnlockTuple(rel, tid, types_storage::lock::InplaceUpdateTupleLock)
+    }
+}
+
 // EvalPlanQualSlot (execMain.c): the per-result-rel EPQ test slot,
 // created on first use into the shared tuple table.
 // C EvalPlanQualStart's resultRelations loop: every result relation starts
@@ -4217,8 +4288,8 @@ fn eval_plan_qual_slot<'mcx>(
 
 // ExecUpdate + ExecUpdatePrologue/Act/Epilogue (nodeModifyTable.c), plain-heap
 // arm: no triggers/FDW/partitions. Concurrent TM_Updated runs the EPQ
-// recheck (redo_act loop); the ri_needLockTagTuple relock is omitted —
-// inplace-update catalogs never reach this executor path.
+// recheck (redo_act loop), retagging the caller's InplaceUpdateTupleLock to
+// the chain's latest version for ri_needLockTagTuple relations (:2638-2643).
 // ExecUpdate's outcome: a cross-partition move carries the INSERT half's
 // result slot (C updateCxt->crossPartUpdate + cpUpdateReturningSlot).
 enum UpdateResult {
@@ -4276,6 +4347,8 @@ fn exec_update<'mcx>(
 
     // redo_act:
     loop {
+        // nodeModifyTable.c:2545: the tid the caller locked for this attempt.
+        let lockedtid = *tupleid;
         let mcx = estate.es_query_cxt;
         let mut cross_part = false;
         {
@@ -4453,6 +4526,12 @@ fn exec_update<'mcx>(
                             return Ok(UpdateResult::NotModified);
                         };
                         debug_assert!(mt.rel().ri_projectNewInfoValid);
+                        // nodeModifyTable.c:2638-2643: move the inplace-update
+                        // lock from the version we locked to the one we found.
+                        if mt.rel().ri_needLockTagTuple {
+                            inplace_tuple_lock(mt, estate, &lockedtid, false)?;
+                            inplace_tuple_lock(mt, estate, tupleid, true)?;
+                        }
                         fetch_old_row_version(mt, estate, tupleid)?;
                         slot_id = exec_get_update_new_tuple(mt, estate, epqslot)?;
                         continue;
@@ -8566,7 +8645,9 @@ pub fn exec_constraints<'mcx>(
                 }
             }
         }
-        if constr.num_check > 0 {
+        // execMain.c:2030: gate on pg_class.relchecks, not on the rows the
+        // relcache found (ExecRelCheck reports the difference).
+        if constr.relchecks > 0 {
             if let Some(failed) = exec_rel_check(mcx, check_exprs, rel, slot)? {
                 return Err(check_violation(mcx, rel, slot, failed, root_rel, modified_cols));
             }
@@ -8585,12 +8666,16 @@ fn exec_rel_check<'mcx>(
     slot: &mut SlotData<'mcx>,
 ) -> PgResult<Option<usize>> {
     let constr = rel.rd_att.constr.as_deref().expect("caller checked");
-    assert!(
-        constr.check.len() == constr.num_check as usize,
-        "{} pg_constraint record(s) missing for relation \"{}\"",
-        constr.num_check as usize - constr.check.len(),
-        String::from_utf8_lossy(rel.rd_rel.relname.name_str()),
-    );
+    // execMain.c:1796-1798: CheckNNConstraintFetch let a short pg_constraint
+    // scan pass with a WARNING; enforcing an incomplete CHECK set is an ERROR.
+    let ncheck = constr.check.len() as i32;
+    if ncheck != constr.relchecks as i32 {
+        return Err(Box::new(PgError::error(format!(
+            "{} pg_constraint record(s) missing for relation \"{}\"",
+            constr.relchecks as i32 - ncheck,
+            String::from_utf8_lossy(rel.rd_rel.relname.name_str()),
+        ))));
+    }
     if check_exprs.is_none() {
         let mut compiled: mcx::PgVec<'mcx, CheckExpr<'mcx>> = mcx::PgVec::new_in(mcx);
         compiled.try_reserve_exact(constr.check.len()).map_err(|_| {
@@ -8958,7 +9043,7 @@ mcx::forget_safe_struct!(
     GeneratedExpr<'_> { attnum; state },
     VirtualNnExpr<'_> { attnum; state },
     WcoExpr<'_> { kind, relname, polname; state },
-    ResultRelExec<'_> { rti, rd_id, relkind, ri_newTupleSlot, ri_oldTupleSlot,
+    ResultRelExec<'_> { rti, rd_id, relkind, ri_needLockTagTuple, ri_newTupleSlot, ri_oldTupleSlot,
         ri_ReturningSlot, ri_AllNullSlot, ri_projectNewInfoValid, ri_RowIdAttNo,
         update_cols, update_colnos, ri_FdwRoutine, ri_usesFdwDirectModify;
         indexes, project_new, project_returning, check_exprs, partition_check, trigdesc,
