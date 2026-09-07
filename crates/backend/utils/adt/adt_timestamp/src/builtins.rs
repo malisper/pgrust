@@ -1309,7 +1309,7 @@ pub fn fc_pg_timezone_abbrevs_abbrevs(
             DTZ => (tp.value as i64, true),
             DYNTZ => {
                 let mut extra = adt_datetime::DateTimeErrorExtra::default();
-                let Some(tzp) = adt_datetime::tz::FetchDynamicTimeZone(tbl, tp, &mut extra)
+                let Some(tzp) = adt_datetime::tz::FetchDynamicTimeZone(tbl, tp, &mut extra)?
                 else {
                     adt_datetime::errors::DateTimeParseError(
                         DTERR_BAD_ZONE_ABBREV,

@@ -190,7 +190,7 @@ fn decode_str(
     s: &str,
     workbuf: &mut [u8; DATE_WORKBUF],
     time_only: bool,
-) -> Result<Decoded, (i32, ExtraOwned)> {
+) -> PgResult<Result<Decoded, (i32, ExtraOwned)>> {
     let mut field: [&[u8]; MAXDATEFIELDS] = [b""; MAXDATEFIELDS];
     let mut ftype = [0i32; MAXDATEFIELDS];
     let mut nf = 0usize;
@@ -210,7 +210,7 @@ fn decode_str(
                 &mut d.fsec,
                 Some(&mut d.tz),
                 &mut extra,
-            )
+            )?
         } else {
             DecodeDateTime(
                 &field[..nf],
@@ -221,20 +221,20 @@ fn decode_str(
                 &mut d.fsec,
                 Some(&mut d.tz),
                 &mut extra,
-            )
+            )?
         };
     }
     if dterr != 0 {
-        return Err((dterr, ExtraOwned::capture(&extra)));
+        return Ok(Err((dterr, ExtraOwned::capture(&extra))));
     }
-    Ok(d)
+    Ok(Ok(d))
 }
 
 /// On soft error the sentinel is `Ok(0)` with `escontext.error_occurred()`
 /// set (adt_timestamp convention).
 pub fn date_in(s: &str, mut escontext: Option<&mut SoftErrorContext>) -> PgResult<DateADT> {
     let mut workbuf = [0u8; DATE_WORKBUF];
-    let mut d = match decode_str(s, &mut workbuf, false) {
+    let mut d = match decode_str(s, &mut workbuf, false)? {
         Ok(d) => d,
         Err((dterr, extra)) => {
             extra.parse_error(dterr, s, "date", escontext)?;
@@ -612,7 +612,7 @@ pub fn time_in(
     escontext: Option<&mut SoftErrorContext>,
 ) -> PgResult<TimeADT> {
     let mut workbuf = [0u8; DATE_WORKBUF];
-    let d = match decode_str(s, &mut workbuf, true) {
+    let d = match decode_str(s, &mut workbuf, true)? {
         Ok(d) => d,
         Err((dterr, extra)) => {
             extra.parse_error(dterr, s, "time", escontext)?;
@@ -745,7 +745,7 @@ pub fn timetz_in(
     escontext: Option<&mut SoftErrorContext>,
 ) -> PgResult<TimeTzADT> {
     let mut workbuf = [0u8; DATE_WORKBUF];
-    let d = match decode_str(s, &mut workbuf, true) {
+    let d = match decode_str(s, &mut workbuf, true)? {
         Ok(d) => d,
         Err((dterr, extra)) => {
             extra.parse_error(dterr, s, "time with time zone", escontext)?;

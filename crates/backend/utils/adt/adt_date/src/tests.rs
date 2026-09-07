@@ -15,7 +15,7 @@ fn gmt_session() {
         fd::init_seams();
         xact_seams::get_current_sub_transaction_id::set(|| 1);
     });
-    tz::pg_timezone_initialize();
+    tz::pg_timezone_initialize().unwrap();
 }
 
 fn d_in(s: &str) -> DateADT {

@@ -20,6 +20,7 @@ pub use pgtz::{
 };
 
 use localtime::{NextDstBoundary, TZ_STRLEN_MAX};
+use types_error::PgResult;
 
 pub fn pg_tz_acceptable(tz: &PgTz) -> bool {
     localtime::pg_tz_acceptable(tz)
@@ -273,7 +274,7 @@ pub fn FetchDynamicTimeZone<'a>(
     tbl: &'a ZoneAbbrevTable,
     tp: &'a DateTkn,
     extra: &mut DateTimeErrorExtra<'a>,
-) -> Option<&'static PgTz> {
+) -> PgResult<Option<&'static PgTz>> {
     debug_assert_eq!(tp.typ as i32, DYNTZ);
     let dtza = &tbl.dynamic[tp.value as usize];
     // Acquire/Release: the table is process-shared, so the pointee's bytes
@@ -283,17 +284,17 @@ pub fn FetchDynamicTimeZone<'a>(
     let cached = dtza.tz.load(Ordering::Acquire);
     if !cached.is_null() {
         // SAFETY: the slot only ever holds &'static PgTz from pg_tzset below.
-        return Some(unsafe { &*cached });
+        return Ok(Some(unsafe { &*cached }));
     }
-    match pg_tzset(dtza.zone) {
+    match pg_tzset(dtza.zone)? {
         Some(tz) => {
             dtza.tz.store(tz as *const PgTz as *mut PgTz, Ordering::Release);
-            Some(tz)
+            Ok(Some(tz))
         }
         None => {
             extra.dtee_timezone = Some(dtza.zone);
             extra.dtee_abbrev = Some(tp.token_bytes());
-            None
+            Ok(None)
         }
     }
 }

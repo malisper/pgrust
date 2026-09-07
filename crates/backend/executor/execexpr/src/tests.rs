@@ -1656,7 +1656,7 @@ fn sql_value_function_datetime_ops() {
         fd::init_seams();
         xact_seams::get_current_sub_transaction_id::set(|| 1);
     });
-    adt_datetime::tz::pg_timezone_initialize();
+    adt_datetime::tz::pg_timezone_initialize().unwrap();
 
     with_mcx(|mcx| {
         let mut eval = |node| {

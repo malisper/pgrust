@@ -17,12 +17,12 @@ fn gmt_session() {
         fd::init_seams();
         xact_seams::get_current_sub_transaction_id::set(|| 1);
     });
-    tz::pg_timezone_initialize();
+    tz::pg_timezone_initialize().unwrap();
 }
 
 fn zone_session(name: &[u8]) -> &'static tz::PgTz {
     gmt_session();
-    let z = tz::pg_tzset(name).expect("zone loads from PGRUST_TZDIR");
+    let z = tz::pg_tzset(name).unwrap().expect("zone loads from PGRUST_TZDIR");
     tz::set_session_timezone(Some(z));
     z
 }
@@ -453,7 +453,7 @@ fn date_trunc_matches_pg18() {
     let got = timestamptz_trunc(b"day", tstz_in("2025-03-09 23:30:00-04")).unwrap();
     assert_eq!(tstz_out(got), "2025-03-09 00:00:00-05");
 
-    tz::set_session_timezone(tz::pg_tzset(b"GMT"));
+    tz::set_session_timezone(tz::pg_tzset(b"GMT").unwrap());
     let got =
         timestamptz_trunc_zone(b"day", tstz_in("2025-03-10 03:30:00+00"), b"America/New_York")
             .unwrap();

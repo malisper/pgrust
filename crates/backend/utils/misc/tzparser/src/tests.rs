@@ -85,8 +85,8 @@ fn dynamic_abbrev_resolves_through_pgtz() {
     let foo = find(tbl, "foo");
     assert_eq!(foo.typ as i32, DYNTZ);
     let mut extra = DateTimeErrorExtra::default();
-    let tz = FetchDynamicTimeZone(tbl, foo, &mut extra).expect("America/New_York loads");
-    assert!(FetchDynamicTimeZone(tbl, foo, &mut extra).is_some());
+    let tz = FetchDynamicTimeZone(tbl, foo, &mut extra).unwrap().expect("America/New_York loads");
+    assert!(FetchDynamicTimeZone(tbl, foo, &mut extra).unwrap().is_some());
     assert_eq!(
         adt_datetime::tz::pg_get_timezone_name(tz),
         Some("America/New_York")
@@ -94,7 +94,7 @@ fn dynamic_abbrev_resolves_through_pgtz() {
 
     let bar = find(tbl, "bar");
     let mut extra = DateTimeErrorExtra::default();
-    assert!(FetchDynamicTimeZone(tbl, bar, &mut extra).is_none());
+    assert!(FetchDynamicTimeZone(tbl, bar, &mut extra).unwrap().is_none());
     assert_eq!(extra.dtee_timezone, Some(&b"Not/AZone"[..]));
     assert_eq!(extra.dtee_abbrev, Some(&b"bar"[..]));
 }

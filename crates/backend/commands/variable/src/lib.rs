@@ -219,7 +219,7 @@ fn check_timezone_value(value: &str, log_only: bool) -> PgResult<Option<&'static
             }
             // SQL to Unix sign convention
             let gmtoffset = -(interval.time / 1_000_000);
-            let new_tz = tz::pg_tzset_offset(gmtoffset);
+            let new_tz = tz::pg_tzset_offset(gmtoffset)?;
             if new_tz.is_none() {
                 GUC_check_errdetail("UTC timezone offset is out of range.");
             }
@@ -233,14 +233,14 @@ fn check_timezone_value(value: &str, log_only: bool) -> PgResult<Option<&'static
         if scan.consumed != 0 && scan.consumed == value.len() {
             let hours = scan.value;
             let gmtoffset = (-hours * SECS_PER_HOUR as f64) as i64;
-            let new_tz = tz::pg_tzset_offset(gmtoffset);
+            let new_tz = tz::pg_tzset_offset(gmtoffset)?;
             if new_tz.is_none() {
                 GUC_check_errdetail("UTC timezone offset is out of range.");
             }
             return Ok(new_tz);
         }
     }
-    let Some(new_tz) = tz::pg_tzset(value.as_bytes()) else {
+    let Some(new_tz) = tz::pg_tzset(value.as_bytes())? else {
         return Ok(None);
     };
     if !tz::pg_tz_acceptable(new_tz) {

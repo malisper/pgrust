@@ -4,7 +4,7 @@ const WAL_SEG_SIZE: i32 = 16 * 1024 * 1024;
 
 // log_timezone and the pg_tzset cache are per-thread; each test sets its own.
 fn setup() {
-    pgtz::set_log_timezone(Some(pgtz::pg_tzset(b"GMT").unwrap()));
+    pgtz::set_log_timezone(Some(pgtz::pg_tzset(b"GMT").unwrap().unwrap()));
 }
 
 // 2001-09-09 01:46:40 GMT

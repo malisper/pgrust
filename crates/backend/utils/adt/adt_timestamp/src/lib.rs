@@ -184,7 +184,7 @@ struct Decoded {
 fn decode_timestamp_str(
     s: &str,
     workbuf: &mut [u8; TS_WORKBUF],
-) -> Result<Decoded, (i32, DateTimeErrorExtraOwned)> {
+) -> PgResult<Result<Decoded, (i32, DateTimeErrorExtraOwned)>> {
     let mut field: [&[u8]; MAXDATEFIELDS] = [b""; MAXDATEFIELDS];
     let mut ftype = [0i32; MAXDATEFIELDS];
     let mut nf = 0usize;
@@ -203,12 +203,12 @@ fn decode_timestamp_str(
             &mut d.fsec,
             Some(&mut d.tz),
             &mut extra,
-        );
+        )?;
     }
     if dterr != 0 {
-        return Err((dterr, DateTimeErrorExtraOwned::capture(&extra)));
+        return Ok(Err((dterr, DateTimeErrorExtraOwned::capture(&extra))));
     }
-    Ok(d)
+    Ok(Ok(d))
 }
 
 // DateTimeErrorExtra borrows the workbuf; the error path owns its copies so
@@ -249,7 +249,7 @@ fn timestamp_in_common(
 ) -> PgResult<Timestamp> {
     let datatype = if with_tz { "timestamp with time zone" } else { "timestamp" };
     let mut workbuf = [0u8; TS_WORKBUF];
-    let d = match decode_timestamp_str(s, &mut workbuf) {
+    let d = match decode_timestamp_str(s, &mut workbuf)? {
         Ok(d) => d,
         Err((dterr, extra)) => {
             extra.parse_error(dterr, s, datatype, escontext)?;
@@ -736,7 +736,7 @@ pub fn DecodeTimezoneName(tzname: &[u8]) -> PgResult<TzLookup> {
     let mut offset = 0;
     let mut ztz: Option<&'static PgTz> = None;
     let mut extra = DateTimeErrorExtra::default();
-    let dterr = DecodeTimezoneAbbrev(0, lowzone, &mut ftype, &mut offset, &mut ztz, &mut extra);
+    let dterr = DecodeTimezoneAbbrev(0, lowzone, &mut ftype, &mut offset, &mut ztz, &mut extra)?;
     if dterr != 0 {
         DateTimeParseError(dterr, Some(&extra), "", "", None)?;
         unreachable!("DateTimeParseError returned without escontext");
@@ -747,7 +747,7 @@ pub fn DecodeTimezoneName(tzname: &[u8]) -> PgResult<TzLookup> {
     } else if ftype == DYNTZ {
         Ok(TzLookup::DynTz(ztz.expect("DYNTZ abbreviation without zone")))
     } else {
-        match tz::pg_tzset(tzname) {
+        match tz::pg_tzset(tzname)? {
             Some(t) => Ok(TzLookup::Zone(t)),
             None => Err(tz_not_recognized(tzname)),
         }
@@ -757,7 +757,7 @@ pub fn DecodeTimezoneName(tzname: &[u8]) -> PgResult<TzLookup> {
 pub fn DecodeTimezoneNameToTz(tzname: &[u8]) -> PgResult<&'static PgTz> {
     match DecodeTimezoneName(tzname)? {
         // flip to the POSIX sign convention
-        TzLookup::FixedOffset(offset) => Ok(tz::pg_tzset_offset(-offset as i64)
+        TzLookup::FixedOffset(offset) => Ok(tz::pg_tzset_offset(-offset as i64)?
             .expect("fixed abbreviation offset representable as a zone")),
         TzLookup::DynTz(t) | TzLookup::Zone(t) => Ok(t),
     }

@@ -318,7 +318,7 @@ pub fn dch_from_char<'mcx>(
                         cur.rest(),
                         &mut gmtoffset,
                         &mut tzp,
-                    );
+                    )?;
                     if tzlen > 0 {
                         out.has_tz = true;
                         out.gmtoffset = gmtoffset;

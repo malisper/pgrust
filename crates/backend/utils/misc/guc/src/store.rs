@@ -176,7 +176,7 @@ pub fn initialize_guc_options_for_child_base(
 
 fn initialize_guc_options_impl(publish: impl Fn(&str) -> bool) -> PgResult<()> {
     // Before log_line_prefix-style GUCs can demand elog timestamps.
-    pgtz::pg_timezone_initialize();
+    pgtz::pg_timezone_initialize()?;
 
     let mut reg = GucRegistry::new();
     for setting in all_settings() {

@@ -23,8 +23,8 @@ fn setup() {
         xact_seams::get_current_sub_transaction_id::set(|| 1);
         postgres_seams::check_for_interrupts::set(|| Ok(()));
     });
-    adt_datetime::tz::pg_timezone_initialize();
-    let z = adt_datetime::tz::pg_tzset(b"GMT").expect("zone loads");
+    adt_datetime::tz::pg_timezone_initialize().unwrap();
+    let z = adt_datetime::tz::pg_tzset(b"GMT").unwrap().expect("zone loads");
     adt_datetime::tz::set_session_timezone(Some(z));
 }
 

@@ -46,7 +46,8 @@ fn decode_ts(input: &str, with_tz: bool) -> Result<(i32, pg_tm, fsec_t, i32), i3
         &mut fsec,
         if with_tz { Some(&mut tz) } else { None },
         &mut extra,
-    );
+    )
+    .unwrap();
     if rc != 0 {
         return Err(rc);
     }
@@ -71,7 +72,8 @@ fn decode_time(input: &str, with_tz: bool) -> Result<(i32, pg_tm, fsec_t, i32), 
         &mut fsec,
         if with_tz { Some(&mut tz) } else { None },
         &mut extra,
-    );
+    )
+    .unwrap();
     if rc != 0 {
         return Err(rc);
     }
@@ -312,17 +314,17 @@ fn unknown_string_field_is_bad_timezone() {
 #[test]
 fn session_zone_resolution_uses_the_engine() {
     setup_tz_engine();
-    tz::pg_timezone_initialize();
+    tz::pg_timezone_initialize().unwrap();
     let (_, _, _, tzv) = decode_ts("1999-01-08 04:05:06", true).unwrap();
     assert_eq!(tzv, 0, "GMT session timezone");
 
     // Session zone with DST: EST in January (+18000 west), EDT in July.
-    tz::set_session_timezone(tz::pg_tzset(b"America/New_York"));
+    tz::set_session_timezone(tz::pg_tzset(b"America/New_York").unwrap());
     let (_, tm, _, tzv) = decode_ts("1999-01-08 04:05:06", true).unwrap();
     assert_eq!((tzv, tm.tm_isdst), (5 * 3600, 0));
     let (_, tm, _, tzv) = decode_ts("1999-07-08 04:05:06", true).unwrap();
     assert_eq!((tzv, tm.tm_isdst), (4 * 3600, 1));
-    tz::pg_timezone_initialize();
+    tz::pg_timezone_initialize().unwrap();
 }
 
 #[test]

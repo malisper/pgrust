@@ -167,16 +167,13 @@ fn scan_directory_ci(dirname: &str, fname: &[u8]) -> PgResult<Option<String>> {
 // site) and the iteration order deterministic.
 static TIMEZONE_CACHE: Mutex<BTreeMap<Box<[u8]>, &'static PgTz>> = Mutex::new(BTreeMap::new());
 
-#[cold]
-fn escaped_report(what: &str, e: Box<PgError>) -> ! {
-    panic!("pgtz: ereport escaped {what}: {}", e.message());
-}
-
 /// Load a timezone from file or cache; does not verify acceptability. "GMT"
-/// always goes to tzparse(), never the filesystem, as in C.
-pub fn pg_tzset(tzname: &[u8]) -> Option<&'static PgTz> {
+/// always goes to tzparse(), never the filesystem, as in C. `Ok(None)` is
+/// C's NULL (unknown zone); `Err` is an ereport that unwound out of tzload
+/// (the AllocateDir descriptor-cap refusal, fd.c:2916) or the GMT elog.
+pub fn pg_tzset(tzname: &[u8]) -> PgResult<Option<&'static PgTz>> {
     if tzname.len() > TZ_STRLEN_MAX {
-        return None; /* not going to fit */
+        return Ok(None); /* not going to fit */
     }
 
     let mut upper = [0u8; TZ_STRLEN_MAX + 1];
@@ -186,7 +183,7 @@ pub fn pg_tzset(tzname: &[u8]) -> Option<&'static PgTz> {
     let uppername = &upper[..tzname.len()];
 
     if let Some(tz) = TIMEZONE_CACHE.lock().unwrap().get(uppername).copied() {
-        return Some(tz);
+        return Ok(Some(tz));
     }
 
     let mut tzstate = Box::new(TzState::new());
@@ -194,16 +191,17 @@ pub fn pg_tzset(tzname: &[u8]) -> Option<&'static PgTz> {
 
     if uppername == b"GMT" {
         if !tzparse(uppername, &mut tzstate, true) {
-            panic!("pgtz: could not initialize GMT time zone");
+            /* This really, really should not happen ... */
+            return Err(PgError::error("could not initialize GMT time zone").into());
         }
         canonname[..3].copy_from_slice(b"GMT");
     } else {
         match tzload(uppername, Some(&mut canonname), &mut tzstate, true) {
             Ok(()) => {}
-            Err(TzLoadError::Report(e)) => escaped_report("pg_tzset", e),
+            Err(TzLoadError::Report(e)) => return Err(e),
             Err(_) => {
                 if uppername.first() == Some(&b':') || !tzparse(uppername, &mut tzstate, false) {
-                    return None;
+                    return Ok(None);
                 }
                 canonname[..uppername.len()].copy_from_slice(uppername);
             }
@@ -214,22 +212,29 @@ pub fn pg_tzset(tzname: &[u8]) -> Option<&'static PgTz> {
     // insert wins and the loser's build is dropped, so every caller — and the
     // process-shared pointer caches downstream — sees ONE permanent entry.
     let mut map = TIMEZONE_CACHE.lock().unwrap();
-    Some(*map.entry(uppername.into()).or_insert_with(|| {
+    Ok(Some(*map.entry(uppername.into()).or_insert_with(|| {
         Box::leak(Box::new(PgTz {
             tzname: canonname,
             state: *tzstate,
         }))
-    }))
+    })))
 }
 
 /// Fixed-GMT-offset zone: seconds, positive = west of Greenwich (POSIX sign
 /// convention); the displayable abbreviation uses the ISO convention.
-pub fn pg_tzset_offset(gmtoffset: i64) -> Option<&'static PgTz> {
+pub fn pg_tzset_offset(gmtoffset: i64) -> PgResult<Option<&'static PgTz>> {
     // pgtz.c:322 `absoffset = (gmtoffset < 0) ? -gmtoffset : gmtoffset`:
     // for LONG_MIN (check_timezone's (long) cast of an infinite/huge hours
     // value) C's negation wraps and the resulting "<+-...>" name fails
     // pg_tzset; the outcome is NULL, so return it directly.
-    let mut absoffset = if gmtoffset < 0 { gmtoffset.checked_neg()? } else { gmtoffset };
+    let mut absoffset = if gmtoffset < 0 {
+        match gmtoffset.checked_neg() {
+            Some(neg) => neg,
+            None => return Ok(None),
+        }
+    } else {
+        gmtoffset
+    };
 
     let mut offsetstr = [0u8; 64];
     let mut olen = 0usize;
@@ -285,10 +290,11 @@ fn push_2d(buf: &mut [u8], len: &mut usize, v: i64) {
 }
 
 /// Called before GUC init so log_timezone is valid for elog timestamps.
-pub fn pg_timezone_initialize() {
-    let tz = pg_tzset(b"GMT");
+pub fn pg_timezone_initialize() -> PgResult<()> {
+    let tz = pg_tzset(b"GMT")?;
     set_session_timezone(tz);
     set_log_timezone(tz);
+    Ok(())
 }
 
 const MAX_TZDIR_DEPTH: usize = 10;
@@ -355,16 +361,24 @@ pub fn pg_tzenumerate_next(dir: &mut PgTzEnum) -> PgResult<Option<&PgTz>> {
         fullname.push('/');
         fullname.push_str(&entry.d_name);
 
-        // C get_dirent_type (unported common/file_utils.c): symlink-following
-        // stat here.
-        let meta = std::fs::metadata(&fullname).map_err(|e| {
-            Box::new(
-                elog::ereport(ERROR)
+        // C get_dirent_type (unported common/file_utils.c:592): symlink-
+        // following stat here; the failure is ereport(ERROR,
+        // errcode_for_file_access(), "could not stat file \"%s\": %m") with
+        // stat's errno behind both the SQLSTATE and the %m text.
+        let meta = match std::fs::metadata(&fullname) {
+            Ok(meta) => meta,
+            Err(e) => {
+                let mut report = elog::ereport(ERROR);
+                if let Some(errno) = e.raw_os_error() {
+                    report = report.with_saved_errno(errno);
+                }
+                return Err(report
                     .errcode_for_file_access()
-                    .errmsg(format!("could not stat file \"{fullname}\": {e}"))
-                    .into_error(),
-            )
-        })?;
+                    .errmsg(format!("could not stat file \"{fullname}\": %m"))
+                    .into_error()
+                    .into());
+            }
+        };
         if meta.is_dir() {
             if dir.depth >= (MAX_TZDIR_DEPTH - 1) as isize {
                 return Err(

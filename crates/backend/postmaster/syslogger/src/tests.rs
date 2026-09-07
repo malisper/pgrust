@@ -263,7 +263,7 @@ fn logfile_getname_formats_up_to_maxpgpath_minus_len_minus_one() {
     let _g = lock();
     let saved_dir = LOG_DIRECTORY.lock().unwrap().replace("log".to_string());
     let saved_tz = pgtz::log_timezone();
-    pgtz::set_log_timezone(Some(pgtz::pg_tzset(b"GMT").expect("GMT always parses")));
+    pgtz::set_log_timezone(Some(pgtz::pg_tzset(b"GMT").unwrap().expect("GMT always parses")));
 
     let len = "log/".len();
     let fits = "x".repeat(MAXPGPATH - len - 1);

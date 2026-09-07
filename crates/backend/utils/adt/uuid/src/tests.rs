@@ -468,8 +468,8 @@ fn gmt_session() {
         fd::init_seams();
         xact_seams::get_current_sub_transaction_id::set(|| 1);
     });
-    adt_datetime::tz::pg_timezone_initialize();
-    adt_datetime::tz::set_session_timezone(adt_datetime::tz::pg_tzset(b"GMT"));
+    adt_datetime::tz::pg_timezone_initialize().unwrap();
+    adt_datetime::tz::set_session_timezone(adt_datetime::tz::pg_tzset(b"GMT").unwrap());
 }
 
 fn wall_clock_us() -> i64 {

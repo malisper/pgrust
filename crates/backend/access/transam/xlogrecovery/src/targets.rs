@@ -825,7 +825,7 @@ pub(crate) fn install_guc_hooks() {
                         &mut fsec,
                         Some(&mut tz),
                         &mut extra,
-                    );
+                    )?;
                 }
                 if dterr != 0 {
                     return Ok(false);

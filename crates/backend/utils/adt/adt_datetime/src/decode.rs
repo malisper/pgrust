@@ -10,6 +10,7 @@ use crate::tz::{
     self, session_tz_abbrev_probe, zoneabbrevtbl, DetermineTimeZoneAbbrevOffset,
     DetermineTimeZoneOffset, FetchDynamicTimeZone, PgTz,
 };
+use types_error::PgResult;
 
 #[inline]
 fn is_space(c: u8) -> bool {
@@ -225,14 +226,14 @@ pub fn DecodeTimezoneAbbrev<'a>(
     offset: &mut i32,
     tz: &mut Option<&'static PgTz>,
     _extra: &mut DateTimeErrorExtra<'a>,
-) -> i32 {
+) -> PgResult<i32> {
     TZABBREVCACHE.with(|cache| {
         let tzc = cache[field].get();
         if tokcmp(lowtoken, &tzc.abbrev) == 0 && tzc.abbrev[0] != 0 {
             *ftype = tzc.ftype as i32;
             *offset = tzc.offset;
             *tz = tzc.tz;
-            return 0;
+            return Ok(0);
         }
 
         if let Some((isfixed, off, isdst)) = session_tz_abbrev_probe(lowtoken) {
@@ -245,7 +246,7 @@ pub fn DecodeTimezoneAbbrev<'a>(
             ent.offset = *offset;
             ent.tz = *tz;
             cache[field].set(ent);
-            return 0;
+            return Ok(0);
         }
 
         let tp = zoneabbrevtbl().and_then(|tbl| datebsearch(lowtoken, tbl.abbrevs));
@@ -259,9 +260,9 @@ pub fn DecodeTimezoneAbbrev<'a>(
                 *ftype = tp.typ as i32;
                 if tp.typ as i32 == DYNTZ {
                     *offset = 0;
-                    *tz = FetchDynamicTimeZone(zoneabbrevtbl().unwrap(), tp, _extra);
+                    *tz = FetchDynamicTimeZone(zoneabbrevtbl().unwrap(), tp, _extra)?;
                     if tz.is_none() {
-                        return DTERR_BAD_ZONE_ABBREV;
+                        return Ok(DTERR_BAD_ZONE_ABBREV);
                     }
                 } else {
                     *offset = tp.value;
@@ -275,7 +276,7 @@ pub fn DecodeTimezoneAbbrev<'a>(
                 cache[field].set(ent);
             }
         }
-        0
+        Ok(0)
     })
 }
 
@@ -285,7 +286,7 @@ pub fn DecodeTimezoneAbbrevPrefix(
     str_: &[u8],
     offset: &mut i32,
     tz: &mut Option<&'static PgTz>,
-) -> i32 {
+) -> PgResult<i32> {
     *offset = 0;
     *tz = None;
 
@@ -309,19 +310,19 @@ pub fn DecodeTimezoneAbbrevPrefix(
             } else {
                 *tz = tz::session_timezone();
             }
-            return len as i32;
+            return Ok(len as i32);
         }
 
         if let Some(tp) = zoneabbrevtbl().and_then(|tbl| datebsearch(tok, tbl.abbrevs)) {
             if tp.typ as i32 == DYNTZ {
                 let mut extra = DateTimeErrorExtra::default();
-                if let Some(tzp) = FetchDynamicTimeZone(zoneabbrevtbl().unwrap(), tp, &mut extra) {
+                if let Some(tzp) = FetchDynamicTimeZone(zoneabbrevtbl().unwrap(), tp, &mut extra)? {
                     *tz = Some(tzp);
-                    return len as i32;
+                    return Ok(len as i32);
                 }
             } else {
                 *offset = tp.value;
-                return len as i32;
+                return Ok(len as i32);
             }
         }
 
@@ -329,7 +330,7 @@ pub fn DecodeTimezoneAbbrevPrefix(
         lowtoken[len] = 0;
     }
 
-    -1
+    Ok(-1)
 }
 
 pub fn ParseFraction(cp: &[u8], frac: &mut f64) -> i32 {
@@ -1109,7 +1110,7 @@ pub fn DecodeDateTime<'a>(
     fsec: &mut fsec_t,
     tzp: Option<&mut i32>,
     extra: &mut DateTimeErrorExtra<'a>,
-) -> i32 {
+) -> PgResult<i32> {
     let mut fmask = 0i32;
     let mut tmask = 0i32;
     let mut ptype = 0i32; // "prefix type" for ISO and Julian formats
@@ -1139,18 +1140,18 @@ pub fn DecodeDateTime<'a>(
                 if ptype == DTK_JULIAN {
                     // integral julian day with attached time zone
                     if !have_tz {
-                        return DTERR_BAD_FORMAT;
+                        return Ok(DTERR_BAD_FORMAT);
                     }
                     let r = strtoint(field[i]);
                     if r.erange || r.val < 0 {
-                        return DTERR_FIELD_OVERFLOW;
+                        return Ok(DTERR_FIELD_OVERFLOW);
                     }
                     j2date(r.val, &mut tm.tm_year, &mut tm.tm_mon, &mut tm.tm_mday);
                     isjulian = true;
 
                     let dterr = DecodeTimezone(&field[i][r.end..], &mut tzv);
                     if dterr != 0 {
-                        return dterr;
+                        return Ok(dterr);
                     }
                     tmask = DTK_DATE_M | DTK_TIME_M | DTK_M(TZ);
                     ptype = 0;
@@ -1160,26 +1161,26 @@ pub fn DecodeDateTime<'a>(
                     // timezone name with embedded punctuation, or a
                     // run-together time with trailing time zone (hhmmss-zz)
                     if !have_tz {
-                        return DTERR_BAD_FORMAT;
+                        return Ok(DTERR_BAD_FORMAT);
                     }
 
                     if field[i].first().is_some_and(|&c| is_digit(c)) || ptype != 0 {
                         if ptype != 0 {
                             // only a preceding "t" field is allowed
                             if ptype != DTK_TIME {
-                                return DTERR_BAD_FORMAT;
+                                return Ok(DTERR_BAD_FORMAT);
                             }
                             ptype = 0;
                         }
                         if fmask & DTK_TIME_M == DTK_TIME_M {
-                            return DTERR_BAD_FORMAT;
+                            return Ok(DTERR_BAD_FORMAT);
                         }
                         let Some(dash) = field[i].iter().position(|&c| c == b'-') else {
-                            return DTERR_BAD_FORMAT;
+                            return Ok(DTERR_BAD_FORMAT);
                         };
                         let dterr = DecodeTimezone(&field[i][dash..], &mut tzv);
                         if dterr != 0 {
-                            return dterr;
+                            return Ok(dterr);
                         }
                         // read the rest of the field as a concatenated time
                         let head = &field[i][..dash];
@@ -1193,15 +1194,15 @@ pub fn DecodeDateTime<'a>(
                             &mut is2digits,
                         );
                         if dterr < 0 {
-                            return dterr;
+                            return Ok(dterr);
                         }
                         tmask |= DTK_M(TZ);
                     } else {
-                        match tz::pg_tzset(field[i]) {
+                        match tz::pg_tzset(field[i])? {
                             Some(z) => namedTz = Some(z),
                             None => {
                                 extra.dtee_timezone = Some(field[i]);
-                                return DTERR_BAD_TIMEZONE;
+                                return Ok(DTERR_BAD_TIMEZONE);
                             }
                         }
                         tmask = DTK_M(TZ);
@@ -1209,7 +1210,7 @@ pub fn DecodeDateTime<'a>(
                 } else {
                     let dterr = DecodeDate(field[i], fmask, &mut tmask, &mut is2digits, tm);
                     if dterr != 0 {
-                        return dterr;
+                        return Ok(dterr);
                     }
                 }
             }
@@ -1218,28 +1219,28 @@ pub fn DecodeDateTime<'a>(
                 // might be an ISO time following a "t" field
                 if ptype != 0 {
                     if ptype != DTK_TIME {
-                        return DTERR_BAD_FORMAT;
+                        return Ok(DTERR_BAD_FORMAT);
                     }
                     ptype = 0;
                 }
                 let dterr =
                     DecodeTime(field[i], fmask, INTERVAL_FULL_RANGE, &mut tmask, tm, fsec);
                 if dterr != 0 {
-                    return dterr;
+                    return Ok(dterr);
                 }
                 if time_overflows(tm.tm_hour, tm.tm_min, tm.tm_sec, *fsec) {
-                    return DTERR_FIELD_OVERFLOW;
+                    return Ok(DTERR_FIELD_OVERFLOW);
                 }
             }
 
             DTK_TZ => {
                 if !have_tz {
-                    return DTERR_BAD_FORMAT;
+                    return Ok(DTERR_BAD_FORMAT);
                 }
                 let mut tz = 0i32;
                 let dterr = DecodeTimezone(field[i], &mut tz);
                 if dterr != 0 {
-                    return dterr;
+                    return Ok(dterr);
                 }
                 tzv = tz;
                 tmask = DTK_M(TZ);
@@ -1250,18 +1251,18 @@ pub fn DecodeDateTime<'a>(
                     // deal with cases where previous field labeled this one
                     let r = strtoint(field[i]);
                     if r.erange {
-                        return DTERR_FIELD_OVERFLOW;
+                        return Ok(DTERR_FIELD_OVERFLOW);
                     }
                     let value = r.val;
                     let cp = r.end;
                     if cp < field[i].len() && field[i][cp] != b'.' {
-                        return DTERR_BAD_FORMAT;
+                        return Ok(DTERR_BAD_FORMAT);
                     }
 
                     match ptype {
                         DTK_JULIAN => {
                             if value < 0 {
-                                return DTERR_FIELD_OVERFLOW;
+                                return Ok(DTERR_FIELD_OVERFLOW);
                             }
                             tmask = DTK_DATE_M;
                             j2date(value, &mut tm.tm_year, &mut tm.tm_mon, &mut tm.tm_mday);
@@ -1272,7 +1273,7 @@ pub fn DecodeDateTime<'a>(
                                 let mut time = 0f64;
                                 let dterr = ParseFraction(&field[i][cp..], &mut time);
                                 if dterr != 0 {
-                                    return dterr;
+                                    return Ok(dterr);
                                 }
                                 time *= USECS_PER_DAY as f64;
                                 dt2time(
@@ -1297,13 +1298,13 @@ pub fn DecodeDateTime<'a>(
                                 &mut is2digits,
                             );
                             if dterr < 0 {
-                                return dterr;
+                                return Ok(dterr);
                             }
                             if tmask != DTK_TIME_M {
-                                return DTERR_BAD_FORMAT;
+                                return Ok(DTERR_BAD_FORMAT);
                             }
                         }
-                        _ => return DTERR_BAD_FORMAT,
+                        _ => return Ok(DTERR_BAD_FORMAT),
                     }
                     ptype = 0;
                     *dtype = DTK_DATE;
@@ -1315,7 +1316,7 @@ pub fn DecodeDateTime<'a>(
                         // embedded decimal and no date yet
                         let dterr = DecodeDate(field[i], fmask, &mut tmask, &mut is2digits, tm);
                         if dterr != 0 {
-                            return dterr;
+                            return Ok(dterr);
                         }
                     } else if dot.is_some_and(|d| flen - (flen - d) > 2) {
                         // embedded decimal with several digits before it:
@@ -1330,7 +1331,7 @@ pub fn DecodeDateTime<'a>(
                             &mut is2digits,
                         );
                         if dterr < 0 {
-                            return dterr;
+                            return Ok(dterr);
                         }
                     } else if flen >= 6
                         && (fmask & DTK_DATE_M == 0 || fmask & DTK_TIME_M == 0)
@@ -1346,7 +1347,7 @@ pub fn DecodeDateTime<'a>(
                             &mut is2digits,
                         );
                         if dterr < 0 {
-                            return dterr;
+                            return Ok(dterr);
                         }
                     } else {
                         let dterr = DecodeNumber(
@@ -1360,7 +1361,7 @@ pub fn DecodeDateTime<'a>(
                             &mut is2digits,
                         );
                         if dterr != 0 {
-                            return dterr;
+                            return Ok(dterr);
                         }
                     }
                 }
@@ -1372,9 +1373,9 @@ pub fn DecodeDateTime<'a>(
                 let mut val = 0;
                 let mut valtz: Option<&'static PgTz> = None;
                 let dterr =
-                    DecodeTimezoneAbbrev(i, field[i], &mut type_, &mut val, &mut valtz, extra);
+                    DecodeTimezoneAbbrev(i, field[i], &mut type_, &mut val, &mut valtz, extra)?;
                 if dterr != 0 {
-                    return dterr;
+                    return Ok(dterr);
                 }
                 if type_ == UNKNOWN_FIELD {
                     type_ = DecodeSpecial(i, field[i], &mut val);
@@ -1455,7 +1456,7 @@ pub fn DecodeDateTime<'a>(
                         tmask |= DTK_M(DTZ);
                         tm.tm_isdst = 1;
                         if !have_tz {
-                            return DTERR_BAD_FORMAT;
+                            return Ok(DTERR_BAD_FORMAT);
                         }
                         tzv -= val;
                     }
@@ -1464,7 +1465,7 @@ pub fn DecodeDateTime<'a>(
                         tmask |= DTK_M(TZ);
                         tm.tm_isdst = 1;
                         if !have_tz {
-                            return DTERR_BAD_FORMAT;
+                            return Ok(DTERR_BAD_FORMAT);
                         }
                         tzv = -val;
                     }
@@ -1472,7 +1473,7 @@ pub fn DecodeDateTime<'a>(
                     TZ => {
                         tm.tm_isdst = 0;
                         if !have_tz {
-                            return DTERR_BAD_FORMAT;
+                            return Ok(DTERR_BAD_FORMAT);
                         }
                         tzv = -val;
                     }
@@ -1480,7 +1481,7 @@ pub fn DecodeDateTime<'a>(
                     DYNTZ => {
                         tmask |= DTK_M(TZ);
                         if !have_tz {
-                            return DTERR_BAD_FORMAT;
+                            return Ok(DTERR_BAD_FORMAT);
                         }
                         // determine the actual offset later
                         abbrevTz = valtz;
@@ -1497,7 +1498,7 @@ pub fn DecodeDateTime<'a>(
                         tmask = 0;
                         // reject consecutive unhandled units
                         if ptype != 0 {
-                            return DTERR_BAD_FORMAT;
+                            return Ok(DTERR_BAD_FORMAT);
                         }
                         ptype = val;
                     }
@@ -1506,50 +1507,50 @@ pub fn DecodeDateTime<'a>(
                         // filler "t": next field is time
                         tmask = 0;
                         if fmask & DTK_DATE_M != DTK_DATE_M {
-                            return DTERR_BAD_FORMAT;
+                            return Ok(DTERR_BAD_FORMAT);
                         }
                         if ptype != 0 {
-                            return DTERR_BAD_FORMAT;
+                            return Ok(DTERR_BAD_FORMAT);
                         }
                         ptype = val;
                     }
 
                     UNKNOWN_FIELD => {
                         // could be an all-alpha timezone name
-                        match tz::pg_tzset(field[i]) {
+                        match tz::pg_tzset(field[i])? {
                             Some(z) => namedTz = Some(z),
-                            None => return DTERR_BAD_FORMAT,
+                            None => return Ok(DTERR_BAD_FORMAT),
                         }
                         tmask = DTK_M(TZ);
                     }
 
-                    _ => return DTERR_BAD_FORMAT,
+                    _ => return Ok(DTERR_BAD_FORMAT),
                 }
             }
 
-            _ => return DTERR_BAD_FORMAT,
+            _ => return Ok(DTERR_BAD_FORMAT),
         }
 
         if tmask & fmask != 0 {
-            return DTERR_BAD_FORMAT;
+            return Ok(DTERR_BAD_FORMAT);
         }
         fmask |= tmask;
     }
 
     // reject if prefix type appeared and was never handled
     if ptype != 0 {
-        return DTERR_BAD_FORMAT;
+        return Ok(DTERR_BAD_FORMAT);
     }
 
     // additional checking for normal date specs (not "infinity" etc)
     if *dtype == DTK_DATE {
         let dterr = ValidateDate(fmask, isjulian, is2digits, bc, tm);
         if dterr != 0 {
-            return dterr;
+            return Ok(dterr);
         }
 
         if mer != HR24 && tm.tm_hour > HOURS_PER_DAY / 2 {
-            return DTERR_FIELD_OVERFLOW;
+            return Ok(DTERR_FIELD_OVERFLOW);
         }
         if mer == AM && tm.tm_hour == HOURS_PER_DAY / 2 {
             tm.tm_hour = 0;
@@ -1562,22 +1563,22 @@ pub fn DecodeDateTime<'a>(
                 if let Some(p) = tzp {
                     *p = tzv;
                 }
-                return 1;
+                return Ok(1);
             }
-            return DTERR_BAD_FORMAT;
+            return Ok(DTERR_BAD_FORMAT);
         }
 
         // a full timezone spec needs the date to resolve DST status
         if let Some(z) = namedTz {
             if fmask & DTK_M(DTZMOD) != 0 {
-                return DTERR_BAD_FORMAT;
+                return Ok(DTERR_BAD_FORMAT);
             }
             tzv = DetermineTimeZoneOffset(tm, z);
         }
 
         if let Some(z) = abbrevTz {
             if fmask & DTK_M(DTZMOD) != 0 {
-                return DTERR_BAD_FORMAT;
+                return Ok(DTERR_BAD_FORMAT);
             }
             tzv = DetermineTimeZoneAbbrevOffset(tm, abbrev.unwrap(), z);
         }
@@ -1585,7 +1586,7 @@ pub fn DecodeDateTime<'a>(
         // timezone not specified? then use session timezone
         if have_tz && fmask & DTK_M(TZ) == 0 {
             if fmask & DTK_M(DTZMOD) != 0 {
-                return DTERR_BAD_FORMAT;
+                return Ok(DTERR_BAD_FORMAT);
             }
             let Some(z) = tz::session_timezone() else {
                 panic!("session timezone not initialized (pg_timezone_initialize) — DecodeDateTime");
@@ -1597,7 +1598,7 @@ pub fn DecodeDateTime<'a>(
     if let Some(p) = tzp {
         *p = tzv;
     }
-    0
+    Ok(0)
 }
 
 pub fn DecodeTimeOnly<'a>(
@@ -1609,7 +1610,7 @@ pub fn DecodeTimeOnly<'a>(
     fsec: &mut fsec_t,
     tzp: Option<&mut i32>,
     extra: &mut DateTimeErrorExtra<'a>,
-) -> i32 {
+) -> PgResult<i32> {
     let mut fmask = 0i32;
     let mut tmask = 0i32;
     let mut ptype = 0i32;
@@ -1636,25 +1637,25 @@ pub fn DecodeTimeOnly<'a>(
             DTK_DATE => {
                 // time zone not allowed? then no dates or zones at all
                 if !have_tz {
-                    return DTERR_BAD_FORMAT;
+                    return Ok(DTERR_BAD_FORMAT);
                 }
 
                 // under limited circumstances, we will accept a date...
                 if i == 0 && nf >= 2 && (ftype[nf - 1] == DTK_DATE || ftype[1] == DTK_TIME) {
                     let dterr = DecodeDate(field[i], fmask, &mut tmask, &mut is2digits, tm);
                     if dterr != 0 {
-                        return dterr;
+                        return Ok(dterr);
                     }
                 } else if field[i].first().is_some_and(|&c| is_digit(c)) {
                     if fmask & DTK_TIME_M == DTK_TIME_M {
-                        return DTERR_BAD_FORMAT;
+                        return Ok(DTERR_BAD_FORMAT);
                     }
                     let Some(dash) = field[i].iter().position(|&c| c == b'-') else {
-                        return DTERR_BAD_FORMAT;
+                        return Ok(DTERR_BAD_FORMAT);
                     };
                     let dterr = DecodeTimezone(&field[i][dash..], &mut tzv);
                     if dterr != 0 {
-                        return dterr;
+                        return Ok(dterr);
                     }
                     let head = &field[i][..dash];
                     let dterr = DecodeNumberField(
@@ -1667,16 +1668,16 @@ pub fn DecodeTimeOnly<'a>(
                         &mut is2digits,
                     );
                     if dterr < 0 {
-                        return dterr;
+                        return Ok(dterr);
                     }
                     ftype[i] = dterr;
                     tmask |= DTK_M(TZ);
                 } else {
-                    match tz::pg_tzset(field[i]) {
+                    match tz::pg_tzset(field[i])? {
                         Some(z) => namedTz = Some(z),
                         None => {
                             extra.dtee_timezone = Some(field[i]);
-                            return DTERR_BAD_TIMEZONE;
+                            return Ok(DTERR_BAD_TIMEZONE);
                         }
                     }
                     ftype[i] = DTK_TZ;
@@ -1687,7 +1688,7 @@ pub fn DecodeTimeOnly<'a>(
             DTK_TIME => {
                 if ptype != 0 {
                     if ptype != DTK_TIME {
-                        return DTERR_BAD_FORMAT;
+                        return Ok(DTERR_BAD_FORMAT);
                     }
                     ptype = 0;
                 }
@@ -1700,18 +1701,18 @@ pub fn DecodeTimeOnly<'a>(
                     fsec,
                 );
                 if dterr != 0 {
-                    return dterr;
+                    return Ok(dterr);
                 }
             }
 
             DTK_TZ => {
                 if !have_tz {
-                    return DTERR_BAD_FORMAT;
+                    return Ok(DTERR_BAD_FORMAT);
                 }
                 let mut tz = 0i32;
                 let dterr = DecodeTimezone(field[i], &mut tz);
                 if dterr != 0 {
-                    return dterr;
+                    return Ok(dterr);
                 }
                 tzv = tz;
                 tmask = DTK_M(TZ);
@@ -1721,21 +1722,21 @@ pub fn DecodeTimeOnly<'a>(
                 if ptype != 0 {
                     let r = strtoint(field[i]);
                     if r.erange {
-                        return DTERR_FIELD_OVERFLOW;
+                        return Ok(DTERR_FIELD_OVERFLOW);
                     }
                     let value = r.val;
                     let cp = r.end;
                     if cp < field[i].len() && field[i][cp] != b'.' {
-                        return DTERR_BAD_FORMAT;
+                        return Ok(DTERR_BAD_FORMAT);
                     }
 
                     match ptype {
                         DTK_JULIAN => {
                             if !have_tz {
-                                return DTERR_BAD_FORMAT;
+                                return Ok(DTERR_BAD_FORMAT);
                             }
                             if value < 0 {
-                                return DTERR_FIELD_OVERFLOW;
+                                return Ok(DTERR_FIELD_OVERFLOW);
                             }
                             tmask = DTK_DATE_M;
                             j2date(value, &mut tm.tm_year, &mut tm.tm_mon, &mut tm.tm_mday);
@@ -1745,7 +1746,7 @@ pub fn DecodeTimeOnly<'a>(
                                 let mut time = 0f64;
                                 let dterr = ParseFraction(&field[i][cp..], &mut time);
                                 if dterr != 0 {
-                                    return dterr;
+                                    return Ok(dterr);
                                 }
                                 time *= USECS_PER_DAY as f64;
                                 dt2time(
@@ -1769,14 +1770,14 @@ pub fn DecodeTimeOnly<'a>(
                                 &mut is2digits,
                             );
                             if dterr < 0 {
-                                return dterr;
+                                return Ok(dterr);
                             }
                             ftype[i] = dterr;
                             if tmask != DTK_TIME_M {
-                                return DTERR_BAD_FORMAT;
+                                return Ok(DTERR_BAD_FORMAT);
                             }
                         }
-                        _ => return DTERR_BAD_FORMAT,
+                        _ => return Ok(DTERR_BAD_FORMAT),
                     }
                     ptype = 0;
                     *dtype = DTK_DATE;
@@ -1790,7 +1791,7 @@ pub fn DecodeTimeOnly<'a>(
                             let dterr =
                                 DecodeDate(field[i], fmask, &mut tmask, &mut is2digits, tm);
                             if dterr != 0 {
-                                return dterr;
+                                return Ok(dterr);
                             }
                         } else if flen - (flen - d) > 2 {
                             let dterr = DecodeNumberField(
@@ -1803,11 +1804,11 @@ pub fn DecodeTimeOnly<'a>(
                                 &mut is2digits,
                             );
                             if dterr < 0 {
-                                return dterr;
+                                return Ok(dterr);
                             }
                             ftype[i] = dterr;
                         } else {
-                            return DTERR_BAD_FORMAT;
+                            return Ok(DTERR_BAD_FORMAT);
                         }
                     } else if flen > 4 {
                         let dterr = DecodeNumberField(
@@ -1820,7 +1821,7 @@ pub fn DecodeTimeOnly<'a>(
                             &mut is2digits,
                         );
                         if dterr < 0 {
-                            return dterr;
+                            return Ok(dterr);
                         }
                         ftype[i] = dterr;
                     } else {
@@ -1835,7 +1836,7 @@ pub fn DecodeTimeOnly<'a>(
                             &mut is2digits,
                         );
                         if dterr != 0 {
-                            return dterr;
+                            return Ok(dterr);
                         }
                     }
                 }
@@ -1846,9 +1847,9 @@ pub fn DecodeTimeOnly<'a>(
                 let mut val = 0;
                 let mut valtz: Option<&'static PgTz> = None;
                 let dterr =
-                    DecodeTimezoneAbbrev(i, field[i], &mut type_, &mut val, &mut valtz, extra);
+                    DecodeTimezoneAbbrev(i, field[i], &mut type_, &mut val, &mut valtz, extra)?;
                 if dterr != 0 {
-                    return dterr;
+                    return Ok(dterr);
                 }
                 if type_ == UNKNOWN_FIELD {
                     type_ = DecodeSpecial(i, field[i], &mut val);
@@ -1873,14 +1874,14 @@ pub fn DecodeTimeOnly<'a>(
                             tm.tm_sec = 0;
                             tm.tm_isdst = 0;
                         }
-                        _ => return DTERR_BAD_FORMAT,
+                        _ => return Ok(DTERR_BAD_FORMAT),
                     },
 
                     DTZMOD => {
                         tmask |= DTK_M(DTZ);
                         tm.tm_isdst = 1;
                         if !have_tz {
-                            return DTERR_BAD_FORMAT;
+                            return Ok(DTERR_BAD_FORMAT);
                         }
                         tzv -= val;
                     }
@@ -1889,7 +1890,7 @@ pub fn DecodeTimeOnly<'a>(
                         tmask |= DTK_M(TZ);
                         tm.tm_isdst = 1;
                         if !have_tz {
-                            return DTERR_BAD_FORMAT;
+                            return Ok(DTERR_BAD_FORMAT);
                         }
                         tzv = -val;
                         ftype[i] = DTK_TZ;
@@ -1898,7 +1899,7 @@ pub fn DecodeTimeOnly<'a>(
                     TZ => {
                         tm.tm_isdst = 0;
                         if !have_tz {
-                            return DTERR_BAD_FORMAT;
+                            return Ok(DTERR_BAD_FORMAT);
                         }
                         tzv = -val;
                         ftype[i] = DTK_TZ;
@@ -1907,7 +1908,7 @@ pub fn DecodeTimeOnly<'a>(
                     DYNTZ => {
                         tmask |= DTK_M(TZ);
                         if !have_tz {
-                            return DTERR_BAD_FORMAT;
+                            return Ok(DTERR_BAD_FORMAT);
                         }
                         abbrevTz = valtz;
                         abbrev = Some(field[i]);
@@ -1921,43 +1922,43 @@ pub fn DecodeTimeOnly<'a>(
                     UNITS | ISOTIME => {
                         tmask = 0;
                         if ptype != 0 {
-                            return DTERR_BAD_FORMAT;
+                            return Ok(DTERR_BAD_FORMAT);
                         }
                         ptype = val;
                     }
 
                     UNKNOWN_FIELD => {
-                        match tz::pg_tzset(field[i]) {
+                        match tz::pg_tzset(field[i])? {
                             Some(z) => namedTz = Some(z),
-                            None => return DTERR_BAD_FORMAT,
+                            None => return Ok(DTERR_BAD_FORMAT),
                         }
                         tmask = DTK_M(TZ);
                     }
 
-                    _ => return DTERR_BAD_FORMAT,
+                    _ => return Ok(DTERR_BAD_FORMAT),
                 }
             }
 
-            _ => return DTERR_BAD_FORMAT,
+            _ => return Ok(DTERR_BAD_FORMAT),
         }
 
         if tmask & fmask != 0 {
-            return DTERR_BAD_FORMAT;
+            return Ok(DTERR_BAD_FORMAT);
         }
         fmask |= tmask;
     }
 
     if ptype != 0 {
-        return DTERR_BAD_FORMAT;
+        return Ok(DTERR_BAD_FORMAT);
     }
 
     let dterr = ValidateDate(fmask, isjulian, is2digits, bc, tm);
     if dterr != 0 {
-        return dterr;
+        return Ok(dterr);
     }
 
     if mer != HR24 && tm.tm_hour > HOURS_PER_DAY / 2 {
-        return DTERR_FIELD_OVERFLOW;
+        return Ok(DTERR_FIELD_OVERFLOW);
     }
     if mer == AM && tm.tm_hour == HOURS_PER_DAY / 2 {
         tm.tm_hour = 0;
@@ -1966,17 +1967,17 @@ pub fn DecodeTimeOnly<'a>(
     }
 
     if time_overflows(tm.tm_hour, tm.tm_min, tm.tm_sec, *fsec) {
-        return DTERR_FIELD_OVERFLOW;
+        return Ok(DTERR_FIELD_OVERFLOW);
     }
 
     if fmask & DTK_TIME_M != DTK_TIME_M {
-        return DTERR_BAD_FORMAT;
+        return Ok(DTERR_BAD_FORMAT);
     }
 
     // a full timezone spec may need the date to resolve DST status
     if let Some(z) = namedTz {
         if fmask & DTK_M(DTZMOD) != 0 {
-            return DTERR_BAD_FORMAT;
+            return Ok(DTERR_BAD_FORMAT);
         }
         let mut gmtoff = 0i64;
         if tz::pg_get_timezone_offset(z, &mut gmtoff) {
@@ -1985,7 +1986,7 @@ pub fn DecodeTimeOnly<'a>(
         } else {
             // a date has to be specified
             if fmask & DTK_DATE_M != DTK_DATE_M {
-                return DTERR_BAD_FORMAT;
+                return Ok(DTERR_BAD_FORMAT);
             }
             tzv = DetermineTimeZoneOffset(tm, z);
         }
@@ -1994,13 +1995,13 @@ pub fn DecodeTimeOnly<'a>(
     if let Some(z) = abbrevTz {
         let mut tt = pg_tm::default();
         if fmask & DTK_M(DTZMOD) != 0 {
-            return DTERR_BAD_FORMAT;
+            return Ok(DTERR_BAD_FORMAT);
         }
         if fmask & DTK_DATE_M == 0 {
             tz::GetCurrentDateTime(&mut tt);
         } else {
             if fmask & DTK_DATE_M != DTK_DATE_M {
-                return DTERR_BAD_FORMAT;
+                return Ok(DTERR_BAD_FORMAT);
             }
             tt.tm_year = tm.tm_year;
             tt.tm_mon = tm.tm_mon;
@@ -2017,13 +2018,13 @@ pub fn DecodeTimeOnly<'a>(
     if have_tz && fmask & DTK_M(TZ) == 0 {
         let mut tt = pg_tm::default();
         if fmask & DTK_M(DTZMOD) != 0 {
-            return DTERR_BAD_FORMAT;
+            return Ok(DTERR_BAD_FORMAT);
         }
         if fmask & DTK_DATE_M == 0 {
             tz::GetCurrentDateTime(&mut tt);
         } else {
             if fmask & DTK_DATE_M != DTK_DATE_M {
-                return DTERR_BAD_FORMAT;
+                return Ok(DTERR_BAD_FORMAT);
             }
             tt.tm_year = tm.tm_year;
             tt.tm_mon = tm.tm_mon;
@@ -2042,7 +2043,7 @@ pub fn DecodeTimeOnly<'a>(
     if let Some(p) = tzp {
         *p = tzv;
     }
-    0
+    Ok(0)
 }
 
 #[inline]
