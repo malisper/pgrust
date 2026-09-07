@@ -53,10 +53,10 @@ impl VarStrXfrmState {
         self.last_valid = true;
 
         let bsize = if self.locale.pg_strnxfrm_prefix_enabled() {
-            self.locale.pg_strnxfrm_prefix(&mut self.buf2[..MAX_PREFIX_BYTES], data)
+            sort_key_or_unwind(self.locale.pg_strnxfrm_prefix(&mut self.buf2[..MAX_PREFIX_BYTES], data))
         } else {
             loop {
-                let bsize = self.locale.pg_strnxfrm(&mut self.buf2[..], data);
+                let bsize = sort_key_or_unwind(self.locale.pg_strnxfrm(&mut self.buf2[..], data));
                 if bsize < self.buf2.len() {
                     break bsize;
                 }
@@ -68,6 +68,17 @@ impl VarStrXfrmState {
         prefix[..n].copy_from_slice(&self.buf2[..n]);
         self.inner.record(data, u64::from_ne_bytes(prefix));
         u64::from_be_bytes(prefix)
+    }
+}
+
+// The abbreviation converter sits under the infallible tuplesort plumbing
+// (as ssup::shim_cmp): C's ereport(ERROR) out of strnxfrm_prefix_icu /
+// strnxfrm_icu (pg_locale_icu.c:562, :838-848) unwinds here as a PgError
+// panic so the original error surfaces verbatim.
+fn sort_key_or_unwind(r: ::types_error::PgResult<usize>) -> usize {
+    match r {
+        Ok(n) => n,
+        Err(e) => std::panic::panic_any(e),
     }
 }
 

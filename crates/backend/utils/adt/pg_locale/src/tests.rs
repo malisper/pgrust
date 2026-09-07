@@ -168,8 +168,8 @@ fn init_database_collation_libc_noncc_builds_collator() {
     assert!(l.is_default && l.deterministic);
     assert!(!l.collate_is_c && !l.ctype_is_c);
     // en_US.UTF-8 strcoll: case-insensitive-ish primary weights, unlike memcmp.
-    assert!(l.pg_strncoll(b"apple", b"Banana") < 0);
-    assert!(l.pg_strncoll(b"a", b"a") == 0);
+    assert!(l.pg_strncoll(b"apple", b"Banana").unwrap() < 0);
+    assert!(l.pg_strncoll(b"a", b"a").unwrap() == 0);
 }
 
 #[test]
@@ -452,7 +452,7 @@ fn varstr_cmp_locale_with(locale: &PgLocale, arg1: &[u8], arg2: &[u8]) -> i32 {
     if arg1 == arg2 {
         return 0;
     }
-    let result = locale.pg_strncoll(arg1, arg2);
+    let result = locale.pg_strncoll(arg1, arg2).unwrap();
     if result == 0 && locale.deterministic {
         return varlena::varstrfastcmp_c(arg1, arg2);
     }
@@ -557,4 +557,66 @@ fn c_locale_case_mapping_is_ascii_without_libc() {
     let mut exact = [0xAAu8; 5];
     assert_eq!(pg_strlower(mcx, &mut exact, b"ABCDE", &C_LOCALE).unwrap(), 5);
     assert_eq!(exact, *b"abcde");
+}
+
+// pg_locale_icu.c:838-848 (init_icu_converter): a database encoding without
+// an ICU converter name is ereport(ERROR) 0A000 "encoding \"%s\" not
+// supported by ICU", and a failing ucnv_open is XX000 "could not open ICU
+// converter for encoding \"%s\": %s"; the non-UTF-8 strncoll / strnxfrm /
+// strnxfrm_prefix arms propagate them (the port unwrapped them with panic!).
+// SQL_ASCII has no ICU converter name (pg_enc2icu_tbl), so it reaches the
+// first arm without touching the collator.
+#[test]
+fn icu_converter_failure_is_a_pg_error() {
+    mbutils::SetDatabaseEncoding(0).unwrap(); // PG_SQL_ASCII
+    let locale = PgLocale {
+        provider: COLLPROVIDER_ICU,
+        deterministic: true,
+        collate_is_c: false,
+        ctype_is_c: false,
+        is_default: false,
+        builtin_locale: None,
+        builtin_casemap_full: false,
+        lt: libc_locale::LibcLocale::NONE,
+        icu: crate::icu::IcuLocale::null_collator(false),
+    };
+    let expect = |err: Box<PgError>| {
+        assert_eq!(err.message(), "encoding \"SQL_ASCII\" not supported by ICU");
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+    };
+    expect(locale.pg_strncoll(b"a", b"b").unwrap_err());
+    let mut dest = [0u8; 32];
+    expect(locale.pg_strnxfrm(&mut dest, b"a").unwrap_err());
+    expect(locale.pg_strnxfrm_prefix(&mut dest, b"a").unwrap_err());
+    mbutils::SetDatabaseEncoding(6).unwrap();
+}
+
+// pg_locale_icu.c:838-848 (init_icu_converter): a database encoding without
+// an ICU converter name is ereport(ERROR) 0A000 "encoding \"%s\" not
+// supported by ICU" (and a failing ucnv_open XX000 "could not open ICU
+// converter for encoding \"%s\": %s"); the non-UTF-8 strncoll / strnxfrm /
+// strnxfrm_prefix arms must report it, never panic. SQL_ASCII has no ICU
+// converter name (pg_enc2icu_tbl), so it reaches the arm without a collator.
+#[test]
+fn icu_converter_failure_does_not_panic() {
+    mbutils::SetDatabaseEncoding(0).unwrap(); // PG_SQL_ASCII
+    let locale = PgLocale {
+        provider: COLLPROVIDER_ICU,
+        deterministic: true,
+        collate_is_c: false,
+        ctype_is_c: false,
+        is_default: false,
+        builtin_locale: None,
+        builtin_casemap_full: false,
+        lt: libc_locale::LibcLocale::NONE,
+        icu: crate::icu::IcuLocale::null_collator(false),
+    };
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut dest = [0u8; 32];
+        let _ = locale.pg_strncoll(b"a", b"b");
+        let _ = locale.pg_strnxfrm(&mut dest, b"a");
+        let _ = locale.pg_strnxfrm_prefix(&mut dest, b"a");
+    }));
+    mbutils::SetDatabaseEncoding(6).unwrap();
+    assert!(r.is_ok(), "an ICU converter failure panicked instead of being reported");
 }

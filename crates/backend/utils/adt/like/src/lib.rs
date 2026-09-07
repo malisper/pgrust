@@ -241,7 +241,7 @@ fn match_text<M: MatchMode>(mut t: &[u8], mut p: &[u8], locale: &PgLocale) -> Pg
             };
 
             if p1.is_empty() {
-                return Ok(if locale.pg_strncoll(subpat, t) == 0 {
+                return Ok(if locale.pg_strncoll(subpat, t)? == 0 {
                     LIKE_TRUE
                 } else {
                     LIKE_FALSE
@@ -251,7 +251,7 @@ fn match_text<M: MatchMode>(mut t: &[u8], mut p: &[u8], locale: &PgLocale) -> Pg
             let mut t1 = t;
             loop {
                 postgres_seams::check_for_interrupts::call()?;
-                if locale.pg_strncoll(subpat, &t[..t.len() - t1.len()]) == 0 {
+                if locale.pg_strncoll(subpat, &t[..t.len() - t1.len()])? == 0 {
                     let matched = match_text::<M>(t1, p1, locale)?;
                     if matched == LIKE_TRUE {
                         return Ok(matched);

@@ -324,6 +324,76 @@ pub(crate) fn LogicalSlotAdvanceAndCheckSnapState(
     }
 }
 
+// LogicalReplicationSlotHasPendingWal (logical.c:2070): decodes the acquired
+// slot's WAL in fast_forward mode from restart_lsn up to end_of_wal and
+// reports whether any decodable change (processing_required) is still
+// pending after confirmed_flush. C keeps this in logical.c; it lives here for
+// the same reason as LogicalSlotAdvanceAndCheckSnapState (the record loop
+// drives logical_decode). Consumer: binary_upgrade_logical_slot_has_caught_up.
+pub fn LogicalReplicationSlotHasPendingWal(end_of_wal: XLogRecPtr) -> PgResult<bool> {
+    let slot = slot::MyReplicationSlot()
+        .expect("LogicalReplicationSlotHasPendingWal: no acquired slot");
+    let mut has_pending_wal = false;
+
+    let attempt: PgResult<()> = (|| {
+        // Create our decoding context in fast_forward mode, passing start_lsn
+        // as InvalidXLogRecPtr, so that we start processing from the slot's
+        // confirmed_flush.
+        let mut ctx = logical::CreateDecodingContext(
+            InvalidXLogRecPtr,
+            Vec::new(),
+            true,
+            None,
+            None,
+            None,
+        )?;
+
+        // Start reading at the slot's restart_lsn, which we know points to a
+        // valid record.
+        ctx.reader.XLogBeginRead(unsafe { slot.data.get() }.restart_lsn);
+
+        // Invalidate non-timetravel entries.
+        inval::local::InvalidateSystemCaches()?;
+
+        // read_local_xlog_page: wait for WAL up to the flush pointer.
+        let mut routine = LocalPageRead { wait_for_wal: true };
+
+        // Loop until the end of WAL or some changes are processed.
+        while !has_pending_wal && ctx.reader.v.EndRecPtr < end_of_wal {
+            let record = ctx.reader.XLogReadRecord(&mut routine)?;
+            if record.is_none() {
+                if let Some(err) = ctx.reader.errormsg() {
+                    elog(
+                        ERROR,
+                        format!("could not find record for logical decoding: {err}"),
+                    )?;
+                    unreachable!("elog(ERROR) returns Err");
+                }
+            } else {
+                logical_decode::LogicalDecodingProcessRecord(&mut ctx)?;
+            }
+
+            has_pending_wal = ctx.processing_required;
+
+            cfi()?;
+        }
+
+        // Clean up.
+        ctx.free()?;
+        inval::local::InvalidateSystemCaches()?;
+        Ok(())
+    })();
+
+    match attempt {
+        Ok(()) => Ok(has_pending_wal),
+        Err(e) => {
+            // PG_CATCH: clear all timetravel entries, then re-throw.
+            inval::local::InvalidateSystemCaches()?;
+            Err(e)
+        }
+    }
+}
+
 // Result of copy_replication_slot: the tuple-building caller (builtins.rs)
 // reads the destination's name/confirmed_flush off MyReplicationSlot() itself
 // (still acquired on return), matching C's post-call values[] fill.

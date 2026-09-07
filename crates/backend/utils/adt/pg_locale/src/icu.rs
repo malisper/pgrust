@@ -28,6 +28,14 @@ impl IcuLocale {
         utf8: false,
     };
 
+    // Test seam: an ICU locale with no collator in the given database-encoding
+    // arm. Only the converter arms (reached before the collator) may be
+    // exercised through it: `ucol()` debug-asserts an opened collator.
+    #[cfg(test)]
+    pub(crate) const fn null_collator(utf8: bool) -> IcuLocale {
+        IcuLocale { ucol: 0, loc: None, utf8 }
+    }
+
     #[inline]
     fn ucol(self) -> *const core::ffi::c_void {
         debug_assert!(self.ucol != 0, "ICU op on an unopened collator");
@@ -55,16 +63,20 @@ fn errname(api: &IcuApi, status: UErrorCode) -> String {
     ffi::u_errorName_str(api, status)
 }
 
-// pg_locale_icu.c:488-489 strncoll_icu_utf8: an ICU failure status is
-// ereport(ERROR, errmsg("collation failed: %s", u_errorName(status))) — the
-// ereport default SQLSTATE XX000. The comparator lanes (varstr_cmp, sort
-// support, btree) return i32, so the error rides the tree's PgError-payload
-// unwind channel, recovered by pg_error_from_panic at the statement boundary
-// (tuplesort's shim_cmp is the precedent).
+// pg_locale_icu.c:489 (strncoll_icu_utf8): ereport(ERROR, errmsg("collation
+// failed: %s", u_errorName(status))) — the ereport default SQLSTATE XX000.
 #[cold]
 #[inline(never)]
-fn collation_failed(api: &IcuApi, status: UErrorCode) -> ! {
-    std::panic::panic_any(icu_error(format!("collation failed: {}", errname(api, status))))
+fn collation_failed(api: &IcuApi, status: UErrorCode) -> Box<PgError> {
+    icu_error(format!("collation failed: {}", errname(api, status)))
+}
+
+// pg_locale_icu.c:562 (strnxfrm_prefix_icu_utf8) / :603 (strnxfrm_prefix_icu):
+// ereport(ERROR, errmsg("sort key generation failed: %s", u_errorName(status))).
+#[cold]
+#[inline(never)]
+fn sort_key_generation_failed(api: &IcuApi, status: UErrorCode) -> Box<PgError> {
+    icu_error(format!("sort key generation failed: {}", errname(api, status)))
 }
 
 // pg_enc2icu_tbl (encnames.c); None entries are not supported by ICU.
@@ -274,9 +286,10 @@ pub(crate) fn create_icu_locale(
     })
 }
 
-/// strncoll_icu_utf8 / strncoll_icu. ICU failures are C ereport(ERROR)s on
-/// can't-happen inputs (server-validated encoding); loud here.
-pub(crate) fn strncoll(arg1: &[u8], arg2: &[u8], locale: IcuLocale) -> i32 {
+/// strncoll_icu_utf8 / strncoll_icu. ICU failures are C ereport(ERROR)s
+/// (pg_locale_icu.c:489 "collation failed", :838-848 init_icu_converter):
+/// catchable PgErrors, propagated to the comparator lanes.
+pub(crate) fn strncoll(arg1: &[u8], arg2: &[u8], locale: IcuLocale) -> PgResult<i32> {
     let api = ffi::icu();
     if locale.utf8 {
         let mut status = ffi::U_ZERO_ERROR;
@@ -292,23 +305,18 @@ pub(crate) fn strncoll(arg1: &[u8], arg2: &[u8], locale: IcuLocale) -> i32 {
             )
         };
         if ffi::U_FAILURE(status) {
-            collation_failed(api, status);
+            return Err(collation_failed(api, status));
         }
-        return result;
+        return Ok(result);
     }
-    let conv = match init_icu_converter() {
-        Ok(c) => c,
-        Err(e) => panic!("pg_locale_icu strncoll: {e:?}"),
-    };
-    UBUF1.with(|c1| {
-        UBUF2.with(|c2| {
+    let conv = init_icu_converter()?;
+    UBUF1.with(|c1| -> PgResult<i32> {
+        UBUF2.with(|c2| -> PgResult<i32> {
             let (mut b1, mut b2) = (c1.borrow_mut(), c2.borrow_mut());
-            let ulen1 = to_uchars(api, conv, &mut b1, arg1)
-                .unwrap_or_else(|e| panic!("pg_locale_icu strncoll: {e:?}"));
-            let ulen2 = to_uchars(api, conv, &mut b2, arg2)
-                .unwrap_or_else(|e| panic!("pg_locale_icu strncoll: {e:?}"));
+            let ulen1 = to_uchars(api, conv, &mut b1, arg1)?;
+            let ulen2 = to_uchars(api, conv, &mut b2, arg2)?;
             // SAFETY: both buffers hold ulen+1 terminated UChars.
-            unsafe {
+            Ok(unsafe {
                 (api.ucol_strcoll)(
                     locale.ucol() as *const ffi::UCollator,
                     b1.as_ptr(),
@@ -316,23 +324,20 @@ pub(crate) fn strncoll(arg1: &[u8], arg2: &[u8], locale: IcuLocale) -> i32 {
                     b2.as_ptr(),
                     ulen2,
                 )
-            }
+            })
         })
     })
 }
 
 /// strnxfrm_icu: returns the sort-key size excluding its NUL; dest content is
-/// valid only when the result fits (result < dest.len()).
-pub(crate) fn strnxfrm(dest: &mut [u8], src: &[u8], locale: IcuLocale) -> usize {
+/// valid only when the result fits (result < dest.len()). The converter
+/// failures are C ereport(ERROR)s (pg_locale_icu.c:838-848), propagated.
+pub(crate) fn strnxfrm(dest: &mut [u8], src: &[u8], locale: IcuLocale) -> PgResult<usize> {
     let api = ffi::icu();
-    let conv = match init_icu_converter() {
-        Ok(c) => c,
-        Err(e) => panic!("pg_locale_icu strnxfrm: {e:?}"),
-    };
-    UBUF1.with(|c1| {
+    let conv = init_icu_converter()?;
+    UBUF1.with(|c1| -> PgResult<usize> {
         let mut b1 = c1.borrow_mut();
-        let ulen = to_uchars(api, conv, &mut b1, src)
-            .unwrap_or_else(|e| panic!("pg_locale_icu strnxfrm: {e:?}"));
+        let ulen = to_uchars(api, conv, &mut b1, src)?;
         // SAFETY: b1 holds ulen terminated UChars; getSortKey writes at most
         // dest.len() bytes.
         let result_bsize = unsafe {
@@ -346,12 +351,15 @@ pub(crate) fn strnxfrm(dest: &mut [u8], src: &[u8], locale: IcuLocale) -> usize 
         };
         debug_assert!(result_bsize > 0);
         // ucol_getSortKey counts the NUL terminator; pg_strnxfrm does not.
-        (result_bsize - 1) as usize
+        Ok((result_bsize - 1) as usize)
     })
 }
 
-/// strnxfrm_prefix_icu(_utf8): state-machine prefix of the sort key.
-pub(crate) fn strnxfrm_prefix(dest: &mut [u8], src: &[u8], locale: IcuLocale) -> usize {
+/// strnxfrm_prefix_icu(_utf8): state-machine prefix of the sort key. A
+/// failing ucol_nextSortKeyPart is ereport(ERROR) "sort key generation
+/// failed: %s" (pg_locale_icu.c:562 / :603), the converter failures are
+/// pg_locale_icu.c:838-848 — catchable PgErrors, never a panic.
+pub(crate) fn strnxfrm_prefix(dest: &mut [u8], src: &[u8], locale: IcuLocale) -> PgResult<usize> {
     let api = ffi::icu();
     let mut iter = UCharIterator::zeroed();
     let mut state = [0u32; 2];
@@ -371,16 +379,12 @@ pub(crate) fn strnxfrm_prefix(dest: &mut [u8], src: &[u8], locale: IcuLocale) ->
             )
         }
     } else {
-        let conv = match init_icu_converter() {
-            Ok(c) => c,
-            Err(e) => panic!("pg_locale_icu strnxfrm_prefix: {e:?}"),
-        };
-        UBUF1.with(|c1| {
+        let conv = init_icu_converter()?;
+        UBUF1.with(|c1| -> PgResult<i32> {
             let mut b1 = c1.borrow_mut();
-            let ulen = to_uchars(api, conv, &mut b1, src)
-                .unwrap_or_else(|e| panic!("pg_locale_icu strnxfrm_prefix: {e:?}"));
+            let ulen = to_uchars(api, conv, &mut b1, src)?;
             // SAFETY: as the UTF-8 arm, over the converted UChar buffer.
-            unsafe {
+            Ok(unsafe {
                 (api.uiter_setString)(&mut iter, b1.as_ptr(), ulen);
                 (api.ucol_nextSortKeyPart)(
                     locale.ucol() as *const ffi::UCollator,
@@ -390,13 +394,13 @@ pub(crate) fn strnxfrm_prefix(dest: &mut [u8], src: &[u8], locale: IcuLocale) ->
                     dest.len() as i32,
                     &mut status,
                 )
-            }
-        })
+            })
+        })?
     };
     if ffi::U_FAILURE(status) {
-        panic!("sort key generation failed: {}", errname(api, status));
+        return Err(sort_key_generation_failed(api, status));
     }
-    result as usize
+    Ok(result as usize)
 }
 
 type CaseKind = u8;
@@ -775,18 +779,39 @@ pub fn icu_locale_display_name_ascii(localename: &str) -> Option<String> {
 }
 
 #[cfg(test)]
+mod failure_arm_tests {
+    use super::*;
+
+    // ICU has no failure injection over valid input and `ucol()` refuses an
+    // unopened collator, so the two ereport arms are exercised on their error
+    // constructors with U_ILLEGAL_ARGUMENT_ERROR (1): the C message bytes and
+    // the ereport default SQLSTATE XX000, as PgErrors the PgResult lanes
+    // return (never a panic).
+    #[test]
+    fn strnxfrm_prefix_failure_is_c_message_and_sqlstate() {
+        let api = ffi::icu();
+        const U_ILLEGAL_ARGUMENT_ERROR: UErrorCode = 1;
+        let err = sort_key_generation_failed(api, U_ILLEGAL_ARGUMENT_ERROR);
+        assert_eq!(err.message(), "sort key generation failed: U_ILLEGAL_ARGUMENT_ERROR");
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        let err = collation_failed(api, U_ILLEGAL_ARGUMENT_ERROR);
+        assert_eq!(err.message(), "collation failed: U_ILLEGAL_ARGUMENT_ERROR");
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    }
+}
+
+#[cfg(test)]
 mod collation_failed_tests {
     use super::*;
 
     // pg_locale_icu.c:488-489: the failure arm of strncoll_icu_utf8 is an
     // ereport(ERROR) whose message is "collation failed: <u_errorName>" and
     // whose SQLSTATE is the ereport default XX000 -- a structured error the
-    // backend reports as such, never an unstructured panic. The comparator
-    // lanes (varstr_cmp, sort support, btree) return i32, so the error rides
-    // the tree's PgError-payload unwind channel (recovered by
-    // pg_error_from_panic at the statement boundary; tuplesort's shim_cmp is
-    // the precedent). ICU itself has no failure injection over valid UTF-8,
-    // so the arm is exercised directly with U_ILLEGAL_ARGUMENT_ERROR (1)
+    // backend reports as such, never an unstructured panic. strncoll returns
+    // PgResult, so the arm is Err(collation_failed(..)) and the tuplesort
+    // boundary (ssup::varstrfastcmp_locale, as shim_cmp) unwinds it. ICU
+    // itself has no failure injection over valid UTF-8, so the arm is
+    // exercised directly with U_ILLEGAL_ARGUMENT_ERROR (1)
     // (row a186-candidate-fp-adt-pg_locale_icu-7c9a51ca5e5bda654367-1).
     #[test]
     fn icu_collation_failure_is_structured_internal_error() {
@@ -794,13 +819,7 @@ mod collation_failed_tests {
             return; // no loadable libicu: the C-without---with-icu arm
         };
         const U_ILLEGAL_ARGUMENT_ERROR: UErrorCode = 1;
-        // unwind-ok: test witness
-        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            collation_failed(api, U_ILLEGAL_ARGUMENT_ERROR)
-        }));
-        let payload = r.expect_err("collation_failed never returns");
-        let err = types_error::pg_error_from_panic(payload)
-            .unwrap_or_else(|_| panic!("expected a structured PgError, got an unstructured panic"));
+        let err = collation_failed(api, U_ILLEGAL_ARGUMENT_ERROR);
         assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
         assert_eq!(
             err.message(),

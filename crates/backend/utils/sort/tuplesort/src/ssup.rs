@@ -332,7 +332,14 @@ fn varstrfastcmp_locale(a1: &[u8], a2: &[u8], locale: &pg_locale::PgLocale, bpch
     } else {
         (a1, a2)
     };
-    let result = locale.pg_strncoll(a1, a2);
+    let result = match locale.pg_strncoll(a1, a2) {
+        Ok(r) => r,
+        // As shim_cmp: the comparator sits under infallible qsort plumbing;
+        // C's ereport(ERROR) out of strncoll_icu (pg_locale_icu.c:489,
+        // :838-848) unwinds here as a PgError panic so the original error
+        // surfaces verbatim.
+        Err(e) => std::panic::panic_any(e),
+    };
     if result == 0 && locale.deterministic {
         return varlena::varstrfastcmp_c(a1, a2);
     }

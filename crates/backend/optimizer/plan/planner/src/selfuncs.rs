@@ -854,7 +854,7 @@ pub(crate) fn ineq_histogram_selectivity<'mcx>(
                 bin_val(i - 1)?,
                 bin_val(i)?,
                 vardata.vartype,
-            ) {
+            )? {
                 Some((val, low, high)) => {
                     if high <= low {
                         0.5
@@ -914,7 +914,7 @@ fn convert_to_scalar(
     lobound: Datum,
     hibound: Datum,
     boundstypid: Oid,
-) -> Option<(f64, f64, f64)> {
+) -> PgResult<Option<(f64, f64, f64)>> {
     const CHAROID: Oid = 18;
     const NAMEOID: Oid = 19;
     const TEXTOID: Oid = 25;
@@ -926,37 +926,61 @@ fn convert_to_scalar(
     const MACADDR8OID: Oid = 774;
     match valuetypid {
         CHAROID | BPCHAROID | VARCHAROID | TEXTOID | NAMEOID => {
-            let val = convert_string_datum(mcx, value, valuetypid, collid)?;
-            let lostr = convert_string_datum(mcx, lobound, boundstypid, collid)?;
-            let histr = convert_string_datum(mcx, hibound, boundstypid, collid)?;
-            Some(convert_string_to_scalar(val, lostr, histr))
+            // pg_strxfrm's ICU failures are ereport(ERROR)s (pg_locale_icu.c),
+            // propagated; an unconvertible datum is C's NULL -> no estimate.
+            let (Some(val), Some(lostr), Some(histr)) = (
+                convert_string_datum(mcx, value, valuetypid, collid)?,
+                convert_string_datum(mcx, lobound, boundstypid, collid)?,
+                convert_string_datum(mcx, hibound, boundstypid, collid)?,
+            ) else {
+                return Ok(None);
+            };
+            Ok(Some(convert_string_to_scalar(val, lostr, histr)))
         }
         BYTEAOID => {
             if boundstypid != BYTEAOID {
-                return None;
+                return Ok(None);
             }
-            Some(convert_bytea_to_scalar(value, lobound, hibound))
+            Ok(Some(convert_bytea_to_scalar(value, lobound, hibound)))
         }
         // Built-in network types (selfuncs.c:4713-4716): inet, cidr,
         // macaddr and macaddr8 all interpolate through
         // convert_network_to_scalar.
         INETOID | CIDROID | MACADDROID | MACADDR8OID => {
-            let v = convert_network_to_scalar(value, valuetypid)?;
-            let lo = convert_network_to_scalar(lobound, boundstypid)?;
-            let hi = convert_network_to_scalar(hibound, boundstypid)?;
-            Some((v, lo, hi))
+            let Some(v) = convert_network_to_scalar(value, valuetypid) else {
+                return Ok(None);
+            };
+            let Some(lo) = convert_network_to_scalar(lobound, boundstypid) else {
+                return Ok(None);
+            };
+            let Some(hi) = convert_network_to_scalar(hibound, boundstypid) else {
+                return Ok(None);
+            };
+            Ok(Some((v, lo, hi)))
         }
         TIMESTAMPOID | TIMESTAMPTZOID | DATEOID | INTERVALOID | TIMEOID | TIMETZOID => {
-            let v = convert_timevalue_to_scalar(value, valuetypid)?;
-            let lo = convert_timevalue_to_scalar(lobound, boundstypid)?;
-            let hi = convert_timevalue_to_scalar(hibound, boundstypid)?;
-            Some((v, lo, hi))
+            let Some(v) = convert_timevalue_to_scalar(value, valuetypid) else {
+                return Ok(None);
+            };
+            let Some(lo) = convert_timevalue_to_scalar(lobound, boundstypid) else {
+                return Ok(None);
+            };
+            let Some(hi) = convert_timevalue_to_scalar(hibound, boundstypid) else {
+                return Ok(None);
+            };
+            Ok(Some((v, lo, hi)))
         }
         _ => {
-            let v = convert_numeric_to_scalar(value, valuetypid)?;
-            let lo = convert_numeric_to_scalar(lobound, boundstypid)?;
-            let hi = convert_numeric_to_scalar(hibound, boundstypid)?;
-            Some((v, lo, hi))
+            let Some(v) = convert_numeric_to_scalar(value, valuetypid) else {
+                return Ok(None);
+            };
+            let Some(lo) = convert_numeric_to_scalar(lobound, boundstypid) else {
+                return Ok(None);
+            };
+            let Some(hi) = convert_numeric_to_scalar(hibound, boundstypid) else {
+                return Ok(None);
+            };
+            Ok(Some((v, lo, hi)))
         }
     }
 }
@@ -1058,7 +1082,7 @@ fn convert_string_datum<'mcx>(
     value: Datum,
     typid: Oid,
     collid: Oid,
-) -> Option<&'mcx [u8]> {
+) -> PgResult<Option<&'mcx [u8]>> {
     const CHAROID: Oid = 18;
     const NAMEOID: Oid = 19;
     const TEXTOID: Oid = 25;
@@ -1069,7 +1093,7 @@ fn convert_string_datum<'mcx>(
             // C builds a 2-byte cstring from the char datum; a single-byte
             // arena slice carries the same information.
             let b = [value.as_u8()];
-            mcx::slice_in(mcx, &b).ok()?.leak()
+            mcx::slice_in(mcx, &b)?.leak()
         }
         BPCHAROID | VARCHAROID | TEXTOID => varlena_datum_payload(value),
         NAMEOID => {
@@ -1082,29 +1106,28 @@ fn convert_string_datum<'mcx>(
             // SAFETY: `n` bytes readable per the loop above.
             unsafe { core::slice::from_raw_parts(p, n) }
         }
-        _ => return None,
+        _ => return Ok(None),
     };
     // upstream 5fd1c3f28718 (18.5): Avoid collation lookup failure when considering a "char" column.
     // No collation (the "char" type, in particular): act as though it is "C".
     if !types_core::OidIsValid(collid) {
-        return Some(bytes);
+        return Ok(Some(bytes));
     }
-    let locale = pg_locale::pg_newlocale_from_collation(collid)
-        .expect("convert_string_datum: collation lookup");
+    let locale = pg_locale::pg_newlocale_from_collation(collid)?;
     if !locale.collate_is_c {
         // C's two-call pattern: size with a NULL dest, allocate xfrmlen+1,
         // fill. glibc's second call may legitimately return a smaller value
         // than the first, hence <=. (C's WIN32 INT_MAX escape has no lane
         // here.) C treats the result as a NUL-terminated string afterwards,
         // so the slice ends at the reported length.
-        let xfrmlen = locale.pg_strnxfrm(&mut [], bytes);
+        let xfrmlen = locale.pg_strnxfrm(&mut [], bytes)?;
         let mut xfrm = mcx::PgVec::<u8>::new_in(mcx);
         xfrm.resize(xfrmlen + 1, 0);
-        let xfrmlen2 = locale.pg_strnxfrm(&mut xfrm, bytes);
+        let xfrmlen2 = locale.pg_strnxfrm(&mut xfrm, bytes)?;
         debug_assert!(xfrmlen2 <= xfrmlen);
-        return Some(&xfrm.leak()[..xfrmlen2]);
+        return Ok(Some(&xfrm.leak()[..xfrmlen2]));
     }
-    Some(bytes)
+    Ok(Some(bytes))
 }
 
 fn convert_string_to_scalar(value: &[u8], lobound: &[u8], hibound: &[u8]) -> (f64, f64, f64) {

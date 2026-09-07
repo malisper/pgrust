@@ -5,10 +5,7 @@
 use datum::Datum;
 use elog::{elog, ereport};
 use types_core::{InvalidXLogRecPtr, Oid, TEXTOID};
-use types_error::{
-    ErrorLocation, PgError, PgResult, ERRCODE_CANT_CHANGE_RUNTIME_PARAM,
-    ERRCODE_FEATURE_NOT_SUPPORTED, ERROR,
-};
+use types_error::{ErrorLocation, PgResult, ERRCODE_CANT_CHANGE_RUNTIME_PARAM, ERROR};
 use types_fmgr::{
     datum_varlena_packed, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction,
 };
@@ -174,16 +171,6 @@ pub fn fc_binary_upgrade_set_record_init_privs(
     Ok(Datum::from_usize(0))
 }
 
-#[track_caller]
-#[cold]
-#[inline(never)]
-fn upgrade_unported(name: &str) -> Box<PgError> {
-    Box::new(
-        PgError::error(format!("function {name} is not yet implemented"))
-            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
-    )
-}
-
 pub fn fc_binary_upgrade_set_missing_value(
     _fl: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
@@ -196,27 +183,95 @@ pub fn fc_binary_upgrade_set_missing_value(
     Ok(Datum::from_usize(0))
 }
 
+// binary_upgrade_logical_slot_has_caught_up (pg_upgrade_support.c:284):
+// true when no decodable WAL records remain after the slot's
+// confirmed_flush_lsn (the slot can be upgraded without data loss).
 pub fn fc_binary_upgrade_logical_slot_has_caught_up(
     _fl: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     check_is_binary_upgrade("binary_upgrade_logical_slot_has_caught_up")?;
-    let _ = fcinfo;
-    // unported: LogicalReplicationSlotHasPendingWal (replication/walsender.c).
-    Err(upgrade_unported("binary_upgrade_logical_slot_has_caught_up"))
+
+    // Binary upgrades only allow super-user connections so we must have
+    // permission to use replication slots (C: Assert(has_rolreplication)).
+
+    // SAFETY: catalog arg 0 is `name` (NAMEDATALEN block), non-null (strict).
+    let slot_name = unsafe { fcinfo.arg_name(0) };
+    let slot_name = name_cstr(slot_name);
+
+    // Acquire the given slot.
+    slot::ReplicationSlotAcquire(slot_name, true, true)?;
+
+    let my_slot = slot::MyReplicationSlot()
+        .expect("binary_upgrade_logical_slot_has_caught_up: slot not acquired");
+    debug_assert!(slot::SlotIsLogical(my_slot));
+    // Slots must be valid as otherwise we won't be able to scan the WAL.
+    debug_assert!(unsafe { my_slot.data.get() }.invalidated == slot::RS_INVAL_NONE);
+
+    let end_of_wal = transam_xlog::GetFlushRecPtr(None);
+    let found_pending_wal = slotfuncs::LogicalReplicationSlotHasPendingWal(end_of_wal)?;
+
+    // Clean up.
+    slot::ReplicationSlotRelease()?;
+
+    Ok(Datum::from_bool(!found_pending_wal))
 }
 
+// NameStr: the NUL-terminated prefix of a NAMEDATALEN block.
+fn name_cstr(n: &[u8; 64]) -> &str {
+    let len = n.iter().position(|&b| b == 0).unwrap_or(n.len());
+    core::str::from_utf8(&n[..len]).expect("pg_upgrade_support: name arg is UTF-8")
+}
+
+// binary_upgrade_replorigin_advance (pg_upgrade_support.c:368): update the
+// remote_lsn for the subscriber's replication origin.
 pub fn fc_binary_upgrade_replorigin_advance(
     _fl: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     check_is_binary_upgrade("binary_upgrade_replorigin_advance")?;
+
+    // We must ensure a non-NULL subscription name before dereferencing the
+    // arguments.
     if fcinfo.argisnull(0) {
         null_arg("binary_upgrade_replorigin_advance")?;
     }
-    // unported: ReplicationOriginNameForLogicalRep (commands/
-    // subscriptioncmds.c) / replorigin_by_name (replication/logical/origin.c).
-    Err(upgrade_unported("binary_upgrade_replorigin_advance"))
+
+    let subname = arg_str(fcinfo, 0)?;
+    let remote_commit = if fcinfo.argisnull(1) {
+        InvalidXLogRecPtr
+    } else {
+        fcinfo.arg_i64(1) as u64
+    };
+
+    let mcx = fcinfo.result_mcx();
+    let rel = table::table_open(mcx, pg_subscription::SubscriptionRelationId, RowExclusiveLock)?;
+    let subid = lsyscache::get_subscription_oid(subname, false)?;
+
+    // ReplicationOriginNameForLogicalRep(subid, InvalidOid) (worker.c):
+    // the subscription's own origin is "pg_%u".
+    let originname = format!("pg_{subid}");
+
+    // Lock to prevent the replication origin from vanishing.
+    lmgr::LockRelationOid(catalog::ReplicationOriginRelationId, RowExclusiveLock)?;
+    let node = origin::replorigin_by_name(&originname, false)?;
+
+    // The server will be stopped after setting up the objects in the new
+    // cluster and the origins will be flushed during the shutdown checkpoint.
+    // This will ensure that the latest LSN values for origin will be
+    // available after the upgrade.
+    origin::replorigin_advance(
+        node,
+        remote_commit,
+        InvalidXLogRecPtr,
+        false, /* backward */
+        false, /* WAL log */
+    )?;
+
+    lmgr::UnlockRelationOid(catalog::ReplicationOriginRelationId, RowExclusiveLock)?;
+    rel.close(RowExclusiveLock)?;
+
+    Ok(Datum::from_usize(0))
 }
 
 pub fn fc_binary_upgrade_add_sub_rel_state(

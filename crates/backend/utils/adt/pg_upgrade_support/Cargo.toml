@@ -33,3 +33,9 @@ catalog_index = { path = "../../../catalog/catalog_index" }
 aclchk = { path = "../../../catalog/aclchk" }
 user = { path = "../../../commands/user" }
 lsyscache = { path = "../../cache/lsyscache" }
+catalog = { path = "../../../catalog/catalog" }
+lmgr = { path = "../../../storage/lmgr/lmgr" }
+origin = { path = "../../../replication/origin" }
+slot = { path = "../../../replication/slot" }
+slotfuncs = { path = "../../../replication/slotfuncs" }
+transam_xlog = { path = "../../../access/transam/transam_xlog" }

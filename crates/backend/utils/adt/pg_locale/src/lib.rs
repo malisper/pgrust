@@ -80,10 +80,12 @@ pub static C_LOCALE: PgLocale = PgLocale {
 };
 
 impl PgLocale {
-    pub fn pg_strncoll(&self, arg1: &[u8], arg2: &[u8]) -> i32 {
+    // pg_strncoll (pg_locale.c): the ICU arm's failures are ereport(ERROR)s
+    // (pg_locale_icu.c:489, :838-848), propagated as PgErrors.
+    pub fn pg_strncoll(&self, arg1: &[u8], arg2: &[u8]) -> PgResult<i32> {
         debug_assert!(!self.collate_is_c, "pg_strncoll on a collate_is_c locale");
         if self.provider == COLLPROVIDER_LIBC {
-            libc_locale::strncoll_libc(arg1, arg2, self.lt)
+            Ok(libc_locale::strncoll_libc(arg1, arg2, self.lt))
         } else if self.provider == COLLPROVIDER_ICU {
             icu::strncoll(arg1, arg2, self.icu)
         } else {
@@ -100,10 +102,10 @@ impl PgLocale {
         self.provider == COLLPROVIDER_ICU
     }
 
-    pub fn pg_strnxfrm(&self, dest: &mut [u8], src: &[u8]) -> usize {
+    pub fn pg_strnxfrm(&self, dest: &mut [u8], src: &[u8]) -> PgResult<usize> {
         debug_assert!(!self.collate_is_c, "pg_strnxfrm on a collate_is_c locale");
         if self.provider == COLLPROVIDER_LIBC {
-            libc_locale::strnxfrm_libc(dest, src, self.lt)
+            Ok(libc_locale::strnxfrm_libc(dest, src, self.lt))
         } else if self.provider == COLLPROVIDER_ICU {
             icu::strnxfrm(dest, src, self.icu)
         } else {
@@ -119,7 +121,7 @@ impl PgLocale {
         self.provider == COLLPROVIDER_ICU
     }
 
-    pub fn pg_strnxfrm_prefix(&self, dest: &mut [u8], src: &[u8]) -> usize {
+    pub fn pg_strnxfrm_prefix(&self, dest: &mut [u8], src: &[u8]) -> PgResult<usize> {
         debug_assert!(self.provider == COLLPROVIDER_ICU, "strnxfrm_prefix is ICU-only");
         icu::strnxfrm_prefix(dest, src, self.icu)
     }
@@ -740,7 +742,7 @@ fn varstr_cmp_locale(collid: Oid, arg1: &[u8], arg2: &[u8]) -> PgResult<i32> {
     if arg1 == arg2 {
         return Ok(0);
     }
-    let result = locale.pg_strncoll(arg1, arg2);
+    let result = locale.pg_strncoll(arg1, arg2)?;
     if result == 0 && locale.deterministic {
         return Ok(varlena::varstrfastcmp_c(arg1, arg2));
     }
@@ -786,10 +788,10 @@ fn varstr_nondeterministic_hash(
     }
     XFRM_SCRATCH.with(|cell| {
         let mut buf = cell.borrow_mut();
-        let bsize = locale.pg_strnxfrm(&mut [], data);
+        let bsize = locale.pg_strnxfrm(&mut [], data)?;
         buf.clear();
         buf.resize(bsize + 1, 0);
-        let rsize = locale.pg_strnxfrm(&mut buf[..], data);
+        let rsize = locale.pg_strnxfrm(&mut buf[..], data)?;
         if rsize > bsize {
             return Err(PgError::error("pg_strnxfrm() returned unexpected result").into());
         }
