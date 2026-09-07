@@ -73,6 +73,9 @@ fn setup(tag: &str) -> std::path::PathBuf {
         fastpath_lock_groups_per_backend: 1,
     });
     lmgr_proc::bind_task_proc(0);
+    // The xlog side reads MyProcNumber for the same identity: XLogFlush's
+    // WaitXLogInsertionsToFinish PANICs without one (xlog.c:1516-1517).
+    g::SetMyProcNumber(0);
 
     let dir = std::env::temp_dir().join(format!("pgrust_catstor_{tag}_{}", std::process::id()));
     std::fs::create_dir_all(dir.join("base/5")).unwrap();

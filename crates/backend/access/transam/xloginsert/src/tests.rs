@@ -307,6 +307,9 @@ fn assemble_insert_decode_roundtrip() {
     }
     transam_xlog::ReadControlFile().unwrap();
     transam_xlog::XLOGShmemInit();
+    // XLogFlush needs a PGPROC: WaitXLogInsertionsToFinish PANICs "cannot
+    // wait without a PGPROC structure" otherwise (xlog.c:1516-1517).
+    init_small::globals::SetMyProcNumber(0);
 
     let end_of_log: XLogRecPtr = 2 * SEG as u64;
     let prev_rec: XLogRecPtr = SEG as u64 + 40;

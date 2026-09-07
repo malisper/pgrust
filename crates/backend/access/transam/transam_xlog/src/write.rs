@@ -814,9 +814,10 @@ pub(crate) fn XLogWrite(write_rqst: (XLogRecPtr, XLogRecPtr), tli: TimeLineID, f
     ctl.logWriteResult.store(lw_write, Release);
     ctl.logFlushResult.store(lw_flush, Release);
 
-    // Wake up walsenders once the new flush position is published so a woken
-    // sender reads the advanced LSN (C wakes after END_CRIT_SECTION).
-    WalSndWakeupProcessRequests(true, !crate::insert::RecoveryInProgress());
+    // C's XLogWrite only REQUESTS the walsender wakeup (xlog.c:2482/2554);
+    // XLogFlush and XLogBackgroundFlush process it after LWLockRelease
+    // (WALWriteLock) + END_CRIT_SECTION (2913/3088). AdvanceXLInsertBuffer's
+    // write leaves the request for the caller's next processing site.
     Ok(())
 }
 
@@ -953,6 +954,10 @@ pub fn XLogFlush(record: XLogRecPtr) -> PgResult<()> {
     init_small::globals::EndCriticalSection();
     loop_result?;
 
+    // xlog.c:2912-2913: wake up walsenders now that we've released heavily
+    // contended locks.
+    WalSndWakeupProcessRequests(true, !crate::insert::RecoveryInProgress());
+
     if LOGWRT_RESULT.get().1 < record {
         return Err(Box::new(PgError::new(
             ERROR,
@@ -1057,6 +1062,10 @@ pub fn XLogFlushPipelined(record: XLogRecPtr) -> PgResult<()> {
 
     init_small::globals::EndCriticalSection();
     loop_result?;
+
+    // xlog.c:2912-2913: wake up walsenders now that we've released heavily
+    // contended locks.
+    WalSndWakeupProcessRequests(true, !crate::insert::RecoveryInProgress());
 
     if LOGWRT_RESULT.get().1 < record {
         return Err(Box::new(PgError::new(

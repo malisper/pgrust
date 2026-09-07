@@ -110,6 +110,9 @@ fn invalidations_record_roundtrips_through_reader_desc_and_redo() {
     waitevent_seams::pgstat_report_wait_end::set(|| {});
     fd::InitFileAccess();
     lwlock::CreateLWLocks(false).unwrap();
+    // XLogFlush needs a PGPROC: WaitXLogInsertionsToFinish PANICs "cannot
+    // wait without a PGPROC structure" otherwise (xlog.c:1516-1517).
+    init_small::globals::SetMyProcNumber(0);
 
     write_control_file(&dir);
     transam_xlog::ReadControlFile().unwrap();

@@ -214,6 +214,15 @@ fn ReserveXLogSwitch() -> (bool, XLogRecPtr, XLogRecPtr, XLogRecPtr) {
 }
 
 pub(crate) fn WaitXLogInsertionsToFinish(upto: XLogRecPtr) -> XLogRecPtr {
+    // xlog.c:1516-1517: if (MyProc == NULL) elog(PANIC, ...) — the structured
+    // PANIC (log line + crash choreography), before any XLogCtl access.
+    if my_proc_number() == types_core::INVALID_PROC_NUMBER {
+        let _ = ereport(PANIC)
+            .errmsg("cannot wait without a PGPROC structure")
+            .finish(loc("WaitXLogInsertionsToFinish"));
+        unreachable!("ereport(PANIC) returned");
+    }
+
     let ctl = XLogCtl();
     let insert = &ctl.Insert;
 

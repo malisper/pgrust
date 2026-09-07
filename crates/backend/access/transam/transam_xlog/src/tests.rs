@@ -188,6 +188,10 @@ fn insert_flush_smoke() {
     waitevent_seams::pgstat_report_wait_end::set(|| {});
     fd::InitFileAccess();
     create_lwlocks_once();
+    // C: XLogFlush runs with MyProc set (WaitXLogInsertionsToFinish PANICs
+    // "cannot wait without a PGPROC structure" otherwise, xlog.c:1516-1517);
+    // this backend is proc 0 for the harness.
+    init_small::globals::SetMyProcNumber(0);
 
     let seg = 16 * 1024 * 1024;
     let redo = seg as u64 + SizeOfXLogLongPHD as u64;
@@ -336,9 +340,22 @@ fn insert_flush_smoke() {
     {
         use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
         static WAKEUPS: AtomicUsize = AtomicUsize::new(0);
+        // Audit a186-candidate-fp-transam-xlog-p1-3a18fce763f2c559db63-1:
+        // C processes the wakeup request in XLogFlush AFTER LWLockRelease
+        // (WALWriteLock) and END_CRIT_SECTION (xlog.c:2905-2913); XLogWrite
+        // only sets the flag (2482/2554). Count wakeups delivered while the
+        // flusher still holds WALWriteLock or is inside a critical section.
+        static WAKEUPS_UNDER_WAL_WRITE_LOCK: AtomicUsize = AtomicUsize::new(0);
+        static WAKEUPS_IN_CRIT_SECTION: AtomicUsize = AtomicUsize::new(0);
         static MWS: AtomicI32 = AtomicI32::new(10);
         walsender_seams::wal_snd_wakeup::set(|_, _| {
             WAKEUPS.fetch_add(1, Ordering::Relaxed);
+            if lwlock::LWLockHeldByMe(crate::ctl::WALWriteLock()) {
+                WAKEUPS_UNDER_WAL_WRITE_LOCK.fetch_add(1, Ordering::Relaxed);
+            }
+            if init_small::globals::CritSectionCount() > 0 {
+                WAKEUPS_IN_CRIT_SECTION.fetch_add(1, Ordering::Relaxed);
+            }
         });
         guc_tables::vars::max_wal_senders.install_if_absent(guc_tables::GucVarAccessors {
             get: || MWS.load(Ordering::Relaxed),
@@ -360,6 +377,16 @@ fn insert_flush_smoke() {
         assert!(
             WAKEUPS.load(Ordering::Relaxed) > before,
             "flush under open_datasync must still wake walsenders (xlog.c:2553)"
+        );
+        assert_eq!(
+            WAKEUPS_UNDER_WAL_WRITE_LOCK.load(Ordering::Relaxed),
+            0,
+            "walsender wakeups must be processed after WALWriteLock is released (xlog.c:2905-2913)"
+        );
+        assert_eq!(
+            WAKEUPS_IN_CRIT_SECTION.load(Ordering::Relaxed),
+            0,
+            "walsender wakeups must be processed after END_CRIT_SECTION (xlog.c:2910-2913)"
         );
         guc_tables::vars::wal_sync_method.write(saved_method);
     }
@@ -536,6 +563,8 @@ fn checkpoint_no_sync_seams_child() {
     crate::init_seams();
     fd::InitFileAccess();
     lwlock::CreateLWLocks(false).unwrap();
+    // The checkpoint's XLogFlush needs a PGPROC (xlog.c:1516-1517).
+    init_small::globals::SetMyProcNumber(0);
 
     let seg = 16 * 1024 * 1024;
     let redo = seg as u64 + SizeOfXLogLongPHD as u64;
@@ -601,6 +630,59 @@ fn checkpoint_without_sync_seams_is_loud() {
     assert!(
         text.contains("seam not installed: sync_seams::"),
         "must fail loudly at the sync seam, got: {text}"
+    );
+}
+
+// WaitXLogInsertionsToFinish (xlog.c:1516-1517): `if (MyProc == NULL)
+// elog(PANIC, "cannot wait without a PGPROC structure")` before any other
+// work. Runs as a child process: the PANIC unwinds PanicExitThread. Audit
+// a186-candidate-fp-transam-xlog-p1-06bad52eb57d336f184d-1.
+#[test]
+#[ignore = "child of wait_xlog_insertions_without_pgproc_is_a_panic"]
+fn wait_xlog_insertions_without_pgproc_child() {
+    use crate::ctl::XLOGShmemInit;
+
+    init_seams_once();
+    elog::init_seams();
+    fd::InitFileAccess();
+    create_lwlocks_once();
+    XLOGShmemInit();
+    assert_eq!(init_small::globals::MyProcNumber(), types_core::INVALID_PROC_NUMBER);
+
+    // Nothing has been inserted (logInsertResult == 0), so a request past it
+    // reaches the wait loop; C never gets that far without a PGPROC.
+    let r = std::panic::catch_unwind(|| crate::insert::WaitXLogInsertionsToFinish(1));
+    match r {
+        Err(payload) if payload.is::<types_error::PanicExitThread>() => std::process::exit(42),
+        _ => std::process::exit(0),
+    }
+}
+
+#[test]
+fn wait_xlog_insertions_without_pgproc_is_a_panic() {
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "tests::wait_xlog_insertions_without_pgproc_child",
+            "--exact",
+            "--ignored",
+            "--test-threads=1",
+            "--nocapture",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(42),
+        "WaitXLogInsertionsToFinish without a PGPROC must PANIC (xlog.c:1516-1517): {out:?}"
+    );
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        text.contains("PANIC:  cannot wait without a PGPROC structure"),
+        "missing the C PANIC report, got: {text}"
     );
 }
 
