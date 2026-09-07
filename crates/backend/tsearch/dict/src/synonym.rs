@@ -83,8 +83,55 @@ pub fn dsynonym_init(init: &DictInitData<'static>) -> PgResult<DictSyn> {
         let parsed = synonym_line(mcx, &line, case_sensitive, &mut syn);
         rd.with_context(parsed)?;
     }
-    syn.sort_unstable_by(|a, b| a.input.as_slice().cmp(b.input.as_slice()));
+    let syn = sort_syn(mcx, syn)?;
     Ok(DictSyn { syn, case_sensitive })
+}
+
+// dict_synonym.c:32 compareSyn: strcmp on the input word only.
+fn compare_syn(a: &Syn, b: &Syn) -> i32 {
+    match a.input.as_slice().cmp(b.input.as_slice()) {
+        core::cmp::Ordering::Less => -1,
+        core::cmp::Ordering::Equal => 0,
+        core::cmp::Ordering::Greater => 1,
+    }
+}
+
+// dict_synonym.c:202 qsort(d->syn, d->len, sizeof(Syn), compareSyn): qsort
+// is pg_qsort (port.h:479), whose equal-key output order is observable here
+// — a synonym file may list one input word several times and bsearch below
+// returns whichever of them the sort left at its probe. Sorting an index
+// permutation with the same comparator over the referenced rows performs
+// exactly the comparisons and swaps C performs on the Syn array itself, so
+// the permutation is C's.
+fn sort_syn(mcx: Mcx<'static>, syn: PgVec<'static, Syn>) -> PgResult<PgVec<'static, Syn>> {
+    let mut order: PgVec<'static, usize> = vec_with_capacity_in(mcx, syn.len())?;
+    order.extend(0..syn.len());
+    ::pg_qsort::pg_qsort(&mut order, |&a, &b| compare_syn(&syn[a], &syn[b]));
+    let mut slots: PgVec<'static, Option<Syn>> = PgVec::with_capacity_in(syn.len(), mcx);
+    slots.extend(syn.into_iter().map(Some));
+    let mut sorted: PgVec<'static, Syn> = PgVec::with_capacity_in(slots.len(), mcx);
+    for i in order.iter() {
+        // pg_qsort leaves a permutation of 0..n: every slot is taken once.
+        sorted.push(slots[*i].take().expect("pg_qsort output is a permutation"));
+    }
+    Ok(sorted)
+}
+
+// bsearch(3) (glibc stdlib/bsearch.c, the shape C 18.6 links): probe
+// (l + u) / 2 and return the FIRST equal element the probe sequence meets —
+// not the lowest or highest equal index. Rust's binary_search_by chooses
+// its probes and its equal-run landing point differently.
+fn c_bsearch(syn: &[Syn], key: &[u8]) -> Option<usize> {
+    let (mut l, mut u) = (0usize, syn.len());
+    while l < u {
+        let idx = (l + u) / 2;
+        match key.cmp(syn[idx].input.as_slice()) {
+            core::cmp::Ordering::Less => u = idx,
+            core::cmp::Ordering::Greater => l = idx + 1,
+            core::cmp::Ordering::Equal => return Some(idx),
+        }
+    }
+    None
 }
 
 // One dict_synonym.c:138-197 loop iteration.
@@ -128,8 +175,7 @@ pub(crate) fn load_synonyms(
     for line in lines.iter() {
         synonym_line(mcx, line, case_sensitive, &mut syn)?;
     }
-    syn.sort_unstable_by(|a, b| a.input.as_slice().cmp(b.input.as_slice()));
-    Ok(syn)
+    sort_syn(mcx, syn)
 }
 
 pub fn dsynonym_lexize<'mcx>(
@@ -147,7 +193,8 @@ pub fn dsynonym_lexize<'mcx>(
     } else {
         lowerstr(mcx, token)?
     };
-    let Ok(idx) = d.syn.binary_search_by(|s| s.input.as_slice().cmp(&key)) else {
+    // dict_synonym.c:230 bsearch(&key, d->syn, d->len, sizeof(Syn), compareSyn).
+    let Some(idx) = c_bsearch(&d.syn, &key) else {
         return Ok(None);
     };
     let found = &d.syn[idx];
