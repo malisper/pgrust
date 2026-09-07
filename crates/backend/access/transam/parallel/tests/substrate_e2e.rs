@@ -24,6 +24,22 @@ static NEXT_PID: AtomicI32 = AtomicI32::new(9000);
 
 // The CI cluster log filters captured test stdout; diagnostics ride the asserts.
 static WORKER_LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
+// parallel.c:115/121: ParallelWorkerNumber / InitializingParallelWorker die
+// with the C worker process. A pooled pgrust thread outlives its task, so a
+// worker thread that still answers IsParallelWorker() after its proc_exit
+// drain would carry the identity into the next task. Recorded per worker
+// thread after the drain; asserted empty by every test that launches workers.
+// Audit a186-candidate-fp-transam-parallel-14fa0aaec5455e4145da-1.
+static LEAKED_WORKER_IDENTITY: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn assert_no_leaked_worker_identity() {
+    let leaked = LEAKED_WORKER_IDENTITY.lock().unwrap_or_else(|e| e.into_inner());
+    assert!(
+        leaked.is_empty(),
+        "worker thread(s) kept their parallel identity past the task (parallel.c:115/121): {}",
+        leaked.join(" | ")
+    );
+}
 static BINDER_TARGET: Mutex<Option<Arc<parallel::ParallelShared>>> = Mutex::new(None);
 static BINDER_REFUSALS: Mutex<Vec<(Arc<parallel::ParallelShared>, &'static str)>> =
     Mutex::new(Vec::new());
@@ -754,6 +770,16 @@ fn launch_registered_workers() -> Vec<std::thread::JoinHandle<i32>> {
                 if let Some(code) = code {
                     let _ = ipc::run_deferred_exit_callbacks(code);
                 }
+                if parallel::IsParallelWorker() || parallel::InitializingParallelWorker() {
+                    LEAKED_WORKER_IDENTITY
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(format!(
+                            "worker {pid}: ParallelWorkerNumber={} InitializingParallelWorker={}",
+                            parallel::ParallelWorkerNumber(),
+                            parallel::InitializingParallelWorker()
+                        ));
+                }
                 if code.is_none() {
                     let msg = payload
                         .downcast_ref::<&str>()
@@ -885,6 +911,7 @@ fn substrate_happy_path_with_launch_fewer() {
     for j in joins {
         assert_eq!(j.join().unwrap(), 0);
     }
+    assert_no_leaked_worker_identity();
     assert!(!parallel::ParallelContextActive());
 }
 
@@ -921,6 +948,7 @@ fn worker_error_rethrows_with_c_shape() {
     for j in joins {
         assert_eq!(j.join().unwrap(), 1);
     }
+    assert_no_leaked_worker_identity();
 }
 
 #[test]
@@ -1026,6 +1054,7 @@ fn query_task_binder_restores_clean_helper_across_outcomes() {
     for join in joins {
         assert_eq!(join.join().unwrap(), 0);
     }
+    assert_no_leaked_worker_identity();
 }
 
 // parallel.c:242-246: InitializeParallelDSM launches nothing while

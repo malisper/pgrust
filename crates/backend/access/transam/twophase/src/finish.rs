@@ -145,23 +145,12 @@ pub fn FinishPreparedTransaction(gid: &str, is_commit: bool) -> PgResult<()> {
         }
     }
 
-    // Hold TwoPhaseStateLock across the callbacks so a concurrent reuse of the
-    // same GID can't collide; release after the shared state is cleared.
-    lock_twophase_state(LW_EXCLUSIVE);
-
     let callbacks = if is_commit {
         &twophase_rmgr::twophase_postcommit_callbacks
     } else {
         &twophase_rmgr::twophase_postabort_callbacks
     };
-    let cb_result = process_records(&buf, layout.records, xid, callbacks)
-        .and_then(|()| predicate::PredicateLockTwoPhaseFinish(xid, is_commit));
-
-    let ondisk = unsafe { g.ondisk.get() };
-    remove_gxact(idx);
-
-    unlock_twophase_state();
-    cb_result?;
+    let ondisk = finish_callbacks_and_remove(&buf, layout.records, xid, callbacks, is_commit, idx)?;
 
     pgstat::xact::AtEOXact_PgStat(is_commit, false);
 
@@ -173,6 +162,46 @@ pub fn FinishPreparedTransaction(gid: &str, is_commit: bool) -> PgResult<()> {
 
     init_small::globals::ResumeInterrupts();
     Ok(())
+}
+
+/// twophase.c:1633-1670, the TwoPhaseStateLock-held tail of
+/// FinishPreparedTransaction: run the post-commit/post-abort callbacks and
+/// PredicateLockTwoPhaseFinish, read `ondisk` under the lock (the state file
+/// is removed after the lock is released), then RemoveGXact. The lock is held
+/// across the callbacks so a concurrent reuse of the same GID cannot collide.
+/// Called with interrupts held (HOLD_INTERRUPTS in the caller).
+///
+/// A callback ERROR in C longjmps with the gxact still in the array and
+/// `valid == false`; LWLockReleaseAll drops the lock and AtAbort_Twophase
+/// removes the gxact. Here the error path releases the lock and undoes the
+/// interrupt hold (C's errfinish zeroes InterruptHoldoffCount) before
+/// propagating, and leaves the gxact for AtAbort_Twophase.
+pub(crate) fn finish_callbacks_and_remove(
+    buf: &[u8],
+    records: usize,
+    xid: TransactionId,
+    callbacks: &[Option<twophase_rmgr::TwoPhaseCallback>; twophase_rmgr::NUM_TWOPHASE_RM],
+    is_commit: bool,
+    idx: i32,
+) -> PgResult<bool> {
+    lock_twophase_state(LW_EXCLUSIVE);
+
+    if let Err(err) = process_records(buf, records, xid, callbacks)
+        .and_then(|()| predicate::PredicateLockTwoPhaseFinish(xid, is_commit))
+    {
+        // twophase.c:1639-1670: RemoveGXact has not run; the gxact stays in
+        // the array (valid == false, locked by us) for AtAbort_Twophase.
+        unlock_twophase_state();
+        init_small::globals::ResumeInterrupts();
+        return Err(err);
+    }
+
+    // Read under the lock: the on-disk file is removed after the release.
+    let ondisk = unsafe { TwoPhaseState().gxact(idx).ondisk.get() };
+    remove_gxact(idx);
+
+    unlock_twophase_state();
+    Ok(ondisk)
 }
 
 fn replorigin_session() -> (types_core::RepOriginId, u64, TimestampTz) {

@@ -1,5 +1,5 @@
 use super::*;
-use types_error::ERRCODE_INVALID_TRANSACTION_STATE;
+use types_error::{ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_TRANSACTION_STATE};
 
 fn serial() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: Mutex<()> = Mutex::new(());
@@ -87,6 +87,24 @@ fn entrypoint_lookup_and_registration() {
     assert!(LookupParallelWorkerFunction("postgres", "substrate_test_entry").is_ok());
     let err = LookupParallelWorkerFunction("postgres", "no_such_entry").unwrap_err();
     assert_eq!(err.message(), "internal function \"no_such_entry\" not found");
+
+    // parallel.c:1650-1668: C serves the InternalParallelWorkers[] names and
+    // load_external_function for any other library. The unported in-core
+    // entrypoints and every external library are typed refusals here
+    // (ERRCODE_FEATURE_NOT_SUPPORTED the leader rethrows), never a panic.
+    // Audit a186-candidate-fp-transam-parallel-aca7b6971f2b73d1451f-1.
+    for name in ["_brin_parallel_build_main", "_gin_parallel_build_main"] {
+        let err = LookupParallelWorkerFunction("postgres", name).unwrap_err();
+        assert_eq!(err.sqlstate(), ERRCODE_FEATURE_NOT_SUPPORTED, "{name}");
+        assert_eq!(err.message(), format!("parallel worker function \"{name}\" is not supported"));
+    }
+    let err = LookupParallelWorkerFunction("libfoo", "foo_worker_main").unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_FEATURE_NOT_SUPPORTED);
+    assert_eq!(
+        err.message(),
+        "could not load parallel worker function \"foo_worker_main\" from library \"libfoo\""
+    );
+    assert_eq!(err.detail(), Some("Dynamic loading of external libraries is not supported."));
 }
 
 #[test]

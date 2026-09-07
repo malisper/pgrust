@@ -9553,6 +9553,7 @@ dependencies = [
  "init_small",
  "libc",
  "lwlock",
+ "lmgr_proc",
  "mcx",
  "multixact_seams",
  "pgstat_seams",

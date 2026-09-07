@@ -17,7 +17,7 @@ use types_core::{
     CommandId, InvalidOid, Oid, ProcNumber, SubTransactionId, TimestampTz, XLogRecPtr,
 };
 use types_error::{
-    ErrorLocation, PgError, PgResult, ERRCODE_ADMIN_SHUTDOWN,
+    ErrorLocation, PgError, PgResult, ERRCODE_ADMIN_SHUTDOWN, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR, FATAL, WARNING,
 };
 use types_storage::RelFileLocator;
@@ -316,9 +316,18 @@ pub fn register_parallel_worker_entrypoint(name: &'static str, f: ParallelWorker
 
 fn LookupParallelWorkerFunction(library_name: &str, function_name: &str) -> PgResult<ParallelWorkerEntry> {
     if library_name != "postgres" {
-        panic!(
-            "LookupParallelWorkerFunction: external library \"{library_name}\" (no dynamic loading; internal table only)"
-        );
+        // parallel.c:1667 load_external_function: pgrust has no dynamic
+        // loader, so an entrypoint outside "postgres" is a typed refusal the
+        // leader rethrows as an ERROR (never a worker-thread panic).
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(format!(
+                "could not load parallel worker function \"{function_name}\" from library \"{library_name}\""
+            ))
+            .errdetail("Dynamic loading of external libraries is not supported.")
+            .into_error()
+            .with_error_location(loc(1667, "LookupParallelWorkerFunction"))
+            .into());
     }
     if let Some((_, f)) = REGISTERED_ENTRYPOINTS
         .lock()
@@ -329,12 +338,17 @@ fn LookupParallelWorkerFunction(library_name: &str, function_name: &str) -> PgRe
         return Ok(*f);
     }
     if UNPORTED_INTERNAL_WORKERS.contains(&function_name) {
-        // INVARIANT: nothing requests these C entrypoints. Query parallelism
-        // registers ParallelQueryMain at executor init; parallel btree builds
-        // run through their own registered pool entrypoint (nbtsort); brin and
-        // gin builds are serial. A request here means a lane started emitting
-        // C's worker names without registering its own.
-        panic!("LookupParallelWorkerFunction: internal worker \"{function_name}\" has no producer — in-tree gangs register their own entrypoints (nbtsort pool main, ParallelQueryMain) or run serial");
+        // parallel.c:1660 finds these in InternalParallelWorkers[] and runs
+        // them; the ported gangs register their own entrypoints (nbtsort
+        // pool main, ParallelQueryMain) and brin/gin builds run serial, so a
+        // request for the C name is an unported feature: a typed refusal
+        // with the C-shaped error surface, never a panic.
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(format!("parallel worker function \"{function_name}\" is not supported"))
+            .into_error()
+            .with_error_location(loc(1660, "LookupParallelWorkerFunction"))
+            .into());
     }
     Err(ereport(ERROR)
         .errmsg(format!("internal function \"{function_name}\" not found"))
@@ -1361,7 +1375,24 @@ fn parallel_worker_main_thunk(main_arg: u64) -> PgResult<()> {
     ParallelWorkerMain(main_arg)
 }
 
+// parallel.c:115/121: ParallelWorkerNumber and InitializingParallelWorker
+// are process globals that die with the worker process. A pgrust worker
+// thread outlives its task (wretain / standing pools), so ParallelWorkerMain
+// holds one of these and both are restored on EVERY exit of it — return,
+// Err, and the proc_exit / FATAL unwinds — or the next task on this thread
+// would still answer IsParallelWorker() / InitializingParallelWorker().
+// (Module-level, not nested in the fn: scripts/check-unwind-policy.sh keys
+// its catch_unwind allowlist on the innermost enclosing `fn`.)
+struct WorkerIdentityReset;
+impl Drop for WorkerIdentityReset {
+    fn drop(&mut self) {
+        PARALLEL_WORKER_NUMBER.with(|c| c.set(-1));
+        INITIALIZING_PARALLEL_WORKER.with(|c| c.set(false));
+    }
+}
+
 pub fn ParallelWorkerMain(main_arg: u64) -> PgResult<()> {
+    let _identity_reset = WorkerIdentityReset;
     INITIALIZING_PARALLEL_WORKER.with(|c| c.set(true));
 
     let entry = bgworker::MyBgworkerEntry().expect("ParallelWorkerMain without bgworker entry");

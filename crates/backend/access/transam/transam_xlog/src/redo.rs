@@ -120,7 +120,10 @@ pub fn xlog_redo(record: &mut XLogReaderState) -> PgResult<()> {
                     check_point.oldestMultiDB,
                 )?;
             }
-            procarray::TransamVariables().oldestXid.store(check_point.oldestXid, Relaxed);
+            // xlog.c:8335: SetTransactionIdLimit stores oldestXid/oldestXidDB
+            // and recomputes xidVacLimit/xidWarnLimit/xidStopLimit/xidWrapLimit
+            // (oldestClogXid is left to the xl_clog_truncate redo).
+            varsup::SetTransactionIdLimit(check_point.oldestXid, check_point.oldestXidDB)?;
 
             if xlogrecovery_seams::archive_recovery_requested::call()
                 && !XLogRecPtrIsInvalid(control_file().backupStartPoint)

@@ -523,3 +523,71 @@ fn shmem_init_registers_prepared_transaction_table_in_shmem_index() {
     let (_, size) = row.expect("Prepared Transaction Table is missing from the ShmemIndex");
     assert_eq!(*size, crate::TwoPhaseShmemSize());
 }
+
+// twophase.c:1639-1670: FinishPreparedTransaction runs ProcessRecords and
+// PredicateLockTwoPhaseFinish under TwoPhaseStateLock and only THEN
+// RemoveGXact. A callback ERROR therefore unwinds with the gxact still in the
+// array (valid == false, still locked by us) and AtAbort_Twophase removes it
+// exactly once; the HOLD_INTERRUPTS taken before the callbacks is undone by
+// the error path. Pre-fix pgrust removed the gxact before evaluating the
+// callback result, so the abort path double-removed it and panicked with
+// "failed to find gxact ... in GlobalTransaction array".
+// Audit a186-candidate-fp-transam-twophase-f9bd389cf1a5396b9731-1.
+#[test]
+fn finish_callback_error_leaves_gxact_for_at_abort() {
+    use twophase_rmgr::{TwoPhaseCallback, NUM_TWOPHASE_RM, TWOPHASE_RM_END_ID, TWOPHASE_RM_LOCK_ID};
+
+    let _l = test_lock();
+    setup();
+    if lmgr_proc::MyProc().is_none() {
+        init_small::globals::SetMyProcPid(4242);
+        lmgr_proc::InitProcess(types_core::BackendType::Backend).expect("InitProcess");
+        procarray::ProcArrayAdd(lmgr_proc::MyProc().unwrap()).expect("ProcArrayAdd");
+    }
+
+    fn failing_callback(
+        _xid: types_core::TransactionId,
+        _info: u16,
+        _data: &[u8],
+    ) -> types_error::PgResult<()> {
+        Err(Box::new(types_error::PgError::error("twophase test callback failure")))
+    }
+    let mut callbacks: [Option<TwoPhaseCallback>; NUM_TWOPHASE_RM] = [None; NUM_TWOPHASE_RM];
+    callbacks[TWOPHASE_RM_LOCK_ID as usize] = Some(failing_callback);
+    // One zero-length lock record, then the END sentinel.
+    let mut buf = TwoPhaseRecordOnDisk { len: 0, rmid: TWOPHASE_RM_LOCK_ID, info: 0 }
+        .to_bytes()
+        .to_vec();
+    buf.extend_from_slice(
+        &TwoPhaseRecordOnDisk { len: 0, rmid: TWOPHASE_RM_END_ID, info: 0 }.to_bytes(),
+    );
+
+    // The finish-time shape: the gxact is in the array, locked by this
+    // backend (MY_LOCKED_GXACT) and marked invalid before the callbacks run.
+    let n0 = unsafe { TwoPhaseState().num_prep_xacts.get() };
+    let slot = crate::MarkAsPreparing(1801, "gid_cb_err", 333, 10, 5).expect("reserve gid_cb_err");
+    assert_eq!(crate::state::MY_LOCKED_GXACT.get(), slot);
+    assert_eq!(unsafe { TwoPhaseState().num_prep_xacts.get() }, n0 + 1);
+
+    let holdoff = init_small::globals::InterruptHoldoffCount();
+    init_small::globals::HoldInterrupts();
+    let err = crate::finish::finish_callbacks_and_remove(&buf, 0, 1801, &callbacks, true, slot)
+        .expect_err("a post-commit callback error must propagate");
+    assert_eq!(err.message(), "twophase test callback failure");
+    assert_eq!(
+        unsafe { TwoPhaseState().num_prep_xacts.get() },
+        n0 + 1,
+        "gxact must stay in the array until AtAbort_Twophase: RemoveGXact (twophase.c:1656) runs only after the callbacks succeed"
+    );
+    assert_eq!(crate::state::MY_LOCKED_GXACT.get(), slot);
+    assert_eq!(
+        init_small::globals::InterruptHoldoffCount(),
+        holdoff,
+        "the HOLD_INTERRUPTS taken for the finish must be undone on the error path"
+    );
+
+    // AtAbort_Twophase: !valid -> RemoveGXact, once, without panicking.
+    crate::AtAbort_Twophase();
+    assert_eq!(unsafe { TwoPhaseState().num_prep_xacts.get() }, n0);
+    assert_eq!(crate::state::MY_LOCKED_GXACT.get(), crate::state::NO_GXACT);
+}
