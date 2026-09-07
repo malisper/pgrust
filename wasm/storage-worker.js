@@ -27,6 +27,12 @@
 //             under the OPFS root). Four `FileSystemSyncAccessHandle`s, and the datadir
 //             SURVIVES the page. Requires a scope where `createSyncAccessHandle()` actually
 //             succeeds — a dedicated worker is such a scope, the window main thread is not.
+//             `opfsDir` is a `/`-separated PATH of directory names, walked one
+//             `getDirectoryHandle` hop per segment (a bare name is the one-segment case, and is
+//             what every lane in this repo passes). OPFS itself has no path API — a name
+//             containing `/` is a `TypeError` in every engine — so a host that wants its store
+//             under a namespace of its own (`app/stores/<id>`) can only get there by walking,
+//             and this is where that walk belongs.
 //
 // FRESH vs EXISTING. The store itself opens either way: `RepackedVfs.open` bootstraps an empty
 // store from an empty directory and recovers an activated one from a populated directory,
@@ -143,29 +149,57 @@ function absent(bundle, vfs, path) {
 }
 
 /**
+ * Split an `opfsDir` into the directory names to walk.
+ *
+ * `.` and `..` are refused rather than resolved: OPFS knows neither, and accepting them would let
+ * a path climb out of the namespace its host meant to hold this store in.
+ */
+function opfsDirSegments(path) {
+  const segments = String(path)
+    .split('/')
+    .filter((segment) => segment !== '');
+  if (segments.length === 0) throw new Error(`"${path}" is not an OPFS directory path`);
+  for (const segment of segments) {
+    if (segment === '.' || segment === '..') throw new Error(`OPFS path "${path}" contains a relative segment`);
+  }
+  return segments;
+}
+
+/**
  * Open the OPFS directory this store owns, optionally emptying it first.
+ *
+ * The path is walked a segment at a time, creating every parent: OPFS has no path API at all, so
+ * `app/stores/<id>` is three `getDirectoryHandle` hops and a name containing `/` is a `TypeError`.
+ * A single name — what every lane here passes — is the one-segment walk and behaves exactly as it
+ * did when that was the only shape allowed.
  *
  * `reset` is the "start over" switch the persistence lanes need: the store fails CLOSED on a
  * directory whose format identity it does not accept (`StoreRecreationRequiredError`) and the
  * only sanctioned repair is deleting the WHOLE directory, so a reset removes every entry
- * rather than the four files it happens to know about.
+ * rather than the four files it happens to know about. Only the LAST segment is ever removed;
+ * the parents are this store's namespace, not its property, and another store may live beside it.
  */
-async function openOpfsDirectory(name, reset) {
+async function openOpfsDirectory(path, reset) {
   if (typeof navigator === 'undefined' || !navigator.storage || !navigator.storage.getDirectory) {
     throw new Error('OPFS is unavailable in this scope (navigator.storage.getDirectory missing)');
   }
-  const root = await navigator.storage.getDirectory();
+  const segments = opfsDirSegments(path);
+  const name = segments[segments.length - 1];
+  let parent = await navigator.storage.getDirectory();
+  for (const segment of segments.slice(0, -1)) {
+    parent = await parent.getDirectoryHandle(segment, { create: true });
+  }
   if (reset) {
-    // removeEntry on the ROOT, not the directory: `recursive` on a directory whose sync access
-    // handles a previous run may still hold is the one call that can fail; a whole-directory
-    // removal followed by a fresh create is the clean slate the store documents.
+    // removeEntry on the PARENT, not on the directory itself: `recursive` on a directory whose
+    // sync access handles a previous run may still hold is the one call that can fail; a
+    // whole-directory removal followed by a fresh create is the clean slate the store documents.
     try {
-      await root.removeEntry(name, { recursive: true });
+      await parent.removeEntry(name, { recursive: true });
     } catch (e) {
       if (!e || e.name !== 'NotFoundError') throw e;
     }
   }
-  return root.getDirectoryHandle(name, { create: true });
+  return parent.getDirectoryHandle(name, { create: true });
 }
 
 // Every request opcode that can CHANGE the store. `open` is in the list because O_CREAT/O_TRUNC
