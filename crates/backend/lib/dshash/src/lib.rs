@@ -385,6 +385,64 @@ impl<P: DshashParams> DshashTable<P> {
         Ok(())
     }
 
+    // dshash_dump (dshash.c:778): print the table's internal state to
+    // stderr. The caller must hold no partition locks.
+    pub fn dump(&self) -> PgResult<()> {
+        let mut err = std::io::stderr().lock();
+        self.dump_to(&mut err)
+    }
+
+    // dshash_dump's body with C's fprintf(stderr, ...) target made explicit;
+    // an I/O failure on the sink is ignored exactly as C ignores fprintf's
+    // return, but the partition locks are always released.
+    pub fn dump_to(&self, out: &mut dyn std::io::Write) -> PgResult<()> {
+        self.assert_no_partition_locks();
+
+        let proc = globals::MyProcNumber();
+        for i in 0..DSHASH_NUM_PARTITIONS {
+            debug_assert!(!lwlock::LWLockHeldByMe(self.lock(i)));
+            if let Err(e) = LWLockAcquire(self.lock(i), LW_SHARED, proc) {
+                for j in 0..i {
+                    let _ = LWLockRelease(self.lock(j));
+                }
+                return Err(e);
+            }
+        }
+
+        // SAFETY: every partition lock is held shared: the buckets/size_log2
+        // pair cannot change (ensure_valid_bucket_pointers) and no chain is
+        // being mutated while we walk it.
+        unsafe {
+            let (buckets, size_log2) = self.view();
+            let _ = writeln!(out, "hash table size = {}", num_buckets(size_log2));
+            for i in 0..DSHASH_NUM_PARTITIONS {
+                let begin = i << num_splits(size_log2);
+                let end = (i + 1) << num_splits(size_log2);
+                let _ = writeln!(out, "  partition {i}");
+                let _ = writeln!(
+                    out,
+                    "    active buckets (key count = {})",
+                    *self.partitions[i].count.get()
+                );
+                for (off, head) in buckets[begin..end].iter().enumerate() {
+                    let j = begin + off;
+                    let mut count = 0usize;
+                    let mut item = head.load(Relaxed);
+                    while !item.is_null() {
+                        item = (*item).next;
+                        count += 1;
+                    }
+                    let _ = writeln!(out, "      bucket {j} (key count = {count})");
+                }
+            }
+        }
+
+        for i in 0..DSHASH_NUM_PARTITIONS {
+            LWLockRelease(self.lock(i))?;
+        }
+        Ok(())
+    }
+
     pub fn seq_scan(&self, exclusive: bool) -> DshashSeqScan<'_, P> {
         DshashSeqScan {
             table: self,

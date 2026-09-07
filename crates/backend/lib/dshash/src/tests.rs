@@ -384,3 +384,65 @@ fn hash_helpers_match_hashfn() {
     assert_eq!(dshash_memhash(b"abcd"), hashfn::tag_hash(b"abcd", 4));
     assert_eq!(dshash_strhash(b"ab\0cd", 5), hashfn::string_hash(b"ab\0cd", 5));
 }
+
+// dshash.c:778 dshash_dump: shared-lock every partition in order, print
+// "hash table size = N", then per partition its count and every bucket's
+// chain length, then release; caller holds no partition locks before/after.
+#[test]
+fn dump_reports_partitions_and_bucket_chains() {
+    let t = new_table();
+    let n: u64 = 4096;
+    for k in 0..n {
+        t.find_or_insert(&k).unwrap();
+    }
+    let size_log2 = t.size_log2.load(Relaxed);
+    assert!(size_log2 > DSHASH_NUM_PARTITIONS_LOG2, "table did not grow");
+    let nbuckets = 1usize << size_log2;
+
+    let mut out = Vec::new();
+    t.dump_to(&mut out).unwrap();
+    for i in 0..DSHASH_NUM_PARTITIONS {
+        assert!(!lwlock::LWLockHeldByMe(t.lock(i)), "dump left partition {i} locked");
+    }
+    // dump() still works afterwards (locks were released, not leaked).
+    let mut again = Vec::new();
+    t.dump_to(&mut again).unwrap();
+    assert_eq!(out, again);
+
+    let text = String::from_utf8(out).unwrap();
+    let mut lines = text.lines();
+    assert_eq!(lines.next(), Some(format!("hash table size = {nbuckets}").as_str()));
+
+    let per_partition = nbuckets / DSHASH_NUM_PARTITIONS;
+    let mut total = 0usize;
+    let mut next_bucket = 0usize;
+    for i in 0..DSHASH_NUM_PARTITIONS {
+        assert_eq!(lines.next(), Some(format!("  partition {i}").as_str()));
+        let head = lines.next().unwrap();
+        let prefix = "    active buckets (key count = ";
+        assert!(head.starts_with(prefix) && head.ends_with(')'), "{head:?}");
+        let pcount: usize = head[prefix.len()..head.len() - 1].parse().unwrap();
+        let mut chained = 0usize;
+        for _ in 0..per_partition {
+            let line = lines.next().unwrap();
+            let expect = format!("      bucket {next_bucket} (key count = ");
+            assert!(line.starts_with(&expect) && line.ends_with(')'), "{line:?}");
+            chained += line[expect.len()..line.len() - 1].parse::<usize>().unwrap();
+            next_bucket += 1;
+        }
+        assert_eq!(chained, pcount, "partition {i}: bucket chains != partition count");
+        total += pcount;
+    }
+    assert_eq!(lines.next(), None, "trailing output after the last bucket");
+    assert_eq!(total, n as usize);
+
+    // Empty table: C prints size 128 and 128 partitions of one empty bucket.
+    let e = DshashTable::create(TestParams, 1);
+    let mut out = Vec::new();
+    e.dump_to(&mut out).unwrap();
+    let text = String::from_utf8(out).unwrap();
+    assert_eq!(text.lines().count(), 1 + 3 * DSHASH_NUM_PARTITIONS);
+    assert!(text.starts_with("hash table size = 128\n  partition 0\n    active buckets (key count = 0)\n      bucket 0 (key count = 0)\n  partition 1\n"));
+    assert!(text.ends_with("  partition 127\n    active buckets (key count = 0)\n      bucket 127 (key count = 0)\n"));
+    e.dump().unwrap();
+}
