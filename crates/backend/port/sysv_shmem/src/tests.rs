@@ -229,6 +229,85 @@ fn check_huge_page_size_platform_gate() {
     assert_eq!(HUGE_PAGE_SIZE_SELECTABLE, cfg!(any(target_os = "linux", target_os = "android")));
 }
 
+// GetHugePageSize (sysv_shmem.c:479-571), audit row
+// a186-candidate-fp-ipc-b1-5f1a8d0095d96b211688-1: the /proc/meminfo scan and
+// the size/flag resolution InitializeShmemGUCs (ipci.c:377) sizes
+// shared_memory_size_in_huge_pages from.
+#[test]
+fn meminfo_hugepagesize_scan_matches_sscanf() {
+    use crate::meminfo_default_hugepagesize;
+    // The real line shape: the first "Hugepagesize: N kB" wins.
+    assert_eq!(
+        meminfo_default_hugepagesize("MemTotal:       16384 kB\nHugepagesize:       2048 kB\nHugetlb:   0 kB\n"),
+        2048 * 1024
+    );
+    assert_eq!(meminfo_default_hugepagesize("Hugepagesize:1048576 kB"), 1024 * 1024 * 1024);
+    // sscanf's %u: leading sign accepted, value wraps like the C conversion.
+    assert_eq!(meminfo_default_hugepagesize("Hugepagesize: +2048 kB"), 2048 * 1024);
+    assert_eq!(
+        meminfo_default_hugepagesize("Hugepagesize: -1 kB"),
+        u32::MAX as usize * 1024
+    );
+    // Another unit is skipped, a later kB line still counts.
+    assert_eq!(
+        meminfo_default_hugepagesize("Hugepagesize: 2 MB\nHugepagesize: 4096 kB\n"),
+        4096 * 1024
+    );
+    // Only one conversion (no unit), no digits, or no line at all: unknown.
+    assert_eq!(meminfo_default_hugepagesize("Hugepagesize: 2048\n"), 0);
+    assert_eq!(meminfo_default_hugepagesize("Hugepagesize: kB\n"), 0);
+    assert_eq!(meminfo_default_hugepagesize("MemTotal: 1 kB\n"), 0);
+    assert_eq!(meminfo_default_hugepagesize(""), 0);
+    // The literal must start the line ("sscanf" anchors at buf[0]).
+    assert_eq!(meminfo_default_hugepagesize(" Hugepagesize: 2048 kB\n"), 0);
+}
+
+#[test]
+fn huge_page_size_resolution_matches_c() {
+    use crate::{resolve_huge_page_size, HugePageSize};
+    const MB: usize = 1024 * 1024;
+    const HUGETLB: i32 = 0x40000;
+    // Without MAP_HUGETLB (sysv_shmem.c:564-569): both results are 0.
+    assert_eq!(
+        resolve_huge_page_size(0, 2 * MB, false, false),
+        HugePageSize { hugepagesize: 0, mmap_flags: 0 }
+    );
+    assert_eq!(
+        resolve_huge_page_size(1048576, 2 * MB, false, false),
+        HugePageSize { hugepagesize: 0, mmap_flags: 0 }
+    );
+    if cfg!(any(target_os = "linux", target_os = "android")) {
+        // System default, no explicit size: MAP_HUGETLB alone (:525-529, :543).
+        assert_eq!(
+            resolve_huge_page_size(0, 2 * MB, true, true),
+            HugePageSize { hugepagesize: 2 * MB, mmap_flags: HUGETLB }
+        );
+        // Unknown default: the 2MB fallback, encoded since it differs from
+        // the (zero) default (:530-541, :549-556): shift 21.
+        assert_eq!(
+            resolve_huge_page_size(0, 0, true, true),
+            HugePageSize { hugepagesize: 2 * MB, mmap_flags: HUGETLB | (21 << 26) }
+        );
+        assert_eq!(
+            resolve_huge_page_size(0, 0, true, false),
+            HugePageSize { hugepagesize: 2 * MB, mmap_flags: HUGETLB }
+        );
+        // Explicit huge_page_size (kB) wins and is encoded: 1GB = shift 30.
+        assert_eq!(
+            resolve_huge_page_size(1048576, 2 * MB, true, true),
+            HugePageSize { hugepagesize: 1024 * MB, mmap_flags: HUGETLB | (30 << 26) }
+        );
+        // Explicit size equal to the default: no encoding needed.
+        assert_eq!(
+            resolve_huge_page_size(2048, 2 * MB, true, true),
+            HugePageSize { hugepagesize: 2 * MB, mmap_flags: HUGETLB }
+        );
+    }
+    // The real reader (/proc/meminfo through AllocateFile + the huge_page_size
+    // GUC) is exercised by ipci's initialize_shmem_gucs_counts_huge_pages_like_c
+    // and scripts/ipc-shmem-huge-pages-guc-e2e.sh on the CI cluster.
+}
+
 // ---------------------------------------------------------------------------
 // PGSharedMemoryCreate's startup interlocks (sysv_shmem.c:702-870). Audit rows
 // a186-candidate-fp-port-sysv_shmem-{79ac1c53,53018cea,78cb3328}-1.

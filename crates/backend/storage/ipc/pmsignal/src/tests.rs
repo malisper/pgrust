@@ -29,9 +29,13 @@ fn shmem_shape_matches_c() {
     setup();
     assert_eq!(state().num_child_flags, MAX_LIVE_CHILDREN);
     assert_eq!(state().PMChildFlags.len(), MAX_LIVE_CHILDREN as usize);
+    // pmsignal.c:130-136: offsetof(PMSignalData, PMChildFlags) — the ten
+    // sig_atomic_t PMSignalFlags, the QuitSignalReason enum and the int
+    // num_child_flags, 4 bytes each (pmsignal.c:69-81) — plus one
+    // sig_atomic_t per child slot: 48 + 4 * MaxLivePostmasterChildren().
     assert_eq!(
         PMSignalShmemSize(MAX_LIVE_CHILDREN).unwrap(),
-        core::mem::size_of::<PMSignalData>() + MAX_LIVE_CHILDREN as usize
+        48 + 4 * MAX_LIVE_CHILDREN as usize
     );
     assert_eq!(NUM_PMSIGNALS, 10);
 }

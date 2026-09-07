@@ -10,6 +10,7 @@ use std::sync::atomic::{
 use std::sync::OnceLock;
 
 use init_small::globals as g;
+use types_core::sig_atomic_t;
 use types_error::{PgError, PgResult, FATAL};
 
 pub const PM_CHILD_UNUSED: u8 = 0;
@@ -76,10 +77,25 @@ fn state() -> &'static PMSignalData {
         .unwrap_or_else(|| panic!("PMSignalState not initialized (PMSignalShmemInit not called)"))
 }
 
+/// C `offsetof(PMSignalData, PMChildFlags)` (pmsignal.c:69-81): the
+/// NUM_PMSIGNALS `sig_atomic_t` flags, the `QuitSignalReason` enum (int) and
+/// the int `num_child_flags`, contiguous and 4-aligned — 48 bytes. The Rust
+/// struct above is laid out for atomics, not for C's bytes, so the C size is
+/// computed from C's fields (it is what CalculateShmemSize sums).
+pub const PMSIGNAL_DATA_CHILD_FLAGS_OFFSET: usize = NUM_PMSIGNALS
+    * core::mem::size_of::<sig_atomic_t>()
+    + core::mem::size_of::<u32>()
+    + core::mem::size_of::<i32>();
+
+// pmsignal.c:130-136: offsetof(PMSignalData, PMChildFlags) +
+// MaxLivePostmasterChildren() * sizeof(sig_atomic_t).
 pub fn PMSignalShmemSize(max_live_children: i32) -> PgResult<usize> {
     shmem_seams::add_size::call(
-        core::mem::size_of::<PMSignalData>(),
-        shmem_seams::mul_size::call(max_live_children as usize, 1)?,
+        PMSIGNAL_DATA_CHILD_FLAGS_OFFSET,
+        shmem_seams::mul_size::call(
+            max_live_children as usize,
+            core::mem::size_of::<sig_atomic_t>(),
+        )?,
     )
 }
 

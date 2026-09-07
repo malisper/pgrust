@@ -50,6 +50,9 @@ fn bringup() {
         ipc_seams::proc_exit::set(|code, _pid| panic!("proc_exit({code})"));
         xact_seams::is_in_parallel_mode::set(|| false);
         xact_seams::get_current_transaction_nest_level::set(|| 1);
+        // GetHugePageSize reads /proc/meminfo through AllocateFile (fd desc
+        // table keyed by the current subxact).
+        xact_seams::get_current_sub_transaction_id::set(|| 1);
         guc_tables::init_seams();
         // commands_variable owns this accessor in production seams_init;
         // AioShmemSize reads it (this harness inits GUCs piecemeal).
@@ -164,6 +167,45 @@ fn create_shared_memory_and_semaphores_end_to_end() {
     assert_eq!(CHECKPOINTER_CV_RESETS.load(Ordering::Relaxed), 1);
     pmsignal::MarkPostmasterChildSlotAssigned(1).unwrap();
     assert!(pmsignal::MarkPostmasterChildSlotUnassigned(1));
+}
+
+// ipci.c:377-388: InitializeShmemGUCs asks GetHugePageSize (sysv_shmem.c:479)
+// for the huge page size and, whenever it is non-zero, sets
+// shared_memory_size_in_huge_pages = size_b / hp_size + 1. Under MAP_HUGETLB
+// (Linux) the size is never zero: huge_page_size when set (0 in this harness),
+// else /proc/meminfo's "Hugepagesize: N kB", else the 2MB fallback. Without
+// MAP_HUGETLB the GUC keeps its -1 boot value.
+#[test]
+fn initialize_shmem_gucs_counts_huge_pages_like_c() {
+    bringup();
+
+    ipci_seams::initialize_shmem_gucs::call(4).unwrap();
+    let (size_b, _) = CalculateShmemSize(&proc_global_config(4)).unwrap();
+    let got = guc::GetConfigOption("shared_memory_size_in_huge_pages", false, false)
+        .unwrap()
+        .unwrap();
+
+    let expected = if cfg!(any(target_os = "linux", target_os = "android")) {
+        let mut hp_size: usize = 2 * 1024 * 1024;
+        if let Ok(meminfo) = std::fs::read_to_string("/proc/meminfo") {
+            for line in meminfo.lines() {
+                let Some(rest) = line.strip_prefix("Hugepagesize:") else { continue };
+                let mut fields = rest.split_whitespace();
+                if let (Some(n), Some(unit)) = (fields.next(), fields.next()) {
+                    if unit.starts_with('k') {
+                        if let Ok(kb) = n.parse::<usize>() {
+                            hp_size = kb * 1024;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        (size_b / hp_size + 1).to_string()
+    } else {
+        "-1".to_string()
+    };
+    assert_eq!(got, expected, "shared_memory_size_in_huge_pages for size_b={size_b}");
 }
 
 #[test]

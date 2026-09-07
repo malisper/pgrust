@@ -237,7 +237,19 @@ pub fn InitializeShmemGUCs(fastpath_lock_groups_per_backend: i32) -> PgResult<()
         PGC_S_DYNAMIC_DEFAULT,
     )?;
 
-    // No segment, no huge pages: that GUC keeps its -1 boot value.
+    // ipci.c:377-388: the number of huge pages required, whenever the
+    // platform reports a huge page size (GetHugePageSize, sysv_shmem.c:479);
+    // where it reports 0 the GUC keeps its -1 boot value.
+    let hp = sysv_shmem::GetHugePageSize()?;
+    if hp.hugepagesize != 0 {
+        let hp_required = shmem::add_size(size_b / hp.hugepagesize, 1)?;
+        guc::SetConfigOption(
+            "shared_memory_size_in_huge_pages",
+            Some(&hp_required.to_string()),
+            PGC_INTERNAL,
+            PGC_S_DYNAMIC_DEFAULT,
+        )?;
+    }
 
     guc::SetConfigOption(
         "num_os_semaphores",

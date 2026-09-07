@@ -14117,6 +14117,7 @@ dependencies = [
  "pmsignal_seams",
  "postmaster_seams",
  "shmem_seams",
+ "types_core",
  "types_error",
  "waiteventset_seams",
 ]
@@ -18853,6 +18854,7 @@ dependencies = [
  "init_small_seams",
  "ipc_seams",
  "libc",
+ "pg_bitutils",
  "pgstat_seams",
  "shmem_seams",
  "types_error",

@@ -366,6 +366,126 @@ pub fn probe_key_space(_datadir: &str, _ino: u64, _dsm_cleanup: fn(u32) -> PgRes
     Ok(())
 }
 
+/// What C `GetHugePageSize` (sysv_shmem.c:479-571) hands back through its two
+/// out-parameters: the huge page size in bytes (0 = huge pages unsupported)
+/// and the mmap flags that request a page of that size.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HugePageSize {
+    pub hugepagesize: usize,
+    pub mmap_flags: i32,
+}
+
+/// Linux `MAP_HUGETLB`; 0 where the flag does not exist (C never reaches the
+/// mmap_flags assignment there: the whole body is `#ifdef MAP_HUGETLB`).
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const MAP_HUGETLB: i32 = libc::MAP_HUGETLB;
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+const MAP_HUGETLB: i32 = 0;
+/// Linux uapi `MAP_HUGE_SHIFT`/`MAP_HUGE_MASK` (asm-generic/hugetlb_encode.h;
+/// the same on every architecture); only consulted where
+/// [`HUGE_PAGE_SIZE_SELECTABLE`] says they exist.
+const MAP_HUGE_SHIFT: i32 = 26;
+const MAP_HUGE_MASK: i32 = 0x3f;
+
+/// The `/proc/meminfo` scan of C `GetHugePageSize` (sysv_shmem.c:495-517):
+/// the first line `sscanf(buf, "Hugepagesize: %u %c", &sz, &ch)` converts
+/// both fields of, with `ch == 'k'`, gives `sz * 1024`; a line with another
+/// unit is skipped ("we could accept other units besides kB, if needed") and
+/// a file with no such line gives 0, the "unknown" the fallback arm reads.
+pub fn meminfo_default_hugepagesize(meminfo: &str) -> usize {
+    for line in meminfo.lines() {
+        let Some(rest) = line.strip_prefix("Hugepagesize:") else { continue };
+        // %u: skip whitespace, an optional sign, then a decimal run.
+        let rest = rest.trim_start_matches(|c: char| c.is_ascii_whitespace());
+        let (neg, rest) = match rest.strip_prefix('-') {
+            Some(r) => (true, r),
+            None => (false, rest.strip_prefix('+').unwrap_or(rest)),
+        };
+        let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        if digits == 0 {
+            continue;
+        }
+        let Ok(sz) = rest[..digits].parse::<u32>() else { continue };
+        // " %c": skip whitespace, then any one character (none = only one
+        // conversion, the line does not match).
+        let rest = rest[digits..].trim_start_matches(|c: char| c.is_ascii_whitespace());
+        let Some(ch) = rest.chars().next() else { continue };
+        if ch == 'k' {
+            // C's `sz * (Size) 1024` on the unsigned conversion: a negative
+            // "-N" is %u's two's-complement wrap.
+            let sz = if neg { sz.wrapping_neg() } else { sz };
+            return sz as usize * 1024;
+        }
+    }
+    0
+}
+
+/// The platform-parameterised body of C `GetHugePageSize`
+/// (sysv_shmem.c:520-562): `huge_page_size_kb` is the GUC (kB),
+/// `default_hugepagesize` what `/proc/meminfo` reported (0 = unknown);
+/// `map_hugetlb` is whether `MAP_HUGETLB` exists at all and `huge_shift`
+/// whether `MAP_HUGE_MASK`/`MAP_HUGE_SHIFT` do.
+pub fn resolve_huge_page_size(
+    huge_page_size_kb: i32,
+    default_hugepagesize: usize,
+    map_hugetlb: bool,
+    huge_shift: bool,
+) -> HugePageSize {
+    if !map_hugetlb {
+        return HugePageSize { hugepagesize: 0, mmap_flags: 0 };
+    }
+    let hugepagesize_local = if huge_page_size_kb != 0 {
+        // If huge page size is requested explicitly, use that.
+        huge_page_size_kb as usize * 1024
+    } else if default_hugepagesize != 0 {
+        // Otherwise use the system default, if we have it.
+        default_hugepagesize
+    } else {
+        // Neither known: assume 2MB (works when the real size is smaller).
+        2 * 1024 * 1024
+    };
+    let mut mmap_flags_local = MAP_HUGETLB;
+    // On recent enough Linux, also include the explicit page size, if
+    // necessary.
+    if huge_shift && hugepagesize_local != default_hugepagesize {
+        let shift = pg_bitutils::pg_ceil_log2_64(hugepagesize_local as u64) as i32;
+        mmap_flags_local |= (shift & MAP_HUGE_MASK) << MAP_HUGE_SHIFT;
+    }
+    HugePageSize { hugepagesize: hugepagesize_local, mmap_flags: mmap_flags_local }
+}
+
+/// C `GetHugePageSize(&hugepagesize, &mmap_flags)` (sysv_shmem.c:479-571).
+/// On Linux the system default comes from `/proc/meminfo` through
+/// `AllocateFile`, read failures ignored as in C; the `huge_page_size` GUC
+/// overrides it; 2MB is the fallback. Without `MAP_HUGETLB` both results
+/// are 0. `InitializeShmemGUCs` (ipci.c:377) sizes
+/// shared_memory_size_in_huge_pages from the result.
+pub fn GetHugePageSize() -> PgResult<HugePageSize> {
+    let mut default_hugepagesize = 0;
+    if MAP_HUGETLB_AVAILABLE && cfg!(target_os = "linux") {
+        let fp = fd::AllocateFile("/proc/meminfo", "r")?;
+        if fp >= 0 {
+            let contents = fd::with_allocated_stdio(fp, |f| {
+                use std::io::Read;
+                let mut buf = Vec::new();
+                f.read_to_end(&mut buf).map(|_| buf)
+            });
+            if let Some(Ok(contents)) = contents {
+                default_hugepagesize =
+                    meminfo_default_hugepagesize(&String::from_utf8_lossy(&contents));
+            }
+            fd::FreeFile(fp)?;
+        }
+    }
+    let huge_page_size = guc_tables::vars::huge_page_size.read();
+    Ok(resolve_huge_page_size(
+        huge_page_size,
+        default_hugepagesize,
+        MAP_HUGETLB_AVAILABLE,
+        HUGE_PAGE_SIZE_SELECTABLE,
+    ))
+}
+
 /// C `check_huge_page_size`'s platform gate (sysv_shmem.c:580): the size is
 /// honoured only where `MAP_HUGE_MASK` and `MAP_HUGE_SHIFT` exist (Linux);
 /// elsewhere any non-zero value is rejected.
