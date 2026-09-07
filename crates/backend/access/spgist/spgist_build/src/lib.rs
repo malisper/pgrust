@@ -2,11 +2,15 @@
 #![allow(non_snake_case)]
 
 use ::mcx::{Mcx, MemoryContext};
-use ::types_core::ForkNumber;
-use ::types_error::PgResult;
+use ::types_core::{Buffer, ForkNumber};
+use ::types_error::{PgError, PgResult};
 use ::types_rel::Relation;
 use ::types_spgist::{SPGIST_LEAF, SPGIST_METAPAGE_BLKNO, SPGIST_NULLS, SPGIST_NULL_BLKNO, SPGIST_ROOT_BLKNO};
 use execindexing::IndexInfo;
+use init_small::globals::{EndCriticalSection, StartCriticalSection};
+
+#[cfg(test)]
+mod tests;
 
 pub struct IndexBuildResult {
     pub heap_tuples: f64,
@@ -41,25 +45,28 @@ pub fn spgbuildempty(index: &Relation<'_>) -> PgResult<()> {
     bulkwrite::smgr_bulk_finish(bulkstate)
 }
 
-/// spgbuild.
-pub fn spgbuild<'mcx>(
-    mcx: Mcx<'mcx>,
-    heap: &Relation<'mcx>,
-    index: &Relation<'mcx>,
-    indexInfo: &mut IndexInfo<'mcx>,
-) -> PgResult<IndexBuildResult> {
-    if bufmgr::RelationGetNumberOfBlocksInFork(index, ForkNumber::MAIN_FORKNUM)? != 0 {
-        panic!("index \"{}\" already contains data", index.name());
+/// spginsert.c:82-84: a build starts on an empty main fork.
+pub(crate) fn spgbuild_check_empty(index: &Relation<'_>) -> PgResult<()> {
+    if bufmgr_seams::relation_get_number_of_blocks_in_fork::call(index, ForkNumber::MAIN_FORKNUM)?
+        != 0
+    {
+        // spginsert.c:83 elog(ERROR): catchable XX000.
+        return Err(Box::new(PgError::error(format!(
+            "index \"{}\" already contains data",
+            index.name()
+        ))));
     }
+    Ok(())
+}
 
-    let metabuffer = spgist::SpGistNewBuffer(index)?;
-    let rootbuffer = spgist::SpGistNewBuffer(index)?;
-    let nullbuffer = spgist::SpGistNewBuffer(index)?;
-
-    debug_assert!(bufmgr_seams::buffer_get_block_number::call(metabuffer) == SPGIST_METAPAGE_BLKNO);
-    debug_assert!(bufmgr_seams::buffer_get_block_number::call(rootbuffer) == SPGIST_ROOT_BLKNO);
-    debug_assert!(bufmgr_seams::buffer_get_block_number::call(nullbuffer) == SPGIST_NULL_BLKNO);
-
+/// spginsert.c:97-107: initialize and dirty the meta, root and nulls pages.
+pub(crate) fn spgbuild_init_pages(
+    metabuffer: Buffer,
+    rootbuffer: Buffer,
+    nullbuffer: Buffer,
+) -> PgResult<()> {
+    // spginsert.c:97 START_CRIT_SECTION
+    StartCriticalSection();
     {
         let mut pm = spgist::spg_buf_page_mut(metabuffer);
         spgist::SpGistInitMetapage(&mut pm);
@@ -69,6 +76,29 @@ pub fn spgbuild<'mcx>(
     bufmgr_seams::mark_buffer_dirty::call(rootbuffer)?;
     spgist::SpGistInitBuffer(nullbuffer, SPGIST_LEAF | SPGIST_NULLS);
     bufmgr_seams::mark_buffer_dirty::call(nullbuffer)?;
+    // spginsert.c:107
+    EndCriticalSection();
+    Ok(())
+}
+
+/// spgbuild.
+pub fn spgbuild<'mcx>(
+    mcx: Mcx<'mcx>,
+    heap: &Relation<'mcx>,
+    index: &Relation<'mcx>,
+    indexInfo: &mut IndexInfo<'mcx>,
+) -> PgResult<IndexBuildResult> {
+    spgbuild_check_empty(index)?;
+
+    let metabuffer = spgist::SpGistNewBuffer(index)?;
+    let rootbuffer = spgist::SpGistNewBuffer(index)?;
+    let nullbuffer = spgist::SpGistNewBuffer(index)?;
+
+    debug_assert!(bufmgr_seams::buffer_get_block_number::call(metabuffer) == SPGIST_METAPAGE_BLKNO);
+    debug_assert!(bufmgr_seams::buffer_get_block_number::call(rootbuffer) == SPGIST_ROOT_BLKNO);
+    debug_assert!(bufmgr_seams::buffer_get_block_number::call(nullbuffer) == SPGIST_NULL_BLKNO);
+
+    spgbuild_init_pages(metabuffer, rootbuffer, nullbuffer)?;
 
     spgist::spg_unlock_release(metabuffer)?;
     spgist::spg_unlock_release(rootbuffer)?;

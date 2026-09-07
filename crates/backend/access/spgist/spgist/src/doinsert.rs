@@ -17,6 +17,7 @@ use ::types_spgist::*;
 use ::types_storage::bufpage::PageMut;
 use ::types_tuple::itemptr::{ItemPointerData, ItemPointerIsValid};
 use ::xloginsert_seams::{XLogRegBuf, REGBUF_STANDARD, REGBUF_WILL_INIT};
+use init_small::globals::{EndCriticalSection, StartCriticalSection};
 
 use crate::utils::*;
 pub use ::types_spgist::{spgPageIndexMultiDelete, spgUpdateNodeLink};
@@ -25,11 +26,11 @@ const K: usize = INDEX_MAX_KEYS as usize;
 pub const RM_SPGIST_ID: u8 = ::types_core::RmgrIds::RM_SPGIST_ID as u8;
 
 #[derive(Clone, Copy)]
-struct SPPageDesc {
-    blkno: BlockNumber,
-    buffer: Buffer,
-    offnum: OffsetNumber,
-    node: i32,
+pub(crate) struct SPPageDesc {
+    pub(crate) blkno: BlockNumber,
+    pub(crate) buffer: Buffer,
+    pub(crate) offnum: OffsetNumber,
+    pub(crate) node: i32,
 }
 
 #[inline]
@@ -49,7 +50,7 @@ fn saveNodeLink(
     Ok(())
 }
 
-fn addLeafTuple(
+pub(crate) fn addLeafTuple(
     index: &Relation<'_>,
     state: &mut SpGistState<'_>,
     leaf_tuple: &mut [u8],
@@ -66,6 +67,10 @@ fn addLeafTuple(
         offnumParent: InvalidOffsetNumber,
         nodeI: 0,
     };
+
+    // spgdoinsert.c:217 START_CRIT_SECTION: an error from here to the WAL
+    // record leaves a torn, unlogged page — C promotes it to PANIC.
+    StartCriticalSection();
 
     if current.offnum == InvalidOffsetNumber || SpGistBlockIsRoot(current.blkno) {
         leaf_set_next_offset(leaf_tuple, InvalidOffsetNumber);
@@ -141,6 +146,9 @@ fn addLeafTuple(
             page(parent).set_lsn(recptr);
         }
     }
+
+    // spgdoinsert.c:319
+    EndCriticalSection();
     Ok(())
 }
 
@@ -235,6 +243,9 @@ fn moveLeafs<'m>(
     debug_assert!(nblkno != current.blkno);
 
     let mut leafdata: PgVec<'m, u8> = ::mcx::vec_with_capacity_in(mcx, size)?;
+
+    // spgdoinsert.c:460 START_CRIT_SECTION
+    StartCriticalSection();
 
     let mut r = InvalidOffsetNumber;
     let mut start_offset = InvalidOffsetNumber;
@@ -334,6 +345,9 @@ fn moveLeafs<'m>(
         buf_page_mut(nbuf).set_lsn(recptr);
         page(parent).set_lsn(recptr);
     }
+
+    // spgdoinsert.c:553
+    EndCriticalSection();
 
     SpGistSetLastUsedPage(index, nbuf)?;
     unlock_release(nbuf)?;
@@ -742,6 +756,8 @@ fn doPickSplit<'m>(
     let mut leafdata: PgVec<'m, u8> = ::mcx::vec_with_capacity_in(mcx, total_leaf_sizes)?;
 
     // ---- begin page modifications ----
+    // spgdoinsert.c:1136 START_CRIT_SECTION
+    StartCriticalSection();
 
     if !SpGistBlockIsRoot(current.blkno) {
         let n_placeholder = page_opaque(&page(current).as_ref()).nPlaceholder as usize;
@@ -985,6 +1001,9 @@ fn doPickSplit<'m>(
         }
     }
 
+    // spgdoinsert.c:1438
+    EndCriticalSection();
+
     if new_leaf_buffer != InvalidBuffer {
         SpGistSetLastUsedPage(index, new_leaf_buffer)?;
         unlock_release(new_leaf_buffer)?;
@@ -1065,7 +1084,7 @@ fn spgMatchNodeAction(
     Ok(())
 }
 
-fn addNode<'m>(
+pub(crate) fn addNode<'m>(
     mcx: Mcx<'m>,
     state: &mut SpGistState<'_>,
     inner: &[u8],
@@ -1077,7 +1096,10 @@ fn addNode<'m>(
     let offset = if offset < 0 {
         n
     } else if offset > n {
-        panic!("invalid offset for adding node to SPGiST inner tuple");
+        // spgdoinsert.c:90 elog(ERROR): catchable XX000.
+        return Err(Box::new(PgError::error(
+            "invalid offset for adding node to SPGiST inner tuple",
+        )));
     } else {
         offset
     };
@@ -1141,6 +1163,8 @@ fn spgAddNodeAction<'m>(
 
     if page(current).as_ref().exact_free_space() + old_inner_size >= new_size {
         // replace in place (freespace check in C is vs the size delta)
+        // spgdoinsert.c:1546 START_CRIT_SECTION
+        StartCriticalSection();
         {
             let mut pm = page(current);
             pm.index_tuple_delete(current.offnum);
@@ -1168,6 +1192,9 @@ fn spgAddNodeAction<'m>(
             )?;
             page(current).set_lsn(recptr);
         }
+
+        // spgdoinsert.c:1572
+        EndCriticalSection();
     } else {
         // move to another page and redirect
         if SpGistBlockIsRoot(current.blkno) {
@@ -1201,6 +1228,9 @@ fn spgAddNodeAction<'m>(
         } else {
             2
         };
+
+        // spgdoinsert.c:1629 START_CRIT_SECTION
+        StartCriticalSection();
 
         current.offnum = {
             let mut pm = page(current);
@@ -1269,6 +1299,9 @@ fn spgAddNodeAction<'m>(
             page(parent).set_lsn(recptr);
             buf_page_mut(save_current.buffer).set_lsn(recptr);
         }
+
+        // spgdoinsert.c:1699
+        EndCriticalSection();
 
         if save_current.buffer != current.buffer && save_current.buffer != parent.buffer {
             SpGistSetLastUsedPage(index, save_current.buffer)?;
@@ -1398,6 +1431,9 @@ fn spgSplitNodeAction<'m>(
         xlrec.newPage = new_page;
     }
 
+    // spgdoinsert.c:1814 START_CRIT_SECTION
+    StartCriticalSection();
+
     {
         let mut pm = page(current);
         pm.index_tuple_delete(current.offnum);
@@ -1473,6 +1509,9 @@ fn spgSplitNodeAction<'m>(
             buf_page_mut(new_buffer).set_lsn(recptr);
         }
     }
+
+    // spgdoinsert.c:1896
+    EndCriticalSection();
 
     if new_buffer != InvalidBuffer {
         SpGistSetLastUsedPage(index, new_buffer)?;

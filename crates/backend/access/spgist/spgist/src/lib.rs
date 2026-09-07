@@ -11,6 +11,9 @@ pub mod scan;
 pub mod utils;
 pub mod vacuum;
 
+#[cfg(test)]
+pub(crate) mod tests;
+
 use ::datum::Datum;
 use ::mcx::{Mcx, MemoryContext};
 use ::types_error::PgResult;

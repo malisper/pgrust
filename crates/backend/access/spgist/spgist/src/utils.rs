@@ -8,7 +8,9 @@ use ::nbtree::itup::ItupBuf;
 use ::types_core::{
     BlockNumber, Buffer, ForkNumber, InvalidBlockNumber, OffsetNumber, Oid, BLCKSZ,
 };
-use ::types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
+use ::types_error::{
+    PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_PROGRAM_LIMIT_EXCEEDED, PANIC,
+};
 use ::types_rel::Relation;
 use ::types_spgist::*;
 pub use ::types_spgist::{spgFormDeadTuple, SpGistInitPage};
@@ -79,6 +81,20 @@ pub fn tuple_state_error(tupstate: u8) -> Box<PgError> {
 #[track_caller]
 pub fn add_item_failed(size: usize) -> Box<PgError> {
     Box::new(PgError::error(format!("failed to add item of size {size} to SPGiST index page")))
+}
+
+/// C: elog(PANIC, "failed to add item of size %zu to SPGiST index page", size)
+/// (spgutils.c:1273) — the placeholder is already deleted, so the page is torn
+/// and the damage must not reach disk: a PANIC-level error (crash-restart),
+/// never a panic!() the statement handler would demote to a recoverable ERROR.
+#[cold]
+#[inline(never)]
+#[track_caller]
+fn add_item_failed_panic(size: usize) -> Box<PgError> {
+    Box::new(PgError::new(
+        PANIC,
+        format!("failed to add item of size {size} to SPGiST index page"),
+    ))
 }
 
 #[cold]
@@ -1281,7 +1297,7 @@ pub fn SpGistPageAddNewItem(
                         *s = offnum + 1;
                     }
                 }
-                _ => panic!("failed to add item of size {size} to SPGiST index page"),
+                _ => return Err(add_item_failed_panic(size)),
             }
             return Ok(offnum);
         }
@@ -1381,7 +1397,7 @@ mod inline_datum_tests {
 }
 
 #[cfg(test)]
-mod node_label_tests {
+pub(crate) mod node_label_tests {
     use super::*;
     use std::rc::Rc;
 
@@ -1396,7 +1412,7 @@ mod node_label_tests {
         SpGistTypeDesc { type_, attlen, attbyval, attalign: b's' as i8, attstorage: b'p' as i8 }
     }
 
-    pub(super) fn state<'m>(mcx: Mcx<'m>) -> SpGistState<'m> {
+    pub(crate) fn state<'m>(mcx: Mcx<'m>) -> SpGistState<'m> {
         let text = desc(25, -1, false);
         let int2 = desc(21, 2, true);
         let fi = || ::types_fmgr::FmgrInfo::new(mock_proc, 0, 2, true, false);

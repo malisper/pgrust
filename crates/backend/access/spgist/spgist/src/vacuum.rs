@@ -28,6 +28,7 @@ use ::types_tuple::itemptr::{
     ItemPointerGetBlockNumber, ItemPointerGetOffsetNumber, ItemPointerIsValid,
 };
 use ::xloginsert_seams::{XLogRegBuf, REGBUF_STANDARD};
+use init_small::globals::{EndCriticalSection, StartCriticalSection};
 
 use crate::doinsert::RM_SPGIST_ID;
 use crate::utils::{
@@ -235,6 +236,10 @@ fn vacuum_leaf_page(
     }
     debug_assert!(n_deletable <= MaxIndexTuplesPerPage);
 
+    // spgvacuum.c:329 START_CRIT_SECTION: the page rewrite and its WAL record
+    // are one unit; an error in between is a PANIC in C.
+    StartCriticalSection();
+
     {
         let mut pm = buf_page_mut(buffer);
         spgPageIndexMultiDelete(
@@ -310,6 +315,9 @@ fn vacuum_leaf_page(
         )?;
         buf_page_mut(buffer).set_lsn(recptr);
     }
+
+    // spgvacuum.c:400
+    EndCriticalSection();
     Ok(())
 }
 
@@ -345,6 +353,9 @@ fn vacuum_leaf_root(
         return Ok(());
     }
 
+    // spgvacuum.c:453 START_CRIT_SECTION
+    StartCriticalSection();
+
     // Offsets are already in order: plain PageIndexMultiDelete.
     buf_page_mut(buffer).index_multi_delete(&to_delete);
     bufmgr::mark_buffer_dirty::call(buffer)?;
@@ -364,6 +375,9 @@ fn vacuum_leaf_root(
         )?;
         buf_page_mut(buffer).set_lsn(recptr);
     }
+
+    // spgvacuum.c:481
+    EndCriticalSection();
     Ok(())
 }
 
@@ -385,6 +399,10 @@ fn vacuum_redirect_and_placeholder(
     let is_catalog_rel = ::nbtree::relation_is_accessible_in_logical_decoding(heaprel);
 
     let vistest = procarray_seams::global_vis_test_for::call(heaprel);
+
+    // spgvacuum.c:514 START_CRIT_SECTION: the backwards scan rewrites tuples
+    // in place as it goes.
+    StartCriticalSection();
 
     {
         let mut pm = buf_page_mut(buffer);
@@ -475,6 +493,9 @@ fn vacuum_redirect_and_placeholder(
         )?;
         buf_page_mut(buffer).set_lsn(recptr);
     }
+
+    // spgvacuum.c:615
+    EndCriticalSection();
     Ok(())
 }
 
@@ -782,5 +803,116 @@ mod pending_drain_tests {
             pending.iter().all(|(_, done)| *done),
             "some pending items were never marked done"
         );
+    }
+}
+
+#[cfg(test)]
+mod crit_section_tests {
+    use super::*;
+    use crate::tests::{
+        heap_rel, index_rel, install, leaf_tuple, lock, push_page, set_wal_fail,
+        take_crit_section_count, WAL_FAIL_MSG,
+    };
+    use ::mcx::MemoryContext;
+
+    fn root_leaf_with_one_tuple() -> Buffer {
+        let buffer = push_page();
+        let mut pm = buf_page_mut(buffer);
+        ::types_spgist::SpGistInitPage(&mut pm, ::types_spgist::SPGIST_LEAF);
+        let lt = leaf_tuple(ItemPointerData::new(10, 1));
+        assert_eq!(pm.add_item(&lt, InvalidOffsetNumber, 0), Some(FirstOffsetNumber));
+        buffer
+    }
+
+    // spgvacuum.c:453-481 vacuumLeafRoot: PageIndexMultiDelete, MarkBufferDirty
+    // and XLogInsert are one critical section (row
+    // a186-candidate-fp-spgist-spgvacuum-f1be868cce420b40a28c-1).
+    #[test]
+    fn vacuum_leaf_root_wal_failure_escapes_inside_the_critical_section() {
+        let _serial = lock();
+        install();
+        let buffer = root_leaf_with_one_tuple();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        let index = index_rel(mcx);
+        let heap = heap_rel(mcx);
+        let info = IndexVacuumInfo {
+            index: &index,
+            heaprel: &heap,
+            analyze_only: false,
+            report_progress: false,
+            estimated_count: false,
+            message_level: ::types_error::DEBUG2,
+            num_heap_tuples: 1.0,
+            strategy: None,
+        };
+        let mut stats = IndexBulkDeleteResult::default();
+        let dead = [ItemPointerData::new(10, 1)];
+        let mut state = SpgVacState {
+            info: &info,
+            stats: &mut stats,
+            dead_items: Some(&dead),
+            collect: None,
+            redirect_xid: 0,
+            pending: Vec::new(),
+            my_xmin: 0,
+            last_filled_block: 0,
+        };
+
+        init_small::globals::SetCritSectionCount(0);
+        set_wal_fail(true);
+        let err = vacuum_leaf_root(&mut state, &index, buffer)
+            .expect_err("the simulated XLogInsert failure must surface");
+        let count = take_crit_section_count();
+        assert_eq!(err.message(), WAL_FAIL_MSG);
+        assert!(
+            count > 0,
+            "spgvacuum.c:453 START_CRIT_SECTION: the Err escaped vacuumLeafRoot with \
+             CritSectionCount = {count}, so it would be recovered as a plain ERROR \
+             (dirty, unlogged root page left in shared buffers) instead of PANIC"
+        );
+    }
+
+    // The Ok path leaves the section balanced (spgvacuum.c:481) and the dead
+    // tuple removed.
+    #[test]
+    fn vacuum_leaf_root_balances_the_critical_section() {
+        let _serial = lock();
+        install();
+        let buffer = root_leaf_with_one_tuple();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        let index = index_rel(mcx);
+        let heap = heap_rel(mcx);
+        let info = IndexVacuumInfo {
+            index: &index,
+            heaprel: &heap,
+            analyze_only: false,
+            report_progress: false,
+            estimated_count: false,
+            message_level: ::types_error::DEBUG2,
+            num_heap_tuples: 1.0,
+            strategy: None,
+        };
+        let mut stats = IndexBulkDeleteResult::default();
+        let dead = [ItemPointerData::new(10, 1)];
+        let mut state = SpgVacState {
+            info: &info,
+            stats: &mut stats,
+            dead_items: Some(&dead),
+            collect: None,
+            redirect_xid: 0,
+            pending: Vec::new(),
+            my_xmin: 0,
+            last_filled_block: 0,
+        };
+
+        init_small::globals::SetCritSectionCount(0);
+        set_wal_fail(false);
+        vacuum_leaf_root(&mut state, &index, buffer)
+            .unwrap_or_else(|e| panic!("vacuumLeafRoot on the fake pool: {e:?}"));
+        assert_eq!(take_crit_section_count(), 0, "END_CRIT_SECTION after the WAL record");
+        assert_eq!(stats.tuples_removed, 1.0);
+        assert_eq!(buf_page_mut(buffer).as_ref().max_offset_number(), 0);
     }
 }
