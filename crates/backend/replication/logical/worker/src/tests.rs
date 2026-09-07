@@ -316,3 +316,23 @@ fn parallel_apply_worker_error_context_is_context_not_message() {
         "logical replication parallel apply worker"
     );
 }
+
+// InitializeLogRepWorker (worker.c:4751): the tablesync start line carries
+// the table NAME (get_rel_name), not the relation OID (row
+// a186-candidate-fp-logical-worker-p2-eb4eccd992480bf6704a-1).
+#[test]
+fn tablesync_worker_started_line_names_the_table() {
+    assert_eq!(
+        super::tablesync_worker_started_message("s", Some("my_table")),
+        "logical replication table synchronization worker for subscription \"s\", table \"my_table\" has started"
+    );
+    // C's snprintf renders a NULL get_rel_name as "(null)".
+    assert_eq!(
+        super::tablesync_worker_started_message("s", None),
+        "logical replication table synchronization worker for subscription \"s\", table \"(null)\" has started"
+    );
+    assert_eq!(
+        super::apply_worker_started_message("s"),
+        "logical replication apply worker for subscription \"s\" has started"
+    );
+}

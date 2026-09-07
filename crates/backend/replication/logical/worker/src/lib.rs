@@ -802,6 +802,21 @@ pub fn ApplyWorkerMain(main_arg: u64) -> PgResult<()> {
 // InitializeLogRepWorker (worker.c:4658), shared by the leader apply,
 // tablesync, and parallel apply workers. Returns None (after its own LOG)
 // when the subscription was removed/disabled during startup.
+// InitializeLogRepWorker (worker.c:4751): the table synchronization worker's
+// start line names the table via get_rel_name; C's %s of a NULL name (the
+// relation vanished between launch and lookup) prints "(null)" (snprintf.c).
+pub(crate) fn tablesync_worker_started_message(subname: &str, relname: Option<&str>) -> String {
+    format!(
+        "logical replication table synchronization worker for subscription \"{subname}\", table \"{}\" has started",
+        relname.unwrap_or("(null)")
+    )
+}
+
+// InitializeLogRepWorker (worker.c:4757).
+pub(crate) fn apply_worker_started_message(subname: &str) -> String {
+    format!("logical replication apply worker for subscription \"{subname}\" has started")
+}
+
 pub(crate) fn initialize_logrep_worker(
     mcx: Mcx<'static>,
     w: &launcher::LogicalRepWorker,
@@ -883,6 +898,20 @@ pub(crate) fn initialize_logrep_worker(
     // (worker.c:4734).
     set_synchronous_commit(&synccommit)?;
 
+    // worker.c:4751: announce the start while the transaction is still open —
+    // the tablesync line resolves the table name through the syscache
+    // (get_rel_name); every worker kind that runs InitializeLogRepWorker logs
+    // here, the parallel apply worker included.
+    if w.is_tablesync() {
+        let relname = lsyscache::get_rel_name(mcx, w.relid)?;
+        let _ = elog::elog(
+            LOG,
+            tablesync_worker_started_message(&subname, relname.as_ref().map(|s| s.as_str())),
+        );
+    } else {
+        let _ = elog::elog(LOG, apply_worker_started_message(&subname));
+    }
+
     xact::CommitTransactionCommand()?;
 
     // InitializeLogRepWorker tail (worker.c:4761): register the origin-state
@@ -905,9 +934,9 @@ fn apply_worker_body(slot: usize) -> PgResult<()> {
     // SAFETY: `top` outlives the worker body; see apply_loop.
     let mcx: Mcx<'static> = unsafe { std::mem::transmute(top.mcx()) };
 
-    let Some(subname) = initialize_logrep_worker(mcx, &w)? else {
+    if initialize_logrep_worker(mcx, &w)?.is_none() {
         return Ok(());
-    };
+    }
     // worker.c:4837: initialized — session locks may be taken from here on,
     // and the exit callback releases them.
     launcher::set_initializing_apply_worker(false);
@@ -919,13 +948,6 @@ fn apply_worker_body(slot: usize) -> PgResult<()> {
     )?;
 
     if w.is_tablesync() {
-        let _ = elog::elog(
-            LOG,
-            format!(
-                "logical replication table synchronization worker for subscription \"{subname}\", relation OID {} has started",
-                w.relid
-            ),
-        );
         apply::logicalrep_relmap_prepare()?;
         let r = tablesync::run_tablesync_worker(mcx, w.relid);
         let r = match r {
@@ -935,11 +957,6 @@ fn apply_worker_body(slot: usize) -> PgResult<()> {
         let _ = origin::replorigin_session_reset();
         return r;
     }
-
-    let _ = elog::elog(
-        LOG,
-        format!("logical replication apply worker for subscription \"{subname}\" has started"),
-    );
 
     // run_apply_worker (worker.c:4546).
     if my_sub(|s| s.slotname.is_none()) {

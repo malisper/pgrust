@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 use mcx::PgFxHashMap;
 use types_core::{CommandId, InvalidOid, Oid, TransactionId};
-use types_error::PgResult;
+use types_error::{PgResult, DEBUG1};
 use types_snapshot::SnapshotData;
 use types_storage::RelFileLocator;
 use types_tuple::{HeapTupleData, ItemPointerData};
@@ -290,6 +290,16 @@ fn UpdateLogicalMappings(
     // Apply in LSN order.
     files.sort();
     for (_lsn, fname) in &files {
+        // reorderbuffer.c:5539: each applied mapping file is announced at
+        // DEBUG1 with the snapshot's first subxid (a queued file implies a
+        // subxip match, so subxip[0] exists).
+        let _ = elog::elog(
+            DEBUG1,
+            format!(
+                "applying mapping: \"{fname}\" in {}",
+                snapshot.subxip.first().copied().unwrap_or(types_core::InvalidTransactionId)
+            ),
+        );
         ApplyLogicalMappingFile(hash, &dir, fname)?;
     }
     Ok(())
@@ -386,5 +396,61 @@ mod mapping_tests {
             .expect_err("missing mapping file is C ereport");
         assert_eq!(err.sqlstate, types_error::ERRCODE_UNDEFINED_FILE);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // UpdateLogicalMappings (reorderbuffer.c:5539): every mapping file queued
+    // for this snapshot is announced at DEBUG1, in LSN order, naming the file
+    // and the snapshot's first subxid (row a186-candidate-fp-logical-
+    // reorderbuffer-p3-5d431f0ae4c8d078f294-1).
+    #[test]
+    fn update_logical_mappings_logs_each_applied_file_at_debug1() {
+        crate::tests::install_did_commit_stub();
+        crate::tests::DID_COMMIT_ANSWER.with(|c| c.set(true));
+
+        let base = std::env::temp_dir().join(format!("rb-mapdebug-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let dir = base.join("pg_logical/mappings");
+        std::fs::create_dir_all(&dir).unwrap();
+        // pg_authid (1260 = 0x4ec) is a shared relation: dboid 0 in the file
+        // name, so the scan does not depend on MyDatabaseId. Two files for
+        // mapped xid 0x2f1 = 753, named out of LSN order.
+        let old = locator(1664, 0, 1260);
+        let new = locator(1664, 0, 77777);
+        for (fname, tid) in [("map-0-4ec-0_20-2f1-2f2", (2u32, 1u16)), ("map-0-4ec-0_10-2f1-2f3", (1, 1))] {
+            std::fs::write(dir.join(fname), entry(old, tid, new, tid)).unwrap();
+        }
+        init_small::globals::SetDataDir(base.to_str().unwrap());
+
+        static SEEN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+        fn hook(error: &types_error::PgError, _output_to_server: &mut bool) {
+            if error.level == types_error::DEBUG1 {
+                SEEN.lock().unwrap().push(error.message.clone());
+            }
+        }
+        SEEN.lock().unwrap().clear();
+        let prev_level = elog::config::log_min_messages();
+        elog::config::set_log_min_messages(types_error::DEBUG1);
+        let prev_hook = elog::set_emit_log_hook(Some(hook));
+
+        let mut snapshot = SnapshotData::sentinel(crate::rb_mcx(), types_snapshot::SnapshotType::SNAPSHOT_HISTORIC_MVCC);
+        snapshot.subxip.push(753);
+        snapshot.subxcnt = 1;
+        let hash: RefCell<TupleCidHash> =
+            RefCell::new(PgFxHashMap::with_hasher_in(Default::default(), crate::rb_mcx()));
+        let result = UpdateLogicalMappings(&hash, 1260, &snapshot);
+
+        elog::set_emit_log_hook(prev_hook);
+        elog::config::set_log_min_messages(prev_level);
+        result.unwrap();
+
+        let seen = SEEN.lock().unwrap();
+        assert_eq!(
+            seen.as_slice(),
+            [
+                "applying mapping: \"map-0-4ec-0_10-2f1-2f3\" in 753".to_owned(),
+                "applying mapping: \"map-0-4ec-0_20-2f1-2f2\" in 753".to_owned(),
+            ]
+        );
+        std::fs::remove_dir_all(&base).ok();
     }
 }

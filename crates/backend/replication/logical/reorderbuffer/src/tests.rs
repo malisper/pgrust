@@ -889,13 +889,13 @@ fn finish_prepared_unknown_xid_is_noop() {
 // --- CheckXidAlive (concurrent-abort detection during prepared decode) ---
 
 thread_local! {
-    static DID_COMMIT_ANSWER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    pub(crate) static DID_COMMIT_ANSWER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 // Seams are set-once per process; every test that needs the stub funnels
 // through this. The stub answers from a thread-local so parallel tests
 // cannot see each other's value.
-fn install_did_commit_stub() {
+pub(crate) fn install_did_commit_stub() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         transam_seams::transaction_id_did_commit::set(|_| {

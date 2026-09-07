@@ -1085,6 +1085,9 @@ pub fn check_point_snap_build() -> PgResult<()> {
         cutoff = redo;
     }
 
+    // snapbuild.c:1992 AllocateDir + ReadDir (fd.c:2997): a directory that
+    // cannot be opened reports "could not open directory"; only a failed
+    // readdir() reports "could not read directory".
     let entries = match std::fs::read_dir(PG_LOGICAL_SNAPSHOTS_DIR) {
         Ok(entries) => entries,
         Err(e) => {
@@ -1092,7 +1095,7 @@ pub fn check_point_snap_build() -> PgResult<()> {
                 .with_saved_errno(e.raw_os_error().unwrap_or(0))
                 .errcode_for_file_access()
                 .errmsg(format!(
-                    "could not read directory \"{PG_LOGICAL_SNAPSHOTS_DIR}\": %m"
+                    "could not open directory \"{PG_LOGICAL_SNAPSHOTS_DIR}\": %m"
                 ))
                 .finish(loc("CheckPointSnapBuild"));
         }
