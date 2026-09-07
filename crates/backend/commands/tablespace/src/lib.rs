@@ -559,13 +559,30 @@ fn create_tablespace_directories(location: &str, tablespaceoid: Oid) -> PgResult
     }
 
     if !in_place {
-        // wasm32: std exposes no symlink creation on wasi (unix::fs is
-        // absent; wasi::fs's is unstable), and preopen-relative symlink
-        // targets are runtime-dependent — refuse with the C error shape
-        // (52 = WASI ENOSYS). Non-in-place tablespaces are effectively
-        // unsupported on wasm.
+        // wasm32: std exposes no symlink creation on wasi (unix::fs is absent
+        // and wasi::fs's is unstable), so call wasi-libc's symlink(2) shim —
+        // `path_symlink` on a preopen-resolved dirfd, the same resolution
+        // every std::fs call in this file already goes through. The C error
+        // shape is unchanged: a failure carries the raw errno below.
         #[cfg(target_family = "wasm")]
-        let link_result: std::io::Result<()> = Err(std::io::Error::from_raw_os_error(52));
+        let link_result: std::io::Result<()> = {
+            match (
+                std::ffi::CString::new(location),
+                std::ffi::CString::new(linkloc.as_str()),
+            ) {
+                (Ok(target), Ok(link)) => {
+                    // SAFETY: both are NUL-terminated C strings that outlive the call.
+                    if unsafe { libc::symlink(target.as_ptr(), link.as_ptr()) } < 0 {
+                        Err(std::io::Error::last_os_error())
+                    } else {
+                        Ok(())
+                    }
+                }
+                // An embedded NUL is never a valid path; std::os::unix::fs::symlink
+                // reports the same EINVAL for it.
+                _ => Err(std::io::Error::from_raw_os_error(libc::EINVAL)),
+            }
+        };
         #[cfg(not(target_family = "wasm"))]
         let link_result = std::os::unix::fs::symlink(location, &linkloc);
         if let Err(e) = link_result {

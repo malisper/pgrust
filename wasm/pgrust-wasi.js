@@ -641,6 +641,15 @@ export function makeWasi({ image, manifest, vfs: existingVfs, stdinBytes, stdinS
     path_readlink(_dirfd, _pathPtr, _pathLen, _bufPtr, _bufLen, _usedPtr) {
       return E.INVAL; // the packed image contains no symlinks (built with cp -RL)
     },
+    // This Vfs is a flat name->node map with no link inode at all, so a link
+    // cannot be created here. ENOTSUP is what a filesystem that does not
+    // implement links answers, and it is what CREATE TABLESPACE reports as
+    // "could not create symbolic link ...: Not supported" on this lane. The
+    // broker lane (--fs broker) has a real store and does create links; the
+    // import only has to EXIST here because the guest now references it.
+    path_symlink(_oldPtr, _oldLen, _dirfd, _newPtr, _newLen) {
+      return E.NOTSUP;
+    },
     poll_oneoff(inPtr, outPtr, nsubs, neventsPtr) {
       // No blocking primitive here (a COEP-less browser worker cannot build a
       // SharedArrayBuffer to Atomics.wait on). Report every clock subscription

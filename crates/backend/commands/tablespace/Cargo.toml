@@ -52,3 +52,9 @@ lwlock = { path = "../../storage/lmgr/lwlock" }
 lmgr = { path = "../../storage/lmgr/lmgr" }
 fd = { path = "../../storage/file/fd" }
 standby = { path = "../../storage/ipc/standby" }
+
+# wasm32 only: std has no stable symlink creation for wasi, so
+# create_tablespace_directories() calls wasi-libc's symlink(2) shim directly.
+# Native keeps std::os::unix::fs::symlink and pulls in nothing.
+[target.'cfg(target_family = "wasm")'.dependencies]
+libc = { version = "0.2", default-features = false }

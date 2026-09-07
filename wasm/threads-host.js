@@ -739,6 +739,8 @@ export function makeThreadsHost({
       path_unlink_file: [1, 2],
       path_readlink: [1, 2],
       path_rename: [1, 2],
+      // path_symlink's first string is the TARGET, and it comes first.
+      path_symlink: [0, 1],
     };
     const dec = new TextDecoder('utf-8', { fatal: false });
     for (const name of Object.keys(wasi)) {

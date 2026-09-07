@@ -1,28 +1,24 @@
 #!/usr/bin/env node
 // tablespace-host-proof.mjs — the HOST half of the tablespace proof, at the WASI seam.
 //
-// WHY THIS EXISTS. `wasm/tablespace-proof.sql` is the real proof and it is currently BLOCKED in
-// the GUEST, not in the host: crates/backend/commands/tablespace/src/lib.rs refuses on wasm before
-// it ever reaches a WASI call —
+// WHY THIS EXISTS. `wasm/tablespace-proof.sql` is the real proof, and it now passes end to end:
+// crates/backend/commands/tablespace/src/lib.rs used to refuse on wasm before it ever reached a
+// WASI call (`Err(std::io::Error::from_raw_os_error(52))`, ENOSYS, which is why the SQL lane
+// reported `could not create symbolic link "pg_tblspc/<oid>": Function not implemented`), and it
+// now calls wasi-libc's `symlink(2)` instead.
 //
-//     #[cfg(target_family = "wasm")]
-//     let link_result: std::io::Result<()> = Err(std::io::Error::from_raw_os_error(52));
-//
-// (52 is WASI ENOSYS, which is why the SQL lane reports `could not create symbolic link
-// "pg_tblspc/<oid>": Function not implemented`). Nothing the host does can change that answer.
-//
-// So this script makes exactly the calls that stanza would have made if it were allowed to, in the
-// same order, through the SAME machinery the guest uses: the storage coordinator worker
-// (wasm/storage-worker.js) owning a root store plus a memory-backed MOUNT at /pgeph, the
-// SharedArrayBuffer broker, and the WASI preview1 adapter over it. If every step below passes, the
-// host is ready and the one remaining change is the guest's.
+// This script stays because it isolates the HOST half. It makes exactly the calls that stanza
+// makes, in the same order, through the SAME machinery the guest uses — the storage coordinator
+// worker (wasm/storage-worker.js) owning a root store plus a memory-backed MOUNT at /pgeph, the
+// SharedArrayBuffer broker, and the WASI preview1 adapter over it — with no Postgres in the
+// picture. When the SQL proof breaks, this says in one run which side broke.
 //
 // The sequence is create_tablespace_directories() plus one relation write:
 //
 //   1. stat(location)                      — the wasm branch's stand-in for chmod(location)
 //   2. mkdir(location/PG_18_<catver>)
 //   3. lstat(pg_tblspc/<oid>)              — must be ENOENT before the link is made
-//   4. symlink(location, pg_tblspc/<oid>)  — the call that is refused in the guest today
+//   4. symlink(location, pg_tblspc/<oid>)  — the call the guest makes via wasi-libc
 //   5. readlink(pg_tblspc/<oid>)           — what pg_tablespace_location() reads
 //   6. lstat / stat of the link            — symlink_metadata() vs metadata()
 //   7. mkdir + open + write + fsync THROUGH the link, at a real relfilenode path
