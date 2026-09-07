@@ -369,6 +369,18 @@ impl SimpleHashIndex {
         }
     }
 
+    /// SH_INSERT_HASH_INTERNAL's grow gate (simplehash.h:629-630): a table
+    /// already at SH_MAX_SIZE cannot grow any further.
+    fn grow_guard(size: u64) -> PgResult<()> {
+        if size == SH_MAX_SIZE {
+            // sh_error(...) = elog(ERROR, ...) in a backend (simplehash.h:300).
+            return Err(PgError::error("hash table size exceeded")
+                .with_sqlstate(::types_error::ERRCODE_INTERNAL_ERROR)
+                .into());
+        }
+        Ok(())
+    }
+
     /// SH_INSERT_HASH_INTERNAL: probe for a match via `matches`; on miss,
     /// robin-hood place `new_ix`. Returns (entry index, found-existing).
     fn insert_or_find(
@@ -381,7 +393,7 @@ impl SimpleHashIndex {
         'restart: loop {
             let mut insertdist = 0u32;
             if self.members >= self.grow_threshold {
-                assert!(self.size() != SH_MAX_SIZE, "hash table size exceeded");
+                Self::grow_guard(self.size())?;
                 self.grow(self.size() * 2, entry_hash);
             }
             let startelem = self.initial_bucket(hash);
@@ -820,7 +832,6 @@ impl<'mcx> TupleHashTable<'mcx> {
         }
         let TupleHashTable { entries, hashtab, tab_eq_func, tableslot, kernel, temp_ctx, .. } =
             self;
-        let mut eq_err: Option<Box<PgError>> = None;
         let input_slot = input_slot;
         // Kernel match = NOT DISTINCT over the entry's cached key datum.
         let entry_hash = |ix: u32| entries[ix as usize].hash;
@@ -898,18 +909,12 @@ impl<'mcx> TupleHashTable<'mcx> {
                     inner: Some(&mut *input_slot),
                     outer: Some(&mut *tableslot),
                 };
-                match exec_qual(Some(tab_eq_func), &mut slots) {
-                    Ok(m) => Ok(m),
-                    Err(e) => {
-                        eq_err = Some(e);
-                        Ok(false)
-                    }
-                }
+                // C TupleHashTableMatch (execGrouping.c:542): an error in
+                // ExecQualAndReset aborts the probe at once — no later
+                // colliding entry is evaluated and THAT error is reported.
+                exec_qual(Some(tab_eq_func), &mut slots)
             })?,
         };
-        if let Some(e) = eq_err {
-            return Err(e);
-        }
         if let Some(ix) = found {
             return Ok((Some(ix), false));
         }

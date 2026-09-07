@@ -556,3 +556,19 @@ fn hash_to_iv0_rebases_variable_iv_onto_leader_mapping() {
         }
     }
 }
+
+/// simplehash.h:629-630 (SH_INSERT_HASH_INTERNAL): a table already at
+/// SH_MAX_SIZE reports `sh_error("hash table size exceeded")` = elog(ERROR)
+/// with ERRCODE_INTERNAL_ERROR (XX000) — an error, never a process abort.
+/// The guard is exercised through its pure form (a 2^32-bucket index is
+/// 16GB); sizes below the cap must pass.
+#[test]
+fn grow_guard_at_max_size_is_an_error_not_a_panic() {
+    use crate::{SimpleHashIndex, SH_MAX_SIZE};
+    assert!(SimpleHashIndex::grow_guard(2).is_ok());
+    assert!(SimpleHashIndex::grow_guard(SH_MAX_SIZE / 2).is_ok());
+    let e = SimpleHashIndex::grow_guard(SH_MAX_SIZE)
+        .expect_err("SH_MAX_SIZE table must refuse to grow with an error");
+    assert_eq!(e.message(), "hash table size exceeded");
+    assert_eq!(e.sqlstate(), ::types_error::ERRCODE_INTERNAL_ERROR);
+}
