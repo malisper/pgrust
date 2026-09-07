@@ -128,6 +128,49 @@ fn missing_file_fails_after_retry() {
     );
 }
 
+// sync.c:441-453 (ProcessSyncRequests): the first ENOENT on a file is
+// reported at DEBUG1 with errmsg_internal("could not fsync file \"%s\" but
+// retrying: %m") before the absorb-and-retry; only the second failure is the
+// data_sync_elevel(ERROR) report.
+#[test]
+fn missing_file_logs_debug1_retry_notice() {
+    setup();
+    fd::vfd::set_data_sync_retry(true);
+
+    static SEEN: std::sync::Mutex<Vec<(elog::ErrorLevel, String)>> = std::sync::Mutex::new(Vec::new());
+    fn hook(error: &elog::PgError, _output_to_server: &mut bool) {
+        SEEN.lock().unwrap().push((error.level, error.message.clone()));
+    }
+    SEEN.lock().unwrap().clear();
+    let prev_min = elog::config::log_min_messages();
+    elog::config::set_log_min_messages(DEBUG1);
+    let prev_hook = elog::set_emit_log_hook(Some(hook));
+
+    let tag = md_tag(20009);
+    RegisterSyncRequest(tag, SyncRequestType::SYNC_REQUEST, false).unwrap();
+    let err = ProcessSyncRequests().unwrap_err();
+
+    elog::set_emit_log_hook(prev_hook);
+    elog::config::set_log_min_messages(prev_min);
+
+    assert_eq!(
+        err.message,
+        "could not fsync file \"base/5/20009\": No such file or directory",
+        "got: {err:?}"
+    );
+    let seen = SEEN.lock().unwrap();
+    let retries: Vec<&(elog::ErrorLevel, String)> =
+        seen.iter().filter(|(_, m)| m.contains("but retrying")).collect();
+    assert_eq!(
+        retries,
+        [&(
+            DEBUG1,
+            "could not fsync file \"base/5/20009\" but retrying: No such file or directory".to_owned()
+        )],
+        "seen: {seen:?}"
+    );
+}
+
 #[test]
 fn filter_cancels_matching_database() {
     setup();

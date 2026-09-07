@@ -338,6 +338,15 @@ pub fn ProcessSyncRequests() -> PgResult<()> {
                         .finish(loc("ProcessSyncRequests"))?;
                     unreachable!("fsync-failure ereport returned");
                 }
+                // sync.c:449-453: the first ENOENT is a DEBUG1 retry notice.
+                ereport(DEBUG1)
+                    .with_saved_errno(r.errno)
+                    .errcode_for_file_access()
+                    .errmsg_internal(format!(
+                        "could not fsync file \"{}\" but retrying: %m",
+                        r.path
+                    ))
+                    .finish(loc("ProcessSyncRequests"))?;
                 absorb()?;
                 absorb_counter = FSYNCS_PER_ABSORB;
                 failures += 1;
