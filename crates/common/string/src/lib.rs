@@ -11,6 +11,24 @@ pub fn pg_clean_ascii(s: &str, _alloc_flags: i32) -> Option<String> {
     Some(dst)
 }
 
+/// C: `pg_is_ascii(str)` (src/common/string.c:132): true when no byte up to
+/// the NUL has the high bit set (`IS_HIGHBIT_SET`).
+pub fn pg_is_ascii(s: &[u8]) -> bool {
+    !c_str(s).iter().any(|&b| b & 0x80 != 0)
+}
+
+/// C: `pg_strip_crlf(str)` (src/common/string.c:153): removes any trailing
+/// newline and carriage return characters.  C zero-terminates in place and
+/// returns the new length; the returned slice is that string, its `len()`
+/// C's return value.
+pub fn pg_strip_crlf(s: &[u8]) -> &[u8] {
+    let mut s = c_str(s);
+    while let [rest @ .., b'\n' | b'\r'] = s {
+        s = rest;
+    }
+    s
+}
+
 /// C-locale `isspace()`: HT, LF, VT, FF, CR, SP.
 ///
 /// Rust's `u8::is_ascii_whitespace` / `str::trim_ascii*` are NOT this set --
@@ -20,6 +38,161 @@ pub fn pg_clean_ascii(s: &str, _alloc_flags: i32) -> Option<String> {
 #[inline]
 pub const fn isspace_c_locale(b: u8) -> bool {
     b == b' ' || (b >= 0x09 && b <= 0x0d)
+}
+
+/// C strings end at the first NUL: every helper here models a `const char *`
+/// argument, so a slice is cut there before anything else looks at it.
+#[inline]
+fn c_str(s: &[u8]) -> &[u8] {
+    match s.iter().position(|&b| b == 0) {
+        Some(n) => &s[..n],
+        None => s,
+    }
+}
+
+/// C: `pg_str_endswith(str, end)` (src/common/string.c:29): whether `str`
+/// has the postfix `end`, both NUL-terminated.
+pub fn pg_str_endswith(s: &[u8], end: &[u8]) -> bool {
+    let (s, end) = (c_str(s), c_str(end));
+    // can't be a postfix if longer; otherwise strcmp the tail
+    end.len() <= s.len() && &s[s.len() - end.len()..] == end
+}
+
+/// `errno` as a C caller observes it after `strtol`/`strtoint`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StrtoErrno {
+    /// The value was out of range (glibc `strtol` saturation, or
+    /// `strtoint`'s `val != (int) val` narrowing test).
+    Erange,
+    /// `base` was not 0 or 2..=36.
+    Einval,
+}
+
+/// Result of [`strtol`]: what a C caller can observe from
+/// `strtol(s, &endptr, base)` — the return value, `endptr - s`, and errno.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Strtol {
+    /// The C return value: `LONG_MAX`/`LONG_MIN` on ERANGE, 0 on no
+    /// conversion or EINVAL.
+    pub value: i64,
+    /// endptr offset: bytes consumed from the start of `s`.  0 == "no
+    /// conversion" (C leaves `*endptr == nptr`; on EINVAL glibc never writes
+    /// `*endptr` at all, which the 0 stands in for).
+    pub consumed: usize,
+    /// `None` == errno untouched: glibc sets NO errno on no-conversion.
+    pub errno: Option<StrtoErrno>,
+}
+
+/// C: `strtol(s, &endptr, base)` on the 64-bit glibc targets the server
+/// runs on (`long` is `int64`).
+///
+/// glibc semantics, verified by execution: `base` outside {0, 2..=36} ->
+/// EINVAL, 0, endptr untouched.  Otherwise skip leading C-locale whitespace
+/// ([`isspace_c_locale`], VT/FF included), take one optional `+`/`-`, then
+/// with base 0 or 16 accept a `0x`/`0X` prefix (base 0: `0x` -> 16, leading
+/// `0` -> 8, else 10).  A `0x` prefix NOT followed by a hex digit is not an
+/// error: the `0` converts and endptr stops on the `x`.  Digits are `0-9`
+/// then `a-z`/`A-Z` below the base; the whole digit run is consumed even
+/// once the accumulator has overflowed, and overflow saturates at
+/// `LONG_MAX`/`LONG_MIN` with ERANGE (`-9223372036854775808` itself is in
+/// range).  No digits -> 0, `consumed == 0`, errno untouched.  Trailing
+/// garbage is the caller's business.
+pub fn strtol(s: &[u8], base: i32) -> Strtol {
+    if base < 0 || base == 1 || base > 36 {
+        return Strtol { value: 0, consumed: 0, errno: Some(StrtoErrno::Einval) };
+    }
+    let s = c_str(s);
+    let mut base = base as u64;
+
+    let mut i = 0;
+    while i < s.len() && isspace_c_locale(s[i]) {
+        i += 1;
+    }
+    let mut neg = false;
+    match s.get(i) {
+        Some(b'-') => {
+            neg = true;
+            i += 1;
+        }
+        Some(b'+') => i += 1,
+        _ => {}
+    }
+
+    // Recognize the base prefix.  A "0x" not followed by a hex digit is the
+    // number 0 with endptr after the "0" (glibc's noconv special case), which
+    // the look-ahead expresses directly.
+    if s.get(i) == Some(&b'0') {
+        if (base == 0 || base == 16)
+            && matches!(s.get(i + 1), Some(b'x') | Some(b'X'))
+            && s.get(i + 2).is_some_and(|b| b.is_ascii_hexdigit())
+        {
+            i += 2;
+            base = 16;
+        } else if base == 0 {
+            base = 8;
+        }
+    } else if base == 0 {
+        base = 10;
+    }
+
+    let digits_start = i;
+    // Accumulate the magnitude; `overflow` marks a magnitude past u64, which
+    // is past LONG_MAX either way.
+    let mut acc: u64 = 0;
+    let mut overflow = false;
+    while i < s.len() {
+        let d = match s[i] {
+            b @ b'0'..=b'9' => u64::from(b - b'0'),
+            b @ b'a'..=b'z' => u64::from(b - b'a' + 10),
+            b @ b'A'..=b'Z' => u64::from(b - b'A' + 10),
+            _ => break,
+        };
+        if d >= base {
+            break;
+        }
+        if !overflow {
+            match acc.checked_mul(base).and_then(|v| v.checked_add(d)) {
+                Some(v) => acc = v,
+                None => overflow = true,
+            }
+        }
+        i += 1;
+    }
+
+    if i == digits_start {
+        // No conversion: value 0, endptr == nptr, errno untouched.
+        return Strtol { value: 0, consumed: 0, errno: None };
+    }
+    // LONG_MIN's magnitude is LONG_MAX + 1.
+    let limit = if neg { (i64::MAX as u64) + 1 } else { i64::MAX as u64 };
+    if overflow || acc > limit {
+        let value = if neg { i64::MIN } else { i64::MAX };
+        return Strtol { value, consumed: i, errno: Some(StrtoErrno::Erange) };
+    }
+    let value = if neg { (acc as i64).wrapping_neg() } else { acc as i64 };
+    Strtol { value, consumed: i, errno: None }
+}
+
+/// Result of [`strtoint`]: the C return value, `endptr - s`, and errno.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Strtoint {
+    /// The C return value: `(int) val` — the long TRUNCATED to int, not
+    /// clamped (`4294967297` -> 1 with ERANGE).
+    pub value: i32,
+    /// endptr offset, exactly as [`Strtol::consumed`].
+    pub consumed: usize,
+    /// errno: strtol's own, or ERANGE when the long did not fit an int.
+    pub errno: Option<StrtoErrno>,
+}
+
+/// C: `strtoint(str, &endptr, base)` (src/common/string.c:50) — "just like
+/// strtol, but returns int not long": `val = strtol(...); if (val != (int)
+/// val) errno = ERANGE; return (int) val;`.
+pub fn strtoint(s: &[u8], base: i32) -> Strtoint {
+    let r = strtol(s, base);
+    let value = r.value as i32;
+    let errno = if i64::from(value) != r.value { Some(StrtoErrno::Erange) } else { r.errno };
+    Strtoint { value, consumed: r.consumed, errno }
 }
 
 /// C: `strtoint(str, &endptr, 10)` (src/common/string.c) plus the
@@ -32,61 +205,15 @@ pub const fn isspace_c_locale(b: u8) -> bool {
 /// `*endptr != '\0'` test is against that NUL.
 pub fn strtoint10_strict(s: &[u8]) -> Option<i32> {
     // TextDatumGetCString: the C string stops at the first NUL.
-    let s = match s.iter().position(|&b| b == 0) {
-        Some(n) => &s[..n],
-        None => s,
-    };
-
-    let mut i = 0;
-    // strtol: skip leading C-locale whitespace.
-    while i < s.len() && isspace_c_locale(s[i]) {
-        i += 1;
-    }
-    // strtol: at most one sign, with no whitespace after it.
-    let neg = match s.get(i) {
-        Some(b'-') => {
-            i += 1;
-            true
-        }
-        Some(b'+') => {
-            i += 1;
-            false
-        }
-        _ => false,
-    };
-
-    let digits_start = i;
-    let mut acc: i64 = 0;
-    let mut erange = false;
-    while i < s.len() && s[i].is_ascii_digit() {
-        if !erange {
-            acc = acc * 10 + i64::from(s[i] - b'0');
-            // Past the int magnitude strtoint reports ERANGE regardless of how
-            // many more digits follow, so stop accumulating here.
-            if acc > i64::from(i32::MAX) + 1 {
-                erange = true;
-            }
-        }
-        i += 1;
-    }
-
+    let s = c_str(s);
+    let r = strtoint(s, 10);
     // endptr == str: strtol converted nothing.
-    if i == digits_start {
-        return None;
-    }
     // *endptr != '\0': trailing junk, including trailing whitespace.
-    if i != s.len() {
-        return None;
-    }
     // errno != 0: strtol's ERANGE, or strtoint's `val != (int) val` narrowing.
-    if erange {
+    if r.consumed == 0 || r.consumed != s.len() || r.errno.is_some() {
         return None;
     }
-    let v = if neg { -acc } else { acc };
-    if v < i64::from(i32::MIN) || v > i64::from(i32::MAX) {
-        return None;
-    }
-    Some(v as i32)
+    Some(r.value)
 }
 
 /// Result of [`strtoul_base0`]; mirrors what a C caller can observe from
@@ -124,11 +251,7 @@ pub struct StrtoulBase0 {
 /// alone, and garbage input "successfully" parses as 0.  Do not "improve"
 /// on this — behavioral identity with the C call sites is the contract.
 pub fn strtoul_base0(s: &[u8]) -> StrtoulBase0 {
-    // C strings end at the first NUL.
-    let s = match s.iter().position(|&b| b == 0) {
-        Some(n) => &s[..n],
-        None => s,
-    };
+    let s = c_str(s);
 
     let mut i = 0;
     while i < s.len() && isspace_c_locale(s[i]) {
@@ -607,5 +730,144 @@ mod tests {
         assert_eq!(pg_clean_ascii("\x7f", 0).unwrap(), "\\x7f");
         assert_eq!(pg_clean_ascii("caf\u{e9}", 0).unwrap(), "caf\\xc3\\xa9");
         assert_eq!(pg_clean_ascii("\t\n", 0).unwrap(), "\\x09\\x0a");
+    }
+
+    /// C: `strtol(s, &endptr, base)` under 64-bit glibc.  Every expectation
+    /// is the value / `endptr - s` / errno triple the real call produces.
+    #[test]
+    fn strtol_matches_glibc() {
+        let ok = |value: i64, consumed: usize| Strtol { value, consumed, errno: None };
+        let erange = |value: i64, consumed: usize| Strtol { value, consumed, errno: Some(StrtoErrno::Erange) };
+
+        // Base 10: C-locale whitespace, one sign, digit run, endptr at the
+        // first non-digit (trailing junk is the caller's business).
+        assert_eq!(strtol(b"123", 10), ok(123, 3));
+        assert_eq!(strtol(b"  \x0b+42xyz", 10), ok(42, 6));
+        assert_eq!(strtol(b"\t\n\x0c\r 7", 10), ok(7, 6));
+        assert_eq!(strtol(b"-17", 10), ok(-17, 3));
+        assert_eq!(strtol(b"12abc", 10), ok(12, 2));
+        // C strings end at the first NUL.
+        assert_eq!(strtol(b"12\x0034", 10), ok(12, 2));
+
+        // No conversion: 0, endptr == nptr, errno untouched.
+        assert_eq!(strtol(b"", 10), ok(0, 0));
+        assert_eq!(strtol(b"abc", 10), ok(0, 0));
+        assert_eq!(strtol(b"-", 10), ok(0, 0));
+        assert_eq!(strtol(b"+", 10), ok(0, 0));
+        assert_eq!(strtol(b"- 1", 10), ok(0, 0));
+        assert_eq!(strtol(b"   ", 10), ok(0, 0));
+
+        // Base 16 accepts an optional 0x/0X prefix; "0x" with no hex digit
+        // after it converts the "0" and leaves endptr on the 'x'.
+        assert_eq!(strtol(b"ff", 16), ok(255, 2));
+        assert_eq!(strtol(b"FF", 16), ok(255, 2));
+        assert_eq!(strtol(b"0XfF", 16), ok(255, 4));
+        assert_eq!(strtol(b"-0x1F", 16), ok(-31, 5));
+        assert_eq!(strtol(b"0x", 16), ok(0, 1));
+        assert_eq!(strtol(b"0xg", 16), ok(0, 1));
+        assert_eq!(strtol(b"-0x", 16), ok(0, 2));
+
+        // Base 0: 0x -> 16, leading 0 -> 8, else 10.
+        assert_eq!(strtol(b"0x1F", 0), ok(31, 4));
+        assert_eq!(strtol(b"0x1g", 0), ok(1, 3));
+        assert_eq!(strtol(b"017", 0), ok(15, 3));
+        assert_eq!(strtol(b"019", 0), ok(1, 2));
+        assert_eq!(strtol(b"0", 0), ok(0, 1));
+        assert_eq!(strtol(b"19", 0), ok(19, 2));
+        assert_eq!(strtol(b"0x", 0), ok(0, 1));
+
+        // Explicit bases: digits are 0-9 then a-z/A-Z below the base.
+        assert_eq!(strtol(b"08", 8), ok(0, 1));
+        assert_eq!(strtol(b"12", 2), ok(1, 1));
+        assert_eq!(strtol(b"102", 2), ok(2, 2));
+        assert_eq!(strtol(b"zz", 36), ok(1295, 2));
+        assert_eq!(strtol(b"Zz", 36), ok(1295, 2));
+        assert_eq!(strtol(b"z", 35), ok(0, 0));
+
+        // Invalid base: EINVAL, 0, endptr never written.
+        let einval = Strtol { value: 0, consumed: 0, errno: Some(StrtoErrno::Einval) };
+        assert_eq!(strtol(b"1", 1), einval);
+        assert_eq!(strtol(b"1", 37), einval);
+        assert_eq!(strtol(b"1", -1), einval);
+
+        // Overflow saturates at LONG_MAX/LONG_MIN with ERANGE; the whole digit
+        // run is still consumed.
+        assert_eq!(strtol(b"9223372036854775807", 10), ok(i64::MAX, 19));
+        assert_eq!(strtol(b"9223372036854775808", 10), erange(i64::MAX, 19));
+        assert_eq!(strtol(b"-9223372036854775808", 10), ok(i64::MIN, 20));
+        assert_eq!(strtol(b"-9223372036854775809", 10), erange(i64::MIN, 20));
+        assert_eq!(strtol(b"99999999999999999999999x", 10), erange(i64::MAX, 23));
+        assert_eq!(strtol(b"-ffffffffffffffffffff", 16), erange(i64::MIN, 21));
+    }
+
+    /// C: `strtoint(s, &endptr, base)` (src/common/string.c:50) — strtol,
+    /// then `if (val != (int) val) errno = ERANGE; return (int) val;`.  The
+    /// return value is the TRUNCATED long, not a clamp.
+    #[test]
+    fn strtoint_matches_c() {
+        let ok = |value: i32, consumed: usize| Strtoint { value, consumed, errno: None };
+        let erange = |value: i32, consumed: usize| Strtoint { value, consumed, errno: Some(StrtoErrno::Erange) };
+
+        assert_eq!(strtoint(b"2147483647", 10), ok(i32::MAX, 10));
+        assert_eq!(strtoint(b"-2147483648", 10), ok(i32::MIN, 11));
+        assert_eq!(strtoint(b"2147483648", 10), erange(i32::MIN, 10));
+        assert_eq!(strtoint(b"-2147483649", 10), erange(i32::MAX, 11));
+        assert_eq!(strtoint(b"4294967297", 10), erange(1, 10));
+        // strtol's own ERANGE (LONG_MAX) truncates to -1 and stays ERANGE.
+        assert_eq!(strtoint(b"9223372036854775808", 10), erange(-1, 19));
+
+        assert_eq!(strtoint(b"7f", 16), ok(127, 2));
+        assert_eq!(strtoint(b"0x7f", 0), ok(127, 4));
+        assert_eq!(strtoint(b"12abc", 10), ok(12, 2));
+        assert_eq!(strtoint(b" -5", 10), ok(-5, 3));
+        assert_eq!(strtoint(b"abc", 10), ok(0, 0));
+        assert_eq!(
+            strtoint(b"1", 1),
+            Strtoint { value: 0, consumed: 0, errno: Some(StrtoErrno::Einval) }
+        );
+    }
+
+    /// C: `pg_is_ascii(str)` (src/common/string.c:132) — IS_HIGHBIT_SET on
+    /// every byte up to the NUL.
+    #[test]
+    fn pg_is_ascii_matches_c() {
+        assert!(pg_is_ascii(b""));
+        assert!(pg_is_ascii(b"abc"));
+        assert!(pg_is_ascii(b"\x7f\x01 ~"));
+        assert!(!pg_is_ascii(b"caf\xc3\xa9"));
+        assert!(!pg_is_ascii(b"\x80"));
+        // The C string ends at the first NUL.
+        assert!(pg_is_ascii(b"ok\x00\xff"));
+    }
+
+    /// C: `pg_str_endswith(str, end)` (src/common/string.c:29).
+    #[test]
+    fn pg_str_endswith_matches_c() {
+        assert!(pg_str_endswith(b"foo.txt", b".txt"));
+        assert!(!pg_str_endswith(b"txt", b".txt"));
+        assert!(pg_str_endswith(b"abc", b"abc"));
+        assert!(pg_str_endswith(b"a", b""));
+        assert!(pg_str_endswith(b"", b""));
+        assert!(!pg_str_endswith(b"", b"a"));
+        assert!(!pg_str_endswith(b"abc", b"ABC"));
+        // NUL-terminated on both sides.
+        assert!(pg_str_endswith(b"ab\x00cd", b"b"));
+        assert!(pg_str_endswith(b"abc", b"bc\x00zz"));
+    }
+
+    /// C: `pg_strip_crlf(str)` (src/common/string.c:153) — the returned
+    /// slice is the string C leaves behind; its length is C's return value.
+    #[test]
+    fn pg_strip_crlf_matches_c() {
+        assert_eq!(pg_strip_crlf(b"abc\r\n"), b"abc");
+        assert_eq!(pg_strip_crlf(b"abc\n\r\n"), b"abc");
+        assert_eq!(pg_strip_crlf(b"abc\n"), b"abc");
+        assert_eq!(pg_strip_crlf(b"abc\r"), b"abc");
+        assert_eq!(pg_strip_crlf(b"\r\n"), b"");
+        assert_eq!(pg_strip_crlf(b""), b"");
+        assert_eq!(pg_strip_crlf(b"a\r\nb"), b"a\r\nb");
+        assert_eq!(pg_strip_crlf(b"abc \n"), b"abc ");
+        // strlen stops at the first NUL.
+        assert_eq!(pg_strip_crlf(b"x\n\x00\n"), b"x");
     }
 }
