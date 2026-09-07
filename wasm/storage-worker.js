@@ -18,7 +18,7 @@
 //      loop), so the broker's detach log and the final `stopped` reach the driver.
 //
 // THE PORT (`options.port`). The store core is port-agnostic, so the SAME coordinator serves
-// two very different lanes:
+// three very different lanes:
 //
 //   'memory'  (default) `MemoryRepackedPort` — the store lives in this worker's heap and dies
 //             with it. Every run starts from the packed image. This is what Node uses (Node
@@ -33,6 +33,15 @@
 //             containing `/` is a `TypeError` in every engine — so a host that wants its store
 //             under a namespace of its own (`app/stores/<id>`) can only get there by walking,
 //             and this is where that walk belongs.
+//   'file'    `FileRepackedPort` over ONE dedicated DIRECTORY on an ordinary filesystem
+//             (`options.fileDir`, an absolute path, created with its parents). NODE ONLY, and
+//             refused outright in a browser: it is `node:fs`'s synchronous calls, and a browser
+//             has none. It is the PREPARED-STORE lane — a coordinator under Node fills a store
+//             where a build step can see the bytes, and the four files it leaves behind are the
+//             whole store, so tarring them and untarring them into a browser's OPFS directory
+//             produces a datadir the `opfs` port boots on without a single file being replayed.
+//             The directory is owned in full, exactly as the OPFS one is, and `reset` removes it
+//             whole for the same reason.
 //
 // FRESH vs EXISTING. The store itself opens either way: `RepackedVfs.open` bootstraps an empty
 // store from an empty directory and recovers an activated one from a populated directory,
@@ -202,6 +211,33 @@ async function openOpfsDirectory(path, reset) {
   return parent.getDirectoryHandle(name, { create: true });
 }
 
+/**
+ * Prepare the DIRECTORY the `file` port owns, optionally emptying it first.
+ *
+ * The port itself creates the directory (and its parents) on first use, so all this has to do is
+ * validate the path and honour `reset`. Both halves matter:
+ *
+ *   - the path must be ABSOLUTE and must not be the filesystem root, because `reset` removes the
+ *     directory whole and a relative or root path is the one way that can be a catastrophe rather
+ *     than a clean slate;
+ *   - `reset` removes the whole directory rather than the four files it could name, exactly as the
+ *     OPFS branch above does and for the same reason: the store fails CLOSED on a directory whose
+ *     format identity it does not accept, and the only sanctioned repair is deleting all of it.
+ */
+async function prepareFileDirectory(path, reset) {
+  if (!IS_NODE) {
+    throw new Error('the file storage port is node:fs and this scope has none; a browser store belongs on the opfs port');
+  }
+  const dir = String(path || '');
+  if (!dir.startsWith('/')) throw new Error(`the file storage port needs an absolute fileDir, got "${dir}"`);
+  if (dir.replace(/\/+$/, '') === '') throw new Error('the file storage port may not own the filesystem root');
+  if (reset) {
+    const fs = await import('node:fs');
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  return dir;
+}
+
 // Every request opcode that can CHANGE the store. `open` is in the list because O_CREAT/O_TRUNC
 // mutate metadata before a single byte is written; `close` is not, because it only drops a
 // descriptor. A `strictSync()` on a clean store returns without touching a handle, so a read
@@ -247,7 +283,10 @@ async function boot(msg) {
   const portKind = options.port || 'memory';
   const durability = options.durability || 'relaxed';
   const opfsDir = options.opfsDir || 'pgrust-pgdata';
-  if (portKind !== 'memory' && portKind !== 'opfs') throw new Error(`unknown storage port ${portKind}`);
+  const fileDir = options.fileDir || '';
+  if (portKind !== 'memory' && portKind !== 'opfs' && portKind !== 'file') {
+    throw new Error(`unknown storage port ${portKind}`);
+  }
   if (durability !== 'relaxed' && durability !== 'strict') {
     throw new Error(`unknown storage durability ${durability}`);
   }
@@ -257,6 +296,8 @@ async function boot(msg) {
   if (portKind === 'opfs') {
     const directory = await openOpfsDirectory(opfsDir, options.reset === true);
     storePort = new bundle.OpfsRepackedPort(directory);
+  } else if (portKind === 'file') {
+    storePort = new bundle.FileRepackedPort(await prepareFileDirectory(fileDir, options.reset === true));
   } else {
     storePort = new bundle.MemoryRepackedPort();
   }
@@ -366,6 +407,7 @@ async function boot(msg) {
     type: 'storage-ready',
     port: portKind,
     opfsDir: portKind === 'opfs' ? opfsDir : null,
+    fileDir: portKind === 'file' ? fileDir : null,
     durability,
     restored: !fresh,
     openMs,
