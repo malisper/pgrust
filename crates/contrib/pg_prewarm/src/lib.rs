@@ -1,19 +1,20 @@
 //! `contrib/pg_prewarm/pg_prewarm.c` — the `pg_prewarm()` SQL function —
-//! plus autoprewarm.c's `pg_prewarm.autoprewarm_interval` GUC (_PG_init:128,
-//! defined in every backend that loads the library; the table row is in
-//! guc_tables, the C static's cell is here). The rest of autoprewarm.c
-//! (leader bgworker, shmem state, dump file, the preload-only
-//! `pg_prewarm.autoprewarm` GUC and prefix reservation) is unported; its
-//! two SQL symbols resolve for `CREATE FUNCTION`'s C validator and raise a
-//! clean feature-not-supported error when called.
+//! plus autoprewarm.c's module-load surface (_PG_init:126): the
+//! `pg_prewarm.autoprewarm_interval` and `pg_prewarm.autoprewarm` GUCs
+//! (table rows in guc_tables, the C statics' cells here), the reserved
+//! prefix, and the leader registration under shared_preload_libraries.
+//! The worker, shared state, dump file and SQL entry points are in
+//! `autoprewarm.rs`.
 
-use std::sync::atomic::{AtomicI32, Ordering};
+mod autoprewarm;
+
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 use datum::Datum;
 use types_core::{BlockNumber, ForkNumber, Oid, OidIsValid, BLCKSZ};
 use types_error::{
-    PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_PARAMETER_VALUE,
-    ERRCODE_UNDEFINED_TABLE, ERRCODE_WRONG_OBJECT_TYPE,
+    PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_UNDEFINED_TABLE,
+    ERRCODE_WRONG_OBJECT_TYPE,
 };
 use types_fmgr::{FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction};
 use types_nodes::parsenodes::{ObjectType, ACL_SELECT};
@@ -29,10 +30,22 @@ const LIBRARY: &str = "pg_prewarm";
 
 // autoprewarm.c:120 `static int autoprewarm_interval = 300` (dump interval,
 // seconds). PGC_SIGHUP, so a process-global cell like the backend's
-// sighup-scope GUCs, not a per-session backing. Only the unported leader
-// worker reads it (autoprewarm_main:213); SHOW/pg_settings go through the
+// sighup-scope GUCs, not a per-session backing. The leader worker reads it
+// each loop (autoprewarm_main:239); SHOW/pg_settings go through the
 // registry.
 static AUTOPREWARM_INTERVAL: AtomicI32 = AtomicI32::new(300);
+
+// autoprewarm.c:119 `static bool autoprewarm = true` (start the leader?).
+// PGC_POSTMASTER; read by pg_init (:158) and autoprewarm_start_worker (:829).
+static AUTOPREWARM: AtomicBool = AtomicBool::new(true);
+
+fn autoprewarm() -> bool {
+    AUTOPREWARM.load(Ordering::Relaxed)
+}
+
+fn set_autoprewarm(v: bool) {
+    AUTOPREWARM.store(v, Ordering::Relaxed);
+}
 
 fn autoprewarm_interval() -> i32 {
     AUTOPREWARM_INTERVAL.load(Ordering::Relaxed)
@@ -92,7 +105,7 @@ fn arg_text_string(fcinfo: &Fcinfo, i: usize) -> PgResult<String> {
 
 // RelationGetSmgr: smgropen is idempotent; guarantees the md entry exists
 // before smgrexists/smgrread.
-fn rel_smgr_key(rel: &types_rel::Relation<'_>) -> PgResult<RelFileLocatorBackend> {
+pub(crate) fn rel_smgr_key(rel: &types_rel::Relation<'_>) -> PgResult<RelFileLocatorBackend> {
     let locator = rel.rd_locator.get();
     smgr::smgropen(locator, rel.rd_backend)?;
     Ok(RelFileLocatorBackend { locator, backend: rel.rd_backend })
@@ -258,35 +271,11 @@ fn fc_pg_prewarm(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResul
     Ok(Datum::from_i64(blocks_done))
 }
 
-// autoprewarm.c is unported (leader bgworker + shmem state + dump file);
-// its SQL entry points raise a clean 0A000 instead of C's
-// ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE flavors (autoprewarm.c:819,830),
-// which presuppose the worker machinery exists.
-#[cold]
-fn autoprewarm_unported(fname: &str) -> Box<PgError> {
-    Box::new(
-        PgError::error(format!("{fname} is not supported by this build"))
-            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
-            .with_detail(
-                "The autoprewarm background worker (contrib/pg_prewarm/autoprewarm.c) \
-                 is not ported.",
-            ),
-    )
-}
-
-fn fc_autoprewarm_start_worker(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    Err(autoprewarm_unported("autoprewarm_start_worker"))
-}
-
-fn fc_autoprewarm_dump_now(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    Err(autoprewarm_unported("autoprewarm_dump_now"))
-}
-
 fn lookup(function: &str) -> Option<PGFunction> {
     Some(match function {
         "pg_prewarm" => fc_pg_prewarm,
-        "autoprewarm_start_worker" => fc_autoprewarm_start_worker,
-        "autoprewarm_dump_now" => fc_autoprewarm_dump_now,
+        "autoprewarm_start_worker" => autoprewarm::fc_autoprewarm_start_worker,
+        "autoprewarm_dump_now" => autoprewarm::fc_autoprewarm_dump_now,
         _ => return None,
     })
 }
@@ -297,43 +286,38 @@ pub fn init_seams() {
         get: autoprewarm_interval,
         set: set_autoprewarm_interval,
     });
+    guc_tables::vars::autoprewarm.install(GucVarAccessors {
+        get: autoprewarm,
+        set: set_autoprewarm,
+    });
     dfmgr::register_builtin_library(dfmgr::BuiltinLibraryEntry {
         name: LIBRARY,
         lookup,
-        // autoprewarm.c:126 _PG_init: the interval GUC is defined statically
-        // above; its remaining work (the preload-only pg_prewarm.autoprewarm
-        // GUC, MarkGUCPrefixReserved, apw_start_leader_worker) belongs to
-        // the unported worker.
-        pg_init: None,
+        pg_init: Some(pg_init),
     });
+}
+
+/// `_PG_init` (autoprewarm.c:126). Both GUCs are static guc_tables rows
+/// (this port has no DefineCustomXxxVariable; the auto_explain / pgss
+/// pattern), so only the preload arm's prefix reservation and leader
+/// registration happen here.
+fn pg_init() -> PgResult<()> {
+    if !miscinit::process_shared_preload_libraries_in_progress() {
+        return Ok(());
+    }
+
+    guc::MarkGUCPrefixReserved("pg_prewarm");
+
+    // Register autoprewarm worker, if enabled.
+    if autoprewarm() {
+        autoprewarm::apw_start_leader_worker()?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // The autoprewarm SQL entry points are unported stubs: they must raise a
-    // clean 0A000 (feature not supported), never panic — regression for the
-    // SQL-reachable `SELECT autoprewarm_start_worker()` crash.
-    #[test]
-    fn autoprewarm_stubs_error_cleanly() {
-        for (name, f) in [
-            ("autoprewarm_start_worker", fc_autoprewarm_start_worker as PGFunction),
-            ("autoprewarm_dump_now", fc_autoprewarm_dump_now as PGFunction),
-        ] {
-            let mut fcinfo = types_fmgr::LocalFcinfo::<0>::new(types_core::InvalidOid);
-            let err = f(None, &mut fcinfo).unwrap_err();
-            assert_eq!(err.sqlstate(), ERRCODE_FEATURE_NOT_SUPPORTED);
-            assert_eq!(err.message(), format!("{name} is not supported by this build"));
-            assert_eq!(
-                err.detail(),
-                Some(
-                    "The autoprewarm background worker (contrib/pg_prewarm/autoprewarm.c) \
-                     is not ported."
-                )
-            );
-        }
-    }
 
     #[test]
     fn forknames() {

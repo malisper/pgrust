@@ -765,6 +765,12 @@ pub static ConfigureNamesBool: &[GucBoolSetting] = &[
     GucBoolSetting { name: "auto_explain.log_timing", context: PGC_SUSET, group: CUSTOM_OPTIONS, short_desc: Some("Collect timing data, not just row counts."), long_desc: None, flags: 0, variable: &vars::aex_log_timing, boot_val: GucDefaultValue::Bool(true), check_hook: None, assign_hook: None, show_hook: None },
     GucBoolSetting { name: "auto_explain.log_nested_statements", context: PGC_SUSET, group: CUSTOM_OPTIONS, short_desc: Some("Log nested statements."), long_desc: None, flags: 0, variable: &vars::aex_log_nested_statements, boot_val: GucDefaultValue::Bool(false), check_hook: None, assign_hook: None, show_hook: None },
     // pg_stat_statements custom GUCs (statically defined; see vars.rs note).
+    // pg_prewarm custom GUC (contrib/pg_prewarm/autoprewarm.c:144-153 _PG_init
+    // DefineCustomBoolVariable "Starts the autoprewarm worker.", PGC_POSTMASTER,
+    // default true; in C defined only under shared_preload_libraries).
+    // Statically defined like auto_explain.*; the cell lives in
+    // crates/contrib/pg_prewarm and gates the leader registration in pg_init.
+    GucBoolSetting { name: "pg_prewarm.autoprewarm", context: PGC_POSTMASTER, group: CUSTOM_OPTIONS, short_desc: Some("Starts the autoprewarm worker."), long_desc: None, flags: 0, variable: &vars::autoprewarm, boot_val: GucDefaultValue::Bool(true), check_hook: None, assign_hook: None, show_hook: None },
     GucBoolSetting { name: "pg_stat_statements.track_utility", context: PGC_SUSET, group: CUSTOM_OPTIONS, short_desc: Some("Selects whether utility commands are tracked by pg_stat_statements."), long_desc: None, flags: 0, variable: &vars::pgss_track_utility, boot_val: GucDefaultValue::Bool(true), check_hook: None, assign_hook: None, show_hook: None },
     GucBoolSetting { name: "pg_stat_statements.track_planning", context: PGC_SUSET, group: CUSTOM_OPTIONS, short_desc: Some("Selects whether planning duration is tracked by pg_stat_statements."), long_desc: None, flags: 0, variable: &vars::pgss_track_planning, boot_val: GucDefaultValue::Bool(false), check_hook: None, assign_hook: None, show_hook: None },
     GucBoolSetting { name: "pg_stat_statements.save", context: PGC_SIGHUP, group: CUSTOM_OPTIONS, short_desc: Some("Save pg_stat_statements statistics across server shutdowns."), long_desc: None, flags: 0, variable: &vars::pgss_save, boot_val: GucDefaultValue::Bool(true), check_hook: None, assign_hook: None, show_hook: None },

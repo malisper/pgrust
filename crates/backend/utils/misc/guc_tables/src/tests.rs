@@ -102,12 +102,16 @@ fn table_counts_match_compiled_backend_shape() {
     //   plpgsql.check_asserts (-> 142), String +2 plpgsql.extra_warnings /
     //   plpgsql.extra_errors (-> 82), Enum +1 plpgsql.variable_conflict
     //   (-> 50) = 483.
-    assert_eq!(ConfigureNamesBool.len(), 142);
+    // audit-remediation w2-038 (contrib/pg_prewarm/autoprewarm.c:144 _PG_init
+    //   DefineCustomBoolVariable, PGC_POSTMASTER): Bool +1
+    //   pg_prewarm.autoprewarm (-> 143) = 484 — the autoprewarm leader gate,
+    //   statically defined like pg_prewarm.autoprewarm_interval.
+    assert_eq!(ConfigureNamesBool.len(), 143);
     assert_eq!(ConfigureNamesInt.len(), 178);
     assert_eq!(ConfigureNamesReal.len(), 31);
     assert_eq!(ConfigureNamesString.len(), 82);
     assert_eq!(ConfigureNamesEnum.len(), 50);
-    assert_eq!(all_settings().count(), 483);
+    assert_eq!(all_settings().count(), 484);
     assert_eq!(GucContext_Names.len(), PGC_USERSET as usize + 1);
     assert_eq!(GucSource_Names.len(), PGC_S_SESSION as usize + 1);
     assert_eq!(config_group_names.len(), DEVELOPER_OPTIONS as usize + 1);
@@ -412,6 +416,28 @@ fn pg_prewarm_autoprewarm_interval_matches_autoprewarm_c() {
     assert!(interval.assign_hook.is_none());
     assert!(interval.show_hook.is_none());
     assert_eq!(interval.variable.c_symbol(), "autoprewarm_interval");
+}
+
+// "pg_prewarm.autoprewarm" — autoprewarm.c:144-153 (_PG_init, preload arm):
+// DefineCustomBoolVariable, default true, PGC_POSTMASTER, flags 0, no hooks,
+// "Starts the autoprewarm worker." Regression for audit-18.6 w2-038
+// (a186-candidate-fp-contrib-pg_prewarm-autoprewarm-95c06274c0f082d7efcc-1):
+// pgrust knew no such GUC (42704 on SHOW under shared_preload_libraries).
+#[test]
+fn pg_prewarm_autoprewarm_matches_autoprewarm_c() {
+    let GucSetting::Bool(apw) = find("pg_prewarm.autoprewarm") else {
+        panic!("pg_prewarm.autoprewarm should be a bool GUC");
+    };
+    assert_eq!(apw.context, PGC_POSTMASTER);
+    assert_eq!(apw.group, CUSTOM_OPTIONS);
+    assert_eq!(apw.flags, 0);
+    assert_eq!(apw.boot_val, GucDefaultValue::Bool(true));
+    assert_eq!(apw.short_desc, Some("Starts the autoprewarm worker."));
+    assert!(apw.long_desc.is_none());
+    assert!(apw.check_hook.is_none());
+    assert!(apw.assign_hook.is_none());
+    assert!(apw.show_hook.is_none());
+    assert_eq!(apw.variable.c_symbol(), "autoprewarm");
 }
 
 // contrib/pg_trgm/trgm_op.c:145-190 (_PG_init): three DefineCustomRealVariable
