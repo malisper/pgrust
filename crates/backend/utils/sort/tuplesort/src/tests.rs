@@ -2851,3 +2851,10 @@ mod sortsupport_guards {
         assert_eq!(err.sqlstate(), ERRCODE_INTERNAL_ERROR);
     }
 }
+
+#[test]
+fn small_datum_sort_reports_c_chunk_memory() {
+    let (mut ts, output) = run_datum_sort(&[Some(3), Some(1), Some(2)], false, false, TUPLESORT_NONE, None);
+    assert_eq!(output, vec![Some(1), Some(2), Some(3)]);
+    assert_eq!(ts.get_stats().spaceUsed, 25);
+}

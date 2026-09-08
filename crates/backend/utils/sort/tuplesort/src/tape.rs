@@ -15,7 +15,7 @@ use sort_storage::{LogicalTapeSet, TapeIdx};
 #[allow(unused_imports)]
 use crate::SortComparator;
 use crate::{
-    cfi, trace_log, trace_sort, CmpCtx, ClusterTupleHeader, SortTuple, SortVariant,
+    aset_chunk_space, cfi, trace_log, trace_sort, CmpCtx, ClusterTupleHeader, SortTuple, SortVariant,
     TupSortStatus, TuplesortData, TRACE_WORKER, TUPLESORT_RANDOMACCESS,
 };
 
@@ -80,7 +80,9 @@ impl<'m> TuplesortData<'m> {
         let max_tapes = tuplesort_merge_order(self.allowed_mem);
 
         let tape_space = max_tapes * TAPE_BUFFER_OVERHEAD;
-        let memtuples_space = (self.memtuples.capacity() * mem::size_of::<SortTuple>()) as i64;
+        let memtuples_space =
+            aset_chunk_space(self.memtuples.capacity() * mem::size_of::<SortTuple>())
+                as i64;
         if tape_space + memtuples_space < self.allowed_mem {
             self.avail_mem -= tape_space;
         }
@@ -199,7 +201,9 @@ impl<'m> TuplesortData<'m> {
 
         self.reset_tuplecontext();
 
-        self.avail_mem += (self.memtuples.capacity() * mem::size_of::<SortTuple>()) as i64;
+        self.avail_mem +=
+            aset_chunk_space(self.memtuples.capacity() * mem::size_of::<SortTuple>())
+                as i64;
         self.memtuples = PgVec::new_in(self.mcx);
 
         let has_tuples = variant_has_tuples(&self.variant);
@@ -211,7 +215,8 @@ impl<'m> TuplesortData<'m> {
         self.avail_mem -= (slab_slots * SLAB_SLOT_SIZE) as i64;
 
         ts.merge_heap.reserve(n_output_tapes);
-        self.avail_mem -= (n_output_tapes * mem::size_of::<MergeTuple>()) as i64;
+        self.avail_mem -=
+            aset_chunk_space(n_output_tapes * mem::size_of::<SortTuple>()) as i64;
 
         ts.tape_buffer_mem = self.avail_mem;
         self.avail_mem = 0;

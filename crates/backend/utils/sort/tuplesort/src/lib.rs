@@ -145,6 +145,30 @@ fn cfi_slow() -> PgResult<()> {
     postgres_seams::check_for_interrupts::call()
 }
 
+// The accounting follows C chunk space even though our arena omits headers.
+#[inline]
+const fn aset_chunk_space(size: usize) -> usize {
+    if size > 8192 {
+        maxalign(size) + 8
+    } else {
+        (if size <= 8 { 8 } else { size.next_power_of_two() }) + 8
+    }
+}
+
+#[inline]
+fn tuple_space(sortopt: i32, len: usize) -> i64 {
+    if sortopt & TUPLESORT_ALLOWBOUNDED != 0 {
+        aset_chunk_space(len) as i64
+    } else {
+        maxalign(len) as i64
+    }
+}
+
+#[inline]
+fn memtuples_space(memtupsize: usize) -> i64 {
+    aset_chunk_space(memtupsize * mem::size_of::<SortTuple>()) as i64
+}
+
 #[inline]
 const fn maxalign(len: usize) -> usize {
     (len + 7) & !7
@@ -1346,8 +1370,7 @@ impl Tuplesort {
             let memtuples = PgVec::with_capacity_in(INITIAL_MEMTUPSIZE, mcx);
             let mut sort_keys = PgVec::with_capacity_in(keys.len(), mcx);
             sort_keys.extend_from_slice(keys);
-            let avail_mem =
-                allowed_mem - (INITIAL_MEMTUPSIZE * mem::size_of::<SortTuple>()) as i64;
+            let avail_mem = allowed_mem - memtuples_space(INITIAL_MEMTUPSIZE);
             Ok(TuplesortData {
                 mcx,
                 // C's TupleSortUseBumpTupleCxt: a bounded-capable sort
@@ -1676,7 +1699,7 @@ impl Tuplesort {
             let datum1 = unsafe {
                 minimal_getattr(tuple, st.sort_keys[0].ssup_attno as i32, tup_desc, &mut isnull1)
             };
-            st.puttuple_common(tuple, datum1, isnull1, maxalign(t_len) as i64)
+            st.puttuple_common(tuple, datum1, isnull1, tuple_space(st.sortopt, t_len))
         })
     }
 
@@ -1706,7 +1729,7 @@ impl Tuplesort {
             let datum1 = unsafe {
                 minimal_getattr(tuple, st.sort_keys[0].ssup_attno as i32, tup_desc, &mut isnull1)
             };
-            st.puttuple_common(tuple, datum1, isnull1, maxalign(t_len) as i64)
+            st.puttuple_common(tuple, datum1, isnull1, tuple_space(st.sortopt, t_len))
         })
     }
 
@@ -1749,7 +1772,7 @@ impl Tuplesort {
             };
             let mut buf =
                 nbtree::itup::index_form_tuple(st.tuplecontext.mcx(), tup_desc, values, isnull)?;
-            let tuplen = buf.size() as i64;
+            let tuplen = tuple_space(st.sortopt, buf.size());
             // SAFETY: t_tid = first 6 bytes of the owned image (itup.h).
             unsafe {
                 buf.as_mut_ptr()
@@ -1783,7 +1806,7 @@ impl Tuplesort {
             else {
                 panic!("put_index_tuple_image on a non-index tuplesort")
             };
-            let tuplen = image.len() as i64;
+            let tuplen = tuple_space(st.sortopt, image.len());
             // MAXALIGNed backing store (u64 words), as putheaptuple does:
             // index_getattr walks the copy, not the caller's bytes.
             let words = image.len().div_ceil(8);
@@ -2003,12 +2026,8 @@ impl Tuplesort {
             // SAFETY: fresh size-byte allocation; src readable per above.
             unsafe { core::ptr::copy_nonoverlapping(src, dst.as_ptr(), size) };
             let datum1 = Datum::from_usize(dst.as_ptr() as usize);
-            st.puttuple_common(
-                dst.as_ptr().cast::<MinimalTupleData>(),
-                datum1,
-                false,
-                maxalign(size) as i64,
-            )
+            // C leaves datum copies uncharged; the by-ref path still needs abbreviation.
+            st.puttuple_full(dst.as_ptr().cast::<MinimalTupleData>(), datum1, false, 0)
         })
     }
 
@@ -2802,14 +2821,14 @@ impl<'m> TuplesortData<'m> {
             return false;
         }
 
-        self.avail_mem += (memtupsize * mem::size_of::<SortTuple>()) as i64;
+        self.avail_mem += memtuples_space(memtupsize);
         // C grow_memtuples: repalloc_huge — memtuples may legally exceed
         // MaxAllocSize (1GB), so this must bypass the allocator's palloc
         // ceiling via the explicit huge entry point.
         let add = newmemtupsize - self.memtuples.len();
         ::mcx::vec_reserve_huge(&mut self.memtuples, add)
             .expect("grow_memtuples: huge memtuples repalloc failed");
-        self.avail_mem -= (self.memtuples.capacity() * mem::size_of::<SortTuple>()) as i64;
+        self.avail_mem -= memtuples_space(self.memtuples.capacity());
         debug_assert!(!self.lackmem());
         true
     }
@@ -3180,7 +3199,7 @@ fn freed_space(free_typlen: i16, stup: &SortTuple) -> i64 {
     if stup.tuple.is_null() {
         return 0;
     }
-    maxalign(stup_alloc_size(free_typlen, stup)) as i64
+    aset_chunk_space(stup_alloc_size(free_typlen, stup)) as i64
 }
 
 /// The physical half of C's free_sort_tuple (pfree): deallocate the tuple's
