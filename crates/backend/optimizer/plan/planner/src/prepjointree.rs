@@ -296,6 +296,20 @@ pub(crate) fn query_has_uplevel_vars<'mcx>(q: &'mcx Query<'mcx>) -> PgResult<boo
                     }
                     nodes_core::expression_tree_walker(node, self)
                 }
+                NodeTag::T_ReturningExpr => {
+                    // A ReturningExpr belonging to an outer level (the
+                    // rewriter's old.<col>/new.<col> over a view expression)
+                    // is an uplevel reference too: IncrementVarSublevelsUp
+                    // adjusts retlevelsup (rewriteManip.c:856-863), so the
+                    // copy it stands in for must be taken.
+                    if node.as_returning_expr().expect("ReturningExpr").retlevelsup as u32
+                        > self.depth
+                    {
+                        self.found = true;
+                        return Ok(true);
+                    }
+                    nodes_core::expression_tree_walker(node, self)
+                }
                 NodeTag::T_RangeTblEntry => {
                     let rte = node.as_range_tbl_entry().expect("RangeTblEntry");
                     if rte.rtekind == RTEKind::RTE_CTE && rte.ctelevelsup > self.depth {
@@ -2105,6 +2119,23 @@ fn offset_expr<'mcx>(
                     phid: phv.phid,
                     phlevelsup: 0,
                 },
+            )?))
+        }
+        NodeTag::T_ReturningExpr => {
+            // IncrementVarSublevelsUp(-1, 1) (rewriteManip.c:856-863): an
+            // outer-level ReturningExpr is one level closer to the DML query
+            // that owns it after pull-up; OffsetVarNodes has no arm for it
+            // (rewriteManip.c OffsetVarNodes_walker), and both walkers recurse
+            // into retexpr, whose Vars carry their own varlevelsup.
+            let r = node.as_returning_expr().expect("ReturningExpr");
+            let retexpr = match offset_expr(mcx, r.retexpr, rtoffset)? {
+                Some(e) => e,
+                None => rewrite_manip::copy_node(mcx, r.retexpr)?,
+            };
+            let retlevelsup = if r.retlevelsup > 0 { r.retlevelsup - 1 } else { r.retlevelsup };
+            Ok(Some(Node::mk(
+                mcx,
+                types_nodes::primnodes::ReturningExpr { retlevelsup, retold: r.retold, retexpr },
             )?))
         }
         _ => clauses::walker::expression_tree_mutator(mcx, node, &mut |n| {
