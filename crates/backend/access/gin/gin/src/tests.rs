@@ -114,14 +114,7 @@ fn one_col_state(col: GinColState) -> GinState {
 fn build_accumulator_dump_order_and_tids() {
     let ctx = MemoryContext::new_bump("t");
     let mcx = ctx.mcx();
-    let state = one_col_state(GinColState {
-        opclass: GinOpclass::JsonbOps,
-        elem_cmp: GinElemCmp::None,
-        support_collation: 100,
-        can_partial_match: false,
-        key_byval: false,
-        key_len: -1,
-    });
+    let state = one_col_state(GinColState::jsonb_ops(100));
     // Keys as 4-byte-header text images (jsonb_ops key form).
     fn key(mcx: ::mcx::Mcx<'_>, s: &[u8]) -> ::datum::Datum {
         let total = 4 + s.len();
@@ -165,14 +158,7 @@ fn build_accumulator_dump_order_and_tids() {
 
 #[test]
 fn compare_entries_category_order() {
-    let state = one_col_state(GinColState {
-        opclass: GinOpclass::JsonbOps,
-        elem_cmp: GinElemCmp::None,
-        support_collation: 100,
-        can_partial_match: false,
-        key_byval: false,
-        key_len: -1,
-    });
+    let state = one_col_state(GinColState::jsonb_ops(100));
     use crate::util::ginCompareEntries;
     let d = ::datum::Datum::null();
     assert!(ginCompareEntries(&state, 1, d, GIN_CAT_EMPTY_QUERY, d, GIN_CAT_NORM_KEY) < 0);
@@ -230,14 +216,7 @@ fn pglz_key(mcx: ::mcx::Mcx<'_>, payload: &[u8]) -> ::datum::Datum {
 }
 
 fn ts_col() -> GinColState {
-    GinColState {
-        opclass: GinOpclass::TsvectorOps,
-        elem_cmp: GinElemCmp::None,
-        support_collation: ::types_core::catalog::C_COLLATION_OID,
-        can_partial_match: true,
-        key_byval: false,
-        key_len: -1,
-    }
+    GinColState::tsvector_ops(::types_core::catalog::C_COLLATION_OID)
 }
 
 #[test]
@@ -266,19 +245,15 @@ fn compare_detoasts_compressed_keys() {
         }
     }
 
-    // array_ops text and hstore arms take the same detoast gate.
-    for opclass in [GinOpclass::ArrayOps, GinOpclass::HstoreOps] {
+    // The bttextcmp arm (text-keyed array_ops, hstore) takes the same
+    // detoast gate.
+    for col in [
+        GinColState::array_ops(GinCompareFn::Text, false, -1),
+        GinColState::hstore_ops(::types_core::catalog::C_COLLATION_OID),
+    ] {
         let col = GinColState {
-            opclass,
-            elem_cmp: if opclass == GinOpclass::ArrayOps {
-                GinElemCmp::Text
-            } else {
-                GinElemCmp::None
-            },
             support_collation: ::types_core::catalog::C_COLLATION_OID,
-            can_partial_match: false,
-            key_byval: false,
-            key_len: -1,
+            ..col
         };
         assert_eq!(crate::opclass::compare(&col, pglz_key(mcx, &la), flat_key(mcx, &la)), 0);
         assert_eq!(
@@ -560,14 +535,7 @@ mod posting_tree_vacuum {
     }
 
     fn int4_col() -> GinColState {
-        GinColState {
-            opclass: GinOpclass::ArrayOps,
-            elem_cmp: GinElemCmp::Int4,
-            support_collation: 0,
-            can_partial_match: false,
-            key_byval: true,
-            key_len: 4,
-        }
+        GinColState::array_ops(GinCompareFn::Int4, true, 4)
     }
 
     // upstream 7becb647da74 (18.5): Restore vacuum_delay_point() in GIN

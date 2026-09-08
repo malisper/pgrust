@@ -11,7 +11,7 @@ use std::sync::Once;
 
 use ::datum::Datum;
 use ::gin_vocab::{
-    GinColState, GinElemCmp, GinMetaPageData, GinOpclass, GinScanOpaqueData, GinState,
+    GinColState, GinCompareFn, GinMetaPageData, GinScanOpaqueData, GinState,
     GIN_CURRENT_VERSION, GIN_MAX_KEY_COLS,
 };
 use ::mcx::{Mcx, MemoryContext, PgVec};
@@ -82,14 +82,7 @@ fn fake_int8_cmp(
 }
 
 fn dummy_col() -> GinColState {
-    GinColState {
-        opclass: GinOpclass::ArrayOps,
-        elem_cmp: GinElemCmp::Int4,
-        support_collation: 0,
-        can_partial_match: false,
-        key_byval: true,
-        key_len: 4,
-    }
+    GinColState::array_ops(GinCompareFn::Int4, true, 4)
 }
 
 fn gin_state() -> GinState {
@@ -230,14 +223,7 @@ fn array_ops_fmgr_elem_compare_dispatches_btree_cmp_proc() {
     install();
     // A non-hardwired element type (e.g. int8's btint8cmp, proc oid 351
     // stand-in): compare() routes through fmgr with the stored cmp proc.
-    let col = GinColState {
-        opclass: GinOpclass::ArrayOps,
-        elem_cmp: GinElemCmp::Fmgr(842),
-        support_collation: 0,
-        can_partial_match: false,
-        key_byval: true,
-        key_len: 8,
-    };
+    let col = GinColState::array_ops(GinCompareFn::Fmgr(842), true, 8);
     let cmp = |x: i64, y: i64| {
         crate::opclass::compare(&col, Datum::from_i64(x), Datum::from_i64(y))
     };

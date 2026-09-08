@@ -1024,7 +1024,7 @@ fn failed_to_add_item(rel: &Relation<'_>) -> Box<PgError> {
 #[cfg(test)]
 mod attrnum_tests {
     use super::*;
-    use ::gin_vocab::{GinColState, GinElemCmp, GinOpclass, GinState, GIN_MAX_KEY_COLS};
+    use ::gin_vocab::{GinColState, GinCompareFn, GinState, GIN_MAX_KEY_COLS};
     use ::types_error::pg_error_from_panic;
     use std::panic::{catch_unwind, AssertUnwindSafe};
 
@@ -1034,14 +1034,7 @@ mod attrnum_tests {
     struct Tuple([u8; 16]);
 
     fn dummy_col() -> GinColState {
-        GinColState {
-            opclass: GinOpclass::ArrayOps,
-            elem_cmp: GinElemCmp::Int4,
-            support_collation: 0,
-            can_partial_match: false,
-            key_byval: true,
-            key_len: 4,
-        }
+        GinColState::array_ops(GinCompareFn::Int4, true, 4)
     }
 
     fn multicol_state(natts: u16) -> GinState {

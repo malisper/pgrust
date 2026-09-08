@@ -402,22 +402,8 @@ pub(crate) mod rig {
 
     pub(crate) fn one_col_state(kind: KeyKind) -> GinState {
         let col = match kind {
-            KeyKind::Int4 => GinColState {
-                opclass: GinOpclass::ArrayOps,
-                elem_cmp: GinElemCmp::Int4,
-                support_collation: 0,
-                can_partial_match: false,
-                key_byval: true,
-                key_len: 4,
-            },
-            KeyKind::Text => GinColState {
-                opclass: GinOpclass::BtreeOps(GinBtreeType::Text),
-                elem_cmp: GinElemCmp::None,
-                support_collation: 100,
-                can_partial_match: true,
-                key_byval: false,
-                key_len: -1,
-            },
+            KeyKind::Int4 => GinColState::array_ops(GinCompareFn::Int4, true, 4),
+            KeyKind::Text => GinColState::btree_ops(GinBtreeType::Text, 100, false, -1),
         };
         GinState {
             natts: 1,

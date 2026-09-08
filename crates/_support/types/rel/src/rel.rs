@@ -99,15 +99,24 @@ pub struct RdIndexList {
 
 pub type RdAmCacheBtree = BTMetaPageData;
 
-/// GIN's resolved per-column opclass state (gin's GinColState mirror).
+/// GIN's resolved per-column opclass state (gin's GinColState mirror: one
+/// tag per support-proc slot, C GinState's per-attnum FmgrInfo arrays).
 #[derive(Clone, Copy, Debug)]
 pub struct RdAmCacheGinCol {
-    pub opclass: u8,
-    /// array_ops element comparator tag (gin's GinElemCmp mirror).
-    pub elem_cmp: u8,
-    /// Fmgr-tag payload: the element type's typcache cmp proc oid
-    /// (InvalidOid for every other tag).
-    pub elem_cmp_proc: Oid,
+    /// compareFn tag (gin's GinCompareFn mirror).
+    pub compare: u8,
+    /// Fmgr-tag payload: the comparator's proc oid (InvalidOid otherwise).
+    pub compare_proc: Oid,
+    /// extractValueFn tag.
+    pub extract_value: u8,
+    /// extractQueryFn tag.
+    pub extract_query: u8,
+    /// consistentFn tag; 0 = the opclass has no proc 4.
+    pub consistent: u8,
+    /// triConsistentFn tag; 0 = the opclass has no proc 6.
+    pub tri_consistent: u8,
+    /// comparePartialFn tag; 0 = the opclass has no proc 5.
+    pub compare_partial: u8,
     pub support_collation: Oid,
     pub can_partial_match: bool,
     pub key_byval: bool,

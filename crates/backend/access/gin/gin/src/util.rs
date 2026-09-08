@@ -16,8 +16,10 @@ use crate::{
     write_meta_to, write_opaque_to, RM_GIN,
 };
 
-/// initGinState. Closed opclass set per column: jsonb_ops / jsonb_path_ops /
-/// tsvector_ops / array_ops; anything else panics loudly.
+/// initGinState (ginutil.c:101-215): one resolved support proc per slot and
+/// column. Each slot is looked up on its own through the opfamily (C's
+/// index_getprocid / index_getprocinfo), so any pairing of support procs an
+/// opclass registers builds and scans as it does in C.
 pub fn initGinState(rel: &Relation<'_>) -> PgResult<GinState> {
     let natts = rel.rd_att.natts;
     // INVARIANT: 1 <= natts <= GIN_MAX_KEY_COLS (32) == INDEX_MAX_KEYS, enforced at
@@ -27,14 +29,7 @@ pub fn initGinState(rel: &Relation<'_>) -> PgResult<GinState> {
     if natts < 1 || natts as usize > GIN_MAX_KEY_COLS {
         panic!("gin index with {natts} key columns outside 1..={GIN_MAX_KEY_COLS}, which DDL rejects (indexcmds/src/define.rs:547,551-556)");
     }
-    let mut cols = [GinColState {
-        opclass: GinOpclass::JsonbOps,
-        elem_cmp: GinElemCmp::None,
-        support_collation: InvalidOid,
-        can_partial_match: false,
-        key_byval: false,
-        key_len: 0,
-    }; GIN_MAX_KEY_COLS];
+    let mut cols = [GinColState::array_ops(GinCompareFn::Int4, true, 4); GIN_MAX_KEY_COLS];
     for i in 0..natts as usize {
         cols[i] = init_gin_col(rel, i)?;
     }
@@ -64,90 +59,287 @@ fn missing_support_function(
     ))
 }
 
+/// The identity fmgr dispatches a support proc by (fmgr.c
+/// fmgr_info_cxt_security): a core proc by its own oid; a LANGUAGE internal
+/// function by the fmgr_builtins row its prosrc names (so a
+/// `CREATE FUNCTION ... LANGUAGE internal AS 'ginarrayextract'` alias IS
+/// ginarrayextract); a LANGUAGE C function by its link symbol (prosrc; the
+/// proname of every in-tree extension proc). Anything else (SQL / PL
+/// bodies) is `Other`, callable only through fmgr.
+enum ProcIdentity {
+    Builtin(::types_core::Oid),
+    Symbol(String),
+    Other,
+}
+
+fn support_proc_identity(proc_oid: ::types_core::Oid) -> PgResult<ProcIdentity> {
+    if proc_oid < ::types_core::catalog::FirstNormalObjectId {
+        return Ok(ProcIdentity::Builtin(proc_oid));
+    }
+    if ::fmgr_seams::internal_builtin_oid::is_installed() {
+        if let Some(builtin) = ::fmgr_seams::internal_builtin_oid::call(proc_oid)? {
+            return Ok(ProcIdentity::Builtin(builtin));
+        }
+    }
+    let Some(row) = ::syscache_seams::lookup_pg_proc_fmgr::call(proc_oid)? else {
+        // Deleted under us: the cache lookup fmgr would make next reports it.
+        return Ok(ProcIdentity::Other);
+    };
+    if row.prolang != C_LANGUAGE_ID {
+        return Ok(ProcIdentity::Other);
+    }
+    let cx = ::mcx::MemoryContext::new("gin support proc probe");
+    let prosrc = ::syscache_seams::lookup_pg_proc_prosrc::call(cx.mcx(), proc_oid)?;
+    let identity = match prosrc {
+        Some(prosrc) => ProcIdentity::Symbol(prosrc.as_str().to_string()),
+        None => ProcIdentity::Other,
+    };
+    Ok(identity)
+}
+
+/// pg_language.dat: the `c` language's oid.
+const C_LANGUAGE_ID: ::types_core::Oid = 13;
+
+/// The "GIN operator class with <slot> support function N is not supported"
+/// refusal: reached only by an internal-argument support proc outside the
+/// tree's set, which no loadable function can be (C-language functions
+/// resolve to in-tree symbols, SQL / PL functions cannot take `internal`).
+#[cold]
+fn unsupported_support_proc(slot: &str, proc_oid: ::types_core::Oid) -> Box<::types_error::PgError> {
+    crate::unsupported(format!(
+        "GIN operator class with {slot} support function {proc_oid} is not supported"
+    ))
+}
+
+/// compareFn: a core comparator with a specialized arm, a btree_gin
+/// comparator (the type's core btree cmp, or gin_numeric_cmp / gin_enum_cmp)
+/// through gin_btree_seams, else fmgr (C's only mechanism). `proc_oid` is
+/// GIN_COMPARE_PROC or the typcache comparator C's initGinState falls back to.
+fn resolve_compare(proc_oid: ::types_core::Oid) -> PgResult<GinCompareFn> {
+    let identity = support_proc_identity(proc_oid)?;
+    let builtin = match identity {
+        ProcIdentity::Builtin(oid) => oid,
+        ProcIdentity::Symbol(ref name) => match name.as_str() {
+            "gin_numeric_cmp" => return Ok(GinCompareFn::Btree(GinBtreeType::Numeric)),
+            "gin_enum_cmp" => return Ok(GinCompareFn::Btree(GinBtreeType::Enum)),
+            _ => InvalidOid,
+        },
+        ProcIdentity::Other => InvalidOid,
+    };
+    Ok(match builtin {
+        opclass::F_BTINT2CMP => GinCompareFn::Int2,
+        opclass::F_BTINT4CMP => GinCompareFn::Int4,
+        opclass::F_BTINT8CMP => GinCompareFn::Int8,
+        opclass::F_BTOIDCMP => GinCompareFn::Oid,
+        opclass::F_BTTEXTCMP => GinCompareFn::Text,
+        opclass::F_GIN_COMPARE_JSONB => GinCompareFn::Jsonb,
+        opclass::F_GIN_CMP_TSLEXEME => GinCompareFn::TsLexeme,
+        _ => match opclass::btree_type_of_core_cmp(builtin) {
+            Some(ty) => GinCompareFn::Btree(ty),
+            None => {
+                // C's fmgr_info_copy site: resolve eagerly so a missing or
+                // not-ported comparator raises a catchable ERROR here rather
+                // than mid-compare (gist state.rs pattern; the gate covers
+                // test mocks that install only fmgr_info).
+                let finfo = ::fmgr_seams::fmgr_info::call(proc_oid)?;
+                if ::fmgr_seams::fmgr_info_not_ported_name::is_installed() {
+                    if let Some(name) = ::fmgr_seams::fmgr_info_not_ported_name::call(&finfo) {
+                        return Err(crate::unsupported(format!(
+                            "GIN compare support function {name} (oid {proc_oid}) is not supported"
+                        )));
+                    }
+                }
+                GinCompareFn::Fmgr(proc_oid)
+            }
+        },
+    })
+}
+
+fn resolve_extract_value(proc_oid: ::types_core::Oid) -> PgResult<GinExtractValueFn> {
+    Ok(match support_proc_identity(proc_oid)? {
+        ProcIdentity::Builtin(oid) => match oid {
+            opclass::F_GIN_EXTRACT_JSONB => GinExtractValueFn::Jsonb,
+            opclass::F_GIN_EXTRACT_JSONB_PATH => GinExtractValueFn::JsonbPath,
+            // gin_extract_tsvector and its 2-argument compatibility row
+            // (tsginidx.c gin_extract_tsvector_2args forwards to it).
+            opclass::F_GIN_EXTRACT_TSVECTOR | opclass::F_GIN_EXTRACT_TSVECTOR_2ARGS => {
+                GinExtractValueFn::Tsvector
+            }
+            // ginarrayextract and ginarrayextract_2args (ginarrayproc.c:68).
+            opclass::F_GINARRAYEXTRACT | opclass::F_GINARRAYEXTRACT_2ARGS => {
+                GinExtractValueFn::Array
+            }
+            other => return Err(unsupported_support_proc("extractValue", other)),
+        },
+        ProcIdentity::Symbol(name) => match name.as_str() {
+            "gin_extract_value_trgm" => GinExtractValueFn::Trgm,
+            "gin_extract_hstore" => GinExtractValueFn::Hstore,
+            other => match other
+                .strip_prefix("gin_extract_value_")
+                .and_then(GinBtreeType::from_type_name)
+            {
+                Some(ty) => GinExtractValueFn::Btree(ty),
+                None => return Err(unsupported_support_proc("extractValue", proc_oid)),
+            },
+        },
+        ProcIdentity::Other => return Err(unsupported_support_proc("extractValue", proc_oid)),
+    })
+}
+
+pub(crate) fn resolve_extract_query(proc_oid: ::types_core::Oid) -> PgResult<GinExtractQueryFn> {
+    Ok(match support_proc_identity(proc_oid)? {
+        ProcIdentity::Builtin(oid) => match oid {
+            opclass::F_GIN_EXTRACT_JSONB_QUERY => GinExtractQueryFn::Jsonb,
+            opclass::F_GIN_EXTRACT_JSONB_QUERY_PATH => GinExtractQueryFn::JsonbPath,
+            // gin_extract_tsquery and its compatibility rows (tsginidx.c
+            // gin_extract_tsquery_5args / _oldsig forward to it).
+            opclass::F_GIN_EXTRACT_TSQUERY
+            | opclass::F_GIN_EXTRACT_TSQUERY_5ARGS
+            | opclass::F_GIN_EXTRACT_TSQUERY_OLDSIG => GinExtractQueryFn::Tsquery,
+            opclass::F_GINQUERYARRAYEXTRACT => GinExtractQueryFn::Array,
+            other => return Err(unsupported_support_proc("extractQuery", other)),
+        },
+        ProcIdentity::Symbol(name) => match name.as_str() {
+            "gin_extract_query_trgm" => GinExtractQueryFn::Trgm,
+            "gin_extract_hstore_query" => GinExtractQueryFn::Hstore,
+            "ginint4_queryextract" => GinExtractQueryFn::IntArray,
+            other => match other
+                .strip_prefix("gin_extract_query_")
+                .and_then(GinBtreeType::from_type_name)
+            {
+                Some(ty) => GinExtractQueryFn::Btree(ty),
+                None => return Err(unsupported_support_proc("extractQuery", proc_oid)),
+            },
+        },
+        ProcIdentity::Other => return Err(unsupported_support_proc("extractQuery", proc_oid)),
+    })
+}
+
+fn resolve_consistent(proc_oid: ::types_core::Oid) -> PgResult<GinConsistentFn> {
+    Ok(match support_proc_identity(proc_oid)? {
+        ProcIdentity::Builtin(oid) => match oid {
+            opclass::F_GIN_CONSISTENT_JSONB => GinConsistentFn::Jsonb,
+            opclass::F_GIN_CONSISTENT_JSONB_PATH => GinConsistentFn::JsonbPath,
+            // gin_tsquery_consistent and its compatibility rows (tsginidx.c
+            // gin_tsquery_consistent_6args / _oldsig forward to it).
+            opclass::F_GIN_TSQUERY_CONSISTENT
+            | opclass::F_GIN_TSQUERY_CONSISTENT_6ARGS
+            | opclass::F_GIN_TSQUERY_CONSISTENT_OLDSIG => GinConsistentFn::Tsquery,
+            opclass::F_GINARRAYCONSISTENT => GinConsistentFn::Array,
+            other => return Err(unsupported_support_proc("consistent", other)),
+        },
+        ProcIdentity::Symbol(name) => match name.as_str() {
+            "gin_trgm_consistent" => GinConsistentFn::Trgm,
+            "gin_consistent_hstore" => GinConsistentFn::Hstore,
+            "ginint4_consistent" => GinConsistentFn::IntArray,
+            "gin_btree_consistent" => GinConsistentFn::Btree,
+            _ => return Err(unsupported_support_proc("consistent", proc_oid)),
+        },
+        ProcIdentity::Other => return Err(unsupported_support_proc("consistent", proc_oid)),
+    })
+}
+
+fn resolve_tri_consistent(proc_oid: ::types_core::Oid) -> PgResult<GinTriConsistentFn> {
+    Ok(match support_proc_identity(proc_oid)? {
+        ProcIdentity::Builtin(oid) => match oid {
+            opclass::F_GIN_TRICONSISTENT_JSONB => GinTriConsistentFn::Jsonb,
+            opclass::F_GIN_TRICONSISTENT_JSONB_PATH => GinTriConsistentFn::JsonbPath,
+            opclass::F_GIN_TSQUERY_TRICONSISTENT => GinTriConsistentFn::Tsquery,
+            opclass::F_GINARRAYTRICONSISTENT => GinTriConsistentFn::Array,
+            other => return Err(unsupported_support_proc("triConsistent", other)),
+        },
+        ProcIdentity::Symbol(name) => match name.as_str() {
+            "gin_trgm_triconsistent" => GinTriConsistentFn::Trgm,
+            _ => return Err(unsupported_support_proc("triConsistent", proc_oid)),
+        },
+        ProcIdentity::Other => return Err(unsupported_support_proc("triConsistent", proc_oid)),
+    })
+}
+
+fn resolve_compare_partial(proc_oid: ::types_core::Oid) -> PgResult<GinComparePartialFn> {
+    Ok(match support_proc_identity(proc_oid)? {
+        ProcIdentity::Builtin(oid) => match oid {
+            opclass::F_GIN_CMP_PREFIX => GinComparePartialFn::TsPrefix,
+            other => return Err(unsupported_support_proc("comparePartial", other)),
+        },
+        ProcIdentity::Symbol(name) => match name
+            .strip_prefix("gin_compare_prefix_")
+            .and_then(GinBtreeType::from_type_name)
+        {
+            Some(ty) => GinComparePartialFn::Btree(ty),
+            None => return Err(unsupported_support_proc("comparePartial", proc_oid)),
+        },
+        ProcIdentity::Other => return Err(unsupported_support_proc("comparePartial", proc_oid)),
+    })
+}
+
 fn init_gin_col(rel: &Relation<'_>, i: usize) -> PgResult<GinColState> {
     let opcintype = rel.rd_opcintype[i];
     let opfamily = rel.rd_opfamily[i];
+    let proc_of = |procnum: u16| {
+        lsyscache::get_opfamily_proc(opfamily, opcintype, opcintype, procnum as i16)
+    };
 
-    // C's initGinState fetches extractValue, then extractQuery, through
-    // index_getprocinfo (ginutil.c:160-165), which errors here (not later, at
-    // planning) when the opclass omits one — CREATE OPERATOR CLASS ... USING
-    // gin does not require FUNCTION 2/3. Proc 2 is probed first, as in C.
-    let extract =
-        lsyscache::get_opfamily_proc(opfamily, opcintype, opcintype, GIN_EXTRACTVALUE_PROC as i16)?;
-    if extract == InvalidOid {
-        return Err(missing_support_function(rel, GIN_EXTRACTVALUE_PROC, i)?);
-    }
-    if lsyscache::get_opfamily_proc(opfamily, opcintype, opcintype, GIN_EXTRACTQUERY_PROC as i16)?
-        == InvalidOid
-    {
-        return Err(missing_support_function(rel, GIN_EXTRACTQUERY_PROC, i)?);
-    }
-
-    let opclass = match extract {
-        opclass::F_GIN_EXTRACT_JSONB => GinOpclass::JsonbOps,
-        opclass::F_GIN_EXTRACT_JSONB_PATH => GinOpclass::JsonbPathOps,
-        opclass::F_GIN_EXTRACT_TSVECTOR => GinOpclass::TsvectorOps,
-        // intarray's gin__int_ops also registers ginarrayextract as proc 2;
-        // the extractQuery proc tells the two opclasses apart.
-        opclass::F_GINARRAYEXTRACT => {
-            let extract_query = lsyscache::get_opfamily_proc(
-                opfamily,
-                opcintype,
-                opcintype,
-                GIN_EXTRACTQUERY_PROC as i16,
-            )?;
-            if extract_query == opclass::F_GINQUERYARRAYEXTRACT {
-                GinOpclass::ArrayOps
-            } else {
-                let cx = ::mcx::MemoryContext::new("gin ext opclass probe");
-                let name = lsyscache::get_func_name(cx.mcx(), extract_query)?
-                    .map(|n| n.as_str().to_string());
-                match name.as_deref() {
-                    Some("ginint4_queryextract") => GinOpclass::IntArrayOps,
-                    _ => {
-                        return Err(crate::unsupported(format!(
-                            "GIN operator class with extractQuery support function {extract_query} is not supported"
-                        )))
-                    }
+    // ginutil.c:139-158: the compare proc, or the index key type's default
+    // btree comparator from the typcache when the opclass omits it.
+    let compare_proc = proc_of(GIN_COMPARE_PROC)?;
+    let compare = if compare_proc != InvalidOid {
+        resolve_compare(compare_proc)?
+    } else {
+        match rel.rd_att.attr(i).atttypid {
+            // The typcache's default btree comparators of these key types
+            // (btint2cmp / btint4cmp / btint8cmp / btoidcmp / bttextcmp).
+            ::types_core::INT2OID => GinCompareFn::Int2,
+            ::types_core::INT4OID => GinCompareFn::Int4,
+            ::types_core::INT8OID => GinCompareFn::Int8,
+            ::types_core::OIDOID => GinCompareFn::Oid,
+            ::types_core::TEXTOID | ::types_core::VARCHAROID => GinCompareFn::Text,
+            other => {
+                // lookup_type_cache(atttypid, TYPECACHE_CMP_PROC_FINFO).
+                let cmp_proc = ::typcache_seams::type_cache_cmp_proc::call(other)?;
+                if cmp_proc == InvalidOid {
+                    return Err(Box::new(
+                        ::types_error::PgError::error(format!(
+                            "could not identify a comparison function for type {}",
+                            ::format_type::format_type_be(other)?
+                        ))
+                        .with_sqlstate(::types_error::ERRCODE_UNDEFINED_FUNCTION),
+                    ));
                 }
-            }
-        }
-        // Extension opclasses carry dynamic oids; match by proname.
-        other => {
-            let cx = ::mcx::MemoryContext::new("gin ext opclass probe");
-            let name = lsyscache::get_func_name(cx.mcx(), other)?
-                .map(|n| n.as_str().to_string());
-            let btree_ty = name
-                .as_deref()
-                .and_then(|n| n.strip_prefix("gin_extract_value_"))
-                .and_then(GinBtreeType::from_type_name);
-            match (name.as_deref(), btree_ty) {
-                (Some("gin_extract_value_trgm"), _) => GinOpclass::TrgmOps,
-                (Some("gin_extract_hstore"), _) => GinOpclass::HstoreOps,
-                (_, Some(ty)) => GinOpclass::BtreeOps(ty),
-                // unported: opclasses beyond the closed set (user-reachable
-                // via CREATE INDEX ... USING gin with a custom opclass).
-                _ => {
-                    return Err(crate::unsupported(format!(
-                        "GIN operator class with extractValue support function {other} is not supported"
-                    )))
-                }
+                resolve_compare(cmp_proc)?
             }
         }
     };
-    let consistent = lsyscache::get_opfamily_proc(
-        opfamily,
-        opcintype,
-        opcintype,
-        GIN_CONSISTENT_PROC as i16,
-    )?;
-    let triconsistent = lsyscache::get_opfamily_proc(
-        opfamily,
-        opcintype,
-        opcintype,
-        GIN_TRICONSISTENT_PROC as i16,
-    )?;
-    if consistent == InvalidOid && triconsistent == InvalidOid {
+
+    // ginutil.c:160-165: the opclass must provide both extract procs, fetched
+    // through index_getprocinfo (which errors here, not at planning, when one
+    // is missing — CREATE OPERATOR CLASS ... USING gin does not require
+    // FUNCTION 2/3). Proc 2 first, then proc 3, as in C.
+    let extract_value_proc = proc_of(GIN_EXTRACTVALUE_PROC)?;
+    if extract_value_proc == InvalidOid {
+        return Err(missing_support_function(rel, GIN_EXTRACTVALUE_PROC, i)?);
+    }
+    let extract_value = resolve_extract_value(extract_value_proc)?;
+    let extract_query_proc = proc_of(GIN_EXTRACTQUERY_PROC)?;
+    if extract_query_proc == InvalidOid {
+        return Err(missing_support_function(rel, GIN_EXTRACTQUERY_PROC, i)?);
+    }
+    let extract_query = resolve_extract_query(extract_query_proc)?;
+
+    // ginutil.c:171-193: tri-state and/or binary consistent; at least one.
+    let tri_consistent_proc = proc_of(GIN_TRICONSISTENT_PROC)?;
+    let tri_consistent = if tri_consistent_proc != InvalidOid {
+        Some(resolve_tri_consistent(tri_consistent_proc)?)
+    } else {
+        None
+    };
+    let consistent_proc = proc_of(GIN_CONSISTENT_PROC)?;
+    let consistent = if consistent_proc != InvalidOid {
+        Some(resolve_consistent(consistent_proc)?)
+    } else {
+        None
+    };
+    if consistent.is_none() && tri_consistent.is_none() {
         let cx = ::mcx::MemoryContext::new("gin consistent probe");
         let relname = lsyscache::get_rel_name(cx.mcx(), rel.rd_id)?
             .map_or_else(String::new, |n| n.as_str().to_string());
@@ -159,101 +351,31 @@ fn init_gin_col(rel: &Relation<'_>, i: usize) -> PgResult<GinColState> {
             .with_sqlstate(::types_error::ERRCODE_INTERNAL_ERROR),
         ));
     }
-    // array_ops has no GIN_COMPARE_PROC; C falls back to the index key
-    // type's default btree comparator via typcache. The index tupdesc attr
-    // is the element type (opckeytype anyelement, ConstructTupleDescriptor).
-    let elem_cmp = if opclass == GinOpclass::ArrayOps {
-        match rel.rd_att.attr(i).atttypid {
-            ::types_core::INT2OID => GinElemCmp::Int2,
-            ::types_core::INT4OID => GinElemCmp::Int4,
-            ::types_core::INT8OID => GinElemCmp::Int8,
-            ::types_core::OIDOID => GinElemCmp::Oid,
-            ::types_core::TEXTOID | ::types_core::VARCHAROID => GinElemCmp::Text,
-            // Any other element type: the typcache lookup itself
-            // (lookup_type_cache TYPECACHE_CMP_PROC_FINFO), dispatched
-            // through fmgr at compare time.
-            other => {
-                let cmp_proc = ::typcache_seams::type_cache_cmp_proc::call(other)?;
-                if cmp_proc == InvalidOid {
-                    return Err(Box::new(
-                        ::types_error::PgError::error(format!(
-                            "could not identify a comparison function for type {}",
-                            ::format_type::format_type_be(other)?
-                        ))
-                        .with_sqlstate(::types_error::ERRCODE_UNDEFINED_FUNCTION),
-                    ));
-                }
-                // C's fmgr_info_copy site (initGinState): resolve eagerly so
-                // a missing or not-ported comparator raises a catchable ERROR
-                // here rather than mid-compare (gist state.rs pattern; the
-                // gate covers test mocks that install only fmgr_info).
-                let finfo = ::fmgr_seams::fmgr_info::call(cmp_proc)?;
-                if ::fmgr_seams::fmgr_info_not_ported_name::is_installed() {
-                    if let Some(name) = ::fmgr_seams::fmgr_info_not_ported_name::call(&finfo) {
-                        return Err(crate::unsupported(format!(
-                            "GIN array_ops element comparator {name} (oid {cmp_proc}) is not supported"
-                        )));
-                    }
-                }
-                GinElemCmp::Fmgr(cmp_proc)
-            }
-        }
+
+    // ginutil.c:196-206: partial match iff proc 5 is registered.
+    let compare_partial_proc = proc_of(GIN_COMPARE_PARTIAL_PROC)?;
+    let compare_partial = if compare_partial_proc != InvalidOid {
+        Some(resolve_compare_partial(compare_partial_proc)?)
     } else {
-        GinElemCmp::None
-    };
-    debug_assert!(
-        matches!(opclass, GinOpclass::BtreeOps(_))
-            || lsyscache::get_opfamily_proc(opfamily, opcintype, opcintype, GIN_COMPARE_PROC as i16)?
-                == match opclass {
-                    GinOpclass::JsonbOps => opclass::F_GIN_COMPARE_JSONB,
-                    GinOpclass::JsonbPathOps => opclass::F_BTINT4CMP,
-                    GinOpclass::TsvectorOps => opclass::F_GIN_CMP_TSLEXEME,
-                    GinOpclass::TrgmOps => opclass::F_BTINT4CMP,
-                    GinOpclass::HstoreOps => opclass::F_BTTEXTCMP,
-                    GinOpclass::IntArrayOps => opclass::F_BTINT4CMP,
-                    GinOpclass::ArrayOps | GinOpclass::BtreeOps(_) => InvalidOid,
-                }
-    );
-    let partial = lsyscache::get_opfamily_proc(
-        opfamily,
-        opcintype,
-        opcintype,
-        GIN_COMPARE_PARTIAL_PROC as i16,
-    )?;
-    let can_partial_match = match partial {
-        InvalidOid => false,
-        opclass::F_GIN_CMP_PREFIX if opclass == GinOpclass::TsvectorOps => true,
-        // btree_gin's gin_compare_prefix_<type> (extension oids; proname).
-        other if matches!(opclass, GinOpclass::BtreeOps(_)) => {
-            let cx = ::mcx::MemoryContext::new("gin ext opclass probe");
-            let is_prefix = lsyscache::get_func_name(cx.mcx(), other)?
-                .is_some_and(|n| n.as_str().starts_with("gin_compare_prefix_"));
-            if !is_prefix {
-                return Err(crate::unsupported(format!(
-                    "GIN operator class with comparePartial support function {other} is not supported"
-                )));
-            }
-            true
-        }
-        // unported: comparePartial support beyond tsvector's prefix compare
-        // (user-reachable via a custom opclass registering proc 5).
-        other => {
-            return Err(crate::unsupported(format!(
-                "GIN operator class with comparePartial support function {other} is not supported"
-            )))
-        }
+        None
     };
 
     let attr = rel.rd_att.compact_attr(i);
     Ok(GinColState {
-        opclass,
-        elem_cmp,
+        compare,
+        extract_value,
+        extract_query,
+        consistent,
+        tri_consistent,
+        compare_partial,
+        // ginutil.c:208-214: the index collation, else the default
+        // collation for collatable storage types of noncollatable keys.
         support_collation: if rel.rd_indcollation[i] != InvalidOid {
             rel.rd_indcollation[i]
         } else {
             ::types_core::catalog::DEFAULT_COLLATION_OID
         },
-        can_partial_match,
+        can_partial_match: compare_partial.is_some(),
         key_byval: attr.attbyval,
         key_len: attr.attlen,
     })

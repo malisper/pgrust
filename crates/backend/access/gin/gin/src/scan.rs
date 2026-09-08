@@ -244,9 +244,11 @@ pub(crate) fn ginNewScanKey(
 
         // SAFETY: query values stored in work (kcx contract).
         let kcx = unsafe { work.kcx() };
+        let col = state.col(skey.sk_attno as OffsetNumber);
         let extracted = crate::opclass::extract_query(
             kcx,
-            state.col(skey.sk_attno as OffsetNumber),
+            col.extract_query,
+            col.support_collation,
             skey.sk_argument,
             skey.sk_strategy,
         )?;

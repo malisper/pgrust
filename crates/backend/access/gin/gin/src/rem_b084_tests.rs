@@ -71,7 +71,7 @@ pub(crate) fn record_wal(info: u8) {
     ));
 }
 
-fn install() {
+pub(crate) fn install() {
     fake_bufmgr::install();
     static INIT: Once = Once::new();
     INIT.call_once(|| {
@@ -110,8 +110,13 @@ fn install() {
             lock_seams::lock_release::set(|_tag, _mode, _s| Ok(true));
         }
         if !syscache_seams::lookup_pg_amproc::is_installed() {
-            // A tsvector_ops-shaped opclass: procs 1-4 present, no proc 5/6.
-            syscache_seams::lookup_pg_amproc::set(|_opfamily, _left, _right, procnum| {
+            // A tsvector_ops-shaped opclass (procs 1-4 present, no proc 5/6)
+            // for this rig's opfamily 3659; the w2_043 rig's custom opclass
+            // shapes are keyed by their own opfamily oids.
+            syscache_seams::lookup_pg_amproc::set(|opfamily, _left, _right, procnum| {
+                if let Some(proc_oid) = crate::w2_043_tests::amproc_of(opfamily, procnum as u16) {
+                    return Ok(proc_oid);
+                }
                 Ok(match procnum as u16 {
                     GIN_COMPARE_PROC => crate::opclass::F_GIN_CMP_TSLEXEME,
                     GIN_EXTRACTVALUE_PROC => crate::opclass::F_GIN_EXTRACT_TSVECTOR,
@@ -308,12 +313,9 @@ fn index_rel(mcx: Mcx<'_>) -> Relation<'_> {
 
 fn text_col() -> GinColState {
     GinColState {
-        opclass: GinOpclass::TsvectorOps,
-        elem_cmp: GinElemCmp::None,
-        support_collation: 0,
+        compare_partial: None,
         can_partial_match: false,
-        key_byval: false,
-        key_len: -1,
+        ..GinColState::tsvector_ops(0)
     }
 }
 

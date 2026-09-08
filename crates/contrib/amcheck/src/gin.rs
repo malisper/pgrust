@@ -893,14 +893,10 @@ mod tests {
     }
 
     fn int4_array_gin_state() -> GinState {
-        use ::gin_vocab::{GinColState, GinElemCmp, GinOpclass, GIN_MAX_KEY_COLS};
+        use ::gin_vocab::{GinColState, GinCompareFn, GIN_MAX_KEY_COLS};
         let col = GinColState {
-            opclass: GinOpclass::ArrayOps,
-            elem_cmp: GinElemCmp::Int4,
             support_collation: ::types_core::primitive::InvalidOid,
-            can_partial_match: false,
-            key_byval: true,
-            key_len: 4,
+            ..GinColState::array_ops(GinCompareFn::Int4, true, 4)
         };
         GinState {
             natts: 1,

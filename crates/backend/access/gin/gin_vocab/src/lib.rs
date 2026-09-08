@@ -208,27 +208,299 @@ pub const fn size_of_gin_posting_list(nbytes: usize) -> usize {
     SizeOfGinPostingListHeader + SHORTALIGN(nbytes)
 }
 
-/// Closed opclass set (rule 4): support-proc OIDs map to a tag at
-/// initGinState; unknown opclasses panic loudly there.
+// C's GinState keeps one FmgrInfo per support-proc slot and per column
+// (ginutil.c initGinState: compareFn, extractValueFn, extractQueryFn,
+// consistentFn, triConsistentFn, comparePartialFn), each resolved on its own
+// through index_getprocinfo, so any pairing of support procs an opclass
+// registers is honoured. pgrust resolves each slot the same way, to a
+// known-set tag (rule 4: enum dispatch, no fmgr frame) keyed on the proc
+// fmgr would dispatch to: the canonical builtin (a core proc or a LANGUAGE
+// internal alias of one) or the C-language link symbol of an in-tree
+// extension proc. Only the compare slot, whose procs take no `internal`
+// argument, can name a proc outside the known set (a SQL / PL function);
+// it carries the oid and is called through fmgr, as C does.
+
+/// compareFn[i] (GIN_COMPARE_PROC, or the storage type's default btree
+/// comparator from the typcache when the opclass omits proc 1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GinOpclass {
-    JsonbOps,
-    JsonbPathOps,
-    TsvectorOps,
-    ArrayOps,
-    // contrib gin_trgm_ops: extension-oid procs matched by proname at
-    // initGinState; bodies reached through gin_trgm_seams.
-    TrgmOps,
-    // contrib gin_hstore_ops: same proname scheme; bodies through
-    // gin_hstore_seams (text keys, shimmed triconsistent).
-    HstoreOps,
-    // contrib gin__int_ops (intarray): shares ginarrayextract as proc 2, so
-    // it is disambiguated from ArrayOps by the extractQuery proc; bodies
-    // through gin_int4_seams (int4 keys, shimmed triconsistent).
-    IntArrayOps,
-    // contrib btree_gin scalar opclasses: same proname scheme; bodies
-    // through gin_btree_seams.
-    BtreeOps(GinBtreeType),
+pub enum GinCompareFn {
+    /// btint2cmp
+    Int2,
+    /// btint4cmp (jsonb_path_ops / gin_trgm_ops / gin__int_ops key compare)
+    Int4,
+    /// btint8cmp
+    Int8,
+    /// btoidcmp
+    Oid,
+    /// bttextcmp under the support collation (hstore, text-keyed array_ops)
+    Text,
+    /// gin_compare_jsonb
+    Jsonb,
+    /// gin_cmp_tslexeme
+    TsLexeme,
+    /// contrib/btree_gin FUNCTION 1 (the type's btree comparator, or
+    /// gin_numeric_cmp / gin_enum_cmp); bodies through gin_btree_seams.
+    Btree(GinBtreeType),
+    /// Any other comparator (a SQL / PL function, a core comparator without
+    /// a specialized arm): resolved at initGinState, called through fmgr per
+    /// compare with the support collation (C's FunctionCall2Coll).
+    Fmgr(::types_core::Oid),
+}
+
+/// extractValueFn[i] (GIN_EXTRACTVALUE_PROC).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GinExtractValueFn {
+    /// gin_extract_jsonb
+    Jsonb,
+    /// gin_extract_jsonb_path
+    JsonbPath,
+    /// gin_extract_tsvector
+    Tsvector,
+    /// ginarrayextract (array_ops; also intarray's gin__int_ops proc 2)
+    Array,
+    /// pg_trgm gin_extract_value_trgm
+    Trgm,
+    /// hstore gin_extract_hstore
+    Hstore,
+    /// btree_gin gin_extract_value_<type>
+    Btree(GinBtreeType),
+}
+
+/// extractQueryFn[i] (GIN_EXTRACTQUERY_PROC).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GinExtractQueryFn {
+    /// gin_extract_jsonb_query
+    Jsonb,
+    /// gin_extract_jsonb_query_path
+    JsonbPath,
+    /// gin_extract_tsquery
+    Tsquery,
+    /// ginqueryarrayextract
+    Array,
+    /// pg_trgm gin_extract_query_trgm
+    Trgm,
+    /// hstore gin_extract_hstore_query
+    Hstore,
+    /// intarray ginint4_queryextract
+    IntArray,
+    /// btree_gin gin_extract_query_<type>
+    Btree(GinBtreeType),
+}
+
+/// consistentFn[i] (GIN_CONSISTENT_PROC); None when the opclass registers
+/// only the tri-state proc (ginlogic.c shimBoolConsistentFn).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GinConsistentFn {
+    /// gin_consistent_jsonb
+    Jsonb,
+    /// gin_consistent_jsonb_path
+    JsonbPath,
+    /// gin_tsquery_consistent
+    Tsquery,
+    /// ginarrayconsistent
+    Array,
+    /// pg_trgm gin_trgm_consistent
+    Trgm,
+    /// hstore gin_consistent_hstore
+    Hstore,
+    /// intarray ginint4_consistent
+    IntArray,
+    /// btree_gin gin_btree_consistent
+    Btree,
+}
+
+/// triConsistentFn[i] (GIN_TRICONSISTENT_PROC); None when the opclass
+/// registers only the binary proc (ginlogic.c shimTriConsistentFn).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GinTriConsistentFn {
+    /// gin_triconsistent_jsonb
+    Jsonb,
+    /// gin_triconsistent_jsonb_path
+    JsonbPath,
+    /// gin_tsquery_triconsistent
+    Tsquery,
+    /// ginarraytriconsistent
+    Array,
+    /// pg_trgm gin_trgm_triconsistent
+    Trgm,
+}
+
+/// comparePartialFn[i] (GIN_COMPARE_PARTIAL_PROC); None means
+/// canPartialMatch[i] = false.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GinComparePartialFn {
+    /// gin_cmp_prefix
+    TsPrefix,
+    /// btree_gin gin_compare_prefix_<type>
+    Btree(GinBtreeType),
+}
+
+// rd_amcache tag codecs (process-local round trip; insert.rs). Tag 0 of an
+// optional slot is None; the btree_gin arms carry the type tag above a base.
+const GIN_TAG_BTREE_BASE: u8 = 32;
+
+impl GinCompareFn {
+    pub fn tag(self) -> u8 {
+        match self {
+            GinCompareFn::Int2 => 1,
+            GinCompareFn::Int4 => 2,
+            GinCompareFn::Int8 => 3,
+            GinCompareFn::Oid => 4,
+            GinCompareFn::Text => 5,
+            GinCompareFn::Jsonb => 6,
+            GinCompareFn::TsLexeme => 7,
+            GinCompareFn::Fmgr(_) => 8,
+            GinCompareFn::Btree(ty) => GIN_TAG_BTREE_BASE + ty.tag(),
+        }
+    }
+
+    pub fn from_tag(tag: u8, proc_oid: ::types_core::Oid) -> Option<GinCompareFn> {
+        Some(match tag {
+            1 => GinCompareFn::Int2,
+            2 => GinCompareFn::Int4,
+            3 => GinCompareFn::Int8,
+            4 => GinCompareFn::Oid,
+            5 => GinCompareFn::Text,
+            6 => GinCompareFn::Jsonb,
+            7 => GinCompareFn::TsLexeme,
+            8 => GinCompareFn::Fmgr(proc_oid),
+            t if t >= GIN_TAG_BTREE_BASE => {
+                GinCompareFn::Btree(GinBtreeType::from_tag(t - GIN_TAG_BTREE_BASE)?)
+            }
+            _ => return None,
+        })
+    }
+}
+
+impl GinExtractValueFn {
+    pub fn tag(self) -> u8 {
+        match self {
+            GinExtractValueFn::Jsonb => 1,
+            GinExtractValueFn::JsonbPath => 2,
+            GinExtractValueFn::Tsvector => 3,
+            GinExtractValueFn::Array => 4,
+            GinExtractValueFn::Trgm => 5,
+            GinExtractValueFn::Hstore => 6,
+            GinExtractValueFn::Btree(ty) => GIN_TAG_BTREE_BASE + ty.tag(),
+        }
+    }
+
+    pub fn from_tag(tag: u8) -> Option<GinExtractValueFn> {
+        Some(match tag {
+            1 => GinExtractValueFn::Jsonb,
+            2 => GinExtractValueFn::JsonbPath,
+            3 => GinExtractValueFn::Tsvector,
+            4 => GinExtractValueFn::Array,
+            5 => GinExtractValueFn::Trgm,
+            6 => GinExtractValueFn::Hstore,
+            t if t >= GIN_TAG_BTREE_BASE => {
+                GinExtractValueFn::Btree(GinBtreeType::from_tag(t - GIN_TAG_BTREE_BASE)?)
+            }
+            _ => return None,
+        })
+    }
+}
+
+impl GinExtractQueryFn {
+    pub fn tag(self) -> u8 {
+        match self {
+            GinExtractQueryFn::Jsonb => 1,
+            GinExtractQueryFn::JsonbPath => 2,
+            GinExtractQueryFn::Tsquery => 3,
+            GinExtractQueryFn::Array => 4,
+            GinExtractQueryFn::Trgm => 5,
+            GinExtractQueryFn::Hstore => 6,
+            GinExtractQueryFn::IntArray => 7,
+            GinExtractQueryFn::Btree(ty) => GIN_TAG_BTREE_BASE + ty.tag(),
+        }
+    }
+
+    pub fn from_tag(tag: u8) -> Option<GinExtractQueryFn> {
+        Some(match tag {
+            1 => GinExtractQueryFn::Jsonb,
+            2 => GinExtractQueryFn::JsonbPath,
+            3 => GinExtractQueryFn::Tsquery,
+            4 => GinExtractQueryFn::Array,
+            5 => GinExtractQueryFn::Trgm,
+            6 => GinExtractQueryFn::Hstore,
+            7 => GinExtractQueryFn::IntArray,
+            t if t >= GIN_TAG_BTREE_BASE => {
+                GinExtractQueryFn::Btree(GinBtreeType::from_tag(t - GIN_TAG_BTREE_BASE)?)
+            }
+            _ => return None,
+        })
+    }
+}
+
+impl GinConsistentFn {
+    pub fn tag(self) -> u8 {
+        match self {
+            GinConsistentFn::Jsonb => 1,
+            GinConsistentFn::JsonbPath => 2,
+            GinConsistentFn::Tsquery => 3,
+            GinConsistentFn::Array => 4,
+            GinConsistentFn::Trgm => 5,
+            GinConsistentFn::Hstore => 6,
+            GinConsistentFn::IntArray => 7,
+            GinConsistentFn::Btree => 8,
+        }
+    }
+
+    pub fn from_tag(tag: u8) -> Option<GinConsistentFn> {
+        Some(match tag {
+            1 => GinConsistentFn::Jsonb,
+            2 => GinConsistentFn::JsonbPath,
+            3 => GinConsistentFn::Tsquery,
+            4 => GinConsistentFn::Array,
+            5 => GinConsistentFn::Trgm,
+            6 => GinConsistentFn::Hstore,
+            7 => GinConsistentFn::IntArray,
+            8 => GinConsistentFn::Btree,
+            _ => return None,
+        })
+    }
+}
+
+impl GinTriConsistentFn {
+    pub fn tag(self) -> u8 {
+        match self {
+            GinTriConsistentFn::Jsonb => 1,
+            GinTriConsistentFn::JsonbPath => 2,
+            GinTriConsistentFn::Tsquery => 3,
+            GinTriConsistentFn::Array => 4,
+            GinTriConsistentFn::Trgm => 5,
+        }
+    }
+
+    pub fn from_tag(tag: u8) -> Option<GinTriConsistentFn> {
+        Some(match tag {
+            1 => GinTriConsistentFn::Jsonb,
+            2 => GinTriConsistentFn::JsonbPath,
+            3 => GinTriConsistentFn::Tsquery,
+            4 => GinTriConsistentFn::Array,
+            5 => GinTriConsistentFn::Trgm,
+            _ => return None,
+        })
+    }
+}
+
+impl GinComparePartialFn {
+    pub fn tag(self) -> u8 {
+        match self {
+            GinComparePartialFn::TsPrefix => 1,
+            GinComparePartialFn::Btree(ty) => GIN_TAG_BTREE_BASE + ty.tag(),
+        }
+    }
+
+    pub fn from_tag(tag: u8) -> Option<GinComparePartialFn> {
+        Some(match tag {
+            1 => GinComparePartialFn::TsPrefix,
+            t if t >= GIN_TAG_BTREE_BASE => {
+                GinComparePartialFn::Btree(GinBtreeType::from_tag(t - GIN_TAG_BTREE_BASE)?)
+            }
+            _ => return None,
+        })
+    }
 }
 
 /// contrib/btree_gin per-type tag, one per C GIN_SUPPORT expansion.
@@ -349,23 +621,6 @@ impl GinBtreeType {
     }
 }
 
-/// array_ops has no GIN_COMPARE_PROC; C falls back to the element type's
-/// default btree comparator via typcache (initGinState). The common element
-/// types resolve to specialized arms; any other type carries its typcache
-/// cmp proc oid and dispatches through fmgr (`Fmgr`). None only on states
-/// that never compare (the gincost extractQuery probe).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GinElemCmp {
-    None,
-    Int2,
-    Int4,
-    Int8,
-    Oid,
-    Text,
-    /// The element type's default btree comparator (typcache cmp proc oid),
-    /// resolved at initGinState and called through fmgr per compare.
-    Fmgr(::types_core::Oid),
-}
 
 pub const JSP_GIN_OR: u8 = 0;
 pub const JSP_GIN_AND: u8 = 1;
@@ -461,15 +716,113 @@ impl TrgmPackedGraph {
     }
 }
 
-/// Per-key-column resolved opclass state (C GinState's per-attnum arrays).
+/// Per-key-column resolved opclass state (C GinState's per-attnum arrays:
+/// one resolved support proc per slot, plus supportCollation /
+/// canPartialMatch and the storage attribute's byval/len).
 #[derive(Clone, Copy, Debug)]
 pub struct GinColState {
-    pub opclass: GinOpclass,
-    pub elem_cmp: GinElemCmp,
+    pub compare: GinCompareFn,
+    pub extract_value: GinExtractValueFn,
+    pub extract_query: GinExtractQueryFn,
+    pub consistent: Option<GinConsistentFn>,
+    pub tri_consistent: Option<GinTriConsistentFn>,
+    pub compare_partial: Option<GinComparePartialFn>,
     pub support_collation: Oid,
     pub can_partial_match: bool,
     pub key_byval: bool,
     pub key_len: i16,
+}
+
+impl GinColState {
+    /// The core array_ops shape (ginarrayproc.c: procs 2/3/4/6, no proc 1 —
+    /// `compare` is the element type's default btree comparator) over a
+    /// storage attribute of the given byval/len.
+    pub const fn array_ops(compare: GinCompareFn, key_byval: bool, key_len: i16) -> GinColState {
+        GinColState {
+            compare,
+            extract_value: GinExtractValueFn::Array,
+            extract_query: GinExtractQueryFn::Array,
+            consistent: Some(GinConsistentFn::Array),
+            tri_consistent: Some(GinTriConsistentFn::Array),
+            compare_partial: None,
+            support_collation: ::types_core::catalog::DEFAULT_COLLATION_OID,
+            can_partial_match: false,
+            key_byval,
+            key_len,
+        }
+    }
+
+    /// The core jsonb_ops shape (text keys, gin_compare_jsonb).
+    pub const fn jsonb_ops(support_collation: Oid) -> GinColState {
+        GinColState {
+            compare: GinCompareFn::Jsonb,
+            extract_value: GinExtractValueFn::Jsonb,
+            extract_query: GinExtractQueryFn::Jsonb,
+            consistent: Some(GinConsistentFn::Jsonb),
+            tri_consistent: Some(GinTriConsistentFn::Jsonb),
+            compare_partial: None,
+            support_collation,
+            can_partial_match: false,
+            key_byval: false,
+            key_len: -1,
+        }
+    }
+
+    /// The core tsvector_ops shape (text keys, gin_cmp_tslexeme, prefix
+    /// partial match through gin_cmp_prefix).
+    pub const fn tsvector_ops(support_collation: Oid) -> GinColState {
+        GinColState {
+            compare: GinCompareFn::TsLexeme,
+            extract_value: GinExtractValueFn::Tsvector,
+            extract_query: GinExtractQueryFn::Tsquery,
+            consistent: Some(GinConsistentFn::Tsquery),
+            tri_consistent: Some(GinTriConsistentFn::Tsquery),
+            compare_partial: Some(GinComparePartialFn::TsPrefix),
+            support_collation,
+            can_partial_match: true,
+            key_byval: false,
+            key_len: -1,
+        }
+    }
+
+    /// contrib/hstore gin_hstore_ops (text keys under bttextcmp, binary
+    /// consistent only).
+    pub const fn hstore_ops(support_collation: Oid) -> GinColState {
+        GinColState {
+            compare: GinCompareFn::Text,
+            extract_value: GinExtractValueFn::Hstore,
+            extract_query: GinExtractQueryFn::Hstore,
+            consistent: Some(GinConsistentFn::Hstore),
+            tri_consistent: None,
+            compare_partial: None,
+            support_collation,
+            can_partial_match: false,
+            key_byval: false,
+            key_len: -1,
+        }
+    }
+
+    /// contrib/btree_gin per-type opclass shape (binary consistent only,
+    /// prefix compare through gin_compare_prefix_<type>).
+    pub const fn btree_ops(
+        ty: GinBtreeType,
+        support_collation: Oid,
+        key_byval: bool,
+        key_len: i16,
+    ) -> GinColState {
+        GinColState {
+            compare: GinCompareFn::Btree(ty),
+            extract_value: GinExtractValueFn::Btree(ty),
+            extract_query: GinExtractQueryFn::Btree(ty),
+            consistent: Some(GinConsistentFn::Btree),
+            tri_consistent: None,
+            compare_partial: Some(GinComparePartialFn::Btree(ty)),
+            support_collation,
+            can_partial_match: true,
+            key_byval,
+            key_len,
+        }
+    }
 }
 
 /// INDEX_MAX_KEYS.

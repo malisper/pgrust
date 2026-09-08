@@ -43,52 +43,48 @@ pub(crate) fn with_insert_scratch<R>(
     })
 }
 
+// INVARIANT: rd_amcache tags round-trip with the encoder in
+// cached_gin_state; rd_amcache is process-local, so an unknown tag means
+// memory corruption, not an unported case.
+#[cold]
+fn amcache_corrupt(slot: &str, tag: u8) -> ! {
+    panic!("rd_amcache gin {slot} tag {tag} not produced by the encoder (insert.rs cached_gin_state); process-local cache is corrupt")
+}
+
+/// An optional support-proc slot's tag: 0 is None.
+fn amcache_optional<T>(slot: &str, tag: u8, from_tag: fn(u8) -> Option<T>) -> Option<T> {
+    match tag {
+        0 => None,
+        t => Some(from_tag(t).unwrap_or_else(|| amcache_corrupt(slot, t))),
+    }
+}
+
 /// initGinState through the relcache rd_amcache slot (rule 5; C caches per
 /// statement in ii_AmCache, the relcache slot has the same invalidation).
 pub(crate) fn cached_gin_state(rel: &Relation<'_>) -> PgResult<GinState> {
-    // Copy out (516B, same bytes the pre-box Cell::get moved) so no RefCell
-    // borrow is held across the state build.
+    // Copy out so no RefCell borrow is held across the state build.
     let cached: Option<RdAmCacheGin> = rel.rd_amcache_gin.borrow().as_deref().copied();
     if let Some(g) = cached {
-        let mut cols = [GinColState {
-            opclass: GinOpclass::JsonbOps,
-            elem_cmp: GinElemCmp::None,
-            support_collation: ::types_core::InvalidOid,
-            can_partial_match: false,
-            key_byval: false,
-            key_len: 0,
-        }; GIN_MAX_KEY_COLS];
+        let mut cols = [GinColState::array_ops(GinCompareFn::Int4, true, 4); GIN_MAX_KEY_COLS];
         for (i, c) in g.cols.iter().enumerate().take(g.natts as usize) {
             cols[i] = GinColState {
-                opclass: match c.opclass {
-                    0 => GinOpclass::JsonbOps,
-                    1 => GinOpclass::JsonbPathOps,
-                    2 => GinOpclass::TsvectorOps,
-                    3 => GinOpclass::ArrayOps,
-                    4 => GinOpclass::TrgmOps,
-                    5 => GinOpclass::HstoreOps,
-                    31 => GinOpclass::IntArrayOps,
-                    // INVARIANT: tags round-trip with the encoder in this file
-                    // (insert.rs:113-135); rd_amcache is process-local, so an
-                    // unknown tag means memory corruption, not an unported case.
-                    other => match GinBtreeType::from_tag(other - 6) {
-                        Some(ty) => GinOpclass::BtreeOps(ty),
-                        None => panic!("rd_amcache gin opclass tag {other} not produced by the encoder (insert.rs:113-135); process-local cache is corrupt"),
-                    },
-                },
-                elem_cmp: match c.elem_cmp {
-                    0 => GinElemCmp::None,
-                    1 => GinElemCmp::Int2,
-                    2 => GinElemCmp::Int4,
-                    3 => GinElemCmp::Int8,
-                    4 => GinElemCmp::Oid,
-                    5 => GinElemCmp::Text,
-                    6 => GinElemCmp::Fmgr(c.elem_cmp_proc),
-                    // INVARIANT: tags round-trip with the encoder in this file
-                    // (insert.rs:113-135); rd_amcache is process-local, so an
-                    // unknown tag means memory corruption, not an unported case.
-                    other => panic!("rd_amcache gin elem_cmp tag {other} not produced by the encoder (insert.rs:113-135); process-local cache is corrupt"),
-                },
+                compare: GinCompareFn::from_tag(c.compare, c.compare_proc)
+                    .unwrap_or_else(|| amcache_corrupt("compare", c.compare)),
+                extract_value: GinExtractValueFn::from_tag(c.extract_value)
+                    .unwrap_or_else(|| amcache_corrupt("extract_value", c.extract_value)),
+                extract_query: GinExtractQueryFn::from_tag(c.extract_query)
+                    .unwrap_or_else(|| amcache_corrupt("extract_query", c.extract_query)),
+                consistent: amcache_optional("consistent", c.consistent, GinConsistentFn::from_tag),
+                tri_consistent: amcache_optional(
+                    "tri_consistent",
+                    c.tri_consistent,
+                    GinTriConsistentFn::from_tag,
+                ),
+                compare_partial: amcache_optional(
+                    "compare_partial",
+                    c.compare_partial,
+                    GinComparePartialFn::from_tag,
+                ),
                 support_collation: c.support_collation,
                 can_partial_match: c.can_partial_match,
                 key_byval: c.key_byval,
@@ -103,9 +99,13 @@ pub(crate) fn cached_gin_state(rel: &Relation<'_>) -> PgResult<GinState> {
     }
     let state = initGinState(rel)?;
     let mut cached_cols = [RdAmCacheGinCol {
-        opclass: 0,
-        elem_cmp: 0,
-        elem_cmp_proc: ::types_core::InvalidOid,
+        compare: 0,
+        compare_proc: ::types_core::InvalidOid,
+        extract_value: 0,
+        extract_query: 0,
+        consistent: 0,
+        tri_consistent: 0,
+        compare_partial: 0,
         support_collation: ::types_core::InvalidOid,
         can_partial_match: false,
         key_byval: false,
@@ -113,29 +113,16 @@ pub(crate) fn cached_gin_state(rel: &Relation<'_>) -> PgResult<GinState> {
     }; GIN_MAX_KEY_COLS];
     for (i, col) in state.cols.iter().enumerate().take(state.natts as usize) {
         cached_cols[i] = RdAmCacheGinCol {
-            opclass: match col.opclass {
-                GinOpclass::JsonbOps => 0,
-                GinOpclass::JsonbPathOps => 1,
-                GinOpclass::TsvectorOps => 2,
-                GinOpclass::ArrayOps => 3,
-                GinOpclass::TrgmOps => 4,
-                GinOpclass::HstoreOps => 5,
-                GinOpclass::BtreeOps(ty) => 6 + ty.tag(),
-                GinOpclass::IntArrayOps => 31,
-            },
-            elem_cmp: match col.elem_cmp {
-                GinElemCmp::None => 0,
-                GinElemCmp::Int2 => 1,
-                GinElemCmp::Int4 => 2,
-                GinElemCmp::Int8 => 3,
-                GinElemCmp::Oid => 4,
-                GinElemCmp::Text => 5,
-                GinElemCmp::Fmgr(_) => 6,
-            },
-            elem_cmp_proc: match col.elem_cmp {
-                GinElemCmp::Fmgr(cmp_proc) => cmp_proc,
+            compare: col.compare.tag(),
+            compare_proc: match col.compare {
+                GinCompareFn::Fmgr(cmp_proc) => cmp_proc,
                 _ => ::types_core::InvalidOid,
             },
+            extract_value: col.extract_value.tag(),
+            extract_query: col.extract_query.tag(),
+            consistent: col.consistent.map_or(0, GinConsistentFn::tag),
+            tri_consistent: col.tri_consistent.map_or(0, GinTriConsistentFn::tag),
+            compare_partial: col.compare_partial.map_or(0, GinComparePartialFn::tag),
             support_collation: col.support_collation,
             can_partial_match: col.can_partial_match,
             key_byval: col.key_byval,
