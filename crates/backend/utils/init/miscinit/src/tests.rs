@@ -787,3 +787,28 @@ fn make_absolute_path_reports_unreadable_cwd() {
     assert_eq!(err.level, types_error::ERROR);
     assert_eq!(err.message, "could not get current working directory: No such file or directory");
 }
+
+/// process_shmem_requests (miscinit.c:1931-1937) runs shmem_request_hook
+/// with process_shmem_requests_in_progress raised — the only window in which
+/// RequestAddinShmemSpace (ipci.c:76) and RequestNamedLWLockTranche
+/// (lwlock.c:686) accept a request — and lowers it afterwards.
+#[test]
+fn shmem_request_hook_runs_inside_process_shmem_requests() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+    static SAW_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+    fn hook() -> PgResult<()> {
+        CALLS.fetch_add(1, Ordering::SeqCst);
+        SAW_IN_PROGRESS.store(process_shmem_requests_in_progress(), Ordering::SeqCst);
+        Ok(())
+    }
+    assert!(!process_shmem_requests_in_progress());
+    register_shmem_request_hook(hook);
+    process_shmem_requests().unwrap();
+    assert_eq!(CALLS.load(Ordering::SeqCst), 1, "shmem_request_hook did not run once");
+    assert!(
+        SAW_IN_PROGRESS.load(Ordering::SeqCst),
+        "shmem_request_hook ran outside the process_shmem_requests_in_progress window"
+    );
+    assert!(!process_shmem_requests_in_progress());
+}

@@ -238,6 +238,8 @@ fn pg_init() -> PgResult<()> {
     // thread IS the postmaster thread, so ExitPostmaster's proc_exit runs it.
     ipc::on_shmem_exit(store::pgss_shmem_shutdown, 0);
 
+    // pg_stat_statements.c:470-471: shmem_request_hook = pgss_shmem_request.
+    miscinit::register_shmem_request_hook(pgss_shmem_request);
     parser_analyze::tap_post_parse_analyze::install(hooks::pgss_post_parse_analyze);
     planner::tap_planner_enter::install(hooks::pgss_planner_enter);
     planner::tap_planner_leave::install(hooks::pgss_planner_leave);
@@ -256,6 +258,33 @@ fn pg_init() -> PgResult<()> {
     utility::dispatch::tap_process_utility_leave::install(hooks::pgss_process_utility_leave);
 
     Ok(())
+}
+
+/// C `MAXALIGN(sizeof(pgssSharedState))` (pg_stat_statements.c:246-256) on
+/// LP64: LWLock *lock 8 + double cur_median_usage 8 + Size mean_query_len 8 +
+/// slock_t mutex 1 (+7 pad) + Size extent 8 + int n_writers 4 + int gc_count
+/// 4 + pgssGlobalStats 16 = 64 — the size of C's "pg_stat_statements"
+/// ShmemIndex row.
+pub(crate) const PGSS_SHARED_STATE_SIZE: usize = 64;
+
+/// `pgss_memsize` (pg_stat_statements.c:2053-2061): the shared memory the
+/// module reserves — its state struct plus a pg_stat_statements.max-entry
+/// shared hash of sizeof(pgssEntry) entries (hash_estimate_size, dynahash.c).
+pub(crate) fn pgss_memsize() -> PgResult<usize> {
+    shmem::add_size(
+        PGSS_SHARED_STATE_SIZE,
+        dynahash::hash_estimate_size(gucs::pgss_max() as i64, store::PGSS_ENTRY_SIZE),
+    )
+}
+
+/// `pgss_shmem_request` (pg_stat_statements.c:495-502): the shmem_request_hook
+/// — reserve pgss_memsize() bytes and one LWLock in the "pg_stat_statements"
+/// tranche. Both requests read process_shmem_requests_in_progress (C's global)
+/// and are FATAL outside process_shmem_requests.
+fn pgss_shmem_request() -> PgResult<()> {
+    let in_progress = miscinit::process_shmem_requests_in_progress();
+    ipci::RequestAddinShmemSpace(pgss_memsize()?, in_progress)?;
+    lwlock::RequestNamedLWLockTranche("pg_stat_statements", 1, in_progress)
 }
 
 pub(crate) fn text_datum(fcinfo: &Fcinfo, s: &[u8]) -> PgResult<Datum> {

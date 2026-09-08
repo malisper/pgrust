@@ -209,3 +209,20 @@ fn dump_rejects_bad_header_version_encoding_and_short_file() {
     let short = &d[..d.len() - 1];
     assert!(read_dump(&mut &short[..], &mut shared(10)).is_err());
 }
+
+/// pgss_memsize (pg_stat_statements.c:2053-2061) at the default
+/// pg_stat_statements.max = 5000: MAXALIGN(sizeof(pgssSharedState)) 64 +
+/// hash_estimate_size(5000, sizeof(pgssEntry) = 432) (dynahash.c:834-869:
+/// MAXALIGN(sizeof(HASHHDR)) 848 [FreeListData[32] 768 + dsize/nsegs 16 +
+/// max_bucket/high_mask/low_mask 12 + 4 pad + keysize/entrysize/
+/// num_partitions/max_dsize/ssize 40 + sshift/nelem_alloc 8] + 256 directory
+/// entries x 8 + 32 segments x MAXALIGN(256 x 8) + 139 element allocs x 36
+/// elements x (16 + 432)) = 2,310,224. A live C 18.6 server's
+/// CalculateShmemSize grows by 2,310,144 (rounded to 8192, ipci.c:158) when
+/// the module is preloaded — this plus the one named LWLock tranche
+/// (lwlock.c:414-430) — and the e2e shows pgrust growing by the same bytes.
+#[test]
+fn pgss_memsize_matches_c_at_default_max() {
+    assert_eq!(crate::gucs::pgss_max(), 5000);
+    assert_eq!(crate::pgss_memsize().unwrap(), 64 + 2_310_224);
+}

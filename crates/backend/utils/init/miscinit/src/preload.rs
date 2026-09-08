@@ -130,12 +130,40 @@ pub fn process_session_preload_libraries() -> PgResult<()> {
     Ok(())
 }
 
-// shmem_request_hook can only be set from a preloaded library; with the
-// empty-list fast path live there is never a hook to run.
+/// `shmem_request_hook_type` (miscadmin.h:533).
+pub type ShmemRequestHook = fn() -> PgResult<()>;
+
+// shmem_request_hook (miscinit.c:1841). C keeps one pointer and every
+// library's _PG_init chains onto it (prev = shmem_request_hook;
+// shmem_request_hook = mine; mine calls prev first, pg_stat_statements.c:
+// 470-471/497-498), so the hooks run in registration order; the chain is
+// kept as that list here (the centralization exec_hooks applies to the
+// executor taps). Written only from a _PG_init under
+// shared_preload_libraries — the single-threaded boot window.
+static SHMEM_REQUEST_HOOKS: RwLock<Vec<ShmemRequestHook>> = RwLock::new(Vec::new());
+
+/// `shmem_request_hook = hook` in a library's `_PG_init`.
+pub fn register_shmem_request_hook(hook: ShmemRequestHook) {
+    SHMEM_REQUEST_HOOKS.write().unwrap().push(hook);
+}
+
+/// `process_shmem_requests_in_progress` (miscadmin.h:532): raised only while
+/// process_shmem_requests runs the hooks — RequestAddinShmemSpace
+/// (ipci.c:76) and RequestNamedLWLockTranche (lwlock.c:686) refuse outside it.
+pub fn process_shmem_requests_in_progress() -> bool {
+    SHMEM_REQUESTS_IN_PROGRESS.get()
+}
+
+/// process_shmem_requests (miscinit.c:1931-1937).
 pub fn process_shmem_requests() -> PgResult<()> {
     SHMEM_REQUESTS_IN_PROGRESS.set(true);
+    let r = SHMEM_REQUEST_HOOKS
+        .read()
+        .unwrap()
+        .iter()
+        .try_for_each(|hook| hook());
     SHMEM_REQUESTS_IN_PROGRESS.set(false);
-    Ok(())
+    r
 }
 
 pub(crate) fn install_preload_guc_vars() {

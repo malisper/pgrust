@@ -39,5 +39,11 @@ instrument = { path = "../../backend/executor/instrument" }
 utility = { path = "../../backend/tcop/utility" }
 parallel = { path = "../../backend/access/transam/parallel" }
 ipc = { path = "../../backend/storage/ipc/ipc" }
+# pgss_shmem_request (pg_stat_statements.c:495-502): RequestAddinShmemSpace /
+# RequestNamedLWLockTranche, sized by hash_estimate_size + add_size.
+ipci = { path = "../../backend/storage/ipc/ipci" }
+lwlock = { path = "../../backend/storage/lmgr/lwlock" }
+dynahash = { path = "../../backend/utils/hash/dynahash" }
+shmem = { path = "../../backend/storage/ipc/shmem" }
 rustc-hash = "2"
 exec_hooks = { path = "../exec_hooks" }
