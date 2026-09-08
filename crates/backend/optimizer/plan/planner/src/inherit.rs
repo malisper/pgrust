@@ -238,6 +238,11 @@ fn expand_partitioned_rtentry<'mcx>(
         }
         run.root.rel_mut(relinfo).live_parts = lp;
     }
+    // Test harness only (C has no injection point here): parks the planner
+    // between the PartitionDesc read above and the child opens below, the
+    // window in which a concurrently detached partition can be dropped
+    // (scripts/planner-partition-detach-e2e.sh). Inert unless attached.
+    injection_point::injection_point("planner-expand-partitioned-rtentry")?;
     let mut i = live_parts.next_member(-1);
     while i >= 0 {
         let child_oid = oids[i as usize];

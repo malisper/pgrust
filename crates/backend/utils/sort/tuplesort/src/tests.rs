@@ -2776,6 +2776,8 @@ mod sortsupport_guards {
                 indimmediate: true,
                 indisvalid: true,
                 indisready: true,
+                indcheckxmin: false,
+                indxmin: 0,
                 indkey,
                 has_indpred: false,
                 indexprs_src: None,

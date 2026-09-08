@@ -41,7 +41,7 @@ pub const RELCACHE_INIT_FILENAME: &str = "pgrust_internal.init";
 pub const C_RELCACHE_INIT_FILENAME: &str = "pg_internal.init";
 pub const RELCACHE_INIT_FILEMAGIC: i32 = 0x573266;
 // Bump whenever the entry codec below changes shape; a mismatch rejects the file.
-pub const RELCACHE_INIT_FORMAT: u32 = 1;
+pub const RELCACHE_INIT_FORMAT: u32 = 2;
 const TABLESPACE_VERSION_DIRECTORY: &str = "PG_18_202506291";
 const PG_TBLSPC_DIR: &str = "pg_tblspc";
 // BUILTIN_TRANCHE_NAMES[16] == "RelCacheInit"; pinned by a test.
@@ -776,6 +776,8 @@ fn put_index(buf: &mut Buf<'_>, i: &FormData_pg_index<'_>) {
     put_bool(buf, i.indimmediate);
     put_bool(buf, i.indisvalid);
     put_bool(buf, i.indisready);
+    put_bool(buf, i.indcheckxmin);
+    put_u32(buf, i.indxmin);
     put_i16_vec(buf, &i.indkey);
     put_bool(buf, i.has_indpred);
     put_opt_str(buf, &i.indexprs_src);
@@ -795,6 +797,8 @@ fn parse_index(rd: &mut Rd<'_>, mcx: Mcx<'static>) -> Option<FormData_pg_index<'
         indimmediate: rd.boolean()?,
         indisvalid: rd.boolean()?,
         indisready: rd.boolean()?,
+        indcheckxmin: rd.boolean()?,
+        indxmin: rd.u32()?,
         indkey: parse_i16_vec(rd, mcx)?,
         has_indpred: rd.boolean()?,
         indexprs_src: parse_opt_str(rd, mcx)?,

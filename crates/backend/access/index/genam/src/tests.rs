@@ -78,6 +78,8 @@ fn make<'mcx>(mcx: Mcx<'mcx>, oid: Oid, name: &str, relkind: u8, relam: Oid) -> 
             indimmediate: true,
             indisvalid: true,
             indisready: true,
+            indcheckxmin: false,
+            indxmin: 0,
             indkey,
             has_indpred: false,
         indexprs_src: None,

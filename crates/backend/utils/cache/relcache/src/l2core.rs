@@ -46,7 +46,8 @@ use std::sync::Arc;
 
 use mcx::{Mcx, MemoryContext, PgString, PgVec};
 use types_core::{
-    AttrNumber, InvalidSubTransactionId, Oid, INVALID_PROC_NUMBER, RELPERSISTENCE_TEMP,
+    AttrNumber, InvalidSubTransactionId, Oid, TransactionId, INVALID_PROC_NUMBER,
+    RELPERSISTENCE_TEMP,
 };
 use types_error::PgResult;
 use types_rel::{FormData_pg_class, FormData_pg_index, RdOptions, RelationData};
@@ -135,6 +136,8 @@ pub(crate) struct IndexCore {
     pub indimmediate: bool,
     pub indisvalid: bool,
     pub indisready: bool,
+    pub indcheckxmin: bool,
+    pub indxmin: TransactionId,
     pub indkey: Box<[AttrNumber]>,
     pub has_indpred: bool,
     pub indexprs_src: Option<Box<str>>,
@@ -268,6 +271,8 @@ impl RelCoreShared {
             indimmediate: ix.indimmediate,
             indisvalid: ix.indisvalid,
             indisready: ix.indisready,
+            indcheckxmin: ix.indcheckxmin,
+            indxmin: ix.indxmin,
             indkey: ix.indkey.iter().copied().collect(),
             has_indpred: ix.has_indpred,
             indexprs_src: ix.indexprs_src.as_ref().map(|s| Box::from(s.as_str())),
@@ -424,6 +429,8 @@ pub(crate) fn shell_from_core(core: &Arc<RelCoreShared>) -> PgResult<RelationDat
                     indimmediate: ix.indimmediate,
                     indisvalid: ix.indisvalid,
                     indisready: ix.indisready,
+                    indcheckxmin: ix.indcheckxmin,
+                    indxmin: ix.indxmin,
                     // SAFETY (all mirrors below): core-owned Copy arrays /
                     // strings; the shell's rd_att clone pins the core through
                     // the tupdesc registry for the shell's whole life.

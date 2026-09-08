@@ -87,6 +87,8 @@ partprune = { path = "../../../partitioning/partprune" }
 tableam = { path = "../../../access/table/tableam" }
 tableam_vocab = { path = "../../../access/table/tableam_vocab" }
 indexam = { path = "../../../access/index/indexam" }
+procarray = { path = "../../../storage/ipc/procarray" }
+injection_point = { path = "../../../utils/misc/injection_point" }
 indexam_seams = { path = "../../../access/index/indexam_seams" }
 brin = { path = "../../../access/brin/brin" }
 spgist = { path = "../../../access/spgist/spgist" }

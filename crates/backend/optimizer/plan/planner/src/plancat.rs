@@ -4,6 +4,7 @@
 use std::cell::{Cell, RefCell};
 
 use mcx::{vec_from_elem_in, PgVec};
+use types_core::xact::TransactionIdPrecedes;
 use types_core::{BlockNumber, Oid};
 use types_error::PgResult;
 use types_portal::ParamListHandle;
@@ -123,7 +124,18 @@ pub fn get_relation_info<'mcx>(
                 indexam::index_close(index_rel, NoLock)?;
                 continue;
             }
-            // indcheckxmin gate: M2 concurrent-build lane (Form lacks it).
+            // plancat.c:276-290: a valid index that cannot yet be used by
+            // this transaction (indcheckxmin, and the pg_index tuple's xmin
+            // does not precede TransactionXmin -- README.HOT) is ignored and
+            // the plan marked transient, so the plancache re-plans it once
+            // the horizon moves (plancache.c BuildCachedPlan saved_xmin).
+            if ind.indcheckxmin
+                && !TransactionIdPrecedes(ind.indxmin, procarray::TransactionXmin())
+            {
+                run.glob.transient_plan = true;
+                indexam::index_close(index_rel, NoLock)?;
+                continue;
+            }
 
             let is_partitioned_index =
                 index_rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_INDEX;

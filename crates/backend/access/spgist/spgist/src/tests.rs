@@ -205,6 +205,8 @@ pub(crate) fn index_rel(mcx: Mcx<'_>) -> Relation<'_> {
             indimmediate: true,
             indisvalid: true,
             indisready: true,
+            indcheckxmin: false,
+            indxmin: 0,
             indkey,
             has_indpred: false,
             indexprs_src: None,

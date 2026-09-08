@@ -1089,6 +1089,8 @@ fn make_index_rel<'mcx>(mcx: Mcx<'mcx>) -> types_rel::Relation<'mcx> {
         indimmediate: true,
         indisvalid: true,
         indisready: true,
+        indcheckxmin: false,
+        indxmin: 0,
         indkey,
         has_indpred: false,
         indexprs_src: None,
@@ -9599,4 +9601,95 @@ fn statistic_proc_security_check_logs_non_leakproof_at_debug2() {
             "not using statistics because function \"int4pl\" is not leakproof".to_string()
         )]
     );
+}
+
+// audit-18.6 remediation batch w2-030 (optimizer/util): unit witnesses.
+mod audit_w2_030 {
+    use super::*;
+    use types_nodes::primnodes::PlaceHolderVar;
+    use types_pathnodes::relids::{relids_equal, relids_members, relids_singleton};
+
+    fn bms<'mcx>(mcx: Mcx<'mcx>, members: &[i32]) -> types_nodes::Bitmapset<'mcx> {
+        let mut b = types_nodes::Bitmapset::empty();
+        for &m in members {
+            b.add_member(mcx, m).unwrap();
+        }
+        b
+    }
+
+    // placeholder.c:128 (find_placeholder_info) computes rels_used with
+    // pull_varnos(root, phexpr), whose PlaceHolderVar arm (var.c:197-260)
+    // contributes a nested PHV's ph_eval_at (plus phnullingrels) once its
+    // PlaceHolderInfo exists, not its syntactic phrels. With an inner PHV
+    // over rel 1 whose syntactic scope is {1,2} (ph_eval_at = {1}) nested in
+    // an outer PHV scoped to {3}, C's outer ph_lateral is {1}; the phrels
+    // fallback gave {1,2}.
+    // a186-candidate-fp-util-placeholder-98bfb31adda354c474b5-1
+    #[test]
+    fn nested_placeholder_contributes_ph_eval_at_not_phrels() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        let mut run = crate::run::PlannerRun::new(mcx);
+
+        let var1 = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+        let inner = PlaceHolderVar {
+            phexpr: var1,
+            phrels: bms(mcx, &[1, 2]),
+            phnullingrels: types_nodes::Bitmapset::empty(),
+            phid: 1,
+            phlevelsup: 0,
+        };
+        let inner_id = crate::placeholder::find_placeholder_info(&mut run, &inner).unwrap();
+        assert!(relids_equal(&run.root.phinfo(inner_id).ph_eval_at, &relids_singleton(mcx, 1)));
+        assert_eq!(relids_members(&run.root.phinfo(inner_id).ph_lateral).count(), 0);
+
+        let inner_node = Node::mk(
+            mcx,
+            PlaceHolderVar {
+                phexpr: var1,
+                phrels: bms(mcx, &[1, 2]),
+                phnullingrels: types_nodes::Bitmapset::empty(),
+                phid: 1,
+                phlevelsup: 0,
+            },
+        )
+        .unwrap();
+        let outer = PlaceHolderVar {
+            phexpr: inner_node,
+            phrels: bms(mcx, &[3]),
+            phnullingrels: types_nodes::Bitmapset::empty(),
+            phid: 2,
+            phlevelsup: 0,
+        };
+        let outer_id = crate::placeholder::find_placeholder_info(&mut run, &outer).unwrap();
+        let lateral: Vec<i32> = relids_members(&run.root.phinfo(outer_id).ph_lateral).collect();
+        assert_eq!(lateral, vec![1], "ph_lateral must be the nested PHV's ph_eval_at");
+        // No referenced rel inside the syntactic scope: evaluation is forced
+        // to the syntactic location (placeholder.c:133-137).
+        assert!(relids_equal(&run.root.phinfo(outer_id).ph_eval_at, &relids_singleton(mcx, 3)));
+
+        // A nested PHV referenced above an outer join carries phnullingrels,
+        // which join the contribution (var.c:257).
+        let nulled = Node::mk(
+            mcx,
+            PlaceHolderVar {
+                phexpr: var1,
+                phrels: bms(mcx, &[1, 2]),
+                phnullingrels: bms(mcx, &[5]),
+                phid: 1,
+                phlevelsup: 0,
+            },
+        )
+        .unwrap();
+        let outer2 = PlaceHolderVar {
+            phexpr: nulled,
+            phrels: bms(mcx, &[3]),
+            phnullingrels: types_nodes::Bitmapset::empty(),
+            phid: 3,
+            phlevelsup: 0,
+        };
+        let outer2_id = crate::placeholder::find_placeholder_info(&mut run, &outer2).unwrap();
+        let lateral: Vec<i32> = relids_members(&run.root.phinfo(outer2_id).ph_lateral).collect();
+        assert_eq!(lateral, vec![1, 5]);
+    }
 }

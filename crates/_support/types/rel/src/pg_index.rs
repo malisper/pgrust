@@ -1,5 +1,5 @@
 use ::mcx::{PgString, PgVec};
-use ::types_core::{AttrNumber, InvalidAttrNumber, Oid};
+use ::types_core::{AttrNumber, InvalidAttrNumber, Oid, TransactionId};
 
 // FormData_pg_index trimmed to the fields ports consume (the decode-once
 // rd_index projection of an index's relcache entry).
@@ -16,6 +16,14 @@ pub struct FormData_pg_index<'mcx> {
     pub indimmediate: bool,
     pub indisvalid: bool,
     pub indisready: bool,
+    // indcheckxmin (pg_index.h): the index was built over a broken HOT chain
+    // (index.c:3174), so a transaction whose TransactionXmin is not newer
+    // than the pg_index tuple must not use it (plancat.c:276-290).
+    pub indcheckxmin: bool,
+    // HeapTupleHeaderGetXmin(rd_indextuple->t_data): the pg_index tuple's
+    // xmin, the horizon indcheckxmin is checked against (relcache.c:1475
+    // keeps the whole tuple; only its xmin is consumed).
+    pub indxmin: TransactionId,
     // indkey.values[0..indnatts]; InvalidAttrNumber marks an expression key.
     pub indkey: PgVec<'mcx, AttrNumber>,
     // !heap_attisnull(rd_indextuple, Anum_pg_index_indpred): partial index.

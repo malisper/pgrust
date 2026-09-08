@@ -56,6 +56,7 @@ const Anum_pg_index_indisprimary: i32 = 7;
 const Anum_pg_index_indisexclusion: i32 = 8;
 const Anum_pg_index_indimmediate: i32 = 9;
 const Anum_pg_index_indisvalid: i32 = 11;
+const Anum_pg_index_indcheckxmin: i32 = 12;
 const Anum_pg_index_indisready: i32 = 13;
 const Anum_pg_index_indislive: i32 = 14;
 const Anum_pg_index_indisreplident: i32 = 15;
@@ -210,6 +211,10 @@ pub(crate) fn relation_init_index_access_info(
         indimmediate: get(Anum_pg_index_indimmediate)?.as_bool(),
         indisvalid: get(Anum_pg_index_indisvalid)?.as_bool(),
         indisready: get(Anum_pg_index_indisready)?.as_bool(),
+        indcheckxmin: get(Anum_pg_index_indcheckxmin)?.as_bool(),
+        // relcache.c:1475: rd_indextuple is the syscache tuple; its xmin is
+        // the indcheckxmin horizon (plancat.c:281).
+        indxmin: tup.tuple().t_data().xmin(),
         indkey,
         has_indpred: !SysCacheGetAttr(INDEXRELID, &tup, Anum_pg_index_indpred)?.1,
         indexprs_src: {

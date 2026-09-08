@@ -245,6 +245,8 @@ fn clone_pg_index<'mcx>(
         indimmediate: src.indimmediate,
         indisvalid: src.indisvalid,
         indisready: src.indisready,
+        indcheckxmin: src.indcheckxmin,
+        indxmin: src.indxmin,
         indkey: vec_clone_in(mcx, &src.indkey)?,
         has_indpred: src.has_indpred,
         indexprs_src: match &src.indexprs_src {
