@@ -26,6 +26,7 @@ init_small = { path = "../../../utils/init/init_small" }
 miscinit = { path = "../../../utils/init/miscinit" }
 guc = { path = "../../../utils/misc/guc" }
 guc_tables = { path = "../../../utils/misc/guc_tables" }
+dfmgr = { path = "../../../utils/fmgr/dfmgr" }
 snapmgr = { path = "../../../utils/time/snapmgr" }
 combocid = { path = "../../../utils/time/combocid" }
 relmapper = { path = "../../../utils/cache/relmapper" }

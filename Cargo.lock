@@ -11339,6 +11339,7 @@ dependencies = [
  "condition_variable_seams",
  "controldata_utils",
  "deadlock_seams",
+ "dfmgr",
  "elog",
  "fd",
  "guc",

@@ -64,10 +64,26 @@ pub struct LoadedModule {
     pub module_name: &'static str,
 }
 
+// SerializeLibraryState (dfmgr.c:722-739): file_list's filenames in load
+// order, the chunk a leader hands its parallel workers (parallel.c:383;
+// EstimateLibraryStateSpace, dfmgr.c:702-716, only sizes that chunk).
+#[derive(Clone, Default)]
+pub struct SerializedLibraryState(Vec<String>);
+
+#[derive(Default)]
+struct FileListState {
+    list: Vec<LoadedFile>,
+    // How much of `list` is the fork-inherited postmaster prefix
+    // (file_list_inherit): a retained worker thread truncates back to it
+    // where C's worker would be a fresh fork (file_list_reset_to_inherited).
+    inherited: usize,
+}
+
 thread_local! {
     // file_list (dfmgr.c): per-backend record of loaded files (malloc'd in C,
     // outliving every context), so _PG_init runs once per session.
-    static FILE_LIST: RefCell<Vec<LoadedFile>> = const { RefCell::new(Vec::new()) };
+    static FILE_LIST: RefCell<FileListState> =
+        const { RefCell::new(FileListState { list: Vec::new(), inherited: 0 }) };
 }
 
 pub fn register_builtin_library(entry: BuiltinLibraryEntry) {
@@ -271,8 +287,8 @@ pub fn check_restricted_library_name(name: &str) -> PgResult<()> {
 // file cannot be dlopen'd (carve §2), so its basename keys the registry. The
 // entry is the module identity (C's SAME_INODE scan).
 fn internal_load_library(libname: &str) -> PgResult<BuiltinLibraryEntry> {
-    let known =
-        FILE_LIST.with(|s| s.borrow().iter().find(|f| f.filename == libname).map(|f| f.entry));
+    let known = FILE_LIST
+        .with(|s| s.borrow().list.iter().find(|f| f.filename == libname).map(|f| f.entry));
     if let Some(entry) = known {
         return Ok(entry);
     }
@@ -290,12 +306,14 @@ fn internal_load_library(libname: &str) -> PgResult<BuiltinLibraryEntry> {
         }
     };
     // Linked into file_list only after _PG_init succeeds, as in C.
-    let already = FILE_LIST.with(|s| s.borrow().iter().any(|f| f.entry.name == entry.name));
+    let already = FILE_LIST.with(|s| s.borrow().list.iter().any(|f| f.entry.name == entry.name));
     if !already {
         if let Some(init) = entry.pg_init {
             init()?;
         }
-        FILE_LIST.with(|s| s.borrow_mut().push(LoadedFile { filename: libname.to_owned(), entry }));
+        FILE_LIST.with(|s| {
+            s.borrow_mut().list.push(LoadedFile { filename: libname.to_owned(), entry })
+        });
     }
     Ok(entry)
 }
@@ -315,12 +333,13 @@ pub fn load_file(filename: &str, restricted: bool) -> PgResult<()> {
 // session_preload_libraries). Hook-only modules whose hooks are process-wide
 // gate on this to reproduce C's per-process hook installation.
 pub fn is_loaded(module_name: &str) -> bool {
-    FILE_LIST.with(|s| s.borrow().iter().any(|f| f.entry.name == module_name))
+    FILE_LIST.with(|s| s.borrow().list.iter().any(|f| f.entry.name == module_name))
 }
 
 pub fn loaded_modules() -> Vec<LoadedModule> {
     FILE_LIST.with(|s| {
         s.borrow()
+            .list
             .iter()
             .map(|f| LoadedModule { library_path: f.filename.clone(), module_name: f.entry.name })
             .collect()
@@ -330,11 +349,45 @@ pub fn loaded_modules() -> Vec<LoadedModule> {
 // The postmaster's file_list, captured on its thread for a child thread's
 // fork-inherited globals (launch_backend).
 pub fn file_list_snapshot() -> FileList {
-    FILE_LIST.with(|s| FileList(s.borrow().clone()))
+    FILE_LIST.with(|s| FileList(s.borrow().list.clone()))
 }
 
 pub fn file_list_inherit(list: &FileList) {
-    FILE_LIST.with(|s| *s.borrow_mut() = list.0.clone());
+    FILE_LIST.with(|s| {
+        *s.borrow_mut() = FileListState { list: list.0.clone(), inherited: list.0.len() }
+    });
+}
+
+// A C parallel worker is a fresh fork: its file_list starts as the
+// postmaster's (parallel.c:1459-1462 then RestoreLibraryState on top). A
+// retained worker thread drops what earlier tasks loaded, so a library one
+// leader LOADed never stays "loaded" (is_loaded, hook gating,
+// pg_get_loaded_modules) under the next leader's task.
+pub fn file_list_reset_to_inherited() {
+    FILE_LIST.with(|s| {
+        let mut st = s.borrow_mut();
+        let n = st.inherited;
+        st.list.truncate(n);
+    });
+}
+
+// SerializeLibraryState (dfmgr.c:722-739): every loaded filename, in
+// file_list order.
+pub fn serialize_library_state() -> SerializedLibraryState {
+    FILE_LIST.with(|s| {
+        SerializedLibraryState(s.borrow().list.iter().map(|f| f.filename.clone()).collect())
+    })
+}
+
+// RestoreLibraryState (dfmgr.c:745-752): load every library the serializing
+// backend had loaded — internal_load_library on the recorded filename, so an
+// inherited (postmaster) entry is found in file_list and skipped, and each
+// new one runs its _PG_init before being linked in.
+pub fn restore_library_state(state: &SerializedLibraryState) -> PgResult<()> {
+    for filename in &state.0 {
+        internal_load_library(filename)?;
+    }
+    Ok(())
 }
 
 pub fn load_external_function(
@@ -593,5 +646,80 @@ mod tests {
         .join()
         .unwrap();
         assert_eq!(loaded_module_names(), vec!["tinh"]);
+    }
+
+    // SerializeLibraryState/RestoreLibraryState (dfmgr.c:722-752) across a
+    // leader thread and a worker thread: the worker ends with the leader's
+    // list in load order, runs _PG_init once for each library it did not
+    // inherit, and skips the ones it did.
+    #[test]
+    fn library_state_restores_into_a_worker_thread() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static INITS_PRE: AtomicUsize = AtomicUsize::new(0);
+        static INITS_SES: AtomicUsize = AtomicUsize::new(0);
+        let pkglib = setup();
+        register_builtin_library(BuiltinLibraryEntry {
+            name: "tpre",
+            lookup: |_| None,
+            pg_init: Some(|| {
+                INITS_PRE.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }),
+        });
+        register_builtin_library(BuiltinLibraryEntry {
+            name: "tses",
+            lookup: |_| None,
+            pg_init: Some(|| {
+                INITS_SES.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }),
+        });
+        // Postmaster: shared_preload_libraries=tpre; the leader inherits it
+        // and LOADs tses; the worker inherits tpre only.
+        load_file("tpre", false).unwrap();
+        let postmaster = file_list_snapshot();
+        file_list_inherit(&postmaster);
+        load_file("tses", false).unwrap();
+        load_file("tlib", false).unwrap();
+        assert_eq!(loaded_module_names(), vec!["tpre", "tses", "tlib"]);
+        let state = serialize_library_state();
+        assert_eq!(
+            state.0,
+            vec![
+                format!("{pkglib}/tpre{DLSUFFIX}"),
+                format!("{pkglib}/tses{DLSUFFIX}"),
+                format!("{pkglib}/tlib{DLSUFFIX}")
+            ]
+        );
+        let (pre, ses) = (INITS_PRE.load(Ordering::SeqCst), INITS_SES.load(Ordering::SeqCst));
+        std::thread::spawn(move || {
+            set_pkglib(&pkglib);
+            dynamic_library_path_set(Some("$libdir".to_owned()));
+            file_list_inherit(&postmaster);
+            assert_eq!(loaded_module_names(), vec!["tpre"]);
+            restore_library_state(&state).unwrap();
+            assert_eq!(loaded_module_names(), vec!["tpre", "tses", "tlib"]);
+            assert_eq!(INITS_PRE.load(Ordering::SeqCst), pre);
+            assert_eq!(INITS_SES.load(Ordering::SeqCst), ses + 1);
+            // Restoring again is a no-op (every filename is already in
+            // file_list: C's first scan).
+            restore_library_state(&state).unwrap();
+            assert_eq!(loaded_module_names(), vec!["tpre", "tses", "tlib"]);
+            assert_eq!(INITS_SES.load(Ordering::SeqCst), ses + 1);
+            // A retained worker thread claimed by another leader starts from
+            // the postmaster's list again, like C's fresh fork.
+            file_list_reset_to_inherited();
+            assert_eq!(loaded_module_names(), vec!["tpre"]);
+            assert!(!is_loaded("tses"));
+            restore_library_state(&SerializedLibraryState(vec![format!(
+                "{pkglib}/tlib{DLSUFFIX}"
+            )]))
+            .unwrap();
+            assert_eq!(loaded_module_names(), vec!["tpre", "tlib"]);
+            assert_eq!(INITS_SES.load(Ordering::SeqCst), ses + 1);
+        })
+        .join()
+        .unwrap();
+        assert_eq!(loaded_module_names(), vec!["tpre", "tses", "tlib"]);
     }
 }

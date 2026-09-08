@@ -165,6 +165,12 @@ pub struct ParallelShared {
     // this carries the GUC transfer and guc_state stays empty (and vice
     // versa: PGRUST_NO_GUC_BIND reverts to the string restore path).
     guc_pin: Option<Arc<guc::layers::GucQuerySnapshot>>,
+    // PARALLEL_KEY_LIBRARY (parallel.c:270,383 SerializeLibraryState): the
+    // leader's dfmgr file_list, loaded into each worker before its
+    // transaction state and GUCs (parallel.c:1459-1462) because the
+    // libraries' _PG_init may define the custom variables the GUC restore
+    // then sets.
+    library_state: dfmgr::SerializedLibraryState,
     tstate: Vec<u8>,
     combocid: Arc<[(CommandId, CommandId)]>,
     pending_syncs: Vec<(RelFileLocator, bool)>,
@@ -487,6 +493,7 @@ pub fn InitializeParallelDSM(id: ParallelContextId) -> PgResult<()> {
         } else {
             None
         },
+        library_state: dfmgr::serialize_library_state(),
         tstate,
         combocid: combocid::SerializeComboCIDState(),
         pending_syncs: catalog_storage::SerializePendingSyncs(),
@@ -628,6 +635,7 @@ pub fn statement_task_shared(
         } else {
             None
         },
+        library_state: dfmgr::serialize_library_state(),
         tstate,
         combocid: combocid::SerializeComboCIDState(),
         pending_syncs: catalog_storage::SerializePendingSyncs(),
@@ -1607,6 +1615,22 @@ fn parallel_worker_body(shared: &Arc<ParallelShared>, _worker_number: i32) -> Pg
         )?;
         mbutils::SetClientEncoding(mbutils::GetDatabaseEncoding())?;
         gtrace("w.conn.end");
+    }
+
+    // parallel.c:1454-1462: load the libraries the leader had loaded, before
+    // the GUC restore (they may define custom variables), inside a
+    // transaction of the worker's own. This thread may be a retained worker
+    // whose earlier tasks loaded libraries; C's worker is a fresh fork whose
+    // file_list is the postmaster's, so start from that.
+    dfmgr::file_list_reset_to_inherited();
+    if shared.database_id != InvalidOid {
+        xact::StartTransactionCommand()?;
+        dfmgr::restore_library_state(&shared.library_state)?;
+        xact::CommitTransactionCommand()?;
+    } else {
+        // Database-less rig worker (see the InitPostgres note above): no
+        // transaction machinery is connected, so load outside one.
+        dfmgr::restore_library_state(&shared.library_state)?;
     }
 
     xact::StartParallelWorkerTransaction(&shared.tstate)?;
