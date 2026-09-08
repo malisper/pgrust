@@ -963,6 +963,13 @@ pub fn ParallelApplyWorkerMain(main_arg: u64) -> PgResult<()> {
     let mut mqh = shm_mq_attach(mq);
 
     // Attach to our worker slot only after the queue is ready for the leader.
+    // logicalrep_worker_onexit's stream fileset removal (launcher.c:836-838,
+    // a NULL check in a parallel apply worker) registered ahead of it, as in
+    // ApplyWorkerMain.
+    ipc::before_shmem_exit(
+        crate::stream_apply::stream_fileset_delete_on_exit,
+        datum::Datum::null(),
+    )?;
     launcher::logicalrep_worker_attach(worker_slot)?;
     let w = launcher::worker_snapshot(worker_slot).expect("attached worker slot");
     {

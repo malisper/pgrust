@@ -180,6 +180,32 @@ pub(crate) fn stream_fileset_arc() -> Arc<FileSet> {
     })
 }
 
+// logicalrep_worker_onexit's stream fileset arm (launcher.c:836-838):
+// `if (MyLogicalRepWorker->stream_fileset != NULL) FileSetDeleteAll(..)`.
+// A before_shmem_exit callback (C registers the whole onexit at attach,
+// launcher.c:744); the worker mains register it just AHEAD of
+// logicalrep_worker_attach so the LIFO drain runs it right after the
+// launcher's onexit — C's detach-then-delete order, the parallel apply
+// workers already stopped. It has to be a before_shmem_exit callback and
+// nothing later: every spool segment the walk unlinks reports its size to
+// pgstat (fd.c:1966 ReportTemporaryFileUsage -> pgstat_report_tempfile,
+// pgstat_database.c:211), and pgstat_shutdown_hook — registered before any
+// worker code runs, by BaseInit's pgstat_initialize (bgworker.c:825,
+// pgstat.c:660) — drains after this one, flushing that report
+// (pgstat.c:617) and shutting the backend's stats state down. Leaving the
+// deletion to STREAM_FILESET's thread-exit drop ran it after the session's
+// stats state was gone: the apply worker panicked on exit after a streamed
+// transaction's apply error. The Arc is taken so that drop is a no-op; a
+// parallel apply worker still holding a clone re-runs the deletion on an
+// already-removed directory, which PathNameDeleteTemporaryDir skips.
+pub(crate) fn stream_fileset_delete_on_exit(_code: i32, _arg: datum::Datum) -> PgResult<()> {
+    let fileset = STREAM_FILESET.with(|cell| cell.borrow_mut().take());
+    if let Some(fileset) = fileset {
+        fileset.delete_all()?;
+    }
+    Ok(())
+}
+
 // What apply_dispatch should do with a data message after
 // handle_streamed_transaction looked at it.
 pub(crate) enum StreamedHandling {

@@ -985,6 +985,10 @@ pub fn ApplyWorkerMain(main_arg: u64) -> PgResult<()> {
     if launcher::worker_snapshot(slot).is_some_and(|w| !w.is_tablesync()) {
         launcher::set_initializing_apply_worker(true);
     }
+    // logicalrep_worker_onexit's stream fileset removal (launcher.c:836-838)
+    // is the worker crate's own before_shmem_exit callback; registered ahead
+    // of the attach so it drains right after the launcher's onexit.
+    ipc::before_shmem_exit(stream_apply::stream_fileset_delete_on_exit, datum::Datum::null())?;
     launcher::logicalrep_worker_attach(slot)?;
 
     // SetupApplyOrSyncWorker (worker.c:4784): SIGHUP reloads config; the
