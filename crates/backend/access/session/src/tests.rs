@@ -1239,7 +1239,17 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      per-backend in C) so a thread's prefix list and its load marker
     //      agree. Per-thread library-load state, no session identity, never
     //      bound or reset — non-session TLS (same class as 61).
-    assert_eq!(count_tree(crates), 599, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 600, 18.6 conformance audit (2026-09-07), injection-point backend-local
+    //   cache (w2-040-injection-point-c-1):
+    //   91. utils/misc/injection_point/src/lib.rs CACHE —
+    //      RefCell<Vec<CacheEntry>>, the port of injection_point.c:106
+    //      `static HTAB *InjectionPointCache` (one per backend in C, in
+    //      TopMemoryContext; one per backend thread here) behind
+    //      InjectionPointLoad / InjectionPointCached / the cache refresh.
+    //      Per-thread cache validated by registry generation, no session
+    //      identity, never bound or reset — non-session TLS (same class as
+    //      61/90).
+    assert_eq!(count_tree(crates), 600, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),
