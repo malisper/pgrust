@@ -1906,3 +1906,15 @@ fn print_slot_preamble_matches_c_early_returns() {
     assert_eq!(print::slot_preamble(&slot), None);
     assert!(print::print_slot(None).is_ok());
 }
+
+#[test]
+fn expr_collation_next_value_expr_is_invalid_oid() {
+    let ctx = cx();
+    let nve = Node::mk(
+        ctx.mcx(),
+        types_nodes::primnodes::NextValueExpr { seqid: 16385, typeId: 23 },
+    )
+    .unwrap();
+    assert_eq!(node_funcs::expr_type(nve), 23);
+    assert_eq!(node_funcs::expr_collation(nve), types_core::InvalidOid);
+}

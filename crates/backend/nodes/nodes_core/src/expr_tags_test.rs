@@ -141,15 +141,7 @@ const LOCATION_C_DEFAULT: &[NodeTag] = &[
     NodeTag::T_NextValueExpr,
 ];
 
-/// Arms C has that nodes_core is KNOWN to lack on this branch: recorded, not
-/// fixed here (the fix is PR #1604: `NodeTag::T_NextValueExpr =>
-/// types_core::InvalidOid` in expr_collation; C nodeFuncs.c:1048-1051
-/// "NextValueExpr's result is an integer type ... so it has no collation").
-/// When an entry's arm lands, this test fails with "expected-missing arm now
-/// handled" and the entry must be deleted; a NEW gap anywhere fails with the
-/// fallthrough message. Both directions are exact-set comparisons so the
-/// rail never goes silently stale.
-const KNOWN_MISSING_ARMS: &[(&str, NodeTag)] = &[("expr_collation", NodeTag::T_NextValueExpr)];
+const KNOWN_MISSING_ARMS: &[(&str, NodeTag)] = &[];
 
 fn int4_const(mcx: Mcx<'_>, v: i32) -> Node<'_> {
     Node::mk(

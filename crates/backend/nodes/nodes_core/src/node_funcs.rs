@@ -291,7 +291,7 @@ pub fn expr_collation(node: Node<'_>) -> Oid {
         NodeTag::T_CollateExpr => node.as_collate_expr().unwrap().collOid,
         NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resultcollid,
         NodeTag::T_ArrayCoerceExpr => node.as_array_coerce_expr().unwrap().resultcollid,
-        NodeTag::T_ConvertRowtypeExpr => types_core::InvalidOid,
+        NodeTag::T_ConvertRowtypeExpr | NodeTag::T_NextValueExpr => types_core::InvalidOid,
         NodeTag::T_BoolExpr
         | NodeTag::T_NullTest
         | NodeTag::T_GroupingFunc
