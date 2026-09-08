@@ -30,7 +30,8 @@ pub use arrayops::ResMcx;
 pub use compile::{
     economy_window, erase_fn_expr, exec_build_agg_projection_info,
     exec_build_agg_projection_info_subplans, exec_build_agg_qual, exec_build_agg_qual_subplans,
-    exec_build_agg_trans, exec_build_agg_trans_gsets, exec_build_agg_trans_hashed,
+    exec_build_agg_trans, exec_build_agg_trans_gsets, exec_build_agg_trans_gsets_subplans,
+    exec_build_agg_trans_hashed,
     exec_build_agg_trans_hashed_masked, exec_build_agg_trans_hashed_subplans,
     exec_build_agg_trans_mixed, exec_build_agg_trans_plain_masked, exec_build_agg_trans_subplans,
     exec_build_grouping_equal, exec_build_hash32_from_attrs, exec_build_hash32_from_exprs,

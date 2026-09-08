@@ -22,6 +22,7 @@ pub mod regex_nfa;
 pub fn init_seams() {
     use regex_core_seams as seams;
 
+    seams::pg_set_regex_collation::set(regex_locale::pg_set_regex_collation);
     seams::pg_regcomp::set(regex_export_free_error::seam_pg_regcomp);
     seams::pg_regexec::set(regex_export_free_error::seam_pg_regexec);
     seams::pg_regprefix::set(regex_export_free_error::seam_pg_regprefix);

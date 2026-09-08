@@ -123,6 +123,7 @@ pub fn replace_text_regexp<'mcx>(
     mut search_start: i32,
     n: i32,
 ) -> PgResult<PgVec<'mcx, u8>> {
+    regex_core_seams::pg_set_regex_collation::call(mcx, collation)?;
     // regex_engine dispatch: RE2-compatible patterns take the byte-offset
     // RE2 path; everything else (and regex_engine=spencer) falls through to
     // the untouched C-parity Spencer path below. A whole-match-only pattern

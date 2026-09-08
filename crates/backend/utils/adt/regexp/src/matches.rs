@@ -46,6 +46,7 @@ pub fn setup_regexp_matches<'a, 'mcx>(
     mut use_subpatterns: bool,
     ignore_degenerate: bool,
 ) -> PgResult<RegexpMatchesCtx<'a, 'mcx>> {
+    regex_core::regex_locale::pg_set_regex_collation(mcx, collation)?;
     // regex_engine dispatch: RE2-compatible patterns take the byte-offset
     // path; everything else runs the untouched Spencer path below. Callers
     // consuming submatches need the capture-safe tier; whole-match callers

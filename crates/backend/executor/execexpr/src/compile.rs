@@ -550,6 +550,24 @@ pub fn exec_build_agg_trans_gsets<'mcx>(
     )
 }
 
+pub fn exec_build_agg_trans_gsets_subplans<'mcx>(
+    mcx: Mcx<'mcx>,
+    specs: &[AggTransSpec<'_, 'mcx>],
+    set_bases: &[NonNull<AggPerGroup>],
+    agg_node: FmNodePtr,
+    params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
+) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
+    build_agg_trans(
+        mcx,
+        specs,
+        PergroupMode::Sets(set_bases),
+        agg_node,
+        params,
+        sub,
+    )
+}
+
 enum PergroupMode<'a> {
     Fixed,
     Indirect(NonNull<NonNull<AggPerGroup>>),

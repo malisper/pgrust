@@ -153,6 +153,7 @@ pub fn RE_compile_and_execute(
 ) -> PgResult<bool> {
     if pmatch.len() < 2 {
         cflags |= REG_NOSUB;
+        regex_core::regex_locale::pg_set_regex_collation(mcx, collation)?;
         // regex_engine dispatch: boolean matches (~, ~*, regexp_like) on
         // RE2-compatible patterns skip the wchar conversion entirely.
         if let Some(re) = regexp_alt::dispatch(pattern, cflags, dat)? {
@@ -279,6 +280,7 @@ pub fn textregexsubstr<'mcx>(
     p: &[u8],
     collation: Oid,
 ) -> PgResult<Option<PgVec<'mcx, u8>>> {
+    regex_core::regex_locale::pg_set_regex_collation(mcx, collation)?;
     if let Some(re) = regexp_alt::dispatch(p, REG_ADVANCED, s)?
         .filter(|re| re.capture_safe() || re.ngroups() == 0)
     {

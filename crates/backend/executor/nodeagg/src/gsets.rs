@@ -13,8 +13,8 @@ use std::ptr::NonNull;
 use std::rc::Rc;
 
 use ::execexpr::{
-    exec_build_agg_trans_gsets, exec_build_agg_trans_hashed, exec_eval_expr, exec_project,
-    exec_qual, AggPerGroup, AggTransSpec, EvalSlots, ExprState, GroupedColsCell,
+    exec_build_agg_trans_gsets_subplans, exec_build_agg_trans_hashed_subplans, exec_eval_expr,
+    exec_project, exec_qual, AggPerGroup, AggTransSpec, EvalSlots, ExprState, GroupedColsCell,
 };
 use ::execgrouping::TupleHashTable;
 use ::executils::{EStateData, ExecSlotId};
@@ -301,13 +301,14 @@ pub(crate) fn init_grouping_sets<'mcx>(
                 eqfunctions[num_cols - 1] =
                     Some(build_grouping_equal_prefix(mcx, &scan_desc, aggnode, num_cols)?);
             }
+            let per_tuple_eq = estate.ecxt(tmpcontext).per_tuple_mcx();
             for eq in eqfunctions.iter_mut().flatten() {
                 // Boundary eqs detoast compressed by-ref keys through the
                 // frame's result mcx; C runs them in tmpcontext per-tuple
                 // memory, reset per input row.
                 // SAFETY: the tmpcontext ExprContext outlives every phase
                 // program (same estate).
-                unsafe { eq.arm_result_mcx_raw(per_tuple) };
+                unsafe { eq.arm_result_mcx_raw(per_tuple_eq) };
             }
         }
 
@@ -318,11 +319,19 @@ pub(crate) fn init_grouping_sets<'mcx>(
         // hash side runs through each set's own program from
         // lookup_hash_entries instead; this program stays sorted-only even
         // for phase 0 of a mixed agg.
-        let mut evaltrans =
-            exec_build_agg_trans_gsets(mcx, specs, &pergroup_bases[..nsets_eff], fm_agg_node, params)?;
+        let mut evaltrans = ::executils::with_subplan_compile_env(estate, |env| {
+            exec_build_agg_trans_gsets_subplans(
+                mcx,
+                specs,
+                &pergroup_bases[..nsets_eff],
+                fm_agg_node,
+                params,
+                env,
+            )
+        })?;
         // By-ref transfn results ride the armed per-tuple mcx (lib.rs note).
         // SAFETY: the tmpcontext ExprContext outlives every phase program.
-        unsafe { evaltrans.arm_result_mcx_raw(per_tuple) };
+        unsafe { evaltrans.arm_result_mcx_raw(estate.ecxt(tmpcontext).per_tuple_mcx()) };
 
         phases.push(PerPhaseData {
             aggstrategy: aggnode.aggstrategy,
@@ -543,7 +552,9 @@ fn init_hash_sets<'mcx>(
         // (exec_build_agg_trans_hashed, C's per-set hashagg_recompile
         // shape) built once at init. Armed by the caller once per_tuple is
         // available (arming here would tie *estate's borrow to 'mcx).
-        let refill_trans = exec_build_agg_trans_hashed(mcx, specs, cell, fm_agg_node, params)?;
+        let refill_trans = ::executils::with_subplan_compile_env(estate, |env| {
+            exec_build_agg_trans_hashed_subplans(mcx, specs, cell, fm_agg_node, params, env)
+        })?;
 
         perhash.push(PerHashSetData {
             hashtable,

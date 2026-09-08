@@ -27,6 +27,13 @@ use ::types_error::PgResult;
 use ::regex::{RegMatch, RegcompResult, RegexCompiled, RegexecResult, RegprefixResult};
 
 seam_core::seam!(
+    pub fn pg_set_regex_collation<'mcx>(
+        mcx: Mcx<'mcx>,
+        collation: Oid,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `pg_regcomp(re, string, len, flags, collation)` (regcomp.c), with the
     /// non-`REG_OKAY` arm carried as `RegcompResult::Failed` (already
     /// `pg_regerror`-formatted). `pattern` is `pg_wchar` code points (the

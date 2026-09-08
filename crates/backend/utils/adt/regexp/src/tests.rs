@@ -978,3 +978,46 @@ fn dispatch_overhead_microbench() {
         (auto / spencer - 1.0) * 100.0
     );
 }
+
+#[test]
+fn indeterminate_collation_guard_fires_on_re2_fast_path() {
+    full_setup();
+    regexp_alt::set_regex_engine(regexp_alt::REGEX_ENGINE_AUTO);
+    let cx = MemoryContext::new("test");
+    let m = cx.mcx();
+
+    assert!(
+        regexp_alt::dispatch(b"abc", REG_ADVANCED, b"abc").unwrap().is_some(),
+        "literal must be RE2-eligible for this test to exercise the fast-path"
+    );
+
+    let inv = types_core::InvalidOid;
+
+    let e = textregexeq(m, b"abc", b"abc", inv).unwrap_err();
+    assert_eq!(&code(&e), b"42P22", "textregexeq: {}", sqlstate(&e));
+    assert!(
+        sqlstate(&e).contains("could not determine which collation"),
+        "{}",
+        sqlstate(&e)
+    );
+    assert!(nameregexeq(m, b"abc", b"abc", inv).is_err());
+    assert!(texticregexeq(m, b"abc", b"abc", inv).is_err());
+
+    let e = textregexsubstr(m, b"abc", b"abc", inv).unwrap_err();
+    assert_eq!(&code(&e), b"42P22");
+
+    let e = crate::matches::regexp_match(m, b"abc", b"abc", None, inv).map(|_| ()).unwrap_err();
+    assert_eq!(&code(&e), b"42P22");
+
+    let e = textregexreplace_noopt(m, b"abc", b"abc", b"x", inv).unwrap_err();
+    assert_eq!(&code(&e), b"42P22");
+
+    assert!(textregexeq(m, b"abc", b"abc", C).unwrap());
+    assert!(!textregexeq(m, b"abc", b"zzz", C).unwrap());
+    assert!(textregexsubstr(m, b"abc", b"b", C).unwrap().is_some());
+    assert!(crate::matches::regexp_match(m, b"abc", b"b", None, C).unwrap().is_some());
+    assert_eq!(
+        textregexreplace_noopt(m, b"abc", b"b", b"X", C).unwrap().as_slice(),
+        b"aXc"
+    );
+}
