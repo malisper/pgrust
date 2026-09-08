@@ -1219,3 +1219,258 @@ fn check_recovery_target_time_rejects_non_date_tokens_like_c() {
     let (r, _) = run_check_hook(&guc_tables::hooks::check_recovery_target_time, "");
     assert!(matches!(r, Ok(true)));
 }
+
+// ---- rm_redo_error_callback (xlogrecovery.c:1943-1946, 2306-2323) ---------
+//
+// ApplyWalRecord pushes an error context frame whose callback appends
+// "WAL redo at %X/%X for <rmgr>/<identify>: <desc>[; blkref #n: ...]" to
+// every report raised while a record is being applied (xlog_outdesc +
+// xlog_block_info over the rmgr table), and pops it right after
+// verifyBackupPageConsistency (xlogrecovery.c:2030-2031). Audit
+// a186-candidate-fp-transam-xlogrecovery-p1-8443be11c090e8e8a810-1.
+
+// One record carrying a block reference (XLR_BLOCK_ID 0: id, fork_flags,
+// data_length, RelFileLocator, BlockNumber — no data, no image) followed by
+// a short main-data chunk (XLR_BLOCK_ID_DATA_SHORT), CRC'd.
+fn record_bytes_with_blkref(
+    loc: XLogRecPtr,
+    rmid: u8,
+    info: u8,
+    rlocator: (u32, u32, u32),
+    forknum: u8,
+    blkno: u32,
+    main_data: &[u8],
+) -> Vec<u8> {
+    assert!(main_data.len() < 256);
+    let tot_len = SizeOfXLogRecord + 20 + 2 + main_data.len();
+    let mut rec = vec![0u8; tot_len];
+    rec[0..4].copy_from_slice(&(tot_len as u32).to_ne_bytes());
+    rec[8..16].copy_from_slice(&(loc - 0x28).to_ne_bytes());
+    rec[16] = info;
+    rec[17] = rmid;
+    let mut p = SizeOfXLogRecord;
+    rec[p] = 0; // block id
+    rec[p + 1] = forknum; // fork_flags: fork number, no BKPBLOCK_* flags
+    rec[p + 2..p + 4].copy_from_slice(&0u16.to_ne_bytes()); // data_length
+    p += 4;
+    rec[p..p + 4].copy_from_slice(&rlocator.0.to_ne_bytes());
+    rec[p + 4..p + 8].copy_from_slice(&rlocator.1.to_ne_bytes());
+    rec[p + 8..p + 12].copy_from_slice(&rlocator.2.to_ne_bytes());
+    rec[p + 12..p + 16].copy_from_slice(&blkno.to_ne_bytes());
+    p += 16;
+    rec[p] = 255; // XLR_BLOCK_ID_DATA_SHORT
+    rec[p + 1] = main_data.len() as u8;
+    rec[p + 2..p + 2 + main_data.len()].copy_from_slice(main_data);
+    let crc = crc32c::fin_crc32c(crc32c::pg_comp_crc32c(
+        crc32c::pg_comp_crc32c(crc32c::CRC32C_INIT, &rec[SizeOfXLogRecord..]),
+        &rec[..20],
+    ));
+    rec[20..24].copy_from_slice(&crc.to_ne_bytes());
+    rec
+}
+
+// AdvanceNextFullTransactionIdPastXid reads TransamVariables; boot the
+// heap image once per test binary (VarsupShmemInit refuses a second call).
+// ApplyWalRecord's AllowCascadeReplication() reads max_wal_senders, whose
+// owning unit is not part of this binary: a zero stand-in (no walsenders).
+fn install_varsup_once() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(varsup::VarsupShmemInit);
+    guc_tables::vars::max_wal_senders
+        .install_if_absent(guc_tables::GucVarAccessors { get: || 0, set: |_| {} });
+}
+
+// ApplyWalRecord advances the shared replay pointers; the boot-path units
+// assert them zero (GetXLogReplayRecPtr), so a witness that applied a record
+// puts them back.
+fn reset_replay_pointers() {
+    REPLAY_END_REC_PTR.store(0, Relaxed);
+    REPLAY_END_TLI.store(0, Relaxed);
+    LAST_REPLAYED_READ_REC_PTR.store(0, Relaxed);
+    LAST_REPLAYED_END_REC_PTR.store(0, Relaxed);
+    LAST_REPLAYED_TLI.store(0, Relaxed);
+}
+
+// Reads the single record at `loc` from the fixture's segment through the
+// real reader and wraps it in a Recovery for apply_wal_record.
+fn recovery_at_record(loc: XLogRecPtr) -> Recovery {
+    let context: &'static mcx::MemoryContext =
+        Box::leak(Box::new(mcx::MemoryContext::new("rm_redo errcontext witness")));
+    let mut reader = XLogReaderState::allocate(context.mcx(), SEG).unwrap();
+    reader.system_identifier = SYS_ID;
+    reader.XLogReaderSetDecodeBuffer(guc_tables::vars::wal_decode_buffer_size.read() as usize);
+    reader.XLogBeginRead(loc);
+    let mut src = PageSource::new();
+    src.replay_tli = 1;
+    assert_eq!(reader.XLogReadRecord(&mut src).unwrap(), Some(loc));
+    src.close_read_file();
+    let prefetcher = xlogprefetcher::XLogPrefetcher::XLogPrefetcherAllocate(context.mcx());
+    Recovery {
+        context,
+        reader,
+        prefetcher,
+        src,
+        check_point_loc: loc,
+        check_point_tli: 1,
+        aborted_rec_ptr: InvalidXLogRecPtr,
+        missing_contrec_ptr: InvalidXLogRecPtr,
+        oldest_active_xid: types_core::InvalidTransactionId,
+        redo_error_arg: Rc::new(RefCell::new(RmRedoErrorArg::default())),
+    }
+}
+
+// An error thrown by rm_redo (btree_redo's unknown op code, a PANIC-level
+// report) carries C's CONTEXT line: identity from rm_identify (UNKNOWN with
+// the opcode in %X), rm_desc (empty for an unknown btree opcode) and the
+// block reference on a non-MAIN fork ("fork %u").
+#[test]
+fn apply_wal_record_error_carries_wal_redo_context_like_c() {
+    let _g = datadir_lock();
+    let dir = boot_fixture("rm_redo_errcontext_err");
+    install_startup_process_seams();
+    install_varsup_once();
+    WALRCV_UP.store(false, Relaxed);
+    STANDBY_MODE.store(false, Relaxed);
+    IN_ARCHIVE_RECOVERY.store(false, Relaxed);
+    RECOVERY_TARGET_TLI.store(1, Relaxed);
+    let loc: XLogRecPtr = SEG as u64 + SizeOfXLogLongPHD as u64;
+    let bad = record_bytes_with_blkref(
+        loc,
+        rmgr::RM_BTREE_ID as u8,
+        0xF0,
+        (1663, 5, 61000),
+        types_core::ForkNumber::FSM_FORKNUM as i32 as u8,
+        7,
+        &[0u8; 4],
+    );
+    write_segment_with_record(&dir, loc, &bad);
+    let mut rec = recovery_at_record(loc);
+    assert_eq!(rec.reader.XLogRecGetRmid(), rmgr::RM_BTREE_ID as u8);
+    let mut replay_tli: TimeLineID = 1;
+
+    let err = apply_wal_record(&mut rec, &mut replay_tli)
+        .expect_err("an unknown btree opcode must not replay silently");
+
+    drop(rec);
+    reset_replay_pointers();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(err.message(), "btree_redo: unknown op code 240");
+    assert_eq!(
+        err.context(),
+        Some(
+            "WAL redo at 0/1000028 for Btree/UNKNOWN (F0): ; blkref #0: rel 1663/5/61000, fork 1, blk 7"
+        ),
+        "rm_redo_error_callback CONTEXT line (xlogrecovery.c:2306-2323)"
+    );
+}
+
+// A non-ERROR report emitted inside the frame (xlogrecovery_redo's DEBUG1
+// "end of backup record reached", xlogrecovery.c:1944-2028 scope) carries the
+// CONTEXT line at emit time; a report after ApplyWalRecord returns does not
+// (the frame was popped, xlogrecovery.c:2030-2031).
+#[test]
+fn apply_wal_record_reports_carry_wal_redo_context_like_c() {
+    let _g = datadir_lock();
+    let dir = boot_fixture("rm_redo_errcontext_emit");
+    install_startup_process_seams();
+    install_varsup_once();
+    WALRCV_UP.store(false, Relaxed);
+    STANDBY_MODE.store(false, Relaxed);
+    IN_ARCHIVE_RECOVERY.store(false, Relaxed);
+    RECOVERY_TARGET_TLI.store(1, Relaxed);
+    let loc: XLogRecPtr = SEG as u64 + SizeOfXLogLongPHD as u64;
+    let backup_end = record_bytes(
+        loc,
+        transam_xlog::RM_XLOG_ID,
+        transam_xlog::XLOG_BACKUP_END,
+        &loc.to_ne_bytes(),
+    );
+    write_segment_with_record(&dir, loc, &backup_end);
+    let mut rec = recovery_at_record(loc);
+    rec.src.backup_start_point = loc;
+    let mut replay_tli: TimeLineID = 1;
+
+    REPORTS.lock().unwrap().clear();
+    let prev_min = elog::config::log_min_messages();
+    elog::config::set_log_min_messages(types_error::DEBUG1);
+    let prev = elog::set_emit_log_hook(Some(capture_report));
+
+    let applied = apply_wal_record(&mut rec, &mut replay_tli);
+    let _ = elog(LOG, "probe after ApplyWalRecord".to_string());
+
+    elog::set_emit_log_hook(prev);
+    elog::config::set_log_min_messages(prev_min);
+    let reports = REPORTS.lock().unwrap().clone();
+    drop(rec);
+    reset_replay_pointers();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    applied.unwrap();
+    let find = |msg: &str| {
+        reports.iter().find(|e| e.message() == msg).cloned().unwrap_or_else(|| {
+            panic!(
+                "no {msg:?} report; got {:?}",
+                reports.iter().map(|e| e.message().to_string()).collect::<Vec<_>>()
+            )
+        })
+    };
+    let inside = find("end of backup record reached");
+    assert_eq!(inside.level, types_error::DEBUG1);
+    assert_eq!(
+        inside.context(),
+        Some("WAL redo at 0/1000028 for XLOG/BACKUP_END: 0/1000028"),
+        "reports inside ApplyWalRecord get rm_redo_error_callback's line"
+    );
+    let outside = find("probe after ApplyWalRecord");
+    assert_eq!(outside.context(), None, "the frame is popped with ApplyWalRecord");
+}
+
+// xlog_outdesc (xlogrecovery.c:2327-2344) + xlog_block_info (2366-2398) over
+// a hand-built decoded record: rm_name/rm_identify ("UNKNOWN (%X): " for an
+// unknown opcode, "%s: " otherwise), rm_desc, then every in-use block
+// reference in id order (unused ids skipped), MAIN fork without "fork %u",
+// other forks with it, " FPW" when the block carries an image.
+#[test]
+fn xlog_outdesc_and_block_info_render_like_c() {
+    let cx = mcx::MemoryContext::new("xlog_outdesc witness");
+
+    let mut unknown = xlogreader_seams::DecodedXLogRecord::default();
+    unknown.xl_rmid = rmgr::RM_BTREE_ID as u8;
+    unknown.xl_info = 0xF0;
+    unknown.max_block_id = 2;
+    unknown.blocks[0] = xlogreader_seams::DecodedBkpBlock {
+        in_use: true,
+        rlocator: types_storage::RelFileLocator::new(1, 2, 3),
+        forknum: types_core::ForkNumber::MAIN_FORKNUM,
+        blkno: 4,
+        has_image: true,
+        ..xlogreader_seams::DecodedBkpBlock::EMPTY
+    };
+    unknown.blocks[2] = xlogreader_seams::DecodedBkpBlock {
+        in_use: true,
+        rlocator: types_storage::RelFileLocator::new(1, 2, 3),
+        forknum: types_core::ForkNumber::VISIBILITYMAP_FORKNUM,
+        blkno: 9,
+        ..xlogreader_seams::DecodedBkpBlock::EMPTY
+    };
+    let view = ReaderView { ReadRecPtr: 0x1000028, record: Some(unknown), ..Default::default() };
+    let mut buf = StringInfo::new_in(cx.mcx()).unwrap();
+    xlog_outdesc(&mut buf, &view).unwrap();
+    xlog_block_info(&mut buf, &view).unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(buf.as_bytes()),
+        "Btree/UNKNOWN (F0): ; blkref #0: rel 1/2/3, blk 4 FPW; blkref #2: rel 1/2/3, fork 2, blk 9"
+    );
+
+    let startpoint: [u8; 8] = 0x1000028u64.to_ne_bytes();
+    let mut known = xlogreader_seams::DecodedXLogRecord::default();
+    known.xl_rmid = transam_xlog::RM_XLOG_ID;
+    known.xl_info = transam_xlog::XLOG_BACKUP_END;
+    known.main_data = startpoint.as_ptr();
+    known.main_data_len = startpoint.len() as u32;
+    let view = ReaderView { ReadRecPtr: 0x1000028, record: Some(known), ..Default::default() };
+    let mut buf = StringInfo::new_in(cx.mcx()).unwrap();
+    xlog_outdesc(&mut buf, &view).unwrap();
+    xlog_block_info(&mut buf, &view).unwrap();
+    assert_eq!(String::from_utf8_lossy(buf.as_bytes()), "XLOG/BACKUP_END: 0/1000028");
+}

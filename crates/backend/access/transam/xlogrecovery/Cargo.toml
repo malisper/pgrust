@@ -32,6 +32,7 @@ transam_xlog = { path = "../transam_xlog" }
 xlogrecovery_seams = { path = "../xlogrecovery_seams" }
 ps_status_seams = { path = "../../../utils/misc/ps_status_seams" }
 rmgr = { path = "../rmgr" }
+stringinfo = { path = "../../../../_support/types/stringinfo" }
 varsup = { path = "../varsup" }
 pmsignal = { path = "../../../storage/ipc/pmsignal" }
 startup_seams = { path = "../../../postmaster/startup_seams" }

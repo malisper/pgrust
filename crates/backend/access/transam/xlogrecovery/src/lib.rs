@@ -10,13 +10,17 @@
 #![allow(non_upper_case_globals)]
 
 use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
 
 use elog::{elog, ereport};
-use types_core::{TimeLineID, TimestampTz, TransactionId, XLogRecPtr, XLogSegNo, BLCKSZ};
+use stringinfo::StringInfo;
+use types_core::{
+    ForkNumber, TimeLineID, TimestampTz, TransactionId, XLogRecPtr, XLogSegNo, BLCKSZ,
+};
 use types_storage::{BufferIsValid, InvalidBuffer, ReadBufferMode};
 use types_error::{
-    ErrorLevel, ErrorLocation, PgResult, DEBUG1, DEBUG2, ERRCODE_CONFIG_FILE_ERROR,
+    ErrorLevel, ErrorLocation, PgError, PgResult, DEBUG1, DEBUG2, ERRCODE_CONFIG_FILE_ERROR,
     ERRCODE_DATA_CORRUPTED, ERRCODE_INVALID_PARAMETER_VALUE, ERROR, FATAL, LOG, PANIC, WARNING,
 };
 use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT};
@@ -1013,6 +1017,10 @@ struct Recovery {
     aborted_rec_ptr: XLogRecPtr,
     missing_contrec_ptr: XLogRecPtr,
     oldest_active_xid: TransactionId,
+    // rm_redo_error_callback's `arg` (xlogrecovery.c:1944): the record
+    // identity ApplyWalRecord's error context frame describes; allocated once
+    // per recovery, re-snapshotted per record (see RmRedoErrorContextFrame).
+    redo_error_arg: Rc<RefCell<RmRedoErrorArg>>,
 }
 
 // ReadRecord: Ok(true) = the reader's current record is the requested one.
@@ -1313,6 +1321,7 @@ pub fn InitWalRecovery() -> PgResult<InitWalRecoveryResult> {
         aborted_rec_ptr: InvalidXLogRecPtr,
         missing_contrec_ptr: InvalidXLogRecPtr,
         oldest_active_xid: types_core::InvalidTransactionId,
+        redo_error_arg: Rc::new(RefCell::new(RmRedoErrorArg::default())),
     };
     rec.src.redo_start_lsn = cf.checkPointCopy.redo;
     rec.src.redo_start_tli = cf.checkPointCopy.ThisTimeLineID;
@@ -2094,7 +2103,56 @@ fn page_lsn(page: &[u8]) -> XLogRecPtr {
     ((hi as u64) << 32) | lo as u64
 }
 
+// ApplyWalRecord (xlogrecovery.c:1936): the record is replayed under the
+// rm_redo_error_callback error context frame (xlogrecovery.c:1943-1946),
+// which is popped right after verifyBackupPageConsistency
+// (xlogrecovery.c:2030-2031) — the walsender/walreceiver wakeups,
+// CheckRecoveryConsistency and the timeline-switch cleanup run outside it.
 fn apply_wal_record(rec: &mut Recovery, replay_tli: &mut TimeLineID) -> PgResult<()> {
+    // Setup error traceback support for ereport() (xlogrecovery.c:1943-1946).
+    let errcallback = RmRedoErrorContextFrame::push(rec);
+    let switched_tli = errcallback.attach(apply_wal_record_under_errcallback(rec, replay_tli))?;
+    // Pop the error context stack (xlogrecovery.c:2030-2031).
+    drop(errcallback);
+
+    LAST_REPLAYED_READ_REC_PTR.store(rec.reader.v.ReadRecPtr, Relaxed);
+    LAST_REPLAYED_END_REC_PTR.store(rec.reader.v.EndRecPtr, Relaxed);
+    LAST_REPLAYED_TLI.store(*replay_tli, Relaxed);
+
+    // Wakeup walsenders (xlogrecovery.c:2056): on the standby the WAL is
+    // flushed first (waking only physical walsenders, from the walreceiver)
+    // and then applied, which wakes only logical walsenders — standby logical
+    // decoding can only proceed once a record has been replayed. Physical
+    // walsenders need a replay-side wakeup only on a timeline switch.
+    // AllowCascadeReplication() = EnableHotStandby && max_wal_senders > 0.
+    if guc_tables::vars::EnableHotStandby.read()
+        && guc_tables::vars::max_wal_senders.read() > 0
+        && walsender_seams::wal_snd_wakeup::is_installed()
+    {
+        walsender_seams::wal_snd_wakeup::call(switched_tli, true);
+    }
+
+    if DO_REQUEST_WALRCV_REPLY.get() {
+        DO_REQUEST_WALRCV_REPLY.set(false);
+        if walreceiverfuncs_seams::wal_rcv_force_reply::is_installed() {
+            walreceiverfuncs_seams::wal_rcv_force_reply::call();
+        }
+    }
+
+    check_recovery_consistency(rec)?;
+
+    if switched_tli {
+        after_timeline_switch(rec.reader.v.EndRecPtr, *replay_tli)?;
+    }
+    Ok(())
+}
+
+// ApplyWalRecord's body inside the rm_redo_error_callback frame
+// (xlogrecovery.c:1948-2028): returns switchedTLI.
+fn apply_wal_record_under_errcallback(
+    rec: &mut Recovery,
+    replay_tli: &mut TimeLineID,
+) -> PgResult<bool> {
     let xid = rec.reader.XLogRecGetXid();
     let rmid = rec.reader.XLogRecGetRmid();
     let info = rec.reader.XLogRecGetInfo();
@@ -2170,35 +2228,174 @@ fn apply_wal_record(rec: &mut Recovery, replay_tli: &mut TimeLineID) -> PgResult
     if info & XLR_CHECK_CONSISTENCY != 0 {
         verify_backup_page_consistency(rec, rmid)?;
     }
+    Ok(switched_tli)
+}
 
-    LAST_REPLAYED_READ_REC_PTR.store(rec.reader.v.ReadRecPtr, Relaxed);
-    LAST_REPLAYED_END_REC_PTR.store(rec.reader.v.EndRecPtr, Relaxed);
-    LAST_REPLAYED_TLI.store(*replay_tli, Relaxed);
+// rm_redo_error_callback's `arg` (xlogrecovery.c:1944: `errcallback.arg =
+// xlogreader`). C's callback reads the live reader at report time; here the
+// reader is exclusively borrowed by rm_redo while the frame is installed, so
+// the frame snapshots the record identity (header, main-data window, the
+// in-use block references — all unchanged for ApplyWalRecord's duration) and
+// the callback describes the snapshot. Allocated once per recovery
+// (XLR_MAX_BLOCK_ID + 1 block slots); a snapshot copies only the header and
+// the blocks up to max_block_id.
+#[derive(Default)]
+struct RmRedoErrorArg {
+    view: ReaderView,
+}
 
-    // Wakeup walsenders (xlogrecovery.c:2056): on the standby the WAL is
-    // flushed first (waking only physical walsenders, from the walreceiver)
-    // and then applied, which wakes only logical walsenders — standby logical
-    // decoding can only proceed once a record has been replayed. Physical
-    // walsenders need a replay-side wakeup only on a timeline switch.
-    // AllowCascadeReplication() = EnableHotStandby && max_wal_senders > 0.
-    if guc_tables::vars::EnableHotStandby.read()
-        && guc_tables::vars::max_wal_senders.read() > 0
-        && walsender_seams::wal_snd_wakeup::is_installed()
-    {
-        walsender_seams::wal_snd_wakeup::call(switched_tli, true);
-    }
-
-    if DO_REQUEST_WALRCV_REPLY.get() {
-        DO_REQUEST_WALRCV_REPLY.set(false);
-        if walreceiverfuncs_seams::wal_rcv_force_reply::is_installed() {
-            walreceiverfuncs_seams::wal_rcv_force_reply::call();
+impl RmRedoErrorArg {
+    fn snapshot(&mut self, live: &ReaderView) {
+        self.view.ReadRecPtr = live.ReadRecPtr;
+        self.view.EndRecPtr = live.EndRecPtr;
+        match live.record.as_ref() {
+            Some(src) => {
+                let dst = self.view.record.get_or_insert_with(Default::default);
+                dst.lsn = src.lsn;
+                dst.next_lsn = src.next_lsn;
+                dst.xl_tot_len = src.xl_tot_len;
+                dst.xl_xid = src.xl_xid;
+                dst.xl_prev = src.xl_prev;
+                dst.xl_info = src.xl_info;
+                dst.xl_rmid = src.xl_rmid;
+                dst.record_origin = src.record_origin;
+                dst.toplevel_xid = src.toplevel_xid;
+                dst.main_data = src.main_data;
+                dst.main_data_len = src.main_data_len;
+                dst.max_block_id = src.max_block_id;
+                // Only blocks 0..=max_block_id are ever consulted
+                // (XLogRecHasBlockRef); stale slots above are never read.
+                let n = (src.max_block_id as i32 + 1).max(0) as usize;
+                dst.blocks[..n].copy_from_slice(&src.blocks[..n]);
+            }
+            None => self.view.record = None,
         }
     }
 
-    check_recovery_consistency(rec)?;
+    fn clear(&mut self) {
+        // The snapshot's payload pointers target the reader's decode buffer;
+        // drop them with the frame.
+        self.view.record = None;
+    }
+}
 
-    if switched_tli {
-        after_timeline_switch(rec.reader.v.EndRecPtr, *replay_tli)?;
+// The ErrorContextCallback ApplyWalRecord pushes (xlogrecovery.c:1943-1946)
+// and pops (xlogrecovery.c:2031). Non-ERROR reports emitted inside the frame
+// (LOG/WARNING/DEBUG, FATAL/PANIC decorated by errfinish at emit time) get
+// the line through the emit-context callback; an ERROR propagating out as
+// `Err` gets it through `attach` at the frame boundary (C's callback runs at
+// the throw site with the same record state). Drop pops the callback.
+struct RmRedoErrorContextFrame {
+    arg: Rc<RefCell<RmRedoErrorArg>>,
+    callback: u64,
+}
+
+impl RmRedoErrorContextFrame {
+    fn push(rec: &Recovery) -> Self {
+        rec.redo_error_arg.borrow_mut().snapshot(&rec.reader.v);
+        let arg = Rc::clone(&rec.redo_error_arg);
+        let cb_arg = Rc::clone(&arg);
+        let callback = elog::push_emit_context_callback(Box::new(move |e: &mut PgError| {
+            rm_redo_error_callback(&cb_arg.borrow(), e)
+        }));
+        RmRedoErrorContextFrame { arg, callback }
+    }
+
+    fn attach<T>(&self, r: PgResult<T>) -> PgResult<T> {
+        r.map_err(|mut e| {
+            rm_redo_error_callback(&self.arg.borrow(), &mut e);
+            e
+        })
+    }
+}
+
+impl Drop for RmRedoErrorContextFrame {
+    fn drop(&mut self) {
+        elog::pop_emit_context_callback(self.callback);
+        self.arg.borrow_mut().clear();
+    }
+}
+
+// rm_redo_error_callback (xlogrecovery.c:2306-2323): error context callback
+// for errors occurring during rm_redo(). C builds the description under
+// ErrorContext (errfinish switched to it before walking the callbacks); the
+// scratch arena here is released with the call.
+fn rm_redo_error_callback(arg: &RmRedoErrorArg, e: &mut PgError) {
+    let scratch = mcx::MemoryContext::new_bump("rm_redo_error_callback");
+    let Ok(mut buf) = StringInfo::new_in(scratch.mcx()) else {
+        return;
+    };
+    // A description failure inside the callback is C's recursive-error
+    // territory; the partial description is still attached.
+    let _ = xlog_outdesc(&mut buf, &arg.view)
+        .and_then(|()| xlog_block_info(&mut buf, &arg.view));
+
+    // translator: %s is a WAL record description
+    e.add_context_line(format!(
+        "WAL redo at {} for {}",
+        lsn_fmt(arg.view.ReadRecPtr),
+        String::from_utf8_lossy(buf.as_bytes())
+    ));
+}
+
+/// xlog_outdesc (xlogrecovery.c:2327-2344): a string describing an
+/// XLogRecord, consisting of its identity optionally followed by a colon, a
+/// space, and a further description.
+pub fn xlog_outdesc(buf: &mut StringInfo<'_>, record: &ReaderView) -> PgResult<()> {
+    let rec = record
+        .record
+        .as_ref()
+        .expect("xlog_outdesc on a reader with no decoded record");
+    let rmgr = rmgr::GetRmgr(rec.xl_rmid)?;
+    let info = rec.xl_info;
+
+    buf.append_str(rmgr.rm_name)?;
+    buf.append_byte(b'/')?;
+
+    match (rmgr.rm_identify)(info) {
+        None => buf.append_str(&format!(
+            "UNKNOWN ({:X}): ",
+            info & !transam_xlog::XLR_INFO_MASK
+        ))?,
+        Some(id) => {
+            buf.append_str(id)?;
+            buf.append_str(": ")?;
+        }
+    }
+
+    (rmgr.rm_desc)(buf, record)
+}
+
+// xlog_block_info (xlogrecovery.c:2366-2398): the record's block references.
+fn xlog_block_info(buf: &mut StringInfo<'_>, record: &ReaderView) -> PgResult<()> {
+    let max_block_id = record.record.as_ref().map_or(-1, |r| r.max_block_id as i32);
+
+    // decode block references
+    for block_id in 0..=max_block_id {
+        let block_id = block_id as u8;
+        let Some((rlocator, forknum, blk, _)) = record.block_tag_extended(block_id) else {
+            continue;
+        };
+
+        if !matches!(forknum, ForkNumber::MAIN_FORKNUM) {
+            buf.append_str(&format!(
+                "; blkref #{}: rel {}/{}/{}, fork {}, blk {}",
+                block_id,
+                rlocator.spcOid,
+                rlocator.dbOid,
+                rlocator.relNumber,
+                forknum as i32 as u32,
+                blk
+            ))?;
+        } else {
+            buf.append_str(&format!(
+                "; blkref #{}: rel {}/{}/{}, blk {}",
+                block_id, rlocator.spcOid, rlocator.dbOid, rlocator.relNumber, blk
+            ))?;
+        }
+        if record.has_block_image(block_id) {
+            buf.append_str(" FPW")?;
+        }
     }
     Ok(())
 }

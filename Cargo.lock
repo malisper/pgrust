@@ -22064,6 +22064,7 @@ dependencies = [
  "spi_seams",
  "standby_seams",
  "startup_seams",
+ "stringinfo",
  "subtrans",
  "sync",
  "syncrep_seams",
