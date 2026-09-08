@@ -9117,21 +9117,27 @@ dependencies = [
 name = "logicalrelation"
 version = "0.1.0"
 dependencies = [
+ "amapi",
  "catalog_namespace",
  "datum",
  "elog",
+ "indexam",
  "inval",
  "logicalproto",
+ "lsyscache",
  "mcx",
  "pg_class_seams",
  "pg_subscription",
  "rel_vocab",
  "relcache",
  "table",
+ "typcache",
  "types_core",
  "types_error",
  "types_fmgr",
  "types_rel",
+ "types_relscan",
+ "types_scan",
 ]
 
 [[package]]

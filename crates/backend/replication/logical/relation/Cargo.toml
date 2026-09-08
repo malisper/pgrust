@@ -24,3 +24,9 @@ pg_class_seams = { path = "../../../catalog/pg_class_seams" }
 relcache = { path = "../../../utils/cache/relcache" }
 inval = { path = "../../../utils/cache/inval" }
 table = { path = "../../../access/table/table" }
+indexam = { path = "../../../access/index/indexam" }
+amapi = { path = "../../../access/index/amapi" }
+types_relscan = { path = "../../../access/index/relscan" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+typcache = { path = "../../../utils/cache/typcache" }
+lsyscache = { path = "../../../utils/cache/lsyscache" }

@@ -800,6 +800,11 @@ pub(crate) fn run_tablesync_worker(mcx: Mcx<'static>, relid: Oid) -> PgResult<()
         }
     };
 
+    // ReplicationOriginNameForLogicalRep + set_apply_error_context_origin
+    // (tablesync.c:1731-1736).
+    let originname = format!("pg_{}_{}", my_sub(|s| s.oid), relid);
+    crate::set_apply_error_context_origin(&originname);
+
     // START_REPLICATION on the tablesync slot from the copy end position.
     crate::start_logical_streaming_on(&mut conn, &slotname, origin_startpos)?;
     crate::apply_loop(&mut conn, origin_startpos)

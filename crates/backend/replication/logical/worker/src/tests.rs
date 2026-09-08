@@ -362,3 +362,115 @@ fn tablesync_worker_started_line_names_the_table() {
         "logical replication apply worker for subscription \"s\" has started"
     );
 }
+
+// ---- audit-remediation w2-021 witnesses ------------------------------------
+
+fn errarg_rel() -> logicalproto::LogicalRepRelation {
+    logicalproto::LogicalRepRelation {
+        remoteid: 42,
+        nspname: "public".into(),
+        relname: "ts_t".into(),
+        natts: 2,
+        attnames: vec!["id".into(), "v".into()],
+        atttyps: vec![23, 25],
+        replident: b'd',
+        relkind: b'r',
+        attkeys: vec![true, false],
+    }
+}
+
+// apply_error_callback (worker.c:5053-5121): the six errcontext forms, chosen
+// by rel / remote_attnum / remote_xid / finish_lsn, and the command == 0
+// early return (rows a186-candidate-fp-logical-applyparallelworker-
+// 01931f170b8e9e5e4bf8-1 and -worker-p1-ab5cef64f7346570236f-1).
+#[test]
+fn apply_error_callback_six_errcontext_forms_match_c() {
+    use super::{apply_error_context_line, ApplyErrorCallbackArg};
+    let mut a = ApplyErrorCallbackArg::INITIAL;
+    a.origin_name = Some("pg_16390".to_string());
+    assert_eq!(apply_error_context_line(&a), None);
+
+    a.command = logicalproto::LOGICAL_REP_MSG_BEGIN;
+    assert_eq!(
+        apply_error_context_line(&a).unwrap(),
+        "processing remote data for replication origin \"pg_16390\" during message type \"BEGIN\""
+    );
+    a.remote_xid = 731;
+    assert_eq!(
+        apply_error_context_line(&a).unwrap(),
+        "processing remote data for replication origin \"pg_16390\" during message type \"BEGIN\" in transaction 731"
+    );
+    a.finish_lsn = 0x1_6B37_48;
+    assert_eq!(
+        apply_error_context_line(&a).unwrap(),
+        "processing remote data for replication origin \"pg_16390\" during message type \"BEGIN\" in transaction 731, finished at 0/16B3748"
+    );
+
+    a.command = logicalproto::LOGICAL_REP_MSG_INSERT;
+    a.rel = Some(errarg_rel());
+    a.finish_lsn = 0;
+    assert_eq!(
+        apply_error_context_line(&a).unwrap(),
+        "processing remote data for replication origin \"pg_16390\" during message type \"INSERT\" for replication target relation \"public.ts_t\" in transaction 731"
+    );
+    a.finish_lsn = (0xA_u64 << 32) | 0xFFFF_FFFF;
+    assert_eq!(
+        apply_error_context_line(&a).unwrap(),
+        "processing remote data for replication origin \"pg_16390\" during message type \"INSERT\" for replication target relation \"public.ts_t\" in transaction 731, finished at A/FFFFFFFF"
+    );
+    a.remote_attnum = 1;
+    a.finish_lsn = 0;
+    assert_eq!(
+        apply_error_context_line(&a).unwrap(),
+        "processing remote data for replication origin \"pg_16390\" during message type \"INSERT\" for replication target relation \"public.ts_t\" column \"v\" in transaction 731"
+    );
+    a.finish_lsn = 0x16B3748;
+    assert_eq!(
+        apply_error_context_line(&a).unwrap(),
+        "processing remote data for replication origin \"pg_16390\" during message type \"INSERT\" for replication target relation \"public.ts_t\" column \"v\" in transaction 731, finished at 0/16B3748"
+    );
+    // An unknown command prints C's "??? (%d)".
+    a.command = 0x7f;
+    a.rel = None;
+    a.remote_xid = 0;
+    assert_eq!(
+        apply_error_context_line(&a).unwrap(),
+        "processing remote data for replication origin \"pg_16390\" during message type \"??? (127)\""
+    );
+}
+
+// apply_dispatch (worker.c:3393/3486) saves the command on entry and restores
+// it only on the normal exit; an error leaves the innermost command for the
+// callback, and the apply loop's frame attaches its line to the propagating
+// error (worker.c:3616-3622) — the ORIGIN out-of-order error carries C's
+// CONTEXT line.
+#[test]
+fn apply_error_context_attaches_to_a_propagating_apply_error() {
+    super::MY_SUBSCRIPTION.with(|s| *s.borrow_mut() = Some(test_sub(0, true)));
+    super::reset_apply_error_context_info();
+    super::set_apply_error_context_origin("pg_16384");
+    let cx = mcx::MemoryContext::new("t");
+    // SAFETY: `cx` outlives every use within this test.
+    let mcx: mcx::Mcx<'static> = unsafe { std::mem::transmute(cx.mcx()) };
+    let mut buf = vec![b'O'];
+    buf.extend_from_slice(&0x10u64.to_be_bytes());
+    buf.extend_from_slice(b"pg_16390\0");
+
+    let frame = super::ApplyErrorContextFrame::push();
+
+    // Normal exit: the saved command (0) is restored.
+    super::IN_REMOTE_TRANSACTION.set(true);
+    frame.attach(super::apply::apply_dispatch(mcx, None, &buf)).unwrap();
+    assert_eq!(super::set_apply_error_context_command(0), 0);
+
+    // Error exit: the command stays 'O' and the frame's attach adds the line.
+    super::IN_REMOTE_TRANSACTION.set(false);
+    let err = frame.attach(super::apply::apply_dispatch(mcx, None, &buf)).unwrap_err();
+    assert_eq!(err.message(), "ORIGIN message sent out of order");
+    assert_eq!(
+        err.context(),
+        Some("processing remote data for replication origin \"pg_16384\" during message type \"ORIGIN\"")
+    );
+    drop(frame);
+    super::reset_apply_error_context_info();
+}

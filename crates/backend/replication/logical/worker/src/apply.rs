@@ -35,7 +35,11 @@ use types_slot::SlotData;
 
 use walreceiver::client::PgConn;
 
-use crate::{loc, my_sub, IN_REMOTE_TRANSACTION, REMOTE_FINAL_LSN};
+use crate::{
+    loc, my_sub, reset_apply_error_context_info, set_apply_error_context_attnum,
+    set_apply_error_context_command, set_apply_error_context_rel, set_apply_error_context_xact,
+    IN_REMOTE_TRANSACTION, REMOTE_FINAL_LSN,
+};
 
 pub(crate) use backend_status_seams::BackendState;
 
@@ -255,13 +259,32 @@ fn should_apply_changes_for_rel(entry: &LogicalRepRelMapEntry) -> PgResult<bool>
 // to the transaction's file instead of applying.
 pub(crate) fn apply_dispatch(
     mcx: Mcx<'static>,
-    mut conn: Option<&mut PgConn>,
+    conn: Option<&mut PgConn>,
     buf: &[u8],
 ) -> PgResult<()> {
     if buf.is_empty() {
         return Ok(());
     }
     let action = buf[0];
+    // Set the current command being applied; this is re-entered when
+    // applying spooled changes, so the current command is saved
+    // (worker.c:3393). C restores it only on the normal exit
+    // (worker.c:3486) — an error leaves the innermost command for the
+    // callback to report.
+    let saved_command = set_apply_error_context_command(action);
+    let r = apply_dispatch_guts(mcx, conn, action, buf);
+    if r.is_ok() {
+        set_apply_error_context_command(saved_command);
+    }
+    r
+}
+
+fn apply_dispatch_guts(
+    mcx: Mcx<'static>,
+    mut conn: Option<&mut PgConn>,
+    action: u8,
+    buf: &[u8],
+) -> PgResult<()> {
     // C checks is_skipping_changes() at the entry of the four data-
     // modification handlers only (worker.c:2404,2564,2769,3257); RELATION/
     // TYPE/MESSAGE are processed even while skipping.
@@ -343,6 +366,8 @@ fn apply_handle_origin() -> PgResult<()> {
 // apply_handle_begin (worker.c:985).
 fn apply_handle_begin(r: &mut Reader<'_>) -> PgResult<()> {
     let begin = logicalproto::logicalrep_read_begin(r)?;
+    set_apply_error_context_xact(begin.xid, begin.final_lsn);
+
     REMOTE_FINAL_LSN.set(begin.final_lsn);
     crate::maybe_start_skipping_changes(begin.final_lsn);
     IN_REMOTE_TRANSACTION.set(true);
@@ -376,6 +401,7 @@ fn apply_handle_commit(
     crate::tablesync::process_syncing_tables(mcx, conn, commit.end_lsn)?;
 
     report_activity(BackendState::STATE_IDLE);
+    reset_apply_error_context_info();
     Ok(())
 }
 
@@ -440,6 +466,8 @@ fn apply_handle_begin_prepare(r: &mut Reader<'_>) -> PgResult<()> {
     }
 
     let begin = logicalproto::logicalrep_read_begin_prepare(r)?;
+    set_apply_error_context_xact(begin.xid, begin.prepare_lsn);
+
     REMOTE_FINAL_LSN.set(begin.prepare_lsn);
     crate::maybe_start_skipping_changes(begin.prepare_lsn);
     IN_REMOTE_TRANSACTION.set(true);
@@ -521,6 +549,7 @@ fn apply_handle_prepare(
     crate::clear_subscription_skip_lsn(mcx, prepare_data.prepare_lsn)?;
 
     report_activity(BackendState::STATE_IDLE);
+    reset_apply_error_context_info();
     Ok(())
 }
 
@@ -531,6 +560,7 @@ fn apply_handle_commit_prepared(
     r: &mut Reader<'_>,
 ) -> PgResult<()> {
     let prepare_data = logicalproto::logicalrep_read_commit_prepared(r)?;
+    set_apply_error_context_xact(prepare_data.xid, prepare_data.commit_lsn);
 
     let gid = twophase::TwoPhaseTransactionGid(my_sub(|s| s.oid), prepare_data.xid)?;
 
@@ -557,6 +587,7 @@ fn apply_handle_commit_prepared(
     crate::clear_subscription_skip_lsn(mcx, prepare_data.end_lsn)?;
 
     report_activity(BackendState::STATE_IDLE);
+    reset_apply_error_context_info();
     Ok(())
 }
 
@@ -567,6 +598,7 @@ fn apply_handle_rollback_prepared(
     r: &mut Reader<'_>,
 ) -> PgResult<()> {
     let rollback_data = logicalproto::logicalrep_read_rollback_prepared(r)?;
+    set_apply_error_context_xact(rollback_data.xid, rollback_data.rollback_end_lsn);
 
     let gid = twophase::TwoPhaseTransactionGid(my_sub(|s| s.oid), rollback_data.xid)?;
 
@@ -584,6 +616,7 @@ fn apply_handle_rollback_prepared(
         twophase::FinishPreparedTransaction(&gid, false)?;
         end_replication_step()?;
         xact::CommitTransactionCommand()?;
+        pgstat::pending::pgstat_report_stat(false);
 
         crate::clear_subscription_skip_lsn(mcx, rollback_data.rollback_end_lsn)?;
     }
@@ -601,6 +634,7 @@ fn apply_handle_rollback_prepared(
     crate::tablesync::process_syncing_tables(mcx, conn, rollback_data.rollback_end_lsn)?;
 
     report_activity(BackendState::STATE_IDLE);
+    reset_apply_error_context_info();
     Ok(())
 }
 
@@ -652,7 +686,10 @@ fn slot_store_data<'mcx>(
             let m = remote as usize;
             tuple_column_check(m, tup.ncols)?;
             let bytes = tup.colvalues[m].as_deref().unwrap_or(&[]);
-            slot_store_datum(
+            // Set attnum for error callback (worker.c:819); reset after the
+            // conversion (worker.c:868).
+            set_apply_error_context_attnum(m as i32);
+            let v = slot_store_datum(
                 mcx,
                 infuncs,
                 i,
@@ -661,7 +698,9 @@ fn slot_store_data<'mcx>(
                 tup.colstatus[m],
                 bytes,
                 m,
-            )?
+            )?;
+            set_apply_error_context_attnum(-1);
+            v
         } else {
             (Datum::null(), true)
         };
@@ -764,6 +803,9 @@ fn slot_modify_data<'mcx>(
             continue;
         }
         let bytes = tup.colvalues[m].as_deref().unwrap_or(&[]);
+        // Set attnum for error callback (worker.c:938); reset after the
+        // conversion (worker.c:983).
+        set_apply_error_context_attnum(m as i32);
         let (value, isnull) = slot_store_datum(
             mcx,
             infuncs,
@@ -774,6 +816,7 @@ fn slot_modify_data<'mcx>(
             bytes,
             m,
         )?;
+        set_apply_error_context_attnum(-1);
         let base = slot.base_mut();
         base.tts_values[i] = value;
         base.tts_isnull[i] = isnull;
@@ -1900,6 +1943,9 @@ fn apply_handle_insert(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> {
     // the user has opted out of that behavior (worker.c:2427).
     let ucxt = maybe_switch_to_table_owner(mcx, rel.rd_rel.relowner)?;
 
+    // Set relation for error callback (worker.c:2442).
+    set_apply_error_context_rel(Some(&entry.remoterel));
+
     // Prepare to catch AFTER triggers (create_edata_for_relation /
     // finish_edata, worker.c:512/554): the queue is opened and drained around
     // each apply operation.
@@ -1923,6 +1969,10 @@ fn apply_handle_insert(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> {
     }
 
     trigger::AfterTriggerEndQuery()?;
+
+    // Reset relation for error callback (worker.c:2473).
+    set_apply_error_context_rel(None);
+
     restore_user_context(&ucxt)?;
 
     logicalrelation::logicalrep_rel_close(rel, types_rel::NoLock)?;
@@ -1941,6 +1991,10 @@ fn apply_handle_update(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> {
         logicalrelation::logicalrep_rel_close(rel, types_rel::RowExclusiveLock)?;
         return end_replication_step();
     }
+
+    // Set relation for error callback (worker.c:2595).
+    set_apply_error_context_rel(Some(&entry.remoterel));
+
     check_relation_updatable(mcx, &rel, &entry)?;
 
     // Make sure that any user-supplied code runs as the table owner, unless
@@ -1970,6 +2024,7 @@ fn apply_handle_update(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> {
             RoutedOp::Update(&upd.newtup),
         )?;
         trigger::AfterTriggerEndQuery()?;
+        set_apply_error_context_rel(None);
         restore_user_context(&ucxt)?;
         logicalrelation::logicalrep_rel_close(rel, types_rel::NoLock)?;
         return end_replication_step();
@@ -2011,6 +2066,10 @@ fn apply_handle_update(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> {
     }
 
     trigger::AfterTriggerEndQuery()?;
+
+    // Reset relation for error callback (worker.c:2661).
+    set_apply_error_context_rel(None);
+
     restore_user_context(&ucxt)?;
 
     logicalrelation::logicalrep_rel_close(rel, types_rel::NoLock)?;
@@ -2029,6 +2088,10 @@ fn apply_handle_delete(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> {
         logicalrelation::logicalrep_rel_close(rel, types_rel::RowExclusiveLock)?;
         return end_replication_step();
     }
+
+    // Set relation for error callback (worker.c:2804).
+    set_apply_error_context_rel(Some(&entry.remoterel));
+
     check_relation_updatable(mcx, &rel, &entry)?;
 
     // Make sure that any user-supplied code runs as the table owner, unless
@@ -2047,6 +2110,7 @@ fn apply_handle_delete(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> {
     if rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE {
         apply_handle_tuple_routing(mcx, &entry, &rel, &mut remoteslot, RoutedOp::Delete)?;
         trigger::AfterTriggerEndQuery()?;
+        set_apply_error_context_rel(None);
         restore_user_context(&ucxt)?;
         logicalrelation::logicalrep_rel_close(rel, types_rel::NoLock)?;
         return end_replication_step();
@@ -2082,6 +2146,10 @@ fn apply_handle_delete(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> {
     }
 
     trigger::AfterTriggerEndQuery()?;
+
+    // Reset relation for error callback (worker.c:2846).
+    set_apply_error_context_rel(None);
+
     restore_user_context(&ucxt)?;
 
     logicalrelation::logicalrep_rel_close(rel, types_rel::NoLock)?;

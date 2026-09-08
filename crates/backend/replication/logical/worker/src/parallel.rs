@@ -44,7 +44,7 @@ use types_rel::{AccessExclusiveLock, AccessShareLock};
 use types_storage::storage::ProcSignalReason;
 use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT};
 
-use crate::{loc, my_sub};
+use crate::{loc, my_sub, ApplyErrorContextFrame};
 
 // DSM_QUEUE_SIZE (applyparallelworker.c:187).
 const DSM_QUEUE_SIZE: usize = 16 * 1024 * 1024;
@@ -832,11 +832,19 @@ fn process_parallel_apply_interrupts() -> PgResult<bool> {
     Ok(true)
 }
 
-// LogicalParallelApplyLoop (applyparallelworker.c:733).
+// LogicalParallelApplyLoop (applyparallelworker.c:733). The apply error
+// context callback is pushed for the loop's duration
+// (applyparallelworker.c:749-754) and popped on every exit (:839).
 fn logical_parallel_apply_loop(mqh: &mut ShmMqHandle) -> PgResult<()> {
-    let top = mcx::MemoryContext::new("ApplyMessageContext");
-    // SAFETY: `top` outlives the loop (see apply_loop).
-    let mcx: Mcx<'static> = unsafe { std::mem::transmute(top.mcx()) };
+    let frame = ApplyErrorContextFrame::push();
+    frame.attach(logical_parallel_apply_loop_guts(mqh))
+}
+
+fn logical_parallel_apply_loop_guts(mqh: &mut ShmMqHandle) -> PgResult<()> {
+    // The ApplyMessageContext we clean up after each replication protocol
+    // message (applyparallelworker.c:741-746); a bump arena released
+    // wholesale at every reset, as the leader's (see apply_loop_guts).
+    let mut top = mcx::MemoryContext::new_bump("ApplyMessageContext");
 
     // Reused across iterations; the ring borrow ends before dispatch.
     let mut buf: Vec<u8> = Vec::new();
@@ -848,6 +856,14 @@ fn logical_parallel_apply_loop(mqh: &mut ShmMqHandle) -> PgResult<()> {
         if crate::apply_worker_exit_requested() {
             return Ok(());
         }
+
+        // MemoryContextReset(ApplyMessageContext) at the end of every
+        // iteration (applyparallelworker.c:834), placed at the head here so
+        // the handle below is always derived from a reset context.
+        top.reset();
+        // SAFETY: `top` outlives the iteration; the handle is re-derived
+        // after every reset and never stored past it.
+        let mcx: Mcx<'static> = unsafe { std::mem::transmute(top.mcx()) };
 
         let received = match mqh.receive(true)? {
             ShmMqRecv::Success(data) => {
@@ -998,6 +1014,9 @@ fn pa_worker_body(
     origin::replorigin_session_setup(originid, w.leader_pid)?;
     origin::set_replorigin_session_origin(originid);
     xact::CommitTransactionCommand()?;
+
+    // applyparallelworker.c:984.
+    crate::set_apply_error_context_origin(&originname);
 
     inval::invalidate::CacheRegisterSyscacheCallback(
         cache_syscache::cacheinfo::SUBSCRIPTIONRELMAP,

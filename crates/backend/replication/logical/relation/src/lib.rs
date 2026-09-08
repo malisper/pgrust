@@ -13,10 +13,11 @@
 //   (logicalrep_relmap_invalidate_cb), C's granularity.
 // - logicalrep_partition_open builds the per-partition entry on every call
 //   (C caches it in LogicalRepPartMap); correctness-identical, the cache is
-//   a later perf item. FindUsableIndexForReplicaIdentityFull is out of
-//   scope, so a REPLICA IDENTITY FULL publisher against a local table with
-//   neither PK nor replica identity index uses the sequential-scan path
-//   (which C also falls back to); a local PK/RI index is used as in C.
+//   a later perf item.
+// - FindUsableIndexForReplicaIdentityFull's amgettuple requirement is read
+//   off this port's index AM set: btree and hash serve index_getnext_slot;
+//   every other AM here is bitmap-only (C's gist/spgist amgettuple are not
+//   scan-capable in this port), so those indexes are not picked.
 #![allow(non_snake_case)]
 
 use std::cell::RefCell;
@@ -146,19 +147,139 @@ pub fn get_relation_identity_or_pk(mcx: Mcx<'_>, rel: &Relation<'_>) -> PgResult
     relcache::indexlist::RelationGetIdentityOrPkIndex(mcx, rel.rd_id)
 }
 
+// FindUsableIndexForReplicaIdentityFull (relation.c:776): the first index of
+// the local relation IsIndexUsableForReplicaIdentityFull accepts, else
+// InvalidOid. Called for a REPLICA IDENTITY FULL remote relation.
+fn find_usable_index_for_replica_identity_full(
+    mcx: Mcx<'_>,
+    localrel: &Relation<'_>,
+    attrmap: &[i16],
+) -> PgResult<Oid> {
+    let idxlist = relcache::indexlist::RelationGetIndexList(mcx, localrel.rd_id)?;
+    for &idxoid in idxlist.iter() {
+        let idxrel = indexam::index_open(mcx, idxoid, types_rel::AccessShareLock)?;
+        let usable = is_index_usable_for_replica_identity_full(&idxrel, attrmap)?;
+        indexam::index_close(idxrel, types_rel::AccessShareLock)?;
+
+        // Return the first eligible index found.
+        if usable {
+            return Ok(idxoid);
+        }
+    }
+    Ok(InvalidOid)
+}
+
+// IsIndexUsableForReplicaIdentityFull (relation.c:814): the index must have
+// an equal strategy for each key column, be non-partial, and the leftmost
+// field must be a column (not an expression) that references a remote
+// relation column; every index attribute type must have a type-cache
+// equality operator (tuples_equal rechecks non-PK/RI matches); and the AM
+// must implement amgettuple.
+pub fn is_index_usable_for_replica_identity_full(
+    idxrel: &Relation<'_>,
+    attrmap: &[i16],
+) -> PgResult<bool> {
+    let form = idxrel.rd_index.as_ref().expect("index form");
+
+    // The index must not be a partial index.
+    if form.has_indpred {
+        return Ok(false);
+    }
+
+    debug_assert!(form.indnatts >= 1);
+
+    // Ensure that the index has a valid equal strategy for each key column
+    // (rd_opfamily[i] is get_opclass_family(indclass->values[i])).
+    for i in 0..form.indnkeyatts as usize {
+        let opfamily = idxrel.rd_opfamily[i];
+        if amapi::IndexAmTranslateCompareType(
+            lsyscache::COMPARE_EQ,
+            idxrel.rd_rel.relam,
+            opfamily,
+            true,
+        )? == types_scan::scankey::InvalidStrategy
+        {
+            return Ok(false);
+        }
+    }
+
+    // For indexes other than PK and REPLICA IDENTITY, we need to match the
+    // local and remote tuples. The equality routine tuples_equal() cannot
+    // accept a data type where the type cache cannot provide an equality
+    // operator.
+    for i in 0..idxrel.rd_att.natts as usize {
+        let typentry = typcache::lookup_type_cache(
+            idxrel.rd_att.attr(i).atttypid,
+            typcache::TYPECACHE_EQ_OPR_FINFO,
+        )?;
+        if typentry.eq_opr_finfo().fn_oid == InvalidOid {
+            return Ok(false);
+        }
+    }
+
+    // The leftmost index field must not be an expression.
+    let keycol = form.indkey0();
+    if keycol == types_core::InvalidAttrNumber {
+        return Ok(false);
+    }
+
+    // And the leftmost index field must reference the remote relation
+    // column: if it doesn't, the sequential scan is favorable over the index
+    // scan in most cases.
+    let off = (keycol - 1) as usize;
+    if attrmap.len() <= off || attrmap[off] < 0 {
+        return Ok(false);
+    }
+
+    // The given index access method must implement "amgettuple", which will
+    // be used later to fetch the tuples (RelationFindReplTupleByIndex): in
+    // this port that is the btree and hash AMs (indexam::am_gettuple).
+    let kind = amapi::GetIndexAmRoutineByAmId(idxrel.rd_rel.relam, false)?
+        .expect("noerror=false returned Some");
+    if !matches!(kind, types_relscan::IndexAmKind::Btree | types_relscan::IndexAmKind::Hash) {
+        return Ok(false);
+    }
+
+    Ok(true)
+}
+
 // FindLogicalRepLocalIndex (relation.c:908). A partitioned table never needs
 // an index (the leaf partition's is used); otherwise the local replica
 // identity or (non-deferrable) primary key is used whatever the remote
-// replica identity is. FindUsableIndexForReplicaIdentityFull (relation.c:770,
-// a REPLICA IDENTITY FULL publisher against a subscriber without PK/RI) is
-// unported: that arm falls back to the sequential scan, which C also takes
-// when no usable index exists (results identical; the index is a scan
-// strategy only, tuples_equal still decides the match).
-fn find_local_index(mcx: Mcx<'_>, rel: &Relation<'_>) -> PgResult<Oid> {
-    if rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE {
+// replica identity is, and a REPLICA IDENTITY FULL publisher gets one more
+// opportunity: any usable index of the local relation
+// (FindUsableIndexForReplicaIdentityFull). Without one the apply worker
+// sequential-scans.
+fn find_local_index(
+    mcx: Mcx<'_>,
+    localrel: &Relation<'_>,
+    remoterel: &LogicalRepRelation,
+    attrmap: &[i16],
+) -> PgResult<Oid> {
+    const REPLICA_IDENTITY_FULL: u8 = b'f';
+
+    // We never need index oid for partitioned tables, always rely on leaf
+    // partition's index.
+    if localrel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE {
         return Ok(InvalidOid);
     }
-    get_relation_identity_or_pk(mcx, rel)
+
+    // Simple case, we already have a primary key or a replica identity index.
+    let idxoid = get_relation_identity_or_pk(mcx, localrel)?;
+    if idxoid != InvalidOid {
+        return Ok(idxoid);
+    }
+
+    if remoterel.replident == REPLICA_IDENTITY_FULL {
+        // We are looking for one more opportunity for using an index. If
+        // there are any indexes defined on the local relation, try to pick a
+        // suitable index. The index selection safely assumes that all the
+        // columns are going to be available for the index scan given that
+        // remote relation has replica identity full.
+        return find_usable_index_for_replica_identity_full(mcx, localrel, attrmap);
+    }
+
+    Ok(InvalidOid)
 }
 
 // logicalrep_get_attrs_str (relation.c:227): the named remote columns,
@@ -322,7 +443,7 @@ pub fn logicalrep_rel_open<'mcx>(
         report_missing_or_gen_attrs(&remoterel, &missing_idx, &generated_hit)?;
 
         mark_updatable(&mut entry)?;
-        entry.localindexoid = find_local_index(mcx, &rel)?;
+        entry.localindexoid = find_local_index(mcx, &rel, &entry.remoterel, &entry.attrmap)?;
         entry.localrelvalid = true;
         localrel = Some(rel);
     }
@@ -385,7 +506,7 @@ pub fn logicalrep_partition_open(
         statelsn: InvalidXLogRecPtr,
     };
     mark_updatable(&mut entry)?;
-    entry.localindexoid = find_local_index(mcx, partrel)?;
+    entry.localindexoid = find_local_index(mcx, partrel, &entry.remoterel, &entry.attrmap)?;
     Ok(entry)
 }
 

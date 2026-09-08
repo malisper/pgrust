@@ -17,7 +17,7 @@ use fd::{
     BufFile, BufFileCreateFileSet, BufFileDeleteFileSet, BufFileOpenFileSet,
     BufFileOpenFileSetMaybe, FileSet,
 };
-use mcx::Mcx;
+use mcx::{Mcx, MemoryContext};
 use types_core::{InvalidTransactionId, InvalidXLogRecPtr, Oid, TransactionId, XLogRecPtr};
 use types_error::{
     PgResult, DEBUG1, ERRCODE_DATA_CORRUPTED, ERRCODE_PROTOCOL_VIOLATION, ERROR,
@@ -34,7 +34,10 @@ use crate::parallel::{
     pa_unlock_stream, pa_unlock_transaction, pa_xact_finish, ParallelTransState,
     PartialFileSetState, Winfo, PARALLEL_STREAM_NCHANGES,
 };
-use crate::{loc, my_sub, IN_REMOTE_TRANSACTION, REMOTE_FINAL_LSN};
+use crate::{
+    loc, my_sub, reset_apply_error_context_info, set_apply_error_context_xact,
+    IN_REMOTE_TRANSACTION, REMOTE_FINAL_LSN,
+};
 
 // SubXactInfo (worker.c:341): offset of the subxact's first change in the
 // changes file.
@@ -73,10 +76,39 @@ thread_local! {
     // C stream_fd: the open spool file between STREAM START and STREAM STOP,
     // and during spooled replay.
     // tls-dtor: plain-data TODAY — BufFile has no Drop (VFDs leak to the fd belts); adding one makes this an offender.
-    static STREAM_FD: RefCell<Option<BufFile<'static>>> = const { RefCell::new(None) };
+    static STREAM_FD: RefCell<Option<StreamFd>> = const { RefCell::new(None) };
     // C subxact_data (subxacts + subxact_last); nsubxacts_max is Vec growth.
     static SUBXACTS: RefCell<Vec<SubXactInfo>> = const { RefCell::new(Vec::new()) };
     static SUBXACT_LAST: Cell<TransactionId> = const { Cell::new(InvalidTransactionId) };
+}
+
+// The open spool file together with the context its buffers live in. C keeps
+// stream_fd's BufFile in LogicalStreamingContext (worker.c:4360, reset at
+// stream stop, worker.c:1646) and the replay file in TopTransactionContext
+// (worker.c:2043) — both outlive the per-message ApplyMessageContext reset.
+// Here the file owns a context of its own with exactly that lifetime: created
+// when the file is opened, freed when it is closed (the field order drops the
+// file first).
+struct StreamFd {
+    file: BufFile<'static>,
+    // Boxed: the file's Mcx handle references the context value itself, and
+    // the heap address survives the move into this struct.
+    _cx: Box<MemoryContext>,
+}
+
+impl StreamFd {
+    fn open(
+        name: &'static str,
+        open: impl FnOnce(Mcx<'static>) -> PgResult<BufFile<'static>>,
+    ) -> PgResult<StreamFd> {
+        let cx = Box::new(MemoryContext::new_bump(name));
+        // SAFETY: the file is allocated from the boxed `cx` (a stable address)
+        // and stored beside it; it is closed and dropped before `cx`
+        // (StreamFd's field order), and nothing else keeps the handle.
+        let mcx: Mcx<'static> = unsafe { std::mem::transmute(cx.mcx()) };
+        let file = open(mcx)?;
+        Ok(StreamFd { file, _cx: cx })
+    }
 }
 
 pub(crate) fn in_streamed_transaction() -> bool {
@@ -276,6 +308,8 @@ pub(crate) fn apply_handle_stream_start(mcx: Mcx<'static>, buf: &[u8]) -> PgResu
     }
     STREAM_XID.set(xid);
 
+    set_apply_error_context_xact(xid, InvalidXLogRecPtr);
+
     // Try to allocate a parallel apply worker for the streaming transaction.
     if first_segment {
         pa_allocate_worker(mcx, xid)?;
@@ -404,6 +438,8 @@ pub(crate) fn apply_handle_stream_stop(mcx: Mcx<'static>, buf: &[u8]) -> PgResul
     } else {
         crate::apply::report_activity(BackendState::STATE_IDLE);
     }
+
+    reset_apply_error_context_info();
     Ok(())
 }
 
@@ -500,6 +536,8 @@ pub(crate) fn apply_handle_stream_abort(mcx: Mcx<'static>, buf: &[u8]) -> PgResu
     let (xid, subxid) = (abort.xid, abort.subxid);
     let toplevel_xact = xid == subxid;
 
+    set_apply_error_context_xact(subxid, abort.abort_lsn);
+
     let (apply_action, winfo) = get_transaction_apply_action(xid);
     match apply_action {
         LeaderApply => {
@@ -581,6 +619,8 @@ pub(crate) fn apply_handle_stream_abort(mcx: Mcx<'static>, buf: &[u8]) -> PgResu
             )
         }
     }
+
+    reset_apply_error_context_info();
     Ok(())
 }
 
@@ -627,8 +667,12 @@ pub(crate) fn apply_spooled_messages(
 
     begin_replication_step(mcx)?;
 
+    // The file handle must survive every per-message reset below
+    // (C: TopTransactionContext, worker.c:2043): it gets a context of its own.
     let name = changes_filename(subid(), xid);
-    let file = BufFileOpenFileSet(mcx, fileset, &name, true)?;
+    let file = StreamFd::open("LogicalStreamingContext", |fmcx| {
+        BufFileOpenFileSet(fmcx, fileset, &name, true)
+    })?;
     debug_assert!(STREAM_FD.with(|f| f.borrow().is_none()));
     STREAM_FD.with(|f| *f.borrow_mut() = Some(file));
 
@@ -640,7 +684,11 @@ pub(crate) fn apply_spooled_messages(
     end_replication_step()?;
 
     // Read the entries one by one and pass them through the same logic as
-    // the live apply path.
+    // the live apply path. Each one is dispatched in the per-message
+    // ApplyMessageContext and that context is reset after it
+    // (worker.c:2119-2123): the caller's own message context holds nothing
+    // this replay needs, so a fresh context stands in for C's switch.
+    let mut msgcx = MemoryContext::new_bump("ApplyMessageContext");
     let mut buf: Vec<u8> = Vec::new();
     let mut nchanges = 0u32;
     loop {
@@ -648,7 +696,7 @@ pub(crate) fn apply_spooled_messages(
 
         let read = STREAM_FD.with(|f| -> PgResult<Option<(i32, i64)>> {
             let mut slot = f.borrow_mut();
-            let file = slot.as_mut().expect("stream file open");
+            let file = &mut slot.as_mut().expect("stream file open").file;
             let mut lenbuf = [0u8; 4];
             let nbytes = file.read_maybe_eof(&mut lenbuf, true)?;
             if nbytes == 0 {
@@ -687,7 +735,13 @@ pub(crate) fn apply_spooled_messages(
         let Some((fileno, offset)) = read else { break };
 
         // The spooled record is action + payload, the live wire shape.
-        apply_dispatch(mcx, conn.as_deref_mut(), &buf)?;
+        {
+            // SAFETY: `msgcx` outlives the dispatch; the handle is re-derived
+            // after every reset and never stored past it.
+            let mmcx: Mcx<'static> = unsafe { std::mem::transmute(msgcx.mcx()) };
+            apply_dispatch(mmcx, conn.as_deref_mut(), &buf)?;
+        }
+        msgcx.reset();
         nchanges += 1;
 
         // The file may have been closed because we processed a transaction
@@ -727,6 +781,7 @@ pub(crate) fn apply_handle_stream_commit(
 
     let mut r = logicalproto::Reader::new(&buf[1..]);
     let (xid, commit_data) = logicalproto::logicalrep_read_stream_commit(&mut r)?;
+    set_apply_error_context_xact(xid, commit_data.commit_lsn);
 
     let (apply_action, winfo) = get_transaction_apply_action(xid);
     match apply_action {
@@ -806,6 +861,8 @@ pub(crate) fn apply_handle_stream_commit(
     crate::tablesync::process_syncing_tables(mcx, conn, commit_data.end_lsn)?;
 
     crate::apply::report_activity(BackendState::STATE_IDLE);
+
+    reset_apply_error_context_info();
     Ok(())
 }
 
@@ -834,6 +891,7 @@ pub(crate) fn apply_handle_stream_prepare(
 
     let mut r = logicalproto::Reader::new(&buf[1..]);
     let prepare_data = logicalproto::logicalrep_read_stream_prepare(&mut r)?;
+    set_apply_error_context_xact(prepare_data.xid, prepare_data.prepare_lsn);
 
     let (apply_action, winfo) = get_transaction_apply_action(prepare_data.xid);
     match apply_action {
@@ -850,8 +908,6 @@ pub(crate) fn apply_handle_stream_prepare(
             )?;
             crate::apply::apply_handle_prepare_internal(&prepare_data)?;
             xact::CommitTransactionCommand()?;
-            // worker.c:1412.
-            pgstat::pending::pgstat_report_stat(false);
 
             // The prepare record is always flushed; an invalid local LSN is ok.
             crate::store_flush_position(prepare_data.end_lsn, types_core::InvalidXLogRecPtr);
@@ -919,6 +975,9 @@ pub(crate) fn apply_handle_stream_prepare(
         }
     }
 
+    // worker.c:1412.
+    pgstat::pending::pgstat_report_stat(false);
+
     // Process any tables that are being synchronized in parallel.
     crate::tablesync::process_syncing_tables(mcx, conn, prepare_data.end_lsn)?;
 
@@ -928,6 +987,8 @@ pub(crate) fn apply_handle_stream_prepare(
     crate::clear_subscription_skip_lsn(mcx, prepare_data.prepare_lsn)?;
 
     crate::apply::report_activity(BackendState::STATE_IDLE);
+
+    reset_apply_error_context_info();
     Ok(())
 }
 
@@ -949,16 +1010,21 @@ fn stream_open_file(
     first_segment: bool,
 ) -> PgResult<()> {
     debug_assert!(STREAM_FD.with(|f| f.borrow().is_none()));
+    let _ = mcx;
     let name = changes_filename(subid, xid);
-    let file = with_fileset(|fs| {
-        if first_segment {
-            BufFileCreateFileSet(mcx, fs, &name)
-        } else {
-            // Always append: seek to the end.
-            let mut f = BufFileOpenFileSet(mcx, fs, &name, false)?;
-            f.seek(0, 0, fd::buffile::SEEK_END)?;
-            Ok(f)
-        }
+    // Create/open the buffile under the logical streaming context so that we
+    // have it until stream stop (worker.c:4360).
+    let file = StreamFd::open("LogicalStreamingContext", |smcx| {
+        with_fileset(|fs| {
+            if first_segment {
+                BufFileCreateFileSet(smcx, fs, &name)
+            } else {
+                // Always append: seek to the end.
+                let mut f = BufFileOpenFileSet(smcx, fs, &name, false)?;
+                f.seek(0, 0, fd::buffile::SEEK_END)?;
+                Ok(f)
+            }
+        })
     })?;
     STREAM_FD.with(|f| *f.borrow_mut() = Some(file));
     Ok(())
@@ -966,9 +1032,9 @@ fn stream_open_file(
 
 // stream_close_file (worker.c:4373).
 fn stream_close_file() {
-    let file = STREAM_FD.with(|f| f.borrow_mut().take()).expect("stream file open");
+    let fd = STREAM_FD.with(|f| f.borrow_mut().take()).expect("stream file open");
     // The spool must be durable across chunks; close flushes the buffer.
-    file.close().expect("closing streamed-changes spool file");
+    fd.file.close().expect("closing streamed-changes spool file");
 }
 
 // stream_write_change (worker.c:4391): [len][action][payload]. For the serial
@@ -977,7 +1043,7 @@ fn stream_close_file() {
 fn stream_write_change(action: u8, payload: &[u8]) -> PgResult<()> {
     STREAM_FD.with(|f| {
         let mut slot = f.borrow_mut();
-        let file = slot.as_mut().expect("stream file open");
+        let file = &mut slot.as_mut().expect("stream file open").file;
         let len = (payload.len() + 1) as i32;
         file.write(&len.to_ne_bytes())?;
         file.write(&[action])?;
@@ -1118,7 +1184,7 @@ fn subxact_info_add(xid: TransactionId) -> PgResult<()> {
     }
 
     let (fileno, offset) = STREAM_FD.with(|f| {
-        f.borrow().as_ref().expect("stream file open").tell()
+        f.borrow().as_ref().expect("stream file open").file.tell()
     });
     SUBXACTS.with(|s| s.borrow_mut().push(SubXactInfo { xid, fileno, offset }));
     Ok(())

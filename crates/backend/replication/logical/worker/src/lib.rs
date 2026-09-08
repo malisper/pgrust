@@ -17,10 +17,11 @@
 use std::cell::{Cell, RefCell};
 
 use elog::ereport;
+use logicalproto::LogicalRepRelation;
 use mcx::{Mcx, MemoryContext};
-use types_core::{InvalidXLogRecPtr, Oid, TimestampTz, XLogRecPtr};
+use types_core::{InvalidTransactionId, InvalidXLogRecPtr, Oid, TimestampTz, TransactionId, XLogRecPtr};
 use types_error::{
-    ErrorLocation, PgResult, DEBUG2, ERRCODE_ADMIN_SHUTDOWN, ERRCODE_CONNECTION_FAILURE,
+    ErrorLocation, PgError, PgResult, DEBUG2, ERRCODE_ADMIN_SHUTDOWN, ERRCODE_CONNECTION_FAILURE,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR, FATAL, LOG, WARNING,
 };
 
@@ -103,6 +104,192 @@ thread_local! {
     // transaction whose finish LSN it holds is being skipped
     // (ALTER SUBSCRIPTION ... SKIP).
     static SKIP_XACT_FINISH_LSN: Cell<XLogRecPtr> = const { Cell::new(InvalidXLogRecPtr) };
+    // apply_error_callback_arg (worker.c:272): the apply error callback's
+    // state, filled while applying a change.
+    static APPLY_ERROR_CALLBACK_ARG: RefCell<ApplyErrorCallbackArg> =
+        const { RefCell::new(ApplyErrorCallbackArg::INITIAL) };
+}
+
+// ApplyErrorCallbackArg (worker.c:213). `rel` is the remote relation of the
+// LogicalRepRelMapEntry C points at (its nspname/relname/attnames are all the
+// callback reads); `command` 0 means no message is being applied.
+pub(crate) struct ApplyErrorCallbackArg {
+    pub command: u8,
+    pub rel: Option<LogicalRepRelation>,
+    // Remote attribute number being processed, -1 if not applicable.
+    pub remote_attnum: i32,
+    pub remote_xid: TransactionId,
+    // Remote transaction's finish WAL location (InvalidXLogRecPtr while
+    // unknown, as in a streamed chunk).
+    pub finish_lsn: XLogRecPtr,
+    pub origin_name: Option<String>,
+}
+
+impl ApplyErrorCallbackArg {
+    // worker.c:272-280: the static initializer.
+    pub const INITIAL: ApplyErrorCallbackArg = ApplyErrorCallbackArg {
+        command: 0,
+        rel: None,
+        remote_attnum: -1,
+        remote_xid: InvalidTransactionId,
+        finish_lsn: InvalidXLogRecPtr,
+        origin_name: None,
+    };
+}
+
+// apply_error_callback's six errcontext forms (worker.c:5053-5121); None when
+// no command is being applied (command == 0), which is C's early return.
+pub(crate) fn apply_error_context_line(errarg: &ApplyErrorCallbackArg) -> Option<String> {
+    if errarg.command == 0 {
+        return None;
+    }
+    // C asserts origin_name; a NULL %s prints "(null)" (snprintf.c).
+    let origin = errarg.origin_name.as_deref().unwrap_or("(null)");
+    let msgtype = logicalproto::logicalrep_message_type(errarg.command);
+    let xid = errarg.remote_xid;
+    let lsn = format!("{:X}/{:X}", (errarg.finish_lsn >> 32) as u32, errarg.finish_lsn as u32);
+    let lsn_valid = errarg.finish_lsn != InvalidXLogRecPtr;
+    Some(match &errarg.rel {
+        None => {
+            if xid == InvalidTransactionId {
+                format!(
+                    "processing remote data for replication origin \"{origin}\" during message type \"{msgtype}\""
+                )
+            } else if !lsn_valid {
+                format!(
+                    "processing remote data for replication origin \"{origin}\" during message type \"{msgtype}\" in transaction {xid}"
+                )
+            } else {
+                format!(
+                    "processing remote data for replication origin \"{origin}\" during message type \"{msgtype}\" in transaction {xid}, finished at {lsn}"
+                )
+            }
+        }
+        Some(rel) => {
+            let (nsp, name) = (&rel.nspname, &rel.relname);
+            if errarg.remote_attnum < 0 {
+                if !lsn_valid {
+                    format!(
+                        "processing remote data for replication origin \"{origin}\" during message type \"{msgtype}\" for replication target relation \"{nsp}.{name}\" in transaction {xid}"
+                    )
+                } else {
+                    format!(
+                        "processing remote data for replication origin \"{origin}\" during message type \"{msgtype}\" for replication target relation \"{nsp}.{name}\" in transaction {xid}, finished at {lsn}"
+                    )
+                }
+            } else {
+                // C indexes attnames[remote_attnum] unchecked; the sites
+                // that set it have bounds-checked it against the received
+                // tuple (tuple_column_check), so a miss here is impossible —
+                // render it empty rather than panic.
+                let col = rel
+                    .attnames
+                    .get(errarg.remote_attnum as usize)
+                    .map(String::as_str)
+                    .unwrap_or("");
+                if !lsn_valid {
+                    format!(
+                        "processing remote data for replication origin \"{origin}\" during message type \"{msgtype}\" for replication target relation \"{nsp}.{name}\" column \"{col}\" in transaction {xid}"
+                    )
+                } else {
+                    format!(
+                        "processing remote data for replication origin \"{origin}\" during message type \"{msgtype}\" for replication target relation \"{nsp}.{name}\" column \"{col}\" in transaction {xid}, finished at {lsn}"
+                    )
+                }
+            }
+        }
+    })
+}
+
+// apply_error_callback (worker.c:5053): the errcontext line for the change
+// being applied, read from the callback arg at report time.
+pub(crate) fn apply_error_callback(e: &mut PgError) {
+    let line = APPLY_ERROR_CALLBACK_ARG.with(|a| apply_error_context_line(&a.borrow()));
+    if let Some(line) = line {
+        e.add_context_line(line);
+    }
+}
+
+// The pushed error-context frame (worker.c:3616-3622 / applyparallelworker.c
+// :749-754): non-ERROR reports emitted inside the apply loop (LOG/WARNING/
+// FATAL, decorated by errfinish at emit time) get the line through the
+// emit-context callback; an ERROR propagating out as `Err` gets it through
+// `attach` at the loop boundary (C's callback runs at the throw site with the
+// same arg state — nothing between the throw and the loop exit touches it).
+// Drop pops the frame (worker.c:3839 / applyparallelworker.c:839).
+pub(crate) struct ApplyErrorContextFrame {
+    callback: u64,
+}
+
+impl ApplyErrorContextFrame {
+    pub(crate) fn push() -> Self {
+        ApplyErrorContextFrame {
+            callback: elog::push_emit_context_callback(Box::new(apply_error_callback)),
+        }
+    }
+
+    pub(crate) fn attach<T>(&self, r: PgResult<T>) -> PgResult<T> {
+        r.map_err(|mut e| {
+            apply_error_callback(&mut e);
+            e
+        })
+    }
+}
+
+impl Drop for ApplyErrorContextFrame {
+    fn drop(&mut self) {
+        elog::pop_emit_context_callback(self.callback);
+    }
+}
+
+// set_apply_error_context_xact (worker.c:5125).
+pub(crate) fn set_apply_error_context_xact(xid: TransactionId, lsn: XLogRecPtr) {
+    APPLY_ERROR_CALLBACK_ARG.with(|a| {
+        let mut a = a.borrow_mut();
+        a.remote_xid = xid;
+        a.finish_lsn = lsn;
+    });
+}
+
+// reset_apply_error_context_info (worker.c:5133).
+pub(crate) fn reset_apply_error_context_info() {
+    APPLY_ERROR_CALLBACK_ARG.with(|a| {
+        let mut a = a.borrow_mut();
+        a.command = 0;
+        a.rel = None;
+        a.remote_attnum = -1;
+        a.remote_xid = InvalidTransactionId;
+        a.finish_lsn = InvalidXLogRecPtr;
+    });
+}
+
+// set_apply_error_context_origin (worker.c:5195): C strdup's the name into
+// ApplyContext (worker lifetime).
+pub(crate) fn set_apply_error_context_origin(originname: &str) {
+    APPLY_ERROR_CALLBACK_ARG.with(|a| a.borrow_mut().origin_name = Some(originname.to_string()));
+}
+
+// apply_error_callback_arg.rel = rel / NULL (worker.c:2442/2473, 2595/2661,
+// 2804/2846).
+pub(crate) fn set_apply_error_context_rel(rel: Option<&LogicalRepRelation>) {
+    APPLY_ERROR_CALLBACK_ARG.with(|a| a.borrow_mut().rel = rel.cloned());
+}
+
+// apply_error_callback_arg.remote_attnum = n / -1 (worker.c:819/868,
+// 938/983).
+pub(crate) fn set_apply_error_context_attnum(remote_attnum: i32) {
+    APPLY_ERROR_CALLBACK_ARG.with(|a| a.borrow_mut().remote_attnum = remote_attnum);
+}
+
+// apply_dispatch's command save (worker.c:3393-3394): returns the previous
+// command (this is re-entered when applying spooled changes).
+pub(crate) fn set_apply_error_context_command(command: u8) -> u8 {
+    APPLY_ERROR_CALLBACK_ARG.with(|a| {
+        let mut a = a.borrow_mut();
+        let saved = a.command;
+        a.command = command;
+        saved
+    })
 }
 
 // is_skipping_changes (worker.c:330).
@@ -467,14 +654,21 @@ pub(crate) fn send_feedback(
 // against a quiet publisher ever notices subscription DDL.
 const NAPTIME_PER_CYCLE: i64 = 1000;
 
-// LogicalRepApplyLoop (worker.c:3574), non-streaming subset. The copy-both
-// read is the client's get_copy_data; Block means "nothing available now" and
-// maps to C's len==0 wait arm.
-pub(crate) fn apply_loop(conn: &mut PgConn, mut last_received: XLogRecPtr) -> PgResult<()> {
-    let top = MemoryContext::new("ApplyMessageContext");
-    // SAFETY: `top` outlives the loop; per-message allocations are reset by
-    // the arena when the context drops at function exit.
-    let mcx: Mcx<'static> = unsafe { std::mem::transmute(top.mcx()) };
+// LogicalRepApplyLoop (worker.c:3574). The copy-both read is the client's
+// get_copy_data; Block means "nothing available now" and maps to C's len==0
+// wait arm. The apply error context callback is pushed for the loop's
+// duration (worker.c:3616-3622) and popped on every exit (worker.c:3839).
+pub(crate) fn apply_loop(conn: &mut PgConn, last_received: XLogRecPtr) -> PgResult<()> {
+    let frame = ApplyErrorContextFrame::push();
+    frame.attach(apply_loop_guts(conn, last_received))
+}
+
+fn apply_loop_guts(conn: &mut PgConn, mut last_received: XLogRecPtr) -> PgResult<()> {
+    // The ApplyMessageContext we clean up after each replication protocol
+    // message (worker.c:3597-3602): a bump arena released wholesale at every
+    // reset (the tcop MessageContext idiom — handlers palloc into it C-style
+    // and never pfree).
+    let mut top = MemoryContext::new_bump("ApplyMessageContext");
 
     // wal_receiver_timeout bookkeeping (LogicalRepApplyLoop locals).
     let mut last_recv_timestamp: TimestampTz = get_ts();
@@ -485,6 +679,17 @@ pub(crate) fn apply_loop(conn: &mut PgConn, mut last_received: XLogRecPtr) -> Pg
 
     loop {
         postgres_seams::check_for_interrupts::call()?;
+
+        // MemoryContextReset(ApplyMessageContext) after every message
+        // (worker.c:3718) and at the end of every idle cycle (worker.c:3743):
+        // one iteration here is one message or one idle cycle, so the reset
+        // sits at its head. Nothing allocated from this context outlives the
+        // iteration (the streamed-chunk spool file has its own context, see
+        // stream_apply::StreamFd).
+        top.reset();
+        // SAFETY: `top` outlives the iteration; the handle is re-derived after
+        // every reset and never stored past it.
+        let mcx: Mcx<'static> = unsafe { std::mem::transmute(top.mcx()) };
 
         let msg = match conn.get_copy_data() {
             Ok(m) => m,
@@ -986,6 +1191,9 @@ fn apply_worker_body(slot: usize) -> PgResult<()> {
     origin::set_replorigin_session_origin(originid);
     let origin_startpos = origin::replorigin_session_get_progress(false)?;
     xact::CommitTransactionCommand()?;
+
+    // run_apply_worker (worker.c:4616).
+    set_apply_error_context_origin(&originname);
 
     let must_use_password = my_sub(|s| s.passwordrequired && !s.ownersuperuser);
     let (conninfo, name) = my_sub(|s| (s.conninfo.clone(), s.name.clone()));
