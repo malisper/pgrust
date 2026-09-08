@@ -35,19 +35,41 @@ LEDGER="$ROOT/wasm/wasm-crate-ledger.md"
 
 # re2 is a build.rs probe; force the stub engine deterministically on wasm.
 export PGRUST_FORCE_NO_RE2=1
+
+# The MAIN shadow stack (-zstack-size), which is a different thing per target.
+#
+# wasm32-wasip1: the guest's session runs ON the main stack (`--single`,
+# `--stdio-wire`), so it needs the whole budget the boot harness pins with
+# max_stack_depth=60000kB (matching the native e2e). Dev-profile frames are
+# huge and the 1MiB link default turns legitimate executor recursion into
+# "stack depth limit exceeded". 64MiB.
+#
+# wasm32-wasip1-threads: nothing that runs SQL is on the main stack. A wire
+# session gets its own 64MiB thread (tcop/postgres/src/stdio_wire.rs) and every
+# postmaster child gets child_thread_stack_size(); the main thread only boots
+# the process and then runs the postmaster loop. On this target the stack is
+# not address space either — it is bytes of the ONE shared linear memory, sat
+# on for the life of the instance — so 16MiB, which the postmaster lane, both
+# tablespace proofs and the browser Speedtest/Concurrency Suites all run under.
+if [ "$TARGET" = "wasm32-wasip1-threads" ]; then
+    DEFAULT_STACK_SIZE=16777216
+else
+    DEFAULT_STACK_SIZE=67108864
+fi
+STACK_SIZE="${PGRUST_WASM_STACK_SIZE:-$DEFAULT_STACK_SIZE}"
+
 # panic=unwind + Wasm EH codegen for every unit, including build-std units.
-# 64MiB shadow stack: dev-profile frames are huge and the boot harness pins
-# max_stack_depth=60000kB (matching the native e2e); the 1MiB link default
-# turns legitimate executor recursion into "stack depth limit exceeded".
 # Any PGRUST_WASM_RUSTFLAGS override MUST carry all three flags.
-export RUSTFLAGS="${PGRUST_WASM_RUSTFLAGS:--C panic=unwind -C target-feature=+exception-handling -C link-arg=-zstack-size=67108864}"
+export RUSTFLAGS="${PGRUST_WASM_RUSTFLAGS:--C panic=unwind -C target-feature=+exception-handling -C link-arg=-zstack-size=${STACK_SIZE}}"
 
 # wasm32-wasip1-threads pins --import-memory --shared-memory in its target
 # spec, so the MODULE's declared memory limits must match the limits of the
 # WebAssembly.Memory the JS host creates and passes in as an import. Pin them
 # here rather than leaving wasm-ld's derived initial size to drift: 256MiB
-# initial (static data + the 64MiB main shadow stack above must fit under it)
-# and the 4GiB wasm32 ceiling as the maximum. Both are 64KiB multiples.
+# initial (static data plus the main shadow stack above must fit under it, and
+# a smaller claim than 256MiB has been measured as a boot that either traps on
+# an out-of-bounds access or takes the renderer down while it grows) and the
+# 4GiB wasm32 ceiling as the maximum. Both are 64KiB multiples.
 if [ "$TARGET" = "wasm32-wasip1-threads" ]; then
     RUSTFLAGS="$RUSTFLAGS -C link-arg=--initial-memory=${PGRUST_WASM_INITIAL_MEMORY:-268435456} -C link-arg=--max-memory=${PGRUST_WASM_MAX_MEMORY:-4294967296}"
     export RUSTFLAGS

@@ -944,12 +944,30 @@ pub fn postmaster_child_launch(
 // or the thread would fault before the guard fires. Reserve is address
 // space only, but it is capped at 512MiB (macOS pthread limit territory;
 // the per-thread ceiling clamp in stack_depth_core keeps the guard sound
-// if the cap ever binds). Unlimited/unknown rlimit reserves at least 16MiB.
+// if the cap ever binds). Unlimited/unknown rlimit reserves at least
+// UNLIMITED_STACK_RESERVE.
+//
+// That floor is 16MiB everywhere except wasm, where "reserve is address
+// space only" is false. WASI has no rlimit (get_stack_depth_rlimit() is the
+// -1 arm), so every child takes the unlimited reserve — and a wasm thread
+// stack is malloc'd out of the ONE shared linear memory, so the reserve is
+// bytes the memory has to grow by and the browser tab has to make resident.
+// A postmaster spawns ~10 children before the first backend: at 16MiB that
+// is 160MiB of a phone's per-tab budget spent on stacks nothing touches. The
+// floor is 4MiB there. It is only a floor: the scaled guard budget below
+// dominates it whenever max_stack_depth x STACK_DEPTH_SCALE + 8MiB exceeds
+// it, and max_stack_depth (which the caller sets) remains the thing that
+// decides how deep a backend may actually recurse.
+#[cfg(target_family = "wasm")]
+const UNLIMITED_STACK_RESERVE: usize = 4 << 20;
+#[cfg(not(target_family = "wasm"))]
+const UNLIMITED_STACK_RESERVE: usize = 16 << 20;
+
 fn child_thread_stack_size() -> usize {
     let rlim = stack_depth::get_stack_depth_rlimit();
     let scaled_need =
         stack_depth::scaled_max_stack_depth_bytes().max(0) as usize + (8 << 20);
-    let unlimited_reserve = (16usize << 20).max(scaled_need);
+    let unlimited_reserve = UNLIMITED_STACK_RESERVE.max(scaled_need);
     let rlim = if rlim > 0 && rlim < isize::MAX { rlim as usize } else { unlimited_reserve };
     let min_stack = std::env::var("RUST_MIN_STACK")
         .ok()
