@@ -513,7 +513,8 @@ fn insert_row<'mcx>(
     slot.base_mut().tts_tid = tuple.as_tuple_mut().t_self;
     slot.base_mut().tts_tableOid = HEAP_OID;
 
-    crate::ExecInsertIndexTuples(mcx, mcx, idxstate, heap, &mut slot, false, None, &[], false).map(|_| ())
+    crate::ExecInsertIndexTuples(mcx, mcx, idxstate, heap, &mut slot, None, false, None, &[], false)
+        .map(|_| ())
 }
 
 fn static_mvcc_snapshot() -> Rc<SnapshotData<'static>> {
@@ -947,7 +948,9 @@ fn self_tuple_seen_twice_in_probe_is_an_error() {
     // One heap row, indexed twice under the same TID (the corrupt shape).
     let mut slot = insert_heap_row(mcx, &heap, 9);
     for _ in 0..2 {
-        crate::ExecInsertIndexTuples(mcx, mcx, &mut idxstate, &heap, &mut slot, false, None, &[], false)
+        crate::ExecInsertIndexTuples(
+            mcx, mcx, &mut idxstate, &heap, &mut slot, None, false, None, &[], false,
+        )
             .unwrap();
     }
     make_exclusion(&mut idxstate.infos[0]);
@@ -1040,7 +1043,9 @@ fn index_check_exclusion_checks_for_interrupts_per_tuple() {
     let mut idxstate = crate::ExecOpenIndices(mcx, &heap, false).unwrap();
     for v in [1, 2, 3] {
         let mut slot = insert_heap_row(mcx, &heap, v);
-        crate::ExecInsertIndexTuples(mcx, mcx, &mut idxstate, &heap, &mut slot, false, None, &[], false)
+        crate::ExecInsertIndexTuples(
+            mcx, mcx, &mut idxstate, &heap, &mut slot, None, false, None, &[], false,
+        )
             .unwrap();
     }
     crate::ExecCloseIndices(idxstate).unwrap();
@@ -1110,4 +1115,140 @@ fn index_build_scan_reports_scan_block_progress() {
         ],
         "scan progress must be published like heapam_index_build_range_scan(progress=true)"
     );
+}
+
+// audit-18.6 w2-011 (row execIndexing-66b7975a): index_unchanged_by_update /
+// index_expression_changed_walker (execIndexing.c:1012-1150) decide whether
+// an UPDATE's index_insert carries the indexUnchanged hint that lets nbtree
+// run bottom-up deletion: true when no key column (INCLUDE columns ignored)
+// and no Var inside an indexed expression was updated; memoized per
+// IndexInfo; predicates deliberately ignored.
+mod rem_w2_011_index_unchanged {
+    use super::*;
+    use ::types_core::INDEX_MAX_KEYS;
+    use ::types_nodes::Bitmapset;
+    use ::types_tuple::htup::FirstLowInvalidHeapAttributeNumber as FLIHAN;
+
+    fn info<'mcx>(
+        mcx: Mcx<'mcx>,
+        key_attrs: &[i16],
+        nkey: i32,
+        exprs: NodeList<'mcx>,
+        pred: NodeList<'mcx>,
+    ) -> crate::IndexInfo<'mcx> {
+        let mut attnums = [0 as ::types_core::AttrNumber; INDEX_MAX_KEYS as usize];
+        for (i, a) in key_attrs.iter().enumerate() {
+            attnums[i] = *a;
+        }
+        crate::IndexInfo {
+            ii_NumIndexAttrs: key_attrs.len() as i32,
+            ii_AmCache: None,
+            ii_NumIndexKeyAttrs: nkey,
+            ii_IndexAttrNumbers: attnums,
+            ii_Expressions: exprs,
+            ii_ExpressionsState: PgVec::new_in(mcx),
+            ii_Predicate: pred,
+            ii_PredicateState: None,
+            ii_Unique: false,
+            ii_NullsNotDistinct: false,
+            ii_ReadyForInserts: true,
+            ii_Summarizing: false,
+            ii_Concurrent: false,
+            ii_BrokenHotChain: false,
+            ii_UniqueOps: [0; INDEX_MAX_KEYS as usize],
+            ii_UniqueProcs: [0; INDEX_MAX_KEYS as usize],
+            ii_UniqueStrats: [0; INDEX_MAX_KEYS as usize],
+            ii_HasExclusion: false,
+            ii_ExclusionOps: [0; INDEX_MAX_KEYS as usize],
+            ii_ExclusionProcs: [0; INDEX_MAX_KEYS as usize],
+            ii_ExclusionStrats: [0; INDEX_MAX_KEYS as usize],
+            ii_WithoutOverlaps: false,
+            ii_CheckedUnchanged: false,
+            ii_IndexUnchanged: false,
+        }
+    }
+
+    // ExecGetAllUpdatedCols encoding: attno - FirstLowInvalidHeapAttributeNumber.
+    fn updated<'mcx>(mcx: Mcx<'mcx>, attnos: &[i32]) -> Bitmapset<'mcx> {
+        let mut b = Bitmapset::empty();
+        for a in attnos {
+            b.add_member(mcx, *a - FLIHAN).unwrap();
+        }
+        b
+    }
+
+    // `(col + 1)` as an indexed expression.
+    fn plus_one_expr<'mcx>(mcx: Mcx<'mcx>, attno: i16) -> NodeList<'mcx> {
+        let var = Node::mk_var(mcx, 1, attno, INT4OID, -1, 0, 0).unwrap();
+        let c = Node::mk_const(mcx, INT4OID, -1, 0, 4, Datum::from_i32(1), false, true).unwrap();
+        let args = NodeList::make2(mcx, var, c).unwrap();
+        let op = Node::mk(
+            mcx,
+            OpExpr {
+                opno: 551,
+                opfuncid: 177,
+                opresulttype: INT4OID,
+                opretset: false,
+                opcollid: 0,
+                inputcollid: 0,
+                args,
+                location: -1,
+            },
+        )
+        .unwrap();
+        NodeList::make1(mcx, op).unwrap()
+    }
+
+    #[test]
+    fn plain_index_is_unchanged_unless_a_key_column_was_updated() {
+        let ctx = MemoryContext::new("iu");
+        let mcx = ctx.mcx();
+        // btree (a) with UPDATE ... SET b: hint (execIndexing.c:1075).
+        let mut ii = info(mcx, &[1], 1, NodeList::nil(), NodeList::nil());
+        assert!(crate::index_unchanged_by_update(&updated(mcx, &[2]), &mut ii).unwrap());
+        assert!(ii.ii_CheckedUnchanged && ii.ii_IndexUnchanged);
+        // UPDATE ... SET a: no hint (:1060).
+        let mut ii = info(mcx, &[1], 1, NodeList::nil(), NodeList::nil());
+        assert!(!crate::index_unchanged_by_update(&updated(mcx, &[1]), &mut ii).unwrap());
+        assert!(ii.ii_CheckedUnchanged && !ii.ii_IndexUnchanged);
+        // No updated columns at all (e.g. a no-op SET): hint.
+        let mut ii = info(mcx, &[1], 1, NodeList::nil(), NodeList::nil());
+        assert!(crate::index_unchanged_by_update(&Bitmapset::empty(), &mut ii).unwrap());
+    }
+
+    #[test]
+    fn include_columns_do_not_count() {
+        let ctx = MemoryContext::new("iu");
+        let mcx = ctx.mcx();
+        // btree (a) INCLUDE (b): SET b keeps the hint (:1041 "only key columns").
+        let mut ii = info(mcx, &[1, 2], 1, NodeList::nil(), NodeList::nil());
+        assert!(crate::index_unchanged_by_update(&updated(mcx, &[2]), &mut ii).unwrap());
+    }
+
+    #[test]
+    fn expression_index_walks_vars() {
+        let ctx = MemoryContext::new("iu");
+        let mcx = ctx.mcx();
+        // btree ((a + 1)): SET a → the walker finds the Var, no hint (:1128).
+        let mut ii = info(mcx, &[0], 1, plus_one_expr(mcx, 1), NodeList::nil());
+        assert!(!crate::index_unchanged_by_update(&updated(mcx, &[1]), &mut ii).unwrap());
+        // SET b → no Var over an updated column, hint.
+        let mut ii = info(mcx, &[0], 1, plus_one_expr(mcx, 1), NodeList::nil());
+        assert!(crate::index_unchanged_by_update(&updated(mcx, &[2]), &mut ii).unwrap());
+        // Mixed (b, (a + 1)) with SET a: the plain key passes, the expression
+        // withholds.
+        let mut ii = info(mcx, &[2, 0], 2, plus_one_expr(mcx, 1), NodeList::nil());
+        assert!(!crate::index_unchanged_by_update(&updated(mcx, &[1]), &mut ii).unwrap());
+    }
+
+    #[test]
+    fn predicates_are_ignored_and_the_verdict_is_memoized() {
+        let ctx = MemoryContext::new("iu");
+        let mcx = ctx.mcx();
+        // Partial index on (a) WHERE b + 1 ...: SET b still hints (:1105).
+        let mut ii = info(mcx, &[1], 1, NodeList::nil(), plus_one_expr(mcx, 2));
+        assert!(crate::index_unchanged_by_update(&updated(mcx, &[2]), &mut ii).unwrap());
+        // Cached: a later call with different columns returns the memo (:1020).
+        assert!(crate::index_unchanged_by_update(&updated(mcx, &[1]), &mut ii).unwrap());
+    }
 }

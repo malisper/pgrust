@@ -249,7 +249,7 @@ pub fn index_bulk_delete<'mcx>(
         // brinbulkdelete: BRIN has no per-heap-tuple entries; stats
         // allocation is the whole body.
         IndexAmKind::Brin => Ok(istat.unwrap_or_default()),
-        #[cfg(test)]
+        #[cfg(any(test, feature = "mock"))]
         IndexAmKind::Mock => Ok(istat.unwrap_or_default()),
         #[allow(unreachable_patterns)]
         _ => mock_outside_tests(),
@@ -319,7 +319,7 @@ pub fn index_vacuum_cleanup<'mcx>(
                 Ok(Some(stats))
             }
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "mock"))]
         IndexAmKind::Mock => Ok(istat),
         #[allow(unreachable_patterns)]
         _ => mock_outside_tests(),
@@ -464,7 +464,7 @@ fn am_getbitmap(
         IndexScanOpaque::Brin(_) => brin::bringetbitmap(scan, bitmap),
         IndexScanOpaque::Hnsw(_) => Err(missing_procedure("amgetbitmap", scan.index_rel())),
         IndexScanOpaque::Bloom(_) => bloom::blgetbitmap(scan, bitmap),
-        #[cfg(test)]
+        #[cfg(any(test, feature = "mock"))]
         IndexScanOpaque::Mock(_) => unreachable!("Mock lacks amgetbitmap"),
         #[allow(unreachable_patterns)]
         _ => mock_outside_tests(),
@@ -869,7 +869,7 @@ fn am_beginscan<'mcx>(
         IndexAmKind::Hnsw => pgvector_hnsw::hnswbeginscan(mcx, indexRelation, nkeys, norderbys),
         IndexAmKind::Bloom => bloom::blbeginscan(mcx, indexRelation, nkeys, norderbys),
         IndexAmKind::Brin => brin::brinbeginscan(mcx, indexRelation, nkeys, norderbys),
-        #[cfg(test)]
+        #[cfg(any(test, feature = "mock"))]
         IndexAmKind::Mock => Ok(mock::beginscan(mcx, indexRelation, nkeys, norderbys)),
         #[allow(unreachable_patterns)]
         _ => mock_outside_tests(),
@@ -891,7 +891,7 @@ fn am_rescan(
         IndexScanOpaque::Hnsw(_) => pgvector_hnsw::hnswrescan(scan, keys, orderbys),
         IndexScanOpaque::Bloom(_) => bloom::blrescan(scan, keys),
         IndexScanOpaque::Brin(_) => brin::brinrescan(scan, keys),
-        #[cfg(test)]
+        #[cfg(any(test, feature = "mock"))]
         IndexScanOpaque::Mock(_) => Ok(mock::rescan(scan)),
         #[allow(unreachable_patterns)]
         _ => mock_outside_tests(),
@@ -908,7 +908,7 @@ fn am_endscan(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
         IndexScanOpaque::Hnsw(_) => pgvector_hnsw::hnswendscan(scan),
         IndexScanOpaque::Bloom(_) => bloom::blendscan(scan),
         IndexScanOpaque::Brin(_) => brin::brinendscan(scan),
-        #[cfg(test)]
+        #[cfg(any(test, feature = "mock"))]
         IndexScanOpaque::Mock(_) => Ok(()),
         #[allow(unreachable_patterns)]
         _ => mock_outside_tests(),
@@ -925,7 +925,7 @@ fn am_markpos(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
         IndexScanOpaque::Hnsw(_) => unreachable!("has_ammarkpos gate"),
         IndexScanOpaque::Bloom(_) => unreachable!("has_ammarkpos gate"),
         IndexScanOpaque::Brin(_) => unreachable!("has_ammarkpos gate"),
-        #[cfg(test)]
+        #[cfg(any(test, feature = "mock"))]
         IndexScanOpaque::Mock(_) => Ok(mock::markpos(scan)),
         #[allow(unreachable_patterns)]
         _ => mock_outside_tests(),
@@ -942,7 +942,7 @@ fn am_restrpos(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
         IndexScanOpaque::Hnsw(_) => unreachable!("has_amrestrpos gate"),
         IndexScanOpaque::Bloom(_) => unreachable!("has_amrestrpos gate"),
         IndexScanOpaque::Brin(_) => unreachable!("has_amrestrpos gate"),
-        #[cfg(test)]
+        #[cfg(any(test, feature = "mock"))]
         IndexScanOpaque::Mock(_) => unreachable!("Mock lacks amrestrpos"),
         #[allow(unreachable_patterns)]
         _ => mock_outside_tests(),
@@ -966,7 +966,7 @@ fn am_gettuple(scan: &mut IndexScanDescData<'_>, direction: ScanDirection) -> Pg
         IndexScanOpaque::Bloom(_) => Err(missing_procedure("amgettuple", scan.index_rel())),
         // CHECK_SCAN_PROCEDURE(amgettuple): BRIN is bitmap-only.
         IndexScanOpaque::Brin(_) => Err(missing_procedure("amgettuple", scan.index_rel())),
-        #[cfg(test)]
+        #[cfg(any(test, feature = "mock"))]
         IndexScanOpaque::Mock(_) => Ok(mock::gettuple(scan)),
         #[allow(unreachable_patterns)]
         _ => mock_outside_tests(),
@@ -1077,7 +1077,7 @@ fn am_insert<'mcx>(
             debug_assert!(checkUnique == IndexUniqueCheck::UNIQUE_CHECK_NO);
             bloom::blinsert(mcx, indexRelation, values, isnull, heap_t_ctid, heapRelation)
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "mock"))]
         IndexAmKind::Mock => Ok(true),
         #[allow(unreachable_patterns)]
         _ => mock_outside_tests(),
@@ -1109,7 +1109,7 @@ fn am_insert_cleanup(
                 .expect("brin ii_AmCache slot type");
             brin::brininsertcleanup(slot)
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "mock"))]
         IndexAmKind::Mock => Ok(()),
         #[allow(unreachable_patterns)]
         _ => mock_outside_tests(),
@@ -1253,7 +1253,7 @@ mod fetch {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "mock"))]
 mod mock {
     use super::*;
     use mcx::PgVec;
@@ -1275,7 +1275,8 @@ mod mock {
             parallel_scan: None,
             xs_want_itup: false,
             xs_itup: None,
-            xs_itupdesc: None,
+            // Scripted images are stored in the index's own descriptor.
+            xs_itupdesc: Some(indexRelation.rd_att.clone()),
             xs_temp_snap: false,
             xs_temp_snapshot: None,
             kill_prior_tuple: false,
@@ -1299,14 +1300,28 @@ mod mock {
 
     pub fn gettuple(scan: &mut IndexScanDescData<'_>) -> bool {
         let kill = scan.kill_prior_tuple;
+        let want_itup = scan.xs_want_itup;
         let IndexScanOpaque::Mock(m) = &mut scan.opaque else {
             unreachable!()
         };
         m.kill_seen.push(kill);
         if m.next < m.tids.len() {
             let tid = m.tids[m.next];
+            // A scripted lossy AM: xs_recheck as the script says (btree
+            // resets it false per btgettuple; gist/spgist set it per leaf),
+            // and the scripted index-tuple image when the scan wants one.
+            let recheck = m.recheck;
+            let itup = if want_itup {
+                m.itups
+                    .get(m.next)
+                    .map(|img| core::ptr::NonNull::new(img.as_ptr().cast_mut()).expect("image"))
+            } else {
+                None
+            };
             m.next += 1;
             scan.xs_heaptid = tid;
+            scan.xs_recheck = recheck;
+            scan.xs_itup = itup;
             true
         } else {
             false

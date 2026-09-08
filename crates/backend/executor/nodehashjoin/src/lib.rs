@@ -10,7 +10,7 @@ use ::execexpr::{
 };
 use ::executils::{EStateData, EcxtId, ExecSlotId};
 use ::mcx::{PgBox, PgVec};
-use ::nodehash::{HashBuildInput, HashJoinTupleHdr, HashState};
+use ::nodehash::{HashBuildInput, HashJoinTupleHdr, HashState, INVALID_SKEW_BUCKET_NO};
 use ::types_error::{PgError, PgResult};
 use ::types_nodes::plannodes::HashJoin;
 use ::types_nodes::JoinType;
@@ -99,6 +99,10 @@ pub struct HashJoinState<'mcx> {
     hj_JoinState: u8,
     hj_CurHashValue: u32,
     hj_CurBucketNo: u32,
+    /// C `hj_CurSkewBucketNo`: the current outer tuple's skew bucket
+    /// (INVALID_SKEW_BUCKET_NO when its hash value is not an outer MCV), and
+    /// the skew-bucket cursor of the unmatched-inner scan.
+    hj_CurSkewBucketNo: i32,
     hj_CurTuple: *mut HashJoinTupleHdr,
     hj_MatchedOuter: bool,
     hj_OuterNotEmpty: bool,
@@ -185,6 +189,7 @@ pub fn exec_init_hash_join<'mcx>(
     init_hash: impl FnOnce(
         &mut EStateData<'mcx>,
         Rc<TupleDescData<'static>>,
+        &[::types_core::Oid],
         &[::types_core::Oid],
         &[::types_core::Oid],
         &[bool],
@@ -300,8 +305,17 @@ pub fn exec_init_hash_join<'mcx>(
     // C: the inner hash_expr gets keep_nulls = HJ_FILL_INNER — a RIGHT/
     // RIGHT_ANTI/FULL build keeps NULL-key tuples (they null-fill); every
     // other jointype skips them at build (nodeHash.c MultiExecPrivateHash).
-    let hash_state =
-        init_hash(estate, inner_desc, &inner_hashfns, &collations, &hash_strict, hj_fill_inner)?;
+    // The outer hash functions ride along for the skew table's hash function
+    // (nodeHashjoin.c:897-905: outer_hashfuncid[0] + the first collation).
+    let hash_state = init_hash(
+        estate,
+        inner_desc,
+        &inner_hashfns,
+        &outer_hashfns,
+        &collations,
+        &hash_strict,
+        hj_fill_inner,
+    )?;
     let hash_node = node
         .join
         .plan
@@ -359,6 +373,7 @@ pub fn exec_init_hash_join<'mcx>(
         hj_JoinState: HJ_BUILD_HASHTABLE,
         hj_CurHashValue: 0,
         hj_CurBucketNo: 0,
+        hj_CurSkewBucketNo: INVALID_SKEW_BUCKET_NO,
         hj_CurTuple: core::ptr::null_mut(),
         hj_MatchedOuter: false,
         hj_OuterNotEmpty: false,
@@ -488,6 +503,7 @@ where
                 let Some((key, isnull)) = get_outer_key(node, outer, estate)? else {
                     if node.hj_fill_inner {
                         node.hj_CurBucketNo = 0;
+                        node.hj_CurSkewBucketNo = 0;
                         node.hj_CurTuple = core::ptr::null_mut();
                         node.hj_JoinState = HJ_FILL_INNER_TUPLES;
                     } else {
@@ -511,6 +527,7 @@ where
                     if node.hj_fill_inner {
                         // ExecPrepHashTableForUnmatched.
                         node.hj_CurBucketNo = 0;
+                        node.hj_CurSkewBucketNo = 0;
                         node.hj_CurTuple = core::ptr::null_mut();
                         node.hj_JoinState = HJ_FILL_INNER_TUPLES;
                     } else {
@@ -523,9 +540,12 @@ where
                 let table = hash_state.table.as_ref().expect("hash table built");
                 let (bucketno, batchno) = table.get_bucket_and_batch(hashvalue);
                 node.hj_CurBucketNo = bucketno;
+                node.hj_CurSkewBucketNo = table.get_skew_bucket(hashvalue);
                 node.hj_CurTuple = core::ptr::null_mut();
 
-                if batchno != table.curbatch {
+                // The tuple might not belong to the current batch (where
+                // "current batch" includes the skew buckets if any).
+                if batchno != table.curbatch && node.hj_CurSkewBucketNo == INVALID_SKEW_BUCKET_NO {
                     // Postpone this outer tuple to its batch's file.
                     debug_assert!(batchno > table.curbatch);
                     let outer_id = estate
@@ -665,6 +685,10 @@ fn new_batch<'mcx>(
         if let Some(f) = table.outer_batch_file[curbatch as usize].take() {
             f.close()?;
         }
+    } else {
+        // We just finished the first batch: skew tuples are never needed
+        // again (nodeHashjoin.c:1155); the context reset below frees them.
+        table.end_skew_after_first_batch();
     }
 
     // Skip batches empty on both sides; one-sided emptiness is skippable
@@ -775,8 +799,13 @@ fn scan_hash_table_for_unmatched<'mcx>(
         } else if node.hj_CurBucketNo < nbuckets {
             cur = table.bucket_head(node.hj_CurBucketNo);
             node.hj_CurBucketNo += 1;
+        } else if node.hj_CurSkewBucketNo < table.n_skew_buckets() {
+            // nodeHash.c:2211: then the skew buckets, in creation order.
+            let j = table.skew_bucket_num(node.hj_CurSkewBucketNo);
+            cur = table.skew_bucket_head(j);
+            node.hj_CurSkewBucketNo += 1;
         } else {
-            // finished all buckets (no skew buckets: unported)
+            // finished all buckets
             return Ok(false);
         }
         while !cur.is_null() {
@@ -973,8 +1002,11 @@ fn scan_hash_bucket<'mcx>(
     let table = hash_state.table.as_ref().expect("hash table built");
     let hashvalue = node.hj_CurHashValue;
     // SAFETY: chain headers live in the batch arena until reset (C's walk).
+    // A skew-bucket outer tuple scans its skew bucket (nodeHash.c:2004).
     let mut cur: *mut HashJoinTupleHdr = if !node.hj_CurTuple.is_null() {
         unsafe { (*node.hj_CurTuple).next() }
+    } else if node.hj_CurSkewBucketNo != INVALID_SKEW_BUCKET_NO {
+        table.skew_bucket_head(node.hj_CurSkewBucketNo)
     } else {
         table.bucket_head(node.hj_CurBucketNo)
     };
@@ -1177,6 +1209,7 @@ pub fn exec_rescan_hash_join_chg<'mcx>(
     node.hj_JoinState = HJ_BUILD_HASHTABLE;
     node.hj_CurHashValue = 0;
     node.hj_CurBucketNo = 0;
+    node.hj_CurSkewBucketNo = INVALID_SKEW_BUCKET_NO;
     node.hj_CurTuple = core::ptr::null_mut();
     node.hj_MatchedOuter = false;
     node.hj_FirstOuterTupleSlot = None;
@@ -1251,6 +1284,7 @@ pub fn exec_rescan_hash_join<'mcx>(
     }
     node.hj_CurHashValue = 0;
     node.hj_CurBucketNo = 0;
+    node.hj_CurSkewBucketNo = INVALID_SKEW_BUCKET_NO;
     node.hj_CurTuple = core::ptr::null_mut();
     node.hj_MatchedOuter = false;
     node.hj_FirstOuterTupleSlot = None;
@@ -1516,6 +1550,7 @@ pub fn lane_probe_pending(node: &HashJoinState<'_>) -> bool {
 pub fn lane_fill_inner_prep(node: &mut HashJoinState<'_>) {
     if node.hj_fill_inner && node.hj_JoinState == HJ_NEED_NEW_OUTER {
         node.hj_CurBucketNo = 0;
+        node.hj_CurSkewBucketNo = 0;
         node.hj_CurTuple = core::ptr::null_mut();
         node.hj_JoinState = HJ_FILL_INNER_TUPLES;
     }
@@ -1600,6 +1635,10 @@ pub fn lane_probe_accept<'mcx>(
         let (bucketno, batchno) = table.get_bucket_and_batch(h);
         debug_assert_eq!(batchno, 0, "lane join admitted a multi-batch probe");
         node.hj_CurBucketNo = bucketno;
+        // Single batch by admission: never a skew table (built only for
+        // nbatch > 1), so this is INVALID_SKEW_BUCKET_NO — kept as C's
+        // HJ_NEED_NEW_OUTER shape.
+        node.hj_CurSkewBucketNo = table.get_skew_bucket(h);
     }
     node.hj_OuterNotEmpty = true;
     node.hj_JoinState = HJ_SCAN_BUCKET;
@@ -1818,7 +1857,7 @@ mcx::forget_safe_struct!(
     HashJoinState<'_> { plan, ps_ExprContext, ps_ResultTupleSlot,
         js_single_match, hj_fill_outer, hj_fill_inner, hj_NullInnerTupleSlot,
         hj_NullOuterTupleSlot, hj_JoinState, hj_CurHashValue, hj_CurBucketNo,
-        hj_CurTuple, hj_MatchedOuter, hj_OuterNotEmpty, hj_OuterTupleSlot,
+        hj_CurSkewBucketNo, hj_CurTuple, hj_MatchedOuter, hj_OuterNotEmpty, hj_OuterTupleSlot,
         hj_FirstOuterTupleSlot,
         outer_saved_scratch, inner_saved_scratch, hash_instr, js_instr,
         dense_cols, dense_on, hj_CurDense, lane_flt_seen, lane_flt_drop;

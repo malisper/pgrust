@@ -23,6 +23,9 @@ use ::types_tuple::itemptr::{ItemPointerCompare, ItemPointerData};
 
 pub fn init_seams() {}
 
+#[cfg(test)]
+mod tests;
+
 const SELF_ITEM_POINTER_ATTR: i16 = -1;
 
 #[derive(Clone, Copy)]

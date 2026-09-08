@@ -1218,12 +1218,13 @@ pub fn exec_init_node<'mcx>(
                         result_desc,
                         &outer_desc,
                         inner_desc,
-                        |es, idesc, ihashfns, colls, strict, keep_nulls| {
+                        |es, idesc, ihashfns, ohashfns, colls, strict, keep_nulls| {
                             ::nodehash::exec_init_hash(
                                 hash_plan_node,
                                 es,
                                 idesc,
                                 ihashfns,
+                                ohashfns,
                                 colls,
                                 strict,
                                 keep_nulls,

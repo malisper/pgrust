@@ -390,6 +390,11 @@ pub struct MockOpaque {
     pub kill_seen: Vec<bool>,
     pub rescans: u32,
     pub markpos_calls: u32,
+    /// Index-tuple images published as `xs_itup` (one per tid) when the
+    /// scan wants them (index-only scans).
+    pub itups: Vec<Vec<u8>>,
+    /// The scripted AM's `xs_recheck` verdict for every returned tuple.
+    pub recheck: bool,
 }
 
 // C's IndexFetchTableData; wraps tableam's enum so tests can script fetches.

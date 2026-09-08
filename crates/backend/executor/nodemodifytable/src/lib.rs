@@ -2177,50 +2177,70 @@ fn ensure_all_updated_cols<'mcx>(
         }
     }
     {
-        const FLIHAN: i32 = types_tuple::htup::FirstLowInvalidHeapAttributeNumber;
         let rel = estate.es_relations[(this_rti - 1) as usize]
             .as_ref()
             .expect("result relation opened");
-        let has_generated = rel
-            .rd_att
-            .constr
-            .as_deref()
-            .is_some_and(|c| c.has_generated_stored || c.has_generated_virtual);
-        if has_generated {
-            let trigdesc = if for_root { &mt.root_rel().trigdesc } else { &mt.rel().trigdesc };
-            let skip_by_deps =
-                !trigdesc.as_ref().is_some_and(|td| td.trig_update_before_row);
-            let constr = rel.rd_att.constr.as_deref().expect("checked above");
-            for i in 0..rel.rd_att.natts as usize {
-                if rel.rd_att.attr(i).attgenerated == 0 {
-                    continue;
-                }
-                if skip_by_deps {
-                    let adbin = constr
-                        .defval
-                        .iter()
-                        .find(|d| d.adnum == (i + 1) as i16)
-                        .and_then(|d| d.adbin.as_ref())
-                        .unwrap_or_else(|| {
-                            panic!(
-                                "no generation expression found for column number {} of table \"{}\"",
-                                i + 1,
-                                String::from_utf8_lossy(rel.rd_rel.relname.name_str())
-                            )
-                        });
-                    let expr = readfuncs::stringToNode(mcx, adbin.as_str())?;
-                    let mut attrs_used = types_nodes::Bitmapset::empty();
-                    vars::var::pull_varattnos(mcx, expr, 1, &mut attrs_used)?;
-                    if !cols.overlap(&attrs_used) {
-                        continue;
-                    }
-                }
-                cols.add_member(mcx, (i + 1) as i32 - FLIHAN)?;
-            }
-        }
+        let trigdesc = if for_root { &mt.root_rel().trigdesc } else { &mt.rel().trigdesc };
+        let trig_update_before_row =
+            trigdesc.as_ref().is_some_and(|td| td.trig_update_before_row);
+        add_generated_extra_updated_cols(mcx, rel, trig_update_before_row, &mut cols)?;
     }
     let r = if for_root { mt.root_rel_mut() } else { mt.rel_mut() };
     r.all_updated_cols = Some(cols);
+    Ok(())
+}
+
+/// ExecGetExtraUpdatedCols' leg of ExecGetAllUpdatedCols (execUtils.c) —
+/// ExecInitStoredGenerated(CMD_UPDATE)'s ri_extraUpdatedCols
+/// (execExpr.c): every generated column whose expression depends on an
+/// updated column joins `cols` (encoded attno - FirstLowInvalidHeapAttributeNumber);
+/// with a BEFORE ROW UPDATE trigger (which may change any column) every
+/// generated column does. Shared with the logical apply worker's
+/// ExecSimpleRelationUpdate (execReplication.c), whose updatedCols are the
+/// remote-changed columns (worker.c:2606-2626).
+pub fn add_generated_extra_updated_cols<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    trig_update_before_row: bool,
+    cols: &mut types_nodes::Bitmapset<'mcx>,
+) -> PgResult<()> {
+    const FLIHAN: i32 = types_tuple::htup::FirstLowInvalidHeapAttributeNumber;
+    let has_generated = rel
+        .rd_att
+        .constr
+        .as_deref()
+        .is_some_and(|c| c.has_generated_stored || c.has_generated_virtual);
+    if !has_generated {
+        return Ok(());
+    }
+    let skip_by_deps = !trig_update_before_row;
+    let constr = rel.rd_att.constr.as_deref().expect("checked above");
+    for i in 0..rel.rd_att.natts as usize {
+        if rel.rd_att.attr(i).attgenerated == 0 {
+            continue;
+        }
+        if skip_by_deps {
+            let adbin = constr
+                .defval
+                .iter()
+                .find(|d| d.adnum == (i + 1) as i16)
+                .and_then(|d| d.adbin.as_ref())
+                .unwrap_or_else(|| {
+                    panic!(
+                        "no generation expression found for column number {} of table \"{}\"",
+                        i + 1,
+                        String::from_utf8_lossy(rel.rd_rel.relname.name_str())
+                    )
+                });
+            let expr = readfuncs::stringToNode(mcx, adbin.as_str())?;
+            let mut attrs_used = types_nodes::Bitmapset::empty();
+            vars::var::pull_varattnos(mcx, expr, 1, &mut attrs_used)?;
+            if !cols.overlap(&attrs_used) {
+                continue;
+            }
+        }
+        cols.add_member(mcx, (i + 1) as i32 - FLIHAN)?;
+    }
     Ok(())
 }
 
@@ -3514,6 +3534,9 @@ fn merge_update_act<'mcx>(
         return Ok(MergeUpdActRes::Tm(result));
     }
 
+    // ExecUpdateEpilogue (nodeModifyTable.c:2229): update = true — the
+    // per-index indexUnchanged hint reads ExecGetAllUpdatedCols.
+    ensure_all_updated_cols(mt, estate, false)?;
     let EStateData { es_relations, es_tupleTable, .. } = estate;
     let rel = es_relations[(mt.rel().rti - 1) as usize]
         .as_ref()
@@ -3521,7 +3544,9 @@ fn merge_update_act<'mcx>(
     let slot = &mut es_tupleTable[slot_id.0 as usize];
     let mut recheck_indexes: mcx::PgVec<'_, Oid> = mcx::PgVec::new_in(mcx);
     let ModifyTableState { rels, cur, index_eval_cx, .. } = &mut *mt;
-    if let Some(indexes) = rels[*cur].indexes.as_mut() {
+    let r = &mut rels[*cur];
+    let updated_cols = r.all_updated_cols.as_ref().expect("resolved above");
+    if let Some(indexes) = r.indexes.as_mut() {
         if indexes.num_indices() > 0 && update_indexes != TU_UpdateIndexes::TU_None {
             recheck_indexes = execindexing::ExecInsertIndexTuples(
                 mcx,
@@ -3529,6 +3554,7 @@ fn merge_update_act<'mcx>(
                 indexes,
                 rel,
                 slot,
+                Some(updated_cols),
                 false,
                 None,
                 &[],
@@ -4560,6 +4586,9 @@ fn exec_update<'mcx>(
     }
 
     let mcx = estate.es_query_cxt;
+    // ExecUpdateEpilogue (nodeModifyTable.c:2229): update = true — the
+    // per-index indexUnchanged hint reads ExecGetAllUpdatedCols.
+    ensure_all_updated_cols(mt, estate, false)?;
     let EStateData { es_relations, es_tupleTable, .. } = estate;
     let rel = es_relations[(mt.rel().rti - 1) as usize]
         .as_ref()
@@ -4567,7 +4596,9 @@ fn exec_update<'mcx>(
     let slot = &mut es_tupleTable[slot_id.0 as usize];
     let mut recheck_indexes: mcx::PgVec<'_, Oid> = mcx::PgVec::new_in(mcx);
     let ModifyTableState { rels, cur, index_eval_cx, .. } = &mut *mt;
-    if let Some(indexes) = rels[*cur].indexes.as_mut() {
+    let r = &mut rels[*cur];
+    let updated_cols = r.all_updated_cols.as_ref().expect("resolved above");
+    if let Some(indexes) = r.indexes.as_mut() {
         if indexes.num_indices() > 0 && update_indexes != TU_UpdateIndexes::TU_None {
             recheck_indexes = execindexing::ExecInsertIndexTuples(
                 mcx,
@@ -4575,6 +4606,7 @@ fn exec_update<'mcx>(
                 indexes,
                 rel,
                 slot,
+                Some(updated_cols),
                 false,
                 None,
                 &[],
@@ -7179,6 +7211,7 @@ fn exec_insert<'mcx>(
                     indexes,
                     rel,
                     slot,
+                    None,
                     false,
                     None,
                     &[],
@@ -7435,6 +7468,7 @@ fn oc_speculative_insert<'mcx>(
             indexes,
             rel,
             slot,
+            None,
             true,
             Some(&mut spec_conflict),
             arbiters,
@@ -8134,6 +8168,10 @@ fn exec_leaf_conflict_update<'mcx>(
 
     let mut recheck_indexes: mcx::PgVec<'_, Oid> = mcx::PgVec::new_in(mcx);
     {
+        // ExecUpdateEpilogue (nodeModifyTable.c:2229): update = true; the
+        // routed leaf's updated columns are the root's mapped through the
+        // root->leaf attrmap (execUtils.c ExecGetUpdatedCols).
+        let leaf_cols = leaf_all_updated_cols(mt, estate, idx)?;
         let ModifyTableState { router, leaf_indexes, index_eval_cx, .. } = &mut *mt;
         let rel = router.as_ref().expect("routed").leaf_rel(idx);
         let EStateData { es_tupleTable, .. } = &mut *estate;
@@ -8146,6 +8184,7 @@ fn exec_leaf_conflict_update<'mcx>(
                     indexes,
                     rel,
                     slot,
+                    Some(&leaf_cols),
                     false,
                     None,
                     &[],

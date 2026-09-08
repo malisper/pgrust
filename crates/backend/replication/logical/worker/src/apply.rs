@@ -1422,12 +1422,14 @@ fn do_insert<'mcx>(
     let mut conflict = false;
     let recheck_indexes = if index_state.num_indices() > 0 {
         let eval_cx = mcx::MemoryContext::new("ApplyIndexEval");
+        // ExecSimpleRelationInsert (execReplication.c:630): update = false.
         let r = execindexing::ExecInsertIndexTuples(
             mcx,
             eval_cx.mcx(),
             &mut index_state,
             rel,
             slot,
+            None,
             !conflict_indexes.is_empty(),
             Some(&mut conflict),
             &conflict_indexes,
@@ -1573,12 +1575,26 @@ fn do_update<'mcx>(
         let mut conflict = false;
         if index_state.num_indices() > 0 {
             let eval_cx = mcx::MemoryContext::new("ApplyIndexEval");
+            // ExecSimpleRelationUpdate (execReplication.c:720): update = true
+            // with ExecGetAllUpdatedCols = the remote-changed columns
+            // (worker.c:2606-2626) plus the generated-column extras.
+            let mut all_updated_cols = match modified_cols {
+                Some(c) => c.clone_in(mcx)?,
+                None => types_nodes::Bitmapset::empty(),
+            };
+            nodemodifytable::add_generated_extra_updated_cols(
+                mcx,
+                rel,
+                trig.as_ref().is_some_and(|t| t.td.trig_update_before_row),
+                &mut all_updated_cols,
+            )?;
             let r = execindexing::ExecInsertIndexTuples(
                 mcx,
                 eval_cx.mcx(),
                 &mut index_state,
                 rel,
                 slot,
+                Some(&all_updated_cols),
                 !conflict_indexes.is_empty(),
                 Some(&mut conflict),
                 &conflict_indexes,

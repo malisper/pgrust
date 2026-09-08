@@ -90,7 +90,7 @@ enum KeyExpr<'mcx> {
 // clear/store + a hash interp round trip + a per-candidate entry-tuple
 // store/deform + an eq interp round trip. Kernel hash matches the expr path
 // bit-for-bit (EEOP_HASHDATUM_FIRST: NULL hashes as 0, init value 0) and eq
-// is NOT DISTINCT — exactly exec_build_grouping_equal's fold.
+// is NOT DISTINCT — exactly exec_build_param_set_equal's fold.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ProbeKernel {
     Expr,
@@ -252,11 +252,11 @@ pub fn exec_init_memoize<'mcx>(
             &cols,
             0,
         )?;
-        let eq_expr = execexpr::exec_build_grouping_equal(
+        // C ExecInitMemoize (nodeMemoize.c:1027): ExecBuildParamSetEqual over
+        // the hash-key descriptor, compared in forward column order.
+        let eq_expr = execexpr::exec_build_param_set_equal(
             mcx,
             &hashkeydesc,
-            &hashkeydesc,
-            &cols,
             &eqfns,
             node.collations,
         )?;

@@ -4,6 +4,11 @@ version = "0.1.0"
 edition.workspace = true
 publish.workspace = true
 
+[features]
+# Test-support index AM (IndexAmKind::Mock): scripted amgettuple for
+# executor-node unit rigs (nodeindexonlyscan); never on in a product build.
+mock = []
+
 [dependencies]
 bloom = { path = "../../../../contrib/bloom" }
 bufmgr = { path = "../../../storage/buffer/bufmgr" }

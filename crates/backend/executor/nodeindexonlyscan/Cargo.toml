@@ -31,6 +31,9 @@ init_small = { path = "../../utils/init/init_small" }
 datum = { path = "../../../_support/types/datum" }
 
 [dev-dependencies]
+# Mock index AM (scripted amgettuple) for the lossy-recheck witness.
+indexam = { path = "../../access/index/indexam", features = ["mock"] }
+types_relscan = { path = "../../access/index/relscan", features = ["mock"] }
 types_fmgr = { path = "../../../_support/types/fmgr" }
 types_nbtree = { path = "../../../_support/types/types_nbtree" }
 types_snapshot = { path = "../../../_support/types/snapshot" }

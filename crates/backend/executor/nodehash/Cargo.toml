@@ -9,6 +9,8 @@ datum = { path = "../../../_support/types/datum" }
 hashfn = { path = "../../../common/hashfn" }
 execexpr = { path = "../execexpr" }
 fd = { path = "../../storage/file/fd" }
+fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
 parallel = { path = "../../access/transam/parallel" }
 pg_barrier = { path = "../../storage/ipc/pg_barrier" }
 sharedtuplestore = { path = "../../utils/sort/sharedtuplestore" }

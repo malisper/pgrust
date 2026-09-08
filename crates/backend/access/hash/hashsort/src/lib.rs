@@ -367,6 +367,8 @@ mod audit_b004_tests {
             ii_ExclusionProcs: [0; INDEX_MAX_KEYS as usize],
             ii_ExclusionStrats: [0; INDEX_MAX_KEYS as usize],
             ii_WithoutOverlaps: false,
+            ii_CheckedUnchanged: false,
+            ii_IndexUnchanged: false,
         }
     }
 

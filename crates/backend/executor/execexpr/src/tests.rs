@@ -5921,3 +5921,131 @@ mod rem_b028 {
         });
     }
 }
+
+// audit-18.6 w2-011 (row execExpr-p2-30d8189c): ExecBuildParamSetEqual
+// (execExpr.c:4626) compares the parameter columns in FORWARD order —
+// INNER_VAR/OUTER_VAR attno 0, 1, 2 … — where ExecBuildGroupingEqual walks
+// the key columns last-first. Memoize (nodeMemoize.c:1027) builds its cache
+// equality with the former; before the port nodememoize used the latter.
+mod rem_w2_011_param_set_equal {
+    use super::*;
+
+    const F_INT4EQ: u32 = 65;
+
+    // (attnum, is_inner) of every INNER_VAR / OUTER_VAR fetch, in program
+    // order. ExecReadyExpr fuses each OUTER_VAR + NOT_DISTINCT pair into the
+    // thin OuterVarNotDistinctThin step (steps.rs), which is the outer fetch
+    // of its column.
+    fn var_fetch_order(state: &ExprState<'_>) -> alloc::vec::Vec<(u16, bool)> {
+        state
+            .steps()
+            .iter()
+            .filter_map(|s| match *s {
+                Step::InnerVar { attnum, .. } => Some((attnum, true)),
+                Step::OuterVar { attnum, .. } | Step::OuterVarNotDistinctThin { attnum, .. } => {
+                    Some((attnum, false))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn param_set_equal_compares_columns_in_forward_order() {
+        with_mcx(|mcx| {
+            let desc = desc_int4(mcx, 3);
+            let state = crate::compile::exec_build_param_set_equal(
+                mcx,
+                &desc,
+                &[F_INT4EQ, F_INT4EQ, F_INT4EQ],
+                &[0, 0, 0],
+            )
+            .unwrap();
+            assert_eq!(
+                var_fetch_order(&state),
+                alloc::vec![(0, true), (0, false), (1, true), (1, false), (2, true), (2, false)],
+                "execExpr.c:4682 walks attno 0..maxatt in forward order"
+            );
+            assert!(matches!(state.steps()[0], Step::InnerFetchSome { last_var: 3 }));
+            assert!(matches!(state.steps()[1], Step::OuterFetchSome { last_var: 3 }));
+            let done = state.steps().len() as u32 - 1;
+            for s in state.steps() {
+                if let Step::Qual { jumpdone } = s {
+                    assert_eq!(*jumpdone, done, "every EEOP_QUAL jumps to DONE_RETURN");
+                }
+            }
+            assert!(matches!(state.steps()[done as usize], Step::DoneReturn));
+        });
+    }
+
+    // Control: the grouping-equality builder keeps C's last-column-first
+    // order (execExpr.c ExecBuildGroupingEqual), so the two programs differ
+    // exactly in the column walk.
+    #[test]
+    fn grouping_equal_compares_columns_last_first() {
+        with_mcx(|mcx| {
+            let desc = desc_int4(mcx, 3);
+            let state = crate::compile::exec_build_grouping_equal(
+                mcx,
+                &desc,
+                &desc,
+                &[1, 2, 3],
+                &[F_INT4EQ, F_INT4EQ, F_INT4EQ],
+                &[0, 0, 0],
+            )
+            .unwrap();
+            assert_eq!(
+                var_fetch_order(&state),
+                alloc::vec![(2, true), (2, false), (1, true), (1, false), (0, true), (0, false)]
+            );
+        });
+    }
+
+    // Behaviour: NULLs are equal (NOT DISTINCT), a mismatch in any column
+    // fails, and the first mismatching column short-circuits.
+    #[test]
+    fn param_set_equal_is_not_distinct_per_column() {
+        with_mcx(|mcx| {
+            let desc = desc_int4(mcx, 2);
+            let mut state = crate::compile::exec_build_param_set_equal(
+                mcx,
+                &desc,
+                &[F_INT4EQ, F_INT4EQ],
+                &[0, 0],
+            )
+            .unwrap();
+            let mut eq = |a: &[Option<i32>], b: &[Option<i32>]| -> bool {
+                let mut inner = virtual_slot(mcx, a);
+                let mut outer = virtual_slot(mcx, b);
+                let mut slots = EvalSlots {
+                    scan: None,
+                    inner: Some(&mut inner),
+                    outer: Some(&mut outer),
+                };
+                crate::exec_qual(Some(&mut *state), &mut slots).unwrap()
+            };
+            assert!(eq(&[Some(1), Some(2)], &[Some(1), Some(2)]));
+            assert!(eq(&[None, Some(2)], &[None, Some(2)]));
+            assert!(!eq(&[Some(1), Some(2)], &[Some(1), Some(3)]));
+            assert!(!eq(&[Some(9), Some(2)], &[Some(1), Some(2)]));
+            assert!(!eq(&[None, Some(2)], &[Some(1), Some(2)]));
+        });
+    }
+
+    // C pushes the two deform steps unconditionally and no initial CONST
+    // (unlike ExecBuildGroupingEqual's numCols == 0 NULL return); Memoize
+    // always has at least one parameter, so the zero-parameter program is
+    // just the fetches + DONE_RETURN.
+    #[test]
+    fn param_set_equal_with_no_parameters_is_fetches_and_done() {
+        with_mcx(|mcx| {
+            let desc = desc_int4(mcx, 0);
+            let state =
+                crate::compile::exec_build_param_set_equal(mcx, &desc, &[], &[]).unwrap();
+            assert_eq!(state.steps().len(), 3);
+            assert!(matches!(state.steps()[0], Step::InnerFetchSome { last_var: 0 }));
+            assert!(matches!(state.steps()[1], Step::OuterFetchSome { last_var: 0 }));
+            assert!(matches!(state.steps()[2], Step::DoneReturn));
+        });
+    }
+}

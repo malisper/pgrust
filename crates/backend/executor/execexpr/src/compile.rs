@@ -1567,6 +1567,108 @@ pub fn exec_build_grouping_equal<'mcx>(
     Ok(state)
 }
 
+/// C `ExecBuildParamSetEqual` (execExpr.c:4626): NOT DISTINCT comparison of
+/// the inner (probe) and outer (cache-table) slots over the first
+/// `eqfuncoids.len()` columns of `desc`, compared in FORWARD column order —
+/// unlike `exec_build_grouping_equal`, which walks the key columns last
+/// column first. NULLs compare equal; evaluated via [`crate::exec_qual`].
+/// Memoize (nodeMemoize.c:1027) is the one C caller: `desc` is the hash-key
+/// descriptor, so column i is parameter i (attno 0-based = i).
+pub fn exec_build_param_set_equal<'mcx>(
+    mcx: Mcx<'mcx>,
+    desc: &TupleDescData<'_>,
+    eqfuncoids: &[Oid],
+    collations: &[Oid],
+) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
+    debug_assert!(collations.len() == eqfuncoids.len());
+    debug_assert!(desc.natts as usize >= eqfuncoids.len());
+    let maxatt = eqfuncoids.len();
+    let mut state = ExprState::new_boxed_in(mcx)?;
+    state.flags = EEO_FLAG_IS_QUAL;
+
+    // C pushes the deform steps unconditionally (last_var = maxatt); with no
+    // parameters the program is the two fetches plus DONE_RETURN, and
+    // ExecQual's initial TRUE stands.
+    push_step(
+        &mut state,
+        mcx,
+        Step::InnerFetchSome {
+            last_var: maxatt as u16,
+        },
+    )?;
+    push_step(
+        &mut state,
+        mcx,
+        Step::OuterFetchSome {
+            last_var: maxatt as u16,
+        },
+    )?;
+
+    let userid = miscinit_seams::get_user_id::call();
+    for attno in 0..maxatt {
+        let att = &desc.attrs[attno];
+        let foid = eqfuncoids[attno];
+        check_execute_acl(mcx, foid, userid)?;
+        let flinfo = fmgr_core::fmgr_info(foid)?;
+        let frame = FuncFrame::new_in(mcx, flinfo, 2, collations[attno])?;
+        let frame_ix = state.frames.len() as u32;
+        let call = FuncCall {
+            fcinfo: frame.fcinfo,
+            flinfo: frame.flinfo,
+            frame: frame_ix,
+            nargs: 2,
+        };
+        state
+            .frames
+            .try_reserve(1)
+            .map_err(|_| mcx.oom(core::mem::size_of::<FuncFrame<'_>>()))?;
+        state.frames.push(frame);
+
+        // SAFETY: args 0/1 of the frame's freshly allocated 2-arg fcinfo.
+        let (arg0, arg1) = unsafe {
+            (
+                OutRef(crate::steps::arg_slot_of(call.fcinfo, 0)),
+                OutRef(crate::steps::arg_slot_of(call.fcinfo, 1)),
+            )
+        };
+        // left arg: EEOP_INNER_VAR attno; right arg: EEOP_OUTER_VAR attno —
+        // both typed from the one shared descriptor (C: att->atttypid).
+        push_step(
+            &mut state,
+            mcx,
+            Step::InnerVar {
+                attnum: attno as u16,
+                vartype: att.atttypid,
+                out: arg0,
+            },
+        )?;
+        push_step(
+            &mut state,
+            mcx,
+            Step::OuterVar {
+                attnum: attno as u16,
+                vartype: att.atttypid,
+                out: arg1,
+            },
+        )?;
+        let rout = state.result_out();
+        push_step(&mut state, mcx, Step::NotDistinct { call, out: rout })?;
+        push_step(&mut state, mcx, Step::Qual { jumpdone: u32::MAX })?;
+    }
+
+    // adjust_jumps: every EEOP_QUAL falls through to DONE_RETURN.
+    let done = state.steps.len() as u32;
+    for step in state.steps.iter_mut() {
+        if let Step::Qual { jumpdone } = step {
+            debug_assert_eq!(*jumpdone, u32::MAX);
+            *jumpdone = done;
+        }
+    }
+    push_step(&mut state, mcx, Step::DoneReturn)?;
+    ready_expr(&mut state);
+    Ok(state)
+}
+
 pub(crate) fn alloc_nullable_datum(mcx: Mcx<'_>) -> PgResult<NonNull<::datum::NullableDatum>> {
     let layout = core::alloc::Layout::new::<::datum::NullableDatum>();
     let raw = mcx.allocate(layout).map_err(|_| mcx.oom(layout.size()))?;

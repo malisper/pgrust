@@ -461,7 +461,10 @@ fn parallel_prep_unmatched<'mcx>(
         phj::exec_hash_table_detach_batch(table)?;
         return Ok(false);
     }
+    // ExecPrepHashTableForUnmatched (nodeHash.c:2104); the parallel scan
+    // never has skew buckets, the cursor is reset for C's shape.
     node.hj_CurBucketNo = 0;
+    node.hj_CurSkewBucketNo = 0;
     node.hj_CurTuple = core::ptr::null_mut();
     Ok(true)
 }

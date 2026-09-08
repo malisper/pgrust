@@ -7,6 +7,7 @@
 use ::datum::Datum;
 use ::mcx::{Mcx, PgBox, PgVec};
 use ::types_nodes::NodeList;
+use ::types_nodes::Bitmapset;
 use ::types_core::{AttrNumber, Oid, INDEX_MAX_KEYS};
 use ::types_error::{PgError, PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE};
 use ::types_nbtree::genam::IndexUniqueCheck;
@@ -65,6 +66,10 @@ pub struct IndexInfo<'mcx> {
     pub ii_ExclusionProcs: [Oid; INDEX_MAX_KEYS as usize],
     pub ii_ExclusionStrats: [u16; INDEX_MAX_KEYS as usize],
     pub ii_WithoutOverlaps: bool,
+    // C ii_CheckedUnchanged / ii_IndexUnchanged: index_unchanged_by_update's
+    // per-statement memo (execIndexing.c:1012).
+    pub ii_CheckedUnchanged: bool,
+    pub ii_IndexUnchanged: bool,
 }
 
 // C rd_indexprs/rd_indpred: processed trees cached per index relid, deep-copied
@@ -288,6 +293,8 @@ pub fn BuildDummyIndexInfo<'mcx>(mcx: Mcx<'mcx>, index: &Relation<'_>) -> PgResu
         ii_ExclusionProcs: [0; INDEX_MAX_KEYS as usize],
         ii_ExclusionStrats: [0; INDEX_MAX_KEYS as usize],
         ii_WithoutOverlaps: false,
+        ii_CheckedUnchanged: false,
+        ii_IndexUnchanged: false,
     })
 }
 
@@ -333,6 +340,8 @@ pub fn BuildIndexInfo<'mcx>(mcx: Mcx<'mcx>, index: &Relation<'_>) -> PgResult<In
         ii_ExclusionProcs: excl_procs,
         ii_ExclusionStrats: excl_strats,
         ii_WithoutOverlaps: indexstruct.indisexclusion && indexstruct.indisunique,
+        ii_CheckedUnchanged: false,
+        ii_IndexUnchanged: false,
     })
 }
 
@@ -548,18 +557,23 @@ pub fn index_predicate_passes<'mcx>(
     execexpr::exec_qual(indexInfo.ii_PredicateState.as_deref_mut(), &mut slots)
 }
 
-/// ExecInsertIndexTuples, INSERT + ON CONFLICT + summarizing-only UPDATE arms
-/// (the `update` indexUnchanged hint is the UPDATE-hint lane). With `noDupErr`,
-/// arbiter (or all, if `arbiter_indexes` is empty) unique indexes get
-/// UNIQUE_CHECK_PARTIAL and a potential conflict sets `*spec_conflict`
-/// instead of erroring. Returns C's recheck-oid list (deferred-exclusion
-/// trigger filtering).
+/// ExecInsertIndexTuples (execIndexing.c:310). `update` is C's `bool update`
+/// argument carrying the result relation's updated columns: `Some(cols)` for
+/// an UPDATE (ExecUpdateEpilogue, cols = ExecGetAllUpdatedCols — the perminfo
+/// updatedCols unioned with the generated-column extraUpdatedCols, offset by
+/// FirstLowInvalidHeapAttributeNumber), `None` for INSERT / COPY / speculative
+/// insert, so `indexUnchanged = update && index_unchanged_by_update(...)` is
+/// computed per index (execIndexing.c:398-403). With `noDupErr`, arbiter (or
+/// all, if `arbiter_indexes` is empty) unique indexes get UNIQUE_CHECK_PARTIAL
+/// and a potential conflict sets `*spec_conflict` instead of erroring. Returns
+/// C's recheck-oid list (deferred-exclusion trigger filtering).
 pub fn ExecInsertIndexTuples<'mcx>(
     mcx: Mcx<'mcx>,
     eval_mcx: Mcx<'_>,
     state: &mut ResultRelIndexState<'mcx>,
     heap_relation: &Relation<'mcx>,
     slot: &mut SlotData<'mcx>,
+    update: Option<&Bitmapset<'_>>,
     noDupErr: bool,
     mut spec_conflict: Option<&mut bool>,
     arbiter_indexes: &[Oid],
@@ -610,6 +624,13 @@ pub fn ExecInsertIndexTuples<'mcx>(
         };
         let indimmediate = index_form.indimmediate;
 
+        // execIndexing.c:398: the bottom-up deletion hint fires only for an
+        // UPDATE that leaves this index's key columns/expressions untouched.
+        let indexUnchanged = match update {
+            Some(cols) => index_unchanged_by_update(cols, &mut state.infos[i])?,
+            None => false,
+        };
+
         let mut satisfiesConstraint = indexam::index_insert(
             mcx,
             indexRelation,
@@ -618,7 +639,7 @@ pub fn ExecInsertIndexTuples<'mcx>(
             &tupleid,
             heap_relation,
             checkUnique,
-            false,
+            indexUnchanged,
             &mut state.infos[i].ii_AmCache,
         )?;
 
@@ -667,6 +688,69 @@ pub fn ExecInsertIndexTuples<'mcx>(
     }
 
     Ok(recheck_indexes)
+}
+
+/// index_unchanged_by_update (execIndexing.c:1012): should this UPDATE's
+/// index_insert pass `indexUnchanged = true`? `all_updated_cols` is
+/// ExecGetUpdatedCols ∪ ExecGetExtraUpdatedCols (attnos offset by
+/// FirstLowInvalidHeapAttributeNumber): C tests the two bitmaps separately
+/// per key column and their union for the expression walk — the same
+/// predicate. Memoized on the IndexInfo (ii_CheckedUnchanged /
+/// ii_IndexUnchanged) for the statement's life. Index predicates are
+/// deliberately not considered (execIndexing.c:1105).
+pub fn index_unchanged_by_update<'mcx>(
+    all_updated_cols: &Bitmapset<'_>,
+    index_info: &mut IndexInfo<'mcx>,
+) -> PgResult<bool> {
+    const FLIHAN: i32 = ::types_tuple::htup::FirstLowInvalidHeapAttributeNumber;
+
+    if index_info.ii_CheckedUnchanged {
+        return Ok(index_info.ii_IndexUnchanged);
+    }
+    index_info.ii_CheckedUnchanged = true;
+
+    // Key columns only: an INCLUDE column is opaque payload to the AM.
+    let mut hasexpression = false;
+    for attr in 0..index_info.ii_NumIndexKeyAttrs as usize {
+        let keycol = index_info.ii_IndexAttrNumbers[attr] as i32;
+        if keycol <= 0 {
+            hasexpression = true;
+            continue;
+        }
+        if all_updated_cols.is_member(keycol - FLIHAN) {
+            index_info.ii_IndexUnchanged = false;
+            return Ok(false);
+        }
+    }
+
+    if !hasexpression {
+        index_info.ii_IndexUnchanged = true;
+        return Ok(true);
+    }
+
+    // Indexed expressions: any Var over an updated column withholds the hint
+    // (index_expression_changed_walker, execIndexing.c:1128). ii_Expressions
+    // is RelationGetIndexExpressions' list (BuildIndexInfo).
+    let mut walker = IndexExpressionChangedWalker { all_updated_cols };
+    let changed = ::nodes_core::walk_list(&index_info.ii_Expressions, &mut walker)?;
+    index_info.ii_IndexUnchanged = !changed;
+    Ok(!changed)
+}
+
+// index_expression_changed_walker (execIndexing.c:1128): true once a Var
+// whose attno is in allUpdatedCols is found.
+struct IndexExpressionChangedWalker<'a, 'b> {
+    all_updated_cols: &'a Bitmapset<'b>,
+}
+
+impl<'mcx> ::nodes_core::NodeWalker<'mcx> for IndexExpressionChangedWalker<'_, '_> {
+    fn visit(&mut self, node: ::types_nodes::Node<'mcx>) -> PgResult<bool> {
+        const FLIHAN: i32 = ::types_tuple::htup::FirstLowInvalidHeapAttributeNumber;
+        if let Some(var) = node.as_var() {
+            return Ok(self.all_updated_cols.is_member(var.varattno as i32 - FLIHAN));
+        }
+        ::nodes_core::expression_tree_walker(node, self)
+    }
 }
 
 /// ExecCheckIndexConstraints: true if no arbiter (or any unique, when

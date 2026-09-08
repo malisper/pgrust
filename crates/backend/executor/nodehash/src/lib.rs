@@ -1,5 +1,5 @@
-// nodeHash.c serial build side; skew buckets absent (sizing reserves the
-// skew-MCV memory iff the planner supplied a skewTable, C's useskew); C
+// nodeHash.c serial build side, skew optimization included (the MCV skew
+// buckets of nodeHash.c ExecHashBuildSkewHash & co., batch 0 only); C
 // HashJoinTupleData layout, pointer chains. The shared
 // (Parallel Hash) table lives in `parallel`; private-vs-shared follows the
 // RUNTIME parallel_state like C, so a parallel-aware Hash without a parallel
@@ -216,6 +216,21 @@ impl DenseTable<'_> {
     }
 }
 
+/// C `HashSkewBucket` (hashjoin.h:113): one outer-MCV hash value's chain of
+/// build tuples, served from batch 0 whatever their main-table batch is.
+#[derive(Clone, Copy)]
+struct HashSkewBucket {
+    hashvalue: u32,
+    tuples: *mut HashJoinTupleHdr,
+}
+
+/// C `INVALID_SKEW_BUCKET_NO` (hashjoin.h:120).
+pub const INVALID_SKEW_BUCKET_NO: i32 = -1;
+/// C `SKEW_MIN_OUTER_FRACTION` (hashjoin.h:122).
+const SKEW_MIN_OUTER_FRACTION: f64 = 0.01;
+/// pg_statistic.h STATISTIC_KIND_MCV.
+const STATISTIC_KIND_MCV: i16 = 1;
+
 pub struct HashJoinTable<'mcx> {
     nbuckets: u32,
     log2_nbuckets: u32,
@@ -240,6 +255,20 @@ pub struct HashJoinTable<'mcx> {
     bloom: Option<ProbeBloom<'mcx>>,
     track: Option<KeyTrack<'mcx>>,
     dense: Option<DenseTable<'mcx>>,
+    // Skew optimization (hashjoin.h:316-348): an open-addressed table of
+    // outer-MCV hash values (`None` = C's NULL hole), the active bucket
+    // indexes in creation (decreasing-frequency) order, and the skew plane's
+    // own space accounting. C allocates the plane in batchCxt; here the
+    // arrays live in the query arena and are cleared when batch 0 ends
+    // (ExecHashJoinNewBatch), the tuples in the batch arena like every
+    // other build tuple.
+    skew_enabled: bool,
+    skew_bucket: PgVec<'mcx, Option<HashSkewBucket>>,
+    skew_bucket_nums: PgVec<'mcx, i32>,
+    n_skew_buckets: i32,
+    skew_tuples: f64,
+    space_used_skew: usize,
+    space_allowed_skew: usize,
 }
 
 impl<'mcx> HashJoinTable<'mcx> {
@@ -281,6 +310,14 @@ impl<'mcx> HashJoinTable<'mcx> {
                 .map(|est| ProbeBloom::new_in(mcx, est)),
             track: None,
             dense: None,
+            skew_enabled: false,
+            skew_bucket: PgVec::new_in(mcx),
+            skew_bucket_nums: PgVec::new_in(mcx),
+            n_skew_buckets: 0,
+            skew_tuples: 0.0,
+            space_used_skew: 0,
+            // nodeHash.c:519 spaceAllowedSkew = spaceAllowed * SKEW_HASH_MEM_PERCENT / 100
+            space_allowed_skew: space_allowed * SKEW_HASH_MEM_PERCENT / 100,
         };
         if nbatch > 1 {
             table.inner_batch_file.resize_with(nbatch as usize, || None);
@@ -409,7 +446,8 @@ impl<'mcx> HashJoinTable<'mcx> {
             let hdr = tup.forget_base().as_ptr().cast::<HashJoinTupleHdr>();
 
             let hash_tuple_size = HJTUPLE_OVERHEAD + t_len as usize;
-            let ntuples = self.total_tuples;
+            // nodeHash.c:1771: ntuples = totalTuples - skewTuples.
+            let ntuples = self.total_tuples - self.skew_tuples;
             if self.tuples.len() == self.tuples.capacity() {
                 let add = self.tuples.capacity().max(256);
                 self.tuples
@@ -605,6 +643,249 @@ impl<'mcx> HashJoinTable<'mcx> {
         Ok(())
     }
 
+    /// `ExecHashBuildSkewHash`'s table half (nodeHash.c:2467-2543): one
+    /// skew bucket per distinct MCV hash value, created in decreasing MCV
+    /// frequency order (`mcv_hashes` is that order) so eviction removes the
+    /// least common values first. The caller resolved the MCV statistics and
+    /// hashed the values with the outer key's hash function.
+    pub(crate) fn build_skew_buckets(&mut self, mcx: Mcx<'mcx>, mcv_hashes: &[u32]) -> PgResult<()> {
+        let mcvs_to_use = mcv_hashes.len();
+        // A power of 2 above the MCV count (at least one hole terminates
+        // every probe), then two more bits against collisions.
+        let nbuckets = (nextpower2_32(mcvs_to_use as u32 + 1) << 2) as usize;
+
+        self.skew_enabled = true;
+        self.skew_bucket = vec_with_capacity_in(mcx, nbuckets)?;
+        self.skew_bucket.resize(nbuckets, None);
+        self.skew_bucket_nums = vec_with_capacity_in(mcx, mcvs_to_use)?;
+
+        // skewBucket[] pointers + skewBucketNums[] ints (C sizes).
+        let arrays = nbuckets * SIZEOF_HASHJOINTUPLE + mcvs_to_use * core::mem::size_of::<i32>();
+        self.space_used += arrays;
+        self.space_used_skew += arrays;
+        if self.space_used > self.space_peak {
+            self.space_peak = self.space_used;
+        }
+
+        for &hashvalue in mcv_hashes {
+            // Linear probing; NB: must match get_skew_bucket.
+            let mut bucket = (hashvalue as usize) & (nbuckets - 1);
+            while self.skew_bucket[bucket].is_some_and(|b| b.hashvalue != hashvalue) {
+                bucket = (bucket + 1) & (nbuckets - 1);
+            }
+            // Two MCVs sharing a hash value share the bucket.
+            if self.skew_bucket[bucket].is_some() {
+                continue;
+            }
+            self.skew_bucket[bucket] = Some(HashSkewBucket {
+                hashvalue,
+                tuples: core::ptr::null_mut(),
+            });
+            self.skew_bucket_nums.push(bucket as i32);
+            self.n_skew_buckets += 1;
+            self.space_used += SKEW_BUCKET_OVERHEAD;
+            self.space_used_skew += SKEW_BUCKET_OVERHEAD;
+            if self.space_used > self.space_peak {
+                self.space_peak = self.space_used;
+            }
+        }
+        Ok(())
+    }
+
+    /// `ExecHashGetSkewBucket` (nodeHash.c:2555): the skew bucket index for
+    /// `hashvalue`, or INVALID_SKEW_BUCKET_NO when the value has no active
+    /// skew bucket (always, once batch 0 is done).
+    #[inline]
+    pub fn get_skew_bucket(&self, hashvalue: u32) -> i32 {
+        if !self.skew_enabled {
+            return INVALID_SKEW_BUCKET_NO;
+        }
+        let mask = self.skew_bucket.len() - 1;
+        let mut bucket = (hashvalue as usize) & mask;
+        while self.skew_bucket[bucket].is_some_and(|b| b.hashvalue != hashvalue) {
+            bucket = (bucket + 1) & mask;
+        }
+        if self.skew_bucket[bucket].is_some() {
+            bucket as i32
+        } else {
+            INVALID_SKEW_BUCKET_NO
+        }
+    }
+
+    /// Head of skew bucket `bucketno`'s tuple chain (C `skewBucket[n]->tuples`).
+    #[inline]
+    pub fn skew_bucket_head(&self, bucketno: i32) -> *mut HashJoinTupleHdr {
+        self.skew_bucket[bucketno as usize].expect("active skew bucket").tuples
+    }
+
+    /// C `nSkewBuckets`.
+    #[inline]
+    pub fn n_skew_buckets(&self) -> i32 {
+        self.n_skew_buckets
+    }
+
+    /// C `skewBucketNums[i]`: the i-th active skew bucket's index.
+    #[inline]
+    pub fn skew_bucket_num(&self, i: i32) -> i32 {
+        self.skew_bucket_nums[i as usize]
+    }
+
+    /// C `skewEnabled`.
+    #[inline]
+    pub fn skew_enabled(&self) -> bool {
+        self.skew_enabled
+    }
+
+    /// C `skewTuples`.
+    #[inline]
+    pub fn skew_tuples(&self) -> f64 {
+        self.skew_tuples
+    }
+
+    /// `ExecHashSkewTableInsert` (nodeHash.c:2601): the current-batch arm of
+    /// `insert` aimed at a skew bucket, then skew-space back-off (evicting
+    /// the least valuable buckets) and the total-space batch growth check.
+    pub fn skew_table_insert(
+        &mut self,
+        estate: &mut EStateData<'mcx>,
+        slot_id: ExecSlotId,
+        hashvalue: u32,
+        bucketno: i32,
+    ) -> PgResult<()> {
+        let query_mcx = estate.es_query_cxt;
+        let (slot, batch_mcx) = estate.slot_and_aux_mcx(slot_id, self.batch_cxt);
+        let mut tup = match &self.form_plan {
+            Some(plan) => exectuples::exec_copy_slot_minimal_tuple_planned(
+                slot,
+                query_mcx,
+                batch_mcx,
+                HJTUPLE_OVERHEAD,
+                plan,
+            )?,
+            None => exectuples::exec_copy_slot_minimal_tuple(
+                slot,
+                query_mcx,
+                batch_mcx,
+                HJTUPLE_OVERHEAD,
+            )?,
+        };
+        tup.data_mut().clear_match();
+        let t_len = tup.t_len();
+        let hdr = tup.forget_base().as_ptr().cast::<HashJoinTupleHdr>();
+        let hash_tuple_size = HJTUPLE_OVERHEAD + t_len as usize;
+
+        // Push it onto the front of the skew bucket's list.
+        let bucket = self.skew_bucket[bucketno as usize].as_mut().expect("active skew bucket");
+        // SAFETY: hdr = the forgotten allocation's prefix.
+        unsafe {
+            (*hdr).next = bucket.tuples;
+            (*hdr).hashvalue = hashvalue;
+        }
+        bucket.tuples = hdr;
+
+        self.space_used += hash_tuple_size;
+        self.space_used_skew += hash_tuple_size;
+        if self.space_used > self.space_peak {
+            self.space_peak = self.space_used;
+        }
+        while self.space_used_skew > self.space_allowed_skew {
+            self.remove_next_skew_bucket(query_mcx)?;
+        }
+        if self.space_used > self.space_allowed {
+            self.increase_num_batches(query_mcx)?;
+        }
+        Ok(())
+    }
+
+    /// `ExecHashRemoveNextSkewBucket` (nodeHash.c:2647): push the least
+    /// valuable skew bucket's tuples into the main table (current batch) or
+    /// their batch file, then retire the bucket — always in reverse creation
+    /// order, so open-addressing probes never hit a hole before a later
+    /// colliding entry.
+    fn remove_next_skew_bucket(&mut self, mcx: Mcx<'mcx>) -> PgResult<()> {
+        let bucket_to_remove = self.skew_bucket_nums[self.n_skew_buckets as usize - 1];
+        let bucket = self.skew_bucket[bucket_to_remove as usize].expect("active skew bucket");
+        let hashvalue = bucket.hashvalue;
+        // nbatch cannot change while this bucket's tuples are processed.
+        let (bucketno, batchno) = self.get_bucket_and_batch(hashvalue);
+
+        let mut hash_tuple = bucket.tuples;
+        while !hash_tuple.is_null() {
+            // SAFETY: skew chain headers/images live in the batch arena until
+            // reset; the header is read before it is relinked.
+            let next = unsafe { (*hash_tuple).next };
+            let hdr = NonNull::new(hash_tuple).expect("non-null chain link");
+            let tuple_size = Self::tuple_size(hdr);
+            if batchno == self.curbatch {
+                // C copies into dense storage so the growth walks find the
+                // tuple; the arena image is that storage here — appending to
+                // the insertion-order list is the dense_alloc at this point.
+                if self.tuples.len() == self.tuples.capacity() {
+                    let add = self.tuples.capacity().max(256);
+                    self.tuples
+                        .try_reserve(add)
+                        .map_err(|_| oom_tuples(*self.tuples.allocator(), add))?;
+                }
+                // SAFETY: bucketno < buckets.len() by mask; hdr live.
+                unsafe {
+                    let head = self.buckets.get_unchecked_mut(bucketno as usize);
+                    (*hash_tuple).next = *head;
+                    *head = hash_tuple;
+                }
+                self.tuples.push(hdr);
+                // Skew space shrinks; overall space does not change.
+                self.space_used_skew -= tuple_size;
+            } else {
+                debug_assert!(batchno > self.curbatch);
+                let tuple = unsafe { HashJoinTupleHdr::mintuple(hash_tuple) };
+                let t_len = unsafe { (*tuple.as_ptr()).t_len };
+                // SAFETY: entry images live in the batch arena until reset.
+                let bytes = unsafe {
+                    core::slice::from_raw_parts(tuple.as_ptr().cast::<u8>(), t_len as usize)
+                };
+                save_tuple(
+                    &mut self.inner_batch_file[batchno as usize],
+                    hashvalue,
+                    bytes,
+                    mcx,
+                )?;
+                self.space_used -= tuple_size;
+                self.space_used_skew -= tuple_size;
+            }
+            hash_tuple = next;
+            // nodeHash.c:2717: the eviction walk stays cancellable.
+            cfi()?;
+        }
+
+        self.skew_bucket[bucket_to_remove as usize] = None;
+        self.n_skew_buckets -= 1;
+        self.space_used -= SKEW_BUCKET_OVERHEAD;
+        self.space_used_skew -= SKEW_BUCKET_OVERHEAD;
+
+        // All skew buckets gone: give up on the optimization and release the
+        // arrays' accounting.
+        if self.n_skew_buckets == 0 {
+            self.skew_enabled = false;
+            self.skew_bucket = PgVec::new_in(mcx);
+            self.skew_bucket_nums = PgVec::new_in(mcx);
+            self.space_used -= self.space_used_skew;
+            self.space_used_skew = 0;
+        }
+        Ok(())
+    }
+
+    /// `ExecHashJoinNewBatch`'s end-of-first-batch reset (nodeHashjoin.c:1155):
+    /// skew tuples are never needed after batch 0; the batch-context reset
+    /// that follows releases them.
+    pub fn end_skew_after_first_batch(&mut self) {
+        let mcx = *self.tuples.allocator();
+        self.skew_enabled = false;
+        self.skew_bucket = PgVec::new_in(mcx);
+        self.skew_bucket_nums = PgVec::new_in(mcx);
+        self.n_skew_buckets = 0;
+        self.space_used_skew = 0;
+    }
+
     fn finish_build(&mut self, mcx: Mcx<'mcx>) -> PgResult<()> {
         if self.nbuckets != self.nbuckets_optimal {
             self.increase_num_buckets(mcx)?;
@@ -746,12 +1027,24 @@ impl<'mcx> HashJoinTable<'mcx> {
         (bf.density() <= 0.25).then(|| Rc::new(bf))
     }
 
-    /// `ExecHashTableResetMatchFlags`.
+    /// `ExecHashTableResetMatchFlags`: main buckets, then the skew buckets
+    /// (nodeHash.c:2377).
     pub fn reset_match_flags(&mut self) {
         for &head in self.buckets.iter() {
             let mut cur = head;
             while !cur.is_null() {
                 // SAFETY: chain headers/images live in the batch arena.
+                unsafe {
+                    (*HashJoinTupleHdr::mintuple(cur).as_ptr()).clear_match();
+                    cur = (*cur).next;
+                }
+            }
+        }
+        for i in 0..self.n_skew_buckets as usize {
+            let j = self.skew_bucket_nums[i] as usize;
+            let mut cur = self.skew_bucket[j].expect("active skew bucket").tuples;
+            while !cur.is_null() {
+                // SAFETY: as above.
                 unsafe {
                     (*HashJoinTupleHdr::mintuple(cur).as_ptr()).clear_match();
                     cur = (*cur).next;
@@ -823,6 +1116,15 @@ pub struct HashState<'mcx> {
     /// base column only for plain-Var keys (createplan.c); sizing reserves
     /// the skew-MCV memory only then (nodeHash.c ExecHashTableCreate).
     use_skew: bool,
+    // Hash.skewTable / skewColumn / skewInherit: the OUTER key's base column
+    // whose pg_statistic MCVs seed the skew buckets (ExecHashBuildSkewHash).
+    skew_table: Oid,
+    skew_column: i16,
+    skew_inherit: bool,
+    /// C `skew_hashfunction` + `skew_collation` (nodeHashjoin.c:897-905):
+    /// the outer side's hash function of the first key, with the first
+    /// key's collation; Some iff skewTable is valid.
+    skew_hashfn: Option<(Oid, Oid)>,
 }
 
 impl<'mcx> HashState<'mcx> {
@@ -886,6 +1188,7 @@ pub fn exec_init_hash<'mcx>(
     estate: &mut EStateData<'mcx>,
     inner_desc: Rc<TupleDescData<'static>>,
     inner_hashfn_oids: &[Oid],
+    outer_hashfn_oids: &[Oid],
     collations: &[Oid],
     hash_strict: &[bool],
     keep_nulls: bool,
@@ -934,11 +1237,22 @@ pub fn exec_init_hash<'mcx>(
         inner_desc: Some(inner_desc),
         parallel_aware: node.plan.parallel_aware,
         use_skew: node.skewTable != InvalidOid,
+        skew_table: node.skewTable,
+        skew_column: node.skewColumn,
+        skew_inherit: node.skewInherit,
+        // nodeHashjoin.c:900: set up the skew table hash function while the
+        // first key's outer hash function oid is at hand.
+        skew_hashfn: if node.skewTable != InvalidOid {
+            Some((outer_hashfn_oids[0], collations[0]))
+        } else {
+            None
+        },
     })
 }
 
-/// `ExecHashTableCreate`; useskew = C's OidIsValid(node->skewTable) (the skew
-/// buckets themselves are not built).
+/// `ExecHashTableCreate`; useskew = C's OidIsValid(node->skewTable), and with
+/// more than one batch the skew buckets are built from the outer key's MCVs
+/// (nodeHash.c:633-638).
 pub fn exec_hash_table_create<'mcx>(
     hs: &HashState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -959,11 +1273,74 @@ pub fn exec_hash_table_create<'mcx>(
         "ExecHashTableCreate (nodeHash.c): private-table arm with parallel_state attached"
     );
     let mcx = estate.es_query_cxt;
-    let (nbuckets, nbatch, _num_skew_mcvs, space_allowed) =
+    let (nbuckets, nbatch, num_skew_mcvs, space_allowed) =
         exec_choose_hash_table_size_full(hs.ntuples_est, hs.tupwidth, hs.use_skew, false, 0);
     let form_plan = hs.inner_desc.as_ref().and_then(|d| MinimalFormPlan::try_new(d));
     let bloom_est = want_filter.then_some(hs.ntuples_est);
-    HashJoinTable::create(mcx, estate, nbuckets, nbatch, space_allowed, form_plan, bloom_est)
+    let mut table =
+        HashJoinTable::create(mcx, estate, nbuckets, nbatch, space_allowed, form_plan, bloom_est)?;
+    // Skew optimization only pays with more than one batch (nodeHash.c:633).
+    if nbatch > 1 {
+        exec_hash_build_skew_hash(hs, &mut table, mcx, num_skew_mcvs)?;
+    }
+    Ok(table)
+}
+
+/// `ExecHashBuildSkewHash` (nodeHash.c:2410): the outer join key's MCV
+/// statistics (STATRELATTINH on skewTable/skewColumn/skewInherit, the MCV
+/// slot's values + numbers) seed one skew bucket per MCV hash value, up to
+/// `mcvs_to_use`, provided the MCVs cover at least SKEW_MIN_OUTER_FRACTION of
+/// the outer relation. Values are hashed with the outer key's hash function
+/// and collation, exactly as the probe side hashes them.
+fn exec_hash_build_skew_hash<'mcx>(
+    hs: &HashState<'mcx>,
+    table: &mut HashJoinTable<'mcx>,
+    mcx: Mcx<'mcx>,
+    mcvs_to_use: i32,
+) -> PgResult<()> {
+    // Do nothing if the planner didn't identify the outer relation's join key.
+    let Some((hashfn, collation)) = hs.skew_hashfn else {
+        return Ok(());
+    };
+    // Also, do nothing if we don't have room for at least one skew bucket.
+    if mcvs_to_use <= 0 {
+        return Ok(());
+    }
+    // SearchSysCache3(STATRELATTINH): no stats tuple, no skew.
+    let Some(bundle) = syscache_seams::lookup_pg_statistic_bundle::call(
+        mcx,
+        hs.skew_table,
+        hs.skew_column,
+        hs.skew_inherit,
+    )?
+    else {
+        return Ok(());
+    };
+    // get_attstatsslot(STATISTIC_KIND_MCV, InvalidOid, VALUES | NUMBERS).
+    let Some(slot) = bundle.slots.iter().find(|s| s.kind == STATISTIC_KIND_MCV) else {
+        return Ok(());
+    };
+    let values = slot.values()?;
+    let numbers = slot.numbers()?;
+    // C reads numbers[i] for i < mcvsToUse (well-formed MCV slots pair every
+    // value with a frequency); the paired prefix is the usable MCV list.
+    let mcvs_to_use = (mcvs_to_use as usize).min(values.len()).min(numbers.len());
+
+    // Expected fraction of the outer relation covered by the skew buckets.
+    let mut frac = 0.0f64;
+    for &n in &numbers[..mcvs_to_use] {
+        frac += n as f64;
+    }
+    if frac < SKEW_MIN_OUTER_FRACTION {
+        return Ok(());
+    }
+
+    let mut hashes: PgVec<'mcx, u32> = vec_with_capacity_in(mcx, mcvs_to_use)?;
+    for &v in &values[..mcvs_to_use] {
+        // FunctionCall1Coll(skew_hashfunction, skew_collation, value)
+        hashes.push(::fmgr_core::oid_function_call1_coll(hashfn, collation, v)?.as_u32());
+    }
+    table.build_skew_buckets(mcx, &hashes)
 }
 
 #[inline(always)]
@@ -980,7 +1357,14 @@ fn hash_insert_slot<'mcx>(
     };
     let ecxt = hs.ps_ExprContext;
     let table = hs.table.as_mut().expect("hash table created");
-    table.insert(estate, slot_id, ecxt, hashvalue)?;
+    // nodeHash.c:181-193: an outer-MCV hash value goes to its skew bucket.
+    let bucket_number = table.get_skew_bucket(hashvalue);
+    if bucket_number != INVALID_SKEW_BUCKET_NO {
+        table.skew_table_insert(estate, slot_id, hashvalue, bucket_number)?;
+        table.skew_tuples += 1.0;
+    } else {
+        table.insert(estate, slot_id, ecxt, hashvalue)?;
+    }
     table.total_tuples += 1.0;
     Ok(())
 }
@@ -1324,6 +1708,7 @@ fn oom_tuples(mcx: Mcx<'_>, add: usize) -> Box<PgError> {
 // is destroyed and taken there, hash_expr via release_frames, inner_desc taken,
 // ptable/parallel_state detached in the shutdown walk then dropped there.
 mcx::forget_safe_struct!(
-    HashState<'_> { hash_tuple_slot, ps_ExprContext, ntuples_est, tupwidth, parallel_aware, use_skew;
+    HashState<'_> { hash_tuple_slot, ps_ExprContext, ntuples_est, tupwidth, parallel_aware, use_skew,
+        skew_table, skew_column, skew_inherit, skew_hashfn;
         table, ptable, parallel_state, hash_expr, inner_desc },
 );

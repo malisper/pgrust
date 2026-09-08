@@ -53,7 +53,10 @@ fn CatalogIndexInsert<'mcx>(
             "system catalog with expression/partial index"
         );
     }
-    execindexing::ExecInsertIndexTuples(mcx, mcx, indstate, heap_rel, &mut slot, false, None, &[], false)?;
+    // CatalogIndexInsert (indexing.c:157): a plain insert, no UPDATE hint.
+    execindexing::ExecInsertIndexTuples(
+        mcx, mcx, indstate, heap_rel, &mut slot, None, false, None, &[], false,
+    )?;
     exectuples::exec_clear_tuple(&mut slot, mcx);
     Ok(())
 }

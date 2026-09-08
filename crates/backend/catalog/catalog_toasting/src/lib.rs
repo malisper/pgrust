@@ -188,6 +188,8 @@ fn create_toast_table<'mcx>(
         ii_ExclusionProcs: [0; INDEX_MAX_KEYS as usize],
         ii_ExclusionStrats: [0; INDEX_MAX_KEYS as usize],
         ii_WithoutOverlaps: false,
+        ii_CheckedUnchanged: false,
+        ii_IndexUnchanged: false,
     };
     let collationIds = [InvalidOid, InvalidOid];
     let opclassIds = [OID_BTREE_OPS_OID, INT4_BTREE_OPS_OID];

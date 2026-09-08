@@ -593,7 +593,15 @@ fn noop_close(_oid: Oid, _mode: LOCKMODE) -> types_error::PgResult<()> {
 }
 
 fn index_relation<'mcx>(mcx: Mcx<'mcx>, oid: Oid, heap_oid: Oid) -> Relation<'mcx> {
-    index_relation_keyed(mcx, oid, heap_oid, int4_tupdesc(mcx), INT4OID, INT4_BTREE_OPFAMILY)
+    index_relation_keyed_am(
+        mcx,
+        oid,
+        heap_oid,
+        int4_tupdesc(mcx),
+        INT4OID,
+        INT4_BTREE_OPFAMILY,
+        BTREE_AM_OID,
+    )
 }
 
 // Single-key btree index: `rd_att` is the physical storage descriptor,
@@ -605,6 +613,20 @@ fn index_relation_keyed<'mcx>(
     rd_att: Rc<TupleDescData<'mcx>>,
     opcintype: Oid,
     opfamily: Oid,
+) -> Relation<'mcx> {
+    index_relation_keyed_am(mcx, oid, heap_oid, rd_att, opcintype, opfamily, BTREE_AM_OID)
+}
+
+// As above with the access method chosen by the caller (the scripted Mock AM
+// serves the lossy-recheck witness).
+fn index_relation_keyed_am<'mcx>(
+    mcx: Mcx<'mcx>,
+    oid: Oid,
+    heap_oid: Oid,
+    rd_att: Rc<TupleDescData<'mcx>>,
+    opcintype: Oid,
+    opfamily: Oid,
+    relam: Oid,
 ) -> Relation<'mcx> {
     let mut relname = NameData::default();
     relname.namestrcpy("t_idx");
@@ -639,7 +661,7 @@ fn index_relation_keyed<'mcx>(
             relnamespace: 2200,
             reltype: 0,
             relowner: 10,
-            relam: BTREE_AM_OID,
+            relam,
             relfilenode: oid,
             reltablespace: 0,
             relpages: 0,
@@ -990,4 +1012,93 @@ fn non_mvcc_snapshot_heap_continuation_is_an_error() {
         assert!(state.ioss_ScanDesc.as_ref().unwrap().xs_heap_continue);
         teardown(state, &mut estate);
     });
+}
+
+// audit-18.6 w2-011 (row nodeIndexonlyscan-2f14f94c): IndexOnlyNext counts a
+// tuple the lossy-index recheck rejects as InstrCountFiltered2
+// (nodeIndexonlyscan.c:206 — EXPLAIN ANALYZE "Rows Removed by Index
+// Recheck"). No 18.6 returnable opclass sets xs_recheck on an index-only
+// scan (btree resets it; gist/spgist leaf consistents are exact), so the
+// witness scripts a lossy AM: indexam's Mock kind returns three index
+// tuples with xs_recheck = true and the recheck qual keeps one of them.
+mod rem_w2_011_recheck {
+    use super::*;
+    use ::types_relscan::{IndexScanOpaque, MOCK_AM_OID};
+
+    fn mock_index_relation<'mcx>(mcx: Mcx<'mcx>, oid: Oid, heap_oid: Oid) -> Relation<'mcx> {
+        index_relation_keyed_am(
+            mcx,
+            oid,
+            heap_oid,
+            int4_tupdesc(mcx),
+            INT4OID,
+            INT4_BTREE_OPFAMILY,
+            MOCK_AM_OID,
+        )
+    }
+
+    // The scripted scan: tids (0,1..=3) carrying values 10, 20, 30, all
+    // rechecked; heap block 0 is all-visible so nothing is fetched.
+    fn scripted<'mcx>(
+        mcx: Mcx<'mcx>,
+        recheck: bool,
+    ) -> (EStateData<'mcx>, IndexOnlyScanState<'mcx>) {
+        let node = mk_index_only_scan(mcx, 20);
+        let heap_oid = fresh_oid();
+        let index_oid = fresh_oid();
+        register_pages(heap_oid, vec![build_heap_page(&[10, 20, 30])]);
+        register_pages_in(heap_oid, vec![vm_page(&[0])], true);
+        let rel = heap_relation(mcx, heap_oid);
+        let index_rel = mock_index_relation(mcx, index_oid, heap_oid);
+        let mut estate = EStateData::new_in(mcx);
+        estate.es_snapshot = Some(static_mvcc_snapshot());
+        // EXPLAIN ANALYZE shape: one instrumentation slot for the scan node.
+        estate.es_instrument = ::types_core::instrument::INSTRUMENT_ROWS;
+        estate
+            .es_instrumentation
+            .resize(1, ::types_core::instrument::Instrumentation::default());
+        let mut state =
+            exec_init_index_only_scan_rel(mcx, &node, &mut estate, rel, index_rel).unwrap();
+        state.ss.instr_idx = Some(0);
+        state.open_scandesc(&mut estate).unwrap();
+        let scandesc = state.ioss_ScanDesc.as_deref_mut().expect("opened");
+        assert!(scandesc.xs_want_itup);
+        let IndexScanOpaque::Mock(m) = &mut scandesc.opaque else {
+            panic!("the index relation must dispatch to the Mock AM");
+        };
+        for (i, v) in [10, 20, 30].into_iter().enumerate() {
+            let tid = ItemPointerData::new(0, (i + 1) as u16);
+            m.tids.push(tid);
+            m.itups.push(itup_image(tid, v).0.to_vec());
+        }
+        m.recheck = recheck;
+        (estate, state)
+    }
+
+    #[test]
+    fn recheck_rejections_count_as_rows_removed_by_index_recheck() {
+        let _g = serial();
+        with_mcx(|mcx| {
+            let (mut estate, mut state) = scripted(mcx, true);
+            assert_eq!(drain(&mut state, &mut estate), vec![20], "recheck keeps k = 20 only");
+            assert_eq!(
+                estate.es_instrumentation[0].nfiltered2, 2.0,
+                "nodeIndexonlyscan.c:206 InstrCountFiltered2 per recheck rejection"
+            );
+            teardown(state, &mut estate);
+        });
+    }
+
+    // Control: an exact AM (xs_recheck false) never rechecks, so every
+    // scripted tuple is returned and nothing is counted.
+    #[test]
+    fn exact_index_never_rechecks() {
+        let _g = serial();
+        with_mcx(|mcx| {
+            let (mut estate, mut state) = scripted(mcx, false);
+            assert_eq!(drain(&mut state, &mut estate), vec![10, 20, 30]);
+            assert_eq!(estate.es_instrumentation[0].nfiltered2, 0.0);
+            teardown(state, &mut estate);
+        });
+    }
 }
