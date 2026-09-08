@@ -67,9 +67,19 @@
 // declaration, so a store-wide fsync skips it, and its per-port file count at
 // stop is the evidence of which store a relation file actually landed in.
 //
+// A FAN-OUT LANE (--fanout N). The postmaster lane normally runs the
+// two-session host-pipes scenario. `--fanout N` runs wasm/fanout-scenario.js
+// instead: N sessions, N backends, each executing --fanout-statements point
+// SELECTs at once over one indexed table, timed as a single wall. It is the
+// same shape as the browser benchmark's Concurrency Test 1, and it runs under
+// `node` and under `bun` (JavaScriptCore) unchanged — which is how a wall that
+// differs between two JavaScript engines gets attributed to the engine rather
+// than to a browser.
+//
 // Usage: node run-node-wire-threads.mjs [--stderr FILE] [--pool N] [--workers N]
 //        [--dispatch stdio-wire|stdio-wire-threaded|postmaster] [--fs copy|broker]
 //        [--sql FILE] [--mount PREFIX=memory] [--trace N]
+//        [--fanout N [--fanout-statements M] [--fanout-rows R]]
 // Env: PGRUST_WASM_THREADS (path to the threads postgres.wasm),
 //      PGRUST_VFS (prefix for vfs.img/vfs.json),
 //      PGRUST_REPACKED_BUNDLE (URL of the @pgxsinkit/pglite-opfs-repacked browser
@@ -98,6 +108,7 @@ import {
   sessionWakeFd,
 } from './threads-host.js';
 import { runHostPipesScenario } from './hostpipes-scenario.js';
+import { runFanOutScenario, DEFAULT_STATEMENTS, DEFAULT_ROWS } from './fanout-scenario.js';
 import { loadRepackedBundle, repackedBundleUrl } from './broker-fs.js';
 import {
   WireReader,
@@ -175,6 +186,17 @@ const NO_SESSION_WAKE = process.argv.includes('--no-session-wake');
 // reports the CPU every thread of this process burned across the window: what
 // a BLOCKED backend costs, which is the price side of the wake-fd A/B.
 const IDLE_MS = Number(argAfter('--idle-ms') || 0);
+// --fanout N runs the READ FAN-OUT scenario (wasm/fanout-scenario.js) with N
+// client sessions instead of the two-session host-pipes scenario: N backends
+// each running --fanout-statements point SELECTs at once, timed as one wall.
+// It is the postmaster lane's answer to "what do N busy backends cost each
+// other", and it is here rather than in a driver of its own because every line
+// of boot above and below it — the pool, the broker store, the fd contract, the
+// real shutdown — is what makes the number mean anything.
+const FANOUT = Number(argAfter('--fanout') || 0);
+const FANOUT_STATEMENTS = Number(argAfter('--fanout-statements') || DEFAULT_STATEMENTS);
+const FANOUT_ROWS = Number(argAfter('--fanout-rows') || DEFAULT_ROWS);
+if (FANOUT && !POSTMASTER) throw new Error('--fanout applies to --dispatch postmaster');
 // `--fs broker` is the arm the postmaster lane is SCORED on now that its
 // shutdown is real: the shutdown checkpoint is the checkpointer thread
 // writing the store, and only the broker gives it the same store the backends
@@ -381,7 +403,9 @@ const stdoutPipe = SabPipe.create(1 << 22);
 // Two for the scenario (A, B) plus one for the shutdown path's explicit
 // CHECKPOINT (C): every pipe has to exist before the guest starts, because the
 // registry is handed to the pool workers at prewarm.
-const SESSION_COUNT = 3;
+// Two for the scenario plus one for the shutdown CHECKPOINT — or, under
+// --fanout N, one per client plus that same shutdown session.
+const SESSION_COUNT = FANOUT ? FANOUT + 1 : 3;
 const CONN_MAGIC = 0x50475048; // "HPGP" in stream order
 const pipeRegistry = new PipeRegistry();
 let listenerPipe = null;
@@ -939,6 +963,21 @@ async function runPostmasterLane() {
   plog(`postmaster ready: ${ready}`);
   if (!ready) {
     failures.push('postmaster never reached "ready to accept connections"');
+    return;
+  }
+  if (FANOUT) {
+    const fan = await runFanOutScenario({
+      openSession: openPipeSession,
+      shutdown: postmasterShutdown,
+      log: plog,
+      clients: FANOUT,
+      statements: FANOUT_STATEMENTS,
+      rows: FANOUT_ROWS,
+    });
+    for (const f of fan.failures) failures.push(f);
+    for (const c of fan.checks) if (!c.ok) failures.push(c.what);
+    for (const n of fan.notes) note(`note: ${n}`);
+    note(`FANOUT ${JSON.stringify(fan.timings)}`);
     return;
   }
   const result = await runHostPipesScenario({
