@@ -509,35 +509,63 @@ impl Drop for SimpleExpr {
 }
 
 std::thread_local! {
-    // One-shot registration flag for the backend-exit release below.
-    static SIMPLE_EXIT_RELEASE: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+    // Once-per-process registration flag for the backend-exit release below.
+    // "Process" = one task on this thread: the on_proc_exit list drains to
+    // empty at every exit (ipc.c:217 on_proc_exit_index = 0), so a retained
+    // pool thread's next task must register again; the callback clears the
+    // flag as its last act.
+    static EXIT_RELEASE_REGISTERED: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
 }
 
-// Backend-exit release of every compiled simple expression's plan pin.
-// Registered when the first Ready state is created, i.e. strictly AFTER
-// plancache's InitPlanCache registered ReleaseAllCachedPlansAtExit; the
-// on_proc_exit list drains LIFO, so this runs FIRST — before the plancache
-// force-clears its slots. Without it, EXPR_PLANS' thread-local destructor
-// would ReleaseCachedPlan into an already-cleared plancache (stale-handle
-// panic; TLS destructor order across crates is not a lifecycle).
-fn release_simple_states_at_exit(_code: i32, _arg: usize) {
-    let orphans: Vec<SimpleState> = EXPR_PLANS.with(|t| {
-        let mut t = t.borrow_mut();
-        t.values_mut()
-            .map(|e| core::mem::replace(&mut e.simple, SimpleState::Unknown))
-            .collect()
-    });
+// Backend-exit teardown of plpgsql's per-process state: the compiled-function
+// hash (pl_comp.c plpgsql_HashTable / funccache.c cfunc_hashtable:39, a
+// TopMemoryContext table kept "for the life of the backend" — funccache.c:59-75)
+// and every function's saved SPI plans (expr->plan, freed in C only by
+// delete_function or process death) with their simple-expression plan pins.
+//
+// In C all of this dies with the process: a parallel worker is a fresh
+// bgworker process per query (parallel.c:611 ParallelWorkerMain via
+// postmaster.c:4105 StartBackgroundWorker), so no task ever inherits another
+// task's compiled functions. This port's pool retains the worker THREAD across
+// tasks (init_small::wretain), and its park runs the on_proc_exit chain —
+// including plancache's ReleaseAllCachedPlansAtExit, which reclaims every
+// CachedPlanSource the SPI plans point at. A FUNC_CACHE entry surviving that
+// park would hand the next task a function whose SPI plans dereference
+// dropped plancache handles (plancache source_mut stale-handle panic, seen as
+// `ERROR ... CONTEXT: parallel worker` on the second forced-parallel call
+// after a park). So the process-death lifecycle is made explicit here.
+//
+// Registered on the first compile (or first Ready simple state), i.e.
+// strictly AFTER plancache's InitPlanCache registered
+// ReleaseAllCachedPlansAtExit; the on_proc_exit list drains LIFO, so this runs
+// FIRST — SPI_freeplan/DropCachedPlan see a live registry (on a warm-claimed
+// thread whose registry is already torn down they are C's process-death
+// abandonment: no-ops). Without it, EXPR_PLANS' thread-local destructor would
+// ReleaseCachedPlan into an already-cleared plancache (stale-handle panic;
+// TLS destructor order across crates is not a lifecycle).
+fn release_plpgsql_state_at_exit(_code: i32, _arg: usize) {
+    // The function hash first (pl_comp.c: functions own their expressions'
+    // plans); entries drop outside the map borrow.
+    crate::handler::release_func_cache_at_exit();
+    let entries: Vec<PlanEntry> = EXPR_PLANS.with(|t| t.borrow_mut().drain().map(|(_, e)| e).collect());
     // Drops (plan pins, fn_extra) run outside the map borrow, plancache
-    // still intact.
-    drop(orphans);
+    // still intact; simple pin before its plansource (free_function_plans
+    // order).
+    for e in entries {
+        let PlanEntry { plan, simple, .. } = e;
+        drop(simple);
+        spi::SPI_freeplan(plan);
+    }
+    CALL_TARGETS.with(|t| t.borrow_mut().clear());
+    EXIT_RELEASE_REGISTERED.with(|c| c.set(false));
 }
 
-fn register_simple_exit_release() {
-    SIMPLE_EXIT_RELEASE.with(|c| {
+pub(crate) fn register_exit_release() {
+    EXIT_RELEASE_REGISTERED.with(|c| {
         if !c.get() {
             // installed() guard: unit-test rigs run without ipc.
             if ipc_seams::on_proc_exit::is_installed() {
-                ipc_seams::on_proc_exit::call(release_simple_states_at_exit, 0);
+                ipc_seams::on_proc_exit::call(release_plpgsql_state_at_exit, 0);
             }
             c.set(true);
         }
@@ -1907,8 +1935,10 @@ impl<'a> Estate<'a> {
         match built {
             Ok(Some(se)) => {
                 // First Ready state of this backend: arrange orderly pin
-                // release at proc_exit (see release_simple_states_at_exit).
-                register_simple_exit_release();
+                // release at proc_exit (see release_plpgsql_state_at_exit;
+                // normally already registered by the compile that produced
+                // this expression).
+                register_exit_release();
                 Ok(Some(se))
             }
             Ok(None) => {

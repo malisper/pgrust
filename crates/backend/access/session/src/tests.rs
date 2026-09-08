@@ -382,14 +382,17 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      identity parallel helpers, no cross-thread access, no retained
     //      session state.
     // 479, simplecache lane (fix/plpgsql-simple-cache):
-    //   20. pl/plpgsql/src/exec.rs SIMPLE_EXIT_RELEASE — one-shot Cell<bool>
-    //      recording that this backend thread registered its on_proc_exit
-    //      release of function-lifetime simple-expression plan pins
-    //      (release_simple_states_at_exit; the TLS-destructor-order law).
+    //   20. pl/plpgsql/src/exec.rs EXIT_RELEASE_REGISTERED (born
+    //      SIMPLE_EXIT_RELEASE) — Cell<bool> recording that this backend
+    //      thread registered its on_proc_exit teardown of plpgsql's
+    //      per-process state: the compiled-function hash, its SPI plans and
+    //      the function-lifetime simple-expression plan pins
+    //      (release_plpgsql_state_at_exit; the TLS-destructor-order law).
     //      Pure per-thread registration bookkeeping: no session identity,
-    //      no state movement, never reset — the registered callback (and
-    //      the flag's meaning) live exactly as long as the backend thread,
-    //      same class as the router DUMP guard (slot 18).
+    //      no state movement; the callback clears it as its last act so a
+    //      retained pool thread's next task (a fresh process in C, whose
+    //      on_proc_exit list drained to empty) registers again — audit-18.6
+    //      fu05. Same class as the router DUMP guard (slot 18).
     // +14 recovery slots (t26 car-10 re-board; renumbered after the simplecache slot): ALL
     // one class — C per-PROCESS function-statics of the replication/
     // recovery machinery become per-THREAD TLS on the thread model, owned

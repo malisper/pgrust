@@ -140,6 +140,19 @@ std::thread_local! {
         core::cell::RefCell::new(FxHashMap::default());
 }
 
+// Process-death teardown of the compiled-function hash (C: TopMemoryContext
+// dies with the backend; a parallel worker is a fresh process per query).
+// Called from exec.rs release_plpgsql_state_at_exit, BEFORE it frees the
+// functions' SPI plans; entries drop outside the map borrow. use_count is
+// ignored exactly as C's process death ignores it: no invocation can be in
+// flight — child threads drain the exit chain at the thread top, after the
+// unwind (ipc proc_exit).
+pub(crate) fn release_func_cache_at_exit() {
+    let entries: Vec<FuncCacheEntry> =
+        FUNC_CACHE.with(|c| c.borrow_mut().drain().map(|(_, e)| e).collect());
+    drop(entries);
+}
+
 #[derive(Clone, Copy)]
 enum CallKind {
     Function,
@@ -218,6 +231,11 @@ fn plpgsql_compile(
         CallKind::EventTrigger => (false, types_core::InvalidOid, true),
     };
     let key = (fn_oid, fn_collation, is_trigger, trig_oid, is_event_trigger, key_argtypes);
+    // The cache's lifetime is the process's (funccache.c:59-75): on this
+    // thread model that is the on_proc_exit chain, and a retained pool
+    // thread runs it at every park — register the teardown before the first
+    // entry exists (exec.rs release_plpgsql_state_at_exit).
+    crate::exec::register_exit_release();
     let cached = FUNC_CACHE.with(|c| c.borrow().get(&key).cloned());
     if let Some(entry) = cached {
         // xmin/tid (funccache.c) covers a redefined pg_proc row; the
