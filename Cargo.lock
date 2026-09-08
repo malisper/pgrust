@@ -16630,8 +16630,10 @@ version = "0.1.0"
 name = "s_lock"
 version = "0.0.0"
 dependencies = [
+ "elog_seams",
  "pg_prng",
  "s_lock_seams",
+ "types_error",
  "waiter",
  "waitevent_seams",
 ]

@@ -28,10 +28,7 @@ pub fn perform_spin_delay(status: &mut SpinDelayStatus) {
     if status.spins >= SPINS_PER_DELAY.get() {
         status.delays += 1;
         if status.delays > NUM_DELAYS {
-            panic!(
-                "stuck spinlock detected at {}, {}:{}",
-                status.func, status.file, status.line
-            );
+            s_lock_stuck(status.file, status.line, status.func);
         }
 
         if status.cur_delay == 0 {
@@ -55,6 +52,28 @@ pub fn perform_spin_delay(status: &mut SpinDelayStatus) {
 
         status.spins = 0;
     }
+}
+
+/// s_lock_stuck (s_lock.c:78-93): `elog(PANIC, "stuck spinlock detected at
+/// %s, %s:%d", func, file, line)` -- the report goes through the error
+/// subsystem (log destinations, PANIC level, crash restart), never a bare
+/// Rust panic. C's `if (!func) func = "(unknown)"` has no arm here: the
+/// port's SpinDelayStatus carries a non-null `&'static str`.
+///
+/// errfinish's PANIC arm never returns (it unwinds the backend thread with
+/// `PanicExitThread`, C abort()'s thread rendering), and `ereport()` is
+/// `pg_unreachable()` past an elevel >= ERROR (elog.h:149): an implementation
+/// that does hand control back is given the same crash class rather than a
+/// fall-through into more spinning.
+#[cold]
+#[inline(never)]
+fn s_lock_stuck(file: &str, line: i32, func: &str) -> ! {
+    let _ = elog_seams::ereport_msg::call(
+        types_error::PANIC,
+        format!("stuck spinlock detected at {func}, {file}:{line}"),
+        None,
+    );
+    std::panic::panic_any(types_error::PanicExitThread)
 }
 
 pub fn finish_spin_delay(status: &SpinDelayStatus) {

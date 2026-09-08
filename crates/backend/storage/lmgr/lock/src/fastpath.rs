@@ -26,7 +26,13 @@ pub(crate) fn FastPathStrongLockHashPartition(hashcode: u32) -> u32 {
     hashcode % FAST_PATH_STRONG_LOCK_HASH_PARTITIONS as u32
 }
 
-struct FastPathStrongRelationLockData {
+/// FastPathStrongRelationLockData (lock.c:306-310): `slock_t mutex` padded
+/// to the uint32 boundary, then `uint32 count[FAST_PATH_STRONG_LOCK_HASH_
+/// PARTITIONS]` -- sizeof = 4100, the size LockManagerShmemInit registers
+/// under "Fast Path Strong Relation Lock Data" (lock.c:494-500). The port's
+/// Spinlock is a 4-byte word, so the layout is C's without explicit padding.
+#[repr(C)]
+pub(crate) struct FastPathStrongRelationLockData {
     mutex: Spinlock,
     // Atomics with SeqCst transitions, NOT SyncCell + the spinlock alone: the
     // unlocked fast-path read below is the ONLY synchronization edge between
@@ -45,17 +51,40 @@ struct FastPathStrongRelationLockData {
     count: [std::sync::atomic::AtomicU32; FAST_PATH_STRONG_LOCK_HASH_PARTITIONS],
 }
 
-#[allow(clippy::declare_interior_mutable_const)]
-const ZERO_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+const _: () = assert!(
+    std::mem::size_of::<FastPathStrongRelationLockData>() == 4100,
+    "sizeof(FastPathStrongRelationLockData) is 4100 in C 18.6"
+);
 
-static FAST_PATH_STRONG_RELATION_LOCKS: FastPathStrongRelationLockData =
-    FastPathStrongRelationLockData {
-        mutex: Spinlock::new(),
-        count: [ZERO_COUNT; FAST_PATH_STRONG_LOCK_HASH_PARTITIONS],
-    };
+/// lock.c:494-500: `FastPathStrongRelationLocks = ShmemInitStruct("Fast Path
+/// Strong Relation Lock Data", sizeof(FastPathStrongRelationLockData),
+/// &found); if (!found) SpinLockInit(&FastPathStrongRelationLocks->mutex);`
+/// -- the counters live in a ShmemIndex block (so pg_shmem_allocations lists
+/// the row with C's size), not in a process static. SpinLockInit is
+/// S_INIT_LOCK == S_UNLOCK (s_lock.h); the counts are the block's zero fill.
+pub(crate) fn shmem_init_strong_locks() -> PgResult<&'static FastPathStrongRelationLockData> {
+    let (raw, found) = shmem::ShmemInitStruct(
+        "Fast Path Strong Relation Lock Data",
+        std::mem::size_of::<FastPathStrongRelationLockData>(),
+    )?;
+    // SAFETY: a cache-line-aligned, zeroed ShmemIndex block of exactly
+    // sizeof(FastPathStrongRelationLockData) bytes (4-aligned atomics over
+    // zero bytes are valid values); leaked for the cluster lifetime like C
+    // shmem, and every field is an atomic, so sharing it across backend
+    // threads is sound.
+    let data = unsafe { &*raw.cast::<FastPathStrongRelationLockData>() };
+    if !found {
+        data.mutex.unlock();
+    }
+    Ok(data)
+}
+
+fn strong_locks() -> &'static FastPathStrongRelationLockData {
+    crate::shared::shared().fast_path_strong
+}
 
 fn strong_spin_acquire() {
-    let lock = &FAST_PATH_STRONG_RELATION_LOCKS.mutex;
+    let lock = &strong_locks().mutex;
     if lock.tas() != 0 {
         let mut delay = s_lock_seams::SpinDelayStatus::new(
             file!(),
@@ -74,23 +103,23 @@ pub(crate) fn strong_lock_count(fasthashcode: u32) -> u32 {
     // SeqCst here pairs with the SeqCst decrement + sinval hasMessages ops
     // (see FastPathStrongRelationLockData) to keep invalidation delivery
     // ordered before a fast-path grant that observes the release.
-    FAST_PATH_STRONG_RELATION_LOCKS.count[fasthashcode as usize]
+    strong_locks().count[fasthashcode as usize]
         .load(std::sync::atomic::Ordering::SeqCst)
 }
 
 pub(crate) fn increment_strong_lock_count_partition(fasthashcode: u32) {
     strong_spin_acquire();
-    FAST_PATH_STRONG_RELATION_LOCKS.count[fasthashcode as usize]
+    strong_locks().count[fasthashcode as usize]
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    FAST_PATH_STRONG_RELATION_LOCKS.mutex.unlock();
+    strong_locks().mutex.unlock();
 }
 
 pub(crate) fn decrement_strong_lock_count_partition(fasthashcode: u32) {
     strong_spin_acquire();
-    let prev = FAST_PATH_STRONG_RELATION_LOCKS.count[fasthashcode as usize]
+    let prev = strong_locks().count[fasthashcode as usize]
         .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     debug_assert!(prev > 0);
-    FAST_PATH_STRONG_RELATION_LOCKS.mutex.unlock();
+    strong_locks().mutex.unlock();
 }
 
 pub(crate) fn decrement_strong_lock_count(hashcode: u32) {
@@ -100,8 +129,9 @@ pub(crate) fn decrement_strong_lock_count(hashcode: u32) {
 // Boot image: all counts zero, spinlock free. Exclusive postmaster-thread
 // access per the crash choreography.
 pub(crate) fn reset_strong_locks_after_crash() {
-    FAST_PATH_STRONG_RELATION_LOCKS.mutex.unlock();
-    for cell in FAST_PATH_STRONG_RELATION_LOCKS.count.iter() {
+    let strong = strong_locks();
+    strong.mutex.unlock();
+    for cell in strong.count.iter() {
         cell.store(0, std::sync::atomic::Ordering::SeqCst);
     }
 }

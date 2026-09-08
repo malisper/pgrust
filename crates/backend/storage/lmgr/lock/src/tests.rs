@@ -783,3 +783,20 @@ fn shmem_init_registers_lock_hashes_with_c_shared_size() {
         shmem::ShmemInitStruct("PROCLOCK hash", shared_size(max_table_size * 2)).unwrap();
     assert!(found, "\"PROCLOCK hash\" is not registered in the ShmemIndex");
 }
+
+// audit-18.6 w2-041 (fp-lmgr-lock-p1): LockManagerShmemInit also allocates
+// the fast-path strong-lock counters with ShmemInitStruct("Fast Path Strong
+// Relation Lock Data", sizeof(FastPathStrongRelationLockData), &found)
+// (lock.c:494-500), so pg_shmem_allocations lists that row with size 4100
+// (slock_t + padding to the uint32 boundary, then uint32 count[1 << 10]).
+// C attaches by name and size (shmem.c:428-456; a size mismatch is an
+// ERROR), the probe used here.
+#[test]
+fn shmem_init_registers_fast_path_strong_relation_lock_data() {
+    setup();
+    let (_, found) = shmem::ShmemInitStruct("Fast Path Strong Relation Lock Data", 4100).unwrap();
+    assert!(
+        found,
+        "\"Fast Path Strong Relation Lock Data\" (4100 bytes) is not registered in the ShmemIndex"
+    );
+}

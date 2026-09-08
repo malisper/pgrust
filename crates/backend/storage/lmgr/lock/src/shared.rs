@@ -28,6 +28,9 @@ pub(crate) fn NLOCKENTS(max_prepared_xacts: i32) -> i64 {
 pub(crate) struct SharedTables {
     pub lock_hash: *mut HTAB,
     pub proclock_hash: *mut HTAB,
+    // lock.c:494-500 FastPathStrongRelationLocks: the ShmemIndex block
+    // "Fast Path Strong Relation Lock Data".
+    pub fast_path_strong: &'static crate::fastpath::FastPathStrongRelationLockData,
 }
 
 // SAFETY: post-arming, both tables are fully preallocated and fixed: bucket
@@ -136,9 +139,12 @@ pub fn LockManagerShmemInit(max_prepared_xacts: i32) -> PgResult<()> {
         HASH_ELEM | HASH_FUNCTION,
     )?;
 
+    let fast_path_strong = crate::fastpath::shmem_init_strong_locks()?;
+
     let _ = SHARED.set(SharedTables {
         lock_hash,
         proclock_hash: proclock_hash_table,
+        fast_path_strong,
     });
     Ok(())
 }
