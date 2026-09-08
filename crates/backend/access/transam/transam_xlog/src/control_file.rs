@@ -192,6 +192,16 @@ pub fn ReadControlFile() -> PgResult<()> {
 
     crate::CalculateCheckpointSegments();
 
+    // Record the dynamic default so backend GUC reinitialization preserves it.
+    if guc_seams::set_config_option_internal_dynamic_default::is_installed() {
+        guc_seams::set_config_option_internal_dynamic_default::call(
+            "data_checksums",
+            if cf.data_checksum_version > 0 { "yes" } else { "no" },
+        )?;
+    } else {
+        guc_tables::vars::data_checksums.write(cf.data_checksum_version > 0);
+    }
+
     control_file_update(|dst| *dst = cf);
     CONTROL_FILE_READ.store(true, std::sync::atomic::Ordering::Relaxed);
     Ok(())

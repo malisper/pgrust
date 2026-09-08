@@ -886,6 +886,18 @@ fn current_string(c: &config_string) -> Option<String> {
     }
 }
 
+pub(crate) fn raw_config_value(record: &GucVariable) -> String {
+    match record {
+        GucVariable::Bool(conf) => if current_bool(conf) { "on" } else { "off" }.to_string(),
+        GucVariable::Int(conf) => current_int(conf).to_string(),
+        GucVariable::Real(conf) => fmt_g(current_real(conf)),
+        GucVariable::String(conf) => current_string(conf).unwrap_or_default(),
+        GucVariable::Enum(conf) => config_enum_lookup_by_value(conf, current_enum(conf))
+            .unwrap_or("?")
+            .to_string(),
+    }
+}
+
 pub fn show_guc_option(record: &GucVariable, use_units: bool) -> String {
     match record {
         GucVariable::Bool(conf) => {

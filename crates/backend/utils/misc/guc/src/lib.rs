@@ -268,7 +268,7 @@ pub fn GetConfigOption(
                 .into_error()
                 .into());
         }
-        Ok(Some(show_guc_option(record, false)))
+        Ok(Some(registry::raw_config_value(record)))
     })
     .expect("GUC store not initialized")
 }
