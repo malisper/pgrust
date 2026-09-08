@@ -1896,7 +1896,8 @@ impl Tuplesort {
                 base.cast::<MinimalTupleData>(),
                 datum1,
                 isnull1,
-                (itup_off + maxalign(itup_len)) as i64,
+                // C charges its 24-byte HeapTupleData, excluding cached expression keys.
+                tuple_space(st.sortopt, 24 + t_len),
             )
         })
     }
