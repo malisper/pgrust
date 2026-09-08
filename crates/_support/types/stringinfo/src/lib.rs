@@ -110,17 +110,7 @@ impl<'mcx> StringInfo<'mcx> {
     #[inline(never)]
     fn enlarge_slow(&mut self, needed: usize) -> PgResult<()> {
         let len = self.data.len();
-        if needed >= MAX_ALLOC_SIZE.saturating_sub(len) {
-            return Err(enlarge_error(len, needed));
-        }
-        let total = len + needed + 1;
-        let mut newlen = 2 * self.data.capacity().max(1);
-        while total > newlen {
-            newlen *= 2;
-        }
-        if newlen > MAX_ALLOC_SIZE {
-            newlen = MAX_ALLOC_SIZE;
-        }
+        let newlen = enlarge_target(len, self.data.capacity(), needed)?;
         let mcx = *self.data.allocator();
         self.data
             .try_reserve_exact(newlen - len)
@@ -267,6 +257,24 @@ impl<'mcx> StringInfo<'mcx> {
         }
         Ok(())
     }
+}
+
+pub fn enlarge_target(len: usize, maxlen: usize, needed: usize) -> PgResult<usize> {
+    if needed >= MAX_ALLOC_SIZE.saturating_sub(len) {
+        return Err(enlarge_error(len, needed));
+    }
+    let total = len + needed + 1;
+    if total <= maxlen {
+        return Ok(maxlen);
+    }
+    let mut newlen = 2 * maxlen.max(1);
+    while total > newlen {
+        newlen *= 2;
+    }
+    if newlen > MAX_ALLOC_SIZE {
+        newlen = MAX_ALLOC_SIZE;
+    }
+    Ok(newlen)
 }
 
 #[cold]

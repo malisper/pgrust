@@ -10,7 +10,7 @@ use types_core::catalog::{INT2OID, INT4OID};
 use types_core::{InvalidOid, Oid, OidIsValid};
 use types_error::{
     PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_NULL_VALUE_NOT_ALLOWED,
-    ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+    ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
 };
 use types_fmgr::{function_call1_coll_in, FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
 
@@ -156,6 +156,12 @@ fn array_out_cache<'f>(
     Ok(flinfo.fn_extra_mut::<ArrayOutCache>().unwrap())
 }
 
+#[cold]
+#[inline(never)]
+fn formatted_concat_limit() -> Box<PgError> {
+    Box::new(PgError::error("out of memory").with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED))
+}
+
 // concat_internal's VARIADIC-array leg == array_to_text_internal with a NULL
 // null_string (varlena.c:5697-5725): null elements skipped.
 fn concat_variadic_array(
@@ -174,21 +180,32 @@ fn concat_variadic_array(
         cache.typalign as u8,
         true,
     )?;
-    let mut out: PgVec<'_, u8> = PgVec::new_in(mcx);
+    let mut out = ::stringinfo::StringInfo::new_in(mcx)?;
     let mut first = true;
     for (i, &value) in elems.iter().enumerate() {
         if nulls[i] {
             continue;
         }
+        let s = output_to_bytes(&mut cache.finfo, mcx, value)?;
         if first {
             first = false;
         } else {
-            mcx::vec_append_bytes(&mut out, sepstr)?;
+            // Formatted StringInfo appends reserve the formatter's NUL-inclusive estimate.
+            let needed = sepstr.len() + s.len();
+            if out.capacity() - out.len() < 16 {
+                out.enlarge(32)?;
+            }
+            if needed >= out.capacity() - out.len() {
+                if needed >= mcx::MAX_ALLOC_SIZE {
+                    return Err(formatted_concat_limit());
+                }
+                out.enlarge(needed + 1)?;
+            }
+            out.append_bytes(sepstr)?;
         }
-        let s = output_to_bytes(&mut cache.finfo, mcx, value)?;
-        mcx::vec_append_bytes(&mut out, s)?;
+        out.append_bytes(s)?;
     }
-    Ok(types_fmgr::varlena_result(cstring_to_text(mcx, &out)?))
+    Ok(types_fmgr::varlena_result(cstring_to_text(mcx, out.as_bytes())?))
 }
 
 // concat_internal (varlena.c:5682-5757); build_concat_foutcache's per-arg
@@ -226,7 +243,7 @@ fn concat_internal(
     let cache = flinfo.fn_extra_mut::<ConcatFout>().unwrap();
 
     let mcx = fcinfo.result_mcx();
-    let mut out: PgVec<'_, u8> = PgVec::new_in(mcx);
+    let mut out = ::stringinfo::StringInfo::new_in(mcx)?;
     let mut first_arg = true;
     for i in argidx..nargs {
         if fcinfo.argisnull(i) {
@@ -235,12 +252,12 @@ fn concat_internal(
         if first_arg {
             first_arg = false;
         } else {
-            mcx::vec_append_bytes(&mut out, sepstr)?;
+            out.append_bytes(sepstr)?;
         }
         let s = output_to_bytes(&mut cache.0[i], mcx, fcinfo.arg(i))?;
-        mcx::vec_append_bytes(&mut out, s)?;
+        out.append_bytes(s)?;
     }
-    Ok(Some(types_fmgr::varlena_result(cstring_to_text(mcx, &out)?)))
+    Ok(Some(types_fmgr::varlena_result(cstring_to_text(mcx, out.as_bytes())?)))
 }
 
 pub fn fc_text_concat(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {

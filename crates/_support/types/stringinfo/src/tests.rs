@@ -222,6 +222,25 @@ fn write_fixed_without_room_panics() {
 }
 
 #[test]
+fn enlarge_target_caps_instead_of_overshooting() {
+    assert_eq!(enlarge_target(0, 1024, 100).unwrap(), 1024);
+    assert_eq!(enlarge_target(1024, 1024, 100).unwrap(), 2048);
+    assert_eq!(enlarge_target(0, 1024, 5000).unwrap(), 8192);
+    assert_eq!(enlarge_target(500_000_000, 536_870_912, 200_000_000).unwrap(), MAX_ALLOC_SIZE);
+    assert_eq!(enlarge_target(MAX_ALLOC_SIZE - 1, MAX_ALLOC_SIZE, 0).unwrap(), MAX_ALLOC_SIZE);
+}
+
+#[test]
+fn enlarge_target_overflow_is_54000() {
+    let err = enlarge_target(MAX_ALLOC_SIZE, 1024, 1).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+    assert_eq!(
+        err.message(),
+        "string buffer exceeds maximum allowed length (1073741823 bytes)"
+    );
+}
+
+#[test]
 fn c_str_restores_spare_slot_after_fixed_write() {
     let ctx = MemoryContext::new("t");
     let mut buf = StringInfo::with_capacity_in(ctx.mcx(), 1).unwrap();

@@ -32,13 +32,12 @@ impl StringAggState {
     }
 
     pub fn append(&mut self, mcx: Mcx<'_>, bytes: &[u8]) -> PgResult<()> {
-        let needed = self.len as usize + bytes.len() + 1;
-        if needed > self.maxlen as usize {
-            let mut newlen = 2 * self.maxlen as usize;
-            while needed > newlen {
-                newlen *= 2;
-            }
-            mcx::check_alloc_size(newlen)?;
+        let newlen = ::stringinfo::enlarge_target(
+            self.len as usize,
+            self.maxlen as usize,
+            bytes.len(),
+        )?;
+        if newlen > self.maxlen as usize {
             let layout = Layout::from_size_align(newlen, 1).unwrap();
             let new = Allocator::allocate(&mcx, layout)
                 .map_err(|_| mcx.oom(newlen))?
@@ -194,4 +193,31 @@ pub fn string_agg_finalfn(fcinfo: &Fcinfo) -> Option<&[u8]> {
     // read-only here.
     let st = unsafe { &*(a.value.as_usize() as *const StringAggState) };
     Some(&st.accumulated()[st.cursor as usize..])
+}
+
+#[cfg(test)]
+mod tests {
+    use mcx::MemoryContext;
+
+    use super::*;
+
+    #[test]
+    fn append_grows_and_concatenates() {
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        let st = make_string_agg_state(mcx).unwrap();
+        // SAFETY: make_string_agg_state allocated this live, uniquely borrowed state.
+        let st = unsafe { &mut *st };
+        assert_eq!(st.maxlen as usize, INITIAL_SIZE);
+
+        let chunk = [b'x'; 300];
+        let mut expected: Vec<u8> = Vec::new();
+        for _ in 0..10 {
+            st.append(mcx, &chunk).unwrap();
+            expected.extend_from_slice(&chunk);
+        }
+        assert_eq!(st.accumulated(), &expected[..]);
+        assert_eq!(st.len as usize, 3000);
+        assert_eq!(st.maxlen, 4096);
+    }
 }
