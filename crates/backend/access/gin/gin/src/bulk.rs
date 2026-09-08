@@ -1,8 +1,7 @@
 //! ginbulk.c: build accumulator. C's rbtree becomes hash-dedup + one sort at
 //! dump — the dumped entry order (sorted by ginCompareEntries) and each
-//! entry's TID list are identical to C's in-order rbtree walk. Dedup is by
-//! key VALUE bytes; a compareFn-equal but byte-unequal key pair would diverge
-//! from C, so the dump sort panics loudly if it ever sees adjacent equal keys.
+//! entry's TID list are identical to C's in-order rbtree walk. Byte-image
+//! dedup is followed by comparator-equal posting-list coalescing at dump.
 
 use ::datum::Datum;
 use ::gin_vocab::*;
@@ -229,7 +228,7 @@ impl<'s> BuildAccumulator<'s> {
                 ::mcx::vec_reserve_huge(&mut e.list, add)?;
                 self.allocated_memory += chunk_space(e.list.capacity() * 6);
             }
-            if !e.should_sort {
+            if !e.should_sort && !e.list.is_empty() {
                 let res = ginCompareItemPointers(&e.list[e.list.len() - 1], heapptr);
                 debug_assert!(res != 0);
                 if res > 0 {
@@ -314,7 +313,9 @@ impl<'s> BuildAccumulator<'s> {
             .try_reserve(self.entries.len())
             .map_err(|_| crate::oom(self.entries.len() * 4))?;
         for i in 0..self.entries.len() as u32 {
-            self.dump_order.push(i);
+            if !self.entries[i as usize].list.is_empty() {
+                self.dump_order.push(i);
+            }
         }
         let entries = &self.entries;
         let state = self.state;
@@ -330,13 +331,39 @@ impl<'s> BuildAccumulator<'s> {
                 eb.key,
                 eb.category,
             );
-            if c == 0 {
-                // Byte-dedup missed a compareFn-equal pair: silent index
-                // corruption vs C — refuse.
-                panic!("gin build accumulator: compareFn-equal keys with distinct byte images");
-            }
-            c.cmp(&0)
+            c.cmp(&0).then_with(|| a.cmp(&b))
         });
+        let mut kept = 0;
+        for pos in 0..self.dump_order.len() {
+            let idx = self.dump_order[pos] as usize;
+            if kept > 0 {
+                let previous = self.dump_order[kept - 1] as usize;
+                let a = &self.entries[previous];
+                let b = &self.entries[idx];
+                if ginCompareAttEntries(
+                    &state, a.attnum, a.key, a.category, b.attnum, b.key, b.category,
+                ) == 0 {
+                    // The index tie-break retains C's first-inserted key image.
+                    let (before, after) = self.entries.split_at_mut(idx);
+                    let dst = &mut before[previous];
+                    let src = &mut after[0];
+                    let old_capacity = dst.list.capacity();
+                    if src.list.len() > dst.list.capacity() - dst.list.len() {
+                        let additional = src.list.len().max(dst.list.capacity());
+                        ::mcx::vec_reserve_huge(&mut dst.list, additional)?;
+                    }
+                    self.allocated_memory += chunk_space(dst.list.capacity() * 6)
+                        - chunk_space(old_capacity * 6);
+                    crate::vec_append(&mut dst.list, src.list.as_slice())?;
+                    dst.should_sort = true;
+                    src.list.clear();
+                    continue;
+                }
+            }
+            self.dump_order[kept] = idx as u32;
+            kept += 1;
+        }
+        self.dump_order.truncate(kept);
         self.dump_pos = 0;
         Ok(())
     }

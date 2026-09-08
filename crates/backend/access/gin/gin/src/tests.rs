@@ -577,3 +577,31 @@ mod posting_tree_vacuum {
         );
     }
 }
+
+#[test]
+fn build_accumulator_comparator_equal_images_coalesce() {
+    let ctx = MemoryContext::new_bump("comparator equal accumulator");
+    let mcx = ctx.mcx();
+    let mut acc = crate::bulk::BuildAccumulator::new(mcx, one_col_state(ts_col()));
+    let bytes = b"y".repeat(2100);
+    let first = pglz_key(mcx, &bytes);
+    let alternate = flat_key(mcx, &bytes);
+    let distinct = flat_key(mcx, b"zz");
+    for (key, block) in [(first, 8), (alternate, 3), (first, 2), (alternate, 9),
+                         (distinct, 1), (alternate, 4), (first, 7), (alternate, 6)] {
+        acc.insert_entries(&tid(block, 1), 1, &[key], &[GIN_CAT_NORM_KEY]).unwrap();
+    }
+    for _ in 0..2 {
+        acc.begin_scan().unwrap();
+        let (att, key, category, list) = acc.next_entry().unwrap();
+        assert_eq!((att, category), (1, GIN_CAT_NORM_KEY));
+        assert!(crate::opclass::inline_image(key) == crate::opclass::inline_image(first));
+        assert_eq!(list, &[tid(2, 1), tid(3, 1), tid(4, 1), tid(6, 1), tid(7, 1), tid(8, 1), tid(9, 1)]);
+        assert_eq!(acc.next_entry().unwrap().3, &[tid(1, 1)]);
+        assert!(acc.next_entry().is_none());
+    }
+    acc.insert_entries(&tid(5, 1), 1, &[alternate], &[GIN_CAT_NORM_KEY]).unwrap();
+    acc.begin_scan().unwrap();
+    assert_eq!(acc.next_entry().unwrap().3,
+        &[tid(2, 1), tid(3, 1), tid(4, 1), tid(5, 1), tid(6, 1), tid(7, 1), tid(8, 1), tid(9, 1)]);
+}
