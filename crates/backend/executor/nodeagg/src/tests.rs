@@ -508,7 +508,7 @@ fn run_agg(agg: &'static Agg<'static>, rows: &'static [i32]) -> (Datum, bool) {
         };
         assert!(exec_agg(&mut state, estate, feeder(outer_id, &[])).unwrap().is_none());
 
-        exec_rescan_agg(&mut state, estate);
+        assert!(exec_rescan_agg(&mut state, estate));
         let again = exec_agg(&mut state, estate, feeder(outer_id, rows)).unwrap().unwrap();
         let base = estate.slot_mut(again).base();
         assert_eq!(base.tts_values[0].as_i64(), v.as_i64());
@@ -658,6 +658,7 @@ fn hashed_group_by_counts_groups() {
         let agg = unsafe { shorten(agg) };
         let mut state = exec_init_agg(agg, estate, 0, result_desc, None).unwrap();
 
+        assert!(!exec_rescan_agg(&mut state, estate));
         let mut got: Vec<(i32, i64)> = Vec::new();
         {
             let mut feed = feeder(outer_id, rows);
@@ -671,7 +672,7 @@ fn hashed_group_by_counts_groups() {
         assert_eq!(got, vec![(1, 3), (2, 2), (3, 1)]);
 
         // Rescan reuses the filled table (C's no-chgParam arm).
-        exec_rescan_agg(&mut state, estate);
+        assert!(!exec_rescan_agg(&mut state, estate));
         let mut again: Vec<(i32, i64)> = Vec::new();
         {
             let mut feed = feeder(outer_id, &[]);
@@ -2334,7 +2335,7 @@ mod hashspill {
             assert!(ai.hash_disk_used > 0, "expected disk usage, got {ai:?}");
             assert!(ai.hash_mem_peak > 0);
 
-            exec_rescan_agg(&mut state, estate);
+            assert!(exec_rescan_agg(&mut state, estate));
             let mut again: Vec<(i32, i64)> = Vec::new();
             {
                 let mut feed = feeder(outer_id, rows);

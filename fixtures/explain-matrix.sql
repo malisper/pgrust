@@ -105,3 +105,11 @@ EXPLAIN (ANALYZE, TIMING OFF, COSTS OFF, SUMMARY OFF, FORMAT JSON) SELECT x, y, 
 -- shapes are exactly where the refusal lines leaked).
 EXPLAIN (ANALYZE, TIMING OFF, COSTS OFF, SUMMARY OFF) SELECT b, count(*) FROM em GROUP BY b ORDER BY b LIMIT 3;
 EXPLAIN (ANALYZE, TIMING OFF, COSTS OFF, SUMMARY OFF, FORMAT JSON) SELECT avg(b) FROM em_small;
+
+SET enable_hashjoin = off;
+SET enable_material = off;
+SET enable_memoize = off;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) SELECT s.x, g.n FROM (SELECT x FROM em_small WHERE x <= 2) s LEFT JOIN (SELECT b, count(*) AS n FROM em GROUP BY b) g ON g.b % 10 = s.x;
+RESET enable_memoize;
+RESET enable_material;
+RESET enable_hashjoin;

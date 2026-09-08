@@ -5509,7 +5509,7 @@ pub fn exec_rescan_agg_chg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut ES
     unsafe { node.agg_node.as_mut() }.reset();
 }
 
-pub fn exec_rescan_agg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut EStateData<'mcx>) {
+pub fn exec_rescan_agg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut EStateData<'mcx>) -> bool {
     let numgroups = node.plan.numGroups as f64;
     node.agg_done = false;
     // Merged results combine into the handed buffers in place, so a rescan
@@ -5529,18 +5529,18 @@ pub fn exec_rescan_agg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut EState
     if let Some(gs) = node.gsets.as_mut() {
         // C's no-chgParam AGG_HASHED arm: filled tables are reused, only the
         // iterators reset.
-        if !gsets::rescan_hash_reuse(gs) {
-            gsets::rescan_grouping_sets(gs).expect("grouping-sets rescan");
+        if gsets::rescan_hash_reuse(gs) {
+            return false;
         }
-        return;
+        gsets::rescan_grouping_sets(gs).expect("grouping-sets rescan");
+        return true;
     }
     if let Some(ph) = node.perhash.as_mut() {
         if !ph.spill.ever_spilled && !merged {
             // C's no-chgParam arm: the filled table is reused, only the
-            // iterator resets (the caller's child rescan is then redundant
-            // but harmless).
+            // iterator resets; the outer scan must keep its position.
             ph.hashiter = 0;
-            return;
+            return false;
         }
         // Spilled tables were consumed batchwise; rebuild (C falls through).
         ph.table_filled = false;
@@ -5553,13 +5553,14 @@ pub fn exec_rescan_agg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut EState
         ph.table_ctx.reset();
         // SAFETY: sole access path to the node during the reset.
         unsafe { node.agg_node.as_mut() }.reset();
-        return;
+        return true;
     }
     if let Some(ps) = node.persort.as_mut() {
         ps.have_pending = false;
     }
     // SAFETY: sole access path to the node during the reset.
     unsafe { node.agg_node.as_mut() }.reset();
+    true
 }
 
 /// C `AggGetAggref` (nodeAgg.c).

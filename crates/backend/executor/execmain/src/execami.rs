@@ -144,8 +144,10 @@ pub fn exec_re_scan<'mcx>(
         // ExecReScanAgg: outer child rescanned when chgParam is NULL (always,
         // until the Param lanes land).
         PlanStateNode::Agg(aps) => {
-            ::nodeagg::exec_rescan_agg(&mut aps.agg, estate);
-            exec_re_scan(&mut aps.outer, estate)
+            if ::nodeagg::exec_rescan_agg(&mut aps.agg, estate) {
+                exec_re_scan(&mut aps.outer, estate)?;
+            }
+            Ok(())
         }
         // ExecReScanWindowAgg: outer child rescanned when chgParam is NULL
         // (always, until the Param lanes land).
@@ -552,8 +554,9 @@ pub(crate) fn exec_re_scan_chg_forced<'mcx>(
                 && !outer_sees_chg
                 && !chg.overlap(&agg_plan.aggParams)
             {
-                ::nodeagg::exec_rescan_agg(&mut aps.agg, estate);
-                exec_re_scan(&mut aps.outer, estate)?;
+                if ::nodeagg::exec_rescan_agg(&mut aps.agg, estate) {
+                    exec_re_scan(&mut aps.outer, estate)?;
+                }
             } else {
                 ::nodeagg::exec_rescan_agg_chg(&mut aps.agg, estate);
                 exec_re_scan_with_chg(&mut aps.outer, outer_plan, estate, chg)?;
@@ -909,6 +912,10 @@ pub fn exec_mark_pos<'mcx>(
 ) -> PgResult<()> {
     match node {
         PlanStateNode::Instrumented(w) => exec_mark_pos(&mut w.inner, estate),
+        PlanStateNode::Result(rs) => match rs.outer.as_deref_mut() {
+            Some(outer) => exec_mark_pos(outer, estate),
+            None => Ok(()),
+        },
         PlanStateNode::IndexScan(is) => {
             if epq_markrestore_noop(estate, is.ss.scanrelid, "ExecIndexMarkPos") {
                 return Ok(());
@@ -934,6 +941,10 @@ pub fn exec_restr_pos<'mcx>(
 ) -> PgResult<()> {
     match node {
         PlanStateNode::Instrumented(w) => exec_restr_pos(&mut w.inner, estate),
+        PlanStateNode::Result(rs) => match rs.outer.as_deref_mut() {
+            Some(outer) => exec_restr_pos(outer, estate),
+            None => Err(result_mark_restore_error()),
+        },
         PlanStateNode::IndexScan(is) => {
             if epq_markrestore_noop(estate, is.ss.scanrelid, "ExecIndexRestrPos") {
                 return Ok(());
@@ -950,6 +961,11 @@ pub fn exec_restr_pos<'mcx>(
         PlanStateNode::Material(m) => ::nodematerial::exec_material_restr_pos(&mut m.state),
         _ => Err(unrecognized_node_type(node)),
     }
+}
+
+#[cold]
+fn result_mark_restore_error() -> Box<PgError> {
+    Box::new(PgError::error("Result nodes do not support mark/restore"))
 }
 
 fn planstate_tag(node: &PlanStateNode<'_>) -> NodeTag {

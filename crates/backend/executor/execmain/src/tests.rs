@@ -643,6 +643,58 @@ fn unsupported_mark_pos_is_noop_restr_errors() {
 }
 
 #[test]
+fn result_mark_restore_childless_error() {
+    install_seams();
+    let pstmt = mk_select1_pstmt(leaked_mcx(), None);
+    with_exec_data(pstmt, |data, pstmt| {
+        let mut ps = exec_init_node(pstmt.planTree, &mut data.estate, 0).unwrap().unwrap();
+        crate::execami::exec_mark_pos(&mut ps, &mut data.estate).unwrap();
+        let err = crate::execami::exec_restr_pos(&mut ps, &mut data.estate).unwrap_err();
+        assert_eq!(err.to_string(), "Result nodes do not support mark/restore");
+        assert_eq!(err.sqlstate, ::types_error::ERRCODE_INTERNAL_ERROR);
+    });
+}
+
+#[test]
+fn result_mark_restore_delegates_to_material() {
+    install_seams();
+    let mcx = leaked_mcx();
+    let mut append = Node::build::<::types_nodes::plannodes::Append>(mcx).unwrap();
+    append.part_prune_index = -1;
+    append.first_partial_plan = 2;
+    append.plan.targetlist = mk_const_tlist(mcx);
+    for n in [1, 2] {
+        let mut leaf = Node::build::<ResultPlan>(mcx).unwrap();
+        leaf.plan.targetlist = NodeList::make1(mcx,
+            Node::mk_target_entry(mcx, mk_int4_const(mcx, n), 1, Some("n"), false).unwrap()).unwrap();
+        append.appendplans.lappend(mcx, leaf.seal()).unwrap();
+    }
+    let mut material = Node::build::<::types_nodes::plannodes::Material>(mcx).unwrap();
+    material.plan.lefttree = Some(append.seal());
+    let var = Node::mk_var(mcx, ::types_nodes::primnodes::OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap();
+    material.plan.targetlist = NodeList::make1(mcx,
+        Node::mk_target_entry(mcx, var, 1, Some("n"), false).unwrap()).unwrap();
+    let mut result = Node::build::<ResultPlan>(mcx).unwrap();
+    result.plan.targetlist = material.plan.targetlist.clone_in(mcx).unwrap();
+    result.plan.lefttree = Some(material.seal());
+    let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
+    pstmt.commandType = CmdType::CMD_SELECT;
+    pstmt.planTree = Some(result.seal());
+    with_exec_data(pstmt.seal_ref(), |data, pstmt| {
+        let mut ps = exec_init_node(pstmt.planTree, &mut data.estate,
+            ::types_slot::EXEC_FLAG_MARK | ::types_slot::EXEC_FLAG_REWIND).unwrap().unwrap();
+        let first = exec_proc_node(&mut ps, &mut data.estate).unwrap().unwrap();
+        assert_eq!(data.estate.slot(first).base().tts_values[0].as_i32(), 1);
+        crate::execami::exec_mark_pos(&mut ps, &mut data.estate).unwrap();
+        let second = exec_proc_node(&mut ps, &mut data.estate).unwrap().unwrap();
+        assert_eq!(data.estate.slot(second).base().tts_values[0].as_i32(), 2);
+        crate::execami::exec_restr_pos(&mut ps, &mut data.estate).unwrap();
+        let replay = exec_proc_node(&mut ps, &mut data.estate).unwrap().unwrap();
+        assert_eq!(data.estate.slot(replay).base().tts_values[0].as_i32(), 2);
+    });
+}
+
+#[test]
 fn false_constant_qual_yields_zero_rows() {
     install_seams();
     let mcx = leaked_mcx();
