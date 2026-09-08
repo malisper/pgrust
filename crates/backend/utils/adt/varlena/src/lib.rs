@@ -943,29 +943,26 @@ pub fn split_identifier_string(
     separator: u8,
     encoding: wchar::pg_enc,
 ) -> PgResult<Option<Vec<String>>> {
-    Ok(split_identifier_string_bytes(mcx, rawstring.as_bytes(), separator, encoding)?.map(
-        |names| {
-            names
-                .into_iter()
-                .map(|n| String::from_utf8_lossy(&n).into_owned())
-                .collect()
-        },
-    ))
+    Ok(split_identifier_bytes(mcx, rawstring.as_bytes(), separator, encoding)?.map(|names| {
+        names
+            .iter()
+            .map(|n| String::from_utf8_lossy(n).into_owned())
+            .collect()
+    }))
 }
 
-// SplitIdentifierString over the raw bytes C sees: a text datum in a
-// SQL_ASCII database need not be UTF-8 (`chr(171)`), and C's downcase /
-// truncate / catalog-miss messages carry those bytes verbatim.
-pub fn split_identifier_string_bytes(
-    mcx: Mcx<'_>,
+// SplitIdentifierString on the raw bytes C scans (text_to_cstring output):
+// the names keep every byte, as C's in-place rewrite of rawstring does.
+pub fn split_identifier_bytes<'mcx>(
+    mcx: Mcx<'mcx>,
     rawstring: &[u8],
     separator: u8,
     encoding: wchar::pg_enc,
-) -> PgResult<Option<Vec<Vec<u8>>>> {
+) -> PgResult<Option<Vec<PgVec<'mcx, u8>>>> {
     use parser_small1::{downcase_truncate_identifier, scanner_isspace, truncate_identifier};
 
     let s = rawstring;
-    let mut namelist: Vec<Vec<u8>> = Vec::new();
+    let mut namelist: Vec<PgVec<'mcx, u8>> = Vec::new();
     let mut p = 0usize;
 
     while p < s.len() && scanner_isspace(s[p]) {
@@ -986,7 +983,7 @@ pub fn split_identifier_string_bytes(
         if p == s.len() {
             return Ok(None);
         }
-        let mut curname: PgVec<'_, u8>;
+        let mut curname: PgVec<'mcx, u8>;
         if s[p] == b'"' {
             curname = mcx::vec_with_capacity_in(mcx, 0)?;
             let mut q = p + 1;
@@ -1032,7 +1029,7 @@ pub fn split_identifier_string_bytes(
         };
 
         truncate_identifier(&mut curname, false, encoding)?;
-        namelist.push(curname.to_vec());
+        namelist.push(curname);
 
         if done {
             return Ok(Some(namelist));
@@ -1040,14 +1037,27 @@ pub fn split_identifier_string_bytes(
     }
 }
 
-// textToQualifiedNameList (varlena.c); caller detoasts to &str. Owned
-// strings, like split_identifier_string (C returns a list of String nodes).
+// textToQualifiedNameList (varlena.c) over the detoasted text bytes; the
+// names are raw bytes like C's String nodes (C returns a list of String nodes).
 #[allow(non_snake_case)]
-pub fn textToQualifiedNameList(mcx: Mcx<'_>, rawname: &str) -> PgResult<Vec<String>> {
-    match split_identifier_string(mcx, rawname, b'.', mbutils::GetDatabaseEncoding())? {
+pub fn textToQualifiedNameList<'mcx>(
+    mcx: Mcx<'mcx>,
+    rawname: &[u8],
+) -> PgResult<Vec<PgVec<'mcx, u8>>> {
+    match split_identifier_bytes(mcx, rawname, b'.', mbutils::GetDatabaseEncoding())? {
         Some(names) if !names.is_empty() => Ok(names),
         _ => Err(invalid_name_syntax()),
     }
+}
+
+pub fn split_identifier_string_bytes(
+    mcx: Mcx<'_>,
+    rawstring: &[u8],
+    separator: u8,
+    encoding: wchar::pg_enc,
+) -> PgResult<Option<Vec<Vec<u8>>>> {
+    Ok(split_identifier_bytes(mcx, rawstring, separator, encoding)?
+        .map(|names| names.iter().map(|name| name.to_vec()).collect()))
 }
 
 // textToQualifiedNameList over the detoasted text bytes (text_to_cstring in

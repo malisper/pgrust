@@ -37,14 +37,14 @@ pub use temp::{
 
 pub use lookup::{
     get_collation_oid, get_collation_oid_list, get_conversion_oid, get_namespace_oid,
-    get_ts_config_oid, get_ts_dict_oid, get_ts_parser_oid, get_ts_template_oid,
-    improper_qualified_name_joined, is_encoding_supported_by_icu, CheckSetNamespace,
-    DeconstructQualifiedName, FuncCandidate,
+    get_ts_config_oid, get_ts_dict_oid, get_ts_parser_oid,
+    get_ts_template_oid, improper_qualified_name_joined, is_encoding_supported_by_icu,
+    CheckSetNamespace, DeconstructQualifiedName, FuncCandidate,
     FuncnameGetCandidates, FuncnameGetCandidatesExtended, LookupCreationNamespace,
     LookupExplicitNamespace, LookupNamespaceNoError, OpclassnameGetOpcid, OperCandidate,
     OpernameGetCandidates, OpernameGetOprid, OpfamilynameGetOpfid, RangeVarGetRelid,
-    RangeVarGetRelidExtended, RelnameGetRelid, TypenameGetTypidExtended, RVR_MISSING_OK,
-    RVR_NOWAIT, RVR_SKIP_LOCKED,
+    RangeVarGetRelidExtended, RangeVarGetRelidFromNameBytes, RelnameGetRelid,
+    TypenameGetTypidExtended, RVR_MISSING_OK, RVR_NOWAIT, RVR_SKIP_LOCKED,
 };
 pub use path::{
     assign_search_path, check_search_path, fetch_search_path, fetch_search_path_array,

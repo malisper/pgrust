@@ -135,7 +135,7 @@ fn tsvector_update_trigger(fcinfo: &mut Fcinfo, config_column: bool) -> PgResult
     } else {
         // Config named in the trigger args; schema qualification is required
         // so results are not search_path dependent.
-        let names = ::varlena::textToQualifiedNameList(mcx, trigger.tgargs[1].as_str())?;
+        let names = ::varlena::textToQualifiedNameList(mcx, trigger.tgargs[1].as_bytes())?;
         if names.len() < 2 {
             return Err(col_err(
                 ERRCODE_INVALID_PARAMETER_VALUE,
@@ -145,7 +145,10 @@ fn tsvector_update_trigger(fcinfo: &mut Fcinfo, config_column: bool) -> PgResult
                 ),
             ));
         }
-        let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+        // tgargs are catalog strings, so the parts are UTF-8 already.
+        let name_strs: Vec<std::borrow::Cow<'_, str>> =
+            names.iter().map(|n| String::from_utf8_lossy(n)).collect();
+        let name_refs: Vec<&str> = name_strs.iter().map(|s| &**s).collect();
         ::ts_cache::get_ts_config_oid(&name_refs, false)?
     };
 

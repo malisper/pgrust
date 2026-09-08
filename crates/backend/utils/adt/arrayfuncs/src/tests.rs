@@ -2129,6 +2129,60 @@ fn array_out_over_ceiling_output_raises_stringinfo_error() {
     );
 }
 
+// Doubling clamped at MaxArraySize: the Datum array never exceeds MaxAllocSize.
+#[test]
+fn read_array_growth_follows_c_schedule() {
+    let max = ::arrayutils::MAX_ARRAY_SIZE as usize;
+    assert_eq!(crate::io::read_array_grow_capacity(0), 16);
+    assert_eq!(crate::io::read_array_grow_capacity(16), 32);
+    assert_eq!(crate::io::read_array_grow_capacity(1 << 25), 1 << 26);
+    assert_eq!(crate::io::read_array_grow_capacity(1 << 26), max);
+    assert!(max * core::mem::size_of::<Datum>() <= ::mcx::MAX_ALLOC_SIZE);
+}
+
+// 2^26+1 elements, accepted by C (pre-fix: 53200); ~1.7GB transient, so ignored.
+#[test]
+#[ignore]
+fn array_in_accepts_literal_past_2_26_elements() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let n = (1usize << 26) + 1;
+    let mut lit = String::with_capacity(2 * n + 2);
+    lit.push('{');
+    for i in 0..n {
+        if i > 0 {
+            lit.push(',');
+        }
+        lit.push('1');
+    }
+    lit.push('}');
+    let m = meta_int4();
+    let mut ip = int4_in();
+    let img = array_in(mcx, lit.as_bytes(), &m, &mut ip, -1, None).unwrap().unwrap();
+    let (ndim, dims, _) = crate::foundation::read_dims_lbounds(&img);
+    assert_eq!((ndim, dims[0] as usize), (1, n));
+}
+
+// One element of 2^29 bytes: a bare Vec's doubling asks the arena for 1GB and
+// aborts the process; C's elembuf is a StringInfo clamped at MaxAllocSize.
+// ~2.5GB transient, so ignored.
+#[test]
+#[ignore]
+fn array_in_accepts_element_past_2_29_bytes() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let n = 1usize << 29;
+    let mut lit = String::with_capacity(n + 2);
+    lit.push('{');
+    lit.extend(core::iter::repeat_n('x', n));
+    lit.push('}');
+    let m = meta_text();
+    let mut ip = text_in();
+    let img = array_in(mcx, lit.as_bytes(), &m, &mut ip, -1, None).unwrap().unwrap();
+    let (ndim, dims, _) = crate::foundation::read_dims_lbounds(&img);
+    assert_eq!((ndim, dims[0] as usize), (1, 1));
+}
+
 // pseudotypes.c: anyarray_out/anycompatiblearray_out are `return
 // array_out(fcinfo)`, anyarray_send/anycompatiblearray_send are `return
 // array_send(fcinfo)`; the aliases must resolve to the same fc body.

@@ -65,4 +65,6 @@ miscinit_seams = { path = "../../init/miscinit_seams" }
 
 [dev-dependencies]
 namespace_seams = { path = "../../../catalog/namespace_seams" }
+aclchk_seams = { path = "../../../catalog/aclchk_seams" }
+miscinit_seams = { path = "../../init/miscinit_seams" }
 

@@ -273,49 +273,28 @@ fn convert_table_priv_string(priv_type: &str) -> PgResult<u64> {
 }
 
 fn convert_table_name(fcinfo: &Fcinfo, i: usize) -> PgResult<Oid> {
-    convert_table_name_str(fcinfo.result_mcx(), arg_text_str(fcinfo, i)?)
+    // SAFETY: catalog arg type text — non-null varlena (strict fn).
+    let v = unsafe { fcinfo.arg_varlena_packed(i) }?;
+    convert_table_name_bytes(fcinfo.result_mcx(), v.data())
 }
 
 // textToQualifiedNameList + makeRangeVarFromNameList + no-lock RangeVarGetRelid.
-pub fn convert_table_name_str(mcx: mcx::Mcx<'_>, rawname: &str) -> PgResult<Oid> {
-    use types_error::ERRCODE_INVALID_NAME;
+pub fn convert_table_name_bytes(mcx: mcx::Mcx<'_>, rawname: &[u8]) -> PgResult<Oid> {
     let encoding = if mbutils_seams::get_database_encoding::is_installed() {
         mbutils_seams::get_database_encoding::call()
     } else {
         wchar::PG_SQL_ASCII
     };
-    let names = ::varlena::split_identifier_string(mcx, rawname, b'.', encoding)?
+    let names = ::varlena::split_identifier_bytes(mcx, rawname, b'.', encoding)?
         .filter(|l| !l.is_empty())
         .ok_or_else(|| {
-            Box::new(PgError::error("invalid name syntax").with_sqlstate(ERRCODE_INVALID_NAME))
+            Box::new(
+                PgError::error("invalid name syntax")
+                    .with_sqlstate(types_error::ERRCODE_INVALID_NAME),
+            )
         })?;
-    let (catalogname, schemaname, relname) = match names.as_slice() {
-        [r] => (None, None, r.as_str()),
-        [s, r] => (None, Some(s.as_str()), r.as_str()),
-        [c, s, r] => (Some(c.as_str()), Some(s.as_str()), r.as_str()),
-        _ => {
-            // namespace.c:3575-3579: NameListToString(names) — the parsed
-            // parts (downcased, unquoted, trimmed) joined by '.', not the raw
-            // argument.
-            return Err(Box::new(
-                PgError::error(format!(
-                    "improper relation name (too many dotted names): {}",
-                    names.join(".")
-                ))
-                .with_sqlstate(types_error::ERRCODE_SYNTAX_ERROR),
-            ))
-        }
-    };
-    let rv = rel_vocab::RangeVar {
-        catalogname,
-        schemaname,
-        relname,
-        inh: true,
-        relpersistence: types_core::catalog::RELPERSISTENCE_PERMANENT,
-        location: -1,
-    };
-    // We might not even have permissions on this relation; don't lock it.
-    catalog_namespace::RangeVarGetRelid(&rv, 0, false)
+    let parts: Vec<&[u8]> = names.iter().map(|n| n.as_slice()).collect();
+    catalog_namespace::RangeVarGetRelidFromNameBytes(&parts, types_rel::NoLock, false)
 }
 
 #[track_caller]

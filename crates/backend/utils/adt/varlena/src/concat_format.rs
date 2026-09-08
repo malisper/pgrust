@@ -5,6 +5,7 @@ use core::ffi::CStr;
 
 use datum::Datum;
 use mcx::{Mcx, PgVec};
+use stringinfo::StringInfo;
 use types_core::catalog::{INT2OID, INT4OID};
 use types_core::{InvalidOid, Oid, OidIsValid};
 use types_error::{
@@ -370,9 +371,11 @@ fn append_quote_literal(out: &mut PgVec<'_, u8>, s: &[u8]) {
 }
 
 // text_format_append_string (varlena.c:6350-6393); width is in characters.
-fn append_padded(out: &mut PgVec<'_, u8>, s: &[u8], flags: i32, mut width: i32) -> PgResult<()> {
+// The pad goes through StringInfo::append_spaces so an over-limit width is
+// enlargeStringInfo's 54000, never an infallible arena grow.
+fn append_padded(out: &mut StringInfo<'_>, s: &[u8], flags: i32, mut width: i32) -> PgResult<()> {
     if width == 0 {
-        return mcx::vec_append_bytes(out, s);
+        return out.append_bytes(s);
     }
     let mut align_to_left = false;
     if width < 0 {
@@ -387,23 +390,18 @@ fn append_padded(out: &mut PgVec<'_, u8>, s: &[u8], flags: i32, mut width: i32) 
     let len = mbutils_seams::pg_mbstrlen_with_len::call(s)?;
     let pad = (width - len).max(0) as usize;
     if align_to_left {
-        mcx::vec_append_bytes(out, s)?;
-        for _ in 0..pad {
-            out.push(b' ');
-        }
+        out.append_bytes(s)?;
+        out.append_spaces(pad)
     } else {
-        for _ in 0..pad {
-            out.push(b' ');
-        }
-        mcx::vec_append_bytes(out, s)?;
+        out.append_spaces(pad)?;
+        out.append_bytes(s)
     }
-    Ok(())
 }
 
 // text_format_string_conversion (varlena.c:6297-6345).
 #[allow(clippy::too_many_arguments)]
 fn string_conversion<'mcx>(
-    out: &mut PgVec<'mcx, u8>,
+    out: &mut StringInfo<'mcx>,
     conversion: u8,
     finfo: &mut FmgrInfo,
     mcx: Mcx<'mcx>,
@@ -422,18 +420,30 @@ fn string_conversion<'mcx>(
     let s = output_to_bytes(finfo, mcx, value)?;
     match conversion {
         b'I' => {
-            // varlena.c:6326-6330: the output function's bytes go straight to
-            // the byte-oriented quote_identifier(); no encoding check.
             let quoted = format_type::quote_identifier_bytes(s);
             append_padded(out, &quoted, flags, width)
         }
         b'L' => {
-            let mut q: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, s.len() * 2 + 3)?;
+            // quote_literal_cstr's palloc counts its NUL; so does the ceiling.
+            let mut q: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, s.len() * 2 + 4)?;
             append_quote_literal(&mut q, s);
             append_padded(out, &q, flags, width)
         }
         _ => append_padded(out, s, flags, width),
     }
+}
+
+#[cold]
+#[inline(never)]
+fn format_width_error(mut error: Box<PgError>, value: &[u8]) -> Box<PgError> {
+    let (prefix, suffix): (&[u8], &[u8]) =
+        if error.sqlstate() == types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE {
+            (b"value \"", b"\" is out of range for type integer")
+        } else {
+            (b"invalid input syntax for type integer: \"", b"\"")
+        };
+    error.message_raw = Some([prefix, value, suffix].concat());
+    error
 }
 
 struct FormatArgs<'a> {
@@ -501,7 +511,7 @@ pub fn fc_text_format(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
     let fmt = fmt_arg.data();
     let end = fmt.len();
 
-    let mut out: PgVec<'_, u8> = PgVec::new_in(mcx);
+    let mut out = StringInfo::new_in(mcx)?;
     let mut arg = 1usize;
     let mut prev_type = InvalidOid;
     let mut prev_width_type = InvalidOid;
@@ -511,13 +521,13 @@ pub fn fc_text_format(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
     let mut cp = 0usize;
     while cp < end {
         if at(fmt, cp) != b'%' {
-            out.push(at(fmt, cp));
+            out.append_byte(at(fmt, cp))?;
             cp += 1;
             continue;
         }
         cp = advance_parse_pointer(cp, end)?;
         if at(fmt, cp) == b'%' {
-            out.push(b'%');
+            out.append_byte(b'%')?;
             cp += 1;
             continue;
         }
@@ -552,9 +562,8 @@ pub fn fc_text_format(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
                     prev_width_type = typid;
                 }
                 let s = output_to_bytes(&mut typoutputinfo_width, mcx, value)?;
-                let s = core::str::from_utf8(s)
-                    .expect("format width: output function produced invalid UTF-8");
-                width = numutils::pg_strtoint32(s)?;
+                width = numutils::pg_strtoint32(&String::from_utf8_lossy(s))
+                    .map_err(|error| format_width_error(error, s))?;
             }
         }
 
@@ -586,5 +595,5 @@ pub fn fc_text_format(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
         cp += 1;
     }
 
-    Ok(types_fmgr::varlena_result(cstring_to_text(mcx, &out)?))
+    Ok(types_fmgr::varlena_result(cstring_to_text(mcx, out.as_bytes())?))
 }

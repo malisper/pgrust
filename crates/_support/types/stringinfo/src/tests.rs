@@ -16,6 +16,23 @@ fn init_default() {
 }
 
 #[test]
+fn as_c_str_terminates_at_len() {
+    let ctx = MemoryContext::new("t");
+    let mut s = StringInfo::new_in(ctx.mcx()).unwrap();
+    assert_eq!(s.as_c_str().unwrap().to_bytes(), b"");
+    s.append_bytes(b"abcdef").unwrap();
+    s.truncate(3);
+    assert_eq!(s.as_c_str().unwrap().to_bytes(), b"abc");
+    s.append_bytes_nt(b"xy").unwrap();
+    assert_eq!(s.as_c_str().unwrap().to_bytes(), b"abcxy");
+    s.append_bytes(&[b'x'; 1024]).unwrap();
+    assert_eq!(s.as_c_str().unwrap().to_bytes().len(), 1029);
+    s.reset();
+    s.append_bytes(b"a\0b").unwrap();
+    assert_eq!(s.as_c_str().unwrap().to_bytes(), b"a");
+}
+
+#[test]
 fn append_within_capacity_does_not_grow() {
     let ctx = MemoryContext::new("t");
     let mut s = StringInfo::new_in(ctx.mcx()).unwrap();
@@ -202,4 +219,12 @@ fn write_fixed_without_room_panics() {
     let ctx = MemoryContext::new("t");
     let mut s = StringInfo::with_capacity_in(ctx.mcx(), 2).unwrap();
     s.write_fixed([1, 2, 3, 4]);
+}
+
+#[test]
+fn c_str_restores_spare_slot_after_fixed_write() {
+    let ctx = MemoryContext::new("t");
+    let mut buf = StringInfo::with_capacity_in(ctx.mcx(), 1).unwrap();
+    buf.write_fixed([b'x']);
+    assert_eq!(buf.as_c_str().unwrap().to_bytes_with_nul(), b"x\0");
 }

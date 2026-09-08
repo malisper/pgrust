@@ -19,32 +19,15 @@ const ANUM_PG_INDEX_INDKEY: i32 = 16;
 
 fn get_rel_from_relname<'mcx>(
     mcx: Mcx<'mcx>,
-    rawname: &str,
+    rawname: &[u8],
     lockmode: i32,
     aclmode: u64,
 ) -> PgResult<Relation<'mcx>> {
     let names = varlena::textToQualifiedNameList(mcx, rawname)?;
-    let parts: Vec<&str> = names.iter().map(String::as_str).collect();
-    let (catalogname, schemaname, relname) = match parts.as_slice() {
-        [r] => (None, None, *r),
-        [s, r] => (None, Some(*s), *r),
-        [c, s, r] => (Some(*c), Some(*s), *r),
-        _ => {
-            return Err(Box::new(
-                PgError::error(format!("improper relation name (too many dotted names): {rawname}"))
-                    .with_sqlstate(types_error::ERRCODE_SYNTAX_ERROR),
-            ))
-        }
-    };
-    let rv = rel_vocab::RangeVar {
-        catalogname,
-        schemaname,
-        relname,
-        inh: true,
-        relpersistence: types_core::catalog::RELPERSISTENCE_PERMANENT,
-        location: -1,
-    };
-    let rel = table::table_openrv(mcx, &rv, lockmode)?;
+    let parts: Vec<&[u8]> = names.iter().map(|n| n.as_slice()).collect();
+    // table_openrv: RangeVarGetRelid(lockmode) then open with the lock held.
+    let relid = catalog_namespace::RangeVarGetRelidFromNameBytes(&parts, lockmode, false)?;
+    let rel = table::table_open(mcx, relid, types_rel::NoLock)?;
     let aclresult = aclchk::pg_class_aclcheck(rel.rd_id, miscinit::GetUserId(), aclmode)?;
     if aclresult != aclchk::ACLCHECK_OK {
         aclchk::aclcheck_error(
@@ -441,7 +424,7 @@ pub fn fc_dblink_get_pkey(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
     let mcx = unsafe { fcinfo.result_mcx_detached() };
     // SAFETY: strict text arg.
     let relname = unsafe { fcinfo.arg_varlena_packed(0)? };
-    let rel = get_rel_from_relname(mcx, &String::from_utf8_lossy(relname.data()), AccessShareLock, adt_acl::ACL_SELECT)?;
+    let rel = get_rel_from_relname(mcx, relname.data(), AccessShareLock, adt_acl::ACL_SELECT)?;
     let (nkeyatts, names) = get_pkey_attnames(mcx, &rel)?;
     table::table_close(rel, AccessShareLock)?;
 
@@ -470,7 +453,7 @@ pub fn fc_dblink_build_sql_insert(
     let mcx = fcinfo.result_mcx();
     // SAFETY: strict text arg 0; text[] args 3,4.
     let relname = unsafe { fcinfo.arg_varlena_packed(0)? };
-    let rel = get_rel_from_relname(mcx, &String::from_utf8_lossy(relname.data()), AccessShareLock, adt_acl::ACL_SELECT)?;
+    let rel = get_rel_from_relname(mcx, relname.data(), AccessShareLock, adt_acl::ACL_SELECT)?;
     let (pkattnums, pknumatts) = build_args(fcinfo, &rel)?;
     let src = get_text_array_contents(mcx, unsafe { fcinfo.arg_varlena_packed(3)? }.image())?;
     if src.len() as i32 != pknumatts {
@@ -494,7 +477,7 @@ pub fn fc_dblink_build_sql_delete(
     let mcx = fcinfo.result_mcx();
     // SAFETY: strict text arg 0; text[] arg 3.
     let relname = unsafe { fcinfo.arg_varlena_packed(0)? };
-    let rel = get_rel_from_relname(mcx, &String::from_utf8_lossy(relname.data()), AccessShareLock, adt_acl::ACL_SELECT)?;
+    let rel = get_rel_from_relname(mcx, relname.data(), AccessShareLock, adt_acl::ACL_SELECT)?;
     let (pkattnums, pknumatts) = build_args(fcinfo, &rel)?;
     let tgt = get_text_array_contents(mcx, unsafe { fcinfo.arg_varlena_packed(3)? }.image())?;
     if tgt.len() as i32 != pknumatts {
@@ -513,7 +496,7 @@ pub fn fc_dblink_build_sql_update(
     let mcx = fcinfo.result_mcx();
     // SAFETY: strict text arg 0; text[] args 3,4.
     let relname = unsafe { fcinfo.arg_varlena_packed(0)? };
-    let rel = get_rel_from_relname(mcx, &String::from_utf8_lossy(relname.data()), AccessShareLock, adt_acl::ACL_SELECT)?;
+    let rel = get_rel_from_relname(mcx, relname.data(), AccessShareLock, adt_acl::ACL_SELECT)?;
     let (pkattnums, pknumatts) = build_args(fcinfo, &rel)?;
     let src = get_text_array_contents(mcx, unsafe { fcinfo.arg_varlena_packed(3)? }.image())?;
     if src.len() as i32 != pknumatts {

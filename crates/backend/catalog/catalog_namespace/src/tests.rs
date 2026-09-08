@@ -321,6 +321,55 @@ fn range_var_lookups() {
     );
 }
 
+// A non-UTF-8 part resolves exactly like a missing name at C's lookup step.
+#[test]
+fn range_var_lookups_from_name_bytes() {
+    install_fakes();
+    set_search_path("public");
+    dbcommands_seams::get_database_name::set(|_| Ok(Some("testdb".into())));
+
+    assert_eq!(RangeVarGetRelidFromNameBytes(&[b"t1"], 1, false).unwrap(), REL_T1);
+    assert_eq!(RangeVarGetRelidFromNameBytes(&[b"\xE9abc"], 1, true).unwrap(), InvalidOid);
+
+    let err = RangeVarGetRelidFromNameBytes(&[b"\xE9abc"], 1, false).err().unwrap();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_UNDEFINED_TABLE);
+    assert_eq!(err.message_raw.as_deref(), Some(b"relation \"\xE9abc\" does not exist".as_slice()));
+
+    let err = RangeVarGetRelidFromNameBytes(&[b"public", b"\xE9"], 1, false).err().unwrap();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_UNDEFINED_TABLE);
+    assert_eq!(err.message_raw.as_deref(), Some(b"relation \"public.\xE9\" does not exist".as_slice()));
+
+    let err = RangeVarGetRelidFromNameBytes(&[b"no_such", b"\xE9"], 1, false).err().unwrap();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_UNDEFINED_SCHEMA);
+
+    let err = RangeVarGetRelidFromNameBytes(&[b"\xE9", b"t1"], 1, false).err().unwrap();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_UNDEFINED_SCHEMA);
+    assert_eq!(err.message_raw.as_deref(), Some(b"schema \"\xE9\" does not exist".as_slice()));
+    assert_eq!(RangeVarGetRelidFromNameBytes(&[b"\xE9", b"t1"], 1, true).unwrap(), InvalidOid);
+
+    let err = RangeVarGetRelidFromNameBytes(&[b"a", b"b", b"c", b"\xE9"], 1, false)
+        .err()
+        .unwrap();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_SYNTAX_ERROR);
+    assert_eq!(
+        err.message_raw.as_deref(),
+        Some(b"improper relation name (too many dotted names): a.b.c.\xE9".as_slice())
+    );
+
+    for missing_ok in [false, true] {
+        let err = RangeVarGetRelidFromNameBytes(&[b"other", b"\xE9", b"t1"], 1, missing_ok)
+            .unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+        assert_eq!(err.message_raw.as_deref(),
+            Some(b"cross-database references are not implemented: \"other.\xE9.t1\"".as_slice()));
+    }
+    let err = RangeVarGetRelidFromNameBytes(&[b"testdb", b"public", b"\xE9"], 1, false)
+        .unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_UNDEFINED_TABLE);
+    assert_eq!(err.message_raw.as_deref(),
+        Some(b"relation \"public.\xE9\" does not exist".as_slice()));
+}
+
 #[test]
 fn check_search_path_validates_syntax() {
     install_fakes();

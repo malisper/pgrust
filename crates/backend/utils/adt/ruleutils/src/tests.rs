@@ -508,6 +508,56 @@ fn ruleutils_cache_lookup_failures_are_catchable_xx000() {
     }
 }
 
+mod serial_sequence {
+    use super::*;
+
+    const NS_PUBLIC: Oid = 2200;
+    const REL_T_SER: Oid = 5002;
+    const REL_T_SER_MIXED: Oid = 5003;
+
+    fn install_name_lookups() {
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            miscinit_seams::get_user_id::set(|| 10);
+            aclchk_seams::object_aclcheck::set(|_classid, _objid, _roleid, _mode| Ok(0));
+            syscache_seams::lookup_pg_namespace_oid_by_name::set(|nspname| {
+                Ok(if nspname == "public" { NS_PUBLIC } else { InvalidOid })
+            });
+            syscache_seams::lookup_pg_class_relid_by_name::set(|relname, nsp| {
+                Ok(match (relname, nsp) {
+                    ("t_ser", NS_PUBLIC) => REL_T_SER,
+                    ("T_Ser", NS_PUBLIC) => REL_T_SER_MIXED,
+                    _ => InvalidOid,
+                })
+            });
+            syscache_seams::lookup_pg_attribute_attnum_by_name::set(|_relid, _attname| Ok(0));
+        });
+    }
+
+    // C prints tablerv->relname (the dequoted, downcased last part), not the
+    // raw text argument.
+    #[test]
+    fn undefined_column_names_the_parsed_relation() {
+        install_name_lookups();
+        let ctx = MemoryContext::new("t");
+        let cases: [(&[u8], &[u8], &str); 5] = [
+            (b"public.t_ser", b"nope", "column \"nope\" of relation \"t_ser\" does not exist"),
+            (b" public . t_ser ", b"nope", "column \"nope\" of relation \"t_ser\" does not exist"),
+            (b"PUBLIC.T_SER", b"nope", "column \"nope\" of relation \"t_ser\" does not exist"),
+            (b"public.\"T_Ser\"", b"nope", "column \"nope\" of relation \"T_Ser\" does not exist"),
+            (b"public.t_ser", b"\xE9", "column \"\u{FFFD}\" of relation \"t_ser\" does not exist"),
+        ];
+        for (table, column, msg) in cases {
+            let err = pg_get_serial_sequence_worker(ctx.mcx(), table, column).unwrap_err();
+            assert_eq!(err.sqlstate(), types_error::ERRCODE_UNDEFINED_COLUMN);
+            assert_eq!(err.message(), msg);
+        }
+        let err = pg_get_serial_sequence_worker(ctx.mcx(), b"public.gone", b"x").unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_UNDEFINED_TABLE);
+        assert_eq!(err.message(), "relation \"public.gone\" does not exist");
+    }
+}
+
 // audit-18.6 b057 a186-candidate-fp-adt-ruleutils-p3-d749acd8397898cfc803-1 /
 // p4-d5718746d4fe34cb7043-1: get_query_def (ruleutils.c:5635), get_setop_query
 // (6422) and get_rule_expr (9263) CHECK_FOR_INTERRUPTS(), so a pending cancel

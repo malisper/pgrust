@@ -16397,7 +16397,6 @@ dependencies = [
  "adt_acl",
  "cache_syscache",
  "catalog_namespace",
- "catalog_objectaddress",
  "datum",
  "elog",
  "guc_tables",

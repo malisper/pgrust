@@ -243,25 +243,26 @@ pub fn type_maximum_size(type_oid: Oid, typemod: i32) -> i32 {
 pub fn quote_identifier(ident: &str) -> std::borrow::Cow<'_, str> {
     match quote_identifier_bytes(ident.as_bytes()) {
         std::borrow::Cow::Borrowed(_) => std::borrow::Cow::Borrowed(ident),
-        // Quoting only inserts ASCII '"' bytes, so the result stays UTF-8.
+        // Quoting inserts only ASCII '"' bytes, so the output stays UTF-8.
         std::borrow::Cow::Owned(v) => std::borrow::Cow::Owned(
-            String::from_utf8(v).expect("quote_identifier: quoting a str yields a str"),
+            String::from_utf8(v).expect("quoting preserves UTF-8"),
         ),
     }
 }
 
-/// C `quote_identifier` (ruleutils.c:13062) over raw server-encoding bytes:
-/// C classifies each byte (`a`-`z`, `0`-`9`, `_` are safe, anything else
-/// forces quoting) and doubles embedded `"` bytes; it never decodes the
-/// identifier, so a SQL_ASCII identifier with non-UTF-8 bytes is quoted
-/// verbatim (varlena.c:6330 text_format `%I` relies on this).
+/// C `quote_identifier` on raw bytes: a non-UTF-8 SQL_ASCII identifier quotes like C.
 pub fn quote_identifier_bytes(ident: &[u8]) -> std::borrow::Cow<'_, [u8]> {
-    let bytes = ident;
-    let mut safe = matches!(bytes.first(), Some(b'a'..=b'z' | b'_'));
-    if safe {
-        safe = bytes
-            .iter()
-            .all(|&b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_'));
+    let mut nquotes = 0usize;
+    let mut safe = matches!(ident.first(), Some(b'a'..=b'z' | b'_'));
+    for &b in ident {
+        match b {
+            b'a'..=b'z' | b'0'..=b'9' | b'_' => {}
+            b'"' => {
+                safe = false;
+                nquotes += 1;
+            }
+            _ => safe = false,
+        }
     }
     // Uninstalled slot = boot default (off), for unit tests of consumer crates.
     if safe
@@ -271,7 +272,7 @@ pub fn quote_identifier_bytes(ident: &[u8]) -> std::borrow::Cow<'_, [u8]> {
         safe = false;
     }
     if safe {
-        let kwnum = ScanKeywordLookup(bytes, &ScanKeywords);
+        let kwnum = ScanKeywordLookup(ident, &ScanKeywords);
         if kwnum >= 0 && ScanKeywordCategories[kwnum as usize] != KeywordCategory::Unreserved {
             safe = false;
         }
@@ -279,13 +280,13 @@ pub fn quote_identifier_bytes(ident: &[u8]) -> std::borrow::Cow<'_, [u8]> {
     if safe {
         return std::borrow::Cow::Borrowed(ident);
     }
-    let mut quoted: Vec<u8> = Vec::with_capacity(ident.len() + 2);
+    let mut quoted = Vec::with_capacity(ident.len() + nquotes + 2);
     quoted.push(b'"');
-    for &ch in ident {
-        if ch == b'"' {
+    for &b in ident {
+        if b == b'"' {
             quoted.push(b'"');
         }
-        quoted.push(ch);
+        quoted.push(b);
     }
     quoted.push(b'"');
     std::borrow::Cow::Owned(quoted)

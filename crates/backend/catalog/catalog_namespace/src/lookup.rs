@@ -1,6 +1,6 @@
 use mcx::MemoryContext;
 use rel_vocab::RangeVar;
-use types_core::{InvalidOid, Oid, RELPERSISTENCE_TEMP};
+use types_core::{InvalidOid, Oid, RELPERSISTENCE_PERMANENT, RELPERSISTENCE_TEMP};
 use types_error::{
     ErrorLocation, PgError, PgResult, DEBUG1, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_LOCK_NOT_AVAILABLE, ERRCODE_SYNTAX_ERROR,
@@ -234,6 +234,100 @@ pub fn DeconstructQualifiedName<'a>(names: &[&'a str]) -> PgResult<(Option<&'a s
         }
         _ => Err(improper_qualified_name(names)),
     }
+}
+
+#[cold]
+fn raw_name_message(prefix: &[u8], names: &[&[u8]], suffix: &[u8]) -> Vec<u8> {
+    let mut message = prefix.to_vec();
+    for (i, name) in names.iter().enumerate() {
+        if i > 0 {
+            message.push(b'.');
+        }
+        message.extend_from_slice(name);
+    }
+    message.extend_from_slice(suffix);
+    message
+}
+
+#[track_caller]
+#[cold]
+#[inline(never)]
+fn improper_relation_name(names: &[&[u8]]) -> Box<PgError> {
+    Box::new(
+        PgError::error_raw_message(raw_name_message(
+            b"improper relation name (too many dotted names): ",
+            names,
+            b"",
+        ))
+        .with_sqlstate(ERRCODE_SYNTAX_ERROR),
+    )
+}
+
+// Invalid UTF-8 cannot name an object in the UTF-8-only catalog (carve §11).
+fn dbname_matches(catalogname: &[u8]) -> PgResult<bool> {
+    let dbname = dbcommands_seams::get_database_name::call(init_small::globals::MyDatabaseId())?;
+    Ok(dbname.as_deref().map(str::as_bytes) == Some(catalogname))
+}
+
+pub fn RangeVarGetRelidFromNameBytes(
+    names: &[&[u8]],
+    lockmode: LOCKMODE,
+    missing_ok: bool,
+) -> PgResult<Oid> {
+    let (catalogname, schemaname, relname) = match names {
+        [r] => (None, None, *r),
+        [s, r] => (None, Some(*s), *r),
+        [c, s, r] => (Some(*c), Some(*s), *r),
+        _ => return Err(improper_relation_name(names)),
+    };
+    if names.iter().all(|name| core::str::from_utf8(name).is_ok()) {
+        let rv = RangeVar {
+            catalogname: catalogname.map(|name| core::str::from_utf8(name).unwrap()),
+            schemaname: schemaname.map(|name| core::str::from_utf8(name).unwrap()),
+            relname: core::str::from_utf8(relname).unwrap(),
+            inh: true,
+            relpersistence: RELPERSISTENCE_PERMANENT,
+            location: -1,
+        };
+        return RangeVarGetRelid(&rv, lockmode, missing_ok);
+    }
+    if let Some(c) = catalogname {
+        if !dbname_matches(c)? {
+            return Err(Box::new(
+                PgError::error_raw_message(raw_name_message(
+                    b"cross-database references are not implemented: \"", names, b"\"",
+                ))
+                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+            ));
+        }
+    }
+    if let Some(s) = schemaname {
+        let Ok(schema) = core::str::from_utf8(s) else {
+            if missing_ok {
+                return Ok(InvalidOid);
+            }
+            return Err(Box::new(
+                PgError::error_raw_message(raw_name_message(
+                    b"schema \"", &[s], b"\" does not exist",
+                ))
+                .with_sqlstate(ERRCODE_UNDEFINED_SCHEMA),
+            ));
+        };
+        let namespace_id = LookupExplicitNamespace(schema, missing_ok)?;
+        if missing_ok && !OidIsValid(namespace_id) {
+            return Ok(InvalidOid);
+        }
+    }
+    if missing_ok {
+        return Ok(InvalidOid);
+    }
+    let parts = &names[usize::from(catalogname.is_some())..];
+    Err(Box::new(
+        PgError::error_raw_message(raw_name_message(
+            b"relation \"", parts, b"\" does not exist",
+        ))
+        .with_sqlstate(ERRCODE_UNDEFINED_TABLE),
+    ))
 }
 
 pub fn OpernameGetOprid(names: &[&str], oprleft: Oid, oprright: Oid) -> PgResult<Oid> {

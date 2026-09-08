@@ -1744,18 +1744,17 @@ const RELKIND_SEQUENCE: i8 = b'S' as i8;
 // pg_get_serial_sequence (ruleutils.c:2833).
 pub fn pg_get_serial_sequence_worker(
     mcx: Mcx<'_>,
-    tablename: &str,
-    columnname: &str,
+    tablename: &[u8],
+    columnname: &[u8],
 ) -> PgResult<Option<String>> {
-    let (table_oid, relname) = viewdef::qualified_name_lookup(mcx, tablename)?;
-    let attnum = lsyscache::get_attnum(table_oid, columnname)?;
+    let (table_oid, relname) = viewdef::qualified_name_to_relid_relname(mcx, tablename)?;
+    // C get_attnum compares raw bytes; a non-UTF-8 name matches no column.
+    let attnum = match core::str::from_utf8(columnname) {
+        Ok(columnname) => lsyscache::get_attnum(table_oid, columnname)?,
+        Err(_) => 0,
+    };
     if attnum == 0 {
-        // ruleutils.c:2860: tablerv->relname, not the raw argument.
-        return Err(PgError::error(format!(
-            "column \"{columnname}\" of relation \"{relname}\" does not exist"
-        ))
-        .with_sqlstate(types_error::ERRCODE_UNDEFINED_COLUMN)
-        .into());
+        return Err(serial_sequence_missing_column(columnname, &relname));
     }
     for cand in pg_depend::get_serial_sequence_candidates(mcx, table_oid, attnum as i32)?.iter() {
         if lsyscache::get_rel_relkind(*cand)? == RELKIND_SEQUENCE {
@@ -1763,6 +1762,17 @@ pub fn pg_get_serial_sequence_worker(
         }
     }
     Ok(None)
+}
+
+#[cold]
+#[inline(never)]
+fn serial_sequence_missing_column(columnname: &[u8], relname: &[u8]) -> Box<PgError> {
+    let message = [
+        b"column \"".as_slice(), columnname, b"\" of relation \"", relname,
+        b"\" does not exist",
+    ].concat();
+    Box::new(PgError::error_raw_message(message)
+        .with_sqlstate(types_error::ERRCODE_UNDEFINED_COLUMN))
 }
 
 // pg_get_partition_constraintdef (ruleutils.c:2096) over

@@ -2,6 +2,7 @@
 
 extern crate alloc;
 
+use core::ffi::CStr;
 use core::ptr;
 
 use mcx::{Mcx, PgVec, MAX_ALLOC_SIZE};
@@ -63,6 +64,19 @@ impl<'mcx> StringInfo<'mcx> {
     #[inline]
     pub fn as_bytes(&self) -> &[u8] {
         &self.data
+    }
+
+    // write_fixed can consume the terminator slot; restore it before C-string access.
+    #[inline]
+    pub fn as_c_str(&mut self) -> PgResult<&CStr> {
+        self.enlarge(0)?;
+        let len = self.data.len();
+        // SAFETY: capacity > len, so slot len is allocated; the bytes before
+        // it are initialized and the write makes the slot a NUL terminator.
+        unsafe {
+            *self.data.as_mut_ptr().add(len) = 0;
+            Ok(CStr::from_ptr(self.data.as_ptr().cast()))
+        }
     }
 
     #[inline]

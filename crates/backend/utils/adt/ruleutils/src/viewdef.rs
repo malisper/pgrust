@@ -3,7 +3,7 @@
 use std::rc::Rc;
 
 use mcx::Mcx;
-use types_core::{Oid, RELPERSISTENCE_PERMANENT};
+use types_core::Oid;
 use types_error::PgResult;
 use types_nodes::nodes_enums::CmdType;
 use types_rel::NoLock;
@@ -71,59 +71,24 @@ pub(crate) fn view_attnames(relid: Oid) -> PgResult<Vec<String>> {
 
 // textToQualifiedNameList + makeRangeVarFromNameList + RangeVarGetRelid
 // (NoLock, hard error) — the by-name pg_get_viewdef and
-// pg_get_serial_sequence forms.
-pub(crate) fn qualified_name_to_relid(mcx: Mcx<'_>, rawname: &str) -> PgResult<Oid> {
-    qualified_name_lookup(mcx, rawname).map(|(relid, _)| relid)
+// pg_get_serial_sequence forms; rawname is the detoasted text.
+// makeRangeVarFromNameList + RangeVarGetRelid; the relname part comes back
+// for messages that print tablerv->relname.
+pub(crate) fn qualified_name_to_relid_relname<'mcx>(
+    mcx: Mcx<'mcx>,
+    rawname: &[u8],
+) -> PgResult<(Oid, mcx::PgVec<'mcx, u8>)> {
+    let mut names = varlena::textToQualifiedNameList(mcx, rawname)?;
+    let parts: Vec<&[u8]> = names.iter().map(|n| n.as_slice()).collect();
+    let relid = catalog_namespace::RangeVarGetRelidFromNameBytes(&parts, NoLock, false)?;
+    let relname = names.pop().expect("a resolved relation name has a last part");
+    Ok((relid, relname))
 }
 
-// makeRangeVarFromNameList(textToQualifiedNameList(rawname)) +
-// RangeVarGetRelid(rv, NoLock, false): the relation OID and the RangeVar's
-// relname (pg_get_serial_sequence's error names the latter, ruleutils.c:2860).
-pub(crate) fn qualified_name_lookup(mcx: Mcx<'_>, rawname: &str) -> PgResult<(Oid, String)> {
-    let names = match varlena::split_identifier_string(
-        mcx,
-        rawname,
-        b'.',
-        mbutils::GetDatabaseEncoding(),
-    )? {
-        Some(names) if !names.is_empty() => names,
-        _ => {
-            return Err(types_error::PgError::error("invalid name syntax")
-                .with_sqlstate(types_error::ERRCODE_INVALID_NAME)
-                .into())
-        }
-    };
-    let mut rv = rel_vocab::RangeVar {
-        catalogname: None,
-        schemaname: None,
-        relname: "",
-        inh: true,
-        relpersistence: RELPERSISTENCE_PERMANENT,
-        location: -1,
-    };
-    match names.as_slice() {
-        [r] => rv.relname = r,
-        [s, r] => {
-            rv.schemaname = Some(s);
-            rv.relname = r;
-        }
-        [c, s, r] => {
-            rv.catalogname = Some(c);
-            rv.schemaname = Some(s);
-            rv.relname = r;
-        }
-        _ => {
-            return Err(types_error::PgError::error(format!(
-                "improper qualified name (too many dotted names): {rawname}"
-            ))
-            .with_sqlstate(types_error::ERRCODE_SYNTAX_ERROR)
-            .into())
-        }
-    }
-    let relid = catalog_namespace::RangeVarGetRelid(&rv, NoLock, false)?;
-    Ok((relid, rv.relname.to_owned()))
+pub(crate) fn qualified_name_to_relid(mcx: Mcx<'_>, rawname: &[u8]) -> PgResult<Oid> {
+    Ok(qualified_name_to_relid_relname(mcx, rawname)?.0)
 }
 
-pub(crate) fn view_name_to_oid(mcx: Mcx<'_>, viewname: &str) -> PgResult<Oid> {
+pub(crate) fn view_name_to_oid(mcx: Mcx<'_>, viewname: &[u8]) -> PgResult<Oid> {
     qualified_name_to_relid(mcx, viewname)
 }

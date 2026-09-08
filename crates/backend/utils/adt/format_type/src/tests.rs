@@ -194,6 +194,15 @@ fn quote_identifier_matches_ruleutils() {
     assert_eq!(quote_identifier("interval"), "\"interval\"");
 }
 
+// The format('%I') path: a non-UTF-8 byte is quoted with the byte kept.
+#[test]
+fn quote_identifier_bytes_keeps_raw_bytes() {
+    let _g = qai_lock();
+    assert_eq!(&*quote_identifier_bytes(b"abc"), b"abc");
+    assert_eq!(&*quote_identifier_bytes(b"\xE9abc"), b"\"\xE9abc\"");
+    assert_eq!(&*quote_identifier_bytes(b"a\"b"), b"\"a\"\"b\"");
+}
+
 // C quote_identifier (ruleutils.c) force-quotes every identifier while the
 // quote_all_identifiers GUC is on.
 #[test]

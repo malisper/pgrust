@@ -205,33 +205,11 @@ fn viewdef(
     })
 }
 
-// ruleutils.c:750 pg_get_viewdef_name hands the raw text bytes to
-// textToQualifiedNameList; this crate's name path is `&str`, which cannot
-// carry a SQL_ASCII name with non-UTF-8 bytes: refuse it with the typed
-// ERRCODE_FEATURE_NOT_SUPPORTED carve (the format_type shape) instead of
-// panicking.
-#[cold]
-#[inline(never)]
-fn non_utf8_view_name() -> Box<types_error::PgError> {
-    Box::new(
-        types_error::PgError::error(format!(
-            "non-ASCII view name values are not supported yet in databases with encoding \"{}\"",
-            mbutils::GetDatabaseEncodingName()
-        ))
-        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
-        .with_hint("Use a database with encoding \"UTF8\"."),
-    )
-}
-
 fn viewdef_name_arg(fcinfo: &mut Fcinfo) -> PgResult<Oid> {
     // SAFETY: arg 0 of the strict by-name pg_get_viewdef forms is text.
     let raw = unsafe { fcinfo.arg_varlena_packed(0) }?;
-    let name = match core::str::from_utf8(raw.data()) {
-        Ok(s) => s.to_owned(),
-        Err(_) => return Err(non_utf8_view_name()),
-    };
     let ctx = MemoryContext::new("pg_get_viewdef_name");
-    crate::viewdef::view_name_to_oid(ctx.mcx(), &name)
+    crate::viewdef::view_name_to_oid(ctx.mcx(), raw.data())
 }
 
 pub fn fc_pg_get_viewdef(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -372,22 +350,15 @@ pub fn fc_pg_get_function_result(
     })
 }
 
-fn text_arg(fcinfo: &mut Fcinfo, argno: usize, what: &str) -> PgResult<String> {
-    // SAFETY: strict builtin, text argument.
-    let raw = unsafe { fcinfo.arg_varlena_packed(argno) }?;
-    Ok(core::str::from_utf8(raw.data())
-        .map_err(|_| crate::non_utf8_unsupported(what))?
-        .to_owned())
-}
-
 pub fn fc_pg_get_serial_sequence(
     flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
-    let tablename = text_arg(fcinfo, 0, "table names")?;
-    let columnname = text_arg(fcinfo, 1, "column names")?;
+    // SAFETY: strict builtin, text arguments.
+    let tablename = unsafe { fcinfo.arg_varlena_packed(0) }?;
+    let columnname = unsafe { fcinfo.arg_varlena_packed(1) }?;
     let ctx = MemoryContext::new("pg_get_serial_sequence");
-    let res = crate::pg_get_serial_sequence_worker(ctx.mcx(), &tablename, &columnname)?;
+    let res = crate::pg_get_serial_sequence_worker(ctx.mcx(), tablename.data(), columnname.data())?;
     Ok(match res {
         Some(s) => text_result(flinfo, "pg_get_serial_sequence", &s),
         None => fcinfo.return_null(),

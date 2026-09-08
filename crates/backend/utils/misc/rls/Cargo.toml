@@ -23,5 +23,4 @@ elog = { path = "../../error/elog" }
 rls_seams = { path = "../rls_seams" }
 types_rel = { path = "../../../../_support/types/rel" }
 varlena = { path = "../../adt/varlena" }
-catalog_objectaddress = { path = "../../../catalog/objectaddress" }
 catalog_namespace = { path = "../../../catalog/catalog_namespace" }

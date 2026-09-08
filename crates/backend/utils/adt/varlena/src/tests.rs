@@ -1320,6 +1320,7 @@ mod format_variadic {
         ONCE.call_once(|| {
             install_detoast_seams();
             install_text_type_shape();
+            install_mb_for_levenshtein();
             syscache_seams::pg_type_io_shape::set(|typid| {
                 Ok((typid == TEXTOID).then_some(syscache_seams::PgTypeIoShape {
                     oid: TEXTOID,
@@ -1393,29 +1394,18 @@ mod format_variadic {
         run(&armed);
     }
 
-    // audit-18.6 a186-verified-fp-cache-ts_cache-a5b4ef5d8aa9f8785472-1 /
-    // a186-verified-fp-catalog-namespace-p1-16474fbe6e07600a677a-1:
-    // varlena.c:6326-6330 text_format %I hands the output-function bytes to
-    // the byte-oriented quote_identifier(), so a SQL_ASCII value with
-    // non-UTF-8 bytes is quoted verbatim ("caf\xe9" -> "\"caf\xe9\"").
-    #[test]
-    fn pct_i_quotes_non_utf8_bytes_verbatim() {
+    fn call(armed: &MemoryContext, fmt: &[u8], elems: &[&[u8]]) -> types_error::PgResult<Vec<u8>> {
         install();
-        let armed = MemoryContext::new("t");
         let ctx = MemoryContext::new("format args");
         let mcx = ctx.mcx();
-        let elems = [
-            cstring_to_text(mcx, b"caf\xe9").unwrap(),
-            cstring_to_text(mcx, b"t\xff").unwrap(),
-            cstring_to_text(mcx, b"plain").unwrap(),
-        ];
-        let datums: Vec<Datum> = elems
+        let texts: Vec<_> = elems.iter().map(|e| cstring_to_text(mcx, e).unwrap()).collect();
+        let datums: Vec<Datum> = texts
             .iter()
             .map(|t| Datum::from_usize(t.as_bytes().as_ptr() as usize))
             .collect();
         let array =
             arrayfuncs::construct_array(mcx, &datums, TEXTOID, -1, false, b'i').unwrap();
-        let fmt = cstring_to_text(mcx, b"%I|%I|%I").unwrap();
+        let fmt = cstring_to_text(mcx, fmt).unwrap();
 
         let mut fcinfo = LocalFcinfo::<2>::new(C);
         fcinfo.set_arg(0, Datum::from_usize(fmt.as_bytes().as_ptr() as usize));
@@ -1424,14 +1414,86 @@ mod format_variadic {
         unsafe { fcinfo.set_result_mcx(armed.mcx()) };
 
         let mut flinfo = FmgrInfo::unresolved();
-        let out = crate::concat_format::fc_text_format(Some(&mut flinfo), &mut fcinfo).unwrap();
+        let out = crate::concat_format::fc_text_format(Some(&mut flinfo), &mut fcinfo)?;
         let p = out.as_usize() as *const u8;
         // SAFETY: live text varlena result.
-        let data = unsafe {
+        Ok(unsafe {
             let n = types_tuple::varatt::varsize_any(p);
-            core::slice::from_raw_parts(p.add(4), n - 4)
+            core::slice::from_raw_parts(p.add(4), n - 4).to_vec()
+        })
+    }
+
+    // A width past MaxAllocSize is enlargeStringInfo's 54000 before any pad
+    // byte is written; pre-fix the per-byte pad loop aborted the process.
+    #[test]
+    fn width_past_max_alloc_size_is_program_limit_error() {
+        let armed = MemoryContext::new("t");
+        let limit = ::mcx::MAX_ALLOC_SIZE;
+        let msg = format!("string buffer exceeds maximum allowed length ({limit} bytes)");
+
+        let err = call(&armed, b"%2147483647s", &[b"a"]).unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+        assert_eq!(err.message(), msg);
+        assert_eq!(
+            err.detail(),
+            Some("Cannot enlarge string buffer containing 0 bytes by 2147483646 more bytes.")
+        );
+
+        let err = call(&armed, b"%-1073741824s", &[b"a"]).unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+        assert_eq!(
+            err.detail(),
+            Some("Cannot enlarge string buffer containing 1 bytes by 1073741823 more bytes.")
+        );
+
+        let err = call(&armed, b"%*s", &[b"-2147483647", b"a"]).unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+        assert_eq!(
+            err.detail(),
+            Some("Cannot enlarge string buffer containing 1 bytes by 2147483646 more bytes.")
+        );
+
+        assert_eq!(call(&armed, b"%5s|%-4s|", &[b"ab", b"c"]).unwrap(), b"   ab|c   |");
+    }
+
+    // %L sizes its buffer like C quote_literal_cstr's palloc (2*len + 3 + NUL):
+    // 536870910 bytes ask for 1073741824 (XX000); one byte less succeeds.
+    // ~4GB transient, so ignored.
+    #[test]
+    #[ignore]
+    fn quote_literal_conversion_ceiling_matches_c_palloc() {
+        let armed = MemoryContext::new("t");
+        let a = vec![b'a'; 536870910];
+        let err = match call(&armed, b"%L", &[a.as_slice()]) {
+            Err(err) => err,
+            Ok(out) => panic!("536870910-byte %L succeeded with {} bytes", out.len()),
         };
-        assert_eq!(data, &b"\"caf\xe9\"|\"t\xff\"|plain"[..]);
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(err.message(), "invalid memory alloc request size 1073741824");
+        assert_eq!(call(&armed, b"%L", &[&a[..536870909]]).unwrap().len(), 536870911);
+    }
+
+    #[test]
+    fn pct_i_quotes_non_utf8_bytes_verbatim() {
+        let armed = MemoryContext::new("t");
+        assert_eq!(
+            call(&armed, b"%I|%I|%I", &[b"caf\xe9", b"t\xff", b"plain"]).unwrap(),
+            b"\"caf\xe9\"|\"t\xff\"|plain"
+        );
+    }
+
+    // Non-UTF-8 output bytes (SQL_ASCII chr()) are quoted verbatim by %I and
+    // rejected with 22P02 as a width, not a panic.
+    #[test]
+    fn ident_and_width_conversions_take_raw_bytes() {
+        let armed = MemoryContext::new("t");
+        assert_eq!(call(&armed, b"%I", &[b"\xE9abc"]).unwrap(), b"\"\xE9abc\"");
+        assert_eq!(call(&armed, b"%I", &[b"abc"]).unwrap(), b"abc");
+
+        let err = call(&armed, b"%*s", &[b"\xE9", b"a"]).unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_TEXT_REPRESENTATION);
+        assert_eq!(err.message(), "invalid input syntax for type integer: \"\u{FFFD}\"");
+        assert_eq!(err.message_raw.as_deref(), Some(b"invalid input syntax for type integer: \"\xE9\"".as_slice()));
     }
 }
 
@@ -1560,10 +1622,26 @@ fn split_guc_list_trailing_separator_is_reject_not_panic() {
     );
 }
 
+// A non-UTF-8 byte is just a name byte, as in C.
+#[test]
+fn split_identifier_bytes_keeps_raw_bytes() {
+    let cx = MemoryContext::new("t");
+    let names = split_identifier_bytes(cx.mcx(), b"\xE9Abc . \"Q\"\"x\"", b'.', wchar::PG_SQL_ASCII)
+        .unwrap()
+        .unwrap();
+    let names: Vec<&[u8]> = names.iter().map(|n| n.as_slice()).collect();
+    assert_eq!(names, [&b"\xE9abc"[..], b"Q\"x"]);
+
+    let names = textToQualifiedNameList(cx.mcx(), b"\xE9abc").unwrap();
+    assert_eq!(names.len(), 1);
+    assert_eq!(names[0].as_slice(), b"\xE9abc");
+    assert_eq!(split_identifier_bytes(cx.mcx(), b"a,", b',', wchar::PG_SQL_ASCII).unwrap(), None);
+}
+
 #[test]
 fn text_to_qualified_name_list_trailing_dot_errors() {
     let cx = MemoryContext::new("t");
-    let err = textToQualifiedNameList(cx.mcx(), "a.").unwrap_err();
+    let err = textToQualifiedNameList(cx.mcx(), b"a.").unwrap_err();
     assert_eq!(err.sqlstate, types_error::ERRCODE_INVALID_NAME);
 }
 

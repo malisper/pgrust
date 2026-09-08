@@ -309,13 +309,13 @@ struct ElemReader<'a, 'mcx> {
     s: &'a [u8],
     pos: usize,
     typdelim: u8,
-    elembuf: PgVec<'mcx, u8>,
+    elembuf: StringInfo<'mcx>,
 }
 
 impl<'a, 'mcx> ElemReader<'a, 'mcx> {
     // Returns Ok(Some(tok)) / Ok(None) soft-error / Err hard.
     fn next_token(&mut self, orig: &[u8], escontext: Option<&mut ErrorSaveNode>) -> PgResult<Option<ArrayTok>> {
-        self.elembuf.clear();
+        self.elembuf.reset();
         // Identify token; skip leading whitespace.
         loop {
             let c = self.s.get(self.pos).copied().unwrap_or(0);
@@ -359,7 +359,7 @@ impl<'a, 'mcx> ElemReader<'a, 'mcx> {
                     if n == 0 {
                         return soft(escontext, malformed(orig, "Unexpected end of input."));
                     }
-                    self.elembuf.push(n);
+                    self.elembuf.append_byte(n)?;
                     self.pos += 1;
                 }
                 b'"' => {
@@ -377,7 +377,7 @@ impl<'a, 'mcx> ElemReader<'a, 'mcx> {
                     return soft(escontext, malformed(orig, "Unexpected end of input."));
                 }
                 _ => {
-                    self.elembuf.push(c);
+                    self.elembuf.append_byte(c)?;
                     self.pos += 1;
                 }
             }
@@ -399,7 +399,7 @@ impl<'a, 'mcx> ElemReader<'a, 'mcx> {
                     if n == 0 {
                         return soft(escontext, malformed(orig, "Unexpected end of input."));
                     }
-                    self.elembuf.push(n);
+                    self.elembuf.append_byte(n)?;
                     self.pos += 1;
                     dstlen = self.elembuf.len();
                     has_escapes = true;
@@ -410,12 +410,12 @@ impl<'a, 'mcx> ElemReader<'a, 'mcx> {
                         // C: `Array_nulls && !has_escapes && pg_strcasecmp
                         // (.., "NULL") == 0` — with array_nulls=off an
                         // unquoted NULL is the literal string (arrayfuncs.c).
-                        if crate::array_nulls() && !has_escapes && eq_null_ci(&self.elembuf) {
+                        if crate::array_nulls() && !has_escapes && eq_null_ci(self.elembuf.as_bytes()) {
                             return Ok(Some(ArrayTok::ElemNull));
                         }
                         return Ok(Some(ArrayTok::Elem));
                     }
-                    self.elembuf.push(c);
+                    self.elembuf.append_byte(c)?;
                     if !scanner_isspace(c) {
                         dstlen = self.elembuf.len();
                     }
@@ -452,7 +452,7 @@ fn read_array_str<'mcx>(
         s,
         pos: *pos,
         typdelim: meta.typdelim,
-        elembuf: vec_new_in(mcx),
+        elembuf: StringInfo::new_in(mcx)?,
     };
 
     let mut nest_level = 0i32;
@@ -535,15 +535,7 @@ fn read_array_str<'mcx>(
                 }
                 let is_null = tok == ArrayTok::ElemNull;
                 let mut result = Datum::null();
-                let cstr_owned;
-                let cstr: Option<&CStr> = if is_null {
-                    None
-                } else {
-                    reader.elembuf.push(0);
-                    cstr_owned = CStr::from_bytes_with_nul(&reader.elembuf)
-                        .map_err(|_| Box::new(malformed(orig, "invalid array element")))?;
-                    Some(cstr_owned)
-                };
+                let cstr: Option<&CStr> = if is_null { None } else { Some(reader.elembuf.as_c_str()?) };
                 let ok = input_function_call_safe(
                     proc,
                     cstr,
@@ -562,8 +554,8 @@ fn read_array_str<'mcx>(
                     // (C: per-call palloc inside the input function).
                     result = copy_byref_datum(mcx, result, meta.typlen)?;
                 }
-                if values.try_reserve(1).is_err() {
-                    return Err(Box::new(mcx.oom(8)));
+                if values.len() == values.capacity() {
+                    grow_read_arrays(mcx, &mut values, &mut nulls)?;
                 }
                 values.push(result);
                 nulls.push(is_null);
@@ -584,6 +576,38 @@ fn read_array_str<'mcx>(
     *pos = reader.pos;
     *ndim_p = ndim;
     Ok(Some((nitems, values, nulls)))
+}
+
+// ReadArrayStr's schedule: 16, doubling, clamped at MaxArraySize (whose Datum
+// array is 8 bytes under MaxAllocSize); plain doubling past 2^26 elements asks
+// for 1GB and the arena ceiling refuses a literal C accepts.
+pub(crate) fn read_array_grow_capacity(cap: usize) -> usize {
+    if cap < 16 {
+        16
+    } else {
+        (cap * 2).min(::arrayutils::MAX_ARRAY_SIZE as usize)
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn grow_read_arrays<'mcx>(
+    mcx: Mcx<'mcx>,
+    values: &mut PgVec<'mcx, Datum>,
+    nulls: &mut PgVec<'mcx, bool>,
+) -> PgResult<()> {
+    let cap = values.capacity();
+    let newcap = read_array_grow_capacity(cap);
+    debug_assert!(newcap > cap, "grow past MaxArraySize is refused before the element is read");
+    let extra = newcap - values.len();
+    if values.try_reserve_exact(extra).is_err() {
+        return Err(Box::new(mcx.oom(newcap * core::mem::size_of::<Datum>())));
+    }
+    let extra = newcap - nulls.len();
+    if nulls.try_reserve_exact(extra).is_err() {
+        return Err(Box::new(mcx.oom(newcap)));
+    }
+    Ok(())
 }
 
 fn copy_byref_datum(mcx: Mcx<'_>, d: Datum, typlen: i32) -> PgResult<Datum> {
