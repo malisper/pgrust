@@ -18,7 +18,7 @@
 use datum::Datum;
 use mcx::Mcx;
 use types_core::Oid;
-use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
+use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_UNDEFINED_OBJECT};
 use types_nodes::bitmapset::Bitmapset;
 use types_nodes::list::{IntList, NodeList, OidList, XidList};
 use types_nodes::jointype::JoinType;
@@ -37,7 +37,8 @@ use types_nodes::primnodes::{
     ScalarArrayOpExpr, SubLink, SubLinkType, TableFunc, TableFuncType, TargetEntry, Var,
     VarReturningType, WindowFunc, WindowFuncRunCondition, XmlExpr, XmlExprOp, XmlOptionType,
 };
-use types_nodes::Node;
+use types_nodes::rawnodes::{A_Const, A_Expr, A_Expr_Kind, ValUnion};
+use types_nodes::{Node, NodeTag};
 
 #[cfg(test)]
 mod tests;
@@ -384,6 +385,12 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
 
     fn read_node_list(&mut self, name: &str) -> PgResult<NodeList<'mcx>> {
         self.label(name);
+        self.node_list_value(name)
+    }
+
+    // The list value after its label (nodeRead over a List field whose
+    // label the caller has already consumed: _readA_Expr's `:name`).
+    fn node_list_value(&mut self, name: &str) -> PgResult<NodeList<'mcx>> {
         let t = self.token(name);
         if t.is_empty() {
             return Ok(NodeList::nil());
@@ -684,6 +691,9 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             b"JSONTABLESIBLINGJOIN" => self.read_json_table_sibling_join(),
             b"NOTIFYSTMT" => self.read_notify_stmt(),
             b"NEXTVALUEEXPR" => self.read_next_value_expr(),
+            b"A_CONST" => self.read_a_const(),
+            b"A_EXPR" => self.read_a_expr(),
+            b"EXTENSIBLENODE" => self.read_extensible_node(),
             other => Err(self.unknown_node_label(other)),
         }
     }
@@ -712,6 +722,100 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         let rest = &self.buf[self.tok_start..];
         let shown = &rest[..rest.len().min(32)];
         elog(format!("badly formatted node string \"{}\"...", lossy(shown)))
+    }
+
+    // _readA_Const (readfuncs.c:310-347): "We expect either NULL or :val
+    // here" — the token is consumed unchecked; the value is nodeRead over
+    // the next token and copied by tag into the union (readfuncs.c:341 elogs
+    // on any other node kind); the location is consumed but restored to -1.
+    fn read_a_const(&mut self) -> PgResult<Node<'mcx>> {
+        let token = self.token("A_Const value");
+        let val = if token == b"NULL" {
+            None
+        } else {
+            // C dereferences nodeRead's result unconditionally: a NULL node
+            // ("<>" or end of input) is a backend crash there, the contained
+            // panic here (as the other non-null entries of this reader).
+            let tmp = self
+                .node_read()
+                .and_then(|r| r.transpose())
+                .unwrap_or_else(|| panic!("_readA_Const (readfuncs.c): null node as the value"))?;
+            match tmp.node_tag() {
+                NodeTag::T_Integer => Some(ValUnion::Integer(*tmp.as_integer().expect("Integer"))),
+                NodeTag::T_Float => Some(ValUnion::Float(*tmp.as_float().expect("Float"))),
+                NodeTag::T_Boolean => Some(ValUnion::Boolean(*tmp.as_boolean().expect("Boolean"))),
+                NodeTag::T_String => Some(ValUnion::String(*tmp.as_string().expect("String"))),
+                NodeTag::T_BitString => {
+                    Some(ValUnion::BitString(*tmp.as_bitstring().expect("BitString")))
+                }
+                other => {
+                    return Err(elog(format!("unrecognized node type: {}", other as u16)));
+                }
+            }
+        };
+        let location = self.read_location("location");
+        Node::mk(self.mcx, A_Const { val, location })
+    }
+
+    // _readA_Expr (readfuncs.c:448-535): the kind keyword follows the node
+    // type and carries READ_NODE_FIELD(name); the `:name` label itself means
+    // AEXPR_OP (the name read by a bare nodeRead); any other token is C's
+    // elog over the exact pg_strtok token (readfuncs.c:525).
+    fn read_a_expr(&mut self) -> PgResult<Node<'mcx>> {
+        let token = self.token("A_Expr kind");
+        let (kind, name) = match token {
+            b"ANY" => (A_Expr_Kind::AEXPR_OP_ANY, self.read_node_list("name")?),
+            b"ALL" => (A_Expr_Kind::AEXPR_OP_ALL, self.read_node_list("name")?),
+            b"DISTINCT" => (A_Expr_Kind::AEXPR_DISTINCT, self.read_node_list("name")?),
+            b"NOT_DISTINCT" => (A_Expr_Kind::AEXPR_NOT_DISTINCT, self.read_node_list("name")?),
+            b"NULLIF" => (A_Expr_Kind::AEXPR_NULLIF, self.read_node_list("name")?),
+            b"IN" => (A_Expr_Kind::AEXPR_IN, self.read_node_list("name")?),
+            b"LIKE" => (A_Expr_Kind::AEXPR_LIKE, self.read_node_list("name")?),
+            b"ILIKE" => (A_Expr_Kind::AEXPR_ILIKE, self.read_node_list("name")?),
+            b"SIMILAR" => (A_Expr_Kind::AEXPR_SIMILAR, self.read_node_list("name")?),
+            b"BETWEEN" => (A_Expr_Kind::AEXPR_BETWEEN, self.read_node_list("name")?),
+            b"NOT_BETWEEN" => (A_Expr_Kind::AEXPR_NOT_BETWEEN, self.read_node_list("name")?),
+            b"BETWEEN_SYM" => (A_Expr_Kind::AEXPR_BETWEEN_SYM, self.read_node_list("name")?),
+            b"NOT_BETWEEN_SYM" => {
+                (A_Expr_Kind::AEXPR_NOT_BETWEEN_SYM, self.read_node_list("name")?)
+            }
+            b":name" => (A_Expr_Kind::AEXPR_OP, self.node_list_value("name")?),
+            other => {
+                return Err(elog(format!("unrecognized A_Expr kind: \"{}\"", lossy(other))));
+            }
+        };
+        let lexpr = self.read_node("lexpr")?;
+        let rexpr = self.read_node("rexpr")?;
+        let rexpr_list_start = self.read_location("rexpr_list_start");
+        let rexpr_list_end = self.read_location("rexpr_list_end");
+        let location = self.read_location("location");
+        Node::mk(
+            self.mcx,
+            A_Expr { kind, name, lexpr, rexpr, rexpr_list_start, rexpr_list_end, location },
+        )
+    }
+
+    // _readExtensibleNode (readfuncs.c:537-560): skip `:extnodename`, take
+    // the name through nullable_string (length 0 — "<>" or end of input —
+    // is NULL: readfuncs.c:550's elog), then resolve it through the
+    // extensible-node registry (extensible.c:100-116, missing_ok = false).
+    // pgrust loads no C modules (docs/design/carve-ratifications.md §2), the
+    // only clients of RegisterExtensibleNodeMethods, so the registry is
+    // empty for the life of the process and every name takes the 42704 a C
+    // backend with no module loaded raises for it.
+    fn read_extensible_node(&mut self) -> PgResult<Node<'mcx>> {
+        let _ = self.next_token();
+        let extnodename = match self.next_token() {
+            None | Some(b"") => return Err(elog("extnodename has to be supplied".into())),
+            Some(b"\"\"") => "",
+            Some(t) => self.arena_str(t)?,
+        };
+        Err(Box::new(
+            PgError::error(format!(
+                "ExtensibleNodeMethods \"{extnodename}\" was not registered"
+            ))
+            .with_sqlstate(ERRCODE_UNDEFINED_OBJECT),
+        ))
     }
 
     fn read_json_format(&mut self) -> PgResult<Node<'mcx>> {

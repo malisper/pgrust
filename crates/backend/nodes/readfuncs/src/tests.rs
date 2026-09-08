@@ -698,3 +698,136 @@ fn deep_nesting_raises_54001_with_the_guard_armed() {
         .join()
         .unwrap();
 }
+
+// ---- audit-18.6 wave 2 w2-018-nodes-1 (raw-node read arms) ----
+//
+// readfuncs.c carries hand-written readers for the two raw parse nodes whose
+// serialised form is irregular (_readA_Const :310, _readA_Expr :448) and for
+// ExtensibleNode (:537). As with the b017 rows, pg_node_tree_in refuses every
+// SQL value on both engines, so these arms are witnessed at the library level.
+
+// _readA_Const (readfuncs.c:310-347): "We expect either NULL or :val here";
+// the value is nodeRead over the next token, copied by tag into the union,
+// and the location is consumed but restored to -1.
+#[test]
+fn a_const_read_arm_matches_c() {
+    use types_nodes::rawnodes::ValUnion;
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let read = |text: &str| {
+        let n = stringToNode(mcx, text).unwrap_or_else(|e| panic!("{text:?}: {}", e.message()));
+        assert_eq!(n.node_tag(), NodeTag::T_A_Const, "{text:?}");
+        let c = n.as_a_const().expect("A_Const");
+        assert_eq!(c.location, -1, "{text:?}: READ_LOCATION_FIELD restores -1");
+        c.val
+    };
+    assert!(matches!(read("{A_CONST :val 42 :location 7}"), Some(ValUnion::Integer(i)) if i.ival == 42));
+    assert!(matches!(read("{A_CONST :val -7 :location -1}"), Some(ValUnion::Integer(i)) if i.ival == -7));
+    assert!(matches!(read("{A_CONST :val 1.5 :location -1}"), Some(ValUnion::Float(f)) if f.fval == "1.5"));
+    assert!(matches!(
+        read("{A_CONST :val 9992999999 :location -1}"),
+        Some(ValUnion::Float(f)) if f.fval == "9992999999"
+    ));
+    assert!(matches!(read("{A_CONST :val true :location -1}"), Some(ValUnion::Boolean(b)) if b.boolval));
+    assert!(matches!(read("{A_CONST :val false :location -1}"), Some(ValUnion::Boolean(b)) if !b.boolval));
+    assert!(matches!(read("{A_CONST :val \"abc\" :location -1}"), Some(ValUnion::String(s)) if s.sval == "abc"));
+    assert!(matches!(read("{A_CONST :val \"\" :location -1}"), Some(ValUnion::String(s)) if s.sval.is_empty()));
+    assert!(matches!(
+        read("{A_CONST :val \"a\\ b\" :location -1}"),
+        Some(ValUnion::String(s)) if s.sval == "a b"
+    ));
+    assert!(matches!(read("{A_CONST :val b101 :location -1}"), Some(ValUnion::BitString(b)) if b.bsval == "b101"));
+    assert!(matches!(read("{A_CONST :val x1F :location -1}"), Some(ValUnion::BitString(b)) if b.bsval == "x1F"));
+    assert!(read("{A_CONST NULL :location 3}").is_none());
+    // readfuncs.c:341: a value token that is not one of the five value
+    // node kinds (here a List, T_List = 1) is C's elog.
+    assert_elog(
+        "{A_CONST :val (1 2) :location -1}",
+        &format!("unrecognized node type: {}", NodeTag::T_List as u16),
+    );
+}
+
+// _readA_Expr (readfuncs.c:448-535): the kind keyword follows the node type
+// (`:name` itself means AEXPR_OP); every other spelling is C's elog with the
+// exact token.
+#[test]
+fn a_expr_read_arm_matches_c() {
+    use types_nodes::rawnodes::A_Expr_Kind;
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let kinds = [
+        ("", A_Expr_Kind::AEXPR_OP),
+        (" ANY", A_Expr_Kind::AEXPR_OP_ANY),
+        (" ALL", A_Expr_Kind::AEXPR_OP_ALL),
+        (" DISTINCT", A_Expr_Kind::AEXPR_DISTINCT),
+        (" NOT_DISTINCT", A_Expr_Kind::AEXPR_NOT_DISTINCT),
+        (" NULLIF", A_Expr_Kind::AEXPR_NULLIF),
+        (" IN", A_Expr_Kind::AEXPR_IN),
+        (" LIKE", A_Expr_Kind::AEXPR_LIKE),
+        (" ILIKE", A_Expr_Kind::AEXPR_ILIKE),
+        (" SIMILAR", A_Expr_Kind::AEXPR_SIMILAR),
+        (" BETWEEN", A_Expr_Kind::AEXPR_BETWEEN),
+        (" NOT_BETWEEN", A_Expr_Kind::AEXPR_NOT_BETWEEN),
+        (" BETWEEN_SYM", A_Expr_Kind::AEXPR_BETWEEN_SYM),
+        (" NOT_BETWEEN_SYM", A_Expr_Kind::AEXPR_NOT_BETWEEN_SYM),
+    ];
+    for (keyword, kind) in kinds {
+        let text = format!(
+            "{{A_EXPR{keyword} :name (\"~~\") :lexpr {{A_CONST :val 1 :location 4}} :rexpr <> \
+             :rexpr_list_start 3 :rexpr_list_end 9 :location 5}}"
+        );
+        let n = stringToNode(mcx, &text).unwrap_or_else(|e| panic!("{text:?}: {}", e.message()));
+        let e = n.as_a_expr().unwrap_or_else(|| panic!("{text:?}: A_Expr"));
+        assert_eq!(e.kind, kind, "{text:?}");
+        assert_eq!(e.name.len(), 1, "{text:?}");
+        assert_eq!(e.name.nth(0).as_string().expect("String").sval, "~~", "{text:?}");
+        assert!(e.lexpr.is_some_and(|l| l.as_a_const().is_some()), "{text:?}");
+        assert!(e.rexpr.is_none(), "{text:?}");
+        assert_eq!(
+            (e.rexpr_list_start, e.rexpr_list_end, e.location),
+            (-1, -1, -1),
+            "{text:?}: READ_LOCATION_FIELD restores -1"
+        );
+    }
+    // A NIL name list ("<>") reads as the empty list.
+    let n = stringToNode(
+        mcx,
+        "{A_EXPR IN :name <> :lexpr <> :rexpr <> :rexpr_list_start -1 :rexpr_list_end -1 \
+         :location -1}",
+    )
+    .expect("NIL name");
+    assert_eq!(n.as_a_expr().unwrap().name.len(), 0);
+    // readfuncs.c:525: `"%.*s"` over the pg_strtok token.
+    assert_elog(
+        "{A_EXPR FOO :name (\"=\") :lexpr <> :rexpr <> :rexpr_list_start -1 :rexpr_list_end -1 \
+         :location -1}",
+        "unrecognized A_Expr kind: \"FOO\"",
+    );
+    assert_elog("{A_EXPR <> :name <>}", "unrecognized A_Expr kind: \"\"");
+}
+
+// _readExtensibleNode (readfuncs.c:537-560) resolves the name through the
+// extensible-node registry (extensible.c GetExtensibleNodeMethods). Nothing
+// can register a node on this engine (docs/design/carve-ratifications.md §2:
+// no C-module loading), exactly like a C backend with no module loaded, so
+// every name takes extensible.c:111-115's 42704 and a missing name takes
+// readfuncs.c:550's elog — never the unported-arm refusal.
+#[test]
+fn extensible_node_read_arm_matches_c() {
+    // WRITE_STRING_FIELD emits the bare outToken form; nullable_string
+    // debackslashes it and keeps any quote characters it carries.
+    let e = err_of("{EXTENSIBLENODE :extnodename custom_ext}");
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_UNDEFINED_OBJECT, "{}", e.message());
+    assert_eq!(e.message(), "ExtensibleNodeMethods \"custom_ext\" was not registered");
+    let e = err_of("{EXTENSIBLENODE :extnodename \"custom_ext\"}");
+    assert_eq!(e.message(), "ExtensibleNodeMethods \"\"custom_ext\"\" was not registered");
+    let e = err_of("{EXTENSIBLENODE :extnodename \\1ext}");
+    assert_eq!(e.message(), "ExtensibleNodeMethods \"1ext\" was not registered");
+    let e = err_of("{EXTENSIBLENODE :extnodename \"\"}");
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_UNDEFINED_OBJECT);
+    assert_eq!(e.message(), "ExtensibleNodeMethods \"\" was not registered");
+    // nullable_string: a "<>" token (length 0) is NULL; so is end of input.
+    assert_elog("{EXTENSIBLENODE :extnodename <>}", "extnodename has to be supplied");
+    assert_elog("{EXTENSIBLENODE :extnodename", "extnodename has to be supplied");
+    assert_elog("{EXTENSIBLENODE", "extnodename has to be supplied");
+}

@@ -1575,15 +1575,209 @@ fn print_expr_invalid_attnum_is_an_internal_error() {
     assert_eq!(err.message(), "invalid attnum 7 for rangetable entry v");
 }
 
-// C query_or_expression_tree_mutator (nodeFuncs.c:3965-3975) delegates a
-// Query to query_tree_mutator; that engine is unported here, so the Query arm
-// must be a typed 0A000 refusal — never a panic.
+// C query_or_expression_tree_mutator (nodeFuncs.c:3965-3975) hands a Query
+// to query_tree_mutator (nodeFuncs.c:3773-3856): the result is a fresh flat
+// copy whose targetList and jointree quals carry the callback's replacements
+// (MUTATE(query->targetList), MUTATE(query->jointree)); the input Query is
+// left untouched. A C-shaped callback: replaces every Param, recurses
+// through the engine for everything else.
 #[test]
-fn qoe_mutator_query_arm_is_a_typed_refusal() {
+fn qoe_mutator_query_arm_runs_query_tree_mutator() {
     let ctx = cx();
     let mcx = ctx.mcx();
-    let q = Node::mk(mcx, Query::default()).unwrap();
-    let err = query_or_expression_tree_mutator(mcx, q, &mut |_| Ok(None), 0).unwrap_err();
-    assert_eq!(err.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
-    assert_eq!(err.message(), "query_or_expression_tree_mutator over a Query is not supported");
+    fn bump_params<'mcx>(mcx: Mcx<'mcx>, n: Node<'mcx>) -> PgResult<Option<Node<'mcx>>> {
+        if let Some(p) = n.as_param() {
+            return Ok(Some(extern_param(mcx, p.paramid + 10)));
+        }
+        expression_tree_mutator(mcx, n, &mut |c| bump_params(mcx, c))
+    }
+    let te = Node::mk_target_entry(mcx, extern_param(mcx, 1), 1, None, false).unwrap();
+    let jointree = Node::mk_mut(
+        mcx,
+        FromExpr { fromlist: NodeList::nil(), quals: Some(extern_param(mcx, 2)) },
+    )
+    .unwrap()
+    .seal_ref();
+    let q = Node::mk(
+        mcx,
+        Query {
+            targetList: NodeList::from_slice(mcx, &[te]).unwrap(),
+            jointree: Some(jointree),
+            ..Query::default()
+        },
+    )
+    .unwrap();
+    let out = query_or_expression_tree_mutator(mcx, q, &mut |n| bump_params(mcx, n), 0)
+        .unwrap_or_else(|e| panic!("Query arm must run query_tree_mutator: {}", e.message()))
+        .expect("query_tree_mutator returns the (flat-copied) Query");
+    let nq = out.as_query().expect("a Query comes back");
+    let param_of = |te: Node<'_>| te.as_target_entry().unwrap().expr.as_param().unwrap().paramid;
+    assert_eq!(param_of(nq.targetList.nth(0)), 11);
+    assert_eq!(nq.jointree.unwrap().quals.unwrap().as_param().unwrap().paramid, 12);
+    // FLATCOPY(newquery, query, Query): the caller's Query is untouched.
+    let oq = q.as_query().unwrap();
+    assert!(!core::ptr::eq(oq, nq));
+    assert_eq!(param_of(oq.targetList.nth(0)), 1);
+    assert_eq!(oq.jointree.unwrap().quals.unwrap().as_param().unwrap().paramid, 2);
+}
+
+// ---- audit-18.6 wave 2 w2-018-nodes-1 (nodeFuncs.c query engines) ----
+
+// C query_tree_walker runs the callback on the root jointree FromExpr itself
+// (nodeFuncs.c:2720 `WALK(query->jointree)`). It is a typed `&FromExpr`
+// here, offered through `visit_from_expr_ref`; before the hook the engine
+// walked its fields directly and no walker could observe the root.
+#[test]
+fn query_tree_walker_offers_the_root_jointree_through_the_hook() {
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let te = Node::mk_target_entry(mcx, extern_param(mcx, 1), 1, None, false).unwrap();
+    let jointree = Node::mk_mut(
+        mcx,
+        FromExpr { fromlist: NodeList::nil(), quals: Some(extern_param(mcx, 2)) },
+    )
+    .unwrap()
+    .seal_ref();
+    let query = Query {
+        targetList: NodeList::from_slice(mcx, &[te]).unwrap(),
+        jointree: Some(jointree),
+        ..Query::default()
+    };
+
+    struct Roots {
+        roots: usize,
+        params: usize,
+    }
+    impl<'mcx> NodeWalker<'mcx> for Roots {
+        fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+            if node.node_tag() == NodeTag::T_Param {
+                self.params += 1;
+                return Ok(false);
+            }
+            expression_tree_walker(node, self)
+        }
+        fn visit_from_expr_ref(&mut self, f: &'mcx FromExpr<'mcx>) -> PgResult<bool> {
+            self.roots += 1;
+            // A C callback that intercepts T_FromExpr recurses itself.
+            Ok(walk_list(&f.fromlist, self)? || walk_opt(f.quals, self)?)
+        }
+    }
+    let mut w = Roots { roots: 0, params: 0 };
+    assert!(!query_tree_walker(&query, &mut w, 0).unwrap());
+    assert_eq!((w.roots, w.params), (1, 2));
+
+    // The default hook keeps every existing walker's view: fields only.
+    struct Plain(usize);
+    impl<'mcx> NodeWalker<'mcx> for Plain {
+        fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+            if node.node_tag() == NodeTag::T_Param {
+                self.0 += 1;
+                return Ok(false);
+            }
+            expression_tree_walker(node, self)
+        }
+    }
+    let mut plain = Plain(0);
+    assert!(!query_tree_walker(&query, &mut plain, 0).unwrap());
+    assert_eq!(plain.0, 2);
+
+    // An intercepting walker may stop at the root (C: the callback returns
+    // true from WALK(query->jointree)).
+    struct StopAtRoot;
+    impl<'mcx> NodeWalker<'mcx> for StopAtRoot {
+        fn visit(&mut self, _node: Node<'mcx>) -> PgResult<bool> {
+            Ok(false)
+        }
+        fn visit_from_expr_ref(&mut self, _f: &'mcx FromExpr<'mcx>) -> PgResult<bool> {
+            Ok(true)
+        }
+    }
+    assert!(query_tree_walker(&query, &mut StopAtRoot, 0).unwrap());
+}
+
+// C query_tree_mutator / range_table_mutator (nodeFuncs.c:3773-3927): RTE
+// subqueries reach the callback as Query nodes (a C-shaped callback recurses
+// with query_tree_mutator), VALUES lists and WindowClause frame offsets are
+// mutated (the latter outside QTW_EXAMINE_SORTGROUP), QTW_IGNORE_RT_SUBQUERIES
+// copies the subquery as-is without consulting the callback, and
+// QTW_DONT_COPY_QUERY scribbles the caller's Query in place.
+#[test]
+fn query_tree_mutator_covers_rtable_window_offsets_and_flags() {
+    use types_nodes::parsenodes::{RTEKind, RangeTblEntry, WindowClause};
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    fn bump<'mcx>(mcx: Mcx<'mcx>, n: Node<'mcx>) -> PgResult<Option<Node<'mcx>>> {
+        if let Some(p) = n.as_param() {
+            return Ok(Some(extern_param(mcx, p.paramid + 10)));
+        }
+        if n.as_query().is_some() {
+            return Ok(Some(query_tree_mutator(mcx, n, &mut |c| bump(mcx, c), 0)?));
+        }
+        expression_tree_mutator(mcx, n, &mut |c| bump(mcx, c))
+    }
+    let param_of = |te: Node<'_>| te.as_target_entry().unwrap().expr.as_param().unwrap().paramid;
+    let te = Node::mk_target_entry(mcx, extern_param(mcx, 1), 1, None, false).unwrap();
+    let sub = mcx::alloc_leak_in(
+        mcx,
+        Query { targetList: NodeList::from_slice(mcx, &[te]).unwrap(), ..Query::default() },
+    )
+    .unwrap();
+    let rte_sub = Node::mk(
+        mcx,
+        RangeTblEntry {
+            rtekind: RTEKind::RTE_SUBQUERY,
+            subquery: Some(sub),
+            ..RangeTblEntry::default()
+        },
+    )
+    .unwrap();
+    let values_row =
+        Node::mk_list(mcx, NodeList::from_slice(mcx, &[extern_param(mcx, 2)]).unwrap()).unwrap();
+    let rte_values = Node::mk(
+        mcx,
+        RangeTblEntry {
+            rtekind: RTEKind::RTE_VALUES,
+            values_lists: NodeList::from_slice(mcx, &[values_row]).unwrap(),
+            ..RangeTblEntry::default()
+        },
+    )
+    .unwrap();
+    let wc = Node::mk(
+        mcx,
+        WindowClause { startOffset: Some(extern_param(mcx, 3)), ..WindowClause::default() },
+    )
+    .unwrap();
+    let q = Node::mk(
+        mcx,
+        Query {
+            rtable: NodeList::from_slice(mcx, &[rte_sub, rte_values]).unwrap(),
+            windowClause: NodeList::from_slice(mcx, &[wc]).unwrap(),
+            ..Query::default()
+        },
+    )
+    .unwrap();
+
+    let out = query_tree_mutator(mcx, q, &mut |n| bump(mcx, n), 0).unwrap();
+    let nq = out.as_query().unwrap();
+    assert!(!core::ptr::eq(nq, q.as_query().unwrap()), "FLATCOPY: a fresh Query");
+    let rte = |i: usize| nq.rtable.nth(i).as_range_tbl_entry().unwrap();
+    assert_eq!(param_of(rte(0).subquery.unwrap().targetList.nth(0)), 11);
+    assert_eq!(
+        rte(1).values_lists.nth(0).as_list().unwrap().nth(0).as_param().unwrap().paramid,
+        12
+    );
+    let start = nq.windowClause.nth(0).as_window_clause().unwrap().startOffset.unwrap();
+    assert_eq!(start.as_param().unwrap().paramid, 13);
+    assert_eq!(param_of(sub.targetList.nth(0)), 1, "the caller's subquery is untouched");
+
+    let out = query_tree_mutator(mcx, q, &mut |n| bump(mcx, n), QTW_IGNORE_RT_SUBQUERIES).unwrap();
+    let copied = out.as_query().unwrap().rtable.nth(0).as_range_tbl_entry().unwrap().subquery.unwrap();
+    assert!(!core::ptr::eq(copied, sub), "copyObject(rte->subquery)");
+    assert_eq!(param_of(copied.targetList.nth(0)), 1);
+
+    let out = query_tree_mutator(mcx, q, &mut |n| bump(mcx, n), QTW_DONT_COPY_QUERY).unwrap();
+    let oq = q.as_query().unwrap();
+    assert!(core::ptr::eq(out.as_query().unwrap(), oq), "in place: the same Query");
+    let sub_now = oq.rtable.nth(0).as_range_tbl_entry().unwrap().subquery.unwrap();
+    assert_eq!(param_of(sub_now.targetList.nth(0)), 11);
 }

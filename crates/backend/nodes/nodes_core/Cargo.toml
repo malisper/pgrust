@@ -15,6 +15,7 @@ types_nodes = { path = "../../../_support/types/nodes" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 format_type = { path = "../../utils/adt/format_type" }
 outfuncs = { path = "../outfuncs" }
+copyfuncs = { path = "../copyfuncs" }
 elog = { path = "../../utils/error/elog" }
 stack_depth_core = { path = "../../utils/misc/stack_depth_core" }
 fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }

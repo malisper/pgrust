@@ -1146,3 +1146,30 @@ fn bms_to_string_matches_c() {
     assert_eq!(bmsToString(&bms), "(b 1 5)");
     assert_eq!(bmsToString(&Bitmapset::empty()), "(b)");
 }
+
+// audit-18.6 w2-018-nodes-1: the raw-node pair this crate writes (_outA_Expr
+// outfuncs.c:588-659, _outA_Const :710-722) reads back through readfuncs'
+// hand-written arms (_readA_Expr readfuncs.c:448, _readA_Const :310) and
+// re-serialises byte-identically — every A_Expr kind spelling and every
+// A_Const value kind, NULL included.
+#[test]
+fn a_expr_and_a_const_round_trip_through_readfuncs() {
+    let kinds = [
+        "", " ANY", " ALL", " DISTINCT", " NOT_DISTINCT", " NULLIF", " IN", " LIKE", " ILIKE",
+        " SIMILAR", " BETWEEN", " NOT_BETWEEN", " BETWEEN_SYM", " NOT_BETWEEN_SYM",
+    ];
+    for keyword in kinds {
+        let text = format!(
+            "{{A_EXPR{keyword} :name (\"=\") :lexpr {{A_CONST :val \"x\" :location -1}} :rexpr \
+             ({{A_CONST :val 1 :location -1}} {{A_CONST :val 1.5 :location -1}} {{A_CONST :val \
+             true :location -1}} {{A_CONST :val false :location -1}} {{A_CONST :val b101 \
+             :location -1}} {{A_CONST :val \"\" :location -1}} {{A_CONST NULL :location -1}}) \
+             :rexpr_list_start -1 :rexpr_list_end -1 :location -1}}"
+        );
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        let n = readfuncs::stringToNode(mcx, &text)
+            .unwrap_or_else(|e| panic!("{text:?}: {}", e.message()));
+        assert_eq!(nodeToString(mcx, n).unwrap().as_str(), text);
+    }
+}

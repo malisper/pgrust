@@ -85,6 +85,16 @@ pub trait NodeWalker<'mcx> {
     fn visit_alias_ref(&mut self, _a: &'mcx Alias<'mcx>) -> PgResult<bool> {
         Ok(false)
     }
+
+    /// `Query.jointree` (stored as `&FromExpr`, not a `Node`): C's
+    /// query_tree_walker runs the callback on the root FromExpr itself
+    /// (nodeFuncs.c:2720 `WALK(query->jointree)`). Default descends into
+    /// fromlist/quals — the net effect for a callback that recurses through
+    /// expression_tree_walker on T_FromExpr — so a walker that special-cases
+    /// T_FromExpr overrides this to observe the root.
+    fn visit_from_expr_ref(&mut self, f: &'mcx FromExpr<'mcx>) -> PgResult<bool> {
+        walk_from_expr(f, self)
+    }
 }
 
 pub fn walk_list<'mcx, W: NodeWalker<'mcx> + ?Sized>(
@@ -471,7 +481,7 @@ pub fn query_tree_walker_dyn<'mcx>(
         return Ok(true);
     }
     if let Some(jt) = query.jointree {
-        if walk_from_expr(jt, w)? {
+        if w.visit_from_expr_ref(jt)? {
             return Ok(true);
         }
     }
@@ -607,31 +617,385 @@ pub fn query_or_expression_tree_walker_dyn<'mcx>(
     }
 }
 
-/// C query_or_expression_tree_mutator (nodeFuncs.c:3965-3975); the Query arm
-/// needs a generic query_tree_mutator engine (unported here — rewrite_manip's
-/// mutate_query_fields_inplace is the parameterized in-place form, but it
-/// cannot live in this crate without a Query-copy hook: RTE subquery descent
-/// needs the outfuncs/readfuncs round trip), so that arm is a typed 0A000
-/// refusal. No in-tree caller passes a Query.
+/// C query_or_expression_tree_mutator (nodeFuncs.c:3965-3975): a Query goes
+/// through [`query_tree_mutator`], anything else straight to the callback.
 pub fn query_or_expression_tree_mutator<'mcx, F>(
     mcx: Mcx<'mcx>,
     node: Node<'mcx>,
     m: &mut F,
-    _flags: u32,
+    flags: u32,
 ) -> PgResult<Option<Node<'mcx>>>
 where
     F: FnMut(Node<'mcx>) -> PgResult<Option<Node<'mcx>>>,
 {
-    let _ = mcx;
     if node.as_query().is_some() {
-        return Err(Box::new(
-            types_error::PgError::error(
-                "query_or_expression_tree_mutator over a Query is not supported",
-            )
-            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
-        ));
+        return Ok(Some(query_tree_mutator_dyn(mcx, node, m, flags)?));
     }
     m(node)
+}
+
+/// C query_tree_mutator (nodeFuncs.c:3773-3856) over a Query node. The
+/// result is a fresh Query node carrying the mutated fields (C's
+/// `FLATCOPY(newquery, query, Query)`), or `qnode` itself scribbled in place
+/// under `QTW_DONT_COPY_QUERY`. Generic wrapper over the erased-callback
+/// engine (de-mono byte-shell).
+pub fn query_tree_mutator<'mcx, F>(
+    mcx: Mcx<'mcx>,
+    qnode: Node<'mcx>,
+    m: &mut F,
+    flags: u32,
+) -> PgResult<Node<'mcx>>
+where
+    F: FnMut(Node<'mcx>) -> PgResult<Option<Node<'mcx>>>,
+{
+    query_tree_mutator_dyn(mcx, qnode, m, flags)
+}
+
+/// Monomorphic engine (single copy); see `expression_tree_mutator_dyn`.
+pub fn query_tree_mutator_dyn<'mcx>(
+    mcx: Mcx<'mcx>,
+    qnode: Node<'mcx>,
+    m: &mut dyn FnMut(Node<'mcx>) -> PgResult<Option<Node<'mcx>>>,
+    flags: u32,
+) -> PgResult<Node<'mcx>> {
+    let query: &Query<'mcx> = qnode
+        .as_query()
+        .unwrap_or_else(|| panic!("query_tree_mutator over a non-Query node: {:?}", qnode.node_tag()));
+    let newquery = mutate_query_fields(mcx, query, m, flags)?;
+    if flags & QTW_DONT_COPY_QUERY != 0 {
+        // C: "modify the passed Query in place" — the caller owns the tree
+        // exclusively (module contract, as C's own scribble).
+        // SAFETY: exclusive tree (module contract); Query needs no drop.
+        unsafe { qnode.with_mut::<Query, _>(|q| *q = newquery) }.expect("Query");
+        return Ok(qnode);
+    }
+    Node::mk(mcx, newquery)
+}
+
+/// The MUTATE(...) body of query_tree_mutator (nodeFuncs.c:3782-3855) over a
+/// flat copy of `q`: every list is spine-copied (C shares the pointer; the
+/// mutate helpers copy on the first change anyway), every scalar and
+/// reference field is carried as-is.
+fn mutate_query_fields<'mcx>(
+    mcx: Mcx<'mcx>,
+    q: &Query<'mcx>,
+    m: &mut dyn FnMut(Node<'mcx>) -> PgResult<Option<Node<'mcx>>>,
+    flags: u32,
+) -> PgResult<Query<'mcx>> {
+    let mut nq = flat_copy_query(mcx, q)?;
+    if let Some(l) = mutate_list_dyn(mcx, &q.targetList, m)? {
+        nq.targetList = l;
+    }
+    if let Some(l) = mutate_list_dyn(mcx, &q.withCheckOptions, m)? {
+        nq.withCheckOptions = l;
+    }
+    if let Some(n) = mutate_opt_dyn(q.onConflict, m)? {
+        nq.onConflict = Some(n);
+    }
+    if let Some(l) = mutate_list_dyn(mcx, &q.mergeActionList, m)? {
+        nq.mergeActionList = l;
+    }
+    if let Some(n) = mutate_opt_dyn(q.mergeJoinCondition, m)? {
+        nq.mergeJoinCondition = Some(n);
+    }
+    if let Some(l) = mutate_list_dyn(mcx, &q.returningList, m)? {
+        nq.returningList = l;
+    }
+    // MUTATE(query->jointree, query->jointree, FromExpr *): the callback
+    // sees the root FromExpr as a node. It is a typed `&FromExpr` here, so
+    // it is handed over as a fresh FromExpr node (fromlist spine-copied,
+    // quals shared) and whatever comes back — the callback's replacement,
+    // or that handle when the callback reports no change — is the new root.
+    if let Some(jt) = q.jointree {
+        let root = Node::mk(
+            mcx,
+            FromExpr { fromlist: jt.fromlist.clone_in(mcx)?, quals: jt.quals },
+        )?;
+        let out = m(root)?.unwrap_or(root);
+        nq.jointree = Some(out.as_variant::<FromExpr>().unwrap_or_else(|| {
+            panic!("query_tree_mutator: jointree callback returned {:?}", out.node_tag())
+        }));
+    }
+    if let Some(n) = mutate_opt_dyn(q.setOperations, m)? {
+        nq.setOperations = Some(n);
+    }
+    if let Some(n) = mutate_opt_dyn(q.havingQual, m)? {
+        nq.havingQual = Some(n);
+    }
+    if let Some(n) = mutate_opt_dyn(q.limitOffset, m)? {
+        nq.limitOffset = Some(n);
+    }
+    if let Some(n) = mutate_opt_dyn(q.limitCount, m)? {
+        nq.limitCount = Some(n);
+    }
+    // "Most callers aren't interested in SortGroupClause nodes since those
+    // don't contain actual expressions. However they do contain OIDs, which
+    // may be of interest to some mutators."
+    if flags & QTW_EXAMINE_SORTGROUP != 0 {
+        if let Some(l) = mutate_list_dyn(mcx, &q.groupClause, m)? {
+            nq.groupClause = l;
+        }
+        if let Some(l) = mutate_list_dyn(mcx, &q.windowClause, m)? {
+            nq.windowClause = l;
+        }
+        if let Some(l) = mutate_list_dyn(mcx, &q.sortClause, m)? {
+            nq.sortClause = l;
+        }
+        if let Some(l) = mutate_list_dyn(mcx, &q.distinctClause, m)? {
+            nq.distinctClause = l;
+        }
+    } else {
+        // "But we need to mutate the expressions under WindowClause nodes
+        // even if we're not interested in SortGroupClause nodes."
+        let mut resultlist = NodeList::nil();
+        for wc_node in &q.windowClause {
+            let wc = wc_node.as_window_clause().expect("windowClause element");
+            let start_offset = mutate_opt_dyn(wc.startOffset, m)?;
+            let end_offset = mutate_opt_dyn(wc.endOffset, m)?;
+            let newnode = Node::mk(
+                mcx,
+                types_nodes::parsenodes::WindowClause {
+                    name: wc.name,
+                    refname: wc.refname,
+                    partitionClause: wc.partitionClause.clone_in(mcx)?,
+                    orderClause: wc.orderClause.clone_in(mcx)?,
+                    frameOptions: wc.frameOptions,
+                    startOffset: start_offset.or(wc.startOffset),
+                    endOffset: end_offset.or(wc.endOffset),
+                    startInRangeFunc: wc.startInRangeFunc,
+                    endInRangeFunc: wc.endInRangeFunc,
+                    inRangeColl: wc.inRangeColl,
+                    inRangeAsc: wc.inRangeAsc,
+                    inRangeNullsFirst: wc.inRangeNullsFirst,
+                    winref: wc.winref,
+                    copiedOrder: wc.copiedOrder,
+                },
+            )?;
+            resultlist.lappend(mcx, newnode)?;
+        }
+        nq.windowClause = resultlist;
+    }
+    // groupingSets and rowMarks are not mutated (nodeFuncs.c:3831-3841).
+    if flags & QTW_IGNORE_CTE_SUBQUERIES == 0 {
+        if let Some(l) = mutate_list_dyn(mcx, &q.cteList, m)? {
+            nq.cteList = l;
+        }
+    } else {
+        // "else copy CTE list as-is" (copyObject).
+        nq.cteList = copy_node_list(mcx, &q.cteList)?;
+    }
+    nq.rtable = range_table_mutator_dyn(mcx, &q.rtable, m, flags)?;
+    Ok(nq)
+}
+
+/// C range_table_mutator (nodeFuncs.c:3864-3927): every RTE is flat-copied
+/// and its kind-specific expression fields mutated (or copyObject'd under
+/// the QTW_IGNORE_* flags). Generic wrapper (de-mono byte-shell).
+pub fn range_table_mutator<'mcx, F>(
+    mcx: Mcx<'mcx>,
+    rtable: &NodeList<'mcx>,
+    m: &mut F,
+    flags: u32,
+) -> PgResult<NodeList<'mcx>>
+where
+    F: FnMut(Node<'mcx>) -> PgResult<Option<Node<'mcx>>>,
+{
+    range_table_mutator_dyn(mcx, rtable, m, flags)
+}
+
+/// Monomorphic engine (single copy); see `expression_tree_mutator_dyn`.
+pub fn range_table_mutator_dyn<'mcx>(
+    mcx: Mcx<'mcx>,
+    rtable: &NodeList<'mcx>,
+    m: &mut dyn FnMut(Node<'mcx>) -> PgResult<Option<Node<'mcx>>>,
+    flags: u32,
+) -> PgResult<NodeList<'mcx>> {
+    let mut newrt = NodeList::nil();
+    for rte_node in rtable {
+        let rte: &RangeTblEntry<'mcx> = rte_node
+            .as_range_tbl_entry()
+            .unwrap_or_else(|| panic!("rtable element is not a RangeTblEntry: {:?}", rte_node));
+        let mut newrte = flat_copy_rte(mcx, rte)?;
+        match rte.rtekind {
+            RTEKind::RTE_RELATION => {
+                if let Some(n) = mutate_opt_dyn(rte.tablesample, m)? {
+                    newrte.tablesample = Some(n);
+                }
+                // "we don't bother to copy eref, aliases, etc; OK?"
+            }
+            RTEKind::RTE_SUBQUERY => {
+                if let Some(sub) = rte.subquery {
+                    if flags & QTW_IGNORE_RT_SUBQUERIES == 0 {
+                        // MUTATE(newrte->subquery, rte->subquery, Query *):
+                        // the callback sees the subquery as a node; it is a
+                        // typed `&Query` here, so a flat copy is handed over
+                        // (the callback's own query_tree_mutator flat-copies
+                        // again, as C's does) and whatever comes back is the
+                        // new subquery.
+                        let sub_node = Node::mk(mcx, flat_copy_query(mcx, sub)?)?;
+                        let out = m(sub_node)?.unwrap_or(sub_node);
+                        newrte.subquery = Some(out.as_query().unwrap_or_else(|| {
+                            panic!(
+                                "range_table_mutator: subquery callback returned {:?}",
+                                out.node_tag()
+                            )
+                        }));
+                    } else {
+                        // "else, copy RT subqueries as-is" (copyObject).
+                        newrte.subquery =
+                            Some(mcx::alloc_leak_in(mcx, copyfuncs::copy_query(mcx, sub)?)?);
+                    }
+                }
+            }
+            RTEKind::RTE_JOIN => {
+                if flags & QTW_IGNORE_JOINALIASES == 0 {
+                    if let Some(l) = mutate_list_dyn(mcx, &rte.joinaliasvars, m)? {
+                        newrte.joinaliasvars = l;
+                    }
+                } else {
+                    // "else, copy join aliases as-is" (copyObject).
+                    newrte.joinaliasvars = copy_node_list(mcx, &rte.joinaliasvars)?;
+                }
+            }
+            RTEKind::RTE_FUNCTION => {
+                if let Some(l) = mutate_list_dyn(mcx, &rte.functions, m)? {
+                    newrte.functions = l;
+                }
+            }
+            RTEKind::RTE_TABLEFUNC => {
+                if let Some(n) = mutate_opt_dyn(rte.tablefunc, m)? {
+                    newrte.tablefunc = Some(n);
+                }
+            }
+            RTEKind::RTE_VALUES => {
+                if let Some(l) = mutate_list_dyn(mcx, &rte.values_lists, m)? {
+                    newrte.values_lists = l;
+                }
+            }
+            // "nothing to do"
+            RTEKind::RTE_CTE | RTEKind::RTE_NAMEDTUPLESTORE | RTEKind::RTE_RESULT => {}
+            RTEKind::RTE_GROUP => {
+                if flags & QTW_IGNORE_GROUPEXPRS == 0 {
+                    if let Some(l) = mutate_list_dyn(mcx, &rte.groupexprs, m)? {
+                        newrte.groupexprs = l;
+                    }
+                } else {
+                    // "else, copy grouping exprs as-is" (copyObject).
+                    newrte.groupexprs = copy_node_list(mcx, &rte.groupexprs)?;
+                }
+            }
+        }
+        if let Some(l) = mutate_list_dyn(mcx, &rte.securityQuals, m)? {
+            newrte.securityQuals = l;
+        }
+        newrt.lappend(mcx, Node::mk(mcx, newrte)?)?;
+    }
+    Ok(newrt)
+}
+
+/// C `copyObject` over a List of nodes (the QTW_IGNORE_* "copy as-is" arms).
+fn copy_node_list<'mcx>(mcx: Mcx<'mcx>, list: &NodeList<'mcx>) -> PgResult<NodeList<'mcx>> {
+    let mut out = NodeList::nil();
+    for n in list {
+        out.lappend(mcx, copyfuncs::copy_object(mcx, n)?)?;
+    }
+    Ok(out)
+}
+
+/// C `FLATCOPY(newquery, query, Query)`: field-for-field copy; lists are
+/// spine-copied (this vocabulary stores them by value), nodes and
+/// references shared. Exhaustive so a new Query field cannot be dropped.
+fn flat_copy_query<'mcx>(mcx: Mcx<'mcx>, q: &Query<'mcx>) -> PgResult<Query<'mcx>> {
+    Ok(Query {
+        commandType: q.commandType,
+        querySource: q.querySource,
+        queryId: q.queryId,
+        canSetTag: q.canSetTag,
+        utilityStmt: q.utilityStmt,
+        resultRelation: q.resultRelation,
+        hasAggs: q.hasAggs,
+        hasWindowFuncs: q.hasWindowFuncs,
+        hasTargetSRFs: q.hasTargetSRFs,
+        hasSubLinks: q.hasSubLinks,
+        hasDistinctOn: q.hasDistinctOn,
+        hasRecursive: q.hasRecursive,
+        hasModifyingCTE: q.hasModifyingCTE,
+        hasForUpdate: q.hasForUpdate,
+        hasRowSecurity: q.hasRowSecurity,
+        hasGroupRTE: q.hasGroupRTE,
+        isReturn: q.isReturn,
+        cteList: q.cteList.clone_in(mcx)?,
+        rtable: q.rtable.clone_in(mcx)?,
+        rteperminfos: q.rteperminfos.clone_in(mcx)?,
+        jointree: q.jointree,
+        mergeActionList: q.mergeActionList.clone_in(mcx)?,
+        mergeTargetRelation: q.mergeTargetRelation,
+        mergeJoinCondition: q.mergeJoinCondition,
+        targetList: q.targetList.clone_in(mcx)?,
+        r#override: q.r#override,
+        onConflict: q.onConflict,
+        returningOldAlias: q.returningOldAlias,
+        returningNewAlias: q.returningNewAlias,
+        returningList: q.returningList.clone_in(mcx)?,
+        groupClause: q.groupClause.clone_in(mcx)?,
+        groupDistinct: q.groupDistinct,
+        groupingSets: q.groupingSets.clone_in(mcx)?,
+        havingQual: q.havingQual,
+        windowClause: q.windowClause.clone_in(mcx)?,
+        distinctClause: q.distinctClause.clone_in(mcx)?,
+        sortClause: q.sortClause.clone_in(mcx)?,
+        limitOffset: q.limitOffset,
+        limitCount: q.limitCount,
+        limitOption: q.limitOption,
+        rowMarks: q.rowMarks.clone_in(mcx)?,
+        setOperations: q.setOperations,
+        constraintDeps: q.constraintDeps.clone_in(mcx)?,
+        withCheckOptions: q.withCheckOptions.clone_in(mcx)?,
+        stmt_location: q.stmt_location,
+        stmt_len: q.stmt_len,
+    })
+}
+
+/// C `FLATCOPY(newrte, rte, RangeTblEntry)`; see [`flat_copy_query`].
+fn flat_copy_rte<'mcx>(
+    mcx: Mcx<'mcx>,
+    r: &RangeTblEntry<'mcx>,
+) -> PgResult<RangeTblEntry<'mcx>> {
+    Ok(RangeTblEntry {
+        alias: r.alias,
+        eref: r.eref,
+        rtekind: r.rtekind,
+        relid: r.relid,
+        inh: r.inh,
+        relkind: r.relkind,
+        rellockmode: r.rellockmode,
+        perminfoindex: r.perminfoindex,
+        tablesample: r.tablesample,
+        subquery: r.subquery,
+        security_barrier: r.security_barrier,
+        jointype: r.jointype,
+        joinmergedcols: r.joinmergedcols,
+        joinaliasvars: r.joinaliasvars.clone_in(mcx)?,
+        joinleftcols: r.joinleftcols.clone_in(mcx)?,
+        joinrightcols: r.joinrightcols.clone_in(mcx)?,
+        join_using_alias: r.join_using_alias,
+        functions: r.functions.clone_in(mcx)?,
+        funcordinality: r.funcordinality,
+        tablefunc: r.tablefunc,
+        values_lists: r.values_lists.clone_in(mcx)?,
+        ctename: r.ctename,
+        ctelevelsup: r.ctelevelsup,
+        self_reference: r.self_reference,
+        coltypes: r.coltypes.clone_in(mcx)?,
+        coltypmods: r.coltypmods.clone_in(mcx)?,
+        colcollations: r.colcollations.clone_in(mcx)?,
+        enrname: r.enrname,
+        enrtuples: r.enrtuples,
+        groupexprs: r.groupexprs.clone_in(mcx)?,
+        lateral: r.lateral,
+        inFromCl: r.inFromCl,
+        securityQuals: r.securityQuals.clone_in(mcx)?,
+    })
 }
 
 pub fn walk_select_stmt<'mcx, W: NodeWalker<'mcx> + ?Sized>(
