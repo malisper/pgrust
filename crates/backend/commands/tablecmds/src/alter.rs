@@ -7338,6 +7338,7 @@ fn ATExecAddIndexConstraint<'mcx>(
         constraint_type,
         flags,
         init_small::globals::allowSystemTableMods(),
+        false,
     )?;
     index_rel.close(NoLock)
 }

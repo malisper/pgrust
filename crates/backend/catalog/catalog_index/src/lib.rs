@@ -922,6 +922,7 @@ pub fn index_create<'mcx>(
                 constraint_type,
                 extra.constr_flags,
                 extra.allow_system_table_mods,
+                extra.is_internal,
             )?;
         } else {
             let mut addrs: mcx::PgVec<'_, pg_depend::ObjectAddress> = mcx::PgVec::new_in(mcx);
@@ -1066,6 +1067,7 @@ pub fn index_constraint_create<'mcx>(
     constraintType: u8,
     constr_flags: u16,
     allow_system_table_mods: bool,
+    is_internal: bool,
 ) -> PgResult<Oid> {
     let namespaceId = heapRelation.rd_rel.relnamespace;
     let is_without_overlaps = constr_flags & INDEX_CONSTR_CREATE_WITHOUT_OVERLAPS != 0;
@@ -1109,6 +1111,7 @@ pub fn index_constraint_create<'mcx>(
     entry.index_relid = indexRelationId;
     entry.deferrable = deferrable;
     entry.deferred = initdeferred;
+    entry.is_internal = is_internal;
     if indexInfo.ii_HasExclusion {
         entry.excl_op = &indexInfo.ii_ExclusionOps[..indexInfo.ii_NumIndexKeyAttrs as usize];
     }
@@ -1142,6 +1145,31 @@ pub fn index_constraint_create<'mcx>(
             &myself,
             &tbl,
             pg_depend::DependencyType::PartitionSec,
+        )?;
+    }
+
+    if deferrable {
+        const F_UNIQUE_KEY_RECHECK: Oid = 1250;
+        trigger::CreateTriggerInternal(
+            mcx,
+            &trigger::InternalTriggerArgs {
+                trigname_base: if constraintType == pg_constraint::CONSTRAINT_PRIMARY {
+                    "PK_ConstraintTrigger"
+                } else {
+                    "Unique_ConstraintTrigger"
+                },
+                relid: heapRelation.rd_id,
+                constrrelid: InvalidOid,
+                constraint_oid: con_oid,
+                index_oid: indexRelationId,
+                funcoid: F_UNIQUE_KEY_RECHECK,
+                tgtype: types_trigger::TRIGGER_TYPE_ROW
+                    | types_trigger::TRIGGER_TYPE_INSERT
+                    | types_trigger::TRIGGER_TYPE_UPDATE,
+                deferrable: true,
+                initdeferred,
+                parent_trigger_oid: InvalidOid,
+            },
         )?;
     }
 
@@ -1185,36 +1213,20 @@ pub fn index_constraint_create<'mcx>(
             if set_primary {
                 inval::invalidate::CacheInvalidateRelcacheByRelid(heapRelation.rd_id)?;
             }
+
+            objectaccess::InvokeObjectPostAlterHookArg(
+                INDEX_RELATION_ID,
+                indexRelationId,
+                0,
+                InvalidOid,
+                is_internal,
+            )?;
         } else {
             genam::systable_endscan(mcx, scan)?;
         }
         pg_index.close(RowExclusiveLock)?;
     }
 
-    if deferrable {
-        const F_UNIQUE_KEY_RECHECK: Oid = 1250;
-        trigger::CreateTriggerInternal(
-            mcx,
-            &trigger::InternalTriggerArgs {
-                trigname_base: if constraintType == pg_constraint::CONSTRAINT_PRIMARY {
-                    "PK_ConstraintTrigger"
-                } else {
-                    "Unique_ConstraintTrigger"
-                },
-                relid: heapRelation.rd_id,
-                constrrelid: InvalidOid,
-                constraint_oid: con_oid,
-                index_oid: indexRelationId,
-                funcoid: F_UNIQUE_KEY_RECHECK,
-                tgtype: types_trigger::TRIGGER_TYPE_ROW
-                    | types_trigger::TRIGGER_TYPE_INSERT
-                    | types_trigger::TRIGGER_TYPE_UPDATE,
-                deferrable: true,
-                initdeferred,
-                parent_trigger_oid: InvalidOid,
-            },
-        )?;
-    }
     Ok(con_oid)
 }
 

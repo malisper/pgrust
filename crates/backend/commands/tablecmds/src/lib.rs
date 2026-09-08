@@ -949,6 +949,7 @@ pub fn DefineRelation<'mcx>(
             allow_system_table_mods: init_small::globals::allowSystemTableMods(),
             reloptions: reloptions.as_deref(),
             relrewrite: InvalidOid,
+            is_internal: false,
         },
         &descriptor,
     )?;

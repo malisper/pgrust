@@ -109,6 +109,7 @@ pub struct ConstraintEntry<'a> {
     pub inhcount: i16,
     pub is_no_inherit: bool,
     pub con_period: bool,
+    pub is_internal: bool,
 }
 
 impl<'a> ConstraintEntry<'a> {
@@ -143,6 +144,7 @@ impl<'a> ConstraintEntry<'a> {
             inhcount: 0,
             is_no_inherit: false,
             con_period: false,
+            is_internal: false,
         }
     }
 }
@@ -287,6 +289,9 @@ pub fn CreateConstraintEntry<'mcx>(mcx: Mcx<'mcx>, e: &ConstraintEntry<'_>) -> P
     if let Some(expr) = e.con_expr {
         record_check_expr_dependencies(mcx, &conobject, e.relid, expr)?;
     }
+
+    objectaccess::InvokeObjectPostCreateHookArg(CONSTRAINT_RELATION_ID, con_oid, 0, e.is_internal)?;
+
     Ok(con_oid)
 }
 
@@ -637,6 +642,9 @@ pub fn RenameConstraintById<'mcx>(mcx: Mcx<'mcx>, con_id: Oid, newname: &str) ->
     let otid = tup.t_self;
     genam::systable_endscan(mcx, scan)?;
     catalog_indexing::CatalogTupleUpdate(mcx, &con_rel, &otid, &mut newtup)?;
+
+    objectaccess::InvokeObjectPostAlterHook(CONSTRAINT_RELATION_ID, con_id, 0)?;
+
     con_rel.close(RowExclusiveLock)
 }
 
@@ -788,6 +796,9 @@ pub fn AlterConstraintNamespaces<'mcx>(
             let otid = tup.t_self;
             catalog_indexing::CatalogTupleUpdate(mcx, &con_rel, &otid, &mut newtup)?;
         }
+
+        objectaccess::InvokeObjectPostAlterHook(CONSTRAINT_RELATION_ID, thisobj.objectId, 0)?;
+
         objs_moved.push(thisobj);
     }
     genam::systable_endscan(mcx, scan)?;

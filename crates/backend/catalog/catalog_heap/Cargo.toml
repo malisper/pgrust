@@ -24,6 +24,7 @@ relation = { path = "../../access/common/relation" }
 tableam = { path = "../../access/table/tableam" }
 pg_type = { path = "../pg_type" }
 pg_depend = { path = "../pg_depend" }
+objectaccess = { path = "../objectaccess" }
 pg_subscription = { path = "../pg_subscription" }
 relcache = { path = "../../utils/cache/relcache" }
 lsyscache = { path = "../../utils/cache/lsyscache" }

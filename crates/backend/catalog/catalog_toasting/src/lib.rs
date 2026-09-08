@@ -153,6 +153,7 @@ fn create_toast_table<'mcx>(
             reloptions,
             // toasting.c:266 relrewrite = OIDOldToast (heap.c:1348).
             relrewrite: OIDOldToast,
+            is_internal: true,
         },
         &tupdesc,
     )?;

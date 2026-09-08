@@ -679,6 +679,7 @@ pub struct HeapCreateParams<'a> {
     // pg_class.relrewrite of a transient heap (cluster.c make_new_heap) or of
     // its toast table (toasting.c OIDOldToast); InvalidOid otherwise.
     pub relrewrite: Oid,
+    pub is_internal: bool,
 }
 
 pub fn heap_create_with_catalog<'mcx>(
@@ -981,6 +982,8 @@ pub fn heap_create_with_catalog<'mcx>(
             pg_depend::DependencyType::Normal,
         )?;
     }
+
+    objectaccess::InvokeObjectPostCreateHookArg(RELATION_RELATION_ID, relid, 0, p.is_internal)?;
 
     pg_class_desc.close(RowExclusiveLock)?;
     Ok(relid)

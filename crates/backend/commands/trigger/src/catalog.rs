@@ -459,6 +459,7 @@ pub fn CreateTriggerFiringOn<'mcx>(
         entry.deferrable = stmt.deferrable;
         entry.deferred = stmt.initdeferred;
         entry.is_no_inherit = true;
+        entry.is_internal = is_internal;
         constraint_oid = pg_constraint::CreateConstraintEntry(mcx, &entry)?;
     }
 

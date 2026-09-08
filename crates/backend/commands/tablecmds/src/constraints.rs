@@ -334,6 +334,7 @@ pub(crate) fn add_relation_new_constraints_ext<'mcx>(
             is_local,
             if is_local { 0 } else { 1 },
             cdef.is_no_inherit,
+            is_internal,
         )?;
         numchecks += 1;
         cooked.push(CookedCon {
@@ -791,6 +792,7 @@ fn store_rel_check<'mcx>(
     is_local: bool,
     inhcount: i16,
     is_no_inherit: bool,
+    is_internal: bool,
 ) -> PgResult<Oid> {
     let ccbin = outfuncs::nodeToString(mcx, expr)?;
     let var_list = vars::pull_var_clause(mcx, expr, 0)?;
@@ -828,6 +830,7 @@ fn store_rel_check<'mcx>(
     entry.is_no_inherit = is_no_inherit;
     entry.conbin = Some(ccbin.as_str());
     entry.con_expr = Some(expr);
+    entry.is_internal = is_internal;
     pg_constraint::CreateConstraintEntry(mcx, &entry)
 }
 

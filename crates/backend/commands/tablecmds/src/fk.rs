@@ -1272,9 +1272,7 @@ fn add_fk_constraint<'mcx>(
     ppeqoperators: &[Oid],
     ffeqoperators: &[Oid],
     fkdelsetcols: &[i16],
-    // C forwards is_internal to the object-access hooks, which do not exist
-    // here.
-    _is_internal: bool,
+    is_internal: bool,
     with_period: bool,
 ) -> PgResult<(Oid, &'mcx str)> {
     // Redundant at the top level; needed when recursing to referenced
@@ -1337,6 +1335,7 @@ fn add_fk_constraint<'mcx>(
     entry.inhcount = coninhcount;
     entry.is_no_inherit = connoinherit;
     entry.con_period = with_period;
+    entry.is_internal = is_internal;
     let constr_oid = pg_constraint::CreateConstraintEntry(mcx, &entry)?;
 
     // Subsidiary rows in partitions hang off the parent constraint: an
