@@ -866,7 +866,7 @@ fn pull_up_constant_function<'mcx>(
     parse.jointree =
         Some(mcx::alloc_leak_in(mcx, FromExpr { fromlist: new_fromlist, quals: new_quals })?);
 
-    for i in 0..run.root.append_rel_list.len() {
+    for i in run.append_rel_base..run.root.append_rel_list.len() {
         replace_appinfo_translated_vars(run, i, &mut |n| {
             replace_var_expr(mcx, n, varno, &tlist, false, Some(&phc))
         })?;
@@ -1061,7 +1061,11 @@ fn pull_up_simple_subquery<'mcx>(
             expand_virtual_generated_columns(run, &mut sub_local)?;
         }
         if has_pullable {
-            pull_up_subqueries(run, &mut sub_local)?;
+            let saved_base = run.append_rel_base;
+            run.append_rel_base = run.root.append_rel_list.len();
+            let result = pull_up_subqueries(run, &mut sub_local);
+            run.append_rel_base = saved_base;
+            result?;
         }
         // C rechecks after hacking on the copy; on failure the copy is
         // discarded and the RTE stays for set_subquery_pathlist.
@@ -1105,7 +1109,11 @@ fn pull_up_simple_subquery<'mcx>(
             expand_virtual_generated_columns(run, &mut sub_local)?;
         }
         if has_pullable {
-            pull_up_subqueries(run, &mut sub_local)?;
+            let saved_base = run.append_rel_base;
+            run.append_rel_base = run.root.append_rel_list.len();
+            let result = pull_up_subqueries(run, &mut sub_local);
+            run.append_rel_base = saved_base;
+            result?;
         }
         // C rechecks unconditionally after the recursive pull_up_subqueries:
         // nested pull-ups can leave the member's jointree bottoming out at a
@@ -1293,7 +1301,7 @@ fn pull_up_simple_subquery<'mcx>(
 
         // perform_pullup_replace_vars tail: pre-existing appendrels' translated
         // exprs may reference the pulled-up rel (lateral union siblings).
-        for i in 0..appinfo_snap {
+        for i in run.append_rel_base..appinfo_snap {
             replace_appinfo_translated_vars(run, i, &mut |n| {
                 replace_var_expr(mcx, n, varno, &off_tlist, lateral, Some(&phc))
             })?;
@@ -1553,7 +1561,7 @@ fn pull_up_simple_subquery<'mcx>(
     run.glob.last_ph_id = last_ph_id.get();
     if run.glob.last_ph_id != 0 {
         crate::placeholder::substitute_phv_relids_query(mcx, parse, varno, &subrelids)?;
-        for ai in 0..run.root.append_rel_list.len() {
+        for ai in run.append_rel_base..run.root.append_rel_list.len() {
             replace_appinfo_translated_vars(run, ai, &mut |n| {
                 crate::placeholder::substitute_phv_relids(mcx, n, varno, &subrelids)?;
                 Ok(None)
@@ -1686,7 +1694,7 @@ pub(crate) fn find_dependent_phvs<'mcx>(
     if nodes_core::query_tree_walker(parse, &mut w, 0)? {
         return Ok(true);
     }
-    for ai in 0..run.root.append_rel_list.len() {
+    for ai in run.append_rel_base..run.root.append_rel_list.len() {
         for &tid in run.root.append_rel_list[ai].translated_vars.iter() {
             if tid == types_pathnodes::NodeId::default() {
                 continue;
@@ -1794,7 +1802,7 @@ pub(crate) fn remove_result_refs<'mcx>(
     crate::placeholder::substitute_phv_relids_query(mcx, parse, varno, &subrelids)?;
     // fix_append_rel_relids (prepjointree.c).
     let mut subvarno: Option<i32> = None;
-    for ai in 0..run.root.append_rel_list.len() {
+    for ai in run.append_rel_base..run.root.append_rel_list.len() {
         debug_assert_ne!(run.root.append_rel_list[ai].parent_relid, varno as u32);
         if run.root.append_rel_list[ai].child_relid == varno as u32 {
             // prepjointree.c:4281: bms_singleton_member complains if the set

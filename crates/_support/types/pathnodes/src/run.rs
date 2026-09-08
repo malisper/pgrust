@@ -156,6 +156,8 @@ pub struct PlannerRun<'mcx> {
     /// swapped in (C: the child's parent_root link, which selfuncs climbs for
     /// uplevel CTE refs); set only around such re-entries.
     pub swapped_parent_subroot: Option<usize>,
+    /// First appendrel at the active pull-up level; outer levels share this list.
+    pub append_rel_base: usize,
     /// Per-planning-cycle attribute-statistics memo (replanfix2 T1):
     /// (relid, attnum, inh) -> arena-leaked decoded pg_statistic bundle
     /// (None = row absent, negative-memoized). Values are planner-crate
@@ -208,7 +210,7 @@ mcx::forget_safe_struct!(
         assess_parallel, suspended_roots, subroots, rel_subroots,
         minmax_subroots, active_windows, suspended_active_windows, qp_setop,
         rowmarks, gset_data, pending_part_prune_infos, cte_subpath_infos,
-        swapped_parent_subroot, att_stats_memo,
+        swapped_parent_subroot, append_rel_base, att_stats_memo,
         syscache_memos, partition_directory },
 );
 
@@ -233,6 +235,7 @@ impl<'mcx> PlannerRun<'mcx> {
             pending_part_prune_infos: NodeList::nil(),
             cte_subpath_infos: PgVec::new_in(mcx),
             swapped_parent_subroot: None,
+            append_rel_base: 0,
             att_stats_memo: core::cell::RefCell::new(PgVec::new_in(mcx)),
             syscache_memos: core::cell::Cell::new(None),
             partition_directory: None,
