@@ -7,12 +7,18 @@ use types_error::{
 use types_fmgr::{FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction};
 use types_nodes::list::{IntList, NodeList};
 use types_nodes::{FdwKind, FdwRoutine, Node};
-use types_pathnodes::{PathId, RelId, RinfoId};
+use types_pathnodes::relids::{relids_is_empty, relids_is_subset, relids_overlap};
+use types_pathnodes::{
+    EcId, EmId, PathId, PathKey, PathNode, PtId, RelId, RinfoId, COMPARE_LT,
+    RELOPT_BASEREL, RELOPT_JOINREL, RELOPT_OTHER_JOINREL, RELOPT_OTHER_MEMBER_REL,
+    RELOPT_OTHER_UPPER_REL, RELOPT_UPPER_REL, UPPERREL_FINAL, UPPERREL_GROUP_AGG,
+    UPPERREL_ORDERED,
+};
 use types_tuple::{SizeofHeapTupleHeader, MAXALIGN};
 
 use executils::EStateData;
 use nodeforeignscan::{FdwExecRoutine, ForeignScanState};
-use planner::fdwplan::FdwPlanRoutine;
+use planner::fdwplan::{FdwPlanRoutine, UpperPathExtra};
 use planner::run::PlannerRun;
 
 use crate::deparse;
@@ -20,6 +26,38 @@ use crate::relinfo::{attach_fpinfo, fpinfo, fpinfo_opt, PgFdwRelationInfo};
 
 const DEFAULT_FDW_STARTUP_COST: f64 = 100.0;
 const DEFAULT_FDW_TUPLE_COST: f64 = 0.2;
+/// If no remote estimates, assume a sort costs 20% extra (postgres_fdw.c:64).
+const DEFAULT_FDW_SORT_MULTIPLIER: f64 = 1.2;
+
+/// PgFdwPathExtraData (postgres_fdw.c:295-302): the extra information
+/// estimate_path_cost_size gets for a path that performs the final sort
+/// and/or the LIMIT restriction remotely.
+pub(crate) struct PgFdwPathExtraData {
+    pub target: PtId,
+    pub has_final_sort: bool,
+    pub has_limit: bool,
+    pub limit_tuples: f64,
+    pub count_est: i64,
+    pub offset_est: i64,
+}
+
+// IS_SIMPLE_REL (pathnodes.h).
+fn is_simple_rel(run: &PlannerRun<'_>, rel: RelId) -> bool {
+    matches!(run.root.rel(rel).reloptkind, RELOPT_BASEREL | RELOPT_OTHER_MEMBER_REL)
+}
+
+// IS_UPPER_REL (pathnodes.h:873).
+fn is_upper_rel(run: &PlannerRun<'_>, rel: RelId) -> bool {
+    matches!(run.root.rel(rel).reloptkind, RELOPT_UPPER_REL | RELOPT_OTHER_UPPER_REL)
+}
+
+// IS_OTHER_REL (pathnodes.h).
+fn is_other_rel(run: &PlannerRun<'_>, rel: RelId) -> bool {
+    matches!(
+        run.root.rel(rel).reloptkind,
+        RELOPT_OTHER_MEMBER_REL | RELOPT_OTHER_JOINREL | RELOPT_OTHER_UPPER_REL
+    )
+}
 
 // ---------- handler ----------
 
@@ -190,7 +228,7 @@ fn postgres_get_foreign_rel_size<'mcx>(
     let use_remote_estimate = fpinfo(run.root.rel(rel_id)).borrow().use_remote_estimate;
     if use_remote_estimate {
         let (rows, width, disabled_nodes, startup_cost, total_cost) =
-            estimate_path_cost_size(run, rel_id, &[])?;
+            estimate_path_cost_size(run, rel_id, &[], &[], None)?;
         {
             let fpc = fpinfo(run.root.rel(rel_id));
             let mut fpm = fpc.borrow_mut();
@@ -220,7 +258,7 @@ fn postgres_get_foreign_rel_size<'mcx>(
         planner::costsize::set_baserel_size_estimates(run, rel_id)?;
 
         let (rows, width, disabled_nodes, startup_cost, total_cost) =
-            estimate_path_cost_size(run, rel_id, &[])?;
+            estimate_path_cost_size(run, rel_id, &[], &[], None)?;
         {
             let fpc = fpinfo(run.root.rel(rel_id));
             let mut fpm = fpc.borrow_mut();
@@ -241,21 +279,25 @@ fn postgres_get_foreign_rel_size<'mcx>(
     Ok(())
 }
 
-// estimate_path_cost_size for base relations: the remote-EXPLAIN lane when
-// use_remote_estimate, else the seqscan-shaped local lane; both feed the
-// cached rel_* costs and the FDW startup/transfer tail. Pathkeys/fpextra
-// lanes (sort/LIMIT pushdown) are not ported yet.
+// estimate_path_cost_size (postgres_fdw.c:3106): the remote-EXPLAIN lane when
+// use_remote_estimate, else the local lane (seqscan-shaped for base rels,
+// cached input costs for joins/groupings); both feed the cached rel_* costs
+// and the FDW startup/transfer tail. `pathkeys` costs a remotely-sorted
+// output; `fpextra` a path performing the final sort / LIMIT remotely.
+// Returns (rows, width, disabled_nodes, startup_cost, total_cost).
 pub(crate) fn estimate_path_cost_size<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel_id: RelId,
     param_join_conds: &[RinfoId],
+    pathkeys: &[PathKey],
+    fpextra: Option<&PgFdwPathExtraData>,
 ) -> PgResult<(f64, i32, i32, f64, f64)> {
     let mcx = run.mcx;
     let use_remote_estimate = fpinfo(run.root.rel(rel_id)).borrow().use_remote_estimate;
     let disabled_nodes = 0;
-    let rows;
+    let mut rows;
     let width;
-    let retrieved_rows;
+    let mut retrieved_rows;
     let mut startup_cost;
     let mut total_cost;
 
@@ -290,6 +332,9 @@ pub(crate) fn estimate_path_cost_size<'mcx>(
             rel_id,
             &fdw_scan_tlist,
             &remote_conds,
+            pathkeys,
+            fpextra.is_some_and(|f| f.has_final_sort),
+            fpextra.is_some_and(|f| f.has_limit),
             None,
         )?;
         let mut sql = String::with_capacity(query.as_str().len() + 8);
@@ -362,17 +407,34 @@ pub(crate) fn estimate_path_cost_size<'mcx>(
         }
     } else {
         debug_assert!(param_join_conds.is_empty());
-        let run_cost;
+        let mut run_cost;
         let (cached_startup, cached_total, cached_retrieved, cached_rows, cached_width) = {
             let fp = fpinfo(run.root.rel(rel_id)).borrow();
             (fp.rel_startup_cost, fp.rel_total_cost, fp.retrieved_rows, fp.rows, fp.width)
         };
         if cached_startup >= 0.0 && cached_total >= 0.0 {
+            debug_assert!(cached_retrieved >= 0.0);
             rows = cached_rows;
             retrieved_rows = cached_retrieved;
             width = cached_width;
             startup_cost = cached_startup;
             run_cost = cached_total - cached_startup;
+            // Costing a scan/join with additional post-scan/join-processing
+            // steps: the cached costs predate apply_scanjoin_target_to_paths'
+            // final target, so add its eval costs now (postgres_fdw.c:3229).
+            if let Some(f) = fpextra {
+                if !is_upper_rel(run, rel_id) {
+                    // Shouldn't get here unless we have LIMIT.
+                    debug_assert!(f.has_limit);
+                    debug_assert!(matches!(
+                        run.root.rel(rel_id).reloptkind,
+                        RELOPT_BASEREL | RELOPT_JOINREL
+                    ));
+                    let rt_cost = run.pathtarget(run.rel_reltarget_id(rel_id)).cost;
+                    startup_cost += rt_cost.startup;
+                    run_cost += rt_cost.per_tuple * rows;
+                }
+            }
         } else if matches!(
             run.root.rel(rel_id).reloptkind,
             types_pathnodes::RELOPT_JOINREL | types_pathnodes::RELOPT_OTHER_JOINREL
@@ -564,10 +626,72 @@ pub(crate) fn estimate_path_cost_size<'mcx>(
             rc += rt_cost.per_tuple * rows;
             run_cost = rc;
         }
+
+        // Without remote estimates, we have no real way to estimate the cost
+        // of generating sorted output; estimate a value high enough that we
+        // won't pick the sorted path when the ordering isn't locally useful,
+        // but low enough to err on the side of pushing down the ORDER BY
+        // when it is (postgres_fdw.c:3452-3474).
+        if !pathkeys.is_empty() {
+            if is_upper_rel(run, rel_id) {
+                debug_assert!(
+                    run.root.rel(rel_id).reloptkind == RELOPT_UPPER_REL
+                        && fpinfo(run.root.rel(rel_id)).borrow().stage == UPPERREL_GROUP_AGG
+                );
+                let limit_tuples =
+                    fpextra.expect("a sorted grouping path carries fpextra").limit_tuples;
+                adjust_foreign_grouping_path_cost(
+                    run,
+                    pathkeys,
+                    retrieved_rows,
+                    width,
+                    limit_tuples,
+                    &mut startup_cost,
+                    &mut run_cost,
+                );
+            } else {
+                startup_cost *= DEFAULT_FDW_SORT_MULTIPLIER;
+                run_cost *= DEFAULT_FDW_SORT_MULTIPLIER;
+            }
+        }
+
         total_cost = startup_cost + run_cost;
+
+        // Adjust the cost estimates if we have LIMIT.
+        if let Some(f) = fpextra {
+            if f.has_limit {
+                planner::pathnode::adjust_limit_rows_costs(
+                    &mut rows,
+                    &mut startup_cost,
+                    &mut total_cost,
+                    f.offset_est,
+                    f.count_est,
+                );
+                retrieved_rows = rows;
+            }
+        }
     }
 
-    if param_join_conds.is_empty() {
+    // If this includes the final sort step, the given target, which will be
+    // applied to the resulting path, might have different expressions from
+    // the foreignrel's reltarget (see make_sort_input_target()); adjust tlist
+    // eval costs (postgres_fdw.c:3496-3505).
+    if let Some(f) = fpextra {
+        let reltarget = run.rel_reltarget_id(rel_id);
+        if f.has_final_sort && f.target != reltarget {
+            let oldcost = run.pathtarget(reltarget).cost;
+            let newcost = run.pathtarget(f.target).cost;
+            startup_cost += newcost.startup - oldcost.startup;
+            total_cost += newcost.startup - oldcost.startup;
+            total_cost += (newcost.per_tuple - oldcost.per_tuple) * rows;
+        }
+    }
+
+    // Cache the retrieved rows and cost estimates for scans, joins, or
+    // groupings without any parameterization, pathkeys, or additional
+    // post-scan/join-processing steps, before adding the costs for
+    // transferring data from the foreign server (postgres_fdw.c:3518).
+    if pathkeys.is_empty() && param_join_conds.is_empty() && fpextra.is_none() {
         let fpc = fpinfo(run.root.rel(rel_id));
         let mut fpm = fpc.borrow_mut();
         fpm.retrieved_rows = retrieved_rows;
@@ -584,7 +708,481 @@ pub(crate) fn estimate_path_cost_size<'mcx>(
     total_cost += fdw_tuple_cost * retrieved_rows;
     total_cost += planner::costsize::gucs::cpu_tuple_cost() * retrieved_rows;
 
+    // If we have LIMIT, prefer performing the restriction remotely: the core
+    // code doesn't account for the extra fetches a local LIMIT causes (see
+    // create_limit_path()), so without remote estimates the two would cost
+    // the same; tweak the remote restriction's cost so it wins when the
+    // LIMIT is a useful one (postgres_fdw.c:3548-3564).
+    if let Some(f) = fpextra {
+        let fp_rows = fpinfo(run.root.rel(rel_id)).borrow().rows;
+        if !use_remote_estimate && f.has_limit && f.limit_tuples > 0.0 && f.limit_tuples < fp_rows
+        {
+            debug_assert!(fp_rows > 0.0);
+            total_cost -= (total_cost - startup_cost) * 0.05 * (fp_rows - f.limit_tuples) / fp_rows;
+        }
+    }
+
     Ok((rows, width, disabled_nodes, startup_cost, total_cost))
+}
+
+// adjust_foreign_grouping_path_cost (postgres_fdw.c:3659): the cost of
+// generating properly-sorted output from a foreign grouping path. C never
+// writes its p_disabled_nodes argument, so it is not threaded through.
+fn adjust_foreign_grouping_path_cost(
+    run: &PlannerRun<'_>,
+    pathkeys: &[PathKey],
+    retrieved_rows: f64,
+    width: i32,
+    limit_tuples: f64,
+    p_startup_cost: &mut f64,
+    p_run_cost: &mut f64,
+) {
+    // If the GROUP BY clause isn't sort-able, the plan chosen by the remote
+    // side is unlikely to generate properly-sorted output, so it would need
+    // an explicit sort; adjust the given costs with cost_sort(). Likewise if
+    // it is sort-able but isn't a superset of the given pathkeys. Otherwise
+    // apply the same heuristic as for the scan or join case.
+    let grouping_is_sortable = run.root.processed_groupClause.iter().all(|&id| {
+        run.root.expr_node(id).as_sort_group_clause().expect("group clause cell").sortop != 0
+    });
+    if !grouping_is_sortable
+        || !types_pathnodes::pathkeys_contained_in(pathkeys, &run.root.group_pathkeys)
+    {
+        let (_disabled_nodes, startup_cost, total_cost) = planner::costsize::cost_sort_shape(
+            0,
+            *p_startup_cost + *p_run_cost,
+            retrieved_rows,
+            width,
+            0.0,
+            init_small::globals::work_mem(),
+            limit_tuples,
+        );
+        *p_startup_cost = startup_cost;
+        *p_run_cost = total_cost - startup_cost;
+    } else {
+        // The default extra cost seems too large for foreign-grouping cases;
+        // add 1/4th of that default.
+        let sort_multiplier = 1.0 + (DEFAULT_FDW_SORT_MULTIPLIER - 1.0) * 0.25;
+        *p_startup_cost *= sort_multiplier;
+        *p_run_cost *= sort_multiplier;
+    }
+}
+
+// find_em_for_rel (postgres_fdw.c:7851): an EquivalenceClass member whose
+// expression uses only Vars from the given rel (none from the hidden
+// subquery rels) and is shippable; child members are considered.
+pub(crate) fn find_em_for_rel<'mcx>(
+    run: &PlannerRun<'mcx>,
+    ec: EcId,
+    rel: RelId,
+) -> PgResult<Option<EmId>> {
+    let ems = planner::equivclass::ec_members_for_relids(run, ec, &run.root.rel(rel).relids);
+    for em in ems.iter().copied() {
+        let (usable, expr_id) = {
+            let m = run.root.em(em);
+            let rel_relids = &run.root.rel(rel).relids;
+            let fp = fpinfo(run.root.rel(rel)).borrow();
+            // Note we require !bms_is_empty, else we'd accept constant
+            // expressions which are not suitable for the purpose.
+            (
+                relids_is_subset(&m.em_relids, rel_relids)
+                    && !relids_is_empty(&m.em_relids)
+                    && !relids_overlap(&m.em_relids, &fp.hidden_subquery_rels),
+                m.em_expr,
+            )
+        };
+        if usable && deparse::is_foreign_expr(run, rel, *run.root.expr_node(expr_id))? {
+            return Ok(Some(em));
+        }
+    }
+    Ok(None)
+}
+
+// find_em_for_rel_target (postgres_fdw.c:7886): an EquivalenceClass member
+// that is computed as a sort column in the given rel's reltarget and is
+// shippable. Caller separately verifies that the pathkey's ordering
+// operator is shippable.
+pub(crate) fn find_em_for_rel_target<'mcx>(
+    run: &PlannerRun<'mcx>,
+    ec: EcId,
+    rel: RelId,
+) -> PgResult<Option<EmId>> {
+    let target = run.rel_reltarget_id(rel);
+    let sort_clause = &run.parse().sortClause;
+    let nexprs = run.pathtarget(target).exprs.len();
+    for i in 0..nexprs {
+        let (expr_id, sgref) = {
+            let t = run.pathtarget(target);
+            (t.exprs[i], t.sortgrouprefs.get(i).copied().unwrap_or(0))
+        };
+        // Ignore non-sort expressions (get_sortgroupref_clause_noerr over
+        // parse->sortClause).
+        if sgref == 0
+            || !sort_clause.iter().any(|c| {
+                c.as_sort_group_clause().expect("sortClause holds SortGroupClause").tleSortGroupRef
+                    == sgref
+            })
+        {
+            continue;
+        }
+        // We ignore binary-compatible relabeling on both ends.
+        let mut expr = *run.root.expr_node(expr_id);
+        while let Some(rt) = expr.as_relabel_type() {
+            expr = rt.arg;
+        }
+        // Locate an EquivalenceClass member matching this expr, if any.
+        // Ignore child members (they never live in ec_members).
+        let members: Vec<EmId> = run.root.ec(ec).ec_members.iter().copied().collect();
+        for em in members {
+            let (is_const, is_child, em_expr_id) = {
+                let m = run.root.em(em);
+                (m.em_is_const, m.em_is_child, m.em_expr)
+            };
+            // Don't match constants.
+            if is_const {
+                continue;
+            }
+            debug_assert!(!is_child);
+            let full_expr = *run.root.expr_node(em_expr_id);
+            let mut em_expr = full_expr;
+            while let Some(rt) = em_expr.as_relabel_type() {
+                em_expr = rt.arg;
+            }
+            // Match if same expression (after stripping relabel).
+            if !types_nodes::equal::equal(em_expr, expr) {
+                continue;
+            }
+            // Check that expression (including relabels!) is shippable.
+            if deparse::is_foreign_expr(run, rel, full_expr)? {
+                return Ok(Some(em));
+            }
+        }
+    }
+    Ok(None)
+}
+
+// get_useful_ecs_for_relation (postgres_fdw.c:814): the EquivalenceClasses
+// that might be useful as sort orderings for a merge join against `rel`.
+fn get_useful_ecs_for_relation<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel: RelId,
+) -> PgResult<Vec<EcId>> {
+    let mcx = run.mcx;
+    let mut useful_eclass_list: Vec<EcId> = Vec::new();
+
+    // First, consider whether any active EC is potentially useful for a
+    // merge join against this relation.
+    if run.root.rel(rel).has_eclass_joins {
+        for i in 0..run.root.eq_classes.len() {
+            let cur_ec = EcId(i as u32);
+            // C's root->eq_classes holds canonical ECs only.
+            if run.root.ec(cur_ec).ec_merged.is_some() {
+                continue;
+            }
+            if planner::equivclass::eclass_useful_for_merging(run, cur_ec, rel) {
+                useful_eclass_list.push(cur_ec);
+            }
+        }
+    }
+
+    // Next, consider whether there are any non-EC derivable join clauses
+    // that are merge-joinable. If the joininfo list is empty, exit quickly.
+    if run.root.rel(rel).joininfo.is_empty() {
+        return Ok(useful_eclass_list);
+    }
+
+    // If this is a child rel, we must use the topmost parent rel to search.
+    let relids = if is_other_rel(run, rel) {
+        debug_assert!(!relids_is_empty(&run.root.rel(rel).top_parent_relids));
+        planner::relnode::relids_copy(mcx, &run.root.rel(rel).top_parent_relids)
+    } else {
+        planner::relnode::relids_copy(mcx, &run.root.rel(rel).relids)
+    };
+
+    // Check each join clause in turn.
+    let joininfo: Vec<RinfoId> = run.root.rel(rel).joininfo.iter().copied().collect();
+    for ri in joininfo {
+        // Consider only mergejoinable clauses.
+        if run.root.rinfo(ri).mergeopfamilies.is_empty() {
+            continue;
+        }
+        // Make sure we've got canonical ECs.
+        planner::pathkeys::update_mergeclause_eclasses(run, ri)?;
+
+        // mergeopfamilies != NIL guarantees left_ec and right_ec are set.
+        // Identify which side of this merge-joinable clause contains columns
+        // from the relation produced by this RelOptInfo; test for overlap,
+        // not containment (either side may carry extra relations). It is
+        // even possible that relids overlaps neither side (A LEFT JOIN B ON
+        // A.x = B.x AND A.x = 1 puts A.x = 1 in B's joininfo); skip then.
+        let (left_ec, right_ec) = {
+            let r = run.root.rinfo(ri);
+            (
+                r.left_ec.expect("mergeclause left_ec set"),
+                r.right_ec.expect("mergeclause right_ec set"),
+            )
+        };
+        if relids_overlap(&relids, &run.root.ec(right_ec).ec_relids) {
+            if !useful_eclass_list.contains(&right_ec) {
+                useful_eclass_list.push(right_ec);
+            }
+        } else if relids_overlap(&relids, &run.root.ec(left_ec).ec_relids)
+            && !useful_eclass_list.contains(&left_ec)
+        {
+            useful_eclass_list.push(left_ec);
+        }
+    }
+
+    Ok(useful_eclass_list)
+}
+
+// get_useful_pathkeys_for_relation (postgres_fdw.c:910): which orderings of
+// a relation might be useful — the query's own pathkeys (to avoid a local
+// sort) and, with remote estimates, single-key orderings that could enable
+// a merge join.
+fn get_useful_pathkeys_for_relation<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel: RelId,
+) -> PgResult<Vec<PgVec<'mcx, PathKey>>> {
+    let mcx = run.mcx;
+    let mut useful_pathkeys_list: Vec<PgVec<'mcx, PathKey>> = Vec::new();
+
+    // Pushing the query_pathkeys to the remote server is always worth
+    // considering, because it might let us avoid a local sort.
+    fpinfo(run.root.rel(rel)).borrow_mut().qp_is_pushdown_safe = false;
+    if !run.root.query_pathkeys.is_empty() {
+        let query_pathkeys: Vec<PathKey> = run.root.query_pathkeys.iter().copied().collect();
+        let mut query_pathkeys_ok = true;
+        for pathkey in &query_pathkeys {
+            // The planner and executor have no clever strategy for taking
+            // data sorted by a prefix of the query's pathkeys and getting it
+            // sorted by all of them: unless we can push down all of the
+            // query pathkeys, forget it.
+            if !deparse::is_foreign_pathkey(run, rel, pathkey)? {
+                query_pathkeys_ok = false;
+                break;
+            }
+        }
+        if query_pathkeys_ok {
+            let mut keys = PgVec::new_in(mcx);
+            keys.extend(query_pathkeys);
+            useful_pathkeys_list.push(keys);
+            fpinfo(run.root.rel(rel)).borrow_mut().qp_is_pushdown_safe = true;
+        }
+    }
+
+    // Even without remote estimates, having the remote side do the sort
+    // generally won't be worse than doing it locally. What follows —
+    // pathkeys that seem promising for possible merge joins — is more
+    // speculative, so bail out if we can't use remote estimates.
+    if !fpinfo(run.root.rel(rel)).borrow().use_remote_estimate {
+        return Ok(useful_pathkeys_list);
+    }
+
+    // Get the list of interesting EquivalenceClasses.
+    let useful_eclass_list = get_useful_ecs_for_relation(run, rel)?;
+
+    // Extract unique EC for query, if any, so we don't consider it again.
+    let query_ec = if run.root.query_pathkeys.len() == 1 {
+        run.root.query_pathkeys[0].pk_eclass
+    } else {
+        None
+    };
+
+    // As a heuristic, the only pathkeys we consider here are those of length
+    // one: each one generates a round-trip to the remote side.
+    for cur_ec in useful_eclass_list {
+        // If redundant with what we did above, skip it.
+        if Some(cur_ec) == query_ec {
+            continue;
+        }
+        // Can't push down the sort if the EC's opfamily is not shippable.
+        let opfamily = run.root.ec(cur_ec).ec_opfamilies[0];
+        let shippable = {
+            let fp = fpinfo(run.root.rel(rel)).borrow();
+            crate::shippable::is_shippable(
+                mcx,
+                opfamily,
+                types_core::catalog::OPERATOR_FAMILY_RELATION_ID,
+                fp.serverid(),
+                &fp.shippable_extensions,
+            )?
+        };
+        if !shippable {
+            continue;
+        }
+        // If no pushable expression for this rel, skip it.
+        if find_em_for_rel(run, cur_ec, rel)?.is_none() {
+            continue;
+        }
+        // Looks like we can generate a pathkey, so let's do it.
+        let pathkey = planner::pathkeys::make_canonical_pathkey(
+            run,
+            cur_ec,
+            opfamily,
+            COMPARE_LT,
+            false,
+        );
+        let mut keys = PgVec::new_in(mcx);
+        keys.push(pathkey);
+        useful_pathkeys_list.push(keys);
+    }
+
+    Ok(useful_pathkeys_list)
+}
+
+// add_paths_with_pathkeys_for_rel (postgres_fdw.c:6120): one ForeignPath per
+// useful set of pathkeys, sorted remotely. `epq_path` is the EPQ-capable
+// local join path of a join rel (it must be at least as well sorted as the
+// path itself, in case it gets used as input to a mergejoin).
+fn add_paths_with_pathkeys_for_rel<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel: RelId,
+    epq_path: Option<PathId>,
+    restrictlist: &[RinfoId],
+) -> PgResult<()> {
+    let mcx = run.mcx;
+    let useful_pathkeys_list = get_useful_pathkeys_for_relation(run, rel)?;
+
+    // Before creating sorted paths, arrange for the passed-in EPQ path, if
+    // any, to return columns needed by the parent ForeignScan node so that
+    // they will propagate up through Sort nodes injected below, if necessary
+    // (postgres_fdw.c:6133-6172).
+    let mut epq_path = epq_path;
+    if let Some(epq) = epq_path {
+        if !useful_pathkeys_list.is_empty() {
+            let epq_target = run
+                .root
+                .path(epq)
+                .base()
+                .pathtarget_id
+                .expect("EPQ path has a pathtarget");
+            // copy_pathtarget.
+            let mut target = {
+                let src = run.pathtarget(epq_target);
+                let mut t = types_pathnodes::PathTarget::new(mcx);
+                t.exprs.extend(src.exprs.iter().copied());
+                t.sortgrouprefs.extend(src.sortgrouprefs.iter().copied());
+                t.cost = src.cost;
+                t.width = src.width;
+                t.has_volatile_expr = src.has_volatile_expr;
+                t
+            };
+            let old_len = target.exprs.len();
+            // add_new_columns_to_pathtarget(pull_var_clause(...)): Vars
+            // required for evaluating PHVs in the tlist, then for the local
+            // conditions.
+            let mut needed: NodeList<'mcx> = NodeList::nil();
+            let expr_ids: Vec<types_pathnodes::NodeId> = target.exprs.iter().copied().collect();
+            for id in expr_ids {
+                let node = *run.root.expr_node(id);
+                for v in &vars::pull_var_clause(mcx, node, vars::PVC_RECURSE_PLACEHOLDERS)? {
+                    needed.lappend(mcx, v)?;
+                }
+            }
+            let local: Vec<RinfoId> =
+                fpinfo(run.root.rel(rel)).borrow().local_conds.iter().copied().collect();
+            for ri in local {
+                let clause = *run.root.expr_node(run.root.rinfo(ri).clause);
+                for v in &vars::pull_var_clause(mcx, clause, vars::PVC_RECURSE_PLACEHOLDERS)? {
+                    needed.lappend(mcx, v)?;
+                }
+            }
+            for v in &needed {
+                let present = target
+                    .exprs
+                    .iter()
+                    .any(|&e| types_nodes::equal::equal(*run.root.expr_node(e), v));
+                if !present {
+                    // add_column_to_pathtarget(target, expr, 0).
+                    target.exprs.push(run.root.alloc_expr_node(v));
+                    if !target.sortgrouprefs.is_empty() {
+                        target.sortgrouprefs.push(0);
+                    }
+                }
+            }
+            // If we have added any new columns, adjust the tlist of the EPQ
+            // path with a ProjectionPath (no set_pathtarget_cost_width: the
+            // plan only executes EPQ checks). The EPQ path is a join path,
+            // so it is projection-capable; its parallel safety already
+            // folds in rel->consider_parallel and its own target's exprs,
+            // and the added Vars are parallel safe.
+            if target.exprs.len() > old_len {
+                debug_assert!(planner::pathnode::is_projection_capable_pathtype(
+                    run.root.path(epq).base().pathtype
+                ));
+                let parallel_safe = run.root.path(epq).base().parallel_safe;
+                let target_id = run.root.alloc_pathtarget(target);
+                let projected = planner::pathnode::create_projection_path(
+                    run,
+                    rel,
+                    epq,
+                    target_id,
+                    parallel_safe,
+                );
+                epq_path = Some(run.root.alloc_path(projected));
+            }
+        }
+    }
+
+    // Create one path for each set of pathkeys we found above.
+    for useful_pathkeys in useful_pathkeys_list {
+        let (rows, _width, disabled_nodes, startup_cost, total_cost) =
+            estimate_path_cost_size(run, rel, &[], &useful_pathkeys, None)?;
+
+        // The EPQ path must be at least as well sorted as the path itself,
+        // in case it gets used as input to a mergejoin.
+        let mut sorted_epq_path = epq_path;
+        if let Some(epq) = sorted_epq_path {
+            if !types_pathnodes::pathkeys_contained_in(
+                &useful_pathkeys,
+                &run.root.path(epq).base().pathkeys,
+            ) {
+                let mut keys = PgVec::new_in(mcx);
+                keys.extend(useful_pathkeys.iter().copied());
+                sorted_epq_path =
+                    Some(planner::pathnode::create_sort_path(run, rel, epq, keys, -1.0));
+            }
+        }
+
+        let lateral_relids =
+            planner::relnode::relids_copy(mcx, &run.root.rel(rel).lateral_relids);
+        let path = if is_simple_rel(run, rel) {
+            planner::pathnode::create_foreignscan_path(
+                run,
+                rel,
+                None,
+                rows,
+                disabled_nodes,
+                startup_cost,
+                total_cost,
+                useful_pathkeys,
+                &lateral_relids,
+                sorted_epq_path,
+                PgVec::new_in(mcx),
+                PgVec::new_in(mcx),
+            )?
+        } else {
+            let mut fdw_restrictinfo = PgVec::new_in(mcx);
+            fdw_restrictinfo.extend(restrictlist.iter().copied());
+            planner::pathnode::create_foreign_join_path(
+                run,
+                rel,
+                None,
+                rows,
+                disabled_nodes,
+                startup_cost,
+                total_cost,
+                useful_pathkeys,
+                &lateral_relids,
+                sorted_epq_path,
+                fdw_restrictinfo,
+                PgVec::new_in(mcx),
+            )?
+        };
+        planner::pathnode::add_path(run, rel, path);
+    }
+    Ok(())
 }
 
 // get_remote_estimate: run EXPLAIN remotely and scrape the top plan line's
@@ -661,8 +1259,9 @@ fn postgres_get_foreign_paths<'mcx>(
         PgVec::new_in(mcx),
     )?;
     planner::pathnode::add_path(run, rel_id, path);
-    // Pathkey (ORDER BY) pushdown paths are not ported yet
-    // (add_paths_with_pathkeys_for_rel).
+
+    // Add paths with pathkeys (postgres_fdw.c:1050).
+    add_paths_with_pathkeys_for_rel(run, rel_id, None, &[])?;
 
     // Without remote estimates there is no way to cost join clauses; stop.
     if !fpinfo(run.root.rel(rel_id)).borrow().use_remote_estimate {
@@ -776,7 +1375,7 @@ fn postgres_get_foreign_paths<'mcx>(
             rel.ppilist[i].ppi_clauses.iter().copied().collect()
         };
         let (rows, _width, disabled_nodes, startup_cost, total_cost) =
-            estimate_path_cost_size(run, rel_id, &clauses)?;
+            estimate_path_cost_size(run, rel_id, &clauses, &[], None)?;
         {
             let rel = run.root.rel_mut(rel_id);
             if let Some(p) = rel
@@ -1151,7 +1750,7 @@ fn postgres_get_foreign_join_paths<'mcx>(
     }
 
     let (rows, width, disabled_nodes, startup_cost, total_cost) =
-        estimate_path_cost_size(run, joinrel, &[])?;
+        estimate_path_cost_size(run, joinrel, &[], &[], None)?;
     run.root.rel_mut(joinrel).rows = rows;
     let pt = run.rel_reltarget_id(joinrel);
     run.root.pathtarget_mut(pt).width = width;
@@ -1183,28 +1782,36 @@ fn postgres_get_foreign_join_paths<'mcx>(
         PgVec::new_in(mcx),
     )?;
     planner::pathnode::add_path(run, joinrel, path);
-    // Pathkey paths for the join (add_paths_with_pathkeys_for_rel): unported.
+
+    // Consider pathkeys for the join relation (postgres_fdw.c:6496). No
+    // EPQ-capable local join path exists on this lane
+    // (GetExistingLocalJoinPath is unported; see the CMD_UPDATE/DELETE and
+    // rowMarks refusal above), so the sorted paths carry no fdw_outerpath.
+    add_paths_with_pathkeys_for_rel(run, joinrel, None, restrictlist)?;
     Ok(())
 }
 
-// ---------- GetForeignUpperPaths (UPPERREL_GROUP_AGG) ----------
+// ---------- GetForeignUpperPaths (GROUP_AGG / ORDERED / FINAL) ----------
 
+// postgresGetForeignUpperPaths (postgres_fdw.c:6748).
 fn postgres_get_foreign_upper_paths<'mcx>(
     run: &mut PlannerRun<'mcx>,
     stage: types_pathnodes::UpperRelationKind,
     input_rel: RelId,
     output_rel: RelId,
-    having_qual: Option<Node<'mcx>>,
+    extra: &UpperPathExtra<'mcx>,
 ) -> PgResult<()> {
     let mcx = run.mcx;
+    // If input rel is not safe to pushdown, then simply return as we cannot
+    // perform any post-join operations on the foreign server.
     {
         let Some(ifp) = fpinfo_opt(run.root.rel(input_rel)) else { return Ok(()) };
         if !ifp.borrow().pushdown_safe {
             return Ok(());
         }
     }
-    // ORDERED/FINAL stages (sort/LIMIT pushdown) are not ported.
-    if stage != types_pathnodes::UPPERREL_GROUP_AGG
+    // Ignore stages we don't support; and skip any duplicate calls.
+    if (stage != UPPERREL_GROUP_AGG && stage != UPPERREL_ORDERED && stage != UPPERREL_FINAL)
         || run.root.rel(output_rel).fdw_state.is_some()
     {
         return Ok(());
@@ -1213,7 +1820,442 @@ fn postgres_get_foreign_upper_paths<'mcx>(
     fp.pushdown_safe = false;
     fp.stage = stage;
     attach_fpinfo(mcx, run.root.rel_mut(output_rel), fp)?;
-    add_foreign_grouping_paths(run, input_rel, output_rel, having_qual)
+
+    match stage {
+        UPPERREL_GROUP_AGG => {
+            let having_qual = match extra {
+                UpperPathExtra::GroupAgg { having_qual } => *having_qual,
+                _ => None,
+            };
+            add_foreign_grouping_paths(run, input_rel, output_rel, having_qual)
+        }
+        UPPERREL_ORDERED => add_foreign_ordered_paths(run, input_rel, output_rel),
+        UPPERREL_FINAL => {
+            let (limit_needed, limit_tuples, count_est, offset_est) = match extra {
+                UpperPathExtra::Final { limit_needed, limit_tuples, count_est, offset_est } => {
+                    (*limit_needed, *limit_tuples, *count_est, *offset_est)
+                }
+                _ => (false, -1.0, 0, 0),
+            };
+            add_foreign_final_paths(
+                run,
+                input_rel,
+                output_rel,
+                limit_needed,
+                limit_tuples,
+                count_est,
+                offset_est,
+            )
+        }
+        _ => Err(Box::new(PgError::error(format!("unexpected upper relation: {stage}")))),
+    }
+}
+
+// merge_fdw_options with fpinfo_i = NULL (postgres_fdw.c:6688): the upper
+// rel takes the input rel's server and FDW options.
+fn copy_fdw_options(run: &PlannerRun<'_>, dst: RelId, src: RelId) {
+    let fpc = fpinfo(run.root.rel(dst));
+    let mut fp = fpc.borrow_mut();
+    let fo = fpinfo(run.root.rel(src)).borrow();
+    fp.serverid = fo.serverid;
+    fp.fdw_startup_cost = fo.fdw_startup_cost;
+    fp.fdw_tuple_cost = fo.fdw_tuple_cost;
+    fp.shippable_extensions.clear();
+    fp.shippable_extensions.extend(fo.shippable_extensions.iter().copied());
+    fp.use_remote_estimate = fo.use_remote_estimate;
+    fp.fetch_size = fo.fetch_size;
+    fp.async_capable = fo.async_capable;
+}
+
+// FdwPathPrivateIndex (postgres_fdw.c:277-283): [has_final_sort, has_limit]
+// as Boolean nodes in the ForeignPath's fdw_private.
+fn make_path_private<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    has_final_sort: bool,
+    has_limit: bool,
+) -> PgResult<PgVec<'mcx, types_pathnodes::NodeId>> {
+    let mcx = run.mcx;
+    let mut fdw_private = PgVec::new_in(mcx);
+    fdw_private.push(run.root.alloc_expr_node(Node::mk_boolean(mcx, has_final_sort)?));
+    fdw_private.push(run.root.alloc_expr_node(Node::mk_boolean(mcx, has_limit)?));
+    Ok(fdw_private)
+}
+
+// add_foreign_ordered_paths (postgres_fdw.c:6897): a foreign path that
+// performs the final sort remotely, added to the ordered_rel.
+fn add_foreign_ordered_paths<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    input_rel: RelId,
+    ordered_rel: RelId,
+) -> PgResult<()> {
+    let mcx = run.mcx;
+    let parse = run.parse();
+    // Shouldn't get here unless the query has ORDER BY.
+    debug_assert!(!parse.sortClause.is_nil());
+
+    // We don't support cases where there are any SRFs in the targetlist.
+    if parse.hasTargetSRFs {
+        return Ok(());
+    }
+
+    // Save the input_rel as outerrel in fpinfo; copy the foreign server, FDW
+    // options etc. from the input relation's fpinfo.
+    fpinfo(run.root.rel(ordered_rel)).borrow_mut().outerrel = Some(input_rel);
+    copy_fdw_options(run, ordered_rel, input_rel);
+
+    // If the input_rel is a base or join relation, we would already have
+    // considered pushing down the final sort to the remote server when
+    // creating pre-sorted foreign paths for that relation, because the
+    // query_pathkeys is set to the root->sort_pathkeys in that case (see
+    // standard_qp_callback()).
+    let input_kind = run.root.rel(input_rel).reloptkind;
+    if input_kind == RELOPT_BASEREL || input_kind == RELOPT_JOINREL {
+        debug_assert!(types_pathnodes::pathkeys_contained_in(
+            &run.root.query_pathkeys,
+            &run.root.sort_pathkeys
+        ) && run.root.query_pathkeys.len() == run.root.sort_pathkeys.len());
+        // Safe to push down if the query_pathkeys is safe to push down.
+        let qp_safe = fpinfo(run.root.rel(input_rel)).borrow().qp_is_pushdown_safe;
+        fpinfo(run.root.rel(ordered_rel)).borrow_mut().pushdown_safe = qp_safe;
+        return Ok(());
+    }
+
+    // The input_rel should be a grouping relation.
+    debug_assert!(
+        input_kind == RELOPT_UPPER_REL
+            && fpinfo(run.root.rel(input_rel)).borrow().stage == UPPERREL_GROUP_AGG
+    );
+
+    // We try to create a path below by extending a simple foreign path for
+    // the underlying grouping relation to perform the final sort remotely,
+    // which is stored into the fdw_private list of the resulting path.
+
+    // Assess if it is safe to push down the final sort.
+    let sort_pathkeys: Vec<PathKey> = run.root.sort_pathkeys.iter().copied().collect();
+    for pathkey in &sort_pathkeys {
+        let pathkey_ec = pathkey.pk_eclass.expect("canonical pathkey has an eclass");
+        // is_foreign_expr would detect volatile expressions as well, but
+        // checking ec_has_volatile here saves some cycles.
+        if run.root.ec(pathkey_ec).ec_has_volatile {
+            return Ok(());
+        }
+        // Can't push down the sort if pathkey's opfamily is not shippable.
+        let shippable = {
+            let fp = fpinfo(run.root.rel(ordered_rel)).borrow();
+            crate::shippable::is_shippable(
+                mcx,
+                pathkey.pk_opfamily,
+                types_core::catalog::OPERATOR_FAMILY_RELATION_ID,
+                fp.serverid(),
+                &fp.shippable_extensions,
+            )?
+        };
+        if !shippable {
+            return Ok(());
+        }
+        // The EC must contain a shippable EM that is computed in input_rel's
+        // reltarget, else we can't push down the sort.
+        if find_em_for_rel_target(run, pathkey_ec, input_rel)?.is_none() {
+            return Ok(());
+        }
+    }
+
+    // Safe to push down.
+    fpinfo(run.root.rel(ordered_rel)).borrow_mut().pushdown_safe = true;
+
+    // Construct PgFdwPathExtraData.
+    let target = run.root.upper_targets[UPPERREL_ORDERED as usize]
+        .expect("upper_targets[UPPERREL_ORDERED] is set before create_ordered_paths");
+    let fpextra = PgFdwPathExtraData {
+        target,
+        has_final_sort: true,
+        has_limit: false,
+        limit_tuples: 0.0,
+        count_est: 0,
+        offset_est: 0,
+    };
+
+    // Estimate the costs of performing the final sort remotely.
+    let (rows, _width, disabled_nodes, startup_cost, total_cost) =
+        estimate_path_cost_size(run, input_rel, &[], &sort_pathkeys, Some(&fpextra))?;
+
+    // Build the fdw_private list that will be used by postgresGetForeignPlan.
+    let fdw_private = make_path_private(run, true, false)?;
+
+    // Create foreign ordering path (parent = input_rel, as C).
+    let mut pathkeys = PgVec::new_in(mcx);
+    pathkeys.extend(sort_pathkeys);
+    let ordered_path = planner::pathnode::create_foreign_upper_path(
+        run,
+        input_rel,
+        Some(target),
+        rows,
+        disabled_nodes,
+        startup_cost,
+        total_cost,
+        pathkeys,
+        None,
+        PgVec::new_in(mcx),
+        fdw_private,
+    )?;
+
+    // and add it to the ordered_rel.
+    planner::pathnode::add_path(run, ordered_rel, ordered_path);
+    Ok(())
+}
+
+// add_foreign_final_paths (postgres_fdw.c:7035): foreign paths performing
+// the final processing (FOR UPDATE/SHARE, LIMIT/OFFSET, possibly the final
+// sort) remotely, added to the final_rel. The FinalPathExtraData fields
+// arrive unpacked.
+#[allow(clippy::too_many_arguments)]
+fn add_foreign_final_paths<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    input_rel: RelId,
+    final_rel: RelId,
+    limit_needed: bool,
+    limit_tuples: f64,
+    count_est: i64,
+    offset_est: i64,
+) -> PgResult<()> {
+    use types_nodes::nodes_enums::LimitOption;
+    use types_nodes::CmdType;
+    let mcx = run.mcx;
+    let parse = run.parse();
+
+    // Currently, we only support this for SELECT commands.
+    if parse.commandType != CmdType::CMD_SELECT {
+        return Ok(());
+    }
+
+    // No work if there is no FOR UPDATE/SHARE clause and if there is no need
+    // to add a LIMIT node.
+    if parse.rowMarks.is_nil() && !limit_needed {
+        return Ok(());
+    }
+
+    // We don't support cases where there are any SRFs in the targetlist.
+    if parse.hasTargetSRFs {
+        return Ok(());
+    }
+
+    // Save the input_rel as outerrel in fpinfo; copy the foreign server, FDW
+    // options etc. from the input relation's fpinfo.
+    fpinfo(run.root.rel(final_rel)).borrow_mut().outerrel = Some(input_rel);
+    copy_fdw_options(run, final_rel, input_rel);
+
+    // If there is no need to add a LIMIT node, there might be a ForeignPath
+    // in the input_rel's pathlist that implements all behavior of the query.
+    // Note: we would already have accounted for the query's FOR UPDATE/SHARE
+    // (if any) before we get here.
+    if !limit_needed {
+        debug_assert!(!parse.rowMarks.is_nil());
+
+        // Grouping and aggregation are not supported with FOR UPDATE/SHARE,
+        // so the input_rel should be a base, join, or ordered relation; and
+        // if it's an ordered relation, its input relation should be a base
+        // or join relation.
+        debug_assert!({
+            let kind = run.root.rel(input_rel).reloptkind;
+            kind == RELOPT_BASEREL
+                || kind == RELOPT_JOINREL
+                || (kind == RELOPT_UPPER_REL && {
+                    let ifp = fpinfo(run.root.rel(input_rel)).borrow();
+                    ifp.stage == UPPERREL_ORDERED
+                        && matches!(
+                            run.root.rel(ifp.outerrel.expect("ordered rel has outerrel")).reloptkind,
+                            RELOPT_BASEREL | RELOPT_JOINREL
+                        )
+                })
+        });
+
+        let paths: Vec<PathId> = run.root.rel(input_rel).pathlist.iter().copied().collect();
+        for path in paths {
+            // apply_scanjoin_target_to_paths() uses create_projection_path()
+            // to adjust each of its input paths if needed, whereas
+            // create_ordered_paths() uses apply_projection_to_path() to do
+            // that. So the former might have put a ProjectionPath on top of
+            // the ForeignPath; look through ProjectionPath and see if the
+            // path underneath it is ForeignPath.
+            let is_foreign = match run.root.path(path) {
+                PathNode::ForeignPath(_) => true,
+                PathNode::ProjectionPath(pp) => pp
+                    .subpath
+                    .is_some_and(|sub| matches!(run.root.path(sub), PathNode::ForeignPath(_))),
+                _ => false,
+            };
+            if !is_foreign {
+                continue;
+            }
+            // Create foreign final path; this gets rid of a no-longer-needed
+            // outer plan (if any), which makes the EXPLAIN output look
+            // cleaner.
+            let (parent, target, rows, disabled_nodes, startup_cost, total_cost, pathkeys) = {
+                let b = run.root.path(path).base();
+                let mut keys = PgVec::new_in(mcx);
+                keys.extend(b.pathkeys.iter().copied());
+                (
+                    b.parent,
+                    b.pathtarget_id,
+                    b.rows,
+                    b.disabled_nodes,
+                    b.startup_cost,
+                    b.total_cost,
+                    keys,
+                )
+            };
+            let final_path = planner::pathnode::create_foreign_upper_path(
+                run,
+                parent,
+                target,
+                rows,
+                disabled_nodes,
+                startup_cost,
+                total_cost,
+                pathkeys,
+                None,
+                PgVec::new_in(mcx),
+                PgVec::new_in(mcx),
+            )?;
+
+            // and add it to the final_rel.
+            planner::pathnode::add_path(run, final_rel, final_path);
+
+            // Safe to push down.
+            fpinfo(run.root.rel(final_rel)).borrow_mut().pushdown_safe = true;
+            return Ok(());
+        }
+
+        // If we get here it means no ForeignPaths; since we would already
+        // have considered pushing down all operations for the query to the
+        // remote server, give up on it.
+        return Ok(());
+    }
+
+    debug_assert!(limit_needed);
+
+    // If the input_rel is an ordered relation, replace the input_rel with
+    // its input relation.
+    let mut input_rel = input_rel;
+    let mut has_final_sort = false;
+    let mut pathkeys: Vec<PathKey> = Vec::new();
+    if run.root.rel(input_rel).reloptkind == RELOPT_UPPER_REL
+        && fpinfo(run.root.rel(input_rel)).borrow().stage == UPPERREL_ORDERED
+    {
+        input_rel = fpinfo(run.root.rel(input_rel))
+            .borrow()
+            .outerrel
+            .expect("ordered rel has outerrel");
+        has_final_sort = true;
+        pathkeys = run.root.sort_pathkeys.iter().copied().collect();
+    }
+
+    // The input_rel should be a base, join, or grouping relation.
+    debug_assert!({
+        let kind = run.root.rel(input_rel).reloptkind;
+        kind == RELOPT_BASEREL
+            || kind == RELOPT_JOINREL
+            || (kind == RELOPT_UPPER_REL
+                && fpinfo(run.root.rel(input_rel)).borrow().stage == UPPERREL_GROUP_AGG)
+    });
+
+    // We try to create a path below by extending a simple foreign path for
+    // the underlying base, join, or grouping relation to perform the final
+    // sort (if has_final_sort) and the LIMIT restriction remotely, which is
+    // stored into the fdw_private list of the resulting path. (We
+    // re-estimate the costs of sorting the underlying relation, if
+    // has_final_sort.)
+
+    // Assess if it is safe to push down the LIMIT and OFFSET to the remote
+    // server: not if the underlying relation has any local conditions.
+    if !fpinfo(run.root.rel(input_rel)).borrow().local_conds.is_empty() {
+        return Ok(());
+    }
+
+    // If the query has FETCH FIRST .. WITH TIES, 1) it must have ORDER BY as
+    // well, and 2) ORDER BY must already have been determined to be safe to
+    // push down. The FETCH clause would then be safe to push down with ORDER
+    // BY if the remote server is v13 or later, but without a remote-version
+    // check the remote query could fail entirely; disable pushing it.
+    if parse.limitOption == LimitOption::LIMIT_OPTION_WITH_TIES {
+        return Ok(());
+    }
+
+    // Also, the LIMIT/OFFSET cannot be pushed down, if their expressions are
+    // not safe to remote (is_foreign_expr(NULL) is true).
+    if let Some(offset) = parse.limitOffset {
+        if !deparse::is_foreign_expr(run, input_rel, offset)? {
+            return Ok(());
+        }
+    }
+    if let Some(count) = parse.limitCount {
+        if !deparse::is_foreign_expr(run, input_rel, count)? {
+            return Ok(());
+        }
+    }
+
+    // Safe to push down.
+    fpinfo(run.root.rel(final_rel)).borrow_mut().pushdown_safe = true;
+
+    // Construct PgFdwPathExtraData.
+    let target = run.root.upper_targets[UPPERREL_FINAL as usize]
+        .expect("upper_targets[UPPERREL_FINAL] is set before the final rel");
+    let fpextra = PgFdwPathExtraData {
+        target,
+        has_final_sort,
+        has_limit: limit_needed,
+        limit_tuples,
+        count_est,
+        offset_est,
+    };
+
+    // Estimate the costs of performing the final sort and the LIMIT
+    // restriction remotely. If has_final_sort is false, we wouldn't need to
+    // execute EXPLAIN anymore if use_remote_estimate, since the costs can be
+    // roughly estimated using the costs we already have for the underlying
+    // relation, in the same way as when use_remote_estimate is false. Since
+    // it's pretty expensive to execute EXPLAIN, force use_remote_estimate to
+    // false in that case.
+    let save_use_remote_estimate = if !fpextra.has_final_sort {
+        let fpc = fpinfo(run.root.rel(input_rel));
+        let mut ifp = fpc.borrow_mut();
+        let saved = ifp.use_remote_estimate;
+        ifp.use_remote_estimate = false;
+        Some(saved)
+    } else {
+        None
+    };
+    let estimate = estimate_path_cost_size(run, input_rel, &[], &pathkeys, Some(&fpextra));
+    if let Some(saved) = save_use_remote_estimate {
+        fpinfo(run.root.rel(input_rel)).borrow_mut().use_remote_estimate = saved;
+    }
+    let (rows, _width, disabled_nodes, startup_cost, total_cost) = estimate?;
+
+    // Build the fdw_private list that will be used by postgresGetForeignPlan.
+    let fdw_private = make_path_private(run, has_final_sort, limit_needed)?;
+
+    // Create foreign final path (parent = input_rel, as C); this gets rid of
+    // a no-longer-needed outer plan (if any), which makes the EXPLAIN output
+    // look cleaner.
+    let mut path_pathkeys = PgVec::new_in(mcx);
+    path_pathkeys.extend(pathkeys);
+    let final_path = planner::pathnode::create_foreign_upper_path(
+        run,
+        input_rel,
+        Some(target),
+        rows,
+        disabled_nodes,
+        startup_cost,
+        total_cost,
+        path_pathkeys,
+        None,
+        PgVec::new_in(mcx),
+        fdw_private,
+    )?;
+
+    // and add it to the final_rel.
+    planner::pathnode::add_path(run, final_rel, final_path);
+    Ok(())
 }
 
 fn add_foreign_grouping_paths<'mcx>(
@@ -1236,20 +2278,8 @@ fn add_foreign_grouping_paths<'mcx>(
 
     // Save input_rel as outerrel; copy FDW options (merge_fdw_options with
     // fpinfo_i = NULL).
-    {
-        let fpc = fpinfo(run.root.rel(grouped_rel));
-        let mut fp = fpc.borrow_mut();
-        let fo = fpinfo(run.root.rel(input_rel)).borrow();
-        fp.outerrel = Some(input_rel);
-        fp.serverid = fo.serverid;
-        fp.fdw_startup_cost = fo.fdw_startup_cost;
-        fp.fdw_tuple_cost = fo.fdw_tuple_cost;
-        fp.shippable_extensions.clear();
-        fp.shippable_extensions.extend(fo.shippable_extensions.iter().copied());
-        fp.use_remote_estimate = fo.use_remote_estimate;
-        fp.fetch_size = fo.fetch_size;
-        fp.async_capable = fo.async_capable;
-    }
+    fpinfo(run.root.rel(grouped_rel)).borrow_mut().outerrel = Some(input_rel);
+    copy_fdw_options(run, grouped_rel, input_rel);
 
     if !foreign_grouping_ok(run, grouped_rel, having_qual)? {
         return Ok(());
@@ -1280,7 +2310,7 @@ fn add_foreign_grouping_paths<'mcx>(
     }
 
     let (rows, width, disabled_nodes, startup_cost, total_cost) =
-        estimate_path_cost_size(run, grouped_rel, &[])?;
+        estimate_path_cost_size(run, grouped_rel, &[], &[], None)?;
     {
         let fpc = fpinfo(run.root.rel(grouped_rel));
         let mut fpm = fpc.borrow_mut();
@@ -1479,13 +2509,31 @@ fn postgres_get_foreign_plan<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel_id: RelId,
     _foreigntableid: Oid,
-    _best_path: PathId,
+    best_path: PathId,
     tlist: NodeList<'mcx>,
     scan_clauses: PgVec<'mcx, RinfoId>,
     outer_plan: Option<Node<'mcx>>,
 ) -> PgResult<Node<'mcx>> {
     let mcx = run.mcx;
     let reloptkind = run.root.rel(rel_id).reloptkind;
+
+    // Get FDW private data created by postgresGetForeignUpperPaths(), if
+    // any (FdwPathPrivateIndex), and the path's pathkeys.
+    let (has_final_sort, has_limit, path_pathkeys) = {
+        let PathNode::ForeignPath(fp) = run.root.path(best_path) else {
+            return Err(Box::new(PgError::error("postgresGetForeignPlan: not a ForeignPath")));
+        };
+        let flag = |id: types_pathnodes::NodeId| -> bool {
+            run.root.expr_node(id).as_boolean().expect("FdwPathPrivate flag is a Boolean").boolval
+        };
+        let (fs, hl) = if fp.fdw_private.is_empty() {
+            (false, false)
+        } else {
+            (flag(fp.fdw_private[0]), flag(fp.fdw_private[1]))
+        };
+        let keys: Vec<PathKey> = fp.path.pathkeys.iter().copied().collect();
+        (fs, hl, keys)
+    };
     let is_join = matches!(
         reloptkind,
         types_pathnodes::RELOPT_JOINREL
@@ -1560,6 +2608,9 @@ fn postgres_get_foreign_plan<'mcx>(
         rel_id,
         &fdw_scan_tlist,
         &remote_rinfos,
+        &path_pathkeys,
+        has_final_sort,
+        has_limit,
         Some(PgVec::new_in(mcx)),
     )?;
 
@@ -1627,7 +2678,7 @@ fn build_tlist_to_deparse<'mcx>(
         return fpinfo(run.root.rel(rel_id)).borrow().grouped_tlist.clone_in(mcx).map_err(Into::into);
     }
     let mut tlist: NodeList<'mcx> = NodeList::nil();
-    let mut add_vars = |vars: NodeList<'mcx>, tlist: &mut NodeList<'mcx>| -> PgResult<()> {
+    let add_vars = |vars: NodeList<'mcx>, tlist: &mut NodeList<'mcx>| -> PgResult<()> {
         for v in &vars {
             let mut found = false;
             for existing in &*tlist {

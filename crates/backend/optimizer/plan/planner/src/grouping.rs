@@ -668,7 +668,24 @@ fn grouping_planner_tail<'mcx>(
             crate::pathnode::add_partial_path(run, final_rel, pid);
         }
     }
-    // FDW upper paths, create_upper_paths_hook: absent.
+    // planner.c:2282-2295 GetForeignUpperPaths(UPPERREL_FINAL) with
+    // FinalPathExtraData; create_upper_paths_hook: absent.
+    if let Some(kind) = run.root.rel(final_rel).fdwroutine {
+        if let Some(f) = crate::fdwplan::fdw_plan_routine(kind).get_foreign_upper_paths {
+            f(
+                run,
+                UPPERREL_FINAL,
+                current_rel,
+                final_rel,
+                &crate::fdwplan::UpperPathExtra::Final {
+                    limit_needed: limit_needed(parse),
+                    limit_tuples,
+                    count_est,
+                    offset_est,
+                },
+            )?;
+        }
+    }
     Ok(())
 }
 
@@ -1422,7 +1439,7 @@ fn create_ordinary_grouping_paths<'mcx>(
                 types_pathnodes::UPPERREL_GROUP_AGG,
                 input_rel,
                 grouped_rel,
-                extra.having_qual,
+                &crate::fdwplan::UpperPathExtra::GroupAgg { having_qual: extra.having_qual },
             )?;
         }
     }
@@ -3118,6 +3135,20 @@ fn create_ordered_paths<'mcx>(
                 sorted_path
             };
             crate::pathnode::add_path(run, ordered_rel, sorted_path);
+        }
+    }
+
+    // planner.c:5612 GetForeignUpperPaths(UPPERREL_ORDERED): the FDW
+    // responsible for all baserels may add a remotely-sorted path.
+    if let Some(kind) = run.root.rel(ordered_rel).fdwroutine {
+        if let Some(f) = crate::fdwplan::fdw_plan_routine(kind).get_foreign_upper_paths {
+            f(
+                run,
+                UPPERREL_ORDERED,
+                input_rel,
+                ordered_rel,
+                &crate::fdwplan::UpperPathExtra::Ordered,
+            )?;
         }
     }
 

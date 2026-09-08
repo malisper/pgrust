@@ -7,7 +7,7 @@ use nodes_core::{expr_type, expr_typmod, strip_implicit_coercions};
 use types_core::{
     catalog::{
         BITOID, BOOLOID, FLOAT4OID, FLOAT8OID, INT2OID, INT4OID, INT8OID, NUMERICOID,
-        OIDOID, PG_CATALOG_NAMESPACE, UNKNOWNOID, VARBITOID,
+        OIDOID, OPERATOR_FAMILY_RELATION_ID, PG_CATALOG_NAMESPACE, UNKNOWNOID, VARBITOID,
     },
     Oid,
 };
@@ -585,6 +585,36 @@ fn get_sortgroupref_tle<'mcx>(
     Err(Box::new(PgError::error(
         "ORDER/GROUP BY expression not found in targetlist",
     )))
+}
+
+/// is_foreign_pathkey (deparse.c:1121): is the sort expression described by
+/// `pathkey` safe to push to the foreign server?
+pub(crate) fn is_foreign_pathkey<'mcx>(
+    run: &PlannerRun<'mcx>,
+    baserel: RelId,
+    pathkey: &types_pathnodes::PathKey,
+) -> PgResult<bool> {
+    let pathkey_ec = pathkey.pk_eclass.expect("canonical pathkey has an eclass");
+    // is_foreign_expr would detect volatile expressions as well, but checking
+    // ec_has_volatile here saves some cycles.
+    if run.root.ec(pathkey_ec).ec_has_volatile {
+        return Ok(false);
+    }
+    // Can't push down the sort if the pathkey's opfamily is not shippable.
+    {
+        let fp = fpinfo(run.root.rel(baserel)).borrow();
+        if !shippable::is_shippable(
+            run.mcx,
+            pathkey.pk_opfamily,
+            OPERATOR_FAMILY_RELATION_ID,
+            fp.serverid(),
+            &fp.shippable_extensions,
+        )? {
+            return Ok(false);
+        }
+    }
+    // Can push if a suitable EC member exists.
+    Ok(crate::plan::find_em_for_rel(run, pathkey_ec, baserel)?.is_some())
 }
 
 /// is_foreign_param: does this top-level expr have to be sent as a Param?
@@ -1675,14 +1705,20 @@ fn deparse_column_ref_buf<'mcx>(
 
 // ---------- SELECT-statement construction (base + join relations) ----------
 
-/// deparseSelectStmtForRel (base and join relations; upper/grouping is phase
-/// 3, pathkeys/LIMIT pushdown not ported). `tlist` is the explicit target
-/// list for join rels (fdw_scan_tlist); ignored for base rels.
+/// deparseSelectStmtForRel (deparse.c:1231): base, join and upper (grouping)
+/// relations. `tlist` is the explicit target list for join/upper rels
+/// (fdw_scan_tlist); ignored for base rels. `pathkeys` adds the ORDER BY
+/// clause (Vars from the scan rel, or from `rel`'s reltarget when
+/// `has_final_sort`); `has_limit` adds the query's LIMIT/OFFSET.
+#[allow(clippy::too_many_arguments)]
 pub fn deparse_select_stmt_for_rel<'mcx>(
     run: &PlannerRun<'mcx>,
     rel: RelId,
     tlist: &NodeList<'mcx>,
     remote_conds: &[types_pathnodes::RinfoId],
+    pathkeys: &[types_pathnodes::PathKey],
+    has_final_sort: bool,
+    has_limit: bool,
     params_list: Option<PgVec<'mcx, Node<'mcx>>>,
 ) -> PgResult<(PgString<'mcx>, PgVec<'mcx, i32>, Option<PgVec<'mcx, Node<'mcx>>>)> {
     let mcx = run.mcx;
@@ -1695,7 +1731,17 @@ pub fn deparse_select_stmt_for_rel<'mcx>(
         mcx,
     };
     let mut retrieved_attrs = PgVec::new_in(mcx);
-    deparse_select_stmt_inner(&mut ctx, rel, tlist, remote_conds, false, &mut retrieved_attrs)?;
+    deparse_select_stmt_inner(
+        &mut ctx,
+        rel,
+        tlist,
+        remote_conds,
+        pathkeys,
+        has_final_sort,
+        has_limit,
+        false,
+        &mut retrieved_attrs,
+    )?;
     Ok((ctx.buf, retrieved_attrs, ctx.params_list))
 }
 
@@ -1706,11 +1752,15 @@ fn is_join_rel(run: &PlannerRun<'_>, rel: RelId) -> bool {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn deparse_select_stmt_inner<'mcx>(
     ctx: &mut DeparseCtx<'_, 'mcx>,
     rel: RelId,
     tlist: &NodeList<'mcx>,
     remote_conds: &[types_pathnodes::RinfoId],
+    pathkeys: &[types_pathnodes::PathKey],
+    has_final_sort: bool,
+    has_limit: bool,
     is_subquery: bool,
     retrieved_attrs: &mut PgVec<'mcx, i32>,
 ) -> PgResult<()> {
@@ -1768,6 +1818,16 @@ fn deparse_select_stmt_inner<'mcx>(
             ctx.buf.push_str(" HAVING ");
             append_conditions(ctx, remote_conds)?;
         }
+    }
+
+    // Add ORDER BY clause if we found any useful pathkeys.
+    if !pathkeys.is_empty() {
+        append_order_by_clause(ctx, pathkeys, has_final_sort)?;
+    }
+
+    // Add LIMIT clause if necessary.
+    if has_limit {
+        append_limit_clause(ctx)?;
     }
 
     deparse_locking_clause(ctx)?;
@@ -1851,6 +1911,111 @@ fn append_group_by_clause<'mcx>(
         deparse_sort_group_clause(ctx, sgc.tleSortGroupRef, tlist, true)?;
     }
     crate::transmission::reset_transmission_modes(nestlevel);
+    Ok(())
+}
+
+// appendOrderByClause (deparse.c:3908): the ORDER BY clause for the given
+// pathkeys. The clause uses Vars from ctx.scanrel if !has_final_sort, or
+// from ctx.foreignrel's reltarget if has_final_sort. Some earlier step
+// verified that a suitable (shippable) pathkey expression exists.
+fn append_order_by_clause<'mcx>(
+    ctx: &mut DeparseCtx<'_, 'mcx>,
+    pathkeys: &[types_pathnodes::PathKey],
+    has_final_sort: bool,
+) -> PgResult<()> {
+    // Make sure any constants in the exprs are printed portably.
+    let nestlevel = crate::transmission::set_transmission_modes();
+    let r = append_order_by_clause_body(ctx, pathkeys, has_final_sort);
+    crate::transmission::reset_transmission_modes(nestlevel);
+    r
+}
+
+fn append_order_by_clause_body<'mcx>(
+    ctx: &mut DeparseCtx<'_, 'mcx>,
+    pathkeys: &[types_pathnodes::PathKey],
+    has_final_sort: bool,
+) -> PgResult<()> {
+    let run = ctx.run;
+    let mut gotone = false;
+    for pathkey in pathkeys {
+        let ec = pathkey.pk_eclass.expect("canonical pathkey has an eclass");
+        let em = if has_final_sort {
+            // By construction, ctx.foreignrel is the input relation to the
+            // final sort.
+            crate::plan::find_em_for_rel_target(run, ec, ctx.foreignrel)?
+        } else {
+            crate::plan::find_em_for_rel(run, ec, ctx.scanrel)?
+        };
+        // We don't expect any error here; it would mean that shippability
+        // wasn't verified earlier. For the same reason, we don't recheck
+        // shippability of the sort operator.
+        let Some(em) = em else {
+            return Err(Box::new(PgError::error("could not find pathkey item to sort")));
+        };
+        let (em_expr_id, em_datatype) = {
+            let m = run.root.em(em);
+            (m.em_expr, m.em_datatype)
+        };
+        let em_expr = *run.root.expr_node(em_expr_id);
+
+        // If the member is a Const expression then we needn't add it to the
+        // ORDER BY clause (UNION ALL children with a Const in the tlist; an
+        // integer literal would read as an ordinal column position).
+        if em_expr.node_tag() == NodeTag::T_Const {
+            continue;
+        }
+
+        if !gotone {
+            ctx.buf.push_str(" ORDER BY ");
+            gotone = true;
+        } else {
+            ctx.buf.push_str(", ");
+        }
+
+        // Lookup the operator corresponding to the compare type in the
+        // opclass. The datatype used by the opfamily is not necessarily the
+        // same as the expression type (for array types for example).
+        let oprid = lsyscache::get_opfamily_member_for_cmptype(
+            pathkey.pk_opfamily,
+            em_datatype,
+            em_datatype,
+            pathkey.pk_cmptype,
+        )?;
+        if oprid == types_core::InvalidOid {
+            return Err(Box::new(PgError::error(format!(
+                "missing operator {}({},{}) in opfamily {}",
+                pathkey.pk_cmptype, em_datatype, em_datatype, pathkey.pk_opfamily
+            ))));
+        }
+
+        deparse_expr(ctx, em_expr)?;
+
+        // Here we need to use the expression's actual type to discover
+        // whether the desired operator will be the default or not.
+        append_order_by_suffix(ctx, oprid, expr_type(em_expr), pathkey.pk_nulls_first)?;
+    }
+    Ok(())
+}
+
+// appendLimitClause (deparse.c:4002): LIMIT/OFFSET from the query.
+fn append_limit_clause<'mcx>(ctx: &mut DeparseCtx<'_, 'mcx>) -> PgResult<()> {
+    // Make sure any constants in the exprs are printed portably.
+    let nestlevel = crate::transmission::set_transmission_modes();
+    let r = append_limit_clause_body(ctx);
+    crate::transmission::reset_transmission_modes(nestlevel);
+    r
+}
+
+fn append_limit_clause_body<'mcx>(ctx: &mut DeparseCtx<'_, 'mcx>) -> PgResult<()> {
+    let parse = ctx.run.parse();
+    if let Some(count) = parse.limitCount {
+        ctx.buf.push_str(" LIMIT ");
+        deparse_expr(ctx, count)?;
+    }
+    if let Some(offset) = parse.limitOffset {
+        ctx.buf.push_str(" OFFSET ");
+        deparse_expr(ctx, offset)?;
+    }
     Ok(())
 }
 
@@ -2040,6 +2205,9 @@ fn deparse_range_tbl_ref<'mcx>(
             foreignrel,
             &NodeList::nil(),
             &remote_conds,
+            &[],
+            false,
+            false,
             true,
             &mut ignored_attrs,
         )?;

@@ -72,14 +72,28 @@ pub type GetForeignJoinPaths = for<'mcx> fn(
     &[RinfoId],
 ) -> PgResult<()>;
 
-/// GetForeignUpperPaths (UPPERREL_GROUP_AGG lane): (stage, input_rel,
-/// output_rel, extra->havingQual). ORDERED/FINAL stages are not yet offered.
+/// The `void *extra` of GetForeignUpperPaths (fdwapi.h): planner.c passes a
+/// GroupPathExtraData at UPPERREL_GROUP_AGG (the FDW reads havingQual), NULL
+/// at UPPERREL_ORDERED and a FinalPathExtraData at UPPERREL_FINAL.
+#[derive(Clone, Copy)]
+pub enum UpperPathExtra<'mcx> {
+    /// GroupPathExtraData.havingQual (planner.c:4286).
+    GroupAgg { having_qual: Option<Node<'mcx>> },
+    /// planner.c:5614 passes NULL.
+    Ordered,
+    /// FinalPathExtraData (planner.c:2282-2285).
+    Final { limit_needed: bool, limit_tuples: f64, count_est: i64, offset_est: i64 },
+}
+
+/// GetForeignUpperPaths: (stage, input_rel, output_rel, extra) — offered at
+/// UPPERREL_GROUP_AGG, UPPERREL_ORDERED and UPPERREL_FINAL (planner.c:4284,
+/// :5612, :2291); the WINDOW/DISTINCT/PARTIAL_* stages are not offered.
 pub type GetForeignUpperPaths = for<'mcx> fn(
     &mut PlannerRun<'mcx>,
     types_pathnodes::UpperRelationKind,
     RelId,
     RelId,
-    Option<Node<'mcx>>,
+    &UpperPathExtra<'mcx>,
 ) -> PgResult<()>;
 
 pub struct FdwPlanRoutine {
