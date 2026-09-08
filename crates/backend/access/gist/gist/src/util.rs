@@ -709,7 +709,7 @@ pub fn gistNewBuffer<'mcx>(
                 return Ok(pin);
             }
             gistcheckpage(r, &pin)?;
-            if gistPageRecyclable(heaprel, &page)? {
+            if gistPageRecyclable(&page)? {
                 if transam_xlog_seams::xlog_standby_info_active::call()
                     && crate::relation_needs_wal(r)
                 {
@@ -733,24 +733,74 @@ pub fn gistNewBuffer<'mcx>(
     Ok(BufferPin::adopt(buf).expect("ExtendBufferedRelBy returned InvalidBuffer"))
 }
 
-/// gistPageRecyclable. C passes NULL rel to GlobalVisCheckRemovableFullXid;
-/// the seam takes the heap relation, whose horizon is what the deleteXid
-/// stamp guards.
-pub fn gistPageRecyclable(
-    heaprel: &::types_rel::RelationData<'_>,
-    page: &PageRef<'_>,
-) -> PgResult<bool> {
+/// gistPageRecyclable (gistutil.c:888).
+pub fn gistPageRecyclable(page: &PageRef<'_>) -> PgResult<bool> {
     if page.is_new() {
         return Ok(true);
     }
     if GistPageIsDeleted(page) {
+        // gistutil.c:906: GlobalVisCheckRemovableFullXid(NULL, deletexid_full)
+        // — rel = NULL selects VISHORIZON_SHARED (procarray.c:1982), so a
+        // scan in ANY database or on a standby that may still hold the
+        // downlink keeps the tombstone; the heap relation's own (per
+        // database) horizon is not conservative enough.
         let deletexid_full = ::types_gist::GistPageGetDeleteXid(page);
-        return procarray_seams::global_vis_check_removable_full_xid::call(
-            heaprel,
+        return procarray_seams::global_vis_test_is_removable_full_xid::call(
+            procarray_seams::GLOBAL_VIS_SHARED_RELS,
             deletexid_full,
         );
     }
     Ok(false)
+}
+
+#[cfg(test)]
+mod page_recyclable_tests {
+    use super::*;
+    use ::types_core::xact::FullTransactionId;
+    use ::types_storage::bufpage::PageMut;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[repr(align(8))]
+    struct AlignedPage([u8; BLCKSZ]);
+
+    static ASKED_HANDLE: AtomicU64 = AtomicU64::new(0);
+    static ASKED_FXID: AtomicU64 = AtomicU64::new(0);
+
+    fn recording_fake(
+        vistest: ::types_core::GlobalVisStateHandle,
+        fxid: FullTransactionId,
+    ) -> PgResult<bool> {
+        ASKED_HANDLE.store(vistest.id, Ordering::Relaxed);
+        ASKED_FXID.store(fxid.value, Ordering::Relaxed);
+        Ok(false)
+    }
+
+    // gistutil.c:906: a deleted page's recyclability is decided against the
+    // rel = NULL horizon (VISHORIZON_SHARED), never the heap relation's.
+    #[test]
+    fn deleted_page_is_judged_against_the_shared_horizon() {
+        procarray_seams::global_vis_test_is_removable_full_xid::set(recording_fake);
+
+        let mut buf = AlignedPage([0u8; BLCKSZ]);
+        let ptr = core::ptr::NonNull::new(buf.0.as_mut_ptr()).unwrap();
+        let deletexid = FullTransactionId::from_u64(0x0000_0001_0000_2a2a);
+        {
+            // SAFETY: owned, 8-aligned, BLCKSZ image, exclusively borrowed.
+            let mut page = unsafe { PageMut::from_raw(ptr) };
+            gistinitpage(&mut page, 0);
+            ::types_gist::GistPageSetDeleted(&mut page, deletexid);
+        }
+        // SAFETY: same owned image, now shared-borrowed.
+        let page = unsafe { PageRef::from_raw(ptr) };
+
+        assert!(!gistPageRecyclable(&page).expect("horizon test"));
+        assert_eq!(
+            ASKED_HANDLE.load(Ordering::Relaxed),
+            procarray_seams::GLOBAL_VIS_SHARED_RELS.id,
+            "gistPageRecyclable must ask the shared (rel = NULL) horizon"
+        );
+        assert_eq!(ASKED_FXID.load(Ordering::Relaxed), deletexid.value);
+    }
 }
 
 #[cfg(test)]

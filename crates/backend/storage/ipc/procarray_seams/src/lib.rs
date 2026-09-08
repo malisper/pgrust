@@ -62,6 +62,22 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // GlobalVisTestIsRemovableFullXid (procarray.c:4222): the FullTransactionId
+    // form of the removability test against an explicit horizon handle.
+    pub fn global_vis_test_is_removable_full_xid(
+        vistest: types_core::GlobalVisStateHandle,
+        fxid: types_core::xact::FullTransactionId,
+    ) -> PgResult<bool>
+);
+
+/// GlobalVisTestFor(NULL): the VISHORIZON_SHARED state (procarray.c:1982),
+/// conservative across every database and hot standby. This is the horizon
+/// C selects when an AM passes rel = NULL (gistutil.c:906, ginvacuum.c:827);
+/// the handle-keyed seams above take it in place of a relation.
+pub const GLOBAL_VIS_SHARED_RELS: types_core::GlobalVisStateHandle =
+    types_core::GlobalVisStateHandle::new(1);
+
+seam_core::seam!(
     pub fn global_vis_check_removable_full_xid<'a, 'mcx>(
         rel: &'a types_rel::RelationData<'mcx>,
         fxid: types_core::xact::FullTransactionId,

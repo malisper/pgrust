@@ -200,7 +200,7 @@ fn gistvacuumpage(
         bufmgr::lock_buffer::call(pin.buffer(), GIST_EXCLUSIVE)?;
         {
             let page = pin.page();
-            if gistPageRecyclable(vstate.info.heaprel, &page)? {
+            if gistPageRecyclable(&page)? {
                 freespace::RecordFreeIndexPage(rel, blkno)?;
                 vstate.stats.pages_deleted += 1;
                 vstate.stats.pages_free += 1;

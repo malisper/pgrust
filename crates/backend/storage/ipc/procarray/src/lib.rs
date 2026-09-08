@@ -1863,6 +1863,8 @@ fn GlobalVisUpdateApply(h: &ComputeXidHorizonsResult) {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+// Discriminants double as GlobalVisStateHandle ids (vis_state_cell);
+// procarray_seams::GLOBAL_VIS_SHARED_RELS pins Shared = 1.
 enum GlobalVisHorizonKind {
     Shared = 1,
     Catalog = 2,
@@ -2482,6 +2484,9 @@ pub fn init_seams() {
     }
     if !procarray_seams::global_vis_test_is_removable_xid::is_installed() {
         procarray_seams::global_vis_test_is_removable_xid::set(GlobalVisTestIsRemovableXid);
+    }
+    if !procarray_seams::global_vis_test_is_removable_full_xid::is_installed() {
+        procarray_seams::global_vis_test_is_removable_full_xid::set(GlobalVisTestIsRemovableFullXid);
     }
     if !procarray_seams::global_vis_check_removable_full_xid::is_installed() {
         procarray_seams::global_vis_check_removable_full_xid::set(GlobalVisCheckRemovableFullXid);
