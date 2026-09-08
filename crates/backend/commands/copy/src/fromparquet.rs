@@ -566,6 +566,7 @@ impl ParquetSrc {
                     return Ok(true);
                 }
             }
+            self.rg = None;
             if self.rg_idx >= self.reader.meta.row_groups.len() {
                 return Ok(false);
             }
@@ -583,7 +584,7 @@ impl<'mcx> CopyFromState<'mcx, '_> {
     /// caller-shared defmap loop in next_copy_from).
     pub(crate) fn copy_from_parquet_one_row(
         &mut self,
-        row_mcx: Mcx<'mcx>,
+        row_mcx: Mcx<'_>,
         values: &mut [Datum],
         nulls: &mut [bool],
     ) -> PgResult<bool> {

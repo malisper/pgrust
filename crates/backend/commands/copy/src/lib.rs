@@ -1247,3 +1247,6 @@ fn to_file_denied() -> Box<PgError> {
 pub fn init_seams() {
     copy_seams::copy_dest_receive::set(to::copy_dest_receive);
 }
+
+#[cfg(test)]
+mod input_memory_tests;

@@ -925,7 +925,7 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
     /// values/nulls (arrays over all physical attrs). Returns false at EOF.
     pub fn next_copy_from(
         &mut self,
-        row_mcx: Mcx<'mcx>,
+        row_mcx: Mcx<'_>,
         values: &mut [Datum],
         nulls: &mut [bool],
     ) -> PgResult<bool> {
@@ -1266,7 +1266,7 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
     /// `CopyFromBinaryOneRow` + `CopyReadBinaryAttribute` (copyfromparse.c).
     fn copy_from_binary_one_row(
         &mut self,
-        row_mcx: Mcx<'mcx>,
+        row_mcx: Mcx<'_>,
         values: &mut [Datum],
         nulls: &mut [bool],
     ) -> PgResult<bool> {

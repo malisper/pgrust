@@ -745,6 +745,7 @@ fn copy_from_body<'mcx>(
     let single_insert =
         cstate.volatile_defexprs || where_clause_volatile(cstate)? || has_br || has_ir;
     let mut single_eval_cx = MemoryContext::new_bump("CopySingleInsertEval");
+    let mut input_row_cx = MemoryContext::new_bump("CopyPerRowInput");
     let mut check_exprs = None;
     // C ri_PartitionCheckExpr: compiled once per COPY, on first use.
     let mut partition_check: Option<mcx::PgBox<'mcx, execexpr::ExprState<'mcx>>> = None;
@@ -775,12 +776,11 @@ fn copy_from_body<'mcx>(
         let slot = &mut slots[nused];
         exectuples::exec_clear_tuple(slot, mcx);
 
-        // Input-function results and the materialized tuple land in the
-        // statement mcx and are reclaimed at statement end (nodemodifytable
-        // ExecInsert precedent); WATCH: unbounded for very large loads.
+        // Buffered slots own materialized copies before the input context resets.
+        input_row_cx.reset();
         {
             let base = slot.base_mut();
-            if !cstate.next_copy_from(mcx, &mut base.tts_values, &mut base.tts_isnull)? {
+            if !cstate.next_copy_from(input_row_cx.mcx(), &mut base.tts_values, &mut base.tts_isnull)? {
                 break;
             }
         }
@@ -1061,6 +1061,7 @@ fn copy_from_partitioned_body<'mcx>(
     // C GetPerTupleExprContext: expression partition keys evaluate here,
     // reset per row.
     let mut route_eval_cx = MemoryContext::new_bump("CopyRouteEvalPerTuple");
+    let mut input_row_cx = MemoryContext::new_bump("CopyPerRowInput");
     let mut rootslot = tableam::table_slot_create(mcx, rel)?;
     let mut buffers: Vec<PartBuffer<'mcx>> = Vec::new();
     let mut leaf_indexes: Vec<Option<execindexing::ResultRelIndexState<'mcx>>> = Vec::new();
@@ -1085,9 +1086,10 @@ fn copy_from_partitioned_body<'mcx>(
         postgres_seams::check_for_interrupts::call()?;
 
         exectuples::exec_clear_tuple(&mut rootslot, mcx);
+        input_row_cx.reset();
         {
             let base = rootslot.base_mut();
-            if !cstate.next_copy_from(mcx, &mut base.tts_values, &mut base.tts_isnull)? {
+            if !cstate.next_copy_from(input_row_cx.mcx(), &mut base.tts_values, &mut base.tts_isnull)? {
                 break;
             }
         }
