@@ -1592,21 +1592,23 @@ impl Tuplesort {
         })
     }
 
-    /// `tuplesort_reset`: recycle the batch, keep keys + memtuples capacity.
-    pub fn reset(&mut self) {
+    /// Recycle the batch, retaining keys and the initial tuple array.
+    pub fn reset(&mut self) -> PgResult<()> {
         self.0.with_mut(|st| {
             st.updatemax();
             // C tuplesort_reset -> tuplesort_free: the "ended" trace line.
             st.trace_free();
             if let Some(ts) = st.tapes.take() {
-                ts.tapeset
-                    .close()
-                    .expect("tuplesort_reset: closing tape temp files failed");
+                ts.tapeset.close()?;
             }
             st.reset_tuplecontext();
             st.memtuples.clear();
-            if st.memtuples.capacity() == 0 {
-                st.memtuples.reserve(INITIAL_MEMTUPSIZE);
+            st.avail_mem = st.allowed_mem;
+            if st.memtuples.capacity() != INITIAL_MEMTUPSIZE {
+                st.memtuples = PgVec::new_in(st.mcx);
+                st.memtuples.try_reserve_exact(INITIAL_MEMTUPSIZE)
+                    .map_err(|_| Box::new(st.mcx.oom(INITIAL_MEMTUPSIZE * mem::size_of::<SortTuple>())))?;
+                st.avail_mem -= memtuples_space(st.memtuples.capacity());
             }
             st.tuple_mem = 0;
             st.status = TupSortStatus::Initial;
@@ -1618,14 +1620,13 @@ impl Tuplesort {
             st.eof_reached = false;
             st.markpos_offset = 0;
             st.markpos_eof = false;
-            // C's reset leaves availMem = allowedMem (memtuples not re-charged).
-            st.avail_mem = st.allowed_mem;
             st.tie_track = false;
             st.tie_dirty = false;
             st.rowref_mode = false;
             st.rowref_missing = false;
             st.abbrev_next = 10;
             st.recompute_put_watermark();
+            Ok(())
         })
     }
 

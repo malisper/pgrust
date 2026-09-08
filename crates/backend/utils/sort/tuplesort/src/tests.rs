@@ -523,7 +523,7 @@ fn reset_recycles_batch_keeps_keys_and_max_stats() {
     let first = ts.get_stats();
     assert_eq!(first.sortMethod, TuplesortMethod::Quicksort);
 
-    ts.reset();
+    ts.reset().unwrap();
     for v in [9i32, 7, 8, 6] {
         ts.putdatum(Datum::from_i32(v), false).unwrap();
     }
@@ -537,8 +537,40 @@ fn reset_recycles_batch_keeps_keys_and_max_stats() {
     assert!(ts.get_stats().spaceUsed >= first.spaceUsed);
 
     // Bound state does not leak across reset.
-    ts.reset();
+    ts.reset().unwrap();
     assert!(!ts.used_bound());
+}
+
+#[test]
+fn reset_initial_array_retains_c_accounting() {
+    let mut ts = Tuplesort::begin_datum_with_key(int32_key(1, false, false), 64, TUPLESORT_NONE);
+    ts.0.with_mut(|st| assert_eq!(st.avail_mem, st.allowed_mem - memtuples_space(1024)));
+    for _ in 0..3 {
+        ts.putdatum(Datum::from_i32(7), false).unwrap();
+        ts.performsort().unwrap();
+        ts.reset().unwrap();
+        ts.0.with_mut(|st| {
+            assert_eq!(st.memtuples.capacity(), 1024);
+            assert_eq!(st.avail_mem, st.allowed_mem);
+        });
+    }
+}
+
+#[test]
+fn reset_grown_array_restarts_c_growth_budget() {
+    let mut ts = Tuplesort::begin_datum_with_key(int32_key(1, false, false), 1024, TUPLESORT_NONE);
+    for _ in 0..3 {
+        for v in (0..3000).rev() {
+            ts.putdatum(Datum::from_i32(v), false).unwrap();
+        }
+        ts.0.with_mut(|st| assert!(st.memtuples.capacity() > 1024));
+        ts.performsort().unwrap();
+        ts.reset().unwrap();
+        ts.0.with_mut(|st| {
+            assert_eq!(st.memtuples.capacity(), 1024);
+            assert_eq!(st.avail_mem, st.allowed_mem - memtuples_space(1024));
+        });
+    }
 }
 
 fn tid(blk: u32, pos: u16) -> ::types_tuple::itemptr::ItemPointerData {
@@ -2174,7 +2206,7 @@ mod spill {
         let first = ts.getdatum(true).unwrap().unwrap();
         assert_eq!(first.value.as_i32(), oracle[0]);
 
-        ts.reset();
+        ts.reset().unwrap();
         assert_eq!(temp_files(&dir), 0, "reset must drop the tape files");
 
         // Second, in-memory batch works after a spilled one.
@@ -2188,6 +2220,34 @@ mod spill {
         .collect();
         assert_eq!(vals, vec![1, 3, 5]);
         ts.end();
+    }
+
+    #[test]
+    fn reset_grown_array_spills_at_fresh_sort_boundary() {
+        setup();
+        let (_cwd, _dir) = enter_datadir("reset-boundary");
+        let mut reused = Tuplesort::begin_datum_with_key(int32_key(1, false, false), 64, TUPLESORT_NONE);
+        for v in 0..1500 {
+            reused.putdatum(Datum::from_i32(v), false).unwrap();
+        }
+        reused.0.with_mut(|st| assert!(st.memtuples.capacity() > INITIAL_MEMTUPSIZE));
+        reused.performsort().unwrap();
+        reused.reset().unwrap();
+        let mut fresh = Tuplesort::begin_datum_with_key(int32_key(1, false, false), 64, TUPLESORT_NONE);
+        for v in (0..10000).rev() {
+            reused.putdatum(Datum::from_i32(v), false).unwrap();
+            fresh.putdatum(Datum::from_i32(v), false).unwrap();
+            let snapshot = |ts: &mut Tuplesort| ts.0.with_mut(|st| (st.status, st.avail_mem, st.memtuples.capacity()));
+            assert_eq!(snapshot(&mut reused), snapshot(&mut fresh));
+        }
+        reused.performsort().unwrap();
+        fresh.performsort().unwrap();
+        for v in 0..10000 {
+            assert_eq!(reused.getdatum(true).unwrap().unwrap().value.as_i32(), v);
+            assert_eq!(fresh.getdatum(true).unwrap().unwrap().value.as_i32(), v);
+        }
+        assert!(reused.getdatum(true).unwrap().is_none());
+        assert!(fresh.getdatum(true).unwrap().is_none());
     }
 
     // cstring (typlen -2) datum spill: writetup_datum sizes the image as
@@ -2620,7 +2680,7 @@ mod bounded_memory_discipline {
 
         // The bound survivors are still charged in the aset caller-tuples
         // context here (only EVICTIONS free per-tuple).
-        ts.reset();
+        ts.reset().unwrap();
 
         // The recycled state sorts a second batch.
         put_rows(&mut ts, 50, &mut seed);
@@ -2651,7 +2711,7 @@ mod bounded_memory_discipline {
         ts.performsort().unwrap();
         assert_eq!(drain(&mut ts, usize::MAX).len(), 64);
 
-        ts.reset();
+        ts.reset().unwrap();
 
         put_rows(&mut ts, 8, &mut seed);
         ts.performsort().unwrap();

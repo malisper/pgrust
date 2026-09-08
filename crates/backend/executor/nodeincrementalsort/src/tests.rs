@@ -312,7 +312,7 @@ fn rescan_resorts_from_scratch() {
     let (mut node, mut estate, mut feed) = setup(rows.clone());
     let out = drain(&mut node, &mut estate, &mut feed, None);
     assert_eq!(out, expected_sorted(rows.clone()));
-    exec_rescan_incremental_sort(&mut node, &mut estate);
+    exec_rescan_incremental_sort(&mut node, &mut estate).unwrap();
     feed.next = 0;
     let out = drain(&mut node, &mut estate, &mut feed, None);
     assert_eq!(out, expected_sorted(rows));

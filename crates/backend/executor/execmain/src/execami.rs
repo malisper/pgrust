@@ -207,7 +207,7 @@ pub fn exec_re_scan<'mcx>(
         // the Param lanes land).
         PlanStateNode::IncrementalSort(s) => {
             let s = &mut **s;
-            ::nodeincrementalsort::exec_rescan_incremental_sort(&mut s.state, estate);
+            ::nodeincrementalsort::exec_rescan_incremental_sort(&mut s.state, estate)?;
             exec_re_scan(&mut s.outer, estate)
         }
         // ExecReScanUnique: outer child rescanned when chgParam is NULL
@@ -634,7 +634,7 @@ pub(crate) fn exec_re_scan_chg_forced<'mcx>(
         }
         PlanStateNode::IncrementalSort(s) => {
             let s = &mut **s;
-            ::nodeincrementalsort::exec_rescan_incremental_sort(&mut s.state, estate);
+            ::nodeincrementalsort::exec_rescan_incremental_sort(&mut s.state, estate)?;
             exec_re_scan_with_chg(
                 &mut s.outer,
                 base.lefttree.expect("IncrementalSort outer plan"),

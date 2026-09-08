@@ -250,7 +250,7 @@ fn switch_to_presorted_prefix_mode<'mcx>(
                 fullsort_opts(node.bounded),
             )?);
         }
-        Some(ts) => ts.reset(),
+        Some(ts) => ts.reset()?,
     }
     if node.bounded {
         node.prefixsort_state.as_mut().unwrap().set_bound(node.bound - node.bound_done);
@@ -385,7 +385,7 @@ where
                     fullsort_opts(node.bounded),
                 )?);
             }
-            Some(ts) => ts.reset(),
+            Some(ts) => ts.reset()?,
         }
 
         let min_group_size = if node.bounded {
@@ -572,7 +572,7 @@ mcx::forget_safe_struct!(
 pub fn exec_rescan_incremental_sort<'mcx>(
     node: &mut IncrementalSortState<'mcx>,
     estate: &mut EStateData<'mcx>,
-) {
+) -> PgResult<()> {
     let mcx = estate.es_query_cxt;
     exectuples::exec_clear_tuple(estate.slot_mut(node.ps_ResultTupleSlot), mcx);
     exectuples::exec_clear_tuple(&mut node.group_pivot, mcx);
@@ -582,11 +582,12 @@ pub fn exec_rescan_incremental_sort<'mcx>(
     node.bound_done = 0;
     node.execution_status = ExecStatus::LoadFullsort;
     if let Some(ts) = &mut node.fullsort_state {
-        ts.reset();
+        ts.reset()?;
     }
     if let Some(ts) = &mut node.prefixsort_state {
-        ts.reset();
+        ts.reset()?;
     }
+    Ok(())
 }
 
 /// The `ExecSetTupleBound` IncrementalSortState arm (execProcnode.c).
