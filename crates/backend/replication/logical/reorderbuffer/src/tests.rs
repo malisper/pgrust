@@ -1695,6 +1695,10 @@ fn mapping_filename_parse_follows_sscanf() {
 // (row a186-candidate-fp-logical-reorderbuffer-p3-064eab6c298f40df6c15-1).
 #[test]
 fn torn_mapping_entry_reports_c_message_with_relative_path() {
+    // ApplyLogicalMappingFile now opens the file through fd::OpenTransientFile
+    // (#1974), which consults the xact/wait-event seams; install them so the
+    // test does not depend on another test in the process having done so.
+    install_file_seams();
     let dir = std::env::temp_dir().join(format!("pgrust_rb_mapping_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
