@@ -116,6 +116,7 @@ aclchk_seams = { path = "../../catalog/aclchk_seams" }
 objectaccess = { path = "../../catalog/objectaccess" }
 datum = { path = "../../../_support/types/datum" }
 types_rel = { path = "../../../_support/types/rel" }
+types_trigger = { path = "../../../_support/types/types_trigger" }
 # WS-K heap batch-source readahead: execmain sees bufmgr ONLY through the
 # seam crate (prefetch_buffer, advisory).
 bufmgr_seams = { path = "../../storage/buffer/bufmgr_seams" }

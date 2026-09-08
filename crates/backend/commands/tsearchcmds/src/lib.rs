@@ -407,6 +407,10 @@ pub fn DefineTSDictionary<'mcx>(
     catalog_indexing::CatalogTupleInsert(mcx, &dictRel, &mut tup)?;
     let address =
         make_dictionary_dependencies(mcx, dictOid, namespaceoid, miscinit::GetUserId(), templId)?;
+
+    // Post creation hook for new text search dictionary (tsearchcmds.c:480)
+    objectaccess::InvokeObjectPostCreateHook(TSDictionaryRelationId, dictOid, 0)?;
+
     dictRel.close(RowExclusiveLock)?;
     Ok(address)
 }
@@ -555,6 +559,10 @@ pub fn DefineTSParser<'mcx>(mcx: Mcx<'mcx>, stmt: &DefineStmt<'mcx>) -> PgResult
     let mut tup = heaptuple::heap_form_tuple(mcx, prsRel.descr(), &values, &nulls)?;
     catalog_indexing::CatalogTupleInsert(mcx, &prsRel, &mut tup)?;
     let address = make_parser_dependencies(mcx, prsOid, namespaceoid, &values)?;
+
+    // Post creation hook for new text search parser (tsearchcmds.c:290)
+    objectaccess::InvokeObjectPostCreateHook(TSParserRelationId, prsOid, 0)?;
+
     prsRel.close(RowExclusiveLock)?;
     Ok(address)
 }
@@ -661,6 +669,10 @@ pub fn DefineTSTemplate<'mcx>(mcx: Mcx<'mcx>, stmt: &DefineStmt<'mcx>) -> PgResu
         values[Anum_pg_ts_template_tmplinit as usize - 1].as_oid(),
         values[Anum_pg_ts_template_tmpllexize as usize - 1].as_oid(),
     )?;
+
+    // Post creation hook for new text search template (tsearchcmds.c:771)
+    objectaccess::InvokeObjectPostCreateHook(TSTemplateRelationId, tmplOid, 0)?;
+
     tmplRel.close(RowExclusiveLock)?;
     Ok(address)
 }
@@ -748,6 +760,10 @@ pub fn AlterTSDictionary<'mcx>(
     let mut newtup =
         heaptuple::heap_modify_tuple(mcx, &old, rel.descr(), &repl_val, &repl_null, &repl_repl)?;
     catalog_indexing::CatalogTupleUpdate(mcx, &rel, &otid, &mut newtup)?;
+
+    // tsearchcmds.c:583
+    objectaccess::InvokeObjectPostAlterHook(TSDictionaryRelationId, dictId, 0)?;
+
     ReleaseSysCache(tup);
     rel.close(RowExclusiveLock)?;
     Ok(ObjectAddress::set(TSDictionaryRelationId, dictId))
@@ -932,6 +948,10 @@ pub fn DefineTSConfiguration<'mcx>(
         false,
         mapRel.as_ref(),
     )?;
+
+    // Post creation hook for new text search configuration (tsearchcmds.c:1093)
+    objectaccess::InvokeObjectPostCreateHook(TSConfigRelationId, cfgOid, 0)?;
+
     if let Some(rel) = mapRel {
         rel.close(RowExclusiveLock)?;
     }
@@ -1219,6 +1239,10 @@ pub fn AlterTSConfiguration<'mcx>(
     );
 
     make_configuration_dependencies(mcx, cfgId, cfgnamespace, cfgowner, prsId, true, Some(&relMap))?;
+
+    // tsearchcmds.c:1189
+    objectaccess::InvokeObjectPostAlterHook(TSConfigRelationId, cfgId, 0)?;
+
     relMap.close(RowExclusiveLock)?;
     Ok(ObjectAddress::set(TSConfigRelationId, cfgId))
 }

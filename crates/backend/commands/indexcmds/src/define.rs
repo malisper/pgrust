@@ -2,6 +2,13 @@
 // CheckPredicate + ChooseIndex*Name* + IndexSetParentIndex (indexcmds.c).
 // Loud: CONCURRENTLY, named opclasses, WITH options,
 // exclusion/WITHOUT OVERLAPS, index detach.
+use backend_progress::progress::{
+    PROGRESS_CREATEIDX_ACCESS_METHOD_OID, PROGRESS_CREATEIDX_COMMAND,
+    PROGRESS_CREATEIDX_COMMAND_CREATE, PROGRESS_CREATEIDX_COMMAND_CREATE_CONCURRENTLY,
+    PROGRESS_CREATEIDX_INDEX_OID, PROGRESS_CREATEIDX_PARTITIONS_DONE,
+    PROGRESS_CREATEIDX_PARTITIONS_TOTAL, PROGRESS_CREATEIDX_PHASE, PROGRESS_CREATEIDX_PHASE_WAIT_1,
+    PROGRESS_CREATEIDX_PHASE_WAIT_2, PROGRESS_CREATEIDX_PHASE_WAIT_3,
+};
 use cache_syscache::{ReleaseSysCache, SearchSysCache1, SysCacheGetAttr, SysCacheKey, INDEXRELID};
 use catalog_index::{
     IndexCreateExtra,
@@ -476,6 +483,27 @@ pub fn DefineIndex<'mcx>(
     }
     let concurrent = stmt.concurrent
         && lsyscache::get_rel_persistence(tableId)? != RELPERSISTENCE_TEMP;
+
+    // Start progress report. If we're building a partition, this was already
+    // done (indexcmds.c:622-637).
+    if parentIndexId == InvalidOid {
+        backend_progress::pgstat_progress_start_command(
+            backend_progress::PROGRESS_COMMAND_CREATE_INDEX,
+            tableId,
+        );
+        backend_progress::pgstat_progress_update_param(
+            PROGRESS_CREATEIDX_COMMAND,
+            if concurrent {
+                PROGRESS_CREATEIDX_COMMAND_CREATE_CONCURRENTLY
+            } else {
+                PROGRESS_CREATEIDX_COMMAND_CREATE
+            },
+        );
+    }
+
+    // No index OID to report yet
+    backend_progress::pgstat_progress_update_param(PROGRESS_CREATEIDX_INDEX_OID, InvalidOid as i64);
+
     let exclusion = !stmt.excludeOpNames.is_nil() || stmt.iswithoutoverlaps;
 
     let numberOfKeyAttributes = stmt.indexParams.len();
@@ -628,6 +656,11 @@ pub fn DefineIndex<'mcx>(
     // partitioned / temp / acl / tablespace checks, so e.g. "cannot create
     // index on relation" outranks "access method ... does not exist".
     let am = resolve_index_am(stmt.accessMethod)?;
+    // indexcmds.c:866
+    backend_progress::pgstat_progress_update_param(
+        PROGRESS_CREATEIDX_ACCESS_METHOD_OID,
+        am.oid as i64,
+    );
     let (accessMethodId, amname, amcanorder, amcanunique, amcanmulticol, amcaninclude) = (
         am.oid,
         am.name.as_str(),
@@ -1060,6 +1093,10 @@ pub fn DefineIndex<'mcx>(
         guc::AtEOXact_GUC(false, root_save_nestlevel);
         guard.restore();
         rel.close(types_rel::NoLock)?;
+        // If this is the top-level index, we're done (indexcmds.c:1290)
+        if parentIndexId == InvalidOid {
+            backend_progress::pgstat_progress_end_command();
+        }
         return Ok(indexRelationId);
     }
 
@@ -1087,6 +1124,21 @@ pub fn DefineIndex<'mcx>(
                 part_oids.push(partdesc.oids[i]);
             }
             let mut invalidate_parent = false;
+
+            // Report the total number of partitions at the start of the
+            // command; don't update it when being called recursively
+            // (indexcmds.c:1330-1358). C's callers pass the count in as an
+            // optimization (-1 = "count it here"); every caller here counts
+            // the same way, one less than find_all_inheritors reports.
+            if parentIndexId == InvalidOid {
+                let children = pg_inherits::find_all_inheritors(mcx, tableId, types_rel::NoLock)?;
+                let total_parts = children.len() as i64 - 1;
+                backend_progress::pgstat_progress_update_param(
+                    PROGRESS_CREATEIDX_PARTITIONS_TOTAL,
+                    total_parts,
+                );
+            }
+
             let parentIndex = indexam::index_open(mcx, indexRelationId, lockmode)?;
             // The IndexInfo built above hasn't been through expression
             // preprocessing; child comparison wants the BuildIndexInfo form.
@@ -1167,6 +1219,13 @@ pub fn DefineIndex<'mcx>(
                             invalidate_parent = true;
                         }
                         found = true;
+
+                        // Report this partition as processed (indexcmds.c:1496).
+                        backend_progress::pgstat_progress_incr_param(
+                            PROGRESS_CREATEIDX_PARTITIONS_DONE,
+                            1,
+                        );
+
                         indexam::index_close(cldidx, types_rel::NoLock)?;
                         break;
                     }
@@ -1220,6 +1279,13 @@ pub fn DefineIndex<'mcx>(
         guc::AtEOXact_GUC(false, root_save_nestlevel);
         guard.restore();
         rel.close(types_rel::NoLock)?;
+        if parentIndexId == InvalidOid {
+            backend_progress::pgstat_progress_end_command();
+        } else {
+            // Update progress for an intermediate partitioned index itself
+            // (indexcmds.c:1608).
+            backend_progress::pgstat_progress_incr_param(PROGRESS_CREATEIDX_PARTITIONS_DONE, 1);
+        }
         return Ok(indexRelationId);
     }
 
@@ -1228,6 +1294,14 @@ pub fn DefineIndex<'mcx>(
 
     if !concurrent {
         rel.close(types_rel::NoLock)?;
+        // If this is the top-level index, the command is done overall;
+        // otherwise, increment progress to report one child index is done
+        // (indexcmds.c:1626-1629).
+        if parentIndexId == InvalidOid {
+            backend_progress::pgstat_progress_end_command();
+        } else {
+            backend_progress::pgstat_progress_incr_param(PROGRESS_CREATEIDX_PARTITIONS_DONE, 1);
+        }
         return Ok(indexRelationId);
     }
 
@@ -1246,6 +1320,13 @@ pub fn DefineIndex<'mcx>(
         procarray::SetIndexsafeProcflags()?;
     }
 
+    // Report the new index OID and the beginning of phase 2 together
+    // (indexcmds.c:1672-1685).
+    backend_progress::pgstat_progress_update_multi_param(
+        &[PROGRESS_CREATEIDX_INDEX_OID, PROGRESS_CREATEIDX_PHASE],
+        &[indexRelationId as i64, PROGRESS_CREATEIDX_PHASE_WAIT_1],
+    );
+
     lmgr::WaitForLockersMultiple(mcx, &heaplocktag, ShareLock, true)?;
 
     let snap = snapmgr::GetTransactionSnapshot()?;
@@ -1259,6 +1340,11 @@ pub fn DefineIndex<'mcx>(
         procarray::SetIndexsafeProcflags()?;
     }
 
+    // Phase 3 of concurrent index build (indexcmds.c:1748).
+    backend_progress::pgstat_progress_update_param(
+        PROGRESS_CREATEIDX_PHASE,
+        PROGRESS_CREATEIDX_PHASE_WAIT_2,
+    );
     lmgr::WaitForLockersMultiple(mcx, &heaplocktag, ShareLock, true)?;
 
     let snap = snapmgr::GetTransactionSnapshot()?;
@@ -1277,7 +1363,12 @@ pub fn DefineIndex<'mcx>(
         procarray::SetIndexsafeProcflags()?;
     }
 
-    crate::WaitForOlderSnapshots(limit_xmin)?;
+    // indexcmds.c:1811
+    backend_progress::pgstat_progress_update_param(
+        PROGRESS_CREATEIDX_PHASE,
+        PROGRESS_CREATEIDX_PHASE_WAIT_3,
+    );
+    crate::WaitForOlderSnapshots(limit_xmin, true)?;
 
     let snap = snapmgr::GetTransactionSnapshot()?;
     snapmgr::PushActiveSnapshot(&snap)?;
@@ -1291,6 +1382,9 @@ pub fn DefineIndex<'mcx>(
     inval::invalidate::CacheInvalidateRelcacheByRelid(heaprelid.relId)?;
 
     lmgr::UnlockRelationIdForSession(&heaprelid, types_rel::ShareUpdateExclusiveLock)?;
+
+    // indexcmds.c:1843
+    backend_progress::pgstat_progress_end_command();
 
     Ok(indexRelationId)
 }

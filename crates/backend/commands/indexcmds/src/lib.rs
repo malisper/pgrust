@@ -39,8 +39,16 @@ pub fn init_seams() {
 }
 
 // WaitForOlderSnapshots (indexcmds.c:431): wait out transactions that might
-// still see catalog state older than limit_xmin; progress reporting unported.
-pub fn WaitForOlderSnapshots(limit_xmin: types_core::TransactionId) -> PgResult<()> {
+// still see catalog state older than limit_xmin. With `progress`, the
+// waitfor params of pg_stat_progress_create_index are kept current
+// (indexcmds.c:446/490/497).
+pub fn WaitForOlderSnapshots(
+    limit_xmin: types_core::TransactionId,
+    progress: bool,
+) -> PgResult<()> {
+    use backend_progress::progress::{
+        PROGRESS_WAITFOR_CURRENT_PID, PROGRESS_WAITFOR_DONE, PROGRESS_WAITFOR_TOTAL,
+    };
     use types_core::InvalidLocalTransactionId;
     use types_storage::storage::{PROC_IN_SAFE_IC, PROC_IN_VACUUM, PROC_IS_AUTOVACUUM};
     let scratch = MemoryContext::new("WaitForOlderSnapshots");
@@ -48,6 +56,12 @@ pub fn WaitForOlderSnapshots(limit_xmin: types_core::TransactionId) -> PgResult<
     let exclude = PROC_IS_AUTOVACUUM | PROC_IN_VACUUM | PROC_IN_SAFE_IC;
     let mut old_snapshots =
         procarray::GetCurrentVirtualXIDs(mcx, limit_xmin, true, false, exclude)?;
+    if progress {
+        backend_progress::pgstat_progress_update_param(
+            PROGRESS_WAITFOR_TOTAL,
+            old_snapshots.len() as i64,
+        );
+    }
     for i in 0..old_snapshots.len() {
         if old_snapshots[i].localTransactionId == InvalidLocalTransactionId {
             continue;
@@ -65,7 +79,20 @@ pub fn WaitForOlderSnapshots(limit_xmin: types_core::TransactionId) -> PgResult<
             }
         }
         if old_snapshots[i].localTransactionId != InvalidLocalTransactionId {
+            // If requested, publish who we're going to wait for.
+            if progress {
+                if let Some(holder) = lmgr_proc::ProcNumberGetProc(old_snapshots[i].procNumber) {
+                    backend_progress::pgstat_progress_update_param(
+                        PROGRESS_WAITFOR_CURRENT_PID,
+                        holder.pid.load(std::sync::atomic::Ordering::Relaxed) as i64,
+                    );
+                }
+            }
             lock::VirtualXactLock(old_snapshots[i], true)?;
+        }
+
+        if progress {
+            backend_progress::pgstat_progress_update_param(PROGRESS_WAITFOR_DONE, i as i64 + 1);
         }
     }
     Ok(())

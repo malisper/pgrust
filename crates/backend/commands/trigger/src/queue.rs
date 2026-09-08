@@ -566,7 +566,12 @@ fn mark_events(sel: EvList, immediate_only: bool, move_deferred: bool) -> PgResu
 // afterTriggerInvokeEvents (trigger.c); returns all_fired. Owns the
 // per-tuple scratch (C's AfterTriggerTupleContext) so the empty-queue
 // mark_events loop in every caller never pays a context create/destroy.
-fn invoke_events(sel: EvList, firing_id: CommandId, delete_ok: bool) -> PgResult<bool> {
+fn invoke_events(
+    sel: EvList,
+    firing_id: CommandId,
+    delete_ok: bool,
+    mut instr: Option<&mut (dyn AfterTriggerInstrSink + '_)>,
+) -> PgResult<bool> {
     // Bump backend: C's per-tuple context shape — reset is a wholesale free
     // (the executor's per-tuple context rides the same arm; an exact-
     // accounting Aset would demand every arena object be released first).
@@ -603,7 +608,7 @@ fn invoke_events(sel: EvList, firing_id: CommandId, delete_ok: bool) -> PgResult
         // points into the scratch, so the reset follows the call.
         AfterTriggerExecute(
             scratch.mcx(), ctid1, ctid2, event, tgoid, relid, table_idx, src_part, dst_part,
-            rolid, modifiedcols.as_deref(), desc.as_ref(),
+            rolid, modifiedcols.as_deref(), desc.as_ref(), instr.as_deref_mut(),
         )?;
         scratch.reset();
         with_list(sel, |evs| {
@@ -634,10 +639,31 @@ pub fn AfterTriggerBeginQuery() {
     QUERY_DEPTH.with(|c| c.set(c.get() + 1));
 }
 
+/// EXPLAIN ANALYZE's per-trigger instrumentation for the after-trigger
+/// firing loop. C AfterTriggerExecute brackets each event with
+/// InstrStartNode / InstrStopNode(1) on `rInfo->ri_TrigInstrument + tgindx`
+/// (trigger.c:4379-4380, 4599-4600), rInfo being the estate's result relation
+/// for the event's relid (ExecGetTriggerResultRel, which opens a trig-target
+/// ResultRelInfo on first sight). The executor owns those arrays and hands the
+/// loop this sink (None when not instrumenting); it must borrow its registry
+/// only for the duration of each call, as the firing re-enters the executor.
+pub trait AfterTriggerInstrSink {
+    fn start(
+        &mut self,
+        relid: Oid,
+        rel: &Relation<'_>,
+        trigdesc: &TriggerDesc<'static>,
+        tgindx: usize,
+    ) -> PgResult<()>;
+    fn stop(&mut self, relid: Oid, tgindx: usize);
+}
+
 // Owns its scratch context (C's AfterTriggerTupleContext): the caller must
 // not hold executor registry borrows across the firing loop (RI checks
-// re-enter the executor through SPI).
-pub fn AfterTriggerEndQuery() -> PgResult<()> {
+// re-enter the executor through SPI). `instr` is the executor's
+// ri_TrigInstrument access for EXPLAIN ANALYZE (C reads it off the estate
+// argument, trigger.c:4765).
+pub fn AfterTriggerEndQuery(mut instr: Option<&mut (dyn AfterTriggerInstrSink + '_)>) -> PgResult<()> {
     let depth = QUERY_DEPTH.with(|c| c.get());
     debug_assert!(depth >= 0, "AfterTriggerEndQuery outside a query");
     let d = depth as usize;
@@ -654,7 +680,7 @@ pub fn AfterTriggerEndQuery() -> PgResult<()> {
             c.set(id + 1);
             id
         });
-        if invoke_events(EvList::Query(d), firing_id, false)? {
+        if invoke_events(EvList::Query(d), firing_id, false, instr.as_deref_mut())? {
             break;
         }
     }
@@ -687,7 +713,7 @@ pub fn AfterTriggerFireDeferred() -> PgResult<()> {
             c.set(id + 1);
             id
         });
-        if invoke_events(EvList::Xact, firing_id, true)? {
+        if invoke_events(EvList::Xact, firing_id, true, None)? {
             break;
         }
     }
@@ -816,7 +842,7 @@ pub(crate) fn fire_now_immediate() -> PgResult<()> {
             c.set(id + 1);
             id
         });
-        if invoke_events(EvList::Xact, firing_id, !xact::IsSubTransaction())? {
+        if invoke_events(EvList::Xact, firing_id, !xact::IsSubTransaction(), None)? {
             break;
         }
     }
@@ -843,6 +869,7 @@ fn AfterTriggerExecute<'mcx>(
     // None = deferred/xact firing, which resolves fresh as C's dummy-estate
     // trig-target open does.
     desc: Option<&Rc<TriggerDesc<'static>>>,
+    mut instr: Option<&mut (dyn AfterTriggerInstrSink + '_)>,
 ) -> PgResult<()> {
     let fresh_desc;
     let trigdesc: &TriggerDesc<'static> = match desc {
@@ -871,13 +898,19 @@ fn AfterTriggerExecute<'mcx>(
         }
         None => 0,
     };
-    let Some(trigger) = trigdesc.triggers.iter().find(|t| t.tgoid == tgoid) else {
+    let Some(tgindx) = trigdesc.triggers.iter().position(|t| t.tgoid == tgoid) else {
         // C AfterTriggerExecute: trigger dropped since the event was queued —
         // silently do nothing. (With a queuing-time `desc` snapshot this arm
         // is only reachable via the fresh-resolve path or concurrent drops.)
         return Ok(());
     };
+    let trigger = &trigdesc.triggers[tgindx];
     let rel = table::table_open(mcx, relid, NoLock)?;
+    // trigger.c:4379-4380: InstrStartNode(instr + tgindx) once the trigger is
+    // located, before the tuple fetches.
+    if let Some(s) = instr.as_deref_mut() {
+        s.start(relid, &rel, trigdesc, tgindx)?;
+    }
 
     // C L4516-4529: hand transition tuplestores to the function and mark the
     // table closed so later statements get fresh stores.
@@ -913,8 +946,12 @@ fn AfterTriggerExecute<'mcx>(
         // AFTER triggers: any returned tuple is discarded (C L4559-4567).
         let restore = become_queuing_role(rolid);
         let result =
-            crate::exec::ExecCallTriggerFunc(mcx, &mut tdata, &mut finfo).map(|_| ());
+            crate::exec::ExecCallTriggerFunc(mcx, &mut tdata, &mut finfo, None).map(|_| ());
         restore_role(restore);
+        // trigger.c:4599-4600
+        if let Some(s) = instr.as_deref_mut() {
+            s.stop(relid, tgindx);
+        }
         rel.close(NoLock)?;
         return result;
     }
@@ -998,7 +1035,7 @@ fn AfterTriggerExecute<'mcx>(
         tdata.tg_newtable = tg_newtable.0;
         tdata.tg_updatedcols = updatedcols_ptr;
         // AFTER ROW triggers: the returned tuple is ignored (C frees it).
-        crate::exec::ExecCallTriggerFunc(mcx, &mut tdata, &mut finfo).map(|_| ())
+        crate::exec::ExecCallTriggerFunc(mcx, &mut tdata, &mut finfo, None).map(|_| ())
     } else {
         let data = RiTriggerData {
             tg_event,
@@ -1010,6 +1047,10 @@ fn AfterTriggerExecute<'mcx>(
         ri_triggers_seams::ri_fkey_trigger::call(mcx, trigger.tgfoid, &data)
     };
     restore_role(restore);
+    // trigger.c:4599-4600
+    if let Some(s) = instr.as_deref_mut() {
+        s.stop(relid, tgindx);
+    }
     if let Some((s, d)) = cp_rels {
         s.close(NoLock)?;
         d.close(NoLock)?;
@@ -1731,7 +1772,7 @@ mod tests {
                 desc: None,
             });
         });
-        AfterTriggerEndQuery().unwrap();
+        AfterTriggerEndQuery(None).unwrap();
         let carried = XACT_EVENTS.with(|s| {
             s.borrow().iter().find(|e| e.tgoid == TGOID).map(|e| e.modifiedcols.clone())
         });

@@ -695,7 +695,7 @@ pub fn CopyFrom<'mcx>(
                 trigger::ExecASInsertTriggers(rel, td, transition_capture.as_ref(), Some(&mut when))?;
             }
             if open_trigger_query {
-                trigger::AfterTriggerEndQuery()?;
+                trigger::AfterTriggerEndQuery(None)?;
             }
             Ok(n)
         }

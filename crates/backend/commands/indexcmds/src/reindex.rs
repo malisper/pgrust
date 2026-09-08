@@ -1,5 +1,13 @@
 // ExecReindex/ReindexIndex/ReindexTable + ReindexMultipleTables/Partitions/
 // MultipleInternal + ReindexRelationConcurrently (indexcmds.c).
+use backend_progress::progress::{
+    PROGRESS_CREATEIDX_ACCESS_METHOD_OID, PROGRESS_CREATEIDX_COMMAND,
+    PROGRESS_CREATEIDX_COMMAND_REINDEX_CONCURRENTLY, PROGRESS_CREATEIDX_INDEX_OID,
+    PROGRESS_CREATEIDX_PHASE, PROGRESS_CREATEIDX_PHASE_BUILD,
+    PROGRESS_CREATEIDX_PHASE_VALIDATE_IDXSCAN, PROGRESS_CREATEIDX_PHASE_WAIT_1,
+    PROGRESS_CREATEIDX_PHASE_WAIT_2, PROGRESS_CREATEIDX_PHASE_WAIT_3,
+    PROGRESS_CREATEIDX_PHASE_WAIT_4, PROGRESS_CREATEIDX_PHASE_WAIT_5,
+};
 use catalog_index::{
     reindex_index, reindex_relation, ReindexParams, REINDEXOPT_CONCURRENTLY,
     REINDEXOPT_MISSING_OK, REINDEXOPT_REPORT_PROGRESS, REINDEXOPT_VERBOSE,
@@ -605,7 +613,35 @@ fn ReindexMultipleInternal<'mcx>(
 struct ReindexIndexInfo {
     index_id: Oid,
     table_id: Oid,
+    am_id: Oid,
     safe: bool,
+}
+
+/// The four progress params ReindexRelationConcurrently re-reports per index
+/// (indexcmds.c:3608-3614), in C's order.
+const PROGRESS_INDEX: [usize; 4] = [
+    PROGRESS_CREATEIDX_COMMAND,
+    PROGRESS_CREATEIDX_PHASE,
+    PROGRESS_CREATEIDX_INDEX_OID,
+    PROGRESS_CREATEIDX_ACCESS_METHOD_OID,
+];
+
+/// `pgstat_progress_start_command` + the four-param report C repeats at
+/// indexcmds.c:3959-3965, 4134-4139 and 4200-4205.
+fn report_concurrent_index(idx: &ReindexIndexInfo, phase: i64) {
+    backend_progress::pgstat_progress_start_command(
+        backend_progress::PROGRESS_COMMAND_CREATE_INDEX,
+        idx.table_id,
+    );
+    backend_progress::pgstat_progress_update_multi_param(
+        &PROGRESS_INDEX,
+        &[
+            PROGRESS_CREATEIDX_COMMAND_REINDEX_CONCURRENTLY,
+            phase,
+            idx.index_id as i64,
+            idx.am_id as i64,
+        ],
+    );
 }
 
 // ReindexRelationConcurrently (indexcmds.c:3568). Progress reporting is
@@ -722,7 +758,12 @@ fn ReindexRelationConcurrently<'mcx>(
 
             heap_relation_ids.push(heap_id);
             // Invalid indexes are allowed here.
-            index_ids.push(ReindexIndexInfo { index_id: relationOid, table_id: heap_id, safe: false });
+            index_ids.push(ReindexIndexInfo {
+                index_id: relationOid,
+                table_id: heap_id,
+                am_id: InvalidOid,
+                safe: false,
+            });
         }
         _ => {
             return Err(err(
@@ -767,6 +808,7 @@ fn ReindexRelationConcurrently<'mcx>(
             && execindexing::RelationGetIndexPredicate(mcx, &indexRel)?.is_nil();
         index_ids[i].safe = safe;
         index_ids[i].table_id = heapRel.rd_id;
+        index_ids[i].am_id = indexRel.rd_rel.relam;
 
         if indexRel.rd_rel.relpersistence == RELPERSISTENCE_TEMP as u8 {
             // C elog(ERROR) (indexcmds.c:3957): XX000, never a panic.
@@ -775,6 +817,10 @@ fn ReindexRelationConcurrently<'mcx>(
                     .with_sqlstate(ERRCODE_INTERNAL_ERROR),
             ));
         }
+
+        // indexcmds.c:3959-3965: the command row targets this index while
+        // its copy is created ("initializing" = phase 0).
+        report_concurrent_index(&index_ids[i], 0);
 
         let concurrent_name = crate::define::ChooseRelationName(
             mcx,
@@ -809,6 +855,7 @@ fn ReindexRelationConcurrently<'mcx>(
         new_index_ids.push(ReindexIndexInfo {
             index_id: new_index_id,
             table_id: index_ids[i].table_id,
+            am_id: index_ids[i].am_id,
             safe,
         });
         relation_locks.push(indexRel.rd_lockInfo.lockRelId);
@@ -848,6 +895,11 @@ fn ReindexRelationConcurrently<'mcx>(
     xact::StartTransactionCommand()?;
 
     // Phase 2: build the new indexes, one transaction each.
+    // indexcmds.c:4104
+    backend_progress::pgstat_progress_update_param(
+        PROGRESS_CREATEIDX_PHASE,
+        PROGRESS_CREATEIDX_PHASE_WAIT_1,
+    );
     lmgr::WaitForLockersMultiple(mcx, &lock_tags, ShareLock, true)?;
     xact::CommitTransactionCommand()?;
 
@@ -859,6 +911,10 @@ fn ReindexRelationConcurrently<'mcx>(
         }
         let snap = snapmgr::GetTransactionSnapshot()?;
         snapmgr::PushActiveSnapshot(&snap)?;
+
+        // Update progress for the index to build, with the correct parent
+        // table involved (indexcmds.c:4134-4139).
+        report_concurrent_index(newidx, PROGRESS_CREATEIDX_PHASE_BUILD);
 
         catalog_index::index_concurrently_build(mcx, newidx.table_id, newidx.index_id)?;
 
@@ -872,6 +928,11 @@ fn ReindexRelationConcurrently<'mcx>(
     xact::StartTransactionCommand()?;
 
     // Phase 3: let the new indexes catch up, then validate, one per xact.
+    // indexcmds.c:4165
+    backend_progress::pgstat_progress_update_param(
+        PROGRESS_CREATEIDX_PHASE,
+        PROGRESS_CREATEIDX_PHASE_WAIT_2,
+    );
     lmgr::WaitForLockersMultiple(mcx, &lock_tags, ShareLock, true)?;
     xact::CommitTransactionCommand()?;
 
@@ -886,6 +947,9 @@ fn ReindexRelationConcurrently<'mcx>(
         let snapshot = snapmgr::RegisterSnapshot(Some(&snap))?.expect("registered snapshot");
         snapmgr::PushActiveSnapshot(&snapshot)?;
 
+        // indexcmds.c:4200-4205
+        report_concurrent_index(newidx, PROGRESS_CREATEIDX_PHASE_VALIDATE_IDXSCAN);
+
         catalog_index::validate_index(mcx, newidx.table_id, newidx.index_id, &snapshot)?;
 
         let limit_xmin = snapshot.xmin;
@@ -895,7 +959,12 @@ fn ReindexRelationConcurrently<'mcx>(
         xact::CommitTransactionCommand()?;
         xact::StartTransactionCommand()?;
 
-        crate::WaitForOlderSnapshots(limit_xmin)?;
+        // indexcmds.c:4235
+        backend_progress::pgstat_progress_update_param(
+            PROGRESS_CREATEIDX_PHASE,
+            PROGRESS_CREATEIDX_PHASE_WAIT_3,
+        );
+        crate::WaitForOlderSnapshots(limit_xmin, true)?;
 
         xact::CommitTransactionCommand()?;
     }
@@ -935,6 +1004,11 @@ fn ReindexRelationConcurrently<'mcx>(
     xact::StartTransactionCommand()?;
 
     // Phase 5: mark the old indexes dead.
+    // indexcmds.c:4331
+    backend_progress::pgstat_progress_update_param(
+        PROGRESS_CREATEIDX_PHASE,
+        PROGRESS_CREATEIDX_PHASE_WAIT_4,
+    );
     lmgr::WaitForLockersMultiple(mcx, &lock_tags, AccessExclusiveLock, true)?;
 
     for oldidx in index_ids.iter() {
@@ -949,6 +1023,11 @@ fn ReindexRelationConcurrently<'mcx>(
     xact::StartTransactionCommand()?;
 
     // Phase 6: drop the old indexes.
+    // indexcmds.c:4373
+    backend_progress::pgstat_progress_update_param(
+        PROGRESS_CREATEIDX_PHASE,
+        PROGRESS_CREATEIDX_PHASE_WAIT_5,
+    );
     lmgr::WaitForLockersMultiple(mcx, &lock_tags, AccessExclusiveLock, true)?;
 
     let snap = snapmgr::GetTransactionSnapshot()?;
@@ -978,6 +1057,9 @@ fn ReindexRelationConcurrently<'mcx>(
     }
 
     xact::StartTransactionCommand()?;
+
+    // indexcmds.c:4451
+    backend_progress::pgstat_progress_end_command();
 
     if verbose {
         if relkind == RELKIND_INDEX {
@@ -1069,7 +1151,12 @@ fn collect_index_for_concurrent_reindex<'mcx>(
             .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
         )?;
     } else {
-        index_ids.push(ReindexIndexInfo { index_id: cell_oid, table_id: InvalidOid, safe: false });
+        index_ids.push(ReindexIndexInfo {
+            index_id: cell_oid,
+            table_id: InvalidOid,
+            am_id: InvalidOid,
+            safe: false,
+        });
     }
     indexam::index_close(index_relation, types_rel::NoLock)
 }

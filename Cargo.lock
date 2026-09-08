@@ -5895,6 +5895,7 @@ dependencies = [
  "types_snapshot",
  "types_startup",
  "types_storage",
+ "types_trigger",
  "types_tuple",
  "varlena",
  "varsup",
@@ -6075,6 +6076,7 @@ dependencies = [
  "types_scan",
  "types_slot",
  "types_storage",
+ "types_trigger",
  "types_tuple",
 ]
 
@@ -8011,6 +8013,7 @@ dependencies = [
  "adt_acl",
  "adt_regproc",
  "amapi",
+ "backend_progress",
  "cache_syscache",
  "catalog",
  "catalog_dependency",
@@ -8044,6 +8047,7 @@ dependencies = [
  "injection_point",
  "inval",
  "lmgr",
+ "lmgr_proc",
  "lock",
  "lsyscache",
  "mbutils",
@@ -17036,6 +17040,7 @@ dependencies = [
  "tcop_dest",
  "test_custom_types",
  "test_decoding",
+ "test_oat_hooks",
  "timeline",
  "timeout",
  "transam",
@@ -19327,6 +19332,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "test_oat_hooks"
+version = "0.0.0"
+dependencies = [
+ "adt_bool",
+ "dfmgr",
+ "elog",
+ "guc",
+ "miscinit",
+ "objectaccess",
+ "parallel_seams",
+ "pgsync",
+ "superuser_seams",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_guc",
+ "types_nodes",
+]
+
+[[package]]
 name = "thread_local"
 version = "1.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -19724,6 +19749,7 @@ dependencies = [
  "heapam",
  "heaptuple",
  "init_small",
+ "instrument",
  "inval",
  "lmgr",
  "lsyscache",
@@ -19893,6 +19919,7 @@ dependencies = [
  "lsyscache",
  "mcx",
  "miscinit",
+ "objectaccess",
  "parse_func_seams",
  "pg_depend",
  "pg_shdepend",

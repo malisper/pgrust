@@ -317,7 +317,7 @@ pub(crate) fn executor_finish_and_park_seam(h: QueryDescHandle) -> PgResult<bool
     let r = (|| -> PgResult<()> {
         let fire_triggers = querydesc::with_qd(h, standard_executor_finish)?;
         if fire_triggers {
-            ::trigger::AfterTriggerEndQuery()?;
+            after_trigger_end_query(h)?;
         }
         // totaltime spans the after-trigger firing (see executor_finish_seam).
         querydesc::with_qd(h, executor_finish_stop_totaltime)
@@ -504,6 +504,72 @@ pub(crate) fn executor_run_seam(
     r
 }
 
+/// The executor's side of `trigger::AfterTriggerInstrSink`: C's
+/// `rInfo->ri_TrigInstrument` through ExecGetTriggerResultRel
+/// (afterTriggerInvokeEvents, trigger.c:4758-4766) over the EState's
+/// registry. Each bracket borrows the QueryDesc only for its own duration,
+/// so the firing loop may re-enter the executor (RI checks through SPI).
+struct EstateTrigInstr(QueryDescHandle);
+
+impl ::trigger::AfterTriggerInstrSink for EstateTrigInstr {
+    fn start(
+        &mut self,
+        relid: ::types_core::Oid,
+        rel: &::types_rel::Relation<'_>,
+        trigdesc: &::types_trigger::TriggerDesc<'static>,
+        tgindx: usize,
+    ) -> PgResult<()> {
+        querydesc::with_qd(self.0, |qd| {
+            let Some(exec) = qd.exec.as_mut() else { return Ok(()) };
+            exec.with_mut(|d| {
+                let es = &mut d.estate;
+                // ExecGetTriggerResultRel (execMain.c:1372-1440): an opened,
+                // routed or already-seen trigger-target relation, else a new
+                // trig-target ResultRelInfo with InitResultRelInfo(...,
+                // es_instrument).
+                let ix = match es.trig_instrument_index(relid) {
+                    Some(ix) => ix,
+                    None => match es.register_trig_instrument(
+                        ::executils::TrigInstrRelKind::Target,
+                        relid,
+                        rel.name(),
+                        Some(trigdesc),
+                    )? {
+                        Some(ix) => ix,
+                        None => return Ok(()),
+                    },
+                };
+                if let Some(i) = es.es_trig_instrument[ix].instr.get_mut(tgindx) {
+                    ::instrument::instr_start_node(i);
+                }
+                Ok(())
+            })
+        })
+    }
+
+    fn stop(&mut self, relid: ::types_core::Oid, tgindx: usize) {
+        querydesc::with_qd(self.0, |qd| {
+            let Some(exec) = qd.exec.as_mut() else { return };
+            exec.with_mut(|d| {
+                let es = &mut d.estate;
+                if let Some(ix) = es.trig_instrument_index(relid) {
+                    if let Some(i) = es.es_trig_instrument[ix].instr.get_mut(tgindx) {
+                        ::instrument::instr_stop_node(i, 1.0);
+                    }
+                }
+            })
+        })
+    }
+}
+
+/// `AfterTriggerEndQuery(estate)` with the instrumentation sink armed only
+/// when the query is instrumented (es_instrument != 0).
+fn after_trigger_end_query(h: QueryDescHandle) -> PgResult<()> {
+    let instrumented = querydesc::with_qd(h, |qd| qd.instrument_options != 0);
+    let mut sink = EstateTrigInstr(h);
+    ::trigger::AfterTriggerEndQuery(if instrumented { Some(&mut sink) } else { None })
+}
+
 pub(crate) fn executor_finish_seam(h: QueryDescHandle) -> PgResult<()> {
     tap_executor_finish::call_if(|f| f(h));
     // The registry borrow must drop before the after-trigger firing loop:
@@ -517,7 +583,7 @@ pub(crate) fn executor_finish_seam(h: QueryDescHandle) -> PgResult<()> {
     let r = (|| -> PgResult<()> {
         let fire_triggers = querydesc::with_qd(h, standard_executor_finish)?;
         if fire_triggers {
-            ::trigger::AfterTriggerEndQuery()?;
+            after_trigger_end_query(h)?;
         }
         querydesc::with_qd(h, executor_finish_stop_totaltime)
     })();

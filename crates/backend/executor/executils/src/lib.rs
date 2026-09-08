@@ -597,6 +597,85 @@ pub struct JunkFilter<'mcx> {
     pub jf_resultSlot: ExecSlotId,
 }
 
+/// Which of C's three EState result-relation lists a `ResultRelTrigInstr`
+/// entry belongs to (explain.c:832 ExplainPrintTriggers reports them in this
+/// order; ExecGetTriggerResultRel searches them in this order).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum TrigInstrRelKind {
+    /// es_opened_result_relations (ExecInitResultRelation).
+    Opened,
+    /// es_tuple_routing_result_relations (ExecInitPartitionInfo).
+    Routing,
+    /// es_trig_target_relations (ExecGetTriggerResultRel's lazy open).
+    Target,
+}
+mcx::forget_safe_nodrop!(TrigInstrRelKind);
+
+/// One ri_TrigDesc entry as report_triggers reads it (explain.c:1099-1119).
+pub struct TrigInstrName<'mcx> {
+    pub tgname: ::mcx::PgString<'mcx>,
+    pub tgconstraint: ::types_core::Oid,
+}
+mcx::forget_safe_struct!(TrigInstrName<'_> { tgname, tgconstraint });
+
+/// C ri_TrigInstrument (execMain.c:1273 `InstrAlloc(numtriggers,
+/// instrument_options, false)`) plus the names explain.c report_triggers
+/// takes off the ResultRelInfo, for one result relation. `instr` is empty
+/// when the relation has no trigger descriptor (C ri_TrigInstrument NULL):
+/// the entry still counts for ExplainPrintTriggers' show_relname rule.
+pub struct ResultRelTrigInstr<'mcx> {
+    pub relid: ::types_core::Oid,
+    pub kind: TrigInstrRelKind,
+    pub relname: ::mcx::PgString<'mcx>,
+    pub triggers: PgVec<'mcx, TrigInstrName<'mcx>>,
+    pub instr: PgVec<'mcx, Instrumentation>,
+}
+// SAFETY: instr is an arena PgVec of the no-drop Copy Instrumentation (the
+// es_instrumentation exemption below) — exempt.
+mcx::forget_safe_struct!(ResultRelTrigInstr<'_> { relid, kind, relname, triggers; instr });
+
+impl<'mcx> ResultRelTrigInstr<'mcx> {
+    /// InitResultRelInfo's trigger-instrumentation leg (execMain.c:1263-1274)
+    /// for a relation with descriptor `trigdesc`: `InstrAlloc(n,
+    /// instrument_options, false)` (instrument.c:31-54) per trigger.
+    pub fn new(
+        mcx: Mcx<'mcx>,
+        instrument_options: i32,
+        kind: TrigInstrRelKind,
+        relid: ::types_core::Oid,
+        relname: &str,
+        trigdesc: Option<&::types_trigger::TriggerDesc<'_>>,
+    ) -> PgResult<Self> {
+        use types_core::instrument::{INSTRUMENT_BUFFERS, INSTRUMENT_TIMER, INSTRUMENT_WAL};
+        let mut triggers = PgVec::new_in(mcx);
+        let mut instr = PgVec::new_in(mcx);
+        if let Some(td) = trigdesc {
+            for t in td.triggers.iter() {
+                triggers.push(TrigInstrName {
+                    tgname: ::mcx::PgString::from_str_in(t.tgname.as_str(), mcx)?,
+                    tgconstraint: t.tgconstraint,
+                });
+                // InstrAlloc: only the need_* flags are set on a fresh entry.
+                instr.push(Instrumentation {
+                    need_bufusage: instrument_options & INSTRUMENT_BUFFERS != 0,
+                    need_walusage: instrument_options & INSTRUMENT_WAL != 0,
+                    need_timer: instrument_options & INSTRUMENT_TIMER != 0,
+                    async_mode: false,
+                    ..Instrumentation::default()
+                });
+            }
+        }
+        Ok(ResultRelTrigInstr {
+            relid,
+            kind,
+            relname: ::mcx::PgString::from_str_in(relname, mcx)?,
+            triggers,
+            instr,
+        })
+    }
+}
+
 /// C ResultRelInfo slice; the open relation is es_relations[rti-1].
 #[derive(Debug, Clone, Copy)]
 #[allow(non_snake_case)]
@@ -830,6 +909,12 @@ pub struct EStateData<'mcx> {
     pub es_instrument: i32,
     // Keyed by plan_node_id (C: per-PlanState); empty when es_instrument == 0.
     pub es_instrumentation: PgVec<'mcx, Instrumentation>,
+    /// C ri_TrigInstrument of every result relation (InitResultRelInfo,
+    /// execMain.c:1263-1274), in the order of C's es_opened_result_relations,
+    /// es_tuple_routing_result_relations and es_trig_target_relations lists;
+    /// empty unless es_instrument != 0. Read by explain's
+    /// ExplainPrintTriggers, charged by the trigger paths.
+    pub es_trig_instrument: PgVec<'mcx, ResultRelTrigInstr<'mcx>>,
     // EA-on-morsels refusal transparency (docs/design/ea-morsels.md §6): one
     // record per (node, arm) the runtime admission walk refused while
     // instrumented AND armed. Empty on every unarmed/uninstrumented path —
@@ -1275,6 +1360,7 @@ impl<'mcx> EStateData<'mcx> {
             es_spi_run_budget: None,
             es_sqe_spool: None,
             es_instrumentation: PgVec::new_in(mcx),
+            es_trig_instrument: PgVec::new_in(mcx),
             es_runtime_ea_refusals: PgVec::new_in(mcx),
             es_runtime_ea_pipelines: PgVec::new_in(mcx),
             es_engine_events: PgVec::new_in(mcx),
@@ -1719,6 +1805,38 @@ impl<'mcx> EStateData<'mcx> {
         Ok(())
     }
 
+    /// InitResultRelInfo's `if (instrument_options) ri_TrigInstrument =
+    /// InstrAlloc(...)` (execMain.c:1263-1274) for a result relation this
+    /// executor opened; None when not instrumenting. Returns the entry's
+    /// index in `es_trig_instrument`.
+    pub fn register_trig_instrument(
+        &mut self,
+        kind: TrigInstrRelKind,
+        relid: ::types_core::Oid,
+        relname: &str,
+        trigdesc: Option<&::types_trigger::TriggerDesc<'_>>,
+    ) -> PgResult<Option<usize>> {
+        if self.es_instrument == 0 {
+            return Ok(None);
+        }
+        let entry = ResultRelTrigInstr::new(
+            self.es_query_cxt,
+            self.es_instrument,
+            kind,
+            relid,
+            relname,
+            trigdesc,
+        )?;
+        self.es_trig_instrument.push(entry);
+        Ok(Some(self.es_trig_instrument.len() - 1))
+    }
+
+    /// ExecGetTriggerResultRel's search (execMain.c:1372-1420): the first
+    /// registered result relation for `relid`, in C's list order.
+    pub fn trig_instrument_index(&self, relid: ::types_core::Oid) -> Option<usize> {
+        self.es_trig_instrument.iter().position(|e| e.relid == relid)
+    }
+
     // ExecCloseResultRelations index/trigger lanes are loud upstream.
     pub fn exec_close_result_relations(&mut self) {
         self.es_opened_result_relations.clear();
@@ -1837,7 +1955,7 @@ mcx::forget_safe_struct!(
         es_aux_contexts,
         es_direction, es_part_prune_results,
         es_insert_pending_modifytables, es_auxmodifytables,
-        es_param_exec_vals, es_instrumentation, es_runtime_ea_refusals,
+        es_param_exec_vals, es_instrumentation, es_trig_instrument, es_runtime_ea_refusals,
         es_runtime_ea_pipelines, es_engine_events,
         es_agg_instrumentation,
         es_sort_instrumentation, es_incsort_instrumentation,

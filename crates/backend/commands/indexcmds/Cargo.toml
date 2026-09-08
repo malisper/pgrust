@@ -56,6 +56,8 @@ commands_tablespace = { path = "../tablespace" }
 init_small = { path = "../../utils/init/init_small" }
 adt_acl = { path = "../../utils/adt/acl" }
 lmgr = { path = "../../storage/lmgr/lmgr" }
+lmgr_proc = { path = "../../storage/lmgr/lmgr_proc" }
+backend_progress = { path = "../../utils/activity/backend_progress" }
 lock = { path = "../../storage/lmgr/lock" }
 procarray = { path = "../../storage/ipc/procarray" }
 types_storage = { path = "../../../_support/types/types_storage" }

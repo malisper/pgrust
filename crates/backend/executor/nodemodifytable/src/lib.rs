@@ -165,6 +165,10 @@ pub struct ResultRelExec<'mcx> {
     trigdesc: Option<Rc<types_trigger::TriggerDesc<'static>>>,
     // C ri_TrigFunctions + ExecGetTriggerOldSlot.
     trig_fmgr: ::trigger::TriggerFmgrCache,
+    // C ri_TrigInstrument: index of this relation's entry in
+    // estate.es_trig_instrument (InitResultRelInfo, execMain.c:1273); None
+    // unless EXPLAIN ANALYZE instruments the query.
+    trig_instr: Option<usize>,
     trig_old_slot: Option<ExecSlotId>,
     // C ri_TrigWhenExprs.
     trig_when: ::trigger::TriggerWhenCache<'mcx>,
@@ -285,6 +289,9 @@ pub struct ModifyTableState<'mcx> {
     leaf_trigdesc: mcx::PgVec<'mcx, Option<Option<Rc<types_trigger::TriggerDesc<'static>>>>>,
     leaf_trig_fmgr: mcx::PgVec<'mcx, ::trigger::TriggerFmgrCache>,
     leaf_trig_when: mcx::PgVec<'mcx, ::trigger::TriggerWhenCache<'mcx>>,
+    // Routed leaves' ri_TrigInstrument (ExecInitPartitionInfo ->
+    // InitResultRelInfo with es_instrument): es_trig_instrument index.
+    leaf_trig_instr: mcx::PgVec<'mcx, Option<usize>>,
     // C ExecInsert's *insert_destrel out-param (routed leaf of the last
     // insert; None = unrouted), for the cross-partition FK update event.
     last_insert_leaf: Option<usize>,
@@ -887,6 +894,7 @@ pub fn exec_init_modify_table<'mcx>(
         leaf_trigdesc: mcx::PgVec::new_in(qcx),
         leaf_trig_fmgr: mcx::PgVec::new_in(qcx),
         leaf_trig_when: mcx::PgVec::new_in(qcx),
+        leaf_trig_instr: mcx::PgVec::new_in(qcx),
         last_insert_leaf: None,
         last_insert_remapped: None,
         oc_returning_leaf: None,
@@ -1271,6 +1279,22 @@ fn init_result_rel<'mcx>(
         check_exprs: None,
         partition_check: None,
         wco_exprs,
+        trig_instr: {
+            // InitResultRelInfo (execMain.c:1263-1274): the per-trigger
+            // Instrumentation array when EXPLAIN ANALYZE instruments.
+            let (relid, relname) = {
+                let rel = estate.es_relations[(rti - 1) as usize]
+                    .as_ref()
+                    .expect("result relation opened");
+                (rel.rd_id, rel.rd_rel.relname)
+            };
+            estate.register_trig_instrument(
+                executils::TrigInstrRelKind::Opened,
+                relid,
+                std::str::from_utf8(relname.name_str()).unwrap_or(""),
+                trigdesc.as_deref(),
+            )?
+        },
         trigdesc,
         trig_fmgr: ::trigger::TriggerFmgrCache::default(),
         trig_old_slot: None,
@@ -2554,13 +2578,17 @@ fn exec_bs_triggers<'mcx>(
         }
         let ret = {
             let root_rti = mt.root_rel().rti;
+            let trig_instr = mt.root_rel().trig_instr;
             let finfo = mt.root_rel_mut().trig_fmgr.get(i, trigger.tgfoid)?;
             let rel = estate.es_relations[(root_rti - 1) as usize]
                 .as_ref()
                 .expect("result relation opened");
+            // relinfo->ri_TrigInstrument + tgindx (trigger.c:2447 etc.).
+            let instr =
+                trig_instr.and_then(|ix| estate.es_trig_instrument[ix].instr.get_mut(i));
             let mut tdata =
                 types_trigger_call::TriggerData::new(tg_event, rel, None, None, trigger);
-            ::trigger::ExecCallTriggerFunc(mcx, &mut tdata, finfo)?
+            ::trigger::ExecCallTriggerFunc(mcx, &mut tdata, finfo, instr)?
         };
         if ret.is_some() {
             return Err(Box::new(
@@ -5665,12 +5693,20 @@ fn row_triggers_common<'mcx>(
             0
         };
         let (ret, rel_tupdesc) = {
-            let ModifyTableState { rels, cur, leaf_trig_fmgr, router, .. } = &mut *mt;
+            let ModifyTableState { rels, cur, leaf_trig_fmgr, leaf_trig_instr, router, .. } =
+                &mut *mt;
             let cur_rti = rels[*cur].rti;
+            let trig_instr = match leaf {
+                None => rels[*cur].trig_instr,
+                Some(ix) => leaf_trig_instr[ix],
+            };
             let finfo = match leaf {
                 None => rels[*cur].trig_fmgr.get(i, trigger.tgfoid)?,
                 Some(ix) => leaf_trig_fmgr[ix].get(i, trigger.tgfoid)?,
             };
+            // relinfo->ri_TrigInstrument + tgindx (trigger.c:2508 etc.).
+            let instr =
+                trig_instr.and_then(|ix| estate.es_trig_instrument[ix].instr.get_mut(i));
             let rel = match leaf {
                 None => estate.es_relations[(cur_rti - 1) as usize]
                     .as_ref()
@@ -5684,7 +5720,7 @@ fn row_triggers_common<'mcx>(
                 tg_event, rel, trig_nn, newtup_nn, trigger,
             );
             tdata.tg_updatedcols = updatedcols_ptr;
-            (::trigger::ExecCallTriggerFunc(mcx, &mut tdata, finfo)?, tupdesc)
+            (::trigger::ExecCallTriggerFunc(mcx, &mut tdata, finfo, instr)?, tupdesc)
         };
         match ret {
             None => return Ok(false),
@@ -6316,6 +6352,7 @@ fn resolve_leaf_trigdesc<'mcx>(
         mt.leaf_trigdesc.push(None);
         mt.leaf_trig_fmgr.push(::trigger::TriggerFmgrCache::default());
         mt.leaf_trig_when.push(::trigger::TriggerWhenCache::default());
+        mt.leaf_trig_instr.push(None);
     }
     if mt.leaf_trigdesc[idx].is_none() {
         let rel = mt.router.as_ref().expect("routed insert has a router").leaf_rel(idx);
@@ -6771,7 +6808,14 @@ fn exec_insert<'mcx>(
     // ExecPrepareTupleRouting: partitioned targets route to a leaf; slots are
     // shared unconverted (attno-remapped children are loud in the router).
     let leaf_idx = {
-        let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
+        let EStateData {
+            es_relations,
+            es_tupleTable,
+            es_trig_instrument,
+            es_instrument,
+            es_query_cxt,
+            ..
+        } = &mut *estate;
         let target = es_relations[(mt.rel().rti - 1) as usize]
             .as_ref()
             .expect("result relation opened");
@@ -6811,6 +6855,7 @@ fn exec_insert<'mcx>(
             if !mt.leaf_ri_checked[idx] {
                 mt.leaf_ri_checked[idx] = true;
                 let lrel = mt.router.as_ref().expect("router built above").leaf_rel(idx);
+                let (lrelid, lrelname) = (lrel.rd_id, lrel.rd_rel.relname);
                 if lrel.rd_rel.relkind == types_rel::RELKIND_FOREIGN_TABLE {
                     return Err(Box::new(
                         PgError::error(format!(
@@ -6859,6 +6904,23 @@ fn exec_insert<'mcx>(
                             execindexing::ExecOpenIndices(mcx, lrel, onconflict != 0)?;
                         mt.leaf_indexes[idx] = Some(opened);
                     }
+                }
+                // ExecInitPartitionInfo -> InitResultRelInfo(...,
+                // estate->es_instrument) (execPartition.c): the routed leaf's
+                // ri_TrigInstrument, appended to
+                // es_tuple_routing_result_relations in first-arrival order.
+                if *es_instrument != 0 {
+                    let td = resolve_leaf_trigdesc(mt, idx)?;
+                    let entry = executils::ResultRelTrigInstr::new(
+                        *es_query_cxt,
+                        *es_instrument,
+                        executils::TrigInstrRelKind::Routing,
+                        lrelid,
+                        std::str::from_utf8(lrelname.name_str()).unwrap_or(""),
+                        td.as_deref(),
+                    )?;
+                    es_trig_instrument.push(entry);
+                    mt.leaf_trig_instr[idx] = Some(es_trig_instrument.len() - 1);
                 }
             }
             Some(idx)
@@ -9086,7 +9148,7 @@ mcx::forget_safe_struct!(
         ri_ReturningSlot, ri_AllNullSlot, ri_projectNewInfoValid, ri_RowIdAttNo,
         update_cols, update_colnos, ri_FdwRoutine, ri_usesFdwDirectModify;
         indexes, project_new, project_returning, check_exprs, partition_check, trigdesc,
-        trig_fmgr, trig_old_slot, trig_when, all_updated_cols, child_to_root,
+        trig_fmgr, trig_instr, trig_old_slot, trig_when, all_updated_cols, child_to_root,
         generated_exprs, virtual_nn_exprs, wco_exprs, merge, ri_FdwState },
     ModifyTableState<'_> { plan, canSetTag, mt_done, fireBSTriggers, cur,
         insert_target_root, last_result_oid, result_oid_attno, returning_slot,
@@ -9096,7 +9158,7 @@ mcx::forget_safe_struct!(
         mt_merge_pending_not_matched, outer_instr_idx, instr_idx, epq_origslot,
         rels, root, leaf_checks, leaf_virtual_nn, leaf_generated, leaf_slots,
         leaf_arbiters, leaf_existing, leaf_child_to_root, leaf_wco,
-        leaf_ri_checked;
+        leaf_ri_checked, leaf_trig_instr;
         operation, snapshot_any, on_conflict, epq_subs, epq_arowmarks,
         router, leaf_indexes, leaf_partition_check,
         leaf_on_conflict,

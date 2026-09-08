@@ -327,7 +327,7 @@ pub fn ExecuteTruncateGuts<'mcx>(
                 r?;
             }
         }
-        trigger::AfterTriggerEndQuery()?;
+        trigger::AfterTriggerEndQuery(None)?;
     }
 
     for rel in rels.drain(n_explicit..) {

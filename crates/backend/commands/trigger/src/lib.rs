@@ -16,6 +16,7 @@ pub use exec::{
 pub use queue::{
     before_stmt_triggers_fired, check_foreign_transition_capture, ri_trigger_kind, AfterTriggerBeginQuery, AfterTriggerBeginSubXact,
     AfterTriggerBeginXact, AfterTriggerEndQuery, AfterTriggerEndSubXact, AfterTriggerEndXact,
+    AfterTriggerInstrSink,
     AfterTriggerFireDeferred, AfterTriggerPendingOnRel, ExecARDeleteTriggers,
     ExecARInsertTriggers, ExecARUpdateTriggers, ExecASDeleteTriggers, ExecASInsertTriggers,
     ChildToRoot, ExecASTruncateTriggers, ExecASUpdateTriggers, MakeTransitionCaptureState,
@@ -83,8 +84,8 @@ mod tests {
         assert_eq!(queue::query_depth(), 0);
         AfterTriggerBeginQuery();
         assert_eq!(queue::query_depth(), 1);
-        AfterTriggerEndQuery().unwrap();
-        AfterTriggerEndQuery().unwrap();
+        AfterTriggerEndQuery(None).unwrap();
+        AfterTriggerEndQuery(None).unwrap();
         assert_eq!(queue::query_depth(), -1);
         trigger_seams::after_trigger_end_xact::call(true).unwrap();
     }

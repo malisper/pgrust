@@ -1968,7 +1968,7 @@ fn apply_handle_insert(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> {
         do_insert(mcx, &rel, &mut remoteslot)?;
     }
 
-    trigger::AfterTriggerEndQuery()?;
+    trigger::AfterTriggerEndQuery(None)?;
 
     // Reset relation for error callback (worker.c:2473).
     set_apply_error_context_rel(None);
@@ -2023,7 +2023,7 @@ fn apply_handle_update(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> {
             &mut remoteslot,
             RoutedOp::Update(&upd.newtup),
         )?;
-        trigger::AfterTriggerEndQuery()?;
+        trigger::AfterTriggerEndQuery(None)?;
         set_apply_error_context_rel(None);
         restore_user_context(&ucxt)?;
         logicalrelation::logicalrep_rel_close(rel, types_rel::NoLock)?;
@@ -2065,7 +2065,7 @@ fn apply_handle_update(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> {
         report_row_missing(mcx, &rel, &entry, &mut remoteslot, &mut localslot, Some(&upd.newtup))?;
     }
 
-    trigger::AfterTriggerEndQuery()?;
+    trigger::AfterTriggerEndQuery(None)?;
 
     // Reset relation for error callback (worker.c:2661).
     set_apply_error_context_rel(None);
@@ -2109,7 +2109,7 @@ fn apply_handle_delete(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> {
     // tuple routes to (worker.c:2864).
     if rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE {
         apply_handle_tuple_routing(mcx, &entry, &rel, &mut remoteslot, RoutedOp::Delete)?;
-        trigger::AfterTriggerEndQuery()?;
+        trigger::AfterTriggerEndQuery(None)?;
         set_apply_error_context_rel(None);
         restore_user_context(&ucxt)?;
         logicalrelation::logicalrep_rel_close(rel, types_rel::NoLock)?;
@@ -2145,7 +2145,7 @@ fn apply_handle_delete(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> {
         report_row_missing(mcx, &rel, &entry, &mut remoteslot, &mut localslot, None)?;
     }
 
-    trigger::AfterTriggerEndQuery()?;
+    trigger::AfterTriggerEndQuery(None)?;
 
     // Reset relation for error callback (worker.c:2846).
     set_apply_error_context_rel(None);

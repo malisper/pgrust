@@ -721,6 +721,7 @@ members = [
     "crates/contrib/pg_buffercache",
     "crates/contrib/auto_explain",
     "crates/contrib/passwordcheck",
+    "crates/contrib/test_oat_hooks",
     "crates/contrib/exec_hooks",
     "crates/contrib/pgvector",
     "crates/contrib/pgvector_hnsw",

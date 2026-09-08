@@ -661,12 +661,9 @@ fn ExplainOnePlanRef<'mcx>(
         ExplainPropertyFloat("Planning Time", Some("ms"), 1000.0 * planduration.as_secs_f64(), 3, es);
     }
 
-    // ExplainPrintTriggers: no CREATE TRIGGER path exists, so every result
-    // relation's ri_TrigDesc is provably absent and report_triggers emits
-    // nothing; non-text formats still print the empty Triggers group.
+    // Print info about runtime of triggers (explain.c:832).
     if es.analyze {
-        ExplainOpenGroup("Triggers", Some("Triggers"), false, es);
-        ExplainCloseGroup("Triggers", Some("Triggers"), false, es);
+        ExplainPrintTriggers(mcx, es, qd)?;
     }
 
     if es.costs {
@@ -1067,3 +1064,103 @@ pub(crate) fn show_wal_usage(es: &mut ExplainState<'_>, usage: &WalUsage) {
         ExplainPropertyInteger("WAL Buffers Full", None, usage.wal_buffers_full, es);
     }
 }
+
+// ExplainPrintTriggers (explain.c:832-871): report_triggers over
+// es_opened_result_relations, es_tuple_routing_result_relations and
+// es_trig_target_relations, in that order; the relation name is shown when
+// more than one opened result relation exists or either other list is
+// non-empty.
+fn ExplainPrintTriggers<'mcx>(
+    mcx: Mcx<'mcx>,
+    es: &mut ExplainState<'mcx>,
+    qd: types_portal::QueryDescHandle,
+) -> PgResult<()> {
+    const OPENED: u8 = 0;
+    const ROUTING: u8 = 1;
+    const TARGET: u8 = 2;
+    let rels: Vec<execmain_seams::TrigInstrReport> = if qd.is_null() {
+        Vec::new()
+    } else {
+        execmain_seams::query_desc_trigger_instrument::call(qd)
+    };
+
+    ExplainOpenGroup("Triggers", Some("Triggers"), false, es);
+
+    let n_resultrels = rels.iter().filter(|r| r.kind == OPENED).count();
+    let show_relname = n_resultrels > 1
+        || rels.iter().any(|r| r.kind == ROUTING)
+        || rels.iter().any(|r| r.kind == TARGET);
+    for kind in [OPENED, ROUTING, TARGET] {
+        for r in rels.iter().filter(|r| r.kind == kind) {
+            report_triggers(mcx, r, show_relname, es)?;
+        }
+    }
+
+    ExplainCloseGroup("Triggers", Some("Triggers"), false, es);
+    Ok(())
+}
+
+// report_triggers (explain.c:1092-1160): execution stats for a single
+// relation's triggers; triggers never invoked are skipped.
+fn report_triggers<'mcx>(
+    mcx: Mcx<'mcx>,
+    r: &execmain_seams::TrigInstrReport,
+    show_relname: bool,
+    es: &mut ExplainState<'mcx>,
+) -> PgResult<()> {
+    for (tgname, tgconstraint, instr) in &r.triggers {
+        // We ignore triggers that were never invoked; they likely aren't
+        // relevant to the current query type.
+        if instr.ntuples == 0.0 {
+            continue;
+        }
+
+        ExplainOpenGroup("Trigger", None, true, es);
+
+        let conname = if *tgconstraint != types_core::InvalidOid {
+            lsyscache::get_constraint_name(mcx, *tgconstraint)?.map(|s| s.as_str().to_owned())
+        } else {
+            None
+        };
+
+        // In text format, we avoid printing both the trigger name and the
+        // constraint name unless VERBOSE is specified. In non-text formats
+        // we just print everything.
+        if es.format == EXPLAIN_FORMAT_TEXT {
+            if es.verbose || conname.is_none() {
+                es.str.append_str(&format!("Trigger {tgname}"))?;
+            } else {
+                es.str.append_str("Trigger")?;
+            }
+            if let Some(c) = &conname {
+                es.str.append_str(&format!(" for constraint {c}"))?;
+            }
+            if show_relname {
+                es.str.append_str(&format!(" on {}", r.relname))?;
+            }
+            if es.timing {
+                es.str.append_str(&format!(
+                    ": time={:.3} calls={:.0}\n",
+                    1000.0 * instr.total,
+                    instr.ntuples
+                ))?;
+            } else {
+                es.str.append_str(&format!(": calls={:.0}\n", instr.ntuples))?;
+            }
+        } else {
+            ExplainPropertyText("Trigger Name", tgname, es);
+            if let Some(c) = &conname {
+                ExplainPropertyText("Constraint Name", c, es);
+            }
+            ExplainPropertyText("Relation", &r.relname, es);
+            if es.timing {
+                ExplainPropertyFloat("Time", Some("ms"), 1000.0 * instr.total, 3, es);
+            }
+            ExplainPropertyFloat("Calls", None, instr.ntuples, 0, es);
+        }
+
+        ExplainCloseGroup("Trigger", None, true, es);
+    }
+    Ok(())
+}
+

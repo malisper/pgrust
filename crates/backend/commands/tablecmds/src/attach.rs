@@ -1168,7 +1168,7 @@ pub(crate) fn ATExecDetachPartitionFinalize<'mcx>(
     // A canceled second transaction of DETACH CONCURRENTLY may leave snapshots
     // that still see the partition as attached; wait them out before
     // completing (tablecmds.c:21436-21448).
-    indexcmds_seams::wait_for_older_snapshots::call(snap.xmin)?;
+    indexcmds_seams::wait_for_older_snapshots::call(snap.xmin, false)?;
     DetachPartitionFinalize(mcx, rel, &part_rel, true, InvalidOid)?;
     part_rel.close(NoLock)
 }

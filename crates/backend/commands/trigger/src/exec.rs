@@ -349,7 +349,7 @@ pub fn ExecBSInsertTriggers<'mcx>(
         }
         let finfo = fmgr.get(i, trigger.tgfoid)?;
         let mut tdata = TriggerData::new(tg_event, rel, None, None, trigger);
-        if ExecCallTriggerFunc(mcx, &mut tdata, finfo)?.is_some() {
+        if ExecCallTriggerFunc(mcx, &mut tdata, finfo, None)?.is_some() {
             return Err(Box::new(
                 PgError::error("BEFORE STATEMENT trigger cannot return a value".to_string())
                     .with_sqlstate(ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED),
@@ -391,7 +391,7 @@ pub fn ExecBSTruncateTriggers<'mcx>(
         }
         let finfo = fmgr.get(i, trigger.tgfoid)?;
         let mut tdata = TriggerData::new(tg_event, rel, None, None, trigger);
-        if ExecCallTriggerFunc(mcx, &mut tdata, finfo)?.is_some() {
+        if ExecCallTriggerFunc(mcx, &mut tdata, finfo, None)?.is_some() {
             return Err(Box::new(
                 PgError::error("BEFORE STATEMENT trigger cannot return a value".to_string())
                     .with_sqlstate(ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED),
@@ -481,7 +481,7 @@ fn insert_row_triggers<'mcx>(
         let finfo = fmgr.get(i, trigger.tgfoid)?;
         let mut tdata =
             types_trigger_call::TriggerData::from_raw(tg_event, rel, Some(cur_nn), None, trigger);
-        let ret = ExecCallTriggerFunc(mcx, &mut tdata, finfo)?;
+        let ret = ExecCallTriggerFunc(mcx, &mut tdata, finfo, None)?;
         match ret {
             None => return Ok(false),
             Some(p) if p == cur_nn => {}
@@ -641,7 +641,7 @@ pub fn ExecBRDeleteTriggers<'mcx>(
         let trig_nn = NonNull::from(&mut trigtuple);
         let finfo = fmgr.get(i, trigger.tgfoid)?;
         let mut tdata = TriggerData::from_raw(tg_event, rel, Some(trig_nn), None, trigger);
-        if ExecCallTriggerFunc(mcx, &mut tdata, finfo)?.is_none() {
+        if ExecCallTriggerFunc(mcx, &mut tdata, finfo, None)?.is_none() {
             return Ok(false); // tell caller to suppress delete
         }
         // A returned tuple other than trigtuple is context-owned here
@@ -712,7 +712,7 @@ pub fn ExecBRUpdateTriggers<'mcx>(
         let mut tdata =
             TriggerData::from_raw(tg_event, rel, Some(trig_nn), Some(new_nn), trigger);
         tdata.tg_updatedcols = updatedcols_ptr;
-        match ExecCallTriggerFunc(mcx, &mut tdata, finfo)? {
+        match ExecCallTriggerFunc(mcx, &mut tdata, finfo, None)? {
             None => return Ok(false), // "do nothing"
             Some(p) if p == new_nn => {}
             Some(p) => {
@@ -792,12 +792,19 @@ impl Drop for TriggerDepthGuard {
 // type overstates validity — it dies at the per-tuple reset, and callers must
 // consume or copy it before then (C: SPI trigger returns palloc'd in the
 // per-tuple context).
+// `instr` is the caller's ri_TrigInstrument + tgindx (trigger.c:2318,
+// :2352/:2400 InstrStartNode/InstrStopNode(1)); None outside EXPLAIN ANALYZE
+// and from the after-trigger queue, which brackets the whole event itself.
 pub fn ExecCallTriggerFunc<'a, 'mcx>(
     per_tuple_mcx: Mcx<'_>,
     trigdata: &mut TriggerData<'a, 'mcx>,
     finfo: &mut FmgrInfo,
+    mut instr: Option<&mut types_core::instrument::Instrumentation>,
 ) -> PgResult<Option<NonNull<HeapTupleData<'a>>>> {
     debug_assert_eq!(finfo.fn_oid, trigdata.tg_trigger.tgfoid);
+    if let Some(i) = instr.as_deref_mut() {
+        ::instrument::instr_start_node(i);
+    }
     let mut fcinfo = LocalFcinfo::<0>::fresh(types_core::InvalidOid);
     fcinfo.context = trigdata.fm_node_ptr();
     // SAFETY: the scratch context outlives this single invocation.
@@ -816,6 +823,9 @@ pub fn ExecCallTriggerFunc<'a, 'mcx>(
     drop(depth_guard);
     if let Some(fcu) = &fcu {
         ::pgstat::function::pgstat_end_function_usage(fcu, true);
+    }
+    if let Some(i) = instr {
+        ::instrument::instr_stop_node(i, 1.0);
     }
     if fcinfo.isnull {
         return Err(returned_null(finfo.fn_oid));

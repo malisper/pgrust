@@ -369,6 +369,36 @@ pub(crate) fn query_desc_instrument_seam(
     })
 }
 
+/// ExplainPrintTriggers' read of the estate's trigger instrumentation
+/// (explain.c:840-842 + report_triggers' InstrEndLoop, :1106).
+pub(crate) fn query_desc_trigger_instrument_seam(
+    h: QueryDescHandle,
+) -> Vec<execmain_seams::TrigInstrReport> {
+    with_qd(h, |qd| {
+        let Some(exec) = qd.exec.as_mut() else { return Vec::new() };
+        exec.with_mut(|d| {
+            d.estate
+                .es_trig_instrument
+                .iter_mut()
+                .map(|e| execmain_seams::TrigInstrReport {
+                    kind: e.kind as u8,
+                    relname: e.relname.as_str().to_owned(),
+                    triggers: e
+                        .triggers
+                        .iter()
+                        .zip(e.instr.iter_mut())
+                        .map(|(t, i)| {
+                            // Must clean up instrumentation state.
+                            ::instrument::instr_end_loop(i);
+                            (t.tgname.as_str().to_owned(), t.tgconstraint, *i)
+                        })
+                        .collect(),
+                })
+                .collect()
+        })
+    })
+}
+
 /// EA-on-morsels refusal records for one node (ea-morsels.md §6). None =
 /// nothing recorded — the armed+instrumented emission gate in data form.
 pub(crate) fn query_desc_runtime_ea_refusals_seam(

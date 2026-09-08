@@ -93,6 +93,9 @@ pub fn init_seams() {
     execmain_seams::query_desc_result_tupdesc::set(querydesc::query_desc_result_tupdesc_seam);
     execmain_seams::query_desc_operation::set(querydesc::query_desc_operation_seam);
     execmain_seams::query_desc_instrument::set(querydesc::query_desc_instrument_seam);
+    execmain_seams::query_desc_trigger_instrument::set(
+        querydesc::query_desc_trigger_instrument_seam,
+    );
     execmain_seams::query_desc_runtime_ea_refusals::set(
         querydesc::query_desc_runtime_ea_refusals_seam,
     );

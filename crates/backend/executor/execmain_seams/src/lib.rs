@@ -121,6 +121,25 @@ seam_core::seam!(
     ) -> Option<Instrumentation>
 );
 
+/// One result relation's trigger instrumentation for ExplainPrintTriggers
+/// (explain.c:832-871): C's ri_TrigDesc names and ri_TrigInstrument (after
+/// report_triggers' InstrEndLoop), copied out of the EState.
+pub struct TrigInstrReport {
+    /// Which EState list the relation came from: 0 =
+    /// es_opened_result_relations, 1 = es_tuple_routing_result_relations,
+    /// 2 = es_trig_target_relations (C reports them in that order).
+    pub kind: u8,
+    pub relname: String,
+    /// (tgname, tgconstraint, instrumentation) per ri_TrigDesc entry.
+    pub triggers: Vec<(String, types_core::Oid, Instrumentation)>,
+}
+
+seam_core::seam!(
+    // ExplainPrintTriggers' walk over the estate's result relations
+    // (queryDesc->estate->es_*_result_relations, explain.c:840-842).
+    pub fn query_desc_trigger_instrument(query_desc: QueryDescHandle) -> Vec<TrigInstrReport>
+);
+
 seam_core::seam!(
     // ExplainMissingMembers/ExplainMemberNodes: initially valid subplan
     // indexes for the Append at part_prune_index (None = no initial pruning).
