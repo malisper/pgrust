@@ -2343,18 +2343,17 @@ pub(crate) fn run_columnar<'mcx, 'd>(
         if estate.es_spi_run_budget.is_some() {
             return Err(refuse(RefuseCause::SpiCadence));
         }
-    } else if estate.es_top_eflags
-        & (::types_slot::EXEC_FLAG_REWIND | ::types_slot::EXEC_FLAG_BACKWARD)
-        != 0
-    {
-        // Spool-armed world: top-level REWIND|BACKWARD eflags reach the
+    } else if estate.es_top_eflags & ::types_slot::EXEC_FLAG_BACKWARD != 0 {
+        // Spool-armed world: a top-level BACKWARD demand reaches the
         // dispatch only when the PORTAL store is disarmed under a SCROLL
-        // cursor (PGRUST_LANE_V2_CURSORS=0). The store is the one
-        // backward server (the sqe spool feeds it; the engine itself has
-        // no backward drive), so the scroll demand refuses typed at the
-        // first drive — the lattice's scroll-past-the-bounded-spool
-        // cause. The default world never sees this: a store-armed SCROLL
-        // portal gets plain eflags and its fills stream from the spool.
+        // cursor. The store is the one backward server (the sqe spool
+        // feeds it; the engine itself has no backward drive), so the
+        // scroll demand refuses typed at the first drive — the lattice's
+        // scroll-past-the-bounded-spool cause. REWIND alone is served: a
+        // store-armed SCROLL portal carries EXEC_FLAG_REWIND (pquery.c:511;
+        // audit-18.6 w2-032) and DoPortalRewind's ExecutorRewind reaches
+        // `spool_rewind` — a replay from the start of the fixed answer
+        // plane, which is exact.
         return Err(refuse(RefuseCause::ScrollableCursor));
     }
     // === end P6-4 posture gates ==========================================
@@ -3545,9 +3544,10 @@ pub(super) fn spool_resume<'mcx, 'd>(
     Ok(())
 }
 
-/// ExecutorRewind's spool arm (defensive: every portal rewind of a
-/// served statement is a STORE rescan today, but rewind semantics over
-/// a fixed answer plane are exact — replay from the start).
+/// ExecutorRewind's spool arm: DoPortalRewind (pquery.c:1702) rewinds the
+/// live executor of a store-armed SCROLL portal (audit-18.6 w2-032), and
+/// rewind semantics over a fixed answer plane are exact — replay from the
+/// start.
 pub(crate) fn spool_rewind(estate: &mut EStateData<'_>) {
     if let Some(b) = estate.es_sqe_spool.as_mut() {
         if let Some(s) = b.downcast_mut::<CursorSpool>() {

@@ -400,9 +400,10 @@ pub fn PortalStart(
 
                 // WS-CA wave-10 (contract §3.1): a store-armed SCROLL portal
                 // is a plain forward plan — backward is consumed by the
-                // store, rewind is a store rescan — so the child gets NEITHER
-                // flag. Knob-OFF keeps C's arm verbatim (deleted at flip,
-                // contract §6 item 1).
+                // store — so the child never gets EXEC_FLAG_BACKWARD. Rewind
+                // is C's (audit-18.6 w2-032, pquery.c:1702 ExecutorRewind
+                // re-executes; the store mirror is emptied), so the child DOES
+                // get EXEC_FLAG_REWIND. Knob-OFF keeps C's arm verbatim.
                 //
                 // D-CA-2 (worklog): CURRENT-OF-ELIGIBLE armed portals keep
                 // C's flags. Their fill must be the row chain (§3.3 — the
@@ -455,8 +456,20 @@ pub fn PortalStart(
                 // REWIND|BACKWARD eflags for backward EXECUTION (the store is not
                 // serving its fetches). That is the backward-execution wave
                 // (B1-B11) territory, NOT landed on this R1a base — untouched here.
-                let myeflags = if scroll && !store_armed {
-                    eflags | EXEC_FLAG_REWIND | EXEC_FLAG_BACKWARD
+                //
+                // pquery.c:510-511: a scrollable cursor's executor must
+                // support REWIND and backward scan. EXEC_FLAG_REWIND is handed
+                // in BOTH worlds — DoPortalRewind → ExecutorRewind rescans the
+                // live plan (Sort/Material keep random-access stores and
+                // replay: the rescan contract C's nodes assume; a store-armed
+                // portal empties its store mirror and refills from the rewound
+                // executor). EXEC_FLAG_BACKWARD only where the executor itself
+                // serves backward fetches (the non-armed world): the armed
+                // world's backward reads are store seeks (the executor's
+                // backward drive is deleted — cursors inc-2 §6), and the lane
+                // engines refuse a BACKWARD demand at dispatch.
+                let myeflags = if scroll {
+                    eflags | EXEC_FLAG_REWIND | if store_armed { 0 } else { EXEC_FLAG_BACKWARD }
                 } else {
                     eflags
                 };
@@ -1292,29 +1305,37 @@ fn DoPortalRewind(portal: &Portal<'static>) -> PgResult<()> {
         }
     }
 
-    // WS-CA wave-10 (contract §5 D1): a store-armed portal rewinds the STORE
-    // and keeps the executor at the fill high-water mark — re-fetch after
-    // rewind is a store replay, never a re-execution. C rewinds the executor
-    // (pquery.c DoPortalRewind -> ExecutorRewind); streams are identical by
-    // replay and strictly more deterministic for volatile queries.
-    if portal.borrow().cursorStoreArmed {
-        let store = cursor_read_store(portal);
-        if !store.is_null() {
-            tuplestore_hold_seams::tuplestore_rescan::call(store)?;
-        }
-        let mut p = portal.borrow_mut();
-        p.atStart = true;
-        p.atEnd = false;
-        p.portalPos = 0;
-        return Ok(());
-    }
-
-    let hold_store = portal.borrow().holdStore;
-    if !hold_store.is_null() {
-        tuplestore_hold_seams::tuplestore_rescan::call(hold_store)?;
-    }
-
+    // pquery.c:1689-1703: rewind the holdStore, if any, then the EXECUTOR,
+    // if active — a live SCROLL cursor re-executes its plan on the next
+    // fetch (volatile expressions are re-evaluated); it never replays.
+    //
+    // audit-18.6 w2-032: a store-armed portal with a live executor is C's
+    // no-holdStore shape (C mints the holdStore only at
+    // PersistHoldablePortal). Its cursor store — `cursorStore`, or the
+    // early-minted holdStore of SCROLL WITH HOLD — is a MIRROR of executor
+    // output, so the rewind empties the mirror (and the §4.2 tid sidecar,
+    // row-aligned with it) and re-arms the fill: the next fetch refills from
+    // the rewound executor (fill_to's high-water mark restarts at 0). Once
+    // the executor is gone (post-persist) the portal is C's holdStore shape
+    // and the store is rescanned, exactly C.
     let query_desc = portal.borrow().queryDesc;
+    if portal.borrow().cursorStoreArmed && !query_desc.is_null() {
+        let store = cursor_read_store(portal);
+        let sidecar = portal.borrow().cursorTidStore;
+        if !store.is_null() {
+            tuplestore_hold_seams::tuplestore_clear::call(store);
+        }
+        if !sidecar.is_null() {
+            tuplestore_hold_seams::tuplestore_clear::call(sidecar);
+        }
+        portal.borrow_mut().cursorFillExhausted = false;
+    } else {
+        let hold_store = portal.borrow().holdStore;
+        if !hold_store.is_null() {
+            tuplestore_hold_seams::tuplestore_rescan::call(hold_store)?;
+        }
+    }
+
     if !query_desc.is_null() {
         let snap = execmain_seams::query_desc_snapshot::call(query_desc)
             .expect("queryDesc->snapshot set while executor is active");

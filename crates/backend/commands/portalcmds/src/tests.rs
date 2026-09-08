@@ -995,6 +995,82 @@ fn live_seqscan_cursor_backward_serves_from_store() {
     scanfix::quiesced();
 }
 
+// audit-18.6 w2-032 (row a186-candidate-fp-tcop-pquery-b76b6b767e87f273af0f-1):
+// pquery.c:1697-1703 DoPortalRewind rewinds the EXECUTOR (ExecutorRewind →
+// ExecReScan) whenever the portal's queryDesc is live, so a rewound SCROLL
+// cursor RE-EXECUTES its plan on the next fetch (volatile expressions are
+// re-evaluated) — it never replays. In the store-armed world (default) the
+// cursor store mirrors executor output, so the rewind must empty the store
+// and rescan the plan: the seqscan's heap_rescan → initscan runs again,
+// counted by scanfix's RelationGetNumberOfBlocks seam. A store-only rewind
+// (the pre-fix behaviour) starts the scan exactly once for the whole
+// sequence.
+#[test]
+fn scroll_cursor_rewind_re_executes_the_plan() {
+    install_fixtures();
+    let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mcx = leaked_mcx();
+
+    let relid: u32 = 71004;
+    scanfix::register_table(relid, &[&[1, 2, 3]]);
+    let pstmt = mk_seqscan_pstmt(mcx, relid);
+    // SAFETY: pstmt is arena-backed by the leaked mcx.
+    let stmts = unsafe { pquery::stmt_list::register(core::slice::from_ref(pstmt)) };
+    let portal = portalmem::CreatePortal("lcr", false, false).unwrap();
+    portalmem::PortalDefineQuery(
+        &portal,
+        None,
+        "DECLARE lcr SCROLL CURSOR FOR SELECT a FROM t",
+        types_portal::CMDTAG_SELECT,
+        stmts,
+        CachedPlanHandle::NULL,
+    )
+    .unwrap();
+    portal.borrow_mut().cursorOptions = CURSOR_OPT_SCROLL;
+    push_snapshot();
+    pquery::PortalStart(&portal, ParamListHandle::NULL, 0, Some(snapmgr::GetActiveSnapshot()))
+        .unwrap();
+    snapmgr::PopActiveSnapshot().unwrap();
+    assert!(portal.borrow().cursorStoreArmed, "spool-on SCROLL portal is store-armed");
+    drop(portal);
+
+    let starts = || scanfix::SCAN_STARTS.load(std::sync::atomic::Ordering::Relaxed);
+    let base = starts();
+
+    let (qc, rows) = fetch("lcr", FETCH_FORWARD, FETCH_ALL, false);
+    assert_eq!((qc.commandTag, qc.nprocessed), (CMDTAG_FETCH, 3));
+    assert_eq!(rows, ["1", "2", "3"]);
+    assert_eq!(pos("lcr"), (false, true, 3));
+    assert_eq!(starts() - base, 1, "the first fill started the scan once");
+
+    // MOVE BACKWARD ALL = DoPortalRewind → ExecutorRewind (pquery.c:1702).
+    let (qc, _) = fetch("lcr", FETCH_BACKWARD, FETCH_ALL, true);
+    assert_eq!((qc.commandTag, qc.nprocessed), (CMDTAG_MOVE, 3));
+    assert_eq!(pos("lcr"), (true, false, 0));
+
+    let (qc, rows) = fetch("lcr", FETCH_FORWARD, FETCH_ALL, false);
+    assert_eq!((qc.commandTag, qc.nprocessed), (CMDTAG_FETCH, 3));
+    assert_eq!(rows, ["1", "2", "3"]);
+    assert_eq!(pos("lcr"), (false, true, 3));
+    assert_eq!(
+        starts() - base,
+        2,
+        "the fetch after MOVE BACKWARD ALL re-drives the rescanned plan (C re-executes on rewind; a store replay never restarts the scan)"
+    );
+
+    // FETCH ABSOLUTE 1 from the end: the goal is at most halfway back, so
+    // DoPortalRunFetch takes the rewind leg (pquery.c:1535) — a third start.
+    let (qc, rows) = fetch("lcr", FETCH_ABSOLUTE, 1, false);
+    assert_eq!((qc.commandTag, qc.nprocessed), (CMDTAG_FETCH, 1));
+    assert_eq!(rows, ["1"]);
+    assert_eq!(pos("lcr"), (false, false, 1));
+    assert_eq!(starts() - base, 3, "FETCH ABSOLUTE's rewind leg re-executes as well");
+
+    PerformPortalClose(Some("lcr")).unwrap();
+    assert!(portalmem::GetPortalByName(Some("lcr")).is_none());
+    scanfix::quiesced();
+}
+
 fn mk_seqscan_pstmt<'mcx>(mcx: Mcx<'mcx>, relid: u32) -> &'mcx PlannedStmt<'mcx> {
     use ::types_nodes::bitmapset::Bitmapset;
     use ::types_nodes::parsenodes::{RTEKind, RTEPermissionInfo, RangeTblEntry};
@@ -1071,6 +1147,8 @@ mod scanfix {
     };
 
     pub static CLOSED: AtomicUsize = AtomicUsize::new(0);
+    /// Scan starts (heap_beginscan + heap_rescan) seen by the fake bufmgr.
+    pub static SCAN_STARTS: AtomicUsize = AtomicUsize::new(0);
     pub static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     struct Fake {
@@ -1134,6 +1212,11 @@ mod scanfix {
         bufmgr_seams::get_access_strategy::set(|_| None);
         bufmgr_seams::free_access_strategy::set(|_| {});
         bufmgr_seams::relation_get_number_of_blocks_in_fork::set(|rel, _fork| {
+            // heapam initscan (heapam.c initscan → RelationGetNumberOfBlocks)
+            // runs once per scan START — heap_beginscan and every
+            // heap_rescan — so this counts the executor's (re)drives of a
+            // seqscan plan (audit-18.6 w2-032 rewind witness).
+            SCAN_STARTS.fetch_add(1, Ordering::Relaxed);
             with_fake(|f| Ok(f.tables[&rel.rd_id].len() as u32))
         });
 

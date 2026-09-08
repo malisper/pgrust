@@ -2021,17 +2021,15 @@ pub(crate) fn maybe_run_heap<'mcx, 'd>(
             .refuse(fp)
             .into_error(&relname)));
     }
-    // [sqe-heap-cursors] Scroll law, the columnar arm verbatim: top
-    // REWIND|BACKWARD eflags reach the dispatch only when the portal
-    // store is disarmed under a SCROLL cursor; the store is the one
-    // backward server (the spool feeds it), so an sqe-owned shape
-    // refuses typed at the first drive. Placed AFTER admission: shapes
+    // [sqe-heap-cursors] Scroll law, the columnar arm verbatim: a top
+    // BACKWARD demand reaches the dispatch only when the portal store is
+    // disarmed under a SCROLL cursor; the store is the one backward
+    // server (the spool feeds it), so an sqe-owned shape refuses typed at
+    // the first drive. REWIND alone is served (a store-armed SCROLL portal
+    // carries it — pquery.c:511, audit-18.6 w2-032 — and ExecutorRewind is
+    // the spool's replay from the start). Placed AFTER admission: shapes
     // the face does not own keep their incumbent routing.
-    if spool_on
-        && estate.es_top_eflags
-            & (::types_slot::EXEC_FLAG_REWIND | ::types_slot::EXEC_FLAG_BACKWARD)
-            != 0
-    {
+    if spool_on && estate.es_top_eflags & ::types_slot::EXEC_FLAG_BACKWARD != 0 {
         return Some(Err(RefuseCause::ScrollableCursor.refuse(fp).into_error(&relname)));
     }
 

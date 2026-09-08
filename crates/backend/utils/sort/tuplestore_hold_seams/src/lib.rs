@@ -66,3 +66,14 @@ seam_core::seam!(
     ) -> types_error::PgResult<()>
 );
 // --- end WS-CA wave-10 ------------------------------------------------------
+
+// --- audit-18.6 w2-032 (pquery DoPortalRewind, store-armed arm) --------------
+
+seam_core::seam!(
+    // tuplestore_clear(state) (tuplestore.c:430) — empties the store and
+    // resets every read pointer to the start. The cursor store of a
+    // store-armed SCROLL portal mirrors executor output; C's rewind
+    // (pquery.c:1702 ExecutorRewind) re-executes, so the mirror is emptied
+    // and refilled from the rewound executor.
+    pub fn tuplestore_clear(store: types_portal::TuplestoreHandle)
+);

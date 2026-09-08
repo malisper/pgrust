@@ -161,6 +161,10 @@ fn rescan_hold(h: TuplestoreHandle) -> PgResult<()> {
     with_store(h, |store| store.rescan())
 }
 
+fn clear_hold(h: TuplestoreHandle) {
+    with_store(h, |store| store.clear())
+}
+
 fn skiptuples_hold(h: TuplestoreHandle, ntuples: i64, forward: bool) -> PgResult<bool> {
     with_store(h, |store| store.skiptuples(ntuples, forward))
 }
@@ -283,4 +287,6 @@ pub(crate) fn install_seams() {
     tuplestore_hold_seams::tuplestore_begin_heap_cursor::set(begin_heap_cursor);
     tuplestore_hold_seams::tuplestore_tuple_count::set(tuple_count_hold);
     tuplestore_hold_seams::tuplestore_tidstore_put::set(tidstore_put);
+    // audit-18.6 w2-032: DoPortalRewind empties a store-armed portal's mirror.
+    tuplestore_hold_seams::tuplestore_clear::set(clear_hold);
 }
