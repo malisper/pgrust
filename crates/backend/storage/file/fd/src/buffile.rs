@@ -78,6 +78,7 @@ pub struct BufFile<'mcx> {
     // All files except the last have length exactly MAX_PHYSICAL_FILESIZE.
     files: PgVec<'mcx, File>,
     is_inter_xact: bool,
+    resowner: types_resowner::ResourceOwner,
     dirty: bool,
     read_only: bool,
     // FileSet-backed files (C's fileset BufFiles): segment i is the set's
@@ -119,6 +120,7 @@ pub fn BufFileCreateTemp<'mcx>(mcx: Mcx<'mcx>, inter_xact: bool) -> PgResult<Buf
     Ok(BufFile {
         files,
         is_inter_xact: inter_xact,
+        resowner: resowner_seams::current_resource_owner::call(),
         dirty: false,
         read_only: false,
         fileset: None,
@@ -171,6 +173,7 @@ pub fn BufFileCreateFileSet<'mcx>(
     Ok(BufFile {
         files,
         is_inter_xact: false,
+        resowner: types_resowner::ResourceOwner::NULL,
         dirty: false,
         read_only: false,
         fileset: Some(key),
@@ -227,6 +230,7 @@ fn open_fileset_common<'mcx>(
     Ok(Some(BufFile {
         files,
         is_inter_xact: false,
+        resowner: types_resowner::ResourceOwner::NULL,
         dirty: false,
         read_only,
         fileset: Some(key),
@@ -362,7 +366,13 @@ impl<'mcx> BufFile<'mcx> {
 
     fn extend(&mut self) -> PgResult<()> {
         let pfile = match &self.fileset {
-            None => OpenTemporaryFile(self.is_inter_xact)?,
+            None => {
+                let old_owner = resowner_seams::current_resource_owner::call();
+                resowner_seams::set_current_resource_owner::call(self.resowner);
+                let file = OpenTemporaryFile(self.is_inter_xact);
+                resowner_seams::set_current_resource_owner::call(old_owner);
+                file?
+            }
             Some(fileset) => {
                 let name = self.name.as_ref().expect("fileset BufFile has a name");
                 make_new_fileset_segment(fileset, name, self.files.len())?

@@ -1858,3 +1858,39 @@ fn startup_progress_lines_during_datadir_sync_and_unlogged_reset() {
         );
     }
 }
+
+#[test]
+fn buffile_segment_rollover_keeps_creation_owner() {
+    setup();
+    install_resowner_seams_once();
+    let saved = resowner::CurrentResourceOwner();
+    let owner = resowner::ResourceOwnerCreate(saved, "buffile-owner").unwrap();
+    resowner::SetCurrentResourceOwner(owner);
+    let dir = scratch_dir("buffile-owner");
+    let _cwd = enter_datadir(&dir);
+    with_fd(|fd| fd.temporary_files_allowed = true);
+    let ctx = mcx::MemoryContext::new("buffile-owner");
+    let mut bf = crate::buffile::BufFileCreateTemp(ctx.mcx(), false).unwrap();
+    let child = resowner::ResourceOwnerCreate(owner, "buffile-child").unwrap();
+    resowner::SetCurrentResourceOwner(child);
+    let boundary = 0x4000_0000;
+    assert_eq!(bf.seek(0, boundary - 4, crate::buffile::SEEK_SET).unwrap(), 0);
+    bf.write(&[1, 2, 3, 4, 5, 6, 7, 8]).unwrap();
+    assert_eq!(bf.seek(0, boundary - 4, crate::buffile::SEEK_SET).unwrap(), 0);
+    assert_eq!(resowner::CurrentResourceOwner(), child);
+    for phase in [
+        types_resowner::RESOURCE_RELEASE_BEFORE_LOCKS,
+        types_resowner::RESOURCE_RELEASE_LOCKS,
+        types_resowner::RESOURCE_RELEASE_AFTER_LOCKS,
+    ] {
+        resowner::ResourceOwnerRelease(child, phase, false, false).unwrap();
+    }
+    resowner::SetCurrentResourceOwner(owner);
+    resowner::ResourceOwnerDelete(child);
+    let mut bytes = [0; 8];
+    bf.read_exact(&mut bytes).unwrap();
+    assert_eq!(bytes, [1, 2, 3, 4, 5, 6, 7, 8]);
+    bf.close().unwrap();
+    resowner::SetCurrentResourceOwner(saved);
+    resowner::ResourceOwnerDelete(owner);
+}

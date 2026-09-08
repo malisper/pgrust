@@ -679,6 +679,7 @@ pub struct Estate<'a> {
     pub rsi: Option<RsiSnapshot>,
     pub tuple_store: Option<tuplestore::Tuplestore>,
     tuple_store_desc: Option<types_tuple::TupleDescData<'static>>,
+    tuple_store_owner: types_resowner::ResourceOwner,
     pub cur_error: Option<Box<PgError>>,
     pub eval_processed: u64,
     eval_tuptable: Option<TuptabHandle>,
@@ -923,6 +924,7 @@ impl<'a> Estate<'a> {
             rsi: None,
             tuple_store: None,
             tuple_store_desc: None,
+            tuple_store_owner: resowner::CurrentResourceOwner(),
             cur_error: None,
             eval_processed: 0,
             eval_tuptable: None,
@@ -4960,10 +4962,11 @@ impl<'a> Estate<'a> {
         };
         let td = tupdesc::CreateTupleDescCopy(self.datum_ctx.mcx(), expected)?;
         let random = rsi.allowed_modes & fmgr::SFRM_Materialize_Random != 0;
-        self.tuple_store = Some(tuplestore::Tuplestore::begin_heap(
+        self.tuple_store = Some(tuplestore::Tuplestore::begin_heap_with_owner(
             random,
             false,
             init_small::globals::work_mem(),
+            self.tuple_store_owner,
         ));
         self.tuple_store_desc = Some(td);
         Ok(())

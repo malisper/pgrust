@@ -8,6 +8,8 @@ publish.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+resowner = { path = "../../resowner/resowner" }
+types_resowner = { path = "../../../../_support/types/types_resowner" }
 datum = { path = "../../../../_support/types/datum" }
 mcx = { path = "../../../../_support/mcx" }
 types_core = { path = "../../../../_support/types/types_core" }
@@ -30,6 +32,4 @@ aio_seams = { path = "../../../storage/aio/aio_seams" }
 waitevent_seams = { path = "../../activity/waitevent_seams" }
 pgstat_seams = { path = "../../activity/pgstat_seams" }
 ipc_seams = { path = "../../../storage/ipc/ipc_seams" }
-resowner = { path = "../../resowner/resowner" }
 resowner_seams = { path = "../../resowner/resowner_seams" }
-types_resowner = { path = "../../../../_support/types/types_resowner" }

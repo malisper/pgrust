@@ -77,6 +77,7 @@ pub struct TuplestoreData<'m> {
     eflags: i32,
     backward: bool,
     inter_xact: bool,
+    resowner: types_resowner::ResourceOwner,
     truncated: bool,
     used_disk: bool,
     allowed_mem: i64,
@@ -163,6 +164,20 @@ mod ts_pool {
 
 impl Tuplestore {
     pub fn begin_heap(random_access: bool, inter_xact: bool, max_kbytes: i32) -> Tuplestore {
+        Self::begin_heap_with_owner(
+            random_access,
+            inter_xact,
+            max_kbytes,
+            resowner::CurrentResourceOwner(),
+        )
+    }
+
+    pub fn begin_heap_with_owner(
+        random_access: bool,
+        inter_xact: bool,
+        max_kbytes: i32,
+        owner: types_resowner::ResourceOwner,
+    ) -> Tuplestore {
         let eflags = if random_access {
             EXEC_FLAG_BACKWARD | EXEC_FLAG_REWIND
         } else {
@@ -175,6 +190,7 @@ impl Tuplestore {
                 st.status = TupStoreStatus::InMem;
                 st.eflags = eflags;
                 st.inter_xact = inter_xact;
+                st.resowner = owner;
                 st.truncated = false;
                 st.used_disk = false;
                 st.allowed_mem = allowed_mem;
@@ -203,6 +219,7 @@ impl Tuplestore {
                 eflags,
                 backward: false,
                 inter_xact,
+                resowner: owner,
                 truncated: false,
                 used_disk: false,
                 allowed_mem,
@@ -662,7 +679,12 @@ impl<'m> TuplestoreData<'m> {
                 }
 
                 // Switch to tape-based operation.
-                let myfile = fd::BufFileCreateTemp(self.mcx, self.inter_xact)?;
+                // The store can outlive the subtransaction that triggers its spill.
+                let old_owner = resowner::CurrentResourceOwner();
+                resowner::SetCurrentResourceOwner(self.resowner);
+                let myfile = fd::BufFileCreateTemp(self.mcx, self.inter_xact);
+                resowner::SetCurrentResourceOwner(old_owner);
+                let myfile = myfile?;
                 self.myfile = Some(myfile);
                 self.backward = (self.eflags & EXEC_FLAG_BACKWARD) != 0;
                 self.updatemax();

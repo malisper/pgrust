@@ -9,6 +9,7 @@ name = "plpgsql"
 path = "src/lib.rs"
 
 [dependencies]
+types_resowner = { path = "../../_support/types/types_resowner" }
 pg_string = { path = "../../common/string" }
 pgsync = { path = "../../_support/pgsync" }
 array = { package = "types_array", path = "../../_support/types/array" }

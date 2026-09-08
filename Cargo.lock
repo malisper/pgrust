@@ -14156,6 +14156,7 @@ dependencies = [
  "types_fmgr",
  "types_nodes",
  "types_portal",
+ "types_resowner",
  "types_rel",
  "types_storage",
  "types_trigger",

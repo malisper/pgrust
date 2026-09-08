@@ -498,6 +498,54 @@ mod spill {
     const N: i32 = 200_000; // ~200k 16B tuples >> 64KB work_mem
 
     #[test]
+    fn spill_keeps_creation_owner_across_child_release_and_pool_reuse() {
+        setup();
+        let (_cwd, dir) = enter_datadir("owner");
+        let mcx = leaked_mcx();
+        let desc = int4_desc(mcx, 1);
+        let mut slot =
+            exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(desc.clone()));
+        let saved = resowner::CurrentResourceOwner();
+        for is_commit in [true, false] {
+            let owner = resowner::ResourceOwnerCreate(saved, "store-owner").unwrap();
+            resowner::SetCurrentResourceOwner(owner);
+            let mut ts = Tuplestore::begin_heap(false, false, 0);
+            let child = resowner::ResourceOwnerCreate(owner, "spill-child").unwrap();
+            resowner::SetCurrentResourceOwner(child);
+            put_i32(&mut ts, &desc, 11);
+            assert!(!ts.in_memory());
+            assert_eq!(resowner::CurrentResourceOwner(), child);
+            for phase in [
+                types_resowner::RESOURCE_RELEASE_BEFORE_LOCKS,
+                types_resowner::RESOURCE_RELEASE_LOCKS,
+                types_resowner::RESOURCE_RELEASE_AFTER_LOCKS,
+            ] {
+                resowner::ResourceOwnerRelease(child, phase, is_commit, false).unwrap();
+            }
+            resowner::SetCurrentResourceOwner(owner);
+            resowner::ResourceOwnerDelete(child);
+            let remaining = temp_files(&dir);
+            if remaining == 0 {
+                // Avoid closing a freed VFD while reporting the ownership failure.
+                std::mem::forget(ts);
+                panic!("child release closed the store's spill file");
+            }
+            put_i32(&mut ts, &desc, 22);
+            for expected in [11, 22] {
+                assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
+                assert_eq!(read_i32(&mut slot), expected);
+            }
+            assert!(!ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
+            exectuples::exec_clear_tuple(&mut slot, mcx);
+            ts.end();
+            assert_eq!(temp_files(&dir), 0);
+            Tuplestore::begin_heap(false, false, 0).end();
+            resowner::SetCurrentResourceOwner(saved);
+            resowner::ResourceOwnerDelete(owner);
+        }
+    }
+
+    #[test]
     fn spill_forward_roundtrip_and_stats() {
         setup();
         let (_cwd, dir) = enter_datadir("fwd");
