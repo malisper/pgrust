@@ -33,8 +33,9 @@ impl AggStateNode {
         }
     }
 
-    pub fn fm_node_ptr(&mut self) -> FmNodePtr {
-        Some(NonNull::from(&mut *self).cast::<FmNode>())
+    // Shared provenance survives writes through the node's interior-mutable slots.
+    pub fn fm_node_ptr(&self) -> FmNodePtr {
+        Some(NonNull::from(self).cast::<FmNode>())
     }
 
     pub fn aggcontext(&self) -> Mcx<'_> {
@@ -118,4 +119,41 @@ impl FunctionCallInfoBaseData {
             Some(p.cast::<AggStateNode>().as_ref())
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn carrier_survives_current_aggregate_changes() {
+        #[allow(unused_mut)]
+        let mut node = AggStateNode::new(MemoryContext::new_bump("carrier-test"));
+        let carrier = node.fm_node_ptr().unwrap().cast::<AggStateNode>();
+        let aggref = NonNull::dangling();
+        node.set_current_agg(aggref, true);
+        // SAFETY: node stays at its address and only shared accesses follow pointer creation.
+        let observed = unsafe { carrier.as_ref() };
+        assert_eq!(observed.current_agg(), Some((aggref, true)));
+        node.clear_current_agg();
+        assert_eq!(observed.current_agg(), None);
+    }
+
+    #[test]
+    fn allocation_carrier_survives_partition_reset() {
+        let raw = ::alloc::boxed::Box::into_raw(::alloc::boxed::Box::new(
+            AggStateNode::new(MemoryContext::new_bump("reset-carrier-test")),
+        ));
+        let mut owner = NonNull::new(raw).unwrap();
+        let carrier = owner.cast::<FmNode>();
+        // SAFETY: owner is the live allocation pointer; reset's exclusive borrow ends before reads.
+        unsafe {
+            owner.as_ref().set_current_agg(NonNull::dangling(), true);
+            owner.as_mut().reset();
+            owner.as_ref().clear_current_agg();
+            assert_eq!(carrier.cast::<AggStateNode>().as_ref().current_agg(), None);
+            drop(::alloc::boxed::Box::from_raw(raw));
+        }
+    }
+
 }

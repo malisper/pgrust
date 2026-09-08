@@ -159,6 +159,7 @@ fn fn_extra_cache_roundtrip_and_clone_reset() {
 }
 
 #[test]
+#[cfg(debug_assertions)]
 #[should_panic(expected = "downcast to u64 failed")]
 fn fn_extra_wrong_type_panics() {
     let mut flinfo = FmgrInfo::new(int4pl, 177, 2, true, false);

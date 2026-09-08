@@ -1035,7 +1035,7 @@ pub fn exec_init_window_agg<'mcx>(
         }
         // C arms fcinfo->context with the WindowAggState; the AggStateNode
         // stands in (AggCheckCallContext accepts both).
-        let fm = unsafe { agg_node.expect("aggs imply agg_node").as_mut() }.fm_node_ptr();
+        let fm = Some(agg_node.expect("aggs imply agg_node").cast());
         let mut et = ::executils::with_subplan_compile_env(estate, |env| {
             ::execexpr::exec_build_agg_trans_subplans(mcx, &specs, fm, params, env)
         })?;
@@ -3148,9 +3148,8 @@ impl<'mcx> WindowAggStateData<'mcx> {
     // next row's projection).
     fn default_agg_finalize_save(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
         let per_tuple = estate.ecxt(self.ps_ExprContext).per_tuple_mcx();
-        let mut an = self.agg_node.expect("aggs imply agg_node");
-        // SAFETY: the node outlives the loop; no other path touches it here.
-        let agg_fm = unsafe { an.as_mut() }.fm_node_ptr();
+        let an = self.agg_node.expect("aggs imply agg_node");
+        let agg_fm = Some(an.cast());
         // SAFETY: shared read of the node's context handle.
         let agg_mcx = unsafe { an.as_ref() }.aggcontext();
         for aggno in 0..self.numaggs {
