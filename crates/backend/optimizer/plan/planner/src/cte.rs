@@ -66,7 +66,7 @@ pub fn ss_process_ctes<'mcx>(run: &mut PlannerRun<'mcx>, parse: &Query<'mcx>) ->
             crate::subselect::get_first_col_type(plan);
         let paramid = assign_special_exec_param(run)?;
 
-        run.glob.subplans.lappend(mcx, plan)?;
+        run.glob.subplans.lappend(mcx, Some(plan))?;
         let plan_id = run.glob.subplans.len() as i32;
         run.cte_subpath_infos.push(types_pathnodes::run::CteSubpathInfo {
             plan_id,
@@ -298,7 +298,11 @@ pub fn set_cte_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgR
         plan_id,
         cte_param,
     });
-    let cteplan = run.glob.subplans.nth((plan_id - 1) as usize);
+    let cteplan = run
+        .glob
+        .subplans
+        .nth((plan_id - 1) as usize)
+        .expect("subplan cells are live until set_plan_references");
     let plan_rows = cteplan.as_plan().expect("plan node").plan_rows;
     crate::costsize::set_cte_size_estimates(run, rel, plan_rows)?;
     let mcx = run.mcx;

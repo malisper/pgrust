@@ -599,14 +599,21 @@ pub fn preprocess_expression<'mcx>(
     if kind == EXPRKIND_QUAL || kind == EXPRKIND_TARGET {
         clauses::convert_saop_to_hashed_saop(expr)?;
     }
-    // C order: replace correlation Vars first, then expand SubLinks — each
-    // sub-level repeats the pair, so uplevel Vars inside sublink bodies are
-    // parked exactly once (subselect.c header comment).
-    if run.root.query_level > 1 {
-        expr = crate::subselect::ss_replace_correlation_vars(run, expr)?;
-    }
+    // Expand SubLinks to SubPlans (planner.c:1364-1365), THEN replace
+    // uplevel vars with Params (planner.c:1373-1374) — nothing in between.
+    // SS_replace_correlation_vars' header (subselect.c:1947-1968): the
+    // uplevel PHV/Aggref/GroupingFunc/ReturningExpr arguments are not
+    // descended into by either pass at this level; they are copied to the
+    // parent's subplan args with their SubLinks still unexpanded, and the
+    // parent's SS_process_sublinks (build_subplan) expands them there. The
+    // parent must therefore replace its own uplevel vars only after
+    // expanding its sublinks, so the copied arguments get both passes at
+    // the parent too.
     if has_sublinks {
         expr = crate::subselect::ss_process_sublinks(run, expr, kind == EXPRKIND_QUAL)?;
+    }
+    if run.root.query_level > 1 {
+        expr = crate::subselect::ss_replace_correlation_vars(run, expr)?;
     }
     // make_ands_implicit runs last in C; constant TRUE reduces to None.
     if kind == EXPRKIND_QUAL {

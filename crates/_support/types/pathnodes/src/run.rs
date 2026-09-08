@@ -1,7 +1,7 @@
 use mcx::{Mcx, PgVec};
 use types_error::PgResult;
 use types_nodes::bitmapset::Bitmapset;
-use types_nodes::list::{IntList, NodeList, OidList};
+use types_nodes::list::{IntList, NodeList, OidList, OptNodeList};
 use types_nodes::parsenodes::{Query, RangeTblEntry};
 use types_nodes::plannodes::PlanRowMark;
 use crate::{
@@ -24,7 +24,9 @@ pub struct Glob<'mcx> {
     pub finalrtable: NodeList<'mcx>,
     pub finalrteperminfos: NodeList<'mcx>,
     pub finalrowmarks: NodeList<'mcx>,
-    pub subplans: NodeList<'mcx>,
+    // glob->subplans: set_plan_references NULLs the AlternativeSubPlan
+    // members it did not choose (setrefs.c:367-382), so cells are Option.
+    pub subplans: OptNodeList<'mcx>,
     pub rewind_plan_ids: Bitmapset<'mcx>,
     pub result_relations: IntList<'mcx>,
     pub append_relations: NodeList<'mcx>,
@@ -52,7 +54,7 @@ impl Glob<'_> {
             finalrtable: NodeList::nil(),
             finalrteperminfos: NodeList::nil(),
             finalrowmarks: NodeList::nil(),
-            subplans: NodeList::nil(),
+            subplans: OptNodeList::nil(),
             rewind_plan_ids: Bitmapset::empty(),
             result_relations: IntList::nil(),
             append_relations: NodeList::nil(),

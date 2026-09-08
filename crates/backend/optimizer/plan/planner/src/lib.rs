@@ -420,7 +420,7 @@ pub fn standard_planner<'mcx>(
         // the main plan's extParam computation validates against).
         debug_assert_eq!(run.subroots.len(), run.glob.subplans.len());
         for i in 0..run.glob.subplans.len() {
-            let subplan = run.glob.subplans.nth(i);
+            let subplan = run.glob.subplans.nth(i).expect("subplan cells are live until set_plan_references");
             let subroot = &run.subroots[i].root;
             crate::subselect::ss_finalize_plan(&run, subroot, subplan, &subroot.outer_params)?;
         }
@@ -430,21 +430,21 @@ pub fn standard_planner<'mcx>(
     debug_assert!(run.glob.finalrtable.is_nil());
     let top_plan = set_plan_references(&mut run, top_plan)?;
     // ... and the subplans, each under its own root (C's forboth over
-    // glob->subplans/glob->subroots).
+    // glob->subplans/glob->subroots, planner.c:561-567). A cell NULLed by an
+    // earlier level's set_plan_references (an unchosen AlternativeSubPlan
+    // member) still runs the flat-list prologue and stays NULL.
     if !run.glob.subplans.is_nil() {
-        let mut fixed_subplans = NodeList::nil();
         for i in 0..run.glob.subplans.len() {
             let subplan = run.glob.subplans.nth(i);
             // Swaps, not replace-with-placeholder: no PlannerInfo ever drops.
             core::mem::swap(&mut run.subroots[i].root, &mut run.root);
             let top_tlist =
                 core::mem::replace(&mut run.processed_tlist, run.subroots[i].processed_tlist);
-            let fixed = set_plan_references(&mut run, subplan)?;
+            let fixed = crate::setrefs::set_plan_references_opt(&mut run, subplan);
             core::mem::swap(&mut run.subroots[i].root, &mut run.root);
             run.processed_tlist = top_tlist;
-            fixed_subplans.lappend(mcx, fixed)?;
+            run.glob.subplans.as_mut_slice()[i] = fixed?;
         }
-        run.glob.subplans = fixed_subplans;
     }
 
     let parse = run.parse();
@@ -488,15 +488,10 @@ pub fn standard_planner<'mcx>(
         permInfos: glob.finalrteperminfos,
         resultRelations: glob.result_relations,
         appendRelations: glob.append_relations,
-        // The planner never leaves holes; NULL cells appear only in
-        // ExecSerializePlan's worker copy.
-        subplans: {
-            let mut sp = types_nodes::list::OptNodeList::nil();
-            for p in glob.subplans.iter() {
-                sp.lappend(mcx, Some(p))?;
-            }
-            sp
-        },
+        // NULL cells are the AlternativeSubPlan members set_plan_references
+        // did not choose (setrefs.c:379); ExecSerializePlan's worker copy adds
+        // its parallel-unsafe holes. The executor skips both.
+        subplans: glob.subplans,
         rewindPlanIDs: glob.rewind_plan_ids,
         rowMarks: glob.finalrowmarks,
         relationOids: glob.relation_oids,

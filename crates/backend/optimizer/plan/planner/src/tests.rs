@@ -9603,6 +9603,125 @@ fn statistic_proc_security_check_logs_non_leakproof_at_debug2() {
     );
 }
 
+// audit-18.6 w2-031 (setrefs.c:348-382): a correlated EXISTS OR'ed with
+// another clause plans as an AlternativeSubPlan pair (the correlated EXISTS
+// SubPlan and its hashed ANY twin). set_plan_references keeps the cheaper
+// member and NULLs the loser out of glob->subplans (setrefs.c:379), so the
+// PlannedStmt carries a NULL cell the executor never initializes.
+#[test]
+fn w2_031_alternative_subplan_loser_is_nulled_out_of_subplans() {
+    let cx = cx();
+    let mcx = cx.mcx();
+
+    // The analyzer's output for `EXISTS (SELECT 1 FROM t t2 WHERE t2.pk = t.pk)`.
+    let sub_node = {
+        let mut rte = Node::build::<types_nodes::parsenodes::RangeTblEntry>(mcx).unwrap();
+        rte.rtekind = RTEKind::RTE_RELATION;
+        rte.relid = TBL;
+        rte.relkind = b'r';
+        rte.rellockmode = 1;
+        let rtable = NodeList::make1(mcx, rte.seal()).unwrap();
+        let rtr = Node::mk_range_tbl_ref(mcx, 1).unwrap();
+        let inner_pk = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+        let outer_pk = Node::mk_var(mcx, 1, 1, 23, -1, 0, 1).unwrap();
+        let corr = Node::mk(
+            mcx,
+            types_nodes::primnodes::OpExpr {
+                opno: INT4EQ_OP,
+                opfuncid: INT4EQ_PROC,
+                opresulttype: 16,
+                opretset: false,
+                opcollid: 0,
+                inputcollid: 0,
+                args: NodeList::make2(mcx, inner_pk, outer_pk).unwrap(),
+                location: -1,
+            },
+        )
+        .unwrap();
+        let jointree = alloc_leak_in(
+            mcx,
+            FromExpr { fromlist: NodeList::make1(mcx, rtr).unwrap(), quals: Some(corr) },
+        )
+        .unwrap();
+        let one = Node::mk_const(mcx, 23, -1, 0, 4, Datum::from_i32(1), false, true).unwrap();
+        let tle = Node::mk_target_entry(mcx, one, 1, Some("?column?"), false).unwrap();
+        let sub = Query {
+            commandType: CmdType::CMD_SELECT,
+            canSetTag: true,
+            jointree: Some(jointree),
+            rtable,
+            targetList: NodeList::make1(mcx, tle).unwrap(),
+            ..Query::default()
+        };
+        Node::mk(mcx, sub).unwrap()
+    };
+    let sublink = Node::mk(
+        mcx,
+        types_nodes::SubLink {
+            subLinkType: types_nodes::SubLinkType::EXISTS_SUBLINK,
+            subLinkId: 0,
+            testexpr: None,
+            operName: NodeList::nil(),
+            subselect: sub_node,
+            location: -1,
+        },
+    )
+    .unwrap();
+    // OR keeps pull_up_sublinks from turning the EXISTS into a semi-join.
+    let qual = Node::mk(
+        mcx,
+        types_nodes::primnodes::BoolExpr {
+            boolop: types_nodes::primnodes::BoolExprType::OR_EXPR,
+            args: NodeList::make2(mcx, sublink, eq_qual(mcx, 1, 42)).unwrap(),
+            location: -1,
+        },
+    )
+    .unwrap();
+    let mut parse = table_query(mcx, Some(qual));
+    parse.hasSubLinks = true;
+
+    let stmt = planner(
+        mcx,
+        leak_q(mcx, parse),
+        "SELECT * FROM t WHERE EXISTS (SELECT 1 FROM t t2 WHERE t2.pk = t.pk) OR pk = 42",
+        CURSOR_OPT_PARALLEL_OK,
+        ParamListHandle::NULL,
+    )
+    .unwrap();
+
+    // make_subplan registered both members: plan 1 = the correlated EXISTS,
+    // plan 2 = the hashed ANY twin (subselect.c:353-365).
+    assert_eq!(stmt.subplans.len(), 2);
+
+    // The scan qual holds the member fix_alternative_subplan chose.
+    fn chosen_subplan_id(node: Node<'_>) -> Option<i32> {
+        if let Some(sp) = node.as_sub_plan() {
+            return Some(sp.plan_id);
+        }
+        if let Some(b) = node.as_bool_expr() {
+            return b.args.iter().find_map(chosen_subplan_id);
+        }
+        None
+    }
+    let top = stmt.planTree.unwrap();
+    let scan = top.as_plan().expect("plan node");
+    let chosen = scan
+        .qual
+        .iter()
+        .find_map(chosen_subplan_id)
+        .expect("the scan qual carries the chosen SubPlan (no AlternativeSubPlan survives setrefs)");
+    assert!(chosen == 1 || chosen == 2, "plan_id {chosen}");
+    let loser = 3 - chosen;
+    assert!(
+        stmt.subplans.nth((chosen - 1) as usize).is_some(),
+        "the chosen member stays in PlannedStmt.subplans"
+    );
+    assert!(
+        stmt.subplans.nth((loser - 1) as usize).is_none(),
+        "setrefs.c:379 NULLs the unchosen AlternativeSubPlan member out of glob->subplans"
+    );
+}
+
 // audit-18.6 remediation batch w2-030 (optimizer/util): unit witnesses.
 mod audit_w2_030 {
     use super::*;

@@ -14,8 +14,19 @@ const PROCOID: i32 = 47;
 // cache_syscache TYPEOID: record_plan_type_dependency's cache (setrefs.c:3608).
 const TYPEOID: i32 = cache_syscache::cacheinfo::TYPEOID;
 
-// No AlternativeSubPlans.
+// set_plan_references (setrefs.c:280-384).
 pub fn set_plan_references<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>) -> PgResult<Node<'mcx>> {
+    Ok(set_plan_references_opt(run, Some(plan))?.expect("set_plan_refs of a plan is a plan"))
+}
+
+// set_plan_references over a glob->subplans cell: a cell an earlier level
+// NULLed out (an unchosen AlternativeSubPlan member) still contributes its
+// subroot's RTEs, AppendRelInfos and PlanRowMarks to the flat lists, and
+// set_plan_refs of NULL is NULL (setrefs.c:623).
+pub(crate) fn set_plan_references_opt<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    plan: Option<Node<'mcx>>,
+) -> PgResult<Option<Node<'mcx>>> {
     let mcx = run.mcx;
     let rtoffset = run.glob.finalrtable.len() as i32;
     add_rtes_to_flat_rtable(run)?;
@@ -43,7 +54,32 @@ pub fn set_plan_references<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>) -
         rc.prti += rtoffset as u32;
         run.glob.finalrowmarks.lappend(mcx, Node::mk(mcx, rc)?)?;
     }
-    set_plan_refs(run, plan, rtoffset)
+    // Workspace for processing AlternativeSubPlans (setrefs.c:348-354):
+    // one flag per glob->subplans cell, both palloc0'd per level.
+    if run.root.hasAlternativeSubPlans {
+        let n = run.glob.subplans.len();
+        run.root.isAltSubplan.clear();
+        run.root.isAltSubplan.resize(n, false);
+        run.root.isUsedSubplan.clear();
+        run.root.isUsedSubplan.resize(n, false);
+    }
+    let result = match plan {
+        Some(plan) => Some(set_plan_refs(run, plan, rtoffset)?),
+        None => None,
+    };
+    // Subplans that some AlternativeSubPlan of this level referenced but no
+    // AlternativeSubPlan selected are dead: NULL their glob->subplans cells
+    // so nothing spends cycles on them later (setrefs.c:367-382). Not done
+    // per AlternativeSubPlan because copies of one may resolve differently.
+    if run.root.hasAlternativeSubPlans {
+        let cells = run.glob.subplans.as_mut_slice();
+        for (ndx, cell) in cells.iter_mut().enumerate() {
+            if run.root.isAltSubplan[ndx] && !run.root.isUsedSubplan[ndx] {
+                *cell = None;
+            }
+        }
+    }
+    Ok(result)
 }
 
 // Top-level flat copy with sub-structure zapped; alias/eref stay by ref.
@@ -3794,16 +3830,15 @@ fn fix_scan_expr_walker<'mcx>(run: &mut PlannerRun<'mcx>, node: Node<'mcx>) -> P
     }
 }
 
-// fix_alternative_subplan (setrefs.c): keep the cheapest member for the
-// expected execution count. Divergence: C NULLs the losers out of
-// glob->subplans so the executor never initializes them; here they stay
-// (initialized but never executed or displayed).
+// fix_alternative_subplan (setrefs.c:2156-2191): keep the cheapest member
+// for the expected execution count, marking every member as part of an
+// AlternativeSubPlan and the winner as used; set_plan_references NULLs the
+// marked-but-unused members out of glob->subplans afterwards.
 fn fix_alternative_subplan<'mcx>(
     run: &mut PlannerRun<'mcx>,
     asplan: &'mcx types_nodes::primnodes::AlternativeSubPlan<'mcx>,
     num_exec: f64,
 ) -> Node<'mcx> {
-    let _ = run;
     let mut best: Option<(Node<'mcx>, f64)> = None;
     for sub_node in &asplan.subplans {
         let sp = sub_node.as_sub_plan().expect("AlternativeSubPlan member");
@@ -3812,8 +3847,14 @@ fn fix_alternative_subplan<'mcx>(
         if best.as_ref().is_none_or(|(_, c)| curcost <= *c) {
             best = Some((sub_node, curcost));
         }
+        // Also mark all subplans that are in AlternativeSubPlans.
+        run.root.isAltSubplan[(sp.plan_id - 1) as usize] = true;
     }
-    best.expect("AlternativeSubPlan has members").0
+    let (best, _) = best.expect("AlternativeSubPlan has members");
+    // Mark the subplan we selected.
+    let bp = best.as_sub_plan().expect("AlternativeSubPlan member");
+    run.root.isUsedSubplan[(bp.plan_id - 1) as usize] = true;
+    best
 }
 
 // set_opfuncid (nodeFuncs.c): get_switched_clauses hands over commuted

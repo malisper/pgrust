@@ -866,9 +866,10 @@ fn process_sublinks_mutator<'mcx>(
         };
         return Ok(Some(make_subplan(run, sl, testexpr, is_top_qual)?));
     }
-    // Don't recurse into the arguments of an outer PHV, Aggref or
-    // GroupingFunc: any SubLinks there belong to the outer query level and
-    // are processed when build_subplan collects the node into subplan args.
+    // Don't recurse into the arguments of an outer PHV, Aggref,
+    // GroupingFunc or ReturningExpr: any SubLinks there belong to the outer
+    // query level and are processed when build_subplan collects the node
+    // into subplan args.
     if let Some(phv) = node.as_place_holder_var() {
         if phv.phlevelsup > 0 {
             return Ok(None);
@@ -881,6 +882,13 @@ fn process_sublinks_mutator<'mcx>(
     }
     if let Some(g) = node.as_grouping_func() {
         if g.agglevelsup > 0 {
+            return Ok(None);
+        }
+    }
+    // Likewise an outer ReturningExpr (subselect.c:2091-2095): its retexpr
+    // belongs to the outer query level.
+    if let Some(r) = node.as_returning_expr() {
+        if r.retlevelsup > 0 {
             return Ok(None);
         }
     }
@@ -1439,7 +1447,7 @@ fn build_subplan<'mcx>(
     if subroot_idx + 1 != run.subroots.len() {
         run.subroots[subroot_idx..].rotate_left(1);
     }
-    run.glob.subplans.lappend(mcx, plan)?;
+    run.glob.subplans.lappend(mcx, Some(plan))?;
     let plan_id = run.glob.subplans.len() as i32;
     // Ancestors' parked subroots may still be in flight (nested build_subplan
     // via the args loop); their rotations restore index alignment on return.
@@ -1845,10 +1853,10 @@ pub(crate) fn query_cells_copy<'mcx>(mcx: Mcx<'mcx>, q: &Query<'mcx>) -> PgResul
     })
 }
 
-/// SS_replace_correlation_vars (subselect.c): uplevel Vars/PHVs/Aggrefs/
-/// GroupingFuncs/MergeSupportFuncs become PARAM_EXEC Params, parked on the
-/// owning ancestor's plan_params. ReturningExpr nodes don't exist in this
-/// tree.
+/// SS_replace_correlation_vars (subselect.c:1973-2002): uplevel Vars/PHVs/
+/// Aggrefs/GroupingFuncs/MergeSupportFuncs/ReturningExprs become PARAM_EXEC
+/// Params, parked on the owning ancestor's plan_params. Runs immediately
+/// after SS_process_sublinks (planner.c:1365-1374).
 pub fn ss_replace_correlation_vars<'mcx>(
     run: &mut PlannerRun<'mcx>,
     expr: Node<'mcx>,
@@ -2012,7 +2020,8 @@ fn finalize_plan<'mcx>(
         let initplan = run
             .glob
             .subplans
-            .nth((sp.plan_id - 1) as usize);
+            .nth((sp.plan_id - 1) as usize)
+            .expect("subplan cells are live until set_plan_references");
         init_ext_param.add_members(mcx, &initplan.as_plan().expect("plan node").extParam)?;
         for id in sp.setParam.iter() {
             init_set_param.add_member(mcx, id)?;
@@ -2130,7 +2139,11 @@ fn finalize_plan<'mcx>(
                 plan_id >= 1 && plan_id as usize <= run.glob.subplans.len(),
                 "could not find plan for CteScan referencing plan ID {plan_id}"
             );
-            let cteplan = run.glob.subplans.nth((plan_id - 1) as usize);
+            let cteplan = run
+                .glob
+                .subplans
+                .nth((plan_id - 1) as usize)
+                .expect("subplan cells are live until set_plan_references");
             paramids.add_members(mcx, &cteplan.as_plan().expect("plan node").extParam)?;
             paramids.add_members(mcx, scan_params)?;
         }
@@ -2425,7 +2438,12 @@ impl<'a, 'mcx> clauses::NodeWalker<'mcx> for FinalizePrimnode<'a, 'mcx> {
             }
         }
         if let Some(sp) = node.as_sub_plan() {
-            let plan = self.run.glob.subplans.nth((sp.plan_id - 1) as usize);
+            let plan = self
+                .run
+                .glob
+                .subplans
+                .nth((sp.plan_id - 1) as usize)
+                .expect("subplan cells are live until set_plan_references");
             if let Some(te) = sp.testexpr {
                 self.visit(te)?;
             }
@@ -2509,7 +2527,7 @@ pub(crate) fn ss_make_initplan_from_plan<'mcx>(
     prm_id: types_pathnodes::NodeId,
 ) -> PgResult<()> {
     let mcx = run.mcx;
-    run.glob.subplans.lappend(mcx, plan)?;
+    run.glob.subplans.lappend(mcx, Some(plan))?;
     run.subroots.push(subroot);
     // >= not ==: ancestors' parked subroots may be in flight (build_subplan).
     debug_assert!(run.subroots.len() >= run.glob.subplans.len());
