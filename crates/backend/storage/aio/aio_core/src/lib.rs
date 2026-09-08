@@ -57,11 +57,15 @@ pub use target::{pgaio_io_get_target_data, pgaio_io_set_target_smgr, pgaio_io_ta
 
 pub const IO_METHOD_OPTIONS: &[config_enum_entry] = &[
     // io_uring stays unlisted until inc-2 (C compile-gates it the same way on
+    // a build without liburing: aio.c:64-70 `#ifdef IOMETHOD_IO_URING_ENABLED`).
+    // Ratified: docs/design/carve-ratifications.md §5 (audit-18.6 w2-035).
     config_enum_entry { name: "sync", val: IOMETHOD_SYNC, hidden: false },
     config_enum_entry { name: "worker", val: IOMETHOD_WORKER, hidden: false },
 ];
 
-// Boot default diverges from C (DEFAULT_IO_METHOD = worker) until the worker
+// Boot default diverges from C (DEFAULT_IO_METHOD = worker, aio.h:42 /
+// aio.c:74) until the worker flip letter; part of the same §5 ruling
+// (docs/design/carve-ratifications.md, audit-18.6 w2-035).
 static IO_METHOD: AtomicI32 = AtomicI32::new(IOMETHOD_SYNC);
 static IO_WORKERS: AtomicI32 = AtomicI32::new(3);
 static IO_MAX_CONCURRENCY: AtomicI32 = AtomicI32::new(-1);
@@ -530,6 +534,7 @@ fn assign_io_method(newval: i32, _extra: Option<&GucHookExtra>) {
 
 // pgrust-only: C compile-gates unavailable methods out of io_method_options;
 // here unported methods are refused at the GUC gate instead (inert-fixes
+// item 1; docs/design/carve-ratifications.md §5 guard site).
 fn check_io_method(
     newval: &mut i32,
     _extra: &mut Option<GucHookExtra>,
