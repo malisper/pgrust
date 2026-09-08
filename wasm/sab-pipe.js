@@ -46,6 +46,32 @@
 // on its own traffic and nothing else. Sharing one across sessions would be
 // correct and would also wake every idle backend on every other session's
 // byte. Pipes without a gate behave exactly as before.
+//
+// THE HOST GATE (optional, and a different problem). The gate above serves a
+// BLOCKING waiter. The agent that drives several pipes at once cannot block —
+// it uses `readAsync`, which parks in `Atomics.waitAsync` — and on WebKit an
+// agent holding TWO OR MORE outstanding `Atomics.waitAsync` while its run loop
+// is otherwise idle intermittently stops running altogether for about a
+// second: not the wait, the whole agent. Its timers stop firing, its incoming
+// messages are not delivered, and the wait's own timeout does not end it. One
+// outstanding waiter never does this (measured, Safari 26.6.2 / macOS 26.6.2:
+// four pipes pumped with a waiter each, ~1 freeze per 500 round trips; the
+// same work behind one waiter, none in 6000).
+//
+// So a host that pumps several pipes gives them all ONE host gate — a second
+// shared word, bumped by `_bump` alongside SEQ and the group gate, that only
+// the host ever waits on. `readAsync` then parks every pipe of that host on a
+// SINGLE `Atomics.waitAsync` (`_awaitHostGate` keeps exactly one alive per
+// gate) and re-tests each pipe on every wake, exactly as a `poll(2)` caller
+// re-tests its fds. It is per HOST AGENT, not per session: waking one pipe's
+// reader for another pipe's byte costs a re-test, and the reader is the one
+// agent that cannot afford to be asleep. A guest never waits on it, so no
+// backend is woken by a foreign session.
+
+// How long one `readAsync` park lasts before the caller re-tests anyway. The
+// protocol has no missed-wakeup window — the wait word is read before the
+// readiness test — so this is a heartbeat, not a correctness bound.
+const HOST_GATE_WAIT_MS = 50;
 
 const HDR_I32 = 4;
 const H_READ = 0;
@@ -54,6 +80,11 @@ const H_CLOSED = 2;
 const H_SEQ = 3;
 
 export class SabPipe {
+  // gate SharedArrayBuffer -> { seq, promise } for the one live host-gate wait
+  // of THIS agent. A Map, not a WeakMap: an entry lives only between a park
+  // and its wakeup, and is deleted by the wait's own continuation.
+  static _hostGateWaits = new Map();
+
   // A gate for a group of pipes: one shared futex word, bumped by every pipe
   // that holds it. Structured-cloneable (a SharedArrayBuffer clones by
   // reference), so it travels in `descriptor()` like the ring itself.
@@ -61,22 +92,30 @@ export class SabPipe {
     return new SharedArrayBuffer(4);
   }
 
+  // The HOST GATE's word, same shape as a group gate and a different role:
+  // one per pumping AGENT rather than one per session (see THE HOST GATE).
+  static createHostGate() {
+    return new SharedArrayBuffer(4);
+  }
+
   // capacity must be a power of two. `gate` is an optional SharedArrayBuffer
-  // from `createGate()`, shared with the other pipes of the same group.
-  static create(capacity = 1 << 20, { gate = null } = {}) {
+  // from `createGate()`, shared with the other pipes of the same group;
+  // `hostGate` is an optional one from `createHostGate()`, shared with every
+  // other pipe the same non-blocking host pumps.
+  static create(capacity = 1 << 20, { gate = null, hostGate = null } = {}) {
     if ((capacity & (capacity - 1)) !== 0) {
       throw new Error(`SabPipe capacity must be a power of two, got ${capacity}`);
     }
     const sab = new SharedArrayBuffer(HDR_I32 * 4 + capacity);
-    return new SabPipe(sab, capacity, gate);
+    return new SabPipe(sab, capacity, gate, hostGate);
   }
 
   // Rehydrate the same pipe in another agent from the transferred descriptor.
   static from(desc) {
-    return new SabPipe(desc.sab, desc.capacity, desc.gate || null);
+    return new SabPipe(desc.sab, desc.capacity, desc.gate || null, desc.hostGate || null);
   }
 
-  constructor(sab, capacity, gate = null) {
+  constructor(sab, capacity, gate = null, hostGate = null) {
     this.sab = sab;
     this.capacity = capacity;
     this.mask = capacity - 1;
@@ -85,11 +124,13 @@ export class SabPipe {
     // Both the raw SAB (to hand on) and the view (to bump).
     this.gateSab = gate;
     this.gate = gate ? new Int32Array(gate) : null;
+    this.hostGateSab = hostGate;
+    this.hostGate = hostGate ? new Int32Array(hostGate) : null;
   }
 
   // Structured-cloneable handle (SharedArrayBuffer is cloned by reference).
   descriptor() {
-    return { sab: this.sab, capacity: this.capacity, gate: this.gateSab };
+    return { sab: this.sab, capacity: this.capacity, gate: this.gateSab, hostGate: this.hostGateSab };
   }
 
   // The group's futex word, or null. Two pipes are in the same group iff
@@ -118,6 +159,13 @@ export class SabPipe {
     if (this.gate) {
       Atomics.add(this.gate, 0, 1);
       Atomics.notify(this.gate, 0);
+    }
+    // The host gate LAST: a host woken by it re-reads state both words above
+    // have already published. Notifying a word nobody waits on is a load and
+    // a branch, which is what it costs on the guest side.
+    if (this.hostGate) {
+      Atomics.add(this.hostGate, 0, 1);
+      Atomics.notify(this.hostGate, 0);
     }
   }
 
@@ -248,20 +296,54 @@ export class SabPipe {
   }
 
   // Consumer side for an agent that MUST NOT block (the Node/browser main
-  // thread driving the pipes). Resolves with the byte count (0 = EOF).
-  // Atomics.waitAsync where available; a 1ms poll otherwise.
+  // thread, or the worker driving several sessions). Resolves with the byte
+  // count (0 = EOF). Atomics.waitAsync where available; a 1ms poll otherwise.
+  //
+  // The wait word is the HOST GATE when the pipe has one, so that an agent
+  // pumping N pipes holds ONE outstanding async waiter rather than N (see THE
+  // HOST GATE); otherwise it is this pipe's own SEQ, exactly as before.
+  //
+  // Either way the word is read BEFORE the readiness test, so a byte landing
+  // in the window between the two makes the wait return at once instead of
+  // sleeping through its own wakeup.
   async readAsync(u8, maxLen) {
     for (;;) {
+      const gate = this.hostGate;
+      const observed = gate ? Atomics.load(gate, 0) : Atomics.load(this.hdr, H_SEQ);
       const n = this.readIntoNow(u8, maxLen);
       if (n >= 0) return n;
-      const seq = Atomics.load(this.hdr, H_SEQ);
-      if (typeof Atomics.waitAsync === 'function') {
-        const res = Atomics.waitAsync(this.hdr, H_SEQ, seq, 50);
-        if (res.async) await res.value;
-      } else {
+      if (typeof Atomics.waitAsync !== 'function') {
         await new Promise((r) => setTimeout(r, 1));
+      } else if (gate) {
+        await SabPipe._awaitHostGate(this.hostGateSab, gate, observed, HOST_GATE_WAIT_MS);
+      } else {
+        const res = Atomics.waitAsync(this.hdr, H_SEQ, observed, HOST_GATE_WAIT_MS);
+        if (res.async) await res.value;
       }
     }
+  }
+
+  // The ONE live `Atomics.waitAsync` on a host gate, shared by every pipe of
+  // that host. Keyed by the gate's SharedArrayBuffer, which is the identity
+  // the pipes were built from; the entry is dropped the moment the wait
+  // settles, so the next park mints a fresh one.
+  //
+  // `observed` is what the caller read from the gate BEFORE it tested its own
+  // pipe. A live wait that was armed on a LATER value means the gate moved in
+  // between, so the caller must re-test now rather than join a wait for a
+  // wakeup it has already been given.
+  static _awaitHostGate(gateSab, gate, observed, timeoutMs) {
+    const live = SabPipe._hostGateWaits.get(gateSab);
+    if (live !== undefined) return live.seq > observed ? Promise.resolve() : live.promise;
+    if (Atomics.load(gate, 0) !== observed) return Promise.resolve();
+    const res = Atomics.waitAsync(gate, 0, observed, timeoutMs);
+    if (!res.async) return Promise.resolve();
+    const entry = { seq: observed };
+    entry.promise = res.value.then(() => {
+      SabPipe._hostGateWaits.delete(gateSab);
+    });
+    SabPipe._hostGateWaits.set(gateSab, entry);
+    return entry.promise;
   }
 
   // Convenience: one chunk out of the pipe, or null at EOF.
