@@ -209,9 +209,10 @@ pub fn jsonb_recv<'mcx>(
     let version = pqformat::pq_getmsgint(buf, 1)?;
     if version != 1 {
         // C elog(ERROR): XX000, client-reachable via binary input.
-        return Err(Box::new(PgError::error(format!(
-            "unsupported jsonb version number {version}"
-        ))));
+        return Err(Box::new(
+            PgError::error(format!("unsupported jsonb version number {version}"))
+                .with_funcname("jsonb_recv"),
+        ));
     }
     let rawbytes = buf.len().saturating_sub(buf.cursor);
     let str = pqformat::pq_getmsgtext(mcx, buf, rawbytes)?;

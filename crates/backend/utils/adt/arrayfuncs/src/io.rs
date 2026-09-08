@@ -813,7 +813,8 @@ pub fn array_recv<'mcx>(
     if ndim < 0 {
         return Err(Box::new(
             PgError::error(alloc::format!("invalid number of dimensions: {ndim}"))
-                .with_sqlstate(ERRCODE_INVALID_BINARY_REPRESENTATION),
+                .with_sqlstate(ERRCODE_INVALID_BINARY_REPRESENTATION)
+                .with_funcname("array_recv"),
         ));
     }
     if ndim as usize > MAXDIM {
@@ -821,13 +822,16 @@ pub fn array_recv<'mcx>(
             PgError::error(alloc::format!(
                 "number of array dimensions ({ndim}) exceeds the maximum allowed ({MAXDIM})"
             ))
-            .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+            .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+            .with_funcname("array_recv"),
         ));
     }
     let flags = ::pqformat::pq_getmsgint(buf, 4)?;
     if flags != 0 && flags != 1 {
         return Err(Box::new(
-            PgError::error("invalid array flags").with_sqlstate(ERRCODE_INVALID_BINARY_REPRESENTATION),
+            PgError::error("invalid array flags")
+                .with_sqlstate(ERRCODE_INVALID_BINARY_REPRESENTATION)
+                .with_funcname("array_recv"),
         ));
     }
     // Check element type recorded in the data.
@@ -864,7 +868,8 @@ pub fn array_recv<'mcx>(
                 )?
                 .expect("no FORMAT_TYPE_INVALID_AS_NULL"),
             ))
-            .with_sqlstate(::types_error::ERRCODE_DATATYPE_MISMATCH),
+            .with_sqlstate(::types_error::ERRCODE_DATATYPE_MISMATCH)
+            .with_funcname("array_recv"),
         ));
     }
     let mut dim = [0i32; MAXDIM];

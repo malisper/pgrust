@@ -142,10 +142,12 @@ fn DropErrorMsgNonExistent(rel: &RangeVar<'_>, rightkind: u8, missing_ok: bool) 
                         .with_sqlstate(types_error::ERRCODE_UNDEFINED_SCHEMA),
                 ));
             }
-            elog_seams::ereport_msg::call(
-                NOTICE,
-                format!("schema \"{schemaname}\" does not exist, skipping"),
-                None,
+            elog_seams::ereport::call(
+                PgError::new(
+                    NOTICE,
+                    format!("schema \"{schemaname}\" does not exist, skipping"),
+                )
+                .with_funcname("DropErrorMsgNonExistent"),
             )?;
             return Ok(());
         }
@@ -159,10 +161,12 @@ fn DropErrorMsgNonExistent(rel: &RangeVar<'_>, rightkind: u8, missing_ok: bool) 
                 .with_sqlstate(rentry.nonexistent_code),
         ));
     }
-    elog_seams::ereport_msg::call(
-        NOTICE,
-        format!("{noun} \"{relname}\" does not exist, skipping"),
-        None,
+    elog_seams::ereport::call(
+        PgError::new(
+            NOTICE,
+            format!("{noun} \"{relname}\" does not exist, skipping"),
+        )
+        .with_funcname("DropErrorMsgNonExistent"),
     )?;
     Ok(())
 }

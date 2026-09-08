@@ -1206,7 +1206,8 @@ fn report_invalid_encoding_int(
             enc_name(encoding),
             byte_sequence(mbstr, mblen, len)
         ))
-        .with_sqlstate(ERRCODE_CHARACTER_NOT_IN_REPERTOIRE),
+        .with_sqlstate(ERRCODE_CHARACTER_NOT_IN_REPERTOIRE)
+        .with_funcname("report_invalid_encoding_int"),
     )
 }
 

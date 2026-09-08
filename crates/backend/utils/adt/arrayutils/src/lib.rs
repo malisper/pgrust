@@ -27,6 +27,7 @@ fn array_size_exceeded() -> PgError {
         MAX_ARRAY_SIZE
     ))
     .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+    .with_funcname("ArrayGetNItemsSafe")
 }
 
 // Same text/sqlstate C raises for an over-MAXDIM ndim on the wire
