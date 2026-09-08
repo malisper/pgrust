@@ -152,9 +152,8 @@ fn inet_cidr_pton_ipv4(src: &[u8], dst: &mut [u8; 16], size: usize) -> Option<i3
         si += 1;
         bits = 0;
         loop {
-            // C accumulates over int and only checks >32 post-loop; saturate
-            // instead of overflowing (same rejections).
-            bits = bits.saturating_mul(10).saturating_add(ch - b'0' as i32);
+            // C checks the width after signed wrapping accumulation (-fwrapv).
+            bits = bits.wrapping_mul(10).wrapping_add(ch - b'0' as i32);
             ch = at(src, si);
             si += 1;
             if !(ch != 0 && is_digit(ch)) {
@@ -253,7 +252,7 @@ fn inet_net_pton_ipv4(src: &[u8], dst: &mut [u8; 16]) -> Option<i32> {
         si += 1;
         bits = 0;
         loop {
-            bits = bits.saturating_mul(10).saturating_add(ch - b'0' as i32);
+            bits = bits.wrapping_mul(10).wrapping_add(ch - b'0' as i32);
             ch = at(src, si);
             si += 1;
             if !(ch != 0 && is_digit(ch)) {

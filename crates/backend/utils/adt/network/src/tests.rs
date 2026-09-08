@@ -193,6 +193,36 @@ fn differential_corpus_vs_live_pg() {
 }
 
 #[test]
+fn cidr_width_wraps_like_c() {
+    for (input, is_cidr, expected) in [
+        ("1.2.3.4/4294967296", false, "1.2.3.4/0"),
+        ("1.2.3.4/4294967320", false, "1.2.3.4/24"),
+        ("1.2.3.4/4294967297", false, "1.2.3.4/1"),
+        ("0.0.0.0/4294967296", true, "0.0.0.0/0"),
+        ("1.2.3.0/4294967320", true, "1.2.3.0/24"),
+        ("1.2.3.4/4294967295", false, "1.2.3.4"),
+        ("10/4294967295", true, "10.0.0.0/8"),
+        ("0x0a/4294967295", true, "10.0.0.0/8"),
+        ("224/4294967295", true, "224.0.0.0/4"),
+    ] {
+        assert_eq!(out(&parse(input, is_cidr).unwrap(), is_cidr), expected, "{input}");
+    }
+    for (input, is_cidr) in [
+        ("1.2.3.4/33", false),
+        ("1.2.3/4294967295", false),
+        ("::1/4294967296", false),
+        ("::/4294967296", true),
+        ("1.2.3.4/2147483648", false),
+        ("1.2.3.4/4294967294", false),
+        ("1.2.3.4/4294967296", true),
+        ("0.0.0.0/2147483648", true),
+    ] {
+        let err = parse(input, is_cidr).unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_TEXT_REPRESENTATION, "{input}");
+    }
+}
+
+#[test]
 fn soft_error_lane() {
     let mut soft = SoftErrorContext::new(true);
     assert!(network_in("junk", false, Some(&mut soft)).unwrap().is_none());

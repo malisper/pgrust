@@ -193,7 +193,7 @@ pub fn network_in(
     let size: isize = if is_cidr { dst.addrsize() as isize } else { -1 };
     let maxbits = dst.maxbits() as i32;
     let bits = match pton::pg_inet_net_pton(family as i32, src.as_bytes(), &mut dst.ipaddr, size) {
-        Some(b) if b <= maxbits => b,
+        Some(b) if (0..=maxbits).contains(&b) => b,
         _ => return ereturn(escontext, None, invalid_input_err(is_cidr, src)),
     };
 
