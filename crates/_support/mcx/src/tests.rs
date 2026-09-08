@@ -1721,3 +1721,22 @@ fn aset_stats_walk_blocks_and_freelists() {
     assert_eq!(t.free_bytes, aset::INIT_BLOCK_SIZE, "the keeper is entirely free");
     assert_eq!(t.free_chunks, 0, "AllocSetReset empties the freelists");
 }
+
+#[test]
+fn aset_stats_footprint_includes_freed_blocks_and_reset_keeper() {
+    let mut ctx = MemoryContext::new("stats-retained");
+    let buffers: std::vec::Vec<_> = (0..200)
+        .map(|_| vec_with_capacity_in::<u8>(ctx.mcx(), 100).unwrap())
+        .collect();
+    let allocated = ctx.stats_tree().arena_footprint;
+    assert!(allocated > ctx.used());
+    assert_eq!(ctx.stats().arena_footprint, allocated);
+    drop(buffers);
+    assert_eq!(ctx.used(), 0);
+    assert_eq!(ctx.stats().arena_footprint, allocated);
+    ctx.reset();
+    let keeper = ctx.stats_tree().arena_footprint;
+    assert!(keeper > 0 && keeper < allocated);
+    assert_eq!(ctx.stats().arena_footprint, keeper);
+    assert_eq!(ctx.used(), 0);
+}

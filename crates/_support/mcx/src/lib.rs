@@ -1475,7 +1475,8 @@ impl MemoryContext {
             subtree_peak: self.acct.subtree_peak_sum(),
             limit: self.acct.limit.get(),
             arena_footprint: match &self.backend {
-                Backend::Aset(_) | Backend::Malloc => self.acct.self_used.get(),
+                Backend::Aset(_) => self.acct.arena_footprint.get(),
+                Backend::Malloc => self.acct.self_used.get(),
                 Backend::Bump(a) | Backend::BumpDrop(a, _) | Backend::BumpForget(a) => {
                     // SAFETY: single-statement borrow, never re-entered (as aset_mut).
                     unsafe { &*a.get() }.footprint()

@@ -428,3 +428,17 @@ fn test_shared_tree_threads() {
         assert_eq!(tree.num_keys(), 0);
     }
 }
+
+#[test]
+fn memory_usage_keeps_freed_leaf_blocks() {
+    let ctx = test_ctx();
+    let mut tree: RadixTree<Big> = RadixTree::create(&ctx).unwrap();
+    tree.set(1, &Big([1, 2, 3])).unwrap();
+    let leaf_blocks = tree.store.leaf_ctx.stats_tree().arena_footprint;
+    assert!(leaf_blocks > size_of::<Big>());
+    assert!(tree.delete(1));
+    assert_eq!(tree.store.leaf_ctx.used(), 0);
+    let slab_blocks: usize = tree.store.node_slabs.iter()
+        .map(|slab| slab.stats_tree().arena_footprint).sum();
+    assert_eq!(tree.memory_usage(), (leaf_blocks + slab_blocks) as u64);
+}
