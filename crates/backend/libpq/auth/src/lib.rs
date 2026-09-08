@@ -3,7 +3,7 @@
 //! (RFC 1413 ident_inet), cert (CheckCertAuth, hostssl-only), the password
 //! family — password / md5 / scram-sha-256 via CheckPWChallengeAuth +
 //! CheckSASLAuth — plus ldap (in-tree LDAPv3 client, simple bind and
-//! search+bind; no TLS/SRV), radius (RFC 2865 over UDP), oauth
+//! search+bind, ldaps / StartTLS, DNS SRV discovery), radius (RFC 2865 over UDP), oauth
 //! (OAUTHBEARER via CheckSASLAuth + auth_oauth), pam (CheckPAMAuth over
 //! dlopened libpam), and gss (pg_GSS_recvauth over the system GSSAPI
 //! library; authentication only, no gssencmode). sspi / bsd never reach
@@ -14,9 +14,13 @@
 #![allow(clippy::result_large_err)]
 
 #[cfg(not(target_family = "wasm"))]
+mod dnssrv;
+#[cfg(not(target_family = "wasm"))]
 mod ldap;
 #[cfg(not(target_family = "wasm"))]
 mod ldapber;
+#[cfg(not(target_family = "wasm"))]
+mod ldapconf;
 #[cfg(not(target_family = "wasm"))]
 mod radius;
 mod gss;

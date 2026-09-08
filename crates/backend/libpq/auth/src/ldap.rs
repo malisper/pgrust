@@ -1,17 +1,19 @@
 //! auth.c LDAP arms: InitializeLDAPConnection / CheckLDAPAuth (simple bind
 //! and search+bind modes), backed by ldapber's in-tree LDAPv3 client instead
-//! of libldap. Feature surface mirrors an OpenLDAP build minus TLS and DNS
-//! SRV: `ldaps` and `ldaptls` fail cleanly at connection setup with
-//! ldap_err2string(-12) "Not Supported", and the empty-ldapserver DNS SRV
-//! path fails with C's could-not-find-SRV-records message after a C-exact
-//! ldap_dn2domain extraction.
+//! of libldap. Feature surface mirrors an OpenLDAP (HAVE_LDAP_INITIALIZE)
+//! build: `ldap://` and `ldaps://` URI lists, the empty-ldapserver DNS SRV
+//! discovery (ldap_dn2domain + ldap_domain2hostlist, dnssrv), `ldaptls`
+//! via ldap_start_tls_s, the client TLS policy from libldap's ldap.conf /
+//! LDAP* environment (ldapconf).
 
 use elog::ereport;
 use hba::ldapurl::ldap_err2string;
 use types_error::{PgResult, LOG};
 use types_startup::{HbaLine, Port};
 
+use crate::dnssrv::{ldap_dn2domain, ldap_domain2hostlist, ResolvConf, LDAP_PARAM_ERROR};
 use crate::ldapber::{parse_search_filter, LdapConn, LDAP_FILTER_ERROR, LDAP_SUCCESS};
+use crate::ldapconf::LdapOptions;
 use crate::{
     loc, recv_password_packet, sendAuthRequest, set_authn_id, AUTH_REQ_PASSWORD, STATUS_EOF,
     STATUS_ERROR, STATUS_OK,
@@ -23,25 +25,13 @@ const LDAP_NO_ATTRS: &str = "1.1";
 
 const LPH_USERNAME: &str = "$username";
 
-// ldap_dn2domain: ou=blah,dc=foo,dc=bar -> foo.bar. Non-empty non-DN input
-// (no '=' in a component) is a parse failure, C's "could not extract domain
-// name from ldapbasedn" arm.
-fn ldap_dn2domain(dn: &str) -> Result<String, ()> {
-    let mut parts: Vec<&str> = Vec::new();
-    for rdn in dn.split(',') {
-        let rdn = rdn.trim();
-        if rdn.is_empty() {
-            continue;
-        }
-        let Some((attr, val)) = rdn.split_once('=') else {
-            return Err(());
-        };
-        if attr.trim().eq_ignore_ascii_case("dc") {
-            parts.push(val.trim());
-        }
-    }
-    Ok(parts.join("."))
-}
+// Test seam for the DNS SRV path (auth.c:2275 ldap_domain2hostlist): the
+// nameservers the SRV lookup consults instead of /etc/resolv.conf. C's
+// libresolv has no such override — a unit witness needs one to point the
+// lookup at an in-process fake. Test-only, absent from production builds.
+#[cfg(test)]
+pub(crate) static SRV_NAMESERVERS: pgsync::Mutex<Option<Vec<std::net::SocketAddr>>> =
+    pgsync::Mutex::new(None);
 
 fn format_search_filter(pattern: &str, user_name: &str) -> String {
     pattern.replace(LPH_USERNAME, user_name)
@@ -55,23 +45,18 @@ fn errdetail_for_ldap(b: elog::ErrorBuilder, conn: &LdapConn) -> elog::ErrorBuil
     }
 }
 
-// InitializeLDAPConnection (auth.c:2217): resolve the target host list and
-// scheme into an unconnected LdapConn (like ldap_initialize, the TCP connect
-// happens at the first operation). STATUS_ERROR arms log their own message.
+// InitializeLDAPConnection (auth.c:2217-2386): the target URI list — the
+// pg_hba.conf hosts with the configured port, or the DNS SRV targets of the
+// base DN's domain with their own ports (auth.c:2258-2290) — under the
+// configured scheme, then the protocol version and the optional StartTLS.
+// STATUS_ERROR arms log their own message.
 fn initialize_ldap_connection(port: &Port, hba: &HbaLine) -> PgResult<Result<LdapConn, ()>> {
     let _ = port;
     let scheme = hba.ldapscheme.as_deref().unwrap_or("ldap");
 
-    if scheme == "ldaps" {
-        // In-tree client has no TLS; C's OpenLDAP build would connect.
-        ereport(LOG)
-            .errmsg(format!(
-                "could not initialize LDAP: {}",
-                ldap_err2string(-12)
-            ))
-            .finish(loc(2330, "InitializeLDAPConnection"))?;
-        return Ok(Err(()));
-    }
+    // ldap_int_initialize: the libldap global options a fresh backend
+    // reads at its first libldap call (ldap.conf, ldaprc, LDAP* env).
+    let opts = LdapOptions::initialize();
 
     let hosts: Vec<(String, i32)> = match &hba.ldapserver {
         Some(s) if !s.is_empty() => s
@@ -80,40 +65,63 @@ fn initialize_ldap_connection(port: &Port, hba: &HbaLine) -> PgResult<Result<Lda
             .map(|h| (h.to_string(), hba.ldapport))
             .collect(),
         _ => {
-            // No hostnames: C asks OpenLDAP for DNS SRV records derived from
-            // the base DN. The extraction is ported; the SRV lookup is not,
-            // so it fails with C's could-not-find message.
+            // No hostnames: extract a domain name from the base DN and look
+            // up DNS SRV records for _ldap._tcp.<domain> (auth.c:2263-2283).
             let basedn = hba.ldapbasedn.as_deref().unwrap_or("");
             let domain = match ldap_dn2domain(basedn) {
                 Ok(d) => d,
                 Err(()) => {
                     ereport(LOG)
                         .errmsg("could not extract domain name from ldapbasedn")
-                        .finish(loc(2268, "InitializeLDAPConnection"))?;
+                        .finish(loc(2271, "InitializeLDAPConnection"))?;
                     return Ok(Err(()));
                 }
             };
-            ereport(LOG)
-                .errmsg(format!(
-                    "LDAP authentication could not find DNS SRV records for \"{domain}\""
-                ))
-                .errhint("Set an LDAP server name explicitly.")
-                .finish(loc(2276, "InitializeLDAPConnection"))?;
-            return Ok(Err(()));
+            // A base DN with no trailing DC run gives libldap a NULL domain,
+            // which C's ldap_domain2hostlist asserts on (dnssrv.c:285); the
+            // could-not-find report below is the non-aborting arm of that.
+            let domain = domain.unwrap_or_default();
+            let list = if domain.is_empty() {
+                Err(LDAP_PARAM_ERROR)
+            } else {
+                ldap_domain2hostlist(&domain, &ResolvConf::system())
+            };
+            match list {
+                Ok(list) => list.into_iter().map(|(h, p)| (h, p as i32)).collect(),
+                Err(_) => {
+                    ereport(LOG)
+                        .errmsg(format!(
+                            "LDAP authentication could not find DNS SRV records for \"{domain}\""
+                        ))
+                        .errhint("Set an LDAP server name explicitly.")
+                        .finish(loc(2279, "InitializeLDAPConnection"))?;
+                    return Ok(Err(()));
+                }
+            }
         }
     };
 
-    let conn = LdapConn::new(hosts);
+    // ldap_initialize(uris) (auth.c:2328): no I/O until the first operation.
+    let mut conn = LdapConn::new(hosts, scheme == "ldaps", opts);
+
+    // ldap_set_option(LDAP_OPT_PROTOCOL_VERSION, LDAPv3) (auth.c:2358):
+    // the in-tree client speaks LDAPv3 only; the call cannot fail.
 
     if hba.ldaptls {
-        // ldap_start_tls_s: no TLS in the in-tree client.
-        ereport(LOG)
-            .errmsg(format!(
-                "could not start LDAP TLS session: {}",
-                ldap_err2string(-12)
-            ))
-            .finish(loc(2380, "InitializeLDAPConnection"))?;
-        return Ok(Err(()));
+        // ldap_start_tls_s (auth.c:2370-2384)
+        let r = conn.start_tls();
+        if r != LDAP_SUCCESS {
+            errdetail_for_ldap(
+                ereport(LOG).errmsg(format!(
+                    "could not start LDAP TLS session: {}",
+                    ldap_err2string(r)
+                )),
+                &conn,
+            )
+            .finish(loc(2377, "InitializeLDAPConnection"))?;
+            conn.unbind();
+            return Ok(Err(()));
+        }
     }
 
     Ok(Ok(conn))
@@ -273,16 +281,6 @@ pub(crate) fn CheckLDAPAuth(port: &mut Port) -> PgResult<i32> {
 #[cfg(all(test, not(target_family = "wasm")))]
 mod ldap_tests {
     use super::*;
-
-    #[test]
-    fn dn2domain_extracts_dc_components() {
-        assert_eq!(
-            ldap_dn2domain("ou=blah,dc=foo,dc=bar").unwrap(),
-            "foo.bar"
-        );
-        assert_eq!(ldap_dn2domain("ou=people,ou=x").unwrap(), "");
-        assert!(ldap_dn2domain("garbage").is_err());
-    }
 
     #[test]
     fn search_filter_placeholder_replacement() {

@@ -39,6 +39,14 @@ types_error = { path = "../../../_support/types/types_error" }
 types_startup = { path = "../../../_support/types/types_startup" }
 walsender_seams = { path = "../../replication/walsender_seams" }
 
+# openssl-src (vendored C) does not compile for wasm32; the LDAP client's
+# TLS (ldaps / StartTLS, the OpenLDAP tls_o.c port in ldapber) lives behind
+# the same cfg as ldapber. Same vendored build be_secure_openssl links.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }
+openssl-sys = "0.9"
+foreign-types = "0.3"
+
 [dev-dependencies]
 acl_seams = { path = "../../utils/adt/acl_seams" }
 fd = { path = "../../storage/file/fd" }

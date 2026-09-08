@@ -1108,3 +1108,729 @@ fn pam_conv_proc_message_styles() {
     };
     assert_eq!(rc, pam_ffi::PAM_CONV_ERR);
 }
+
+// ===========================================================================
+// audit-18.6 w2-022 — LDAP DNS SRV discovery (auth.c:2255-2290:
+// ldap_dn2domain / ldap_domain2hostlist) and LDAP TLS (auth.c:2296-2385:
+// `ldaps` at ldap_initialize, `ldaptls` via ldap_start_tls_s), witnessed
+// against in-process fakes: a DNS server answering `_ldap._tcp.<domain>`
+// SRV queries (UDP, TC -> TCP) and an LDAPv3 server (bind / search /
+// StartTLS / ldaps) built on ldapber's own BER helpers. The expected
+// outcomes are what an OpenLDAP-built C 18.6 produces against the same
+// fakes (message text: auth.c + libldap 2.5 tls2.c / tls_o.c).
+// ===========================================================================
+#[cfg(not(target_family = "wasm"))]
+pub(crate) mod ldap_fakes {
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use openssl::asn1::Asn1Time;
+    use openssl::bn::BigNum;
+    use openssl::hash::MessageDigest;
+    use openssl::pkey::{PKey, Private};
+    use openssl::rsa::Rsa;
+    use openssl::ssl::{SslAcceptor, SslMethod, SslStream};
+    use openssl::x509::extension::{BasicConstraints, SubjectAlternativeName};
+    use openssl::x509::{X509NameBuilder, X509};
+
+    use crate::ldapber::{
+        ber_int, decode_int, tlv, BerReader, TAG_BIND_REQUEST, TAG_BIND_RESPONSE,
+        TAG_ENUMERATED, TAG_INTEGER, TAG_OCTET_STRING, TAG_SEARCH_DONE, TAG_SEARCH_ENTRY,
+        TAG_SEARCH_REQUEST, TAG_SEQUENCE, TAG_UNBIND_REQUEST,
+    };
+
+    pub const STARTTLS_OID: &[u8] = b"1.3.6.1.4.1.1466.20037";
+    const TAG_EXTENDED_REQUEST: u8 = 0x77;
+    const TAG_EXTENDED_RESPONSE: u8 = 0x78;
+
+    // ---------------- DNS ----------------
+
+    pub struct SrvRec {
+        pub priority: u16,
+        pub weight: u16,
+        pub port: u16,
+        pub target: &'static str,
+    }
+
+    /// SRV-only authoritative fake on 127.0.0.1: one UDP socket and one TCP
+    /// listener on the same port. `truncate_udp` answers UDP with TC and no
+    /// records, so only the TCP retry carries the answer.
+    pub struct FakeDns {
+        pub addr: SocketAddr,
+    }
+
+    fn encode_name(name: &str) -> Vec<u8> {
+        let mut v = Vec::new();
+        for label in name.trim_end_matches('.').split('.') {
+            v.push(label.len() as u8);
+            v.extend_from_slice(label.as_bytes());
+        }
+        v.push(0);
+        v
+    }
+
+    fn dns_response(query: &[u8], recs: &[SrvRec], truncate: bool) -> Vec<u8> {
+        let mut p = 12;
+        while query[p] != 0 {
+            p += 1 + query[p] as usize;
+        }
+        let question = &query[12..p + 1 + 4];
+        let mut out = Vec::new();
+        out.extend_from_slice(&query[0..2]);
+        let flags: u16 = if truncate { 0x8380 } else { 0x8180 };
+        out.extend_from_slice(&flags.to_be_bytes());
+        out.extend_from_slice(&1u16.to_be_bytes());
+        let an: u16 = if truncate { 0 } else { recs.len() as u16 };
+        out.extend_from_slice(&an.to_be_bytes());
+        out.extend_from_slice(&0u16.to_be_bytes());
+        out.extend_from_slice(&0u16.to_be_bytes());
+        out.extend_from_slice(question);
+        if !truncate {
+            for r in recs {
+                out.extend_from_slice(&[0xc0, 0x0c]); // name: pointer to the question
+                out.extend_from_slice(&33u16.to_be_bytes()); // SRV
+                out.extend_from_slice(&1u16.to_be_bytes()); // IN
+                out.extend_from_slice(&60u32.to_be_bytes());
+                let target = encode_name(r.target);
+                out.extend_from_slice(&((6 + target.len()) as u16).to_be_bytes());
+                out.extend_from_slice(&r.priority.to_be_bytes());
+                out.extend_from_slice(&r.weight.to_be_bytes());
+                out.extend_from_slice(&r.port.to_be_bytes());
+                out.extend_from_slice(&target);
+            }
+        }
+        out
+    }
+
+    impl FakeDns {
+        pub fn start(records: Vec<SrvRec>, truncate_udp: bool) -> FakeDns {
+            // The same port number on both transports: bind TCP on an
+            // ephemeral port and retry until UDP can take the same one.
+            let (udp, tcp, addr) = loop {
+                let tcp = TcpListener::bind("127.0.0.1:0").unwrap();
+                let addr = tcp.local_addr().unwrap();
+                if let Ok(udp) = UdpSocket::bind(addr) {
+                    break (udp, tcp, addr);
+                }
+            };
+            let recs = Arc::new(records);
+            let recs_udp = Arc::clone(&recs);
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 1024];
+                while let Ok((n, peer)) = udp.recv_from(&mut buf) {
+                    let resp = dns_response(&buf[..n], &recs_udp, truncate_udp);
+                    let _ = udp.send_to(&resp, peer);
+                }
+            });
+            std::thread::spawn(move || {
+                for s in tcp.incoming() {
+                    let Ok(mut s) = s else { continue };
+                    let mut l = [0u8; 2];
+                    if s.read_exact(&mut l).is_err() {
+                        continue;
+                    }
+                    let mut q = vec![0u8; u16::from_be_bytes(l) as usize];
+                    if s.read_exact(&mut q).is_err() {
+                        continue;
+                    }
+                    let resp = dns_response(&q, &recs, false);
+                    let _ = s.write_all(&(resp.len() as u16).to_be_bytes());
+                    let _ = s.write_all(&resp);
+                }
+            });
+            FakeDns { addr }
+        }
+    }
+
+    // ---------------- certificate ----------------
+
+    pub struct TestCert {
+        pub cert_pem: PathBuf,
+        pub cert: X509,
+        pub key: PKey<Private>,
+    }
+
+    /// Self-signed certificate (CN = `cn`, the given DNS / IP SANs), written
+    /// as PEM into a fresh per-process directory; usable both as the fake
+    /// server's certificate and as the client's trust anchor.
+    pub fn test_cert(tag: &str, cn: &str, dns: &[&str], ips: &[&str]) -> TestCert {
+        let key = PKey::from_rsa(Rsa::generate(2048).unwrap()).unwrap();
+        let mut name = X509NameBuilder::new().unwrap();
+        name.append_entry_by_text("CN", cn).unwrap();
+        let name = name.build();
+        let mut b = X509::builder().unwrap();
+        b.set_version(2).unwrap();
+        b.set_serial_number(&BigNum::from_u32(1).unwrap().to_asn1_integer().unwrap())
+            .unwrap();
+        b.set_subject_name(&name).unwrap();
+        b.set_issuer_name(&name).unwrap();
+        b.set_pubkey(&key).unwrap();
+        b.set_not_before(&Asn1Time::days_from_now(0).unwrap()).unwrap();
+        b.set_not_after(&Asn1Time::days_from_now(30).unwrap()).unwrap();
+        b.append_extension(BasicConstraints::new().critical().ca().build().unwrap())
+            .unwrap();
+        if !dns.is_empty() || !ips.is_empty() {
+            let mut san = SubjectAlternativeName::new();
+            for d in dns {
+                san.dns(d);
+            }
+            for ip in ips {
+                san.ip(ip);
+            }
+            let ext = san.build(&b.x509v3_context(None, None)).unwrap();
+            b.append_extension(ext).unwrap();
+        }
+        b.sign(&key, MessageDigest::sha256()).unwrap();
+        let cert = b.build();
+        let dir = std::env::temp_dir().join(format!("pgrust_auth_ldap_{tag}_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cert_pem = dir.join("cert.pem");
+        std::fs::write(&cert_pem, cert.to_pem().unwrap()).unwrap();
+        TestCert {
+            cert_pem,
+            cert,
+            key,
+        }
+    }
+
+    // ---------------- LDAP ----------------
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub enum LdapMode {
+        /// Plain LDAP; StartTLS is honored (needs a cert).
+        Plain,
+        /// Plain LDAP; StartTLS answered `unwillingToPerform` "TLS not supported".
+        NoTls,
+        /// TLS from the first byte (ldaps).
+        Ldaps,
+    }
+
+    pub struct FakeLdap {
+        pub port: u16,
+    }
+
+    enum FakeStream {
+        Plain(TcpStream),
+        Tls(SslStream<TcpStream>),
+        Gone,
+    }
+
+    impl Read for FakeStream {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            match self {
+                FakeStream::Plain(s) => s.read(buf),
+                FakeStream::Tls(s) => s.read(buf),
+                FakeStream::Gone => Ok(0),
+            }
+        }
+    }
+    impl Write for FakeStream {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            match self {
+                FakeStream::Plain(s) => s.write(buf),
+                FakeStream::Tls(s) => s.write(buf),
+                FakeStream::Gone => Ok(0),
+            }
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            match self {
+                FakeStream::Plain(s) => s.flush(),
+                FakeStream::Tls(s) => s.flush(),
+                FakeStream::Gone => Ok(()),
+            }
+        }
+    }
+
+    fn read_ber_message(r: &mut impl Read) -> Option<Vec<u8>> {
+        let mut header = [0u8; 2];
+        r.read_exact(&mut header).ok()?;
+        let mut msg = header.to_vec();
+        let len = if header[1] < 0x80 {
+            header[1] as usize
+        } else {
+            let n = (header[1] & 0x7f) as usize;
+            let mut lb = vec![0u8; n];
+            r.read_exact(&mut lb).ok()?;
+            msg.extend_from_slice(&lb);
+            lb.iter().fold(0usize, |v, &b| (v << 8) | b as usize)
+        };
+        let at = msg.len();
+        msg.resize(at + len, 0);
+        r.read_exact(&mut msg[at..]).ok()?;
+        Some(msg)
+    }
+
+    fn envelope(msgid: i64, op: &[u8]) -> Vec<u8> {
+        let mut c = ber_int(TAG_INTEGER, msgid);
+        c.extend_from_slice(op);
+        tlv(TAG_SEQUENCE, &c)
+    }
+
+    fn ldap_result(tag: u8, rc: i64, diag: &str, extra: &[u8]) -> Vec<u8> {
+        let mut body = ber_int(TAG_ENUMERATED, rc);
+        body.extend_from_slice(&tlv(TAG_OCTET_STRING, b""));
+        body.extend_from_slice(&tlv(TAG_OCTET_STRING, diag.as_bytes()));
+        body.extend_from_slice(extra);
+        tlv(tag, &body)
+    }
+
+    fn contains(hay: &[u8], needle: &[u8]) -> bool {
+        !needle.is_empty() && hay.windows(needle.len()).any(|w| w == needle)
+    }
+
+    struct Users {
+        entries: Vec<(String, String)>,
+        anonymous_ok: bool,
+    }
+
+    fn serve(tcp: TcpStream, mode: LdapMode, users: Arc<Users>, acceptor: Option<Arc<SslAcceptor>>) {
+        let mut s = if mode == LdapMode::Ldaps {
+            match acceptor.as_ref().unwrap().accept(tcp) {
+                Ok(t) => FakeStream::Tls(t),
+                Err(_) => return, // client refused our certificate
+            }
+        } else {
+            FakeStream::Plain(tcp)
+        };
+        loop {
+            let Some(msg) = read_ber_message(&mut s) else { return };
+            let mut r = BerReader::new(&msg);
+            let Ok((_, content)) = r.read_tlv() else { return };
+            let mut r = BerReader::new(content);
+            let Ok((_, id)) = r.read_tlv() else { return };
+            let Ok(msgid) = decode_int(id) else { return };
+            let Ok((tag, op)) = r.read_tlv() else { return };
+            match tag {
+                TAG_BIND_REQUEST => {
+                    let mut b = BerReader::new(op);
+                    let (Ok((_, _ver)), Ok((_, name)), Ok((_, pw))) =
+                        (b.read_tlv(), b.read_tlv(), b.read_tlv())
+                    else {
+                        return;
+                    };
+                    let ok = if name.is_empty() && pw.is_empty() {
+                        users.anonymous_ok
+                    } else {
+                        users
+                            .entries
+                            .iter()
+                            .any(|(dn, p)| dn.as_bytes() == name && p.as_bytes() == pw)
+                    };
+                    let rc = if ok { 0 } else { 49 };
+                    let _ = s.write_all(&envelope(msgid, &ldap_result(TAG_BIND_RESPONSE, rc, "", &[])));
+                }
+                TAG_SEARCH_REQUEST => {
+                    for (dn, _) in &users.entries {
+                        let uid = dn.split(',').next().and_then(|a| a.strip_prefix("uid="));
+                        if let Some(uid) = uid {
+                            if contains(op, uid.as_bytes()) {
+                                let mut e = tlv(TAG_OCTET_STRING, dn.as_bytes());
+                                e.extend_from_slice(&tlv(TAG_SEQUENCE, &[]));
+                                let _ = s.write_all(&envelope(msgid, &tlv(TAG_SEARCH_ENTRY, &e)));
+                            }
+                        }
+                    }
+                    let _ = s.write_all(&envelope(msgid, &ldap_result(TAG_SEARCH_DONE, 0, "", &[])));
+                }
+                TAG_EXTENDED_REQUEST => {
+                    let mut b = BerReader::new(op);
+                    let Ok((t, oid)) = b.read_tlv() else { return };
+                    let is_tls = matches!(s, FakeStream::Tls(_));
+                    if t != 0x80 || oid != STARTTLS_OID {
+                        let _ = s.write_all(&envelope(
+                            msgid,
+                            &ldap_result(TAG_EXTENDED_RESPONSE, 2, "unsupported extended operation", &[]),
+                        ));
+                    } else if is_tls {
+                        let _ = s.write_all(&envelope(
+                            msgid,
+                            &ldap_result(TAG_EXTENDED_RESPONSE, 1, "TLS already started", &[]),
+                        ));
+                    } else if mode == LdapMode::NoTls {
+                        let _ = s.write_all(&envelope(
+                            msgid,
+                            &ldap_result(TAG_EXTENDED_RESPONSE, 53, "TLS not supported", &[]),
+                        ));
+                    } else {
+                        let _ = s.write_all(&envelope(
+                            msgid,
+                            &ldap_result(TAG_EXTENDED_RESPONSE, 0, "", &tlv(0x8a, STARTTLS_OID)),
+                        ));
+                        let FakeStream::Plain(tcp) = std::mem::replace(&mut s, FakeStream::Gone) else {
+                            return;
+                        };
+                        match acceptor.as_ref().unwrap().accept(tcp) {
+                            Ok(t) => s = FakeStream::Tls(t),
+                            Err(_) => return,
+                        }
+                    }
+                }
+                TAG_UNBIND_REQUEST => return,
+                _ => return,
+            }
+        }
+    }
+
+    impl FakeLdap {
+        /// `users` = (bind DN, password); `anonymous_ok` = whether the empty
+        /// simple bind auth.c's search+bind mode issues first succeeds.
+        pub fn start(
+            mode: LdapMode,
+            users: Vec<(&str, &str)>,
+            anonymous_ok: bool,
+            cert: Option<&TestCert>,
+        ) -> FakeLdap {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let acceptor = cert.map(|c| {
+                let mut b = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls_server()).unwrap();
+                b.set_private_key(&c.key).unwrap();
+                b.set_certificate(&c.cert).unwrap();
+                Arc::new(b.build())
+            });
+            let users = Arc::new(Users {
+                entries: users
+                    .into_iter()
+                    .map(|(d, p)| (d.to_string(), p.to_string()))
+                    .collect(),
+                anonymous_ok,
+            });
+            std::thread::spawn(move || {
+                for conn in listener.incoming() {
+                    let Ok(conn) = conn else { continue };
+                    let users = Arc::clone(&users);
+                    let acceptor = acceptor.clone();
+                    std::thread::spawn(move || serve(conn, mode, users, acceptor));
+                }
+            });
+            FakeLdap { port }
+        }
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+mod ldap_witness {
+    use super::ldap_fakes::{test_cert, FakeDns, FakeLdap, LdapMode, SrvRec};
+    use super::*;
+
+    const ALICE_DN: &str = "uid=alice,dc=example,dc=test";
+
+    // Every LDAP test holds GUC_LOCK (hba is process-global) and owns the
+    // libldap-style environment while it runs: LDAPCONF names the one
+    // ldap.conf the test wants (OpenLDAP init.c reads it after the system
+    // file, so its TLS_* lines win), nothing else is inherited.
+    fn ldap_conf(tag: &str, body: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("pgrust_auth_ldapconf_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{tag}.conf"));
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    fn set_ldap_env(conf: &std::path::Path) {
+        for k in [
+            "LDAPNOINIT",
+            "LDAPRC",
+            "LDAPTLS_CACERT",
+            "LDAPTLS_CACERTDIR",
+            "LDAPTLS_REQCERT",
+            "LDAPTLS_REQSAN",
+            "LDAPTLS_CERT",
+            "LDAPTLS_KEY",
+            "LDAPTLS_CIPHER_SUITE",
+            "LDAPTLS_PROTOCOL_MIN",
+            "LDAPTLS_PROTOCOL_MAX",
+            "LDAPTLS_PEERKEY_HASH",
+            "LDAPTLS_CRLCHECK",
+        ] {
+            std::env::remove_var(k);
+        }
+        std::env::set_var("LDAPCONF", conf);
+    }
+
+    fn describe(captured: &[PgError]) -> Vec<String> {
+        captured
+            .iter()
+            .map(|e| match e.detail() {
+                Some(d) => format!("{} | DETAIL: {d}", e.message()),
+                None => e.message().to_string(),
+            })
+            .collect()
+    }
+
+    // Runs ClientAuthentication on `port` with a client thread that answers
+    // the password request with `password`; returns (outcome, server-side
+    // reports, the client's final message type/code).
+    fn run_ldap_auth(
+        tag: &str,
+        unix_port: u16,
+        port_user: &str,
+        password: &'static [u8],
+    ) -> (Result<(), String>, Vec<PgError>, (u8, u32)) {
+        let (sa, sock_path) = SocketAuth::listen(tag, unix_port);
+        let client = std::thread::spawn(move || {
+            let mut stream = UnixStream::connect(sock_path).unwrap();
+            let (t, code, _) = read_server_msg(&mut stream);
+            assert_eq!((t, code), (b'R', AUTH_REQ_PASSWORD));
+            let mut body = password.to_vec();
+            body.push(0);
+            send_password_msg(&mut stream, &body);
+            let (t, code, _) = read_server_msg(&mut stream);
+            (t, code)
+        });
+        let mut port = sa.accept_port(port_user);
+        CAPTURED.with(|c| c.borrow_mut().clear());
+        let prev = elog::set_emit_log_hook(Some(capture_hook));
+        elog::config::set_where_to_send_output(types_dest::CommandDest::Remote);
+        let result = catch_unwind(AssertUnwindSafe(|| ClientAuthentication(&mut port)));
+        elog::config::set_where_to_send_output(types_dest::CommandDest::Debug);
+        elog::set_emit_log_hook(prev);
+        let _ = pqcomm::pq_flush();
+        let captured = CAPTURED.with(|c| c.borrow().clone());
+        let outcome = match result {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(format!("error: {}", e.message())),
+            Err(p) => Err(payload_str(&p)),
+        };
+        let client_final = client.join().unwrap();
+        drop(port);
+        sa.cleanup();
+        (outcome, captured, client_final)
+    }
+
+    fn assert_ok(outcome: &Result<(), String>, captured: &[PgError], client_final: (u8, u32)) {
+        assert!(
+            outcome.is_ok(),
+            "authentication failed ({:?}); server reports: {:#?}",
+            outcome,
+            describe(captured)
+        );
+        assert_eq!(client_final, (b'R', AUTH_REQ_OK));
+        assert_eq!(miscinit::client_connection_info().0, Some(ALICE_DN));
+    }
+
+    fn assert_failed_with(
+        outcome: &Result<(), String>,
+        captured: &[PgError],
+        message: &str,
+        detail: Option<&str>,
+    ) {
+        assert_eq!(
+            outcome.as_ref().unwrap_err(),
+            "proc_exit(1)",
+            "expected the FATAL auth failure; reports: {:#?}",
+            describe(captured)
+        );
+        let hit = captured.iter().find(|e| e.message() == message);
+        assert!(
+            hit.is_some(),
+            "expected server report {message:?}; got {:#?}",
+            describe(captured)
+        );
+        assert_eq!(hit.unwrap().detail(), detail, "DETAIL of {message:?}");
+    }
+
+    // auth.c:2255-2290 — no ldapserver: the base DN's trailing DC components
+    // name the domain (ldap_dn2domain: "ou=people,dc=example,dc=test" ->
+    // example.test), `_ldap._tcp.example.test` SRV records name the servers,
+    // and ldap_domain2hostlist orders them by priority: the priority-0 server
+    // (which knows alice) must be tried before the priority-10 one (which
+    // refuses every bind, so a wrong order fails the initial bind). The UDP
+    // answer is truncated, so the lookup must complete over TCP as libresolv
+    // does. Before the port: "LDAP authentication could not find DNS SRV
+    // records for \"example.test\"" and STATUS_ERROR.
+    #[test]
+    fn ldap_srv_discovery_orders_hosts_by_priority() {
+        setup_backend(4261);
+        let _g = GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_ldap_env(&ldap_conf("srv", "# nothing\n"));
+        let good = FakeLdap::start(LdapMode::Plain, vec![(ALICE_DN, "secret")], true, None);
+        let bad = FakeLdap::start(LdapMode::Plain, vec![], false, None);
+        let dns = FakeDns::start(
+            vec![
+                SrvRec { priority: 10, weight: 0, port: bad.port, target: "localhost" },
+                SrvRec { priority: 0, weight: 0, port: good.port, target: "localhost" },
+            ],
+            true,
+        );
+        *pgsync::lock(&crate::ldap::SRV_NAMESERVERS) = Some(vec![dns.addr]);
+        load_hba_content_locked(
+            "ldap_srv.conf",
+            "local all all ldap ldapbasedn=\"ou=people,dc=example,dc=test\"\n",
+        );
+        let (outcome, captured, fin) = run_ldap_auth("ldap_srv", 45471, "alice", b"secret");
+        *pgsync::lock(&crate::ldap::SRV_NAMESERVERS) = None;
+        assert_ok(&outcome, &captured, fin);
+    }
+
+    // auth.c:2296-2330 — ldapscheme=ldaps: ldap_initialize("ldaps://...")
+    // and the TLS handshake at the first operation, the peer verified against
+    // the configured TLS_CACERT (ldap.conf via LDAPCONF), the host name
+    // checked against the certificate's IP SAN (tls_o.c tlso_session_chkhost).
+    // Before the port: "could not initialize LDAP: Not Supported".
+    #[test]
+    fn ldaps_with_configured_ca_authenticates() {
+        setup_backend(4262);
+        let _g = GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cert = test_cert("ldaps_ok", "ldap.example.test", &["ldap.example.test"], &["127.0.0.1"]);
+        set_ldap_env(&ldap_conf(
+            "ldaps_ok",
+            &format!("TLS_CACERT {}\n", cert.cert_pem.display()),
+        ));
+        let srv = FakeLdap::start(LdapMode::Ldaps, vec![(ALICE_DN, "secret")], true, Some(&cert));
+        load_hba_content_locked(
+            "ldaps_ok.conf",
+            &format!(
+                "local all all ldap ldapserver=127.0.0.1 ldapport={} ldapscheme=ldaps ldapprefix=\"uid=\" ldapsuffix=\",dc=example,dc=test\"\n",
+                srv.port
+            ),
+        );
+        let (outcome, captured, fin) = run_ldap_auth("ldaps_ok", 45472, "alice", b"secret");
+        assert_ok(&outcome, &captured, fin);
+    }
+
+    // Same, search+bind mode over ldaps (the anonymous initial bind, the
+    // search, and the user bind all ride the one TLS session).
+    #[test]
+    fn ldaps_search_bind_authenticates() {
+        setup_backend(4263);
+        let _g = GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cert = test_cert("ldaps_sb", "ldap.example.test", &[], &["127.0.0.1"]);
+        set_ldap_env(&ldap_conf("ldaps_sb", &format!("TLS_CACERT {}\n", cert.cert_pem.display())));
+        let srv = FakeLdap::start(LdapMode::Ldaps, vec![(ALICE_DN, "secret")], true, Some(&cert));
+        load_hba_content_locked(
+            "ldaps_sb.conf",
+            &format!(
+                "local all all ldap ldapserver=127.0.0.1 ldapport={} ldapscheme=ldaps ldapbasedn=\"dc=example,dc=test\" ldapsearchattribute=uid\n",
+                srv.port
+            ),
+        );
+        let (outcome, captured, fin) = run_ldap_auth("ldaps_sb", 45473, "alice", b"secret");
+        assert_ok(&outcome, &captured, fin);
+    }
+
+    // TLS_REQCERT demand (the OpenLDAP default) with no trust anchor for the
+    // fake's self-signed certificate: tlsg_session_accept's post-handshake
+    // verification fails (-1), ldap_new_connection reports LDAP_SERVER_DOWN
+    // at the bind, and ld_error carries tlsg_session_errmsg's text —
+    // gnutls_strerror(-1) = "(unknown error code)", as the Debian C 18.6
+    // pair logs it.
+    #[test]
+    fn ldaps_untrusted_certificate_is_cant_contact_with_gnutls_diagnostics() {
+        setup_backend(4264);
+        let _g = GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cert = test_cert("ldaps_untrusted", "ldap.example.test", &[], &["127.0.0.1"]);
+        set_ldap_env(&ldap_conf("ldaps_untrusted", "TLS_REQCERT demand\n"));
+        let srv = FakeLdap::start(LdapMode::Ldaps, vec![(ALICE_DN, "secret")], true, Some(&cert));
+        load_hba_content_locked(
+            "ldaps_untrusted.conf",
+            &format!(
+                "local all all ldap ldapserver=127.0.0.1 ldapport={} ldapscheme=ldaps ldapprefix=\"uid=\" ldapsuffix=\",dc=example,dc=test\"\n",
+                srv.port
+            ),
+        );
+        let (outcome, captured, _) = run_ldap_auth("ldaps_untrusted", 45474, "alice", b"secret");
+        assert_failed_with(
+            &outcome,
+            &captured,
+            "LDAP login failed for user \"uid=alice,dc=example,dc=test\" on server \"127.0.0.1\": Can't contact LDAP server",
+            Some("LDAP diagnostics: (unknown error code)"),
+        );
+    }
+
+    // TLS_REQCERT never: no verification, no host-name check
+    // (tls2.c:544-551), the untrusted certificate is accepted.
+    #[test]
+    fn ldaps_reqcert_never_skips_verification() {
+        setup_backend(4265);
+        let _g = GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cert = test_cert("ldaps_never", "other.example.test", &[], &[]);
+        set_ldap_env(&ldap_conf("ldaps_never", "TLS_REQCERT never\n"));
+        let srv = FakeLdap::start(LdapMode::Ldaps, vec![(ALICE_DN, "secret")], true, Some(&cert));
+        load_hba_content_locked(
+            "ldaps_never.conf",
+            &format!(
+                "local all all ldap ldapserver=127.0.0.1 ldapport={} ldapscheme=ldaps ldapprefix=\"uid=\" ldapsuffix=\",dc=example,dc=test\"\n",
+                srv.port
+            ),
+        );
+        let (outcome, captured, fin) = run_ldap_auth("ldaps_never", 45475, "alice", b"secret");
+        assert_ok(&outcome, &captured, fin);
+    }
+
+    // ldapserver=localhost: libldap checks the certificate against the local
+    // FQDN (ldap_int_hostname, init.c:695 / tls_g.c:579-585), never against
+    // the literal "localhost"; a certificate naming neither fails the CN
+    // check (LDAP_CONNECT_ERROR), and ldap_int_tls_connect renders that code
+    // through gnutls_strerror: "(unknown error code)".
+    #[test]
+    fn ldaps_localhost_checks_the_fqdn_against_the_certificate() {
+        setup_backend(4266);
+        let _g = GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cert = test_cert("ldaps_host", "ldap.example.test", &["ldap.example.test"], &["127.0.0.1"]);
+        set_ldap_env(&ldap_conf("ldaps_host", &format!("TLS_CACERT {}\n", cert.cert_pem.display())));
+        let srv = FakeLdap::start(LdapMode::Ldaps, vec![(ALICE_DN, "secret")], true, Some(&cert));
+        load_hba_content_locked(
+            "ldaps_host.conf",
+            &format!(
+                "local all all ldap ldapserver=localhost ldapport={} ldapscheme=ldaps ldapprefix=\"uid=\" ldapsuffix=\",dc=example,dc=test\"\n",
+                srv.port
+            ),
+        );
+        let (outcome, captured, _) = run_ldap_auth("ldaps_host", 45476, "alice", b"secret");
+        assert_failed_with(
+            &outcome,
+            &captured,
+            "LDAP login failed for user \"uid=alice,dc=example,dc=test\" on server \"localhost\": Can't contact LDAP server",
+            Some("LDAP diagnostics: (unknown error code)"),
+        );
+    }
+
+    // auth.c:2367-2385 — ldaptls=1: ldap_start_tls_s sends the StartTLS
+    // extended operation (1.3.6.1.4.1.1466.20037) on the plain connection and
+    // upgrades it. Before the port: "could not start LDAP TLS session: Not
+    // Supported".
+    #[test]
+    fn ldap_starttls_with_configured_ca_authenticates() {
+        setup_backend(4267);
+        let _g = GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cert = test_cert("starttls_ok", "ldap.example.test", &[], &["127.0.0.1"]);
+        set_ldap_env(&ldap_conf("starttls_ok", &format!("TLS_CACERT {}\n", cert.cert_pem.display())));
+        let srv = FakeLdap::start(LdapMode::Plain, vec![(ALICE_DN, "secret")], true, Some(&cert));
+        load_hba_content_locked(
+            "starttls_ok.conf",
+            &format!(
+                "local all all ldap ldapserver=127.0.0.1 ldapport={} ldaptls=1 ldapprefix=\"uid=\" ldapsuffix=\",dc=example,dc=test\"\n",
+                srv.port
+            ),
+        );
+        let (outcome, captured, fin) = run_ldap_auth("starttls_ok", 45477, "alice", b"secret");
+        assert_ok(&outcome, &captured, fin);
+    }
+
+    // The server declines StartTLS: the extended operation's result code and
+    // diagnosticMessage come back through ldap_err2string / errdetail_for_ldap.
+    #[test]
+    fn ldap_starttls_refused_by_server_reports_the_result() {
+        setup_backend(4268);
+        let _g = GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_ldap_env(&ldap_conf("starttls_refused", "# nothing\n"));
+        let srv = FakeLdap::start(LdapMode::NoTls, vec![(ALICE_DN, "secret")], true, None);
+        load_hba_content_locked(
+            "starttls_refused.conf",
+            &format!(
+                "local all all ldap ldapserver=127.0.0.1 ldapport={} ldaptls=1 ldapprefix=\"uid=\" ldapsuffix=\",dc=example,dc=test\"\n",
+                srv.port
+            ),
+        );
+        let (outcome, captured, _) = run_ldap_auth("starttls_refused", 45478, "alice", b"secret");
+        assert_failed_with(
+            &outcome,
+            &captured,
+            "could not start LDAP TLS session: Server is unwilling to perform",
+            Some("LDAP diagnostics: TLS not supported"),
+        );
+    }
+}
