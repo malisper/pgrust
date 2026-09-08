@@ -40,8 +40,8 @@ pub use control_file::{
 pub use ctl::{GetWALInsertionTimeLineIfSet, XLOGShmemInit, XLOGShmemResetAfterCrash, XLOGShmemSize};
 pub use insert::{
     GetFullPageWriteInfo, GetInsertRecPtr, GetLastImportantRecPtr, GetRedoRecPtr,
-    GetXLogInsertEndRecPtr, GetXLogInsertRecPtr, RecoveryInProgress, XLogInsertAllowed,
-    XLogInsertRecord,
+    GetXLogInsertEndRecPtr, GetXLogInsertRecPtr, RecoveryInProgress, WALReadFromBuffers,
+    XLogInsertAllowed, XLogInsertRecord,
 };
 pub use startup::{
     CreateCheckPoint, CreateRestartPoint, ReachedEndOfBackup, ResetInstallXLogFileSegmentActive,

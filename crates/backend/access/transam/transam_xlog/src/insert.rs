@@ -338,6 +338,123 @@ pub(crate) fn GetXLogBuffer(ptr: XLogRecPtr, tli: TimeLineID) -> *mut u8 {
     unsafe { page.add((ptr % XLOG_BLCKSZ as u64) as usize) }
 }
 
+// xlog.c:1751 WALReadFromBuffers: read WAL data directly from the WAL
+// buffers, if available. Returns the number of bytes read successfully;
+// fewer than `count` when some of the requested WAL has already been
+// evicted. No locks are taken.
+//
+// The caller should ensure that it reads no further than
+// LogwrtResult.Write (which it refreshed when determining how far to read).
+// `tli` is only a convenient safety check so that callers do not read from
+// the WAL buffers on a historical timeline.
+pub fn WALReadFromBuffers(
+    dstbuf: &mut [u8],
+    startptr: XLogRecPtr,
+    count: usize,
+    tli: TimeLineID,
+) -> PgResult<usize> {
+    use std::sync::atomic::{fence, Ordering::Acquire, Ordering::SeqCst};
+
+    debug_assert!(dstbuf.len() >= count);
+    let mut pdst = 0usize;
+    let mut recptr = startptr;
+    let mut nbytes = count;
+
+    if RecoveryInProgress() || tli != crate::ctl::GetWALInsertionTimeLine() {
+        return Ok(0);
+    }
+
+    debug_assert!(startptr != InvalidXLogRecPtr);
+
+    let ctl = XLogCtl();
+
+    // Caller should ensure that the requested data has been inserted into
+    // WAL buffers before we try to read it (xlog.c:1768-1773).
+    let inserted = ctl.logInsertResult.load(Relaxed);
+    if startptr + count as u64 > inserted {
+        let requested = startptr + count as u64;
+        ereport(types_error::ERROR)
+            .errmsg(format!(
+                "cannot read past end of generated WAL: requested {:X}/{:X}, current position {:X}/{:X}",
+                requested >> 32,
+                requested as u32,
+                inserted >> 32,
+                inserted as u32
+            ))
+            .finish(loc("WALReadFromBuffers"))?;
+        unreachable!("ereport(ERROR) returned");
+    }
+
+    // Loop through the buffers without a lock (xlog.c:1789-1848). For each
+    // buffer, atomically read and verify the end pointer, then copy the data
+    // out, and finally re-read and re-verify the end pointer.
+    //
+    // Once a page is evicted, it never returns to the WAL buffers, so if the
+    // end pointer matches the expected end pointer before and after we copy
+    // the data, then the right page must have been present during the data
+    // copy. Read barriers are necessary to ensure that the data copy actually
+    // happens between the two verification steps.
+    //
+    // If either verification fails, we simply terminate the loop and return
+    // with the data that had been already copied out successfully.
+    while nbytes > 0 {
+        let offset = (recptr % XLOG_BLCKSZ as u64) as usize;
+        let idx = XLogRecPtrToBufIdx(recptr) as usize;
+
+        // The end pointer we expect in the xlblocks array if the correct
+        // page is present.
+        let expected_end_ptr = recptr + (XLOG_BLCKSZ - offset) as u64;
+
+        // First verification step: check that the correct page is present in
+        // the WAL buffers (the Acquire load is C's pg_read_barrier() between
+        // this check and the data copy).
+        let endptr = ctl.xlblocks[idx].load(Acquire);
+        if expected_end_ptr != endptr {
+            break;
+        }
+
+        // The correct page is present (or was at the time the endptr was
+        // read; must re-verify later). Source data and how much of it lives
+        // on this page.
+        let page = ctl.page_ptr(idx);
+        let npagebytes = nbytes.min(XLOG_BLCKSZ - offset);
+
+        // Data copy. SAFETY: `page` is an XLOG_BLCKSZ buffer of the cluster-
+        // lifetime WAL buffer array and offset + npagebytes <= XLOG_BLCKSZ;
+        // the destination range is in bounds (pdst + npagebytes <= count <=
+        // dstbuf.len()). The bytes may be concurrently recycled by
+        // AdvanceXLInsertBuffer (C reads them the same way, lock-free): the
+        // xlblocks re-verification below discards any copy that raced with
+        // an eviction, so torn bytes are never returned.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                page.add(offset) as *const u8,
+                dstbuf.as_mut_ptr().add(pdst),
+                npagebytes,
+            );
+        }
+
+        // pg_read_barrier(): the data copy and the second verification step
+        // must not be reordered.
+        fence(SeqCst);
+
+        // Second verification step: check that the page we read from wasn't
+        // evicted while we were copying the data.
+        let endptr = ctl.xlblocks[idx].load(Acquire);
+        if expected_end_ptr != endptr {
+            break;
+        }
+
+        pdst += npagebytes;
+        recptr += npagebytes as u64;
+        nbytes -= npagebytes;
+    }
+
+    debug_assert!(pdst <= count);
+
+    Ok(pdst)
+}
+
 pub(crate) fn AdvanceXLInsertBuffer(upto: XLogRecPtr, tli: TimeLineID, opportunistic: bool) {
     let ctl = XLogCtl();
     let insert = &ctl.Insert;

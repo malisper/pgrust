@@ -1138,3 +1138,133 @@ fn online_checkpoint_redo_advances_oldest_xid_across_wraparound() {
     crate::redo::xlog_redo(&mut state2).unwrap();
     assert_eq!(tv.oldestXid.load(Relaxed), 1500);
 }
+
+// WALReadFromBuffers (xlog.c:1751-1848): hot WAL is served straight from the
+// shared WAL buffers, page by page, with the xlblocks end pointer verified
+// before and after every copy; an evicted (or not yet mapped) page ends the
+// read with the bytes copied so far, a historical timeline or recovery serves
+// nothing, and a request past logInsertResult is C's "cannot read past end of
+// generated WAL" ERROR. Runs as a child process: it seeds the process-global
+// XLogCtl.
+#[test]
+#[ignore = "child of wal_read_from_buffers_serves_hot_pages_like_c"]
+fn wal_read_from_buffers_child() {
+    use crate::ctl::{XLOGShmemInit, XLogCtl, XLogRecPtrToBufIdx};
+    use std::sync::atomic::Ordering::Relaxed;
+
+    init_seams_once();
+    elog::init_seams();
+    fd::InitFileAccess();
+    create_lwlocks_once();
+    set_wal_segment_size(16 * 1024 * 1024);
+    XLOGShmemInit();
+    let ctl = XLogCtl();
+    let blcksz = XLOG_BLCKSZ as u64;
+
+    // Two consecutive pages, mapped in adjacent buffer slots.
+    let p0: XLogRecPtr = 16 * 1024 * 1024 + 3 * blcksz;
+    let p1 = p0 + blcksz;
+    let idx0 = XLogRecPtrToBufIdx(p0) as usize;
+    let idx1 = XLogRecPtrToBufIdx(p1) as usize;
+    assert_ne!(idx0, idx1);
+    let pat0 = |i: usize| (i as u8) ^ 0x5A;
+    let pat1 = |i: usize| (i as u8) ^ 0xA5;
+    // SAFETY: exclusive access to the freshly initialized buffer array.
+    unsafe {
+        let page0 = std::slice::from_raw_parts_mut(ctl.page_ptr(idx0), XLOG_BLCKSZ);
+        for (i, b) in page0.iter_mut().enumerate() {
+            *b = pat0(i);
+        }
+        let page1 = std::slice::from_raw_parts_mut(ctl.page_ptr(idx1), XLOG_BLCKSZ);
+        for (i, b) in page1.iter_mut().enumerate() {
+            *b = pat1(i);
+        }
+    }
+    ctl.xlblocks[idx0].store(p0 + blcksz, Relaxed);
+    ctl.xlblocks[idx1].store(p1 + blcksz, Relaxed);
+    // Inserted up to 100 bytes before the end of the second page.
+    let inserted = p1 + blcksz - 100;
+    ctl.logInsertResult.store(inserted, Relaxed);
+    ctl.InsertTimeLineID.store(1, Relaxed);
+
+    let start = p0 + 40;
+    let count = XLOG_BLCKSZ + 500;
+    let mut dst = vec![0u8; 3 * XLOG_BLCKSZ];
+
+    // xlog.c:1759-1760: in recovery nothing is served (SharedRecoveryState is
+    // still RECOVERY_STATE_CRASH from XLOGShmemInit).
+    assert!(RecoveryInProgress());
+    assert_eq!(crate::WALReadFromBuffers(&mut dst, start, count, 1).unwrap(), 0);
+
+    ctl.SharedRecoveryState.store(RECOVERY_STATE_DONE, Relaxed);
+    assert!(!RecoveryInProgress());
+
+    // xlog.c:1759-1760: a historical timeline never reads the buffers.
+    assert_eq!(crate::WALReadFromBuffers(&mut dst, start, count, 2).unwrap(), 0);
+
+    // xlog.c:1768-1773: past logInsertResult is an ERROR with C's message.
+    let too_far = inserted - 10;
+    let err = crate::WALReadFromBuffers(&mut dst, too_far, 20, 1).unwrap_err();
+    assert_eq!(
+        err.message(),
+        format!(
+            "cannot read past end of generated WAL: requested {:X}/{:X}, current position {:X}/{:X}",
+            (too_far + 20) >> 32,
+            (too_far + 20) as u32,
+            inserted >> 32,
+            inserted as u32
+        )
+    );
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+
+    // Both pages present: the whole range is served, page by page.
+    let got = crate::WALReadFromBuffers(&mut dst, start, count, 1).unwrap();
+    assert_eq!(got, count);
+    for i in 0..count {
+        let expect = if i < XLOG_BLCKSZ - 40 { pat0(40 + i) } else { pat1(i - (XLOG_BLCKSZ - 40)) };
+        assert_eq!(dst[i], expect, "byte {i}");
+    }
+
+    // Second page evicted (xlblocks no longer names it): the read stops at
+    // the page boundary with the first page's bytes intact.
+    ctl.xlblocks[idx1].store(InvalidXLogRecPtr, Relaxed);
+    dst.fill(0);
+    let got = crate::WALReadFromBuffers(&mut dst, start, count, 1).unwrap();
+    assert_eq!(got, XLOG_BLCKSZ - 40);
+    for i in 0..got {
+        assert_eq!(dst[i], pat0(40 + i), "byte {i}");
+    }
+    assert!(dst[got..count].iter().all(|&b| b == 0));
+
+    // The slot of the first page recycled for a later page: nothing served.
+    let slots = ctl.XLogCacheBlck as u64 + 1;
+    ctl.xlblocks[idx0].store(p0 + blcksz + slots * blcksz, Relaxed);
+    assert_eq!(crate::WALReadFromBuffers(&mut dst, start, count, 1).unwrap(), 0);
+
+    // A zero-length request is a no-op.
+    ctl.xlblocks[idx0].store(p0 + blcksz, Relaxed);
+    assert_eq!(crate::WALReadFromBuffers(&mut dst, start, 0, 1).unwrap(), 0);
+
+    std::process::exit(0);
+}
+
+#[test]
+fn wal_read_from_buffers_serves_hot_pages_like_c() {
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "tests::wal_read_from_buffers_child",
+            "--exact",
+            "--ignored",
+            "--test-threads=1",
+            "--nocapture",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "WALReadFromBuffers child failed (xlog.c:1751): {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

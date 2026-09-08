@@ -351,9 +351,11 @@ pub fn XLogSendPhysical(reader: &mut XLogReaderState<'_>) -> PgResult<()> {
     Ok(())
 }
 
-// The WAL read + 'w' framing + CopyData put of XLogSendPhysical. WALReadFromBuffers
-// is a read-from-shared-buffers optimization; reading the whole slice through
-// wal_read (the WALRead fallback) is always correct.
+// The WAL read + 'w' framing + CopyData put of XLogSendPhysical
+// (walsender.c:3363-3400): the slice is served from the shared WAL buffers
+// first (WALReadFromBuffers, xlog.c:1751) and only the remainder — WAL already
+// evicted from the buffers, or a historical timeline — is read from the
+// segment files through the xlogreader `wal_read` seam (WALRead).
 fn xlog_send_physical_emit(
     reader: &mut XLogReaderState<'_>,
     startptr: XLogRecPtr,
@@ -378,10 +380,29 @@ fn xlog_send_physical_emit(
     let next_tli = crate::SEND_TIME_LINE_NEXT_TLI.with(|c| c.get());
 
     let mut wal_buf = vec![0u8; nbytes];
-    // C's `retry:` label (walsender.c:3332).
+    // C's `startptr` / `nbytes` are advanced past the bytes served from the
+    // WAL buffers (walsender.c:3367-3369); `read_from` / `read_off` are those
+    // cursors and, like C's, persist across a cascading `retry`.
+    let mut read_from = startptr;
+    let mut read_off = 0usize;
+    // C's `retry:` label (walsender.c:3363).
     loop {
-        let mut chunk_start = startptr;
-        let mut off = 0usize;
+        // Attempt to read WAL from WAL buffers first (walsender.c:3365): the
+        // TLI is the xlogreader's seg.ws_tli, the timeline of the last file
+        // it opened, so a reader on a historical timeline never serves from
+        // the buffers.
+        let rbytes = transam_xlog::WALReadFromBuffers(
+            &mut wal_buf[read_off..],
+            read_from,
+            nbytes - read_off,
+            reader.v.seg.ws_tli,
+        )?;
+        read_off += rbytes;
+        read_from += rbytes as u64;
+
+        // Now read the remaining WAL from the WAL files (walsender.c:3372).
+        let mut chunk_start = read_from;
+        let mut off = read_off;
         while chunk_start < endptr {
             let seg_no = chunk_start / segsize_u;
             let seg_end = (seg_no + 1) * segsize_u;
@@ -401,8 +422,10 @@ fn xlog_send_physical_emit(
             off += chunk_len;
         }
 
-        // C checks with xlogreader->seg.ws_tli, the TLI of the last-opened file.
-        transam_xlog::CheckXLogRemoved(startptr / segsize_u, reader.v.seg.ws_tli)?;
+        // See logical_read_xlog_page() (walsender.c:3383-3384): the segment
+        // of the advanced start pointer, checked with xlogreader->seg.ws_tli,
+        // the TLI of the last-opened file.
+        transam_xlog::CheckXLogRemoved(read_from / segsize_u, reader.v.seg.ws_tli)?;
 
         // During recovery, the currently-open WAL file might be replaced with
         // the file of the same name retrieved from archive. So we always need
