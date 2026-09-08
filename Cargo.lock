@@ -40,6 +40,7 @@ dependencies = [
  "mcx",
  "miscinit",
  "numutils",
+ "objectaccess",
  "parse_func_seams",
  "parse_utilcmd_seams",
  "pg_depend",

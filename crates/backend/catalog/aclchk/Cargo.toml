@@ -42,6 +42,7 @@ lock_seams = { path = "../../storage/lmgr/lock_seams" }
 lmgr = { path = "../../storage/lmgr/lmgr" }
 sinval = { path = "../../storage/ipc/sinval" }
 numutils = { path = "../../utils/adt/numutils" }
+objectaccess = { path = "../objectaccess" }
 rel_vocab = { path = "../../../_support/types/rel_vocab" }
 elog = { path = "../../utils/error/elog" }
 

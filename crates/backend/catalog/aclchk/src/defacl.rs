@@ -503,6 +503,13 @@ fn SetDefaultACL<'mcx>(mcx: Mcx<'mcx>, iacls: &InternalDefaultACL<'_>) -> PgResu
             old_members.as_deref().unwrap_or(&[]),
             &new_members,
         )?;
+
+        // aclchk.c:1389-1392
+        if is_new {
+            objectaccess::InvokeObjectPostCreateHook(DefaultAclRelationId, defacl_oid, 0)?;
+        } else {
+            objectaccess::InvokeObjectPostAlterHook(DefaultAclRelationId, defacl_oid, 0)?;
+        }
     }
 
     if let Some(tuple) = tuple {
