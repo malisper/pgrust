@@ -25,6 +25,7 @@ use ::types_relscan::{relation_get_index_scan, IndexScanDescData, IndexScanOpaqu
 use ::types_scan::scankey::ScanKeyData;
 use ::types_scan::sdir::ScanDirection;
 use ::types_storage::buf::BufferAccessStrategy;
+use ::types_storage::bufpage::MaxOffsetNumber;
 use ::types_nbtree::IndexBulkDeleteResult;
 use ::types_tuple::itemptr::ItemPointerData;
 use ::xloginsert_seams::{XLogRegBuf, REGBUF_NO_CHANGE, REGBUF_NO_IMAGE, REGBUF_STANDARD};
@@ -472,7 +473,9 @@ pub(crate) fn hashbucketcleanup(
     };
 
     loop {
-        let mut deletable = [0 as OffsetNumber; MaxIndexTuplesPerPage];
+        // hash.c:717 OffsetNumber deletable[MaxOffsetNumber]: every offset a
+        // page can carry, not the MaxIndexTuplesPerPage tuple bound.
+        let mut deletable = [0 as OffsetNumber; MaxOffsetNumber as usize];
         let mut ndeletable = 0usize;
         let mut retain_pin = false;
         let mut clear_dead_marking = false;

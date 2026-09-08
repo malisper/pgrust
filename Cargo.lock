@@ -7466,18 +7466,23 @@ version = "0.1.0"
 name = "hashsort"
 version = "0.1.0"
 dependencies = [
+ "backend_progress",
+ "backend_status",
  "bufmgr",
  "bufmgr_seams",
  "datum",
  "execindexing",
  "hash",
  "init_small",
+ "ipc_seams",
  "mcx",
  "nbtree",
  "planner",
+ "predicate_seams",
  "tuplesort",
  "types_core",
  "types_error",
+ "types_fmgr",
  "types_hash",
  "types_nodes",
  "types_rel",

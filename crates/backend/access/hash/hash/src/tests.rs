@@ -21,6 +21,7 @@ use ::types_rel::{
     FormData_pg_class, FormData_pg_index, LockInfoData, LockRelId, Relation, RelationData,
     LOCKMODE, RELKIND_INDEX, RELKIND_RELATION, REPLICA_IDENTITY_DEFAULT,
 };
+use ::types_storage::bufpage::{ItemIdData, SizeOfPageHeaderData, LP_NORMAL};
 use ::types_storage::ReadBufferMode;
 use ::types_tuple::itemptr::ItemPointerData;
 use ::types_tuple::tupdesc::CompactAttribute;
@@ -387,6 +388,36 @@ fn fill_page(buf: Buffer) {
     page.set_pd_upper(lower);
 }
 
+// A bucket page carrying `n` 8-byte index-tuple images (t_tid (10, i), t_info
+// size 8, no key bytes) written straight into the line-pointer and tuple
+// areas. The hash AM never writes such a page (its tuples are 16 bytes, so
+// at most ~407 fit), so n > MaxIndexTuplesPerPage (408) is the crafted /
+// corrupt page of the audit rows; C sizes deletable[] by MaxOffsetNumber
+// (2048) so it reaps it whole. The 8 bytes below the special area stay
+// unused so the hashkey read at itup+8 of the topmost item stays on-page.
+// Returns the TIDs in offset order (sorted, as a dead-items array).
+fn craft_dense_page(buf: Buffer, n: u16) -> Vec<ItemPointerData> {
+    // SAFETY: fake-pool page, exclusively used by this test.
+    let mut page = unsafe { page_mut(buf) };
+    let special = page.as_ref().pd_special() as usize;
+    let mut tids = Vec::with_capacity(n as usize);
+    for i in 1..=n {
+        let off = special - 8 * (i as usize + 1);
+        let tid = ItemPointerData::new(10, i);
+        let mut img = [0u8; 8];
+        // SAFETY: ItemPointerData is a 6-byte POD written at the image start.
+        unsafe { img.as_mut_ptr().cast::<ItemPointerData>().write_unaligned(tid) };
+        img[6..8].copy_from_slice(&8u16.to_ne_bytes()); // t_info: size 8, no flags
+        // SAFETY: off + 8 <= pd_special, inside the BLCKSZ page.
+        unsafe { core::ptr::copy_nonoverlapping(img.as_ptr(), page.as_mut_ptr().add(off), 8) };
+        page.set_item_id(i, ItemIdData::new(off as u16, LP_NORMAL, 8));
+        tids.push(tid);
+    }
+    page.set_pd_lower((SizeOfPageHeaderData + n as usize * 4) as u16);
+    page.set_pd_upper((special - 8 * (n as usize + 1)) as u16);
+    tids
+}
+
 // The escape check after an Err surfaced from an update phase: C promotes
 // any ereport(ERROR) raised between START_CRIT_SECTION and END_CRIT_SECTION
 // to PANIC (elog.c errstart, CritSectionCount > 0); pgrust does the same for
@@ -486,6 +517,86 @@ fn vacuum_one_page_records_catalog_relations_for_logical_decoding() {
         data[6], 1,
         "hashinsert.c:433: isCatalogRel must be RelationIsAccessibleInLogicalDecoding(hrel)"
     );
+}
+
+// hashinsert.c:372 OffsetNumber deletable[MaxOffsetNumber]: a page carrying
+// more LP_DEAD line pointers than MaxIndexTuplesPerPage (408) is vacuumed
+// whole (C's array holds any offset a page can carry; PageIndexMultiDelete
+// then empties it, bufpage.c:1160 indexing its scratch by the kept count).
+#[test]
+fn vacuum_one_page_reaps_more_dead_items_than_max_index_tuples_per_page() {
+    install();
+    let cx = MemoryContext::new("t");
+    let idx = index_rel(cx.mcx());
+    let heap = heap_rel(cx.mcx());
+    build_index(&idx);
+    const N: u16 = 500;
+    assert!(N as usize > MaxIndexTuplesPerPage);
+    craft_dense_page(BUCKET0_BUF, N);
+    let offs: Vec<OffsetNumber> = (1..=N).collect();
+    mark_dead(BUCKET0_BUF, &offs);
+
+    _hash_vacuum_one_page(&idx, &heap, METABUF, BUCKET0_BUF).unwrap_or_else(|e| {
+        panic!("hashinsert.c:372: a {N}-item dead page must be vacuumed whole: {e:?}")
+    });
+    assert_eq!(take_crit_section_count(), 0, "balanced critical section");
+
+    // SAFETY: fake-pool page.
+    let page = unsafe { page_ref(BUCKET0_BUF) };
+    assert_eq!(page.max_offset_number(), 0, "every dead item removed");
+    assert_eq!(page.pd_upper(), page.pd_special());
+    let records = WAL.with(|w| w.borrow().clone());
+    let (_, data) = records
+        .iter()
+        .find(|(info, _)| *info == XLOG_HASH_VACUUM_ONE_PAGE)
+        .expect("XLOG_HASH_VACUUM_ONE_PAGE emitted");
+    // xl_hash_vacuum_one_page: ntuples u16 @4.
+    assert_eq!(u16::from_ne_bytes([data[4], data[5]]), N, "ntuples in the WAL record");
+}
+
+// hash.c:717 OffsetNumber deletable[MaxOffsetNumber]: hashbucketcleanup over
+// a page whose every line pointer the callback reaps collects all of them
+// (> MaxIndexTuplesPerPage) and PageIndexMultiDelete empties the page. The
+// fake pool cannot answer IsBufferCleanupOK for the closing squeeze, so the
+// walk ends at the simulated XLogInsert failure — after the page update.
+#[test]
+fn bucketcleanup_reaps_more_dead_items_than_max_index_tuples_per_page() {
+    install();
+    let cx = MemoryContext::new("t");
+    let idx = index_rel(cx.mcx());
+    build_index(&idx);
+    const N: u16 = 500;
+    assert!(N as usize > MaxIndexTuplesPerPage);
+    let tids = craft_dense_page(BUCKET0_BUF, N);
+
+    let mut removed = 0.0f64;
+    let mut kept = 0.0f64;
+    let mut callback = crate::HashVacDelete::DeadItems(&tids);
+    WAL_FAIL.with(|c| c.set(true));
+    let err = crate::hashbucketcleanup(
+        &idx,
+        0,
+        BUCKET0_BUF,
+        BUCKET0_BLKNO,
+        None,
+        1,
+        3,
+        1,
+        Some(&mut removed),
+        Some(&mut kept),
+        false,
+        Some(&mut callback),
+    )
+    .expect_err("the simulated XLogInsert failure must surface");
+    let count = take_crit_section_count();
+    assert_eq!(err.message(), WAL_FAIL_MSG, "hash.c:717: the {N}-item walk must reach XLogInsert");
+    assert!(count > 0, "hash.c:800 START_CRIT_SECTION still open at the escape");
+    assert_eq!(removed, N as f64, "tuples_removed counts every reaped item");
+    assert_eq!(kept, 0.0, "num_index_tuples counts none");
+    // SAFETY: fake-pool page.
+    let page = unsafe { page_ref(BUCKET0_BUF) };
+    assert_eq!(page.max_offset_number(), 0, "PageIndexMultiDelete removed every item");
+    assert_eq!(page.pd_upper(), page.pd_special());
 }
 
 // hash.c:800-851 hashbucketcleanup: PageIndexMultiDelete + XLOG_HASH_DELETE

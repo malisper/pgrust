@@ -20,6 +20,11 @@ bufmgr = { path = "../../../storage/buffer/bufmgr" }
 bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
 init_small = { path = "../../../utils/init/init_small" }
 planner = { path = "../../../optimizer/plan/planner" }
+backend_progress = { path = "../../../utils/activity/backend_progress" }
 
 [dev-dependencies]
 types_nodes = { path = "../../../../_support/types/nodes" }
+backend_status = { path = "../../../utils/activity/backend_status" }
+ipc_seams = { path = "../../../storage/ipc/ipc_seams" }
+predicate_seams = { path = "../../../storage/lmgr/predicate_seams" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }

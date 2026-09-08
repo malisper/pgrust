@@ -1035,7 +1035,15 @@ impl<'a> PageMut<'a> {
 
     /// `PageIndexMultiDelete`; `itemnos` must be sorted ascending.
     pub fn index_multi_delete(&mut self, itemnos: &[OffsetNumber]) {
-        debug_assert!(itemnos.len() <= MaxIndexTuplesPerPage);
+        // bufpage.c:1180 Assert(nitems <= MaxIndexTuplesPerPage) is a
+        // debug-only cross-check the release code never relies on: the
+        // callers' deletable[] arrays are MaxOffsetNumber wide (hash.c:717,
+        // hashinsert.c:372) and the scratch arrays below are
+        // indexed by the KEPT count, so a page carrying more line pointers
+        // than MaxIndexTuplesPerPage deletes cleanly while the survivors fit
+        // (the all-deleted case). Bound the input by the architectural
+        // offset limit only.
+        debug_assert!(itemnos.len() <= MaxOffsetNumber as usize);
 
         if itemnos.len() <= 2 {
             for &off in itemnos.iter().rev() {
@@ -1064,17 +1072,6 @@ impl<'a> PageMut<'a> {
         }
 
         let nline = r.max_offset_number();
-        // Bound the untrusted line-pointer count (derived from pd_lower) against
-        // the fixed itemidbase/newitemids capacity before collecting kept items.
-        // nused is indexed up to nline, so a corrupted pd_lower yielding nline
-        // beyond MaxIndexTuplesPerPage (the hard limit on index line pointers)
-        // would overrun the scratch arrays and panic. Reject it as data
-        // corruption instead, mirroring C's reliance on the MaxIndexTuplesPerPage
-        // invariant in PageIndexMultiDelete (bufpage.c).
-        assert!(
-            (nline as usize) <= MaxIndexTuplesPerPage,
-            "corrupted line pointer count: nline = {nline}, max = {MaxIndexTuplesPerPage}"
-        );
         let mut itemidbase = [ItemIdCompact::ZERO; MaxIndexTuplesPerPage];
         let mut newitemids = [ItemIdData::default(); MaxIndexTuplesPerPage];
         let mut totallen = 0usize;
@@ -1098,6 +1095,19 @@ impl<'a> PageMut<'a> {
             if nextitm < itemnos.len() && offnum == itemnos[nextitm] {
                 nextitm += 1;
             } else {
+                // The survivors index C's itemidbase/newitemids
+                // [MaxIndexTuplesPerPage] scratch (bufpage.c:1167-1168);
+                // bufpage.c has no check and would overrun its stack, so a
+                // page keeping more is refused as data corruption (the page
+                // is untouched: nothing is written before the loop ends).
+                if nused >= MaxIndexTuplesPerPage {
+                    data_corrupted(
+                        ERROR,
+                        alloc::format!(
+                            "corrupted line pointer count: {nline} line pointers, more than {MaxIndexTuplesPerPage} kept"
+                        ),
+                    );
+                }
                 let alignedlen = (size + 7) & !7;
                 if last_offset > offset {
                     last_offset = offset;
@@ -1762,6 +1772,98 @@ mod tests {
         pm.index_multi_delete(&[1, 2, 3, 4]);
         assert_eq!(pm.as_ref().max_offset_number(), 0);
         assert_eq!(pm.as_ref().pd_upper(), pm.as_ref().pd_special());
+    }
+
+    // A page carrying `n` 8-byte index tuples written straight into the
+    // line-pointer and tuple areas (payload = the item's ordinal as u16 at
+    // bytes 0..2). MaxIndexTuplesPerPage (408) assumes a 16-byte minimum
+    // tuple, so n > 408 is only reachable through a crafted or corrupt page
+    // (the audit-18.6 hash rows: hash.c:717 / hashinsert.c:372 size
+    // deletable[] by MaxOffsetNumber for exactly this reason).
+    fn fill_dense_index_page(pm: &mut PageMut<'_>, n: usize) {
+        pm.init(16);
+        let special = pm.as_ref().pd_special() as usize;
+        for i in 1..=n {
+            let off = special - 8 * i;
+            // SAFETY: off + 8 <= pd_special, inside the BLCKSZ image.
+            unsafe {
+                pm.as_mut_ptr().add(off).cast::<u16>().write_unaligned(i as u16);
+            }
+            pm.set_item_id(i as OffsetNumber, ItemIdData::new(off as ItemOffset, LP_NORMAL, 8));
+        }
+        pm.set_pd_lower((SizeOfPageHeaderData + n * core::mem::size_of::<ItemIdData>()) as uint16);
+        pm.set_pd_upper((special - 8 * n) as uint16);
+    }
+
+    fn dense_payloads(pm: &PageMut<'_>) -> alloc::vec::Vec<u16> {
+        let r = pm.as_ref();
+        (1..=r.max_offset_number())
+            .map(|off| {
+                let (p, l) = r.item_raw(r.item_id(off));
+                assert_eq!(l, 8);
+                // SAFETY: item_raw bounds-checked; 8 bytes of payload.
+                unsafe { p.cast::<u16>().read_unaligned() }
+            })
+            .collect()
+    }
+
+    // bufpage.c:1160 PageIndexMultiDelete indexes itemidbase/newitemids by
+    // the KEPT count (nused), never by the page's line-pointer count, so a
+    // page with more line pointers than MaxIndexTuplesPerPage deletes
+    // cleanly while the survivors fit: the all-deleted page empties
+    // (hash.c:717 hashbucketcleanup / hashinsert.c:372 _hash_vacuum_one_page
+    // reap whole pages this way) and a partial delete keeping <= 408 items
+    // compacts like any other.
+    #[test]
+    fn index_multi_delete_over_more_line_pointers_than_max_index_tuples() {
+        const N: usize = 500;
+        assert!(N > MaxIndexTuplesPerPage && N <= MaxOffsetNumber as usize);
+
+        let mut t = temp_page();
+        let mut pm = page_mut(&mut t);
+        fill_dense_index_page(&mut pm, N);
+        let all: alloc::vec::Vec<OffsetNumber> = (1..=N as OffsetNumber).collect();
+        pm.index_multi_delete(&all);
+        assert_eq!(pm.as_ref().max_offset_number(), 0);
+        assert_eq!(pm.as_ref().pd_upper(), pm.as_ref().pd_special());
+
+        let mut t = temp_page();
+        let mut pm = page_mut(&mut t);
+        fill_dense_index_page(&mut pm, N);
+        // Delete the first 100 (keeps 400 <= MaxIndexTuplesPerPage).
+        let first: alloc::vec::Vec<OffsetNumber> = (1..=100).collect();
+        pm.index_multi_delete(&first);
+        let kept: alloc::vec::Vec<u16> = (101..=N as u16).collect();
+        assert_eq!(dense_payloads(&pm), kept);
+        assert_eq!(
+            pm.as_ref().pd_lower() as usize,
+            SizeOfPageHeaderData + (N - 100) * core::mem::size_of::<ItemIdData>()
+        );
+        assert_eq!(pm.as_ref().pd_upper() as usize, pm.as_ref().pd_special() as usize - 8 * (N - 100));
+    }
+
+    // The survivors of a multi-delete must fit C's MaxIndexTuplesPerPage
+    // scratch arrays (bufpage.c:1167-1168 itemidbase/newitemids); bufpage.c
+    // has no check and would overrun its stack, so pgrust refuses the page
+    // as data corruption (ERRCODE_DATA_CORRUPTED, ERROR) rather than
+    // panicking or writing past the arrays.
+    #[test]
+    fn index_multi_delete_keeping_more_than_max_index_tuples_is_data_corrupted() {
+        const N: usize = 500;
+        let mut t = temp_page();
+        let mut pm = page_mut(&mut t);
+        fill_dense_index_page(&mut pm, N);
+        let dels: alloc::vec::Vec<OffsetNumber> = (1..=50).collect();
+        let err = unwind_pg_error(|| pm.index_multi_delete(&dels));
+        assert_data_corrupted(
+            &err,
+            ERROR,
+            &alloc::format!(
+                "corrupted line pointer count: {N} line pointers, more than {MaxIndexTuplesPerPage} kept"
+            ),
+        );
+        // Nothing was modified: the page still carries every line pointer.
+        assert_eq!(pm.as_ref().max_offset_number() as usize, N);
     }
 
     // bufpage.c's ereport(ERROR|PANIC, (errcode(ERRCODE_DATA_CORRUPTED), ...))

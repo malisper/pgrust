@@ -1,5 +1,5 @@
 //! hash.c build half (hashbuild/hashbuildempty) + hashsort.c (HSpool).
-//! Loud: parallel build, progress reporting.
+//! Loud: parallel build.
 #![allow(non_snake_case)]
 
 use ::mcx::Mcx;
@@ -97,6 +97,11 @@ pub fn hashbuild<'mcx>(
             Ok(())
         },
     )?;
+    // hash.c:183-184.
+    backend_progress::pgstat_progress_update_param(
+        backend_progress::progress::PROGRESS_CREATEIDX_TUPLES_TOTAL,
+        indtuples as i64,
+    );
 
     if let Some(mut sp) = spool.take() {
         _h_indexbuild(&mut sp, heap, index)?;
@@ -143,6 +148,8 @@ fn _h_indexbuild(
     heap_rel: &Relation<'_>,
     index: &Relation<'_>,
 ) -> PgResult<()> {
+    let mut tups_done: i64 = 0;
+
     hspool.sortstate.performsort()?;
 
     #[cfg(debug_assertions)]
@@ -173,28 +180,46 @@ fn _h_indexbuild(
 
         hash::_hash_doinsert(index, image, heap_rel, true)?;
 
-        // allow insertion phase to be interrupted (hashsort.c:152)
+        // allow insertion phase to be interrupted, and track progress
+        // (hashsort.c:152-155)
         hash::check_for_interrupts()?;
+
+        tups_done += 1;
+        backend_progress::pgstat_progress_update_param(
+            backend_progress::progress::PROGRESS_CREATEIDX_TUPLES_DONE,
+            tups_done,
+        );
     }
     Ok(())
 }
 
 #[cfg(test)]
-mod audit_b004_tests {
-    //! Unit witness for hash.c:137 (audit-18.6 remediation batch b004).
+mod tests {
+    //! Unit witnesses for the hash build half (audit-18.6 remediation
+    //! batches b004 and w2-029): a fake buffer pool (the hash crate tests'
+    //! shape, keyed by thread so parallel tests never share pages) under a
+    //! real two-bucket index built by `_hash_init`, and a bound
+    //! PgBackendStatus entry so the CREATE INDEX progress params can be read
+    //! back. Each test names the C site it witnesses.
     use std::cell::Cell;
+    use std::collections::HashMap;
     use std::rc::Rc;
-    use std::sync::Once;
+    use std::sync::{Mutex, Once};
+    use std::thread::ThreadId;
 
+    use ::datum::Datum;
     use ::mcx::{Mcx, MemoryContext, PgVec};
     use ::types_core::{
-        Oid, HASH_AM_OID, INDEX_MAX_KEYS, INVALID_PROC_NUMBER, RELPERSISTENCE_PERMANENT,
+        BlockNumber, Buffer, ForkNumber, Oid, BLCKSZ, HASH_AM_OID, INDEX_MAX_KEYS,
+        INVALID_PROC_NUMBER, RELPERSISTENCE_PERMANENT, RELPERSISTENCE_UNLOGGED,
     };
     use ::types_error::{PgResult, ERRCODE_INTERNAL_ERROR, ERROR};
+    use ::types_fmgr::{FmgrInfo, FunctionCallInfoBaseData};
     use ::types_rel::{
         FormData_pg_class, FormData_pg_index, LockInfoData, LockRelId, Relation, RelationData,
         LOCKMODE, RELKIND_INDEX, RELKIND_RELATION, REPLICA_IDENTITY_DEFAULT,
     };
+    use ::types_tuple::itemptr::ItemPointerData;
     use ::types_tuple::tupdesc::CompactAttribute;
     use ::types_tuple::TupleDescData;
     use execindexing::IndexInfo;
@@ -202,12 +227,93 @@ mod audit_b004_tests {
     const INDEX_OID: Oid = 5000;
     const HEAP_OID: Oid = 4999;
 
+    // Fake buffer manager: pages are leaked 8KB boxes; Buffer = block + 1.
+    // One pool per thread (the seams are process-global and set once).
+    #[repr(C, align(8))]
+    struct FakePage([u8; BLCKSZ]);
+
+    static POOLS: Mutex<Option<HashMap<ThreadId, Vec<usize>>>> = Mutex::new(None);
+
+    fn with_pool<R>(f: impl FnOnce(&mut Vec<usize>) -> R) -> R {
+        let mut guard = POOLS.lock().unwrap_or_else(|e| e.into_inner());
+        let pools = guard.get_or_insert_with(HashMap::new);
+        f(pools.entry(std::thread::current().id()).or_default())
+    }
+
+    fn push_page() -> Buffer {
+        with_pool(|pages| {
+            pages.push(Box::leak(Box::new(FakePage([0u8; BLCKSZ]))) as *mut FakePage as usize);
+            pages.len() as Buffer
+        })
+    }
+
+    fn page_bytes(buf: Buffer) -> core::ptr::NonNull<u8> {
+        with_pool(|pages| {
+            let idx = (buf - 1) as usize;
+            assert!(idx < pages.len(), "fake pool has no buffer {buf}");
+            core::ptr::NonNull::new(pages[idx] as *mut u8).expect("leaked page")
+        })
+    }
+
+    fn reset_pool() {
+        with_pool(|pages| pages.clear());
+        init_small::globals::SetCritSectionCount(0);
+    }
+
     fn install() {
         static INIT: Once = Once::new();
         INIT.call_once(|| {
-            // The index's main fork already holds a block.
-            bufmgr_seams::relation_get_number_of_blocks_in_fork::set(|_rel, _fork| Ok(1));
+            bufmgr_seams::read_buffer::set(|rel, blkno| {
+                assert_eq!(rel.rd_id, INDEX_OID, "only the index is read through the fake pool");
+                let _ = page_bytes(blkno as Buffer + 1);
+                Ok(blkno as Buffer + 1)
+            });
+            bufmgr_seams::read_buffer_extended::set(|rel, _fork, blkno, _mode, _strategy| {
+                assert_eq!(rel.rd_id, INDEX_OID);
+                let _ = page_bytes(blkno as Buffer + 1);
+                Ok(blkno as Buffer + 1)
+            });
+            bufmgr_seams::extend_buffered_rel_by::set(|rel, _fork, _strategy, flags, n| {
+                assert_eq!(rel.rd_id, INDEX_OID);
+                assert_eq!(n, 1);
+                assert!(flags & bufmgr_seams::EB_LOCK_FIRST != 0);
+                Ok((push_page(), 1))
+            });
+            // RelationGetNumberOfBlocks = the thread's pool size (hashbuild's
+            // hash.c:137 check and _hash_init's hashpage.c:344 check).
+            bufmgr_seams::relation_get_number_of_blocks_in_fork::set(|_rel, _fork| {
+                Ok(with_pool(|pages| pages.len() as BlockNumber))
+            });
+            bufmgr_seams::release_buffer::set(|_buf| Ok(()));
+            bufmgr_seams::lock_buffer::set(|_buf, _mode| Ok(()));
+            bufmgr_seams::lock_buffer_for_cleanup::set(|_buf| Ok(()));
+            bufmgr_seams::conditional_lock_buffer_for_cleanup::set(|_buf| Ok(true));
+            bufmgr_seams::mark_buffer_dirty::set(|_buf| Ok(()));
+            bufmgr_seams::buffer_get_block_number::set(|buf| (buf - 1) as BlockNumber);
+            bufmgr_seams::buffer_get_page::set(page_bytes);
+            predicate_seams::check_for_serializable_conflict_in::set(|_rel, _tid, _blk| Ok(()));
         });
+    }
+
+    // A bound PgBackendStatus entry with track_activities on, so the
+    // progress params written by the build can be read back (the lmgr
+    // tests' shape: one fixed slot, serialized by the returned guard).
+    fn progress_beentry(
+    ) -> (&'static backend_status::PgBackendStatus, std::sync::MutexGuard<'static, ()>) {
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            init_small::globals::SetMaxBackends(8);
+            ipc_seams::on_shmem_exit::set(|_, _| {});
+            backend_status::init_seams();
+            backend_progress::init_seams();
+            backend_status::BackendStatusShmemInit().unwrap();
+        });
+        static SLOT: Mutex<()> = Mutex::new(());
+        let guard = SLOT.lock().unwrap_or_else(|e| e.into_inner());
+        init_small::globals::SetMyProcNumber(3);
+        backend_status::pgstat_beinit().unwrap();
+        backend_status::set_pgstat_track_activities_backing(true);
+        (backend_status::MyBEEntry().expect("pgstat_beinit bound a beentry"), guard)
     }
 
     fn int4_tupdesc(mcx: Mcx<'_>) -> TupleDescData<'_> {
@@ -238,7 +344,14 @@ mod audit_b004_tests {
         Ok(())
     }
 
-    fn pg_class(relname: &str, relam: Oid, relkind: u8, oid: Oid) -> FormData_pg_class {
+    fn stub_hashint4(
+        _flinfo: Option<&mut FmgrInfo>,
+        fcinfo: &mut FunctionCallInfoBaseData,
+    ) -> PgResult<Datum> {
+        Ok(Datum::from_i32(fcinfo.arg(0).as_i32()))
+    }
+
+    fn pg_class(relname: &str, relam: Oid, relkind: u8, oid: Oid, persistence: u8) -> FormData_pg_class {
         let mut name = ::types_tuple::NameData::default();
         name.namestrcpy(relname);
         FormData_pg_class {
@@ -255,7 +368,7 @@ mod audit_b004_tests {
             reltoastrelid: 0,
             relhasindex: relkind == RELKIND_RELATION,
             relisshared: false,
-            relpersistence: RELPERSISTENCE_PERMANENT,
+            relpersistence: persistence,
             relkind,
             relhassubclass: false,
             relrowsecurity: false,
@@ -267,7 +380,7 @@ mod audit_b004_tests {
         }
     }
 
-    fn rel(mcx: Mcx<'_>, index: bool) -> Relation<'_> {
+    fn rel(mcx: Mcx<'_>, index: bool, persistence: u8) -> Relation<'_> {
         let one = |v: Oid| {
             let mut vec = PgVec::new_in(mcx);
             vec.push(v);
@@ -312,10 +425,10 @@ mod audit_b004_tests {
             rd_droppedSubid: Cell::new(0),
             rd_lockInfo: LockInfoData { lockRelId: LockRelId { relId: oid, dbId: 5 } },
             rd_rel: if index {
-                pg_class("t_hidx", HASH_AM_OID, RELKIND_INDEX, oid)
+                pg_class("t_hidx", HASH_AM_OID, RELKIND_INDEX, oid, persistence)
             } else {
                 // 2 = HEAP_TABLE_AM_OID.
-                pg_class("t", 2, RELKIND_RELATION, oid)
+                pg_class("t", 2, RELKIND_RELATION, oid, persistence)
             },
             rd_att: Rc::new(int4_tupdesc(mcx)),
             rd_index,
@@ -338,7 +451,15 @@ mod audit_b004_tests {
             rd_hastriggers: false,
             rd_hasrules: false,
         };
-        Relation::open(data, Some(noop_close))
+        let rel = Relation::open(data, Some(noop_close));
+        if index {
+            // index_getprocid(HASHSTANDARD_PROC) at _hash_init reads the
+            // primed support info (no syscache behind the fake pool).
+            rel.rd_supportinfo
+                .borrow_mut()
+                .push(Some(FmgrInfo::new(stub_hashint4, 425, 1, true, false)));
+        }
+        rel
     }
 
     fn index_info(mcx: Mcx<'_>) -> IndexInfo<'_> {
@@ -377,10 +498,13 @@ mod audit_b004_tests {
     #[test]
     fn hashbuild_on_a_populated_index_is_a_catchable_error() {
         install();
+        reset_pool();
+        // The index's main fork already holds a block.
+        push_page();
         let cx = MemoryContext::new("t");
         let mcx = cx.mcx();
-        let heap = rel(mcx, false);
-        let idx = rel(mcx, true);
+        let heap = rel(mcx, false, RELPERSISTENCE_PERMANENT);
+        let idx = rel(mcx, true, RELPERSISTENCE_PERMANENT);
         let mut ii = index_info(mcx);
         let err = match crate::hashbuild(mcx, &heap, &idx, &mut ii) {
             Ok(_) => panic!("hash.c:137: hashbuild must refuse a populated index"),
@@ -390,5 +514,54 @@ mod audit_b004_tests {
         assert_eq!(err.sqlstate(), ERRCODE_INTERNAL_ERROR, "{err:?}");
         assert_eq!(err.message(), "index \"t_hidx\" already contains data");
         assert_eq!(err.hint(), None);
+    }
+
+    // hashsort.c:154-155 pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_DONE,
+    // ++tups_done) after every spooled insert: pg_stat_progress_create_index
+    // .tuples_done climbs to the spool size during the insertion phase.
+    #[test]
+    fn indexbuild_reports_every_spooled_tuple_as_progress() {
+        use backend_progress::progress::PROGRESS_CREATEIDX_TUPLES_DONE;
+
+        install();
+        reset_pool();
+        let (be, _slot_guard) = progress_beentry();
+        backend_progress::pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_DONE, 0);
+
+        let cx = MemoryContext::new("t");
+        let mcx = cx.mcx();
+        // Unlogged: the fake pool has no WAL (hashbuild's spool arm and
+        // _hash_doinsert's sorted arm are the same code either way).
+        let heap = rel(mcx, false, RELPERSISTENCE_UNLOGGED);
+        let idx = rel(mcx, true, RELPERSISTENCE_UNLOGGED);
+        let num_buckets = hash::_hash_init(&idx, 0.0, ForkNumber::MAIN_FORKNUM)
+            .unwrap_or_else(|e| panic!("_hash_init on the fake pool: {e:?}"));
+        assert_eq!(num_buckets, 2);
+
+        const N: u32 = 20;
+        let mut spool = crate::_h_spoolinit(&heap, &idx, num_buckets);
+        for i in 1..=N {
+            // Hash values spread over both buckets; the sort orders them.
+            let hashkey = i.wrapping_mul(0x9e37_79b9);
+            spool
+                .sortstate
+                .putindextuplevalues(
+                    ItemPointerData::new(10, i as u16),
+                    &[Datum::from_u32(hashkey)],
+                    &[false],
+                )
+                .unwrap_or_else(|e| panic!("_h_spool: {e:?}"));
+        }
+        crate::_h_indexbuild(&mut spool, &heap, &idx)
+            .unwrap_or_else(|e| panic!("_h_indexbuild on the fake pool: {e:?}"));
+
+        // SAFETY: this backend's own entry; single-writer cell read.
+        let done = unsafe { be.st_progress_param[PROGRESS_CREATEIDX_TUPLES_DONE].get() };
+        assert_eq!(
+            done, N as i64,
+            "hashsort.c:154: PROGRESS_CREATEIDX_TUPLES_DONE must reach the spool size \
+             (pg_stat_progress_create_index.tuples_done stays 0 without it)"
+        );
+        backend_progress::pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_DONE, 0);
     }
 }

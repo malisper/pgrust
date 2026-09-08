@@ -5,7 +5,7 @@ use ::types_core::{Buffer, InvalidBlockNumber, OffsetNumber, BLCKSZ};
 use ::types_error::{PgError, PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
 use ::types_hash::*;
 use ::types_rel::Relation;
-use ::types_storage::bufpage::SizeOfPageHeaderData;
+use ::types_storage::bufpage::{MaxOffsetNumber, SizeOfPageHeaderData};
 use ::xloginsert_seams::{XLogRegBuf, REGBUF_STANDARD};
 use init_small::globals::{EndCriticalSection, StartCriticalSection};
 
@@ -238,7 +238,9 @@ pub(crate) fn _hash_vacuum_one_page(
     metabuf: Buffer,
     buf: Buffer,
 ) -> PgResult<()> {
-    let mut deletable = [0 as OffsetNumber; MaxIndexTuplesPerPage];
+    // hashinsert.c:372 OffsetNumber deletable[MaxOffsetNumber]: every offset
+    // a page can carry, not the MaxIndexTuplesPerPage tuple bound.
+    let mut deletable = [0 as OffsetNumber; MaxOffsetNumber as usize];
     let mut ndeletable = 0usize;
 
     {
