@@ -15934,10 +15934,12 @@ dependencies = [
  "datum",
  "detoast",
  "elog",
+ "fd",
  "guc_tables",
  "heaptuple",
  "init_small",
  "inval",
+ "libc",
  "mcx",
  "postgres_seams",
  "procarray_seams",
@@ -15956,7 +15958,9 @@ dependencies = [
  "types_snapshot",
  "types_storage",
  "types_tuple",
+ "waitevent_seams",
  "xact",
+ "xact_seams",
 ]
 
 [[package]]

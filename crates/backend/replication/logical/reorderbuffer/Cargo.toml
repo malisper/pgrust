@@ -34,7 +34,11 @@ guc_tables = { path = "../../../utils/misc/guc_tables" }
 init_small = { path = "../../../utils/init/init_small" }
 reorderbuffer_seams = { path = "../reorderbuffer_seams" }
 relfilenumbermap_seams = { path = "../../../utils/cache/relfilenumbermap_seams" }
+fd = { path = "../../../storage/file/fd" }
+waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
+libc = "0.2"
 relpath_seams = { path = "../../../../common/relpath_seams" }
 
 [dev-dependencies]
 tupdesc = { path = "../../../access/common/tupdesc" }
+xact_seams = { path = "../../../access/transam/xact_seams" }

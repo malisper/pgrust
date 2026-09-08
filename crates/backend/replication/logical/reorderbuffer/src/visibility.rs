@@ -82,7 +82,17 @@ fn read_tid(b: &[u8]) -> ItemPointerData {
     ItemPointerData::new(block, u16::from_ne_bytes(b[4..6].try_into().unwrap()))
 }
 
-// ApplyLogicalMappingFile (reorderbuffer.c:5323): stream the file's
+// Wait event (wait_event_names.txt, IO section): reorderbuffer.c:5383.
+const PG_WAIT_IO: u32 = 0x0A00_0000;
+const WAIT_EVENT_REORDER_LOGICAL_MAPPING_READ: u32 = PG_WAIT_IO + 45;
+
+// The io::Error carrier for the thread's errno, as C's %m / errcode_for_
+// file_access read it at ereport time.
+fn os_error() -> std::io::Error {
+    std::io::Error::from_raw_os_error(elog::errno::current_errno())
+}
+
+// ApplyLogicalMappingFile (reorderbuffer.c:5357): stream the file's
 // (old locator/tid) -> (new locator/tid) entries into the tuplecid hash so
 // cmin/cmax lookups keep working against the rewritten catalog heap.
 pub(crate) fn ApplyLogicalMappingFile(
@@ -90,57 +100,66 @@ pub(crate) fn ApplyLogicalMappingFile(
     dir: &PathBuf,
     fname: &str,
 ) -> PgResult<()> {
-    use std::io::Read;
-
     let path = dir.join(fname);
     // Errors name the path as C builds it (reorderbuffer.c:5365).
     let cpath = format!("{PG_LOGICAL_MAPPINGS_DIR}/{fname}");
-    let mut file = std::fs::File::open(&path).map_err(|e| {
-        rb_file_error(format!("could not open file \"{cpath}\": %m"), &e)
-    })?;
-    let mut buf = [0u8; LOGICAL_REWRITE_MAPPING_SIZE];
+    // reorderbuffer.c:5366: OpenTransientFile(path, O_RDONLY | PG_BINARY).
+    let fd = fd::OpenTransientFile(&path.to_string_lossy(), libc::O_RDONLY)?;
+    if fd < 0 {
+        return Err(rb_file_error(format!("could not open file \"{cpath}\": %m"), &os_error()));
+    }
+
+    let result = apply_mapping_entries(hash, fd, &cpath);
+    // reorderbuffer.c:5437: CloseTransientFile(fd) != 0 is an ERROR of its
+    // own. On a read error C ereports with the descriptor still open and
+    // AtEOXact_Files releases it; here the transient descriptor is released
+    // first (twophase/files.rs does the same) and the read error wins.
+    let close_result = close_mapping_file(fd, &cpath);
+    result?;
+    close_result
+}
+
+// reorderbuffer.c:5437-5440.
+fn close_mapping_file(fd: i32, cpath: &str) -> PgResult<()> {
+    if fd::CloseTransientFile(fd) != 0 {
+        return Err(rb_file_error(format!("could not close file \"{cpath}\": %m"), &os_error()));
+    }
+    Ok(())
+}
+
+// reorderbuffer.c:5371-5435: the read loop over one open mapping file.
+fn apply_mapping_entries(hash: &RefCell<TupleCidHash>, fd: i32, cpath: &str) -> PgResult<()> {
+    let mut map = [0u8; LOGICAL_REWRITE_MAPPING_SIZE];
     loop {
-        // Read all mappings until the end of the file.
-        match file.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) if n == LOGICAL_REWRITE_MAPPING_SIZE => {}
-            Ok(n) => {
-                // C keeps reading on a short read only via read() semantics;
-                // match its error for a torn entry.
-                let mut got = n;
-                while got < LOGICAL_REWRITE_MAPPING_SIZE {
-                    match file.read(&mut buf[got..]) {
-                        Ok(0) => {
-                            // reorderbuffer.c:5397.
-                            return Err(rb_file_error(
-                                format!(
-                                    "could not read from file \"{cpath}\": read {got} instead of {} bytes",
-                                    LOGICAL_REWRITE_MAPPING_SIZE
-                                ),
-                                &std::io::Error::from_raw_os_error(0),
-                            ));
-                        }
-                        Ok(m) => got += m,
-                        Err(e) => {
-                            return Err(rb_file_error(
-                                format!("could not read file \"{cpath}\": %m"),
-                                &e,
-                            ))
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                return Err(rb_file_error(
-                    format!("could not read file \"{cpath}\": %m"),
-                    &e,
-                ))
-            }
+        // Read all mappings until the end of the file: one read() per
+        // entry, reported as ReorderLogicalMappingRead (reorderbuffer.c:
+        // 5383-5385).
+        waitevent_seams::pgstat_report_wait_start::call(WAIT_EVENT_REORDER_LOGICAL_MAPPING_READ);
+        // SAFETY: map is a live writable buffer of exactly map.len() bytes.
+        let read_bytes = unsafe { libc::read(fd, map.as_mut_ptr().cast(), map.len()) };
+        waitevent_seams::pgstat_report_wait_end::call();
+
+        if read_bytes < 0 {
+            // reorderbuffer.c:5388.
+            return Err(rb_file_error(format!("could not read file \"{cpath}\": %m"), &os_error()));
+        } else if read_bytes == 0 {
+            // EOF.
+            break;
+        } else if read_bytes as usize != LOGICAL_REWRITE_MAPPING_SIZE {
+            // reorderbuffer.c:5395: a torn entry, with whatever errno the
+            // short read left behind (C reads it the same way).
+            return Err(rb_file_error(
+                format!(
+                    "could not read from file \"{cpath}\": read {read_bytes} instead of {} bytes",
+                    LOGICAL_REWRITE_MAPPING_SIZE
+                ),
+                &os_error(),
+            ));
         }
 
         let old_key = ReorderBufferTupleCidKey {
-            rlocator: read_locator(&buf[0..12]),
-            tid: read_tid(&buf[24..30]),
+            rlocator: read_locator(&map[0..12]),
+            tid: read_tid(&map[24..30]),
         };
         let mut h = hash.borrow_mut();
         // No existing mapping: no need to update.
@@ -148,8 +167,8 @@ pub(crate) fn ApplyLogicalMappingFile(
             continue;
         };
         let new_key = ReorderBufferTupleCidKey {
-            rlocator: read_locator(&buf[12..24]),
-            tid: read_tid(&buf[30..36]),
+            rlocator: read_locator(&map[12..24]),
+            tid: read_tid(&map[30..36]),
         };
         // If present already, keep it (C asserts the existing entry agrees,
         // modulo entries that had no cmin/cmax yet); otherwise map over the
@@ -333,6 +352,7 @@ mod mapping_tests {
 
     #[test]
     fn apply_logical_mapping_file_remaps_known_tuples() {
+        crate::tests::install_file_seams();
         let dir = std::env::temp_dir().join(format!("rb-maptest-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let old = locator(1663, 5, 1259);
@@ -376,6 +396,7 @@ mod mapping_tests {
 
     #[test]
     fn apply_logical_mapping_file_rejects_torn_entry() {
+        crate::tests::install_file_seams();
         let dir = std::env::temp_dir().join(format!("rb-maptest-torn-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let fname = "map-5-4eb-3_28-2f1-2f3";
@@ -388,6 +409,7 @@ mod mapping_tests {
 
     #[test]
     fn apply_logical_mapping_file_missing_is_undefined_file() {
+        crate::tests::install_file_seams();
         let dir = std::env::temp_dir().join(format!("rb-maptest-miss-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let hash: RefCell<TupleCidHash> =
@@ -398,6 +420,62 @@ mod mapping_tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    // reorderbuffer.c:5383-5385: every read() of a mapping entry runs under
+    // WAIT_EVENT_REORDER_LOGICAL_MAPPING_READ (wait_event_names.txt IO
+    // section: PG_WAIT_IO + 45, "ReorderLogicalMappingRead"), one
+    // start/end pair per read including the EOF read that ends the loop
+    // (row a186-candidate-fp-logical-reorderbuffer-p3-055d8a875828ef7e472a-1).
+    #[test]
+    fn apply_logical_mapping_file_reports_read_wait_event() {
+        crate::tests::install_file_seams();
+        let dir = std::env::temp_dir().join(format!("rb-mapwait-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = locator(1663, 5, 1259);
+        let new = locator(1663, 5, 99998);
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&entry(old, (0, 1), new, (7, 3)));
+        bytes.extend_from_slice(&entry(old, (0, 2), new, (7, 4)));
+        let fname = "map-5-4eb-3_28-2f1-2f5";
+        std::fs::write(dir.join(fname), &bytes).unwrap();
+        let hash: RefCell<TupleCidHash> =
+            RefCell::new(PgFxHashMap::with_hasher_in(Default::default(), crate::rb_mcx()));
+
+        let starts_before = crate::tests::my_wait_starts().len();
+        let ends_before = crate::tests::my_wait_ends();
+        ApplyLogicalMappingFile(&hash, &dir, fname).unwrap();
+        let starts = crate::tests::my_wait_starts()[starts_before..].to_vec();
+        let ends = crate::tests::my_wait_ends() - ends_before;
+
+        const REORDER_LOGICAL_MAPPING_READ: u32 = 0x0A00_0000 + 45;
+        assert_eq!(
+            starts,
+            vec![REORDER_LOGICAL_MAPPING_READ; 3],
+            "two entries + the EOF read: three reads, each reported as ReorderLogicalMappingRead"
+        );
+        assert_eq!(ends, 3, "every wait_start is paired with a wait_end");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // reorderbuffer.c:5437-5440: a failing CloseTransientFile() is its own
+    // ERROR, errcode_for_file_access + "could not close file ...: %m". A
+    // descriptor number no open() in this process can hold makes close(2)
+    // fail with EBADF deterministically, and nobody else's file can sit
+    // behind it (row a186-candidate-fp-logical-reorderbuffer-p3-
+    // 2f34edf415e1621327cb-1).
+    #[test]
+    fn close_mapping_file_failure_is_c_ereport() {
+        crate::tests::install_file_seams();
+        let cpath = "pg_logical/mappings/map-5-4eb-3_28-2f1-2f6";
+        let err = close_mapping_file(i32::MAX, cpath).expect_err("close(2) failure is ERROR");
+        // elog.c errcode_for_file_access: EBADF is none of the named errnos,
+        // so it classifies as ERRCODE_INTERNAL_ERROR (the default arm).
+        assert_eq!(err.sqlstate, types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(
+            err.message,
+            format!("could not close file \"{cpath}\": Bad file descriptor")
+        );
+    }
+
     // UpdateLogicalMappings (reorderbuffer.c:5539): every mapping file queued
     // for this snapshot is announced at DEBUG1, in LSN order, naming the file
     // and the snapshot's first subxid (row a186-candidate-fp-logical-
@@ -405,6 +483,7 @@ mod mapping_tests {
     #[test]
     fn update_logical_mappings_logs_each_applied_file_at_debug1() {
         crate::tests::install_did_commit_stub();
+        crate::tests::install_file_seams();
         crate::tests::DID_COMMIT_ANSWER.with(|c| c.set(true));
 
         let base = std::env::temp_dir().join(format!("rb-mapdebug-{}", std::process::id()));

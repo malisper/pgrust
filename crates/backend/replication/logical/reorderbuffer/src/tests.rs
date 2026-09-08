@@ -912,6 +912,44 @@ pub(crate) fn install_did_commit_stub() {
     });
 }
 
+// The mapping-file reader goes through fd.c's transient-file API and the
+// wait-event brackets, whose seams are set-once per process; every test that
+// reaches ApplyLogicalMappingFile funnels through this. The wait-event
+// recorder is keyed by the reporting thread (the xlogreader WalRead witness
+// precedent) so parallel tests only ever witness their own reports.
+use std::thread::ThreadId;
+static WAIT_STARTS: std::sync::Mutex<Vec<(ThreadId, u32)>> = std::sync::Mutex::new(Vec::new());
+static WAIT_ENDS: std::sync::Mutex<Vec<ThreadId>> = std::sync::Mutex::new(Vec::new());
+
+pub(crate) fn install_file_seams() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        if !xact_seams::get_current_sub_transaction_id::is_installed() {
+            xact_seams::get_current_sub_transaction_id::set(|| types_core::TopSubTransactionId);
+        }
+        if !waitevent_seams::pgstat_report_wait_start::is_installed() {
+            waitevent_seams::pgstat_report_wait_start::set(|info| {
+                WAIT_STARTS.lock().unwrap().push((std::thread::current().id(), info));
+            });
+            waitevent_seams::pgstat_report_wait_end::set(|| {
+                WAIT_ENDS.lock().unwrap().push(std::thread::current().id());
+            });
+        }
+    });
+}
+
+// This thread's pgstat_report_wait_start ids, in report order.
+pub(crate) fn my_wait_starts() -> Vec<u32> {
+    let me = std::thread::current().id();
+    WAIT_STARTS.lock().unwrap().iter().filter(|(t, _)| *t == me).map(|(_, i)| *i).collect()
+}
+
+// This thread's pgstat_report_wait_end count.
+pub(crate) fn my_wait_ends() -> usize {
+    let me = std::thread::current().id();
+    WAIT_ENDS.lock().unwrap().iter().filter(|t| **t == me).count()
+}
+
 #[test]
 fn setup_check_xid_live_matches_c_arms() {
     install_did_commit_stub();
