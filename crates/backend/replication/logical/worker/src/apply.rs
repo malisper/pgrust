@@ -1773,6 +1773,13 @@ fn apply_handle_tuple_routing<'mcx>(
         &entry.remoterel.nspname,
         &entry.remoterel.relname,
     )?;
+    // Same reason for the AM gate: a columnar leaf can be attached after the
+    // CREATE/REFRESH-time CheckSubscriptionRelam check ran.
+    logicalrelation::check_target_am(
+        partrel.rd_rel.relam,
+        &entry.remoterel.nspname,
+        &entry.remoterel.relname,
+    )?;
 
     // Convert the tuple to the partition's rowtype if needed (worker.c:3168).
     let root_to_leaf: Option<Vec<i16>> = proute.leaf_attrmap(idx).map(|m| m.to_vec());
@@ -1905,6 +1912,11 @@ fn apply_handle_tuple_routing<'mcx>(
                 let newpartrel = proute.leaf_rel(new_idx).alias();
                 logicalrelation::check_relkind(
                     newpartrel.rd_rel.relkind as u8,
+                    &entry.remoterel.nspname,
+                    &entry.remoterel.relname,
+                )?;
+                logicalrelation::check_target_am(
+                    newpartrel.rd_rel.relam,
                     &entry.remoterel.nspname,
                     &entry.remoterel.relname,
                 )?;

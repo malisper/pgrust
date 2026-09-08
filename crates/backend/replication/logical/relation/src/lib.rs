@@ -29,8 +29,8 @@ use logicalproto::{LogicalRepRelId, LogicalRepRelation};
 use mcx::Mcx;
 use types_core::{InvalidOid, InvalidXLogRecPtr, Oid, XLogRecPtr};
 use types_error::{
-    ErrorLocation, PgError, PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
-    ERRCODE_WRONG_OBJECT_TYPE, ERROR,
+    ErrorLocation, PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED,
+    ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
 use types_rel::{Relation, LOCKMODE};
 
@@ -345,6 +345,19 @@ pub fn check_relkind(relkind: u8, nspname: &str, relname: &str) -> PgResult<()> 
     Ok(())
 }
 
+// Apply bypasses ModifyTable and never publishes columnar writers before advancing the origin.
+pub fn check_target_am(relam: Oid, nspname: &str, relname: &str) -> PgResult<()> {
+    if tableam_vocab::is_pgrcolumnar_am_oid(relam) || tableam_vocab::is_pgrcolumnar2_am_oid(relam) {
+        ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(format!(
+                "cannot use columnar relation \"{nspname}.{relname}\" as logical replication target"
+            ))
+            .finish(loc("logicalrep_rel_open"))?;
+    }
+    Ok(())
+}
+
 // logicalrep_rel_open (relation.c:349): returns the (possibly rebuilt) entry
 // metadata plus the opened+locked local relation.
 pub fn logicalrep_rel_open<'mcx>(
@@ -405,6 +418,7 @@ pub fn logicalrep_rel_open<'mcx>(
         entry.localreloid = relid;
 
         check_relkind(rel.rd_rel.relkind as u8, &remoterel.nspname, &remoterel.relname)?;
+        check_target_am(rel.rd_rel.relam, &remoterel.nspname, &remoterel.relname)?;
 
         // Local-offset -> remote-column attrmap by column name; track remote
         // columns with no local counterpart and local generated columns
@@ -519,6 +533,26 @@ pub fn logicalrep_relmap_init() -> PgResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn columnar_targets_refuse_typed() {
+        let v1: Oid = 910_001;
+        let v2: Oid = 910_002;
+        let heap_am: Oid = 2;
+        tableam_vocab::register_pgrcolumnar_table_am(v1);
+        tableam_vocab::register_pgrcolumnar2_table_am(v2);
+
+        assert!(check_target_am(heap_am, "public", "t").is_ok());
+        for am in [v1, v2] {
+            let err = check_target_am(am, "public", "t").expect_err("columnar target must refuse");
+            assert_eq!(err.sqlstate(), ERRCODE_FEATURE_NOT_SUPPORTED);
+            assert!(
+                err.message().contains("cannot use columnar relation \"public.t\""),
+                "unexpected refusal message: {}",
+                err.message()
+            );
+        }
+    }
 
     fn remoterel() -> LogicalRepRelation {
         LogicalRepRelation {

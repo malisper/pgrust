@@ -531,6 +531,10 @@ impl WriterRegistry {
         self.writers.is_empty()
     }
 
+    pub fn registered_stamps(&self) -> impl Iterator<Item = (u64, TxnStamp)> + '_ {
+        self.writers.iter().map(|(k, w)| (*k, w.stamp()))
+    }
+
     /// Get the table's writer, EVICTING a stale one first (stamp mismatch ⇒
     /// abort + drop, the old-writer law). `open` constructs a fresh writer
     /// when none (or a stale one) is registered.

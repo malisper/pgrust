@@ -19,6 +19,7 @@ walreceiver = { path = "../../replication/walreceiver" }
 origin = { path = "../../replication/origin" }
 catalog_namespace = { path = "../../catalog/catalog_namespace" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
+tableam_vocab = { path = "../../access/table/tableam_vocab" }
 rel_vocab = { path = "../../../_support/types/rel_vocab" }
 types_rel = { path = "../../../_support/types/rel" }
 types_scan = { path = "../../../_support/types/types_scan" }

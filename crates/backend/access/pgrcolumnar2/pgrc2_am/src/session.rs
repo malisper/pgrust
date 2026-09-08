@@ -234,9 +234,32 @@ fn pgrc2_xact_callback(event: XactEvent, _arg: datum::Datum) -> PgResult<()> {
         XACT_EVENT_PREPARE => {
             purge_writers();
         }
-        XACT_EVENT_PRE_COMMIT | XACT_EVENT_PARALLEL_PRE_COMMIT => {}
+        XACT_EVENT_PRE_COMMIT | XACT_EVENT_PARALLEL_PRE_COMMIT => {
+            // Unpublished writers from aborted savepoints may be discarded; live ones must refuse.
+            let live = WRITERS.with(|w| {
+                w.borrow().registered_stamps().find(|(_, stamp)| {
+                    xact::TransactionIdIsCurrentTransactionId(
+                        types_core::xact::FullTransactionId::from_u64(stamp.fxid).xid(),
+                    )
+                })
+            });
+            if let Some((relfilenumber, _)) = live {
+                return Err(unpublished_ingest_error(relfilenumber));
+            }
+        }
     }
     Ok(())
+}
+
+#[cold]
+fn unpublished_ingest_error(relfilenumber: u64) -> Box<types_error::PgError> {
+    Box::new(
+        types_error::PgError::error(format!(
+            "pgrcolumnar2: buffered ingest for relfilenumber {relfilenumber} reached \
+             commit without table_finish_bulk_insert; unpublished rows would be lost"
+        ))
+        .with_sqlstate(types_error::ERRCODE_INTERNAL_ERROR),
+    )
 }
 
 fn pgrc2_subxact_callback(

@@ -399,6 +399,7 @@ pub(crate) fn AlterSubscription_refresh<'mcx>(
                 nspname,
                 relname,
             )?;
+            crate::CheckSubscriptionRelam(mcx, relid, nspname, relname)?;
             pubrel_local_oids.push(relid);
 
             if subrel_local_oids.binary_search(&relid).is_err() {
