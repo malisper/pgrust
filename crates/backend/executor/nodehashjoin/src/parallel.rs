@@ -7,7 +7,8 @@ use ::executils::{EStateData, ExecSlotId};
 use ::nodehash::parallel::{
     self as phj, ParallelHashJoinTable, PHJ_BATCH_ALLOCATE, PHJ_BATCH_ELECT, PHJ_BATCH_FREE,
     PHJ_BATCH_LOAD, PHJ_BATCH_PROBE, PHJ_BATCH_SCAN, PHJ_BUILD_FREE, PHJ_BUILD_HASH_OUTER,
-    PHJ_BUILD_RUN,
+    PHJ_BUILD_RUN, WAIT_EVENT_HASH_BATCH_ALLOCATE, WAIT_EVENT_HASH_BATCH_ELECT,
+    WAIT_EVENT_HASH_BATCH_LOAD, WAIT_EVENT_HASH_BUILD_HASH_OUTER,
 };
 use ::nodehash::{HashBuildInput, HashJoinTupleHdr, HashState};
 use ::types_error::PgResult;
@@ -116,7 +117,7 @@ where
                 if table.total_tuples == 0.0 && !node.hj_fill_outer {
                     // Advance to PHJ_BUILD_RUN so cleanup can be negotiated.
                     while build_barrier.phase() < PHJ_BUILD_RUN {
-                        build_barrier.arrive_and_wait()?;
+                        build_barrier.arrive_and_wait(0)?;
                     }
                     hash_state.ptable = Some(table);
                     return Ok(None);
@@ -130,7 +131,7 @@ where
                     if table.nbatch > 1 {
                         partition_outer(node, outer, &mut table, estate)?;
                     }
-                    build_barrier.arrive_and_wait()?;
+                    build_barrier.arrive_and_wait(WAIT_EVENT_HASH_BUILD_HASH_OUTER)?;
                 } else if phase == PHJ_BUILD_FREE {
                     // Attached too late; the job is already done.
                     hash_state.ptable = Some(table);
@@ -531,13 +532,13 @@ fn parallel_new_batch<'mcx>(hash_state: &mut HashState<'mcx>) -> PgResult<bool> 
         if !table.batch_done(batchno) {
             let mut phase = table.batch_barrier(batchno).attach();
             if phase == PHJ_BATCH_ELECT {
-                if table.batch_barrier(batchno).arrive_and_wait()? {
+                if table.batch_barrier(batchno).arrive_and_wait(WAIT_EVENT_HASH_BATCH_ELECT)? {
                     phj::exec_parallel_hash_table_alloc(table, batchno);
                 }
                 phase = PHJ_BATCH_ALLOCATE;
             }
             if phase == PHJ_BATCH_ALLOCATE {
-                table.batch_barrier(batchno).arrive_and_wait()?;
+                table.batch_barrier(batchno).arrive_and_wait(WAIT_EVENT_HASH_BATCH_ALLOCATE)?;
                 phase = PHJ_BATCH_LOAD;
             }
             if phase == PHJ_BATCH_LOAD {
@@ -559,7 +560,7 @@ fn parallel_new_batch<'mcx>(hash_state: &mut HashState<'mcx>) -> PgResult<bool> 
                     phj::exec_parallel_hash_table_insert_current_batch(table, image, hashvalue)?;
                 }
                 table.inner_tuples(batchno).end_parallel_scan()?;
-                table.batch_barrier(batchno).arrive_and_wait()?;
+                table.batch_barrier(batchno).arrive_and_wait(WAIT_EVENT_HASH_BATCH_LOAD)?;
                 phase = PHJ_BATCH_PROBE;
             }
             match phase {

@@ -35,6 +35,11 @@ fn setup() {
         waiteventset::init_seams();
         latch::init_seams();
         init_seams();
+        // ProcSignalShmemInit's per-slot ConditionVariableInit, at a slot
+        // count a max_connections=5000 configuration produces.
+        condition_variable_seams::proc_signal_barrier_cvs_init::call(
+            5000 + types_storage::storage::NUM_AUXILIARY_PROCS,
+        );
     });
 }
 
@@ -225,4 +230,20 @@ fn crash_reset_checkpointer_cv_survives_killed_sleeper() {
         CheckpointerCvsResetAfterCrash,
         7300,
     );
+}
+
+// audit-18.6 w2-013 (procsignal.c:75 ProcSignalShmemInit): pss_barrierCV
+// storage is one ConditionVariable per ProcSignal slot, NumProcSignalSlots =
+// MaxBackends + NUM_AUXILIARY_PROCS, and max_connections may reach
+// MAX_BACKENDS — a slot index past 4096 must resolve to a CV (WaitForProcSignalBarrier
+// walks every slot; a backend seated there broadcasts its own slot).
+#[test]
+fn barrier_cv_slots_cover_num_proc_signal_slots() {
+    let _s = serial();
+    setup();
+    become_backend(0, 7400);
+    let slots = 5000 + types_storage::storage::NUM_AUXILIARY_PROCS;
+    let last = slots - 1;
+    condition_variable_seams::proc_signal_barrier_cv_broadcast::call(last);
+    assert_eq!(wakeup_len_locked(barrier_cv(last)), 0);
 }

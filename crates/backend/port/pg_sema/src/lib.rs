@@ -46,6 +46,17 @@ fn sema(procno: ProcNumber) -> &'static PgSemaphore {
     })
 }
 
+// C sizeof(PGSemaphoreData) (posix_sema.c:52) = sizeof(sem_t) = 32 on
+// LP64 glibc — the unnamed-POSIX-semaphore build (USE_UNNAMED_POSIX_SEMAPHORES,
+// the Linux default; named semaphores would need no shared memory).
+const C_SIZEOF_PG_SEMAPHORE_DATA: usize = 32;
+
+/// PGSemaphoreShmemSize (posix_sema.c:165): one PGSemaphoreData per
+/// semaphore in shared memory.
+pub fn PGSemaphoreShmemSize(max_semas: i32) -> types_error::PgResult<usize> {
+    shmem_seams::mul_size::call(max_semas as usize, C_SIZEOF_PG_SEMAPHORE_DATA)
+}
+
 pub fn PGSemaphoreCreate(procno: ProcNumber) {
     let mut semas = SEMAS.write().unwrap();
     assert_eq!(

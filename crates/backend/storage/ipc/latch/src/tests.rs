@@ -534,3 +534,29 @@ fn wait_latch_runs_thread_signal_drain() {
 
     SetMyLatch(None);
 }
+
+// audit-18.6 w2-013: C's LocalLatchData is per-process storage, so every
+// backend a max_connections up to MAX_BACKENDS admits owns a latch; the local
+// slab must scale with the configured backend count instead of refusing the
+// 4097th concurrent thread ("local latch slab exhausted").
+#[test]
+fn local_latch_slab_scales_with_configured_backends() {
+    let _g = TEST_LOCK.lock().unwrap();
+    // ipci sizes this from MaxLivePostmasterChildren() + 1 at shmem init.
+    LocalLatchSlabInit(1024);
+    let want = LOCAL_LATCH_CAP + 64;
+    let handles: Mutex<Vec<LatchHandle>> = Mutex::new(Vec::with_capacity(want));
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        for _ in 0..want {
+            let h = allocate_local_latch();
+            handles.lock().unwrap().push(h);
+        }
+    }));
+    let got = handles.into_inner().unwrap();
+    let high = local_latch_high_water();
+    for h in got {
+        free_local_latch(h);
+    }
+    assert!(outcome.is_ok(), "allocating {want} local latches panicked");
+    assert!(high > LOCAL_LATCH_CAP, "high water {high} never left the boot slab");
+}

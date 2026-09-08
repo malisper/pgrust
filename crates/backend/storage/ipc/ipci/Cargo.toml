@@ -36,6 +36,7 @@ subtrans = { path = "../../../access/transam/subtrans" }
 multixact = { path = "../../../access/transam/multixact" }
 twophase = { path = "../../../access/transam/twophase" }
 sinval = { path = "../sinval" }
+latch = { path = "../latch" }
 pmsignal = { path = "../pmsignal" }
 procsignal = { path = "../procsignal" }
 aio_core = { path = "../../aio/aio_core" }
@@ -54,6 +55,15 @@ ipci_seams = { path = "../ipci_seams" }
 pmchild_seams = { path = "../../../postmaster/pmchild_seams" }
 backend_status_seams = { path = "../../../utils/activity/backend_status_seams" }
 types_guc = { path = "../../../../_support/types/types_guc" }
+# CalculateShmemSize terms (ipci.c:116-165).
+pg_sema = { path = "../../../port/pg_sema" }
+dynahash = { path = "../../../utils/hash/dynahash" }
+xlogrecovery = { path = "../../../access/transam/xlogrecovery" }
+bgworker = { path = "../../../postmaster/bgworker" }
+walsender = { path = "../../../replication/walsender" }
+launcher = { path = "../../../replication/launcher" }
+nbtree = { path = "../../../access/nbtree/nbtree" }
+pgstat = { path = "../../../utils/activity/pgstat" }
 
 [dev-dependencies]
 file_seams = { path = "../../file/file_seams" }
@@ -67,5 +77,4 @@ scalar_seams = { path = "../../../utils/adt/scalar_seams" }
 aclchk_seams = { path = "../../../catalog/aclchk_seams" }
 mbutils_seams = { path = "../../../utils/mb/mbutils_seams" }
 init_small_seams = { path = "../../../utils/init/init_small_seams" }
-pgstat = { path = "../../../utils/activity/pgstat" }
 condition_variable_seams = { path = "../../lmgr/condition_variable_seams" }

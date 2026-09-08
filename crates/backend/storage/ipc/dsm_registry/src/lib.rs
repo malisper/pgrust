@@ -43,10 +43,18 @@ pub fn DSMRegistryShmemSize() -> usize {
     16
 }
 
-pub fn DSMRegistryShmemInit() {
-    REGISTRY
-        .set(Registry(UnsafeCell::new(Vec::new())))
-        .unwrap_or_else(|_| panic!("DSMRegistryShmemInit called twice"));
+/// DSMRegistryShmemInit (dsm_registry.c:74): ShmemInitStruct("DSM Registry
+/// Data", DSMRegistryShmemSize()) registers the block in the ShmemIndex, so
+/// pg_shmem_allocations lists it; a fresh segment (!found) boots the
+/// registry (C: dsah/dshh invalid), a re-entry leaves the live table alone.
+pub fn DSMRegistryShmemInit() -> PgResult<()> {
+    let (_raw, found) = shmem::ShmemInitStruct("DSM Registry Data", DSMRegistryShmemSize())?;
+    if !found {
+        REGISTRY
+            .set(Registry(UnsafeCell::new(Vec::new())))
+            .unwrap_or_else(|_| panic!("DSMRegistryShmemInit: fresh segment but the registry already exists"));
+    }
+    Ok(())
 }
 
 pub fn DSMRegistryShmemResetAfterCrash() {

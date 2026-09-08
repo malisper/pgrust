@@ -37,7 +37,7 @@ use types_rel::rel::RelationData;
 
 pub use buf_hdr::{
     BufferDesc, BufferDescriptorGetBuffer, BufferGetBlockPtr, BufferManagerShmemInit,
-    BufferManagerShmemResetAfterCrash, GetBufferDescriptor, LockBufHdr, NBuffersInited,
+    BufferManagerShmemResetAfterCrash, BufferManagerShmemSize, GetBufferDescriptor, LockBufHdr, NBuffersInited,
     UnlockBufHdr, BUFFERDESC_PAD_TO_SIZE,
 };
 pub use buf_table::{BufMappingPartitionLock, BufTableHashCode, BufTableLookup};

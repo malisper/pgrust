@@ -9,7 +9,7 @@ use std::cell::Cell;
 // primitives, which is what makes WaitLatch/SetLatch directly loom-modelable
 // (tests/loom.rs drives THIS code, not a mirror).
 use pgsync::atomic::{
-    AtomicUsize,
+    AtomicPtr, AtomicUsize,
     Ordering::{Acquire, Relaxed, Release},
 };
 use pgsync::Mutex;
@@ -28,12 +28,17 @@ const LatchWaitSetLatchPos: i32 = 0;
 const LatchWaitSetPostmasterDeathPos: i32 = 1;
 
 // C callers declare `Latch` storage themselves (miscinit.c's LocalLatchData,
-// aux-process statics); here that storage is this fixed slab, handed out by
-// allocate_local_latch. Const-init statics keep handle resolution a plain
-// index — SetLatch stays lock- and allocation-free (signal-handler-reachable).
+// aux-process statics); here that storage is a const-init boot slab plus an
+// extension slab sized from the configured backend count at shared-memory
+// init (LocalLatchSlabInit — C has one LocalLatchData per process, and
+// max_connections may reach MAX_BACKENDS), both handed out by
+// allocate_local_latch. Handle resolution stays a plain index (one Acquire
+// load for the extension) — SetLatch stays lock- and allocation-free
+// (signal-handler-reachable). The boot slab serves allocations before
+// shmem init (the postmaster's own latch, unit processes).
 //
-// Under --cfg loom the slab shrinks: models allocate 1-2 latches, and every
-// Latch is 5 loom-tracked atomic cells created per model iteration.
+// Under --cfg loom the boot slab shrinks: models allocate 1-2 latches, and
+// every Latch is 5 loom-tracked atomic cells created per model iteration.
 #[cfg(not(loom))]
 const LOCAL_LATCH_CAP: usize = 4096;
 #[cfg(loom)]
@@ -63,6 +68,42 @@ pgsync::process_global! {
     // C latch.c: the single static recovery-wakeup latch (was a fn-local
     // static in latch_ref; hoisted to module scope for the shim).
     static RECOVERY_WAKEUP: Latch = Latch::new(true, 0);
+    // Extension slab (LocalLatchSlabInit): a leaked boot allocation published
+    // once — len stored first, ptr Release-stored last; readers Acquire the
+    // ptr. Ids above LOCAL_LATCH_CAP index into it.
+    static LOCAL_LATCH_EXT: AtomicPtr<Latch> = AtomicPtr::new(core::ptr::null_mut());
+    static LOCAL_LATCH_EXT_LEN: AtomicUsize = AtomicUsize::new(0);
+    static LOCAL_LATCH_EXT_INIT: Mutex<()> = Mutex::new(());
+}
+
+/// Size the local-latch slab for `owners` concurrent latch owners beyond the
+/// boot slab: C's LocalLatchData is per-process storage (miscinit.c), one
+/// for every live postmaster child plus the postmaster, so the thread model
+/// provisions that many at shared-memory init. A repeat call keeps the
+/// first slab (ShmemInitStruct's `found` arm).
+pub fn LocalLatchSlabInit(owners: usize) {
+    assert!(owners > 0, "LocalLatchSlabInit: owner count not initialized");
+    let _init = LOCAL_LATCH_EXT_INIT.lock().unwrap_or_else(|e| e.into_inner());
+    if !LOCAL_LATCH_EXT.load(Acquire).is_null() {
+        return;
+    }
+    let slab: &'static mut [Latch] = (0..owners)
+        .map(|_| Latch::new(false, 0))
+        .collect::<Vec<_>>()
+        .leak();
+    LOCAL_LATCH_EXT_LEN.store(slab.len(), Relaxed);
+    LOCAL_LATCH_EXT.store(slab.as_mut_ptr(), Release);
+}
+
+// (ptr, len) of the extension slab; (null, 0) before LocalLatchSlabInit.
+#[inline]
+fn local_latch_ext() -> (*mut Latch, usize) {
+    let ptr = LOCAL_LATCH_EXT.load(Acquire);
+    if ptr.is_null() {
+        (ptr, 0)
+    } else {
+        (ptr, LOCAL_LATCH_EXT_LEN.load(Relaxed))
+    }
 }
 
 pub fn allocate_local_latch() -> LatchHandle {
@@ -74,7 +115,11 @@ pub fn allocate_local_latch() -> LatchHandle {
         return LatchHandle::new(id);
     }
     let id = LOCAL_LATCH_NEXT.fetch_add(1, Relaxed);
-    assert!(id < LOCAL_LATCH_CAP, "local latch slab exhausted");
+    let (_, ext_len) = local_latch_ext();
+    assert!(
+        id < LOCAL_LATCH_CAP + ext_len,
+        "local latch slab exhausted ({LOCAL_LATCH_CAP} boot + {ext_len} configured slots)"
+    );
     LatchHandle::new(id + 1)
 }
 
@@ -101,7 +146,21 @@ pub fn latch_ref(latch: LatchHandle) -> &'static Latch {
     match latch.kind() {
         LatchKind::Local(id) => {
             debug_assert!(id >= 1 && id <= LOCAL_LATCH_NEXT.load(Relaxed));
-            &LOCAL_LATCHES[id - 1]
+            let idx = id - 1;
+            if idx < LOCAL_LATCH_CAP {
+                return &LOCAL_LATCHES[idx];
+            }
+            let (ext, ext_len) = local_latch_ext();
+            let ext_idx = idx - LOCAL_LATCH_CAP;
+            assert!(
+                ext_idx < ext_len,
+                "local latch id {id} beyond the slab ({LOCAL_LATCH_CAP} boot + {ext_len} configured)"
+            );
+            // SAFETY: a leaked `ext_len`-element slab, never freed or moved;
+            // the Acquire load of the ptr pairs with LocalLatchSlabInit's
+            // Release store, which follows the len store and the writes that
+            // initialized every element.
+            unsafe { &*ext.add(ext_idx) }
         }
         LatchKind::Proc(procno) => lmgr_proc_seams::proc_latch::call(procno),
         LatchKind::RecoveryWakeup => &RECOVERY_WAKEUP,

@@ -39,9 +39,9 @@ fn barrier_static_party_release_single_election() {
         let b = Arc::new(Barrier::new(2));
         let peer = {
             let b = Arc::clone(&b);
-            loom::thread::spawn(move || b.arrive_and_wait().unwrap())
+            loom::thread::spawn(move || b.arrive_and_wait(0).unwrap())
         };
-        let elected_here = b.arrive_and_wait().unwrap();
+        let elected_here = b.arrive_and_wait(0).unwrap();
         let elected_peer = peer.join().unwrap();
         assert!(
             elected_here ^ elected_peer,
@@ -66,7 +66,7 @@ fn barrier_detach_releases_parked_arriver() {
         let arriver = {
             let b = Arc::clone(&b);
             loom::thread::spawn(move || {
-                let elected = b.arrive_and_wait().unwrap();
+                let elected = b.arrive_and_wait(0).unwrap();
                 assert!(
                     elected,
                     "phase advanced without a releasing arrival: the woken \
@@ -95,7 +95,7 @@ fn barrier_arrive_and_detach_releases_peer() {
         b.attach();
         let peer = {
             let b = Arc::clone(&b);
-            loom::thread::spawn(move || b.arrive_and_wait().unwrap())
+            loom::thread::spawn(move || b.arrive_and_wait(0).unwrap())
         };
         let last = b.arrive_and_detach();
         assert!(!last, "peer still attached: arrive_and_detach is not last");

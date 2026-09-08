@@ -51,7 +51,7 @@ fn bringup() -> MutexGuard<'static, ()> {
         procsignal::ProcSignalShmemInit();
     });
     // Idempotent; refreshes pmsignal's thread-local num_child_flags copy.
-    pmsignal::PMSignalShmemInit(pmchild_seams::max_live_postmaster_children::call());
+    pmsignal::PMSignalShmemInit(pmchild_seams::max_live_postmaster_children::call()).unwrap();
     TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 

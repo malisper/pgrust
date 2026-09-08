@@ -1950,6 +1950,26 @@ pgsync::process_global! {
     });
 }
 
+// C sizes (nbtutils.c): offsetof(BTVacInfo, vacuums) = BTCycleId (uint16,
+// padded) + int num_vacuums + int max_vacuums = 12; sizeof(BTOneVacInfo) =
+// LockRelId (2 Oids) + BTCycleId, padded = 12.
+const C_OFFSETOF_BT_VAC_INFO_VACUUMS: usize = 12;
+const C_SIZEOF_BT_ONE_VAC_INFO: usize = 12;
+
+/// BTreeShmemSize (nbtutils.c:3512): the BTVacInfo header plus one
+/// BTOneVacInfo per backend (MaxBackends).
+pub fn BTreeShmemSize() -> PgResult<usize> {
+    let mut size = C_OFFSETOF_BT_VAC_INFO_VACUUMS;
+    size = ::mcx::add_size(
+        size,
+        ::mcx::mul_size(
+            ::init_small::globals::MaxBackends() as usize,
+            C_SIZEOF_BT_ONE_VAC_INFO,
+        )?,
+    )?;
+    Ok(size)
+}
+
 pub(crate) fn vac_key(rel: &Relation<'_>) -> (::types_core::Oid, ::types_core::Oid) {
     (rel.rd_locator.get().dbOid, rel.rd_id)
 }

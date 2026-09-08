@@ -35,7 +35,7 @@ fn bringup() -> MutexGuard<'static, ()> {
     g::SetIsUnderPostmaster(true);
     g::SetIsPostmasterEnvironment(true);
     g::SetMaxBackends(16);
-    pmsignal::PMSignalShmemInit(8);
+    pmsignal::PMSignalShmemInit(8).unwrap();
     procsignal::ProcSignalShmemInit();
     *REGISTRY.lock().unwrap_or_else(|e| e.into_inner()) = None;
     // A fresh postmaster has no pending static registrations. The pending

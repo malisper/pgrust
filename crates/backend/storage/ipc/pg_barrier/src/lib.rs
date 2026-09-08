@@ -34,10 +34,21 @@ mod route {
     }
 
     #[inline]
-    pub(crate) fn park_wait() -> PgResult<()> {
+    pub(crate) fn park_wait(wait_event_info: u32) -> PgResult<()> {
         // 10ms timed park = the InterruptPending poll cadence the old
-        // Condvar wait had; a phase advance unparks promptly.
+        // Condvar wait had; a phase advance unparks promptly. The park is
+        // bracketed by the caller's wait_event_info like C's
+        // ConditionVariableSleep -> WaitLatch (pgstat_report_wait_start/end
+        // around every wait); guarded like latch::WaitLatch — unit tests run
+        // without the activity seams installed.
+        let report = waitevent_seams::pgstat_report_wait_start::is_installed();
+        if report {
+            waitevent_seams::pgstat_report_wait_start::call(wait_event_info);
+        }
         let _ = waiter::park_timeout(core::time::Duration::from_millis(10));
+        if report {
+            waitevent_seams::pgstat_report_wait_end::call();
+        }
         if init_small::globals::InterruptPending() {
             postgres_seams::check_for_interrupts::call()?;
         }
@@ -103,7 +114,7 @@ mod route {
         })
     }
 
-    pub(crate) fn park_wait() -> PgResult<()> {
+    pub(crate) fn park_wait(_wait_event_info: u32) -> PgResult<()> {
         let word = current_word();
         let slot = {
             let v = SLOTS.lock().unwrap();
@@ -166,8 +177,10 @@ impl Barrier {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// `BarrierArriveAndWait`: true in the one elected participant.
-    pub fn arrive_and_wait(&self) -> PgResult<bool> {
+    /// `BarrierArriveAndWait` (barrier.c:125): true in the one elected
+    /// participant. While parked, pg_stat_activity shows `wait_event_info`
+    /// (a WAIT_EVENT_* IPC value, 0 for none).
+    pub fn arrive_and_wait(&self, wait_event_info: u32) -> PgResult<bool> {
         let (start_phase, next_phase);
         {
             let mut b = self.lock();
@@ -202,7 +215,7 @@ impl Barrier {
                 b.waiters.push(handle);
             }
             drop(b);
-            if let Err(e) = route::park_wait() {
+            if let Err(e) = route::park_wait(wait_event_info) {
                 // A cancel/die interrupt raised inside the wait unwinds this
                 // arrival. C leaves `arrived` counted (CHECK_FOR_INTERRUPTS
                 // throws out of ConditionVariableSleep) and survives anyway:
@@ -345,7 +358,7 @@ mod tests {
             handles.push(std::thread::spawn(move || {
                 let mut elected = 0;
                 for _ in 0..5 {
-                    if b.arrive_and_wait().unwrap() {
+                    if b.arrive_and_wait(0).unwrap() {
                         elected += 1;
                     }
                 }
@@ -401,7 +414,7 @@ mod tests {
         assert_eq!(b.attach(), 0);
         let a = {
             let b = std::sync::Arc::clone(&b);
-            std::thread::spawn(move || b.arrive_and_wait().unwrap())
+            std::thread::spawn(move || b.arrive_and_wait(0).unwrap())
         };
         // A has arrived and is parked.
         while b.lock().arrived < 1 {
@@ -410,7 +423,7 @@ mod tests {
         // B arrives with a pending interrupt: the wait unwinds with the
         // raised error and the arrival must be rolled back.
         init_small::globals::SetInterruptPending(true);
-        assert!(b.arrive_and_wait().is_err());
+        assert!(b.arrive_and_wait(0).is_err());
         assert_eq!(
             b.lock().arrived,
             1,
@@ -426,9 +439,63 @@ mod tests {
             "phase advanced without attached participant C arriving"
         );
         // C arrives: NOW the phase advances and A is released.
-        assert!(b.arrive_and_wait().unwrap());
+        assert!(b.arrive_and_wait(0).unwrap());
         assert!(!a.join().unwrap());
         assert_eq!(b.lock().phase, 1);
+    }
+
+    // audit-18.6 w2-013 (barrier.c:125 BarrierArriveAndWait): a parked
+    // arrival sleeps under the caller's wait_event_info (C:
+    // ConditionVariableSleep -> pgstat_report_wait_start/end around every
+    // WaitLatch), so pg_stat_activity shows the Hash* IPC events while
+    // parallel-hash participants wait on a barrier.
+    #[test]
+    fn arrive_and_wait_reports_wait_event() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Mutex;
+        static STARTS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+        static ENDS: AtomicUsize = AtomicUsize::new(0);
+        static INSTALL: std::sync::Once = std::sync::Once::new();
+        INSTALL.call_once(|| {
+            waitevent_seams::pgstat_report_wait_start::set(|info| {
+                STARTS.lock().unwrap_or_else(|e| e.into_inner()).push(info);
+            });
+            waitevent_seams::pgstat_report_wait_end::set(|| {
+                ENDS.fetch_add(1, Ordering::SeqCst);
+            });
+        });
+        // PG_WAIT_IPC | HashBuildElect (wait_event_names.txt IPC row 18).
+        const WAIT_EVENT_HASH_BUILD_ELECT: u32 = 0x0800_0000 | 18;
+
+        let b = std::sync::Arc::new(Barrier::new(2));
+        let parked = {
+            let b = std::sync::Arc::clone(&b);
+            std::thread::spawn(move || b.arrive_and_wait(WAIT_EVENT_HASH_BUILD_ELECT).unwrap())
+        };
+        while b.lock().arrived < 1 {
+            std::thread::yield_now();
+        }
+        // The parked participant has issued at least one timed park by now.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        // The recorder is process-global: sibling tests park with event 0 in
+        // parallel, so only this barrier's event is asserted on.
+        let seen: Vec<u32> = STARTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .copied()
+            .filter(|&i| i != 0)
+            .collect();
+        assert!(b.arrive_and_wait(WAIT_EVENT_HASH_BUILD_ELECT).unwrap());
+        assert!(!parked.join().unwrap());
+        assert!(!seen.is_empty(), "no wait event reported while parked on the barrier");
+        assert!(
+            seen.iter().all(|&i| i == WAIT_EVENT_HASH_BUILD_ELECT),
+            "wait events reported: {seen:x?}"
+        );
+        // Every park is bracketed: the parked participant has returned, so
+        // its wait_end reports have landed.
+        assert!(ENDS.load(Ordering::SeqCst) >= seen.len(), "wait_end brackets missing");
     }
 
     #[test]

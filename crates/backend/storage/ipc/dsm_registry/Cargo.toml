@@ -14,4 +14,5 @@ types_storage = { path = "../../../../_support/types/types_storage" }
 elog = { path = "../../../utils/error/elog" }
 init_small = { path = "../../../utils/init/init_small" }
 lwlock = { path = "../../lmgr/lwlock" }
+shmem = { path = "../shmem" }
 dsm_core = { path = "../dsm_core" }

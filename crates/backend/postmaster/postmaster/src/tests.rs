@@ -394,7 +394,7 @@ mod b032 {
         // launch on the next ServerLoop pass instead of waiting for an
         // unrelated worker event.
         install_seams();
-        pmsignal::PMSignalShmemInit(8);
+        pmsignal::PMSignalShmemInit(8).unwrap();
         fresh_pm();
         with_pm(|pm| {
             pm.pm_state = PMState::PM_RECOVERY;

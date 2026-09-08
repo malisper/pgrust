@@ -18,7 +18,7 @@ fn setup() {
         shmem_seams::add_size::set(|a, b| Ok(a.checked_add(b).expect("add_size overflow")));
         ipc_seams::on_shmem_exit::set(|f, arg| EXIT_CALLBACKS.lock().unwrap().push((f, arg)));
         waiteventset_seams::wakeup_postmaster::set(|| WAKEUPS.lock().unwrap().push(0));
-        PMSignalShmemInit(MAX_LIVE_CHILDREN);
+        PMSignalShmemInit(MAX_LIVE_CHILDREN).unwrap();
         init_seams();
     });
     NUM_CHILD_FLAGS.set(MAX_LIVE_CHILDREN);

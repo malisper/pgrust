@@ -11,6 +11,26 @@ use ::executils::{EStateData, EcxtId, ExecSlotId};
 use ::fd::fileset::FileSet;
 use ::mcx::Mcx;
 use ::pg_barrier::Barrier;
+
+// BarrierArriveAndWait wait events (nodeHash.c / nodeHashjoin.c):
+// PG_WAIT_IPC | the event's row in wait_event_names.txt's IPC section (the
+// WAIT_EVENT_HASH_* enumerators of the generated wait_event_types.h).
+const PG_WAIT_IPC: u32 = 0x0800_0000;
+pub const WAIT_EVENT_HASH_BATCH_ALLOCATE: u32 = PG_WAIT_IPC | 14;
+pub const WAIT_EVENT_HASH_BATCH_ELECT: u32 = PG_WAIT_IPC | 15;
+pub const WAIT_EVENT_HASH_BATCH_LOAD: u32 = PG_WAIT_IPC | 16;
+pub const WAIT_EVENT_HASH_BUILD_ALLOCATE: u32 = PG_WAIT_IPC | 17;
+pub const WAIT_EVENT_HASH_BUILD_ELECT: u32 = PG_WAIT_IPC | 18;
+pub const WAIT_EVENT_HASH_BUILD_HASH_INNER: u32 = PG_WAIT_IPC | 19;
+pub const WAIT_EVENT_HASH_BUILD_HASH_OUTER: u32 = PG_WAIT_IPC | 20;
+pub const WAIT_EVENT_HASH_GROW_BATCHES_DECIDE: u32 = PG_WAIT_IPC | 21;
+pub const WAIT_EVENT_HASH_GROW_BATCHES_ELECT: u32 = PG_WAIT_IPC | 22;
+pub const WAIT_EVENT_HASH_GROW_BATCHES_FINISH: u32 = PG_WAIT_IPC | 23;
+pub const WAIT_EVENT_HASH_GROW_BATCHES_REALLOCATE: u32 = PG_WAIT_IPC | 24;
+pub const WAIT_EVENT_HASH_GROW_BATCHES_REPARTITION: u32 = PG_WAIT_IPC | 25;
+pub const WAIT_EVENT_HASH_GROW_BUCKETS_ELECT: u32 = PG_WAIT_IPC | 26;
+pub const WAIT_EVENT_HASH_GROW_BUCKETS_REALLOCATE: u32 = PG_WAIT_IPC | 27;
+pub const WAIT_EVENT_HASH_GROW_BUCKETS_REINSERT: u32 = PG_WAIT_IPC | 28;
 use ::sharedtuplestore::{SharedTuplestore, SharedTuplestoreAccessor};
 use ::types_core::instrument::HashInstrumentation;
 use ::types_error::PgResult;
@@ -422,7 +442,7 @@ fn make_batch(
         while batch.batch_barrier.phase() < PHJ_BATCH_PROBE {
             batch
                 .batch_barrier
-                .arrive_and_wait()
+                .arrive_and_wait(0)
                 .expect("sole participant cannot block");
         }
         batch.batch_barrier.detach();
@@ -595,7 +615,7 @@ pub fn exec_parallel_hash_table_create<'mcx>(
     // Attach; detach is ExecHashTableDetach.
     let build_barrier = &pstate.build_barrier;
     build_barrier.attach();
-    if build_barrier.phase() == PHJ_BUILD_ELECT && build_barrier.arrive_and_wait()? {
+    if build_barrier.phase() == PHJ_BUILD_ELECT && build_barrier.arrive_and_wait(WAIT_EVENT_HASH_BUILD_ELECT)? {
         {
             let mut g = pstate.locked();
             g.space_allowed = space_allowed;
@@ -624,7 +644,7 @@ pub fn multi_exec_parallel_hash_begin<'mcx>(
     debug_assert!(build_barrier.phase() >= PHJ_BUILD_ALLOCATE);
     let mut phase = build_barrier.phase();
     if phase == PHJ_BUILD_ALLOCATE {
-        build_barrier.arrive_and_wait()?;
+        build_barrier.arrive_and_wait(WAIT_EVENT_HASH_BUILD_ALLOCATE)?;
         phase = PHJ_BUILD_HASH_INNER;
     }
     if phase == PHJ_BUILD_HASH_INNER {
@@ -657,7 +677,7 @@ pub fn multi_exec_parallel_hash_finish<'mcx>(
         exec_parallel_hash_merge_counters(table);
         pstate.grow_buckets_barrier.detach();
         pstate.grow_batches_barrier.detach();
-        if build_barrier.arrive_and_wait()? {
+        if build_barrier.arrive_and_wait(WAIT_EVENT_HASH_BUILD_HASH_INNER)? {
             // Elected: batches are now fixed.
             pstate.locked().growth = ParallelHashGrowth::Disabled;
         }
@@ -938,7 +958,7 @@ pub fn exec_parallel_hash_increase_num_batches(
     let barrier = &pstate.grow_batches_barrier;
     let mut phase = grow_batches_phase(barrier.phase());
     if phase == PHJ_GROW_BATCHES_ELECT {
-        if barrier.arrive_and_wait()? {
+        if barrier.arrive_and_wait(WAIT_EVENT_HASH_GROW_BATCHES_ELECT)? {
             let (old_gen, old_nbatch, new_nbatch) = {
                 let mut g = pstate.locked();
                 let old_gen = g.batches.take().expect("batches installed");
@@ -994,7 +1014,7 @@ pub fn exec_parallel_hash_increase_num_batches(
         phase = 1; // PHJ_GROW_BATCHES_REALLOCATE
     }
     if phase == 1 {
-        barrier.arrive_and_wait()?;
+        barrier.arrive_and_wait(WAIT_EVENT_HASH_GROW_BATCHES_REALLOCATE)?;
         phase = 2; // PHJ_GROW_BATCHES_REPARTITION
     }
     if phase == 2 {
@@ -1003,11 +1023,11 @@ pub fn exec_parallel_hash_increase_num_batches(
         repartition_first(table)?;
         repartition_rest(table)?;
         exec_parallel_hash_merge_counters(table);
-        barrier.arrive_and_wait()?;
+        barrier.arrive_and_wait(WAIT_EVENT_HASH_GROW_BATCHES_REPARTITION)?;
         phase = 3; // PHJ_GROW_BATCHES_DECIDE
     }
     if phase == 3 {
-        if barrier.arrive_and_wait()? {
+        if barrier.arrive_and_wait(WAIT_EVENT_HASH_GROW_BATCHES_DECIDE)? {
             let mut space_exhausted = false;
             let mut extreme_skew_detected = false;
             ensure_batch_accessors(table)?;
@@ -1060,7 +1080,7 @@ pub fn exec_parallel_hash_increase_num_batches(
         phase = 4; // PHJ_GROW_BATCHES_FINISH
     }
     if phase == 4 {
-        barrier.arrive_and_wait()?;
+        barrier.arrive_and_wait(WAIT_EVENT_HASH_GROW_BATCHES_FINISH)?;
     }
     Ok(())
 }
@@ -1162,7 +1182,7 @@ pub fn exec_parallel_hash_increase_num_buckets(
     let barrier = &pstate.grow_buckets_barrier;
     let mut phase = grow_buckets_phase(barrier.phase());
     if phase == PHJ_GROW_BUCKETS_ELECT {
-        if barrier.arrive_and_wait()? {
+        if barrier.arrive_and_wait(WAIT_EVENT_HASH_GROW_BUCKETS_ELECT)? {
             let mut g = pstate.locked();
             g.nbuckets *= 2;
             let nbuckets = g.nbuckets;
@@ -1179,7 +1199,7 @@ pub fn exec_parallel_hash_increase_num_buckets(
         phase = 1; // PHJ_GROW_BUCKETS_REALLOCATE
     }
     if phase == 1 {
-        barrier.arrive_and_wait()?;
+        barrier.arrive_and_wait(WAIT_EVENT_HASH_GROW_BUCKETS_REALLOCATE)?;
         phase = 2; // PHJ_GROW_BUCKETS_REINSERT
     }
     if phase == 2 {
@@ -1212,7 +1232,7 @@ pub fn exec_parallel_hash_increase_num_buckets(
             }
             cfi()?;
         }
-        barrier.arrive_and_wait()?;
+        barrier.arrive_and_wait(WAIT_EVENT_HASH_GROW_BUCKETS_REINSERT)?;
     }
     Ok(())
 }

@@ -126,6 +126,25 @@ const fn walsnd_empty() -> WalSnd {
     }
 }
 
+// C sizes (walsender_private.h, LP64): offsetof(WalSndCtlData, walsnds) =
+// 3 dlist_head (48) + 3 XLogRecPtr (24) + bits8 + 3 ConditionVariable (12
+// each, int-aligned) = 112, MAXALIGN-padded to the WalSnd array; sizeof(WalSnd)
+// = pid_t + WalSndState + sentPtr + needreload + write/flush/apply + three
+// TimeOffsets + sync_standby_priority + slock_t + replyTime + ReplicationKind
+// = 96.
+const C_OFFSETOF_WAL_SND_CTL_DATA_WALSNDS: usize = 112;
+const C_SIZEOF_WAL_SND: usize = 96;
+
+/// WalSndShmemSize (walsender.c:3651): the WalSndCtlData header plus
+/// max_wal_senders WalSnd slots. The GUC value comes from the caller, as with
+/// lmgr_proc's ProcGlobalConfig.
+pub fn WalSndShmemSize(max_wal_senders: i32) -> PgResult<usize> {
+    let mut size: usize = 0;
+    size = mcx::add_size(size, C_OFFSETOF_WAL_SND_CTL_DATA_WALSNDS)?;
+    size = mcx::add_size(size, mcx::mul_size(max_wal_senders as usize, C_SIZEOF_WAL_SND)?)?;
+    Ok(size)
+}
+
 // WalSndCtlData minus the syncrep queues (SyncRep is out of P1 scope). The
 // per-kind wakeup CVs land here in increment 3: the WAL flush/replay paths
 // broadcast them via the wal_snd_wakeup seam.

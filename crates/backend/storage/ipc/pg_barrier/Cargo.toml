@@ -19,6 +19,7 @@ pgsync = { path = "../../../../_support/pgsync" }
 postgres_seams = { path = "../../../tcop/postgres_seams" }
 types_error = { path = "../../../../_support/types/types_error" }
 waiter = { path = "../waiter" }
+waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
 
 # Model glue only: the cfg(loom) park route still uses loom::lazy_static! /
 # loom::thread_local! (per-iteration reset — no pgsync papering exists nor

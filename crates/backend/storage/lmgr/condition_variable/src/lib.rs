@@ -2,6 +2,10 @@
 #![allow(non_upper_case_globals)]
 
 use std::cell::Cell;
+use std::sync::atomic::{
+    AtomicPtr, AtomicUsize,
+    Ordering::{Acquire, Relaxed, Release},
+};
 // DST P2 (contract §1.3): CV timed-sleep deadline math rides pg_clock (the
 // one monotonic authority); the wait itself stays on the waiter park
 // primitive via WaitLatch.
@@ -321,21 +325,59 @@ pub fn ConditionVariableBroadcast(cv: &'static ConditionVariable) {
     }
 }
 
-// procsignal's pss_barrierCV per-slot storage (slot index == ProcNumber) and
-// CheckpointerShmem's start_cv/done_cv; const-init slab per latch's
-// LOCAL_LATCH_CAP precedent — NumProcSignalSlots stays far below the cap.
-const BARRIER_CV_CAP: usize = 4096;
-static BARRIER_CVS: [ConditionVariable; BARRIER_CV_CAP] =
-    [const { ConditionVariable::new() }; BARRIER_CV_CAP];
+// procsignal's pss_barrierCV per-slot storage (slot index == ProcNumber):
+// C embeds one ConditionVariable in every ProcSignalSlot and
+// ProcSignalShmemInit runs ConditionVariableInit over NumProcSignalSlots =
+// MaxBackends + NUM_AUXILIARY_PROCS of them (procsignal.c:75-160). The
+// storage is sized from that count at shmem init (a leaked boot allocation,
+// procsignal's own psh_slot shape) — never a const cap: max_connections may
+// reach MAX_BACKENDS.
+// Published once: len stored first, ptr Release-stored last, under the init
+// spinlock; readers Acquire the ptr (no raw std sync type — the ratchet
+// ledger's once/rawsync budgets for this file stay where they are).
+static BARRIER_CVS: AtomicPtr<ConditionVariable> = AtomicPtr::new(core::ptr::null_mut());
+static BARRIER_CV_LEN: AtomicUsize = AtomicUsize::new(0);
+static BARRIER_CV_INIT: Spinlock = Spinlock::new();
+
+/// ProcSignalShmemInit's per-slot `ConditionVariableInit(&slot->pss_barrierCV)`
+/// (procsignal.c:156): allocate one CV per ProcSignal slot. A repeat call
+/// keeps the first slab (psh_slot's init-once shape).
+pub fn ProcSignalBarrierCvsInit(num_slots: i32) {
+    assert!(num_slots > 0, "ProcSignalBarrierCvsInit: NumProcSignalSlots not initialized");
+    spin_acquire(&BARRIER_CV_INIT);
+    if BARRIER_CVS.load(Acquire).is_null() {
+        let cvs: &'static mut [ConditionVariable] = (0..num_slots)
+            .map(|_| ConditionVariable::new())
+            .collect::<Vec<_>>()
+            .leak();
+        BARRIER_CV_LEN.store(cvs.len(), Relaxed);
+        BARRIER_CVS.store(cvs.as_mut_ptr(), Release);
+    }
+    BARRIER_CV_INIT.unlock();
+}
+
+fn barrier_cvs() -> &'static [ConditionVariable] {
+    let ptr = BARRIER_CVS.load(Acquire);
+    if ptr.is_null() {
+        panic!("ProcSignal barrier CVs not initialized (ProcSignalShmemInit not called)");
+    }
+    let len = BARRIER_CV_LEN.load(Relaxed);
+    // SAFETY: a leaked `len`-element slab, never freed or moved; the Acquire
+    // load pairs with the Release store that follows the len store and the
+    // writes that initialized every element.
+    unsafe { core::slice::from_raw_parts(ptr, len) }
+}
 
 static CHECKPOINTER_CVS: [ConditionVariable; 2] = [const { ConditionVariable::new() }; 2];
 
 fn barrier_cv(slot: i32) -> &'static ConditionVariable {
+    let cvs = barrier_cvs();
     assert!(
-        (0..BARRIER_CV_CAP as i32).contains(&slot),
-        "ProcSignal barrier CV slot {slot} out of range"
+        (0..cvs.len() as i32).contains(&slot),
+        "ProcSignal barrier CV slot {slot} out of range (NumProcSignalSlots = {})",
+        cvs.len()
     );
-    &BARRIER_CVS[slot as usize]
+    &cvs[slot as usize]
 }
 
 fn checkpointer_cv(cv: condition_variable_seams::CheckpointerCv) -> &'static ConditionVariable {
@@ -360,7 +402,7 @@ pub fn cv_reset_after_crash(cv: &ConditionVariable) {
 }
 
 pub fn ProcSignalBarrierCvsResetAfterCrash() {
-    for cv in &BARRIER_CVS {
+    for cv in barrier_cvs() {
         cv_reset_after_crash(cv);
     }
 }
@@ -379,6 +421,7 @@ pub fn init_seams() {
     condition_variable_seams::proc_signal_barrier_cv_broadcast::set(|slot| {
         ConditionVariableBroadcast(barrier_cv(slot))
     });
+    condition_variable_seams::proc_signal_barrier_cvs_init::set(ProcSignalBarrierCvsInit);
     condition_variable_seams::checkpointer_cv_broadcast::set(|cv| {
         ConditionVariableBroadcast(checkpointer_cv(cv))
     });

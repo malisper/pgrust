@@ -218,6 +218,41 @@ pub fn BufferGetBlockPtr(buffer: Buffer) -> *mut u8 {
     unsafe { blocks.add((buffer as usize - 1) * BLCKSZ) }
 }
 
+// C sizes for the BufferManagerShmemSize terms (LP64; the pgrust structs
+// are not byte-identical to C's, so the C shmem estimate is spelled with C's
+// numbers): sizeof(BufferDescPadded) = BUFFERDESC_PAD_TO_SIZE (64,
+// buf_internals.h:293), PG_CACHE_LINE_SIZE (128, pg_config_manual.h:212),
+// sizeof(ConditionVariableMinimallyPadded) = CV_MINIMAL_SIZE (16,
+// condition_variable.h:38), sizeof(CkptSortItem) = 5 * 4 (buf_internals.h).
+const C_PG_CACHE_LINE_SIZE: usize = 128;
+const C_SIZEOF_CONDITION_VARIABLE_MINIMALLY_PADDED: usize = 16;
+const C_SIZEOF_CKPT_SORT_ITEM: usize = 20;
+
+/// BufferManagerShmemSize (buf_init.c:145): the shared-memory estimate for
+/// the buffer pool — descriptors, blocks, freelist.c's structures, the I/O
+/// condition variables and bufmgr.c's checkpoint sort array.
+pub fn BufferManagerShmemSize() -> PgResult<usize> {
+    let nbuffers = globals::NBuffers() as usize;
+    let mut size: usize = 0;
+    // size of buffer descriptors, plus alignment padding
+    size = mcx::add_size(size, mcx::mul_size(nbuffers, BUFFERDESC_PAD_TO_SIZE)?)?;
+    size = mcx::add_size(size, C_PG_CACHE_LINE_SIZE)?;
+    // size of data pages, plus alignment padding
+    size = mcx::add_size(size, PG_IO_ALIGN_SIZE)?;
+    size = mcx::add_size(size, mcx::mul_size(nbuffers, BLCKSZ)?)?;
+    // size of stuff controlled by freelist.c
+    size = mcx::add_size(size, crate::freelist::StrategyShmemSize()?)?;
+    // size of I/O condition variables, plus alignment padding
+    size = mcx::add_size(
+        size,
+        mcx::mul_size(nbuffers, C_SIZEOF_CONDITION_VARIABLE_MINIMALLY_PADDED)?,
+    )?;
+    size = mcx::add_size(size, C_PG_CACHE_LINE_SIZE)?;
+    // size of checkpoint sort array in bufmgr.c
+    size = mcx::add_size(size, mcx::mul_size(nbuffers, C_SIZEOF_CKPT_SORT_ITEM)?)?;
+    Ok(size)
+}
+
 /// BufferManagerShmemInit (buf_init.c) minus localbuf/checkpoint carve-outs.
 pub fn BufferManagerShmemInit() -> PgResult<()> {
     let n = globals::NBuffers();

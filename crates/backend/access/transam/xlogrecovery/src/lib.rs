@@ -145,6 +145,16 @@ thread_local! {
     static RECEIPT_SOURCE: Cell<XLogSource> = const { Cell::new(XLogSource::Any) };
 }
 
+// C sizeof(XLogRecoveryCtlData) (xlogrecovery.c): two bools, a Latch (16),
+// XLogRecPtr/TimeLineID pairs, two TimestampTz, RecoveryPauseState, a
+// ConditionVariable (12) and slock_t = 104 on LP64.
+const C_SIZEOF_XLOG_RECOVERY_CTL_DATA: usize = 104;
+
+/// XLogRecoveryShmemSize (xlogrecovery.c:460): sizeof(XLogRecoveryCtlData).
+pub fn XLogRecoveryShmemSize() -> usize {
+    C_SIZEOF_XLOG_RECOVERY_CTL_DATA
+}
+
 pub fn ArchiveRecoveryRequested() -> bool {
     ARCHIVE_RECOVERY_REQUESTED.load(Relaxed)
 }

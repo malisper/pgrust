@@ -224,6 +224,38 @@ fn calculate_shmem_size_rounds_and_counts_addin() {
     TOTAL_ADDIN_REQUEST.set(0);
 }
 
+// C 18.6 values for the terms CalculateShmemSize (ipci.c:116) used to omit,
+// at this harness's configuration (MaxBackends 136 = 100 + 16 + 8 + 10 + 2,
+// max_prepared_transactions 0, hot_standby on, max_wal_senders 10): the
+// pg_shmem_allocations rows a C 18.6 server reports for the same structs
+// ("Proc Array" 580, "KnownAssignedXids" 35360, "KnownAssignedXidsValid"
+// 8840, "XLOG Recovery Ctl" 104, "Wal Sender Ctl" 1072, "BTree Vacuum
+// State" 1644, "Shared Memory Stats" 315552) and posix_sema.c's
+// PGSemaphoreShmemSize for ProcGlobalSemas = 136 + NUM_AUXILIARY_PROCS.
+#[test]
+fn shmem_size_terms_match_c_18_6_census() {
+    bringup();
+    assert_eq!(g::MaxBackends(), 136);
+    // hot_standby boots on (transam_xlog's GUC install): Proc Array +
+    // KnownAssignedXids + KnownAssignedXidsValid.
+    assert_eq!(procarray::ProcArrayShmemSize(0).unwrap(), 580 + 35360 + 8840);
+    assert_eq!(xlogrecovery::XLogRecoveryShmemSize(), 104);
+    assert_eq!(walsender::WalSndShmemSize(10).unwrap(), 1072);
+    assert_eq!(nbtree::BTreeShmemSize().unwrap(), 1644);
+    assert_eq!(pgstat::shmem::StatsShmemSize().unwrap(), 315552);
+    assert_eq!(lmgr_proc::ProcGlobalSemas(), 174);
+    assert_eq!(pg_sema::PGSemaphoreShmemSize(174).unwrap(), 174 * 32);
+    // BufferManagerShmemSize (buf_init.c:145) at this harness's NBuffers:
+    // descriptors + cache-line pad, blocks + I/O-align pad, freelist.c's
+    // estimate, I/O CVs + pad, checkpoint sort items.
+    let nbuffers = g::NBuffers() as usize;
+    let strategy = dynahash::hash_estimate_size((nbuffers + 128) as i64, 24) + 32;
+    assert_eq!(
+        bufmgr::BufferManagerShmemSize().unwrap(),
+        nbuffers * 64 + 128 + 4096 + nbuffers * 8192 + strategy + nbuffers * 16 + 128 + nbuffers * 20
+    );
+}
+
 #[test]
 fn request_addin_outside_hook_is_fatal() {
     bringup();

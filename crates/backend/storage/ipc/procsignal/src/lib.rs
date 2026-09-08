@@ -380,6 +380,11 @@ pub fn ProcSignalShmemInit() {
             }
         }
     });
+    // procsignal.c:156 ConditionVariableInit(&slot->pss_barrierCV) for every
+    // slot: the CV owner sizes its per-slot storage from NumProcSignalSlots.
+    if condition_variable_seams::proc_signal_barrier_cvs_init::is_installed() {
+        condition_variable_seams::proc_signal_barrier_cvs_init::call(NumProcSignalSlots());
+    }
 }
 
 #[track_caller]

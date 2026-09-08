@@ -87,6 +87,24 @@ fn ctl() -> &'static BufferStrategyControl {
         .expect("bufmgr: StrategyInitialize (freelist.c) not called")
 }
 
+// C sizeof(BufferStrategyControl) (freelist.c): slock_t, pg_atomic_uint32
+// nextVictimBuffer, int firstFreeBuffer, int lastFreeBuffer, uint32
+// completePasses, pg_atomic_uint32 numBufferAllocs, int bgwprocno = 28,
+// MAXALIGN 32.
+const C_MAXALIGN_SIZEOF_BUFFER_STRATEGY_CONTROL: usize = 32;
+
+/// StrategyShmemSize (freelist.c:463): the lookup hash table (see
+/// StrategyInitialize) plus the shared replacement-strategy control block.
+pub fn StrategyShmemSize() -> PgResult<usize> {
+    let mut size: usize = 0;
+    size = mcx::add_size(
+        size,
+        crate::buf_table::BufTableShmemSize(globals::NBuffers() + lwlock::NUM_BUFFER_PARTITIONS),
+    )?;
+    size = mcx::add_size(size, C_MAXALIGN_SIZEOF_BUFFER_STRATEGY_CONTROL)?;
+    Ok(size)
+}
+
 pub fn StrategyInitialize(nbuffers: i32) -> PgResult<()> {
     InitBufTable(nbuffers + lwlock::NUM_BUFFER_PARTITIONS)?;
     STRATEGY

@@ -101,8 +101,21 @@ pub fn PMSignalShmemSize(max_live_children: i32) -> PgResult<usize> {
 
 // C sizes the child-flag array with MaxLivePostmasterChildren() (pmchild.c,
 // unported); the caller passes the value, as with lmgr_proc's config.
-pub fn PMSignalShmemInit(max_live_children: i32) {
+//
+// PMSignalShmemInit (pmsignal.c:145): ShmemInitStruct("PMSignalState",
+// PMSignalShmemSize(), &found) registers the block in the ShmemIndex, so
+// pg_shmem_allocations lists it; the state itself is the boot allocation
+// below (a fresh segment zeroes it and stores num_child_flags — the
+// get_or_init image). Unit processes without the shmem seam installed
+// behave as a fresh segment.
+pub fn PMSignalShmemInit(max_live_children: i32) -> PgResult<()> {
     assert!(max_live_children > 0, "max_live_children not initialized");
+    if shmem_seams::shmem_init_struct::is_installed() {
+        let (_raw, _found) = shmem_seams::shmem_init_struct::call(
+            "PMSignalState",
+            PMSignalShmemSize(max_live_children)?,
+        )?;
+    }
     let state = PM_SIGNAL_STATE.get_or_init(|| PMSignalData {
         PMSignalFlags: std::array::from_fn(|_| AtomicBool::new(false)),
         sigquit_reason: AtomicU32::new(QuitSignalReason::PMQUIT_NOT_SENT as u32),
@@ -113,6 +126,7 @@ pub fn PMSignalShmemInit(max_live_children: i32) {
             .leak(),
     });
     NUM_CHILD_FLAGS.set(state.num_child_flags);
+    Ok(())
 }
 
 /// Crash-cycle reset in place to the post-PMSignalShmemInit image

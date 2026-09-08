@@ -302,7 +302,7 @@ fn setup() {
         subtrans::StartupSUBTRANS(3).unwrap();
         assert!(transam_xlog::XLogInsertAllowed());
 
-        pmsignal::PMSignalShmemInit(64);
+        pmsignal::PMSignalShmemInit(64).unwrap();
         bgworker::BackgroundWorkerShmemInit().expect("bgworker shmem init");
         procsignal::ProcSignalShmemInit();
         parallel::register_parallel_worker_entrypoint("substrate_e2e_main", e2e_worker_main);

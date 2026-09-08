@@ -284,7 +284,7 @@ fn setup() {
         boot_xlog_ctl();
         subtrans::StartupSUBTRANS(3).unwrap();
 
-        pmsignal::PMSignalShmemInit(64);
+        pmsignal::PMSignalShmemInit(64).unwrap();
         bgworker::BackgroundWorkerShmemInit().expect("bgworker shmem init");
         procsignal::ProcSignalShmemInit();
     });

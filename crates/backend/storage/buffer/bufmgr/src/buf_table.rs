@@ -81,6 +81,15 @@ fn free_entries(p: *mut BufferLookupEnt, cap: usize) {
     unsafe { std::alloc::dealloc(p as *mut u8, layout) };
 }
 
+// C sizeof(BufferLookupEnt) (buf_table.c:27): BufferTag (5 * 4) + int id.
+const C_SIZEOF_BUFFER_LOOKUP_ENT: usize = 24;
+
+/// BufTableShmemSize (buf_table.c:41): dynahash's estimate for `size`
+/// BufferLookupEnt entries.
+pub fn BufTableShmemSize(size: i32) -> usize {
+    dynahash::hash_estimate_size(size as i64, C_SIZEOF_BUFFER_LOOKUP_ENT)
+}
+
 /// InitBufTable (buf_table.c): size = NBuffers + NUM_BUFFER_PARTITIONS.
 pub fn InitBufTable(size: i32) -> PgResult<()> {
     let base = main_lock(BUFFER_MAPPING_LWLOCK_OFFSET as usize) as *const LWLock

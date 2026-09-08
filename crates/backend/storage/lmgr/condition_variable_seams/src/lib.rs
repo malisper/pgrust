@@ -18,6 +18,14 @@ seam_core::seam!(
     pub fn proc_signal_barrier_cv_broadcast(slot: i32)
 );
 
+// ProcSignalShmemInit's per-slot ConditionVariableInit (procsignal.c:156):
+// the owner sizes the pss_barrierCV storage from NumProcSignalSlots.
+// Uninstalled skip is safe: without the owner no sleep/broadcast is
+// installed either.
+seam_core::seam!(
+    pub fn proc_signal_barrier_cvs_init(num_slots: i32)
+);
+
 // CheckpointerShmem's start_cv/done_cv; the condition_variable owner
 // allocates the storage. Broadcast callers may skip when uninstalled: no
 // thread can be sleeping while the unit is unported (sleep panics first).

@@ -5354,6 +5354,7 @@ dependencies = [
  "elog",
  "init_small",
  "lwlock",
+ "shmem",
  "types_error",
  "types_storage",
 ]
@@ -8333,6 +8334,7 @@ dependencies = [
  "aio_core",
  "autovacuum",
  "backend_status_seams",
+ "bgworker",
  "bufmgr",
  "checkpointer",
  "clog",
@@ -8341,6 +8343,7 @@ dependencies = [
  "condition_variable_seams",
  "dsm_core",
  "dsm_registry",
+ "dynahash",
  "elog",
  "file_seams",
  "guc",
@@ -8349,13 +8352,17 @@ dependencies = [
  "init_small_seams",
  "ipc_seams",
  "ipci_seams",
+ "latch",
+ "launcher",
  "lmgr_proc",
  "lock",
  "lwlock",
  "mbutils_seams",
  "multixact",
+ "nbtree",
  "origin",
  "pg_prng",
+ "pg_sema",
  "pg_sema_seams",
  "pgarch",
  "pgstat",
@@ -8383,9 +8390,11 @@ dependencies = [
  "varsup",
  "waitevent",
  "walreceiverfuncs",
+ "walsender",
  "walsummarizer",
  "xact_seams",
  "xlogprefetcher",
+ "xlogrecovery",
 ]
 
 [[package]]
@@ -12123,6 +12132,7 @@ dependencies = [
  "postgres_seams",
  "types_error",
  "waiter",
+ "waitevent_seams",
 ]
 
 [[package]]
@@ -12859,7 +12869,9 @@ name = "pg_sema"
 version = "0.0.0"
 dependencies = [
  "pg_sema_seams",
+ "shmem_seams",
  "types_core",
+ "types_error",
  "waiter",
 ]
 

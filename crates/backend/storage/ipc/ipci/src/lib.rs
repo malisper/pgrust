@@ -47,25 +47,44 @@ fn proc_global_config(fastpath_lock_groups_per_backend: i32) -> ProcGlobalConfig
     }
 }
 
-/// Returns `(size, num_semaphores)`; sums landed subsystems only.
+// shmem.h: SHMEM_INDEX_SIZE (64) entries of ShmemIndexEnt (key[48] + void *
+// + Size + Size = 72 on LP64) — CalculateShmemSize's ShmemIndex estimate.
+const C_SHMEM_INDEX_SIZE: i64 = 64;
+const C_SIZEOF_SHMEM_INDEX_ENT: usize = 72;
+
+/// CalculateShmemSize (ipci.c:87): returns `(size, num_semaphores)`; every
+/// C term in C's order (ipci.c:116-165). InjectionPointShmemSize is 0 in a
+/// build without USE_INJECTION_POINTS (injection_point.c), which pgrust is.
 pub fn CalculateShmemSize(cfg: &ProcGlobalConfig) -> PgResult<(usize, i32)> {
     let num_semas = lmgr_proc::ProcGlobalSemas();
 
     let mut size: usize = 100000;
+    size = shmem::add_size(size, pg_sema::PGSemaphoreShmemSize(num_semas)?)?;
+    size = shmem::add_size(
+        size,
+        dynahash::hash_estimate_size(C_SHMEM_INDEX_SIZE, C_SIZEOF_SHMEM_INDEX_ENT),
+    )?;
     size = shmem::add_size(size, dsm_core::dsm::dsm_estimate_size())?;
     size = shmem::add_size(size, dsm_registry::DSMRegistryShmemSize())?;
+    size = shmem::add_size(size, bufmgr::BufferManagerShmemSize()?)?;
     size = shmem::add_size(size, lock::LockManagerShmemSize(cfg.max_prepared_xacts))?;
     size = shmem::add_size(size, predicate::PredicateLockShmemSize(cfg.max_prepared_xacts))?;
     size = shmem::add_size(size, lmgr_proc::ProcGlobalShmemSize(cfg)?)?;
+    size = shmem::add_size(size, xlogprefetcher::XLogPrefetchShmemSize())?;
     size = shmem::add_size(size, varsup::VarsupShmemSize())?;
     size = shmem::add_size(size, transam_xlog::XLOGShmemSize())?;
-    size = shmem::add_size(size, xlogprefetcher::XLogPrefetchShmemSize())?;
+    size = shmem::add_size(size, xlogrecovery::XLogRecoveryShmemSize())?;
     size = shmem::add_size(size, clog::CLOGShmemSize())?;
     size = shmem::add_size(size, commit_ts::CommitTsShmemSize())?;
     size = shmem::add_size(size, subtrans::SUBTRANSShmemSize())?;
-    size = shmem::add_size(size, multixact::MultiXactShmemSize())?;
     size = shmem::add_size(size, twophase::TwoPhaseShmemSize())?;
+    size = shmem::add_size(size, bgworker::BackgroundWorkerShmemSize()?)?;
+    size = shmem::add_size(size, multixact::MultiXactShmemSize())?;
     size = shmem::add_size(size, lwlock::LWLockShmemSize()?)?;
+    size = shmem::add_size(
+        size,
+        procarray::ProcArrayShmemSize(cfg.max_prepared_xacts)?,
+    )?;
     size = shmem::add_size(size, backend_status_seams::backend_status_shmem_size::call()?)?;
     size = shmem::add_size(size, sinval::SharedInvalShmemSize()?)?;
     size = shmem::add_size(
@@ -73,17 +92,22 @@ pub fn CalculateShmemSize(cfg: &ProcGlobalConfig) -> PgResult<(usize, i32)> {
         pmsignal::PMSignalShmemSize(pmchild_seams::max_live_postmaster_children::call())?,
     )?;
     size = shmem::add_size(size, procsignal::ProcSignalShmemSize()?)?;
-    size = shmem::add_size(size, syncscan::SyncScanShmemSize())?;
-    size = shmem::add_size(size, commands_async::AsyncShmemSize())?;
-    size = shmem::add_size(size, waitevent::custom::WaitEventCustomShmemSize())?;
-    size = shmem::add_size(size, aio_core::AioShmemSize()?)?;
     size = shmem::add_size(size, checkpointer::CheckpointerShmemSize(g::NBuffers()))?;
     size = shmem::add_size(size, autovacuum::AutoVacuumShmemSize()?)?;
     size = shmem::add_size(size, slot::ReplicationSlotsShmemSize())?;
     size = shmem::add_size(size, origin::ReplicationOriginShmemSize()?)?;
-    size = shmem::add_size(size, walsummarizer::WalSummarizerShmemSize())?;
+    size = shmem::add_size(size, walsender::WalSndShmemSize(cfg.max_wal_senders)?)?;
     size = shmem::add_size(size, walreceiverfuncs::WalRcvShmemSize())?;
+    size = shmem::add_size(size, walsummarizer::WalSummarizerShmemSize())?;
     size = shmem::add_size(size, pgarch::PgArchShmemSize())?;
+    size = shmem::add_size(size, launcher::ApplyLauncherShmemSize()?)?;
+    size = shmem::add_size(size, nbtree::BTreeShmemSize()?)?;
+    size = shmem::add_size(size, syncscan::SyncScanShmemSize())?;
+    size = shmem::add_size(size, commands_async::AsyncShmemSize())?;
+    size = shmem::add_size(size, pgstat::shmem::StatsShmemSize()?)?;
+    size = shmem::add_size(size, waitevent::custom::WaitEventCustomShmemSize())?;
+    size = shmem::add_size(size, slotsync::SlotSyncShmemSize())?;
+    size = shmem::add_size(size, aio_core::AioShmemSize()?)?;
 
     size = shmem::add_size(size, TOTAL_ADDIN_REQUEST.get())?;
 
@@ -138,7 +162,7 @@ pub fn CreateOrAttachShmemStructs(cfg: &ProcGlobalConfig) -> PgResult<()> {
     lwlock::CreateLWLocks(g::IsUnderPostmaster())?;
 
     dsm_core::dsm::dsm_shmem_init()?;
-    dsm_registry::DSMRegistryShmemInit();
+    dsm_registry::DSMRegistryShmemInit()?;
 
     varsup::VarsupShmemInit();
     transam_xlog::XLOGShmemInit();
@@ -161,7 +185,12 @@ pub fn CreateOrAttachShmemStructs(cfg: &ProcGlobalConfig) -> PgResult<()> {
 
     sinval::SharedInvalShmemInit()?;
 
-    pmsignal::PMSignalShmemInit(pmchild_seams::max_live_postmaster_children::call());
+    let max_live_children = pmchild_seams::max_live_postmaster_children::call();
+    pmsignal::PMSignalShmemInit(max_live_children)?;
+    // C's LocalLatchData is per-process storage (miscinit.c): one for every
+    // live postmaster child plus the postmaster; the thread model's local
+    // latch slab is provisioned here for that count.
+    latch::LocalLatchSlabInit(max_live_children as usize + 1);
     procsignal::ProcSignalShmemInit();
     checkpointer::CheckpointerShmemInit(g::NBuffers())?;
     autovacuum::AutoVacuumShmemInit()?;

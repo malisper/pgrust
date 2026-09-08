@@ -22,6 +22,27 @@ use crate::{
     PGSTAT_FETCH_CONSISTENCY_SNAPSHOT,
 };
 
+// C MAXALIGN(sizeof(PgStat_ShmemControl)) (pgstat_internal.h, LP64):
+// raw_dsa_area 8 + hash_handle 8 + is_shutdown (padded) 8 + gc_request_count
+// 8 + PgStatShared_Archiver 296 + PgStatShared_BgWriter 88 +
+// PgStatShared_Checkpointer 200 + PgStatShared_IO (18 LWLocks + PgStat_IO
+// 51848) 52136 + PgStatShared_SLRU (LWLock + 8 * 64) 528 + PgStatShared_Wal
+// 56 + custom_data[PGSTAT_KIND_CUSTOM_SIZE = 9] 72 = 53408.
+const C_MAXALIGN_SIZEOF_PGSTAT_SHMEM_CONTROL: usize = 53408;
+// pgstat_dsa_init_size (pgstat_shmem.c:125): MAXALIGN(256 kB) for the dshash
+// header / initial bucket array.
+const C_PGSTAT_DSA_INIT_SIZE: usize = 256 * 1024;
+
+/// StatsShmemSize (pgstat_shmem.c:142): the shared control block plus the
+/// initial dsa area. Custom fixed-numbered kinds (PGSTAT_KIND_CUSTOM_MIN..MAX)
+/// contribute nothing: none is registered (C: no shared_size without a
+/// registered custom kind).
+pub fn StatsShmemSize() -> types_error::PgResult<usize> {
+    let mut sz = C_MAXALIGN_SIZEOF_PGSTAT_SHMEM_CONTROL;
+    sz = mcx::add_size(sz, C_PGSTAT_DSA_INIT_SIZE)?;
+    Ok(sz)
+}
+
 // repr(C), all-i64 fields: statsfile serialization copies these as bytes.
 #[derive(Clone, Copy, Default, PartialEq, Debug)]
 #[repr(C)]
