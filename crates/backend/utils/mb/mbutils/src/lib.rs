@@ -271,7 +271,7 @@ fn client_encoding() -> pg_enc {
 fn resolve_conv_proc(proc: Oid) -> PgResult<ResolvedConvProc> {
     let finfo = fmgr_seams::fmgr_info::call(proc)?;
     Ok(ResolvedConvProc {
-        fn_addr: finfo.fn_addr,
+        fn_addr: finfo.fn_addr(),
     })
 }
 

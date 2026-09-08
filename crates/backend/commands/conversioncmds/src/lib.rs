@@ -119,7 +119,7 @@ pub fn CreateConversionCommand<'mcx>(
     let src = [0u8; 1];
     let mut result = [0u8; 1];
     let funcresult = direct_function_call6_coll(
-        finfo.fn_addr,
+        finfo.fn_addr(),
         types_core::InvalidOid,
         Datum::from_i32(from_encoding),
         Datum::from_i32(to_encoding),

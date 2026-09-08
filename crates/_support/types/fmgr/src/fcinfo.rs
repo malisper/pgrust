@@ -27,13 +27,28 @@ pub type FmNodePtr = Option<NonNull<FmNode>>;
 pub type PGFunction =
     fn(Option<&mut FmgrInfo>, &mut FunctionCallInfoBaseData) -> PgResult<Datum>;
 
+// Rust may duplicate or merge function addresses; identity is resolver data.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FnKind {
+    Unresolved = 0,
+    Direct,
+    Builtin,
+    NotPorted,
+    SecurityDefiner,
+    Language,
+}
+
 pub struct FmgrInfo {
-    pub fn_addr: PGFunction,
+    fn_addr: PGFunction,
     pub fn_oid: Oid,
     pub fn_nargs: i16,
     pub fn_strict: bool,
     pub fn_retset: bool,
     pub fn_stats: u8,
+    pub fn_kind: FnKind,
+    // Canonical body OID for Builtin/NotPorted; InvalidOid otherwise.
+    pub fn_body: Oid,
     // C's `void *fn_extra`; std Box justified: open-set slot written once per
     // resolved FmgrInfo (its lifetime replaces fn_mcxt), never per row.
     pub fn_extra: Option<FnExtra>,
@@ -519,13 +534,45 @@ impl FmgrInfo {
             fn_strict,
             fn_retset,
             fn_stats: TRACK_FUNC_OFF,
+            fn_kind: FnKind::Direct,
+            fn_body: ::types_core::primitive::InvalidOid,
             fn_extra: None,
             fn_expr: None,
         }
     }
 
+    #[inline]
+    pub fn fn_addr(&self) -> PGFunction {
+        self.fn_addr
+    }
+
+    #[inline]
+    pub fn set_fn_addr(&mut self, body: PGFunction) {
+        self.fn_addr = body;
+        self.set_resolution(FnKind::Direct, ::types_core::primitive::InvalidOid);
+    }
+
     pub fn unresolved() -> Self {
-        Self::new(unresolved_function, ::types_core::primitive::InvalidOid, 0, false, false)
+        let mut f = Self::new(unresolved_function, ::types_core::primitive::InvalidOid, 0, false, false);
+        f.fn_kind = FnKind::Unresolved;
+        f
+    }
+
+    // Resolver authority: body and metadata must describe the installed target.
+    #[inline]
+    pub fn set_resolution(&mut self, kind: FnKind, body: Oid) {
+        self.fn_kind = kind;
+        self.fn_body = body;
+    }
+
+    #[inline]
+    pub fn is_builtin_body(&self, body: Oid) -> bool {
+        self.fn_kind == FnKind::Builtin && self.fn_body == body
+    }
+
+    #[inline]
+    pub fn is_security_definer_wrapper(&self) -> bool {
+        self.fn_kind == FnKind::SecurityDefiner
     }
 
     #[inline(always)]
@@ -585,6 +632,8 @@ impl core::fmt::Debug for FmgrInfo {
             .field("fn_nargs", &self.fn_nargs)
             .field("fn_strict", &self.fn_strict)
             .field("fn_retset", &self.fn_retset)
+            .field("fn_kind", &self.fn_kind)
+            .field("fn_body", &self.fn_body)
             .finish_non_exhaustive()
     }
 }
@@ -599,6 +648,8 @@ impl Clone for FmgrInfo {
             fn_strict: self.fn_strict,
             fn_retset: self.fn_retset,
             fn_stats: self.fn_stats,
+            fn_kind: self.fn_kind,
+            fn_body: self.fn_body,
             fn_extra: None,
             fn_expr: self.fn_expr.clone(),
         }

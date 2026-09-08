@@ -153,7 +153,8 @@ pub fn gistrescan(
         for skey in scan.keyData.iter_mut() {
             let attno = skey.sk_attno as usize;
             let src = &so.giststate.consistentFn[attno - 1];
-            skey.sk_func.fn_addr = src.fn_addr;
+            skey.sk_func.set_fn_addr(src.fn_addr());
+            skey.sk_func.set_resolution(src.fn_kind, src.fn_body);
             skey.sk_func.fn_oid = src.fn_oid;
             skey.sk_func.fn_nargs = src.fn_nargs;
             skey.sk_func.fn_strict = src.fn_strict;

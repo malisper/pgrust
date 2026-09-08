@@ -635,7 +635,7 @@ pub fn comparator_for_opfamily(
                 SortComparator::Bool
             } else {
                 let flinfo = ::fmgr_seams::fmgr_info::call(sort_function)?;
-                let fn_addr = flinfo.fn_addr;
+                let fn_addr = flinfo.fn_addr();
                 // Fresh per-setup resolution, as C fmgr_info_cxt's per shim.
                 install_shim_flinfo(sort_function, flinfo);
                 SortComparator::Shim(ShimCmp { fn_addr, fn_oid: sort_function })
@@ -675,7 +675,7 @@ pub fn comparator_for_gist_index_col(opfamily: Oid, opcintype: Oid) -> PgResult<
         F_GIST_POINT_SORTSUPPORT => Ok(SortComparator::GistPointZorder),
         F_RANGE_SORTSUPPORT => {
             let flinfo = ::fmgr_seams::fmgr_info::call(F_RANGE_CMP)?;
-            let fn_addr = flinfo.fn_addr;
+            let fn_addr = flinfo.fn_addr();
             // Fresh per-setup resolution, as C fmgr_info_cxt's per shim.
             install_shim_flinfo(F_RANGE_CMP, flinfo);
             Ok(SortComparator::Shim(ShimCmp { fn_addr, fn_oid: F_RANGE_CMP }))
@@ -787,7 +787,7 @@ pub fn comparator_for_index_col(
                 SortComparator::Bool
             } else {
                 let flinfo = ::fmgr_seams::fmgr_info::call(sort_function)?;
-                let fn_addr = flinfo.fn_addr;
+                let fn_addr = flinfo.fn_addr();
                 // Fresh per-setup resolution, as C fmgr_info_cxt's per shim.
                 install_shim_flinfo(sort_function, flinfo);
                 SortComparator::Shim(ShimCmp { fn_addr, fn_oid: sort_function })

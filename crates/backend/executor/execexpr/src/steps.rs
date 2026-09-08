@@ -1287,7 +1287,7 @@ impl FuncCall {
     #[inline(always)]
     pub(crate) fn fn_addr(&self) -> PGFunction {
         // SAFETY: frame-owned mcx-boxed FmgrInfo, live for 'mcx.
-        unsafe { self.flinfo.as_ref() }.fn_addr
+        unsafe { self.flinfo.as_ref() }.fn_addr()
     }
 }
 

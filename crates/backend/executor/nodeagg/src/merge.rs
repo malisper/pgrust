@@ -668,7 +668,7 @@ pub(crate) fn init_finalize_merge<'mcx>(
             .iter()
             .zip(&kinds)
             .map(|(c, &kind)| ParCombine {
-                func: c.flinfo.fn_addr,
+                func: c.flinfo.fn_addr(),
                 strict: c.strict,
                 collation: c.collation,
                 kind,

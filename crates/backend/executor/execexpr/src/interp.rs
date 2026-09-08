@@ -476,7 +476,7 @@ fn eval_kernel<'mcx>(
             };
             fcinfo.isnull = false;
             let flinfo = unsafe { &mut *f.flinfo.as_ptr() };
-            let value = (flinfo.fn_addr)(Some(flinfo), fcinfo)?;
+            let value = (flinfo.fn_addr())(Some(flinfo), fcinfo)?;
             Ok(NullableDatum {
                 value,
                 isnull: false,
@@ -3421,7 +3421,7 @@ fn eval_array_expr(
 fn invoke2(call: &crate::steps::Call2) -> PgResult<(Datum, bool)> {
     // SAFETY: 'mcx-live mcx-boxed FmgrInfo + fcinfo image; sole references.
     let flinfo = unsafe { &mut *call.flinfo.as_ptr() };
-    let fn_addr = flinfo.fn_addr;
+    let fn_addr = flinfo.fn_addr();
     let fcinfo = unsafe { fcinfo_mut(call.fcinfo, 2) };
     fcinfo.isnull = false;
     let d = fn_addr(Some(flinfo), fcinfo)?;
@@ -3487,7 +3487,7 @@ pub(crate) fn invoke(call: &FuncCall) -> PgResult<(Datum, bool)> {
     // SAFETY: 'mcx-live mcx-boxed FmgrInfo + fcinfo image; sole references
     // during the call.
     let flinfo = unsafe { &mut *call.flinfo.as_ptr() };
-    let fn_addr = flinfo.fn_addr;
+    let fn_addr = flinfo.fn_addr();
     let fcinfo = unsafe { fcinfo_mut(call.fcinfo, call.nargs) };
     fcinfo.isnull = false;
     let d = fn_addr(Some(flinfo), fcinfo)?;

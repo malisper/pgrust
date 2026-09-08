@@ -1,6 +1,10 @@
 #![no_std]
 #![allow(non_upper_case_globals)]
 
+// A function's address is not an identity: builtin / wrapper identity reads
+// the resolution record (FmgrInfo::fn_kind / fn_body), never a pointer compare.
+#![deny(unpredictable_function_pointer_comparisons)]
+
 extern crate alloc;
 // thread_local! for the per-backend CFuncHash (AGENTS.md rule 10).
 extern crate std;
@@ -14,7 +18,7 @@ use alloc::boxed::Box;
 use alloc::format;
 
 use ::datum::Datum;
-use ::fmgr::{FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData, TRACK_FUNC_ALL};
+use ::fmgr::{FmgrBuiltin, FmgrInfo, FnKind, FunctionCallInfoBaseData, TRACK_FUNC_ALL};
 use ::types_core::{primitive::InvalidOid, Oid, TransactionId};
 use ::types_error::PgResult;
 use ::types_tuple::ItemPointerData;
@@ -47,10 +51,10 @@ pub fn init_seams() {
 /// an unported dependency at resolution time instead of deep inside an
 /// operation (e.g. a GiST page split long after CREATE INDEX succeeded).
 pub fn fmgr_info_not_ported_name(flinfo: &FmgrInfo) -> Option<&'static str> {
-    #[allow(function_casts_as_integer)] // fn address used as identity key; cast is intentional
-    if flinfo.fn_addr as usize == builtin_not_ported as usize
-        && late_builtin(flinfo.fn_oid).is_none()
-    {
+    // The resolution's own record (`FnKind::NotPorted`), never `fn_addr ==
+    // builtin_not_ported`: a fn-item cast is not one address (Rust gives a
+    // function no unique address; Miri salts every fresh cast).
+    if flinfo.fn_kind == FnKind::NotPorted && late_builtin(flinfo.fn_oid).is_none() {
         Some(fmgr_isbuiltin(flinfo.fn_oid).map_or("?", |b| b.name))
     } else {
         None
@@ -222,12 +226,64 @@ const fn build_builtins() -> [FmgrBuiltin; FMGR_NBUILTINS] {
     t
 }
 
+/// Row `i` of `BUILTINS` kept the `builtin_not_ported` stub: no `PORTED`
+/// entry named its oid. The same walk as `build_builtins`, so the bit and the
+/// row's body are one fact of the generated tables; every "is this row the
+/// stub?" question reads the bit — comparing function addresses is unreliable.
+const fn build_not_ported() -> [bool; FMGR_NBUILTINS] {
+    let mut stub = [true; FMGR_NBUILTINS];
+    let mut p = 0;
+    while p < ported::PORTED.len() {
+        let (oid, _) = ported::PORTED[p];
+        let mut lo = 0;
+        let mut hi = FMGR_NBUILTINS;
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if BUILTINS[mid].foid == oid {
+                stub[mid] = false;
+                break;
+            } else if BUILTINS[mid].foid < oid {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        p += 1;
+    }
+    stub
+}
+
 const BUILTINS: [FmgrBuiltin; FMGR_NBUILTINS] = build_builtins();
 const OID_INDEX: BuiltinOidIndex<FMGR_OID_INDEX_SIZE> = BuiltinOidIndex::build(&BUILTINS);
+// A static, not a const: a const array is materialized at every use.
+static NOT_PORTED_ROW: [bool; FMGR_NBUILTINS] = build_not_ported();
+
 
 /// C: `fmgr_builtins[]`.
 pub static FMGR_BUILTINS: [FmgrBuiltin; FMGR_NBUILTINS] = BUILTINS;
 pub static FMGR_BUILTIN_OID_INDEX: BuiltinOidIndex<FMGR_OID_INDEX_SIZE> = OID_INDEX;
+
+/// The row's index in `FMGR_BUILTINS` when `b` borrows from it (a data
+/// address: unique and stable, unlike a function's); `None` for a late,
+/// extra or native-C table row.
+#[inline]
+fn canonical_row_index(b: &FmgrBuiltin) -> Option<usize> {
+    let p = b as *const FmgrBuiltin;
+    if FMGR_BUILTINS.as_ptr_range().contains(&p) {
+        // SAFETY: `p` is in the array's range, so both pointers derive from the
+        // same allocation and the offset is a whole number of rows.
+        Some(unsafe { p.offset_from(FMGR_BUILTINS.as_ptr()) } as usize)
+    } else {
+        None
+    }
+}
+
+/// `b`'s body is the not-ported stub: a canonical row without a `PORTED`
+/// entry. By the generated bit, never by comparing `b.func` to a fresh cast.
+#[inline]
+pub fn row_is_stub(b: &FmgrBuiltin) -> bool {
+    canonical_row_index(b).is_some_and(|i| NOT_PORTED_ROW[i])
+}
 
 // Overlay for builtin tables whose crates would cycle into fmgr_core via
 // cache_syscache -> catcache -> indexam -> nbtree (regproc/acl/ruleutils…),
@@ -243,9 +299,9 @@ static EXTRA_LEN: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUs
 pub fn install_extra_builtins(tables: &'static [&'static [FmgrBuiltin]]) {
     for t in tables {
         for b in *t {
-            #[allow(function_casts_as_integer)] // fn address used as identity key; cast is intentional
-            let live = fmgr_isbuiltin(b.foid)
-                .is_some_and(|x| x.func as usize != builtin_not_ported as usize);
+            // Live = a ported canonical row, or an already-installed extra
+            // row (never the stub's own row) — by the table's bit, not `x.func`.
+            let live = fmgr_isbuiltin(b.foid).is_some_and(|x| !row_is_stub(x));
             assert!(!live, "extra builtin {} collides with a live row", b.foid);
         }
     }
@@ -291,10 +347,7 @@ pub fn assert_rows_match_canonical(rows: &[FmgrBuiltin]) {
 
 pub fn fmgr_isbuiltin(id: Oid) -> Option<&'static FmgrBuiltin> {
     match FMGR_BUILTIN_OID_INDEX.lookup(&FMGR_BUILTINS, id) {
-        #[allow(function_casts_as_integer)] // fn address used as identity key; cast is intentional
-        Some(b) if b.func as usize == builtin_not_ported as usize => {
-            extra_builtin(id).or(Some(b))
-        }
+        Some(b) if row_is_stub(b) => extra_builtin(id).or(Some(b)),
         Some(b) => Some(b),
         None => extra_builtin(id),
     }
@@ -306,15 +359,18 @@ const THIN_TABLES: &[&[::fmgr::ThinBuiltin]] = &[
     ::adt_int8::builtins::INT8_THIN,
 ];
 
-/// Thin-ABI twin for a resolved carrier. `fn_addr` + `nargs` referee the
-/// row: an oid reused by a diverging resolution path, or a call site whose
-/// arity differs from the registration, falls back to the PGFunction ABI.
+/// Thin-ABI twin for a resolved carrier. The resolution record + `nargs`
+/// referee the row: a carrier whose body is not the builtin table's row for
+/// its oid (a hand-installed `FmgrInfo::new`, a wrapper, a diverging
+/// resolution path), or a call site whose arity differs from the
+/// registration, falls back to the PGFunction ABI. Identity is
+/// `is_builtin_body(foid)`, never `e.func == fn_addr` (two casts of one body
+/// need not compare equal).
 pub fn fmgr_thin_builtin(flinfo: &FmgrInfo, nargs: i16) -> Option<::fmgr::PGFunctionThin> {
     for t in THIN_TABLES {
         if let Ok(i) = t.binary_search_by_key(&flinfo.fn_oid, |e| e.foid) {
             let e = &t[i];
-            return (e.func as usize == flinfo.fn_addr as usize && e.nargs == nargs)
-                .then_some(e.thin);
+            return (flinfo.is_builtin_body(e.foid) && e.nargs == nargs).then_some(e.thin);
         }
     }
     None
@@ -361,17 +417,18 @@ fn internal_builtin_oid(funcid: Oid) -> PgResult<Option<Oid>> {
 // A user-created internal-language fn (new oid) must resolve through the
 // canonical entry's oid: the stub's late lookup keys on flinfo.fn_oid, which
 // is the new oid, so late and extra ports are resolved here instead.
-fn internal_fn_addr(prosrc: &str) -> Option<::fmgr::PGFunction> {
+// Returns (body, resolution kind, the builtin row's oid): `Builtin` under the
+// canonical row's oid (a user alias keeps its new `fn_oid`), `NotPorted` for
+// a stub row with no late/extra port.
+fn internal_fn_addr(prosrc: &str) -> Option<(::fmgr::PGFunction, FnKind, Oid)> {
     let fbp = fmgr_lookup_by_name(prosrc)?;
-    #[allow(function_casts_as_integer)] // fn address used as identity key; cast is intentional
-    if fbp.func as usize == builtin_not_ported as usize {
-        return Some(
-            late_builtin(fbp.foid)
-                .or_else(|| extra_builtin(fbp.foid))
-                .map_or(fbp.func, |b| b.func),
-        );
+    if row_is_stub(fbp) {
+        return Some(match late_builtin(fbp.foid).or_else(|| extra_builtin(fbp.foid)) {
+            Some(b) => (b.func, FnKind::Builtin, fbp.foid),
+            None => (fbp.func, FnKind::NotPorted, fbp.foid),
+        });
     }
-    Some(fbp.func)
+    Some((fbp.func, FnKind::Builtin, fbp.foid))
 }
 
 #[cold]
@@ -405,13 +462,21 @@ pub fn fmgr_internal_function(proname: &str) -> Oid {
 /// flinfo-less invocations (sortsupport shims) don't dead-end in the stub.
 #[inline]
 pub fn fmgr_info_from_builtin_into(fbp: &FmgrBuiltin, function_id: Oid, finfo: &mut FmgrInfo) {
-    #[allow(function_casts_as_integer)] // fn address used as identity key; cast is intentional
-    let fbp = if fbp.func as usize == builtin_not_ported as usize {
-        late_builtin(function_id).unwrap_or(fbp)
+    let (fbp, kind) = if row_is_stub(fbp) {
+        match late_builtin(function_id) {
+            Some(late) => (late, FnKind::Builtin),
+            None => (fbp, FnKind::NotPorted),
+        }
+    } else if canonical_row_index(fbp).is_some()
+        || [extra_builtin(fbp.foid), late_builtin(fbp.foid), native_clang_builtin(fbp.foid)]
+            .into_iter().flatten().any(|row| core::ptr::eq(row, fbp))
+    {
+        (fbp, FnKind::Builtin)
     } else {
-        fbp
+        (fbp, FnKind::Direct)
     };
-    finfo.fn_addr = fbp.func;
+    finfo.set_fn_addr(fbp.func);
+    finfo.set_resolution(kind, if kind == FnKind::Direct { InvalidOid } else { fbp.foid });
     finfo.fn_nargs = fbp.nargs;
     finfo.fn_strict = fbp.strict;
     finfo.fn_retset = fbp.retset;
@@ -611,7 +676,9 @@ fn fmgr_info_pg_proc(
     // fmgr_info_cxt_security: prosecdef or non-null proconfig routes through
     // the fmgr_security_definer handler (FmgrHookIsNeeded: no hook surface).
     if !ignore_security && (row.prosecdef || !row.proconfig_isnull) {
-        finfo.fn_addr = fmgr_security_definer;
+        finfo.set_fn_addr(fmgr_security_definer);
+        // The wrapper's identity is this write (C: `fn_addr == fmgr_security_definer`).
+        finfo.set_resolution(FnKind::SecurityDefiner, InvalidOid);
         finfo.fn_nargs = row.pronargs;
         finfo.fn_strict = row.proisstrict;
         finfo.fn_retset = row.proretset;
@@ -621,13 +688,15 @@ fn fmgr_info_pg_proc(
         finfo.fn_oid = function_id;
         return Ok(());
     }
-    let fn_addr = match row.prolang {
+    // (body, resolution kind, builtin row oid): the language arms are
+    // `FnKind::Language`; the internal arm is the canonical row's body.
+    let (fn_addr, kind, body) = match row.prolang {
         INTERNAL_LANGUAGE_ID => {
             let cx = ::mcx::MemoryContext::new("fmgr_info prosrc");
             let prosrc = syscache_seams::lookup_pg_proc_prosrc::call(cx.mcx(), function_id)?
                 .unwrap_or_else(|| panic!("fmgr: null prosrc for function {function_id}"));
             match internal_fn_addr(&prosrc) {
-                Some(f) => f,
+                Some(resolved) => resolved,
                 None => {
                     return Err(alloc::boxed::Box::new(
                         PgError::error(alloc::format!(
@@ -646,10 +715,10 @@ fn fmgr_info_pg_proc(
             }
             // SAFETY: written only by register_sql_language_handler from a
             // valid PGFunction.
-            unsafe { core::mem::transmute::<usize, ::fmgr::PGFunction>(h) }
+            (unsafe { core::mem::transmute::<usize, ::fmgr::PGFunction>(h) }, FnKind::Language, InvalidOid)
         }
         C_LANGUAGE_ID => match lookup_c_func(function_id, row.xmin, row.tid) {
-            Some(f) => f,
+            Some(f) => (f, FnKind::Language, InvalidOid),
             None => {
                 // fmgr_info_C_lang (fmgr.c:349-365): prosrc is the link
                 // symbol, probin the library; load_external_function always
@@ -667,7 +736,7 @@ fn fmgr_info_pg_proc(
                 let user_fn = ::dfmgr::load_external_function(&probin, &prosrc, true)?
                     .expect("signal_not_found=true returned no function");
                 record_c_func(function_id, row.xmin, row.tid, user_fn);
-                user_fn
+                (user_fn, FnKind::Language, InvalidOid)
             }
         },
         lang => {
@@ -684,10 +753,12 @@ fn fmgr_info_pg_proc(
             };
             let mut plfinfo = FmgrInfo::unresolved();
             fmgr_info_pg_proc(langrow.lanplcallfoid, &mut plfinfo, true)?;
-            plfinfo.fn_addr
+            (plfinfo.fn_addr(), FnKind::Language, InvalidOid)
         }
     };
-    finfo.fn_addr = fn_addr;
+    finfo.set_fn_addr(fn_addr);
+    finfo.set_resolution(kind, body);
+
     finfo.fn_nargs = row.pronargs;
     finfo.fn_strict = row.proisstrict;
     finfo.fn_retset = row.proretset;

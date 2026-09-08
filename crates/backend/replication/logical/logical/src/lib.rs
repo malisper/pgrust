@@ -777,17 +777,9 @@ fn LoadOutputPlugin(callbacks: &mut OutputPluginCallbacks, plugin: &str) -> PgRe
 
     // The registered init symbol is a PGFunction; arg 0 carries the callbacks
     // struct pointer (C casts the dlsym result instead).
-    let mut flinfo = types_fmgr::FmgrInfo {
-        fn_addr: init,
-        fn_oid: InvalidOid,
-        fn_nargs: 1,
-        fn_strict: false,
-        fn_retset: false,
-        fn_stats: 0,
-        fn_extra: None,
-        fn_expr: None,
-    };
+    let mut flinfo = types_fmgr::FmgrInfo::new(init, InvalidOid, 1, false, false);
     let scratch = MemoryContext::new("LoadOutputPlugin");
+
     types_fmgr::function_call1_coll_in(
         &mut flinfo,
         InvalidOid,

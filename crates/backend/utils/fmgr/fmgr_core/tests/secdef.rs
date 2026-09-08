@@ -52,7 +52,9 @@ fn security_definer_wrapper_switches_user_and_gucs() {
     });
 
     let mut flinfo = fmgr_core::fmgr_info(SECDEF_OID).unwrap();
-    assert_eq!(flinfo.fn_addr as usize, fmgr_core::fmgr_security_definer as usize);
+    // The wrapper by fmgr_info's record, never `fn_addr == fmgr_security_definer`.
+    assert!(flinfo.is_security_definer_wrapper());
+
     assert_eq!(flinfo.fn_stats, TRACK_FUNC_ALL);
     assert!(flinfo.fn_strict);
     assert_eq!(flinfo.fn_nargs, 2);

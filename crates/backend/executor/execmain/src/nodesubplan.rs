@@ -1525,7 +1525,7 @@ fn exec_tuples_unequal<'mcx>(
             value: a2,
             isnull: false,
         };
-        let fn_addr = flinfo.fn_addr;
+        let fn_addr = flinfo.fn_addr();
         let d = fn_addr(Some(flinfo), &mut fcinfo)?;
         debug_assert!(!fcinfo.isnull);
         if !d.as_bool() {
@@ -1577,7 +1577,7 @@ fn hash_slot_lhs<'mcx>(
                 value: v,
                 isnull: false,
             };
-            let fn_addr = flinfo.fn_addr;
+            let fn_addr = flinfo.fn_addr();
             let d = fn_addr(Some(flinfo), &mut fcinfo)?;
             if i == 0 {
                 hash = d.as_u32();
@@ -1640,7 +1640,7 @@ fn find_exact_cross<'mcx>(
                 value: a2,
                 isnull: false,
             };
-            let fn_addr = flinfo.fn_addr;
+            let fn_addr = flinfo.fn_addr();
             let d = fn_addr(Some(flinfo), &mut fcinfo)?;
             if fcinfo.isnull || !d.as_bool() {
                 return Ok(false);

@@ -1,5 +1,5 @@
 use ::datum::Datum;
-use ::fmgr::{FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData, LocalFcinfo, TRACK_FUNC_ALL};
+use ::fmgr::{FmgrBuiltin, FmgrInfo, FnKind, FunctionCallInfoBaseData, LocalFcinfo, TRACK_FUNC_ALL};
 use ::types_core::{primitive::InvalidOid, Oid};
 use ::types_error::PgResult;
 
@@ -42,10 +42,7 @@ fn binary_wire_send_recv_holes_stay_ported() {
     ] {
         let b = fmgr_isbuiltin(oid).unwrap_or_else(|| panic!("{name} missing from canonical"));
         assert_eq!(b.name, name);
-        assert!(
-            b.func as usize != builtin_not_ported as usize,
-            "{name} (OID {oid}) resolves to the not-ported stub"
-        );
+        assert!(!row_is_stub(b), "{name} (OID {oid}) resolves to the not-ported stub");
     }
 }
 
@@ -118,11 +115,7 @@ fn unported_builtin_invocation_is_clean_feature_error() {
     // some lane ports it (1294 did).
     let b = FMGR_BUILTINS
         .iter()
-        .find(|b| {
-            b.func as usize == builtin_not_ported as usize
-                && late_builtin(b.foid).is_none()
-                && extra_builtin(b.foid).is_none()
-        })
+        .find(|b| row_is_stub(b) && late_builtin(b.foid).is_none() && extra_builtin(b.foid).is_none())
         .expect("no unported canonical builtin left");
     let (oid, name) = (b.foid, b.name);
     let mut f = fmgr_info(oid).unwrap();
@@ -514,15 +507,17 @@ fn thin_tables_sorted_and_refereed() {
         for e in *t {
             let b = fmgr_isbuiltin(e.foid).expect("thin row without builtin row");
             assert_eq!(b.nargs, e.nargs, "thin arity mismatch ({})", e.foid);
-            assert_eq!(b.func as usize, e.func as usize, "thin referee mismatch ({})", e.foid);
+            assert!(!row_is_stub(b), "thin row over a stub ({})", e.foid);
         }
     }
     let f = fmgr_info(177).unwrap();
     assert!(fmgr_thin_builtin(&f, 2).is_some());
     assert!(fmgr_thin_builtin(&f, 1).is_none(), "arity mismatch must not get a thin twin");
-    let mut g = fmgr_info(177).unwrap();
-    g.fn_addr = int4pl_body;
-    assert!(fmgr_thin_builtin(&g, 2).is_none(), "diverging fn_addr must not get a thin twin");
+    // A hand-installed body (`FmgrInfo::new`: `Direct`) claims no table
+    // identity — even under the table's own oid.
+    let g = FmgrInfo::new(int4pl_body, 177, 2, true, false);
+    assert!(fmgr_thin_builtin(&g, 2).is_none(), "a hand-installed body must not get a thin twin");
+
     assert!(fmgr_thin_builtin(&fmgr_info(65).unwrap(), 2).is_some());
     assert!(fmgr_thin_builtin(&fmgr_info(1219).unwrap(), 1).is_some(), "int8inc thin row");
 }
@@ -563,9 +558,7 @@ fn not_ported_name_predicate() {
     // one instead of hard-coding an oid so this test survives future ports;
     // if the whole catalog is ever ported the loop body simply never runs.
     for b in FMGR_BUILTINS.iter() {
-        let live = fmgr_isbuiltin(b.foid)
-            .is_some_and(|x| x.func as usize != builtin_not_ported as usize);
-        if live {
+        if fmgr_isbuiltin(b.foid).is_some_and(|x| !row_is_stub(x)) {
             continue;
         }
         let mut f = fmgr_info(b.foid).unwrap();
@@ -603,14 +596,9 @@ fn internal_prosrc_resolves_through_the_extra_tables() {
     // A canonical stub row with no late/extra port yet: install an extra
     // port for it and check CREATE FUNCTION ... LANGUAGE internal resolution
     // (fmgr_info's prosrc arm) finds it, as fmgr_isbuiltin already does.
-    #[allow(function_casts_as_integer)] // fn address used as identity key; cast is intentional
     let b = FMGR_BUILTINS
         .iter()
-        .find(|b| {
-            b.func as usize == builtin_not_ported as usize
-                && late_builtin(b.foid).is_none()
-                && extra_builtin(b.foid).is_none()
-        })
+        .find(|b| row_is_stub(b) && late_builtin(b.foid).is_none() && extra_builtin(b.foid).is_none())
         .expect("no unported canonical builtin left");
     let row: &'static [FmgrBuiltin] = Box::leak(Box::new([FmgrBuiltin {
         foid: b.foid,
@@ -622,9 +610,65 @@ fn internal_prosrc_resolves_through_the_extra_tables() {
     }]));
     let tables: &'static [&'static [FmgrBuiltin]] = Box::leak(Box::new([row]));
     install_extra_builtins(tables);
-    #[allow(function_casts_as_integer)]
-    let resolved = internal_fn_addr(b.name).expect("canonical name resolves") as usize;
-    #[allow(function_casts_as_integer)]
-    let want = probe as ::fmgr::PGFunction as usize;
-    assert_eq!(resolved, want);
+    let (resolved, kind, body) = internal_fn_addr(b.name).expect("canonical name resolves");
+    assert_eq!((kind, body), (FnKind::Builtin, b.foid), "the extra port under the canonical row's oid");
+    let mut fcinfo = LocalFcinfo::<0>::fresh(InvalidOid);
+    assert_eq!(resolved(None, &mut fcinfo).unwrap().as_i32(), 1);
+}
+
+
+/// The generated stub bit is `PORTED` membership for every canonical row (the
+/// id fact, every arm); a foreign row carries no bit.
+#[test]
+fn stub_bit_is_ported_membership() {
+    let mut stubs = 0;
+    for b in FMGR_BUILTINS.iter() {
+        let ported = ported::PORTED.binary_search_by_key(&b.foid, |p| p.0).is_ok();
+        assert_eq!(row_is_stub(b), !ported, "oid {} bit vs PORTED", b.foid);
+        stubs += row_is_stub(b) as usize;
+    }
+    assert_eq!(stubs + ported::PORTED.len(), FMGR_BUILTINS.len());
+    let foreign = FmgrBuiltin { foid: 1, name: "x", nargs: 0, strict: true, retset: false, func: builtin_not_ported };
+    assert!(!row_is_stub(&foreign), "a foreign row carries no bit");
+}
+
+#[test]
+fn identity_is_the_resolution_record_not_the_address() {
+    fn trampoline(fl: Option<&mut FmgrInfo>, fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+        ::adt_int::builtins::fc_int4pl(fl, fc)
+    }
+    let f = fmgr_info(177).unwrap();
+    assert_eq!((f.fn_kind, f.fn_body), (FnKind::Builtin, 177));
+    assert!(f.is_builtin_body(177) && !f.is_builtin_body(178));
+    let mut via_other_address = fmgr_info(177).unwrap();
+    via_other_address.set_fn_addr(trampoline);
+    assert!(fmgr_thin_builtin(&via_other_address, 2).is_none(), "replacing the body invalidates identity");
+    let exact_no_record = FmgrInfo::new(::adt_int::builtins::fc_int4pl, 177, 2, true, false);
+    assert_eq!((exact_no_record.fn_kind, exact_no_record.fn_body), (FnKind::Direct, InvalidOid));
+    assert!(fmgr_thin_builtin(&exact_no_record, 2).is_none());
+    assert_eq!(FmgrInfo::unresolved().fn_kind, FnKind::Unresolved);
+    let copy = f.clone();
+    assert_eq!((copy.fn_kind, copy.fn_body), (FnKind::Builtin, 177), "fmgr_info_copy keeps the record");
+    let stub_oid = FMGR_BUILTINS
+        .iter()
+        .find(|b| row_is_stub(b) && late_builtin(b.foid).is_none() && extra_builtin(b.foid).is_none())
+        .map(|b| b.foid);
+    if let Some(oid) = stub_oid {
+        let mut s = fmgr_info(oid).unwrap();
+        assert_eq!((s.fn_kind, s.fn_body), (FnKind::NotPorted, oid));
+        assert!(fmgr_info_not_ported_name(&s).is_some());
+        s.set_fn_addr(trampoline);
+        assert!(fmgr_info_not_ported_name(&s).is_none(), "replacing the stub invalidates identity");
+        let hand = FmgrInfo::new(builtin_not_ported, oid, 0, false, false);
+        assert_eq!(fmgr_info_not_ported_name(&hand), None, "the stub's address without the record is not the stub");
+    }
+}
+
+#[test]
+fn foreign_builtin_row_cannot_claim_thin_identity() {
+    let row = FmgrBuiltin { foid: 177, name: "foreign", nargs: 2, strict: true,
+        retset: false, func: int4pl_body };
+    let f = fmgr_info_from_builtin(&row, row.foid);
+    assert_eq!(f.fn_kind, FnKind::Direct);
+    assert!(fmgr_thin_builtin(&f, 2).is_none());
 }
