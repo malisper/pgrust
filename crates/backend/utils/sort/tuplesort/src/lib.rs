@@ -1363,6 +1363,7 @@ impl Tuplesort {
     ) -> Tuplesort {
         let free_typlen = match variant {
             SortVariant::Datum { byref_typlen } => byref_typlen,
+            SortVariant::Cluster { .. } => FREE_SIZE_CLUSTER,
             _ => FREE_SIZE_TLEN,
         };
         let owned = McxOwned::try_new(MemoryContext::new("TupleSort main"), |mcx| {
@@ -3171,6 +3172,7 @@ impl<'m> TuplesortData<'m> {
 // Datum sorts store their begin-time typlen instead (datum images have no
 // header: >0 fixed, -1 varlena, -2 NUL-terminated cstring).
 const FREE_SIZE_TLEN: i16 = i16::MIN;
+const FREE_SIZE_CLUSTER: i16 = i16::MIN + 1;
 
 /// Put-time allocation size of a live sort tuple: the minimal-tuple image's
 /// t_len (heaptuple's alloc_image, extra = 0), or the datum copy's typlen /
@@ -3179,7 +3181,11 @@ const FREE_SIZE_TLEN: i16 = i16::MIN;
 #[inline]
 fn stup_alloc_size(free_typlen: i16, stup: &SortTuple) -> usize {
     debug_assert!(!stup.tuple.is_null());
-    if free_typlen == FREE_SIZE_TLEN {
+    if free_typlen == FREE_SIZE_CLUSTER {
+        // SAFETY: live CLUSTER blob; match putheaptuple allocation, including cached keys.
+        let hdr = unsafe { &*stup.tuple.cast::<ClusterTupleHeader>() };
+        maxalign(maxalign(16 + hdr.t_len as usize) + hdr.itup_len as usize)
+    } else if free_typlen == FREE_SIZE_TLEN {
         // SAFETY: live tuplecontext image.
         (unsafe { (*stup.tuple).t_len }) as usize
     } else if free_typlen > 0 {
@@ -3201,7 +3207,13 @@ fn freed_space(free_typlen: i16, stup: &SortTuple) -> i64 {
     if stup.tuple.is_null() {
         return 0;
     }
-    aset_chunk_space(stup_alloc_size(free_typlen, stup)) as i64
+    let size = if free_typlen == FREE_SIZE_CLUSTER {
+        // SAFETY: live CLUSTER blob; the ledger charges C's HeapTupleData header.
+        24 + unsafe { (*stup.tuple).t_len } as usize
+    } else {
+        stup_alloc_size(free_typlen, stup)
+    };
+    aset_chunk_space(size) as i64
 }
 
 /// The physical half of C's free_sort_tuple (pfree): deallocate the tuple's

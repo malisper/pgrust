@@ -2918,3 +2918,47 @@ fn small_datum_sort_reports_c_chunk_memory() {
     assert_eq!(output, vec![Some(1), Some(2), Some(3)]);
     assert_eq!(ts.get_stats().spaceUsed, 25);
 }
+
+#[test]
+fn bounded_cluster_frees_complete_blobs() {
+    for expression in [false, true] {
+        let mcx = leaked_mcx();
+        let desc = int4_desc(mcx, 1);
+        let mut attnums = [0; 32];
+        attnums[0] = if expression { 0 } else { 1 };
+        let mut ts = Tuplesort::begin_common(
+            4096, TUPLESORT_ALLOWBOUNDED, &[int32_key(1, false, false)],
+            false, None,
+            SortVariant::Cluster {
+                tup_desc: desc.clone(), attnums, nkeys: 1,
+                index_desc: expression.then(|| desc.clone()),
+            },
+            ::pg_rusage::PgRUsage::default(),
+        );
+        ts.set_bound(3);
+        for k in (0..32).rev().chain(32..64) {
+            let values = [Datum::from_i32(k)];
+            let tuple = heaptuple::heap_form_tuple(mcx, &desc, &values, &[false]).unwrap();
+            let index = expression.then(|| nbtree::itup::index_form_tuple(
+                mcx, &desc, &values, &[false],
+            ).unwrap());
+            let image = index.as_ref().map(|itup| {
+                // SAFETY: the formed index image remains live through putheaptuple.
+                unsafe { core::slice::from_raw_parts(itup.as_ptr(), itup.size()) }
+            });
+            ts.putheaptuple(&tuple, image).unwrap();
+        }
+        ts.performsort().unwrap();
+        assert!(ts.used_bound());
+        assert!(ts.tuplecontext_stats().used <= 3 * 128, "only three small blobs remain live");
+        for expected in 0..3 {
+            let tuple = ts.getheaptuple(true).unwrap().unwrap();
+            let mut isnull = false;
+            // SAFETY: live output image under its original descriptor.
+            let value = unsafe { types_tuple::heap_getattr(&tuple, 1, &desc, &mut isnull) };
+            assert!(!isnull);
+            assert_eq!(value.as_i32(), expected);
+        }
+        ts.end();
+    }
+}
