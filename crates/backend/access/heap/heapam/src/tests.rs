@@ -1017,6 +1017,9 @@ const FAKE_XID: u32 = 100;
 
 static DML_INIT: Once = Once::new();
 static FSM_VACUUM_RANGES: Mutex<Vec<(BlockNumber, BlockNumber)>> = Mutex::new(Vec::new());
+// Waiters on the relation-extension lock seen by RelationAddBlocks (0 = C's
+// uncontended case).
+static EXT_LOCK_WAITERS: AtomicUsize = AtomicUsize::new(0);
 static XLOG_RECS: Mutex<Vec<(u8, Vec<u8>, usize, Vec<(u8, Vec<u8>)>)>> = Mutex::new(Vec::new());
 static NEXT_LSN: AtomicUsize = AtomicUsize::new(0x1000);
 
@@ -1080,6 +1083,9 @@ fn install_dml_seams() {
             FSM_VACUUM_RANGES.lock().unwrap().push((start, end));
             Ok(())
         });
+        // RelationExtensionLockWaiterCount's LockWaiterCount (lock.c:4824):
+        // the test-controlled nRequested of the relation-extension lock.
+        lock_seams::lock_waiter_count::set(|_tag| Ok(EXT_LOCK_WAITERS.load(Ordering::Relaxed) as i32));
         // CHECK_FOR_INTERRUPTS() (the seam only runs when InterruptPending is
         // set): a pending cancel comes back as C's 57014.
         postgres_seams::check_for_interrupts::set(|| {
@@ -2518,6 +2524,38 @@ fn bulk_extend_fsm_vacuum_range_covers_last_block() {
     let ranges = core::mem::take(&mut *FSM_VACUUM_RANGES.lock().unwrap());
     assert_eq!(ranges, vec![(1, 4)]);
     quiesced();
+}
+
+// hio.c:272-282 RelationAddBlocks: with a bistate or the FSM available,
+// extend_by_pages += extend_by_pages * RelationExtensionLockWaiterCount(rel)
+// (audit-18.6 w2-034, a186-candidate-fp-heap-hio-0984fe54151d3897036c-1).
+#[test]
+fn relation_add_blocks_scales_extension_by_extension_lock_waiters() {
+    install_dml_seams();
+    let _serial = serial();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let oid = fresh_oid();
+    register_table(oid, vec![]);
+    let rel = test_relation(mcx, oid);
+    FSM_VACUUM_RANGES.lock().unwrap().clear();
+
+    // Two other backends queue on the extension lock: one requested page
+    // becomes 1 + 1 * 2 = 3 pages, the extra two going into the FSM.
+    EXT_LOCK_WAITERS.store(2, Ordering::Relaxed);
+    let pin = hio::RelationGetBufferForTuple(&rel, 64, None, 0, None, 1);
+    EXT_LOCK_WAITERS.store(0, Ordering::Relaxed);
+    let pin = pin.unwrap();
+    let first_block = pin.block_number();
+    let nblocks = with_fake(|f| f.tables[&oid].len());
+    // Release before asserting so a failing witness leaves the fake quiesced.
+    bufmgr_seams::lock_buffer::call(pin.buffer(), bufmgr_seams::BUFFER_LOCK_UNLOCK).unwrap();
+    pin.release();
+    let ranges = core::mem::take(&mut *FSM_VACUUM_RANGES.lock().unwrap());
+    quiesced();
+    assert_eq!(first_block, 0);
+    assert_eq!(nblocks, 3, "hio.c:282 extend_by_pages += extend_by_pages * waitcount");
+    assert_eq!(ranges, vec![(1, 3)], "blocks 1..=2 were recorded in the FSM");
 }
 
 // --- upstream f581fa729d8e (18.5): VM buffers registered in heap records ---

@@ -104,8 +104,20 @@ fn RelationAddBlocks(
     let extend_by_pages = if bistate.is_none() && !use_fsm {
         1
     } else {
-        // Single-backend: no extension-lock waiters, so no waitcount term.
+        // hio.c:268-282: extend by at least the pages the caller needs,
+        // multiplied by the backends queued on the relation-extension lock
+        // (RelationExtensionLockWaiterCount; RELATION_IS_LOCAL relations
+        // have no contention) — relieves contention even without the FSM,
+        // by deferring this backend's next extension.
         let mut pages = num_pages as u32;
+        let relation_is_local = relation.rd_islocaltemp
+            || relation.rd_createSubid.get() != ::types_core::xact::InvalidSubTransactionId;
+        let waitcount: u32 = if !relation_is_local {
+            ::lmgr::RelationExtensionLockWaiterCount(relation)? as u32
+        } else {
+            0
+        };
+        pages += pages * waitcount;
         if let Some(bi) = bistate.as_deref() {
             pages = pages.max(bi.already_extended_by);
         }

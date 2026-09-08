@@ -25,6 +25,8 @@ use ::types_nbtree::IndexBulkDeleteResult;
 use ::types_rel::lock::{NoLock, RowExclusiveLock};
 use ::types_rel::Relation;
 use ::mcx::Mcx;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 use ::tableam_vocab::{
     VacOptValue, VacuumCutoffs, VacuumParams, VACOPT_DISABLE_PAGE_SKIPPING, VACOPT_VERBOSE,
 };
@@ -36,7 +38,7 @@ use ::types_core::{
     BlockNumber, Buffer, ForkNumber, GlobalVisStateHandle, InvalidBlockNumber, OffsetNumber, Size,
     TransactionId, BLCKSZ,
 };
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult};
 use ::types_rel::RelationData;
 use ::types_snapshot::HTSV_Result;
 use ::types_storage::buf::BufferAccessStrategy;
@@ -104,11 +106,193 @@ pub(crate) struct ScanEnv<'a, 'mcx> {
 /// The phase-I fold block: the LVRelState counters the per-block bodies
 /// write, every one an order-insensitive-exact fold (sum / XID-min / max —
 /// doc §3.2), homed on the gated vacuum_morsels::ScanCounters unit so the
-/// serial arm and the morsel workers fold IDENTICAL state. `offnum` is C's
-/// error-context bookkeeping (vacrel->offnum), participant-local.
+/// serial arm and the morsel workers fold IDENTICAL state. `err` is C's
+/// error-context bookkeeping (vacrel->phase/blkno/offnum/indname),
+/// participant-local — see [`VacErrInfo`].
 pub(crate) struct ScanFolds {
     pub(crate) counters: ::vacuum_morsels::ScanCounters,
-    pub(crate) offnum: OffsetNumber,
+    pub(crate) err: Rc<VacErrInfo>,
+}
+
+/// VacErrPhase (vacuumlazy.c:224-232): the phase vacuum_error_callback
+/// describes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum VacErrPhase {
+    Unknown,
+    ScanHeap,
+    VacuumIndex,
+    VacuumHeap,
+    IndexCleanup,
+    Truncate,
+}
+
+/// LVSavedErrInfo (vacuumlazy.c:296-301): what update_vacuum_error_info saves
+/// for restore_vacuum_error_info.
+#[derive(Clone, Copy)]
+pub(crate) struct LVSavedErrInfo {
+    blkno: BlockNumber,
+    offnum: OffsetNumber,
+    phase: VacErrPhase,
+}
+
+/// The error-context state of C's LVRelState (vacuumlazy.c:268-274:
+/// relnamespace / relname / indname / blkno / offnum / phase), read by
+/// vacuum_error_callback. One per scanning participant — the leader's lives
+/// in its ScanFolds, each morsel worker builds its own (phase I is
+/// morselized, so the block/offset bookkeeping is participant-local). Shared
+/// (Rc) with the participant's [`VacErrContext`] frame so non-ERROR reports
+/// are decorated at emission time too.
+pub(crate) struct VacErrInfo {
+    relnamespace: String,
+    relname: String,
+    indname: RefCell<Option<String>>,
+    blkno: Cell<BlockNumber>,
+    offnum: Cell<OffsetNumber>,
+    phase: Cell<VacErrPhase>,
+}
+
+impl VacErrInfo {
+    /// vacuumlazy.c:669-673: names snapshotted, indname NULL, phase UNKNOWN.
+    pub(crate) fn new(relnamespace: String, relname: String) -> Rc<Self> {
+        Rc::new(VacErrInfo {
+            relnamespace,
+            relname,
+            indname: RefCell::new(None),
+            blkno: Cell::new(InvalidBlockNumber),
+            offnum: Cell::new(InvalidOffsetNumber),
+            phase: Cell::new(VacErrPhase::Unknown),
+        })
+    }
+
+    /// vacuum_error_callback (vacuumlazy.c:3782-3839): the errcontext() line
+    /// for the current phase; None in VACUUM_ERRCB_PHASE_UNKNOWN (the
+    /// callback returns without a line).
+    pub(crate) fn context_line(&self) -> Option<String> {
+        let (ns, rel) = (&self.relnamespace, &self.relname);
+        let blkno = self.blkno.get();
+        let offnum = self.offnum.get();
+        match self.phase.get() {
+            VacErrPhase::ScanHeap => Some(if blkno != InvalidBlockNumber {
+                if offnum != InvalidOffsetNumber {
+                    format!("while scanning block {blkno} offset {offnum} of relation \"{ns}.{rel}\"")
+                } else {
+                    format!("while scanning block {blkno} of relation \"{ns}.{rel}\"")
+                }
+            } else {
+                format!("while scanning relation \"{ns}.{rel}\"")
+            }),
+            VacErrPhase::VacuumHeap => Some(if blkno != InvalidBlockNumber {
+                if offnum != InvalidOffsetNumber {
+                    format!("while vacuuming block {blkno} offset {offnum} of relation \"{ns}.{rel}\"")
+                } else {
+                    format!("while vacuuming block {blkno} of relation \"{ns}.{rel}\"")
+                }
+            } else {
+                format!("while vacuuming relation \"{ns}.{rel}\"")
+            }),
+            VacErrPhase::VacuumIndex => Some(format!(
+                "while vacuuming index \"{}\" of relation \"{ns}.{rel}\"",
+                self.indname.borrow().as_deref().unwrap_or("")
+            )),
+            VacErrPhase::IndexCleanup => Some(format!(
+                "while cleaning up index \"{}\" of relation \"{ns}.{rel}\"",
+                self.indname.borrow().as_deref().unwrap_or("")
+            )),
+            VacErrPhase::Truncate => (blkno != InvalidBlockNumber)
+                .then(|| format!("while truncating relation \"{ns}.{rel}\" to {blkno} blocks")),
+            VacErrPhase::Unknown => None,
+        }
+    }
+
+    /// The callback's errcontext() over one report. C runs it once per
+    /// report; here an ERROR crosses every enclosing phase boundary on its
+    /// way out, and each one sees the same unrestored state the innermost
+    /// already reported (C's longjmp skips restore_vacuum_error_info just
+    /// the same), so a line equal to the last one attached is not repeated.
+    pub(crate) fn attach(&self, e: &mut PgError) {
+        let Some(line) = self.context_line() else { return };
+        if e.context().is_some_and(|c| c.rsplit('\n').next() == Some(line.as_str())) {
+            return;
+        }
+        e.add_context_line(line);
+    }
+
+    pub(crate) fn attach_err(&self, mut e: Box<PgError>) -> Box<PgError> {
+        self.attach(&mut e);
+        e
+    }
+}
+
+/// update_vacuum_error_info (vacuumlazy.c:3846-3859); the returned save is
+/// C's `saved_vacrel` out-parameter (callers that pass NULL drop it).
+pub(crate) fn update_vacuum_error_info(
+    info: &VacErrInfo,
+    phase: VacErrPhase,
+    blkno: BlockNumber,
+    offnum: OffsetNumber,
+) -> LVSavedErrInfo {
+    let saved = LVSavedErrInfo {
+        blkno: info.blkno.get(),
+        offnum: info.offnum.get(),
+        phase: info.phase.get(),
+    };
+    info.blkno.set(blkno);
+    info.offnum.set(offnum);
+    info.phase.set(phase);
+    saved
+}
+
+/// restore_vacuum_error_info (vacuumlazy.c:3865-3871).
+pub(crate) fn restore_vacuum_error_info(info: &VacErrInfo, saved: &LVSavedErrInfo) {
+    info.blkno.set(saved.blkno);
+    info.offnum.set(saved.offnum);
+    info.phase.set(saved.phase);
+}
+
+/// One phase body between update_vacuum_error_info and
+/// restore_vacuum_error_info: the restore runs on the success path only
+/// (C's ERROR longjmps past it) and an escaping error is decorated with the
+/// callback's line for the state it escaped from.
+pub(crate) fn with_vacuum_error_info<R>(
+    info: &VacErrInfo,
+    phase: VacErrPhase,
+    blkno: BlockNumber,
+    offnum: OffsetNumber,
+    body: impl FnOnce() -> PgResult<R>,
+) -> PgResult<R> {
+    let saved = update_vacuum_error_info(info, phase, blkno, offnum);
+    match body() {
+        Ok(v) => {
+            restore_vacuum_error_info(info, &saved);
+            Ok(v)
+        }
+        Err(e) => Err(info.attach_err(e)),
+    }
+}
+
+/// The participant's `error_context_stack` frame (vacuumlazy.c:675-678
+/// push, :865 pop): the emit-time callback that decorates non-ERROR reports
+/// (WARNING/NOTICE/LOG/DEBUG) as vacuum_error_callback does; ERRORs are
+/// decorated on propagation (the elog stack design).
+pub(crate) struct VacErrContext {
+    callback: u64,
+}
+
+impl VacErrContext {
+    pub(crate) fn push(info: &Rc<VacErrInfo>) -> Self {
+        let info = Rc::clone(info);
+        VacErrContext {
+            callback: elog::push_emit_context_callback(Box::new(move |e: &mut PgError| {
+                info.attach(e)
+            })),
+        }
+    }
+}
+
+impl Drop for VacErrContext {
+    fn drop(&mut self) {
+        elog::pop_emit_context_callback(self.callback);
+    }
 }
 
 /// Dead-TID sink of the per-block bodies: the serial arm feeds the round
@@ -293,6 +477,21 @@ pub fn heap_vacuum_rel<'mcx>(
         skipwithvm = false;
     }
 
+    // C (vacuumlazy.c:669-673) snapshots db/namespace/rel names up front,
+    // unconditionally: the error-context callback, the failsafe WARNING and
+    // the instrumentation report name the table "db.schema.rel".
+    let (dbname, relnamespace, relname) = {
+        let dbname = dbcommands_seams::get_database_name::call(
+            init_small::globals::MyDatabaseId(),
+        )?
+        .unwrap_or_default();
+        let nspname = syscache_seams::pg_namespace_nspname::call(rel.rd_rel.relnamespace)?
+            .map(|n| String::from_utf8_lossy(n.name_str()).into_owned())
+            .unwrap_or_default();
+        (dbname, nspname, rel.name().to_string())
+    };
+    let errinfo = VacErrInfo::new(relnamespace.clone(), relname.clone());
+
     let mut vacrel = LVRelState {
         mcx,
         rel,
@@ -317,7 +516,7 @@ pub fn heap_vacuum_rel<'mcx>(
             // Trackers start at the removal cutoffs; pruning ratchets them
             // back to the oldest extant XID/MXID.
             counters: ::vacuum_morsels::ScanCounters::seed(cutoffs.OldestXmin, cutoffs.OldestMxact),
-            offnum: InvalidOffsetNumber,
+            err: Rc::clone(&errinfo),
         },
         dead_items: None,
         dead_items_info: VacDeadItemsInfo { max_bytes: 0, num_items: 0 },
@@ -335,30 +534,17 @@ pub fn heap_vacuum_rel<'mcx>(
         eager_scan_remaining_successes: 0,
         eager_scan_max_fails_per_region: 0,
         eager_scan_remaining_fails: 0,
-        dbname: String::new(),
-        relnamespace: String::new(),
-        relname: String::new(),
+        dbname: dbname.clone(),
+        relnamespace: relnamespace.clone(),
+        relname: relname.clone(),
     };
     heap_vacuum_eager_scan_setup(&mut vacrel, params)?;
 
-    // C (vacuumlazy.c:660-662) snapshots db/namespace/rel names up front,
-    // unconditionally: the failsafe WARNING and the instrumentation report
-    // name the table "db.schema.rel" (the error-context callback itself is
-    // elided in this port).
-    let (dbname, relnamespace, relname) = {
-        let dbname = dbcommands_seams::get_database_name::call(
-            init_small::globals::MyDatabaseId(),
-        )?
-        .unwrap_or_default();
-        let nspname = syscache_seams::pg_namespace_nspname::call(rel.rd_rel.relnamespace)?
-            .map(|n| String::from_utf8_lossy(n.name_str()).into_owned())
-            .unwrap_or_default();
-        (dbname, nspname, rel.name().to_string())
-    };
-    vacrel.dbname = dbname.clone();
-    vacrel.relnamespace = relnamespace.clone();
-    vacrel.relname = relname.clone();
-
+    // vacuumlazy.c:675-678: vacuum_error_callback is on error_context_stack
+    // from here until it is popped after the truncate phase (:865); every
+    // report in between carries the phase's CONTEXT line.
+    let errcallback = VacErrContext::push(&errinfo);
+    let phases = (|| -> PgResult<u64> {
     if verbose {
         // C: aggressiveness gets its own dedicated VACUUM VERBOSE ereport.
         elog::ereport(::types_error::INFO)
@@ -400,6 +586,14 @@ pub fn heap_vacuum_rel<'mcx>(
     if should_attempt_truncation(&vacrel) {
         phase_trace::time(phase_trace::TRUNC, || lazy_truncate_heap(&mut vacrel))?;
     }
+    Ok(trace_setup_ns)
+    })();
+    let trace_setup_ns = match phases {
+        Ok(v) => v,
+        Err(e) => return Err(errinfo.attach_err(e)),
+    };
+    // Pop the error context stack (vacuumlazy.c:865).
+    drop(errcallback);
 
     pgstat_progress_update_param(PROGRESS_VACUUM_PHASE, PROGRESS_VACUUM_PHASE_FINAL_CLEANUP);
 
@@ -1026,6 +1220,14 @@ fn lazy_scan_heap(vacrel: &mut LVRelState<'_, '_>, mcx: Mcx<'_>, nrequested: i32
         }
 
         pgstat_progress_update_param(PROGRESS_VACUUM_HEAP_BLKS_SCANNED, blkno as i64);
+        // vacuumlazy.c:1341: update_vacuum_error_info(vacrel, NULL,
+        // VACUUM_ERRCB_PHASE_SCAN_HEAP, blkno, InvalidOffsetNumber).
+        update_vacuum_error_info(
+            &vacrel.folds.err,
+            VacErrPhase::ScanHeap,
+            blkno,
+            InvalidOffsetNumber,
+        );
 
         visibilitymap_pin(vacrel.rel, blkno, &mut vmbuffer)?;
 
@@ -1148,6 +1350,8 @@ fn lazy_scan_heap(vacrel: &mut LVRelState<'_, '_>, mcx: Mcx<'_>, nrequested: i32
     }
 
     vacrel.current_block = InvalidBlockNumber;
+    // vacuumlazy.c:1511: vacrel->blkno = InvalidBlockNumber.
+    vacrel.folds.err.blkno.set(InvalidBlockNumber);
     vmbuffer.release();
     vacrel.next_unskippable_vmbuffer.release();
 
@@ -1375,7 +1579,7 @@ fn lazy_scan_noprune(
     let maxoff = page.max_offset_number();
     let mut offnum = FirstOffsetNumber;
     while offnum <= maxoff {
-        folds.offnum = offnum;
+        folds.err.offnum.set(offnum);
         let itemid = page.item_id(offnum);
 
         if !itemid.is_used() {
@@ -1419,7 +1623,7 @@ fn lazy_scan_noprune(
         {
             // Aggressive VACUUM must advance relfrozenxid past FreezeLimit:
             // only lazy_scan_prune under a cleanup lock can freeze this page.
-            folds.offnum = InvalidOffsetNumber;
+            folds.err.offnum.set(InvalidOffsetNumber);
             return Ok(false);
         }
 
@@ -1442,7 +1646,7 @@ fn lazy_scan_noprune(
         offnum += 1;
     }
 
-    folds.offnum = InvalidOffsetNumber;
+    folds.err.offnum.set(InvalidOffsetNumber);
 
     // Freezing/pruning is deferred to the next VACUUM; ratchet the trackers
     // last (lazy_scan_prune expects a clean slate).
@@ -1498,7 +1702,11 @@ fn lazy_scan_prune(
     let mut presult = PruneFreezeResult::default();
     let mut new_relfrozen_xid = folds.counters.NewRelfrozenXid;
     let mut new_relmin_mxid = folds.counters.NewRelminMxid;
-    heap_page_prune_and_freeze(
+    // C passes &vacrel->offnum as off_loc (pruneheap.c:503-655 tracks the
+    // offset being processed for vacuum_error_callback); the slot is copied
+    // back before an escaping error is decorated.
+    let mut off_loc = folds.err.offnum.get();
+    let pruned = heap_page_prune_and_freeze(
         env.rel,
         buf,
         env.vistest,
@@ -1506,10 +1714,12 @@ fn lazy_scan_prune(
         Some(env.cutoffs),
         &mut presult,
         PruneReason::PruneVacuumScan,
-        &mut folds.offnum,
+        &mut off_loc,
         Some(&mut new_relfrozen_xid),
         Some(&mut new_relmin_mxid),
-    )?;
+    );
+    folds.err.offnum.set(off_loc);
+    pruned?;
     folds.counters.NewRelfrozenXid = new_relfrozen_xid;
     folds.counters.NewRelminMxid = new_relmin_mxid;
     debug_assert!(folds.counters.NewRelminMxid != 0);
@@ -1527,7 +1737,7 @@ fn lazy_scan_prune(
     if presult.all_visible {
         debug_assert!(presult.lpdead_items == 0);
         let (dbg_av, dbg_af, dbg_cutoff) =
-            heap_page_is_all_visible(env.rel, env.cutoffs.OldestXmin, &mut folds.offnum, buf)?;
+            heap_page_is_all_visible(env.rel, env.cutoffs.OldestXmin, &folds.err, buf)?;
         debug_assert!(dbg_av);
         debug_assert!(presult.all_frozen == dbg_af);
         debug_assert!(!TransactionIdIsValid(dbg_cutoff) || dbg_cutoff == presult.vm_conflict_horizon);
@@ -1745,7 +1955,20 @@ fn lazy_vacuum_all_indexes(vacrel: &mut LVRelState<'_, '_>) -> PgResult<bool> {
                     num_heap_tuples: old_live_tuples,
                     strategy: vacrel.bstrategy.clone(),
                 };
-                vac_bulkdel_one_index(vacrel.mcx, &ivinfo, istat, &dead_tids)?
+                // vacuumlazy.c:3116-3129 lazy_vacuum_one_index: indname +
+                // VACUUM_ERRCB_PHASE_VACUUM_INDEX for the duration of the
+                // bulk delete, then the previous phase information.
+                let err = Rc::clone(&vacrel.folds.err);
+                *err.indname.borrow_mut() = Some(vacrel.indrels[idx].name().to_string());
+                let new_istat = with_vacuum_error_info(
+                    &err,
+                    VacErrPhase::VacuumIndex,
+                    InvalidBlockNumber,
+                    InvalidOffsetNumber,
+                    || vac_bulkdel_one_index(vacrel.mcx, &ivinfo, istat, &dead_tids),
+                )?;
+                *err.indname.borrow_mut() = None;
+                new_istat
             };
             if morsels::vtrace_enabled() {
                 morsels::vtrace(&format!(
@@ -1830,7 +2053,20 @@ fn lazy_cleanup_all_indexes(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> {
                     num_heap_tuples: reltuples,
                     strategy: vacrel.bstrategy.clone(),
                 };
-                vac_cleanup_one_index(vacrel.mcx, &ivinfo, istat)?
+                // vacuumlazy.c:3167-3179 lazy_cleanup_one_index: indname +
+                // VACUUM_ERRCB_PHASE_INDEX_CLEANUP for the duration of the
+                // cleanup, then the previous phase information.
+                let err = Rc::clone(&vacrel.folds.err);
+                *err.indname.borrow_mut() = Some(vacrel.indrels[idx].name().to_string());
+                let new_istat = with_vacuum_error_info(
+                    &err,
+                    VacErrPhase::IndexCleanup,
+                    InvalidBlockNumber,
+                    InvalidOffsetNumber,
+                    || vac_cleanup_one_index(vacrel.mcx, &ivinfo, istat),
+                )?;
+                *err.indname.borrow_mut() = None;
+                new_istat
             };
             vacrel.indstats[idx] = new_istat;
 
@@ -1885,11 +2121,24 @@ fn update_relstats_all_indexes(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> 
 /// block by block. Reached from lazy_vacuum only after index vacuuming (loud
 /// today); exercised directly by tests.
 pub fn lazy_vacuum_heap_rel(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> {
+    pgstat_progress_update_param(PROGRESS_VACUUM_PHASE, PROGRESS_VACUUM_PHASE_VACUUM_HEAP);
+
+    // vacuumlazy.c:2751-2753 / 2840: VACUUM_ERRCB_PHASE_VACUUM_HEAP for the
+    // whole pass, the previous information restored after it.
+    let err = Rc::clone(&vacrel.folds.err);
+    with_vacuum_error_info(
+        &err,
+        VacErrPhase::VacuumHeap,
+        InvalidBlockNumber,
+        InvalidOffsetNumber,
+        || lazy_vacuum_heap_rel_pages(vacrel),
+    )
+}
+
+fn lazy_vacuum_heap_rel_pages(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> {
     let mut vacuumed_pages: BlockNumber = 0;
     let mut vacuumed_items: u64 = 0; // W1 forensics (trace-gated report)
     let mut vmbuffer = VmBuffer::new();
-
-    pgstat_progress_update_param(PROGRESS_VACUUM_PHASE, PROGRESS_VACUUM_PHASE_VACUUM_HEAP);
 
     let dead_items = vacrel.dead_items.take().unwrap();
     let mut iter = dead_items.begin_iterate();
@@ -1897,6 +2146,8 @@ pub fn lazy_vacuum_heap_rel(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> {
         vacuum_delay_point(false)?;
 
         let blkno = iter_result.blkno;
+        // vacuumlazy.c:2792: vacrel->blkno = blkno.
+        vacrel.folds.err.blkno.set(blkno);
         let mut offsets = [InvalidOffsetNumber; MaxOffsetNumber as usize];
         let num_offsets = iter_result.block_offsets(&mut offsets);
         debug_assert!(num_offsets <= offsets.len());
@@ -1923,6 +2174,8 @@ pub fn lazy_vacuum_heap_rel(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> {
     }
     drop(iter);
     vacrel.dead_items = Some(dead_items);
+    // vacuumlazy.c:2822: vacrel->blkno = InvalidBlockNumber.
+    vacrel.folds.err.blkno.set(InvalidBlockNumber);
     // vacuumlazy.c:2834: the second-pass summary at DEBUG2.
     elog::ereport(::types_error::DEBUG2)
         .errmsg(format!(
@@ -1965,6 +2218,21 @@ fn lazy_vacuum_heap_page(
 ) -> PgResult<()> {
     pgstat_progress_update_param(PROGRESS_VACUUM_HEAP_BLKS_VACUUMED, blkno as i64);
 
+    // vacuumlazy.c:2868-2870 / 2948: VACUUM_ERRCB_PHASE_VACUUM_HEAP at blkno
+    // for the page, the previous information restored after it.
+    let err = Rc::clone(&vacrel.folds.err);
+    with_vacuum_error_info(&err, VacErrPhase::VacuumHeap, blkno, InvalidOffsetNumber, || {
+        lazy_vacuum_heap_page_body(vacrel, blkno, buffer, deadoffsets, vmbuffer)
+    })
+}
+
+fn lazy_vacuum_heap_page_body(
+    vacrel: &mut LVRelState<'_, '_>,
+    blkno: BlockNumber,
+    buffer: Buffer,
+    deadoffsets: &[OffsetNumber],
+    vmbuffer: &VmBuffer,
+) -> PgResult<()> {
     // SAFETY: caller holds pin + exclusive content lock.
     let mut pm = unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(buffer)) };
     let mut unused = [InvalidOffsetNumber; MaxHeapTuplesPerPage];
@@ -2014,7 +2282,7 @@ fn lazy_vacuum_heap_page(
     let (all_visible, all_frozen, visibility_cutoff_xid) = heap_page_is_all_visible(
         vacrel.rel,
         vacrel.cutoffs.OldestXmin,
-        &mut vacrel.folds.offnum,
+        &vacrel.folds.err,
         buffer,
     )?;
     if all_visible {
@@ -2041,12 +2309,13 @@ fn lazy_vacuum_heap_page(
     Ok(())
 }
 
-/// Returns (all_visible, all_frozen, visibility_cutoff_xid). `offnum` is the
-/// caller's error-context slot (C's vacrel->offnum) — participant-local.
+/// Returns (all_visible, all_frozen, visibility_cutoff_xid). `err` is the
+/// caller's error-context state (C's vacrel->offnum, vacuumlazy.c:3656 /
+/// 3738) — participant-local.
 fn heap_page_is_all_visible(
     rel: &RelationData<'_>,
     oldest_xmin: TransactionId,
-    offnum_cx: &mut OffsetNumber,
+    err: &VacErrInfo,
     buf: Buffer,
 ) -> PgResult<(bool, bool, TransactionId)> {
     // SAFETY: caller holds pin + content lock; HTSV hint-bit stores land in
@@ -2060,7 +2329,7 @@ fn heap_page_is_all_visible(
     let maxoff = page.max_offset_number();
     let mut offnum = FirstOffsetNumber;
     while offnum <= maxoff && all_visible {
-        *offnum_cx = offnum;
+        err.offnum.set(offnum);
         let itemid = page.item_id(offnum);
 
         if !itemid.is_used() || itemid.is_redirected() {
@@ -2126,7 +2395,7 @@ fn heap_page_is_all_visible(
         offnum += 1;
     }
 
-    *offnum_cx = InvalidOffsetNumber;
+    err.offnum.set(InvalidOffsetNumber);
     Ok((all_visible, all_frozen, visibility_cutoff_xid))
 }
 
@@ -2207,6 +2476,15 @@ const VACUUM_TRUNCATE_LOCK_CHECK_INTERVAL_MS: i64 = 20;
 fn lazy_truncate_heap(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> {
     pgstat_progress_update_param(PROGRESS_VACUUM_PHASE, PROGRESS_VACUUM_PHASE_TRUNCATE);
 
+    // vacuumlazy.c:3236-3237: update_vacuum_error_info(vacrel, NULL,
+    // VACUUM_ERRCB_PHASE_TRUNCATE, vacrel->nonempty_pages, InvalidOffsetNumber).
+    update_vacuum_error_info(
+        &vacrel.folds.err,
+        VacErrPhase::Truncate,
+        vacrel.folds.counters.nonempty_pages,
+        InvalidOffsetNumber,
+    );
+
     let mut orig_rel_pages = vacrel.rel_pages;
     loop {
         let mut lock_retry = 0u64;
@@ -2258,6 +2536,8 @@ fn lazy_truncate_heap(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> {
         let mut lock_waiter_detected = false;
         let new_rel_pages = count_nondeletable_pages(vacrel, &mut lock_waiter_detected)?;
         vacrel.current_block = new_rel_pages;
+        // vacuumlazy.c:3310: vacrel->blkno = new_rel_pages.
+        vacrel.folds.err.blkno.set(new_rel_pages);
 
         if new_rel_pages >= orig_rel_pages {
             lmgr::UnlockRelation(vacrel.rel, types_rel::lock::AccessExclusiveLock)?;

@@ -97,3 +97,74 @@ fn insert_tuple_body_len_validates_bounds() {
         MaxHeapTupleSize
     );
 }
+
+// --- audit-18.6 w2-034 (a186-candidate-fp-heap-rewriteheap-e01e8c21d9efbd22f6c5-1):
+// rewriteheap.c:1100/1114/1131 heap_xlog_logical_rewrite brackets its
+// ftruncate / pg_pwrite / pg_fsync with WAIT_EVENT_LOGICAL_REWRITE_TRUNCATE,
+// _MAPPING_WRITE and _MAPPING_SYNC (pgstat_report_wait_start/_end). Ids are
+// the positions in waitevent's IO name table (wait_event_names.txt order).
+
+static LRW_WAIT_EVENTS: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+
+fn install_wait_event_recorder() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        waitevent_seams::pgstat_report_wait_start::set(|info| {
+            LRW_WAIT_EVENTS.lock().unwrap().push(info);
+        });
+        waitevent_seams::pgstat_report_wait_end::set(|| {
+            LRW_WAIT_EVENTS.lock().unwrap().push(0);
+        });
+    });
+    LRW_WAIT_EVENTS.lock().unwrap().clear();
+}
+
+#[test]
+fn heap_xlog_logical_rewrite_reports_truncate_write_sync_wait_events() {
+    const PG_WAIT_IO: u32 = 0x0A00_0000;
+    const WAIT_EVENT_LOGICAL_REWRITE_MAPPING_SYNC: u32 = PG_WAIT_IO | 35;
+    const WAIT_EVENT_LOGICAL_REWRITE_MAPPING_WRITE: u32 = PG_WAIT_IO | 36;
+    const WAIT_EVENT_LOGICAL_REWRITE_TRUNCATE: u32 = PG_WAIT_IO | 38;
+    const LOGICAL_REWRITE_MAPPING_SIZE: usize = 36;
+
+    install_wait_event_recorder();
+    let dir = std::env::temp_dir().join(format!("heapam-xlog-lrw-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("pg_logical/mappings")).unwrap();
+    init_small::globals::SetDataDir(dir.to_str().unwrap());
+
+    // xl_heap_rewrite_mapping (40 bytes, C layout) + one mapping entry.
+    let mut md = vec![0u8; 40 + LOGICAL_REWRITE_MAPPING_SIZE];
+    md[0..4].copy_from_slice(&700u32.to_ne_bytes()); // mapped_xid
+    md[4..8].copy_from_slice(&5u32.to_ne_bytes()); // mapped_db
+    md[8..12].copy_from_slice(&16384u32.to_ne_bytes()); // mapped_rel
+    md[16..24].copy_from_slice(&0i64.to_ne_bytes()); // offset
+    md[24..28].copy_from_slice(&1u32.to_ne_bytes()); // num_mappings
+    md[32..40].copy_from_slice(&0x0000_0001_0000_0010u64.to_ne_bytes()); // start_lsn
+    for b in md[40..].iter_mut() {
+        *b = 0xAB;
+    }
+    let rec = xlogreader_seams::DecodedXLogRecord {
+        xl_info: XLOG_HEAP2_REWRITE,
+        xl_xid: 900,
+        main_data: md.as_ptr(),
+        main_data_len: md.len() as u32,
+        ..Default::default()
+    };
+    let mut state = XLogReaderState { record: Some(rec), ..Default::default() };
+    heap_xlog_logical_rewrite(&mut state).unwrap();
+
+    let path = dir.join("pg_logical/mappings/map-5-4000-1_10-2bc-384");
+    assert_eq!(std::fs::read(&path).unwrap(), vec![0xABu8; LOGICAL_REWRITE_MAPPING_SIZE]);
+    assert_eq!(
+        core::mem::take(&mut *LRW_WAIT_EVENTS.lock().unwrap()),
+        vec![
+            WAIT_EVENT_LOGICAL_REWRITE_TRUNCATE,
+            0,
+            WAIT_EVENT_LOGICAL_REWRITE_MAPPING_WRITE,
+            0,
+            WAIT_EVENT_LOGICAL_REWRITE_MAPPING_SYNC,
+            0,
+        ],
+        "ftruncate, pg_pwrite and pg_fsync each run under their own wait event"
+    );
+}

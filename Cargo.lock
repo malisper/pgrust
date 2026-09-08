@@ -16295,6 +16295,7 @@ dependencies = [
  "types_rel",
  "types_storage",
  "types_tuple",
+ "waitevent_seams",
  "xact_seams",
  "xloginsert_seams",
 ]

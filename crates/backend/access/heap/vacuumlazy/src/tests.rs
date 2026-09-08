@@ -303,7 +303,7 @@ fn vacrel<'a, 'mcx>(rel: &'a RelationData<'mcx>, mcx: Mcx<'mcx>) -> LVRelState<'
             // Seed = (OldestXmin, OldestMxact), as heap_vacuum_rel.
             let mut counters = ::vacuum_morsels::ScanCounters::seed(1000, 1);
             counters.lpdead_item_pages = 1;
-            ScanFolds { counters, offnum: InvalidOffsetNumber }
+            ScanFolds { counters, err: VacErrInfo::new("public".to_string(), "t".to_string()) }
         },
         dead_items: Some(TidStore::create_local(mcx, 64 * 1024 * 1024, true).unwrap()),
         dead_items_info: VacDeadItemsInfo { max_bytes: 64 * 1024 * 1024, num_items: 0 },
@@ -321,9 +321,11 @@ fn vacrel<'a, 'mcx>(rel: &'a RelationData<'mcx>, mcx: Mcx<'mcx>) -> LVRelState<'
         eager_scan_remaining_successes: 0,
         eager_scan_max_fails_per_region: 0,
         eager_scan_remaining_fails: 0,
-        dbname: String::new(),
-        relnamespace: String::new(),
-        relname: String::new(),
+        // C heap_vacuum_rel snapshots the names for the error-context
+        // callback (vacuumlazy.c:669-671).
+        dbname: "postgres".to_string(),
+        relnamespace: "public".to_string(),
+        relname: "t".to_string(),
     }
 }
 
@@ -483,7 +485,7 @@ fn lazy_scan_noprune_counts_and_collects() {
     assert_eq!(::types_tuple::ItemPointerGetOffsetNumberNoCheck(&dead_tids[0]), 2);
     assert_eq!(vr.folds.counters.NewRelfrozenXid, 500, "ratcheted to oldest unfrozen xmin");
     assert_eq!(vr.folds.counters.nonempty_pages, 4);
-    assert_eq!(vr.folds.offnum, InvalidOffsetNumber);
+    assert_eq!(vr.folds.err.offnum.get(), InvalidOffsetNumber);
 
     bufmgr_seams::release_buffer::call(buf).unwrap();
 }
@@ -514,7 +516,7 @@ fn lazy_scan_noprune_aggressive_requires_prune() {
     assert_eq!(vr.dead_items_info.num_items, 0);
     assert_eq!(vr.folds.counters.NewRelfrozenXid, 1000, "tracker untouched on bailout");
     assert_eq!(vr.folds.counters.nonempty_pages, 0);
-    assert_eq!(vr.folds.offnum, InvalidOffsetNumber);
+    assert_eq!(vr.folds.err.offnum.get(), InvalidOffsetNumber);
 
     bufmgr_seams::release_buffer::call(buf).unwrap();
 }
@@ -999,6 +1001,54 @@ fn lazy_vacuum_heap_page_wal_failure_escapes_inside_critical_section() {
     assert!(!page.item_id(1).is_used(), "remaining lp is LP_UNUSED");
     bufmgr_seams::lock_buffer::call(heap_buf, BUFFER_LOCK_UNLOCK).unwrap();
     bufmgr_seams::release_buffer::call(heap_buf).unwrap();
+}
+
+// vacuumlazy.c:2751/2868 update_vacuum_error_info(VACUUM_ERRCB_PHASE_VACUUM_HEAP)
+// + vacuum_error_callback (vacuumlazy.c:3803-3816): an error raised while
+// phase III reaps a page carries C's CONTEXT line naming the block and the
+// relation (audit-18.6 w2-034,
+// a186-candidate-fp-heap-vacuumlazy-p2-d171dde8ec246a2b2d13-1).
+#[test]
+fn lazy_vacuum_heap_rel_error_carries_vacuum_heap_context() {
+    let _s = serial();
+    install_seams();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let rel = test_relation(mcx);
+
+    let heap_buf = fake_page(0, 0);
+    {
+        // SAFETY: freshly created exclusive test page.
+        let mut pm = unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(heap_buf)) };
+        pm.init(0);
+        let tuple = [0u8; 32];
+        for expected in 1..=2u16 {
+            let off = pm.add_item(&tuple, InvalidOffsetNumber, PAI_IS_HEAP).unwrap();
+            assert_eq!(off, expected);
+            let mut lp = pm.as_ref().item_id(off);
+            lp.set_dead();
+            pm.set_item_id(off, lp);
+        }
+    }
+    bufmgr_seams::release_buffer::call(heap_buf).unwrap();
+
+    let mut vr = vacrel(&rel, mcx);
+    {
+        let LVRelState { dead_items, dead_items_info, .. } = &mut vr;
+        dead_items_add(dead_items.as_mut().unwrap(), dead_items_info, 0, &[1, 2]).unwrap();
+    }
+    vr.folds.counters.lpdead_items = 2;
+
+    let err = {
+        let _wal = FailingWal::arm();
+        lazy_vacuum_heap_rel(&mut vr).expect_err("the failing WAL insert must escape")
+    };
+    assert_eq!(err.message, "simulated XLogInsert failure");
+    assert_eq!(
+        err.context(),
+        Some("while vacuuming block 0 of relation \"public.t\""),
+        "vacuum_error_callback's VACUUM_ERRCB_PHASE_VACUUM_HEAP line (vacuumlazy.c:3807)"
+    );
 }
 
 // vacuumlazy.c:1890-1914 lazy_scan_new_or_empty: marking an empty page

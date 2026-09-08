@@ -1411,6 +1411,24 @@ pub fn heap2_redo(record: &mut XLogReaderState) -> PgResult<()> {
 // start_lsn(32..40), then the raw LogicalRewriteMappingData entries.
 fn heap_xlog_logical_rewrite(record: &mut XLogReaderState) -> PgResult<()> {
     const LOGICAL_REWRITE_MAPPING_SIZE: usize = 36;
+    // wait_event_types.h (generated from wait_event_names.txt): PG_WAIT_IO |
+    // the row of waitevent's IO name table.
+    const PG_WAIT_IO: u32 = 0x0A00_0000;
+    const WAIT_EVENT_LOGICAL_REWRITE_MAPPING_SYNC: u32 = PG_WAIT_IO | 35;
+    const WAIT_EVENT_LOGICAL_REWRITE_MAPPING_WRITE: u32 = PG_WAIT_IO | 36;
+    const WAIT_EVENT_LOGICAL_REWRITE_TRUNCATE: u32 = PG_WAIT_IO | 38;
+    // pgstat_report_wait_start/end (wait_event.h) through the waitevent seam;
+    // a harness without the waitevent crate reports nothing.
+    fn report_wait_start(wait_event_info: u32) {
+        if waitevent_seams::pgstat_report_wait_start::is_installed() {
+            waitevent_seams::pgstat_report_wait_start::call(wait_event_info);
+        }
+    }
+    fn report_wait_end() {
+        if waitevent_seams::pgstat_report_wait_end::is_installed() {
+            waitevent_seams::pgstat_report_wait_end::call();
+        }
+    }
     let md = main_data(record);
     let mapped_xid = u32::from_ne_bytes(md[0..4].try_into().unwrap());
     let mapped_db = u32::from_ne_bytes(md[4..8].try_into().unwrap());
@@ -1452,7 +1470,9 @@ fn heap_xlog_logical_rewrite(record: &mut XLogReaderState) -> PgResult<()> {
         Err(e) => return file_err(format!("create file \"{}\"", path.display()), e),
     };
     // Truncate all data that's not guaranteed to have been safely fsynced
-    // (by a previous record or by the last checkpoint).
+    // (by a previous record or by the last checkpoint). rewriteheap.c:1100:
+    // pgstat_report_wait_start(WAIT_EVENT_LOGICAL_REWRITE_TRUNCATE).
+    report_wait_start(WAIT_EVENT_LOGICAL_REWRITE_TRUNCATE);
     if let Err(e) = file.set_len(offset) {
         // rewriteheap.c:1101-1105: "could not truncate file \"%s\" to %u: %m"
         return file_err(
@@ -1460,12 +1480,15 @@ fn heap_xlog_logical_rewrite(record: &mut XLogReaderState) -> PgResult<()> {
             e,
         );
     }
+    report_wait_end();
     let len = num_mappings as usize * LOGICAL_REWRITE_MAPPING_SIZE;
     let data = &md[40..40 + len];
     // Write out the tail end of the mapping file (again).
     // positional write; on non-unix (wasm) targets the FileExt trait is
     // unstable, so seek+write_all — equivalent here (nothing reads the
     // cursor after; sync_all follows).
+    // rewriteheap.c:1114: pgstat_report_wait_start(WAIT_EVENT_LOGICAL_REWRITE_MAPPING_WRITE).
+    report_wait_start(WAIT_EVENT_LOGICAL_REWRITE_MAPPING_WRITE);
     #[cfg(unix)]
     let write_res = std::os::unix::fs::FileExt::write_all_at(&file, data, offset);
     #[cfg(not(unix))]
@@ -1478,10 +1501,14 @@ fn heap_xlog_logical_rewrite(record: &mut XLogReaderState) -> PgResult<()> {
     if let Err(e) = write_res {
         return file_err(format!("write to file \"{}\"", path.display()), e);
     }
-    // fsync all previously written data. C rewriteheap.c:1133:
+    report_wait_end();
+    // fsync all previously written data (rewriteheap.c:1131
+    // WAIT_EVENT_LOGICAL_REWRITE_MAPPING_SYNC). C rewriteheap.c:1133:
     // data_sync_elevel(ERROR) — PANIC at default data_sync_retry=off; the
     // other file_err sites (create/truncate/write) stay plain ERROR as in C.
-    if let Err(e) = file.sync_all() {
+    report_wait_start(WAIT_EVENT_LOGICAL_REWRITE_MAPPING_SYNC);
+    let synced = file.sync_all();
+    if let Err(e) = synced {
         return elog::ereport(fd::data_sync_elevel(types_error::ERROR))
             .errcode_for_file_access()
             .errmsg(format!("could not fsync file \"{}\": {e}", path.display()))
@@ -1491,6 +1518,7 @@ fn heap_xlog_logical_rewrite(record: &mut XLogReaderState) -> PgResult<()> {
                 "heap_xlog_logical_rewrite",
             ));
     }
+    report_wait_end();
     // rewriteheap.c:1138: CloseTransientFile's result is checked.
     #[cfg(unix)]
     {

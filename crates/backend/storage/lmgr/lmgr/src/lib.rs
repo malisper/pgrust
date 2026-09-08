@@ -272,6 +272,16 @@ pub fn LockRelationForExtension(rel: &RelationData<'_>, lockmode: LOCKMODE) -> P
     Ok(())
 }
 
+/// RelationExtensionLockWaiterCount (lmgr.c:459-468): LockWaiterCount over the
+/// relation-extension LOCKTAG. A harness without the lock crate (seam not
+/// installed) sees C's uncontended value, 0.
+pub fn RelationExtensionLockWaiterCount(rel: &RelationData<'_>) -> PgResult<i32> {
+    if !lock_seams::lock_waiter_count::is_installed() {
+        return Ok(0);
+    }
+    lock_seams::lock_waiter_count::call(extend_tag(rel))
+}
+
 pub fn UnlockRelationForExtension(rel: &RelationData<'_>, lockmode: LOCKMODE) -> PgResult<()> {
     lock_seams::lock_release::call(extend_tag(rel), lockmode, false)?;
     Ok(())

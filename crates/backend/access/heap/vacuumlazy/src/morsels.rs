@@ -77,7 +77,8 @@ use ::bufmgr_seams::{BUFFER_LOCK_SHARE, BUFFER_LOCK_UNLOCK};
 
 use super::{
     apply_failsafe, dead_items_add, eager_scan_disable_ereport, lazy_check_wraparound_failsafe,
-    lazy_scan_new_or_empty, lazy_scan_noprune, lazy_scan_prune, lazy_vacuum, LVRelState, ScanEnv,
+    lazy_scan_new_or_empty, lazy_scan_noprune, lazy_scan_prune, lazy_vacuum,
+    update_vacuum_error_info, LVRelState, ScanEnv, VacErrContext, VacErrInfo, VacErrPhase,
     ScanFolds, FAILSAFE_EVERY_PAGES,
 };
 
@@ -640,6 +641,13 @@ fn leader_deferred_block(
         ReadBufferMode::Normal,
         vacrel.bstrategy.clone(),
     )?;
+    // vacuumlazy.c:1341: the serial per-block error-context update.
+    update_vacuum_error_info(
+        &vacrel.folds.err,
+        VacErrPhase::ScanHeap,
+        blkno,
+        ::types_tuple::InvalidOffsetNumber,
+    );
     let mut vmbuffer = VmBuffer::new();
     visibilitymap_pin(vacrel.rel, blkno, &mut vmbuffer)?;
 
@@ -1006,6 +1014,14 @@ impl VacScanShared {
             wcx.bstrategy.clone(),
         )?;
         wcx.folds.counters.scanned_pages += 1;
+        // vacuumlazy.c:1341: the per-block error-context update, on this
+        // worker's own state (phase I is morselized; the leader's is separate).
+        update_vacuum_error_info(
+            &wcx.folds.err,
+            VacErrPhase::ScanHeap,
+            blkno,
+            ::types_tuple::InvalidOffsetNumber,
+        );
 
         // Buffer disposition: 0 = pinned only, 1 = pinned+locked,
         // 2 = released (the per-block bodies release on their true paths).
@@ -1136,7 +1152,9 @@ impl VacScanShared {
                 let _ = bufmgr_seams::release_buffer::call(buf);
             }
         }
-        r
+        // vacuum_error_callback for the escaping report, from this worker's
+        // block/offset state (the leader rethrows it under its own frame).
+        r.map_err(|e| wcx.folds.err.attach_err(e))
     }
 }
 
@@ -1228,9 +1246,14 @@ fn worker_drive(shared: &Arc<VacScanShared>) -> PgResult<()> {
         vmbuffer: VmBuffer::new(),
         folds: ScanFolds {
             counters: ScanCounters::seed(shared.cutoffs.OldestXmin, shared.cutoffs.OldestMxact),
-            offnum: ::types_tuple::InvalidOffsetNumber,
+            // This worker's vacrel->{phase,blkno,offnum} (vacuumlazy.c:669-673
+            // names, PHASE_UNKNOWN until its first block).
+            err: VacErrInfo::new(shared.eager_relnamespace.clone(), shared.eager_relname.clone()),
         },
     };
+    // The worker's error_context_stack frame (vacuum_error_callback over its
+    // own state) for the duration of the drive.
+    let errcallback = VacErrContext::push(&wcx.folds.err);
     shared.started.fetch_add(1, Ordering::SeqCst);
 
     // Publish the worker cx for run_morsel (this thread only), drive, clear.
@@ -1245,6 +1268,7 @@ fn worker_drive(shared: &Arc<VacScanShared>) -> PgResult<()> {
     });
     let _outcome = shared.rt.drive_pinned(&mut lane_local, &rg);
     WORKER_CX.with(|c| c.set(std::ptr::null_mut()));
+    drop(errcallback);
     emit_wfin(lane.ordinal(), &lane_local, &rg);
 
     // Teardown (parallel_vacuum_main order).

@@ -56,6 +56,12 @@ seam_core::seam!(
     pub fn lock_has_waiters(locktag: LOCKTAG, lockmode: LOCKMODE) -> PgResult<bool>
 );
 
+// LockWaiterCount (lock.c:4824): the LOCK's nRequested, 0 when no such lock
+// exists — hio.c:272 RelationAddBlocks scales its extension by it.
+seam_core::seam!(
+    pub fn lock_waiter_count(locktag: LOCKTAG) -> PgResult<i32>
+);
+
 seam_core::seam!(
     // DoLockModesConflict (lock.c); pure conflict-table probe.
     pub fn do_lock_modes_conflict(mode1: LOCKMODE, mode2: LOCKMODE) -> bool

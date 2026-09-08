@@ -34,6 +34,30 @@ use types_tuple::{ItemPointerData, ItemPointerIsValid};
 const PG_LOGICAL_MAPPINGS_DIR: &str = "pg_logical/mappings";
 // sizeof(LogicalRewriteMappingData): 2x RelFileLocator + 2x ItemPointerData.
 const LOGICAL_REWRITE_MAPPING_SIZE: usize = 36;
+
+// wait_event_types.h (generated from wait_event_names.txt): PG_WAIT_IO | the
+// row of waitevent's IO name table, same derivation as fd's wait_event
+// module. The three rewriteheap.c sites: FileWrite (:881), FileSync (:922),
+// the checkpoint's pg_fsync (:1236).
+const PG_WAIT_IO: u32 = 0x0A00_0000;
+const WAIT_EVENT_LOGICAL_REWRITE_CHECKPOINT_SYNC: u32 = PG_WAIT_IO | 34;
+const WAIT_EVENT_LOGICAL_REWRITE_SYNC: u32 = PG_WAIT_IO | 37;
+const WAIT_EVENT_LOGICAL_REWRITE_WRITE: u32 = PG_WAIT_IO | 39;
+
+// pgstat_report_wait_start/end (wait_event.h) through the waitevent seam;
+// a harness without the waitevent crate reports nothing (the twophase
+// crate's shape for the same seam).
+fn report_wait_start(wait_event_info: u32) {
+    if waitevent_seams::pgstat_report_wait_start::is_installed() {
+        waitevent_seams::pgstat_report_wait_start::call(wait_event_info);
+    }
+}
+
+fn report_wait_end() {
+    if waitevent_seams::pgstat_report_wait_end::is_installed() {
+        waitevent_seams::pgstat_report_wait_end::call();
+    }
+}
 // sizeof(xl_heap_rewrite_mapping) with C padding: xid(4) db(4) rel(4) pad(4)
 // offset(8) num_mappings(4) pad(4) start_lsn(8).
 const XL_HEAP_REWRITE_MAPPING_SIZE: usize = 40;
@@ -318,38 +342,7 @@ fn logical_heap_rewrite_flush_mappings(state: &mut RewriteState<'_>) -> PgResult
         xlrec[24..28].copy_from_slice(&num_mappings.to_ne_bytes());
         xlrec[32..40].copy_from_slice(&start_lsn.to_ne_bytes());
 
-        // rewriteheap.c:880-886: one positional write at src->off (FileWrite);
-        // a failed or short write reports the bytes actually written, naming
-        // the file by the datadir-relative path C keeps in src->path.
-        #[cfg(unix)]
-        let written: i64 = {
-            use std::os::unix::io::AsRawFd;
-            fd::pg_pwrite(src.file.as_raw_fd(), &waldata, src.off as i64) as i64
-        };
-        #[cfg(not(unix))]
-        let written: i64 = {
-            use std::io::{Seek, SeekFrom, Write};
-            let mut f = &src.file;
-            match f.seek(SeekFrom::Start(src.off)).and_then(|_| f.write(&waldata)) {
-                Ok(n) => n as i64,
-                Err(e) => {
-                    fd::set_errno(e.raw_os_error().unwrap_or(0));
-                    -1
-                }
-            }
-        };
-        if written != len as i64 {
-            return ereport(ERROR)
-                .errcode_for_file_access()
-                .errmsg(format!(
-                    "could not write to file \"{}\", wrote {} of {}: %m",
-                    mapping_relpath(&src.path),
-                    written,
-                    len
-                ))
-                .finish(loc(886, "logical_heap_rewrite_flush_mappings"));
-        }
-        src.off += len as u64;
+        logical_mapping_file_write(src, &waldata)?;
 
         xloginsert_seams::xlog_insert_record::call(
             RM_HEAP2_ID,
@@ -363,6 +356,86 @@ fn logical_heap_rewrite_flush_mappings(state: &mut RewriteState<'_>) -> PgResult
     Ok(())
 }
 
+// rewriteheap.c:880-886: FileWrite(src->vfd, waldata, len, src->off,
+// WAIT_EVENT_LOGICAL_REWRITE_WRITE) — one positional write at src->off
+// under the LogicalRewriteWrite wait event (fd.c FileWrite brackets the
+// pwrite with pgstat_report_wait_start/end); a failed or short write reports
+// the bytes actually written, naming the file by the datadir-relative path C
+// keeps in src->path. Advances src->off on success.
+fn logical_mapping_file_write(src: &mut RewriteMappingFile, waldata: &[u8]) -> PgResult<()> {
+    let len = waldata.len();
+    report_wait_start(WAIT_EVENT_LOGICAL_REWRITE_WRITE);
+    #[cfg(unix)]
+    let written: i64 = {
+        use std::os::unix::io::AsRawFd;
+        fd::pg_pwrite(src.file.as_raw_fd(), waldata, src.off as i64) as i64
+    };
+    #[cfg(not(unix))]
+    let written: i64 = {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut f = &src.file;
+        match f.seek(SeekFrom::Start(src.off)).and_then(|_| f.write(waldata)) {
+            Ok(n) => n as i64,
+            Err(e) => {
+                fd::set_errno(e.raw_os_error().unwrap_or(0));
+                -1
+            }
+        }
+    };
+    report_wait_end();
+    if written != len as i64 {
+        return ereport(ERROR)
+            .errcode_for_file_access()
+            .errmsg(format!(
+                "could not write to file \"{}\", wrote {} of {}: %m",
+                mapping_relpath(&src.path),
+                written,
+                len
+            ))
+            .finish(loc(886, "logical_heap_rewrite_flush_mappings"));
+    }
+    src.off += len as u64;
+    Ok(())
+}
+
+// rewriteheap.c:921-924: FileSync(src->vfd, WAIT_EVENT_LOGICAL_REWRITE_SYNC)
+// on one mapping file (fd.c FileSync brackets the fsync with
+// pgstat_report_wait_start/end).
+fn logical_mapping_file_sync(src: &RewriteMappingFile) -> PgResult<()> {
+    report_wait_start(WAIT_EVENT_LOGICAL_REWRITE_SYNC);
+    let synced = src.file.sync_all();
+    report_wait_end();
+    if let Err(e) = synced {
+        // C rewriteheap.c:923: data_sync_elevel(ERROR) — PANIC at default
+        // data_sync_retry=off; a failed fsync must never be retried.
+        return ereport(fd::data_sync_elevel(ERROR))
+            .errcode_for_file_access()
+            .errmsg(format!("could not fsync file \"{}\": {e}", src.path.display()))
+            .finish(loc(921, "logical_end_heap_rewrite"));
+    }
+    Ok(())
+}
+
+// rewriteheap.c:1236-1240: pg_fsync(fd) of one surviving mapping file at
+// checkpoint time, under WAIT_EVENT_LOGICAL_REWRITE_CHECKPOINT_SYNC.
+fn checkpoint_fsync_mapping_file(file: &std::fs::File, path: &std::path::Path) -> PgResult<()> {
+    report_wait_start(WAIT_EVENT_LOGICAL_REWRITE_CHECKPOINT_SYNC);
+    let synced = file.sync_all();
+    report_wait_end();
+    if let Err(e) = synced {
+        // C rewriteheap.c:1238: data_sync_elevel(ERROR) — PANIC at
+        // default data_sync_retry=off. This is the fsyncgate file
+        // shape (written by a backend, fsynced by the checkpoint);
+        // trusting a retry would let a checkpoint complete over
+        // lost mapping data.
+        return ereport(fd::data_sync_elevel(ERROR))
+            .errcode_for_file_access()
+            .errmsg(format!("could not fsync file \"{}\": {e}", path.display()))
+            .finish(loc(1249, "CheckPointLogicalRewriteHeap"));
+    }
+    Ok(())
+}
+
 // logical_end_heap_rewrite (rewriteheap.c:905): flush the remaining
 // in-memory entries, then fsync every mapping file we wrote.
 fn logical_end_heap_rewrite(state: &mut RewriteState<'_>) -> PgResult<()> {
@@ -373,14 +446,7 @@ fn logical_end_heap_rewrite(state: &mut RewriteState<'_>) -> PgResult<()> {
         logical_heap_rewrite_flush_mappings(state)?;
     }
     for src in state.rs_logical_mappings.values() {
-        if let Err(e) = src.file.sync_all() {
-            // C rewriteheap.c:923: data_sync_elevel(ERROR) — PANIC at default
-            // data_sync_retry=off; a failed fsync must never be retried.
-            return ereport(fd::data_sync_elevel(ERROR))
-                .errcode_for_file_access()
-                .errmsg(format!("could not fsync file \"{}\": {e}", src.path.display()))
-                .finish(loc(921, "logical_end_heap_rewrite"));
-        }
+        logical_mapping_file_sync(src)?;
     }
     // Dropping the map closes the files (C: FileClose per entry).
     state.rs_logical_mappings.clear();
@@ -773,17 +839,7 @@ pub fn CheckPointLogicalRewriteHeap() -> PgResult<()> {
                         .finish(loc(1237, "CheckPointLogicalRewriteHeap"));
                 }
             };
-            if let Err(e) = f.sync_all() {
-                // C rewriteheap.c:1238: data_sync_elevel(ERROR) — PANIC at
-                // default data_sync_retry=off. This is the fsyncgate file
-                // shape (written by a backend, fsynced by the checkpoint);
-                // trusting a retry would let a checkpoint complete over
-                // lost mapping data.
-                return ereport(fd::data_sync_elevel(ERROR))
-                    .errcode_for_file_access()
-                    .errmsg(format!("could not fsync file \"{}\": {e}", path.display()))
-                    .finish(loc(1249, "CheckPointLogicalRewriteHeap"));
-            }
+            checkpoint_fsync_mapping_file(&f, &path)?;
             // rewriteheap.c:1243: a failing close(2) is an ERROR.
             if let Err(e) = close_checked(f) {
                 fd::set_errno(e.raw_os_error().unwrap_or(0));
@@ -807,3 +863,6 @@ pub fn CheckPointLogicalRewriteHeap() -> PgResult<()> {
 pub fn init_seams() {
     rewriteheap_seams::check_point_logical_rewrite_heap::set(CheckPointLogicalRewriteHeap);
 }
+
+#[cfg(test)]
+mod tests;

@@ -20,6 +20,7 @@ freespace = { path = "../../../storage/freespace/freespace" }
 visibilitymap = { path = "../visibilitymap" }
 inval = { path = "../../../utils/cache/inval" }
 pruneheap_seams = { path = "../pruneheap_seams" }
+waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
 
 standby = { path = "../../../storage/ipc/standby" }
 
@@ -99,7 +100,6 @@ pg_sema_seams = { path = "../../../port/pg_sema_seams" }
 s_lock_seams = { path = "../../../storage/lmgr/s_lock_seams" }
 latch_seams = { path = "../../../storage/ipc/latch_seams" }
 miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
-waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
 backend_status_seams = { path = "../../../utils/activity/backend_status_seams" }
 backend_progress_seams = { path = "../../../utils/activity/backend_progress_seams" }
 ipc_seams = { path = "../../../storage/ipc/ipc_seams" }
