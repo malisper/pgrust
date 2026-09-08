@@ -302,6 +302,40 @@ fn cleanup_using_control_segment_is_quiet_on_missing() {
     dsm_cleanup_using_control_segment(0x7fff_fffe).unwrap();
 }
 
+// docs/design/carve-ratifications.md §6 (RATIFIED): min_dynamic_shared_memory
+// accepts only 0. C 18.6 (guc_tables.c:2371) has no check hook on it and
+// takes any value up to INT_MAX; pgrust's pin is the check hook dsm_core's
+// init_seams installs, which must refuse every nonzero value with the
+// ratified errdetail (a clean GUC error at load, never the
+// main_region_unported tripwire) and accept 0. audit-18.6 w2-051.
+#[test]
+fn min_dynamic_shared_memory_hook_pins_zero_per_carve_s6() {
+    static DETAILS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    static INSTALL: Once = Once::new();
+    INSTALL.call_once(|| {
+        guc_seams::guc_check_errdetail::set(|d| DETAILS.lock().unwrap().push(d));
+        crate::init_seams();
+    });
+    let hook = guc_tables::hooks::check_min_dynamic_shared_memory.get();
+    let mut extra = None;
+    for v in [1, 10, 100, i32::MAX] {
+        DETAILS.lock().unwrap().clear();
+        let mut newval = v;
+        let accepted = hook(&mut newval, &mut extra, types_guc::GucSource::PGC_S_FILE).unwrap();
+        assert!(!accepted, "min_dynamic_shared_memory={v} must be refused");
+        assert_eq!(
+            *DETAILS.lock().unwrap(),
+            vec!["min_dynamic_shared_memory is not yet supported by pgrust; only 0 (disabled) is accepted."
+                .to_string()],
+            "errdetail for min_dynamic_shared_memory={v}"
+        );
+    }
+    DETAILS.lock().unwrap().clear();
+    let mut zero = 0;
+    assert!(hook(&mut zero, &mut extra, types_guc::GucSource::PGC_S_FILE).unwrap());
+    assert!(DETAILS.lock().unwrap().is_empty());
+}
+
 #[test]
 fn estimate_size_and_shmem_init_zero() {
     let _g = bringup();
