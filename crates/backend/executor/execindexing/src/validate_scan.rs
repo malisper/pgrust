@@ -9,6 +9,7 @@ use ::types_storage::bufpage::MaxHeapTuplesPerPage;
 use ::types_tuple::itemptr::{
     itemptr_decode, itemptr_encode, InvalidOffsetNumber, ItemPointerCompare, ItemPointerData,
 };
+use backend_progress_seams::{PROGRESS_SCAN_BLOCKS_DONE, PROGRESS_SCAN_BLOCKS_TOTAL};
 use tableam_vocab::{SO_ALLOW_PAGEMODE, SO_ALLOW_STRAT, SO_TYPE_SEQSCAN};
 use tuplesort::{Tuplesort, TUPLESORT_NONE};
 
@@ -66,6 +67,7 @@ pub fn table_index_validate_scan<'mcx>(
     let mut root_blkno = InvalidBlockNumber;
     let mut root_offsets = [InvalidOffsetNumber; MaxHeapTuplesPerPage];
     let mut in_index = [false; MaxHeapTuplesPerPage];
+    let mut previous_blkno = InvalidBlockNumber;
     let mut values = [Datum::null(); INDEX_MAX_KEYS as usize];
     let mut isnull = [false; INDEX_MAX_KEYS as usize];
 
@@ -89,6 +91,12 @@ pub fn table_index_validate_scan<'mcx>(
     // prepare_index_predicate).
     crate::prepare_index_predicate(mcx, index_info)?;
 
+    // heapam_handler.c:1806-1807
+    backend_progress_seams::pgstat_progress_update_param::call(
+        PROGRESS_SCAN_BLOCKS_TOTAL,
+        i64::from(scan.rs_nblocks),
+    );
+
     let mut per_tuple = mcx::MemoryContext::new_bump("IndexValidatePerTuple");
 
     loop {
@@ -102,6 +110,15 @@ pub fn table_index_validate_scan<'mcx>(
         postgres_seams::check_for_interrupts::call()?;
 
         state.htups += 1.0;
+
+        // heapam_handler.c:1823-1828
+        if previous_blkno == InvalidBlockNumber || scan.rs_cblock != previous_blkno {
+            backend_progress_seams::pgstat_progress_update_param::call(
+                PROGRESS_SCAN_BLOCKS_DONE,
+                i64::from(scan.rs_cblock),
+            );
+            previous_blkno = scan.rs_cblock;
+        }
 
         if scan.rs_cblock != root_blkno {
             let pin = scan.rs_cbuf.as_ref().expect("pinned page for returned tuple");
