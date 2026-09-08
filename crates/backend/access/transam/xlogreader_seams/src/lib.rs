@@ -6,7 +6,7 @@ use types_core::{
     BlockNumber, Buffer, ForkNumber, RepOriginId, RmgrId, TimeLineID, TransactionId, XLogRecPtr,
     XLogSegNo,
 };
-use types_error::PgResult;
+use types_error::{PgError, PgResult};
 use types_storage::RelFileLocator;
 
 pub const XLOG_BLCKSZ: usize = 8192;
@@ -202,6 +202,18 @@ impl XLogReaderState {
         Some((blk.rlocator, blk.forknum, blk.blkno, blk.prefetch_buffer))
     }
 
+    /// XLogRecGetBlockTag (xlogreader.c:1993-2008): like `block_tag_extended`
+    /// except that the block reference must exist and there is no access to
+    /// prefetch_buffer; an absent reference is elog(ERROR, "could not locate
+    /// backup block with ID %d in WAL record") (xlogreader.c:2001) — a
+    /// catchable ERROR, never a panic.
+    pub fn block_tag(&self, block_id: u8) -> PgResult<(RelFileLocator, ForkNumber, BlockNumber)> {
+        match self.block_tag_extended(block_id) {
+            Some((rlocator, forknum, blkno, _)) => Ok((rlocator, forknum, blkno)),
+            None => Err(missing_block_tag(block_id)),
+        }
+    }
+
     pub fn has_block_image(&self, block_id: u8) -> bool {
         self.block(block_id).has_image
     }
@@ -209,6 +221,16 @@ impl XLogReaderState {
     pub fn block_image_apply(&self, block_id: u8) -> bool {
         self.block(block_id).apply_image
     }
+}
+
+// XLogRecGetBlockTag (xlogreader.c:2001): elog(ERROR, "could not locate backup
+// block with ID %d in WAL record") — XX000 at ERROR level.
+#[cold]
+#[inline(never)]
+fn missing_block_tag(block_id: u8) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "could not locate backup block with ID {block_id} in WAL record"
+    )))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -239,3 +261,40 @@ seam_core::seam!(
         tli: TimeLineID,
     ) -> PgResult<Result<(), WALReadError>>
 );
+
+#[cfg(test)]
+mod block_tag_tests {
+    use super::*;
+
+    // XLogRecGetBlockTag (xlogreader.c:1993-2008): an absent block reference is
+    // elog(ERROR, "could not locate backup block with ID %d in WAL record");
+    // a present one yields its (rlocator, forknum, blkno) without the
+    // prefetch buffer (audit-18.6 w2-053, row xlogreader-3a26fc89).
+    #[test]
+    fn block_tag_is_c_exact() {
+        let mut rec = DecodedXLogRecord::default();
+        rec.max_block_id = 0;
+        rec.blocks[0] = DecodedBkpBlock {
+            in_use: true,
+            rlocator: RelFileLocator::new(1663, 5, 42),
+            forknum: ForkNumber::MAIN_FORKNUM,
+            blkno: 3,
+            prefetch_buffer: 9,
+            ..DecodedBkpBlock::EMPTY
+        };
+        let record = XLogReaderState { record: Some(rec), ..Default::default() };
+        assert_eq!(
+            record.block_tag(0).unwrap(),
+            (RelFileLocator::new(1663, 5, 42), ForkNumber::MAIN_FORKNUM, 3)
+        );
+        let err = record.block_tag(1).expect_err("block 1 is not registered");
+        assert_eq!(err.message(), "could not locate backup block with ID 1 in WAL record");
+        assert_eq!(err.level(), types_error::ERROR);
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+
+        // No decoded record at all: still the C error, never a panic.
+        let empty = XLogReaderState::default();
+        let err = empty.block_tag(0).expect_err("no record");
+        assert_eq!(err.message(), "could not locate backup block with ID 0 in WAL record");
+    }
+}

@@ -24,7 +24,7 @@ use types_core::{
     BlockNumber, Buffer, ForkNumber, InvalidRepOriginId, InvalidTransactionId, InvalidXLogRecPtr,
     RelFileNumber, RepOriginId, RmgrId, TimeLineID, TransactionId, XLogRecPtr, XLogSegNo,
 };
-use types_error::PgResult;
+use types_error::{PgError, PgResult};
 use types_storage::RelFileLocator;
 use xlogreader_seams::{
     DecodedXLogRecord as ViewRecord, WALOpenSegment, WALReadError, WALSegmentContext,
@@ -1538,6 +1538,23 @@ impl<'mcx> XLogReaderState<'mcx> {
         }
         let blk = self.block(self.current(), block_id as usize);
         Some((blk.rlocator, blk.forknum, blk.blkno, blk.prefetch_buffer))
+    }
+
+    /// XLogRecGetBlockTag (xlogreader.c:1993-2008): like
+    /// `XLogRecGetBlockTagExtended` except that the block reference must exist
+    /// and there is no access to prefetch_buffer; an absent reference is
+    /// elog(ERROR, "could not locate backup block with ID %d in WAL record")
+    /// (xlogreader.c:2001) — a catchable ERROR, never a panic.
+    pub fn XLogRecGetBlockTag(
+        &self,
+        block_id: u8,
+    ) -> PgResult<(RelFileLocator, ForkNumber, BlockNumber)> {
+        match self.XLogRecGetBlockTagExtended(block_id) {
+            Some((rlocator, forknum, blkno, _)) => Ok((rlocator, forknum, blkno)),
+            None => Err(Box::new(PgError::error(format!(
+                "could not locate backup block with ID {block_id} in WAL record"
+            )))),
+        }
     }
 
     pub fn XLogRecGetBlockFlags(&self, block_id: u8) -> u8 {

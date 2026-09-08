@@ -79,16 +79,15 @@ fn panic_err(msg: String) -> Box<PgError> {
 }
 
 // XLogRecGetBlockTag (xlogreader.c:2001): elog(ERROR) if the referenced block
-// is missing from the record, rather than a panic on the None.
+// is missing from the record, rather than a panic on the None. The shared
+// port lives on XLogReaderState (xlogreader_seams::XLogReaderState::block_tag);
+// this shim keeps the callers' 4-tuple shape (prefetch_buffer is never read).
 fn block_tag(
     record: &XLogReaderState,
     block_id: u8,
 ) -> PgResult<(types_storage::RelFileLocator, types_core::ForkNumber, BlockNumber, Buffer)> {
-    record.block_tag_extended(block_id).ok_or_else(|| {
-        redo_error(format!(
-            "could not locate backup block with ID {block_id} in WAL record"
-        ))
-    })
+    let (rlocator, forknum, blkno) = record.block_tag(block_id)?;
+    Ok((rlocator, forknum, blkno, types_core::InvalidBuffer))
 }
 
 /// IndexTupleSize() over a block-data slice, validated against what remains.

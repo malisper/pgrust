@@ -321,9 +321,7 @@ fn heap_xlog_delete(record: &mut XLogReaderState) -> PgResult<()> {
     let infobits_set = xlrec[6];
     let flags = xlrec[7];
 
-    let (target_locator, _fork, blkno, _) = record
-        .block_tag_extended(0)
-        .expect("heap_xlog_delete: no block 0");
+    let (target_locator, _fork, blkno) = record.block_tag(0)?;
     let target_tid = ItemPointerData::new(blkno, offnum);
 
     if flags & XLH_DELETE_ALL_VISIBLE_CLEARED != 0 {
@@ -399,9 +397,7 @@ fn heap_xlog_insert(record: &mut XLogReaderState) -> PgResult<()> {
         .get(2)
         .ok_or_else(|| corrupt_err("heap_xlog_insert: main data too short for xl_heap_insert".into()))?;
 
-    let (target_locator, _fork, blkno, _) = record
-        .block_tag_extended(0)
-        .expect("heap_xlog_insert: no block 0");
+    let (target_locator, _fork, blkno) = record.block_tag(0)?;
     let target_tid = ItemPointerData::new(blkno, offnum);
 
     debug_assert!(flags & XLH_INSERT_ALL_FROZEN_SET == 0);
@@ -513,9 +509,7 @@ fn heap_xlog_multi_insert(record: &mut XLogReaderState) -> PgResult<()> {
     let flags = xlrec[0];
     let ntuples = read_u16(&xlrec, 2, "heap_xlog_multi_insert")? as usize;
 
-    let (target_locator, _fork, blkno, _) = record
-        .block_tag_extended(0)
-        .expect("heap_xlog_multi_insert: no block 0");
+    let (target_locator, _fork, blkno) = record.block_tag(0)?;
 
     debug_assert!(
         !(flags & XLH_INSERT_ALL_VISIBLE_CLEARED != 0 && flags & XLH_INSERT_ALL_FROZEN_SET != 0)
@@ -733,9 +727,7 @@ fn heap_xlog_update(record: &mut XLogReaderState, hot_update: bool) -> PgResult<
         )
     };
 
-    let (rlocator, _fork, newblk, _) = record
-        .block_tag_extended(0)
-        .expect("heap_xlog_update: no block 0");
+    let (rlocator, _fork, newblk) = record.block_tag(0)?;
     let oldblk = match record.block_tag_extended(1) {
         Some((_, _, blk, _)) => {
             debug_assert!(!hot_update);
@@ -1052,9 +1044,7 @@ fn heap_xlog_lock_common(record: &mut XLogReaderState, lock_updated: bool) -> Pg
     };
 
     if flags & XLH_LOCK_ALL_FROZEN_CLEARED != 0 {
-        let (rlocator, _fork, block, _) = record
-            .block_tag_extended(0)
-            .expect("heap_xlog_lock: no block 0");
+        let (rlocator, _fork, block) = record.block_tag(0)?;
         heap_xlog_vm_clear(
             record,
             rlocator,
@@ -1139,9 +1129,7 @@ fn heap_xlog_prune_freeze(record: &mut XLogReaderState) -> PgResult<()> {
         .get(1)
         .ok_or_else(|| corrupt_err("heap_xlog_prune_freeze: main data too short for xl_heap_prune".into()))?;
 
-    let (rlocator, _fork, blkno, _) = record
-        .block_tag_extended(0)
-        .expect("heap_xlog_prune_freeze: no block 0");
+    let (rlocator, _fork, blkno) = record.block_tag(0)?;
 
     debug_assert!(
         flags & XLHP_CLEANUP_LOCK != 0
@@ -1296,9 +1284,7 @@ fn heap_xlog_visible(record: &mut XLogReaderState) -> PgResult<()> {
             == flags
     );
 
-    let (rlocator, _fork, blkno, _) = record
-        .block_tag_extended(1)
-        .expect("heap_xlog_visible: no block 1");
+    let (rlocator, _fork, blkno) = record.block_tag(1)?;
 
     if xlogutils::InHotStandby() {
         standby::ResolveRecoveryConflictWithSnapshot(
@@ -1646,6 +1632,29 @@ pub fn heap_mask(pagedata: &mut [u8], blkno: types_core::BlockNumber) -> PgResul
 }
 
 pub fn init_seams() {}
+
+#[cfg(test)]
+mod block_tag_tests {
+    use super::*;
+
+    // XLogRecGetBlockTag (xlogreader.c:1993-2008): a block reference the record
+    // never registered is elog(ERROR, "could not locate backup block with ID %d
+    // in WAL record") — a catchable ERROR reaching the redo caller as Err, never
+    // a process panic on the None (audit-18.6 w2-053, row xlogreader-3a26fc89).
+    #[test]
+    fn delete_missing_block_is_c_error() {
+        // xl_heap_delete: xmax u32, offnum u16, infobits_set u8, flags u8.
+        let xlrec = [0u8; 8];
+        let mut rec = xlogreader_seams::DecodedXLogRecord::default();
+        rec.main_data = xlrec.as_ptr();
+        rec.main_data_len = xlrec.len() as u32;
+        let mut record = XLogReaderState { record: Some(rec), ..Default::default() };
+        let err = heap_xlog_delete(&mut record)
+            .expect_err("absent block 0 must be a catchable error");
+        assert_eq!(err.message(), "could not locate backup block with ID 0 in WAL record");
+        assert_eq!(err.level(), types_error::ERROR);
+    }
+}
 
 #[cfg(test)]
 mod mask_tests {

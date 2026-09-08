@@ -420,10 +420,8 @@ fn hash_xlog_add_ovfl_page(record: &mut XLogReaderState) -> PgResult<()> {
     let bmsize = u16_at(xlrec, 0);
     let bmpage_found = xlrec[2] != 0;
 
-    let (_, _, rightblk, _) =
-        record.block_tag_extended(0).expect("hash_xlog_add_ovfl_page: no block 0");
-    let (_, _, leftblk, _) =
-        record.block_tag_extended(1).expect("hash_xlog_add_ovfl_page: no block 1");
+    let (_, _, rightblk) = record.block_tag(0)?;
+    let (_, _, leftblk) = record.block_tag(1)?;
 
     let ovflbuf = XLogInitBufferForRedo(record, 0)?;
     let data = block_data(record, 0);
@@ -1029,9 +1027,7 @@ fn hash_xlog_vacuum_one_page(record: &mut XLogReaderState) -> PgResult<()> {
     if xlogutils::InHotStandby() {
         let horizon = u32::from_ne_bytes(xldata[0..4].try_into().unwrap());
         let is_catalog_rel = xldata[6] != 0;
-        let (rlocator, _, _, _) = record
-            .block_tag_extended(0)
-            .expect("hash_xlog_vacuum_one_page: no block 0");
+        let (rlocator, _, _) = record.block_tag(0)?;
         standby::ResolveRecoveryConflictWithSnapshot(horizon, is_catalog_rel, rlocator)?;
     }
 
@@ -1126,6 +1122,23 @@ pub fn init_seams() {}
 #[cfg(test)]
 mod redo_bounds_tests {
     use super::*;
+
+    // XLogRecGetBlockTag (xlogreader.c:1993-2008): a block reference the record
+    // never registered is elog(ERROR, "could not locate backup block with ID %d
+    // in WAL record") — a catchable ERROR reaching the redo caller as Err, never
+    // a process panic on the None (audit-18.6 w2-053, row xlogreader-3a26fc89).
+    #[test]
+    fn add_ovfl_page_missing_block_is_c_error() {
+        let xlrec = [0u8; SIZE_OF_HASH_ADD_OVFL_PAGE];
+        let mut rec = xlogreader_seams::DecodedXLogRecord::default();
+        rec.main_data = xlrec.as_ptr();
+        rec.main_data_len = xlrec.len() as u32;
+        let mut record = XLogReaderState { record: Some(rec), ..Default::default() };
+        let err = hash_xlog_add_ovfl_page(&mut record)
+            .expect_err("absent block 0 must be a catchable error");
+        assert_eq!(err.message(), "could not locate backup block with ID 0 in WAL record");
+        assert_eq!(err.level(), types_error::ERROR);
+    }
 
     // A record whose main data is shorter than the opcode's fixed struct must
     // surface as ERRCODE_DATA_CORRUPTED, never a slice panic in the startup

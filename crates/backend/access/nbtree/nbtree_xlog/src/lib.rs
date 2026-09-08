@@ -446,10 +446,8 @@ fn btree_xlog_split(newitemonleft: bool, record: &mut XLogReaderState) -> PgResu
     let postingoff = u16::from_ne_bytes(xlrec[8..10].try_into().unwrap());
     let isleaf = level == 0;
 
-    let (_, _, origpagenumber, _) =
-        record.block_tag_extended(0).expect("btree_xlog_split: no block 0");
-    let (_, _, rightpagenumber, _) =
-        record.block_tag_extended(1).expect("btree_xlog_split: no block 1");
+    let (_, _, origpagenumber) = record.block_tag(0)?;
+    let (_, _, rightpagenumber) = record.block_tag(1)?;
     let spagenumber = record.block_tag_extended(2).map(|t| t.2).unwrap_or(P_NONE);
 
     if !isleaf {
@@ -959,8 +957,7 @@ fn btree_xlog_delete(record: &mut XLogReaderState) -> PgResult<()> {
         require_len(xlrec, SizeOfBtreeDelete, "btree_xlog_delete")?;
         let horizon = u32::from_ne_bytes(xlrec[0..4].try_into().unwrap());
         let is_catalog_rel = xlrec[8] != 0;
-        let (rlocator, _, _, _) =
-            record.block_tag_extended(0).expect("btree_xlog_delete: no block 0");
+        let (rlocator, _, _) = record.block_tag(0)?;
         standby::ResolveRecoveryConflictWithSnapshot(horizon, is_catalog_rel, rlocator)?;
     }
     btree_xlog_vacuum_or_delete(record, false)
@@ -1346,6 +1343,28 @@ pub fn btree_mask(pagedata: &mut [u8], _blkno: types_core::BlockNumber) -> PgRes
 }
 
 pub fn init_seams() {}
+
+#[cfg(test)]
+mod block_tag_tests {
+    use super::*;
+
+    // XLogRecGetBlockTag (xlogreader.c:1993-2008): a block reference the record
+    // never registered is elog(ERROR, "could not locate backup block with ID %d
+    // in WAL record") — a catchable ERROR reaching the redo caller as Err, never
+    // a process panic on the None (audit-18.6 w2-053, row xlogreader-3a26fc89).
+    #[test]
+    fn split_missing_block_is_c_error() {
+        let xlrec = [0u8; SizeOfBtreeSplit];
+        let mut rec = xlogreader_seams::DecodedXLogRecord::default();
+        rec.main_data = xlrec.as_ptr();
+        rec.main_data_len = xlrec.len() as u32;
+        let mut record = XLogReaderState { record: Some(rec), ..Default::default() };
+        let err = btree_xlog_split(false, &mut record)
+            .expect_err("absent block 0 must be a catchable error");
+        assert_eq!(err.message(), "could not locate backup block with ID 0 in WAL record");
+        assert_eq!(err.level(), types_error::ERROR);
+    }
+}
 
 #[cfg(test)]
 mod mask_tests {

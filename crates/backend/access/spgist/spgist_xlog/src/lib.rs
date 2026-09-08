@@ -754,8 +754,7 @@ fn spgRedoVacuumRedirect(record: &XLogReaderState) -> PgResult<()> {
     let item_to_placeholder = checked_u16s_at(md, SizeOfSpgxlogVacuumRedirect, xldata.nToPlaceholder as usize)?;
 
     if xlogutils::InHotStandby() {
-        let (rlocator, _, _, _) =
-            record.block_tag_extended(0).expect("spgRedoVacuumRedirect: no block 0");
+        let (rlocator, _, _) = record.block_tag(0)?;
         standby::ResolveRecoveryConflictWithSnapshot(
             xldata.snapshotConflictHorizon,
             xldata.isCatalogRel,
@@ -896,6 +895,27 @@ mod tests {
     // op code %u", info) — a PANIC-level PgError the recovery loop escalates
     // (the info byte is xl_info & ~XLR_INFO_MASK, so 0x90 prints 144) — never
     // a Rust panic unwinding the startup thread (audit row spgxlog-e7d10a21).
+    // XLogRecGetBlockTag (xlogreader.c:1993-2008): a block reference the record
+    // never registered is elog(ERROR, "could not locate backup block with ID %d
+    // in WAL record") — a catchable ERROR reaching the redo caller as Err, never
+    // a process panic on the None (audit-18.6 w2-053, row xlogreader-3a26fc89).
+    #[test]
+    fn vacuum_redirect_missing_block_is_c_error() {
+        let xlrec = [0u8; SizeOfSpgxlogVacuumRedirect];
+        let mut rec = xlogreader_seams::DecodedXLogRecord::default();
+        rec.main_data = xlrec.as_ptr();
+        rec.main_data_len = xlrec.len() as u32;
+        let record = XLogReaderState { record: Some(rec), ..Default::default() };
+        // The block-0 lookup sits under InHotStandby() (spgxlog.c:878).
+        let saved = xlogutils::standby_state();
+        xlogutils::set_standby_state(xlogutils::STANDBY_SNAPSHOT_PENDING);
+        let res = spgRedoVacuumRedirect(&record);
+        xlogutils::set_standby_state(saved);
+        let err = res.expect_err("absent block 0 must be a catchable error");
+        assert_eq!(err.message(), "could not locate backup block with ID 0 in WAL record");
+        assert_eq!(err.level(), types_error::ERROR);
+    }
+
     #[test]
     fn spg_redo_unknown_opcode_is_a_panic_level_error() {
         let mut rec = xlogreader_seams::DecodedXLogRecord::default();
