@@ -7,7 +7,7 @@ use types_core::instrument::{
     Instrumentation, INSTRUMENT_ALL, INSTRUMENT_BUFFERS, INSTRUMENT_ROWS, INSTRUMENT_TIMER,
     INSTRUMENT_WAL,
 };
-use types_error::{ErrorLevel, ErrorLocation, WARNING};
+use types_error::{ErrorLevel, ErrorLocation, PgResult};
 use types_portal::{ParamListHandle, QueryDescHandle};
 use types_slot::EXEC_FLAG_EXPLAIN_ONLY;
 
@@ -134,10 +134,13 @@ struct LogJob {
 /// `explain_ExecutorEnd`: log the plan if the duration threshold was crossed.
 /// Split in two phases: the decision + snapshot runs inside `with_qd`, the
 /// EXPLAIN walk runs outside it (ExplainPrintPlan re-enters the QueryDesc
-/// registry through `es.qd`, which would double-borrow).
-pub(crate) fn explain_executor_end(h: QueryDescHandle) {
+/// registry through `es.qd`, which would double-borrow). An error while
+/// rendering (auto_explain.c:394-424 has no PG_TRY) aborts the statement:
+/// it returns through the end tap and skips standard_ExecutorEnd, as C's
+/// longjmp does.
+pub(crate) fn explain_executor_end(h: QueryDescHandle) -> PgResult<()> {
     if !crate::session_loaded() {
-        return;
+        return Ok(());
     }
     let job = execmain::with_qd(h, |qd| -> Option<LogJob> {
         if qd.totaltime.is_none() || !auto_explain_enabled() {
@@ -167,23 +170,14 @@ pub(crate) fn explain_executor_end(h: QueryDescHandle) {
         })
     });
 
-    if let Some(job) = job {
-        // Explain-build failures must not take down the query at ExecutorEnd:
-        // the tap has no error channel (C would abort the statement here; a
-        // failure in plan rendering is the only divergence surface).
-        if let Err(e) = log_plan(h, &job) {
-            let _ = elog::ereport(WARNING)
-                .errmsg(format!("auto_explain: could not log plan: {}", e.message()))
-                .finish(loc("explain_ExecutorEnd"));
-        }
+    match job {
+        Some(job) => log_plan(h, &job),
+        None => Ok(()),
     }
 }
 
-fn log_plan(h: QueryDescHandle, job: &LogJob) -> types_error::PgResult<()> {
-    use explain::{
-        ExplainBeginOutput, ExplainCloseGroup, ExplainEndOutput, ExplainOpenGroup,
-        ExplainPropertyText,
-    };
+fn log_plan(h: QueryDescHandle, job: &LogJob) -> PgResult<()> {
+    use explain::{ExplainBeginOutput, ExplainEndOutput, ExplainPropertyText};
 
     // C switches to the per-query context; a private context scoped to this
     // call gives the same discard-at-end guarantee.
@@ -243,13 +237,11 @@ fn log_plan(h: QueryDescHandle, job: &LogJob) -> types_error::PgResult<()> {
     es.qd = QueryDescHandle::NULL;
     r?;
 
+    // auto_explain.c:411-412: the per-relation trigger statistics
+    // (ri_TrigInstrument, charged by the firing paths under es_instrument)
+    // rendered by explain.c:832 ExplainPrintTriggers / :1092 report_triggers.
     if es.analyze && gucs::log_triggers() {
-        // ExplainPrintTriggers: same shape core EXPLAIN uses — no CREATE
-        // TRIGGER path exists, so report_triggers output is provably empty;
-        // non-text formats still print the empty Triggers group (as C does
-        // for a query that fired no triggers).
-        ExplainOpenGroup("Triggers", Some("Triggers"), false, &mut es);
-        ExplainCloseGroup("Triggers", Some("Triggers"), false, &mut es);
+        explain::ExplainPrintTriggers(mcx, &mut es, h)?;
     }
 
     // ExplainPrintJITSummary is skipped: provably output-free in this build

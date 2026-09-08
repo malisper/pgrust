@@ -5509,6 +5509,7 @@ dependencies = [
  "execmain",
  "pgsync",
  "seam_core",
+ "types_error",
  "types_portal",
 ]
 

@@ -9,6 +9,7 @@ use types_core::instrument::{
 };
 use types_nodes::parsenodes::Query;
 use types_nodes::plannodes::PlannedStmt;
+use types_error::PgResult;
 use types_nodes::NodeTag;
 use types_portal::{QueryCompletion, QueryDescHandle};
 use utility::consts::{
@@ -181,8 +182,9 @@ pub(crate) fn pgss_executor_finish_leave(_h: QueryDescHandle) {
     nesting_add(-1);
 }
 
-/// `pgss_ExecutorEnd`.
-pub(crate) fn pgss_executor_end(h: QueryDescHandle) {
+/// `pgss_ExecutorEnd` (no error path of its own; the chain's end hook is
+/// fallible for auto_explain's sake).
+pub(crate) fn pgss_executor_end(h: QueryDescHandle) -> PgResult<()> {
     execmain::with_qd(h, |qd| {
         let pstmt = qd.plannedstmt();
         let query_id = unsafe { pstmt.queryId.get() };
@@ -218,6 +220,7 @@ pub(crate) fn pgss_executor_end(h: QueryDescHandle) {
             i64::from(pw_launched),
         );
     });
+    Ok(())
 }
 
 /// `pgss_ProcessUtility` (enter half): zero the pstmt queryId in place and

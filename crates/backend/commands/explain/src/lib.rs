@@ -1069,8 +1069,9 @@ pub(crate) fn show_wal_usage(es: &mut ExplainState<'_>, usage: &WalUsage) {
 // es_opened_result_relations, es_tuple_routing_result_relations and
 // es_trig_target_relations, in that order; the relation name is shown when
 // more than one opened result relation exists or either other list is
-// non-empty.
-fn ExplainPrintTriggers<'mcx>(
+// non-empty. Public for auto_explain's explain_ExecutorEnd
+// (auto_explain.c:411-412), which calls it after ExplainPrintPlan.
+pub fn ExplainPrintTriggers<'mcx>(
     mcx: Mcx<'mcx>,
     es: &mut ExplainState<'mcx>,
     qd: types_portal::QueryDescHandle,

@@ -29,7 +29,11 @@ use crate::querydesc::{self, ExecData, ExecTy, ExecutorHandle, QueryDescData};
 seam_core::tap!(pub fn tap_executor_start(h: QueryDescHandle));
 seam_core::tap!(pub fn tap_executor_run(h: QueryDescHandle));
 seam_core::tap!(pub fn tap_executor_finish(h: QueryDescHandle));
-seam_core::tap!(pub fn tap_executor_end(h: QueryDescHandle));
+// The end tap is fallible: C runs the ExecutorEnd_hook chain with no PG_TRY
+// (auto_explain.c:394-424 explain_ExecutorEnd renders the plan and lets an
+// ERROR unwind), so a consumer's error aborts the statement before
+// standard_ExecutorEnd — the callers of both end seams propagate it.
+seam_core::tap!(pub fn tap_executor_end(h: QueryDescHandle) -> PgResult<()>);
 // _leave taps: C consumers wrap standard_ExecutorRun/Finish in PG_TRY to
 // track nesting depth; the seam guarantees the leave fires on the error path
 // too (PG_FINALLY parity).
@@ -324,7 +328,7 @@ pub(crate) fn executor_finish_and_park_seam(h: QueryDescHandle) -> PgResult<bool
     })();
     tap_executor_finish_leave::call_if(|f| f(h));
     r?;
-    tap_executor_end::call_if(|f| f(h));
+    tap_executor_end::call_if_or(Ok(()), |f| f(h))?;
     let parked = querydesc::with_qd(h, |qd| -> PgResult<bool> {
         if skeleton_disarm_in_place(qd)?.is_none() {
             standard_executor_end(qd)?;
@@ -613,7 +617,7 @@ pub(crate) fn executor_rewind_seam(h: QueryDescHandle) -> PgResult<()> {
 }
 
 pub(crate) fn executor_end_seam(h: QueryDescHandle) -> PgResult<()> {
-    tap_executor_end::call_if(|f| f(h));
+    tap_executor_end::call_if_or(Ok(()), |f| f(h))?;
     querydesc::with_qd(h, standard_executor_end)
 }
 

@@ -22,9 +22,15 @@
 use std::sync::atomic::{AtomicPtr, Ordering};
 use pgsync::Mutex;
 
+use types_error::PgResult;
 use types_portal::QueryDescHandle;
 
 type Hook = fn(QueryDescHandle);
+/// The ExecutorEnd_hook body may ereport(ERROR) with no PG_TRY between it
+/// and the executor (auto_explain.c:394-424): the first error in dispatch
+/// order — the outermost C wrapper — unwinds past the inner hooks and
+/// standard_ExecutorEnd.
+type EndHook = fn(QueryDescHandle) -> PgResult<()>;
 
 /// One module's executor hook set (all optional).
 #[derive(Clone, Copy, Default)]
@@ -40,8 +46,9 @@ pub struct ExecutorHooks {
     pub finish: Option<Hook>,
     /// C `ExecutorFinish_hook` PG_FINALLY.
     pub finish_leave: Option<Hook>,
-    /// C `ExecutorEnd_hook` (before standard_ExecutorEnd).
-    pub end: Option<Hook>,
+    /// C `ExecutorEnd_hook` (before standard_ExecutorEnd); an `Err` aborts
+    /// the statement there, exactly like the C hook's ERROR.
+    pub end: Option<EndHook>,
 }
 
 pgsync::process_global! {
@@ -121,7 +128,18 @@ dispatch_enter!(dispatch_run, run);
 dispatch_leave!(dispatch_run_leave, run_leave);
 dispatch_enter!(dispatch_finish, finish);
 dispatch_leave!(dispatch_finish_leave, finish_leave);
-dispatch_enter!(dispatch_end, end);
+
+// ExecutorEnd: enter order (last-registered first); the first Err returns at
+// once — C's inner `prev_ExecutorEnd` / standard_ExecutorEnd never run once
+// the outer hook has raised.
+fn dispatch_end(h: QueryDescHandle) -> PgResult<()> {
+    for c in consumers().iter().rev() {
+        if let Some(f) = c.end {
+            f(h)?;
+        }
+    }
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {
@@ -133,9 +151,34 @@ mod tests {
     static SECOND_START_AT: AtomicU32 = AtomicU32::new(0);
     static FIRST_LEAVE_AT: AtomicU32 = AtomicU32::new(0);
     static SECOND_LEAVE_AT: AtomicU32 = AtomicU32::new(0);
+    static FIRST_END_AT: AtomicU32 = AtomicU32::new(0);
+    static THIRD_END_AT: AtomicU32 = AtomicU32::new(0);
 
     fn stamp(slot: &AtomicU32) {
         slot.store(ORDER.fetch_add(1, Ordering::Relaxed) + 1, Ordering::Relaxed);
+    }
+
+    // C's ExecutorEnd_hook chain has no PG_TRY around a consumer: an ERROR
+    // raised by a hook body (auto_explain.c:394-424 explain_ExecutorEnd
+    // renders the plan with no catch) longjmps past the inner hooks and
+    // standard_ExecutorEnd and aborts the statement. The end tap therefore
+    // must carry an error channel — a consumer signature returning a Result
+    // — where the other five taps stay infallible (their C bodies are
+    // counters and PG_FINALLY bookkeeping). Observed through the tap's
+    // published Signature so the assertion compiles on a tree whose end tap
+    // is still `fn(QueryDescHandle)` and fails there for exactly that reason.
+    #[test]
+    fn end_tap_carries_an_error_channel() {
+        let end = std::any::type_name::<execmain::tap_executor_end::Signature>();
+        let start = std::any::type_name::<execmain::tap_executor_start::Signature>();
+        assert!(
+            end.contains("-> core::result::Result<(), "),
+            "tap_executor_end must return PgResult<()> (C: a hook ERROR aborts the statement), got `{end}`"
+        );
+        assert!(
+            !start.contains("->"),
+            "tap_executor_start stays infallible (C: no error path in the counters), got `{start}`"
+        );
     }
 
     // One test only: registration is process-global (like the taps it owns),
@@ -151,6 +194,10 @@ mod tests {
         register(ExecutorHooks {
             start: Some(|_| stamp(&FIRST_START_AT)),
             run_leave: Some(|_| stamp(&FIRST_LEAVE_AT)),
+            end: Some(|_| {
+                stamp(&FIRST_END_AT);
+                Ok(())
+            }),
             ..Default::default()
         });
         assert!(execmain::tap_executor_start::is_installed());
@@ -158,6 +205,7 @@ mod tests {
         register(ExecutorHooks {
             start: Some(|_| stamp(&SECOND_START_AT)),
             run_leave: Some(|_| stamp(&SECOND_LEAVE_AT)),
+            end: Some(|_| Err(Box::new(types_error::PgError::error("end hook raised")))),
             ..Default::default()
         });
 
@@ -174,5 +222,22 @@ mod tests {
             (FIRST_LEAVE_AT.load(Ordering::Relaxed), SECOND_LEAVE_AT.load(Ordering::Relaxed));
         assert!(s_start < f_start, "enter: last-registered runs first");
         assert!(f_leave < s_leave, "leave: first-registered runs first");
+
+        // ExecutorEnd with no PG_TRY (auto_explain.c:394-424): the third
+        // (outermost) consumer runs, the second raises, and the first —
+        // C's inner prev_ExecutorEnd — never runs; the error reaches the
+        // executor, which skips standard_ExecutorEnd.
+        register(ExecutorHooks {
+            end: Some(|_| {
+                stamp(&THIRD_END_AT);
+                Ok(())
+            }),
+            ..Default::default()
+        });
+        let r = execmain::tap_executor_end::call_if_or(Ok(()), |f| f(h));
+        let e = r.expect_err("the raising end consumer must surface from the tap");
+        assert_eq!(e.message(), "end hook raised");
+        assert!(THIRD_END_AT.load(Ordering::Relaxed) > 0, "outermost end hook ran");
+        assert_eq!(FIRST_END_AT.load(Ordering::Relaxed), 0, "inner end hook skipped after the error");
     }
 }

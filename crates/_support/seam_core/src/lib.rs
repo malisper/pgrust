@@ -29,14 +29,14 @@ pub fn tap_boot_phase_open() -> bool {
 macro_rules! tap {
     (
         $(#[$attr:meta])*
-        $vis:vis fn $name:ident $(<$($lt:lifetime),+ $(,)?>)? ( $($arg:ident : $arg_ty:ty),* $(,)? )
+        $vis:vis fn $name:ident $(<$($lt:lifetime),+ $(,)?>)? ( $($arg:ident : $arg_ty:ty),* $(,)? ) $(-> $ret:ty)?
     ) => {
         $(#[$attr])*
         $vis mod $name {
             #![allow(dead_code, unused_imports)]
             use super::*;
 
-            pub type Signature = $(for<$($lt),+>)? fn($($arg_ty),*);
+            pub type Signature = $(for<$($lt),+>)? fn($($arg_ty),*) $(-> $ret)?;
 
             static SLOT: ::std::sync::atomic::AtomicPtr<()> =
                 ::std::sync::atomic::AtomicPtr::new(::std::ptr::null_mut());
@@ -71,9 +71,24 @@ macro_rules! tap {
                 }
             }
 
+            // Fallible-tap form: a tap declared `-> R` (the executor end
+            // hook, whose C consumers may ereport(ERROR) with no PG_TRY
+            // between them and the caller) yields the consumer's value when
+            // installed and `default` otherwise. Same not-installed cost as
+            // `call_if`.
+            #[inline(always)]
+            pub fn call_if_or<R>(default: R, f: impl FnOnce(Signature) -> R) -> R {
+                let raw = SLOT.load(::std::sync::atomic::Ordering::Relaxed);
+                if raw.is_null() {
+                    default
+                } else {
+                    __invoke(raw, f)
+                }
+            }
+
             #[cold]
             #[inline(never)]
-            fn __invoke(raw: *mut (), f: impl FnOnce(Signature)) {
+            fn __invoke<R>(raw: *mut (), f: impl FnOnce(Signature) -> R) -> R {
                 // SAFETY: install-once invariant — a non-null SLOT always
                 // holds a valid `Signature` written by `install()`.
                 let g: Signature = unsafe { ::std::mem::transmute::<*mut (), Signature>(raw) };

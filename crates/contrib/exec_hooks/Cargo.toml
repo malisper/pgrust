@@ -12,6 +12,7 @@ path = "src/lib.rs"
 pgsync = { path = "../../_support/pgsync" }
 seam_core = { path = "../../_support/seam_core" }
 execmain = { path = "../../backend/executor/execmain" }
+types_error = { path = "../../_support/types/types_error" }
 types_portal = { path = "../../_support/types/portal" }
 
 [lints.rust]
