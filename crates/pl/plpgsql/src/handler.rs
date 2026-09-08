@@ -1365,8 +1365,9 @@ fn plpgsql_exec_function(
         argi += 1;
         match &func.datums[dno as usize] {
             // Argument datums live in the caller's context for the call's
-            // duration; no copy (C behaves identically for IN args).
-            PlDatum::Var(_) => estate.set_var(dno, value, isnull),
+            // duration; no copy, not freeable (C assign_simple_var(...,
+            // false) for IN args, pl_exec.c:565).
+            PlDatum::Var(_) => estate.set_var(dno, value, isnull, false),
             PlDatum::Rec(_) => {
                 if isnull {
                     estate.datums[dno as usize] = crate::exec::DatumVal::Rec(None);
@@ -1383,7 +1384,7 @@ fn plpgsql_exec_function(
 
     // C sets FOUND=false at function entry (pl_exec.c:623).
     estate.frame.text.set(Some("during function entry"));
-    estate.set_var(func.found_varno, Datum::from_bool(false), false);
+    estate.set_var(func.found_varno, Datum::from_bool(false), false, false);
     estate.frame.text.set(None);
 
     let outcome = (|| -> PgResult<i32> {
@@ -1566,6 +1567,7 @@ fn coerce_function_result_tuple(
             let retval = estate.retval;
             let (desc, src, values, nulls, _) = estate.deconstruct_composite(retval)?;
             crate::exec::RecValue {
+                owned: vec![false; values.len()],
                 desc,
                 values,
                 nulls,
@@ -1787,7 +1789,10 @@ fn fulfill_trigger_promises(
             }
             other => panic!("unrecognized promise type: {other}"),
         };
-        estate.set_var(v.dno, value, isnull);
+        // Promise images are built once per invocation in the datum context
+        // by their own constructors (not the datumCopy layout the per-value
+        // free expects) and are released with it at exit.
+        estate.set_var(v.dno, value, isnull, false);
     }
     Ok(())
 }
@@ -1815,6 +1820,7 @@ fn bind_trigger_tuple(
                 rv.desc.typlens[i],
                 rv.desc.typbyvals[i],
             )?;
+            rv.owned[i] = !rv.nulls[i] && !rv.desc.typbyvals[i];
         }
     }
     Ok(())
@@ -1913,6 +1919,7 @@ fn plpgsql_exec_trigger(
         empty: true,
         sys: None,
         fvalue_valid: false,
+        owned: vec![false; natts],
     };
     let mut new_rv = empty_rv.clone();
     let mut old_rv = empty_rv;
@@ -1956,7 +1963,7 @@ fn plpgsql_exec_trigger(
     fulfill_trigger_promises(&mut estate, func, trigdata)?;
 
     estate.frame.text.set(Some("during function entry"));
-    estate.set_var(func.found_varno, Datum::from_bool(false), false);
+    estate.set_var(func.found_varno, Datum::from_bool(false), false, false);
     estate.frame.text.set(None);
 
     let rc = match estate.exec_toplevel_block(&func.action) {
@@ -1998,6 +2005,7 @@ fn plpgsql_exec_trigger(
                 Err(e) => return Err(attach_exec_context(e, &estate)),
             };
             crate::exec::RecValue {
+                owned: vec![false; values.len()],
                 desc: d,
                 values,
                 nulls,
@@ -2178,6 +2186,7 @@ mod tests {
                 desc: crate::exec::RecDesc::from_tupdesc(&returned),
                 values: vec![Datum::from_i32(42), Datum::from_i32(43)],
                 nulls: vec![false, false],
+                owned: vec![false, false],
                 src_desc: Some(Rc::new(returned)),
                 empty: false,
                 sys: None,

@@ -10,8 +10,14 @@
 //   (estate), not per transaction: fast execexpr bakes the param-slot
 //   address at compile, so a state cannot outlive its estate's param
 //   buffer. Loops (the hot case) reuse within the invocation.
-// - Old var values are not freed on reassignment; they live until the
-//   invocation's datum context is dropped at function exit (C pfrees).
+//
+// Value ownership follows pl_exec.c: the invocation's datum context is an
+// AllocSet, a Var's by-ref value is a datumCopy the variable owns (freeval)
+// and pfrees on reassignment (assign_simple_var 8817-8825), a record's
+// field images are owned per field and freed when the record or the field
+// is replaced (assign_record_var 8854-8869 / expanded_record_set_field's
+// "not part of the tuple" rule), and a FOR-over-query loop only swaps the
+// tuple into the loop record while its tupdesc identity holds (5913-5920).
 //
 // Std collections justified as in ast.rs (invocation-lifetime bookkeeping,
 // never per row on a steady path).
@@ -68,8 +74,17 @@ const CURSOR_OPT_PARALLEL_OK: i32 = 0x0800;
 pub(crate) struct Ctx(*mut MemoryContext);
 
 impl Ctx {
+    // Reset-wholesale scratch (C's eval_mcontext / stmt_mcontext discipline).
     pub fn new(name: &'static str) -> Ctx {
         Ctx(Box::into_raw(Box::new(MemoryContext::new_bump(name))))
+    }
+    // C's datum_context (plpgsql_estate_setup, pl_exec.c:4027: the SPI
+    // procedure context, an AllocSet): values are pfree'd one at a time on
+    // reassignment, so the backend must give chunks back. Never reset()
+    // (the aset reset asserts nothing is still charged); dropped with the
+    // estate.
+    pub fn new_aset(name: &'static str) -> Ctx {
+        Ctx(Box::into_raw(Box::new(MemoryContext::new(name))))
     }
     pub fn mcx(&self) -> Mcx<'static> {
         // SAFETY: reclaimed only in Drop; handles do not outlive the estate.
@@ -197,7 +212,6 @@ fn compatible_tupdescs(src: &types_tuple::TupleDescData<'_>, dst: &types_tuple::
 // A deconstructed expanded record (values always deconstructed; src_desc
 // keeps the physical tupdesc so the record can re-materialize as a
 // composite Datum, dropped columns included).
-#[derive(Clone)]
 pub struct RecValue {
     pub desc: RecDesc,
     pub values: Vec<Datum>,
@@ -210,6 +224,30 @@ pub struct RecValue {
     /// C ER_FLAG_FVALUE_VALID: the stored tuple still matches the fields; a
     /// field assignment clears it but keeps `sys` readable.
     pub fvalue_valid: bool,
+    /// Per field: the image in `values` is a copy this record made in the
+    /// invocation's datum context (datumCopy layout) and frees when the field
+    /// or the record is replaced — expandedrecord.c's "free the old field
+    /// value if it is not part of the tuple". False for values that point
+    /// into a caller-owned tuple or image.
+    pub owned: Vec<bool>,
+}
+
+impl Clone for RecValue {
+    // A clone shares the field images but not their ownership: the datum
+    // entry the value came from frees them exactly once (C: one
+    // DeleteExpandedObject per expanded record, assign_record_var).
+    fn clone(&self) -> RecValue {
+        RecValue {
+            desc: self.desc.clone(),
+            values: self.values.clone(),
+            nulls: self.nulls.clone(),
+            src_desc: self.src_desc.clone(),
+            empty: self.empty,
+            sys: self.sys.clone(),
+            fvalue_valid: self.fvalue_valid,
+            owned: vec![false; self.values.len()],
+        }
+    }
 }
 
 // A rec materialized into the eval scratch, keyed by the datum's address:
@@ -222,9 +260,51 @@ struct RecOrigin {
 }
 
 pub enum DatumVal {
-    Var { value: Datum, isnull: bool },
+    /// `freeval` is C PLpgSQL_var.freeval: the by-ref value is a datumCopy in
+    /// the invocation's datum context that the variable owns and pfrees on
+    /// reassignment; false for values that live in the caller's memory
+    /// (arguments) or are by-value / NULL.
+    Var { value: Datum, isnull: bool, freeval: bool },
     Rec(Option<RecValue>),
     None,
+}
+
+// pfree(DatumGetPointer(value)) for a copy made by copy_to_datum_ctx: the
+// datumCopy layout (datumGetSize bytes at palloc alignment, datum.c) is
+// recomputed from the stored image — the role of C's chunk header — so the
+// AllocSet chunk returns to its own freelist. Expanded objects are never
+// stored (agg_datum_copy flattens them), so a -1 image is always a flat or
+// toast-pointer varlena whose varsize_any is the size that was allocated.
+//
+// # Safety
+// `value` is a non-null by-ref datum previously returned by
+// `copy_to_datum_ctx` INTO `mcx`, of `typlen` discipline, with no other
+// owner (a freeval Var or an owned RecValue field).
+unsafe fn free_datum_copy(mcx: Mcx<'_>, value: Datum, typlen: i16) {
+    let p = value.as_usize() as *mut u8;
+    if p.is_null() {
+        return;
+    }
+    // SAFETY: forwarded caller contract.
+    let size = unsafe {
+        match typlen {
+            -1 => types_tuple::varatt::varsize_any(p),
+            n if n > 0 => n as usize,
+            -2 => {
+                let mut len = 0usize;
+                while *p.add(len) != 0 {
+                    len += 1;
+                }
+                len + 1
+            }
+            n => panic!("datumGetSize (datum.c): by-ref value with typlen {n} not ported"),
+        }
+    };
+    let layout = core::alloc::Layout::from_size_align(size, 8).expect("datumCopy layout");
+    // SAFETY: `p` is the live allocation of exactly this layout in `mcx`.
+    unsafe {
+        mcx::Allocator::deallocate(&mcx, core::ptr::NonNull::new_unchecked(p), layout);
+    }
 }
 
 struct PlanEntry {
@@ -790,7 +870,7 @@ impl<'a> Estate<'a> {
         let mut datums = Vec::with_capacity(func.datums.len());
         for d in &func.datums {
             datums.push(match d {
-                PlDatum::Var(_) => DatumVal::Var { value: Datum::null(), isnull: true },
+                PlDatum::Var(_) => DatumVal::Var { value: Datum::null(), isnull: true, freeval: false },
                 PlDatum::Rec(_) => DatumVal::Rec(None),
                 _ => DatumVal::None,
             });
@@ -812,7 +892,7 @@ impl<'a> Estate<'a> {
             readonly_func,
             atomic,
             cast_cache: FxHashMap::default(),
-            datum_ctx: Ctx::new("PLpgSQL per-invocation values"),
+            datum_ctx: Ctx::new_aset("PLpgSQL per-invocation values"),
             eval_ctx: Ctx::new("PLpgSQL eval scratch"),
             var_type_overrides: FxHashMap::default(),
             rec_type_overrides: FxHashMap::default(),
@@ -836,11 +916,26 @@ impl<'a> Estate<'a> {
         }
     }
 
-    pub fn set_var(&mut self, dno: Dno, value: Datum, isnull: bool) {
+    // assign_simple_var (pl_exec.c:8778-8830) after its detoast arm (which
+    // assign_copy_to_datum_ctx runs before the copy): free the previous
+    // value if the variable owns it, install the new one and record whether
+    // it is ours to free. `freeable` is true only for a copy
+    // copy_to_datum_ctx made (by-ref, non-null).
+    pub fn set_var(&mut self, dno: Dno, value: Datum, isnull: bool, freeable: bool) {
+        let typlen = self.var_type(dno).typlen;
+        let mcx = self.datum_ctx.mcx();
         match &mut self.datums[dno as usize] {
-            DatumVal::Var { value: v, isnull: n } => {
+            DatumVal::Var { value: v, isnull: n, freeval } => {
+                if *freeval {
+                    // SAFETY: freeval marks a copy_to_datum_ctx copy in
+                    // datum_ctx owned solely by this variable; every reader
+                    // of the old image finished before the assignment (the
+                    // new value was computed and copied first).
+                    unsafe { free_datum_copy(mcx, *v, typlen) };
+                }
                 *v = value;
                 *n = isnull;
+                *freeval = freeable && !isnull;
             }
             _ => panic!("plpgsql: assign to non-Var datum {dno}"),
         }
@@ -848,14 +943,37 @@ impl<'a> Estate<'a> {
 
     pub fn get_var(&self, dno: Dno) -> (Datum, bool) {
         match &self.datums[dno as usize] {
-            DatumVal::Var { value, isnull } => (*value, *isnull),
+            DatumVal::Var { value, isnull, .. } => (*value, *isnull),
             _ => panic!("plpgsql: read of non-Var datum {dno}"),
         }
     }
 
     fn exec_set_found(&mut self, state: bool) {
         let dno = self.func.found_varno;
-        self.set_var(dno, Datum::from_bool(state), false);
+        self.set_var(dno, Datum::from_bool(state), false, false);
+    }
+
+    // assign_record_var (pl_exec.c:8854-8869): install the new record value
+    // and free the old one — its owned field images here; the tupdesc copy
+    // goes with the last Rc holder (C: DeleteExpandedObject of the previous
+    // expanded record, whose private context held both).
+    fn assign_record_var(&mut self, recno: Dno, new: Option<RecValue>) {
+        let old = core::mem::replace(&mut self.datums[recno as usize], DatumVal::Rec(new));
+        if let DatumVal::Rec(Some(mut rv)) = old {
+            self.free_rec_fields(&mut rv);
+        }
+    }
+
+    fn free_rec_fields(&self, rv: &mut RecValue) {
+        let mcx = self.datum_ctx.mcx();
+        for f in 0..rv.values.len() {
+            if rv.owned[f] {
+                // SAFETY: owned marks a copy_to_datum_ctx copy in datum_ctx
+                // held only by this record value.
+                unsafe { free_datum_copy(mcx, rv.values[f], rv.desc.typlens[f]) };
+                rv.owned[f] = false;
+            }
+        }
     }
 
     // exec_eval_cleanup.
@@ -906,10 +1024,17 @@ impl<'a> Estate<'a> {
                     // via varsize_any.
                     let attr =
                         core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p));
-                    let out = detoast::detoast_external_attr(self.datum_ctx.mcx(), attr)?;
-                    let d = Datum::from_usize(out.as_ptr() as usize);
-                    core::mem::forget(out);
-                    return Ok(d);
+                    // pl_exec.c:8803-8811: detoast in the eval_mcontext
+                    // (released at the next exec_eval_cleanup), then
+                    // datumCopy into the function's context so the stored
+                    // image has the layout free_datum_copy expects.
+                    let out = detoast::detoast_external_attr(self.eval_ctx.mcx(), attr)?;
+                    return self.copy_to_datum_ctx(
+                        Datum::from_usize(out.as_ptr() as usize),
+                        false,
+                        -1,
+                        false,
+                    );
                 }
             }
         }
@@ -1378,15 +1503,19 @@ impl<'a> Estate<'a> {
         let td = typcache::lookup_rowtype_tupdesc_copy(self.datum_ctx.mcx(), base, -1)?;
         let desc = RecDesc::from_tupdesc(&td);
         let n = desc.types.len();
-        self.datums[recno as usize] = DatumVal::Rec(Some(RecValue {
-            desc,
-            values: vec![Datum::null(); n],
-            nulls: vec![true; n],
-            src_desc: Some(std::rc::Rc::new(td)),
-            empty: true,
-            sys: None,
-            fvalue_valid: false,
-        }));
+        self.assign_record_var(
+            recno,
+            Some(RecValue {
+                desc,
+                values: vec![Datum::null(); n],
+                nulls: vec![true; n],
+                src_desc: Some(std::rc::Rc::new(td)),
+                empty: true,
+                sys: None,
+                fvalue_valid: false,
+                owned: vec![false; n],
+            }),
+        );
         Ok(())
     }
 
@@ -2556,7 +2685,7 @@ impl<'a> Estate<'a> {
                 (t.typlen, t.typbyval)
             };
             let stored = self.assign_copy_to_datum_ctx(t_val, isnull, tl, bv)?;
-            self.set_var(t_varno, stored, isnull);
+            self.set_var(t_varno, stored, isnull, !isnull && !bv);
             self.exec_eval_cleanup();
         }
 
@@ -2565,14 +2694,14 @@ impl<'a> Estate<'a> {
             self.exec_eval_cleanup();
             if !isnull && value {
                 if have_t {
-                    self.set_var(t_varno, Datum::null(), true);
+                    self.set_var(t_varno, Datum::null(), true, false);
                 }
                 return self.exec_stmts(stmts);
             }
         }
 
         if have_t {
-            self.set_var(t_varno, Datum::null(), true);
+            self.set_var(t_varno, Datum::null(), true, false);
         }
         if !have_else {
             return Err(Box::new(
@@ -2790,7 +2919,7 @@ impl<'a> Estate<'a> {
                     if let Some(default_val) = &v.default_val {
                         self.exec_assign_expr(dno, default_val)?;
                     } else {
-                        self.set_var(dno, Datum::null(), true);
+                        self.set_var(dno, Datum::null(), true, false);
                         if v.notnull {
                             return Err(exec_err(
                                 types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED,
@@ -2809,7 +2938,9 @@ impl<'a> Estate<'a> {
                     }
                 }
                 PlDatum::Rec(r) => {
-                    self.datums[dno as usize] = DatumVal::Rec(None);
+                    // pl_exec.c:1727-1748 exec_move_row(rec, NULL, NULL):
+                    // the previous expanded record is deleted.
+                    self.assign_record_var(dno, None);
                     if let Some(default_val) = &r.default_val {
                         self.exec_assign_expr(dno, default_val)?;
                     } else if r.datatype.as_ref().is_some_and(|d| d.typtype == TYPTYPE_DOMAIN) {
@@ -2944,9 +3075,13 @@ impl<'a> Estate<'a> {
         }
     }
 
+    // assign_text_var (pl_exec.c:8838-8842): CStringGetTextDatum, stored as
+    // a freeable copy (built in the eval scratch, datumCopy'd into the
+    // function's context like every other owned value).
     pub fn assign_text_var(&mut self, dno: Dno, s: &str) -> PgResult<()> {
-        let v = varlena::cstring_to_text(self.datum_ctx.mcx(), s.as_bytes())?;
-        self.set_var(dno, fmgr::varlena_result(v), false);
+        let v = varlena::cstring_to_text(self.eval_ctx.mcx(), s.as_bytes())?;
+        let stored = self.copy_to_datum_ctx(fmgr::varlena_result(v), false, -1, false)?;
+        self.set_var(dno, stored, false, true);
         Ok(())
     }
 
@@ -3017,7 +3152,7 @@ impl<'a> Estate<'a> {
                     ));
                 }
                 let stored = self.assign_copy_to_datum_ctx(newvalue, isnull, typlen, typbyval)?;
-                self.set_var(target, stored, isnull);
+                self.set_var(target, stored, isnull, !isnull && !typbyval);
                 Ok(())
             }
             PlDatum::RecField(f) => {
@@ -3077,9 +3212,19 @@ impl<'a> Estate<'a> {
                     pn[i] = isnull;
                     self.rec_domain_check_fields(rectypeid, &src, &pv, &pn)?;
                 }
+                let mcx = self.datum_ctx.mcx();
                 if let DatumVal::Rec(Some(rv)) = &mut self.datums[recno as usize] {
+                    // expanded_record_set_field_internal (expandedrecord.c):
+                    // free the old field value if it is not part of the
+                    // stored tuple — here, if this record made the copy.
+                    if rv.owned[i] {
+                        // SAFETY: owned marks a copy_to_datum_ctx copy held
+                        // only by this field; `stored` was copied first.
+                        unsafe { free_datum_copy(mcx, rv.values[i], flen) };
+                    }
                     rv.values[i] = stored;
                     rv.nulls[i] = isnull;
+                    rv.owned[i] = !isnull && !fbyval;
                     rv.empty = false;
                     rv.fvalue_valid = false;
                 }
@@ -3108,7 +3253,7 @@ impl<'a> Estate<'a> {
                         adt_domains::domain_check(Datum::null(), true, self.rec_typeid(target))?;
                         self.instantiate_empty_rec(target)?;
                     } else {
-                        self.datums[target as usize] = DatumVal::Rec(None);
+                        self.assign_record_var(target, None);
                     }
                     return Ok(());
                 }
@@ -3250,7 +3395,7 @@ impl<'a> Estate<'a> {
                 break;
             }
             found = true;
-            self.set_var(var, Datum::from_i32(loop_value), false);
+            self.set_var(var, Datum::from_i32(loop_value), false, false);
             rc = self.exec_stmts(body)?;
             if let Some(r) = self.loop_rc(label, rc) {
                 rc = r;
@@ -3334,6 +3479,9 @@ impl<'a> Estate<'a> {
         let mut found = false;
         let mut rc = RC_OK;
         let prefetch_ok = prefetch_ok && self.atomic;
+        // C's previous_id / tupdescs_match (pl_exec.c:5844-5845).
+        let mut previous: Option<std::rc::Rc<types_tuple::TupleDescData<'static>>> = None;
+        let mut tupdescs_match = true;
 
         // C pins the loop portal so an intra-loop COMMIT/ROLLBACK converts it
         // to held (HoldPinnedPortals) instead of dropping it. On error the
@@ -3356,7 +3504,7 @@ impl<'a> Estate<'a> {
         'outer: while n > 0 {
             let t = tuptab.expect("fetch returned rows");
             for i in 0..n as usize {
-                self.move_row_from_tuptable(var, t, i)?;
+                self.move_loop_row(var, t, i, &mut previous, &mut tupdescs_match)?;
                 self.exec_eval_cleanup();
                 rc = self.exec_stmts(body)?;
                 match self.loop_rc(label, rc) {
@@ -3378,6 +3526,137 @@ impl<'a> Estate<'a> {
         self.exec_set_found(found);
         portalmem::UnpinPortal(&cursor.portal)?;
         Ok(rc)
+    }
+
+    // exec_for_query's per-row assignment (pl_exec.c:5905-5945): once the
+    // loop record holds a tupdesc (previous_id) that the query's rows fit
+    // (tupdescs_match), each row only swaps the tuple into the record. A
+    // body assignment that replaced the record's descriptor, a NULLed
+    // record, a row target, or a rowtype needing coercion takes the full
+    // exec_move_row path, after which the match is re-tested (once false it
+    // stays false) and the record's descriptor becomes the new identity.
+    fn move_loop_row(
+        &mut self,
+        var: Dno,
+        tuptab: TuptabHandle,
+        i: usize,
+        previous: &mut Option<std::rc::Rc<types_tuple::TupleDescData<'static>>>,
+        tupdescs_match: &mut bool,
+    ) -> PgResult<()> {
+        if !matches!(&self.func.datums[var as usize], PlDatum::Rec(_)) {
+            return self.move_row_from_tuptable(var, tuptab, i);
+        }
+        let held = match &self.datums[var as usize] {
+            DatumVal::Rec(Some(rv)) => rv.src_desc.clone(),
+            _ => None,
+        };
+        if let (Some(prev), Some(cur)) = (previous.as_ref(), held.as_ref()) {
+            if std::rc::Rc::ptr_eq(prev, cur) && *tupdescs_match {
+                return self.rec_set_tuple_from_tuptable(var, tuptab, i);
+            }
+        }
+        self.move_row_from_tuptable(var, tuptab, i)?;
+        let src_desc = match &self.datums[var as usize] {
+            DatumVal::Rec(Some(rv)) => rv.src_desc.clone(),
+            _ => None,
+        };
+        if *tupdescs_match {
+            let rectypeid = self.rec_typeid(var);
+            *tupdescs_match = rectypeid == RECORDOID
+                || spi::tuptable_with(tuptab, |t| {
+                    rectypeid == t.tupdesc.tdtypeid
+                        || src_desc
+                            .as_ref()
+                            .is_some_and(|d| compatible_tupdescs(&t.tupdesc, d))
+                });
+        }
+        *previous = src_desc;
+        Ok(())
+    }
+
+    // expanded_record_set_tuple (expandedrecord.c) for the loop's tuple-swap
+    // arm: deconstruct the row against the record's own descriptor (the rows
+    // fit it — tupdescs_match), copy the by-ref fields into the function's
+    // context, domain-check a composite-domain record on the prospective
+    // fields, then swap the images in and free the previous ones. The
+    // descriptor, its RecDesc and the tupdesc copy are reused untouched.
+    fn rec_set_tuple_from_tuptable(
+        &mut self,
+        recno: Dno,
+        tuptab: TuptabHandle,
+        i: usize,
+    ) -> PgResult<()> {
+        let natts = match &self.datums[recno as usize] {
+            DatumVal::Rec(Some(rv)) => rv.values.len(),
+            _ => unreachable!("tuple swap on a valueless record"),
+        };
+        let mut values = vec![Datum::null(); natts];
+        let mut nulls = vec![true; natts];
+        let sys = spi::tuptable_with(tuptab, |t| {
+            for f in 0..natts {
+                let (v, isnull) = spi::SPI_getbinval(&t.vals[i], &t.tupdesc, (f + 1) as i32);
+                values[f] = v;
+                nulls[f] = isnull;
+            }
+            std::rc::Rc::new(RecSysAttrs::from_tuple(&t.vals[i]))
+        });
+        let mut owned = vec![false; natts];
+        {
+            let DatumVal::Rec(Some(rv)) = &self.datums[recno as usize] else {
+                unreachable!("checked above")
+            };
+            for f in 0..natts {
+                if !rv.desc.dropped[f] {
+                    values[f] = self.assign_copy_to_datum_ctx(
+                        values[f],
+                        nulls[f],
+                        rv.desc.typlens[f],
+                        rv.desc.typbyvals[f],
+                    )?;
+                    owned[f] = !nulls[f] && !rv.desc.typbyvals[f];
+                }
+            }
+        }
+        // check_domain_for_new_tuple: the prospective fields must satisfy
+        // a composite domain before they replace the current ones.
+        let rectypeid = self.rec_typeid(recno);
+        if Self::rec_base_typeid(rectypeid)? != rectypeid {
+            let td = match &self.datums[recno as usize] {
+                DatumVal::Rec(Some(rv)) => {
+                    rv.src_desc.clone().expect("RecValue carries its source tupdesc")
+                }
+                _ => unreachable!("checked above"),
+            };
+            if let Err(e) = self.rec_domain_check_fields(rectypeid, &td, &values, &nulls) {
+                let mcx = self.datum_ctx.mcx();
+                if let DatumVal::Rec(Some(rv)) = &self.datums[recno as usize] {
+                    for f in 0..natts {
+                        if owned[f] {
+                            // SAFETY: fresh copies above, held by nobody.
+                            unsafe { free_datum_copy(mcx, values[f], rv.desc.typlens[f]) };
+                        }
+                    }
+                }
+                return Err(e);
+            }
+        }
+        let mcx = self.datum_ctx.mcx();
+        if let DatumVal::Rec(Some(rv)) = &mut self.datums[recno as usize] {
+            for f in 0..natts {
+                if rv.owned[f] {
+                    // SAFETY: owned marks a copy_to_datum_ctx copy held only
+                    // by this record; the new images were copied first.
+                    unsafe { free_datum_copy(mcx, rv.values[f], rv.desc.typlens[f]) };
+                }
+            }
+            rv.values = values;
+            rv.nulls = nulls;
+            rv.owned = owned;
+            rv.sys = Some(sys);
+            rv.fvalue_valid = true;
+            rv.empty = false;
+        }
+        Ok(())
     }
 
     fn rec_desc_of(&self, tuptab: TuptabHandle) -> PgResult<(RecDesc, std::rc::Rc<types_tuple::TupleDescData<'static>>)> {
@@ -3499,15 +3778,22 @@ impl<'a> Estate<'a> {
                     )?;
                 }
             }
-            self.datums[recno as usize] = DatumVal::Rec(Some(RecValue {
-                desc: srcdesc.clone(),
-                values: out_values,
-                nulls: nulls.to_vec(),
-                src_desc: Some(src_tupdesc),
-                empty: false,
-                fvalue_valid: sys.is_some(),
-                sys,
-            }));
+            let owned = (0..natts)
+                .map(|f| !srcdesc.dropped[f] && !nulls[f] && !srcdesc.typbyvals[f])
+                .collect();
+            self.assign_record_var(
+                recno,
+                Some(RecValue {
+                    desc: srcdesc.clone(),
+                    values: out_values,
+                    nulls: nulls.to_vec(),
+                    src_desc: Some(src_tupdesc),
+                    empty: false,
+                    fvalue_valid: sys.is_some(),
+                    sys,
+                    owned,
+                }),
+            );
             return Ok(());
         }
 
@@ -3579,15 +3865,22 @@ impl<'a> Estate<'a> {
         if domain_check && base != rectypeid {
             self.rec_domain_check_fields(rectypeid, &var_td, &newvalues, &newnulls)?;
         }
-        self.datums[recno as usize] = DatumVal::Rec(Some(RecValue {
-            desc: dst,
-            values: newvalues,
-            nulls: newnulls,
-            src_desc: Some(std::rc::Rc::new(var_td)),
-            empty: false,
-            fvalue_valid: sys.is_some(),
-            sys,
-        }));
+        let owned = (0..vtd_natts)
+            .map(|f| !dst.dropped[f] && !newnulls[f] && !dst.typbyvals[f])
+            .collect();
+        self.assign_record_var(
+            recno,
+            Some(RecValue {
+                desc: dst,
+                values: newvalues,
+                nulls: newnulls,
+                src_desc: Some(std::rc::Rc::new(var_td)),
+                empty: false,
+                fvalue_valid: sys.is_some(),
+                sys,
+                owned,
+            }),
+        );
         Ok(())
     }
 
@@ -3630,6 +3923,7 @@ impl<'a> Estate<'a> {
             values[i] =
                 self.copy_to_datum_ctx(values[i], nulls[i], desc.typlens[i], desc.typbyvals[i])?;
         }
+        let owned = (0..n).map(|i| !nulls[i] && !desc.typbyvals[i]).collect();
         Ok(RecValue {
             desc,
             values,
@@ -3638,6 +3932,7 @@ impl<'a> Estate<'a> {
             empty: false,
             sys: None,
             fvalue_valid: false,
+            owned,
         })
     }
 
@@ -5197,7 +5492,7 @@ impl<'a> Estate<'a> {
             Err(e) => return Err(e),
         };
         if curname.is_none() {
-            self.set_var(curvar, Datum::null(), true);
+            self.set_var(curvar, Datum::null(), true, false);
         }
         Ok(rc)
     }
@@ -5695,6 +5990,7 @@ pub(crate) mod cfi_tests {
             desc: RecDesc::from_tupdesc(&td),
             values: vec![Datum::from_i32(7)],
             nulls: vec![false],
+            owned: vec![false],
             src_desc: Some(std::rc::Rc::new(tupdesc::CreateTupleDescCopy(mcx, &td).unwrap())),
             empty: false,
             fvalue_valid: sys.is_some(),
@@ -5757,6 +6053,7 @@ pub(crate) mod cfi_tests {
             desc: RecDesc::from_tupdesc(&td),
             values: vec![Datum::from_i32(7)],
             nulls: vec![false],
+            owned: vec![false],
             src_desc: Some(std::rc::Rc::new(tupdesc::CreateTupleDescCopy(mcx, &td).unwrap())),
             empty: false,
             sys: Some(std::rc::Rc::new(RecSysAttrs::from_tuple(&tup))),
