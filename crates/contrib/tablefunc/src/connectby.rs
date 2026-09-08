@@ -27,10 +27,20 @@ fn err(msg: &str, detail: &str, sqlstate: types_error::SqlState) -> Box<PgError>
     Box::new(e)
 }
 
+// A text argument that is spliced into the SQL handed to SPI (C
+// tablefunc.c:979-982/:1057-1061 text_to_cstring → :1230/:1241 quote_literal_cstr / the
+// query template): bytes no &str can carry (a SQL_ASCII database) draw the
+// ratified §11 refusal instead of a panic.
 fn arg_str<'a>(fcinfo: &'a Fcinfo, i: usize) -> PgResult<&'a str> {
+    core::str::from_utf8(arg_bytes(fcinfo, i)?).map_err(|_| crate::non_utf8_query_error())
+}
+
+// A text argument that only travels the value plane (the branch delimiter,
+// tablefunc.c:1006/:1085, used only at :1318/:1335/:1345 appendStringInfo): carried raw as C does.
+fn arg_bytes<'a>(fcinfo: &'a Fcinfo, i: usize) -> PgResult<&'a [u8]> {
     // SAFETY: catalog args are non-null text varlenas (STRICT fns).
     let v = unsafe { fcinfo.arg_varlena_packed(i)? };
-    Ok(core::str::from_utf8(v.data()).expect("text arg is valid UTF-8"))
+    Ok(v.data())
 }
 
 struct ConnectbyParams {
@@ -38,7 +48,7 @@ struct ConnectbyParams {
     key_fld: String,
     parent_key_fld: String,
     orderby_fld: Option<String>,
-    branch_delim: String,
+    branch_delim: Vec<u8>,
     show_branch: bool,
     show_serial: bool,
     max_depth: i32,
@@ -50,9 +60,9 @@ pub(crate) fn fc_connectby_text(
 ) -> PgResult<Datum> {
     let show_branch = fcinfo.nargs() == 6;
     let branch_delim = if show_branch {
-        arg_str(fcinfo, 5)?.to_string()
+        arg_bytes(fcinfo, 5)?.to_vec()
     } else {
-        "~".to_string()
+        b"~".to_vec()
     };
     let params = ConnectbyParams {
         relname: arg_str(fcinfo, 0)?.to_string(),
@@ -74,9 +84,9 @@ pub(crate) fn fc_connectby_text_serial(
 ) -> PgResult<Datum> {
     let show_branch = fcinfo.nargs() == 7;
     let branch_delim = if show_branch {
-        arg_str(fcinfo, 6)?.to_string()
+        arg_bytes(fcinfo, 6)?.to_vec()
     } else {
-        "~".to_string()
+        b"~".to_vec()
     };
     let params = ConnectbyParams {
         relname: arg_str(fcinfo, 0)?.to_string(),
@@ -214,7 +224,7 @@ fn connectby_body(
         mcx,
         &params,
         &start_with,
-        &start_with,
+        start_with.as_bytes(),
         0,
         &mut serial,
         &mut attinmeta,
@@ -230,7 +240,7 @@ fn build_tuplestore_recursively(
     mcx: Mcx<'_>,
     params: &ConnectbyParams,
     start_with: &str,
-    branch: &str,
+    branch: &[u8],
     level: i32,
     serial: &mut i32,
     attinmeta: &mut AttInMetadata,
@@ -276,7 +286,7 @@ fn build_tuplestore_recursively(
             Some(start_with.as_bytes()),
             None,
             level,
-            Some(start_with),
+            Some(start_with.as_bytes()),
             serial,
         );
         let val_refs: Vec<Option<&[u8]>> = values.iter().map(|v| v.as_deref()).collect();
@@ -314,31 +324,22 @@ fn build_tuplestore_recursively(
     })?;
 
     for row in rows {
-        // Cycle detection: chk_branchstr = delim + branch + delim, and the
-        // current key wrapped in delimiters must not already appear in it.
+        // Cycle detection (tablefunc.c:1318-1341): chk_branchstr = delim +
+        // branch + delim, and the current key wrapped in delimiters must not
+        // already appear in it. Byte strings, as C's StringInfos are.
         if let Some(ck) = row.current_key.as_deref() {
-            let chk_branch = format!(
-                "{d}{b}{d}",
-                d = params.branch_delim,
-                b = branch
-            );
-            let ck_str = String::from_utf8_lossy(ck);
-            let chk_current = format!(
-                "{d}{k}{d}",
-                d = params.branch_delim,
-                k = ck_str
-            );
-            if chk_branch.contains(&chk_current) {
+            let d = params.branch_delim.as_slice();
+            let chk_branch = [d, branch, d].concat();
+            let chk_current = [d, ck, d].concat();
+            if contains_bytes(&chk_branch, &chk_current) {
                 return Err(err("infinite recursion detected", "", ERRCODE_INVALID_RECURSION));
             }
         }
 
-        // Extend the branch with the current key.
-        let current_branch = match row.current_key.as_deref() {
-            Some(ck) => {
-                format!("{branch}{}{}", params.branch_delim, String::from_utf8_lossy(ck))
-            }
-            None => branch.to_string(),
+        // Extend the branch with the current key (tablefunc.c:1345-1346).
+        let current_branch: Vec<u8> = match row.current_key.as_deref() {
+            Some(ck) => [branch, params.branch_delim.as_slice(), ck].concat(),
+            None => branch.to_vec(),
         };
 
         let values = build_values(
@@ -346,7 +347,7 @@ fn build_tuplestore_recursively(
             row.current_key.as_deref(),
             row.parent_key.as_deref(),
             level,
-            Some(&current_branch),
+            Some(current_branch.as_slice()),
             serial,
         );
         let val_refs: Vec<Option<&[u8]>> = values.iter().map(|v| v.as_deref()).collect();
@@ -354,7 +355,10 @@ fn build_tuplestore_recursively(
         srf.putvalues(&d, &n)?;
 
         if let Some(ck) = row.current_key.as_deref() {
-            let ck_str = core::str::from_utf8(ck).expect("key is text");
+            // The key becomes the next query's start_with (tablefunc.c:1230/:1241
+            // quote_literal_cstr → SQL text): the §11 refusal for bytes no
+            // &str can carry, never a panic.
+            let ck_str = core::str::from_utf8(ck).map_err(|_| crate::non_utf8_query_error())?;
             build_tuplestore_recursively(
                 mcx,
                 params,
@@ -377,7 +381,7 @@ fn build_values(
     current_key: Option<&[u8]>,
     parent_key: Option<&[u8]>,
     level: i32,
-    current_branch: Option<&str>,
+    current_branch: Option<&[u8]>,
     serial: &mut i32,
 ) -> Vec<Option<Vec<u8>>> {
     let ncols = if params.show_branch {
@@ -390,7 +394,7 @@ fn build_values(
     values[1] = parent_key.map(|s| s.to_vec());
     values[2] = Some(level.to_string().into_bytes());
     if params.show_branch {
-        values[3] = current_branch.map(|s| s.as_bytes().to_vec());
+        values[3] = current_branch.map(|s| s.to_vec());
     }
     if params.show_serial {
         let s = *serial;
@@ -401,7 +405,14 @@ fn build_values(
     values
 }
 
+// strstr(chk_branchstr.data, chk_current_key.data) != NULL (tablefunc.c:1337).
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    needle.is_empty() || haystack.windows(needle.len()).any(|w| w == needle)
+}
+
 fn quote_literal_cstr(mcx: Mcx<'_>, s: &str) -> PgResult<String> {
     let v = adt_quote::quote_literal(mcx, s.as_bytes())?;
-    Ok(String::from_utf8(v.data().to_vec()).expect("quote_literal yields valid UTF-8"))
+    // quote_literal only adds ASCII (quotes, E, doubled backslashes) to a
+    // valid-UTF-8 input; the map_err keeps the path panic-free regardless.
+    String::from_utf8(v.data().to_vec()).map_err(|_| crate::non_utf8_query_error())
 }

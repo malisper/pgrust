@@ -21,6 +21,7 @@ format_type = { path = "../../backend/utils/adt/format_type" }
 funcapi = { path = "../../backend/utils/fmgr/funcapi" }
 fmgr_core = { path = "../../backend/utils/fmgr/fmgr_core" }
 lsyscache = { path = "../../backend/utils/cache/lsyscache" }
+mbutils = { path = "../../backend/utils/mb/mbutils" }
 tupdesc = { path = "../../backend/access/common/tupdesc" }
 heaptuple = { path = "../../backend/access/common/heaptuple" }
 spi = { path = "../../backend/executor/spi" }

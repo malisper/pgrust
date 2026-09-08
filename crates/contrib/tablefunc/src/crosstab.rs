@@ -31,7 +31,11 @@ fn arg_sql(fcinfo: &Fcinfo, i: usize) -> PgResult<String> {
     // SAFETY: catalog args are non-null text varlenas (STRICT fns). Copied to
     // owned so the immutable arg borrow doesn't block the &mut fcinfo below.
     let v = unsafe { fcinfo.arg_varlena_packed(i)? };
-    Ok(core::str::from_utf8(v.data()).expect("SQL text arg is valid UTF-8").to_string())
+    // C (tablefunc.c:360, :638-639) runs the raw bytes as SQL; bytes no &str can
+    // carry (SQL_ASCII database) draw the ratified §11 refusal.
+    Ok(core::str::from_utf8(v.data())
+        .map_err(|_| crate::non_utf8_query_error())?
+        .to_string())
 }
 
 // compatCrosstabTupleDescs: ret[0] must match sql[0]; ret[1..] must match sql[2].

@@ -19203,6 +19203,7 @@ dependencies = [
  "funcapi",
  "heaptuple",
  "lsyscache",
+ "mbutils",
  "mcx",
  "pg_prng",
  "rustc-hash",
