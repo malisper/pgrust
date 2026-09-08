@@ -16,6 +16,7 @@ use types_slot::SlotData;
 use partbounds::{PartitionBoundInfoData, KIND_MAXVALUE, KIND_MINVALUE};
 use partcache::PARTITION_MAX_KEYS;
 use partdesc::PartitionDescData;
+pub use partdesc::PartitionDirectory;
 
 const PARTITION_CACHED_FIND_THRESHOLD: i32 = 16;
 
@@ -58,7 +59,13 @@ pub struct PartitionTupleRouting<'mcx> {
 
 impl<'mcx> PartitionTupleRouting<'mcx> {
     // ExecSetupPartitionTupleRouting: only the root dispatch up front.
-    pub fn new(mcx: Mcx<'mcx>, root: &Relation<'mcx>) -> PgResult<Self> {
+    // `pdir` is the owning EState's es_partition_directory slot (C: the
+    // estate every ExecInitPartitionDispatchInfo call reads it from).
+    pub fn new(
+        mcx: Mcx<'mcx>,
+        root: &Relation<'mcx>,
+        pdir: &mut Option<PartitionDirectory<'mcx>>,
+    ) -> PgResult<Self> {
         let root_rc = root.alias();
         let mut prt = PartitionTupleRouting {
             mcx,
@@ -70,7 +77,7 @@ impl<'mcx> PartitionTupleRouting<'mcx> {
             leaf_check_slots: Vec::new(),
             root_check: None,
         };
-        prt.init_dispatch(root_rc, None)?;
+        prt.init_dispatch(root_rc, None, pdir)?;
         Ok(prt)
     }
 
@@ -80,12 +87,21 @@ impl<'mcx> PartitionTupleRouting<'mcx> {
         &mut self,
         rel: Relation<'mcx>,
         parent_idx: Option<usize>,
+        pdir: &mut Option<PartitionDirectory<'mcx>>,
     ) -> PgResult<usize> {
         let key = partcache::RelationGetPartitionKey(&rel)?;
-        // C ExecInitPartitionDispatchInfo's CreatePartitionDirectory: routing
-        // omits detach-pending partitions except under snapshot isolation.
-        let partdesc =
-            partdesc::RelationGetPartitionDesc(&rel, !xact::IsolationUsesXactSnapshot())?;
+        // execPartition.c:1121-1123: for data modification the executor
+        // omits detach-pending partitions, except in snapshot-isolation
+        // mode (a repeatable-read transaction can still use such a
+        // partition); the policy is fixed by whichever lookup created the
+        // run's directory first.  execPartition.c:1137: through it.
+        let mcx = self.mcx;
+        let partdesc = partdesc::PartitionDirectoryLookup(
+            pdir.get_or_insert_with(|| {
+                partdesc::CreatePartitionDirectory(mcx, !xact::IsolationUsesXactSnapshot())
+            }),
+            &rel,
+        )?;
         let mut supfuncs = Vec::with_capacity(key.partnatts as usize);
         for f in key.partsupfunc.iter() {
             let fn_oid = f.borrow().fn_oid;
@@ -155,10 +171,14 @@ impl<'mcx> PartitionTupleRouting<'mcx> {
 
     // ExecFindPartition -> index for leaf_rel(); eval_mcx is C's per-tuple
     // context (caller resets it per row).
+    // `pdir`: the owning EState's es_partition_directory slot, read when a
+    // sub-partitioned level is first descended into (C ExecFindPartition ->
+    // ExecInitPartitionDispatchInfo).
     pub fn find_partition(
         &mut self,
         slot: &mut SlotData<'mcx>,
         eval_mcx: Mcx<'_>,
+        pdir: &mut Option<PartitionDirectory<'mcx>>,
     ) -> PgResult<usize> {
         let mcx = self.mcx;
         // C ExecFindPartition's routing-root pre-check (execPartition.c:286-
@@ -344,7 +364,7 @@ impl<'mcx> PartitionTupleRouting<'mcx> {
             } else {
                 let sub = table::table_open(self.mcx, oid, RowExclusiveLock)?;
                 assert!(sub.rd_rel.relkind == RELKIND_PARTITIONED_TABLE);
-                dispatch_idx = self.init_dispatch(sub, Some(parent_idx))?;
+                dispatch_idx = self.init_dispatch(sub, Some(parent_idx), pdir)?;
             }
             pending_default_check = is_default;
         }

@@ -178,6 +178,15 @@ pub struct PlannerRun<'mcx> {
     /// lookup (SELECT 1: the instr guard) pay one None store — the guard
     /// stays EXACTLY flat (a 4-field eager form measured +19 instr/q).
     pub syscache_memos: core::cell::Cell<Option<core::ptr::NonNull<()>>>,
+    /// C glob->partition_directory (pathnodes.h:181, planner.c:358 NULL):
+    /// opaque pointer to the run owner's `Option<PartitionDirectory>` slot
+    /// (`planner::plancat` owns the only cast pair; this _support crate takes
+    /// no backend dependency).  The slot lives OUTSIDE the forgotten run on
+    /// purpose: the directory pins relations (partdesc.c:472), and the owner's
+    /// frame releases them on the success exit (planner.c:624-625
+    /// DestroyPartitionDirectory) and on the error exit alike (C: the
+    /// resource owner's relcache release).
+    pub partition_directory: Option<core::ptr::NonNull<()>>,
 }
 
 // A run is forgotten at the planner boundary (mcx reset reclaims), never
@@ -200,7 +209,7 @@ mcx::forget_safe_struct!(
         minmax_subroots, active_windows, suspended_active_windows, qp_setop,
         rowmarks, gset_data, pending_part_prune_infos, cte_subpath_infos,
         swapped_parent_subroot, att_stats_memo,
-        syscache_memos },
+        syscache_memos, partition_directory },
 );
 
 impl<'mcx> PlannerRun<'mcx> {
@@ -226,6 +235,7 @@ impl<'mcx> PlannerRun<'mcx> {
             swapped_parent_subroot: None,
             att_stats_memo: core::cell::RefCell::new(PgVec::new_in(mcx)),
             syscache_memos: core::cell::Cell::new(None),
+            partition_directory: None,
         }
     }
 

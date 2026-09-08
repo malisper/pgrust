@@ -1053,7 +1053,11 @@ fn copy_from_partitioned_body<'mcx>(
         b
     };
     let mut qualexpr = init_where_qual(mcx, cstate)?;
-    let mut router = execpartition::PartitionTupleRouting::new(mcx, rel)?;
+    // C CopyFrom's estate (CreateExecutorState) carries the routing's
+    // es_partition_directory; freed with it at the end (FreeExecutorState).
+    let mut partition_directory: Option<execpartition::PartitionDirectory<'mcx>> = None;
+    let mut router =
+        execpartition::PartitionTupleRouting::new(mcx, rel, &mut partition_directory)?;
     // C GetPerTupleExprContext: expression partition keys evaluate here,
     // reset per row.
     let mut route_eval_cx = MemoryContext::new_bump("CopyRouteEvalPerTuple");
@@ -1111,7 +1115,8 @@ fn copy_from_partitioned_body<'mcx>(
         }
 
         route_eval_cx.reset();
-        let leaf = router.find_partition(&mut rootslot, route_eval_cx.mcx())?;
+        let leaf =
+            router.find_partition(&mut rootslot, route_eval_cx.mcx(), &mut partition_directory)?;
         if leaf_checks.len() <= leaf {
             leaf_checks.resize_with(leaf + 1, || None);
             leaf_indexes.resize_with(leaf + 1, || None);

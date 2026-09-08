@@ -4,6 +4,7 @@
 
 pub mod fkey;
 pub mod lock;
+pub mod partdir;
 pub mod pg_class;
 pub mod pg_index;
 pub mod reindex;

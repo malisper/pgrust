@@ -327,7 +327,7 @@ impl Drop for Relation<'_> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::pg_class::REPLICA_IDENTITY_DEFAULT;
     use crate::reloptions::{
@@ -368,7 +368,7 @@ mod tests {
         }
     }
 
-    fn rel_data<'mcx>(mcx: ::mcx::Mcx<'mcx>, oid: Oid) -> RelationData<'mcx> {
+    pub(crate) fn rel_data<'mcx>(mcx: ::mcx::Mcx<'mcx>, oid: Oid) -> RelationData<'mcx> {
         let td = TupleDescData {
             natts: 0,
             tdtypeid: 0,

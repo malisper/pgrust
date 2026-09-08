@@ -369,6 +369,52 @@ fn RelationBuildPartitionDesc(
     Ok(desc)
 }
 
+// partdesc.c:35-46 PartitionDirectoryData, shaped in types_rel (below the
+// executor) so PlannerRun and EState can own one; this crate owns the
+// descriptor downcast and is the only writer of entries.
+pub type PartitionDirectory<'mcx> = types_rel::partdir::PartitionDirectoryData<'mcx>;
+
+// CreatePartitionDirectory (partdesc.c:423-445).
+pub fn CreatePartitionDirectory<'mcx>(
+    mcxt: Mcx<'mcx>,
+    omit_detached: bool,
+) -> PartitionDirectory<'mcx> {
+    PartitionDirectory::new(mcxt, omit_detached)
+}
+
+// PartitionDirectoryLookup (partdesc.c:447-478): the same PartitionDesc for
+// a relation every time it is looked up through one directory.  In the face
+// of concurrent DDL different lookups of the relcache may construct
+// different descriptors, but any particular OID always gets the descriptor
+// its first lookup pinned for as long as the directory lives.  The entry
+// pins the relation (partdesc.c:472 RelationIncrementReferenceCount = the
+// alias's Rc strong count) so the descriptor cannot be destroyed under us.
+pub fn PartitionDirectoryLookup<'mcx>(
+    pdir: &mut PartitionDirectory<'mcx>,
+    rel: &Relation<'mcx>,
+) -> PgResult<Rc<PartitionDescData>> {
+    let relid = rel.rd_id;
+    if let Some(pde) = pdir.pdir_hash.get(&relid) {
+        return Ok(Rc::clone(&pde.pd)
+            .downcast::<PartitionDescData>()
+            .expect("partition directory entries hold PartitionDescData"));
+    }
+    let pd = RelationGetPartitionDesc(rel, pdir.omit_detached)?;
+    let erased: Rc<dyn core::any::Any> = pd.clone();
+    pdir.pdir_hash.insert(
+        relid,
+        types_rel::partdir::PartitionDirectoryEntry { rel: rel.alias(), pd: erased },
+    );
+    Ok(pd)
+}
+
+// DestroyPartitionDirectory (partdesc.c:480-492): release the reference
+// counts the entries hold (each pinned alias drops with its entry; the
+// hash's arena memory goes with its context, as in C).
+pub fn DestroyPartitionDirectory(pdir: PartitionDirectory<'_>) {
+    drop(pdir);
+}
+
 // RelationGetPartitionQual + generate_partition_qual (partcache.c), hosted
 // here for partdesc access (partcache -> partbounds would cycle); cached per
 // relid under the same relcache invalidation as the descriptors.

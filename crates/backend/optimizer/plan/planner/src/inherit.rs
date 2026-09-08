@@ -217,7 +217,11 @@ fn expand_partitioned_rtentry<'mcx>(
     if !run.root.partColsUpdated {
         run.root.partColsUpdated = has_partition_attrs(mcx, parentrel, parent_updated_cols)?;
     }
-    let pdesc = partdesc::RelationGetPartitionDesc(parentrel, true)?;
+    // inherit.c:332-333: through the run's PartitionDirectory, so this is
+    // the descriptor set_relation_partition_info built rel->boundinfo from
+    // (live_parts below index its oids) whatever was accepted since.
+    let pdesc =
+        partdesc::PartitionDirectoryLookup(crate::plancat::partition_directory(run), parentrel)?;
     let live_parts = crate::partprune::prune_append_rel_partitions(run, relinfo)?;
     let oids = {
         let mut v: PgVec<'mcx, types_core::Oid> = mcx::vec_with_capacity_in(mcx, pdesc.oids.len())?;

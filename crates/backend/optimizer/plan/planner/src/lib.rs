@@ -316,8 +316,15 @@ pub fn standard_planner<'mcx>(
 ) -> PgResult<PlannedStmt<'mcx>> {
     // C frees the planner's data with one context reset; the run is forgotten
     // (drop glue never runs), success or error — mcx reclaims it wholesale.
+    // C glob->partition_directory (planner.c:358): NULL until plancat's
+    // first partitioned-rel lookup creates it.  Owned by THIS frame, not the
+    // forgotten run: its relation pins (partdesc.c:472) are released on the
+    // success exit (planner.c:624-625) and, by the local's drop, on every
+    // `?` exit (C: the resource owner's relcache release).
+    let mut partition_directory: Option<partdesc::PartitionDirectory<'mcx>> = None;
     let mut run_owner = mcx::ArenaForget::new(PlannerRun::new(mcx));
     let mut run = &mut *run_owner;
+    plancat::install_partition_directory_slot(run, &mut partition_directory);
     run.glob.bound_params = bound_params;
 
     // The raw-tree hazard scan (planner.c:349-353) runs at subquery_planner
@@ -501,6 +508,11 @@ pub fn standard_planner<'mcx>(
         stmt_location: parse.stmt_location,
         stmt_len: parse.stmt_len,
     };
+    // planner.c:624-625.
+    run.partition_directory = None;
+    if let Some(pdir) = partition_directory.take() {
+        partdesc::DestroyPartitionDirectory(pdir);
+    }
     Ok(stmt)
 }
 

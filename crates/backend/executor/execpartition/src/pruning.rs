@@ -154,6 +154,12 @@ fn create_partition_prune_state<'mcx>(
         .expect("PartitionPruneInfo node");
     let econtext = estate.create_expr_context();
     let explain_generic = estate.es_top_eflags & EXEC_FLAG_EXPLAIN_GENERIC != 0;
+    // execPartition.c:1988-1991: for data reading the executor always
+    // includes detached partitions (a directory routing created first keeps
+    // its own policy, as in C).
+    estate
+        .es_partition_directory
+        .get_or_insert_with(|| partdesc::CreatePartitionDirectory(mcx, false));
 
     let mut state = PartitionPruneState {
         hierarchies: Vec::with_capacity(pruneinfo.prune_infos.len()),
@@ -172,10 +178,17 @@ fn create_partition_prune_state<'mcx>(
                 .as_partitioned_rel_prune_info()
                 .expect("PartitionedRelPruneInfo node");
             let (partdesc, partkey) = {
-                let partrel = estate.exec_get_range_table_relation(pinfo.rtindex, false)?;
+                let partrel = estate.exec_get_range_table_relation(pinfo.rtindex, false)?.alias();
+                // execPartition.c:2058-2060: through es_partition_directory,
+                // so InitExecPartitionPruneContexts' second lookup
+                // (execPartition.c:2412-2413) is the stored `partdesc`.
+                let pdir = estate
+                    .es_partition_directory
+                    .as_mut()
+                    .expect("es_partition_directory created above");
                 (
-                    partdesc::RelationGetPartitionDesc(partrel, false)?,
-                    partcache::RelationGetPartitionKey(partrel)?,
+                    partdesc::PartitionDirectoryLookup(pdir, &partrel)?,
+                    partcache::RelationGetPartitionKey(&partrel)?,
                 )
             };
 

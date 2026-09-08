@@ -870,6 +870,14 @@ pub struct EStateData<'mcx> {
     pub es_range_table: PgVec<'mcx, &'mcx RangeTblEntry<'mcx>>,
     pub es_range_table_size: u32,
     pub es_relations: PgVec<'mcx, Option<Relation<'mcx>>>,
+    /// C es_partition_directory (execnodes.h:687): created on first use by
+    /// ExecInitPartitionDispatchInfo (execPartition.c:1121-1123, omit
+    /// detach-pending partitions unless under snapshot isolation) or
+    /// CreatePartitionPruneState (execPartition.c:1989-1991, never omit) --
+    /// whichever comes first fixes the policy for this run -- so every
+    /// PartitionDesc lookup of this executor run answers identically;
+    /// released by FreeExecutorState (execUtils.c:219-223, `teardown`).
+    pub es_partition_directory: Option<types_rel::partdir::PartitionDirectoryData<'mcx>>,
     pub es_rowmarks: PgVec<'mcx, Option<ExecRowMark>>,
     pub es_rteperminfos: Option<&'mcx NodeList<'mcx>>,
     pub es_plannedstmt: Option<&'mcx PlannedStmt<'mcx>>,
@@ -1329,6 +1337,7 @@ impl<'mcx> EStateData<'mcx> {
             es_range_table: PgVec::new_in(mcx),
             es_range_table_size: 0,
             es_relations: PgVec::new_in(mcx),
+            es_partition_directory: None,
             es_rowmarks: PgVec::new_in(mcx),
             es_rteperminfos: None,
             es_plannedstmt: None,
@@ -1877,6 +1886,9 @@ impl<'mcx> EStateData<'mcx> {
         // so the forget path reclaims it (partial-FETCH-then-CLOSE
         // hygiene rides this line).
         self.es_sqe_spool = None;
+        // execUtils.c:219-223: DestroyPartitionDirectory releases the
+        // relation pins its entries hold.
+        self.es_partition_directory = None;
     }
 
     /// True iff every census-exempt owner has been released — the
@@ -1886,6 +1898,7 @@ impl<'mcx> EStateData<'mcx> {
             && self.es_crosscheck_snapshot.is_none()
             && self.es_junkFilter.is_none()
             && self.es_relations.iter().all(Option::is_none)
+            && self.es_partition_directory.is_none()
             && self.es_exprcontexts.iter().all(Option::is_none)
             && self.es_cte_shared.iter().all(Option::is_none)
             && self.es_worktable_shared.iter().all(Option::is_none)
@@ -1954,6 +1967,10 @@ mcx::forget_safe_struct!(
         // bundle is forgotten (owners_released asserts it) — exempt group [1].
         es_execute_acl_funcs,
         es_snapshot, es_crosscheck_snapshot, es_relations, es_junkFilter,
+        // es_partition_directory: pinned relation aliases + descriptor Rcs,
+        // released in teardown() before the bundle is forgotten
+        // (owners_released asserts it) — same group as es_relations.
+        es_partition_directory,
         es_tupleTable, es_exprcontexts, es_cte_shared, es_worktable_shared,
         es_aux_contexts,
         es_direction, es_part_prune_results,

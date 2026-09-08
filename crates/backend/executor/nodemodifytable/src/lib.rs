@@ -6814,6 +6814,7 @@ fn exec_insert<'mcx>(
             es_trig_instrument,
             es_instrument,
             es_query_cxt,
+            es_partition_directory,
             ..
         } = &mut *estate;
         let target = es_relations[(mt.rel().rti - 1) as usize]
@@ -6824,14 +6825,18 @@ fn exec_insert<'mcx>(
             let router = match mt.router.as_mut() {
                 Some(r) => r,
                 None => {
-                    mt.router =
-                        Some(execpartition::PartitionTupleRouting::new(mcx, target)?);
+                    mt.router = Some(execpartition::PartitionTupleRouting::new(
+                        mcx,
+                        target,
+                        es_partition_directory,
+                    )?);
                     mt.router.as_mut().unwrap()
                 }
             };
             let idx = router.find_partition(
                 slot,
                 mt.index_eval_cx.as_ref().expect("index_eval_cx live until ExecEndNode").mcx(),
+                es_partition_directory,
             )?;
             while mt.leaf_indexes.len() <= idx {
                 mt.leaf_indexes.push(None);

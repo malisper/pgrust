@@ -542,14 +542,50 @@ fn get_relation_foreign_keys<'mcx>(
     Ok(())
 }
 
-// set_relation_partition_info (plancat.c); the PartitionDirectory is subsumed
-// by partdesc's relid-keyed cache (no concurrent-detach snapshot isolation).
+/// Installs the run owner's `glob->partition_directory` slot (planner.c:358:
+/// NULL until the first partitioned rel is looked up).  The slot must outlive
+/// every use of `run`: standard_planner and plan_cluster_use_sort declare it
+/// as a local of the frame that owns the run.
+pub(crate) fn install_partition_directory_slot<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    slot: &mut Option<partdesc::PartitionDirectory<'mcx>>,
+) {
+    run.partition_directory = Some(core::ptr::NonNull::from(slot).cast());
+}
+
+/// C root->glob->partition_directory, created on first use with
+/// omit_detached = true (plancat.c:2461-2467: the planner omits
+/// detach-pending partitions).
+pub(crate) fn partition_directory<'a, 'mcx>(
+    run: &'a mut PlannerRun<'mcx>,
+) -> &'a mut partdesc::PartitionDirectory<'mcx> {
+    let slot = run
+        .partition_directory
+        .expect("PlannerRun without a partition-directory slot (install_partition_directory_slot)");
+    let mcx = run.mcx;
+    // SAFETY: the pointer was made by install_partition_directory_slot from
+    // an `Option<PartitionDirectory<'mcx>>` local of the frame owning `run`,
+    // which outlives every use of the run; `run` is exclusively borrowed for
+    // 'a, so no other reference to the slot is live meanwhile.
+    let slot: &'a mut Option<partdesc::PartitionDirectory<'mcx>> =
+        unsafe { &mut *slot.cast::<Option<partdesc::PartitionDirectory<'mcx>>>().as_ptr() };
+    slot.get_or_insert_with(|| partdesc::CreatePartitionDirectory(mcx, true))
+}
+
+// set_relation_partition_info (plancat.c:2453-2477).
 fn set_relation_partition_info<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel: RelId,
     relation: &Relation<'mcx>,
 ) -> PgResult<()> {
-    let partdesc = partdesc::RelationGetPartitionDesc(relation, true)?;
+    // plancat.c:2463-2470: create the PartitionDirectory if we didn't
+    // already, and look the relation up through it.
+    let partdesc = partdesc::PartitionDirectoryLookup(partition_directory(run), relation)?;
+    // Test harness only (C has no injection point here): parks the planner
+    // between this descriptor lookup and expand_partitioned_rtentry's, the
+    // window in which a concurrent ATTACH PARTITION commit lands
+    // (scripts/partdesc-partition-directory-e2e.sh). Inert unless attached.
+    injection_point::injection_point("planner-set-relation-partition-info")?;
     let key = partcache::RelationGetPartitionKey(relation)?;
     let scheme = find_partition_scheme(run, &key)?;
     let bcopy = match partdesc.boundinfo.as_ref() {

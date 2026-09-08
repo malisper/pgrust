@@ -42,7 +42,12 @@ pub fn plan_cluster_use_sort<'mcx>(
         q.seal().as_query().expect("built Query")
     };
 
+    // C plan_cluster_use_sort's fresh PlannerGlobal (partition_directory NULL);
+    // the clustered rel is a heap, so the slot stays empty, and it drops
+    // with this frame either way.
+    let mut partition_directory = None;
     let mut run = PlannerRun::new(mcx);
+    crate::plancat::install_partition_directory_slot(&mut run, &mut partition_directory);
     let qid = run.intern_query(query);
     run.root.parse = qid;
 

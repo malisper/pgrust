@@ -1756,11 +1756,15 @@ fn apply_handle_tuple_routing<'mcx>(
     remoteslot: &mut SlotData<'mcx>,
     op: RoutedOp<'_>,
 ) -> PgResult<()> {
-    let mut proute = execpartition::PartitionTupleRouting::new(mcx, rel)?;
+    // C edata->estate's es_partition_directory (create_edata_for_relation's
+    // CreateExecutorState; freed by finish_edata).
+    let mut partition_directory: Option<execpartition::PartitionDirectory<'mcx>> = None;
+    let mut proute =
+        execpartition::PartitionTupleRouting::new(mcx, rel, &mut partition_directory)?;
     // C's per-tuple context for routing-key evaluation.
     let eval_cx = mcx::MemoryContext::new("ApplyTupleRoutingEval");
 
-    let idx = proute.find_partition(remoteslot, eval_cx.mcx())?;
+    let idx = proute.find_partition(remoteslot, eval_cx.mcx(), &mut partition_directory)?;
     let partrel = proute.leaf_rel(idx).alias();
     // CheckSubscriptionRelkind (worker.c:3161): the partition set can change,
     // so CREATE/ALTER SUBSCRIPTION-time checks are insufficient.
@@ -1896,7 +1900,8 @@ fn apply_handle_tuple_routing<'mcx>(
                     None => exectuples::exec_copy_slot(&mut rootslot, &mut newslot, mcx, mcx)?,
                 }
 
-                let new_idx = proute.find_partition(&mut rootslot, eval_cx.mcx())?;
+                let new_idx =
+                    proute.find_partition(&mut rootslot, eval_cx.mcx(), &mut partition_directory)?;
                 let newpartrel = proute.leaf_rel(new_idx).alias();
                 logicalrelation::check_relkind(
                     newpartrel.rd_rel.relkind as u8,
