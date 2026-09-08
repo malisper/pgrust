@@ -1,15 +1,15 @@
-//! ginxlog.c — GIN rmgr redo + gin_mask. Pre-9.4 uncompressed leaf
-//! conversion in ginRedoRecompress is loud (fresh clusters only).
+//! ginxlog.c — GIN rmgr redo + gin_mask, including ginRedoRecompress's
+//! in-place conversion of pre-9.4 uncompressed leaves.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
 use gin_vocab::*;
 use types_core::{BlockNumber, Buffer, InvalidBlockNumber, OffsetNumber, BLCKSZ};
-use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_FEATURE_NOT_SUPPORTED};
+use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED};
 use types_storage::bufpage::{PageMut, SizeOfPageHeaderData as SIZE_OF_PAGE_HEADER};
 use types_storage::RelFileLocator;
-use types_tuple::itemptr::{FirstOffsetNumber, ItemPointerData};
+use types_tuple::itemptr::{FirstOffsetNumber, InvalidOffsetNumber, ItemPointerData};
 use xlogreader_seams::XLogReaderState;
 use xlogutils::{XLogInitBufferForRedo, XLogReadBufferForRedo, BLK_NEEDS_REDO, BLK_RESTORED};
 
@@ -122,19 +122,47 @@ fn error_err(msg: String) -> Box<PgError> {
     Box::new(PgError::error(msg))
 }
 
-/// The pre-9.4 uncompressed posting-tree leaf lane (ginxlog.c:132-164) is
-/// unported: ERRCODE_FEATURE_NOT_SUPPORTED with a REINDEX hint, never a
-/// panic in the recovery thread.
+/// ginxlog.c:132-164: convert a pre-9.4 (uncompressed) posting-tree leaf to
+/// the compressed format in place — the raw ItemPointerData array at
+/// GinDataPageGetData (maxoff items) becomes one posting-list segment
+/// (ginCompressPostingList with maxsize BLCKSZ packs every item), pd_lower
+/// records its size, GIN_COMPRESSED is set and maxoff cleared. An empty leaf
+/// (leftmost/rightmost pages are never deleted, so pg_upgrade'd instances may
+/// carry them) converts to an empty posting list. maxoff and the encoded size
+/// are checked against the data area: C asserts npacked == nuncompressed and
+/// memcpys unchecked, so an overrun is corruption here.
 #[cold]
 #[inline(never)]
-fn unsupported_uncompressed_leaf() -> Box<PgError> {
-    Box::new(
-        PgError::error(
-            "uncompressed (pre-9.4 format) GIN posting-tree leaf pages are not supported",
-        )
-        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
-        .with_hint("Rebuild the index with REINDEX."),
-    )
+fn redo_convert_uncompressed_leaf(bytes: &mut [u8]) -> PgResult<()> {
+    let mut o = opaque_of(bytes);
+    let nuncompressed = o.maxoff as usize;
+    if nuncompressed * 6 > GinDataPageMaxDataSize {
+        return Err(corrupt_err(format!(
+            "GIN redo recompress: pre-9.4 leaf item count {nuncompressed} exceeds the page data area"
+        )));
+    }
+    let totalsize = if nuncompressed > 0 {
+        let mut items: Vec<u64> = Vec::with_capacity(nuncompressed);
+        for i in 0..nuncompressed {
+            items.push(read_item(bytes, GinDataPageDataOffset + i * 6));
+        }
+        let plist = encode_items(&items);
+        if plist.len() > GinDataPageMaxDataSize {
+            return Err(corrupt_err(format!(
+                "GIN redo recompress: pre-9.4 leaf posting list size {} exceeds page capacity {GinDataPageMaxDataSize}",
+                plist.len()
+            )));
+        }
+        bytes[GinDataPageDataOffset..GinDataPageDataOffset + plist.len()].copy_from_slice(&plist);
+        plist.len()
+    } else {
+        0
+    };
+    set_data_page_data_size(bytes, totalsize);
+    o.flags |= GIN_COMPRESSED;
+    o.maxoff = InvalidOffsetNumber;
+    write_opaque_to(bytes, &o);
+    Ok(())
 }
 
 /// Malformed replayed WAL is a corruption condition, not a bug: report it as a
@@ -298,12 +326,8 @@ fn redo_recompress(buffer: Buffer, rdata: &[u8]) -> PgResult<()> {
     // SAFETY: redo lock protocol.
     let bytes = unsafe { page_bytes_mut(buffer) };
     if opaque_of(bytes).flags & GIN_COMPRESSED == 0 {
-        // ginxlog.c:132-164 converts a pre-9.4 (uncompressed) leaf in place
-        // before replaying. pgrust writes every posting-tree leaf
-        // GIN_COMPRESSED (redo_create_ptree, gin/src/datapage.rs) and has no
-        // pg_upgrade lineage, so the conversion lane is unported: a typed
-        // refusal (the read side's shape) instead of a recovery-thread panic.
-        return Err(unsupported_uncompressed_leaf());
+        // ginxlog.c:132-164: convert the pre-9.4 page first.
+        redo_convert_uncompressed_leaf(bytes)?;
     }
 
     // ginxlogRecompressDataLeaf: nactions @0 (uint16), action stream follows.
@@ -487,6 +511,12 @@ fn recompress_additems(oldseg: &[u8], items: &[u8]) -> PgResult<Vec<u8>> {
     all.extend_from_slice(&old[i..]);
     all.extend_from_slice(&new[j..]);
 
+    Ok(encode_items(&all))
+}
+
+/// One posting-list segment (ginCompressPostingList's image, no size cap) over
+/// sorted item values: first item verbatim, nbytes, varbyte deltas, SHORTALIGN.
+fn encode_items(all: &[u64]) -> Vec<u8> {
     let mut out: Vec<u8> = Vec::with_capacity(8 + all.len() * 7);
     out.extend_from_slice(&[0u8; 8]);
     write_item(&mut out, 0, all[0]);
@@ -505,7 +535,7 @@ fn recompress_additems(oldseg: &[u8], items: &[u8]) -> PgResult<Vec<u8>> {
     if nbytes & 1 != 0 {
         out.push(0);
     }
-    Ok(out)
+    out
 }
 
 fn read_item(b: &[u8], off: usize) -> u64 {
@@ -1119,19 +1149,51 @@ mod tests {
         assert_eq!(err.message(), "unexpected GIN leaf action: 5");
     }
 
-    // ginxlog.c:132-164 (pre-9.4 leaf conversion) is unported: a typed
-    // ERRCODE_FEATURE_NOT_SUPPORTED refusal, never a recovery-thread panic.
+    // ginxlog.c:132-164: a pre-9.4 (uncompressed) leaf is converted to the
+    // compressed format in place before the actions replay: the raw TID
+    // array becomes one posting-list segment, GIN_COMPRESSED is set and
+    // maxoff cleared. An empty pre-9.4 leaf (leftmost/rightmost pages are
+    // never deleted, ginxlog.c:139-143) converts to an empty posting list.
     #[test]
-    fn recompress_on_uncompressed_leaf_is_typed_refusal_not_panic() {
+    fn recompress_converts_uncompressed_leaf_like_c() {
         let bytes = install_fake_page(9103, GIN_DATA | GIN_LEAF);
-        set_data_page_data_size(bytes, 0);
+        // Raw TIDs (1,1) (2,1) (3,1) at GinDataPageGetData, count in maxoff.
+        for (i, blk) in [1u64, 2, 3].iter().enumerate() {
+            write_item(bytes, GinDataPageDataOffset + i * 6, (blk << 11) | 1);
+        }
+        let mut o = opaque_of(bytes);
+        o.maxoff = 3;
+        write_opaque_to(bytes, &o);
+        // pd_lower is meaningless on a pre-9.4 page: leave it at the data
+        // offset (the shape a pg_upgrade'd page carries).
+
         let rdata = [0u8, 0];
-        let err = redo_recompress(9103, &rdata).err().expect("uncompressed leaf is refused");
-        assert_eq!(err.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
-        assert_eq!(
-            err.message(),
-            "uncompressed (pre-9.4 format) GIN posting-tree leaf pages are not supported"
-        );
+        redo_recompress(9103, &rdata).unwrap();
+
+        let o = opaque_of(bytes);
+        assert_ne!(o.flags & GIN_COMPRESSED, 0, "flags {:#x}", o.flags);
+        assert_eq!(o.maxoff, types_tuple::itemptr::InvalidOffsetNumber);
+        // ginCompressPostingList shape: first item verbatim, nbytes, then the
+        // varbyte deltas of (blk << 11 | posid): 2048 = 0x80 0x10 twice.
+        let mut expect = vec![0u8; 8];
+        write_item(&mut expect, 0, (1u64 << 11) | 1);
+        expect[6..8].copy_from_slice(&4u16.to_ne_bytes());
+        expect.extend_from_slice(&[0x80, 0x10, 0x80, 0x10]);
+        let pd_lower = u16::from_ne_bytes([bytes[12], bytes[13]]) as usize;
+        assert_eq!(pd_lower, GinDataPageDataOffset + expect.len());
+        assert_eq!(&bytes[GinDataPageDataOffset..pd_lower], &expect[..]);
+
+        // Empty pre-9.4 leaf.
+        let bytes = install_fake_page(9104, GIN_DATA | GIN_LEAF);
+        let mut o = opaque_of(bytes);
+        o.maxoff = 0;
+        write_opaque_to(bytes, &o);
+        redo_recompress(9104, &rdata).unwrap();
+        let o = opaque_of(bytes);
+        assert_ne!(o.flags & GIN_COMPRESSED, 0);
+        assert_eq!(o.maxoff, types_tuple::itemptr::InvalidOffsetNumber);
+        let pd_lower = u16::from_ne_bytes([bytes[12], bytes[13]]) as usize;
+        assert_eq!(pd_lower, GinDataPageDataOffset);
     }
 
     #[test]

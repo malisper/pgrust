@@ -1,11 +1,12 @@
-//! gindatapage.c: posting-tree pages. Pre-9.4 uncompressed pages are loud
-//! (fresh clusters only produce GIN_COMPRESSED leaves).
+//! gindatapage.c: posting-tree pages. Pre-9.4 uncompressed leaves (a
+//! pg_upgrade lineage) are read as C does and converted to the compressed
+//! format on their first modification.
 
 use ::bufmgr_seams as bm;
 use ::gin_vocab::*;
 use ::mcx::{Mcx, PgVec};
 use ::types_core::{BlockNumber, Buffer, InvalidBlockNumber, OffsetNumber, BLCKSZ};
-use ::types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_FEATURE_NOT_SUPPORTED};
+use ::types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED};
 use init_small::globals::{EndCriticalSection, StartCriticalSection};
 use ::types_rel::Relation;
 use ::types_storage::bufpage::{PageRef, PageTemp};
@@ -197,20 +198,38 @@ pub(crate) fn gin_page_delete_posting_item(bytes: &mut [u8], offset: OffsetNumbe
     set_data_page_data_size(bytes, opaque.maxoff as usize * 10);
 }
 
-/// The pre-9.4 uncompressed posting-tree leaf lane (gindatapage.c:139-199
-/// dataLeafPageGetUncompressed, reached only through a pg_upgrade lineage
-/// pgrust does not carry) is unported: a typed refusal, never a panic.
+/// dataLeafPageGetUncompressed (gindatapage.c:211-224): on a pre-9.4 format
+/// leaf the whole page content is the raw ItemPointerData array and the item
+/// count is the opaque's maxoff. Appends the array to `out`. maxoff comes from
+/// disk: an array that would run past the data area is corruption (C reads it
+/// unchecked).
 #[cold]
 #[inline(never)]
-fn unsupported_uncompressed_leaf() -> Box<PgError> {
-    Box::new(
-        PgError::error(
-            "uncompressed (pre-9.4 format) GIN posting-tree leaf pages are not supported"
-                .to_string(),
-        )
-        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
-        .with_hint("Rebuild the index with REINDEX."),
-    )
+fn data_leaf_page_get_uncompressed(
+    bytes: &[u8],
+    out: &mut PgVec<'_, ItemPointerData>,
+) -> PgResult<()> {
+    debug_assert!(!GinPageIsCompressed(&opaque_of(bytes)));
+    let nitems = opaque_of(bytes).maxoff as usize;
+    if nitems * 6 > GinDataPageMaxDataSize {
+        return Err(Box::new(
+            PgError::error(format!(
+                "corrupted GIN posting-tree leaf: {nitems} uncompressed items exceed the page data area"
+            ))
+            .with_sqlstate(ERRCODE_DATA_CORRUPTED),
+        ));
+    }
+    let mcx = *out.allocator();
+    out.try_reserve(nitems).map_err(|_| mcx.oom(nitems * 6))?;
+    let mut at = GinDataPageDataOffset;
+    for _ in 0..nitems {
+        let hi = u16::from_ne_bytes([bytes[at], bytes[at + 1]]);
+        let lo = u16::from_ne_bytes([bytes[at + 2], bytes[at + 3]]);
+        let posid = u16::from_ne_bytes([bytes[at + 4], bytes[at + 5]]);
+        out.push(ItemPointerData::new(((hi as u32) << 16) | lo as u32, posid));
+        at += 6;
+    }
+    Ok(())
 }
 
 /// GinDataLeafPageGetItems: append page TIDs (segments past advancePast).
@@ -220,12 +239,9 @@ pub fn gin_data_leaf_page_get_items(
     out: &mut PgVec<'_, ItemPointerData>,
 ) -> PgResult<()> {
     if !GinPageIsCompressed(&opaque_of(bytes)) {
-        // INVARIANT: every pgrust-created posting-tree leaf is stamped GIN_COMPRESSED
-        // (datapage.rs:1171 createPostingTree, datapage.rs:658-659 leaf split,
-        // gin_xlog/src/lib.rs:152 redo create-ptree) and there is no pg_upgrade
-        // lineage; C keeps dataLeafPageGetUncompressed (gindatapage.c:139-199) only
-        // for pg_upgrade'd pre-9.4 pages, so an uncompressed leaf here is on-disk corruption.
-        return Err(unsupported_uncompressed_leaf());
+        // gindatapage.c:167-173: the whole uncompressed array (advancePast
+        // only skips compressed segments).
+        return data_leaf_page_get_uncompressed(bytes, out);
     }
     let all = data_leaf_posting_list_checked(bytes)?;
     let mut off = 0usize;
@@ -252,12 +268,13 @@ pub(crate) fn gin_data_leaf_page_get_items_to_tbm(
     tbm: &mut ::tidbitmap::TIDBitmap<'_>,
 ) -> PgResult<i64> {
     if !GinPageIsCompressed(&opaque_of(bytes)) {
-        // INVARIANT: every pgrust-created posting-tree leaf is stamped GIN_COMPRESSED
-        // (datapage.rs:1171 createPostingTree, datapage.rs:658-659 leaf split,
-        // gin_xlog/src/lib.rs:152 redo create-ptree) and there is no pg_upgrade
-        // lineage; C keeps dataLeafPageGetUncompressed (gindatapage.c:139-199) only
-        // for pg_upgrade'd pre-9.4 pages, so an uncompressed leaf here is on-disk corruption.
-        return Err(unsupported_uncompressed_leaf());
+        // gindatapage.c:195-199.
+        let mut uncompressed = mcx::vec_new_in(mcx);
+        data_leaf_page_get_uncompressed(bytes, &mut uncompressed)?;
+        if !uncompressed.is_empty() {
+            tbm.add_tuples(uncompressed.as_slice(), false)?;
+        }
+        return Ok(uncompressed.len() as i64);
     }
     crate::postinglist::ginPostingListDecodeAllSegmentsToTbm(
         mcx,
@@ -314,6 +331,8 @@ pub(crate) struct DisassembledLeaf {
     lsize: usize,
     rsize: usize,
     walinfo: Vec<u8>,
+    /// Page is in pre-9.4 format on disk.
+    oldformat: bool,
 }
 
 fn owned_seg<'s>(mcx: Mcx<'s>, bytes: PgVec<'s, u8>) -> SegBytes {
@@ -341,14 +360,29 @@ fn items_slice<'x>(si: &SegItems, new_items: &'x [ItemPointerData]) -> &'x [Item
 }
 
 /// disassembleLeaf.
-fn disassemble_leaf(bytes: &[u8]) -> PgResult<DisassembledLeaf> {
+fn disassemble_leaf<'s>(mcx: Mcx<'s>, bytes: &[u8]) -> PgResult<DisassembledLeaf> {
     if !GinPageIsCompressed(&opaque_of(bytes)) {
-        // INVARIANT: every pgrust-created posting-tree leaf is stamped GIN_COMPRESSED
-        // (datapage.rs:1171 createPostingTree, datapage.rs:658-659 leaf split,
-        // gin_xlog/src/lib.rs:152 redo create-ptree) and there is no pg_upgrade
-        // lineage; C keeps dataLeafPageGetUncompressed (gindatapage.c:139-199) only
-        // for pg_upgrade'd pre-9.4 pages, so an uncompressed leaf here is on-disk corruption.
-        return Err(unsupported_uncompressed_leaf());
+        // gindatapage.c:1413-1428: a pre-9.4 uncompressed page is one REPLACE
+        // segment carrying the item array; an empty one has no segments.
+        let mut uncompressed = mcx::vec_new_in(mcx);
+        data_leaf_page_get_uncompressed(bytes, &mut uncompressed)?;
+        let mut segs = Vec::new();
+        if !uncompressed.is_empty() {
+            segs.push(SegInfo {
+                action: GIN_SEGMENT_REPLACE,
+                seg: None,
+                items: Some(owned_items(mcx, uncompressed)),
+                moditems: None,
+            });
+        }
+        return Ok(DisassembledLeaf {
+            segs,
+            lastleft: 0,
+            lsize: 0,
+            rsize: 0,
+            walinfo: Vec::new(),
+            oldformat: true,
+        });
     }
     // Bounds-check pd_lower and the whole segment chain before recording any
     // (ptr, seg_size) extent: a crafted segment size would otherwise drive an
@@ -373,6 +407,7 @@ fn disassemble_leaf(bytes: &[u8]) -> PgResult<DisassembledLeaf> {
         lsize: 0,
         rsize: 0,
         walinfo: Vec::new(),
+        oldformat: false,
     })
 }
 
@@ -699,17 +734,19 @@ fn data_place_to_page_leaf_recompress(buf: Buffer, leaf: &DisassembledLeaf) -> P
     let mut page = unsafe { page_mut(buf) };
     // SAFETY: borrow confined to this function.
     let bytes = unsafe { crate::page_bytes_mut(&mut page) };
+    let mut modified = false;
     if !GinPageIsCompressed(&opaque_of(bytes)) {
-        // INVARIANT: every pgrust-created posting-tree leaf is stamped GIN_COMPRESSED
-        // (datapage.rs:1171 createPostingTree, datapage.rs:658-659 leaf split,
-        // gin_xlog/src/lib.rs:152 redo create-ptree) and there is no pg_upgrade
-        // lineage; C keeps dataLeafPageGetUncompressed (gindatapage.c:139-199) only
-        // for pg_upgrade'd pre-9.4 pages, so an uncompressed leaf here is on-disk corruption.
-        return Err(unsupported_uncompressed_leaf());
+        // gindatapage.c:992-998: a pre-9.4 page converts its header here and
+        // every segment is copied to the page whether modified or not.
+        debug_assert!(leaf.oldformat);
+        let mut o = opaque_of(bytes);
+        o.flags |= GIN_COMPRESSED;
+        o.maxoff = InvalidOffsetNumber;
+        write_opaque_to(bytes, &o);
+        modified = true;
     }
     let mut ptr = GinDataPageDataOffset;
     let mut newsize = 0usize;
-    let mut modified = false;
     for seg in leaf.segs.iter() {
         if seg.action != GIN_SEGMENT_UNMODIFIED {
             modified = true;
@@ -854,7 +891,7 @@ impl<'a, 'r, 's> DataBtree<'a, 'r, 's> {
             maxitems = i;
         }
 
-        let mut leaf = disassemble_leaf(bytes)?;
+        let mut leaf = disassemble_leaf(self.scratch, bytes)?;
 
         // Appending to the end of the page?
         let (append, max_old_item) = if !leaf.segs.is_empty() {
@@ -1400,7 +1437,7 @@ pub(crate) fn ginVacuumPostingTreeLeaf<'s>(
     let rel = gvs.rel;
     // SAFETY: pin + exclusive lock held by the caller.
     let bytes = page_bytes(&unsafe { page_ref(buffer) });
-    let mut leaf = disassemble_leaf(bytes)?;
+    let mut leaf = disassemble_leaf(scratch, bytes)?;
 
     let mut removed_something = false;
     for seg in leaf.segs.iter_mut() {
@@ -1486,9 +1523,15 @@ pub(crate) fn ginVacuumPostingTreeLeaf<'s>(
     Ok(())
 }
 
-/// GinDataLeafPageIsEmpty (compressed leaves only; pre-9.4 loud upstream).
+/// GinDataLeafPageIsEmpty (ginblock.h:285): posting-list size on a
+/// compressed leaf, maxoff < FirstOffsetNumber on a pre-9.4 one.
 pub(crate) fn gin_data_leaf_page_is_empty(bytes: &[u8]) -> bool {
-    data_leaf_posting_list_size(bytes) == 0
+    let opaque = opaque_of(bytes);
+    if GinPageIsCompressed(&opaque) {
+        data_leaf_posting_list_size(bytes) == 0
+    } else {
+        opaque.maxoff < FirstOffsetNumber
+    }
 }
 
 #[cfg(test)]

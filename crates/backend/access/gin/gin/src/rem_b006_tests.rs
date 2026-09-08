@@ -713,45 +713,88 @@ fn step_right_onto_different_page_type_is_internal_error() {
     assert_eq!(err.sqlstate(), ERRCODE_INTERNAL_ERROR);
 }
 
-// --- gindatapage.c:167 GinDataLeafPageGetItems / :195 GetItemsToTbm on a
-// pre-9.4 uncompressed leaf (row a186-candidate-fp-gin-gindatapage-d74c16878f331c675166-1):
-// pgrust does not carry the uncompressed lane; the refusal must be a typed
-// error, never a backend panic.
+// --- gindatapage.c:167 GinDataLeafPageGetItems / :195 GetItemsToTbm /
+// :1402 disassembleLeaf / :992 dataPlaceToPageLeafRecompress on a pre-9.4
+// uncompressed leaf (row a186-candidate-fp-gin-gindatapage-d74c16878f331c675166-1):
+// C reads the raw TID array through dataLeafPageGetUncompressed
+// (gindatapage.c:211-224) and converts the page to the compressed format on
+// its first modification. pgrust must do the same, never refuse or panic.
 
-fn uncompressed_leaf() -> Box<FakePage> {
+/// A pre-9.4 format posting-tree leaf: `n` raw TIDs (b, 1) for b in 1..=n at
+/// GinDataPageGetData, the count in the opaque's maxoff, no GIN_COMPRESSED.
+fn uncompressed_leaf(n: u32) -> Box<FakePage> {
     let mut p = gin_page(GIN_DATA | GIN_LEAF);
-    let items = [tid(1, 1), tid(2, 1), tid(3, 1)];
     let mut at = GinDataPageDataOffset;
-    for it in &items {
+    for b in 1..=n {
+        let it = tid(b, 1);
         // SAFETY: ItemPointerData is a 6-byte POD.
-        let b = unsafe { core::slice::from_raw_parts((it as *const ItemPointerData).cast::<u8>(), 6) };
+        let b = unsafe { core::slice::from_raw_parts((&it as *const ItemPointerData).cast::<u8>(), 6) };
         p.0[at..at + 6].copy_from_slice(b);
         at += 6;
     }
     let mut o = crate::opaque_of(&p.0);
-    o.maxoff = items.len() as OffsetNumber;
+    o.maxoff = n as OffsetNumber;
     crate::write_opaque_to(&mut p.0, &o);
     p
 }
 
 #[test]
-fn uncompressed_posting_leaf_is_typed_refusal_not_panic() {
+fn uncompressed_posting_leaf_reads_like_c() {
     let ctx = MemoryContext::new_bump("t");
     let mcx = ctx.mcx();
-    let page = uncompressed_leaf();
+    let page = uncompressed_leaf(3);
+    let expect = [tid(1, 1), tid(2, 1), tid(3, 1)];
 
-    let mut out = mcx::vec_new_in(mcx);
-    let err = crate::datapage::gin_data_leaf_page_get_items(&page.0, &tid(0, 0), &mut out)
-        .err()
-        .expect("uncompressed leaf must be a catchable error");
-    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
-    assert!(err.message().contains("uncompressed"), "{}", err.message());
+    // gindatapage.c:167-173: the whole array is returned (advancePast is a
+    // segment-skipping hint that has no effect on an uncompressed page).
+    for advance in [tid(0, 0), tid(2, 1)] {
+        let mut out = mcx::vec_new_in(mcx);
+        crate::datapage::gin_data_leaf_page_get_items(&page.0, &advance, &mut out).unwrap();
+        assert_eq!(out.as_slice(), &expect[..]);
+    }
 
+    // gindatapage.c:195-199: every TID lands in the bitmap.
     let mut tbm = ::tidbitmap::TIDBitmap::new(mcx, 1 << 20);
-    let err = crate::datapage::gin_data_leaf_page_get_items_to_tbm(mcx, &page.0, &mut tbm)
-        .err()
-        .expect("uncompressed leaf must be a catchable error");
-    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+    let n = crate::datapage::gin_data_leaf_page_get_items_to_tbm(mcx, &page.0, &mut tbm).unwrap();
+    assert_eq!(n, 3);
+
+    // ginblock.h:285 GinDataLeafPageIsEmpty: maxoff < FirstOffsetNumber on
+    // an uncompressed page, whatever pd_lower says.
+    assert!(!crate::datapage::gin_data_leaf_page_is_empty(&page.0));
+    assert!(crate::datapage::gin_data_leaf_page_is_empty(&uncompressed_leaf(0).0));
+}
+
+#[test]
+fn uncompressed_posting_leaf_vacuum_converts_to_compressed_format() {
+    install();
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    set_pages(vec![metapage(), gin_page(GIN_LEAF), uncompressed_leaf(3)], 0);
+
+    let rel = index_rel(mcx, KeyKind::Int4);
+    let state = one_col_state(KeyKind::Int4);
+    let dead = [tid(2, 1)];
+    let mut stats = ::types_nbtree::IndexBulkDeleteResult::default();
+    let mut gvs = crate::vacuum::GinVacuumState {
+        rel: &rel,
+        state: &state,
+        delete: crate::vacuum::GinVacDelete::DeadItems(&dead),
+        stats: &mut stats,
+    };
+    // gindatapage.c:1413-1428 disassembleLeaf: one REPLACE segment holding
+    // the raw array; :992-998 dataPlaceToPageLeafRecompress: header converted.
+    crate::datapage::ginVacuumPostingTreeLeaf(mcx, &mut gvs, 3).unwrap();
+    assert_eq!(stats.tuples_removed, 1.0);
+    assert_wal_in_crit_section(&[XLOG_GIN_VACUUM_DATA_LEAF_PAGE]);
+    assert_eq!(init_small::globals::CritSectionCount(), 0);
+
+    let bytes = page_bytes_of(2);
+    let o = crate::opaque_of(bytes);
+    assert!(crate::GinPageIsCompressed(&o), "flags {:#x}", o.flags);
+    assert_eq!(o.maxoff, ::types_tuple::itemptr::InvalidOffsetNumber);
+    let mut out = mcx::vec_new_in(mcx);
+    crate::datapage::gin_data_leaf_page_get_items(bytes, &tid(0, 0), &mut out).unwrap();
+    assert_eq!(out.as_slice(), &[tid(1, 1), tid(3, 1)][..]);
 }
 
 // --- ginentrypage.c:176 ginReadTuple count mismatch elog(ERROR)
