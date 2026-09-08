@@ -52,6 +52,32 @@ pub fn RelationSetNewRelfilenumber<'mcx>(
         ));
     };
 
+    // relcache.c:3817-3826: pg_class is opened and the relation's pg_class
+    // tuple is locked (SearchSysCacheLockedCopy1, InplaceUpdateTupleLock)
+    // BEFORE the old storage is dropped (relcache.c:3860) and the new
+    // relfilenumber's storage created (relcache.c:3873-3884), and before the
+    // mapped/unmapped branch, for mapped indexes too; both are released after
+    // it (relcache.c:3949-3953). The tuple is a copy, as C's is, so no scan
+    // stays open across the storage change.
+    let pg_class = table::table_open(mcx, RELATION_RELATION_ID, RowExclusiveLock)?;
+    let key = [oid_scankey(1, rel.rd_id)];
+    let mut scan =
+        genam::systable_beginscan(mcx, &pg_class, catalog::ClassOidIndexId, true, None, &key)?;
+    let Some(found) = genam::systable_getnext(mcx, &mut scan)? else {
+        // relcache.c:3824-3826 elog(ERROR): catchable, not a backend abort.
+        return Err(crate::relation_tuple_missing(rel.rd_id));
+    };
+    let reltup = heaptuple::heap_copytuple(mcx, found)?;
+    genam::systable_endscan(mcx, scan)?;
+    // C: SearchSysCacheLockedCopy1 (relcache.c:3820) / UnlockTuple
+    // (relcache.c:3949). Before the content read that feeds the
+    // replacement image, so a concurrent inplace writer is either
+    // serialized behind us or visible in what we copy -- losing
+    // relfrozenxid/relminmxid here is a durable wraparound-safety
+    // regression, and this function writes both.
+    let otid = reltup.t_self;
+    lmgr::LockTuple(&pg_class, &otid, InplaceUpdateTupleLock)?;
+
     if init_small::globals::IsBinaryUpgrade() {
         // Binary upgrade frees old storage immediately: the incoming
         // relfilenumber may equal the one being vacated (pg_largeobject).
@@ -85,27 +111,6 @@ pub fn RelationSetNewRelfilenumber<'mcx>(
         _ => return Err(crate::relation_has_no_storage(rel.name())),
     };
 
-    // relcache.c:3817-3826: pg_class is opened and the relation's pg_class
-    // tuple is locked (SearchSysCacheLockedCopy1, InplaceUpdateTupleLock)
-    // BEFORE the mapped/unmapped branch, for mapped indexes too; both are
-    // released after it (relcache.c:3949-3953).
-    let pg_class = table::table_open(mcx, RELATION_RELATION_ID, RowExclusiveLock)?;
-    let key = [oid_scankey(1, rel.rd_id)];
-    let mut scan =
-        genam::systable_beginscan(mcx, &pg_class, catalog::ClassOidIndexId, true, None, &key)?;
-    let Some(reltup) = genam::systable_getnext(mcx, &mut scan)? else {
-        // relcache.c:3824-3826 elog(ERROR): catchable, not a backend abort.
-        return Err(crate::relation_tuple_missing(rel.rd_id));
-    };
-    // C: SearchSysCacheLockedCopy1 (relcache.c:3820) / UnlockTuple
-    // (relcache.c:3949). Before the content read that feeds the
-    // replacement image, so a concurrent inplace writer is either
-    // serialized behind us or visible in what we copy -- losing
-    // relfrozenxid/relminmxid here is a durable wraparound-safety
-    // regression, and this function writes both.
-    let otid = reltup.t_self;
-    lmgr::LockTuple(&pg_class, &otid, InplaceUpdateTupleLock)?;
-
     if rel.is_mapped() {
         // Mapped index: pg_class stays untouched (essential when reindexing
         // pg_class itself); the relation mapper carries the new number
@@ -119,7 +124,6 @@ pub fn RelationSetNewRelfilenumber<'mcx>(
             false,
         )?;
         inval::invalidate::CacheInvalidateRelcache(rel)?;
-        genam::systable_endscan(mcx, scan)?;
     } else {
         let mut values = [Datum::null(); Natts_pg_class];
         let isnull = [false; Natts_pg_class];
@@ -140,13 +144,12 @@ pub fn RelationSetNewRelfilenumber<'mcx>(
         set(Anum_pg_class_relpersistence, Datum::from_char(persistence as i8));
         let mut newtup = heaptuple::heap_modify_tuple(
             mcx,
-            reltup,
+            &reltup,
             pg_class.descr(),
             &values,
             &isnull,
             &replace,
         )?;
-        genam::systable_endscan(mcx, scan)?;
         catalog_indexing::CatalogTupleUpdate(mcx, &pg_class, &otid, &mut newtup)?;
     }
 
