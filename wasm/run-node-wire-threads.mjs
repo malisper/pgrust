@@ -408,6 +408,7 @@ const stdoutPipe = SabPipe.create(1 << 22);
 const SESSION_COUNT = FANOUT ? FANOUT + 1 : 3;
 const CONN_MAGIC = 0x50475048; // "HPGP" in stream order
 const pipeRegistry = new PipeRegistry();
+const hostGate = SabPipe.createHostGate();
 let listenerPipe = null;
 let wakePipe = null;
 const sessionPipes = [];
@@ -429,7 +430,11 @@ if (POSTMASTER) {
     // wakes on its own traffic and not on every other session's byte.
     const gate = SabPipe.createGate();
     const toGuest = SabPipe.create(1 << 20, { gate }); // driver -> backend (guest READS)
-    const fromGuest = SabPipe.create(1 << 22, { gate }); // backend -> driver (guest WRITES)
+    // ONE HOST GATE FOR EVERY SESSION (sab-pipe.js "THE HOST GATE"): this driver reads every
+    // session's out ring and may not block, so without it it would hold one outstanding
+    // `Atomics.waitAsync` per session — the shape that can stop a WebKit agent dead for a second.
+    // Only the ring the DRIVER reads carries it; no guest ever waits on it.
+    const fromGuest = SabPipe.create(1 << 22, { gate, hostGate }); // backend -> driver (guest WRITES)
     pipeRegistry.register(inFd, { in: toGuest });
     pipeRegistry.register(outFd, { out: fromGuest });
     // This session's WAKE ring: both ends of one ring on one fd, exactly as
