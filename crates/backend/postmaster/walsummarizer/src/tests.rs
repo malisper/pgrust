@@ -220,8 +220,12 @@ mod contents_rows {
                 postgres_seams::check_for_interrupts::set(|| Ok(()));
             }
             aio_seams::pgaio_closing_fd::set(|_| {});
-            waitevent_seams::pgstat_report_wait_start::set(|_| {});
-            waitevent_seams::pgstat_report_wait_end::set(|| {});
+            if !waitevent_seams::pgstat_report_wait_start::is_installed() {
+                waitevent_seams::pgstat_report_wait_start::set(|_| {});
+            }
+            if !waitevent_seams::pgstat_report_wait_end::is_installed() {
+                waitevent_seams::pgstat_report_wait_end::set(|| {});
+            }
         });
         fd::InitFileAccess();
     }
@@ -444,8 +448,12 @@ mod shutdown_lock {
             // Real in-process semaphores: the contended LWLock wait parks on them.
             pg_sema::init_seams();
             if !waitevent_seams::pgstat_report_wait_start::is_installed() {
-                waitevent_seams::pgstat_report_wait_start::set(|_| {});
-                waitevent_seams::pgstat_report_wait_end::set(|| {});
+                if !waitevent_seams::pgstat_report_wait_start::is_installed() {
+                    waitevent_seams::pgstat_report_wait_start::set(|_| {});
+                }
+                if !waitevent_seams::pgstat_report_wait_end::is_installed() {
+                    waitevent_seams::pgstat_report_wait_end::set(|| {});
+                }
             }
             if !postgres_seams::check_for_interrupts::is_installed() {
                 postgres_seams::check_for_interrupts::set(|| Ok(()));
