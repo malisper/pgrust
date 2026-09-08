@@ -21,6 +21,7 @@ types_scan = { path = "../../_support/types/types_scan" }
 types_tuple = { path = "../../_support/types/types_tuple" }
 rel_vocab = { path = "../../_support/types/rel_vocab" }
 pgclient = { path = "../../interfaces/pgclient" }
+pg_b64 = { path = "../../common/base64" }
 elog = { path = "../../backend/utils/error/elog" }
 dfmgr = { path = "../../backend/utils/fmgr/dfmgr" }
 fmgr_core = { path = "../../backend/utils/fmgr/fmgr_core" }

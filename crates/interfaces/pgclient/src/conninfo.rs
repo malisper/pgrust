@@ -92,12 +92,302 @@ fn uri_prefix_length(s: &str) -> usize {
     }
 }
 
+// conninfo_storeval's "replace the option's value" effect on the option
+// array: one entry per keyword, the last store wins.
+fn store(opts: &mut Vec<(String, String)>, key: &str, val: String) {
+    opts.retain(|(k, _)| k != key);
+    opts.push((key.to_string(), val));
+}
+
+// fe-connect.c get_hexdigit: A-F and a-f are treated identically.
+fn get_hexdigit(digit: u8) -> Option<u8> {
+    match digit {
+        b'0'..=b'9' => Some(digit - b'0'),
+        b'A'..=b'F' => Some(digit - b'A' + 10),
+        b'a'..=b'f' => Some(digit - b'a' + 10),
+        _ => None,
+    }
+}
+
+// fe-connect.c conninfo_uri_decode: replace %xy triplets, skipping leading
+// and trailing spaces; a space anywhere else ends the value and is an error
+// ("use percent-encoded spaces (%20) instead"). C stores the raw decoded
+// bytes; a percent-encoded non-UTF-8 byte degrades lossily here, as the
+// keyword=value scanner already does.
+fn conninfo_uri_decode(s: &str) -> Result<String, String> {
+    let b = s.as_bytes();
+    let mut q = 0usize;
+    while q < b.len() && b[q] == b' ' {
+        q += 1;
+    }
+    let mut out: Vec<u8> = Vec::with_capacity(b.len());
+    while q < b.len() && b[q] != b' ' {
+        if b[q] != b'%' {
+            out.push(b[q]);
+            q += 1;
+        } else {
+            q += 1; // skip the percent sign itself
+            // C reads *q++ twice; end-of-string is caught by the first
+            // failing get_hexdigit (NUL is not a hex digit).
+            let d1 = b.get(q).copied().unwrap_or(0);
+            q += 1;
+            let Some(hi) = get_hexdigit(d1) else {
+                return Err(format!("invalid percent-encoded token: \"{s}\""));
+            };
+            let d2 = b.get(q).copied().unwrap_or(0);
+            q += 1;
+            let Some(lo) = get_hexdigit(d2) else {
+                return Err(format!("invalid percent-encoded token: \"{s}\""));
+            };
+            let c = (hi << 4) | lo;
+            if c == 0 {
+                return Err(format!("forbidden value %00 in percent-encoded value: \"{s}\""));
+            }
+            out.push(c);
+        }
+    }
+    while q < b.len() && b[q] == b' ' {
+        q += 1;
+    }
+    if q < b.len() {
+        return Err(format!(
+            "unexpected spaces found in \"{s}\", use percent-encoded spaces (%20) instead"
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out).into_owned())
+}
+
+// conninfo_storeval (fe-connect.c) as conninfo_uri_parse_options calls it:
+// uri_decode=true, ignoreMissing=false. requiressl is translated BEFORE the
+// decode (C reads value[0] of the still-encoded string); the keyword is one
+// of user/password/host/port/dbname here, always a known option.
+fn store_uri_component(
+    opts: &mut Vec<(String, String)>,
+    keyword: &str,
+    value_encoded: &str,
+) -> Result<(), String> {
+    let (keyword, value) = if keyword == "requiressl" {
+        (
+            "sslmode",
+            if value_encoded.starts_with('1') { "require" } else { "prefer" }.to_string(),
+        )
+    } else {
+        (keyword, conninfo_uri_decode(value_encoded)?)
+    };
+    if lookup_option(keyword).is_none() {
+        return Err(format!("invalid connection option \"{keyword}\""));
+    }
+    store(opts, keyword, value);
+    Ok(())
+}
+
+// fe-connect.c conninfo_uri_parse_params: ?param1=value1&param2=value2...
+// Keyword and value are percent-decoded; ssl=true is rewritten to
+// sslmode=require (JDBC compatibility); an unknown keyword is "invalid URI
+// query parameter" (conninfo_storeval with ignoreMissing=true adds no
+// message of its own).
+fn conninfo_uri_parse_params(params: &str, opts: &mut Vec<(String, String)>) -> Result<(), String> {
+    let b = params.as_bytes();
+    let mut p = 0usize;
+    while p < b.len() {
+        let kw_start = p;
+        let mut eq: Option<usize> = None;
+        let seg_end;
+        loop {
+            if p >= b.len() || b[p] == b'&' {
+                seg_end = p;
+                break;
+            }
+            if b[p] == b'=' {
+                match eq {
+                    None => eq = Some(p),
+                    Some(first) => {
+                        return Err(format!(
+                            "extra key/value separator \"=\" in URI query parameter: \"{}\"",
+                            &params[kw_start..first]
+                        ))
+                    }
+                }
+            }
+            p += 1;
+        }
+        let Some(eqpos) = eq else {
+            return Err(format!(
+                "missing key/value separator \"=\" in URI query parameter: \"{}\"",
+                &params[kw_start..seg_end]
+            ));
+        };
+        if p < b.len() {
+            p += 1; // advance past '&'
+        }
+        let keyword = conninfo_uri_decode(&params[kw_start..eqpos])?;
+        let value = conninfo_uri_decode(&params[eqpos + 1..seg_end])?;
+        let (keyword, value) = if keyword == "ssl" && value == "true" {
+            ("sslmode".to_string(), "require".to_string())
+        } else {
+            (keyword, value)
+        };
+        // conninfo_storeval, uri_decode=false arm: requiressl reads the
+        // decoded first byte.
+        let (keyword, value) = if keyword == "requiressl" {
+            (
+                "sslmode".to_string(),
+                if value.starts_with('1') { "require" } else { "prefer" }.to_string(),
+            )
+        } else {
+            (keyword, value)
+        };
+        if lookup_option(&keyword).is_none() {
+            return Err(format!("invalid URI query parameter: \"{keyword}\""));
+        }
+        store(opts, &keyword, value);
+    }
+    Ok(())
+}
+
+// fe-connect.c conninfo_uri_parse_options (RFC 3986 form):
+//   postgresql://[user[:password]@][netloc][:port][,...][/dbname][?params]
+// netloc = host name, IPv4 address, or a bracketed IPv6 address; several
+// netloc[:port] pairs may be comma-separated (host/port become comma lists).
+// Every component may be percent-encoded. Component boundaries are ASCII
+// delimiters, so the byte-indexed slices below are always char boundaries.
+fn conninfo_uri_parse(uri: &str) -> Result<Vec<(String, String)>, String> {
+    let mut opts: Vec<(String, String)> = Vec::new();
+    let b = uri.as_bytes();
+    let prefix_len = uri_prefix_length(uri);
+    if prefix_len == 0 {
+        // Should never happen.
+        return Err(format!("invalid URI propagated to internal parser routine: \"{uri}\""));
+    }
+    let start = prefix_len;
+    let mut p = start;
+
+    // Look ahead for possible user credentials designator.
+    while p < b.len() && b[p] != b'@' && b[p] != b'/' {
+        p += 1;
+    }
+    if p < b.len() && b[p] == b'@' {
+        // scheme://user[:password]@[netloc]  ('@' is at p, so both scans
+        // below terminate before the end of the string).
+        let at = p;
+        let mut e = start;
+        while b[e] != b':' && b[e] != b'@' {
+            e += 1;
+        }
+        let user = &uri[start..e];
+        if !user.is_empty() {
+            store_uri_component(&mut opts, "user", user)?;
+        }
+        if b[e] == b':' {
+            let pw_start = e + 1;
+            let password = &uri[pw_start..at];
+            if !password.is_empty() {
+                store_uri_component(&mut opts, "password", password)?;
+            }
+        }
+        p = at + 1; // advance past end of parsed user name or password token
+    } else {
+        // No username/password designator found. Reset to start of URI.
+        p = start;
+    }
+
+    // There may be multiple netloc[:port] pairs, each separated from the
+    // next by a comma.
+    let mut hostbuf = String::new();
+    let mut portbuf = String::new();
+    let mut prevchar: u8;
+    loop {
+        let host_start;
+        let host_end;
+        if p < b.len() && b[p] == b'[' {
+            // IPv6 address.
+            p += 1;
+            host_start = p;
+            while p < b.len() && b[p] != b']' {
+                p += 1;
+            }
+            if p >= b.len() {
+                return Err(format!(
+                    "end of string reached when looking for matching \"]\" in IPv6 host address in URI: \"{uri}\""
+                ));
+            }
+            if p == host_start {
+                return Err(format!("IPv6 host address may not be empty in URI: \"{uri}\""));
+            }
+            host_end = p;
+            p += 1; // cut off the bracket and advance
+            // The address may be followed by a port specifier or a slash or
+            // a query or a separator comma.
+            if p < b.len() && b[p] != b':' && b[p] != b'/' && b[p] != b'?' && b[p] != b',' {
+                return Err(format!(
+                    "unexpected character \"{}\" at position {} in URI (expected \":\" or \"/\"): \"{uri}\"",
+                    b[p] as char,
+                    p + 1
+                ));
+            }
+        } else {
+            // Not an IPv6 address: DNS-named or IPv4 netloc.
+            host_start = p;
+            while p < b.len() && b[p] != b':' && b[p] != b'/' && b[p] != b'?' && b[p] != b',' {
+                p += 1;
+            }
+            host_end = p;
+        }
+        prevchar = b.get(p).copied().unwrap_or(0);
+        hostbuf.push_str(&uri[host_start..host_end]);
+
+        if prevchar == b':' {
+            p += 1; // advance past host terminator
+            let port_start = p;
+            while p < b.len() && b[p] != b'/' && b[p] != b'?' && b[p] != b',' {
+                p += 1;
+            }
+            prevchar = b.get(p).copied().unwrap_or(0);
+            portbuf.push_str(&uri[port_start..p]);
+        }
+
+        if prevchar != b',' {
+            break;
+        }
+        p += 1; // advance past comma separator
+        hostbuf.push(',');
+        portbuf.push(',');
+    }
+
+    if !hostbuf.is_empty() {
+        store_uri_component(&mut opts, "host", &hostbuf)?;
+    }
+    if !portbuf.is_empty() {
+        store_uri_component(&mut opts, "port", &portbuf)?;
+    }
+
+    if prevchar != 0 && prevchar != b'?' {
+        p += 1; // advance past host terminator
+        let db_start = p;
+        while p < b.len() && b[p] != b'?' {
+            p += 1;
+        }
+        prevchar = b.get(p).copied().unwrap_or(0);
+        // An empty dbname is not set at all: setting it to "" would force
+        // the default (user name) and ignore $PGDATABASE.
+        let dbname = &uri[db_start..p];
+        if !dbname.is_empty() {
+            store_uri_component(&mut opts, "dbname", dbname)?;
+        }
+    }
+
+    if prevchar != 0 {
+        p += 1; // advance past terminator
+        conninfo_uri_parse_params(&uri[p..], &mut opts)?;
+    }
+    Ok(opts)
+}
+
+// fe-connect.c parse_connection_string: a string carrying a URI designator
+// goes to conninfo_uri_parse, anything else to the keyword=value scanner.
 pub fn parse_conninfo(s: &str) -> Result<Vec<(String, String)>, String> {
-    // conninfo_uri_parse is unported: refuse the URI form by name instead of
-    // letting the keyword=value grammar mis-parse it ("missing \"=\"" /
-    // "invalid connection option \"postgresql:///db?host\"").
     if uri_prefix_length(s) != 0 {
-        return Err("connection URIs (postgresql://) are not supported".into());
+        return conninfo_uri_parse(s);
     }
     let b = s.as_bytes();
     let mut i = 0;

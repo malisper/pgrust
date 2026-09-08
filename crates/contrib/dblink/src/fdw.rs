@@ -53,7 +53,7 @@ fn is_valid_dblink_fdw_option(option: &str, context: Oid) -> bool {
 }
 
 // upstream e5d019fbdc12 (18.6): postgres_fdw, dblink: Validate use_scram_passthrough values
-fn mk_def_elem<'mcx>(
+pub(crate) fn mk_def_elem<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     name: &'mcx str,
     value: Option<&'mcx str>,

@@ -18,6 +18,8 @@ pub mod conninfo;
 pub use conninfo::{opt, parse_conninfo, resolve_conninfo, ConnOption, CONNINFO_OPTIONS};
 
 mod auth;
+#[cfg(test)]
+mod conninfo_uri_tests;
 
 pub const PG_PROTOCOL_3_0: u32 = 3 << 16;
 const CANCEL_REQUEST_CODE: u32 = (1234 << 16) | 5678;
@@ -374,9 +376,24 @@ pub fn connect(
     // (allow/prefer would merely *attempt* SSL first, which we cannot, so they
     // fall through to plaintext just as no-SSL libpq does). require/verify-ca/
     // verify-full demand encryption and cannot be satisfied, so we refuse.
+    // connectOptions2 validates require_auth (fe-connect.c:1469) before
+    // sslmode, and decodes the SCRAM pass-through keys (:2018) after it —
+    // all before any socket is opened, so none of these carry a host
+    // identity prefix.
+    let policy = match auth::AuthPolicy::parse(opt(&opts, "require_auth")) {
+        Ok(p) => p,
+        Err(e) => return Ok(Err(e)),
+    };
     if let Err(e) = check_sslmode(&opts) {
         return Ok(Err(e));
     }
+    let keys = match auth::ScramKeys::parse(
+        opt(&opts, "scram_client_key"),
+        opt(&opts, "scram_server_key"),
+    ) {
+        Ok(k) => k,
+        Err(e) => return Ok(Err(e)),
+    };
     let port = match validate_port(&opts) {
         Ok(p) => p,
         Err(e) => return Ok(Err(e)),
@@ -495,7 +512,8 @@ pub fn connect(
         return Ok(Err(format!("{host_identity}{e}")));
     }
 
-    match auth::handshake(&mut conn, &user, password.as_deref())? {
+    let auth_opts = auth::AuthOptions { password: password.as_deref(), keys, policy };
+    match auth::handshake(&mut conn, &user, &auth_opts)? {
         Ok(()) => Ok(Ok(conn)),
         Err(e) => Ok(Err(format!("{host_identity}{e}"))),
     }
@@ -1721,16 +1739,23 @@ mod tests {
     // unported, so the URI form must be refused by name rather than fall
     // into the keyword=value parser (audit-18.6 b045 row 7).
     #[test]
-    fn conninfo_uri_refused_by_name() {
-        for uri in [
-            "postgresql://user:secret@localhost:5432/postgres",
-            "postgres://localhost/db",
-            "postgresql:///postgres?host=/tmp&port=5432",
-        ] {
-            let e = parse_conninfo(uri).err().unwrap();
-            assert_eq!(e, "connection URIs (postgresql://) are not supported", "{uri}");
-            assert_eq!(resolve_conninfo(uri).err().unwrap(), e, "{uri}");
-        }
+    fn conninfo_uri_routes_to_uri_parser() {
+        // fe-connect.c parse_connection_string: both designators route to
+        // conninfo_uri_parse, and resolve_conninfo layers the defaults on.
+        let o = parse_conninfo("postgresql://user:secret@localhost:5432/postgres").unwrap();
+        assert_eq!(opt(&o, "user"), Some("user"));
+        assert_eq!(opt(&o, "password"), Some("secret"));
+        assert_eq!(opt(&o, "host"), Some("localhost"));
+        assert_eq!(opt(&o, "port"), Some("5432"));
+        assert_eq!(opt(&o, "dbname"), Some("postgres"));
+        let o = parse_conninfo("postgres://localhost/db").unwrap();
+        assert_eq!(opt(&o, "host"), Some("localhost"));
+        assert_eq!(opt(&o, "dbname"), Some("db"));
+        let o = resolve_conninfo("postgresql:///postgres?host=/tmp&port=5433").unwrap();
+        assert_eq!(opt(&o, "host"), Some("/tmp"));
+        assert_eq!(opt(&o, "port"), Some("5433"));
+        assert_eq!(opt(&o, "dbname"), Some("postgres"));
+        assert_eq!(opt(&o, "sslmode"), Some("prefer"));
         // Not a prefix match: a keyword that merely contains the designator.
         assert!(parse_conninfo("dbname=postgresql://x").is_ok());
     }

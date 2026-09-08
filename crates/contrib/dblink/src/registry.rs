@@ -183,14 +183,62 @@ pub fn connstr_has_pw(connstr: &str) -> bool {
     }
 }
 
-// dblink_connstr_check: pre-connect, non-superuser must supply a password in
-// the connstr (SCRAM pass-through and GSS delegation are unported — the server
-// exposes no has_scram_keys / delegated creds, so those branches are dormant).
+// `MyProcPort != NULL && MyProcPort->has_scram_keys`: the session's own
+// login was a completed SCRAM exchange, so its ClientKey/ServerKey are held
+// in the Port (auth-scram.c, exchange.rs) for pass-through.
+fn port_has_scram_keys() -> bool {
+    init_small::globals::HaveMyProcPort() && init_small::globals::WithMyProcPort(|p| p.has_scram_keys)
+}
+
+// dblink_connstr_has_required_scram_options (dblink.c:2626): the connstr
+// must still carry require_auth=scram-sha-256 and non-empty
+// scram_client_key / scram_server_key — every option is walked so a later
+// redeclaration overriding the ones appendSCRAMKeysInfo prepended is
+// caught — and the session must hold pass-through keys. A connstr
+// PQconninfoParse rejects has no options at all.
+pub fn connstr_has_required_scram_options(connstr: &str) -> bool {
+    let (has_scram_client_key, has_scram_server_key, has_require_auth) =
+        connstr_scram_options(connstr);
+    let has_scram_keys = has_scram_client_key && has_scram_server_key && port_has_scram_keys();
+    has_scram_keys && has_require_auth
+}
+
+// The option walk of dblink_connstr_has_required_scram_options:
+// (scram_client_key non-empty, scram_server_key non-empty,
+// require_auth == scram-sha-256), each reflecting the LAST declaration.
+fn connstr_scram_options(connstr: &str) -> (bool, bool, bool) {
+    let mut has_scram_server_key = false;
+    let mut has_scram_client_key = false;
+    let mut has_require_auth = false;
+    if let Ok(opts) = pgclient::parse_conninfo(connstr) {
+        for (keyword, val) in &opts {
+            if keyword == "require_auth" {
+                has_require_auth = val == "scram-sha-256";
+            }
+            if keyword == "scram_client_key" {
+                has_scram_client_key = !val.is_empty();
+            }
+            if keyword == "scram_server_key" {
+                has_scram_server_key = !val.is_empty();
+            }
+        }
+    }
+    (has_scram_client_key, has_scram_server_key, has_require_auth)
+}
+
+// dblink_connstr_check (dblink.c:2769): pre-connect, a non-superuser must
+// supply a password in the connstr, or be using SCRAM pass-through with the
+// required options intact. This keeps a password from being picked up from
+// .pgpass, a service file, the environment, etc. (GSS delegation is not
+// compiled in: no ENABLE_GSS arm.)
 pub fn connstr_check(connstr: &str) -> PgResult<()> {
     if superuser::superuser()? {
         return Ok(());
     }
     if connstr_has_pw(connstr) {
+        return Ok(());
+    }
+    if port_has_scram_keys() && connstr_has_required_scram_options(connstr) {
         return Ok(());
     }
     Err(Box::new(
@@ -202,15 +250,20 @@ pub fn connstr_check(connstr: &str) -> PgResult<()> {
     ))
 }
 
-// dblink_security_check: post-connect, the password must actually have been
-// used (PQconnectionUsedPassword). Runs after connstr_check, so a
-// non-superuser reaching here supplied a password; verify the server demanded
-// it. On failure the caller closes the conn / deletes the hash entry.
+// dblink_security_check (dblink.c:2685): post-connect, the credentials the
+// server demanded must be ones the user provided — a password from the
+// connstr (PQconnectionUsedPassword), or the session's SCRAM pass-through
+// keys with the required options still in place (if they are, dblink itself
+// added them: users cannot set the 'D' options on a server or mapping). On
+// failure the caller closes the conn / deletes the hash entry.
 pub fn security_check(conn: &PgConn, connstr: &str) -> PgResult<()> {
     if superuser::superuser()? {
         return Ok(());
     }
     if conn.used_password() && connstr_has_pw(connstr) {
+        return Ok(());
+    }
+    if port_has_scram_keys() && connstr_has_required_scram_options(connstr) {
         return Ok(());
     }
     Err(Box::new(
@@ -250,6 +303,12 @@ pub fn get_connect_string(mcx: mcx::Mcx<'_>, servername: &str) -> PgResult<Optio
     }
 
     let mut buf = String::new();
+    // First append the hardcoded options needed for SCRAM pass-through, so
+    // if the user overwrites them dblink_connstr_check /
+    // dblink_security_check can ereport (dblink.c:2937).
+    if port_has_scram_keys() && use_scram_passthrough(mcx, &server, &mapping)? {
+        append_scram_keys_info(&mut buf)?;
+    }
     // C get_connect_string reads strVal(def->arg) unconditionally; catalog
     // options always carry values (grammar-enforced), so a NULL here is the
     // hand-built-text[] path C would crash on — error loudly instead.
@@ -263,6 +322,51 @@ pub fn get_connect_string(mcx: mcx::Mcx<'_>, servername: &str) -> PgResult<Optio
         append_opt(&mut buf, opt.name, opt.require_value()?, crate::fdw::USER_MAPPING_CONTEXT);
     }
     Ok(Some(buf))
+}
+
+// appendSCRAMKeysInfo (dblink.c:3227): the session's SCRAM ClientKey and
+// ServerKey (the whole SCRAM_MAX_KEY_LEN arrays, as C sizeof's them) base64
+// encoded, plus require_auth='scram-sha-256' so the remote must run SCRAM.
+fn append_scram_keys_info(buf: &mut String) -> PgResult<()> {
+    let (client, server) =
+        init_small::globals::WithMyProcPort(|p| (p.scram_client_key, p.scram_server_key));
+    let client_key = b64_key(&client).ok_or_else(|| {
+        Box::new(PgError::error("could not encode SCRAM client key"))
+    })?;
+    let server_key = b64_key(&server).ok_or_else(|| {
+        Box::new(PgError::error("could not encode SCRAM server key"))
+    })?;
+    buf.push_str(&format!("scram_client_key='{client_key}' "));
+    buf.push_str(&format!("scram_server_key='{server_key}' "));
+    buf.push_str("require_auth='scram-sha-256' ");
+    Ok(())
+}
+
+fn b64_key(key: &[u8]) -> Option<String> {
+    let len = pg_b64::pg_b64_enc_len(key.len() as i32);
+    let mut dst = vec![0u8; len as usize];
+    let n = pg_b64::pg_b64_encode(key, key.len() as i32, &mut dst, len);
+    if n < 0 {
+        return None;
+    }
+    dst.truncate(n as usize);
+    Some(String::from_utf8_lossy(&dst).into_owned())
+}
+
+// UseScramPassthrough (dblink.c:3268): the user mapping's
+// use_scram_passthrough wins over the foreign server's; absent on both it is
+// off. defGetBoolean, as C (the validator already vetted the value).
+fn use_scram_passthrough<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    server: &foreigncmds::foreign::ForeignServer<'mcx>,
+    mapping: &foreigncmds::foreign::UserMapping<'mcx>,
+) -> PgResult<bool> {
+    for opt in mapping.options.iter().chain(server.options.iter()) {
+        if opt.name == "use_scram_passthrough" {
+            return commands_define::defGetBoolean(&crate::fdw::mk_def_elem(mcx, opt.name, opt.value)?);
+        }
+    }
+    Ok(false)
 }
 
 fn append_opt(buf: &mut String, name: &str, value: &str, context: Oid) {
@@ -297,6 +401,59 @@ mod tests {
         assert!(!connstr_has_pw("dbname=x port=5432"));
         assert!(!connstr_has_pw("password="));
         assert!(!connstr_has_pw("password=''"));
+    }
+
+    // dblink_connstr_has_required_scram_options' option walk: all three
+    // pass-through options present, the last declaration of each wins, and
+    // a keyword=value / URI connstr both count.
+    #[test]
+    fn scram_option_walk() {
+        let key = "A".repeat(43) + "=";
+        let full = format!(
+            "scram_client_key='{key}' scram_server_key='{key}' require_auth='scram-sha-256' host=h"
+        );
+        assert_eq!(connstr_scram_options(&full), (true, true, true));
+        // A later redeclaration (user-supplied option after dblink's) must be
+        // seen: empty key or a different require_auth clears the flag.
+        assert_eq!(
+            connstr_scram_options(&format!("{full} scram_client_key=''")),
+            (false, true, true)
+        );
+        assert_eq!(
+            connstr_scram_options(&format!("{full} require_auth=none")),
+            (true, true, false)
+        );
+        assert_eq!(
+            connstr_scram_options(&format!("{full} scram_server_key=")),
+            (true, false, true)
+        );
+        assert_eq!(connstr_scram_options("host=h user=u"), (false, false, false));
+        // URI form: the base64 '=' padding must be percent-encoded in a
+        // query parameter (a bare '=' is "extra key/value separator").
+        let ukey = key.replace('=', "%3D");
+        assert_eq!(
+            connstr_scram_options(&format!(
+                "postgresql://h/d?scram_client_key={ukey}&scram_server_key={ukey}&require_auth=scram-sha-256"
+            )),
+            (true, true, true)
+        );
+        assert_eq!(
+            connstr_scram_options(&format!("postgresql://h/d?scram_client_key={key}")),
+            (false, false, false)
+        );
+        // Unparseable connstr: PQconninfoParse returns NULL -> nothing found.
+        assert_eq!(connstr_scram_options("host"), (false, false, false));
+        // Without a MyProcPort holding keys the full predicate is false.
+        assert!(!connstr_has_required_scram_options(&full));
+    }
+
+    // dblink_connstr_has_pw sees a URI password (row 2 of w2-037).
+    #[test]
+    fn connstr_pw_detection_uri() {
+        assert!(connstr_has_pw("postgresql://u:secret@localhost:1/postgres"));
+        assert!(!connstr_has_pw("postgresql://u@localhost:1/postgres"));
+        assert!(!connstr_has_pw("postgresql://u:@localhost:1/postgres"));
+        assert!(connstr_has_pw("postgresql:///db?password=x"));
     }
 
     #[test]

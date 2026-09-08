@@ -5125,6 +5125,7 @@ dependencies = [
  "mcx",
  "miscinit",
  "parser_small1",
+ "pg_b64",
  "pgclient",
  "rel_vocab",
  "ruleutils",
