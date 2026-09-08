@@ -51,25 +51,63 @@ fn table_uninit() -> ! {
 
 #[cold]
 #[inline(never)]
-fn table_oom(nbytes: usize) -> ! {
-    panic!("bufmgr: buffer lookup table allocation failed ({nbytes} bytes)")
+fn oom_error(message: String, func: &'static str) -> Box<types_error::PgError> {
+    Box::new(
+        types_error::PgError::new(ERROR, message)
+            .with_sqlstate(types_error::ERRCODE_OUT_OF_MEMORY)
+            .with_error_location(ErrorLocation::new(file!(), line!() as i32, func)),
+    )
 }
 
-fn alloc_entries(cap: usize) -> *mut BufferLookupEnt {
+// Fault-injection seam: while set, an entry-array allocation is refused the
+// way a null std::alloc return would be, so the out-of-memory surface is
+// testable without a real out-of-memory condition.
+#[cfg(test)]
+pub(crate) static ENTRIES_ALLOC_FAIL: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Test probe: (count, grow_at) of the partition `hashcode` selects. The
+/// caller holds that partition's lock.
+#[cfg(test)]
+pub(crate) fn partition_fill(hashcode: u32) -> (u32, u32) {
+    // SAFETY: partition lock held by the caller; index in range.
+    unsafe {
+        let part = &*partition_for(hashcode);
+        (part.count, part.grow_at)
+    }
+}
+
+/// `None` when the allocator refuses (C: a NULL from the table's allocator;
+/// the callers raise dynahash's ERRCODE_OUT_OF_MEMORY surfaces, never panic).
+fn alloc_entries(cap: usize) -> Option<*mut BufferLookupEnt> {
     let layout = core::alloc::Layout::array::<BufferLookupEnt>(cap)
         .unwrap()
         .align_to(64)
         .unwrap();
-    // SAFETY: layout is non-zero; entries are plain-old-data.
-    let p = unsafe { std::alloc::alloc(layout) } as *mut BufferLookupEnt;
+    let refused = {
+        #[cfg(test)]
+        {
+            ENTRIES_ALLOC_FAIL.load(core::sync::atomic::Ordering::Relaxed)
+        }
+        #[cfg(not(test))]
+        {
+            false
+        }
+    };
+    let p = if refused {
+        core::ptr::null_mut()
+    } else {
+        // SAFETY: layout is non-zero; entries are plain-old-data.
+        unsafe { std::alloc::alloc(layout) as *mut BufferLookupEnt }
+    };
     if p.is_null() {
-        table_oom(layout.size());
+        return None;
     }
     for i in 0..cap {
         // SAFETY: i < cap, freshly allocated.
         unsafe { (*p.add(i)).key.blockNum = EMPTY_BLOCK };
     }
-    p
+    Some(p)
 }
 
 fn free_entries(p: *mut BufferLookupEnt, cap: usize) {
@@ -103,15 +141,26 @@ pub fn InitBufTable(size: i32) -> PgResult<()> {
     // SAFETY: non-zero layout; fields initialized below before publication.
     let parts = unsafe { std::alloc::alloc(layout) } as *mut Partition;
     if parts.is_null() {
-        table_oom(layout.size());
+        // shmem.c:466-471 ShmemInitStruct: the table's directory block.
+        return Err(oom_error(
+            format!(
+                "not enough shared memory for data structure \"Shared Buffer Lookup Table\" ({} bytes requested)",
+                layout.size()
+            ),
+            "InitBufTable",
+        ));
     }
     for i in 0..nparts {
+        // dynahash.c:610-617 hash_create: the preallocated element pool.
+        let Some(entries) = alloc_entries(cap) else {
+            return Err(oom_error("out of memory".to_string(), "InitBufTable"));
+        };
         // SAFETY: i < nparts, freshly allocated.
         unsafe {
             core::ptr::write(
                 parts.add(i),
                 Partition {
-                    entries: alloc_entries(cap),
+                    entries,
                     mask: (cap - 1) as u32,
                     count: 0,
                     grow_at: (cap - cap / 4) as u32,
@@ -235,7 +284,7 @@ pub fn BufTableInsert(tag: &buftag, hashcode: u32, buf_id: i32) -> PgResult<i32>
     unsafe {
         let part = &mut *partition_for(hashcode);
         if part.count + 1 > part.grow_at {
-            grow(part);
+            grow(part)?;
         }
         let mask = part.mask;
         let mut slot = ideal_slot(hashcode, mask);
@@ -255,12 +304,19 @@ pub fn BufTableInsert(tag: &buftag, hashcode: u32, buf_id: i32) -> PgResult<i32>
     }
 }
 
+/// Doubles the partition. A refused allocation leaves the partition exactly
+/// as it was and is C's HASH_ENTER failure on the shared table:
+/// dynahash.c:1094-1096 ereport(ERROR, ERRCODE_OUT_OF_MEMORY,
+/// "out of shared memory") — the caller's partition lock is released by the
+/// abort path (LWLockReleaseAll), as after C's longjmp.
 #[cold]
 #[inline(never)]
-unsafe fn grow(part: &mut Partition) {
+unsafe fn grow(part: &mut Partition) -> PgResult<()> {
     let old_cap = part.mask as usize + 1;
     let new_cap = old_cap * 2;
-    let new_entries = alloc_entries(new_cap);
+    let Some(new_entries) = alloc_entries(new_cap) else {
+        return Err(oom_error("out of shared memory".to_string(), "BufTableInsert"));
+    };
     let new_mask = (new_cap - 1) as u32;
     for s in 0..old_cap {
         let ent = &*part.entries.add(s);
@@ -282,6 +338,7 @@ unsafe fn grow(part: &mut Partition) {
     part.entries = new_entries;
     part.mask = new_mask;
     part.grow_at = (new_cap - new_cap / 4) as u32;
+    Ok(())
 }
 
 /// Caller holds the partition lock exclusively.

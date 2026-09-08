@@ -31,6 +31,11 @@ use crate::pin::{buffer_refcount, buffer_usagecount};
 
 const MAX_ALLOC_SIZE: usize = 0x3fffffff;
 
+// PallocAlignedExtraBytes(PG_IO_ALIGN_SIZE) (memutils_internal.h:104-105):
+// alignto + (sizeof(MemoryChunk) - MAXIMUM_ALIGNOF), both 8 on every 18.6
+// build, so the extra is the alignment itself.
+const PALLOC_ALIGNED_EXTRA_BYTES: usize = PG_IO_ALIGN_SIZE;
+
 struct LocalBufs {
     descs: &'static [BufferDesc],
     blocks: &'static [Cell<*mut u8>],
@@ -87,6 +92,17 @@ pub fn n_loc_buffer() -> i32 {
     with_inited(0, |lb| lb.descs.len() as i32)
 }
 
+// Fault-injection seams (test builds only). LOCAL_INIT_TEST_NBUFS replaces
+// InitLocalBuffers' descriptor count with one the allocator must refuse;
+// LOCAL_STORAGE_TEST_LIMIT ceilings a fresh LocalBufferContext so the first
+// chunk request fails the way real allocator refusal would.
+#[cfg(test)]
+pub(crate) static LOCAL_INIT_TEST_NBUFS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+pub(crate) static LOCAL_STORAGE_TEST_LIMIT: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
 #[cold]
 fn init_local_buffers(slot: &mut Option<LocalBufs>) -> PgResult<()> {
     if parallel_seams::is_parallel_worker::is_installed()
@@ -97,16 +113,48 @@ fn init_local_buffers(slot: &mut Option<LocalBufs>) -> PgResult<()> {
             .errmsg("cannot access temporary tables during a parallel operation")
             .finish(ErrorLocation::new(file!(), line!() as i32, "InitLocalBuffers"))?;
     }
-    let nbufs = num_temp_buffers().max(1) as usize;
-    let mut descs = Vec::with_capacity(nbufs);
+    let nbufs = {
+        let n = num_temp_buffers().max(1) as usize;
+        #[cfg(test)]
+        {
+            let forced = LOCAL_INIT_TEST_NBUFS.load(Ordering::Relaxed);
+            if forced != 0 {
+                forced
+            } else {
+                n
+            }
+        }
+        #[cfg(not(test))]
+        {
+            n
+        }
+    };
+    // localbuf.c:745-753: the three arrays are calloc'd and a refusal is
+    // ereport(FATAL, ERRCODE_OUT_OF_MEMORY, "out of memory") — the backend
+    // ends, the cluster does not.
+    let mut descs: Vec<BufferDesc> = Vec::new();
+    let mut blocks: Vec<Cell<*mut u8>> = Vec::new();
+    let mut ref_counts: Vec<Cell<i32>> = Vec::new();
+    if descs.try_reserve_exact(nbufs).is_err()
+        || blocks.try_reserve_exact(nbufs).is_err()
+        || ref_counts.try_reserve_exact(nbufs).is_err()
+    {
+        return Err(Box::new(
+            types_error::PgError::new(types_error::FATAL, "out of memory")
+                .with_sqlstate(types_error::ERRCODE_OUT_OF_MEMORY)
+                .with_error_location(ErrorLocation::new(file!(), line!() as i32, "InitLocalBuffers")),
+        ));
+    }
     for i in 0..nbufs {
         descs.push(BufferDesc::initial(-(i as i32) - 2, 0));
     }
+    blocks.resize_with(nbufs, || Cell::new(core::ptr::null_mut()));
+    ref_counts.resize_with(nbufs, || Cell::new(0));
     let cx: &'static MemoryContext = ::mcx::session_root("LocalBufferLookup");
     slot.replace(LocalBufs {
         descs: Box::leak(descs.into_boxed_slice()),
-        blocks: Box::leak(vec![Cell::new(core::ptr::null_mut()); nbufs].into_boxed_slice()),
-        ref_counts: Box::leak(vec![Cell::new(0); nbufs].into_boxed_slice()),
+        blocks: Box::leak(blocks.into_boxed_slice()),
+        ref_counts: Box::leak(ref_counts.into_boxed_slice()),
         hash: ManuallyDrop::new(PgFxHashMap::with_hasher_in(Default::default(), cx.mcx())),
         next_free: 0,
         pinned: 0,
@@ -672,7 +720,16 @@ fn get_local_buffer_storage(lb: &mut LocalBufs) -> PgResult<*mut u8> {
         let cx = match lb.storage_cx {
             Some(cx) => cx,
             None => {
-                let cx: &'static MemoryContext = ::mcx::session_root("LocalBufferContext");
+                #[allow(unused_mut)]
+                let mut ctx = MemoryContext::new("LocalBufferContext");
+                #[cfg(test)]
+                {
+                    let limit = LOCAL_STORAGE_TEST_LIMIT.load(Ordering::Relaxed);
+                    if limit != 0 {
+                        ctx = ctx.with_limit(limit);
+                    }
+                }
+                let cx: &'static MemoryContext = ::mcx::session_root_from(ctx);
                 lb.storage_cx = Some(cx);
                 cx
             }
@@ -687,7 +744,16 @@ fn get_local_buffer_storage(lb: &mut LocalBufs) -> PgResult<*mut u8> {
             .expect("local buffer chunk layout");
         // The chunk lives for the session (C never frees it): the context's
         // teardown reclaims it wholesale.
-        let chunk = cx.mcx().alloc_uninit_bytes(layout).map_err(|_| Box::new(cx.mcx().oom(size)))?;
+        // A refusal reports C's request size: MemoryContextAllocAligned asks
+        // its context for size + PallocAlignedExtraBytes(PG_IO_ALIGN_SIZE)
+        // (mcxt.c:1479; memutils_internal.h:104-105: alignto +
+        // sizeof(MemoryChunk) - MAXIMUM_ALIGNOF = alignto) and that is the
+        // size in "Failed on request of size %zu in memory context \"%s\"."
+        // (mcxt.c:1160-1167).
+        let chunk = cx
+            .mcx()
+            .alloc_uninit_bytes(layout)
+            .map_err(|_| Box::new(cx.mcx().oom(size + PALLOC_ALIGNED_EXTRA_BYTES)))?;
         lb.cur_block = chunk.as_ptr();
         lb.next_buf_in_block = 0;
         lb.num_bufs_in_block = num_bufs;

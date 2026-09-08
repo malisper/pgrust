@@ -2497,3 +2497,195 @@ fn b244_cleanup_lock_in_hot_standby_logs_conflict_and_marks_ps_waiting() {
         vec!["suffix:waiting".to_string(), "remove".to_string()]
     );
 }
+
+// ---- w2-036: allocation-failure surfaces (audit-18.6 wave 2) ----
+
+fn panic_payload_str(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "non-string panic payload".to_string())
+}
+
+// buf_table.c:118 BufTableInsert -> dynahash.c:1094-1096: an entry the shared
+// table cannot allocate is ereport(ERROR, 53200 "out of shared memory"), never
+// a process panic. pgrust's open-addressed partition grows past 75% load under
+// the exclusive partition lock; the seam refuses that growth's allocation the
+// way a null std::alloc return would, and the table must stay intact.
+#[test]
+fn w2_036_buf_table_grow_alloc_failure_is_error_not_panic() {
+    let _g = setup();
+    use crate::buf_table::{
+        BufMappingPartitionLock, BufTableDelete, BufTableHashCode, BufTableInsert,
+        BufTableLookup,
+    };
+    use lwlock::{LWLockAcquire, LWLockRelease, LW_EXCLUSIVE};
+    let nparts = lwlock::NUM_BUFFER_PARTITIONS as u32;
+    let rel = 9977u32;
+    let tag_at = |blk: u32| crate::read::init_buffer_tag(rloc(rel), ForkNumber::MAIN_FORKNUM, blk);
+    let first_hash = BufTableHashCode(&tag_at(0));
+    let partition = first_hash % nparts;
+    let lock = BufMappingPartitionLock(first_hash);
+    LWLockAcquire(lock, LW_EXCLUSIVE, globals::MyProcNumber()).unwrap();
+
+    let (count0, grow_at) = crate::buf_table::partition_fill(first_hash);
+    // Tags that hash into this partition, in blockNum order.
+    let mut blk = 0u32;
+    let mut next_tag = || loop {
+        let t = tag_at(blk);
+        blk += 1;
+        let h = BufTableHashCode(&t);
+        if h % nparts == partition {
+            return (t, h);
+        }
+    };
+    // Fill the partition to its growth threshold (the next insert grows).
+    let mut inserted: Vec<(types_storage::buf::buftag, u32, i32)> = Vec::new();
+    while count0 + (inserted.len() as u32) < grow_at {
+        let (t, h) = next_tag();
+        let id = 1000 + inserted.len() as i32;
+        assert_eq!(BufTableInsert(&t, h, id).unwrap(), -1);
+        inserted.push((t, h, id));
+    }
+    let (t_grow, h_grow) = next_tag();
+    let drain = |inserted: &[(types_storage::buf::buftag, u32, i32)]| {
+        for (t, h, _) in inserted {
+            BufTableDelete(t, *h).unwrap();
+        }
+        LWLockRelease(lock).unwrap();
+    };
+
+    crate::buf_table::ENTRIES_ALLOC_FAIL.store(true, Ordering::Relaxed);
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        BufTableInsert(&t_grow, h_grow, 4242)
+    }));
+    crate::buf_table::ENTRIES_ALLOC_FAIL.store(false, Ordering::Relaxed);
+    let res = match res {
+        Ok(r) => r,
+        Err(payload) => {
+            drain(&inserted);
+            panic!(
+                "BufTableInsert panicked on a refused entry allocation (C: ERROR 53200 \"out of shared memory\"): {}",
+                panic_payload_str(&*payload)
+            );
+        }
+    };
+    let err = res.expect_err("a refused entry allocation is an ERROR in C");
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_OUT_OF_MEMORY);
+    assert_eq!(err.message(), "out of shared memory");
+    // The failed insert left the partition exactly as it was.
+    assert_eq!(crate::buf_table::partition_fill(h_grow), (grow_at, grow_at));
+    assert_eq!(BufTableLookup(&t_grow, h_grow).unwrap(), -1);
+    for (t, h, id) in &inserted {
+        assert_eq!(BufTableLookup(t, *h).unwrap(), *id);
+    }
+    // With memory available again the same insert grows the partition.
+    assert_eq!(BufTableInsert(&t_grow, h_grow, 4242).unwrap(), -1);
+    assert!(crate::buf_table::partition_fill(h_grow).1 > grow_at, "partition grew");
+    assert_eq!(BufTableLookup(&t_grow, h_grow).unwrap(), 4242);
+    for (t, h, id) in &inserted {
+        assert_eq!(BufTableLookup(t, *h).unwrap(), *id);
+    }
+    inserted.push((t_grow, h_grow, 4242));
+    drain(&inserted);
+}
+
+// localbuf.c:937-940 GetLocalBufferStorage -> MemoryContextAllocAligned ->
+// mcxt.c:1160-1167 MemoryContextAllocationFailure: a refused chunk is
+// ERROR 53200 "out of memory", DETAIL "Failed on request of size %zu in memory
+// context \"LocalBufferContext\"." where the size is C's alloc_size = the
+// 16-buffer chunk + PallocAlignedExtraBytes(PG_IO_ALIGN_SIZE) (mcxt.c:1479,
+// memutils_internal.h:104-105: 131072 + 4096); never a panic.
+#[test]
+fn w2_036_local_buffer_chunk_alloc_failure_is_out_of_memory_error() {
+    let _g = setup();
+    use types_resowner::ResourceOwner;
+    let rel = 9978u32;
+    // A fresh thread is a fresh backend: LocalBufferContext is created on its
+    // first chunk request, under the ceiling.
+    crate::localbuf::LOCAL_STORAGE_TEST_LIMIT.store(64, Ordering::Relaxed);
+    let res = std::thread::spawn(move || {
+        globals::SetNBuffers(TEST_NBUFFERS);
+        globals::SetMaxBackends(test_max_backends());
+        become_backend();
+        let owner = resowner::ResourceOwnerCreate(ResourceOwner::NULL, "w2-036-local").unwrap();
+        resowner::SetCurrentResourceOwner(owner);
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ReadBuffer_common(
+                temp_smgr(rel),
+                types_core::RELPERSISTENCE_TEMP,
+                ForkNumber::MAIN_FORKNUM,
+                0,
+                ReadBufferMode::Normal,
+                None,
+            )
+            .map(|(b, _)| b)
+        }))
+    })
+    .join()
+    .expect("reader thread");
+    crate::localbuf::LOCAL_STORAGE_TEST_LIMIT.store(0, Ordering::Relaxed);
+    let res = res.unwrap_or_else(|payload| {
+        panic!(
+            "local buffer chunk allocation panicked (C: ERROR 53200 \"out of memory\"): {}",
+            panic_payload_str(&*payload)
+        )
+    });
+    let err = res.expect_err("a refused local buffer chunk is an ERROR in C");
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_OUT_OF_MEMORY);
+    assert_eq!(err.message(), "out of memory");
+    assert_eq!(
+        err.detail.as_deref(),
+        Some("Failed on request of size 135168 in memory context \"LocalBufferContext\"."),
+    );
+
+    // Recovery analog: a backend without the ceiling reads the block.
+    std::thread::spawn(move || {
+        globals::SetNBuffers(TEST_NBUFFERS);
+        globals::SetMaxBackends(test_max_backends());
+        become_backend();
+        let owner = resowner::ResourceOwnerCreate(ResourceOwner::NULL, "w2-036-local2").unwrap();
+        resowner::SetCurrentResourceOwner(owner);
+        let b = read_local_blk(rel, 0);
+        assert!(b < 0);
+        ReleaseBuffer(b).unwrap();
+        DropRelationAllLocalBuffers(rloc(rel)).unwrap();
+    })
+    .join()
+    .expect("a backend with memory available reads the temp block");
+}
+
+// localbuf.c:745-753 InitLocalBuffers: a refused descriptor-array
+// allocation (calloc) is ereport(FATAL, 53200 "out of memory") — the backend
+// ends, the cluster does not — never a panic or an abort.
+#[test]
+fn w2_036_init_local_buffers_alloc_failure_is_fatal_out_of_memory() {
+    let _g = setup();
+    crate::localbuf::LOCAL_INIT_TEST_NBUFS.store(usize::MAX / 2, Ordering::Relaxed);
+    let (res, n_after_failure, retry) = std::thread::spawn(|| {
+        let res = std::panic::catch_unwind(crate::localbuf::ensure_local_buffers);
+        crate::localbuf::LOCAL_INIT_TEST_NBUFS.store(0, Ordering::Relaxed);
+        let n_after_failure = crate::localbuf::n_loc_buffer();
+        let retry = crate::localbuf::ensure_local_buffers().map(|_| crate::localbuf::n_loc_buffer());
+        (res, n_after_failure, retry)
+    })
+    .join()
+    .expect("init thread");
+    crate::localbuf::LOCAL_INIT_TEST_NBUFS.store(0, Ordering::Relaxed);
+    let res = res.unwrap_or_else(|payload| {
+        panic!(
+            "InitLocalBuffers panicked on a refused descriptor allocation (C: FATAL 53200 \"out of memory\"): {}",
+            panic_payload_str(&*payload)
+        )
+    });
+    let err = res.expect_err("a refused descriptor-array allocation is FATAL in C");
+    assert_eq!(err.level(), types_error::FATAL);
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_OUT_OF_MEMORY);
+    assert_eq!(err.message(), "out of memory");
+    assert_eq!(err.detail, None);
+    // Nothing was initialized; the next request (memory available) succeeds
+    // with num_temp_buffers descriptors (the harness has no GUC store: 1024).
+    assert_eq!(n_after_failure, 0);
+    assert_eq!(retry.map_err(|e| e.message().to_string()), Ok(1024));
+}
