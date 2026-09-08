@@ -49,6 +49,7 @@ pgarch = { path = "../../../postmaster/pgarch" }
 walsummarizer = { path = "../../../postmaster/walsummarizer" }
 walreceiverfuncs = { path = "../../../replication/walreceiverfuncs" }
 syncscan = { path = "../../../access/common/syncscan" }
+nbtree = { path = "../../../access/nbtree/nbtree" }
 waitevent = { path = "../../../utils/activity/waitevent" }
 procarray = { path = "../procarray" }
 ipci_seams = { path = "../ipci_seams" }
@@ -62,7 +63,6 @@ xlogrecovery = { path = "../../../access/transam/xlogrecovery" }
 bgworker = { path = "../../../postmaster/bgworker" }
 walsender = { path = "../../../replication/walsender" }
 launcher = { path = "../../../replication/launcher" }
-nbtree = { path = "../../../access/nbtree/nbtree" }
 pgstat = { path = "../../../utils/activity/pgstat" }
 
 [dev-dependencies]

@@ -262,6 +262,8 @@ fn install_real() {
     fd::init_seams();
     fd::InitFileAccess();
     lwlock::CreateLWLocks(false).unwrap();
+    // BtreeVacuumLock-guarded "BTree Vacuum State" table (CreateOrAttachShmemStructs).
+    nbtree::BTreeShmemInit().unwrap();
     lmgr_proc::init_seams();
     lmgr_proc::InitProcGlobal(&lmgr_proc::ProcGlobalConfig {
         autovacuum_worker_slots: 3,

@@ -112,7 +112,8 @@ struct BtVacuumGuard<'a, 'mcx> {
 
 impl Drop for BtVacuumGuard<'_, '_> {
     fn drop(&mut self) {
-        bt_end_vacuum(self.rel);
+        // C's _bt_end_vacuum_callback: nothing to report from a cleanup.
+        let _ = bt_end_vacuum(self.rel);
     }
 }
 
@@ -317,7 +318,7 @@ impl Drop for BtVacChunkedScan {
         // later vacuum of this index errors with "multiple active vacuums".
         // Cleanup scans (cycleid 0) never registered.
         if !self.finished && self.cycleid != 0 {
-            bt_end_vacuum_key(self.key);
+            let _ = bt_end_vacuum_key(self.key);
         }
     }
 }
@@ -438,7 +439,7 @@ pub fn bt_chunked_bulkdelete_finish<'mcx>(
     debug_assert!(scan.cycleid != 0);
     chunk_scan_finalize(info, &mut scan)?;
     scan.finished = true;
-    bt_end_vacuum_key(scan.key);
+    bt_end_vacuum_key(scan.key)?;
     Ok(std::mem::take(&mut scan.stats))
 }
 
@@ -493,7 +494,7 @@ fn with_chunk_vstate<'mcx, R>(
     r
 }
 
-fn btvacuumpage(
+pub(crate) fn btvacuumpage(
     vstate: &mut BTVacState<'_, '_, '_>,
     scratch: &mut MemoryContext,
     pin: BufferPin,
@@ -521,12 +522,26 @@ fn btvacuumpage(
         debug_assert!(blkno <= scanblkno);
         if blkno != scanblkno {
             // Backtracked to a right sibling: only a live leaf page carrying
-            // the current cycle ID needs work (C LOGs corruption here).
+            // the current cycle ID needs work. Anything else implies
+            // corruption: nbtree.c:1413 LOGs it and gives up on this page
+            // (C's Assert(false) there is a cassert-only trap).
             let ok = opaque
                 .as_ref()
                 .is_some_and(|o| P_ISLEAF(o) && !P_ISHALFDEAD(o));
             if !ok {
-                debug_assert!(false);
+                ::elog_seams::ereport::call(
+                    ::types_error::PgError::new(
+                        ::types_error::LOG,
+                        format!(
+                            "right sibling {} of scanblkno {} unexpectedly in an inconsistent state in index \"{}\"",
+                            blkno,
+                            scanblkno,
+                            rel.name()
+                        ),
+                    )
+                    .with_sqlstate(::types_error::ERRCODE_INDEX_CORRUPTED)
+                    .with_location("nbtree.c", 1413, "btvacuumpage"),
+                )?;
                 bt_relbuf(rel, pin)?;
                 return Ok(());
             }

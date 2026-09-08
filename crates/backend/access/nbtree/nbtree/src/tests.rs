@@ -64,6 +64,22 @@ thread_local! {
     static INSERT_ON_PRED_LOCK: Cell<Option<i32>> = const { Cell::new(None) };
 }
 
+// Every ereport the crate emits below ERROR (audit w2-023: the nbtpage.c /
+// nbtree.c index-corruption LOG sites) lands here, keyed by the emitting
+// thread — the elog seam is process-wide while tests run in parallel.
+pgsync::process_global! {
+    static EREPORTS: pgsync::Mutex<Vec<(std::thread::ThreadId, ::types_error::PgError)>> =
+        pgsync::Mutex::new(Vec::new());
+}
+
+fn take_ereports() -> Vec<::types_error::PgError> {
+    let me = std::thread::current().id();
+    let mut all = pgsync::lock(&EREPORTS);
+    let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut *all).into_iter().partition(|e| e.0 == me);
+    *all = rest;
+    mine.into_iter().map(|e| e.1).collect()
+}
+
 // The writer's root creation, as _bt_newroot leaves it: one leaf that is
 // also the root, and a metapage pointing at it.
 fn create_root_leaf(value: i32) {
@@ -93,6 +109,23 @@ fn install() {
     INIT.call_once(|| {
         genam_seams::build_index_value_description::set(|_, _, _| Ok(None));
         syscache_seams::pg_namespace_nspname::set(|_| Ok(None));
+        ::elog_seams::ereport::set(|err| {
+            assert!(err.level().0 < ::types_error::ERROR.0, "ereport seam: {}", err.message());
+            pgsync::lock(&EREPORTS).push((std::thread::current().id(), err));
+            Ok(())
+        });
+        // Shared-memory registry + LWLocks (BtreeVacuumLock): the same boot
+        // a real cluster gets from CreateSharedMemoryAndSemaphores.
+        init_small::globals::SetMyProcNumber(0);
+        init_small::globals::SetMaxBackends(8);
+        shmem::init_seams();
+        s_lock_seams::perform_spin_delay::set(|_| std::thread::yield_now());
+        s_lock_seams::finish_spin_delay::set(|_| {});
+        s_lock_seams::set_spins_per_delay::set(|_| {});
+        s_lock_seams::update_spins_per_delay::set(|v| v);
+        pg_sema_seams::pg_semaphore_create::set(|_| {});
+        lwlock::CreateLWLocks(false).unwrap();
+        crate::BTreeShmemInit().unwrap();
         bufmgr_seams::read_buffer::set(|rel, blkno| {
             READS.with(|c| c.set(c.get() + 1));
             PINS.with(|c| c.set(c.get() + 1));
@@ -116,7 +149,11 @@ fn install() {
             bufmgr_seams::read_buffer::call(rel, blkno)
         });
         bufmgr_seams::lock_buffer::set(|_buf, _mode| Ok(()));
+        bufmgr_seams::lock_buffer_for_cleanup::set(|_buf| Ok(()));
         bufmgr_seams::conditional_lock_buffer::set(|_buf| Ok(true));
+        bufmgr_seams::read_buffer_extended::set(|rel, _fork, blkno, _mode, _strategy| {
+            bufmgr_seams::read_buffer::call(rel, blkno)
+        });
         bufmgr_seams::buffer_get_block_number::set(|buf| {
             if buf > HEAP_BUF_BASE {
                 (buf - HEAP_BUF_BASE - 1) as BlockNumber
@@ -2191,4 +2228,181 @@ fn oversized_tuple_error_carries_errtableconstraint_fields() {
     assert_eq!(err.sqlstate(), ::types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED);
     assert_eq!(err.table_name(), Some("t"), "errtableconstraint: heap relation name");
     assert_eq!(err.constraint_name(), Some("t_idx"), "errtableconstraint: index name as constraint");
+}
+
+// ---------------------------------------------------------------------------
+// audit-18.6 w2-023: index-corruption LOG parity (nbtpage.c / nbtree.c).
+// C ereport(LOG, ERRCODE_INDEX_CORRUPTED, ...) at the abandon-and-continue
+// corruption arms of page deletion and VACUUM backtracking; pgrust kept the
+// control flow but emitted nothing.
+
+fn set_cycleid(p: &mut FakePage, cycleid: u16) {
+    let special = BLCKSZ - core::mem::size_of::<BTPageOpaqueData>();
+    // SAFETY: in-bounds, aligned special area of an owned page.
+    unsafe {
+        (*p.0.as_mut_ptr().add(special).cast::<BTPageOpaqueData>()).btpo_cycleid = cycleid;
+    }
+}
+
+fn vacuum_info<'a, 'mcx>(
+    rel: &'a Relation<'mcx>,
+    heap: &'a Relation<'mcx>,
+) -> crate::vacuum::IndexVacuumInfo<'a, 'mcx> {
+    crate::vacuum::IndexVacuumInfo {
+        index: rel,
+        heaprel: heap,
+        analyze_only: false,
+        report_progress: false,
+        estimated_count: false,
+        message_level: ::types_error::DEBUG2,
+        num_heap_tuples: 0.0,
+        strategy: None,
+    }
+}
+
+// nbtpage.c:1859 _bt_pagedel: a half-dead INTERNAL page (pre-9.4 deletion
+// residue) is LOGged with ERRCODE_INDEX_CORRUPTED and the REINDEX hint, then
+// abandoned. The message and hint bytes are C's.
+#[test]
+fn pagedel_logs_half_dead_internal_page_like_c() {
+    install();
+    let cx = MemoryContext::new("t");
+    let mcx = cx.mcx();
+    let rel = index_rel(mcx);
+    let heap = heap_relation(mcx);
+    PAGES.with(|p| {
+        let mut pages = p.borrow_mut();
+        pages.clear();
+        pages.push(leak_page(meta_page(1, 1)));
+        pages.push(leak_page(new_page(::types_nbtree::BTP_HALF_DEAD, 1, P_NONE, P_NONE)));
+    });
+    let info = vacuum_info(&rel, &heap);
+    let mut stats = ::types_nbtree::IndexBulkDeleteResult::default();
+    let mut vstate = crate::vacuum::BTVacState {
+        info: &info,
+        stats: &mut stats,
+        dead_items: None,
+        collect: None,
+        cycleid: 0,
+        pendingpages: Vec::new(),
+        maxbufsize: 0,
+    };
+    let pins_before = PINS.with(Cell::get);
+    let leafbuf = crate::page::bt_getbuf(&rel, 1, ::types_nbtree::BT_WRITE).unwrap();
+    let _ = take_ereports();
+    crate::pagedel::bt_pagedel(mcx, &rel, leafbuf, &mut vstate).unwrap();
+    assert_eq!(PINS.with(Cell::get), pins_before, "leafbuf released on the abandon path");
+
+    let logs = take_ereports();
+    assert_eq!(logs.len(), 1, "exactly one LOG for the half-dead internal page: {logs:?}");
+    let e = &logs[0];
+    assert_eq!(e.level(), ::types_error::LOG);
+    assert_eq!(e.sqlstate(), ::types_error::ERRCODE_INDEX_CORRUPTED);
+    assert_eq!(e.message(), "index \"t_idx\" contains a half-dead internal page");
+    assert_eq!(
+        e.hint(),
+        Some(
+            "This can be caused by an interrupted VACUUM in version 9.3 or older, before upgrade. Please REINDEX it."
+        )
+    );
+    let loc = e.location().expect("C-parity location");
+    assert_eq!((loc.filename.as_deref(), loc.lineno), (Some("nbtpage.c"), 1859));
+}
+
+// nbtree.c:1413 btvacuumpage: a leaf carrying the current cycle ID whose
+// right sibling has a LOWER block number makes VACUUM backtrack; a sibling
+// that is not a live leaf is LOGged (errmsg_internal, ERRCODE_INDEX_CORRUPTED)
+// and the scan of that page ends. C's Assert(false) is a cassert-only trap;
+// the shipped behaviour is the LOG.
+#[test]
+fn vacuumpage_logs_inconsistent_backtracked_right_sibling_like_c() {
+    install();
+    let cx = MemoryContext::new("t");
+    let mcx = cx.mcx();
+    let rel = index_rel(mcx);
+    let heap = heap_relation(mcx);
+    const CYCLE: u16 = 7;
+    PAGES.with(|p| {
+        let mut pages = p.borrow_mut();
+        pages.clear();
+        pages.push(leak_page(meta_page(2, 0)));
+        // block 1: an internal page where a live leaf sibling is expected
+        pages.push(leak_page(new_page(0, 1, P_NONE, P_NONE)));
+        // block 2: the scanblkno leaf, split during this cycle, right link -> 1;
+        // a non-rightmost leaf carries its high key at P_HIKEY, then one live
+        // tuple (so the page is neither empty nor a deletion candidate).
+        let mut leaf = new_page(BTP_LEAF, 0, P_NONE, 1);
+        add_tuple(&mut leaf, tid(90, 1), 900);
+        add_tuple(&mut leaf, tid(10, 1), 100);
+        set_cycleid(&mut leaf, CYCLE);
+        pages.push(leak_page(leaf));
+    });
+    let info = vacuum_info(&rel, &heap);
+    let mut stats = ::types_nbtree::IndexBulkDeleteResult::default();
+    let dead: [ItemPointerData; 0] = [];
+    let mut vstate = crate::vacuum::BTVacState {
+        info: &info,
+        stats: &mut stats,
+        dead_items: Some(&dead),
+        collect: None,
+        cycleid: CYCLE,
+        pendingpages: Vec::new(),
+        maxbufsize: 0,
+    };
+    let mut scratch = MemoryContext::new("btvacuumpage");
+    let pins_before = PINS.with(Cell::get);
+    let pin = ::bufmgr_seams::BufferPin::adopt(bufmgr_seams::read_buffer::call(&rel, 2).unwrap())
+        .unwrap();
+    let _ = take_ereports();
+    crate::vacuum::btvacuumpage(&mut vstate, &mut scratch, pin).unwrap();
+    assert_eq!(PINS.with(Cell::get), pins_before, "every pin released");
+
+    let logs = take_ereports();
+    assert_eq!(logs.len(), 1, "exactly one LOG for the inconsistent sibling: {logs:?}");
+    let e = &logs[0];
+    assert_eq!(e.level(), ::types_error::LOG);
+    assert_eq!(e.sqlstate(), ::types_error::ERRCODE_INDEX_CORRUPTED);
+    assert_eq!(
+        e.message(),
+        "right sibling 1 of scanblkno 2 unexpectedly in an inconsistent state in index \"t_idx\""
+    );
+    let loc = e.location().expect("C-parity location");
+    assert_eq!((loc.filename.as_deref(), loc.lineno), (Some("nbtree.c"), 1413));
+}
+
+// nbtutils.c:3641-3680 BTreeShmemSize/BTreeShmemInit: the VACUUM cycle-ID
+// table is a ShmemInitStruct("BTree Vacuum State") allocation of
+// offsetof(BTVacInfo, vacuums) + MaxBackends * sizeof(BTOneVacInfo) bytes
+// (12 + 12 * MaxBackends), so pg_shmem_allocations lists it. The harness
+// runs BTreeShmemInit at boot with MaxBackends = 8.
+#[test]
+fn btree_shmem_init_registers_vacuum_state_in_shmem_index() {
+    install();
+    // MaxBackends is a per-thread global: this thread mirrors the boot value.
+    init_small::globals::SetMaxBackends(8);
+    assert_eq!(crate::BTreeShmemSize().unwrap(), 12 + 12 * 8);
+    let (_, found) = shmem::ShmemInitStruct("BTree Vacuum State", 12 + 12 * 8).unwrap();
+    assert!(found, "ShmemIndex carries the BTree Vacuum State row");
+}
+
+// _bt_start_vacuum / _bt_vacuum_cycleid / _bt_end_vacuum over the shared
+// table: a nonzero cycle ID while registered, "multiple active vacuums"
+// (nbtutils.c:3577) on a second registration, zero after the end.
+#[test]
+fn vacuum_cycleid_registry_roundtrip_over_the_shared_table() {
+    install();
+    let cx = MemoryContext::new("t");
+    let mcx = cx.mcx();
+    let rel = index_rel(mcx);
+    assert_eq!(crate::utils::bt_vacuum_cycleid(&rel).unwrap(), 0);
+    let id = crate::utils::bt_start_vacuum(&rel).unwrap();
+    assert!(id != 0 && id <= ::types_nbtree::MAX_BT_CYCLE_ID);
+    assert_eq!(crate::utils::bt_vacuum_cycleid(&rel).unwrap(), id);
+    let err = crate::utils::bt_start_vacuum(&rel).unwrap_err();
+    assert_eq!(err.message(), "multiple active vacuums for index \"t_idx\"");
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_INTERNAL_ERROR);
+    crate::utils::bt_end_vacuum(&rel).unwrap();
+    assert_eq!(crate::utils::bt_vacuum_cycleid(&rel).unwrap(), 0);
+    // Silent when no entry exists, as C.
+    crate::utils::bt_end_vacuum(&rel).unwrap();
 }

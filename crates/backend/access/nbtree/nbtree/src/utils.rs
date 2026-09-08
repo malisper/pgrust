@@ -1935,91 +1935,234 @@ pub unsafe fn bt_check_third_page(
     Err(Box::new(err))
 }
 
-// btvacinfo: cross-backend shared state, a process static guarded by a Mutex
-// standing in for C's shmem area + BtreeVacuumLock. Keyed by (dbOid, relId)
-// per C's LockRelId. Bare Vec: shared registry outside any mcx, cold path.
-struct BtVacInfo {
+// btvacinfo (nbtutils.c:3486-3500): the cross-backend VACUUM cycle-ID table,
+// C's BTVacInfo layout inside the ShmemInitStruct("BTree Vacuum State")
+// allocation, guarded by BtreeVacuumLock. Backends are threads here, so the
+// registry allocation IS the shared table (pg_shmem_allocations lists it with
+// C's size).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct BTOneVacInfo {
+    // LockRelId relid: global identifier of an index
+    rel_id: ::types_core::Oid,
+    db_id: ::types_core::Oid,
+    // cycle ID for its active VACUUM
+    cycleid: ::types_nbtree::BTCycleId,
+}
+
+#[repr(C)]
+struct BTVacInfo {
+    // cycle ID most recently assigned
     cycle_ctr: ::types_nbtree::BTCycleId,
-    vacuums: Vec<(::types_core::Oid, ::types_core::Oid, ::types_nbtree::BTCycleId)>,
+    // number of currently active VACUUMs
+    num_vacuums: i32,
+    // allocated length of vacuums[] array
+    max_vacuums: i32,
+    // BTOneVacInfo vacuums[FLEXIBLE_ARRAY_MEMBER] follows the header.
 }
 
-pgsync::process_global! {
-    static BTVACINFO: pgsync::Mutex<BtVacInfo> = pgsync::Mutex::new(BtVacInfo {
-        cycle_ctr: 0,
-        vacuums: Vec::new(),
-    });
+// offsetof(BTVacInfo, vacuums) == 12 and sizeof(BTOneVacInfo) == 12 (LP64).
+const _: () = assert!(core::mem::size_of::<BTVacInfo>() == 12);
+const _: () = assert!(core::mem::size_of::<BTOneVacInfo>() == 12);
+const _: () = assert!(core::mem::size_of::<BTVacInfo>() % core::mem::align_of::<BTOneVacInfo>() == 0);
+
+// C: `static BTVacInfo *btvacinfo` — set once by BTreeShmemInit.
+static BTVACINFO: core::sync::atomic::AtomicPtr<BTVacInfo> =
+    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+
+fn btvacinfo() -> *mut BTVacInfo {
+    let p = BTVACINFO.load(core::sync::atomic::Ordering::Acquire);
+    assert!(!p.is_null(), "BTree Vacuum State not initialized (BTreeShmemInit)");
+    p
 }
 
-// C sizes (nbtutils.c): offsetof(BTVacInfo, vacuums) = BTCycleId (uint16,
-// padded) + int num_vacuums + int max_vacuums = 12; sizeof(BTOneVacInfo) =
-// LockRelId (2 Oids) + BTCycleId, padded = 12.
-const C_OFFSETOF_BT_VAC_INFO_VACUUMS: usize = 12;
-const C_SIZEOF_BT_ONE_VAC_INFO: usize = 12;
+/// `btvacinfo->vacuums`: the flexible array right after the 12-byte header.
+///
+/// # Safety
+/// `info` must be the live BTreeShmemInit allocation.
+unsafe fn vacuums(info: *mut BTVacInfo) -> *mut BTOneVacInfo {
+    info.add(1).cast::<BTOneVacInfo>()
+}
 
-/// BTreeShmemSize (nbtutils.c:3512): the BTVacInfo header plus one
-/// BTOneVacInfo per backend (MaxBackends).
+fn btree_vacuum_lock() -> &'static lwlock::LWLock {
+    lwlock::main_lock(::types_storage::BTREE_VACUUM_LOCK)
+}
+
+fn fresh_btvacinfo() -> BTVacInfo {
+    // nbtutils.c:3668-3673: seed the cycle counter with the low-order bits
+    // of time() so it does not always start the same; no active VACUUMs;
+    // MaxBackends slots.
+    BTVacInfo {
+        cycle_ctr: pg_clock::wall_secs() as ::types_nbtree::BTCycleId,
+        num_vacuums: 0,
+        max_vacuums: ::init_small::globals::MaxBackends(),
+    }
+}
+
+/// BTreeShmemSize (nbtutils.c:3641-3648): offsetof(BTVacInfo, vacuums) +
+/// MaxBackends * sizeof(BTOneVacInfo).
 pub fn BTreeShmemSize() -> PgResult<usize> {
-    let mut size = C_OFFSETOF_BT_VAC_INFO_VACUUMS;
-    size = ::mcx::add_size(
-        size,
-        ::mcx::mul_size(
-            ::init_small::globals::MaxBackends() as usize,
-            C_SIZEOF_BT_ONE_VAC_INFO,
-        )?,
+    let slots = ::shmem_seams::mul_size::call(
+        ::init_small::globals::MaxBackends() as usize,
+        core::mem::size_of::<BTOneVacInfo>(),
     )?;
-    Ok(size)
+    ::shmem_seams::add_size::call(core::mem::size_of::<BTVacInfo>(), slots)
 }
 
+/// BTreeShmemInit (nbtutils.c:3654-3680): ShmemInitStruct("BTree Vacuum
+/// State", BTreeShmemSize()) — the ShmemIndex row pg_shmem_allocations
+/// reports — initialized by the postmaster (fresh segment), attached by
+/// children.
+pub fn BTreeShmemInit() -> PgResult<()> {
+    const {
+        assert!(!core::mem::needs_drop::<BTVacInfo>());
+    }
+    let (raw, found) =
+        ::shmem_seams::shmem_init_struct::call("BTree Vacuum State", BTreeShmemSize()?)?;
+    let info = raw.cast::<BTVacInfo>();
+    if !::init_small::globals::IsUnderPostmaster() {
+        debug_assert!(!found, "BTreeShmemInit: segment already initialized");
+        // SAFETY: a fresh, zeroed, cache-line-aligned ShmemIndex allocation
+        // of BTreeShmemSize() >= size_of::<BTVacInfo>() bytes.
+        unsafe { info.write(fresh_btvacinfo()) };
+    } else {
+        debug_assert!(found, "BTreeShmemInit: child attached before the postmaster initialized");
+    }
+    BTVACINFO.store(info, core::sync::atomic::Ordering::Release);
+    Ok(())
+}
+
+/// Crash-cycle reset to the fresh-segment image BTreeShmemInit writes;
+/// postmaster thread, children dead (notes/crash-restart-design.md).
+/// BtreeVacuumLock itself resets in LWLockResetAfterCrash.
+pub fn BTreeShmemResetAfterCrash() {
+    let info = btvacinfo();
+    // SAFETY: the live allocation; no backend thread exists to race.
+    unsafe { info.write(fresh_btvacinfo()) };
+}
+
+/// `rel->rd_lockInfo.lockRelId` as (dbId, relId).
 pub(crate) fn vac_key(rel: &Relation<'_>) -> (::types_core::Oid, ::types_core::Oid) {
-    (rel.rd_locator.get().dbOid, rel.rd_id)
+    let id = rel.rd_lockInfo.lockRelId;
+    (id.dbId, id.relId)
 }
 
-/// _bt_vacuum_cycleid: 0 when no vacuum is active on this index.
-pub(crate) fn bt_vacuum_cycleid(rel: &Relation<'_>) -> ::types_nbtree::BTCycleId {
-    let info = BTVACINFO.lock().unwrap();
-    let key = vac_key(rel);
-    info.vacuums
-        .iter()
-        .find(|v| (v.0, v.1) == key)
-        .map_or(0, |v| v.2)
-}
-
-/// _bt_start_vacuum. Caller pairs with bt_end_vacuum even on error exit.
-pub(crate) fn bt_start_vacuum(rel: &Relation<'_>) -> PgResult<::types_nbtree::BTCycleId> {
-    let mut info = BTVACINFO.lock().unwrap();
-    if info.cycle_ctr == 0 {
-        // C seeds from time() at shmem init; any nonzero start works.
-        // DST P2 (contract §1.2): seed from pg_clock::wall_secs().
-        info.cycle_ctr = (pg_clock::wall_secs().max(1) as ::types_nbtree::BTCycleId) | 1;
+/// _bt_vacuum_cycleid (nbtutils.c:3513-3535): 0 when no vacuum is active on
+/// this index. Share lock: read-only.
+pub(crate) fn bt_vacuum_cycleid(rel: &Relation<'_>) -> PgResult<::types_nbtree::BTCycleId> {
+    let mut result: ::types_nbtree::BTCycleId = 0;
+    lwlock::LWLockAcquire(
+        btree_vacuum_lock(),
+        lwlock::LW_SHARED,
+        ::init_small::globals::MyProcNumber(),
+    )?;
+    let info = btvacinfo();
+    let (db_id, rel_id) = vac_key(rel);
+    // SAFETY: BtreeVacuumLock held; the first num_vacuums slots are live.
+    unsafe {
+        let vacs = vacuums(info);
+        for i in 0..(*info).num_vacuums as usize {
+            let vac = &*vacs.add(i);
+            if vac.rel_id == rel_id && vac.db_id == db_id {
+                result = vac.cycleid;
+                break;
+            }
+        }
     }
-    info.cycle_ctr = info.cycle_ctr.wrapping_add(1);
-    if info.cycle_ctr == 0 || info.cycle_ctr > ::types_nbtree::MAX_BT_CYCLE_ID {
-        info.cycle_ctr = 1;
-    }
-    let result = info.cycle_ctr;
-    let key = vac_key(rel);
-    if info.vacuums.iter().any(|v| (v.0, v.1) == key) {
-        return Err(Box::new(::types_error::PgError::error(format!(
-            "multiple active vacuums for index \"{}\"",
-            rel.name()
-        ))));
-    }
-    info.vacuums.push((key.0, key.1, result));
+    lwlock::LWLockRelease(btree_vacuum_lock())?;
     Ok(result)
 }
 
-/// _bt_end_vacuum; silent when no entry exists, as C.
-pub(crate) fn bt_end_vacuum(rel: &Relation<'_>) {
-    bt_end_vacuum_key(vac_key(rel));
+/// _bt_start_vacuum (nbtutils.c:3547-3593). Caller pairs with bt_end_vacuum
+/// even on error exit (the BtVacuumGuard in vacuum.rs is C's
+/// PG_ENSURE_ERROR_CLEANUP).
+pub(crate) fn bt_start_vacuum(rel: &Relation<'_>) -> PgResult<::types_nbtree::BTCycleId> {
+    lwlock::LWLockAcquire(
+        btree_vacuum_lock(),
+        lwlock::LW_EXCLUSIVE,
+        ::init_small::globals::MyProcNumber(),
+    )?;
+    let info = btvacinfo();
+    let (db_id, rel_id) = vac_key(rel);
+    // SAFETY: BtreeVacuumLock held exclusively; num_vacuums <= max_vacuums
+    // slots were allocated by BTreeShmemInit.
+    let result = unsafe {
+        // Assign the next cycle ID, avoiding zero and the reserved high values.
+        let mut result = (*info).cycle_ctr.wrapping_add(1);
+        if result == 0 || result > ::types_nbtree::MAX_BT_CYCLE_ID {
+            result = 1;
+        }
+        (*info).cycle_ctr = result;
+
+        // Make sure there's no entry already for this index. Unlike most
+        // places, release the LWLock explicitly before throwing: C expects
+        // _bt_end_vacuum() to run before transaction abort releases LWLocks.
+        let vacs = vacuums(info);
+        let n = (*info).num_vacuums as usize;
+        for i in 0..n {
+            let vac = &*vacs.add(i);
+            if vac.rel_id == rel_id && vac.db_id == db_id {
+                lwlock::LWLockRelease(btree_vacuum_lock())?;
+                return Err(Box::new(
+                    ::types_error::PgError::error(format!(
+                        "multiple active vacuums for index \"{}\"",
+                        rel.name()
+                    ))
+                    .with_location("nbtutils.c", 3577, "_bt_start_vacuum"),
+                ));
+            }
+        }
+
+        if (*info).num_vacuums >= (*info).max_vacuums {
+            lwlock::LWLockRelease(btree_vacuum_lock())?;
+            return Err(Box::new(
+                ::types_error::PgError::error("out of btvacinfo slots").with_location(
+                    "nbtutils.c",
+                    3586,
+                    "_bt_start_vacuum",
+                ),
+            ));
+        }
+        vacs.add(n).write(BTOneVacInfo { rel_id, db_id, cycleid: result });
+        (*info).num_vacuums += 1;
+        result
+    };
+    lwlock::LWLockRelease(btree_vacuum_lock())?;
+    Ok(result)
 }
 
-/// bt_end_vacuum by (db, relid) key: the chunked scan's abort-path release
+/// _bt_end_vacuum (nbtutils.c:3604-3626); silent when no entry exists, as C.
+pub(crate) fn bt_end_vacuum(rel: &Relation<'_>) -> PgResult<()> {
+    bt_end_vacuum_key(vac_key(rel))
+}
+
+/// bt_end_vacuum by (dbId, relId) key: the chunked scan's abort-path release
 /// (Q2) runs from a Drop with no Relation handle in scope.
-pub(crate) fn bt_end_vacuum_key(key: (::types_core::Oid, ::types_core::Oid)) {
-    let mut info = BTVACINFO.lock().unwrap();
-    if let Some(i) = info.vacuums.iter().position(|v| (v.0, v.1) == key) {
-        info.vacuums.swap_remove(i);
+pub(crate) fn bt_end_vacuum_key(key: (::types_core::Oid, ::types_core::Oid)) -> PgResult<()> {
+    let (db_id, rel_id) = key;
+    lwlock::LWLockAcquire(
+        btree_vacuum_lock(),
+        lwlock::LW_EXCLUSIVE,
+        ::init_small::globals::MyProcNumber(),
+    )?;
+    let info = btvacinfo();
+    // SAFETY: BtreeVacuumLock held exclusively; the first num_vacuums slots
+    // are live.
+    unsafe {
+        let vacs = vacuums(info);
+        let n = (*info).num_vacuums as usize;
+        for i in 0..n {
+            let vac = &*vacs.add(i);
+            if vac.rel_id == rel_id && vac.db_id == db_id {
+                // Remove it by shifting down the last entry.
+                vacs.add(i).write(*vacs.add(n - 1));
+                (*info).num_vacuums -= 1;
+                break;
+            }
+        }
     }
+    lwlock::LWLockRelease(btree_vacuum_lock())?;
+    Ok(())
 }
 
 /// _bt_mkscankey; `itup: None` is the utility-statement arm. C divergence:

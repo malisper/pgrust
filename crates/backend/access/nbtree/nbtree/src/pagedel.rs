@@ -1,8 +1,9 @@
 //! nbtpage.c VACUUM write arms: _bt_delitems_vacuum, page deletion
 //! (_bt_pagedel/_bt_mark_page_halfdead/_bt_unlink_halfdead_page), cleanup-info
-//! metapage maintenance, pending-FSM recycling. C divergences (recorded):
-//! index-corruption LOG chatter elided (the abandon-and-continue control flow
-//! is kept); posting images are owned copies (see vacuum.rs).
+//! metapage maintenance, pending-FSM recycling. The index-corruption
+//! ereport(LOG, ERRCODE_INDEX_CORRUPTED) sites keep C's message bytes and
+//! abandon-and-continue control flow. C divergence (recorded): posting
+//! images are owned copies (see vacuum.rs).
 
 use ::bufmgr_seams::{self as bufmgr, BufferPin};
 use ::mcx::{Mcx, PgVec};
@@ -36,6 +37,16 @@ use crate::vacuum::{bt_update_posting, BTVacState, VacPosting};
 
 fn needs_wal(rel: &Relation<'_>) -> bool {
     crate::relation_needs_wal(rel)
+}
+
+/// ereport(LOG, (errcode(ERRCODE_INDEX_CORRUPTED), errmsg...)) at an nbtpage.c
+/// corruption arm: logged, never raised (VACUUM presses on).
+fn log_index_corrupted(msg: String, lineno: i32, funcname: &'static str) -> PgResult<()> {
+    ::elog_seams::ereport::call(
+        PgError::new(::types_error::LOG, msg)
+            .with_sqlstate(ERRCODE_INDEX_CORRUPTED)
+            .with_location("nbtpage.c", lineno, funcname),
+    )
 }
 
 pub(crate) fn offsets_as_bytes(offs: &[OffsetNumber]) -> &[u8] {
@@ -297,8 +308,34 @@ pub(crate) fn bt_pagedel<'s>(
 
         debug_assert!(!P_ISDELETED(&opaque));
         if !P_ISLEAF(&opaque) || P_ISDELETED(&opaque) {
-            // Half-dead internal or deleted page via right link: corrupt.
-            // C LOGs and presses on.
+            // Half-dead internal page (pre-9.4 deletion residue) or a deleted
+            // page reached through a right link: corrupt. nbtpage.c:1859/1866
+            // LOG and press on.
+            if P_ISHALFDEAD(&opaque) {
+                ::elog_seams::ereport::call(
+                    PgError::new(
+                        ::types_error::LOG,
+                        format!("index \"{}\" contains a half-dead internal page", rel.name()),
+                    )
+                    .with_sqlstate(ERRCODE_INDEX_CORRUPTED)
+                    .with_hint(
+                        "This can be caused by an interrupted VACUUM in version 9.3 or older, before upgrade. Please REINDEX it.",
+                    )
+                    .with_location("nbtpage.c", 1859, "_bt_pagedel"),
+                )?;
+            }
+            if P_ISDELETED(&opaque) {
+                log_index_corrupted(
+                    format!(
+                        "found deleted block {} while following right link from block {} in index \"{}\"",
+                        leafbuf.block_number(),
+                        scanblkno,
+                        rel.name()
+                    ),
+                    1866,
+                    "_bt_pagedel",
+                )?;
+            }
             bt_relbuf(rel, leafbuf)?;
             return Ok(());
         }
@@ -434,8 +471,22 @@ fn bt_mark_page_halfdead(
         let nextoffset = poffset + 1;
         let itup = page_item(&page, page.item_id(nextoffset));
         // SAFETY: pinned+locked parent page item.
-        if unsafe { bt_tuple_get_downlink(itup) } != topparentrightsib {
-            // C LOGs INDEX_CORRUPTED and backs out.
+        let nextchild = unsafe { bt_tuple_get_downlink(itup) };
+        if nextchild != topparentrightsib {
+            // nbtpage.c:2181: LOG INDEX_CORRUPTED and back out of the
+            // deletion (C's Assert(false) follows the LOG).
+            log_index_corrupted(
+                format!(
+                    "right sibling {} of block {} is not next child {} of block {} in index \"{}\"",
+                    topparentrightsib,
+                    topparent,
+                    nextchild,
+                    subtreeparent.block_number(),
+                    rel.name()
+                ),
+                2181,
+                "_bt_mark_page_halfdead",
+            )?;
             bt_relbuf(rel, subtreeparent)?;
             debug_assert!(false);
             return Ok(false);
@@ -586,7 +637,21 @@ fn bt_unlink_halfdead_page(
             bt_relbuf(rel, pin)?;
 
             if !leftsibvalid {
-                // Sibling-link corruption (C LOGs): release and bail.
+                // Sibling-link corruption is relatively common in the field:
+                // nbtpage.c:2434 LOGs it and VACUUM presses on.
+                log_index_corrupted(
+                    format!(
+                        "valid left sibling for deletion target could not be located: left sibling {} of target {} with leafblkno {} and scanblkno {} on level {} of index \"{}\"",
+                        leftsib,
+                        target,
+                        leafblkno,
+                        scanblkno,
+                        targetlevel,
+                        rel.name()
+                    ),
+                    2434,
+                    "_bt_unlink_halfdead_page",
+                )?;
                 target_pin.release();
                 if !target_is_leaf {
                     bt_relbuf(rel, leafbuf)?;
@@ -666,7 +731,22 @@ fn bt_unlink_halfdead_page(
     {
         let opaque = page_opaque(&rbuf.page());
         if opaque.btpo_prev != target {
-            // Right sibling's left-link mismatch (C LOGs): release all.
+            // Right sibling's left-link mismatch: nbtpage.c:2532 LOGs and
+            // releases every pin and lock (VACUUM presses on).
+            log_index_corrupted(
+                format!(
+                    "right sibling's left-link doesn't match: right sibling {} of target {} with leafblkno {} and scanblkno {} spuriously links to non-target {} on level {} of index \"{}\"",
+                    rightsib,
+                    target,
+                    leafblkno,
+                    scanblkno,
+                    opaque.btpo_prev,
+                    targetlevel,
+                    rel.name()
+                ),
+                2532,
+                "_bt_unlink_halfdead_page",
+            )?;
             if let Some(lb) = lbuf {
                 bt_relbuf(rel, lb)?;
             }
@@ -897,7 +977,17 @@ fn bt_lock_subtree_parent(
     // SAFETY: parent-insertion protocol (child pages locked by caller).
     let pbuf = unsafe { bt_getstackbuf(rel, heaprel, frame, top, parent_stack, child)? };
     let Some(pbuf) = pbuf else {
-        // Failed to re-find the downlink (C LOGs INDEX_CORRUPTED).
+        // Failed to re-find the downlink: nbtpage.c:2845 LOGs INDEX_CORRUPTED
+        // and backs out (C's Assert(false) follows the LOG).
+        log_index_corrupted(
+            format!(
+                "failed to re-find parent key in index \"{}\" for deletion target page {}",
+                rel.name(),
+                child
+            ),
+            2845,
+            "_bt_lock_subtree_parent",
+        )?;
         debug_assert!(false);
         return Ok(None);
     };

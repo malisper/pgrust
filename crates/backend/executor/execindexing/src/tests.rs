@@ -325,6 +325,11 @@ fn install() {
         });
     });
     test_boot::boot_wal("execindexing");
+    // BtreeVacuumLock-guarded "BTree Vacuum State" table: page splits read
+    // the VACUUM cycle ID from it (CreateOrAttachShmemStructs boots it after
+    // the LWLocks; test_boot's process boot stops at InitProcGlobal).
+    static BTREE_SHMEM: Once = Once::new();
+    BTREE_SHMEM.call_once(|| nbtree::BTreeShmemInit().unwrap());
 }
 
 thread_local! {

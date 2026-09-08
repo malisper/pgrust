@@ -49,8 +49,10 @@ use search::{bt_first, bt_gettuple_continue, pos_unpin_if_pinned, restore_scanpo
 use utils::bt_killitems;
 
 pub use search::{bt_peek_same_block_tids, BtScanInsert};
-pub use utils::BTreeShmemSize;
-pub use utils::{bt_check_third_page, bt_keep_natts_fast, bt_mkscankey, bt_truncate};
+pub use utils::{
+    bt_check_third_page, bt_keep_natts_fast, bt_mkscankey, bt_truncate, BTreeShmemInit,
+    BTreeShmemResetAfterCrash, BTreeShmemSize,
+};
 pub use fcframe::OrderProcFrame;
 
 /// skey.h SK_ROW_HEADER contract: sk_argument holds the pointer word of the

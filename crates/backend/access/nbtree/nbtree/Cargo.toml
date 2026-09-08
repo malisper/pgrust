@@ -9,6 +9,9 @@ bench-internals = []
 
 [dependencies]
 backend_progress = { path = "../../../utils/activity/backend_progress" }
+elog_seams = { path = "../../../utils/error/elog_seams" }
+shmem_seams = { path = "../../../storage/ipc/shmem_seams" }
+lwlock = { path = "../../../storage/lmgr/lwlock" }
 pgsync = { path = "../../../../_support/pgsync" }
 pg_clock = { path = "../../../../port/pg_clock" }
 vacuum_seams = { path = "../../../commands/vacuum_seams" }
@@ -67,7 +70,6 @@ xlogutils = { path = "../../transam/xlogutils" }
 controldata_utils = { path = "../../../../common/controldata_utils" }
 shmem = { path = "../../../storage/ipc/shmem" }
 fd = { path = "../../../storage/file/fd" }
-lwlock = { path = "../../../storage/lmgr/lwlock" }
 lmgr_proc = { path = "../../../storage/lmgr/lmgr_proc" }
 procarray = { path = "../../../storage/ipc/procarray" }
 miscinit_seams = { path = "../../../utils/init/miscinit_seams" }

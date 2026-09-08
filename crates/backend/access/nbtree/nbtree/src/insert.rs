@@ -1539,7 +1539,7 @@ unsafe fn bt_split<'mcx>(
     let rightpagenumber = rbuf.block_number();
 
     lopaque.btpo_next = rightpagenumber;
-    lopaque.btpo_cycleid = bt_vacuum_cycleid(rel);
+    lopaque.btpo_cycleid = bt_vacuum_cycleid(rel)?;
     write_opaque(&mut leftpage, &lopaque);
 
     let mut ropaque = BTPageOpaqueData {
