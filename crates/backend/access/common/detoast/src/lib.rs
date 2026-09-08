@@ -22,8 +22,9 @@ use types_tuple::varatt::{
 /// `eoh_methods` function pointers loaded from it (a control-flow primitive).
 /// C only ever mints these tags in memory (reorderbuffer for INDIRECT,
 /// expanded-object code for EXPANDED) and never stores them on disk or accepts
-/// them from user data; pgrust's reorderbuffer likewise never emits INDIRECT
-/// (see `reorderbuffer::toast::toast_replace`). Any image that reaches
+/// them from user data; pgrust's reorderbuffer mints INDIRECT the same way
+/// (see `reorderbuffer::toast::toast_replace`), and the tuples carrying them
+/// reach only the in-process output plugins. Any image that reaches
 /// detoasting from an untrusted origin (a SQL `bytea` argument, raw heap/index
 /// page bytes) therefore must not be dispatched into those arms.
 #[cold]

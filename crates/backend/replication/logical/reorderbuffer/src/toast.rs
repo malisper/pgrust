@@ -170,10 +170,13 @@ impl ReorderBuffer {
         Ok(())
     }
 
-    // ReorderBufferToastReplace. DIVERGENCE: C rebuilds changed toasted
-    // columns as VARTAG_INDIRECT pointers at the reconstructed chunks; this
-    // port inlines the reconstructed (possibly still compressed) varlena into
-    // the rebuilt tuple — same detoasted value, no unsafe pointer datum.
+    // ReorderBufferToastReplace (reorderbuffer.c:5087): changed toasted
+    // columns are rebuilt as VARTAG_INDIRECT pointers at the reconstructed
+    // (possibly still compressed) varlena, which stays owned by the toast
+    // hash entry until toast_reset. The tuple's t_len is therefore C's, and
+    // so is every accounting figure derived from it. The in-process output
+    // plugins detoast through detoast::detoast_attr, whose INDIRECT arm
+    // follows the pointer exactly as C's detoast.c does.
     pub fn toast_replace(
         &mut self,
         txn: TxnId,
@@ -222,16 +225,12 @@ impl ReorderBuffer {
 
         let mut hash = self.txn_mut(txn).toast_hash.take().expect("checked above");
         let mut replaced_any = false;
-        // Own every reconstructed buffer here until heap_form_tuple has consumed
-        // the values[] pointers. C keeps each reconstructed varlena alive in
-        // rb->context (freed only in ReorderBufferToastReset), so overwriting
-        // ent->reconstructed on a duplicate chunk id never invalidates an
-        // already-published attrs[] pointer. Storing directly in the hash entry
-        // instead would drop the prior PgVec while its raw pointer is still
-        // live in values[], a use-after-free. The Vec may reallocate as it
-        // grows, but that only moves the PgVec structs, not their heap data, so
-        // the published data pointers stay valid.
-        let mut keepalive: Vec<PgVec<'static, u8>> = Vec::new();
+        // The 10-byte VARTAG_INDIRECT images (VARHDRSZ_EXTERNAL + struct
+        // varatt_indirect) that replace each changed attribute. C pallocs each
+        // in rb->context; heap_form_tuple copies the image into the rebuilt
+        // tuple, so they only need to outlive that call. Reserved up front so
+        // the values[] pointers into it never move.
+        let mut indirect_images: Vec<[u8; VARHDRSZ_EXTERNAL + 8]> = Vec::with_capacity(natts);
 
         for natt in 0..natts {
             let attr = desc.attr(natt);
@@ -249,35 +248,58 @@ impl ReorderBuffer {
                 continue;
             };
 
-            let mut reconstructed: PgVec<'static, u8> =
-                mcx::vec_with_capacity_in(self.mcx, toast_pointer.va_rawsize as usize)?;
-            reconstructed.extend_from_slice(&[0u8; VARHDRSZ]);
+            // The reconstructed varlena lives in ent->reconstructed until
+            // ReorderBufferToastReset frees it (reorderbuffer.c:5273); the
+            // tuple only carries a pointer at it. A value id already
+            // reconstructed for this tuple (the same chunk list, hence the
+            // same bytes) is pointed at again rather than rebuilt, since
+            // replacing the buffer would dangle the earlier pointer.
+            if ent.reconstructed.is_none() {
+                let mut reconstructed: PgVec<'static, u8> =
+                    mcx::vec_with_capacity_in(self.mcx, toast_pointer.va_rawsize as usize)?;
+                reconstructed.extend_from_slice(&[0u8; VARHDRSZ]);
 
-            let mut data_done = 0usize;
-            for chunk_cid in dl_iter(&self.changes, ent.chunks, |c| c.node) {
-                let mut cvalues = vec![Datum::from_usize(0); toast_natts];
-                let mut cisnull = vec![false; toast_natts];
-                let cchange = self.change(chunk_cid);
-                let ReorderBufferChangeData::Tp { newtuple: Some(ctup), .. } = &cchange.data
-                else {
-                    unreachable!("toast chunk change carries a new tuple");
-                };
-                heap_deform_tuple(ctup.as_tuple(), toast_desc, &mut cvalues, &mut cisnull);
-                debug_assert!(!cisnull[2]);
-                // SAFETY: deform yielded a by-ref datum into the live chunk image.
-                let chunk = unsafe { varlena_image(cvalues[2].as_usize() as *const u8) };
-                debug_assert!(is_4b(chunk));
-                mcx::vec_append_bytes(&mut reconstructed, &chunk[VARHDRSZ..varsize_4b(chunk)])?;
-                data_done += varsize_4b(chunk) - VARHDRSZ;
+                let mut data_done = 0usize;
+                for chunk_cid in dl_iter(&self.changes, ent.chunks, |c| c.node) {
+                    let mut cvalues = vec![Datum::from_usize(0); toast_natts];
+                    let mut cisnull = vec![false; toast_natts];
+                    let cchange = self.change(chunk_cid);
+                    let ReorderBufferChangeData::Tp { newtuple: Some(ctup), .. } = &cchange.data
+                    else {
+                        unreachable!("toast chunk change carries a new tuple");
+                    };
+                    heap_deform_tuple(ctup.as_tuple(), toast_desc, &mut cvalues, &mut cisnull);
+                    debug_assert!(!cisnull[2]);
+                    // SAFETY: deform yielded a by-ref datum into the live chunk image.
+                    let chunk = unsafe { varlena_image(cvalues[2].as_usize() as *const u8) };
+                    debug_assert!(is_4b(chunk));
+                    mcx::vec_append_bytes(&mut reconstructed, &chunk[VARHDRSZ..varsize_4b(chunk)])?;
+                    data_done += varsize_4b(chunk) - VARHDRSZ;
+                }
+                debug_assert_eq!(data_done as u32, toast_pointer.extsize());
+
+                // make sure its marked as compressed or not (reorderbuffer.c:5205)
+                let header = varsize_4b_word(data_done + VARHDRSZ, toast_pointer.is_compressed());
+                reconstructed[..VARHDRSZ].copy_from_slice(&header);
+
+                let ent = hash.get_mut(&toast_pointer.va_valueid).expect("present");
+                ent.reconstructed = Some(reconstructed);
             }
-            debug_assert_eq!(data_done as u32, toast_pointer.extsize());
+            let target = hash
+                .get(&toast_pointer.va_valueid)
+                .and_then(|e| e.reconstructed.as_ref())
+                .expect("just reconstructed")
+                .as_ptr();
 
-            let header = varsize_4b_word(data_done + VARHDRSZ, toast_pointer.is_compressed());
-            reconstructed[..VARHDRSZ].copy_from_slice(&header);
-
-            keepalive.push(reconstructed);
+            // SET_VARTAG_EXTERNAL(new_datum, VARTAG_INDIRECT) + the
+            // varatt_indirect pointer body (reorderbuffer.c:5210-5216).
+            let mut image = [0u8; VARHDRSZ_EXTERNAL + 8];
+            image[0] = 0x01;
+            image[1] = VARTAG_INDIRECT;
+            image[VARHDRSZ_EXTERNAL..].copy_from_slice(&(target as usize).to_ne_bytes());
+            indirect_images.push(image);
             values[natt] = Datum::from_usize(
-                keepalive.last().expect("just pushed").as_ptr() as usize,
+                indirect_images.last().expect("just pushed").as_ptr() as usize,
             );
             replaced_any = true;
         }

@@ -3,7 +3,7 @@ use std::rc::Rc;
 use mcx::PgVec;
 use snapmgr::Snapshot;
 use types_core::{
-    CommandId, FirstCommandId, InvalidCommandId, InvalidOid, InvalidTransactionId,
+    CommandId, FirstCommandId, ForkNumber, InvalidCommandId, InvalidOid, InvalidTransactionId,
     InvalidXLogRecPtr, Oid, RepOriginId, TimestampTz, TransactionId, TransactionIdPrecedes,
     XLogRecPtr, RELPERSISTENCE_PERMANENT,
 };
@@ -11,7 +11,6 @@ use types_error::PgResult;
 use types_rel::{RelationData, RELKIND_SEQUENCE};
 use types_snapshot::SnapshotData;
 use types_storage::SharedInvalidationMessage;
-use types_tuple::HeapTupleData;
 
 use crate::iter::IterState;
 use crate::visibility::{ReorderBufferTupleCidEnt, ReorderBufferTupleCidKey, TupleCidHash};
@@ -91,39 +90,61 @@ impl Drop for CheckXidLiveGuard {
     }
 }
 
+// ReorderBufferChangeSize (reorderbuffer.c:4451) sums C's sizeof, and the
+// sums are user-visible numbers: rb->size trips the logical_decoding_work_mem
+// spill/stream, txn->total_size feeds pg_stat_replication_slots
+// spill_bytes/stream_bytes/total_bytes. So the port sums C's LP64 layouts,
+// pinned here, never its own struct sizes.
+//   ReorderBufferChange (reorderbuffer.h:76): lsn 8 | action 4 +pad 4 | txn 8 |
+//     origin_id 2 +pad 6 | union 32 (tp: RelFileLocator 12, bool +pad 4, two
+//     HeapTuple 16; tuplecid: 12 + ItemPointerData 6 +pad 2 + 3 CommandId 12) |
+//     dlist_node 16 = 80.
+//   HeapTupleData (htup.h:62): t_len 4 | t_self 6 +pad 2 | t_tableOid 4 +pad 4 |
+//     t_data 8 = 24.
+//   SnapshotData (snapshot.h:138): type 4 | xmin 4 | xmax 4 +pad 4 | xip 8 |
+//     xcnt 4 +pad 4 | subxip 8 | subxcnt 4 | 3 bool +pad 1 | curcid 4 |
+//     speculativeToken 4 | vistest 8 | active_count 4 | regd_count 4 |
+//     pairingheap_node 24 | snapXactCompletionCount 8 = 104.
+//   SharedInvalidationMessage (sinval.h:124): the 16-byte SharedInvalSmgrMsg
+//     arm (int8, int8, uint16, RelFileLocator 12) is the widest.
+//   Size 8, Oid 4, TransactionId 4.
+const C_SIZEOF_REORDER_BUFFER_CHANGE: usize = 80;
+const C_SIZEOF_HEAP_TUPLE_DATA: usize = 24;
+const C_SIZEOF_SNAPSHOT_DATA: usize = 104;
+const C_SIZEOF_SHARED_INVALIDATION_MESSAGE: usize = 16;
+const C_SIZEOF_SIZE: usize = 8;
+const C_SIZEOF_OID: usize = 4;
+const C_SIZEOF_TRANSACTION_ID: usize = 4;
+
 impl ReorderBuffer {
     pub fn change_size(&self, id: ChangeId) -> usize {
         let change = self.change(id);
-        // Sizes use this build's struct layouts where C uses its own sizeof.
-        let mut sz = std::mem::size_of::<crate::ReorderBufferChange>();
+        let mut sz = C_SIZEOF_REORDER_BUFFER_CHANGE;
         match (&change.action, &change.data) {
             (
                 Insert | Update | Delete | InternalSpecInsert,
                 ReorderBufferChangeData::Tp { oldtuple, newtuple, .. },
             ) => {
                 if let Some(t) = oldtuple {
-                    sz += std::mem::size_of::<HeapTupleData>() + t.t_len as usize;
+                    sz += C_SIZEOF_HEAP_TUPLE_DATA + t.t_len as usize;
                 }
                 if let Some(t) = newtuple {
-                    sz += std::mem::size_of::<HeapTupleData>() + t.t_len as usize;
+                    sz += C_SIZEOF_HEAP_TUPLE_DATA + t.t_len as usize;
                 }
             }
             (Message, ReorderBufferChangeData::Msg { prefix, message }) => {
-                sz += prefix.len() + 1
-                    + message.len()
-                    + std::mem::size_of::<usize>()
-                    + std::mem::size_of::<usize>();
+                sz += prefix.len() + 1 + message.len() + C_SIZEOF_SIZE + C_SIZEOF_SIZE;
             }
             (Invalidation, ReorderBufferChangeData::Inval { invalidations }) => {
-                sz += std::mem::size_of::<SharedInvalidationMessage>() * invalidations.len();
+                sz += C_SIZEOF_SHARED_INVALIDATION_MESSAGE * invalidations.len();
             }
             (InternalSnapshot, ReorderBufferChangeData::Snapshot(snap)) => {
-                sz += std::mem::size_of::<SnapshotData>()
-                    + std::mem::size_of::<TransactionId>() * snap.xcnt as usize
-                    + std::mem::size_of::<TransactionId>() * snap.subxcnt.max(0) as usize;
+                sz += C_SIZEOF_SNAPSHOT_DATA
+                    + C_SIZEOF_TRANSACTION_ID * snap.xcnt as usize
+                    + C_SIZEOF_TRANSACTION_ID * snap.subxcnt.max(0) as usize;
             }
             (Truncate, ReorderBufferChangeData::Truncate { relids, .. }) => {
-                sz += std::mem::size_of::<Oid>() * relids.len();
+                sz += C_SIZEOF_OID * relids.len();
             }
             _ => {}
         }
@@ -805,7 +826,7 @@ impl ReorderBuffer {
         Ok(())
     }
 
-    fn apply_tuple_change(
+    pub(crate) fn apply_tuple_change(
         &mut self,
         txn: TxnId,
         work: ChangeId,
@@ -837,13 +858,19 @@ impl ReorderBuffer {
         let relation = if reloid == InvalidOid && !has_new && !has_old {
             None
         } else if reloid == InvalidOid {
+            // reorderbuffer.c:2340: the relation is named by its
+            // relpathperm(rlocator, MAIN_FORKNUM) path.
             return Err(rb_error(format!(
-                "could not map filenumber \"{}/{}/{}\" to relation OID",
-                rlocator.spcOid, rlocator.dbOid, rlocator.relNumber
+                "could not map filenumber \"{}\" to relation OID",
+                relpath_seams::relpathperm::call(rlocator, ForkNumber::MAIN_FORKNUM)
             )));
         } else {
             Some(relcache::RelationIdGetRelation(reloid)?.ok_or_else(|| {
-                rb_error(format!("could not open relation with OID {reloid}"))
+                // reorderbuffer.c:2347
+                rb_error(format!(
+                    "could not open relation with OID {reloid} (for filenumber \"{}\")",
+                    relpath_seams::relpathperm::call(rlocator, ForkNumber::MAIN_FORKNUM)
+                ))
             })?)
         };
 

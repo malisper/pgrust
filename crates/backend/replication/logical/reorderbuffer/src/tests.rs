@@ -182,10 +182,9 @@ fn queue_change_updates_memory_accounting() {
     assert_eq!(rb.txn(txn).total_size, rb.size);
 
     let cid = rb.txn(txn).changes.head;
-    let expected = std::mem::size_of::<ReorderBufferChange>()
-        + "test".len() + 1
-        + "hello".len()
-        + 2 * std::mem::size_of::<usize>();
+    // C: sizeof(ReorderBufferChange) 80 + strlen(prefix)+1 + message_size +
+    // 2 * sizeof(Size) (reorderbuffer.c:4487).
+    let expected = 80 + "test".len() + 1 + "hello".len() + 2 * 8;
     assert_eq!(rb.change_size(cid), expected);
 
     rb.cleanup_txn(txn).unwrap();
@@ -535,7 +534,7 @@ fn unlink_tail(rb: &mut ReorderBuffer, txn: TxnId) -> ChangeId {
 }
 
 #[test]
-fn toast_chunks_reassemble_into_inline_varlena() {
+fn toast_chunks_reassemble_behind_an_indirect_pointer() {
     let mut rb = rb();
     let (main_desc, toast_desc) = toast_descs();
     let xid: TransactionId = 21;
@@ -579,16 +578,26 @@ fn toast_chunks_reassemble_into_inline_varlena() {
 
     match &rb.change(cid).data {
         ReorderBufferChangeData::Tp { newtuple: Some(t), .. } => {
+            // C rebuilds the tuple around a 10-byte VARTAG_INDIRECT pointer
+            // (reorderbuffer.c:5212): MAXALIGN(header) 24 + 10, no padding for
+            // a 1B_E datum. Detoasting follows the pointer to the reassembled
+            // value, which the toast hash entry owns until toast_reset.
+            assert_eq!(t.t_len, 24 + 10);
             let mut values = [Datum::from_usize(0)];
             let mut isnull = [true];
             types_tuple::heap_deform_tuple(t.as_tuple(), &main_desc, &mut values, &mut isnull);
             assert!(!isnull[0]);
             let img = unsafe { crate::toast::varlena_image(values[0].as_usize() as *const u8) };
-            assert_eq!(img.len(), raw_len + 4);
-            assert_eq!(&img[4..], b"hello toasted world");
+            assert_eq!(img.len(), 10);
+            assert_eq!((img[0], img[1]), (0x01, 1));
+            let detoasted = detoast::detoast_attr(rb.mcx, img).unwrap();
+            assert_eq!(detoasted.len(), raw_len + 4);
+            assert_eq!(&detoasted[4..], b"hello toasted world");
+            assert_eq!(rb.change_size(cid), 80 + 24 + 34);
         }
         _ => panic!("expected Tp data"),
     }
+    assert!(rb.txn(txn).toast_hash.as_ref().unwrap().get(&valueid).unwrap().reconstructed.is_some());
 
     rb.toast_reset(txn);
     assert!(rb.txn(txn).toast_hash.is_none());
@@ -659,14 +668,13 @@ fn change_size_formula_matches_shapes() {
     rb.add_snapshot(3, 10, snap(100)).unwrap();
     let txn = rb.txn_by_xid(3, false, 0, false).0.unwrap();
     let cid = rb.txn(txn).changes.head;
-    assert_eq!(
-        rb.change_size(cid),
-        std::mem::size_of::<ReorderBufferChange>() + std::mem::size_of::<SnapshotData>()
-    );
+    // C: sizeof(ReorderBufferChange) 80 + sizeof(SnapshotData) 104 + xcnt/subxcnt
+    // TransactionIds (reorderbuffer.c:4508); a command-id change is the bare 80.
+    assert_eq!(rb.change_size(cid), 80 + 104);
 
     rb.add_new_command_id(3, 11, 2).unwrap();
     let cid2 = rb.txn(txn).changes.tail;
-    assert_eq!(rb.change_size(cid2), std::mem::size_of::<ReorderBufferChange>());
+    assert_eq!(rb.change_size(cid2), 80);
 
     // Tuplecid changes never count toward the memory limit.
     let before = rb.size;
@@ -1394,8 +1402,12 @@ fn spill_toast_chunks_reassemble_after_restore() {
             let mut isnull = [true];
             types_tuple::heap_deform_tuple(t.as_tuple(), &main_desc, &mut values, &mut isnull);
             assert!(!isnull[0]);
+            // A VARTAG_INDIRECT pointer at the reassembled value
+            // (reorderbuffer.c:5212); detoasting follows it.
             let img = unsafe { crate::toast::varlena_image(values[0].as_usize() as *const u8) };
-            assert_eq!(&img[4..], b"spill survives toast");
+            assert_eq!((img.len(), img[0], img[1]), (10, 0x01, 1));
+            let detoasted = detoast::detoast_attr(rb.mcx, img).unwrap();
+            assert_eq!(&detoasted[4..], b"spill survives toast");
         }
         _ => panic!("expected Tp data"),
     }
@@ -1662,4 +1674,77 @@ fn torn_mapping_entry_reports_c_message_with_relative_path() {
     crate::visibility::ApplyLogicalMappingFile(&hash, &dir, fname).unwrap();
     assert!(hash.borrow().is_empty());
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// --- audit-18.6 w2-027: C-exact diagnostics and accounting ---
+
+// Answer for the relid_by_relfilenumber stub below; both arms of the mapping
+// failure live in one test so the process-global seam sees one writer.
+static MAPPED_RELOID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+fn install_relfilenumber_stubs() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        relfilenumbermap_seams::relid_by_relfilenumber::set(|_, _| {
+            Ok(MAPPED_RELOID.load(std::sync::atomic::Ordering::Relaxed))
+        });
+        // relpathperm for the default tablespace (relpath.c:172 "base/%u/%u").
+        relpath_seams::relpathperm::set(|rlocator, _forknum| {
+            format!("base/{}/{}", rlocator.dbOid, rlocator.relNumber)
+        });
+        // Every relcache miss resolves to "no such relation": RelationBuildDesc
+        // returns NULL, so RelationIdGetRelation is !RelationIsValid.
+        relcache_build_seams::scan_pg_relation::set(|_, _, _| Ok(None));
+    });
+}
+
+#[test]
+fn apply_tuple_change_reports_relfilenumber_paths_like_c() {
+    install_relfilenumber_stubs();
+    let mut rb = rb();
+    let (main_desc, _) = toast_descs();
+    let payload = inline_varlena(b"row");
+    let values = [Datum::from_usize(payload.as_ptr() as usize)];
+    let change = tuple_change(&rb, &main_desc, &values, &[false]);
+    rb.queue_change(31, 100, change, false).unwrap();
+    let txn = rb.txn_by_xid(31, false, 0, false).0.unwrap();
+    let cid = rb.txn(txn).changes.head;
+
+    // reorderbuffer.c:2340: a change carrying tuple data whose relfilenumber
+    // no longer maps names the relation by its relpathperm path.
+    MAPPED_RELOID.store(types_core::InvalidOid, std::sync::atomic::Ordering::Relaxed);
+    let err = rb.apply_tuple_change(txn, cid, &mut None, &mut None, false).unwrap_err();
+    assert_eq!(err.message(), "could not map filenumber \"base/5/55555\" to relation OID");
+
+    // reorderbuffer.c:2347: a mapped OID the relcache cannot open carries the
+    // same path as a "(for filenumber ...)" suffix.
+    MAPPED_RELOID.store(424242, std::sync::atomic::Ordering::Relaxed);
+    let err = rb.apply_tuple_change(txn, cid, &mut None, &mut None, false).unwrap_err();
+    assert_eq!(
+        err.message(),
+        "could not open relation with OID 424242 (for filenumber \"base/5/55555\")"
+    );
+
+    rb.cleanup_txn(txn).unwrap();
+}
+
+#[test]
+fn cleanup_serialized_txns_reports_relative_paths_like_c() {
+    let dir = std::env::temp_dir().join(format!("pgrust_rb_cleanup_{}", std::process::id()));
+    let slot = dir.join("pg_replslot/relslot");
+    // A directory named like a spill file: unlink() refuses it on every
+    // platform (EISDIR / EPERM), whatever uid runs the test.
+    std::fs::create_dir_all(slot.join("xid-7-lsn-0-1.spill")).unwrap();
+
+    let dir_str: &'static str = Box::leak(dir.to_string_lossy().into_owned().into_boxed_str());
+    init_small::globals::SetDataDir(dir_str);
+
+    let err = crate::startup::ReorderBufferCleanupSerializedTXNs("relslot").unwrap_err();
+    // reorderbuffer.c:4899: both paths are PG_REPLSLOT_DIR-relative (C runs
+    // with DataDir as its cwd), never the absolute DataDir-joined path.
+    let expect = "could not remove file \"pg_replslot/relslot/xid-7-lsn-0-1.spill\" \
+                  during removal of pg_replslot/relslot/xid*: ";
+    assert!(err.message().starts_with(expect), "got: {}", err.message());
+
+    std::fs::remove_dir_all(&dir).ok();
 }

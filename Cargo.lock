@@ -15937,6 +15937,7 @@ dependencies = [
  "relcache",
  "relcache_build_seams",
  "relfilenumbermap_seams",
+ "relpath_seams",
  "reorderbuffer_seams",
  "snapmgr",
  "transam_seams",
