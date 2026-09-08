@@ -6,13 +6,12 @@ use core::fmt::Write;
 
 use mcx::{Mcx, PgString, PgVec};
 use types_core::AttrNumber;
-use types_error::{
-    ErrorLevel, ErrorLocation, PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED,
-    ERRCODE_INTERNAL_ERROR,
-};
+use types_error::{ErrorLevel, ErrorLocation, PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 use types_nodes::parsenodes::{RTEKind, RangeTblEntry};
 use types_nodes::primnodes::{INDEX_VAR, INNER_VAR, OUTER_VAR};
 use types_nodes::{Node, NodeList, NodeTag};
+use types_pathnodes::{NodeId, PathKey, PlannerInfo};
+use types_slot::SlotData;
 
 const LINELEN: usize = 78;
 const INDENTSTOP: i32 = 3;
@@ -398,22 +397,97 @@ pub fn print_tl(mcx: Mcx<'_>, tlist: &NodeList<'_>, rtable: &NodeList<'_>) -> Pg
     Ok(())
 }
 
-// C print_pathkeys walks PathKey -> EquivalenceClass members (print.c:430);
-// pathnodes here are PlannerInfo arena handles, not a List walkable from
-// nodes_core, so the printer is a typed refusal (never a panic) until the
-// planner-debug lane ports it.
-pub fn print_pathkeys() -> PgResult<()> {
-    Err(Box::new(
-        PgError::error("print_pathkeys is not supported by this server")
-            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
-    ))
+// print_pathkeys (print.c:430-465): "(" then, per PathKey, "(" the
+// canonical EquivalenceClass's members through print_expr joined by ", "
+// ")" — pathkeys joined by ", " — then ")\n". PathKeys and their
+// EquivalenceClasses/Members are PlannerInfo arena records here, so the
+// root that owns them is the extra argument (C reaches them by pointer).
+pub fn print_pathkeys(
+    mcx: Mcx<'_>,
+    root: &PlannerInfo<'_>,
+    pathkeys: &[PathKey],
+    rtable: &NodeList<'_>,
+) -> PgResult<()> {
+    let text = format_pathkeys(mcx, root, pathkeys, rtable)?;
+    stdout_flush(&text);
+    Ok(())
 }
 
-// C print_slot formats a TupleTableSlot through debugtup (printtup.c), which
-// has no port; typed refusal (never a panic) until the printer lane ports it.
-pub fn print_slot() -> PgResult<()> {
-    Err(Box::new(
-        PgError::error("print_slot is not supported by this server")
-            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
-    ))
+pub(crate) fn format_pathkeys<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &PlannerInfo<'_>,
+    pathkeys: &[PathKey],
+    rtable: &NodeList<'_>,
+) -> PgResult<PgVec<'mcx, u8>> {
+    let mut buf = Buf::new(mcx);
+    write_pathkeys(&mut buf, mcx, root, pathkeys, rtable)?;
+    Ok(buf.0)
+}
+
+fn write_pathkeys(
+    buf: &mut Buf<'_>,
+    mcx: Mcx<'_>,
+    root: &PlannerInfo<'_>,
+    pathkeys: &[PathKey],
+    rtable: &NodeList<'_>,
+) -> PgResult<()> {
+    buf.push_bytes(b"(");
+    for (i, pathkey) in pathkeys.iter().enumerate() {
+        // C dereferences pk_eclass unconditionally (a NULL is a backend
+        // crash there); every PathKey the planner builds carries one.
+        let eclass = pathkey.pk_eclass.expect("PathKey without an EquivalenceClass");
+        // chase up, in case pathkey is non-canonical
+        let eclass = root.ec_canonical(eclass);
+        buf.push_bytes(b"(");
+        for (k, em) in root.ec(eclass).ec_members.iter().enumerate() {
+            if k > 0 {
+                buf.push_bytes(b", ");
+            }
+            write_expr(buf, mcx, arena_expr(root, root.em(*em).em_expr), rtable)?;
+        }
+        buf.push_bytes(b")");
+        if i + 1 < pathkeys.len() {
+            buf.push_bytes(b", ");
+        }
+    }
+    buf.push_bytes(b")\n");
+    Ok(())
+}
+
+// A planner expression handle: NodeId(0) is the NULL pointer (print_expr
+// then writes "<>", as C does for a NULL Expr).
+fn arena_expr<'mcx>(root: &PlannerInfo<'mcx>, id: NodeId) -> Option<Node<'mcx>> {
+    if id == NodeId::default() {
+        None
+    } else {
+        Some(*root.expr_node(id))
+    }
+}
+
+// print_slot (print.c:496-511): TupIsNull (a NULL slot or an empty one) and
+// a slot without a descriptor print a fixed line; otherwise the tuple goes
+// through debugtup (printtup.c:462), the interactive-backend row printer.
+pub fn print_slot(slot: Option<&mut SlotData<'_>>) -> PgResult<()> {
+    let Some(slot) = slot else {
+        stdout_flush(b"tuple is null.\n");
+        return Ok(());
+    };
+    if let Some(line) = slot_preamble(slot) {
+        stdout_flush(line.as_bytes());
+        return Ok(());
+    }
+    printtup::debugtup::DrDebugtup::new().receive_slot(slot)?;
+    Ok(())
+}
+
+// The two early returns of print_slot for a non-NULL slot, in C order.
+pub(crate) fn slot_preamble(slot: &SlotData<'_>) -> Option<&'static str> {
+    let base = slot.base();
+    if base.is_empty() {
+        return Some("tuple is null.\n");
+    }
+    if base.tts_tupleDescriptor.is_none() {
+        return Some("no tuple descriptor.\n");
+    }
+    None
 }

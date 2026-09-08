@@ -32,7 +32,18 @@ use types_nodes::rawnodes::{
     A_Const, A_Expr, A_Expr_Kind, PartitionBoundSpec, PartitionRangeDatum, TypeName, ValUnion,
 };
 use types_nodes::{Boolean, Float, Integer, Node, NodeTag};
+use types_pathnodes::relids::relids_members;
+use types_pathnodes::{
+    EcId, EmId, EquivalenceClass, ForeignKeyOptInfo, JoinDomain, NodeId, PlannerInfo, Relids,
+    RestrictInfo, RinfoId,
+};
 use types_tuple::varatt::varsize_any;
+
+macro_rules! w {
+    ($out:expr, $($arg:tt)*) => {
+        write!($out, $($arg)*).expect("outfuncs append")
+    };
+}
 
 thread_local! {
     // outfuncs.c:29 `static bool write_location_fields = false;` — set only
@@ -57,9 +68,17 @@ fn node_to_string_internal<'mcx>(
     node: Node<'mcx>,
     write_loc_fields: bool,
 ) -> PgResult<PgString<'mcx>> {
+    to_string_internal(mcx, write_loc_fields, |out| out_node(out, node))
+}
+
+fn to_string_internal<'mcx>(
+    mcx: Mcx<'mcx>,
+    write_loc_fields: bool,
+    walk: impl FnOnce(&mut PgString<'mcx>) -> PgResult<()>,
+) -> PgResult<PgString<'mcx>> {
     let save = WRITE_LOCATION_FIELDS.with(|f| f.replace(write_loc_fields));
     let mut out = PgString::new_in(mcx);
-    let walked = out_node(&mut out, node);
+    let walked = walk(&mut out);
     WRITE_LOCATION_FIELDS.with(|f| f.set(save));
     walked?;
     Ok(out)
@@ -93,10 +112,306 @@ pub fn queryToString<'mcx>(mcx: Mcx<'mcx>, q: &Query<'_>) -> PgResult<PgString<'
     Ok(out)
 }
 
-macro_rules! w {
-    ($out:expr, $($arg:tt)*) => {
-        write!($out, $($arg)*).expect("outfuncs append")
-    };
+// nodeToString over the planner records that C keeps as Nodes but this
+// engine keeps as PlannerInfo arena entries (no node handle to dispatch
+// on): ForeignKeyOptInfo (outfuncs.c:435-461), EquivalenceClass (:463-489)
+// and, through them, EquivalenceMember, JoinDomain and RestrictInfo (the
+// generated _out* of outfuncs.funcs.c, field order = pathnodes.h). The
+// location flag is false, as for nodeToString.
+pub fn foreignKeyOptInfoToString<'mcx>(
+    mcx: Mcx<'mcx>,
+    fk: &ForeignKeyOptInfo<'_>,
+) -> PgResult<PgString<'mcx>> {
+    to_string_internal(mcx, false, |out| {
+        out_foreign_key_opt_info(out, fk);
+        Ok(())
+    })
+}
+
+pub fn equivalenceClassToString<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &PlannerInfo<'mcx>,
+    ec: EcId,
+) -> PgResult<PgString<'mcx>> {
+    to_string_internal(mcx, false, |out| out_equivalence_class(out, root, ec))
+}
+
+pub fn restrictInfoToString<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &PlannerInfo<'mcx>,
+    rinfo: RinfoId,
+) -> PgResult<PgString<'mcx>> {
+    to_string_internal(mcx, false, |out| out_restrict_info(out, root, rinfo))
+}
+
+// _outForeignKeyOptInfo (outfuncs.c:435-461). The C arrays are inline
+// [INDEX_MAX_KEYS] (never NULL), written over the first nkeys entries; the
+// eclass/rinfos arrays print only presence / list length "for compactness".
+fn out_foreign_key_opt_info(out: &mut PgString<'_>, fk: &ForeignKeyOptInfo<'_>) {
+    let nkeys = fk.nkeys.max(0) as usize;
+    w!(
+        out,
+        "{{FOREIGNKEYOPTINFO :con_relid {} :ref_relid {} :nkeys {} :conkey (",
+        fk.con_relid, fk.ref_relid, fk.nkeys
+    );
+    for v in fk.conkey.iter().take(nkeys) {
+        w!(out, " {v}");
+    }
+    w!(out, ") :confkey (");
+    for v in fk.confkey.iter().take(nkeys) {
+        w!(out, " {v}");
+    }
+    w!(out, ") :conpfeqop (");
+    for v in fk.conpfeqop.iter().take(nkeys) {
+        w!(out, " {v}");
+    }
+    w!(
+        out,
+        ") :nmatched_ec {} :nconst_ec {} :nmatched_rcols {} :nmatched_ri {} :eclass",
+        fk.nmatched_ec, fk.nconst_ec, fk.nmatched_rcols, fk.nmatched_ri
+    );
+    for ec in fk.eclass.iter().take(nkeys) {
+        w!(out, " {}", ec.is_some() as i32);
+    }
+    w!(out, " :rinfos");
+    for rinfos in fk.rinfos.iter().take(nkeys) {
+        w!(out, " {}", rinfos.len());
+    }
+    w!(out, "}}");
+}
+
+// _outEquivalenceClass (outfuncs.c:463-489): chase up to the topmost merged
+// EC and print that; ec_derives_hash is not serialized.
+fn out_equivalence_class(
+    out: &mut PgString<'_>,
+    root: &PlannerInfo<'_>,
+    ec: EcId,
+) -> PgResult<()> {
+    let ec: &EquivalenceClass<'_> = root.ec(root.ec_canonical(ec));
+    w!(out, "{{EQUIVALENCECLASS :ec_opfamilies ");
+    out_oid_vec(out, &ec.ec_opfamilies);
+    w!(
+        out,
+        " :ec_collation {} :ec_childmembers_size {} :ec_members ",
+        ec.ec_collation, ec.ec_childmembers_size
+    );
+    out_em_list(out, root, &ec.ec_members)?;
+    // WRITE_NODE_ARRAY(ec_childmembers, ec_childmembers_size): NULL until the
+    // first child member is added (an empty array here), else "( <list>...)".
+    w!(out, " :ec_childmembers ");
+    if ec.ec_childmembers.is_empty() {
+        w!(out, "<>");
+    } else {
+        w!(out, "(");
+        for members in ec.ec_childmembers.iter() {
+            w!(out, " ");
+            out_em_list(out, root, members)?;
+        }
+        w!(out, ")");
+    }
+    w!(out, " :ec_sources ");
+    out_rinfo_list(out, root, &ec.ec_sources)?;
+    w!(out, " :ec_derives_list ");
+    out_rinfo_list(out, root, &ec.ec_derives_list)?;
+    w!(out, " :ec_relids ");
+    out_relids(out, &ec.ec_relids);
+    w!(out, " :ec_has_const ");
+    out_bool(out, ec.ec_has_const);
+    w!(out, " :ec_has_volatile ");
+    out_bool(out, ec.ec_has_volatile);
+    w!(out, " :ec_broken ");
+    out_bool(out, ec.ec_broken);
+    w!(
+        out,
+        " :ec_sortref {} :ec_min_security {} :ec_max_security {}}}",
+        ec.ec_sortref, ec.ec_min_security, ec.ec_max_security
+    );
+    Ok(())
+}
+
+// _outEquivalenceMember (generated; pathnodes.h EquivalenceMember): em_parent
+// is read_write_ignore.
+fn out_equivalence_member(
+    out: &mut PgString<'_>,
+    root: &PlannerInfo<'_>,
+    em: EmId,
+) -> PgResult<()> {
+    let em = root.em(em);
+    w!(out, "{{EQUIVALENCEMEMBER :em_expr ");
+    out_arena_expr(out, root, em.em_expr)?;
+    w!(out, " :em_relids ");
+    out_relids(out, &em.em_relids);
+    w!(out, " :em_is_const ");
+    out_bool(out, em.em_is_const);
+    w!(out, " :em_is_child ");
+    out_bool(out, em.em_is_child);
+    w!(out, " :em_datatype {} :em_jdomain ", em.em_datatype);
+    // em_jdomain is an index into root.join_domains (C's pointer identity);
+    // an index outside the table is the NULL pointer's "<>".
+    match root.join_domains.get(em.em_jdomain) {
+        Some(jd) => out_join_domain(out, jd),
+        None => w!(out, "<>"),
+    }
+    w!(out, "}}");
+    Ok(())
+}
+
+// _outJoinDomain (generated; pathnodes.h JoinDomain).
+fn out_join_domain(out: &mut PgString<'_>, jd: &JoinDomain<'_>) {
+    w!(out, "{{JOINDOMAIN :jd_relids ");
+    out_relids(out, &jd.jd_relids);
+    w!(out, "}}");
+}
+
+// _outRestrictInfo (generated; pathnodes.h RestrictInfo): parent_ec, left_ec,
+// right_ec and scansel_cache are read_write_ignore; QualCost writes its two
+// members as :eval_cost.startup / :eval_cost.per_tuple.
+fn out_restrict_info(
+    out: &mut PgString<'_>,
+    root: &PlannerInfo<'_>,
+    rinfo: RinfoId,
+) -> PgResult<()> {
+    let r: &RestrictInfo<'_> = root.rinfo(rinfo);
+    w!(out, "{{RESTRICTINFO :clause ");
+    out_arena_expr(out, root, r.clause)?;
+    w!(out, " :is_pushed_down ");
+    out_bool(out, r.is_pushed_down);
+    w!(out, " :can_join ");
+    out_bool(out, r.can_join);
+    w!(out, " :pseudoconstant ");
+    out_bool(out, r.pseudoconstant);
+    w!(out, " :has_clone ");
+    out_bool(out, r.has_clone);
+    w!(out, " :is_clone ");
+    out_bool(out, r.is_clone);
+    w!(out, " :leakproof ");
+    out_bool(out, r.leakproof);
+    w!(
+        out,
+        " :has_volatile {} :security_level {} :num_base_rels {} :clause_relids ",
+        r.has_volatile, r.security_level, r.num_base_rels
+    );
+    out_relids(out, &r.clause_relids);
+    w!(out, " :required_relids ");
+    out_relids(out, &r.required_relids);
+    w!(out, " :incompatible_relids ");
+    out_relids(out, &r.incompatible_relids);
+    w!(out, " :outer_relids ");
+    out_relids(out, &r.outer_relids);
+    w!(out, " :left_relids ");
+    out_relids(out, &r.left_relids);
+    w!(out, " :right_relids ");
+    out_relids(out, &r.right_relids);
+    w!(out, " :orclause ");
+    out_arena_expr(out, root, r.orclause.unwrap_or_default())?;
+    w!(out, " :rinfo_serial {} :eval_cost.startup ", r.rinfo_serial);
+    out_double(out, r.eval_cost.startup);
+    w!(out, " :eval_cost.per_tuple ");
+    out_double(out, r.eval_cost.per_tuple);
+    w!(out, " :norm_selec ");
+    out_double(out, r.norm_selec);
+    w!(out, " :outer_selec ");
+    out_double(out, r.outer_selec);
+    w!(out, " :mergeopfamilies ");
+    out_oid_vec(out, &r.mergeopfamilies);
+    w!(out, " :left_em ");
+    match r.left_em {
+        Some(em) => out_equivalence_member(out, root, em)?,
+        None => w!(out, "<>"),
+    }
+    w!(out, " :right_em ");
+    match r.right_em {
+        Some(em) => out_equivalence_member(out, root, em)?,
+        None => w!(out, "<>"),
+    }
+    w!(out, " :outer_is_left ");
+    out_bool(out, r.outer_is_left);
+    w!(out, " :hashjoinoperator {} :left_bucketsize ", r.hashjoinoperator);
+    out_double(out, r.left_bucketsize);
+    w!(out, " :right_bucketsize ");
+    out_double(out, r.right_bucketsize);
+    w!(out, " :left_mcvfreq ");
+    out_double(out, r.left_mcvfreq);
+    w!(out, " :right_mcvfreq ");
+    out_double(out, r.right_mcvfreq);
+    w!(
+        out,
+        " :left_hasheqoperator {} :right_hasheqoperator {}}}",
+        r.left_hasheqoperator, r.right_hasheqoperator
+    );
+    Ok(())
+}
+
+// A planner expression handle through outNode: NodeId(0) is the NULL
+// pointer ("<>").
+fn out_arena_expr(out: &mut PgString<'_>, root: &PlannerInfo<'_>, id: NodeId) -> PgResult<()> {
+    if id == NodeId::default() {
+        w!(out, "<>");
+        Ok(())
+    } else {
+        out_node(out, *root.expr_node(id))
+    }
+}
+
+// _outList over a List of EquivalenceMembers ("<>" for NIL).
+fn out_em_list(out: &mut PgString<'_>, root: &PlannerInfo<'_>, l: &[EmId]) -> PgResult<()> {
+    if l.is_empty() {
+        w!(out, "<>");
+        return Ok(());
+    }
+    w!(out, "(");
+    for (i, em) in l.iter().enumerate() {
+        if i > 0 {
+            w!(out, " ");
+        }
+        out_equivalence_member(out, root, *em)?;
+    }
+    w!(out, ")");
+    Ok(())
+}
+
+// _outList over a List of RestrictInfos ("<>" for NIL).
+fn out_rinfo_list(
+    out: &mut PgString<'_>,
+    root: &PlannerInfo<'_>,
+    l: &[RinfoId],
+) -> PgResult<()> {
+    if l.is_empty() {
+        w!(out, "<>");
+        return Ok(());
+    }
+    w!(out, "(");
+    for (i, rinfo) in l.iter().enumerate() {
+        if i > 0 {
+            w!(out, " ");
+        }
+        out_restrict_info(out, root, *rinfo)?;
+    }
+    w!(out, ")");
+    Ok(())
+}
+
+// _outList over an OID List held as a plain vector ("<>" for NIL).
+fn out_oid_vec(out: &mut PgString<'_>, l: &[types_core::Oid]) {
+    if l.is_empty() {
+        w!(out, "<>");
+        return;
+    }
+    w!(out, "(o");
+    for v in l {
+        w!(out, " {v}");
+    }
+    w!(out, ")");
+}
+
+// outBitmapset over the planner's Relids representation: "(b" + members +
+// ")" (a NULL set is "(b)" too).
+fn out_relids(out: &mut PgString<'_>, r: &Relids<'_>) {
+    w!(out, "(b");
+    for m in relids_members(r) {
+        w!(out, " {m}");
+    }
+    w!(out, ")");
 }
 
 // C outfuncs.c outDouble: WRITE_FLOAT_FIELD prints through PostgreSQL's Ryu

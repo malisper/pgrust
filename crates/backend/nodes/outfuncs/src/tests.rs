@@ -1147,6 +1147,188 @@ fn bms_to_string_matches_c() {
     assert_eq!(bmsToString(&Bitmapset::empty()), "(b)");
 }
 
+// _outForeignKeyOptInfo / _outEquivalenceClass (outfuncs.c:435-489) and the
+// generated EquivalenceMember / JoinDomain / RestrictInfo writers they reach
+// (field order = pathnodes.h; parent_ec/left_ec/right_ec/scansel_cache and
+// em_parent are read_write_ignore). The records are PlannerInfo arena
+// entries here, so the entry points take the owning root. Locations render
+// as -1 (nodeToString's write_location_fields=false), the merged-away EC
+// is chased to its canonical one, NULL pointers are "<>".
+#[test]
+fn planner_records_write_c_outfuncs_format() {
+    use types_pathnodes::relids::{relids_add_member, relids_empty, relids_singleton};
+    use types_pathnodes::{
+        EquivalenceClass, EquivalenceMember, ForeignKeyOptInfo, JoinDomain, PlannerInfo,
+        QualCost, RestrictInfo, VOLATILITY_NOVOLATILE,
+    };
+    use crate::{equivalenceClassToString, foreignKeyOptInfoToString, restrictInfoToString};
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut root = PlannerInfo::new(mcx);
+    let var = |varno: i32| {
+        Node::mk(
+            mcx,
+            Var {
+                varno,
+                varattno: 1,
+                vartype: 23,
+                vartypmod: -1,
+                varnosyn: varno as u32,
+                varattnosyn: 1,
+                location: 12,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    };
+    let both = relids_add_member(mcx, &relids_singleton(mcx, 1), 2);
+    root.join_domains.push(JoinDomain { jd_relids: both.clone() });
+    let e1 = root.alloc_expr_node(var(1));
+    let e2 = root.alloc_expr_node(var(2));
+    let em1 = root.alloc_em(EquivalenceMember {
+        em_expr: e1,
+        em_relids: relids_singleton(mcx, 1),
+        em_datatype: 23,
+        em_jdomain: 0,
+        ..Default::default()
+    });
+    let em2 = root.alloc_em(EquivalenceMember {
+        em_expr: e2,
+        em_relids: relids_singleton(mcx, 2),
+        em_datatype: 23,
+        em_jdomain: 0,
+        ..Default::default()
+    });
+    let clause = Node::mk(
+        mcx,
+        OpExpr {
+            opno: 96,
+            opfuncid: 65,
+            opresulttype: 16,
+            opretset: false,
+            opcollid: 0,
+            inputcollid: 0,
+            args: NodeList::from_slice(mcx, &[var(1), var(2)]).unwrap(),
+            location: 20,
+        },
+    )
+    .unwrap();
+    let clause = root.alloc_expr_node(clause);
+    let mut mergeopfamilies = mcx::PgVec::new_in(mcx);
+    mergeopfamilies.push(1976);
+    let rinfo = root.alloc_rinfo(RestrictInfo {
+        clause,
+        is_pushed_down: true,
+        can_join: true,
+        pseudoconstant: false,
+        has_clone: false,
+        is_clone: false,
+        leakproof: true,
+        has_volatile: VOLATILITY_NOVOLATILE,
+        security_level: 0,
+        num_base_rels: 2,
+        clause_relids: both.clone(),
+        required_relids: both.clone(),
+        incompatible_relids: relids_empty(),
+        outer_relids: relids_empty(),
+        left_relids: relids_singleton(mcx, 1),
+        right_relids: relids_singleton(mcx, 2),
+        orclause: None,
+        rinfo_serial: 3,
+        parent_ec: None,
+        eval_cost: QualCost { startup: 0.0, per_tuple: 0.0025 },
+        norm_selec: 0.005,
+        outer_selec: -1.0,
+        mergeopfamilies,
+        left_ec: None,
+        right_ec: None,
+        left_em: Some(em1),
+        right_em: Some(em2),
+        scansel_cache: mcx::PgVec::new_in(mcx),
+        outer_is_left: true,
+        hashjoinoperator: 96,
+        left_bucketsize: -1.0,
+        right_bucketsize: -1.0,
+        left_mcvfreq: -1.0,
+        right_mcvfreq: -1.0,
+        left_hasheqoperator: 96,
+        right_hasheqoperator: 96,
+    });
+    let mut canonical = EquivalenceClass::new(mcx);
+    canonical.ec_opfamilies.push(1976);
+    canonical.ec_members.push(em1);
+    canonical.ec_members.push(em2);
+    canonical.ec_sources.push(rinfo);
+    canonical.ec_relids = both.clone();
+    let canonical = root.alloc_ec(canonical);
+    let mut merged = EquivalenceClass::new(mcx);
+    merged.ec_merged = Some(canonical);
+    let merged = root.alloc_ec(merged);
+    root.rinfo_mut(rinfo).parent_ec = Some(canonical);
+
+    let em = |varno: i32| {
+        format!(
+            "{{EQUIVALENCEMEMBER :em_expr {{VAR :varno {varno} :varattno 1 :vartype 23 \
+             :vartypmod -1 :varcollid 0 :varnullingrels (b) :varlevelsup 0 :varreturningtype 0 \
+             :varnosyn {varno} :varattnosyn 1 :location -1}} :em_relids (b {varno}) \
+             :em_is_const false :em_is_child false :em_datatype 23 :em_jdomain {{JOINDOMAIN \
+             :jd_relids (b 1 2)}}}}"
+        )
+    };
+    let ri = format!(
+        "{{RESTRICTINFO :clause {{OPEXPR :opno 96 :opfuncid 65 :opresulttype 16 :opretset false \
+         :opcollid 0 :inputcollid 0 :args ({{VAR :varno 1 :varattno 1 :vartype 23 :vartypmod -1 \
+         :varcollid 0 :varnullingrels (b) :varlevelsup 0 :varreturningtype 0 :varnosyn 1 \
+         :varattnosyn 1 :location -1}} {{VAR :varno 2 :varattno 1 :vartype 23 :vartypmod -1 \
+         :varcollid 0 :varnullingrels (b) :varlevelsup 0 :varreturningtype 0 :varnosyn 2 \
+         :varattnosyn 1 :location -1}}) :location -1}} :is_pushed_down true :can_join true \
+         :pseudoconstant false :has_clone false :is_clone false :leakproof true :has_volatile 2 \
+         :security_level 0 :num_base_rels 2 :clause_relids (b 1 2) :required_relids (b 1 2) \
+         :incompatible_relids (b) :outer_relids (b) :left_relids (b 1) :right_relids (b 2) \
+         :orclause <> :rinfo_serial 3 :eval_cost.startup 0 :eval_cost.per_tuple 0.0025 \
+         :norm_selec 0.005 :outer_selec -1 :mergeopfamilies (o 1976) :left_em {} :right_em {} \
+         :outer_is_left true :hashjoinoperator 96 :left_bucketsize -1 :right_bucketsize -1 \
+         :left_mcvfreq -1 :right_mcvfreq -1 :left_hasheqoperator 96 :right_hasheqoperator 96}}",
+        em(1),
+        em(2)
+    );
+    assert_eq!(restrictInfoToString(mcx, &root, rinfo).unwrap().as_str(), ri);
+    let ec = format!(
+        "{{EQUIVALENCECLASS :ec_opfamilies (o 1976) :ec_collation 0 :ec_childmembers_size 0 \
+         :ec_members ({} {}) :ec_childmembers <> :ec_sources ({ri}) :ec_derives_list <> \
+         :ec_relids (b 1 2) :ec_has_const false :ec_has_volatile false :ec_broken false \
+         :ec_sortref 0 :ec_min_security 0 :ec_max_security 0}}",
+        em(1),
+        em(2)
+    );
+    assert_eq!(equivalenceClassToString(mcx, &root, canonical).unwrap().as_str(), ec);
+    // the merged-away EC prints its canonical survivor
+    assert_eq!(equivalenceClassToString(mcx, &root, merged).unwrap().as_str(), ec);
+
+    let mut fk = ForeignKeyOptInfo::new(mcx);
+    fk.con_relid = 1;
+    fk.ref_relid = 2;
+    fk.nkeys = 2;
+    fk.conkey.extend([1, 2]);
+    fk.confkey.extend([1, 3]);
+    fk.conpfeqop.extend([96, 96]);
+    fk.nmatched_ec = 1;
+    fk.nmatched_rcols = 1;
+    fk.nmatched_ri = 1;
+    fk.eclass.extend([Some(canonical), None]);
+    fk.fk_eclass_member.extend([Some(em1), None]);
+    let mut rinfos0 = mcx::PgVec::new_in(mcx);
+    rinfos0.push(rinfo);
+    fk.rinfos.push(rinfos0);
+    fk.rinfos.push(mcx::PgVec::new_in(mcx));
+    assert_eq!(
+        foreignKeyOptInfoToString(mcx, &fk).unwrap().as_str(),
+        "{FOREIGNKEYOPTINFO :con_relid 1 :ref_relid 2 :nkeys 2 :conkey ( 1 2) :confkey ( 1 3) \
+         :conpfeqop ( 96 96) :nmatched_ec 1 :nconst_ec 0 :nmatched_rcols 1 :nmatched_ri 1 \
+         :eclass 1 0 :rinfos 1 0}"
+    );
+}
+
 // audit-18.6 w2-018-nodes-1: the raw-node pair this crate writes (_outA_Expr
 // outfuncs.c:588-659, _outA_Const :710-722) reads back through readfuncs'
 // hand-written arms (_readA_Expr readfuncs.c:448, _readA_Const :310) and

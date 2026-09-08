@@ -1781,3 +1781,128 @@ fn query_tree_mutator_covers_rtable_window_offsets_and_flags() {
     let sub_now = oq.rtable.nth(0).as_range_tbl_entry().unwrap().subquery.unwrap();
     assert_eq!(param_of(sub_now.targetList.nth(0)), 11);
 }
+
+fn values_rte<'mcx>(mcx: Mcx<'mcx>, alias: &'mcx str, cols: &[&'mcx str]) -> Node<'mcx> {
+    use types_nodes::parsenodes::{RTEKind, RangeTblEntry};
+    use types_nodes::primnodes::Alias;
+    let mut colnames = Vec::new();
+    for c in cols {
+        colnames.push(Node::mk_string(mcx, c).unwrap());
+    }
+    let eref = Node::mk_mut(
+        mcx,
+        Alias { aliasname: Some(alias), colnames: NodeList::from_slice(mcx, &colnames).unwrap() },
+    )
+    .unwrap()
+    .seal_ref();
+    Node::mk(
+        mcx,
+        RangeTblEntry { rtekind: RTEKind::RTE_VALUES, eref: Some(eref), ..RangeTblEntry::default() },
+    )
+    .unwrap()
+}
+
+// C print_pathkeys (print.c:430-465): "(" per pathkey "(" the members of the
+// CANONICAL EquivalenceClass (ec_merged chased) through print_expr, ", "
+// separated ")" ... ")\n"; a NULL member expression prints "<>".
+#[test]
+fn print_pathkeys_walks_canonical_eclass_members_in_c_format() {
+    use types_nodes::primnodes::Var;
+    use types_pathnodes::relids::relids_singleton;
+    use types_pathnodes::{
+        EquivalenceClass, EquivalenceMember, PathKey, PlannerInfo, COMPARE_LT, NodeId,
+    };
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let rtable = NodeList::from_slice(
+        mcx,
+        &[values_rte(mcx, "t", &["a", "b"]), values_rte(mcx, "u", &["c"])],
+    )
+    .unwrap();
+    let mut root = PlannerInfo::new(mcx);
+    // varno 0 = a member whose em_expr is the NULL handle
+    fn member<'mcx>(
+        mcx: Mcx<'mcx>,
+        root: &mut PlannerInfo<'mcx>,
+        varno: i32,
+        varattno: i16,
+    ) -> types_pathnodes::EmId {
+        let em_expr = if varno == 0 {
+            NodeId::default()
+        } else {
+            let var = Node::mk(mcx, Var { varno, varattno, vartype: 23, ..Default::default() })
+                .unwrap();
+            root.alloc_expr_node(var)
+        };
+        root.alloc_em(EquivalenceMember {
+            em_expr,
+            em_relids: relids_singleton(mcx, varno.max(1) as u32),
+            em_datatype: 23,
+            ..Default::default()
+        })
+    }
+    let m_ta = member(mcx, &mut root, 1, 1);
+    let m_uc = member(mcx, &mut root, 2, 1);
+    let m_tb = member(mcx, &mut root, 1, 2);
+    let m_null = member(mcx, &mut root, 0, 0);
+    let mut canonical = EquivalenceClass::new(mcx);
+    canonical.ec_members.push(m_ta);
+    canonical.ec_members.push(m_uc);
+    let canonical = root.alloc_ec(canonical);
+    // a stale (merged-away) EC still reachable from a non-canonical PathKey
+    let mut merged = EquivalenceClass::new(mcx);
+    merged.ec_members.push(m_tb);
+    merged.ec_merged = Some(canonical);
+    let merged = root.alloc_ec(merged);
+    let mut second = EquivalenceClass::new(mcx);
+    second.ec_members.push(m_tb);
+    second.ec_members.push(m_null);
+    let second = root.alloc_ec(second);
+    let pathkey = |ec| PathKey {
+        pk_eclass: Some(ec),
+        pk_opfamily: 1976,
+        pk_cmptype: COMPARE_LT,
+        pk_nulls_first: false,
+    };
+
+    let text = print::format_pathkeys(mcx, &root, &[pathkey(merged), pathkey(second)], &rtable)
+        .unwrap();
+    assert_eq!(core::str::from_utf8(&text).unwrap(), "((t.a, u.c), (t.b, <>))\n");
+    let text = print::format_pathkeys(mcx, &root, &[], &rtable).unwrap();
+    assert_eq!(core::str::from_utf8(&text).unwrap(), "()\n");
+}
+
+// C print_slot (print.c:496-511): TupIsNull (NULL or empty slot) prints
+// "tuple is null.", a slot without a descriptor "no tuple descriptor.";
+// only a filled slot reaches debugtup.
+#[test]
+fn print_slot_preamble_matches_c_early_returns() {
+    use std::rc::Rc;
+    use types_slot::{SlotData, TupleSlotKind, TupleTableSlot, VirtualTupleTableSlot};
+    use types_tuple::TupleDescData;
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let mut slot = SlotData::Virtual(VirtualTupleTableSlot {
+        base: TupleTableSlot::new_in(mcx, TupleSlotKind::Virtual),
+        data: mcx::PgVec::new_in(mcx),
+    });
+    assert!(slot.base().is_empty());
+    assert_eq!(print::slot_preamble(&slot), Some("tuple is null.\n"));
+    slot.base_mut().mark_not_empty();
+    assert_eq!(print::slot_preamble(&slot), Some("no tuple descriptor.\n"));
+    // set_descriptor requires an empty slot (ExecSetSlotDescriptor clears it)
+    slot.base_mut().mark_empty();
+    let desc = Rc::new(TupleDescData {
+        natts: 0,
+        tdtypeid: 0,
+        tdtypmod: -1,
+        tdrefcount: -1,
+        constr: None,
+        compact_attrs: mcx::PgVec::new_in(mcx),
+        attrs: mcx::PgVec::new_in(mcx),
+    });
+    slot.base_mut().set_descriptor(mcx, desc);
+    slot.base_mut().mark_not_empty();
+    assert_eq!(print::slot_preamble(&slot), None);
+    assert!(print::print_slot(None).is_ok());
+}

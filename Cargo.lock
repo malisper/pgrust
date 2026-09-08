@@ -10629,12 +10629,16 @@ dependencies = [
  "lsyscache",
  "mcx",
  "outfuncs",
+ "printtup",
  "stack_depth_core",
  "syscache_seams",
  "types_core",
  "types_error",
  "types_fmgr",
  "types_nodes",
+ "types_pathnodes",
+ "types_slot",
+ "types_tuple",
 ]
 
 [[package]]
@@ -11226,6 +11230,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_nodes",
+ "types_pathnodes",
  "types_tuple",
 ]
 

@@ -21,6 +21,10 @@ stack_depth_core = { path = "../../utils/misc/stack_depth_core" }
 fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
 types_fmgr = { path = "../../../_support/types/fmgr" }
 datum = { path = "../../../_support/types/datum" }
+types_pathnodes = { path = "../../../_support/types/pathnodes" }
+types_slot = { path = "../../../_support/types/types_slot" }
+printtup = { path = "../../access/common/printtup" }
 
 [dev-dependencies]
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
