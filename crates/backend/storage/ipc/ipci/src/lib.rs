@@ -109,6 +109,12 @@ pub fn CreateSharedMemoryAndSemaphores(fastpath_lock_groups_per_backend: i32) ->
     // mmaps with MAP_HUGETLB, so huge pages are always off (never "unknown").
     guc::SetConfigOption("huge_pages_status", Some("off"), PGC_INTERNAL, PGC_S_DYNAMIC_DEFAULT)?;
 
+    // ipci.c:236 InitShmemAllocation over the segment header
+    // PGSharedMemoryCreate sized (totalsize = size, sysv_shmem.c:855): seeds
+    // the freeoffset bump and the totalsize the free row of
+    // pg_shmem_allocations reports.
+    shmem::InitShmemAllocation(size);
+
     CreateOrAttachShmemStructs(&cfg)?;
 
     // The C shim is PGSharedMemoryCreate's segment header; ipci owns it here.

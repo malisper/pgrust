@@ -24,6 +24,7 @@ latch = { path = "../latch" }
 lmgr_proc = { path = "../../lmgr/lmgr_proc" }
 procsignal_seams = { path = "../procsignal_seams" }
 ipc_seams = { path = "../ipc_seams" }
+shmem = { path = "../shmem" }
 shmem_seams = { path = "../shmem_seams" }
 async_seams = { path = "../../../commands/async_seams" }
 parallel_seams = { path = "../../../access/transam/parallel_seams" }

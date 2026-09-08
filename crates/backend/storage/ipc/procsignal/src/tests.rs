@@ -90,10 +90,9 @@ fn shmem_shape_matches_c() {
     let _guard = serial();
     let n = (MAX_BACKENDS + NUM_AUXILIARY_PROCS) as usize;
     assert_eq!(proc_signal().psh_slot.len(), n);
-    assert_eq!(
-        ProcSignalShmemSize().unwrap(),
-        n * core::mem::size_of::<ProcSignalSlot>() + 8
-    );
+    // procsignal.c:124-131 with C's sizeof(ProcSignalSlot) = 128 and
+    // offsetof(ProcSignalHeader, psh_slot) = 8 (audit-18.6 w2-014).
+    assert_eq!(ProcSignalShmemSize().unwrap(), n * 128 + 8);
     let s = slot((n - 1) as ProcNumber);
     assert_eq!(s.pss_pid.load(Relaxed), 0);
     assert_eq!(s.pss_barrierGeneration.load(Relaxed), u64::MAX);
@@ -608,4 +607,18 @@ fn cancel_request_signal_failure_is_silent_like_c() {
         "C's SendCancelRequest logs nothing when kill() fails: {stray:?}"
     );
     cleanup_current();
+}
+
+// audit-18.6 w2-014: ProcSignalShmemInit is ShmemInitStruct("ProcSignal",
+// ProcSignalShmemSize()) (procsignal.c:138-143), ProcSignalShmemSize being
+// offsetof(ProcSignalHeader, psh_slot) = 8 plus NumProcSignalSlots *
+// sizeof(ProcSignalSlot) = 128 on 18.6 LP64 (procsignal.c:64-77, :124-131), so
+// pg_shmem_allocations lists the block with C's size. C attaches to an
+// existing block by name and size (shmem.c:428-456), the probe used here.
+#[test]
+fn shmem_init_registers_proc_signal_block() {
+    setup();
+    let slots = NumProcSignalSlots() as usize;
+    let (_, found) = shmem::ShmemInitStruct("ProcSignal", 8 + 128 * slots).unwrap();
+    assert!(found, "\"ProcSignal\" is not registered in the ShmemIndex");
 }

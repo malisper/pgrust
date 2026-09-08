@@ -1,14 +1,15 @@
 //! Custom wait events (wait_event.c): a shared, name<->info registry backing
 //! extension (`PG_WAIT_EXTENSION`) and injection-point (`PG_WAIT_INJECTIONPOINT`)
 //! wait events. C's shmem dynahash pair (`WaitEventCustomHashByInfo`,
-//! `WaitEventCustomHashByName`) becomes a process-lifetime `OnceLock` (one
-//! address space here; no `HASH_ATTACH` needed), same dynahash flags as the
-//! lock manager's shared table (`HASH_SHARED_MEM | HASH_FIXED_SIZE`).
+//! `WaitEventCustomHashByName`) is created through ShmemInitHash under C's
+//! names (wait_event.c:139/149) and held in a process-lifetime `OnceLock`
+//! (one address space here; no `HASH_ATTACH` needed); like the lock
+//! manager's tables they are preallocated at max size (`HASH_FIXED_SIZE`).
 
 use core::mem::size_of;
 use std::sync::OnceLock;
 
-use dynahash::{hash_create, hash_search, hash_seq_init, hash_seq_search};
+use dynahash::{hash_search, hash_seq_init, hash_seq_search};
 use elog::{elog, ereport};
 use init_small::globals as g;
 use lwlock::{main_lock, LWLockAcquire, LWLockRelease, LW_EXCLUSIVE, LW_SHARED};
@@ -18,7 +19,7 @@ use types_error::{
 };
 use types_hash::hsearch::{
     HASHCTL, HASH_BLOBS, HASH_ELEM, HASH_ENTER, HASH_FIND, HASH_FIXED_SIZE, HASH_SEQ_STATUS,
-    HASH_SHARED_MEM, HASH_STRINGS, HTAB,
+    HASH_STRINGS, HTAB,
 };
 use types_storage::storage::{Spinlock, SyncCell, WAIT_EVENT_CUSTOM_LOCK};
 
@@ -107,22 +108,27 @@ pub fn WaitEventCustomShmemInit() -> PgResult<()> {
     let mut by_info_ctl = HASHCTL::default();
     by_info_ctl.keysize = size_of::<u32>();
     by_info_ctl.entrysize = size_of::<EntryByInfo>();
-    // HASH_FIXED_SIZE forbids growth: preallocate at max (C grows 16->128).
-    let by_info = hash_create(
+    // wait_event.c:139-144: ShmemInitHash registers the table in the
+    // ShmemIndex. HASH_FIXED_SIZE forbids growth: preallocate at max (C grows
+    // WAIT_EVENT_CUSTOM_HASH_INIT_SIZE 16 -> 128).
+    let by_info = shmem::ShmemInitHash(
         "WaitEventCustom hash by wait event information",
         WAIT_EVENT_CUSTOM_HASH_MAX_SIZE as i64,
-        &by_info_ctl,
-        HASH_ELEM | HASH_BLOBS | HASH_SHARED_MEM | HASH_FIXED_SIZE,
+        WAIT_EVENT_CUSTOM_HASH_MAX_SIZE as i64,
+        &mut by_info_ctl,
+        HASH_ELEM | HASH_BLOBS | HASH_FIXED_SIZE,
     )?;
 
     let mut by_name_ctl = HASHCTL::default();
     by_name_ctl.keysize = NAMEDATALEN;
     by_name_ctl.entrysize = size_of::<EntryByName>();
-    let by_name = hash_create(
+    // wait_event.c:149-154
+    let by_name = shmem::ShmemInitHash(
         "WaitEventCustom hash by name",
         WAIT_EVENT_CUSTOM_HASH_MAX_SIZE as i64,
-        &by_name_ctl,
-        HASH_ELEM | HASH_STRINGS | HASH_SHARED_MEM | HASH_FIXED_SIZE,
+        WAIT_EVENT_CUSTOM_HASH_MAX_SIZE as i64,
+        &mut by_name_ctl,
+        HASH_ELEM | HASH_STRINGS | HASH_FIXED_SIZE,
     )?;
 
     let _ = CUSTOM.set(CustomTables {

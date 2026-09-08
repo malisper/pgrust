@@ -123,6 +123,26 @@ fn custom_wait_events_register_resolve_and_collide() {
     setup_lwlocks();
     let _ = super::custom::WaitEventCustomShmemInit();
 
+    // audit-18.6 w2-014: both tables are ShmemInitHash creations
+    // (wait_event.c:139/149) registered under their names with
+    // hash_get_shared_size (shmem.c:353-363) for WAIT_EVENT_CUSTOM_HASH_MAX_SIZE
+    // = 128 entries, so pg_shmem_allocations lists them with C's sizes; C
+    // attaches by name and size (shmem.c:428-456), the probe used here.
+    {
+        use dynahash::{hash_get_shared_size, hash_select_dirsize};
+        use types_hash::hsearch::{HASHCTL, HASH_DIRSIZE};
+        let mut info = HASHCTL::new();
+        info.dsize = hash_select_dirsize(128);
+        info.max_dsize = info.dsize;
+        let size = hash_get_shared_size(&info, HASH_DIRSIZE);
+        let (_, found) =
+            shmem::ShmemInitStruct("WaitEventCustom hash by wait event information", size)
+                .unwrap();
+        assert!(found, "the by-info table is not registered in the ShmemIndex");
+        let (_, found) = shmem::ShmemInitStruct("WaitEventCustom hash by name", size).unwrap();
+        assert!(found, "the by-name table is not registered in the ShmemIndex");
+    }
+
     let ext = super::custom::WaitEventExtensionNew("my_ext_wait").unwrap();
     assert_eq!(ext & super::WAIT_EVENT_CLASS_MASK, super::PG_WAIT_EXTENSION);
     assert_eq!(super::custom::GetWaitEventCustomIdentifier(ext).unwrap(), "my_ext_wait");

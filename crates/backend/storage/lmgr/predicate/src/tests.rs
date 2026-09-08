@@ -801,3 +801,32 @@ fn summarization_under_sxact_pool_pressure() {
     // Checkpoint after the storm truncates the now-idle SLRU cleanly.
     CheckPointPredicate().unwrap();
 }
+
+// audit-18.6 w2-014: PredicateLockShmemInit creates its three tables through
+// ShmemInitHash (predicate.c:1170/1206/1288), which registers each under its
+// name with hash_get_shared_size (shmem.c:353-363), so pg_shmem_allocations
+// lists "PREDICATELOCKTARGET hash", "PREDICATELOCK hash" and
+// "SERIALIZABLEXID hash" with C's sizes. C attaches by name and size
+// (shmem.c:428-456), the probe used here.
+#[test]
+fn shmem_init_registers_predicate_hashes_with_c_shared_size() {
+    use dynahash::{hash_get_shared_size, hash_select_dirsize};
+    use types_hash::hsearch::{HASHCTL, HASH_DIRSIZE};
+    setup();
+    let shared_size = |max_size: i64| {
+        let mut info = HASHCTL::new();
+        info.dsize = hash_select_dirsize(max_size);
+        info.max_dsize = info.dsize;
+        hash_get_shared_size(&info, HASH_DIRSIZE)
+    };
+    let max_table_size = crate::engine::NPREDICATELOCKTARGETENTS(CFG.max_prepared_xacts);
+    let (_, found) =
+        shmem::ShmemInitStruct("PREDICATELOCKTARGET hash", shared_size(max_table_size)).unwrap();
+    assert!(found, "\"PREDICATELOCKTARGET hash\" is not registered in the ShmemIndex");
+    let (_, found) =
+        shmem::ShmemInitStruct("PREDICATELOCK hash", shared_size(max_table_size * 2)).unwrap();
+    assert!(found, "\"PREDICATELOCK hash\" is not registered in the ShmemIndex");
+    let (_, found) =
+        shmem::ShmemInitStruct("SERIALIZABLEXID hash", shared_size(max_table_size * 2)).unwrap();
+    assert!(found, "\"SERIALIZABLEXID hash\" is not registered in the ShmemIndex");
+}

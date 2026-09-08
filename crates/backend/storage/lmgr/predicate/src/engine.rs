@@ -30,7 +30,7 @@ use types_error::{
 };
 use types_hash::hsearch::{
     HASHCTL, HASH_BLOBS, HASH_ELEM, HASH_ENTER, HASH_ENTER_NULL, HASH_FIND, HASH_FIXED_SIZE,
-    HASH_FUNCTION, HASH_PARTITION, HASH_REMOVE, HASH_SEQ_STATUS, HASH_SHARED_MEM, HTAB,
+    HASH_FUNCTION, HASH_PARTITION, HASH_REMOVE, HASH_SEQ_STATUS, HTAB,
 };
 use types_snapshot::{IsMVCCSnapshot, SnapshotData};
 use types_storage::storage::{
@@ -199,7 +199,7 @@ unsafe fn PredicateLockHashCodeFromTargetHashCode(
         ^ (((*predicatelocktag).myXact as usize as u32) << LOG2_NUM_PREDICATELOCK_PARTITIONS)
 }
 
-fn NPREDICATELOCKTARGETENTS(max_prepared_xacts: i32) -> i64 {
+pub(crate) fn NPREDICATELOCKTARGETENTS(max_prepared_xacts: i32) -> i64 {
     max_predicate_locks_per_xact() as i64
         * (init_small::globals::MaxBackends() as i64 + max_prepared_xacts as i64)
 }
@@ -470,11 +470,14 @@ pub fn PredicateLockShmemInit(max_prepared_xacts: i32) -> PgResult<()> {
         info.keysize = size_of::<PREDICATELOCKTARGETTAG>();
         info.entrysize = size_of::<PREDICATELOCKTARGET>();
         info.num_partitions = NUM_PREDICATELOCK_PARTITIONS as i64;
-        let target_hash = hash_create(
+        // predicate.c:1170-1175: ShmemInitHash registers the table under its
+        // C name (pg_shmem_allocations) and preallocates header + directory.
+        let target_hash = shmem::ShmemInitHash(
             "PREDICATELOCKTARGET hash",
             max_table_size_targets,
-            &info,
-            HASH_ELEM | HASH_BLOBS | HASH_PARTITION | HASH_FIXED_SIZE | HASH_SHARED_MEM,
+            max_table_size_targets,
+            &mut info,
+            HASH_ELEM | HASH_BLOBS | HASH_PARTITION | HASH_FIXED_SIZE,
         )?;
 
         // Reserve the scratch (dummy) entry lock-transfer relies on.
@@ -493,11 +496,13 @@ pub fn PredicateLockShmemInit(max_prepared_xacts: i32) -> PgResult<()> {
         info.entrysize = size_of::<PREDICATELOCK>();
         info.hash = Some(predicatelock_hash);
         info.num_partitions = NUM_PREDICATELOCK_PARTITIONS as i64;
-        let lock_hash = hash_create(
+        // predicate.c:1206-1211
+        let lock_hash = shmem::ShmemInitHash(
             "PREDICATELOCK hash",
             max_table_size_targets * 2,
-            &info,
-            HASH_ELEM | HASH_FUNCTION | HASH_PARTITION | HASH_FIXED_SIZE | HASH_SHARED_MEM,
+            max_table_size_targets * 2,
+            &mut info,
+            HASH_ELEM | HASH_FUNCTION | HASH_PARTITION | HASH_FIXED_SIZE,
         )?;
 
         let xact_count = (init_small::globals::MaxBackends() + max_prepared_xacts) as i64;
@@ -517,11 +522,13 @@ pub fn PredicateLockShmemInit(max_prepared_xacts: i32) -> PgResult<()> {
         // C sizes this at max_table_size AFTER the *10 (predicate.c:1289):
         // committed xacts keep their SERIALIZABLEXID entries while they sit
         // on the finished list, so the hash must cover the whole sxact pool.
-        let xid_hash = hash_create(
+        // predicate.c:1288-1293
+        let xid_hash = shmem::ShmemInitHash(
             "SERIALIZABLEXID hash",
             elem_count,
-            &info,
-            HASH_ELEM | HASH_BLOBS | HASH_FIXED_SIZE | HASH_SHARED_MEM,
+            elem_count,
+            &mut info,
+            HASH_ELEM | HASH_BLOBS | HASH_FIXED_SIZE,
         )?;
 
         let conflict_count = elem_count * 5;

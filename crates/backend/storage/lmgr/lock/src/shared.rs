@@ -7,7 +7,7 @@ use types_core::{ProcNumber, Size};
 use types_error::PgResult;
 use types_hash::hsearch::{
     HASHCTL, HASH_BLOBS, HASH_ELEM, HASH_ENTER_NULL, HASH_FIND, HASH_FIXED_SIZE, HASH_FUNCTION,
-    HASH_PARTITION, HASH_REMOVE, HASH_SEQ_STATUS, HASH_SHARED_MEM, HTAB,
+    HASH_PARTITION, HASH_REMOVE, HASH_SEQ_STATUS, HTAB,
 };
 use types_storage::ilist::{dlist_head, dlist_node};
 use types_storage::lock::{
@@ -20,7 +20,7 @@ use types_storage::storage::{
 
 use crate::waitqueue::ProcLockWakeup;
 
-fn NLOCKENTS(max_prepared_xacts: i32) -> i64 {
+pub(crate) fn NLOCKENTS(max_prepared_xacts: i32) -> i64 {
     crate::max_locks_per_xact() as i64
         * (init_small::globals::MaxBackends() as i64 + max_prepared_xacts as i64)
 }
@@ -44,21 +44,25 @@ pub(crate) fn shared() -> &'static SharedTables {
         .unwrap_or_else(|| panic!("lock manager shmem not initialized"))
 }
 
-// C's ShmemInitHash flag set (no HASH_ATTACH: one address space). Divergences
-// vs C stand: preallocation is max-size (C: init_size then grow within shmem)
-// and the bound is entry-count, not shmem bytes; HASH_ENTER_NULL plays C's
+// lock.c:465/484: ShmemInitHash(name, init_table_size, max_table_size, &info,
+// flags | HASH_PARTITION) registers the table in the ShmemIndex under its C
+// name. Divergences vs C stand: preallocation is max-size under
+// HASH_FIXED_SIZE (dynahash's growable shared tables are unported, so
+// init_size = max_size here; C: init_size then grow within shmem) and the
+// bound is entry-count, not shmem bytes; HASH_ENTER_NULL plays C's
 // bounded-shmem exhaustion.
 fn shmem_init_hash(
     name: &str,
     max_size: i64,
-    info: &HASHCTL,
+    info: &mut HASHCTL,
     hash_flags: i32,
 ) -> PgResult<*mut HTAB> {
-    dynahash::hash_create(
+    shmem::ShmemInitHash(
         name,
         max_size,
+        max_size,
         info,
-        hash_flags | HASH_PARTITION | HASH_SHARED_MEM | HASH_FIXED_SIZE,
+        hash_flags | HASH_PARTITION | HASH_FIXED_SIZE,
     )
 }
 
@@ -116,7 +120,8 @@ pub fn LockManagerShmemInit(max_prepared_xacts: i32) -> PgResult<()> {
     info.keysize = size_of::<LOCKTAG>();
     info.entrysize = size_of::<LOCK>();
     info.num_partitions = NUM_LOCK_PARTITIONS as i64;
-    let lock_hash = shmem_init_hash("LOCK hash", max_table_size, &info, HASH_ELEM | HASH_BLOBS)?;
+    let lock_hash =
+        shmem_init_hash("LOCK hash", max_table_size, &mut info, HASH_ELEM | HASH_BLOBS)?;
 
     let max_table_size = max_table_size * 2;
     let mut info = HASHCTL::new();
@@ -127,7 +132,7 @@ pub fn LockManagerShmemInit(max_prepared_xacts: i32) -> PgResult<()> {
     let proclock_hash_table = shmem_init_hash(
         "PROCLOCK hash",
         max_table_size,
-        &info,
+        &mut info,
         HASH_ELEM | HASH_FUNCTION,
     )?;
 

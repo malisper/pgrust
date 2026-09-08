@@ -1399,3 +1399,26 @@ fn set_replication_slot_xmin_logs_debug1_like_c() {
         "captured log: {log:?}"
     );
 }
+
+// audit-18.6 w2-014: ProcArrayShmemInit is ShmemInitStruct("Proc Array",
+// offsetof(ProcArrayStruct, pgprocnos) + sizeof(int) * PROCARRAY_MAXPROCS)
+// plus, under hot_standby (the boot default), "KnownAssignedXids" /
+// "KnownAssignedXidsValid" over TOTAL_MAX_CACHED_SUBXIDS (procarray.c:424-460),
+// so pg_shmem_allocations lists the three blocks with C's sizes. C attaches to
+// an existing block by name and size (shmem.c:428-456: found = true; a size
+// mismatch is an ERROR), which is the probe used here.
+#[test]
+fn shmem_init_registers_proc_array_and_known_assigned_xids() {
+    setup();
+    let array = procArray();
+    let max_procs = array.maxProcs as usize;
+    let max_kax = array.maxKnownAssignedXids as usize;
+    assert_eq!(max_kax, (PGPROC_MAX_CACHED_SUBXIDS + 1) * max_procs);
+    // offsetof(ProcArrayStruct, pgprocnos): nine 4-byte fields (procarray.c:71-100).
+    let (_, found) = shmem::ShmemInitStruct("Proc Array", 36 + 4 * max_procs).unwrap();
+    assert!(found, "\"Proc Array\" is not registered in the ShmemIndex");
+    let (_, found) = shmem::ShmemInitStruct("KnownAssignedXids", 4 * max_kax).unwrap();
+    assert!(found, "\"KnownAssignedXids\" is not registered in the ShmemIndex");
+    let (_, found) = shmem::ShmemInitStruct("KnownAssignedXidsValid", max_kax).unwrap();
+    assert!(found, "\"KnownAssignedXidsValid\" is not registered in the ShmemIndex");
+}

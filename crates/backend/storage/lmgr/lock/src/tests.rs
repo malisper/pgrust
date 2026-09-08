@@ -758,3 +758,28 @@ fn autovacuum_cancel_failure_warning_carries_strerror_text() {
         "expected {expected:?}, got {warnings:?}"
     );
 }
+
+// audit-18.6 w2-014: LockManagerShmemInit creates both tables through
+// ShmemInitHash (lock.c:465/484), which registers each under its name with
+// hash_get_shared_size (HASHHDR + hash_select_dirsize(max_size) directory
+// slots; shmem.c:353-363), so pg_shmem_allocations lists "LOCK hash" and
+// "PROCLOCK hash" with C's sizes. C attaches by name and size
+// (shmem.c:428-456), the probe used here.
+#[test]
+fn shmem_init_registers_lock_hashes_with_c_shared_size() {
+    use dynahash::{hash_get_shared_size, hash_select_dirsize};
+    use types_hash::hsearch::{HASHCTL, HASH_DIRSIZE};
+    setup();
+    let shared_size = |max_size: i64| {
+        let mut info = HASHCTL::new();
+        info.dsize = hash_select_dirsize(max_size);
+        info.max_dsize = info.dsize;
+        hash_get_shared_size(&info, HASH_DIRSIZE)
+    };
+    let max_table_size = crate::shared::NLOCKENTS(CFG.max_prepared_xacts);
+    let (_, found) = shmem::ShmemInitStruct("LOCK hash", shared_size(max_table_size)).unwrap();
+    assert!(found, "\"LOCK hash\" is not registered in the ShmemIndex");
+    let (_, found) =
+        shmem::ShmemInitStruct("PROCLOCK hash", shared_size(max_table_size * 2)).unwrap();
+    assert!(found, "\"PROCLOCK hash\" is not registered in the ShmemIndex");
+}

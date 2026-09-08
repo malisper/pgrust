@@ -3,12 +3,20 @@
 // leaked, zeroed, cache-line-aligned heap allocation per request (C never
 // frees shmem either); the ShmemIndex dynahash is a Mutex'd registry (the
 // Mutex is C's ShmemIndexLock); ShmemLock stays a spinlock (lwlock.c brackets
-// its shared counters with it via the seams). Segment mechanics have no
-// thread-model counterpart and no port: InitShmemAccess/Allocation/Index
-// bootstrap, ShmemAllocUnlocked, ShmemAddrIsValid. pg_get_shmem_allocations
+// its shared counters with it via the seams). ShmemInitHash registers every
+// shared dynahash table under its C name and hands dynahash the
+// preallocated header + directory, as C does. Segment mechanics have no
+// thread-model counterpart and no port: InitShmemAccess, the InitShmemIndex
+// bootstrap (its "ShmemIndex" table never enters the index, so
+// pg_shmem_allocations lists no such row in C either), ShmemAllocUnlocked,
+// ShmemAddrIsValid. pg_get_shmem_allocations
 // 5052 maps ShmemSegHdr->freeoffset to a bump counter over all ShmemAllocRaw
-// calls, so `off` reproduces C's within-segment offsets; the trailing free
-// row is size 0 (the malloc-backed segment reserves nothing ahead).
+// calls, so `off` reproduces C's within-segment offsets; InitShmemAllocation
+// seeds the counter and totalsize the way PGSharedMemoryCreate +
+// InitShmemAllocation do, so the trailing free row is C's
+// totalsize - freeoffset. The bump counter has no ceiling: C's
+// out-of-shared-memory arm (shmem.c:213) needs a CalculateShmemSize that
+// sums every subsystem, which ipci does not yet (audit-18.6 b020 b1-b32a6a2c).
 // The NUMA builtins (4099/4100) are ported below as C's no-libnuma build.
 #![allow(non_snake_case)]
 
@@ -18,6 +26,9 @@ use std::sync::Mutex;
 
 use elog::ereport;
 use types_error::{ErrorLocation, PgResult, ERRCODE_OUT_OF_MEMORY, ERROR};
+use types_hash::hsearch::{
+    HASHCTL, HASHHDR, HASH_ALLOC, HASH_ATTACH, HASH_DIRSIZE, HASH_SHARED_MEM, HTAB,
+};
 
 #[cfg(test)]
 mod tests;
@@ -50,10 +61,43 @@ static SHMEM_INDEX: Mutex<Vec<ShmemIndexEnt>> = Mutex::new(Vec::new());
 static SHMEM_LOCK: AtomicBool = AtomicBool::new(false);
 // ShmemSegHdr->freeoffset counterpart: total bytes bump-allocated so far.
 static SHMEM_FREEOFFSET: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+// ShmemSegHdr->totalsize counterpart: CalculateShmemSize's segment size, set
+// by InitShmemAllocation (0 until the postmaster's bring-up runs it).
+static SHMEM_TOTALSIZE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 fn CACHELINEALIGN(len: usize) -> Option<usize> {
     len.checked_add(PG_CACHE_LINE_SIZE - 1)
         .map(|n| n & !(PG_CACHE_LINE_SIZE - 1))
+}
+
+// MAXALIGN (c.h): 8-byte alignment on every LP64 target.
+const fn MAXALIGN(len: usize) -> usize {
+    (len + 7) & !7
+}
+
+/// InitShmemAllocation (shmem.c:115-142) over the header PGSharedMemoryCreate
+/// just filled in (sysv_shmem.c:855-856: totalsize = size, freeoffset =
+/// MAXALIGN(sizeof(PGShmemHeader))): the ShmemLock spinlock is carved with
+/// ShmemAllocUnlocked (shmem.c:129; :238-262 rounds start and size to
+/// MAXALIGN) and the first ShmemAlloc is then pushed to a cache-line boundary
+/// (shmem.c:137-138). The Rust ShmemLock is a static, so only the bump
+/// accounting is reproduced: the header bytes are added to the counter, and
+/// `off` of the first block indexed after this call is C's 128 whenever the
+/// bring-up order is C's. (pgrust's postmaster registers "Background Worker
+/// Data" and the launcher block before CreateSharedMemoryAndSemaphores —
+/// C does both inside CreateOrAttachShmemStructs — so those two carry
+/// pre-header offsets until that ordering is C's; the bytes stay accounted.)
+pub fn InitShmemAllocation(totalsize: usize) {
+    SHMEM_TOTALSIZE.store(totalsize, Ordering::Relaxed);
+    SHMEM_FREEOFFSET.fetch_add(initial_freeoffset(), Ordering::Relaxed);
+}
+
+// freeoffset after InitShmemAllocation: sysv_shmem.c:856 then shmem.c:129-138.
+fn initial_freeoffset() -> usize {
+    let freeoffset = MAXALIGN(core::mem::size_of::<types_storage::PGShmemHeader>());
+    // slock_t is 1 byte (x86_64) or an int (aarch64): MAXALIGN(1) = MAXALIGN(4).
+    let freeoffset = MAXALIGN(freeoffset) + MAXALIGN(1);
+    CACHELINEALIGN(freeoffset).expect("segment header fits the counter")
 }
 
 // Returns (space, off): `off` is the bump counter's value this request
@@ -144,6 +188,38 @@ pub fn ShmemInitStruct(name: &str, size: usize) -> PgResult<(*mut u8, bool)> {
         off,
     });
     Ok((struct_ptr, false))
+}
+
+/// ShmemInitHash (shmem.c:332-380): create a shared-memory dynahash table.
+/// The directory is fixed at hash_select_dirsize(max_size) slots, the
+/// allocator is ShmemAllocNoError, and HASH_SHARED_MEM | HASH_ALLOC |
+/// HASH_DIRSIZE are added to the caller's flags; the header + directory block
+/// (hash_get_shared_size) is registered in the ShmemIndex under `name`, so
+/// pg_shmem_allocations lists the table with C's size, and its location is
+/// handed to hash_create as info->hctl. A table already in the index is C's
+/// HASH_ATTACH arm, dynahash's typed refusal in one address space.
+pub fn ShmemInitHash(
+    name: &str,
+    init_size: i64,
+    max_size: i64,
+    info: &mut HASHCTL,
+    hash_flags: i32,
+) -> PgResult<*mut HTAB> {
+    info.dsize = dynahash::hash_select_dirsize(max_size);
+    info.max_dsize = info.dsize;
+    info.alloc = Some(ShmemAllocNoError);
+    let mut hash_flags = hash_flags | HASH_SHARED_MEM | HASH_ALLOC | HASH_DIRSIZE;
+
+    let (location, found) =
+        ShmemInitStruct(name, dynahash::hash_get_shared_size(info, hash_flags))?;
+
+    if found {
+        hash_flags |= HASH_ATTACH;
+    }
+
+    info.hctl = location.cast::<HASHHDR>();
+
+    dynahash::hash_create(name, init_size, info, hash_flags)
 }
 
 // add_size/mul_size live in mcxt.c at 18.6 (mcxt.c:1684/:1703); the
@@ -241,9 +317,11 @@ pub fn fc_pg_get_shmem_allocations_numa(
     unreachable!()
 }
 
-// pg_get_shmem_allocations (shmem.c): named ShmemIndex rows, then
-// <anonymous> (bump usage outside the index), then the free row (size 0
-// here — the malloc-backed segment reserves nothing ahead).
+// pg_get_shmem_allocations (shmem.c:491-546): named ShmemIndex rows, then
+// <anonymous> (bump usage outside the index), then the free row
+// (totalsize - freeoffset, shmem.c:532-536; totalsize is what
+// InitShmemAllocation was handed, so the row is C's whenever
+// CalculateShmemSize is).
 pub fn fc_pg_get_shmem_allocations(
     flinfo: Option<&mut types_fmgr::FmgrInfo>,
     fcinfo: &mut types_fmgr::FunctionCallInfoBaseData,
@@ -283,12 +361,14 @@ pub fn fc_pg_get_shmem_allocations(
         ],
         &[false, true, false, false],
     )?;
+    let totalsize = SHMEM_TOTALSIZE.load(Ordering::Relaxed);
+    let free = totalsize as i64 - freeoffset as i64;
     srf.putvalues(
         &[
             datum::Datum::null(),
             datum::Datum::from_i64(freeoffset as i64),
-            datum::Datum::from_i64(0),
-            datum::Datum::from_i64(0),
+            datum::Datum::from_i64(free),
+            datum::Datum::from_i64(free),
         ],
         &[true, false, false, false],
     )?;

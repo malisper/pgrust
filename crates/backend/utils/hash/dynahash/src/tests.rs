@@ -2,7 +2,9 @@
 
 use super::*;
 use ::types_error::{ERRCODE_FEATURE_NOT_SUPPORTED, ERROR, FATAL, PANIC};
-use ::types_hash::hsearch::{HASH_ATTACH, HASH_FUNCTION, HASH_PARTITION, HASH_SHARED_MEM};
+use ::types_hash::hsearch::{
+    HASH_ATTACH, HASH_DIRSIZE, HASH_FUNCTION, HASH_PARTITION, HASH_SHARED_MEM,
+};
 use std::sync::Once;
 
 fn search(t: *mut HTAB, k: *const u8, a: HASHACTION) -> PgResult<(*mut u8, bool)> {
@@ -32,6 +34,20 @@ fn ctl(keysize: usize, entrysize: usize) -> HASHCTL {
         entrysize,
         ..Default::default()
     }
+}
+
+// dynahash.c:478-487: a shared table's header and directory are preallocated
+// by ShmemInitHash (shmem.c:353-363: hash_select_dirsize slots, HASH_DIRSIZE);
+// this stands in for it, leaking the block for the test process like shmem.
+fn shared_ctl(keysize: usize, entrysize: usize, max_size: i64) -> HASHCTL {
+    let mut info = ctl(keysize, entrysize);
+    info.dsize = hash_select_dirsize(max_size);
+    info.max_dsize = info.dsize;
+    let bytes = hash_get_shared_size(&info, HASH_DIRSIZE);
+    let layout = std::alloc::Layout::from_size_align(bytes, 128).unwrap();
+    // SAFETY: non-zero layout; the block outlives every table built on it.
+    info.hctl = unsafe { std::alloc::alloc_zeroed(layout) }.cast();
+    info
 }
 
 unsafe fn entry(p: *mut u8) -> &'static mut [u8] {
@@ -372,13 +388,18 @@ fn partitioned_freelists_spread_lock_and_borrow() {
 #[test]
 fn partitioned_shared_fixed_create_works() {
     install_test_seams();
-    let mut info = ctl(4, 8);
+    let mut info = shared_ctl(4, 8, 128);
     info.num_partitions = 4;
     let table = hash_create(
         "part_shared",
         128,
         &info,
-        HASH_ELEM | HASH_BLOBS | HASH_PARTITION | HASH_SHARED_MEM | HASH_FIXED_SIZE,
+        HASH_ELEM
+            | HASH_BLOBS
+            | HASH_PARTITION
+            | HASH_SHARED_MEM
+            | HASH_FIXED_SIZE
+            | HASH_DIRSIZE,
     )
     .unwrap();
     unsafe {
@@ -409,13 +430,18 @@ fn partitioned_shared_fixed_create_works() {
 #[test]
 fn reset_after_crash_restores_boot_image() {
     install_test_seams();
-    let mut info = ctl(4, 8);
+    let mut info = shared_ctl(4, 8, 128);
     info.num_partitions = 4;
     let table = hash_create(
         "part_shared_reset",
         128,
         &info,
-        HASH_ELEM | HASH_BLOBS | HASH_PARTITION | HASH_SHARED_MEM | HASH_FIXED_SIZE,
+        HASH_ELEM
+            | HASH_BLOBS
+            | HASH_PARTITION
+            | HASH_SHARED_MEM
+            | HASH_FIXED_SIZE
+            | HASH_DIRSIZE,
     )
     .unwrap();
     unsafe {
@@ -515,12 +541,12 @@ fn corrupted_local_table_is_a_fatal_error() {
 #[test]
 fn corrupted_shared_table_is_a_panic_error() {
     install_test_seams();
-    let ctl = ctl(4, 8);
+    let ctl = shared_ctl(4, 8, 8);
     let table = hash_create(
         "corrupt_shared",
         8,
         &ctl,
-        HASH_ELEM | HASH_BLOBS | HASH_SHARED_MEM | HASH_FIXED_SIZE,
+        HASH_ELEM | HASH_BLOBS | HASH_SHARED_MEM | HASH_FIXED_SIZE | HASH_DIRSIZE,
     )
     .unwrap();
     unsafe {

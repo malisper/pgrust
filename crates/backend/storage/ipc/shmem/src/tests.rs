@@ -205,3 +205,71 @@ fn index_entry_off_is_the_entrys_own_bump() {
     assert_eq!(offs.len(), total, "a bump offset was attributed twice");
     assert!(offs.iter().all(|off| off % PG_CACHE_LINE_SIZE == 0));
 }
+
+// shmem.c:332-380: ShmemInitHash fixes the directory at
+// hash_select_dirsize(max_size) slots, registers the header + directory block
+// (hash_get_shared_size) under the table's name, and hands its location to
+// hash_create as the preallocated header (dynahash.c:478-487); elements are
+// carved with ShmemAllocNoError. The table works, and the index row carries
+// the C size.
+#[test]
+fn init_hash_registers_header_and_directory_under_the_table_name() {
+    use types_hash::hsearch::{HASH_BLOBS, HASH_ELEM, HASH_ENTER, HASH_FIXED_SIZE};
+    let mut info = HASHCTL::new();
+    info.keysize = 4;
+    info.entrysize = 16;
+    let table =
+        ShmemInitHash("test_init_hash", 32, 32, &mut info, HASH_ELEM | HASH_BLOBS | HASH_FIXED_SIZE)
+            .unwrap();
+    assert_eq!(info.dsize, dynahash::hash_select_dirsize(32));
+    assert_eq!(info.max_dsize, info.dsize);
+    let expected = core::mem::size_of::<HASHHDR>() + info.dsize as usize * 8;
+    let ent_size = {
+        let index = SHMEM_INDEX.lock().unwrap();
+        index.iter().find(|e| e.name == "test_init_hash").map(|e| (e.size, e.location))
+    };
+    let (size, location) = ent_size.expect("ShmemInitHash registers the table name");
+    assert_eq!(size, expected);
+    assert_eq!(size, dynahash::hash_get_shared_size(&info, HASH_DIRSIZE));
+    // dynahash.c:484: the header IS the registered block.
+    assert_eq!(info.hctl as usize, location);
+    unsafe {
+        assert!((*table).isshared);
+        assert_eq!((*table).hctl as usize, location);
+        let mut found = false;
+        let key = 7u32.to_ne_bytes();
+        let p = dynahash::hash_search(table, key.as_ptr(), HASH_ENTER, Some(&mut found)).unwrap();
+        assert!(!p.is_null() && !found);
+        let p2 = dynahash::hash_search(table, key.as_ptr(), HASH_ENTER, Some(&mut found)).unwrap();
+        assert!(found);
+        assert_eq!(p, p2);
+    }
+}
+
+// shmem.c:369-373 + dynahash.c:491: a name already in the index is the
+// HASH_ATTACH arm, which one address space has no use for (dynahash's typed
+// refusal, carve-ratifications §4).
+#[test]
+fn init_hash_of_a_registered_name_is_the_attach_refusal() {
+    use types_hash::hsearch::{HASH_BLOBS, HASH_ELEM, HASH_FIXED_SIZE};
+    let mut info = HASHCTL::new();
+    info.keysize = 4;
+    info.entrysize = 16;
+    let flags = HASH_ELEM | HASH_BLOBS | HASH_FIXED_SIZE;
+    ShmemInitHash("test_init_hash_twice", 8, 8, &mut info, flags).unwrap();
+    let err = ShmemInitHash("test_init_hash_twice", 8, 8, &mut info, flags).unwrap_err();
+    assert_eq!(
+        err.message(),
+        "attaching to hash table \"test_init_hash_twice\" is not supported"
+    );
+}
+
+// sysv_shmem.c:855-856 + shmem.c:115-142: the segment starts with the
+// MAXALIGN'd PGShmemHeader (56 bytes on every LP64 target), then
+// ShmemAllocUnlocked's slock_t (MAXALIGN(1) = 8), then the first ShmemAlloc
+// is cache-line aligned: the first indexed block sits at off 128 in C.
+#[test]
+fn init_shmem_allocation_seeds_freeoffset_like_c() {
+    assert_eq!(core::mem::size_of::<types_storage::PGShmemHeader>(), 56);
+    assert_eq!(initial_freeoffset(), 128);
+}

@@ -28,6 +28,8 @@ varsup = { path = "../../../access/transam/varsup" }
 types_rel = { path = "../../../../_support/types/rel" }
 catalog_seams = { path = "../../../catalog/catalog_seams" }
 init_small = { path = "../../../utils/init/init_small" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+shmem = { path = "../shmem" }
 elog = { path = "../../../utils/error/elog" }
 postgres_seams = { path = "../../../tcop/postgres_seams" }
 superuser_seams = { path = "../../../utils/misc/superuser_seams" }

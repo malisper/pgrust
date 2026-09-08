@@ -49,12 +49,13 @@ fn XidGenLock() -> &'static lwlock::LWLock {
     lwlock::main_lock(XID_GEN_LOCK)
 }
 
-pub struct ProcArrayStruct {
-    numProcs: SyncCell<i32>,          // [PAL]
+/// ProcArrayStruct's fixed part (procarray.c:71-100) in C's layout: the
+/// ShmemInitStruct("Proc Array") block starts with these nine 4-byte fields
+/// and pgprocnos[PROCARRAY_MAXPROCS] follows at offset 36.
+#[repr(C)]
+pub struct ProcArrayShmem {
+    numProcs: SyncCell<i32>, // [PAL]
     maxProcs: i32,
-    replication_slot_xmin: SyncCell<TransactionId>, // [PAL]
-    replication_slot_catalog_xmin: SyncCell<TransactionId>, // [PAL]
-    pgprocnos: &'static [SyncCell<i32>], // [PAL]
     // KnownAssignedXids ring (startup process is the only writer). Adds
     // publish head with Release, no lock; readers hold PAL shared and load
     // head with Acquire (C's pg_write_barrier/pg_read_barrier pairing).
@@ -64,12 +65,33 @@ pub struct ProcArrayStruct {
     tailKnownAssignedXids: std::sync::atomic::AtomicI32,
     headKnownAssignedXids: std::sync::atomic::AtomicI32,
     lastOverflowedXid: SyncCell<TransactionId>, // [PAL]
+    replication_slot_xmin: SyncCell<TransactionId>, // [PAL]
+    replication_slot_catalog_xmin: SyncCell<TransactionId>, // [PAL]
+}
+
+// offsetof(ProcArrayStruct, pgprocnos) (procarray.c:99).
+const PROCARRAY_PGPROCNOS_OFFSET: usize = 36;
+const _: () = assert!(core::mem::size_of::<ProcArrayShmem>() == PROCARRAY_PGPROCNOS_OFFSET);
+const _: () = assert!(core::mem::align_of::<ProcArrayShmem>() == 4);
+
+/// The process-wide ProcArray: C's `procArray` header (in the "Proc Array"
+/// block) and the arrays carved from their ShmemIndex blocks — pgprocnos[]
+/// is the tail of "Proc Array", the KnownAssignedXids ring lives in
+/// "KnownAssignedXids" / "KnownAssignedXidsValid" (procarray.c:424-460).
+pub struct ProcArrayStruct {
+    shmem: &'static ProcArrayShmem,
+    pgprocnos: &'static [SyncCell<i32>], // [PAL]
     knownAssignedXids: &'static [std::sync::atomic::AtomicU32],
     knownAssignedXidsValid: &'static [std::sync::atomic::AtomicBool],
 }
 
-// SAFETY: SyncCell fields are serialized by ProcArrayLock as documented.
-unsafe impl Sync for ProcArrayStruct {}
+impl core::ops::Deref for ProcArrayStruct {
+    type Target = ProcArrayShmem;
+
+    fn deref(&self) -> &ProcArrayShmem {
+        self.shmem
+    }
+}
 
 // varsup.c owns the live TransamVariables instance; this direct-dep
 // re-export keeps the GetSnapshotData fastpath seam-free.
@@ -389,38 +411,133 @@ fn latest_completed_xid() -> FullTransactionId {
     FullTransactionId::from_u64(TransamVariables().latestCompletedXid.load(Relaxed))
 }
 
+// TOTAL_MAX_CACHED_SUBXIDS (procarray.c:399-400).
+fn TOTAL_MAX_CACHED_SUBXIDS(max_procs: usize) -> usize {
+    (PGPROC_MAX_CACHED_SUBXIDS + 1) * max_procs
+}
+
+// hot_standby (guc_tables.c, boot_val true): the GUC once its owner has
+// installed it; substrate test binaries that never bring the GUC store up
+// see the boot value, as C's static initializer gives them.
+fn EnableHotStandby() -> bool {
+    if guc_tables::vars::EnableHotStandby.installed() {
+        guc_tables::vars::EnableHotStandby.read()
+    } else {
+        true
+    }
+}
+
+/// ProcArrayShmemSize (procarray.c:376-411): the "Proc Array" block
+/// (offsetof(ProcArrayStruct, pgprocnos) + sizeof(int) * PROCARRAY_MAXPROCS)
+/// plus, under hot_standby, the KnownAssignedXids TransactionId and bool
+/// arrays over TOTAL_MAX_CACHED_SUBXIDS. PROCARRAY_MAXPROCS is MaxBackends +
+/// max_prepared_xacts (procarray.c:381); the caller passes the GUC as the
+/// other *ShmemSize functions do.
+pub fn ProcArrayShmemSize(max_prepared_xacts: i32) -> PgResult<usize> {
+    let max_procs = (init_small::globals::MaxBackends() + max_prepared_xacts) as usize;
+    let mut size = shmem::add_size(
+        PROCARRAY_PGPROCNOS_OFFSET,
+        shmem::mul_size(core::mem::size_of::<i32>(), max_procs)?,
+    )?;
+    if EnableHotStandby() {
+        let total = TOTAL_MAX_CACHED_SUBXIDS(max_procs);
+        size = shmem::add_size(
+            size,
+            shmem::mul_size(core::mem::size_of::<TransactionId>(), total)?,
+        )?;
+        size = shmem::add_size(size, shmem::mul_size(core::mem::size_of::<bool>(), total)?)?;
+    }
+    Ok(size)
+}
+
+// A ShmemIndex failure during ProcArrayShmemInit is C's boot-time
+// out-of-shared-memory ERROR in the postmaster (shmem.c:461-470), never a
+// user-reachable path.
+fn boot_shmem<T>(what: &str, r: PgResult<T>) -> T {
+    r.unwrap_or_else(|e| panic!("ProcArrayShmemInit ({what}): {}", e.message()))
+}
+
+/// ProcArrayShmemInit (procarray.c:424-460): ShmemInitStruct("Proc Array",
+/// offsetof(ProcArrayStruct, pgprocnos) + sizeof(int) * PROCARRAY_MAXPROCS)
+/// and, under hot_standby, "KnownAssignedXids" / "KnownAssignedXidsValid"
+/// over TOTAL_MAX_CACHED_SUBXIDS, so pg_shmem_allocations lists the three
+/// blocks with C's sizes and the arrays live in them. First time through
+/// (found = false) the header is written with C's boot image
+/// (procarray.c:432-443; xactCompletionCount = 1 is varsup's boot image).
 pub fn ProcArrayShmemInit() {
     let all_procs = ProcGlobal().allProcs.len();
     // PROCARRAY_MAXPROCS: auxiliary slots never join the array.
     let max_procs = all_procs - NUM_AUXILIARY_PROCS as usize;
+    let max_kax = TOTAL_MAX_CACHED_SUBXIDS(max_procs);
 
-    let pgprocnos: &'static [SyncCell<i32>] = (0..max_procs)
-        .map(|_| SyncCell::new(-1))
-        .collect::<Vec<_>>()
-        .leak();
+    let size = boot_shmem(
+        "Proc Array size",
+        shmem::mul_size(core::mem::size_of::<i32>(), max_procs)
+            .and_then(|tail| shmem::add_size(PROCARRAY_PGPROCNOS_OFFSET, tail)),
+    );
+    let (raw, found) = boot_shmem("Proc Array", shmem::ShmemInitStruct("Proc Array", size));
+    // SAFETY: a cache-line-aligned, zeroed ShmemIndex block of `size` bytes:
+    // the 36-byte header occupies its start and pgprocnos[max_procs] the
+    // rest (procarray.c:99), both 4-aligned; written once here before the
+    // pointer is published and leaked for the cluster lifetime like C shmem.
+    let (shmem_hdr, pgprocnos): (&'static ProcArrayShmem, &'static [SyncCell<i32>]) = unsafe {
+        let hdr = raw.cast::<ProcArrayShmem>();
+        let slots = raw.add(PROCARRAY_PGPROCNOS_OFFSET).cast::<SyncCell<i32>>();
+        if !found {
+            hdr.write(ProcArrayShmem {
+                numProcs: SyncCell::new(0),
+                maxProcs: max_procs as i32,
+                maxKnownAssignedXids: max_kax as i32,
+                numKnownAssignedXids: std::sync::atomic::AtomicI32::new(0),
+                tailKnownAssignedXids: std::sync::atomic::AtomicI32::new(0),
+                headKnownAssignedXids: std::sync::atomic::AtomicI32::new(0),
+                lastOverflowedXid: SyncCell::new(InvalidTransactionId),
+                replication_slot_xmin: SyncCell::new(InvalidTransactionId),
+                replication_slot_catalog_xmin: SyncCell::new(InvalidTransactionId),
+            });
+            // C leaves pgprocnos[] past numProcs unset; this port's empty-slot
+            // sentinel is -1 (ProcArrayShmemResetAfterCrash restores it).
+            for i in 0..max_procs {
+                slots.add(i).write(SyncCell::new(-1));
+            }
+        }
+        (&*hdr, core::slice::from_raw_parts(slots, max_procs))
+    };
 
-    // TOTAL_MAX_CACHED_SUBXIDS.
-    let max_kax = (PGPROC_MAX_CACHED_SUBXIDS + 1) * max_procs;
-    let known_assigned_xids: &'static [std::sync::atomic::AtomicU32] = (0..max_kax)
-        .map(|_| std::sync::atomic::AtomicU32::new(0))
-        .collect::<Vec<_>>()
-        .leak();
-    let known_assigned_xids_valid: &'static [std::sync::atomic::AtomicBool] = (0..max_kax)
-        .map(|_| std::sync::atomic::AtomicBool::new(false))
-        .collect::<Vec<_>>()
-        .leak();
+    // procarray.c:448-460: the KnownAssignedXids arrays exist only under
+    // hot_standby (C: NULL pointers otherwise; empty slices here).
+    let (known_assigned_xids, known_assigned_xids_valid): (
+        &'static [std::sync::atomic::AtomicU32],
+        &'static [std::sync::atomic::AtomicBool],
+    ) = if EnableHotStandby() {
+        let xids = boot_shmem(
+            "KnownAssignedXids",
+            shmem::mul_size(core::mem::size_of::<TransactionId>(), max_kax)
+                .and_then(|size| shmem::ShmemInitStruct("KnownAssignedXids", size)),
+        )
+        .0;
+        let valid = boot_shmem(
+            "KnownAssignedXidsValid",
+            shmem::mul_size(core::mem::size_of::<bool>(), max_kax)
+                .and_then(|size| shmem::ShmemInitStruct("KnownAssignedXidsValid", size)),
+        )
+        .0;
+        // SAFETY: zeroed ShmemIndex blocks of max_kax TransactionIds / bools;
+        // AtomicU32 / AtomicBool have their layouts, and all-zero is the boot
+        // image (0 / false) C's fresh segment gives them.
+        unsafe {
+            (
+                core::slice::from_raw_parts(xids.cast::<std::sync::atomic::AtomicU32>(), max_kax),
+                core::slice::from_raw_parts(valid.cast::<std::sync::atomic::AtomicBool>(), max_kax),
+            )
+        }
+    } else {
+        (&[], &[])
+    };
 
     let array: &'static ProcArrayStruct = Box::leak(Box::new(ProcArrayStruct {
-        numProcs: SyncCell::new(0),
-        maxProcs: max_procs as i32,
-        replication_slot_xmin: SyncCell::new(InvalidTransactionId),
-        replication_slot_catalog_xmin: SyncCell::new(InvalidTransactionId),
+        shmem: shmem_hdr,
         pgprocnos,
-        maxKnownAssignedXids: max_kax as i32,
-        numKnownAssignedXids: std::sync::atomic::AtomicI32::new(0),
-        tailKnownAssignedXids: std::sync::atomic::AtomicI32::new(0),
-        headKnownAssignedXids: std::sync::atomic::AtomicI32::new(0),
-        lastOverflowedXid: SyncCell::new(InvalidTransactionId),
         knownAssignedXids: known_assigned_xids,
         knownAssignedXidsValid: known_assigned_xids_valid,
     }));

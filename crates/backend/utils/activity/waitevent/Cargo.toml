@@ -12,6 +12,7 @@ path = "src/lib.rs"
 waitevent_seams = { path = "../waitevent_seams" }
 lwlock = { path = "../../../storage/lmgr/lwlock" }
 dynahash = { path = "../../hash/dynahash" }
+shmem = { path = "../../../storage/ipc/shmem" }
 init_small = { path = "../../init/init_small" }
 funcapi = { path = "../../fmgr/funcapi" }
 varlena = { path = "../../adt/varlena" }

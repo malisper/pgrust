@@ -357,16 +357,35 @@ unsafe fn hash_create_in(
         (*hashp).alloc = None;
     }
 
-    (*hashp).hctl = ptr::null_mut();
-    (*hashp).dir = ptr::null_mut();
-    (*hashp).hcxt = cxp as *mut u8;
-    (*hashp).isshared = flags & HASH_SHARED_MEM != 0;
-
-    let hdr = hash_alloc(hashp, size_of::<HASHHDR>());
-    if hdr.is_null() {
-        return Err(oom_error(false));
+    if flags & HASH_SHARED_MEM != 0 {
+        // dynahash.c:478-487: a shared table's ctl structure and directory
+        // are preallocated by ShmemInitHash (which also sets HASH_DIRSIZE |
+        // HASH_ALLOC): the header is info->hctl, the directory follows it.
+        // C dereferences a NULL hctl; a typed internal error stands in.
+        if info.hctl.is_null() {
+            return Err(Box::new(PgError::error(format!(
+                "shared hash table \"{tabname}\" has no preallocated header"
+            ))));
+        }
+        (*hashp).hctl = info.hctl;
+        (*hashp).dir = info.hctl.cast::<u8>().add(size_of::<HASHHDR>()).cast::<HASHSEGMENT>();
+        (*hashp).isshared = true;
+    } else {
+        // dynahash.c:501-506
+        (*hashp).hctl = ptr::null_mut();
+        (*hashp).dir = ptr::null_mut();
+        (*hashp).isshared = false;
     }
-    (*hashp).hctl = hdr as *mut HASHHDR;
+    (*hashp).hcxt = cxp as *mut u8;
+
+    // dynahash.c:508-514
+    if (*hashp).hctl.is_null() {
+        let hdr = hash_alloc(hashp, size_of::<HASHHDR>());
+        if hdr.is_null() {
+            return Err(oom_error(false));
+        }
+        (*hashp).hctl = hdr as *mut HASHHDR;
+    }
 
     (*hashp).frozen = false;
 

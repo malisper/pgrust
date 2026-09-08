@@ -101,8 +101,31 @@ impl ProcSignalSlot {
     }
 }
 
+// sizeof(ProcSignalSlot) on C 18.6 LP64 (procsignal.c:64-77):
+// pg_atomic_uint32 pss_pid (4) + int pss_cancel_key_len (4) +
+// uint8 pss_cancel_key[MAX_CANCEL_KEY_LENGTH = 32] + volatile sig_atomic_t
+// pss_signalFlags[NUM_PROCSIGNALS = 15] (60) + slock_t (1 on x86_64, 4 on
+// aarch64) padded to 104, + pg_atomic_uint64 pss_barrierGeneration (8) +
+// pg_atomic_uint32 pss_barrierCheckMask (4) + ConditionVariable {slock_t;
+// proclist_head {int head; int tail}} (12) = 128. This port's slot carries
+// thread-model fields and no CV, so it is laid out at its own (smaller)
+// stride inside C's block; the block is sized as C sizes it.
+const C_SIZEOF_PROC_SIGNAL_SLOT: usize = 128;
+// offsetof(ProcSignalHeader, psh_slot) (procsignal.c:81-85): the
+// pg_atomic_uint64 psh_barrierGeneration.
+const C_OFFSETOF_PSH_SLOT: usize = 8;
+const _: () = {
+    assert!(NUM_PROCSIGNALS == 15);
+    assert!(MAX_CANCEL_KEY_LENGTH == 32);
+    assert!(core::mem::size_of::<ProcSignalSlot>() <= C_SIZEOF_PROC_SIGNAL_SLOT);
+    assert!(core::mem::align_of::<ProcSignalSlot>() <= C_OFFSETOF_PSH_SLOT);
+};
+
+// C's ProcSignalHeader (procsignal.c:81-85) viewed into the
+// ShmemInitStruct("ProcSignal") block: psh_barrierGeneration at offset 0,
+// the slots from offset 8.
 struct ProcSignalHeader {
-    psh_barrierGeneration: AtomicU64,
+    psh_barrierGeneration: &'static AtomicU64,
     psh_slot: &'static [ProcSignalSlot],
 }
 
@@ -313,22 +336,49 @@ fn NumProcSignalSlots() -> i32 {
     g::MaxBackends() + NUM_AUXILIARY_PROCS
 }
 
+/// ProcSignalShmemSize (procsignal.c:124-131): NumProcSignalSlots *
+/// sizeof(ProcSignalSlot) + offsetof(ProcSignalHeader, psh_slot), with C's
+/// sizes, so shared_memory_size and the "ProcSignal" census row are C's.
 pub fn ProcSignalShmemSize() -> PgResult<usize> {
-    let size = shmem_seams::mul_size::call(
-        NumProcSignalSlots() as usize,
-        core::mem::size_of::<ProcSignalSlot>(),
-    )?;
-    shmem_seams::add_size::call(size, core::mem::size_of::<AtomicU64>())
+    let size = shmem::mul_size(NumProcSignalSlots() as usize, C_SIZEOF_PROC_SIGNAL_SLOT)?;
+    shmem::add_size(size, C_OFFSETOF_PSH_SLOT)
 }
 
+/// ProcSignalShmemInit (procsignal.c:138-164): ShmemInitStruct("ProcSignal",
+/// ProcSignalShmemSize()) registers the block in the ShmemIndex, so
+/// pg_shmem_allocations lists it; first time through (found = false) the
+/// barrier generation is 0 and every slot is unused (pid 0, no cancel key,
+/// flags clear, pss_barrierGeneration PG_UINT64_MAX, check mask 0). A
+/// ShmemIndex failure here is C's boot-time out-of-shared-memory ERROR in
+/// the postmaster, never a user-reachable path.
 pub fn ProcSignalShmemInit() {
     assert!(g::MaxBackends() > 0, "MaxBackends not initialized");
-    PROC_SIGNAL.get_or_init(|| ProcSignalHeader {
-        psh_barrierGeneration: AtomicU64::new(0),
-        psh_slot: (0..NumProcSignalSlots() as usize)
-            .map(|_| ProcSignalSlot::unused())
-            .collect::<Vec<_>>()
-            .leak(),
+    PROC_SIGNAL.get_or_init(|| {
+        let size = ProcSignalShmemSize()
+            .unwrap_or_else(|e| panic!("ProcSignalShmemInit: {}", e.message()));
+        let (raw, found) = shmem::ShmemInitStruct("ProcSignal", size)
+            .unwrap_or_else(|e| panic!("ProcSignalShmemInit: {}", e.message()));
+        let slots = NumProcSignalSlots() as usize;
+        // SAFETY: a cache-line-aligned, zeroed ShmemIndex block of
+        // 8 + slots * 128 bytes: the generation word is its first 8 bytes and
+        // the slots follow at their own stride (<= 128, align <= 8, asserted
+        // above), so every write is inside the block; written once here
+        // before the pointer is published and leaked for the cluster
+        // lifetime like C shmem.
+        unsafe {
+            let generation = raw.cast::<AtomicU64>();
+            let first = raw.add(C_OFFSETOF_PSH_SLOT).cast::<ProcSignalSlot>();
+            if !found {
+                generation.write(AtomicU64::new(0));
+                for i in 0..slots {
+                    first.add(i).write(ProcSignalSlot::unused());
+                }
+            }
+            ProcSignalHeader {
+                psh_barrierGeneration: &*generation,
+                psh_slot: core::slice::from_raw_parts(first, slots),
+            }
+        }
     });
 }
 
