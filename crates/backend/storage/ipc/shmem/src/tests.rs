@@ -246,6 +246,45 @@ fn init_hash_registers_header_and_directory_under_the_table_name() {
     }
 }
 
+// shmem.c:349-350 + dynahash.c:375: ShmemInitHash without HASH_FIXED_SIZE is
+// a growable shared table (wait_event.c:143, lock.c:469): past init_size the
+// table carves segments and elements with ShmemAllocNoError
+// (dynahash.c:1694/1724), which advances the segment's freeoffset
+// (shmem.c:210-215) -- never "out of shared memory" while the segment has
+// room, and never a refusal at create (audit-18.6 w2-060).
+#[test]
+fn init_hash_without_fixed_size_grows_through_shmem_alloc() {
+    use types_hash::hsearch::{HASH_BLOBS, HASH_ELEM, HASH_ENTER, HASH_FIND};
+    let mut info = HASHCTL::new();
+    info.keysize = 4;
+    info.entrysize = 16;
+    let table = ShmemInitHash("test_init_hash_grow", 8, 4096, &mut info, HASH_ELEM | HASH_BLOBS)
+        .expect("dynahash.c:375: a shared table need not be HASH_FIXED_SIZE");
+    let freeoffset_after_create = SHMEM_FREEOFFSET.load(Ordering::Relaxed);
+    unsafe {
+        assert!((*table).isshared);
+        assert!(!(*table).isfixed);
+        for i in 0u32..1000 {
+            let key = i.to_ne_bytes();
+            let mut found = false;
+            let p = dynahash::hash_search(table, key.as_ptr(), HASH_ENTER, Some(&mut found)).unwrap();
+            assert!(!found);
+            assert!(!p.is_null(), "growth past init_size=8 must not be out of shared memory");
+        }
+        assert_eq!(dynahash::hash_get_num_entries(table), 1000);
+        for i in 0u32..1000 {
+            let key = i.to_ne_bytes();
+            let mut found = false;
+            let p = dynahash::hash_search(table, key.as_ptr(), HASH_FIND, Some(&mut found)).unwrap();
+            assert!(found && !p.is_null());
+        }
+    }
+    assert!(
+        SHMEM_FREEOFFSET.load(Ordering::Relaxed) > freeoffset_after_create,
+        "shmem.c:210-215: growth is carved from the segment (ShmemAllocNoError)"
+    );
+}
+
 // shmem.c:369-373 + dynahash.c:491: a name already in the index is the
 // HASH_ATTACH arm, which one address space has no use for (dynahash's typed
 // refusal, carve-ratifications §4).

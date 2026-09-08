@@ -257,15 +257,18 @@ pub fn hash_create(tabname: &str, nelem: i64, info: &HASHCTL, flags: i32) -> PgR
     debug_assert!(info.keysize > 0);
     debug_assert!(info.entrysize >= info.keysize);
 
-    if flags & HASH_SHARED_MEM != 0 && flags & HASH_FIXED_SIZE == 0 {
-        // One process = one address space, so a shared table lives on the
-        // ordinary heap — but growth allocates through the table's private
-        // (single-threaded) MemoryContext, so only fully preallocated shared
-        // tables are thread-safe under the partition-lock protocol. C
-        // (dynahash.c:375) accepts a growable shared table; unported here,
-        // so a typed refusal rather than a panic (audit-18.6 b163).
+    if flags & HASH_SHARED_MEM != 0 && flags & (HASH_FIXED_SIZE | HASH_ALLOC) == 0 {
+        // dynahash.c:375 accepts a growable shared table: ShmemInitHash
+        // (shmem.c:349-350) installs ShmemAllocNoError as HASH_ALLOC, and
+        // every later segment/element allocation goes through hashp->alloc
+        // (dynahash.c:1694/1724) under the freelist protocol, which
+        // hash_alloc honours. Without HASH_ALLOC a shared table's growth
+        // would allocate through the table's private (single-threaded)
+        // MemoryContext; C has no such caller (its hcxt is NULL, :486, and
+        // DynaHashAlloc asserts a valid context, :293), so the shape is a
+        // typed refusal rather than a panic (audit-18.6 b163, w2-060).
         return Err(unsupported_error(format!(
-            "shared hash table \"{tabname}\" without HASH_FIXED_SIZE is not supported"
+            "shared hash table \"{tabname}\" without HASH_ALLOC or HASH_FIXED_SIZE is not supported"
         )));
     }
     if flags & HASH_ATTACH != 0 {

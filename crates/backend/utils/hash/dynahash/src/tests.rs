@@ -3,8 +3,9 @@
 use super::*;
 use ::types_error::{ERRCODE_FEATURE_NOT_SUPPORTED, ERROR, FATAL, PANIC};
 use ::types_hash::hsearch::{
-    HASH_ATTACH, HASH_DIRSIZE, HASH_FUNCTION, HASH_PARTITION, HASH_SHARED_MEM,
+    HASH_ALLOC, HASH_ATTACH, HASH_DIRSIZE, HASH_FUNCTION, HASH_PARTITION, HASH_SHARED_MEM,
 };
+use core::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Once;
 
 fn search(t: *mut HTAB, k: *const u8, a: HASHACTION) -> PgResult<(*mut u8, bool)> {
@@ -48,6 +49,21 @@ fn shared_ctl(keysize: usize, entrysize: usize, max_size: i64) -> HASHCTL {
     // SAFETY: non-zero layout; the block outlives every table built on it.
     info.hctl = unsafe { std::alloc::alloc_zeroed(layout) }.cast();
     info
+}
+
+// shmem.c:172 ShmemAllocNoError shape, the allocator ShmemInitHash installs as
+// info->alloc (shmem.c:349): a max-aligned, zeroed, never-freed block, NULL
+// when it cannot be carved. The call count witnesses that growth allocates
+// through hashp->alloc (dynahash.c:1668/1694/1724), never a private context.
+static SHARED_ALLOC_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+fn shared_alloc(size: usize) -> *mut u8 {
+    SHARED_ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
+    let Ok(layout) = std::alloc::Layout::from_size_align(size.max(1), 128) else {
+        return ptr::null_mut();
+    };
+    // SAFETY: non-zero layout; leaked for the test process like shmem.
+    unsafe { std::alloc::alloc_zeroed(layout) }
 }
 
 unsafe fn entry(p: *mut u8) -> &'static mut [u8] {
@@ -472,21 +488,128 @@ fn reset_after_crash_restores_boot_image() {
     hash_destroy(table);
 }
 
-// audit-18.6 b163: an unported flag combination is a typed refusal
-// (ERRCODE_FEATURE_NOT_SUPPORTED), never a panic. C dynahash.c:375 accepts a
-// growable shared table; this port only preallocates shared tables.
+// audit-18.6 w2-060 (b163 residual): C dynahash.c:375 accepts a shared table
+// without HASH_FIXED_SIZE; ShmemInitHash (shmem.c:349-350) hands it
+// ShmemAllocNoError as HASH_ALLOC, and every later segment, directory or
+// element allocation goes through hashp->alloc (dynahash.c:1668/1694/1724)
+// under the freelist protocol -- so the table grows past nelem, and an
+// unpartitioned one splits its buckets (dynahash.c:1027-1041).
 #[test]
-fn shared_without_fixed_size_is_a_typed_refusal() {
+fn growable_shared_table_grows_through_its_shared_allocator() {
+    install_test_seams();
+    let mut info = shared_ctl(4, 8, 4096);
+    info.alloc = Some(shared_alloc);
+    let table = hash_create(
+        "shgrow",
+        8,
+        &info,
+        HASH_ELEM | HASH_BLOBS | HASH_SHARED_MEM | HASH_ALLOC | HASH_DIRSIZE,
+    )
+    .expect("dynahash.c:375: a shared table need not be HASH_FIXED_SIZE");
+    unsafe {
+        assert!((*table).isshared);
+        assert!(!(*table).isfixed, "dynahash.c:621: isfixed only under HASH_FIXED_SIZE");
+        let hctl = (*table).hctl;
+        assert_eq!(hctl, info.hctl, "dynahash.c:484: the preallocated header is the table's");
+        let initial_max_bucket = (*hctl).max_bucket;
+        let calls_after_create = SHARED_ALLOC_CALLS.load(Ordering::Relaxed);
+        for i in 0u32..2000 {
+            let (p, found) = search(table, i.to_ne_bytes().as_ptr(), HASH_ENTER).unwrap();
+            assert!(!found);
+            assert!(!p.is_null(), "growth past nelem=8 must not report out of shared memory");
+            entry(p)[4..8].copy_from_slice(&(i ^ 0x5a5a).to_ne_bytes());
+        }
+        assert_eq!(hash_get_num_entries(table), 2000);
+        assert!(
+            SHARED_ALLOC_CALLS.load(Ordering::Relaxed) > calls_after_create,
+            "dynahash.c:1724: element_alloc carves new elements through hashp->alloc"
+        );
+        assert!(
+            (*hctl).max_bucket > initial_max_bucket,
+            "dynahash.c:1027: an unpartitioned shared table splits as it fills"
+        );
+        assert!((*hctl).nsegs > 1, "dynahash.c:1019: new segments come from hashp->alloc");
+        assert!((*hctl).dsize <= info.max_dsize, "dynahash.c:1650: the directory never grows");
+        for i in 0u32..2000 {
+            let (p, found) = search(table, i.to_ne_bytes().as_ptr(), HASH_FIND).unwrap();
+            assert!(found);
+            assert_eq!(&entry(p)[4..8], &(i ^ 0x5a5a).to_ne_bytes());
+        }
+        for i in 0u32..2000 {
+            let (_, found) = search(table, i.to_ne_bytes().as_ptr(), HASH_REMOVE).unwrap();
+            assert!(found);
+        }
+        assert_eq!(hash_get_num_entries(table), 0);
+    }
+    // Shared tables are never destroyed (dynahash.c:871 asserts a private
+    // allocator); the block is leaked like shmem.
+}
+
+// Same, partitioned (the lock manager's shape, lock.c:469): each freelist
+// refills through hashp->alloc under its own spinlock (dynahash.c:1743-1755),
+// borrowing across freelists only when the allocator is exhausted; the
+// bucket count never changes (dynahash.c:1038: partitioned tables never
+// expand).
+#[test]
+fn growable_partitioned_shared_table_refills_its_freelists() {
+    install_test_seams();
+    let mut info = shared_ctl(4, 8, 4096);
+    info.alloc = Some(shared_alloc);
+    info.num_partitions = 4;
+    let table = hash_create(
+        "shgrow_part",
+        64,
+        &info,
+        HASH_ELEM | HASH_BLOBS | HASH_PARTITION | HASH_SHARED_MEM | HASH_ALLOC | HASH_DIRSIZE,
+    )
+    .expect("dynahash.c:375: a partitioned shared table need not be HASH_FIXED_SIZE");
+    unsafe {
+        assert!((*table).isshared);
+        assert!(!(*table).isfixed);
+        let hctl = (*table).hctl;
+        let before = (*hctl).max_bucket;
+        let calls_after_create = SHARED_ALLOC_CALLS.load(Ordering::Relaxed);
+        for i in 0u32..1000 {
+            let hv = get_hash_value(table, i.to_ne_bytes().as_ptr());
+            let (p, found) = search_hv(table, i.to_ne_bytes().as_ptr(), hv, HASH_ENTER).unwrap();
+            assert!(!found);
+            assert!(!p.is_null(), "growth past nelem=64 must not report out of shared memory");
+        }
+        assert_eq!(hash_get_num_entries(table), 1000);
+        assert!(
+            SHARED_ALLOC_CALLS.load(Ordering::Relaxed) > calls_after_create,
+            "dynahash.c:1724: freelists refill through hashp->alloc"
+        );
+        assert_eq!((*hctl).max_bucket, before, "partitioned tables never split");
+        for i in 0u32..1000 {
+            let (_, found) = search(table, i.to_ne_bytes().as_ptr(), HASH_FIND).unwrap();
+            assert!(found);
+        }
+        for i in 0u32..1000 {
+            let (_, found) = search(table, i.to_ne_bytes().as_ptr(), HASH_REMOVE).unwrap();
+            assert!(found);
+        }
+        assert_eq!(hash_get_num_entries(table), 0);
+    }
+}
+
+// A growable shared table with no HASH_ALLOC has no C counterpart: its hcxt
+// is NULL (dynahash.c:486) and DynaHashAlloc asserts a valid context
+// (dynahash.c:293), so C has no such caller; here growth would go through
+// the table's private (single-threaded) context, so the shape stays a typed
+// refusal (ERRCODE_FEATURE_NOT_SUPPORTED), never a panic (audit-18.6 b163).
+#[test]
+fn shared_without_alloc_or_fixed_size_is_a_typed_refusal() {
     install_test_seams();
     let ctl = ctl(4, 8);
-    let e = hash_create("shgrow", 8, &ctl, HASH_ELEM | HASH_BLOBS | HASH_SHARED_MEM)
+    let e = hash_create("shgrow_noalloc", 8, &ctl, HASH_ELEM | HASH_BLOBS | HASH_SHARED_MEM)
         .err()
-        .expect("HASH_SHARED_MEM without HASH_FIXED_SIZE must be a typed refusal");
+        .expect("HASH_SHARED_MEM without HASH_ALLOC or HASH_FIXED_SIZE must be a typed refusal");
     assert_eq!(e.level(), ERROR);
     assert_eq!(e.sqlstate(), ERRCODE_FEATURE_NOT_SUPPORTED);
     assert_eq!(
         e.message(),
-        "shared hash table \"shgrow\" without HASH_FIXED_SIZE is not supported"
+        "shared hash table \"shgrow_noalloc\" without HASH_ALLOC or HASH_FIXED_SIZE is not supported"
     );
 }
 
