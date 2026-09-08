@@ -89,8 +89,10 @@ syscache_seams = { path = "../../cache/syscache_seams" }
 guc_seams = { path = "../../misc/guc_seams" }
 miscinit_seams = { path = "../../init/miscinit_seams" }
 dfmgr = { path = "../dfmgr" }
+pgstat = { path = "../../activity/pgstat" }
 
 [dev-dependencies]
 init_small = { path = "../../init/init_small" }
 stringinfo = { path = "../../../../_support/types/stringinfo" }
 nodes = { package = "types_nodes", path = "../../../../_support/types/nodes" }
+inval_seams = { path = "../../cache/inval_seams" }

@@ -672,3 +672,15 @@ fn foreign_builtin_row_cannot_claim_thin_identity() {
     assert_eq!(f.fn_kind, FnKind::Direct);
     assert!(fmgr_thin_builtin(&f, 2).is_none());
 }
+
+#[test]
+fn registered_pl_handlers_retain_callable_provenance() {
+    register_plpgsql_handlers(int4pl_body, int4pl_body, int4pl_body);
+    for name in ["plpgsql_call_handler", "plpgsql_inline_handler", "plpgsql_validator"] {
+        let handler = registered_c_lang_fn(name).unwrap();
+        let mut args = LocalFcinfo::<2>::new(0);
+        args.set_arg(0, Datum::from_i32(40));
+        args.set_arg(1, Datum::from_i32(2));
+        assert_eq!(handler(None, &mut args).unwrap().as_i32(), 42);
+    }
+}

@@ -535,30 +535,31 @@ pub const INTERNAL_LANGUAGE_ID: Oid = 12;
 pub const C_LANGUAGE_ID: Oid = 13;
 pub const SQL_LANGUAGE_ID: Oid = 14;
 
-static SQL_HANDLER: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+static SQL_HANDLER: core::sync::atomic::AtomicPtr<()> =
+    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
 
 pub fn register_sql_language_handler(handler: ::fmgr::PGFunction) {
-    SQL_HANDLER.store(handler as usize, core::sync::atomic::Ordering::Release);
+    SQL_HANDLER.store(handler as *mut (), core::sync::atomic::Ordering::Release);
 }
 
 // PL handler entry points are C-language extension functions; the dlopen leg
 // is replaced by name-keyed registration (closed set; no-dlopen carve,
 // docs/design/carve-ratifications.md §2).
-static PLPGSQL_CALL_HANDLER: core::sync::atomic::AtomicUsize =
-    core::sync::atomic::AtomicUsize::new(0);
-static PLPGSQL_INLINE_HANDLER: core::sync::atomic::AtomicUsize =
-    core::sync::atomic::AtomicUsize::new(0);
-static PLPGSQL_VALIDATOR: core::sync::atomic::AtomicUsize =
-    core::sync::atomic::AtomicUsize::new(0);
+static PLPGSQL_CALL_HANDLER: core::sync::atomic::AtomicPtr<()> =
+    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+static PLPGSQL_INLINE_HANDLER: core::sync::atomic::AtomicPtr<()> =
+    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+static PLPGSQL_VALIDATOR: core::sync::atomic::AtomicPtr<()> =
+    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
 
 pub fn register_plpgsql_handlers(
     call_handler: ::fmgr::PGFunction,
     inline_handler: ::fmgr::PGFunction,
     validator: ::fmgr::PGFunction,
 ) {
-    PLPGSQL_CALL_HANDLER.store(call_handler as usize, core::sync::atomic::Ordering::Release);
-    PLPGSQL_INLINE_HANDLER.store(inline_handler as usize, core::sync::atomic::Ordering::Release);
-    PLPGSQL_VALIDATOR.store(validator as usize, core::sync::atomic::Ordering::Release);
+    PLPGSQL_CALL_HANDLER.store(call_handler as *mut (), core::sync::atomic::Ordering::Release);
+    PLPGSQL_INLINE_HANDLER.store(inline_handler as *mut (), core::sync::atomic::Ordering::Release);
+    PLPGSQL_VALIDATOR.store(validator as *mut (), core::sync::atomic::Ordering::Release);
 }
 
 fn registered_c_lang_fn(prosrc: &str) -> Option<::fmgr::PGFunction> {
@@ -569,11 +570,11 @@ fn registered_c_lang_fn(prosrc: &str) -> Option<::fmgr::PGFunction> {
         _ => return None,
     };
     let h = slot.load(core::sync::atomic::Ordering::Acquire);
-    if h == 0 {
+    if h.is_null() {
         return None;
     }
     // SAFETY: written only by register_plpgsql_handlers from valid PGFunctions.
-    Some(unsafe { core::mem::transmute::<usize, ::fmgr::PGFunction>(h) })
+    Some(unsafe { core::mem::transmute::<*mut (), ::fmgr::PGFunction>(h) })
 }
 
 // fmgr.c CFuncHash: the resolved address of each external C function, keyed
@@ -710,12 +711,12 @@ fn fmgr_info_pg_proc(
         }
         SQL_LANGUAGE_ID => {
             let h = SQL_HANDLER.load(core::sync::atomic::Ordering::Acquire);
-            if h == 0 {
+            if h.is_null() {
                 panic!("fmgr: SQL-language handler not registered (function {function_id})");
             }
             // SAFETY: written only by register_sql_language_handler from a
             // valid PGFunction.
-            (unsafe { core::mem::transmute::<usize, ::fmgr::PGFunction>(h) }, FnKind::Language, InvalidOid)
+            (unsafe { core::mem::transmute::<*mut (), ::fmgr::PGFunction>(h) }, FnKind::Language, InvalidOid)
         }
         C_LANGUAGE_ID => match lookup_c_func(function_id, row.xmin, row.tid) {
             Some(f) => (f, FnKind::Language, InvalidOid),
@@ -782,12 +783,7 @@ struct SecurityDefinerCache {
     proconfig: Option<alloc::vec::Vec<alloc::string::String>>,
 }
 
-/// fmgr_security_definer (fmgr.c:632): SECURITY DEFINER / proconfig call
-/// handler. GUC and userid state need no unwinding on error — the ensuing
-/// xact or subxact abort restores both (fmgr.c:717); C's PG_TRY only relinks
-/// fcinfo->flinfo, which does not exist in this ABI (flinfo travels as a
-/// parameter). Divergence: pgstat function tracking inside the wrapper
-/// (fmgr.c:733/741) is not wired — fmgr_core has no pgstat edge.
+// Transaction abort restores user and GUC state after an error.
 pub fn fmgr_security_definer(
     flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut FunctionCallInfoBaseData,
@@ -831,7 +827,22 @@ pub fn fmgr_security_definer(
         guc_seams::process_guc_array_secdef::call(cfg)?;
     }
 
+    let fcu = if cache.flinfo.fn_stats < TRACK_FUNC_ALL
+        && ::pgstat::function::pgstat_track_functions() > i32::from(cache.flinfo.fn_stats)
+    {
+        Some(::pgstat::function::pgstat_init_function_usage(cache.flinfo.fn_oid)?)
+    } else {
+        None
+    };
+
     let result = cache.flinfo.invoke(fcinfo)?;
+
+    if let Some(fcu) = &fcu {
+        let finalize = fcinfo
+            .rsinfo_mut()
+            .is_none_or(|rs| rs.isDone != ::fmgr::ExprDoneCond::ExprMultipleResult);
+        ::pgstat::function::pgstat_end_function_usage(fcu, finalize);
+    }
 
     if cache.proconfig.is_some() {
         guc_seams::at_eoxact_guc::call(true, save_nestlevel)?;
