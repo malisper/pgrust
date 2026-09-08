@@ -5071,6 +5071,16 @@ fn init_param(param: &Param, params: ParamBind<'_>, out: OutRef) -> PgResult<Ste
             })
         }
         ParamKind::PARAM_EXTERN => {
+            // C execExpr.c:1060-1064: a paramCompile hook takes precedence
+            // over the materialized list; the value is fetched at evaluation.
+            if let Some(func) = params.param_callback {
+                return Ok(Step::ParamCallback {
+                    func,
+                    paramid,
+                    paramtype: param.paramtype,
+                    out,
+                });
+            }
             let list = params.extern_params.unwrap_or(&[]);
             if paramid <= 0 || paramid as usize > list.len() {
                 return Ok(Step::ParamExternMissing { paramid });

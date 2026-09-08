@@ -2,10 +2,10 @@
 // compile-to-steps + execExprInterp.c). Ported step families: DONE_RETURN/
 // DONE_NO_RETURN, INNER/OUTER/SCAN_FETCHSOME, INNER/OUTER/SCAN_VAR,
 // ASSIGN_*_VAR, ASSIGN_TMP[_MAKE_RO], CONST, FUNCEXPR[_STRICT[_1|_2]], QUAL,
-// PARAM_EXTERN/PARAM_EXEC (compile-resolved; ParamBind), MINMAX,
-// BOOL_AND/OR/NOT, NULLTEST_ISNULL/ISNOTNULL/ROWISNULL/ROWISNOTNULL.
-// Deferred families (loud-panic at compile): WHOLEROW RECORD leg,
-// PARAM_CALLBACK, JUMP_* +
+// PARAM_EXTERN/PARAM_EXEC (compile-resolved; ParamBind), PARAM_CALLBACK
+// (ParamBind.param_callback; the owner arms its hook arg per evaluation),
+// MINMAX, BOOL_AND/OR/NOT, NULLTEST_ISNULL/ISNOTNULL/ROWISNULL/ROWISNOTNULL.
+// Deferred families (loud-panic at compile): WHOLEROW RECORD leg, JUMP_* +
 // BOOLTEST + CASE/COALESCE (eval_const_expressions folds the all-Const
 // forms; non-const forms wait for their vocabularies), FUSAGE,
 // SQLVALUEFUNCTION, row/array/subscript/domain/hash/json/xml/agg/window/

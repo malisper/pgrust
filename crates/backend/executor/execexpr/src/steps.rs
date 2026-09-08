@@ -110,6 +110,16 @@ pub enum Step {
         ptype: Oid,
         paramtype: Oid,
     },
+    // C EEOP_PARAM_CALLBACK (execExpr.c:1060-1064): a PARAM_EXTERN compiled
+    // through the list's paramCompile hook. The callback produces the value
+    // only when the program reaches this step (execExprInterp.c:1334), with
+    // the state's armed hook arg (C paramFetchArg via ecxt_param_list_info).
+    ParamCallback {
+        func: ::types_portal::params::ParamCallbackFn,
+        paramid: i32,
+        paramtype: Oid,
+        out: OutRef,
+    },
     // paramid rides along for the pending-initplan lane: a fetch that finds
     // exec_plan set suspends so the driver can run ExecSetParamPlan for this
     // param on demand (C ExecEvalParamExec, execExprInterp.c).
@@ -2059,6 +2069,11 @@ pub struct ExprState<'mcx> {
     // compile-allocated cell; only MERGE RETURNING projections may compile it.
     pub(crate) merge_action_cell: Option<NonNull<Option<::types_nodes::nodes_enums::CmdType>>>,
     pub(crate) allow_merge_support: bool,
+    // C econtext->ecxt_param_list_info->paramFetchArg as read by
+    // EEOP_PARAM_CALLBACK steps: the list owner's hook data for the running
+    // evaluation (null = no owner armed; a callback step then has no
+    // estate to fetch from, which the owner's callback must treat as a bug).
+    pub(crate) cparam_arg: *mut (),
 }
 
 impl<'mcx> ExprState<'mcx> {
@@ -2107,6 +2122,7 @@ impl<'mcx> ExprState<'mcx> {
                 jit: None,
                 merge_action_cell: None,
                 allow_merge_support: false,
+                cparam_arg: core::ptr::null_mut(),
             });
             Ok(::mcx::PgBox::from_raw_in(p.as_ptr(), mcx))
         }
@@ -2346,6 +2362,15 @@ impl<'mcx> ExprState<'mcx> {
     #[inline]
     pub fn has_subplan(&self) -> bool {
         self.flags & EEO_FLAG_HAS_SUBPLAN != 0
+    }
+
+    // C econtext->ecxt_param_list_info->paramFetchArg for the next
+    // evaluation: the hook data ParamCallback steps hand to their callback.
+    // plpgsql re-arms it per evaluation because its compiled simple
+    // expression is function-lifetime and shared by nested invocations,
+    // each evaluating under its own estate (pl_exec.c:6154-6164).
+    pub fn arm_param_callback_arg(&mut self, arg: *mut ()) {
+        self.cparam_arg = arg;
     }
 
     // Result-mcx convention: every frame's fcinfo is armed with the context

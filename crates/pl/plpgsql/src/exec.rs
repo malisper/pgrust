@@ -25,7 +25,7 @@ use std::collections::HashMap;
 
 type FxHashMap<K, V> = HashMap<K, V, rustc_hash::FxBuildHasher>;
 
-use datum::Datum;
+use datum::{Datum, NullableDatum};
 use mcx::{Mcx, MemoryContext};
 use spi::{
     SPI_cursor_close, SPI_cursor_fetch, SPI_cursor_open, SPI_cursor_open_with_paramlist,
@@ -481,14 +481,10 @@ struct SimpleExpr {
     // expressions containing mutable functions need the CCI + fresh-snapshot
     // ceremony per evaluation (pl_exec.c:6198-6204).
     mutable: bool,
-    // Datum sources for the compiled program, replayed before each eval.
-    paramnos: std::rc::Rc<[Dno]>,
-    // Stable param image whose slot addresses are baked into the compiled
-    // ParamExtern steps (C instead reads params at eval time through the
-    // per-estate econtext, pl_exec.c:6154-6164; a per-expression image is
-    // equivalent because the InUse gate serializes evaluations of this
-    // program, and every evaluation rewrites its paramnos first).
-    param_buf: Box<[ParamExternData]>,
+    // Datum references compile to ParamCallback steps (C EEOP_PARAM_CALLBACK
+    // via plpgsql_param_compile, pl_exec.c:6465-6488) that fetch through
+    // simple_param_eval from the estate armed for each evaluation
+    // (pl_exec.c:6154-6164), only when the program reaches them.
     // Owns every allocation `state` points into; declared last so it drops
     // after `state` (C: the state dies with simple_eval_estate's context).
     #[allow(dead_code)] // never read: held for ownership + drop order only
@@ -548,6 +544,24 @@ fn register_simple_exit_release() {
     });
 }
 
+// The plpgsql_param_eval_* family behind plpgsql_param_compile's
+// EEOP_PARAM_CALLBACK steps (pl_exec.c:6465-6488; _var :6667, _var_ro :6693,
+// _recfield :6739, _generic :6803): fetch the datum's CURRENT value when the
+// executor reaches the Param, with the per-eval type safety check
+// (pl_exec.c:6797/6838) that datum_as_param carries. `arg` is the evaluating
+// estate (C paramFetchArg), armed by eval_simple_body.
+unsafe fn simple_param_eval(arg: *mut (), paramid: i32, paramtype: Oid) -> PgResult<NullableDatum> {
+    assert!(!arg.is_null(), "plpgsql: simple expression evaluated without an armed estate");
+    // SAFETY: eval_simple_body arms `arg` from its own `&mut Estate`
+    // immediately before running the program and uses nothing else through
+    // that borrow until the program returns (C's ecxt_param_list_info->
+    // paramFetchArg contract); the evaluation is single-threaded.
+    let estate = unsafe { &mut *arg.cast::<Estate<'_>>() };
+    // paramid's are 1-based, dnos 0-based (pl_exec.c:6579).
+    let (value, isnull) = estate.datum_as_param(paramid - 1, Some(paramtype))?;
+    Ok(NullableDatum { value, isnull })
+}
+
 // Take the expression's simple state for evaluation, leaving InUse behind
 // (C expr_simple_in_use = true). `take_unknown` gates whether an
 // undetermined expression may proceed to a build: only the post-ensure_plan
@@ -556,9 +570,9 @@ enum SimpleTake {
     /// Not eligible right now: no entry, not simple, or already in use.
     Skip,
     Ready(Box<SimpleExpr>),
-    /// Undetermined; caller owns the build. Carries what the build needs so
-    /// no second map borrow is required.
-    Build { plan: SpiPlanPtr, paramnos: std::rc::Rc<[Dno]>, argtypes: std::rc::Rc<[Oid]> },
+    /// Undetermined; caller owns the build. Carries the plan identity so no
+    /// second map borrow is required.
+    Build { plan: SpiPlanPtr },
 }
 
 fn take_simple(expr_id: u32, take_unknown: bool) -> SimpleTake {
@@ -582,11 +596,7 @@ fn take_simple(expr_id: u32, take_unknown: bool) -> SimpleTake {
                     return SimpleTake::Skip;
                 }
                 e.simple = SimpleState::InUse;
-                SimpleTake::Build {
-                    plan: e.plan,
-                    paramnos: e.paramnos.clone(),
-                    argtypes: e.argtypes.clone(),
-                }
+                SimpleTake::Build { plan: e.plan }
             }
         }
     })
@@ -1548,7 +1558,7 @@ impl<'a> Estate<'a> {
 
     // setup_param_list: current datum values for the plan's paramnos as
     // (values, nulls) views for SPI. (The compiled simple-expression path
-    // keeps its own stable param image instead — SimpleExpr::param_buf.)
+    // fetches lazily through simple_param_eval instead.)
     fn setup_params(&mut self, entry_paramnos: &[Dno], argtypes: &[Oid]) -> PgResult<(Vec<Datum>, Vec<bool>)> {
         let n = argtypes.len();
         let mut values = vec![Datum::null(); n];
@@ -1792,20 +1802,19 @@ impl<'a> Estate<'a> {
                 drop(se);
                 EXPR_PLANS.with(|t| {
                     let t = t.borrow();
-                    let e = t.get(&expr.expr_id).expect("plan ensured");
-                    (e.plan, e.paramnos.clone(), e.argtypes.clone())
+                    t.get(&expr.expr_id).expect("plan ensured").plan
                 })
             }
-            SimpleTake::Build { plan, paramnos, argtypes } => {
+            SimpleTake::Build { plan } => {
                 if let Err(e) = pquery::EnsurePortalSnapshotExists() {
                     put_simple(expr.expr_id, plan, SimpleState::Unknown);
                     return Err(e);
                 }
-                (plan, paramnos, argtypes)
+                plan
             }
         };
-        let (plan, paramnos, argtypes) = build;
-        let se = match self.build_simple_expr(expr, plan, paramnos, argtypes) {
+        let plan = build;
+        let se = match self.build_simple_expr(expr, plan) {
             Ok(se) => se,
             Err(e) => {
                 put_simple(expr.expr_id, plan, SimpleState::Unknown);
@@ -1826,8 +1835,6 @@ impl<'a> Estate<'a> {
         &mut self,
         expr: &PlExpr,
         plan: SpiPlanPtr,
-        paramnos: std::rc::Rc<[Dno]>,
-        argtypes: std::rc::Rc<[Oid]>,
     ) -> PgResult<Option<Box<SimpleExpr>>> {
         let Some((psrc, _)) = spi::SPI_plan_single_source(plan) else {
             return Ok(None);
@@ -1865,34 +1872,14 @@ impl<'a> Estate<'a> {
             let Some(plan_expr) = simple_result_expr(stmt) else {
                 return Ok(None);
             };
-            // Stable per-expression param image, sized to the highest
-            // referenced dno; slot types written BEFORE compile
-            // (exec_init_expr reads them and bakes slot addresses).
-            let nslots = paramnos.iter().map(|&d| d as usize + 1).max().unwrap_or(0);
-            let mut param_buf: Box<[ParamExternData]> = (0..nslots)
-                .map(|_| ParamExternData {
-                    value: Datum::null(),
-                    isnull: true,
-                    pflags: 0,
-                    ptype: types_core::InvalidOid,
-                })
-                .collect();
-            for &dno in paramnos.iter() {
-                let slot = &mut param_buf[dno as usize];
-                slot.ptype = argtypes[dno as usize];
-                slot.pflags = types_portal::params::PARAM_FLAG_CONST;
-            }
+            // C exec_eval_simple_expr compiles under estate->paramLI, whose
+            // paramCompile hook (plpgsql_param_compile, pl_exec.c:6465-6488)
+            // turns every datum Param into an EEOP_PARAM_CALLBACK step; the
+            // Param node's paramtype is the plan-time type the per-eval
+            // safety check compares against (pl_exec.c:6797/6838).
             let bind = types_portal::params::ParamBind {
-                extern_params: Some(
-                    // SAFETY: param_buf is a stable Box'd slice owned by the
-                    // SimpleExpr alongside the compiled state; the Box move
-                    // into the struct below does not move the heap image.
-                    unsafe {
-                        core::slice::from_raw_parts(param_buf.as_ptr(), param_buf.len())
-                    },
-                ),
-                exec_vals: None,
-                n_exec: 0,
+                param_callback: Some(simple_param_eval),
+                ..types_portal::params::ParamBind::NONE
             };
             // Function-lifetime memory home for the compiled program (C
             // compiles into simple_eval_estate->es_query_cxt and rebuilds
@@ -1914,8 +1901,6 @@ impl<'a> Estate<'a> {
                 rettype: plan_expr.1,
                 rettypmod: plan_expr.2,
                 mutable,
-                paramnos,
-                param_buf,
                 ctx,
             })))
         })();
@@ -1962,14 +1947,11 @@ impl<'a> Estate<'a> {
     }
 
     fn eval_simple_body(&mut self, se: &mut SimpleExpr) -> PgResult<(Datum, bool, Oid, i32)> {
-        // Current param values into the stable image the program reads.
-        for &dno in se.paramnos.iter() {
-            let planned = se.param_buf[dno as usize].ptype;
-            let (v, isnull) = self.datum_as_param(dno, Some(planned))?;
-            let slot = &mut se.param_buf[dno as usize];
-            slot.value = v;
-            slot.isnull = isnull;
-        }
+        // C pl_exec.c:6154-6164: the program evaluates under an econtext
+        // whose ecxt_param_list_info->paramFetchArg is THIS estate; its
+        // ParamCallback steps fetch datums through simple_param_eval only
+        // when reached (an untaken CASE arm never touches its record).
+        se.state.arm_param_callback_arg((self as *mut Estate<'a>).cast());
         // By-ref results land in THIS invocation's eval scratch: the state
         // is shared across estates now, so it re-arms per evaluation (C
         // evaluates under get_eval_mcontext, pl_exec.c:6197).
@@ -1989,6 +1971,8 @@ impl<'a> Estate<'a> {
             let r = execexpr::exec_eval_expr(&mut se.state, &mut slots)?;
             Ok((r.value, r.isnull, se.rettype, se.rettypmod))
         })();
+        // The shared program must never keep a pointer to a dead estate.
+        se.state.arm_param_callback_arg(core::ptr::null_mut());
         if pushed {
             let popped = snapmgr::PopActiveSnapshot();
             if result.is_ok() {
@@ -2223,6 +2207,7 @@ impl<'a> Estate<'a> {
             }),
             exec_vals: None,
             n_exec: 0,
+            param_callback: None,
         };
         let Some(mut state) = execexpr::exec_init_expr(mcx, Some(cast_expr), bind)? else {
             return Ok(CastEntry { state: None, param, inval_gen, lxid: current_lxid() });

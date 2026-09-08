@@ -1928,7 +1928,12 @@ pub fn ExecuteCallStmt<'mcx>(
         // SAFETY: the portal that registered the handle outlives this utility call.
         Some(unsafe { types_portal::params::resolve(params) })
     };
-    let bind = execexpr::ParamBind { extern_params, exec_vals: None, n_exec: 0 };
+    let bind = execexpr::ParamBind {
+        extern_params,
+        exec_vals: None,
+        n_exec: 0,
+        param_callback: None,
+    };
 
     if !atomic {
         let snap = snapmgr::GetTransactionSnapshot()?;

@@ -1406,6 +1406,95 @@ fn param_extern_step_is_one_resolved_load() {
     });
 }
 
+// C execExpr.c:1060-1064 + execExprInterp.c:1334: with a paramCompile hook
+// the PARAM_EXTERN compiles to a callback step that fetches through the hook
+// with the state's armed arg (audit-18.6 w2-042).
+#[test]
+fn param_callback_step_fetches_through_the_hook_when_reached() {
+    use ::types_nodes::primnodes::ParamKind;
+    unsafe fn hook(
+        arg: *mut (),
+        paramid: i32,
+        paramtype: ::types_core::Oid,
+    ) -> ::types_error::PgResult<::datum::NullableDatum> {
+        // SAFETY: the test arms a live `u32` call counter.
+        let calls = unsafe { &mut *arg.cast::<u32>() };
+        *calls += 1;
+        assert_eq!((paramid, paramtype), (1, INT4OID));
+        Ok(::datum::NullableDatum {
+            value: Datum::from_i32(42),
+            isnull: false,
+        })
+    }
+    with_mcx(|mcx| {
+        let bind = ParamBind {
+            param_callback: Some(hook),
+            ..ParamBind::NONE
+        };
+        let node = mk_param(mcx, ParamKind::PARAM_EXTERN, 1, INT4OID);
+        let mut state = exec_init_expr(mcx, Some(node), bind).unwrap().unwrap();
+        assert!(matches!(
+            state.steps()[0],
+            Step::ParamCallback {
+                paramid: 1,
+                paramtype: INT4OID,
+                ..
+            }
+        ));
+        let mut calls = 0u32;
+        state.arm_param_callback_arg((&mut calls as *mut u32).cast());
+        let mut slots = EvalSlots::default();
+        let r = exec_eval_expr(&mut state, &mut slots).unwrap();
+        assert_eq!((r.isnull, r.value.as_i32()), (false, 42));
+        let r = exec_eval_expr(&mut state, &mut slots).unwrap();
+        assert_eq!((r.isnull, r.value.as_i32()), (false, 42));
+        assert_eq!(calls, 2, "one fetch per evaluation, none at compile");
+    });
+}
+
+// The callback runs only when the program reaches its step: `false AND $1`
+// short-circuits past it (plpgsql's untaken CASE arm never fetches r.a,
+// plpgsql_param_eval_recfield pl_exec.c:6769).
+#[test]
+fn param_callback_step_is_not_reached_behind_a_short_circuit() {
+    use ::types_nodes::primnodes::BoolExprType::AND_EXPR;
+    use ::types_nodes::primnodes::{BoolExpr, ParamKind};
+    unsafe fn hook(
+        _arg: *mut (),
+        paramid: i32,
+        _paramtype: ::types_core::Oid,
+    ) -> ::types_error::PgResult<::datum::NullableDatum> {
+        panic!("parameter {paramid} fetched behind a false AND")
+    }
+    with_mcx(|mcx| {
+        let bind = ParamBind {
+            param_callback: Some(hook),
+            ..ParamBind::NONE
+        };
+        let mut args = NodeList::nil();
+        args.lappend(mcx, mk_bool_const(mcx, Some(false))).unwrap();
+        args.lappend(mcx, mk_param(mcx, ParamKind::PARAM_EXTERN, 1, 16))
+            .unwrap();
+        let node = Node::mk(
+            mcx,
+            BoolExpr {
+                boolop: AND_EXPR,
+                args,
+                location: -1,
+            },
+        )
+        .unwrap();
+        let mut state = exec_init_expr(mcx, Some(node), bind).unwrap().unwrap();
+        assert!(state
+            .steps()
+            .iter()
+            .any(|s| matches!(s, Step::ParamCallback { .. })));
+        let mut slots = EvalSlots::default();
+        let r = exec_eval_expr(&mut state, &mut slots).unwrap();
+        assert_eq!((r.isnull, r.value.as_bool()), (false, false));
+    });
+}
+
 #[test]
 fn param_extern_missing_value_errors_42704() {
     use ::types_nodes::primnodes::ParamKind;
@@ -1442,6 +1531,7 @@ fn param_exec_step_reads_estate_slot() {
             extern_params: None,
             exec_vals: core::ptr::NonNull::new(base),
             n_exec: 2,
+            param_callback: None,
         };
         let node = mk_param(mcx, ParamKind::PARAM_EXEC, 1, INT4OID);
         let mut state = exec_init_expr(mcx, Some(node), bind).unwrap().unwrap();
@@ -4111,6 +4201,7 @@ fn multiexpr_subplan_compiles_to_setup_steps_and_dummy_const() {
             extern_params: None,
             exec_vals: core::ptr::NonNull::new(base),
             n_exec: 2,
+            param_callback: None,
         };
         let env = crate::compile::SubplanCompileEnv {
             estate: NonNull::<u8>::dangling().cast(),

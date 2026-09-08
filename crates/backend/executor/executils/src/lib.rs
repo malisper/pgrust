@@ -1426,6 +1426,9 @@ impl<'mcx> EStateData<'mcx> {
             extern_params: self.es_param_list_info,
             exec_vals: core::ptr::NonNull::new(self.es_param_exec_vals.as_mut_ptr()),
             n_exec: self.es_param_exec_vals.len() as u32,
+            // Portal-registered lists are materialized images (params.rs
+            // Entry::hooked): no paramCompile hook rides with them.
+            param_callback: None,
         }
     }
 

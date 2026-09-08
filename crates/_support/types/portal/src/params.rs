@@ -1,8 +1,9 @@
 // params.c ParamListInfo as a registry (stmt_list precedent); stale handle = loud panic.
 use core::cell::RefCell;
 
-use ::datum::Datum;
+use ::datum::{Datum, NullableDatum};
 use ::types_core::Oid;
+use ::types_error::PgResult;
 
 use crate::ParamListHandle;
 
@@ -29,17 +30,35 @@ impl ParamExecData {
         ParamExecData { value: Datum::null(), isnull: true, exec_plan: false };
 }
 
+// C ParamListInfo.paramCompile (params.h ParamCompileHook) reduced to its
+// runtime half: execExpr.c ExecInitExprRec compiles every PARAM_EXTERN
+// through the hook into an EEOP_PARAM_CALLBACK step (execExpr.c:1044-1064)
+// whose paramfunc runs only when the program reaches it
+// (execExprInterp.c:1334). One function per list owner (plpgsql's
+// plpgsql_param_eval_* family folds into its datum dispatch); `arg` is the
+// owner's per-evaluation hook data (C paramFetchArg), armed on the ExprState
+// before each evaluation (`ExprState::arm_param_callback_arg`).
+//
+// # Safety
+// `arg` is the pointer the list owner armed for the running evaluation.
+pub type ParamCallbackFn =
+    unsafe fn(arg: *mut (), paramid: i32, paramtype: Oid) -> PgResult<NullableDatum>;
+
 // Resolve-once compile binding (execexpr's AggBind precedent); both arrays are address-stable.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ParamBind<'a> {
     pub extern_params: Option<&'a [ParamExternData]>,
     pub exec_vals: Option<core::ptr::NonNull<ParamExecData>>,
     pub n_exec: u32,
+    // C ParamListInfo.paramCompile: when set, every PARAM_EXTERN compiles to
+    // a callback step instead of a resolved load (execExpr.c:1060-1064) and
+    // `extern_params` is not consulted for it.
+    pub param_callback: Option<ParamCallbackFn>,
 }
 
 impl ParamBind<'_> {
     pub const NONE: ParamBind<'static> =
-        ParamBind { extern_params: None, exec_vals: None, n_exec: 0 };
+        ParamBind { extern_params: None, exec_vals: None, n_exec: 0, param_callback: None };
 }
 
 #[derive(Clone)]

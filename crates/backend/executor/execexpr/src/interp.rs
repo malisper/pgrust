@@ -597,9 +597,11 @@ fn run_program<'mcx>(
         frames,
         resnd,
         saop_tables,
+        cparam_arg,
         ..
     } = state;
     let res = *resnd;
+    let cparam_arg = *cparam_arg;
     let steps = steps.as_slice();
     let mut scan = slots.scan.as_deref_mut();
     let mut inner = slots.inner.as_deref_mut();
@@ -893,6 +895,19 @@ fn run_program<'mcx>(
                 return Err(crate::compile::param_type_mismatch(
                     *paramid, *ptype, *paramtype,
                 ));
+            }
+            Step::ParamCallback {
+                func,
+                paramid,
+                paramtype,
+                out,
+            } => {
+                // C EEOP_PARAM_CALLBACK (execExprInterp.c:1334): the owner's
+                // paramfunc, only now that the program reached the step.
+                // SAFETY: cparam_arg is what the list owner armed for this
+                // evaluation (ExprState::arm_param_callback_arg).
+                let nd = unsafe { func(cparam_arg, *paramid, *paramtype) }?;
+                write_out(*out, nd.value, nd.isnull);
             }
             Step::ParamExec { prm, out, paramid } => {
                 // SAFETY: compile-resolved pointer into stable es_param_exec_vals.
@@ -4690,9 +4705,11 @@ pub(crate) fn exec_one_step<'mcx>(
         frames,
         resnd,
         saop_tables,
+        cparam_arg,
         ..
     } = state;
     let res = *resnd;
+    let cparam_arg = *cparam_arg;
     let step = steps[ix as usize];
     // run_program's OLD/NEW resolution (RetSlot::Scan aliases the scan slot).
     macro_rules! old_slot {
@@ -4941,6 +4958,16 @@ pub(crate) fn exec_one_step<'mcx>(
             paramtype,
         } => {
             return Err(crate::compile::param_type_mismatch(paramid, ptype, paramtype));
+        }
+        Step::ParamCallback {
+            func,
+            paramid,
+            paramtype,
+            out,
+        } => {
+            // SAFETY: as run_program's arm.
+            let nd = unsafe { func(cparam_arg, paramid, paramtype) }?;
+            write_out(out, nd.value, nd.isnull);
         }
         Step::ParamExec { prm, out, paramid } => {
             // SAFETY: compile-resolved pointer into stable es_param_exec_vals.
@@ -5623,6 +5650,7 @@ pub(crate) fn step_has_helper(step: &Step) -> bool {
         | Step::ParamExtern { .. }
         | Step::ParamExternMissing { .. }
         | Step::ParamExternTypeMismatch { .. }
+        | Step::ParamCallback { .. }
         | Step::ParamExec { .. }
         | Step::ParamSet { .. }
         | Step::SubPlan { .. }
