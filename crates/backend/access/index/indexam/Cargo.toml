@@ -43,3 +43,4 @@ gin = { path = "../../gin/gin" }
 
 [dev-dependencies]
 types_relscan = { path = "../relscan", features = ["mock"] }
+gin_vocab = { path = "../../gin/gin_vocab" }

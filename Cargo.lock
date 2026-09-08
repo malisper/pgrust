@@ -7975,6 +7975,7 @@ dependencies = [
  "bufmgr",
  "datum",
  "gin",
+ "gin_vocab",
  "gist",
  "guc_tables",
  "hash",

@@ -955,10 +955,7 @@ fn am_gettuple(scan: &mut IndexScanDescData<'_>, direction: ScanDirection) -> Pg
     match scan.opaque {
         IndexScanOpaque::Btree(_) => nbtree::btgettuple(scan, direction),
         IndexScanOpaque::Hash(_) => hash::hashgettuple(scan, direction),
-        IndexScanOpaque::Gin(_) => panic!(
-            "index \"{}\" does not support amgettuple (bitmap-only AM)",
-            scan.index_rel().name()
-        ),
+        IndexScanOpaque::Gin(_) => Err(missing_procedure("amgettuple", scan.index_rel())),
         IndexScanOpaque::Gist(_) => gist::gistgettuple(scan, direction),
         IndexScanOpaque::Spgist(_) => spgist::spggettuple(scan, direction),
         IndexScanOpaque::Hnsw(_) => pgvector_hnsw::hnswgettuple(scan, direction),

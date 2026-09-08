@@ -416,3 +416,32 @@ fn insert_dispatches_through_am() {
     assert!(ok);
     index_insert_cleanup(&idx, &mut am_cache).unwrap();
 }
+
+#[test]
+fn gin_getnext_tid_returns_missing_procedure_without_advancing_scan() {
+    install();
+    let ctx = MemoryContext::new("gin missing procedure");
+    let mcx = ctx.mcx();
+    let idx = make(mcx, IDX, "gin_idx", RELKIND_INDEX, types_core::GIN_AM_OID);
+    let so = mcx::alloc_in(
+        mcx,
+        gin_vocab::GinScanOpaqueData {
+            ginstate: None,
+            work: None,
+            isVoidRes: false,
+        },
+    )
+    .unwrap();
+    let mut scan =
+        relation_get_index_scan(mcx, &idx, 0, 0, IndexScanOpaque::Gin(so), false).unwrap();
+    scan.kill_prior_tuple = true;
+    scan.xs_heap_continue = true;
+    let err = index_getnext_tid(&mut scan, ForwardScanDirection).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    assert_eq!(
+        err.message,
+        "function \"amgettuple\" is not defined for index \"gin_idx\""
+    );
+    assert!(scan.kill_prior_tuple);
+    assert!(scan.xs_heap_continue);
+}
