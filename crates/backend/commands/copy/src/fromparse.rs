@@ -1245,12 +1245,13 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
     // CopyReadBinaryAttribute's data load: fld_size bytes into binary_attr_buf.
     pub(crate) fn read_binary_attr_data(&mut self, fld_size: usize) -> PgResult<()> {
         self.binary_attr_buf.reset();
+        self.binary_attr_buf.enlarge(fld_size)?;
         let mut remaining = fld_size;
-        loop {
+        while remaining > 0 {
             if self.raw_buf_len - self.raw_buf_index == 0 {
                 self.copy_load_raw_buf()?;
                 if self.raw_reached_eof {
-                    break;
+                    return Err(unexpected_eof_in_copy_data());
                 }
             }
             let chunk = remaining.min(self.raw_buf_len - self.raw_buf_index);
@@ -1258,11 +1259,8 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
                 .append_bytes(&self.raw_buf[self.raw_buf_index..self.raw_buf_index + chunk])?;
             self.raw_buf_index += chunk;
             remaining -= chunk;
-            if remaining == 0 {
-                return Ok(());
-            }
         }
-        Err(unexpected_eof_in_copy_data())
+        Ok(())
     }
 
     /// `CopyFromBinaryOneRow` + `CopyReadBinaryAttribute` (copyfromparse.c).

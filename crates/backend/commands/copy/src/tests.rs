@@ -744,3 +744,56 @@ fn parquet_format_refusal_points_at_the_format_option() {
     let e = crate::parquet_format_not_recognized(&opts, None);
     assert_eq!(e.sqlstate(), types_error::ERRCODE_INVALID_PARAMETER_VALUE);
 }
+
+#[test]
+fn binary_empty_field_does_not_read_source() {
+    let mcx = test_ctx().mcx();
+    for eof in [false, true] {
+        let mut st = mk_state(mcx, b'\t', "");
+        st.opts.binary = true;
+        st.raw_reached_eof = eof;
+        st.src = CopySrc::Callback { cb: Box::new(|_, _| panic!("unexpected read")) };
+        st.binary_attr_buf.append_bytes(b"previous field").unwrap();
+        st.binary_attr_buf.cursor = 3;
+        st.read_binary_attr_data(0).unwrap();
+        assert!(st.binary_attr_buf.as_bytes().is_empty());
+        assert_eq!(st.binary_attr_buf.cursor, 0);
+    }
+}
+
+#[test]
+fn binary_oversize_field_is_rejected_before_reading() {
+    let mcx = test_ctx().mcx();
+    for size in [0x3fff_ffff, 0x4000_0000, i32::MAX as usize] {
+        let mut st = mk_state(mcx, b'\t', "");
+        st.opts.binary = true;
+        st.src = CopySrc::Callback { cb: Box::new(|_, _| panic!("unexpected read")) };
+        let error = st.read_binary_attr_data(size).unwrap_err();
+        assert_eq!(error.sqlstate(), types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+    }
+}
+
+#[test]
+fn binary_field_handles_fragmentation_and_truncation() {
+    setup_fd();
+    let mcx = test_ctx().mcx();
+    for (size, payload) in [(1, b"x".as_slice()), (3, b"abc".as_slice()), (4, b"abc".as_slice())] {
+        let mut st = mk_state(mcx, b'\t', "");
+        st.opts.binary = true;
+        let mut offset = 0;
+        st.src = CopySrc::Callback { cb: Box::new(move |dst, _| {
+            if offset == payload.len() { return Ok(0); }
+            dst[0] = payload[offset];
+            offset += 1;
+            Ok(1)
+        }) };
+        let result = st.read_binary_attr_data(size);
+        if size == payload.len() {
+            result.unwrap();
+            assert_eq!(st.binary_attr_buf.as_bytes(), payload);
+            st.read_binary_attr_data(0).unwrap();
+        } else {
+            assert_eq!(result.unwrap_err().sqlstate(), types_error::ERRCODE_BAD_COPY_FILE_FORMAT);
+        }
+    }
+}
