@@ -1206,6 +1206,7 @@ pub fn exec_rescan_hash_join_chg<'mcx>(
         hash_state.table.as_mut().expect("just checked").destroy()?;
         hash_state.table = None;
     }
+    end_hash_instr_loop(node, estate);
     node.hj_JoinState = HJ_BUILD_HASHTABLE;
     node.hj_CurHashValue = 0;
     node.hj_CurBucketNo = 0;
@@ -1248,7 +1249,15 @@ fn release_parallel_table<'mcx>(
     }
     hash_state.ptable = None;
     node.hj_JoinState = HJ_BUILD_HASHTABLE;
+    end_hash_instr_loop(node, estate);
     Ok(true)
+}
+
+// Rescanning the Hash child does not close the Hash node's instrumentation cycle.
+fn end_hash_instr_loop(node: &HashJoinState<'_>, estate: &mut EStateData<'_>) {
+    if let Some(ix) = node.hash_instr {
+        ::instrument::instr_end_loop(&mut estate.es_instrumentation[ix as usize]);
+    }
 }
 
 /// `ExecReScanHashJoin`.
@@ -1279,6 +1288,7 @@ pub fn exec_rescan_hash_join<'mcx>(
             hash_state.table = None;
             node.hj_JoinState = HJ_BUILD_HASHTABLE;
             node.dense_on = false;
+            end_hash_instr_loop(node, estate);
             rescan_inner = RescanInner::Rescan;
         }
     }
