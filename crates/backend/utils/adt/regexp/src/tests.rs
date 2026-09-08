@@ -1021,3 +1021,44 @@ fn indeterminate_collation_guard_fires_on_re2_fast_path() {
         b"aXc"
     );
 }
+
+#[test]
+fn session_cache_teardown_cannot_invalidate_live_datum() {
+    with_cache(|cache| {
+        let value = mcx::alloc_leak_in(cache.mcx, [7u8; 16384])?;
+        let result = std::panic::catch_unwind(clear_cache);
+        assert!(result.is_err());
+        assert_eq!(value[16383], 7);
+        Ok(())
+    }).unwrap();
+    clear_cache();
+    RE_CACHE.with(|cell| assert!(cell.borrow().is_none()));
+}
+
+#[test]
+fn session_cache_clear_preserves_compiled_clone() {
+    utf8();
+    let cx = MemoryContext::new("surviving compiled regex");
+    let re = RE_compile_and_cache(cx.mcx(), b"^(a+)(b+)$", REG_ADVANCED, C).unwrap();
+    clear_cache();
+    let mut pmatch = [RegMatch::UNSET; 3];
+    assert!(RE_execute(cx.mcx(), &re, b"aabbb", &mut pmatch).unwrap());
+    assert_eq!(pmatch[0], RegMatch { rm_so: 0, rm_eo: 5 });
+    assert!(cache_keys().is_empty());
+    clear_cache();
+}
+
+#[test]
+#[ignore = "process-global accounting; run alone with --test-threads=1"]
+fn session_cache_reclaims_complete_context() {
+    clear_cache();
+    let before = mcx::global_footprint::bytes();
+    for _ in 0..64 {
+        with_cache(|cache| {
+            let _value = mcx::alloc_leak_in(cache.mcx, [1u8; 32768])?;
+            Ok(())
+        }).unwrap();
+        clear_cache();
+        assert_eq!(mcx::global_footprint::bytes(), before);
+    }
+}

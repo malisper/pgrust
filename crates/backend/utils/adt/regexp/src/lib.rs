@@ -21,33 +21,43 @@ pub mod matches;
 
 pub const MAX_CACHED_RES: usize = 32;
 
-struct CachedRe {
-    cre_pat: PgVec<'static, u8>,
+struct CachedRe<'mcx> {
+    cre_pat: PgVec<'mcx, u8>,
     cre_flags: i32,
     cre_collation: Oid,
     re: RegexCompiled,
 }
 
-struct ReCache {
-    mcx: Mcx<'static>,
-    entries: PgVec<'static, CachedRe>,
+struct ReCache<'mcx> {
+    mcx: Mcx<'mcx>,
+    entries: PgVec<'mcx, CachedRe<'mcx>>,
 }
+
+mcx::bind!(ReCacheTy => ReCache<'mcx>);
 
 thread_local! {
-    static RE_CACHE: RefCell<Option<ManuallyDrop<ReCache>>> = const { RefCell::new(None) };
+    static RE_CACHE: RefCell<Option<ManuallyDrop<mcx::McxOwned<ReCacheTy>>>> = const { RefCell::new(None) };
 }
 
-// INVARIANT: `f` must not re-enter the cache; the borrow spans its extent
-// (loud RefCell panic otherwise).
-fn with_cache<R>(f: impl FnOnce(&mut ReCache) -> R) -> R {
+fn clear_cache() {
+    let old = RE_CACHE.with(|cell| cell.borrow_mut().take());
+    if let Some(cache) = old {
+        drop(ManuallyDrop::into_inner(cache));
+    }
+}
+
+fn with_cache<R>(f: impl for<'mcx> FnOnce(&mut ReCache<'mcx>) -> PgResult<R>) -> PgResult<R> {
     RE_CACHE.with(|cell| {
         let mut slot = cell.borrow_mut();
-        let cache = slot.get_or_insert_with(|| {
-            let mcx =
-                ::mcx::session_root("RegexpCacheMemoryContext").mcx();
-            ManuallyDrop::new(ReCache { mcx, entries: PgVec::new_in(mcx) })
-        });
-        f(cache)
+        if slot.is_none() {
+            let cache = mcx::McxOwned::try_new(
+                mcx::MemoryContext::new("RegexpCacheMemoryContext"),
+                |mcx| Ok(ReCache { mcx, entries: PgVec::new_in(mcx) }),
+            )?;
+            *slot = Some(ManuallyDrop::new(cache));
+            mcx::register_session_cleanup(Box::new(clear_cache));
+        }
+        slot.as_mut().unwrap().with_mut(f)
     })
 }
 
@@ -72,18 +82,18 @@ pub fn RE_compile_and_cache(
     collation: Oid,
 ) -> PgResult<RegexCompiled> {
     let hit = with_cache(|cache| {
-        let i = cache.entries.iter().position(|e| {
+        let Some(i) = cache.entries.iter().position(|e| {
             e.cre_pat.len() == pattern.len()
                 && e.cre_flags == cflags
                 && e.cre_collation == collation
                 && e.cre_pat.as_slice() == pattern
-        })?;
+        }) else { return Ok(None) };
         if i > 0 {
             let entry = cache.entries.remove(i);
             cache.entries.insert(0, entry);
         }
-        Some(cache.entries[0].re.clone())
-    });
+        Ok(Some(cache.entries[0].re.clone()))
+    })?;
     if let Some(re) = hit {
         return Ok(re);
     }
@@ -100,7 +110,7 @@ pub fn RE_compile_and_cache(
         cache
             .entries
             .try_reserve(1)
-            .map_err(|_| cache.mcx.oom(core::mem::size_of::<CachedRe>()))?;
+            .map_err(|_| cache.mcx.oom(core::mem::size_of::<CachedRe<'_>>()))?;
         if cache.entries.len() >= MAX_CACHED_RES {
             // C: MemoryContextDelete(re_array[num_res].cre_context); here the
             // engine state frees when the last RegexCompiled clone drops.
@@ -603,12 +613,12 @@ pub fn init_seams() {
 #[cfg(test)]
 fn cache_keys() -> Vec<(Vec<u8>, i32, Oid)> {
     with_cache(|cache| {
-        cache
+        Ok(cache
             .entries
             .iter()
             .map(|e| (e.cre_pat.as_slice().to_vec(), e.cre_flags, e.cre_collation))
-            .collect()
-    })
+            .collect())
+    }).unwrap()
 }
 
 #[cfg(test)]

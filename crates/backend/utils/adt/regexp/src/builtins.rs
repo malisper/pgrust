@@ -8,15 +8,23 @@ use types_fmgr::{varlena_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData
 // Per-call wide-char conversion scratch (C pallocs and pfrees in
 // CurrentMemoryContext); reset on entry, so nothing escapes a call.
 std::thread_local! {
-    static EXEC_SCRATCH: core::cell::RefCell<Option<&'static mut ::mcx::MemoryContext>> =
+    static EXEC_SCRATCH: core::cell::RefCell<Option<core::mem::ManuallyDrop<::mcx::MemoryContext>>> =
         const { core::cell::RefCell::new(None) };
 }
 
-fn with_exec_scratch<R>(f: impl FnOnce(::mcx::Mcx<'_>) -> R) -> R {
+fn clear_exec_scratch() {
+    let old = EXEC_SCRATCH.with(|cell| cell.borrow_mut().take());
+    if let Some(ctx) = old {
+        drop(core::mem::ManuallyDrop::into_inner(ctx));
+    }
+}
+
+fn with_exec_scratch<R>(f: impl for<'scratch> FnOnce(::mcx::Mcx<'scratch>) -> R) -> R {
     EXEC_SCRATCH.with(|cell| {
         let mut slot = cell.borrow_mut();
         let ctx = slot.get_or_insert_with(|| {
-            ::mcx::session_root_mut(::mcx::MemoryContext::new_bump("RegexpExecScratch"))
+            ::mcx::register_session_cleanup(Box::new(clear_exec_scratch));
+            core::mem::ManuallyDrop::new(::mcx::MemoryContext::new_bump("RegexpExecScratch"))
         });
         ctx.reset();
         f(ctx.mcx())
@@ -703,3 +711,51 @@ pub const REGEXP_BUILTINS: &[FmgrBuiltin] = &[
     bn(6268, "regexp_substr_no_subexpr", 5, fc_regexp_substr_no_subexpr),
     bn(6269, "regexp_substr", 6, fc_regexp_substr),
 ];
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+
+    #[test]
+    fn session_scratch_teardown_cannot_invalidate_live_datum() {
+        with_exec_scratch(|mcx| {
+            let value = mcx::alloc_leak_in(mcx, [7u8; 16384]).unwrap();
+            let result = std::panic::catch_unwind(clear_exec_scratch);
+            assert!(result.is_err());
+            assert_eq!(value[16383], 7);
+        });
+        clear_exec_scratch();
+        EXEC_SCRATCH.with(|cell| assert!(cell.borrow().is_none()));
+        with_exec_scratch(|mcx| {
+            assert_eq!(*mcx::alloc_leak_in(mcx, 9u8).unwrap(), 9);
+        });
+        clear_exec_scratch();
+    }
+
+    #[test]
+    fn session_scratch_unwind_keeps_owner_valid() {
+        let result = std::panic::catch_unwind(|| {
+            with_exec_scratch(|mcx| {
+                let _value = mcx::alloc_leak_in(mcx, [1u8; 16384]).unwrap();
+                panic!("abort regexp evaluation");
+            });
+        });
+        assert!(result.is_err());
+        with_exec_scratch(|mcx| assert_eq!(*mcx::alloc_leak_in(mcx, 42u8).unwrap(), 42));
+        clear_exec_scratch();
+    }
+
+    #[test]
+    #[ignore = "process-global accounting; run alone with --test-threads=1"]
+    fn session_scratch_reclaims_complete_context() {
+        clear_exec_scratch();
+        let before = mcx::global_footprint::bytes();
+        for _ in 0..64 {
+            with_exec_scratch(|mcx| {
+                let _value = mcx::alloc_leak_in(mcx, [1u8; 32768]).unwrap();
+            });
+            clear_exec_scratch();
+            assert_eq!(mcx::global_footprint::bytes(), before);
+        }
+    }
+}
