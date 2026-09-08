@@ -430,13 +430,20 @@ pub fn XLogFileInit(logsegno: XLogSegNo, logtli: TimeLineID) -> PgResult<i32> {
     if f >= 0 {
         return Ok(f);
     }
+    reopen_initialized_wal(&path)
+}
+
+fn reopen_initialized_wal(path: &str) -> PgResult<i32> {
     let f = fd::BasicOpenFile(
-        &path,
+        path,
         libc::O_RDWR | libc::O_CLOEXEC | get_sync_bit(wal_sync_method()),
     )?;
     if f < 0 {
+        let en = fd::get_errno();
         return ereport(ERROR)
-            .errmsg(format!("could not open file \"{path}\""))
+            .with_saved_errno(en)
+            .errcode_for_file_access()
+            .errmsg(format!("could not open file \"{path}\": %m"))
             .finish(loc("XLogFileInit"))
             .map(|_| -1);
     }
@@ -576,10 +583,15 @@ pub fn XLogFileOpen(segno: XLogSegNo, tli: TimeLineID) -> PgResult<i32> {
     match fd::BasicOpenFile(&path, libc::O_RDWR | libc::O_CLOEXEC | get_sync_bit(wal_sync_method()))
     {
         Ok(f) if f >= 0 => Ok(f),
-        _ => ereport(PANIC)
-            .errmsg(format!("could not open file \"{path}\""))
-            .finish(loc("XLogFileOpen"))
-            .map(|_| -1),
+        _ => {
+            let en = fd::get_errno();
+            ereport(PANIC)
+                .with_saved_errno(en)
+                .errcode_for_file_access()
+                .errmsg(format!("could not open file \"{path}\": %m"))
+                .finish(loc("XLogFileOpen"))
+                .map(|_| -1)
+        }
     }
 }
 
@@ -589,10 +601,17 @@ fn XLogFileClose() -> PgResult<()> {
     let guard = OPEN_LOG_FILE.with(|c| c.borrow_mut().take());
     debug_assert!(guard.is_some());
     let f = guard.map_or(-1, VfsFd::into_raw);
+    close_wal_file(f)
+}
+
+fn close_wal_file(f: i32) -> PgResult<()> {
     if fd::pg_close(f) != 0 {
+        let en = fd::get_errno();
         let fname = XLogFileName(OPEN_LOG_TLI.get(), OPEN_LOG_SEG_NO.get(), wal_segment_size());
         return ereport(PANIC)
-            .errmsg(format!("could not close file \"{fname}\""))
+            .with_saved_errno(en)
+            .errcode_for_file_access()
+            .errmsg(format!("could not close file \"{fname}\": %m"))
             .finish(loc("XLogFileClose"));
     }
     fd::ReleaseExternalFD();
@@ -1320,3 +1339,78 @@ pub(crate) fn open_log_file_close_if_open() -> PgResult<()> {
     Ok(())
 }
 
+
+#[cfg(test)]
+mod file_error_tests {
+    use super::*;
+    use types_error::{ERRCODE_INTERNAL_ERROR, ERRCODE_UNDEFINED_FILE, ERRCODE_WRONG_OBJECT_TYPE};
+
+    thread_local! {
+        static REPORTED: RefCell<Option<PgError>> = const { RefCell::new(None) };
+    }
+
+    fn capture(error: &PgError, output_to_server: &mut bool) {
+        REPORTED.with(|slot| *slot.borrow_mut() = Some(error.clone()));
+        *output_to_server = false;
+    }
+
+    fn panic_error(f: impl FnOnce() + std::panic::UnwindSafe) -> PgError {
+        let previous = elog::set_emit_log_hook(Some(capture));
+        let result = std::panic::catch_unwind(f);
+        elog::set_emit_log_hook(previous);
+        assert!(result.unwrap_err().is::<types_error::PanicExitThread>());
+        REPORTED.with(|slot| slot.borrow_mut().take().expect("PANIC diagnostic"))
+    }
+
+    fn check(error: &PgError, errno: i32, state: types_error::SqlState, message: &str) {
+        assert_eq!(error.saved_errno, Some(errno));
+        assert_eq!(error.sqlstate, state);
+        assert_eq!(error.message, message);
+    }
+
+    #[test]
+    fn initialized_segment_reopen_reports_kernel_errors() {
+        let root = std::env::temp_dir().join(format!("pgrust-wal-reopen-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let missing = root.join("missing");
+        let path = missing.to_str().unwrap();
+        let error = reopen_initialized_wal(path).unwrap_err();
+        assert_eq!(error.level, ERROR);
+        check(&error, libc::ENOENT, ERRCODE_UNDEFINED_FILE,
+            &format!("could not open file \"{path}\": {}", elog::errno::strerror(libc::ENOENT)));
+        let path = root.to_str().unwrap();
+        let error = reopen_initialized_wal(path).unwrap_err();
+        check(&error, libc::EISDIR, ERRCODE_WRONG_OBJECT_TYPE,
+            &format!("could not open file \"{path}\": {}", elog::errno::strerror(libc::EISDIR)));
+        let good = root.join("segment");
+        std::fs::write(&good, b"wal").unwrap();
+        let raw = reopen_initialized_wal(good.to_str().unwrap()).unwrap();
+        assert!(raw >= 0);
+        assert_eq!(fd::pg_close(raw), 0);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn open_missing_segment_keeps_panic_and_file_sqlstate() {
+        let segno = u32::MAX as u64;
+        let tli = u32::MAX;
+        let path = XLogFilePath(tli, segno, wal_segment_size());
+        assert!(!std::path::Path::new(&path).exists());
+        let error = panic_error(|| { let _ = XLogFileOpen(segno, tli); });
+        assert_eq!(error.level, PANIC);
+        check(&error, libc::ENOENT, ERRCODE_UNDEFINED_FILE,
+            &format!("could not open file \"{path}\": {}", elog::errno::strerror(libc::ENOENT)));
+    }
+
+    #[test]
+    fn failed_segment_close_keeps_panic_and_errno() {
+        OPEN_LOG_TLI.set(1);
+        OPEN_LOG_SEG_NO.set(1);
+        let error = panic_error(|| { let _ = close_wal_file(-1); });
+        assert_eq!(error.level, PANIC);
+        assert_eq!(open_log_file(), -1);
+        let name = XLogFileName(1, 1, wal_segment_size());
+        check(&error, libc::EBADF, ERRCODE_INTERNAL_ERROR,
+            &format!("could not close file \"{name}\": {}", elog::errno::strerror(libc::EBADF)));
+    }
+}
