@@ -1029,6 +1029,8 @@ mod acct_pool {
             arena_footprint: Cell::new(0),
             arena_nblocks: Cell::new(0),
             window_tail: Cell::new(0),
+            live_chunk_bytes: Cell::new(0),
+            free_chunks: Cell::new(0),
             is_bump: false,
             kind: "AllocSet",
             parent: None,
@@ -1639,4 +1641,83 @@ mod freed_chunk_detection {
         let d = m.allocate(l(72)).unwrap().cast::<u8>();
         unsafe { m.deallocate(d, l(72)) };
     }
+}
+
+// aset.c:1545-1609 AllocSetStats: nblocks counts every block on set->blocks
+// (the single-chunk blocks of AllocSetAllocLarge included), totalspace is the
+// bytes those blocks hold, freespace is Σ (endptr - freeptr) over the blocks
+// plus the size of every chunk parked on a freelist, freechunks is the
+// freelist population, and "used" is totalspace - freespace. The pgrust
+// AllocSet tracks all of it (blocks, dedicated list, mem_allocated,
+// freelists); the stats surface (stats_tree / stats, and through them
+// pg_backend_memory_contexts and the context dump) must report it rather
+// than 0 blocks / 0 free for every AllocSet context.
+#[test]
+fn aset_stats_walk_blocks_and_freelists() {
+    use allocator_api2::alloc::Allocator;
+    let mut ctx = MemoryContext::new("aset-stats");
+    let l = Layout::from_size_align(64, 8).unwrap();
+    // mcx's own tests take no recycled keeper (take_recycled_blocks), so the
+    // first chunk allocates the 8K keeper: 389 64-byte chunks fill the keeper
+    // (128), a second 8K block (128) and 133 slots of a 16K block (256).
+    let n = 3 * aset::INIT_BLOCK_SIZE / 64 + 5;
+    let mut ptrs = alloc::vec::Vec::new();
+    {
+        let mcx = ctx.mcx();
+        for _ in 0..n {
+            ptrs.push(Allocator::allocate(&mcx, l).unwrap().cast::<u8>());
+        }
+    }
+    let t = ctx.stats_tree();
+    assert_eq!(t.nblocks, 3, "AllocSetStats counts the keeper and both overflow blocks");
+    assert_eq!(t.arena_footprint, 4 * aset::INIT_BLOCK_SIZE, "totalspace is the block bytes");
+    // freespace = Σ (endptr - freeptr): only the 16K block's 123 unused slots.
+    let tails = 4 * aset::INIT_BLOCK_SIZE - n * 64;
+    assert_eq!(t.free_bytes, tails, "block tails are free space");
+    assert_eq!(t.free_chunks, 0, "nothing parked on a freelist yet");
+
+    // AllocSetFree parks the chunk on its freelist: freechunks counts it and
+    // freespace grows by its class size (aset.c:1571-1590).
+    for p in ptrs.drain(..10) {
+        unsafe { Allocator::deallocate(&ctx.mcx(), p, l) };
+    }
+    let t = ctx.stats_tree();
+    assert_eq!(t.free_chunks, 10);
+    assert_eq!(t.free_bytes, tails + 10 * 64);
+    let s = ctx.stats();
+    assert_eq!(
+        (s.nblocks, s.free_bytes, s.free_chunks),
+        (3, tails + 10 * 64, 10),
+        "ContextStats carries the same figures"
+    );
+    // A freelist hit un-parks the chunk.
+    ptrs.push(Allocator::allocate(&ctx.mcx(), l).unwrap().cast::<u8>());
+    let t = ctx.stats_tree();
+    assert_eq!((t.free_chunks, t.free_bytes), (9, tails + 9 * 64));
+
+    // AllocSetAllocLarge: a chunk above the freelist classes is a block of its
+    // own — one more block, its bytes in totalspace, nothing free in it.
+    let big = Layout::from_size_align(100_000, 8).unwrap();
+    let d = Allocator::allocate(&ctx.mcx(), big).unwrap().cast::<u8>();
+    let t = ctx.stats_tree();
+    assert_eq!(t.nblocks, 4, "a single-chunk block is on set->blocks");
+    assert_eq!(t.arena_footprint, 4 * aset::INIT_BLOCK_SIZE + 100_000);
+    assert_eq!(t.free_bytes, tails + 9 * 64, "a single-chunk block has no free space");
+    unsafe { Allocator::deallocate(&ctx.mcx(), d, big) };
+    let t = ctx.stats_tree();
+    assert_eq!(t.nblocks, 3, "AllocSetFree unlinks a single-chunk block");
+    assert_eq!((t.free_chunks, t.free_bytes), (9, tails + 9 * 64));
+
+    // Every chunk freed (nothing charged, so the reset leak check holds), then
+    // AllocSetReset (aset.c:537-597): the keeper stays, everything else goes.
+    for p in ptrs {
+        unsafe { Allocator::deallocate(&ctx.mcx(), p, l) };
+    }
+    assert_eq!(ctx.stats_tree().free_chunks, n);
+    ctx.reset();
+    let t = ctx.stats_tree();
+    assert_eq!(t.nblocks, 1, "the keeper block survives a reset");
+    assert_eq!(t.arena_footprint, aset::INIT_BLOCK_SIZE);
+    assert_eq!(t.free_bytes, aset::INIT_BLOCK_SIZE, "the keeper is entirely free");
+    assert_eq!(t.free_chunks, 0, "AllocSetReset empties the freelists");
 }

@@ -139,17 +139,18 @@ impl Counters {
     }
 }
 
-/// The context's own counters (C's per-allocator `stats` method). C
-/// divergence: allocator-native accounting, the same convention as
-/// mcxtfuncs put_context_row so the view and the dump agree — block
-/// footprint where tracked, charged bytes otherwise (floored at used, so an
-/// aset context never dumps as "0 total" with megabytes used); bump free
-/// space is the block-transition window-tail snapshot; free-chunk counts are
-/// not tracked (0).
+/// The context's own counters (C's per-allocator `stats` method): for an
+/// AllocSet, aset.c:1545 AllocSetStats' block bytes / blocks on set->blocks /
+/// block tails + freelist chunks / freelist population. C divergence:
+/// allocator-native figures, the same convention as mcxtfuncs
+/// put_context_row so the view and the dump agree — no chunk or context
+/// headers in the totals, the total floored at the charged bytes and the
+/// block count at 1 (C's keeper is eager, pgrust's is lazy); bump free space
+/// is the block-transition window-tail snapshot and has no chunk count.
 fn counters_of(t: &TreeStats) -> Counters {
     let total = t.arena_footprint.max(t.used);
-    let free = if t.is_bump { t.free_tail.min(total) } else { total - t.used };
-    Counters { nblocks: t.nblocks.max(1), freechunks: 0, totalspace: total, freespace: free }
+    let free = t.free_bytes.min(total);
+    Counters { nblocks: t.nblocks.max(1), freechunks: t.free_chunks, totalspace: total, freespace: free }
 }
 
 /// Each allocator's stats string (aset.c:1596, generation.c:1076, slab.c:978,
@@ -442,7 +443,8 @@ mod tests {
             is_bump: false,
             arena_footprint: used + 8,
             nblocks: 1,
-            free_tail: 0,
+            free_bytes: 8,
+            free_chunks: 0,
             children,
         }
     }

@@ -5,6 +5,8 @@ use core::ptr::NonNull;
 
 use allocator_api2::alloc::{AllocError, Allocator, Global};
 
+use crate::Acct;
+
 // Guard-page debug allocator: overruns fault at the writing site.
 #[cfg(feature = "aset-guard")]
 mod guard {
@@ -376,10 +378,29 @@ impl AllocSet {
         self.mem_allocated
     }
 
+    // aset.c:1545 AllocSetStats at block grain: the bytes held in blocks and
+    // the block count — every block on set->blocks, the single-chunk blocks
+    // of AllocSetAllocLarge included.
+    pub(crate) fn footprint(&self) -> usize {
+        self.mem_allocated
+    }
+
+    pub(crate) fn nblocks(&self) -> usize {
+        self.blocks.len() + self.dedicated.len()
+    }
+
+    // Mirror the block-grain figures to the accounting node; cold (block
+    // transitions only). The chunk-grain figures (live chunk bytes, parked
+    // free chunks) move on the Acct itself at each alloc/free.
+    #[inline]
+    fn sync_blocks(&self, acct: &Acct) {
+        acct.set_blocks(self.mem_allocated, self.nblocks());
+    }
+
     // always-inline: with 7 Backend variants LLVM's budget outlines this behind a
     // call in hot lanes (+17 instr/op on aset_alloc_8, Graviton job -1783030007).
     #[inline(always)]
-    pub(crate) fn alloc(&mut self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+    pub(crate) fn alloc(&mut self, layout: Layout, acct: &Acct) -> Result<NonNull<[u8]>, AllocError> {
         // ZST: dangling aligned pointer, no pool state touched (as allocator_api2 expects).
         if layout.size() == 0 {
             let dangling = layout.align() as *mut u8;
@@ -393,7 +414,7 @@ impl AllocSet {
         }
         #[cfg(not(feature = "aset-guard"))]
         if is_dedicated(layout) {
-            return self.alloc_dedicated(layout);
+            return self.alloc_dedicated(layout, acct);
         }
         let (idx, csize) = idx_and_chunk(layout.size());
 
@@ -403,12 +424,15 @@ impl AllocSet {
             self.freelist[idx] = next;
             #[cfg(debug_assertions)]
             self.freed.note_alloc(head.as_ptr().addr());
+            acct.free_chunks.set(acct.free_chunks.get() - 1);
+            acct.live_chunk_bytes.set(acct.live_chunk_bytes.get() + csize);
             return Ok(NonNull::slice_from_raw_parts(head, csize));
         }
 
         let avail = self.cur_end as usize - self.cur_ptr as usize;
         if csize <= avail {
             let p = self.cur_ptr;
+            acct.live_chunk_bytes.set(acct.live_chunk_bytes.get() + csize);
             // SAFETY: csize <= avail keeps the bump within the active block; p non-null there.
             unsafe {
                 self.cur_ptr = p.add(csize);
@@ -416,24 +440,27 @@ impl AllocSet {
             }
         }
 
-        self.alloc_new_block(csize)
+        self.alloc_new_block(csize, acct)
     }
 
     // C's AllocSetAllocLarge: a dedicated chunk is a single-chunk block —
     // tracked, counted in mem_allocated, and freed at pfree/reset/delete.
     #[cold]
     #[inline(never)]
-    fn alloc_dedicated(&mut self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+    fn alloc_dedicated(&mut self, layout: Layout, acct: &Acct) -> Result<NonNull<[u8]>, AllocError> {
         let out = Global.allocate(layout)?;
         self.dedicated.push((out.cast::<u8>(), layout));
         self.mem_allocated += layout.size();
         crate::global_footprint::add(layout.size());
+        // A single-chunk block has no free space (freeptr == endptr).
+        acct.live_chunk_bytes.set(acct.live_chunk_bytes.get() + layout.size());
+        self.sync_blocks(acct);
         Ok(out)
     }
 
     #[cold]
     #[inline(never)]
-    fn dealloc_dedicated(&mut self, ptr: NonNull<u8>, layout: Layout) {
+    fn dealloc_dedicated(&mut self, ptr: NonNull<u8>, layout: Layout, acct: &Acct) {
         let idx = self
             .dedicated
             .iter()
@@ -442,6 +469,8 @@ impl AllocSet {
         self.dedicated.swap_remove(idx);
         self.mem_allocated -= layout.size();
         crate::global_footprint::sub(layout.size());
+        acct.live_chunk_bytes.set(acct.live_chunk_bytes.get() - layout.size());
+        self.sync_blocks(acct);
         // SAFETY: tracked live dedicated allocation; caller guarantees layout.
         unsafe { Global.deallocate(ptr, layout) };
     }
@@ -457,7 +486,7 @@ impl AllocSet {
 
     #[cold]
     #[inline(never)]
-    fn alloc_new_block(&mut self, csize: usize) -> Result<NonNull<[u8]>, AllocError> {
+    fn alloc_new_block(&mut self, csize: usize, acct: &Acct) -> Result<NonNull<[u8]>, AllocError> {
         self.sync_active();
         let is_keeper = self.blocks.is_empty();
         let blksize = if is_keeper {
@@ -477,12 +506,14 @@ impl AllocSet {
         self.cur_ptr = unsafe { p.as_ptr().add(csize) };
         self.cur_end = unsafe { p.as_ptr().add(blksize) };
         self.blocks.push(block);
+        acct.live_chunk_bytes.set(acct.live_chunk_bytes.get() + csize);
+        self.sync_blocks(acct);
         Ok(NonNull::slice_from_raw_parts(p, csize))
     }
 
     /// # Safety
     /// Live allocation from [`alloc`](Self::alloc) with the same layout.
-    pub(crate) unsafe fn dealloc(&mut self, ptr: NonNull<u8>, layout: Layout) {
+    pub(crate) unsafe fn dealloc(&mut self, ptr: NonNull<u8>, layout: Layout, acct: &Acct) {
         // ZST: dangling sentinel; writing a freelist head into it corrupts the heap.
         if layout.size() == 0 {
             return;
@@ -494,7 +525,7 @@ impl AllocSet {
         }
         #[cfg(not(feature = "aset-guard"))]
         if is_dedicated(layout) {
-            self.dealloc_dedicated(ptr, layout);
+            self.dealloc_dedicated(ptr, layout, acct);
             return;
         }
         let idx = free_list_index(layout.size());
@@ -502,6 +533,10 @@ impl AllocSet {
         self.freed.note_free(ptr);
         core::ptr::write(ptr.as_ptr() as *mut Option<NonNull<u8>>, self.freelist[idx]);
         self.freelist[idx] = Some(ptr);
+        // aset.c AllocSetFree: the chunk parks on its freelist (AllocSetStats
+        // counts it as a free chunk of its class size).
+        acct.live_chunk_bytes.set(acct.live_chunk_bytes.get() - chunk_size(idx));
+        acct.free_chunks.set(acct.free_chunks.get() + 1);
     }
 
     // upstream 3f3eefc28892 (18.4): Detect pfree or repalloc of a previously-freed memory chunk.
@@ -530,21 +565,27 @@ impl AllocSet {
         ptr: NonNull<u8>,
         old_layout: Layout,
         new_layout: Layout,
+        acct: &Acct,
     ) -> Result<NonNull<[u8]>, AllocError> {
-        let new = self.alloc(new_layout)?;
+        let new = self.alloc(new_layout, acct)?;
         let copy = old_layout.size().min(new_layout.size());
         core::ptr::copy_nonoverlapping(ptr.as_ptr(), new.cast::<u8>().as_ptr(), copy);
-        self.dealloc(ptr, old_layout);
+        self.dealloc(ptr, old_layout, acct);
         Ok(new)
     }
 
-    pub(crate) fn reset(&mut self) {
+    // aset.c:537-597 AllocSetReset: every chunk goes (freelists emptied, the
+    // keeper block alone stays, fully free).
+    pub(crate) fn reset(&mut self, acct: &Acct) {
         self.free_all_dedicated();
         #[cfg(debug_assertions)]
         self.freed.clear();
+        acct.live_chunk_bytes.set(0);
+        acct.free_chunks.set(0);
         if self.blocks.is_empty() {
             self.freelist = [None; NUM_FREELISTS];
             self.next_block_size = INIT_BLOCK_SIZE;
+            self.sync_blocks(acct);
             return;
         }
         let drained: alloc::vec::Vec<Block> = self.blocks.drain(1..).collect();
@@ -563,6 +604,7 @@ impl AllocSet {
         self.freelist = [None; NUM_FREELISTS];
         self.next_block_size = INIT_BLOCK_SIZE;
         debug_assert_eq!(self.mem_allocated, self.blocks[0].size);
+        self.sync_blocks(acct);
     }
 }
 
@@ -597,6 +639,27 @@ impl Drop for AllocSet {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::cell::{Cell, RefCell};
+
+    fn acct() -> Acct {
+        Acct {
+            name: Cell::new("aset-test"),
+            ident: RefCell::new(None),
+            self_used: Cell::new(0),
+            self_peak: Cell::new(0),
+            limit: Cell::new(usize::MAX),
+            limited_path: Cell::new(false),
+            arena_footprint: Cell::new(0),
+            arena_nblocks: Cell::new(0),
+            window_tail: Cell::new(0),
+            live_chunk_bytes: Cell::new(0),
+            free_chunks: Cell::new(0),
+            is_bump: false,
+            kind: "AllocSet",
+            parent: None,
+            children: RefCell::new(alloc::vec::Vec::new()),
+        }
+    }
 
     #[test]
     fn free_list_index_matches_power_of_two_classes() {
@@ -624,11 +687,12 @@ mod tests {
     #[test]
     fn cached_bump_carves_contiguously_across_a_block_boundary() {
         let mut a = AllocSet::new();
+        let acct = acct();
         let l = Layout::from_size_align(64, 8).unwrap();
         let per_block = INIT_BLOCK_SIZE / 64;
         let mut ptrs = alloc::vec::Vec::new();
         for _ in 0..(per_block * 3 + 5) {
-            let p = a.alloc(l).unwrap();
+            let p = a.alloc(l, &acct).unwrap();
             let raw = p.cast::<u8>().as_ptr();
             assert_eq!(raw as usize % 8, 0);
             for &q in &ptrs {
@@ -650,25 +714,26 @@ mod tests {
     #[test]
     fn cached_bump_survives_reset_and_interleaved_free() {
         let mut a = AllocSet::new();
+        let acct = acct();
         let l = Layout::from_size_align(48, 8).unwrap();
         let mut held = alloc::vec::Vec::new();
         for i in 0..500 {
-            let p = a.alloc(l).unwrap().cast::<u8>();
+            let p = a.alloc(l, &acct).unwrap().cast::<u8>();
             if i % 3 == 0 {
-                unsafe { a.dealloc(p, l) };
+                unsafe { a.dealloc(p, l, &acct) };
             } else {
                 held.push(p);
             }
         }
-        a.reset();
+        a.reset(&acct);
         assert_eq!(a.blocks.len(), 1);
         assert_eq!(a.blocks[0].used, 0);
         let keeper_base = a.blocks[0].ptr.as_ptr();
         assert_eq!(a.cur_ptr, keeper_base);
-        let first = a.alloc(l).unwrap().cast::<u8>().as_ptr();
+        let first = a.alloc(l, &acct).unwrap().cast::<u8>().as_ptr();
         assert_eq!(first, keeper_base, "first post-reset chunk must start the keeper");
         for _ in 0..(INIT_BLOCK_SIZE / 64 + 10) {
-            let _ = a.alloc(l).unwrap();
+            let _ = a.alloc(l, &acct).unwrap();
         }
         a.sync_active();
         let total_used: usize = a.blocks.iter().map(|b| b.used).sum();
@@ -678,9 +743,10 @@ mod tests {
     #[test]
     fn recycled_keeper_primes_cached_window() {
         let mut a = AllocSet::new();
+        let acct = acct();
         assert!(a.cur_ptr.is_null() && a.cur_end.is_null());
         let l = Layout::from_size_align(32, 8).unwrap();
-        let p = a.alloc(l).unwrap().cast::<u8>().as_ptr();
+        let p = a.alloc(l, &acct).unwrap().cast::<u8>().as_ptr();
         assert!(!a.cur_ptr.is_null());
         let base = a.blocks[0].ptr.as_ptr();
         assert_eq!(p, base);
@@ -698,60 +764,64 @@ mod tests {
     #[test]
     fn alloc_dealloc_reuses_same_size_class() {
         let mut a = AllocSet::new();
+        let acct = acct();
         let l = Layout::from_size_align(24, 8).unwrap();
-        let p1 = a.alloc(l).unwrap();
+        let p1 = a.alloc(l, &acct).unwrap();
         assert!(p1.len() >= 24);
         assert_eq!(p1.cast::<u8>().as_ptr() as usize % 8, 0);
-        unsafe { a.dealloc(p1.cast(), l) };
-        let p2 = a.alloc(l).unwrap();
+        unsafe { a.dealloc(p1.cast(), l, &acct) };
+        let p2 = a.alloc(l, &acct).unwrap();
         assert_eq!(p1.cast::<u8>().as_ptr(), p2.cast::<u8>().as_ptr());
     }
 
     #[test]
     fn carving_many_chunks_grows_blocks_and_stays_aligned() {
         let mut a = AllocSet::new();
+        let acct = acct();
         let l = Layout::from_size_align(64, 8).unwrap();
         let mut ptrs = alloc::vec::Vec::new();
         for _ in 0..1000 {
-            let p = a.alloc(l).unwrap();
+            let p = a.alloc(l, &acct).unwrap();
             assert_eq!(p.cast::<u8>().as_ptr() as usize % 8, 0);
             ptrs.push(p);
         }
         assert!(a.mem_allocated() > INIT_BLOCK_SIZE);
         assert!(a.blocks.len() > 1);
         for p in ptrs {
-            unsafe { a.dealloc(p.cast(), l) };
+            unsafe { a.dealloc(p.cast(), l, &acct) };
         }
     }
 
     #[test]
     fn reset_keeps_keeper_frees_rest() {
         let mut a = AllocSet::new();
+        let acct = acct();
         let l = Layout::from_size_align(4096, 8).unwrap();
         for _ in 0..10 {
-            let _ = a.alloc(l).unwrap();
+            let _ = a.alloc(l, &acct).unwrap();
         }
         assert!(a.blocks.len() > 1);
-        a.reset();
+        a.reset(&acct);
         assert_eq!(a.blocks.len(), 1);
         assert_eq!(a.mem_allocated(), INIT_BLOCK_SIZE);
         assert_eq!(a.blocks[0].used, 0);
-        let _ = a.alloc(l).unwrap();
+        let _ = a.alloc(l, &acct).unwrap();
     }
 
     #[test]
     fn zero_sized_alloc_dealloc_is_a_noop_on_dangling_ptr() {
         let mut a = AllocSet::new();
+        let acct = acct();
         for align in [1usize, 2, 4, 8] {
             let l = Layout::from_size_align(0, align).unwrap();
-            let p = a.alloc(l).unwrap();
+            let p = a.alloc(l, &acct).unwrap();
             assert_eq!(p.len(), 0);
             assert_eq!(p.cast::<u8>().as_ptr() as usize % align, 0);
             assert_eq!(a.mem_allocated(), 0);
-            unsafe { a.dealloc(p.cast(), l) };
+            unsafe { a.dealloc(p.cast(), l, &acct) };
         }
         let dangling = unsafe { NonNull::new_unchecked(1usize as *mut u8) };
-        unsafe { a.dealloc(dangling, Layout::from_size_align(0, 1).unwrap()) };
+        unsafe { a.dealloc(dangling, Layout::from_size_align(0, 1).unwrap(), &acct) };
         assert!(a.freelist.iter().all(|h| h.is_none()));
     }
 
@@ -773,24 +843,26 @@ mod tests {
     #[test]
     fn dedicated_large_chunk_roundtrips() {
         let mut a = AllocSet::new();
+        let acct = acct();
         let l = Layout::from_size_align(100_000, 8).unwrap();
-        let p = a.alloc(l).unwrap();
+        let p = a.alloc(l, &acct).unwrap();
         assert!(p.len() >= 100_000);
         // C counts single-chunk blocks in mem_allocated (aset.c AllocSetAllocLarge).
         assert_eq!(a.mem_allocated(), 100_000);
-        unsafe { a.dealloc(p.cast(), l) };
+        unsafe { a.dealloc(p.cast(), l, &acct) };
         assert_eq!(a.mem_allocated(), 0);
     }
 
     #[test]
     fn reset_frees_outstanding_dedicated_chunks() {
         let mut a = AllocSet::new();
+        let acct = acct();
         let l = Layout::from_size_align(100_000, 8).unwrap();
-        let _p1 = a.alloc(l).unwrap();
-        let _p2 = a.alloc(l).unwrap();
+        let _p1 = a.alloc(l, &acct).unwrap();
+        let _p2 = a.alloc(l, &acct).unwrap();
         assert_eq!(a.mem_allocated(), 200_000);
         assert_eq!(a.dedicated.len(), 2);
-        a.reset();
+        a.reset(&acct);
         assert_eq!(a.dedicated.len(), 0);
         // Only the keeper block (if any) remains charged.
         assert_eq!(a.mem_allocated(), a.blocks.first().map_or(0, |b| b.size));
@@ -799,16 +871,17 @@ mod tests {
     #[test]
     fn realloc_moves_dedicated_chunks_and_keeps_accounting() {
         let mut a = AllocSet::new();
+        let acct = acct();
         let small = Layout::from_size_align(64, 8).unwrap();
         let big = Layout::from_size_align(50_000, 8).unwrap();
         let bigger = Layout::from_size_align(120_000, 8).unwrap();
-        let p = a.alloc(small).unwrap();
+        let p = a.alloc(small, &acct).unwrap();
         let base = a.mem_allocated();
-        let p2 = unsafe { a.realloc(p.cast(), small, big).unwrap() };
+        let p2 = unsafe { a.realloc(p.cast(), small, big, &acct).unwrap() };
         assert_eq!(a.mem_allocated(), base + 50_000);
-        let p3 = unsafe { a.realloc(p2.cast(), big, bigger).unwrap() };
+        let p3 = unsafe { a.realloc(p2.cast(), big, bigger, &acct).unwrap() };
         assert_eq!(a.mem_allocated(), base + 120_000);
-        unsafe { a.dealloc(p3.cast(), bigger) };
+        unsafe { a.dealloc(p3.cast(), bigger, &acct) };
         assert_eq!(a.mem_allocated(), base);
         assert!(a.dedicated.is_empty());
     }

@@ -404,6 +404,8 @@ mod tests {
             arena_footprint: Cell::new(0),
             arena_nblocks: Cell::new(0),
             window_tail: Cell::new(0),
+            live_chunk_bytes: Cell::new(0),
+            free_chunks: Cell::new(0),
             is_bump: true,
             kind: "Generation",
             parent: None,

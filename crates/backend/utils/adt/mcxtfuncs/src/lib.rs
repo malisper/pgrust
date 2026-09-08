@@ -77,17 +77,21 @@ fn put_context_row(
     values[2] = text_datum(mcx, t.kind.as_bytes())?;
     values[3] = Datum::from_i32(path.len() as i32);
     values[4] = int4_array_datum(mcx, path)?;
-    // C divergence: allocator-native accounting — block footprint where
-    // tracked, charged bytes otherwise; free-chunk counts unavailable. Bump
-    // free space is the block-transition window-tail snapshot, not C's live
-    // freeptr walk.
-    let total = if t.arena_footprint > 0 { t.arena_footprint } else { t.used };
-    let total = total.max(t.used);
-    let free = if t.is_bump { t.free_tail.min(total) } else { total - t.used };
+    // mcxtfuncs.c PutMemoryContextsStatRecord: the allocator's stats method
+    // fills totalspace / nblocks / freespace / freechunks, and used_bytes is
+    // totalspace - freespace. AllocSet (aset.c:1545 AllocSetStats): block
+    // bytes, every block on set->blocks, block tails + freelist chunks,
+    // freelist population. C divergence (allocator-native figures): no
+    // per-chunk headers or context header in the totals, a keeper taken
+    // lazily (a context that has not allocated yet is reported as C's one
+    // keeper block), bump free space is the block-transition window-tail
+    // snapshot rather than C's live freeptr walk.
+    let total = t.arena_footprint.max(t.used);
+    let free = t.free_bytes.min(total);
     values[5] = Datum::from_i64(total as i64);
     values[6] = Datum::from_i64(t.nblocks.max(1) as i64);
     values[7] = Datum::from_i64(free as i64);
-    values[8] = Datum::from_i64(0);
+    values[8] = Datum::from_i64(t.free_chunks as i64);
     values[9] = Datum::from_i64((total - free) as i64);
 
     srf.putvalues(&values, &nulls)

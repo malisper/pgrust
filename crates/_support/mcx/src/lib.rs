@@ -148,6 +148,14 @@ pub(crate) struct Acct {
     // Active-window tail as of the last block transition (bump backends only);
     // per-alloc bumps never touch Acct, so this reads high vs C's live freeptr.
     pub(crate) window_tail: Cell<usize>,
+    // aset.c:1545 AllocSetStats inputs at chunk grain (AllocSet backend only;
+    // the block pair above is its block grain): the class-rounded bytes of
+    // every live chunk (single-chunk blocks at their size), so that
+    // arena_footprint - live_chunk_bytes is C's freespace — the block tails
+    // (endptr - freeptr) plus every chunk parked on a freelist — and the
+    // freelist population (C's freechunks).
+    pub(crate) live_chunk_bytes: Cell<usize>,
+    pub(crate) free_chunks: Cell<usize>,
     pub(crate) is_bump: bool,
     pub(crate) kind: &'static str,
     pub(crate) parent: Option<AcctRc>,
@@ -155,6 +163,23 @@ pub(crate) struct Acct {
 }
 
 impl Acct {
+    // Block-grain snapshot (AllocSet backend; cold, block transitions only).
+    pub(crate) fn set_blocks(&self, footprint: usize, nblocks: usize) {
+        self.arena_footprint.set(footprint);
+        self.arena_nblocks.set(nblocks);
+    }
+
+    // Free bytes as the allocator's stats method reports them: AllocSetStats'
+    // block tails + freelist chunks for an AllocSet; the block-transition
+    // window-tail snapshot for the bump backends (see window_tail).
+    fn free_bytes(&self) -> usize {
+        if self.is_bump {
+            self.window_tail.get()
+        } else {
+            self.arena_footprint.get().saturating_sub(self.live_chunk_bytes.get())
+        }
+    }
+
     fn ancestors(&self) -> impl Iterator<Item = &Acct> {
         let mut cur: Option<&Acct> = Some(self);
         core::iter::from_fn(move || {
@@ -1136,7 +1161,12 @@ impl MemoryContext {
         parent: Option<AcctRc>,
     ) -> Self {
         let (is_bump, kind, init_footprint, init_nblocks) = match &backend {
-            Backend::Aset(_) => (false, "AllocSet", 0usize, 0usize),
+            Backend::Aset(a) => {
+                // SAFETY: exclusive during construction.
+                let a = unsafe { &*a.get() };
+                // A recycled keeper (aset.c context_freelists) is a block already.
+                (false, "AllocSet", a.footprint(), a.nblocks())
+            }
             Backend::Malloc => (false, "Malloc", 0usize, 0usize),
             Backend::Bump(a) | Backend::BumpDrop(a, _) | Backend::BumpForget(a) => {
                 // SAFETY: exclusive during construction.
@@ -1167,6 +1197,8 @@ impl MemoryContext {
             arena_footprint: Cell::new(init_footprint),
             arena_nblocks: Cell::new(init_nblocks),
             window_tail: Cell::new(0),
+            live_chunk_bytes: Cell::new(0),
+            free_chunks: Cell::new(0),
             is_bump,
             kind,
             parent,
@@ -1382,13 +1414,13 @@ impl MemoryContext {
         let acct = &*self.acct;
         match &mut self.backend {
             Backend::Aset(set) => {
-                set.get_mut().reset();
                 // aset.c:537-597 AllocSetReset: every chunk is released
                 // whether or not it was pfree'd, so nothing stays charged
-                // (a stale charge here outlived the arena it accounted for).
+                // (a stale charge here outlived the arena it accounted for);
+                // the arena's reset re-snapshots the block grain (the keeper
+                // block stays, alone and free).
+                set.get_mut().reset(acct);
                 acct.self_used.set(0);
-                acct.arena_footprint.set(0);
-                acct.arena_nblocks.set(0);
                 acct.self_peak.set(0);
             }
             Backend::Malloc => {
@@ -1453,6 +1485,9 @@ impl MemoryContext {
                 // SAFETY: as above.
                 Backend::Slab(a) => unsafe { &*a.get() }.footprint(),
             },
+            nblocks: self.acct.arena_nblocks.get(),
+            free_bytes: self.acct.free_bytes(),
+            free_chunks: self.acct.free_chunks.get(),
         }
     }
 
@@ -1566,6 +1601,11 @@ impl Drop for MemoryContext {
         self.acct.ident.borrow_mut().take();
         self.acct.self_used.set(0);
         self.acct.window_tail.set(0);
+        // The arena goes with the context; a node kept alive by its children's
+        // parent links reports no blocks from here on.
+        self.acct.set_blocks(0, 0);
+        self.acct.live_chunk_bytes.set(0);
+        self.acct.free_chunks.set(0);
     }
 }
 
@@ -1591,6 +1631,13 @@ pub struct ContextStats {
     pub subtree_peak: usize,
     pub limit: usize,
     pub arena_footprint: usize,
+    // The allocator's own stats figures (aset.c:1545 AllocSetStats for an
+    // AllocSet: blocks on set->blocks, block tails + freelist chunks, freelist
+    // population); bump backends report the window-tail snapshot as free
+    // bytes and no chunks.
+    pub nblocks: usize,
+    pub free_bytes: usize,
+    pub free_chunks: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1604,10 +1651,15 @@ pub struct TreeStats {
     pub subtree_peak: usize,
     pub limit: usize,
     pub is_bump: bool,
+    // Block bytes; AllocSet: aset.c:1545 AllocSetStats' totalspace less the
+    // context header (mem_allocated).
     pub arena_footprint: usize,
     pub nblocks: usize,
-    // Bump backends only; block-transition snapshot (see Acct::window_tail).
-    pub free_tail: usize,
+    // AllocSet: block tails + freelist chunks / freelist population
+    // (AllocSetStats freespace / freechunks). Bump backends: the
+    // block-transition window-tail snapshot (see Acct::window_tail), 0 chunks.
+    pub free_bytes: usize,
+    pub free_chunks: usize,
     pub children: alloc::vec::Vec<TreeStats>,
 }
 
@@ -1640,7 +1692,8 @@ fn tree_stats_node(acct: &Acct) -> TreeStats {
         is_bump: acct.is_bump,
         arena_footprint: acct.arena_footprint.get(),
         nblocks: acct.arena_nblocks.get(),
-        free_tail: acct.window_tail.get(),
+        free_bytes: acct.free_bytes(),
+        free_chunks: acct.free_chunks.get(),
         children,
     }
 }
@@ -1740,7 +1793,7 @@ unsafe impl Allocator for Mcx<'_> {
                 #[cfg(test)]
                 crate::churn_probe::bump();
                 // SAFETY: single-statement borrow, never re-entered (aset_mut).
-                unsafe { aset_mut(set) }.dealloc(ptr, layout)
+                unsafe { aset_mut(set) }.dealloc(ptr, layout, &self.0.acct)
             }
             Backend::Malloc => {
                 self.0.uncharge(layout.size());
@@ -1780,7 +1833,8 @@ unsafe impl Allocator for Mcx<'_> {
                 let delta = new_layout.size() - old_layout.size();
                 self.0.charge(delta)?;
                 // SAFETY: single-statement borrow, never re-entered (aset_mut).
-                let result = unsafe { aset_mut(set) }.realloc(ptr, old_layout, new_layout);
+                let result =
+                    unsafe { aset_mut(set) }.realloc(ptr, old_layout, new_layout, &self.0.acct);
                 if result.is_err() {
                     self.0.uncharge(delta);
                 }
@@ -1828,7 +1882,8 @@ unsafe impl Allocator for Mcx<'_> {
         match &self.0.backend {
             Backend::Aset(set) => {
                 // SAFETY: single-statement borrow, never re-entered (aset_mut).
-                let result = unsafe { aset_mut(set) }.realloc(ptr, old_layout, new_layout);
+                let result =
+                    unsafe { aset_mut(set) }.realloc(ptr, old_layout, new_layout, &self.0.acct);
                 if result.is_ok() {
                     self.0.uncharge(old_layout.size() - new_layout.size());
                 }
@@ -1908,7 +1963,7 @@ impl Mcx<'_> {
             Backend::Aset(set) => {
                 self.0.charge(layout.size())?;
                 // SAFETY: single-statement borrow, never re-entered (aset_mut).
-                let result = unsafe { aset_mut(set) }.alloc(layout);
+                let result = unsafe { aset_mut(set) }.alloc(layout, &self.0.acct);
                 if result.is_err() {
                     self.0.uncharge(layout.size());
                 }
