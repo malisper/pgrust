@@ -5,7 +5,7 @@
 use ::datum::Datum;
 use ::mcx::{Mcx, PgVec};
 use ::types_core::{AttrNumber, INDEX_MAX_KEYS};
-use ::types_error::{PgError, PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
+use ::types_error::{PgError, PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_TOO_MANY_COLUMNS};
 use ::types_nbtree::{
     BT_IS_POSTING, BT_OFFSET_MASK, BT_PIVOT_HEAP_TID_ATTR, INDEX_ALT_TID_MASK,
 };
@@ -266,7 +266,9 @@ pub fn index_form_tuple<'mcx>(
     use ::types_tuple::{TYPSTORAGE_EXTENDED, TYPSTORAGE_MAIN};
 
     let natts = tupdesc.natts as usize;
-    debug_assert!(natts <= INDEX_MAX_KEYS as usize);
+    if natts > INDEX_MAX_KEYS as usize {
+        return Err(too_many_index_columns(natts));
+    }
 
     let mut untoasted: [Datum; INDEX_MAX_KEYS as usize] = [Datum::from_usize(0); INDEX_MAX_KEYS as usize];
     untoasted[..natts].copy_from_slice(&values[..natts]);
@@ -786,5 +788,42 @@ mod index_tuple_verify_tests {
         set_info(&mut image, size as u16);
         let atts = vec![att(8, true, 8)];
         assert!(!unsafe { index_tuple_verify(image.0.as_ptr(), size, &atts) });
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn too_many_index_columns(natts: usize) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "number of index columns ({natts}) exceeds limit ({INDEX_MAX_KEYS})"
+    )).with_sqlstate(ERRCODE_TOO_MANY_COLUMNS))
+}
+
+#[cfg(test)]
+mod column_limit_tests {
+    use super::*;
+
+    #[test]
+    fn index_tuple_column_limit_precedes_attribute_access() {
+        let context = mcx::MemoryContext::new("index column limit");
+        let mcx = context.mcx();
+        let natts = INDEX_MAX_KEYS as usize + 1;
+        let desc = TupleDescData {
+            natts: natts as i32,
+            tdtypeid: 0,
+            tdtypmod: -1,
+            tdrefcount: 1,
+            constr: None,
+            compact_attrs: PgVec::new_in(mcx),
+            attrs: PgVec::new_in(mcx),
+        };
+        let error = match index_form_tuple(mcx, &desc, &[], &[]) {
+            Err(error) => error,
+            Ok(_) => panic!("oversized index tuple accepted"),
+        };
+        assert_eq!(error.sqlstate(), ERRCODE_TOO_MANY_COLUMNS);
+        assert_eq!(error.message(), format!(
+            "number of index columns ({natts}) exceeds limit ({INDEX_MAX_KEYS})"
+        ));
     }
 }

@@ -264,6 +264,7 @@ pub fn RelationGetDummyIndexExpressions<'mcx>(
 pub fn BuildDummyIndexInfo<'mcx>(mcx: Mcx<'mcx>, index: &Relation<'_>) -> PgResult<IndexInfo<'mcx>> {
     let indexstruct = index.rd_index.as_ref().expect("index relation");
     let numatts = indexstruct.indnatts as i32;
+    check_indnatts(numatts, index.rd_id)?;
     let mut attrs = [0 as AttrNumber; INDEX_MAX_KEYS as usize];
     for i in 0..numatts as usize {
         attrs[i] = indexstruct.indkey[i];
@@ -301,6 +302,8 @@ pub fn BuildDummyIndexInfo<'mcx>(mcx: Mcx<'mcx>, index: &Relation<'_>) -> PgResu
 /// BuildIndexInfo (catalog/index.c), pg_index arm.
 pub fn BuildIndexInfo<'mcx>(mcx: Mcx<'mcx>, index: &Relation<'_>) -> PgResult<IndexInfo<'mcx>> {
     let indexstruct = index.rd_index.as_ref().expect("index relation");
+    let numatts = indexstruct.indnatts as i32;
+    check_indnatts(numatts, index.rd_id)?;
 
     let mut excl_ops = [0 as Oid; INDEX_MAX_KEYS as usize];
     let mut excl_procs = [0 as Oid; INDEX_MAX_KEYS as usize];
@@ -309,7 +312,6 @@ pub fn BuildIndexInfo<'mcx>(mcx: Mcx<'mcx>, index: &Relation<'_>) -> PgResult<In
         RelationGetExclusionInfo(mcx, index, &mut excl_ops, &mut excl_procs, &mut excl_strats)?;
     }
 
-    let numatts = indexstruct.indnatts as i32;
     let mut attrs = [0 as AttrNumber; INDEX_MAX_KEYS as usize];
     for i in 0..numatts as usize {
         attrs[i] = indexstruct.indkey[i];
@@ -1312,4 +1314,17 @@ fn deferrable_arbiter(mcx: Mcx<'_>, heap: &Relation<'_>, index: &Relation<'_>) -
         e = e.with_schema_name(nsp.as_str().to_owned());
     }
     Box::new(e)
+}
+
+fn check_indnatts(numatts: i32, indexoid: Oid) -> PgResult<()> {
+    if numatts < 1 || numatts > INDEX_MAX_KEYS as i32 {
+        return Err(invalid_indnatts(numatts, indexoid));
+    }
+    Ok(())
+}
+
+#[cold]
+#[inline(never)]
+fn invalid_indnatts(numatts: i32, indexoid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!("invalid indnatts {numatts} for index {indexoid}")))
 }

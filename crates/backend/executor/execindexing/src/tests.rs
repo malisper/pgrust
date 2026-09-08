@@ -1259,3 +1259,28 @@ mod rem_w2_011_index_unchanged {
         assert!(crate::index_unchanged_by_update(&updated(mcx, &[1]), &mut ii).unwrap());
     }
 }
+
+#[test]
+fn index_info_rejects_invalid_attribute_counts_before_metadata_access() {
+    let _guard = serial();
+    let context = MemoryContext::new("invalid index attributes");
+    let mcx = context.mcx();
+    for count in [-1, 0, types_core::INDEX_MAX_KEYS as i16 + 1, i16::MAX] {
+        let mut data = index_relation_data(mcx, false);
+        let catalog = data.rd_index.as_mut().unwrap();
+        catalog.indnatts = count;
+        catalog.indisexclusion = true;
+        let index = Relation::open(data, noop_closer());
+        for result in [crate::BuildIndexInfo(mcx, &index), crate::BuildDummyIndexInfo(mcx, &index)] {
+            let error = match result {
+                Err(error) => error,
+                Ok(_) => panic!("invalid indnatts accepted"),
+            };
+            assert_eq!(error.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+            assert_eq!(error.message(), format!("invalid indnatts {count} for index {IDX_OID}"));
+        }
+    }
+    for count in [1, types_core::INDEX_MAX_KEYS as i32] {
+        crate::check_indnatts(count, IDX_OID).unwrap();
+    }
+}

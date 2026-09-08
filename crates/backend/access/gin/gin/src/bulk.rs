@@ -6,7 +6,7 @@
 use ::datum::Datum;
 use ::gin_vocab::*;
 use ::mcx::{Mcx, PgFxHashMap, PgVec};
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
 use ::types_tuple::itemptr::ItemPointerData;
 use ::types_tuple::varatt;
 
@@ -219,6 +219,7 @@ impl<'s> BuildAccumulator<'s> {
             // ginCombineData.
             let e = &mut self.entries[idx as usize];
             if e.list.len() == e.list.capacity() {
+                check_posting_list_grow(e.list.capacity())?;
                 self.allocated_memory -= chunk_space(e.list.capacity() * 6);
                 // C ginCombineData: `repalloc_huge(eo->list, ...)` — the TID
                 // list of a very common key may legally exceed MaxAllocSize
@@ -390,5 +391,38 @@ impl<'s> BuildAccumulator<'s> {
 
     pub fn nentries(&self) -> usize {
         self.entries.len()
+    }
+}
+
+fn check_posting_list_grow(capacity: usize) -> PgResult<()> {
+    if capacity > i32::MAX as usize {
+        return Err(posting_list_too_long());
+    }
+    Ok(())
+}
+
+#[cold]
+#[inline(never)]
+fn posting_list_too_long() -> Box<PgError> {
+    Box::new(PgError::error("posting list is too long")
+        .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+        .with_hint("Reduce \"maintenance_work_mem\"."))
+}
+
+#[cfg(test)]
+mod posting_limit_tests {
+    use super::*;
+
+    #[test]
+    fn posting_growth_limit_matches_c_before_doubling() {
+        for capacity in [DEF_NPTR, i32::MAX as usize - 1, i32::MAX as usize] {
+            check_posting_list_grow(capacity).unwrap();
+        }
+        for capacity in [i32::MAX as usize + 1, DEF_NPTR << 29, usize::MAX] {
+            let error = check_posting_list_grow(capacity).unwrap_err();
+            assert_eq!(error.sqlstate(), ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+            assert_eq!(error.message(), "posting list is too long");
+            assert_eq!(error.hint(), Some("Reduce \"maintenance_work_mem\"."));
+        }
     }
 }
