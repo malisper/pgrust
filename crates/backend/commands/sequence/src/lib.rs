@@ -8,6 +8,7 @@
 mod builtins;
 
 use std::cell::RefCell;
+use std::mem::ManuallyDrop;
 
 use datum::Datum;
 use mcx::{Mcx, PgFxHashMap};
@@ -73,43 +74,62 @@ const NEW_ELM: SeqTableData = SeqTableData {
     increment: 0,
 };
 
-struct SeqState {
-    tab: PgFxHashMap<'static, Oid, SeqTableData>,
+struct SeqState<'mcx> {
+    tab: PgFxHashMap<'mcx, Oid, SeqTableData>,
     last_used: Option<Oid>,
 }
 
+mcx::bind!(SeqStateTy => SeqState<'mcx>);
+
 thread_local! {
-    static STATE: RefCell<Option<std::mem::ManuallyDrop<SeqState>>> = const { RefCell::new(None) };
+    static STATE: RefCell<Option<ManuallyDrop<mcx::McxOwned<SeqStateTy>>>> = const { RefCell::new(None) };
 }
 
-// INVARIANT: `f` must not re-enter sequence state (no relation/catalog calls
-// inside); every call site holds the borrow for a field read/write only.
-fn with_state<R>(f: impl FnOnce(&mut SeqState) -> R) -> R {
+fn clear_sequence_state() {
+    let old = STATE.with(|cell| cell.borrow_mut().take());
+    if let Some(owner) = old {
+        drop(ManuallyDrop::into_inner(owner));
+    }
+}
+
+fn with_state<R>(f: impl for<'mcx> FnOnce(&mut SeqState<'mcx>) -> R) -> PgResult<R> {
     STATE.with(|cell| {
         let mut slot = cell.borrow_mut();
-        let st = slot.get_or_insert_with(|| {
-            let mcx = mcx::session_root("SeqTable").mcx();
-            std::mem::ManuallyDrop::new(SeqState {
-                tab: PgFxHashMap::with_capacity_and_hasher_in(16, Default::default(), mcx),
-                last_used: None,
-            })
-        });
-        f(st)
+        if slot.is_none() {
+            let owner = mcx::McxOwned::try_new(mcx::MemoryContext::new("SeqTable"), |mcx| {
+                Ok(SeqState {
+                    tab: PgFxHashMap::with_capacity_and_hasher_in(16, Default::default(), mcx),
+                    last_used: None,
+                })
+            })?;
+            *slot = Some(ManuallyDrop::new(owner));
+            mcx::register_session_cleanup(Box::new(clear_sequence_state));
+        }
+        Ok(slot.as_mut().unwrap().with_mut(f))
+    })
+}
+
+fn with_initialized_state<R>(f: impl for<'mcx> FnOnce(&mut SeqState<'mcx>) -> R) -> R {
+    STATE.with(|cell| {
+        cell.borrow_mut().as_mut().expect("SeqTable initialized").with_mut(f)
     })
 }
 
 fn with_elm<R>(relid: Oid, f: impl FnOnce(&mut SeqTableData) -> R) -> R {
-    with_state(|s| f(s.tab.get_mut(&relid).expect("SeqTable entry exists")))
+    with_initialized_state(|s| f(s.tab.get_mut(&relid).expect("SeqTable entry exists")))
 }
 
-/// C `ResetSequenceCaches` (sequence.c:1944-1954): C hash_destroys the table;
-/// the port clears in place because the map's arena is the leaked backing
-/// context (entries are inline PODs, so clear() forgets everything C frees).
+fn last_used_sequence() -> Option<Oid> {
+    STATE.with(|cell| cell.borrow().as_ref().and_then(|owner| owner.with(|s| s.last_used)))
+}
+
 pub fn ResetSequenceCaches() {
     STATE.with(|cell| {
-        if let Some(s) = cell.borrow_mut().as_mut() {
-            s.tab.clear();
-            s.last_used = None;
+        if let Some(owner) = cell.borrow_mut().as_mut() {
+            owner.with_mut(|s| {
+                s.tab.clear();
+                s.last_used = None;
+            });
         }
     });
 }
@@ -236,7 +256,7 @@ fn lock_and_open_sequence<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<Relation
 fn init_sequence<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<Relation<'mcx>> {
     with_state(|s| {
         s.tab.entry(relid).or_insert(NEW_ELM);
-    });
+    })?;
     let seqrel = lock_and_open_sequence(mcx, relid)?;
     let filenumber = seqrel.rd_rel.relfilenode;
     with_elm(relid, |e| {
@@ -1231,18 +1251,38 @@ fn pgs_form(relid: Oid) -> PgResult<syscache_seams::PgSequenceForm> {
     }
 }
 
-// One retained backend context for the fmgr entry points (rule 4: no per-call
-// context); nothing on these paths allocates into it.
-fn fc_mcx() -> Mcx<'static> {
-    thread_local! {
-        static CTX: &'static mcx::MemoryContext =
-            mcx::session_root("SequenceFmgr");
+struct SequenceFmgr<'mcx> {
+    mcx: Mcx<'mcx>,
+}
+
+mcx::bind!(SequenceFmgrTy => SequenceFmgr<'mcx>);
+
+thread_local! {
+    static FMGR_CONTEXT: RefCell<Option<ManuallyDrop<mcx::McxOwned<SequenceFmgrTy>>>> = const { RefCell::new(None) };
+}
+
+fn clear_sequence_fmgr() {
+    let old = FMGR_CONTEXT.with(|cell| cell.borrow_mut().take());
+    if let Some(owner) = old {
+        drop(ManuallyDrop::into_inner(owner));
     }
-    CTX.with(|c| c.mcx())
+}
+
+fn with_fc_mcx<R>(f: impl for<'mcx> FnOnce(Mcx<'mcx>) -> PgResult<R>) -> PgResult<R> {
+    FMGR_CONTEXT.with(|cell| {
+        if cell.borrow().is_none() {
+            let owner = mcx::McxOwned::try_new(mcx::MemoryContext::new("SequenceFmgr"), |mcx| {
+                Ok(SequenceFmgr { mcx })
+            })?;
+            *cell.borrow_mut() = Some(ManuallyDrop::new(owner));
+            mcx::register_session_cleanup(Box::new(clear_sequence_fmgr));
+        }
+        cell.borrow().as_ref().unwrap().with(|state| f(state.mcx))
+    })
 }
 
 fn nextval_internal_entry(relid: Oid, check_permissions: bool) -> PgResult<i64> {
-    nextval_internal(fc_mcx(), relid, check_permissions)
+    with_fc_mcx(|mcx| nextval_internal(mcx, relid, check_permissions))
 }
 
 /// Output of the pure nextval fetch-loop computation (proofs/state-seam-probe).
@@ -1381,7 +1421,7 @@ pub fn nextval_internal(mcx: Mcx<'_>, relid: Oid, check_permissions: bool) -> Pg
             e.last
         });
         seqrel.close(NoLock)?;
-        with_state(|s| s.last_used = Some(relid));
+        with_initialized_state(|s| s.last_used = Some(relid));
         return Ok(v);
     }
 
@@ -1429,7 +1469,7 @@ pub fn nextval_internal(mcx: Mcx<'_>, relid: Oid, check_permissions: bool) -> Pg
         e.cached = last;
         e.last_valid = true;
     });
-    with_state(|s| s.last_used = Some(relid));
+    with_initialized_state(|s| s.last_used = Some(relid));
 
     // Assign the top xid outside the critical section so commit flushes WAL.
     if logit && relation_needs_wal(&seqrel) {
@@ -1465,7 +1505,10 @@ pub fn nextval_internal(mcx: Mcx<'_>, relid: Oid, check_permissions: bool) -> Pg
 }
 
 fn currval_internal(relid: Oid) -> PgResult<i64> {
-    let mcx = fc_mcx();
+    with_fc_mcx(|mcx| currval_in(mcx, relid))
+}
+
+fn currval_in(mcx: Mcx<'_>, relid: Oid) -> PgResult<i64> {
     let seqrel = init_sequence(mcx, relid)?;
 
     if aclchk::pg_class_aclcheck(relid, miscinit::GetUserId(), ACL_SELECT | ACL_USAGE)?
@@ -1492,14 +1535,16 @@ fn currval_internal(relid: Oid) -> PgResult<i64> {
 }
 
 fn lastval_internal() -> PgResult<i64> {
-    let mcx = fc_mcx();
-
-    let Some(relid) = with_state(|s| s.last_used) else {
+    let Some(relid) = last_used_sequence() else {
         return Err(err(
             "lastval is not yet defined in this session".into(),
             ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
         ));
     };
+    with_fc_mcx(|mcx| lastval_in(mcx, relid))
+}
+
+fn lastval_in(mcx: Mcx<'_>, relid: Oid) -> PgResult<i64> {
     // The sequence may have been dropped since the last nextval().
     if !syscache_seams::search_syscache_exists_reloid::call(relid)? {
         return Err(err(
@@ -1526,7 +1571,7 @@ fn lastval_internal() -> PgResult<i64> {
 }
 
 fn do_setval_entry(relid: Oid, next: i64, iscalled: bool) -> PgResult<()> {
-    do_setval(fc_mcx(), relid, next, iscalled)
+    with_fc_mcx(|mcx| do_setval(mcx, relid, next, iscalled))
 }
 
 pub fn do_setval(mcx: Mcx<'_>, relid: Oid, next: i64, iscalled: bool) -> PgResult<()> {
@@ -1975,5 +2020,144 @@ mod cache_lookup_error_tests {
         assert_eq!(e.message(), "cache lookup failed for sequence 16384");
         assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
         assert_eq!(e.level(), ERROR);
+    }
+}
+
+#[cfg(test)]
+mod session_sequence_tests {
+    use super::*;
+
+    fn clear() {
+        clear_sequence_state();
+        clear_sequence_fmgr();
+    }
+
+    #[test]
+    fn session_sequence_empty_lastval_does_not_initialize() {
+        clear();
+        let error = lastval_internal().unwrap_err();
+        assert_eq!(error.sqlstate(), ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE);
+        STATE.with(|s| assert!(s.borrow().is_none()));
+        FMGR_CONTEXT.with(|s| assert!(s.borrow().is_none()));
+        ResetSequenceCaches();
+        STATE.with(|s| assert!(s.borrow().is_none()));
+    }
+
+    #[test]
+    fn session_sequence_reset_and_reuse() {
+        clear();
+        for _ in 0..8 {
+            with_state(|s| {
+                s.tab.insert(42, SeqTableData { last: 7, cached: 10, last_valid: true, ..NEW_ELM });
+                s.last_used = Some(42);
+            }).unwrap();
+            assert_eq!(with_elm(42, |e| (e.last, e.cached)), (7, 10));
+            assert_eq!(last_used_sequence(), Some(42));
+            ResetSequenceCaches();
+            assert_eq!(last_used_sequence(), None);
+            with_initialized_state(|s| assert!(s.tab.is_empty()));
+            clear();
+            STATE.with(|s| assert!(s.borrow().is_none()));
+        }
+    }
+
+    #[test]
+    fn session_sequence_borrowed_teardown_keeps_owners_live() {
+        clear();
+        with_state(|s| {
+            s.tab.insert(42, NEW_ELM);
+            let result = std::panic::catch_unwind(clear_sequence_state);
+            assert!(result.is_err());
+            assert!(s.tab.contains_key(&42));
+        }).unwrap();
+        with_fc_mcx(|mcx| {
+            let value = mcx::alloc_leak_in(mcx, 73u64)?;
+            assert!(std::panic::catch_unwind(clear_sequence_fmgr).is_err());
+            assert_eq!(*value, 73);
+            with_fc_mcx(|nested| {
+                let second = mcx::alloc_leak_in(nested, 17u64)?;
+                assert_eq!(*second, 17);
+                Ok(())
+            })?;
+            Ok(())
+        }).unwrap();
+        clear();
+    }
+
+    #[test]
+    fn session_sequence_error_unwinds_context_borrow() {
+        clear();
+        let error = with_fc_mcx::<()>(|mcx| {
+            let _value = mcx::alloc_leak_in(mcx, [3u8; 256])?;
+            Err(err("sequence test error".into(), ERRCODE_SYNTAX_ERROR))
+        }).unwrap_err();
+        assert_eq!(error.sqlstate(), ERRCODE_SYNTAX_ERROR);
+        clear();
+        with_fc_mcx(|_| Ok(())).unwrap();
+        clear();
+    }
+
+    #[test]
+    #[ignore = "process-global accounting; run alone with --test-threads=1"]
+    fn session_sequence_reclaims_complete_contexts() {
+        clear();
+        let before = mcx::global_footprint::bytes();
+        for _ in 0..32 {
+            with_state(|s| {
+                for oid in 1..128 {
+                    s.tab.insert(oid, NEW_ELM);
+                }
+                let _value = mcx::alloc_leak_in(*s.tab.allocator(), [9u8; 32768]).unwrap();
+            }).unwrap();
+            with_fc_mcx(|mcx| {
+                let _value = mcx::alloc_leak_in(mcx, [3u8; 32768])?;
+                Ok(())
+            }).unwrap();
+            clear();
+            assert_eq!(mcx::global_footprint::bytes(), before);
+        }
+    }
+}
+
+#[cfg(test)]
+mod session_sequence_cleanup_tests {
+    use super::*;
+
+    thread_local! {
+        static CLEANUPS: RefCell<Vec<Box<dyn FnOnce()>>> = const { RefCell::new(Vec::new()) };
+    }
+
+    fn register(_phase: mcx::SessionCleanupPhase, cleanup: Box<dyn FnOnce()>) {
+        CLEANUPS.with(|callbacks| callbacks.borrow_mut().push(cleanup));
+    }
+
+    #[test]
+    #[ignore = "global cleanup sink; run alone with --test-threads=1"]
+    fn session_sequence_worker_reuse_invokes_registered_cleanup() {
+        clear_sequence_state();
+        clear_sequence_fmgr();
+        mcx::set_session_cleanup_sink(register);
+        let before = mcx::global_footprint::bytes();
+        for _ in 0..16 {
+            with_state(|s| {
+                s.tab.insert(42, NEW_ELM);
+                s.last_used = Some(42);
+            }).unwrap();
+            with_fc_mcx(|mcx| {
+                let _value = mcx::alloc_leak_in(mcx, [1u8; 32768])?;
+                Ok(())
+            }).unwrap();
+            let callbacks = CLEANUPS.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
+            assert_eq!(callbacks.len(), 2);
+            for callback in callbacks {
+                callback();
+            }
+            assert_eq!(last_used_sequence(), None);
+            FMGR_CONTEXT.with(|cell| assert!(cell.borrow().is_none()));
+            assert_eq!(mcx::global_footprint::bytes(), before);
+            assert!(lastval_internal().is_err());
+            CLEANUPS.with(|cell| assert!(cell.borrow().is_empty()));
+        }
+        mcx::set_session_cleanup_sink(|_, _| {});
     }
 }

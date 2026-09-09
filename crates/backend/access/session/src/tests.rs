@@ -1252,12 +1252,11 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      Per-thread cache validated by registry generation, no session
     //      identity, never bound or reset — non-session TLS (same class as
     //      61/90).
-    // MultiXact ownership: WAL_SCRATCH joins its existing scratch TLS block (-1);
-    // cfg(test) OWNER_CLEANUPS and INJECT_WAL_ERROR add two harness blocks (+2).
-    // Both fixtures are non-production TLS; net textual census delta is +1.
     // 601: transam_xlog/write.rs file_error_tests::REPORTED captures PANIC
     // diagnostics under cfg(test) only; no production session state.
-    assert_eq!(count_tree(crates), 602, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 602: sequence session_sequence_cleanup_tests::CLEANUPS records cleanup
+    // callbacks under cfg(test) only; no production session state.
+    assert_eq!(count_tree(crates), 603, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

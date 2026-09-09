@@ -7,7 +7,7 @@ use types_rel::{AccessShareLock, NoLock, RELKIND_SEQUENCE};
 
 use adt_acl::{ACL_SELECT, ACL_UPDATE, ACL_USAGE};
 
-use crate::{err, fc_mcx, init_sequence, pgs_form, read_seq_tuple};
+use crate::{err, with_fc_mcx, init_sequence, pgs_form, read_seq_tuple};
 
 pub(crate) fn register_builtins() {
     fmgr_core::register_late_builtins(SEQUENCE_INTROSPECT_BUILTINS);
@@ -54,16 +54,15 @@ fn composite_datum(
 
 #[track_caller]
 #[cold]
-fn permission_denied(relid: Oid) -> Box<PgError> {
-    let name = lsyscache::relation::get_rel_name(fc_mcx(), relid)
-        .ok()
-        .flatten()
-        .map(|n| n.as_str().to_string())
-        .unwrap_or_else(|| format!("{relid}"));
-    err(
+fn permission_denied(relid: Oid) -> PgResult<Box<PgError>> {
+    let name = with_fc_mcx(|mcx| {
+        Ok(lsyscache::relation::get_rel_name(mcx, relid)
+            .ok().flatten().map(|n| n.as_str().to_string()))
+    })?.unwrap_or_else(|| format!("{relid}"));
+    Ok(err(
         format!("permission denied for sequence {name}"),
         ERRCODE_INSUFFICIENT_PRIVILEGE,
-    )
+    ))
 }
 
 fn fc_pg_sequence_parameters(
@@ -79,7 +78,7 @@ fn fc_pg_sequence_parameters(
         ACL_SELECT | ACL_UPDATE | ACL_USAGE,
     )? != aclchk::ACLCHECK_OK
     {
-        return Err(permission_denied(relid));
+        return Err(permission_denied(relid)?);
     }
 
     let mcx = fcinfo.result_mcx();
@@ -107,7 +106,11 @@ fn fc_pg_sequence_last_value(
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     let relid = fcinfo.arg_oid(0);
-    let seqrel = init_sequence(fc_mcx(), relid)?;
+    with_fc_mcx(|mcx| pg_sequence_last_value(mcx, relid, fcinfo))
+}
+
+fn pg_sequence_last_value(mcx: Mcx<'_>, relid: Oid, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let seqrel = init_sequence(mcx, relid)?;
 
     let mut is_called = false;
     let mut result = 0i64;
