@@ -159,7 +159,6 @@ fn fn_extra_cache_roundtrip_and_clone_reset() {
 }
 
 #[test]
-#[cfg(debug_assertions)]
 #[should_panic(expected = "downcast to u64 failed")]
 fn fn_extra_wrong_type_panics() {
     let mut flinfo = FmgrInfo::new(int4pl, 177, 2, true, false);
@@ -560,4 +559,18 @@ fn fn_extra_take_restore_and_drop() {
     assert_eq!(DROPS.load(Ordering::Relaxed), 1, "replacement drops the old memo");
     drop(b);
     assert_eq!(DROPS.load(Ordering::Relaxed), 2, "flinfo death drops the memo");
+}
+
+#[test]
+#[should_panic(expected = "downcast to bool failed")]
+fn fn_extra_invalid_bool_is_rejected() {
+    let extra = FnExtra::new(2u8);
+    assert!(*extra.downcast_ref::<bool>());
+}
+
+#[test]
+#[should_panic(expected = "downcast to [u64; 32] failed")]
+fn fn_extra_wrong_mutable_layout_is_rejected() {
+    let mut extra = FnExtra::new(1u8);
+    extra.downcast_mut::<[u64; 32]>()[31] = 0;
 }
