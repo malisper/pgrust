@@ -528,3 +528,54 @@ fn too_many_dotted_names_reports_every_element() {
     assert_eq!(err.sqlstate(), ERRCODE_SYNTAX_ERROR);
     assert_eq!(err.message(), MSG);
 }
+
+#[test]
+fn session_operator_cache_teardown_preserves_live_datum() {
+    install_fixture();
+    crate::with_opr_cache(|map| {
+        let value = mcx::alloc_leak_in(*map.allocator(), [7u8; 16384]).unwrap();
+        assert!(std::panic::catch_unwind(crate::clear_opr_cache).is_err());
+        assert_eq!(value[16383], 7);
+    }).unwrap();
+    crate::clear_opr_cache();
+    crate::OPR_CACHE.with(|cell| assert!(cell.borrow().is_none()));
+    crate::with_opr_cache(|map| assert!(map.is_empty())).unwrap();
+    crate::clear_opr_cache();
+}
+
+#[test]
+fn session_operator_cache_invalidation_and_passivation() {
+    install_fixture();
+    let key = crate::OprCacheKey {
+        oprname: [b'+'; 64], left_arg: INT4OID, right_arg: INT4OID,
+        search_path: [PG_CATALOG; 16],
+    };
+    crate::with_opr_cache(|map| map.insert(key, INT4_PLUS_OP)).unwrap();
+    crate::InvalidateOprCacheCallBack(datum::Datum::null(), 0, 0);
+    crate::with_opr_cache(|map| assert!(!map.contains_key(&key))).unwrap();
+    crate::with_opr_cache(|map| map.insert(key, INT4_PLUS_OP)).unwrap();
+    crate::PassivateOprCache();
+    crate::with_opr_cache(|map| assert!(!map.contains_key(&key))).unwrap();
+    crate::clear_opr_cache();
+}
+
+#[test]
+#[ignore = "process-global accounting; run alone with --test-threads=1"]
+fn session_operator_cache_reclaims_complete_context() {
+    crate::clear_opr_cache();
+    let before = mcx::global_footprint::bytes();
+    for _ in 0..64 {
+        let owner = mcx::McxOwned::<crate::OprCacheTy>::try_new(
+            MemoryContext::new("operator ownership test"),
+            |mcx| Ok(crate::OprCache { map: mcx::PgHashMap::with_capacity_in(16, mcx) }),
+        ).unwrap();
+        crate::OPR_CACHE.with(|cell| {
+            *cell.borrow_mut() = Some(core::mem::ManuallyDrop::new(owner));
+        });
+        crate::with_opr_cache(|map| {
+            let _value = mcx::alloc_leak_in(*map.allocator(), [7u8; 32768]).unwrap();
+        }).unwrap();
+        crate::clear_opr_cache();
+        assert_eq!(mcx::global_footprint::bytes(), before);
+    }
+}

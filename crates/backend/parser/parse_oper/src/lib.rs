@@ -29,12 +29,6 @@ pub struct Operator {
 const NAMEDATALEN: usize = 64;
 const MAX_CACHED_PATH_LEN: usize = 16;
 
-// Wave-4 floor census: C sizes its OprCache dynahash at 256 entries, but
-// dynahash pre-allocates lazily where hashbrown pre-allocates buckets —
-// with_capacity_in(256) dirtied 512 x 145B buckets (~72KB, the census's
-// "Operator lookup cache" line) in every backend that ever looked up an
-// operator. Start tiny and let demand grow the table (the warmed pgbench
-// census used 69 operators; a doubling from 16 costs one µs-scale rehash).
 const OPR_CACHE_INIT_CAPACITY: usize = 16;
 
 // Zero-filled unused bytes keep hashing stable (C's MemSet'd OprCacheKey).
@@ -46,21 +40,27 @@ struct OprCacheKey {
     search_path: [Oid; MAX_CACHED_PATH_LEN],
 }
 
-struct OprCache {
-    map: PgHashMap<'static, OprCacheKey, Oid>,
+struct OprCache<'mcx> {
+    map: PgHashMap<'mcx, OprCacheKey, Oid>,
 }
+
+mcx::bind!(OprCacheTy => OprCache<'mcx>);
 
 thread_local! {
-    static OPR_CACHE: RefCell<Option<ManuallyDrop<OprCache>>> = const { RefCell::new(None) };
+    static OPR_CACHE: RefCell<Option<ManuallyDrop<mcx::McxOwned<OprCacheTy>>>> = const { RefCell::new(None) };
 }
 
-fn with_opr_cache<R>(f: impl FnOnce(&mut PgHashMap<'static, OprCacheKey, Oid>) -> R) -> PgResult<R> {
+fn clear_opr_cache() {
+    let old = OPR_CACHE.with(|cell| cell.borrow_mut().take());
+    if let Some(cache) = old {
+        drop(ManuallyDrop::into_inner(cache));
+    }
+}
+
+fn with_opr_cache<R>(f: impl for<'mcx> FnOnce(&mut PgHashMap<'mcx, OprCacheKey, Oid>) -> R) -> PgResult<R> {
     OPR_CACHE.with(|cell| {
         let mut slot = cell.borrow_mut();
         if slot.is_none() {
-            // The context is leaked (backend-lifetime table, C: hash_create in
-            // TopMemoryContext); flush on pg_operator and pg_cast changes.
-            let mcx = ::mcx::session_root("Operator lookup cache").mcx();
             inval::invalidate::CacheRegisterSyscacheCallback(
                 OPERNAMENSP,
                 InvalidateOprCacheCallBack,
@@ -71,18 +71,20 @@ fn with_opr_cache<R>(f: impl FnOnce(&mut PgHashMap<'static, OprCacheKey, Oid>) -
                 InvalidateOprCacheCallBack,
                 Datum::null(),
             )?;
-            *slot = Some(ManuallyDrop::new(OprCache {
-                map: PgHashMap::with_capacity_in(OPR_CACHE_INIT_CAPACITY, mcx),
-            }));
+            let cache = mcx::McxOwned::try_new(MemoryContext::new("Operator lookup cache"), |mcx| {
+                Ok(OprCache { map: PgHashMap::with_capacity_in(OPR_CACHE_INIT_CAPACITY, mcx) })
+            })?;
+            *slot = Some(ManuallyDrop::new(cache));
+            mcx::register_session_cleanup(Box::new(clear_opr_cache));
         }
-        Ok(f(&mut slot.as_mut().unwrap().map))
+        Ok(slot.as_mut().unwrap().with_mut(|cache| f(&mut cache.map)))
     })
 }
 
 fn InvalidateOprCacheCallBack(_arg: Datum, _cacheid: i32, _hashvalue: u32) {
     OPR_CACHE.with(|cell| {
         if let Some(cache) = cell.borrow_mut().as_mut() {
-            cache.map.clear();
+            cache.with_mut(|cache| cache.map.clear());
         }
     });
 }
@@ -94,8 +96,10 @@ fn InvalidateOprCacheCallBack(_arg: Datum, _cacheid: i32, _hashvalue: u32) {
 pub fn PassivateOprCache() {
     OPR_CACHE.with(|cell| {
         if let Some(cache) = cell.borrow_mut().as_mut() {
-            let mcx = *cache.map.allocator();
-            cache.map = PgHashMap::with_capacity_in(OPR_CACHE_INIT_CAPACITY, mcx);
+            cache.with_mut(|cache| {
+                let mcx = *cache.map.allocator();
+                cache.map = PgHashMap::with_capacity_in(OPR_CACHE_INIT_CAPACITY, mcx);
+            });
         }
     });
 }
