@@ -794,9 +794,14 @@ fn copy_from_body<'mcx>(
         exectuples::exec_store_virtual_tuple(slot);
         slot.base_mut().tts_tableOid = rel.rd_id;
 
-        if qualexpr.is_some() {
+        if let Some(qual) = qualexpr.as_deref_mut() {
             let mut eval = execexpr::EvalSlots { scan: Some(slot), inner: None, outer: None };
-            if !execexpr::exec_qual(qualexpr.as_deref_mut(), &mut eval)? {
+            // SAFETY: input_row_cx is stable and live until the result is consumed;
+            // restore the statement context before either success or error leaves this scope.
+            unsafe { qual.arm_result_mcx_raw(input_row_cx.mcx()) };
+            let accepted = execexpr::exec_qual(Some(qual), &mut eval);
+            qual.arm_result_mcx(mcx);
+            if !accepted? {
                 excluded += 1;
                 pgstat_progress_update_param(PROGRESS_COPY_TUPLES_EXCLUDED, excluded);
                 continue;
@@ -989,9 +994,7 @@ fn init_where_qual<'mcx>(
     let mut qualexpr =
         execexpr::exec_init_qual(mcx, &cstate.where_clause, execexpr::ParamBind::NONE)?;
     if let Some(q) = qualexpr.as_mut() {
-        // SAFETY: qual scratch results land in the statement mcx, which
-        // outlives every per-row evaluation.
-        unsafe { q.arm_result_mcx_raw(mcx) };
+        q.arm_result_mcx(mcx);
     }
     Ok(qualexpr)
 }
@@ -1122,10 +1125,15 @@ fn copy_from_partitioned_body<'mcx>(
         exectuples::exec_store_virtual_tuple(&mut rootslot);
         rootslot.base_mut().tts_tableOid = rel.rd_id;
 
-        if qualexpr.is_some() {
+        if let Some(qual) = qualexpr.as_deref_mut() {
             let mut eval =
                 execexpr::EvalSlots { scan: Some(&mut rootslot), inner: None, outer: None };
-            if !execexpr::exec_qual(qualexpr.as_deref_mut(), &mut eval)? {
+            // SAFETY: input_row_cx is stable and live until the result is consumed;
+            // restore the statement context before either success or error leaves this scope.
+            unsafe { qual.arm_result_mcx_raw(input_row_cx.mcx()) };
+            let accepted = execexpr::exec_qual(Some(qual), &mut eval);
+            qual.arm_result_mcx(mcx);
+            if !accepted? {
                 excluded += 1;
                 pgstat_progress_update_param(PROGRESS_COPY_TUPLES_EXCLUDED, excluded);
                 continue;

@@ -6167,3 +6167,32 @@ fn copy_default_result_context_rearms_after_row_reset() {
         assert!(!result.isnull);
     });
 }
+
+#[test]
+fn copy_where_result_context_rearms_after_row_reset() {
+    with_mcx(|mcx| {
+        let value = varlena::cstring_to_text(mcx, b"payload").unwrap();
+        let constant = Node::mk_const(mcx, 25, -1, 0, -1,
+            ::types_fmgr::varlena_result(value), false, false).unwrap();
+        let args = NodeList::make2(mcx, constant, constant).unwrap();
+        let concatenated = mk_opexpr(mcx, 1258, 25, args);
+        let args = NodeList::make2(mcx, concatenated, constant).unwrap();
+        let predicate = Node::mk(mcx, OpExpr {
+            opno: 0, opfuncid: 67, opresulttype: 16, opretset: false,
+            opcollid: 0, inputcollid: 950, args, location: -1,
+        }).unwrap();
+        let mut predicates = NodeList::nil();
+        predicates.lappend(mcx, predicate).unwrap();
+        let mut state = exec_init_qual(mcx, &predicates, ParamBind::NONE).unwrap().unwrap();
+        let mut row = MemoryContext::new_bump("copy-where-row-test");
+        for _ in 0..8 {
+            // SAFETY: row is stable through evaluation; restore before resetting.
+            unsafe { state.arm_result_mcx_raw(row.mcx()) };
+            let result = exec_qual(Some(&mut state), &mut EvalSlots::default());
+            state.arm_result_mcx(mcx);
+            assert!(!result.unwrap());
+            row.reset();
+        }
+        assert!(!exec_qual(Some(&mut state), &mut EvalSlots::default()).unwrap());
+    });
+}
