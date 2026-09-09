@@ -880,10 +880,12 @@ pub(crate) fn pool_feed_spools<'mcx>(
         0,
         Some(runtime::WidthRequest::unbounded(nworkers.max(1) as u32)),
         descriptor,
+        |rg| {
+            bp.rg
+                .set(rg.downgrade())
+                .unwrap_or_else(|_| unreachable!("rg set once per pool build"));
+        },
     );
-    bp.rg
-        .set(rg.downgrade())
-        .unwrap_or_else(|_| unreachable!("rg set once per pool build"));
     btrace(&format!(
         "engaged pass tickets={nworkers} blocks={nblocks} unique={}",
         index_info.ii_Unique

@@ -602,7 +602,14 @@ impl Runtime {
         session_token: u64,
         width: Option<WidthRequest>,
         descriptor: BoundDescriptor,
+        on_rg: impl FnOnce(&RgHandle),
     ) -> (RgHandle, CompletionWaiter) {
+        let mut on_rg = Some(on_rg);
+        let mut call = |rg: &RgHandle| {
+            if let Some(f) = on_rg.take() {
+                f(rg);
+            }
+        };
         let rg = self.sched.submit(
             spec,
             true,
@@ -610,7 +617,7 @@ impl Runtime {
             session_token,
             width,
             Some(descriptor),
-            None,
+            Some(&mut call),
         );
         (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
     }

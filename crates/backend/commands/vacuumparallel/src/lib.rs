@@ -1306,10 +1306,12 @@ fn pool_engage_pass(
         0,
         Some(runtime::WidthRequest::unbounded(nworkers.max(1) as u32)),
         descriptor,
+        |rg| {
+            pass.rg
+                .set(rg.downgrade())
+                .unwrap_or_else(|_| unreachable!("rg set once per pass payload"));
+        },
     );
-    pass.rg
-        .set(rg.downgrade())
-        .unwrap_or_else(|_| unreachable!("rg set once per pass payload"));
 
     // The leader's own accounting joins the shared-balance discipline for
     // the pass (its unsafe-index processing runs concurrently with pool

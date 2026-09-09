@@ -1781,13 +1781,18 @@ fn round_ceremony(
                 0,
                 Some(runtime::WidthRequest::unbounded(k.max(1) as u32)),
                 descriptor.clone(),
+                |rg| {
+                    shared.rg.set(rg.downgrade())
+                        .unwrap_or_else(|_| unreachable!("rg set once per round payload"));
+                },
             ),
-            None => rt.submit_pinned(spec),
+            None => {
+                let submitted = rt.submit_pinned(spec);
+                shared.rg.set(submitted.0.downgrade())
+                    .unwrap_or_else(|_| unreachable!("rg set once per round payload"));
+                submitted
+            }
         };
-        shared
-            .rg
-            .set(rg.downgrade())
-            .unwrap_or_else(|_| unreachable!("rg set once per round payload"));
         *submitted = Some(rg.clone());
 
         // Pool phase: park against the board; Done shares the launched

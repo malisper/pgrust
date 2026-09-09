@@ -4385,13 +4385,16 @@ mod bound_gate {
             0,
             Some(crate::ledger::WidthRequest::unbounded(2)),
             descriptor,
+            |rg| {
+                assert_eq!(rt.stats().rgs_submitted, 0, "initialize before publication");
+                payload.rg.set(rg.clone()).ok().expect("handle stored once");
+            },
         );
         assert_eq!(
             h.priority(),
             rt.p_util(),
             "utility class seeds the Q0 stride weight on a bound pinned RG"
         );
-        payload.rg.set(h.clone()).ok().expect("handle stored once");
         assert_eq!(waiter.wait(), RgOutcome::Completed);
         work.assert_all_executed_once();
         pool.shutdown();
@@ -4425,8 +4428,11 @@ mod bound_gate {
             0,
             None,
             descriptor2,
+            |rg| {
+                assert_eq!(rt.stats().rgs_submitted, 1, "initialize before publication");
+                payload2.rg.set(rg.clone()).ok().expect("handle stored once");
+            },
         );
-        payload2.rg.set(h2.clone()).ok().expect("handle stored once");
         assert_eq!(
             h2.priority(),
             crate::rg::INITIAL_PRIORITY,
