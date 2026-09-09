@@ -196,6 +196,7 @@ pub fn CreateOrAttachShmemStructs(cfg: &ProcGlobalConfig) -> PgResult<()> {
     autovacuum::AutoVacuumShmemInit()?;
     slot::ReplicationSlotsShmemInit();
     origin::ReplicationOriginShmemInit()?;
+    walsender::WalSndShmemInit(cfg.max_wal_senders)?;
     walsummarizer::WalSummarizerShmemInit();
     walreceiverfuncs::WalRcvShmemInit()?;
     pgarch::PgArchShmemInit()?;

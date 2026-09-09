@@ -21470,6 +21470,7 @@ dependencies = [
  "ps_status_seams",
  "repl_gram",
  "resowner",
+ "shmem_seams",
  "slot",
  "snapbuild",
  "snapmgr",

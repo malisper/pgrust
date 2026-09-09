@@ -6,7 +6,7 @@
 // (inc 6), and UPLOAD_MANIFEST (incremental backup Stage 3): the CopyIn
 // manifest receive loop feeding basebackup_incremental's parser, with the
 // resulting IncrementalBackupInfo held in the SESSION-owned slot store
-// (Q2 ruling — see WalSndCtlData.uploaded_manifests).
+// (Q2 ruling — see UPLOADED_MANIFESTS).
 #![allow(non_snake_case)]
 
 pub mod replies;
@@ -135,7 +135,7 @@ const fn walsnd_empty() -> WalSnd {
 const C_OFFSETOF_WAL_SND_CTL_DATA_WALSNDS: usize = 112;
 const C_SIZEOF_WAL_SND: usize = 96;
 
-/// WalSndShmemSize (walsender.c:3651): the WalSndCtlData header plus
+/// WalSndShmemSize (walsender.c:3690-3699): the WalSndCtlData header plus
 /// max_wal_senders WalSnd slots. The GUC value comes from the caller, as with
 /// lmgr_proc's ProcGlobalConfig.
 pub fn WalSndShmemSize(max_wal_senders: i32) -> PgResult<usize> {
@@ -145,28 +145,13 @@ pub fn WalSndShmemSize(max_wal_senders: i32) -> PgResult<usize> {
     Ok(size)
 }
 
-// WalSndCtlData minus the syncrep queues (SyncRep is out of P1 scope). The
-// per-kind wakeup CVs land here in increment 3: the WAL flush/replay paths
-// broadcast them via the wal_snd_wakeup seam.
+// WalSndCtlData (walsender_private.h). The header lives in the
+// ShmemInitStruct("Wal Sender Ctl") arena (WalSndShmemInit); the per-slot
+// WalSnd bodies hang off it as a boxed slice (the C flexible array member,
+// with the slot spinlock as a per-slot Mutex). The per-kind wakeup CVs are
+// broadcast by the WAL flush/replay paths via the wal_snd_wakeup seam.
 pub struct WalSndCtlData {
     pub walsnds: Box<[Mutex<WalSnd>]>,
-    // UPLOAD_MANIFEST session store — pgrust-only field, absent from C's
-    // shared WalSndCtlData.
-    //
-    // Q2 RULING (binding): C keeps the parsed manifest in a per-PROCESS
-    // static (walsender.c:152 `uploaded_manifest`, parented under
-    // CacheMemoryContext). pgrust is thread-per-backend under the
-    // "no state belongs to a thread" ruling: this state — potentially 100s
-    // of MB — must be SESSION-owned, never a per-thread static or
-    // thread_local, because sessions may migrate across pool threads and a
-    // second session hosted on the same thread must never see (or pay for)
-    // the prior session's manifest. The session identity we key on is the
-    // walsender slot tenure: InitWalSenderSlot acquires a slot at session
-    // start and WalSndKill (on_shmem_exit) releases it at session end, and
-    // both points clear this entry — so the manifest is dropped with the
-    // session, exactly when C's process death would have freed it.
-    pub(crate) uploaded_manifests:
-        Box<[Mutex<Option<Box<basebackup_incremental::IncrementalBackupInfo>>>]>,
     pub wal_flush_cv: ConditionVariable,
     pub wal_replay_cv: ConditionVariable,
     pub wal_confirm_rcv_cv: ConditionVariable,
@@ -186,28 +171,111 @@ pub const NUM_SYNC_REP_WAIT_MODE: usize = 3;
 pub const SYNC_STANDBY_INIT: u32 = 1 << 0;
 pub const SYNC_STANDBY_DEFINED: u32 = 1 << 1;
 
-static WAL_SND_CTL: OnceLock<WalSndCtlData> = OnceLock::new();
+// The published control block: C's `WalSndCtlData *WalSndCtl` pointer — the
+// ShmemInitStruct("Wal Sender Ctl") allocation (walsender.c:3708-3709),
+// leaked for the cluster lifetime like C shmem — plus the pgrust-only
+// UPLOAD_MANIFEST session store, which is absent from C's shared
+// WalSndCtlData and so lives beside the block, not inside the C-sized arena
+// (one cell per walsender slot).
+//
+// Q2 RULING (binding): C keeps the parsed manifest in a per-PROCESS
+// static (walsender.c:152 `uploaded_manifest`, parented under
+// CacheMemoryContext). pgrust is thread-per-backend under the
+// "no state belongs to a thread" ruling: this state — potentially 100s
+// of MB — must be SESSION-owned, never a per-thread static or
+// thread_local, because sessions may migrate across pool threads and a
+// second session hosted on the same thread must never see (or pay for)
+// the prior session's manifest. The session identity we key on is the
+// walsender slot tenure: InitWalSenderSlot acquires a slot at session
+// start and WalSndKill (on_shmem_exit) releases it at session end, and
+// both points clear this entry — so the manifest is dropped with the
+// session, exactly when C's process death would have freed it.
+struct WalSndShared {
+    ctl: &'static WalSndCtlData,
+    uploaded_manifests: Box<[Mutex<Option<Box<basebackup_incremental::IncrementalBackupInfo>>>]>,
+}
 
-// C: ShmemInitStruct("Wal Sender Ctl") sized by max_wal_senders; here the
-// publish-before-threads static, first-touch initialized (OnceLock).
-pub fn WalSndCtl() -> &'static WalSndCtlData {
+static WAL_SND_CTL: OnceLock<WalSndShared> = OnceLock::new();
+
+fn wal_snd_shared(ctl: &'static WalSndCtlData) -> WalSndShared {
+    WalSndShared {
+        ctl,
+        uploaded_manifests: (0..ctl.walsnds.len()).map(|_| Mutex::new(None)).collect(),
+    }
+}
+
+// The server publishes the arena from WalSndShmemInit before any backend
+// runs; substrate test binaries without a shmem seam get a heap image sized
+// by the walsender_config mirror of max_wal_senders (the ShmemIndex row is
+// the only thing the seam adds).
+fn wal_snd_ctl_shared() -> &'static WalSndShared {
     WAL_SND_CTL.get_or_init(|| {
-        let n = walsender_config::max_wal_senders().max(0) as usize;
-        WalSndCtlData {
-            walsnds: (0..n).map(|_| Mutex::new(walsnd_empty())).collect(),
-            uploaded_manifests: (0..n).map(|_| Mutex::new(None)).collect(),
-            wal_flush_cv: ConditionVariable::new(),
-            wal_replay_cv: ConditionVariable::new(),
-            wal_confirm_rcv_cv: ConditionVariable::new(),
-            sync_rep_queue: std::array::from_fn(|_| {
-                types_storage::storage::SyncCell::new(
-                    types_storage::storage::proclist_head::default(),
-                )
-            }),
-            sync_rep_lsn: Default::default(),
-            sync_standbys_status: std::sync::atomic::AtomicU32::new(0),
-        }
+        wal_snd_shared(Box::leak(Box::new(wal_snd_ctl_boot_image(
+            walsender_config::max_wal_senders(),
+        ))))
     })
+}
+
+pub(crate) fn uploaded_manifests(
+) -> &'static [Mutex<Option<Box<basebackup_incremental::IncrementalBackupInfo>>>] {
+    &wal_snd_ctl_shared().uploaded_manifests
+}
+
+// The "first time through" image of WalSndShmemInit (walsender.c:3711-3729):
+// a zeroed block, the SyncRepQueue heads dlist_init'ed, every slot's spinlock
+// initialized, the three CVs initialized.
+fn wal_snd_ctl_boot_image(max_wal_senders: i32) -> WalSndCtlData {
+    let n = max_wal_senders.max(0) as usize;
+    WalSndCtlData {
+        walsnds: (0..n).map(|_| Mutex::new(walsnd_empty())).collect(),
+        wal_flush_cv: ConditionVariable::new(),
+        wal_replay_cv: ConditionVariable::new(),
+        wal_confirm_rcv_cv: ConditionVariable::new(),
+        sync_rep_queue: std::array::from_fn(|_| {
+            types_storage::storage::SyncCell::new(types_storage::storage::proclist_head::default())
+        }),
+        sync_rep_lsn: Default::default(),
+        sync_standbys_status: std::sync::atomic::AtomicU32::new(0),
+    }
+}
+
+/// WalSndShmemInit (walsender.c:3702-3730): ShmemInitStruct("Wal Sender
+/// Ctl", WalSndShmemSize(), &found) registers the control block in the
+/// ShmemIndex — so pg_shmem_allocations lists it with C's size,
+/// offsetof(WalSndCtlData, walsnds) + max_wal_senders * sizeof(WalSnd) — and
+/// hands back the arena the boot image is written into on the first pass
+/// (!found: MemSet 0, dlist_init the SyncRepQueues, SpinLockInit every slot,
+/// ConditionVariableInit the three CVs). A re-entry finds the block
+/// (found = true) and leaves the live data alone. The Rust header (two
+/// words for the boxed slot slice, three CVs, the SyncRep queues/LSNs and the
+/// status byte) fits inside C's 112-byte header, so the arena is C-sized
+/// even at max_wal_senders = 0. Called from CreateOrAttachShmemStructs
+/// (ipci.c:331) with the GUC value, like WalSndShmemSize.
+pub fn WalSndShmemInit(max_wal_senders: i32) -> PgResult<()> {
+    const {
+        assert!(core::mem::size_of::<WalSndCtlData>() <= C_OFFSETOF_WAL_SND_CTL_DATA_WALSNDS);
+        assert!(core::mem::align_of::<WalSndCtlData>() <= 64, "PG_CACHE_LINE_SIZE alignment");
+    }
+    let (raw, found) =
+        shmem_seams::shmem_init_struct::call("Wal Sender Ctl", WalSndShmemSize(max_wal_senders)?)?;
+    let p = raw.cast::<WalSndCtlData>();
+    if !found {
+        // SAFETY: a fresh, zeroed, cache-line-aligned ShmemIndex allocation of
+        // WalSndShmemSize(max_wal_senders) >= size_of::<WalSndCtlData>() bytes
+        // (asserted above), written exactly once during single-threaded shmem
+        // init and leaked for the cluster lifetime like C shmem.
+        unsafe { p.write(wal_snd_ctl_boot_image(max_wal_senders)) };
+    }
+    // Same block on every call: the ShmemIndex hands back the first one.
+    // SAFETY: the block is initialized (above, or by the first pass that
+    // registered it) and never freed.
+    let _ = WAL_SND_CTL.set(wal_snd_shared(unsafe { &*p }));
+    Ok(())
+}
+
+// C: the `WalSndCtl` pointer.
+pub fn WalSndCtl() -> &'static WalSndCtlData {
+    wal_snd_ctl_shared().ctl
 }
 
 /// am_cascading_walsender (walsender.c global); syncrep's priority gate.
@@ -271,7 +339,7 @@ fn InitWalSenderSlot() {
         // Session-ownership (Q2): a fresh session tenure must never observe
         // a prior tenant's uploaded manifest. WalSndKill already clears it
         // at session end; this is the acquire-side belt to that suspender.
-        *ctl.uploaded_manifests[i].lock().expect("uploaded manifest mutex") = None;
+        *uploaded_manifests()[i].lock().expect("uploaded manifest mutex") = None;
         MY_WAL_SND.set(i as i32);
         break;
     }
@@ -292,7 +360,7 @@ fn WalSndKill(_code: i32, _arg: usize) {
     // slot tenure (C frees it implicitly at process death; there is no
     // process death per session here). Drop it BEFORE releasing the slot so
     // no successor tenant can race into a stale entry.
-    *WalSndCtl().uploaded_manifests[i as usize]
+    *uploaded_manifests()[i as usize]
         .lock()
         .expect("uploaded manifest mutex") = None;
     WalSndCtl().walsnds[i as usize].lock().expect("walsnd mutex").pid = 0;
@@ -1183,7 +1251,7 @@ fn DropReplicationSlot(cmd: DropReplicationSlotCmd) -> PgResult<()> {
 // ===========================================================================
 // UPLOAD_MANIFEST (walsender.c:667 UploadManifest) — receive a backup
 // manifest as a CopyIn stream and stash the parsed IncrementalBackupInfo in
-// the SESSION-owned store (see WalSndCtlData.uploaded_manifests for the Q2
+// the SESSION-owned store (see UPLOADED_MANIFESTS for the Q2
 // session-ownership ruling; C uses a process-static under
 // CacheMemoryContext, which pgrust must not).
 // ===========================================================================
@@ -1203,7 +1271,7 @@ pub fn uploaded_manifest_cell(
     if i < 0 {
         return None;
     }
-    Some(&WalSndCtl().uploaded_manifests[i as usize])
+    Some(&uploaded_manifests()[i as usize])
 }
 
 /// Whether this walsender session has an uploaded manifest (basebackup's
@@ -1726,7 +1794,7 @@ mod tests {
         WalSndKill(0, 0);
         assert_eq!(MY_WAL_SND.get(), -1);
         assert!(
-            WalSndCtl().uploaded_manifests[slot as usize].lock().unwrap().is_none(),
+            uploaded_manifests()[slot as usize].lock().unwrap().is_none(),
             "manifest must die with the session"
         );
     }
@@ -1757,7 +1825,7 @@ mod tests {
         assert!(uploaded_manifest_cell().is_none());
         assert!(!uploaded_manifest_exists());
         assert!(
-            WalSndCtl().uploaded_manifests[slot1 as usize].lock().unwrap().is_none(),
+            uploaded_manifests()[slot1 as usize].lock().unwrap().is_none(),
             "session 1's manifest leaked past WalSndKill"
         );
 
@@ -1768,12 +1836,12 @@ mod tests {
         // start with no manifest.
         assert!(!uploaded_manifest_exists(), "second session saw prior session's manifest");
         assert!(
-            WalSndCtl().uploaded_manifests[slot2 as usize].lock().unwrap().is_none()
+            uploaded_manifests()[slot2 as usize].lock().unwrap().is_none()
         );
 
         // Belt-and-suspenders: even a manifest left behind WITHOUT WalSndKill
         // (crash-shaped teardown) is cleared by the acquire side.
-        *WalSndCtl().uploaded_manifests[slot2 as usize].lock().unwrap() = Some(Box::new(
+        *uploaded_manifests()[slot2 as usize].lock().unwrap() = Some(Box::new(
             basebackup_incremental::CreateIncrementalBackupInfo(43),
         ));
         WalSndCtl().walsnds[slot2 as usize].lock().unwrap().pid = 0; // slot freed, cell stale
@@ -1808,5 +1876,62 @@ mod tests {
         assert!(!uploaded_manifest_exists(), "failed upload must not stash a manifest");
 
         WalSndKill(0, 0);
+    }
+
+    // ShmemIndex name -> (location, requested size) for the recording
+    // shmem_init_struct seam below: pg_shmem_allocations' name and size.
+    fn shmem_index() -> &'static Mutex<std::collections::HashMap<String, (usize, usize)>> {
+        static R: OnceLock<Mutex<std::collections::HashMap<String, (usize, usize)>>> =
+            OnceLock::new();
+        R.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+    }
+
+    // walsender.c:3702-3730 WalSndShmemInit: ShmemInitStruct("Wal Sender
+    // Ctl", WalSndShmemSize(), &found) registers the ShmemIndex row that
+    // pg_shmem_allocations lists, sized offsetof(WalSndCtlData, walsnds) +
+    // max_wal_senders * sizeof(WalSnd) (walsender.c:3690-3699: 112 + 96 n on
+    // LP64); a second pass finds the block and leaves it alone. Audit
+    // a186-candidate-fp-replication-walsender-p2-f22716dfceeffd54944d-1.
+    #[test]
+    fn shmem_init_registers_wal_sender_ctl_in_shmem_index() {
+        let _g = slot_lock();
+        if !shmem_seams::shmem_init_struct::is_installed() {
+            shmem_seams::shmem_init_struct::set(|name, size| {
+                let mut reg = shmem_index().lock().unwrap();
+                if let Some(&(addr, _)) = reg.get(name) {
+                    return Ok((std::ptr::with_exposed_provenance_mut(addr), true));
+                }
+                let layout = std::alloc::Layout::from_size_align(size.max(1), 128).unwrap();
+                // SAFETY: non-zero size; the block is leaked like C shmem.
+                let p = unsafe { std::alloc::alloc_zeroed(layout) };
+                assert!(!p.is_null());
+                reg.insert(name.to_string(), (p.expose_provenance(), size));
+                Ok((p, false))
+            });
+        }
+        let n = walsender_config::max_wal_senders();
+        let want = C_OFFSETOF_WAL_SND_CTL_DATA_WALSNDS + C_SIZEOF_WAL_SND * n.max(0) as usize;
+
+        WalSndShmemInit(n).expect("WalSndShmemInit");
+        let first = {
+            let reg = shmem_index().lock().unwrap();
+            let (addr, size) = *reg
+                .get("Wal Sender Ctl")
+                .unwrap_or_else(|| panic!("Wal Sender Ctl is missing from the ShmemIndex: {:?}", reg.keys().collect::<Vec<_>>()));
+            assert_eq!(size, want, "pg_shmem_allocations.size for Wal Sender Ctl");
+            assert_eq!(size, WalSndShmemSize(n).unwrap());
+            addr
+        };
+        // The control block is usable: every slot free, the SyncRep LSNs zero.
+        let ctl = WalSndCtl();
+        assert_eq!(ctl.walsnds.len(), n.max(0) as usize);
+        assert!(ctl.walsnds.iter().all(|s| s.lock().unwrap().pid == 0));
+        assert!(ctl.sync_rep_lsn.iter().all(|l| l.load(std::sync::atomic::Ordering::Relaxed) == 0));
+
+        // Re-entry (found = true): one row, same location, live data kept.
+        WalSndShmemInit(n).expect("WalSndShmemInit re-entry");
+        let reg = shmem_index().lock().unwrap();
+        assert_eq!(reg.get("Wal Sender Ctl").map(|&(a, _)| a), Some(first));
+        assert_eq!(reg.keys().filter(|k| k.as_str() == "Wal Sender Ctl").count(), 1);
     }
 }

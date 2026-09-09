@@ -46,6 +46,7 @@ procarray = { path = "../../storage/ipc/procarray" }
 ps_status_seams = { path = "../../utils/misc/ps_status_seams" }
 repl_gram = { path = "../repl_gram" }
 resowner = { path = "../../utils/resowner/resowner" }
+shmem_seams = { path = "../../storage/ipc/shmem_seams" }
 slot = { path = "../slot" }
 procsignal = { path = "../../storage/ipc/procsignal" }
 logical = { path = "../logical/logical" }
