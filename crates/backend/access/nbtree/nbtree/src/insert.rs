@@ -2256,6 +2256,10 @@ mod swap_posting_tests {
         ItemPointerData::new(blk, pos)
     }
 
+    // Tuple accessors require aligned storage.
+    #[repr(align(8))]
+    struct Img<const N: usize>([u8; N]);
+
     // A crafted posting tuple whose posting offset is an attacker-chosen 32-bit
     // value must be rejected with an index-corruption error rather than driving a
     // wild pointer write. Regression guard for the OOB write in _bt_swap_posting.
@@ -2266,26 +2270,28 @@ mod swap_posting_tests {
         let cx = MemoryContext::new("swap");
 
         // 32-byte posting tuple, nposting = 2, but posting offset = 0xFFFF0000.
-        let mut oposting = [0u8; 32];
+        let mut oposting = Img([0u8; 32]);
         let t_info: u16 = 32 | ALT_TID;
-        oposting[6..8].copy_from_slice(&t_info.to_ne_bytes());
+        oposting.0[6..8].copy_from_slice(&t_info.to_ne_bytes());
         let tid0 = ItemPointerData::new(0xFFFF_0000, IS_POSTING | 2);
         // 16-byte plain (non-pivot, non-posting) newitem with a heap TID.
-        let mut newitem = [0u8; 16];
-        newitem[6..8].copy_from_slice(&16u16.to_ne_bytes());
+        let mut newitem = Img([0u8; 16]);
+        newitem.0[6..8].copy_from_slice(&16u16.to_ne_bytes());
 
         // SAFETY: owned aligned images; writes stay within bounds.
         unsafe {
             oposting
+                .0
                 .as_mut_ptr()
                 .cast::<ItemPointerData>()
                 .write_unaligned(tid0);
             newitem
+                .0
                 .as_mut_ptr()
                 .cast::<ItemPointerData>()
                 .write_unaligned(tid(8, 1));
 
-            let res = bt_swap_posting(cx.mcx(), newitem.as_mut_ptr(), oposting.as_ptr(), 1);
+            let res = bt_swap_posting(cx.mcx(), newitem.0.as_mut_ptr(), oposting.0.as_ptr(), 1);
             let err = res.err().expect("crafted posting offset must be rejected");
             assert_eq!(err.sqlstate(), ::types_error::ERRCODE_INDEX_CORRUPTED);
         }
@@ -2298,38 +2304,42 @@ mod swap_posting_tests {
         const IS_POSTING: u16 = 0x2000;
         let cx = MemoryContext::new("swap");
 
-        let mut oposting = [0u8; 32];
+        let mut oposting = Img([0u8; 32]);
         let t_info: u16 = 32 | ALT_TID;
-        oposting[6..8].copy_from_slice(&t_info.to_ne_bytes());
+        oposting.0[6..8].copy_from_slice(&t_info.to_ne_bytes());
         let tid0 = ItemPointerData::new(16, IS_POSTING | 2);
-        let mut newitem = [0u8; 16];
-        newitem[6..8].copy_from_slice(&16u16.to_ne_bytes());
+        let mut newitem = Img([0u8; 16]);
+        newitem.0[6..8].copy_from_slice(&16u16.to_ne_bytes());
 
         // SAFETY: owned aligned images; posting offset 16 + 2 TIDs fit in 32 bytes.
         unsafe {
             oposting
+                .0
                 .as_mut_ptr()
                 .cast::<ItemPointerData>()
                 .write_unaligned(tid0);
             oposting
+                .0
                 .as_mut_ptr()
                 .add(16)
                 .cast::<ItemPointerData>()
                 .write_unaligned(tid(7, 1));
             oposting
+                .0
                 .as_mut_ptr()
                 .add(22)
                 .cast::<ItemPointerData>()
                 .write_unaligned(tid(9, 2));
             newitem
+                .0
                 .as_mut_ptr()
                 .cast::<ItemPointerData>()
                 .write_unaligned(tid(8, 1));
 
-            let nposting = bt_swap_posting(cx.mcx(), newitem.as_mut_ptr(), oposting.as_ptr(), 1)
+            let nposting = bt_swap_posting(cx.mcx(), newitem.0.as_mut_ptr(), oposting.0.as_ptr(), 1)
                 .expect("valid posting split must succeed");
             // newitem takes oposting's rightmost/max TID.
-            assert_eq!(t_tid(newitem.as_ptr()), tid(9, 2));
+            assert_eq!(t_tid(newitem.0.as_ptr()), tid(9, 2));
             // The gap at postingoff was filled with newitem's original TID.
             assert_eq!(bt_tuple_get_posting_n(nposting.as_ptr(), 1), tid(8, 1));
         }

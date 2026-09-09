@@ -273,10 +273,11 @@ mod validate_varlena_key_tests {
     /// so the tuple ends `slack` bytes past the varlena header start.
     fn make_tuple(declared: u32, tuple_size: usize) -> (Buf, usize) {
         let mut b = Buf([0u8; 64]);
-        let itup = b.0.as_mut_ptr();
         // Varlena 4-byte header at the key offset (INDEX_TUPLE_DATA_SIZE = 8).
         let word = varatt::set_varsize_4b_word(declared).to_ne_bytes();
         b.0[8..12].copy_from_slice(&word);
+        // Derive after the slice reborrow to retain pointer provenance.
+        let itup = b.0.as_mut_ptr();
         // t_info lives at offset 6; store IndexTupleSize (no null/var flags).
         // SAFETY: itup is a live, 8-aligned image.
         unsafe { itup::set_t_info(itup, tuple_size as u16) };

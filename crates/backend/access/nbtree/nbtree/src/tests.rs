@@ -313,13 +313,9 @@ fn meta_page_opts(root: BlockNumber, level: u32, allequalimage: bool) -> Box<Fak
         btm_last_cleanup_num_heap_tuples: -1.0,
         btm_allequalimage: allequalimage,
     };
-    // SAFETY: metapage contents at +24 on an owned page.
-    unsafe {
-        p.0.as_mut_ptr()
-            .add(SizeOfPageHeaderData)
-            .cast::<BTMetaPageData>()
-            .write(metad)
-    };
+    // A typed store leaves padding uninitialized; page_meta reads bytes.
+    let img = metad.page_image();
+    p.0[SizeOfPageHeaderData..SizeOfPageHeaderData + img.len()].copy_from_slice(&img);
     p
 }
 

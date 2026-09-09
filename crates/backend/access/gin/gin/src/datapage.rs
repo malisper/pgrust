@@ -1539,13 +1539,17 @@ mod tests {
     use super::*;
     use ::gin_vocab::GIN_DATA;
 
-    fn make_internal_page(maxoff: OffsetNumber) -> Vec<u8> {
-        let mut bytes = vec![0u8; BLCKSZ];
-        gin_init_page_bytes(&mut bytes, GIN_DATA);
-        let mut opaque = opaque_of(&bytes);
+    // Typed page accessors require aligned storage.
+    #[repr(C, align(8))]
+    struct FakePage([u8; BLCKSZ]);
+
+    fn make_internal_page(maxoff: OffsetNumber) -> Box<FakePage> {
+        let mut page = Box::new(FakePage([0u8; BLCKSZ]));
+        gin_init_page_bytes(&mut page.0, GIN_DATA);
+        let mut opaque = opaque_of(&page.0);
         opaque.maxoff = maxoff;
-        write_opaque_to(&mut bytes, &opaque);
-        bytes
+        write_opaque_to(&mut page.0, &opaque);
+        page
     }
 
     #[test]
@@ -1554,7 +1558,7 @@ mod tests {
         // BLCKSZ image.
         let ok = make_internal_page(GinMaxNonLeafDataItems as OffsetNumber);
         assert_eq!(
-            nonleaf_maxoff_checked(&ok).unwrap(),
+            nonleaf_maxoff_checked(&ok.0).unwrap(),
             GinMaxNonLeafDataItems as OffsetNumber
         );
 
@@ -1562,7 +1566,7 @@ mod tests {
         // typed data-corruption error rather than an out-of-bounds access.
         for crafted in [GinMaxNonLeafDataItems as OffsetNumber + 1, 816, u16::MAX] {
             let page = make_internal_page(crafted);
-            let err = nonleaf_maxoff_checked(&page).unwrap_err();
+            let err = nonleaf_maxoff_checked(&page.0).unwrap_err();
             assert_eq!(err.sqlstate(), ERRCODE_DATA_CORRUPTED);
         }
     }
@@ -1573,10 +1577,10 @@ mod tests {
         // free-space computation (which would make the insert "fits" guard pass
         // on a corrupt page); it saturates to zero, forcing the split/error path.
         let page = make_internal_page(u16::MAX);
-        assert_eq!(nonleaf_free_space(&page), 0);
+        assert_eq!(nonleaf_free_space(&page.0), 0);
 
         // A legitimately empty page still reports full free space.
         let empty = make_internal_page(0);
-        assert_eq!(nonleaf_free_space(&empty), GinDataPageMaxDataSize);
+        assert_eq!(nonleaf_free_space(&empty.0), GinDataPageMaxDataSize);
     }
 }
