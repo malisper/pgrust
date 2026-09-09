@@ -17,7 +17,7 @@ use crate::opclass;
 fn direct_bool_consistent(
     tmp: &MemoryContext,
     state: &GinState,
-    key: &GinScanKeyData,
+    key: &GinScanKeyData<'_>,
     entry_res: &[GinTernaryValue],
     trgm_graph: Option<&mut TrgmPackedGraph>,
 ) -> PgResult<(bool, bool)> {
@@ -43,7 +43,7 @@ fn direct_bool_consistent(
 fn direct_tri_consistent(
     tmp: &MemoryContext,
     state: &GinState,
-    key: &mut GinScanKeyData,
+    key: &mut GinScanKeyData<'_>,
 ) -> PgResult<GinTernaryValue> {
     opclass::tri_consistent(
         tmp.mcx(),
@@ -66,7 +66,7 @@ fn direct_tri_consistent(
 pub(crate) fn bool_consistent(
     tmp: &mut MemoryContext,
     state: &GinState,
-    key: &mut GinScanKeyData,
+    key: &mut GinScanKeyData<'_>,
 ) -> PgResult<bool> {
     if key.searchMode == GIN_SEARCH_MODE_EVERYTHING {
         key.recheckCurItem = false;
@@ -102,7 +102,7 @@ pub(crate) fn bool_consistent(
 pub(crate) fn tri_consistent(
     tmp: &mut MemoryContext,
     state: &GinState,
-    key: &mut GinScanKeyData,
+    key: &mut GinScanKeyData<'_>,
 ) -> PgResult<GinTernaryValue> {
     if key.searchMode == GIN_SEARCH_MODE_EVERYTHING {
         return Ok(GIN_TRUE);

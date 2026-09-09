@@ -846,19 +846,19 @@ impl GinState {
 // Scan opaque: entry sharing is u32 handles into GinScanWork.entries (C
 // shares pointers); the 'static lifetimes are an erasure over key_ctx.
 
-pub struct GinScanKeyData {
+pub struct GinScanKeyData<'scan> {
     pub nentries: u32,
     pub nuserentries: u32,
-    pub scanEntry: PgVec<'static, u32>,
-    pub requiredEntries: PgVec<'static, u32>,
-    pub additionalEntries: PgVec<'static, u32>,
-    pub entryRes: PgVec<'static, GinTernaryValue>,
+    pub scanEntry: PgVec<'scan, u32>,
+    pub requiredEntries: PgVec<'scan, u32>,
+    pub additionalEntries: PgVec<'scan, u32>,
+    pub entryRes: PgVec<'scan, GinTernaryValue>,
     pub query: Datum,
-    pub queryValues: PgVec<'static, Datum>,
-    pub queryCategories: PgVec<'static, GinNullCategory>,
-    pub jspOps: PgVec<'static, JspGinOp>,
+    pub queryValues: PgVec<'scan, Datum>,
+    pub queryCategories: PgVec<'scan, GinNullCategory>,
+    pub jspOps: PgVec<'scan, JspGinOp>,
     // tsvector_ops extra_data[0]: QueryItem index -> operand (entry) number.
-    pub mapItemOperand: PgVec<'static, i32>,
+    pub mapItemOperand: PgVec<'scan, i32>,
     // gin_trgm_ops regexp extra_data[0]: the packed trigram graph.
     pub trgmGraph: Option<TrgmPackedGraph>,
     pub strategy: StrategyNumber,
@@ -871,7 +871,7 @@ pub struct GinScanKeyData {
     pub isFinished: bool,
 }
 
-pub struct GinScanEntryData {
+pub struct GinScanEntryData<'scan> {
     pub queryKey: Datum,
     // btree_gin's original query datum (C QueryInfo.datum in extra_data):
     // for the < / <= strategies queryKey is the type's leftmost value and
@@ -886,15 +886,15 @@ pub struct GinScanEntryData {
     pub buffer: Buffer,
     pub curItem: ItemPointerData,
 
-    pub matchBitmap: Option<TIDBitmap<'static>>,
+    pub matchBitmap: Option<TIDBitmap<'scan>>,
     pub matchIterator: Option<TbmPrivateIterator>,
     // Extracted TBMIterateResult snapshot (C keeps a borrow into the bitmap).
     pub matchBlockno: BlockNumber,
     pub matchLossy: bool,
     pub matchNtuples: i32,
-    pub matchOffsets: PgVec<'static, OffsetNumber>,
+    pub matchOffsets: PgVec<'scan, OffsetNumber>,
 
-    pub list: PgVec<'static, ItemPointerData>,
+    pub list: PgVec<'scan, ItemPointerData>,
     pub offset: usize,
 
     pub isFinished: bool,
@@ -904,11 +904,9 @@ pub struct GinScanEntryData {
     pub postingRoot: BlockNumber,
 }
 
-impl GinScanEntryData {
-    /// # Safety
-    /// `mcx` must be the scan's key_ctx; the entry must not outlive it.
-    pub unsafe fn new(mcx: Mcx<'_>) -> PgResult<Self> {
-        let offsets: PgVec<'_, OffsetNumber> =
+impl<'scan> GinScanEntryData<'scan> {
+    pub fn new(mcx: Mcx<'scan>) -> PgResult<Self> {
+        let offsets: PgVec<'scan, OffsetNumber> =
             mcx::vec_from_elem_in(mcx, 0 as OffsetNumber, TBM_MAX_TUPLES_PER_PAGE);
         Ok(GinScanEntryData {
             queryKey: Datum::null(),
@@ -925,8 +923,8 @@ impl GinScanEntryData {
             matchBlockno: InvalidBlockNumber,
             matchLossy: false,
             matchNtuples: -1,
-            matchOffsets: unsafe { core::mem::transmute(offsets) },
-            list: unsafe { core::mem::transmute(mcx::vec_new_in::<ItemPointerData>(mcx)) },
+            matchOffsets: offsets,
+            list: mcx::vec_new_in::<ItemPointerData>(mcx),
             offset: 0,
             isFinished: false,
             reduceResult: false,
@@ -936,71 +934,65 @@ impl GinScanEntryData {
     }
 }
 
-#[repr(transparent)]
-pub struct GinScanVec<T: 'static>(core::mem::MaybeUninit<PgVec<'static, T>>);
-
-impl<T> GinScanVec<T> {
-    fn new(value: PgVec<'static, T>) -> Self {
-        Self(core::mem::MaybeUninit::new(value))
-    }
-}
-
-impl<T> core::ops::Deref for GinScanVec<T> {
-    type Target = PgVec<'static, T>;
-
-    fn deref(&self) -> &Self::Target {
-        // SAFETY: initialized once by new, destroyed only by Drop.
-        unsafe { self.0.assume_init_ref() }
-    }
-}
-
-impl<T> core::ops::DerefMut for GinScanVec<T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        // SAFETY: initialized and exclusively borrowed.
-        unsafe { self.0.assume_init_mut() }
-    }
-}
-
-impl<T> Drop for GinScanVec<T> {
-    fn drop(&mut self) {
-        // SAFETY: initialized once; union storage avoids move-time reference
-        // protectors surviving vector destruction until the context is freed.
-        unsafe { self.0.assume_init_drop() }
-    }
-}
-
-/// Per-(re)scan key state: C's keyCtx plus everything allocated in it.
-/// Dropped as a unit on rescan/endscan (vectors first, then the context).
-pub struct GinScanWork {
-    pub keys: GinScanVec<GinScanKeyData>,
-    pub entries: GinScanVec<PgBox<'static, GinScanEntryData>>,
-    key_ctx: mcx::PinnedContext,
-    // C so->tempCtx: consistent-fn scratch, reset after each call.
+pub struct GinScanState<'scan> {
+    pub keys: PgVec<'scan, GinScanKeyData<'scan>>,
+    pub entries: PgVec<'scan, PgBox<'scan, GinScanEntryData<'scan>>>,
+    kcx: Mcx<'scan>,
     pub temp_ctx: Box<mcx::MemoryContext>,
 }
 
+impl<'scan> GinScanState<'scan> {
+    pub fn kcx(&self) -> Mcx<'scan> {
+        self.kcx
+    }
+}
+
+pub struct GinScanWork {
+    state: core::mem::MaybeUninit<GinScanState<'static>>,
+    key_ctx: mcx::PinnedContext,
+}
+
 impl GinScanWork {
-    /// # Safety
-    /// Keep every key-context borrower within this work; none may escape its
-    /// destruction, including vectors moved out of the public fields.
-    pub unsafe fn new() -> Self {
+    pub fn new() -> Self {
         let key_ctx = mcx::PinnedContext::new(mcx::MemoryContext::new_bump("Gin scan key context"));
-        // SAFETY: both vectors precede their owner in field destruction order;
-        // the caller preserves that order for borrowers moved out of fields.
+        // SAFETY: state is private and destroyed before key_ctx; with() bounds
+        // every exposed allocator lifetime to a generative invocation.
         let kcx = unsafe { key_ctx.handle() };
-        GinScanWork {
-            keys: GinScanVec::new(PgVec::new_in(kcx)),
-            entries: GinScanVec::new(PgVec::new_in(kcx)),
+        Self {
+            state: core::mem::MaybeUninit::new(GinScanState {
+                keys: PgVec::new_in(kcx),
+                entries: PgVec::new_in(kcx),
+                kcx,
+                temp_ctx: Box::new(mcx::MemoryContext::new_bump("Gin scan temporary context")),
+            }),
             key_ctx,
-            temp_ctx: Box::new(mcx::MemoryContext::new_bump("Gin scan temporary context")),
         }
     }
 
-    /// # Safety
-    /// Anything allocated from it must be stored in this GinScanWork.
-    pub unsafe fn kcx(&self) -> Mcx<'static> {
-        // SAFETY: caller keeps allocations within this work's lifetime.
-        unsafe { self.key_ctx.handle() }
+    /// ```compile_fail
+    /// let mut owner = gin_vocab::GinScanWork::new();
+    /// let escaped = owner.with(|state| state.entries.pop());
+    /// drop(owner);
+    /// drop(escaped);
+    /// ```
+    /// ```compile_fail
+    /// let mut owner = gin_vocab::GinScanWork::new();
+    /// let escaped = owner.with(|state| state.kcx());
+    /// drop(owner);
+    /// drop(escaped);
+    /// ```
+    pub fn with<R>(&mut self, f: impl for<'scan> FnOnce(&mut GinScanState<'scan>) -> R) -> R {
+        // SAFETY: higher-ranked access prevents borrowers escaping or an
+        // allocation from a shorter-lived context being stored in state.
+        unsafe { f(&mut *self.state.as_mut_ptr().cast::<GinScanState<'_>>()) }
+    }
+}
+
+impl Drop for GinScanWork {
+    fn drop(&mut self) {
+        // SAFETY: initialized once; drop borrowers before their owner. Union
+        // storage prevents outer move-time protectors surviving this drop.
+        unsafe { self.state.assume_init_drop() }
     }
 }
 
@@ -1038,16 +1030,18 @@ mod owner_tests {
 
     #[test]
     fn scan_work_owner_survives_moves_and_live_entry_drop() {
-        // SAFETY: all borrowed vectors stay in work until its drop.
-        let mut work = unsafe { GinScanWork::new() };
-        // SAFETY: the entry and its vectors are stored in work.
-        let kcx = unsafe { work.kcx() };
-        let entry = unsafe { GinScanEntryData::new(kcx) }.unwrap();
-        work.entries.push(mcx::alloc_in(kcx, entry).unwrap());
+        let mut work = GinScanWork::new();
+        work.with(|state| {
+            let kcx = state.kcx();
+            let entry = GinScanEntryData::new(kcx).unwrap();
+            state.entries.push(mcx::alloc_in(kcx, entry).unwrap());
+        });
         let mut parked = Some(work);
         let mut work = parked.take().unwrap();
-        work.entries[0].matchOffsets[0] = 17;
-        assert_eq!(work.entries[0].matchOffsets[0], 17);
+        work.with(|state| {
+            state.entries[0].matchOffsets[0] = 17;
+            assert_eq!(state.entries[0].matchOffsets[0], 17);
+        });
         drop(work);
     }
 }

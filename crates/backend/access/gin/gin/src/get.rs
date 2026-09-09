@@ -65,10 +65,10 @@ fn move_right_if_needed(
 }
 
 /// scanPostingTree: decode the whole posting tree into the match bitmap.
-fn scan_posting_tree(
-    mcx: Mcx<'_>,
+fn scan_posting_tree<'scan>(
+    mcx: Mcx<'scan>,
     rel: &Relation<'_>,
-    entry: &mut GinScanEntryData,
+    entry: &mut GinScanEntryData<'scan>,
     root: BlockNumber,
 ) -> PgResult<()> {
     let stack = {
@@ -105,12 +105,12 @@ fn scan_posting_tree(
 }
 
 /// collectMatchBitmap. Returns Ok(true) when done, Ok(false) to restart.
-fn collect_match_bitmap(
+fn collect_match_bitmap<'scan>(
     rel: &Relation<'_>,
     state: &GinState,
-    kcx: Mcx<'static>,
+    kcx: Mcx<'scan>,
     stack: &mut GinStack<'_>,
-    entry: &mut GinScanEntryData,
+    entry: &mut GinScanEntryData<'scan>,
     snapshot: Option<&::types_snapshot::SnapshotData<'_>>,
 ) -> PgResult<bool> {
     entry.matchBitmap = Some(TIDBitmap::new(
@@ -233,7 +233,7 @@ fn collect_match_bitmap(
     }
 }
 
-fn datum_copy_key(mcx: Mcx<'static>, col: &GinColState, key: Datum) -> PgResult<Datum> {
+fn datum_copy_key<'scan>(mcx: Mcx<'scan>, col: &GinColState, key: Datum) -> PgResult<Datum> {
     if col.key_byval {
         return Ok(key);
     }
@@ -243,7 +243,7 @@ fn datum_copy_key(mcx: Mcx<'static>, col: &GinColState, key: Datum) -> PgResult<
     } else {
         col.key_len as usize
     };
-    let mut buf: PgVec<'static, u8> = mcx::vec_with_capacity_in(mcx, len)?;
+    let mut buf: PgVec<'scan, u8> = mcx::vec_with_capacity_in(mcx, len)?;
     // SAFETY: len bytes of the live key image.
     crate::vec_append(&mut buf, unsafe {
         core::slice::from_raw_parts(key.as_usize() as *const u8, len)
@@ -254,11 +254,11 @@ fn datum_copy_key(mcx: Mcx<'static>, col: &GinColState, key: Datum) -> PgResult<
 }
 
 /// startScanEntry.
-fn start_scan_entry(
+fn start_scan_entry<'scan>(
     rel: &Relation<'_>,
     state: &GinState,
-    kcx: Mcx<'static>,
-    entry: &mut GinScanEntryData,
+    kcx: Mcx<'scan>,
+    entry: &mut GinScanEntryData<'scan>,
     snapshot: Option<&::types_snapshot::SnapshotData<'_>>,
 ) -> PgResult<()> {
     'restart: loop {
@@ -370,7 +370,7 @@ fn start_scan_entry(
 }
 
 /// startScanKey: split entries into required/additional by frequency.
-fn start_scan_key(state: &GinState, work: &mut GinScanWork, key_idx: usize) -> PgResult<()> {
+fn start_scan_key(state: &GinState, work: &mut GinScanState<'_>, key_idx: usize) -> PgResult<()> {
     {
         let key = &mut work.keys[key_idx];
         item_pointer_set_min(&mut key.curItem);
@@ -432,11 +432,10 @@ fn start_scan_key(state: &GinState, work: &mut GinScanWork, key_idx: usize) -> P
 fn start_scan(
     rel: &Relation<'_>,
     state: &GinState,
-    work: &mut GinScanWork,
+    work: &mut GinScanState<'_>,
     snapshot: Option<&::types_snapshot::SnapshotData<'_>>,
 ) -> PgResult<()> {
-    // SAFETY: everything allocated below is stored in `work` (kcx contract).
-    let kcx = unsafe { work.kcx() };
+    let kcx = work.kcx();
     for entry in work.entries.iter_mut() {
         start_scan_entry(rel, state, kcx, entry, snapshot)?;
     }
@@ -468,7 +467,7 @@ fn start_scan(
 /// entryLoadMoreItems.
 fn entry_load_more_items(
     rel: &Relation<'_>,
-    entry: &mut GinScanEntryData,
+    entry: &mut GinScanEntryData<'_>,
     advance_past: &ItemPointerData,
 ) -> PgResult<()> {
     if entry.buffer == InvalidBuffer {
@@ -570,7 +569,7 @@ fn entry_load_more_items(
     }
 }
 
-fn drop_item(entry: &GinScanEntryData) -> bool {
+fn drop_item(entry: &GinScanEntryData<'_>) -> bool {
     let fuzzy = guc_tables::vars::GinFuzzySearchLimit.read() as f64;
     pg_prng::global_prng(pg_prng::PgPrng::next_f64)
         > fuzzy / entry.predictNumberResult.max(1) as f64
@@ -579,7 +578,7 @@ fn drop_item(entry: &GinScanEntryData) -> bool {
 /// entryGetItem.
 fn entry_get_item(
     rel: &Relation<'_>,
-    entry: &mut GinScanEntryData,
+    entry: &mut GinScanEntryData<'_>,
     advance_past: &ItemPointerData,
 ) -> PgResult<()> {
     debug_assert!(!entry.isFinished);
@@ -699,7 +698,7 @@ fn entry_get_item(
 fn key_get_item(
     rel: &Relation<'_>,
     state: &GinState,
-    work: &mut GinScanWork,
+    work: &mut GinScanState<'_>,
     key_idx: usize,
     advance_past: &ItemPointerData,
 ) -> PgResult<()> {
@@ -849,7 +848,7 @@ fn key_get_item(
 fn scan_get_item(
     rel: &Relation<'_>,
     state: &GinState,
-    work: &mut GinScanWork,
+    work: &mut GinScanState<'_>,
     advance_past: &ItemPointerData,
     item: &mut ItemPointerData,
 ) -> PgResult<Option<bool>> {
@@ -988,7 +987,7 @@ fn match_partial_in_pending_list(
     buffer: Buffer,
     mut off: OffsetNumber,
     maxoff: OffsetNumber,
-    entry: &GinScanEntryData,
+    entry: &GinScanEntryData<'_>,
     datum: &mut [Datum],
     category: &mut [GinNullCategory],
     extracted: &mut [bool],
@@ -1042,7 +1041,7 @@ fn match_partial_in_pending_list(
 fn collect_matches_for_heap_row(
     rel: &Relation<'_>,
     state: &GinState,
-    work: &mut GinScanWork,
+    work: &mut GinScanState<'_>,
     pos: &mut PendingPosition,
     has_match_key: &mut [bool],
 ) -> PgResult<bool> {
@@ -1107,7 +1106,7 @@ fn collect_matches_for_heap_row(
                         let mut cat = GIN_CAT_NORM_KEY;
                         // SAFETY: live tuple under the lock; kcx is the
                         // scan-lifetime key context (transient tupdesc only).
-                        let kcx2 = unsafe { work.kcx() };
+                        let kcx2 = work.kcx();
                         datum[mi] =
                             unsafe { gintuple_get_key(kcx2, rel, state, itup, &mut cat)? };
                         category[mi] = cat;
@@ -1137,8 +1136,7 @@ fn collect_matches_for_heap_row(
 
                     if res == 0 {
                         work.keys[ki].entryRes[j] = if entry.isPartialMatch {
-                            // SAFETY: kcx contract as above.
-                            let kcx2 = unsafe { work.kcx() };
+                            let kcx2 = work.kcx();
                             if match_partial_in_pending_list(
                                 kcx2,
                                 state,
@@ -1170,8 +1168,7 @@ fn collect_matches_for_heap_row(
                 if !found_eq && entry.isPartialMatch {
                     // No exact match: scan forward from the first tuple
                     // greater than the target value.
-                    // SAFETY: kcx contract as above.
-                    let kcx2 = unsafe { work.kcx() };
+                    let kcx2 = work.kcx();
                     work.keys[ki].entryRes[j] = if match_partial_in_pending_list(
                         kcx2,
                         state,
@@ -1221,7 +1218,7 @@ fn collect_matches_for_heap_row(
 fn scan_pending_insert(
     rel: &Relation<'_>,
     state: &GinState,
-    work: &mut GinScanWork,
+    work: &mut GinScanState<'_>,
     tbm: &mut TIDBitmap<'_>,
     snapshot: Option<&::types_snapshot::SnapshotData<'_>>,
 ) -> PgResult<i64> {
@@ -1304,7 +1301,7 @@ pub fn gingetbitmap(
         return Ok(0);
     }
     let state = so.ginstate.expect("ginstate");
-    let work = so.work.as_mut().expect("scan work");
+    so.work.as_mut().expect("scan work").with(|work| {
 
     let mut ntids = scan_pending_insert(rel, &state, work, tbm, snapshot)?;
 
@@ -1328,4 +1325,5 @@ pub fn gingetbitmap(
     }
 
     Ok(ntids)
+    })
 }

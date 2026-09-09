@@ -46,7 +46,7 @@ pub fn ginbeginscan<'mcx>(
 #[allow(clippy::too_many_arguments)]
 fn fill_scan_entry(
     state: &GinState,
-    work: &mut GinScanWork,
+    work: &mut GinScanState<'_>,
     attnum: OffsetNumber,
     strategy: StrategyNumber,
     search_mode: i32,
@@ -75,10 +75,9 @@ fn fill_scan_entry(
         }
     }
 
-    // SAFETY: entry stored in work (kcx contract).
-    let kcx = unsafe { work.kcx() };
+    let kcx = work.kcx();
     // SAFETY: as above.
-    let mut entry = unsafe { GinScanEntryData::new(kcx)? };
+    let mut entry = GinScanEntryData::new(kcx)?;
     entry.queryKey = query_key;
     entry.queryOrig = query_orig;
     entry.queryCategory = query_category;
@@ -97,7 +96,7 @@ fn fill_scan_entry(
 
 fn add_hidden_entry(
     state: &GinState,
-    work: &mut GinScanWork,
+    work: &mut GinScanState<'_>,
     key_idx: usize,
     category: GinNullCategory,
 ) -> PgResult<()> {
@@ -125,9 +124,9 @@ fn add_hidden_entry(
 
 /// ginFillScanKey.
 #[allow(clippy::too_many_arguments)]
-fn fill_scan_key(
+fn fill_scan_key<'scan>(
     state: &GinState,
-    work: &mut GinScanWork,
+    work: &mut GinScanState<'scan>,
     attnum: OffsetNumber,
     strategy: StrategyNumber,
     search_mode: i32,
@@ -136,12 +135,11 @@ fn fill_scan_key(
     btree_orig: Datum,
     query_categories: &[GinNullCategory],
     partial_match: &[bool],
-    jsp_ops: PgVec<'static, JspGinOp>,
-    map_item_operand: PgVec<'static, i32>,
+    jsp_ops: PgVec<'scan, JspGinOp>,
+    map_item_operand: PgVec<'scan, i32>,
     trgm_graph: Option<TrgmPackedGraph>,
 ) -> PgResult<()> {
-    // SAFETY: vectors stored in work (kcx contract).
-    let kcx = unsafe { work.kcx() };
+    let kcx = work.kcx();
     let n = query_values.len();
 
     let mut key = GinScanKeyData {
@@ -210,17 +208,19 @@ fn fill_scan_key(
 
 /// ginFreeScanKeys.
 pub(crate) fn ginFreeScanKeys(so: &mut GinScanOpaqueData) -> PgResult<()> {
-    let Some(work) = so.work.take() else {
+    let Some(mut work) = so.work.take() else {
         return Ok(());
     };
+    work.with(|work| {
     for entry in work.entries.iter() {
         if entry.buffer != InvalidBuffer {
             bm::release_buffer::call(entry.buffer)?;
         }
         // list / matchIterator / matchBitmap die with the work drop below.
     }
-    drop(work);
     Ok(())
+    })
+
 }
 
 /// ginNewScanKey.
@@ -230,8 +230,8 @@ pub(crate) fn ginNewScanKey(
     so: &mut GinScanOpaqueData,
 ) -> PgResult<()> {
     let state = so.ginstate.expect("ginstate initialized at beginscan");
-    // SAFETY: key-context borrowers stay in work until rescan/endscan drops it.
-    let mut work = unsafe { GinScanWork::new() };
+    let mut owner = GinScanWork::new();
+    owner.with(|mut work| {
     so.isVoidRes = false;
 
     let mut has_null_query = false;
@@ -243,8 +243,7 @@ pub(crate) fn ginNewScanKey(
             break;
         }
 
-        // SAFETY: query values stored in work (kcx contract).
-        let kcx = unsafe { work.kcx() };
+        let kcx = work.kcx();
         let col = state.col(skey.sk_attno as OffsetNumber);
         let extracted = crate::opclass::extract_query(
             kcx,
@@ -331,8 +330,7 @@ pub(crate) fn ginNewScanKey(
 
     if work.keys.is_empty() && !so.isVoidRes {
         has_null_query = true;
-        // SAFETY: vector stored in the key inside work (kcx contract).
-        let kcx2 = unsafe { work.kcx() };
+        let kcx2 = work.kcx();
         let empty_ops = mcx::vec_new_in(kcx2);
         let empty_map = mcx::vec_new_in(kcx2);
         fill_scan_key(
@@ -368,7 +366,9 @@ pub(crate) fn ginNewScanKey(
         }
     }
 
-    so.work = Some(work);
+    Ok(())
+    })?;
+    so.work = Some(owner);
     // pgstat_count_index_scan is bumped by the caller (gingetbitmap) through
     // the scan's xs_pgstat_index_scans slot, as the other AMs do.
     Ok(())

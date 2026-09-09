@@ -232,3 +232,23 @@ fn array_ops_fmgr_elem_compare_dispatches_btree_cmp_proc() {
     assert_eq!(cmp(7, 7), 0);
     assert_eq!(cmp(-3, 4), -1);
 }
+
+#[test]
+fn safe_scan_state_cannot_escape_owner() {
+    install();
+    let cx = MemoryContext::new("escape witness");
+    let rel = index_rel(cx.mcx());
+    set_meta_version(GIN_CURRENT_VERSION);
+    let mut so = GinScanOpaqueData {
+        ginstate: Some(gin_state()),
+        work: None,
+        isVoidRes: false,
+    };
+    crate::scan::ginNewScanKey(&rel, &[], &mut so).unwrap();
+    so.work.as_mut().unwrap().with(|state| {
+        let entry = state.entries.pop().unwrap();
+        assert_eq!(entry.matchOffsets[0], 0);
+        drop(entry);
+    });
+    drop(so);
+}
