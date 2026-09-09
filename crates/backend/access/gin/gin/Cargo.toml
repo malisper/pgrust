@@ -56,6 +56,9 @@ procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
 miscinit = { path = "../../../utils/init/miscinit" }
 
 [dev-dependencies]
+# The b006 rig records PageAddItemExtended's elog(WARNING) refusals
+# (bufpage.c:292) that add_item now emits on this seam.
+elog_seams = { path = "../../../utils/error/elog_seams" }
 pglz = { path = "../../../../common/pglz" }
 lock_seams = { path = "../../../storage/lmgr/lock_seams" }
 

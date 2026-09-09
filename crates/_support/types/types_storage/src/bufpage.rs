@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 use ::types_core::{
     uint16, uint32, uint8, BlockNumber, InvalidBlockNumber, OffsetNumber, Size, XLogRecPtr, BLCKSZ,
 };
-use ::types_error::{ErrorLevel, PgError, ERRCODE_DATA_CORRUPTED, ERROR, PANIC};
+use ::types_error::{ErrorLevel, PgError, ERRCODE_DATA_CORRUPTED, ERROR, PANIC, WARNING};
 
 /// bufpage.c's `ereport(ERROR|PANIC, (errcode(ERRCODE_DATA_CORRUPTED), ...))`
 /// sites: an XX001 error on the ereport channel carrying C's message bytes.
@@ -19,6 +19,24 @@ fn data_corrupted(level: ErrorLevel, message: alloc::string::String) -> ! {
     std::panic::panic_any(alloc::boxed::Box::new(
         PgError::new(level, message).with_sqlstate(ERRCODE_DATA_CORRUPTED),
     ))
+}
+
+/// PageAddItemExtended's `elog(WARNING, ...)` arms (bufpage.c:235/:292/:299):
+/// the warning goes out on elog's ereport channel from inside the page code,
+/// as in C (no caller forwards it; every C caller goes on to PANIC/ERROR on
+/// the InvalidOffsetNumber). elog(WARNING) never longjmps for the message
+/// itself, but errfinish ends with CHECK_FOR_INTERRUPTS, so a pending
+/// cancel/die comes back as an error; this entry point is infallible-shaped,
+/// so it travels as the same `Box<PgError>` panic payload `data_corrupted`
+/// uses, restored by `pg_error_from_panic` at the statement boundary.
+#[cold]
+#[inline(never)]
+fn add_item_warning(message: &'static str) {
+    if let Err(err) =
+        ::elog_seams::ereport_msg::call(WARNING, alloc::string::String::from(message), None)
+    {
+        std::panic::panic_any(err);
+    }
 }
 
 pub type ItemOffset = uint16;
@@ -536,8 +554,10 @@ impl<'a> PageMut<'a> {
         self.set_prune_xid(0);
     }
 
-    /// `PageAddItemExtended`; `None` is C's `InvalidOffsetNumber` (the C
-    /// WARNING text lives at the caller). Corrupt page pointers raise C's
+    /// `PageAddItemExtended`; `None` is C's `InvalidOffsetNumber`. The three
+    /// refusals C reports with elog(WARNING) (bufpage.c:235/:292/:299) emit
+    /// that WARNING from here, exactly as C does; the no-room refusal
+    /// (bufpage.c:319) is silent in both. Corrupt page pointers raise C's
     /// ereport(PANIC, ERRCODE_DATA_CORRUPTED) (bufpage.c:214).
     pub fn add_item(
         &mut self,
@@ -574,6 +594,8 @@ impl<'a> PageMut<'a> {
                 let id = r.item_id(offset_number);
                 if overwrite {
                     if id.is_used() || id.has_storage() {
+                        // bufpage.c:235
+                        add_item_warning("will not overwrite a used ItemId");
                         return None;
                     }
                 } else {
@@ -599,9 +621,13 @@ impl<'a> PageMut<'a> {
         }
 
         if offset_number > limit {
+            // bufpage.c:292
+            add_item_warning("specified item offset is too large");
             return None;
         }
         if is_heap && offset_number as usize > MaxHeapTuplesPerPage {
+            // bufpage.c:299
+            add_item_warning("can't put more than MaxHeapTuplesPerPage items in a heap page");
             return None;
         }
 
@@ -1398,6 +1424,48 @@ mod tests {
         unsafe { PageMut::from_raw(ptr) }
     }
 
+    // PageAddItemExtended's three elog(WARNING) arms (bufpage.c:235 "will not
+    // overwrite a used ItemId", :292 "specified item offset is too large",
+    // :299 "can't put more than MaxHeapTuplesPerPage items in a heap page")
+    // go out on elog's ereport_msg seam from inside add_item, as in C (no
+    // caller forwards them). This binary owns no elog stack, so a recorder
+    // stands in for it; the seam is set-once, hence the installed flag.
+    static WARNING_LOG: pgsync::Mutex<Vec<(ErrorLevel, alloc::string::String)>> =
+        pgsync::Mutex::new(Vec::new());
+    static WARNING_RECORDER_INSTALLED: pgsync::Mutex<bool> = pgsync::Mutex::new(false);
+
+    fn install_warning_recorder() {
+        let mut installed = WARNING_RECORDER_INSTALLED.lock().unwrap();
+        if !*installed {
+            ::elog_seams::ereport_msg::set(|elevel, msg, _detail| {
+                WARNING_LOG.lock().unwrap().push((elevel, msg));
+                Ok(())
+            });
+            *installed = true;
+        }
+    }
+
+    fn warning_log_len() -> usize {
+        WARNING_LOG.lock().unwrap().len()
+    }
+
+    fn assert_warning_since(start: usize, message: &str) {
+        // Copy the tail out and release the lock before asserting: a failing
+        // witness must not poison the recorder for its siblings.
+        let tail: Vec<(ErrorLevel, alloc::string::String)> =
+            WARNING_LOG.lock().unwrap()[start..].to_vec();
+        let hits = tail
+            .iter()
+            .filter(|(level, msg)| *level == ::types_error::WARNING && msg == message)
+            .count();
+        // At least one: sibling tests in this binary share the recorder and
+        // may raise the same text concurrently.
+        assert!(
+            hits >= 1,
+            "expected WARNING {message:?} on the ereport channel; got {tail:?}"
+        );
+    }
+
     #[test]
     fn page_init_layout() {
         let mut t = temp_page();
@@ -1446,6 +1514,7 @@ mod tests {
 
     #[test]
     fn add_item_rejects_when_full() {
+        install_warning_recorder();
         let mut t = temp_page();
         let mut pm = page_mut(&mut t);
         pm.init(0);
@@ -1455,6 +1524,76 @@ mod tests {
         assert!(pm.add_item(&big, 0, PAI_IS_HEAP).is_none());
         // offnum beyond limit refused
         assert!(pm.add_item(&[0u8; 8], 9, 0).is_none());
+    }
+
+    #[test]
+    fn add_item_overwrite_of_used_item_id_warns_like_c() {
+        // bufpage.c:235: PAI_OVERWRITE on a used/storage ItemId refuses with
+        // elog(WARNING, "will not overwrite a used ItemId") and returns
+        // InvalidOffsetNumber.
+        install_warning_recorder();
+        let mut t = temp_page();
+        let mut pm = page_mut(&mut t);
+        pm.init(0);
+        let item = [0x5Au8; 24];
+        assert_eq!(pm.add_item(&item, 0, PAI_IS_HEAP), Some(1));
+        let start = warning_log_len();
+        assert_eq!(pm.add_item(&item, 1, PAI_OVERWRITE | PAI_IS_HEAP), None);
+        assert_warning_since(start, "will not overwrite a used ItemId");
+        // The page is untouched.
+        let r = pm.as_ref();
+        assert_eq!(r.max_offset_number(), 1);
+        assert_eq!(r.item_id(1).lp_len(), 24);
+    }
+
+    #[test]
+    fn add_item_offset_beyond_limit_warns_like_c() {
+        // bufpage.c:292: an offsetNumber past the first unused line pointer
+        // (limit = maxoff + 1) is refused with elog(WARNING, "specified item
+        // offset is too large").
+        install_warning_recorder();
+        let mut t = temp_page();
+        let mut pm = page_mut(&mut t);
+        pm.init(0);
+        let item = [0x5Au8; 8];
+        assert_eq!(pm.add_item(&item, 0, 0), Some(1));
+        let start = warning_log_len();
+        // limit is 2; offset 3 is one past it.
+        assert_eq!(pm.add_item(&item, 3, 0), None);
+        assert_warning_since(start, "specified item offset is too large");
+        assert_eq!(pm.as_ref().max_offset_number(), 1);
+    }
+
+    #[test]
+    fn add_item_past_max_heap_tuples_warns_like_c() {
+        // bufpage.c:299: with PAI_IS_HEAP an offsetNumber beyond
+        // MaxHeapTuplesPerPage is refused with elog(WARNING, "can't put more
+        // than MaxHeapTuplesPerPage items in a heap page") — both when the
+        // caller names offset MaxHeapTuplesPerPage + 1 (== limit here) and
+        // when the free-slot search lands there.
+        install_warning_recorder();
+        let mut t = temp_page();
+        let mut pm = page_mut(&mut t);
+        pm.init(0);
+        let tiny = [0u8; 8];
+        for i in 0..MaxHeapTuplesPerPage {
+            assert_eq!(pm.add_item(&tiny, 0, PAI_IS_HEAP), Some((i + 1) as OffsetNumber));
+        }
+        let limit = (MaxHeapTuplesPerPage + 1) as OffsetNumber;
+        let start = warning_log_len();
+        assert_eq!(pm.add_item(&tiny, limit, PAI_IS_HEAP), None);
+        assert_warning_since(
+            start,
+            "can't put more than MaxHeapTuplesPerPage items in a heap page",
+        );
+        let start = warning_log_len();
+        assert_eq!(pm.add_item(&tiny, 0, PAI_IS_HEAP), None);
+        assert_warning_since(
+            start,
+            "can't put more than MaxHeapTuplesPerPage items in a heap page",
+        );
+        // Not a heap page: the same offset is accepted (only :292 guards it).
+        assert_eq!(pm.add_item(&tiny, limit, 0), Some(limit));
     }
 
     #[test]
@@ -1515,6 +1654,7 @@ mod tests {
 
     #[test]
     fn heap_free_space_line_pointer_limit() {
+        install_warning_recorder();
         let mut t = temp_page();
         let mut pm = page_mut(&mut t);
         pm.init(0);

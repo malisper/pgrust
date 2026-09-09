@@ -6968,6 +6968,7 @@ dependencies = [
  "datum",
  "detoast",
  "elog",
+ "elog_seams",
  "fmgr_seams",
  "format_type",
  "freespace",
@@ -20632,6 +20633,7 @@ dependencies = [
 name = "types_storage"
 version = "0.1.0"
 dependencies = [
+ "elog_seams",
  "libc",
  "mcx",
  "pgsync",

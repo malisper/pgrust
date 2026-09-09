@@ -22,7 +22,7 @@ use ::types_core::{
     BlockNumber, Buffer, InvalidBlockNumber, Oid, OffsetNumber, BLCKSZ, INVALID_PROC_NUMBER,
     RELPERSISTENCE_PERMANENT,
 };
-use ::types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
+use ::types_error::{ErrorLevel, PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 use ::types_rel::{
     FormData_pg_class, FormData_pg_index, LockInfoData, LockRelId, Relation, RelationData,
     LOCKMODE, RELKIND_INDEX, REPLICA_IDENTITY_DEFAULT,
@@ -76,12 +76,31 @@ pub(crate) mod rig {
         Ok(())
     }
 
+    /// Process-wide ereport_msg ledger: the below-elog WARNING/LOG reports
+    /// (PageAddItemExtended's refusals, bufpage.c:235/:292/:299) land here
+    /// since this binary owns no elog stack.
+    static REPORTS: std::sync::Mutex<Vec<(ErrorLevel, String)>> = std::sync::Mutex::new(Vec::new());
+
+    pub(crate) fn reports_len() -> usize {
+        REPORTS.lock().unwrap().len()
+    }
+
+    pub(crate) fn reports_since(start: usize) -> Vec<(ErrorLevel, String)> {
+        REPORTS.lock().unwrap()[start..].to_vec()
+    }
+
     /// Installs the seams every witness needs (once per process; layered on
     /// tests.rs's fake_bufmgr, whose seams it never re-installs).
     pub(crate) fn install() {
         crate::tests::fake_bufmgr::install();
         static INIT: Once = Once::new();
         INIT.call_once(|| {
+            if !::elog_seams::ereport_msg::is_installed() {
+                ::elog_seams::ereport_msg::set(|elevel, msg, _detail| {
+                    REPORTS.lock().unwrap().push((elevel, msg));
+                    Ok(())
+                });
+            }
             // The b084 rig (rem_b084_tests) records the same two seams into
             // its own process-wide ledgers; a seam is installed once per
             // process, so whichever rig wins the race feeds BOTH recorders.
@@ -865,13 +884,23 @@ fn exec_place_to_page_at_bad_offset_is_internal_error() {
         crate::entrypage::EntryBtree::new(&rel, &state, 1, Datum::from_i32(1), GIN_CAT_NORM_KEY, mcx);
     btree.payload = Some(crate::entrypage::EntryPayload { entry, is_delete: false });
 
-    // Offset 3 on an empty leaf: PageAddItem refuses (offset past maxoff+1).
+    // Offset 3 on an empty leaf: PageAddItem refuses (offset past maxoff+1),
+    // logging bufpage.c:292's WARNING first, as C does.
+    let start = rig::reports_len();
     let err = btree
         .exec_place_to_page(2, 3, InvalidBlockNumber)
         .err()
         .expect("PageAddItem failure must be a catchable error");
     assert_eq!(err.message(), "failed to add item to index page in \"t_gin\"");
     assert_eq!(err.sqlstate(), ERRCODE_INTERNAL_ERROR);
+    let reports = rig::reports_since(start);
+    assert!(
+        reports.contains(&(
+            ::types_error::WARNING,
+            "specified item offset is too large".to_string()
+        )),
+        "bufpage.c:292 WARNING missing: {reports:?}"
+    );
 }
 
 // --- ginentrypage.c:312 entryLocateEntry key extraction: a corrupt varlena

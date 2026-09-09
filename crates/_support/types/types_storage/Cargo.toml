@@ -5,6 +5,10 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+# PageAddItemExtended's elog(WARNING) arms (bufpage.c:235/292/299) report on
+# elog's ereport_msg seam from inside the page code, as C does; seam-only
+# dependency (seam_core + types_error), no cycle.
+elog_seams = { path = "../../../backend/utils/error/elog_seams" }
 libc = { version = "0.2", default-features = false }
 mcx = { path = "../../mcx" }
 # THE single lock library (permit-s1): latch.rs's atomics ride pgsync so the
