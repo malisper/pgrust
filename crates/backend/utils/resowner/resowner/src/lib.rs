@@ -1024,6 +1024,10 @@ pub fn ResourceOwnerForgetLock(owner: ResourceOwner, locallock: LOCALLOCKTAG) ->
                 return Ok(());
             }
         }
+        // resowner.c:1108-1109: elog(ERROR, "lock reference %p is not owned
+        // by resource owner %s"). The owner caches LOCALLOCKTAG values, not
+        // LOCALLOCK addresses, so C's per-process pointer bytes have no
+        // rendering here; the fixed text and the owner name are C's.
         Err(Box::new(PgError::error(format!(
             "lock reference is not owned by resource owner {}",
             d.name

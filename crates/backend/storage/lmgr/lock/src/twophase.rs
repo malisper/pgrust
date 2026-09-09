@@ -251,7 +251,7 @@ pub fn PostPrepare_Locks(xid: TransactionId) -> PgResult<()> {
         });
         match action {
             Action::Skip => continue,
-            Action::RemoveOnly => RemoveLocalLock(tag),
+            Action::RemoveOnly => RemoveLocalLock(tag)?,
             Action::Mark(proclock, mark) => {
                 if mark {
                     // SAFETY: releaseMask is only ever touched by the owning
@@ -260,7 +260,7 @@ pub fn PostPrepare_Locks(xid: TransactionId) -> PgResult<()> {
                         (*proclock).releaseMask |= LOCKBIT_ON(tag.mode);
                     }
                 }
-                RemoveLocalLock(tag);
+                RemoveLocalLock(tag)?;
             }
         }
     }

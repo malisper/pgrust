@@ -60,11 +60,12 @@ pub(crate) fn return_scratch(scratch: PgVec<'static, LOCALLOCKTAG>) {
     with_local(|state| state.scratch = scratch);
 }
 
-fn remove_locallock_if_unused(tag: &LOCALLOCKTAG) {
+fn remove_locallock_if_unused(tag: &LOCALLOCKTAG) -> PgResult<()> {
     let unused = with_local(|state| state.table.get(tag).is_some_and(|ll| ll.nLocks == 0));
     if unused {
-        RemoveLocalLock(tag);
+        RemoveLocalLock(tag)?;
     }
+    Ok(())
 }
 
 pub fn LockAcquire(
@@ -170,7 +171,7 @@ pub fn LockAcquireExtended(
         BeginStrongLockAcquire(&localtag, fasthashcode);
         if !FastPathTransferRelationLocks(lockMethodTable, locktag, hashcode)? {
             AbortStrongLockAcquire();
-            remove_locallock_if_unused(&localtag);
+            remove_locallock_if_unused(&localtag)?;
             if reportMemoryError {
                 return Err(out_of_shmem_error());
             }
@@ -188,7 +189,7 @@ pub fn LockAcquireExtended(
     if proclock.is_null() {
         AbortStrongLockAcquire();
         lwlock::LWLockRelease(partition_lock)?;
-        remove_locallock_if_unused(&localtag);
+        remove_locallock_if_unused(&localtag)?;
         if reportMemoryError {
             return Err(out_of_shmem_error());
         }
@@ -271,10 +272,10 @@ pub fn LockAcquireExtended(
                     Some(format!("{noun}: {holders}, Wait queue: {waiters}.")),
                 )?;
             }
-            remove_locallock_if_unused(&localtag);
+            remove_locallock_if_unused(&localtag)?;
             return Ok(LOCKACQUIRE_NOT_AVAIL);
         }
-        remove_locallock_if_unused(&localtag);
+        remove_locallock_if_unused(&localtag)?;
         deadlock_seams::dead_lock_report::call()?;
         unreachable!("DeadLockReport returned");
     }
@@ -362,7 +363,8 @@ pub fn LockRelease(locktag: &LOCKTAG, lockmode: LOCKMODE, sessionLock: bool) -> 
             (true, forget, still_held, ll.hashcode, ll.lock, ll.proclock)
         });
     if let Some(o) = forget_owner {
-        resowner::ResourceOwnerForgetLock(o, localtag).expect("ResourceOwnerForgetLock");
+        // lock.c:2137: an unowned reference is the elog(ERROR).
+        resowner::ResourceOwnerForgetLock(o, localtag)?;
     }
     if !owned {
         warn_not_owned(lockMethodTable.lockModeNames[lockmode as usize])?;
@@ -384,7 +386,7 @@ pub fn LockRelease(locktag: &LOCKTAG, lockmode: LOCKMODE, sessionLock: bool) -> 
             unsafe { FastPathUnGrantRelationLock(locktag.locktag_field2, lockmode) };
         lwlock::LWLockRelease(fp_info_lock(proc))?;
         if released {
-            RemoveLocalLock(&localtag);
+            RemoveLocalLock(&localtag)?;
             return Ok(true);
         }
     }
@@ -427,7 +429,7 @@ pub fn LockRelease(locktag: &LOCKTAG, lockmode: LOCKMODE, sessionLock: bool) -> 
         if (*proclock).holdMask & LOCKBIT_ON(lockmode) == 0 {
             lwlock::LWLockRelease(partition_lock)?;
             warn_not_owned(lockMethodTable.lockModeNames[lockmode as usize])?;
-            RemoveLocalLock(&localtag);
+            RemoveLocalLock(&localtag)?;
             return Ok(false);
         }
 
@@ -436,7 +438,7 @@ pub fn LockRelease(locktag: &LOCKTAG, lockmode: LOCKMODE, sessionLock: bool) -> 
     }
 
     lwlock::LWLockRelease(partition_lock)?;
-    RemoveLocalLock(&localtag);
+    RemoveLocalLock(&localtag)?;
     Ok(true)
 }
 
@@ -454,7 +456,8 @@ pub fn LockReleaseAll(lockmethodid: LOCKMETHODID, allLocks: bool) -> PgResult<()
     let mut kept_forgets: Vec<(ResourceOwner, LOCALLOCKTAG)> = Vec::new();
     let mut removed = locallock::drain_release_all(lockmethodid, allLocks, &mut kept_forgets);
     for (owner, tag) in kept_forgets {
-        resowner::ResourceOwnerForgetLock(owner, tag).expect("ResourceOwnerForgetLock");
+        // lock.c:2347: an unowned reference is the elog(ERROR).
+        resowner::ResourceOwnerForgetLock(owner, tag)?;
     }
 
     let mut have_fast_path_lwlock = false;
@@ -480,7 +483,7 @@ pub fn LockReleaseAll(lockmethodid: LOCKMETHODID, allLocks: bool) -> PgResult<()
                 LockRefindAndRelease(lockMethodTable, my_procno(), &r.tag.lock, lockmode, false)?;
             }
         }
-        locallock::finish_removed_lock(r);
+        locallock::finish_removed_lock(r)?;
     }
 
     if have_fast_path_lwlock {
@@ -623,7 +626,8 @@ fn ReleaseLockIfHeld(tag: &LOCALLOCKTAG, sessionLock: bool) -> PgResult<()> {
         Outcome::None => Ok(()),
         Outcome::PartialForget(forget) => {
             if let Some(o) = forget {
-                resowner::ResourceOwnerForgetLock(o, *tag).expect("ResourceOwnerForgetLock");
+                // lock.c:2643: an unowned reference is the elog(ERROR).
+                resowner::ResourceOwnerForgetLock(o, *tag)?;
             }
             Ok(())
         }
@@ -649,20 +653,24 @@ pub fn LockReassignCurrentOwner(locallocks: Option<&[LOCALLOCKTAG]>) -> PgResult
         None => {
             let tags = snapshot_locallock_tags();
             for tag in tags.iter() {
-                LockReassignOwner(tag, current, parent);
+                LockReassignOwner(tag, current, parent)?;
             }
             return_scratch(tags);
         }
         Some(tags) => {
             for tag in tags.iter().rev() {
-                LockReassignOwner(tag, current, parent);
+                LockReassignOwner(tag, current, parent)?;
             }
         }
     }
     Ok(())
 }
 
-fn LockReassignOwner(tag: &LOCALLOCKTAG, current: ResourceOwner, parent: ResourceOwner) {
+fn LockReassignOwner(
+    tag: &LOCALLOCKTAG,
+    current: ResourceOwner,
+    parent: ResourceOwner,
+) -> PgResult<()> {
     enum Change {
         None,
         GaveSlotToParent,
@@ -694,15 +702,14 @@ fn LockReassignOwner(tag: &LOCALLOCKTAG, current: ResourceOwner, parent: Resourc
             }
         }
     });
+    // lock.c:2742: an unowned reference is the elog(ERROR).
     match change {
-        Change::None => {}
+        Change::None => Ok(()),
         Change::GaveSlotToParent => {
             resowner::ResourceOwnerRememberLock(parent, *tag);
-            resowner::ResourceOwnerForgetLock(current, *tag).expect("ResourceOwnerForgetLock");
+            resowner::ResourceOwnerForgetLock(current, *tag)
         }
-        Change::MergedIntoParent => {
-            resowner::ResourceOwnerForgetLock(current, *tag).expect("ResourceOwnerForgetLock");
-        }
+        Change::MergedIntoParent => resowner::ResourceOwnerForgetLock(current, *tag),
     }
 }
 
@@ -738,7 +745,7 @@ pub fn LockHasWaiters(
         if (*proclock).holdMask & LOCKBIT_ON(lockmode) == 0 {
             lwlock::LWLockRelease(partition_lock)?;
             warn_not_owned(lockMethodTable.lockModeNames[lockmode as usize])?;
-            RemoveLocalLock(&localtag);
+            RemoveLocalLock(&localtag)?;
             return Ok(false);
         }
         lockMethodTable.conflictTab[lockmode as usize] & (*lock).waitMask != 0

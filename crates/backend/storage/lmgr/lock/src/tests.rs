@@ -8,7 +8,8 @@ use types_core::BackendType;
 use types_error::{ErrorLevel, PgError};
 use types_storage::lock::{
     AccessExclusiveLock, AccessShareLock, DeadLockState, ExclusiveLock, RowExclusiveLock,
-    ShareLock, LOCKACQUIRE_ALREADY_HELD, LOCKACQUIRE_NOT_AVAIL, LOCKACQUIRE_OK, LOCKTAG,
+    ShareLock, LOCALLOCKTAG, LOCKACQUIRE_ALREADY_HELD, LOCKACQUIRE_NOT_AVAIL, LOCKACQUIRE_OK,
+    LOCKTAG,
 };
 
 const TESTDB: u32 = 7777;
@@ -677,6 +678,103 @@ fn twophase_standby_recover_rejects_unknown_lock_method() {
             "unexpected error for lockmethodid {bad_method}: {text}"
         );
     }
+}
+
+// resowner.c:1093-1110 (ResourceOwnerForgetLock): a LOCALLOCK owner entry the
+// resource owner does not hold is `elog(ERROR, "lock reference %p is not owned
+// by resource owner %s")` — an ERROR the lock.c callers carry out, never a
+// panic (audit row a186-candidate-fp-resowner-resowner-7a510b223d33252ac326-1).
+// The inconsistency is manufactured the only way it can arise: the owner
+// forgets the lock while the LOCALLOCK still lists it. The owner keeps one
+// unrelated cache entry so the walk reaches the elog, not the preceding
+// `Assert(owner->nlocks > 0)` (resowner.c:1100).
+fn owner_forgets_held_lock(tag: &LOCKTAG, lockmode: i32) {
+    let owner = resowner::CurrentResourceOwner();
+    resowner::ResourceOwnerRememberLock(
+        owner,
+        LOCALLOCKTAG {
+            lock: rel_tag(6299),
+            mode: AccessShareLock,
+        },
+    );
+    let localtag = LOCALLOCKTAG {
+        lock: *tag,
+        mode: lockmode,
+    };
+    resowner::ResourceOwnerForgetLock(owner, localtag).unwrap();
+}
+
+const UNOWNED_LOCK_MSG: &str = "lock reference is not owned by resource owner lock tests";
+
+fn assert_unowned_lock_error(err: Box<PgError>) {
+    assert_eq!(err.level(), types_error::ERROR);
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    assert_eq!(err.message(), UNOWNED_LOCK_MSG);
+}
+
+#[test]
+fn lock_release_reports_unowned_lock_reference_as_error() {
+    become_backend();
+    let tag = rel_tag(6200);
+    assert_eq!(
+        LockAcquire(&tag, AccessShareLock, false, false).unwrap(),
+        LOCKACQUIRE_OK
+    );
+    owner_forgets_held_lock(&tag, AccessShareLock);
+    // lock.c:2128-2145 (LockRelease): the owner slot drains to zero and
+    // ResourceOwnerForgetLock (lock.c:2137) raises the ERROR.
+    let err = LockRelease(&tag, AccessShareLock, false)
+        .expect_err("ResourceOwnerForgetLock must raise an ERROR, not Ok");
+    assert_unowned_lock_error(err);
+}
+
+#[test]
+fn lock_release_all_reports_unowned_lock_reference_as_error() {
+    let t = std::thread::spawn(|| {
+        become_backend();
+        // A transaction lock lives in the shared table, so the release
+        // reaches the owner walk before any fpInfoLock/partition LWLock is
+        // taken: the ERROR (or the pre-fix panic) leaves no LWLock held for
+        // the other tests' strong-lock transfers to block on.
+        let tag = LOCKTAG::transaction(4260);
+        assert_eq!(
+            LockAcquire(&tag, ExclusiveLock, false, false).unwrap(),
+            LOCKACQUIRE_OK
+        );
+        owner_forgets_held_lock(&tag, ExclusiveLock);
+        // lock.c:1475-1490 (LockReleaseAll -> RemoveLocalLock): the owner
+        // array walk raises the ERROR at lock.c:1482.
+        let err = LockReleaseAll(1, false)
+            .expect_err("ResourceOwnerForgetLock must raise an ERROR, not Ok");
+        assert_unowned_lock_error(err);
+    });
+    t.join()
+        .expect("LockReleaseAll with an unowned lock reference must not panic");
+}
+
+#[test]
+fn lock_reassign_current_owner_reports_unowned_lock_reference_as_error() {
+    let t = std::thread::spawn(|| {
+        become_backend();
+        let parent = resowner::CurrentResourceOwner();
+        let child = resowner::ResourceOwnerCreate(parent, "lock tests").unwrap();
+        resowner::SetCurrentResourceOwner(child);
+        let tag = rel_tag(6202);
+        assert_eq!(
+            LockAcquire(&tag, AccessShareLock, false, false).unwrap(),
+            LOCKACQUIRE_OK
+        );
+        owner_forgets_held_lock(&tag, AccessShareLock);
+        // lock.c:2704-2744 (LockReassignOwner): the child's slot moves to the
+        // parent, then ResourceOwnerForgetLock(current) (lock.c:2742) raises
+        // the ERROR.
+        let err = LockReassignCurrentOwner(None)
+            .expect_err("ResourceOwnerForgetLock must raise an ERROR, not Ok");
+        assert_unowned_lock_error(err);
+        resowner::SetCurrentResourceOwner(parent);
+    });
+    t.join()
+        .expect("LockReassignCurrentOwner with an unowned lock reference must not panic");
 }
 
 // proc.c:1577-1580 (ProcSleep -> cancel of a blocking autovacuum worker): a

@@ -292,11 +292,13 @@ pub(crate) fn drain_release_all(
     })
 }
 
-// RemoveLocalLock's deferred half for a drained entry.
-pub(crate) fn finish_removed_lock(r: &mut RemovedLock) {
+// RemoveLocalLock's deferred half for a drained entry. lock.c:1482: an
+// owner that does not hold the lock is ResourceOwnerForgetLock's
+// elog(ERROR), carried out of the release.
+pub(crate) fn finish_removed_lock(r: &mut RemovedLock) -> PgResult<()> {
     for o in r.owners.iter().rev() {
         if !o.owner.is_null() {
-            resowner::ResourceOwnerForgetLock(o.owner, r.tag).expect("ResourceOwnerForgetLock");
+            resowner::ResourceOwnerForgetLock(o.owner, r.tag)?;
         }
     }
     r.owners.clear();
@@ -305,15 +307,17 @@ pub(crate) fn finish_removed_lock(r: &mut RemovedLock) {
         r.holds_strong = false;
     }
     CheckAndSetLockHeld(&r.tag, false);
+    Ok(())
 }
 
-pub(crate) fn RemoveLocalLock(tag: &LOCALLOCKTAG) {
-    // One probe: entry taken out before the (infallible) forget calls;
+pub(crate) fn RemoveLocalLock(tag: &LOCALLOCKTAG) -> PgResult<()> {
+    // One probe: entry taken out before the forget calls (lock.c:1479-1483,
+    // an unowned reference is ResourceOwnerForgetLock's elog(ERROR));
     // dropping the owner array is C's pfree(lockOwners).
     let ll = with_local(|state| state.table.remove(tag).expect("missing LOCALLOCK"));
     for o in ll.lockOwners.iter().rev() {
         if !o.owner.is_null() {
-            resowner::ResourceOwnerForgetLock(o.owner, *tag).expect("ResourceOwnerForgetLock");
+            resowner::ResourceOwnerForgetLock(o.owner, *tag)?;
         }
     }
     if ll.holdsStrongLockCount {
@@ -321,6 +325,7 @@ pub(crate) fn RemoveLocalLock(tag: &LOCALLOCKTAG) {
     }
     drop(ll);
     CheckAndSetLockHeld(tag, false);
+    Ok(())
 }
 
 pub(crate) fn BeginStrongLockAcquire(tag: &LOCALLOCKTAG, fasthashcode: u32) {
