@@ -1730,7 +1730,7 @@ fn parallel_worker_body(shared: &Arc<ParallelShared>, _worker_number: i32) -> Pg
     pg_enum::RestoreUncommittedEnums(
         &shared.uncommitted_enum_types,
         &shared.uncommitted_enum_values,
-    );
+    )?;
 
     miscinit::RestoreClientConnectionInfo(&shared.clientconninfo)?;
     // C: InitializeSystemUser once MyClientConnectionInfo is restored (only

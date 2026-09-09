@@ -33,92 +33,97 @@ pub const Anum_pg_enum_enumsortorder: AttrNumber = 3;
 pub const Anum_pg_enum_enumlabel: AttrNumber = 4;
 const Natts_pg_enum: usize = 4;
 
-// C's two TopTransactionContext HTABs; None == the C NULL table pointer.
-// Tiny per-tx sets: linear membership over a retained backend-life arena
-// replaces the C hash (cleared, not freed, at EOX).
-struct Uncommitted {
-    mcx: Option<Mcx<'static>>,
-    types: Option<PgVec<'static, Oid>>,
-    values: Option<PgVec<'static, Oid>>,
+struct Uncommitted<'mcx> {
+    mcx: Mcx<'mcx>,
+    types: Option<PgVec<'mcx, Oid>>,
+    values: Option<PgVec<'mcx, Oid>>,
 }
 
-impl Uncommitted {
-    fn mcx(&mut self) -> Mcx<'static> {
-        *self
-            .mcx
-            .get_or_insert_with(|| mcx::session_root("UncommittedEnums").mcx())
-    }
-}
+mcx::bind!(UncommittedTy => Uncommitted<'mcx>);
 
 thread_local! {
-    static UNCOMMITTED: RefCell<core::mem::ManuallyDrop<Uncommitted>> = const {
-        RefCell::new(core::mem::ManuallyDrop::new(Uncommitted {
-            mcx: None,
-            types: None,
-            values: None,
-        }))
+    static UNCOMMITTED: RefCell<Option<core::mem::ManuallyDrop<mcx::McxOwned<UncommittedTy>>>> = const {
+        RefCell::new(None)
     };
 }
 
+fn clear_uncommitted() {
+    let old = UNCOMMITTED.with(|cell| cell.borrow_mut().take());
+    if let Some(owner) = old {
+        drop(core::mem::ManuallyDrop::into_inner(owner));
+    }
+}
+
+fn read_uncommitted<R>(f: impl for<'mcx> FnOnce(Option<&Uncommitted<'mcx>>) -> R) -> R {
+    UNCOMMITTED.with(|cell| match cell.borrow().as_ref() {
+        Some(owner) => owner.with(|state| f(Some(state))),
+        None => f(None),
+    })
+}
+
+fn with_uncommitted<R>(f: impl for<'mcx> FnOnce(&mut Uncommitted<'mcx>) -> R) -> PgResult<R> {
+    UNCOMMITTED.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if slot.is_none() {
+            let owner = mcx::McxOwned::try_new(mcx::MemoryContext::new("UncommittedEnums"), |mcx| {
+                Ok(Uncommitted { mcx, types: None, values: None })
+            })?;
+            *slot = Some(core::mem::ManuallyDrop::new(owner));
+            mcx::register_session_cleanup(Box::new(clear_uncommitted));
+        }
+        Ok(slot.as_mut().unwrap().with_mut(f))
+    })
+}
+
 pub fn EnumUncommitted(enum_id: Oid) -> bool {
-    UNCOMMITTED.with(|u| u.borrow().values.as_ref().is_some_and(|v| v.contains(&enum_id)))
+    read_uncommitted(|u| u.is_some_and(|u| u.values.as_ref().is_some_and(|v| v.contains(&enum_id))))
 }
 
 pub fn HasUncommittedEnums() -> bool {
-    UNCOMMITTED.with(|u| {
-        let u = u.borrow();
+    read_uncommitted(|u| u.is_some_and(|u| {
         u.types.as_ref().is_some_and(|v| !v.is_empty())
             || u.values.as_ref().is_some_and(|v| !v.is_empty())
-    })
+    }))
 }
 
 fn EnumTypeUncommitted(typ_id: Oid) -> bool {
-    UNCOMMITTED.with(|u| u.borrow().types.as_ref().is_some_and(|v| v.contains(&typ_id)))
+    read_uncommitted(|u| u.is_some_and(|u| u.types.as_ref().is_some_and(|v| v.contains(&typ_id))))
 }
 
 pub fn AtEOXact_Enum() {
-    UNCOMMITTED.with(|u| {
-        let mut u = u.borrow_mut();
-        u.types = None;
-        u.values = None;
+    UNCOMMITTED.with(|cell| {
+        if let Some(owner) = cell.borrow_mut().as_mut() {
+            owner.with_mut(|u| { u.types = None; u.values = None; });
+        }
     });
 }
 
-/// SerializeUncommittedEnums, thread-native rendering: the parallel snapshot
-/// carries the (types, values) sets as owned lists (C flattens both HTABs
-/// into one InvalidOid-terminated Oid array in the DSM).
 pub fn SerializeUncommittedEnums() -> (Vec<Oid>, Vec<Oid>) {
-    UNCOMMITTED.with(|u| {
-        let u = u.borrow();
-        (
+    read_uncommitted(|u| match u {
+        Some(u) => (
             u.types.as_deref().map(<[Oid]>::to_vec).unwrap_or_default(),
             u.values.as_deref().map(<[Oid]>::to_vec).unwrap_or_default(),
-        )
+        ),
+        None => (Vec::new(), Vec::new()),
     })
 }
 
-/// RestoreUncommittedEnums (parallel worker side).
-pub fn RestoreUncommittedEnums(types: &[Oid], values: &[Oid]) {
-    UNCOMMITTED.with(|u| {
-        let mut u = u.borrow_mut();
+pub fn RestoreUncommittedEnums(types: &[Oid], values: &[Oid]) -> PgResult<()> {
+    if types.is_empty() && values.is_empty() {
+        debug_assert!(!HasUncommittedEnums());
+        return Ok(());
+    }
+    with_uncommitted(|u| {
         debug_assert!(u.types.is_none() && u.values.is_none());
-        // If either list is empty then don't even bother to create that
-        // table (C keeps the NULL table pointer).
         if !types.is_empty() {
-            let smcx = u.mcx();
-            let t = u.types.get_or_insert_with(|| PgVec::new_in(smcx));
-            for &oid in types {
-                t.push(oid);
-            }
+            let t = u.types.get_or_insert_with(|| PgVec::new_in(u.mcx));
+            for &oid in types { t.push(oid); }
         }
         if !values.is_empty() {
-            let smcx = u.mcx();
-            let v = u.values.get_or_insert_with(|| PgVec::new_in(smcx));
-            for &oid in values {
-                v.push(oid);
-            }
+            let v = u.values.get_or_insert_with(|| PgVec::new_in(u.mcx));
+            for &oid in values { v.push(oid); }
         }
-    });
+    })
 }
 
 fn oid_key(attno: AttrNumber, value: Oid) -> ScanKeyData {
@@ -163,14 +168,13 @@ fn form_and_insert<'mcx>(
 
 pub fn EnumValuesCreate<'mcx>(mcx: Mcx<'mcx>, enumTypeOid: Oid, vals: &[&str]) -> PgResult<()> {
     if xact::GetCurrentTransactionNestLevel() == 1 {
-        UNCOMMITTED.with(|u| {
-            let mut u = u.borrow_mut();
-            let smcx = u.mcx();
+        with_uncommitted(|u| {
+            let smcx = u.mcx;
             let t = u.types.get_or_insert_with(|| PgVec::new_in(smcx));
             if !t.contains(&enumTypeOid) {
                 t.push(enumTypeOid);
             }
-        });
+        })?;
     }
 
     let num_elems = vals.len();
@@ -395,14 +399,13 @@ pub fn AddEnumLabel<'mcx>(
         return Ok(());
     }
 
-    UNCOMMITTED.with(|u| {
-        let mut u = u.borrow_mut();
-        let smcx = u.mcx();
+    with_uncommitted(|u| {
+        let smcx = u.mcx;
         let v = u.values.get_or_insert_with(|| PgVec::new_in(smcx));
         if !v.contains(&newOid) {
             v.push(newOid);
         }
-    });
+    })?;
     Ok(())
 }
 
@@ -665,7 +668,7 @@ mod tests {
         assert!(t.is_empty() && v.is_empty());
 
         // Leader-shaped state restored into this (worker) thread.
-        RestoreUncommittedEnums(&[3500], &[3600, 3601]);
+        RestoreUncommittedEnums(&[3500], &[3600, 3601]).unwrap();
         assert!(HasUncommittedEnums());
         assert!(EnumUncommitted(3600));
         assert!(EnumUncommitted(3601));
@@ -678,7 +681,7 @@ mod tests {
         // C NULL-table shape (no tables created).
         AtEOXact_Enum();
         assert!(!HasUncommittedEnums());
-        RestoreUncommittedEnums(&[], &[]);
+        RestoreUncommittedEnums(&[], &[]).unwrap();
         assert!(!HasUncommittedEnums());
     }
 
@@ -715,4 +718,66 @@ mod tests {
         assert_eq!(take_next_pg_enum_oid(), Some(123456));
         assert_eq!(take_next_pg_enum_oid(), None);
     }
+    #[test]
+    fn session_enum_empty_reads_do_not_allocate() {
+        clear_uncommitted();
+        assert!(!EnumUncommitted(1));
+        assert!(!EnumTypeUncommitted(1));
+        assert!(!HasUncommittedEnums());
+        assert_eq!(SerializeUncommittedEnums(), (vec![], vec![]));
+        RestoreUncommittedEnums(&[], &[]).unwrap();
+        AtEOXact_Enum();
+        UNCOMMITTED.with(|cell| assert!(cell.borrow().is_none()));
+    }
+
+    #[test]
+    fn session_enum_worker_snapshot_survives_leader_cleanup() {
+        clear_uncommitted();
+        RestoreUncommittedEnums(&[3500], &[3600, 3601]).unwrap();
+        let snapshot = SerializeUncommittedEnums();
+        clear_uncommitted();
+        std::thread::spawn(move || {
+            RestoreUncommittedEnums(&snapshot.0, &snapshot.1).unwrap();
+            assert!(EnumTypeUncommitted(3500));
+            assert!(!EnumUncommitted(3500));
+            assert!(EnumUncommitted(3600));
+            assert!(!EnumTypeUncommitted(3600));
+            AtEOXact_Enum();
+            assert!(!HasUncommittedEnums());
+            RestoreUncommittedEnums(&[4500], &[4600]).unwrap();
+            assert!(!EnumUncommitted(3600));
+            assert!(EnumUncommitted(4600));
+            clear_uncommitted();
+            assert!(!HasUncommittedEnums());
+        }).join().unwrap();
+        assert!(!HasUncommittedEnums());
+    }
+
+    #[test]
+    fn session_enum_cleanup_refuses_live_borrow() {
+        clear_uncommitted();
+        with_uncommitted(|u| {
+            let value = mcx::alloc_leak_in(u.mcx, [7u8; 16384]).unwrap();
+            assert!(std::panic::catch_unwind(clear_uncommitted).is_err());
+            assert_eq!(value[16383], 7);
+        }).unwrap();
+        clear_uncommitted();
+        UNCOMMITTED.with(|cell| assert!(cell.borrow().is_none()));
+    }
+
+    #[test]
+    #[ignore = "process-global accounting; run alone with --test-threads=1"]
+    fn session_enum_complete_context_reclaimed() {
+        clear_uncommitted();
+        let before = mcx::global_footprint::bytes();
+        for _ in 0..64 {
+            RestoreUncommittedEnums(&[3500], &[3600]).unwrap();
+            with_uncommitted(|u| {
+                let _value = mcx::alloc_leak_in(u.mcx, [7u8; 32768]).unwrap();
+            }).unwrap();
+            clear_uncommitted();
+            assert_eq!(mcx::global_footprint::bytes(), before);
+        }
+    }
+
 }
