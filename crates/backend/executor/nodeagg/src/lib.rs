@@ -2180,7 +2180,7 @@ fn hashagg_release_retained(tag: &str) {
 fn hashagg_memdebug(tag: &str, ph: &PerHashData<'_>, tval_mem: usize, buffer_mem: usize) {
     let (rss, anon, shmem, hwm) = hashagg_vm_kb();
     let meta = ph.hashtable.meta_mem();
-    let entry = ph.table_ctx.subtree_used();
+    let entry = ph.table_ctx.subtree_allocated();
     eprintln!(
         "HASHAGG_MEMDEBUG {tag}: ngroups={} meta_kb={} table_ctx_kb={} aggctx_kb={} bufs_kb={} accounted_kb={} vmrss_kb={rss} anon_kb={anon} shmem_kb={shmem} vmhwm_kb={hwm} nbatches_pending={} limit_kb={}",
         ph.hash_ngroups_current,
@@ -2233,8 +2233,8 @@ fn hash_agg_check_limits<'mcx>(
 ) -> PgResult<()> {
     let ngroups = ph.hash_ngroups_current;
     let meta_mem = ph.hashtable.meta_mem();
-    let entry_mem = ph.table_ctx.subtree_used();
-    let tval_mem = aggctx.context().subtree_used();
+    let entry_mem = ph.table_ctx.subtree_allocated();
+    let tval_mem = aggctx.context().subtree_allocated();
     let total_mem = meta_mem + entry_mem + tval_mem;
     if ngroups > 0 && (total_mem > ph.hash_mem_limit || ngroups > ph.hash_ngroups_limit) {
         ph.spill.mode = true;
@@ -5269,8 +5269,8 @@ fn hash_agg_update_metrics(
     // SAFETY: read of the once-allocated node; no &mut is live to it.
     let aggctx = unsafe { node.agg_node.as_ref() }.aggcontext();
     let meta_mem = ph.hashtable.meta_mem() as u64;
-    let entry_mem = ph.table_ctx.subtree_used() as u64;
-    let hashkey_mem = aggctx.context().subtree_used() as u64;
+    let entry_mem = ph.table_ctx.subtree_allocated() as u64;
+    let hashkey_mem = aggctx.context().subtree_allocated() as u64;
     let buffer_mem = npartitions as u64 * HASHAGG_WRITE_BUFFER_SIZE as u64
         + if from_tape { HASHAGG_READ_BUFFER_SIZE as u64 } else { 0 };
     let total = meta_mem + entry_mem + hashkey_mem + buffer_mem;

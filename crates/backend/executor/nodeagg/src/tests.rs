@@ -2295,6 +2295,39 @@ mod hashspill {
     }
 
     #[test]
+    fn hashagg_spill_limit_counts_retained_child_blocks() {
+        setup();
+        let (_cwd, dir) = enter_datadir("retained-child");
+        let agg = mk_hashed_count_agg(leaked_mcx());
+        let mut estate_owner =
+            create_executor_state(Box::leak(Box::new(MemoryContext::new("q")))).unwrap();
+        estate_owner.with_mut(|estate| {
+            // SAFETY: the leaked plan is immutable and outlives the executor.
+            let agg = unsafe { shorten(agg) };
+            let mut state = exec_init_agg(agg, estate, 0, two_col_desc(leaked_mcx()), None).unwrap();
+            let transctx = MemoryContext::new_bump("transvalues");
+            let child = transctx.new_child("retained transition storage");
+            let storage: PgVec<u8> = ::mcx::vec_with_capacity_in(child.mcx(), 64).unwrap();
+            drop(storage);
+            assert_eq!(child.subtree_used(), 0);
+            assert!(child.subtree_allocated() >= 8192);
+            let ph = state.perhash.as_mut().unwrap();
+            ph.hash_ngroups_current = 1;
+            ph.hash_ngroups_limit = u64::MAX;
+            ph.hash_mem_limit = ph.hashtable.meta_mem()
+                + ph.table_ctx.subtree_allocated()
+                + transctx.subtree_allocated();
+            crate::hash_agg_check_limits(ph, transctx.mcx(), estate.es_query_cxt).unwrap();
+            assert!(!ph.spill.mode, "the limit comparison is strict");
+            ph.hash_mem_limit -= 1;
+            crate::hash_agg_check_limits(ph, transctx.mcx(), estate.es_query_cxt).unwrap();
+            assert!(ph.spill.mode, "retained blocks must trigger spilling");
+            crate::exec_end_agg(&mut state);
+        });
+        assert_eq!(temp_files(&dir), 0);
+    }
+
+    #[test]
     fn hashed_group_by_spills_and_recombines() {
         setup();
         let (_cwd, dir) = enter_datadir("count");

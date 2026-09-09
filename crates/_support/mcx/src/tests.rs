@@ -1764,3 +1764,41 @@ fn aset_stats_footprint_includes_freed_blocks_and_reset_keeper() {
     assert_eq!(ctx.stats().arena_footprint, keeper);
     assert_eq!(ctx.used(), 0);
 }
+
+#[test]
+fn allocated_subtree_retains_freed_child_blocks() {
+    let root = MemoryContext::new_bump("root");
+    let root_blocks = root.subtree_allocated();
+    let child = root.new_child("child");
+    let v: PgVec<u8> = vec_with_capacity_in(child.mcx(), 64).unwrap();
+    let child_blocks = child.subtree_allocated();
+    assert!(child_blocks >= 8192);
+    assert_eq!(root.subtree_allocated(), root_blocks + child_blocks);
+    drop(v);
+    assert_eq!(child.subtree_used(), 0);
+    assert_eq!(child.subtree_allocated(), child_blocks);
+    assert_eq!(root.subtree_allocated(), root_blocks + child_blocks);
+    drop(child);
+    assert_eq!(root.subtree_allocated(), root_blocks);
+}
+
+#[test]
+fn allocated_subtree_counts_reset_keeper() {
+    let mut root = MemoryContext::new("root");
+    let v: PgVec<u8> = vec_with_capacity_in(root.mcx(), 64).unwrap();
+    drop(v);
+    root.reset();
+    assert_eq!(root.used(), 0);
+    assert_eq!(root.subtree_allocated(), 8192);
+}
+
+#[test]
+fn allocated_subtree_counts_malloc_children() {
+    let root = MemoryContext::new_bump("root");
+    let baseline = root.subtree_allocated();
+    let child = MemoryContext::with_backend("malloc", Backend::Malloc, Some(root.acct.clone()));
+    let v: PgVec<u8> = vec_with_capacity_in(child.mcx(), 64).unwrap();
+    assert_eq!(root.subtree_allocated(), baseline + 64);
+    drop(v);
+    assert_eq!(root.subtree_allocated(), baseline);
+}

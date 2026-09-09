@@ -238,6 +238,22 @@ impl Acct {
         total
     }
 
+    fn subtree_allocated_sum(&self) -> usize {
+        let mut total = if self.kind == "Malloc" {
+            self.self_used.get()
+        } else {
+            self.arena_footprint.get()
+        };
+        self.children.borrow_mut().retain(|w| match w.upgrade() {
+            Some(c) => {
+                total = total.saturating_add(c.subtree_allocated_sum());
+                true
+            }
+            None => false,
+        });
+        total
+    }
+
     fn subtree_peak_sum(&self) -> usize {
         let mut total = self.self_peak.get();
         self.children.borrow_mut().retain(|w| match w.upgrade() {
@@ -1351,6 +1367,11 @@ impl MemoryContext {
 
     pub fn subtree_used(&self) -> usize {
         self.acct.subtree_sum()
+    }
+
+    /// Retained arena blocks, recursively; malloc contexts contribute live requested bytes.
+    pub fn subtree_allocated(&self) -> usize {
+        self.acct.subtree_allocated_sum()
     }
 
     pub fn peak(&self) -> usize {

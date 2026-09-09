@@ -651,7 +651,7 @@ fn hash_agg_check_limits_gs<'mcx>(
 ) -> PgResult<()> {
     let ngroups = h.hash_ngroups_current;
     let meta_mem: usize = h.perhash.iter().map(|ph| ph.hashtable.meta_mem()).sum();
-    let total_mem = meta_mem + aggctx.context().subtree_used();
+    let total_mem = meta_mem + aggctx.context().subtree_allocated();
     if ngroups > 0 && (total_mem > h.hash_mem_limit || ngroups > h.hash_ngroups_limit) {
         h.spill_mode = true;
         if !h.ever_spilled {
@@ -1169,7 +1169,7 @@ fn update_hash_metrics(
     // SAFETY: read of the once-allocated node; no &mut is live to it.
     let aggctx = unsafe { node.agg_node.as_ref() }.aggcontext();
     let meta: usize = h.perhash.iter().map(|ph| ph.hashtable.meta_mem()).sum();
-    let hashkey_mem = aggctx.context().subtree_used();
+    let hashkey_mem = aggctx.context().subtree_allocated();
     let buffer_mem = npartitions * crate::HASHAGG_WRITE_BUFFER_SIZE as usize
         + if from_tape { crate::HASHAGG_READ_BUFFER_SIZE as usize } else { 0 };
     let total = (meta + hashkey_mem + buffer_mem) as u64;
