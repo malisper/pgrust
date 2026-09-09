@@ -21,18 +21,17 @@
 //!   parentage; the walsender crate stores it in its *session-slot*-keyed
 //!   store and drops it when the session releases the slot. See
 //!   `walsender::uploaded_manifest` for the ownership site.
-//! - **Parse timing.** C parses incrementally during upload
-//!   (json_parse_manifest_incremental_*, MIN_CHUNK/MAX_CHUNK buffering so the
-//!   checksum line lands in the is_last call). pgrust's Stage-2
-//!   `parse_manifest` is whole-buffer only, so `AppendIncrementalManifestData`
-//!   accumulates verbatim and `FinalizeIncrementalManifest` runs one
-//!   whole-buffer parse. The checksum covers the same bytes and every error
-//!   string is unchanged, so the difference is not client-visible. Because
-//!   the whole manifest is retained (no incremental parser to drain it), the
-//!   accumulation buffer is bounded to MAX_ALLOC_SIZE (1 GB - 1) with fallible
-//!   allocation — the same ceiling and catchable-ERROR behavior C's StringInfo
-//!   gives every buffer — so a replication client cannot stream an unbounded
-//!   run of CopyData packets to exhaust server memory or abort the process.
+//! - **Parse timing** is C's: the manifest is parsed incrementally during
+//!   upload (`parse_manifest::JsonManifestParseIncrementalState`, C's
+//!   json_parse_manifest_incremental_*), with `AppendIncrementalManifestData`
+//!   draining the staging buffer through the parser whenever it would exceed
+//!   MAX_CHUNK while keeping the last MIN_CHUNK bytes back, so the checksum
+//!   line always lands in the `is_last` call of `FinalizeIncrementalManifest`.
+//!   The staging buffer therefore never holds more than about MAX_CHUNK plus
+//!   one CopyData payload, whatever the manifest size. The per-append growth
+//!   is still held to C's StringInfo ceiling (enlargeStringInfo's
+//!   MaxAllocSize refusal) with fallible allocation, so a single oversized
+//!   packet is a catchable ERROR rather than an allocation abort.
 //! - **brtab lifetime.** C stashes the merged block-reference table in
 //!   `ib->brtab` for GetFileBackupMethod. Here `PrepareForIncrementalBackup`
 //!   *returns* the `BlockRefTable`, tied to the caller's (command-lifetime)
@@ -50,7 +49,7 @@ use blkreftable::{BlockRefTable, BlockRefTableReader};
 use elog::ereport;
 use manifest::checksum::PgChecksumType;
 use mcx::{oom_named, Mcx, MemoryContext, PgVec, MAX_ALLOC_SIZE};
-use parse_manifest::{json_parse_manifest, JsonManifestParseContext};
+use parse_manifest::{JsonManifestParseContext, JsonManifestParseIncrementalState};
 use timeline_seams::TimeLineHistoryEntry;
 use types_core::{
     BlockNumber, ForkNumber, InvalidBlockNumber, Oid, RelFileNumber, TimeLineID, XLogRecPtr,
@@ -71,6 +70,16 @@ const InvalidXLogRecPtr: XLogRecPtr = 0;
 
 /// C: BLOCKS_PER_READ — batch size for draining a summary reader.
 const BLOCKS_PER_READ: usize = 512;
+
+/// C: MIN_CHUNK / MAX_CHUNK (basebackup_incremental.c:39-40) — the manifest
+/// is streamed through the incremental parser in pieces of up to MAX_CHUNK
+/// bytes, always keeping MIN_CHUNK bytes back so that the final piece
+/// (which must carry the complete checksum line) is never empty.
+/// "It's expected that the checksum will be found in the last MIN_CHUNK
+/// bytes of the manifest. We trigger an incremental parse step if we are
+/// about to overflow MAX_CHUNK bytes."
+pub const MIN_CHUNK: usize = 1024;
+pub const MAX_CHUNK: usize = 128 * 1024;
 
 // wait_event_names.txt IO section: WalSummaryRead (pinned by
 // scripts/lint-waitevent-tags.sh against the waitevent name table).
@@ -105,18 +114,19 @@ pub struct BackupWalRange {
 /// + manifest accumulation buffer). Plain owned data — see the module
 /// comment for why there is no memory context and no static here.
 pub struct IncrementalBackupInfo {
-    /// This server's system identifier, captured at creation time. C reads
-    /// GetSystemIdentifier() inside the manifest callback; capturing it at
-    /// CreateIncrementalBackupInfo time is value-identical (the sysid is
-    /// immutable for the life of a cluster) and keeps this crate testable.
-    system_identifier: u64,
-
-    /// C: ib->buf — temporary buffer storing the manifest while parsing.
-    /// Bounded to MAX_ALLOC_SIZE with fallible growth in
-    /// AppendIncrementalManifestData (C: StringInfo's MaxAllocSize ceiling).
+    /// C: ib->buf — temporary buffer storing the not-yet-parsed tail of the
+    /// manifest while it is being uploaded (drained through `inc_state` at
+    /// MAX_CHUNK, MIN_CHUNK kept back). Each append is held to C's
+    /// StringInfo MaxAllocSize ceiling with fallible growth.
     buf: Vec<u8>,
     /// True once FinalizeIncrementalManifest has run (C: buf.data == NULL).
     finalized: bool,
+
+    /// C: ib->inc_state — state object for incremental JSON parsing, owning
+    /// the manifest callbacks' side tables until FinalizeIncrementalManifest
+    /// hands them to `manifest_files` / `manifest_wal_ranges` below (C: the
+    /// callbacks write into ib directly through `private_data`).
+    inc_state: Option<JsonManifestParseIncrementalState<IbManifestContext>>,
 
     /// C: ib->manifest_files (backup_file_hash) — path -> size. Retained for
     /// sanity checking only; checksums and mtimes are deliberately dropped
@@ -132,13 +142,23 @@ pub struct IncrementalBackupInfo {
 /// object owns its allocations and the *holder* (the walsender session slot)
 /// defines the lifetime.
 pub fn CreateIncrementalBackupInfo(system_identifier: u64) -> IncrementalBackupInfo {
-    IncrementalBackupInfo {
+    // C: the JsonManifestParseContext (version/system_identifier/per_file/
+    // per_wal_range/error callbacks over ib) and
+    // ib->inc_state = json_parse_manifest_incremental_init(context).
+    let context = IbManifestContext {
         system_identifier,
-        buf: Vec::new(),
-        finalized: false,
         // C pre-sizes backup_file_create(mcxt, 10000, NULL) — "a fresh initdb
         // creates almost 1000 files ... substantially higher".
         manifest_files: HashMap::with_capacity(10000),
+        manifest_wal_ranges: Vec::new(),
+    };
+    IncrementalBackupInfo {
+        buf: Vec::new(),
+        finalized: false,
+        inc_state: Some(
+            JsonManifestParseIncrementalState::json_parse_manifest_incremental_init(context),
+        ),
+        manifest_files: HashMap::new(),
         manifest_wal_ranges: Vec::new(),
     }
 }
@@ -168,33 +188,49 @@ fn check_manifest_capacity(len: usize, needed: usize) -> PgResult<()> {
 }
 
 impl IncrementalBackupInfo {
-    /// C: AppendIncrementalManifestData — each chunk of manifest data
-    /// received from the client is passed here. C interleaves incremental
-    /// parsing (MIN_CHUNK/MAX_CHUNK) so its staging StringInfo never holds
-    /// more than ~MAX_CHUNK at once; pgrust's Stage-2 `parse_manifest` is
-    /// whole-buffer only, so this accumulates verbatim and parses in
-    /// FinalizeIncrementalManifest (see module comment).
+    /// C: AppendIncrementalManifestData (basebackup_incremental.c:195) —
+    /// each chunk of manifest data received from the client is passed here.
+    /// When the staging buffer already holds more than MIN_CHUNK bytes and
+    /// this chunk would push it past MAX_CHUNK, everything but the last
+    /// MIN_CHUNK bytes is fed to the incremental parser first and removed,
+    /// so the buffer stays bounded whatever the manifest size.
     ///
-    /// Because the whole manifest is retained here rather than streamed
-    /// through an incremental parser, the buffer is a single logical
-    /// allocation and is held to the same ceiling every C StringInfo
-    /// enforces — MAX_ALLOC_SIZE (1 GB - 1). A replication client that
-    /// streams an unbounded run of CopyData packets is rejected with a
-    /// catchable ERRCODE_PROGRAM_LIMIT_EXCEEDED carrying C's
-    /// enlargeStringInfo overflow ERROR text, instead of driving the process
-    /// into an infallible-allocation abort. Growth uses `try_reserve`, so an
-    /// allocator failure short of the cap also surfaces as a per-command
-    /// out-of-memory ERROR (C: palloc failure is a catchable ERROR, not a
-    /// crash) rather than aborting the whole thread-per-backend server.
+    /// The append itself keeps C's StringInfo ceiling: enlargeStringInfo
+    /// refuses to grow past MaxAllocSize with a catchable
+    /// ERRCODE_PROGRAM_LIMIT_EXCEEDED carrying its overflow text, and growth
+    /// uses `try_reserve` so an allocator failure short of the cap is a
+    /// per-command out-of-memory ERROR (C: palloc failure is a catchable
+    /// ERROR) rather than a process abort.
     pub fn AppendIncrementalManifestData(&mut self, data: &[u8]) -> PgResult<()> {
         debug_assert!(!self.finalized, "append after FinalizeIncrementalManifest");
 
         let len = self.buf.len();
         let needed = data.len();
 
+        if len > MIN_CHUNK && len + needed > MAX_CHUNK {
+            /*
+             * time for an incremental parse. We'll do all but the last
+             * MIN_CHUNK so that we have enough left for the final piece.
+             */
+            // C: MemoryContextSwitchTo(ib->mcxt) — the parse's per-token
+            // scratch lives in a context released with this call.
+            let chunk_cx = MemoryContext::new("incremental backup manifest chunk");
+            self.inc_state
+                .as_mut()
+                .expect("inc_state lives until FinalizeIncrementalManifest")
+                .json_parse_manifest_incremental_chunk(
+                    chunk_cx.mcx(),
+                    &self.buf[..len - MIN_CHUNK],
+                    false,
+                )?;
+            /* now remove what we just parsed */
+            self.buf.drain(..len - MIN_CHUNK);
+        }
+
+        let len = self.buf.len();
+
         // C: enlargeStringInfo caps any single buffer at MaxAllocSize and
-        // raises ERRCODE_PROGRAM_LIMIT_EXCEEDED. Mirror that ceiling here so
-        // client-controlled accumulation cannot grow without bound.
+        // raises ERRCODE_PROGRAM_LIMIT_EXCEEDED.
         check_manifest_capacity(len, needed)?;
 
         // Fallible allocation: an allocator failure becomes a catchable
@@ -207,30 +243,42 @@ impl IncrementalBackupInfo {
         Ok(())
     }
 
-    /// C: FinalizeIncrementalManifest — parse the manifest (the whole text,
-    /// here) and release the accumulation buffer.
+    /// C: FinalizeIncrementalManifest (basebackup_incremental.c:226) — parse
+    /// the last chunk of the manifest (which carries the checksum line),
+    /// release the staging buffer and the incremental state.
     pub fn FinalizeIncrementalManifest(&mut self) -> PgResult<()> {
-        // Short-lived context backing the JSON lexer's de-escaped tokens;
-        // dropped as soon as the parse completes (C: pfree of ib->buf plus
-        // the incremental-state shutdown).
+        let mut inc_state = self
+            .inc_state
+            .take()
+            .expect("FinalizeIncrementalManifest called twice");
+        // Short-lived context backing the last chunk's token scratch (C:
+        // ib->mcxt, with the buffer pfree'd and the state shut down below).
         let parse_cx = MemoryContext::new("incremental backup manifest parse");
         let buf = std::mem::take(&mut self.buf);
-        let result = {
-            let mut ctx = IbManifestContext { ib: self };
-            json_parse_manifest(parse_cx.mcx(), &mut ctx, &buf)
-        };
+
+        /* Parse the last chunk of the manifest */
         // C frees ib->buf unconditionally on the success path only (error
         // paths abort the command and drop the whole object); mirror that —
         // on error the caller discards this IncrementalBackupInfo.
-        result?;
+        inc_state.json_parse_manifest_incremental_chunk(parse_cx.mcx(), &buf, true)?;
+
+        /* Done with inc_state, so release that memory too */
+        let context = inc_state.json_parse_manifest_incremental_shutdown();
+        self.manifest_files = context.manifest_files;
+        self.manifest_wal_ranges = context.manifest_wal_ranges;
         self.finalized = true;
         Ok(())
     }
 
-    /// The number of file entries taken from the manifest
+    /// The number of file entries taken from the manifest so far
     /// (GetFileBackupMethod consumes the lookups; tests consume the count).
+    /// Before FinalizeIncrementalManifest this reflects what the incremental
+    /// parse has delivered from the chunks drained so far.
     pub fn manifest_file_count(&self) -> usize {
-        self.manifest_files.len()
+        match &self.inc_state {
+            Some(st) if !self.finalized => st.context().manifest_files.len(),
+            _ => self.manifest_files.len(),
+        }
     }
 
     /// C: backup_file_lookup(ib->manifest_files, path) != NULL.
@@ -873,12 +921,23 @@ impl IncrementalBackupInfo {
 }
 
 /// The JsonManifestParseContext wired to an IncrementalBackupInfo (C: the
-/// five manifest_* callbacks in basebackup_incremental.c).
-struct IbManifestContext<'a> {
-    ib: &'a mut IncrementalBackupInfo,
+/// five manifest_* callbacks in basebackup_incremental.c, writing into ib
+/// through `private_data`). Owned by the incremental parse state during the
+/// upload; its tables move into the IncrementalBackupInfo at
+/// FinalizeIncrementalManifest.
+struct IbManifestContext {
+    /// This server's system identifier, captured at creation time. C reads
+    /// GetSystemIdentifier() inside the manifest callback; capturing it at
+    /// CreateIncrementalBackupInfo time is value-identical (the sysid is
+    /// immutable for the life of a cluster) and keeps this crate testable.
+    system_identifier: u64,
+    /// C: ib->manifest_files, being filled.
+    manifest_files: HashMap<Box<[u8]>, u64>,
+    /// C: ib->manifest_wal_ranges, being filled.
+    manifest_wal_ranges: Vec<BackupWalRange>,
 }
 
-impl JsonManifestParseContext for IbManifestContext<'_> {
+impl JsonManifestParseContext for IbManifestContext {
     /// C: manifest_process_version — incremental backups don't work with
     /// manifest version 1.
     fn version_cb(&mut self, manifest_version: i32) -> PgResult<()> {
@@ -893,10 +952,10 @@ impl JsonManifestParseContext for IbManifestContext<'_> {
 
     /// C: manifest_process_system_identifier — validate against this server.
     fn system_identifier_cb(&mut self, manifest_system_identifier: u64) -> PgResult<()> {
-        if manifest_system_identifier != self.ib.system_identifier {
+        if manifest_system_identifier != self.system_identifier {
             return Err(elog::PgError::error(format!(
                 "system identifier in backup manifest is {}, but database system identifier is {}",
-                manifest_system_identifier, self.ib.system_identifier
+                manifest_system_identifier, self.system_identifier
             ))
             .into());
         }
@@ -912,10 +971,7 @@ impl JsonManifestParseContext for IbManifestContext<'_> {
         _checksum_type: PgChecksumType,
         _checksum_payload: Option<&[u8]>,
     ) -> PgResult<()> {
-        self.ib
-            .manifest_files
-            .entry(pathname.into())
-            .or_insert(size);
+        self.manifest_files.entry(pathname.into()).or_insert(size);
         Ok(())
     }
 
@@ -926,9 +982,7 @@ impl JsonManifestParseContext for IbManifestContext<'_> {
         start_lsn: XLogRecPtr,
         end_lsn: XLogRecPtr,
     ) -> PgResult<()> {
-        self.ib
-            .manifest_wal_ranges
-            .push(BackupWalRange { tli, start_lsn, end_lsn });
+        self.manifest_wal_ranges.push(BackupWalRange { tli, start_lsn, end_lsn });
         Ok(())
     }
 

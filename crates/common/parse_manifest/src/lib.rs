@@ -1,14 +1,13 @@
 //! C: src/common/parse_manifest.c — parse a backup manifest in JSON format.
 //!
-//! Whole-buffer parse only (C's `json_parse_manifest`). C additionally has an
-//! incremental variant (`json_parse_manifest_incremental_init/chunk/shutdown`
-//! on `pg_parse_json_incremental`) used by frontend pg_verifybackup and by the
-//! walsender's UPLOAD_MANIFEST chunk loop; pgrust's jsonapi port has no
-//! incremental lexer yet, so UPLOAD_MANIFEST (Stage 3) accumulates the chunks
-//! and finalizes with one whole-buffer parse here — behaviorally identical
-//! (the manifest checksum covers the same bytes, and error identity is
-//! unchanged because C parse errors surface the same detail strings), at the
-//! cost of holding the full manifest text during the parse.
+//! Two entry points, as in C: the whole-buffer `json_parse_manifest`, and the
+//! incremental `json_parse_manifest_incremental_init` / `_chunk` /
+//! `_shutdown` triple ([`JsonManifestParseIncrementalState`]) over
+//! `adt_json::jsonapi::incremental::pg_parse_json_incremental`, which the
+//! walsender's UPLOAD_MANIFEST chunk loop uses so that a manifest of any size
+//! streams through a bounded staging buffer (basebackup_incremental.c
+//! MIN_CHUNK/MAX_CHUNK) and the checksum covering everything but its last
+//! line is accumulated chunk by chunk.
 //!
 //! Error identity: every failure funnels through the context's `error_cb`
 //! with the exact C message text. Low-level shape errors carry C's
@@ -21,7 +20,8 @@
 //! `errmsg_internal` wrapper in basebackup_incremental.c; frontend-style
 //! consumers can override error_cb to re-code.
 
-use adt_json::jsonapi::{parse_sem, JsonLexDe, JsonSem, JsonSemToken};
+use adt_json::jsonapi::incremental::JsonLexIncremental;
+use adt_json::jsonapi::{parse_sem, JsonError, JsonLexDe, JsonSem, JsonSemToken};
 use manifest::{pg_checksum_parse_type, PgChecksumType};
 use mcx::Mcx;
 use pg_sha2::{PgSha256Ctx, PG_SHA256_DIGEST_LENGTH};
@@ -52,6 +52,36 @@ pub trait JsonManifestParseContext {
     /// prefix override this.
     fn error_cb(&mut self, msg: String) -> Box<PgError> {
         PgError::error(msg).into()
+    }
+}
+
+/// A borrowed context is a context (C passes `JsonManifestParseContext *`).
+impl<T: JsonManifestParseContext + ?Sized> JsonManifestParseContext for &mut T {
+    fn version_cb(&mut self, manifest_version: i32) -> PgResult<()> {
+        (**self).version_cb(manifest_version)
+    }
+    fn system_identifier_cb(&mut self, manifest_system_identifier: u64) -> PgResult<()> {
+        (**self).system_identifier_cb(manifest_system_identifier)
+    }
+    fn per_file_cb(
+        &mut self,
+        pathname: &[u8],
+        size: u64,
+        checksum_type: PgChecksumType,
+        checksum_payload: Option<&[u8]>,
+    ) -> PgResult<()> {
+        (**self).per_file_cb(pathname, size, checksum_type, checksum_payload)
+    }
+    fn per_wal_range_cb(
+        &mut self,
+        tli: TimeLineID,
+        start_lsn: XLogRecPtr,
+        end_lsn: XLogRecPtr,
+    ) -> PgResult<()> {
+        (**self).per_wal_range_cb(tli, start_lsn, end_lsn)
+    }
+    fn error_cb(&mut self, msg: String) -> Box<PgError> {
+        (**self).error_cb(msg)
     }
 }
 
@@ -94,31 +124,57 @@ enum WalRangeField {
     EndLsn,
 }
 
-/// C: JsonManifestParseState.
-struct JsonManifestParseState<'m, 'c, C: JsonManifestParseContext + ?Sized> {
-    context: &'c mut C,
+/// C: JsonManifestParseState. The token fields are owned copies (C: the
+/// lexer hands the semantic actions palloc'd strings, which they keep until
+/// the enclosing object is finalized), so the same state serves the
+/// whole-buffer parser and the incremental one, whose token buffers do not
+/// outlive the chunk.
+struct JsonManifestParseState<C: JsonManifestParseContext> {
+    context: C,
     state: SemState,
 
     /* fields used for parsing objects in the list of files */
     file_field: FileField,
-    pathname: Option<&'m [u8]>,
-    encoded_pathname: Option<&'m [u8]>,
-    size: Option<&'m [u8]>,
-    algorithm: Option<&'m [u8]>,
-    checksum: Option<&'m [u8]>,
+    pathname: Option<Vec<u8>>,
+    encoded_pathname: Option<Vec<u8>>,
+    size: Option<Vec<u8>>,
+    algorithm: Option<Vec<u8>>,
+    checksum: Option<Vec<u8>>,
 
     /* fields used for parsing objects in the list of WAL ranges */
     wal_range_field: WalRangeField,
-    timeline: Option<&'m [u8]>,
-    start_lsn: Option<&'m [u8]>,
-    end_lsn: Option<&'m [u8]>,
+    timeline: Option<Vec<u8>>,
+    start_lsn: Option<Vec<u8>>,
+    end_lsn: Option<Vec<u8>>,
 
     /* miscellaneous other stuff */
     saw_version_field: bool,
-    manifest_checksum: Option<&'m [u8]>,
+    manifest_checksum: Option<Vec<u8>>,
 }
 
-impl<C: JsonManifestParseContext + ?Sized> JsonManifestParseState<'_, '_, C> {
+impl<C: JsonManifestParseContext> JsonManifestParseState<C> {
+    /// C: the `parse->context = context; parse->state =
+    /// JM_EXPECT_TOPLEVEL_START; parse->saw_version_field = false` setup
+    /// shared by json_parse_manifest and json_parse_manifest_incremental_init.
+    fn new(context: C) -> Self {
+        JsonManifestParseState {
+            context,
+            state: SemState::ExpectToplevelStart,
+            file_field: FileField::Path,
+            pathname: None,
+            encoded_pathname: None,
+            size: None,
+            algorithm: None,
+            checksum: None,
+            wal_range_field: WalRangeField::Timeline,
+            timeline: None,
+            start_lsn: None,
+            end_lsn: None,
+            saw_version_field: false,
+            manifest_checksum: None,
+        }
+    }
+
     /// C: json_manifest_parse_failure.
     fn parse_failure<T>(&mut self, msg: impl core::fmt::Display) -> PgResult<T> {
         Err(self
@@ -163,7 +219,7 @@ impl<C: JsonManifestParseContext + ?Sized> JsonManifestParseState<'_, '_, C> {
         if self.pathname.is_some() && self.encoded_pathname.is_some() {
             return self.parse_failure("both path name and encoded path name");
         }
-        let Some(size_token) = self.size else {
+        let Some(size_token) = self.size.take() else {
             return self.parse_failure("missing size");
         };
         if self.algorithm.is_none() && self.checksum.is_some() {
@@ -171,26 +227,23 @@ impl<C: JsonManifestParseContext + ?Sized> JsonManifestParseState<'_, '_, C> {
         }
 
         /* Decode encoded pathname, if that's what we have. */
-        let decoded_pathname: Option<Vec<u8>> = match self.encoded_pathname.take() {
-            Some(encoded) => match hexdecode_string(encoded) {
-                Some(raw) => Some(raw),
+        let pathname: Vec<u8> = match self.encoded_pathname.take() {
+            Some(encoded) => match hexdecode_string(&encoded) {
+                Some(raw) => raw,
                 None => return self.parse_failure("could not decode file name"),
             },
-            None => None,
-        };
-        let pathname: &[u8] = match &decoded_pathname {
-            Some(raw) => raw,
-            None => self.pathname.expect("checked above"),
+            None => self.pathname.take().expect("checked above"),
         };
 
         /* Parse size. */
-        let (size, consumed) = c_strtou64(size_token);
+        let (size, consumed) = c_strtou64(&size_token);
         if consumed != size_token.len() {
             return self.parse_failure("file size is not an integer");
         }
 
         /* Parse the checksum algorithm, if it's present. */
-        let checksum_type = match self.algorithm {
+        let algorithm = self.algorithm.take();
+        let checksum_type = match algorithm.as_deref() {
             None => PgChecksumType::None,
             Some(algorithm) => match pg_checksum_parse_type(algorithm) {
                 Some(ty) => ty,
@@ -204,7 +257,8 @@ impl<C: JsonManifestParseContext + ?Sized> JsonManifestParseState<'_, '_, C> {
         };
 
         /* Parse the checksum payload, if it's present. */
-        let checksum_payload: Option<Vec<u8>> = match self.checksum {
+        let checksum = self.checksum.take();
+        let checksum_payload: Option<Vec<u8>> = match checksum.as_deref() {
             None => None,
             Some(checksum) if checksum.is_empty() => None,
             Some(checksum) => match hexdecode_string(checksum) {
@@ -212,62 +266,55 @@ impl<C: JsonManifestParseContext + ?Sized> JsonManifestParseState<'_, '_, C> {
                 None => {
                     return Err(self.context.error_cb(format!(
                         "invalid checksum for file \"{}\": \"{}\"",
-                        String::from_utf8_lossy(pathname),
+                        String::from_utf8_lossy(&pathname),
                         String::from_utf8_lossy(checksum)
                     )))
                 }
             },
         };
 
-        /* Invoke the callback with the details we've gathered. */
+        /* Invoke the callback with the details we've gathered. C pfrees
+         * size/algorithm/checksum afterwards; taken above, so the state
+         * never dangles. */
         self.context
-            .per_file_cb(pathname, size, checksum_type, checksum_payload.as_deref())?;
-
-        /* C pfrees size/algorithm/checksum here; the next object_start also
-         * resets everything, but match C so state never dangles. */
-        self.size = None;
-        self.algorithm = None;
-        self.checksum = None;
-        Ok(())
+            .per_file_cb(&pathname, size, checksum_type, checksum_payload.as_deref())
     }
 
     /// C: json_manifest_finalize_wal_range.
     fn finalize_wal_range(&mut self) -> PgResult<()> {
         /* Make sure all fields are present. */
-        let Some(timeline_token) = self.timeline else {
+        if self.timeline.is_none() {
             return self.parse_failure("missing timeline");
-        };
-        let Some(start_lsn_token) = self.start_lsn else {
+        }
+        if self.start_lsn.is_none() {
             return self.parse_failure("missing start LSN");
-        };
-        let Some(end_lsn_token) = self.end_lsn else {
+        }
+        if self.end_lsn.is_none() {
             return self.parse_failure("missing end LSN");
-        };
+        }
+        let timeline_token = self.timeline.take().expect("checked above");
+        let start_lsn_token = self.start_lsn.take().expect("checked above");
+        let end_lsn_token = self.end_lsn.take().expect("checked above");
 
         /* Parse timeline. C: strtoul(..., 10) assigned to a uint32 TLI. */
-        let (tli64, consumed) = c_strtou64(timeline_token);
+        let (tli64, consumed) = c_strtou64(&timeline_token);
         if consumed != timeline_token.len() {
             return self.parse_failure("timeline is not an integer");
         }
         let tli = tli64 as TimeLineID;
-        let Some(start_lsn) = parse_xlogrecptr(start_lsn_token) else {
+        let Some(start_lsn) = parse_xlogrecptr(&start_lsn_token) else {
             return self.parse_failure("could not parse start LSN");
         };
-        let Some(end_lsn) = parse_xlogrecptr(end_lsn_token) else {
+        let Some(end_lsn) = parse_xlogrecptr(&end_lsn_token) else {
             return self.parse_failure("could not parse end LSN");
         };
 
         /* Invoke the callback with the details we've gathered. */
-        self.context.per_wal_range_cb(tli, start_lsn, end_lsn)?;
-
-        self.timeline = None;
-        self.start_lsn = None;
-        self.end_lsn = None;
-        Ok(())
+        self.context.per_wal_range_cb(tli, start_lsn, end_lsn)
     }
 }
 
-impl<'m, C: JsonManifestParseContext + ?Sized> JsonSem<'m> for JsonManifestParseState<'m, '_, C> {
+impl<'m, C: JsonManifestParseContext> JsonSem<'m> for JsonManifestParseState<C> {
     /// C: json_manifest_object_start.
     fn object_start(&mut self, _lex: &adt_json::jsonapi::JsonLex<'_>) -> PgResult<bool> {
         match self.state {
@@ -396,7 +443,7 @@ impl<'m, C: JsonManifestParseContext + ?Sized> JsonSem<'m> for JsonManifestParse
         _lex: &adt_json::jsonapi::JsonLex<'_>,
         token: JsonSemToken<'m>,
     ) -> PgResult<bool> {
-        let token: &'m [u8] = match token {
+        let token: &[u8] = match token {
             JsonSemToken::String(s) => s,
             JsonSemToken::Number(n) => n,
             /* C's need_escapes lexer hands the raw lexemes for these. */
@@ -415,30 +462,117 @@ impl<'m, C: JsonManifestParseContext + ?Sized> JsonSem<'m> for JsonManifestParse
             }
             SemState::ExpectThisFileValue => {
                 match self.file_field {
-                    FileField::Path => self.pathname = Some(token),
-                    FileField::EncodedPath => self.encoded_pathname = Some(token),
-                    FileField::Size => self.size = Some(token),
+                    FileField::Path => self.pathname = Some(token.to_vec()),
+                    FileField::EncodedPath => self.encoded_pathname = Some(token.to_vec()),
+                    FileField::Size => self.size = Some(token.to_vec()),
                     FileField::LastModified => { /* unused */ }
-                    FileField::ChecksumAlgorithm => self.algorithm = Some(token),
-                    FileField::Checksum => self.checksum = Some(token),
+                    FileField::ChecksumAlgorithm => self.algorithm = Some(token.to_vec()),
+                    FileField::Checksum => self.checksum = Some(token.to_vec()),
                 }
                 self.state = SemState::ExpectThisFileField;
             }
             SemState::ExpectThisWalRangeValue => {
                 match self.wal_range_field {
-                    WalRangeField::Timeline => self.timeline = Some(token),
-                    WalRangeField::StartLsn => self.start_lsn = Some(token),
-                    WalRangeField::EndLsn => self.end_lsn = Some(token),
+                    WalRangeField::Timeline => self.timeline = Some(token.to_vec()),
+                    WalRangeField::StartLsn => self.start_lsn = Some(token.to_vec()),
+                    WalRangeField::EndLsn => self.end_lsn = Some(token.to_vec()),
                 }
                 self.state = SemState::ExpectThisWalRangeField;
             }
             SemState::ExpectManifestChecksumValue => {
                 self.state = SemState::ExpectToplevelEnd;
-                self.manifest_checksum = Some(token);
+                self.manifest_checksum = Some(token.to_vec());
             }
             _ => return self.parse_failure("unexpected scalar"),
         }
         Ok(true)
+    }
+}
+
+/// C: JsonManifestParseIncrementalState — the state for parsing a manifest
+/// in pieces: the incremental JSON lexer, the semantic state (C: `sem` with
+/// its `semstate`), and the running checksum over every chunk but the last
+/// line. Built by [`Self::json_parse_manifest_incremental_init`], fed by
+/// [`Self::json_parse_manifest_incremental_chunk`], torn down by
+/// [`Self::json_parse_manifest_incremental_shutdown`], which hands the
+/// context back.
+pub struct JsonManifestParseIncrementalState<C: JsonManifestParseContext> {
+    lex: JsonLexIncremental,
+    parse: JsonManifestParseState<C>,
+    /// C: incstate->manifest_ctx; consumed by the final chunk's
+    /// verify_manifest_checksum (C: pg_cryptohash_free there).
+    manifest_ctx: Option<PgSha256Ctx>,
+}
+
+impl<C: JsonManifestParseContext> JsonManifestParseIncrementalState<C> {
+    /// C: json_parse_manifest_incremental_init(context) — set up for
+    /// incremental parsing of the manifest (parse_manifest.c:129).
+    pub fn json_parse_manifest_incremental_init(context: C) -> Self {
+        JsonManifestParseIncrementalState {
+            /* C: makeJsonLexContextIncremental(&lex, PG_UTF8, true) */
+            lex: JsonLexIncremental::new(wchar::PG_UTF8, true),
+            parse: JsonManifestParseState::new(context),
+            manifest_ctx: Some(PgSha256Ctx::init_sha256()),
+        }
+    }
+
+    /// C: json_parse_manifest_incremental_shutdown — free the state; the
+    /// context it was built over is returned to the caller.
+    pub fn json_parse_manifest_incremental_shutdown(self) -> C {
+        self.parse.context
+    }
+
+    /// The context this parse reports into (C: sem.semstate->context).
+    pub fn context(&self) -> &C {
+        &self.parse.context
+    }
+
+    /// Mutable access to the context (see [`Self::context`]).
+    pub fn context_mut(&mut self) -> &mut C {
+        &mut self.parse.context
+    }
+
+    /// C: json_parse_manifest_incremental_chunk(incstate, chunk, size,
+    /// is_last) — parse the manifest in pieces (parse_manifest.c:185). The
+    /// caller must ensure that the final piece contains the final lines with
+    /// the complete checksum. `mcx` backs the chunk's token scratch.
+    pub fn json_parse_manifest_incremental_chunk(
+        &mut self,
+        mcx: Mcx<'_>,
+        chunk: &[u8],
+        is_last: bool,
+    ) -> PgResult<()> {
+        {
+            let mut ch = self.lex.chunk(mcx, chunk, is_last);
+            let res = ch.parse(&mut self.parse)?;
+
+            let expected = if is_last { JsonError::Success } else { JsonError::Incomplete };
+
+            if res != expected {
+                let detail = ch.errdetail(res);
+                return self.parse.parse_failure(detail);
+            }
+        }
+
+        if is_last && self.parse.state != SemState::ExpectEof {
+            return self.parse.parse_failure("manifest ended unexpectedly");
+        }
+
+        if !is_last {
+            self.manifest_ctx
+                .as_mut()
+                .expect("checksum context lives until the last chunk")
+                .update(chunk);
+            Ok(())
+        } else {
+            let incr_ctx = self.manifest_ctx.take();
+            verify_manifest_checksum(
+                self.parse.manifest_checksum.as_deref(),
+                &mut self.parse.context,
+                chunk,
+                incr_ctx,
+            )
+        }
     }
 }
 
@@ -456,29 +590,14 @@ pub fn json_parse_manifest<C: JsonManifestParseContext + ?Sized>(
     buffer: &[u8],
 ) -> PgResult<()> {
     /* Set up our private parsing context. */
-    let mut parse = JsonManifestParseState {
-        context,
-        state: SemState::ExpectToplevelStart,
-        file_field: FileField::Path,
-        pathname: None,
-        encoded_pathname: None,
-        size: None,
-        algorithm: None,
-        checksum: None,
-        wal_range_field: WalRangeField::Timeline,
-        timeline: None,
-        start_lsn: None,
-        end_lsn: None,
-        saw_version_field: false,
-        manifest_checksum: None,
-    };
+    let mut parse = JsonManifestParseState::new(context);
 
     /* Create a JSON lexing context (C: PG_UTF8, need_escapes=true). */
     let mut lex = JsonLexDe::new(mcx, buffer, wchar::PG_UTF8);
 
     /* Run the actual JSON parser. */
     let json_error = parse_sem(&mut lex, &mut parse)?;
-    if json_error != adt_json::jsonapi::JsonError::Success {
+    if json_error != JsonError::Success {
         let detail = lex.lex.errdetail(json_error);
         return parse.parse_failure(detail);
     }
@@ -487,16 +606,22 @@ pub fn json_parse_manifest<C: JsonManifestParseContext + ?Sized>(
     }
 
     /* Verify the manifest checksum. */
-    verify_manifest_checksum(parse.manifest_checksum, parse.context, buffer)
+    verify_manifest_checksum(parse.manifest_checksum.as_deref(), parse.context, buffer, None)
 }
 
 /// C: verify_manifest_checksum. The last line of the manifest file is
 /// excluded from the manifest checksum, because the last line is expected to
 /// contain the checksum that covers the rest of the file.
+///
+/// For an incremental parse, this is called on the last chunk of the
+/// manifest only, with the cryptohash context that already covers every
+/// earlier chunk passed in (`incr_ctx`); for a non-incremental parse
+/// `incr_ctx` is None (C: NULL) and `buffer` is the whole manifest.
 fn verify_manifest_checksum<C: JsonManifestParseContext + ?Sized>(
     manifest_checksum: Option<&[u8]>,
     context: &mut C,
     buffer: &[u8],
+    incr_ctx: Option<PgSha256Ctx>,
 ) -> PgResult<()> {
     let parse_failure = |context: &mut C, msg: &str| {
         Err(context.error_cb(format!("could not parse backup manifest: {msg}")))
@@ -526,7 +651,7 @@ fn verify_manifest_checksum<C: JsonManifestParseContext + ?Sized>(
     }
 
     /* Checksum the rest. */
-    let mut manifest_ctx = PgSha256Ctx::init_sha256();
+    let mut manifest_ctx = incr_ctx.unwrap_or_else(PgSha256Ctx::init_sha256);
     manifest_ctx.update(&buffer[..penultimate_newline + 1]);
     let manifest_checksum_actual = manifest_ctx.final_sha256();
 

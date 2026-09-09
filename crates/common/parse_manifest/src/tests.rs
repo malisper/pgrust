@@ -10,7 +10,7 @@ use pg_sha2::PgSha256Ctx;
 
 use crate::{
     c_strtoi64, c_strtou64, json_parse_manifest, parse_xlogrecptr, JsonManifestParseContext,
-    ManifestWalRange, ParsedManifest,
+    JsonManifestParseIncrementalState, ManifestWalRange, ParsedManifest,
 };
 
 const TEST_SYSID: u64 = 1234567890123456789;
@@ -535,4 +535,219 @@ fn timeline_truncates_like_c_uint32_assignment() {
     let body = "{ \"PostgreSQL-Backup-Manifest-Version\": 2,\n\"WAL-Ranges\": [\n{ \"Timeline\": 4294967301, \"Start-LSN\": \"0/0\", \"End-LSN\": \"0/0\" }\n],\n";
     let m = parse(&with_checksum(body)).unwrap();
     assert_eq!(m.wal_ranges[0].tli, 5);
+}
+
+// ---------------------------------------------------------------------------
+// Incremental parse (C: json_parse_manifest_incremental_init/chunk/shutdown).
+// ---------------------------------------------------------------------------
+
+/// The ParsedManifest accumulator, as a context the incremental state owns.
+#[derive(Default)]
+struct Acc(ParsedManifest);
+
+impl JsonManifestParseContext for Acc {
+    fn version_cb(&mut self, manifest_version: i32) -> types_error::PgResult<()> {
+        self.0.version = manifest_version;
+        Ok(())
+    }
+    fn system_identifier_cb(&mut self, sysid: u64) -> types_error::PgResult<()> {
+        self.0.system_identifier = Some(sysid);
+        Ok(())
+    }
+    fn per_file_cb(
+        &mut self,
+        pathname: &[u8],
+        size: u64,
+        checksum_type: PgChecksumType,
+        checksum_payload: Option<&[u8]>,
+    ) -> types_error::PgResult<()> {
+        self.0.files.push(crate::ManifestFile {
+            pathname: pathname.to_vec(),
+            size,
+            checksum_type,
+            checksum_payload: checksum_payload.map(<[u8]>::to_vec),
+        });
+        Ok(())
+    }
+    fn per_wal_range_cb(
+        &mut self,
+        tli: types_core::TimeLineID,
+        start_lsn: types_core::XLogRecPtr,
+        end_lsn: types_core::XLogRecPtr,
+    ) -> types_error::PgResult<()> {
+        self.0.wal_ranges.push(ManifestWalRange { tli, start_lsn, end_lsn });
+        Ok(())
+    }
+}
+
+/// Feed `buffer` in pieces of `piece` bytes, but never split the final
+/// `tail` bytes: they go in the last (is_last) piece, as C's caller
+/// guarantees (basebackup_incremental.c MIN_CHUNK hold-back — the checksum
+/// line and the newline before it must be in the last chunk, since
+/// verify_manifest_checksum scans only that chunk for them). Returns the
+/// parsed manifest or the error text, plus how many files were already
+/// delivered before the last piece (the parse must not wait for the end).
+fn parse_in_pieces_tail(
+    buffer: &[u8],
+    piece: usize,
+    tail: usize,
+) -> (Result<ParsedManifest, String>, usize) {
+    install_seams();
+    let mut st = JsonManifestParseIncrementalState::json_parse_manifest_incremental_init(Acc::default());
+    let mut files_before_last = 0;
+    let mut off = 0;
+    let last_start = buffer.len().saturating_sub(tail);
+    loop {
+        let mut end = (off + piece).min(buffer.len());
+        if end > last_start {
+            end = buffer.len();
+        }
+        let is_last = end == buffer.len();
+        // A fresh context per chunk: the token scratch is bulk-freed with it.
+        let cx = MemoryContext::new("parse-manifest-chunk");
+        if !is_last {
+            files_before_last = st.context().0.files.len();
+        }
+        if let Err(e) = st.json_parse_manifest_incremental_chunk(cx.mcx(), &buffer[off..end], is_last) {
+            return (Err(e.message().to_string()), files_before_last);
+        }
+        if is_last {
+            break;
+        }
+        off = end;
+    }
+    (Ok(st.json_parse_manifest_incremental_shutdown().0), files_before_last)
+}
+
+/// C's caller shape: MIN_CHUNK (1024) bytes always held back for the last call.
+fn parse_in_pieces(buffer: &[u8], piece: usize) -> (Result<ParsedManifest, String>, usize) {
+    parse_in_pieces_tail(buffer, piece, 1024)
+}
+
+#[test]
+fn incremental_parse_matches_whole_buffer_at_every_piece_size() {
+    let whole = parse(C_FIXTURE).unwrap();
+    for piece in [1usize, 7, 100, 1024, 4096, 65536, C_FIXTURE.len() - 1, C_FIXTURE.len()] {
+        let (got, files_before_last) = parse_in_pieces(C_FIXTURE, piece);
+        assert_eq!(got.as_ref().map(|m| m.files.len()), Ok(whole.files.len()), "piece {piece}");
+        assert_eq!(got, Ok(whole.clone()), "piece {piece}");
+        if piece < C_FIXTURE.len() / 2 {
+            // Files are delivered as they are parsed, not at the end.
+            assert!(files_before_last > 0, "piece {piece}: no files before the last chunk");
+        }
+    }
+}
+
+#[test]
+fn incremental_parse_trailer_checks_look_at_the_last_chunk_only() {
+    // C: verify_manifest_checksum scans `chunk` (the last one) for the two
+    // trailing newlines; a last chunk of only the tail of the checksum line
+    // is refused, whatever came before it, while a last chunk that starts
+    // at or before the newline preceding the checksum line is fine.
+    let feed = |split: usize| -> Result<ParsedManifest, String> {
+        install_seams();
+        let mut st = JsonManifestParseIncrementalState::json_parse_manifest_incremental_init(Acc::default());
+        let cx = MemoryContext::new("parse-manifest-chunk");
+        st.json_parse_manifest_incremental_chunk(cx.mcx(), &C_FIXTURE[..split], false)
+            .map_err(|e| e.message().to_string())?;
+        st.json_parse_manifest_incremental_chunk(cx.mcx(), &C_FIXTURE[split..], true)
+            .map_err(|e| e.message().to_string())?;
+        Ok(st.json_parse_manifest_incremental_shutdown().0)
+    };
+    assert_eq!(
+        feed(C_FIXTURE.len() - 10).unwrap_err(),
+        "could not parse backup manifest: expected at least 2 lines"
+    );
+    let nl_before_checksum_line =
+        C_FIXTURE[..C_FIXTURE.len() - 1].iter().rposition(|&b| b == b'\n').unwrap();
+    assert_eq!(feed(nl_before_checksum_line + 1).unwrap_err(), "could not parse backup manifest: expected at least 2 lines");
+    assert_eq!(feed(nl_before_checksum_line), Ok(parse(C_FIXTURE).unwrap()));
+    assert_eq!(feed(nl_before_checksum_line - 100), Ok(parse(C_FIXTURE).unwrap()));
+}
+
+#[test]
+fn incremental_parse_checksum_spans_all_chunks() {
+    // The manifest checksum covers every chunk but the last line; corrupting
+    // an early chunk must still be caught at the end.
+    let mut corrupt = C_FIXTURE.to_vec();
+    let pos = corrupt.len() / 3;
+    // Flip a byte inside a per-file checksum hex string past `pos` (keeps
+    // the JSON valid and the file entry well-formed).
+    let needle = b"\"Checksum\": \"";
+    let cpos = pos + corrupt[pos..].windows(needle.len()).position(|w| w == needle).unwrap() + needle.len();
+    corrupt[cpos] = if corrupt[cpos] == b'0' { b'1' } else { b'0' };
+    assert!(parse(&corrupt).is_err());
+    let (got, _) = parse_in_pieces(&corrupt, 4096);
+    assert_eq!(got.unwrap_err(), "manifest checksum mismatch");
+}
+
+#[test]
+fn incremental_parse_error_identity_matches_whole_buffer() {
+    // A JSON shape error deep in the file, split so the bad token straddles
+    // a chunk boundary: the message is C's json_errdetail text either way.
+    let mut bad = C_FIXTURE.to_vec();
+    let needle = b"\"Path\": \"PG_VERSION\"";
+    let ppos = bad.windows(needle.len()).position(|w| w == needle).unwrap();
+    bad[ppos + 9] = b'\\'; // "Path": "\G_VERSION" -> invalid escape \G
+    let whole_err = parse(&bad).unwrap_err();
+    assert_eq!(
+        whole_err,
+        "could not parse backup manifest: Escape sequence \"\\G\" is invalid."
+    );
+    for piece in [ppos + 10, ppos + 9, ppos + 8, 1, 1000] {
+        let (got, _) = parse_in_pieces(&bad, piece);
+        assert_eq!(got.unwrap_err(), whole_err, "piece {piece}");
+    }
+
+    // A manifest that ends before the top-level object closes.
+    let truncated = &C_FIXTURE[..C_FIXTURE.len() / 2];
+    let (got, _) = parse_in_pieces(truncated, 1000);
+    assert_eq!(got.unwrap_err(), parse(truncated).unwrap_err());
+
+    // The trailer checks look at the last chunk only (C: verify_manifest_checksum
+    // over `chunk`): a last chunk without two newlines is refused.
+    let body = with_checksum("{ \"PostgreSQL-Backup-Manifest-Version\": 2,\n\"Files\": [],\n");
+    let split = body.len() - 10; // inside the checksum line, no newline before the end
+    install_seams();
+    let mut st = JsonManifestParseIncrementalState::json_parse_manifest_incremental_init(Acc::default());
+    let cx = MemoryContext::new("parse-manifest-chunk");
+    st.json_parse_manifest_incremental_chunk(cx.mcx(), &body[..split], false).unwrap();
+    let e = st.json_parse_manifest_incremental_chunk(cx.mcx(), &body[split..], true).unwrap_err();
+    assert_eq!(e.message(), "could not parse backup manifest: expected at least 2 lines");
+}
+
+#[test]
+fn incremental_parse_callback_errors_propagate() {
+    struct Failing;
+    impl JsonManifestParseContext for Failing {
+        fn version_cb(&mut self, _v: i32) -> types_error::PgResult<()> {
+            Err(types_error::PgError::error("consumer rejected version").into())
+        }
+        fn system_identifier_cb(&mut self, _s: u64) -> types_error::PgResult<()> {
+            Ok(())
+        }
+        fn per_file_cb(
+            &mut self,
+            _p: &[u8],
+            _s: u64,
+            _t: PgChecksumType,
+            _c: Option<&[u8]>,
+        ) -> types_error::PgResult<()> {
+            Ok(())
+        }
+        fn per_wal_range_cb(
+            &mut self,
+            _t: types_core::TimeLineID,
+            _s: types_core::XLogRecPtr,
+            _e: types_core::XLogRecPtr,
+        ) -> types_error::PgResult<()> {
+            Ok(())
+        }
+    }
+    install_seams();
+    let mut st = JsonManifestParseIncrementalState::json_parse_manifest_incremental_init(Failing);
+    let cx = MemoryContext::new("parse-manifest-chunk");
+    // The version value is the first scalar; it arrives in the first chunk.
+    let e = st.json_parse_manifest_incremental_chunk(cx.mcx(), &C_FIXTURE[..100], false).unwrap_err();
+    assert_eq!(e.message(), "consumer rejected version");
 }

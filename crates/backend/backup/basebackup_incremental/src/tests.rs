@@ -139,6 +139,116 @@ fn duplicate_manifest_paths_first_entry_wins() {
     assert_eq!(ib.manifest_file_lookup(b"dup"), Some(11));
 }
 
+/// A synthetic version-2 manifest with `nfiles` entries, C-shaped (one file
+/// object per line, the WAL range, the checksum trailer), ~90 bytes per file.
+fn synthetic_manifest(nfiles: usize) -> Vec<u8> {
+    let mut body = String::with_capacity(nfiles * 96 + 256);
+    body.push_str(&format!(
+        "{{ \"PostgreSQL-Backup-Manifest-Version\": 2,\n\"System-Identifier\": {C_FIXTURE_SYSID},\n\"Files\": [\n"
+    ));
+    for i in 0..nfiles {
+        if i > 0 {
+            body.push_str(",\n");
+        }
+        body.push_str(&format!(
+            "{{ \"Path\": \"base/5/{}\", \"Size\": {}, \"Last-Modified\": \"2026-09-07 00:00:00 GMT\" }}",
+            100_000 + i,
+            (i % 7) * 8192
+        ));
+    }
+    body.push_str("\n],\n\"WAL-Ranges\": [\n{ \"Timeline\": 1, \"Start-LSN\": \"0/2000028\", \"End-LSN\": \"0/2000120\" }\n],\n");
+    with_checksum(&body)
+}
+
+/// C: AppendIncrementalManifestData (basebackup_incremental.c:202-216) feeds
+/// the manifest through json_parse_manifest_incremental_chunk in pieces of
+/// at most MAX_CHUNK bytes as it arrives, keeping only the last MIN_CHUNK
+/// bytes back for the final call — so ib->buf never holds more than
+/// max(MAX_CHUNK, MIN_CHUNK + one packet) and a manifest of any size streams
+/// through a bounded buffer, its file entries hashed during the upload. A
+/// port that retains the whole text until Finalize fails both invariants.
+#[test]
+fn upload_streams_manifest_through_incremental_parser_with_bounded_buffer() {
+    // MIN_CHUNK / MAX_CHUNK: basebackup_incremental.c:39-40 (super::).
+    const PACKET: usize = 8192;
+
+    let nfiles = 40_000; // ~3.6 MB: some thirty MAX_CHUNK drains
+    let manifest = synthetic_manifest(nfiles);
+    assert!(manifest.len() > 20 * MAX_CHUNK, "fixture too small: {}", manifest.len());
+
+    let mut ib = CreateIncrementalBackupInfo(C_FIXTURE_SYSID);
+    let mut peak = 0usize;
+    let pieces: Vec<&[u8]> = manifest.chunks(PACKET).collect();
+    for (i, piece) in pieces.iter().enumerate() {
+        ib.AppendIncrementalManifestData(piece).unwrap();
+        peak = peak.max(ib.buf.len());
+        assert!(
+            ib.buf.len() <= MAX_CHUNK.max(MIN_CHUNK + piece.len()),
+            "after packet {i}: staging buffer holds {} bytes (C keeps at most MAX_CHUNK={MAX_CHUNK} / MIN_CHUNK+packet)",
+            ib.buf.len()
+        );
+    }
+    assert!(peak <= MAX_CHUNK, "peak staging buffer {peak} > MAX_CHUNK {MAX_CHUNK}");
+
+    // The manifest was parsed as it arrived: the file hash is already
+    // populated before FinalizeIncrementalManifest.
+    let hashed_during_upload = ib.manifest_file_count();
+    assert!(
+        hashed_during_upload > nfiles / 2,
+        "only {hashed_during_upload} of {nfiles} files hashed before Finalize (C parses during upload)"
+    );
+    assert!(!ib.finalized);
+
+    ib.FinalizeIncrementalManifest().unwrap();
+    assert!(ib.buf.is_empty(), "C pfrees ib->buf in FinalizeIncrementalManifest");
+    assert_eq!(ib.manifest_file_count(), nfiles);
+    assert_eq!(ib.manifest_file_lookup(b"base/5/100000"), Some(0));
+    assert_eq!(ib.manifest_file_lookup(format!("base/5/{}", 100_000 + nfiles - 1).as_bytes()), Some(((nfiles - 1) % 7) as u64 * 8192));
+    assert_eq!(
+        ib.manifest_wal_ranges(),
+        &[BackupWalRange { tli: 1, start_lsn: 0x2000028, end_lsn: 0x2000120 }]
+    );
+}
+
+/// The same stream with a corrupted checksum trailer is refused at
+/// Finalize with C's message, and a shape error early in the stream is
+/// refused as soon as the drain reaches it (during the upload, not at the
+/// end), with C's json_errdetail text.
+#[test]
+fn upload_stream_errors_are_c_exact() {
+    const PACKET: usize = 8192;
+
+    // Checksum mismatch: flip a hex digit of the trailer.
+    let mut manifest = synthetic_manifest(20_000);
+    let pos = manifest.len() - 4;
+    manifest[pos] = if manifest[pos] == b'0' { b'1' } else { b'0' };
+    let mut ib = CreateIncrementalBackupInfo(C_FIXTURE_SYSID);
+    for piece in manifest.chunks(PACKET) {
+        ib.AppendIncrementalManifestData(piece).unwrap();
+    }
+    assert_eq!(errmsg_of(ib.FinalizeIncrementalManifest()), "manifest checksum mismatch");
+
+    // Invalid escape in a path a few hundred KB in: refused mid-upload.
+    let mut manifest = synthetic_manifest(20_000);
+    let needle = b"\"Path\": \"base/5/105000\"";
+    let ppos = manifest.windows(needle.len()).position(|w| w == needle).unwrap();
+    manifest[ppos + 9] = b'\\'; // "Path": "\ase/5/105000"
+    let mut ib = CreateIncrementalBackupInfo(C_FIXTURE_SYSID);
+    let mut failed_at = None;
+    for (i, piece) in manifest.chunks(PACKET).enumerate() {
+        if let Err(e) = ib.AppendIncrementalManifestData(piece) {
+            failed_at = Some((i, e.message().to_string()));
+            break;
+        }
+    }
+    let (i, msg) = failed_at.expect("the drain must reach the bad token before the upload ends");
+    assert!(i * PACKET < manifest.len() - PACKET, "failed only at the last packet ({i})");
+    assert_eq!(
+        msg,
+        "could not parse backup manifest: Escape sequence \"\\a\" is invalid."
+    );
+}
+
 #[test]
 fn append_manifest_bounded_to_max_alloc_size() {
     // A small chunk from empty is always accepted (the normal path).

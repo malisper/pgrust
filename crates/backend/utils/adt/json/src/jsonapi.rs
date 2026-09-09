@@ -2,6 +2,12 @@
 //! need_escapes=false path used by json_in/json_recv). Validation-only: no
 //! strval de-escaping, no surrogate combining, no server-encoding conversion —
 //! those live on the need_escapes lanes (json_typeof/object-keys), loud there.
+//!
+//! The incremental (chunked, table-driven) parser — C's
+//! `makeJsonLexContextIncremental` / `pg_parse_json_incremental` — lives in
+//! the [`incremental`] child module.
+
+pub mod incremental;
 
 use stack_depth::check_stack_depth;
 use types_error::PgResult;
@@ -26,6 +32,11 @@ pub enum JsonToken {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum JsonError {
     Success,
+    /// C: JSON_INCOMPLETE — the chunk ended inside the document (incremental
+    /// parser only; never surfaced by the whole-buffer parser).
+    Incomplete,
+    /// C: JSON_NESTING_TOO_DEEP — the incremental parser's JSON_TD_MAX_STACK.
+    NestingTooDeep,
     EscapingInvalid,
     EscapingRequired,
     ExpectedArrayFirst,
@@ -442,59 +453,11 @@ impl<'a> JsonLex<'a> {
 
     // C: json_errdetail. The `%.*s` specifier prints the current token verbatim.
     pub fn errdetail(&self, error: JsonError) -> String {
-        let tok = || String::from_utf8_lossy(self.current_token());
-        match error {
-            JsonError::EscapingInvalid => {
-                format!("Escape sequence \"\\{}\" is invalid.", tok())
-            }
-            JsonError::EscapingRequired => format!(
-                "Character with value 0x{:02x} must be escaped.",
-                self.input[self.token_terminator]
-            ),
-            JsonError::ExpectedEnd => {
-                format!("Expected end of input, but found \"{}\".", tok())
-            }
-            JsonError::ExpectedArrayFirst => {
-                format!("Expected array element or \"]\", but found \"{}\".", tok())
-            }
-            JsonError::ExpectedArrayNext => {
-                format!("Expected \",\" or \"]\", but found \"{}\".", tok())
-            }
-            JsonError::ExpectedColon => {
-                format!("Expected \":\", but found \"{}\".", tok())
-            }
-            JsonError::ExpectedJson => {
-                format!("Expected JSON value, but found \"{}\".", tok())
-            }
-            JsonError::ExpectedMore => "The input string ended unexpectedly.".to_string(),
-            JsonError::ExpectedObjectFirst => {
-                format!("Expected string or \"}}\", but found \"{}\".", tok())
-            }
-            JsonError::ExpectedObjectNext => {
-                format!("Expected \",\" or \"}}\", but found \"{}\".", tok())
-            }
-            JsonError::ExpectedString => {
-                format!("Expected string, but found \"{}\".", tok())
-            }
-            JsonError::InvalidToken => format!("Token \"{}\" is invalid.", tok()),
-            JsonError::UnicodeCodePointZero => {
-                "\\u0000 cannot be converted to text.".to_string()
-            }
-            JsonError::UnicodeEscapeFormat => {
-                "\"\\u\" must be followed by four hexadecimal digits.".to_string()
-            }
-            JsonError::UnicodeHighSurrogate => {
-                "Unicode high surrogate must not follow a high surrogate.".to_string()
-            }
-            JsonError::UnicodeLowSurrogate => {
-                "Unicode low surrogate must follow a high surrogate.".to_string()
-            }
-            JsonError::UnicodeUntranslatable => format!(
-                "Unicode escape value could not be translated to the server's encoding {}.",
-                mbutils::GetDatabaseEncodingName()
-            ),
-            JsonError::SemActionFailed | JsonError::Success => String::new(),
-        }
+        errdetail_for(
+            error,
+            self.current_token(),
+            self.input.get(self.token_terminator).copied(),
+        )
     }
 
     // C: report_json_context — the "JSON data, line N: ..." errcontext line.
@@ -533,6 +496,77 @@ impl<'a> JsonLex<'a> {
             "JSON data, line {}: {}{}{}",
             self.line_number, prefix, ctxt, suffix
         )
+    }
+}
+
+/// C: json_errdetail's message table over an explicit current token
+/// (`token_start..token_terminator`) and the byte at `token_terminator`
+/// (JSON_ESCAPING_REQUIRED prints it). Shared by [`JsonLex::errdetail`] and
+/// the incremental lexer, whose current token may live in its partial-token
+/// buffer rather than in the chunk.
+pub(crate) fn errdetail_for(
+    error: JsonError,
+    token: &[u8],
+    byte_at_terminator: Option<u8>,
+) -> String {
+    let tok = || String::from_utf8_lossy(token);
+    match error {
+        JsonError::EscapingInvalid => {
+            format!("Escape sequence \"\\{}\" is invalid.", tok())
+        }
+        JsonError::EscapingRequired => format!(
+            "Character with value 0x{:02x} must be escaped.",
+            byte_at_terminator.unwrap_or(0)
+        ),
+        JsonError::ExpectedEnd => {
+            format!("Expected end of input, but found \"{}\".", tok())
+        }
+        JsonError::ExpectedArrayFirst => {
+            format!("Expected array element or \"]\", but found \"{}\".", tok())
+        }
+        JsonError::ExpectedArrayNext => {
+            format!("Expected \",\" or \"]\", but found \"{}\".", tok())
+        }
+        JsonError::ExpectedColon => {
+            format!("Expected \":\", but found \"{}\".", tok())
+        }
+        JsonError::ExpectedJson => {
+            format!("Expected JSON value, but found \"{}\".", tok())
+        }
+        JsonError::ExpectedMore => "The input string ended unexpectedly.".to_string(),
+        JsonError::ExpectedObjectFirst => {
+            format!("Expected string or \"}}\", but found \"{}\".", tok())
+        }
+        JsonError::ExpectedObjectNext => {
+            format!("Expected \",\" or \"}}\", but found \"{}\".", tok())
+        }
+        JsonError::ExpectedString => {
+            format!("Expected string, but found \"{}\".", tok())
+        }
+        JsonError::InvalidToken => format!("Token \"{}\" is invalid.", tok()),
+        JsonError::UnicodeCodePointZero => {
+            "\\u0000 cannot be converted to text.".to_string()
+        }
+        JsonError::UnicodeEscapeFormat => {
+            "\"\\u\" must be followed by four hexadecimal digits.".to_string()
+        }
+        JsonError::UnicodeHighSurrogate => {
+            "Unicode high surrogate must not follow a high surrogate.".to_string()
+        }
+        JsonError::UnicodeLowSurrogate => {
+            "Unicode low surrogate must follow a high surrogate.".to_string()
+        }
+        JsonError::UnicodeUntranslatable => format!(
+            "Unicode escape value could not be translated to the server's encoding {}.",
+            mbutils::GetDatabaseEncodingName()
+        ),
+        JsonError::NestingTooDeep => {
+            "JSON nested too deep, maximum permitted depth is 6400.".to_string()
+        }
+        // C: JSON_INCOMPLETE falls through the switch to the "unexpected
+        // json parse error type: %d" fallback (JsonParseErrorType value 1).
+        JsonError::Incomplete => "unexpected json parse error type: 1".to_string(),
+        JsonError::SemActionFailed | JsonError::Success => String::new(),
     }
 }
 
