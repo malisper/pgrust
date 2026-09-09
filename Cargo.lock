@@ -9449,6 +9449,7 @@ dependencies = [
 name = "mcx"
 version = "0.0.0"
 dependencies = [
+ "mimalloc",
  "allocator-api2",
  "hashbrown",
  "libc",

@@ -1072,7 +1072,15 @@ pub fn exec_init_agg<'mcx>(
     // BuildTupleHashTable the same hashcontext memory).
     let agg_ctx_name =
         if node.aggstrategy == AGG_HASHED { "HashAgg hash table" } else { "AggContext" };
-    let agg_node = make_agg_state_node(mcx, mcx.context().new_child_bump(agg_ctx_name))?;
+    let aggcontext = if matches!(node.aggstrategy, AGG_HASHED | AGG_MIXED) {
+        mcx.context().new_child_bump_with_max_block_size(
+            agg_ctx_name,
+            work_mem_block_size(init_small::globals::work_mem()),
+        )
+    } else {
+        mcx.context().new_child_bump(agg_ctx_name)
+    };
+    let agg_node = make_agg_state_node(mcx, aggcontext)?;
     let fm_agg_node: FmNodePtr = Some(agg_node.cast());
     let tmpcontext = estate.create_expr_context();
     let ps_ExprContext = estate.exec_assign_expr_context();
@@ -1830,6 +1838,12 @@ fn collect_base_var_cols(node: Node<'_>, out: &mut PgVec<'_, bool>) {
 }
 
 // find_hash_columns + build_hash_tables (nodeAgg.c), single grouping set.
+fn work_mem_block_size(work_mem_kb: i32) -> usize {
+    let bytes = (work_mem_kb.max(0) as usize).saturating_mul(1024) / 16;
+    let bounded = bytes.clamp(8 * 1024, 8 * 1024 * 1024);
+    1usize << (usize::BITS - 1 - bounded.leading_zeros())
+}
+
 fn init_perhash<'mcx>(
     node: &'mcx Agg<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -1976,7 +1990,10 @@ fn init_perhash<'mcx>(
     );
     let wslot =
         exectuples::make_tuple_table_slot(mcx, TupleSlotKind::Virtual, Some(outer_desc));
-    let table_ctx = mcx.context().new_child_bump("HashAgg table context");
+    let table_ctx = mcx.context().new_child_bump_with_max_block_size(
+        "HashAgg table context",
+        work_mem_block_size(init_small::globals::work_mem()),
+    );
     let tmp_ctx = mcx.context().new_child_bump("HashAgg spill tuple");
 
     let cell_layout = Layout::new::<NonNull<AggPerGroup>>();

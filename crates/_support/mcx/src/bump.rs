@@ -12,14 +12,17 @@ use crate::Acct;
 
 // C's allocChunkLimit policy (8 chunks per max block), kept although Rust blocks carry no header.
 const BUMP_BLOCK_HDR_SZ: usize = 40;
-const BUMP_CHUNK_LIMIT: usize = {
-    let bound = (MAX_BLOCK_SIZE - BUMP_BLOCK_HDR_SZ) / 8;
-    let mut limit = MAX_BLOCK_SIZE;
+#[cfg(test)]
+const BUMP_CHUNK_LIMIT: usize = chunk_limit(MAX_BLOCK_SIZE);
+
+const fn chunk_limit(max_block_size: usize) -> usize {
+    let bound = (max_block_size - BUMP_BLOCK_HDR_SZ) / 8;
+    let mut limit = max_block_size;
     while limit > bound {
         limit >>= 1;
     }
     limit
-};
+}
 
 pub(crate) struct BumpArena {
     // blocks[0] is the keeper (retained over reset, uncharged until claimed).
@@ -30,11 +33,21 @@ pub(crate) struct BumpArena {
     cur_ptr: *mut u8,
     cur_end: *mut u8,
     next_block_size: usize,
+    max_block_size: usize,
+    chunk_limit: usize,
     mem_allocated: usize,
 }
 
+const _: () = assert!(core::mem::size_of::<BumpArena>() <= 128);
+
 impl BumpArena {
     pub(crate) fn new() -> BumpArena {
+        Self::with_max_block_size(MAX_BLOCK_SIZE)
+    }
+
+    pub(crate) fn with_max_block_size(max_block_size: usize) -> BumpArena {
+        assert!(max_block_size.is_power_of_two());
+        assert!((INIT_BLOCK_SIZE..=MAX_BLOCK_SIZE).contains(&max_block_size));
         let blocks = take_recycled_blocks();
         debug_assert!(blocks.is_empty() || (blocks.len() == 1 && blocks[0].used == 0));
         let mem_allocated = blocks.first().map_or(0, |b| b.size);
@@ -45,6 +58,8 @@ impl BumpArena {
             cur_ptr: core::ptr::null_mut(),
             cur_end: core::ptr::null_mut(),
             next_block_size: INIT_BLOCK_SIZE,
+            max_block_size,
+            chunk_limit: chunk_limit(max_block_size),
             mem_allocated,
         }
     }
@@ -72,7 +87,7 @@ impl BumpArena {
         }
         let csize = (layout.size() + 7) & !7;
         // wrapping_sub folds the ZST case into the oversize branch.
-        if csize.wrapping_sub(1) >= BUMP_CHUNK_LIMIT {
+        if csize.wrapping_sub(1) >= self.chunk_limit {
             return self.alloc_unusual(layout, csize, acct);
         }
         let avail = self.cur_end as usize - self.cur_ptr as usize;
@@ -116,7 +131,7 @@ impl BumpArena {
             INIT_BLOCK_SIZE
         } else {
             let b = self.next_block_size;
-            self.next_block_size = (b * 2).min(MAX_BLOCK_SIZE);
+            self.next_block_size = (b * 2).min(self.max_block_size);
             b
         };
         if blksize < csize {
@@ -192,7 +207,7 @@ impl BumpArena {
             // Last-chunk in-place extension (what a growing PgVec hits).
             if ptr.as_ptr().add(old_csize) == self.cur_ptr
                 && new_csize - old_csize <= self.cur_end as usize - self.cur_ptr as usize
-                && new_csize < BUMP_CHUNK_LIMIT
+                && new_csize < self.chunk_limit
             {
                 self.cur_ptr = ptr.as_ptr().add(new_csize);
                 return Ok(NonNull::slice_from_raw_parts(ptr, new_csize));
@@ -294,6 +309,36 @@ mod tests {
             parent: None,
             children: RefCell::new(alloc::vec::Vec::new()),
         }
+    }
+
+    #[test]
+    fn capped_blocks_survive_reset_and_grow_crosses_chunk_limit() {
+        let mut a = BumpArena::with_max_block_size(INIT_BLOCK_SIZE);
+        let acct = acct();
+        let layout = Layout::from_size_align(200, 8).unwrap();
+        for _ in 0..2000 {
+            a.alloc(layout, &acct).unwrap();
+        }
+        assert!(a.blocks.len() > 2);
+        assert!(a.blocks.iter().all(|block| block.size <= INIT_BLOCK_SIZE));
+        assert!(a.oversize.is_empty());
+        a.reset();
+        acct.self_used.set(a.footprint());
+        let old = Layout::from_size_align(64, 8).unwrap();
+        let large = Layout::from_size_align(1024, 8).unwrap();
+        let p = a.alloc(old, &acct).unwrap().cast::<u8>();
+        // SAFETY: p owns 64 live writable bytes; grow preserves that prefix.
+        unsafe {
+            p.as_ptr().write_bytes(0x5a, old.size());
+            let q = a.grow(p, old, large, &acct).unwrap().cast::<u8>();
+            assert_eq!(core::slice::from_raw_parts(q.as_ptr(), old.size()), &[0x5a; 64]);
+        }
+        assert_eq!(a.oversize.len(), 1);
+        assert_eq!(a.oversize[0].1.size(), 1024);
+        for _ in 0..200 {
+            a.alloc(layout, &acct).unwrap();
+        }
+        assert!(a.blocks.iter().all(|block| block.size <= INIT_BLOCK_SIZE));
     }
 
     #[test]

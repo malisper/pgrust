@@ -27,3 +27,6 @@ libc = { version = "0.2", optional = true }
 allocator-api2 = { version = "0.2", default-features = false, features = ["alloc"] }
 hashbrown = { version = "0.14", default-features = false, features = ["allocator-api2", "ahash", "inline-more"] }
 rustc-hash = { version = "2", default-features = false }
+
+[dev-dependencies]
+mimalloc = "0.1"

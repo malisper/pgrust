@@ -1089,6 +1089,18 @@ impl MemoryContext {
         Self::with_backend(name, Backend::Bump(new_arena()), Some(self.acct.clone()))
     }
 
+    pub fn new_child_bump_with_max_block_size(
+        &self,
+        name: &'static str,
+        max_block_size: usize,
+    ) -> MemoryContext {
+        Self::with_backend(
+            name,
+            Backend::Bump(core::cell::UnsafeCell::new(bump::BumpArena::with_max_block_size(max_block_size))),
+            Some(self.acct.clone()),
+        )
+    }
+
     pub fn new_bumpdrop(name: &'static str) -> Self {
         Self::with_backend(
             name,
@@ -2451,5 +2463,35 @@ pub(crate) mod churn_probe {
     }
     pub(crate) fn take() -> u64 {
         REAL_FREES.swap(0, Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+mod bump_policy_wrapper_tests {
+    use super::*;
+
+    #[test]
+    fn capped_wrapper_grow_reset_and_shrink() {
+        let parent = MemoryContext::new_bump("parent");
+        let mut child = parent.new_child_bump_with_max_block_size("capped", 8192);
+        for _ in 0..2 {
+            {
+                let mcx = child.mcx();
+                let small = Layout::from_size_align(32, 8).unwrap();
+                let large = Layout::from_size_align(1024, 8).unwrap();
+                let aligned = Layout::from_size_align(16, 256).unwrap();
+                let p = Allocator::allocate(&mcx, small).unwrap().cast::<u8>();
+                // SAFETY: p owns 32 writable bytes; grow/shrink receive the live allocation's layout.
+                unsafe {
+                    p.as_ptr().write_bytes(0xa7, 32);
+                    let q = Allocator::grow(&mcx, p, small, large).unwrap().cast::<u8>();
+                    assert_eq!(core::slice::from_raw_parts(q.as_ptr(), 32), &[0xa7; 32]);
+                    let r = Allocator::shrink(&mcx, q, large, aligned).unwrap().cast::<u8>();
+                    assert_eq!(r.as_ptr() as usize % 256, 0);
+                    assert_eq!(core::slice::from_raw_parts(r.as_ptr(), 16), &[0xa7; 16]);
+                }
+            }
+            child.reset();
+        }
     }
 }

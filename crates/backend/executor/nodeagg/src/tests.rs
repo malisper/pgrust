@@ -3218,3 +3218,12 @@ mod rem_b080 {
         assert!(err.message().starts_with("unexpected EOF for"), "{}", err.message());
     }
 }
+
+#[test]
+fn work_mem_block_cap_rounds_down_and_clamps() {
+    for (kb, bytes) in [(0, 8192), (64, 8192), (128, 8192), (255, 8192),
+                        (256, 16384), (4096, 262144), (131072, 8388608),
+                        (i32::MAX, 8388608)] {
+        assert_eq!(crate::work_mem_block_size(kb), bytes);
+    }
+}
