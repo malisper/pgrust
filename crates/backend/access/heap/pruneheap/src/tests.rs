@@ -1,13 +1,45 @@
 use super::*;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::sync::{Mutex, MutexGuard, Once};
 
 static IN_RECOVERY: AtomicBool = AtomicBool::new(false);
 
+#[repr(align(4096))]
+struct AlignedPage([u8; BLCKSZ]);
+
 fn page_ptr() -> core::ptr::NonNull<u8> {
-    #[repr(align(4096))]
-    struct AlignedPage([u8; BLCKSZ]);
     static PAGE: AlignedPage = AlignedPage([0; BLCKSZ]);
     core::ptr::NonNull::new(PAGE.0.as_ptr().cast_mut()).unwrap()
+}
+
+// Seams install once per process (seam_core's set-once law), so every test
+// that reads a page through bufmgr goes through one shared selector: the
+// page currently chosen under PAGE_LOCK.
+static CURRENT_PAGE: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
+static PAGE_SEAMS: Once = Once::new();
+static PAGE_LOCK: Mutex<()> = Mutex::new(());
+
+fn current_page(_: Buffer) -> core::ptr::NonNull<u8> {
+    core::ptr::NonNull::new(CURRENT_PAGE.load(Ordering::SeqCst)).expect("test page selected")
+}
+fn block_zero(_: Buffer) -> types_core::BlockNumber {
+    0
+}
+fn no_fpi() -> i64 {
+    0
+}
+
+/// Installs the shared page seams and selects `page` for the caller's
+/// lifetime of the returned guard.
+fn select_page(page: core::ptr::NonNull<u8>) -> MutexGuard<'static, ()> {
+    PAGE_SEAMS.call_once(|| {
+        bufmgr_seams::buffer_get_page::set(current_page);
+        bufmgr_seams::buffer_get_block_number::set(block_zero);
+        transam_xlog_seams::wal_usage_fpi::set(no_fpi);
+    });
+    let guard = PAGE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    CURRENT_PAGE.store(page.as_ptr(), Ordering::SeqCst);
+    guard
 }
 
 fn test_relation<'mcx>(mcx: mcx::Mcx<'mcx>) -> RelationData<'mcx> {
@@ -101,7 +133,7 @@ fn test_relation<'mcx>(mcx: mcx::Mcx<'mcx>) -> RelationData<'mcx> {
 fn guard_chain_early_exits() {
     init_seams();
     transam_xlog_seams::recovery_in_progress::set(|| IN_RECOVERY.load(Ordering::SeqCst));
-    bufmgr_seams::buffer_get_page::set(|_| page_ptr());
+    let _page = select_page(page_ptr());
     let mcx_owner = mcx::MemoryContext::new("t");
     let rel = test_relation(mcx_owner.mcx());
 
@@ -177,4 +209,60 @@ fn unexpected_dead_htsv_is_ereport_not_panic() {
     assert_eq!(err.level, types_error::ERROR);
     assert_eq!(err.sqlstate, types_error::ERRCODE_INTERNAL_ERROR);
     assert_eq!(err.message, "unexpected HeapTupleSatisfiesVacuum result 0");
+}
+
+#[test]
+fn prune_refuses_line_pointer_count_beyond_max_heap_tuples_as_data_corrupted() {
+    // audit-18.6 w2-068 (verified fp5_t): pd_lower forged so the page carries
+    // 292 line pointers, one more than MaxHeapTuplesPerPage. C's
+    // PruneState.processed/htsv are [MaxHeapTuplesPerPage + 1] stack arrays
+    // (pruneheap.c:86/:98) that the scan loop (pruneheap.c:492-506) indexes
+    // one past their end - undefined behaviour with no ereport. pgrust must
+    // not panic on the same page: the line-pointer count is refused as an
+    // XX001 ERROR before the scan, the bufpage data_corrupted surface.
+    const fn page_292() -> AlignedPage {
+        let mut p = [0u8; super::BLCKSZ];
+        // PageHeaderData: pd_lower @12 = 24 + 292 * 4 = 1192, pd_upper @14 =
+        // pd_special @16 = BLCKSZ, pd_pagesize_version @18 = BLCKSZ | 4.
+        p[12] = 0xa8;
+        p[13] = 0x04;
+        p[14] = 0x00;
+        p[15] = 0x20;
+        p[16] = 0x00;
+        p[17] = 0x20;
+        p[18] = 0x04;
+        p[19] = 0x20;
+        AlignedPage(p)
+    }
+    static PAGE: AlignedPage = page_292();
+    let page_nn = core::ptr::NonNull::new(PAGE.0.as_ptr().cast_mut()).unwrap();
+    let _page = select_page(page_nn);
+
+    let mcx_owner = mcx::MemoryContext::new("t");
+    let rel = test_relation(mcx_owner.mcx());
+    // SAFETY: a static, never-written page image.
+    let maxoff = unsafe { super::PageRef::from_raw(page_nn) }.max_offset_number();
+    assert_eq!(maxoff as usize, super::MaxHeapTuplesPerPage + 1);
+
+    let mut presult = super::PruneFreezeResult::default();
+    let mut off_loc: super::OffsetNumber = 0;
+    let err = super::heap_page_prune_and_freeze(
+        &rel,
+        1,
+        types_core::GlobalVisStateHandle::new(0),
+        super::HEAP_PAGE_PRUNE_MARK_UNUSED_NOW,
+        None,
+        &mut presult,
+        super::PruneReason::PruneVacuumScan,
+        &mut off_loc,
+        None,
+        None,
+    )
+    .expect_err("292 line pointers on a heap page is a typed corruption refusal");
+    assert_eq!(err.level, types_error::ERROR);
+    assert_eq!(err.sqlstate, types_error::ERRCODE_DATA_CORRUPTED);
+    assert_eq!(
+        err.message,
+        "corrupted line pointer count: nline = 292, max = 291"
+    );
 }

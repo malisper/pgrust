@@ -174,10 +174,9 @@ fn bitmap_next_block(
     } else {
         let page = lock.page();
         let maxoff = page.max_offset_number();
-        assert!(
-            maxoff as usize <= MaxHeapTuplesPerPage,
-            "corrupt heap page: pd_lower implies {maxoff} line pointers"
-        );
+        if maxoff as usize > MaxHeapTuplesPerPage {
+            return Err(crate::line_pointer_count_corrupted(maxoff));
+        }
         let mut offnum = FirstOffsetNumber;
         while offnum <= maxoff {
             let lp = page.item_id(offnum);

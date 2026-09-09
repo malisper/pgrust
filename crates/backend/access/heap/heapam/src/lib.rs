@@ -596,6 +596,25 @@ unsafe fn page_collect_tuples<const ALL_VISIBLE: bool, const CHECK_SERIALIZABLE:
     Ok(ntup)
 }
 
+/// A heap page whose pd_lower encodes more than MaxHeapTuplesPerPage line
+/// pointers. C has no check: PageAddItemExtended never creates one
+/// (bufpage.c:297-300) and heapgetpage's rs_vistuples[MaxHeapTuplesPerPage]
+/// (heapam.c:544 Assert only) would overflow on the same corruption -
+/// undefined behaviour, no ereport. Refused on the bufpage data_corrupted
+/// surface (XX001), the same line PageRepairFragmentation and the prune scan
+/// report for this page, never a bounds-check panic. audit-18.6 w2-068.
+#[cold]
+#[inline(never)]
+pub(crate) fn line_pointer_count_corrupted(nline: OffsetNumber) -> Box<::types_error::PgError> {
+    Box::new(
+        ::types_error::PgError::new(
+            ::types_error::ERROR,
+            format!("corrupted line pointer count: nline = {nline}, max = {MaxHeapTuplesPerPage}"),
+        )
+        .with_sqlstate(::types_error::ERRCODE_DATA_CORRUPTED),
+    )
+}
+
 pub fn heap_prepare_pagescan(scan: &mut HeapScanDescData<'_>) -> PgResult<()> {
     debug_assert!((scan.rs_base.rs_flags & SO_ALLOW_PAGEMODE) != 0);
     let block = scan.rs_cblock;
@@ -630,10 +649,9 @@ pub fn heap_prepare_pagescan(scan: &mut HeapScanDescData<'_>) -> PgResult<()> {
     // (rs_ntuples <= lines). C trusts this implicitly (its rs_vistuples array
     // would overflow on the same corruption); the hard check is per page, not
     // per tuple, per heapam's hoisting model.
-    assert!(
-        lines as usize <= MaxHeapTuplesPerPage,
-        "corrupt heap page: pd_lower implies {lines} line pointers"
-    );
+    if lines as usize > MaxHeapTuplesPerPage {
+        return Err(line_pointer_count_corrupted(lines));
+    }
     let all_visible = page.is_all_visible() && !snapshot.takenDuringRecovery;
 
     let vist = &mut scan.rs_vistuples;

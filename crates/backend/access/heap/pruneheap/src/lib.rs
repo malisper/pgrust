@@ -268,6 +268,27 @@ pub fn heap_page_prune_and_freeze(
 
     let maxoff = page.max_offset_number();
 
+    // C's PruneState.processed/htsv are [MaxHeapTuplesPerPage + 1] stack
+    // arrays (pruneheap.c:86/:98) and the scan below indexes them by offnum
+    // up to maxoff (pruneheap.c:492-506); root_items/heaponly_items and the
+    // per-item arrays are [MaxHeapTuplesPerPage]. C has no check: a heap
+    // page never gets a 292nd line pointer through PageAddItemExtended
+    // (bufpage.c:297-300), so a forged pd_lower makes C write past those
+    // arrays (undefined behaviour, no ereport). Refuse the count as data
+    // corruption before the scan, the bufpage repair_fragmentation surface
+    // (XX001, catchable), never a bounds-check panic. audit-18.6 w2-068.
+    if maxoff as usize > MaxHeapTuplesPerPage {
+        return Err(Box::new(
+            ::types_error::PgError::new(
+                ::types_error::ERROR,
+                format!(
+                    "corrupted line pointer count: nline = {maxoff}, max = {MaxHeapTuplesPerPage}"
+                ),
+            )
+            .with_sqlstate(::types_error::ERRCODE_DATA_CORRUPTED),
+        ));
+    }
+
     // HTSV once per tuple (a second call could answer differently), in
     // reverse offset order: tuples then read at increasing page offsets,
     // which the prefetcher likes.

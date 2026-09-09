@@ -847,14 +847,22 @@ impl<'a> PageMut<'a> {
         // the fixed itemidbase capacity before collecting live items. nstorage is
         // indexed up to nline, so a corrupted pd_lower yielding nline beyond
         // MaxHeapTuplesPerPage (the hard limit on heap line pointers) would
-        // overrun the scratch array and panic. Reject it as data corruption
-        // instead. C relies on the MaxHeapTuplesPerPage invariant here (see the
-        // "too many line pointers" note in bufpage.c); we make that invariant an
-        // explicit, catchable check.
-        assert!(
-            (nline as usize) <= MaxHeapTuplesPerPage,
-            "corrupted line pointer count: nline = {nline}, max = {MaxHeapTuplesPerPage}"
-        );
+        // overrun the scratch array. C has no check: PageAddItemExtended refuses
+        // to create a 292nd heap line pointer (bufpage.c:297-300) and
+        // PageRepairFragmentation's itemidbase[MaxHeapTuplesPerPage]
+        // (bufpage.c:704) relies on that invariant, overrunning the stack on a
+        // forged pd_lower (undefined behaviour, no ereport). Refuse the count
+        // on the same XX001 data_corrupted surface as the other repair checks
+        // (a catchable ERROR; PANIC in prune's critical section as errstart
+        // would), never a bare string panic. audit-18.6 w2-068.
+        if (nline as usize) > MaxHeapTuplesPerPage {
+            data_corrupted(
+                ERROR,
+                alloc::format!(
+                    "corrupted line pointer count: nline = {nline}, max = {MaxHeapTuplesPerPage}"
+                ),
+            );
+        }
         let mut itemidbase = [ItemIdCompact::ZERO; MaxHeapTuplesPerPage];
         let mut nstorage = 0usize;
         let mut nunused = 0usize;
@@ -2043,6 +2051,31 @@ mod tests {
         pm.set_pd_upper(8160);
         let err = unwind_pg_error(|| pm.repair_fragmentation());
         assert_data_corrupted(&err, ERROR, "corrupted line pointer: 8128");
+    }
+
+    #[test]
+    fn repair_fragmentation_line_pointer_count_beyond_max_is_c_data_corrupted() {
+        // audit-18.6 w2-068 (verified fp5_t): pd_lower forged 32 -> 1192 so
+        // the page carries 292 line pointers, one past MaxHeapTuplesPerPage.
+        // C's itemidbase[MaxHeapTuplesPerPage] (bufpage.c:704) has no room
+        // for a 292nd storage item and PageRepairFragmentation has no
+        // ereport for the count - it relies on the PageAddItemExtended
+        // invariant (bufpage.c:297). pgrust refuses the count on the same
+        // XX001 data_corrupted surface as the other repair checks, never as
+        // a bare string panic (statement boundary: XX000).
+        let mut t = temp_page();
+        let mut pm = page_mut(&mut t);
+        pm.init(0);
+        add_n(&mut pm, 2, 28);
+        assert_eq!(pm.as_ref().pd_lower(), 32);
+        pm.set_pd_lower((SizeOfPageHeaderData + (MaxHeapTuplesPerPage + 1) * 4) as uint16);
+        assert_eq!(pm.as_ref().max_offset_number() as usize, MaxHeapTuplesPerPage + 1);
+        let err = unwind_pg_error(|| pm.repair_fragmentation());
+        assert_data_corrupted(
+            &err,
+            ERROR,
+            "corrupted line pointer count: nline = 292, max = 291",
+        );
     }
 
     #[test]
