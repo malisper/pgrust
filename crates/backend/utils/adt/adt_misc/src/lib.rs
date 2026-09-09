@@ -40,6 +40,28 @@ fn null_flinfo(what: &str) -> ! {
     panic!("{what}: NULL flinfo")
 }
 
+/// The UTF-8-only server-encoding carve (docs/design/carve-ratifications.md
+/// §11): a pg_input_is_valid / pg_input_error_info typname that C
+/// (misc.c:792-794 `text_to_cstring(typname)` → `parseTypeString`) parses as
+/// raw bytes but no `&str` can carry is refused with the same typed 0A000 +
+/// HINT the tcop gate raises (`non_utf8_query_error`). Only reachable in a
+/// SQL_ASCII database: textin validates UTF-8 everywhere else.
+#[cold]
+fn non_utf8_typname_error() -> Box<PgError> {
+    Box::new(
+        PgError::new(
+            types_error::ERROR,
+            alloc::format!(
+                "query strings with non-ASCII characters are not supported yet in databases \
+                 with encoding \"{}\"",
+                mbutils::GetDatabaseEncodingName()
+            ),
+        )
+        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+        .with_hint("Use a database with encoding \"UTF8\"."),
+    )
+}
+
 fn input_is_valid_common(
     flinfo: &mut FmgrInfo,
     fcinfo: &Fcinfo,
@@ -70,8 +92,13 @@ fn input_is_valid_common(
     // If the typname argument is constant, we only need to parse it the
     // first time through.
     if memo_typoid == InvalidOid || !typname_constant {
-        let typname = String::from_utf8_lossy(typname_bytes);
-        let (typoid, typmod) = parse_utilcmd::parseTypeString(mcx, &typname)?;
+        // C (misc.c:792-794) hands text_to_cstring(typname) to parseTypeString
+        // verbatim; parseTypeString takes &str here, so bytes no &str can
+        // carry (a SQL_ASCII database only: textin validates UTF-8 everywhere
+        // else) are the §11 typed refusal, never a lossy substitution.
+        let typname =
+            core::str::from_utf8(typname_bytes).map_err(|_| non_utf8_typname_error())?;
+        let (typoid, typmod) = parse_utilcmd::parseTypeString(mcx, typname)?;
         let v = flinfo.fn_extra_mut::<ValidIOData>().expect("populated above");
         v.typmod = typmod;
         // Update type-specific info if typoid changed.

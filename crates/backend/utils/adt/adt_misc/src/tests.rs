@@ -308,3 +308,36 @@ fn pg_promote_wait_loop_bound_wraps_like_c() {
     assert_eq!(crate::builtins::promote_wait_iterations(300_000_000), 3_000_000_000u32 as i32);
     assert!(crate::builtins::promote_wait_iterations(i32::MAX) < 0);
 }
+
+// pg_input_is_valid_common (misc.c:792-794) hands text_to_cstring(typname)
+// to parseTypeString verbatim. pgrust's parser takes &str, so a typname that
+// is not UTF-8 (only reachable in a SQL_ASCII database) is the UTF-8-only
+// carve's typed refusal (docs/design/carve-ratifications.md §11, the tcop
+// gate's non_utf8_query_error bytes), never a lossy U+FFFD substitution.
+#[test]
+fn input_is_valid_non_utf8_typname_is_the_ratified_refusal() {
+    let ctx = MemoryContext::new("t");
+    let mut fcinfo = LocalFcinfo::<2>::new(0);
+    // SAFETY: mcx outlives the call.
+    unsafe { fcinfo.set_result_mcx(ctx.mcx()) };
+    let val = varlena::cstring_to_text(ctx.mcx(), b"1").unwrap();
+    let typ = varlena::cstring_to_text(ctx.mcx(), b"\"zz\xe9\"").unwrap();
+    fcinfo.set_arg(0, Datum::from_usize(val.as_bytes().as_ptr() as usize));
+    fcinfo.set_arg(1, Datum::from_usize(typ.as_bytes().as_ptr() as usize));
+    let mut flinfo = FmgrInfo::new(crate::fc_pg_input_is_valid, 8050, 2, true, false);
+    let e = crate::fc_pg_input_is_valid(Some(&mut flinfo), &mut fcinfo).unwrap_err();
+    assert_eq!(
+        e.sqlstate(),
+        types_error::make_sqlstate(*b"0A000"),
+        "ERRCODE_FEATURE_NOT_SUPPORTED"
+    );
+    assert_eq!(
+        e.message(),
+        format!(
+            "query strings with non-ASCII characters are not supported yet in databases \
+             with encoding \"{}\"",
+            mbutils::GetDatabaseEncodingName()
+        )
+    );
+    assert_eq!(e.hint(), Some("Use a database with encoding \"UTF8\"."));
+}
