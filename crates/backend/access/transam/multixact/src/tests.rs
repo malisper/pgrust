@@ -4,6 +4,10 @@ use std::sync::atomic::AtomicU32 as StdAtomicU32;
 use std::sync::{Mutex, Once, OnceLock};
 use types_storage::multixact::MultiXactStatus::*;
 
+thread_local! {
+    static INJECT_WAL_ERROR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 static XLOG_INSERTS: Mutex<Vec<(u8, u8, Vec<u8>)>> = Mutex::new(Vec::new());
 static IN_PROGRESS_XIDS: Mutex<Vec<TransactionId>> = Mutex::new(Vec::new());
 static CURRENT_XID: StdAtomicU32 = StdAtomicU32::new(0);
@@ -44,6 +48,23 @@ fn write_fixture_segments(dir: &std::path::Path) {
     members_page[12..16].copy_from_slice(&101u32.to_ne_bytes());
     members_page[16..20].copy_from_slice(&102u32.to_ne_bytes());
     std::fs::write(dir.join("pg_multixact/members/0000"), &members_page).unwrap();
+}
+
+fn install_test_wal_seam() {
+    if !xloginsert_seams::xlog_insert::is_installed() {
+        xloginsert_seams::xlog_insert::set(|rmid, info, fragments| {
+            if INJECT_WAL_ERROR.get() {
+                assert_eq!(fragments[1].len(), 16384);
+                return Err(Box::new(PgError::new(ERROR, "injected WAL error")));
+            }
+            let mut data = Vec::new();
+            for f in fragments {
+                data.extend_from_slice(f);
+            }
+            XLOG_INSERTS.lock().unwrap().push((rmid, info, data));
+            Ok(0x1000)
+        });
+    }
 }
 
 fn setup() {
@@ -134,14 +155,7 @@ fn setup() {
         transam_xlog_seams::recovery_in_progress::set(|| false);
         transam_xlog_seams::xlog_flush::set(|_| Ok(()));
         transam_xlog_seams::count_ckpt_slru_written::set(|| {});
-        xloginsert_seams::xlog_insert::set(|rmid, info, fragments| {
-            let mut data = Vec::new();
-            for f in fragments {
-                data.extend_from_slice(f);
-            }
-            XLOG_INSERTS.lock().unwrap().push((rmid, info, data));
-            Ok(0x1000)
-        });
+        install_test_wal_seam();
         varsup_seams::advance_next_full_transaction_id_past_xid::set(|_| Ok(()));
 
         xact_seams::transaction_id_is_current_transaction_id::set(|xid| {
@@ -827,4 +841,123 @@ fn multixact_redo_unknown_op_code_is_c_panic_report() {
     let err = multixact_redo(&mut state).unwrap_err();
     assert_eq!(err.level, types_error::PANIC);
     assert_eq!(err.message(), "multixact_redo: unknown op code 112");
+}
+
+thread_local! {
+    static OWNER_CLEANUPS: RefCell<Vec<Box<dyn FnOnce()>>> = const { RefCell::new(Vec::new()) };
+}
+
+fn owner_cleanup_sink(_: mcx::SessionCleanupPhase, f: Box<dyn FnOnce()>) {
+    OWNER_CLEANUPS.with(|s| s.borrow_mut().push(f));
+}
+
+fn drain_owner_cleanups() {
+    loop {
+        let f = OWNER_CLEANUPS.with(|s| s.borrow_mut().pop());
+        match f {
+            Some(f) => f(),
+            None => break,
+        }
+    }
+}
+
+#[test]
+fn owned_family_session_lifecycle() {
+    let _l = test_lock();
+    mcx::set_session_cleanup_sink(owner_cleanup_sink);
+    MXACT_CACHE.with(|c| drop(c.borrow_mut().take()));
+    clear_member_scratch();
+    for _ in 0..3 {
+        let mut members = [MultiXactMember {
+            xid: 77,
+            status: MultiXactStatusForShare,
+        }; 2048];
+        assert_eq!(mXactCacheGetBySet(&mut members), InvalidMultiXactId);
+        MXACT_CACHE.with(|c| assert!(c.borrow().is_none()));
+        mXactCachePut(42, &members).unwrap();
+        let mut scratch = take_member_scratch().unwrap();
+        scratch.owner.with_mut(|s| {
+            assert_eq!(mXactCacheGetById(42, &mut s.buf), Some(2048));
+            let capacity = s.buf.capacity();
+            cache_clear();
+            mXactCachePut(42, &members).unwrap();
+            assert_eq!(mXactCacheGetById(42, &mut s.buf), Some(2048));
+            assert_eq!(s.buf.capacity(), capacity);
+            drain_owner_cleanups();
+            assert_eq!(s.buf[2047].xid, 77);
+        });
+        let mut next = take_member_scratch().unwrap();
+        let generation = next.generation;
+        next.owner.with_mut(|s| {
+            s.buf.push(MultiXactMember {
+                xid: 88,
+                status: MultiXactStatusForShare,
+            })
+        });
+        put_member_scratch(next);
+        put_member_scratch(scratch);
+        let next = take_member_scratch().unwrap();
+        assert_eq!(next.generation, generation);
+        next.owner.with(|s| assert_eq!(s.buf[0].xid, 88));
+        put_member_scratch(next);
+        drain_owner_cleanups();
+        MEMBER_SCRATCH.with(|s| assert!(s.borrow().is_none()));
+        assert!(!MEMBER_SCRATCH_INIT.get());
+        MXACT_CACHE.with(|c| assert!(c.borrow().is_none()));
+    }
+}
+
+#[test]
+fn owned_family_consumer_panic_and_reentry() {
+    let _l = test_lock();
+    mcx::set_session_cleanup_sink(owner_cleanup_sink);
+    clear_member_scratch();
+    let members = [MultiXactMember {
+        xid: 77,
+        status: MultiXactStatusForShare,
+    }];
+    mXactCachePut(42, &members).unwrap();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        GetMultiXactIdMembers(42, false, false, &mut |_| {
+            GetMultiXactIdMembers(42, false, false, &mut |_| {}).unwrap();
+        })
+        .unwrap();
+    }));
+    assert!(result.is_err());
+    assert_eq!(
+        GetMultiXactIdMembers(42, false, false, &mut |s| {
+            drain_owner_cleanups();
+            assert_eq!(s[0].xid, 77);
+        })
+        .unwrap(),
+        1
+    );
+    assert!(!MEMBER_SCRATCH_INIT.get());
+    let scratch = take_member_scratch().unwrap();
+    put_member_scratch(scratch);
+    drain_owner_cleanups();
+}
+
+#[test]
+fn owned_family_wal_error_retains_buffer() {
+    let _l = test_lock();
+    install_test_wal_seam();
+    mcx::set_session_cleanup_sink(owner_cleanup_sink);
+    INJECT_WAL_ERROR.set(true);
+    let members = [MultiXactMember {
+        xid: 77,
+        status: MultiXactStatusForShare,
+    }; 2048];
+    assert!(write_create_wal(&[], &members).is_err());
+    let capacity = WAL_SCRATCH.with(|s| s.borrow().as_ref().unwrap().with(|s| s.buf.capacity()));
+    assert!(write_create_wal(&[], &members).is_err());
+    WAL_SCRATCH.with(|s| {
+        s.borrow()
+            .as_ref()
+            .unwrap()
+            .with(|s| assert_eq!(s.buf.capacity(), capacity))
+    });
+    drain_owner_cleanups();
+    WAL_SCRATCH.with(|s| assert!(s.borrow().is_none()));
+    INJECT_WAL_ERROR.set(false);
 }

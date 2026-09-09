@@ -9,7 +9,7 @@ use std::sync::OnceLock;
 use elog::{elog, ereport};
 use init_small::globals;
 use lwlock::{LWLockAcquire, LWLockRelease, LWLock, LW_EXCLUSIVE, LW_SHARED};
-use mcx::{oom_named, MemoryContext, PgVec};
+use mcx::{oom_named, Mcx, McxOwned, MemoryContext, PgVec};
 use pmsignal::{PMSignalReason, SendPostmasterSignal};
 use slru::{
     check_slru_buffers, LwGuard, SimpleLruDoesPhysicalPageExist, SimpleLruGetBankLock,
@@ -338,17 +338,17 @@ fn write_offset_entry(
     buf[start..start + 4].copy_from_slice(&value.to_ne_bytes());
 }
 
-struct MXactCacheEnt {
+struct MXactCacheEnt<'mcx> {
     multi: MultiXactId,
-    members: PgVec<'static, MultiXactMember>,
+    members: PgVec<'mcx, MultiXactMember>,
 }
 
 // entries[..live] is the cache in recency order (head = most recent);
 // entries[live..] are spare slots whose member buffers retain capacity across
 // AtEOXact resets (C instead frees MXactContext per transaction).
-struct MXactCache {
-    cx: &'static MemoryContext,
-    entries: PgVec<'static, MXactCacheEnt>,
+struct MXactCache<'mcx> {
+    cx: Mcx<'mcx>,
+    entries: PgVec<'mcx, MXactCacheEnt<'mcx>>,
     live: usize,
 }
 
@@ -357,7 +357,7 @@ struct MXactCache {
 // none yet); PRE_INITIALIZED_OFFSETS_PAGE is the last page implicitly
 // initialized by a CREATE_ID record before its ZERO_OFF_PAGE was seen.
 thread_local! {
-    static MXACT_CACHE: RefCell<Option<MXactCache>> = const { RefCell::new(None) };
+    static MXACT_CACHE: RefCell<Option<McxOwned<CacheTy>>> = const { RefCell::new(None) };
     static PRE_INITIALIZED_OFFSETS_PAGE: std::cell::Cell<i64> = const { std::cell::Cell::new(-1) };
     static LAST_INITIALIZED_OFFSETS_PAGE: std::cell::Cell<i64> = const { std::cell::Cell::new(-1) };
 }
@@ -368,28 +368,38 @@ thread_local! {
     pub(crate) static CACHE_ID_HITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
-fn with_cache<R>(f: impl FnOnce(&mut MXactCache) -> R) -> R {
+mcx::bind!(CacheTy => MXactCache<'mcx>);
+
+fn with_cache<R>(f: impl for<'mcx> FnOnce(&mut MXactCache<'mcx>) -> R) -> Option<R> {
+    MXACT_CACHE.with(|c| c.borrow_mut().as_mut().map(|cache| cache.with_mut(f)))
+}
+
+fn with_cache_init<R>(f: impl for<'mcx> FnOnce(&mut MXactCache<'mcx>) -> R) -> PgResult<R> {
     MXACT_CACHE.with(|c| {
         let mut slot = c.borrow_mut();
-        let cache = slot.get_or_insert_with(|| {
-            let cx: &'static MemoryContext =
-                ::mcx::session_root("MultiXact cache context");
-            // LIFO: empty the droppy TLS cache before its context is freed.
-            ::mcx::register_session_cleanup(Box::new(|| {
+        if slot.is_none() {
+            *slot = Some(McxOwned::try_new(
+                MemoryContext::new("MultiXact cache context"),
+                |cx| {
+                    Ok(MXactCache {
+                        cx,
+                        entries: PgVec::new_in(cx),
+                        live: 0,
+                    })
+                },
+            )?);
+            mcx::register_session_cleanup(Box::new(|| {
                 MXACT_CACHE.with(|c| drop(c.borrow_mut().take()));
             }));
-            MXactCache {
-                cx,
-                entries: PgVec::new_in(cx.mcx()),
-                live: 0,
-            }
-        });
-        f(cache)
+        }
+        Ok(slot.as_mut().expect("cache initialized").with_mut(f))
     })
 }
 
 fn mxact_member_cmp(a: &MultiXactMember, b: &MultiXactMember) -> core::cmp::Ordering {
-    a.xid.cmp(&b.xid).then((a.status as i32).cmp(&(b.status as i32)))
+    a.xid
+        .cmp(&b.xid)
+        .then((a.status as i32).cmp(&(b.status as i32)))
 }
 
 fn members_eq(a: &[MultiXactMember], b: &[MultiXactMember]) -> bool {
@@ -415,9 +425,10 @@ fn mXactCacheGetBySet(members: &mut [MultiXactMember]) -> MultiXactId {
         }
         InvalidMultiXactId
     })
+    .unwrap_or(InvalidMultiXactId)
 }
 
-fn mXactCacheGetById(multi: MultiXactId, out: &mut PgVec<'static, MultiXactMember>) -> Option<i32> {
+fn mXactCacheGetById(multi: MultiXactId, out: &mut PgVec<'_, MultiXactMember>) -> Option<i32> {
     with_cache(|c| {
         for i in 0..c.live {
             if c.entries[i].multi == multi {
@@ -432,10 +443,11 @@ fn mXactCacheGetById(multi: MultiXactId, out: &mut PgVec<'static, MultiXactMembe
         }
         None
     })
+    .flatten()
 }
 
-fn mXactCachePut(multi: MultiXactId, members: &[MultiXactMember]) {
-    with_cache(|c| {
+fn mXactCachePut(multi: MultiXactId, members: &[MultiXactMember]) -> PgResult<()> {
+    with_cache_init(|c| {
         let slot = if c.live == MAX_CACHE_ENTRIES {
             c.live - 1
         } else if c.entries.len() > c.live {
@@ -444,7 +456,7 @@ fn mXactCachePut(multi: MultiXactId, members: &[MultiXactMember]) {
         } else {
             let ent = MXactCacheEnt {
                 multi: InvalidMultiXactId,
-                members: PgVec::new_in(c.cx.mcx()),
+                members: PgVec::new_in(c.cx),
             };
             c.entries.push(ent);
             c.live += 1;
@@ -464,44 +476,65 @@ fn mXactCachePut(multi: MultiXactId, members: &[MultiXactMember]) {
 fn cache_clear() {
     MXACT_CACHE.with(|c| {
         if let Some(cache) = c.borrow_mut().as_mut() {
-            cache.live = 0;
+            cache.with_mut(|cache| cache.live = 0);
         }
     });
 }
 
+struct MemberBuffer<'mcx> {
+    buf: PgVec<'mcx, MultiXactMember>,
+}
+mcx::bind!(MemberBufferTy => MemberBuffer<'mcx>);
+
 struct MemberScratch {
-    _cx: &'static MemoryContext,
-    buf: PgVec<'static, MultiXactMember>,
+    owner: McxOwned<MemberBufferTy>,
+    generation: u64,
 }
 
 thread_local! {
     static MEMBER_SCRATCH: RefCell<Option<MemberScratch>> = const { RefCell::new(None) };
     static MEMBER_SCRATCH_INIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static MEMBER_SCRATCH_GENERATION: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static WAL_SCRATCH: RefCell<Option<McxOwned<WalBufferTy>>> = const { RefCell::new(None) };
 }
 
-fn take_member_scratch() -> MemberScratch {
+fn clear_member_scratch() {
+    MEMBER_SCRATCH_INIT.set(false);
+    MEMBER_SCRATCH_GENERATION.set(
+        MEMBER_SCRATCH_GENERATION
+            .get()
+            .checked_add(1)
+            .expect("scratch generation overflow"),
+    );
+    MEMBER_SCRATCH.with(|s| drop(s.borrow_mut().take()));
+}
+
+fn take_member_scratch() -> PgResult<MemberScratch> {
     if !MEMBER_SCRATCH_INIT.get() {
+        let owner = McxOwned::try_new(MemoryContext::new("MultiXact member scratch"), |cx| {
+            Ok(MemberBuffer {
+                buf: PgVec::new_in(cx),
+            })
+        })?;
         MEMBER_SCRATCH_INIT.set(true);
-        let cx: &'static MemoryContext =
-            ::mcx::session_root("MultiXact member scratch");
-        // LIFO: empty the droppy TLS slot before its context is freed.
-        ::mcx::register_session_cleanup(Box::new(|| {
-            MEMBER_SCRATCH.with(|s| drop(s.borrow_mut().take()));
-        }));
-        return MemberScratch {
-            buf: PgVec::new_in(cx.mcx()),
-            _cx: cx,
-        };
+        mcx::register_session_cleanup(Box::new(clear_member_scratch));
+        return Ok(MemberScratch {
+            owner,
+            generation: MEMBER_SCRATCH_GENERATION.get(),
+        });
     }
     MEMBER_SCRATCH.with(|s| {
-        s.borrow_mut()
+        Ok(s.borrow_mut()
             .take()
-            .unwrap_or_else(|| panic!("GetMultiXactIdMembers re-entered from its consumer"))
+            .unwrap_or_else(|| panic!("GetMultiXactIdMembers re-entered from its consumer")))
     })
 }
 
 fn put_member_scratch(scratch: MemberScratch) {
-    MEMBER_SCRATCH.with(|s| *s.borrow_mut() = Some(scratch));
+    // Cleanup can run in the consumer; an old checkout must not enter the new session.
+    if scratch.generation == MEMBER_SCRATCH_GENERATION.get() && MEMBER_SCRATCH_INIT.get() {
+        MEMBER_SCRATCH.with(|s| *s.borrow_mut() = Some(scratch));
+    }
 }
 
 pub fn MultiXactIdCreate(
@@ -704,38 +737,48 @@ pub fn MultiXactIdCreateFromMembers(members: &mut [MultiXactMember]) -> PgResult
     globals::EndCriticalSection();
     res?;
 
-    mXactCachePut(multi, members);
+    mXactCachePut(multi, members)?;
     Ok(multi)
 }
 
+struct WalBuffer<'mcx> {
+    buf: PgVec<'mcx, u8>,
+}
+mcx::bind!(WalBufferTy => WalBuffer<'mcx>);
+
 fn write_create_wal(header: &[u8], members: &[MultiXactMember]) -> PgResult<()> {
-    thread_local! {
-        static WAL_SCRATCH: RefCell<Option<(&'static MemoryContext, PgVec<'static, u8>)>> =
-            const { RefCell::new(None) };
-    }
     WAL_SCRATCH.with(|s| {
         let mut slot = s.borrow_mut();
-        let (_, buf) = slot.get_or_insert_with(|| {
-            let cx: &'static MemoryContext =
-                ::mcx::session_root("MultiXact WAL scratch");
-            // LIFO: empty the droppy TLS slot before its context is freed.
-            ::mcx::register_session_cleanup(Box::new(|| {
+        if slot.is_none() {
+            *slot = Some(McxOwned::try_new(
+                MemoryContext::new("MultiXact WAL scratch"),
+                |cx| {
+                    Ok(WalBuffer {
+                        buf: PgVec::new_in(cx),
+                    })
+                },
+            )?);
+            mcx::register_session_cleanup(Box::new(|| {
                 WAL_SCRATCH.with(|s| drop(s.borrow_mut().take()));
             }));
-            (cx, PgVec::new_in(cx.mcx()))
-        });
-        buf.clear();
-        buf.reserve(members.len() * SIZE_OF_MULTIXACT_MEMBER);
-        for m in members {
-            buf.extend_from_slice(&m.xid.to_ne_bytes());
-            buf.extend_from_slice(&(m.status as i32).to_ne_bytes());
         }
-        xloginsert_seams::xlog_insert::call(
-            RM_MULTIXACT_ID,
-            XLOG_MULTIXACT_CREATE_ID,
-            &[header, buf],
-        )?;
-        Ok(())
+        slot.as_mut()
+            .expect("WAL scratch initialized")
+            .with_mut(|scratch| {
+                let buf = &mut scratch.buf;
+                buf.clear();
+                buf.reserve(members.len() * SIZE_OF_MULTIXACT_MEMBER);
+                for m in members {
+                    buf.extend_from_slice(&m.xid.to_ne_bytes());
+                    buf.extend_from_slice(&(m.status as i32).to_ne_bytes());
+                }
+                xloginsert_seams::xlog_insert::call(
+                    RM_MULTIXACT_ID,
+                    XLOG_MULTIXACT_CREATE_ID,
+                    &[header, buf],
+                )?;
+                Ok(())
+            })
     })
 }
 
@@ -1058,15 +1101,21 @@ pub fn GetMultiXactIdMembers(
             put_member_scratch(self.0.take().expect("scratch present until drop"));
         }
     }
-    let mut scratch = PutBack(Some(take_member_scratch()));
-    let buf = &mut scratch.0.as_mut().expect("scratch present until drop").buf;
-    let res = get_members_into(multi, is_lock_only, buf);
-    if let Ok(n) = res {
-        if n > 0 {
-            consume(buf);
-        }
-    }
-    res
+    let mut scratch = PutBack(Some(take_member_scratch()?));
+    scratch
+        .0
+        .as_mut()
+        .expect("scratch present until drop")
+        .owner
+        .with_mut(|scratch| {
+            let res = get_members_into(multi, is_lock_only, &mut scratch.buf);
+            if let Ok(n) = res {
+                if n > 0 {
+                    consume(&scratch.buf);
+                }
+            }
+            res
+        })
 }
 
 /// Reject a member count derived from untrusted SLRU offset entries. A valid
@@ -1084,7 +1133,7 @@ fn member_count_is_corrupt(length: i32) -> bool {
 fn get_members_into(
     multi: MultiXactId,
     is_lock_only: bool,
-    out: &mut PgVec<'static, MultiXactMember>,
+    out: &mut PgVec<'_, MultiXactMember>,
 ) -> PgResult<i32> {
     if let Some(n) = mXactCacheGetById(multi, out) {
         return Ok(n);
@@ -1265,7 +1314,7 @@ fn get_members_into(
     }
 
     debug_assert!(!out.is_empty());
-    mXactCachePut(multi, out);
+    mXactCachePut(multi, out)?;
     Ok(out.len() as i32)
 }
 
