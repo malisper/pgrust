@@ -812,17 +812,58 @@ fn CreateOptsFile(argv: &[String]) -> bool {
         line.push('"');
     }
     line.push('\n');
-    // vfs-routed (provider-seam reroute): postmaster.opts lives in the
-    // datadir domain; std::fs would bypass the sim namespace.
-    match fd::write_whole_file("postmaster.opts", line.as_bytes(), false) {
-        Ok(()) => true,
-        Err(en) => {
-            let _ = elog::ereport(LOG)
-                .with_saved_errno(en)
-                .errcode_for_file_access()
-                .errmsg("could not create file \"postmaster.opts\": %m".to_string())
-                .finish(loc(3862, "CreateOptsFile"));
-            false
-        }
+    // C is fopen("w") / fprintf / fclose (postmaster.c:4070-4088): an open
+    // failure is "could not create file", a write or close failure (fclose
+    // flushes the buffered line, so ENOSPC surfaces there) is "could not
+    // write file". vfs-routed (provider-seam reroute): postmaster.opts lives
+    // in the datadir domain; std::fs would bypass the sim namespace.
+    const OPTS_FILE: &str = "postmaster.opts";
+    let path = std::ffi::CString::new(OPTS_FILE).expect("OPTS_FILE has no NUL");
+    let fd = vfs::open(
+        &path,
+        libc::O_CREAT | libc::O_TRUNC | libc::O_WRONLY,
+        fd::vfd::pg_file_create_mode() as libc::mode_t,
+    );
+    if fd < 0 {
+        let _ = elog::ereport(LOG)
+            .with_saved_errno(vfs::get_errno())
+            .errcode_for_file_access()
+            .errmsg(format!("could not create file \"{OPTS_FILE}\": %m"))
+            .finish(loc(4072, "CreateOptsFile"));
+        return false;
     }
+    let bytes = line.as_bytes();
+    let mut off: usize = 0;
+    let mut write_errno: Option<i32> = None;
+    while off < bytes.len() {
+        let n = vfs::pwrite(fd, &bytes[off..], off as libc::off_t);
+        if n < 0 && vfs::get_errno() == libc::EINTR {
+            continue;
+        }
+        if n <= 0 {
+            // A short write with no errno is ENOSPC (fd::write_whole_file's
+            // convention, C's errno-for-short-write idiom).
+            let en = vfs::get_errno();
+            write_errno = Some(if en == 0 { libc::ENOSPC } else { en });
+            break;
+        }
+        off += n as usize;
+    }
+    let close_errno = match write_errno {
+        Some(en) => {
+            vfs::close(fd);
+            Some(en)
+        }
+        None if vfs::close(fd) < 0 => Some(vfs::get_errno()),
+        None => None,
+    };
+    if let Some(en) = close_errno {
+        let _ = elog::ereport(LOG)
+            .with_saved_errno(en)
+            .errcode_for_file_access()
+            .errmsg(format!("could not write file \"{OPTS_FILE}\": %m"))
+            .finish(loc(4085, "CreateOptsFile"));
+        return false;
+    }
+    true
 }
