@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+backend_progress = { path = "../../../utils/activity/backend_progress" }
 postgres_seams = { path = "../../../tcop/postgres_seams" }
 mcx = { path = "../../../../_support/mcx" }
 gin = { path = "../gin" }

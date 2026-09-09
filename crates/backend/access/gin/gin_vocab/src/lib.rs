@@ -119,6 +119,15 @@ pub const GINNProcs: usize = 7;
 
 pub const GIN_DEFAULT_USE_FASTUPDATE: bool = true;
 
+// gin.h:41-50: progress-reporting subphases of a GIN build
+// (PROGRESS_CREATEIDX_SUBPHASE values; PROGRESS_CREATEIDX_SUBPHASE_INITIALIZE
+// is 1, progress.h). Numbers must match ginbuildphasename (ginutil.c:712).
+pub const PROGRESS_GIN_PHASE_INDEXBUILD_TABLESCAN: i64 = 2;
+pub const PROGRESS_GIN_PHASE_PERFORMSORT_1: i64 = 3;
+pub const PROGRESS_GIN_PHASE_MERGE_1: i64 = 4;
+pub const PROGRESS_GIN_PHASE_PERFORMSORT_2: i64 = 5;
+pub const PROGRESS_GIN_PHASE_MERGE_2: i64 = 6;
+
 #[inline]
 pub fn gin_item_pointer_block(p: &ItemPointerData) -> BlockNumber {
     ItemPointerGetBlockNumberNoCheck(p)

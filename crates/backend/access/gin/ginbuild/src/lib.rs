@@ -89,6 +89,14 @@ pub fn ginbuild<'mcx>(
     // SAFETY: per erase contract below.
     let mut accum = Some(unsafe { erase(BuildAccumulator::new(tmp_ctx.mcx(), state)) });
 
+    // gininsert.c:676-678: report the table scan phase started (gin.h:46
+    // PROGRESS_GIN_PHASE_INDEXBUILD_TABLESCAN; ginutil.c:718 names it
+    // "scanning table" in pg_stat_progress_create_index).
+    backend_progress::pgstat_progress_update_param(
+        backend_progress::progress::PROGRESS_CREATEIDX_SUBPHASE,
+        PROGRESS_GIN_PHASE_INDEXBUILD_TABLESCAN,
+    );
+
     let reltuples = execindexing::table_index_build_scan(
         mcx,
         heap,

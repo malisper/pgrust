@@ -7120,6 +7120,7 @@ dependencies = [
 name = "ginbuild"
 version = "0.1.0"
 dependencies = [
+ "backend_progress",
  "bufmgr_seams",
  "execindexing",
  "gin",
