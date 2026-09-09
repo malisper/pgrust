@@ -911,6 +911,20 @@ seam_core::seam!(
     pub fn pg_statistic_slot_shape(tuple: &HeapTupleData<'_>) -> PgStatisticSlotShape
 );
 
+seam_core::seam!(
+    // SysCacheGetAttrNotNull(STATRELATTINH, statstuple, attnum) +
+    // DatumGetArrayTypePCopy (lsyscache.c:3536/3586): the detoasted, owned
+    // 4B-header image of one pg_statistic stanumbers<n>/stavalues<n> array
+    // column (attnum = Anum_pg_statistic_stanumbers1/stavalues1 + slot). A
+    // NULL column is syscache.c:641's "unexpected null value in cached tuple"
+    // ERROR.
+    pub fn pg_statistic_slot_array_image<'mcx>(
+        mcx: Mcx<'mcx>,
+        tuple: &HeapTupleData<'_>,
+        attnum: i32,
+    ) -> PgResult<PgVec<'mcx, u8>>
+);
+
 // One pg_statistic slot. Array images are fetched on first access via
 // lookup_pg_statistic_slot_images and decoded on first values()/numbers()
 // (C's get_attstatsslot laziness: the unique-column eq path never touches

@@ -2589,6 +2589,43 @@ fn lookup_pg_statistic_slot_images<'mcx>(
     Ok(syscache_seams::PgStatisticSlotImages { valuetype, stakind, staop, values_image, numbers_image })
 }
 
+// get_attstatsslot's Form_pg_statistic reads (lsyscache.c:3549-3559):
+// stakind1..5 / staop1..5 / stacoll1..5 of a pg_statistic tuple.
+fn pg_statistic_slot_shape(tuple: &HeapTupleData<'_>) -> syscache_seams::PgStatisticSlotShape {
+    let mut shape = syscache_seams::PgStatisticSlotShape {
+        stakind: [0; 5],
+        staop: [InvalidOid; 5],
+        stacoll: [InvalidOid; 5],
+    };
+    for i in 0..STATISTIC_NUM_SLOTS {
+        shape.stakind[i as usize] = getattr(tuple, STATRELATTINH, ANUM_PG_STATISTIC_STAKIND1 + i).as_i16();
+        shape.staop[i as usize] = getattr(tuple, STATRELATTINH, ANUM_PG_STATISTIC_STAOP1 + i).as_oid();
+        shape.stacoll[i as usize] = getattr(tuple, STATRELATTINH, ANUM_PG_STATISTIC_STACOLL1 + i).as_oid();
+    }
+    shape
+}
+
+// SysCacheGetAttrNotNull(STATRELATTINH, statstuple, attnum) followed by
+// DatumGetArrayTypePCopy (lsyscache.c:3536/3586): the detoasted, owned image
+// of one stanumbers<n>/stavalues<n> column. A NULL column is syscache.c:641's
+// elog(ERROR) naming the catalog and the column.
+fn pg_statistic_slot_array_image<'mcx>(
+    mcx: Mcx<'mcx>,
+    tuple: &HeapTupleData<'_>,
+    attnum: i32,
+) -> PgResult<PgVec<'mcx, u8>> {
+    match varlena_image(mcx, tuple, STATRELATTINH, attnum)? {
+        Some(image) => Ok(image),
+        None => {
+            let attname = tupdesc_for(STATRELATTINH).attr(attnum as usize - 1).attname;
+            Err(Box::new(types_error::PgError::error(format!(
+                "unexpected null value in cached tuple for catalog pg_statistic column {}",
+                String::from_utf8_lossy(attname.name_str())
+            ))))
+        }
+    }
+}
+
 fn decode_pg_statistic_values<'mcx>(
     mcx: Mcx<'mcx>,
     valuetype: Oid,
@@ -3151,6 +3188,8 @@ pub(crate) fn install_pg_statistic() {
     syscache_seams::decode_pg_statistic_values::set(decode_pg_statistic_values);
     syscache_seams::decode_pg_statistic_numbers::set(decode_pg_statistic_numbers);
     syscache_seams::pg_statistic_stawidth::set(pg_statistic_stawidth);
+    syscache_seams::pg_statistic_slot_shape::set(pg_statistic_slot_shape);
+    syscache_seams::pg_statistic_slot_array_image::set(pg_statistic_slot_array_image);
 }
 
 const ANUM_PG_TS_PARSER_PRSSTART: i32 = 4;

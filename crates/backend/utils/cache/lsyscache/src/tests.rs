@@ -461,8 +461,85 @@ fn install() {
             staop: [INT4_EQ, INT4_LT, 0, 0, 0],
             stacoll: [InvalidOid, InvalidOid, 0, 0, 0],
         });
+        s::pg_statistic_slot_array_image::set(mock_pg_statistic_slot_array_image);
         miscinit_seams::is_bootstrap_processing_mode::set(|| false);
     });
+}
+
+// The pg_statistic tuple behind pg_statistic_slot_shape above, column by
+// column: slot 1 (stakind 1) carries int4 stavalues {10,20,30} and float4
+// stanumbers {0.5,0.25}; slot 2 (stakind 2) carries text stavalues {ab,cde}
+// (a by-reference element type) and an int4 stanumbers2, which C's
+// get_attstatsslot rejects as "stanumbers is not a 1-D float4 array"
+// (lsyscache.c:3610). Every other array column is NULL, which
+// SysCacheGetAttrNotNull turns into syscache.c:641's ERROR.
+fn mock_pg_statistic_slot_array_image<'m>(
+    mcx: Mcx<'m>,
+    _tuple: &types_tuple::HeapTupleData<'_>,
+    attnum: i32,
+) -> types_error::PgResult<PgVec<'m, u8>> {
+    use datum::array_build::construct_array_image;
+    use datum::Datum;
+    match attnum {
+        ANUM_PG_STATISTIC_STANUMBERS1 => construct_array_image(
+            mcx,
+            &[Datum::from_f32(0.5), Datum::from_f32(0.25)],
+            types_core::FLOAT4OID,
+            4,
+            true,
+            b'i',
+        ),
+        ANUM_PG_STATISTIC_STAVALUES1 => construct_array_image(
+            mcx,
+            &[Datum::from_i32(10), Datum::from_i32(20), Datum::from_i32(30)],
+            INT4OID,
+            4,
+            true,
+            b'i',
+        ),
+        a if a == ANUM_PG_STATISTIC_STANUMBERS1 + 1 => {
+            construct_array_image(mcx, &[Datum::from_i32(1)], INT4OID, 4, true, b'i')
+        }
+        a if a == ANUM_PG_STATISTIC_STAVALUES1 + 1 => {
+            let ab = text_varlena(b"ab");
+            let cde = text_varlena(b"cde");
+            construct_array_image(
+                mcx,
+                &[Datum::from_usize(ab.as_ptr() as usize), Datum::from_usize(cde.as_ptr() as usize)],
+                TEXTOID,
+                -1,
+                false,
+                b'i',
+            )
+        }
+        a => {
+            let (col, n) = if a >= ANUM_PG_STATISTIC_STAVALUES1 {
+                ("stavalues", a - ANUM_PG_STATISTIC_STAVALUES1 + 1)
+            } else {
+                ("stanumbers", a - ANUM_PG_STATISTIC_STANUMBERS1 + 1)
+            };
+            Err(Box::new(types_error::PgError::error(format!(
+                "unexpected null value in cached tuple for catalog pg_statistic column {col}{n}"
+            ))))
+        }
+    }
+}
+
+// A 4-byte-header text varlena image (VARSIZE = header >> 2).
+fn text_varlena(payload: &[u8]) -> Vec<u8> {
+    let mut v = ((payload.len() as u32 + 4) << 2).to_ne_bytes().to_vec();
+    v.extend_from_slice(payload);
+    v
+}
+
+// Payload bytes of a by-reference text datum produced by deconstruct_array.
+fn text_datum_bytes(d: datum::Datum) -> Vec<u8> {
+    let p = d.as_usize() as *const u8;
+    // SAFETY: d points at a 4-byte-header varlena inside a live array image.
+    unsafe {
+        let len = (u32::from_ne_bytes(*(p as *const [u8; 4])) >> 2) as usize;
+        core::slice::from_raw_parts(p.add(4), len - 4).to_vec()
+    }
 }
 
 fn with_mcx<R>(f: impl for<'m> FnOnce(Mcx<'m>) -> R) -> R {
@@ -789,15 +866,18 @@ fn init_seams_installs() {
     );
 }
 
-// get_attstatsslot's stavalues / stanumbers extraction (lsyscache.c:3536)
-// is unported: asking for either array is a typed 0A000 refusal, never a
-// panic (audit-18.6 b169, row lsyscache-p2-7e8bcbf8).
+// get_attstatsslot's ATTSTATSSLOT_VALUES / ATTSTATSSLOT_NUMBERS arms
+// (lsyscache.c:3536-3639): stavalues is detoasted and deconstruct_array'd
+// under the element type's typlen/typbyval/typalign (valuetype reports the
+// array's element type), stanumbers must be a 1-D no-nulls float4 array, and
+// each array is only fetched when its flag is set (audit-18.6 w2-067, row
+// lsyscache-p2-7e8bcbf8; wave 1 left this arm a 0A000 refusal).
 #[test]
-fn attstatsslot_array_flags_are_typed_refusals() {
+fn attstatsslot_extracts_stavalues_and_stanumbers_like_c() {
     with_mcx(|m| {
         let image = [0u64; 8];
         // SAFETY: dummy aligned image, larger than the fixed header; the
-        // mocked pg_statistic_slot_shape seam never dereferences it.
+        // mocked pg_statistic seams never dereference it.
         let tuple = unsafe {
             types_tuple::HeapTupleData::from_raw_parts(
                 image.as_ptr().cast(),
@@ -806,18 +886,40 @@ fn attstatsslot_array_flags_are_typed_refusals() {
                 InvalidOid,
             )
         };
-        for flags in [ATTSTATSSLOT_VALUES, ATTSTATSSLOT_NUMBERS, ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS] {
-            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                get_attstatsslot(m, &tuple, 1, InvalidOid, flags).map(|s| s.is_some())
-            }));
-            let err = match r.expect("typed refusal, not a panic") {
-                Ok(_) => panic!("flags {flags:#x} must be refused"),
-                Err(e) => e,
-            };
-            assert_eq!(err.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
-            assert!(err.message().contains("not supported"), "{}", err.message());
-        }
-        // The flag-less lookup keeps working.
+        // Both arrays of slot 1 (by-value int4 stavalues).
+        let slot = get_attstatsslot(m, &tuple, 1, InvalidOid, ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS)
+            .unwrap()
+            .unwrap();
+        assert_eq!(slot.staop, INT4_EQ);
+        assert_eq!(slot.valuetype, INT4OID);
+        let values: Vec<i32> = slot.values.iter().map(|d| d.as_i32()).collect();
+        assert_eq!(values, [10, 20, 30]);
+        assert_eq!(&slot.numbers[..], [0.5f32, 0.25]);
+        free_attstatsslot(slot);
+        // ATTSTATSSLOT_VALUES alone leaves numbers NULL/0 (lsyscache.c:3521).
+        let slot = get_attstatsslot(m, &tuple, 1, InvalidOid, ATTSTATSSLOT_VALUES).unwrap().unwrap();
+        assert_eq!(slot.valuetype, INT4OID);
+        assert_eq!(slot.values.len(), 3);
+        assert!(slot.numbers.is_empty());
+        free_attstatsslot(slot);
+        // ATTSTATSSLOT_NUMBERS alone leaves valuetype/values InvalidOid/NULL/0.
+        let slot = get_attstatsslot(m, &tuple, 1, InvalidOid, ATTSTATSSLOT_NUMBERS).unwrap().unwrap();
+        assert_eq!(slot.valuetype, InvalidOid);
+        assert!(slot.values.is_empty());
+        assert_eq!(&slot.numbers[..], [0.5f32, 0.25]);
+        free_attstatsslot(slot);
+        // Slot 2: by-reference text stavalues stay readable after the slot is
+        // built (C keeps the detoasted array in values_arr, lsyscache.c:3568).
+        let slot = get_attstatsslot(m, &tuple, 2, INT4_LT, ATTSTATSSLOT_VALUES).unwrap().unwrap();
+        assert_eq!(slot.valuetype, TEXTOID);
+        let texts: Vec<Vec<u8>> = slot.values.iter().map(|&d| text_datum_bytes(d)).collect();
+        assert_eq!(texts, [b"ab".to_vec(), b"cde".to_vec()]);
+        free_attstatsslot(slot);
+        // Slot 2's stanumbers is an int4 array: lsyscache.c:3610's elog(ERROR).
+        let err = get_attstatsslot(m, &tuple, 2, INT4_LT, ATTSTATSSLOT_NUMBERS).unwrap_err();
+        assert_eq!(err.message(), "stanumbers is not a 1-D float4 array");
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+        // flags = 0 fetches nothing (a NULL stavalues3 would otherwise ERROR).
         assert!(get_attstatsslot(m, &tuple, 1, InvalidOid, 0).unwrap().is_some());
     });
 }

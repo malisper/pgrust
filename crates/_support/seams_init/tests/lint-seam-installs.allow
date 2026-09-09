@@ -64,4 +64,3 @@ get_xlog_receipt_time	INTENTIONAL	hot-standby conflict path already loud for oth
 # --- F10-F12: DEAD (deletion candidates per audit recommendation 4) ----------
 pgaio_io_start_readv	DEAD	FileStartReadV has no production caller (re-export only); aio_uring setup is a test fixture
 lookup_pg_transform_shape	DEAD	get_transform_fromsql/tosql have no production callers
-pg_statistic_slot_shape	DEAD	get_attstatsslot has no production callers; superseded by memoized lookup_pg_statistic_slot_images
