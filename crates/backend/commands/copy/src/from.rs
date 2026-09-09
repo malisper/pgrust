@@ -833,12 +833,15 @@ fn copy_from_body<'mcx>(
         }
 
         if has_generated_stored {
-            nodemodifytable::exec_compute_stored_generated(mcx, &mut generated_exprs, rel, slot)?;
+            nodemodifytable::exec_compute_stored_generated_in_row(
+                mcx, input_row_cx.mcx(), &mut generated_exprs, rel, slot,
+            )?;
         }
 
         // ExecConstraints (copyfrom.c:1352-1358): NOT NULL + CHECK.
-        nodemodifytable::exec_constraints(
+        nodemodifytable::exec_constraints_in_row(
             mcx,
+            input_row_cx.mcx(),
             &mut check_exprs,
             &mut virtual_nn_exprs,
             rel,
@@ -1260,10 +1263,13 @@ fn copy_from_partitioned_body<'mcx>(
             }
             // Compute stored generated columns on the leaf (copyfrom.c:1345-1350).
             if lrel.rd_att.constr.as_deref().is_some_and(|c| c.has_generated_stored) {
-                nodemodifytable::exec_compute_stored_generated(mcx, gen, lrel, use_slot)?;
+                nodemodifytable::exec_compute_stored_generated_in_row(
+                    mcx, input_row_cx.mcx(), gen, lrel, use_slot,
+                )?;
             }
-            nodemodifytable::exec_constraints(
+            nodemodifytable::exec_constraints_in_row(
                 mcx,
+                input_row_cx.mcx(),
                 &mut leaf_checks[leaf],
                 vnn,
                 lrel,
@@ -1371,10 +1377,13 @@ fn copy_from_partitioned_body<'mcx>(
             let lt = leaf_trig[leaf].as_mut().expect("leaf initialized");
             // Compute stored generated columns on the leaf (copyfrom.c:1345-1350).
             if lrel.rd_att.constr.as_deref().is_some_and(|c| c.has_generated_stored) {
-                nodemodifytable::exec_compute_stored_generated(mcx, &mut lt.gen, lrel, slot)?;
+                nodemodifytable::exec_compute_stored_generated_in_row(
+                    mcx, input_row_cx.mcx(), &mut lt.gen, lrel, slot,
+                )?;
             }
-            nodemodifytable::exec_constraints(
+            nodemodifytable::exec_constraints_in_row(
                 mcx,
+                input_row_cx.mcx(),
                 &mut leaf_checks[leaf],
                 &mut lt.vnn,
                 lrel,

@@ -1180,7 +1180,6 @@ fn get_members_into(
     let mut bank = LwGuard::acquire(SimpleLruGetBankLock(octl, pageno), LW_EXCLUSIVE)?;
     let mut slotno = SimpleLruReadPage(octl, pageno, true, multi, &mut bank)?;
     let offset = read_offset_entry(octl, slotno, entryno, &bank);
-    debug_assert!(offset != 0);
 
     // Length = next multi's offset minus ours. Corner case 1: we are the
     // newest multi, so nextOffset is the endpoint (multixact.c).

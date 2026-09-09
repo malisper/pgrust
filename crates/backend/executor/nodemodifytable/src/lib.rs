@@ -8503,6 +8503,26 @@ pub fn exec_compute_stored_generated<'mcx>(
     rel: &Relation<'mcx>,
     slot: &mut SlotData<'mcx>,
 ) -> PgResult<()> {
+    exec_compute_stored_generated_impl::<false>(mcx, mcx, generated_exprs, rel, slot)
+}
+
+pub fn exec_compute_stored_generated_in_row<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    row_mcx: mcx::Mcx<'_>,
+    generated_exprs: &mut Option<mcx::PgVec<'mcx, GeneratedExpr<'mcx>>>,
+    rel: &Relation<'mcx>,
+    slot: &mut SlotData<'mcx>,
+) -> PgResult<()> {
+    exec_compute_stored_generated_impl::<true>(mcx, row_mcx, generated_exprs, rel, slot)
+}
+
+fn exec_compute_stored_generated_impl<'mcx, const ROW: bool>(
+    mcx: mcx::Mcx<'mcx>,
+    row_mcx: mcx::Mcx<'_>,
+    generated_exprs: &mut Option<mcx::PgVec<'mcx, GeneratedExpr<'mcx>>>,
+    rel: &Relation<'mcx>,
+    slot: &mut SlotData<'mcx>,
+) -> PgResult<()> {
     let constr = rel.rd_att.constr.as_deref().expect("caller checked");
     if generated_exprs.is_none() {
         let mut compiled: mcx::PgVec<'mcx, GeneratedExpr<'mcx>> = mcx::PgVec::new_in(mcx);
@@ -8538,21 +8558,26 @@ pub fn exec_compute_stored_generated<'mcx>(
 
     exectuples::slot_getallattrs(slot);
     let exprs = generated_exprs.as_mut().expect("just built");
-    let mut results: mcx::PgVec<'mcx, (usize, Datum, bool)> = mcx::PgVec::new_in(mcx);
+    let mut results: mcx::PgVec<'_, (usize, Datum, bool)> = mcx::PgVec::new_in(row_mcx);
     results
         .try_reserve_exact(exprs.len())
         .map_err(|_| Box::new(mcx.oom(exprs.len() * 24)))?;
     for ge in exprs.iter_mut() {
         let mut slots = EvalSlots { scan: Some(slot), inner: None, outer: None };
-        let r = execexpr::exec_eval_expr(&mut ge.state, &mut slots)?;
+        if ROW {
+            // SAFETY: row results are owned by the slot before return; caches retain mcx.
+            unsafe { ge.state.arm_result_mcx_raw(row_mcx) };
+        }
+        let result = execexpr::exec_eval_expr(&mut ge.state, &mut slots);
+        if ROW {
+            ge.state.arm_result_mcx(mcx);
+        }
+        let r = result?;
         results.push((ge.attnum, r.value, r.isnull));
     }
-    // C copies every by-ref datum (old and computed) before the clear frees
-    // the backing image; the copies live in the query context, not C's
-    // per-tuple context — WATCH bulk-insert memory growth.
     let natts = rel.rd_att.natts as usize;
-    let mut values: mcx::PgVec<'mcx, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
-    let mut nulls: mcx::PgVec<'mcx, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+    let mut values: mcx::PgVec<'_, Datum> = mcx::vec_with_capacity_in(row_mcx, natts)?;
+    let mut nulls: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(row_mcx, natts)?;
     {
         let base = slot.base_mut();
         values.extend(base.tts_values.iter().copied());
@@ -8565,7 +8590,7 @@ pub fn exec_compute_stored_generated<'mcx>(
     for i in 0..natts {
         let att = rel.rd_att.attr(i);
         if !nulls[i] && !att.attbyval {
-            values[i] = copy_by_ref_datum(mcx, values[i], att.attlen)?;
+            values[i] = copy_by_ref_datum(row_mcx, values[i], att.attlen)?;
         }
     }
     exectuples::exec_clear_tuple(slot, mcx);
@@ -8575,6 +8600,15 @@ pub fn exec_compute_stored_generated<'mcx>(
         base.tts_isnull[i] = nulls[i];
     }
     exectuples::exec_store_virtual_tuple(slot);
+    if ROW {
+        if let Err(error) = exectuples::exec_materialize_slot(slot, mcx) {
+            exectuples::exec_clear_tuple(slot, mcx);
+            let base = slot.base_mut();
+            base.tts_values.fill(Datum::null());
+            base.tts_isnull.fill(true);
+            return Err(error);
+        }
+    }
     Ok(())
 }
 
@@ -8800,6 +8834,32 @@ pub fn exec_constraints<'mcx>(
     root_rel: Option<&Relation<'mcx>>,
     modified_cols: Option<&types_nodes::Bitmapset<'mcx>>,
 ) -> PgResult<()> {
+    exec_constraints_impl::<false>(mcx, mcx, check_exprs, virtual_nn_exprs, rel, slot, root_rel, modified_cols)
+}
+
+pub fn exec_constraints_in_row<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    row_mcx: mcx::Mcx<'_>,
+    check_exprs: &mut Option<mcx::PgVec<'mcx, CheckExpr<'mcx>>>,
+    virtual_nn_exprs: &mut Option<mcx::PgVec<'mcx, VirtualNnExpr<'mcx>>>,
+    rel: &Relation<'mcx>,
+    slot: &mut SlotData<'mcx>,
+    root_rel: Option<&Relation<'mcx>>,
+    modified_cols: Option<&types_nodes::Bitmapset<'mcx>>,
+) -> PgResult<()> {
+    exec_constraints_impl::<true>(mcx, row_mcx, check_exprs, virtual_nn_exprs, rel, slot, root_rel, modified_cols)
+}
+
+fn exec_constraints_impl<'mcx, const ROW: bool>(
+    mcx: mcx::Mcx<'mcx>,
+    row_mcx: mcx::Mcx<'_>,
+    check_exprs: &mut Option<mcx::PgVec<'mcx, CheckExpr<'mcx>>>,
+    virtual_nn_exprs: &mut Option<mcx::PgVec<'mcx, VirtualNnExpr<'mcx>>>,
+    rel: &Relation<'mcx>,
+    slot: &mut SlotData<'mcx>,
+    root_rel: Option<&Relation<'mcx>>,
+    modified_cols: Option<&types_nodes::Bitmapset<'mcx>>,
+) -> PgResult<()> {
     if let Some(constr) = rel.rd_att.constr.as_deref() {
         if constr.has_not_null {
             exec_not_null_constraints(mcx, rel, slot, root_rel, modified_cols)?;
@@ -8812,7 +8872,7 @@ pub fn exec_constraints<'mcx>(
         // execMain.c:2030: gate on pg_class.relchecks, not on the rows the
         // relcache found (ExecRelCheck reports the difference).
         if constr.relchecks > 0 {
-            if let Some(failed) = exec_rel_check(mcx, check_exprs, rel, slot)? {
+            if let Some(failed) = exec_rel_check::<ROW>(mcx, row_mcx, check_exprs, rel, slot)? {
                 return Err(check_violation(mcx, rel, slot, failed, root_rel, modified_cols));
             }
         }
@@ -8823,8 +8883,9 @@ pub fn exec_constraints<'mcx>(
 // ExecRelCheck (execMain.c): compile once into check_exprs, evaluate with the
 // slot as the scan tuple; ExecCheck semantics (NULL result passes). Returns
 // the failing constraint's index.
-fn exec_rel_check<'mcx>(
+fn exec_rel_check<'mcx, const ROW: bool>(
     mcx: mcx::Mcx<'mcx>,
+    row_mcx: mcx::Mcx<'_>,
     check_exprs: &mut Option<mcx::PgVec<'mcx, CheckExpr<'mcx>>>,
     rel: &Relation<'mcx>,
     slot: &mut SlotData<'mcx>,
@@ -8873,7 +8934,15 @@ fn exec_rel_check<'mcx>(
     for (i, ce) in check_exprs.as_mut().expect("just built").iter_mut().enumerate() {
         let Some(state) = ce.state.as_deref_mut() else { continue };
         let mut slots = EvalSlots { scan: Some(slot), inner: None, outer: None };
-        let r = execexpr::exec_eval_expr(state, &mut slots)?;
+        if ROW {
+            // SAFETY: only the CHECK Boolean escapes; persistent frames are restored below.
+            unsafe { state.arm_result_mcx_raw(row_mcx) };
+        }
+        let result = execexpr::exec_eval_expr(state, &mut slots);
+        if ROW {
+            state.arm_result_mcx(mcx);
+        }
+        let r = result?;
         if !r.isnull && !r.value.as_bool() {
             return Ok(Some(i));
         }
@@ -9476,3 +9545,6 @@ mod check_valid_result_rel_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod copy_row_tests;
