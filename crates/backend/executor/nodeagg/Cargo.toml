@@ -26,6 +26,7 @@ lsyscache = { path = "../../utils/cache/lsyscache" }
 coerce = { path = "../../parser/coerce" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 aclchk_seams = { path = "../../catalog/aclchk_seams" }
+objectaccess = { path = "../../catalog/objectaccess" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 execexpr = { path = "../execexpr" }
 execgrouping = { path = "../execgrouping" }

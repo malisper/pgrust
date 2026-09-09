@@ -50,6 +50,7 @@ adt_scalar = { path = "../../utils/adt/scalar" }
 clauses_seams = { path = "../../optimizer/util/clauses_seams" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 aclchk_seams = { path = "../../catalog/aclchk_seams" }
+objectaccess = { path = "../../catalog/objectaccess" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 init_small = { path = "../../utils/init/init_small" }
 dbcommands_seams = { path = "../../commands/dbcommands_seams" }

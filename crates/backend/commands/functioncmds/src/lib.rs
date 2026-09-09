@@ -1898,7 +1898,11 @@ pub fn ExecuteCallStmt<'mcx>(
         ));
     }
 
-    // InvokeFunctionExecuteHook: no hook surface exists (repo-wide).
+    // ExecuteCallStmt (functioncmds.c:2269): InvokeFunctionExecuteHook —
+    // the OAT_FUNCTION_EXECUTE object-access hook (objectaccess.h:213), fired
+    // right before fmgr_info (no EXECUTE-ACL gate here: the parser's
+    // LookupFuncWithArgs already checked it).
+    ::objectaccess::InvokeFunctionExecuteHook(fexpr.funcid)?;
     let mut flinfo = fmgr_seams::fmgr_info::call(fexpr.funcid)?;
     // C fmgr_info_set_expr(fexpr): sql_functions resolves RECORD result
     // shapes through fn_expr.

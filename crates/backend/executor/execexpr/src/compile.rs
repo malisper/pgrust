@@ -6071,12 +6071,16 @@ impl Drop for EconomyWindow {
 //
 // To preserve C's invariant, execmain opens a recording window over InitPlan;
 // every funcid whose EXECUTE privilege is checked during compile is recorded
-// here. execmain stores the recorded set on the estate and, on every
+// here. execmain stores the recorded list on the estate and, on every
 // parked-executor reuse (skeleton_rearm_exec), re-runs the same checks against
 // the CURRENT user id via `recheck_execute_acls`, matching C's per-execution
-// recheck. The window nests (SPI executors inside InitPlan) exactly like the
-// jit session, and resets on begin so an error-unwound prior window can never
-// contaminate the next statement.
+// recheck. The list keeps compile order WITH repeats: each entry is one C
+// ExecInitFunc-family gate, and the gate also fires the object-access hook
+// InvokeFunctionExecuteHook(funcid) (objectaccess.h:213) once per site, so a
+// reuse must replay the same sequence of hook invocations C's rebuilt
+// ExprStates would produce. The window nests (SPI executors inside InitPlan)
+// exactly like the jit session, and resets on begin so an error-unwound prior
+// window can never contaminate the next statement.
 thread_local! {
     static EXECUTE_ACL_SESSION: core::cell::RefCell<Option<ExecuteAclSession>> =
         const { core::cell::RefCell::new(None) };
@@ -6098,8 +6102,9 @@ pub fn execute_acl_session_begin() {
     });
 }
 
-/// Closes the window, returning the deduplicated funcids whose EXECUTE ACL was
-/// checked while it was open (empty when no window was open).
+/// Closes the window, returning, in compile order and with repeats, the
+/// funcids whose EXECUTE ACL was checked (and whose OAT_FUNCTION_EXECUTE hook
+/// fired) while it was open (empty when no window was open).
 pub fn execute_acl_session_end() -> alloc::vec::Vec<Oid> {
     EXECUTE_ACL_SESSION.with(|s| {
         let cur = s.borrow_mut().take();
@@ -6113,37 +6118,43 @@ pub fn execute_acl_session_end() -> alloc::vec::Vec<Oid> {
     })
 }
 
-// Records a checked funcid into the active recording window (no-op outside a
-// window: EPQ / utility / SPI-without-park compiles).
+// Records a gated funcid into the active recording window (no-op outside a
+// window: EPQ / utility / SPI-without-park compiles). Repeats are kept: C
+// gates (and fires the execute hook for) every ExecInitFunc-family site.
 fn execute_acl_record(funcid: Oid) {
     EXECUTE_ACL_SESSION.with(|s| {
         if let Some(cur) = s.borrow_mut().as_mut() {
-            if !cur.funcids.contains(&funcid) {
-                cur.funcids.push(funcid);
-            }
+            cur.funcids.push(funcid);
         }
     });
 }
 
-/// C's per-call ExecInitFunc EXECUTE-ACL gate:
+/// C's per-call ExecInitFunc EXECUTE-ACL gate (execExpr.c:2716-2718, and its
+/// twins at execExpr.c:1295-1311 ScalarArrayOpExpr, :4538-4542
+/// ExecBuildGroupingEqual, :4674-4678 ExecBuildParamSetEqual):
 /// object_aclcheck(PROCEDURE, funcid, GetUserId(), ACL_EXECUTE), erroring with
-/// C's text on denial. The checked funcid is recorded into the active
-/// recording window so a parked executor's reuse can replay the check
-/// (idx-112, CWE-863).
+/// C's text on denial, then InvokeFunctionExecuteHook(funcid) — the
+/// OAT_FUNCTION_EXECUTE object-access hook (objectaccess.h:213). The gated
+/// funcid is recorded into the active recording window so a parked executor's
+/// reuse can replay both the check and the hook (idx-112, CWE-863).
 fn check_execute_acl(mcx: Mcx<'_>, funcid: Oid, userid: Oid) -> PgResult<()> {
     let aclresult =
         aclchk_seams::object_aclcheck::call(PROCEDURE_RELATION_ID, funcid, userid, ACL_EXECUTE)?;
     if aclresult != ACLCHECK_OK {
         return Err(permission_denied(mcx, funcid)?);
     }
+    ::objectaccess::InvokeFunctionExecuteHook(funcid)?;
     execute_acl_record(funcid);
     Ok(())
 }
 
-/// Re-runs the recorded compile-time EXECUTE-ACL checks against the CURRENT
-/// user id. Called on every parked-executor reuse so a REVOKE EXECUTE or a
-/// SET ROLE between executions is honored exactly as C's per-execution
-/// ExecInitFunc recheck would honor it (idx-112, CWE-863).
+/// Re-runs the recorded compile-time ExecInitFunc gates against the CURRENT
+/// user id — the EXECUTE-ACL check and, on success, the OAT_FUNCTION_EXECUTE
+/// hook, per recorded site and in compile order. Called on every
+/// parked-executor reuse so a REVOKE EXECUTE or a SET ROLE between executions
+/// is honored, and an object-access-hook consumer sees every execution,
+/// exactly as C's per-ExecutorStart ExprState rebuild would (idx-112,
+/// CWE-863; audit fu06).
 pub fn recheck_execute_acls(mcx: Mcx<'_>, funcids: &[Oid]) -> PgResult<()> {
     if funcids.is_empty() {
         return Ok(());
@@ -6159,6 +6170,7 @@ pub fn recheck_execute_acls(mcx: Mcx<'_>, funcids: &[Oid]) -> PgResult<()> {
         if aclresult != ACLCHECK_OK {
             return Err(permission_denied(mcx, funcid)?);
         }
+        ::objectaccess::InvokeFunctionExecuteHook(funcid)?;
     }
     Ok(())
 }

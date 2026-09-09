@@ -785,12 +785,16 @@ fn fn_permission_denied(fnoid: Oid) -> Box<PgError> {
     Box::new(PgError::error(msg).with_sqlstate(::types_error::ERRCODE_INSUFFICIENT_PRIVILEGE))
 }
 
+// ExecInitAgg (nodeAgg.c:3861-3885 finalfn / serialfn / deserialfn,
+// :3959-3963 transfn): EXECUTE check on one component function as the
+// aggregate owner, then InvokeFunctionExecuteHook (objectaccess.h:213).
 fn component_fn_aclcheck(fnoid: Oid, agg_owner: Oid) -> PgResult<()> {
     let aclresult =
         aclchk_seams::object_aclcheck::call(PROCEDURE_RELATION_ID, fnoid, agg_owner, ACL_EXECUTE)?;
     if aclresult != ACLCHECK_OK {
         return Err(fn_permission_denied(fnoid));
     }
+    ::objectaccess::InvokeFunctionExecuteHook(fnoid)?;
     Ok(())
 }
 
@@ -1144,6 +1148,8 @@ pub fn exec_init_agg<'mcx>(
         if aclresult != ACLCHECK_OK {
             return Err(agg_permission_denied(aggref.aggfnoid));
         }
+        // ExecInitAgg (nodeAgg.c:3799): InvokeFunctionExecuteHook(aggfnoid).
+        ::objectaccess::InvokeFunctionExecuteHook(aggref.aggfnoid)?;
         let shape = syscache_seams::lookup_pg_aggregate_shape::call(aggref.aggfnoid)?
             .ok_or_else(|| agg_lookup_failed(aggref.aggfnoid))?;
         let is_ordered_set = shape.aggkind != AGGKIND_NORMAL;

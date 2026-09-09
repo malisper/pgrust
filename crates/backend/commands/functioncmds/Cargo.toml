@@ -23,6 +23,7 @@ elog = { path = "../../utils/error/elog" }
 catalog_namespace = { path = "../../catalog/catalog_namespace" }
 aclchk = { path = "../../catalog/aclchk" }
 aclchk_seams = { path = "../../catalog/aclchk_seams" }
+objectaccess = { path = "../../catalog/objectaccess" }
 cache_syscache = { path = "../../utils/cache/cache_syscache" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 lsyscache = { path = "../../utils/cache/lsyscache" }

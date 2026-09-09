@@ -544,9 +544,9 @@ fn wfunc_strictness_mismatch() -> Box<PgError> {
     )
 }
 
-// initialize_peragg (nodeWindowAgg.c:2911-2944): EXECUTE check on one
-// component function, run as the aggregate owner (pg_proc.proowner).
-// InvokeFunctionExecuteHook: no hook surface exists (repo-wide).
+// initialize_peragg (nodeWindowAgg.c:3002-3026): EXECUTE check on one
+// component function (transfn / invtransfn / finalfn), run as the aggregate
+// owner (pg_proc.proowner), then InvokeFunctionExecuteHook (objectaccess.h:213).
 fn component_fn_aclcheck(mcx: ::mcx::Mcx<'_>, fnoid: Oid, agg_owner: Oid) -> PgResult<()> {
     let aclresult =
         aclchk_seams::object_aclcheck::call(PROCEDURE_RELATION_ID, fnoid, agg_owner, ACL_EXECUTE)?;
@@ -558,6 +558,7 @@ fn component_fn_aclcheck(mcx: ::mcx::Mcx<'_>, fnoid: Oid, agg_owner: Oid) -> PgR
             name.as_ref().map(|n| n.as_str()).unwrap_or(""),
         )?;
     }
+    ::objectaccess::InvokeFunctionExecuteHook(fnoid)?;
     Ok(())
 }
 
@@ -891,6 +892,8 @@ pub fn exec_init_window_agg<'mcx>(
                 name.as_ref().map(|n| n.as_str()).unwrap_or(""),
             )?;
         }
+        // ExecInitWindowAgg (nodeWindowAgg.c:2710): InvokeFunctionExecuteHook.
+        ::objectaccess::InvokeFunctionExecuteHook(wfunc.winfnoid)?;
         wfuncnos.push((wnode, wfuncno as u16));
 
         let mut argstates: PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>> = PgVec::new_in(mcx);

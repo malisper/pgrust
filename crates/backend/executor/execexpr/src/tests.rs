@@ -1072,6 +1072,74 @@ fn parked_reuse_replays_function_execute_acl() {
     });
 }
 
+// Audit fu06 (OAT_FUNCTION_EXECUTE): C's ExecInitFunc gate fires the
+// object-access hook InvokeFunctionExecuteHook(funcid) (execExpr.c:2718,
+// objectaccess.h:213) right after the EXECUTE-ACL check, once per site, and
+// again on every ExecutorStart (C rebuilds the ExprStates). Here: (1) compiling
+// one OpExpr under a recording window invokes the hook exactly once with
+// OAT_FUNCTION_EXECUTE / ProcedureRelationId / the operator's funcid, and (2)
+// the parked-reuse replay (`recheck_execute_acls`) fires it again in the same
+// order, so a hook consumer sees every execution of a parked plan.
+static FUNCTION_EXECUTE_HOOK_LOG: std::sync::Mutex<alloc::vec::Vec<(u32, u32)>> =
+    std::sync::Mutex::new(alloc::vec::Vec::new());
+
+fn function_execute_hook_recorder(
+    access: ::objectaccess::ObjectAccessType,
+    class_id: u32,
+    object_id: u32,
+    sub_id: i32,
+    arg: &mut ::objectaccess::ObjectAccessArg<'_>,
+) -> ::types_error::PgResult<()> {
+    assert_eq!(access, ::objectaccess::OAT_FUNCTION_EXECUTE);
+    assert_eq!(sub_id, 0);
+    assert!(matches!(arg, ::objectaccess::ObjectAccessArg::None));
+    FUNCTION_EXECUTE_HOOK_LOG.lock().unwrap().push((class_id, object_id));
+    Ok(())
+}
+
+#[test]
+fn exec_init_func_fires_function_execute_hook_and_reuse_replays_it() {
+    install_seams();
+    ACL_DENY.with(|d| d.borrow_mut().clear());
+    FUNCTION_EXECUTE_HOOK_LOG.lock().unwrap().clear();
+    let prev = ::objectaccess::set_object_access_hook(Some(function_execute_hook_recorder));
+    with_mcx(|mcx| {
+        let args = NodeList::make2(
+            mcx,
+            mk_scan_var(mcx, 1, INT4OID),
+            mk_int4_const(mcx, Some(7)),
+        )
+        .unwrap();
+        crate::compile::execute_acl_session_begin();
+        let _state = qual_state(mcx, mk_opexpr(mcx, 65, BOOLOID, args));
+        let funcids = crate::compile::execute_acl_session_end();
+        // execExpr.c:2718: one hook invocation per ExecInitFunc, after the
+        // ACL check passed: (ProcedureRelationId, funcid).
+        assert_eq!(
+            FUNCTION_EXECUTE_HOOK_LOG.lock().unwrap().clone(),
+            alloc::vec![(1255u32, 65u32)],
+            "compiling one OpExpr must fire OAT_FUNCTION_EXECUTE exactly once"
+        );
+        assert_eq!(funcids, alloc::vec![65u32]);
+
+        // Parked reuse == C's ExecutorStart rebuild: the hook fires again.
+        crate::compile::recheck_execute_acls(mcx, &funcids).unwrap();
+        assert_eq!(
+            FUNCTION_EXECUTE_HOOK_LOG.lock().unwrap().clone(),
+            alloc::vec![(1255u32, 65u32), (1255u32, 65u32)],
+            "parked reuse must replay the execute hook"
+        );
+
+        // Denied on reuse: C errors in aclcheck_error BEFORE the hook — no
+        // third invocation.
+        ACL_DENY.with(|d| d.borrow_mut().push(65));
+        crate::compile::recheck_execute_acls(mcx, &funcids).err().unwrap();
+        assert_eq!(FUNCTION_EXECUTE_HOOK_LOG.lock().unwrap().len(), 2);
+        ACL_DENY.with(|d| d.borrow_mut().clear());
+    });
+    ::objectaccess::set_object_access_hook(prev);
+}
+
 #[test]
 fn cmp_op_semantics_match_int_c() {
     assert!(CmpOp::Int4Eq.eval(Datum::from_i32(-1), Datum::from_i32(-1)));

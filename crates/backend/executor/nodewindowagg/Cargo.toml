@@ -22,6 +22,7 @@ coerce = { path = "../../parser/coerce" }
 regproc = { package = "adt_regproc", path = "../../utils/adt/regproc" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 aclchk_seams = { path = "../../catalog/aclchk_seams" }
+objectaccess = { path = "../../catalog/objectaccess" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 execexpr = { path = "../execexpr" }
 exectuples = { path = "../exectuples" }
