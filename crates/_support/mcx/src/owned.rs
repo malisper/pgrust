@@ -4,6 +4,41 @@ use ::types_error::PgResult;
 
 use crate::{Mcx, MemoryContext};
 
+pub struct PinnedContext(NonNull<MemoryContext>);
+
+impl PinnedContext {
+    pub fn new(ctx: MemoryContext) -> Self {
+        let raw = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(ctx));
+        // SAFETY: Box::into_raw returns a non-null, uniquely owned allocation.
+        Self(unsafe { NonNull::new_unchecked(raw) })
+    }
+
+    /// # Safety
+    /// All copied handles and derived references must cease being used before
+    /// this owner drops. Allocation destructors must run before the owner.
+    pub unsafe fn handle(&self) -> Mcx<'static> {
+        // SAFETY: the raw owner survives moves without retagging the context;
+        // the caller bounds every borrower to this allocation's lifetime.
+        unsafe { (*self.0.as_ptr()).mcx() }
+    }
+}
+
+impl core::ops::Deref for PinnedContext {
+    type Target = MemoryContext;
+
+    fn deref(&self) -> &MemoryContext {
+        // SAFETY: the owner keeps the allocation live for this shared borrow.
+        unsafe { self.0.as_ref() }
+    }
+}
+
+impl Drop for PinnedContext {
+    fn drop(&mut self) {
+        // SAFETY: sole owner; handle's contract requires all borrowers dead.
+        drop(unsafe { alloc::boxed::Box::from_raw(self.0.as_ptr()) });
+    }
+}
+
 pub trait Bind {
     type Out<'mcx>;
 }

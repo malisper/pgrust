@@ -1723,6 +1723,30 @@ fn aset_stats_walk_blocks_and_freelists() {
 }
 
 #[test]
+fn pinned_context_handle_survives_moves() {
+    struct Holder {
+        rows: PgVec<'static, u64>,
+        ctx: PinnedContext,
+    }
+    for ctx in [MemoryContext::new("pinned aset"), MemoryContext::new_bump("pinned bump")] {
+        let ctx = PinnedContext::new(ctx);
+        // SAFETY: rows drops before ctx, including while Holder is unwound.
+        let mut rows = vec_with_capacity_in(unsafe { ctx.handle() }, 2).unwrap();
+        rows.extend(0..2);
+        let holder = Holder { rows, ctx };
+        let mut parked = alloc::vec::Vec::new();
+        parked.push(holder);
+        let mut holder = parked.pop().unwrap();
+        holder.rows.extend(2..32);
+        assert_eq!(holder.rows.iter().sum::<u64>(), 496);
+        assert!(holder.ctx.used() > 0);
+        let Holder { rows, ctx } = holder;
+        drop(rows);
+        drop(ctx);
+    }
+}
+
+#[test]
 fn aset_stats_footprint_includes_freed_blocks_and_reset_keeper() {
     let mut ctx = MemoryContext::new("stats-retained");
     let buffers: std::vec::Vec<_> = (0..200)

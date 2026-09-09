@@ -31,7 +31,7 @@ mod slab;
 mod string;
 pub use arena_safe::{ArenaForget, ArenaSafe, ForgetSafe};
 pub use aset::alloc_stats;
-pub use owned::{Bind, McxOwned};
+pub use owned::{Bind, McxOwned, PinnedContext};
 pub use string::PgString;
 
 /// # Safety: caller asserts the full [`ArenaSafe`] contract; the field list is only a guard.

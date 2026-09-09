@@ -230,7 +230,8 @@ pub(crate) fn ginNewScanKey(
     so: &mut GinScanOpaqueData,
 ) -> PgResult<()> {
     let state = so.ginstate.expect("ginstate initialized at beginscan");
-    let mut work = GinScanWork::new();
+    // SAFETY: key-context borrowers stay in work until rescan/endscan drops it.
+    let mut work = unsafe { GinScanWork::new() };
     so.isVoidRes = false;
 
     let mut has_null_query = false;
