@@ -64,10 +64,12 @@ pub(crate) fn OidIsValid(oid: Oid) -> bool {
     oid != InvalidOid
 }
 
-struct PathState {
-    mcx: Mcx<'static>,
-    base_search_path: PgVec<'static, Oid>,
+struct PathState<'mcx> {
+    mcx: Mcx<'mcx>,
+    base_search_path: PgVec<'mcx, Oid>,
 }
+
+mcx::bind!(PathStateTy => PathState<'mcx>);
 
 thread_local! {
     pub(crate) static MY_TEMP_NAMESPACE: Cell<Oid> = const { Cell::new(InvalidOid) };
@@ -81,31 +83,52 @@ thread_local! {
     // INVARIANT: never zero (zero means "not known equal" in matchers).
     pub(crate) static ACTIVE_PATH_GENERATION: Cell<u64> = const { Cell::new(1) };
     pub(crate) static NAMESPACE_SEARCH_PATH: RefCell<Option<String>> = const { RefCell::new(None) };
-    // The baseSearchPath list (C: TopMemoryContext). The context is leaked,
-    // list replacement frees the old allocation through it.
-    static PATH: RefCell<Option<ManuallyDrop<PathState>>> = const { RefCell::new(None) };
+    static PATH: RefCell<Option<ManuallyDrop<mcx::McxOwned<PathStateTy>>>> = const { RefCell::new(None) };
 }
 
-pub(crate) fn with_path_state<R>(f: impl FnOnce(&mut PathState) -> R) -> R {
+fn clear_path_state() {
+    let old = PATH.with(|cell| cell.borrow_mut().take());
+    BASE_SEARCH_PATH_VALID.set(false);
+    BASE_CREATION_NAMESPACE.set(InvalidOid);
+    BASE_TEMP_CREATION_PENDING.set(false);
+    NAMESPACE_USER.set(InvalidOid);
+    ACTIVE_PATH_GENERATION.set(ACTIVE_PATH_GENERATION.get().wrapping_add(1).max(1));
+    path::invalidate_search_path_cache();
+    if let Some(owner) = old {
+        drop(ManuallyDrop::into_inner(owner));
+    }
+}
+
+pub(crate) fn with_path_state_mut<R>(
+    f: impl for<'mcx> FnOnce(&mut PathState<'mcx>) -> PgResult<R>,
+) -> PgResult<R> {
     PATH.with(|cell| {
         let mut slot = cell.borrow_mut();
-        let st = slot.get_or_insert_with(|| {
-            let mcx = ::mcx::session_root("namespace base search path").mcx();
-            ManuallyDrop::new(PathState {
-                mcx,
-                base_search_path: PgVec::new_in(mcx),
-            })
-        });
-        f(st)
+        if slot.is_none() {
+            let owner = mcx::McxOwned::try_new(
+                mcx::MemoryContext::new("namespace base search path"),
+                |mcx| Ok(PathState { mcx, base_search_path: PgVec::new_in(mcx) }),
+            )?;
+            *slot = Some(ManuallyDrop::new(owner));
+            mcx::register_session_cleanup(Box::new(clear_path_state));
+        }
+        slot.as_mut().unwrap().with_mut(f)
+    })
+}
+
+pub(crate) fn with_path<R>(f: impl FnOnce(&[Oid]) -> R) -> R {
+    PATH.with(|cell| match cell.borrow().as_ref() {
+        Some(owner) => owner.with(|st| f(&st.base_search_path)),
+        None => f(&[]),
     })
 }
 
 pub(crate) fn base_path_len() -> usize {
-    with_path_state(|st| st.base_search_path.len())
+    with_path(|path| path.len())
 }
 
 pub(crate) fn base_path_nth(i: usize) -> Oid {
-    with_path_state(|st| st.base_search_path[i])
+    with_path(|path| path[i])
 }
 
 pub fn my_temp_namespace() -> Oid {

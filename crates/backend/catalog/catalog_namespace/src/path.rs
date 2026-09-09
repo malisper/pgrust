@@ -9,7 +9,7 @@ use cache_syscache::cacheinfo::{AUTHMEMROLEMEM, AUTHOID, DATABASEOID, NAMESPACEO
 
 use crate::lookup::get_namespace_oid;
 use crate::{
-    with_path_state, OidIsValid, ACTIVE_PATH_GENERATION, BASE_CREATION_NAMESPACE,
+    with_path, with_path_state_mut, OidIsValid, ACTIVE_PATH_GENERATION, BASE_CREATION_NAMESPACE,
     BASE_SEARCH_PATH_VALID, BASE_TEMP_CREATION_PENDING, MY_TEMP_NAMESPACE,
     NAMESPACE_SEARCH_PATH, NAMESPACE_USER,
 };
@@ -326,7 +326,7 @@ pub(crate) fn recomputeNamespacePath() -> PgResult<()> {
 
     let search_path = NAMESPACE_SEARCH_PATH.with(|s| s.borrow().clone()).unwrap_or_default();
     let pathChanged = cachedNamespacePath(&search_path, roleid, |entry, final_path| {
-        with_path_state(|ps| {
+        with_path_state_mut(|ps| {
             let changed = !(BASE_CREATION_NAMESPACE.with(Cell::get) == entry.first_ns
                 && BASE_TEMP_CREATION_PENDING.with(Cell::get) == entry.temp_missing
                 && ps.base_search_path.as_slice() == final_path);
@@ -393,7 +393,7 @@ pub(crate) fn assign_search_path_hook(
 
 pub fn InitializeSearchPath() -> PgResult<()> {
     if miscinit_seams::is_bootstrap_processing_mode::call() {
-        with_path_state(|ps| -> PgResult<()> {
+        with_path_state_mut(|ps| -> PgResult<()> {
             ps.base_search_path = slice_in(ps.mcx, &[PG_CATALOG_NAMESPACE])?;
             Ok(())
         })?;
@@ -456,7 +456,7 @@ pub fn fetch_search_path<'mcx>(
         recomputeNamespacePath()?;
     }
 
-    let mut result = with_path_state(|ps| slice_in(mcx, &ps.base_search_path))?;
+    let mut result = with_path(|path| slice_in(mcx, path))?;
     if !includeImplicit {
         let creation = BASE_CREATION_NAMESPACE.with(Cell::get);
         while !result.is_empty() && result[0] != creation {
@@ -472,9 +472,9 @@ pub fn fetch_search_path_array(sarray: &mut [Oid]) -> PgResult<usize> {
     recomputeNamespacePath()?;
 
     let mtn = MY_TEMP_NAMESPACE.with(Cell::get);
-    Ok(with_path_state(|ps| {
+    Ok(with_path(|path| {
         let mut count = 0;
-        for &namespaceId in ps.base_search_path.iter() {
+        for &namespaceId in path.iter() {
             if namespaceId == mtn {
                 continue;
             }
@@ -500,8 +500,7 @@ pub fn GetSearchPathMatcher<'mcx>(mcx: Mcx<'mcx>) -> PgResult<SearchPathMatcher<
 
     let creation = BASE_CREATION_NAMESPACE.with(Cell::get);
     let mtn = MY_TEMP_NAMESPACE.with(Cell::get);
-    with_path_state(|ps| {
-        let path = ps.base_search_path.as_slice();
+    with_path(|path| {
         let mut skip = 0;
         let mut addTemp = false;
         let mut addCatalog = false;
@@ -543,8 +542,7 @@ pub fn SearchPathMatchesCurrentEnvironment(path: &mut SearchPathMatcher<'_>) -> 
         return Ok(true);
     }
 
-    let matches = with_path_state(|ps| {
-        let active = ps.base_search_path.as_slice();
+    let matches = with_path(|active| {
         let mut lc = 0;
         if path.addTemp {
             if lc < active.len() && active[lc] == MY_TEMP_NAMESPACE.with(Cell::get) {

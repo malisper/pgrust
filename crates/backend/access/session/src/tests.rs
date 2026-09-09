@@ -1256,7 +1256,9 @@ fn tls_source_census_and_session_surface_are_pinned() {
     // diagnostics under cfg(test) only; no production session state.
     // 602: sequence session_sequence_cleanup_tests::CLEANUPS records cleanup
     // callbacks under cfg(test) only; no production session state.
-    assert_eq!(count_tree(crates), 603, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 603: catalog_namespace/tests.rs registered-cleanup CLEANUPS is a
+    // cfg(test) callback recorder; no production session state.
+    assert_eq!(count_tree(crates), 604, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

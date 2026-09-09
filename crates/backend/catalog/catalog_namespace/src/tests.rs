@@ -19,6 +19,7 @@ thread_local! {
     static NS_BY_NAME: RefCell<HashMap<String, Oid>> = RefCell::new(HashMap::new());
     static RELS: RefCell<HashMap<(String, Oid), Oid>> = RefCell::new(HashMap::new());
     static ROLNAME: RefCell<Option<String>> = const { RefCell::new(None) };
+    static BOOTSTRAP: Cell<bool> = const { Cell::new(false) };
     static USER: Cell<Oid> = const { Cell::new(USER_A) };
     static ACL_DENIED: RefCell<Vec<Oid>> = const { RefCell::new(Vec::new()) };
     // InitTempTableNamespace's RecoveryInProgress()/IsParallelWorker() arms.
@@ -31,7 +32,7 @@ fn install_fakes() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         miscinit_seams::get_user_id::set(|| USER.with(Cell::get));
-        miscinit_seams::is_bootstrap_processing_mode::set(|| false);
+        miscinit_seams::is_bootstrap_processing_mode::set(|| BOOTSTRAP.get());
         aclchk_seams::object_aclcheck::set(|_classid, objid, _roleid, _mode| {
             Ok(if ACL_DENIED.with(|d| d.borrow().contains(&objid)) {
                 1
@@ -93,6 +94,7 @@ fn install_fakes() {
     });
     ROLNAME.with(|r| *r.borrow_mut() = None);
     ACL_DENIED.with(|d| d.borrow_mut().clear());
+    BOOTSTRAP.set(false);
     USER.with(|u| u.set(USER_A));
     IN_RECOVERY.with(|c| c.set(false));
     PARALLEL_WORKER.with(|c| c.set(false));
@@ -797,4 +799,110 @@ fn funcname_candidates_arrays_miss_is_an_error_not_a_panic() {
     .err()
     .expect("a vanished pg_proc row must be reported as an error");
     assert_eq!(err.message(), "cache lookup failed for function 9001");
+}
+
+#[test]
+fn session_namespace_noninitializing_reads_and_borrowed_teardown() {
+    clear_path_state();
+    assert_eq!(base_path_len(), 0);
+    PATH.with(|slot| assert!(slot.borrow().is_none()));
+    with_path_state_mut(|st| {
+        st.base_search_path = mcx::slice_in(st.mcx, &[NS_PUBLIC])?;
+        let value = mcx::alloc_leak_in(st.mcx, [7u8; 16384]).unwrap();
+        assert!(std::panic::catch_unwind(clear_path_state).is_err());
+        assert_eq!(value[16383], 7);
+        Ok(())
+    }).unwrap();
+    assert!(std::panic::catch_unwind(|| with_path(|_| clear_path_state())).is_err());
+    assert_eq!(base_path_nth(0), NS_PUBLIC);
+    clear_path_state();
+}
+
+#[test]
+fn session_namespace_cleanup_rebuilds_worker_path_and_matcher() {
+    install_fakes();
+    clear_path_state();
+    MY_TEMP_NAMESPACE.set(InvalidOid);
+    MY_TEMP_TOAST_NAMESPACE.set(InvalidOid);
+    MY_TEMP_NAMESPACE_SUB_ID.set(InvalidSubTransactionId);
+    let ctx = MemoryContext::new("namespace caller");
+    set_search_path("public");
+    let copied = fetch_search_path(ctx.mcx(), true).unwrap();
+    let mut matcher = GetSearchPathMatcher(ctx.mcx()).unwrap();
+    let old_generation = matcher.generation;
+    clear_path_state();
+    assert!(!BASE_SEARCH_PATH_VALID.get());
+    assert!(ACTIVE_PATH_GENERATION.get() > old_generation);
+    assert_eq!(copied.as_slice(), &[PG_CATALOG_NAMESPACE, NS_PUBLIC]);
+    set_search_path("s1");
+    ResetTempNamespaceStateForRetainedPark();
+    assert!(!SearchPathMatchesCurrentEnvironment(&mut matcher).unwrap());
+    assert_eq!(fetch_search_path(ctx.mcx(), false).unwrap().as_slice(), &[NS_S1]);
+    clear_path_state();
+    BOOTSTRAP.set(true);
+    InitializeSearchPath().unwrap();
+    assert_eq!(base_path_nth(0), PG_CATALOG_NAMESPACE);
+    assert!(BASE_SEARCH_PATH_VALID.get());
+    BOOTSTRAP.set(false);
+    clear_path_state();
+}
+
+#[test]
+fn session_namespace_error_unwind_keeps_owner_valid() {
+    clear_path_state();
+    let result = with_path_state_mut(|st| -> PgResult<()> {
+        st.base_search_path = mcx::slice_in(st.mcx, &[NS_PUBLIC])?;
+        Err(Box::new(types_error::PgError::error("test unwind")))
+    });
+    assert!(result.is_err());
+    assert_eq!(base_path_nth(0), NS_PUBLIC);
+    clear_path_state();
+    let result = mcx::McxOwned::<PathStateTy>::try_new(
+        MemoryContext::new("namespace failed construction").with_limit(1),
+        |mcx| Ok(PathState { mcx, base_search_path: PgVec::new_in(mcx) }),
+    );
+    assert!(result.is_err());
+    assert_eq!(base_path_len(), 0);
+}
+
+#[test]
+#[ignore = "process-global accounting; run alone with --test-threads=1"]
+fn session_namespace_reclaims_complete_context() {
+    clear_path_state();
+    let before = mcx::global_footprint::bytes();
+    for _ in 0..64 {
+        with_path_state_mut(|st| {
+            st.base_search_path = mcx::slice_in(st.mcx, &[NS_PUBLIC; 8192])?;
+            Ok(())
+        }).unwrap();
+        clear_path_state();
+        assert_eq!(mcx::global_footprint::bytes(), before);
+    }
+}
+
+#[test]
+#[ignore = "installs process-global cleanup sink; run alone with --test-threads=1"]
+fn session_namespace_registered_cleanup_reinitializes() {
+    thread_local! {
+        static CLEANUPS: RefCell<Vec<Box<dyn FnOnce()>>> = const { RefCell::new(Vec::new()) };
+    }
+    fn record(_phase: mcx::SessionCleanupPhase, cleanup: Box<dyn FnOnce()>) {
+        CLEANUPS.with(|slot| slot.borrow_mut().push(cleanup));
+    }
+    clear_path_state();
+    mcx::set_session_cleanup_sink(record);
+    for _ in 0..3 {
+        with_path_state_mut(|st| {
+            st.base_search_path = mcx::slice_in(st.mcx, &[NS_PUBLIC])?;
+            Ok(())
+        }).unwrap();
+        BASE_SEARCH_PATH_VALID.set(true);
+        let callbacks = CLEANUPS.with(|slot| std::mem::take(&mut *slot.borrow_mut()));
+        assert_eq!(callbacks.len(), 1);
+        for callback in callbacks { callback(); }
+        assert!(!BASE_SEARCH_PATH_VALID.get());
+        assert_eq!(base_path_len(), 0);
+        PATH.with(|slot| assert!(slot.borrow().is_none()));
+    }
+    mcx::set_session_cleanup_sink(|_, _| {});
 }
