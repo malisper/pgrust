@@ -340,10 +340,7 @@ fn begin_copy_from_guts<'mcx: 's, 's>(
             nodes_core::fix_opfuncids(defexpr)?;
             let mut state = execexpr::exec_init_expr(mcx, Some(defexpr), execexpr::ParamBind::NONE)?
                 .expect("column default expression");
-            // SAFETY: default results land in the statement mcx, which
-            // outlives every next_copy_from call (C per-tuple econtext;
-            // WATCH: unbounded for very large loads, as the input values).
-            unsafe { state.arm_result_mcx_raw(mcx) };
+            state.arm_result_mcx(mcx);
             defexprs[i] = Some(state);
             if !in_list {
                 defmap.push(i);
@@ -780,7 +777,7 @@ fn copy_from_body<'mcx>(
         input_row_cx.reset();
         {
             let base = slot.base_mut();
-            if !cstate.next_copy_from(input_row_cx.mcx(), &mut base.tts_values, &mut base.tts_isnull)? {
+            if !next_copy_row(cstate, mcx, input_row_cx.mcx(), &mut base.tts_values, &mut base.tts_isnull)? {
                 break;
             }
         }
@@ -955,6 +952,25 @@ fn copy_from_body<'mcx>(
     Ok(processed)
 }
 
+fn next_copy_row<'mcx>(
+    cstate: &mut CopyFromState<'mcx, '_>,
+    statement_mcx: Mcx<'mcx>,
+    row_mcx: Mcx<'_>,
+    values: &mut [datum::Datum],
+    nulls: &mut [bool],
+) -> PgResult<bool> {
+    for state in cstate.defexprs.iter_mut().flatten() {
+        // SAFETY: the caller keeps row_mcx stable and live through evaluation
+        // and materializes accepted values before resetting it. Re-arm on errors too.
+        unsafe { state.arm_result_mcx_raw(row_mcx) };
+    }
+    let result = cstate.next_copy_from(row_mcx, values, nulls);
+    for state in cstate.defexprs.iter_mut().flatten() {
+        state.arm_result_mcx(statement_mcx);
+    }
+    result
+}
+
 // The whereClause volatility arm of C's insert-method selection
 // (copyfrom.c:1041).
 fn where_clause_volatile(cstate: &CopyFromState<'_, '_>) -> PgResult<bool> {
@@ -1089,7 +1105,7 @@ fn copy_from_partitioned_body<'mcx>(
         input_row_cx.reset();
         {
             let base = rootslot.base_mut();
-            if !cstate.next_copy_from(input_row_cx.mcx(), &mut base.tts_values, &mut base.tts_isnull)? {
+            if !next_copy_row(cstate, mcx, input_row_cx.mcx(), &mut base.tts_values, &mut base.tts_isnull)? {
                 break;
             }
         }

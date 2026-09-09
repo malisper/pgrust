@@ -6140,3 +6140,30 @@ mod rem_w2_011_param_set_equal {
         });
     }
 }
+
+#[test]
+fn copy_default_result_context_rearms_after_row_reset() {
+    with_mcx(|mcx| {
+        let value = varlena::cstring_to_text(mcx, b"payload").unwrap();
+        let constant = Node::mk_const(mcx, 25, -1, 0, -1,
+            ::types_fmgr::varlena_result(value), false, false).unwrap();
+        let args = NodeList::make2(mcx, constant, constant).unwrap();
+        let expr = mk_opexpr(mcx, 1258, 25, args);
+        let mut state = exec_init_expr(mcx, Some(expr), ParamBind::NONE).unwrap().unwrap();
+        let mut row = MemoryContext::new_bump("copy-default-row-test");
+        for _ in 0..8 {
+            // SAFETY: row is stable through evaluation and the state is restored before reset.
+            unsafe { state.arm_result_mcx_raw(row.mcx()) };
+            let result = exec_eval_expr(&mut state, &mut EvalSlots::default());
+            state.arm_result_mcx(mcx);
+            let result = result.unwrap();
+            assert!(!result.isnull);
+            // SAFETY: the result belongs to the still-live row arena.
+            let bytes = unsafe { core::slice::from_raw_parts((result.value.as_usize() as *const u8).add(4), 14) };
+            assert_eq!(bytes, b"payloadpayload");
+            row.reset();
+        }
+        let result = exec_eval_expr(&mut state, &mut EvalSlots::default()).unwrap();
+        assert!(!result.isnull);
+    });
+}
