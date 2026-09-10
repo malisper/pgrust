@@ -8,7 +8,7 @@
 use std::rc::Rc;
 
 use ::execexpr::{exec_build_grouping_equal, exec_qual, EvalSlots, ExprState};
-use ::executils::{EStateData, EcxtId, ExecSlotId};
+use ::executils::{EStateData, EcxtId, ExecSlotId, RetainedTupleCtx};
 use ::mcx::{vec_with_capacity_in, PgBox, PgVec};
 use ::types_error::PgResult;
 use ::types_nodes::plannodes::Unique;
@@ -26,6 +26,9 @@ pub struct UniqueState<'mcx> {
     pub ps_ResultTupleDesc: Option<Rc<TupleDescData<'static>>>,
     pub ps_ResultTupleSlot: ExecSlotId,
     prev_slot: SlotData<'mcx>,
+    // prev_slot's image lives here, one at a time (C: the slot's tts_mcxt,
+    // pfreed by the next ExecCopySlot; the query context is a Bump arena).
+    prev_ctx: RetainedTupleCtx,
     eq: PgBox<'mcx, ExprState<'mcx>>,
     have_prev: bool,
 }
@@ -63,12 +66,14 @@ pub fn exec_init_unique<'mcx>(
     )?;
     let prev_slot =
         exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(outer_desc.clone()));
+    let prev_ctx = RetainedTupleCtx::new(mcx, "Unique previous tuple")?;
     Ok(UniqueState {
         plan: node,
         ps_ExprContext,
         ps_ResultTupleDesc: Some(result_desc),
         ps_ResultTupleSlot,
         prev_slot,
+        prev_ctx,
         eq,
         have_prev: false,
     })
@@ -151,26 +156,36 @@ pub fn lane_unique_feed<'mcx>(
 pub fn lane_unique_eof<'mcx>(node: &mut UniqueState<'mcx>, estate: &mut EStateData<'mcx>) {
     let mcx = estate.es_query_cxt;
     node.have_prev = false;
-    exectuples::exec_clear_tuple(&mut node.prev_slot, mcx);
+    // The result slot shares prev_slot's image by pointer: unhook it FIRST,
+    // then release the image with the prev slot.
     let result_slot = estate.slot_mut(node.ps_ResultTupleSlot);
     exectuples::exec_clear_tuple(result_slot, mcx);
+    node.prev_ctx.clear_slot(&mut node.prev_slot);
 }
 
 impl<'mcx> UniqueState<'mcx> {
     // ExecCopySlot into the retained prev slot; the copied image is shared
-    // into the result slot (both die with the query context).
+    // into the result slot. The image lives in prev_ctx and dies at the next
+    // store (C: tts_minimal_copyslot pfrees the old image the same way).
     fn store_and_return(
         &mut self,
         estate: &mut EStateData<'mcx>,
         outer_id: ExecSlotId,
     ) -> PgResult<()> {
         let mcx = estate.es_query_cxt;
+        let prev_mcx = self.prev_ctx.mcx();
         {
+            // Compare-then-store order: the caller has already run the
+            // equality program over the OLD image (lane_unique_feed), so it
+            // is dead here; the result slot (which pointed into it) is
+            // unhooked and re-stored below before anyone reads it again.
+            let result_slot = estate.slot_mut(self.ps_ResultTupleSlot);
+            exectuples::exec_clear_tuple(result_slot, mcx);
             let outer_slot = estate.slot_mut(outer_id);
-            exectuples::exec_copy_slot(&mut self.prev_slot, outer_slot, mcx, mcx)?;
+            self.prev_ctx.copy_slot(&mut self.prev_slot, outer_slot, mcx)?;
         }
         self.have_prev = true;
-        let tup = exectuples::exec_fetch_slot_minimal_tuple(&mut self.prev_slot, mcx, mcx)?;
+        let tup = exectuples::exec_fetch_slot_minimal_tuple(&mut self.prev_slot, prev_mcx, prev_mcx)?;
         let ptr = match tup {
             exectuples::FetchedMinimalTuple::Slot(t, _) => t,
             exectuples::FetchedMinimalTuple::Copied(_) => {
@@ -178,8 +193,10 @@ impl<'mcx> UniqueState<'mcx> {
             }
         };
         let result_slot = estate.slot_mut(self.ps_ResultTupleSlot);
-        // SAFETY: the image lives in prev_slot until the next store, and the
-        // result slot is re-stored before every return (no stale reads).
+        // SAFETY: the image lives in prev_ctx until the next store_and_return
+        // / lane_unique_eof, both of which clear the result slot before the
+        // image goes; the result slot is re-stored before every return (no
+        // stale reads).
         unsafe { exectuples::exec_store_minimal_tuple_ptr(result_slot, mcx, ptr) };
         Ok(())
     }
@@ -198,8 +215,9 @@ pub fn exec_rescan_unique<'mcx>(node: &mut UniqueState<'mcx>, estate: &mut EStat
     lane_unique_eof(node, estate);
 }
 
-// Exempt: all released in exec_end_unique (eq via release_frames).
+// Exempt: all released in exec_end_unique (eq via release_frames); prev_ctx
+// is dropped by the query context's reset callback.
 mcx::forget_safe_struct!(
-    UniqueState<'_> { plan, ps_ExprContext, ps_ResultTupleSlot, have_prev;
+    UniqueState<'_> { plan, ps_ExprContext, ps_ResultTupleSlot, have_prev, prev_ctx;
         ps_ResultTupleDesc, prev_slot, eq },
 );

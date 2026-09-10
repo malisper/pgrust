@@ -528,6 +528,30 @@ pub fn panic_payload_to_exit_status(payload: &(dyn std::any::Any + Send)) -> i32
         .unwrap_or(procsignal::signums::SIGABRT)
 }
 
+/// Crash-class exits (a caught panic, a synthetic kill) skip the exit-callback
+/// drain, so ProcKill's `LWLockReleaseAll` never runs for them and every
+/// LWLock the dead task held stays held forever. C tolerates that because a
+/// crashed child's locks die with its process image and the SIGQUIT'd
+/// siblings `_exit` from a real signal handler even mid-wait; here the held
+/// set is thread-local state that outlives nothing, and a sibling parked in
+/// `LWLockAcquire`'s semaphore wait has no drain point, so a lock held by a
+/// dead thread wedges every waiter past the crash cycle's SIGQUIT until the
+/// gang-wedge watchdog escalates (#67, point 3). Release from the dying
+/// thread itself, the only one that can see its held list. Contained: the
+/// crash is already being announced, and a panic inside the release must not
+/// escape the thread top and lose the announce.
+fn release_crash_held_lwlocks(payload: &(dyn std::any::Any + Send)) {
+    if payload.is::<ipc::ProcExitThread>() {
+        // proc_exit: the callback drain (ProcKill) released them, or a
+        // quickdie that never held any (LWLocks hold off interrupts).
+        return;
+    }
+    // unwind-ok: log-then-die
+    if std::panic::catch_unwind(::lwlock::LWLockReleaseAll).is_err() {
+        eprintln!("LWLockReleaseAll panicked on the crash path; locks left held");
+    }
+}
+
 // The per-task half of the child thread body (InitPostmasterChild through the
 // exit announce): the spawn closure runs it after the thread prelude; a wpool
 // standby runs it on claim with the prelude already paid.
@@ -648,6 +672,7 @@ fn run_child_task(
         }
         None => payload,
     };
+    release_crash_held_lwlocks(payload.as_ref());
     // C's process death closes fds; without this the peer never sees EOF.
     if let Some(cs) = client_sock {
         unsafe { libc::close(cs.sock) };

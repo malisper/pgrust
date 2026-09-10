@@ -181,6 +181,68 @@ fn empty_input_returns_nothing() {
     assert!(run_unique(&[]).is_empty());
 }
 
+// Query-context bytes after feeding `n` distinct rows (every row is
+// retained as the new "previous" tuple): (self used, subtree used).
+fn query_ctx_used_after(n: i32) -> (usize, usize) {
+    install_seams();
+    let uq = mk_unique(leaked_mcx());
+    let mut estate_owner =
+        create_executor_state(Box::leak(Box::new(MemoryContext::new("q")))).unwrap();
+    estate_owner.with_mut(|estate| {
+        let mcx = estate.es_query_cxt;
+        let outer_desc = one_col_desc(mcx);
+        let outer_id =
+            estate.exec_init_extra_tuple_slot(Some(outer_desc), TupleSlotKind::Virtual);
+        // SAFETY: uq is leaked ('static) and read-only.
+        let uq = unsafe { shorten(uq) };
+        let result_desc = one_col_desc(leaked_mcx());
+        let mut state =
+            exec_init_unique(uq, estate, 0, &result_desc.clone(), result_desc).unwrap();
+        let mut i = 0i32;
+        let mut feed = |estate: &mut EStateData<'_>| {
+            if i >= n {
+                return Ok(None);
+            }
+            let mcx = estate.es_query_cxt;
+            let slot = estate.slot_mut(outer_id);
+            exectuples::exec_clear_tuple(slot, mcx);
+            slot.base_mut().tts_values[0] = Datum::from_i32(i);
+            slot.base_mut().tts_isnull[0] = false;
+            exectuples::exec_store_virtual_tuple(slot);
+            i += 1;
+            Ok(Some(outer_id))
+        };
+        let mut count = 0;
+        while let Some(slot_id) = exec_unique(&mut state, estate, &mut feed).unwrap() {
+            let slot = estate.slot_mut(slot_id);
+            exectuples::slot_getallattrs(slot);
+            assert_eq!(slot.base().tts_values[0].as_i32(), count);
+            count += 1;
+        }
+        assert_eq!(count, n);
+        let ctx = estate.es_query_cxt.context();
+        (ctx.used(), ctx.subtree_used())
+    })
+}
+
+// The retained previous tuple must not accumulate in the query context (a
+// Bump arena: nothing is ever freed there): 50k distinct rows cost the same
+// query-context bytes as 1k, to within one arena block.
+#[test]
+fn retained_prev_tuple_does_not_grow_query_context() {
+    let (small_self, small_tree) = query_ctx_used_after(1_000);
+    let (big_self, big_tree) = query_ctx_used_after(50_000);
+    const SLACK: usize = 64 * 1024;
+    assert!(
+        big_self <= small_self + SLACK,
+        "query context grew with row count: {small_self} -> {big_self}"
+    );
+    assert!(
+        big_tree <= small_tree + SLACK,
+        "query context subtree grew with row count: {small_tree} -> {big_tree}"
+    );
+}
+
 // NOT DISTINCT semantics: adjacent NULL keys collapse into one row.
 #[test]
 fn null_keys_are_not_distinct() {

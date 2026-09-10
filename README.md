@@ -113,6 +113,18 @@ To achieve that goal, we're taking several different approaches:
 3. We're doing aggressive differential fuzz testing to ensure pgrust's
    behavior is identical to Postgres's.
 
+### Conformance suite
+
+The regression suite we run is PostgreSQL's own `src/test/regress`, vendored
+unmodified at `crates/postgres-18.6-reference/src/test/regress` and driven by
+upstream `pg_regress` against a pgrust server (`scripts/pg-regress-fast.sh`;
+gate: every one of the 231 `parallel_schedule` files passes byte-for-byte
+against the vendor expected output). Prerequisites, the exact local and CI cluster
+commands, what the harness counts (files vs lines vs queries), and what can
+and cannot be said about the "46,066" figure are in
+[`docs/conformance/README.md`](docs/conformance/README.md); the gate contract
+is [`docs/conformance/regress-gate.md`](docs/conformance/regress-gate.md).
+
 ## Unsafe Code
 
 pgrust uses unsafe code, but only for the specific things that need it.

@@ -65,6 +65,9 @@ static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 static ON_SHMEM_EXIT_CBS: std::sync::Mutex<Vec<(fn(i32, usize), usize)>> =
     std::sync::Mutex::new(Vec::new());
 
+/// When set, the check_for_interrupts seam reports a pending cancel.
+static CFI_CANCEL: AtomicBool = AtomicBool::new(false);
+
 fn setup() -> std::sync::MutexGuard<'static, ()> {
     let guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     setup_once();
@@ -273,7 +276,18 @@ fn setup_once() {
         ipc_seams::before_shmem_exit::set(|_, _| Ok(()));
         waitevent_seams::pgstat_report_wait_start::set(|_| {});
         waitevent_seams::pgstat_report_wait_end::set(|| {});
-        postgres_seams::check_for_interrupts::set(|| Ok(()));
+        // Seams install once: a test that wants a pending cancel raises
+        // CFI_CANCEL instead of re-installing.
+        postgres_seams::check_for_interrupts::set(|| {
+            if CFI_CANCEL.load(Ordering::Relaxed) {
+                Err(Box::new(PgError::new(
+                    types_error::ERROR,
+                    "canceling statement due to user request",
+                )))
+            } else {
+                Ok(())
+            }
+        });
         xact_seams::get_current_transaction_nest_level::set(|| 1);
         pg_sema::init_seams();
 
@@ -1765,6 +1779,52 @@ fn setup_b039_seams() {
             relpath_seams::relpathbackend::set(|l, b, f| relpath::GetRelationPath(l, b, f));
         }
     });
+}
+
+// malisper/pgrust#93: a buffer pinned by NOBODY this backend can wait for
+// (shared refcount > 0, private refcount 0, no IO in progress — the shape a
+// stranded recovery prefetch pin leaves behind) makes InvalidateBuffer's
+// WaitIO retry a busy loop. C reaches CHECK_FOR_INTERRUPTS only through
+// WaitIO's sleep, which such a pin never enters; the loop must check for
+// interrupts itself so a DROP stuck on it is cancellable rather than an
+// uncancellable 100% CPU spin. No timeout, no bound: with no cancel pending
+// the loop keeps waiting exactly as C does (exercised by releasing the pin
+// from the "foreign" side and seeing the drop complete).
+#[test]
+fn invalidate_buffer_foreign_pin_wait_is_cancellable() {
+    let _g = setup();
+    setup_b039_seams();
+    let rel = 9902u32;
+    let rlb = RelFileLocatorBackend {
+        locator: rloc(rel),
+        backend: INVALID_PROC_NUMBER,
+    };
+    let b = read_blk(rel, 0);
+    let desc = GetBufferDescriptor(b - 1);
+    // Fabricate the foreign pin: one shared refcount with no private entry
+    // behind it (what another thread's, or a dead thread's, pin looks like).
+    desc.state.fetch_add(types_storage::buf::BUF_REFCOUNT_ONE, Ordering::AcqRel);
+    ReleaseBuffer(b).unwrap();
+    assert_eq!(GetPrivateRefCount(b), 0);
+    assert_eq!(desc.state.load(Ordering::Acquire) & BUF_REFCOUNT_MASK, 1);
+
+    CFI_CANCEL.store(true, Ordering::Relaxed);
+    let res = crate::drop_buffers::DropRelationBuffers(rlb, &[ForkNumber::MAIN_FORKNUM], &[0]);
+    CFI_CANCEL.store(false, Ordering::Relaxed);
+    let err = res.expect_err("a pending cancel must escape the pinned-buffer retry loop");
+    assert_eq!(err.message(), "canceling statement due to user request");
+    // The buffer was left alone: still tagged, still valid, still pinned.
+    let state = desc.state.load(Ordering::Acquire);
+    assert!(state & BM_VALID != 0);
+    assert_eq!(state & BUF_REFCOUNT_MASK, 1);
+    assert_eq!(desc.tag().relNumber, rel);
+
+    // The foreign side releases its pin; with no cancel pending the same
+    // drop now completes (C semantics: wait, never time out).
+    desc.state.fetch_sub(types_storage::buf::BUF_REFCOUNT_ONE, Ordering::AcqRel);
+    crate::drop_buffers::DropRelationBuffers(rlb, &[ForkNumber::MAIN_FORKNUM], &[0]).unwrap();
+    assert_eq!(desc.state.load(Ordering::Acquire) & BM_VALID, 0, "buffer invalidated");
+    AtEOXact_Buffers(true);
 }
 
 // bufmgr.c:2245 InvalidateBuffer: a buffer still pinned by this backend is

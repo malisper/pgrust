@@ -7,7 +7,7 @@
 use std::rc::Rc;
 
 use ::execexpr::{exec_build_grouping_equal, exec_qual, EvalSlots, ExprState};
-use ::executils::{EStateData, EcxtId, ExecSlotId};
+use ::executils::{EStateData, EcxtId, ExecSlotId, RetainedTupleCtx};
 use ::mcx::{vec_with_capacity_in, PgBox, PgVec};
 use ::types_error::{
     PgError, PgResult, ERRCODE_INVALID_ROW_COUNT_IN_LIMIT_CLAUSE,
@@ -71,6 +71,9 @@ pub struct LimitState<'mcx> {
     // WITH TIES: last in-window tuple + the tie-detection equality program
     // (C: last_slot + eqfunction from execTuplesMatchPrepare).
     last_slot: Option<SlotData<'mcx>>,
+    // last_slot's image lives here, one at a time (C: the slot's tts_mcxt,
+    // pfreed by the next ExecCopySlot; the query context is a Bump arena).
+    last_ctx: Option<RetainedTupleCtx>,
     eq: Option<PgBox<'mcx, ExprState<'mcx>>>,
 }
 
@@ -122,10 +125,12 @@ pub fn exec_init_limit<'mcx>(
         )?;
         let last_slot =
             exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(desc.clone()));
-        (Some(last_slot), Some(eq))
+        let last_ctx = RetainedTupleCtx::new(mcx, "Limit WITH TIES last tuple")?;
+        (Some((last_slot, last_ctx)), Some(eq))
     } else {
         (None, None)
     };
+    let (last_slot, last_ctx) = last_slot.unzip();
     Ok(LimitState {
         plan: node,
         ps_ExprContext,
@@ -139,12 +144,16 @@ pub fn exec_init_limit<'mcx>(
         position: 0,
         subSlot: None,
         last_slot,
+        last_ctx,
         eq,
     })
 }
 
 // ExecCopySlot(node->last_slot, slot): retain the boundary tuple for tie
-// comparison.
+// comparison. Only the WINDOWEND_TIES equality program ever reads last_slot,
+// and a save happens strictly before that state (or after a rescan), so the
+// old image is dead at every save; nothing else shares it (the returned row
+// is the subplan's own slot, not last_slot).
 fn save_last_slot<'mcx>(
     node: &mut LimitState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -152,9 +161,9 @@ fn save_last_slot<'mcx>(
 ) -> PgResult<()> {
     let mcx = estate.es_query_cxt;
     let last = node.last_slot.as_mut().expect("WITH TIES has a last slot");
+    let last_ctx = node.last_ctx.expect("WITH TIES has a last-tuple context");
     let src = estate.slot_mut(slot);
-    exectuples::exec_copy_slot(last, src, mcx, mcx)?;
-    Ok(())
+    last_ctx.copy_slot(last, src, mcx)
 }
 
 /// `ExecLimit`; C's switch fall-throughs become `continue` re-dispatch.
@@ -499,9 +508,11 @@ mcx::forget_safe_nodrop!(LimitStateCond);
 
 // Exempt: limitOffset/limitCount/eq are released in exec_end_limit (eq via
 // release_frames), last_slot's descriptor likewise; LimitOption is no-drop,
-// const-proven below.
+// const-proven below; last_ctx is a Copy handle whose context the query
+// context's reset callback drops.
 const _: () = assert!(!core::mem::needs_drop::<LimitOption>());
+const _: () = assert!(!core::mem::needs_drop::<Option<RetainedTupleCtx>>());
 mcx::forget_safe_struct!(
     LimitState<'_> { plan, ps_ExprContext, offset, count, noCount, lstate,
-        position, subSlot; limitOffset, limitCount, limitOption, last_slot, eq },
+        position, subSlot; limitOffset, limitCount, limitOption, last_slot, last_ctx, eq },
 );

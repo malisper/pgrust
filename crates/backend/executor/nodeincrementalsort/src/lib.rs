@@ -10,7 +10,7 @@
 use core::ptr::NonNull;
 use std::rc::Rc;
 
-use ::executils::{EStateData, EcxtId, ExecSlotId};
+use ::executils::{EStateData, EcxtId, ExecSlotId, RetainedTupleCtx};
 use ::mcx::{Mcx, MemoryContext, PgVec};
 use ::tuplesort::{Tuplesort, TUPLESORT_ALLOWBOUNDED, TUPLESORT_NONE};
 use ::types_core::instrument::IncrementalSortInfo;
@@ -53,6 +53,11 @@ pub struct IncrementalSortState<'mcx> {
     fullsort_state: Option<Tuplesort>,
     prefixsort_state: Option<Tuplesort>,
     group_pivot: SlotData<'mcx>,
+    // group_pivot's image lives here, one group boundary at a time (C: the
+    // slot's tts_mcxt, pfreed by the next ExecCopySlot; the query context is
+    // a Bump arena). transfer_tuple never lives here: its image is the full
+    // sort's, and it is never copied FROM group_pivot.
+    pivot_ctx: RetainedTupleCtx,
     transfer_tuple: SlotData<'mcx>,
     presorted: Option<PresortedKeys<'mcx>>,
 }
@@ -81,7 +86,7 @@ pub fn exec_init_incremental_sort<'mcx>(
     eflags: i32,
     outer_desc: &Rc<TupleDescData<'static>>,
     result_desc: Rc<TupleDescData<'static>>,
-) -> IncrementalSortState<'mcx> {
+) -> PgResult<IncrementalSortState<'mcx>> {
     debug_assert!(eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK) == 0);
     let mcx = estate.es_query_cxt;
     let ps_ExprContext = estate.exec_assign_expr_context();
@@ -89,9 +94,10 @@ pub fn exec_init_incremental_sort<'mcx>(
         .exec_init_extra_tuple_slot(Some(result_desc.clone()), TupleSlotKind::MinimalTuple);
     let group_pivot =
         exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(outer_desc.clone()));
+    let pivot_ctx = RetainedTupleCtx::new(mcx, "IncrementalSort group pivot")?;
     let transfer_tuple =
         exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(outer_desc.clone()));
-    IncrementalSortState {
+    Ok(IncrementalSortState {
         plan: node,
         ps_ExprContext,
         ps_ResultTupleDesc: Some(result_desc),
@@ -106,9 +112,31 @@ pub fn exec_init_incremental_sort<'mcx>(
         fullsort_state: None,
         prefixsort_state: None,
         group_pivot,
+        pivot_ctx,
         transfer_tuple,
         presorted: None,
-    }
+    })
+}
+
+// ExecCopySlot(node->group_pivot, src): every pivot store follows the
+// compare that read the old pivot (is_current_group) or replaces a pivot
+// that was cleared/consumed by the batch it opened; nothing shares the pivot
+// image by pointer (the result slot reads from the tuplesorts), so the old
+// image is dead at every store.
+fn set_group_pivot<'mcx>(
+    node: &mut IncrementalSortState<'mcx>,
+    src: &mut SlotData<'mcx>,
+    src_mcx: Mcx<'mcx>,
+) -> PgResult<()> {
+    node.pivot_ctx.copy_slot(&mut node.group_pivot, src, src_mcx)
+}
+
+// Same, from the node's own transfer_tuple (disjoint fields).
+fn set_group_pivot_from_transfer<'mcx>(
+    node: &mut IncrementalSortState<'mcx>,
+    mcx: Mcx<'mcx>,
+) -> PgResult<()> {
+    node.pivot_ctx.copy_slot(&mut node.group_pivot, &mut node.transfer_tuple, mcx)
 }
 
 // preparePresortedCols: the equality function of every presorted key,
@@ -264,7 +292,7 @@ fn switch_to_presorted_prefix_mode<'mcx>(
                 .as_mut()
                 .unwrap()
                 .puttupleslot(&mut node.transfer_tuple, mcx)?;
-            exectuples::exec_copy_slot(&mut node.group_pivot, &mut node.transfer_tuple, mcx, mcx)?;
+            set_group_pivot_from_transfer(node, mcx)?;
         } else {
             let got = node.fullsort_state.as_mut().unwrap().gettupleslot(
                 ScanDirectionIsForward(dir),
@@ -274,12 +302,7 @@ fn switch_to_presorted_prefix_mode<'mcx>(
             )?;
             debug_assert!(got);
             if node.group_pivot.base().is_empty() {
-                exectuples::exec_copy_slot(
-                    &mut node.group_pivot,
-                    &mut node.transfer_tuple,
-                    mcx,
-                    mcx,
-                )?;
+                set_group_pivot_from_transfer(node, mcx)?;
             }
             let matched = is_current_group(
                 node.presorted.as_mut().expect("presorted keys prepared"),
@@ -295,7 +318,7 @@ fn switch_to_presorted_prefix_mode<'mcx>(
             } else {
                 // transfer_tuple carries the group opener into the next batch;
                 // its image (inside the full sort) outlives this transfer loop.
-                exectuples::exec_clear_tuple(&mut node.group_pivot, mcx);
+                node.pivot_ctx.clear_slot(&mut node.group_pivot);
                 break;
             }
         }
@@ -305,7 +328,7 @@ fn switch_to_presorted_prefix_mode<'mcx>(
     node.n_fullsort_remaining -= n_tuples;
 
     if node.n_fullsort_remaining == 0 {
-        exectuples::exec_copy_slot(&mut node.group_pivot, &mut node.transfer_tuple, mcx, mcx)?;
+        set_group_pivot_from_transfer(node, mcx)?;
         node.execution_status = ExecStatus::LoadPrefixsort;
         exectuples::exec_clear_tuple(&mut node.transfer_tuple, mcx);
     } else {
@@ -407,7 +430,7 @@ where
                 .puttupleslot(&mut node.group_pivot, mcx)?;
             n_tuples += 1;
             if n_tuples != min_group_size {
-                exectuples::exec_clear_tuple(&mut node.group_pivot, mcx);
+                node.pivot_ctx.clear_slot(&mut node.group_pivot);
             }
         }
 
@@ -429,12 +452,7 @@ where
                     .puttupleslot(estate.slot_mut(outer_id), mcx)?;
                 n_tuples += 1;
                 if n_tuples == min_group_size {
-                    exectuples::exec_copy_slot(
-                        &mut node.group_pivot,
-                        estate.slot_mut(outer_id),
-                        mcx,
-                        mcx,
-                    )?;
+                    set_group_pivot(node, estate.slot_mut(outer_id), mcx)?;
                 }
             } else {
                 let matched = is_current_group(
@@ -451,12 +469,7 @@ where
                     n_tuples += 1;
                 } else {
                     // Group boundary: carry the tuple into the next batch.
-                    exectuples::exec_copy_slot(
-                        &mut node.group_pivot,
-                        estate.slot_mut(outer_id),
-                        mcx,
-                        mcx,
-                    )?;
+                    set_group_pivot(node, estate.slot_mut(outer_id), mcx)?;
                     if node.bounded {
                         node.bound_done = node.bound.min(node.bound_done + n_tuples);
                     }
@@ -478,7 +491,7 @@ where
             {
                 // Likely one large prefix group: switch to presorted prefix
                 // mode via a FIFO drain of the sorted batch.
-                exectuples::exec_clear_tuple(&mut node.group_pivot, mcx);
+                node.pivot_ctx.clear_slot(&mut node.group_pivot);
                 let ts = node.fullsort_state.as_mut().unwrap();
                 ts.performsort()?;
                 record_group(estate, plan.sort.plan.plan_node_id, false, node.fullsort_state.as_mut().unwrap());
@@ -514,12 +527,7 @@ where
                     .puttupleslot(estate.slot_mut(outer_id), mcx)?;
                 n_tuples += 1;
             } else {
-                exectuples::exec_copy_slot(
-                    &mut node.group_pivot,
-                    estate.slot_mut(outer_id),
-                    mcx,
-                    mcx,
-                )?;
+                set_group_pivot(node, estate.slot_mut(outer_id), mcx)?;
                 break;
             }
         }
@@ -558,11 +566,12 @@ pub fn exec_end_incremental_sort(node: &mut IncrementalSortState<'_>) {
 
 mcx::forget_safe_nodrop!(ExecStatus);
 
-// Exempt: all released in exec_end_incremental_sort.
+// Exempt: all released in exec_end_incremental_sort; pivot_ctx is dropped by
+// the query context's reset callback.
 mcx::forget_safe_struct!(
     IncrementalSortState<'_> { plan, ps_ExprContext, ps_ResultTupleSlot,
         bounded, bound, execution_status, outer_node_done, bound_done,
-        n_fullsort_remaining;
+        n_fullsort_remaining, pivot_ctx;
         ps_ResultTupleDesc, outer_desc, fullsort_state, prefixsort_state,
         group_pivot, transfer_tuple, presorted },
 );
@@ -575,7 +584,7 @@ pub fn exec_rescan_incremental_sort<'mcx>(
 ) -> PgResult<()> {
     let mcx = estate.es_query_cxt;
     exectuples::exec_clear_tuple(estate.slot_mut(node.ps_ResultTupleSlot), mcx);
-    exectuples::exec_clear_tuple(&mut node.group_pivot, mcx);
+    node.pivot_ctx.clear_slot(&mut node.group_pivot);
     exectuples::exec_clear_tuple(&mut node.transfer_tuple, mcx);
     node.outer_node_done = false;
     node.n_fullsort_remaining = 0;

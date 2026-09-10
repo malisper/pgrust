@@ -17,7 +17,7 @@ use std::rc::Rc;
 
 use ::datum::Datum;
 use ::execexpr::{exec_eval_expr, exec_qual, EvalSlots, ExprState};
-use ::executils::{EStateData, EcxtId, ExecSlotId};
+use ::executils::{EStateData, EcxtId, ExecSlotId, RetainedTupleCtx};
 use ::mcx::{Allocator, Mcx, MemoryContext, PgBox, PgVec};
 use ::types_core::instrument::MemoizeInstrumentation;
 use ::types_core::Oid;
@@ -151,6 +151,9 @@ pub struct MemoizeState<'mcx> {
     lru_head: u32,
     lru_tail: u32,
     table_ctx: NonNull<MemoryContext>,
+    // The result slot's copied image (cache-fill / bypass rows) lives here,
+    // one row at a time; cache-hit rows are stored by pointer into table_ctx.
+    result_ctx: RetainedTupleCtx,
     mem_used: u64,
     mem_limit: u64,
     entry: u32,
@@ -287,6 +290,7 @@ pub fn exec_init_memoize<'mcx>(
         lru_head: INVALID,
         lru_tail: INVALID,
         table_ctx: make_table_ctx(mcx)?,
+        result_ctx: RetainedTupleCtx::new(mcx, "Memoize result tuple")?,
         mem_used: 0,
         mem_limit: nodehash::get_hash_memory_limit() as u64,
         entry: INVALID,
@@ -986,7 +990,11 @@ fn copy_to_result<'mcx>(
     let [dst, src] = table
         .get_disjoint_mut([result.0 as usize, outerslot.0 as usize])
         .expect("distinct in-range memoize slot ids");
-    exectuples::exec_copy_slot(dst, src, mcx, mcx)?;
+    // Per-row copy into the result slot: the previous row's image is dead
+    // (the parent consumed it before pulling again), and the cache keeps its
+    // own copies in table_ctx, so nothing points into result_ctx but the
+    // result slot itself — which is re-stored right here before any read.
+    node.result_ctx.copy_slot(dst, src, mcx)?;
     Ok(Some(result))
 }
 
@@ -1062,7 +1070,7 @@ mcx::forget_safe_struct!(
         key_isnull },
     MemoizeState<'_> { plan, ps_ExprContext, ps_ResultTupleSlot, mstatus, nkeys,
         key_attrs, kernel, binary_mode, singlerow, entries, free_slots, built,
-        lru_head, lru_tail, table_ctx, mem_used, mem_limit, entry, last_tuple;
+        lru_head, lru_tail, table_ctx, result_ctx, mem_used, mem_limit, entry, last_tuple;
         ps_ResultTupleDesc, tableslot, probeslot, param_exprs, hash_expr,
         eq_expr, hashtab, stats },
 );

@@ -2537,6 +2537,20 @@ fn perform_wal_recovery_guts(rec: &mut Recovery) -> PgResult<()> {
             have_record = read_record(rec, LOG, false, replay_tli)?;
         }
 
+        // Divergence from C: the recovery prefetcher's io_uring lane
+        // (PrefetchSharedBuffer -> uring::start_read) pins the victim buffer
+        // and hands the pin to THIS thread's ring slot; only this thread's
+        // collect_done (run at the next start_read) or drain_own drops it.
+        // Nothing prefetches after the last record, so without a drain here
+        // the last prefetched pages stay pinned by nobody: the shared
+        // refcount survives the startup thread and DropRelationsAllBuffers
+        // (DROP TABLE / TRUNCATE / DROP DATABASE) on that relation spins in
+        // InvalidateBuffer (malisper/pgrust#93, fix #94). C's fadvise
+        // prefetch holds no pins, so C needs nothing at this point; the
+        // end-of-recovery checkpoint and every later pin census must see
+        // zero recovery pins.
+        bufmgr::uring_drain_pins();
+
         if reached_recovery_target {
             if !reached_consistency() {
                 ereport(FATAL)

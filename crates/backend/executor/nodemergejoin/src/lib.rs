@@ -11,7 +11,7 @@ use ::execexpr::{
     exec_build_projection_info_subplans, exec_init_expr_subplans,
     exec_init_qual_subplans, exec_project, exec_qual, EvalSlots, ExprState,
 };
-use ::executils::{EStateData, EcxtId, ExecSlotId};
+use ::executils::{EStateData, EcxtId, ExecSlotId, RetainedTupleCtx};
 use ::mcx::PgBox;
 use ::tuplesort::{apply_sort_comparator_in, SortSupport};
 use ::types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
@@ -105,6 +105,9 @@ pub struct MergeJoinState<'mcx> {
     mj_OuterTupleSlot: Option<ExecSlotId>,
     mj_InnerTupleSlot: Option<ExecSlotId>,
     mj_MarkedTupleSlot: ExecSlotId,
+    // The marked slot's image lives here, one at a time (C: the slot's
+    // tts_mcxt, pfreed by the next MarkInnerTuple; the query context is Bump).
+    mj_MarkedCtx: RetainedTupleCtx,
     // InstrCountFiltered1/2 slot for this join node (nodeMergejoin.c).
     js_instr: Option<u32>,
 }
@@ -150,6 +153,7 @@ pub fn exec_init_merge_join<'mcx>(
         estate.exec_init_extra_tuple_slot(Some(result_desc.clone()), TupleSlotKind::Virtual);
     let mj_MarkedTupleSlot =
         estate.exec_init_extra_tuple_slot(Some(inner_desc.clone()), TupleSlotKind::MinimalTuple);
+    let mj_MarkedCtx = RetainedTupleCtx::new(mcx, "MergeJoin marked tuple")?;
     let mj_FillOuter = matches!(
         node.join.jointype,
         JoinType::JOIN_LEFT | JoinType::JOIN_ANTI | JoinType::JOIN_FULL
@@ -227,6 +231,7 @@ pub fn exec_init_merge_join<'mcx>(
         mj_OuterTupleSlot: None,
         mj_InnerTupleSlot: None,
         mj_MarkedTupleSlot,
+        mj_MarkedCtx,
         js_instr: if estate.es_instrument != 0 {
             Some(u32::try_from(node.join.plan.plan_node_id).expect("plan_node_id is non-negative"))
         } else {
@@ -585,10 +590,16 @@ fn mark_inner_tuple<'mcx>(
     let src_id = node.mj_InnerTupleSlot.expect("inner slot to mark");
     let dst_id = node.mj_MarkedTupleSlot;
     let table = &mut estate.es_tupleTable[..];
+    // Distinct ids: the source is the inner child's slot, never the marked
+    // slot itself (after a restore the inner is re-fetched before any new
+    // mark), so `src` never lives in mj_MarkedCtx. The old marked image is
+    // dead here: it is read only by TESTOUTER (eval_inner_values over the
+    // marked slot) and as the restored inner, both strictly before the next
+    // mark of a NEW inner tuple — the same pfree C's ExecCopySlot performs.
     let [dst, src] = table
         .get_disjoint_mut([dst_id.0 as usize, src_id.0 as usize])
         .expect("distinct in-range mark slot ids");
-    exectuples::exec_copy_slot(dst, src, mcx, mcx)
+    node.mj_MarkedCtx.copy_slot(dst, src, mcx)
 }
 
 // MJFillOuter: null-extended outer emission (otherqual over outer + nulls).
@@ -916,8 +927,7 @@ pub fn exec_end_merge_join(node: &mut MergeJoinState<'_>) {
 
 /// `ExecReScanMergeJoin` node-local half; the caller rescans both children.
 pub fn exec_rescan_merge_join<'mcx>(node: &mut MergeJoinState<'mcx>, estate: &mut EStateData<'mcx>) {
-    let mcx = estate.es_query_cxt;
-    exectuples::exec_clear_tuple(estate.slot_mut(node.mj_MarkedTupleSlot), mcx);
+    node.mj_MarkedCtx.clear_slot(estate.slot_mut(node.mj_MarkedTupleSlot));
     node.mj_JoinState = EXEC_MJ_INITIALIZE_OUTER;
     node.mj_MatchedOuter = false;
     node.mj_MatchedInner = false;
@@ -940,6 +950,6 @@ mcx::forget_safe_struct!(
         mj_SkipMarkRestore, mj_ExtraMarks, js_single_match, mj_ConstFalseJoin, mj_FillOuter,
         mj_FillInner, mj_NullInnerTupleSlot, mj_NullOuterTupleSlot,
         mj_MatchedOuter, mj_MatchedInner, mj_OuterTupleSlot,
-        mj_InnerTupleSlot, mj_MarkedTupleSlot, js_instr;
+        mj_InnerTupleSlot, mj_MarkedTupleSlot, mj_MarkedCtx, js_instr;
         ps_ResultTupleDesc, proj, joinqual, otherqual, clauses },
 );

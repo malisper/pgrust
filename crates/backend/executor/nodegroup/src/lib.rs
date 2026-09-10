@@ -5,7 +5,7 @@
 use std::rc::Rc;
 
 use ::execexpr::{exec_build_grouping_equal, exec_project, exec_qual, EvalSlots, ExprState};
-use ::executils::{EStateData, EcxtId, ExecSlotId};
+use ::executils::{EStateData, EcxtId, ExecSlotId, RetainedTupleCtx};
 use ::mcx::{vec_with_capacity_in, PgBox, PgVec};
 use ::types_error::PgResult;
 use ::types_nodes::plannodes::Group;
@@ -23,6 +23,9 @@ pub struct GroupState<'mcx> {
     pub ps_ResultTupleDesc: Option<Rc<TupleDescData<'static>>>,
     pub ps_ResultTupleSlot: ExecSlotId,
     firsttuple_slot: SlotData<'mcx>,
+    // firsttuple_slot's image lives here, one group at a time (C: the slot's
+    // tts_mcxt, pfreed by the next ExecCopySlot; the query context is Bump).
+    first_ctx: RetainedTupleCtx,
     // None when numCols == 0 (every key proved constant): one group.
     eq: Option<PgBox<'mcx, ExprState<'mcx>>>,
     qual: Option<PgBox<'mcx, ExprState<'mcx>>>,
@@ -74,12 +77,14 @@ pub fn exec_init_group<'mcx>(
         TupleSlotKind::MinimalTuple,
         Some(outer_desc.clone()),
     );
+    let first_ctx = RetainedTupleCtx::new(mcx, "Group first tuple")?;
     Ok(GroupState {
         plan: node,
         ps_ExprContext,
         ps_ResultTupleDesc: Some(result_desc),
         ps_ResultTupleSlot,
         firsttuple_slot,
+        first_ctx,
         eq,
         qual,
         proj,
@@ -190,7 +195,12 @@ impl<'mcx> GroupState<'mcx> {
     ) -> PgResult<()> {
         let mcx = estate.es_query_cxt;
         let outer_slot = estate.slot_mut(outer_id);
-        exectuples::exec_copy_slot(&mut self.firsttuple_slot, outer_slot, mcx, mcx)?;
+        // Compare-then-store order: the caller has already run the equality
+        // program over the OLD first tuple (lane_group_feed), and the
+        // projection of the previous group (which may point by-ref into that
+        // image through the Virtual result slot) was consumed by the parent
+        // before it asked for the next row — exactly C's pfree hazard.
+        self.first_ctx.copy_slot(&mut self.firsttuple_slot, outer_slot, mcx)?;
         self.have_first = true;
         Ok(())
     }
@@ -256,12 +266,17 @@ pub fn exec_end_group(node: &mut GroupState<'_>) {
 pub fn exec_rescan_group<'mcx>(node: &mut GroupState<'mcx>, estate: &mut EStateData<'mcx>) {
     node.grp_done = false;
     node.have_first = false;
+    // The projected result slot may point by-ref into the retained image:
+    // unhook it before the image goes.
     let mcx = estate.es_query_cxt;
-    exectuples::exec_clear_tuple(&mut node.firsttuple_slot, mcx);
+    exectuples::exec_clear_tuple(estate.slot_mut(node.ps_ResultTupleSlot), mcx);
+    node.first_ctx.clear_slot(&mut node.firsttuple_slot);
 }
 
-// Exempt: all released in exec_end_group (eq/qual/proj via release_frames).
+// Exempt: all released in exec_end_group (eq/qual/proj via release_frames);
+// first_ctx is dropped by the query context's reset callback.
 mcx::forget_safe_struct!(
-    GroupState<'_> { plan, ps_ExprContext, ps_ResultTupleSlot, grp_done, have_first, instr_idx;
+    GroupState<'_> { plan, ps_ExprContext, ps_ResultTupleSlot, grp_done, have_first, instr_idx,
+        first_ctx;
         ps_ResultTupleDesc, firsttuple_slot, eq, qual, proj },
 );

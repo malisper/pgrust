@@ -25,10 +25,22 @@ mod alloc_track {
     use std::sync::Mutex;
 
     pub static ENABLED: AtomicBool = AtomicBool::new(false);
+    // PGRUST_ALLOC_TRACK=all: record every thread, not just pg:backend*
+    // (runtime pool / lane workers allocate on their own threads).
+    pub static ALL_THREADS: AtomicBool = AtomicBool::new(false);
+    // SIGWINCH (PGRUST_ALLOC_TRACK=...,dump) requests a mid-run dump of the
+    // live set; the next tracked allocation performs it under the lock, so
+    // the query state is still live (an exit-time dump only sees what
+    // survives the exiting thread's unwind).
+    pub static DUMP_REQ: AtomicBool = AtomicBool::new(false);
+    pub extern "C" fn request_dump(_sig: libc::c_int) {
+        DUMP_REQ.store(true, Relaxed);
+    }
 
-    const BT_DEPTH: usize = 14;
+    const BT_DEPTH: usize = 28;
 
     struct Rec {
+        tname: &'static str,
         size: usize,
         bt: [usize; BT_DEPTH],
         n: usize,
@@ -39,19 +51,36 @@ mod alloc_track {
     thread_local! {
         static IN_HOOK: Cell<bool> = const { Cell::new(false) };
         // Resolved once per thread: only backend threads are tracked.
-        static TRACKED: Cell<u8> = const { Cell::new(0) }; // 0 unknown, 1 no, 2 yes
+        // (tracked: 0 unknown, 1 no, 2 yes; name: interned on first use). One
+        // slot: the session TLS census is pinned, so no second thread_local.
+        static TRACKED: Cell<(u8, Option<&'static str>)> = const { Cell::new((0, None)) };
+    }
+
+    fn thread_name() -> &'static str {
+        TRACKED.with(|t| {
+            let (tracked, name) = t.get();
+            if let Some(n) = name {
+                return n;
+            }
+            let n: &'static str = Box::leak(
+                std::thread::current().name().unwrap_or("<unnamed>").to_owned().into_boxed_str(),
+            );
+            t.set((tracked, Some(n)));
+            n
+        })
     }
 
     #[inline]
     fn thread_tracked() -> bool {
         match TRACKED.get() {
-            2 => true,
-            1 => false,
-            _ => {
-                let is_backend = std::thread::current()
-                    .name()
-                    .is_some_and(|n| n.starts_with("pg:backend"));
-                TRACKED.set(if is_backend { 2 } else { 1 });
+            (2, _) => true,
+            (1, _) => false,
+            (_, name) => {
+                let is_backend = ALL_THREADS.load(Relaxed)
+                    || std::thread::current()
+                        .name()
+                        .is_some_and(|n| n.starts_with("pg:backend"));
+                TRACKED.set((if is_backend { 2 } else { 1 }, name));
                 is_backend
             }
         }
@@ -101,7 +130,12 @@ mod alloc_track {
                 let n = unsafe { backtrace_fp(&mut bt) };
                 let mut g = LIVE.lock().unwrap_or_else(|e| e.into_inner());
                 g.get_or_insert_with(HashMap::new)
-                    .insert(p as usize, Rec { size: l.size(), bt, n });
+                    .insert(p as usize, Rec { tname: thread_name(), size: l.size(), bt, n });
+                if DUMP_REQ.swap(false, Relaxed) {
+                    if let Some(m) = g.as_ref() {
+                        dump_map(m, "mid-run");
+                    }
+                }
             }
             h.set(false);
         });
@@ -128,26 +162,39 @@ mod alloc_track {
         ENABLED.store(false, Relaxed);
         let g = LIVE.lock().unwrap_or_else(|e| e.into_inner());
         let Some(m) = g.as_ref() else { return };
+        dump_map(m, "exit");
+    }
+
+    fn dump_map(m: &HashMap<usize, Rec>, when: &str) {
         // Group by backtrace.
-        let mut groups: HashMap<&[usize], (usize, usize)> = HashMap::new();
+        let mut groups: HashMap<(&'static str, &[usize]), (usize, usize)> = HashMap::new();
         for r in m.values() {
-            let e = groups.entry(&r.bt[..r.n]).or_insert((0, 0));
+            let e = groups.entry((r.tname, &r.bt[..r.n])).or_insert((0, 0));
             e.0 += 1;
             e.1 += r.size;
         }
-        let mut rows: Vec<(&[usize], usize, usize)> =
-            groups.into_iter().map(|(k, (c, b))| (k, c, b)).collect();
-        rows.sort_by(|a, b| b.2.cmp(&a.2));
+        let mut rows: Vec<(&'static str, &[usize], usize, usize)> =
+            groups.into_iter().map(|((t, k), (c, b))| (t, k, c, b)).collect();
+        rows.sort_by(|a, b| b.3.cmp(&a.3));
+        let mut per_thread: HashMap<&'static str, usize> = HashMap::new();
+        for r in m.values() {
+            *per_thread.entry(r.tname).or_insert(0) += r.size;
+        }
+        let mut pt: Vec<_> = per_thread.into_iter().collect();
+        pt.sort_by(|a, b| b.1.cmp(&a.1));
+        for (t, b) in pt.iter().take(8) {
+            eprintln!("ALLOC-TRACK thread: {t} live_bytes={b}");
+        }
         let slide = unsafe { slide0() };
         eprintln!(
-            "ALLOC-TRACK dump: {} live tracked blocks, {} bytes, slide=0x{:x}",
+            "ALLOC-TRACK dump ({when}): {} live tracked blocks, {} bytes, slide=0x{:x}",
             m.len(),
             m.values().map(|r| r.size).sum::<usize>(),
             slide,
         );
-        for (bt, count, bytes) in rows.iter().take(25) {
+        for (tname, bt, count, bytes) in rows.iter().take(25) {
             let addrs: Vec<String> = bt.iter().map(|a| format!("0x{a:x}")).collect();
-            eprintln!("ALLOC-TRACK leak: n={} bytes={} bt={}", count, bytes, addrs.join(" "));
+            eprintln!("ALLOC-TRACK leak: thread={} n={} bytes={} bt={}", tname, count, bytes, addrs.join(" "));
         }
     }
 
@@ -307,7 +354,20 @@ fn run() {
     // FPBUDGET-1 debug instrument (debug builds): track backend-thread
     // allocations that survive to process exit, with fp backtraces.
     #[cfg(all(not(target_family = "wasm"), debug_assertions))]
-    if std::env::var_os("PGRUST_ALLOC_TRACK").is_some() {
+    // PGRUST_ALLOC_TRACK=1 | all [,dump]: `all` records every thread, `dump`
+    // installs the SIGWINCH mid-run dump (one env read: the determinism
+    // lint's raw-env budget for this file is a ratchet).
+    if let Some(v) = std::env::var_os("PGRUST_ALLOC_TRACK") {
+        let v = v.to_string_lossy();
+        let flag = |f: &str| v.split(',').any(|x| x.trim() == f);
+        if flag("all") {
+            alloc_track::ALL_THREADS.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        if flag("dump") {
+            unsafe {
+                libc::signal(libc::SIGWINCH, alloc_track::request_dump as extern "C" fn(libc::c_int) as usize);
+            }
+        }
         unsafe { libc::atexit(alloc_track::dump) };
         alloc_track::ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
         eprintln!("ALLOC-TRACK: enabled");

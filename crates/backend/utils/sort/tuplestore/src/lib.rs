@@ -92,8 +92,10 @@ pub struct TuplestoreData<'m> {
     memtupdeleted: usize,
     readptrs: PgVec<'m, ReadPointer>,
     activeptr: usize,
-    // Retained flat-image scratch for the READFILE readtup.
-    read_scratch: PgVec<'m, u8>,
+    // Retained flat-image scratch for the READFILE readtup, in MAXALIGN
+    // words so a slot can deform the image in place (`gettupleslot` with
+    // `copy == false` lends this buffer out — see its contract).
+    read_scratch: PgVec<'m, u64>,
 }
 
 bind!(pub TuplestoreTy => TuplestoreData<'mcx>);
@@ -285,8 +287,17 @@ impl Tuplestore {
         })
     }
 
-    /// With `copy == false` the slot borrows the store's image: valid until
-    /// clear/end (C's shouldFree=false contract).
+    /// With `copy == false` the slot borrows the store's image (C's
+    /// "may just receive a pointer to a tuple held within the tuplestore"
+    /// contract): an in-memory tuple is valid until the next put/clear/end;
+    /// a spilled tuple lives in the store's read scratch and is valid only
+    /// until the next get on this store. C DIVERGENCE (memory-bound, not
+    /// visible): C's readtup pallocs a per-row copy that the slot pfrees,
+    /// but the executor's query context here is a bump arena whose free is
+    /// a no-op, so a per-row copy would be retained until query end (5M
+    /// generate_series rows held ~130 MB past work_mem). Callers that hold
+    /// a row across further reads pass `copy == true`, exactly as C does
+    /// (nodeWindowAgg.c).
     pub fn gettupleslot<'q>(
         &mut self,
         forward: bool,
@@ -301,10 +312,26 @@ impl Tuplestore {
                     return Ok(false);
                 }
                 StoreTuple::File => {
-                    // File tuples are always fresh copies (C should_free).
-                    let owned =
-                        heaptuple::heap_copy_minimal_tuple(slot_mcx, &st.read_scratch, 0)?;
-                    exectuples::exec_store_minimal_tuple_owned(slot, slot_mcx, owned);
+                    if copy {
+                        let owned =
+                            heaptuple::heap_copy_minimal_tuple(slot_mcx, st.scratch_image(), 0)?;
+                        exectuples::exec_store_minimal_tuple_owned(slot, slot_mcx, owned);
+                    } else {
+                        // SAFETY: readtup just staged a t_len-byte image at the
+                        // start of read_scratch (MAXALIGN'd), held until the
+                        // next readtup (caller contract above); full-buffer
+                        // provenance — a &MinimalTupleData here would shrink
+                        // it to the header.
+                        unsafe {
+                            exectuples::exec_store_minimal_tuple_ptr(
+                                slot,
+                                slot_mcx,
+                                core::ptr::NonNull::new_unchecked(
+                                    st.read_scratch.as_mut_ptr().cast::<MinimalTupleData>(),
+                                ),
+                            )
+                        };
+                    }
                     return Ok(true);
                 }
                 StoreTuple::Mem(tuple) => tuple,
@@ -801,21 +828,40 @@ impl<'m> TuplestoreData<'m> {
         Ok(u32::from_ne_bytes(buf))
     }
 
+    /// The staged READFILE image: `t_len` bytes at the head of `read_scratch`.
+    fn scratch_image(&self) -> &[u8] {
+        let words: &[u64] = &self.read_scratch;
+        debug_assert!(!words.is_empty(), "scratch_image before readtup");
+        // SAFETY: the buffer holds >= t_len bytes (readtup sized it).
+        unsafe {
+            let p = words.as_ptr().cast::<u8>();
+            let t_len = u32::from_ne_bytes(*p.cast::<[u8; 4]>()) as usize;
+            debug_assert!(t_len <= words.len() * 8);
+            core::slice::from_raw_parts(p, t_len)
+        }
+    }
+
     /// `readtup_heap` into `read_scratch` as a flat minimal-tuple image.
     fn readtup(&mut self, len: u32) -> PgResult<()> {
         let bodylen = len as usize - mem::size_of::<u32>();
         let t_len = bodylen + MINIMAL_TUPLE_DATA_OFFSET;
-        // Bytes 4..10 (header padding) stay zero across reuse: resize only
-        // ever zero-fills growth, and no write below touches them.
-        if self.read_scratch.len() < t_len {
-            self.read_scratch.resize(t_len, 0);
-        } else {
-            self.read_scratch.truncate(t_len);
+        // Grow only (geometric via PgVec), never shrink: the image is lent
+        // to a slot until the next readtup. Bytes 4..10 (header padding)
+        // stay zero across reuse: growth zero-fills, and no write below
+        // touches them.
+        let words = maxalign(t_len) / 8;
+        if self.read_scratch.len() < words {
+            self.read_scratch.resize(words, 0);
         }
-        self.read_scratch[..4].copy_from_slice(&(t_len as u32).to_ne_bytes());
         let TuplestoreData { myfile, read_scratch, .. } = self;
+        // SAFETY: read_scratch holds >= maxalign(t_len) bytes; u64 -> u8
+        // reinterpretation of an initialized buffer.
+        let image = unsafe {
+            core::slice::from_raw_parts_mut(read_scratch.as_mut_ptr().cast::<u8>(), t_len)
+        };
+        image[..4].copy_from_slice(&(t_len as u32).to_ne_bytes());
         let file = myfile.as_mut().expect("readtup without file");
-        file.read_exact(&mut read_scratch[MINIMAL_TUPLE_DATA_OFFSET..])?;
+        file.read_exact(&mut image[MINIMAL_TUPLE_DATA_OFFSET..])?;
         if self.backward {
             let mut trail = [0u8; 4];
             let file = self.myfile.as_mut().expect("readtup without file");

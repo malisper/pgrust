@@ -210,7 +210,7 @@ fn setup_with_sortop(
     let mut estate = EStateData::new_in(mcx);
     let in_slot = estate.exec_init_extra_tuple_slot(Some(desc.clone()), TupleSlotKind::Virtual);
     let plan = mk_plan(mcx, 1, prefix_sortop);
-    let node = exec_init_incremental_sort(plan, &mut estate, 0, &desc, desc.clone());
+    let node = exec_init_incremental_sort(plan, &mut estate, 0, &desc, desc.clone()).unwrap();
     let feed = Feed { slot: in_slot, rows, next: 0 };
     (node, estate, feed)
 }
@@ -316,6 +316,35 @@ fn rescan_resorts_from_scratch() {
     feed.next = 0;
     let out = drain(&mut node, &mut estate, &mut feed, None);
     assert_eq!(out, expected_sorted(rows));
+}
+
+// Query-context bytes after sorting `n` rows whose prefix key changes on
+// every row (a pivot copy at every group boundary): (self, subtree).
+fn query_ctx_used_after(n: i32) -> (usize, usize) {
+    let rows: Vec<(Option<i32>, i32)> = (0..n).map(|i| (Some(i), 0)).collect();
+    let (mut node, mut estate, mut feed) = setup(rows);
+    let out = drain(&mut node, &mut estate, &mut feed, None);
+    assert_eq!(out.len(), n as usize);
+    let ctx = estate.es_query_cxt.context();
+    (ctx.used(), ctx.subtree_used())
+}
+
+// The retained group pivot must not accumulate in the query context: 50k
+// group boundaries cost the same query-context bytes as 2k, to within one
+// arena block.
+#[test]
+fn retained_group_pivot_does_not_grow_query_context() {
+    let (small_self, small_tree) = query_ctx_used_after(2_000);
+    let (big_self, big_tree) = query_ctx_used_after(50_000);
+    const SLACK: usize = 64 * 1024;
+    assert!(
+        big_self <= small_self + SLACK,
+        "query context grew with group count: {small_self} -> {big_self}"
+    );
+    assert!(
+        big_tree <= small_tree + SLACK,
+        "query context subtree grew with group count: {small_tree} -> {big_tree}"
+    );
 }
 
 // nodeIncrementalSort.c:248-249: fcinfo->args[0] = pivot, args[1] = tuple.

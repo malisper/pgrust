@@ -7,6 +7,7 @@
 //! (varlena.c string_agg_serialize/string_agg_deserialize).
 
 use core::alloc::Layout;
+use core::ptr::NonNull;
 
 use datum::Bytea;
 use mcx::{Allocator, Mcx};
@@ -38,14 +39,19 @@ impl StringAggState {
             bytes.len(),
         )?;
         if newlen > self.maxlen as usize {
-            let layout = Layout::from_size_align(newlen, 1).unwrap();
-            let new = Allocator::allocate(&mcx, layout)
-                .map_err(|_| mcx.oom(newlen))?
-                .cast::<u8>()
-                .as_ptr();
-            // SAFETY: fresh allocation of newlen > len bytes; source is the
-            // live previous buffer.
-            unsafe { core::ptr::copy_nonoverlapping(self.data, new, self.len as usize) };
+            // enlargeStringInfo's repalloc: grow in place where the arena can
+            // (tail chunk, or a dedicated chunk via realloc) so the old buffer
+            // is released rather than left dead until the aggcontext resets.
+            let old_layout = Layout::from_size_align(self.maxlen as usize, 1).unwrap();
+            let new_layout = Layout::from_size_align(newlen, 1).unwrap();
+            // SAFETY: data is the live buffer this state allocated/grew from
+            // `mcx` with exactly old_layout; newlen > maxlen.
+            let new = unsafe {
+                Allocator::grow(&mcx, NonNull::new_unchecked(self.data), old_layout, new_layout)
+            }
+            .map_err(|_| mcx.oom(newlen))?
+            .cast::<u8>()
+            .as_ptr();
             self.data = new;
             self.maxlen = newlen as u32;
         }
@@ -219,5 +225,37 @@ mod tests {
         assert_eq!(st.accumulated(), &expected[..]);
         assert_eq!(st.len as usize, 3000);
         assert_eq!(st.maxlen, 4096);
+        for _ in 0..10 {
+            st.append(mcx, &chunk).unwrap();
+            expected.extend_from_slice(&chunk);
+        }
+        assert_eq!(st.accumulated(), &expected[..]);
+        assert_eq!(st.len as usize, 6000);
+        assert_eq!(st.maxlen, 8192, "maxlen keeps doubling through grow");
+    }
+
+    // The production aggcontext is Bump: growth through chunk_limit and into
+    // dedicated realloc must keep bytes intact and maxlen doubling.
+    #[test]
+    fn append_grows_through_bump_dedicated_chunks() {
+        let ctx = MemoryContext::new_bump("agg");
+        let mcx = ctx.mcx();
+        let st = make_string_agg_state(mcx).unwrap();
+        // SAFETY: make_string_agg_state allocated this live, uniquely borrowed state.
+        let st = unsafe { &mut *st };
+        let chunk: Vec<u8> = (0..4093u32).map(|i| (i % 251) as u8).collect();
+        let mut expected: Vec<u8> = Vec::new();
+        let mut maxlen = INITIAL_SIZE;
+        for _ in 0..600 {
+            st.append(mcx, &chunk).unwrap();
+            expected.extend_from_slice(&chunk);
+            while maxlen < expected.len() {
+                maxlen *= 2;
+            }
+            assert_eq!(st.maxlen as usize, maxlen);
+        }
+        assert!(expected.len() > 2 * 1024 * 1024, "crossed the 8MiB-policy chunk limit");
+        assert_eq!(st.accumulated(), &expected[..]);
+        assert!(ctx.used() < 2 * maxlen + 64 * 1024, "old buffers are released, not retained");
     }
 }

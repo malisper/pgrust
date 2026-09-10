@@ -1890,3 +1890,51 @@ fn heap_tuple_datum_store_detoasts_packed_composite() {
     assert_eq!(datum_text_bytes(slot_getattr(&mut slot, 2, &mut n)), b"hello");
     assert_eq!(slot_getattr(&mut slot, 3, &mut n).as_i64(), 1_234_567_890_123);
 }
+
+/// A Minimal slot holding only deformed values (an Agg's output row) copied
+/// by the Sort/tuplestore put path must not materialize into the slot's own
+/// context: that context is the query-lifetime Bump arena, so every row's
+/// image stayed resident until query end (5M Agg rows under a Sort: +260 MB
+/// RSS vs C, alloc-track profile 2026-09-10). The copy is formed straight
+/// into the caller's context and the slot stays values-only.
+#[test]
+fn copy_from_values_only_tuple_slot_does_not_materialize_into_slot_context() {
+    let slot_ctx = MemoryContext::new_bump("query (slot)");
+    let out_ctx = MemoryContext::new("out");
+    let (smcx, omcx) = (slot_ctx.mcx(), out_ctx.mcx());
+    let desc = desc3(smcx);
+    let txt = text_varlena("values only");
+    let values = [Datum::from_i32(7), text_datum(&txt), Datum::from_i64(99)];
+
+    for kind in [TupleSlotKind::MinimalTuple, TupleSlotKind::HeapTuple] {
+        let mut slot = make_tuple_table_slot(smcx, kind, Some(desc.clone()));
+        {
+            let base = slot.base_mut();
+            base.tts_values[..3].copy_from_slice(&values);
+            base.tts_isnull[..3].copy_from_slice(&[false; 3]);
+        }
+        exec_store_virtual_tuple(&mut slot);
+        let before = slot_ctx.used();
+
+        let mut n = false;
+        let out_before = out_ctx.used();
+        let copy = exec_copy_slot_minimal_tuple(&mut slot, smcx, omcx, 0).unwrap();
+        assert!(out_ctx.used() > out_before, "the copy lives in the caller's context");
+        assert_eq!(slot_ctx.used(), before, "{kind:?}: no image materialized into the slot context");
+        assert!(!slot.base().should_free(), "{kind:?}: the slot stays values-only");
+        let mut slot2 = make_tuple_table_slot(omcx, TupleSlotKind::MinimalTuple, Some(desc.clone()));
+        exec_store_minimal_tuple_owned(&mut slot2, omcx, copy);
+        assert_eq!(slot_getattr(&mut slot2, 1, &mut n).as_i32(), 7);
+        assert_eq!(datum_text_bytes(slot_getattr(&mut slot2, 2, &mut n)), b"values only");
+        assert_eq!(slot_getattr(&mut slot2, 3, &mut n).as_i64(), 99);
+
+        let heap = exec_copy_slot_heap_tuple(&mut slot, smcx, omcx).unwrap();
+        assert_eq!(slot_ctx.used(), before, "{kind:?}: heap copy materializes nothing either");
+        let mut slot3 = make_tuple_table_slot(omcx, TupleSlotKind::HeapTuple, Some(desc.clone()));
+        exec_store_heap_tuple_owned(&mut slot3, omcx, heap);
+        assert_eq!(slot_getattr(&mut slot3, 3, &mut n).as_i64(), 99);
+        exec_clear_tuple(&mut slot3, omcx);
+        exec_clear_tuple(&mut slot2, omcx);
+        exec_clear_tuple(&mut slot, smcx);
+    }
+}

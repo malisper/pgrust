@@ -302,3 +302,36 @@ fn i2_build_is_panic_unwind_not_abort() {
         "panic=abort breaks the I-1 backend crash firewall (I-2 P0 hazard #1)"
     );
 }
+
+/// #67 (point 3): a caught backend panic skips the exit-callback drain, so
+/// nothing released the LWLocks the dead task held; a sibling parked in the
+/// semaphore wait for one of them has no drain point and wedges the crash
+/// cycle. The crash path must release the dying thread's held set itself.
+#[test]
+fn crash_exit_releases_held_lwlocks() {
+    use ::lwlock::{LWLockAcquire, LWLockHeldByMe, LWLockPadded, LW_EXCLUSIVE, LW_SHARED};
+    let slots = [LWLockPadded::new_unlocked(0), LWLockPadded::new_unlocked(0)];
+    let held = std::thread::scope(|s| {
+        s.spawn(|| {
+            LWLockAcquire(&slots[0].lock, LW_EXCLUSIVE, 0).unwrap();
+            LWLockAcquire(&slots[1].lock, LW_SHARED, 0).unwrap();
+            let payload = std::panic::catch_unwind(|| panic!("backend panic under lock"))
+                .expect_err("must unwind");
+            release_crash_held_lwlocks(payload.as_ref());
+            (LWLockHeldByMe(&slots[0].lock), LWLockHeldByMe(&slots[1].lock))
+        })
+        .join()
+        .expect("contained on its own thread")
+    });
+    assert_eq!(held, (false, false), "the crash path must release every held LWLock");
+    // The lock is genuinely free again: a sibling can take it exclusively.
+    assert!(LWLockAcquire(&slots[0].lock, LW_EXCLUSIVE, 0).unwrap());
+    assert!(LWLockAcquire(&slots[1].lock, LW_EXCLUSIVE, 0).unwrap());
+    ::lwlock::LWLockReleaseAll().unwrap();
+
+    // A clean proc_exit owes its release to the callback drain, not here.
+    LWLockAcquire(&slots[0].lock, LW_SHARED, 0).unwrap();
+    release_crash_held_lwlocks(&ipc::ProcExitThread { code: 0 });
+    assert!(LWLockHeldByMe(&slots[0].lock));
+    ::lwlock::LWLockReleaseAll().unwrap();
+}

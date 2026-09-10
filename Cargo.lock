@@ -8662,6 +8662,7 @@ dependencies = [
  "libc",
  "libpq_pqsignal",
  "lmgr_proc",
+ "lwlock",
  "mcx",
  "mcxt_stats",
  "miscinit",

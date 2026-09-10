@@ -163,6 +163,15 @@ fn InvalidateBuffer(desc: &BufferDesc, buf_state_in: u32) -> PgResult<()> {
                     .with_error_location(crate::read::loc("InvalidateBuffer")),
                 ));
             }
+            // C reaches CHECK_FOR_INTERRUPTS through WaitIO's condition-
+            // variable sleep; but when the foreign pin is not an IO in
+            // progress (BM_IO_IN_PROGRESS clear) WaitIO returns at once and
+            // the retry is a busy loop (bufmgr.c:2229 comment). A pin that
+            // is never released (malisper/pgrust#93: a stranded recovery
+            // prefetch pin) then spun uncancellably at 100% CPU inside the
+            // commit path. Check for interrupts on every retry so the spin
+            // is at least cancellable; no timeout or bound, as in C.
+            postgres_seams::check_for_interrupts::call()?;
             crate::read::WaitIO(desc)?;
             continue;
         }

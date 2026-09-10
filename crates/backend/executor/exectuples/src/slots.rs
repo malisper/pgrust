@@ -770,7 +770,7 @@ pub fn exec_materialize_slot<'mcx>(slot: &mut SlotData<'mcx>, mcx: Mcx<'mcx>) ->
 /// callbacks perform in `slot_mcx`). Result is allocated in `out_mcx`.
 pub fn exec_copy_slot_heap_tuple<'mcx, 'out>(
     slot: &mut SlotData<'mcx>,
-    slot_mcx: Mcx<'mcx>,
+    _slot_mcx: Mcx<'mcx>,
     out_mcx: Mcx<'out>,
 ) -> PgResult<HeapTuple<'out>> {
     debug_assert!(!slot.base().is_empty());
@@ -783,39 +783,43 @@ pub fn exec_copy_slot_heap_tuple<'mcx, 'out>(
                 .expect("copy without descriptor");
             heap_form_tuple(out_mcx, desc, &v.base.tts_values, &v.base.tts_isnull)
         }
-        SlotData::Heap(h) => {
-            if h.tuple.is_none() {
-                heap_materialize(h, slot_mcx)?;
+        // A tuple-typed slot holding only deformed values (a virtual store
+        // into a Heap/Minimal slot: Agg output, projections) is formed
+        // straight into the caller's context. C materializes into the slot's
+        // own context first, but its slot context is an AllocSet that frees
+        // the image on the next clear/store; here the slot context is the
+        // query-lifetime Bump arena, so the per-row materialization would
+        // stay resident until query end (5M Agg rows under a Sort: +260 MB).
+        SlotData::Heap(h) => match h.tuple.as_ref() {
+            Some(t) => heap_copytuple(out_mcx, t),
+            None => {
+                let desc = h.base.tts_tupleDescriptor.as_ref().expect("copy without descriptor");
+                heap_form_tuple(out_mcx, desc, &h.base.tts_values, &h.base.tts_isnull)
             }
-            heap_copytuple(
-                out_mcx,
-                h.tuple.as_ref().expect("materialize left no tuple"),
-            )
-        }
-        SlotData::BufferHeap(b) => {
-            if b.base.tuple.is_none() {
-                buffer_materialize(b, slot_mcx)?;
+        },
+        SlotData::BufferHeap(b) => match b.base.tuple.as_ref() {
+            Some(t) => heap_copytuple(out_mcx, t),
+            None => {
+                let base = &b.base.base;
+                let desc = base.tts_tupleDescriptor.as_ref().expect("copy without descriptor");
+                heap_form_tuple(out_mcx, desc, &base.tts_values, &base.tts_isnull)
             }
-            heap_copytuple(
-                out_mcx,
-                b.base.tuple.as_ref().expect("materialize left no tuple"),
-            )
-        }
-        SlotData::Minimal(m) => {
-            if m.mintuple.is_none() {
-                minimal_materialize(m, slot_mcx)?;
-            }
-            let p = m.mintuple.expect("materialize left no tuple");
+        },
+        SlotData::Minimal(m) => match m.mintuple {
             // SAFETY: stored mintuple is live for the duration of the copy.
-            heap_tuple_from_minimal_tuple(out_mcx, unsafe { minimal_bytes(p) })
-        }
+            Some(p) => heap_tuple_from_minimal_tuple(out_mcx, unsafe { minimal_bytes(p) }),
+            None => {
+                let desc = m.base.tts_tupleDescriptor.as_ref().expect("copy without descriptor");
+                heap_form_tuple(out_mcx, desc, &m.base.tts_values, &m.base.tts_isnull)
+            }
+        },
     }
 }
 
 /// C `ExecCopySlotMinimalTuple` / `ExecCopySlotMinimalTupleExtra`.
 pub fn exec_copy_slot_minimal_tuple<'mcx, 'out>(
     slot: &mut SlotData<'mcx>,
-    slot_mcx: Mcx<'mcx>,
+    _slot_mcx: Mcx<'mcx>,
     out_mcx: Mcx<'out>,
     extra: usize,
 ) -> PgResult<MinimalTuple<'out>> {
@@ -829,34 +833,31 @@ pub fn exec_copy_slot_minimal_tuple<'mcx, 'out>(
                 .expect("copy without descriptor");
             heap_form_minimal_tuple(out_mcx, desc, &v.base.tts_values, &v.base.tts_isnull, extra)
         }
-        SlotData::Heap(h) => {
-            if h.tuple.is_none() {
-                heap_materialize(h, slot_mcx)?;
+        // See exec_copy_slot_heap_tuple: no materialization into the slot's
+        // (query-lifetime Bump) context for a values-only tuple slot.
+        SlotData::Heap(h) => match h.tuple.as_ref() {
+            Some(t) => minimal_tuple_from_heap_tuple(out_mcx, t, extra),
+            None => {
+                let desc = h.base.tts_tupleDescriptor.as_ref().expect("copy without descriptor");
+                heap_form_minimal_tuple(out_mcx, desc, &h.base.tts_values, &h.base.tts_isnull, extra)
             }
-            minimal_tuple_from_heap_tuple(
-                out_mcx,
-                h.tuple.as_ref().expect("materialize left no tuple"),
-                extra,
-            )
-        }
-        SlotData::BufferHeap(b) => {
-            if b.base.tuple.is_none() {
-                buffer_materialize(b, slot_mcx)?;
+        },
+        SlotData::BufferHeap(b) => match b.base.tuple.as_ref() {
+            Some(t) => minimal_tuple_from_heap_tuple(out_mcx, t, extra),
+            None => {
+                let base = &b.base.base;
+                let desc = base.tts_tupleDescriptor.as_ref().expect("copy without descriptor");
+                heap_form_minimal_tuple(out_mcx, desc, &base.tts_values, &base.tts_isnull, extra)
             }
-            minimal_tuple_from_heap_tuple(
-                out_mcx,
-                b.base.tuple.as_ref().expect("materialize left no tuple"),
-                extra,
-            )
-        }
-        SlotData::Minimal(m) => {
-            if m.mintuple.is_none() {
-                minimal_materialize(m, slot_mcx)?;
-            }
-            let p = m.mintuple.expect("materialize left no tuple");
+        },
+        SlotData::Minimal(m) => match m.mintuple {
             // SAFETY: stored mintuple is live for the duration of the copy.
-            heap_copy_minimal_tuple(out_mcx, unsafe { minimal_bytes(p) }, extra)
-        }
+            Some(p) => heap_copy_minimal_tuple(out_mcx, unsafe { minimal_bytes(p) }, extra),
+            None => {
+                let desc = m.base.tts_tupleDescriptor.as_ref().expect("copy without descriptor");
+                heap_form_minimal_tuple(out_mcx, desc, &m.base.tts_values, &m.base.tts_isnull, extra)
+            }
+        },
     }
 }
 

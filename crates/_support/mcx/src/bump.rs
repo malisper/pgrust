@@ -213,6 +213,43 @@ impl BumpArena {
                 return Ok(NonNull::slice_from_raw_parts(ptr, new_csize));
             }
         }
+        self.grow_moved(ptr, old_layout, new_layout, acct)
+    }
+
+    // Off the tail-extension fast path. A dedicated (oversize/overaligned)
+    // chunk reallocs through Global like C's AllocSet repalloc of a
+    // dedicated block: the old block is released by the system allocator,
+    // so the peak is old+new only while it copies (string_agg's buffer).
+    // Anything else — a block chunk, including one whose new size crosses
+    // chunk_limit and so promotes to a dedicated chunk — is alloc+copy and
+    // the old chunk stays dead in its block until reset (bump.c has no
+    // per-chunk free; C's AllocSet would have freed that small chunk into
+    // a freelist, a bounded difference of at most chunk_limit bytes).
+    #[cold]
+    #[inline(never)]
+    unsafe fn grow_moved(
+        &mut self,
+        ptr: NonNull<u8>,
+        old_layout: Layout,
+        new_layout: Layout,
+        acct: &Acct,
+    ) -> Result<NonNull<[u8]>, AllocError> {
+        if let Some(i) = self.oversize.iter().position(|(p, _)| *p == ptr) {
+            let (_, cur_layout) = self.oversize[i];
+            let new_size = new_layout.size().max(cur_layout.size());
+            let new_layout =
+                Layout::from_size_align(new_size, new_layout.align()).map_err(|_| AllocError)?;
+            let delta = new_size - cur_layout.size();
+            acct.check_limit(delta)?;
+            // SAFETY: (ptr, cur_layout) is the live Global allocation recorded
+            // for this chunk; new_size >= cur_layout.size().
+            let new = unsafe { Global.grow(ptr, cur_layout, new_layout)? };
+            self.oversize[i] = (new.cast(), new_layout);
+            self.mem_allocated += delta;
+            crate::global_footprint::add(delta);
+            acct.commit_block(delta, self.mem_allocated, self.nblocks());
+            return Ok(new);
+        }
         let new = self.alloc(new_layout, acct)?;
         core::ptr::copy_nonoverlapping(ptr.as_ptr(), new.cast::<u8>().as_ptr(), old_layout.size());
         Ok(new)
@@ -446,5 +483,80 @@ mod tests {
         // SAFETY: q live from grow with `new`.
         let r = unsafe { a.grow(q.cast(), new, bigger, &acct) }.unwrap();
         assert_ne!(r.cast::<u8>().as_ptr(), p.as_ptr(), "non-tail grow moves");
+    }
+
+    #[test]
+    fn grow_dedicated_reallocs_and_charges_delta_only() {
+        let mut a = BumpArena::new();
+        let acct = acct();
+        let old = Layout::from_size_align(BUMP_CHUNK_LIMIT + 8, 8).unwrap();
+        let new = Layout::from_size_align(4 * BUMP_CHUNK_LIMIT, 8).unwrap();
+        let p = a.alloc(old, &acct).unwrap().cast::<u8>();
+        assert_eq!(a.oversize.len(), 1);
+        assert_eq!(a.footprint(), old.size());
+        let used0 = acct.self_used.get();
+        // SAFETY: p owns old.size() live bytes; grow preserves that prefix.
+        let q = unsafe {
+            p.as_ptr().write_bytes(0xa5, old.size());
+            let q = a.grow(p, old, new, &acct).unwrap().cast::<u8>();
+            assert!(core::slice::from_raw_parts(q.as_ptr(), old.size()).iter().all(|&b| b == 0xa5));
+            q
+        };
+        assert_eq!(a.oversize.len(), 1, "realloc replaces the entry, never appends");
+        assert_eq!(a.oversize[0].0, q);
+        assert_eq!(a.oversize[0].1.size(), new.size());
+        assert_eq!(a.blocks.len(), 0, "no block was opened for the copy");
+        assert_eq!(a.footprint(), new.size(), "old dedicated bytes are released, not retained");
+        assert_eq!(acct.self_used.get(), used0 + (new.size() - old.size()));
+        assert_eq!(acct.arena_footprint.get(), a.footprint());
+        assert_eq!(acct.arena_nblocks.get(), 1);
+        // Second grow on the moved pointer keeps one entry.
+        let bigger = Layout::from_size_align(8 * BUMP_CHUNK_LIMIT, 8).unwrap();
+        // SAFETY: q live from grow with `new`.
+        let r = unsafe { a.grow(q, new, bigger, &acct) }.unwrap().cast::<u8>();
+        assert_eq!(a.oversize.len(), 1);
+        assert_eq!(a.oversize[0].0, r);
+        assert_eq!(a.footprint(), bigger.size());
+        a.reset();
+        assert!(a.oversize.is_empty());
+        assert_eq!(a.footprint(), 0, "reset frees the grown dedicated chunk");
+    }
+
+    #[test]
+    fn grow_promotes_block_chunk_to_dedicated_then_reallocs() {
+        let mut a = BumpArena::new();
+        let acct = acct();
+        let small = Layout::from_size_align(64, 8).unwrap();
+        let p = a.alloc(small, &acct).unwrap().cast::<u8>();
+        let _hole = a.alloc(small, &acct).unwrap();
+        let big = Layout::from_size_align(BUMP_CHUNK_LIMIT + 8, 8).unwrap();
+        // SAFETY: p owns 64 live bytes; grow preserves that prefix.
+        let q = unsafe {
+            p.as_ptr().write_bytes(0x3c, small.size());
+            let q = a.grow(p, small, big, &acct).unwrap().cast::<u8>();
+            assert_eq!(core::slice::from_raw_parts(q.as_ptr(), 64), &[0x3c; 64]);
+            q
+        };
+        assert_eq!(a.oversize.len(), 1, "crossing chunk_limit promotes to a dedicated chunk");
+        assert_eq!(a.blocks.len(), 1, "the dead 64-byte chunk stays in the keeper");
+        assert_eq!(a.footprint(), INIT_BLOCK_SIZE + big.size());
+        let bigger = Layout::from_size_align(2 * BUMP_CHUNK_LIMIT, 8).unwrap();
+        // SAFETY: q live from grow with `big`.
+        let r = unsafe { a.grow(q, big, bigger, &acct) }.unwrap().cast::<u8>();
+        assert_eq!(a.oversize.len(), 1);
+        assert_eq!(a.oversize[0].0, r);
+        assert_eq!(a.footprint(), INIT_BLOCK_SIZE + bigger.size());
+        // Overaligned dedicated chunks realloc the same way.
+        let al = Layout::from_size_align(64, 64).unwrap();
+        let al2 = Layout::from_size_align(4096, 64).unwrap();
+        let s = a.alloc(al, &acct).unwrap().cast::<u8>();
+        // SAFETY: s live from alloc with `al`.
+        let t = unsafe { a.grow(s, al, al2, &acct) }.unwrap().cast::<u8>();
+        assert_eq!(t.as_ptr() as usize % 64, 0);
+        assert_eq!(a.oversize.len(), 2);
+        assert_eq!(a.footprint(), INIT_BLOCK_SIZE + bigger.size() + al2.size());
+        a.reset();
+        assert!(a.oversize.is_empty());
+        assert_eq!(a.footprint(), INIT_BLOCK_SIZE);
     }
 }

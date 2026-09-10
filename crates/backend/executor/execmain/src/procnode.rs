@@ -941,7 +941,7 @@ pub fn exec_init_node<'mcx>(
                         eflags,
                         &outer_desc,
                         result_desc,
-                    );
+                    )?;
                     PlanStateNode::IncrementalSort(::mcx::alloc_in(
                         mcx,
                         IncrementalSortNode { state, outer },

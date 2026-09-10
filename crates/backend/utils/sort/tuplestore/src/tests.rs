@@ -589,6 +589,59 @@ mod spill {
         assert_eq!(temp_files(&dir), 0, "temp file must be removed at end");
     }
 
+    /// The executor's query context is a bump arena whose per-chunk free is
+    /// a no-op, so a per-row READFILE copy handed to a slot there is retained
+    /// until query end: `SELECT count(*) FROM generate_series(1, 5000000)`
+    /// at work_mem=4MB grew RSS by ~130 MB (5M x ~26 B) while C stays flat.
+    /// A spilled store served with `copy == false` must lend its own scratch
+    /// image and allocate nothing in the slot's context; `copy == true`
+    /// still hands out a durable copy (C nodeWindowAgg's contract).
+    #[test]
+    fn spill_copy_false_reads_do_not_grow_slot_context() {
+        setup();
+        let (_cwd, _dir) = enter_datadir("noalloc");
+        let mcx = leaked_mcx();
+        let desc = int4_desc(mcx, 1);
+        let bump: &'static MemoryContext =
+            Box::leak(Box::new(MemoryContext::new_bump("ExecutorState-test")));
+        let bmcx = bump.mcx();
+        let mut slot =
+            exectuples::make_tuple_table_slot(bmcx, TupleSlotKind::MinimalTuple, Some(desc.clone()));
+
+        let mut ts = Tuplestore::begin_heap(false, false, 64);
+        for v in 0..N {
+            put_i32(&mut ts, &desc, v);
+        }
+        assert!(!ts.in_memory(), "200k tuples must spill at 64KB");
+
+        assert!(ts.gettupleslot(true, false, &mut slot, bmcx).unwrap());
+        assert_eq!(read_i32(&mut slot), 0);
+        let before = bump.used();
+        for v in 1..N {
+            assert!(ts.gettupleslot(true, false, &mut slot, bmcx).unwrap());
+            assert_eq!(read_i32(&mut slot), v);
+        }
+        assert!(!ts.gettupleslot(true, false, &mut slot, bmcx).unwrap());
+        assert_eq!(
+            bump.used(),
+            before,
+            "copy=false reads of a spilled store must not allocate in the slot context"
+        );
+
+        // copy=true: the held row survives a later read on the same store.
+        ts.rescan().unwrap();
+        let mut held =
+            exectuples::make_tuple_table_slot(bmcx, TupleSlotKind::MinimalTuple, Some(desc.clone()));
+        assert!(ts.gettupleslot(true, true, &mut held, bmcx).unwrap());
+        assert!(ts.gettupleslot(true, false, &mut slot, bmcx).unwrap());
+        assert_eq!(read_i32(&mut slot), 1);
+        assert_eq!(read_i32(&mut held), 0);
+
+        exectuples::exec_clear_tuple(&mut held, bmcx);
+        exectuples::exec_clear_tuple(&mut slot, bmcx);
+        ts.end();
+    }
+
     #[test]
     fn spill_backward_and_rescan() {
         setup();

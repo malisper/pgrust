@@ -4,7 +4,7 @@
 
 use std::rc::Rc;
 
-use ::executils::{EStateData, ExecSlotId};
+use ::executils::{EStateData, ExecSlotId, RetainedTupleCtx};
 use ::tuplestore::Tuplestore;
 use ::types_error::PgResult;
 use ::types_nodes::plannodes::Material;
@@ -22,6 +22,11 @@ pub struct MaterialState<'mcx> {
     pub plan: &'mcx Material<'mcx>,
     pub ps_ResultTupleDesc: Option<Rc<TupleDescData<'static>>>,
     pub ps_ResultTupleSlot: ExecSlotId,
+    // The result slot's per-row copy of the outer tuple lives here, one row
+    // at a time (C: the slot's tts_mcxt, pfreed by the next ExecCopySlot; the
+    // query context is a Bump arena). Tuplestore reads into the same slot
+    // are the store's own images, not this context's.
+    result_ctx: RetainedTupleCtx,
     eflags: i32,
     tuplestorestate: Option<Tuplestore>,
     eof_underlying: bool,
@@ -41,10 +46,12 @@ pub fn exec_init_material<'mcx>(
     debug_assert!(eflags & EXEC_FLAG_BACKWARD == 0);
     let ps_ResultTupleSlot =
         estate.exec_init_extra_tuple_slot(Some(result_desc.clone()), TupleSlotKind::MinimalTuple);
+    let result_ctx = RetainedTupleCtx::new(estate.es_query_cxt, "Material result tuple")?;
     Ok(MaterialState {
         plan: node,
         ps_ResultTupleDesc: Some(result_desc),
         ps_ResultTupleSlot,
+        result_ctx,
         // B5: BACKWARD dropped from the retained mask (no producer; the
         // backward read arm is deleted). REWIND/MARK stay - rescan replay
         // and merge-join mark/restore are forward machinery.
@@ -125,7 +132,12 @@ pub fn exec_material<'mcx, C: MaterialChild<'mcx>>(
     let [dst, src] = table
         .get_disjoint_mut([result.0 as usize, outer_slot.0 as usize])
         .expect("distinct in-range material slot ids");
-    exectuples::exec_copy_slot(dst, src, mcx, mcx)?;
+    // Per-row copy into the result slot: the previous row's image is dead
+    // (the parent consumed it before pulling again; a mergejoin parent keeps
+    // its own marked copy), and the tuplestore holds its own copy of every
+    // row, so nothing but the result slot points into result_ctx — and it is
+    // re-stored right here before any read.
+    node.result_ctx.copy_slot(dst, src, mcx)?;
     Ok(Some(result))
 }
 
@@ -191,8 +203,9 @@ pub fn exec_rescan_material<'mcx>(
     })
 }
 
-// Exempt: released in exec_end_material.
+// Exempt: released in exec_end_material; result_ctx is dropped by the query
+// context's reset callback.
 mcx::forget_safe_struct!(
-    MaterialState<'_> { plan, ps_ResultTupleSlot, eflags, eof_underlying;
+    MaterialState<'_> { plan, ps_ResultTupleSlot, result_ctx, eflags, eof_underlying;
         ps_ResultTupleDesc, tuplestorestate },
 );

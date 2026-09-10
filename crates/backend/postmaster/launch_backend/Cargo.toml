@@ -20,6 +20,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(pgrust_sim)'] }
 test-crash-primitive = []
 
 [dependencies]
+lwlock = { path = "../../storage/lmgr/lwlock" }
 guc = { path = "../../utils/misc/guc" }
 pmsignal = { path = "../../storage/ipc/pmsignal" }
 types_core = { path = "../../../_support/types/types_core" }

@@ -224,7 +224,7 @@ mod with_ties {
         TYPSTORAGE_PLAIN,
     };
 
-    use crate::{exec_init_limit, exec_limit, LimitChild, LimitState};
+    use crate::{exec_init_limit, exec_limit, exec_rescan_limit, LimitChild, LimitState};
 
     const INT4_EQ: u32 = 96;
     const F_INT4EQ: u32 = 65;
@@ -364,6 +364,53 @@ mod with_ties {
             assert_eq!(child.bound, Some(-1));
             got
         })
+    }
+
+    // Query-context bytes after `rescans` full WITH TIES windows (one
+    // boundary-tuple copy per window): (self, subtree).
+    fn query_ctx_used_after(rescans: usize) -> (usize, usize) {
+        install_seams();
+        let plan = mk_ties_limit(leaked_mcx(), 2);
+        let mut estate_owner =
+            create_executor_state(Box::leak(Box::new(MemoryContext::new("q")))).unwrap();
+        estate_owner.with_mut(|estate| {
+            // SAFETY: plan is leaked ('static) and read-only.
+            let plan = unsafe { shorten(plan) };
+            let outer_desc = one_col_desc(leaked_mcx());
+            let outer_id = estate
+                .exec_init_extra_tuple_slot(Some(outer_desc.clone()), TupleSlotKind::Virtual);
+            let mut state: LimitState<'_> =
+                exec_init_limit(plan, estate, 0, Some(&outer_desc)).unwrap();
+            let mut child = RowFeeder { rows: &[0, 0, 0, 1, 2], pos: 0, slot: outer_id, bound: None };
+            for _ in 0..rescans {
+                let mut got = 0;
+                while exec_limit(&mut state, &mut child, estate).unwrap().is_some() {
+                    got += 1;
+                }
+                assert_eq!(got, 3);
+                exec_rescan_limit(&mut state, &mut child, estate).unwrap();
+                child.pos = 0;
+            }
+            let ctx = estate.es_query_cxt.context();
+            (ctx.used(), ctx.subtree_used())
+        })
+    }
+
+    // The retained WITH TIES boundary tuple must not accumulate in the
+    // query context across rescans (a Bump arena: nothing is ever freed).
+    #[test]
+    fn retained_last_tuple_does_not_grow_query_context() {
+        let (small_self, small_tree) = query_ctx_used_after(20);
+        let (big_self, big_tree) = query_ctx_used_after(20_000);
+        const SLACK: usize = 64 * 1024;
+        assert!(
+            big_self <= small_self + SLACK,
+            "query context grew with rescan count: {small_self} -> {big_self}"
+        );
+        assert!(
+            big_tree <= small_tree + SLACK,
+            "query context subtree grew with rescan count: {small_tree} -> {big_tree}"
+        );
     }
 
     #[test]

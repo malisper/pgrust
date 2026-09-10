@@ -802,7 +802,10 @@ pub fn lane_framed_emit_next<'mcx>(
             {
                 let buffer = state.buffer.as_mut().unwrap();
                 buffer.select_read_pointer(0)?;
-                if !buffer.gettupleslot(true, false, &mut state.scan_slot, mcx)? {
+                // copy=true (C nodeWindowAgg.c:2321): scan_slot is held
+                // across the frame reads below; a spilled copy=false row
+                // lives only until the next read on this buffer.
+                if !buffer.gettupleslot(true, true, &mut state.scan_slot, mcx)? {
                     panic!("unexpected end of tuplestore");
                 }
             }
@@ -831,7 +834,8 @@ pub fn lane_framed_emit_next<'mcx>(
         } else {
             let buffer = state.buffer.as_mut().unwrap();
             buffer.select_read_pointer(0)?;
-            if !buffer.gettupleslot(true, false, &mut state.scan_slot, mcx)? {
+            // copy=true (C nodeWindowAgg.c:2335), as above.
+            if !buffer.gettupleslot(true, true, &mut state.scan_slot, mcx)? {
                 panic!("unexpected end of tuplestore");
             }
         }

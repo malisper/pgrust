@@ -820,6 +820,21 @@ fn corrupt_negative_member_count_is_c_palloc_error() {
     let saved_next = st.nextMXact.load(Relaxed);
     // multi 3000 must precede nextMXact to pass the wraparound guards.
     st.nextMXact.store(3002, Relaxed);
+    // Stamp the corrupt pair into the SLRU page itself, right before the
+    // read: the fixture file carries it on offsets page 1, but any test that
+    // creates multi 2047 first (offsets_page_boundary_crossed) zeroes page 1
+    // in the buffer pool, and this test then read entry 3001 as 0 ("invalid
+    // next offset") — an ordering flake under parallel test threads that
+    // blocked the merge queue (CI-ci b2, 2026-09-09/10).
+    {
+        let octl = OffsetCtl();
+        let pageno = MultiXactIdToOffsetPage(3000);
+        let mut bank = LwGuard::acquire(SimpleLruGetBankLock(octl, pageno), LW_EXCLUSIVE).unwrap();
+        let slotno = SimpleLruReadPage(octl, pageno, true, 3000, &mut bank).unwrap();
+        write_offset_entry(octl, slotno, MultiXactIdToOffsetEntry(3000), 100, &mut bank);
+        write_offset_entry(octl, slotno, MultiXactIdToOffsetEntry(3001), 50, &mut bank);
+        bank.release().unwrap();
+    }
     let r = multixact_seams::get_multi_xact_id_members::call(3000, false, false, &mut |_| {});
     st.nextMXact.store(saved_next, Relaxed);
     AtEOXact_MultiXact();

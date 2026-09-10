@@ -2066,5 +2066,92 @@ pub fn executor_errposition(estate: Option<&EStateData<'_>>, location: i32) -> i
     mbutils_seams::pg_mbstrlen_with_len::call(prefix).unwrap_or(location) + 1
 }
 
+// ===========================================================================
+// Retained-tuple scratch context: C's `ExecCopySlot(node->prev_slot, slot)`
+// materializes into the slot's tts_mcxt (an AllocSet) and the next copy
+// pfrees the old image. Here the query context is a Bump arena (deallocate
+// is a no-op), so a node that retains one "previous / pivot / marked /
+// result" tuple per row or per group boundary must own a resettable child
+// context for that image, or the images accumulate until query end
+// (measured: Unique over 5M distinct rows, ~75 MB in 16 Bump blocks).
+// ===========================================================================
+
+/// A node-owned Bump child of the query context holding exactly one retained
+/// tuple image at a time. Droppy context inside a no-drop arena: the query
+/// context's reset callback is its destructor (docs/no-drop.md; the nodeagg
+/// `make_agg_state_node` / nodememoize `make_table_ctx` idiom), so the holder
+/// stays `ForgetSafe` and `!needs_drop`.
+#[derive(Clone, Copy)]
+pub struct RetainedTupleCtx(core::ptr::NonNull<MemoryContext>);
+
+::mcx::forget_safe_tuple!(RetainedTupleCtx(ctx));
+
+impl RetainedTupleCtx {
+    /// Create the child under `mcx` (the query context) and register its
+    /// destructor as that context's reset callback.
+    pub fn new(mcx: Mcx<'_>, name: &'static str) -> PgResult<Self> {
+        let layout = core::alloc::Layout::new::<MemoryContext>();
+        let raw = ::mcx::Allocator::allocate(&mcx, layout).map_err(|_| mcx.oom(layout.size()))?;
+        let p: core::ptr::NonNull<MemoryContext> = raw.cast();
+        // SAFETY: fresh allocation of the exact layout.
+        unsafe { p.write(mcx.context().new_child_bump(name)) };
+        // SAFETY: fires exactly once, before the arena bytes are reclaimed.
+        mcx.context()
+            .register_reset_callback(move || unsafe { core::ptr::drop_in_place(p.as_ptr()) });
+        Ok(Self(p))
+    }
+
+    /// The scratch as an allocator. The lifetime is the caller's: the holder
+    /// (query context) outlives every node state, so any `'a` a slot of this
+    /// query carries is sound.
+    #[inline]
+    pub fn mcx<'a>(self) -> Mcx<'a> {
+        // SAFETY: live until the query context's reset callback fires, which
+        // is after the plan tree is dead (no node code runs past it).
+        unsafe { self.0.as_ref() }.mcx()
+    }
+
+    /// Release every retained image (keeper block stays; extra blocks go).
+    /// The caller guarantees nothing references an image in this context.
+    #[inline]
+    pub fn reset(self) {
+        // SAFETY: exclusive here — every `Mcx` handed out by `mcx()` is a
+        // by-value copy consumed by a slot operation that has returned; no
+        // `&MemoryContext` is live across this call.
+        unsafe { (*self.0.as_ptr()).reset() }
+    }
+
+    /// C `ExecCopySlot(dst, src)` for a retained slot whose image lives here:
+    /// unhook `dst` from its old image, drop that image (reset), then copy
+    /// `src` into fresh scratch. Result-byte-identical to a copy into the
+    /// query context; only the image's owner changes.
+    ///
+    /// The old image is dead from the reset on: the caller must ensure every
+    /// slot sharing it by pointer (a result slot fed via
+    /// `exec_store_minimal_tuple_ptr`) is re-stored before it is next read,
+    /// and that `src` does not itself live in this scratch.
+    #[inline]
+    pub fn copy_slot<'mcx, 'src>(
+        self,
+        dst: &mut SlotData<'mcx>,
+        src: &mut SlotData<'src>,
+        src_mcx: Mcx<'src>,
+    ) -> PgResult<()> {
+        // Clear BEFORE the reset so the slot never holds a pointer into
+        // reclaimed bytes (Bump deallocate is a no-op; the clear only
+        // updates slot state).
+        exectuples::exec_clear_tuple(dst, self.mcx());
+        self.reset();
+        exectuples::exec_copy_slot(dst, src, self.mcx(), src_mcx)
+    }
+
+    /// Rescan / end-of-stream: clear the retained slot and release its image.
+    #[inline]
+    pub fn clear_slot(self, dst: &mut SlotData<'_>) {
+        exectuples::exec_clear_tuple(dst, self.mcx());
+        self.reset();
+    }
+}
+
 #[cfg(test)]
 mod tests;
