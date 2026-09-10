@@ -1244,10 +1244,17 @@ pub fn exec_init_agg<'mcx>(
         };
         let (resulttype_len, _resulttype_byval) = lsyscache::get_typlenbyval(aggref.aggtype)?;
 
+        // C ExecInitExprList(aggref->aggdirectargs, (PlanState *) aggstate)
+        // (nodeAgg.c build_pertrans_for_aggref): the direct arguments compile
+        // under the Agg node, so a SubPlan / initplan Param in them
+        // (`percentile_disc((SELECT 0.5)) WITHIN GROUP (...)`) resolves and
+        // is serviced by the suspension driver at finalize time.
         let mut direct_args: PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>> = PgVec::new_in(mcx);
         for d in aggref.aggdirectargs.iter() {
-            let mut es = ::execexpr::exec_init_expr(mcx, Some(d), params)?
-                .expect("aggdirectargs cell is a non-NULL expression");
+            let mut es = ::executils::with_subplan_compile_env(estate, |env| {
+                ::execexpr::exec_init_expr_subplans(mcx, Some(d), params, env)
+            })?
+            .expect("aggdirectargs cell is a non-NULL expression");
             // SAFETY: the ps_ExprContext outlives the program (same estate);
             // C evaluates direct args in its per-tuple memory.
             unsafe { es.arm_result_mcx_raw(estate.ecxt(ps_ExprContext).per_tuple_mcx()) };
@@ -4933,10 +4940,10 @@ const MAX_FINAL_ARGS: usize = 8;
 // datumCopy discipline); no finalfn = the byval transvalue itself.
 pub(crate) fn finalize_aggregates<'mcx>(
     node: &mut AggStateData<'mcx>,
-    estate: &EStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
     pergroup: NonNull<AggPerGroup>,
 ) -> PgResult<()> {
-    let per_tuple = estate.ecxt(node.ps_ExprContext).per_tuple_mcx();
+    let ps_ecxt = node.ps_ExprContext;
     let skip_final = node.skip_final;
     let AggStateData {
         peragg, trans_typ, agg_node, agg_values_base, agg_nulls_base, persort, gsets, ..
@@ -4957,6 +4964,7 @@ pub(crate) fn finalize_aggregates<'mcx>(
         };
         // finalize_partialaggregate (nodeAgg.c): serialfn or raw transvalue.
         if skip_final {
+            let per_tuple = estate.ecxt(ps_ecxt).per_tuple_mcx();
             let (value, isnull) = match pa.serialfn.as_mut() {
                 None => (trans_value, pg.trans_value_is_null),
                 Some(flinfo) => {
@@ -5021,11 +5029,28 @@ pub(crate) fn finalize_aggregates<'mcx>(
         // Direct arguments go into arg positions 1 and up (nodeAgg.c:1065),
         // evaluated even without a finalfn so side-effects happen.
         for (i, es) in pa.direct_args.iter_mut().enumerate() {
-            let mut slots = EvalSlots { scan: None, inner: None, outer: outer.as_deref_mut() };
-            let nd = exec_eval_expr(es, &mut slots)?;
+            // C ExecEvalExprSwitchContext over the Agg node's ExprState: a
+            // SubPlan / pending initplan Param in a direct argument needs the
+            // suspension driver (nodeSubplan.c lane); the plain kernel entry
+            // serves the common Const / Var case.
+            let nd = if trans_needs_driver(es) {
+                match outer.as_deref_mut() {
+                    Some(o) => ::executils::exec_eval_expr_with_subplans_outer(
+                        es, o, estate, ps_ecxt,
+                    )?,
+                    None => ::executils::exec_eval_expr_with_subplans(es, estate, ps_ecxt)?,
+                }
+            } else {
+                let mut slots =
+                    EvalSlots { scan: None, inner: None, outer: outer.as_deref_mut() };
+                exec_eval_expr(es, &mut slots)?
+            };
             fcinfo.args[i + 1] = nd;
             anynull |= nd.isnull;
         }
+        // Re-fetched after the direct-argument evaluation above: a SubPlan
+        // drive there took the estate mutably.
+        let per_tuple = estate.ecxt(ps_ecxt).per_tuple_mcx();
         let (value, isnull) = match pa.finalfn.as_mut() {
             None => (trans_value, pg.trans_value_is_null),
             Some(flinfo) => {

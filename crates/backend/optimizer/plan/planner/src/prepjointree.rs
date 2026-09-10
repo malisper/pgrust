@@ -7,7 +7,7 @@ use mcx::Mcx;
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 use types_nodes::list::NodeList;
 use types_nodes::parsenodes::{Query, RTEKind, RangeTblEntry};
-use types_nodes::primnodes::{FromExpr, TargetEntry, Var};
+use types_nodes::primnodes::{Aggref, FromExpr, TargetEntry, Var};
 use types_nodes::{Node, NodeTag};
 
 // C recurses and mutates in place; here each pull-up rebuilds the jointree
@@ -284,6 +284,23 @@ pub(crate) fn query_has_uplevel_vars<'mcx>(q: &'mcx Query<'mcx>) -> PgResult<boo
                         return Ok(true);
                     }
                     Ok(false)
+                }
+                NodeTag::T_Aggref => {
+                    // An aggregate owned by an outer level (agglevelsup > 0):
+                    // IncrementVarSublevelsUp adjusts it too (rewriteManip.c
+                    // IncrementVarSublevelsUp_walker).
+                    if node.as_aggref().expect("Aggref").agglevelsup > self.depth {
+                        self.found = true;
+                        return Ok(true);
+                    }
+                    nodes_core::expression_tree_walker(node, self)
+                }
+                NodeTag::T_GroupingFunc => {
+                    if node.as_grouping_func().expect("GroupingFunc").agglevelsup > self.depth {
+                        self.found = true;
+                        return Ok(true);
+                    }
+                    nodes_core::expression_tree_walker(node, self)
                 }
                 NodeTag::T_PlaceHolderVar => {
                     // PHVs made by pullup_replace_vars carry uplevel refs the
@@ -2128,6 +2145,42 @@ fn offset_expr<'mcx>(
                     phlevelsup: 0,
                 },
             )?))
+        }
+        NodeTag::T_Aggref | NodeTag::T_GroupingFunc => {
+            // IncrementVarSublevelsUp(-1, 1) (rewriteManip.c
+            // IncrementVarSublevelsUp_walker, Aggref/GroupingFunc arms): an
+            // aggregate that belongs to an outer query level (agglevelsup >
+            // 0, e.g. `SELECT (SELECT s FROM (SELECT sum(g) AS s) r) FROM t
+            // g`) is one level closer to its owner after pull-up. Its
+            // arguments carry their own varlevelsup and go through the
+            // ordinary arms.
+            let levelsup = match node.as_aggref() {
+                Some(a) => a.agglevelsup,
+                None => node.as_grouping_func().expect("GroupingFunc").agglevelsup,
+            };
+            if levelsup == 0 {
+                return clauses::walker::expression_tree_mutator(mcx, node, &mut |n| {
+                    offset_expr(mcx, n, rtoffset)
+                });
+            }
+            let fresh = match clauses::walker::expression_tree_mutator(mcx, node, &mut |n| {
+                offset_expr(mcx, n, rtoffset)
+            })? {
+                Some(n) => n,
+                None => rewrite_manip::copy_node(mcx, node)?,
+            };
+            // SAFETY: `fresh` is a node built just above (mutator output or a
+            // deep copy); no reference to it exists yet.
+            unsafe {
+                if fresh.with_mut::<Aggref, _>(|a| a.agglevelsup -= 1).is_none() {
+                    fresh
+                        .with_mut::<types_nodes::primnodes::GroupingFunc, _>(|g| {
+                            g.agglevelsup -= 1
+                        })
+                        .expect("GroupingFunc");
+                }
+            }
+            Ok(Some(fresh))
         }
         NodeTag::T_ReturningExpr => {
             // IncrementVarSublevelsUp(-1, 1) (rewriteManip.c:856-863): an
