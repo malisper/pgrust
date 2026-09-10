@@ -13,7 +13,8 @@ use ::bufmgr_seams::BufferPin;
 use ::mcx::{Mcx, PgVec};
 use ::tableam_vocab::{
     ParallelBlockTableScanDescData, Snapshot, TableAm, TableScanDescData, SO_ALLOW_PAGEMODE,
-    SO_ALLOW_STRAT, SO_ALLOW_SYNC, SO_TEMP_SNAPSHOT, SO_TYPE_SAMPLESCAN, SO_TYPE_SEQSCAN,
+    SO_ALLOW_STRAT, SO_ALLOW_SYNC, SO_TEMP_SNAPSHOT, SO_TYPE_BITMAPSCAN, SO_TYPE_SAMPLESCAN,
+    SO_TYPE_SEQSCAN,
 };
 use ::types_core::xact::TransactionIdIsValid;
 use ::types_core::xact::{InvalidTransactionId, TransactionIdPrecedes};
@@ -85,9 +86,26 @@ pub struct HeapScanDescData<'mcx> {
     // pin moves. Keeps the per-tuple walk free of the seam-derive call edge.
     rs_cpage: *mut u8,
     pub rs_vistuples: [OffsetNumber; MaxHeapTuplesPerPage],
-    // One-probe pgstat accumulators (indexam precedent); pgstat_relation flushes.
-    pub rs_pgstat_numscans: u64,
-    pub rs_pgstat_getnext: u64,
+    // One-probe pgstat accumulator (indexam precedent), drained to the
+    // relation's pending counts by `drain_pgstat` (heap_endscan AND Drop:
+    // C's pgstat_count_* macros bump rel->pgstat_info immediately, so a scan
+    // torn down by an erroring statement is still counted; the batch is
+    // pure deferral). Per-tuple counter of the scan's kind: C's
+    // pgstat_count_heap_getnext (tuples_returned / seq_tup_read) for seq
+    // scans, pgstat_count_heap_fetch on the heap rel (tuples_fetched /
+    // idx_tup_fetch) for bitmap heap scans. numscans is counted at initscan
+    // as C does (one probe per scan). Size-neutral with the batch mark below:
+    // SeqScanState rides inline in PlanStateNode (<= 1024 bytes).
+    pub rs_pgstat_tuples: u64,
+    // Page-batch feed accounting (heap_getnextpagebatch / bitmap pagebatch):
+    // tuples of the staged page already credited to the pgstat accumulator.
+    // C counts per tuple RETURNED (heapgettup / bitmap next_tuple), so a
+    // batch consumer that stops mid-page (LIMIT, EXISTS, an RI check's
+    // tcount=1) credits only up to the last row it stored; the remainder of
+    // a page is credited when the feed advances past it (every row was
+    // handed to the consumer's qual, exactly what C would have returned).
+    // The per-tuple walks keep this equal to rs_ntuples (nothing pending).
+    pub rs_batch_credited: u32,
     // The registered handle behind SO_TEMP_SNAPSHOT: rs_snapshot's lifetime is
     // 'mcx-erased, so the 'static Rc UnregisterSnapshot needs is kept here.
     pub rs_temp_snapshot: Option<std::rc::Rc<SnapshotData<'static>>>,
@@ -129,17 +147,72 @@ fn check_for_interrupts() -> PgResult<()> {
     Ok(())
 }
 
+// C pgstat_count_heap_scan (initscan): one pending-counts probe per scan /
+// rescan, landed immediately so an erroring statement's scan is counted.
 #[inline]
 fn pgstat_count_heap_scan(scan: &mut HeapScanDescData<'_>) {
     if scan.rs_base.rs_rd.pgstat_enabled.get() {
-        scan.rs_pgstat_numscans += 1;
+        pgstat::relation::pgstat_count_heap_scan(
+            scan.rs_base.rs_rd.rd_id,
+            scan.rs_base.rs_rd.rd_rel.relisshared,
+        );
     }
 }
 
 #[inline]
 fn pgstat_count_heap_getnext(scan: &mut HeapScanDescData<'_>) {
     if scan.rs_base.rs_rd.pgstat_enabled.get() {
-        scan.rs_pgstat_getnext += 1;
+        scan.rs_pgstat_tuples += 1;
+    }
+}
+
+/// Credit the staged page's rows `[rs_batch_credited, upto)` as returned
+/// (seq scans: tuples_returned / seq_tup_read; bitmap scans:
+/// tuples_fetched / idx_tup_fetch — C's per-tuple macro in the matching
+/// walk). Monotonic: a row index at or below the mark is a no-op.
+#[inline]
+pub(crate) fn batch_credit_upto(scan: &mut HeapScanDescData<'_>, upto: u32) {
+    if upto <= scan.rs_batch_credited {
+        return;
+    }
+    let n = (upto - scan.rs_batch_credited) as u64;
+    scan.rs_batch_credited = upto;
+    if scan.rs_base.rs_rd.pgstat_enabled.get() {
+        scan.rs_pgstat_tuples += n;
+    }
+}
+
+/// The feed is leaving the staged page: every row on it was consumed.
+#[inline]
+pub(crate) fn batch_credit_page(scan: &mut HeapScanDescData<'_>) {
+    let n = scan.rs_ntuples;
+    batch_credit_upto(scan, n);
+}
+
+// The heap_endscan drain of the per-scan batched counters; idempotent
+// (Drop runs it again and sees zeros).
+fn drain_pgstat(scan: &mut HeapScanDescData<'_>) {
+    let n = core::mem::take(&mut scan.rs_pgstat_tuples);
+    if n == 0 {
+        return;
+    }
+    let bitmap = (scan.rs_base.rs_flags & SO_TYPE_BITMAPSCAN) != 0;
+    pgstat::relation::pgstat_count_heap_scan_batched(
+        scan.rs_base.rs_rd.rd_id,
+        scan.rs_base.rs_rd.rd_rel.relisshared,
+        if bitmap { 0 } else { n },
+        if bitmap { n } else { 0 },
+    );
+}
+
+impl Drop for HeapScanDescData<'_> {
+    fn drop(&mut self) {
+        // An erroring statement never reaches heap_endscan (ExecutorEnd is
+        // skipped); C's counts already sit in rel->pgstat_info and are
+        // reported at AbortTransaction, so the abort-path drop drains too.
+        if !std::thread::panicking() {
+            drain_pgstat(self);
+        }
     }
 }
 
@@ -285,6 +358,9 @@ fn initscan(
     key: Option<&[ScanKeyData]>,
     keep_startblock: bool,
 ) -> PgResult<()> {
+    // A rescan mid-page returns none of the page's remaining rows (C: the
+    // walk restarts) — nothing pending from the previous staged page.
+    scan.rs_batch_credited = scan.rs_ntuples;
     scan.rs_nblocks = if let Some(p) = scan.rs_base.rs_parallel {
         // SAFETY: the shared parallel descriptor outlives every worker scan
         // (parallel-context contract carried by rs_parallel).
@@ -1017,12 +1093,19 @@ fn heapgettup<'mcx>(scan: &mut HeapScanDescData<'mcx>) -> PgResult<()> {
 // the per-tuple walk's frame.
 #[inline(never)]
 fn pagemode_next_page(scan: &mut HeapScanDescData<'_>) -> PgResult<bool> {
+    // Leaving the staged page: a batch consumer that ran the page to its
+    // end is credited for all of it (no-op for the per-tuple walk, which
+    // credits per returned tuple and keeps the mark at rs_ntuples).
+    if scan.rs_inited {
+        batch_credit_page(scan);
+    }
     heap_fetch_next_buffer(scan)?;
     if scan.rs_cbuf.is_none() {
         return Ok(false);
     }
     debug_assert!(scan.rs_cbuf.as_ref().unwrap().block_number() == scan.rs_cblock);
     heap_prepare_pagescan(scan)?;
+    scan.rs_batch_credited = scan.rs_ntuples;
     scan.rs_cpage = scan
         .rs_cbuf
         .as_ref()
@@ -1135,9 +1218,10 @@ pub fn heap_getnextpagebatch(scan: &mut HeapScanDescData<'_>) -> PgResult<u32> {
         }
         if scan.rs_ntuples > 0 {
             scan.rs_cindex = scan.rs_ntuples - 1;
-            if scan.rs_base.rs_rd.pgstat_enabled.get() {
-                scan.rs_pgstat_getnext += scan.rs_ntuples as u64;
-            }
+            // Deferred credit: rows count as returned when the consumer
+            // stores them (heap_batch_store_slot) or when the feed leaves
+            // the page — C's per-returned-tuple pgstat_count_heap_getnext.
+            scan.rs_batch_credited = 0;
             return Ok(scan.rs_ntuples);
         }
     }
@@ -1172,6 +1256,8 @@ pub fn heap_adopt_midpage_batch(scan: &mut HeapScanDescData<'_>) -> Option<(u32,
         return None;
     }
     scan.rs_cindex = scan.rs_ntuples - 1;
+    // Rows below `start` were credited by the per-tuple walk as returned.
+    scan.rs_batch_credited = start;
     Some((start, scan.rs_ntuples))
 }
 
@@ -1417,6 +1503,7 @@ pub fn heap_batch_store_slot<'mcx>(
     slot: &mut SlotData<'mcx>,
 ) {
     debug_assert!(i < scan.rs_ntuples && !scan.rs_cpage.is_null());
+    batch_credit_upto(scan, i + 1);
     // SAFETY: the heapgettup_pagemode walk verbatim — i < rs_ntuples <=
     // MaxHeapTuplesPerPage (heap_prepare_pagescan's per-page bound), lineoff
     // from page_collect_tuples on the page pinned by rs_cbuf.
@@ -1494,8 +1581,8 @@ pub fn heap_beginscan<'mcx>(
         rs_ntuples: 0,
         rs_cpage: core::ptr::null_mut(),
         rs_vistuples: [0; MaxHeapTuplesPerPage],
-        rs_pgstat_numscans: 0,
-        rs_pgstat_getnext: 0,
+        rs_pgstat_tuples: 0,
+        rs_batch_credited: 0,
         rs_temp_snapshot: None,
     };
 
@@ -1546,12 +1633,7 @@ pub fn heap_rescan(
 
 pub fn heap_endscan(mut scan: HeapScanDescData<'_>) -> PgResult<()> {
     scan.rs_ctup = None;
-    pgstat::relation::pgstat_count_heap_scan_batched(
-        scan.rs_base.rs_rd.rd_id,
-        scan.rs_base.rs_rd.rd_rel.relisshared,
-        scan.rs_pgstat_numscans,
-        scan.rs_pgstat_getnext,
-    );
+    drain_pgstat(&mut scan);
     if let Some(pin) = scan.rs_cbuf.take() {
         pin.release();
     }

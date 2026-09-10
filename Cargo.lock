@@ -20574,6 +20574,7 @@ dependencies = [
  "datum",
  "gin_vocab",
  "mcx",
+ "pgstat",
  "pgsync",
  "snapmgr",
  "tableam",

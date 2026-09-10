@@ -499,8 +499,7 @@ fn seqscan_pagemode_forward_rescan() {
     assert_eq!(scan.rs_nblocks, 2);
     let vals = collect_vals(&mut scan, ForwardScanDirection);
     assert_eq!(vals, vec![(0, 1, 1), (0, 2, 2), (1, 1, 3), (1, 3, 4)]);
-    assert_eq!(scan.rs_pgstat_getnext, 4);
-    assert_eq!(scan.rs_pgstat_numscans, 1);
+    assert_eq!(scan.rs_pgstat_tuples, 4);
 
     // Rescan replays the same forward walk. (Backward-execution wave B7:
     // the backward collect leg - 4,3,2,1 - retired with the stepping arms.)
@@ -3340,5 +3339,112 @@ fn buffer_for_tuple_tries_conditional_lock_on_other_buffer_first() {
     bufmgr_seams::lock_buffer::call(other.buffer(), bufmgr_seams::BUFFER_LOCK_UNLOCK).unwrap();
     drop(pin);
     drop(other);
+    quiesced();
+}
+
+// pg_stat seq_tup_read under the page-batch feed (sitediff N-2): C's
+// pgstat_count_heap_getnext is per tuple RETURNED, so a consumer that stops
+// mid-page (LIMIT 1, EXISTS, an RI check's tcount=1) credits only the rows it
+// pulled; a page the feed advances past is credited whole.
+#[test]
+fn pagebatch_credits_rows_stored_then_whole_page_on_advance() {
+    install_seams();
+    let _serial = serial();
+    let ctx = MemoryContext::new("test");
+    let mcx = ctx.mcx();
+    let oid = fresh_oid();
+    register_table(
+        oid,
+        (0..2)
+            .map(|p| {
+                build_page(
+                    &[
+                        Item::Tuple(tuple_image(10, 0, p * 3)),
+                        Item::Tuple(tuple_image(10, 0, p * 3 + 1)),
+                        Item::Tuple(tuple_image(10, 0, p * 3 + 2)),
+                    ],
+                    true,
+                )
+            })
+            .collect(),
+    );
+    let rel = test_relation(mcx, oid);
+    let mut scan = begin_seqscan(mcx, &rel, mvcc_snapshot(mcx));
+
+    assert_eq!(heap_getnextpagebatch(&mut scan).unwrap(), 3);
+    assert_eq!(scan.rs_pgstat_tuples, 0, "staging a page returns nothing yet");
+    batch_credit_upto(&mut scan, 1);
+    assert_eq!(scan.rs_pgstat_tuples, 1, "LIMIT 1 shape: one row returned");
+    batch_credit_upto(&mut scan, 1);
+    assert_eq!(scan.rs_pgstat_tuples, 1, "re-crediting a row is a no-op");
+    batch_credit_upto(&mut scan, 2);
+    assert_eq!(scan.rs_pgstat_tuples, 2);
+
+    // Advancing past the page: every row on it was handed to the qual.
+    assert_eq!(heap_getnextpagebatch(&mut scan).unwrap(), 3);
+    assert_eq!(scan.rs_pgstat_tuples, 3);
+    // Exhaustion credits the last page in full.
+    assert_eq!(heap_getnextpagebatch(&mut scan).unwrap(), 0);
+    assert_eq!(scan.rs_pgstat_tuples, 6);
+    heap_endscan(scan).unwrap();
+    quiesced();
+}
+
+// Sitediff N-1: an erroring statement never reaches heap_endscan; C's
+// counts already sit in rel->pgstat_info and are reported at abort, so the
+// scan descriptor's drop drains the batched counters too (and a rescan
+// mid-page leaves the unreturned remainder uncounted).
+#[test]
+fn scan_drop_drains_batched_pgstat_counters() {
+    install_seams();
+    let _serial = serial();
+    let ctx = MemoryContext::new("test");
+    let mcx = ctx.mcx();
+    let oid = fresh_oid();
+    register_table(
+        oid,
+        vec![
+            build_page(
+                &[
+                    Item::Tuple(tuple_image(10, 0, 1)),
+                    Item::Tuple(tuple_image(10, 0, 2)),
+                    Item::Tuple(tuple_image(10, 0, 3)),
+                ],
+                true,
+            ),
+            build_page(&[Item::Tuple(tuple_image(10, 0, 4))], true),
+        ],
+    );
+    let rel = test_relation(mcx, oid);
+    let counts = |before: (i64, i64)| {
+        let c = ::pgstat::relation::find_tabstat_entry(oid).expect("pending entry");
+        (c.numscans - before.0, c.tuples_returned - before.1)
+    };
+    let before = ::pgstat::relation::find_tabstat_entry(oid)
+        .map(|c| (c.numscans, c.tuples_returned))
+        .unwrap_or((0, 0));
+
+    // Per-tuple walk, two rows out, then the "error" (plain drop).
+    let mut scan = begin_seqscan(mcx, &rel, mvcc_snapshot(mcx));
+    assert_eq!(counts(before), (1, 0), "numscans lands at initscan (C)");
+    assert!(heap_getnext(&mut scan, ForwardScanDirection).unwrap().is_some());
+    assert!(heap_getnext(&mut scan, ForwardScanDirection).unwrap().is_some());
+    assert_eq!(scan.rs_pgstat_tuples, 2);
+    drop(scan);
+    assert_eq!(counts(before), (1, 2), "drop drained tuples_returned into the pending counts");
+
+    // Batch feed stopped mid-page, then rescan: only the pulled row counts;
+    // the rescan is a second scan.
+    let mut scan = begin_seqscan(mcx, &rel, mvcc_snapshot(mcx));
+    assert_eq!(heap_getnextpagebatch(&mut scan).unwrap(), 3);
+    batch_credit_upto(&mut scan, 1);
+    heap_rescan(&mut scan, None, false, false, false, false).unwrap();
+    assert_eq!(counts(before), (3, 2));
+    assert_eq!(scan.rs_pgstat_tuples, 1);
+    let vals = collect_vals(&mut scan, ForwardScanDirection);
+    assert_eq!(vals.len(), 4);
+    assert_eq!(scan.rs_pgstat_tuples, 5);
+    heap_endscan(scan).unwrap();
+    assert_eq!(counts(before), (3, 7), "heap_endscan drains once; the drop after it sees zeros");
     quiesced();
 }

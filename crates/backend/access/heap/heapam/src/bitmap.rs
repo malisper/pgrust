@@ -7,8 +7,8 @@
 use tidbitmap::{TIDBitmap, TbmIterator, TBM_MAX_TUPLES_PER_PAGE};
 
 use crate::{
-    heap_hot_search_buffer, store_ctup_into_slot, HeapCheckForSerializableConflictOut,
-    HeapScanDescData,
+    batch_credit_page, batch_credit_upto, heap_hot_search_buffer, store_ctup_into_slot,
+    HeapCheckForSerializableConflictOut, HeapScanDescData,
 };
 use ::bufmgr_seams::BufferPin;
 use ::mcx::Mcx;
@@ -69,6 +69,10 @@ pub fn heap_scan_bitmap_batch_store<'mcx>(
     slot: &mut SlotData<'mcx>,
 ) {
     debug_assert!(i < scan.rs_ntuples);
+    // C heapam_scan_bitmap_next_tuple's pgstat_count_heap_fetch(rs_rd), per
+    // tuple returned (the fused batch drive stores only its survivors; the
+    // page's remainder is credited when the feed leaves it).
+    batch_credit_upto(scan, i + 1);
     let targoffset = scan.rs_vistuples[i as usize];
     let block = scan.rs_cblock;
     let rd_id = scan.rs_base.rs_rd.rd_id;
@@ -101,8 +105,11 @@ fn bitmap_next_block(
 ) -> PgResult<bool> {
     debug_assert!((scan.rs_base.rs_flags & SO_TYPE_BITMAPSCAN) != 0);
 
+    // Leaving the staged page: every row on it was handed to the consumer.
+    batch_credit_page(scan);
     scan.rs_cindex = 0;
     scan.rs_ntuples = 0;
+    scan.rs_batch_credited = 0;
 
     if let Some(pin) = scan.rs_cbuf.take() {
         pin.release();

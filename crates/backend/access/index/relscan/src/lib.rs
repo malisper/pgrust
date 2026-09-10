@@ -515,6 +515,27 @@ pub struct IndexScanDescData<'mcx> {
     pub xs_nsearches: u64,
 }
 
+impl Drop for IndexScanDescData<'_> {
+    fn drop(&mut self) {
+        // The per-scan batched pgstat counters (C's pgstat_count_index_scan /
+        // pgstat_count_index_tuples / pgstat_count_heap_fetch macros bump
+        // rel->pgstat_info immediately and survive an abort). index_endscan
+        // and index_parkscan drain them first (and clear the alias); this is
+        // the abort path — an erroring statement never reaches ExecutorEnd.
+        if std::thread::panicking() {
+            return;
+        }
+        let Some(index_rel) = self.indexRelation.as_ref() else { return };
+        ::pgstat::relation::pgstat_count_index_scan_batched(
+            index_rel.rd_id,
+            index_rel.rd_rel.relisshared,
+            core::mem::take(&mut self.xs_pgstat_index_scans),
+            core::mem::take(&mut self.xs_pgstat_index_tuples),
+            core::mem::take(&mut self.xs_pgstat_heap_fetches),
+        );
+    }
+}
+
 impl<'mcx> IndexScanDescData<'mcx> {
     #[inline]
     pub fn index_rel(&self) -> &Relation<'mcx> {

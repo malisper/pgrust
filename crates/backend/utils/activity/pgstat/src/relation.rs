@@ -214,19 +214,21 @@ pub fn pgstat_count_heap_scan(relid: Oid, relisshared: bool) {
     with_counts(relid, relisshared, |c| c.numscans += 1);
 }
 
-// Drain of heapam's per-scan batched counters (one probe per scan, not per row).
+// Drain of heapam's per-scan batched tuple counters (one probe per scan, not
+// per row): pgstat_count_heap_getnext for seq scans, pgstat_count_heap_fetch
+// for bitmap heap scans. numscans lands per scan at initscan, as in C.
 pub fn pgstat_count_heap_scan_batched(
     relid: Oid,
     relisshared: bool,
-    numscans: u64,
     tuples_returned: u64,
+    tuples_fetched: u64,
 ) {
-    if numscans == 0 && tuples_returned == 0 {
+    if tuples_returned == 0 && tuples_fetched == 0 {
         return;
     }
     with_counts(relid, relisshared, |c| {
-        c.numscans += numscans as PgStat_Counter;
         c.tuples_returned += tuples_returned as PgStat_Counter;
+        c.tuples_fetched += tuples_fetched as PgStat_Counter;
     });
 }
 
