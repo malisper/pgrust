@@ -588,11 +588,73 @@ fn log_status_format_q_stops_without_client_port() {
     set_backend_log_context(previous);
 }
 
+// The STATEMENT line's text: an ERROR is reported by the tcop catch after the
+// exec_* frame's guard dropped, where C's debug_query_string is still set;
+// the retired copy serves that read and is gone once the loop nulls it.
+#[test]
+fn current_query_string_outlives_the_guard_until_cleared() {
+    let _guard = lock();
+    clear_retired_debug_query_string();
+    assert_eq!(current_query_string(), None);
+
+    let q = String::from("select 1/0");
+    {
+        let _scope = debug_query_string_scope(&q);
+        assert_eq!(current_query_string().as_deref(), Some("select 1/0"));
+    }
+    assert_eq!(current_query_string().as_deref(), Some("select 1/0"));
+
+    clear_retired_debug_query_string();
+    assert_eq!(current_query_string(), None);
+
+    // A nested guard's drop retires nothing; the outermost's drop retires
+    // its own text, and arming the next statement forgets the old one.
+    let outer = String::from("outer");
+    let inner = String::from("inner");
+    {
+        let _o = debug_query_string_scope(&outer);
+        {
+            let _i = debug_query_string_scope(&inner);
+        }
+        assert_eq!(current_query_string().as_deref(), Some("outer"));
+    }
+    assert_eq!(current_query_string().as_deref(), Some("outer"));
+    let next = String::from("next");
+    let scope = debug_query_string_scope(&next);
+    drop(scope);
+    assert_eq!(current_query_string().as_deref(), Some("next"));
+
+    // proc_exit_prepare's suppression wins over both sources.
+    stack::suppress_statement();
+    assert_eq!(current_query_string(), None);
+    stack::reset_statement_suppressed();
+    clear_retired_debug_query_string();
+}
+
+#[test]
+fn check_log_of_query_needs_a_statement_in_flight() {
+    let _guard = lock();
+    config::set_log_min_error_statement(ERROR);
+    clear_retired_debug_query_string();
+    assert!(!check_log_of_query(&PgError::error("boom")));
+
+    let q = String::from("select 1/0");
+    let scope = debug_query_string_scope(&q);
+    assert!(check_log_of_query(&PgError::error("boom")));
+    assert!(!check_log_of_query(&PgError::warning("below log_min_error_statement")));
+    assert!(!check_log_of_query(&PgError::error("hidden").with_hide_statement(true)));
+    drop(scope);
+    assert!(check_log_of_query(&PgError::error("reported after the frame unwound")));
+    clear_retired_debug_query_string();
+    assert!(!check_log_of_query(&PgError::error("idle")));
+}
+
 #[test]
 fn check_log_of_query_matches_level_hide_and_query_rules() {
     let _guard = lock();
     config::set_log_min_error_statement(WARNING);
-    let previous = set_backend_log_context(Some(&TEST_CONTEXT));
+    let q = String::from("select 1");
+    let scope = debug_query_string_scope(&q);
 
     assert!(check_log_of_query(&PgError::warning("warn")));
     assert!(!check_log_of_query(&PgError::notice("notice")));
@@ -600,10 +662,10 @@ fn check_log_of_query_matches_level_hide_and_query_rules() {
         &PgError::warning("hidden").with_hide_statement(true)
     ));
 
-    set_backend_log_context(None);
+    drop(scope);
+    clear_retired_debug_query_string();
     assert!(!check_log_of_query(&PgError::warning("warn")));
 
-    set_backend_log_context(previous);
     config::set_log_min_error_statement(ERROR);
 }
 

@@ -271,6 +271,8 @@ pub(crate) fn error_recovery(
     if first_attempt {
         elog::emit_error_report_for(err);
     }
+    // C: `debug_query_string = NULL;` (postgres.c:4433), after the report.
+    elog::clear_retired_debug_query_string();
 
     timeout_seams::disable_all_timeouts::call(false)?; /* do first to avoid race */
     g::SetQueryCancelPending(false);
@@ -773,6 +775,7 @@ pub fn PostgresMain(dbname: &str, username: &str) -> ! {
 }
 
 fn postgres_main_inner(dbname: &str, username: &str) -> PgResult<()> {
+    elog::clear_retired_debug_query_string();
     assert!(!dbname.is_empty() || !username.is_empty());
 
     crate::install_thread_signal_handlers();
@@ -1004,6 +1007,9 @@ fn run_one_iteration_inner<'mcx>(mcx: Mcx<'mcx>, state: &mut LoopState) -> PgRes
 
     set_doing_command_read(true);
 
+    // No statement is in flight while reading a command: an idle-time FATAL
+    // logs no STATEMENT line.
+    elog::clear_retired_debug_query_string();
     let firstchar = ReadCommand(&mut input_message)?;
     crate::stmt_trace::probe_read(firstchar);
 

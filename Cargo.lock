@@ -21464,6 +21464,7 @@ dependencies = [
  "elog",
  "exectuples_output",
  "fd",
+ "file_seams",
  "guc_file",
  "guc_funcs",
  "guc_tables",

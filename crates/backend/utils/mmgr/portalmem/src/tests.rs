@@ -258,6 +258,37 @@ fn hold_store_lifecycle() {
     assert!(portal.borrow().holdContext.is_none());
 }
 
+// A WITH HOLD cursor outlives its transaction (createSubid Invalid, no
+// resowner) and AtCleanup_Portals leaves it alone, as C does; the session's
+// Portals teardown phase must then PortalDrop it so its tuplestore is ended.
+#[test]
+fn session_teardown_drops_held_portals_and_ends_their_stores() {
+    setup();
+    let held = CreatePortal("held", false, false).unwrap();
+    define_simple(&held, "select 1");
+    held.borrow_mut().cursorOptions |= CURSOR_OPT_SCROLL | CURSOR_OPT_HOLD;
+    PortalCreateHoldStore(&held).unwrap();
+    {
+        let mut p = held.borrow_mut();
+        p.status = PORTAL_READY;
+        p.resowner = ResourceOwner::NULL;
+        p.createSubid = InvalidSubTransactionId;
+        p.activeSubid = InvalidSubTransactionId;
+        p.cleanup = PortalCleanupHook::None;
+    }
+    AtCleanup_Portals().unwrap();
+    assert!(GetPortalByName(Some("held")).is_some(), "held cursor survives cleanup");
+    EVENTS.with(|e| e.borrow_mut().clear());
+
+    session_teardown_portals();
+
+    assert!(events().contains(&"ts_end(42)".to_owned()), "hold store ended: {:?}", events());
+    assert!(PORTAL_MGR.with(|m| m.borrow().is_none()), "manager torn down");
+    // Idempotent: a second drain (or a never-enabled manager) is a no-op.
+    session_teardown_portals();
+    EnablePortalManager();
+}
+
 #[test]
 fn precommit_holds_holdable_and_drops_the_rest() {
     setup();

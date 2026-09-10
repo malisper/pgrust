@@ -30,6 +30,7 @@ xlogutils = { path = "../../access/transam/xlogutils" }
 datum = { path = "../../../_support/types/datum" }
 dbcommands_seams = { path = "../../commands/dbcommands_seams" }
 elog = { path = "../../utils/error/elog" }
+file_seams = { path = "../../storage/file/file_seams" }
 exectuples_output = { path = "../../executor/exectuples_output" }
 fd = { path = "../../storage/file/fd" }
 guc_funcs = { path = "../../utils/misc/guc_funcs" }

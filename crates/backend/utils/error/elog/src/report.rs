@@ -143,12 +143,15 @@ pub fn check_log_of_query(edata: &PgError) -> bool {
 }
 
 // C's debug_query_string as the log writers see it (NULL once suppressed);
-// pub for the csvlog/jsonlog writers hosted in the syslogger crate.
+// pub for the csvlog/jsonlog writers hosted in the syslogger crate. An ERROR
+// is reported after its exec_* frame unwound, so the retired copy stands in
+// for the guard that frame held.
 pub fn current_query_string() -> Option<String> {
     if stack::statement_suppressed() {
         return None;
     }
-    sink::backend_log_context().and_then(|c| c.query_string().map(str::to_owned))
+    sink::with_debug_query_string(|q| q.map(str::to_owned))
+        .or_else(sink::retired_debug_query_string)
 }
 
 pub fn get_backend_type_for_log() -> String {

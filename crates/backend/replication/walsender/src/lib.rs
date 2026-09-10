@@ -593,6 +593,9 @@ pub fn WalSndErrorCleanup() -> PgResult<()> {
 
 // exec_replication_command (walsender.c:1983).
 pub fn exec_replication_command(cmd_string: &str) -> PgResult<bool> {
+    // C: `debug_query_string = cmd_string;` (walsender.c:2113); the scope's
+    // drop is the tail reset, retiring the text for the error report.
+    let _debug_query = elog::debug_query_string_scope(cmd_string);
     if GOT_STOPPING.get() {
         WalSndSetState(WalSndState::Stopping);
     }
@@ -736,8 +739,7 @@ pub fn exec_replication_command(cmd_string: &str) -> PgResult<bool> {
         }
     }
 
-    // ps display / pg_stat_activity reset to "idle" by PostgresMain;
-    // debug_query_string is not a raw pointer here, nothing to reset.
+    // ps display / pg_stat_activity reset to "idle" by PostgresMain.
     Ok(true)
 }
 
@@ -1616,6 +1618,32 @@ mod conformance_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // WalSndSegmentOpen (walsender.c:3119): a missing segment is reported by
+    // its bare file name (xlogutils' shared opener says "pg_wal/<name>").
+    #[test]
+    fn segment_open_reports_removed_segment_by_bare_name() {
+        use xlogreader::XLogSegmentRoutine as _;
+        file_seams::basic_open_file::set(|_name, _flags| {
+            // A failed open(2) leaves ENOENT in this thread's errno slot.
+            #[cfg(target_os = "macos")]
+            // SAFETY: libc returns this thread's errno slot.
+            unsafe { *libc::__error() = libc::ENOENT };
+            #[cfg(not(target_os = "macos"))]
+            // SAFETY: libc returns this thread's errno slot.
+            unsafe { *libc::__errno_location() = libc::ENOENT };
+            -1
+        });
+        let mut v = xlogreader_seams::XLogReaderState::default();
+        v.segcxt.ws_segsize = 16 * 1024 * 1024;
+        let mut tli = 1;
+        let err = streaming::WalSndSegment
+            .segment_open(&mut v, 0, &mut tli)
+            .unwrap_err();
+        assert_eq!(err.message, "requested WAL segment 000000010000000000000000 has already been removed");
+        assert_eq!(err.sqlstate, types_error::ERRCODE_UNDEFINED_FILE);
+        assert_eq!(err.location.as_ref().and_then(|l| l.funcname.as_deref()), Some("WalSndSegmentOpen"));
+    }
 
     // WalSndRqstFileReload flags every ACTIVE slot's needreload and leaves
     // free slots (pid == 0) untouched, as C's per-slot pid gate does.

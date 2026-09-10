@@ -170,6 +170,13 @@ thread_local! {
     static DEBUG_QUERY_STACK: std::cell::RefCell<Vec<(u64, *const u8, usize)>> =
         const { std::cell::RefCell::new(Vec::new()) };
     static DEBUG_QUERY_NEXT_ID: Cell<u64> = const { Cell::new(0) };
+    // The text of the last outermost guard to drop, for the server-log
+    // STATEMENT line: an ERROR unwinds out of the exec_* frame that armed the
+    // slot before the tcop catch reports it, where C's global is still set
+    // (its `debug_query_string = NULL` comes after EmitErrorReport). Cleared
+    // by the message loop at that point and before the next read. Retained
+    // capacity: one memcpy per message, no allocation after warmup.
+    static RETIRED_QUERY: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
 }
 
 /// RAII guard for the `debug_query_string` TLS slot (C: the `debug_query_string`
@@ -205,7 +212,14 @@ pub fn debug_query_string_scope(query: &str) -> DebugQueryStringScope<'_> {
         c.set(id.wrapping_add(1));
         id
     });
-    DEBUG_QUERY_STACK.with(|s| s.borrow_mut().push((id, query.as_ptr(), query.len())));
+    let outermost = DEBUG_QUERY_STACK.with(|s| {
+        let mut st = s.borrow_mut();
+        st.push((id, query.as_ptr(), query.len()));
+        st.len() == 1
+    });
+    if outermost {
+        clear_retired_debug_query_string();
+    }
     DebugQueryStringScope {
         id,
         _borrow: PhantomData,
@@ -218,8 +232,38 @@ impl Drop for DebugQueryStringScope<'_> {
         // pops the tail; an out-of-order drop removes from the middle. Either
         // way every remaining entry still belongs to a live guard, so the stack
         // can never retain a pointer into freed storage.
-        DEBUG_QUERY_STACK.with(|s| s.borrow_mut().retain(|&(id, _, _)| id != self.id));
+        let mine = DEBUG_QUERY_STACK.with(|s| {
+            let mut st = s.borrow_mut();
+            let mine = st.iter().find(|&&(id, _, _)| id == self.id).map(|&(_, p, len)| (p, len));
+            st.retain(|&(id, _, _)| id != self.id);
+            if st.is_empty() { mine } else { None }
+        });
+        if let Some((p, len)) = mine {
+            // SAFETY: this guard is still alive, so its borrowed `&str` is.
+            let text = unsafe {
+                core::str::from_utf8_unchecked(core::slice::from_raw_parts(p, len))
+            };
+            RETIRED_QUERY.with(|r| {
+                let mut r = r.borrow_mut();
+                r.clear();
+                r.push_str(text);
+            });
+        }
     }
+}
+
+/// C's `debug_query_string = NULL` at the points where no statement is in
+/// flight (the tcop catch after EmitErrorReport, and before each command
+/// read): forget the text the last guard retired for the log writers.
+pub fn clear_retired_debug_query_string() {
+    RETIRED_QUERY.with(|r| r.borrow_mut().clear());
+}
+
+pub(crate) fn retired_debug_query_string() -> Option<String> {
+    RETIRED_QUERY.with(|r| {
+        let r = r.borrow();
+        if r.is_empty() { None } else { Some(r.clone()) }
+    })
 }
 
 // current_query()'s read: the borrowed text is handed to `f` so the raw

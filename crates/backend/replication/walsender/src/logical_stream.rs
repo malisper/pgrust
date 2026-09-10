@@ -206,7 +206,7 @@ impl XLogSegmentRoutine for LogicalWalSndPageRead {
         next_seg_no: XLogSegNo,
         tli: &mut TimeLineID,
     ) -> PgResult<()> {
-        xlogutils::wal_segment_open(v, next_seg_no, tli)
+        crate::streaming::WalSndSegment.segment_open(v, next_seg_no, tli)
     }
     fn segment_close(&mut self, v: &mut ReaderView) {
         xlogutils::wal_segment_close(v);
@@ -288,8 +288,9 @@ impl XLogReaderRoutine for LogicalWalSndPageRead {
             (flushptr - target_page_ptr) as i32
         };
 
-        if let Err(errinfo) = xlogreader_seams::wal_read::call(
+        if let Err(errinfo) = xlogreader::WALRead(
             v,
+            &mut crate::streaming::WalSndSegment,
             &mut cur_page[..count as usize],
             target_page_ptr,
             count as usize,

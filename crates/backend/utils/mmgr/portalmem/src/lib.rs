@@ -16,7 +16,7 @@ use ::mcx::{Mcx, MemoryContext, PgBox, PgHashMap, PgString, PgVec};
 use ::types_core::{InvalidSubTransactionId, SubTransactionId, TimestampTz};
 use ::types_error::{
     ErrorLocation, PgResult, ERRCODE_DUPLICATE_CURSOR, ERRCODE_FEATURE_NOT_SUPPORTED,
-    ERRCODE_INVALID_CURSOR_STATE, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR, WARNING,
+    ERRCODE_INVALID_CURSOR_STATE, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, DEBUG1, ERROR, WARNING,
 };
 use ::types_portal::{
     CachedPlanHandle, ParamListHandle, PlanSourceHandle, Portal, PortalCleanupHook, PortalData,
@@ -129,6 +129,32 @@ fn table_len() -> usize {
     with_mgr(|m| m.entries.len()).unwrap_or(0)
 }
 
+// Portals phase (C's AtCleanup_Portals slot, see the phase doc in mcx),
+// BEFORE any State clear or Roots free, so every context a portal's drop
+// glue deallocates into is still alive. Held cursors survive the exit
+// ceremony (AtCleanup_Portals skips createSubid == Invalid, as C does; C
+// then lets them die with the process): PortalDrop them here so their
+// tuplestores are ended — the registry is ManuallyDrop TLS, so a store no
+// one ends outlives the session. Then the manager itself — parked shells
+// (releasing their plancache pins) and pooled PortalContext values.
+fn session_teardown_portals() {
+    if PORTAL_MGR.with(|m| m.borrow().is_none()) {
+        return;
+    }
+    let _ = PortalHashTableDeleteAll();
+    PORTAL_MGR.with(|m| {
+        let Some(mgr) = m.borrow_mut().take() else { return };
+        let mgr = ManuallyDrop::into_inner(mgr);
+        if !mgr.entries.is_empty() {
+            let _ = elog(
+                DEBUG1,
+                format!("session teardown found {} live portal(s)", mgr.entries.len()),
+            );
+        }
+        drop(mgr);
+    });
+}
+
 fn portal_at(i: usize) -> Option<Portal<'static>> {
     with_mgr(|m| m.entries.get(i).cloned()).flatten()
 }
@@ -148,33 +174,9 @@ pub fn EnablePortalManager() {
         // Backend-lifetime context; freed at clean task end (session_root).
         let top: &'static MemoryContext =
             ::mcx::session_root("TopPortalContext");
-        // Portals phase (C's AtCleanup_Portals slot, see the phase doc in
-        // mcx): drop the manager — live portals, parked shells (releasing
-        // their plancache pins), and pooled PortalContext values — BEFORE
-        // any State clear or Roots free runs, so every context a portal's
-        // drop glue deallocates into is still alive. Without this every
-        // PortalContext value still parked in the arena leaks its own arena
-        // (the FunctionScan-argcontext class, 8c22b25a6). The teardown gate
-        // (launch_backend) only reaches this drain on clean proc_exit exits,
-        // after the exit-callback ceremony dropped every table portal; a
-        // portal still here means that invariant broke, so report it rather
-        // than trust its estate blindly (v2 drop-safety audit).
         ::mcx::register_session_cleanup_phase(
             ::mcx::SessionCleanupPhase::Portals,
-            Box::new(|| {
-                PORTAL_MGR.with(|m| {
-                    let Some(mgr) = m.borrow_mut().take() else { return };
-                    let mgr = ManuallyDrop::into_inner(mgr);
-                    if !mgr.entries.is_empty() {
-                        eprintln!(
-                            "WARNING: session teardown found {} live portal(s); \
-                             the exit ceremony should have dropped them",
-                            mgr.entries.len()
-                        );
-                    }
-                    drop(mgr);
-                });
-            }),
+            Box::new(session_teardown_portals),
         );
         let mut entries: PgVec<'static, Portal<'static>> = PgVec::new_in(top.mcx());
         entries.reserve(PORTALS_PER_USER);

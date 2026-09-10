@@ -2,7 +2,7 @@
 // XLogSendPhysical, WalSndLoop, and the keepalive/timeout/sleep helpers.
 //
 // The send-decision control flow and message framing are ported 1:1. WAL bytes
-// are read through the xlogreader `wal_read` seam over an owned reader. Cascading
+// are read through xlogreader WALRead over an owned reader. Cascading
 // (standby-served) streaming needs the walreceiver flush position (P2) and
 // historic-timeline streaming needs the timeline-switch machinery (P4); both are
 // loud panics. SyncRep and lag-tracking are out of P1 scope (async only).
@@ -12,12 +12,13 @@ use core::ffi::c_long;
 
 use elog::ereport;
 use repl_gram::{ReplicationKind, StartReplicationCmd};
-use types_core::{InvalidXLogRecPtr, TimeLineID, TimestampTz, XLogRecPtr};
+use types_core::{InvalidXLogRecPtr, TimeLineID, TimestampTz, XLogRecPtr, XLogSegNo};
 use types_error::{
     ErrorLocation, PgResult, COMMERROR, DEBUG1, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR,
 };
 use types_storage::waiteventset::{WL_POSTMASTER_DEATH, WL_SOCKET_READABLE, WL_SOCKET_WRITEABLE};
-use xlogreader::XLogReaderState;
+use xlogreader::{XLogReaderState, XLogSegmentRoutine};
+use xlogreader_seams::XLogReaderState as ReaderView;
 
 use crate::WalSndState;
 
@@ -355,7 +356,7 @@ pub fn XLogSendPhysical(reader: &mut XLogReaderState<'_>) -> PgResult<()> {
 // (walsender.c:3363-3400): the slice is served from the shared WAL buffers
 // first (WALReadFromBuffers, xlog.c:1751) and only the remainder — WAL already
 // evicted from the buffers, or a historical timeline — is read from the
-// segment files through the xlogreader `wal_read` seam (WALRead).
+// segment files through xlogreader WALRead with the walsender opener.
 fn xlog_send_physical_emit(
     reader: &mut XLogReaderState<'_>,
     startptr: XLogRecPtr,
@@ -409,8 +410,9 @@ fn xlog_send_physical_emit(
             let chunk_end = seg_end.min(endptr);
             let chunk_len = (chunk_end - chunk_start) as usize;
             let tli = if historic && seg_no == end_seg_no { next_tli } else { send_tli };
-            if let Err(errinfo) = xlogreader_seams::wal_read::call(
+            if let Err(errinfo) = xlogreader::WALRead(
                 &mut reader.v,
+                &mut WalSndSegment,
                 &mut wal_buf[off..off + chunk_len],
                 chunk_start,
                 chunk_len,
@@ -462,6 +464,48 @@ fn xlog_send_physical_emit(
     crate::OUTPUT_MESSAGE.with(|b| pqcomm::pq_putmessage_noblock(b'd', &b.borrow()))?;
 
     Ok(())
+}
+
+// WalSndSegmentOpen (walsender.c:3062): a missing segment is reported by its
+// bare file name, where xlogutils' shared opener reports the pg_wal/ path.
+// Timeline selection stays with the callers (the physical sender picks the
+// TLI per chunk, the logical page reader per page).
+pub(crate) struct WalSndSegment;
+
+impl XLogSegmentRoutine for WalSndSegment {
+    fn segment_open(
+        &mut self,
+        v: &mut ReaderView,
+        next_seg_no: XLogSegNo,
+        tli_p: &mut TimeLineID,
+    ) -> PgResult<()> {
+        let path = transam_xlog::XLogFilePath(*tli_p, next_seg_no, v.segcxt.ws_segsize);
+        let fd = file_seams::basic_open_file::call(&path, libc::O_RDONLY);
+        if fd >= 0 {
+            v.seg.ws_file = fd;
+            return Ok(());
+        }
+        let en = elog::errno::current_errno();
+        if en == libc::ENOENT {
+            let fname =
+                transam_xlog::XLogFileName(*tli_p, next_seg_no, transam_xlog::wal_segment_size());
+            ereport(ERROR)
+                .with_saved_errno(en)
+                .errcode_for_file_access()
+                .errmsg(format!("requested WAL segment {fname} has already been removed"))
+                .finish(loc(3119, "WalSndSegmentOpen"))?;
+        } else {
+            ereport(ERROR)
+                .with_saved_errno(en)
+                .errcode_for_file_access()
+                .errmsg(format!("could not open file \"{path}\": %m"))
+                .finish(loc(3125, "WalSndSegmentOpen"))?;
+        }
+        unreachable!("WalSndSegmentOpen reported below ERROR");
+    }
+    fn segment_close(&mut self, v: &mut ReaderView) {
+        xlogutils::wal_segment_close(v);
+    }
 }
 
 // WALReadRaiseError(&errinfo) (xlogutils.c:1047): the C error text, keyed on
